@@ -259,7 +259,7 @@ func (n *SOCKS5Negotiator) Negotiate(ctx context.Context, conn net.Conn) (contex
 			n.logger(ctx).Info("socks5 target blocked by scope",
 				"target", target, "reason", reason)
 			_ = writeSOCKS5Reply(conn, socks5ReplyConnectionNotAllowed)
-			return ctx, "", ErrSOCKS5BlockedByScope
+			return ctx, target, ErrSOCKS5BlockedByScope
 		}
 	}
 
@@ -273,7 +273,7 @@ func (n *SOCKS5Negotiator) Negotiate(ctx context.Context, conn net.Conn) (contex
 			n.logger(ctx).Info("socks5 target blocked by rate limit",
 				"target", target, "type", denial.LimitType)
 			_ = writeSOCKS5Reply(conn, socks5ReplyConnectionNotAllowed)
-			return ctx, "", ErrSOCKS5BlockedByRateLimit
+			return ctx, target, ErrSOCKS5BlockedByRateLimit
 		}
 	}
 
@@ -601,12 +601,21 @@ func SOCKS5Handler(negotiator *SOCKS5Negotiator, tunnel *TunnelHandler) func(ctx
 			// correct SOCKS5 reply to the client. Return nil so the listener
 			// logs at Debug instead of Error; the dispatcher-level log path
 			// remains reserved for truly unexpected failures.
-			if errors.Is(err, ErrSOCKS5BlockedByScope) ||
-				errors.Is(err, ErrSOCKS5BlockedByRateLimit) ||
-				errors.Is(err, ErrSOCKS5AuthFailed) ||
-				errors.Is(err, ErrSOCKS5UnsupportedCommand) ||
-				errors.Is(err, ErrSOCKS5UnsupportedAddrType) ||
-				errors.Is(err, ErrSOCKS5NoAcceptableMethods) {
+			//
+			// Scope and rate-limit denials are surfaced through TunnelHandler's
+			// OnBlock callback so observers (tests, flow recording in main.go)
+			// can treat them identically to CONNECT-path denials.
+			switch {
+			case errors.Is(err, ErrSOCKS5BlockedByScope):
+				tunnel.ReportBlock(newCtx, target, "target_scope", "SOCKS5")
+				return nil
+			case errors.Is(err, ErrSOCKS5BlockedByRateLimit):
+				tunnel.ReportBlock(newCtx, target, "rate_limit", "SOCKS5")
+				return nil
+			case errors.Is(err, ErrSOCKS5AuthFailed),
+				errors.Is(err, ErrSOCKS5UnsupportedCommand),
+				errors.Is(err, ErrSOCKS5UnsupportedAddrType),
+				errors.Is(err, ErrSOCKS5NoAcceptableMethods):
 				return nil
 			}
 			return fmt.Errorf("connector: SOCKS5 negotiate: %w", err)
