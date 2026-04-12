@@ -1,10 +1,8 @@
-//go:build legacy
-
 // Package session implements the universal session loop that drives all
-// protocols through the Codec + Pipeline architecture. RunSession is
-// protocol-agnostic: it only knows Codec (parse/serialize) and Pipeline
-// (ordered processing steps). Two goroutines handle the bidirectional
-// data flow: client-to-upstream and upstream-to-client.
+// protocols through the Channel + Pipeline architecture. RunSession is
+// protocol-agnostic: it only knows Channel (read/write envelopes) and Pipeline
+// (ordered processing steps). Two goroutines handle the bidirectional data
+// flow: client-to-upstream and upstream-to-client.
 package session
 
 import (
@@ -14,22 +12,22 @@ import (
 	"io"
 	"sync"
 
-	"github.com/usk6666/yorishiro-proxy/internal/codec"
-	"github.com/usk6666/yorishiro-proxy/internal/exchange"
+	"github.com/usk6666/yorishiro-proxy/internal/envelope"
+	"github.com/usk6666/yorishiro-proxy/internal/layer"
 	"github.com/usk6666/yorishiro-proxy/internal/pipeline"
 	"golang.org/x/sync/errgroup"
 )
 
-// DialFunc creates an upstream Codec lazily. It is called with the first
-// Send Exchange so that the target address can be derived from the request
-// (e.g., HTTP forward proxy uses the URL to determine the upstream host).
-type DialFunc func(ctx context.Context, ex *exchange.Exchange) (codec.Codec, error)
+// DialFunc creates an upstream Channel lazily. It is called with the first
+// Send Envelope so that the target address can be derived from the envelope's
+// Context.TargetHost.
+type DialFunc func(ctx context.Context, env *envelope.Envelope) (layer.Channel, error)
 
 // SessionOptions configures optional callbacks for RunSession.
 type SessionOptions struct {
 	// OnComplete is called after both goroutines have terminated.
-	// streamID is the StreamID captured from the first Exchange (may be empty
-	// if no Exchange was processed). err is nil on normal EOF termination, or
+	// streamID is the StreamID captured from the first Envelope (may be empty
+	// if no Envelope was processed). err is nil on normal EOF termination, or
 	// the error that caused the session to end.
 	//
 	// The context passed to OnComplete is derived from the original context
@@ -38,7 +36,7 @@ type SessionOptions struct {
 	OnComplete func(ctx context.Context, streamID string, err error)
 }
 
-// streamCapture captures the StreamID from the first Exchange in a
+// streamCapture captures the StreamID from the first Envelope in a
 // goroutine-safe manner.
 type streamCapture struct {
 	mu       sync.Mutex
@@ -63,27 +61,27 @@ func (s *streamCapture) get() string {
 	return s.streamID
 }
 
-// upstreamHolder passes the upstream Codec from goroutine 1 to goroutine 2
+// upstreamHolder passes the upstream Channel from goroutine 1 to goroutine 2
 // with proper synchronization via the ready channel. The done channel is
 // closed when goroutine 1 exits, allowing goroutine 2 to detect that no
 // upstream will ever be established.
 type upstreamHolder struct {
-	codec codec.Codec
-	ready chan struct{} // closed when upstream Codec is established
-	done  chan struct{} // closed when goroutine 1 (client→upstream) exits
+	ch    layer.Channel
+	ready chan struct{} // closed when upstream Channel is established
+	done  chan struct{} // closed when goroutine 1 (client->upstream) exits
 }
 
 // RunSession is the universal session loop for all protocols.
 //
-// It reads Exchanges from the client Codec, runs them through the Pipeline,
-// and forwards them to an upstream Codec created lazily via dial. A second
+// It reads Envelopes from the client Channel, runs them through the Pipeline,
+// and forwards them to an upstream Channel created lazily via dial. A second
 // goroutine reads responses from upstream, runs them through the Pipeline,
 // and sends them back to the client.
 //
 // Both goroutines are managed by errgroup.WithContext: if either returns an
 // error the context is cancelled and the other goroutine terminates. io.EOF
-// from Codec.Next is treated as normal stream termination, not an error.
-func RunSession(ctx context.Context, client codec.Codec, dial DialFunc, p *pipeline.Pipeline, opts ...SessionOptions) error {
+// from Channel.Next is treated as normal stream termination, not an error.
+func RunSession(ctx context.Context, client layer.Channel, dial DialFunc, p *pipeline.Pipeline, opts ...SessionOptions) error {
 	defer client.Close()
 
 	var opt SessionOptions
@@ -101,8 +99,8 @@ func RunSession(ctx context.Context, client codec.Codec, dial DialFunc, p *pipel
 		done:  make(chan struct{}),
 	}
 	defer func() {
-		if uh.codec != nil {
-			uh.codec.Close()
+		if uh.ch != nil {
+			uh.ch.Close()
 		}
 	}()
 
@@ -128,19 +126,19 @@ func RunSession(ctx context.Context, client codec.Codec, dial DialFunc, p *pipel
 	return result
 }
 
-// clientToUpstream reads Exchanges from the client, runs them through the
-// Pipeline, and forwards them to the upstream Codec. It creates the upstream
-// Codec lazily on the first forwarded Exchange and signals uh.ready.
+// clientToUpstream reads Envelopes from the client, runs them through the
+// Pipeline, and forwards them to the upstream Channel. It creates the upstream
+// Channel lazily on the first forwarded Envelope and signals uh.ready.
 func clientToUpstream(
 	ctx context.Context,
-	client codec.Codec,
+	client layer.Channel,
 	dial DialFunc,
 	p *pipeline.Pipeline,
 	uh *upstreamHolder,
 	sc *streamCapture,
 ) error {
 	for {
-		ex, err := client.Next(ctx)
+		env, err := client.Next(ctx)
 		if err != nil {
 			if errors.Is(err, io.EOF) {
 				return nil
@@ -148,9 +146,9 @@ func clientToUpstream(
 			return fmt.Errorf("client.Next: %w", err)
 		}
 
-		sc.set(ex.StreamID)
+		sc.set(env.StreamID)
 
-		ex, action, resp := p.Run(ctx, ex)
+		env, action, resp := p.Run(ctx, env)
 		switch action {
 		case pipeline.Drop:
 			continue
@@ -162,35 +160,35 @@ func clientToUpstream(
 		}
 
 		// Continue: forward to upstream.
-		if uh.codec == nil {
-			u, err := dial(ctx, ex)
+		if uh.ch == nil {
+			u, err := dial(ctx, env)
 			if err != nil {
 				return fmt.Errorf("dial: %w", err)
 			}
-			uh.codec = u
+			uh.ch = u
 			close(uh.ready)
 		}
 
-		if err := uh.codec.Send(ctx, ex); err != nil {
+		if err := uh.ch.Send(ctx, env); err != nil {
 			return fmt.Errorf("upstream.Send: %w", err)
 		}
 	}
 }
 
-// upstreamToClient waits for the upstream Codec to be established, then reads
-// Exchanges from it, runs them through the Pipeline, and sends them to the
-// client Codec. It returns nil on io.EOF (normal termination) or if goroutine 1
+// upstreamToClient waits for the upstream Channel to be established, then reads
+// Envelopes from it, runs them through the Pipeline, and sends them to the
+// client Channel. It returns nil on io.EOF (normal termination) or if goroutine 1
 // exits without establishing upstream.
 func upstreamToClient(
 	ctx context.Context,
-	client codec.Codec,
+	client layer.Channel,
 	p *pipeline.Pipeline,
 	uh *upstreamHolder,
 	sc *streamCapture,
 ) error {
 	// Wait for upstream to be established, goroutine 1 to exit, or context
 	// cancellation. If goroutine 1 exits without establishing upstream
-	// (e.g., all Exchanges were dropped), we return immediately.
+	// (e.g., all Envelopes were dropped), we return immediately.
 	//
 	// Priority handling: goroutine 1 closes uh.ready before uh.done, so if
 	// we see uh.done we must re-check uh.ready before bailing out — the
@@ -219,7 +217,7 @@ func upstreamToClient(
 	}
 
 	for {
-		ex, err := uh.codec.Next(ctx)
+		env, err := uh.ch.Next(ctx)
 		if err != nil {
 			if errors.Is(err, io.EOF) {
 				return nil
@@ -227,14 +225,14 @@ func upstreamToClient(
 			return fmt.Errorf("upstream.Next: %w", err)
 		}
 
-		sc.set(ex.StreamID)
+		sc.set(env.StreamID)
 
-		ex, action, _ := p.Run(ctx, ex)
+		env, action, _ := p.Run(ctx, env)
 		if action == pipeline.Drop {
 			continue
 		}
 
-		if err := client.Send(ctx, ex); err != nil {
+		if err := client.Send(ctx, env); err != nil {
 			return fmt.Errorf("client.Send: %w", err)
 		}
 	}
