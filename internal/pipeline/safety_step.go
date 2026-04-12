@@ -1,81 +1,64 @@
-//go:build legacy
-
 package pipeline
 
 import (
 	"context"
 	"log/slog"
 
-	"github.com/usk6666/yorishiro-proxy/internal/exchange"
-	"github.com/usk6666/yorishiro-proxy/internal/safety"
+	"github.com/usk6666/yorishiro-proxy/internal/envelope"
+	httprules "github.com/usk6666/yorishiro-proxy/internal/rules/http"
 )
 
-// SafetyStep enforces the safety engine's input filter rules on Send-direction
-// Exchanges. Receive-direction Exchanges pass through unchanged.
+// SafetyStep is a Message-typed Pipeline Step that checks Send-direction
+// messages against input safety rules. If a violation is detected, the
+// envelope is dropped. Receive-direction messages always pass through
+// (Input Filter is Send-only).
 //
-// OutputFilter (PII masking) is NOT handled here — it stays in the MCP layer
-// and is applied when returning data to the client.
+// HTTP messages are dispatched to the httprules.SafetyEngine; unknown
+// Message types pass through.
 type SafetyStep struct {
-	engine *safety.Engine
+	http   *httprules.SafetyEngine
+	logger *slog.Logger
 }
 
-// NewSafetyStep creates a SafetyStep with the given safety engine.
-// A nil engine is permitted; Process will return Continue for all Exchanges.
-func NewSafetyStep(engine *safety.Engine) *SafetyStep {
-	return &SafetyStep{engine: engine}
+// NewSafetyStep creates a SafetyStep. If httpEngine is nil, all messages
+// pass through.
+func NewSafetyStep(httpEngine *httprules.SafetyEngine, logger *slog.Logger) *SafetyStep {
+	return &SafetyStep{http: httpEngine, logger: logger}
 }
 
-// Process checks the Exchange against the safety engine's input rules.
-// Only Send-direction Exchanges are inspected. If a blocking violation is
-// found, the Exchange is dropped. If the engine is nil or the direction is
-// Receive, Continue is returned.
-func (s *SafetyStep) Process(_ context.Context, ex *exchange.Exchange) Result {
-	if s.engine == nil {
-		return Result{}
-	}
-	if ex.Direction != exchange.Send {
+// Process checks Send-direction envelopes against safety rules. Receive
+// direction always passes through. HTTPMessage is dispatched to the
+// SafetyEngine; all other Message types pass through.
+func (s *SafetyStep) Process(ctx context.Context, env *envelope.Envelope) Result {
+	if env.Direction != envelope.Send {
 		return Result{}
 	}
 
-	var rawURL string
-	if ex.URL != nil {
-		rawURL = ex.URL.String()
+	switch msg := env.Message.(type) {
+	case *envelope.HTTPMessage:
+		return s.processHTTP(ctx, msg)
+	default:
+		return Result{}
 	}
+}
 
-	// Body nil (passthrough mode): skip body check, check URL + headers only.
-	var body []byte
-	if ex.Body != nil {
-		body = ex.Body
-	}
-
-	violation := s.engine.CheckInput(body, rawURL, ex.Headers)
-	if violation == nil {
+func (s *SafetyStep) processHTTP(ctx context.Context, msg *envelope.HTTPMessage) Result {
+	if s.http == nil {
 		return Result{}
 	}
 
-	action := lookupInputAction(s.engine, violation.RuleID)
-
-	slog.Info("SafetyStep matched input filter",
-		slog.String("rule_id", violation.RuleID),
-		slog.String("rule_name", violation.RuleName),
-		slog.String("target", violation.Target.String()),
-		slog.String("action", action.String()),
-	)
-
-	if action == safety.ActionBlock {
+	violation := s.http.CheckInput(msg)
+	if violation != nil {
+		if s.logger != nil {
+			s.logger.InfoContext(ctx, "safety: request blocked",
+				slog.String("rule_id", violation.RuleID),
+				slog.String("rule_name", violation.RuleName),
+				slog.String("target", violation.Target),
+				slog.String("match", violation.Match),
+			)
+		}
 		return Result{Action: Drop}
 	}
 
 	return Result{}
-}
-
-// lookupInputAction finds the action for the given rule ID from the engine's
-// input rules. Returns ActionBlock if the rule is not found (fail-safe).
-func lookupInputAction(engine *safety.Engine, ruleID string) safety.Action {
-	for _, r := range engine.InputRules() {
-		if r.ID == ruleID {
-			return r.Action
-		}
-	}
-	return safety.ActionBlock
 }
