@@ -47,10 +47,10 @@ type mockChannel struct {
 	streamID string
 }
 
-func (c *mockChannel) StreamID() string                                          { return c.streamID }
-func (c *mockChannel) Next(_ context.Context) (*envelope.Envelope, error)        { return nil, nil }
-func (c *mockChannel) Send(_ context.Context, _ *envelope.Envelope) error        { return nil }
-func (c *mockChannel) Close() error                                              { return nil }
+func (c *mockChannel) StreamID() string                                   { return c.streamID }
+func (c *mockChannel) Next(_ context.Context) (*envelope.Envelope, error) { return nil, nil }
+func (c *mockChannel) Send(_ context.Context, _ *envelope.Envelope) error { return nil }
+func (c *mockChannel) Close() error                                       { return nil }
 
 func TestConnectionStack_PushAndTopmost(t *testing.T) {
 	stack := NewConnectionStack("conn-1")
@@ -129,19 +129,9 @@ func TestConnectionStack_ReplaceOnEmpty(t *testing.T) {
 func TestConnectionStack_Close_ReverseOrder(t *testing.T) {
 	stack := NewConnectionStack("conn-1")
 
-	var order []string
-	var mu sync.Mutex
-
-	makeLayer := func(id string) *mockLayer {
-		ml := newMockLayer(id)
-		origClose := ml.Close
-		_ = origClose
-		return ml
-	}
-
-	l1 := makeLayer("c1")
-	l2 := makeLayer("c2")
-	l3 := makeLayer("c3")
+	l1 := newMockLayer("c1")
+	l2 := newMockLayer("c2")
+	l3 := newMockLayer("c3")
 
 	stack.PushClient(l1)
 	stack.PushClient(l2)
@@ -153,8 +143,6 @@ func TestConnectionStack_Close_ReverseOrder(t *testing.T) {
 	}
 
 	// All layers should be closed
-	_ = order
-	_ = mu
 	for _, ml := range []*mockLayer{l1, l2, l3} {
 		if !ml.isClosed() {
 			t.Errorf("layer %s should be closed", ml.id)

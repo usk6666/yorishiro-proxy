@@ -1,3 +1,5 @@
+//go:build legacy
+
 // Package session implements the universal session loop that drives all
 // protocols through the Codec + Pipeline architecture. RunSession is
 // protocol-agnostic: it only knows Codec (parse/serialize) and Pipeline
