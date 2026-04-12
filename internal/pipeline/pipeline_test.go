@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/usk6666/yorishiro-proxy/internal/exchange"
+	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 )
 
 // mockStep records whether it was called and returns a preconfigured Result.
@@ -13,7 +13,7 @@ type mockStep struct {
 	result Result
 }
 
-func (m *mockStep) Process(_ context.Context, _ *exchange.Exchange) Result {
+func (m *mockStep) Process(_ context.Context, _ *envelope.Envelope) Result {
 	m.called = true
 	return m.result
 }
@@ -24,7 +24,7 @@ type anotherStep struct {
 	result Result
 }
 
-func (a *anotherStep) Process(_ context.Context, _ *exchange.Exchange) Result {
+func (a *anotherStep) Process(_ context.Context, _ *envelope.Envelope) Result {
 	a.called = true
 	return a.result
 }
@@ -35,8 +35,8 @@ func TestRun_AllStepsCalled(t *testing.T) {
 	s3 := &mockStep{result: Result{Action: Continue}}
 
 	p := New(s1, s2, s3)
-	ex := &exchange.Exchange{StreamID: "f1"}
-	got, action, resp := p.Run(context.Background(), ex)
+	env := &envelope.Envelope{StreamID: "s1", Message: &envelope.RawMessage{Bytes: []byte("data")}}
+	got, action, resp := p.Run(context.Background(), env)
 
 	if action != Continue {
 		t.Fatalf("expected Continue, got %v", action)
@@ -44,8 +44,8 @@ func TestRun_AllStepsCalled(t *testing.T) {
 	if resp != nil {
 		t.Fatal("expected nil response")
 	}
-	if got != ex {
-		t.Fatal("expected original exchange to be returned")
+	if got != env {
+		t.Fatal("expected original envelope to be returned")
 	}
 	for i, s := range []*mockStep{s1, s2, s3} {
 		if !s.called {
@@ -60,8 +60,8 @@ func TestRun_DropStopsExecution(t *testing.T) {
 	s3 := &mockStep{result: Result{Action: Continue}}
 
 	p := New(s1, s2, s3)
-	ex := &exchange.Exchange{StreamID: "f1"}
-	_, action, _ := p.Run(context.Background(), ex)
+	env := &envelope.Envelope{StreamID: "s1", Message: &envelope.RawMessage{Bytes: []byte("data")}}
+	_, action, _ := p.Run(context.Background(), env)
 
 	if action != Drop {
 		t.Fatalf("expected Drop, got %v", action)
@@ -78,65 +78,74 @@ func TestRun_DropStopsExecution(t *testing.T) {
 }
 
 func TestRun_RespondReturnsResponse(t *testing.T) {
-	respEx := &exchange.Exchange{StreamID: "resp", Status: 403}
+	respEnv := &envelope.Envelope{
+		StreamID: "resp",
+		Protocol: envelope.ProtocolHTTP,
+		Message:  &envelope.HTTPMessage{Status: 403},
+	}
 	s1 := &mockStep{result: Result{Action: Continue}}
-	s2 := &mockStep{result: Result{Action: Respond, Response: respEx}}
+	s2 := &mockStep{result: Result{Action: Respond, Response: respEnv}}
 	s3 := &mockStep{result: Result{Action: Continue}}
 
 	p := New(s1, s2, s3)
-	ex := &exchange.Exchange{StreamID: "f1"}
-	_, action, resp := p.Run(context.Background(), ex)
+	env := &envelope.Envelope{StreamID: "s1", Message: &envelope.RawMessage{Bytes: []byte("data")}}
+	_, action, resp := p.Run(context.Background(), env)
 
 	if action != Respond {
 		t.Fatalf("expected Respond, got %v", action)
 	}
-	if resp != respEx {
-		t.Fatal("expected response exchange from step 2")
+	if resp != respEnv {
+		t.Fatal("expected response envelope from step 2")
 	}
 	if s3.called {
 		t.Error("step 3 should not have been called after Respond")
 	}
 }
 
-func TestRun_ExchangeModificationPropagates(t *testing.T) {
-	modified := &exchange.Exchange{StreamID: "modified"}
+func TestRun_EnvelopeModificationPropagates(t *testing.T) {
+	modified := &envelope.Envelope{
+		StreamID: "modified",
+		Message:  &envelope.RawMessage{Bytes: []byte("modified")},
+	}
 
-	s1 := &mockStep{result: Result{Action: Continue, Exchange: modified}}
+	s1 := &mockStep{result: Result{Action: Continue, Envelope: modified}}
 
-	// s2 captures the exchange it receives via a custom step.
-	var receivedEx *exchange.Exchange
-	s2 := &captureStep{result: Result{Action: Continue}, received: &receivedEx}
+	var receivedEnv *envelope.Envelope
+	s2 := &captureStep{result: Result{Action: Continue}, received: &receivedEnv}
 
 	p := New(s1, s2)
-	original := &exchange.Exchange{StreamID: "original"}
+	original := &envelope.Envelope{
+		StreamID: "original",
+		Message:  &envelope.RawMessage{Bytes: []byte("original")},
+	}
 	got, action, _ := p.Run(context.Background(), original)
 
 	if action != Continue {
 		t.Fatalf("expected Continue, got %v", action)
 	}
 	if got != modified {
-		t.Fatal("expected modified exchange to be returned")
+		t.Fatal("expected modified envelope to be returned")
 	}
-	if receivedEx != modified {
-		t.Fatalf("step 2 should have received modified exchange, got StreamID=%q", receivedEx.StreamID)
+	if receivedEnv != modified {
+		t.Fatalf("step 2 should have received modified envelope, got StreamID=%q", receivedEnv.StreamID)
 	}
 }
 
-// captureStep records the exchange it receives.
+// captureStep records the envelope it receives.
 type captureStep struct {
 	result   Result
-	received **exchange.Exchange
+	received **envelope.Envelope
 }
 
-func (c *captureStep) Process(_ context.Context, ex *exchange.Exchange) Result {
-	*c.received = ex
+func (c *captureStep) Process(_ context.Context, env *envelope.Envelope) Result {
+	*c.received = env
 	return c.result
 }
 
 func TestRun_EmptyPipeline(t *testing.T) {
 	p := New()
-	ex := &exchange.Exchange{StreamID: "f1"}
-	got, action, resp := p.Run(context.Background(), ex)
+	env := &envelope.Envelope{StreamID: "s1", Message: &envelope.RawMessage{Bytes: []byte("data")}}
+	got, action, resp := p.Run(context.Background(), env)
 
 	if action != Continue {
 		t.Fatalf("expected Continue, got %v", action)
@@ -144,9 +153,69 @@ func TestRun_EmptyPipeline(t *testing.T) {
 	if resp != nil {
 		t.Fatal("expected nil response")
 	}
-	if got != ex {
-		t.Fatal("expected original exchange to be returned")
+	if got != env {
+		t.Fatal("expected original envelope to be returned")
 	}
+}
+
+func TestRun_SnapshotUsesCloneMessage(t *testing.T) {
+	// Verify that the snapshot stored in context is a deep copy via CloneMessage
+	httpMsg := &envelope.HTTPMessage{
+		Method: "GET",
+		Path:   "/test",
+		Headers: []envelope.KeyValue{
+			{Name: "Host", Value: "example.com"},
+		},
+	}
+	env := &envelope.Envelope{
+		StreamID:  "s1",
+		Protocol:  envelope.ProtocolHTTP,
+		Raw:       []byte("raw data"),
+		Message:   httpMsg,
+		Direction: envelope.Send,
+	}
+
+	// Step that mutates the envelope and checks snapshot independence
+	verifyStep := &snapshotVerifyStep{t: t}
+	p := New(verifyStep)
+	p.Run(context.Background(), env)
+
+	if !verifyStep.verified {
+		t.Fatal("snapshot verification step was not called")
+	}
+}
+
+type snapshotVerifyStep struct {
+	t        *testing.T
+	verified bool
+}
+
+func (s *snapshotVerifyStep) Process(ctx context.Context, env *envelope.Envelope) Result {
+	snap := SnapshotFromContext(ctx)
+	if snap == nil {
+		s.t.Fatal("snapshot should be present in context")
+	}
+
+	// Mutate the current envelope's headers
+	if httpMsg, ok := env.Message.(*envelope.HTTPMessage); ok {
+		httpMsg.Headers[0].Name = "MUTATED"
+	}
+
+	// Snapshot should be unaffected
+	if snapHTTP, ok := snap.Message.(*envelope.HTTPMessage); ok {
+		if snapHTTP.Headers[0].Name == "MUTATED" {
+			s.t.Error("snapshot headers should be independent of envelope mutations")
+		}
+	}
+
+	// Mutate raw bytes
+	env.Raw[0] = 'X'
+	if snap.Raw[0] == 'X' {
+		s.t.Error("snapshot Raw should be independent of envelope mutations")
+	}
+
+	s.verified = true
+	return Result{}
 }
 
 func TestWithout_ExcludesMatchingType(t *testing.T) {
@@ -155,15 +224,11 @@ func TestWithout_ExcludesMatchingType(t *testing.T) {
 	s3 := &mockStep{result: Result{Action: Continue}}
 
 	p := New(s1, s2, s3)
-
-	// Exclude all mockStep instances.
 	derived := p.Without(&mockStep{})
 
-	ex := &exchange.Exchange{StreamID: "f1"}
-	derived.Run(context.Background(), ex)
+	env := &envelope.Envelope{StreamID: "s1", Message: &envelope.RawMessage{Bytes: []byte("data")}}
+	derived.Run(context.Background(), env)
 
-	// s1 and s3 are mockStep — they should NOT have been called in the
-	// derived pipeline. s2 is anotherStep — it should have been called.
 	if s1.called {
 		t.Error("mockStep s1 should have been excluded")
 	}
@@ -182,10 +247,9 @@ func TestWithout_OriginalUnchanged(t *testing.T) {
 	p := New(s1, s2)
 	derived := p.Without(&anotherStep{})
 
-	ex := &exchange.Exchange{StreamID: "f1"}
+	env := &envelope.Envelope{StreamID: "s1", Message: &envelope.RawMessage{Bytes: []byte("data")}}
 
-	// Run derived — only s1 should be called.
-	derived.Run(context.Background(), ex)
+	derived.Run(context.Background(), env)
 	if !s1.called {
 		t.Error("s1 should have been called in derived pipeline")
 	}
@@ -193,10 +257,9 @@ func TestWithout_OriginalUnchanged(t *testing.T) {
 		t.Error("s2 should have been excluded in derived pipeline")
 	}
 
-	// Reset and run original — both should be called.
 	s1.called = false
 	s2.called = false
-	p.Run(context.Background(), ex)
+	p.Run(context.Background(), env)
 	if !s1.called {
 		t.Error("s1 should have been called in original pipeline")
 	}

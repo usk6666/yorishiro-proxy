@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/usk6666/yorishiro-proxy/internal/exchange"
+	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 )
 
 func TestSnapshotFromContext_NoSnapshot(t *testing.T) {
@@ -15,10 +15,10 @@ func TestSnapshotFromContext_NoSnapshot(t *testing.T) {
 }
 
 func TestSnapshotFromContext_RoundTrip(t *testing.T) {
-	ex := &exchange.Exchange{FlowID: "test-1"}
-	ctx := withSnapshot(context.Background(), ex)
+	env := &envelope.Envelope{FlowID: "test-1"}
+	ctx := withSnapshot(context.Background(), env)
 	got := SnapshotFromContext(ctx)
-	if got != ex {
+	if got != env {
 		t.Fatal("expected same pointer from context")
 	}
 }
