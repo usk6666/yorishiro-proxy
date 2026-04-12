@@ -37,7 +37,7 @@ Read `project_rfc001.md` and `feedback_rfc001_impl.md` from auto-memory to confi
 
 ## Phase 1: Issue Selection & Analysis
 
-Identify what to implement and how.
+Identify what to implement and how. Delegates design analysis to reusable agents.
 
 ### 1-1. Check Linear State
 
@@ -57,12 +57,11 @@ If the target issue belongs to a milestone with a blocking Open Question, **warn
 
 Do not proceed. Flag to the user and suggest resolving the Open Question first.
 
-### 1-3. Select Issue
+### 1-3. Select Issue — or Plan Milestone
 
-- If an Issue ID was given as argument, fetch it with `mcp__linear-server__get_issue`
-- Otherwise, select the next available issue by:
-  1. Priority (Urgent > High > Medium > Low)
-  2. Dependency order (lower USK number first within same priority)
+- If an **Issue ID** was given as argument, fetch it with `mcp__linear-server__get_issue` → proceed to **1-4**
+- If a **milestone name** (e.g., `N3`) was given and the milestone has **0 issues** → go to **Phase 1-A**
+- Otherwise, select the next available issue by priority/dependency order → proceed to **1-4**
 
 ### 1-4. Determine File Actions
 
@@ -72,7 +71,51 @@ Cross-reference `envelope-implementation.md` §2 to determine which files should
 - **Written from scratch** (e.g., envelope/, layer/, pipeline steps)
 - **Left untouched** (e.g., old code that coexists until N9)
 
-### 1-5. Present Plan
+### 1-5. Launch Design Review Agent
+
+**Mandatory for every issue. Do not skip.**
+
+1. Read `.claude/agents/design-reviewer.md`
+2. Build the prompt by replacing placeholders:
+
+| Placeholder | Value |
+|-------------|-------|
+| `{{SCOPE_DESCRIPTION}}` | Issue title + description + file actions from 1-4 |
+| `{{SPEC_REFERENCES}}` | `docs/rfc/envelope.md` (relevant §), `docs/rfc/envelope-implementation.md` §2 and §7 |
+| `{{PACKAGES_TO_SURVEY}}` | Packages the issue creates, modifies, or depends on |
+| `{{COMPLETED_CONTEXT}}` | From auto-memory `project_rfc001.md` — completed milestones, new packages, key decisions |
+| `{{PRODUCT_IDENTITY}}` | `yorishiro-proxy is a MITM diagnostic proxy for AI agents. It intercepts, records, and replays network traffic for vulnerability assessment. Architecture: TCP Listener → Protocol Detection → Layer Stack → Pipeline → Session Recording → MCP Tool.` |
+| `{{PRINCIPLES}}` | See **Principles Block** below |
+
+3. Launch the agent:
+
+```
+Agent(
+  description="Design review: <Issue ID>",
+  subagent_type="general-purpose",
+  prompt=<composed prompt>
+)
+```
+
+4. Process the result:
+   - **All resolved** → incorporate decisions into the plan, proceed to 1-6
+   - **Unresolved items exist** → present ONLY unresolved items to the user for decision. Do NOT present resolved items as questions.
+
+#### Principles Block
+
+Used for `{{PRINCIPLES}}` in design-reviewer and milestone-planner agents:
+
+```
+1. Wire fidelity: Envelope.Raw must contain the exact wire-observed bytes. Never reconstruct wire bytes from structured fields. Unmodified data must take the zero-copy fast path (write Raw directly).
+2. No normalization: Header case, order, duplicates, and whitespace must be preserved as observed on the wire. Do not merge, canonicalize, or reorder.
+3. L7/L4 duality: Every protocol must provide both a structured Message view AND raw bytes (Envelope.Raw). L7 parsing is an overlay, not a replacement.
+4. Protocol confinement: HTTP-specific fields belong on HTTPMessage, not Envelope. Pipeline Steps dispatch via type-switch on env.Message, not if-else on Protocol string.
+5. Scrap-and-build: No backwards compatibility needed. No shims, no old-code evolution. Write fresh from the RFC spec.
+6. net/http ban: Data path code must not use net/http types. Use internal types (parser.RawRequest/RawResponse, hpack types). net/http is permitted only in control plane (MCP server, CLI).
+7. Attacker-controlled input: The parser handles malformed input gracefully (Anomaly, not panic). Buffer limits are enforced.
+```
+
+### 1-6. Present Plan
 
 Present the issue and implementation plan to the user. Include:
 
@@ -80,12 +123,70 @@ Present the issue and implementation plan to the user. Include:
 - File actions (copy / scratch / untouched) with specific paths
 - Dependencies on completed issues (with specific types/files they provide)
 - Expected deliverables (new files, modified files, E2E tests)
+- **Key design decisions** resolved by the design review (summary table)
+- **Deferred items** (what is explicitly out of scope and why)
 
 Get confirmation before proceeding to Phase 2.
 
-### 1-6. Update Linear Status
+### 1-7. Update Linear Status
 
 Update the issue status to **In Progress** with `mcp__linear-server__save_issue`.
+
+---
+
+## Phase 1-A: Milestone Planning
+
+**Triggered when:** Phase 1-3 finds the target milestone has 0 issues.
+
+### 1-A-1. Launch Milestone Planner Agent
+
+1. Read `.claude/agents/milestone-planner.md`
+2. Read `.claude/agents/design-reviewer.md` — inject its **full Prompt Body** into the `{{DESIGN_REVIEW_AGENT}}` placeholder
+3. Build the prompt by replacing placeholders:
+
+| Placeholder | Value |
+|-------------|-------|
+| `{{MILESTONE_NAME}}` | Target milestone (e.g., "N3") |
+| `{{MILESTONE_DESCRIPTION}}` | Full description from Linear milestone |
+| `{{SPEC_REFERENCES}}` | `docs/rfc/envelope.md`, `docs/rfc/envelope-implementation.md` |
+| `{{COMPLETED_CONTEXT}}` | From auto-memory `project_rfc001.md` |
+| `{{PRODUCT_IDENTITY}}` | Same as Phase 1-5 |
+| `{{PRINCIPLES}}` | Same **Principles Block** as Phase 1-5 |
+| `{{DESIGN_REVIEW_AGENT}}` | Full Prompt Body from `design-reviewer.md` |
+| `{{CHECKLISTS}}` | From CLAUDE.md: "Config Checklist for New Feature Milestones" and "e2e Test Checklist for New Protocol Addition" (include only if applicable to this milestone) |
+
+4. Launch the agent:
+
+```
+Agent(
+  description="Plan milestone <N>",
+  subagent_type="general-purpose",
+  prompt=<composed prompt>
+)
+```
+
+### 1-A-2. Present Plan to User
+
+Present the milestone planner's output:
+
+- Issue breakdown with dependency graph
+- Resolved design decisions (summary)
+- Unresolved decisions (if any) — ask the user to decide
+- Recommended implementation order
+
+Get confirmation before creating issues.
+
+### 1-A-3. Create Issues in Linear
+
+After user confirmation:
+
+1. Create each issue via `mcp__linear-server__save_issue` under the target milestone
+2. Set priority: Urgent/High for blockers, Medium for parallelizable, Low for docs/cleanup
+3. Include scope, file list, dependencies, and acceptance criteria in each issue description
+
+### 1-A-4. Return to Issue Selection
+
+Return to **Phase 1-3** to select the first issue by priority/dependency order. The selected issue then goes through Phase 1-4 → 1-5 → 1-6 → 1-7 as normal.
 
 ---
 
@@ -96,10 +197,10 @@ Update the issue status to **In Progress** with `mcp__linear-server__save_issue`
 Create a branch off `rewrite/rfc-001` for this issue:
 
 ```
-rewrite/rfc-001/<issue-id>-<short-desc>
+rfc001/<issue-id>-<short-desc>
 ```
 
-Example: `rewrite/rfc-001/USK-587-bytechunk-layer`
+Example: `rfc001/USK-587-bytechunk-layer`
 
 ### 2-2. Implementation Rules
 
@@ -122,7 +223,7 @@ Before writing code, internalize these rules:
 
 ### 2-3. Implement
 
-Execute the implementation based on the plan from Phase 1-5. Follow file actions:
+Execute the implementation based on the plan from Phase 1-6. Follow file actions:
 
 - **Copy verbatim**: Copy the source file, adjust package/import paths only
 - **Write from scratch**: Implement from the RFC spec, referencing pseudo-code frictions in `envelope-implementation.md` §7
@@ -171,7 +272,7 @@ Refs: <Issue ID>
 
 1. Push the per-issue branch:
    ```bash
-   git push -u origin rewrite/rfc-001/<issue-id>-<short-desc>
+   git push -u origin rfc001/<issue-id>-<short-desc>
    ```
 
 2. Create PR targeting `rewrite/rfc-001`:
@@ -189,6 +290,9 @@ Refs: <Issue ID>
    - **Copied**: <list of files copied verbatim, or "None">
    - **New**: <list of new files>
    - **Modified**: <list of modified existing files, or "None">
+
+   ## Design Decisions
+   <key decisions from design review, with citations>
 
    Resolves <Issue ID>
    Linear: https://linear.app/usk6666/issue/<Issue ID>
@@ -261,7 +365,7 @@ Agent(
 
 The prompt must include:
 - The full content of `/review-gate` SKILL.md
-- PR number, head branch (`rewrite/rfc-001/<issue-id>-<short-desc>`), base branch (`rewrite/rfc-001`)
+- PR number, head branch (`rfc001/<issue-id>-<short-desc>`), base branch (`rewrite/rfc-001`)
 - Issue ID
 - Product context and security context (from 4-2)
 - Content of all three agent templates (code-reviewer, security-reviewer, fixer)
@@ -339,7 +443,7 @@ Present a summary:
 | Field | Value |
 |-------|-------|
 | Issue | <Issue ID>: <title> |
-| Branch | `rewrite/rfc-001/<issue-id>-<short-desc>` |
+| Branch | `rfc001/<issue-id>-<short-desc>` |
 | PR | #<N> → `rewrite/rfc-001` |
 | Tests | <N> passed |
 | Review | APPROVED / ESCALATED / Skipped |
