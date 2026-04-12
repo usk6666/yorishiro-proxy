@@ -1,3 +1,5 @@
+//go:build legacy
+
 // Package job defines the execution unit for resend/fuzz operations.
 //
 // Job is NOT a Pipeline Step — it is a separate execution layer that wraps
