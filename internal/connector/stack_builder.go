@@ -13,6 +13,7 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/bytechunk"
+	"github.com/usk6666/yorishiro-proxy/internal/layer/http1"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/tlslayer"
 )
 
@@ -38,9 +39,9 @@ type BuildConfig struct {
 // BuildConnectionStack constructs a ConnectionStack for the given CONNECT
 // target and client connection, based on per-host configuration policy.
 //
-// For N2, two modes are supported:
+// Two modes are supported:
 //   - raw_passthrough: client [TLS MITM → ByteChunk], upstream [TLS → ByteChunk]
-//   - default: returns an error ("not yet supported", deferred to N3)
+//   - default (HTTP MITM): client [TLS MITM → HTTP/1.x Layer], upstream [TLS → HTTP/1.x Layer]
 //
 // The client-side TLS MITM handshake is performed inside this function
 // because the stack builder owns the TLS layer decision.
@@ -63,8 +64,96 @@ func BuildConnectionStack(
 		return buildRawPassthroughStack(ctx, clientConn, target, connID, cfg)
 	}
 
-	// N3 will add HTTP/1.x layer support here.
-	return nil, nil, fmt.Errorf("connector: non-raw-passthrough mode not yet supported (deferred to N3)")
+	return buildHTTPMITMStack(ctx, clientConn, target, connID, cfg)
+}
+
+// buildHTTPMITMStack builds a [TLS → HTTP/1.x] stack on both sides.
+//
+// Client side: TLS MITM server handshake → HTTP/1.x layer (parses requests)
+// Upstream side: DialUpstreamRaw → HTTP/1.x layer (parses responses)
+func buildHTTPMITMStack(
+	ctx context.Context,
+	clientConn net.Conn,
+	target string,
+	connID string,
+	cfg *BuildConfig,
+) (*ConnectionStack, *envelope.TLSSnapshot, error) {
+	host, _, err := net.SplitHostPort(target)
+	if err != nil {
+		return nil, nil, fmt.Errorf("connector: invalid target %q: %w", target, err)
+	}
+
+	// --- Client-side TLS MITM ---
+
+	mitmCert, err := cfg.Issuer.GetCertificate(host)
+	if err != nil {
+		return nil, nil, fmt.Errorf("connector: MITM cert for %s: %w", host, err)
+	}
+
+	serverTLSCfg := &tls.Config{
+		Certificates: []tls.Certificate{*mitmCert},
+	}
+
+	clientTLSConn, clientSnap, err := tlslayer.Server(ctx, clientConn, serverTLSCfg)
+	if err != nil {
+		return nil, nil, fmt.Errorf("connector: client TLS MITM handshake for %s: %w", target, err)
+	}
+
+	slog.Debug("connector: client-side MITM handshake complete",
+		"target", target,
+		"conn_id", connID,
+	)
+
+	// --- Upstream TLS ---
+
+	upstreamTLSCfg := &tls.Config{
+		ServerName: host,
+	}
+
+	upstreamConn, _, err := DialUpstreamRaw(ctx, target, DialRawOpts{
+		TLSConfig:          upstreamTLSCfg,
+		InsecureSkipVerify: cfg.InsecureSkipVerify,
+		UTLSProfile:        cfg.TLSFingerprint,
+		ClientCert:         cfg.ClientCert,
+		OfferALPN:          []string{"http/1.1"},
+	})
+	if err != nil {
+		clientTLSConn.Close()
+		return nil, nil, fmt.Errorf("connector: upstream dial for %s: %w", target, err)
+	}
+
+	slog.Debug("connector: upstream connection established",
+		"target", target,
+		"conn_id", connID,
+	)
+
+	// --- Build EnvelopeContext ---
+
+	envCtx := envelope.EnvelopeContext{
+		ConnID:     connID,
+		TargetHost: target,
+		TLS:        clientSnap,
+	}
+
+	// --- Build the stack ---
+
+	stack := NewConnectionStack(connID)
+
+	// Client: HTTP/1.x layer over the MITM'd TLS conn (parses requests)
+	clientLayer := http1.New(clientTLSConn, connID+"/client", envelope.Send,
+		http1.WithScheme("https"),
+		http1.WithEnvelopeContext(envCtx),
+	)
+	stack.PushClient(clientLayer)
+
+	// Upstream: HTTP/1.x layer over the upstream TLS conn (parses responses)
+	upstreamLayer := http1.New(upstreamConn, connID+"/upstream", envelope.Receive,
+		http1.WithScheme("https"),
+		http1.WithEnvelopeContext(envCtx),
+	)
+	stack.PushUpstream(upstreamLayer)
+
+	return stack, clientSnap, nil
 }
 
 // buildRawPassthroughStack builds a [TLS → ByteChunk] stack on both sides.
