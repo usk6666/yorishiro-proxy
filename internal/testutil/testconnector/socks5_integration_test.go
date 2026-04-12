@@ -3,7 +3,6 @@
 package testconnector_test
 
 import (
-	"bufio"
 	"crypto/tls"
 	"fmt"
 	"io"
@@ -287,6 +286,3 @@ func firstLine(s string) string {
 	}
 	return s
 }
-
-// unused import guard for bufio if needed later.
-var _ = bufio.NewReader

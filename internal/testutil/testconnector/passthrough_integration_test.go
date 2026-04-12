@@ -109,15 +109,20 @@ func TestPassthroughBypassesTLSMITM(t *testing.T) {
 	}
 
 	// And critically: no HTTP/1.x stream should have been recorded by the
-	// Pipeline (passthrough means no Codec ran).
+	// Pipeline (passthrough means no Codec ran). Poll for a bounded window
+	// so we give the server time to settle and fail fast if a stream does
+	// appear.
 	ctx := context.Background()
-	time.Sleep(200 * time.Millisecond)
-	streams, err := h.Store.ListStreams(ctx, flow.StreamListOptions{Protocol: "HTTP/1.x"})
-	if err != nil {
-		t.Fatalf("list streams: %v", err)
-	}
-	if len(streams) != 0 {
-		t.Fatalf("expected zero HTTP/1.x streams under passthrough, got %d", len(streams))
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		streams, err := h.Store.ListStreams(ctx, flow.StreamListOptions{Protocol: "HTTP/1.x"})
+		if err != nil {
+			t.Fatalf("list streams: %v", err)
+		}
+		if len(streams) != 0 {
+			t.Fatalf("expected zero HTTP/1.x streams under passthrough, got %d", len(streams))
+		}
+		time.Sleep(25 * time.Millisecond)
 	}
 }
 

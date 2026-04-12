@@ -16,8 +16,6 @@ import (
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/usk6666/yorishiro-proxy/internal/testutil/testconnector"
 )
 
 // rawTLSUpstream is a tiny TLS upstream that records the bytes each client
@@ -140,23 +138,3 @@ func (r *rawTLSUpstream) WaitFirst(t *testing.T, timeout time.Duration) string {
 
 // Close terminates the raw upstream listener.
 func (r *rawTLSUpstream) Close() { _ = r.Listener.Close() }
-
-// --- Small test-only assertions kept alongside helpers --------------------
-
-// expectBlock drains the harness BlockCh waiting for a BlockInfo matching
-// the expected reason and protocol. Fails the test after timeout.
-func expectBlock(t *testing.T, h *testconnector.Harness, protocol, reason string, timeout time.Duration) {
-	t.Helper()
-	deadline := time.After(timeout)
-	for {
-		select {
-		case info := <-h.BlockCh:
-			if info.Reason == reason && info.Protocol == protocol {
-				return
-			}
-			// Ignore non-matching blocks (e.g. when multiple tunnels blocked).
-		case <-deadline:
-			t.Fatalf("timed out waiting for BlockInfo protocol=%q reason=%q", protocol, reason)
-		}
-	}
-}

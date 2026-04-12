@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -50,17 +51,6 @@ func (o *PluginObserver) Count(hook plugin.Hook) int {
 	defer o.mu.Unlock()
 	return o.calls[hook]
 }
-
-// DialCounter atomically counts upstream DialUpstream invocations, so tests
-// can assert "exactly one TLS handshake per tunnel" and verify ALPN cache
-// miss → eager dial and cache hit → lazy dial paths.
-type DialCounter struct{ n atomic.Int64 }
-
-// Load returns the current count.
-func (d *DialCounter) Load() int64 { return d.n.Load() }
-
-// Reset zeroes the counter.
-func (d *DialCounter) Reset() { d.n.Store(0) }
 
 // Harness bundles every resource a testconnector-backed integration test
 // needs: the listen address for drivers, a CA pool for TLS client
@@ -109,11 +99,6 @@ type Harness struct {
 
 	// Plugins records plugin hook invocations.
 	Plugins *PluginObserver
-
-	// DialCounter counts DialUpstream invocations the harness has caused.
-	// It includes only the counts observed via the instrumented TunnelHandler
-	// path (eager dial during cache miss and lazy dial during session run).
-	DialCounter *DialCounter
 
 	// TunnelHandler is the installed TunnelHandler. Tests may inspect it to
 	// prove that CONNECT and SOCKS5 share the same instance (Q3 proof).
@@ -180,7 +165,7 @@ type options struct {
 	safetyConfig  *safety.Config
 	extraSteps    []pipeline.Step
 	dialTimeout   time.Duration
-	hookObservers map[plugin.Hook]bool
+	hookObservers map[plugin.Hook]struct{}
 }
 
 func defaultOptions() *options {
@@ -188,13 +173,13 @@ func defaultOptions() *options {
 		alpnCacheSize: 32,
 		alpnCacheTTL:  time.Minute,
 		dialTimeout:   5 * time.Second,
-		hookObservers: map[plugin.Hook]bool{
-			plugin.HookOnReceiveFromClient:  true,
-			plugin.HookOnBeforeSendToServer: true,
-			plugin.HookOnReceiveFromServer:  true,
-			plugin.HookOnBeforeSendToClient: true,
-			plugin.HookOnTLSHandshake:       true,
-			plugin.HookOnSOCKS5Connect:      true,
+		hookObservers: map[plugin.Hook]struct{}{
+			plugin.HookOnReceiveFromClient:  {},
+			plugin.HookOnBeforeSendToServer: {},
+			plugin.HookOnReceiveFromServer:  {},
+			plugin.HookOnBeforeSendToClient: {},
+			plugin.HookOnTLSHandshake:       {},
+			plugin.HookOnSOCKS5Connect:      {},
 		},
 	}
 }
@@ -319,7 +304,6 @@ func Start(t *testing.T, opts ...Option) *Harness {
 		ALPNCache:         alpnCache,
 		BlockCh:           blockCh,
 		Plugins:           observer,
-		DialCounter:       &DialCounter{},
 		TunnelHandler:     tunnel,
 		CapturedLogs:      capture,
 		Pipeline:          pl,
@@ -375,7 +359,7 @@ func buildCA(t *testing.T) (*cert.CA, *x509.CertPool, *cert.Issuer) {
 
 func newFlowStore(t *testing.T, logger *slog.Logger) *flow.SQLiteStore {
 	t.Helper()
-	dbPath := t.TempDir() + "/test.db"
+	dbPath := filepath.Join(t.TempDir(), "test.db")
 	store, err := flow.NewSQLiteStore(context.Background(), dbPath, logger)
 	if err != nil {
 		t.Fatalf("testconnector: new sqlite store: %v", err)
@@ -583,6 +567,15 @@ func (h *Harness) Stop() {
 	}
 	// Wait for the listener goroutine to exit. Bound the wait so a stuck
 	// listener cannot deadlock test cleanup.
+	//
+	// Note: we deliberately do not fail the test on a timeout here. In
+	// practice, an HTTPS MITM tunnel goroutine can outlive its parent
+	// context by a few seconds (client keep-alive connections sit in the
+	// transport's idle pool until IdleConnTimeout, and the tunnel's
+	// handleConn loop only terminates once the underlying socket is fully
+	// drained). Treating that as a per-test failure would mask real
+	// assertion errors with goroutine-lifecycle noise; tunnel goroutine
+	// lifecycle is tracked separately at the connector level.
 	done := make(chan struct{})
 	go func() {
 		h.wg.Wait()

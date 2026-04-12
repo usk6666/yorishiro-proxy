@@ -155,21 +155,27 @@ func TestCONNECTMalformedTargetClosesCleanly(t *testing.T) {
 
 	buf, _ := io.ReadAll(conn)
 	_ = buf
-	// Sanity: no stream should exist after this malformed CONNECT.
+	// Sanity: no HTTP/1.x stream should ever appear after a malformed CONNECT.
+	// Poll for a bounded window so we both (a) give the server time to react
+	// and (b) fail fast if a stream is unexpectedly recorded.
 	ctx := context.Background()
-	time.Sleep(100 * time.Millisecond)
-	streams, _ := h.Store.ListStreams(ctx, flow.StreamListOptions{})
-	for _, st := range streams {
-		if st.Protocol == "HTTP/1.x" {
-			t.Fatalf("unexpected HTTP/1.x stream after malformed CONNECT: %+v", st)
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		streams, _ := h.Store.ListStreams(ctx, flow.StreamListOptions{})
+		for _, st := range streams {
+			if st.Protocol == "HTTP/1.x" {
+				t.Fatalf("unexpected HTTP/1.x stream after malformed CONNECT: %+v", st)
+			}
 		}
+		time.Sleep(25 * time.Millisecond)
 	}
 }
 
 // TestTLSHandshakeFailureClient verifies that a client that completes
 // CONNECT but then sends garbage instead of a TLS ClientHello causes the
-// tunnel to shut down cleanly. We assert the connection terminates within
-// the clientHandshakeTimeout window (10s) by checking the read returns.
+// tunnel to shut down cleanly. The assertion is that io.ReadAll returns
+// within the read deadline via a clean close (EOF / reset), not via a
+// deadline-exceeded timeout — i.e. the proxy actively tore the tunnel down.
 func TestTLSHandshakeFailureClient(t *testing.T) {
 	h := testconnector.Start(t)
 
@@ -178,6 +184,8 @@ func TestTLSHandshakeFailureClient(t *testing.T) {
 		t.Fatalf("dial: %v", err)
 	}
 	defer conn.Close()
+	// Bound the total read wait so a hung tunnel produces a deadline error
+	// (which we explicitly reject below) rather than stalling forever.
 	conn.SetDeadline(time.Now().Add(12 * time.Second))
 
 	fmt.Fprintf(conn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", h.UpstreamAddr, h.UpstreamAddr)
@@ -192,11 +200,23 @@ func TestTLSHandshakeFailureClient(t *testing.T) {
 	}
 
 	// Send non-TLS garbage.
-	_, _ = conn.Write([]byte("not-a-tls-hello-just-random-bytes"))
+	if _, err := conn.Write([]byte("not-a-tls-hello-just-random-bytes")); err != nil {
+		t.Fatalf("write garbage: %v", err)
+	}
 
-	// Expect EOF eventually.
-	if _, err := io.ReadAll(conn); err != nil && !isClosedNetErr(err) {
-		t.Logf("read after garbage returned: %v (ok)", err)
+	// The proxy should actively close the tunnel after the TLS handshake
+	// fails. io.ReadAll must return via a clean close — either io.EOF or
+	// "use of closed network connection" / "connection reset" — and NOT
+	// via a read deadline. A deadline-exceeded error here means the proxy
+	// left the tunnel open, which is the failure mode we care about.
+	start := time.Now()
+	_, err = io.ReadAll(conn)
+	elapsed := time.Since(start)
+	if err != nil && !isClosedNetErr(err) {
+		t.Fatalf("read after garbage returned unexpected error: %v (elapsed=%v)", err, elapsed)
+	}
+	if elapsed >= 12*time.Second {
+		t.Fatalf("proxy did not close tunnel after failed TLS handshake (elapsed=%v)", elapsed)
 	}
 }
 

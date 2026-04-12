@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -76,12 +77,12 @@ func TestHTTPSPostBodyRoundTripE2E(t *testing.T) {
 }
 
 func TestHTTPSKeepAliveE2E(t *testing.T) {
-	var hits int
+	var hits atomic.Int64
 	h := testconnector.Start(t, testconnector.WithUpstreamHandler(http.HandlerFunc(
 		func(w http.ResponseWriter, r *http.Request) {
-			hits++
+			n := hits.Add(1)
 			w.WriteHeader(http.StatusOK)
-			fmt.Fprintf(w, "req-%d", hits)
+			fmt.Fprintf(w, "req-%d", n)
 		})))
 
 	// Make two GETs on the same client Transport, reusing the CONNECT tunnel.
@@ -90,6 +91,9 @@ func TestHTTPSKeepAliveE2E(t *testing.T) {
 		resp, err := client.Get(h.UpstreamServer.URL + "/k")
 		if err != nil {
 			t.Fatalf("GET %d: %v", i, err)
+		}
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("GET %d: status=%d want 200", i, resp.StatusCode)
 		}
 		io.Copy(io.Discard, resp.Body)
 		resp.Body.Close()
@@ -301,8 +305,9 @@ func assertRecordedStream(t *testing.T, h *testconnector.Harness) {
 		t.Fatal("no HTTP/1.x streams recorded")
 	}
 	st := streams[0]
+	// The "complete" state transition happens asynchronously after
+	// session.RunSession returns. Poll for up to 1s for the final state.
 	if st.State != "complete" {
-		t.Logf("stream state=%q (may still be active; polling up to 1s)", st.State)
 		deadline := time.Now().Add(1 * time.Second)
 		for time.Now().Before(deadline) {
 			got, _ := h.Store.GetStream(ctx, st.ID)
