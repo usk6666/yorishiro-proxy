@@ -115,7 +115,11 @@ func buildRawPassthroughStack(
 		InsecureSkipVerify: cfg.InsecureSkipVerify,
 		UTLSProfile:        cfg.TLSFingerprint,
 		ClientCert:         cfg.ClientCert,
-		OfferALPN:          []string{"http/1.1"},
+		// N2: offer http/1.1 only. In raw_passthrough mode ALPN is not
+		// critical (bytes are relayed as-is after TLS), but we need a
+		// plausible value for the handshake. N6 integrates ALPN cache
+		// and can propagate the client's original ALPN offer.
+		OfferALPN: []string{"http/1.1"},
 	})
 	if err != nil {
 		clientTLSConn.Close()

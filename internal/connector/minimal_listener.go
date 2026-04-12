@@ -28,11 +28,12 @@ type MinimalListenerConfig struct {
 // This listener coexists with the old connector/listener.go and will be
 // replaced in N4 when full protocol detection is added.
 type MinimalListener struct {
-	ln   net.Listener
-	cfg  MinimalListenerConfig
-	neg  *CONNECTNegotiator
-	wg   sync.WaitGroup
-	done chan struct{}
+	ln        net.Listener
+	cfg       MinimalListenerConfig
+	neg       *CONNECTNegotiator
+	wg        sync.WaitGroup
+	done      chan struct{}
+	closeOnce sync.Once
 }
 
 // NewMinimalListener creates a listener bound to the given address.
@@ -90,9 +91,13 @@ func (ml *MinimalListener) Serve(ctx context.Context) error {
 }
 
 // Close shuts down the listener and waits for active connections to finish.
+// Close is idempotent and safe to call multiple times.
 func (ml *MinimalListener) Close() error {
-	close(ml.done)
-	err := ml.ln.Close()
+	var err error
+	ml.closeOnce.Do(func() {
+		close(ml.done)
+		err = ml.ln.Close()
+	})
 	ml.wg.Wait()
 	return err
 }
@@ -100,11 +105,6 @@ func (ml *MinimalListener) Close() error {
 // handleConn processes a single accepted connection: parse CONNECT, build
 // the ConnectionStack, and call OnStack.
 func (ml *MinimalListener) handleConn(ctx context.Context, conn net.Conn) {
-	defer func() {
-		// If we exit without calling OnStack, close the raw connection.
-		// If OnStack was called, it owns the stack (and thus the connections).
-	}()
-
 	pc := NewPeekConn(conn)
 
 	target, err := ml.neg.Negotiate(ctx, pc)
@@ -131,7 +131,11 @@ func (ml *MinimalListener) handleConn(ctx context.Context, conn net.Conn) {
 		return
 	}
 
+	// OnStack takes ownership of the stack. If nil, close the stack to
+	// prevent connection leaks.
 	if ml.cfg.OnStack != nil {
 		ml.cfg.OnStack(ctx, stack, snap, target)
+	} else {
+		stack.Close()
 	}
 }
