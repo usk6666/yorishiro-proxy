@@ -200,26 +200,128 @@ Refs: <Issue ID>
 
 ---
 
-## Phase 4: Review & Close
+## Phase 4: Review Gate
 
-### 4-1. Review Gate
+Run the `/review-gate` flow for the created PR.
 
-Delegate to `/review-gate` for the created PR.
+### 4-1. Determine Review Requirement
 
-- For **N2** (vertical slice checkpoint) and **milestone-final issues**: review is **mandatory**
-- For other issues: recommend review but proceed at user's discretion
+| Condition | Review |
+|-----------|--------|
+| **N2** (vertical slice checkpoint) | **Mandatory** |
+| **Milestone-final issue** (last issue in N*X*) | **Mandatory** |
+| Other issues | **Recommended** — ask the user; skip to Phase 5 if declined |
 
-### 4-2. Update Linear Status
+### 4-2. Build Review Context
+
+1. Read agent templates with the Read tool:
+   - `.claude/agents/code-reviewer.md`
+   - `.claude/agents/security-reviewer.md`
+   - `.claude/agents/fixer.md`
+
+2. Build **product context**:
+   ```
+   yorishiro-proxy is a network proxy (MCP server) for AI agents.
+   Provides traffic interception, recording, and replay capabilities for vulnerability assessment.
+   Architecture: TCP Listener → Protocol Detection → Protocol Handler → Session Recording → MCP Tool
+
+   This PR is part of the RFC-001 rewrite (Envelope + Layered Connection Model).
+   Target branch: rewrite/rfc-001 (long-running rewrite branch, NOT main)
+   Milestone: N<X> — <milestone description>
+   ```
+
+3. Build **security context**:
+   ```
+   yorishiro-proxy operates as a MITM proxy, therefore:
+   - It directly processes attacker-controlled traffic
+   - It holds the CA private key and dynamically issues certificates
+   - Session recordings may contain credentials (auth tokens, passwords)
+   - AI agents execute commands via MCP
+
+   RFC-001 data path packages (MITM triage targets):
+   - internal/envelope/, internal/layer/, internal/connector/, internal/channel/
+   - Plus existing: internal/protocol/, internal/proxy/, internal/flow/, internal/plugin/
+   ```
+
+### 4-3. Launch Review Gate Agent
+
+Read `.claude/skills/review-gate/SKILL.md` at invocation time and include its **full content**
+in the sub-agent prompt. This ensures the review-gate flow is always the latest version.
+
+Launch a single Agent that executes the entire review → fix → re-review cycle:
+
+```
+Agent(
+  description="Review gate PR #<N> (RFC-001)",
+  subagent_type="general-purpose",
+  isolation="worktree",
+  prompt=<review gate prompt>
+)
+```
+
+The prompt must include:
+- The full content of `/review-gate` SKILL.md
+- PR number, head branch (`rewrite/rfc-001/<issue-id>-<short-desc>`), base branch (`rewrite/rfc-001`)
+- Issue ID
+- Product context and security context (from 4-2)
+- Content of all three agent templates (code-reviewer, security-reviewer, fixer)
+
+> **Single Source of Truth**: Do not duplicate the review-gate flow steps in this skill.
+> Always read the SKILL.md at prompt construction time.
+
+**Expected output format** from the review gate agent:
+
+```
+REVIEW_GATE_RESULT:
+  pr_number: <N>
+  code_review: APPROVED | CHANGES_REQUESTED
+  security_review: APPROVED | CHANGES_REQUESTED
+  final_verdict: APPROVED | ESCALATED
+  fix_rounds: 0 | 1 | 2
+  unresolved_findings: [...]
+  agent_ids: [<all sub-agent IDs launched>]
+```
+
+### 4-4. Handle Verdict
+
+| Verdict | Action |
+|---------|--------|
+| **APPROVED** | Proceed to Phase 5. Record `fix_rounds` for the report. |
+| **ESCALATED** | Report unresolved findings to the user. **Do not merge.** Ask whether to proceed to Phase 5 (with issue noted) or stop entirely. |
+
+### 4-5. Worktree Cleanup
+
+Collect all agent IDs returned by the review gate agent (its own ID + `agent_ids` from its output).
+Delete **only those worktrees**:
+
+```bash
+git worktree remove .claude/worktrees/agent-<agentId> --force 2>/dev/null || true
+```
+
+After all deletions:
+
+```bash
+git worktree prune
+```
+
+---
+
+## Phase 5: Close & Report
+
+### 5-1. Update Linear Status
 
 Update the issue status to **In Review** with `mcp__linear-server__save_issue`.
 
-Post a comment with the PR URL:
-```
-PR #<N> created: <PR URL>
-Branch: rewrite/rfc-001/<issue-id>-<short-desc> → rewrite/rfc-001
-```
+Post a comment with review results:
 
-### 4-3. Update Auto-Memory
+| Event | Linear Comment |
+|-------|---------------|
+| PR created, review passed | `"PR #N created → rewrite/rfc-001. Code Review APPROVED, Security Review APPROVED."` |
+| PR created, review passed after fix | `"PR #N created → rewrite/rfc-001. All findings resolved after N fix round(s)."` |
+| PR created, review escalated | `"PR #N created → rewrite/rfc-001. ESCALATION — N unresolved findings. Manual review needed."` |
+| PR created, review skipped | `"PR #N created → rewrite/rfc-001. Review skipped (non-mandatory issue)."` |
+
+### 5-2. Update Auto-Memory
 
 Update `project_rfc001.md` to reflect:
 
@@ -227,7 +329,7 @@ Update `project_rfc001.md` to reflect:
 - Current milestone progress (e.g., "N2: 3/5 issues complete")
 - Any design decisions or friction resolutions discovered during implementation
 
-### 4-4. Report Results
+### 5-3. Report Results
 
 Present a summary:
 
@@ -240,7 +342,19 @@ Present a summary:
 | Branch | `rewrite/rfc-001/<issue-id>-<short-desc>` |
 | PR | #<N> → `rewrite/rfc-001` |
 | Tests | <N> passed |
+| Review | APPROVED / ESCALATED / Skipped |
+| Fix Rounds | 0 / 1 / 2 |
 | Status | In Review |
+
+### Review Findings (if any)
+| ID | Severity | Category | Status |
+|----|----------|----------|--------|
+| F-1 | HIGH | Correctness | FIXED (Round 1) |
+
+### MITM-Rejected Findings (if any)
+| ID | Source | Reason |
+|----|--------|--------|
+| F-2 | Code Review | Suggests header dedup — blocks smuggling testing |
 
 ### Milestone Progress
 - N<X>: <done>/<total> issues complete
@@ -282,15 +396,46 @@ Each sub-agent receives:
 
 - Maximum **2** concurrent sub-agents for N4 ∥ N5
 - Each sub-agent must target different packages (N4 = connector/, N5 = job/macro)
-- Merge PRs sequentially into `rewrite/rfc-001` (resolve any conflicts on second merge)
 - Both must pass verification gate (Phase 3-1) before PR creation
+- All PRs must target `rewrite/rfc-001` as base branch
+
+### Review Gate for Parallel PRs
+
+After both implementation agents complete and PRs are created, launch review gates
+for both PRs as **background** agents (same pattern as `/orchestrate` Phase 2.5):
+
+```
+Agent(
+  description="Review gate PR #<N1> (N4)",
+  subagent_type="general-purpose",
+  isolation="worktree",
+  run_in_background=true,
+  prompt=<review gate prompt for N4 PR>
+)
+Agent(
+  description="Review gate PR #<N2> (N5)",
+  subagent_type="general-purpose",
+  isolation="worktree",
+  run_in_background=true,
+  prompt=<review gate prompt for N5 PR>
+)
+```
+
+Build the prompt following the same procedure as Phase 4-2 and 4-3.
+Merge PRs sequentially into `rewrite/rfc-001` only after review passes (resolve any conflicts on second merge).
 
 ### Worktree Cleanup
 
-After both agents complete and PRs are merged:
+After both agents complete, reviews pass, and PRs are merged, collect **all** agent IDs
+(implementation agents + review gate agents + sub-agents reported in `agent_ids`):
 
 ```bash
 git worktree remove .claude/worktrees/agent-<agentId> --force 2>/dev/null || true
+```
+
+After all deletions:
+
+```bash
 git worktree prune
 ```
 
