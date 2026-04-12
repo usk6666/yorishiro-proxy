@@ -1,5 +1,3 @@
-//go:build legacy
-
 package session
 
 import (
@@ -11,27 +9,32 @@ import (
 	"testing"
 	"time"
 
-	"github.com/usk6666/yorishiro-proxy/internal/codec"
-	"github.com/usk6666/yorishiro-proxy/internal/exchange"
+	"github.com/usk6666/yorishiro-proxy/internal/envelope"
+	"github.com/usk6666/yorishiro-proxy/internal/layer"
 	"github.com/usk6666/yorishiro-proxy/internal/pipeline"
 )
 
-// mockCodec is a test double for codec.Codec.
-// nextExchanges are returned by Next() in order, followed by io.EOF.
-// Exchanges passed to Send() are recorded in sent.
-type mockCodec struct {
+// mockChannel is a test double for layer.Channel.
+// nextEnvelopes are returned by Next() in order, followed by io.EOF.
+// Envelopes passed to Send() are recorded in sent.
+type mockChannel struct {
 	mu            sync.Mutex
-	nextExchanges []*exchange.Exchange
+	streamID      string
+	nextEnvelopes []*envelope.Envelope
 	nextIdx       int
-	nextErr       error // if set, returned instead of io.EOF after exchanges are exhausted
-	sent          []*exchange.Exchange
+	nextErr       error // if set, returned instead of io.EOF after envelopes are exhausted
+	sent          []*envelope.Envelope
 	closed        bool
 	blockNext     chan struct{} // if non-nil, Next blocks until closed or ctx done
 	sendErr       error         // if set, Send returns this error
 	nextGate      chan struct{} // if non-nil, Next waits for a value before each return
 }
 
-func (m *mockCodec) Next(ctx context.Context) (*exchange.Exchange, error) {
+func (m *mockChannel) StreamID() string {
+	return m.streamID
+}
+
+func (m *mockChannel) Next(ctx context.Context) (*envelope.Envelope, error) {
 	if m.blockNext != nil {
 		select {
 		case <-m.blockNext:
@@ -40,10 +43,6 @@ func (m *mockCodec) Next(ctx context.Context) (*exchange.Exchange, error) {
 		}
 	}
 
-	// If nextGate is set, wait for a signal before returning each exchange.
-	// This allows tests to synchronize Next() calls with external events
-	// (e.g., ensuring Send() has been called before the next response is
-	// returned).
 	if m.nextGate != nil {
 		select {
 		case <-m.nextGate:
@@ -55,43 +54,43 @@ func (m *mockCodec) Next(ctx context.Context) (*exchange.Exchange, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if m.nextIdx >= len(m.nextExchanges) {
+	if m.nextIdx >= len(m.nextEnvelopes) {
 		if m.nextErr != nil {
 			return nil, m.nextErr
 		}
 		return nil, io.EOF
 	}
-	ex := m.nextExchanges[m.nextIdx]
+	env := m.nextEnvelopes[m.nextIdx]
 	m.nextIdx++
-	return ex, nil
+	return env, nil
 }
 
-func (m *mockCodec) Send(_ context.Context, ex *exchange.Exchange) error {
+func (m *mockChannel) Send(_ context.Context, env *envelope.Envelope) error {
 	if m.sendErr != nil {
 		return m.sendErr
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.sent = append(m.sent, ex)
+	m.sent = append(m.sent, env)
 	return nil
 }
 
-func (m *mockCodec) Close() error {
+func (m *mockChannel) Close() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.closed = true
 	return nil
 }
 
-func (m *mockCodec) getSent() []*exchange.Exchange {
+func (m *mockChannel) getSent() []*envelope.Envelope {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	out := make([]*exchange.Exchange, len(m.sent))
+	out := make([]*envelope.Envelope, len(m.sent))
 	copy(out, m.sent)
 	return out
 }
 
-func (m *mockCodec) isClosed() bool {
+func (m *mockChannel) isClosed() bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.closed
@@ -100,191 +99,192 @@ func (m *mockCodec) isClosed() bool {
 // passStep is a Pipeline Step that always continues.
 type passStep struct{}
 
-func (passStep) Process(_ context.Context, ex *exchange.Exchange) pipeline.Result {
+func (passStep) Process(_ context.Context, _ *envelope.Envelope) pipeline.Result {
 	return pipeline.Result{Action: pipeline.Continue}
 }
 
-// dropStep drops all Exchanges.
+// dropStep drops all Envelopes.
 type dropStep struct{}
 
-func (dropStep) Process(_ context.Context, _ *exchange.Exchange) pipeline.Result {
+func (dropStep) Process(_ context.Context, _ *envelope.Envelope) pipeline.Result {
 	return pipeline.Result{Action: pipeline.Drop}
 }
 
-// respondStep responds with a fixed Exchange for Send-direction messages.
+// respondStep responds with a fixed Envelope for Send-direction messages.
 type respondStep struct {
-	resp *exchange.Exchange
+	resp *envelope.Envelope
 }
 
-func (s respondStep) Process(_ context.Context, ex *exchange.Exchange) pipeline.Result {
-	if ex.Direction == exchange.Send {
+func (s respondStep) Process(_ context.Context, env *envelope.Envelope) pipeline.Result {
+	if env.Direction == envelope.Send {
 		return pipeline.Result{Action: pipeline.Respond, Response: s.resp}
 	}
 	return pipeline.Result{Action: pipeline.Continue}
 }
 
-func makeExchange(dir exchange.Direction, method string, seq int) *exchange.Exchange {
-	return &exchange.Exchange{
+func makeEnvelope(dir envelope.Direction, seq int) *envelope.Envelope {
+	return &envelope.Envelope{
 		Direction: dir,
-		Method:    method,
 		Sequence:  seq,
-		Protocol:  exchange.HTTP1,
+		Protocol:  envelope.ProtocolRaw,
+		Raw:       []byte("test-data"),
+		Message:   &envelope.RawMessage{Bytes: []byte("test-data")},
 	}
 }
 
-func makeExchangeWithStreamID(dir exchange.Direction, method string, seq int, streamID string) *exchange.Exchange {
-	ex := makeExchange(dir, method, seq)
-	ex.StreamID = streamID
-	return ex
+func makeEnvelopeWithStreamID(dir envelope.Direction, seq int, streamID string) *envelope.Envelope {
+	env := makeEnvelope(dir, seq)
+	env.StreamID = streamID
+	return env
 }
 
 func TestRunSession_Unary(t *testing.T) {
-	req := makeExchange(exchange.Send, "GET", 0)
-	resp := makeExchange(exchange.Receive, "", 1)
+	req := makeEnvelope(envelope.Send, 0)
+	resp := makeEnvelope(envelope.Receive, 1)
 
-	clientCodec := &mockCodec{
-		nextExchanges: []*exchange.Exchange{req},
+	clientCh := &mockChannel{
+		streamID:      "client-stream",
+		nextEnvelopes: []*envelope.Envelope{req},
 	}
-	upstreamCodec := &mockCodec{
-		nextExchanges: []*exchange.Exchange{resp},
+	upstreamCh := &mockChannel{
+		streamID:      "upstream-stream",
+		nextEnvelopes: []*envelope.Envelope{resp},
 	}
 
-	dial := func(_ context.Context, _ *exchange.Exchange) (codec.Codec, error) {
-		return upstreamCodec, nil
+	dial := func(_ context.Context, _ *envelope.Envelope) (layer.Channel, error) {
+		return upstreamCh, nil
 	}
 	p := pipeline.New(passStep{})
 
-	err := RunSession(context.Background(), clientCodec, dial, p)
+	err := RunSession(context.Background(), clientCh, dial, p)
 	if err != nil {
 		t.Fatalf("RunSession returned error: %v", err)
 	}
 
 	// Upstream should have received the request.
-	upSent := upstreamCodec.getSent()
+	upSent := upstreamCh.getSent()
 	if len(upSent) != 1 {
 		t.Fatalf("upstream.Send called %d times, want 1", len(upSent))
 	}
-	if upSent[0].Method != "GET" {
-		t.Errorf("upstream received method %q, want %q", upSent[0].Method, "GET")
+	if upSent[0].Direction != envelope.Send {
+		t.Errorf("upstream received direction %v, want Send", upSent[0].Direction)
 	}
 
 	// Client should have received the response.
-	clientSent := clientCodec.getSent()
+	clientSent := clientCh.getSent()
 	if len(clientSent) != 1 {
 		t.Fatalf("client.Send called %d times, want 1", len(clientSent))
 	}
-	if clientSent[0].Direction != exchange.Receive {
+	if clientSent[0].Direction != envelope.Receive {
 		t.Errorf("client received direction %v, want Receive", clientSent[0].Direction)
 	}
 
-	// Both codecs should be closed.
-	if !clientCodec.isClosed() {
-		t.Error("client codec not closed")
+	// Both channels should be closed.
+	if !clientCh.isClosed() {
+		t.Error("client channel not closed")
 	}
-	if !upstreamCodec.isClosed() {
-		t.Error("upstream codec not closed")
+	if !upstreamCh.isClosed() {
+		t.Error("upstream channel not closed")
 	}
 }
 
 func TestRunSession_Stream(t *testing.T) {
-	var clientExchanges []*exchange.Exchange
-	var upstreamExchanges []*exchange.Exchange
+	var clientEnvelopes []*envelope.Envelope
+	var upstreamEnvelopes []*envelope.Envelope
 	for i := 0; i < 3; i++ {
-		clientExchanges = append(clientExchanges, makeExchange(exchange.Send, "STREAM", i))
-		upstreamExchanges = append(upstreamExchanges, makeExchange(exchange.Receive, "", i))
+		clientEnvelopes = append(clientEnvelopes, makeEnvelope(envelope.Send, i))
+		upstreamEnvelopes = append(upstreamEnvelopes, makeEnvelope(envelope.Receive, i))
 	}
 
-	// Use a buffered nextGate channel so that each upstream Next() call
-	// waits for an explicit signal. This prevents a race where the
-	// upstream-to-client goroutine drains all responses before the
-	// client-to-upstream goroutine has finished, and then the done/ready
-	// channel ordering causes the upstream reader to exit early.
-	//
-	// We pre-fill the gate with len(upstreamExchanges)+1 tokens:
-	// one for each response, plus one for the final EOF call.
-	gate := make(chan struct{}, len(upstreamExchanges)+1)
-	for i := 0; i < len(upstreamExchanges)+1; i++ {
+	gate := make(chan struct{}, len(upstreamEnvelopes)+1)
+	for i := 0; i < len(upstreamEnvelopes)+1; i++ {
 		gate <- struct{}{}
 	}
 
-	clientCodec := &mockCodec{nextExchanges: clientExchanges}
-	upstreamCodec := &mockCodec{
-		nextExchanges: upstreamExchanges,
+	clientCh := &mockChannel{
+		streamID:      "stream",
+		nextEnvelopes: clientEnvelopes,
+	}
+	upstreamCh := &mockChannel{
+		streamID:      "upstream",
+		nextEnvelopes: upstreamEnvelopes,
 		nextGate:      gate,
 	}
 
-	dial := func(_ context.Context, _ *exchange.Exchange) (codec.Codec, error) {
-		return upstreamCodec, nil
+	dial := func(_ context.Context, _ *envelope.Envelope) (layer.Channel, error) {
+		return upstreamCh, nil
 	}
 	p := pipeline.New(passStep{})
 
-	err := RunSession(context.Background(), clientCodec, dial, p)
+	err := RunSession(context.Background(), clientCh, dial, p)
 	if err != nil {
 		t.Fatalf("RunSession returned error: %v", err)
 	}
 
-	upSent := upstreamCodec.getSent()
+	upSent := upstreamCh.getSent()
 	if len(upSent) != 3 {
 		t.Fatalf("upstream.Send called %d times, want 3", len(upSent))
 	}
 
-	clientSent := clientCodec.getSent()
+	clientSent := clientCh.getSent()
 	if len(clientSent) != 3 {
 		t.Fatalf("client.Send called %d times, want 3", len(clientSent))
 	}
 }
 
 func TestRunSession_PipelineDrop(t *testing.T) {
-	req := makeExchange(exchange.Send, "GET", 0)
+	req := makeEnvelope(envelope.Send, 0)
 
-	clientCodec := &mockCodec{
-		nextExchanges: []*exchange.Exchange{req},
+	clientCh := &mockChannel{
+		streamID:      "stream",
+		nextEnvelopes: []*envelope.Envelope{req},
 	}
 
 	dialCalled := false
-	dial := func(_ context.Context, _ *exchange.Exchange) (codec.Codec, error) {
+	dial := func(_ context.Context, _ *envelope.Envelope) (layer.Channel, error) {
 		dialCalled = true
-		return &mockCodec{}, nil
+		return &mockChannel{}, nil
 	}
 
-	// Drop all exchanges.
 	p := pipeline.New(dropStep{})
 
-	err := RunSession(context.Background(), clientCodec, dial, p)
+	err := RunSession(context.Background(), clientCh, dial, p)
 	if err != nil {
 		t.Fatalf("RunSession returned error: %v", err)
 	}
 
 	if dialCalled {
-		t.Error("dial should not be called when all exchanges are dropped")
+		t.Error("dial should not be called when all envelopes are dropped")
 	}
 
-	if !clientCodec.isClosed() {
-		t.Error("client codec not closed")
+	if !clientCh.isClosed() {
+		t.Error("client channel not closed")
 	}
 }
 
 func TestRunSession_PipelineRespond(t *testing.T) {
-	req := makeExchange(exchange.Send, "GET", 0)
-	customResp := &exchange.Exchange{
-		Direction: exchange.Receive,
-		Status:    403,
-		Body:      []byte("blocked"),
+	req := makeEnvelope(envelope.Send, 0)
+	customResp := &envelope.Envelope{
+		Direction: envelope.Receive,
+		Protocol:  envelope.ProtocolRaw,
+		Raw:       []byte("blocked"),
+		Message:   &envelope.RawMessage{Bytes: []byte("blocked")},
 	}
 
-	clientCodec := &mockCodec{
-		nextExchanges: []*exchange.Exchange{req},
+	clientCh := &mockChannel{
+		streamID:      "stream",
+		nextEnvelopes: []*envelope.Envelope{req},
 	}
 
 	dialCalled := false
-	dial := func(_ context.Context, _ *exchange.Exchange) (codec.Codec, error) {
+	dial := func(_ context.Context, _ *envelope.Envelope) (layer.Channel, error) {
 		dialCalled = true
-		return &mockCodec{}, nil
+		return &mockChannel{}, nil
 	}
 
 	p := pipeline.New(respondStep{resp: customResp})
 
-	err := RunSession(context.Background(), clientCodec, dial, p)
+	err := RunSession(context.Background(), clientCh, dial, p)
 	if err != nil {
 		t.Fatalf("RunSession returned error: %v", err)
 	}
@@ -293,32 +293,30 @@ func TestRunSession_PipelineRespond(t *testing.T) {
 		t.Error("dial should not be called when pipeline responds directly")
 	}
 
-	clientSent := clientCodec.getSent()
+	clientSent := clientCh.getSent()
 	if len(clientSent) != 1 {
 		t.Fatalf("client.Send called %d times, want 1", len(clientSent))
 	}
-	if clientSent[0].Status != 403 {
-		t.Errorf("client received status %d, want 403", clientSent[0].Status)
-	}
-	if string(clientSent[0].Body) != "blocked" {
-		t.Errorf("client received body %q, want %q", clientSent[0].Body, "blocked")
+	if string(clientSent[0].Raw) != "blocked" {
+		t.Errorf("client received raw %q, want %q", clientSent[0].Raw, "blocked")
 	}
 }
 
 func TestRunSession_DialFailure(t *testing.T) {
-	req := makeExchange(exchange.Send, "GET", 0)
+	req := makeEnvelope(envelope.Send, 0)
 
-	clientCodec := &mockCodec{
-		nextExchanges: []*exchange.Exchange{req},
+	clientCh := &mockChannel{
+		streamID:      "stream",
+		nextEnvelopes: []*envelope.Envelope{req},
 	}
 
 	dialErr := errors.New("connection refused")
-	dial := func(_ context.Context, _ *exchange.Exchange) (codec.Codec, error) {
+	dial := func(_ context.Context, _ *envelope.Envelope) (layer.Channel, error) {
 		return nil, dialErr
 	}
 	p := pipeline.New(passStep{})
 
-	err := RunSession(context.Background(), clientCodec, dial, p)
+	err := RunSession(context.Background(), clientCh, dial, p)
 	if err == nil {
 		t.Fatal("RunSession should return error on dial failure")
 	}
@@ -326,19 +324,19 @@ func TestRunSession_DialFailure(t *testing.T) {
 		t.Errorf("error %v does not wrap %v", err, dialErr)
 	}
 
-	if !clientCodec.isClosed() {
-		t.Error("client codec not closed after dial failure")
+	if !clientCh.isClosed() {
+		t.Error("client channel not closed after dial failure")
 	}
 }
 
 func TestRunSession_ContextCancel(t *testing.T) {
-	// Client blocks on Next until context is cancelled.
-	clientCodec := &mockCodec{
+	clientCh := &mockChannel{
+		streamID:  "stream",
 		blockNext: make(chan struct{}),
 	}
 
-	dial := func(_ context.Context, _ *exchange.Exchange) (codec.Codec, error) {
-		return &mockCodec{}, nil
+	dial := func(_ context.Context, _ *envelope.Envelope) (layer.Channel, error) {
+		return &mockChannel{}, nil
 	}
 	p := pipeline.New(passStep{})
 
@@ -346,10 +344,9 @@ func TestRunSession_ContextCancel(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		done <- RunSession(ctx, clientCodec, dial, p)
+		done <- RunSession(ctx, clientCh, dial, p)
 	}()
 
-	// Cancel after a short delay.
 	time.Sleep(10 * time.Millisecond)
 	cancel()
 
@@ -362,23 +359,24 @@ func TestRunSession_ContextCancel(t *testing.T) {
 		t.Fatal("RunSession did not terminate after context cancellation")
 	}
 
-	if !clientCodec.isClosed() {
-		t.Error("client codec not closed after context cancellation")
+	if !clientCh.isClosed() {
+		t.Error("client channel not closed after context cancellation")
 	}
 }
 
 func TestRunSession_ClientNextError(t *testing.T) {
 	clientErr := fmt.Errorf("read error")
-	clientCodec := &mockCodec{
-		nextErr: clientErr,
+	clientCh := &mockChannel{
+		streamID: "stream",
+		nextErr:  clientErr,
 	}
 
-	dial := func(_ context.Context, _ *exchange.Exchange) (codec.Codec, error) {
-		return &mockCodec{}, nil
+	dial := func(_ context.Context, _ *envelope.Envelope) (layer.Channel, error) {
+		return &mockChannel{}, nil
 	}
 	p := pipeline.New(passStep{})
 
-	err := RunSession(context.Background(), clientCodec, dial, p)
+	err := RunSession(context.Background(), clientCh, dial, p)
 	if err == nil {
 		t.Fatal("RunSession should return error on client.Next failure")
 	}
@@ -388,22 +386,24 @@ func TestRunSession_ClientNextError(t *testing.T) {
 }
 
 func TestRunSession_UpstreamSendError(t *testing.T) {
-	req := makeExchange(exchange.Send, "GET", 0)
-	clientCodec := &mockCodec{
-		nextExchanges: []*exchange.Exchange{req},
+	req := makeEnvelope(envelope.Send, 0)
+	clientCh := &mockChannel{
+		streamID:      "stream",
+		nextEnvelopes: []*envelope.Envelope{req},
 	}
 
 	sendErr := fmt.Errorf("write error")
-	upstreamCodec := &mockCodec{
-		sendErr: sendErr,
+	upstreamCh := &mockChannel{
+		streamID: "upstream",
+		sendErr:  sendErr,
 	}
 
-	dial := func(_ context.Context, _ *exchange.Exchange) (codec.Codec, error) {
-		return upstreamCodec, nil
+	dial := func(_ context.Context, _ *envelope.Envelope) (layer.Channel, error) {
+		return upstreamCh, nil
 	}
 	p := pipeline.New(passStep{})
 
-	err := RunSession(context.Background(), clientCodec, dial, p)
+	err := RunSession(context.Background(), clientCh, dial, p)
 	if err == nil {
 		t.Fatal("RunSession should return error on upstream.Send failure")
 	}
@@ -413,21 +413,25 @@ func TestRunSession_UpstreamSendError(t *testing.T) {
 }
 
 func TestRunSession_ClientSendRespondError(t *testing.T) {
-	req := makeExchange(exchange.Send, "GET", 0)
-	customResp := &exchange.Exchange{Direction: exchange.Receive, Status: 403}
+	req := makeEnvelope(envelope.Send, 0)
+	customResp := &envelope.Envelope{
+		Direction: envelope.Receive,
+		Protocol:  envelope.ProtocolRaw,
+	}
 
 	sendErr := fmt.Errorf("client send error")
-	clientCodec := &mockCodec{
-		nextExchanges: []*exchange.Exchange{req},
+	clientCh := &mockChannel{
+		streamID:      "stream",
+		nextEnvelopes: []*envelope.Envelope{req},
 		sendErr:       sendErr,
 	}
 
-	dial := func(_ context.Context, _ *exchange.Exchange) (codec.Codec, error) {
-		return &mockCodec{}, nil
+	dial := func(_ context.Context, _ *envelope.Envelope) (layer.Channel, error) {
+		return &mockChannel{}, nil
 	}
 	p := pipeline.New(respondStep{resp: customResp})
 
-	err := RunSession(context.Background(), clientCodec, dial, p)
+	err := RunSession(context.Background(), clientCh, dial, p)
 	if err == nil {
 		t.Fatal("RunSession should return error on client.Send failure during respond")
 	}
@@ -437,66 +441,39 @@ func TestRunSession_ClientSendRespondError(t *testing.T) {
 }
 
 func TestRunSession_NoUpstreamCloseOnNil(t *testing.T) {
-	// When all exchanges are dropped, upstream is never created.
-	// RunSession should not panic when closing nil upstream.
-	req := makeExchange(exchange.Send, "GET", 0)
-	clientCodec := &mockCodec{
-		nextExchanges: []*exchange.Exchange{req},
+	req := makeEnvelope(envelope.Send, 0)
+	clientCh := &mockChannel{
+		streamID:      "stream",
+		nextEnvelopes: []*envelope.Envelope{req},
 	}
 
-	dial := func(_ context.Context, _ *exchange.Exchange) (codec.Codec, error) {
-		return &mockCodec{}, nil
+	dial := func(_ context.Context, _ *envelope.Envelope) (layer.Channel, error) {
+		return &mockChannel{}, nil
 	}
 	p := pipeline.New(dropStep{})
 
 	// Should not panic.
-	err := RunSession(context.Background(), clientCodec, dial, p)
+	err := RunSession(context.Background(), clientCh, dial, p)
 	if err != nil {
 		t.Fatalf("RunSession returned error: %v", err)
-	}
-}
-
-func TestRunSession_DropSendContinueReceive(t *testing.T) {
-	// Pipeline drops Send-direction but continues Receive-direction.
-	// First exchange is not dropped (to establish upstream), subsequent are.
-	req1 := makeExchange(exchange.Send, "GET", 0)
-	resp := makeExchange(exchange.Receive, "", 1)
-
-	clientCodec := &mockCodec{
-		nextExchanges: []*exchange.Exchange{req1},
-	}
-	upstreamCodec := &mockCodec{
-		nextExchanges: []*exchange.Exchange{resp},
-	}
-
-	// Use a pipeline that passes everything (so we can establish upstream).
-	p := pipeline.New(passStep{})
-
-	dial := func(_ context.Context, _ *exchange.Exchange) (codec.Codec, error) {
-		return upstreamCodec, nil
-	}
-
-	err := RunSession(context.Background(), clientCodec, dial, p)
-	if err != nil {
-		t.Fatalf("RunSession returned error: %v", err)
-	}
-
-	// Verify response was forwarded to client.
-	clientSent := clientCodec.getSent()
-	if len(clientSent) != 1 {
-		t.Fatalf("client.Send called %d times, want 1", len(clientSent))
 	}
 }
 
 func TestRunSession_OnComplete_NormalEOF(t *testing.T) {
-	req := makeExchangeWithStreamID(exchange.Send, "GET", 0, "stream-1")
-	resp := makeExchangeWithStreamID(exchange.Receive, "", 1, "stream-1")
+	req := makeEnvelopeWithStreamID(envelope.Send, 0, "stream-1")
+	resp := makeEnvelopeWithStreamID(envelope.Receive, 1, "stream-1")
 
-	clientCodec := &mockCodec{nextExchanges: []*exchange.Exchange{req}}
-	upstreamCodec := &mockCodec{nextExchanges: []*exchange.Exchange{resp}}
+	clientCh := &mockChannel{
+		streamID:      "client",
+		nextEnvelopes: []*envelope.Envelope{req},
+	}
+	upstreamCh := &mockChannel{
+		streamID:      "upstream",
+		nextEnvelopes: []*envelope.Envelope{resp},
+	}
 
-	dial := func(_ context.Context, _ *exchange.Exchange) (codec.Codec, error) {
-		return upstreamCodec, nil
+	dial := func(_ context.Context, _ *envelope.Envelope) (layer.Channel, error) {
+		return upstreamCh, nil
 	}
 	p := pipeline.New(passStep{})
 
@@ -512,7 +489,7 @@ func TestRunSession_OnComplete_NormalEOF(t *testing.T) {
 		},
 	}
 
-	err := RunSession(context.Background(), clientCodec, dial, p, opts)
+	err := RunSession(context.Background(), clientCh, dial, p, opts)
 	if err != nil {
 		t.Fatalf("RunSession returned error: %v", err)
 	}
@@ -530,13 +507,19 @@ func TestRunSession_OnComplete_NormalEOF(t *testing.T) {
 
 func TestRunSession_OnComplete_Error(t *testing.T) {
 	sendErr := fmt.Errorf("upstream write error")
-	req := makeExchangeWithStreamID(exchange.Send, "GET", 0, "stream-err")
+	req := makeEnvelopeWithStreamID(envelope.Send, 0, "stream-err")
 
-	clientCodec := &mockCodec{nextExchanges: []*exchange.Exchange{req}}
-	upstreamCodec := &mockCodec{sendErr: sendErr}
+	clientCh := &mockChannel{
+		streamID:      "client",
+		nextEnvelopes: []*envelope.Envelope{req},
+	}
+	upstreamCh := &mockChannel{
+		streamID: "upstream",
+		sendErr:  sendErr,
+	}
 
-	dial := func(_ context.Context, _ *exchange.Exchange) (codec.Codec, error) {
-		return upstreamCodec, nil
+	dial := func(_ context.Context, _ *envelope.Envelope) (layer.Channel, error) {
+		return upstreamCh, nil
 	}
 	p := pipeline.New(passStep{})
 
@@ -552,7 +535,7 @@ func TestRunSession_OnComplete_Error(t *testing.T) {
 		},
 	}
 
-	err := RunSession(context.Background(), clientCodec, dial, p, opts)
+	err := RunSession(context.Background(), clientCh, dial, p, opts)
 	if err == nil {
 		t.Fatal("RunSession should return error")
 	}
@@ -569,29 +552,40 @@ func TestRunSession_OnComplete_Error(t *testing.T) {
 }
 
 func TestRunSession_OnComplete_Nil(t *testing.T) {
-	// OnComplete nil should not panic.
-	req := makeExchange(exchange.Send, "GET", 0)
-	resp := makeExchange(exchange.Receive, "", 1)
+	req := makeEnvelope(envelope.Send, 0)
+	resp := makeEnvelope(envelope.Receive, 1)
 
-	clientCodec := &mockCodec{nextExchanges: []*exchange.Exchange{req}}
-	upstreamCodec := &mockCodec{nextExchanges: []*exchange.Exchange{resp}}
+	clientCh := &mockChannel{
+		streamID:      "client",
+		nextEnvelopes: []*envelope.Envelope{req},
+	}
+	upstreamCh := &mockChannel{
+		streamID:      "upstream",
+		nextEnvelopes: []*envelope.Envelope{resp},
+	}
 
-	dial := func(_ context.Context, _ *exchange.Exchange) (codec.Codec, error) {
-		return upstreamCodec, nil
+	dial := func(_ context.Context, _ *envelope.Envelope) (layer.Channel, error) {
+		return upstreamCh, nil
 	}
 	p := pipeline.New(passStep{})
 
 	// No opts at all — backward compatible.
-	err := RunSession(context.Background(), clientCodec, dial, p)
+	err := RunSession(context.Background(), clientCh, dial, p)
 	if err != nil {
 		t.Fatalf("RunSession returned error: %v", err)
 	}
 
 	// Explicit nil OnComplete.
 	err = RunSession(context.Background(),
-		&mockCodec{nextExchanges: []*exchange.Exchange{makeExchange(exchange.Send, "GET", 0)}},
-		func(_ context.Context, _ *exchange.Exchange) (codec.Codec, error) {
-			return &mockCodec{nextExchanges: []*exchange.Exchange{makeExchange(exchange.Receive, "", 1)}}, nil
+		&mockChannel{
+			streamID:      "client2",
+			nextEnvelopes: []*envelope.Envelope{makeEnvelope(envelope.Send, 0)},
+		},
+		func(_ context.Context, _ *envelope.Envelope) (layer.Channel, error) {
+			return &mockChannel{
+				streamID:      "upstream2",
+				nextEnvelopes: []*envelope.Envelope{makeEnvelope(envelope.Receive, 1)},
+			}, nil
 		},
 		pipeline.New(passStep{}),
 		SessionOptions{OnComplete: nil},
@@ -601,16 +595,18 @@ func TestRunSession_OnComplete_Nil(t *testing.T) {
 	}
 }
 
-func TestRunSession_OnComplete_StreamIDFromFirstExchange(t *testing.T) {
-	// Multiple exchanges with different StreamIDs — only the first is captured.
-	ex1 := makeExchangeWithStreamID(exchange.Send, "GET", 0, "first-stream")
-	ex2 := makeExchangeWithStreamID(exchange.Send, "GET", 1, "second-stream")
+func TestRunSession_OnComplete_StreamIDFromFirstEnvelope(t *testing.T) {
+	env1 := makeEnvelopeWithStreamID(envelope.Send, 0, "first-stream")
+	env2 := makeEnvelopeWithStreamID(envelope.Send, 1, "second-stream")
 
-	clientCodec := &mockCodec{nextExchanges: []*exchange.Exchange{ex1, ex2}}
-	upstreamCodec := &mockCodec{} // no responses, will EOF immediately
+	clientCh := &mockChannel{
+		streamID:      "client",
+		nextEnvelopes: []*envelope.Envelope{env1, env2},
+	}
+	upstreamCh := &mockChannel{streamID: "upstream"}
 
-	dial := func(_ context.Context, _ *exchange.Exchange) (codec.Codec, error) {
-		return upstreamCodec, nil
+	dial := func(_ context.Context, _ *envelope.Envelope) (layer.Channel, error) {
+		return upstreamCh, nil
 	}
 	p := pipeline.New(passStep{})
 
@@ -621,7 +617,7 @@ func TestRunSession_OnComplete_StreamIDFromFirstExchange(t *testing.T) {
 		},
 	}
 
-	_ = RunSession(context.Background(), clientCodec, dial, p, opts)
+	_ = RunSession(context.Background(), clientCh, dial, p, opts)
 
 	if gotStreamID != "first-stream" {
 		t.Errorf("OnComplete streamID = %q, want %q", gotStreamID, "first-stream")
@@ -629,14 +625,20 @@ func TestRunSession_OnComplete_StreamIDFromFirstExchange(t *testing.T) {
 }
 
 func TestRunSession_OnComplete_ContextNotCancelled(t *testing.T) {
-	req := makeExchangeWithStreamID(exchange.Send, "GET", 0, "ctx-test")
-	resp := makeExchangeWithStreamID(exchange.Receive, "", 1, "ctx-test")
+	req := makeEnvelopeWithStreamID(envelope.Send, 0, "ctx-test")
+	resp := makeEnvelopeWithStreamID(envelope.Receive, 1, "ctx-test")
 
-	clientCodec := &mockCodec{nextExchanges: []*exchange.Exchange{req}}
-	upstreamCodec := &mockCodec{nextExchanges: []*exchange.Exchange{resp}}
+	clientCh := &mockChannel{
+		streamID:      "client",
+		nextEnvelopes: []*envelope.Envelope{req},
+	}
+	upstreamCh := &mockChannel{
+		streamID:      "upstream",
+		nextEnvelopes: []*envelope.Envelope{resp},
+	}
 
-	dial := func(_ context.Context, _ *exchange.Exchange) (codec.Codec, error) {
-		return upstreamCodec, nil
+	dial := func(_ context.Context, _ *envelope.Envelope) (layer.Channel, error) {
+		return upstreamCh, nil
 	}
 	p := pipeline.New(passStep{})
 
@@ -647,7 +649,7 @@ func TestRunSession_OnComplete_ContextNotCancelled(t *testing.T) {
 		},
 	}
 
-	err := RunSession(context.Background(), clientCodec, dial, p, opts)
+	err := RunSession(context.Background(), clientCh, dial, p, opts)
 	if err != nil {
 		t.Fatalf("RunSession returned error: %v", err)
 	}
@@ -658,14 +660,15 @@ func TestRunSession_OnComplete_ContextNotCancelled(t *testing.T) {
 }
 
 func TestRunSession_OnComplete_AllDropped(t *testing.T) {
-	// When all exchanges are dropped, no upstream is established.
-	// OnComplete should still be called with an empty StreamID.
-	req := makeExchangeWithStreamID(exchange.Send, "GET", 0, "dropped-stream")
+	req := makeEnvelopeWithStreamID(envelope.Send, 0, "dropped-stream")
 
-	clientCodec := &mockCodec{nextExchanges: []*exchange.Exchange{req}}
+	clientCh := &mockChannel{
+		streamID:      "client",
+		nextEnvelopes: []*envelope.Envelope{req},
+	}
 
-	dial := func(_ context.Context, _ *exchange.Exchange) (codec.Codec, error) {
-		return &mockCodec{}, nil
+	dial := func(_ context.Context, _ *envelope.Envelope) (layer.Channel, error) {
+		return &mockChannel{}, nil
 	}
 	p := pipeline.New(dropStep{})
 
@@ -681,15 +684,14 @@ func TestRunSession_OnComplete_AllDropped(t *testing.T) {
 		},
 	}
 
-	err := RunSession(context.Background(), clientCodec, dial, p, opts)
+	err := RunSession(context.Background(), clientCh, dial, p, opts)
 	if err != nil {
 		t.Fatalf("RunSession returned error: %v", err)
 	}
 
 	if !called {
-		t.Fatal("OnComplete was not called when all exchanges dropped")
+		t.Fatal("OnComplete was not called when all envelopes dropped")
 	}
-	// StreamID is still captured because we read the exchange before dropping.
 	if gotStreamID != "dropped-stream" {
 		t.Errorf("OnComplete streamID = %q, want %q", gotStreamID, "dropped-stream")
 	}
