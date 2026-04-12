@@ -9,6 +9,26 @@ import "io"
 // when Envelope.Direction == Send.
 // Response-side fields (Status, StatusReason) are valid when
 // Envelope.Direction == Receive.
+// AnomalyType classifies the kind of HTTP anomaly detected during parsing.
+// Anomaly types are defined as strings matching the parser's type constants.
+type AnomalyType string
+
+const (
+	AnomalyCLTE            AnomalyType = "CLTE"
+	AnomalyDuplicateCL     AnomalyType = "DuplicateCL"
+	AnomalyInvalidTE       AnomalyType = "InvalidTE"
+	AnomalyHeaderInjection AnomalyType = "HeaderInjection"
+	AnomalyAmbiguousTE     AnomalyType = "AmbiguousTE"
+	AnomalyObsFold         AnomalyType = "ObsFold"
+)
+
+// Anomaly records a single protocol-level anomaly found during parsing.
+// HTTP-specific; lives on HTTPMessage, not Envelope (RFC-001 §3.1 rule).
+type Anomaly struct {
+	Type   AnomalyType
+	Detail string
+}
+
 type HTTPMessage struct {
 	// --- Request-side fields ---
 
@@ -50,6 +70,11 @@ type HTTPMessage struct {
 	// BodyStream is a streaming body reader for passthrough mode.
 	// Non-nil only when Body is nil.
 	BodyStream io.Reader
+
+	// Anomalies records parser-detected protocol anomalies (CL/TE conflict,
+	// duplicate CL, obs-fold, etc.). HTTP-specific; not on Envelope because
+	// not meaningful for all protocols.
+	Anomalies []Anomaly
 }
 
 // Protocol returns ProtocolHTTP.
@@ -69,6 +94,17 @@ func (m *HTTPMessage) CloneMessage() Message {
 		Headers:      cloneKeyValues(m.Headers),
 		Trailers:     cloneKeyValues(m.Trailers),
 		Body:         cloneBytes(m.Body),
+		Anomalies:    cloneAnomalies(m.Anomalies),
 		// BodyStream intentionally not cloned
 	}
+}
+
+// cloneAnomalies returns a deep copy of an Anomaly slice.
+func cloneAnomalies(a []Anomaly) []Anomaly {
+	if a == nil {
+		return nil
+	}
+	c := make([]Anomaly, len(a))
+	copy(c, a)
+	return c
 }
