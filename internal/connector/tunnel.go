@@ -647,6 +647,14 @@ func (t *TunnelHandler) dispatchOnTLSHandshake(ctx context.Context, host string,
 	}
 }
 
+// ReportBlock delivers a pre-tunnel block notification via OnBlock. It is
+// used by the SOCKS5Handler adapter to surface denial decisions that occur
+// inside the negotiator (before TunnelHandler.Handle runs) so that callers
+// observing OnBlock still see SOCKS5 scope/ratelimit denials.
+func (t *TunnelHandler) ReportBlock(ctx context.Context, target, reason, sourceProtocol string) {
+	t.fireBlock(ctx, target, reason, sourceProtocol)
+}
+
 // fireBlock invokes the OnBlock callback if one is registered. The callback
 // receives a fresh context so it can still record even if the parent ctx was
 // cancelled.
