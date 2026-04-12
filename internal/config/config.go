@@ -531,6 +531,12 @@ type ProxyConfig struct {
 	// destructive payloads. This is a Policy Layer setting: once loaded from a
 	// config file, it cannot be modified at runtime via MCP tools.
 	SafetyFilter *SafetyFilterConfig `json:"safety_filter,omitempty"`
+
+	// RawPassthroughHosts is a list of "host:port" targets that bypass L7
+	// parsing. Traffic to these hosts is relayed as raw bytes through the
+	// ByteChunk layer, enabling HTTP request-smuggling diagnosis.
+	// Matching is case-insensitive exact match (wildcard deferred to N4).
+	RawPassthroughHosts []string `json:"raw_passthrough_hosts,omitempty"`
 }
 
 // SafetyFilterConfig holds the SafetyFilter engine configuration.
