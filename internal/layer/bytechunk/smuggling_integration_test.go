@@ -11,6 +11,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -298,7 +299,7 @@ func TestRawPassthroughSmuggling(t *testing.T) {
 	respBuf := make([]byte, 4096)
 	clientTLS.SetReadDeadline(time.Now().Add(10 * time.Second))
 	n, err := clientTLS.Read(respBuf)
-	if err != nil && err != io.EOF {
+	if err != nil && !errors.Is(err, io.EOF) {
 		t.Fatalf("read response: %v", err)
 	}
 	gotResponse := respBuf[:n]
@@ -406,7 +407,7 @@ func TestRawPassthrough_NormalHTTP(t *testing.T) {
 	respBuf := make([]byte, 4096)
 	clientTLS.SetReadDeadline(time.Now().Add(10 * time.Second))
 	n, err := clientTLS.Read(respBuf)
-	if err != nil && err != io.EOF {
+	if err != nil && !errors.Is(err, io.EOF) {
 		t.Fatalf("read response: %v", err)
 	}
 
@@ -504,8 +505,9 @@ func TestRawPassthrough_TLSFailure(t *testing.T) {
 	})
 	hsErr := clientTLS.Handshake()
 	if hsErr != nil {
-		// Handshake failed: proxy closed before completion. Acceptable.
-		t.Logf("TLS handshake failed (acceptable): %v", hsErr)
+		// Handshake failed: proxy closed before completion. Acceptable
+		// because the upstream dial failure may tear down the connection
+		// before the client-side TLS handshake finishes.
 	} else {
 		// Handshake succeeded. The next operation should fail because the
 		// proxy closes the connection after upstream dial failure.
