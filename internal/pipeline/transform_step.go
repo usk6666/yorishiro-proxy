@@ -1,51 +1,51 @@
-//go:build legacy
-
 package pipeline
 
 import (
 	"context"
 
-	"github.com/usk6666/yorishiro-proxy/internal/exchange"
-	"github.com/usk6666/yorishiro-proxy/internal/proxy/rules"
+	"github.com/usk6666/yorishiro-proxy/internal/envelope"
+	httprules "github.com/usk6666/yorishiro-proxy/internal/rules/http"
 )
 
-// TransformStep applies auto-transform rules as a Pipeline Step.
-// When rules match, it modifies Exchange Headers and Body in place.
-// Body nil (passthrough) skips body rules; only header rules are applied.
-// Content-Length update is the Codec's responsibility, not TransformStep's.
+// TransformStep is a Message-typed Pipeline Step that applies transformation
+// rules to messages in-place. HTTP messages are dispatched to the
+// httprules.TransformEngine; unknown Message types pass through.
 type TransformStep struct {
-	pipeline *rules.Pipeline
+	http *httprules.TransformEngine
 }
 
-// NewTransformStep creates a TransformStep with the given rules.Pipeline.
-// If pipeline is nil, Process always returns Continue with no modifications.
-func NewTransformStep(pipeline *rules.Pipeline) *TransformStep {
-	return &TransformStep{pipeline: pipeline}
+// NewTransformStep creates a TransformStep. If httpEngine is nil, all
+// messages pass through unmodified.
+func NewTransformStep(httpEngine *httprules.TransformEngine) *TransformStep {
+	return &TransformStep{http: httpEngine}
 }
 
-// Process applies matching auto-transform rules to the Exchange.
-// For Send direction, request-side rules are applied using Method, URL,
-// Headers, and Body. For Receive direction, response-side rules are applied
-// using Status, Headers, and Body.
-func (s *TransformStep) Process(_ context.Context, ex *exchange.Exchange) Result {
-	if s.pipeline == nil {
+// Process type-switches on env.Message. HTTPMessage is dispatched to the
+// TransformEngine for in-place mutation; all other Message types pass through.
+// Returns Result{} always — mutations are in-place on the same Message
+// pointer, so subsequent Steps see the modifications without envelope
+// replacement.
+func (s *TransformStep) Process(_ context.Context, env *envelope.Envelope) Result {
+	switch msg := env.Message.(type) {
+	case *envelope.HTTPMessage:
+		return s.processHTTP(env, msg)
+	default:
+		return Result{}
+	}
+}
+
+func (s *TransformStep) processHTTP(env *envelope.Envelope, msg *envelope.HTTPMessage) Result {
+	if s.http == nil {
 		return Result{}
 	}
 
-	switch ex.Direction {
-	case exchange.Send:
-		headers, body := s.pipeline.TransformRequest(ex.Method, ex.URL, ex.Headers, ex.Body)
-		ex.Headers = headers
-		if ex.Body != nil {
-			ex.Body = body
-		}
-	case exchange.Receive:
-		headers, body := s.pipeline.TransformResponse(ex.Status, ex.Headers, ex.Body)
-		ex.Headers = headers
-		if ex.Body != nil {
-			ex.Body = body
-		}
+	switch env.Direction {
+	case envelope.Send:
+		s.http.TransformRequest(env, msg)
+	case envelope.Receive:
+		s.http.TransformResponse(env, msg)
 	}
 
+	// In-place mutation — no Result.Envelope replacement needed.
 	return Result{}
 }
