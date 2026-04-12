@@ -5,10 +5,16 @@ Operates as an MCP (Model Context Protocol) server, providing traffic intercepti
 
 **Status**: OSS (Apache License 2.0) · Under active development
 
-## Architecture Rewrite (M36-M44)
+## Active Rewrite (RFC-001)
 
-> **Active rewrite in progress.** The codebase is being restructured from handler-per-protocol to Codec + Pipeline + Session architecture.
-> **Before working on any M36-M44 Issue, read [`docs/architecture-rewrite.md`](docs/architecture-rewrite.md)** — it contains all design decisions, implementation FAQ, and rationale that are not repeated in individual Issue descriptions.
+> **M36-M44 (Codec + Pipeline + Session) is cancelled.** Superseded by [RFC-001: Envelope + Layered Connection Model](docs/rfc/envelope.md) which fixes the HTTP bias in the Exchange/Codec abstractions.
+> **Before working on any N1-N9 Issue, invoke the `/rfc001` skill** — it loads the spec, implementation guide, Linear state, and presents the implementation rules automatically.
+
+- **Spec**: [`docs/rfc/envelope.md`](docs/rfc/envelope.md) (English) / [`docs/rfc/envelope-ja.md`](docs/rfc/envelope-ja.md) (Japanese)
+- **Implementation strategy**: [`docs/rfc/envelope-implementation.md`](docs/rfc/envelope-implementation.md)
+- **Branch**: `rewrite/rfc-001`
+- **Active milestones**: N1-N9 (see Linear). M36-M44 are `[Cancelled]` in Linear.
+- **Entry point**: `/rfc001` skill or `/rfc001 <Issue ID>`
 
 ## Architecture
 
