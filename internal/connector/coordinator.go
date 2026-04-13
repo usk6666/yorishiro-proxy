@@ -44,6 +44,13 @@ type CoordinatorConfig struct {
 
 	// SOCKS5Negotiator handles SOCKS5 handshakes. Required for SOCKS5 tunnel
 	// support; nil means no SOCKS5 handler is wired.
+	//
+	// Unlike the CONNECT path (where Scope/RateLimiter are checked by the
+	// handler after negotiation), the SOCKS5Negotiator checks Scope and
+	// RateLimiter inline during the handshake so that denied targets receive
+	// the correct SOCKS5 reply code before the connection is torn down.
+	// Therefore, the caller must set Scope and RateLimiter on the negotiator
+	// itself — the Coordinator does not override them.
 	SOCKS5Negotiator *SOCKS5Negotiator
 
 	// --- Shared policy objects ---
@@ -156,6 +163,13 @@ func (c *Coordinator) StartNamed(ctx context.Context, name, addr string) error {
 		name = DefaultListenerName
 	}
 
+	// NOTE: The lock is held across listener creation and the Ready()/errCh
+	// wait. This serializes concurrent StartNamed calls, which is acceptable
+	// because listeners are created at startup (a handful at most). If
+	// high-concurrency listener creation becomes a requirement, the lock
+	// should be released after NewFullListener and re-acquired for map
+	// insertion (CWE-667 consideration, low practical risk since TCP
+	// net.Listen is non-blocking).
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
