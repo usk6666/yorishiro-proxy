@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net"
 
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 )
@@ -16,6 +17,10 @@ type SOCKS5HandlerConfig struct {
 
 	// BuildCfg configures ConnectionStack construction.
 	BuildCfg *BuildConfig
+
+	// PassthroughList, if non-nil, identifies hosts whose TLS traffic should
+	// be relayed without MITM. Matching hosts bypass the ConnectionStack.
+	PassthroughList *PassthroughList
 
 	// OnStack is called when a ConnectionStack is ready. The callback owns
 	// the session lifecycle (RunSession wiring). This avoids an import cycle
@@ -79,7 +84,19 @@ func NewSOCKS5Handler(cfg SOCKS5HandlerConfig) HandlerFunc {
 
 		connLogger = connLogger.With("target", target, "via", "socks5")
 
-		// Step 2: Build ConnectionStack.
+		// Step 2: TLS passthrough check.
+		if cfg.PassthroughList != nil {
+			host, _, _ := net.SplitHostPort(target)
+			if cfg.PassthroughList.Contains(host) {
+				connLogger.Debug("TLS passthrough relay", "target", target)
+				if err := RelayTLSPassthrough(ctx, pc, target, passDialOpts(cfg.BuildCfg)); err != nil {
+					connLogger.Debug("TLS passthrough ended", "error", err)
+				}
+				return nil
+			}
+		}
+
+		// Step 3: Build ConnectionStack.
 		stack, snap, err := BuildConnectionStack(ctx, pc, target, cfg.BuildCfg)
 		if err != nil {
 			connLogger.Warn("stack build failed", "error", err)
@@ -88,7 +105,7 @@ func NewSOCKS5Handler(cfg SOCKS5HandlerConfig) HandlerFunc {
 
 		connLogger.Debug("connection stack built")
 
-		// Step 3: Hand off to OnStack callback for session wiring.
+		// Step 4: Hand off to OnStack callback for session wiring.
 		if cfg.OnStack != nil {
 			cfg.OnStack(ctx, stack, snap, target)
 		} else {
