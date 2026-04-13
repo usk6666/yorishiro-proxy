@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/url"
 
 	"github.com/google/uuid"
 
@@ -34,6 +35,14 @@ type BuildConfig struct {
 
 	// ClientCert is the global mTLS client certificate for upstream, if any.
 	ClientCert *tls.Certificate
+
+	// UpstreamProxy, if non-nil, tunnels upstream connections through an
+	// HTTP CONNECT or SOCKS5 proxy.
+	UpstreamProxy *url.URL
+
+	// HostTLSResolver resolves per-host TLS overrides (InsecureSkipVerify,
+	// ClientCert, RootCAs). Nil means use global settings for all hosts.
+	HostTLSResolver *HostTLSResolver
 }
 
 // BuildConnectionStack constructs a ConnectionStack for the given CONNECT
@@ -110,12 +119,36 @@ func buildHTTPMITMStack(
 		ServerName: host,
 	}
 
+	insecureSkip := cfg.InsecureSkipVerify
+	clientCert := cfg.ClientCert
+
+	// Apply per-host TLS overrides if configured.
+	if cfg.HostTLSResolver != nil {
+		resolved, resolveErr := cfg.HostTLSResolver.Resolve(target)
+		if resolveErr != nil {
+			clientTLSConn.Close()
+			return nil, nil, fmt.Errorf("connector: resolve host TLS for %s: %w", target, resolveErr)
+		}
+		if resolved != nil {
+			if resolved.InsecureSkipVerify != nil {
+				insecureSkip = *resolved.InsecureSkipVerify
+			}
+			if resolved.ClientCert != nil {
+				clientCert = resolved.ClientCert
+			}
+			if resolved.RootCAs != nil {
+				upstreamTLSCfg.RootCAs = resolved.RootCAs
+			}
+		}
+	}
+
 	upstreamConn, _, err := DialUpstreamRaw(ctx, target, DialRawOpts{
 		TLSConfig:          upstreamTLSCfg,
-		InsecureSkipVerify: cfg.InsecureSkipVerify,
+		InsecureSkipVerify: insecureSkip,
 		UTLSProfile:        cfg.TLSFingerprint,
-		ClientCert:         cfg.ClientCert,
+		ClientCert:         clientCert,
 		OfferALPN:          []string{"http/1.1"},
+		UpstreamProxy:      cfg.UpstreamProxy,
 	})
 	if err != nil {
 		clientTLSConn.Close()
@@ -199,16 +232,40 @@ func buildRawPassthroughStack(
 		ServerName: host,
 	}
 
+	insecureSkip := cfg.InsecureSkipVerify
+	clientCert := cfg.ClientCert
+
+	// Apply per-host TLS overrides if configured.
+	if cfg.HostTLSResolver != nil {
+		resolved, resolveErr := cfg.HostTLSResolver.Resolve(target)
+		if resolveErr != nil {
+			clientTLSConn.Close()
+			return nil, nil, fmt.Errorf("connector: resolve host TLS for %s: %w", target, resolveErr)
+		}
+		if resolved != nil {
+			if resolved.InsecureSkipVerify != nil {
+				insecureSkip = *resolved.InsecureSkipVerify
+			}
+			if resolved.ClientCert != nil {
+				clientCert = resolved.ClientCert
+			}
+			if resolved.RootCAs != nil {
+				upstreamTLSCfg.RootCAs = resolved.RootCAs
+			}
+		}
+	}
+
 	upstreamConn, _, err := DialUpstreamRaw(ctx, target, DialRawOpts{
 		TLSConfig:          upstreamTLSCfg,
-		InsecureSkipVerify: cfg.InsecureSkipVerify,
+		InsecureSkipVerify: insecureSkip,
 		UTLSProfile:        cfg.TLSFingerprint,
-		ClientCert:         cfg.ClientCert,
+		ClientCert:         clientCert,
 		// N2: offer http/1.1 only. In raw_passthrough mode ALPN is not
 		// critical (bytes are relayed as-is after TLS), but we need a
 		// plausible value for the handshake. N6 integrates ALPN cache
 		// and can propagate the client's original ALPN offer.
-		OfferALPN: []string{"http/1.1"},
+		OfferALPN:     []string{"http/1.1"},
+		UpstreamProxy: cfg.UpstreamProxy,
 	})
 	if err != nil {
 		clientTLSConn.Close()
