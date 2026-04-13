@@ -24,6 +24,11 @@ type CONNECTHandlerConfig struct {
 	// RateLimiter checks per-host rate limits. Nil disables.
 	RateLimiter *RateLimiter
 
+	// PassthroughList, if non-nil, identifies hosts whose TLS traffic should
+	// be relayed without MITM. Matching hosts bypass the ConnectionStack
+	// entirely and use bidirectional io.Copy relay.
+	PassthroughList *PassthroughList
+
 	// OnStack is called when a ConnectionStack is ready. The callback owns
 	// the session lifecycle (RunSession wiring). This avoids an import cycle
 	// between connector and pipeline/session.
@@ -89,7 +94,20 @@ func NewCONNECTHandler(cfg CONNECTHandlerConfig) HandlerFunc {
 			}
 		}
 
-		// Step 4: Build ConnectionStack.
+		// Step 4: TLS passthrough check.
+		if cfg.PassthroughList != nil {
+			host, _, _ := net.SplitHostPort(target)
+			if cfg.PassthroughList.Contains(host) {
+				connLogger.Debug("TLS passthrough relay", "target", target)
+				dialOpts := DialRawOpts{UpstreamProxy: cfg.BuildCfg.UpstreamProxy}
+				if err := RelayTLSPassthrough(ctx, pc, target, dialOpts); err != nil {
+					connLogger.Debug("TLS passthrough ended", "error", err)
+				}
+				return nil
+			}
+		}
+
+		// Step 5: Build ConnectionStack.
 		stack, snap, err := BuildConnectionStack(ctx, pc, target, cfg.BuildCfg)
 		if err != nil {
 			connLogger.Warn("stack build failed", "error", err)
@@ -98,7 +116,7 @@ func NewCONNECTHandler(cfg CONNECTHandlerConfig) HandlerFunc {
 
 		connLogger.Debug("connection stack built")
 
-		// Step 5: Hand off to OnStack callback for session wiring.
+		// Step 6: Hand off to OnStack callback for session wiring.
 		if cfg.OnStack != nil {
 			cfg.OnStack(ctx, stack, snap, target)
 		} else {
