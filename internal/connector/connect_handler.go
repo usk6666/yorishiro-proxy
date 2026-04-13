@@ -38,6 +38,16 @@ type CONNECTHandlerConfig struct {
 	Logger *slog.Logger
 }
 
+// passDialOpts builds DialRawOpts for TLS passthrough relay. It safely
+// handles a nil BuildCfg (only UpstreamProxy is needed for passthrough).
+func passDialOpts(buildCfg *BuildConfig) DialRawOpts {
+	var opts DialRawOpts
+	if buildCfg != nil {
+		opts.UpstreamProxy = buildCfg.UpstreamProxy
+	}
+	return opts
+}
+
 // NewCONNECTHandler returns a HandlerFunc that processes CONNECT tunnel
 // connections: negotiate → scope check → rate limit check →
 // build ConnectionStack → invoke OnStack callback.
@@ -99,8 +109,7 @@ func NewCONNECTHandler(cfg CONNECTHandlerConfig) HandlerFunc {
 			host, _, _ := net.SplitHostPort(target)
 			if cfg.PassthroughList.Contains(host) {
 				connLogger.Debug("TLS passthrough relay", "target", target)
-				dialOpts := DialRawOpts{UpstreamProxy: cfg.BuildCfg.UpstreamProxy}
-				if err := RelayTLSPassthrough(ctx, pc, target, dialOpts); err != nil {
+				if err := RelayTLSPassthrough(ctx, pc, target, passDialOpts(cfg.BuildCfg)); err != nil {
 					connLogger.Debug("TLS passthrough ended", "error", err)
 				}
 				return nil

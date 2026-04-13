@@ -161,14 +161,15 @@ func buildALPNRoutedStack(
 	}
 
 	var negotiatedALPN string
+	var clientTLSConn net.Conn
 	var upstreamConn net.Conn
 	var clientSnap *envelope.TLSSnapshot
 
 	if cacheHit {
-		upstreamConn, clientSnap, negotiatedALPN, err = buildCacheHitPath(
+		clientTLSConn, upstreamConn, clientSnap, negotiatedALPN, err = buildCacheHitPath(
 			ctx, clientConn, target, host, cachedALPN, cacheKey, hostTLS, cfg)
 	} else {
-		upstreamConn, clientSnap, negotiatedALPN, err = buildCacheMissPath(
+		clientTLSConn, upstreamConn, clientSnap, negotiatedALPN, err = buildCacheMissPath(
 			ctx, clientConn, target, host, cacheKey, hostTLS, cfg)
 	}
 	if err != nil {
@@ -178,7 +179,7 @@ func buildALPNRoutedStack(
 	route, routeErr := alpnRoute(negotiatedALPN)
 	if routeErr != nil {
 		upstreamConn.Close()
-		clientConn.Close()
+		clientTLSConn.Close()
 		return nil, nil, fmt.Errorf("connector: %s: %w", target, routeErr)
 	}
 
@@ -187,11 +188,12 @@ func buildALPNRoutedStack(
 		"alpn", negotiatedALPN, "route", route, "cache_hit", cacheHit,
 	)
 
-	return buildStackFromRoute(clientConn, upstreamConn, target, connID, route, clientSnap)
+	return buildStackFromRoute(clientTLSConn, upstreamConn, target, connID, route, clientSnap)
 }
 
 // buildCacheHitPath handles the ALPN cache hit: client MITM first (offering
 // cached ALPN), then upstream dial (offering cached ALPN), verify match.
+// Returns the TLS-wrapped client connection (not the original plain conn).
 func buildCacheHitPath(
 	ctx context.Context,
 	clientConn net.Conn,
@@ -199,32 +201,33 @@ func buildCacheHitPath(
 	cacheKey ALPNCacheKey,
 	hostTLS *resolvedTLS,
 	cfg *BuildConfig,
-) (net.Conn, *envelope.TLSSnapshot, string, error) {
-	clientSnap, err := performClientMITM(ctx, clientConn, host, cachedALPN, cfg)
+) (clientTLSConn net.Conn, upstreamConn net.Conn, clientSnap *envelope.TLSSnapshot, negotiatedALPN string, err error) {
+	clientTLSConn, clientSnap, err = performClientMITM(ctx, clientConn, host, cachedALPN, cfg)
 	if err != nil {
-		return nil, nil, "", err
+		return nil, nil, nil, "", err
 	}
 
-	upstreamConn, negotiatedALPN, err := dialUpstreamWithALPN(ctx, target, host,
+	upstreamConn, negotiatedALPN, err = dialUpstreamWithALPN(ctx, target, host,
 		[]string{cachedALPN}, hostTLS.insecureSkip, hostTLS.clientCert, hostTLS.rootCAs, cfg)
 	if err != nil {
 		clientConn.Close()
-		return nil, nil, "", err
+		return nil, nil, nil, "", err
 	}
 
 	if negotiatedALPN != cachedALPN {
 		cfg.ALPNCache.Delete(cacheKey)
 		upstreamConn.Close()
 		clientConn.Close()
-		return nil, nil, "", fmt.Errorf("connector: ALPN mismatch for %s: cached %q, got %q",
+		return nil, nil, nil, "", fmt.Errorf("connector: ALPN mismatch for %s: cached %q, got %q",
 			target, cachedALPN, negotiatedALPN)
 	}
 
-	return upstreamConn, clientSnap, negotiatedALPN, nil
+	return clientTLSConn, upstreamConn, clientSnap, negotiatedALPN, nil
 }
 
 // buildCacheMissPath handles the ALPN cache miss: upstream dial first (to
 // learn ALPN), then client MITM (offering learned ALPN).
+// Returns the TLS-wrapped client connection (not the original plain conn).
 func buildCacheMissPath(
 	ctx context.Context,
 	clientConn net.Conn,
@@ -232,17 +235,17 @@ func buildCacheMissPath(
 	cacheKey ALPNCacheKey,
 	hostTLS *resolvedTLS,
 	cfg *BuildConfig,
-) (net.Conn, *envelope.TLSSnapshot, string, error) {
-	upstreamConn, negotiatedALPN, err := dialUpstreamWithALPN(ctx, target, host,
+) (clientTLSConn net.Conn, upstreamConn net.Conn, clientSnap *envelope.TLSSnapshot, negotiatedALPN string, err error) {
+	upstreamConn, negotiatedALPN, err = dialUpstreamWithALPN(ctx, target, host,
 		defaultALPNOffer, hostTLS.insecureSkip, hostTLS.clientCert, hostTLS.rootCAs, cfg)
 	if err != nil {
-		return nil, nil, "", err
+		return nil, nil, nil, "", err
 	}
 
 	// Validate ALPN route early so we don't waste a client MITM handshake.
 	if _, routeErr := alpnRoute(negotiatedALPN); routeErr != nil {
 		upstreamConn.Close()
-		return nil, nil, "", fmt.Errorf("connector: %s: %w", target, routeErr)
+		return nil, nil, nil, "", fmt.Errorf("connector: %s: %w", target, routeErr)
 	}
 
 	// Cache the learned ALPN.
@@ -255,27 +258,29 @@ func buildCacheMissPath(
 	if alpnOffer == "" {
 		alpnOffer = ALPNProtocolHTTP11
 	}
-	clientSnap, err := performClientMITM(ctx, clientConn, host, alpnOffer, cfg)
+	clientTLSConn, clientSnap, err = performClientMITM(ctx, clientConn, host, alpnOffer, cfg)
 	if err != nil {
 		upstreamConn.Close()
-		return nil, nil, "", err
+		return nil, nil, nil, "", err
 	}
 
-	return upstreamConn, clientSnap, negotiatedALPN, nil
+	return clientTLSConn, upstreamConn, clientSnap, negotiatedALPN, nil
 }
 
 // performClientMITM performs the client-side TLS MITM handshake, issuing a
 // certificate for the given host and offering the specified ALPN protocol.
+// Returns the TLS-wrapped connection (which must be used for subsequent I/O
+// instead of the original plain connection) and the TLS snapshot.
 func performClientMITM(
 	ctx context.Context,
 	clientConn net.Conn,
 	host string,
 	alpnOffer string,
 	cfg *BuildConfig,
-) (*envelope.TLSSnapshot, error) {
+) (net.Conn, *envelope.TLSSnapshot, error) {
 	mitmCert, err := cfg.Issuer.GetCertificate(host)
 	if err != nil {
-		return nil, fmt.Errorf("connector: MITM cert for %s: %w", host, err)
+		return nil, nil, fmt.Errorf("connector: MITM cert for %s: %w", host, err)
 	}
 
 	serverTLSCfg := &tls.Config{
@@ -285,11 +290,11 @@ func performClientMITM(
 		serverTLSCfg.NextProtos = []string{alpnOffer}
 	}
 
-	_, clientSnap, err := tlslayer.Server(ctx, clientConn, serverTLSCfg)
+	tlsConn, clientSnap, err := tlslayer.Server(ctx, clientConn, serverTLSCfg)
 	if err != nil {
-		return nil, fmt.Errorf("connector: client TLS MITM handshake: %w", err)
+		return nil, nil, fmt.Errorf("connector: client TLS MITM handshake: %w", err)
 	}
-	return clientSnap, nil
+	return tlsConn, clientSnap, nil
 }
 
 // dialUpstreamWithALPN dials upstream and performs TLS, returning the

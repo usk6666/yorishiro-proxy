@@ -44,12 +44,20 @@ func relayBidirectional(ctx context.Context, a, b net.Conn) error {
 	defer b.Close()
 
 	// Cancel-driven shutdown: when ctx is cancelled, close both connections
-	// to unblock the io.Copy goroutines.
+	// to unblock the io.Copy goroutines. The done channel ensures the
+	// goroutine exits promptly when the relay completes normally without
+	// waiting for context cancellation.
+	done := make(chan struct{})
+	defer close(done)
+
 	if ctx.Done() != nil {
 		go func() {
-			<-ctx.Done()
-			a.Close()
-			b.Close()
+			select {
+			case <-ctx.Done():
+				a.Close()
+				b.Close()
+			case <-done:
+			}
 		}()
 	}
 

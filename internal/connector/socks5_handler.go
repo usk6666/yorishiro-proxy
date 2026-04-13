@@ -89,11 +89,7 @@ func NewSOCKS5Handler(cfg SOCKS5HandlerConfig) HandlerFunc {
 			host, _, _ := net.SplitHostPort(target)
 			if cfg.PassthroughList.Contains(host) {
 				connLogger.Debug("TLS passthrough relay", "target", target)
-				var dialOpts DialRawOpts
-				if cfg.BuildCfg != nil {
-					dialOpts.UpstreamProxy = cfg.BuildCfg.UpstreamProxy
-				}
-				if err := RelayTLSPassthrough(ctx, pc, target, dialOpts); err != nil {
+				if err := RelayTLSPassthrough(ctx, pc, target, passDialOpts(cfg.BuildCfg)); err != nil {
 					connLogger.Debug("TLS passthrough ended", "error", err)
 				}
 				return nil
