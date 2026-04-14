@@ -746,18 +746,32 @@ N9: Legacy Removal + Documentation
 
 ## 9. Open Questions
 
-### 9.1 HTTP/2 Flow Control × Long-Blocking Pipeline Steps
+### 9.1 HTTP/2 Flow Control × Long-Blocking Pipeline Steps — RESOLVED
+
+**Resolved:** 2026-04-15
 
 **Problem:** HTTP/2 has per-stream and per-connection flow control (WINDOW_UPDATE frames). If a Pipeline Step blocks for minutes (e.g., `InterceptStep` waiting for AI agent action), the stream's WINDOW fills and the downstream side stalls. If *many* concurrent streams on the same connection all block simultaneously, connection-level WINDOW fills and the entire HTTP/2 connection stalls, impacting unrelated streams.
 
-**Options:**
-1. **Per-stream Pipeline goroutine, decoupled from Layer read loop.** The HTTP/2 Layer drains frames into per-stream channels as fast as the frame parser can read. Pipeline runs on its own goroutine per stream. Flow-control window updates are sent as frames are consumed by the stream, not as the Pipeline finishes processing. **Risk:** the Layer buffers potentially unlimited data in memory for blocked streams.
-2. **Pipeline-driven back-pressure.** The Layer only ACKs window bytes after the Pipeline consumes them. Blocked streams stall naturally. **Risk:** Intercept with slow AI response stalls the stream, and if many streams block, the connection stalls.
-3. **Intercept is async.** Instead of a blocking Step, Intercept is a Pipeline "fork" — the envelope is queued for AI review and the main Pipeline continues. If the AI later decides to drop, it has to be idempotent (already sent). **Risk:** breaks the current "intercept blocks forwarding" semantic.
+**Resolution: Complete-message aggregation model.**
 
-**Proposal:** default to Option 1 with a configurable per-stream buffer cap. When the cap is hit, the stream is terminated with RST_STREAM and logged. This matches how most real proxies handle the corner case.
+The original problem formulation assumed a frame-per-envelope streaming model where the HTTP/2 Layer yields individual DATA frames as separate Envelopes. Analysis revealed this model is incompatible with the Pipeline's actual requirements: SafetyFilter, TransformEngine, PluginHooks, and InterceptStep all operate on **complete HTTP messages** (headers + body), not individual frames. The HTTP/1.x Layer already aggregates the full request/response body before returning from `Channel.Next()`.
 
-**Decision required before N6 starts.**
+**Decision:** HTTP/2 `Channel.Next()` aggregates all frames (HEADERS + DATA* + END_STREAM) into a single Envelope containing a complete `HTTPMessage`, identical to HTTP/1.x behavior.
+
+**Why this resolves the flow control concern:**
+
+1. **During body assembly (Layer-internal):** The Layer sends WINDOW_UPDATE immediately as DATA frames arrive, because it must receive all frames to assemble the complete message. Connection-level and stream-level windows are replenished during assembly.
+2. **After assembly:** `Channel.Next()` returns the complete message. No more DATA frames will arrive for this stream (END_STREAM was received). The in-memory cost is fixed (= body size), not growing.
+3. **During InterceptStep block:** The Pipeline holds a single complete message in memory. No buffer is growing because the stream's data transfer is already finished. Other streams are unaffected — the frame reader goroutine handles them independently, and the connection-level window was replenished during assembly.
+
+**Memory protection during assembly:** Same `passthroughThreshold` (10 MiB) as HTTP/1.x. Bodies exceeding the threshold switch to passthrough mode (`BodyStream io.Reader`). The worst-case memory for concurrent assembly is `passthroughThreshold × MAX_CONCURRENT_STREAMS` (default: 10 MiB × 100 = 1 GiB), which is bounded and acceptable.
+
+**Body size limitations (passthrough mode):** When `Body` is nil (passthrough), SafetyFilter and TransformEngine skip body inspection — same behavior as HTTP/1.x today. A dedicated disk-backed body mechanism is planned as a separate cross-cutting improvement to remove this limitation for both protocols.
+
+**Rejected alternatives:**
+- **Frame-per-envelope streaming + per-stream buffer cap + RST_STREAM** (original proposal): Incompatible with Pipeline Steps that require complete messages. Would require every Step to handle partial data, adding significant complexity.
+- **Pipeline-driven back-pressure (Option 2):** A single intercepted stream stalls the connection-level window, blocking all other streams on the same connection.
+- **Async Intercept (Option 3):** Breaks the "intercept blocks forwarding" contract that the MCP tool surface depends on.
 
 ### 9.2 gRPC Message Envelope Granularity
 
@@ -868,7 +882,7 @@ This RFC is **accepted** as of 2026-04-12. Implementation proceeds on N1.
 - [x] M36–M44 milestones and incomplete issues moved to Cancelled
 
 **Deferred to implementation phase (per-milestone gating):**
-- [ ] Open Question #1 (HTTP/2 flow control vs Pipeline latency) — **resolved before N6 starts**
+- [x] Open Question #1 (HTTP/2 flow control vs Pipeline latency) — **resolved 2026-04-15: complete-message aggregation model (§9.1)**
 - [ ] Open Question #2 (gRPC envelope granularity) — **resolved before N7 starts**
 - [ ] Open Question #3 (Starlark plugin API shape) — **resolved before N8 starts**
 - [ ] Envelope + Message Go interfaces compiled and validated — **part of N1**
