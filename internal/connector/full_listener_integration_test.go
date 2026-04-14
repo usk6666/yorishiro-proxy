@@ -135,6 +135,8 @@ func readHTTPRequest(br *bufio.Reader) ([]byte, error) {
 	}
 	headerBytes := buf.Bytes()
 
+	const maxContentLength = 10 * 1024 * 1024 // 10 MB safety cap
+
 	contentLength := 0
 	clFound := false
 	for _, line := range bytes.Split(headerBytes, []byte("\r\n")) {
@@ -142,7 +144,7 @@ func readHTTPRequest(br *bufio.Reader) ([]byte, error) {
 			if !clFound {
 				val := strings.TrimSpace(string(line[len("content-length:"):]))
 				n, err := strconv.Atoi(val)
-				if err == nil {
+				if err == nil && n >= 0 && n <= maxContentLength {
 					contentLength = n
 					clFound = true
 				}
@@ -293,10 +295,14 @@ func readHTTPResponse(t *testing.T, conn net.Conn) string {
 			headerPart := resp[:idx]
 			bodyStart := idx + 4
 			cl := 0
+			const maxCL = 10 * 1024 * 1024 // 10 MB safety cap
 			for _, line := range strings.Split(headerPart, "\r\n") {
 				if strings.HasPrefix(strings.ToLower(line), "content-length:") {
 					val := strings.TrimSpace(line[len("content-length:"):])
-					cl, _ = strconv.Atoi(val)
+					n, err := strconv.Atoi(val)
+					if err == nil && n >= 0 && n <= maxCL {
+						cl = n
+					}
 				}
 			}
 			if len(resp)-bodyStart >= cl {
@@ -492,10 +498,6 @@ func startFullListenerProxy(
 	case <-time.After(5 * time.Second):
 		t.Fatal("timeout waiting for FullListener to be ready")
 	}
-
-	t.Cleanup(func() {
-		// Context cancellation stops the listener.
-	})
 
 	return fl.Addr(), store, wg
 }
@@ -882,6 +884,14 @@ func TestFullListener_TargetScope_Blocking(t *testing.T) {
 			t.Error("OnStack was called, but scope should have blocked the target")
 		case <-time.After(2 * time.Second):
 			// Expected: OnStack was NOT called.
+		}
+
+		// Verify the proxy closed the connection after scope denial.
+		conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		verifyBuf := make([]byte, 1)
+		_, readErr := conn.Read(verifyBuf)
+		if readErr == nil {
+			t.Error("expected connection to be closed after scope denial, but read succeeded")
 		}
 	})
 
