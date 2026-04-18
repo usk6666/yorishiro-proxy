@@ -156,6 +156,14 @@ func (l *Layer) handleStreamHeaders(f *frame.Frame) error {
 	endHeaders := f.Header.Flags.Has(frame.FlagEndHeaders)
 	endStream := f.Header.Flags.Has(frame.FlagEndStream)
 
+	// S-2 guard: refuse new peer-initiated streams beyond our advertised
+	// MAX_CONCURRENT_STREAMS so a malicious peer can't force unbounded
+	// allocation by opening 1, 3, 5, ... ad infinitum.
+	if l.isNewPeerStream(f.Header.StreamID) && l.peerStreamLimitExceeded() {
+		l.enqueueWrite(writeRequest{rst: &writeRST{streamID: f.Header.StreamID, code: ErrCodeRefusedStream}})
+		return nil
+	}
+
 	asm, ch, isNew := l.assemblerFor(f.Header.StreamID, true)
 	if asm == nil {
 		return nil
@@ -199,15 +207,37 @@ func (l *Layer) updatePendingHeaderStream(streamID uint32, endHeaders bool) {
 // dropPassthroughTrailers consumes a trailer header block while a stream is
 // in passthrough mode, decoding it (to keep HPACK state coherent) but not
 // delivering it to the consumer.
+//
+// The same CONTINUATION-flood guards apply here: a malicious peer cannot
+// send unbounded CONTINUATION frames in passthrough trailer position to
+// exhaust memory.
 func (l *Layer) dropPassthroughTrailers(asm *streamAssembler, fragment []byte, endHeaders bool, streamID uint32) error {
 	if endHeaders {
-		if _, dErr := l.decoder.Decode(fragment); dErr != nil {
+		// Decode the accumulated buffer plus the final fragment, so HPACK
+		// state stays coherent for subsequent frames on this connection.
+		full := append(asm.fragBuf, fragment...)
+		asm.fragBuf = nil
+		asm.continuationCount = 0
+		if _, dErr := l.decoder.Decode(full); dErr != nil {
 			return fmt.Errorf("http2: decode trailer block (passthrough, stream %d): %w", streamID, dErr)
 		}
 		l.passthroughMu.Lock()
 		l.passthroughTrailerCount++
 		l.passthroughMu.Unlock()
 		return nil
+	}
+	if len(asm.fragBuf)+len(fragment) > maxHeaderFragmentBytes {
+		return &ConnError{
+			Code:   ErrCodeCompression,
+			Reason: fmt.Sprintf("passthrough trailer fragment exceeds %d bytes (stream %d)", maxHeaderFragmentBytes, streamID),
+		}
+	}
+	asm.continuationCount++
+	if asm.continuationCount > maxContinuationFrames {
+		return &ConnError{
+			Code:   ErrCodeEnhanceYourCalm,
+			Reason: fmt.Sprintf("too many CONTINUATION frames (>%d) for passthrough trailer (stream %d)", maxContinuationFrames, streamID),
+		}
 	}
 	asm.fragBuf = append(asm.fragBuf, fragment...)
 	return nil
@@ -329,6 +359,15 @@ func (l *Layer) handleStreamPushPromise(f *frame.Frame) error {
 			Reason: "server received PUSH_PROMISE",
 		}
 	}
+
+	// S-4: enforce ENABLE_PUSH=0 against non-conforming peers (RFC 9113 §6.6).
+	if l.conn.LocalSettings().EnablePush == 0 {
+		return &ConnError{
+			Code:   ErrCodeProtocol,
+			Reason: "PUSH_PROMISE with local SETTINGS_ENABLE_PUSH=0",
+		}
+	}
+
 	endHeaders := f.Header.Flags.Has(frame.FlagEndHeaders)
 
 	if !endHeaders {
@@ -339,6 +378,21 @@ func (l *Layer) handleStreamPushPromise(f *frame.Frame) error {
 			Code:   ErrCodeInternal,
 			Reason: "PUSH_PROMISE without END_HEADERS not supported",
 		}
+	}
+
+	// S-1 guard: bound the PUSH_PROMISE fragment size as well.
+	if len(fragment) > maxHeaderFragmentBytes {
+		return &ConnError{
+			Code:   ErrCodeCompression,
+			Reason: fmt.Sprintf("PUSH_PROMISE header block exceeds %d bytes", maxHeaderFragmentBytes),
+		}
+	}
+
+	// S-3 guard: cap concurrent peer-driven streams (push counts toward our
+	// advertised MAX_CONCURRENT_STREAMS — RFC 9113 §6.6 second paragraph).
+	if l.peerStreamLimitExceeded() {
+		l.enqueueWrite(writeRequest{rst: &writeRST{streamID: promisedID, code: ErrCodeRefusedStream}})
+		return nil
 	}
 
 	decoded, dErr := l.decoder.Decode(fragment)
@@ -578,4 +632,37 @@ func cloneBytes(b []byte) []byte {
 	out := make([]byte, len(b))
 	copy(out, b)
 	return out
+}
+
+// isNewPeerStream reports whether streamID corresponds to a peer-initiated
+// stream that we have not yet seen on this connection. We rely on
+// LastPeerStreamID() (monotonic, set when a new peer stream is registered)
+// — a stream id strictly greater than the high-water mark must be new.
+func (l *Layer) isNewPeerStream(streamID uint32) bool {
+	if streamID == 0 {
+		return false
+	}
+	// Peer streams have id parity matching the peer role; we don't bother
+	// distinguishing here because a server seeing an even id, or a client
+	// seeing an odd one, is itself a protocol error handled elsewhere. The
+	// concern of this guard is purely "is this a new allocation?".
+	l.mu.Lock()
+	_, exists := l.assemblers[streamID]
+	l.mu.Unlock()
+	return !exists
+}
+
+// peerStreamLimitExceeded reports whether accepting a new peer-initiated
+// stream would exceed our advertised SETTINGS_MAX_CONCURRENT_STREAMS.
+// Active = peer-initiated streams currently in {open, half-closed local,
+// half-closed remote} state. We approximate via StreamMap.ActiveCount which
+// counts BOTH directions; that is a conservative over-count from the peer's
+// perspective and is acceptable as a DoS guard (worst case: a peer sees
+// REFUSED_STREAM slightly earlier than the strict limit).
+func (l *Layer) peerStreamLimitExceeded() bool {
+	limit := l.conn.LocalSettings().MaxConcurrentStreams
+	if limit == 0 {
+		return false
+	}
+	return uint32(l.conn.Streams().ActiveCount()) >= limit
 }

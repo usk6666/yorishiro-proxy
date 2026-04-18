@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"sync"
+	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/layer"
@@ -258,6 +259,11 @@ const defaultLargeConnWindow = 16 * 1024 * 1024
 // via SETTINGS_INITIAL_WINDOW_SIZE. Same rationale as defaultLargeConnWindow.
 const defaultLargeStreamWindow = 16 * 1024 * 1024
 
+// closeDrainTimeout bounds how long Close waits for the writer goroutine to
+// drain its queue (and emit GOAWAY) before forcibly closing the underlying
+// conn. 100ms is enough for a typical local-host send with no congestion.
+const closeDrainTimeout = 100 * time.Millisecond
+
 // Channels yields one Channel per HTTP/2 stream as it is created. The channel
 // is closed when the Layer shuts down.
 func (l *Layer) Channels() <-chan layer.Channel { return l.channelOut }
@@ -326,7 +332,14 @@ func (l *Layer) Close() error {
 	}
 	l.writerMu.Unlock()
 
-	// Wait for writer to drain (best-effort with the conn close as escape).
+	// Best-effort: give the writer a short window to drain (and emit the
+	// queued GOAWAY) before tearing down the underlying conn. Then close
+	// the conn regardless so the reader unblocks. Bound the wait so a
+	// stuck/slow writer cannot hang Close indefinitely.
+	select {
+	case <-l.writerDone:
+	case <-time.After(closeDrainTimeout):
+	}
 	closeErr := l.netConn.Close()
 	<-l.writerDone
 	<-l.readerDone
@@ -338,36 +351,45 @@ func (l *Layer) Close() error {
 
 // enqueueWrite places a write request on the writer queue. No-op (logged
 // implicitly via dropped doneChan signal) if the writer is closed.
+//
+// To avoid deadlock with Close (which acquires writerMu to close the queue),
+// the channel send is performed WITHOUT writerMu held. We use shutdown as
+// the secondary signal that the writer is gone.
 func (l *Layer) enqueueWrite(req writeRequest) {
 	l.writerMu.Lock()
-	defer l.writerMu.Unlock()
-	if !l.writerOpen {
-		// Reply with errWriterClosed if a done channel is waiting.
-		switch {
-		case req.opaque != nil:
-			deliverDone(req.opaque.done, errWriterClosed)
-		case req.message != nil:
-			deliverDone(req.message.done, errWriterClosed)
-		case req.rst != nil:
-			deliverDone(req.rst.done, errWriterClosed)
-		case req.windowUpdate != nil:
-			deliverDone(req.windowUpdate.done, errWriterClosed)
-		case req.pingAck != nil:
-			deliverDone(req.pingAck.done, errWriterClosed)
-		case req.settings != nil:
-			deliverDone(req.settings.done, errWriterClosed)
-		case req.settingsAck != nil:
-			deliverDone(req.settingsAck.done, errWriterClosed)
-		case req.goAway != nil:
-			deliverDone(req.goAway.done, errWriterClosed)
-		}
+	open := l.writerOpen
+	l.writerMu.Unlock()
+	if !open {
+		failWriteRequest(req, errWriterClosed)
 		return
 	}
 	select {
 	case l.writerQueue <- req:
-	default:
-		// Queue is full — block.
-		l.writerQueue <- req
+	case <-l.shutdown:
+		failWriteRequest(req, errWriterClosed)
+	}
+}
+
+// failWriteRequest delivers err on the done channel of whichever sub-request
+// is non-nil in req.
+func failWriteRequest(req writeRequest, err error) {
+	switch {
+	case req.opaque != nil:
+		deliverDone(req.opaque.done, err)
+	case req.message != nil:
+		deliverDone(req.message.done, err)
+	case req.rst != nil:
+		deliverDone(req.rst.done, err)
+	case req.windowUpdate != nil:
+		deliverDone(req.windowUpdate.done, err)
+	case req.pingAck != nil:
+		deliverDone(req.pingAck.done, err)
+	case req.settings != nil:
+		deliverDone(req.settings.done, err)
+	case req.settingsAck != nil:
+		deliverDone(req.settingsAck.done, err)
+	case req.goAway != nil:
+		deliverDone(req.goAway.done, err)
 	}
 }
 

@@ -173,20 +173,101 @@ type opaqueHTTP2 struct {
 
 // headersChanged reports whether the message's headers differ from the
 // original (pre-Pipeline) ones.
+//
+// We must NOT compare positionally because buildHeaderFields generates the
+// pseudo-header list in a fixed canonical order (:method, :scheme,
+// :authority, :path / :status), while op.origHeaders preserves the wire
+// order the peer used. A positional mismatch on a non-canonical-order peer
+// would falsely claim "headers changed", forcing every Send through the
+// HPACK re-encode path and defeating the opaque zero-copy fast path.
+//
+// Instead, separately compare the pseudo-header values (set semantics) and
+// the regular header sequence (which IS order-sensitive on the wire).
 func headersChanged(msg *envelope.HTTPMessage, op *opaqueHTTP2) bool {
 	if op == nil || op.origHeaders == nil {
 		return true
 	}
-	current := buildHeaderFields(nil, msg)
-	if len(current) != len(op.origHeaders) {
+	origPseudo, origRegular := splitOrigHeaders(op.origHeaders)
+	if pseudoChanged(msg, origPseudo) {
 		return true
 	}
-	for i := range current {
-		if current[i].Name != op.origHeaders[i].Name || current[i].Value != op.origHeaders[i].Value {
+	return regularHeadersChanged(msg.Headers, origRegular)
+}
+
+// splitOrigHeaders separates a wire-order header list into a pseudo-header
+// value map (first-occurrence-wins) and the regular-header sequence.
+func splitOrigHeaders(orig []hpack.HeaderField) (map[string]string, []hpack.HeaderField) {
+	pseudo := map[string]string{}
+	regular := make([]hpack.HeaderField, 0, len(orig))
+	for _, hf := range orig {
+		if strings.HasPrefix(hf.Name, ":") {
+			if _, ok := pseudo[hf.Name]; !ok {
+				pseudo[hf.Name] = hf.Value
+			}
+			continue
+		}
+		regular = append(regular, hf)
+	}
+	return pseudo, regular
+}
+
+// pseudoChanged reports whether msg's request/response pseudo-headers differ
+// from origPseudo. Direction is inferred from whether origPseudo carries a
+// :status (response) or msg.Status is set.
+func pseudoChanged(msg *envelope.HTTPMessage, origPseudo map[string]string) bool {
+	if msg.Status != 0 || origPseudo[":status"] != "" {
+		return pseudoStatus(msg) != origPseudo[":status"]
+	}
+	if msg.Method != origPseudo[":method"] {
+		return true
+	}
+	if msg.Scheme != origPseudo[":scheme"] {
+		return true
+	}
+	if msg.Authority != origPseudo[":authority"] {
+		return true
+	}
+	return reconstructPath(msg) != origPseudo[":path"]
+}
+
+// regularHeadersChanged reports whether the wire-order regular header
+// sequence differs (including duplicates and order). Names are compared
+// case-insensitively because the wire form is lowercase per RFC 9113 §8.2.1.
+func regularHeadersChanged(msgHeaders []envelope.KeyValue, origRegular []hpack.HeaderField) bool {
+	if len(msgHeaders) != len(origRegular) {
+		return true
+	}
+	for i, kv := range msgHeaders {
+		if strings.ToLower(kv.Name) != origRegular[i].Name {
+			return true
+		}
+		if kv.Value != origRegular[i].Value {
 			return true
 		}
 	}
 	return false
+}
+
+// pseudoStatus returns the :status pseudo-header value buildHeaderFields
+// would emit for msg. Mirrors the response branch in buildHeaderFields.
+func pseudoStatus(msg *envelope.HTTPMessage) string {
+	if msg.Status == 0 {
+		return "200"
+	}
+	return strconv.Itoa(msg.Status)
+}
+
+// reconstructPath returns the :path pseudo-header value buildHeaderFields
+// would emit for msg. Mirrors the request branch in buildHeaderFields.
+func reconstructPath(msg *envelope.HTTPMessage) string {
+	path := msg.Path
+	if path == "" {
+		path = "/"
+	}
+	if msg.RawQuery != "" {
+		path = path + "?" + msg.RawQuery
+	}
+	return path
 }
 
 func bodyChanged(msg *envelope.HTTPMessage, op *opaqueHTTP2) bool {
@@ -249,9 +330,17 @@ func buildHeaderFields(env *envelope.Envelope, msg *envelope.HTTPMessage) []hpac
 	}
 
 	for _, kv := range msg.Headers {
-		// Lowercase for HPACK transport per RFC 9113 §8.2.1, but only if the
-		// caller hasn't already lowercased it (no normalization beyond what
-		// HPACK requires).
+		// Per RFC 9113 §8.2.1, header names in HTTP/2 MUST be lowercase on
+		// the wire; uppercase names cause peers to treat the message as
+		// malformed (and likely RST_STREAM with PROTOCOL_ERROR).
+		//
+		// MITM-fidelity caveat: this means the Send path normalizes case,
+		// while the Receive path (assembler.go) preserves wire case and
+		// flags H2UppercaseHeaderName as an anomaly. Operators wishing to
+		// pentest a server's behavior on uppercase header names cannot
+		// currently emit them through this path; they must use the opaque
+		// zero-copy path with hand-crafted frames or extend this layer to
+		// honor an explicit "preserve case" flag on KeyValue.
 		name := strings.ToLower(kv.Name)
 		out = append(out, hpack.HeaderField{Name: name, Value: kv.Value})
 	}

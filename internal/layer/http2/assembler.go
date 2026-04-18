@@ -15,6 +15,22 @@ import (
 // HTTP/1.x layer so consumer behavior is symmetric.
 const passthroughThreshold = 10 << 20 // 10 MiB
 
+// maxHeaderFragmentBytes is the upper bound on the cumulative size of an
+// HPACK header block fragment accumulator (HEADERS + CONTINUATION*). This
+// is a raw-HPACK-byte limit, distinct from MaxHeaderListSize which bounds
+// the *decoded* header list. Without this cap, a malicious peer could
+// stream an unbounded chain of CONTINUATION frames and exhaust memory
+// (CONTINUATION-flood DoS, cf. the 2024 class of bugs around CVE-2024-27316).
+// 1 MiB is well above any legitimate header block while bounding the worst
+// case.
+const maxHeaderFragmentBytes = 1 << 20
+
+// maxContinuationFrames bounds how many CONTINUATION frames may follow a
+// single HEADERS or PUSH_PROMISE before the connection is treated as
+// abusive. Real header blocks fit in 1-2 frames; large clients may use a
+// handful. 32 is a generous upper bound that still bounds the worst case.
+const maxContinuationFrames = 32
+
 // h1OnlyHeaders is the set of HTTP/1-specific connection-management headers
 // that MUST NOT appear over HTTP/2 per RFC 9113 §8.2.2. We do not strip them
 // — wire fidelity rules — but we attach an H2ConnectionSpecificHeader anomaly
@@ -52,6 +68,9 @@ type streamAssembler struct {
 	// fragBuf accumulates HPACK header-block fragments across HEADERS +
 	// CONTINUATION (for either initial headers or trailers).
 	fragBuf []byte
+	// continuationCount counts CONTINUATION frames received for the current
+	// header block (resets when END_HEADERS is observed).
+	continuationCount int
 	// rawAcc accumulates RawBytes from contributing frames (HEADERS/CONT/DATA).
 	rawAcc []byte
 	// frameBytes accumulates per-frame raw bytes for opaque resend.
@@ -240,7 +259,16 @@ func buildHTTPMessage(decoded []hpack.HeaderField, direction envelope.Direction)
 // has already been extracted by the caller (the reader goroutine), but the
 // HPACK decode is deferred until END_HEADERS so a single header block is
 // decoded as a unit (RFC 7541 §4.1).
+//
+// Returns a *ConnError tagged COMPRESSION_ERROR if the cumulative fragment
+// size would exceed maxHeaderFragmentBytes (CONTINUATION-flood DoS guard).
 func (a *streamAssembler) handleHeadersFrame(fragment, raw []byte, endHeaders, endStream bool, decoder *hpack.Decoder, direction envelope.Direction) (yieldEnv *envelope.Envelope, complete bool, err error) {
+	if len(a.fragBuf)+len(fragment) > maxHeaderFragmentBytes {
+		return nil, false, &ConnError{
+			Code:   ErrCodeCompression,
+			Reason: fmt.Sprintf("header block fragment exceeds %d bytes (stream %d)", maxHeaderFragmentBytes, a.streamID),
+		}
+	}
 	a.rawAcc = append(a.rawAcc, raw...)
 	a.frameBytes = append(a.frameBytes, cloneSlice(raw))
 	a.fragBuf = append(a.fragBuf, fragment...)
@@ -251,8 +279,18 @@ func (a *streamAssembler) handleHeadersFrame(fragment, raw []byte, endHeaders, e
 	}
 
 	if !endHeaders {
+		a.continuationCount++
+		if a.continuationCount > maxContinuationFrames {
+			return nil, false, &ConnError{
+				Code:   ErrCodeEnhanceYourCalm,
+				Reason: fmt.Sprintf("too many CONTINUATION frames (>%d) for stream %d", maxContinuationFrames, a.streamID),
+			}
+		}
 		return nil, false, nil
 	}
+	// END_HEADERS observed; reset continuation counter for any future block
+	// (trailers).
+	a.continuationCount = 0
 
 	// Decode the complete header block.
 	decoded, dErr := decoder.Decode(a.fragBuf)
