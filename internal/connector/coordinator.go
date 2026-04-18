@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
+	"github.com/usk6666/yorishiro-proxy/internal/layer"
 	"github.com/usk6666/yorishiro-proxy/internal/plugin"
 )
 
@@ -83,6 +84,14 @@ type CoordinatorConfig struct {
 	OnHTTP1 HandlerFunc
 	OnHTTP2 HandlerFunc
 	OnTCP   HandlerFunc
+
+	// OnHTTP2Stream is invoked once per HTTP/2 stream accepted on a cleartext
+	// (h2c) client-side Layer. When set (and OnHTTP2 is nil), the Coordinator
+	// builds the h2c handler internally via NewH2CHandler. The callback owns
+	// the upstream dial, Pipeline wiring, and session.RunSession invocation.
+	// OnHTTP2 takes precedence when both are set — callers that want a
+	// fully-custom per-connection HTTP/2 handler can still inject one.
+	OnHTTP2Stream func(ctx context.Context, clientCh layer.Channel)
 }
 
 // Coordinator manages multiple FullListener instances that share the same
@@ -103,9 +112,10 @@ type Coordinator struct {
 	buildCfg    *BuildConfig
 	onStack     OnStackFunc
 
-	onHTTP1 HandlerFunc
-	onHTTP2 HandlerFunc
-	onTCP   HandlerFunc
+	onHTTP1       HandlerFunc
+	onHTTP2       HandlerFunc
+	onTCP         HandlerFunc
+	onHTTP2Stream func(ctx context.Context, clientCh layer.Channel)
 
 	mu        sync.Mutex
 	listeners map[string]*coordEntry
@@ -130,21 +140,22 @@ func NewCoordinator(cfg CoordinatorConfig) *Coordinator {
 		logger = slog.Default()
 	}
 	return &Coordinator{
-		logger:       logger,
-		pluginEngine: cfg.PluginEngine,
-		peekTimeout:  cfg.PeekTimeout,
-		maxConns:     cfg.MaxConnections,
-		connectNeg:   cfg.CONNECTNegotiator,
-		socks5Neg:    cfg.SOCKS5Negotiator,
-		scope:        cfg.Scope,
-		rateLimiter:  cfg.RateLimiter,
-		passthrough:  cfg.PassthroughList,
-		buildCfg:     cfg.BuildCfg,
-		onStack:      cfg.OnStack,
-		onHTTP1:      cfg.OnHTTP1,
-		onHTTP2:      cfg.OnHTTP2,
-		onTCP:        cfg.OnTCP,
-		listeners:    make(map[string]*coordEntry),
+		logger:        logger,
+		pluginEngine:  cfg.PluginEngine,
+		peekTimeout:   cfg.PeekTimeout,
+		maxConns:      cfg.MaxConnections,
+		connectNeg:    cfg.CONNECTNegotiator,
+		socks5Neg:     cfg.SOCKS5Negotiator,
+		scope:         cfg.Scope,
+		rateLimiter:   cfg.RateLimiter,
+		passthrough:   cfg.PassthroughList,
+		buildCfg:      cfg.BuildCfg,
+		onStack:       cfg.OnStack,
+		onHTTP1:       cfg.OnHTTP1,
+		onHTTP2:       cfg.OnHTTP2,
+		onTCP:         cfg.OnTCP,
+		onHTTP2Stream: cfg.OnHTTP2Stream,
+		listeners:     make(map[string]*coordEntry),
 	}
 }
 
@@ -177,6 +188,15 @@ func (c *Coordinator) StartNamed(ctx context.Context, name, addr string) error {
 		return fmt.Errorf("%q: %w", name, ErrListenerExists)
 	}
 
+	// OnHTTP2 takes precedence: the pre-existing pass-through field lets
+	// callers (including tests) inject a fully-custom per-connection HTTP/2
+	// handler. When it is nil, fall back to the internally-built h2c handler
+	// (which itself may be nil when OnHTTP2Stream is unset).
+	onHTTP2 := c.onHTTP2
+	if onHTTP2 == nil {
+		onHTTP2 = c.buildHTTP2Handler()
+	}
+
 	fl := NewFullListener(FullListenerConfig{
 		Name:           name,
 		Addr:           addr,
@@ -187,7 +207,7 @@ func (c *Coordinator) StartNamed(ctx context.Context, name, addr string) error {
 		OnCONNECT:      c.buildCONNECTHandler(),
 		OnSOCKS5:       c.buildSOCKS5Handler(),
 		OnHTTP1:        c.onHTTP1,
-		OnHTTP2:        c.onHTTP2,
+		OnHTTP2:        onHTTP2,
 		OnTCP:          c.onTCP,
 	})
 
@@ -335,6 +355,18 @@ func (c *Coordinator) buildCONNECTHandler() HandlerFunc {
 		PassthroughList: c.passthrough,
 		OnStack:         c.onStack,
 		Logger:          c.logger,
+	})
+}
+
+// buildHTTP2Handler constructs a cleartext HTTP/2 (h2c) HandlerFunc from the
+// configured OnHTTP2Stream callback. Returns nil when no callback is set.
+func (c *Coordinator) buildHTTP2Handler() HandlerFunc {
+	if c.onHTTP2Stream == nil {
+		return nil
+	}
+	return NewH2CHandler(H2CHandlerConfig{
+		OnStream: c.onHTTP2Stream,
+		Logger:   c.logger,
 	})
 }
 
