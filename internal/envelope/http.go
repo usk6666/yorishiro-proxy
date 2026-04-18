@@ -20,6 +20,15 @@ const (
 	AnomalyHeaderInjection AnomalyType = "HeaderInjection"
 	AnomalyAmbiguousTE     AnomalyType = "AmbiguousTE"
 	AnomalyObsFold         AnomalyType = "ObsFold"
+
+	// HTTP/2 specific anomalies.
+	H2DuplicatePseudoHeader    AnomalyType = "H2DuplicatePseudoHeader"
+	H2PseudoHeaderAfterRegular AnomalyType = "H2PseudoHeaderAfterRegular"
+	H2InvalidPseudoHeader      AnomalyType = "H2InvalidPseudoHeader"
+	H2UppercaseHeaderName      AnomalyType = "H2UppercaseHeaderName"
+	H2ConnectionSpecificHeader AnomalyType = "H2ConnectionSpecificHeader"
+	H2TrailersAfterPassthrough AnomalyType = "H2TrailersAfterPassthrough"
+	H2PushPromise              AnomalyType = "H2PushPromise"
 )
 
 // Anomaly records a single protocol-level anomaly found during parsing.
