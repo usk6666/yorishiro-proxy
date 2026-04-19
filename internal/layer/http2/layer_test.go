@@ -340,3 +340,42 @@ func TestLayer_WithInitialSettings(t *testing.T) {
 	}
 	_ = l
 }
+
+// --- PeerMaxConcurrentStreams ---
+
+// TestLayer_PeerMaxConcurrentStreams_BeforeAndAfterPeerSettings verifies that
+// PeerMaxConcurrentStreams returns 0 ("not advertised") until the peer sends
+// its first SETTINGS frame, matching the documented "treat as unbounded"
+// contract. Before this fix Conn seeded peerSettings with the RFC default
+// (100), so the method always returned 100 — causing the pool's
+// "peer > 0 → unbounded" branch to be dead code.
+func TestLayer_PeerMaxConcurrentStreams_BeforeAndAfterPeerSettings(t *testing.T) {
+	l, peer, cleanup := startServerLayer(t)
+	defer cleanup()
+	peer.consumePeerSettings(t)
+
+	// Peer has not yet sent its SETTINGS frame — must be 0.
+	if got := l.PeerMaxConcurrentStreams(); got != 0 {
+		t.Fatalf("PeerMaxConcurrentStreams before peer SETTINGS = %d, want 0", got)
+	}
+
+	// Peer sends SETTINGS advertising MAX_CONCURRENT_STREAMS = 42.
+	if err := peer.wr.WriteSettings([]frame.Setting{
+		{ID: frame.SettingMaxConcurrentStreams, Value: 42},
+	}); err != nil {
+		t.Fatalf("write SETTINGS: %v", err)
+	}
+	// Wait for the Layer to ACK so we know it has applied the SETTINGS.
+	peer.expectSettingsAck(t)
+
+	// Poll briefly in case the ACK was queued before the apply finished; this
+	// should be near-instant in practice.
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if l.PeerMaxConcurrentStreams() == 42 {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("PeerMaxConcurrentStreams after peer SETTINGS = %d, want 42", l.PeerMaxConcurrentStreams())
+}
