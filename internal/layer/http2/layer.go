@@ -153,6 +153,20 @@ func (l *Layer) LastReaderError() error {
 	return l.lastErr
 }
 
+// ActiveStreamCount returns the number of streams currently open or
+// half-closed. Used by connection pools to decide whether to reuse this
+// Layer for a new stream.
+func (l *Layer) ActiveStreamCount() int {
+	return l.conn.Streams().ActiveCount()
+}
+
+// PeerMaxConcurrentStreams returns the peer-advertised
+// SETTINGS_MAX_CONCURRENT_STREAMS. Returns 0 if the peer has not advertised
+// a value (RFC 9113 §6.5.2 — treat as unbounded).
+func (l *Layer) PeerMaxConcurrentStreams() uint32 {
+	return l.conn.PeerSettings().MaxConcurrentStreams
+}
+
 // New creates an HTTP/2 Layer wrapping conn.
 //
 // The preface is exchanged synchronously inside New (per role). Once preface
