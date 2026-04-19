@@ -92,20 +92,40 @@ type writeGoAway struct {
 }
 
 // writerLoop is the body of the single writer goroutine. It serializes all
-// frame writes for the connection. It exits when queue is closed AND drained.
+// frame writes for the connection.
+//
+// Shutdown model (USK-614): the writer is the sole owner of writerQueue
+// lifecycle — it never closes the channel, and neither does anyone else.
+// When <-shutdown fires, the writer performs a non-blocking drain of any
+// remaining requests and exits. This is safe because every sender
+// (enqueueWrite) selects on <-shutdown as well, so once shutdown is closed
+// no new requests reach writerQueue — the drain observes exactly the set
+// of requests that were enqueued before shutdown became visible.
 //
 // The writer also needs access to the per-stream send window (held in conn)
 // and a way to wait for WINDOW_UPDATE; that wait happens on l.windowUpdated.
 func (l *Layer) writerLoop() {
 	defer close(l.writerDone)
 
-	for req := range l.writerQueue {
-		l.dispatchWrite(req)
+	for {
+		select {
+		case <-l.shutdown:
+			// Best-effort drain of already-queued requests. After
+			// shutdown, no new senders can succeed on writerQueue
+			// (they select on <-shutdown), so a non-blocking drain
+			// reaches a quiescent state.
+			for {
+				select {
+				case req := <-l.writerQueue:
+					l.dispatchWrite(req)
+				default:
+					return
+				}
+			}
+		case req := <-l.writerQueue:
+			l.dispatchWrite(req)
+		}
 	}
-
-	// Drain any pending Send callers waiting on done channels by signaling
-	// errWriterClosed via the writerCloseErr (set by Close).
-	// Nothing to do here — we just exit.
 }
 
 func (l *Layer) dispatchWrite(req writeRequest) {
