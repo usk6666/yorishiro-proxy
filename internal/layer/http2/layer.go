@@ -161,9 +161,16 @@ func (l *Layer) ActiveStreamCount() int {
 }
 
 // PeerMaxConcurrentStreams returns the peer-advertised
-// SETTINGS_MAX_CONCURRENT_STREAMS. Returns 0 if the peer has not advertised
-// a value (RFC 9113 §6.5.2 — treat as unbounded).
+// SETTINGS_MAX_CONCURRENT_STREAMS. Returns 0 if the peer has not yet sent a
+// SETTINGS frame (RFC 9113 §6.5.2 — treat as unbounded). Callers must use
+// this method (rather than PeerSettings().MaxConcurrentStreams directly)
+// to distinguish "peer advertised N" from "peer has not advertised yet",
+// because Conn seeds peerSettings with the RFC default (100) before the
+// first peer SETTINGS arrives.
 func (l *Layer) PeerMaxConcurrentStreams() uint32 {
+	if !l.conn.PeerSettingsReceived() {
+		return 0
+	}
 	return l.conn.PeerSettings().MaxConcurrentStreams
 }
 

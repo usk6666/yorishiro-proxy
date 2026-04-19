@@ -32,8 +32,11 @@ type PoolKey struct {
 	TLSConfigHash string
 }
 
-// String returns a stable identifier suitable as a singleflight key.
-func (k PoolKey) String() string { return k.HostPort + "|" + k.TLSConfigHash }
+// String returns a stable identifier suitable as a singleflight key. The
+// separator is a NUL byte, which cannot appear in a valid host:port
+// (RFC 3986) nor in the hex-encoded TLSConfigHash, eliminating collision
+// risk from unusual HostPort values.
+func (k PoolKey) String() string { return k.HostPort + "\x00" + k.TLSConfigHash }
 
 // PoolOptions configures a Pool.
 type PoolOptions struct {
@@ -558,7 +561,12 @@ func (p *Pool) Close() error {
 // bytes describing a TLS config. Callers are responsible for choosing a
 // canonical byte form covering the TLS knobs that affect identity
 // (ServerName, NextProtos, InsecureSkipVerify, Certificates, RootCAs, etc).
+//
+// The digest is truncated to 16 bytes (32 hex chars, 128 bits). This is
+// used only as a pool-internal identifier, but 128 bits of defense-in-depth
+// against birthday collisions (vs ~64 bits for an 8-byte truncation) costs
+// nothing at call sites.
 func HashTLSConfig(canonical []byte) string {
 	sum := sha256.Sum256(canonical)
-	return hex.EncodeToString(sum[:8])
+	return hex.EncodeToString(sum[:16])
 }

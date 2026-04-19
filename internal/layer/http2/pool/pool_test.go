@@ -621,14 +621,14 @@ func TestHashTLSConfig_Deterministic(t *testing.T) {
 	if a == c {
 		t.Fatalf("different input produced same hash")
 	}
-	if len(a) != 16 {
-		t.Fatalf("hash length = %d, want 16", len(a))
+	if len(a) != 32 {
+		t.Fatalf("hash length = %d, want 32", len(a))
 	}
 }
 
 func TestPoolKey_String(t *testing.T) {
 	k := PoolKey{HostPort: "example:443", TLSConfigHash: "abcd"}
-	if got := k.String(); got != "example:443|abcd" {
+	if got := k.String(); got != "example:443\x00abcd" {
 		t.Fatalf("String = %q", got)
 	}
 }
