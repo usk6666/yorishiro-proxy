@@ -4,7 +4,6 @@ import (
 	"crypto/sha256"
 	"crypto/tls"
 	"encoding/hex"
-	"fmt"
 )
 
 // ALPN protocol constants for routing decisions.
@@ -13,22 +12,18 @@ const (
 	ALPNProtocolH2     = "h2"
 )
 
-// ErrHTTP2LayerNotImplemented is returned when upstream negotiates h2 but the
-// HTTP/2 Layer is not yet available (deferred to N6).
-var ErrHTTP2LayerNotImplemented = fmt.Errorf("connector: HTTP/2 Layer not implemented (deferred to N6)")
-
 // alpnRoute determines which Layer type to build based on the negotiated ALPN.
 //
 // Returns:
 //   - "http1" for "http/1.1" or "" (empty = no ALPN negotiated, assume HTTP/1.1)
+//   - "h2" for "h2" (HTTP/2 Layer, wired in USK-612)
 //   - "bytechunk" for unknown/unrecognized ALPN protocols
-//   - error for "h2" (HTTP/2 Layer deferred to N6)
 func alpnRoute(negotiatedALPN string) (string, error) {
 	switch negotiatedALPN {
 	case ALPNProtocolHTTP11, "":
 		return "http1", nil
 	case ALPNProtocolH2:
-		return "", ErrHTTP2LayerNotImplemented
+		return "h2", nil
 	default:
 		// Unknown protocol: raw passthrough with MITM for observability
 		return "bytechunk", nil

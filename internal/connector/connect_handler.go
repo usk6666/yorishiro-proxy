@@ -8,6 +8,24 @@ import (
 	"strconv"
 
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
+	"github.com/usk6666/yorishiro-proxy/internal/layer/http2"
+)
+
+// OnHTTP2StackFunc is the callback signature for when a ConnectionStack's h2
+// route produces an upstream HTTP/2 Layer (the stack's client side is also
+// http2.ServerRole). The callback owns the per-stream fan-out and session
+// wiring for every new stream that appears on stack.ClientTopmost().Channels().
+//
+// The upstream Layer is pooled: its lifetime is independent of the client
+// stack. The handler that invokes this callback is responsible for returning
+// upstreamH2 to the pool (or evicting on failure) once the callback exits —
+// callees do not call Pool.Put themselves.
+type OnHTTP2StackFunc func(
+	ctx context.Context,
+	stack *ConnectionStack,
+	upstreamH2 *http2.Layer,
+	snap *envelope.TLSSnapshot,
+	target string,
 )
 
 // CONNECTHandlerConfig holds dependencies for the CONNECT handler factory.
@@ -29,10 +47,16 @@ type CONNECTHandlerConfig struct {
 	// entirely and use bidirectional io.Copy relay.
 	PassthroughList *PassthroughList
 
-	// OnStack is called when a ConnectionStack is ready. The callback owns
-	// the session lifecycle (RunSession wiring). This avoids an import cycle
-	// between connector and pipeline/session.
+	// OnStack is called when a non-h2 ConnectionStack is ready. The callback
+	// owns the session lifecycle (RunSession wiring). This avoids an import
+	// cycle between connector and pipeline/session. h2-routed stacks are
+	// dispatched via OnHTTP2Stack instead.
 	OnStack func(ctx context.Context, stack *ConnectionStack, snap *envelope.TLSSnapshot, target string)
+
+	// OnHTTP2Stack is called when the stack was built for the "h2" ALPN route.
+	// See OnHTTP2StackFunc for the callback contract. When nil, h2 stacks are
+	// closed immediately after Pool.Put.
+	OnHTTP2Stack OnHTTP2StackFunc
 
 	// Logger for handler-level logging. Nil uses slog.Default().
 	Logger *slog.Logger
@@ -125,13 +149,56 @@ func NewCONNECTHandler(cfg CONNECTHandlerConfig) HandlerFunc {
 
 		connLogger.Debug("connection stack built")
 
-		// Step 6: Hand off to OnStack callback for session wiring.
-		if cfg.OnStack != nil {
-			cfg.OnStack(ctx, stack, snap, target)
-		} else {
-			stack.Close()
-		}
+		// Step 6: Hand off to the appropriate callback based on ALPN route.
+		dispatchStack(ctx, stack, snap, target, cfg.BuildCfg, cfg.OnStack, cfg.OnHTTP2Stack)
 
 		return nil
+	}
+}
+
+// dispatchStack picks between OnHTTP2Stack (when the stack has a pooled
+// upstream h2 Layer) and OnStack (all other routes). It also handles the
+// Pool.Put lifecycle for h2 stacks — even if OnHTTP2Stack is nil, the
+// upstream Layer is still returned to the pool so it can be reused by a
+// later connection.
+//
+// This helper is shared by CONNECT and SOCKS5 handlers to keep the h2
+// dispatch behaviour consistent across tunnel entry points.
+func dispatchStack(
+	ctx context.Context,
+	stack *ConnectionStack,
+	snap *envelope.TLSSnapshot,
+	target string,
+	buildCfg *BuildConfig,
+	onStack func(ctx context.Context, stack *ConnectionStack, snap *envelope.TLSSnapshot, target string),
+	onHTTP2Stack OnHTTP2StackFunc,
+) {
+	if upstreamH2 := stack.UpstreamH2Layer(); upstreamH2 != nil {
+		// h2 route: always return the Layer to the pool on exit (if one
+		// exists). Pool.Put is a no-op when the pool is nil, but we must
+		// still close the Layer in that case so no goroutines leak.
+		poolKey := stack.PoolKey()
+		defer func() {
+			if buildCfg != nil && buildCfg.HTTP2Pool != nil {
+				buildCfg.HTTP2Pool.Put(poolKey, upstreamH2)
+			} else {
+				_ = upstreamH2.Close()
+			}
+		}()
+
+		if onHTTP2Stack != nil {
+			onHTTP2Stack(ctx, stack, upstreamH2, snap, target)
+		}
+		// Always close the client-side stack once the handler exits. Pool.Put
+		// above handles upstreamH2 independently (stack.Close is a no-op for
+		// it by design — see ConnectionStack.Close docstring).
+		_ = stack.Close()
+		return
+	}
+
+	if onStack != nil {
+		onStack(ctx, stack, snap, target)
+	} else {
+		_ = stack.Close()
 	}
 }

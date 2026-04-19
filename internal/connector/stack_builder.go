@@ -15,6 +15,8 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/bytechunk"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/http1"
+	"github.com/usk6666/yorishiro-proxy/internal/layer/http2"
+	"github.com/usk6666/yorishiro-proxy/internal/layer/http2/pool"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/tlslayer"
 )
 
@@ -48,6 +50,15 @@ type BuildConfig struct {
 	// upstream dial for ALPN learning on subsequent connections.
 	// Nil disables caching (every connection dials upstream to learn ALPN).
 	ALPNCache *ALPNCache
+
+	// HTTP2Pool caches upstream HTTP/2 Layers keyed by (host:port, TLS config
+	// hash). When non-nil, buildStackFromRoute hands h2-routed upstream
+	// connections to the pool (via GetOrDial) so later streams for the same
+	// target reuse a single *http2.Layer. Nil disables pooling: every
+	// h2-routed connection builds a fresh Layer and the handler closes it on
+	// exit. Disabling the pool is a supported diagnostic mode (useful for
+	// debugging per-connection state without the confounder of reuse).
+	HTTP2Pool *pool.Pool
 }
 
 // BuildConnectionStack constructs a ConnectionStack for the given CONNECT
@@ -188,7 +199,7 @@ func buildALPNRoutedStack(
 		"alpn", negotiatedALPN, "route", route, "cache_hit", cacheHit,
 	)
 
-	return buildStackFromRoute(clientTLSConn, upstreamConn, target, connID, route, clientSnap)
+	return buildStackFromRoute(ctx, clientTLSConn, upstreamConn, target, connID, route, clientSnap, cfg)
 }
 
 // buildCacheHitPath handles the ALPN cache hit: client MITM first (offering
@@ -337,9 +348,11 @@ func dialUpstreamWithALPN(
 // buildStackFromRoute constructs a ConnectionStack with the appropriate
 // Layers based on the ALPN route decision.
 func buildStackFromRoute(
+	ctx context.Context,
 	clientConn, upstreamConn net.Conn,
 	target, connID, route string,
 	clientSnap *envelope.TLSSnapshot,
+	cfg *BuildConfig,
 ) (*ConnectionStack, *envelope.TLSSnapshot, error) {
 	envCtx := envelope.EnvelopeContext{
 		ConnID:     connID,
@@ -363,6 +376,9 @@ func buildStackFromRoute(
 		)
 		stack.PushUpstream(upstreamLayer)
 
+	case "h2":
+		return buildH2Stack(ctx, stack, clientConn, upstreamConn, target, connID, envCtx, clientSnap, cfg)
+
 	case "bytechunk":
 		clientLayer := bytechunk.New(clientConn, connID+"/client", envelope.Send)
 		stack.PushClient(clientLayer)
@@ -376,6 +392,103 @@ func buildStackFromRoute(
 		return nil, nil, fmt.Errorf("connector: unknown route %q", route)
 	}
 
+	return stack, clientSnap, nil
+}
+
+// buildH2Stack specializes buildStackFromRoute for the "h2" route.
+//
+// Client side: a ServerRole http2.Layer is pushed onto the client stack.
+// Upstream side: the pre-dialed upstreamConn is handed to the pool (if
+// non-nil) or used directly to construct a ClientRole http2.Layer. The
+// upstream Layer is NOT pushed into the stack — it lives on
+// ConnectionStack.upstreamH2 so that its lifecycle stays with the pool
+// and does not get swept by stack.Close.
+//
+// Single-consumption guarantee: upstreamConn is consumed exactly once. If
+// the pool returns a hit, the pre-dialed conn is orphaned and closed. If
+// the pool invokes dialFn (miss), dialFn wraps the pre-dialed conn in
+// http2.New; on internal failure http2.New already closes conn, so no
+// double-close is possible.
+func buildH2Stack(
+	ctx context.Context,
+	stack *ConnectionStack,
+	clientConn, upstreamConn net.Conn,
+	target, connID string,
+	envCtx envelope.EnvelopeContext,
+	clientSnap *envelope.TLSSnapshot,
+	cfg *BuildConfig,
+) (*ConnectionStack, *envelope.TLSSnapshot, error) {
+	// Client-side Layer (ServerRole = local acts as HTTP/2 server).
+	clientLayer, err := http2.New(clientConn, connID+"/client", http2.ServerRole,
+		http2.WithScheme("https"),
+		http2.WithEnvelopeContext(envCtx),
+	)
+	if err != nil {
+		upstreamConn.Close()
+		clientConn.Close()
+		return nil, nil, fmt.Errorf("connector: h2 client layer: %w", err)
+	}
+	stack.PushClient(clientLayer)
+
+	// Upstream-side Layer (ClientRole = local acts as HTTP/2 client).
+	// EnvelopeContext for the upstream Layer: ConnID + TargetHost + TLS
+	// snapshot are the same as the client side for correlation purposes.
+	// The upstream TLS snapshot is not yet threaded through — recorded via
+	// the stack-owned clientSnap until USK-613.
+	upstreamEnvCtx := envelope.EnvelopeContext{
+		ConnID:     connID,
+		TargetHost: target,
+		TLS:        clientSnap,
+	}
+
+	poolKey := poolKeyForH2(target, cfg)
+
+	// consumed tracks whether dialFn ran (true = upstreamConn is owned by
+	// http2.New and must not be closed by the caller). On pool hit, remains
+	// false and we close upstreamConn as an orphan.
+	var consumed bool
+
+	dialFn := func() (*http2.Layer, error) {
+		consumed = true
+		l, lerr := http2.New(upstreamConn, connID+"/upstream", http2.ClientRole,
+			http2.WithScheme("https"),
+			http2.WithEnvelopeContext(upstreamEnvCtx),
+		)
+		if lerr != nil {
+			// http2.New already closed upstreamConn on failure.
+			return nil, lerr
+		}
+		return l, nil
+	}
+
+	var upstreamH2 *http2.Layer
+	if cfg != nil && cfg.HTTP2Pool != nil {
+		l, getErr := cfg.HTTP2Pool.GetOrDial(ctx, poolKey, dialFn)
+		if getErr != nil {
+			if !consumed {
+				upstreamConn.Close()
+			}
+			clientLayer.Close()
+			return nil, nil, fmt.Errorf("connector: h2 pool get-or-dial: %w", getErr)
+		}
+		upstreamH2 = l
+	} else {
+		l, dErr := dialFn()
+		if dErr != nil {
+			clientLayer.Close()
+			return nil, nil, fmt.Errorf("connector: h2 upstream layer: %w", dErr)
+		}
+		upstreamH2 = l
+	}
+
+	if !consumed {
+		// Pool hit: orphan the pre-dialed conn. The pool already owns a live
+		// upstream Layer for this key, so the fresh dial is wasted — close
+		// it to avoid a fd leak.
+		upstreamConn.Close()
+	}
+
+	stack.setUpstreamH2(upstreamH2, poolKey)
 	return stack, clientSnap, nil
 }
 

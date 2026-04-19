@@ -22,10 +22,15 @@ type SOCKS5HandlerConfig struct {
 	// be relayed without MITM. Matching hosts bypass the ConnectionStack.
 	PassthroughList *PassthroughList
 
-	// OnStack is called when a ConnectionStack is ready. The callback owns
-	// the session lifecycle (RunSession wiring). This avoids an import cycle
-	// between connector and pipeline/session.
+	// OnStack is called when a non-h2 ConnectionStack is ready. The callback
+	// owns the session lifecycle (RunSession wiring). h2-routed stacks are
+	// dispatched via OnHTTP2Stack instead.
 	OnStack func(ctx context.Context, stack *ConnectionStack, snap *envelope.TLSSnapshot, target string)
+
+	// OnHTTP2Stack is called when the stack was built for the "h2" ALPN route.
+	// See OnHTTP2StackFunc for the callback contract. When nil, h2 stacks are
+	// closed immediately after Pool.Put.
+	OnHTTP2Stack OnHTTP2StackFunc
 
 	// Logger for handler-level logging. Nil uses slog.Default().
 	Logger *slog.Logger
@@ -105,12 +110,8 @@ func NewSOCKS5Handler(cfg SOCKS5HandlerConfig) HandlerFunc {
 
 		connLogger.Debug("connection stack built")
 
-		// Step 4: Hand off to OnStack callback for session wiring.
-		if cfg.OnStack != nil {
-			cfg.OnStack(ctx, stack, snap, target)
-		} else {
-			stack.Close()
-		}
+		// Step 4: Hand off to the appropriate callback based on ALPN route.
+		dispatchStack(ctx, stack, snap, target, cfg.BuildCfg, cfg.OnStack, cfg.OnHTTP2Stack)
 
 		return nil
 	}
