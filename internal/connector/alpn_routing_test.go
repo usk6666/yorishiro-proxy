@@ -26,12 +26,12 @@ func TestAlpnRoute_Empty(t *testing.T) {
 }
 
 func TestAlpnRoute_H2(t *testing.T) {
-	_, err := alpnRoute("h2")
-	if err == nil {
-		t.Fatal("expected error for h2")
+	route, err := alpnRoute("h2")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
-	if err != ErrHTTP2LayerNotImplemented {
-		t.Errorf("error = %v, want ErrHTTP2LayerNotImplemented", err)
+	if route != "h2" {
+		t.Errorf("route = %q, want %q", route, "h2")
 	}
 }
 

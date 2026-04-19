@@ -70,11 +70,19 @@ type CoordinatorConfig struct {
 	// per-host TLS, ALPN cache). Shared across all listeners.
 	BuildCfg *BuildConfig
 
-	// OnStack is called when a ConnectionStack is ready. The callback owns
-	// session lifecycle wiring (Pipeline, flow.Store, RunSession). Required
-	// for CONNECT and SOCKS5 handling; nil causes stacks to be closed
-	// immediately (useful for tests that only verify listener lifecycle).
+	// OnStack is called when a non-h2 ConnectionStack is ready. The callback
+	// owns session lifecycle wiring (Pipeline, flow.Store, RunSession).
+	// Required for CONNECT and SOCKS5 handling of http/1.x and bytechunk
+	// routes; nil causes stacks to be closed immediately (useful for tests
+	// that only verify listener lifecycle). h2-routed stacks are dispatched
+	// via OnHTTP2Stack instead.
 	OnStack OnStackFunc
+
+	// OnHTTP2Stack is called when the stack was built for the "h2" ALPN
+	// route. See OnHTTP2StackFunc for the callback contract. When nil, h2
+	// stacks are closed immediately after returning the upstream Layer to
+	// the pool (if one is configured on BuildCfg.HTTP2Pool).
+	OnHTTP2Stack OnHTTP2StackFunc
 
 	// --- Optional handler overrides ---
 
@@ -104,13 +112,14 @@ type Coordinator struct {
 	peekTimeout  time.Duration
 	maxConns     int
 
-	connectNeg  *CONNECTNegotiator
-	socks5Neg   *SOCKS5Negotiator
-	scope       *TargetScope
-	rateLimiter *RateLimiter
-	passthrough *PassthroughList
-	buildCfg    *BuildConfig
-	onStack     OnStackFunc
+	connectNeg   *CONNECTNegotiator
+	socks5Neg    *SOCKS5Negotiator
+	scope        *TargetScope
+	rateLimiter  *RateLimiter
+	passthrough  *PassthroughList
+	buildCfg     *BuildConfig
+	onStack      OnStackFunc
+	onHTTP2Stack OnHTTP2StackFunc
 
 	onHTTP1       HandlerFunc
 	onHTTP2       HandlerFunc
@@ -151,6 +160,7 @@ func NewCoordinator(cfg CoordinatorConfig) *Coordinator {
 		passthrough:   cfg.PassthroughList,
 		buildCfg:      cfg.BuildCfg,
 		onStack:       cfg.OnStack,
+		onHTTP2Stack:  cfg.OnHTTP2Stack,
 		onHTTP1:       cfg.OnHTTP1,
 		onHTTP2:       cfg.OnHTTP2,
 		onTCP:         cfg.OnTCP,
@@ -354,6 +364,7 @@ func (c *Coordinator) buildCONNECTHandler() HandlerFunc {
 		RateLimiter:     c.rateLimiter,
 		PassthroughList: c.passthrough,
 		OnStack:         c.onStack,
+		OnHTTP2Stack:    c.onHTTP2Stack,
 		Logger:          c.logger,
 	})
 }
@@ -381,6 +392,7 @@ func (c *Coordinator) buildSOCKS5Handler() HandlerFunc {
 		BuildCfg:        c.buildCfg,
 		PassthroughList: c.passthrough,
 		OnStack:         c.onStack,
+		OnHTTP2Stack:    c.onHTTP2Stack,
 		Logger:          c.logger,
 	})
 }
