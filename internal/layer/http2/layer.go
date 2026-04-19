@@ -104,10 +104,14 @@ type Layer struct {
 	pendingHeaderStream uint32 // non-zero while CONTINUATION is expected
 
 	// Writer goroutine machinery.
+	//
+	// writerQueue is owned exclusively by the writer goroutine with respect
+	// to closing: the writer never closes it either, and Close() does not
+	// close it. GC reclaims it once the writer exits and no more senders
+	// exist. All senders (enqueueWrite) select on <-shutdown as the escape
+	// hatch, so no send can block forever and no send races a close.
 	writerQueue chan writeRequest
 	writerDone  chan struct{}
-	writerOpen  bool
-	writerMu    sync.Mutex // guards writerOpen / writerQueue close
 
 	// Reader goroutine done signal.
 	readerDone chan struct{}
@@ -211,7 +215,6 @@ func New(conn net.Conn, streamID string, role Role, opts ...Option) (*Layer, err
 		shutdown:           make(chan struct{}),
 		windowUpdated:      make(chan struct{}, 1),
 		nextClientStreamID: 1,
-		writerOpen:         true,
 		encoderTableSize:   local.HeaderTableSize,
 	}
 
@@ -305,6 +308,11 @@ func (l *Layer) OpenStream(ctx context.Context) (layer.Channel, error) {
 
 // Close tears down the Layer: sends GOAWAY, drains the writer, closes
 // streams, closes the connection. Safe to call multiple times.
+//
+// Ownership: Close does NOT close writerQueue. The writer goroutine is the
+// sole owner w.r.t. lifecycle — it exits when it observes <-shutdown, after
+// draining any already-queued writes. All senders select on <-shutdown so
+// enqueue is race-free against Close (see USK-614).
 func (l *Layer) Close() error {
 	l.mu.Lock()
 	if l.closed {
@@ -314,23 +322,18 @@ func (l *Layer) Close() error {
 	l.closed = true
 	l.mu.Unlock()
 
-	// Best-effort GOAWAY.
+	// Best-effort GOAWAY. Enqueued BEFORE close(shutdown) so the writer
+	// goroutine, still running, dispatches it as part of its normal loop.
 	last := l.conn.Streams().LastPeerStreamID()
 	l.enqueueWrite(writeRequest{goAway: &writeGoAway{
 		lastStreamID: last,
 		code:         ErrCodeNo,
 	}})
 
-	// Trigger shutdown signal.
+	// Trigger shutdown signal. After this, any further enqueueWrite call
+	// takes the <-shutdown branch and fails with errWriterClosed instead
+	// of sending on writerQueue, so the writer sees no new work.
 	l.shutdownOnce.Do(func() { close(l.shutdown) })
-
-	// Stop accepting writes.
-	l.writerMu.Lock()
-	if l.writerOpen {
-		close(l.writerQueue)
-		l.writerOpen = false
-	}
-	l.writerMu.Unlock()
 
 	// Best-effort: give the writer a short window to drain (and emit the
 	// queued GOAWAY) before tearing down the underlying conn. Then close
@@ -349,20 +352,15 @@ func (l *Layer) Close() error {
 	return closeErr
 }
 
-// enqueueWrite places a write request on the writer queue. No-op (logged
-// implicitly via dropped doneChan signal) if the writer is closed.
+// enqueueWrite places a write request on the writer queue. If the Layer is
+// shutting down, the request fails with errWriterClosed without ever touching
+// writerQueue.
 //
-// To avoid deadlock with Close (which acquires writerMu to close the queue),
-// the channel send is performed WITHOUT writerMu held. We use shutdown as
-// the secondary signal that the writer is gone.
+// This uses a plain select between the channel send and <-shutdown. No
+// preflight lock is needed because the writer goroutine never closes
+// writerQueue — it exits when it observes <-shutdown. See Layer.Close
+// docstring for the ownership rationale (USK-614).
 func (l *Layer) enqueueWrite(req writeRequest) {
-	l.writerMu.Lock()
-	open := l.writerOpen
-	l.writerMu.Unlock()
-	if !open {
-		failWriteRequest(req, errWriterClosed)
-		return
-	}
 	select {
 	case l.writerQueue <- req:
 	case <-l.shutdown:
