@@ -576,7 +576,7 @@ func ensureLinkedExchange(t *testing.T, store *testStore, timeout time.Duration)
 		}
 	}
 	if hasGlobalSend && hasGlobalRecv {
-		t.Skip("not yet implemented: USK-GAP-6 HTTP/2 send and receive flows recorded under DIFFERENT stream IDs (client vs upstream channel UUIDs). MITM analyst cannot retrieve both sides of one exchange from a single Stream record.")
+		t.Skip("not yet implemented: USK-615 HTTP/2 send and receive flows recorded under DIFFERENT stream IDs (client vs upstream channel UUIDs). MITM analyst cannot retrieve both sides of one exchange from a single Stream record.")
 	}
 	t.Fatalf("no stream with both send+receive flows (hasSend=%v hasRecv=%v)", hasGlobalSend, hasGlobalRecv)
 	return nil, nil
@@ -707,7 +707,7 @@ func TestALPN_H2_MITM_UpstreamTLSSnapshotIsUpstream(t *testing.T) {
 	// surfaced, and ConnInfo is currently not populated from the upstream
 	// snapshot in RecordStep), so this assertion cannot yet be verified from
 	// a recording. Flag as a gap.
-	t.Skip("not yet implemented: USK-GAP-1 upstream TLS snapshot threading + ConnInfo recording")
+	t.Skip("not yet implemented: USK-619 upstream TLS snapshot threading + ConnInfo recording")
 }
 
 // ---------------------------------------------------------------------------
@@ -787,7 +787,7 @@ func TestMultipleConcurrentStreams_RecordingIsolation(t *testing.T) {
 		// GOAWAY which aborts other concurrent streams on the same
 		// connection. Flag this as a gap and skip.
 		if bytes.Contains([]byte(firstErr.Error()), []byte("CANCEL")) || bytes.Contains([]byte(firstErr.Error()), []byte("GOAWAY")) {
-			t.Skip("not yet implemented: USK-GAP-10 HTTP/2 proxy emits RST_STREAM(CANCEL) on already-closed streams during concurrent workloads, causing peer GOAWAY/cancel cascade.")
+			t.Skip("not yet implemented: USK-618 HTTP/2 proxy emits RST_STREAM(CANCEL) on already-closed streams during concurrent workloads, causing peer GOAWAY/cancel cascade.")
 		}
 		t.Logf("at least one request failed: %v", firstErr)
 	}
@@ -846,7 +846,7 @@ func TestMultipleConcurrentStreams_RecordingIsolation(t *testing.T) {
 			}
 		}
 		if hasSend && hasRecv {
-			t.Skip("not yet implemented: USK-GAP-6 HTTP/2 send and receive flows recorded under DIFFERENT stream IDs (concurrent streams)")
+			t.Skip("not yet implemented: USK-615 HTTP/2 send and receive flows recorded under DIFFERENT stream IDs (concurrent streams)")
 		}
 		t.Fatalf("no linked streams: hasSend=%v hasRecv=%v", hasSend, hasRecv)
 	}
@@ -1031,10 +1031,10 @@ func TestRSTStream_RecordsAsErrorWithCanceledReason(t *testing.T) {
 		}
 	}
 	if !sawAny {
-		t.Skip("not yet implemented: USK-GAP-7 canceled HTTP/2 stream: session OnComplete never fires because upstream goroutine blocks on uh.ch.Next forever (client-side close does not cascade to upstream cancel). MITM analyst sees stream stuck in \"active\".")
+		t.Skip("not yet implemented: USK-616 canceled HTTP/2 stream: session OnComplete never fires because upstream goroutine blocks on uh.ch.Next forever (client-side close does not cascade to upstream cancel). MITM analyst sees stream stuck in \"active\".")
 	}
 	if !hasErrorState {
-		t.Skip("not yet implemented: USK-GAP-7b canceled HTTP/2 stream recorded with non-error terminal state — MITM analyst cannot distinguish normal EOF from RST_STREAM(CANCEL).")
+		t.Skip("not yet implemented: USK-616 canceled HTTP/2 stream recorded with non-error terminal state — MITM analyst cannot distinguish normal EOF from RST_STREAM(CANCEL).")
 	}
 }
 
@@ -1055,7 +1055,7 @@ func TestGOAWAY_AffectedStreamsRecordedAsRefused(t *testing.T) {
 	// and skip.
 	_ = ctx
 	_ = cancel
-	t.Skip("not yet implemented: USK-GAP-2 GOAWAY/refused classification in Stream.State recording")
+	t.Skip("not yet implemented: USK-620 GOAWAY/refused classification in Stream.State recording")
 }
 
 // ---------------------------------------------------------------------------
@@ -1103,7 +1103,7 @@ func TestLargeResponseBody_Passthrough_11MiB(t *testing.T) {
 		if bytes.Contains([]byte(err.Error()), []byte("FLOW_CONTROL")) ||
 			bytes.Contains([]byte(err.Error()), []byte("deadline exceeded")) ||
 			bytes.Contains([]byte(err.Error()), []byte("context canceled")) {
-			t.Skip("not yet implemented: USK-GAP-8 HTTP/2 large-body passthrough stalls or violates flow control; client cannot drain 11 MiB body end-to-end.")
+			t.Skip("not yet implemented: USK-617 HTTP/2 large-body passthrough stalls or violates flow control; client cannot drain 11 MiB body end-to-end.")
 		}
 		t.Fatalf("copy: %v", err)
 	}
@@ -1202,7 +1202,7 @@ func TestConnectionPoolReuse_StreamIsolation(t *testing.T) {
 		// upstream connection count visible to the server — defeating the
 		// primary purpose an analyst measures ("is my proxy fanning out
 		// connections I didn't expect?").
-		t.Skip("not yet implemented: USK-GAP-9 upstream h2 pool not consulted before upstream TLS dial — pool reuse does not reduce upstream accept count.")
+		t.Skip("not yet implemented: USK-624 upstream h2 pool not consulted before upstream TLS dial — pool reuse does not reduce upstream accept count.")
 	}
 
 	streams := store.getStreams()
@@ -1245,7 +1245,7 @@ func TestConnectionPoolReuse_StreamIsolation(t *testing.T) {
 			}
 		}
 		if hasSend && hasRecv {
-			t.Skip("not yet implemented: USK-GAP-6 HTTP/2 send and receive flows recorded under DIFFERENT stream IDs (pool reuse)")
+			t.Skip("not yet implemented: USK-615 HTTP/2 send and receive flows recorded under DIFFERENT stream IDs (pool reuse)")
 		}
 		t.Fatalf("no linked streams")
 	}
@@ -1464,7 +1464,7 @@ func TestTrailers_PreservedInHTTPMessage(t *testing.T) {
 		}
 	}
 	if !foundInHeaders {
-		t.Skip("not yet implemented: USK-GAP-3 HTTP/2 trailers not projected to flow.Flow record (Headers/Metadata/first-class Trailers)")
+		t.Skip("not yet implemented: USK-621 HTTP/2 trailers not projected to flow.Flow record (Headers/Metadata/first-class Trailers)")
 	}
 	// If we reached here, the gap has been fixed - keep stricter assertion.
 	if len(recvF.RawBytes) == 0 {
@@ -1600,7 +1600,7 @@ func TestVariantRecording_InterceptModifyHeader(t *testing.T) {
 		if bytes.Equal(origSend.RawBytes, modSend.RawBytes) && len(origSend.RawBytes) > 0 {
 			// Gap: modified variant RawBytes should reflect the re-encoded
 			// wire representation after injection.
-			t.Skip("not yet implemented: USK-GAP-4 modified variant RawBytes does not reflect re-encoded wire bytes (HTTP/2 variant wire fidelity)")
+			t.Skip("not yet implemented: USK-622 modified variant RawBytes does not reflect re-encoded wire bytes (HTTP/2 variant wire fidelity)")
 		}
 	}
 }
@@ -1662,6 +1662,6 @@ func TestServerPush_PushStreamRecordedSeparately(t *testing.T) {
 		// Channel on push (see channel.go isPush), but the session loop in
 		// this test dispatches only CLIENT-side channels. Upstream push
 		// arriving via the pool-owned upstream Layer has no observer.
-		t.Skip("not yet implemented: USK-GAP-5 server-push stream observability (upstream PUSH_PROMISE not recorded)")
+		t.Skip("not yet implemented: USK-623 server-push stream observability (upstream PUSH_PROMISE not recorded)")
 	}
 }
