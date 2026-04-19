@@ -116,6 +116,13 @@ type Conn struct {
 	// peerSettings holds the settings that apply to the peer.
 	peerSettings Settings
 
+	// peerSettingsReceived indicates whether at least one SETTINGS frame from
+	// the peer has been applied. Until true, peerSettings still holds the
+	// RFC 9113 §6.5.2 defaults seeded by NewConn, and callers (notably the
+	// connection pool) should treat fields like MaxConcurrentStreams as
+	// unadvertised rather than as advertised values.
+	peerSettingsReceived bool
+
 	// localSettingsAcked indicates whether our initial SETTINGS has been acknowledged.
 	localSettingsAcked bool
 
@@ -170,6 +177,17 @@ func (c *Conn) PeerSettings() Settings {
 	return c.peerSettings
 }
 
+// PeerSettingsReceived reports whether the peer has sent at least one
+// SETTINGS frame. Before the first peer SETTINGS arrives, PeerSettings
+// still returns RFC 9113 §6.5.2 defaults (e.g. MaxConcurrentStreams=100),
+// so callers that need to distinguish "peer advertised value X" from
+// "peer has not advertised yet" must consult this flag.
+func (c *Conn) PeerSettingsReceived() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.peerSettingsReceived
+}
+
 // SetLocalSettings updates the local settings. This should be called
 // before sending the SETTINGS frame. The settings take effect locally
 // immediately for new streams.
@@ -206,6 +224,7 @@ func (c *Conn) ApplyPeerSettings(params []frame.Setting) error {
 	if err := c.peerSettings.Apply(params); err != nil {
 		return err
 	}
+	c.peerSettingsReceived = true
 
 	// If INITIAL_WINDOW_SIZE changed, adjust all active streams' send windows.
 	if c.peerSettings.InitialWindowSize != oldInitialWindowSize {

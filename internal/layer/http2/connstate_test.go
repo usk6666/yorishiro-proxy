@@ -330,6 +330,20 @@ func TestConn_ConnectionFlowControl_Overflow(t *testing.T) {
 	}
 }
 
+func TestConn_PeerSettingsReceived(t *testing.T) {
+	c := NewConn()
+	if c.PeerSettingsReceived() {
+		t.Fatalf("PeerSettingsReceived = true before any peer SETTINGS, want false")
+	}
+	// Even an empty SETTINGS payload counts as the peer having spoken.
+	if err := c.ApplyPeerSettings(nil); err != nil {
+		t.Fatalf("ApplyPeerSettings(nil): %v", err)
+	}
+	if !c.PeerSettingsReceived() {
+		t.Fatalf("PeerSettingsReceived = false after ApplyPeerSettings, want true")
+	}
+}
+
 func TestConn_ApplyPeerSettings_WindowAdjust(t *testing.T) {
 	c := NewConn()
 
