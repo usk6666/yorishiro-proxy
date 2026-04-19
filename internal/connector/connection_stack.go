@@ -5,6 +5,8 @@ import (
 	"sync"
 
 	"github.com/usk6666/yorishiro-proxy/internal/layer"
+	"github.com/usk6666/yorishiro-proxy/internal/layer/http2"
+	"github.com/usk6666/yorishiro-proxy/internal/layer/http2/pool"
 )
 
 // ConnectionStack is a per-connection runtime object representing the layer
@@ -23,6 +25,17 @@ type ConnectionStack struct {
 	mu       sync.Mutex
 	client   sideStack
 	upstream sideStack
+
+	// upstreamH2 is the pooled upstream HTTP/2 Layer when the stack was built
+	// for the "h2" ALPN route. It is owned by the Pool (not the stack) and
+	// MUST NOT be closed by ConnectionStack.Close(). Callers obtain it via
+	// UpstreamH2Layer and are responsible for returning it to the pool via
+	// Pool.Put once the handler exits. Nil on non-h2 routes.
+	upstreamH2 *http2.Layer
+
+	// poolKey is the PoolKey under which upstreamH2 was obtained. Zero value
+	// when upstreamH2 is nil.
+	poolKey pool.PoolKey
 }
 
 type sideStack struct {
@@ -100,8 +113,42 @@ func (s *ConnectionStack) UpstreamTopmost() layer.Layer {
 	return s.upstream.topmost
 }
 
+// UpstreamH2Layer returns the pooled upstream HTTP/2 Layer when the stack was
+// built for the "h2" ALPN route. Returns nil on non-h2 routes.
+//
+// The returned Layer is owned by the connection pool; callers MUST return it
+// via Pool.Put (or Pool.Evict on failure) once the handler exits.
+// ConnectionStack.Close does NOT close this Layer — pool lifecycle is
+// independent of stack lifecycle.
+func (s *ConnectionStack) UpstreamH2Layer() *http2.Layer {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.upstreamH2
+}
+
+// PoolKey returns the pool.PoolKey under which UpstreamH2Layer was obtained.
+// Returns the zero value when UpstreamH2Layer is nil.
+func (s *ConnectionStack) PoolKey() pool.PoolKey {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.poolKey
+}
+
+// setUpstreamH2 stores the pooled upstream HTTP/2 Layer and its pool key.
+// Intended for use by stack_builder.go only.
+func (s *ConnectionStack) setUpstreamH2(l *http2.Layer, key pool.PoolKey) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.upstreamH2 = l
+	s.poolKey = key
+}
+
 // Close closes all layers in both stacks in reverse order (top to bottom).
 // Errors are collected; the first error is returned.
+//
+// Close does NOT close upstreamH2 — that Layer is owned by the connection
+// pool and has an independent lifecycle. Callers are responsible for
+// returning it via Pool.Put before or after Close.
 func (s *ConnectionStack) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -123,6 +170,8 @@ func (s *ConnectionStack) Close() error {
 
 	s.client = sideStack{}
 	s.upstream = sideStack{}
+	// Intentionally NOT clearing upstreamH2 / poolKey: the pool owns the
+	// Layer and the handler is still responsible for Pool.Put using poolKey.
 
 	if firstErr != nil {
 		return fmt.Errorf("connection stack close: %w", firstErr)
