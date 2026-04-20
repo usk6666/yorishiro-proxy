@@ -122,6 +122,43 @@ func (s respondStep) Process(_ context.Context, env *envelope.Envelope) pipeline
 	return pipeline.Result{Action: pipeline.Continue}
 }
 
+// capturedEnv is a snapshot of the fields a captureStep observed on one
+// envelope, used to assert what the Pipeline saw without holding a reference
+// to a mutating live envelope.
+type capturedEnv struct {
+	direction envelope.Direction
+	streamID  string
+	sequence  int
+}
+
+// captureStep records every envelope the Pipeline dispatches to it. Used to
+// verify session-layer transformations (e.g., StreamID rewriting) that
+// happen before the Pipeline runs.
+type captureStep struct {
+	mu   *sync.Mutex
+	seen *[]capturedEnv
+}
+
+func (c *captureStep) Process(_ context.Context, env *envelope.Envelope) pipeline.Result {
+	c.mu.Lock()
+	*c.seen = append(*c.seen, capturedEnv{
+		direction: env.Direction,
+		streamID:  env.StreamID,
+		sequence:  env.Sequence,
+	})
+	c.mu.Unlock()
+	return pipeline.Result{Action: pipeline.Continue}
+}
+
+func findCaptured(seen []capturedEnv, dir envelope.Direction) *capturedEnv {
+	for i := range seen {
+		if seen[i].direction == dir {
+			return &seen[i]
+		}
+	}
+	return nil
+}
+
 func makeEnvelope(dir envelope.Direction, seq int) *envelope.Envelope {
 	return &envelope.Envelope{
 		Direction: dir,
@@ -621,6 +658,109 @@ func TestRunSession_OnComplete_StreamIDFromFirstEnvelope(t *testing.T) {
 
 	if gotStreamID != "first-stream" {
 		t.Errorf("OnComplete streamID = %q, want %q", gotStreamID, "first-stream")
+	}
+}
+
+// TestRunSession_UnifiesReceiveStreamID verifies that when the upstream
+// Channel yields an envelope with a StreamID different from the one stamped
+// by the client Channel, RunSession rewrites the receive-direction envelope
+// to carry the client-side StreamID before the Pipeline runs. This is the
+// invariant that USK-615 restores: one logical exchange = one flow.Stream,
+// with both Send and Receive flows linked by the same identifier.
+func TestRunSession_UnifiesReceiveStreamID(t *testing.T) {
+	req := makeEnvelopeWithStreamID(envelope.Send, 0, "client-uuid")
+	resp := makeEnvelopeWithStreamID(envelope.Receive, 0, "upstream-uuid")
+
+	clientCh := &mockChannel{
+		streamID:      "client-conn",
+		nextEnvelopes: []*envelope.Envelope{req},
+	}
+	upstreamCh := &mockChannel{
+		streamID:      "upstream-conn",
+		nextEnvelopes: []*envelope.Envelope{resp},
+	}
+
+	dial := func(_ context.Context, _ *envelope.Envelope) (layer.Channel, error) {
+		return upstreamCh, nil
+	}
+
+	var (
+		mu   sync.Mutex
+		seen []capturedEnv
+	)
+	capture := &captureStep{mu: &mu, seen: &seen}
+	p := pipeline.New(capture)
+
+	if err := RunSession(context.Background(), clientCh, dial, p); err != nil {
+		t.Fatalf("RunSession returned error: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(seen) != 2 {
+		t.Fatalf("Pipeline saw %d envelopes, want 2", len(seen))
+	}
+
+	// Send-direction envelope should retain the client-side StreamID as-is.
+	sendSeen := findCaptured(seen, envelope.Send)
+	if sendSeen == nil {
+		t.Fatal("no send envelope seen by Pipeline")
+	}
+	if sendSeen.streamID != "client-uuid" {
+		t.Errorf("send StreamID seen by Pipeline = %q, want client-uuid", sendSeen.streamID)
+	}
+
+	// Receive-direction envelope must be rewritten to the client-side StreamID
+	// BEFORE the Pipeline runs. Before USK-615 this would be "upstream-uuid".
+	recvSeen := findCaptured(seen, envelope.Receive)
+	if recvSeen == nil {
+		t.Fatal("no receive envelope seen by Pipeline")
+	}
+	if recvSeen.streamID != "client-uuid" {
+		t.Errorf("receive StreamID seen by Pipeline = %q, want client-uuid (unified from upstream-uuid)", recvSeen.streamID)
+	}
+}
+
+// TestRunSession_UnifyReceiveStreamID_EmptyClientStreamID covers the defensive
+// branch where the client-side StreamID is empty (e.g., the Channel produced
+// an envelope without stamping one). In that case the rewrite is skipped —
+// we do not want to clobber the upstream value with an empty string.
+func TestRunSession_UnifyReceiveStreamID_EmptyClientStreamID(t *testing.T) {
+	req := makeEnvelopeWithStreamID(envelope.Send, 0, "")
+	resp := makeEnvelopeWithStreamID(envelope.Receive, 0, "upstream-kept")
+
+	clientCh := &mockChannel{
+		streamID:      "client-conn",
+		nextEnvelopes: []*envelope.Envelope{req},
+	}
+	upstreamCh := &mockChannel{
+		streamID:      "upstream-conn",
+		nextEnvelopes: []*envelope.Envelope{resp},
+	}
+
+	dial := func(_ context.Context, _ *envelope.Envelope) (layer.Channel, error) {
+		return upstreamCh, nil
+	}
+
+	var (
+		mu   sync.Mutex
+		seen []capturedEnv
+	)
+	capture := &captureStep{mu: &mu, seen: &seen}
+	p := pipeline.New(capture)
+
+	if err := RunSession(context.Background(), clientCh, dial, p); err != nil {
+		t.Fatalf("RunSession returned error: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	recvSeen := findCaptured(seen, envelope.Receive)
+	if recvSeen == nil {
+		t.Fatal("no receive envelope seen by Pipeline")
+	}
+	if recvSeen.streamID != "upstream-kept" {
+		t.Errorf("receive StreamID seen by Pipeline = %q, want upstream-kept (no rewrite when client-side empty)", recvSeen.streamID)
 	}
 }
 

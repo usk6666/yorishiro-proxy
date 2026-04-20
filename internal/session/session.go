@@ -225,6 +225,20 @@ func upstreamToClient(
 			return fmt.Errorf("upstream.Next: %w", err)
 		}
 
+		// Unify StreamID across the exchange. The upstream Channel generates
+		// its own identifier (HTTP/2 ServerRole and ClientRole Layers each
+		// allocate independent UUIDs per stream; HTTP/1.x leaves the upstream
+		// Receive channel's per-request ID unset). Without this rewrite the
+		// Receive flow is recorded under an identifier with no matching
+		// flow.Stream — MITM analysts can no longer retrieve both halves of
+		// one logical exchange from a single Stream record.
+		//
+		// sc was populated by the client-side goroutine's first Envelope
+		// above (line 149); happens-before is enforced by streamCapture's
+		// mutex plus the uh.ready close that gates this loop's entry.
+		if clientID := sc.get(); clientID != "" {
+			env.StreamID = clientID
+		}
 		sc.set(env.StreamID)
 
 		env, action, _ := p.Run(ctx, env)
