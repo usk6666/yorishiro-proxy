@@ -320,6 +320,7 @@ func (a *streamAssembler) handleHeadersFrame(fragment, raw []byte, endHeaders, e
 			// No body; finalize.
 			env.Raw = a.rawAcc
 			env.Opaque = &opaqueHTTP2{
+				layer:       a.channel.layer,
 				streamID:    a.streamID,
 				frames:      a.frameBytes,
 				origHeaders: cloneHeaderFields(decoded),
@@ -371,6 +372,7 @@ func (a *streamAssembler) handleHeadersFrame(fragment, raw []byte, endHeaders, e
 				a.pipeWriter = nil
 			}
 			env.Opaque = &opaqueHTTP2{
+				layer:       a.channel.layer,
 				streamID:    a.streamID,
 				frames:      a.frameBytes,
 				origHeaders: cloneHeaderFields(a.origHeaders),
@@ -440,6 +442,7 @@ func (a *streamAssembler) handleDataFrame(payload, raw []byte, endStream bool) (
 		// via BodyStream).
 		env.Raw = a.rawAcc
 		env.Opaque = &opaqueHTTP2{
+			layer:       a.channel.layer,
 			streamID:    a.streamID,
 			frames:      a.frameBytes,
 			origHeaders: cloneHeaderFields(a.origHeaders),
@@ -469,6 +472,7 @@ func (a *streamAssembler) handleDataFrame(payload, raw []byte, endStream bool) (
 		env := a.inflight
 		env.Raw = a.rawAcc
 		env.Opaque = &opaqueHTTP2{
+			layer:       a.channel.layer,
 			streamID:    a.streamID,
 			frames:      a.frameBytes,
 			origHeaders: cloneHeaderFields(a.origHeaders),

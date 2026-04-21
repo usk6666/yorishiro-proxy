@@ -147,8 +147,12 @@ func (c *channel) Send(ctx context.Context, env *envelope.Envelope) error {
 		return fmt.Errorf("http2: Send requires *HTTPMessage, got %T", env.Message)
 	}
 
-	// Opaque-based zero-copy path.
-	if op, ok := env.Opaque.(*opaqueHTTP2); ok && op != nil && op.streamID == c.h2Stream {
+	// Opaque-based zero-copy path. Restricted to same-Layer sends:
+	// cross-Layer forwarding cannot use raw frames because HPACK dynamic-
+	// table indices are per-connection and MAX_FRAME_SIZE / flow-control
+	// state differ. Cross-Layer sends fall through to the synthetic path,
+	// which re-encodes headers and flow-controls DATA via writeStreamingBody.
+	if op, ok := env.Opaque.(*opaqueHTTP2); ok && op != nil && op.layer == c.layer && op.streamID == c.h2Stream {
 		if !headersChanged(msg, op) && !bodyChanged(msg, op) && len(op.frames) > 0 {
 			done := make(chan error, 1)
 			c.layer.enqueueWrite(writeRequest{opaque: &writeOpaque{
@@ -162,6 +166,7 @@ func (c *channel) Send(ctx context.Context, env *envelope.Envelope) error {
 
 	// Synthetic path.
 	headers := buildHeaderFields(env, msg)
+	trailers := buildTrailerFields(msg.Trailers)
 
 	done := make(chan error, 1)
 	c.layer.enqueueWrite(writeRequest{message: &writeMessage{
@@ -169,6 +174,7 @@ func (c *channel) Send(ctx context.Context, env *envelope.Envelope) error {
 		headers:    headers,
 		body:       msg.Body,
 		bodyReader: msg.BodyStream,
+		trailers:   trailers,
 		endStream:  true,
 		done:       done,
 	}})
@@ -203,8 +209,17 @@ func (c *channel) Close() error {
 }
 
 // opaqueHTTP2 holds Layer-internal state for raw-first patching.
+//
+// The opaque zero-copy fast path in channel.Send is valid only when the
+// receiving Channel belongs to the same Layer that produced the snapshot:
+// HPACK dynamic-table indices embedded in op.frames are meaningful only
+// within the encoder/decoder pair of one connection. Cross-Layer forwarding
+// (e.g., upstream → client in a MITM proxy) must re-encode through the
+// destination Layer's HPACK context. The layer field records the owning
+// Layer for this identity check.
 type opaqueHTTP2 struct {
-	streamID    uint32 // HTTP/2 stream ID
+	layer       *Layer // owning Layer; gates the zero-copy fast path to same-Layer sends
+	streamID    uint32 // HTTP/2 stream ID (scoped to layer)
 	frames      [][]byte
 	origHeaders []hpack.HeaderField
 	origBody    []byte
@@ -313,8 +328,16 @@ func reconstructPath(msg *envelope.HTTPMessage) string {
 
 func bodyChanged(msg *envelope.HTTPMessage, op *opaqueHTTP2) bool {
 	if msg.Body == nil && op.bodyReader != nil {
-		// Passthrough body still attached and unchanged.
-		return false
+		// Passthrough mode: op.frames snapshot was taken at the threshold
+		// handoff and contains only the pre-handoff portion of the body
+		// (no END_STREAM). The remainder streams through op.bodyReader
+		// (the pipe attached to msg.BodyStream). Treating this as
+		// "unchanged" and taking the opaque fast path would emit only the
+		// captured frames and never drain the pipe, stalling the reader
+		// goroutine and truncating the body on the wire. Force the
+		// synthetic path so writeStreamingBody drains bodyReader with
+		// flow control (USK-617).
+		return true
 	}
 	if msg.Body == nil && op.origBody == nil && op.bodyReader == nil {
 		return false
@@ -384,6 +407,40 @@ func buildHeaderFields(env *envelope.Envelope, msg *envelope.HTTPMessage) []hpac
 		// honor an explicit "preserve case" flag on KeyValue.
 		name := strings.ToLower(kv.Name)
 		out = append(out, hpack.HeaderField{Name: name, Value: kv.Value})
+	}
+	return out
+}
+
+// buildTrailerFields converts HTTPMessage.Trailers to lowercase hpack.HeaderField
+// entries for the trailer HEADERS frame. Returns nil when there are no trailers
+// so the writer's hasTrailers check stays false and no frame is emitted.
+//
+// HTTP/2 trailers must not contain pseudo-headers (RFC 9113 §8.1); any such
+// entries are dropped defensively. Wire case is normalized to lowercase per
+// the same rule as initial headers (documented limitation in buildHeaderFields).
+func buildTrailerFields(trailers []envelope.KeyValue) []hpack.HeaderField {
+	if len(trailers) == 0 {
+		return nil
+	}
+	out := make([]hpack.HeaderField, 0, len(trailers))
+	for _, kv := range trailers {
+		if strings.HasPrefix(kv.Name, ":") {
+			continue
+		}
+		// Connection-specific headers (RFC 9113 §8.2.2 — Connection,
+		// Keep-Alive, Transfer-Encoding, Upgrade, and TE != "trailers")
+		// are NOT filtered here. MITM wire-fidelity policy prohibits
+		// silent normalization on the Send path. The symmetric
+		// anomaly-flagging that the Receive path applies in
+		// assembler.go (regularHeaderAnomalies) is a known gap for the
+		// trailer-send path; tracked as a follow-up issue.
+		out = append(out, hpack.HeaderField{
+			Name:  strings.ToLower(kv.Name),
+			Value: kv.Value,
+		})
+	}
+	if len(out) == 0 {
+		return nil
 	}
 	return out
 }
