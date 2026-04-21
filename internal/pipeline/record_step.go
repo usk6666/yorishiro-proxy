@@ -213,6 +213,14 @@ func envelopeToFlow(env *envelope.Envelope) *flow.Flow {
 			}
 			fl.Headers = hdrs
 		}
+
+		if len(m.Trailers) > 0 {
+			trlrs := make(map[string][]string, len(m.Trailers))
+			for _, kv := range m.Trailers {
+				trlrs[kv.Name] = append(trlrs[kv.Name], kv.Value)
+			}
+			fl.Trailers = trlrs
+		}
 	case *envelope.RawMessage:
 		fl.Body = m.Bytes
 	}

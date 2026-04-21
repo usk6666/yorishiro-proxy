@@ -362,6 +362,80 @@ func TestRecordStep_FlowFieldsHTTP(t *testing.T) {
 	}
 }
 
+func TestRecordStep_HTTPTrailersProjectedToFlow(t *testing.T) {
+	// Response with trailers (HTTP/2 trailer-HEADERS or HTTP/1.1 chunked
+	// trailers). Projection must be symmetric to Headers and retain
+	// duplicate-name values so analysts can observe grpc-status style
+	// metadata.
+	w := &mockWriter{}
+	step := NewRecordStep(w, nil)
+
+	env := &envelope.Envelope{
+		StreamID:  "s1",
+		FlowID:    "f1",
+		Direction: envelope.Receive,
+		Sequence:  1,
+		Protocol:  envelope.ProtocolHTTP,
+		Raw:       []byte("HTTP/2 200\r\n\r\nbody\r\n"),
+		Message: &envelope.HTTPMessage{
+			Status: 200,
+			Headers: []envelope.KeyValue{
+				{Name: "Trailer", Value: "X-Trailer-1"},
+			},
+			Trailers: []envelope.KeyValue{
+				{Name: "X-Trailer-1", Value: "trailer-value"},
+				{Name: "Grpc-Status", Value: "0"},
+				{Name: "X-Trailer-1", Value: "second"},
+			},
+			Body: []byte("body"),
+		},
+	}
+	// Use sequence > 0 to avoid stream creation noise.
+	step.Process(context.Background(), env)
+
+	if len(w.flows) != 1 {
+		t.Fatalf("expected 1 flow, got %d", len(w.flows))
+	}
+	fl := w.flows[0]
+	if fl.Trailers == nil {
+		t.Fatal("flow Trailers is nil; want projected map")
+	}
+	if got := fl.Trailers["X-Trailer-1"]; len(got) != 2 || got[0] != "trailer-value" || got[1] != "second" {
+		t.Errorf("flow Trailers[X-Trailer-1] = %v, want [trailer-value second]", got)
+	}
+	if got := fl.Trailers["Grpc-Status"]; len(got) != 1 || got[0] != "0" {
+		t.Errorf("flow Trailers[Grpc-Status] = %v, want [0]", got)
+	}
+}
+
+func TestRecordStep_HTTPTrailersEmptyStaysNil(t *testing.T) {
+	// An HTTPMessage without trailers must not produce an empty map — the
+	// nil-vs-empty distinction keeps round-tripping via SQLite idempotent.
+	w := &mockWriter{}
+	step := NewRecordStep(w, nil)
+
+	env := &envelope.Envelope{
+		StreamID:  "s1",
+		FlowID:    "f1",
+		Direction: envelope.Send,
+		Sequence:  0,
+		Protocol:  envelope.ProtocolHTTP,
+		Raw:       []byte("GET / HTTP/1.1\r\n\r\n"),
+		Message: &envelope.HTTPMessage{
+			Method: "GET",
+			Path:   "/",
+		},
+	}
+	step.Process(context.Background(), env)
+
+	if len(w.flows) != 1 {
+		t.Fatalf("expected 1 flow, got %d", len(w.flows))
+	}
+	if w.flows[0].Trailers != nil {
+		t.Errorf("flow Trailers = %v, want nil for message without trailers", w.flows[0].Trailers)
+	}
+}
+
 func TestRecordStep_VariantRecording(t *testing.T) {
 	w := &mockWriter{}
 	step := NewRecordStep(w, nil)

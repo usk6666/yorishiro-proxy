@@ -77,6 +77,7 @@ type ExportFlow struct {
 	Direction     string              `json:"direction"`
 	Timestamp     string              `json:"timestamp"`
 	Headers       map[string][]string `json:"headers,omitempty"`
+	Trailers      map[string][]string `json:"trailers,omitempty"`
 	Body          string              `json:"body,omitempty"`
 	RawBytes      string              `json:"raw_bytes,omitempty"`
 	BodyTruncated bool                `json:"body_truncated"`
@@ -182,6 +183,7 @@ func flowsToExport(flows []*Flow, includeBodies bool) []*ExportFlow {
 			Direction:     f.Direction,
 			Timestamp:     f.Timestamp.UTC().Format(time.RFC3339Nano),
 			Headers:       f.Headers,
+			Trailers:      f.Trailers,
 			BodyTruncated: f.BodyTruncated,
 			Method:        f.Method,
 			StatusCode:    f.StatusCode,

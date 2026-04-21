@@ -272,16 +272,25 @@ ALTER TABLE streams ADD COLUMN failure_reason TEXT NOT NULL DEFAULT '';
 CREATE INDEX IF NOT EXISTS idx_streams_failure_reason ON streams(failure_reason);
 `
 
+// schemaV10 adds the trailers column to flows for HTTP message trailers
+// (HTTP/2 trailer-HEADERS, HTTP/1.1 chunked trailers). JSON-encoded
+// map[string][]string, matching the headers column shape. Empty for
+// non-HTTP protocols and for messages without trailers.
+const schemaV10 = `
+ALTER TABLE flows ADD COLUMN trailers TEXT NOT NULL DEFAULT '{}';
+`
+
 var migrations = map[int]string{
-	1: schemaV1,
-	2: schemaV2,
-	3: schemaV3,
-	4: schemaV4,
-	5: schemaV5,
-	6: schemaV6,
-	7: schemaV7,
-	8: schemaV8,
-	9: schemaV9,
+	1:  schemaV1,
+	2:  schemaV2,
+	3:  schemaV3,
+	4:  schemaV4,
+	5:  schemaV5,
+	6:  schemaV6,
+	7:  schemaV7,
+	8:  schemaV8,
+	9:  schemaV9,
+	10: schemaV10,
 }
 
 func migrate(ctx context.Context, db *sql.DB) error {
