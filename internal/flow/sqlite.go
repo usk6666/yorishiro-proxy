@@ -545,6 +545,15 @@ func (s *SQLiteStore) saveFlowSync(ctx context.Context, f *Flow) error {
 		headers = string(headersJSON)
 	}
 
+	trailers := "{}"
+	if f.Trailers != nil {
+		trailersJSON, err := json.Marshal(f.Trailers)
+		if err != nil {
+			return fmt.Errorf("marshal trailers: %w", err)
+		}
+		trailers = string(trailersJSON)
+	}
+
 	metadata := "{}"
 	if f.Metadata != nil {
 		metaJSON, err := json.Marshal(f.Metadata)
@@ -560,8 +569,8 @@ func (s *SQLiteStore) saveFlowSync(ctx context.Context, f *Flow) error {
 	}
 
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO flows (id, stream_id, sequence, direction, timestamp, headers, body, raw_bytes, body_truncated, method, url, status_code, metadata)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO flows (id, stream_id, sequence, direction, timestamp, headers, body, raw_bytes, body_truncated, method, url, status_code, metadata, trailers)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		f.ID,
 		f.StreamID,
 		f.Sequence,
@@ -575,6 +584,7 @@ func (s *SQLiteStore) saveFlowSync(ctx context.Context, f *Flow) error {
 		urlStr,
 		f.StatusCode,
 		metadata,
+		trailers,
 	)
 	if err != nil {
 		return fmt.Errorf("insert flow: %w", err)
@@ -583,7 +593,7 @@ func (s *SQLiteStore) saveFlowSync(ctx context.Context, f *Flow) error {
 }
 
 // flowColumns is the list of columns selected in flow queries.
-const flowColumns = `id, stream_id, sequence, direction, timestamp, headers, body, raw_bytes, body_truncated, method, url, status_code, metadata`
+const flowColumns = `id, stream_id, sequence, direction, timestamp, headers, body, raw_bytes, body_truncated, method, url, status_code, metadata, trailers`
 
 // GetFlow retrieves a flow by ID.
 func (s *SQLiteStore) GetFlow(ctx context.Context, id string) (*Flow, error) {
@@ -823,6 +833,7 @@ func scanFlow(row scannable) (*Flow, error) {
 		urlStr        string
 		bodyTruncated int
 		metadataStr   string
+		trailersStr   string
 	)
 
 	err := row.Scan(
@@ -839,6 +850,7 @@ func scanFlow(row scannable) (*Flow, error) {
 		&urlStr,
 		&f.StatusCode,
 		&metadataStr,
+		&trailersStr,
 	)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -856,6 +868,11 @@ func scanFlow(row scannable) (*Flow, error) {
 
 	if err := json.Unmarshal([]byte(headersStr), &f.Headers); err != nil {
 		f.Headers = make(map[string][]string)
+	}
+	if trailersStr != "" && trailersStr != "{}" {
+		if err := json.Unmarshal([]byte(trailersStr), &f.Trailers); err != nil {
+			f.Trailers = nil
+		}
 	}
 	if metadataStr != "" && metadataStr != "{}" {
 		if err := json.Unmarshal([]byte(metadataStr), &f.Metadata); err != nil {

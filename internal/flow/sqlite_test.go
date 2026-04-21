@@ -2046,3 +2046,100 @@ func TestSQLiteStore_StreamFailureReason_EmptySkipsUpdate(t *testing.T) {
 			got.FailureReason, "canceled")
 	}
 }
+
+// TestSQLiteStore_FlowTrailers_RoundTrip covers the USK-621 trailers column:
+// Flow.Trailers persists through SaveFlow and is read back via GetFlow /
+// GetFlows, preserving duplicate values and value order.
+func TestSQLiteStore_FlowTrailers_RoundTrip(t *testing.T) {
+	t.Parallel()
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	st := &Stream{
+		Protocol:  "HTTP/2",
+		State:     "complete",
+		Timestamp: time.Now().UTC(),
+	}
+	if err := store.SaveStream(ctx, st); err != nil {
+		t.Fatalf("SaveStream: %v", err)
+	}
+
+	fl := &Flow{
+		StreamID:  st.ID,
+		Sequence:  1,
+		Direction: "receive",
+		Timestamp: time.Now().UTC(),
+		Headers:   map[string][]string{"Content-Type": {"application/grpc"}},
+		Trailers: map[string][]string{
+			"Grpc-Status":  {"0"},
+			"X-Trailer-1":  {"trailer-value", "second"},
+			"X-Request-Id": {"abc123"},
+		},
+		Body: []byte("body"),
+	}
+	if err := store.SaveFlow(ctx, fl); err != nil {
+		t.Fatalf("SaveFlow: %v", err)
+	}
+
+	got, err := store.GetFlow(ctx, fl.ID)
+	if err != nil {
+		t.Fatalf("GetFlow: %v", err)
+	}
+	if got.Trailers == nil {
+		t.Fatal("Trailers nil after round-trip, want populated")
+	}
+	if v := got.Trailers["Grpc-Status"]; len(v) != 1 || v[0] != "0" {
+		t.Errorf("Trailers[Grpc-Status] = %v, want [0]", v)
+	}
+	if v := got.Trailers["X-Trailer-1"]; len(v) != 2 || v[0] != "trailer-value" || v[1] != "second" {
+		t.Errorf("Trailers[X-Trailer-1] = %v, want [trailer-value second]", v)
+	}
+	if v := got.Trailers["X-Request-Id"]; len(v) != 1 || v[0] != "abc123" {
+		t.Errorf("Trailers[X-Request-Id] = %v, want [abc123]", v)
+	}
+
+	// GetFlows surfaces the same value.
+	flows, err := store.GetFlows(ctx, st.ID, FlowListOptions{})
+	if err != nil {
+		t.Fatalf("GetFlows: %v", err)
+	}
+	if len(flows) != 1 {
+		t.Fatalf("GetFlows len = %d, want 1", len(flows))
+	}
+	if v := flows[0].Trailers["Grpc-Status"]; len(v) != 1 || v[0] != "0" {
+		t.Errorf("GetFlows Trailers[Grpc-Status] = %v, want [0]", v)
+	}
+}
+
+// TestSQLiteStore_FlowTrailers_EmptyStaysNil verifies the zero-value Trailers
+// field round-trips to nil, not an empty map. Scanning logic relies on this
+// to avoid producing noisy empty "trailers": {} output in MCP responses.
+func TestSQLiteStore_FlowTrailers_EmptyStaysNil(t *testing.T) {
+	t.Parallel()
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	st := &Stream{Protocol: "HTTP/1.x", State: "complete", Timestamp: time.Now().UTC()}
+	if err := store.SaveStream(ctx, st); err != nil {
+		t.Fatalf("SaveStream: %v", err)
+	}
+
+	fl := &Flow{
+		StreamID:  st.ID,
+		Sequence:  0,
+		Direction: "send",
+		Timestamp: time.Now().UTC(),
+		Method:    "GET",
+	}
+	if err := store.SaveFlow(ctx, fl); err != nil {
+		t.Fatalf("SaveFlow: %v", err)
+	}
+
+	got, err := store.GetFlow(ctx, fl.ID)
+	if err != nil {
+		t.Fatalf("GetFlow: %v", err)
+	}
+	if got.Trailers != nil {
+		t.Errorf("Trailers = %v, want nil for message without trailers", got.Trailers)
+	}
+}
