@@ -18,18 +18,33 @@ import (
 // nextEnvelopes are returned by Next() in order, followed by io.EOF.
 // Envelopes passed to Send() are recorded in sent.
 type mockChannel struct {
-	mu               sync.Mutex
-	streamID         string
-	nextEnvelopes    []*envelope.Envelope
-	nextIdx          int
-	nextErr          error // if set, returned instead of io.EOF after envelopes are exhausted
-	sent             []*envelope.Envelope
-	closed           bool
-	closeCalls       int
-	blockNext        chan struct{} // if non-nil, Next blocks until closed or ctx done
-	sendErr          error         // if set, Send returns this error
-	nextGate         chan struct{} // if non-nil, Next waits for a value before each return
-	lateErrInjection chan error    // if non-nil, Next drains this non-blockingly when on EOF path; drained value is returned instead of EOF
+	mu            sync.Mutex
+	streamID      string
+	nextEnvelopes []*envelope.Envelope
+	nextIdx       int
+	nextErr       error // if set, returned instead of io.EOF after envelopes are exhausted
+	sent          []*envelope.Envelope
+	closed        bool
+	closeCalls    int
+	blockNext     chan struct{} // if non-nil, Next blocks until closed or ctx done
+	sendErr       error         // if set, Send returns this error
+	nextGate      chan struct{} // if non-nil, Next waits for a value before each return
+
+	// Terminal-state tracking exposed via Closed/Err. A test can call
+	// fireTerminated(err) to model a post-EOF terminal event (e.g., a
+	// RST_STREAM that arrives after the peer already half-closed). The
+	// backing channel is lazy-initialized so existing literal constructions
+	// remain valid — no shared-state surprises because every access funnels
+	// through ensureTerm.
+	termInit sync.Once
+	termMu   sync.Mutex
+	termErr  error
+	termOnce sync.Once
+	termDone chan struct{}
+}
+
+func (m *mockChannel) ensureTerm() {
+	m.termInit.Do(func() { m.termDone = make(chan struct{}) })
 }
 
 func (m *mockChannel) StreamID() string {
@@ -60,17 +75,6 @@ func (m *mockChannel) Next(ctx context.Context) (*envelope.Envelope, error) {
 		if m.nextErr != nil {
 			return nil, m.nextErr
 		}
-		// Late-error injection: if the test has seeded an error on the
-		// lateErrInjection channel, return it instead of io.EOF. Drained
-		// non-blockingly so Next remains a fast EOF-returner when the channel
-		// is empty.
-		if m.lateErrInjection != nil {
-			select {
-			case e := <-m.lateErrInjection:
-				return nil, e
-			default:
-			}
-		}
 		return nil, io.EOF
 	}
 	env := m.nextEnvelopes[m.nextIdx]
@@ -90,26 +94,57 @@ func (m *mockChannel) Send(_ context.Context, env *envelope.Envelope) error {
 
 func (m *mockChannel) Close() error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	m.closeCalls++
-	if m.closed {
+	alreadyClosed := m.closed
+	m.closed = true
+	block := m.blockNext
+	m.mu.Unlock()
+	if alreadyClosed {
 		// Already closed — keep Close idempotent like real Channels.
 		return nil
 	}
-	m.closed = true
 	// If a blocked Next is waiting on blockNext, release it so the Next call
 	// returns (io.EOF by default once m.closed is observed). This models the
 	// real HTTP/2 channel.Close behavior where Close tears down the receive
 	// side and unblocks any pending Next.
-	if m.blockNext != nil {
+	if block != nil {
 		select {
-		case <-m.blockNext:
+		case <-block:
 			// Already closed by the test.
 		default:
-			close(m.blockNext)
+			close(block)
 		}
 	}
+	// Local Close counts as normal (EOF) termination; it must not be
+	// misread as a late peer cancel by the session watcher.
+	m.fireTerminated(io.EOF)
 	return nil
+}
+
+// Closed returns the Channel's terminal-state signal.
+func (m *mockChannel) Closed() <-chan struct{} {
+	m.ensureTerm()
+	return m.termDone
+}
+
+// Err returns the terminal error captured when Closed fired.
+func (m *mockChannel) Err() error {
+	m.termMu.Lock()
+	defer m.termMu.Unlock()
+	return m.termErr
+}
+
+// fireTerminated records err (first-writer-wins) and closes termDone
+// exactly once. In-package helper used by tests to simulate terminal
+// events.
+func (m *mockChannel) fireTerminated(err error) {
+	m.ensureTerm()
+	m.termMu.Lock()
+	if m.termErr == nil {
+		m.termErr = err
+	}
+	m.termMu.Unlock()
+	m.termOnce.Do(func() { close(m.termDone) })
 }
 
 func (m *mockChannel) getCloseCalls() int {
@@ -1054,13 +1089,13 @@ func TestRunSession_LateClientErrorCascadesToUpstream(t *testing.T) {
 	req := makeEnvelopeWithStreamID(envelope.Send, 0, "late-err-stream")
 	streamErr := &layer.StreamError{Code: layer.ErrorCanceled, Reason: "late cancel"}
 
-	// Client: first Next returns req; subsequent Next calls return EOF
-	// until a value is pushed on lateErrInjection, at which point Next
-	// returns that value (modelling a late RST_STREAM after endStream).
+	// Client: first Next returns req; subsequent Next calls return EOF.
+	// The test fires fireTerminated(streamErr) to model a late RST_STREAM
+	// arriving after the client half-closed — the watcher observes it via
+	// Closed()/Err() instead of driving Next.
 	clientCh := &mockChannel{
-		streamID:         "client",
-		nextEnvelopes:    []*envelope.Envelope{req},
-		lateErrInjection: make(chan error, 1),
+		streamID:      "client",
+		nextEnvelopes: []*envelope.Envelope{req},
 	}
 
 	// Upstream: blocks on Next until Close is called (Close unblocks via
@@ -1099,10 +1134,11 @@ func TestRunSession_LateClientErrorCascadesToUpstream(t *testing.T) {
 	}()
 
 	// Give the session a moment to forward the request and reach the
-	// post-EOF waiting state, then inject the late error. The poll interval
-	// of lateClientErrorWatcher is 5ms, so a 50ms wait is ample.
+	// post-EOF waiting state, then fire the late-error signal on the
+	// client Channel. 50ms is ample — the watcher parks on Closed()
+	// without polling.
 	time.Sleep(50 * time.Millisecond)
-	clientCh.lateErrInjection <- streamErr
+	clientCh.fireTerminated(streamErr)
 
 	select {
 	case err := <-done:
