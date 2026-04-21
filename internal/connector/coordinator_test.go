@@ -193,7 +193,7 @@ func TestCoordinator_OnStack_Callback(t *testing.T) {
 	coord := NewCoordinator(CoordinatorConfig{
 		CONNECTNegotiator: NewCONNECTNegotiator(nil),
 		SOCKS5Negotiator:  NewSOCKS5Negotiator(nil),
-		OnStack: func(_ context.Context, stack *ConnectionStack, _ *envelope.TLSSnapshot, _ string) {
+		OnStack: func(_ context.Context, stack *ConnectionStack, _, _ *envelope.TLSSnapshot, _ string) {
 			called.Add(1)
 			stack.Close()
 		},
@@ -237,7 +237,7 @@ func TestCoordinator_NilNegotiators(t *testing.T) {
 // handler configs".
 func TestCoordinator_OnHTTP2Stack_Wiring(t *testing.T) {
 	onHTTP2 := func(_ context.Context, _ *ConnectionStack, _ *http2.Layer,
-		_ *envelope.TLSSnapshot, _ string) {
+		_, _ *envelope.TLSSnapshot, _ string) {
 	}
 
 	coord := NewCoordinator(CoordinatorConfig{

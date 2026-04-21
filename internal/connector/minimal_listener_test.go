@@ -60,7 +60,7 @@ func TestMinimalListener_CONNECT_RawPassthrough(t *testing.T) {
 			Issuer:             issuer,
 			InsecureSkipVerify: true,
 		},
-		OnStack: func(_ context.Context, stack *ConnectionStack, _ *envelope.TLSSnapshot, tgt string) {
+		OnStack: func(_ context.Context, stack *ConnectionStack, _, _ *envelope.TLSSnapshot, tgt string) {
 			stackMu.Lock()
 			stackReceived = stack
 			stackTarget = tgt
@@ -155,7 +155,7 @@ func TestMinimalListener_NonCONNECT_ClosesConnection(t *testing.T) {
 			ProxyConfig: &config.ProxyConfig{},
 			Issuer:      issuer,
 		},
-		OnStack: func(_ context.Context, _ *ConnectionStack, _ *envelope.TLSSnapshot, _ string) {
+		OnStack: func(_ context.Context, _ *ConnectionStack, _, _ *envelope.TLSSnapshot, _ string) {
 			t.Error("OnStack should not be called for non-CONNECT")
 		},
 	}

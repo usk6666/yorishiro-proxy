@@ -54,7 +54,38 @@ func (s *testStore) SaveStream(_ context.Context, st *flow.Stream) error {
 	return nil
 }
 
-func (s *testStore) UpdateStream(_ context.Context, _ string, _ flow.StreamUpdate) error {
+func (s *testStore) UpdateStream(_ context.Context, id string, update flow.StreamUpdate) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, st := range s.streams {
+		if st.ID == id {
+			hasConnInfo := update.ServerAddr != "" ||
+				update.TLSVersion != "" ||
+				update.TLSCipher != "" ||
+				update.TLSALPN != "" ||
+				update.TLSServerCertSubject != ""
+			if hasConnInfo {
+				if st.ConnInfo == nil {
+					st.ConnInfo = &flow.ConnectionInfo{}
+				}
+				if update.ServerAddr != "" {
+					st.ConnInfo.ServerAddr = update.ServerAddr
+				}
+				if update.TLSVersion != "" {
+					st.ConnInfo.TLSVersion = update.TLSVersion
+				}
+				if update.TLSCipher != "" {
+					st.ConnInfo.TLSCipher = update.TLSCipher
+				}
+				if update.TLSALPN != "" {
+					st.ConnInfo.TLSALPN = update.TLSALPN
+				}
+				if update.TLSServerCertSubject != "" {
+					st.ConnInfo.TLSServerCertSubject = update.TLSServerCertSubject
+				}
+			}
+		}
+	}
 	return nil
 }
 
@@ -269,7 +300,7 @@ func startHTTPMITMProxy(
 			Issuer:             issuer,
 			InsecureSkipVerify: true,
 		},
-		OnStack: func(ctx context.Context, stack *connector.ConnectionStack, _ *envelope.TLSSnapshot, _ string) {
+		OnStack: func(ctx context.Context, stack *connector.ConnectionStack, _, _ *envelope.TLSSnapshot, _ string) {
 			defer close(done)
 			defer stack.Close()
 
@@ -445,6 +476,21 @@ func TestHTTPSMITM_BasicRoundtrip(t *testing.T) {
 	}
 	if streams[0].State != "active" {
 		t.Errorf("stream state = %q, want %q", streams[0].State, "active")
+	}
+
+	// USK-619 (h1 parity): Stream.ConnInfo must reflect upstream TLS
+	// reality, not the synthetic MITM cert. The upstream handler's
+	// self-signed cert uses CN="test-upstream" (newTestTLSConfig).
+	if streams[0].ConnInfo == nil {
+		t.Fatal("Stream.ConnInfo is nil; upstream TLS was not projected into ConnInfo")
+	}
+	if !strings.Contains(streams[0].ConnInfo.TLSServerCertSubject, "test-upstream") {
+		t.Errorf("ConnInfo.TLSServerCertSubject = %q, want to contain %q "+
+			"(synthetic MITM cert leaking into ConnInfo)",
+			streams[0].ConnInfo.TLSServerCertSubject, "test-upstream")
+	}
+	if streams[0].ConnInfo.TLSVersion == "" {
+		t.Error("ConnInfo.TLSVersion is empty; expected TLS 1.2 or TLS 1.3")
 	}
 
 	// --- Verify flow recording ---

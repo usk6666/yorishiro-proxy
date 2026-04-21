@@ -2,7 +2,11 @@ package pipeline
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
@@ -13,7 +17,13 @@ import (
 type mockWriter struct {
 	streams []*flow.Stream
 	flows   []*flow.Flow
+	updates []streamUpdateRecord
 	saveErr error
+}
+
+type streamUpdateRecord struct {
+	streamID string
+	update   flow.StreamUpdate
 }
 
 func (m *mockWriter) SaveStream(_ context.Context, s *flow.Stream) error {
@@ -24,7 +34,8 @@ func (m *mockWriter) SaveStream(_ context.Context, s *flow.Stream) error {
 	return nil
 }
 
-func (m *mockWriter) UpdateStream(_ context.Context, _ string, _ flow.StreamUpdate) error {
+func (m *mockWriter) UpdateStream(_ context.Context, id string, u flow.StreamUpdate) error {
+	m.updates = append(m.updates, streamUpdateRecord{streamID: id, update: u})
 	return nil
 }
 
@@ -136,6 +147,123 @@ func TestRecordStep_NoStreamOnReceive(t *testing.T) {
 	}
 	if len(w.flows) != 1 {
 		t.Fatalf("expected 1 flow, got %d", len(w.flows))
+	}
+}
+
+// TestRecordStep_ReceiveProjectsUpstreamTLSToConnInfo verifies that Receive
+// envelopes with a non-nil Context.TLS trigger an UpdateStream call that
+// projects upstream TLS reality into Stream.ConnInfo — the diagnostic
+// invariant USK-619 is solving.
+func TestRecordStep_ReceiveProjectsUpstreamTLSToConnInfo(t *testing.T) {
+	w := &mockWriter{}
+	step := NewRecordStep(w, nil)
+
+	upstreamCert := &x509.Certificate{
+		Subject: pkix.Name{CommonName: "upstream-tls-marker"},
+	}
+	upstreamSnap := &envelope.TLSSnapshot{
+		SNI:             "upstream.example.com",
+		ALPN:            "h2",
+		PeerCertificate: upstreamCert,
+		Version:         tls.VersionTLS13,
+		CipherSuite:     tls.TLS_AES_128_GCM_SHA256,
+	}
+
+	env := &envelope.Envelope{
+		StreamID:  "stream-1",
+		FlowID:    "flow-recv",
+		Direction: envelope.Receive,
+		Sequence:  0,
+		Protocol:  envelope.ProtocolHTTP,
+		Raw:       []byte("HTTP/1.1 200 OK\r\n\r\n"),
+		Message:   &envelope.HTTPMessage{Status: 200},
+		Context: envelope.EnvelopeContext{
+			ConnID: "conn-1",
+			TLS:    upstreamSnap,
+		},
+	}
+	step.Process(context.Background(), env)
+
+	if len(w.updates) != 1 {
+		t.Fatalf("expected 1 UpdateStream call, got %d", len(w.updates))
+	}
+	got := w.updates[0]
+	if got.streamID != "stream-1" {
+		t.Errorf("UpdateStream streamID = %q, want stream-1", got.streamID)
+	}
+	if got.update.TLSVersion != "TLS 1.3" {
+		t.Errorf("TLSVersion = %q, want %q", got.update.TLSVersion, "TLS 1.3")
+	}
+	if got.update.TLSCipher != "TLS_AES_128_GCM_SHA256" {
+		t.Errorf("TLSCipher = %q, want TLS_AES_128_GCM_SHA256", got.update.TLSCipher)
+	}
+	if got.update.TLSALPN != "h2" {
+		t.Errorf("TLSALPN = %q, want h2", got.update.TLSALPN)
+	}
+	if !strings.Contains(got.update.TLSServerCertSubject, "upstream-tls-marker") {
+		t.Errorf("TLSServerCertSubject = %q, want to contain upstream-tls-marker",
+			got.update.TLSServerCertSubject)
+	}
+}
+
+// TestRecordStep_SendDoesNotProjectClientMITMToConnInfo guards against
+// regressing to the Send-side projection model — the client Send envelope
+// carries the synthetic MITM cert we presented, which would mislead
+// analysts if recorded as Stream.ConnInfo.TLSServerCertSubject.
+func TestRecordStep_SendDoesNotProjectClientMITMToConnInfo(t *testing.T) {
+	w := &mockWriter{}
+	step := NewRecordStep(w, nil)
+
+	clientSnap := &envelope.TLSSnapshot{
+		Version: tls.VersionTLS13,
+		PeerCertificate: &x509.Certificate{
+			Subject: pkix.Name{CommonName: "synthetic-mitm-cert"},
+		},
+	}
+	env := &envelope.Envelope{
+		StreamID:  "stream-1",
+		FlowID:    "flow-send",
+		Direction: envelope.Send,
+		Sequence:  0,
+		Protocol:  envelope.ProtocolHTTP,
+		Message:   &envelope.HTTPMessage{Method: "GET"},
+		Context: envelope.EnvelopeContext{
+			ConnID: "conn-1",
+			TLS:    clientSnap,
+		},
+	}
+	step.Process(context.Background(), env)
+
+	if len(w.updates) != 0 {
+		t.Errorf("expected 0 UpdateStream calls for Send, got %d (synthetic MITM "+
+			"cert leaked into ConnInfo)", len(w.updates))
+	}
+}
+
+// TestRecordStep_ReceiveWithoutTLSSkipsUpdate verifies that Receive envelopes
+// without a TLS snapshot (e.g., cleartext h2c) do not fire a no-op
+// UpdateStream.
+func TestRecordStep_ReceiveWithoutTLSSkipsUpdate(t *testing.T) {
+	w := &mockWriter{}
+	step := NewRecordStep(w, nil)
+
+	env := &envelope.Envelope{
+		StreamID:  "stream-1",
+		FlowID:    "flow-recv",
+		Direction: envelope.Receive,
+		Sequence:  0,
+		Protocol:  envelope.ProtocolHTTP,
+		Message:   &envelope.HTTPMessage{Status: 200},
+		Context: envelope.EnvelopeContext{
+			ConnID: "conn-1",
+			// TLS intentionally nil (cleartext)
+		},
+	}
+	step.Process(context.Background(), env)
+
+	if len(w.updates) != 0 {
+		t.Errorf("expected 0 UpdateStream calls for cleartext Receive, got %d",
+			len(w.updates))
 	}
 }
 

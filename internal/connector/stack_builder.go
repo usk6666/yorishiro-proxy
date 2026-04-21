@@ -74,17 +74,22 @@ type BuildConfig struct {
 //
 // The client-side TLS MITM handshake is performed inside this function
 // because the stack builder owns the TLS layer decision.
+//
+// Returns the stack, the client-facing MITM TLS snapshot (synthetic cert
+// we presented to the client), and the upstream TLS snapshot (the real
+// cert observed from upstream). Both snapshots are per-Layer per RFC-001
+// §3.1 and must not be conflated.
 func BuildConnectionStack(
 	ctx context.Context,
 	clientConn net.Conn,
 	target string,
 	cfg *BuildConfig,
-) (*ConnectionStack, *envelope.TLSSnapshot, error) {
+) (*ConnectionStack, *envelope.TLSSnapshot, *envelope.TLSSnapshot, error) {
 	if cfg == nil || cfg.ProxyConfig == nil {
-		return nil, nil, fmt.Errorf("connector: BuildConnectionStack: nil config")
+		return nil, nil, nil, fmt.Errorf("connector: BuildConnectionStack: nil config")
 	}
 	if cfg.Issuer == nil {
-		return nil, nil, fmt.Errorf("connector: BuildConnectionStack: nil issuer")
+		return nil, nil, nil, fmt.Errorf("connector: BuildConnectionStack: nil issuer")
 	}
 
 	connID := uuid.New().String()
@@ -149,15 +154,15 @@ func buildALPNRoutedStack(
 	target string,
 	connID string,
 	cfg *BuildConfig,
-) (*ConnectionStack, *envelope.TLSSnapshot, error) {
+) (*ConnectionStack, *envelope.TLSSnapshot, *envelope.TLSSnapshot, error) {
 	host, _, err := net.SplitHostPort(target)
 	if err != nil {
-		return nil, nil, fmt.Errorf("connector: invalid target %q: %w", target, err)
+		return nil, nil, nil, fmt.Errorf("connector: invalid target %q: %w", target, err)
 	}
 
 	hostTLS, err := resolvePerHostTLS(target, cfg)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	// Check ALPN cache.
@@ -171,27 +176,31 @@ func buildALPNRoutedStack(
 		}
 	}
 
-	var negotiatedALPN string
 	var clientTLSConn net.Conn
 	var upstreamConn net.Conn
-	var clientSnap *envelope.TLSSnapshot
+	var clientSnap, upstreamSnap *envelope.TLSSnapshot
 
 	if cacheHit {
-		clientTLSConn, upstreamConn, clientSnap, negotiatedALPN, err = buildCacheHitPath(
+		clientTLSConn, upstreamConn, clientSnap, upstreamSnap, err = buildCacheHitPath(
 			ctx, clientConn, target, host, cachedALPN, cacheKey, hostTLS, cfg)
 	} else {
-		clientTLSConn, upstreamConn, clientSnap, negotiatedALPN, err = buildCacheMissPath(
+		clientTLSConn, upstreamConn, clientSnap, upstreamSnap, err = buildCacheMissPath(
 			ctx, clientConn, target, host, cacheKey, hostTLS, cfg)
 	}
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
+	}
+
+	negotiatedALPN := ""
+	if upstreamSnap != nil {
+		negotiatedALPN = upstreamSnap.ALPN
 	}
 
 	route, routeErr := alpnRoute(negotiatedALPN)
 	if routeErr != nil {
 		upstreamConn.Close()
 		clientTLSConn.Close()
-		return nil, nil, fmt.Errorf("connector: %s: %w", target, routeErr)
+		return nil, nil, nil, fmt.Errorf("connector: %s: %w", target, routeErr)
 	}
 
 	slog.Debug("connector: ALPN routed",
@@ -199,12 +208,13 @@ func buildALPNRoutedStack(
 		"alpn", negotiatedALPN, "route", route, "cache_hit", cacheHit,
 	)
 
-	return buildStackFromRoute(ctx, clientTLSConn, upstreamConn, target, connID, route, clientSnap, cfg)
+	return buildStackFromRoute(ctx, clientTLSConn, upstreamConn, target, connID, route, clientSnap, upstreamSnap, cfg)
 }
 
 // buildCacheHitPath handles the ALPN cache hit: client MITM first (offering
 // cached ALPN), then upstream dial (offering cached ALPN), verify match.
-// Returns the TLS-wrapped client connection (not the original plain conn).
+// Returns the TLS-wrapped client connection (not the original plain conn)
+// plus both TLS snapshots.
 func buildCacheHitPath(
 	ctx context.Context,
 	clientConn net.Conn,
@@ -212,33 +222,38 @@ func buildCacheHitPath(
 	cacheKey ALPNCacheKey,
 	hostTLS *resolvedTLS,
 	cfg *BuildConfig,
-) (clientTLSConn net.Conn, upstreamConn net.Conn, clientSnap *envelope.TLSSnapshot, negotiatedALPN string, err error) {
+) (clientTLSConn net.Conn, upstreamConn net.Conn, clientSnap, upstreamSnap *envelope.TLSSnapshot, err error) {
 	clientTLSConn, clientSnap, err = performClientMITM(ctx, clientConn, host, cachedALPN, cfg)
 	if err != nil {
-		return nil, nil, nil, "", err
+		return nil, nil, nil, nil, err
 	}
 
-	upstreamConn, negotiatedALPN, err = dialUpstreamWithALPN(ctx, target, host,
+	upstreamConn, upstreamSnap, err = dialUpstreamWithALPN(ctx, target, host,
 		[]string{cachedALPN}, hostTLS.insecureSkip, hostTLS.clientCert, hostTLS.rootCAs, cfg)
 	if err != nil {
 		clientConn.Close()
-		return nil, nil, nil, "", err
+		return nil, nil, nil, nil, err
 	}
 
+	negotiatedALPN := ""
+	if upstreamSnap != nil {
+		negotiatedALPN = upstreamSnap.ALPN
+	}
 	if negotiatedALPN != cachedALPN {
 		cfg.ALPNCache.Delete(cacheKey)
 		upstreamConn.Close()
 		clientConn.Close()
-		return nil, nil, nil, "", fmt.Errorf("connector: ALPN mismatch for %s: cached %q, got %q",
+		return nil, nil, nil, nil, fmt.Errorf("connector: ALPN mismatch for %s: cached %q, got %q",
 			target, cachedALPN, negotiatedALPN)
 	}
 
-	return clientTLSConn, upstreamConn, clientSnap, negotiatedALPN, nil
+	return clientTLSConn, upstreamConn, clientSnap, upstreamSnap, nil
 }
 
 // buildCacheMissPath handles the ALPN cache miss: upstream dial first (to
 // learn ALPN), then client MITM (offering learned ALPN).
-// Returns the TLS-wrapped client connection (not the original plain conn).
+// Returns the TLS-wrapped client connection (not the original plain conn)
+// plus both TLS snapshots.
 func buildCacheMissPath(
 	ctx context.Context,
 	clientConn net.Conn,
@@ -246,17 +261,22 @@ func buildCacheMissPath(
 	cacheKey ALPNCacheKey,
 	hostTLS *resolvedTLS,
 	cfg *BuildConfig,
-) (clientTLSConn net.Conn, upstreamConn net.Conn, clientSnap *envelope.TLSSnapshot, negotiatedALPN string, err error) {
-	upstreamConn, negotiatedALPN, err = dialUpstreamWithALPN(ctx, target, host,
+) (clientTLSConn net.Conn, upstreamConn net.Conn, clientSnap, upstreamSnap *envelope.TLSSnapshot, err error) {
+	upstreamConn, upstreamSnap, err = dialUpstreamWithALPN(ctx, target, host,
 		defaultALPNOffer, hostTLS.insecureSkip, hostTLS.clientCert, hostTLS.rootCAs, cfg)
 	if err != nil {
-		return nil, nil, nil, "", err
+		return nil, nil, nil, nil, err
+	}
+
+	negotiatedALPN := ""
+	if upstreamSnap != nil {
+		negotiatedALPN = upstreamSnap.ALPN
 	}
 
 	// Validate ALPN route early so we don't waste a client MITM handshake.
 	if _, routeErr := alpnRoute(negotiatedALPN); routeErr != nil {
 		upstreamConn.Close()
-		return nil, nil, nil, "", fmt.Errorf("connector: %s: %w", target, routeErr)
+		return nil, nil, nil, nil, fmt.Errorf("connector: %s: %w", target, routeErr)
 	}
 
 	// Cache the learned ALPN.
@@ -272,10 +292,10 @@ func buildCacheMissPath(
 	clientTLSConn, clientSnap, err = performClientMITM(ctx, clientConn, host, alpnOffer, cfg)
 	if err != nil {
 		upstreamConn.Close()
-		return nil, nil, nil, "", err
+		return nil, nil, nil, nil, err
 	}
 
-	return clientTLSConn, upstreamConn, clientSnap, negotiatedALPN, nil
+	return clientTLSConn, upstreamConn, clientSnap, upstreamSnap, nil
 }
 
 // performClientMITM performs the client-side TLS MITM handshake, issuing a
@@ -309,7 +329,9 @@ func performClientMITM(
 }
 
 // dialUpstreamWithALPN dials upstream and performs TLS, returning the
-// connection, negotiated ALPN, and any error.
+// connection, the full upstream TLS snapshot (authoritative upstream reality
+// for downstream EnvelopeContext stamping and ConnInfo recording), and any
+// error. Callers extract the negotiated ALPN from snap.ALPN.
 func dialUpstreamWithALPN(
 	ctx context.Context,
 	target, host string,
@@ -318,7 +340,7 @@ func dialUpstreamWithALPN(
 	clientCert *tls.Certificate,
 	rootCAsConfig *tls.Config,
 	cfg *BuildConfig,
-) (net.Conn, string, error) {
+) (net.Conn, *envelope.TLSSnapshot, error) {
 	upstreamTLSCfg := &tls.Config{
 		ServerName: host,
 	}
@@ -335,29 +357,33 @@ func dialUpstreamWithALPN(
 		UpstreamProxy:      cfg.UpstreamProxy,
 	})
 	if err != nil {
-		return nil, "", fmt.Errorf("connector: upstream dial for %s: %w", target, err)
+		return nil, nil, fmt.Errorf("connector: upstream dial for %s: %w", target, err)
 	}
 
-	alpn := ""
-	if snap != nil {
-		alpn = snap.ALPN
-	}
-	return conn, alpn, nil
+	return conn, snap, nil
 }
 
 // buildStackFromRoute constructs a ConnectionStack with the appropriate
-// Layers based on the ALPN route decision.
+// Layers based on the ALPN route decision. Each Layer's EnvelopeContext
+// carries the TLS snapshot for its own wire (clientSnap for the client-
+// facing Layer, upstreamSnap for the upstream-facing Layer) per RFC-001
+// §3.1 (TLS is per-Layer, not per-stack).
 func buildStackFromRoute(
 	ctx context.Context,
 	clientConn, upstreamConn net.Conn,
 	target, connID, route string,
-	clientSnap *envelope.TLSSnapshot,
+	clientSnap, upstreamSnap *envelope.TLSSnapshot,
 	cfg *BuildConfig,
-) (*ConnectionStack, *envelope.TLSSnapshot, error) {
-	envCtx := envelope.EnvelopeContext{
+) (*ConnectionStack, *envelope.TLSSnapshot, *envelope.TLSSnapshot, error) {
+	clientEnvCtx := envelope.EnvelopeContext{
 		ConnID:     connID,
 		TargetHost: target,
 		TLS:        clientSnap,
+	}
+	upstreamEnvCtx := envelope.EnvelopeContext{
+		ConnID:     connID,
+		TargetHost: target,
+		TLS:        upstreamSnap,
 	}
 
 	stack := NewConnectionStack(connID)
@@ -366,18 +392,18 @@ func buildStackFromRoute(
 	case "http1":
 		clientLayer := http1.New(clientConn, connID+"/client", envelope.Send,
 			http1.WithScheme("https"),
-			http1.WithEnvelopeContext(envCtx),
+			http1.WithEnvelopeContext(clientEnvCtx),
 		)
 		stack.PushClient(clientLayer)
 
 		upstreamLayer := http1.New(upstreamConn, connID+"/upstream", envelope.Receive,
 			http1.WithScheme("https"),
-			http1.WithEnvelopeContext(envCtx),
+			http1.WithEnvelopeContext(upstreamEnvCtx),
 		)
 		stack.PushUpstream(upstreamLayer)
 
 	case "h2":
-		return buildH2Stack(ctx, stack, clientConn, upstreamConn, target, connID, envCtx, clientSnap, cfg)
+		return buildH2Stack(ctx, stack, clientConn, upstreamConn, target, connID, clientEnvCtx, upstreamEnvCtx, clientSnap, upstreamSnap, cfg)
 
 	case "bytechunk":
 		clientLayer := bytechunk.New(clientConn, connID+"/client", envelope.Send)
@@ -389,10 +415,10 @@ func buildStackFromRoute(
 	default:
 		upstreamConn.Close()
 		clientConn.Close()
-		return nil, nil, fmt.Errorf("connector: unknown route %q", route)
+		return nil, nil, nil, fmt.Errorf("connector: unknown route %q", route)
 	}
 
-	return stack, clientSnap, nil
+	return stack, clientSnap, upstreamSnap, nil
 }
 
 // buildH2Stack specializes buildStackFromRoute for the "h2" route.
@@ -409,37 +435,32 @@ func buildStackFromRoute(
 // the pool invokes dialFn (miss), dialFn wraps the pre-dialed conn in
 // http2.New; on internal failure http2.New already closes conn, so no
 // double-close is possible.
+//
+// TLS snapshot correctness: the upstream Layer is constructed with
+// upstreamEnvCtx (TLS=upstreamSnap). Pool hits return a cached Layer whose
+// original EnvelopeContext carries the correct upstream snap from its
+// original dial; pool hits on a second connection discard the freshly-dialed
+// upstream snap as expected (the cached Layer is authoritative).
 func buildH2Stack(
 	ctx context.Context,
 	stack *ConnectionStack,
 	clientConn, upstreamConn net.Conn,
 	target, connID string,
-	envCtx envelope.EnvelopeContext,
-	clientSnap *envelope.TLSSnapshot,
+	clientEnvCtx, upstreamEnvCtx envelope.EnvelopeContext,
+	clientSnap, upstreamSnap *envelope.TLSSnapshot,
 	cfg *BuildConfig,
-) (*ConnectionStack, *envelope.TLSSnapshot, error) {
+) (*ConnectionStack, *envelope.TLSSnapshot, *envelope.TLSSnapshot, error) {
 	// Client-side Layer (ServerRole = local acts as HTTP/2 server).
 	clientLayer, err := http2.New(clientConn, connID+"/client", http2.ServerRole,
 		http2.WithScheme("https"),
-		http2.WithEnvelopeContext(envCtx),
+		http2.WithEnvelopeContext(clientEnvCtx),
 	)
 	if err != nil {
 		upstreamConn.Close()
 		clientConn.Close()
-		return nil, nil, fmt.Errorf("connector: h2 client layer: %w", err)
+		return nil, nil, nil, fmt.Errorf("connector: h2 client layer: %w", err)
 	}
 	stack.PushClient(clientLayer)
-
-	// Upstream-side Layer (ClientRole = local acts as HTTP/2 client).
-	// EnvelopeContext for the upstream Layer: ConnID + TargetHost + TLS
-	// snapshot are the same as the client side for correlation purposes.
-	// The upstream TLS snapshot is not yet threaded through — recorded via
-	// the stack-owned clientSnap until USK-613.
-	upstreamEnvCtx := envelope.EnvelopeContext{
-		ConnID:     connID,
-		TargetHost: target,
-		TLS:        clientSnap,
-	}
 
 	poolKey := poolKeyForH2(target, cfg)
 
@@ -469,14 +490,14 @@ func buildH2Stack(
 				upstreamConn.Close()
 			}
 			clientLayer.Close()
-			return nil, nil, fmt.Errorf("connector: h2 pool get-or-dial: %w", getErr)
+			return nil, nil, nil, fmt.Errorf("connector: h2 pool get-or-dial: %w", getErr)
 		}
 		upstreamH2 = l
 	} else {
 		l, dErr := dialFn()
 		if dErr != nil {
 			clientLayer.Close()
-			return nil, nil, fmt.Errorf("connector: h2 upstream layer: %w", dErr)
+			return nil, nil, nil, fmt.Errorf("connector: h2 upstream layer: %w", dErr)
 		}
 		upstreamH2 = l
 	}
@@ -489,28 +510,34 @@ func buildH2Stack(
 	}
 
 	stack.setUpstreamH2(upstreamH2, poolKey)
-	return stack, clientSnap, nil
+	return stack, clientSnap, upstreamSnap, nil
 }
 
 // buildRawPassthroughStack builds a [TLS → ByteChunk] stack on both sides.
 // This is the config-level raw_passthrough mode that bypasses ALPN routing.
+//
+// Returns both the client-facing MITM snapshot and the upstream snapshot.
+// NOTE: bytechunk.Layer does not currently stamp an EnvelopeContext on its
+// envelopes, so upstreamSnap surfaces via BuildConnectionStack's return
+// value but is not embedded into each envelope. Threading upstream snap
+// into bytechunk-produced envelopes is deferred (follow-up issue).
 func buildRawPassthroughStack(
 	ctx context.Context,
 	clientConn net.Conn,
 	target string,
 	connID string,
 	cfg *BuildConfig,
-) (*ConnectionStack, *envelope.TLSSnapshot, error) {
+) (*ConnectionStack, *envelope.TLSSnapshot, *envelope.TLSSnapshot, error) {
 	host, _, err := net.SplitHostPort(target)
 	if err != nil {
-		return nil, nil, fmt.Errorf("connector: invalid target %q: %w", target, err)
+		return nil, nil, nil, fmt.Errorf("connector: invalid target %q: %w", target, err)
 	}
 
 	// --- Client-side TLS MITM ---
 
 	mitmCert, err := cfg.Issuer.GetCertificate(host)
 	if err != nil {
-		return nil, nil, fmt.Errorf("connector: MITM cert for %s: %w", host, err)
+		return nil, nil, nil, fmt.Errorf("connector: MITM cert for %s: %w", host, err)
 	}
 
 	serverTLSCfg := &tls.Config{
@@ -519,7 +546,7 @@ func buildRawPassthroughStack(
 
 	clientTLSConn, clientSnap, err := tlslayer.Server(ctx, clientConn, serverTLSCfg)
 	if err != nil {
-		return nil, nil, fmt.Errorf("connector: client TLS MITM handshake for %s: %w", target, err)
+		return nil, nil, nil, fmt.Errorf("connector: client TLS MITM handshake for %s: %w", target, err)
 	}
 
 	slog.Debug("connector: client-side MITM handshake complete",
@@ -541,7 +568,7 @@ func buildRawPassthroughStack(
 		resolved, resolveErr := cfg.HostTLSResolver.Resolve(target)
 		if resolveErr != nil {
 			clientTLSConn.Close()
-			return nil, nil, fmt.Errorf("connector: resolve host TLS for %s: %w", target, resolveErr)
+			return nil, nil, nil, fmt.Errorf("connector: resolve host TLS for %s: %w", target, resolveErr)
 		}
 		if resolved != nil {
 			if resolved.InsecureSkipVerify != nil {
@@ -556,7 +583,7 @@ func buildRawPassthroughStack(
 		}
 	}
 
-	upstreamConn, _, err := DialUpstreamRaw(ctx, target, DialRawOpts{
+	upstreamConn, upstreamSnap, err := DialUpstreamRaw(ctx, target, DialRawOpts{
 		TLSConfig:          upstreamTLSCfg,
 		InsecureSkipVerify: insecureSkip,
 		UTLSProfile:        cfg.TLSFingerprint,
@@ -566,7 +593,7 @@ func buildRawPassthroughStack(
 	})
 	if err != nil {
 		clientTLSConn.Close()
-		return nil, nil, fmt.Errorf("connector: upstream dial for %s: %w", target, err)
+		return nil, nil, nil, fmt.Errorf("connector: upstream dial for %s: %w", target, err)
 	}
 
 	slog.Debug("connector: upstream connection established",
@@ -586,5 +613,5 @@ func buildRawPassthroughStack(
 	upstreamLayer := bytechunk.New(upstreamConn, connID+"/upstream", envelope.Receive)
 	stack.PushUpstream(upstreamLayer)
 
-	return stack, clientSnap, nil
+	return stack, clientSnap, upstreamSnap, nil
 }

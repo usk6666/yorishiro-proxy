@@ -182,7 +182,7 @@ func startRawPassthroughProxy(
 			Issuer:             issuer,
 			InsecureSkipVerify: true,
 		},
-		OnStack: func(ctx context.Context, stack *connector.ConnectionStack, _ *envelope.TLSSnapshot, _ string) {
+		OnStack: func(ctx context.Context, stack *connector.ConnectionStack, _, _ *envelope.TLSSnapshot, _ string) {
 			defer close(done)
 			defer stack.Close()
 
@@ -463,7 +463,7 @@ func TestRawPassthrough_TLSFailure(t *testing.T) {
 			Issuer:             issuer,
 			InsecureSkipVerify: true,
 		},
-		OnStack: func(_ context.Context, stack *connector.ConnectionStack, _ *envelope.TLSSnapshot, _ string) {
+		OnStack: func(_ context.Context, stack *connector.ConnectionStack, _, _ *envelope.TLSSnapshot, _ string) {
 			defer stack.Close()
 			onStackCalled <- struct{}{}
 		},
@@ -553,7 +553,7 @@ func TestRawPassthrough_ScopeBlock(t *testing.T) {
 			Issuer:             issuer,
 			InsecureSkipVerify: true,
 		},
-		OnStack: func(_ context.Context, stack *connector.ConnectionStack, _ *envelope.TLSSnapshot, _ string) {
+		OnStack: func(_ context.Context, stack *connector.ConnectionStack, _, _ *envelope.TLSSnapshot, _ string) {
 			defer stack.Close()
 			onStackCalled <- struct{}{}
 		},
