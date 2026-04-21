@@ -53,6 +53,16 @@ func (s *RecordStep) Process(ctx context.Context, env *envelope.Envelope) Result
 		s.createStream(ctx, env)
 	}
 
+	// On Receive, project upstream TLS snapshot (if present) onto
+	// Stream.ConnInfo. The Send side carries the synthetic MITM cert we
+	// presented to the client; Receive carries the real upstream TLS
+	// reality that analysts actually need. UpdateStream is idempotent —
+	// repeated Receive envelopes on the same stream rewrite the same
+	// values.
+	if env.Direction == envelope.Receive && env.Context.TLS != nil {
+		s.updateStreamTLS(ctx, env)
+	}
+
 	// Record Flow for every Envelope (Send or Receive).
 	snap := SnapshotFromContext(ctx)
 	if snap != nil && envelopeModified(snap, env) {
@@ -62,6 +72,41 @@ func (s *RecordStep) Process(ctx context.Context, env *envelope.Envelope) Result
 	}
 
 	return Result{}
+}
+
+// updateStreamTLS projects env.Context.TLS into Stream.ConnInfo via
+// UpdateStream. Fires on every Receive envelope with a non-nil TLS
+// snapshot.
+//
+// The per-Receive invocation is intentional: it keeps RecordStep
+// protocol-agnostic (no per-stream sync.Map state) and idempotent on
+// the same row — repeated Receive envelopes on the same stream rewrite
+// the same values. For N6 HTTP/2 complete-message aggregation this is
+// exactly one UpdateStream per Stream, so the cost is negligible.
+//
+// Future consideration (N7 streaming protocols — gRPC / WebSocket /
+// SSE): this fires once per received envelope, which could produce N
+// redundant UpdateStream calls per Stream where only the first is
+// meaningful (TLS snapshot is set-once per connection). If that
+// becomes a bottleneck, replace with a first-Receive gate then.
+func (s *RecordStep) updateStreamTLS(ctx context.Context, env *envelope.Envelope) {
+	tls := env.Context.TLS
+	update := flow.StreamUpdate{
+		TLSVersion:           tls.VersionName(),
+		TLSCipher:            tls.CipherName(),
+		TLSALPN:              tls.ALPN,
+		TLSServerCertSubject: tls.PeerCertSubject(),
+	}
+	if update.TLSVersion == "" && update.TLSCipher == "" && update.TLSALPN == "" && update.TLSServerCertSubject == "" {
+		// No data worth writing.
+		return
+	}
+	if err := s.store.UpdateStream(ctx, env.StreamID, update); err != nil {
+		s.logger.Error("record step: TLS snapshot update failed",
+			"stream_id", env.StreamID,
+			"error", err,
+		)
+	}
 }
 
 // createStream creates a new Stream record from the Envelope.

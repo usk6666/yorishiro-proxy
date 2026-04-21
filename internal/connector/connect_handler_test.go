@@ -16,7 +16,7 @@ func TestNewCONNECTHandler_SuccessfulPipeline(t *testing.T) {
 	handler := NewCONNECTHandler(CONNECTHandlerConfig{
 		Negotiator: NewCONNECTNegotiator(nil),
 		BuildCfg:   nil, // Will cause stack build to fail — that's OK for this test
-		OnStack: func(ctx context.Context, stack *ConnectionStack, snap *envelope.TLSSnapshot, target string) {
+		OnStack: func(ctx context.Context, stack *ConnectionStack, clientSnap, upstreamSnap *envelope.TLSSnapshot, target string) {
 			stackReceived.Store(true)
 			defer stack.Close()
 			if target != "example.com:443" {
@@ -62,7 +62,7 @@ func TestNewCONNECTHandler_ScopeDenial(t *testing.T) {
 	handler := NewCONNECTHandler(CONNECTHandlerConfig{
 		Negotiator: NewCONNECTNegotiator(nil),
 		Scope:      scope,
-		OnStack: func(ctx context.Context, stack *ConnectionStack, snap *envelope.TLSSnapshot, target string) {
+		OnStack: func(ctx context.Context, stack *ConnectionStack, clientSnap, upstreamSnap *envelope.TLSSnapshot, target string) {
 			stackCalled.Store(true)
 		},
 	})
@@ -103,7 +103,7 @@ func TestNewCONNECTHandler_RateLimitDenial(t *testing.T) {
 	handler := NewCONNECTHandler(CONNECTHandlerConfig{
 		Negotiator:  NewCONNECTNegotiator(nil),
 		RateLimiter: rl,
-		OnStack: func(ctx context.Context, stack *ConnectionStack, snap *envelope.TLSSnapshot, target string) {
+		OnStack: func(ctx context.Context, stack *ConnectionStack, clientSnap, upstreamSnap *envelope.TLSSnapshot, target string) {
 			stackCalled.Store(true)
 		},
 	})
@@ -135,7 +135,7 @@ func TestNewCONNECTHandler_NotCONNECT(t *testing.T) {
 	var stackCalled atomic.Bool
 	handler := NewCONNECTHandler(CONNECTHandlerConfig{
 		Negotiator: NewCONNECTNegotiator(nil),
-		OnStack: func(ctx context.Context, stack *ConnectionStack, snap *envelope.TLSSnapshot, target string) {
+		OnStack: func(ctx context.Context, stack *ConnectionStack, clientSnap, upstreamSnap *envelope.TLSSnapshot, target string) {
 			stackCalled.Store(true)
 		},
 	})

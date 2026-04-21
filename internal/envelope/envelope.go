@@ -1,7 +1,9 @@
 package envelope
 
 import (
+	"crypto/tls"
 	"crypto/x509"
+	"fmt"
 	"net"
 	"time"
 )
@@ -144,4 +146,46 @@ type TLSSnapshot struct {
 	ClientFingerprint string // JA3 or JA4 hash of the client's ClientHello
 	Version           uint16
 	CipherSuite       uint16
+}
+
+// VersionName returns a human-readable TLS version string
+// ("TLS 1.2", "TLS 1.3", ...). Unknown versions are formatted
+// as "unknown (0xNNNN)".
+func (s *TLSSnapshot) VersionName() string {
+	if s == nil {
+		return ""
+	}
+	switch s.Version {
+	case tls.VersionTLS10:
+		return "TLS 1.0"
+	case tls.VersionTLS11:
+		return "TLS 1.1"
+	case tls.VersionTLS12:
+		return "TLS 1.2"
+	case tls.VersionTLS13:
+		return "TLS 1.3"
+	case 0:
+		return ""
+	default:
+		return fmt.Sprintf("unknown (0x%04x)", s.Version)
+	}
+}
+
+// CipherName returns the standard name of the negotiated cipher suite,
+// or a hex-encoded identifier for unknown suites. Returns the empty
+// string when the snapshot is nil or CipherSuite is zero.
+func (s *TLSSnapshot) CipherName() string {
+	if s == nil || s.CipherSuite == 0 {
+		return ""
+	}
+	return tls.CipherSuiteName(s.CipherSuite)
+}
+
+// PeerCertSubject returns the Subject DN of PeerCertificate, or the
+// empty string when no peer certificate was observed.
+func (s *TLSSnapshot) PeerCertSubject() string {
+	if s == nil || s.PeerCertificate == nil {
+		return ""
+	}
+	return s.PeerCertificate.Subject.String()
 }
