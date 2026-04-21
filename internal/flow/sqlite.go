@@ -156,8 +156,8 @@ func (s *SQLiteStore) saveStreamSync(ctx context.Context, st *Stream) error {
 	}
 
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO streams (id, conn_id, protocol, scheme, state, timestamp, duration_ms, tags, client_addr, server_addr, tls_version, tls_cipher, tls_alpn, tls_server_cert_subject, blocked_by, send_ms, wait_ms, receive_ms)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO streams (id, conn_id, protocol, scheme, state, timestamp, duration_ms, tags, client_addr, server_addr, tls_version, tls_cipher, tls_alpn, tls_server_cert_subject, blocked_by, send_ms, wait_ms, receive_ms, failure_reason)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		st.ID,
 		st.ConnID,
 		st.Protocol,
@@ -176,6 +176,7 @@ func (s *SQLiteStore) saveStreamSync(ctx context.Context, st *Stream) error {
 		st.SendMs,
 		st.WaitMs,
 		st.ReceiveMs,
+		st.FailureReason,
 	)
 	if err != nil {
 		return fmt.Errorf("insert stream: %w", err)
@@ -186,70 +187,70 @@ func (s *SQLiteStore) saveStreamSync(ctx context.Context, st *Stream) error {
 // UpdateStream applies partial updates to an existing stream.
 func (s *SQLiteStore) UpdateStream(ctx context.Context, id string, update StreamUpdate) error {
 	return s.enqueueWrite(ctx, func(ctx context.Context) error {
-		var sets []string
-		var args []interface{}
-
-		if update.State != "" {
-			sets = append(sets, "state = ?")
-			args = append(args, update.State)
+		sets, args, err := buildStreamUpdateSets(update)
+		if err != nil {
+			return err
 		}
-		if update.Duration != 0 {
-			sets = append(sets, "duration_ms = ?")
-			args = append(args, update.Duration.Milliseconds())
-		}
-		if update.Tags != nil {
-			tagsJSON, err := json.Marshal(update.Tags)
-			if err != nil {
-				return fmt.Errorf("marshal tags: %w", err)
-			}
-			sets = append(sets, "tags = ?")
-			args = append(args, string(tagsJSON))
-		}
-		if update.ServerAddr != "" {
-			sets = append(sets, "server_addr = ?")
-			args = append(args, update.ServerAddr)
-		}
-		if update.TLSVersion != "" {
-			sets = append(sets, "tls_version = ?")
-			args = append(args, update.TLSVersion)
-		}
-		if update.TLSCipher != "" {
-			sets = append(sets, "tls_cipher = ?")
-			args = append(args, update.TLSCipher)
-		}
-		if update.TLSALPN != "" {
-			sets = append(sets, "tls_alpn = ?")
-			args = append(args, update.TLSALPN)
-		}
-		if update.TLSServerCertSubject != "" {
-			sets = append(sets, "tls_server_cert_subject = ?")
-			args = append(args, update.TLSServerCertSubject)
-		}
-		if update.SendMs != nil {
-			sets = append(sets, "send_ms = ?")
-			args = append(args, *update.SendMs)
-		}
-		if update.WaitMs != nil {
-			sets = append(sets, "wait_ms = ?")
-			args = append(args, *update.WaitMs)
-		}
-		if update.ReceiveMs != nil {
-			sets = append(sets, "receive_ms = ?")
-			args = append(args, *update.ReceiveMs)
-		}
-
 		if len(sets) == 0 {
 			return nil
 		}
 
 		args = append(args, id)
 		query := fmt.Sprintf("UPDATE streams SET %s WHERE id = ?", strings.Join(sets, ", "))
-		_, err := s.db.ExecContext(ctx, query, args...)
-		if err != nil {
+		if _, err := s.db.ExecContext(ctx, query, args...); err != nil {
 			return fmt.Errorf("update stream %s: %w", id, err)
 		}
 		return nil
 	})
+}
+
+// buildStreamUpdateSets translates a StreamUpdate into SQL SET clauses and
+// their bind arguments. Empty / zero values are skipped so partial updates
+// do not clobber existing columns (contract relied on by every caller —
+// RecordStep's per-Receive TLS projection, Session's OnComplete State
+// transition, and USK-620's FailureReason classification).
+func buildStreamUpdateSets(update StreamUpdate) ([]string, []interface{}, error) {
+	var sets []string
+	var args []interface{}
+	addString := func(column, value string) {
+		if value == "" {
+			return
+		}
+		sets = append(sets, column+" = ?")
+		args = append(args, value)
+	}
+	addInt64 := func(column string, value *int64) {
+		if value == nil {
+			return
+		}
+		sets = append(sets, column+" = ?")
+		args = append(args, *value)
+	}
+
+	addString("state", update.State)
+	addString("failure_reason", update.FailureReason)
+	if update.Duration != 0 {
+		sets = append(sets, "duration_ms = ?")
+		args = append(args, update.Duration.Milliseconds())
+	}
+	if update.Tags != nil {
+		tagsJSON, err := json.Marshal(update.Tags)
+		if err != nil {
+			return nil, nil, fmt.Errorf("marshal tags: %w", err)
+		}
+		sets = append(sets, "tags = ?")
+		args = append(args, string(tagsJSON))
+	}
+	addString("server_addr", update.ServerAddr)
+	addString("tls_version", update.TLSVersion)
+	addString("tls_cipher", update.TLSCipher)
+	addString("tls_alpn", update.TLSALPN)
+	addString("tls_server_cert_subject", update.TLSServerCertSubject)
+	addInt64("send_ms", update.SendMs)
+	addInt64("wait_ms", update.WaitMs)
+	addInt64("receive_ms", update.ReceiveMs)
+
+	return sets, args, nil
 }
 
 // GetStream retrieves a stream by ID. It accepts either a full UUID (36 chars)
@@ -323,7 +324,7 @@ func ValidateStreamID(id string) error {
 }
 
 // streamColumns is the list of columns selected in stream queries.
-const streamColumns = `id, conn_id, protocol, scheme, state, timestamp, duration_ms, tags, client_addr, server_addr, tls_version, tls_cipher, tls_alpn, tls_server_cert_subject, blocked_by, send_ms, wait_ms, receive_ms`
+const streamColumns = `id, conn_id, protocol, scheme, state, timestamp, duration_ms, tags, client_addr, server_addr, tls_version, tls_cipher, tls_alpn, tls_server_cert_subject, blocked_by, send_ms, wait_ms, receive_ms, failure_reason`
 
 // buildStreamWhereClause constructs a SQL WHERE clause from StreamListOptions.
 // Method, URLPattern, and StatusCode are matched via EXISTS subqueries on flows.
@@ -749,6 +750,7 @@ func scanStream(row scannable) (*Stream, error) {
 		sendMs         sql.NullInt64
 		waitMs         sql.NullInt64
 		receiveMs      sql.NullInt64
+		failureReason  string
 	)
 
 	err := row.Scan(
@@ -770,6 +772,7 @@ func scanStream(row scannable) (*Stream, error) {
 		&sendMs,
 		&waitMs,
 		&receiveMs,
+		&failureReason,
 	)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -804,6 +807,7 @@ func scanStream(row scannable) (*Stream, error) {
 	}
 
 	st.BlockedBy = blockedBy
+	st.FailureReason = failureReason
 	st.SendMs = nullInt64ToPtr(sendMs)
 	st.WaitMs = nullInt64ToPtr(waitMs)
 	st.ReceiveMs = nullInt64ToPtr(receiveMs)

@@ -263,6 +263,15 @@ CREATE INDEX IF NOT EXISTS idx_flows_url ON flows(url);
 CREATE INDEX IF NOT EXISTS idx_flows_status_code ON flows(status_code);
 `
 
+// schemaV9 adds the failure_reason column to streams for classification of
+// stream-level errors (refused / canceled / protocol / internal). Populated
+// by SessionOptions.OnComplete when err wraps a *layer.StreamError. Empty
+// when the stream completed normally or when the error has no classification.
+const schemaV9 = `
+ALTER TABLE streams ADD COLUMN failure_reason TEXT NOT NULL DEFAULT '';
+CREATE INDEX IF NOT EXISTS idx_streams_failure_reason ON streams(failure_reason);
+`
+
 var migrations = map[int]string{
 	1: schemaV1,
 	2: schemaV2,
@@ -272,6 +281,7 @@ var migrations = map[int]string{
 	6: schemaV6,
 	7: schemaV7,
 	8: schemaV8,
+	9: schemaV9,
 }
 
 func migrate(ctx context.Context, db *sql.DB) error {

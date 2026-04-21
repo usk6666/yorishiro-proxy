@@ -26,6 +26,13 @@ type Stream struct {
 	// State indicates the stream lifecycle state:
 	// "active" (in progress), "complete" (finished), or "error" (failed).
 	State string
+	// FailureReason classifies the stream-level error for diagnostic use.
+	// Empty when State != "error" or when no classified error was surfaced.
+	// Canonical values come from layer.ErrorCode.String(): "refused",
+	// "canceled", "aborted", "internal_error", "protocol_error".
+	// Analysts use this to distinguish GOAWAY-refused streams from
+	// cancelled streams and protocol errors without inspecting raw bytes.
+	FailureReason string
 	// Timestamp is the time the stream was initiated.
 	Timestamp time.Time
 	// Duration is the total duration of the stream.
@@ -115,6 +122,9 @@ type Flow struct {
 type StreamUpdate struct {
 	// State sets the stream state (e.g., "complete", "error").
 	State string
+	// FailureReason sets the classification label for an errored stream.
+	// Only applied when non-empty. See Stream.FailureReason for valid values.
+	FailureReason string
 	// Duration sets the stream duration.
 	Duration time.Duration
 	// Tags replaces the stream tags.

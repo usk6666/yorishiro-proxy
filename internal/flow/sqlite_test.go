@@ -1940,3 +1940,109 @@ func TestSQLiteStore_SchemeField(t *testing.T) {
 		t.Errorf("GetFlow scheme = %q, want %q", got.Scheme, "https")
 	}
 }
+
+// TestSQLiteStore_StreamFailureReason_RoundTrip covers the USK-620 classification
+// column: FailureReason persists through UpdateStream and is read back via
+// GetStream/ListStreams.
+func TestSQLiteStore_StreamFailureReason_RoundTrip(t *testing.T) {
+	t.Parallel()
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	st := &Stream{
+		Protocol:  "HTTP/2",
+		State:     "active",
+		Timestamp: time.Now().UTC(),
+	}
+	if err := store.SaveStream(ctx, st); err != nil {
+		t.Fatalf("SaveStream: %v", err)
+	}
+
+	// Precondition: freshly saved stream has empty FailureReason.
+	got, err := store.GetStream(ctx, st.ID)
+	if err != nil {
+		t.Fatalf("GetStream (pre-update): %v", err)
+	}
+	if got.FailureReason != "" {
+		t.Errorf("FailureReason before update = %q, want empty", got.FailureReason)
+	}
+
+	// Apply error state + classification.
+	if err := store.UpdateStream(ctx, st.ID, StreamUpdate{
+		State:         "error",
+		FailureReason: "refused",
+	}); err != nil {
+		t.Fatalf("UpdateStream: %v", err)
+	}
+
+	got, err = store.GetStream(ctx, st.ID)
+	if err != nil {
+		t.Fatalf("GetStream (post-update): %v", err)
+	}
+	if got.State != "error" {
+		t.Errorf("State = %q, want %q", got.State, "error")
+	}
+	if got.FailureReason != "refused" {
+		t.Errorf("FailureReason = %q, want %q", got.FailureReason, "refused")
+	}
+
+	// ListStreams must surface the same value.
+	list, err := store.ListStreams(ctx, StreamListOptions{Limit: 10})
+	if err != nil {
+		t.Fatalf("ListStreams: %v", err)
+	}
+	var found bool
+	for _, s := range list {
+		if s.ID == st.ID {
+			found = true
+			if s.FailureReason != "refused" {
+				t.Errorf("ListStreams FailureReason = %q, want %q", s.FailureReason, "refused")
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("stream %s not present in ListStreams output", st.ID)
+	}
+}
+
+// TestSQLiteStore_StreamFailureReason_EmptySkipsUpdate verifies the standard
+// partial-update contract: empty FailureReason does not overwrite an existing
+// value. This matters for sequences like "refused" then a follow-up
+// UpdateStream that only changes Duration.
+func TestSQLiteStore_StreamFailureReason_EmptySkipsUpdate(t *testing.T) {
+	t.Parallel()
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	st := &Stream{
+		Protocol:  "HTTP/2",
+		State:     "active",
+		Timestamp: time.Now().UTC(),
+	}
+	if err := store.SaveStream(ctx, st); err != nil {
+		t.Fatalf("SaveStream: %v", err)
+	}
+
+	if err := store.UpdateStream(ctx, st.ID, StreamUpdate{
+		State:         "error",
+		FailureReason: "canceled",
+	}); err != nil {
+		t.Fatalf("UpdateStream (initial): %v", err)
+	}
+
+	// Second update with no FailureReason — value must be preserved.
+	if err := store.UpdateStream(ctx, st.ID, StreamUpdate{
+		Duration: 200 * time.Millisecond,
+	}); err != nil {
+		t.Fatalf("UpdateStream (follow-up): %v", err)
+	}
+
+	got, err := store.GetStream(ctx, st.ID)
+	if err != nil {
+		t.Fatalf("GetStream: %v", err)
+	}
+	if got.FailureReason != "canceled" {
+		t.Errorf("FailureReason after follow-up update = %q, want %q",
+			got.FailureReason, "canceled")
+	}
+}

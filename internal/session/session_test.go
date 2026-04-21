@@ -1213,3 +1213,47 @@ func TestRunSession_OnComplete_AllDropped(t *testing.T) {
 		t.Errorf("OnComplete err = %v, want nil", gotErr)
 	}
 }
+
+// TestClassifyError covers the USK-620 helper that OnComplete closures use
+// to project a *layer.StreamError's code into flow.StreamUpdate.FailureReason.
+// The helper must traverse %w wrapping (session.RunSession wraps dial errors
+// as "dial: %w") and return the empty string for unclassified errors so the
+// FailureReason column remains empty when no protocol-level classification
+// applies.
+func TestClassifyError(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"nil", nil, ""},
+		{"refused", &layer.StreamError{Code: layer.ErrorRefused, Reason: "GOAWAY received"}, "refused"},
+		{"canceled", &layer.StreamError{Code: layer.ErrorCanceled}, "canceled"},
+		{"aborted", &layer.StreamError{Code: layer.ErrorAborted}, "aborted"},
+		{"internal_error", &layer.StreamError{Code: layer.ErrorInternalError}, "internal_error"},
+		{"protocol_error", &layer.StreamError{Code: layer.ErrorProtocol}, "protocol_error"},
+		{
+			"wrapped refused",
+			fmt.Errorf("dial: %w", &layer.StreamError{Code: layer.ErrorRefused, Reason: "layer shutdown"}),
+			"refused",
+		},
+		{
+			"double-wrapped canceled",
+			fmt.Errorf("upstream.Next: %w", fmt.Errorf("inner: %w", &layer.StreamError{Code: layer.ErrorCanceled})),
+			"canceled",
+		},
+		{"plain ctx cancel", context.Canceled, ""},
+		{"plain ctx deadline", context.DeadlineExceeded, ""},
+		{"unclassified error", errors.New("something else"), ""},
+		{"io.EOF", io.EOF, ""},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := ClassifyError(tc.err)
+			if got != tc.want {
+				t.Errorf("ClassifyError(%v) = %q, want %q", tc.err, got, tc.want)
+			}
+		})
+	}
+}
