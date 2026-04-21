@@ -75,8 +75,20 @@ func (s *RecordStep) Process(ctx context.Context, env *envelope.Envelope) Result
 }
 
 // updateStreamTLS projects env.Context.TLS into Stream.ConnInfo via
-// UpdateStream. Called on every Receive envelope with a non-nil TLS
-// snapshot; the update is idempotent.
+// UpdateStream. Fires on every Receive envelope with a non-nil TLS
+// snapshot.
+//
+// The per-Receive invocation is intentional: it keeps RecordStep
+// protocol-agnostic (no per-stream sync.Map state) and idempotent on
+// the same row — repeated Receive envelopes on the same stream rewrite
+// the same values. For N6 HTTP/2 complete-message aggregation this is
+// exactly one UpdateStream per Stream, so the cost is negligible.
+//
+// Future consideration (N7 streaming protocols — gRPC / WebSocket /
+// SSE): this fires once per received envelope, which could produce N
+// redundant UpdateStream calls per Stream where only the first is
+// meaningful (TLS snapshot is set-once per connection). If that
+// becomes a bottleneck, replace with a first-Receive gate then.
 func (s *RecordStep) updateStreamTLS(ctx context.Context, env *envelope.Envelope) {
 	tls := env.Context.TLS
 	update := flow.StreamUpdate{
