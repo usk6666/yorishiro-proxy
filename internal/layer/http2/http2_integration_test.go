@@ -792,15 +792,7 @@ func TestMultipleConcurrentStreams_RecordingIsolation(t *testing.T) {
 		got[r.id] = r.body
 	}
 	if firstErr != nil {
-		// Under -race scheduling, the proxy sends RST_STREAM(CANCEL) via
-		// channel.Close() in RunSession's defer even for streams that have
-		// already reached closed-closed state. Some peers respond with
-		// GOAWAY which aborts other concurrent streams on the same
-		// connection. Flag this as a gap and skip.
-		if bytes.Contains([]byte(firstErr.Error()), []byte("CANCEL")) || bytes.Contains([]byte(firstErr.Error()), []byte("GOAWAY")) {
-			t.Skip("not yet implemented: USK-618 HTTP/2 proxy emits RST_STREAM(CANCEL) on already-closed streams during concurrent workloads, causing peer GOAWAY/cancel cascade.")
-		}
-		t.Logf("at least one request failed: %v", firstErr)
+		t.Fatalf("at least one request failed: %v", firstErr)
 	}
 	if len(got) != n {
 		t.Fatalf("got %d unique responses, want %d (firstErr=%v)", len(got), n, firstErr)
