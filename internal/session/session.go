@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"io"
 	"sync"
-	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/layer"
@@ -290,20 +289,20 @@ func upstreamToClient(
 // arrives just after the request half-closed. For HTTP/2 with a GET request,
 // the client sends HEADERS(endStream=true), the Channel's recv is closed by
 // the assembler, and Next returns io.EOF on the session's next iteration.
-// Any RST_STREAM that arrives after that point fills the Channel's errCh but
-// is not observed because nobody calls Next anymore. Without this watcher,
-// upstreamToClient would block on upstream.Next forever while the upstream
-// server still holds the response.
+// Any RST_STREAM that arrives after that point is stored on the Channel
+// but is not observed because nobody calls Next anymore. Without this
+// watcher, upstreamToClient would block on upstream.Next forever while the
+// upstream server still holds the response.
 //
-// The watcher starts after uh.done and stops when upstreamDone fires or the
-// session context is cancelled. It polls client.Next with a short interval
-// so that Next drains a filled errCh on any subsequent iteration. On a
-// non-EOF error it closes the upstream Channel (HTTP/2: RST_STREAM(CANCEL)
-// + errCh delivery + recv close) and returns the wrapped error, so the
-// errgroup classifies the session as an error result and OnComplete can
-// surface the StreamError for MITM classification.
+// The watcher starts after uh.done and waits on the Channel's Closed
+// signal. Implementations populate the terminal error (Err) before closing
+// the signal, so when Closed fires a non-EOF value from Err indicates a
+// late abnormal event. On such an error the watcher closes the upstream
+// Channel (HTTP/2: RST_STREAM(CANCEL)) and returns the wrapped error so
+// the errgroup classifies the session as an error result and OnComplete
+// can surface the StreamError for MITM classification.
 //
-// See USK-616.
+// See USK-616, USK-625.
 func lateClientErrorWatcher(
 	ctx context.Context,
 	client layer.Channel,
@@ -326,45 +325,19 @@ func lateClientErrorWatcher(
 		return nil
 	}
 
-	for {
-		// Stop once upstreamToClient completes (normal EOF or otherwise) —
-		// a late cancel at that point is irrelevant, the session is already
-		// winding down.
-		select {
-		case <-upstreamDone:
-			return nil
-		case <-ctx.Done():
-			return nil
-		default:
+	select {
+	case <-client.Closed():
+		if err := client.Err(); err != nil && !errors.Is(err, io.EOF) {
+			// Late abnormal event (e.g., RST_STREAM) arrived after the
+			// client's recv half-closed. Propagate the cancel to the
+			// response side and surface the error for classification.
+			_ = uh.ch.Close()
+			return fmt.Errorf("client late cancel: %w", err)
 		}
-
-		_, nerr := client.Next(ctx)
-		if nerr == nil {
-			// Unexpected: after client-side EOF no further envelopes should
-			// arrive. Bail out rather than loop.
-			return nil
-		}
-		if errors.Is(nerr, io.EOF) {
-			// Still EOF; no late error yet. Brief wait then retry, or exit
-			// early if the response side or session context is done.
-			select {
-			case <-upstreamDone:
-				return nil
-			case <-ctx.Done():
-				return nil
-			case <-time.After(lateErrorPollInterval):
-			}
-			continue
-		}
-		// Non-EOF error observed after client-side EOF (late cancel).
-		// Close upstream to propagate the cancel to the response side, and
-		// return the error so g.Wait classifies the session result.
-		_ = uh.ch.Close()
-		return fmt.Errorf("client late cancel: %w", nerr)
+		return nil
+	case <-upstreamDone:
+		return nil
+	case <-ctx.Done():
+		return nil
 	}
 }
-
-// lateErrorPollInterval controls how often lateClientErrorWatcher polls
-// client.Next for a late stream-level error after the client has
-// half-closed. Chosen to balance latency-to-detect against CPU overhead.
-const lateErrorPollInterval = 5 * time.Millisecond

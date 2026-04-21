@@ -524,6 +524,10 @@ func (l *Layer) failStream(streamID uint32, se *layer.StreamError) {
 	case ch.errCh <- se:
 	default:
 	}
+	// Populate Err before closing termDone so subscribers observe a stable
+	// value. First-writer-wins: a prior local markTerminated (e.g. from
+	// channel.Close) keeps its terminal error.
+	ch.markTerminated(se)
 	if asm != nil {
 		asm.phase = asmDone
 	}
@@ -545,6 +549,7 @@ func (l *Layer) failStreamsAfterGoAway(lastStreamID uint32, se *layer.StreamErro
 		case ch.errCh <- se:
 		default:
 		}
+		ch.markTerminated(se)
 		l.closeChannelRecv(ch)
 	}
 }
@@ -560,6 +565,10 @@ func (l *Layer) broadcastShutdown() {
 	l.mu.Unlock()
 
 	for _, ch := range channels {
+		// Connection-level teardown: streams that never individually
+		// terminated see the layer-shutdown as a normal EOF so the session
+		// watcher does not misclassify it as a late peer cancel.
+		ch.markTerminated(io.EOF)
 		l.closeChannelRecv(ch)
 	}
 	l.closeChannelOutOnce.Do(func() {

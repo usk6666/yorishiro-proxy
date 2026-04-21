@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -46,6 +47,12 @@ type channel struct {
 	currentStreamID string // changes per request-response pair
 	sequence        int    // 0=request, 1=response within a pair
 	connClosed      bool   // set when Connection: close or HTTP/1.0
+
+	// Terminal-state tracking. Populated before termDone closes.
+	termMu   sync.Mutex
+	termErr  error
+	termOnce sync.Once
+	termDone chan struct{}
 }
 
 // StreamID returns the connection-level identifier for this channel.
@@ -60,6 +67,7 @@ func (c *channel) StreamID() string { return c.streamID }
 // on the previous message, or HTTP/1.0 without keep-alive).
 func (c *channel) Next(ctx context.Context) (*envelope.Envelope, error) {
 	if c.connClosed {
+		c.markTerminated(io.EOF)
 		return nil, io.EOF
 	}
 
@@ -69,7 +77,9 @@ func (c *channel) Next(ctx context.Context) (*envelope.Envelope, error) {
 	case envelope.Receive:
 		return c.nextResponse(ctx)
 	default:
-		return nil, fmt.Errorf("http1: unknown direction %d", c.direction)
+		err := fmt.Errorf("http1: unknown direction %d", c.direction)
+		c.markTerminated(err)
+		return nil, err
 	}
 }
 
@@ -102,15 +112,40 @@ func (c *channel) Send(ctx context.Context, env *envelope.Envelope) error {
 // Close is a no-op. The connection is owned by the Layer, not the Channel.
 func (c *channel) Close() error { return nil }
 
+// Closed returns a channel closed when this Channel has reached its terminal
+// state. See layer.Channel for the contract.
+func (c *channel) Closed() <-chan struct{} { return c.termDone }
+
+// Err returns the terminal error. See layer.Channel for the contract.
+func (c *channel) Err() error {
+	c.termMu.Lock()
+	defer c.termMu.Unlock()
+	return c.termErr
+}
+
+// markTerminated stores err (first-writer-wins) and closes termDone exactly
+// once. Callers must guarantee err is non-nil.
+func (c *channel) markTerminated(err error) {
+	c.termMu.Lock()
+	if c.termErr == nil {
+		c.termErr = err
+	}
+	c.termMu.Unlock()
+	c.termOnce.Do(func() { close(c.termDone) })
+}
+
 // --- Next() implementation ---
 
 func (c *channel) nextRequest(_ context.Context) (*envelope.Envelope, error) {
 	rawReq, err := parser.ParseRequest(c.reader)
 	if err != nil {
 		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			c.markTerminated(io.EOF)
 			return nil, io.EOF
 		}
-		return nil, fmt.Errorf("http1: parse request: %w", err)
+		wrapped := fmt.Errorf("http1: parse request: %w", err)
+		c.markTerminated(wrapped)
+		return nil, wrapped
 	}
 
 	// Generate new StreamID for each request-response pair.
@@ -173,9 +208,12 @@ func (c *channel) nextResponse(_ context.Context) (*envelope.Envelope, error) {
 	rawResp, err := parser.ParseResponse(c.reader)
 	if err != nil {
 		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			c.markTerminated(io.EOF)
 			return nil, io.EOF
 		}
-		return nil, fmt.Errorf("http1: parse response: %w", err)
+		wrapped := fmt.Errorf("http1: parse response: %w", err)
+		c.markTerminated(wrapped)
+		return nil, wrapped
 	}
 
 	// Read body with passthrough threshold.
