@@ -279,6 +279,13 @@ func (l *Layer) preparePeerWriteSettings(peer Settings, headers, trailers []hpac
 // writeBodyForMessage writes the body portion of req. When hasTrailers is true,
 // END_STREAM is suppressed on the body's final DATA frame so the trailer
 // HEADERS frame can carry it instead (RFC 9113 §8.1).
+//
+// Invariant: bodyReq is a shallow copy of *req. bodyReq.done shares the
+// underlying channel with req.done, so this helper MUST NOT call deliverDone
+// on bodyReq.done — only the top-level handleWriteMessage signals completion.
+// Returning the error up to the caller preserves the single-signaller
+// invariant; adding a deliverDone here would fire req.done prematurely and
+// leak the caller goroutine awaiting the real completion signal.
 func (l *Layer) writeBodyForMessage(req *writeMessage, hasTrailers bool) error {
 	bodyReq := *req
 	if hasTrailers {
@@ -411,6 +418,15 @@ func (l *Layer) writeStreamingChunk(req *writeMessage, buf []byte, n int, eof bo
 // waitForWindow blocks until the smaller of {stream send window, conn send
 // window, requested, maxFrameSize} is positive, then consumes that many bytes
 // from both windows and returns the consumed amount.
+//
+// Slow-peer / shutdown invariant: <-l.shutdown is the ONLY escape when a peer
+// withholds WINDOW_UPDATE. Per-request context is intentionally not observed
+// here — request-level deadlines do not apply to body streaming, because the
+// writer goroutine is owned by the Layer's lifecycle, not by any individual
+// request. A malicious or slow peer that never emits WINDOW_UPDATE parks the
+// writer in the select below until Layer.Close cascades shutdown. This is
+// acceptable because the Layer's close path bounds total waiting time; it is
+// the operator's responsibility to tear down the Layer on abuse.
 func (l *Layer) waitForWindow(streamID uint32, requested, maxFrameSize int) (int, error) {
 	for {
 		// Check shutdown first.

@@ -427,6 +427,13 @@ func buildTrailerFields(trailers []envelope.KeyValue) []hpack.HeaderField {
 		if strings.HasPrefix(kv.Name, ":") {
 			continue
 		}
+		// Connection-specific headers (RFC 9113 §8.2.2 — Connection,
+		// Keep-Alive, Transfer-Encoding, Upgrade, and TE != "trailers")
+		// are NOT filtered here. MITM wire-fidelity policy prohibits
+		// silent normalization on the Send path. The symmetric
+		// anomaly-flagging that the Receive path applies in
+		// assembler.go (regularHeaderAnomalies) is a known gap for the
+		// trailer-send path; tracked as a follow-up issue.
 		out = append(out, hpack.HeaderField{
 			Name:  strings.ToLower(kv.Name),
 			Value: kv.Value,

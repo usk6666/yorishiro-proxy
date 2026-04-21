@@ -332,11 +332,17 @@ func (l *Layer) handleStreamData(f *frame.Frame) error {
 	if endStream {
 		_ = l.conn.Streams().Transition(f.Header.StreamID, EventRecvEndStream)
 	}
-	// Passthrough END_STREAM: the assembler handed the envelope off at the
-	// threshold and terminates without yielding another one, so the
-	// deliverEnvelope path does not close recv. Close it here idempotently
-	// so Channel.Next consumers observe io.EOF and the session completes
-	// (USK-617).
+	// Close the Channel's recv side if the assembler has reached asmDone.
+	// This handles two cases:
+	//   - Passthrough END_STREAM: handleDataFrame returns (nil, true, nil)
+	//     because the assembler handed the envelope off at the passthrough
+	//     threshold and terminates without yielding another one. The
+	//     deliverEnvelope branch above is skipped, so recv would otherwise
+	//     stay open forever and Channel.Next would never observe io.EOF
+	//     (USK-617).
+	//   - Normal terminal DATA: deliverEnvelope has already closed recv via
+	//     its own asmDone check. This second call is a safe idempotent
+	//     backstop — closeChannelRecv is guarded by sync.Once.
 	if asm.phase == asmDone {
 		l.closeChannelRecv(ch)
 	}
