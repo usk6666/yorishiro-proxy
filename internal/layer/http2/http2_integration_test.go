@@ -539,8 +539,7 @@ func waitForStreamState(t *testing.T, store *testStore, streamID, wantState stri
 
 // ensureLinkedExchange asserts that at least one Stream exists whose flow list
 // contains both a send and a receive flow (the MITM-diagnostic invariant:
-// one exchange = one Stream record). If HTTP/2 records flows under distinct
-// client/upstream channel UUIDs, this invariant is broken; skip with GAP-6.
+// one exchange = one Stream record).
 func ensureLinkedExchange(t *testing.T, store *testStore, timeout time.Duration) (*flow.Stream, []*flow.Flow) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
@@ -562,8 +561,6 @@ func ensureLinkedExchange(t *testing.T, store *testStore, timeout time.Duration)
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	// Look globally — if send+receive exist but under different stream IDs,
-	// that's GAP-6.
 	allFlows := store.allFlows()
 	hasGlobalSend := false
 	hasGlobalRecv := false
@@ -574,9 +571,6 @@ func ensureLinkedExchange(t *testing.T, store *testStore, timeout time.Duration)
 		if f.Direction == "receive" {
 			hasGlobalRecv = true
 		}
-	}
-	if hasGlobalSend && hasGlobalRecv {
-		t.Skip("not yet implemented: USK-615 HTTP/2 send and receive flows recorded under DIFFERENT stream IDs (client vs upstream channel UUIDs). MITM analyst cannot retrieve both sides of one exchange from a single Stream record.")
 	}
 	t.Fatalf("no stream with both send+receive flows (hasSend=%v hasRecv=%v)", hasGlobalSend, hasGlobalRecv)
 	return nil, nil
@@ -805,7 +799,9 @@ func TestMultipleConcurrentStreams_RecordingIsolation(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 
 	// MITM invariant: n concurrent streams → n Streams with send+recv each
-	// (no cross-contamination).
+	// (no cross-contamination). The warm-up stream issued above establishes
+	// the shared tunnel and is recorded as its own Stream; count only the
+	// n concurrent streams by filtering on X-Stream-Id != "warm".
 	streams := store.getStreams()
 	linked := 0
 	for _, st := range streams {
@@ -818,20 +814,26 @@ func TestMultipleConcurrentStreams_RecordingIsolation(t *testing.T) {
 				recvF = f
 			}
 		}
-		if sendF != nil && recvF != nil {
-			linked++
-			// Cross-contamination check:
-			sent := ""
-			for k, v := range sendF.Headers {
-				if (k == "X-Stream-Id" || k == "x-stream-id") && len(v) > 0 {
-					sent = v[0]
-					break
-				}
+		if sendF == nil || recvF == nil {
+			continue
+		}
+		// Extract X-Stream-Id from the send flow to distinguish the warm-up
+		// stream from the n concurrent streams.
+		sent := ""
+		for k, v := range sendF.Headers {
+			if (k == "X-Stream-Id" || k == "x-stream-id") && len(v) > 0 {
+				sent = v[0]
+				break
 			}
-			if sent != "" && string(recvF.Body) != "stream-"+sent {
-				t.Errorf("stream %s: send id=%s but recv body=%q, want %q (cross-contamination)",
-					st.ID, sent, recvF.Body, "stream-"+sent)
-			}
+		}
+		if sent == "warm" {
+			continue
+		}
+		linked++
+		// Cross-contamination check:
+		if sent != "" && string(recvF.Body) != "stream-"+sent {
+			t.Errorf("stream %s: send id=%s but recv body=%q, want %q (cross-contamination)",
+				st.ID, sent, recvF.Body, "stream-"+sent)
 		}
 	}
 	if linked == 0 {
@@ -845,13 +847,10 @@ func TestMultipleConcurrentStreams_RecordingIsolation(t *testing.T) {
 				hasRecv = true
 			}
 		}
-		if hasSend && hasRecv {
-			t.Skip("not yet implemented: USK-615 HTTP/2 send and receive flows recorded under DIFFERENT stream IDs (concurrent streams)")
-		}
 		t.Fatalf("no linked streams: hasSend=%v hasRecv=%v", hasSend, hasRecv)
 	}
 	if linked != n {
-		t.Errorf("linked send+recv pairs = %d, want %d", linked, n)
+		t.Errorf("linked send+recv pairs = %d, want %d (excluding warm-up)", linked, n)
 	}
 }
 
@@ -1234,19 +1233,6 @@ func TestConnectionPoolReuse_StreamIsolation(t *testing.T) {
 		}
 	}
 	if linked == 0 {
-		allFlows := store.allFlows()
-		hasSend, hasRecv := false, false
-		for _, f := range allFlows {
-			if f.Direction == "send" {
-				hasSend = true
-			}
-			if f.Direction == "receive" {
-				hasRecv = true
-			}
-		}
-		if hasSend && hasRecv {
-			t.Skip("not yet implemented: USK-615 HTTP/2 send and receive flows recorded under DIFFERENT stream IDs (pool reuse)")
-		}
 		t.Fatalf("no linked streams")
 	}
 }
@@ -1306,11 +1292,13 @@ func TestStreamFlowRecording_ProtocolAndStateLifecycle(t *testing.T) {
 	if sendF.Sequence != 0 {
 		t.Errorf("send Sequence = %d, want 0", sendF.Sequence)
 	}
-	// Receive sequence is 1 if both flows are under the same stream record;
-	// but with GAP-6 active, receive may come from a distinct channel (its
-	// own sequence=0). Under the fixed invariant it should be 1.
-	if recvF.Sequence != 1 && recvF.Sequence != 0 {
-		t.Errorf("recv Sequence = %d, want 1 (or 0 if separate channel)", recvF.Sequence)
+	// HTTP/2 Sequence is per-channel (RFC §3.1). The upstream ClientRole
+	// channel that produced this response envelope starts its own counter at
+	// 0, independent of the client-facing channel. After USK-615, the two
+	// halves share a StreamID but keep independent Sequence — both sides
+	// legitimately report Sequence=0 and are distinguishable by Direction.
+	if recvF.Sequence != 0 {
+		t.Errorf("recv Sequence = %d, want 0 (per-channel counter)", recvF.Sequence)
 	}
 	if sendF.StreamID != st.ID || recvF.StreamID != st.ID {
 		t.Error("flow StreamID mismatch with stream")
