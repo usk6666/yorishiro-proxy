@@ -38,6 +38,22 @@ type channel struct {
 	headersHas bool // true after first request HEADERS sent (client side)
 	closed     bool
 
+	// sentEndStream is set after Send returns successfully. Both Send paths
+	// (opaque and synthetic) always terminate the message with END_STREAM, so
+	// a successful return implies the send half is closed. recvEndStream is
+	// set by the reader/assembler path when natural end-of-stream is observed
+	// (asmDone), via markRecvEnded. Abnormal terminations (failStream,
+	// failStreamsAfterGoAway, broadcastShutdown) deliberately do NOT set
+	// recvEndStream — those paths leave it false so Close still emits
+	// RST_STREAM for the abnormal-teardown case.
+	//
+	// Close reads both flags to decide whether RST_STREAM(CANCEL) is needed.
+	// When both are true and the channel is not a push stream, the stream is
+	// bilaterally closed on the wire and any RST would arrive on a closed
+	// state, provoking a peer PROTOCOL_ERROR + GOAWAY (RFC 9113 §5.1).
+	sentEndStream bool
+	recvEndStream bool
+
 	// Terminal-state tracking. Populated before termDone closes so any
 	// observer of Closed sees a stable Err value.
 	//
@@ -86,6 +102,17 @@ func (c *channel) markTerminated(err error) {
 	}
 	c.termMu.Unlock()
 	c.termOnce.Do(func() { close(c.termDone) })
+}
+
+// markRecvEnded records that the reader/assembler has observed the natural
+// end of the receive half (asmDone). Called from reader paths that close
+// the recv channel due to END_STREAM, NOT from abnormal-termination paths
+// (failStream, failStreamsAfterGoAway, broadcastShutdown) so Close can
+// still distinguish bilateral close from abnormal teardown.
+func (c *channel) markRecvEnded() {
+	c.mu.Lock()
+	c.recvEndStream = true
+	c.mu.Unlock()
 }
 
 // nextSequence returns the next sequence number, atomically.
@@ -160,7 +187,17 @@ func (c *channel) Send(ctx context.Context, env *envelope.Envelope) error {
 				frames:   op.frames,
 				done:     done,
 			}})
-			return waitDone(ctx, done, c.layer.shutdown)
+			if err := waitDone(ctx, done, c.layer.shutdown); err != nil {
+				return err
+			}
+			// The opaque snapshot is captured when the reader has observed
+			// the full inbound message (assembler asmDone) or equivalent,
+			// so op.frames always include END_STREAM on the last frame.
+			// Successful dispatch therefore means our send half is closed.
+			c.mu.Lock()
+			c.sentEndStream = true
+			c.mu.Unlock()
+			return nil
 		}
 	}
 
@@ -186,22 +223,44 @@ func (c *channel) Send(ctx context.Context, env *envelope.Envelope) error {
 	}
 	c.mu.Lock()
 	c.headersHas = true
+	// writeMessage always sets endStream=true (see channel.Send above), so a
+	// successful return means we have closed the send half.
+	c.sentEndStream = true
 	c.mu.Unlock()
 	return nil
 }
 
-// Close emits a RST_STREAM(CANCEL) once and tears down the receive side.
-// Idempotent.
+// Close tears down the receive side and, for abnormal terminations, emits
+// RST_STREAM(CANCEL). Idempotent.
+//
+// RST_STREAM is suppressed when the stream has completed bilaterally on the
+// wire — both sides have sent END_STREAM. In that case the stream is
+// already in RFC 9113 §5.1 "closed" state; sending RST would arrive on a
+// closed stream and provoke a peer PROTOCOL_ERROR + GOAWAY, aborting other
+// concurrent streams on the shared connection. session.RunSession defers
+// Close on every session exit (normal or abnormal), so this gate is the
+// difference between a quiet cleanup and a connection-wide cascade.
+//
+// Push channels always RST on Close: we never requested them, and an
+// unwanted-push rejection is legitimate regardless of peer state
+// (RFC 9113 §8.4).
 func (c *channel) Close() error {
 	c.closeSendOnce.Do(func() {
 		c.mu.Lock()
 		c.closed = true
+		sentEnd := c.sentEndStream
+		recvEnd := c.recvEndStream
 		c.mu.Unlock()
-		// Best-effort RST_STREAM. We do not wait for the result.
-		c.layer.enqueueWrite(writeRequest{rst: &writeRST{
-			streamID: c.h2Stream,
-			code:     ErrCodeCancel,
-		}})
+
+		// Emit RST_STREAM(CANCEL) unless the stream has completed
+		// bilaterally — in which case wire-level "closed" state forbids
+		// any further frames on this stream (RFC 9113 §5.1).
+		if c.isPush || !sentEnd || !recvEnd {
+			c.layer.enqueueWrite(writeRequest{rst: &writeRST{
+				streamID: c.h2Stream,
+				code:     ErrCodeCancel,
+			}})
+		}
 		c.layer.closeChannelRecv(c)
 		// Local cancellation is "normal" from the watcher's perspective:
 		// we initiated it and do not want the session's late-error path

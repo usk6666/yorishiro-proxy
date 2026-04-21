@@ -344,6 +344,10 @@ func (l *Layer) handleStreamData(f *frame.Frame) error {
 	//     its own asmDone check. This second call is a safe idempotent
 	//     backstop — closeChannelRecv is guarded by sync.Once.
 	if asm.phase == asmDone {
+		// Record natural end-of-recv for USK-618's Close-time RST gate.
+		// markRecvEnded is idempotent; safe to call on both the passthrough
+		// path and the backstop.
+		ch.markRecvEnded()
 		l.closeChannelRecv(ch)
 	}
 	return nil
@@ -514,6 +518,11 @@ func (l *Layer) deliverEnvelope(ch *channel, env *envelope.Envelope, asm *stream
 
 	// If the assembler reached terminal state, close the channel's recv side.
 	if asm != nil && asm.phase == asmDone {
+		// Record natural end-of-recv for USK-618's Close-time RST gate.
+		// Only set on natural asmDone; abnormal paths (failStream,
+		// failStreamsAfterGoAway, broadcastShutdown) deliberately do NOT
+		// set this flag so Close still emits RST.
+		ch.markRecvEnded()
 		l.closeChannelRecv(ch)
 	}
 }
