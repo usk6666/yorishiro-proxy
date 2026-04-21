@@ -125,19 +125,33 @@ func IsChunked(headers RawHeaders) bool {
 }
 
 // dechunkedReader reads a chunked Transfer-Encoding stream and returns only
-// the decoded payload data (stripping chunk size lines, trailers, and the
-// terminal chunk). Unlike rawChunkedReader it does not preserve wire format
-// and has no memory cap beyond the caller's read buffer.
+// the decoded payload data (stripping chunk size lines and the terminal chunk).
+// Unlike rawChunkedReader it does not preserve wire format and has no memory
+// cap beyond the caller's read buffer.
+//
+// Chunked trailers (per RFC 7230 §4.1.2) are parsed, not discarded. After the
+// reader returns io.EOF, Trailers() and TrailerAnomalies() surface the parsed
+// trailer section. The dechunkedReader satisfies TrailerProvider.
 type dechunkedReader struct {
-	r         *bufio.Reader
-	remaining int64 // bytes remaining in the current chunk
-	done      bool
-	err       error
+	r                *bufio.Reader
+	remaining        int64 // bytes remaining in the current chunk
+	done             bool
+	err              error
+	trailers         RawHeaders
+	trailerAnomalies []Anomaly
 }
 
 func newDechunkedReader(r *bufio.Reader) *dechunkedReader {
 	return &dechunkedReader{r: r}
 }
+
+// Trailers returns the parsed chunked trailers in wire order. Call after the
+// reader has returned io.EOF; before that the result is nil/empty.
+func (dr *dechunkedReader) Trailers() RawHeaders { return dr.trailers }
+
+// TrailerAnomalies returns anomalies observed while parsing the trailer
+// section (pseudo-header, forbidden header, obs-fold, injection).
+func (dr *dechunkedReader) TrailerAnomalies() []Anomaly { return dr.trailerAnomalies }
 
 // Read implements io.Reader. It returns decoded chunk data without markers.
 func (dr *dechunkedReader) Read(p []byte) (int, error) {
@@ -198,6 +212,11 @@ func (dr *dechunkedReader) nextChunk() error {
 	if sizeStr == "0" {
 		dr.consumeTrailers()
 		dr.done = true
+		// Propagate trailer-parse failures (e.g., oversize, malformed section)
+		// to the body reader consumer instead of silently masking them with EOF.
+		if dr.err != nil {
+			return dr.err
+		}
 		return io.EOF
 	}
 
@@ -247,35 +266,65 @@ func (dr *dechunkedReader) readChunkSizeLine() (string, error) {
 	return sizeStr, nil
 }
 
-// consumeTrailers reads and discards trailer lines until a blank line.
-// Total trailer bytes are capped at maxHeaderSize to prevent unbounded allocation.
+// consumeTrailers parses chunked trailer lines until the blank line terminator.
+// Parsed trailers are stored on dr.trailers for later retrieval via Trailers().
+// Pseudo-header and RFC 7230 §4.1.2 forbidden-header names are recorded as
+// anomalies but kept in the Trailers slice (wire fidelity: do not drop).
+// Total trailer bytes are capped at maxHeaderSize to bound attacker-controlled
+// input.
 func (dr *dechunkedReader) consumeTrailers() {
-	var totalSize int
-	for {
-		trailer, tErr := dr.r.ReadSlice('\n')
-		totalSize += len(trailer)
-		if tErr != nil && tErr != bufio.ErrBufferFull {
-			break
+	trailers, anomalies, err := parseHeaderLines(dr.r, nil, maxHeaderSize)
+	if err != nil {
+		// Preserve whatever was successfully parsed for diagnostics even when
+		// the section overflows or a read fails.
+		dr.trailers = trailers
+		dr.trailerAnomalies = anomalies
+		dr.err = fmt.Errorf("chunked trailers: %w", err)
+		return
+	}
+	anomalies = append(anomalies, scanTrailerAnomalies(trailers)...)
+	dr.trailers = trailers
+	dr.trailerAnomalies = anomalies
+}
+
+// forbiddenTrailerHeaders enumerates the RFC 7230 §4.1.2 framing/routing
+// subset whose appearance in a chunked trailer is a smuggling indicator.
+var forbiddenTrailerHeaders = []string{
+	"Transfer-Encoding",
+	"Content-Length",
+	"Host",
+	"Trailer",
+}
+
+// scanTrailerAnomalies classifies semantically invalid trailer names. The
+// offending headers remain in the RawHeaders slice so that MITM analysts see
+// the wire as-observed; this helper only produces diagnostic Anomalies.
+//
+// HTTP/1 has no pseudo-header concept, so a line beginning with ':' (e.g.,
+// ":authority: foo") is parsed by parseHeaderLines as an empty-Name header
+// because the split happens on the first colon. Empty Name therefore signals
+// an H2-style pseudo-header smuggling attempt or other malformed name.
+func scanTrailerAnomalies(trailers RawHeaders) []Anomaly {
+	var anomalies []Anomaly
+	for _, h := range trailers {
+		if h.Name == "" || strings.HasPrefix(h.Name, ":") {
+			anomalies = append(anomalies, Anomaly{
+				Type:   AnomalyTrailerPseudoHeader,
+				Detail: fmt.Sprintf("pseudo-header-like trailer (empty or :-prefixed name, value=%q)", h.Value),
+			})
+			continue
 		}
-		for tErr == bufio.ErrBufferFull {
-			var extra []byte
-			extra, tErr = dr.r.ReadSlice('\n')
-			trailer = append(trailer, extra...)
-			totalSize += len(extra)
-			if totalSize > maxHeaderSize {
-				dr.err = fmt.Errorf("chunked trailers exceed maximum size %d", maxHeaderSize)
-				return
+		for _, forbidden := range forbiddenTrailerHeaders {
+			if strings.EqualFold(h.Name, forbidden) {
+				anomalies = append(anomalies, Anomaly{
+					Type:   AnomalyTrailerForbidden,
+					Detail: fmt.Sprintf("framing/routing header not allowed in trailer (RFC 7230 §4.1.2): %q", h.Name),
+				})
+				break
 			}
 		}
-		if totalSize > maxHeaderSize {
-			dr.err = fmt.Errorf("chunked trailers exceed maximum size %d", maxHeaderSize)
-			return
-		}
-		trimmed := bytes.TrimRight(trailer, "\r\n")
-		if len(trimmed) == 0 {
-			break
-		}
 	}
+	return anomalies
 }
 
 // parseHexSize parses a hex chunk size string with overflow protection.

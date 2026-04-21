@@ -1192,3 +1192,68 @@ func TestHTTPSMITM_AnomalyDetection(t *testing.T) {
 		t.Errorf("upstream received %d Content-Length headers, want 2; raw: %q", clCount, upReq)
 	}
 }
+
+// TestHTTPSMITM_ChunkedTrailers verifies that chunked trailers sent by the
+// client are parsed and projected onto flow.Flow.Trailers (USK-627).
+// Previously the HTTP/1 parser's consumeTrailers discarded trailer lines,
+// leaving flow records with empty Trailers even though USK-621 wired up
+// the record path.
+func TestHTTPSMITM_ChunkedTrailers(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// The upstream helper's readHTTPRequest only understands Content-Length
+	// framing, but the proxy's RecordStep fires on the send envelope before
+	// the body is forwarded upstream — so chunked trailers appear in the flow
+	// record regardless of what the upstream does with the request body.
+	// We use a close-after-response upstream to unblock both sides quickly.
+	upstreamLn, getUpstreamReqs := startUpstreamHTTPS(t, func(_ []byte) []byte {
+		return []byte("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+	})
+	defer upstreamLn.Close()
+	target := upstreamLn.Addr().String()
+
+	proxyAddr, store, sessionDone := startHTTPMITMProxy(t, ctx, target, proxyOpts{})
+
+	chunkedReq := fmt.Sprintf(
+		"POST /upload HTTP/1.1\r\n"+
+			"Host: %s\r\n"+
+			"Transfer-Encoding: chunked\r\n"+
+			"Trailer: X-Checksum\r\n"+
+			"Connection: close\r\n"+
+			"\r\n"+
+			"5\r\nhello\r\n"+
+			"0\r\n"+
+			"X-Checksum: abc123\r\n"+
+			"\r\n",
+		target,
+	)
+	resp := connectAndSendHTTP(t, proxyAddr, target, chunkedReq)
+	if !strings.Contains(resp, "200 OK") {
+		t.Errorf("response missing 200 OK: %q", resp)
+	}
+
+	// Drain upstream goroutine; body content is incidental.
+	_ = getUpstreamReqs()
+
+	select {
+	case <-sessionDone:
+	case <-time.After(15 * time.Second):
+		t.Fatal("timeout waiting for session to complete")
+	}
+
+	// --- Verify flow recording: trailer projected onto flow.Flow.Trailers ---
+	sendFlows := store.flowsByDirection("send")
+	if len(sendFlows) < 1 {
+		t.Fatal("expected at least 1 send flow, got 0")
+	}
+	sendFlow := sendFlows[0]
+	if sendFlow.Trailers == nil {
+		t.Fatalf("send flow Trailers is nil; USK-627 parser fix did not populate HTTPMessage.Trailers")
+	}
+	got := sendFlow.Trailers["X-Checksum"]
+	if len(got) != 1 || got[0] != "abc123" {
+		t.Errorf("sendFlow.Trailers[X-Checksum] = %v, want [abc123]; full Trailers = %v",
+			got, sendFlow.Trailers)
+	}
+}

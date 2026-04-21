@@ -14,12 +14,15 @@ import "io"
 type AnomalyType string
 
 const (
-	AnomalyCLTE            AnomalyType = "CLTE"
-	AnomalyDuplicateCL     AnomalyType = "DuplicateCL"
-	AnomalyInvalidTE       AnomalyType = "InvalidTE"
-	AnomalyHeaderInjection AnomalyType = "HeaderInjection"
-	AnomalyAmbiguousTE     AnomalyType = "AmbiguousTE"
-	AnomalyObsFold         AnomalyType = "ObsFold"
+	AnomalyCLTE                  AnomalyType = "CLTE"
+	AnomalyDuplicateCL           AnomalyType = "DuplicateCL"
+	AnomalyInvalidTE             AnomalyType = "InvalidTE"
+	AnomalyHeaderInjection       AnomalyType = "HeaderInjection"
+	AnomalyAmbiguousTE           AnomalyType = "AmbiguousTE"
+	AnomalyObsFold               AnomalyType = "ObsFold"
+	AnomalyTrailerPseudoHeader   AnomalyType = "TrailerPseudoHeader"
+	AnomalyTrailerForbidden      AnomalyType = "TrailerForbidden"
+	AnomalyTrailersInPassthrough AnomalyType = "TrailersInPassthrough"
 
 	// HTTP/2 specific anomalies.
 	H2DuplicatePseudoHeader    AnomalyType = "H2DuplicatePseudoHeader"
