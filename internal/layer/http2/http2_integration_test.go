@@ -1621,37 +1621,22 @@ func TestTrailers_PreservedInHTTPMessage(t *testing.T) {
 		t.Fatal("no receive flow under linked stream")
 	}
 
-	// flow.Flow has no first-class Trailers field. An analyst inspecting a
-	// proxy recording MUST be able to retrieve trailers to diagnose
-	// trailer-sensitive behavior (gRPC status codes, redirects, etc.).
-	// Neither recvF.Headers nor recvF.Metadata carries the trailer today —
-	// envelopeToFlow in pipeline/record_step.go only projects Headers.
-	// Flag as a gap. Raw bytes SHOULD contain the trailer frame.
-	foundInHeaders := false
-	for k, vals := range recvF.Headers {
-		if k == "X-Trailer-1" || k == "x-trailer-1" {
-			for _, v := range vals {
-				if v == "trailer-value" {
-					foundInHeaders = true
-				}
-			}
-		}
+	// USK-621: recvF.Trailers is the canonical projection path.
+	// envelopeToFlow in pipeline/record_step.go projects HTTPMessage.Trailers
+	// onto flow.Flow.Trailers with the same shape as Headers. HTTP/2 wire
+	// reality is lowercase header names (RFC 9113 §8.2.1), so the projected
+	// key is "x-trailer-1". This MITM preserves wire casing per the
+	// "no normalization" principle.
+	if recvF.Trailers == nil {
+		t.Fatal("receive flow Trailers is nil; USK-621 should have projected HTTPMessage.Trailers")
 	}
-	if !foundInHeaders {
-		// Double check in metadata.
-		if recvF.Metadata != nil {
-			if v := recvF.Metadata["x-trailer-1"]; v == "trailer-value" {
-				foundInHeaders = true
-			}
-			if v := recvF.Metadata["trailer.X-Trailer-1"]; v == "trailer-value" {
-				foundInHeaders = true
-			}
-		}
+	got := recvF.Trailers["x-trailer-1"]
+	if len(got) != 1 || got[0] != "trailer-value" {
+		t.Errorf("recvF.Trailers[x-trailer-1] = %v, want [trailer-value]; full Trailers = %v",
+			got, recvF.Trailers)
 	}
-	if !foundInHeaders {
-		t.Skip("not yet implemented: USK-621 HTTP/2 trailers not projected to flow.Flow record (Headers/Metadata/first-class Trailers)")
-	}
-	// If we reached here, the gap has been fixed - keep stricter assertion.
+	// Wire-level trailer frame must also be present in the raw snapshot
+	// (L7/L4 duality).
 	if len(recvF.RawBytes) == 0 {
 		t.Error("receive flow RawBytes empty")
 	}

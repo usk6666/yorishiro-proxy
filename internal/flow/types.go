@@ -96,6 +96,11 @@ type Flow struct {
 	Timestamp time.Time
 	// Headers holds HTTP-style headers. May be nil for non-HTTP protocols.
 	Headers map[string][]string
+	// Trailers holds HTTP message trailers (HTTP/2 trailer-HEADERS and
+	// HTTP/1.1 chunked trailer lines). Nil for non-HTTP protocols and for
+	// messages without trailers. Storage shape mirrors Headers; wire-level
+	// ordering and case of duplicate names live in RawBytes.
+	Trailers map[string][]string
 	// Body holds the flow body content.
 	Body []byte
 	// RawBytes holds the original raw bytes as captured on the wire.
