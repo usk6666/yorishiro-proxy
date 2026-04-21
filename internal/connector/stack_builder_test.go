@@ -80,7 +80,7 @@ func TestBuildConnectionStack_RawPassthrough(t *testing.T) {
 			resultCh <- buildResult{nil, err}
 			return
 		}
-		stack, _, err := BuildConnectionStack(context.Background(), serverConn, target, buildCfg)
+		stack, _, _, err := BuildConnectionStack(context.Background(), serverConn, target, buildCfg)
 		resultCh <- buildResult{stack, err}
 	}()
 
@@ -190,20 +190,21 @@ func TestBuildConnectionStack_HTTPMITMStack(t *testing.T) {
 	defer clientLn.Close()
 
 	type buildResult struct {
-		stack *ConnectionStack
-		snap  *envelope.TLSSnapshot
-		err   error
+		stack        *ConnectionStack
+		clientSnap   *envelope.TLSSnapshot
+		upstreamSnap *envelope.TLSSnapshot
+		err          error
 	}
 	resultCh := make(chan buildResult, 1)
 
 	go func() {
 		serverConn, err := clientLn.Accept()
 		if err != nil {
-			resultCh <- buildResult{nil, nil, err}
+			resultCh <- buildResult{err: err}
 			return
 		}
-		stack, snap, err := BuildConnectionStack(context.Background(), serverConn, target, buildCfg)
-		resultCh <- buildResult{stack, snap, err}
+		stack, clientSnap, upstreamSnap, err := BuildConnectionStack(context.Background(), serverConn, target, buildCfg)
+		resultCh <- buildResult{stack, clientSnap, upstreamSnap, err}
 	}()
 
 	// Client-side: connect and perform TLS handshake with the proxy (MITM).
@@ -264,12 +265,23 @@ func TestBuildConnectionStack_HTTPMITMStack(t *testing.T) {
 		t.Error("expected upstream layer to produce a Channel")
 	}
 
-	// Verify TLSSnapshot is populated.
-	if result.snap == nil {
-		t.Fatal("expected non-nil TLSSnapshot")
+	// Verify both TLS snapshots are populated. The client snapshot captures
+	// the synthetic MITM handshake we performed with the test client; the
+	// upstream snapshot captures the real upstream TLS reality.
+	if result.clientSnap == nil {
+		t.Fatal("expected non-nil client TLSSnapshot")
 	}
-	if result.snap.Version == 0 {
-		t.Error("expected non-zero TLS version in snapshot")
+	if result.clientSnap.Version == 0 {
+		t.Error("expected non-zero TLS version in client snapshot")
+	}
+	if result.upstreamSnap == nil {
+		t.Fatal("expected non-nil upstream TLSSnapshot")
+	}
+	if result.upstreamSnap.Version == 0 {
+		t.Error("expected non-zero TLS version in upstream snapshot")
+	}
+	if result.upstreamSnap.PeerCertificate == nil {
+		t.Error("expected upstream snapshot to carry PeerCertificate (upstream cert)")
 	}
 }
 
@@ -278,7 +290,7 @@ func TestBuildConnectionStack_NilConfig(t *testing.T) {
 	defer clientConn.Close()
 	defer proxyConn.Close()
 
-	_, _, err := BuildConnectionStack(context.Background(), proxyConn, "example.com:443", nil)
+	_, _, _, err := BuildConnectionStack(context.Background(), proxyConn, "example.com:443", nil)
 	if err == nil {
 		t.Error("expected error for nil config")
 	}
@@ -358,9 +370,10 @@ func TestBuildConnectionStack_H2MITMStack(t *testing.T) {
 	defer clientLn.Close()
 
 	type buildResult struct {
-		stack *ConnectionStack
-		snap  *envelope.TLSSnapshot
-		err   error
+		stack        *ConnectionStack
+		clientSnap   *envelope.TLSSnapshot
+		upstreamSnap *envelope.TLSSnapshot
+		err          error
 	}
 	resultCh := make(chan buildResult, 1)
 
@@ -370,8 +383,8 @@ func TestBuildConnectionStack_H2MITMStack(t *testing.T) {
 			resultCh <- buildResult{err: acceptErr}
 			return
 		}
-		stack, snap, buildErr := BuildConnectionStack(context.Background(), serverConn, target, buildCfg)
-		resultCh <- buildResult{stack, snap, buildErr}
+		stack, clientSnap, upstreamSnap, buildErr := BuildConnectionStack(context.Background(), serverConn, target, buildCfg)
+		resultCh <- buildResult{stack, clientSnap, upstreamSnap, buildErr}
 	}()
 
 	// --- Client-side: connect to the proxy and perform a TLS handshake
@@ -443,12 +456,17 @@ func TestBuildConnectionStack_H2MITMStack(t *testing.T) {
 			t.Errorf("PoolKey = %+v, want %+v", gotKey, wantKey)
 		}
 
-		// TLSSnapshot is populated and its ALPN is h2.
-		if result.snap == nil {
-			t.Fatal("expected non-nil TLSSnapshot")
+		// Both TLS snapshots are populated; upstream ALPN is h2 (the
+		// diagnostic signal for USK-619 — upstream reality, not synthetic
+		// client MITM reality).
+		if result.clientSnap == nil {
+			t.Fatal("expected non-nil client TLSSnapshot")
 		}
-		if result.snap.ALPN != "h2" {
-			t.Errorf("TLSSnapshot.ALPN = %q, want %q", result.snap.ALPN, "h2")
+		if result.upstreamSnap == nil {
+			t.Fatal("expected non-nil upstream TLSSnapshot")
+		}
+		if result.upstreamSnap.ALPN != "h2" {
+			t.Errorf("upstream TLSSnapshot.ALPN = %q, want %q", result.upstreamSnap.ALPN, "h2")
 		}
 
 		// Return the upstream Layer to the pool (the handler would normally

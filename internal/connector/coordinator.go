@@ -7,16 +7,14 @@ import (
 	"sync"
 	"time"
 
-	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/layer"
 	"github.com/usk6666/yorishiro-proxy/internal/plugin"
 )
 
-// OnStackFunc is the callback signature for when a ConnectionStack is ready.
-// The callback owns the session lifecycle (Pipeline + RunSession wiring).
-// The connector package does not import pipeline or session — this callback
-// bridges the boundary.
-type OnStackFunc func(ctx context.Context, stack *ConnectionStack, snap *envelope.TLSSnapshot, target string)
+// OnStackFunc is defined in connect_handler.go — it is the shared callback
+// signature for non-h2 ConnectionStack routes used by CONNECT, SOCKS5, and
+// Coordinator dispatch. The connector package does not import pipeline or
+// session; this callback bridges the boundary.
 
 // CoordinatorConfig holds the parameters for constructing a Coordinator.
 // Shared policy objects are passed here and wired into every FullListener

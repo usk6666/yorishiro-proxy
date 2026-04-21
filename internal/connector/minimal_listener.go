@@ -6,8 +6,6 @@ import (
 	"log/slog"
 	"net"
 	"sync"
-
-	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 )
 
 // MinimalListenerConfig configures the MinimalListener.
@@ -17,8 +15,8 @@ type MinimalListenerConfig struct {
 
 	// OnStack is called when a ConnectionStack is ready for a new connection.
 	// Session wiring (RunSession) should happen inside this callback.
-	// The callback owns the stack and TLSSnapshot lifetime.
-	OnStack func(ctx context.Context, stack *ConnectionStack, snap *envelope.TLSSnapshot, target string)
+	// The callback owns the stack and TLSSnapshot lifetimes.
+	OnStack OnStackFunc
 }
 
 // MinimalListener is a TCP listener that handles CONNECT requests and builds
@@ -121,7 +119,7 @@ func (ml *MinimalListener) handleConn(ctx context.Context, conn net.Conn) {
 
 	// Build the ConnectionStack. This performs client-side TLS MITM and
 	// upstream dial+TLS inside BuildConnectionStack.
-	stack, snap, err := BuildConnectionStack(ctx, pc, target, ml.cfg.BuildConfig)
+	stack, clientSnap, upstreamSnap, err := BuildConnectionStack(ctx, pc, target, ml.cfg.BuildConfig)
 	if err != nil {
 		slog.Warn("connector: stack build failed",
 			"target", target,
@@ -134,7 +132,7 @@ func (ml *MinimalListener) handleConn(ctx context.Context, conn net.Conn) {
 	// OnStack takes ownership of the stack. If nil, close the stack to
 	// prevent connection leaks.
 	if ml.cfg.OnStack != nil {
-		ml.cfg.OnStack(ctx, stack, snap, target)
+		ml.cfg.OnStack(ctx, stack, clientSnap, upstreamSnap, target)
 	} else {
 		stack.Close()
 	}

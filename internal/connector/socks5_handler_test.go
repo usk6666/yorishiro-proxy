@@ -46,7 +46,7 @@ func TestNewSOCKS5Handler_ScopeDenial(t *testing.T) {
 	var stackCalled atomic.Bool
 	handler := NewSOCKS5Handler(SOCKS5HandlerConfig{
 		Negotiator: neg,
-		OnStack: func(ctx context.Context, stack *ConnectionStack, snap *envelope.TLSSnapshot, target string) {
+		OnStack: func(ctx context.Context, stack *ConnectionStack, clientSnap, upstreamSnap *envelope.TLSSnapshot, target string) {
 			stackCalled.Store(true)
 		},
 	})
@@ -187,7 +187,7 @@ func TestNewSOCKS5Handler_SuccessfulNegotiation_StackBuildFails(t *testing.T) {
 	handler := NewSOCKS5Handler(SOCKS5HandlerConfig{
 		Negotiator: neg,
 		BuildCfg:   nil, // nil config → stack build fails
-		OnStack: func(ctx context.Context, stack *ConnectionStack, snap *envelope.TLSSnapshot, target string) {
+		OnStack: func(ctx context.Context, stack *ConnectionStack, clientSnap, upstreamSnap *envelope.TLSSnapshot, target string) {
 			stackCalled.Store(true)
 		},
 	})

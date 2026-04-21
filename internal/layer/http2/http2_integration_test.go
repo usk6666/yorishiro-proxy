@@ -22,6 +22,7 @@ import (
 	nethttp "net/http"
 	"regexp"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -85,6 +86,32 @@ func (s *testStore) UpdateStream(_ context.Context, id string, update flow.Strea
 				}
 				for k, v := range update.Tags {
 					st.Tags[k] = v
+				}
+			}
+			// Project ConnInfo fields if any TLS/addr update is present.
+			hasConnInfoUpdate := update.ServerAddr != "" ||
+				update.TLSVersion != "" ||
+				update.TLSCipher != "" ||
+				update.TLSALPN != "" ||
+				update.TLSServerCertSubject != ""
+			if hasConnInfoUpdate {
+				if st.ConnInfo == nil {
+					st.ConnInfo = &flow.ConnectionInfo{}
+				}
+				if update.ServerAddr != "" {
+					st.ConnInfo.ServerAddr = update.ServerAddr
+				}
+				if update.TLSVersion != "" {
+					st.ConnInfo.TLSVersion = update.TLSVersion
+				}
+				if update.TLSCipher != "" {
+					st.ConnInfo.TLSCipher = update.TLSCipher
+				}
+				if update.TLSALPN != "" {
+					st.ConnInfo.TLSALPN = update.TLSALPN
+				}
+				if update.TLSServerCertSubject != "" {
+					st.ConnInfo.TLSServerCertSubject = update.TLSServerCertSubject
 				}
 			}
 		}
@@ -347,7 +374,9 @@ func startH2MITMProxy(t *testing.T, ctx context.Context, buildCfg *connector.Bui
 	t.Helper()
 	store = &testStore{}
 
-	onHTTP2Stack := func(cbCtx context.Context, stack *connector.ConnectionStack, upstreamH2 *intHTTP2.Layer, snap *envelope.TLSSnapshot, target string) {
+	onHTTP2Stack := func(cbCtx context.Context, stack *connector.ConnectionStack, upstreamH2 *intHTTP2.Layer, clientSnap, upstreamSnap *envelope.TLSSnapshot, target string) {
+		_ = clientSnap
+		_ = upstreamSnap
 		// The client-side layer is the stack's ClientTopmost (a *http2.Layer
 		// in ServerRole). Fan out one goroutine per client stream and wire
 		// a session to the upstream Layer via OpenStream.
@@ -400,7 +429,7 @@ func startH2MITMProxy(t *testing.T, ctx context.Context, buildCfg *connector.Bui
 	}
 
 	// Build a default non-h2 onStack for other routes; it won't be used.
-	onStack := func(_ context.Context, s *connector.ConnectionStack, _ *envelope.TLSSnapshot, _ string) {
+	onStack := func(_ context.Context, s *connector.ConnectionStack, _, _ *envelope.TLSSnapshot, _ string) {
 		_ = s.Close()
 	}
 
@@ -710,15 +739,27 @@ func TestALPN_H2_MITM_UpstreamTLSSnapshotIsUpstream(t *testing.T) {
 		t.Errorf("Scheme = %q, want https", st.Scheme)
 	}
 
-	// The diagnostic invariant: a MITM analyst MUST see the upstream's own
-	// TLS snapshot when inspecting the upstream-side recording. The current
-	// production code plants clientSnap on upstream envCtx (see
-	// internal/connector/stack_builder.go:438). We cannot read the upstream
-	// envelope's TLS snapshot directly from recorded flows (only ConnInfo is
-	// surfaced, and ConnInfo is currently not populated from the upstream
-	// snapshot in RecordStep), so this assertion cannot yet be verified from
-	// a recording. Flag as a gap.
-	t.Skip("not yet implemented: USK-619 upstream TLS snapshot threading + ConnInfo recording")
+	// USK-619 diagnostic invariant: Stream.ConnInfo must reflect UPSTREAM
+	// TLS reality, not the synthetic client-side MITM cert. The upstream
+	// handler starts with CN="upstream-tls-marker" — that string must appear
+	// in the recorded cert subject.
+	if st.ConnInfo == nil {
+		t.Fatal("Stream.ConnInfo is nil; upstream TLS was not projected into ConnInfo")
+	}
+	if !strings.Contains(st.ConnInfo.TLSServerCertSubject, "upstream-tls-marker") {
+		t.Errorf("ConnInfo.TLSServerCertSubject = %q, want to contain %q "+
+			"(synthetic MITM cert is leaking into ConnInfo)",
+			st.ConnInfo.TLSServerCertSubject, "upstream-tls-marker")
+	}
+	if st.ConnInfo.TLSALPN != "h2" {
+		t.Errorf("ConnInfo.TLSALPN = %q, want h2", st.ConnInfo.TLSALPN)
+	}
+	if st.ConnInfo.TLSVersion == "" {
+		t.Error("ConnInfo.TLSVersion is empty; expected TLS 1.2 or TLS 1.3")
+	}
+	if st.ConnInfo.TLSCipher == "" {
+		t.Error("ConnInfo.TLSCipher is empty; expected a cipher suite name")
+	}
 }
 
 // ---------------------------------------------------------------------------

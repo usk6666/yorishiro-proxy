@@ -5,8 +5,6 @@ import (
 	"errors"
 	"log/slog"
 	"net"
-
-	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 )
 
 // SOCKS5HandlerConfig holds dependencies for the SOCKS5 handler factory.
@@ -25,7 +23,7 @@ type SOCKS5HandlerConfig struct {
 	// OnStack is called when a non-h2 ConnectionStack is ready. The callback
 	// owns the session lifecycle (RunSession wiring). h2-routed stacks are
 	// dispatched via OnHTTP2Stack instead.
-	OnStack func(ctx context.Context, stack *ConnectionStack, snap *envelope.TLSSnapshot, target string)
+	OnStack OnStackFunc
 
 	// OnHTTP2Stack is called when the stack was built for the "h2" ALPN route.
 	// See OnHTTP2StackFunc for the callback contract. When nil, h2 stacks are
@@ -102,7 +100,7 @@ func NewSOCKS5Handler(cfg SOCKS5HandlerConfig) HandlerFunc {
 		}
 
 		// Step 3: Build ConnectionStack.
-		stack, snap, err := BuildConnectionStack(ctx, pc, target, cfg.BuildCfg)
+		stack, clientSnap, upstreamSnap, err := BuildConnectionStack(ctx, pc, target, cfg.BuildCfg)
 		if err != nil {
 			connLogger.Warn("stack build failed", "error", err)
 			return nil
@@ -111,7 +109,7 @@ func NewSOCKS5Handler(cfg SOCKS5HandlerConfig) HandlerFunc {
 		connLogger.Debug("connection stack built")
 
 		// Step 4: Hand off to the appropriate callback based on ALPN route.
-		dispatchStack(ctx, stack, snap, target, cfg.BuildCfg, cfg.OnStack, cfg.OnHTTP2Stack)
+		dispatchStack(ctx, stack, clientSnap, upstreamSnap, target, cfg.BuildCfg, cfg.OnStack, cfg.OnHTTP2Stack)
 
 		return nil
 	}

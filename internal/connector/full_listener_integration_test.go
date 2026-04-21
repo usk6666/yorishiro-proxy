@@ -449,7 +449,7 @@ func startFullListenerProxy(
 		socks5Neg.RateLimiter = opts.rateLimiter
 	}
 
-	onStack := func(ctx context.Context, stack *connector.ConnectionStack, snap *envelope.TLSSnapshot, target string) {
+	onStack := func(ctx context.Context, stack *connector.ConnectionStack, clientSnap, upstreamSnap *envelope.TLSSnapshot, target string) {
 		defer wg.Done()
 		defer stack.Close()
 
@@ -772,7 +772,7 @@ func TestCoordinator_MultipleListeners(t *testing.T) {
 			Issuer:             issuer,
 			InsecureSkipVerify: true,
 		},
-		OnStack: func(ctx context.Context, stack *connector.ConnectionStack, snap *envelope.TLSSnapshot, target string) {
+		OnStack: func(ctx context.Context, stack *connector.ConnectionStack, clientSnap, upstreamSnap *envelope.TLSSnapshot, target string) {
 			defer wg.Done()
 			defer stack.Close()
 
@@ -855,7 +855,7 @@ func TestFullListener_TargetScope_Blocking(t *testing.T) {
 
 		proxyAddr, _, _ := startFullListenerProxy(t, ctx, fullListenerOpts{
 			scope: scope,
-			onStack: func(_ context.Context, stack *connector.ConnectionStack, _ *envelope.TLSSnapshot, _ string) {
+			onStack: func(_ context.Context, stack *connector.ConnectionStack, _, _ *envelope.TLSSnapshot, _ string) {
 				defer stack.Close()
 				onStackCalled <- struct{}{}
 			},
@@ -906,7 +906,7 @@ func TestFullListener_TargetScope_Blocking(t *testing.T) {
 
 		proxyAddr, _, _ := startFullListenerProxy(t, ctx, fullListenerOpts{
 			scope: scope,
-			onStack: func(_ context.Context, stack *connector.ConnectionStack, _ *envelope.TLSSnapshot, _ string) {
+			onStack: func(_ context.Context, stack *connector.ConnectionStack, _, _ *envelope.TLSSnapshot, _ string) {
 				defer stack.Close()
 				onStackCalled <- struct{}{}
 			},
@@ -1029,7 +1029,7 @@ func TestFullListener_TLSPassthrough(t *testing.T) {
 
 	proxyAddr, _, _ := startFullListenerProxy(t, ctx, fullListenerOpts{
 		passthroughList: pl,
-		onStack: func(_ context.Context, stack *connector.ConnectionStack, _ *envelope.TLSSnapshot, _ string) {
+		onStack: func(_ context.Context, stack *connector.ConnectionStack, _, _ *envelope.TLSSnapshot, _ string) {
 			defer stack.Close()
 			onStackCalled <- struct{}{}
 		},
@@ -1179,7 +1179,7 @@ func TestFullListener_RateLimiter_Blocking(t *testing.T) {
 
 	proxyAddr, _, _ := startFullListenerProxy(t, ctx, fullListenerOpts{
 		rateLimiter: rl,
-		onStack: func(_ context.Context, stack *connector.ConnectionStack, _ *envelope.TLSSnapshot, _ string) {
+		onStack: func(_ context.Context, stack *connector.ConnectionStack, _, _ *envelope.TLSSnapshot, _ string) {
 			defer stack.Close()
 			onStackCalled <- struct{}{}
 		},

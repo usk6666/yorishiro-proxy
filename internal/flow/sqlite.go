@@ -209,6 +209,18 @@ func (s *SQLiteStore) UpdateStream(ctx context.Context, id string, update Stream
 			sets = append(sets, "server_addr = ?")
 			args = append(args, update.ServerAddr)
 		}
+		if update.TLSVersion != "" {
+			sets = append(sets, "tls_version = ?")
+			args = append(args, update.TLSVersion)
+		}
+		if update.TLSCipher != "" {
+			sets = append(sets, "tls_cipher = ?")
+			args = append(args, update.TLSCipher)
+		}
+		if update.TLSALPN != "" {
+			sets = append(sets, "tls_alpn = ?")
+			args = append(args, update.TLSALPN)
+		}
 		if update.TLSServerCertSubject != "" {
 			sets = append(sets, "tls_server_cert_subject = ?")
 			args = append(args, update.TLSServerCertSubject)

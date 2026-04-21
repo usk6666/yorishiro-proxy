@@ -20,11 +20,25 @@ import (
 // stack. The handler that invokes this callback is responsible for returning
 // upstreamH2 to the pool (or evicting on failure) once the callback exits —
 // callees do not call Pool.Put themselves.
+//
+// clientSnap is the synthetic MITM TLS snapshot presented to the client;
+// upstreamSnap is the real upstream TLS snapshot observed at dial time.
+// Both are per-Layer per RFC-001 §3.1.
 type OnHTTP2StackFunc func(
 	ctx context.Context,
 	stack *ConnectionStack,
 	upstreamH2 *http2.Layer,
-	snap *envelope.TLSSnapshot,
+	clientSnap, upstreamSnap *envelope.TLSSnapshot,
+	target string,
+)
+
+// OnStackFunc is the callback signature for non-h2 ConnectionStack routes.
+// It receives both TLS snapshots so that callers have access to client-
+// facing MITM cert and real upstream cert (per-Layer per RFC-001 §3.1).
+type OnStackFunc func(
+	ctx context.Context,
+	stack *ConnectionStack,
+	clientSnap, upstreamSnap *envelope.TLSSnapshot,
 	target string,
 )
 
@@ -51,7 +65,7 @@ type CONNECTHandlerConfig struct {
 	// owns the session lifecycle (RunSession wiring). This avoids an import
 	// cycle between connector and pipeline/session. h2-routed stacks are
 	// dispatched via OnHTTP2Stack instead.
-	OnStack func(ctx context.Context, stack *ConnectionStack, snap *envelope.TLSSnapshot, target string)
+	OnStack OnStackFunc
 
 	// OnHTTP2Stack is called when the stack was built for the "h2" ALPN route.
 	// See OnHTTP2StackFunc for the callback contract. When nil, h2 stacks are
@@ -141,7 +155,7 @@ func NewCONNECTHandler(cfg CONNECTHandlerConfig) HandlerFunc {
 		}
 
 		// Step 5: Build ConnectionStack.
-		stack, snap, err := BuildConnectionStack(ctx, pc, target, cfg.BuildCfg)
+		stack, clientSnap, upstreamSnap, err := BuildConnectionStack(ctx, pc, target, cfg.BuildCfg)
 		if err != nil {
 			connLogger.Warn("stack build failed", "error", err)
 			return nil
@@ -150,7 +164,7 @@ func NewCONNECTHandler(cfg CONNECTHandlerConfig) HandlerFunc {
 		connLogger.Debug("connection stack built")
 
 		// Step 6: Hand off to the appropriate callback based on ALPN route.
-		dispatchStack(ctx, stack, snap, target, cfg.BuildCfg, cfg.OnStack, cfg.OnHTTP2Stack)
+		dispatchStack(ctx, stack, clientSnap, upstreamSnap, target, cfg.BuildCfg, cfg.OnStack, cfg.OnHTTP2Stack)
 
 		return nil
 	}
@@ -167,10 +181,10 @@ func NewCONNECTHandler(cfg CONNECTHandlerConfig) HandlerFunc {
 func dispatchStack(
 	ctx context.Context,
 	stack *ConnectionStack,
-	snap *envelope.TLSSnapshot,
+	clientSnap, upstreamSnap *envelope.TLSSnapshot,
 	target string,
 	buildCfg *BuildConfig,
-	onStack func(ctx context.Context, stack *ConnectionStack, snap *envelope.TLSSnapshot, target string),
+	onStack OnStackFunc,
 	onHTTP2Stack OnHTTP2StackFunc,
 ) {
 	if upstreamH2 := stack.UpstreamH2Layer(); upstreamH2 != nil {
@@ -187,7 +201,7 @@ func dispatchStack(
 		}()
 
 		if onHTTP2Stack != nil {
-			onHTTP2Stack(ctx, stack, upstreamH2, snap, target)
+			onHTTP2Stack(ctx, stack, upstreamH2, clientSnap, upstreamSnap, target)
 		}
 		// Always close the client-side stack once the handler exits. Pool.Put
 		// above handles upstreamH2 independently (stack.Close is a no-op for
@@ -197,7 +211,7 @@ func dispatchStack(
 	}
 
 	if onStack != nil {
-		onStack(ctx, stack, snap, target)
+		onStack(ctx, stack, clientSnap, upstreamSnap, target)
 	} else {
 		_ = stack.Close()
 	}

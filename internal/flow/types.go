@@ -122,6 +122,15 @@ type StreamUpdate struct {
 	// ServerAddr sets the upstream server address in ConnInfo.
 	// Only applied when non-empty.
 	ServerAddr string
+	// TLSVersion sets the negotiated TLS version in ConnInfo
+	// (e.g., "TLS 1.3"). Only applied when non-empty.
+	TLSVersion string
+	// TLSCipher sets the negotiated TLS cipher suite name in ConnInfo
+	// (e.g., "TLS_AES_128_GCM_SHA256"). Only applied when non-empty.
+	TLSCipher string
+	// TLSALPN sets the negotiated ALPN protocol in ConnInfo
+	// (e.g., "h2", "http/1.1"). Only applied when non-empty.
+	TLSALPN string
 	// TLSServerCertSubject sets the upstream server TLS certificate subject in ConnInfo.
 	// Only applied when non-empty.
 	TLSServerCertSubject string
