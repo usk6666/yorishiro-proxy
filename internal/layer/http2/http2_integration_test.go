@@ -799,7 +799,9 @@ func TestMultipleConcurrentStreams_RecordingIsolation(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 
 	// MITM invariant: n concurrent streams → n Streams with send+recv each
-	// (no cross-contamination).
+	// (no cross-contamination). The warm-up stream issued above establishes
+	// the shared tunnel and is recorded as its own Stream; count only the
+	// n concurrent streams by filtering on X-Stream-Id != "warm".
 	streams := store.getStreams()
 	linked := 0
 	for _, st := range streams {
@@ -812,20 +814,26 @@ func TestMultipleConcurrentStreams_RecordingIsolation(t *testing.T) {
 				recvF = f
 			}
 		}
-		if sendF != nil && recvF != nil {
-			linked++
-			// Cross-contamination check:
-			sent := ""
-			for k, v := range sendF.Headers {
-				if (k == "X-Stream-Id" || k == "x-stream-id") && len(v) > 0 {
-					sent = v[0]
-					break
-				}
+		if sendF == nil || recvF == nil {
+			continue
+		}
+		// Extract X-Stream-Id from the send flow to distinguish the warm-up
+		// stream from the n concurrent streams.
+		sent := ""
+		for k, v := range sendF.Headers {
+			if (k == "X-Stream-Id" || k == "x-stream-id") && len(v) > 0 {
+				sent = v[0]
+				break
 			}
-			if sent != "" && string(recvF.Body) != "stream-"+sent {
-				t.Errorf("stream %s: send id=%s but recv body=%q, want %q (cross-contamination)",
-					st.ID, sent, recvF.Body, "stream-"+sent)
-			}
+		}
+		if sent == "warm" {
+			continue
+		}
+		linked++
+		// Cross-contamination check:
+		if sent != "" && string(recvF.Body) != "stream-"+sent {
+			t.Errorf("stream %s: send id=%s but recv body=%q, want %q (cross-contamination)",
+				st.ID, sent, recvF.Body, "stream-"+sent)
 		}
 	}
 	if linked == 0 {
@@ -842,7 +850,7 @@ func TestMultipleConcurrentStreams_RecordingIsolation(t *testing.T) {
 		t.Fatalf("no linked streams: hasSend=%v hasRecv=%v", hasSend, hasRecv)
 	}
 	if linked != n {
-		t.Errorf("linked send+recv pairs = %d, want %d", linked, n)
+		t.Errorf("linked send+recv pairs = %d, want %d (excluding warm-up)", linked, n)
 	}
 }
 
