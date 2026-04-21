@@ -1132,11 +1132,6 @@ func TestLargeResponseBody_Passthrough_11MiB(t *testing.T) {
 	if err != nil {
 		// An analyst driving a large download MUST get the full body through
 		// the proxy. A FLOW_CONTROL_ERROR is a proxy bug, not a client bug.
-		if bytes.Contains([]byte(err.Error()), []byte("FLOW_CONTROL")) ||
-			bytes.Contains([]byte(err.Error()), []byte("deadline exceeded")) ||
-			bytes.Contains([]byte(err.Error()), []byte("context canceled")) {
-			t.Skip("not yet implemented: USK-617 HTTP/2 large-body passthrough stalls or violates flow control; client cannot drain 11 MiB body end-to-end.")
-		}
 		t.Fatalf("copy: %v", err)
 	}
 	if n != size {
