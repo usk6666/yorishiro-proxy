@@ -80,6 +80,9 @@ func (s *testStore) UpdateStream(_ context.Context, id string, update flow.Strea
 			if update.State != "" {
 				st.State = update.State
 			}
+			if update.FailureReason != "" {
+				st.FailureReason = update.FailureReason
+			}
 			if update.Tags != nil {
 				if st.Tags == nil {
 					st.Tags = make(map[string]string, len(update.Tags))
@@ -343,7 +346,10 @@ func startH2CProxy(t *testing.T, ctx context.Context, upstreamAddr string, opts 
 				if err != nil && !errors.Is(err, io.EOF) {
 					state = "error"
 				}
-				store.UpdateStream(cctx, streamID, flow.StreamUpdate{State: state})
+				store.UpdateStream(cctx, streamID, flow.StreamUpdate{
+					State:         state,
+					FailureReason: session.ClassifyError(err),
+				})
 			},
 		})
 	}
@@ -406,20 +412,14 @@ func startH2MITMProxy(t *testing.T, ctx context.Context, buildCfg *connector.Bui
 					session.RunSession(cbCtx, ch, dial, pipe, session.SessionOptions{
 						OnComplete: func(cctx context.Context, streamID string, err error) {
 							state := "complete"
-							var tags map[string]string
 							if err != nil && !errors.Is(err, io.EOF) {
 								state = "error"
-								var se *layer.StreamError
-								if errors.As(err, &se) {
-									tags = map[string]string{"failure_reason": se.Code.String()}
-								}
 							}
 							if streamID != "" {
-								up := flow.StreamUpdate{State: state}
-								if tags != nil {
-									up.Tags = tags
-								}
-								store.UpdateStream(cctx, streamID, up)
+								store.UpdateStream(cctx, streamID, flow.StreamUpdate{
+									State:         state,
+									FailureReason: session.ClassifyError(err),
+								})
 							}
 						},
 					})
@@ -1086,20 +1086,21 @@ func TestRSTStream_RecordsAsErrorWithCanceledReason(t *testing.T) {
 		t.Fatalf(`expected at least one StreamUpdate with State=="error" — MITM analyst cannot distinguish normal EOF from RST_STREAM(CANCEL)`)
 	}
 
-	// USK-616: classification via Tags["failure_reason"]. The session
-	// OnComplete closure wires the layer.StreamError code (from the upstream
-	// Channel's cascaded close) into Tags so MITM analysts can filter canceled
-	// streams from other failure modes.
+	// USK-620: classification via StreamUpdate.FailureReason (first-class
+	// column). The session OnComplete closure wires the layer.StreamError
+	// code (from the upstream Channel's cascaded close) via
+	// session.ClassifyError so MITM analysts can filter canceled streams
+	// from other failure modes.
 	var hasCanceledReason bool
 	for _, st := range streams {
 		for _, u := range store.getUpdates(st.ID) {
-			if u.State == "error" && u.Tags != nil && u.Tags["failure_reason"] == "canceled" {
+			if u.State == "error" && u.FailureReason == "canceled" {
 				hasCanceledReason = true
 			}
 		}
 	}
 	if !hasCanceledReason {
-		t.Errorf(`expected Tags["failure_reason"]=="canceled" on the error update (streams=%d)`, len(streams))
+		t.Errorf(`expected FailureReason=="canceled" on the error update (streams=%d)`, len(streams))
 	}
 }
 
@@ -1108,19 +1109,154 @@ func TestRSTStream_RecordsAsErrorWithCanceledReason(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestGOAWAY_AffectedStreamsRecordedAsRefused(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	// GOAWAY production-path visibility from x/net/http2 is limited; an
-	// analyst-level distinction between "refused due to GOAWAY" and
-	// "canceled" requires surfacing the h2 error code through OnComplete.
-	// RecordStep only consumes the aggregate err from session.RunSession
-	// and classifies any non-EOF err as "error" — there's no "refused"
-	// vs "error" distinction in flow.Stream.State today. Flag as a gap
-	// and skip.
-	_ = ctx
-	_ = cancel
-	t.Skip("not yet implemented: USK-620 GOAWAY/refused classification in Stream.State recording")
+	// Upstream is our own intHTTP2.Layer in ServerRole. It accepts one
+	// h2c preface, then immediately Close()s the Layer which emits a
+	// GOAWAY(NO_ERROR) frame to the MITM-side ClientRole Layer. On the
+	// MITM's subsequent OpenStream call, the Layer returns a
+	// *layer.StreamError{Code: ErrorRefused, Reason: "GOAWAY received"|"layer shutdown"},
+	// which session.RunSession propagates to OnComplete. The test asserts
+	// the recording surfaces FailureReason="refused" so an analyst can
+	// distinguish a GOAWAY-induced refusal from a plain error.
+	upLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer upLn.Close()
+
+	upstreamDone := make(chan struct{})
+	go func() {
+		defer close(upstreamDone)
+		conn, err := upLn.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		upL, err := intHTTP2.New(conn, "upstream-goaway", intHTTP2.ServerRole)
+		if err != nil {
+			return
+		}
+		// GOAWAY is enqueued by Close. The writer has a 100ms drain window
+		// to deliver the frame before the underlying conn is torn down.
+		_ = upL.Close()
+	}()
+
+	store := &testStore{}
+	onStream := func(streamCtx context.Context, clientCh layer.Channel) {
+		dial := func(dialCtx context.Context, env *envelope.Envelope) (layer.Channel, error) {
+			upConn, dErr := net.DialTimeout("tcp", upLn.Addr().String(), 5*time.Second)
+			if dErr != nil {
+				return nil, dErr
+			}
+			upLayer, dErr := intHTTP2.New(upConn, "mitm-upstream", intHTTP2.ClientRole,
+				intHTTP2.WithScheme("http"),
+			)
+			if dErr != nil {
+				upConn.Close()
+				return nil, dErr
+			}
+			// The reader goroutine processes GOAWAY asynchronously after
+			// preface. Poll OpenStream until it either returns Refused
+			// (GOAWAY observed) or succeeds (race lost). A short ceiling
+			// keeps the test bounded on CI.
+			deadline := time.Now().Add(500 * time.Millisecond)
+			var ch layer.Channel
+			var openErr error
+			for time.Now().Before(deadline) {
+				ch, openErr = upLayer.OpenStream(dialCtx)
+				if openErr != nil {
+					break
+				}
+				// Stream allocated but GOAWAY may still be in-flight.
+				// Drop the Channel and retry briefly; the server will
+				// eventually refuse once GOAWAY is processed.
+				_ = ch.Close()
+				ch = nil
+				time.Sleep(20 * time.Millisecond)
+			}
+			if openErr != nil {
+				upLayer.Close()
+				return nil, openErr
+			}
+			if ch != nil {
+				go func() {
+					<-dialCtx.Done()
+					upLayer.Close()
+				}()
+				return ch, nil
+			}
+			upLayer.Close()
+			return nil, fmt.Errorf("OpenStream did not refuse within deadline")
+		}
+		pipe := buildPipeline(store, pipelineOpts{})
+		session.RunSession(streamCtx, clientCh, dial, pipe, session.SessionOptions{
+			OnComplete: func(cctx context.Context, streamID string, err error) {
+				state := "complete"
+				if err != nil && !errors.Is(err, io.EOF) {
+					state = "error"
+				}
+				if streamID != "" {
+					store.UpdateStream(cctx, streamID, flow.StreamUpdate{
+						State:         state,
+						FailureReason: session.ClassifyError(err),
+					})
+				}
+			},
+		})
+	}
+
+	flCfg := connector.FullListenerConfig{
+		Name: "h2c-goaway",
+		Addr: "127.0.0.1:0",
+		OnHTTP2: connector.NewH2CHandler(connector.H2CHandlerConfig{
+			OnStream: onStream,
+			Logger:   slog.Default(),
+		}),
+	}
+	fl := connector.NewFullListener(flCfg)
+	go fl.Start(ctx) //nolint:errcheck
+	select {
+	case <-fl.Ready():
+	case <-time.After(5 * time.Second):
+		t.Fatal("proxy not ready")
+	}
+
+	// Client issues one h2c request. MITM's dial will hit the refused path.
+	cli := newH2CClient()
+	req, _ := nethttp.NewRequestWithContext(ctx, "GET", "http://"+fl.Addr()+"/", nil)
+	resp, _ := cli.Do(req)
+	if resp != nil {
+		io.Copy(io.Discard, resp.Body) //nolint:errcheck
+		resp.Body.Close()
+	}
+
+	// Give OnComplete time to fire and persist the update. Bounded by ctx.
+	select {
+	case <-upstreamDone:
+	case <-ctx.Done():
+	}
+	time.Sleep(300 * time.Millisecond)
+
+	streams := store.getStreams()
+	if len(streams) == 0 {
+		t.Fatal("no streams recorded — Stream must be created before dial failure")
+	}
+
+	var hasRefused bool
+	var observed []string
+	for _, st := range streams {
+		for _, u := range store.getUpdates(st.ID) {
+			observed = append(observed, fmt.Sprintf("state=%q reason=%q", u.State, u.FailureReason))
+			if u.State == "error" && u.FailureReason == "refused" {
+				hasRefused = true
+			}
+		}
+	}
+	if !hasRefused {
+		t.Errorf(`expected FailureReason=="refused" on at least one error update; got updates=%v`, observed)
+	}
 }
 
 // ---------------------------------------------------------------------------

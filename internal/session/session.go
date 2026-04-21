@@ -71,6 +71,29 @@ type upstreamHolder struct {
 	done  chan struct{} // closed when goroutine 1 (client->upstream) exits
 }
 
+// ClassifyError returns the canonical label for a stream-level error if err
+// wraps a *layer.StreamError, or the empty string otherwise. Callers wire
+// the result into flow.StreamUpdate.FailureReason from OnComplete so that
+// analysts can distinguish GOAWAY-refused streams from cancels and protocol
+// errors in recordings.
+//
+// Values mirror layer.ErrorCode.String(): "canceled", "aborted",
+// "internal_error", "refused", "protocol_error".
+//
+// Non-StreamError failures (context cancellation, dial errors, pipeline
+// errors) intentionally return the empty string. FailureReason reflects a
+// wire-observed protocol signal, not local control-flow.
+func ClassifyError(err error) string {
+	if err == nil {
+		return ""
+	}
+	var se *layer.StreamError
+	if errors.As(err, &se) && se != nil {
+		return se.Code.String()
+	}
+	return ""
+}
+
 // RunSession is the universal session loop for all protocols.
 //
 // It reads Envelopes from the client Channel, runs them through the Pipeline,
