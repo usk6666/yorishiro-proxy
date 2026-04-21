@@ -332,6 +332,14 @@ func (l *Layer) handleStreamData(f *frame.Frame) error {
 	if endStream {
 		_ = l.conn.Streams().Transition(f.Header.StreamID, EventRecvEndStream)
 	}
+	// Passthrough END_STREAM: the assembler handed the envelope off at the
+	// threshold and terminates without yielding another one, so the
+	// deliverEnvelope path does not close recv. Close it here idempotently
+	// so Channel.Next consumers observe io.EOF and the session completes
+	// (USK-617).
+	if asm.phase == asmDone {
+		l.closeChannelRecv(ch)
+	}
 	return nil
 }
 

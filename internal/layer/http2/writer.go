@@ -36,13 +36,17 @@ type writeOpaque struct {
 }
 
 // writeMessage encodes a request or response: HEADERS (+ CONTINUATION*) plus
-// flow-controlled DATA. Headers and body are owned by the writer goroutine
-// after this request is queued.
+// flow-controlled DATA and optional trailer HEADERS. Headers, body, and
+// trailers are owned by the writer goroutine after this request is queued.
+//
+// When trailers is non-empty, END_STREAM is placed on the trailer HEADERS
+// frame rather than the final DATA frame per RFC 9113 §8.1.
 type writeMessage struct {
 	streamID   uint32
 	headers    []hpack.HeaderField
 	body       []byte
 	bodyReader io.Reader
+	trailers   []hpack.HeaderField
 	endStream  bool
 	endHook    func() // optional: called after successful write
 	done       chan error
@@ -202,50 +206,43 @@ func (l *Layer) handleWriteGoAway(req *writeGoAway) {
 	deliverDone(req.done, err)
 }
 
-// handleWriteMessage encodes headers+body and writes them, respecting peer's
-// MaxHeaderListSize, MaxFrameSize, and stream/connection send windows.
+// handleWriteMessage encodes headers+body+trailers and writes them, respecting
+// peer's MaxHeaderListSize, MaxFrameSize, and stream/connection send windows.
+//
+// Frame ordering (RFC 9113 §8.1):
+//   - HEADERS (END_STREAM iff no body and no trailers)
+//   - DATA*   (END_STREAM on the last frame iff no trailers)
+//   - HEADERS (trailers; END_STREAM always set when trailers are present)
 func (l *Layer) handleWriteMessage(req *writeMessage) {
-	// Enforce peer's MaxHeaderListSize, if any.
 	peer := l.conn.PeerSettings()
-	if peer.MaxHeaderListSize > 0 {
-		var total uint32
-		for _, hf := range req.headers {
-			total += hf.Size()
-			if total > peer.MaxHeaderListSize {
-				deliverDone(req.done, fmt.Errorf("http2: encoded header list size %d exceeds peer max %d", total, peer.MaxHeaderListSize))
-				return
-			}
-		}
-	}
-
-	// Apply peer's HEADER_TABLE_SIZE if it changed since last call.
-	if l.encoderTableSize != peer.HeaderTableSize {
-		l.encoder.SetMaxTableSize(peer.HeaderTableSize)
-		l.encoderTableSize = peer.HeaderTableSize
-	}
-
-	// Update writer max frame size from peer settings.
-	if peer.MaxFrameSize >= frame.DefaultMaxFrameSize && peer.MaxFrameSize <= frame.MaxAllowedFrameSize {
-		_ = l.frameWriter.SetMaxFrameSize(peer.MaxFrameSize)
+	if err := l.preparePeerWriteSettings(peer, req.headers, req.trailers); err != nil {
+		deliverDone(req.done, err)
+		return
 	}
 	maxFrameSize := l.frameWriter.MaxFrameSize()
 
-	// Encode headers.
-	encoded := l.encoder.Encode(req.headers)
-
-	// Determine if there is a body.
 	hasBody := len(req.body) > 0 || req.bodyReader != nil
-	headersEndStream := req.endStream && !hasBody
+	hasTrailers := len(req.trailers) > 0
+	// END_STREAM goes on the last frame emitted — trailers if any, else the
+	// last DATA, else the initial HEADERS.
+	headersEndStream := req.endStream && !hasBody && !hasTrailers
 
-	// Split header block fragment across HEADERS + CONTINUATION* frames.
+	encoded := l.encoder.Encode(req.headers)
 	if err := l.writeHeaderBlock(req.streamID, encoded, headersEndStream, maxFrameSize); err != nil {
 		deliverDone(req.done, err)
 		return
 	}
 
-	// Write body if any.
 	if hasBody {
-		if err := l.writeMessageBody(req); err != nil {
+		if err := l.writeBodyForMessage(req, hasTrailers); err != nil {
+			deliverDone(req.done, err)
+			return
+		}
+	}
+
+	if hasTrailers {
+		trailerBlock := l.encoder.Encode(req.trailers)
+		if err := l.writeHeaderBlock(req.streamID, trailerBlock, req.endStream, maxFrameSize); err != nil {
 			deliverDone(req.done, err)
 			return
 		}
@@ -255,6 +252,53 @@ func (l *Layer) handleWriteMessage(req *writeMessage) {
 		req.endHook()
 	}
 	deliverDone(req.done, nil)
+}
+
+// preparePeerWriteSettings validates header/trailer sizes against the peer's
+// SETTINGS_MAX_HEADER_LIST_SIZE and updates the encoder/frame writer state for
+// the peer's HEADER_TABLE_SIZE and MAX_FRAME_SIZE.
+func (l *Layer) preparePeerWriteSettings(peer Settings, headers, trailers []hpack.HeaderField) error {
+	if peer.MaxHeaderListSize > 0 {
+		if err := checkHeaderListSize(headers, peer.MaxHeaderListSize); err != nil {
+			return err
+		}
+		if err := checkHeaderListSize(trailers, peer.MaxHeaderListSize); err != nil {
+			return err
+		}
+	}
+	if l.encoderTableSize != peer.HeaderTableSize {
+		l.encoder.SetMaxTableSize(peer.HeaderTableSize)
+		l.encoderTableSize = peer.HeaderTableSize
+	}
+	if peer.MaxFrameSize >= frame.DefaultMaxFrameSize && peer.MaxFrameSize <= frame.MaxAllowedFrameSize {
+		_ = l.frameWriter.SetMaxFrameSize(peer.MaxFrameSize)
+	}
+	return nil
+}
+
+// writeBodyForMessage writes the body portion of req. When hasTrailers is true,
+// END_STREAM is suppressed on the body's final DATA frame so the trailer
+// HEADERS frame can carry it instead (RFC 9113 §8.1).
+func (l *Layer) writeBodyForMessage(req *writeMessage, hasTrailers bool) error {
+	bodyReq := *req
+	if hasTrailers {
+		bodyReq.endStream = false
+	}
+	return l.writeMessageBody(&bodyReq)
+}
+
+// checkHeaderListSize returns an error when the cumulative Size() of fields
+// exceeds limit. Used to enforce the peer's SETTINGS_MAX_HEADER_LIST_SIZE for
+// both the initial header block and the trailer block (RFC 9113 §6.5.2).
+func checkHeaderListSize(fields []hpack.HeaderField, limit uint32) error {
+	var total uint32
+	for _, hf := range fields {
+		total += hf.Size()
+		if total > limit {
+			return fmt.Errorf("http2: encoded header list size %d exceeds peer max %d", total, limit)
+		}
+	}
+	return nil
 }
 
 // writeHeaderBlock splits encoded header block fragment across HEADERS +
