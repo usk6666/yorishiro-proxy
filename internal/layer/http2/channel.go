@@ -166,7 +166,10 @@ func (c *channel) Send(ctx context.Context, env *envelope.Envelope) error {
 
 	// Synthetic path.
 	headers := buildHeaderFields(env, msg)
-	trailers := buildTrailerFields(msg.Trailers)
+	trailers, trailerAnomalies := buildTrailerFields(msg.Trailers)
+	if len(trailerAnomalies) > 0 {
+		msg.Anomalies = append(msg.Anomalies, trailerAnomalies...)
+	}
 
 	done := make(chan error, 1)
 	c.layer.enqueueWrite(writeRequest{message: &writeMessage{
@@ -412,37 +415,55 @@ func buildHeaderFields(env *envelope.Envelope, msg *envelope.HTTPMessage) []hpac
 }
 
 // buildTrailerFields converts HTTPMessage.Trailers to lowercase hpack.HeaderField
-// entries for the trailer HEADERS frame. Returns nil when there are no trailers
-// so the writer's hasTrailers check stays false and no frame is emitted.
+// entries for the trailer HEADERS frame, and returns anomalies describing any
+// diagnostic issues in the supplied trailers. Returns nil fields when there are
+// no trailers so the writer's hasTrailers check stays false and no frame is
+// emitted.
 //
 // HTTP/2 trailers must not contain pseudo-headers (RFC 9113 §8.1); any such
-// entries are dropped defensively. Wire case is normalized to lowercase per
-// the same rule as initial headers (documented limitation in buildHeaderFields).
-func buildTrailerFields(trailers []envelope.KeyValue) []hpack.HeaderField {
+// entries are dropped from the wire (they would cause the peer to treat the
+// stream as malformed) but flagged with H2InvalidPseudoHeader on msg.Anomalies
+// so the diagnostic record captures what the caller attempted. Wire case is
+// normalized to lowercase per the same rule as initial headers (documented
+// limitation in buildHeaderFields).
+//
+// Connection-specific headers (RFC 9113 §8.2.2 — Connection, Keep-Alive,
+// Transfer-Encoding, Upgrade, and TE != "trailers") and uppercase names are
+// NOT filtered. MITM wire-fidelity policy prohibits silent normalization on
+// the Send path. Instead we mirror the Receive path's regularHeaderAnomalies
+// helper (assembler.go) so operators see the same diagnostic record whether
+// the anomaly originated client-side or server-side.
+func buildTrailerFields(trailers []envelope.KeyValue) ([]hpack.HeaderField, []envelope.Anomaly) {
 	if len(trailers) == 0 {
-		return nil
+		return nil, nil
 	}
 	out := make([]hpack.HeaderField, 0, len(trailers))
+	var anomalies []envelope.Anomaly
 	for _, kv := range trailers {
 		if strings.HasPrefix(kv.Name, ":") {
+			anomalies = append(anomalies, envelope.Anomaly{
+				Type:   envelope.H2InvalidPseudoHeader,
+				Detail: "in trailers: " + kv.Name,
+			})
 			continue
 		}
-		// Connection-specific headers (RFC 9113 §8.2.2 — Connection,
-		// Keep-Alive, Transfer-Encoding, Upgrade, and TE != "trailers")
-		// are NOT filtered here. MITM wire-fidelity policy prohibits
-		// silent normalization on the Send path. The symmetric
-		// anomaly-flagging that the Receive path applies in
-		// assembler.go (regularHeaderAnomalies) is a known gap for the
-		// trailer-send path; tracked as a follow-up issue.
+		// Flag anomalies against the ORIGINAL (pre-lowercase) name so
+		// H2UppercaseHeaderName is actually observable. regularHeaderAnomalies
+		// handles the §8.2.2 set (h1-only names + malformed "te:") identically
+		// for initial headers and trailers per RFC 9113 §8.1.
+		anomalies = append(anomalies, regularHeaderAnomalies(hpack.HeaderField{
+			Name:  kv.Name,
+			Value: kv.Value,
+		})...)
 		out = append(out, hpack.HeaderField{
 			Name:  strings.ToLower(kv.Name),
 			Value: kv.Value,
 		})
 	}
 	if len(out) == 0 {
-		return nil
+		return nil, anomalies
 	}
-	return out
+	return out, anomalies
 }
 
 // isResponse infers whether msg is a response (vs request) when env is nil

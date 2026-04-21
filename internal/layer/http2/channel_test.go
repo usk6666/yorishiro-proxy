@@ -222,6 +222,197 @@ func waitForChannel(t *testing.T, l *Layer, dur time.Duration) (ch interface {
 // The opaque path's cached op.frames only contains bytes captured before the
 // threshold handoff — taking it would emit the prefix and leave the pipe
 // permanently un-drained.
+// TestBuildTrailerFields_Anomalies is a table-driven unit test for USK-626:
+// the Send-trailer path must flag the same anomalies the Receive path flags
+// for initial headers (H2ConnectionSpecificHeader / H2UppercaseHeaderName /
+// malformed "te:") without changing the emitted wire form. Pseudo-headers in
+// trailers are flagged H2InvalidPseudoHeader and dropped (emitting them would
+// cause the peer to treat the stream as malformed per RFC 9113 §8.1).
+func TestBuildTrailerFields_Anomalies(t *testing.T) {
+	tests := []struct {
+		name           string
+		trailers       []envelope.KeyValue
+		wantFieldNames []string // lowercase emitted names in order; nil means no trailer frame
+		wantAnomalies  []envelope.Anomaly
+	}{
+		{
+			name: "clean trailers emit no anomalies",
+			trailers: []envelope.KeyValue{
+				{Name: "grpc-status", Value: "0"},
+				{Name: "grpc-message", Value: ""},
+			},
+			wantFieldNames: []string{"grpc-status", "grpc-message"},
+			wantAnomalies:  nil,
+		},
+		{
+			name: "uppercase name flags H2UppercaseHeaderName and is still emitted lowercased",
+			trailers: []envelope.KeyValue{
+				{Name: "Grpc-Status", Value: "0"},
+			},
+			wantFieldNames: []string{"grpc-status"},
+			wantAnomalies: []envelope.Anomaly{
+				{Type: envelope.H2UppercaseHeaderName, Detail: "Grpc-Status"},
+			},
+		},
+		{
+			name: "connection-specific header flags H2ConnectionSpecificHeader and is still emitted",
+			trailers: []envelope.KeyValue{
+				{Name: "transfer-encoding", Value: "chunked"},
+			},
+			wantFieldNames: []string{"transfer-encoding"},
+			wantAnomalies: []envelope.Anomaly{
+				{Type: envelope.H2ConnectionSpecificHeader, Detail: "transfer-encoding"},
+			},
+		},
+		{
+			name: "te with non-trailers value flags H2ConnectionSpecificHeader",
+			trailers: []envelope.KeyValue{
+				{Name: "te", Value: "gzip"},
+			},
+			wantFieldNames: []string{"te"},
+			wantAnomalies: []envelope.Anomaly{
+				{Type: envelope.H2ConnectionSpecificHeader, Detail: "te: gzip"},
+			},
+		},
+		{
+			name: "te: trailers is the documented exception and flags no anomaly",
+			trailers: []envelope.KeyValue{
+				{Name: "te", Value: "trailers"},
+			},
+			wantFieldNames: []string{"te"},
+			wantAnomalies:  nil,
+		},
+		{
+			name: "pseudo-header in trailers is dropped and flagged H2InvalidPseudoHeader",
+			trailers: []envelope.KeyValue{
+				{Name: ":status", Value: "200"},
+				{Name: "grpc-status", Value: "0"},
+			},
+			wantFieldNames: []string{"grpc-status"},
+			wantAnomalies: []envelope.Anomaly{
+				{Type: envelope.H2InvalidPseudoHeader, Detail: "in trailers: :status"},
+			},
+		},
+		{
+			name: "combined anomalies accumulate in order",
+			trailers: []envelope.KeyValue{
+				{Name: "Upgrade", Value: "h2c"},
+				{Name: ":path", Value: "/evil"},
+				{Name: "te", Value: "deflate"},
+				{Name: "grpc-status", Value: "0"},
+			},
+			wantFieldNames: []string{"upgrade", "te", "grpc-status"},
+			wantAnomalies: []envelope.Anomaly{
+				{Type: envelope.H2UppercaseHeaderName, Detail: "Upgrade"},
+				{Type: envelope.H2ConnectionSpecificHeader, Detail: "Upgrade"},
+				{Type: envelope.H2InvalidPseudoHeader, Detail: "in trailers: :path"},
+				{Type: envelope.H2ConnectionSpecificHeader, Detail: "te: deflate"},
+			},
+		},
+		{
+			name:           "empty trailers return nil fields and nil anomalies",
+			trailers:       nil,
+			wantFieldNames: nil,
+			wantAnomalies:  nil,
+		},
+		{
+			name: "trailers containing only a pseudo-header return nil fields and the anomaly",
+			trailers: []envelope.KeyValue{
+				{Name: ":status", Value: "200"},
+			},
+			wantFieldNames: nil,
+			wantAnomalies: []envelope.Anomaly{
+				{Type: envelope.H2InvalidPseudoHeader, Detail: "in trailers: :status"},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fields, anomalies := buildTrailerFields(tt.trailers)
+
+			if len(fields) != len(tt.wantFieldNames) {
+				t.Fatalf("fields count = %d, want %d (fields=%+v)", len(fields), len(tt.wantFieldNames), fields)
+			}
+			for i, want := range tt.wantFieldNames {
+				if fields[i].Name != want {
+					t.Errorf("fields[%d].Name = %q, want %q", i, fields[i].Name, want)
+				}
+			}
+
+			if len(anomalies) != len(tt.wantAnomalies) {
+				t.Fatalf("anomalies count = %d, want %d (anomalies=%+v)", len(anomalies), len(tt.wantAnomalies), anomalies)
+			}
+			for i, want := range tt.wantAnomalies {
+				if anomalies[i] != want {
+					t.Errorf("anomalies[%d] = %+v, want %+v", i, anomalies[i], want)
+				}
+			}
+		})
+	}
+}
+
+// TestChannel_Send_TrailerAnomaliesAppendedToMessage verifies that anomalies
+// surfaced by buildTrailerFields are appended onto msg.Anomalies by the Send
+// path. This is the subsystem-integration proof — a caller observing the
+// HTTPMessage after Send sees the diagnostic record.
+func TestChannel_Send_TrailerAnomaliesAppendedToMessage(t *testing.T) {
+	l, peer, cleanup := startClientLayer(t)
+	defer cleanup()
+	peer.consumePeerSettings(t)
+
+	ch, err := l.OpenStream(context.Background())
+	if err != nil {
+		t.Fatalf("OpenStream: %v", err)
+	}
+
+	msg := &envelope.HTTPMessage{
+		Method:    "POST",
+		Scheme:    "https",
+		Authority: "example.com",
+		Path:      "/stream",
+		Headers: []envelope.KeyValue{
+			{Name: "content-type", Value: "application/grpc"},
+		},
+		Body: []byte{0x00},
+		Trailers: []envelope.KeyValue{
+			{Name: "Transfer-Encoding", Value: "chunked"}, // uppercase + connection-specific
+			{Name: "grpc-status", Value: "0"},
+		},
+	}
+	env := &envelope.Envelope{
+		Direction: envelope.Send,
+		Protocol:  envelope.ProtocolHTTP,
+		Message:   msg,
+	}
+
+	// Drain peer frames so the writer queue doesn't stall on net.Pipe.
+	go func() {
+		for {
+			if _, err := peer.rd.ReadFrame(); err != nil {
+				return
+			}
+		}
+	}()
+
+	if err := ch.Send(context.Background(), env); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	wantAnomalies := []envelope.Anomaly{
+		{Type: envelope.H2UppercaseHeaderName, Detail: "Transfer-Encoding"},
+		{Type: envelope.H2ConnectionSpecificHeader, Detail: "Transfer-Encoding"},
+	}
+	if len(msg.Anomalies) != len(wantAnomalies) {
+		t.Fatalf("msg.Anomalies = %+v, want %+v", msg.Anomalies, wantAnomalies)
+	}
+	for i, want := range wantAnomalies {
+		if msg.Anomalies[i] != want {
+			t.Errorf("msg.Anomalies[%d] = %+v, want %+v", i, msg.Anomalies[i], want)
+		}
+	}
+}
+
 func TestBodyChanged_PassthroughReturnsTrue(t *testing.T) {
 	pr, pw := io.Pipe()
 	defer pw.Close()
