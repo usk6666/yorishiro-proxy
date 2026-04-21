@@ -482,24 +482,34 @@ func TestParseRequest_ChunkedBody_WithTrailers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadAll() error: %v", err)
 	}
-	// The dechunkedReader decodes the chunk data and discards trailers.
 	want := "hello"
 	if string(body) != want {
 		t.Errorf("body = %q, want %q", string(body), want)
+	}
+
+	tp, ok := req.Body.(TrailerProvider)
+	if !ok {
+		t.Fatalf("req.Body does not implement TrailerProvider: %T", req.Body)
+	}
+	trailers := tp.Trailers()
+	if len(trailers) != 1 {
+		t.Fatalf("trailer count = %d, want 1; got %+v", len(trailers), trailers)
+	}
+	if trailers[0].Name != "Trailer-Key" || trailers[0].Value != "val" {
+		t.Errorf("trailer[0] = %+v, want {Trailer-Key, val}", trailers[0])
 	}
 }
 
 // --- CP-10: readTrailers size limit ---
 
 func TestParseRequest_ChunkedBody_LargeTrailers(t *testing.T) {
-	// Build a chunked body with a tiny chunk but large trailers.
-	// The dechunkedReader discards trailers, so large trailers should not
-	// cause an error — only the chunk data ("A") is returned.
+	// Build a chunked body with a tiny chunk but large trailers. Trailers are
+	// now parsed and preserved; the cap still applies but 100 * ~110 bytes is
+	// well under maxHeaderSize so parsing succeeds.
 	var b strings.Builder
 	b.WriteString("POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n")
 	b.WriteString("1\r\nA\r\n") // 1-byte chunk
 	b.WriteString("0\r\n")      // terminal chunk
-	// Add a few trailer lines (not absurdly large to avoid slow test).
 	for i := 0; i < 100; i++ {
 		b.WriteString("X-Pad: " + strings.Repeat("B", 100) + "\r\n")
 	}
@@ -515,6 +525,254 @@ func TestParseRequest_ChunkedBody_LargeTrailers(t *testing.T) {
 	}
 	if string(body) != "A" {
 		t.Errorf("body = %q, want %q", body, "A")
+	}
+	if tp, ok := req.Body.(TrailerProvider); ok {
+		if len(tp.Trailers()) != 100 {
+			t.Errorf("trailer count = %d, want 100", len(tp.Trailers()))
+		}
+	} else {
+		t.Errorf("req.Body does not implement TrailerProvider: %T", req.Body)
+	}
+}
+
+// --- USK-627: chunked trailer preservation ---
+
+func TestParseRequest_ChunkedTrailers_MultiplePreserveOrderAndCase(t *testing.T) {
+	raw := "POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\nTrailer: X-Checksum, x-order\r\n\r\n" +
+		"5\r\nhello\r\n" +
+		"0\r\n" +
+		"X-Checksum: abc123\r\n" +
+		"x-order: second\r\n" +
+		"X-CHECKSUM: dup-different-case\r\n" +
+		"\r\n"
+	req, err := ParseRequest(newReader(raw))
+	if err != nil {
+		t.Fatalf("ParseRequest() error: %v", err)
+	}
+	if _, err := io.ReadAll(req.Body); err != nil {
+		t.Fatalf("ReadAll() error: %v", err)
+	}
+
+	tp, ok := req.Body.(TrailerProvider)
+	if !ok {
+		t.Fatalf("req.Body does not implement TrailerProvider: %T", req.Body)
+	}
+	trailers := tp.Trailers()
+	want := []RawHeader{
+		{Name: "X-Checksum", Value: "abc123"},
+		{Name: "x-order", Value: "second"},
+		{Name: "X-CHECKSUM", Value: "dup-different-case"},
+	}
+	if len(trailers) != len(want) {
+		t.Fatalf("trailer count = %d, want %d; got %+v", len(trailers), len(want), trailers)
+	}
+	for i := range want {
+		if trailers[i].Name != want[i].Name || trailers[i].Value != want[i].Value {
+			t.Errorf("trailer[%d] = %+v, want %+v", i, trailers[i], want[i])
+		}
+	}
+	if anomalies := tp.TrailerAnomalies(); len(anomalies) != 0 {
+		t.Errorf("unexpected trailer anomalies: %+v", anomalies)
+	}
+}
+
+func TestParseResponse_ChunkedTrailers_Preserved(t *testing.T) {
+	raw := "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n" +
+		"4\r\nwiki\r\n" +
+		"0\r\n" +
+		"X-Digest: sha256-deadbeef\r\n" +
+		"\r\n"
+	resp, err := ParseResponse(newReader(raw))
+	if err != nil {
+		t.Fatalf("ParseResponse() error: %v", err)
+	}
+	if _, err := io.ReadAll(resp.Body); err != nil {
+		t.Fatalf("ReadAll() error: %v", err)
+	}
+	tp, ok := resp.Body.(TrailerProvider)
+	if !ok {
+		t.Fatalf("resp.Body does not implement TrailerProvider: %T", resp.Body)
+	}
+	trailers := tp.Trailers()
+	if len(trailers) != 1 || trailers[0].Name != "X-Digest" || trailers[0].Value != "sha256-deadbeef" {
+		t.Errorf("trailers = %+v, want [{X-Digest, sha256-deadbeef}]", trailers)
+	}
+}
+
+func TestParseRequest_ChunkedTrailers_PseudoHeaderFlaggedAndKept(t *testing.T) {
+	// HTTP/1 has no pseudo-header concept, so a line ":authority: foo" is
+	// parsed with Name="" Value="authority: foo" (split on first colon).
+	// Wire fidelity: the entry stays in Trailers; empty Name triggers the
+	// pseudo-header anomaly.
+	raw := "POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n" +
+		"1\r\nA\r\n" +
+		"0\r\n" +
+		":authority: smuggled.example.com\r\n" +
+		"\r\n"
+	req, err := ParseRequest(newReader(raw))
+	if err != nil {
+		t.Fatalf("ParseRequest() error: %v", err)
+	}
+	if _, err := io.ReadAll(req.Body); err != nil {
+		t.Fatalf("ReadAll() error: %v", err)
+	}
+	tp := req.Body.(TrailerProvider)
+
+	trailers := tp.Trailers()
+	if len(trailers) != 1 {
+		t.Fatalf("trailer count = %d, want 1; got %+v", len(trailers), trailers)
+	}
+	if trailers[0].Name != "" {
+		t.Errorf("Name = %q, want empty (first-colon split)", trailers[0].Name)
+	}
+	if trailers[0].Value != "authority: smuggled.example.com" {
+		t.Errorf("Value = %q, want %q", trailers[0].Value, "authority: smuggled.example.com")
+	}
+	hasPseudo := false
+	for _, a := range tp.TrailerAnomalies() {
+		if a.Type == AnomalyTrailerPseudoHeader {
+			hasPseudo = true
+		}
+	}
+	if !hasPseudo {
+		t.Errorf("expected AnomalyTrailerPseudoHeader, got %+v", tp.TrailerAnomalies())
+	}
+}
+
+func TestParseRequest_ChunkedTrailers_ForbiddenHeaderFlaggedAndKept(t *testing.T) {
+	forbidden := []string{"Transfer-Encoding", "Content-Length", "Host", "Trailer"}
+	for _, name := range forbidden {
+		t.Run(name, func(t *testing.T) {
+			raw := "POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n" +
+				"1\r\nA\r\n" +
+				"0\r\n" +
+				name + ": bogus\r\n" +
+				"\r\n"
+			req, err := ParseRequest(newReader(raw))
+			if err != nil {
+				t.Fatalf("ParseRequest() error: %v", err)
+			}
+			if _, err := io.ReadAll(req.Body); err != nil {
+				t.Fatalf("ReadAll() error: %v", err)
+			}
+			tp := req.Body.(TrailerProvider)
+			if len(tp.Trailers()) != 1 || !strings.EqualFold(tp.Trailers()[0].Name, name) {
+				t.Errorf("forbidden trailer %q not preserved: %+v", name, tp.Trailers())
+			}
+			hasForbidden := false
+			for _, a := range tp.TrailerAnomalies() {
+				if a.Type == AnomalyTrailerForbidden {
+					hasForbidden = true
+				}
+			}
+			if !hasForbidden {
+				t.Errorf("expected AnomalyTrailerForbidden for %q, got %+v", name, tp.TrailerAnomalies())
+			}
+		})
+	}
+}
+
+func TestParseRequest_ChunkedTrailers_ForbiddenHeaderCaseInsensitive(t *testing.T) {
+	raw := "POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n" +
+		"1\r\nA\r\n" +
+		"0\r\n" +
+		"CONTENT-LENGTH: 99\r\n" +
+		"\r\n"
+	req, err := ParseRequest(newReader(raw))
+	if err != nil {
+		t.Fatalf("ParseRequest() error: %v", err)
+	}
+	if _, err := io.ReadAll(req.Body); err != nil {
+		t.Fatalf("ReadAll() error: %v", err)
+	}
+	tp := req.Body.(TrailerProvider)
+	if tp.Trailers()[0].Name != "CONTENT-LENGTH" {
+		t.Errorf("case not preserved: got %q", tp.Trailers()[0].Name)
+	}
+	hasForbidden := false
+	for _, a := range tp.TrailerAnomalies() {
+		if a.Type == AnomalyTrailerForbidden {
+			hasForbidden = true
+		}
+	}
+	if !hasForbidden {
+		t.Errorf("expected AnomalyTrailerForbidden, got %+v", tp.TrailerAnomalies())
+	}
+}
+
+func TestParseRequest_ChunkedTrailers_Empty(t *testing.T) {
+	raw := "POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n" +
+		"5\r\nhello\r\n" +
+		"0\r\n" +
+		"\r\n"
+	req, err := ParseRequest(newReader(raw))
+	if err != nil {
+		t.Fatalf("ParseRequest() error: %v", err)
+	}
+	if _, err := io.ReadAll(req.Body); err != nil {
+		t.Fatalf("ReadAll() error: %v", err)
+	}
+	tp := req.Body.(TrailerProvider)
+	if len(tp.Trailers()) != 0 {
+		t.Errorf("expected empty trailers, got %+v", tp.Trailers())
+	}
+	if len(tp.TrailerAnomalies()) != 0 {
+		t.Errorf("expected no trailer anomalies, got %+v", tp.TrailerAnomalies())
+	}
+}
+
+func TestParseRequest_ChunkedTrailers_OversizeCapped(t *testing.T) {
+	// Build trailer section just over maxHeaderSize (4 MiB) to confirm the cap
+	// still triggers. The parse will fail with an error surfaced via dr.err on
+	// final Read, but no panic should occur.
+	const trailerName = "X-Pad: "
+	paddingPerLine := maxHeaderSize / 100 // 100 lines × ~40 KiB each = 4 MiB
+	var b strings.Builder
+	b.WriteString("POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n")
+	b.WriteString("1\r\nA\r\n")
+	b.WriteString("0\r\n")
+	for i := 0; i < 101; i++ { // intentionally exceed the cap
+		b.WriteString(trailerName + strings.Repeat("B", paddingPerLine-len(trailerName)-2) + "\r\n")
+	}
+	b.WriteString("\r\n")
+
+	req, err := ParseRequest(newReader(b.String()))
+	if err != nil {
+		t.Fatalf("ParseRequest() error: %v", err)
+	}
+	// Read will surface the oversize error on the final Read after the chunk.
+	_, readErr := io.ReadAll(req.Body)
+	if readErr == nil {
+		t.Error("expected oversize trailer error from Read, got nil")
+	}
+}
+
+func TestParseRequest_ChunkedTrailers_ObsFoldFlagged(t *testing.T) {
+	raw := "POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n" +
+		"1\r\nA\r\n" +
+		"0\r\n" +
+		"X-Folded: first\r\n" +
+		" continuation\r\n" +
+		"\r\n"
+	req, err := ParseRequest(newReader(raw))
+	if err != nil {
+		t.Fatalf("ParseRequest() error: %v", err)
+	}
+	if _, err := io.ReadAll(req.Body); err != nil {
+		t.Fatalf("ReadAll() error: %v", err)
+	}
+	tp := req.Body.(TrailerProvider)
+	if len(tp.Trailers()) != 1 || tp.Trailers()[0].Value != "first continuation" {
+		t.Errorf("obs-fold not applied: %+v", tp.Trailers())
+	}
+	hasObsFold := false
+	for _, a := range tp.TrailerAnomalies() {
+		if a.Type == AnomalyObsFold {
+			hasObsFold = true
+		}
+	}
+	if !hasObsFold {
+		t.Errorf("expected AnomalyObsFold in trailer anomalies, got %+v", tp.TrailerAnomalies())
 	}
 }
 

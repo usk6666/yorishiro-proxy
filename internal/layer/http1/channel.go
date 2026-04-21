@@ -164,6 +164,10 @@ func (c *channel) nextRequest(_ context.Context) (*envelope.Envelope, error) {
 	// Convert anomalies.
 	anomalies := convertAnomalies(rawReq.Anomalies)
 
+	// Project chunked trailers (buffered mode) or flag passthrough loss.
+	trailers, trailerAnomalies := extractTrailers(rawReq.Body, bodyReader)
+	anomalies = append(anomalies, trailerAnomalies...)
+
 	// Build HTTPMessage.
 	msg := &envelope.HTTPMessage{
 		Method:     rawReq.Method,
@@ -172,6 +176,7 @@ func (c *channel) nextRequest(_ context.Context) (*envelope.Envelope, error) {
 		Path:       path,
 		RawQuery:   rawQuery,
 		Headers:    rawHeadersToKV(rawReq.Headers),
+		Trailers:   trailers,
 		Body:       body,
 		BodyStream: bodyReader,
 		Anomalies:  anomalies,
@@ -228,11 +233,16 @@ func (c *channel) nextResponse(_ context.Context) (*envelope.Envelope, error) {
 	// Convert anomalies.
 	anomalies := convertAnomalies(rawResp.Anomalies)
 
+	// Project chunked trailers (buffered mode) or flag passthrough loss.
+	trailers, trailerAnomalies := extractTrailers(rawResp.Body, bodyReader)
+	anomalies = append(anomalies, trailerAnomalies...)
+
 	// Build HTTPMessage.
 	msg := &envelope.HTTPMessage{
 		Status:       rawResp.StatusCode,
 		StatusReason: statusReason,
 		Headers:      rawHeadersToKV(rawResp.Headers),
+		Trailers:     trailers,
 		Body:         body,
 		BodyStream:   bodyReader,
 		Anomalies:    anomalies,
@@ -599,4 +609,36 @@ func convertAnomalies(parserAnomalies []parser.Anomaly) []envelope.Anomaly {
 		}
 	}
 	return anomalies
+}
+
+// extractTrailers projects chunked trailers from the parser body onto the
+// outgoing HTTPMessage. Two cases:
+//
+//   - Buffered mode (bodyReader == nil): the dechunkedReader has been fully
+//     drained by readBodyWithThreshold, so trailers are available synchronously
+//     on the TrailerProvider.
+//   - Passthrough mode (bodyReader != nil): the dechunkedReader will be drained
+//     later by the downstream writer. Trailer values cannot be attached to the
+//     Envelope at Next() time; record AnomalyTrailersInPassthrough as an
+//     honest diagnostic marker paralleling H2TrailersAfterPassthrough.
+//
+// parserBody that is not a TrailerProvider (e.g., Content-Length framing,
+// no-body) yields no trailers and no anomaly.
+func extractTrailers(parserBody io.Reader, bodyReader io.Reader) ([]envelope.KeyValue, []envelope.Anomaly) {
+	tp, ok := parserBody.(parser.TrailerProvider)
+	if !ok {
+		return nil, nil
+	}
+	if bodyReader != nil {
+		return nil, []envelope.Anomaly{{
+			Type:   envelope.AnomalyTrailersInPassthrough,
+			Detail: "chunked body exceeded passthrough threshold; trailers not captured",
+		}}
+	}
+	var trailers []envelope.KeyValue
+	if raw := tp.Trailers(); len(raw) > 0 {
+		trailers = rawHeadersToKV(raw)
+	}
+	anomalies := convertAnomalies(tp.TrailerAnomalies())
+	return trailers, anomalies
 }

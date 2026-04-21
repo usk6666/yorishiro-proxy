@@ -36,7 +36,7 @@ type captureWriter struct {
 }
 
 func (cw *captureWriter) write(p []byte) {
-	if cw.truncated {
+	if cw == nil || cw.truncated {
 		return
 	}
 	remaining := MaxRawCaptureSize - cw.buf.Len()
@@ -256,6 +256,18 @@ func readLine(r *bufio.Reader, cw *captureWriter, maxLen int) (string, error) {
 // parseHeaders parses HTTP headers until the blank line terminator.
 // It handles obs-fold (continuation lines starting with SP or HT).
 func parseHeaders(r *bufio.Reader, cw *captureWriter) (RawHeaders, []Anomaly, error) {
+	return parseHeaderLines(r, cw, maxHeaderSize)
+}
+
+// parseHeaderLines implements the shared line-by-line header/trailer parser.
+// Used by parseHeaders for initial header sections (with cw capturing RawBytes)
+// and by dechunkedReader.consumeTrailers for chunked trailer sections (with cw
+// nil). Honors obs-fold, OWS preservation, embedded-CR detection, space-before-
+// colon detection, and colon-less line fallback.
+//
+// maxSize caps the total line bytes (including approximated CRLF overhead).
+// Header count is capped at maxHeaderCount.
+func parseHeaderLines(r *bufio.Reader, cw *captureWriter, maxSize int) (RawHeaders, []Anomaly, error) {
 	var headers RawHeaders
 	var anomalies []Anomaly
 	var totalSize int
@@ -265,14 +277,14 @@ func parseHeaders(r *bufio.Reader, cw *captureWriter) (RawHeaders, []Anomaly, er
 			return headers, anomalies, fmt.Errorf("header count exceeds limit %d", maxHeaderCount)
 		}
 
-		line, err := readLine(r, cw, maxHeaderSize)
+		line, err := readLine(r, cw, maxSize)
 		if err != nil {
 			return headers, anomalies, fmt.Errorf("read header line: %w", err)
 		}
 
 		totalSize += len(line) + 2 // approximate +2 for CRLF
-		if totalSize > maxHeaderSize {
-			return headers, anomalies, fmt.Errorf("header section exceeds maximum size %d", maxHeaderSize)
+		if totalSize > maxSize {
+			return headers, anomalies, fmt.Errorf("header section exceeds maximum size %d", maxSize)
 		}
 
 		// Empty line = end of headers.

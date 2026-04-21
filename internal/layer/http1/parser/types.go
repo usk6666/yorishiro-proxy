@@ -36,7 +36,36 @@ const (
 	AnomalyAmbiguousTE AnomalyType = "AmbiguousTE"
 	// AnomalyObsFold indicates an obsolete line folding (RFC 7230 Section 3.2.4).
 	AnomalyObsFold AnomalyType = "ObsFold"
+	// AnomalyTrailerPseudoHeader indicates a pseudo-header name (":"-prefix) in
+	// a chunked trailer. HTTP/1.x has no pseudo-header concept, so its appearance
+	// in a trailer is a smuggling/injection indicator. The header is preserved
+	// in Trailers for wire fidelity.
+	AnomalyTrailerPseudoHeader AnomalyType = "TrailerPseudoHeader"
+	// AnomalyTrailerForbidden indicates a framing/routing header appeared in a
+	// chunked trailer, which RFC 7230 §4.1.2 prohibits (Transfer-Encoding,
+	// Content-Length, Host, Trailer). The header is preserved in Trailers for
+	// wire fidelity.
+	AnomalyTrailerForbidden AnomalyType = "TrailerForbidden"
+	// AnomalyTrailersInPassthrough indicates that a chunked body exceeded the
+	// passthrough threshold before trailers could be captured on the Envelope.
+	// Trailer values are drained by the downstream writer but are not surfaced
+	// on HTTPMessage.Trailers. Parallels H2TrailersAfterPassthrough for HTTP/2.
+	AnomalyTrailersInPassthrough AnomalyType = "TrailersInPassthrough"
 )
+
+// TrailerProvider is implemented by body readers that parse chunked trailers
+// after the terminal chunk. Callers may type-assert a RawRequest.Body or
+// RawResponse.Body to TrailerProvider after the body has been fully drained
+// (io.EOF) to retrieve parsed trailers. Before full drain the methods return
+// empty results.
+type TrailerProvider interface {
+	// Trailers returns the parsed chunked trailers in wire order, preserving
+	// original header name case and OWS (same rules as parseHeaders).
+	Trailers() RawHeaders
+	// TrailerAnomalies returns anomalies detected during trailer parsing
+	// (pseudo-header, forbidden header, obs-fold, header injection).
+	TrailerAnomalies() []Anomaly
+}
 
 // Anomaly records a single protocol-level anomaly found during parsing.
 type Anomaly struct {
