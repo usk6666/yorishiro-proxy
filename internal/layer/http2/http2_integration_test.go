@@ -79,6 +79,14 @@ func (s *testStore) UpdateStream(_ context.Context, id string, update flow.Strea
 			if update.State != "" {
 				st.State = update.State
 			}
+			if update.Tags != nil {
+				if st.Tags == nil {
+					st.Tags = make(map[string]string, len(update.Tags))
+				}
+				for k, v := range update.Tags {
+					st.Tags[k] = v
+				}
+			}
 		}
 	}
 	return nil
@@ -369,11 +377,20 @@ func startH2MITMProxy(t *testing.T, ctx context.Context, buildCfg *connector.Bui
 					session.RunSession(cbCtx, ch, dial, pipe, session.SessionOptions{
 						OnComplete: func(cctx context.Context, streamID string, err error) {
 							state := "complete"
+							var tags map[string]string
 							if err != nil && !errors.Is(err, io.EOF) {
 								state = "error"
+								var se *layer.StreamError
+								if errors.As(err, &se) {
+									tags = map[string]string{"failure_reason": se.Code.String()}
+								}
 							}
 							if streamID != "" {
-								store.UpdateStream(cctx, streamID, flow.StreamUpdate{State: state})
+								up := flow.StreamUpdate{State: state}
+								if tags != nil {
+									up.Tags = tags
+								}
+								store.UpdateStream(cctx, streamID, up)
 							}
 						},
 					})
@@ -1030,10 +1047,26 @@ func TestRSTStream_RecordsAsErrorWithCanceledReason(t *testing.T) {
 		}
 	}
 	if !sawAny {
-		t.Skip("not yet implemented: USK-616 canceled HTTP/2 stream: session OnComplete never fires because upstream goroutine blocks on uh.ch.Next forever (client-side close does not cascade to upstream cancel). MITM analyst sees stream stuck in \"active\".")
+		t.Fatalf("no StreamUpdate recorded for any stream — session OnComplete did not fire (streams=%d)", len(streams))
 	}
 	if !hasErrorState {
-		t.Skip("not yet implemented: USK-616 canceled HTTP/2 stream recorded with non-error terminal state — MITM analyst cannot distinguish normal EOF from RST_STREAM(CANCEL).")
+		t.Fatalf(`expected at least one StreamUpdate with State=="error" — MITM analyst cannot distinguish normal EOF from RST_STREAM(CANCEL)`)
+	}
+
+	// USK-616: classification via Tags["failure_reason"]. The session
+	// OnComplete closure wires the layer.StreamError code (from the upstream
+	// Channel's cascaded close) into Tags so MITM analysts can filter canceled
+	// streams from other failure modes.
+	var hasCanceledReason bool
+	for _, st := range streams {
+		for _, u := range store.getUpdates(st.ID) {
+			if u.State == "error" && u.Tags != nil && u.Tags["failure_reason"] == "canceled" {
+				hasCanceledReason = true
+			}
+		}
+	}
+	if !hasCanceledReason {
+		t.Errorf(`expected Tags["failure_reason"]=="canceled" on the error update (streams=%d)`, len(streams))
 	}
 }
 

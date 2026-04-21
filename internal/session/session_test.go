@@ -18,16 +18,18 @@ import (
 // nextEnvelopes are returned by Next() in order, followed by io.EOF.
 // Envelopes passed to Send() are recorded in sent.
 type mockChannel struct {
-	mu            sync.Mutex
-	streamID      string
-	nextEnvelopes []*envelope.Envelope
-	nextIdx       int
-	nextErr       error // if set, returned instead of io.EOF after envelopes are exhausted
-	sent          []*envelope.Envelope
-	closed        bool
-	blockNext     chan struct{} // if non-nil, Next blocks until closed or ctx done
-	sendErr       error         // if set, Send returns this error
-	nextGate      chan struct{} // if non-nil, Next waits for a value before each return
+	mu               sync.Mutex
+	streamID         string
+	nextEnvelopes    []*envelope.Envelope
+	nextIdx          int
+	nextErr          error // if set, returned instead of io.EOF after envelopes are exhausted
+	sent             []*envelope.Envelope
+	closed           bool
+	closeCalls       int
+	blockNext        chan struct{} // if non-nil, Next blocks until closed or ctx done
+	sendErr          error         // if set, Send returns this error
+	nextGate         chan struct{} // if non-nil, Next waits for a value before each return
+	lateErrInjection chan error    // if non-nil, Next drains this non-blockingly when on EOF path; drained value is returned instead of EOF
 }
 
 func (m *mockChannel) StreamID() string {
@@ -58,6 +60,17 @@ func (m *mockChannel) Next(ctx context.Context) (*envelope.Envelope, error) {
 		if m.nextErr != nil {
 			return nil, m.nextErr
 		}
+		// Late-error injection: if the test has seeded an error on the
+		// lateErrInjection channel, return it instead of io.EOF. Drained
+		// non-blockingly so Next remains a fast EOF-returner when the channel
+		// is empty.
+		if m.lateErrInjection != nil {
+			select {
+			case e := <-m.lateErrInjection:
+				return nil, e
+			default:
+			}
+		}
 		return nil, io.EOF
 	}
 	env := m.nextEnvelopes[m.nextIdx]
@@ -78,8 +91,31 @@ func (m *mockChannel) Send(_ context.Context, env *envelope.Envelope) error {
 func (m *mockChannel) Close() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.closeCalls++
+	if m.closed {
+		// Already closed — keep Close idempotent like real Channels.
+		return nil
+	}
 	m.closed = true
+	// If a blocked Next is waiting on blockNext, release it so the Next call
+	// returns (io.EOF by default once m.closed is observed). This models the
+	// real HTTP/2 channel.Close behavior where Close tears down the receive
+	// side and unblocks any pending Next.
+	if m.blockNext != nil {
+		select {
+		case <-m.blockNext:
+			// Already closed by the test.
+		default:
+			close(m.blockNext)
+		}
+	}
 	return nil
+}
+
+func (m *mockChannel) getCloseCalls() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.closeCalls
 }
 
 func (m *mockChannel) getSent() []*envelope.Envelope {
@@ -796,6 +832,308 @@ func TestRunSession_OnComplete_ContextNotCancelled(t *testing.T) {
 
 	if ctxErr != nil {
 		t.Errorf("OnComplete context was cancelled: %v", ctxErr)
+	}
+}
+
+// TestRunSession_CascadeCloseOnClientError verifies that when
+// clientToUpstream returns a non-EOF error (e.g., client-side RST_STREAM), the
+// upstream Channel is actively closed so upstreamToClient's pending Next
+// unblocks promptly. Before USK-616 the errgroup context cancel did not
+// reliably unblock Next on all Channel implementations, causing OnComplete to
+// never fire and flow.Stream.State to remain "active" even for canceled
+// streams.
+func TestRunSession_CascadeCloseOnClientError(t *testing.T) {
+	req := makeEnvelopeWithStreamID(envelope.Send, 0, "cascade-stream")
+	streamErr := &layer.StreamError{Code: layer.ErrorCanceled, Reason: "client canceled"}
+
+	clientCh := &mockChannel{
+		streamID:      "client",
+		nextEnvelopes: []*envelope.Envelope{req},
+		// After the first envelope is delivered, the next Next call returns
+		// a StreamError to simulate an abnormal client exit (e.g.,
+		// RST_STREAM(CANCEL)).
+		nextErr: streamErr,
+	}
+
+	// Upstream mock: Next blocks until Close is called. Close will unblock
+	// the pending Next by closing blockNext, and then Next returns io.EOF
+	// (because nextErr is unset). This models the HTTP/2 channel.Close
+	// behavior where Close closes the recv queue and any pending Next
+	// unblocks promptly.
+	upstreamCh := &mockChannel{
+		streamID:  "upstream",
+		blockNext: make(chan struct{}),
+	}
+
+	dial := func(_ context.Context, _ *envelope.Envelope) (layer.Channel, error) {
+		return upstreamCh, nil
+	}
+	p := pipeline.New(passStep{})
+
+	var (
+		called       bool
+		gotStreamID  string
+		gotErr       error
+		onCompleteMu sync.Mutex
+	)
+	opts := SessionOptions{
+		OnComplete: func(_ context.Context, streamID string, err error) {
+			onCompleteMu.Lock()
+			defer onCompleteMu.Unlock()
+			called = true
+			gotStreamID = streamID
+			gotErr = err
+		},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- RunSession(ctx, clientCh, dial, p, opts)
+	}()
+
+	select {
+	case err := <-done:
+		// Session should return the wrapped StreamError.
+		if err == nil {
+			t.Fatal("RunSession should return error")
+		}
+		if !errors.Is(err, streamErr) {
+			t.Errorf("RunSession err = %v, want wrapping %v", err, streamErr)
+		}
+	case <-time.After(1500 * time.Millisecond):
+		t.Fatal("RunSession did not terminate within 1.5s — upstream cascade close did not unblock response goroutine")
+	}
+
+	// Upstream must have been closed at least twice:
+	//   1. the cascade close triggered by the new defer in clientToUpstream
+	//   2. the outer defer in RunSession that closes uh.ch
+	// Real Channel implementations (and our mock) are idempotent, so the
+	// second call is observed but is a no-op on the underlying state. A count
+	// of 2 indicates the cascade fired; a count of 1 would indicate only the
+	// outer defer ran, which means the cascade is missing.
+	if got := upstreamCh.getCloseCalls(); got < 2 {
+		t.Errorf("upstream Close calls = %d, want >= 2 (cascade close missing — only outer defer ran)", got)
+	}
+
+	// OnComplete must have fired with the StreamError.
+	onCompleteMu.Lock()
+	defer onCompleteMu.Unlock()
+	if !called {
+		t.Fatal("OnComplete was not called")
+	}
+	if gotStreamID != "cascade-stream" {
+		t.Errorf("OnComplete streamID = %q, want %q", gotStreamID, "cascade-stream")
+	}
+	if gotErr == nil {
+		t.Fatal("OnComplete err = nil, want StreamError")
+	}
+	var se *layer.StreamError
+	if !errors.As(gotErr, &se) {
+		t.Fatalf("OnComplete err = %v, want unwrappable to *layer.StreamError", gotErr)
+	}
+	if se.Code != layer.ErrorCanceled {
+		t.Errorf("OnComplete StreamError.Code = %v, want %v", se.Code, layer.ErrorCanceled)
+	}
+}
+
+// TestRunSession_NoCascadeOnNormalEOF verifies that on normal EOF from the
+// client (err == nil from clientToUpstream), the upstream Channel is NOT
+// prematurely closed by the new cascade-close defer. This preserves HTTP/1.x
+// single-request semantics where the client half-closes after the request
+// and the response is still being delivered.
+//
+// The critical invariant: the response envelope must round-trip successfully
+// before the outer RunSession defer closes the upstream. If the cascade
+// defer fired on nil err, the upstream would be closed prematurely and the
+// response would be lost.
+func TestRunSession_NoCascadeOnNormalEOF(t *testing.T) {
+	req := makeEnvelopeWithStreamID(envelope.Send, 0, "normal-stream")
+	resp := makeEnvelopeWithStreamID(envelope.Receive, 0, "normal-stream")
+
+	// Client: first call returns req, second returns io.EOF (normal termination).
+	clientCh := &mockChannel{
+		streamID:      "client",
+		nextEnvelopes: []*envelope.Envelope{req},
+	}
+
+	// Upstream: two Next calls. First returns the response after ~50ms delay
+	// (so the client-side goroutine exits with EOF first, testing that the
+	// response goroutine still gets its envelope); second returns io.EOF.
+	// We implement the delay via nextGate.
+	gate := make(chan struct{}, 2)
+	go func() {
+		// Let the first Next return after a short delay so clientToUpstream
+		// has time to see EOF and hit its defer without the cascade firing.
+		time.Sleep(50 * time.Millisecond)
+		gate <- struct{}{}
+		// Second call returns io.EOF immediately.
+		gate <- struct{}{}
+	}()
+	upstreamCh := &mockChannel{
+		streamID:      "upstream",
+		nextEnvelopes: []*envelope.Envelope{resp},
+		nextGate:      gate,
+	}
+
+	dial := func(_ context.Context, _ *envelope.Envelope) (layer.Channel, error) {
+		return upstreamCh, nil
+	}
+	p := pipeline.New(passStep{})
+
+	var (
+		called       bool
+		gotErr       error
+		onCompleteMu sync.Mutex
+	)
+	opts := SessionOptions{
+		OnComplete: func(_ context.Context, _ string, err error) {
+			onCompleteMu.Lock()
+			defer onCompleteMu.Unlock()
+			called = true
+			gotErr = err
+		},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- RunSession(ctx, clientCh, dial, p, opts)
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("RunSession returned error on normal EOF: %v", err)
+		}
+	case <-time.After(1500 * time.Millisecond):
+		t.Fatal("RunSession did not terminate within 1.5s")
+	}
+
+	// Upstream Close must have been called exactly once — by the outer defer
+	// in RunSession. The cascade defer in clientToUpstream must NOT fire on
+	// nil err (EOF path).
+	if got := upstreamCh.getCloseCalls(); got != 1 {
+		t.Errorf("upstream Close calls = %d, want 1 (cascade fired on nil err: %v)", got, got > 1)
+	}
+
+	// The response envelope must have reached the client BEFORE upstream was
+	// closed. Verify by checking client.Send was called with the receive envelope.
+	sent := clientCh.getSent()
+	if len(sent) != 1 {
+		t.Fatalf("client.Send called %d times, want 1 (response lost due to premature cascade close?)", len(sent))
+	}
+	if sent[0].Direction != envelope.Receive {
+		t.Errorf("client received direction %v, want Receive", sent[0].Direction)
+	}
+
+	// OnComplete must have fired with nil err.
+	onCompleteMu.Lock()
+	defer onCompleteMu.Unlock()
+	if !called {
+		t.Fatal("OnComplete was not called")
+	}
+	if gotErr != nil {
+		t.Errorf("OnComplete err = %v, want nil (normal EOF)", gotErr)
+	}
+}
+
+// TestRunSession_LateClientErrorCascadesToUpstream verifies that an error
+// that arrives on the client Channel AFTER clientToUpstream has already
+// returned io.EOF still causes the upstream Channel to be closed and the
+// session to terminate with an error result. This models the HTTP/2
+// scenario where the client sends HEADERS(endStream=true) followed by a
+// late RST_STREAM — the cascade-close defer in clientToUpstream misses the
+// late error (Next already returned EOF), so the late-error watcher must
+// pick it up.
+func TestRunSession_LateClientErrorCascadesToUpstream(t *testing.T) {
+	req := makeEnvelopeWithStreamID(envelope.Send, 0, "late-err-stream")
+	streamErr := &layer.StreamError{Code: layer.ErrorCanceled, Reason: "late cancel"}
+
+	// Client: first Next returns req; subsequent Next calls return EOF
+	// until a value is pushed on lateErrInjection, at which point Next
+	// returns that value (modelling a late RST_STREAM after endStream).
+	clientCh := &mockChannel{
+		streamID:         "client",
+		nextEnvelopes:    []*envelope.Envelope{req},
+		lateErrInjection: make(chan error, 1),
+	}
+
+	// Upstream: blocks on Next until Close is called (Close unblocks via
+	// blockNext, then Next returns io.EOF). This mirrors the real upstream
+	// HTTP/2 Channel: Close emits RST_STREAM and closes the recv side.
+	upstreamCh := &mockChannel{
+		streamID:  "upstream",
+		blockNext: make(chan struct{}),
+	}
+
+	dial := func(_ context.Context, _ *envelope.Envelope) (layer.Channel, error) {
+		return upstreamCh, nil
+	}
+	p := pipeline.New(passStep{})
+
+	var (
+		called       bool
+		gotErr       error
+		onCompleteMu sync.Mutex
+	)
+	opts := SessionOptions{
+		OnComplete: func(_ context.Context, _ string, err error) {
+			onCompleteMu.Lock()
+			defer onCompleteMu.Unlock()
+			called = true
+			gotErr = err
+		},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- RunSession(ctx, clientCh, dial, p, opts)
+	}()
+
+	// Give the session a moment to forward the request and reach the
+	// post-EOF waiting state, then inject the late error. The poll interval
+	// of lateClientErrorWatcher is 5ms, so a 50ms wait is ample.
+	time.Sleep(50 * time.Millisecond)
+	clientCh.lateErrInjection <- streamErr
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("RunSession should return error when late client cancel is detected")
+		}
+		if !errors.Is(err, streamErr) {
+			t.Errorf("RunSession err = %v, want wrapping %v", err, streamErr)
+		}
+	case <-time.After(1500 * time.Millisecond):
+		t.Fatal("RunSession did not terminate after late client error injection")
+	}
+
+	// Upstream must have been closed at least once (by the watcher). The
+	// outer RunSession defer also closes it, so we expect >= 2.
+	if got := upstreamCh.getCloseCalls(); got < 2 {
+		t.Errorf("upstream Close calls = %d, want >= 2 (watcher cascade missing)", got)
+	}
+
+	// OnComplete must have fired with the late error surfaced.
+	onCompleteMu.Lock()
+	defer onCompleteMu.Unlock()
+	if !called {
+		t.Fatal("OnComplete was not called")
+	}
+	var se *layer.StreamError
+	if !errors.As(gotErr, &se) {
+		t.Fatalf("OnComplete err = %v, want unwrappable to *layer.StreamError", gotErr)
+	}
+	if se.Code != layer.ErrorCanceled {
+		t.Errorf("OnComplete StreamError.Code = %v, want %v", se.Code, layer.ErrorCanceled)
 	}
 }
 
