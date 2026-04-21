@@ -45,12 +45,21 @@ func (m *mockLayer) isClosed() bool {
 // mockChannel is a minimal Channel implementation for testing.
 type mockChannel struct {
 	streamID string
+
+	termInit sync.Once
+	termDone chan struct{}
+}
+
+func (c *mockChannel) ensureTerm() {
+	c.termInit.Do(func() { c.termDone = make(chan struct{}) })
 }
 
 func (c *mockChannel) StreamID() string                                   { return c.streamID }
 func (c *mockChannel) Next(_ context.Context) (*envelope.Envelope, error) { return nil, nil }
 func (c *mockChannel) Send(_ context.Context, _ *envelope.Envelope) error { return nil }
 func (c *mockChannel) Close() error                                       { return nil }
+func (c *mockChannel) Closed() <-chan struct{}                            { c.ensureTerm(); return c.termDone }
+func (c *mockChannel) Err() error                                         { return nil }
 
 func TestConnectionStack_PushAndTopmost(t *testing.T) {
 	stack := NewConnectionStack("conn-1")

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"regexp"
+	"sync"
 	"testing"
 
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
@@ -47,6 +48,16 @@ type mockChannel struct {
 	sendErr   error
 	nextErr   error
 	closed    bool
+
+	// Terminal-state plumbing for layer.Channel. The backing channel is
+	// lazy-initialized so bare `&mockChannel{}` literals keep working.
+	termInit sync.Once
+	termDone chan struct{}
+	termOnce sync.Once
+}
+
+func (c *mockChannel) ensureTerm() {
+	c.termInit.Do(func() { c.termDone = make(chan struct{}) })
 }
 
 func (c *mockChannel) StreamID() string { return c.streamID }
@@ -73,7 +84,26 @@ func (c *mockChannel) Send(_ context.Context, env *envelope.Envelope) error {
 
 func (c *mockChannel) Close() error {
 	c.closed = true
+	c.ensureTerm()
+	c.termOnce.Do(func() { close(c.termDone) })
 	return nil
+}
+
+// Closed implements layer.Channel.
+func (c *mockChannel) Closed() <-chan struct{} {
+	c.ensureTerm()
+	return c.termDone
+}
+
+// Err implements layer.Channel. The job test mock treats every terminal
+// event as a normal EOF — the job package does not observe late errors.
+func (c *mockChannel) Err() error {
+	select {
+	case <-c.Closed():
+		return io.EOF
+	default:
+		return nil
+	}
 }
 
 // --- Helpers ---

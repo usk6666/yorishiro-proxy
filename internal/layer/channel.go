@@ -32,4 +32,22 @@ type Channel interface {
 
 	// Close closes just this channel. Underlying layer lifecycle is separate.
 	Close() error
+
+	// Closed returns a channel that is closed when this Channel has entered
+	// its terminal state. After it fires, Next will no longer produce new
+	// Envelopes: it returns the same terminal error as Err. Callers that
+	// need to react to terminal events without driving Next (e.g., a
+	// late-error watcher parked after a prior Next returned io.EOF) should
+	// select on this channel.
+	//
+	// Implementations MUST populate the terminal error returned by Err
+	// before closing this channel so that any observer of Closed sees a
+	// stable value through Err.
+	Closed() <-chan struct{}
+
+	// Err returns the terminal error for this Channel. It returns nil
+	// before Closed has fired; after Closed fires it returns io.EOF for
+	// normal termination or a non-EOF error (typically *StreamError) for
+	// abnormal termination.
+	Err() error
 }

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -22,6 +23,13 @@ type Channel struct {
 	direction envelope.Direction
 	seq       int
 	buf       []byte
+
+	// Terminal-state tracking. Populated before termDone is closed so
+	// callers observing Closed see a stable Err value.
+	termMu   sync.Mutex
+	termErr  error
+	termOnce sync.Once
+	termDone chan struct{}
 }
 
 // StreamID returns the stable identifier for this channel.
@@ -71,9 +79,12 @@ func (c *Channel) Next(ctx context.Context) (*envelope.Envelope, error) {
 	}
 	if err != nil {
 		if err == io.EOF || isConnectionClosed(err) {
+			c.markTerminated(io.EOF)
 			return nil, io.EOF
 		}
-		return nil, fmt.Errorf("bytechunk: read: %w", err)
+		wrapped := fmt.Errorf("bytechunk: read: %w", err)
+		c.markTerminated(wrapped)
+		return nil, wrapped
 	}
 	// n == 0 && err == nil: unusual but possible; retry.
 	return c.Next(ctx)
@@ -108,6 +119,29 @@ func (c *Channel) Send(ctx context.Context, env *envelope.Envelope) error {
 // Close is a no-op for Channel. The underlying connection is owned by the
 // Layer, not the Channel.
 func (c *Channel) Close() error { return nil }
+
+// Closed returns a channel closed when this Channel has reached its terminal
+// state. See layer.Channel for the contract.
+func (c *Channel) Closed() <-chan struct{} { return c.termDone }
+
+// Err returns the terminal error. See layer.Channel for the contract.
+func (c *Channel) Err() error {
+	c.termMu.Lock()
+	defer c.termMu.Unlock()
+	return c.termErr
+}
+
+// markTerminated stores err (first-writer-wins) and closes termDone exactly
+// once. Callers must guarantee err is non-nil; io.EOF is used for normal
+// termination.
+func (c *Channel) markTerminated(err error) {
+	c.termMu.Lock()
+	if c.termErr == nil {
+		c.termErr = err
+	}
+	c.termMu.Unlock()
+	c.termOnce.Do(func() { close(c.termDone) })
+}
 
 // isConnectionClosed checks for common "connection closed" errors that
 // should be treated as EOF.

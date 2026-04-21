@@ -37,6 +37,19 @@ type channel struct {
 	sequence   int
 	headersHas bool // true after first request HEADERS sent (client side)
 	closed     bool
+
+	// Terminal-state tracking. Populated before termDone closes so any
+	// observer of Closed sees a stable Err value.
+	//
+	// markTerminated is deliberately NOT invoked on normal END_STREAM
+	// (assembler asmDone path). A peer may still deliver a late RST_STREAM
+	// on a stream it half-closed, and firing Closed on asmDone would
+	// latch io.EOF as the terminal error and prevent the subsequent
+	// StreamError from becoming visible through Err.
+	termMu   sync.Mutex
+	termErr  error
+	termOnce sync.Once
+	termDone chan struct{}
 }
 
 // newChannel constructs a channel bound to layer for h2 stream id.
@@ -48,7 +61,31 @@ func newChannel(l *Layer, h2Stream uint32, isPush bool) *channel {
 		isPush:   isPush,
 		recv:     make(chan *envelope.Envelope, 1),
 		errCh:    make(chan *layer.StreamError, 1),
+		termDone: make(chan struct{}),
 	}
+}
+
+// Closed returns a channel closed when this Channel has reached its terminal
+// state. See layer.Channel for the contract.
+func (c *channel) Closed() <-chan struct{} { return c.termDone }
+
+// Err returns the terminal error. See layer.Channel for the contract.
+func (c *channel) Err() error {
+	c.termMu.Lock()
+	defer c.termMu.Unlock()
+	return c.termErr
+}
+
+// markTerminated stores err (first-writer-wins) and closes termDone exactly
+// once. Callers must guarantee err is non-nil; io.EOF is used for normal
+// termination.
+func (c *channel) markTerminated(err error) {
+	c.termMu.Lock()
+	if c.termErr == nil {
+		c.termErr = err
+	}
+	c.termMu.Unlock()
+	c.termOnce.Do(func() { close(c.termDone) })
 }
 
 // nextSequence returns the next sequence number, atomically.
@@ -157,6 +194,10 @@ func (c *channel) Close() error {
 			code:     ErrCodeCancel,
 		}})
 		c.layer.closeChannelRecv(c)
+		// Local cancellation is "normal" from the watcher's perspective:
+		// we initiated it and do not want the session's late-error path
+		// to cascade the close back onto the peer.
+		c.markTerminated(io.EOF)
 	})
 	return nil
 }

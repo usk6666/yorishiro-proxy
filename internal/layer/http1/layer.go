@@ -80,6 +80,7 @@ func New(conn net.Conn, streamID string, direction envelope.Direction, opts ...O
 		direction: direction,
 		scheme:    o.scheme,
 		ctxTmpl:   o.ctx,
+		termDone:  make(chan struct{}),
 	}
 	l.ch <- l.channel
 	close(l.ch)
@@ -90,7 +91,16 @@ func New(conn net.Conn, streamID string, direction envelope.Direction, opts ...O
 func (l *Layer) Channels() <-chan layer.Channel { return l.ch }
 
 // Close closes the underlying connection. The Layer owns the connection.
-func (l *Layer) Close() error { return l.conn.Close() }
+// It also fires the Channel's Closed signal with io.EOF if the Channel has
+// not already observed a terminal state (covers the idle-Channel race where
+// Close runs with no Next in flight).
+func (l *Layer) Close() error {
+	err := l.conn.Close()
+	if l.channel != nil {
+		l.channel.markTerminated(io.EOF)
+	}
+	return err
+}
 
 // DetachStream tears down the HTTP/1 layer after an Upgrade response and
 // returns the buffered reader, writer, and underlying closer so that the

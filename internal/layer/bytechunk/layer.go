@@ -1,6 +1,7 @@
 package bytechunk
 
 import (
+	"io"
 	"net"
 
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
@@ -32,6 +33,7 @@ func New(conn net.Conn, streamID string, direction envelope.Direction) *Layer {
 		streamID:  streamID,
 		direction: direction,
 		buf:       make([]byte, 32*1024), // 32 KB read buffer
+		termDone:  make(chan struct{}),
 	}
 	l.ch <- l.channel
 	close(l.ch)
@@ -42,4 +44,13 @@ func New(conn net.Conn, streamID string, direction envelope.Direction) *Layer {
 func (l *Layer) Channels() <-chan layer.Channel { return l.ch }
 
 // Close closes the underlying connection. The Layer owns the connection.
-func (l *Layer) Close() error { return l.conn.Close() }
+// It also fires the Channel's Closed signal with io.EOF if the Channel has
+// not already observed a terminal state, covering the case where Layer.Close
+// races an idle Next-less Channel.
+func (l *Layer) Close() error {
+	err := l.conn.Close()
+	if l.channel != nil {
+		l.channel.markTerminated(io.EOF)
+	}
+	return err
+}
