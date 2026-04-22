@@ -81,7 +81,9 @@ func SweepOrphanBodyFiles(dir string, logger *slog.Logger) {
 		scanned++
 		info, err := entry.Info()
 		if err != nil {
-			// Race with another process unlinking; skip silently.
+			// Race with another process unlinking; skip.
+			logger.Debug("body spill sweep: stat failed",
+				"name", name, "err", err)
 			continue
 		}
 		if info.ModTime().After(cutoff) {

@@ -70,8 +70,12 @@ func (c *Config) validateBodySpill() error {
 		if err != nil {
 			return fmt.Errorf("body_spill_dir %q is not writable: %w", c.BodySpillDir, err)
 		}
-		defer tmp.Close()
-		defer os.Remove(tmp.Name())
+		// Close before Remove so the unlink succeeds on Windows, where
+		// os.Remove fails on files with open handles. Matches the pattern in
+		// internal/selfupdate/updater.go (checkWritePermission).
+		name := tmp.Name()
+		tmp.Close()
+		os.Remove(name)
 	}
 	if c.BodySpillThreshold < 0 {
 		return fmt.Errorf("body_spill_threshold must be >= 0, got %d", c.BodySpillThreshold)
