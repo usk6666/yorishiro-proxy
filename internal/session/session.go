@@ -307,7 +307,7 @@ func upstreamToClient(
 		// client Layer would emit a malformed response. The MITM default
 		// posture is to terminate push at the proxy: the pushed stream
 		// itself is recorded independently via the upstream push recorder
-		// (see internal/connector/push_recorder.go).
+		// (see internal/pushrecorder/push_recorder.go).
 		if m, ok := env.Message.(*envelope.HTTPMessage); ok && envelope.HasPushPromiseAnomaly(m) {
 			continue
 		}

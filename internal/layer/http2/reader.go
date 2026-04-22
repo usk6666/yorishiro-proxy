@@ -447,7 +447,7 @@ func (l *Layer) handleStreamPushPromise(f *frame.Frame) error {
 
 	// Create a new push channel for the promised stream. originStreamID
 	// points back to the origin channel's UUID so the push recorder (see
-	// internal/connector/push_recorder.go) can tag the pushed stream's
+	// internal/pushrecorder/push_recorder.go) can tag the pushed stream's
 	// flows with the originating request's identifier for analyst
 	// correlation.
 	pushCh := newChannel(l, promisedID, true)
