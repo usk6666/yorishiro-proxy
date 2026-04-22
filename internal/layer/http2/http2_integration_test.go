@@ -38,6 +38,8 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/layer"
 	intHTTP2 "github.com/usk6666/yorishiro-proxy/internal/layer/http2"
+	h2frame "github.com/usk6666/yorishiro-proxy/internal/layer/http2/frame"
+	h2hpack "github.com/usk6666/yorishiro-proxy/internal/layer/http2/hpack"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/http2/pool"
 	"github.com/usk6666/yorishiro-proxy/internal/pipeline"
 	"github.com/usk6666/yorishiro-proxy/internal/rules/common"
@@ -302,7 +304,12 @@ func buildPipeline(store flow.Writer, opts pipelineOpts) *pipeline.Pipeline {
 		pipeline.NewSafetyStep(opts.safetyEngine, slog.Default()),
 		pipeline.NewTransformStep(opts.transformEngine),
 		pipeline.NewInterceptStep(opts.interceptEngine, opts.holdQueue, slog.Default()),
-		pipeline.NewRecordStep(store, slog.Default()),
+		pipeline.NewRecordStep(store, slog.Default(),
+			// USK-622: register the HTTP/2 wire-encoder so that modified-
+			// variant RawBytes reflects the re-encoded frame bytes instead
+			// of the ingress env.Raw that was captured before mutation.
+			pipeline.WithWireEncoder(envelope.ProtocolHTTP, intHTTP2.EncodeWireBytes),
+		),
 	}
 	return pipeline.New(steps...)
 }
@@ -1761,16 +1768,57 @@ func TestVariantRecording_InterceptModifyHeader(t *testing.T) {
 		if !hasInjected(modSend) {
 			t.Error("modified variant should contain X-Injected")
 		}
-		// Raw bytes may or may not differ depending on whether the opaque
-		// fast path was used to re-encode on modification. In the current
-		// implementation, if the frames are reused literally for the
-		// original but re-encoded on modify, they should differ. If both
-		// share the same bytes, that's a MITM wire-fidelity gap for the
-		// modified variant.
+
+		// USK-622: the modified variant's RawBytes must reflect the
+		// re-encoded wire representation (HPACK-encoded header block +
+		// END_STREAM), NOT the ingress env.Raw captured before the
+		// injection. The two byte strings must therefore differ, and the
+		// modified bytes must decode back via hpack to a header list
+		// containing x-injected: by-proxy.
 		if bytes.Equal(origSend.RawBytes, modSend.RawBytes) && len(origSend.RawBytes) > 0 {
-			// Gap: modified variant RawBytes should reflect the re-encoded
-			// wire representation after injection.
-			t.Skip("not yet implemented: USK-622 modified variant RawBytes does not reflect re-encoded wire bytes (HTTP/2 variant wire fidelity)")
+			t.Error("modified variant RawBytes equals original — WireEncoder did not run")
+		}
+		if len(modSend.RawBytes) == 0 {
+			t.Fatal("modified variant RawBytes is empty")
+		}
+
+		// Decode the modified wire bytes back through hpack and assert the
+		// injected header is present. HPACK indices differ from the live
+		// wire bytes (documented caveat in EncodeWireBytes godoc) but the
+		// decoded (name, value) sequence must round-trip the injection.
+		rdr := h2frame.NewReader(bytes.NewReader(modSend.RawBytes))
+		var fragment []byte
+		for {
+			f, rerr := rdr.ReadFrame()
+			if rerr != nil {
+				break
+			}
+			if f.Header.Type != h2frame.TypeHeaders &&
+				f.Header.Type != h2frame.TypeContinuation {
+				continue
+			}
+			fragment = append(fragment, f.Payload...)
+			if f.Header.Flags&h2frame.FlagEndHeaders != 0 {
+				break
+			}
+		}
+		if len(fragment) == 0 {
+			t.Fatalf("no HEADERS/CONTINUATION frame in modified variant RawBytes: % x", modSend.RawBytes)
+		}
+		dec := h2hpack.NewDecoder(4096)
+		hdrs, derr := dec.Decode(fragment)
+		if derr != nil {
+			t.Fatalf("hpack.Decode: %v", derr)
+		}
+		var foundInjected bool
+		for _, hf := range hdrs {
+			if hf.Name == "x-injected" && hf.Value == "by-proxy" {
+				foundInjected = true
+				break
+			}
+		}
+		if !foundInjected {
+			t.Errorf("hpack decode of modified RawBytes missing x-injected: by-proxy; got %v", hdrs)
 		}
 	}
 }
