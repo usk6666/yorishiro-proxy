@@ -190,6 +190,23 @@ func buildALPNRoutedStack(
 		return nil, nil, nil, err
 	}
 
+	// H2 pool fast path: consult the pool BEFORE upstream TLS dial. On hit
+	// we reuse the cached Layer and skip the upstream handshake entirely —
+	// the whole point of pooling, and externally observable via upstream
+	// TCP accept count staying flat across same-target CONNECTs.
+	//
+	// A pool hit implies ALPN=h2 because poolKeyForH2 is only minted for
+	// the h2 route, so we can offer "h2" to the client MITM without
+	// consulting the ALPN cache. On miss (including Pool.Get returning
+	// ErrClosed, a dead Layer, or a capacity-capped Layer) fall through
+	// to the existing ALPN-cache / upstream-dial flow.
+	if cfg.HTTP2Pool != nil {
+		poolKey := poolKeyForH2(target, cfg)
+		if pooled, perr := cfg.HTTP2Pool.Get(poolKey); perr == nil && pooled != nil {
+			return buildPoolHitFastPath(ctx, clientConn, target, host, connID, pooled, poolKey, cfg)
+		}
+	}
+
 	// Check ALPN cache.
 	var cacheKey ALPNCacheKey
 	cachedALPN, cacheHit := "", false
@@ -321,6 +338,64 @@ func buildCacheMissPath(
 	}
 
 	return clientTLSConn, upstreamConn, clientSnap, upstreamSnap, nil
+}
+
+// buildPoolHitFastPath constructs the ConnectionStack without dialing
+// upstream — the cached h2 Layer is reused as-is. The caller has already
+// obtained pooled via cfg.HTTP2Pool.Get (inUseCount is incremented);
+// the stack's deferred Pool.Put in dispatchStack balances that on handler
+// exit. If client MITM fails before the stack is returned, this function
+// calls Pool.Put inline to release the reservation (the cached Layer is
+// healthy — Evict would destroy a reusable connection for an unrelated
+// client-side problem).
+//
+// Returns (stack, clientSnap, upstreamSnap, err). The upstreamSnap is read
+// from pooled.EnvelopeContextTemplate() — authoritative per USK-619 (the
+// stored snap was captured at the cached Layer's original dial).
+func buildPoolHitFastPath(
+	ctx context.Context,
+	clientConn net.Conn,
+	target, host, connID string,
+	pooled *http2.Layer,
+	poolKey pool.PoolKey,
+	cfg *BuildConfig,
+) (*ConnectionStack, *envelope.TLSSnapshot, *envelope.TLSSnapshot, error) {
+	clientTLSConn, clientSnap, err := performClientMITM(ctx, clientConn, host, ALPNProtocolH2, cfg)
+	if err != nil {
+		// Release the pool reservation — Layer is healthy, we just didn't
+		// complete the client-side handshake. Put (not Evict) keeps the
+		// Layer available for the next caller.
+		cfg.HTTP2Pool.Put(poolKey, pooled)
+		return nil, nil, nil, err
+	}
+
+	upstreamSnap := pooled.EnvelopeContextTemplate().TLS
+
+	clientEnvCtx := envelope.EnvelopeContext{
+		ConnID:     connID,
+		TargetHost: target,
+		TLS:        clientSnap,
+	}
+
+	clientLayer, err := http2.New(clientTLSConn, connID+"/client", http2.ServerRole,
+		http2.WithScheme("https"),
+		http2.WithEnvelopeContext(clientEnvCtx),
+	)
+	if err != nil {
+		cfg.HTTP2Pool.Put(poolKey, pooled)
+		clientTLSConn.Close()
+		return nil, nil, nil, fmt.Errorf("connector: h2 client layer: %w", err)
+	}
+
+	stack := NewConnectionStack(connID)
+	stack.PushClient(clientLayer)
+	stack.setUpstreamH2(pooled, poolKey)
+
+	slog.Debug("connector: h2 pool fast-path hit",
+		"target", target, "conn_id", connID, "key", poolKey.String(),
+	)
+
+	return stack, clientSnap, upstreamSnap, nil
 }
 
 // performClientMITM performs the client-side TLS MITM handshake, issuing a
