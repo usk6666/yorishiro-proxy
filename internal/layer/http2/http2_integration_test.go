@@ -42,6 +42,7 @@ import (
 	h2hpack "github.com/usk6666/yorishiro-proxy/internal/layer/http2/hpack"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/http2/pool"
 	"github.com/usk6666/yorishiro-proxy/internal/pipeline"
+	"github.com/usk6666/yorishiro-proxy/internal/pushrecorder"
 	"github.com/usk6666/yorishiro-proxy/internal/rules/common"
 	httprules "github.com/usk6666/yorishiro-proxy/internal/rules/http"
 	"github.com/usk6666/yorishiro-proxy/internal/session"
@@ -386,6 +387,18 @@ func startH2CProxy(t *testing.T, ctx context.Context, upstreamAddr string, opts 
 func startH2MITMProxy(t *testing.T, ctx context.Context, buildCfg *connector.BuildConfig, opts pipelineOpts) (proxyAddr string, store *testStore) {
 	t.Helper()
 	store = &testStore{}
+
+	// USK-623: install an OnHTTP2UpstreamDialed hook that spawns the
+	// upstream push recorder for every freshly-dialed upstream h2 Layer.
+	// The recorder goroutine's lifetime matches the Layer's (runs until
+	// Layer.Channels() closes on shutdown). On pool hit the hook does
+	// NOT fire, so the original recorder keeps draining — no double
+	// attach.
+	if buildCfg != nil {
+		buildCfg.OnHTTP2UpstreamDialed = func(l *intHTTP2.Layer) {
+			go pushrecorder.RunUpstream(ctx, l, store, slog.Default())
+		}
+	}
 
 	onHTTP2Stack := func(cbCtx context.Context, stack *connector.ConnectionStack, upstreamH2 *intHTTP2.Layer, clientSnap, upstreamSnap *envelope.TLSSnapshot, target string) {
 		_ = clientSnap
@@ -1873,13 +1886,26 @@ func TestServerPush_PushStreamRecordedSeparately(t *testing.T) {
 		}
 	}
 	if !pushFound {
-		// PUSH_PROMISE from upstream should reach the proxy's upstream Layer
-		// and be assembled as a separate push channel (isPush=true). Whether
-		// it reaches the client or is flagged/recorded by the proxy is an
-		// observability decision. The current Layer wiring emits a separate
-		// Channel on push (see channel.go isPush), but the session loop in
-		// this test dispatches only CLIENT-side channels. Upstream push
-		// arriving via the pool-owned upstream Layer has no observer.
-		t.Skip("not yet implemented: USK-623 server-push stream observability (upstream PUSH_PROMISE not recorded)")
+		t.Fatalf("push stream recording missing: no flow with URL.Path=/pushed.css across %d streams", len(streams))
+	}
+
+	// USK-623 acceptance: the push stream must be recorded as an INDEPENDENT
+	// Stream tagged with the push's origin identifier. The tag value is the
+	// origin channel's streamID on the UPSTREAM Layer — it does NOT match
+	// the store's client-side Stream.ID (session.upstreamToClient rewrites
+	// every upstream envelope's StreamID to the captured client stream id
+	// before RecordStep fires, so origin Stream rows are keyed by the
+	// client-side id). Analysts correlate push↔origin via the origin
+	// Stream's flow carrying H2PushPromise + URL.Path rather than by ID
+	// equality.
+	var pushStreamFound bool
+	for _, st := range streams {
+		if st.Tags != nil && st.Tags[pushrecorder.OriginStreamTag] != "" {
+			pushStreamFound = true
+			break
+		}
+	}
+	if !pushStreamFound {
+		t.Errorf("no Stream with Tags[%q] recorded for the pushed resource", pushrecorder.OriginStreamTag)
 	}
 }

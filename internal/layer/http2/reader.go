@@ -445,10 +445,38 @@ func (l *Layer) handleStreamPushPromise(f *frame.Frame) error {
 	}
 	l.deliverEnvelope(originCh, envSyn, nil)
 
-	// Create a new push channel for the promised stream.
+	// Create a new push channel for the promised stream. originStreamID
+	// points back to the origin channel's UUID so the push recorder (see
+	// internal/pushrecorder/push_recorder.go) can tag the pushed stream's
+	// flows with the originating request's identifier for analyst
+	// correlation.
 	pushCh := newChannel(l, promisedID, true)
+	pushCh.originStreamID = originCh.streamID
 	l.registerChannel(promisedID, pushCh)
 	l.emitChannel(pushCh)
+
+	// Also deliver a clone of the synthetic envelope on the push channel as
+	// its first envelope. This gives the push stream's recording a flow
+	// carrying Method/Path/Authority (from the PUSH_PROMISE pseudo-headers)
+	// so analysts can identify the pushed resource without cross-
+	// referencing the origin stream. The origin-side delivery above is kept
+	// for observers of the origin stream.
+	//
+	// Clone Message so mutation on either side doesn't bleed across, and
+	// reset StreamID + Sequence so envelopeToFlow attributes the flow to
+	// the push Stream.
+	pushEnvSyn := &envelope.Envelope{
+		StreamID:  pushCh.streamID,
+		FlowID:    uuid.New().String(),
+		Sequence:  pushCh.nextSequence(),
+		Direction: envelope.Receive,
+		Protocol:  envelope.ProtocolHTTP,
+		Raw:       cloneBytes(f.RawBytes),
+		Message:   syntheticMsg.CloneMessage(),
+		Context:   envSyn.Context,
+	}
+	l.deliverEnvelope(pushCh, pushEnvSyn, nil)
+
 	// Ensure the server's stream state reflects "reserved (remote)".
 	_ = l.conn.Streams().Transition(promisedID, EventRecvPushPromise)
 	return nil
