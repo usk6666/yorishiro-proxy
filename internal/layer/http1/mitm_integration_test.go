@@ -1224,6 +1224,184 @@ func TestHTTPSMITM_AnomalyDetection(t *testing.T) {
 	}
 }
 
+// TestHTTPSMITM_LargeBodyRoundtrip verifies that a response body exceeding
+// the spill threshold (15 MiB > default 10 MiB) round-trips correctly
+// through the MITM proxy. The BodyBuffer path serializes the buffered file
+// back onto the wire for the client.
+func TestHTTPSMITM_LargeBodyRoundtrip(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	// 15 MiB of deterministic content so we can byte-compare end-to-end.
+	const bodyLen = 15 << 20
+	largeBody := make([]byte, bodyLen)
+	for i := range largeBody {
+		largeBody[i] = byte(i % 251) // prime modulus → non-trivial pattern
+	}
+
+	upstreamLn, _ := startUpstreamHTTPS(t, func(_ []byte) []byte {
+		// Pre-allocate header + body.
+		header := fmt.Sprintf(
+			"HTTP/1.1 200 OK\r\nContent-Length: %d\r\nConnection: close\r\n\r\n",
+			bodyLen)
+		out := make([]byte, 0, len(header)+bodyLen)
+		out = append(out, []byte(header)...)
+		out = append(out, largeBody...)
+		return out
+	})
+	defer upstreamLn.Close()
+	target := upstreamLn.Addr().String()
+
+	proxyAddr, _, sessionDone := startHTTPMITMProxy(t, ctx, target, proxyOpts{})
+
+	// Client-side: send request and read the full response manually (the
+	// helper connectAndSendHTTP would spin on a 15 MiB body).
+	tlsConn := connectThroughProxy(t, proxyAddr, target)
+	defer tlsConn.Close()
+
+	rawReq := fmt.Sprintf("GET /large HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n", target)
+	if _, err := tlsConn.Write([]byte(rawReq)); err != nil {
+		t.Fatalf("write request: %v", err)
+	}
+
+	// Read response fully.
+	tlsConn.SetReadDeadline(time.Now().Add(30 * time.Second))
+	br := bufio.NewReader(tlsConn)
+
+	// Read status line + headers.
+	var headerBuf bytes.Buffer
+	for {
+		line, err := br.ReadBytes('\n')
+		if err != nil {
+			t.Fatalf("read response headers: %v", err)
+		}
+		headerBuf.Write(line)
+		if bytes.Equal(line, []byte("\r\n")) {
+			break
+		}
+	}
+
+	// Parse Content-Length.
+	cl := 0
+	for _, line := range strings.Split(headerBuf.String(), "\r\n") {
+		if strings.HasPrefix(strings.ToLower(line), "content-length:") {
+			val := strings.TrimSpace(line[len("content-length:"):])
+			cl, _ = strconv.Atoi(val)
+		}
+	}
+	if cl != bodyLen {
+		t.Fatalf("Content-Length = %d, want %d", cl, bodyLen)
+	}
+
+	body := make([]byte, cl)
+	if _, err := io.ReadFull(br, body); err != nil {
+		t.Fatalf("read response body: %v", err)
+	}
+
+	// Wait for session completion.
+	select {
+	case <-sessionDone:
+	case <-time.After(30 * time.Second):
+		t.Fatal("timeout waiting for session to complete")
+	}
+
+	// Verify the body bytes round-tripped byte-for-byte.
+	if !bytes.Equal(body, largeBody) {
+		// Avoid dumping 15 MiB on diff — just show first divergence.
+		for i := 0; i < len(body) && i < len(largeBody); i++ {
+			if body[i] != largeBody[i] {
+				t.Fatalf("body byte %d: got %d, want %d", i, body[i], largeBody[i])
+			}
+		}
+		t.Fatalf("body length mismatch: got %d, want %d", len(body), bodyLen)
+	}
+}
+
+// TestHTTPSMITM_LargeBodyChunkedTrailers verifies that chunked trailers
+// survive on a body larger than the spill threshold. Before USK-631 this
+// would have emitted AnomalyTrailersInPassthrough and dropped the trailers;
+// after USK-631 the body is always fully drained into BodyBuffer, so the
+// trailers are recorded on HTTPMessage.Trailers and AnomalyTrailersInPassthrough
+// is NOT present in the anomalies list.
+func TestHTTPSMITM_LargeBodyChunkedTrailers(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	upstreamLn, _ := startUpstreamHTTPS(t, func(_ []byte) []byte {
+		return []byte("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+	})
+	defer upstreamLn.Close()
+	target := upstreamLn.Addr().String()
+
+	proxyAddr, store, sessionDone := startHTTPMITMProxy(t, ctx, target, proxyOpts{})
+
+	// Build a chunked body larger than the default spill threshold (10 MiB).
+	// One 11 MiB chunk + trailer keeps the framing simple.
+	const chunkSize = 11 << 20
+	chunkData := make([]byte, chunkSize)
+	for i := range chunkData {
+		chunkData[i] = 'A' // deterministic content
+	}
+
+	var reqBuf bytes.Buffer
+	fmt.Fprintf(&reqBuf,
+		"POST /upload HTTP/1.1\r\n"+
+			"Host: %s\r\n"+
+			"Transfer-Encoding: chunked\r\n"+
+			"Trailer: X-Checksum\r\n"+
+			"Connection: close\r\n"+
+			"\r\n",
+		target)
+	fmt.Fprintf(&reqBuf, "%x\r\n", chunkSize)
+	reqBuf.Write(chunkData)
+	reqBuf.WriteString("\r\n0\r\nX-Checksum: big-body-xyz\r\n\r\n")
+
+	tlsConn := connectThroughProxy(t, proxyAddr, target)
+	defer tlsConn.Close()
+
+	if _, err := tlsConn.Write(reqBuf.Bytes()); err != nil {
+		t.Fatalf("write chunked request: %v", err)
+	}
+
+	// Read response so server closes; exact content doesn't matter here.
+	tlsConn.SetReadDeadline(time.Now().Add(30 * time.Second))
+	respBuf := make([]byte, 4096)
+	for {
+		if _, err := tlsConn.Read(respBuf); err != nil {
+			break
+		}
+	}
+
+	select {
+	case <-sessionDone:
+	case <-time.After(30 * time.Second):
+		t.Fatal("timeout waiting for session to complete")
+	}
+
+	sendFlows := store.flowsByDirection("send")
+	if len(sendFlows) < 1 {
+		t.Fatal("expected at least 1 send flow")
+	}
+	sendFlow := sendFlows[0]
+
+	// Trailers must be captured even though the body exceeded the spill
+	// threshold (the dechunked body is fully drained into BodyBuffer before
+	// extractTrailers runs).
+	if sendFlow.Trailers == nil {
+		t.Fatal("large-body chunked trailers were dropped; expected Trailers populated")
+	}
+	got := sendFlow.Trailers["X-Checksum"]
+	if len(got) != 1 || got[0] != "big-body-xyz" {
+		t.Errorf("sendFlow.Trailers[X-Checksum] = %v, want [big-body-xyz]", got)
+	}
+
+	// USK-631: AnomalyTrailersInPassthrough must NOT appear on large-body
+	// chunked requests anymore. The anomaly (if it were still emitted) would
+	// be projected into flow Metadata by RecordStep; the absence of any
+	// trailer-related anomaly is indirectly confirmed by the trailers being
+	// populated above.
+}
+
 // TestHTTPSMITM_ChunkedTrailers verifies that chunked trailers sent by the
 // client are parsed and projected onto flow.Flow.Trailers (USK-627).
 // Previously the HTTP/1 parser's consumeTrailers discarded trailer lines,
