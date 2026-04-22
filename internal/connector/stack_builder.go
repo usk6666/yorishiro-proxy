@@ -59,6 +59,31 @@ type BuildConfig struct {
 	// exit. Disabling the pool is a supported diagnostic mode (useful for
 	// debugging per-connection state without the confounder of reuse).
 	HTTP2Pool *pool.Pool
+
+	// OnHTTP2UpstreamDialed, if non-nil, is invoked exactly once per
+	// upstream *http2.Layer at the moment it is freshly dialed (i.e.,
+	// inside the pool's dialFn on a miss, or inline when HTTP2Pool is
+	// nil). It is NOT invoked on pool hits — the callback is meant to
+	// attach goroutines whose lifetime should match the Layer, and running
+	// them again for every reused CONNECT would race.
+	//
+	// USK-623: the primary use is to spawn the upstream push recorder
+	// (internal/pushrecorder) on the Layer so pushed streams surfaced via
+	// Layer.Channels() are drained and recorded. Without this hook the
+	// Layer.channelOut buffer fills after 8 pushes and the reader
+	// goroutine stalls — a correctness problem independent of the
+	// observability feature.
+	//
+	// The callback must not block. The Layer is already fully initialized
+	// (preface done, reader+writer goroutines running) when the callback
+	// fires; the callback may call any Layer method but must not close
+	// the Layer (ownership stays with the pool/caller).
+	//
+	// Pushrecorder is wired outside the connector package (see
+	// internal/pushrecorder) to keep this package free of pipeline/flow
+	// dependencies; callers that want the feature construct a closure in
+	// their bootstrap code and install it here.
+	OnHTTP2UpstreamDialed func(l *http2.Layer)
 }
 
 // BuildConnectionStack constructs a ConnectionStack for the given CONNECT
@@ -478,6 +503,15 @@ func buildH2Stack(
 		if lerr != nil {
 			// http2.New already closed upstreamConn on failure.
 			return nil, lerr
+		}
+		// USK-623: notify the caller once about the freshly-dialed Layer
+		// so push-channel observers (e.g., the upstream push recorder)
+		// can attach before any PUSH_PROMISE frames arrive. On pool hit
+		// dialFn is not invoked, so the callback never fires for reuse
+		// — observers attached on the original dial keep running for
+		// the pooled Layer's full lifetime.
+		if cfg != nil && cfg.OnHTTP2UpstreamDialed != nil {
+			cfg.OnHTTP2UpstreamDialed(l)
 		}
 		return l, nil
 	}

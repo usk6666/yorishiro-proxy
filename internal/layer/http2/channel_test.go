@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
+	"github.com/usk6666/yorishiro-proxy/internal/layer"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/http2/frame"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/http2/hpack"
 )
@@ -194,12 +195,7 @@ func TestChannel_PushChannel_RejectsSend(t *testing.T) {
 }
 
 // waitForChannel polls l.Channels() until a Channel arrives or timeout.
-func waitForChannel(t *testing.T, l *Layer, dur time.Duration) (ch interface {
-	StreamID() string
-	Next(context.Context) (*envelope.Envelope, error)
-	Send(context.Context, *envelope.Envelope) error
-	Close() error
-}) {
+func waitForChannel(t *testing.T, l *Layer, dur time.Duration) (ch layer.Channel) {
 	t.Helper()
 	deadline := time.NewTimer(dur)
 	defer deadline.Stop()
