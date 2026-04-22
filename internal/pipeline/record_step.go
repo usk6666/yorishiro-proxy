@@ -216,11 +216,10 @@ func (s *RecordStep) recordFlow(ctx context.Context, env *envelope.Envelope) {
 // ErrPartialWireBytes the returned bytes are stored and the tag is
 // "partial". env.Raw itself is never mutated.
 func (s *RecordStep) recordVariantFlows(ctx context.Context, snap, current *envelope.Envelope) {
+	// envelopeToFlow always initializes Metadata with {"protocol": ...}, so
+	// no nil-check is needed before assigning the "variant" entry.
 	origFlow := envelopeToFlow(snap)
 	origFlow.ID = current.FlowID + "-original"
-	if origFlow.Metadata == nil {
-		origFlow.Metadata = make(map[string]string, 1)
-	}
 	origFlow.Metadata["variant"] = "original"
 	if err := s.store.SaveFlow(ctx, origFlow); err != nil {
 		s.logger.Error("record step: original variant save failed",
@@ -231,9 +230,6 @@ func (s *RecordStep) recordVariantFlows(ctx context.Context, snap, current *enve
 	}
 
 	modFlow := envelopeToFlow(current)
-	if modFlow.Metadata == nil {
-		modFlow.Metadata = make(map[string]string, 1)
-	}
 	modFlow.Metadata["variant"] = "modified"
 	s.applyWireEncode(current, modFlow)
 	if err := s.store.SaveFlow(ctx, modFlow); err != nil {
@@ -247,11 +243,23 @@ func (s *RecordStep) recordVariantFlows(ctx context.Context, snap, current *enve
 
 // applyWireEncode consults the registered WireEncoder for current.Protocol
 // and, if present, rewrites modFlow.RawBytes with the post-mutation wire
-// representation. Metadata["wire_bytes"] is set to "partial" on
-// ErrPartialWireBytes, "unavailable" on other errors or absent encoder (but
-// only when an encoder was actually attempted; a completely-unregistered
-// protocol leaves Metadata untouched to avoid noise for protocols that
-// have no wire-encoding notion, such as raw).
+// representation. The Metadata["wire_bytes"] tag follows this decision table:
+//
+//   - No encoders registered at all, or no encoder registered for
+//     current.Protocol: the call is skipped entirely. Metadata is untouched
+//     (kept silent for protocols that have no wire-encoding notion, e.g. raw).
+//   - Encoder succeeds and returns non-nil bytes: RawBytes is overwritten, tag
+//     is not set.
+//   - Encoder succeeds but returns nil bytes: RawBytes keeps env.Raw, tag is
+//     set to "unavailable".
+//   - Encoder returns ErrPartialWireBytes with non-nil bytes: partial bytes
+//     are stored in RawBytes, tag is set to "partial".
+//   - Encoder returns ErrPartialWireBytes with nil bytes: RawBytes keeps
+//     env.Raw, tag is set to "unavailable" (the contract requires bytes
+//     alongside the partial sentinel; a nil return is treated the same as an
+//     encoder failure).
+//   - Encoder returns any other non-nil error: RawBytes keeps env.Raw, tag
+//     is set to "unavailable" and the error is logged.
 func (s *RecordStep) applyWireEncode(current *envelope.Envelope, modFlow *flow.Flow) {
 	if len(s.wireEncoders) == 0 {
 		return
@@ -271,8 +279,13 @@ func (s *RecordStep) applyWireEncode(current *envelope.Envelope, modFlow *flow.F
 	case errors.Is(err, ErrPartialWireBytes):
 		if bytesOut != nil {
 			modFlow.RawBytes = bytesOut
+			modFlow.Metadata["wire_bytes"] = "partial"
+		} else {
+			// Partial sentinel with no bytes violates the WireEncoder
+			// contract; treat as unavailable rather than misrepresent the
+			// stored ingress Raw as a partial re-encode.
+			modFlow.Metadata["wire_bytes"] = "unavailable"
 		}
-		modFlow.Metadata["wire_bytes"] = "partial"
 	default:
 		modFlow.Metadata["wire_bytes"] = "unavailable"
 		s.logger.Warn("record step: wire encoder failed",

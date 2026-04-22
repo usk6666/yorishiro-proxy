@@ -95,8 +95,10 @@ func EncodeWireBytes(env *envelope.Envelope) ([]byte, error) {
 		}
 	}
 
-	out := make([]byte, buf.Len())
-	copy(out, buf.Bytes())
+	// buf is function-local and unreachable after return, so buf.Bytes() is
+	// safe to return directly: no other code can mutate the buffer's backing
+	// storage. A defensive copy would be a pure allocation with no benefit.
+	out := buf.Bytes()
 
 	if streamStillOpen {
 		// Passthrough body was not included; signal partial wire bytes.

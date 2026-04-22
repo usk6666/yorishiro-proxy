@@ -802,6 +802,57 @@ func TestRecordStep_VariantRecording_EncoderPartialTagsPartial(t *testing.T) {
 	}
 }
 
+// TestRecordStep_VariantRecording_EncoderPartialNilBytesTagsUnavailable
+// verifies that an encoder that returns ErrPartialWireBytes together with a
+// nil byte slice is treated as a contract violation: RawBytes stays as
+// env.Raw and wire_bytes is tagged "unavailable", NOT "partial". Tagging
+// "partial" on a nil-bytes return would misrepresent the stored ingress Raw
+// as a partial re-encode.
+func TestRecordStep_VariantRecording_EncoderPartialNilBytesTagsUnavailable(t *testing.T) {
+	w := &mockWriter{}
+	step := NewRecordStep(w, nil,
+		WithWireEncoder(envelope.ProtocolHTTP, func(*envelope.Envelope) ([]byte, error) {
+			return nil, ErrPartialWireBytes
+		}),
+	)
+
+	original := &envelope.Envelope{
+		StreamID:  "s1",
+		FlowID:    "f1",
+		Direction: envelope.Send,
+		Sequence:  1,
+		Protocol:  envelope.ProtocolHTTP,
+		Raw:       []byte("ORIG"),
+		Message:   &envelope.HTTPMessage{Method: "GET"},
+	}
+	modified := &envelope.Envelope{
+		StreamID:  "s1",
+		FlowID:    "f1",
+		Direction: envelope.Send,
+		Sequence:  1,
+		Protocol:  envelope.ProtocolHTTP,
+		Raw:       []byte("ORIG"),
+		Message:   &envelope.HTTPMessage{Method: "POST"},
+	}
+
+	ctx := withSnapshot(context.Background(), original)
+	step.Process(ctx, modified)
+
+	if len(w.flows) != 2 {
+		t.Fatalf("expected 2 flows, got %d", len(w.flows))
+	}
+	modFlow := w.flows[1]
+	if string(modFlow.RawBytes) != "ORIG" {
+		t.Errorf("modified RawBytes = %q, want env.Raw kept when partial+nil",
+			modFlow.RawBytes)
+	}
+	if modFlow.Metadata["wire_bytes"] != "unavailable" {
+		t.Errorf("modified wire_bytes metadata = %q, want %q "+
+			"(partial sentinel with nil bytes violates contract)",
+			modFlow.Metadata["wire_bytes"], "unavailable")
+	}
+}
+
 // TestRecordStep_VariantRecording_OriginalRawNeverRewrittenByEncoder verifies
 // that the original variant's RawBytes is sourced from snap.Raw and that the
 // WireEncoder (which operates on current) does not influence it.
