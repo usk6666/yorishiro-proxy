@@ -475,6 +475,24 @@ func (a *streamAssembler) writeBody(payload []byte) error {
 		// trigger PromoteToFile on the next iteration.
 		a.bodyBuf = bodybuf.NewMemory(nil)
 	}
+
+	// Enforce maxBody before every Write. bodybuf.NewMemory seeds the buffer
+	// with maxSize=0 (unlimited), so without this guard the memory-mode path
+	// would accumulate DATA frames without any cap until PromoteToFile
+	// succeeded — a DoS vector when temp-dir promotion fails (see USK-632
+	// security review S-1 / CWE-770). Enforcement here is identical across
+	// memory and file mode: once cumulative size would exceed maxBody, we
+	// fail the stream with INTERNAL_ERROR just like bodybuf's own
+	// ErrMaxSizeExceeded path does for file-backed buffers.
+	if a.bodyBuf.Len()+int64(len(payload)) > a.bodyOpts.maxBody {
+		_ = a.bodyBuf.Release()
+		a.bodyBuf = nil
+		return &layer.StreamError{
+			Code:   layer.ErrorInternalError,
+			Reason: "http2: body exceeds max size",
+		}
+	}
+
 	if _, werr := a.bodyBuf.Write(payload); werr != nil {
 		if errors.Is(werr, bodybuf.ErrMaxSizeExceeded) {
 			// bodybuf.Write has already torn down the backing file and
@@ -492,8 +510,9 @@ func (a *streamAssembler) writeBody(payload []byte) error {
 	}
 
 	// Promote to file-backed storage once the in-memory size crosses the
-	// threshold. PromoteToFile failure keeps the buffer in memory mode
-	// (already bounded by maxBody via Write), so we log and continue.
+	// threshold. PromoteToFile failure keeps the buffer in memory mode;
+	// the assembler-level maxBody check above still bounds memory growth
+	// across subsequent writes regardless of promotion success.
 	if !a.bodyBuf.IsFileBacked() && a.bodyBuf.Len() > a.bodyOpts.spillThreshold {
 		if perr := a.bodyBuf.PromoteToFile(a.bodyOpts.spillDir, config.BodySpillPrefix, a.bodyOpts.maxBody); perr != nil {
 			slog.Warn("http2: promote body to file failed; staying in memory",

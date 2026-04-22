@@ -493,10 +493,13 @@ func bodyChanged(msg *envelope.HTTPMessage, op *opaqueHTTP2) bool {
 }
 
 // readCloserOnce wraps an io.ReadCloser so that io.Copy-style callers
-// (writeStreamingBody) see the Read surface while Close is fired once when
-// EOF is reached. The h2 writer goroutine owns the lifetime; it only reads
-// to EOF and then discards the reader, so Close-on-EOF is the correct
-// fd-release hook for file-backed BodyBuffer readers.
+// (writeStreamingBody) see the Read surface while Close is fired once on
+// any terminal Read outcome. The h2 writer goroutine owns the lifetime
+// and discards the reader after a terminal error or EOF, so firing Close
+// on the first non-nil error is the correct fd-release hook for
+// file-backed BodyBuffer readers — an EOF-only gate would leak the
+// underlying os.File fd if writeStreamingBody returned on a non-EOF read
+// error or on a wire write error.
 type readCloserOnce struct {
 	rc     io.ReadCloser
 	closed bool
@@ -504,7 +507,7 @@ type readCloserOnce struct {
 
 func (r *readCloserOnce) Read(p []byte) (int, error) {
 	n, err := r.rc.Read(p)
-	if err == io.EOF && !r.closed {
+	if err != nil && !r.closed {
 		r.closed = true
 		_ = r.rc.Close()
 	}

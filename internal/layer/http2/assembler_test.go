@@ -499,6 +499,91 @@ func TestAssembler_MaxBodySizeStreamError(t *testing.T) {
 	}
 }
 
+// TestAssembler_MaxBodySizeStreamError_MemoryMode verifies that the
+// MaxBodySize cap is enforced even before a file-mode promotion has
+// occurred. With spillThreshold > maxBody, PromoteToFile will never be
+// attempted (Len() stays below threshold as the writeBody guard fires
+// first), so cap enforcement must come from the assembler-level check —
+// not from bodybuf's own maxSize enforcement which is set only at
+// NewFile/PromoteToFile time. Without the assembler-level guard, a
+// malicious peer could exhaust temp-dir space (causing PromoteToFile to
+// fail silently) and then flood memory unbounded via DATA frames
+// (USK-632 security review S-1, CWE-770).
+func TestAssembler_MaxBodySizeStreamError_MemoryMode(t *testing.T) {
+	// Invariants: spillThreshold > maxBody so promotion never triggers
+	// before the cap. maxBody is sized to admit a few default 16 KiB
+	// DATA frames before overflow.
+	const maxBody = 32 << 10
+	const threshold = 128 << 10
+
+	l, peer, cleanup := startServerLayer(t,
+		WithBodySpillThreshold(threshold),
+		WithMaxBodySize(maxBody),
+	)
+	defer cleanup()
+	peer.consumePeerSettings(t)
+
+	headers := []hpack.HeaderField{
+		{Name: ":method", Value: "POST"},
+		{Name: ":scheme", Value: "https"},
+		{Name: ":authority", Value: "x"},
+		{Name: ":path", Value: "/mem-toobig"},
+	}
+	chunk := make([]byte, int(frame.DefaultMaxFrameSize))
+	for i := range chunk {
+		chunk[i] = 'm'
+	}
+	// Four 16 KiB frames = 64 KiB, double the maxBody cap and well below
+	// the 128 KiB spill threshold.
+	const numChunks = 4
+
+	peerErr := make(chan error, 1)
+	go func() {
+		if err := peer.wr.WriteSettings(nil); err != nil {
+			peerErr <- err
+			return
+		}
+		go func() {
+			for {
+				if _, err := peer.rd.ReadFrame(); err != nil {
+					return
+				}
+			}
+		}()
+		encoded := peer.encoder.Encode(headers)
+		if err := peer.wr.WriteHeaders(1, false, true, encoded); err != nil {
+			peerErr <- err
+			return
+		}
+		for i := 0; i < numChunks; i++ {
+			if err := peer.wr.WriteData(1, false, chunk); err != nil {
+				peerErr <- nil
+				return
+			}
+		}
+		_ = peer.wr.WriteData(1, true, nil)
+		peerErr <- nil
+	}()
+
+	ch := waitForChannel(t, l, 5*time.Second)
+	if ch == nil {
+		t.Fatal("no channel emitted")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err := ch.Next(ctx)
+	if err == nil {
+		t.Fatal("Next: want error (memory-mode body exceeds max size), got nil")
+	}
+	var se *layer.StreamError
+	if !errors.As(err, &se) {
+		t.Fatalf("Next err = %T %v, want *layer.StreamError", err, err)
+	}
+	if se.Code != layer.ErrorInternalError {
+		t.Errorf("StreamError.Code = %v, want ErrorInternalError", se.Code)
+	}
+}
+
 // TestAssembler_HeadersOnlyNoBodyBuffer verifies that a request with no DATA
 // frames produces an envelope with both Body and BodyBuffer nil.
 func TestAssembler_HeadersOnlyNoBodyBuffer(t *testing.T) {
