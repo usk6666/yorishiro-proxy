@@ -3,6 +3,7 @@ package pipeline
 import (
 	"bytes"
 	"context"
+	"errors"
 	"log/slog"
 	"net/url"
 	"time"
@@ -10,6 +11,31 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 )
+
+// WireEncoder re-encodes an Envelope's post-mutation Message into wire-form
+// bytes. It is used by RecordStep when recording the "modified" variant of
+// an intercepted envelope: env.Raw captures the ingress wire bytes and must
+// not be rewritten when a Pipeline Step mutates env.Message, so RecordStep
+// calls a per-protocol WireEncoder to render the post-mutation wire bytes
+// into flow.Flow.RawBytes of the modified variant only.
+//
+// Implementations must be pure: they must not mutate env or env.Message and
+// must not perform network IO. Returning ErrPartialWireBytes together with a
+// non-nil byte slice signals that re-encoding was only partially possible
+// (for example, headers were re-serialized but a passthrough body could not
+// be replayed). RecordStep tags the flow's Metadata["wire_bytes"] with
+// "partial" in that case and still stores the returned header-only bytes.
+//
+// Returning any other non-nil error — or a nil byte slice — causes
+// RecordStep to keep env.Raw as the modified variant's RawBytes and tag
+// Metadata["wire_bytes"] = "unavailable".
+type WireEncoder func(env *envelope.Envelope) ([]byte, error)
+
+// ErrPartialWireBytes is an alias for envelope.ErrPartialWireBytes. It is
+// re-exported here so tests and callers that live in the pipeline package
+// can use errors.Is without importing envelope directly. See
+// envelope.ErrPartialWireBytes for the contract.
+var ErrPartialWireBytes = envelope.ErrPartialWireBytes
 
 // RecordStep is an Envelope-only Pipeline Step that records Envelope data to
 // the Flow Store. It runs last in the Pipeline (after all transformations)
@@ -25,19 +51,52 @@ import (
 //
 // If preceding Steps modified the Envelope (detected by comparing with the
 // snapshot stored in context), both the original and modified variants are
-// recorded.
+// recorded. When a per-protocol WireEncoder is registered via
+// WithWireEncoder, the modified variant's flow.Flow.RawBytes is overwritten
+// with the encoder's output so the recorded bytes reflect what the proxy
+// would emit on the wire after the mutation, rather than the ingress Raw.
 type RecordStep struct {
-	store  flow.Writer
-	logger *slog.Logger
+	store        flow.Writer
+	logger       *slog.Logger
+	wireEncoders map[envelope.Protocol]WireEncoder
+}
+
+// Option configures a RecordStep.
+type Option func(*RecordStep)
+
+// WithWireEncoder registers a per-protocol WireEncoder used when recording
+// the "modified" variant of an intercepted envelope. The encoder is invoked
+// only for envelopes whose Protocol matches proto. See WireEncoder for the
+// contract on return values.
+//
+// Passing a nil fn removes any previously-registered encoder for proto.
+func WithWireEncoder(proto envelope.Protocol, fn WireEncoder) Option {
+	return func(s *RecordStep) {
+		if s.wireEncoders == nil {
+			s.wireEncoders = make(map[envelope.Protocol]WireEncoder)
+		}
+		if fn == nil {
+			delete(s.wireEncoders, proto)
+			return
+		}
+		s.wireEncoders[proto] = fn
+	}
 }
 
 // NewRecordStep creates a RecordStep with the given flow.Writer.
 // If store is nil, Process returns immediately with no side effects.
-func NewRecordStep(store flow.Writer, logger *slog.Logger) *RecordStep {
+//
+// Additional configuration (per-protocol wire encoders, etc.) may be
+// supplied via functional Options.
+func NewRecordStep(store flow.Writer, logger *slog.Logger, opts ...Option) *RecordStep {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &RecordStep{store: store, logger: logger}
+	s := &RecordStep{store: store, logger: logger}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
 // Process records the Envelope to the Flow Store. It always returns a zero
@@ -147,6 +206,15 @@ func (s *RecordStep) recordFlow(ctx context.Context, env *envelope.Envelope) {
 
 // recordVariantFlows records both the original (from snapshot) and the
 // modified (current) Envelope as separate flows with variant metadata.
+//
+// The original variant's RawBytes reflect the ingress wire bytes (snap.Raw).
+// The modified variant's RawBytes are replaced with the output of the
+// protocol-specific WireEncoder (if any) so the recorded bytes reflect the
+// post-mutation wire representation instead of the ingress bytes. When no
+// encoder is registered or the encoder fails, the modified flow keeps
+// current.Raw and Metadata["wire_bytes"] is tagged "unavailable"; on
+// ErrPartialWireBytes the returned bytes are stored and the tag is
+// "partial". env.Raw itself is never mutated.
 func (s *RecordStep) recordVariantFlows(ctx context.Context, snap, current *envelope.Envelope) {
 	origFlow := envelopeToFlow(snap)
 	origFlow.ID = current.FlowID + "-original"
@@ -167,10 +235,50 @@ func (s *RecordStep) recordVariantFlows(ctx context.Context, snap, current *enve
 		modFlow.Metadata = make(map[string]string, 1)
 	}
 	modFlow.Metadata["variant"] = "modified"
+	s.applyWireEncode(current, modFlow)
 	if err := s.store.SaveFlow(ctx, modFlow); err != nil {
 		s.logger.Error("record step: modified variant save failed",
 			"stream_id", current.StreamID,
 			"flow_id", modFlow.ID,
+			"error", err,
+		)
+	}
+}
+
+// applyWireEncode consults the registered WireEncoder for current.Protocol
+// and, if present, rewrites modFlow.RawBytes with the post-mutation wire
+// representation. Metadata["wire_bytes"] is set to "partial" on
+// ErrPartialWireBytes, "unavailable" on other errors or absent encoder (but
+// only when an encoder was actually attempted; a completely-unregistered
+// protocol leaves Metadata untouched to avoid noise for protocols that
+// have no wire-encoding notion, such as raw).
+func (s *RecordStep) applyWireEncode(current *envelope.Envelope, modFlow *flow.Flow) {
+	if len(s.wireEncoders) == 0 {
+		return
+	}
+	enc, ok := s.wireEncoders[current.Protocol]
+	if !ok {
+		return
+	}
+	bytesOut, err := enc(current)
+	switch {
+	case err == nil:
+		if bytesOut != nil {
+			modFlow.RawBytes = bytesOut
+		} else {
+			modFlow.Metadata["wire_bytes"] = "unavailable"
+		}
+	case errors.Is(err, ErrPartialWireBytes):
+		if bytesOut != nil {
+			modFlow.RawBytes = bytesOut
+		}
+		modFlow.Metadata["wire_bytes"] = "partial"
+	default:
+		modFlow.Metadata["wire_bytes"] = "unavailable"
+		s.logger.Warn("record step: wire encoder failed",
+			"stream_id", current.StreamID,
+			"flow_id", modFlow.ID,
+			"protocol", string(current.Protocol),
 			"error", err,
 		)
 	}

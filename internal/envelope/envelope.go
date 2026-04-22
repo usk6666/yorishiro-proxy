@@ -3,10 +3,24 @@ package envelope
 import (
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"net"
 	"time"
 )
+
+// ErrPartialWireBytes is returned by a per-protocol wire-encode helper to
+// signal that only a fragment of the post-mutation message (typically
+// headers, not body) could be re-encoded. Callers such as
+// pipeline.RecordStep use this sentinel to tag the recorded modified
+// variant's metadata as "partial" while still storing the returned header-
+// only bytes.
+//
+// It lives on internal/envelope (a leaf package) rather than on
+// internal/pipeline because per-Layer encoders must import the sentinel
+// without creating an import cycle through pipeline's dependency on
+// internal/connector.
+var ErrPartialWireBytes = errors.New("envelope: partial wire bytes")
 
 // Direction indicates whether an envelope was observed traveling from
 // client to server (Send) or server to client (Receive).
