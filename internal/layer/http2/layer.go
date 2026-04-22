@@ -148,6 +148,16 @@ func (l *Layer) PassthroughTrailerCount() uint64 {
 	return l.passthroughTrailerCount
 }
 
+// EnvelopeContextTemplate returns a copy of the EnvelopeContext template
+// stamped onto envelopes produced by this Layer. Used by the connector's
+// pool fast-path to surface the Layer's upstream TLS snapshot when the
+// Layer is reused from the pool (the fresh-dial snapshot is not
+// available on that path). The returned value has no ReceivedAt set —
+// it is the template, not a per-envelope instance.
+func (l *Layer) EnvelopeContextTemplate() envelope.EnvelopeContext {
+	return l.opts.ctx
+}
+
 // LastReaderError returns the most recent non-EOF error observed by the
 // reader goroutine. Intended for diagnostics and tests; nil if no error
 // has occurred or the layer is still healthy.

@@ -341,6 +341,48 @@ func TestLayer_WithInitialSettings(t *testing.T) {
 	_ = l
 }
 
+// --- EnvelopeContextTemplate ---
+
+// TestLayer_EnvelopeContextTemplate_ReturnsStored verifies the accessor
+// returns the template stamped at construction. Used by the connector's
+// h2 pool fast path (USK-624) to surface the cached Layer's upstream TLS
+// snapshot without a fresh dial.
+func TestLayer_EnvelopeContextTemplate_ReturnsStored(t *testing.T) {
+	template := envelope.EnvelopeContext{
+		ConnID:     "test-conn",
+		TargetHost: "pooled.example.com:443",
+		TLS: &envelope.TLSSnapshot{
+			ALPN: "h2",
+			SNI:  "pooled.example.com",
+		},
+	}
+	l, peer, cleanup := startClientLayer(t, WithEnvelopeContext(template))
+	defer cleanup()
+	peer.consumePeerSettings(t)
+
+	got := l.EnvelopeContextTemplate()
+	if got.ConnID != "test-conn" {
+		t.Errorf("ConnID = %q, want %q", got.ConnID, "test-conn")
+	}
+	if got.TargetHost != "pooled.example.com:443" {
+		t.Errorf("TargetHost = %q, want %q", got.TargetHost, "pooled.example.com:443")
+	}
+	if got.TLS == nil {
+		t.Fatal("TLS = nil, want non-nil")
+	}
+	if got.TLS.ALPN != "h2" {
+		t.Errorf("TLS.ALPN = %q, want %q", got.TLS.ALPN, "h2")
+	}
+	if got.TLS.SNI != "pooled.example.com" {
+		t.Errorf("TLS.SNI = %q, want %q", got.TLS.SNI, "pooled.example.com")
+	}
+	// Template semantics: ReceivedAt is unset (per-envelope path uses
+	// envelopeContextWithTime to stamp the time).
+	if !got.ReceivedAt.IsZero() {
+		t.Errorf("ReceivedAt = %v, want zero (template, not per-envelope)", got.ReceivedAt)
+	}
+}
+
 // --- PeerMaxConcurrentStreams ---
 
 // TestLayer_PeerMaxConcurrentStreams_BeforeAndAfterPeerSettings verifies that

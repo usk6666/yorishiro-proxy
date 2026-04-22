@@ -1409,16 +1409,12 @@ func TestConnectionPoolReuse_StreamIsolation(t *testing.T) {
 	waitForStreams(t, store, 2, 5*time.Second)
 	time.Sleep(200 * time.Millisecond)
 
-	acc := accepts()
-	if acc != 1 {
-		// Current connector dials upstream to learn ALPN BEFORE consulting
-		// the pool (see buildCacheHitPath / buildCacheMissPath). So each
-		// tunnel performs its own upstream TLS dial even when the pool has
-		// a reusable h2 Layer. This means pool reuse has no effect on the
-		// upstream connection count visible to the server — defeating the
-		// primary purpose an analyst measures ("is my proxy fanning out
-		// connections I didn't expect?").
-		t.Skip("not yet implemented: USK-624 upstream h2 pool not consulted before upstream TLS dial — pool reuse does not reduce upstream accept count.")
+	// USK-624: pool fast-path consults the h2 pool before upstream TLS dial,
+	// so the second CONNECT reuses the first connection and upstream accept
+	// count stays at 1. This is the externally-observable correctness signal
+	// of pool reuse (tcpdump would see a single upstream handshake).
+	if acc := accepts(); acc != 1 {
+		t.Fatalf("upstream accept count = %d, want 1 (pool reuse must suppress second dial)", acc)
 	}
 
 	streams := store.getStreams()
