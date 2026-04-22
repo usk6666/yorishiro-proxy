@@ -597,6 +597,307 @@ func TestEnvelopeModified_HTTPMessage(t *testing.T) {
 	}
 }
 
+// TestRecordStep_VariantRecording_WireEncoder verifies that when a per-
+// protocol WireEncoder is registered the modified variant's RawBytes is
+// overwritten with the encoder's output while the original variant's
+// RawBytes continues to reflect the snapshot (ingress) Raw.
+func TestRecordStep_VariantRecording_WireEncoder(t *testing.T) {
+	w := &mockWriter{}
+	encoded := []byte("ENCODED-MODIFIED-WIRE-BYTES")
+	step := NewRecordStep(w, nil,
+		WithWireEncoder(envelope.ProtocolHTTP, func(*envelope.Envelope) ([]byte, error) {
+			return encoded, nil
+		}),
+	)
+
+	original := &envelope.Envelope{
+		StreamID:  "s1",
+		FlowID:    "f1",
+		Direction: envelope.Send,
+		Sequence:  1,
+		Protocol:  envelope.ProtocolHTTP,
+		Raw:       []byte("GET /orig HTTP/1.1\r\n\r\n"),
+		Message:   &envelope.HTTPMessage{Method: "GET", Path: "/orig"},
+	}
+	modified := &envelope.Envelope{
+		StreamID:  "s1",
+		FlowID:    "f1",
+		Direction: envelope.Send,
+		Sequence:  1,
+		Protocol:  envelope.ProtocolHTTP,
+		// Raw intentionally still reflects the ingress bytes — Pipeline
+		// never rewrites Raw even when env.Message is mutated.
+		Raw:     []byte("GET /orig HTTP/1.1\r\n\r\n"),
+		Message: &envelope.HTTPMessage{Method: "GET", Path: "/modified"},
+	}
+
+	ctx := withSnapshot(context.Background(), original)
+	step.Process(ctx, modified)
+
+	if len(w.flows) != 2 {
+		t.Fatalf("expected 2 flows, got %d", len(w.flows))
+	}
+	origFlow := w.flows[0]
+	modFlow := w.flows[1]
+
+	if string(origFlow.RawBytes) != "GET /orig HTTP/1.1\r\n\r\n" {
+		t.Errorf("original RawBytes = %q, want ingress Raw", origFlow.RawBytes)
+	}
+	if origFlow.Metadata["wire_bytes"] != "" {
+		t.Errorf("original wire_bytes metadata = %q, want empty",
+			origFlow.Metadata["wire_bytes"])
+	}
+	if string(modFlow.RawBytes) != string(encoded) {
+		t.Errorf("modified RawBytes = %q, want %q", modFlow.RawBytes, encoded)
+	}
+	if modFlow.Metadata["wire_bytes"] != "" {
+		t.Errorf("modified wire_bytes metadata = %q, want empty (encoder succeeded fully)",
+			modFlow.Metadata["wire_bytes"])
+	}
+}
+
+// TestRecordStep_VariantRecording_NoEncoderLeavesRawAndTags verifies that
+// when no WireEncoder is registered for the protocol but at least one
+// encoder exists for other protocols, the modified variant's RawBytes
+// remains env.Raw and Metadata["wire_bytes"] is "unavailable".
+func TestRecordStep_VariantRecording_NoEncoderLeavesRawAndTags(t *testing.T) {
+	w := &mockWriter{}
+	// Register an encoder for ProtocolRaw so wireEncoders is non-empty,
+	// but the test envelope is ProtocolHTTP — no encoder available for it.
+	step := NewRecordStep(w, nil,
+		WithWireEncoder(envelope.ProtocolRaw, func(*envelope.Envelope) ([]byte, error) {
+			t.Fatal("raw encoder must not be called for http envelope")
+			return nil, nil
+		}),
+	)
+
+	original := &envelope.Envelope{
+		StreamID:  "s1",
+		FlowID:    "f1",
+		Direction: envelope.Send,
+		Sequence:  1,
+		Protocol:  envelope.ProtocolHTTP,
+		Raw:       []byte("ORIG"),
+		Message:   &envelope.HTTPMessage{Method: "GET"},
+	}
+	modified := &envelope.Envelope{
+		StreamID:  "s1",
+		FlowID:    "f1",
+		Direction: envelope.Send,
+		Sequence:  1,
+		Protocol:  envelope.ProtocolHTTP,
+		Raw:       []byte("ORIG"),
+		Message:   &envelope.HTTPMessage{Method: "POST"},
+	}
+
+	ctx := withSnapshot(context.Background(), original)
+	step.Process(ctx, modified)
+
+	if len(w.flows) != 2 {
+		t.Fatalf("expected 2 flows, got %d", len(w.flows))
+	}
+	modFlow := w.flows[1]
+	if string(modFlow.RawBytes) != "ORIG" {
+		t.Errorf("modified RawBytes = %q, want env.Raw (%q)", modFlow.RawBytes, "ORIG")
+	}
+	if modFlow.Metadata["wire_bytes"] != "" {
+		t.Errorf("modified wire_bytes metadata = %q, want empty "+
+			"(no encoder registered for this protocol at all; tag should be silent)",
+			modFlow.Metadata["wire_bytes"])
+	}
+}
+
+// TestRecordStep_VariantRecording_EncoderErrorTagsUnavailable verifies that
+// a WireEncoder error (other than ErrPartialWireBytes) leaves RawBytes as
+// env.Raw and tags wire_bytes = "unavailable".
+func TestRecordStep_VariantRecording_EncoderErrorTagsUnavailable(t *testing.T) {
+	w := &mockWriter{}
+	step := NewRecordStep(w, nil,
+		WithWireEncoder(envelope.ProtocolHTTP, func(*envelope.Envelope) ([]byte, error) {
+			return nil, errors.New("encoder broken")
+		}),
+	)
+
+	original := &envelope.Envelope{
+		StreamID:  "s1",
+		FlowID:    "f1",
+		Direction: envelope.Send,
+		Sequence:  1,
+		Protocol:  envelope.ProtocolHTTP,
+		Raw:       []byte("ORIG"),
+		Message:   &envelope.HTTPMessage{Method: "GET"},
+	}
+	modified := &envelope.Envelope{
+		StreamID:  "s1",
+		FlowID:    "f1",
+		Direction: envelope.Send,
+		Sequence:  1,
+		Protocol:  envelope.ProtocolHTTP,
+		Raw:       []byte("ORIG"),
+		Message:   &envelope.HTTPMessage{Method: "POST"},
+	}
+
+	ctx := withSnapshot(context.Background(), original)
+	step.Process(ctx, modified)
+
+	if len(w.flows) != 2 {
+		t.Fatalf("expected 2 flows, got %d", len(w.flows))
+	}
+	modFlow := w.flows[1]
+	if string(modFlow.RawBytes) != "ORIG" {
+		t.Errorf("modified RawBytes = %q, want env.Raw kept on encoder error",
+			modFlow.RawBytes)
+	}
+	if modFlow.Metadata["wire_bytes"] != "unavailable" {
+		t.Errorf("modified wire_bytes metadata = %q, want %q",
+			modFlow.Metadata["wire_bytes"], "unavailable")
+	}
+}
+
+// TestRecordStep_VariantRecording_EncoderPartialTagsPartial verifies that
+// an encoder returning ErrPartialWireBytes together with a non-nil slice
+// writes those bytes and tags wire_bytes = "partial".
+func TestRecordStep_VariantRecording_EncoderPartialTagsPartial(t *testing.T) {
+	w := &mockWriter{}
+	partial := []byte("HEADERS-ONLY")
+	step := NewRecordStep(w, nil,
+		WithWireEncoder(envelope.ProtocolHTTP, func(*envelope.Envelope) ([]byte, error) {
+			return partial, ErrPartialWireBytes
+		}),
+	)
+
+	original := &envelope.Envelope{
+		StreamID:  "s1",
+		FlowID:    "f1",
+		Direction: envelope.Send,
+		Sequence:  1,
+		Protocol:  envelope.ProtocolHTTP,
+		Raw:       []byte("ORIG"),
+		Message:   &envelope.HTTPMessage{Method: "GET"},
+	}
+	modified := &envelope.Envelope{
+		StreamID:  "s1",
+		FlowID:    "f1",
+		Direction: envelope.Send,
+		Sequence:  1,
+		Protocol:  envelope.ProtocolHTTP,
+		Raw:       []byte("ORIG"),
+		Message:   &envelope.HTTPMessage{Method: "POST"},
+	}
+
+	ctx := withSnapshot(context.Background(), original)
+	step.Process(ctx, modified)
+
+	if len(w.flows) != 2 {
+		t.Fatalf("expected 2 flows, got %d", len(w.flows))
+	}
+	modFlow := w.flows[1]
+	if string(modFlow.RawBytes) != string(partial) {
+		t.Errorf("modified RawBytes = %q, want %q (partial encoder output)",
+			modFlow.RawBytes, partial)
+	}
+	if modFlow.Metadata["wire_bytes"] != "partial" {
+		t.Errorf("modified wire_bytes metadata = %q, want %q",
+			modFlow.Metadata["wire_bytes"], "partial")
+	}
+}
+
+// TestRecordStep_VariantRecording_EncoderPartialNilBytesTagsUnavailable
+// verifies that an encoder that returns ErrPartialWireBytes together with a
+// nil byte slice is treated as a contract violation: RawBytes stays as
+// env.Raw and wire_bytes is tagged "unavailable", NOT "partial". Tagging
+// "partial" on a nil-bytes return would misrepresent the stored ingress Raw
+// as a partial re-encode.
+func TestRecordStep_VariantRecording_EncoderPartialNilBytesTagsUnavailable(t *testing.T) {
+	w := &mockWriter{}
+	step := NewRecordStep(w, nil,
+		WithWireEncoder(envelope.ProtocolHTTP, func(*envelope.Envelope) ([]byte, error) {
+			return nil, ErrPartialWireBytes
+		}),
+	)
+
+	original := &envelope.Envelope{
+		StreamID:  "s1",
+		FlowID:    "f1",
+		Direction: envelope.Send,
+		Sequence:  1,
+		Protocol:  envelope.ProtocolHTTP,
+		Raw:       []byte("ORIG"),
+		Message:   &envelope.HTTPMessage{Method: "GET"},
+	}
+	modified := &envelope.Envelope{
+		StreamID:  "s1",
+		FlowID:    "f1",
+		Direction: envelope.Send,
+		Sequence:  1,
+		Protocol:  envelope.ProtocolHTTP,
+		Raw:       []byte("ORIG"),
+		Message:   &envelope.HTTPMessage{Method: "POST"},
+	}
+
+	ctx := withSnapshot(context.Background(), original)
+	step.Process(ctx, modified)
+
+	if len(w.flows) != 2 {
+		t.Fatalf("expected 2 flows, got %d", len(w.flows))
+	}
+	modFlow := w.flows[1]
+	if string(modFlow.RawBytes) != "ORIG" {
+		t.Errorf("modified RawBytes = %q, want env.Raw kept when partial+nil",
+			modFlow.RawBytes)
+	}
+	if modFlow.Metadata["wire_bytes"] != "unavailable" {
+		t.Errorf("modified wire_bytes metadata = %q, want %q "+
+			"(partial sentinel with nil bytes violates contract)",
+			modFlow.Metadata["wire_bytes"], "unavailable")
+	}
+}
+
+// TestRecordStep_VariantRecording_OriginalRawNeverRewrittenByEncoder verifies
+// that the original variant's RawBytes is sourced from snap.Raw and that the
+// WireEncoder (which operates on current) does not influence it.
+func TestRecordStep_VariantRecording_OriginalRawNeverRewrittenByEncoder(t *testing.T) {
+	w := &mockWriter{}
+	step := NewRecordStep(w, nil,
+		WithWireEncoder(envelope.ProtocolHTTP, func(*envelope.Envelope) ([]byte, error) {
+			return []byte("MODIFIED-ONLY"), nil
+		}),
+	)
+
+	original := &envelope.Envelope{
+		StreamID:  "s1",
+		FlowID:    "f1",
+		Direction: envelope.Send,
+		Sequence:  1,
+		Protocol:  envelope.ProtocolHTTP,
+		Raw:       []byte("WIRE-INGRESS"),
+		Message:   &envelope.HTTPMessage{Method: "GET"},
+	}
+	modified := &envelope.Envelope{
+		StreamID:  "s1",
+		FlowID:    "f1",
+		Direction: envelope.Send,
+		Sequence:  1,
+		Protocol:  envelope.ProtocolHTTP,
+		Raw:       []byte("WIRE-INGRESS"),
+		Message:   &envelope.HTTPMessage{Method: "POST"},
+	}
+
+	ctx := withSnapshot(context.Background(), original)
+	step.Process(ctx, modified)
+
+	if len(w.flows) != 2 {
+		t.Fatalf("expected 2 flows, got %d", len(w.flows))
+	}
+	if string(w.flows[0].RawBytes) != "WIRE-INGRESS" {
+		t.Errorf("original RawBytes = %q, want ingress Raw unmodified",
+			w.flows[0].RawBytes)
+	}
+	if string(w.flows[1].RawBytes) != "MODIFIED-ONLY" {
+		t.Errorf("modified RawBytes = %q, want encoder output", w.flows[1].RawBytes)
+	}
+}
+
 func TestRecordStep_StoreError(t *testing.T) {
 	w := &mockWriter{saveErr: errors.New("store unavailable")}
 	step := NewRecordStep(w, nil)

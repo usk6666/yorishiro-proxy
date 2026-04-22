@@ -30,6 +30,7 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/layer"
+	"github.com/usk6666/yorishiro-proxy/internal/layer/http1"
 	"github.com/usk6666/yorishiro-proxy/internal/pipeline"
 	"github.com/usk6666/yorishiro-proxy/internal/rules/common"
 	httprules "github.com/usk6666/yorishiro-proxy/internal/rules/http"
@@ -313,7 +314,13 @@ func startHTTPMITMProxy(
 				pipeline.NewSafetyStep(opts.safetyEngine, slog.Default()),
 				pipeline.NewTransformStep(opts.transformEngine),
 				pipeline.NewInterceptStep(opts.interceptEngine, opts.holdQueue, slog.Default()),
-				pipeline.NewRecordStep(store, slog.Default()),
+				pipeline.NewRecordStep(store, slog.Default(),
+					// USK-622: register the HTTP/1.x wire-encoder so that
+					// modified-variant RawBytes reflects the re-encoded
+					// header block + body instead of the ingress env.Raw
+					// that was captured before mutation.
+					pipeline.WithWireEncoder(envelope.ProtocolHTTP, http1.EncodeWireBytes),
+				),
 			}
 
 			p := pipeline.New(steps...)
@@ -691,22 +698,46 @@ func TestHTTPSMITM_InterceptModify(t *testing.T) {
 
 	// --- Verify variant recording ---
 	allFlows := store.allFlows()
-	var hasOriginal, hasModified bool
+	var origFlow, modFlow *flow.Flow
 	for _, f := range allFlows {
-		if f.Metadata != nil {
-			switch f.Metadata["variant"] {
-			case "original":
-				hasOriginal = true
-			case "modified":
-				hasModified = true
+		if f.Metadata == nil {
+			continue
+		}
+		switch f.Metadata["variant"] {
+		case "original":
+			if f.Direction == "send" {
+				origFlow = f
+			}
+		case "modified":
+			if f.Direction == "send" {
+				modFlow = f
 			}
 		}
 	}
-	if !hasOriginal {
-		t.Error("expected original variant flow, found none")
+	if origFlow == nil {
+		t.Error("expected original variant send flow, found none")
 	}
-	if !hasModified {
-		t.Error("expected modified variant flow, found none")
+	if modFlow == nil {
+		t.Error("expected modified variant send flow, found none")
+	}
+
+	// USK-622: the modified-variant send flow's RawBytes must reflect the
+	// re-encoded wire representation after header injection, not the
+	// ingress env.Raw captured before the injection.
+	if modFlow != nil {
+		if len(modFlow.RawBytes) == 0 {
+			t.Fatal("modified-variant send flow RawBytes is empty")
+		}
+		if !bytes.Contains(modFlow.RawBytes, []byte("X-Injected: by-proxy")) {
+			t.Errorf("modified-variant RawBytes missing re-encoded X-Injected header: %q",
+				modFlow.RawBytes)
+		}
+		// The original variant must NOT carry the injected header in its
+		// recorded RawBytes (env.Raw snapshotted before mutation).
+		if origFlow != nil && bytes.Contains(origFlow.RawBytes, []byte("X-Injected: by-proxy")) {
+			t.Errorf("original-variant RawBytes unexpectedly contains injected header: %q",
+				origFlow.RawBytes)
+		}
 	}
 }
 
