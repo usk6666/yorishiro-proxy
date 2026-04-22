@@ -3,12 +3,11 @@ package http1
 import (
 	"bufio"
 	"bytes"
-	"errors"
-	"io"
 	"strings"
 	"testing"
 
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
+	"github.com/usk6666/yorishiro-proxy/internal/envelope/bodybuf"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/http1/parser"
 )
 
@@ -20,19 +19,23 @@ func parseReqFixture(t *testing.T, raw string) *envelope.Envelope {
 	if err != nil {
 		t.Fatalf("parse request: %v", err)
 	}
-	body, _, err := readBodyWithThreshold(rawReq.Body)
+	bb, body, err := readBodyWithThreshold(rawReq.Body, "", 10<<20, 254<<20)
 	if err != nil {
 		t.Fatalf("read body: %v", err)
 	}
+	if bb != nil {
+		t.Cleanup(func() { _ = bb.Release() })
+	}
 	path, rawQuery, authority := parseRequestURI(rawReq.RequestURI, rawReq.Headers)
 	msg := &envelope.HTTPMessage{
-		Method:    rawReq.Method,
-		Scheme:    "http",
-		Authority: authority,
-		Path:      path,
-		RawQuery:  rawQuery,
-		Headers:   rawHeadersToKV(rawReq.Headers),
-		Body:      body,
+		Method:     rawReq.Method,
+		Scheme:     "http",
+		Authority:  authority,
+		Path:       path,
+		RawQuery:   rawQuery,
+		Headers:    rawHeadersToKV(rawReq.Headers),
+		Body:       body,
+		BodyBuffer: bb,
 	}
 	return &envelope.Envelope{
 		Direction: envelope.Send,
@@ -40,9 +43,10 @@ func parseReqFixture(t *testing.T, raw string) *envelope.Envelope {
 		Raw:       rawReq.RawBytes,
 		Message:   msg,
 		Opaque: &opaqueHTTP1{
-			rawReq:   rawReq,
-			origKV:   cloneKV(msg.Headers),
-			origBody: cloneBytes(body),
+			rawReq:         rawReq,
+			origKV:         cloneKV(msg.Headers),
+			origBody:       cloneBytes(body),
+			origBodyBuffer: bb,
 		},
 	}
 }
@@ -53,15 +57,19 @@ func parseRespFixture(t *testing.T, raw string) *envelope.Envelope {
 	if err != nil {
 		t.Fatalf("parse response: %v", err)
 	}
-	body, _, err := readBodyWithThreshold(rawResp.Body)
+	bb, body, err := readBodyWithThreshold(rawResp.Body, "", 10<<20, 254<<20)
 	if err != nil {
 		t.Fatalf("read body: %v", err)
+	}
+	if bb != nil {
+		t.Cleanup(func() { _ = bb.Release() })
 	}
 	msg := &envelope.HTTPMessage{
 		Status:       rawResp.StatusCode,
 		StatusReason: extractStatusReason(rawResp.Status),
 		Headers:      rawHeadersToKV(rawResp.Headers),
 		Body:         body,
+		BodyBuffer:   bb,
 	}
 	return &envelope.Envelope{
 		Direction: envelope.Receive,
@@ -69,9 +77,10 @@ func parseRespFixture(t *testing.T, raw string) *envelope.Envelope {
 		Raw:       rawResp.RawBytes,
 		Message:   msg,
 		Opaque: &opaqueHTTP1{
-			rawResp:  rawResp,
-			origKV:   cloneKV(msg.Headers),
-			origBody: cloneBytes(body),
+			rawResp:        rawResp,
+			origKV:         cloneKV(msg.Headers),
+			origBody:       cloneBytes(body),
+			origBodyBuffer: bb,
 		},
 	}
 }
@@ -183,20 +192,27 @@ func TestEncodeWireBytes_Synthetic_Response(t *testing.T) {
 	}
 }
 
-// TestEncodeWireBytes_PassthroughBodyReturnsPartial verifies that when the
-// opaque path has a live passthrough bodyReader and msg.Body is nil, the
-// encoder returns header-only bytes together with ErrPartialWireBytes.
-func TestEncodeWireBytes_PassthroughBodyReturnsPartial(t *testing.T) {
+// TestEncodeWireBytes_BufferBackedBodyMaterialized verifies that when the
+// opaque path has msg.Body==nil but msg.BodyBuffer holds a materialized
+// large body, the encoder returns the full header+body bytes with no
+// partial marker. Replaces the pre-USK-631 passthrough path.
+func TestEncodeWireBytes_BufferBackedBodyMaterialized(t *testing.T) {
+	// 15 MiB body; exceeds the default 10 MiB spill threshold but fits
+	// within 254 MiB maxBody.
+	largeBody := bytes.Repeat([]byte("X"), 15<<20)
+	bb := bodybuf.NewMemory(largeBody)
+	defer func() { _ = bb.Release() }()
+
 	rawReq, err := parser.ParseRequest(bufio.NewReader(strings.NewReader(
-		"POST /large HTTP/1.1\r\nHost: example.com\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n")))
+		"POST /large HTTP/1.1\r\nHost: example.com\r\nContent-Length: 0\r\n\r\n")))
 	if err != nil {
 		t.Fatalf("parse request: %v", err)
 	}
 	msg := &envelope.HTTPMessage{
-		Method:  "POST",
-		Path:    "/large",
-		Headers: rawHeadersToKV(rawReq.Headers),
-		// Body intentionally nil — passthrough mode.
+		Method:     "POST",
+		Path:       "/large",
+		Headers:    rawHeadersToKV(rawReq.Headers),
+		BodyBuffer: bb, // buffer-backed body; Body intentionally nil.
 	}
 	env := &envelope.Envelope{
 		Direction: envelope.Send,
@@ -204,25 +220,27 @@ func TestEncodeWireBytes_PassthroughBodyReturnsPartial(t *testing.T) {
 		Raw:       rawReq.RawBytes,
 		Message:   msg,
 		Opaque: &opaqueHTTP1{
-			rawReq:     rawReq,
-			origKV:     cloneKV(msg.Headers),
-			origBody:   nil, // passthrough
-			bodyReader: io.NopCloser(bytes.NewReader([]byte("streamed-body"))),
+			rawReq:         rawReq,
+			origKV:         cloneKV(msg.Headers),
+			origBody:       nil,
+			origBodyBuffer: bb,
 		},
 	}
-	// Mutate headers to force the opaque encode path.
+	// Mutate headers to force the opaque encode path (would otherwise take
+	// the zero-copy fast path and return rawReq.RawBytes unchanged).
 	msg.Headers = append(msg.Headers, envelope.KeyValue{Name: "X-Injected", Value: "y"})
 
 	out, err := EncodeWireBytes(env)
-	if !errors.Is(err, envelope.ErrPartialWireBytes) {
-		t.Fatalf("err = %v, want ErrPartialWireBytes", err)
+	if err != nil {
+		t.Fatalf("EncodeWireBytes: %v", err)
 	}
 	if !bytes.Contains(out, []byte("X-Injected: y\r\n")) {
-		t.Errorf("partial output missing injected header:\n%s", out)
+		t.Errorf("output missing injected header")
 	}
-	// Header-only — must not contain the upstream-delivered streamed body.
-	if bytes.Contains(out, []byte("streamed-body")) {
-		t.Errorf("partial output must not include live passthrough body")
+	// The full 15 MiB body must be present in the encoded output.
+	if !bytes.HasSuffix(out, largeBody) {
+		t.Errorf("encoded output does not end with the full body (len=%d, got tail %d bytes)",
+			len(out), len(out)-bytes.Index(out, []byte("\r\n\r\n"))-4)
 	}
 }
 

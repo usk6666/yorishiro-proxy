@@ -3,12 +3,15 @@ package http1
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net"
 	"strings"
 	"testing"
 
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
+	"github.com/usk6666/yorishiro-proxy/internal/envelope/bodybuf"
+	"github.com/usk6666/yorishiro-proxy/internal/layer"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/http1/parser"
 )
 
@@ -652,12 +655,12 @@ func TestApplyHeaderPatch_HeaderRemoved(t *testing.T) {
 
 func TestReadBodyWithThreshold_SmallBody(t *testing.T) {
 	r := strings.NewReader("hello world")
-	body, bodyReader, err := readBodyWithThreshold(r)
+	bb, body, err := readBodyWithThreshold(r, "", 1024, 1<<20)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if bodyReader != nil {
-		t.Error("expected nil bodyReader for small body")
+	if bb != nil {
+		t.Error("expected nil BodyBuffer for small body")
 	}
 	if string(body) != "hello world" {
 		t.Errorf("body = %q, want hello world", string(body))
@@ -665,29 +668,83 @@ func TestReadBodyWithThreshold_SmallBody(t *testing.T) {
 }
 
 func TestReadBodyWithThreshold_NilReader(t *testing.T) {
-	body, bodyReader, err := readBodyWithThreshold(nil)
+	bb, body, err := readBodyWithThreshold(nil, "", 1024, 1<<20)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if body != nil {
 		t.Errorf("expected nil body, got %v", body)
 	}
-	if bodyReader != nil {
-		t.Error("expected nil bodyReader")
+	if bb != nil {
+		t.Error("expected nil BodyBuffer")
 	}
 }
 
 func TestReadBodyWithThreshold_EmptyBody(t *testing.T) {
 	r := strings.NewReader("")
-	body, bodyReader, err := readBodyWithThreshold(r)
+	bb, body, err := readBodyWithThreshold(r, "", 1024, 1<<20)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if bodyReader != nil {
-		t.Error("expected nil bodyReader for empty body")
+	if bb != nil {
+		t.Error("expected nil BodyBuffer for empty body")
 	}
 	if len(body) != 0 {
 		t.Errorf("body = %v, want empty", body)
+	}
+}
+
+// TestReadBodyWithThreshold_LargeBodyReturnsBuffer verifies that a body
+// exceeding the spill threshold is returned as a file-backed BodyBuffer
+// with msg.Body == nil.
+func TestReadBodyWithThreshold_LargeBodyReturnsBuffer(t *testing.T) {
+	const threshold = 64
+	payload := bytes.Repeat([]byte("A"), threshold+1024)
+	r := bytes.NewReader(payload)
+
+	bb, body, err := readBodyWithThreshold(r, "", threshold, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bb == nil {
+		t.Fatal("expected non-nil BodyBuffer for large body")
+	}
+	defer func() { _ = bb.Release() }()
+	if body != nil {
+		t.Errorf("expected nil body (buffer-backed), got %d bytes", len(body))
+	}
+	if got := bb.Len(); got != int64(len(payload)) {
+		t.Errorf("BodyBuffer.Len() = %d, want %d", got, len(payload))
+	}
+	if !bb.IsFileBacked() {
+		t.Error("expected file-backed BodyBuffer after overflow")
+	}
+}
+
+// TestReadBodyWithThreshold_MaxBodyExceeded verifies that a body exceeding
+// maxBody surfaces as *layer.StreamError with ErrorInternalError.
+func TestReadBodyWithThreshold_MaxBodyExceeded(t *testing.T) {
+	const threshold = 64
+	const maxBody = 128
+	payload := bytes.Repeat([]byte("A"), maxBody+1024)
+	r := bytes.NewReader(payload)
+
+	bb, body, err := readBodyWithThreshold(r, "", threshold, maxBody)
+	if err == nil {
+		t.Fatal("expected error for oversize body")
+	}
+	if bb != nil {
+		t.Error("expected nil BodyBuffer on error path")
+	}
+	if body != nil {
+		t.Error("expected nil body on error path")
+	}
+	var se *layer.StreamError
+	if !errors.As(err, &se) {
+		t.Fatalf("expected *layer.StreamError, got %T: %v", err, err)
+	}
+	if se.Code != layer.ErrorInternalError {
+		t.Errorf("StreamError.Code = %v, want ErrorInternalError", se.Code)
 	}
 }
 
@@ -772,48 +829,82 @@ func TestKvEqual(t *testing.T) {
 }
 
 func TestIsBodyChanged(t *testing.T) {
+	// Shared BodyBuffer for buffer-backed cases. Retained so the test can
+	// observe both "unchanged buffer-backed" and "buffer cleared" semantics
+	// without disturbing the buffer state. Released at test end.
+	origBB := bodybuf.NewMemory([]byte("buffered-body"))
+	defer func() { _ = origBB.Release() }()
+
 	tests := []struct {
 		name     string
-		body     []byte
+		msg      *envelope.HTTPMessage
 		opaque   *opaqueHTTP1
 		expected bool
 	}{
 		{
-			name:     "passthrough unchanged",
-			body:     nil,
-			opaque:   &opaqueHTTP1{bodyReader: strings.NewReader("data")},
-			expected: false,
-		},
-		{
-			name:     "both nil",
-			body:     nil,
+			name:     "both nil (no body)",
+			msg:      &envelope.HTTPMessage{},
 			opaque:   &opaqueHTTP1{},
 			expected: false,
 		},
 		{
-			name:     "body set from passthrough",
-			body:     []byte("new"),
-			opaque:   &opaqueHTTP1{origBody: nil, bodyReader: strings.NewReader("old")},
-			expected: true,
-		},
-		{
-			name:     "body unchanged",
-			body:     []byte("same"),
+			name:     "memory body unchanged",
+			msg:      &envelope.HTTPMessage{Body: []byte("same")},
 			opaque:   &opaqueHTTP1{origBody: []byte("same")},
 			expected: false,
 		},
 		{
-			name:     "body changed",
-			body:     []byte("new"),
+			name:     "memory body changed",
+			msg:      &envelope.HTTPMessage{Body: []byte("new")},
 			opaque:   &opaqueHTTP1{origBody: []byte("old")},
+			expected: true,
+		},
+		{
+			name:     "body set where there was none",
+			msg:      &envelope.HTTPMessage{Body: []byte("new")},
+			opaque:   &opaqueHTTP1{origBody: nil},
+			expected: true,
+		},
+		{
+			name:     "body cleared",
+			msg:      &envelope.HTTPMessage{Body: nil},
+			opaque:   &opaqueHTTP1{origBody: []byte("old")},
+			expected: true,
+		},
+		{
+			name:     "buffer-backed unchanged (same pointer)",
+			msg:      &envelope.HTTPMessage{BodyBuffer: origBB},
+			opaque:   &opaqueHTTP1{origBodyBuffer: origBB},
+			expected: false,
+		},
+		{
+			name:     "buffer replaced by different pointer",
+			msg:      &envelope.HTTPMessage{BodyBuffer: bodybuf.NewMemory([]byte("other"))},
+			opaque:   &opaqueHTTP1{origBodyBuffer: origBB},
+			expected: true,
+		},
+		{
+			name:     "buffer dropped to nil (body cleared)",
+			msg:      &envelope.HTTPMessage{},
+			opaque:   &opaqueHTTP1{origBodyBuffer: origBB},
+			expected: true,
+		},
+		{
+			name:     "buffer materialized into Body",
+			msg:      &envelope.HTTPMessage{Body: []byte("materialized"), BodyBuffer: origBB},
+			opaque:   &opaqueHTTP1{origBodyBuffer: origBB},
 			expected: true,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := isBodyChanged(tt.body, tt.opaque)
+			got := isBodyChanged(tt.msg, tt.opaque)
 			if got != tt.expected {
 				t.Errorf("isBodyChanged() = %v, want %v", got, tt.expected)
+			}
+			// Clean up per-case temporaries (the "other" buffer).
+			if tt.msg.BodyBuffer != nil && tt.msg.BodyBuffer != origBB {
+				_ = tt.msg.BodyBuffer.Release()
 			}
 		})
 	}
@@ -869,6 +960,214 @@ func TestStatusText(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("statusText(%d) = %q, want %q", tt.code, got, tt.want)
 		}
+	}
+}
+
+// --- BodyBuffer Send tests (USK-631) ---
+
+// TestChannel_Send_BodyBufferUnchanged_ZeroCopy verifies that an envelope
+// whose BodyBuffer was populated at Next time and never mutated takes the
+// zero-copy RawBytes fast path — the buffer content is NOT re-materialized
+// through writeBody because RawBytes already includes it.
+func TestChannel_Send_BodyBufferUnchanged_ZeroCopy(t *testing.T) {
+	client, server := testConn(t)
+	defer client.Close()
+	defer server.Close()
+
+	// Construct an envelope where Body is nil but BodyBuffer holds the
+	// content. RawBytes is the headers-only block (matching parser output);
+	// writeBody streams the BodyBuffer contents separately.
+	rawBytes := []byte("GET / HTTP/1.1\r\nHost: example.com\r\nContent-Length: 5\r\n\r\n")
+	bb := bodybuf.NewMemory([]byte("hello"))
+
+	env := &envelope.Envelope{
+		Direction: envelope.Send,
+		Protocol:  envelope.ProtocolHTTP,
+		Raw:       rawBytes,
+		Message: &envelope.HTTPMessage{
+			Method:    "GET",
+			Path:      "/",
+			Authority: "example.com",
+			Headers: []envelope.KeyValue{
+				{Name: "Host", Value: "example.com"},
+				{Name: "Content-Length", Value: "5"},
+			},
+			BodyBuffer: bb,
+		},
+		Opaque: &opaqueHTTP1{
+			rawReq: &parser.RawRequest{
+				Method:     "GET",
+				RequestURI: "/",
+				Proto:      "HTTP/1.1",
+				Headers: parser.RawHeaders{
+					{Name: "Host", Value: "example.com"},
+					{Name: "Content-Length", Value: "5"},
+				},
+				RawBytes: rawBytes,
+			},
+			origKV: []envelope.KeyValue{
+				{Name: "Host", Value: "example.com"},
+				{Name: "Content-Length", Value: "5"},
+			},
+			origBody:       nil,
+			origBodyBuffer: bb,
+		},
+	}
+
+	l := New(server, "conn-1", envelope.Receive)
+	defer l.Close()
+	ch := <-l.Channels()
+
+	resultCh := make(chan []byte, 1)
+	go func() {
+		data, _ := io.ReadAll(client)
+		resultCh <- data
+	}()
+
+	if err := ch.Send(context.Background(), env); err != nil {
+		t.Fatal(err)
+	}
+	server.Close()
+
+	result := <-resultCh
+	// Zero-copy writes RawBytes (headers-only) + BodyBuffer contents.
+	expected := string(rawBytes) + "hello"
+	if string(result) != expected {
+		t.Errorf("zero-copy output mismatch:\ngot:  %q\nwant: %q", result, expected)
+	}
+
+	// Release the retained BodyBuffer so the test doesn't leak.
+	_ = bb.Release()
+}
+
+// TestChannel_Send_BodyChangedToBytes verifies that when Pipeline replaces
+// a buffer-backed body with msg.Body bytes, the encoded output re-stamps
+// Content-Length from len(msg.Body) and writes the new body.
+func TestChannel_Send_BodyChangedToBytes(t *testing.T) {
+	client, server := testConn(t)
+	defer client.Close()
+	defer server.Close()
+
+	rawBytes := []byte("GET / HTTP/1.1\r\nHost: example.com\r\nContent-Length: 5\r\n\r\nhello")
+	origBB := bodybuf.NewMemory([]byte("hello"))
+
+	env := &envelope.Envelope{
+		Direction: envelope.Send,
+		Protocol:  envelope.ProtocolHTTP,
+		Raw:       rawBytes,
+		Message: &envelope.HTTPMessage{
+			Method:    "GET",
+			Path:      "/",
+			Authority: "example.com",
+			Headers: []envelope.KeyValue{
+				{Name: "Host", Value: "example.com"},
+				{Name: "Content-Length", Value: "5"},
+			},
+			// Pipeline dropped the buffer and set a new memory body.
+			Body: []byte("world-replaced"),
+		},
+		Opaque: &opaqueHTTP1{
+			rawReq: &parser.RawRequest{
+				Method:     "GET",
+				RequestURI: "/",
+				Proto:      "HTTP/1.1",
+				Headers: parser.RawHeaders{
+					{Name: "Host", Value: "example.com"},
+					{Name: "Content-Length", Value: "5"},
+				},
+				RawBytes: rawBytes,
+			},
+			origKV: []envelope.KeyValue{
+				{Name: "Host", Value: "example.com"},
+				{Name: "Content-Length", Value: "5"},
+			},
+			origBodyBuffer: origBB,
+		},
+	}
+
+	l := New(server, "conn-1", envelope.Receive)
+	defer l.Close()
+	ch := <-l.Channels()
+
+	resultCh := make(chan []byte, 1)
+	go func() {
+		data, _ := io.ReadAll(client)
+		resultCh <- data
+	}()
+
+	if err := ch.Send(context.Background(), env); err != nil {
+		t.Fatal(err)
+	}
+	server.Close()
+
+	result := string(<-resultCh)
+
+	// Content-Length must be re-stamped.
+	if !strings.Contains(result, "Content-Length: 14\r\n") {
+		t.Errorf("Content-Length not re-stamped to 14: %s", result)
+	}
+	// New body must be at the end.
+	if !strings.HasSuffix(result, "\r\n\r\nworld-replaced") {
+		t.Errorf("new body not appended: %s", result)
+	}
+
+	_ = origBB.Release()
+}
+
+// TestChannel_Send_BodyNilBothNoBodyBytes verifies that an envelope with
+// neither msg.Body nor msg.BodyBuffer writes no body bytes after the header
+// block.
+func TestChannel_Send_BodyNilBothNoBodyBytes(t *testing.T) {
+	client, server := testConn(t)
+	defer client.Close()
+	defer server.Close()
+
+	rawBytes := []byte("GET / HTTP/1.1\r\nHost: example.com\r\n\r\n")
+
+	env := &envelope.Envelope{
+		Direction: envelope.Send,
+		Protocol:  envelope.ProtocolHTTP,
+		Raw:       rawBytes,
+		Message: &envelope.HTTPMessage{
+			Method:    "GET",
+			Path:      "/",
+			Authority: "example.com",
+			Headers: []envelope.KeyValue{
+				{Name: "Host", Value: "example.com"},
+			},
+		},
+		Opaque: &opaqueHTTP1{
+			rawReq: &parser.RawRequest{
+				Method:     "GET",
+				RequestURI: "/",
+				Proto:      "HTTP/1.1",
+				Headers:    parser.RawHeaders{{Name: "Host", Value: "example.com"}},
+				RawBytes:   rawBytes,
+			},
+			origKV: []envelope.KeyValue{
+				{Name: "Host", Value: "example.com"},
+			},
+		},
+	}
+
+	l := New(server, "conn-1", envelope.Receive)
+	defer l.Close()
+	ch := <-l.Channels()
+
+	resultCh := make(chan []byte, 1)
+	go func() {
+		data, _ := io.ReadAll(client)
+		resultCh <- data
+	}()
+
+	if err := ch.Send(context.Background(), env); err != nil {
+		t.Fatal(err)
+	}
+	server.Close()
+
+	result := <-resultCh
+	if string(result) != string(rawBytes) {
+		t.Errorf("unexpected output:\ngot:  %q\nwant: %q", result, rawBytes)
 	}
 }
 

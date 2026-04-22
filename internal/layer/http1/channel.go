@@ -15,23 +15,29 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
+	"github.com/usk6666/yorishiro-proxy/internal/envelope/bodybuf"
+	"github.com/usk6666/yorishiro-proxy/internal/layer"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/http1/parser"
 )
-
-// passthroughThreshold is the body size above which passthrough mode is used.
-// Bodies larger than this are streamed via HTTPMessage.BodyStream instead of
-// being buffered into HTTPMessage.Body.
-const passthroughThreshold = 10 << 20 // 10 MiB
 
 // opaqueHTTP1 holds Layer-specific data stored in Envelope.Opaque.
 // Pipeline Steps must not type-assert on this.
 type opaqueHTTP1 struct {
-	rawReq     *parser.RawRequest
-	rawResp    *parser.RawResponse
-	origKV     []envelope.KeyValue // header snapshot at Next() time
-	origBody   []byte              // body snapshot at Next() time (nil for passthrough)
-	bodyReader io.Reader           // passthrough body (non-nil when Body == nil)
+	rawReq         *parser.RawRequest
+	rawResp        *parser.RawResponse
+	origKV         []envelope.KeyValue // header snapshot at Next() time
+	origBody       []byte              // body snapshot at Next() time (nil for buffer-backed)
+	origBodyBuffer *bodybuf.BodyBuffer // buffer-backed body snapshot (nil for memory-backed)
+}
+
+// bodyOpts are the per-channel body assembly options, threaded through
+// http1.New via WithBodySpillDir / WithBodySpillThreshold / WithMaxBodySize.
+type bodyOpts struct {
+	spillDir       string
+	spillThreshold int64
+	maxBody        int64
 }
 
 // channel implements layer.Channel for HTTP/1.x.
@@ -42,6 +48,7 @@ type channel struct {
 	direction envelope.Direction
 	scheme    string
 	ctxTmpl   envelope.EnvelopeContext
+	bodyOpts  bodyOpts
 
 	// Per-request state.
 	currentStreamID string // changes per request-response pair
@@ -136,7 +143,7 @@ func (c *channel) markTerminated(err error) {
 
 // --- Next() implementation ---
 
-func (c *channel) nextRequest(_ context.Context) (*envelope.Envelope, error) {
+func (c *channel) nextRequest(_ context.Context) (env *envelope.Envelope, retErr error) {
 	rawReq, err := parser.ParseRequest(c.reader)
 	if err != nil {
 		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
@@ -155,20 +162,33 @@ func (c *channel) nextRequest(_ context.Context) (*envelope.Envelope, error) {
 	// Parse RequestURI into structured fields.
 	path, rawQuery, authority := parseRequestURI(rawReq.RequestURI, rawReq.Headers)
 
-	// Read body with passthrough threshold.
-	body, bodyReader, err := readBodyWithThreshold(rawReq.Body)
+	// Read body. Small bodies are buffered in memory; large bodies spill to a
+	// file-backed BodyBuffer. MaxBodySize is enforced as an absolute cap.
+	bb, body, err := readBodyWithThreshold(rawReq.Body,
+		c.bodyOpts.spillDir, c.bodyOpts.spillThreshold, c.bodyOpts.maxBody)
 	if err != nil {
-		return nil, fmt.Errorf("http1: read request body: %w", err)
+		wrapped := fmt.Errorf("http1: read request body: %w", err)
+		c.markTerminated(wrapped)
+		return nil, wrapped
 	}
+	// Release the partial buffer on any subsequent error. On success, bb is
+	// owned by the envelope/opaque (single refcount = 1) and released later
+	// by the session OnComplete backstop (USK-634).
+	defer func() {
+		if retErr != nil && bb != nil {
+			_ = bb.Release()
+		}
+	}()
 
 	// Convert anomalies.
 	anomalies := convertAnomalies(rawReq.Anomalies)
 
-	// Project chunked trailers (buffered mode) or flag passthrough loss.
-	trailers, trailerAnomalies := extractTrailers(rawReq.Body, bodyReader)
+	// Project chunked trailers. The body reader has been fully drained by
+	// readBodyWithThreshold, so trailers are available synchronously.
+	trailers, trailerAnomalies := extractTrailers(rawReq.Body)
 	anomalies = append(anomalies, trailerAnomalies...)
 
-	// Build HTTPMessage.
+	// Build HTTPMessage. At most one of Body/BodyBuffer is non-nil.
 	msg := &envelope.HTTPMessage{
 		Method:     rawReq.Method,
 		Scheme:     c.scheme,
@@ -178,7 +198,7 @@ func (c *channel) nextRequest(_ context.Context) (*envelope.Envelope, error) {
 		Headers:    rawHeadersToKV(rawReq.Headers),
 		Trailers:   trailers,
 		Body:       body,
-		BodyStream: bodyReader,
+		BodyBuffer: bb,
 		Anomalies:  anomalies,
 	}
 
@@ -186,7 +206,7 @@ func (c *channel) nextRequest(_ context.Context) (*envelope.Envelope, error) {
 	envCtx := c.ctxTmpl
 	envCtx.ReceivedAt = time.Now()
 
-	env := &envelope.Envelope{
+	env = &envelope.Envelope{
 		StreamID:  c.currentStreamID,
 		FlowID:    uuid.New().String(),
 		Sequence:  c.sequence,
@@ -196,10 +216,10 @@ func (c *channel) nextRequest(_ context.Context) (*envelope.Envelope, error) {
 		Message:   msg,
 		Context:   envCtx,
 		Opaque: &opaqueHTTP1{
-			rawReq:     rawReq,
-			origKV:     cloneKV(msg.Headers),
-			origBody:   cloneBytes(body),
-			bodyReader: bodyReader,
+			rawReq:         rawReq,
+			origKV:         cloneKV(msg.Headers),
+			origBody:       cloneBytes(body),
+			origBodyBuffer: bb,
 		},
 	}
 
@@ -209,7 +229,7 @@ func (c *channel) nextRequest(_ context.Context) (*envelope.Envelope, error) {
 	return env, nil
 }
 
-func (c *channel) nextResponse(_ context.Context) (*envelope.Envelope, error) {
+func (c *channel) nextResponse(_ context.Context) (env *envelope.Envelope, retErr error) {
 	rawResp, err := parser.ParseResponse(c.reader)
 	if err != nil {
 		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
@@ -221,11 +241,20 @@ func (c *channel) nextResponse(_ context.Context) (*envelope.Envelope, error) {
 		return nil, wrapped
 	}
 
-	// Read body with passthrough threshold.
-	body, bodyReader, err := readBodyWithThreshold(rawResp.Body)
+	// Read body. Small bodies are buffered in memory; large bodies spill to a
+	// file-backed BodyBuffer. MaxBodySize is enforced as an absolute cap.
+	bb, body, err := readBodyWithThreshold(rawResp.Body,
+		c.bodyOpts.spillDir, c.bodyOpts.spillThreshold, c.bodyOpts.maxBody)
 	if err != nil {
-		return nil, fmt.Errorf("http1: read response body: %w", err)
+		wrapped := fmt.Errorf("http1: read response body: %w", err)
+		c.markTerminated(wrapped)
+		return nil, wrapped
 	}
+	defer func() {
+		if retErr != nil && bb != nil {
+			_ = bb.Release()
+		}
+	}()
 
 	// Extract status reason from the full status string.
 	statusReason := extractStatusReason(rawResp.Status)
@@ -233,18 +262,19 @@ func (c *channel) nextResponse(_ context.Context) (*envelope.Envelope, error) {
 	// Convert anomalies.
 	anomalies := convertAnomalies(rawResp.Anomalies)
 
-	// Project chunked trailers (buffered mode) or flag passthrough loss.
-	trailers, trailerAnomalies := extractTrailers(rawResp.Body, bodyReader)
+	// Project chunked trailers. The body reader has been fully drained by
+	// readBodyWithThreshold, so trailers are available synchronously.
+	trailers, trailerAnomalies := extractTrailers(rawResp.Body)
 	anomalies = append(anomalies, trailerAnomalies...)
 
-	// Build HTTPMessage.
+	// Build HTTPMessage. At most one of Body/BodyBuffer is non-nil.
 	msg := &envelope.HTTPMessage{
 		Status:       rawResp.StatusCode,
 		StatusReason: statusReason,
 		Headers:      rawHeadersToKV(rawResp.Headers),
 		Trailers:     trailers,
 		Body:         body,
-		BodyStream:   bodyReader,
+		BodyBuffer:   bb,
 		Anomalies:    anomalies,
 	}
 
@@ -252,7 +282,7 @@ func (c *channel) nextResponse(_ context.Context) (*envelope.Envelope, error) {
 	envCtx := c.ctxTmpl
 	envCtx.ReceivedAt = time.Now()
 
-	env := &envelope.Envelope{
+	env = &envelope.Envelope{
 		StreamID:  c.currentStreamID,
 		FlowID:    uuid.New().String(),
 		Sequence:  c.sequence + 1,
@@ -262,10 +292,10 @@ func (c *channel) nextResponse(_ context.Context) (*envelope.Envelope, error) {
 		Message:   msg,
 		Context:   envCtx,
 		Opaque: &opaqueHTTP1{
-			rawResp:    rawResp,
-			origKV:     cloneKV(msg.Headers),
-			origBody:   cloneBytes(body),
-			bodyReader: bodyReader,
+			rawResp:        rawResp,
+			origKV:         cloneKV(msg.Headers),
+			origBody:       cloneBytes(body),
+			origBodyBuffer: bb,
 		},
 	}
 
@@ -303,14 +333,14 @@ func (c *channel) sendResponse(msg *envelope.HTTPMessage, env *envelope.Envelope
 func (c *channel) sendRequestOpaque(msg *envelope.HTTPMessage, opaque *opaqueHTTP1) error {
 	rawReq := opaque.rawReq
 	headersChanged := !kvEqual(msg.Headers, opaque.origKV)
-	bodyChanged := isBodyChanged(msg.Body, opaque)
+	bodyChanged := isBodyChanged(msg, opaque)
 
 	// Zero-copy fast path: nothing changed.
 	if !headersChanged && !bodyChanged && len(rawReq.RawBytes) > 0 {
 		if _, err := c.writer.Write(rawReq.RawBytes); err != nil {
 			return fmt.Errorf("http1: send request raw: %w", err)
 		}
-		return c.writeBody(msg, opaque)
+		return c.writeBody(msg)
 	}
 
 	// Apply header patches.
@@ -318,11 +348,20 @@ func (c *channel) sendRequestOpaque(msg *envelope.HTTPMessage, opaque *opaqueHTT
 		rawReq.Headers = applyHeaderPatch(opaque.origKV, msg.Headers, rawReq.Headers)
 	}
 
-	// Update body headers if changed.
-	if bodyChanged && msg.Body != nil {
+	// Update body headers if the body changed. Three sub-cases:
+	//   - msg.Body != nil                   → re-stamp CL from len(msg.Body).
+	//   - msg.BodyBuffer != nil             → re-stamp CL from BodyBuffer.Len().
+	//   - both nil                          → body was cleared; stamp CL=0.
+	if bodyChanged {
 		rawReq.Headers.Del("Transfer-Encoding")
-		rawReq.Headers.Set("Content-Length", strconv.Itoa(len(msg.Body)))
-		opaque.bodyReader = nil
+		switch {
+		case msg.Body != nil:
+			rawReq.Headers.Set("Content-Length", strconv.Itoa(len(msg.Body)))
+		case msg.BodyBuffer != nil:
+			rawReq.Headers.Set("Content-Length", strconv.FormatInt(msg.BodyBuffer.Len(), 10))
+		default:
+			rawReq.Headers.Set("Content-Length", "0")
+		}
 	}
 
 	// Serialize and write.
@@ -330,20 +369,20 @@ func (c *channel) sendRequestOpaque(msg *envelope.HTTPMessage, opaque *opaqueHTT
 	if _, err := c.writer.Write(headerBytes); err != nil {
 		return fmt.Errorf("http1: send request: %w", err)
 	}
-	return c.writeBody(msg, opaque)
+	return c.writeBody(msg)
 }
 
 func (c *channel) sendResponseOpaque(msg *envelope.HTTPMessage, opaque *opaqueHTTP1) error {
 	rawResp := opaque.rawResp
 	headersChanged := !kvEqual(msg.Headers, opaque.origKV)
-	bodyChanged := isBodyChanged(msg.Body, opaque)
+	bodyChanged := isBodyChanged(msg, opaque)
 
 	// Zero-copy fast path: nothing changed.
 	if !headersChanged && !bodyChanged && len(rawResp.RawBytes) > 0 {
 		if _, err := c.writer.Write(rawResp.RawBytes); err != nil {
 			return fmt.Errorf("http1: send response raw: %w", err)
 		}
-		return c.writeBody(msg, opaque)
+		return c.writeBody(msg)
 	}
 
 	// Apply header patches.
@@ -351,11 +390,18 @@ func (c *channel) sendResponseOpaque(msg *envelope.HTTPMessage, opaque *opaqueHT
 		rawResp.Headers = applyHeaderPatch(opaque.origKV, msg.Headers, rawResp.Headers)
 	}
 
-	// Update body headers if changed.
-	if bodyChanged && msg.Body != nil {
+	// Update body headers if the body changed. See sendRequestOpaque for
+	// the three sub-cases.
+	if bodyChanged {
 		rawResp.Headers.Del("Transfer-Encoding")
-		rawResp.Headers.Set("Content-Length", strconv.Itoa(len(msg.Body)))
-		opaque.bodyReader = nil
+		switch {
+		case msg.Body != nil:
+			rawResp.Headers.Set("Content-Length", strconv.Itoa(len(msg.Body)))
+		case msg.BodyBuffer != nil:
+			rawResp.Headers.Set("Content-Length", strconv.FormatInt(msg.BodyBuffer.Len(), 10))
+		default:
+			rawResp.Headers.Set("Content-Length", "0")
+		}
 	}
 
 	// Serialize and write.
@@ -363,7 +409,7 @@ func (c *channel) sendResponseOpaque(msg *envelope.HTTPMessage, opaque *opaqueHT
 	if _, err := c.writer.Write(headerBytes); err != nil {
 		return fmt.Errorf("http1: send response: %w", err)
 	}
-	return c.writeBody(msg, opaque)
+	return c.writeBody(msg)
 }
 
 // --- Send Path 2: Synthetic (no Opaque) ---
@@ -387,8 +433,13 @@ func (c *channel) sendRequestSynthetic(msg *envelope.HTTPMessage) error {
 	headers := kvToRawHeaders(msg.Headers)
 
 	// Set Content-Length if body present and header not already set.
-	if msg.Body != nil && headers.Get("Content-Length") == "" {
-		headers.Set("Content-Length", strconv.Itoa(len(msg.Body)))
+	if headers.Get("Content-Length") == "" {
+		switch {
+		case msg.Body != nil:
+			headers.Set("Content-Length", strconv.Itoa(len(msg.Body)))
+		case msg.BodyBuffer != nil:
+			headers.Set("Content-Length", strconv.FormatInt(msg.BodyBuffer.Len(), 10))
+		}
 	}
 
 	if err := serializeHeaders(&buf, headers); err != nil {
@@ -399,13 +450,7 @@ func (c *channel) sendRequestSynthetic(msg *envelope.HTTPMessage) error {
 		return fmt.Errorf("http1: send synthetic request: %w", err)
 	}
 
-	// Write body.
-	if msg.Body != nil {
-		if _, err := c.writer.Write(msg.Body); err != nil {
-			return fmt.Errorf("http1: send synthetic request body: %w", err)
-		}
-	}
-	return nil
+	return c.writeBody(msg)
 }
 
 func (c *channel) sendResponseSynthetic(msg *envelope.HTTPMessage) error {
@@ -428,8 +473,13 @@ func (c *channel) sendResponseSynthetic(msg *envelope.HTTPMessage) error {
 	headers := kvToRawHeaders(msg.Headers)
 
 	// Set Content-Length if body present and header not already set.
-	if msg.Body != nil && headers.Get("Content-Length") == "" {
-		headers.Set("Content-Length", strconv.Itoa(len(msg.Body)))
+	if headers.Get("Content-Length") == "" {
+		switch {
+		case msg.Body != nil:
+			headers.Set("Content-Length", strconv.Itoa(len(msg.Body)))
+		case msg.BodyBuffer != nil:
+			headers.Set("Content-Length", strconv.FormatInt(msg.BodyBuffer.Len(), 10))
+		}
 	}
 
 	if err := serializeHeaders(&buf, headers); err != nil {
@@ -440,58 +490,106 @@ func (c *channel) sendResponseSynthetic(msg *envelope.HTTPMessage) error {
 		return fmt.Errorf("http1: send synthetic response: %w", err)
 	}
 
-	// Write body.
-	if msg.Body != nil {
-		if _, err := c.writer.Write(msg.Body); err != nil {
-			return fmt.Errorf("http1: send synthetic response body: %w", err)
-		}
-	}
-	return nil
+	return c.writeBody(msg)
 }
 
 // --- Helpers ---
 
 // writeBody writes the body portion of a message to the wire.
-func (c *channel) writeBody(msg *envelope.HTTPMessage, opaque *opaqueHTTP1) error {
+// Reads from msg.Body, msg.BodyBuffer, or writes nothing if both are nil.
+func (c *channel) writeBody(msg *envelope.HTTPMessage) error {
 	if msg.Body != nil {
 		if _, err := c.writer.Write(msg.Body); err != nil {
 			return fmt.Errorf("http1: write body: %w", err)
 		}
 		return nil
 	}
-	// Passthrough mode: stream from bodyReader.
-	if opaque != nil && opaque.bodyReader != nil {
-		if _, err := io.Copy(c.writer, opaque.bodyReader); err != nil {
-			return fmt.Errorf("http1: write passthrough body: %w", err)
+	if msg.BodyBuffer != nil {
+		r, err := msg.BodyBuffer.Reader()
+		if err != nil {
+			return fmt.Errorf("http1: open body buffer: %w", err)
+		}
+		defer r.Close()
+		if _, err := io.Copy(c.writer, r); err != nil {
+			return fmt.Errorf("http1: write body buffer: %w", err)
 		}
 	}
 	return nil
 }
 
-// readBodyWithThreshold reads a body up to passthroughThreshold.
-// Returns (body, nil, nil) for buffered bodies and (nil, reader, nil) for
-// passthrough mode when the body exceeds the threshold.
-func readBodyWithThreshold(r io.Reader) (body []byte, bodyReader io.Reader, err error) {
+// readBodyWithThreshold drains r into either an in-memory []byte (when the
+// total size fits within spillThreshold) or a file-backed BodyBuffer (when
+// it exceeds the threshold). Enforces maxBody as an absolute cap; exceeding
+// it returns a *layer.StreamError{Code: ErrorInternalError}.
+//
+// Returns: at most one of (bb, body) is non-nil. Both nil means r was nil
+// (no body present). On any error, partial resources are released so the
+// caller gets a nil bb.
+func readBodyWithThreshold(r io.Reader, spillDir string, spillThreshold, maxBody int64) (bb *bodybuf.BodyBuffer, body []byte, retErr error) {
 	if r == nil {
 		return nil, nil, nil
 	}
+	// Defensive: caps must be sane even if the layer forgot to set defaults.
+	if spillThreshold <= 0 {
+		spillThreshold = config.DefaultBodySpillThreshold
+	}
+	if maxBody <= 0 {
+		maxBody = config.MaxBodySize
+	}
 
-	buf := make([]byte, passthroughThreshold+1)
-	n, readErr := io.ReadFull(r, buf)
+	// Phase 1: read up to spillThreshold+1 into a scratch buffer to detect
+	// overflow. If EOF arrives before the scratch fills, the whole body fits
+	// in memory.
+	scratch := make([]byte, spillThreshold+1)
+	n, readErr := io.ReadFull(r, scratch)
 
 	if readErr == io.EOF || readErr == io.ErrUnexpectedEOF {
 		if n == 0 {
-			return []byte{}, nil, nil
+			return nil, []byte{}, nil
 		}
-		return buf[:n], nil, nil
+		out := make([]byte, n)
+		copy(out, scratch[:n])
+		return nil, out, nil
 	}
 	if readErr != nil {
-		return nil, nil, fmt.Errorf("read body: %w", readErr)
+		return nil, nil, fmt.Errorf("http1: read body: %w", readErr)
 	}
 
-	// Body exceeds threshold — passthrough mode.
-	combined := io.MultiReader(bytes.NewReader(buf[:n]), r)
-	return nil, combined, nil
+	// Phase 2: overflow → switch to file-backed BodyBuffer. At this point
+	// n == spillThreshold+1 bytes were consumed into scratch.
+	bb, err := bodybuf.NewFile(spillDir, config.BodySpillPrefix, maxBody)
+	if err != nil {
+		return nil, nil, fmt.Errorf("http1: create body file: %w", err)
+	}
+	defer func() {
+		if retErr != nil && bb != nil {
+			_ = bb.Release()
+			bb = nil
+		}
+	}()
+
+	if _, werr := bb.Write(scratch[:n]); werr != nil {
+		if errors.Is(werr, bodybuf.ErrMaxSizeExceeded) {
+			return nil, nil, &layer.StreamError{
+				Code:   layer.ErrorInternalError,
+				Reason: "http1: body exceeds max size",
+			}
+		}
+		return nil, nil, fmt.Errorf("http1: write body: %w", werr)
+	}
+
+	// Stream the remainder directly into the file-backed buffer.
+	if _, cerr := io.Copy(bb, r); cerr != nil {
+		if errors.Is(cerr, bodybuf.ErrMaxSizeExceeded) {
+			return nil, nil, &layer.StreamError{
+				Code:   layer.ErrorInternalError,
+				Reason: "http1: body exceeds max size",
+			}
+		}
+		return nil, nil, fmt.Errorf("http1: read body: %w", cerr)
+	}
+
+	return bb, nil, nil
 }
 
 // parseRequestURI extracts path, rawQuery, and authority from a RequestURI.
@@ -580,20 +678,45 @@ func kvEqual(a, b []envelope.KeyValue) bool {
 }
 
 // isBodyChanged checks whether the message body was modified from the original.
-func isBodyChanged(body []byte, opaque *opaqueHTTP1) bool {
-	// Passthrough mode unchanged: body is still nil with a bodyReader.
-	if body == nil && opaque.bodyReader != nil {
-		return false
-	}
-	// Both nil: no body at all (unchanged).
-	if body == nil && opaque.bodyReader == nil {
-		return false
-	}
-	// If passthrough was active (origBody nil) but Pipeline set Body, it changed.
-	if opaque.origBody == nil {
+// Priority: BodyBuffer pointer identity (Transform can't create a fresh
+// BodyBuffer; Pipeline mutations materialize into msg.Body), then fall back
+// to byte compare.
+func isBodyChanged(msg *envelope.HTTPMessage, opaque *opaqueHTTP1) bool {
+	// If the BodyBuffer pointer changed, the body changed. This catches both
+	// (a) Pipeline replaced a buffered body with a fresh BodyBuffer, and
+	// (b) Pipeline dropped the buffered body (msg.BodyBuffer=nil, origBodyBuffer!=nil).
+	if msg.BodyBuffer != opaque.origBodyBuffer {
+		// Exception: if Pipeline materialized the original buffer into msg.Body
+		// and left BodyBuffer nil, that's still a change only if the bytes differ.
+		// But we don't have the original bytes in memory when origBodyBuffer was
+		// set, so we must treat this as changed. Either way, CL needs restamping.
 		return true
 	}
-	return !bytes.Equal(body, opaque.origBody)
+	// BodyBuffer unchanged (both nil OR same pointer).
+	// If BodyBuffer is still the original, msg.Body is expected to be nil.
+	// A non-nil msg.Body alongside the same origBodyBuffer would mean the
+	// Pipeline both kept the buffer AND set Body — treat as changed and let
+	// the msg.Body path win in the write code.
+	if opaque.origBodyBuffer != nil {
+		if msg.Body != nil {
+			return true
+		}
+		// Buffer-backed and unchanged.
+		return false
+	}
+	// Memory-backed path.
+	if msg.Body == nil && opaque.origBody == nil {
+		return false
+	}
+	if opaque.origBody == nil {
+		// Pipeline set Body where there was nothing before.
+		return true
+	}
+	if msg.Body == nil {
+		// Pipeline cleared the body.
+		return true
+	}
+	return !bytes.Equal(msg.Body, opaque.origBody)
 }
 
 // convertAnomalies converts parser anomalies to envelope anomalies.
@@ -612,28 +735,17 @@ func convertAnomalies(parserAnomalies []parser.Anomaly) []envelope.Anomaly {
 }
 
 // extractTrailers projects chunked trailers from the parser body onto the
-// outgoing HTTPMessage. Two cases:
-//
-//   - Buffered mode (bodyReader == nil): the dechunkedReader has been fully
-//     drained by readBodyWithThreshold, so trailers are available synchronously
-//     on the TrailerProvider.
-//   - Passthrough mode (bodyReader != nil): the dechunkedReader will be drained
-//     later by the downstream writer. Trailer values cannot be attached to the
-//     Envelope at Next() time; record AnomalyTrailersInPassthrough as an
-//     honest diagnostic marker paralleling H2TrailersAfterPassthrough.
+// outgoing HTTPMessage. After USK-631 the HTTP/1.x layer always fully drains
+// the body into either in-memory bytes or a file-backed BodyBuffer, so
+// trailers are always available synchronously on the TrailerProvider. The
+// passthrough-mode path that emitted AnomalyTrailersInPassthrough is gone.
 //
 // parserBody that is not a TrailerProvider (e.g., Content-Length framing,
 // no-body) yields no trailers and no anomaly.
-func extractTrailers(parserBody io.Reader, bodyReader io.Reader) ([]envelope.KeyValue, []envelope.Anomaly) {
+func extractTrailers(parserBody io.Reader) ([]envelope.KeyValue, []envelope.Anomaly) {
 	tp, ok := parserBody.(parser.TrailerProvider)
 	if !ok {
 		return nil, nil
-	}
-	if bodyReader != nil {
-		return nil, []envelope.Anomaly{{
-			Type:   envelope.AnomalyTrailersInPassthrough,
-			Detail: "chunked body exceeded passthrough threshold; trailers not captured",
-		}}
 	}
 	var trailers []envelope.KeyValue
 	if raw := tp.Trailers(); len(raw) > 0 {

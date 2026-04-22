@@ -1,6 +1,10 @@
 package envelope
 
-import "io"
+import (
+	"io"
+
+	"github.com/usk6666/yorishiro-proxy/internal/envelope/bodybuf"
+)
 
 // HTTPMessage represents one HTTP request or response. Used by both HTTP/1.x
 // and HTTP/2 layers. See RFC-001 section 3.2.1.
@@ -79,9 +83,15 @@ type HTTPMessage struct {
 	// Body is the message body. Nil when BodyStream is used instead.
 	Body []byte
 
-	// BodyStream is a streaming body reader for passthrough mode.
-	// Non-nil only when Body is nil.
+	// BodyStream is reserved for future streaming protocols (SSE, WebSocket).
+	// HTTP/1.x and HTTP/2 layers populate BodyBuffer instead.
 	BodyStream io.Reader
+
+	// BodyBuffer holds the body when it exceeds BodySpillThreshold and is
+	// backed by a temp file (memory mode for smaller bodies is represented
+	// via Body []byte). At most one of Body/BodyBuffer is non-nil for HTTP/1.x
+	// and HTTP/2 envelopes.
+	BodyBuffer *bodybuf.BodyBuffer
 
 	// Anomalies records parser-detected protocol anomalies (CL/TE conflict,
 	// duplicate CL, obs-fold, etc.). HTTP-specific; not on Envelope because
@@ -94,8 +104,11 @@ func (m *HTTPMessage) Protocol() Protocol { return ProtocolHTTP }
 
 // CloneMessage returns a deep copy of the HTTPMessage.
 // BodyStream is not cloned — it is a one-shot reader owned by the Layer.
+// BodyBuffer is shared (pointer-copied) via Retain so variant snapshots
+// see the same underlying buffer; the session OnComplete backstop releases
+// the terminal reference.
 func (m *HTTPMessage) CloneMessage() Message {
-	return &HTTPMessage{
+	clone := &HTTPMessage{
 		Method:       m.Method,
 		Scheme:       m.Scheme,
 		Authority:    m.Authority,
@@ -107,8 +120,13 @@ func (m *HTTPMessage) CloneMessage() Message {
 		Trailers:     cloneKeyValues(m.Trailers),
 		Body:         cloneBytes(m.Body),
 		Anomalies:    cloneAnomalies(m.Anomalies),
-		// BodyStream intentionally not cloned
+		// BodyStream intentionally not cloned (one-shot reader).
 	}
+	if m.BodyBuffer != nil {
+		m.BodyBuffer.Retain()
+		clone.BodyBuffer = m.BodyBuffer
+	}
+	return clone
 }
 
 // HasPushPromiseAnomaly reports whether m carries an H2PushPromise anomaly.

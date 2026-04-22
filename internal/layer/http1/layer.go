@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 
+	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/layer"
 )
@@ -24,9 +25,12 @@ type Layer struct {
 
 // options holds Layer configuration.
 type options struct {
-	scheme  string
-	ctx     envelope.EnvelopeContext
-	bufSize int
+	scheme             string
+	ctx                envelope.EnvelopeContext
+	bufSize            int
+	bodySpillDir       string
+	bodySpillThreshold int64
+	maxBody            int64
 }
 
 // Option configures a Layer.
@@ -49,6 +53,25 @@ func WithBufioSize(size int) Option {
 	return func(o *options) { o.bufSize = size }
 }
 
+// WithBodySpillDir sets the directory used for temp files when a body
+// exceeds BodySpillThreshold. Defaults to os.TempDir() if unset.
+func WithBodySpillDir(dir string) Option {
+	return func(o *options) { o.bodySpillDir = dir }
+}
+
+// WithBodySpillThreshold sets the in-memory body size limit above which
+// bodies spill to disk. Defaults to config.DefaultBodySpillThreshold (10 MiB).
+func WithBodySpillThreshold(n int64) Option {
+	return func(o *options) { o.bodySpillThreshold = n }
+}
+
+// WithMaxBodySize sets the absolute body size cap. Defaults to config.MaxBodySize
+// (254 MiB). Writes exceeding this cap surface as *layer.StreamError with
+// Code=layer.ErrorInternalError.
+func WithMaxBodySize(n int64) Option {
+	return func(o *options) { o.maxBody = n }
+}
+
 // New creates an HTTP/1.x Layer wrapping conn.
 //
 // direction determines what the Channel parses:
@@ -58,8 +81,11 @@ func WithBufioSize(size int) Option {
 // streamID is the connection-level identifier returned by Channel.StreamID().
 func New(conn net.Conn, streamID string, direction envelope.Direction, opts ...Option) *Layer {
 	o := options{
-		scheme:  "http",
-		bufSize: 4096,
+		scheme:             "http",
+		bufSize:            4096,
+		bodySpillDir:       "", // resolved to os.TempDir() by bodybuf.NewFile
+		bodySpillThreshold: config.DefaultBodySpillThreshold,
+		maxBody:            config.MaxBodySize,
 	}
 	for _, opt := range opts {
 		opt(&o)
@@ -81,6 +107,11 @@ func New(conn net.Conn, streamID string, direction envelope.Direction, opts ...O
 		scheme:    o.scheme,
 		ctxTmpl:   o.ctx,
 		termDone:  make(chan struct{}),
+		bodyOpts: bodyOpts{
+			spillDir:       o.bodySpillDir,
+			spillThreshold: o.bodySpillThreshold,
+			maxBody:        o.maxBody,
+		},
 	}
 	l.ch <- l.channel
 	close(l.ch)
