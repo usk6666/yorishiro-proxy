@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"time"
 
+	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 )
@@ -59,6 +60,10 @@ type RecordStep struct {
 	store        flow.Writer
 	logger       *slog.Logger
 	wireEncoders map[envelope.Protocol]WireEncoder
+	// maxBodySize caps flow.Flow.Body when materializing a BodyBuffer. A
+	// larger materialized body is truncated and Flow.BodyTruncated is set
+	// to true. Zero means use config.MaxBodySize.
+	maxBodySize int64
 }
 
 // Option configures a RecordStep.
@@ -83,6 +88,18 @@ func WithWireEncoder(proto envelope.Protocol, fn WireEncoder) Option {
 	}
 }
 
+// WithMaxBodySize caps the number of bytes materialized into flow.Flow.Body
+// when an HTTPMessage carries a BodyBuffer. If the materialized body exceeds
+// n bytes it is truncated to n and flow.Flow.BodyTruncated is set to true.
+// n <= 0 is ignored (falls back to config.MaxBodySize).
+func WithMaxBodySize(n int64) Option {
+	return func(s *RecordStep) {
+		if n > 0 {
+			s.maxBodySize = n
+		}
+	}
+}
+
 // NewRecordStep creates a RecordStep with the given flow.Writer.
 // If store is nil, Process returns immediately with no side effects.
 //
@@ -95,6 +112,9 @@ func NewRecordStep(store flow.Writer, logger *slog.Logger, opts ...Option) *Reco
 	s := &RecordStep{store: store, logger: logger}
 	for _, opt := range opts {
 		opt(s)
+	}
+	if s.maxBodySize <= 0 {
+		s.maxBodySize = config.MaxBodySize
 	}
 	return s
 }
@@ -193,7 +213,7 @@ func (s *RecordStep) createStream(ctx context.Context, env *envelope.Envelope) {
 
 // recordFlow records a single Flow from the Envelope.
 func (s *RecordStep) recordFlow(ctx context.Context, env *envelope.Envelope) {
-	fl := envelopeToFlow(env)
+	fl := s.envelopeToFlow(ctx, env)
 	if err := s.store.SaveFlow(ctx, fl); err != nil {
 		s.logger.Error("record step: flow save failed",
 			"stream_id", env.StreamID,
@@ -218,7 +238,7 @@ func (s *RecordStep) recordFlow(ctx context.Context, env *envelope.Envelope) {
 func (s *RecordStep) recordVariantFlows(ctx context.Context, snap, current *envelope.Envelope) {
 	// envelopeToFlow always initializes Metadata with {"protocol": ...}, so
 	// no nil-check is needed before assigning the "variant" entry.
-	origFlow := envelopeToFlow(snap)
+	origFlow := s.envelopeToFlow(ctx, snap)
 	origFlow.ID = current.FlowID + "-original"
 	origFlow.Metadata["variant"] = "original"
 	if err := s.store.SaveFlow(ctx, origFlow); err != nil {
@@ -229,7 +249,7 @@ func (s *RecordStep) recordVariantFlows(ctx context.Context, snap, current *enve
 		)
 	}
 
-	modFlow := envelopeToFlow(current)
+	modFlow := s.envelopeToFlow(ctx, current)
 	modFlow.Metadata["variant"] = "modified"
 	s.applyWireEncode(current, modFlow)
 	if err := s.store.SaveFlow(ctx, modFlow); err != nil {
@@ -301,7 +321,17 @@ func (s *RecordStep) applyWireEncode(current *envelope.Envelope, modFlow *flow.F
 // Protocol-specific fields (Method, URL, StatusCode, Headers) are populated
 // from the Message when it is an HTTPMessage. For RawMessage, Body is set
 // to the raw bytes.
-func envelopeToFlow(env *envelope.Envelope) *flow.Flow {
+//
+// When HTTPMessage.Body is nil but BodyBuffer is non-nil, the buffer is
+// materialized via Bytes(ctx) into Flow.Body. If the materialized body
+// exceeds s.maxBodySize it is truncated and Flow.BodyTruncated is set.
+// Materialization errors are logged at Warn (operator-visible data loss)
+// and Flow.Body is left nil.
+//
+// RecordStep never Releases the BodyBuffer — terminal release is owned by
+// the Session OnComplete backstop (USK-634). Snapshot and current each hold
+// independent Retain counts from CloneMessage().
+func (s *RecordStep) envelopeToFlow(ctx context.Context, env *envelope.Envelope) *flow.Flow {
 	fl := &flow.Flow{
 		ID:        env.FlowID,
 		StreamID:  env.StreamID,
@@ -316,7 +346,7 @@ func envelopeToFlow(env *envelope.Envelope) *flow.Flow {
 	case *envelope.HTTPMessage:
 		fl.Method = m.Method
 		fl.StatusCode = m.Status
-		fl.Body = m.Body
+		s.projectHTTPBody(ctx, env, m, fl)
 
 		if m.Path != "" || m.Authority != "" {
 			fl.URL = &url.URL{
@@ -347,6 +377,34 @@ func envelopeToFlow(env *envelope.Envelope) *flow.Flow {
 	}
 
 	return fl
+}
+
+// projectHTTPBody populates fl.Body (and BodyTruncated) from m.Body or
+// m.BodyBuffer, applying the maxBodySize cap.
+func (s *RecordStep) projectHTTPBody(ctx context.Context, env *envelope.Envelope, m *envelope.HTTPMessage, fl *flow.Flow) {
+	if m.Body != nil {
+		fl.Body = m.Body
+		return
+	}
+	if m.BodyBuffer == nil {
+		return
+	}
+	b, err := m.BodyBuffer.Bytes(ctx)
+	if err != nil {
+		// Flow body data loss — operator-visible event.
+		s.logger.WarnContext(ctx, "record: materialize body failed",
+			"stream_id", env.StreamID,
+			"flow_id", env.FlowID,
+			"err", err,
+		)
+		return
+	}
+	if s.maxBodySize > 0 && int64(len(b)) > s.maxBodySize {
+		fl.Body = b[:s.maxBodySize]
+		fl.BodyTruncated = true
+		return
+	}
+	fl.Body = b
 }
 
 // envelopeModified reports whether the current Envelope differs from the
@@ -391,6 +449,16 @@ func messageModified(a, b envelope.Message) bool {
 // httpMessageModified reports whether two HTTPMessages differ in their
 // content fields (headers, trailers, body). No normalization is applied
 // (MITM wire fidelity).
+//
+// Body detection prefers BodyBuffer pointer identity over byte compare:
+//   - If a.BodyBuffer != b.BodyBuffer, the body changed. This catches the
+//     common Transform commit path where BodyBuffer→Body materialization
+//     sets the snapshot's BodyBuffer!=nil and the current's BodyBuffer==nil.
+//   - If both BodyBuffer pointers match (including both nil), fall back to
+//     bytes.Equal(a.Body, b.Body) for the memory-backed path.
+//
+// Follows the USK-631 `isBodyChanged` precedent in
+// internal/layer/http1/channel.go.
 func httpMessageModified(a, b *envelope.HTTPMessage) bool {
 	if a.Method != b.Method || a.Status != b.Status {
 		return true
@@ -404,6 +472,16 @@ func httpMessageModified(a, b *envelope.HTTPMessage) bool {
 	if !keyValuesEqual(a.Trailers, b.Trailers) {
 		return true
 	}
+	// BodyBuffer pointer inequality = modified. Transform Releases+nils the
+	// BodyBuffer on commit, so snapshot retains the original pointer and
+	// current is nil — a cheap pointer compare catches this without
+	// materializing either side.
+	if a.BodyBuffer != b.BodyBuffer {
+		return true
+	}
+	// BodyBuffer pointers equal (both nil or same pointer) — compare Body
+	// bytes. In the same-pointer case Body is expected to be nil on both
+	// sides; bytes.Equal(nil, nil) == true keeps that as "unchanged".
 	if !bytes.Equal(a.Body, b.Body) {
 		return true
 	}

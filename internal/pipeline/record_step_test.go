@@ -1,6 +1,7 @@
 package pipeline
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -10,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
+	"github.com/usk6666/yorishiro-proxy/internal/envelope/bodybuf"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 )
 
@@ -916,5 +918,268 @@ func TestRecordStep_StoreError(t *testing.T) {
 	r := step.Process(context.Background(), env)
 	if r.Action != Continue {
 		t.Errorf("store error: got action %v, want Continue", r.Action)
+	}
+}
+
+// TestRecordStep_BodyBufferMaterializedToFlowBody verifies that when
+// HTTPMessage.Body is nil and BodyBuffer is non-nil, RecordStep materializes
+// the buffer via Bytes(ctx) into Flow.Body. Exercises both memory-mode and
+// file-mode buffers.
+func TestRecordStep_BodyBufferMaterializedToFlowBody(t *testing.T) {
+	tests := []struct {
+		name     string
+		makeBuf  func(t *testing.T) *bodybuf.BodyBuffer
+		wantBody []byte
+	}{
+		{
+			name: "memory",
+			makeBuf: func(t *testing.T) *bodybuf.BodyBuffer {
+				return bodybuf.NewMemory([]byte("memory-body"))
+			},
+			wantBody: []byte("memory-body"),
+		},
+		{
+			name: "file",
+			makeBuf: func(t *testing.T) *bodybuf.BodyBuffer {
+				bb, err := bodybuf.NewFile(t.TempDir(), "rec", 0)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := bb.Write([]byte("file-body")); err != nil {
+					t.Fatal(err)
+				}
+				return bb
+			},
+			wantBody: []byte("file-body"),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			w := &mockWriter{}
+			step := NewRecordStep(w, nil)
+			bb := tt.makeBuf(t)
+			t.Cleanup(func() { _ = bb.Release() })
+
+			env := &envelope.Envelope{
+				StreamID:  "s1",
+				FlowID:    "f1",
+				Direction: envelope.Send,
+				Sequence:  0,
+				Protocol:  envelope.ProtocolHTTP,
+				Raw:       []byte("wire-bytes"),
+				Message: &envelope.HTTPMessage{
+					Method:     "POST",
+					Scheme:     "https",
+					Authority:  "example.com",
+					Path:       "/api",
+					BodyBuffer: bb,
+				},
+			}
+			step.Process(context.Background(), env)
+
+			if len(w.flows) != 1 {
+				t.Fatalf("expected 1 flow, got %d", len(w.flows))
+			}
+			fl := w.flows[0]
+			if !bytes.Equal(fl.Body, tt.wantBody) {
+				t.Errorf("flow.Body = %q, want %q", fl.Body, tt.wantBody)
+			}
+			if fl.BodyTruncated {
+				t.Error("flow.BodyTruncated = true, want false for sub-cap body")
+			}
+		})
+	}
+}
+
+// TestRecordStep_BodyBufferExceedsMaxBodySize_Truncated verifies that a
+// materialized body larger than maxBodySize is truncated and
+// flow.Flow.BodyTruncated is set to true.
+func TestRecordStep_BodyBufferExceedsMaxBodySize_Truncated(t *testing.T) {
+	const cap = 10 << 20 // 10 MiB
+	const payloadSize = 12 << 20
+	payload := bytes.Repeat([]byte("X"), payloadSize)
+
+	w := &mockWriter{}
+	step := NewRecordStep(w, nil, WithMaxBodySize(cap))
+
+	bb, err := bodybuf.NewFile(t.TempDir(), "rec", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = bb.Release() })
+	if _, err := bb.Write(payload); err != nil {
+		t.Fatal(err)
+	}
+
+	env := &envelope.Envelope{
+		StreamID:  "s1",
+		FlowID:    "f1",
+		Direction: envelope.Send,
+		Sequence:  0,
+		Protocol:  envelope.ProtocolHTTP,
+		Raw:       []byte("wire"),
+		Message: &envelope.HTTPMessage{
+			Method:     "POST",
+			BodyBuffer: bb,
+		},
+	}
+	step.Process(context.Background(), env)
+
+	if len(w.flows) != 1 {
+		t.Fatalf("expected 1 flow, got %d", len(w.flows))
+	}
+	fl := w.flows[0]
+	if int64(len(fl.Body)) != cap {
+		t.Errorf("flow.Body length = %d, want %d", len(fl.Body), cap)
+	}
+	if !fl.BodyTruncated {
+		t.Error("flow.BodyTruncated = false, want true for over-cap body")
+	}
+}
+
+// TestRecordStep_MaterializeErrorLogsWarnAndSkipsBody verifies that an error
+// from BodyBuffer.Bytes (simulated by Releasing the buffer to dead state)
+// leaves Flow.Body nil and does not crash. The Warn log path is exercised;
+// we assert the observable outcome (nil Body, no panic, flow still saved).
+func TestRecordStep_MaterializeErrorLogsWarnAndSkipsBody(t *testing.T) {
+	w := &mockWriter{}
+	step := NewRecordStep(w, nil)
+
+	bb := bodybuf.NewMemory([]byte("doomed"))
+	// Drive refcount to zero so subsequent Bytes(ctx) errors with
+	// "bytes after release".
+	if err := bb.Release(); err != nil {
+		t.Fatal(err)
+	}
+
+	env := &envelope.Envelope{
+		StreamID:  "s1",
+		FlowID:    "f1",
+		Direction: envelope.Send,
+		Sequence:  0,
+		Protocol:  envelope.ProtocolHTTP,
+		Raw:       []byte("wire"),
+		Message: &envelope.HTTPMessage{
+			Method:     "POST",
+			BodyBuffer: bb,
+		},
+	}
+	step.Process(context.Background(), env)
+
+	if len(w.flows) != 1 {
+		t.Fatalf("expected 1 flow even when materialize fails, got %d", len(w.flows))
+	}
+	fl := w.flows[0]
+	if fl.Body != nil {
+		t.Errorf("flow.Body = %q, want nil after materialize error", fl.Body)
+	}
+	if fl.BodyTruncated {
+		t.Error("flow.BodyTruncated = true, want false on materialize error")
+	}
+}
+
+// TestRecordStep_VariantDetection_BodyBufferToBodyReplacement verifies that
+// the variant detection path emits both original and modified flows when
+// the snapshot has BodyBuffer!=nil and the current envelope has Body!=nil
+// with BodyBuffer==nil — the state produced by Transform.commit.
+func TestRecordStep_VariantDetection_BodyBufferToBodyReplacement(t *testing.T) {
+	w := &mockWriter{}
+	step := NewRecordStep(w, nil)
+
+	snapBuf := bodybuf.NewMemory([]byte("original-body-from-buffer"))
+	t.Cleanup(func() { _ = snapBuf.Release() })
+
+	snap := &envelope.Envelope{
+		StreamID:  "s1",
+		FlowID:    "f1",
+		Direction: envelope.Send,
+		Sequence:  1,
+		Protocol:  envelope.ProtocolHTTP,
+		Raw:       []byte("WIRE-INGRESS"),
+		Message: &envelope.HTTPMessage{
+			Method:     "POST",
+			BodyBuffer: snapBuf,
+		},
+	}
+	// Current: simulate Transform commit — Body set, BodyBuffer niled.
+	current := &envelope.Envelope{
+		StreamID:  "s1",
+		FlowID:    "f1",
+		Direction: envelope.Send,
+		Sequence:  1,
+		Protocol:  envelope.ProtocolHTTP,
+		Raw:       []byte("WIRE-INGRESS"),
+		Message: &envelope.HTTPMessage{
+			Method: "POST",
+			Body:   []byte("modified-body"),
+		},
+	}
+
+	ctx := withSnapshot(context.Background(), snap)
+	step.Process(ctx, current)
+
+	if len(w.flows) != 2 {
+		t.Fatalf("expected 2 flows (variant pair from BodyBuffer→Body), got %d", len(w.flows))
+	}
+	origFlow := w.flows[0]
+	modFlow := w.flows[1]
+	if origFlow.Metadata["variant"] != "original" {
+		t.Errorf("orig variant = %q, want original", origFlow.Metadata["variant"])
+	}
+	if !bytes.Equal(origFlow.Body, []byte("original-body-from-buffer")) {
+		t.Errorf("orig flow.Body = %q, want materialized snapshot buffer", origFlow.Body)
+	}
+	if modFlow.Metadata["variant"] != "modified" {
+		t.Errorf("mod variant = %q, want modified", modFlow.Metadata["variant"])
+	}
+	if !bytes.Equal(modFlow.Body, []byte("modified-body")) {
+		t.Errorf("mod flow.Body = %q, want modified-body", modFlow.Body)
+	}
+}
+
+// TestRecordStep_VariantDetection_SameBodyBuffer_NoVariant verifies that
+// when snapshot and current share the same BodyBuffer pointer and both
+// Body slices are nil, httpMessageModified returns false and only one
+// flow is emitted (no variant pair).
+func TestRecordStep_VariantDetection_SameBodyBuffer_NoVariant(t *testing.T) {
+	w := &mockWriter{}
+	step := NewRecordStep(w, nil)
+
+	sharedBuf := bodybuf.NewMemory([]byte("shared-buffer-contents"))
+	t.Cleanup(func() { _ = sharedBuf.Release() })
+
+	snap := &envelope.Envelope{
+		StreamID:  "s1",
+		FlowID:    "f1",
+		Direction: envelope.Send,
+		Sequence:  1,
+		Protocol:  envelope.ProtocolHTTP,
+		Raw:       []byte("WIRE"),
+		Message: &envelope.HTTPMessage{
+			Method:     "POST",
+			BodyBuffer: sharedBuf,
+		},
+	}
+	current := &envelope.Envelope{
+		StreamID:  "s1",
+		FlowID:    "f1",
+		Direction: envelope.Send,
+		Sequence:  1,
+		Protocol:  envelope.ProtocolHTTP,
+		Raw:       []byte("WIRE"),
+		Message: &envelope.HTTPMessage{
+			Method:     "POST",
+			BodyBuffer: sharedBuf,
+		},
+	}
+
+	ctx := withSnapshot(context.Background(), snap)
+	step.Process(ctx, current)
+
+	if len(w.flows) != 1 {
+		t.Fatalf("expected 1 flow when BodyBuffer pointers match, got %d", len(w.flows))
+	}
+	if w.flows[0].Metadata["variant"] != "" {
+		t.Errorf("unexpected variant tag: %q", w.flows[0].Metadata["variant"])
 	}
 }

@@ -1,10 +1,31 @@
 package http
 
 import (
+	"context"
 	"strings"
 
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 )
+
+// materializeBody returns the body bytes for msg, reading from the in-memory
+// Body slice if present, or materializing via BodyBuffer.Bytes(ctx) otherwise.
+// Returns (nil, nil) when msg has neither a Body slice nor a BodyBuffer.
+//
+// Ownership note: when the result is sourced from BodyBuffer, the returned
+// slice is a defensive copy (bodybuf.BodyBuffer.Bytes) — callers may mutate
+// it freely. materializeBody does not touch the refcount.
+func materializeBody(ctx context.Context, msg *envelope.HTTPMessage) ([]byte, error) {
+	if msg == nil {
+		return nil, nil
+	}
+	if msg.Body != nil {
+		return msg.Body, nil
+	}
+	if msg.BodyBuffer != nil {
+		return msg.BodyBuffer.Bytes(ctx)
+	}
+	return nil, nil
+}
 
 // headerGet returns the value of the first header matching name (case-insensitive).
 func headerGet(headers []envelope.KeyValue, name string) string {
