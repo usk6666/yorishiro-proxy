@@ -1,7 +1,10 @@
 package http
 
 import (
+	"bytes"
+	"context"
 	"fmt"
+	"log/slog"
 	"regexp"
 	"sort"
 	"strings"
@@ -74,7 +77,11 @@ func (e *TransformEngine) AddRule(rule TransformRule) {
 
 // TransformRequest applies matching rules to an HTTP request.
 // Modifies msg in-place. Returns true if any modification was applied.
-func (e *TransformEngine) TransformRequest(env *envelope.Envelope, msg *envelope.HTTPMessage) bool {
+//
+// ctx is threaded down to BodyBuffer.Bytes(ctx) so that disk-backed body
+// materialization honors cancellation. On materialization error (e.g. ctx
+// cancelled), the TransformReplaceBody action is skipped silently.
+func (e *TransformEngine) TransformRequest(ctx context.Context, env *envelope.Envelope, msg *envelope.HTTPMessage) bool {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 
@@ -89,7 +96,7 @@ func (e *TransformEngine) TransformRequest(env *envelope.Envelope, msg *envelope
 		if !e.matchesConditions(&rule, env, msg) {
 			continue
 		}
-		if e.applyAction(&rule, msg) {
+		if e.applyAction(ctx, &rule, msg) {
 			modified = true
 		}
 	}
@@ -98,7 +105,7 @@ func (e *TransformEngine) TransformRequest(env *envelope.Envelope, msg *envelope
 
 // TransformResponse applies matching rules to an HTTP response.
 // Modifies msg in-place. Returns true if any modification was applied.
-func (e *TransformEngine) TransformResponse(env *envelope.Envelope, msg *envelope.HTTPMessage) bool {
+func (e *TransformEngine) TransformResponse(ctx context.Context, env *envelope.Envelope, msg *envelope.HTTPMessage) bool {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 
@@ -113,7 +120,7 @@ func (e *TransformEngine) TransformResponse(env *envelope.Envelope, msg *envelop
 		if !e.matchesConditions(&rule, env, msg) {
 			continue
 		}
-		if e.applyAction(&rule, msg) {
+		if e.applyAction(ctx, &rule, msg) {
 			modified = true
 		}
 	}
@@ -147,7 +154,7 @@ func (e *TransformEngine) matchesConditions(rule *TransformRule, env *envelope.E
 	return true
 }
 
-func (e *TransformEngine) applyAction(rule *TransformRule, msg *envelope.HTTPMessage) bool {
+func (e *TransformEngine) applyAction(ctx context.Context, rule *TransformRule, msg *envelope.HTTPMessage) bool {
 	switch rule.ActionType {
 	case TransformAddHeader:
 		if containsCRLF(rule.HeaderName) || containsCRLF(rule.HeaderValue) {
@@ -170,17 +177,34 @@ func (e *TransformEngine) applyAction(rule *TransformRule, msg *envelope.HTTPMes
 		return len(msg.Headers) != before
 
 	case TransformReplaceBody:
-		if msg.Body == nil {
-			return false // passthrough mode: skip body transform
-		}
 		if rule.BodyPattern == nil {
 			return false
 		}
-		replaced := rule.BodyPattern.ReplaceAll(msg.Body, []byte(rule.BodyReplace))
-		if string(replaced) == string(msg.Body) {
+		// Materialize the body from Body []byte or BodyBuffer (disk-backed).
+		// Note: when sourced from BodyBuffer.Bytes, target is a defensive
+		// copy owned by this invocation — safe to use as regex input.
+		target, err := materializeBody(ctx, msg)
+		if err != nil {
+			slog.DebugContext(ctx, "transform: materialize body failed", "err", err)
 			return false
 		}
+		if target == nil {
+			return false // passthrough mode: skip body transform
+		}
+		replaced := rule.BodyPattern.ReplaceAll(target, []byte(rule.BodyReplace))
+		if bytes.Equal(replaced, target) {
+			return false
+		}
+		// Commit: move authoritative body into msg.Body and release the
+		// BodyBuffer reference held by this HTTPMessage. The pipeline
+		// snapshot holds its own Retain (via CloneMessage), so the buffer
+		// survives for variant recording. See USK-631 isBodyChanged
+		// pointer-identity precedent.
 		msg.Body = replaced
+		if msg.BodyBuffer != nil {
+			_ = msg.BodyBuffer.Release()
+			msg.BodyBuffer = nil
+		}
 		return true
 
 	default:

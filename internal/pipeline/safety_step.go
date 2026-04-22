@@ -47,7 +47,7 @@ func (s *SafetyStep) processHTTP(ctx context.Context, msg *envelope.HTTPMessage)
 		return Result{}
 	}
 
-	violation := s.http.CheckInput(msg)
+	violation := s.http.CheckInput(ctx, msg)
 	if violation != nil {
 		if s.logger != nil {
 			s.logger.InfoContext(ctx, "safety: request blocked",

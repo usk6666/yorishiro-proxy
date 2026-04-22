@@ -1,9 +1,13 @@
 package http
 
 import (
+	"bytes"
+	"context"
+	"strings"
 	"testing"
 
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
+	"github.com/usk6666/yorishiro-proxy/internal/envelope/bodybuf"
 	"github.com/usk6666/yorishiro-proxy/internal/rules/common"
 )
 
@@ -27,7 +31,7 @@ func TestSafetyEngine_DestructiveSQL_DropTable(t *testing.T) {
 
 	msg := testSafetyMsg("POST", "/api", "example.com", "", nil,
 		[]byte("DROP TABLE users"))
-	v := e.CheckInput(msg)
+	v := e.CheckInput(context.Background(), msg)
 	if v == nil {
 		t.Fatal("expected violation for DROP TABLE")
 	}
@@ -50,7 +54,7 @@ func TestSafetyEngine_DestructiveSQL_InQuery(t *testing.T) {
 	// also contains the query string. Either target is acceptable.
 	msg := testSafetyMsg("GET", "/search", "example.com",
 		"q=DROP TABLE users", nil, nil)
-	v := e.CheckInput(msg)
+	v := e.CheckInput(context.Background(), msg)
 	if v == nil {
 		t.Fatal("expected violation for DROP TABLE in query")
 	}
@@ -66,7 +70,7 @@ func TestSafetyEngine_DestructiveSQL_InURL(t *testing.T) {
 	}
 
 	msg := testSafetyMsg("GET", "/api/DROP TABLE foo", "example.com", "", nil, nil)
-	v := e.CheckInput(msg)
+	v := e.CheckInput(context.Background(), msg)
 	if v == nil {
 		t.Fatal("expected violation for DROP TABLE in URL")
 	}
@@ -83,7 +87,7 @@ func TestSafetyEngine_DestructiveSQL_Truncate(t *testing.T) {
 
 	msg := testSafetyMsg("POST", "/", "example.com", "", nil,
 		[]byte("TRUNCATE TABLE sessions"))
-	v := e.CheckInput(msg)
+	v := e.CheckInput(context.Background(), msg)
 	if v == nil {
 		t.Fatal("expected violation for TRUNCATE TABLE")
 	}
@@ -97,7 +101,7 @@ func TestSafetyEngine_DestructiveSQL_Safe(t *testing.T) {
 
 	msg := testSafetyMsg("POST", "/api", "example.com", "", nil,
 		[]byte("SELECT * FROM users WHERE id = 1"))
-	v := e.CheckInput(msg)
+	v := e.CheckInput(context.Background(), msg)
 	if v != nil {
 		t.Errorf("unexpected violation for safe query: %+v", v)
 	}
@@ -124,7 +128,7 @@ func TestSafetyEngine_DestructiveOSCommand(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			msg := testSafetyMsg("POST", "/", "example.com", "", nil, []byte(tt.body))
-			v := e.CheckInput(msg)
+			v := e.CheckInput(context.Background(), msg)
 			if tt.want && v == nil {
 				t.Error("expected violation")
 			}
@@ -139,7 +143,7 @@ func TestSafetyEngine_NoRules(t *testing.T) {
 	e := NewSafetyEngine()
 	msg := testSafetyMsg("POST", "/", "example.com", "", nil,
 		[]byte("DROP TABLE users"))
-	v := e.CheckInput(msg)
+	v := e.CheckInput(context.Background(), msg)
 	if v != nil {
 		t.Error("expected no violation with no rules loaded")
 	}
@@ -153,7 +157,7 @@ func TestSafetyEngine_CheckInputAll(t *testing.T) {
 
 	msg := testSafetyMsg("POST", "/", "example.com", "", nil,
 		[]byte("DROP TABLE users; TRUNCATE TABLE sessions"))
-	violations := e.CheckInputAll(msg)
+	violations := e.CheckInputAll(context.Background(), msg)
 	if len(violations) < 2 {
 		t.Errorf("expected at least 2 violations, got %d", len(violations))
 	}
@@ -173,7 +177,7 @@ func TestSafetyEngine_CustomRule(t *testing.T) {
 
 	msg := testSafetyMsg("POST", "/", "example.com", "", nil,
 		[]byte(`eval(userInput)`))
-	v := e.CheckInput(msg)
+	v := e.CheckInput(context.Background(), msg)
 	if v == nil {
 		t.Fatal("expected violation for eval()")
 	}
@@ -204,7 +208,7 @@ func TestSafetyEngine_NilBody(t *testing.T) {
 	// nil body with dangerous query should still match on query target.
 	msg := testSafetyMsg("GET", "/", "example.com",
 		"q=DROP TABLE users", nil, nil)
-	v := e.CheckInput(msg)
+	v := e.CheckInput(context.Background(), msg)
 	if v == nil {
 		t.Fatal("expected violation in query even with nil body")
 	}
@@ -233,6 +237,91 @@ func TestReconstructURL(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("reconstructURL = %q, want %q", got, tt.want)
 		}
+	}
+}
+
+// TestSafetyEngine_CheckInput_BodyBufferFileBackedSQLi verifies that a
+// disk-backed BodyBuffer (12 MiB) carrying a SQL injection pattern is
+// materialized via Bytes(ctx) and matched by the safety engine. Before
+// USK-633 the body target was silently skipped whenever msg.Body was nil,
+// which let >10 MiB bodies bypass Safety entirely.
+func TestSafetyEngine_CheckInput_BodyBufferFileBackedSQLi(t *testing.T) {
+	e := NewSafetyEngine()
+	if err := e.LoadPreset(common.PresetDestructiveSQL); err != nil {
+		t.Fatal(err)
+	}
+
+	// Build a 12 MiB body with a DROP TABLE needle in the middle so the
+	// file-mode reader has to traverse multiple readChunkSize chunks.
+	const payloadSize = 12 << 20
+	needle := []byte("DROP TABLE users")
+	filler := bytes.Repeat([]byte("A"), payloadSize/2)
+	body := append(append([]byte(nil), filler...), needle...)
+	body = append(body, filler...)
+
+	bb, err := bodybuf.NewFile(t.TempDir(), "test-body", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = bb.Release() })
+	if _, err := bb.Write(body); err != nil {
+		t.Fatal(err)
+	}
+
+	msg := &envelope.HTTPMessage{
+		Method:     "POST",
+		Scheme:     "https",
+		Authority:  "example.com",
+		Path:       "/api",
+		BodyBuffer: bb,
+	}
+
+	v := e.CheckInput(context.Background(), msg)
+	if v == nil {
+		t.Fatal("expected violation from disk-backed body materialization")
+	}
+	if v.Target != "body" {
+		t.Errorf("Target = %q, want body", v.Target)
+	}
+	if !strings.Contains(v.Match, "DROP TABLE") {
+		t.Errorf("Match = %q, want substring DROP TABLE", v.Match)
+	}
+}
+
+// TestSafetyEngine_CheckInput_CtxCancel_SkipsBodyTarget verifies that a
+// cancelled ctx during disk-backed body materialization is swallowed at
+// the body target: no violation, no panic, and other targets still evaluate.
+func TestSafetyEngine_CheckInput_CtxCancel_SkipsBodyTarget(t *testing.T) {
+	e := NewSafetyEngine()
+	if err := e.LoadPreset(common.PresetDestructiveSQL); err != nil {
+		t.Fatal(err)
+	}
+
+	// Disk-backed body containing a pattern that would match if read.
+	bb, err := bodybuf.NewFile(t.TempDir(), "test-body", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = bb.Release() })
+	if _, err := bb.Write([]byte("DROP TABLE users")); err != nil {
+		t.Fatal(err)
+	}
+
+	msg := &envelope.HTTPMessage{
+		Method:     "POST",
+		Scheme:     "https",
+		Authority:  "example.com",
+		Path:       "/api",
+		BodyBuffer: bb,
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // pre-cancelled: Bytes(ctx) must fail fast.
+
+	// Must not panic and must return nil (body skipped, URL/query clean).
+	v := e.CheckInput(ctx, msg)
+	if v != nil {
+		t.Errorf("expected nil violation with cancelled ctx, got %+v", v)
 	}
 }
 

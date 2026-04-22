@@ -25,25 +25,28 @@ func NewTransformStep(httpEngine *httprules.TransformEngine) *TransformStep {
 // Returns Result{} always — mutations are in-place on the same Message
 // pointer, so subsequent Steps see the modifications without envelope
 // replacement.
-func (s *TransformStep) Process(_ context.Context, env *envelope.Envelope) Result {
+//
+// ctx is forwarded to the TransformEngine so TransformReplaceBody can
+// materialize a disk-backed BodyBuffer via Bytes(ctx).
+func (s *TransformStep) Process(ctx context.Context, env *envelope.Envelope) Result {
 	switch msg := env.Message.(type) {
 	case *envelope.HTTPMessage:
-		return s.processHTTP(env, msg)
+		return s.processHTTP(ctx, env, msg)
 	default:
 		return Result{}
 	}
 }
 
-func (s *TransformStep) processHTTP(env *envelope.Envelope, msg *envelope.HTTPMessage) Result {
+func (s *TransformStep) processHTTP(ctx context.Context, env *envelope.Envelope, msg *envelope.HTTPMessage) Result {
 	if s.http == nil {
 		return Result{}
 	}
 
 	switch env.Direction {
 	case envelope.Send:
-		s.http.TransformRequest(env, msg)
+		s.http.TransformRequest(ctx, env, msg)
 	case envelope.Receive:
-		s.http.TransformResponse(env, msg)
+		s.http.TransformResponse(ctx, env, msg)
 	}
 
 	// In-place mutation — no Result.Envelope replacement needed.
