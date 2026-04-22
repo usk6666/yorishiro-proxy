@@ -497,6 +497,174 @@ func TestBuildConnectionStack_H2MITMStack(t *testing.T) {
 	}
 }
 
+// startCachedH2Layer constructs a live ClientRole *http2.Layer over a
+// net.Pipe and runs a ServerRole peer on the other end. The returned
+// Layer is suitable for pre-populating an h2 pool entry; teardown closes
+// both sides cleanly. The Layer is stamped with the supplied
+// EnvelopeContext template so that EnvelopeContextTemplate() returns
+// deterministic values for assertions.
+func startCachedH2Layer(t *testing.T, template envelope.EnvelopeContext) (cached *http2.Layer, teardown func()) {
+	t.Helper()
+	srvConn, cliConn := net.Pipe()
+
+	type srvRes struct {
+		l   *http2.Layer
+		err error
+	}
+	srvDone := make(chan srvRes, 1)
+	go func() {
+		l, err := http2.New(srvConn, "cached-server", http2.ServerRole, http2.WithScheme("https"))
+		srvDone <- srvRes{l: l, err: err}
+	}()
+
+	type cliRes struct {
+		l   *http2.Layer
+		err error
+	}
+	cliDone := make(chan cliRes, 1)
+	go func() {
+		l, err := http2.New(cliConn, "cached-client", http2.ClientRole,
+			http2.WithScheme("https"),
+			http2.WithEnvelopeContext(template),
+		)
+		cliDone <- cliRes{l: l, err: err}
+	}()
+
+	var srv, cli *http2.Layer
+	deadline := time.After(3 * time.Second)
+	for srv == nil || cli == nil {
+		select {
+		case r := <-srvDone:
+			if r.err != nil {
+				t.Fatalf("cached-server http2.New: %v", r.err)
+			}
+			srv = r.l
+		case r := <-cliDone:
+			if r.err != nil {
+				t.Fatalf("cached-client http2.New: %v", r.err)
+			}
+			cli = r.l
+		case <-deadline:
+			t.Fatal("startCachedH2Layer: handshake timeout")
+		}
+	}
+
+	return cli, func() {
+		_ = cli.Close()
+		_ = srv.Close()
+		_ = cliConn.Close()
+		_ = srvConn.Close()
+	}
+}
+
+// TestBuildConnectionStack_H2PoolFastPath_ClientMITMFailReleasesReservation
+// verifies that when the h2 pool fast path is triggered but the subsequent
+// client-side TLS MITM handshake fails (e.g., the client closes mid-
+// handshake), the pool reservation taken by Pool.Get is returned via
+// Pool.Put — not leaked or evicted. A leaked inUseCount would silently
+// cap the pool after a few failed handshakes; an Evict would destroy a
+// reusable Layer for an unrelated client-side problem.
+//
+// The test uses MaxStreamsPerConn=1 so a successful Pool.Get followed by
+// a leaked reservation makes the second Get return miss (capacity full).
+// If the reservation is correctly released, the second Get succeeds.
+func TestBuildConnectionStack_H2PoolFastPath_ClientMITMFailReleasesReservation(t *testing.T) {
+	target := "127.0.0.1:1" // unreachable; only the FAST path can succeed without dialing
+
+	// CA + Issuer for MITM (issuer needs to mint a cert for the host portion).
+	ca := &cert.CA{}
+	if err := ca.Generate(); err != nil {
+		t.Fatal(err)
+	}
+	issuer := cert.NewIssuer(ca)
+
+	// Pool with capacity=1 so we can detect a leaked reservation.
+	h2Pool := pool.New(pool.PoolOptions{MaxStreamsPerConn: 1})
+	defer h2Pool.Close()
+
+	buildCfg := &BuildConfig{
+		ProxyConfig:        &config.ProxyConfig{},
+		Issuer:             issuer,
+		InsecureSkipVerify: true,
+		HTTP2Pool:          h2Pool,
+	}
+
+	// Pre-populate the pool with a live cached Layer.
+	cached, teardown := startCachedH2Layer(t, envelope.EnvelopeContext{
+		ConnID:     "cached-conn",
+		TargetHost: target,
+		TLS:        &envelope.TLSSnapshot{ALPN: "h2", SNI: "cached-marker"},
+	})
+	defer teardown()
+	poolKey := poolKeyForH2(target, buildCfg)
+	h2Pool.Put(poolKey, cached)
+
+	// Sanity: pool returns the cached Layer on first Get (and increments
+	// inUseCount). Put it back so the BuildConnectionStack call below can
+	// take it.
+	if got, err := h2Pool.Get(poolKey); err != nil || got != cached {
+		t.Fatalf("sanity Get: got=%v err=%v", got, err)
+	}
+	h2Pool.Put(poolKey, cached)
+
+	// Run BuildConnectionStack with a clientConn whose far side closes
+	// immediately — performClientMITM's tlslayer.Server will fail reading
+	// the ClientHello, returning an error.
+	clientLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clientLn.Close()
+
+	type buildResult struct {
+		stack *ConnectionStack
+		err   error
+	}
+	resultCh := make(chan buildResult, 1)
+	go func() {
+		serverConn, acceptErr := clientLn.Accept()
+		if acceptErr != nil {
+			resultCh <- buildResult{err: acceptErr}
+			return
+		}
+		stack, _, _, buildErr := BuildConnectionStack(context.Background(), serverConn, target, buildCfg)
+		resultCh <- buildResult{stack: stack, err: buildErr}
+	}()
+
+	clientConn, err := net.Dial("tcp", clientLn.Addr().String())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	// Close immediately — the proxy's TLS handshake will see EOF and fail.
+	_ = clientConn.Close()
+
+	select {
+	case r := <-resultCh:
+		if r.err == nil {
+			if r.stack != nil {
+				_ = r.stack.Close()
+			}
+			t.Fatal("BuildConnectionStack: expected error from client MITM, got nil")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("BuildConnectionStack timed out")
+	}
+
+	// Verify the pool reservation was released: Pool.Get must return the
+	// cached Layer again. With MaxStreamsPerConn=1, a leaked reservation
+	// would make Get return nil (entry at capacity).
+	got, err := h2Pool.Get(poolKey)
+	if err != nil {
+		t.Fatalf("Get after MITM fail: err=%v", err)
+	}
+	if got == nil {
+		t.Fatal("Get after MITM fail: returned nil; reservation appears to have leaked (Pool.Put not called on failure path)")
+	}
+	if got != cached {
+		t.Errorf("Get after MITM fail: returned %v, want cached %v", got, cached)
+	}
+}
+
 // TestPoolKeyForH2_StableAndDistinct verifies that poolKeyForH2 produces the
 // same key for identical configs, and distinct keys when any of the
 // canonicalised fields differ. This guards against silent cache misses
