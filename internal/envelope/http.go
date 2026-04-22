@@ -111,6 +111,22 @@ func (m *HTTPMessage) CloneMessage() Message {
 	}
 }
 
+// HasPushPromiseAnomaly reports whether m carries an H2PushPromise anomaly.
+// Used to classify a synthetic envelope the HTTP/2 layer delivers upon
+// receiving a PUSH_PROMISE: such envelopes are for recording only and must
+// not be forwarded back down as a response frame (they have no :status).
+func HasPushPromiseAnomaly(m *HTTPMessage) bool {
+	if m == nil {
+		return false
+	}
+	for _, a := range m.Anomalies {
+		if a.Type == H2PushPromise {
+			return true
+		}
+	}
+	return false
+}
+
 // cloneAnomalies returns a deep copy of an Anomaly slice.
 func cloneAnomalies(a []Anomaly) []Anomaly {
 	if a == nil {

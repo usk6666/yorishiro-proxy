@@ -236,6 +236,47 @@ func TestReader_PushPromise_EmitsChannelAndSyntheticEnvelope(t *testing.T) {
 	if c.h2Stream != 2 {
 		t.Errorf("push channel h2Stream = %d, want 2", c.h2Stream)
 	}
+
+	// USK-623: originStreamID must point back to the originating channel's
+	// UUID so the upstream push recorder can tag pushed flows with the
+	// origin's identifier.
+	origID, ok := PushOriginChannelStreamID(pushCh)
+	if !ok {
+		t.Fatal("PushOriginChannelStreamID returned ok=false for push channel")
+	}
+	if origID != ch.StreamID() {
+		t.Errorf("push originStreamID = %q, want %q", origID, ch.StreamID())
+	}
+
+	// USK-623: a clone of the synthetic PUSH_PROMISE envelope must also
+	// arrive on the push channel as its FIRST envelope so the push Stream
+	// has URL-bearing content (envelopeToFlow populates fl.URL only when
+	// Path/Authority is non-empty, which only the synthetic envelope
+	// carries for push — the response HEADERS on the push channel have
+	// only :status). Without this duplicate delivery the push Stream's
+	// recording has no URL to surface for analysts.
+	pushCtx, pushCancel := context.WithTimeout(context.Background(), time.Second)
+	defer pushCancel()
+	pushEnv, err := pushCh.Next(pushCtx)
+	if err != nil {
+		t.Fatalf("pushCh.Next: %v", err)
+	}
+	pushMsg, ok := pushEnv.Message.(*envelope.HTTPMessage)
+	if !ok {
+		t.Fatalf("push first envelope Message = %T, want *HTTPMessage", pushEnv.Message)
+	}
+	if pushMsg.Path != "/pushed.css" {
+		t.Errorf("push channel first envelope Path = %q, want /pushed.css", pushMsg.Path)
+	}
+	if !envelope.HasPushPromiseAnomaly(pushMsg) {
+		t.Errorf("push channel first envelope missing H2PushPromise anomaly: %+v", pushMsg.Anomalies)
+	}
+	if pushEnv.Direction != envelope.Receive {
+		t.Errorf("push channel first envelope Direction = %v, want Receive", pushEnv.Direction)
+	}
+	if pushEnv.StreamID != pushCh.StreamID() {
+		t.Errorf("push channel first envelope StreamID = %q, want push channel id %q", pushEnv.StreamID, pushCh.StreamID())
+	}
 }
 
 func TestReader_WindowUpdateAcceptedConn(t *testing.T) {

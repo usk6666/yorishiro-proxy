@@ -28,6 +28,13 @@ type channel struct {
 	h2Stream uint32 // HTTP/2 stream identifier
 	isPush   bool
 
+	// originStreamID is set on push channels (isPush=true) to the UUID
+	// StreamID of the channel that carried the PUSH_PROMISE. Zero value on
+	// client-initiated streams. Surfaced via PushOriginChannelStreamID so
+	// the upstream push recorder can tag pushed flows with the origin's
+	// identifier.
+	originStreamID string
+
 	recv          chan *envelope.Envelope
 	errCh         chan *layer.StreamError
 	closeRecvOnce sync.Once
