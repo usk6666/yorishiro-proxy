@@ -1280,10 +1280,17 @@ func TestGOAWAY_AffectedStreamsRecordedAsRefused(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Scenario 7: Large response body passthrough (11 MiB)
+// Scenario 7: Large response body round-trips via spill-backed BodyBuffer
 // ---------------------------------------------------------------------------
 
-func TestLargeResponseBody_Passthrough_11MiB(t *testing.T) {
+// TestLargeResponseBody_SpillRoundtrip_11MiB verifies that an 11 MiB body
+// round-trips through the MITM proxy end-to-end under the USK-632 model:
+// the assembler aggregates all DATA frames into a BodyBuffer (memory →
+// file-backed past the configured spill threshold) and emits the envelope
+// only after END_STREAM. flow.Flow.Body stays empty because the recording
+// layer projects msg.Body and not msg.BodyBuffer (wire-observed bytes are
+// available on RawBytes; the structured body is live on msg.BodyBuffer).
+func TestLargeResponseBody_SpillRoundtrip_11MiB(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
@@ -1342,22 +1349,17 @@ func TestLargeResponseBody_Passthrough_11MiB(t *testing.T) {
 	if recvF == nil {
 		t.Fatal("no receive flow under linked stream")
 	}
-	// In passthrough mode the assembler yields the envelope BEFORE body is
-	// fully drained, so Body must be nil while Headers are preserved.
+	// flow.Flow.Body is projected from msg.Body (record_step.go). Since the
+	// assembler hands the body off on msg.BodyBuffer, recvF.Body stays empty
+	// while the wire bytes remain observable on RawBytes (L7/L4 duality).
 	if len(recvF.Body) != 0 {
-		t.Errorf("passthrough receive flow should have empty Body, got %d bytes", len(recvF.Body))
+		t.Errorf("receive flow Body should be empty (body lives on BodyBuffer), got %d bytes", len(recvF.Body))
 	}
 	if len(recvF.Headers) == 0 {
 		t.Error("receive flow headers missing")
 	}
 	if len(recvF.RawBytes) == 0 {
 		t.Error("receive flow RawBytes empty")
-	}
-	// Raw contains headers + zero-or-more DATA frame bytes captured BEFORE
-	// the passthrough handoff. 11 MiB of DATA would appear only if the
-	// assembler snapshot captured before the threshold trigger.
-	if len(recvF.RawBytes) >= size {
-		t.Errorf("passthrough RawBytes=%d suggests full body was buffered (threshold not triggered)", len(recvF.RawBytes))
 	}
 
 	waitForStreamState(t, store, st.ID, "complete", 5*time.Second)

@@ -1,19 +1,19 @@
 package http2
 
 import (
+	"context"
+	"errors"
 	"fmt"
-	"io"
+	"log/slog"
 	"strconv"
 	"strings"
 
+	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
+	"github.com/usk6666/yorishiro-proxy/internal/envelope/bodybuf"
+	"github.com/usk6666/yorishiro-proxy/internal/layer"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/http2/hpack"
 )
-
-// passthroughThreshold is the body size above which an envelope switches to
-// passthrough mode (BodyStream instead of buffered Body). Same value as the
-// HTTP/1.x layer so consumer behavior is symmetric.
-const passthroughThreshold = 10 << 20 // 10 MiB
 
 // maxHeaderFragmentBytes is the upper bound on the cumulative size of an
 // HPACK header block fragment accumulator (HEADERS + CONTINUATION*). This
@@ -53,9 +53,18 @@ const (
 	asmInitialHeaders     asmPhase = iota // waiting for HEADERS / collecting CONTINUATION
 	asmCollectingBody                     // header block decoded; collecting DATA
 	asmCollectingTrailers                 // received HEADERS-after-DATA; collecting CONTINUATION
-	asmPassthrough                        // body exceeds threshold; envelope already yielded; piping body
 	asmDone                               // terminal — assembler will not yield more for this stream
 )
+
+// asmBodyOpts is the per-assembler subset of Layer options that controls how
+// body DATA frames are accumulated into a BodyBuffer. Threaded in from
+// Layer via newStreamAssembler so assemblers can spill to disk at the
+// configured threshold and cap total body size at maxBody.
+type asmBodyOpts struct {
+	spillDir       string
+	spillThreshold int64
+	maxBody        int64
+}
 
 // streamAssembler is the per-stream assembler state. It is owned by the
 // reader goroutine and accessed only from there (no mutex).
@@ -78,24 +87,41 @@ type streamAssembler struct {
 	// origHeaders snapshot of decoded header fields, for opaque change detection.
 	origHeaders []hpack.HeaderField
 
-	// body buffers DATA payloads up to passthroughThreshold.
-	body []byte
+	// bodyBuf collects DATA payloads into a reference-counted BodyBuffer. It
+	// is lazily allocated on the first DATA frame with a non-empty payload,
+	// starts in memory mode, and promotes to a temp file once total size
+	// crosses bodyOpts.spillThreshold. Total size is capped by
+	// bodyOpts.maxBody; exceeding that cap returns a *layer.StreamError with
+	// Code=ErrorInternalError from handleDataFrame. On success the assembler
+	// hands ownership of bodyBuf to HTTPMessage.BodyBuffer without Retain
+	// (single refcount = 1); on error before handoff, the assembler must
+	// Release bodyBuf itself.
+	bodyBuf *bodybuf.BodyBuffer
 
-	// pipeWriter is non-nil in passthrough mode. The corresponding pipe reader
-	// is held by the already-yielded envelope's HTTPMessage.BodyStream.
-	pipeWriter *io.PipeWriter
+	// bodyOpts carries the Layer-configured spill/max limits.
+	bodyOpts asmBodyOpts
 
-	// inflight is the envelope being assembled. Yielded on END_STREAM (normal
-	// mode) or upon entering passthrough mode.
+	// inflight is the envelope being assembled. Yielded on END_STREAM.
 	inflight *envelope.Envelope
 }
 
-// newStreamAssembler creates an assembler for a stream owned by ch.
-func newStreamAssembler(streamID uint32, ch *channel) *streamAssembler {
+// newStreamAssembler creates an assembler for a stream owned by ch, using
+// bodyOpts for body accumulation decisions (threshold, maxBody, spill dir).
+func newStreamAssembler(streamID uint32, ch *channel, bodyOpts asmBodyOpts) *streamAssembler {
+	// Defensive: assemblers may be constructed with zero-valued opts in tests
+	// or unusual call paths; fall back to package defaults so Write always has
+	// a cap and promotion to file has a sensible threshold.
+	if bodyOpts.spillThreshold <= 0 {
+		bodyOpts.spillThreshold = config.DefaultBodySpillThreshold
+	}
+	if bodyOpts.maxBody <= 0 {
+		bodyOpts.maxBody = config.MaxBodySize
+	}
 	return &streamAssembler{
 		streamID: streamID,
 		channel:  ch,
 		phase:    asmInitialHeaders,
+		bodyOpts: bodyOpts,
 	}
 }
 
@@ -317,15 +343,16 @@ func (a *streamAssembler) handleHeadersFrame(fragment, raw []byte, endHeaders, e
 		a.inflight = env
 
 		if endStream {
-			// No body; finalize.
+			// No DATA at all: finalize with both Body and BodyBuffer nil.
 			env.Raw = a.rawAcc
 			env.Opaque = &opaqueHTTP2{
-				layer:       a.channel.layer,
-				streamID:    a.streamID,
-				frames:      a.frameBytes,
-				origHeaders: cloneHeaderFields(decoded),
-				origBody:    nil,
-				isPush:      a.channel.isPush,
+				layer:          a.channel.layer,
+				streamID:       a.streamID,
+				frames:         a.frameBytes,
+				origHeaders:    cloneHeaderFields(decoded),
+				origBody:       nil,
+				origBodyBuffer: nil,
+				isPush:         a.channel.isPush,
 			}
 			a.rawAcc = nil
 			a.frameBytes = nil
@@ -362,25 +389,20 @@ func (a *streamAssembler) handleHeadersFrame(fragment, raw []byte, endHeaders, e
 		env := a.inflight
 		if env != nil {
 			env.Raw = a.rawAcc
-			// Attach buffered body if not in passthrough.
 			msg := env.Message.(*envelope.HTTPMessage)
-			if a.pipeWriter == nil {
-				msg.Body = a.body
-				a.body = nil
-			} else {
-				_ = a.pipeWriter.Close()
-				a.pipeWriter = nil
-			}
+			a.finalizeBody(msg)
 			env.Opaque = &opaqueHTTP2{
-				layer:       a.channel.layer,
-				streamID:    a.streamID,
-				frames:      a.frameBytes,
-				origHeaders: cloneHeaderFields(a.origHeaders),
-				origBody:    cloneSlice(msg.Body),
-				isPush:      a.channel.isPush,
+				layer:          a.channel.layer,
+				streamID:       a.streamID,
+				frames:         a.frameBytes,
+				origHeaders:    cloneHeaderFields(a.origHeaders),
+				origBody:       cloneSlice(msg.Body),
+				origBodyBuffer: msg.BodyBuffer,
+				isPush:         a.channel.isPush,
 			}
 			a.rawAcc = nil
 			a.frameBytes = nil
+			a.bodyBuf = nil
 		}
 		a.inflight = nil
 		a.phase = asmDone
@@ -390,122 +412,160 @@ func (a *streamAssembler) handleHeadersFrame(fragment, raw []byte, endHeaders, e
 	return nil, false, nil
 }
 
-// handleDataFrame appends DATA payload to the in-flight body (or pipes it in
-// passthrough mode). Returns the in-flight envelope on the transition to
-// passthrough or on END_STREAM.
+// handleDataFrame appends DATA payload to the in-flight BodyBuffer, lazily
+// allocating the buffer on first non-empty payload and promoting it to a
+// file-backed store once the cumulative size crosses the spill threshold.
+// On END_STREAM, the buffer is handed off to msg.BodyBuffer (or released and
+// set nil when empty) and the envelope is finalized.
+//
+// Returns a *layer.StreamError with Code=ErrorInternalError when a Write
+// would exceed bodyOpts.maxBody. In that case bodyBuf is released by
+// bodybuf.Write's error-path teardown and this helper additionally calls
+// Release for symmetry with the success path's single-refcount handoff
+// contract.
 func (a *streamAssembler) handleDataFrame(payload, raw []byte, endStream bool) (yieldEnv *envelope.Envelope, complete bool, err error) {
 	a.rawAcc = append(a.rawAcc, raw...)
 	a.frameBytes = append(a.frameBytes, cloneSlice(raw))
 
-	if a.phase == asmPassthrough {
-		if len(payload) > 0 && a.pipeWriter != nil {
-			if _, werr := a.pipeWriter.Write(payload); werr != nil {
-				return nil, false, fmt.Errorf("http2: write passthrough body (stream %d): %w", a.streamID, werr)
-			}
+	if len(payload) > 0 {
+		if err := a.writeBody(payload); err != nil {
+			return nil, false, err
 		}
-		if endStream {
-			if a.pipeWriter != nil {
-				_ = a.pipeWriter.Close()
-				a.pipeWriter = nil
-			}
-			a.phase = asmDone
-			return nil, true, nil
-		}
+	}
+
+	if !endStream {
 		return nil, false, nil
 	}
 
-	// Buffered mode.
-	if len(payload) > 0 {
-		a.body = append(a.body, payload...)
+	if a.inflight == nil {
+		return nil, false, fmt.Errorf("http2: stream %d end_stream without headers", a.streamID)
+	}
+	msg := a.inflight.Message.(*envelope.HTTPMessage)
+	a.finalizeBody(msg)
+	env := a.inflight
+	env.Raw = a.rawAcc
+	env.Opaque = &opaqueHTTP2{
+		layer:          a.channel.layer,
+		streamID:       a.streamID,
+		frames:         a.frameBytes,
+		origHeaders:    cloneHeaderFields(a.origHeaders),
+		origBody:       cloneSlice(msg.Body),
+		origBodyBuffer: msg.BodyBuffer,
+		isPush:         a.channel.isPush,
+	}
+	a.rawAcc = nil
+	a.frameBytes = nil
+	a.bodyBuf = nil
+	a.inflight = nil
+	a.phase = asmDone
+	return env, true, nil
+}
+
+// writeBody writes payload into a.bodyBuf, lazily allocating it on the first
+// non-empty payload and promoting it to a temp file once cumulative size
+// exceeds bodyOpts.spillThreshold. Returns a *layer.StreamError when the
+// total size would exceed bodyOpts.maxBody (ErrMaxSizeExceeded from
+// bodybuf.Write already tore down the buffer's temp file; this helper
+// additionally calls Release for refcount symmetry with the success path).
+func (a *streamAssembler) writeBody(payload []byte) error {
+	if a.bodyBuf == nil {
+		// Start in memory mode. NewMemory seeds the buffer with a copy of
+		// its argument; we pass nil so the very first Write below both
+		// populates the buffer and contributes to the size check that may
+		// trigger PromoteToFile on the next iteration.
+		a.bodyBuf = bodybuf.NewMemory(nil)
+	}
+	if _, werr := a.bodyBuf.Write(payload); werr != nil {
+		if errors.Is(werr, bodybuf.ErrMaxSizeExceeded) {
+			// bodybuf.Write has already torn down the backing file and
+			// marked the buffer dead. Release for refcount symmetry: the
+			// assembler owns the single outstanding refcount and the
+			// error path must balance it.
+			_ = a.bodyBuf.Release()
+			a.bodyBuf = nil
+			return &layer.StreamError{
+				Code:   layer.ErrorInternalError,
+				Reason: "http2: body exceeds max size",
+			}
+		}
+		return fmt.Errorf("http2: write body (stream %d): %w", a.streamID, werr)
 	}
 
-	// Check for passthrough threshold. If exceeded, switch modes.
-	if len(a.body) > passthroughThreshold {
-		if a.inflight == nil {
-			return nil, false, fmt.Errorf("http2: stream %d data without headers", a.streamID)
+	// Promote to file-backed storage once the in-memory size crosses the
+	// threshold. PromoteToFile failure keeps the buffer in memory mode
+	// (already bounded by maxBody via Write), so we log and continue.
+	if !a.bodyBuf.IsFileBacked() && a.bodyBuf.Len() > a.bodyOpts.spillThreshold {
+		if perr := a.bodyBuf.PromoteToFile(a.bodyOpts.spillDir, config.BodySpillPrefix, a.bodyOpts.maxBody); perr != nil {
+			slog.Warn("http2: promote body to file failed; staying in memory",
+				"stream", a.streamID, "err", perr)
 		}
-		pr, pw := io.Pipe()
-		buffered := a.body
-		a.body = nil
-		a.pipeWriter = pw
-		a.phase = asmPassthrough
+	}
+	return nil
+}
 
-		msg := a.inflight.Message.(*envelope.HTTPMessage)
-		// Attach the pipe reader, prefixed with the buffered bytes.
+// finalizeBody transfers the accumulated body onto msg according to the
+// standard contract (mirrors the HTTP/1.x layer's readBodyWithThreshold
+// behavior for symmetric downstream flow.Flow.Body projection):
+//
+//   - bodyBuf == nil (no DATA frames received): Body and BodyBuffer both nil.
+//   - bodyBuf.Len() == 0 (allocated but unused): Release and nil both fields.
+//   - file-backed: msg.BodyBuffer = bodyBuf, msg.Body = nil. Refcount
+//     transfers to the envelope.
+//   - memory-backed: materialize via BodyBuffer.Bytes and set msg.Body;
+//     release the buffer. Keeps the HTTP/1.x + HTTP/2 receive-side symmetry
+//     that small bodies surface as msg.Body (so pipeline steps and
+//     record_step's flow.Flow.Body projection behave identically across
+//     the two layers).
+//
+// finalizeBody is idempotent on a.bodyBuf (sets it to nil) so the caller
+// should not Release afterward.
+func (a *streamAssembler) finalizeBody(msg *envelope.HTTPMessage) {
+	if a.bodyBuf == nil {
 		msg.Body = nil
-		msg.BodyStream = newPrefixedReader(buffered, pr)
-
-		env := a.inflight
-		// Snapshot raw at hand-off; subsequent frames append to a.rawAcc but
-		// they are not retroactively visible to the consumer (acceptable —
-		// passthrough is a degraded mode; consumers receive the streamed body
-		// via BodyStream).
-		env.Raw = a.rawAcc
-		env.Opaque = &opaqueHTTP2{
-			layer:       a.channel.layer,
-			streamID:    a.streamID,
-			frames:      a.frameBytes,
-			origHeaders: cloneHeaderFields(a.origHeaders),
-			origBody:    nil, // passthrough mode: body is streamed
-			bodyReader:  msg.BodyStream,
-			isPush:      a.channel.isPush,
-		}
-		a.rawAcc = nil
-		a.frameBytes = nil
-		a.inflight = nil
-
-		if endStream {
-			_ = a.pipeWriter.Close()
-			a.pipeWriter = nil
-			a.phase = asmDone
-		}
-		return env, true, nil
+		msg.BodyBuffer = nil
+		return
 	}
-
-	if endStream {
-		if a.inflight == nil {
-			return nil, false, fmt.Errorf("http2: stream %d end_stream without headers", a.streamID)
-		}
-		msg := a.inflight.Message.(*envelope.HTTPMessage)
-		msg.Body = a.body
-		a.body = nil
-		env := a.inflight
-		env.Raw = a.rawAcc
-		env.Opaque = &opaqueHTTP2{
-			layer:       a.channel.layer,
-			streamID:    a.streamID,
-			frames:      a.frameBytes,
-			origHeaders: cloneHeaderFields(a.origHeaders),
-			origBody:    cloneSlice(msg.Body),
-			isPush:      a.channel.isPush,
-		}
-		a.rawAcc = nil
-		a.frameBytes = nil
-		a.inflight = nil
-		a.phase = asmDone
-		return env, true, nil
+	if a.bodyBuf.Len() == 0 {
+		_ = a.bodyBuf.Release()
+		a.bodyBuf = nil
+		msg.Body = nil
+		msg.BodyBuffer = nil
+		return
 	}
-
-	return nil, false, nil
+	if a.bodyBuf.IsFileBacked() {
+		msg.Body = nil
+		msg.BodyBuffer = a.bodyBuf
+		a.bodyBuf = nil
+		return
+	}
+	// Memory-backed: project to msg.Body and release the buffer so
+	// downstream consumers see the familiar []byte shape (matches
+	// internal/layer/http1's contract — USK-631 precedent).
+	b, err := a.bodyBuf.Bytes(context.Background())
+	if err != nil {
+		// Read from an in-memory buffer should never fail; if it somehow
+		// does, fall back to the BodyBuffer handoff so we do not drop the
+		// body entirely.
+		msg.Body = nil
+		msg.BodyBuffer = a.bodyBuf
+		a.bodyBuf = nil
+		return
+	}
+	_ = a.bodyBuf.Release()
+	a.bodyBuf = nil
+	msg.Body = b
+	msg.BodyBuffer = nil
 }
 
-// prefixedReader serves a buffered prefix followed by an io.Reader.
-type prefixedReader struct {
-	prefix []byte
-	r      io.Reader
-}
-
-func newPrefixedReader(prefix []byte, r io.Reader) io.Reader {
-	return &prefixedReader{prefix: prefix, r: r}
-}
-
-func (p *prefixedReader) Read(buf []byte) (int, error) {
-	if len(p.prefix) > 0 {
-		n := copy(buf, p.prefix)
-		p.prefix = p.prefix[n:]
-		return n, nil
+// releaseBody releases any outstanding BodyBuffer owned by the assembler.
+// Safe to call multiple times. Intended for error paths between envelope
+// creation and END_STREAM where the assembler's single refcount must not
+// leak.
+func (a *streamAssembler) releaseBody() {
+	if a.bodyBuf != nil {
+		_ = a.bodyBuf.Release()
+		a.bodyBuf = nil
 	}
-	return p.r.Read(buf)
 }
 
 // cloneSlice returns a copy of b, or nil if b is nil.

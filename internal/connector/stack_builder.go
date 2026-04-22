@@ -396,6 +396,9 @@ func buildPoolHitFastPath(
 	clientLayer, err := http2.New(clientTLSConn, connID+"/client", http2.ServerRole,
 		http2.WithScheme("https"),
 		http2.WithEnvelopeContext(clientEnvCtx),
+		http2.WithBodySpillDir(cfg.BodySpillDir),
+		http2.WithBodySpillThreshold(cfg.BodySpillThreshold),
+		http2.WithMaxBodySize(cfg.MaxBodySize),
 	)
 	if err != nil {
 		cfg.HTTP2Pool.Put(poolKey, pooled)
@@ -576,6 +579,9 @@ func buildH2Stack(
 	clientLayer, err := http2.New(clientConn, connID+"/client", http2.ServerRole,
 		http2.WithScheme("https"),
 		http2.WithEnvelopeContext(clientEnvCtx),
+		http2.WithBodySpillDir(cfg.BodySpillDir),
+		http2.WithBodySpillThreshold(cfg.BodySpillThreshold),
+		http2.WithMaxBodySize(cfg.MaxBodySize),
 	)
 	if err != nil {
 		upstreamConn.Close()
@@ -596,6 +602,9 @@ func buildH2Stack(
 		l, lerr := http2.New(upstreamConn, connID+"/upstream", http2.ClientRole,
 			http2.WithScheme("https"),
 			http2.WithEnvelopeContext(upstreamEnvCtx),
+			http2.WithBodySpillDir(cfg.BodySpillDir),
+			http2.WithBodySpillThreshold(cfg.BodySpillThreshold),
+			http2.WithMaxBodySize(cfg.MaxBodySize),
 		)
 		if lerr != nil {
 			// http2.New already closed upstreamConn on failure.

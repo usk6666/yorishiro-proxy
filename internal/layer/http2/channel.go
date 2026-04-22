@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
+	"github.com/usk6666/yorishiro-proxy/internal/envelope/bodybuf"
 	"github.com/usk6666/yorishiro-proxy/internal/layer"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/http2/hpack"
 )
@@ -181,46 +182,63 @@ func (c *channel) Send(ctx context.Context, env *envelope.Envelope) error {
 		return fmt.Errorf("http2: Send requires *HTTPMessage, got %T", env.Message)
 	}
 
-	// Opaque-based zero-copy path. Restricted to same-Layer sends:
-	// cross-Layer forwarding cannot use raw frames because HPACK dynamic-
-	// table indices are per-connection and MAX_FRAME_SIZE / flow-control
-	// state differ. Cross-Layer sends fall through to the synthetic path,
-	// which re-encodes headers and flow-controls DATA via writeStreamingBody.
-	if op, ok := env.Opaque.(*opaqueHTTP2); ok && op != nil && op.layer == c.layer && op.streamID == c.h2Stream {
-		if !headersChanged(msg, op) && !bodyChanged(msg, op) && len(op.frames) > 0 {
-			done := make(chan error, 1)
-			c.layer.enqueueWrite(writeRequest{opaque: &writeOpaque{
-				streamID: c.h2Stream,
-				frames:   op.frames,
-				done:     done,
-			}})
-			if err := waitDone(ctx, done, c.layer.shutdown); err != nil {
-				return err
-			}
-			// The opaque snapshot is captured when the reader has observed
-			// the full inbound message (assembler asmDone) or equivalent,
-			// so op.frames always include END_STREAM on the last frame.
-			// Successful dispatch therefore means our send half is closed.
-			c.mu.Lock()
-			c.sentEndStream = true
-			c.mu.Unlock()
-			return nil
-		}
+	if handled, err := c.trySendOpaque(ctx, env, msg); handled {
+		return err
 	}
+	return c.sendSynthetic(ctx, env, msg)
+}
 
-	// Synthetic path.
+// trySendOpaque returns (handled=true, err) when the opaque zero-copy path
+// applies, (false, nil) otherwise. Restricted to same-Layer sends: cross-
+// Layer forwarding cannot use raw frames because HPACK dynamic-table indices
+// are per-connection and MAX_FRAME_SIZE / flow-control state differ.
+func (c *channel) trySendOpaque(ctx context.Context, env *envelope.Envelope, msg *envelope.HTTPMessage) (bool, error) {
+	op, ok := env.Opaque.(*opaqueHTTP2)
+	if !ok || op == nil || op.layer != c.layer || op.streamID != c.h2Stream {
+		return false, nil
+	}
+	if headersChanged(msg, op) || bodyChanged(msg, op) || len(op.frames) == 0 {
+		return false, nil
+	}
+	done := make(chan error, 1)
+	c.layer.enqueueWrite(writeRequest{opaque: &writeOpaque{
+		streamID: c.h2Stream,
+		frames:   op.frames,
+		done:     done,
+	}})
+	if err := waitDone(ctx, done, c.layer.shutdown); err != nil {
+		return true, err
+	}
+	// The opaque snapshot is captured when the reader has observed the full
+	// inbound message (assembler asmDone), so op.frames always include
+	// END_STREAM on the last frame. Successful dispatch therefore means our
+	// send half is closed.
+	c.mu.Lock()
+	c.sentEndStream = true
+	c.mu.Unlock()
+	return true, nil
+}
+
+// sendSynthetic re-encodes the message into HEADERS (+ CONTINUATION) + DATA
+// + trailer HEADERS via the Layer's HPACK encoder and frame writer.
+func (c *channel) sendSynthetic(ctx context.Context, env *envelope.Envelope, msg *envelope.HTTPMessage) error {
 	headers := buildHeaderFields(env, msg)
 	trailers, trailerAnomalies := buildTrailerFields(msg.Trailers)
 	if len(trailerAnomalies) > 0 {
 		msg.Anomalies = append(msg.Anomalies, trailerAnomalies...)
 	}
 
+	sendBody, sendReader, err := selectSendBody(msg)
+	if err != nil {
+		return err
+	}
+
 	done := make(chan error, 1)
 	c.layer.enqueueWrite(writeRequest{message: &writeMessage{
 		streamID:   c.h2Stream,
 		headers:    headers,
-		body:       msg.Body,
-		bodyReader: msg.BodyStream,
+		body:       sendBody,
+		bodyReader: sendReader,
 		trailers:   trailers,
 		endStream:  true,
 		done:       done,
@@ -230,11 +248,40 @@ func (c *channel) Send(ctx context.Context, env *envelope.Envelope) error {
 	}
 	c.mu.Lock()
 	c.headersHas = true
-	// writeMessage always sets endStream=true (see channel.Send above), so a
-	// successful return means we have closed the send half.
+	// writeMessage always sets endStream=true, so a successful return means
+	// we have closed the send half.
 	c.sentEndStream = true
 	c.mu.Unlock()
 	return nil
+}
+
+// selectSendBody picks the body representation the writer goroutine should
+// use, in priority order:
+//
+//  1. msg.Body != nil — memory-resident bytes from the pipeline.
+//  2. msg.BodyBuffer != nil — open a fresh reader (file-mode opens a new
+//     fd independent of the Write handle; memory-mode wraps the slice).
+//  3. msg.BodyStream != nil — reserved for future streaming protocols.
+//  4. none set — headers-only message; writeMessage emits HEADERS with
+//     END_STREAM.
+func selectSendBody(msg *envelope.HTTPMessage) ([]byte, io.Reader, error) {
+	if msg.Body != nil {
+		return msg.Body, nil, nil
+	}
+	if msg.BodyBuffer != nil {
+		r, rerr := msg.BodyBuffer.Reader()
+		if rerr != nil {
+			return nil, nil, fmt.Errorf("http2: open body buffer reader: %w", rerr)
+		}
+		// writeStreamingBody drains to EOF; wrap in a closer-closing reader
+		// so the underlying fd (for file-backed buffers) is released when
+		// the writer goroutine finishes with it.
+		return nil, &readCloserOnce{rc: r}, nil
+	}
+	if msg.BodyStream != nil {
+		return nil, msg.BodyStream, nil
+	}
+	return nil, nil, nil
 }
 
 // Close tears down the receive side and, for abnormal terminations, emits
@@ -286,14 +333,28 @@ func (c *channel) Close() error {
 // (e.g., upstream → client in a MITM proxy) must re-encode through the
 // destination Layer's HPACK context. The layer field records the owning
 // Layer for this identity check.
+//
+// Body snapshot semantics mirror HTTP/1.x (USK-631):
+//   - origBody carries a defensive copy of msg.Body at envelope creation
+//     time when the assembler finalized into memory mode.
+//   - origBodyBuffer records the BodyBuffer pointer when the assembler
+//     finalized into file-backed mode. The assembler does NOT Retain when
+//     stamping opaqueHTTP2 — origBodyBuffer and msg.BodyBuffer share the
+//     single refcount the assembler minted. That is safe because
+//     opaqueHTTP2 only reads the pointer (for identity comparison in
+//     bodyChanged) and never calls Reader/Bytes/Release itself. The
+//     terminal Release is performed by session OnComplete (USK-634).
+//
+// bodyChanged compares pointers first (file-backed path), then falls back
+// to byte comparison against origBody (memory path).
 type opaqueHTTP2 struct {
-	layer       *Layer // owning Layer; gates the zero-copy fast path to same-Layer sends
-	streamID    uint32 // HTTP/2 stream ID (scoped to layer)
-	frames      [][]byte
-	origHeaders []hpack.HeaderField
-	origBody    []byte
-	bodyReader  io.Reader
-	isPush      bool
+	layer          *Layer // owning Layer; gates the zero-copy fast path to same-Layer sends
+	streamID       uint32 // HTTP/2 stream ID (scoped to layer)
+	frames         [][]byte
+	origHeaders    []hpack.HeaderField
+	origBody       []byte
+	origBodyBuffer *bodybuf.BodyBuffer
+	isPush         bool
 }
 
 // headersChanged reports whether the message's headers differ from the
@@ -395,25 +456,31 @@ func reconstructPath(msg *envelope.HTTPMessage) string {
 	return path
 }
 
+// bodyChanged reports whether the message body was modified after the
+// assembler handed the envelope to the pipeline.
+//
+// Two tracks mirror the HTTP/1.x layer (USK-631):
+//
+//   - File-backed: assembler stamped op.origBodyBuffer with the pointer
+//     handed to msg.BodyBuffer. Pointer inequality signals a change
+//     (pipeline replaced, dropped, or materialized the buffer). A match
+//     with msg.BodyBuffer non-nil permits opaque reuse.
+//   - Memory-backed: assembler left op.origBodyBuffer == nil and stamped
+//     op.origBody with a defensive copy of msg.Body. Modifications are
+//     detected by comparing msg.Body to op.origBody; differences force the
+//     synthetic path.
+//
+// A defensive "mixed state" guard: when either side swapped tracks (e.g.
+// pipeline added a BodyBuffer where origBody was set), treat as changed —
+// the opaque frames correspond to the original storage mode, and
+// reconstructing them from the new representation is not a fast-path
+// concern.
 func bodyChanged(msg *envelope.HTTPMessage, op *opaqueHTTP2) bool {
-	if msg.Body == nil && op.bodyReader != nil {
-		// Passthrough mode: op.frames snapshot was taken at the threshold
-		// handoff and contains only the pre-handoff portion of the body
-		// (no END_STREAM). The remainder streams through op.bodyReader
-		// (the pipe attached to msg.BodyStream). Treating this as
-		// "unchanged" and taking the opaque fast path would emit only the
-		// captured frames and never drain the pipe, stalling the reader
-		// goroutine and truncating the body on the wire. Force the
-		// synthetic path so writeStreamingBody drains bodyReader with
-		// flow control (USK-617).
-		return true
+	// File-backed track: BodyBuffer pointer identity decides.
+	if op.origBodyBuffer != nil || msg.BodyBuffer != nil {
+		return op.origBodyBuffer != msg.BodyBuffer
 	}
-	if msg.Body == nil && op.origBody == nil && op.bodyReader == nil {
-		return false
-	}
-	if op.origBody == nil {
-		return true
-	}
+	// Memory track: compare bytes against the defensive snapshot.
 	if len(msg.Body) != len(op.origBody) {
 		return true
 	}
@@ -423,6 +490,25 @@ func bodyChanged(msg *envelope.HTTPMessage, op *opaqueHTTP2) bool {
 		}
 	}
 	return false
+}
+
+// readCloserOnce wraps an io.ReadCloser so that io.Copy-style callers
+// (writeStreamingBody) see the Read surface while Close is fired once when
+// EOF is reached. The h2 writer goroutine owns the lifetime; it only reads
+// to EOF and then discards the reader, so Close-on-EOF is the correct
+// fd-release hook for file-backed BodyBuffer readers.
+type readCloserOnce struct {
+	rc     io.ReadCloser
+	closed bool
+}
+
+func (r *readCloserOnce) Read(p []byte) (int, error) {
+	n, err := r.rc.Read(p)
+	if err == io.EOF && !r.closed {
+		r.closed = true
+		_ = r.rc.Close()
+	}
+	return n, err
 }
 
 // buildHeaderFields constructs the HPACK header field list for a message,

@@ -2,11 +2,12 @@ package http2
 
 import (
 	"context"
-	"io"
+	"errors"
 	"testing"
 	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
+	"github.com/usk6666/yorishiro-proxy/internal/layer"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/http2/frame"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/http2/hpack"
 )
@@ -97,6 +98,11 @@ func TestAssembler_HeadersDataEndStream(t *testing.T) {
 	body := []byte("hello world")
 	env := driveOneRequest(t, peer, l, 1, headers, body)
 	msg := env.Message.(*envelope.HTTPMessage)
+	// Small body surfaces as msg.Body (memory track; mirrors HTTP/1.x
+	// behavior — USK-631 precedent). BodyBuffer stays nil.
+	if msg.BodyBuffer != nil {
+		t.Errorf("BodyBuffer non-nil for small body, expected nil")
+	}
 	if string(msg.Body) != "hello world" {
 		t.Errorf("body = %q, want hello world", msg.Body)
 	}
@@ -250,6 +256,9 @@ func TestAssembler_TrailersAttached(t *testing.T) {
 		t.Fatalf("Next: %v", err)
 	}
 	msg := env.Message.(*envelope.HTTPMessage)
+	if msg.BodyBuffer != nil {
+		t.Errorf("BodyBuffer non-nil for small trailed body, expected nil (memory track)")
+	}
 	if string(msg.Body) != "body" {
 		t.Errorf("body = %q, want body", msg.Body)
 	}
@@ -258,37 +267,39 @@ func TestAssembler_TrailersAttached(t *testing.T) {
 	}
 }
 
-func TestAssembler_PassthroughThreshold(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping large body test in short mode")
-	}
+// TestAssembler_BodyBufferMemoryMode verifies that bodies smaller than the
+// configured spill threshold surface as msg.Body (memory track — the
+// assembler materializes the buffer to bytes and releases it, matching
+// the HTTP/1.x USK-631 precedent).
+func TestAssembler_BodyBufferMemoryMode(t *testing.T) {
+	// Default threshold is 10 MiB — send 1 MiB of body to stay well below.
+	const bodySize = 1 << 20
+
 	l, peer, cleanup := startServerLayer(t)
 	defer cleanup()
 	peer.consumePeerSettings(t)
 
-	// Run the entire peer-side I/O from a goroutine since net.Pipe is
-	// unbuffered and the layer reads concurrently.
 	headers := []hpack.HeaderField{
 		{Name: ":method", Value: "POST"},
 		{Name: ":scheme", Value: "https"},
 		{Name: ":authority", Value: "x"},
-		{Name: ":path", Value: "/big"},
+		{Name: ":path", Value: "/mem"},
 	}
-	chunkSize := int(frame.DefaultMaxFrameSize)
-	totalChunks := (12 * 1024 * 1024) / chunkSize
+	chunk := make([]byte, int(frame.DefaultMaxFrameSize))
+	for i := range chunk {
+		chunk[i] = 'm'
+	}
+	totalChunks := bodySize / len(chunk)
 
 	peerErr := make(chan error, 1)
 	go func() {
-		// Initial SETTINGS from peer + ACK exchange so the layer is happy.
 		if err := peer.wr.WriteSettings(nil); err != nil {
 			peerErr <- err
 			return
 		}
-		// Drain frames coming back (settings ACK + window updates).
 		go func() {
 			for {
-				_, err := peer.rd.ReadFrame()
-				if err != nil {
+				if _, err := peer.rd.ReadFrame(); err != nil {
 					return
 				}
 			}
@@ -297,10 +308,6 @@ func TestAssembler_PassthroughThreshold(t *testing.T) {
 		if err := peer.wr.WriteHeaders(1, false, true, encoded); err != nil {
 			peerErr <- err
 			return
-		}
-		chunk := make([]byte, chunkSize)
-		for i := range chunk {
-			chunk[i] = 'a'
 		}
 		for i := 0; i < totalChunks; i++ {
 			if err := peer.wr.WriteData(1, false, chunk); err != nil {
@@ -326,19 +333,277 @@ func TestAssembler_PassthroughThreshold(t *testing.T) {
 		t.Fatalf("Next: %v (lastReaderErr=%v)", err, l.LastReaderError())
 	}
 	msg := env.Message.(*envelope.HTTPMessage)
-	if msg.BodyStream == nil {
-		t.Fatalf("expected BodyStream != nil for passthrough mode (Body=%d bytes)", len(msg.Body))
+	if msg.BodyBuffer != nil {
+		t.Errorf("BodyBuffer non-nil below threshold; expected msg.Body materialization")
 	}
-	if msg.Body != nil {
-		t.Errorf("Body should be nil in passthrough mode, got %d bytes", len(msg.Body))
+	if int64(len(msg.Body)) != int64(bodySize) {
+		t.Errorf("msg.Body len = %d, want %d", len(msg.Body), bodySize)
 	}
+}
 
-	n, err := io.Copy(io.Discard, msg.BodyStream)
-	if err != nil {
-		t.Fatalf("io.Copy body: %v", err)
+// TestAssembler_PromoteToFileAtThreshold verifies that a body crossing the
+// configured spill threshold promotes to a file-backed BodyBuffer.
+func TestAssembler_PromoteToFileAtThreshold(t *testing.T) {
+	// Use a small threshold so we don't have to stream 10 MiB through
+	// net.Pipe. 64 KiB works well against a 16 KiB default max frame size.
+	const threshold = 64 << 10
+
+	l, peer, cleanup := startServerLayer(t, WithBodySpillThreshold(threshold))
+	defer cleanup()
+	peer.consumePeerSettings(t)
+
+	headers := []hpack.HeaderField{
+		{Name: ":method", Value: "POST"},
+		{Name: ":scheme", Value: "https"},
+		{Name: ":authority", Value: "x"},
+		{Name: ":path", Value: "/spill"},
 	}
-	if n < passthroughThreshold {
-		t.Errorf("body copied only %d bytes, want >= %d", n, passthroughThreshold)
+	chunk := make([]byte, int(frame.DefaultMaxFrameSize))
+	for i := range chunk {
+		chunk[i] = 's'
+	}
+	// Send 5× threshold to guarantee promotion well past the edge.
+	const totalBytes = threshold * 5
+	totalChunks := totalBytes / len(chunk)
+
+	peerErr := make(chan error, 1)
+	go func() {
+		if err := peer.wr.WriteSettings(nil); err != nil {
+			peerErr <- err
+			return
+		}
+		go func() {
+			for {
+				if _, err := peer.rd.ReadFrame(); err != nil {
+					return
+				}
+			}
+		}()
+		encoded := peer.encoder.Encode(headers)
+		if err := peer.wr.WriteHeaders(1, false, true, encoded); err != nil {
+			peerErr <- err
+			return
+		}
+		for i := 0; i < totalChunks; i++ {
+			if err := peer.wr.WriteData(1, false, chunk); err != nil {
+				peerErr <- err
+				return
+			}
+		}
+		if err := peer.wr.WriteData(1, true, nil); err != nil {
+			peerErr <- err
+			return
+		}
+		peerErr <- nil
+	}()
+
+	ch := waitForChannel(t, l, 5*time.Second)
+	if ch == nil {
+		t.Fatal("no channel emitted")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	env, err := ch.Next(ctx)
+	if err != nil {
+		t.Fatalf("Next: %v (lastReaderErr=%v)", err, l.LastReaderError())
+	}
+	msg := env.Message.(*envelope.HTTPMessage)
+	if msg.BodyBuffer == nil {
+		t.Fatal("BodyBuffer = nil, want file-backed buffer after threshold crossing")
+	}
+	if !msg.BodyBuffer.IsFileBacked() {
+		t.Errorf("BodyBuffer not file-backed after %d > %d threshold (len=%d)",
+			totalBytes, threshold, msg.BodyBuffer.Len())
+	}
+	if got, want := msg.BodyBuffer.Len(), int64(totalBytes); got != want {
+		t.Errorf("BodyBuffer.Len = %d, want %d", got, want)
+	}
+}
+
+// TestAssembler_MaxBodySizeStreamError verifies that a body exceeding
+// MaxBodySize surfaces as a *layer.StreamError on the Channel and drops the
+// stream without corrupting the connection. The peer splits the body into
+// DEFAULT_MAX_FRAME_SIZE chunks; once cumulative Writes cross the cap the
+// assembler surfaces ErrorInternalError via Channel.Next.
+func TestAssembler_MaxBodySizeStreamError(t *testing.T) {
+	// Small cap chosen to fit a handful of default 16 KiB DATA frames.
+	const maxBody = 32 << 10
+
+	l, peer, cleanup := startServerLayer(t,
+		WithBodySpillThreshold(16<<10),
+		WithMaxBodySize(maxBody),
+	)
+	defer cleanup()
+	peer.consumePeerSettings(t)
+
+	headers := []hpack.HeaderField{
+		{Name: ":method", Value: "POST"},
+		{Name: ":scheme", Value: "https"},
+		{Name: ":authority", Value: "x"},
+		{Name: ":path", Value: "/toobig"},
+	}
+	chunk := make([]byte, int(frame.DefaultMaxFrameSize))
+	for i := range chunk {
+		chunk[i] = 'x'
+	}
+	// Stream four 16 KiB DATA frames = 64 KiB — double the cap.
+	const numChunks = 4
+
+	peerErr := make(chan error, 1)
+	go func() {
+		if err := peer.wr.WriteSettings(nil); err != nil {
+			peerErr <- err
+			return
+		}
+		go func() {
+			for {
+				if _, err := peer.rd.ReadFrame(); err != nil {
+					return
+				}
+			}
+		}()
+		encoded := peer.encoder.Encode(headers)
+		if err := peer.wr.WriteHeaders(1, false, true, encoded); err != nil {
+			peerErr <- err
+			return
+		}
+		for i := 0; i < numChunks; i++ {
+			// Late DATA frames may race with the layer's RST_STREAM after
+			// the cap is crossed; ignore net.ErrClosed / io.EOF on write
+			// so the race does not spuriously fail the test.
+			if err := peer.wr.WriteData(1, false, chunk); err != nil {
+				peerErr <- nil
+				return
+			}
+		}
+		_ = peer.wr.WriteData(1, true, nil)
+		peerErr <- nil
+	}()
+
+	ch := waitForChannel(t, l, 5*time.Second)
+	if ch == nil {
+		t.Fatal("no channel emitted")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err := ch.Next(ctx)
+	if err == nil {
+		t.Fatal("Next: want error (body exceeds max size), got nil")
+	}
+	var se *layer.StreamError
+	if !errors.As(err, &se) {
+		t.Fatalf("Next err = %T %v, want *layer.StreamError", err, err)
+	}
+	if se.Code != layer.ErrorInternalError {
+		t.Errorf("StreamError.Code = %v, want ErrorInternalError", se.Code)
+	}
+}
+
+// TestAssembler_HeadersOnlyNoBodyBuffer verifies that a request with no DATA
+// frames produces an envelope with both Body and BodyBuffer nil.
+func TestAssembler_HeadersOnlyNoBodyBuffer(t *testing.T) {
+	l, peer, cleanup := startServerLayer(t)
+	defer cleanup()
+	peer.consumePeerSettings(t)
+
+	headers := []hpack.HeaderField{
+		{Name: ":method", Value: "GET"},
+		{Name: ":scheme", Value: "https"},
+		{Name: ":authority", Value: "x"},
+		{Name: ":path", Value: "/empty"},
+	}
+	env := driveOneRequest(t, peer, l, 1, headers, nil)
+	msg := env.Message.(*envelope.HTTPMessage)
+	if msg.Body != nil {
+		t.Errorf("Body = %v, want nil (headers-only)", msg.Body)
+	}
+	if msg.BodyBuffer != nil {
+		t.Errorf("BodyBuffer = %v, want nil (headers-only; no DATA frames)", msg.BodyBuffer)
+	}
+}
+
+// TestAssembler_TrailersPreservedWithFileBody verifies that trailers are
+// still projected onto msg.Trailers when the body has spilled to disk —
+// previously passthrough mode silently dropped trailers (fixed by USK-632).
+func TestAssembler_TrailersPreservedWithFileBody(t *testing.T) {
+	const threshold = 32 << 10
+
+	l, peer, cleanup := startServerLayer(t, WithBodySpillThreshold(threshold))
+	defer cleanup()
+	peer.consumePeerSettings(t)
+
+	headers := []hpack.HeaderField{
+		{Name: ":method", Value: "POST"},
+		{Name: ":scheme", Value: "https"},
+		{Name: ":authority", Value: "x"},
+		{Name: ":path", Value: "/bigtrailer"},
+	}
+	chunk := make([]byte, int(frame.DefaultMaxFrameSize))
+	for i := range chunk {
+		chunk[i] = 'x'
+	}
+	// 4× threshold forces promotion to file.
+	const totalBytes = threshold * 4
+	totalChunks := totalBytes / len(chunk)
+
+	peerErr := make(chan error, 1)
+	go func() {
+		if err := peer.wr.WriteSettings(nil); err != nil {
+			peerErr <- err
+			return
+		}
+		go func() {
+			for {
+				if _, err := peer.rd.ReadFrame(); err != nil {
+					return
+				}
+			}
+		}()
+		encoded := peer.encoder.Encode(headers)
+		if err := peer.wr.WriteHeaders(1, false, true, encoded); err != nil {
+			peerErr <- err
+			return
+		}
+		for i := 0; i < totalChunks; i++ {
+			if err := peer.wr.WriteData(1, false, chunk); err != nil {
+				peerErr <- err
+				return
+			}
+		}
+		// Send trailers (END_STREAM on trailer HEADERS, not on DATA).
+		trailerBlock := peer.encoder.Encode([]hpack.HeaderField{
+			{Name: "x-checksum", Value: "abc123"},
+		})
+		if err := peer.wr.WriteHeaders(1, true, true, trailerBlock); err != nil {
+			peerErr <- err
+			return
+		}
+		peerErr <- nil
+	}()
+
+	ch := waitForChannel(t, l, 5*time.Second)
+	if ch == nil {
+		t.Fatal("no channel emitted")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	env, err := ch.Next(ctx)
+	if err != nil {
+		t.Fatalf("Next: %v (lastReaderErr=%v)", err, l.LastReaderError())
+	}
+	msg := env.Message.(*envelope.HTTPMessage)
+	if msg.BodyBuffer == nil {
+		t.Fatal("BodyBuffer = nil, expected file-backed buffer for large body")
+	}
+	if !msg.BodyBuffer.IsFileBacked() {
+		t.Errorf("BodyBuffer not file-backed (len=%d, threshold=%d)",
+			msg.BodyBuffer.Len(), threshold)
+	}
+	if len(msg.Trailers) != 1 {
+		t.Fatalf("Trailers = %+v, want 1 entry", msg.Trailers)
+	}
+	if msg.Trailers[0].Name != "x-checksum" || msg.Trailers[0].Value != "abc123" {
+		t.Errorf("Trailers[0] = %+v, want {x-checksum, abc123}", msg.Trailers[0])
 	}
 }
 
