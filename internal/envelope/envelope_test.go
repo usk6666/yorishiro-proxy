@@ -3,6 +3,8 @@ package envelope
 import (
 	"testing"
 	"time"
+
+	"github.com/usk6666/yorishiro-proxy/internal/envelope/bodybuf"
 )
 
 func TestDirection_String(t *testing.T) {
@@ -128,6 +130,39 @@ func TestRawMessage_CloneMessage_NilBytes(t *testing.T) {
 	cloned := orig.CloneMessage().(*RawMessage)
 	if cloned.Bytes != nil {
 		t.Error("CloneMessage of nil Bytes should produce nil, not empty slice")
+	}
+}
+
+// TestHTTPMessage_CloneMessage_BodyBufferRetained verifies that CloneMessage
+// shares the BodyBuffer pointer and calls Retain so the clone and original
+// both hold live references. The buffer is fully released only after both
+// owners call Release.
+func TestHTTPMessage_CloneMessage_BodyBufferRetained(t *testing.T) {
+	bb := bodybuf.NewMemory([]byte("shared-body"))
+	orig := &HTTPMessage{
+		Method:     "POST",
+		BodyBuffer: bb,
+	}
+
+	cloned := orig.CloneMessage().(*HTTPMessage)
+
+	if cloned.BodyBuffer != orig.BodyBuffer {
+		t.Fatal("CloneMessage should share BodyBuffer pointer with original")
+	}
+
+	// Release the original owner's reference; Len() must still work because
+	// the clone still holds a ref.
+	if err := orig.BodyBuffer.Release(); err != nil {
+		t.Fatalf("first Release (orig): %v", err)
+	}
+	if got := cloned.BodyBuffer.Len(); got != int64(len("shared-body")) {
+		t.Errorf("clone.BodyBuffer.Len() after orig Release = %d, want %d",
+			got, len("shared-body"))
+	}
+
+	// Final release: clone drops the last reference; cleanup happens now.
+	if err := cloned.BodyBuffer.Release(); err != nil {
+		t.Fatalf("second Release (clone): %v", err)
 	}
 }
 

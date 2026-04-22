@@ -84,6 +84,22 @@ type BuildConfig struct {
 	// dependencies; callers that want the feature construct a closure in
 	// their bootstrap code and install it here.
 	OnHTTP2UpstreamDialed func(l *http2.Layer)
+
+	// BodySpillDir is the directory used for temp files when a message body
+	// exceeds BodySpillThreshold. Empty means os.TempDir() (resolved by the
+	// bodybuf package). Pre-resolve at the bootstrap layer using
+	// config.ResolveBodySpillDir if spill location is configurable.
+	BodySpillDir string
+
+	// BodySpillThreshold is the size above which a body spills from memory
+	// to a temp file. Zero means the layer's internal default
+	// (config.DefaultBodySpillThreshold, 10 MiB).
+	BodySpillThreshold int64
+
+	// MaxBodySize is the absolute cap on body size. Exceeding it produces a
+	// layer.StreamError with Code=ErrorInternalError. Zero means the
+	// layer's internal default (config.MaxBodySize, 254 MiB).
+	MaxBodySize int64
 }
 
 // BuildConnectionStack constructs a ConnectionStack for the given CONNECT
@@ -493,12 +509,18 @@ func buildStackFromRoute(
 		clientLayer := http1.New(clientConn, connID+"/client", envelope.Send,
 			http1.WithScheme("https"),
 			http1.WithEnvelopeContext(clientEnvCtx),
+			http1.WithBodySpillDir(cfg.BodySpillDir),
+			http1.WithBodySpillThreshold(cfg.BodySpillThreshold),
+			http1.WithMaxBodySize(cfg.MaxBodySize),
 		)
 		stack.PushClient(clientLayer)
 
 		upstreamLayer := http1.New(upstreamConn, connID+"/upstream", envelope.Receive,
 			http1.WithScheme("https"),
 			http1.WithEnvelopeContext(upstreamEnvCtx),
+			http1.WithBodySpillDir(cfg.BodySpillDir),
+			http1.WithBodySpillThreshold(cfg.BodySpillThreshold),
+			http1.WithMaxBodySize(cfg.MaxBodySize),
 		)
 		stack.PushUpstream(upstreamLayer)
 
