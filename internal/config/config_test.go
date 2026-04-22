@@ -738,6 +738,126 @@ func TestValidateProjectName(t *testing.T) {
 	}
 }
 
+func TestValidate_BodySpillDir_Valid(t *testing.T) {
+	dir := t.TempDir()
+	cfg := Default()
+	cfg.BodySpillDir = dir
+
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("Validate() with valid BodySpillDir = %v, want nil", err)
+	}
+}
+
+func TestValidate_BodySpillDir_Empty(t *testing.T) {
+	cfg := Default()
+	cfg.BodySpillDir = ""
+
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("Validate() with empty BodySpillDir = %v, want nil (skips fs checks)", err)
+	}
+}
+
+func TestValidate_BodySpillDir_NonExistent(t *testing.T) {
+	cfg := Default()
+	cfg.BodySpillDir = filepath.Join(t.TempDir(), "does-not-exist")
+
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected error for non-existent BodySpillDir, got nil")
+	}
+	if !strings.Contains(err.Error(), "does not exist") {
+		t.Errorf("error = %q, want substring %q", err.Error(), "does not exist")
+	}
+}
+
+func TestValidate_BodySpillDir_IsFile(t *testing.T) {
+	tmp := t.TempDir()
+	filePath := filepath.Join(tmp, "not-a-dir")
+	if err := os.WriteFile(filePath, []byte("x"), 0600); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	cfg := Default()
+	cfg.BodySpillDir = filePath
+
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected error for file-not-dir BodySpillDir, got nil")
+	}
+	if !strings.Contains(err.Error(), "is not a directory") {
+		t.Errorf("error = %q, want substring %q", err.Error(), "is not a directory")
+	}
+}
+
+func TestValidate_BodySpillDir_NotWritable(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("skipping non-writable test: root bypasses 0500 permission")
+	}
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0500); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() {
+		// Restore write perm so t.TempDir()'s cleanup can remove the directory.
+		_ = os.Chmod(dir, 0700)
+	})
+
+	cfg := Default()
+	cfg.BodySpillDir = dir
+
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected error for non-writable BodySpillDir, got nil")
+	}
+	if !strings.Contains(err.Error(), "is not writable") {
+		t.Errorf("error = %q, want substring %q", err.Error(), "is not writable")
+	}
+}
+
+func TestValidate_BodySpillThreshold_Negative(t *testing.T) {
+	cfg := Default()
+	cfg.BodySpillThreshold = -1
+
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected error for negative BodySpillThreshold, got nil")
+	}
+	if !strings.Contains(err.Error(), "body_spill_threshold must be >= 0") {
+		t.Errorf("error = %q, want substring %q", err.Error(), "body_spill_threshold must be >= 0")
+	}
+}
+
+func TestValidate_BodySpillThreshold_ExceedsMaxBodySize(t *testing.T) {
+	cfg := Default()
+	cfg.BodySpillThreshold = MaxBodySize + 1
+
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected error for BodySpillThreshold > MaxBodySize, got nil")
+	}
+	if !strings.Contains(err.Error(), "must be <= MaxBodySize") {
+		t.Errorf("error = %q, want substring %q", err.Error(), "must be <= MaxBodySize")
+	}
+}
+
+func TestValidate_BodySpillThreshold_Zero(t *testing.T) {
+	cfg := Default()
+	cfg.BodySpillThreshold = 0
+
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("Validate() with BodySpillThreshold=0 = %v, want nil (zero means default)", err)
+	}
+}
+
+func TestValidate_BodySpillThreshold_AtMaxBodySize(t *testing.T) {
+	cfg := Default()
+	cfg.BodySpillThreshold = MaxBodySize
+
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("Validate() with BodySpillThreshold=MaxBodySize = %v, want nil (upper bound inclusive)", err)
+	}
+}
+
 func TestLoadFile_UnknownFieldsIgnored(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "extra.json")
