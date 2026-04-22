@@ -415,6 +415,11 @@ func initInfra(ctx context.Context, cfg *config.Config) (*infraResult, error) {
 	}
 	slog.SetDefault(logger)
 
+	// Sweep orphaned yorishiro-body-* temp files from prior crashed or killed
+	// runs before initializing any further state. Failures are logged but
+	// never block startup.
+	config.SweepOrphanBodyFiles(config.ResolveBodySpillDir(cfg), logger)
+
 	// Ensure the database directory exists (e.g. ~/.yorishiro-proxy/).
 	if err := config.EnsureDBDir(cfg.DBPath); err != nil {
 		logCleanup()

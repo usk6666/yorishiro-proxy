@@ -48,6 +48,41 @@ func (c *Config) Validate() error {
 	if c.CleanupInterval < 0 {
 		return fmt.Errorf("cleanup_interval must be >= 0, got %s", c.CleanupInterval)
 	}
+	if err := c.validateBodySpill(); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validateBodySpill checks BodySpillDir (existence, is-dir, writable) and
+// BodySpillThreshold (non-negative, <= MaxBodySize). An empty BodySpillDir
+// is treated as "use os.TempDir()" and skips filesystem checks.
+func (c *Config) validateBodySpill() error {
+	if c.BodySpillDir != "" {
+		fi, err := os.Stat(c.BodySpillDir)
+		if err != nil {
+			return fmt.Errorf("body_spill_dir %q does not exist: %w", c.BodySpillDir, err)
+		}
+		if !fi.IsDir() {
+			return fmt.Errorf("body_spill_dir %q is not a directory", c.BodySpillDir)
+		}
+		tmp, err := os.CreateTemp(c.BodySpillDir, BodySpillPrefix+"validate-*")
+		if err != nil {
+			return fmt.Errorf("body_spill_dir %q is not writable: %w", c.BodySpillDir, err)
+		}
+		// Close before Remove so the unlink succeeds on Windows, where
+		// os.Remove fails on files with open handles. Matches the pattern in
+		// internal/selfupdate/updater.go (checkWritePermission).
+		name := tmp.Name()
+		tmp.Close()
+		os.Remove(name)
+	}
+	if c.BodySpillThreshold < 0 {
+		return fmt.Errorf("body_spill_threshold must be >= 0, got %d", c.BodySpillThreshold)
+	}
+	if c.BodySpillThreshold > MaxBodySize {
+		return fmt.Errorf("body_spill_threshold (%d) must be <= MaxBodySize (%d)", c.BodySpillThreshold, MaxBodySize)
+	}
 	return nil
 }
 
@@ -166,6 +201,14 @@ type Config struct {
 	// file's safety_filter.enabled value.
 	// CLI flag: -safety-filter, env: YP_SAFETY_FILTER_ENABLED.
 	SafetyFilterEnabled *bool `json:"-"`
+
+	// BodySpillDir is the directory used for temp files storing bodies that
+	// exceed BodySpillThreshold. Empty means os.TempDir().
+	BodySpillDir string `json:"body_spill_dir,omitempty"`
+
+	// BodySpillThreshold is the size threshold above which bodies spill to disk.
+	// Zero means 10<<20 (10 MiB). Must be <= MaxBodySize.
+	BodySpillThreshold int64 `json:"body_spill_threshold,omitempty"`
 }
 
 // Default returns a Config with sensible defaults.
