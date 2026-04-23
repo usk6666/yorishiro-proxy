@@ -12,6 +12,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -60,6 +61,12 @@ func (s *testStore) UpdateStream(_ context.Context, id string, update flow.Strea
 	defer s.mu.Unlock()
 	for _, st := range s.streams {
 		if st.ID == id {
+			if update.State != "" {
+				st.State = update.State
+			}
+			if update.FailureReason != "" {
+				st.FailureReason = update.FailureReason
+			}
 			hasConnInfo := update.ServerAddr != "" ||
 				update.TLSVersion != "" ||
 				update.TLSCipher != "" ||
@@ -271,6 +278,18 @@ type proxyOpts struct {
 	safetyEngine    *httprules.SafetyEngine
 	holdQueue       *common.HoldQueue
 	scope           *connector.TargetScope
+
+	// Body-spill configuration. Zero values mean "use layer/config defaults".
+	bodySpillDir       string
+	bodySpillThreshold int64
+	maxBodySize        int64
+	// recordMaxBodySize caps flow.Flow.Body when RecordStep materializes a
+	// BodyBuffer. Zero means "use config.MaxBodySize".
+	recordMaxBodySize int64
+	// prependCustomSteps are optional extra Steps prepended to the pipeline
+	// (before HostScope). Useful for mid-flight inspection of envelope state
+	// without introducing extra BodyBuffer Retains via HoldQueue Clone.
+	prependCustomSteps []pipeline.Step
 }
 
 // startHTTPMITMProxy starts a MinimalListener configured for HTTP MITM (not
@@ -300,6 +319,11 @@ func startHTTPMITMProxy(
 			},
 			Issuer:             issuer,
 			InsecureSkipVerify: true,
+			// USK-635: body-spill configuration threads through to http1.New
+			// via stack_builder.go. Zero values fall back to config defaults.
+			BodySpillDir:       opts.bodySpillDir,
+			BodySpillThreshold: opts.bodySpillThreshold,
+			MaxBodySize:        opts.maxBodySize,
 		},
 		OnStack: func(ctx context.Context, stack *connector.ConnectionStack, _, _ *envelope.TLSSnapshot, _ string) {
 			defer close(done)
@@ -307,28 +331,50 @@ func startHTTPMITMProxy(
 
 			clientCh := <-stack.ClientTopmost().Channels()
 
+			// Build RecordStep options. USK-622 wire encoder is unconditional;
+			// USK-635 MaxBodySize override is opt-in for the exceed-cap test.
+			recordOpts := []pipeline.Option{
+				pipeline.WithWireEncoder(envelope.ProtocolHTTP, http1.EncodeWireBytes),
+			}
+			if opts.recordMaxBodySize > 0 {
+				recordOpts = append(recordOpts, pipeline.WithMaxBodySize(opts.recordMaxBodySize))
+			}
+
 			// Build pipeline: HostScope → HTTPScope → Safety → Transform → Intercept → Record.
-			steps := []pipeline.Step{
+			// Optional custom Steps are prepended before HostScope for tests
+			// that need mid-flight inspection without Intercept's HoldQueue.
+			steps := make([]pipeline.Step, 0, 6+len(opts.prependCustomSteps))
+			steps = append(steps, opts.prependCustomSteps...)
+			steps = append(steps,
 				pipeline.NewHostScopeStep(nil),
 				pipeline.NewHTTPScopeStep(opts.scope),
 				pipeline.NewSafetyStep(opts.safetyEngine, slog.Default()),
 				pipeline.NewTransformStep(opts.transformEngine),
 				pipeline.NewInterceptStep(opts.interceptEngine, opts.holdQueue, slog.Default()),
-				pipeline.NewRecordStep(store, slog.Default(),
-					// USK-622: register the HTTP/1.x wire-encoder so that
-					// modified-variant RawBytes reflects the re-encoded
-					// header block + body instead of the ingress env.Raw
-					// that was captured before mutation.
-					pipeline.WithWireEncoder(envelope.ProtocolHTTP, http1.EncodeWireBytes),
-				),
-			}
+				pipeline.NewRecordStep(store, slog.Default(), recordOpts...),
+			)
 
 			p := pipeline.New(steps...)
 
 			// Lazy dial: return upstream channel on first forwarded envelope.
 			session.RunSession(ctx, clientCh, func(_ context.Context, _ *envelope.Envelope) (layer.Channel, error) {
 				return <-stack.UpstreamTopmost().Channels(), nil
-			}, p)
+			}, p, session.SessionOptions{
+				// USK-635: project State + FailureReason onto Stream so
+				// error-path tests can assert "error" + "internal_error".
+				OnComplete: func(cctx context.Context, streamID string, err error) {
+					state := "complete"
+					if err != nil && !errors.Is(err, io.EOF) {
+						state = "error"
+					}
+					if streamID != "" {
+						_ = store.UpdateStream(cctx, streamID, flow.StreamUpdate{
+							State:         state,
+							FailureReason: session.ClassifyError(err),
+						})
+					}
+				},
+			})
 		},
 	}
 
@@ -481,8 +527,13 @@ func TestHTTPSMITM_BasicRoundtrip(t *testing.T) {
 	if streams[0].Protocol != "http" {
 		t.Errorf("stream protocol = %q, want %q", streams[0].Protocol, "http")
 	}
-	if streams[0].State != "active" {
-		t.Errorf("stream state = %q, want %q", streams[0].State, "active")
+	// USK-635: the http1 helper now wires session.SessionOptions.OnComplete
+	// so Stream.State transitions to "complete" on EOF, mirroring h2's
+	// integration test precedent. The prior assertion expected "active"
+	// because state was never projected; that was a wiring gap in the old
+	// helper, not a contract.
+	if streams[0].State != "complete" {
+		t.Errorf("stream state = %q, want %q", streams[0].State, "complete")
 	}
 
 	// USK-619 (h1 parity): Stream.ConnInfo must reflect upstream TLS

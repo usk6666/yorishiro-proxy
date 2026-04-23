@@ -1348,11 +1348,11 @@ func (transformReleaseStep) Process(_ context.Context, env *envelope.Envelope) p
 }
 
 // TestRunSession_BodyBufferBackstop_ContinuePath verifies that the backstop
-// Releases exactly the snapshot Retain that Pipeline.Run added. The test
-// simulates the Layer's own Release by calling Release once after the session
-// ends; if the backstop worked the refcount is now zero and the temp file has
-// been removed. If the backstop were missing the refcount would stay at 1 and
-// the file would leak.
+// Releases both outstanding Retains on a disk-backed body at session end:
+// the Layer-owned Retain from bodybuf.NewFile plus the Pipeline.Run variant-
+// snapshot Retain. No manual Release is issued — any additional Release would
+// panic with Release-below-zero, which is itself a useful assertion that the
+// accounting is exact.
 func TestRunSession_BodyBufferBackstop_ContinuePath(t *testing.T) {
 	dir := t.TempDir()
 	req := makeHTTPEnvelopeWithBuf(t, dir, envelope.Send, 0, []byte("request"))
@@ -1372,24 +1372,24 @@ func TestRunSession_BodyBufferBackstop_ContinuePath(t *testing.T) {
 		t.Fatalf("RunSession: %v", err)
 	}
 
-	// Simulate Layer Release (channel.Send zero-copy or channel.Close would do
-	// this in production). The backstop has already cancelled the snapshot
-	// Retain, so this Release drops refcount to zero and unlinks the file.
-	if err := reqBuf.Release(); err != nil {
-		t.Errorf("reqBuf final Release: %v", err)
+	// Both req and resp buffers should have been fully released by drain.
+	// Probe: Bytes() errors on a released buffer.
+	if _, err := reqBuf.Bytes(context.Background()); err == nil {
+		t.Error("expected reqBuf Bytes() to error after full teardown")
 	}
-	if err := respBuf.Release(); err != nil {
-		t.Errorf("respBuf final Release: %v", err)
+	if _, err := respBuf.Bytes(context.Background()); err == nil {
+		t.Error("expected respBuf Bytes() to error after full teardown")
 	}
 
 	if got := countSpillFiles(t, dir); got != 0 {
-		t.Errorf("after session+layer-sim release: spill files = %d, want 0 (leak)", got)
+		t.Errorf("after session: spill files = %d, want 0 (backstop must release both Retains)", got)
 	}
 }
 
 // TestRunSession_BodyBufferBackstop_DropPath covers the Drop branch of
 // Pipeline.Run where the envelope is discarded before Send. The backstop must
-// still release the snapshot Retain; without it the temp file leaks.
+// release BOTH the Layer Retain and the snapshot Retain (drop doesn't consume
+// the buffer anywhere downstream).
 func TestRunSession_BodyBufferBackstop_DropPath(t *testing.T) {
 	dir := t.TempDir()
 	req := makeHTTPEnvelopeWithBuf(t, dir, envelope.Send, 0, []byte("drop-me"))
@@ -1405,8 +1405,8 @@ func TestRunSession_BodyBufferBackstop_DropPath(t *testing.T) {
 		t.Fatalf("RunSession: %v", err)
 	}
 
-	if err := reqBuf.Release(); err != nil {
-		t.Errorf("reqBuf final Release: %v", err)
+	if _, err := reqBuf.Bytes(context.Background()); err == nil {
+		t.Error("expected reqBuf Bytes() to error after drop session teardown")
 	}
 	if got := countSpillFiles(t, dir); got != 0 {
 		t.Errorf("after drop session: spill files = %d, want 0", got)
@@ -1442,24 +1442,21 @@ func TestRunSession_BodyBufferBackstop_RespondPath(t *testing.T) {
 		t.Fatalf("RunSession: %v", err)
 	}
 
-	// req: Pipeline.Run Retain (+1) + session drain (-1) → net 0, still at 1
-	// from the Layer-sim ref. Final Release drops to 0.
-	if err := reqBuf.Release(); err != nil {
-		t.Errorf("reqBuf final Release: %v", err)
-	}
-	// customResp: NOT passed through Pipeline.Run (it is the resp, not the
-	// env). session.runPipelineTracked registers it on the Respond path
-	// separately. The session's single Release therefore drops refcount from
-	// 1 (constructor) straight to 0 and removes the file. A test-issued
-	// additional Release would panic — assert via file count instead.
+	// req: Layer Retain (+1) + Pipeline.Run snapshot Retain (+1) = 2. Drain
+	// Releases both (Respond path keeps msg.BodyBuffer == pre, so the backstop
+	// owns the Layer Retain). No manual Release — would panic.
+	// customResp: Layer Retain = 1, tracked by reg.trackEnvelope(resp), drain
+	// Releases once → refcount 0 → file removed. An additional Release would
+	// panic; assert via file count + Bytes() error instead.
 	if got := countSpillFiles(t, dir); got != 0 {
-		t.Errorf("after respond session + req final release: spill files = %d, want 0", got)
+		t.Errorf("after respond session: spill files = %d, want 0", got)
 	}
 
-	// Probe: respBuf should be dead. Bytes returns an error on a released
-	// buffer.
+	if _, err := reqBuf.Bytes(context.Background()); err == nil {
+		t.Error("expected reqBuf Bytes() to error after session teardown")
+	}
 	if _, err := respBuf.Bytes(context.Background()); err == nil {
-		t.Error("expected respBuf Bytes() to error after session Release")
+		t.Error("expected respBuf Bytes() to error after session teardown")
 	}
 }
 
@@ -1483,8 +1480,11 @@ func TestRunSession_BodyBufferBackstop_DialFailure(t *testing.T) {
 		t.Fatalf("RunSession err = %v, want wrap of %v", err, dialErr)
 	}
 
-	if err := reqBuf.Release(); err != nil {
-		t.Errorf("reqBuf final Release: %v", err)
+	// Dial failure means no channel.Send ever ran — the backstop must release
+	// both Retains (Layer + snapshot) so the temp file is unlinked. No manual
+	// Release — would panic on the zero refcount.
+	if _, err := reqBuf.Bytes(context.Background()); err == nil {
+		t.Error("expected reqBuf Bytes() to error after dial-failure teardown")
 	}
 	if got := countSpillFiles(t, dir); got != 0 {
 		t.Errorf("after dial failure: spill files = %d, want 0", got)
@@ -1593,11 +1593,12 @@ func TestRunSession_BodyBufferBackstop_MultipleEnvelopes(t *testing.T) {
 		t.Fatalf("RunSession: %v", err)
 	}
 
-	// Simulate Layer Release for each envelope. After this all refcounts
-	// should be zero and all temp files removed.
+	// Backstop releases Layer+snapshot for every envelope; file count must
+	// drop to zero purely from drain. An additional manual Release would
+	// panic on the zero refcount.
 	for i, b := range bufs {
-		if err := b.Release(); err != nil {
-			t.Errorf("bufs[%d] final Release: %v", i, err)
+		if _, err := b.Bytes(context.Background()); err == nil {
+			t.Errorf("bufs[%d] Bytes() succeeded post-drain; expected released", i)
 		}
 	}
 	if got := countSpillFiles(t, dir); got != 0 {

@@ -129,15 +129,38 @@ func (r *bodyBufRegistry) drain() {
 	}
 }
 
-// runPipelineTracked runs p on env and registers the Pipeline's snapshot
-// Retain with reg. It captures the pre-Run HTTPMessage.BodyBuffer pointer
-// because Transform commit sets env.Message.BodyBuffer to nil, making the
-// post-Run inspection insufficient. Respond-path resp envelopes are also
-// tracked: no current Step populates resp.Message.BodyBuffer, but the
-// pre-emptive track prevents a future Step from introducing a leak.
+// runPipelineTracked runs p on env and registers the buffer refcounts that
+// the session backstop must Release at drain time.
+//
+// Refcount accounting (USK-635 follow-up to USK-634):
+// Every disk-backed HTTP body arrives with two outstanding Retains that the
+// session is responsible for releasing at end of session:
+//
+//  1. The Layer-owned Retain from bodybuf.NewFile at parse time. The downstream
+//     channel.Send reads the buffer to emit wire bytes but does NOT Release
+//     (the buffer is immutable wire source for zero-copy fidelity). For the
+//     Drop / Respond / DialFailure paths the buffer is never Sent, so nothing
+//     consumes this Retain either. The session backstop therefore owns it —
+//     EXCEPT on the Transform commit path, where TransformReplaceBody calls
+//     msg.BodyBuffer.Release() + msg.BodyBuffer = nil to swap in the rewritten
+//     bytes. We detect that case via pointer identity: if post-Run
+//     msg.BodyBuffer is nil (or different from pre), Transform already
+//     cancelled the Layer Retain and the backstop must not.
+//
+//  2. The Pipeline.Run variant-snapshot Retain from HTTPMessage.CloneMessage.
+//     The snapshot lives only inside the ctx threaded into Run; when Run
+//     returns the ctx goes out of scope and Go's GC can reclaim the snapshot
+//     struct, but the BodyBuffer's refcount never decrements automatically.
+//     The backstop always owns this Retain (one per Pipeline.Run invocation
+//     with a non-nil pre-Run BodyBuffer).
+//
+// For the synthetic resp envelope on the Respond path: its BodyBuffer (if
+// any) was not traversed by Pipeline.Run so it holds only the Layer Retain
+// — one track is enough. No current Step populates resp.Message.BodyBuffer
+// but the pre-emptive track prevents a future Step from introducing a leak.
 //
 // Panic safety: a Step panic inside p.Run unwinds through this function
-// without reaching the post-Run reg.track(pre). This is intentional —
+// without reaching the post-Run reg.track calls. This is intentional —
 // errgroup (golang.org/x/sync/errgroup v0.19.0) does not recover panics, so
 // a Step panic terminates the process. Any deferred registration at this
 // layer would not run either (the process dies before RunSession's
@@ -158,7 +181,17 @@ func runPipelineTracked(
 
 	outEnv, action, resp := p.Run(ctx, env)
 
-	reg.track(pre)
+	if pre != nil {
+		// Always register the Pipeline snapshot Retain (Clone added one).
+		reg.track(pre)
+		// Additionally register the Layer Retain unless Transform's commit
+		// path already Released it. Transform sets msg.BodyBuffer=nil; any
+		// other outcome (nil pre, pointer unchanged) means the Layer Retain
+		// is still outstanding and the backstop owns it.
+		if m, ok := outEnv.Message.(*envelope.HTTPMessage); ok && m != nil && m.BodyBuffer == pre {
+			reg.track(pre)
+		}
+	}
 	if action == pipeline.Respond {
 		reg.trackEnvelope(resp)
 	}
