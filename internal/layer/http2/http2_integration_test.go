@@ -41,6 +41,7 @@ import (
 	h2frame "github.com/usk6666/yorishiro-proxy/internal/layer/http2/frame"
 	h2hpack "github.com/usk6666/yorishiro-proxy/internal/layer/http2/hpack"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/http2/pool"
+	"github.com/usk6666/yorishiro-proxy/internal/layer/httpaggregator"
 	"github.com/usk6666/yorishiro-proxy/internal/pipeline"
 	"github.com/usk6666/yorishiro-proxy/internal/pushrecorder"
 	"github.com/usk6666/yorishiro-proxy/internal/rules/common"
@@ -307,7 +308,7 @@ func buildPipeline(store flow.Writer, opts pipelineOpts) *pipeline.Pipeline {
 	// env.Raw that was captured before mutation.
 	// USK-635: MaxBodySize override is opt-in for the exceed-cap test path.
 	recordOpts := []pipeline.Option{
-		pipeline.WithWireEncoder(envelope.ProtocolHTTP, intHTTP2.EncodeWireBytes),
+		pipeline.WithWireEncoder(envelope.ProtocolHTTP, httpaggregator.EncodeWireBytes),
 	}
 	if opts.recordMaxBodySize > 0 {
 		recordOpts = append(recordOpts, pipeline.WithMaxBodySize(opts.recordMaxBodySize))
@@ -331,6 +332,13 @@ func startH2CProxy(t *testing.T, ctx context.Context, upstreamAddr string, opts 
 	store = &testStore{}
 
 	onStream := func(streamCtx context.Context, clientCh layer.Channel) {
+		// USK-637: wrap the event-granular client channel with the
+		// aggregator so Pipeline sees HTTPMessage envelopes.
+		aggClient, derr := connector.DispatchH2Stream(streamCtx, clientCh, httpaggregator.RoleServer, httpaggregator.WrapOptions{}, slog.Default())
+		if derr != nil {
+			_ = clientCh.Close()
+			return
+		}
 		dial := func(dialCtx context.Context, env *envelope.Envelope) (layer.Channel, error) {
 			// Dial upstream h2c via a raw TCP connection + ClientRole layer.
 			upConn, err := net.DialTimeout("tcp", upstreamAddr, 5*time.Second)
@@ -344,7 +352,6 @@ func startH2CProxy(t *testing.T, ctx context.Context, upstreamAddr string, opts 
 				upConn.Close()
 				return nil, err
 			}
-			// Close the layer when the stream closes: we track it via stream context.
 			ch, err := upLayer.OpenStream(dialCtx)
 			if err != nil {
 				upLayer.Close()
@@ -354,10 +361,11 @@ func startH2CProxy(t *testing.T, ctx context.Context, upstreamAddr string, opts 
 				<-dialCtx.Done()
 				upLayer.Close()
 			}()
-			return ch, nil
+			// Wrap upstream client-role event channel with aggregator.
+			return httpaggregator.Wrap(ch, httpaggregator.RoleClient, nil, httpaggregator.OptionsFromLayer(upLayer)), nil
 		}
 		pipe := buildPipeline(store, opts)
-		session.RunSession(streamCtx, clientCh, dial, pipe, session.SessionOptions{
+		session.RunSession(streamCtx, aggClient, dial, pipe, session.SessionOptions{
 			OnComplete: func(cctx context.Context, streamID string, err error) {
 				state := "complete"
 				if err != nil && !errors.Is(err, io.EOF) {
@@ -420,6 +428,8 @@ func startH2MITMProxy(t *testing.T, ctx context.Context, buildCfg *connector.Bui
 			t.Errorf("stack.ClientTopmost is not *http2.Layer")
 			return
 		}
+		clientLOpts := httpaggregator.OptionsFromLayer(clientL)
+		upstreamLOpts := httpaggregator.OptionsFromLayer(upstreamH2)
 		var wg sync.WaitGroup
 		for {
 			select {
@@ -434,11 +444,24 @@ func startH2MITMProxy(t *testing.T, ctx context.Context, buildCfg *connector.Bui
 				wg.Add(1)
 				go func(ch layer.Channel) {
 					defer wg.Done()
+					// USK-637: peek the first H2HeadersEvent for gRPC
+					// detection, then wrap with HTTPAggregator.
+					aggCh, derr := connector.DispatchH2Stream(cbCtx, ch, httpaggregator.RoleServer, clientLOpts, slog.Default())
+					if derr != nil {
+						_ = ch.Close()
+						return
+					}
 					dial := func(dctx context.Context, env *envelope.Envelope) (layer.Channel, error) {
-						return upstreamH2.OpenStream(dctx)
+						upCh, oerr := upstreamH2.OpenStream(dctx)
+						if oerr != nil {
+							return nil, oerr
+						}
+						// Wrap upstream client-role event channel with
+						// aggregator (no peek — we open the stream).
+						return httpaggregator.Wrap(upCh, httpaggregator.RoleClient, nil, upstreamLOpts), nil
 					}
 					pipe := buildPipeline(store, opts)
-					session.RunSession(cbCtx, ch, dial, pipe, session.SessionOptions{
+					session.RunSession(cbCtx, aggCh, dial, pipe, session.SessionOptions{
 						OnComplete: func(cctx context.Context, streamID string, err error) {
 							state := "complete"
 							if err != nil && !errors.Is(err, io.EOF) {

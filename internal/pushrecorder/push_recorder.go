@@ -36,6 +36,7 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/layer"
 	intHTTP2 "github.com/usk6666/yorishiro-proxy/internal/layer/http2"
+	"github.com/usk6666/yorishiro-proxy/internal/layer/httpaggregator"
 	"github.com/usk6666/yorishiro-proxy/internal/pipeline"
 	"github.com/usk6666/yorishiro-proxy/internal/session"
 )
@@ -72,6 +73,8 @@ func RunUpstream(ctx context.Context, upstreamH2 *intHTTP2.Layer, store flow.Wri
 		logger = slog.Default()
 	}
 
+	lopts := httpaggregator.OptionsFromLayer(upstreamH2)
+
 	var wg sync.WaitGroup
 	for {
 		select {
@@ -84,9 +87,7 @@ func RunUpstream(ctx context.Context, upstreamH2 *intHTTP2.Layer, store flow.Wri
 				return
 			}
 			// Defence in depth: only push channels should arrive on a
-			// ClientRole Layer's Channels(). If a non-push channel slips
-			// through (e.g., future Layer changes), drop it — session owns
-			// non-push upstream channels, not this recorder.
+			// ClientRole Layer's Channels().
 			if !intHTTP2.IsPushChannel(ch) {
 				logger.Debug("pushrecorder: non-push channel on upstream Layer ignored",
 					"stream_id", ch.StreamID())
@@ -96,18 +97,34 @@ func RunUpstream(ctx context.Context, upstreamH2 *intHTTP2.Layer, store flow.Wri
 			wg.Add(1)
 			go func(pushCh layer.Channel) {
 				defer wg.Done()
-				record(ctx, pushCh, store, logger)
+				// USK-637: push channels are event-granular post-split.
+				// Wrap with the HTTPAggregator so the recorder sees one
+				// HTTPMessage envelope (built from the synthetic
+				// PUSH_PROMISE H2HeadersEvent the Layer delivered as the
+				// push channel's first envelope) and subsequent response
+				// headers/body/trailers as a second aggregated envelope.
+				//
+				// The synthetic first event carries EndStream=true (see
+				// http2.handleStreamPushPromise) so the aggregator emits
+				// it immediately as a bodyless HTTPMessage — matching the
+				// pre-split behavior where ensureStream used the first
+				// envelope's HTTPMessage to seed the Stream row.
+				aggCh := httpaggregator.Wrap(pushCh, httpaggregator.RoleClient, nil, lopts)
+				record(ctx, aggCh, pushCh, store, logger)
 			}(ch)
 		}
 	}
 }
 
-// record drains one push channel to the store.
-func record(ctx context.Context, ch layer.Channel, store flow.Writer, logger *slog.Logger) {
-	defer ch.Close()
+// record drains one push channel to the store. aggCh is the aggregator-
+// wrapped channel used for envelope iteration; rawCh is the underlying
+// event-granular channel (used for IsPushChannel / PushOriginChannelStreamID
+// type assertions that the aggregator does not forward).
+func record(ctx context.Context, aggCh, rawCh layer.Channel, store flow.Writer, logger *slog.Logger) {
+	defer aggCh.Close()
 
-	streamID := ch.StreamID()
-	origin, _ := intHTTP2.PushOriginChannelStreamID(ch)
+	streamID := rawCh.StreamID()
+	origin, _ := intHTTP2.PushOriginChannelStreamID(rawCh)
 
 	p := pipeline.New(
 		pipeline.NewHostScopeStep(nil),
@@ -116,7 +133,7 @@ func record(ctx context.Context, ch layer.Channel, store flow.Writer, logger *sl
 
 	streamCreated := false
 	for {
-		env, err := ch.Next(ctx)
+		env, err := aggCh.Next(ctx)
 		if err != nil {
 			finalizeStream(ctx, store, logger, streamID, origin, streamCreated, err)
 			return
