@@ -73,6 +73,7 @@ Spolsky の警告は「既存コードに蓄積された無数のエッジケー
 | `internal/layer/tlslayer/` | TLS handshake の関数群を Server/Client の関数として再編 |
 | `internal/layer/http1/layer.go`, `channel.go` | parser は流用、しかし Codec → Layer の concept 変換がある |
 | `internal/layer/http2/` 全体 | HTTP/2 の multiplexing を layer として再設計 (M40 以前の設計は放棄) |
+| `internal/layer/httpaggregator/` (新規) | 2026-04-23 §9.1/§9.2 改訂の aftermath。event-granular H2 Channel 上で HTTPMessage を作る wrapper。N6.7 で N6/N6.5/N6.6 の aggregation ロジックをここに切り出す (アルゴリズム流用 85%) |
 | `internal/layer/ws/`, `grpc/`, `grpcweb/`, `sse/` | application layer として再設計 |
 | `internal/pipeline/*_step.go` 全部 | type-switch dispatch の書き方は現行と別物 |
 | `internal/pipeline/pipeline.go`, `snapshot.go` | interface 自体はほぼ同じだが、Envelope 型になるのと Message.CloneMessage() を使うので書き直し (コピペではなく) |
@@ -350,9 +351,9 @@ RFC を accepted にした以上、実装時の誘惑に抗うために明示化
 2. Pipeline 駆動の back-pressure
 3. Intercept を非同期化
 
-**解決 (RFC 提案):** Option 1 + per-stream buffer cap + 超過時 RST_STREAM。
+**解決 (RFC 正式 resolution, 2026-04-23 再起草版):** event-granular HTTP/2 Layer + per-stream BodyBuffer + soft/hard cap。WINDOW_UPDATE は buffer append 時点で送信 (Pipeline 消費とは decouple)。plain HTTP 用の aggregation は `HTTPAggregatorLayer` に分離 (Friction 4-D 参照)。
 
-**状態:** Open Question #1 として追跡。**N6 着手前に決定必須**。
+**状態:** **RESOLVED** (RFC §9.1 正式 resolution, 2026-04-23 再起草)。実装は N6 / N6.5 / N6.6 で in-layer aggregation 版が完了しており、N6.7 で event-granular + HTTPAggregatorLayer へリファクタする。
 
 ### Friction 3-D: stream lifecycle error の区別
 
@@ -377,18 +378,47 @@ HTTP/2 layer が RST_STREAM frame を受けたとき、ErrorCode を翻訳して
 
 **状態:** 解決済み (RFC §3.3.2, §4.4 に反映)
 
-### Friction 4-B: gRPC Envelope 粒度
+### Friction 4-B: gRPC Envelope 粒度 [RESOLVED 2026-04-23]
 
 **問題:** 1 gRPC RPC = HEADERS + DATA* + trailer-HEADERS。これをどう Envelope に割るか。
 
-**選択肢 (RFC §9.2 に記載済み):**
-1. frame-per-envelope (HEADERS = HTTPMessage, each DATA = GRPCMessage, trailers = HTTPMessage with Trailers)
-2. message-per-envelope (aggregate)
-3. rpc-per-envelope (unary only works)
+**解決 (RFC §9.2 正式 resolution):** **event-per-envelope + 専用 Message 型**。
+- `GRPCStartMessage` (HEADERS; request-side / response-side 各 1)
+- `GRPCDataMessage` (each length-prefixed gRPC message; LPM 単位で reassembly)
+- `GRPCEndMessage` (trailer HEADERS; grpc-status / grpc-message / grpc-status-details-bin を parsed で持つ)
 
-**解決 (暫定):** Option 1。Pipeline Step が複数 Envelope をまたいで accumulate したい場合は StreamID で束ねる。
+粒度は **LPM 単位** であって HTTP/2 DATA frame 単位ではない (frame 境界と LPM 境界は独立)。`Envelope.Raw` は wire そのままの bytes を持つ (compressed なら compressed のまま)。`GRPCDataMessage.Payload` は常に decompressed (UI/intercept での観察容易性)。
 
-**状態:** Open Question #2 として追跡。**N7 着手前に決定必須**。
+**HTTPMessage は流用しない**。理由: trailers を HTTPMessage に詰めると Method/URL/Status/Body 空の "type-system lie" が生まれ、§3.1 design rule に反する。
+
+**関連決定 (Friction 4-D / 4-E として分離管理)**:
+- §9.1 の "in-layer aggregation" 初版 resolution は、gRPC streaming と両立しないため 2026-04-23 に再起草。HTTP/2 Layer は event-granular になり、aggregation は `HTTPAggregatorLayer` wrapper に分離 (下記 Friction 4-D 参照)。
+- N6/N6.5/N6.6 で実装した HTTP/2 Layer の aggregation ロジックは破棄せず、HTTPAggregatorLayer へそのまま移設する (N6.7 aftermath、85% 流用)。
+
+**状態:** **RESOLVED**。N7 着手前の blocker は解除。実装詳細は N6.7 で Layer 切り分け完了後に N7 (gRPC 実装) に着手する。
+
+### Friction 4-D: HTTP/2 Layer 分割 (N6 aftermath)
+
+**問題:** §9.1 初版 resolution は HTTP/2 Layer が HEADERS+DATA+TRAILERS を aggregate して HTTPMessage を返す設計だった。しかし §9.2 で gRPC streaming を first-class に扱うことが決まった (event-per-envelope)。streaming RPC では aggregate する対象 (END_STREAM) がいつ来るか分からないため、in-layer aggregation は成立しない。
+
+**解決:** HTTP/2 Layer を二層構造に分解する。
+
+```
+internal/layer/http2/          ← event-granular (H2HeadersEvent / H2DataEvent / H2TrailersEvent)
+                                  BodyBuffer-driven flow control
+                                  per-stream soft cap → stream-level stall / disk spill
+                                  per-stream hard cap → RST_STREAM
+internal/layer/httpaggregator/ ← wrapper: 上記 event stream → HTTPMessage (plain HTTP/2 向け)
+                                  GRPCLayer は別 wrapper として並列に存在
+```
+
+**移設方針:**
+- 現 http2 Layer の内部 aggregation ロジック・BodyBuffer integration は **アルゴリズムそのまま** httpaggregator へ。
+- 公開 API: 現 http2 Channel の Next() が HTTPMessage を返していたのを、event 型 (H2HeadersEvent / H2DataEvent / H2TrailersEvent) を返すように変更。
+- plain HTTP/2 呼び出し経路に httpaggregator.Wrap を挿入。ユーザから見た挙動は完全に変わらない (N6.5 の e2e test がそのまま通るのが受け入れ基準)。
+- gRPC 検出経路 (peek first HEADERS → isGRPC) は httpaggregator を通さず、直接 GRPCLayer.Wrap に渡す。
+
+**状態:** **N6.7 として Linear に追加**。N7 (gRPC) 着手の prerequisite。N6.5 の BodyBuffer 資産がそのまま per-stream buffer として効く (新規実装ほぼ不要)。
 
 ### Friction 4-C: gRPC-Web の HTTP/1 と HTTP/2 両対応
 
@@ -693,8 +723,8 @@ RFC-001 の Envelope.StreamID / Envelope.FlowID はこの schema にそのまま
 
 ### Open Questions の解決タイミング (再掲)
 
-- **Open Question #1 (HTTP/2 flow control × Pipeline latency)** — N6 着手前に解決必須
-- **Open Question #2 (gRPC envelope granularity)** — N7 着手前に解決必須
+- **Open Question #1 (HTTP/2 flow control × Pipeline latency)** — ✅ **RESOLVED** 2026-04-15 (初版) / 2026-04-23 (再起草: event-granular Layer + HTTPAggregatorLayer wrapper)
+- **Open Question #2 (gRPC envelope granularity)** — ✅ **RESOLVED** 2026-04-23 (event-per-envelope + GRPCStart/Data/End 型)
 - **Open Question #3 (Starlark plugin API shape)** — N8 着手前に解決必須
 
 解決は「RFC §9 を読み返す → 選択肢の pros/cons を再評価 → RFC に decision ブロックを追加 → 実装開始」の順。
@@ -728,6 +758,6 @@ RFC-001 の Envelope.StreamID / Envelope.FlowID はこの schema にそのまま
 
 ---
 
-**最終更新:** 2026-04-12
+**最終更新:** 2026-04-23 (§9.1 再起草 + §9.2 正式 resolution + Friction 4-B/4-D 追加 + N6.7 追加)
 
-**次の変更タイミング:** N2 (raw smuggling E2E) 完了時、N6 着手前 (Open Question #1 解決時)、N7 着手前 (同 #2)、N8 着手前 (同 #3)。各タイミングで本文書を更新し、解決した Open Question は §7 から正式な「決定事項」へ昇格させる。
+**次の変更タイミング:** N6.7 (HTTP/2 Layer 分割) 完了時、N7 (gRPC 実装) 完了時、N8 着手前 (OQ#3 解決時)。各タイミングで本文書を更新し、解決した Open Question は §7 から正式な「決定事項」へ昇格させる。
