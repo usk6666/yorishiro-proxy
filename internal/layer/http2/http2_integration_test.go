@@ -296,21 +296,30 @@ type pipelineOpts struct {
 	transformEngine *httprules.TransformEngine
 	safetyEngine    *httprules.SafetyEngine
 	holdQueue       *common.HoldQueue
+	// recordMaxBodySize caps flow.Flow.Body when RecordStep materializes a
+	// BodyBuffer. Zero means "use config.MaxBodySize".
+	recordMaxBodySize int64
 }
 
 func buildPipeline(store flow.Writer, opts pipelineOpts) *pipeline.Pipeline {
+	// USK-622: register the HTTP/2 wire-encoder so that modified-variant
+	// RawBytes reflects the re-encoded frame bytes instead of the ingress
+	// env.Raw that was captured before mutation.
+	// USK-635: MaxBodySize override is opt-in for the exceed-cap test path.
+	recordOpts := []pipeline.Option{
+		pipeline.WithWireEncoder(envelope.ProtocolHTTP, intHTTP2.EncodeWireBytes),
+	}
+	if opts.recordMaxBodySize > 0 {
+		recordOpts = append(recordOpts, pipeline.WithMaxBodySize(opts.recordMaxBodySize))
+	}
+
 	steps := []pipeline.Step{
 		pipeline.NewHostScopeStep(nil),
 		pipeline.NewHTTPScopeStep(nil),
 		pipeline.NewSafetyStep(opts.safetyEngine, slog.Default()),
 		pipeline.NewTransformStep(opts.transformEngine),
 		pipeline.NewInterceptStep(opts.interceptEngine, opts.holdQueue, slog.Default()),
-		pipeline.NewRecordStep(store, slog.Default(),
-			// USK-622: register the HTTP/2 wire-encoder so that modified-
-			// variant RawBytes reflects the re-encoded frame bytes instead
-			// of the ingress env.Raw that was captured before mutation.
-			pipeline.WithWireEncoder(envelope.ProtocolHTTP, intHTTP2.EncodeWireBytes),
-		),
+		pipeline.NewRecordStep(store, slog.Default(), recordOpts...),
 	}
 	return pipeline.New(steps...)
 }
@@ -490,6 +499,17 @@ func makeBuildCfg(t *testing.T, h2Pool *pool.Pool) *connector.BuildConfig {
 		InsecureSkipVerify: true,
 		HTTP2Pool:          h2Pool,
 	}
+}
+
+// makeBuildCfgWithBody is makeBuildCfg plus body-spill configuration (USK-635).
+// Zero values for spillDir/threshold/maxBody fall back to the layer defaults.
+func makeBuildCfgWithBody(t *testing.T, h2Pool *pool.Pool, spillDir string, threshold, maxBody int64) *connector.BuildConfig {
+	t.Helper()
+	cfg := makeBuildCfg(t, h2Pool)
+	cfg.BodySpillDir = spillDir
+	cfg.BodySpillThreshold = threshold
+	cfg.MaxBodySize = maxBody
+	return cfg
 }
 
 // ---------------------------------------------------------------------------
