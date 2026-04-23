@@ -5,11 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
+	"github.com/usk6666/yorishiro-proxy/internal/envelope/bodybuf"
 	"github.com/usk6666/yorishiro-proxy/internal/layer"
 	"github.com/usk6666/yorishiro-proxy/internal/pipeline"
 )
@@ -1255,5 +1257,350 @@ func TestClassifyError(t *testing.T) {
 				t.Errorf("ClassifyError(%v) = %q, want %q", tc.err, got, tc.want)
 			}
 		})
+	}
+}
+
+// --- USK-634: session body-buffer backstop -----------------------------------
+//
+// The backstop exists because Pipeline.Run's variant-snapshot Clone calls
+// HTTPMessage.CloneMessage, which calls BodyBuffer.Retain. The snapshot is
+// reachable only through the ctx threaded into Run; once Run returns that ctx
+// goes out of scope, and Go's GC will happily reclaim the snapshot struct
+// without decrementing the BodyBuffer's refcount. Without the backstop the
+// temp file would leak on every exchange where Pipeline.Run saw a
+// BodyBuffer — i.e. every disk-backed-body request or response.
+//
+// These tests model the Layer's refcount ownership by constructing buffers at
+// refCount=1 (bodybuf.NewFile's default, matching what a Layer assembler would
+// produce) and asserting the outcome the session observes. For pass-through
+// paths the test issues a final manual Release after the session returns, to
+// mirror the channel.Send zero-copy / channel.Close Release a real Layer would
+// perform. The file-count assertion then checks that backstop + Layer-sim
+// Release together drop the refcount to zero.
+//
+// For Transform-style paths the Step itself Releases one ref (the Layer's
+// ref, in the real system), so the post-session state is already refCount=0
+// and the test must not issue another Release (which would panic under the
+// sync.WaitGroup.Done()-style contract of bodybuf.Release on a zero refcount).
+
+// bodyBufSpillPrefix matches config.BodySpillPrefix. Hardcoded to avoid an
+// import cycle via internal/config.
+const bodyBufSpillPrefix = "yorishiro-body-"
+
+// makeHTTPEnvelopeWithBuf constructs an HTTPMessage envelope carrying a
+// freshly allocated file-backed BodyBuffer at refCount=1. The buffer is
+// pre-populated with payload so its temp file exists on disk.
+func makeHTTPEnvelopeWithBuf(t *testing.T, dir string, dir_ envelope.Direction, seq int, payload []byte) *envelope.Envelope {
+	t.Helper()
+	buf, err := bodybuf.NewFile(dir, bodyBufSpillPrefix, 1<<20)
+	if err != nil {
+		t.Fatalf("bodybuf.NewFile: %v", err)
+	}
+	if _, err := buf.Write(payload); err != nil {
+		t.Fatalf("bodybuf.Write: %v", err)
+	}
+	return &envelope.Envelope{
+		Direction: dir_,
+		Sequence:  seq,
+		Protocol:  envelope.ProtocolHTTP,
+		Raw:       append([]byte(nil), payload...),
+		Message: &envelope.HTTPMessage{
+			Method:     "POST",
+			Path:       "/",
+			BodyBuffer: buf,
+		},
+	}
+}
+
+// countSpillFiles returns the number of yorishiro-body-*- files in dir.
+func countSpillFiles(t *testing.T, dir string) int {
+	t.Helper()
+	matches, err := filepath.Glob(filepath.Join(dir, bodyBufSpillPrefix+"*"))
+	if err != nil {
+		t.Fatalf("filepath.Glob: %v", err)
+	}
+	return len(matches)
+}
+
+// envelopeBuf extracts the BodyBuffer pointer from an HTTPMessage envelope.
+func envelopeBuf(t *testing.T, env *envelope.Envelope) *bodybuf.BodyBuffer {
+	t.Helper()
+	m, ok := env.Message.(*envelope.HTTPMessage)
+	if !ok || m == nil {
+		t.Fatalf("envelope is not HTTPMessage: %#v", env.Message)
+	}
+	return m.BodyBuffer
+}
+
+// transformReleaseStep models rules/http.TransformEngine's ReplaceBody commit:
+// it Releases the current envelope's BodyBuffer and nils the pointer. The
+// snapshot taken at Pipeline.Run entry still holds its own Retain'd reference,
+// which only the session backstop can Release.
+type transformReleaseStep struct{}
+
+func (transformReleaseStep) Process(_ context.Context, env *envelope.Envelope) pipeline.Result {
+	if m, ok := env.Message.(*envelope.HTTPMessage); ok && m != nil && m.BodyBuffer != nil {
+		_ = m.BodyBuffer.Release()
+		m.BodyBuffer = nil
+		m.Body = []byte("transformed")
+	}
+	return pipeline.Result{Action: pipeline.Continue}
+}
+
+// TestRunSession_BodyBufferBackstop_ContinuePath verifies that the backstop
+// Releases exactly the snapshot Retain that Pipeline.Run added. The test
+// simulates the Layer's own Release by calling Release once after the session
+// ends; if the backstop worked the refcount is now zero and the temp file has
+// been removed. If the backstop were missing the refcount would stay at 1 and
+// the file would leak.
+func TestRunSession_BodyBufferBackstop_ContinuePath(t *testing.T) {
+	dir := t.TempDir()
+	req := makeHTTPEnvelopeWithBuf(t, dir, envelope.Send, 0, []byte("request"))
+	resp := makeHTTPEnvelopeWithBuf(t, dir, envelope.Receive, 0, []byte("response"))
+	reqBuf := envelopeBuf(t, req)
+	respBuf := envelopeBuf(t, resp)
+
+	if got := countSpillFiles(t, dir); got != 2 {
+		t.Fatalf("setup: spill files = %d, want 2", got)
+	}
+
+	clientCh := &mockChannel{streamID: "s", nextEnvelopes: []*envelope.Envelope{req}}
+	upstreamCh := &mockChannel{streamID: "u", nextEnvelopes: []*envelope.Envelope{resp}}
+	dial := func(_ context.Context, _ *envelope.Envelope) (layer.Channel, error) { return upstreamCh, nil }
+
+	if err := RunSession(context.Background(), clientCh, dial, pipeline.New(passStep{})); err != nil {
+		t.Fatalf("RunSession: %v", err)
+	}
+
+	// Simulate Layer Release (channel.Send zero-copy or channel.Close would do
+	// this in production). The backstop has already cancelled the snapshot
+	// Retain, so this Release drops refcount to zero and unlinks the file.
+	if err := reqBuf.Release(); err != nil {
+		t.Errorf("reqBuf final Release: %v", err)
+	}
+	if err := respBuf.Release(); err != nil {
+		t.Errorf("respBuf final Release: %v", err)
+	}
+
+	if got := countSpillFiles(t, dir); got != 0 {
+		t.Errorf("after session+layer-sim release: spill files = %d, want 0 (leak)", got)
+	}
+}
+
+// TestRunSession_BodyBufferBackstop_DropPath covers the Drop branch of
+// Pipeline.Run where the envelope is discarded before Send. The backstop must
+// still release the snapshot Retain; without it the temp file leaks.
+func TestRunSession_BodyBufferBackstop_DropPath(t *testing.T) {
+	dir := t.TempDir()
+	req := makeHTTPEnvelopeWithBuf(t, dir, envelope.Send, 0, []byte("drop-me"))
+	reqBuf := envelopeBuf(t, req)
+
+	clientCh := &mockChannel{streamID: "s", nextEnvelopes: []*envelope.Envelope{req}}
+	dial := func(_ context.Context, _ *envelope.Envelope) (layer.Channel, error) {
+		t.Error("dial should not be called on Drop path")
+		return &mockChannel{}, nil
+	}
+
+	if err := RunSession(context.Background(), clientCh, dial, pipeline.New(dropStep{})); err != nil {
+		t.Fatalf("RunSession: %v", err)
+	}
+
+	if err := reqBuf.Release(); err != nil {
+		t.Errorf("reqBuf final Release: %v", err)
+	}
+	if got := countSpillFiles(t, dir); got != 0 {
+		t.Errorf("after drop session: spill files = %d, want 0", got)
+	}
+}
+
+// TestRunSession_BodyBufferBackstop_RespondPath covers the Respond branch,
+// where the Step synthesizes a response envelope that is sent back to the
+// client without touching the upstream. Both the original request's
+// BodyBuffer (snapshot Retain) AND the synthetic response's BodyBuffer must
+// be tracked. No current Step populates resp.Message.BodyBuffer, but the
+// backstop registers it defensively — any future plugin or rule that
+// synthesizes a body-carrying response must not leak its buffer.
+func TestRunSession_BodyBufferBackstop_RespondPath(t *testing.T) {
+	dir := t.TempDir()
+	req := makeHTTPEnvelopeWithBuf(t, dir, envelope.Send, 0, []byte("blocked-request"))
+	customResp := makeHTTPEnvelopeWithBuf(t, dir, envelope.Receive, 0, []byte("custom-response"))
+	reqBuf := envelopeBuf(t, req)
+	respBuf := envelopeBuf(t, customResp)
+
+	if got := countSpillFiles(t, dir); got != 2 {
+		t.Fatalf("setup: spill files = %d, want 2", got)
+	}
+
+	clientCh := &mockChannel{streamID: "s", nextEnvelopes: []*envelope.Envelope{req}}
+	dial := func(_ context.Context, _ *envelope.Envelope) (layer.Channel, error) {
+		t.Error("dial should not be called on Respond path")
+		return &mockChannel{}, nil
+	}
+
+	p := pipeline.New(respondStep{resp: customResp})
+	if err := RunSession(context.Background(), clientCh, dial, p); err != nil {
+		t.Fatalf("RunSession: %v", err)
+	}
+
+	// req: Pipeline.Run Retain (+1) + session drain (-1) → net 0, still at 1
+	// from the Layer-sim ref. Final Release drops to 0.
+	if err := reqBuf.Release(); err != nil {
+		t.Errorf("reqBuf final Release: %v", err)
+	}
+	// customResp: NOT passed through Pipeline.Run (it is the resp, not the
+	// env). session.runPipelineTracked registers it on the Respond path
+	// separately. The session's single Release therefore drops refcount from
+	// 1 (constructor) straight to 0 and removes the file. A test-issued
+	// additional Release would panic — assert via file count instead.
+	if got := countSpillFiles(t, dir); got != 0 {
+		t.Errorf("after respond session + req final release: spill files = %d, want 0", got)
+	}
+
+	// Probe: respBuf should be dead. Bytes returns an error on a released
+	// buffer.
+	if _, err := respBuf.Bytes(context.Background()); err == nil {
+		t.Error("expected respBuf Bytes() to error after session Release")
+	}
+}
+
+// TestRunSession_BodyBufferBackstop_DialFailure covers the error-exit path
+// where upstream dial fails after Pipeline.Run completed. The snapshot Retain
+// is outstanding at the moment the goroutine returns the dial error; the
+// backstop must still run.
+func TestRunSession_BodyBufferBackstop_DialFailure(t *testing.T) {
+	dir := t.TempDir()
+	req := makeHTTPEnvelopeWithBuf(t, dir, envelope.Send, 0, []byte("req"))
+	reqBuf := envelopeBuf(t, req)
+
+	clientCh := &mockChannel{streamID: "s", nextEnvelopes: []*envelope.Envelope{req}}
+	dialErr := errors.New("connection refused")
+	dial := func(_ context.Context, _ *envelope.Envelope) (layer.Channel, error) {
+		return nil, dialErr
+	}
+
+	err := RunSession(context.Background(), clientCh, dial, pipeline.New(passStep{}))
+	if !errors.Is(err, dialErr) {
+		t.Fatalf("RunSession err = %v, want wrap of %v", err, dialErr)
+	}
+
+	if err := reqBuf.Release(); err != nil {
+		t.Errorf("reqBuf final Release: %v", err)
+	}
+	if got := countSpillFiles(t, dir); got != 0 {
+		t.Errorf("after dial failure: spill files = %d, want 0", got)
+	}
+}
+
+// TestRunSession_BodyBufferBackstop_TransformCommit verifies that when a Step
+// Releases its own reference to a BodyBuffer (rules/http.TransformEngine's
+// ReplaceBody commit contract, USK-633), the session backstop cleanly
+// releases the snapshot's Retain without panicking on a double-Release.
+// This is the load-bearing refcount invariant for USK-634.
+func TestRunSession_BodyBufferBackstop_TransformCommit(t *testing.T) {
+	dir := t.TempDir()
+	req := makeHTTPEnvelopeWithBuf(t, dir, envelope.Send, 0, []byte("original-body"))
+	reqBuf := envelopeBuf(t, req)
+
+	if got := countSpillFiles(t, dir); got != 1 {
+		t.Fatalf("setup: spill files = %d, want 1", got)
+	}
+
+	clientCh := &mockChannel{streamID: "s", nextEnvelopes: []*envelope.Envelope{req}}
+	upstreamCh := &mockChannel{streamID: "u"}
+	dial := func(_ context.Context, _ *envelope.Envelope) (layer.Channel, error) { return upstreamCh, nil }
+
+	// transformReleaseStep: msg.BodyBuffer.Release() + msg.BodyBuffer=nil.
+	// Starting refCount=1; Pipeline.Run Retain → 2; Step Release → 1;
+	// session drain Release → 0 → teardown. No test-side Release — that
+	// would panic because refcount is already zero.
+	if err := RunSession(context.Background(), clientCh, dial, pipeline.New(transformReleaseStep{})); err != nil {
+		t.Fatalf("RunSession: %v", err)
+	}
+
+	if _, err := reqBuf.Bytes(context.Background()); err == nil {
+		t.Error("expected reqBuf Bytes() to error after full teardown")
+	}
+	if got := countSpillFiles(t, dir); got != 0 {
+		t.Errorf("after transform commit session: spill files = %d, want 0", got)
+	}
+}
+
+// TestRunSession_BodyBufferBackstop_ClientNextError covers the path where no
+// envelope is ever received — the backstop registry is empty and drain is a
+// no-op.
+func TestRunSession_BodyBufferBackstop_ClientNextError(t *testing.T) {
+	dir := t.TempDir()
+	clientErr := errors.New("read error")
+	clientCh := &mockChannel{streamID: "s", nextErr: clientErr}
+	dial := func(_ context.Context, _ *envelope.Envelope) (layer.Channel, error) {
+		return &mockChannel{}, nil
+	}
+
+	err := RunSession(context.Background(), clientCh, dial, pipeline.New(passStep{}))
+	if !errors.Is(err, clientErr) {
+		t.Fatalf("RunSession err = %v, want wrap of %v", err, clientErr)
+	}
+	if got := countSpillFiles(t, dir); got != 0 {
+		t.Errorf("no-envelope session: spill files = %d, want 0", got)
+	}
+}
+
+// TestRunSession_BodyBufferBackstop_NonHTTPEnvelope verifies the backstop is
+// a no-op for non-HTTP envelopes (Raw, WS, gRPC, SSE). These protocols do not
+// use HTTPMessage.BodyBuffer today; the type-switch must skip them cleanly
+// without allocating tracker slots.
+func TestRunSession_BodyBufferBackstop_NonHTTPEnvelope(t *testing.T) {
+	dir := t.TempDir()
+	// RawMessage envelope — no BodyBuffer field, no tracking expected.
+	req := makeEnvelope(envelope.Send, 0)
+	resp := makeEnvelope(envelope.Receive, 0)
+
+	clientCh := &mockChannel{streamID: "s", nextEnvelopes: []*envelope.Envelope{req}}
+	upstreamCh := &mockChannel{streamID: "u", nextEnvelopes: []*envelope.Envelope{resp}}
+	dial := func(_ context.Context, _ *envelope.Envelope) (layer.Channel, error) { return upstreamCh, nil }
+
+	if err := RunSession(context.Background(), clientCh, dial, pipeline.New(passStep{})); err != nil {
+		t.Fatalf("RunSession: %v", err)
+	}
+	if got := countSpillFiles(t, dir); got != 0 {
+		t.Errorf("non-HTTP session: spill files = %d, want 0", got)
+	}
+}
+
+// TestRunSession_BodyBufferBackstop_MultipleEnvelopes covers the streaming
+// case where a single session processes many envelopes with disk-backed
+// bodies. Registry append must accumulate every snapshot Retain and release
+// all of them at drain time; a bounded-size optimization that dropped older
+// entries would silently leak.
+func TestRunSession_BodyBufferBackstop_MultipleEnvelopes(t *testing.T) {
+	dir := t.TempDir()
+	const n = 5
+	reqs := make([]*envelope.Envelope, n)
+	bufs := make([]*bodybuf.BodyBuffer, n)
+	for i := 0; i < n; i++ {
+		reqs[i] = makeHTTPEnvelopeWithBuf(t, dir, envelope.Send, i, []byte(fmt.Sprintf("req-%d", i)))
+		bufs[i] = envelopeBuf(t, reqs[i])
+	}
+	if got := countSpillFiles(t, dir); got != n {
+		t.Fatalf("setup: spill files = %d, want %d", got, n)
+	}
+
+	clientCh := &mockChannel{streamID: "s", nextEnvelopes: reqs}
+	upstreamCh := &mockChannel{streamID: "u"}
+	dial := func(_ context.Context, _ *envelope.Envelope) (layer.Channel, error) { return upstreamCh, nil }
+
+	if err := RunSession(context.Background(), clientCh, dial, pipeline.New(passStep{})); err != nil {
+		t.Fatalf("RunSession: %v", err)
+	}
+
+	// Simulate Layer Release for each envelope. After this all refcounts
+	// should be zero and all temp files removed.
+	for i, b := range bufs {
+		if err := b.Release(); err != nil {
+			t.Errorf("bufs[%d] final Release: %v", i, err)
+		}
+	}
+	if got := countSpillFiles(t, dir); got != 0 {
+		t.Errorf("after streaming session: spill files = %d, want 0", got)
 	}
 }

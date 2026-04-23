@@ -13,6 +13,7 @@ import (
 	"sync"
 
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
+	"github.com/usk6666/yorishiro-proxy/internal/envelope/bodybuf"
 	"github.com/usk6666/yorishiro-proxy/internal/layer"
 	"github.com/usk6666/yorishiro-proxy/internal/pipeline"
 	"golang.org/x/sync/errgroup"
@@ -59,6 +60,110 @@ func (s *streamCapture) get() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.streamID
+}
+
+// bodyBufRegistry owns the BodyBuffer references a session accumulates via
+// variant-snapshot Retains inside Pipeline.Run, and Releases them in a single
+// drain after both session goroutines exit.
+//
+// Ownership model. For every non-nil HTTPMessage.BodyBuffer entering
+// Pipeline.Run, Envelope.Clone invokes HTTPMessage.CloneMessage which calls
+// BodyBuffer.Retain — the snapshot stored in ctx thereby holds one extra
+// reference. The snapshot is reachable only through that ctx, which goes out
+// of scope when Run returns; Go's GC can reclaim the snapshot struct but will
+// never decrement the refcount, so the backing temp file would leak.
+// bodyBufRegistry captures the pre-Run pointer into a session-scoped slice and
+// issues one Release per slot at session end, matching the one Retain per Run.
+//
+// The registry never dedupes: two Retains demand two Releases, so appending
+// duplicate pointers is correct when two different envelopes happen to share
+// the same buffer pointer (not a current scenario but a safe default).
+// Release errors from os.Remove surface only the filesystem-level failure
+// and are ignored — the bodybuf teardown already logs inconsistencies, and a
+// Release error must not override the session's primary result.
+type bodyBufRegistry struct {
+	mu   sync.Mutex
+	bufs []*bodybuf.BodyBuffer
+}
+
+// track records a BodyBuffer pointer for terminal Release. A nil pointer is a
+// no-op so callers can forward extracted fields unconditionally.
+func (r *bodyBufRegistry) track(b *bodybuf.BodyBuffer) {
+	if b == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.bufs = append(r.bufs, b)
+}
+
+// trackEnvelope tracks the BodyBuffer carried by env if env is HTTP-typed.
+// Non-HTTP envelopes (Raw, WS, gRPC, etc.) have no BodyBuffer and are skipped.
+//
+// Contract for callers that synthesize Respond-path envelopes (rules,
+// plugins, safety Steps): the response Envelope's HTTPMessage.BodyBuffer MUST
+// be a distinct pointer from the request's, OR the synthesizer must issue
+// an extra Retain to match the extra Release that this registry will later
+// issue. Aliasing without a compensating Retain would cause drain() to
+// double-Release the shared pointer, panicking on the zero-refcount contract
+// of bodybuf.Release. No current Step aliases, and the panic is fail-loud
+// rather than fail-silent, so regressions surface immediately.
+func (r *bodyBufRegistry) trackEnvelope(env *envelope.Envelope) {
+	if env == nil || env.Message == nil {
+		return
+	}
+	if m, ok := env.Message.(*envelope.HTTPMessage); ok && m != nil {
+		r.track(m.BodyBuffer)
+	}
+}
+
+// drain releases all tracked buffers and clears the backing slice. Safe to
+// call multiple times; subsequent calls are no-ops.
+func (r *bodyBufRegistry) drain() {
+	r.mu.Lock()
+	bufs := r.bufs
+	r.bufs = nil
+	r.mu.Unlock()
+	for _, b := range bufs {
+		_ = b.Release()
+	}
+}
+
+// runPipelineTracked runs p on env and registers the Pipeline's snapshot
+// Retain with reg. It captures the pre-Run HTTPMessage.BodyBuffer pointer
+// because Transform commit sets env.Message.BodyBuffer to nil, making the
+// post-Run inspection insufficient. Respond-path resp envelopes are also
+// tracked: no current Step populates resp.Message.BodyBuffer, but the
+// pre-emptive track prevents a future Step from introducing a leak.
+//
+// Panic safety: a Step panic inside p.Run unwinds through this function
+// without reaching the post-Run reg.track(pre). This is intentional —
+// errgroup (golang.org/x/sync/errgroup v0.19.0) does not recover panics, so
+// a Step panic terminates the process. Any deferred registration at this
+// layer would not run either (the process dies before RunSession's
+// defer reg.drain() executes). Temp-file cleanup on process crash falls to
+// the startup orphan sweep in config.SweepOrphanBodyFiles.
+func runPipelineTracked(
+	ctx context.Context,
+	p *pipeline.Pipeline,
+	env *envelope.Envelope,
+	reg *bodyBufRegistry,
+) (*envelope.Envelope, pipeline.Action, *envelope.Envelope) {
+	var pre *bodybuf.BodyBuffer
+	if env != nil && env.Message != nil {
+		if m, ok := env.Message.(*envelope.HTTPMessage); ok && m != nil {
+			pre = m.BodyBuffer
+		}
+	}
+
+	outEnv, action, resp := p.Run(ctx, env)
+
+	reg.track(pre)
+	if action == pipeline.Respond {
+		reg.trackEnvelope(resp)
+	}
+
+	return outEnv, action, resp
 }
 
 // upstreamHolder passes the upstream Channel from goroutine 1 to goroutine 2
@@ -129,6 +234,12 @@ func RunSession(ctx context.Context, client layer.Channel, dial DialFunc, p *pip
 
 	sc := &streamCapture{}
 
+	// Backstop for BodyBuffer references that Pipeline.Run's variant-snapshot
+	// Clone retained. Drained after g.Wait() returns and after OnComplete, so
+	// post-session hooks can still materialize bodies via BodyBuffer.Bytes.
+	reg := &bodyBufRegistry{}
+	defer reg.drain()
+
 	// upstreamDone is closed by upstreamToClient on exit. The late-error
 	// watcher uses this to stop polling once the response side has already
 	// finished (whether normally or due to an error).
@@ -138,12 +249,12 @@ func RunSession(ctx context.Context, client layer.Channel, dial DialFunc, p *pip
 
 	g.Go(func() error {
 		defer close(uh.done)
-		return clientToUpstream(ctx, client, dial, p, uh, sc)
+		return clientToUpstream(ctx, client, dial, p, uh, sc, reg)
 	})
 
 	g.Go(func() error {
 		defer close(upstreamDone)
-		return upstreamToClient(ctx, client, p, uh, sc)
+		return upstreamToClient(ctx, client, p, uh, sc, reg)
 	})
 
 	g.Go(func() error {
@@ -169,6 +280,7 @@ func clientToUpstream(
 	p *pipeline.Pipeline,
 	uh *upstreamHolder,
 	sc *streamCapture,
+	reg *bodyBufRegistry,
 ) (err error) {
 	// When the client-side goroutine exits abnormally (e.g., client-side
 	// RST_STREAM, stream error, pipeline error), actively tear the upstream
@@ -199,7 +311,7 @@ func clientToUpstream(
 
 		sc.set(env.StreamID)
 
-		env, action, resp := p.Run(ctx, env)
+		env, action, resp := runPipelineTracked(ctx, p, env, reg)
 		switch action {
 		case pipeline.Drop:
 			continue
@@ -236,6 +348,7 @@ func upstreamToClient(
 	p *pipeline.Pipeline,
 	uh *upstreamHolder,
 	sc *streamCapture,
+	reg *bodyBufRegistry,
 ) error {
 	// Wait for upstream to be established, goroutine 1 to exit, or context
 	// cancellation. If goroutine 1 exits without establishing upstream
@@ -294,7 +407,7 @@ func upstreamToClient(
 			env.StreamID = clientID
 		}
 
-		env, action, _ := p.Run(ctx, env)
+		env, action, _ := runPipelineTracked(ctx, p, env, reg)
 		if action == pipeline.Drop {
 			continue
 		}
