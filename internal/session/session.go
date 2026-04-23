@@ -99,6 +99,15 @@ func (r *bodyBufRegistry) track(b *bodybuf.BodyBuffer) {
 
 // trackEnvelope tracks the BodyBuffer carried by env if env is HTTP-typed.
 // Non-HTTP envelopes (Raw, WS, gRPC, etc.) have no BodyBuffer and are skipped.
+//
+// Contract for callers that synthesize Respond-path envelopes (rules,
+// plugins, safety Steps): the response Envelope's HTTPMessage.BodyBuffer MUST
+// be a distinct pointer from the request's, OR the synthesizer must issue
+// an extra Retain to match the extra Release that this registry will later
+// issue. Aliasing without a compensating Retain would cause drain() to
+// double-Release the shared pointer, panicking on the zero-refcount contract
+// of bodybuf.Release. No current Step aliases, and the panic is fail-loud
+// rather than fail-silent, so regressions surface immediately.
 func (r *bodyBufRegistry) trackEnvelope(env *envelope.Envelope) {
 	if env == nil || env.Message == nil {
 		return
@@ -126,6 +135,14 @@ func (r *bodyBufRegistry) drain() {
 // post-Run inspection insufficient. Respond-path resp envelopes are also
 // tracked: no current Step populates resp.Message.BodyBuffer, but the
 // pre-emptive track prevents a future Step from introducing a leak.
+//
+// Panic safety: a Step panic inside p.Run unwinds through this function
+// without reaching the post-Run reg.track(pre). This is intentional —
+// errgroup (golang.org/x/sync/errgroup v0.19.0) does not recover panics, so
+// a Step panic terminates the process. Any deferred registration at this
+// layer would not run either (the process dies before RunSession's
+// defer reg.drain() executes). Temp-file cleanup on process crash falls to
+// the startup orphan sweep in config.SweepOrphanBodyFiles.
 func runPipelineTracked(
 	ctx context.Context,
 	p *pipeline.Pipeline,
