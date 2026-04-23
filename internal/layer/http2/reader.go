@@ -176,10 +176,6 @@ func (l *Layer) handleStreamHeaders(f *frame.Frame) error {
 	}
 	l.updatePendingHeaderStream(f.Header.StreamID, endHeaders)
 
-	if asm.phase == asmPassthrough {
-		return l.dropPassthroughTrailers(asm, fragment, endHeaders, f.Header.StreamID)
-	}
-
 	direction := l.headerDirection(asm)
 	env, _, err := asm.handleHeadersFrame(fragment, f.RawBytes, endHeaders, endStream, l.decoder, direction)
 	if err != nil {
@@ -202,45 +198,6 @@ func (l *Layer) updatePendingHeaderStream(streamID uint32, endHeaders bool) {
 	} else {
 		l.pendingHeaderStream = 0
 	}
-}
-
-// dropPassthroughTrailers consumes a trailer header block while a stream is
-// in passthrough mode, decoding it (to keep HPACK state coherent) but not
-// delivering it to the consumer.
-//
-// The same CONTINUATION-flood guards apply here: a malicious peer cannot
-// send unbounded CONTINUATION frames in passthrough trailer position to
-// exhaust memory.
-func (l *Layer) dropPassthroughTrailers(asm *streamAssembler, fragment []byte, endHeaders bool, streamID uint32) error {
-	if endHeaders {
-		// Decode the accumulated buffer plus the final fragment, so HPACK
-		// state stays coherent for subsequent frames on this connection.
-		full := append(asm.fragBuf, fragment...)
-		asm.fragBuf = nil
-		asm.continuationCount = 0
-		if _, dErr := l.decoder.Decode(full); dErr != nil {
-			return fmt.Errorf("http2: decode trailer block (passthrough, stream %d): %w", streamID, dErr)
-		}
-		l.passthroughMu.Lock()
-		l.passthroughTrailerCount++
-		l.passthroughMu.Unlock()
-		return nil
-	}
-	if len(asm.fragBuf)+len(fragment) > maxHeaderFragmentBytes {
-		return &ConnError{
-			Code:   ErrCodeCompression,
-			Reason: fmt.Sprintf("passthrough trailer fragment exceeds %d bytes (stream %d)", maxHeaderFragmentBytes, streamID),
-		}
-	}
-	asm.continuationCount++
-	if asm.continuationCount > maxContinuationFrames {
-		return &ConnError{
-			Code:   ErrCodeEnhanceYourCalm,
-			Reason: fmt.Sprintf("too many CONTINUATION frames (>%d) for passthrough trailer (stream %d)", maxContinuationFrames, streamID),
-		}
-	}
-	asm.fragBuf = append(asm.fragBuf, fragment...)
-	return nil
 }
 
 // headerDirection picks the direction for envelopes built from the next
@@ -295,6 +252,21 @@ func (l *Layer) handleStreamContinuation(f *frame.Frame) error {
 	return nil
 }
 
+// handleStreamData dispatches a DATA frame. On a *layer.StreamError from the
+// assembler (body exceeded MaxBodySize), the stream is terminated by
+// emitting RST_STREAM(INTERNAL_ERROR) and surfacing the error to the
+// Channel's consumer. On any other error, the error propagates upward.
+func (l *Layer) handleStreamDataError(streamID uint32, err error) error {
+	var se *layer.StreamError
+	if errors.As(err, &se) {
+		// Translate the layer.ErrorCode back to an HTTP/2 wire code for RST.
+		l.enqueueWrite(writeRequest{rst: &writeRST{streamID: streamID, code: ErrCodeInternal}})
+		l.failStream(streamID, se)
+		return nil
+	}
+	return err
+}
+
 func (l *Layer) handleStreamData(f *frame.Frame) error {
 	payload, err := f.DataPayload()
 	if err != nil {
@@ -320,7 +292,12 @@ func (l *Layer) handleStreamData(f *frame.Frame) error {
 
 	env, _, err := asm.handleDataFrame(payload, f.RawBytes, endStream)
 	if err != nil {
-		return err
+		// A *layer.StreamError from the assembler (e.g. body exceeded
+		// MaxBodySize) is a per-stream fault, not a connection fault:
+		// RST_STREAM the offending stream with INTERNAL_ERROR and surface
+		// the error to the Channel's consumer. Non-StreamError errors
+		// propagate upward to the connection-error path.
+		return l.handleStreamDataError(f.Header.StreamID, err)
 	}
 
 	// Eagerly emit WINDOW_UPDATE if recv windows have drained ≥50%.
@@ -333,20 +310,12 @@ func (l *Layer) handleStreamData(f *frame.Frame) error {
 		_ = l.conn.Streams().Transition(f.Header.StreamID, EventRecvEndStream)
 	}
 	// Close the Channel's recv side if the assembler has reached asmDone.
-	// This handles two cases:
-	//   - Passthrough END_STREAM: handleDataFrame returns (nil, true, nil)
-	//     because the assembler handed the envelope off at the passthrough
-	//     threshold and terminates without yielding another one. The
-	//     deliverEnvelope branch above is skipped, so recv would otherwise
-	//     stay open forever and Channel.Next would never observe io.EOF
-	//     (USK-617).
-	//   - Normal terminal DATA: deliverEnvelope has already closed recv via
-	//     its own asmDone check. This second call is a safe idempotent
-	//     backstop — closeChannelRecv is guarded by sync.Once.
+	// deliverEnvelope already closes recv via its own asmDone check on the
+	// terminal-DATA path; this is a safe idempotent backstop —
+	// closeChannelRecv is guarded by sync.Once.
 	if asm.phase == asmDone {
 		// Record natural end-of-recv for USK-618's Close-time RST gate.
-		// markRecvEnded is idempotent; safe to call on both the passthrough
-		// path and the backstop.
+		// markRecvEnded is idempotent.
 		ch.markRecvEnded()
 		l.closeChannelRecv(ch)
 	}
@@ -504,7 +473,7 @@ func (l *Layer) assemblerFor(streamID uint32, createIfMissing bool) (*streamAsse
 
 	ch := newChannel(l, streamID, false)
 	l.channels[streamID] = ch
-	asm := newStreamAssembler(streamID, ch)
+	asm := newStreamAssembler(streamID, ch, l.asmBodyOpts())
 	l.assemblers[streamID] = asm
 	l.conn.Streams().SetLastPeerStreamID(streamID)
 	return asm, ch, true
@@ -516,7 +485,7 @@ func (l *Layer) registerChannel(streamID uint32, ch *channel) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.channels[streamID] = ch
-	l.assemblers[streamID] = newStreamAssembler(streamID, ch)
+	l.assemblers[streamID] = newStreamAssembler(streamID, ch, l.asmBodyOpts())
 }
 
 // emitChannel sends ch on the Channels() output channel. Non-blocking on
@@ -562,7 +531,9 @@ func (l *Layer) closeChannelRecv(ch *channel) {
 	})
 }
 
-// failStream delivers a stream error to ch and closes its recv side.
+// failStream delivers a stream error to ch and closes its recv side. Any
+// partial BodyBuffer held by the assembler is released so aborted streams
+// do not leak temp files.
 func (l *Layer) failStream(streamID uint32, se *layer.StreamError) {
 	l.mu.Lock()
 	ch, ok := l.channels[streamID]
@@ -580,6 +551,7 @@ func (l *Layer) failStream(streamID uint32, se *layer.StreamError) {
 	// channel.Close) keeps its terminal error.
 	ch.markTerminated(se)
 	if asm != nil {
+		asm.releaseBody()
 		asm.phase = asmDone
 	}
 	l.closeChannelRecv(ch)
@@ -589,9 +561,13 @@ func (l *Layer) failStream(streamID uint32, se *layer.StreamError) {
 func (l *Layer) failStreamsAfterGoAway(lastStreamID uint32, se *layer.StreamError) {
 	l.mu.Lock()
 	channels := make([]*channel, 0)
+	assemblers := make([]*streamAssembler, 0)
 	for id, ch := range l.channels {
 		if id > lastStreamID {
 			channels = append(channels, ch)
+			if asm, ok := l.assemblers[id]; ok {
+				assemblers = append(assemblers, asm)
+			}
 		}
 	}
 	l.mu.Unlock()
@@ -603,15 +579,24 @@ func (l *Layer) failStreamsAfterGoAway(lastStreamID uint32, se *layer.StreamErro
 		ch.markTerminated(se)
 		l.closeChannelRecv(ch)
 	}
+	for _, asm := range assemblers {
+		asm.releaseBody()
+	}
 }
 
 // broadcastShutdown closes all per-channel recv chans and the channelOut chan.
-// Idempotent via sync.Once on each channel.
+// Idempotent via sync.Once on each channel. Also releases any partial
+// BodyBuffer held by per-stream assemblers so temp files do not leak past
+// connection teardown.
 func (l *Layer) broadcastShutdown() {
 	l.mu.Lock()
 	channels := make([]*channel, 0, len(l.channels))
 	for _, ch := range l.channels {
 		channels = append(channels, ch)
+	}
+	assemblers := make([]*streamAssembler, 0, len(l.assemblers))
+	for _, asm := range l.assemblers {
+		assemblers = append(assemblers, asm)
 	}
 	l.mu.Unlock()
 
@@ -621,6 +606,9 @@ func (l *Layer) broadcastShutdown() {
 		// watcher does not misclassify it as a late peer cancel.
 		ch.markTerminated(io.EOF)
 		l.closeChannelRecv(ch)
+	}
+	for _, asm := range assemblers {
+		asm.releaseBody()
 	}
 	l.closeChannelOutOnce.Do(func() {
 		close(l.channelOut)

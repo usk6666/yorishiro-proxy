@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/layer"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/http2/frame"
@@ -39,10 +40,13 @@ func (r Role) String() string {
 
 // options is the runtime configuration for a Layer.
 type options struct {
-	scheme            string
-	ctx               envelope.EnvelopeContext
-	initialSettings   *Settings
-	maxHeaderListSize uint32
+	scheme             string
+	ctx                envelope.EnvelopeContext
+	initialSettings    *Settings
+	maxHeaderListSize  uint32
+	bodySpillDir       string
+	bodySpillThreshold int64
+	maxBody            int64
 }
 
 // Option configures a Layer.
@@ -71,6 +75,27 @@ func WithInitialSettings(s Settings) Option {
 // the decoder will accept. 0 = use HPACK's defaultMaxHeaderListSize.
 func WithMaxHeaderListSize(n uint32) Option {
 	return func(o *options) { o.maxHeaderListSize = n }
+}
+
+// WithBodySpillDir sets the directory used for temp files when a per-stream
+// body exceeds BodySpillThreshold. Empty means os.TempDir() (resolved by the
+// bodybuf package).
+func WithBodySpillDir(dir string) Option {
+	return func(o *options) { o.bodySpillDir = dir }
+}
+
+// WithBodySpillThreshold sets the in-memory body size limit above which
+// bodies spill to disk. Defaults to config.DefaultBodySpillThreshold (10 MiB).
+func WithBodySpillThreshold(n int64) Option {
+	return func(o *options) { o.bodySpillThreshold = n }
+}
+
+// WithMaxBodySize sets the absolute body size cap. Defaults to
+// config.MaxBodySize (254 MiB). Writes exceeding this cap surface as a
+// *layer.StreamError with Code=layer.ErrorInternalError, which the reader
+// translates into RST_STREAM(INTERNAL_ERROR) on the wire.
+func WithMaxBodySize(n int64) Option {
+	return func(o *options) { o.maxBody = n }
 }
 
 // Layer is the HTTP/2 Layer per RFC-001. It wraps a net.Conn and yields one
@@ -128,24 +153,21 @@ type Layer struct {
 	// streams (1, 3, 5, ...).
 	nextClientStreamID uint32
 
-	// passthroughTrailerCount is incremented every time trailers arrive while
-	// a stream is in passthrough body mode (best-effort metric only).
-	passthroughMu           sync.Mutex
-	passthroughTrailerCount uint64
-
 	// Last non-EOF error from the reader goroutine; set under lastErrMu.
 	lastErrMu sync.Mutex
 	lastErr   error
 }
 
-// PassthroughTrailerCount returns the number of trailer blocks dropped because
-// they arrived after a stream had switched to passthrough body mode. This is
-// a diagnostic metric only; trailers in passthrough are not delivered to
-// consumers.
-func (l *Layer) PassthroughTrailerCount() uint64 {
-	l.passthroughMu.Lock()
-	defer l.passthroughMu.Unlock()
-	return l.passthroughTrailerCount
+// asmBodyOpts returns the per-assembler body options derived from the
+// Layer's configured options. Defaults are applied lazily by the assembler
+// (newStreamAssembler / writeBody); New also threads them so tests can
+// override them directly.
+func (l *Layer) asmBodyOpts() asmBodyOpts {
+	return asmBodyOpts{
+		spillDir:       l.opts.bodySpillDir,
+		spillThreshold: l.opts.bodySpillThreshold,
+		maxBody:        l.opts.maxBody,
+	}
 }
 
 // EnvelopeContextTemplate returns a copy of the EnvelopeContext template
@@ -199,7 +221,10 @@ func (l *Layer) PeerMaxConcurrentStreams() uint32 {
 // returned by Channel.StreamID().
 func New(conn net.Conn, streamID string, role Role, opts ...Option) (*Layer, error) {
 	o := options{
-		scheme: "https",
+		scheme:             "https",
+		bodySpillDir:       "", // resolved to os.TempDir() by bodybuf.NewFile
+		bodySpillThreshold: config.DefaultBodySpillThreshold,
+		maxBody:            config.MaxBodySize,
 	}
 	for _, opt := range opts {
 		opt(&o)
@@ -212,7 +237,8 @@ func New(conn net.Conn, streamID string, role Role, opts ...Option) (*Layer, err
 		}
 	} else {
 		// Default: bump local InitialWindowSize so streaming bodies up to
-		// passthroughThreshold do not stall under per-stream flow control.
+		// the configured body spill threshold do not stall under per-stream
+		// flow control.
 		def := DefaultSettings()
 		def.InitialWindowSize = defaultLargeStreamWindow
 		if err := httpConn.SetLocalSettings(def); err != nil {
@@ -285,8 +311,8 @@ func New(conn net.Conn, streamID string, role Role, opts ...Option) (*Layer, err
 }
 
 // defaultLargeConnWindow is the connection-level recv window we advertise on
-// startup. 16 MiB is enough for streaming bodies up to passthroughThreshold
-// without stalling under flow control.
+// startup. 16 MiB is enough for streaming bodies up to the default body
+// spill threshold without stalling under flow control.
 const defaultLargeConnWindow = 16 * 1024 * 1024
 
 // defaultLargeStreamWindow is the per-stream initial recv window we advertise

@@ -44,18 +44,20 @@
 // H2UppercaseHeaderName anomaly. Pseudo-header order anomalies and duplicates
 // are flagged via H2PseudoHeaderAfterRegular and H2DuplicatePseudoHeader.
 //
-// # Body buffering and passthrough
+// # Body buffering
 //
-// Bodies are buffered up to passthroughThreshold (10 MiB) before the
-// envelope is yielded to the consumer. When a stream's body exceeds that
-// threshold, the assembler switches to passthrough mode: it yields the
-// envelope immediately with HTTPMessage.BodyStream set to a pipe reader,
-// and subsequent DATA frames are written into the pipe writer. END_STREAM
-// closes the pipe writer.
+// DATA frames are fully aggregated into a reference-counted BodyBuffer
+// before the envelope is yielded to the consumer (RFC-001 §9.1 OQ#1
+// RESOLVED). The buffer starts in memory and promotes to a temp file once
+// the cumulative body size crosses BodySpillThreshold (default 10 MiB).
+// Total size is capped by MaxBodySize (default 254 MiB); exceeding the cap
+// is surfaced as a *layer.StreamError with Code=ErrorInternalError and the
+// reader emits RST_STREAM(INTERNAL_ERROR) for the offending stream.
 //
-// Trailers are not supported in passthrough mode — they are dropped. A
-// counter is incremented on the Layer for diagnostic purposes; consumers
-// that hold the already-yielded envelope will not see the trailers.
+// Trailers are preserved uniformly regardless of body size: the
+// asmCollectingTrailers branch runs after the body has been drained into
+// the BodyBuffer, so msg.Trailers is always populated when the peer sends
+// a HEADERS-after-DATA block with END_STREAM.
 //
 // # Flow control
 //
