@@ -297,15 +297,18 @@ func TestLayer_Channels_ChannelEmittedOnPeerHeaders(t *testing.T) {
 	if env.Direction != envelope.Send {
 		t.Errorf("envelope direction = %s, want send", env.Direction)
 	}
-	msg := env.Message.(*envelope.HTTPMessage)
-	if msg.Method != "GET" {
-		t.Errorf("method = %q, want GET", msg.Method)
+	evt := env.Message.(*H2HeadersEvent)
+	if evt.Method != "GET" {
+		t.Errorf("method = %q, want GET", evt.Method)
 	}
-	if msg.Path != "/hello" {
-		t.Errorf("path = %q, want /hello", msg.Path)
+	if evt.Path != "/hello" {
+		t.Errorf("path = %q, want /hello", evt.Path)
 	}
-	if msg.Authority != "example.com" {
-		t.Errorf("authority = %q, want example.com", msg.Authority)
+	if evt.Authority != "example.com" {
+		t.Errorf("authority = %q, want example.com", evt.Authority)
+	}
+	if !evt.EndStream {
+		t.Error("EndStream = false, want true (HEADERS carried END_STREAM)")
 	}
 }
 

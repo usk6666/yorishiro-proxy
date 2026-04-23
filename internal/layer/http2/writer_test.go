@@ -9,8 +9,23 @@ import (
 	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
+	"github.com/usk6666/yorishiro-proxy/internal/layer"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/http2/frame"
 )
+
+// sendRequestAsEvents decomposes a POST-with-body request into event
+// envelopes and sends them on ch sequentially: HEADERS(no END_STREAM),
+// DATA(END_STREAM=true with the full body). Returns the first error.
+func sendRequestAsEvents(ctx context.Context, ch layer.Channel, body []byte) error {
+	hdr := &H2HeadersEvent{
+		Method: "POST", Scheme: "https", Authority: "x", Path: "/",
+	}
+	if err := ch.Send(ctx, &envelope.Envelope{Direction: envelope.Send, Message: hdr}); err != nil {
+		return err
+	}
+	data := &H2DataEvent{Payload: body, EndStream: true}
+	return ch.Send(ctx, &envelope.Envelope{Direction: envelope.Send, Message: data})
+}
 
 func TestWriter_HeadersAndDataInOrder(t *testing.T) {
 	l, peer, cleanup := startClientLayer(t)
@@ -24,13 +39,7 @@ func TestWriter_HeadersAndDataInOrder(t *testing.T) {
 
 	body := []byte("ABCDEFGH")
 	go func() {
-		_ = ch.Send(context.Background(), &envelope.Envelope{
-			Direction: envelope.Send,
-			Message: &envelope.HTTPMessage{
-				Method: "POST", Scheme: "https", Authority: "x", Path: "/",
-				Body: body,
-			},
-		})
+		_ = sendRequestAsEvents(context.Background(), ch, body)
 	}()
 
 	gotHeaders := false
@@ -80,13 +89,7 @@ func TestWriter_DataSplitByMaxFrameSize(t *testing.T) {
 		body[i] = 'x'
 	}
 	go func() {
-		_ = ch.Send(context.Background(), &envelope.Envelope{
-			Direction: envelope.Send,
-			Message: &envelope.HTTPMessage{
-				Method: "POST", Scheme: "https", Authority: "x", Path: "/",
-				Body: body,
-			},
-		})
+		_ = sendRequestAsEvents(context.Background(), ch, body)
 	}()
 
 	dataFrames := 0
@@ -144,15 +147,13 @@ func TestWriter_FlowControlBlocksAndUnblocks(t *testing.T) {
 		_ = peer.conn.Close()
 	}()
 
-	// Peer sends initial SETTINGS with a tiny INITIAL_WINDOW_SIZE so OUR
-	// new streams' send windows are constrained.
+	// Tiny INITIAL_WINDOW_SIZE: new streams are tightly windowed.
 	if err := peer.wr.WriteSettings([]frame.Setting{
 		{ID: frame.SettingInitialWindowSize, Value: 32},
 	}); err != nil {
 		t.Fatalf("write SETTINGS: %v", err)
 	}
 
-	// Drain layer's frames in a goroutine.
 	drained := make(chan struct{})
 	var dataFrames []*frame.Frame
 	var dfMu sync.Mutex
@@ -176,7 +177,6 @@ func TestWriter_FlowControlBlocksAndUnblocks(t *testing.T) {
 		t.Fatalf("OpenStream: %v", err)
 	}
 
-	// Wait for the layer to apply the peer's SETTINGS.
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
 		if res.l.conn.PeerSettings().InitialWindowSize == 32 {
@@ -188,13 +188,7 @@ func TestWriter_FlowControlBlocksAndUnblocks(t *testing.T) {
 	body := make([]byte, 200)
 	sendDone := make(chan error, 1)
 	go func() {
-		sendDone <- ch.Send(context.Background(), &envelope.Envelope{
-			Direction: envelope.Send,
-			Message: &envelope.HTTPMessage{
-				Method: "POST", Scheme: "https", Authority: "x", Path: "/",
-				Body: body,
-			},
-		})
+		sendDone <- sendRequestAsEvents(context.Background(), ch, body)
 	}()
 
 	time.Sleep(200 * time.Millisecond)
@@ -246,18 +240,11 @@ func TestWriter_ConcurrentSendsDoNotInterleaveFrames(t *testing.T) {
 			for k := range body {
 				body[k] = byte('a' + i)
 			}
-			_ = chs[i].Send(context.Background(), &envelope.Envelope{
-				Direction: envelope.Send,
-				Message: &envelope.HTTPMessage{
-					Method: "POST", Scheme: "https", Authority: "x", Path: "/",
-					Body: body,
-				},
-			})
+			_ = sendRequestAsEvents(context.Background(), chs[i], body)
 		}(i)
 	}
 
-	// Read all frames; per-stream we expect HEADERS then DATA(END_STREAM).
-	per := map[uint32]int{} // 0=expect headers, 1=expect data
+	per := map[uint32]int{}
 	deadline := time.Now().Add(3 * time.Second)
 	completed := 0
 	for completed < numStreams && time.Now().Before(deadline) {

@@ -1,0 +1,104 @@
+package connector
+
+import (
+	"context"
+	"fmt"
+	"log/slog"
+	"strings"
+
+	"github.com/usk6666/yorishiro-proxy/internal/envelope"
+	"github.com/usk6666/yorishiro-proxy/internal/layer"
+	"github.com/usk6666/yorishiro-proxy/internal/layer/http2"
+	"github.com/usk6666/yorishiro-proxy/internal/layer/httpaggregator"
+)
+
+// DispatchH2Stream peeks the first event-granular envelope on an HTTP/2
+// stream Channel, inspects its content-type for gRPC detection, and wraps
+// the channel with HTTPAggregatorLayer (for plain HTTP/2) or leaves the
+// raw event-granular Channel in place for gRPC (handled by a future
+// GRPCLayer, stubbed for N6.7 — see N7).
+//
+// role selects which direction convention the aggregator uses. lopts
+// threads the Layer's body-buffer configuration into the aggregator so
+// disk spill behavior matches the HTTP/1.x path.
+//
+// The returned layer.Channel is what the caller should run RunSession or
+// other consumers against. The first event is replayed as the first
+// aggregated envelope (via the firstHeaders argument on Wrap), so no data
+// is lost by the peek.
+//
+// Errors from the initial peek (ch.Next) are returned as-is so the caller
+// can distinguish "no stream activity" from "stream error".
+func DispatchH2Stream(
+	ctx context.Context,
+	ch layer.Channel,
+	role httpaggregator.Role,
+	lopts httpaggregator.WrapOptions,
+	logger *slog.Logger,
+) (layer.Channel, error) {
+	if logger == nil {
+		logger = slog.Default()
+	}
+
+	firstEnv, err := ch.Next(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	// The first envelope on an HTTP/2 event-granular channel is always an
+	// H2HeadersEvent (the initial request/response HEADERS block). Any
+	// other event type indicates a malformed stream or a bug in the Layer.
+	evt, ok := firstEnv.Message.(*http2.H2HeadersEvent)
+	if !ok {
+		return nil, fmt.Errorf("connector: DispatchH2Stream: first envelope is %T, expected *H2HeadersEvent", firstEnv.Message)
+	}
+
+	// gRPC detection: content-type: application/grpc[+proto|+json|...] on
+	// the request HEADERS (or the response HEADERS in ClientRole) signals
+	// a gRPC stream. N7 will plug in GRPCLayer.Wrap here; for N6.7 we log
+	// and fall through to the aggregator so traffic continues to flow as
+	// plain HTTP/2 (aggregator will produce HTTPMessage envelopes that
+	// intercept rules cannot sensibly rewrite for gRPC, but traffic is
+	// NOT dropped — a safe temporary regression).
+	if isGRPCHeaders(evt) {
+		logger.Warn("connector: DispatchH2Stream: gRPC content-type observed; using HTTPAggregator (GRPCLayer wiring pending N7 / TODO: USK-?)",
+			"stream_id", firstEnv.StreamID,
+			"path", evt.Path,
+		)
+		// TODO(N7): branch to grpclayer.Wrap(ch, firstEnv, role) once the
+		// gRPC layer package is implemented.
+	}
+
+	return httpaggregator.Wrap(ch, role, firstEnv, lopts), nil
+}
+
+// isGRPCHeaders reports whether evt carries a content-type that indicates
+// gRPC (including the +proto / +json subtype variants).
+func isGRPCHeaders(evt *http2.H2HeadersEvent) bool {
+	for _, kv := range evt.Headers {
+		if !strings.EqualFold(kv.Name, "content-type") {
+			continue
+		}
+		// Check only the leading type; subtypes ("+proto", "+json") and
+		// parameters (; charset=...) are permitted variations.
+		v := strings.ToLower(kv.Value)
+		if strings.HasPrefix(v, "application/grpc") {
+			return true
+		}
+	}
+	return false
+}
+
+// EnvelopeIsH2Event reports whether env.Message is one of the HTTP/2 event
+// types. Useful in callers that want to sanity-check a Channel they have
+// NOT yet wrapped with the aggregator.
+func EnvelopeIsH2Event(env *envelope.Envelope) bool {
+	if env == nil || env.Message == nil {
+		return false
+	}
+	switch env.Message.(type) {
+	case *http2.H2HeadersEvent, *http2.H2DataEvent, *http2.H2TrailersEvent:
+		return true
+	}
+	return false
+}
