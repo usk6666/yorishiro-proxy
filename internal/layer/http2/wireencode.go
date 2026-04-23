@@ -2,6 +2,7 @@ package http2
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
@@ -40,11 +41,15 @@ const defaultEncoderTableSize uint32 = 4096
 // Body handling:
 //   - When msg.Body is non-nil it is serialized directly into DATA frames
 //     using the default MaxFrameSize (16 KiB).
-//   - When msg.Body is nil and msg.BodyStream is non-nil (HTTP/2 passthrough
-//     mode), the stream cannot be replayed offline without disturbing the
-//     live channel — the encoder returns the header-block-only bytes
-//     together with envelope.ErrPartialWireBytes so RecordStep can tag
-//     Metadata["wire_bytes"] = "partial".
+//   - When msg.Body is nil and msg.BodyBuffer is non-nil the buffer is
+//     materialized via BodyBuffer.Bytes(context.Background()) and emitted as
+//     DATA frames. This path covers both in-memory and file-backed buffers
+//     — file-mode opens a fresh fd so the pipeline's variant re-encode and
+//     the live Send path never race on the write handle.
+//   - When both are nil, the encoder emits HEADERS (END_STREAM) with no
+//     DATA frames. HTTP/2 no longer produces ErrPartialWireBytes: the
+//     assembler always fully aggregates a body into a BodyBuffer before
+//     yielding the envelope (RFC-001 §9.1 OQ#1 RESOLVED).
 //
 // No flow-control accounting occurs: this is an offline re-encode, not a
 // wire write. END_STREAM is placed on the last frame emitted (trailer
@@ -53,6 +58,9 @@ const defaultEncoderTableSize uint32 = 4096
 //
 // EncodeWireBytes is pure: it does not consult the live Layer's
 // hpack.Encoder / frame.Writer and does not mutate env or env.Message.
+// BodyBuffer.Bytes reads through a fresh fd in file mode so this call is
+// safe to run concurrently with the live write path; the underlying temp
+// file is append-only and our read offset is independent.
 func EncodeWireBytes(env *envelope.Envelope) ([]byte, error) {
 	if env == nil {
 		return nil, fmt.Errorf("http2: EncodeWireBytes: nil envelope")
@@ -62,13 +70,21 @@ func EncodeWireBytes(env *envelope.Envelope) ([]byte, error) {
 		return nil, fmt.Errorf("http2: EncodeWireBytes: requires *HTTPMessage, got %T", env.Message)
 	}
 
+	// Resolve the body into an in-memory []byte for offline DATA encoding.
+	// Memory-backed Body already is one; file-backed BodyBuffer is read
+	// through its independent read handle (fresh os.Open). Both-nil means
+	// no body frames emitted.
+	bodyBytes, err := resolveBodyForEncode(msg)
+	if err != nil {
+		return nil, err
+	}
+
 	headers := buildHeaderFields(env, msg)
 	trailers, _ := buildTrailerFields(msg.Trailers)
 
-	hasBody := len(msg.Body) > 0
+	hasBody := len(bodyBytes) > 0
 	hasTrailers := len(trailers) > 0
-	streamStillOpen := msg.Body == nil && msg.BodyStream != nil
-	headersEndStream := !hasBody && !hasTrailers && !streamStillOpen
+	headersEndStream := !hasBody && !hasTrailers
 
 	enc := hpack.NewEncoder(defaultEncoderTableSize, true)
 	headerBlock := enc.Encode(headers)
@@ -83,7 +99,7 @@ func EncodeWireBytes(env *envelope.Envelope) ([]byte, error) {
 	}
 
 	if hasBody {
-		if err := writeBodyBuffered(wr, encodeStreamID, msg.Body, !hasTrailers, int(maxFrameSize)); err != nil {
+		if err := writeBodyBuffered(wr, encodeStreamID, bodyBytes, !hasTrailers, int(maxFrameSize)); err != nil {
 			return nil, fmt.Errorf("http2: EncodeWireBytes: write body: %w", err)
 		}
 	}
@@ -98,13 +114,25 @@ func EncodeWireBytes(env *envelope.Envelope) ([]byte, error) {
 	// buf is function-local and unreachable after return, so buf.Bytes() is
 	// safe to return directly: no other code can mutate the buffer's backing
 	// storage. A defensive copy would be a pure allocation with no benefit.
-	out := buf.Bytes()
+	return buf.Bytes(), nil
+}
 
-	if streamStillOpen {
-		// Passthrough body was not included; signal partial wire bytes.
-		return out, envelope.ErrPartialWireBytes
+// resolveBodyForEncode flattens msg.Body or msg.BodyBuffer into an
+// in-memory []byte for offline DATA frame encoding. Returns nil when the
+// message has no body. BodyBuffer.Bytes is wrapped so materialization
+// errors (e.g. temp-file disappeared) surface cleanly to the caller.
+func resolveBodyForEncode(msg *envelope.HTTPMessage) ([]byte, error) {
+	if msg.Body != nil {
+		return msg.Body, nil
 	}
-	return out, nil
+	if msg.BodyBuffer != nil {
+		b, err := msg.BodyBuffer.Bytes(context.Background())
+		if err != nil {
+			return nil, fmt.Errorf("http2: EncodeWireBytes materialize body: %w", err)
+		}
+		return b, nil
+	}
+	return nil, nil
 }
 
 // writeHeaderBlockEncoded writes a HEADERS (+ CONTINUATION) sequence for the

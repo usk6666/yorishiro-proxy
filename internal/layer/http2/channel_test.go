@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
+	"github.com/usk6666/yorishiro-proxy/internal/envelope/bodybuf"
 	"github.com/usk6666/yorishiro-proxy/internal/layer"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/http2/frame"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/http2/hpack"
@@ -212,12 +213,6 @@ func waitForChannel(t *testing.T, l *Layer, dur time.Duration) (ch layer.Channel
 	}
 }
 
-// TestBodyChanged_PassthroughReturnsTrue pins the USK-617 gate flip: when an
-// envelope carries a streaming body (msg.Body == nil && op.bodyReader != nil),
-// bodyChanged must report "changed" so channel.Send takes the synthetic path.
-// The opaque path's cached op.frames only contains bytes captured before the
-// threshold handoff — taking it would emit the prefix and leave the pipe
-// permanently un-drained.
 // TestBuildTrailerFields_Anomalies is a table-driven unit test for USK-626:
 // the Send-trailer path must flag the same anomalies the Receive path flags
 // for initial headers (H2ConnectionSpecificHeader / H2UppercaseHeaderName /
@@ -409,139 +404,57 @@ func TestChannel_Send_TrailerAnomaliesAppendedToMessage(t *testing.T) {
 	}
 }
 
-func TestBodyChanged_PassthroughReturnsTrue(t *testing.T) {
-	pr, pw := io.Pipe()
-	defer pw.Close()
-	msg := &envelope.HTTPMessage{Body: nil, BodyStream: pr}
-	op := &opaqueHTTP2{bodyReader: pr}
-	if !bodyChanged(msg, op) {
-		t.Error("bodyChanged(passthrough) = false; want true to force synthetic path (USK-617)")
+// TestBodyChanged_PointerIdentity verifies the pointer-identity check
+// for the file-backed track and byte comparison for the memory track
+// (USK-632 dual-path bodyChanged, mirroring HTTP/1.x USK-631).
+func TestBodyChanged_PointerIdentity(t *testing.T) {
+	bb1 := bodybuf.NewMemory([]byte("one"))
+	defer bb1.Release()
+	bb2 := bodybuf.NewMemory([]byte("two"))
+	defer bb2.Release()
+
+	bufCases := []struct {
+		name       string
+		msgBuffer  *bodybuf.BodyBuffer
+		origBuffer *bodybuf.BodyBuffer
+		want       bool
+	}{
+		{"same pointer", bb1, bb1, false},
+		{"different pointers", bb1, bb2, true},
+		{"nil to non-nil", bb1, nil, true},
+		{"non-nil to nil", nil, bb1, true},
 	}
-}
-
-// TestChannel_Send_PassthroughDrainsBodyStream verifies that a passthrough-
-// shaped envelope (msg.BodyStream set, opaqueHTTP2.bodyReader set) is routed
-// through the synthetic path: headers are re-encoded on the wire, DATA frames
-// are emitted for every byte fed into the pipe writer, and the final DATA
-// frame carries END_STREAM. This is the core USK-617 regression guard — before
-// the fix the opaque fast path would write only the captured op.frames and
-// never drain the pipe.
-func TestChannel_Send_PassthroughDrainsBodyStream(t *testing.T) {
-	l, peer, cleanup := startClientLayer(t)
-	defer cleanup()
-	peer.consumePeerSettings(t)
-
-	ch, err := l.OpenStream(context.Background())
-	if err != nil {
-		t.Fatalf("OpenStream: %v", err)
-	}
-	cs := ch.(*channel)
-
-	body := make([]byte, 8192)
-	for i := range body {
-		body[i] = byte(i)
+	for _, c := range bufCases {
+		t.Run("buffer/"+c.name, func(t *testing.T) {
+			msg := &envelope.HTTPMessage{BodyBuffer: c.msgBuffer}
+			op := &opaqueHTTP2{origBodyBuffer: c.origBuffer}
+			if got := bodyChanged(msg, op); got != c.want {
+				t.Errorf("bodyChanged = %v, want %v", got, c.want)
+			}
+		})
 	}
 
-	pr, pw := io.Pipe()
-
-	// If the opaque path were (incorrectly) taken, len(op.frames) > 0 is
-	// required — populate a sentinel byte so the only guard that can reject
-	// the opaque path is the bodyChanged passthrough gate introduced by
-	// USK-617. op.layer is set to ch.layer so the cross-layer guard does
-	// NOT reject; only the passthrough gate should.
-	env := &envelope.Envelope{
-		StreamID:  ch.StreamID(),
-		Direction: envelope.Send,
-		Protocol:  envelope.ProtocolHTTP,
-		Message: &envelope.HTTPMessage{
-			Method:     "GET",
-			Scheme:     "https",
-			Authority:  "example.com",
-			Path:       "/big",
-			Body:       nil,
-			BodyStream: pr,
-		},
-		Opaque: &opaqueHTTP2{
-			layer:       cs.layer,
-			streamID:    cs.h2Stream,
-			frames:      [][]byte{{0xde, 0xad, 0xbe, 0xef}},
-			origHeaders: []hpack.HeaderField{{Name: ":method", Value: "GET"}},
-			origBody:    nil,
-			bodyReader:  pr,
-		},
+	bodyCases := []struct {
+		name     string
+		msgBody  []byte
+		origBody []byte
+		want     bool
+	}{
+		{"both nil", nil, nil, false},
+		{"identical bytes", []byte("hello"), []byte("hello"), false},
+		{"different bytes", []byte("hello"), []byte("world"), true},
+		{"different lengths", []byte("hi"), []byte("hello"), true},
+		{"nil to bytes", []byte("hi"), nil, true},
+		{"bytes to nil", nil, []byte("hi"), true},
 	}
-
-	sendErr := make(chan error, 1)
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		defer cancel()
-		sendErr <- ch.Send(ctx, env)
-	}()
-
-	// Feed the pipe in the background so writeStreamingBody can drain it.
-	go func() {
-		_, _ = pw.Write(body)
-		_ = pw.Close()
-	}()
-
-	// First wire frame must be a real HEADERS (re-encoded via HPACK), not the
-	// sentinel bytes from op.frames. Decoding succeeding and recovering
-	// :method=GET proves the synthetic path was taken.
-	f, err := peer.rd.ReadFrame()
-	if err != nil {
-		t.Fatalf("read HEADERS: %v", err)
-	}
-	if f.Header.Type != frame.TypeHeaders {
-		t.Fatalf("first frame = %s, want HEADERS (synthetic path)", f.Header.Type)
-	}
-	frag, err := f.HeaderBlockFragment()
-	if err != nil {
-		t.Fatalf("HeaderBlockFragment: %v", err)
-	}
-	hdrs, err := peer.decoder.Decode(frag)
-	if err != nil {
-		t.Fatalf("decode HEADERS: %v", err)
-	}
-	var gotMethod string
-	for _, h := range hdrs {
-		if h.Name == ":method" {
-			gotMethod = h.Value
-		}
-	}
-	if gotMethod != "GET" {
-		t.Errorf(":method = %q, want GET (synthetic path)", gotMethod)
-	}
-
-	var collected []byte
-	endStreamSeen := false
-	deadline := time.Now().Add(3 * time.Second)
-	for !endStreamSeen && time.Now().Before(deadline) {
-		f, err := peer.rd.ReadFrame()
-		if err != nil {
-			t.Fatalf("read DATA: %v", err)
-		}
-		if f.Header.Type != frame.TypeData {
-			continue
-		}
-		collected = append(collected, f.Payload...)
-		if f.Header.Flags.Has(frame.FlagEndStream) {
-			endStreamSeen = true
-		}
-	}
-	if !endStreamSeen {
-		t.Fatal("did not observe END_STREAM on any DATA frame")
-	}
-	if len(collected) != len(body) {
-		t.Errorf("received %d body bytes, want %d", len(collected), len(body))
-	}
-	for i := range collected {
-		if collected[i] != body[i] {
-			t.Fatalf("body byte %d = %d, want %d", i, collected[i], body[i])
-		}
-	}
-
-	if err := <-sendErr; err != nil {
-		t.Fatalf("Send: %v", err)
+	for _, c := range bodyCases {
+		t.Run("memory/"+c.name, func(t *testing.T) {
+			msg := &envelope.HTTPMessage{Body: c.msgBody}
+			op := &opaqueHTTP2{origBody: c.origBody}
+			if got := bodyChanged(msg, op); got != c.want {
+				t.Errorf("bodyChanged = %v, want %v", got, c.want)
+			}
+		})
 	}
 }
 
@@ -592,11 +505,11 @@ func TestChannel_Send_CrossLayerOpaqueFallsToSynthetic(t *testing.T) {
 		Protocol:  envelope.ProtocolHTTP,
 		Message:   msg,
 		Opaque: &opaqueHTTP2{
-			layer:       foreign,
-			streamID:    cs.h2Stream,
-			frames:      [][]byte{{0xde, 0xad, 0xbe, 0xef}},
-			origHeaders: []hpack.HeaderField{{Name: ":method", Value: "POST"}},
-			origBody:    body,
+			layer:          foreign,
+			streamID:       cs.h2Stream,
+			frames:         [][]byte{{0xde, 0xad, 0xbe, 0xef}},
+			origHeaders:    []hpack.HeaderField{{Name: ":method", Value: "POST"}},
+			origBodyBuffer: nil,
 		},
 	}
 

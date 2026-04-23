@@ -2,10 +2,10 @@ package http2
 
 import (
 	"bytes"
-	"errors"
 	"testing"
 
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
+	"github.com/usk6666/yorishiro-proxy/internal/envelope/bodybuf"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/http2/frame"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/http2/hpack"
 )
@@ -256,38 +256,82 @@ func TestEncodeWireBytes_ContinuationFragmentation(t *testing.T) {
 	}
 }
 
-func TestEncodeWireBytes_PassthroughBodyReturnsPartial(t *testing.T) {
+// TestEncodeWireBytes_BodyBufferMaterialized verifies that a message whose
+// body is carried on BodyBuffer (possibly file-backed) round-trips through
+// the offline encoder into DATA frames that decode back to the original
+// bytes. This is the USK-632 replacement for the old passthrough-partial
+// path; h2 no longer emits ErrPartialWireBytes from wireencode.
+func TestEncodeWireBytes_BodyBufferMaterialized(t *testing.T) {
+	// 15 MiB body — large enough to force multiple DATA frames under the
+	// default MaxFrameSize (16 KiB) and to be plausibly file-backed.
+	const bodySize = 15 << 20
+	body := make([]byte, bodySize)
+	for i := range body {
+		body[i] = byte(i % 251)
+	}
+
+	bb := bodybuf.NewMemory(nil)
+	defer bb.Release()
+	if _, err := bb.Write(body); err != nil {
+		t.Fatalf("bodybuf.Write: %v", err)
+	}
+
 	env := &envelope.Envelope{
 		Direction: envelope.Receive,
 		Protocol:  envelope.ProtocolHTTP,
 		Message: &envelope.HTTPMessage{
 			Status:     200,
 			Headers:    []envelope.KeyValue{{Name: "content-type", Value: "application/octet-stream"}},
-			BodyStream: bytes.NewReader([]byte("streamed")),
+			BodyBuffer: bb,
 		},
 	}
 	out, err := EncodeWireBytes(env)
-	if !errors.Is(err, envelope.ErrPartialWireBytes) {
-		t.Fatalf("err = %v, want ErrPartialWireBytes", err)
+	if err != nil {
+		t.Fatalf("EncodeWireBytes: %v", err)
 	}
-	// Only a HEADERS frame should be present — no DATA.
+
+	// Decode the full frame sequence: HEADERS (no END_STREAM) + DATA* with
+	// END_STREAM on the last frame. Accumulate DATA payloads and compare.
 	rdr := frame.NewReader(bytes.NewReader(out))
-	f, ferr := rdr.ReadFrame()
-	if ferr != nil {
-		t.Fatalf("read frame: %v", ferr)
+	first, err := rdr.ReadFrame()
+	if err != nil {
+		t.Fatalf("read HEADERS: %v", err)
 	}
-	if f.Header.Type != frame.TypeHeaders {
-		t.Errorf("frame type = %v, want HEADERS", f.Header.Type)
+	if first.Header.Type != frame.TypeHeaders {
+		t.Fatalf("first frame = %v, want HEADERS", first.Header.Type)
 	}
-	// Header HEADERS must NOT have END_STREAM because the real stream is
-	// still pending body data the encoder could not capture.
-	if f.Header.Flags&frame.FlagEndStream != 0 {
-		t.Errorf("HEADERS carries END_STREAM but passthrough body is still live; "+
-			"END_STREAM must not be emitted in the partial wire bytes (flags=0x%x)",
-			f.Header.Flags)
+	if first.Header.Flags&frame.FlagEndStream != 0 {
+		t.Errorf("HEADERS must NOT carry END_STREAM when body present")
 	}
-	if _, err := rdr.ReadFrame(); err == nil {
-		t.Errorf("expected EOF after single HEADERS frame for passthrough partial encoding")
+	dec := hpack.NewDecoder(defaultEncoderTableSize)
+	if _, derr := dec.Decode(first.Payload); derr != nil {
+		t.Fatalf("decode HEADERS: %v", derr)
+	}
+
+	var collected []byte
+	var last *frame.Frame
+	for {
+		f, rerr := rdr.ReadFrame()
+		if rerr != nil {
+			break
+		}
+		if f.Header.Type != frame.TypeData {
+			t.Fatalf("unexpected non-DATA frame: %v", f.Header.Type)
+		}
+		collected = append(collected, f.Payload...)
+		last = f
+	}
+	if last == nil {
+		t.Fatal("no DATA frames emitted")
+	}
+	if last.Header.Flags&frame.FlagEndStream == 0 {
+		t.Error("last DATA frame missing END_STREAM")
+	}
+	if len(collected) != len(body) {
+		t.Fatalf("body round-trip = %d bytes, want %d", len(collected), len(body))
+	}
+	if !bytes.Equal(collected, body) {
+		t.Error("body bytes differ after encode/decode round-trip")
 	}
 }
 
