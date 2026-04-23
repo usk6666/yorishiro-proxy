@@ -128,13 +128,30 @@ func (c *channel) H2StreamID() uint32 { return c.h2Stream }
 // MaxBodySize enforcement path, where the aggregator needs to reset the
 // underlying stream without closing the whole channel surface itself.
 // err becomes the channel's terminal Err.
+//
+// Note: this intentionally does NOT close ch.recv. Closing from this
+// external goroutine would race with the reader goroutine's in-flight
+// ch.recv <- env send (the reader's `select` + defer-recover protects
+// against the panic but the race detector still flags concurrent
+// close+send). markTerminated closes termDone which the reader observes
+// in deliverEnvelope's select; subsequent sends for this stream are
+// short-circuited. Any ch.recv close happens later when the caller
+// eventually invokes channel.Close (bilateral close or session teardown).
 func (c *channel) MarkTerminatedWithRST(code uint32, err error) {
 	c.layer.enqueueWrite(writeRequest{rst: &writeRST{streamID: c.h2Stream, code: code}})
 	if err == nil {
 		err = errors.New("http2: aggregator-initiated RST")
 	}
+	// Push onto errCh so any current Next blocked in select picks it up.
+	// Non-blocking: if errCh is full a prior error is preserved (first-
+	// writer-wins semantics match markTerminated).
+	if se, ok := err.(*layer.StreamError); ok {
+		select {
+		case c.errCh <- se:
+		default:
+		}
+	}
 	c.markTerminated(err)
-	c.layer.closeChannelRecv(c)
 }
 
 // Next returns the next event envelope on this channel.

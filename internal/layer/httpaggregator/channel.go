@@ -70,8 +70,15 @@ func (a *aggregatorChannel) Err() error {
 	return a.inner.Err()
 }
 
-// Close closes the aggregator wrapper itself. The underlying Channel's
-// lifecycle is the caller's responsibility.
+// Close closes the aggregator wrapper and cascades to the underlying Channel.
+//
+// Cascade rationale: Session treats the aggregator as its sole Channel handle
+// (no separate reference to the inner Channel exists in Session). When Session's
+// defer client.Close() fires after an abnormal termination (e.g. upstream
+// MaxBodySize error), the inner channel's RST_STREAM emission (driven by
+// USK-618 logic in http2.channel.Close) is what signals the peer. Not
+// cascading would leak per-stream state in the inner Layer and leave the
+// peer waiting on an unterminated stream.
 func (a *aggregatorChannel) Close() error {
 	a.closeOnce.Do(func() {
 		a.mu.Lock()
@@ -85,6 +92,7 @@ func (a *aggregatorChannel) Close() error {
 		}
 		a.mu.Unlock()
 		close(a.recvDone)
+		_ = a.inner.Close()
 	})
 	return nil
 }
