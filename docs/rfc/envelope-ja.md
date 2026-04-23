@@ -223,26 +223,63 @@ type WSMessage struct {
 }
 ```
 
-#### 3.2.3 GRPCMessage
+#### 3.2.3 gRPC Messages
 
-HTTP/2 stream 上の 1 つの length-prefixed な gRPC メッセージを表す。メタデータと trailers は `GRPCMessage` には *ない* — それらは HTTP/2 layer の `HTTPMessage` に属する。gRPC は「1 本の HTTP/2 stream をラップする」ものとしてモデル化し、HEADERS フレームは `HTTPMessage` envelope、DATA フレームは `GRPCMessage` envelope として同じ Channel 上で surface する。
+gRPC RPC は単一の Channel 上で **3 つの event 型のストリーム**として surface する。各 event 型は独自の Message 実装を持つ。メタデータと trailers も専用型を持ち、HTTPMessage は gRPC には **流用しない**。決定と根拠は §9.2 を参照。
 
 ```go
-type GRPCMessage struct {
-    // HTTP/2 stream の :path から導出; 便宜上ここに非正規化
+// GRPCStartMessage は gRPC metadata (HEADERS フレーム) を持つ。request 側・response
+// 側それぞれの開始時に 1 回ずつ発火する。
+type GRPCStartMessage struct {
+    // request 側では :path から導出; response 側では mirror
     Service string
     Method  string
 
-    // 5 byte の gRPC フレームヘッダ
-    Compressed bool
-    Length     uint32
+    // gRPC metadata — custom + reserved。HTTP/2 pseudo-header (:method,
+    // :path, :status, ...) は含まない (transport 層の所管、Envelope.Context 経由で
+    // 必要なら観察できる)
+    Metadata []KeyValue
 
-    // message 本体 (raw protobuf または圧縮 blob)
+    // 便宜のための parsed metadata。wire コピーは Metadata にも残る (wire fidelity)
+    Timeout        time.Duration // grpc-timeout parsed (0 = 未設定)
+    ContentType    string        // application/grpc[+proto|+json|...]
+    Encoding       string        // grpc-encoding (identity, gzip, deflate, ...)
+    AcceptEncoding []string      // grpc-accept-encoding
+}
+
+// GRPCDataMessage は 1 つの length-prefixed gRPC message (LPM) を持つ。LPM 境界は
+// HTTP/2 DATA フレーム境界とは独立に reassembly される。
+type GRPCDataMessage struct {
+    // 関連する GRPCStartMessage からの denormalization (read-only)
+    Service string
+    Method  string
+
+    // wire-level フィールド (5-byte LPM prefix 由来)
+    Compressed bool   // 5-byte prefix の 1 byte 目
+    WireLength uint32 // 5-byte prefix の uint32 length
+
+    // Compressed flag の値に関わらず、常に decompressed bytes (観察容易性のため)。
+    // Send 時、Layer が Compressed + 交渉済み grpc-encoding に従って再圧縮する。
+    // 意図的に malformed な圧縮 bytes を inject したい場合は Envelope.Raw を直書きする。
     Payload []byte
+}
+
+// GRPCEndMessage は gRPC RPC を終了させる trailer HEADERS フレーム (END_STREAM 付き)
+// を持つ。常に Direction=Receive。
+type GRPCEndMessage struct {
+    Status        uint32   // grpc-status parsed (codes.OK, codes.Canceled, ...)
+    Message       string   // grpc-message parsed (percent-decoded)
+    StatusDetails []byte   // grpc-status-details-bin (raw protobuf Status)
+    Trailers      []KeyValue // 上記 3 つを除く残りの trailer metadata
 }
 ```
 
-**Open Question #2 (§9.2 参照):** gRPC RPC が envelope-per-frame (HEADERS + DATA* + HEADERS-trailer) として surface されるか、集約されるか。この RFC は frame-per-envelope をデフォルトとして記載し、代替案は §9.2 で追跡する。
+**gRPC envelope の Envelope.Raw** は当該 event の wire bytes を持つ:
+- `GRPCStartMessage`: HEADERS フレームの HPACK エンコード済み block (HTTP/2 フレームラッパーは含まない)
+- `GRPCDataMessage`: 5-byte LPM prefix + compressed payload の wire そのまま
+- `GRPCEndMessage`: trailer HEADERS フレームの HPACK エンコード済み block
+
+HTTP/2 frame レベルの bytes (frame header, SETTINGS, WINDOW_UPDATE 等) は HTTP/2 Layer の所管であり gRPC envelope には露出しない。観察したい場合は HTTP/2 Layer の event stream を直接 attach する (§3.3.2 参照)。
 
 #### 3.2.4 RawMessage
 
@@ -376,7 +413,34 @@ package http2layer
 // New は net.Conn を HTTP/2 layer で wrap する。HTTP/2 stream ごとに
 // Channel を 1 本 yield する。返される Layer は HPACK 状態、接続レベル
 // フロー制御、SETTINGS ネゴシエーション、stream ライフサイクルを管理する
+//
+// 各 stream の Channel は EVENT-GRANULAR: Next() は H2HeadersEvent、
+// H2DataEvent (各 DATA フレーム、または BodyBuffer drain chunk ごと)、
+// H2TrailersEvent を yield する。HTTPMessage に集約したい Pipeline 消費者は
+// HTTPAggregatorLayer で wrap する必要がある (下記)。gRPC 消費者は GRPCLayer
+// で wrap する。根拠は §9.1 再起草版 resolution を参照。
+//
+// フロー制御: Layer は DATA bytes を stream ごとの BodyBuffer に append し、
+// append 時点で WINDOW_UPDATE を送信する (Pipeline が event を消費したか否か
+// には依存しない)。per-stream の soft cap で stream-level stall + ディスク
+// spill、hard cap で RST_STREAM。接続レベル WINDOW は Pipeline レイテンシから
+// decouple される。
 func New(conn net.Conn, role Role) layer.Layer
+```
+
+```go
+package httpaggregator
+// Wrap は event-granular な HTTP/2 (または HTTP/1.x event-granular) stream
+// Channel を消費し、request/response ごとに 1 つの HTTPMessage envelope を
+// 生成する。plain HTTP/2 トラフィックを event stream ではなく request-response
+// ペアとして扱いたい場合 (完全メッセージに対する intercept/transform) に使う。
+//
+// 集約は N6.5 BodyBuffer を流用する: 小さな body は HTTPMessage.Body、大きな body
+// は HTTPMessage.BodyBuffer に格納され、materialize セマンティクスは HTTP/1.x と同一。
+//
+// gRPC stream (content-type: application/grpc) では呼び出し側が代わりに
+// GRPCLayer.Wrap を使う必要がある。HTTPAggregatorLayer では streaming を表現できない。
+func Wrap(stream layer.Channel, role Role) layer.Channel
 ```
 
 ```go
@@ -389,12 +453,17 @@ func New(reader io.Reader, writer io.Writer, closer io.Closer, role Role) layer.
 
 ```go
 package grpclayer
-// Wrap は HTTP/2 stream Channel を受け取り、DATA フレームが GRPCMessage
-// envelope として surface されるようにラップする。下位 stream から来る
-// HEADERS 由来の HTTPMessage envelope はそのまま通過する。最初の
-// HTTPMessage envelope がすでに peek されていること (content-type 検出用)
-// を要求する
-func Wrap(stream layer.Channel, firstHTTP *envelope.Envelope, role Role) layer.Channel
+// Wrap は event-granular な HTTP/2 stream Channel を受け取り、その event を
+// gRPC envelope として surface する。マッピングは:
+//   H2HeadersEvent  → GRPCStartMessage envelope
+//   H2DataEvent*    → GRPCDataMessage envelope (LPM ごとに 1 つ。LPM 再組立は
+//                     wrapper 内部で行い、DATA フレーム境界とは独立)
+//   H2TrailersEvent → GRPCEndMessage envelope
+//
+// 呼び出し側は Wrap 呼び出し前に、content-type 検出のために最初の H2HeadersEvent
+// を peek しておく必要がある。peek した event は Wrap によって消費され、wrap 済
+// Channel の最初の envelope として再発出される。
+func Wrap(stream layer.Channel, firstHeaders *envelope.Envelope, role Role) layer.Channel
 ```
 
 ### 3.4 ConnectionStack
@@ -576,24 +645,30 @@ HTTP/1.x layer が保持していた bufio.Reader はそのまま WebSocket laye
 
 ```
 初期 stack:
-  Client:   [TCP → TLS(ALPN=h2) → HTTP/2]
-  Upstream: [TCP → TLS(ALPN=h2) → HTTP/2]  (プール)
+  Client:   [TCP → TLS(ALPN=h2) → HTTP/2]  (event-granular)
+  Upstream: [TCP → TLS(ALPN=h2) → HTTP/2]  (event-granular、プール)
 
-HTTP/2 layer の Channels() は新しい client stream ごとに 1 つの Channel を yield:
+HTTP/2 layer の Channels() は新しい stream ごとに 1 つの event-granular Channel を yield:
   for clientStreamChan := range clientH2.Channels():
     go handleStream(clientStreamChan)
 
 handleStream(clientStreamChan):
-  最初の envelope (HEADERS 由来の HTTPMessage) を peek
-  if isGRPC(firstHTTPMessage):
-    // gRPC layer でラップ
-    grpcChan := grpclayer.Wrap(clientStreamChan, firstHTTPMessage, ServerRole)
-    upstreamStreamChan := upstreamH2.OpenStream(ctx)
-    upstreamGRPCChan := grpclayer.Wrap(upstreamStreamChan, firstHTTPMessage, ClientRole)
-    Session.RunSession(grpcChan, staticDial(upstreamGRPCChan), pipeline)
+  // raw H2 Channel で最初の event (H2HeadersEvent) を peek
+  firstHeaders := clientStreamChan.Next(ctx)
+
+  upstreamStreamChan := upstreamH2.OpenStream(ctx)
+
+  if isGRPC(firstHeaders):
+    // 両側を GRPCLayer で wrap: GRPCStart + GRPCData* + GRPCEnd
+    clientGRPC   := grpclayer.Wrap(clientStreamChan, firstHeaders, ServerRole)
+    upstreamGRPC := grpclayer.Wrap(upstreamStreamChan, firstHeaders, ClientRole)
+    Session.RunSession(clientGRPC, staticDial(upstreamGRPC), pipeline)
   else:
-    upstreamStreamChan := upstreamH2.OpenStream(ctx)
-    Session.RunSession(clientStreamChan, staticDial(upstreamStreamChan), pipeline)
+    // plain HTTP/2: HTTPAggregatorLayer で request/response ごとに 1 つの
+    // HTTPMessage にまとめる (HTTP/1.x と同じユーザ可視挙動)
+    clientHTTP   := httpaggregator.Wrap(clientStreamChan, ServerRole, firstHeaders)
+    upstreamHTTP := httpaggregator.Wrap(upstreamStreamChan, ClientRole, nil)
+    Session.RunSession(clientHTTP, staticDial(upstreamHTTP), pipeline)
 ```
 
 HTTP/2 layer は内部的に以下を処理する:
@@ -641,6 +716,8 @@ func withSnapshot(ctx context.Context, env *envelope.Envelope) context.Context {
 | `internal/codec/http1/codec.go` | `internal/layer/http1/layer.go` (Layer interface) + `channel.go` (Channel interface) として書き直し。raw-first patching と `opaqueHTTP1` diff ロジックは新しい Channel の `Send` パスに移動 | 50% |
 | `internal/codec/tcp/tcp.go` | `internal/layer/bytechunk/layer.go` として書き直し | 90% |
 | `internal/codec/codec.go` (Codec interface) | **削除。** `internal/layer/layer.go` (Layer + Channel interface) に置き換え | 0% |
+| `internal/layer/http2/` (N6/N6.5/N6.6 で in-layer aggregation として実装済み) | **分割**: `internal/layer/http2/` (event-granular Channel: H2HeadersEvent/H2DataEvent/H2TrailersEvent、BodyBuffer 駆動フロー制御) + `internal/layer/httpaggregator/` (plain HTTP/2 向けに HTTPMessage を生成する wrapper)。aggregation アルゴリズムと BodyBuffer integration は **そのまま流用**、API 境界のみ移動。N6.7 aftermath として追跡 | 85% |
+| `internal/rules/grpc/` (新規) | gRPC-typed engine: GRPCStartMessage / GRPCDataMessage / GRPCEndMessage 上で動作する InterceptEngine/TransformEngine/SafetyEngine。LPM reassembly は Layer で、engine は論理 event を見る | 0% (新規) |
 | `internal/connector/dial.go` (DialUpstream) | ほぼ変更なし; raw モード用に `DialUpstreamRaw` を追加し、stack 構築 helper を公開。TLS/uTLS/mTLS handshake コードは保持 | 90% |
 | `internal/connector/listener.go`, `detect.go`, `tunnel.go`, `socks5.go` (USK-561 経由) | 構造的にはほぼ変更なし; 単一 Codec を選ぶ代わりに `ConnectionStack` を構築するよう更新 | 70% |
 | `internal/session/session.go` | Codec → Channel に名前変更; `Stack.ReplaceClientTop` 駆動の session 再起動サポートを追加 | 70% |
@@ -694,13 +771,24 @@ N5: Job + Macro 統合
     Job.Run 周りの Macro hook 呼び出し
     成果物: resend_http、resend_raw が両方動作; smuggling payload fuzz が動作
 
-N6: HTTP/2 Layer
+N6: HTTP/2 Layer  [DONE: N6 / N6.5 / N6.6]
     http2 layer (フレームコーデック、HPACK、stream ごとの channel)
     上流接続プール (基本: target ごと、LRU eviction)
     成果物: HTTPS + h2 通常通信が動作
 
+N6.7: HTTP/2 Layer 分割 (aftermath)  [N7 の prerequisite]
+    現 HTTP/2 Layer (in-layer aggregation) を分割:
+      - internal/layer/http2/ — event-granular Channel (H2HeadersEvent /
+        H2DataEvent / H2TrailersEvent); BodyBuffer 駆動フロー制御
+      - internal/layer/httpaggregator/ — HTTPMessage を生成する wrapper
+    BodyBuffer と集約アルゴリズムはそのまま流用; API のみ移動
+    根拠: §9.1 再起草 resolution (2026-04-23) + §9.2 resolution
+    成果物: plain HTTP/2 通信は end-to-end で変化なし; event-granular Channel が
+           GRPCLayer (N7) から利用可能
+
 N7: Application Layer
-    grpclayer (http2 stream channel をラップ)
+    grpclayer: event-granular な HTTP/2 Channel を消費し、
+               GRPCStartMessage / GRPCDataMessage / GRPCEndMessage envelope を発火
     wslayer (HTTP/1 Upgrade から; HTTP/2 CONNECT+:protocol すなわち
              RFC 8441 は延期)
     ssehlayer (HTTP/1 レスポンスから)
@@ -720,7 +808,7 @@ N9: レガシー削除 + ドキュメント
     成果物: 単一アーキテクチャ、ドキュメント一貫性
 ```
 
-**マイルストーン依存:** N1 → N2 → N3 → (N4 || N5) → N6 → N7 → N8 → N9。N4 と N5 は N3 着地後に並行で進められる。
+**マイルストーン依存:** N1 → N2 → N3 → (N4 || N5) → N6 → N6.7 → N7 → N8 → N9。N4 と N5 は N3 着地後に並行で進められる。N6.7 は §9.1/§9.2 resolution (2026-04-23) の aftermath であり、N7 を block する。
 
 ---
 
@@ -751,31 +839,84 @@ N9: レガシー削除 + ドキュメント
 
 ## 9. Open Questions
 
-### 9.1 HTTP/2 フロー制御 × 長時間ブロックする Pipeline Step
+### 9.1 HTTP/2 フロー制御 × 長時間ブロックする Pipeline Step — RESOLVED
+
+**解決:** 2026-04-15
+**再起草:** 2026-04-23 (2026-04-15 の in-layer aggregation モデルを置換。動機は OQ#2 resolution を参照)
 
 **問題:** HTTP/2 には stream ごとと接続ごとのフロー制御 (WINDOW_UPDATE フレーム) がある。Pipeline Step が数分ブロックする (例: AI エージェントのアクション待ちの `InterceptStep`) と、その stream の WINDOW が埋まり、下流側が stall する。同じ接続上の *多数の* 並行 stream が同時にブロックすると、接続レベル WINDOW が埋まり、HTTP/2 接続全体が stall して無関係な stream にも影響する。
 
-**選択肢:**
-1. **stream ごとの Pipeline goroutine を Layer read ループから切り離す。** HTTP/2 Layer はフレームパーサが読める限りの速度でフレームを stream ごとの channel に drain する。Pipeline は stream ごとの独自 goroutine で動く。フロー制御の window update は、stream がバイトを消費する時点で送られる。Pipeline が処理を終えた時点ではない。**リスク:** ブロック中の stream に対して Layer が無制限にメモリにバッファする可能性
-2. **Pipeline 駆動の back-pressure。** Layer は Pipeline が consume した後にのみ window バイトを ACK する。ブロックした stream は自然に stall する。**リスク:** Intercept で AI 応答が遅いと stream が stall し、多数の stream がブロックすると接続全体が stall する
-3. **Intercept を非同期化する。** ブロッキング Step の代わりに、Intercept は Pipeline の「フォーク」とする — envelope は AI レビュー用にキューに入れられ、メイン Pipeline は継続する。AI が後でドロップを決定した場合、冪等でなければならない (すでに送信済み)。**リスク:** 現在の「intercept は forwarding をブロックする」セマンティクスが壊れる
+**Resolution: event-granular な HTTP/2 Layer + per-stream bounded buffer。集約は上位 wrapper Layer。**
 
-**提案:** デフォルトを Option 1 とし、stream ごとのバッファキャップを設定可能にする。キャップに達したとき、stream は RST_STREAM で終了しログに記録する。これはほとんどの実プロキシがこのコーナーケースを処理する方法と一致する。
+初版 resolution (2026-04-15) は HTTP/2 Layer の内部で集約を行い、`Channel.Next()` は stream ごとに完全な `HTTPMessage` を返す設計だった。OQ#2 (gRPC 粒度) の検討で、このモデルは streaming gRPC と両立しない (長時間 bidi stream は「完了」しないため集約対象が無い) ことが明らかになった。根本的な設計ミスは、Pipeline のレイテンシを transport 層に伝搬させていた点。以下の再起草はこの結合を decouple することで是正する。
 
-**N6 着手前に決定必須。**
+**決定:**
 
-### 9.2 gRPC Message Envelope の粒度
+1. **HTTP/2 Layer は常に event-granular**。Channel は 3 種類の event を yield する: `H2HeadersEvent` (HEADERS フレーム由来)、`H2DataEvent` (DATA フレーム、もしくは BodyBuffer drain chunk 由来)、`H2TrailersEvent` (END_STREAM 付き trailer HEADERS 由来)。
+2. **per-stream buffer がフロー制御を駆動する**。各 stream は `BodyBuffer` (N6.5 の memory-then-spill primitive を流用) を所有。DATA フレームは到着次第 buffer に append され、WINDOW_UPDATE は **append 時点で** 送信される (Pipeline 消費時点ではない)。接続レベル WINDOW は Pipeline レイテンシから完全に decouple され、どれだけ長い Pipeline hold でも他 stream に影響を及ぼさない。
+3. **back-pressure は stream-scoped であり、connection-scoped ではない**。Pipeline が stream を hold している間に buffer が per-stream soft cap を超えたら、Layer は *その stream の* WINDOW 補充を停止し (stream-level stall)、次にディスクへ spill し、hard cap を超えたら RST_STREAM する。他 stream には影響しない。
+4. **集約は HTTP/2 Layer の性質ではなく wrapper Layer の責務**。plain HTTP/2 トラフィック向けに `HTTPAggregatorLayer` が H2 event を消費し、request/response ごとに 1 つの `HTTPMessage` を生成する (N6.5 のユーザ可視挙動を保持、HTTP/1.x と parity)。gRPC 向けには `GRPCLayer` が同じ event を消費し `GRPCStartMessage` / `GRPCDataMessage` / `GRPCEndMessage` を生成する (集約しない)。
 
-**問題:** gRPC RPC は (request HEADERS) + (request DATA*) + (response HEADERS) + (response DATA*) + (trailers HEADERS) から成る。これらを Pipeline にどう surface するか?
+**なぜこれでフロー制御が解決するか:**
 
-**選択肢:**
-1. **Frame ごとに envelope。** HEADERS → (gRPC Channel 上の) HTTPMessage envelope。各 DATA フレーム → GRPCMessage envelope。Trailers → `Trailers` 埋められた HTTPMessage envelope。Pipeline は同じ Channel 上で異なる型の混在を見る
-2. **Message ごとに集約。** メタデータと payload を両方持つ、gRPC message ごとに 1 envelope。streaming RPC は複数 envelope を yield し、unary は 1 つ。Pipeline が単純だが、メタデータは最初のメッセージが完全に組み立てられるまで遅延する
-3. **RPC ごとに集約。** RPC ごとに 1 envelope で内部 streaming 表現。unary でしか動作しない — streaming が嵌まらない
+- transport 層の ACK が application 層の処理速度から独立。WINDOW_UPDATE は frame reader goroutine が socket から frame を取り出した直後 (マイクロ秒単位で) per-stream buffer に到達した時点で発射される。Pipeline が個別 stream をブロックしても接続への back-pressure は発生しない。
+- 接続あたりの最悪メモリは `perStreamSoftCap × MAX_CONCURRENT_STREAMS`。soft cap に達した stream はディスク spill する。soft cap は調整可能。ディスク spill パスは N6.5 で実証済み。
+- plain HTTP ユーザは HTTPAggregatorLayer 経由で「1 exchange あたり 1 HTTPMessage」の同じ ergonomics を維持する。streaming プロトコル (gRPC、将来の SSE) のユーザは event を到着順に見る。
 
-**提案 (暫定):** Option 1。wire の実態と一致し、既にある HTTPMessage 型と自然に組み合わさり、新しい集約ステートマシンを要求しない。「完全なメッセージ」を気にする Pipeline Step は、`Envelope.StreamID` をキーとして envelope をまたいで蓄積できる。
+**却下した代替案:**
+- **In-layer aggregation (2026-04-15 resolution):** streaming gRPC をサポート不能。bidi stream で body inspection が passthrough モード化する。
+- **Frame-per-envelope streaming without buffering (2026-04-15 以前の原案):** Pipeline hold が接続レベル WINDOW を詰まらせる。本再起草では buffer drain を Pipeline drain から decouple することで修正。
+- **Pipeline-driven back-pressure:** 接続レベル stall 問題が同じ。
+- **Async Intercept:** MCP tool surface が依存する「intercept は forwarding をブロックする」契約を壊す。
 
-**N7 着手前に決定必須。**
+**移行メモ:** N6 / N6.5 / N6.6 で構築した HTTP/2 Layer は in-layer aggregation 実装。これを `HTTP2Layer` (event-granular) + `HTTPAggregatorLayer` (wrapper) に分割する作業は N6 系列 aftermath Issue として N6.7 で追跡。集約アルゴリズムと BodyBuffer integration はそのまま流用し、API 境界のみ移動する。
+
+### 9.2 gRPC Message Envelope の粒度 — RESOLVED
+
+**解決:** 2026-04-23
+
+**問題:** gRPC RPC は event stream である: (request HEADERS) + (request DATA*) + (response HEADERS) + (response DATA*) + (trailers HEADERS)。unary ですら概念的には「start + 1 message + end」。これらをどう Pipeline に surface するか?
+
+**Resolution: event-per-envelope + 専用 gRPC Message 型。**
+
+論理的に異なる各 gRPC event はそれぞれ自身の Message 型を持つ Envelope となる。暫定案と異なり HTTPMessage は headers / trailers に **流用しない** — gRPC 固有のセマンティクス (grpc-status, grpc-timeout, grpc-encoding) は HTTPMessage の型契約 ("HTTPMessage の全フィールドは HTTP として有意でなければならない") に収まらない。新しい Message 型の対応は:
+
+| wire event | Envelope.Message 型 | 発火条件 |
+|------------|---------------------|----------|
+| Request HEADERS | `GRPCStartMessage` | Direction=Send, Sequence=0 |
+| 各 length-prefixed request message | `GRPCDataMessage` | Direction=Send, LPM ごとに 1 つ |
+| Response HEADERS | `GRPCStartMessage` | Direction=Receive, Sequence=0 |
+| 各 length-prefixed response message | `GRPCDataMessage` | Direction=Receive, LPM ごとに 1 つ |
+| Trailer HEADERS (END_STREAM 付き) | `GRPCEndMessage` | Direction=Receive, 末尾 |
+
+5 種類の event は同じ `Envelope.StreamID` (HTTP/2 stream ID) を共有し、`Sequence` が stream 内の順序を示す。「完全な RPC」単位で動作したい Pipeline Step は StreamID で envelope を束ねて集約する。
+
+**粒度は length-prefixed gRPC message (LPM) であって HTTP/2 DATA フレームではない。** 1 つの gRPC message が複数の DATA フレームにまたがる場合も、1 つの DATA フレームが複数の gRPC message を含む場合もある。gRPC Layer は H2 Layer が surface する raw byte stream (`H2DataEvent`) から LPM 境界を reassembly する。`GRPCDataMessage` envelope の `Envelope.Raw` は 5-byte prefix + payload の wire bytes そのまま (圧縮が有効なら compressed)。
+
+**圧縮の扱い:**
+- `GRPCDataMessage.Compressed` は wire の flag (5-byte prefix の 1 byte 目) を保持。
+- `GRPCDataMessage.Payload` は **常に decompressed** bytes (観察容易性のため)。
+- `GRPCDataMessage.WireLength` は wire レベル長 (compressed bytes 長)。
+- `Envelope.Raw` は wire そのまま (5-byte prefix + compressed payload)。
+- Send 時: `Compressed=true` なら gRPC Layer が交渉済み `grpc-encoding` で `Payload` を再圧縮して書き込む。意図的に malformed な compressed bytes を送り込みたい場合は `Envelope.Raw` を直書きする low-level bypass を使う (raw TCP layer と同じパターン)。
+
+**なぜこれで決着したか:**
+
+- wire の実態と一致 (wire は event stream、型システムもそう)。
+- gRPC streaming が first-class: bidi stream は event が到着順に発火し、Pipeline は任意の 1 message を stream 完了を待たずに intercept/transform できる。
+- `HTTPMessage` の型契約違反を作らない: 各 Message 型の全フィールドがその event にとって有意。
+- Pipeline フロー制御懸念は §9.1 再起草 resolution に委譲 (transport buffer が Pipeline から decouple)。
+- MCP `resend_grpc` tool が自然にマップする: 「この stream の event 列を再生、任意で event ごとに edit」。
+
+**却下した代替案:**
+- **暫定案 (HTTPMessage を headers / trailers に流用):** Method/URL/Status/Body 空の HTTPMessage を生み、§3.1 design rule (全フィールドが型にとって有意であること) に違反。
+- **Aggregated-per-message (メタデータを最初の message に bundle):** headers 観察が最初の LPM 完了まで遅延し、server-streaming で不整合 (headers は message 到着より遥かに早く観察可能なことが多い)。
+- **Aggregated-per-RPC:** unary 専用、streaming で不可能。
+
+**付随決定事項:**
+- `GRPCDataMessage` 上の Service/Method は関連する `GRPCStartMessage` からの **read-only 非正規化**。service/method を変更したい場合は Start envelope を intercept する。
+- grpc-web は本 resolution のスコープ外。独自 layer (`GRPCWebLayer`) が HTTP/1 または HTTP/2 aggregated `HTTPMessage` を wrap する (base64 または binary framing)。`envelope-implementation.md` の Friction 4-C を参照。
+- HTTP/2 CONNECT + `:protocol` 拡張 CONNECT (RFC 8441) による WebSocket-over-H2 は N7 milestone の scope 外のまま据え置き。
 
 ### 9.3 Starlark Plugin API Shape
 
@@ -873,8 +1014,8 @@ type Envelope struct {
 - [x] M36–M44 マイルストーンと未完了 issue をキャンセル済み
 
 **実装フェーズに延期 (マイルストーン別のゲート):**
-- [ ] Open Question #1 (HTTP/2 フロー制御 vs Pipeline レイテンシ) — **N6 着手前に解決**
-- [ ] Open Question #2 (gRPC envelope 粒度) — **N7 着手前に解決**
+- [x] Open Question #1 (HTTP/2 フロー制御 vs Pipeline レイテンシ) — **解決済 2026-04-15; 再起草 2026-04-23: event-granular HTTP/2 Layer + HTTPAggregatorLayer wrapper (§9.1)**
+- [x] Open Question #2 (gRPC envelope 粒度) — **解決済 2026-04-23: event-per-envelope + GRPCStart/Data/End 専用型 (§9.2)**
 - [ ] Open Question #3 (Starlark plugin API shape) — **N8 着手前に解決**
 - [ ] Envelope + Message Go interface がコンパイル・検証できている — **N1 の成果物**
 - [ ] InterceptStep の疑似コードレベル実装で dispatch パターンが証明されている — **N3 の成果物**
