@@ -1287,9 +1287,10 @@ func TestGOAWAY_AffectedStreamsRecordedAsRefused(t *testing.T) {
 // round-trips through the MITM proxy end-to-end under the USK-632 model:
 // the assembler aggregates all DATA frames into a BodyBuffer (memory →
 // file-backed past the configured spill threshold) and emits the envelope
-// only after END_STREAM. flow.Flow.Body stays empty because the recording
-// layer projects msg.Body and not msg.BodyBuffer (wire-observed bytes are
-// available on RawBytes; the structured body is live on msg.BodyBuffer).
+// only after END_STREAM. After USK-633, RecordStep materializes the
+// BodyBuffer into flow.Flow.Body via projectHTTPBody (capped at
+// config.MaxBodySize = 254 MiB), so recvF.Body carries the full 11 MiB —
+// the wire-observed bytes also remain on RawBytes (L7/L4 duality).
 func TestLargeResponseBody_SpillRoundtrip_11MiB(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
@@ -1349,11 +1350,16 @@ func TestLargeResponseBody_SpillRoundtrip_11MiB(t *testing.T) {
 	if recvF == nil {
 		t.Fatal("no receive flow under linked stream")
 	}
-	// flow.Flow.Body is projected from msg.Body (record_step.go). Since the
-	// assembler hands the body off on msg.BodyBuffer, recvF.Body stays empty
-	// while the wire bytes remain observable on RawBytes (L7/L4 duality).
-	if len(recvF.Body) != 0 {
-		t.Errorf("receive flow Body should be empty (body lives on BodyBuffer), got %d bytes", len(recvF.Body))
+	// RecordStep materializes the BodyBuffer into flow.Flow.Body after USK-633
+	// (projectHTTPBody with MaxBodySize=254 MiB). 11 MiB fits under the cap
+	// and must be recorded faithfully for analyst review.
+	if len(recvF.Body) != size {
+		t.Errorf("receive flow Body length = %d, want %d", len(recvF.Body), size)
+	} else {
+		gotBodyHash := sha256.Sum256(recvF.Body)
+		if !bytes.Equal(gotBodyHash[:], expectedHash[:]) {
+			t.Errorf("receive flow Body hash mismatch: got=%x want=%x", gotBodyHash, expectedHash)
+		}
 	}
 	if len(recvF.Headers) == 0 {
 		t.Error("receive flow headers missing")
