@@ -144,11 +144,12 @@ func TestNewH2CHandler_PerStreamDispatch(t *testing.T) {
 		env := &envelope.Envelope{
 			Direction: envelope.Send,
 			Protocol:  envelope.ProtocolHTTP,
-			Message: &envelope.HTTPMessage{
+			Message: &http2.H2HeadersEvent{
 				Method:    "GET",
 				Scheme:    "http",
 				Authority: "example.com",
 				Path:      "/",
+				EndStream: true,
 			},
 		}
 		sendCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)

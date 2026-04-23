@@ -103,7 +103,16 @@ func TestReader_GoAwayMarksStreams(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	_, err := ch.Next(ctx)
+	// USK-637: post-split, the initial HEADERS emits an H2HeadersEvent
+	// envelope even without END_STREAM. Drain it; the GOAWAY that follows
+	// surfaces on the channel's error path.
+	env, err := ch.Next(ctx)
+	if err == nil {
+		if _, ok := env.Message.(*H2HeadersEvent); !ok {
+			t.Fatalf("first envelope Message = %T, want *H2HeadersEvent", env.Message)
+		}
+		_, err = ch.Next(ctx)
+	}
 	if err == nil {
 		t.Fatal("Next: want error after GOAWAY, got nil")
 	}
@@ -148,7 +157,17 @@ func TestReader_RSTStreamTranslated(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	_, err := ch.Next(ctx)
+	// USK-637: the initial HEADERS block (no END_STREAM) emits an
+	// H2HeadersEvent envelope immediately post-split. Drain it; the RST
+	// that follows should then surface on the channel's error path.
+	env, err := ch.Next(ctx)
+	if err == nil {
+		if _, ok := env.Message.(*H2HeadersEvent); !ok {
+			t.Fatalf("first envelope Message = %T, want *H2HeadersEvent", env.Message)
+		}
+		// Now expect the RST.
+		_, err = ch.Next(ctx)
+	}
 	var se *layer.StreamError
 	if !errors.As(err, &se) {
 		t.Fatalf("Next: want *layer.StreamError, got %T (%v)", err, err)
@@ -174,8 +193,9 @@ func TestReader_PushPromise_EmitsChannelAndSyntheticEnvelope(t *testing.T) {
 	go func() {
 		_ = ch.Send(context.Background(), &envelope.Envelope{
 			Direction: envelope.Send,
-			Message: &envelope.HTTPMessage{
+			Message: &H2HeadersEvent{
 				Method: "GET", Scheme: "https", Authority: "x", Path: "/",
+				EndStream: true,
 			},
 		})
 	}()
@@ -210,22 +230,32 @@ func TestReader_PushPromise_EmitsChannelAndSyntheticEnvelope(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Next: %v", err)
 	}
-	msg := env.Message.(*envelope.HTTPMessage)
+	evt := env.Message.(*H2HeadersEvent)
 	hasPushAnomaly := false
-	for _, a := range msg.Anomalies {
+	for _, a := range evt.Anomalies {
 		if a.Type == envelope.H2PushPromise {
 			hasPushAnomaly = true
 		}
 	}
 	if !hasPushAnomaly {
-		t.Errorf("synthetic push envelope missing H2PushPromise anomaly: %+v", msg.Anomalies)
+		t.Errorf("synthetic push envelope missing H2PushPromise anomaly: %+v", evt.Anomalies)
 	}
-	if msg.Path != "/pushed.css" {
-		t.Errorf("synthetic push path = %q, want /pushed.css", msg.Path)
+	if evt.Path != "/pushed.css" {
+		t.Errorf("synthetic push path = %q, want /pushed.css", evt.Path)
 	}
 
 	// Expect a new push channel on Channels().
-	pushCh := waitForChannel(t, l, time.Second)
+	var pushCh layer.Channel
+	deadline2 := time.Now().Add(time.Second)
+	for time.Now().Before(deadline2) && pushCh == nil {
+		select {
+		case c := <-l.Channels():
+			if c != nil {
+				pushCh = c
+			}
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
 	if pushCh == nil {
 		t.Fatal("no push channel emitted")
 	}
@@ -261,15 +291,21 @@ func TestReader_PushPromise_EmitsChannelAndSyntheticEnvelope(t *testing.T) {
 	if err != nil {
 		t.Fatalf("pushCh.Next: %v", err)
 	}
-	pushMsg, ok := pushEnv.Message.(*envelope.HTTPMessage)
+	pushEvt, ok := pushEnv.Message.(*H2HeadersEvent)
 	if !ok {
-		t.Fatalf("push first envelope Message = %T, want *HTTPMessage", pushEnv.Message)
+		t.Fatalf("push first envelope Message = %T, want *H2HeadersEvent", pushEnv.Message)
 	}
-	if pushMsg.Path != "/pushed.css" {
-		t.Errorf("push channel first envelope Path = %q, want /pushed.css", pushMsg.Path)
+	if pushEvt.Path != "/pushed.css" {
+		t.Errorf("push channel first envelope Path = %q, want /pushed.css", pushEvt.Path)
 	}
-	if !envelope.HasPushPromiseAnomaly(pushMsg) {
-		t.Errorf("push channel first envelope missing H2PushPromise anomaly: %+v", pushMsg.Anomalies)
+	hasAnomaly := false
+	for _, a := range pushEvt.Anomalies {
+		if a.Type == envelope.H2PushPromise {
+			hasAnomaly = true
+		}
+	}
+	if !hasAnomaly {
+		t.Errorf("push channel first envelope missing H2PushPromise anomaly: %+v", pushEvt.Anomalies)
 	}
 	if pushEnv.Direction != envelope.Receive {
 		t.Errorf("push channel first envelope Direction = %v, want Receive", pushEnv.Direction)

@@ -177,7 +177,7 @@ func (l *Layer) handleStreamHeaders(f *frame.Frame) error {
 	l.updatePendingHeaderStream(f.Header.StreamID, endHeaders)
 
 	direction := l.headerDirection(asm)
-	env, _, err := asm.handleHeadersFrame(fragment, f.RawBytes, endHeaders, endStream, l.decoder, direction)
+	env, err := asm.handleHeadersFrame(fragment, endHeaders, endStream, l.decoder, direction)
 	if err != nil {
 		return err
 	}
@@ -200,12 +200,14 @@ func (l *Layer) updatePendingHeaderStream(streamID uint32, endHeaders bool) {
 	}
 }
 
-// headerDirection picks the direction for envelopes built from the next
-// HEADERS frame: Send on the server-facing reader, Receive on the
-// client-facing reader, or the in-flight envelope's direction for trailers.
-func (l *Layer) headerDirection(asm *streamAssembler) envelope.Direction {
-	if asm.phase == asmCollectingTrailers && asm.inflight != nil {
-		return asm.inflight.Direction
+// headerDirection picks the direction for the next HEADERS block. For the
+// initial block, use Send (ServerRole reading requests) or Receive
+// (ClientRole reading responses). For a trailer block, mirror the direction
+// of the initial block so the aggregator can associate trailers with the
+// correct in-flight HTTPMessage.
+func (l *Layer) headerDirection(asm *eventAssembler) envelope.Direction {
+	if asm.phase == phaseTrailers && asm.initialDirSet {
+		return asm.initialDirection
 	}
 	if l.role == ServerRole {
 		return envelope.Send
@@ -232,14 +234,14 @@ func (l *Layer) handleStreamContinuation(f *frame.Frame) error {
 	}
 
 	direction := envelope.Receive
-	if l.role == ServerRole && asm.phase != asmCollectingTrailers {
+	if l.role == ServerRole && asm.phase != phaseTrailers {
 		direction = envelope.Send
 	}
-	if asm.inflight != nil {
-		direction = asm.inflight.Direction
+	if asm.initialDirSet {
+		direction = asm.initialDirection
 	}
 
-	env, _, err := asm.handleHeadersFrame(fragment, f.RawBytes, endHeaders, false, l.decoder, direction)
+	env, err := asm.handleHeadersFrame(fragment, endHeaders, false, l.decoder, direction)
 	if err != nil {
 		return err
 	}
@@ -250,21 +252,6 @@ func (l *Layer) handleStreamContinuation(f *frame.Frame) error {
 		l.deliverEnvelope(ch, env, asm)
 	}
 	return nil
-}
-
-// handleStreamData dispatches a DATA frame. On a *layer.StreamError from the
-// assembler (body exceeded MaxBodySize), the stream is terminated by
-// emitting RST_STREAM(INTERNAL_ERROR) and surfacing the error to the
-// Channel's consumer. On any other error, the error propagates upward.
-func (l *Layer) handleStreamDataError(streamID uint32, err error) error {
-	var se *layer.StreamError
-	if errors.As(err, &se) {
-		// Translate the layer.ErrorCode back to an HTTP/2 wire code for RST.
-		l.enqueueWrite(writeRequest{rst: &writeRST{streamID: streamID, code: ErrCodeInternal}})
-		l.failStream(streamID, se)
-		return nil
-	}
-	return err
 }
 
 func (l *Layer) handleStreamData(f *frame.Frame) error {
@@ -290,17 +277,17 @@ func (l *Layer) handleStreamData(f *frame.Frame) error {
 		return nil
 	}
 
-	env, _, err := asm.handleDataFrame(payload, f.RawBytes, endStream)
-	if err != nil {
-		// A *layer.StreamError from the assembler (e.g. body exceeded
-		// MaxBodySize) is a per-stream fault, not a connection fault:
-		// RST_STREAM the offending stream with INTERNAL_ERROR and surface
-		// the error to the Channel's consumer. Non-StreamError errors
-		// propagate upward to the connection-error path.
-		return l.handleStreamDataError(f.Header.StreamID, err)
-	}
+	// Always produce exactly one H2DataEvent per DATA frame (RFC-001 §9.1
+	// revised — deterministic 1:1 mapping).
+	env := asm.handleDataFrame(payload, endStream)
 
-	// Eagerly emit WINDOW_UPDATE if recv windows have drained ≥50%.
+	// USK-637: WINDOW_UPDATE fires at frame-arrival time (Layer-level),
+	// BEFORE the event is delivered to the aggregator/Pipeline. This keeps
+	// transport-layer ACKing independent of Pipeline consumption speed: a
+	// long-held Pipeline Step cannot stall the connection-level window for
+	// other streams. The per-stream event channel (bounded at 32 slots) is
+	// the only backpressure mechanism — if it fills, the reader blocks on
+	// the deliver step, but WINDOW_UPDATE has already gone out.
 	l.maybeWindowUpdate(f.Header.StreamID, f.Header.Length)
 
 	if env != nil {
@@ -309,13 +296,11 @@ func (l *Layer) handleStreamData(f *frame.Frame) error {
 	if endStream {
 		_ = l.conn.Streams().Transition(f.Header.StreamID, EventRecvEndStream)
 	}
-	// Close the Channel's recv side if the assembler has reached asmDone.
-	// deliverEnvelope already closes recv via its own asmDone check on the
-	// terminal-DATA path; this is a safe idempotent backstop —
+	// Close the Channel's recv side if the assembler has reached terminal
+	// state. deliverEnvelope already closes recv via its own isDone check on
+	// the terminal path; this is a safe idempotent backstop because
 	// closeChannelRecv is guarded by sync.Once.
-	if asm.phase == asmDone {
-		// Record natural end-of-recv for USK-618's Close-time RST gate.
-		// markRecvEnded is idempotent.
+	if asm.isDone() {
 		ch.markRecvEnded()
 		l.closeChannelRecv(ch)
 	}
@@ -358,9 +343,7 @@ func (l *Layer) handleStreamPushPromise(f *frame.Frame) error {
 	endHeaders := f.Header.Flags.Has(frame.FlagEndHeaders)
 
 	if !endHeaders {
-		// Fragmented PUSH_PROMISE not supported in this minimum implementation
-		// — most servers fit promises in a single frame because they are
-		// usually small. Treat as a connection error so we surface the gap.
+		// Fragmented PUSH_PROMISE not supported in this minimum implementation.
 		return &ConnError{
 			Code:   ErrCodeInternal,
 			Reason: "PUSH_PROMISE without END_HEADERS not supported",
@@ -375,8 +358,7 @@ func (l *Layer) handleStreamPushPromise(f *frame.Frame) error {
 		}
 	}
 
-	// S-3 guard: cap concurrent peer-driven streams (push counts toward our
-	// advertised MAX_CONCURRENT_STREAMS — RFC 9113 §6.6 second paragraph).
+	// S-3 guard: cap concurrent peer-driven streams.
 	if l.peerStreamLimitExceeded() {
 		l.enqueueWrite(writeRequest{rst: &writeRST{streamID: promisedID, code: ErrCodeRefusedStream}})
 		return nil
@@ -387,17 +369,20 @@ func (l *Layer) handleStreamPushPromise(f *frame.Frame) error {
 		return fmt.Errorf("http2: decode PUSH_PROMISE header block: %w", dErr)
 	}
 
-	// Build a synthetic request envelope on the original stream's channel.
+	// Build a synthetic H2HeadersEvent on the original stream's channel. The
+	// pushed request pseudo-headers (:method/:scheme/:authority/:path) come
+	// from the PUSH_PROMISE frame; we mark this as EndStream=true (no body
+	// will follow on the origin stream for this synthetic event) and tag the
+	// H2PushPromise anomaly so aggregator-level HTTPMessage surfacing can
+	// flag it for downstream classification.
 	originAsm, originCh, _ := l.assemblerFor(f.Header.StreamID, false)
 	if originAsm == nil {
-		// No origin channel? Refuse the promise.
 		l.enqueueWrite(writeRequest{rst: &writeRST{streamID: promisedID, code: ErrCodeRefusedStream}})
 		return nil
 	}
 
-	syntheticMsg, anomalies := buildHTTPMessage(decoded, envelope.Send)
-	syntheticMsg.Anomalies = append(syntheticMsg.Anomalies, anomalies...)
-	syntheticMsg.Anomalies = append(syntheticMsg.Anomalies, envelope.Anomaly{
+	syntheticEvt := buildHeadersEvent(decoded, envelope.Send, true)
+	syntheticEvt.Anomalies = append(syntheticEvt.Anomalies, envelope.Anomaly{
 		Type:   envelope.H2PushPromise,
 		Detail: fmt.Sprintf("promised_stream_id=%d", promisedID),
 	})
@@ -408,45 +393,38 @@ func (l *Layer) handleStreamPushPromise(f *frame.Frame) error {
 		Sequence:  originCh.nextSequence(),
 		Direction: envelope.Receive, // pushed onto our connection by the server
 		Protocol:  envelope.ProtocolHTTP,
-		Raw:       cloneBytes(f.RawBytes),
-		Message:   syntheticMsg,
+		Raw:       cloneBytes(fragment),
+		Message:   syntheticEvt,
 		Context:   l.envelopeContextWithTime(),
 	}
 	l.deliverEnvelope(originCh, envSyn, nil)
 
 	// Create a new push channel for the promised stream. originStreamID
-	// points back to the origin channel's UUID so the push recorder (see
-	// internal/pushrecorder/push_recorder.go) can tag the pushed stream's
-	// flows with the originating request's identifier for analyst
-	// correlation.
+	// points back to the origin channel's UUID so the push recorder can tag
+	// the pushed stream's flows with the originating request's identifier
+	// for analyst correlation.
 	pushCh := newChannel(l, promisedID, true)
 	pushCh.originStreamID = originCh.streamID
 	l.registerChannel(promisedID, pushCh)
 	l.emitChannel(pushCh)
 
-	// Also deliver a clone of the synthetic envelope on the push channel as
-	// its first envelope. This gives the push stream's recording a flow
-	// carrying Method/Path/Authority (from the PUSH_PROMISE pseudo-headers)
-	// so analysts can identify the pushed resource without cross-
-	// referencing the origin stream. The origin-side delivery above is kept
-	// for observers of the origin stream.
-	//
-	// Clone Message so mutation on either side doesn't bleed across, and
-	// reset StreamID + Sequence so envelopeToFlow attributes the flow to
-	// the push Stream.
+	// Also deliver a clone of the synthetic event on the push channel as its
+	// first envelope. Tests and the push recorder expect the PUSH_PROMISE
+	// pseudo-headers to appear on the push channel so analysts can identify
+	// the pushed resource without cross-referencing the origin.
+	pushSynClone := syntheticEvt.CloneMessage()
 	pushEnvSyn := &envelope.Envelope{
 		StreamID:  pushCh.streamID,
 		FlowID:    uuid.New().String(),
 		Sequence:  pushCh.nextSequence(),
 		Direction: envelope.Receive,
 		Protocol:  envelope.ProtocolHTTP,
-		Raw:       cloneBytes(f.RawBytes),
-		Message:   syntheticMsg.CloneMessage(),
+		Raw:       cloneBytes(fragment),
+		Message:   pushSynClone,
 		Context:   envSyn.Context,
 	}
 	l.deliverEnvelope(pushCh, pushEnvSyn, nil)
 
-	// Ensure the server's stream state reflects "reserved (remote)".
 	_ = l.conn.Streams().Transition(promisedID, EventRecvPushPromise)
 	return nil
 }
@@ -454,9 +432,7 @@ func (l *Layer) handleStreamPushPromise(f *frame.Frame) error {
 // assemblerFor returns (assembler, channel) for streamID, optionally creating
 // the assembler+channel if missing (createIfMissing=true). Returns (nil, nil, false)
 // if the stream is closed or the layer is shut down.
-//
-// `isNew` is true when a new channel was created.
-func (l *Layer) assemblerFor(streamID uint32, createIfMissing bool) (*streamAssembler, *channel, bool) {
+func (l *Layer) assemblerFor(streamID uint32, createIfMissing bool) (*eventAssembler, *channel, bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
@@ -473,7 +449,7 @@ func (l *Layer) assemblerFor(streamID uint32, createIfMissing bool) (*streamAsse
 
 	ch := newChannel(l, streamID, false)
 	l.channels[streamID] = ch
-	asm := newStreamAssembler(streamID, ch, l.asmBodyOpts())
+	asm := newEventAssembler(streamID, ch)
 	l.assemblers[streamID] = asm
 	l.conn.Streams().SetLastPeerStreamID(streamID)
 	return asm, ch, true
@@ -485,7 +461,7 @@ func (l *Layer) registerChannel(streamID uint32, ch *channel) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.channels[streamID] = ch
-	l.assemblers[streamID] = newStreamAssembler(streamID, ch, l.asmBodyOpts())
+	l.assemblers[streamID] = newEventAssembler(streamID, ch)
 }
 
 // emitChannel sends ch on the Channels() output channel. Non-blocking on
@@ -497,9 +473,17 @@ func (l *Layer) emitChannel(ch *channel) {
 	}
 }
 
-// deliverEnvelope sends env on ch's recv chan, applying backpressure.
-// Returns false if the layer is shutting down.
-func (l *Layer) deliverEnvelope(ch *channel, env *envelope.Envelope, asm *streamAssembler) {
+// deliverEnvelope sends env on ch's recv chan, applying backpressure. The
+// per-stream event channel is bounded (perStreamEventChanCap); a long-
+// blocking aggregator causes the reader to block here, but WINDOW_UPDATE
+// has already been sent at frame-arrival time so connection-level flow
+// control is not affected.
+//
+// If the channel's recv has already been closed (e.g., by the aggregator
+// invoking MarkTerminatedWithRST on a MaxBodySize violation), the event
+// is silently dropped — the stream is terminated from the consumer's
+// perspective, so the event would be unreachable anyway.
+func (l *Layer) deliverEnvelope(ch *channel, env *envelope.Envelope, asm *eventAssembler) {
 	if env.FlowID == "" {
 		env.FlowID = uuid.New().String()
 	}
@@ -507,18 +491,30 @@ func (l *Layer) deliverEnvelope(ch *channel, env *envelope.Envelope, asm *stream
 		env.Context = l.envelopeContextWithTime()
 	}
 
+	// Defense-in-depth: skip delivery if recv was already closed via
+	// MarkTerminatedWithRST or another abnormal termination path.
+	select {
+	case <-ch.termDone:
+		return
+	default:
+	}
+
+	defer func() {
+		// If another goroutine closed recv between the termDone check and
+		// the send, recover gracefully instead of panicking.
+		_ = recover()
+	}()
+
 	select {
 	case ch.recv <- env:
 	case <-l.shutdown:
 		return
+	case <-ch.termDone:
+		return
 	}
 
 	// If the assembler reached terminal state, close the channel's recv side.
-	if asm != nil && asm.phase == asmDone {
-		// Record natural end-of-recv for USK-618's Close-time RST gate.
-		// Only set on natural asmDone; abnormal paths (failStream,
-		// failStreamsAfterGoAway, broadcastShutdown) deliberately do NOT
-		// set this flag so Close still emits RST.
+	if asm != nil && asm.isDone() {
 		ch.markRecvEnded()
 		l.closeChannelRecv(ch)
 	}
@@ -531,9 +527,7 @@ func (l *Layer) closeChannelRecv(ch *channel) {
 	})
 }
 
-// failStream delivers a stream error to ch and closes its recv side. Any
-// partial BodyBuffer held by the assembler is released so aborted streams
-// do not leak temp files.
+// failStream delivers a stream error to ch and closes its recv side.
 func (l *Layer) failStream(streamID uint32, se *layer.StreamError) {
 	l.mu.Lock()
 	ch, ok := l.channels[streamID]
@@ -551,8 +545,7 @@ func (l *Layer) failStream(streamID uint32, se *layer.StreamError) {
 	// channel.Close) keeps its terminal error.
 	ch.markTerminated(se)
 	if asm != nil {
-		asm.releaseBody()
-		asm.phase = asmDone
+		asm.phase = phaseDone
 	}
 	l.closeChannelRecv(ch)
 }
@@ -561,13 +554,9 @@ func (l *Layer) failStream(streamID uint32, se *layer.StreamError) {
 func (l *Layer) failStreamsAfterGoAway(lastStreamID uint32, se *layer.StreamError) {
 	l.mu.Lock()
 	channels := make([]*channel, 0)
-	assemblers := make([]*streamAssembler, 0)
 	for id, ch := range l.channels {
 		if id > lastStreamID {
 			channels = append(channels, ch)
-			if asm, ok := l.assemblers[id]; ok {
-				assemblers = append(assemblers, asm)
-			}
 		}
 	}
 	l.mu.Unlock()
@@ -579,36 +568,21 @@ func (l *Layer) failStreamsAfterGoAway(lastStreamID uint32, se *layer.StreamErro
 		ch.markTerminated(se)
 		l.closeChannelRecv(ch)
 	}
-	for _, asm := range assemblers {
-		asm.releaseBody()
-	}
 }
 
 // broadcastShutdown closes all per-channel recv chans and the channelOut chan.
-// Idempotent via sync.Once on each channel. Also releases any partial
-// BodyBuffer held by per-stream assemblers so temp files do not leak past
-// connection teardown.
+// Idempotent via sync.Once on each channel.
 func (l *Layer) broadcastShutdown() {
 	l.mu.Lock()
 	channels := make([]*channel, 0, len(l.channels))
 	for _, ch := range l.channels {
 		channels = append(channels, ch)
 	}
-	assemblers := make([]*streamAssembler, 0, len(l.assemblers))
-	for _, asm := range l.assemblers {
-		assemblers = append(assemblers, asm)
-	}
 	l.mu.Unlock()
 
 	for _, ch := range channels {
-		// Connection-level teardown: streams that never individually
-		// terminated see the layer-shutdown as a normal EOF so the session
-		// watcher does not misclassify it as a late peer cancel.
 		ch.markTerminated(io.EOF)
 		l.closeChannelRecv(ch)
-	}
-	for _, asm := range assemblers {
-		asm.releaseBody()
 	}
 	l.closeChannelOutOnce.Do(func() {
 		close(l.channelOut)
@@ -616,7 +590,6 @@ func (l *Layer) broadcastShutdown() {
 }
 
 // signalWindowUpdate wakes the writer if it is blocked waiting for a window.
-// Non-blocking; coalesces multiple updates.
 func (l *Layer) signalWindowUpdate() {
 	select {
 	case l.windowUpdated <- struct{}{}:
@@ -624,21 +597,17 @@ func (l *Layer) signalWindowUpdate() {
 	}
 }
 
-// handleReadError is called when the reader cannot proceed. It triggers
-// shutdown so the writer drains and Layer.Close completes.
+// handleReadError is called when the reader cannot proceed.
 func (l *Layer) handleReadError(err error) {
 	if errors.Is(err, io.EOF) {
-		// Normal shutdown — close all channels and shut down.
 		l.shutdownOnce.Do(func() { close(l.shutdown) })
 		return
 	}
 
-	// Capture for diagnostic.
 	l.lastErrMu.Lock()
 	l.lastErr = err
 	l.lastErrMu.Unlock()
 
-	// Connection error: send GOAWAY, then shut down.
 	var ce *ConnError
 	if errors.As(err, &ce) {
 		l.enqueueWrite(writeRequest{goAway: &writeGoAway{
@@ -650,17 +619,14 @@ func (l *Layer) handleReadError(err error) {
 }
 
 // maybeWindowUpdate enqueues WINDOW_UPDATE frames matching the consumed
-// dataLen. The simple "replace what was consumed" strategy keeps us well
-// inside the recv windows for streaming bodies; the writer goroutine is
-// single-threaded so frames go out in order. Per RFC 9113 §6.9, this is
-// permitted and matches go-http2 behavior.
+// dataLen. Fires at frame-arrival time (RFC-001 §9.1 revised) independent
+// of Pipeline consumption. The simple "replace what was consumed" strategy
+// keeps us well inside the recv windows for streaming bodies.
 func (l *Layer) maybeWindowUpdate(streamID uint32, dataLen uint32) {
 	if dataLen == 0 {
 		return
 	}
-	// Connection-level WINDOW_UPDATE.
 	l.enqueueWrite(writeRequest{windowUpdate: &writeWindowUpdate{streamID: 0, increment: dataLen}})
-	// Stream-level WINDOW_UPDATE.
 	l.enqueueWrite(writeRequest{windowUpdate: &writeWindowUpdate{streamID: streamID, increment: dataLen}})
 }
 
@@ -683,17 +649,11 @@ func cloneBytes(b []byte) []byte {
 }
 
 // isNewPeerStream reports whether streamID corresponds to a peer-initiated
-// stream that we have not yet seen on this connection. We rely on
-// LastPeerStreamID() (monotonic, set when a new peer stream is registered)
-// — a stream id strictly greater than the high-water mark must be new.
+// stream that we have not yet seen on this connection.
 func (l *Layer) isNewPeerStream(streamID uint32) bool {
 	if streamID == 0 {
 		return false
 	}
-	// Peer streams have id parity matching the peer role; we don't bother
-	// distinguishing here because a server seeing an even id, or a client
-	// seeing an odd one, is itself a protocol error handled elsewhere. The
-	// concern of this guard is purely "is this a new allocation?".
 	l.mu.Lock()
 	_, exists := l.assemblers[streamID]
 	l.mu.Unlock()
@@ -702,11 +662,6 @@ func (l *Layer) isNewPeerStream(streamID uint32) bool {
 
 // peerStreamLimitExceeded reports whether accepting a new peer-initiated
 // stream would exceed our advertised SETTINGS_MAX_CONCURRENT_STREAMS.
-// Active = peer-initiated streams currently in {open, half-closed local,
-// half-closed remote} state. We approximate via StreamMap.ActiveCount which
-// counts BOTH directions; that is a conservative over-count from the peer's
-// perspective and is acceptable as a DoS guard (worst case: a peer sees
-// REFUSED_STREAM slightly earlier than the strict limit).
 func (l *Layer) peerStreamLimitExceeded() bool {
 	limit := l.conn.LocalSettings().MaxConcurrentStreams
 	if limit == 0 {

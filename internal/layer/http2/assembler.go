@@ -1,17 +1,11 @@
 package http2
 
 import (
-	"context"
-	"errors"
 	"fmt"
-	"log/slog"
 	"strconv"
 	"strings"
 
-	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
-	"github.com/usk6666/yorishiro-proxy/internal/envelope/bodybuf"
-	"github.com/usk6666/yorishiro-proxy/internal/layer"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/http2/hpack"
 )
 
@@ -46,33 +40,41 @@ var h1OnlyHeaders = map[string]struct{}{
 	"upgrade":           {},
 }
 
-// asmPhase tracks the assembler's state for one stream.
-type asmPhase uint8
+// streamEventPhase tracks which header block the stream is currently
+// accumulating. The HTTP/2 reader produces H2HeadersEvent / H2DataEvent /
+// H2TrailersEvent envelopes on a per-stream basis; this phase field lets the
+// assembler know whether an END_HEADERS block should yield initial headers or
+// trailers. DATA frames do not transition the phase — they are emitted as
+// H2DataEvent directly.
+type streamEventPhase uint8
 
 const (
-	asmInitialHeaders     asmPhase = iota // waiting for HEADERS / collecting CONTINUATION
-	asmCollectingBody                     // header block decoded; collecting DATA
-	asmCollectingTrailers                 // received HEADERS-after-DATA; collecting CONTINUATION
-	asmDone                               // terminal — assembler will not yield more for this stream
+	// phaseInitialHeaders waits for the initial HEADERS (plus CONTINUATION*).
+	phaseInitialHeaders streamEventPhase = iota
+	// phaseBodyOrTrailers has already emitted initial H2HeadersEvent and is
+	// waiting for DATA frames or a trailer HEADERS frame.
+	phaseBodyOrTrailers
+	// phaseTrailers is coalescing a trailer HEADERS block (HEADERS-after-DATA).
+	phaseTrailers
+	// phaseDone terminal.
+	phaseDone
 )
 
-// asmBodyOpts is the per-assembler subset of Layer options that controls how
-// body DATA frames are accumulated into a BodyBuffer. Threaded in from
-// Layer via newStreamAssembler so assemblers can spill to disk at the
-// configured threshold and cap total body size at maxBody.
-type asmBodyOpts struct {
-	spillDir       string
-	spillThreshold int64
-	maxBody        int64
-}
-
-// streamAssembler is the per-stream assembler state. It is owned by the
-// reader goroutine and accessed only from there (no mutex).
-type streamAssembler struct {
+// eventAssembler is the per-stream state held by the HTTP/2 reader. It
+// coalesces CONTINUATION fragments into a single HPACK block, decodes the
+// block, and produces event envelopes (H2HeadersEvent / H2TrailersEvent).
+// DATA frames are emitted as H2DataEvent directly by the reader — the
+// assembler only gets involved if it needs to observe END_STREAM on DATA
+// (for state transitions).
+//
+// The assembler is owned by the reader goroutine and accessed only from there
+// (no mutex). One assembler per stream, stored in Layer.assemblers keyed by
+// HTTP/2 stream id.
+type eventAssembler struct {
 	streamID uint32
-	channel  *channel // owning Channel; nil for assemblers we will discard
+	channel  *channel
 
-	phase asmPhase
+	phase streamEventPhase
 
 	// fragBuf accumulates HPACK header-block fragments across HEADERS +
 	// CONTINUATION (for either initial headers or trailers).
@@ -80,48 +82,30 @@ type streamAssembler struct {
 	// continuationCount counts CONTINUATION frames received for the current
 	// header block (resets when END_HEADERS is observed).
 	continuationCount int
-	// rawAcc accumulates RawBytes from contributing frames (HEADERS/CONT/DATA).
-	rawAcc []byte
-	// frameBytes accumulates per-frame raw bytes for opaque resend.
-	frameBytes [][]byte
-	// origHeaders snapshot of decoded header fields, for opaque change detection.
-	origHeaders []hpack.HeaderField
 
-	// bodyBuf collects DATA payloads into a reference-counted BodyBuffer. It
-	// is lazily allocated on the first DATA frame with a non-empty payload,
-	// starts in memory mode, and promotes to a temp file once total size
-	// crosses bodyOpts.spillThreshold. Total size is capped by
-	// bodyOpts.maxBody; exceeding that cap returns a *layer.StreamError with
-	// Code=ErrorInternalError from handleDataFrame. On success the assembler
-	// hands ownership of bodyBuf to HTTPMessage.BodyBuffer without Retain
-	// (single refcount = 1); on error before handoff, the assembler must
-	// Release bodyBuf itself.
-	bodyBuf *bodybuf.BodyBuffer
+	// fragRaw accumulates the raw fragment bytes across HEADERS + CONTINUATION
+	// (or trailer HEADERS + CONTINUATION) so the emitted event's Envelope.Raw
+	// reflects the complete HPACK block as observed on the wire (without the
+	// 9-byte frame header — this is what a pure HPACK decoder would consume).
+	//
+	// The RFC-001 Raw-for-event contract says Raw = HPACK block fragment, not
+	// the full DATA frame wrapper. We therefore accumulate fragment bytes
+	// (post-extraction) rather than raw frame bytes.
+	fragRaw []byte
 
-	// bodyOpts carries the Layer-configured spill/max limits.
-	bodyOpts asmBodyOpts
-
-	// inflight is the envelope being assembled. Yielded on END_STREAM.
-	inflight *envelope.Envelope
+	// initialDirection is the direction inferred from the first HEADERS block
+	// (Send for ServerRole, Receive for ClientRole). Reused for the trailer
+	// block which must share the direction of the in-flight request/response.
+	initialDirection envelope.Direction
+	initialDirSet    bool
 }
 
-// newStreamAssembler creates an assembler for a stream owned by ch, using
-// bodyOpts for body accumulation decisions (threshold, maxBody, spill dir).
-func newStreamAssembler(streamID uint32, ch *channel, bodyOpts asmBodyOpts) *streamAssembler {
-	// Defensive: assemblers may be constructed with zero-valued opts in tests
-	// or unusual call paths; fall back to package defaults so Write always has
-	// a cap and promotion to file has a sensible threshold.
-	if bodyOpts.spillThreshold <= 0 {
-		bodyOpts.spillThreshold = config.DefaultBodySpillThreshold
-	}
-	if bodyOpts.maxBody <= 0 {
-		bodyOpts.maxBody = config.MaxBodySize
-	}
-	return &streamAssembler{
+// newEventAssembler creates an assembler for a stream owned by ch.
+func newEventAssembler(streamID uint32, ch *channel) *eventAssembler {
+	return &eventAssembler{
 		streamID: streamID,
 		channel:  ch,
-		phase:    asmInitialHeaders,
-		bodyOpts: bodyOpts,
+		phase:    phaseInitialHeaders,
 	}
 }
 
@@ -257,353 +241,246 @@ func splitPath(p string) (path, rawQuery string) {
 	return p, ""
 }
 
-// buildHTTPMessage constructs an HTTPMessage from decoded headers. The
-// direction is needed to interpret pseudo-headers (request vs response).
-func buildHTTPMessage(decoded []hpack.HeaderField, direction envelope.Direction) (*envelope.HTTPMessage, []envelope.Anomaly) {
+// buildHeadersEvent constructs an H2HeadersEvent from a decoded initial
+// HEADERS block plus anomalies. direction selects request-vs-response
+// pseudo-header interpretation.
+func buildHeadersEvent(decoded []hpack.HeaderField, direction envelope.Direction, endStream bool) *H2HeadersEvent {
 	pf, regular, anomalies := splitHeaders(decoded)
-
-	msg := &envelope.HTTPMessage{
-		Headers: regular,
+	evt := &H2HeadersEvent{
+		Headers:   regular,
+		EndStream: endStream,
+		Anomalies: anomalies,
 	}
-
 	if direction == envelope.Send {
-		msg.Method = pf.method
-		msg.Scheme = pf.scheme
-		msg.Authority = pf.authority
-		msg.Path, msg.RawQuery = splitPath(pf.path)
+		evt.Method = pf.method
+		evt.Scheme = pf.scheme
+		evt.Authority = pf.authority
+		evt.Path, evt.RawQuery = splitPath(pf.path)
 	} else {
 		if pf.hasStatus {
 			if n, err := strconv.Atoi(pf.status); err == nil {
-				msg.Status = n
+				evt.Status = n
+				evt.StatusReason = statusReason(n)
 			}
 		}
 	}
-	return msg, anomalies
+	return evt
 }
 
-// handleHeadersFrame processes a HEADERS frame for this stream. The fragment
-// has already been extracted by the caller (the reader goroutine), but the
-// HPACK decode is deferred until END_HEADERS so a single header block is
-// decoded as a unit (RFC 7541 §4.1).
+// buildTrailersEvent constructs an H2TrailersEvent from a decoded trailer
+// HEADERS block. Pseudo-headers in trailers are invalid (RFC 9113 §8.1);
+// they are dropped here and an H2InvalidPseudoHeader anomaly is attached.
+func buildTrailersEvent(decoded []hpack.HeaderField) *H2TrailersEvent {
+	trailers := make([]envelope.KeyValue, 0, len(decoded))
+	var anomalies []envelope.Anomaly
+	for _, hf := range decoded {
+		if strings.HasPrefix(hf.Name, ":") {
+			anomalies = append(anomalies, envelope.Anomaly{
+				Type:   envelope.H2InvalidPseudoHeader,
+				Detail: "in trailers: " + hf.Name,
+			})
+			continue
+		}
+		trailers = append(trailers, envelope.KeyValue{Name: hf.Name, Value: hf.Value})
+		anomalies = append(anomalies, regularHeaderAnomalies(hf)...)
+	}
+	return &H2TrailersEvent{
+		Trailers:  trailers,
+		Anomalies: anomalies,
+	}
+}
+
+// statusReasonTable maps HTTP status codes to the canonical HTTP/1.1 reason
+// phrase. HTTP/2 wire has no reason phrase (RFC 9113 §8.3.1); this surfaces
+// one for HTTP/1.x parity in downstream flow.Flow.StatusCode rendering.
 //
-// Returns a *ConnError tagged COMPRESSION_ERROR if the cumulative fragment
-// size would exceed maxHeaderFragmentBytes (CONTINUATION-flood DoS guard).
-func (a *streamAssembler) handleHeadersFrame(fragment, raw []byte, endHeaders, endStream bool, decoder *hpack.Decoder, direction envelope.Direction) (yieldEnv *envelope.Envelope, complete bool, err error) {
+// Unknown codes are represented as the empty string via map-miss.
+var statusReasonTable = map[int]string{
+	100: "Continue",
+	101: "Switching Protocols",
+	200: "OK",
+	201: "Created",
+	202: "Accepted",
+	204: "No Content",
+	206: "Partial Content",
+	301: "Moved Permanently",
+	302: "Found",
+	304: "Not Modified",
+	307: "Temporary Redirect",
+	308: "Permanent Redirect",
+	400: "Bad Request",
+	401: "Unauthorized",
+	403: "Forbidden",
+	404: "Not Found",
+	405: "Method Not Allowed",
+	409: "Conflict",
+	410: "Gone",
+	413: "Payload Too Large",
+	415: "Unsupported Media Type",
+	418: "I'm a teapot",
+	429: "Too Many Requests",
+	500: "Internal Server Error",
+	501: "Not Implemented",
+	502: "Bad Gateway",
+	503: "Service Unavailable",
+	504: "Gateway Timeout",
+}
+
+// statusReason returns the canonical reason phrase for code, or empty
+// string when unknown.
+func statusReason(code int) string {
+	return statusReasonTable[code]
+}
+
+// handleHeadersFrame processes a HEADERS (or CONTINUATION) fragment. When
+// END_HEADERS is observed, the decoded block is converted to an event
+// envelope (H2HeadersEvent for phaseInitialHeaders, H2TrailersEvent for
+// phaseTrailers) and returned. Otherwise the fragment is accumulated and
+// (nil, nil) is returned.
+//
+// Returns (*envelope.Envelope, error). A non-nil *envelope.Envelope is
+// ready to deliver to the channel's recv side. A *ConnError is returned if
+// the cumulative fragment size exceeds maxHeaderFragmentBytes
+// (CONTINUATION-flood DoS guard) or if the decode itself fails.
+func (a *eventAssembler) handleHeadersFrame(
+	fragment []byte,
+	endHeaders, endStream bool,
+	decoder *hpack.Decoder,
+	direction envelope.Direction,
+) (*envelope.Envelope, error) {
 	if len(a.fragBuf)+len(fragment) > maxHeaderFragmentBytes {
-		return nil, false, &ConnError{
+		return nil, &ConnError{
 			Code:   ErrCodeCompression,
 			Reason: fmt.Sprintf("header block fragment exceeds %d bytes (stream %d)", maxHeaderFragmentBytes, a.streamID),
 		}
 	}
-	a.rawAcc = append(a.rawAcc, raw...)
-	a.frameBytes = append(a.frameBytes, cloneSlice(raw))
 	a.fragBuf = append(a.fragBuf, fragment...)
+	a.fragRaw = append(a.fragRaw, fragment...)
 
-	if a.phase == asmCollectingBody {
+	if a.phase == phaseBodyOrTrailers {
 		// HEADERS-after-DATA = trailers. Switch to trailer collection.
-		a.phase = asmCollectingTrailers
+		a.phase = phaseTrailers
 	}
 
 	if !endHeaders {
 		a.continuationCount++
 		if a.continuationCount > maxContinuationFrames {
-			return nil, false, &ConnError{
+			return nil, &ConnError{
 				Code:   ErrCodeEnhanceYourCalm,
 				Reason: fmt.Sprintf("too many CONTINUATION frames (>%d) for stream %d", maxContinuationFrames, a.streamID),
 			}
 		}
-		return nil, false, nil
+		return nil, nil
 	}
+
 	// END_HEADERS observed; reset continuation counter for any future block
 	// (trailers).
 	a.continuationCount = 0
 
-	// Decode the complete header block.
 	decoded, dErr := decoder.Decode(a.fragBuf)
 	a.fragBuf = nil
 	if dErr != nil {
-		return nil, false, fmt.Errorf("http2: decode header block (stream %d): %w", a.streamID, dErr)
+		return nil, fmt.Errorf("http2: decode header block (stream %d): %w", a.streamID, dErr)
 	}
 
-	switch a.phase {
-	case asmInitialHeaders, asmCollectingBody:
-		// Initial headers (asmCollectingBody can occur if we got headers,
-		// no DATA, and then END_HEADERS — fall through equivalent).
-		msg, anomalies := buildHTTPMessage(decoded, direction)
-		msg.Anomalies = anomalies
-		a.origHeaders = decoded
+	// Capture accumulated raw bytes for the event.
+	rawBlock := a.fragRaw
+	a.fragRaw = nil
 
+	switch a.phase {
+	case phaseInitialHeaders:
+		if !a.initialDirSet {
+			a.initialDirection = direction
+			a.initialDirSet = true
+		}
+		evt := buildHeadersEvent(decoded, direction, endStream)
 		env := &envelope.Envelope{
 			StreamID:  a.channel.streamID,
 			Sequence:  a.channel.nextSequence(),
 			Direction: direction,
 			Protocol:  envelope.ProtocolHTTP,
-			Message:   msg,
+			Raw:       rawBlock,
+			Message:   evt,
 		}
-		a.inflight = env
-
 		if endStream {
-			// No DATA at all: finalize with both Body and BodyBuffer nil.
-			env.Raw = a.rawAcc
-			env.Opaque = &opaqueHTTP2{
-				layer:          a.channel.layer,
-				streamID:       a.streamID,
-				frames:         a.frameBytes,
-				origHeaders:    cloneHeaderFields(decoded),
-				origBody:       nil,
-				origBodyBuffer: nil,
-				isPush:         a.channel.isPush,
-			}
-			a.rawAcc = nil
-			a.frameBytes = nil
-			a.phase = asmDone
-			return env, true, nil
+			a.phase = phaseDone
+		} else {
+			a.phase = phaseBodyOrTrailers
 		}
+		return env, nil
 
-		a.phase = asmCollectingBody
-		return nil, false, nil
-
-	case asmCollectingTrailers:
-		// Convert the decoded list (no pseudo-headers expected) to KeyValues.
-		trailers := make([]envelope.KeyValue, 0, len(decoded))
-		var trailerAnomalies []envelope.Anomaly
-		for _, hf := range decoded {
-			if strings.HasPrefix(hf.Name, ":") {
-				trailerAnomalies = append(trailerAnomalies, envelope.Anomaly{
-					Type:   envelope.H2InvalidPseudoHeader,
-					Detail: "in trailers: " + hf.Name,
-				})
-				continue
-			}
-			trailers = append(trailers, envelope.KeyValue{Name: hf.Name, Value: hf.Value})
+	case phaseTrailers:
+		// Trailers always END_STREAM (RFC 9113 §8.1). Direction mirrors the
+		// initial HEADERS so the aggregator can associate them with the
+		// right in-flight HTTPMessage.
+		dir := a.initialDirection
+		if !a.initialDirSet {
+			dir = direction
 		}
-		if a.inflight != nil {
-			msg := a.inflight.Message.(*envelope.HTTPMessage)
-			msg.Trailers = trailers
-			if len(trailerAnomalies) > 0 {
-				msg.Anomalies = append(msg.Anomalies, trailerAnomalies...)
-			}
+		evt := buildTrailersEvent(decoded)
+		env := &envelope.Envelope{
+			StreamID:  a.channel.streamID,
+			Sequence:  a.channel.nextSequence(),
+			Direction: dir,
+			Protocol:  envelope.ProtocolHTTP,
+			Raw:       rawBlock,
+			Message:   evt,
 		}
-
-		// Trailers always END_STREAM (RFC 9113 §8.1).
-		env := a.inflight
-		if env != nil {
-			env.Raw = a.rawAcc
-			msg := env.Message.(*envelope.HTTPMessage)
-			a.finalizeBody(msg)
-			env.Opaque = &opaqueHTTP2{
-				layer:          a.channel.layer,
-				streamID:       a.streamID,
-				frames:         a.frameBytes,
-				origHeaders:    cloneHeaderFields(a.origHeaders),
-				origBody:       cloneSlice(msg.Body),
-				origBodyBuffer: msg.BodyBuffer,
-				isPush:         a.channel.isPush,
-			}
-			a.rawAcc = nil
-			a.frameBytes = nil
-			a.bodyBuf = nil
-		}
-		a.inflight = nil
-		a.phase = asmDone
-		return env, true, nil
+		a.phase = phaseDone
+		return env, nil
 	}
 
-	return nil, false, nil
+	return nil, nil
 }
 
-// handleDataFrame appends DATA payload to the in-flight BodyBuffer, lazily
-// allocating the buffer on first non-empty payload and promoting it to a
-// file-backed store once the cumulative size crosses the spill threshold.
-// On END_STREAM, the buffer is handed off to msg.BodyBuffer (or released and
-// set nil when empty) and the envelope is finalized.
+// handleDataFrame builds an H2DataEvent envelope for a single DATA frame.
+// Every non-nil payload produces one event (deterministic 1:1 with the frame);
+// empty DATA frames carrying END_STREAM also produce an event so the
+// aggregator observes END_STREAM for bodyless paths.
 //
-// Returns a *layer.StreamError with Code=ErrorInternalError when a Write
-// would exceed bodyOpts.maxBody. In that case bodyBuf is released by
-// bodybuf.Write's error-path teardown and this helper additionally calls
-// Release for symmetry with the success path's single-refcount handoff
-// contract.
-func (a *streamAssembler) handleDataFrame(payload, raw []byte, endStream bool) (yieldEnv *envelope.Envelope, complete bool, err error) {
-	a.rawAcc = append(a.rawAcc, raw...)
-	a.frameBytes = append(a.frameBytes, cloneSlice(raw))
-
-	if len(payload) > 0 {
-		if err := a.writeBody(payload); err != nil {
-			return nil, false, err
-		}
-	}
-
-	if !endStream {
-		return nil, false, nil
-	}
-
-	if a.inflight == nil {
-		return nil, false, fmt.Errorf("http2: stream %d end_stream without headers", a.streamID)
-	}
-	msg := a.inflight.Message.(*envelope.HTTPMessage)
-	a.finalizeBody(msg)
-	env := a.inflight
-	env.Raw = a.rawAcc
-	env.Opaque = &opaqueHTTP2{
-		layer:          a.channel.layer,
-		streamID:       a.streamID,
-		frames:         a.frameBytes,
-		origHeaders:    cloneHeaderFields(a.origHeaders),
-		origBody:       cloneSlice(msg.Body),
-		origBodyBuffer: msg.BodyBuffer,
-		isPush:         a.channel.isPush,
-	}
-	a.rawAcc = nil
-	a.frameBytes = nil
-	a.bodyBuf = nil
-	a.inflight = nil
-	a.phase = asmDone
-	return env, true, nil
-}
-
-// writeBody writes payload into a.bodyBuf, lazily allocating it on the first
-// non-empty payload and promoting it to a temp file once cumulative size
-// exceeds bodyOpts.spillThreshold. Returns a *layer.StreamError when the
-// total size would exceed bodyOpts.maxBody (ErrMaxSizeExceeded from
-// bodybuf.Write already tore down the buffer's temp file; this helper
-// additionally calls Release for refcount symmetry with the success path).
-func (a *streamAssembler) writeBody(payload []byte) error {
-	if a.bodyBuf == nil {
-		// Start in memory mode. NewMemory seeds the buffer with a copy of
-		// its argument; we pass nil so the very first Write below both
-		// populates the buffer and contributes to the size check that may
-		// trigger PromoteToFile on the next iteration.
-		a.bodyBuf = bodybuf.NewMemory(nil)
-	}
-
-	// Enforce maxBody before every Write. bodybuf.NewMemory seeds the buffer
-	// with maxSize=0 (unlimited), so without this guard the memory-mode path
-	// would accumulate DATA frames without any cap until PromoteToFile
-	// succeeded — a DoS vector when temp-dir promotion fails (see USK-632
-	// security review S-1 / CWE-770). Enforcement here is identical across
-	// memory and file mode: once cumulative size would exceed maxBody, we
-	// fail the stream with INTERNAL_ERROR just like bodybuf's own
-	// ErrMaxSizeExceeded path does for file-backed buffers.
-	if a.bodyBuf.Len()+int64(len(payload)) > a.bodyOpts.maxBody {
-		_ = a.bodyBuf.Release()
-		a.bodyBuf = nil
-		return &layer.StreamError{
-			Code:   layer.ErrorInternalError,
-			Reason: "http2: body exceeds max size",
-		}
-	}
-
-	if _, werr := a.bodyBuf.Write(payload); werr != nil {
-		if errors.Is(werr, bodybuf.ErrMaxSizeExceeded) {
-			// bodybuf.Write has already torn down the backing file and
-			// marked the buffer dead. Release for refcount symmetry: the
-			// assembler owns the single outstanding refcount and the
-			// error path must balance it.
-			_ = a.bodyBuf.Release()
-			a.bodyBuf = nil
-			return &layer.StreamError{
-				Code:   layer.ErrorInternalError,
-				Reason: "http2: body exceeds max size",
-			}
-		}
-		return fmt.Errorf("http2: write body (stream %d): %w", a.streamID, werr)
-	}
-
-	// Promote to file-backed storage once the in-memory size crosses the
-	// threshold. PromoteToFile failure keeps the buffer in memory mode;
-	// the assembler-level maxBody check above still bounds memory growth
-	// across subsequent writes regardless of promotion success.
-	if !a.bodyBuf.IsFileBacked() && a.bodyBuf.Len() > a.bodyOpts.spillThreshold {
-		if perr := a.bodyBuf.PromoteToFile(a.bodyOpts.spillDir, config.BodySpillPrefix, a.bodyOpts.maxBody); perr != nil {
-			slog.Warn("http2: promote body to file failed; staying in memory",
-				"stream", a.streamID, "err", perr)
-		}
-	}
-	return nil
-}
-
-// finalizeBody transfers the accumulated body onto msg according to the
-// standard contract (mirrors the HTTP/1.x layer's readBodyWithThreshold
-// behavior for symmetric downstream flow.Flow.Body projection):
+// Returns the envelope to deliver. The caller (reader) is responsible for
+// subsequent WINDOW_UPDATE emission (independent of aggregator drain).
 //
-//   - bodyBuf == nil (no DATA frames received): Body and BodyBuffer both nil.
-//   - bodyBuf.Len() == 0 (allocated but unused): Release and nil both fields.
-//   - file-backed: msg.BodyBuffer = bodyBuf, msg.Body = nil. Refcount
-//     transfers to the envelope.
-//   - memory-backed: materialize via BodyBuffer.Bytes and set msg.Body;
-//     release the buffer. Keeps the HTTP/1.x + HTTP/2 receive-side symmetry
-//     that small bodies surface as msg.Body (so pipeline steps and
-//     record_step's flow.Flow.Body projection behave identically across
-//     the two layers).
-//
-// finalizeBody is idempotent on a.bodyBuf (sets it to nil) so the caller
-// should not Release afterward.
-func (a *streamAssembler) finalizeBody(msg *envelope.HTTPMessage) {
-	if a.bodyBuf == nil {
-		msg.Body = nil
-		msg.BodyBuffer = nil
-		return
+// The returned envelope's Raw field shares the same defensive copy as the
+// event's Payload — saving one allocation per DATA frame for large-body
+// streams. Both slices are owned by the event consumer; neither the Layer
+// nor the reader retain a reference.
+func (a *eventAssembler) handleDataFrame(payload []byte, endStream bool) *envelope.Envelope {
+	// One defensive copy shared by evt.Payload and env.Raw. The caller
+	// (aggregator) reads evt.Payload; env.Raw is kept so per-frame wire
+	// observers (e.g., future grpc LPM reassembly) can consume it.
+	cp := cloneEvBytes(payload)
+	evt := &H2DataEvent{
+		Payload:   cp,
+		EndStream: endStream,
 	}
-	if a.bodyBuf.Len() == 0 {
-		_ = a.bodyBuf.Release()
-		a.bodyBuf = nil
-		msg.Body = nil
-		msg.BodyBuffer = nil
-		return
+
+	dir := a.initialDirection
+	if !a.initialDirSet {
+		if a.channel != nil && a.channel.layer != nil && a.channel.layer.role == ServerRole {
+			dir = envelope.Send
+		} else {
+			dir = envelope.Receive
+		}
 	}
-	if a.bodyBuf.IsFileBacked() {
-		msg.Body = nil
-		msg.BodyBuffer = a.bodyBuf
-		a.bodyBuf = nil
-		return
+
+	env := &envelope.Envelope{
+		StreamID:  a.channel.streamID,
+		Sequence:  a.channel.nextSequence(),
+		Direction: dir,
+		Protocol:  envelope.ProtocolHTTP,
+		Raw:       cp,
+		Message:   evt,
 	}
-	// Memory-backed: project to msg.Body and release the buffer so
-	// downstream consumers see the familiar []byte shape (matches
-	// internal/layer/http1's contract — USK-631 precedent).
-	b, err := a.bodyBuf.Bytes(context.Background())
-	if err != nil {
-		// Read from an in-memory buffer should never fail; if it somehow
-		// does, fall back to the BodyBuffer handoff so we do not drop the
-		// body entirely.
-		msg.Body = nil
-		msg.BodyBuffer = a.bodyBuf
-		a.bodyBuf = nil
-		return
+	if endStream {
+		a.phase = phaseDone
 	}
-	_ = a.bodyBuf.Release()
-	a.bodyBuf = nil
-	msg.Body = b
-	msg.BodyBuffer = nil
+	return env
 }
 
-// releaseBody releases any outstanding BodyBuffer owned by the assembler.
-// Safe to call multiple times. Intended for error paths between envelope
-// creation and END_STREAM where the assembler's single refcount must not
-// leak.
-func (a *streamAssembler) releaseBody() {
-	if a.bodyBuf != nil {
-		_ = a.bodyBuf.Release()
-		a.bodyBuf = nil
-	}
-}
-
-// cloneSlice returns a copy of b, or nil if b is nil.
-func cloneSlice(b []byte) []byte {
-	if b == nil {
-		return nil
-	}
-	out := make([]byte, len(b))
-	copy(out, b)
-	return out
-}
-
-// cloneHeaderFields returns a copy of the slice (HeaderField is a value type
-// holding strings, so copy is shallow-but-safe).
-func cloneHeaderFields(hf []hpack.HeaderField) []hpack.HeaderField {
-	if hf == nil {
-		return nil
-	}
-	out := make([]hpack.HeaderField, len(hf))
-	copy(out, hf)
-	return out
+// isDone reports whether the assembler has reached terminal state (observed
+// END_STREAM on the initial HEADERS or on a DATA frame, or decoded a trailer
+// HEADERS block).
+func (a *eventAssembler) isDone() bool {
+	return a.phase == phaseDone
 }
