@@ -3,9 +3,11 @@ package pipeline
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
 	"log/slog"
 	"net/url"
+	"strconv"
 	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/config"
@@ -357,26 +359,127 @@ func (s *RecordStep) envelopeToFlow(ctx context.Context, env *envelope.Envelope)
 			}
 		}
 
-		if len(m.Headers) > 0 {
-			hdrs := make(map[string][]string, len(m.Headers))
-			for _, kv := range m.Headers {
-				hdrs[kv.Name] = append(hdrs[kv.Name], kv.Value)
-			}
+		if hdrs := keyValuesToMap(m.Headers); hdrs != nil {
 			fl.Headers = hdrs
 		}
-
-		if len(m.Trailers) > 0 {
-			trlrs := make(map[string][]string, len(m.Trailers))
-			for _, kv := range m.Trailers {
-				trlrs[kv.Name] = append(trlrs[kv.Name], kv.Value)
-			}
+		if trlrs := keyValuesToMap(m.Trailers); trlrs != nil {
 			fl.Trailers = trlrs
 		}
 	case *envelope.RawMessage:
 		fl.Body = m.Bytes
+	case *envelope.WSMessage:
+		projectWSMessage(m, fl)
+	case *envelope.GRPCStartMessage:
+		projectGRPCStart(m, fl)
+	case *envelope.GRPCDataMessage:
+		projectGRPCData(m, fl)
+	case *envelope.GRPCEndMessage:
+		projectGRPCEnd(m, fl)
+	case *envelope.SSEMessage:
+		projectSSE(m, fl)
 	}
 
 	return fl
+}
+
+// keyValuesToMap projects an ordered KeyValue slice into the flow.Flow
+// multimap shape. Duplicate-name order is preserved via append; inter-name
+// order lives in flow.Flow.RawBytes (map iteration is undefined). Returns
+// nil for an empty input so callers can leave Flow.Headers/Trailers nil.
+func keyValuesToMap(kvs []envelope.KeyValue) map[string][]string {
+	if len(kvs) == 0 {
+		return nil
+	}
+	out := make(map[string][]string, len(kvs))
+	for _, kv := range kvs {
+		out[kv.Name] = append(out[kv.Name], kv.Value)
+	}
+	return out
+}
+
+// projectWSMessage projects a WSMessage into fl.Body and fl.Metadata.
+//
+// Sentinel keys ws_opcode / ws_fin / ws_compressed are always present —
+// they identify the WS frame event. ws_close_code and ws_close_reason
+// are emitted only for Close frames; populating them on non-Close
+// frames would fabricate fields the wire never sent (MITM wire
+// fidelity). Mask and Masked are wire-level masking artifacts; they
+// are not projected because the unmasked Payload is the analyst's view
+// and Mask is regenerated on Send.
+func projectWSMessage(m *envelope.WSMessage, fl *flow.Flow) {
+	fl.Body = m.Payload
+	fl.Metadata["ws_opcode"] = strconv.FormatUint(uint64(m.Opcode), 10)
+	fl.Metadata["ws_fin"] = strconv.FormatBool(m.Fin)
+	fl.Metadata["ws_compressed"] = strconv.FormatBool(m.Compressed)
+	if m.Opcode == envelope.WSClose {
+		fl.Metadata["ws_close_code"] = strconv.FormatUint(uint64(m.CloseCode), 10)
+		fl.Metadata["ws_close_reason"] = m.CloseReason
+	}
+}
+
+// projectGRPCStart projects a GRPCStartMessage. grpc_event / grpc_service /
+// grpc_method are always present (RPC identity); content_type and encoding
+// are conditional on non-empty values to avoid fabricating wire fields.
+// Metadata KeyValues project to Flow.Headers via the same multimap shape
+// as HTTPMessage.
+func projectGRPCStart(m *envelope.GRPCStartMessage, fl *flow.Flow) {
+	fl.Metadata["grpc_event"] = "start"
+	fl.Metadata["grpc_service"] = m.Service
+	fl.Metadata["grpc_method"] = m.Method
+	if m.ContentType != "" {
+		fl.Metadata["grpc_content_type"] = m.ContentType
+	}
+	if m.Encoding != "" {
+		fl.Metadata["grpc_encoding"] = m.Encoding
+	}
+	if hdrs := keyValuesToMap(m.Metadata); hdrs != nil {
+		fl.Headers = hdrs
+	}
+}
+
+// projectGRPCData projects a GRPCDataMessage. Body holds the decompressed
+// payload; RawBytes (set by envelopeToFlow) holds the wire form (5-byte
+// LPM prefix + compressed payload).
+func projectGRPCData(m *envelope.GRPCDataMessage, fl *flow.Flow) {
+	fl.Body = m.Payload
+	fl.Metadata["grpc_event"] = "data"
+	fl.Metadata["grpc_service"] = m.Service
+	fl.Metadata["grpc_method"] = m.Method
+	fl.Metadata["grpc_compressed"] = strconv.FormatBool(m.Compressed)
+	fl.Metadata["grpc_wire_length"] = strconv.FormatUint(uint64(m.WireLength), 10)
+}
+
+// projectGRPCEnd projects a GRPCEndMessage. grpc_status is always present
+// (RPC outcome identity); grpc_message and grpc_status_details_bin are
+// conditional on non-empty values. Trailers project via the multimap shape.
+func projectGRPCEnd(m *envelope.GRPCEndMessage, fl *flow.Flow) {
+	fl.Metadata["grpc_event"] = "end"
+	fl.Metadata["grpc_status"] = strconv.FormatUint(uint64(m.Status), 10)
+	if m.Message != "" {
+		fl.Metadata["grpc_message"] = m.Message
+	}
+	if len(m.StatusDetails) > 0 {
+		fl.Metadata["grpc_status_details_bin"] = base64.StdEncoding.EncodeToString(m.StatusDetails)
+	}
+	if trlrs := keyValuesToMap(m.Trailers); trlrs != nil {
+		fl.Trailers = trlrs
+	}
+}
+
+// projectSSE projects an SSEMessage. SSE event fields are independently
+// optional on the wire; emit only when non-empty / non-zero so analysts can
+// distinguish "wire didn't send this field" from "field was empty".
+func projectSSE(m *envelope.SSEMessage, fl *flow.Flow) {
+	fl.Body = []byte(m.Data)
+	if m.Event != "" {
+		fl.Metadata["sse_event"] = m.Event
+	}
+	if m.ID != "" {
+		fl.Metadata["sse_id"] = m.ID
+	}
+	if m.Retry > 0 {
+		fl.Metadata["sse_retry_ms"] = strconv.FormatInt(m.Retry.Milliseconds(), 10)
+	}
 }
 
 // projectHTTPBody populates fl.Body (and BodyTruncated) from m.Body or
@@ -441,7 +544,48 @@ func messageModified(a, b envelope.Message) bool {
 		}
 		return httpMessageModified(ma, mb)
 	default:
-		// Unknown Message type — assume not modified to avoid false positives.
+		return appMessageModified(a, b)
+	}
+}
+
+// appMessageModified is the application-layer dispatch for messageModified —
+// it handles the N7 Message types (WS, gRPC Start/Data/End, SSE) so the
+// outer messageModified stays under gocyclo's threshold. Returns false for
+// any unrecognized type (unknown Message means "not modified" to avoid
+// false-positive variant recordings).
+func appMessageModified(a, b envelope.Message) bool {
+	switch ma := a.(type) {
+	case *envelope.WSMessage:
+		mb, ok := b.(*envelope.WSMessage)
+		if !ok {
+			return true
+		}
+		return wsMessageModified(ma, mb)
+	case *envelope.GRPCStartMessage:
+		mb, ok := b.(*envelope.GRPCStartMessage)
+		if !ok {
+			return true
+		}
+		return grpcStartModified(ma, mb)
+	case *envelope.GRPCDataMessage:
+		mb, ok := b.(*envelope.GRPCDataMessage)
+		if !ok {
+			return true
+		}
+		return grpcDataModified(ma, mb)
+	case *envelope.GRPCEndMessage:
+		mb, ok := b.(*envelope.GRPCEndMessage)
+		if !ok {
+			return true
+		}
+		return grpcEndModified(ma, mb)
+	case *envelope.SSEMessage:
+		mb, ok := b.(*envelope.SSEMessage)
+		if !ok {
+			return true
+		}
+		return sseMessageModified(ma, mb)
+	default:
 		return false
 	}
 }
@@ -500,4 +644,78 @@ func keyValuesEqual(a, b []envelope.KeyValue) bool {
 		}
 	}
 	return true
+}
+
+// stringSliceEqual reports whether two string slices are identical in length,
+// order, and value.
+func stringSliceEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// wsMessageModified reports whether two WSMessages differ in observable
+// content. Mask and Masked are excluded — wire-level masking is regenerated
+// on Send and treating it as observable would produce false-positive
+// variants for every client→server frame after re-masking.
+func wsMessageModified(a, b *envelope.WSMessage) bool {
+	if a.Opcode != b.Opcode || a.Fin != b.Fin || a.Compressed != b.Compressed {
+		return true
+	}
+	if a.CloseCode != b.CloseCode || a.CloseReason != b.CloseReason {
+		return true
+	}
+	return !bytes.Equal(a.Payload, b.Payload)
+}
+
+// grpcStartModified reports whether two GRPCStartMessages differ. All mutable
+// fields are compared; Metadata uses keyValuesEqual (order/case strict, no
+// normalization).
+func grpcStartModified(a, b *envelope.GRPCStartMessage) bool {
+	if a.Service != b.Service || a.Method != b.Method {
+		return true
+	}
+	if a.Timeout != b.Timeout || a.ContentType != b.ContentType || a.Encoding != b.Encoding {
+		return true
+	}
+	if !stringSliceEqual(a.AcceptEncoding, b.AcceptEncoding) {
+		return true
+	}
+	return !keyValuesEqual(a.Metadata, b.Metadata)
+}
+
+// grpcDataModified reports whether two GRPCDataMessages differ. Service and
+// Method are denormalized read-only from the associated GRPCStartMessage,
+// but defensively compared so an errant Step that mutates them produces a
+// recorded variant.
+func grpcDataModified(a, b *envelope.GRPCDataMessage) bool {
+	if a.Service != b.Service || a.Method != b.Method {
+		return true
+	}
+	if a.Compressed != b.Compressed || a.WireLength != b.WireLength {
+		return true
+	}
+	return !bytes.Equal(a.Payload, b.Payload)
+}
+
+// grpcEndModified reports whether two GRPCEndMessages differ.
+func grpcEndModified(a, b *envelope.GRPCEndMessage) bool {
+	if a.Status != b.Status || a.Message != b.Message {
+		return true
+	}
+	if !bytes.Equal(a.StatusDetails, b.StatusDetails) {
+		return true
+	}
+	return !keyValuesEqual(a.Trailers, b.Trailers)
+}
+
+// sseMessageModified reports whether two SSEMessages differ.
+func sseMessageModified(a, b *envelope.SSEMessage) bool {
+	return a.Event != b.Event || a.Data != b.Data || a.ID != b.ID || a.Retry != b.Retry
 }
