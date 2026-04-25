@@ -902,6 +902,69 @@ func TestChannel_EmptyCompressedLPM(t *testing.T) {
 }
 
 // ----------------------------------------------------------------------
+// Decompression-bomb cap (CWE-409): gunzip output size capped at
+// config.MaxGRPCMessageSize. A peer sending highly compressible bytes
+// must NOT be able to expand to GBs of memory.
+// ----------------------------------------------------------------------
+
+func TestChannel_DecompressionBombRejected(t *testing.T) {
+	t.Parallel()
+	stub := newStubInner("stream-1")
+	hdrs := requestStartHeaders("/svc.S/M",
+		envelope.KeyValue{Name: "grpc-encoding", Value: "gzip"},
+	)
+	stub.pushHeaders(envelope.Send, []byte("HPACK"), hdrs)
+
+	// Build a gzip stream whose decompressed size exceeds MaxGRPCMessageSize.
+	// We don't actually allocate (max+1) bytes here; instead we craft a
+	// payload of (max+1) zero bytes and let gzip compress it to a tiny LPM.
+	// Caveat: this allocates max+1 bytes briefly during compression. To
+	// keep the unit test fast and memory-light, scale the cap down via a
+	// gunzip helper test that calls gunzip directly with a small max.
+	const smallMax uint32 = 64
+	bigPayload := bytes.Repeat([]byte("A"), int(smallMax)+1)
+	compressed := gzipCompress(t, bigPayload)
+	out, err := gunzip(compressed, smallMax)
+	if err == nil {
+		t.Fatalf("gunzip cap=%d, len(decompressed)=%d expected error, got nil", smallMax, len(out))
+	}
+	if !errors.Is(err, errMessageTooLarge) {
+		t.Errorf("gunzip cap exceeded: err=%v, want errMessageTooLarge", err)
+	}
+}
+
+// ----------------------------------------------------------------------
+// Late inner termination → wrapper Closed() fires without active Next.
+// (Watcher-goroutine contract; callers in internal/session park on
+// Closed() to detect late RST_STREAM events.)
+// ----------------------------------------------------------------------
+
+func TestChannel_LateInnerCloseFiresClosed(t *testing.T) {
+	t.Parallel()
+	stub := newStubInner("stream-1")
+	ch := Wrap(stub, nil, RoleServer)
+	defer ch.Close()
+
+	// Trigger inner termination without anyone calling ch.Next: simulate a
+	// late peer-side RST by closing the inner stub directly.
+	stub.termErr = errors.New("late RST")
+	stub.Close() // closes stub.termDone, which is what stub.Closed() returns.
+
+	// The wrapper's watcher goroutine should observe inner.Closed() and
+	// propagate to ch.Closed() within a short window.
+	select {
+	case <-ch.Closed():
+		// good
+	case <-time.After(2 * time.Second):
+		t.Fatalf("ch.Closed() did not fire after inner termination")
+	}
+	// And ch.Err() should reflect the inner error (or io.EOF if nil).
+	if ch.Err() == nil {
+		t.Errorf("ch.Err() = nil, want non-nil after late termination")
+	}
+}
+
+// ----------------------------------------------------------------------
 // Repeated mid-stream HEADERS → StreamError.
 // ----------------------------------------------------------------------
 

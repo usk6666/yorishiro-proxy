@@ -30,6 +30,14 @@
 //   - Per-channel reassembly buffer is bounded by config.MaxGRPCMessageSize
 //     (254 MiB). Exceeding the cap yields *layer.StreamError{
 //     Code: ErrorInternalError} and marks the wrapper terminated.
+//   - The cap applies BOTH to the wire LPM length (the 4-byte length
+//     prefix) AND to the decompressed length after gunzip — the latter
+//     is enforced via io.LimitReader inside gunzip to mitigate
+//     CWE-409 / CWE-400 (decompression bomb).
+//   - A bidirectional gRPC stream holds two reassembler buffers (one
+//     per direction), so worst-case in-flight memory per stream is
+//     2 * MaxGRPCMessageSize (CWE-770; same envelope as the body limits
+//     documented in internal/config/limits.go).
 //
 // Compression policy (D2 — strict):
 //

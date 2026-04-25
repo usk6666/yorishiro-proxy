@@ -190,9 +190,14 @@ func (c *grpcChannel) StreamID() string {
 	return c.streamID
 }
 
-// Closed returns the inner Channel's terminal-state signal. The wrapper
-// does not own a separate lifecycle; terminal events propagate from
-// inner.
+// Closed returns a channel closed when this wrapper has entered its
+// terminal state. The wrapper closes recvDone when:
+//   - Next observes a terminal error from inner (or an absorb error),
+//   - Close is invoked by the caller, OR
+//   - the inner Channel terminates abnormally and the watcher goroutine
+//     started in Wrap propagates it (so callers parking on Closed()
+//     observe late RST_STREAM events even when no Next is in flight —
+//     mirroring the contract that internal/session relies on).
 func (c *grpcChannel) Closed() <-chan struct{} {
 	return c.recvDone
 }
@@ -226,6 +231,20 @@ func (c *grpcChannel) terminate(err error) {
 		c.mu.Unlock()
 		close(c.recvDone)
 	})
+}
+
+// watchInnerClose blocks until the inner Channel terminates and then
+// propagates the termination to recvDone. Started by Wrap as a goroutine
+// so callers parking on Closed() observe late abnormal events (e.g.,
+// RST_STREAM after EOF) even when no Next is in flight. terminate uses
+// sync.Once so a duplicate call from Close (or from Next) is a no-op.
+func (c *grpcChannel) watchInnerClose() {
+	<-c.inner.Closed()
+	innerErr := c.inner.Err()
+	if innerErr == nil {
+		innerErr = io.EOF
+	}
+	c.terminate(innerErr)
 }
 
 // rstInner asks the inner Channel to emit RST_STREAM(INTERNAL_ERROR) and
@@ -438,8 +457,18 @@ func (c *grpcChannel) buildDataEnvelopeLocked(ev *envelope.Envelope, dir *direct
 			// negotiated encoding) but per-message-compress can occur even
 			// when encoding header is absent. Surface payload verbatim.
 		case encodingGzip:
-			decoded, derr := gunzip(payload)
+			decoded, derr := gunzip(payload, config.MaxGRPCMessageSize)
 			if derr != nil {
+				if errors.Is(derr, errMessageTooLarge) {
+					// CWE-409: decompression-bomb cap exceeded. Map to
+					// ErrorInternalError so the caller RSTs the stream
+					// (same code path as the wire-LPM cap in
+					// reassembler.feed).
+					return nil, &layer.StreamError{
+						Code:   layer.ErrorInternalError,
+						Reason: "grpc: decompressed message too large",
+					}
+				}
 				return nil, &layer.StreamError{
 					Code:   layer.ErrorProtocol,
 					Reason: "grpc: gzip decode: " + derr.Error(),
@@ -1082,16 +1111,27 @@ func statusFor(env *envelope.Envelope, _ *envelope.GRPCStartMessage) int {
 	return 0
 }
 
-// gunzip decompresses a gzip-encoded LPM payload.
-func gunzip(b []byte) ([]byte, error) {
+// gunzip decompresses a gzip-encoded LPM payload. The decompressed length
+// is capped at max bytes (CWE-409: decompression-bomb mitigation). If the
+// decompressed stream would exceed max, gunzip returns errMessageTooLarge
+// so the channel maps it to *layer.StreamError{Code: ErrorInternalError}
+// and RSTs the stream. The caller passes config.MaxGRPCMessageSize.
+func gunzip(b []byte, max uint32) ([]byte, error) {
 	r, err := gzip.NewReader(bytes.NewReader(b))
 	if err != nil {
 		return nil, err
 	}
 	defer r.Close()
-	out, err := io.ReadAll(r)
+	// Read up to max+1 bytes; an exact-max read is fine, max+1 means we
+	// hit the cap and must reject. io.LimitReader returns io.EOF at the
+	// limit even if more bytes are available in the underlying stream.
+	lr := io.LimitReader(r, int64(max)+1)
+	out, err := io.ReadAll(lr)
 	if err != nil {
 		return nil, err
+	}
+	if uint32(len(out)) > max {
+		return nil, errMessageTooLarge
 	}
 	return out, nil
 }

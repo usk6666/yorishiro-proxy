@@ -60,5 +60,14 @@ func Wrap(stream layer.Channel, firstHeaders *envelope.Envelope, role Role) laye
 	if firstHeaders != nil && len(firstHeaders.Raw) > 0 {
 		gc.peeked = firstHeaders
 	}
+	// Watcher goroutine: propagate inner termination to recvDone so callers
+	// parking on Closed() observe late RST_STREAM-style events even when no
+	// Next is in flight. Mirrors the contract that internal/session's
+	// clientToUpstreamCascade depends on. The goroutine exits naturally
+	// when either inner terminates (then it calls terminate, which closes
+	// recvDone) or our own Close fires terminate first (the goroutine then
+	// observes inner.Closed soon after Close cascades inner.Close, and
+	// terminate's sync.Once makes the second call a no-op).
+	go gc.watchInnerClose()
 	return gc
 }
