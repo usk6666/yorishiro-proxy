@@ -8,24 +8,27 @@ import (
 
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/layer"
+	grpclayer "github.com/usk6666/yorishiro-proxy/internal/layer/grpc"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/http2"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/httpaggregator"
 )
 
 // DispatchH2Stream peeks the first event-granular envelope on an HTTP/2
 // stream Channel, inspects its content-type for gRPC detection, and wraps
-// the channel with HTTPAggregatorLayer (for plain HTTP/2) or leaves the
-// raw event-granular Channel in place for gRPC (handled by a future
-// GRPCLayer, stubbed for N6.7 — see N7).
+// the channel with the appropriate application-layer wrapper:
 //
-// role selects which direction convention the aggregator uses. lopts
-// threads the Layer's body-buffer configuration into the aggregator so
-// disk spill behavior matches the HTTP/1.x path.
+//   - application/grpc[+proto|+json|...]  → grpclayer.Wrap (per USK-640)
+//   - any other content-type              → httpaggregator.Wrap
+//
+// role selects which direction convention the aggregator (or gRPC Layer)
+// uses. lopts threads the Layer's body-buffer configuration into the
+// aggregator so disk spill behavior matches the HTTP/1.x path; the
+// gRPC Layer manages its own LPM-bounded buffer and ignores lopts.
 //
 // The returned layer.Channel is what the caller should run RunSession or
 // other consumers against. The first event is replayed as the first
-// aggregated envelope (via the firstHeaders argument on Wrap), so no data
-// is lost by the peek.
+// emitted envelope (via the firstHeaders argument on Wrap), so no data is
+// lost by the peek.
 //
 // Errors from the initial peek (ch.Next) are returned as-is so the caller
 // can distinguish "no stream activity" from "stream error".
@@ -55,21 +58,31 @@ func DispatchH2Stream(
 
 	// gRPC detection: content-type: application/grpc[+proto|+json|...] on
 	// the request HEADERS (or the response HEADERS in ClientRole) signals
-	// a gRPC stream. N7 will plug in GRPCLayer.Wrap here; for N6.7 we log
-	// and fall through to the aggregator so traffic continues to flow as
-	// plain HTTP/2 (aggregator will produce HTTPMessage envelopes that
-	// intercept rules cannot sensibly rewrite for gRPC, but traffic is
-	// NOT dropped — a safe temporary regression).
+	// a gRPC stream. Wrap with GRPCLayer (USK-640) — it consumes the
+	// peeked first envelope as the initial GRPCStartMessage source.
 	if isGRPCHeaders(evt) {
-		logger.Warn("connector: DispatchH2Stream: gRPC content-type observed; using HTTPAggregator (GRPCLayer wiring pending N7 / TODO: USK-?)",
+		logger.Debug("connector: DispatchH2Stream: gRPC content-type detected; wrapping with grpclayer",
 			"stream_id", firstEnv.StreamID,
 			"path", evt.Path,
 		)
-		// TODO(N7): branch to grpclayer.Wrap(ch, firstEnv, role) once the
-		// gRPC layer package is implemented.
+		return grpclayer.Wrap(ch, firstEnv, translateRoleForGRPC(role)), nil
 	}
 
 	return httpaggregator.Wrap(ch, role, firstEnv, lopts), nil
+}
+
+// translateRoleForGRPC converts an httpaggregator.Role into the
+// equivalent grpclayer.Role. The two enums are independent (sibling
+// Layers, no shared base type) but their semantics agree.
+func translateRoleForGRPC(r httpaggregator.Role) grpclayer.Role {
+	switch r {
+	case httpaggregator.RoleServer:
+		return grpclayer.RoleServer
+	case httpaggregator.RoleClient:
+		return grpclayer.RoleClient
+	default:
+		return grpclayer.RoleServer
+	}
 }
 
 // isGRPCHeaders reports whether evt carries a content-type that indicates
