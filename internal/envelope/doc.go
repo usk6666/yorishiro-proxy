@@ -7,8 +7,9 @@
 // layer-internal state.
 //
 // The [Message] interface is implemented by protocol-specific types:
-// [HTTPMessage], [RawMessage], and (in future milestones) WSMessage,
-// GRPCMessage, SSEMessage, TLSHandshakeMessage.
+// [HTTPMessage], [RawMessage], [WSMessage], [GRPCStartMessage],
+// [GRPCDataMessage], [GRPCEndMessage], and [SSEMessage]. (TLSHandshakeMessage
+// will follow in a future milestone.)
 //
 // Design rule: any field on Envelope must be meaningful for every protocol,
 // including raw TCP. Protocol-specific fields belong on Message implementations.
