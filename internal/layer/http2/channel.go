@@ -37,7 +37,13 @@ type channel struct {
 	// StreamID of the channel that carried the PUSH_PROMISE.
 	originStreamID string
 
-	recv          chan *envelope.Envelope
+	recv chan *envelope.Envelope
+	// recvMu serializes close(recv) against sends from the reader goroutine.
+	// The reader (deliverEnvelope) holds it for the duration of a send-select;
+	// closeChannelRecv acquires it before closing. Close() sequences
+	// markTerminated → closeChannelRecv so a reader blocked in the send-select
+	// unblocks via the termDone case and releases recvMu before close runs.
+	recvMu        sync.Mutex
 	errCh         chan *layer.StreamError
 	closeRecvOnce sync.Once
 	closeSendOnce sync.Once
@@ -308,8 +314,13 @@ func (c *channel) Close() error {
 				code:     ErrCodeCancel,
 			}})
 		}
-		c.layer.closeChannelRecv(c)
+		// Order matters: markTerminated FIRST so a reader currently blocked
+		// in deliverEnvelope's send-select unblocks via the termDone case
+		// before we acquire recvMu to close ch.recv. Reversing this risks a
+		// deadlock when the consumer has stopped draining and the reader is
+		// stuck mid-send holding recvMu.
 		c.markTerminated(io.EOF)
+		c.layer.closeChannelRecv(c)
 	})
 	return nil
 }
