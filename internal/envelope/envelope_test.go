@@ -292,6 +292,39 @@ func TestEnvelope_Clone_NilRaw(t *testing.T) {
 	}
 }
 
+// TestEnvelope_Clone_UpgradePathQueryCopied verifies the new
+// EnvelopeContext.UpgradePath and UpgradeQuery fields (added for
+// rules/ws PathPattern source) are copied through Clone. The Clone path
+// uses a struct value-copy of Context, so this is primarily a guard
+// against future Clone refactors that switch to a manual field list.
+func TestEnvelope_Clone_UpgradePathQueryCopied(t *testing.T) {
+	orig := &Envelope{
+		StreamID: "s",
+		Protocol: ProtocolWebSocket,
+		Message:  &WSMessage{Opcode: WSText},
+		Context: EnvelopeContext{
+			ConnID:       "c1",
+			TargetHost:   "example.com:443",
+			UpgradePath:  "/ws/v1/chat",
+			UpgradeQuery: "token=abc",
+		},
+	}
+	cloned := orig.Clone()
+	if cloned.Context.UpgradePath != "/ws/v1/chat" {
+		t.Errorf("UpgradePath = %q, want /ws/v1/chat", cloned.Context.UpgradePath)
+	}
+	if cloned.Context.UpgradeQuery != "token=abc" {
+		t.Errorf("UpgradeQuery = %q, want token=abc", cloned.Context.UpgradeQuery)
+	}
+	// Independence: mutating the clone must not affect the original
+	// (string fields are immutable, but verify the field assignment
+	// path as a sanity check).
+	cloned.Context.UpgradePath = "/mutated"
+	if orig.Context.UpgradePath == "/mutated" {
+		t.Error("Context.UpgradePath shared between original and clone")
+	}
+}
+
 func TestEnvelope_Clone_NilTLS(t *testing.T) {
 	orig := &Envelope{
 		StreamID: "stream-1",
