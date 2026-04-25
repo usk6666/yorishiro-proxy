@@ -6,9 +6,11 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/base64"
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/envelope/bodybuf"
@@ -1181,5 +1183,538 @@ func TestRecordStep_VariantDetection_SameBodyBuffer_NoVariant(t *testing.T) {
 	}
 	if w.flows[0].Metadata["variant"] != "" {
 		t.Errorf("unexpected variant tag: %q", w.flows[0].Metadata["variant"])
+	}
+}
+
+// --- USK-646: WS / gRPC / SSE projection tests ---------------------------
+
+func TestRecordStep_FlowFieldsWSText(t *testing.T) {
+	w := &mockWriter{}
+	step := NewRecordStep(w, nil)
+
+	env := &envelope.Envelope{
+		StreamID:  "ws-1",
+		FlowID:    "ws-1-f1",
+		Direction: envelope.Send,
+		Sequence:  1,
+		Protocol:  envelope.ProtocolWebSocket,
+		Raw:       []byte{0x81, 0x05, 'h', 'e', 'l', 'l', 'o'},
+		Message: &envelope.WSMessage{
+			Opcode:     envelope.WSText,
+			Fin:        true,
+			Compressed: false,
+			Payload:    []byte("hello"),
+		},
+	}
+	step.Process(context.Background(), env)
+
+	if len(w.flows) != 1 {
+		t.Fatalf("expected 1 flow, got %d", len(w.flows))
+	}
+	fl := w.flows[0]
+	if string(fl.Body) != "hello" {
+		t.Errorf("flow Body = %q, want %q", fl.Body, "hello")
+	}
+	if !bytes.Equal(fl.RawBytes, env.Raw) {
+		t.Errorf("flow RawBytes = %v, want %v", fl.RawBytes, env.Raw)
+	}
+	if got := fl.Metadata["protocol"]; got != "ws" {
+		t.Errorf("metadata[protocol] = %q, want ws", got)
+	}
+	if got := fl.Metadata["ws_opcode"]; got != "1" {
+		t.Errorf("metadata[ws_opcode] = %q, want %q", got, "1")
+	}
+	if got := fl.Metadata["ws_fin"]; got != "true" {
+		t.Errorf("metadata[ws_fin] = %q, want true", got)
+	}
+	if got := fl.Metadata["ws_compressed"]; got != "false" {
+		t.Errorf("metadata[ws_compressed] = %q, want false", got)
+	}
+	if _, has := fl.Metadata["ws_close_code"]; has {
+		t.Errorf("non-Close frame must not emit ws_close_code (got %q)",
+			fl.Metadata["ws_close_code"])
+	}
+	if _, has := fl.Metadata["ws_close_reason"]; has {
+		t.Errorf("non-Close frame must not emit ws_close_reason")
+	}
+}
+
+func TestRecordStep_FlowFieldsWSCloseFrame(t *testing.T) {
+	w := &mockWriter{}
+	step := NewRecordStep(w, nil)
+
+	env := &envelope.Envelope{
+		StreamID:  "ws-1",
+		FlowID:    "ws-1-close",
+		Direction: envelope.Receive,
+		Sequence:  5,
+		Protocol:  envelope.ProtocolWebSocket,
+		Raw:       []byte{0x88, 0x06, 0x03, 0xe8, 'b', 'y', 'e', '!'},
+		Message: &envelope.WSMessage{
+			Opcode:      envelope.WSClose,
+			Fin:         true,
+			Compressed:  false,
+			CloseCode:   1000,
+			CloseReason: "bye!",
+			Payload:     []byte{0x03, 0xe8, 'b', 'y', 'e', '!'},
+		},
+	}
+	step.Process(context.Background(), env)
+
+	if len(w.flows) != 1 {
+		t.Fatalf("expected 1 flow, got %d", len(w.flows))
+	}
+	fl := w.flows[0]
+	if got := fl.Metadata["ws_opcode"]; got != "8" {
+		t.Errorf("metadata[ws_opcode] = %q, want 8", got)
+	}
+	if got := fl.Metadata["ws_close_code"]; got != "1000" {
+		t.Errorf("metadata[ws_close_code] = %q, want 1000", got)
+	}
+	if got := fl.Metadata["ws_close_reason"]; got != "bye!" {
+		t.Errorf("metadata[ws_close_reason] = %q, want bye!", got)
+	}
+}
+
+func TestRecordStep_FlowFieldsGRPCStart(t *testing.T) {
+	w := &mockWriter{}
+	step := NewRecordStep(w, nil)
+
+	env := &envelope.Envelope{
+		StreamID:  "rpc-1",
+		FlowID:    "rpc-1-start",
+		Direction: envelope.Send,
+		Sequence:  0,
+		Protocol:  envelope.ProtocolGRPC,
+		Raw:       []byte("hpack-encoded-start"),
+		Message: &envelope.GRPCStartMessage{
+			Service:     "helloworld.Greeter",
+			Method:      "SayHello",
+			ContentType: "application/grpc+proto",
+			Encoding:    "gzip",
+			Metadata: []envelope.KeyValue{
+				{Name: "grpc-timeout", Value: "1S"},
+				{Name: "user-agent", Value: "grpc-go/1.0"},
+				{Name: "user-agent", Value: "second-ua"},
+			},
+		},
+	}
+	step.Process(context.Background(), env)
+
+	if len(w.flows) != 1 {
+		t.Fatalf("expected 1 flow, got %d", len(w.flows))
+	}
+	fl := w.flows[0]
+	if got := fl.Metadata["grpc_event"]; got != "start" {
+		t.Errorf("metadata[grpc_event] = %q, want start", got)
+	}
+	if got := fl.Metadata["grpc_service"]; got != "helloworld.Greeter" {
+		t.Errorf("metadata[grpc_service] = %q", got)
+	}
+	if got := fl.Metadata["grpc_method"]; got != "SayHello" {
+		t.Errorf("metadata[grpc_method] = %q", got)
+	}
+	if got := fl.Metadata["grpc_content_type"]; got != "application/grpc+proto" {
+		t.Errorf("metadata[grpc_content_type] = %q", got)
+	}
+	if got := fl.Metadata["grpc_encoding"]; got != "gzip" {
+		t.Errorf("metadata[grpc_encoding] = %q", got)
+	}
+	if fl.Headers == nil {
+		t.Fatal("expected Headers populated from gRPC metadata")
+	}
+	if got := fl.Headers["grpc-timeout"]; len(got) != 1 || got[0] != "1S" {
+		t.Errorf("Headers[grpc-timeout] = %v", got)
+	}
+	if got := fl.Headers["user-agent"]; len(got) != 2 || got[0] != "grpc-go/1.0" || got[1] != "second-ua" {
+		t.Errorf("Headers[user-agent] = %v, want duplicate-name preserved order", got)
+	}
+	if !bytes.Equal(fl.RawBytes, env.Raw) {
+		t.Errorf("flow RawBytes did not preserve env.Raw")
+	}
+}
+
+func TestRecordStep_FlowFieldsGRPCStartOptionalsOmitted(t *testing.T) {
+	w := &mockWriter{}
+	step := NewRecordStep(w, nil)
+
+	env := &envelope.Envelope{
+		StreamID:  "rpc-1",
+		FlowID:    "rpc-1-start",
+		Direction: envelope.Send,
+		Sequence:  0,
+		Protocol:  envelope.ProtocolGRPC,
+		Message: &envelope.GRPCStartMessage{
+			Service: "svc.S",
+			Method:  "M",
+		},
+	}
+	step.Process(context.Background(), env)
+
+	if len(w.flows) != 1 {
+		t.Fatalf("expected 1 flow, got %d", len(w.flows))
+	}
+	fl := w.flows[0]
+	if _, has := fl.Metadata["grpc_content_type"]; has {
+		t.Errorf("empty content_type must not be emitted")
+	}
+	if _, has := fl.Metadata["grpc_encoding"]; has {
+		t.Errorf("empty encoding must not be emitted")
+	}
+	if fl.Headers != nil {
+		t.Errorf("Headers must remain nil when Metadata is empty (got %v)", fl.Headers)
+	}
+}
+
+func TestRecordStep_FlowFieldsGRPCData(t *testing.T) {
+	w := &mockWriter{}
+	step := NewRecordStep(w, nil)
+
+	wirePrefix := []byte{0x01, 0x00, 0x00, 0x00, 0x05}
+	wireBody := append(wirePrefix, []byte("compr")...)
+	env := &envelope.Envelope{
+		StreamID:  "rpc-1",
+		FlowID:    "rpc-1-data-0",
+		Direction: envelope.Send,
+		Sequence:  1,
+		Protocol:  envelope.ProtocolGRPC,
+		Raw:       wireBody,
+		Message: &envelope.GRPCDataMessage{
+			Service:    "svc.S",
+			Method:     "M",
+			Compressed: true,
+			WireLength: 5,
+			Payload:    []byte("plain"),
+		},
+	}
+	step.Process(context.Background(), env)
+
+	fl := w.flows[0]
+	if got := fl.Metadata["grpc_event"]; got != "data" {
+		t.Errorf("metadata[grpc_event] = %q, want data", got)
+	}
+	if got := fl.Metadata["grpc_service"]; got != "svc.S" {
+		t.Errorf("metadata[grpc_service] = %q", got)
+	}
+	if got := fl.Metadata["grpc_method"]; got != "M" {
+		t.Errorf("metadata[grpc_method] = %q", got)
+	}
+	if got := fl.Metadata["grpc_compressed"]; got != "true" {
+		t.Errorf("metadata[grpc_compressed] = %q, want true", got)
+	}
+	if got := fl.Metadata["grpc_wire_length"]; got != "5" {
+		t.Errorf("metadata[grpc_wire_length] = %q, want 5", got)
+	}
+	if string(fl.Body) != "plain" {
+		t.Errorf("flow Body = %q, want decompressed payload", fl.Body)
+	}
+	if !bytes.Equal(fl.RawBytes, wireBody) {
+		t.Errorf("flow RawBytes did not preserve LPM wire form")
+	}
+}
+
+func TestRecordStep_FlowFieldsGRPCEnd(t *testing.T) {
+	w := &mockWriter{}
+	step := NewRecordStep(w, nil)
+
+	details := []byte{0x0a, 0x05, 'h', 'e', 'l', 'l', 'o'}
+	env := &envelope.Envelope{
+		StreamID:  "rpc-1",
+		FlowID:    "rpc-1-end",
+		Direction: envelope.Receive,
+		Sequence:  9,
+		Protocol:  envelope.ProtocolGRPC,
+		Raw:       []byte("hpack-encoded-end"),
+		Message: &envelope.GRPCEndMessage{
+			Status:        13,
+			Message:       "internal error",
+			StatusDetails: details,
+			Trailers: []envelope.KeyValue{
+				{Name: "x-trailer", Value: "v1"},
+				{Name: "x-trailer", Value: "v2"},
+			},
+		},
+	}
+	step.Process(context.Background(), env)
+
+	fl := w.flows[0]
+	if got := fl.Metadata["grpc_event"]; got != "end" {
+		t.Errorf("metadata[grpc_event] = %q, want end", got)
+	}
+	if got := fl.Metadata["grpc_status"]; got != "13" {
+		t.Errorf("metadata[grpc_status] = %q, want 13", got)
+	}
+	if got := fl.Metadata["grpc_message"]; got != "internal error" {
+		t.Errorf("metadata[grpc_message] = %q", got)
+	}
+	wantB64 := base64.StdEncoding.EncodeToString(details)
+	if got := fl.Metadata["grpc_status_details_bin"]; got != wantB64 {
+		t.Errorf("metadata[grpc_status_details_bin] = %q, want %q", got, wantB64)
+	}
+	if fl.Trailers == nil {
+		t.Fatal("expected Trailers populated")
+	}
+	if got := fl.Trailers["x-trailer"]; len(got) != 2 || got[0] != "v1" || got[1] != "v2" {
+		t.Errorf("Trailers[x-trailer] = %v", got)
+	}
+	// gRPC End must not pollute service/method (RFC §3.2.3 — End only carries
+	// trailers).
+	if _, has := fl.Metadata["grpc_service"]; has {
+		t.Errorf("End must not emit grpc_service (got %q)", fl.Metadata["grpc_service"])
+	}
+}
+
+func TestRecordStep_FlowFieldsGRPCEndOptionalsOmitted(t *testing.T) {
+	w := &mockWriter{}
+	step := NewRecordStep(w, nil)
+
+	env := &envelope.Envelope{
+		StreamID:  "rpc-ok",
+		FlowID:    "rpc-ok-end",
+		Direction: envelope.Receive,
+		Sequence:  5,
+		Protocol:  envelope.ProtocolGRPC,
+		Message: &envelope.GRPCEndMessage{
+			Status: 0,
+		},
+	}
+	step.Process(context.Background(), env)
+
+	fl := w.flows[0]
+	if got := fl.Metadata["grpc_status"]; got != "0" {
+		t.Errorf("metadata[grpc_status] = %q, want 0", got)
+	}
+	if _, has := fl.Metadata["grpc_message"]; has {
+		t.Errorf("empty grpc-message must not be emitted")
+	}
+	if _, has := fl.Metadata["grpc_status_details_bin"]; has {
+		t.Errorf("empty grpc-status-details-bin must not be emitted")
+	}
+	if fl.Trailers != nil {
+		t.Errorf("Trailers must remain nil when no trailers (got %v)", fl.Trailers)
+	}
+}
+
+func TestRecordStep_FlowFieldsSSEFull(t *testing.T) {
+	w := &mockWriter{}
+	step := NewRecordStep(w, nil)
+
+	env := &envelope.Envelope{
+		StreamID:  "sse-1",
+		FlowID:    "sse-1-evt",
+		Direction: envelope.Receive,
+		Sequence:  3,
+		Protocol:  envelope.ProtocolSSE,
+		Raw:       []byte("event: ping\ndata: hi\nid: 42\nretry: 1500\n\n"),
+		Message: &envelope.SSEMessage{
+			Event: "ping",
+			Data:  "hi",
+			ID:    "42",
+			Retry: 1500 * time.Millisecond,
+		},
+	}
+	step.Process(context.Background(), env)
+
+	fl := w.flows[0]
+	if string(fl.Body) != "hi" {
+		t.Errorf("flow Body = %q, want hi", fl.Body)
+	}
+	if got := fl.Metadata["sse_event"]; got != "ping" {
+		t.Errorf("metadata[sse_event] = %q, want ping", got)
+	}
+	if got := fl.Metadata["sse_id"]; got != "42" {
+		t.Errorf("metadata[sse_id] = %q, want 42", got)
+	}
+	if got := fl.Metadata["sse_retry_ms"]; got != "1500" {
+		t.Errorf("metadata[sse_retry_ms] = %q, want 1500", got)
+	}
+	if !bytes.Equal(fl.RawBytes, env.Raw) {
+		t.Errorf("flow RawBytes did not preserve env.Raw")
+	}
+}
+
+func TestRecordStep_FlowFieldsSSEOptionalsOmitted(t *testing.T) {
+	w := &mockWriter{}
+	step := NewRecordStep(w, nil)
+
+	env := &envelope.Envelope{
+		StreamID:  "sse-1",
+		FlowID:    "sse-1-evt",
+		Direction: envelope.Receive,
+		Sequence:  1,
+		Protocol:  envelope.ProtocolSSE,
+		Raw:       []byte("data: payload-only\n\n"),
+		Message: &envelope.SSEMessage{
+			Data: "payload-only",
+		},
+	}
+	step.Process(context.Background(), env)
+
+	fl := w.flows[0]
+	if string(fl.Body) != "payload-only" {
+		t.Errorf("flow Body = %q", fl.Body)
+	}
+	for _, k := range []string{"sse_event", "sse_id", "sse_retry_ms"} {
+		if _, has := fl.Metadata[k]; has {
+			t.Errorf("optional metadata %q emitted on empty/zero field (=%q)", k, fl.Metadata[k])
+		}
+	}
+}
+
+// --- USK-646: messageModified for new types ------------------------------
+
+func TestEnvelopeModified_WSPayload(t *testing.T) {
+	a := &envelope.Envelope{Message: &envelope.WSMessage{Opcode: envelope.WSText, Fin: true, Payload: []byte("aa")}}
+	b := &envelope.Envelope{Message: &envelope.WSMessage{Opcode: envelope.WSText, Fin: true, Payload: []byte("bb")}}
+	if !envelopeModified(a, b) {
+		t.Error("expected modified when WS payload differs")
+	}
+}
+
+func TestEnvelopeModified_WSOpcode(t *testing.T) {
+	a := &envelope.Envelope{Message: &envelope.WSMessage{Opcode: envelope.WSText, Fin: true, Payload: []byte("x")}}
+	b := &envelope.Envelope{Message: &envelope.WSMessage{Opcode: envelope.WSBinary, Fin: true, Payload: []byte("x")}}
+	if !envelopeModified(a, b) {
+		t.Error("expected modified when WS opcode differs")
+	}
+}
+
+func TestEnvelopeModified_WSMaskIgnored(t *testing.T) {
+	// Masked/Mask are wire-level masking artifacts; differences must NOT
+	// trigger variant recording. Re-masking on Send would otherwise produce
+	// false-positive variants for every client→server frame.
+	a := &envelope.Envelope{Message: &envelope.WSMessage{Opcode: envelope.WSText, Fin: true, Masked: true, Mask: [4]byte{1, 2, 3, 4}, Payload: []byte("hi")}}
+	b := &envelope.Envelope{Message: &envelope.WSMessage{Opcode: envelope.WSText, Fin: true, Masked: false, Mask: [4]byte{}, Payload: []byte("hi")}}
+	if envelopeModified(a, b) {
+		t.Error("Masked/Mask differences must not trigger variant detection")
+	}
+}
+
+func TestEnvelopeModified_GRPCStartMetadata(t *testing.T) {
+	a := &envelope.Envelope{Message: &envelope.GRPCStartMessage{
+		Service:  "S",
+		Method:   "M",
+		Metadata: []envelope.KeyValue{{Name: "k", Value: "v1"}},
+	}}
+	b := &envelope.Envelope{Message: &envelope.GRPCStartMessage{
+		Service:  "S",
+		Method:   "M",
+		Metadata: []envelope.KeyValue{{Name: "k", Value: "v2"}},
+	}}
+	if !envelopeModified(a, b) {
+		t.Error("expected modified when GRPCStart metadata value differs")
+	}
+}
+
+func TestEnvelopeModified_GRPCStartAcceptEncoding(t *testing.T) {
+	a := &envelope.Envelope{Message: &envelope.GRPCStartMessage{Service: "S", Method: "M", AcceptEncoding: []string{"gzip"}}}
+	b := &envelope.Envelope{Message: &envelope.GRPCStartMessage{Service: "S", Method: "M", AcceptEncoding: []string{"identity"}}}
+	if !envelopeModified(a, b) {
+		t.Error("expected modified when AcceptEncoding differs")
+	}
+}
+
+func TestEnvelopeModified_GRPCDataPayload(t *testing.T) {
+	a := &envelope.Envelope{Message: &envelope.GRPCDataMessage{Service: "S", Method: "M", Payload: []byte("a")}}
+	b := &envelope.Envelope{Message: &envelope.GRPCDataMessage{Service: "S", Method: "M", Payload: []byte("b")}}
+	if !envelopeModified(a, b) {
+		t.Error("expected modified when GRPCData payload differs")
+	}
+}
+
+func TestEnvelopeModified_GRPCDataServiceDefensive(t *testing.T) {
+	// Service/Method are denormalized read-only on Data, but defensive compare
+	// catches an errant Step that mutates them.
+	a := &envelope.Envelope{Message: &envelope.GRPCDataMessage{Service: "S1", Method: "M", Payload: []byte("x")}}
+	b := &envelope.Envelope{Message: &envelope.GRPCDataMessage{Service: "S2", Method: "M", Payload: []byte("x")}}
+	if !envelopeModified(a, b) {
+		t.Error("expected modified when GRPCData service is mutated")
+	}
+}
+
+func TestEnvelopeModified_GRPCEndStatus(t *testing.T) {
+	a := &envelope.Envelope{Message: &envelope.GRPCEndMessage{Status: 0}}
+	b := &envelope.Envelope{Message: &envelope.GRPCEndMessage{Status: 13}}
+	if !envelopeModified(a, b) {
+		t.Error("expected modified when GRPCEnd status differs")
+	}
+}
+
+func TestEnvelopeModified_GRPCEndTrailers(t *testing.T) {
+	a := &envelope.Envelope{Message: &envelope.GRPCEndMessage{Trailers: []envelope.KeyValue{{Name: "k", Value: "v1"}}}}
+	b := &envelope.Envelope{Message: &envelope.GRPCEndMessage{Trailers: []envelope.KeyValue{{Name: "k", Value: "v2"}}}}
+	if !envelopeModified(a, b) {
+		t.Error("expected modified when GRPCEnd trailers differ")
+	}
+}
+
+func TestEnvelopeModified_SSEData(t *testing.T) {
+	a := &envelope.Envelope{Message: &envelope.SSEMessage{Event: "e", Data: "old"}}
+	b := &envelope.Envelope{Message: &envelope.SSEMessage{Event: "e", Data: "new"}}
+	if !envelopeModified(a, b) {
+		t.Error("expected modified when SSE data differs")
+	}
+}
+
+func TestEnvelopeModified_SSEUnchanged(t *testing.T) {
+	a := &envelope.Envelope{Message: &envelope.SSEMessage{Event: "e", Data: "x", ID: "1", Retry: 100 * time.Millisecond}}
+	b := &envelope.Envelope{Message: &envelope.SSEMessage{Event: "e", Data: "x", ID: "1", Retry: 100 * time.Millisecond}}
+	if envelopeModified(a, b) {
+		t.Error("expected unchanged when all SSE fields equal")
+	}
+}
+
+func TestRecordStep_VariantRecordingGRPCData(t *testing.T) {
+	// Full variant pair test for GRPCDataMessage — exercises envelopeModified
+	// + recordVariantFlows + envelopeToFlow's gRPC branch end-to-end.
+	w := &mockWriter{}
+	step := NewRecordStep(w, nil)
+
+	original := &envelope.Envelope{
+		StreamID:  "rpc-1",
+		FlowID:    "rpc-1-data-0",
+		Direction: envelope.Send,
+		Sequence:  1,
+		Protocol:  envelope.ProtocolGRPC,
+		Raw:       []byte{0x00, 0x00, 0x00, 0x00, 0x03, 'a', 'b', 'c'},
+		Message: &envelope.GRPCDataMessage{
+			Service:    "S",
+			Method:     "M",
+			Compressed: false,
+			WireLength: 3,
+			Payload:    []byte("abc"),
+		},
+	}
+	modified := &envelope.Envelope{
+		StreamID:  "rpc-1",
+		FlowID:    "rpc-1-data-0",
+		Direction: envelope.Send,
+		Sequence:  1,
+		Protocol:  envelope.ProtocolGRPC,
+		Raw:       []byte{0x00, 0x00, 0x00, 0x00, 0x03, 'x', 'y', 'z'},
+		Message: &envelope.GRPCDataMessage{
+			Service:    "S",
+			Method:     "M",
+			Compressed: false,
+			WireLength: 3,
+			Payload:    []byte("xyz"),
+		},
+	}
+
+	ctx := withSnapshot(context.Background(), original)
+	step.Process(ctx, modified)
+
+	if len(w.flows) != 2 {
+		t.Fatalf("expected 2 flows (variant pair), got %d", len(w.flows))
+	}
+	if w.flows[0].ID != "rpc-1-data-0-original" || w.flows[0].Metadata["variant"] != "original" {
+		t.Errorf("flow[0] = %+v, want original variant", w.flows[0])
+	}
+	if w.flows[1].ID != "rpc-1-data-0" || w.flows[1].Metadata["variant"] != "modified" {
+		t.Errorf("flow[1] = %+v, want modified variant", w.flows[1])
+	}
+	if string(w.flows[0].Body) != "abc" || string(w.flows[1].Body) != "xyz" {
+		t.Errorf("variant Body mismatch: original=%q modified=%q",
+			w.flows[0].Body, w.flows[1].Body)
 	}
 }
