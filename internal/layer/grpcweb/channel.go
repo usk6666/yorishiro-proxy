@@ -16,6 +16,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/layer"
 )
@@ -43,6 +44,13 @@ type channel struct {
 	terminated  bool
 	terminalErr error
 
+	// recvDone is closed by terminate() when the channel reaches terminal
+	// state (either inner termination propagated or layer-internal failure).
+	// terminalErr is populated before recvDone fires, satisfying the Channel
+	// contract invariant ("populate Err before closing Closed").
+	termOnce sync.Once
+	recvDone chan struct{}
+
 	// Send-side accumulator (for the direction we are responsible for
 	// assembling and forwarding via inner.Send).
 	sendStart    *envelope.GRPCStartMessage
@@ -56,9 +64,22 @@ type channel struct {
 // newChannel constructs the wrapper.
 func newChannel(inner layer.Channel, role Role) *channel {
 	return &channel{
-		inner: inner,
-		role:  role,
+		inner:    inner,
+		role:     role,
+		recvDone: make(chan struct{}),
 	}
+}
+
+// terminate marks the channel terminated, caches err, and fires recvDone.
+// Caller MUST NOT hold c.mu. Idempotent.
+func (c *channel) terminate(err error) {
+	c.termOnce.Do(func() {
+		c.mu.Lock()
+		c.terminated = true
+		c.terminalErr = err
+		c.mu.Unlock()
+		close(c.recvDone)
+	})
 }
 
 // StreamID delegates to the inner Channel.
@@ -66,12 +87,16 @@ func (c *channel) StreamID() string {
 	return c.inner.StreamID()
 }
 
-// Closed delegates to inner.
+// Closed returns the layer's own terminal signal. Fires when terminate()
+// is called (either from a Next-side terminal error propagated from inner,
+// a layer-internal protocol/parse failure, or an explicit Close).
 func (c *channel) Closed() <-chan struct{} {
-	return c.inner.Closed()
+	return c.recvDone
 }
 
 // Err returns the stored terminal error if any, otherwise delegates to inner.
+// The Channel contract requires Err to be populated before Closed fires;
+// terminate() preserves that ordering.
 func (c *channel) Err() error {
 	c.mu.Lock()
 	if c.terminated {
@@ -83,9 +108,13 @@ func (c *channel) Err() error {
 	return c.inner.Err()
 }
 
-// Close cascades to inner.Close exactly once.
+// Close cascades to inner.Close exactly once and fires the layer's own
+// terminal signal so observers parked on Closed() unblock.
 func (c *channel) Close() error {
 	c.closeOnce.Do(func() {
+		// Set a terminal error if none has been recorded yet; an explicit
+		// Close represents normal teardown so we use io.EOF.
+		c.terminate(io.EOF)
 		_ = c.inner.Close()
 	})
 	return nil
@@ -113,10 +142,7 @@ func (c *channel) Next(ctx context.Context) (*envelope.Envelope, error) {
 		// Queue empty; pull next HTTPMessage from inner and refill.
 		env, err := c.inner.Next(ctx)
 		if err != nil {
-			c.mu.Lock()
-			c.terminated = true
-			c.terminalErr = err
-			c.mu.Unlock()
+			c.terminate(err)
 			return nil, err
 		}
 
@@ -126,18 +152,12 @@ func (c *channel) Next(ctx context.Context) (*envelope.Envelope, error) {
 				Code:   layer.ErrorProtocol,
 				Reason: fmt.Sprintf("grpcweb: inner produced non-HTTPMessage (got %T)", env.Message),
 			}
-			c.mu.Lock()
-			c.terminated = true
-			c.terminalErr = se
-			c.mu.Unlock()
+			c.terminate(se)
 			return nil, se
 		}
 
 		if err := c.refillFromHTTPMessage(ctx, env, httpMsg); err != nil {
-			c.mu.Lock()
-			c.terminated = true
-			c.terminalErr = err
-			c.mu.Unlock()
+			c.terminate(err)
 			return nil, err
 		}
 	}
@@ -365,6 +385,7 @@ func (c *channel) sendEndLocked(ctx context.Context, env *envelope.Envelope, m *
 	}
 	start := c.sendStart
 	srcEnv := c.sendCtxEnv
+	streamID := c.sendStreamID
 	dir := env.Direction
 	dataBytes := append([]byte(nil), c.sendDataBuf.Bytes()...)
 	// Reset assembly state immediately to allow pipelined RPCs.
@@ -398,7 +419,7 @@ func (c *channel) sendEndLocked(ctx context.Context, env *envelope.Envelope, m *
 	httpMsg := buildHTTPMessage(start, m, body, dir, srcEnv, embedTrailer)
 
 	out := &envelope.Envelope{
-		StreamID:  c.sendStreamID,
+		StreamID:  streamID,
 		FlowID:    uuid.New().String(),
 		Sequence:  env.Sequence,
 		Direction: dir,
@@ -667,11 +688,20 @@ func maybeDecompress(payload []byte, compressed bool, encoding string) ([]byte, 
 			}
 		}
 		defer zr.Close()
-		out, err := io.ReadAll(zr)
+		// Bound decompressed length to MaxGRPCMessageSize to defend against
+		// gzip-bomb DoS. Read at most cap+1 so we can detect overflow.
+		cap := int64(config.MaxGRPCMessageSize)
+		out, err := io.ReadAll(io.LimitReader(zr, cap+1))
 		if err != nil {
 			return nil, &layer.StreamError{
 				Code:   layer.ErrorInternalError,
 				Reason: "grpcweb: gzip read: " + err.Error(),
+			}
+		}
+		if int64(len(out)) > cap {
+			return nil, &layer.StreamError{
+				Code:   layer.ErrorInternalError,
+				Reason: fmt.Sprintf("grpcweb: gzip decompressed size exceeds cap %d", cap),
 			}
 		}
 		return out, nil

@@ -791,6 +791,107 @@ func TestStreamID_Delegated(t *testing.T) {
 	}
 }
 
+// --- Closed signal fires on layer-internal terminal error ---
+
+func TestClosed_FiresOnLayerInternalError(t *testing.T) {
+	bad := &envelope.Envelope{
+		StreamID:  "s-closed",
+		Direction: envelope.Receive,
+		Protocol:  envelope.ProtocolRaw,
+		Message:   &envelope.RawMessage{Bytes: []byte("not http")},
+	}
+	mock := newMockChannel("s-closed", bad)
+	ch := Wrap(mock, RoleClient)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+	_, err := ch.Next(ctx)
+	if err == nil {
+		t.Fatal("expected error from non-HTTPMessage inner")
+	}
+	// Closed must fire after the layer terminated, even though inner is
+	// still alive (we never closed it). Per Channel contract, Err() must be
+	// populated before Closed fires.
+	select {
+	case <-ch.Closed():
+	case <-time.After(time.Second):
+		t.Fatal("Closed() did not fire after layer-internal terminal error")
+	}
+	if ch.Err() == nil {
+		t.Error("Err() should return the cached terminal error after Closed fires")
+	}
+}
+
+// --- Closed signal fires on explicit Close ---
+
+func TestClosed_FiresOnExplicitClose(t *testing.T) {
+	mock := newMockChannel("s-closed-2")
+	ch := Wrap(mock, RoleClient)
+	if err := ch.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	select {
+	case <-ch.Closed():
+	case <-time.After(time.Second):
+		t.Fatal("Closed() did not fire after Close()")
+	}
+}
+
+// --- Gzip decompression is bounded by MaxGRPCMessageSize ---
+
+func TestGzipDecompressionCap(t *testing.T) {
+	// Build a small gzip blob whose decompressed size exceeds
+	// MaxGRPCMessageSize. We don't need to actually allocate that much:
+	// the LimitReader-based cap should fire before allocation completes.
+	// Use a highly-compressible payload of zero bytes; gzip compresses
+	// runs of zeros at ~1000:1, so a 1 MiB compressed payload decodes to
+	// roughly 1 GiB of zeros.
+	var bigZeros [1 << 20]byte // 1 MiB of zeros
+	var gz bytes.Buffer
+	gw := gzip.NewWriter(&gz)
+	// Write the same MiB many times to cross the cap.
+	for i := 0; i < 300; i++ {
+		if _, err := gw.Write(bigZeros[:]); err != nil {
+			t.Fatalf("gzip write: %v", err)
+		}
+	}
+	if err := gw.Close(); err != nil {
+		t.Fatalf("gzip close: %v", err)
+	}
+	// Wrap as an LPM frame with compressed=true.
+	frame := EncodeFrame(false, true, gz.Bytes())
+	headers := []envelope.KeyValue{
+		{Name: "content-type", Value: "application/grpc-web+proto"},
+		{Name: "grpc-encoding", Value: "gzip"},
+	}
+	in := mustHTTPResponseEnv("s-bomb", headers, frame, 200)
+	mock := newMockChannel("s-bomb", in)
+	ch := Wrap(mock, RoleClient)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	// Drain until error.
+	for i := 0; i < 5; i++ {
+		_, err := ch.Next(ctx)
+		if err == nil {
+			continue
+		}
+		var se *layer.StreamError
+		if !errors.As(err, &se) {
+			t.Fatalf("err = %v, want *layer.StreamError", err)
+		}
+		if se.Code != layer.ErrorInternalError {
+			t.Errorf("Code = %v, want ErrorInternalError", se.Code)
+		}
+		if !strings.Contains(se.Reason, "exceeds cap") &&
+			!strings.Contains(se.Reason, "gzip") {
+			t.Errorf("Reason = %q (expected mention of cap or gzip)", se.Reason)
+		}
+		return
+	}
+	t.Fatal("expected StreamError from gzip cap, got none after 5 Next calls")
+}
+
 // --- Helpers ---
 
 func hasHeader(kvs []envelope.KeyValue, name string) bool {
