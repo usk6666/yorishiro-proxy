@@ -312,12 +312,43 @@ func (l *Layer) handleStreamRST(f *frame.Frame) error {
 	if err != nil {
 		return err
 	}
+	// RFC 9113 §5.4.2: RST_STREAM(NO_ERROR) signals the peer no longer
+	// needs the stream — graceful cleanup, not a failure. Go's net/http2
+	// server emits it after a handler returns without draining the request
+	// body, even when the response was completed cleanly. Treat as EOF so
+	// the consumer's Next returns io.EOF rather than a StreamError; if we
+	// surfaced the error here, lateClientErrorWatcher would cascade a
+	// CANCEL to the original client and abort an exchange that was already
+	// successful on the wire.
+	if code == ErrCodeNo {
+		l.gracefulCloseStream(f.Header.StreamID)
+		return nil
+	}
 	se := &layer.StreamError{
 		Code:   translateH2StreamError(code),
 		Reason: ErrCodeString(code),
 	}
 	l.failStream(f.Header.StreamID, se)
 	return nil
+}
+
+// gracefulCloseStream marks the stream's recv side as ended with io.EOF,
+// without queuing a StreamError. Used for RST_STREAM(NO_ERROR), which is
+// the peer's "stream no longer needed" signal.
+func (l *Layer) gracefulCloseStream(streamID uint32) {
+	l.mu.Lock()
+	ch, ok := l.channels[streamID]
+	asm := l.assemblers[streamID]
+	l.mu.Unlock()
+	if !ok {
+		return
+	}
+	if asm != nil {
+		asm.phase = phaseDone
+	}
+	ch.markRecvEnded()
+	ch.markTerminated(io.EOF)
+	l.closeChannelRecv(ch)
 }
 
 func (l *Layer) handleStreamPushPromise(f *frame.Frame) error {
@@ -491,27 +522,38 @@ func (l *Layer) deliverEnvelope(ch *channel, env *envelope.Envelope, asm *eventA
 		env.Context = l.envelopeContextWithTime()
 	}
 
-	// Defense-in-depth: skip delivery if recv was already closed via
-	// MarkTerminatedWithRST or another abnormal termination path.
+	// Skip delivery if the channel has been terminated externally
+	// (MarkTerminatedWithRST or channel.Close()).
 	select {
 	case <-ch.termDone:
 		return
 	default:
 	}
 
-	defer func() {
-		// If another goroutine closed recv between the termDone check and
-		// the send, recover gracefully instead of panicking.
-		_ = recover()
-	}()
-
+	// Serialize the send against close(ch.recv) in closeChannelRecv. Holding
+	// recvMu during the send-select makes close+send mutually exclusive.
+	// channel.Close() closes termDone before acquiring recvMu, so a blocked
+	// reader unblocks via the termDone case and releases the lock before the
+	// close runs — no deadlock.
+	ch.recvMu.Lock()
+	// Re-check termDone under the lock; it may have been closed between the
+	// early check and lock acquisition.
+	select {
+	case <-ch.termDone:
+		ch.recvMu.Unlock()
+		return
+	default:
+	}
 	select {
 	case ch.recv <- env:
 	case <-l.shutdown:
+		ch.recvMu.Unlock()
 		return
 	case <-ch.termDone:
+		ch.recvMu.Unlock()
 		return
 	}
+	ch.recvMu.Unlock()
 
 	// If the assembler reached terminal state, close the channel's recv side.
 	if asm != nil && asm.isDone() {
@@ -520,8 +562,11 @@ func (l *Layer) deliverEnvelope(ch *channel, env *envelope.Envelope, asm *eventA
 	}
 }
 
-// closeChannelRecv idempotently closes ch's recv chan.
+// closeChannelRecv idempotently closes ch's recv chan. Acquires ch.recvMu
+// to serialize against the reader goroutine's send in deliverEnvelope.
 func (l *Layer) closeChannelRecv(ch *channel) {
+	ch.recvMu.Lock()
+	defer ch.recvMu.Unlock()
 	ch.closeRecvOnce.Do(func() {
 		close(ch.recv)
 	})
