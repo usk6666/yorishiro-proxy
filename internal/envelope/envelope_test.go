@@ -315,4 +315,9 @@ func TestEnvelope_Clone_NilTLS(t *testing.T) {
 var (
 	_ Message = (*HTTPMessage)(nil)
 	_ Message = (*RawMessage)(nil)
+	_ Message = (*WSMessage)(nil)
+	_ Message = (*GRPCStartMessage)(nil)
+	_ Message = (*GRPCDataMessage)(nil)
+	_ Message = (*GRPCEndMessage)(nil)
+	_ Message = (*SSEMessage)(nil)
 )
