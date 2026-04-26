@@ -382,22 +382,28 @@ func (s *sendEndInjector) Send(ctx context.Context, env *envelope.Envelope) erro
 func (s *sendEndInjector) Next(ctx context.Context) (*envelope.Envelope, error) {
 	env, err := s.inner.Next(ctx)
 	if err != nil {
+		// Only mark `emitted` and synthesize a sentinel on EOF — non-EOF
+		// errors must propagate without consuming the one-shot guard so
+		// that a subsequent EOF (if any) still injects the GRPCEndMessage.
+		if !errors.Is(err, io.EOF) {
+			return nil, err
+		}
 		s.mu.Lock()
 		alreadyEmitted := s.emitted
 		s.emitted = true
 		seq := s.lastSeq + 1
 		s.mu.Unlock()
-		if errors.Is(err, io.EOF) && !alreadyEmitted {
-			return &envelope.Envelope{
-				StreamID:  s.streamID,
-				FlowID:    uuid.New().String(),
-				Sequence:  seq,
-				Direction: envelope.Send,
-				Protocol:  envelope.ProtocolGRPCWeb,
-				Message:   &envelope.GRPCEndMessage{Status: 0},
-			}, nil
+		if alreadyEmitted {
+			return nil, err
 		}
-		return nil, err
+		return &envelope.Envelope{
+			StreamID:  s.streamID,
+			FlowID:    uuid.New().String(),
+			Sequence:  seq,
+			Direction: envelope.Send,
+			Protocol:  envelope.ProtocolGRPCWeb,
+			Message:   &envelope.GRPCEndMessage{Status: 0},
+		}, nil
 	}
 	s.mu.Lock()
 	s.lastSeq = env.Sequence
@@ -430,7 +436,12 @@ func (c *rawClearOnSend) Send(ctx context.Context, env *envelope.Envelope) error
 	if env != nil {
 		switch env.Message.(type) {
 		case *envelope.GRPCDataMessage, *envelope.GRPCEndMessage:
-			env.Raw = nil
+			// Shallow-copy the envelope before clearing Raw so any caller
+			// retaining a reference (e.g. a recorder branch in the pipeline
+			// that later inspects env.Raw) sees the original wire bytes.
+			cp := *env
+			cp.Raw = nil
+			return c.inner.Send(ctx, &cp)
 		}
 	}
 	return c.inner.Send(ctx, env)
@@ -686,8 +697,8 @@ func startGRPCWebHTTP2Proxy(
 }
 
 // looksLikeGRPCWebContentType reports whether evt's content-type indicates
-// gRPC-Web (binary or text). Inline duplicate of grpcweb.IsGRPCWebContentType
-// kept here to keep the import surface flat.
+// gRPC-Web (binary or text). It iterates the H2HeadersEvent and delegates
+// the actual content-type matching to grpcweb.IsGRPCWebContentType.
 func looksLikeGRPCWebContentType(evt *intHTTP2.H2HeadersEvent) bool {
 	for _, kv := range evt.Headers {
 		if !strings.EqualFold(kv.Name, "content-type") {
