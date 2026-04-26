@@ -354,6 +354,12 @@ func applyTLSFingerprintFlag(tlsFingerprint string, proxyCfg *config.ProxyConfig
 
 // loadConfigs loads the proxy config file and target scope policy.
 // Priority for target scope: -target-policy-file > config file target_scope_policy section.
+//
+// loadConfigs also runs the per-protocol limit validation
+// (config.ValidateProtocolLimits) on the loaded ProxyConfig — sibling of
+// ValidateSafetyFilterConfig. Validation rejects negative numbers and
+// accepts zero (= "use default" per project convention; see
+// config.ResolveBodySpillThreshold).
 func loadConfigs(configFile, targetPolicyFile string) (*configsResult, error) {
 	var proxyCfg *config.ProxyConfig
 	if configFile != "" {
@@ -361,6 +367,9 @@ func loadConfigs(configFile, targetPolicyFile string) (*configsResult, error) {
 		proxyCfg, err = config.LoadFile(configFile)
 		if err != nil {
 			return nil, fmt.Errorf("load config file: %w", err)
+		}
+		if err := config.ValidateProtocolLimits(proxyCfg.WebSocket, proxyCfg.GRPC, proxyCfg.SSE); err != nil {
+			return nil, fmt.Errorf("invalid protocol limits: %w", err)
 		}
 	}
 

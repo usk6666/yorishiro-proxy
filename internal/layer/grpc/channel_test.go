@@ -846,6 +846,67 @@ func TestChannel_LPMCapExceeded(t *testing.T) {
 	}
 }
 
+// TestChannel_WithMaxMessageSize_ConfiguredCapRejectsSmallerLPMs verifies
+// that WithMaxMessageSize tightens the per-Channel cap below the package
+// default. A 200-byte LPM is well under MaxGRPCMessageSize (254 MiB) but
+// exceeds the configured cap of 100 bytes; the wrapper must surface
+// *layer.StreamError{Code: ErrorInternalError} (the same code path as
+// the default cap).
+func TestChannel_WithMaxMessageSize_ConfiguredCapRejectsSmallerLPMs(t *testing.T) {
+	t.Parallel()
+	stub := newStubInner("stream-2")
+	stub.pushHeaders(envelope.Send, []byte("HPACK"), requestStartHeaders("/svc.S/M"))
+	// Declare a 200-byte LPM. Default cap (254 MiB) accepts; cap=100 rejects.
+	prefix := make([]byte, lpmPrefixLen)
+	binary.BigEndian.PutUint32(prefix[1:5], 200)
+	stub.pushData(envelope.Send, prefix, false)
+
+	ch := Wrap(stub, nil, RoleServer, WithMaxMessageSize(100))
+	defer ch.Close()
+
+	if _, err := ch.Next(context.Background()); err != nil {
+		t.Fatalf("Next Start: %v", err)
+	}
+	_, err := ch.Next(context.Background())
+	var se *layer.StreamError
+	if !errors.As(err, &se) {
+		t.Fatalf("Next: got %v, want *layer.StreamError", err)
+	}
+	if se.Code != layer.ErrorInternalError {
+		t.Errorf("StreamError.Code = %v, want ErrorInternalError", se.Code)
+	}
+	if stub.rstErr == nil {
+		t.Error("inner.MarkTerminatedWithRST was not called for tightened cap")
+	}
+}
+
+// TestChannel_WithMaxMessageSize_ZeroLeavesDefault verifies that passing
+// WithMaxMessageSize(0) is a no-op (defensive: a zero from a misconfigured
+// caller must NOT result in every LPM being rejected). The Layer should
+// keep the package default (config.MaxGRPCMessageSize, 254 MiB) so a
+// reasonable-sized LPM still rounds-trips.
+func TestChannel_WithMaxMessageSize_ZeroLeavesDefault(t *testing.T) {
+	t.Parallel()
+	stub := newStubInner("stream-3")
+	stub.pushHeaders(envelope.Send, []byte("HPACK"), requestStartHeaders("/svc.S/M"))
+	// 32-byte LPM. Default cap accepts; a buggy 0-cap would reject.
+	stub.pushData(envelope.Send, makeLPM(false, []byte("hello-world-payload-32-bytes-aaa")), true)
+
+	ch := Wrap(stub, nil, RoleServer, WithMaxMessageSize(0))
+	defer ch.Close()
+
+	if _, err := ch.Next(context.Background()); err != nil {
+		t.Fatalf("Next Start: %v", err)
+	}
+	env, err := ch.Next(context.Background())
+	if err != nil {
+		t.Fatalf("Next Data: %v", err)
+	}
+	if _, ok := env.Message.(*envelope.GRPCDataMessage); !ok {
+		t.Errorf("expected GRPCDataMessage, got %T", env.Message)
+	}
+}
+
 // ----------------------------------------------------------------------
 // Bad gzip on Receive → StreamError(Protocol).
 // ----------------------------------------------------------------------
