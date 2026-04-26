@@ -96,11 +96,12 @@ func (e *SafetyEngine) CheckInput(ctx context.Context, env *envelope.Envelope, m
 	if env == nil || msg == nil {
 		return nil
 	}
+	_ = ctx // ctx threaded for symmetry with rules/http; currently unused
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 
 	for i := range e.rules {
-		if v := e.checkRule(ctx, &e.rules[i], msg); v != nil {
+		if v := e.checkRule(&e.rules[i], msg); v != nil {
 			return v
 		}
 	}
@@ -112,21 +113,22 @@ func (e *SafetyEngine) CheckInputAll(ctx context.Context, env *envelope.Envelope
 	if env == nil || msg == nil {
 		return nil
 	}
+	_ = ctx // ctx threaded for symmetry with rules/http; currently unused
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 
 	var violations []*Violation
 	for i := range e.rules {
-		if v := e.checkRule(ctx, &e.rules[i], msg); v != nil {
+		if v := e.checkRule(&e.rules[i], msg); v != nil {
 			violations = append(violations, v)
 		}
 	}
 	return violations
 }
 
-func (e *SafetyEngine) checkRule(ctx context.Context, rule *common.CompiledRule, msg envelope.Message) *Violation {
+func (e *SafetyEngine) checkRule(rule *common.CompiledRule, msg envelope.Message) *Violation {
 	for _, target := range rule.Targets {
-		data, name := extractTarget(ctx, target, msg)
+		data, name := extractTarget(target, msg)
 		if data == "" {
 			continue
 		}
@@ -153,7 +155,7 @@ func (e *SafetyEngine) checkRule(ctx context.Context, rule *common.CompiledRule,
 //
 // common.TargetBody is an alias for the gRPC payload target when the
 // message is GRPCDataMessage (preset reuse contract).
-func extractTarget(ctx context.Context, target common.Target, msg envelope.Message) (data, name string) {
+func extractTarget(target common.Target, msg envelope.Message) (data, name string) {
 	switch m := msg.(type) {
 	case *envelope.GRPCStartMessage:
 		switch target {
@@ -168,7 +170,7 @@ func extractTarget(ctx context.Context, target common.Target, msg envelope.Messa
 	case *envelope.GRPCDataMessage:
 		switch target {
 		case TargetPayload, common.TargetBody:
-			payload := materializePayload(ctx, m)
+			payload := materializePayload(m)
 			if payload == nil {
 				return "", ""
 			}

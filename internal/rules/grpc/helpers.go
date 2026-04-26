@@ -1,7 +1,6 @@
 package grpc
 
 import (
-	"context"
 	"net"
 	"strings"
 
@@ -52,11 +51,11 @@ func metadataAdd(metadata []envelope.KeyValue, name, value string) []envelope.Ke
 // gRPC payloads are always carried in-memory on GRPCDataMessage.Payload
 // (the LPM has been reassembled from HTTP/2 DATA events). This helper
 // exists so the SafetyEngine and TransformEngine paths read a single
-// helper for body-like data and so the API stays symmetric with the
-// HTTP rules helpers, which thread context.Context through
-// BodyBuffer.Bytes(ctx). For gRPC the ctx is currently a no-op but is
-// kept in the signature for symmetry and future evolution.
-func materializePayload(_ context.Context, msg *envelope.GRPCDataMessage) []byte {
+// helper for body-like data. Public engine methods (Transform*,
+// CheckInput) keep their context.Context parameter for API symmetry
+// with rules/http; the helper itself does not need it because gRPC
+// payloads never spill to a BodyBuffer.
+func materializePayload(msg *envelope.GRPCDataMessage) []byte {
 	if msg == nil {
 		return nil
 	}

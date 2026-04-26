@@ -131,6 +131,26 @@ func TestTransformEngine_SetMetadata_CRLFRejected(t *testing.T) {
 	}
 }
 
+func TestTransformEngine_RemoveMetadata_CRLFRejected(t *testing.T) {
+	e := NewTransformEngine()
+	rule, _ := CompileTransformRule("r1", 0, DirectionSend, "", "",
+		TransformRemoveMetadata, "X-Bad\r\nEvil", "", "", "", 0, "")
+	e.SetRules([]TransformRule{*rule})
+
+	metadata := []envelope.KeyValue{
+		{Name: "X-Bad", Value: "v"},
+		{Name: "Other", Value: "keep"},
+	}
+	env, msg := makeStartEnv(envelope.Send, "svc", "M", metadata)
+	if e.TransformStart(context.Background(), env, msg) {
+		t.Error("CRLF in RemoveMetadata name must be rejected")
+	}
+	// Original metadata must be untouched on reject.
+	if len(msg.Metadata) != 2 {
+		t.Errorf("metadata must be untouched on CRLF reject; got %v", msg.Metadata)
+	}
+}
+
 func TestTransformEngine_ReplacePayload_CommitAndClearRaw(t *testing.T) {
 	e := NewTransformEngine()
 	rule, err := CompileTransformRule("r1", 0, DirectionSend, "", "",

@@ -41,8 +41,14 @@ type InterceptRule struct {
 
 	Direction RuleDirection
 
+	// ServicePattern matches against GRPCStartMessage.Service /
+	// GRPCDataMessage.Service. Ignored on MatchEnd (GRPCEndMessage
+	// carries no Service/Method).
 	ServicePattern *regexp.Regexp
-	MethodPattern  *regexp.Regexp
+	// MethodPattern matches against GRPCStartMessage.Method /
+	// GRPCDataMessage.Method. Ignored on MatchEnd (GRPCEndMessage
+	// carries no Service/Method).
+	MethodPattern *regexp.Regexp
 
 	// HeaderMatch matches against GRPCStartMessage.Metadata. Keys are
 	// lowercased at compile time (HTTP/2 wire form per RFC 9113 §8.2.2);
@@ -156,12 +162,14 @@ func (e *InterceptEngine) MatchData(env *envelope.Envelope, msg *envelope.GRPCDa
 }
 
 // MatchEnd evaluates rules against a GRPCEndMessage envelope.
-// HeaderMatch and PayloadPattern are no-ops on End; only direction +
-// service/method gates apply. Service / Method are not on
-// GRPCEndMessage, so per the design review the engine evaluates only
-// the direction + Enabled gates here. To match a specific RPC's End
-// event, leave Service/Method patterns empty (they would be no-ops
-// anyway since GRPCEndMessage carries no service/method fields).
+// HeaderMatch and PayloadPattern are no-ops on End; only the
+// direction + Enabled gates apply. Service/Method patterns on the
+// rule are ignored (End events have no Service/Method); a rule
+// configured with Direction:Receive and ServicePattern:"foo" will
+// therefore still match every End event in the receive direction
+// regardless of the configured ServicePattern. To scope an End-only
+// match to a specific RPC, correlate at the call site by tracking
+// the matching Start event's stream identity.
 func (e *InterceptEngine) MatchEnd(env *envelope.Envelope, msg *envelope.GRPCEndMessage) []string {
 	if env == nil || msg == nil {
 		return nil

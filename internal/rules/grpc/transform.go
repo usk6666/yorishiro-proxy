@@ -96,6 +96,10 @@ func (e *TransformEngine) AddRule(rule TransformRule) {
 //
 // On Start, only metadata mutations (Add/Set/Remove) and direction +
 // service/method gates apply. Payload and Status actions are no-ops.
+//
+// Concurrency: the engine's RWMutex protects only the rules slice;
+// the caller must ensure no concurrent access to env or msg during
+// the call. Mutates env/msg in-place.
 func (e *TransformEngine) TransformStart(ctx context.Context, env *envelope.Envelope, msg *envelope.GRPCStartMessage) bool {
 	if env == nil || msg == nil {
 		return false
@@ -133,10 +137,15 @@ func (e *TransformEngine) TransformStart(ctx context.Context, env *envelope.Enve
 // true on any mutation. ReplacePayload commits by writing the new
 // payload AND clearing env.Raw so the downstream Layer re-encodes the
 // LPM frame. WireLength is left verbatim.
+//
+// Concurrency: the engine's RWMutex protects only the rules slice;
+// the caller must ensure no concurrent access to env or msg during
+// the call. Mutates env/msg in-place.
 func (e *TransformEngine) TransformData(ctx context.Context, env *envelope.Envelope, msg *envelope.GRPCDataMessage) bool {
 	if env == nil || msg == nil {
 		return false
 	}
+	_ = ctx // ctx threaded for symmetry with rules/http; currently unused
 
 	e.mu.RLock()
 	defer e.mu.RUnlock()
@@ -153,7 +162,7 @@ func (e *TransformEngine) TransformData(ctx context.Context, env *envelope.Envel
 		if !matchServiceMethodTransform(rule, msg.Service, msg.Method) {
 			continue
 		}
-		if applyDataAction(ctx, rule, msg) {
+		if applyDataAction(rule, msg) {
 			modified = true
 		}
 	}
@@ -170,6 +179,10 @@ func (e *TransformEngine) TransformData(ctx context.Context, env *envelope.Envel
 // TransformEnd applies matching rules to a GRPCEndMessage. SetStatus
 // and SetStatusMessage actions apply here; metadata/payload actions
 // are no-ops.
+//
+// Concurrency: the engine's RWMutex protects only the rules slice;
+// the caller must ensure no concurrent access to env or msg during
+// the call. Mutates env/msg in-place.
 func (e *TransformEngine) TransformEnd(ctx context.Context, env *envelope.Envelope, msg *envelope.GRPCEndMessage) bool {
 	if env == nil || msg == nil {
 		return false
@@ -230,6 +243,13 @@ func applyStartAction(rule *TransformRule, msg *envelope.GRPCStartMessage) bool 
 		return true
 
 	case TransformRemoveMetadata:
+		if containsCRLF(rule.MetadataName) {
+			// Symmetry with Add/Set: surface configuration bugs that put
+			// CRLF in the metadata name. Remove can't smuggle by itself,
+			// but a CRLF name is always misconfigured and silently
+			// matching nothing would hide the mistake.
+			return false
+		}
 		before := len(msg.Metadata)
 		msg.Metadata = metadataDel(msg.Metadata, rule.MetadataName)
 		return len(msg.Metadata) != before
@@ -240,14 +260,14 @@ func applyStartAction(rule *TransformRule, msg *envelope.GRPCStartMessage) bool 
 	}
 }
 
-func applyDataAction(ctx context.Context, rule *TransformRule, msg *envelope.GRPCDataMessage) bool {
+func applyDataAction(rule *TransformRule, msg *envelope.GRPCDataMessage) bool {
 	if rule.ActionType != TransformReplacePayload {
 		return false
 	}
 	if rule.PayloadPattern == nil {
 		return false
 	}
-	target := materializePayload(ctx, msg)
+	target := materializePayload(msg)
 	if target == nil {
 		return false
 	}
