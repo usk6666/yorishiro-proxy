@@ -12,9 +12,13 @@ import (
 	"io"
 	"sync"
 
+	"github.com/usk6666/yorishiro-proxy/internal/connector"
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/envelope/bodybuf"
 	"github.com/usk6666/yorishiro-proxy/internal/layer"
+	"github.com/usk6666/yorishiro-proxy/internal/layer/http1"
+	"github.com/usk6666/yorishiro-proxy/internal/layer/sse"
+	"github.com/usk6666/yorishiro-proxy/internal/layer/ws"
 	"github.com/usk6666/yorishiro-proxy/internal/pipeline"
 	"golang.org/x/sync/errgroup"
 )
@@ -242,8 +246,17 @@ func ClassifyError(err error) string {
 // Both goroutines are managed by errgroup.WithContext: if either returns an
 // error the context is cancelled and the other goroutine terminates. io.EOF
 // from Channel.Next is treated as normal stream termination, not an error.
-func RunSession(ctx context.Context, client layer.Channel, dial DialFunc, p *pipeline.Pipeline, opts ...SessionOptions) error {
-	defer client.Close()
+func RunSession(ctx context.Context, client layer.Channel, dial DialFunc, p *pipeline.Pipeline, opts ...SessionOptions) (retErr error) {
+	// Cleanup is conditional: when the session exits with ErrUpgradePending
+	// the caller (RunStackSession) needs the underlying wires alive so it
+	// can DetachStream and construct the post-upgrade Layer. A normal exit
+	// closes both wires.
+	defer func() {
+		if errors.Is(retErr, ErrUpgradePending) {
+			return
+		}
+		_ = client.Close()
+	}()
 
 	var opt SessionOptions
 	if len(opts) > 0 {
@@ -260,6 +273,9 @@ func RunSession(ctx context.Context, client layer.Channel, dial DialFunc, p *pip
 		done:  make(chan struct{}),
 	}
 	defer func() {
+		if errors.Is(retErr, ErrUpgradePending) {
+			return
+		}
 		if uh.ch != nil {
 			uh.ch.Close()
 		}
@@ -296,11 +312,261 @@ func RunSession(ctx context.Context, client layer.Channel, dial DialFunc, p *pip
 
 	result := g.Wait()
 
+	// On upgrade, expose the still-live upstream Channel via the session's
+	// notice helper so RunStackSession can construct the post-upgrade Layer
+	// without re-dialing.
+	if errors.Is(result, ErrUpgradePending) {
+		if notice := UpgradeNoticeFromContext(origCtx); notice != nil {
+			notice.attachUpstream(uh.ch)
+		}
+	}
+
 	if opt.OnComplete != nil {
 		opt.OnComplete(context.WithoutCancel(origCtx), sc.get(), result)
 	}
 
 	return result
+}
+
+// RunStackSession is the upgrade-aware entry point. It wraps RunSession in
+// a restart loop that detects HTTP→WebSocket Upgrade or HTTP→SSE response
+// envelopes via UpgradeStep + UpgradeNotice (plumbed through ctx), drains
+// both session goroutines via ErrUpgradePending, swaps the topmost client
+// and/or upstream Layer on the supplied ConnectionStack, and recursively
+// re-runs the session on the new Channels.
+//
+// The recursion depth is bounded by 2 (HTTP → WS, no further upgrades) per
+// RFC-001 N7. After the recursive call returns a non-ErrUpgradePending
+// error, the caller's OnComplete fires exactly once with the terminal
+// result — the first session's OnComplete invocation is suppressed (it
+// would carry ErrUpgradePending which is not a user-visible error).
+//
+// Friction 2-C strict ordering preserved (per design review R4):
+//  1. clientToUpstream forwards the request to upstream.
+//  2. upstreamToClient receives 101, runs Pipeline (UpgradeStep flips notice).
+//  3. upstreamToClient forwards 101 to client (must succeed before swap).
+//  4. upstreamToClient returns ErrUpgradePending.
+//  5. errgroup ctx cancels clientToUpstream which also returns ErrUpgradePending.
+//  6. RunSession returns ErrUpgradePending; this function takes over.
+//  7. DetachStream on both sides (or only upstream for SSE).
+//  8. Construct new Layer(s); call ReplaceClientTop / ReplaceUpstreamTop.
+//  9. Recursively call RunStackSession on the new Channel(s).
+//
+// Type-assertion guard (R19): WS upgrade requires *http1.Layer on the
+// client side. A non-http1 topmost surfaces a wrapped error.
+//
+// Production OnStack wiring is downstream of this issue (R20); existing
+// tests using RunSession directly remain unchanged.
+func RunStackSession(
+	ctx context.Context,
+	stack *connector.ConnectionStack,
+	dial DialFunc,
+	p *pipeline.Pipeline,
+	opts ...SessionOptions,
+) error {
+	if stack == nil {
+		return errors.New("session: RunStackSession requires non-nil ConnectionStack")
+	}
+
+	var userOpt SessionOptions
+	if len(opts) > 0 {
+		userOpt = opts[0]
+	}
+
+	clientTop := stack.ClientTopmost()
+	if clientTop == nil {
+		return errors.New("session: ConnectionStack has no client topmost layer")
+	}
+
+	// The first session reads from the current client topmost Layer's
+	// Channel. We range-receive the (possibly already-buffered) Channel
+	// out of the Layer.
+	clientCh, ok := <-clientTop.Channels()
+	if !ok || clientCh == nil {
+		return errors.New("session: client topmost layer produced no Channel")
+	}
+
+	notice := &UpgradeNotice{}
+	sessCtx := WithUpgradeNotice(ctx, notice)
+
+	// Wrap user OnComplete: suppress the first session's callback when it
+	// fires with ErrUpgradePending, otherwise pass through.
+	wrapped := SessionOptions{
+		OnComplete: func(cbCtx context.Context, streamID string, err error) {
+			if errors.Is(err, ErrUpgradePending) {
+				return
+			}
+			if userOpt.OnComplete != nil {
+				userOpt.OnComplete(cbCtx, streamID, err)
+			}
+		},
+	}
+
+	err := RunSession(sessCtx, clientCh, dial, p, wrapped)
+	if !errors.Is(err, ErrUpgradePending) {
+		return err
+	}
+
+	// Upgrade detected. Acquire the still-live upstream Channel from the
+	// notice (RunSession parked it before the OnComplete suppression).
+	upstreamCh := notice.Upstream()
+	if upstreamCh == nil {
+		return errors.New("session: upgrade pending but upstream Channel was never established")
+	}
+
+	switch notice.Pending() {
+	case UpgradeWS:
+		return runUpgradeWS(ctx, stack, dial, p, userOpt, upstreamCh)
+	case UpgradeSSE:
+		return runUpgradeSSE(ctx, stack, dial, p, userOpt, upstreamCh)
+	default:
+		// ErrUpgradePending without a kind set is a logic bug; surface it
+		// rather than silently looping.
+		return errors.New("session: ErrUpgradePending observed but UpgradeNotice.Pending() is empty")
+	}
+}
+
+// runUpgradeWS performs the WS-side swap: detach both the client and
+// upstream HTTP/1.x Layers, construct ws.Layers (RoleServer client side,
+// RoleClient upstream side), install them via ReplaceClient/UpstreamTop,
+// then recursively call RunStackSession with a trivial DialFunc that
+// returns the pre-acquired upstream WS Channel.
+func runUpgradeWS(
+	ctx context.Context,
+	stack *connector.ConnectionStack,
+	_ DialFunc,
+	p *pipeline.Pipeline,
+	userOpt SessionOptions,
+	upstreamCh layer.Channel,
+) error {
+	clientTop := stack.ClientTopmost()
+	clientHTTP, ok := clientTop.(*http1.Layer)
+	if !ok {
+		return fmt.Errorf("session: ws upgrade requires *http1.Layer client topmost, got %T", clientTop)
+	}
+
+	upstreamTop := stack.UpstreamTopmost()
+	upstreamHTTP, ok := upstreamTop.(*http1.Layer)
+	if !ok {
+		return fmt.Errorf("session: ws upgrade requires *http1.Layer upstream topmost, got %T", upstreamTop)
+	}
+
+	clientReader, clientWriter, clientCloser, err := clientHTTP.DetachStream()
+	if err != nil {
+		return fmt.Errorf("session: detach client http1: %w", err)
+	}
+	upReader, upWriter, upCloser, err := upstreamHTTP.DetachStream()
+	if err != nil {
+		return fmt.Errorf("session: detach upstream http1: %w", err)
+	}
+
+	// Hygiene: close the old http1 Layer wrappers to mark their internal
+	// Channels terminated. DetachStream already transferred ownership of
+	// the conn so Close is a no-op for the wire (R21).
+	_ = clientHTTP.Close()
+	_ = upstreamHTTP.Close()
+
+	clientStreamID := upstreamCh.StreamID()
+
+	clientWS := ws.New(clientReader, clientWriter, clientCloser, clientStreamID, ws.RoleServer)
+	upstreamWS := ws.New(upReader, upWriter, upCloser, clientStreamID, ws.RoleClient)
+
+	stack.ReplaceClientTop(clientWS)
+	stack.ReplaceUpstreamTop(upstreamWS)
+
+	// Pull the upstream WS Channel up-front so the recursive dial returns
+	// it without blocking on Channels() inside RunSession's goroutine.
+	upstreamWSCh, ok := <-upstreamWS.Channels()
+	if !ok || upstreamWSCh == nil {
+		return errors.New("session: upstream ws layer produced no Channel")
+	}
+	upgradeDial := DialFunc(func(_ context.Context, _ *envelope.Envelope) (layer.Channel, error) {
+		return upstreamWSCh, nil
+	})
+
+	return RunStackSession(ctx, stack, upgradeDial, p, userOpt)
+}
+
+// runUpgradeSSE performs the SSE-side swap: only the upstream side is
+// replaced with sse.Wrap (wrapped in sseLayerAdapter so it satisfies
+// layer.Layer). The client side keeps its existing http1.Layer; SSE is
+// half-duplex (server→client), so the recursive RunStackSession runs with
+// a drainedChannel as the client side.
+//
+// SSE end-to-end is currently blocked by an http1.channel.Next that fully
+// drains the body before returning; an integration test for this path is
+// supplied with t.Skip("blocked on http1 streaming-body detach follow-up").
+// The orchestration code below is exercised by unit tests.
+func runUpgradeSSE(
+	ctx context.Context,
+	stack *connector.ConnectionStack,
+	_ DialFunc,
+	p *pipeline.Pipeline,
+	userOpt SessionOptions,
+	upstreamCh layer.Channel,
+) error {
+	upstreamTop := stack.UpstreamTopmost()
+	upstreamHTTP, ok := upstreamTop.(*http1.Layer)
+	if !ok {
+		return fmt.Errorf("session: sse upgrade requires *http1.Layer upstream topmost, got %T", upstreamTop)
+	}
+
+	// The first SSE response envelope was already forwarded to the client
+	// before the goroutine returned (Friction 2-C). For sse.Wrap we need
+	// to supply a re-shaped first envelope and a body io.Reader carrying
+	// the post-headers byte stream. The body provenance is the deferred
+	// item D1 — production wiring needs an http1 streaming-body-detach
+	// primitive. For now we reuse the http1 reader returned by
+	// DetachStream as the "body" pipe and let the upgrade orchestration
+	// proceed; tests cover the ReplaceUpstreamTop call.
+	upReader, _, _, err := upstreamHTTP.DetachStream()
+	if err != nil {
+		return fmt.Errorf("session: detach upstream http1 (sse): %w", err)
+	}
+	_ = upstreamHTTP.Close()
+
+	// We need a pre-shaped first envelope that sse.Wrap re-clones. Without
+	// access to the original 101/200 envelope here (it was already sent to
+	// the client and dropped), construct a minimal placeholder so the
+	// wrapper's first emit is well-formed. Production code will plumb the
+	// real envelope through a hook; see D1.
+	first := &envelope.Envelope{
+		StreamID:  upstreamCh.StreamID(),
+		Direction: envelope.Receive,
+		Protocol:  envelope.ProtocolSSE,
+		Message:   &envelope.HTTPMessage{Status: 200, Headers: []envelope.KeyValue{{Name: "Content-Type", Value: "text/event-stream"}}},
+	}
+
+	sseCh := sse.Wrap(upstreamCh, first, upReader)
+	adapter := newSSELayerAdapter(sseCh)
+	stack.ReplaceUpstreamTop(adapter)
+
+	clientCh := newDrainedChannel(upstreamCh.StreamID())
+
+	upgradeDial := DialFunc(func(_ context.Context, _ *envelope.Envelope) (layer.Channel, error) {
+		return sseCh, nil
+	})
+
+	// SSE recursion runs RunSession directly: there is no further upgrade
+	// nested inside SSE, and we do not want to walk the stack again.
+	wrapped := SessionOptions{
+		OnComplete: func(cbCtx context.Context, streamID string, sessErr error) {
+			if errors.Is(sessErr, ErrUpgradePending) {
+				return
+			}
+			if userOpt.OnComplete != nil {
+				userOpt.OnComplete(cbCtx, streamID, sessErr)
+			}
+		},
+	}
+	return RunSession(ctx, clientCh, upgradeDial, p, wrapped)
+}
+
+// upgradePending returns true when notice has latched a pending UpgradeKind.
+// Centralised so the goroutines can express "exit cleanly for upgrade swap"
+// without re-implementing the nil-guard at every call site.
+func upgradePending(notice *UpgradeNotice) bool {
+	return notice != nil && notice.Pending() != ""
 }
 
 // clientToUpstream reads Envelopes from the client, runs them through the
@@ -315,23 +581,18 @@ func clientToUpstream(
 	sc *streamCapture,
 	reg *bodyBufRegistry,
 ) (err error) {
-	// When the client-side goroutine exits abnormally (e.g., client-side
-	// RST_STREAM, stream error, pipeline error), actively tear the upstream
-	// channel so the response-side goroutine's pending Next unblocks with the
-	// corresponding error. HTTP/2 channel.Close emits RST_STREAM(CANCEL) +
-	// delivers a StreamError via errCh + closes the recv queue, causing
-	// upstreamToClient's Next to return promptly. HTTP/1.x Channel.Close is a
-	// no-op because its lifetime is tied to the Layer, not the exchange.
-	//
-	// Normal EOF (err == nil) intentionally leaves the upstream open so the
-	// in-flight response can finish streaming — this is critical for HTTP/1.x
-	// single-request semantics, where the client half-closes after sending the
-	// request and the response is still being delivered.
+	// Cascade-close discipline (feedback_session_cascade_pattern.md):
+	//   * Genuine err → close upstream so peer goroutine unblocks promptly.
+	//   * Normal EOF (err == nil) → leave open; the response may still arrive.
+	//   * ErrUpgradePending → leave open; RunStackSession owns the wire.
 	defer func() {
-		if err != nil && uh.ch != nil {
-			_ = uh.ch.Close()
+		if err == nil || errors.Is(err, ErrUpgradePending) || uh.ch == nil {
+			return
 		}
+		_ = uh.ch.Close()
 	}()
+
+	notice := UpgradeNoticeFromContext(ctx)
 
 	for {
 		env, nerr := client.Next(ctx)
@@ -339,36 +600,70 @@ func clientToUpstream(
 			if errors.Is(nerr, io.EOF) {
 				return nil
 			}
+			// Unblocked by errgroup ctx cancel after the peer goroutine
+			// latched the upgrade — return the sentinel instead of the
+			// wrapped cancellation.
+			if upgradePending(notice) {
+				return ErrUpgradePending
+			}
 			return fmt.Errorf("client.Next: %w", nerr)
 		}
 
 		sc.set(env.StreamID)
 
 		env, action, resp := runPipelineTracked(ctx, p, env, reg)
-		switch action {
-		case pipeline.Drop:
-			continue
-		case pipeline.Respond:
-			if serr := client.Send(ctx, resp); serr != nil {
-				return fmt.Errorf("client.Send (respond): %w", serr)
-			}
-			continue
+		if perr := dispatchClientAction(ctx, client, uh, dial, env, resp, action); perr != nil {
+			return perr
 		}
-
-		// Continue: forward to upstream.
-		if uh.ch == nil {
-			u, derr := dial(ctx, env)
-			if derr != nil {
-				return fmt.Errorf("dial: %w", derr)
-			}
-			uh.ch = u
-			close(uh.ready)
-		}
-
-		if serr := uh.ch.Send(ctx, env); serr != nil {
-			return fmt.Errorf("upstream.Send: %w", serr)
+		// UpgradeStep may have flipped the notice during Pipeline.Run or
+		// the receive-side goroutine may have flipped it concurrently.
+		if upgradePending(notice) {
+			return ErrUpgradePending
 		}
 	}
+}
+
+// dispatchClientAction performs the post-Pipeline action on a client-side
+// envelope: Drop, Respond (client.Send), or Continue (upstream.Send). It
+// also handles the lazy dial-and-publish on first forwarded envelope.
+//
+// Returning a non-nil error terminates clientToUpstream; returning nil
+// loops to the next iteration. The "should I exit for upgrade?" check
+// stays in the caller because it must run AFTER this returns nil so the
+// final envelope (the WS upgrade request) reaches upstream first
+// (Friction 2-C).
+func dispatchClientAction(
+	ctx context.Context,
+	client layer.Channel,
+	uh *upstreamHolder,
+	dial DialFunc,
+	env *envelope.Envelope,
+	resp *envelope.Envelope,
+	action pipeline.Action,
+) error {
+	switch action {
+	case pipeline.Drop:
+		return nil
+	case pipeline.Respond:
+		if serr := client.Send(ctx, resp); serr != nil {
+			return fmt.Errorf("client.Send (respond): %w", serr)
+		}
+		return nil
+	}
+
+	if uh.ch == nil {
+		u, derr := dial(ctx, env)
+		if derr != nil {
+			return fmt.Errorf("dial: %w", derr)
+		}
+		uh.ch = u
+		close(uh.ready)
+	}
+
+	if serr := uh.ch.Send(ctx, env); serr != nil {
+		return fmt.Errorf("upstream.Send: %w", serr)
+	}
+	return nil
 }
 
 // upstreamToClient waits for the upstream Channel to be established, then reads
@@ -383,34 +678,8 @@ func upstreamToClient(
 	sc *streamCapture,
 	reg *bodyBufRegistry,
 ) error {
-	// Wait for upstream to be established, goroutine 1 to exit, or context
-	// cancellation. If goroutine 1 exits without establishing upstream
-	// (e.g., all Envelopes were dropped), we return immediately.
-	//
-	// Priority handling: goroutine 1 closes uh.ready before uh.done, so if
-	// we see uh.done we must re-check uh.ready before bailing out — the
-	// select-random-choice rule means a naive select could pick uh.done even
-	// when uh.ready was closed first. The outer non-blocking probe handles
-	// the common fast-path where ready is already closed on entry; the
-	// inner re-check handles the case where ready closes just before done
-	// while we are waiting.
-	select {
-	case <-uh.ready:
-	default:
-		select {
-		case <-uh.ready:
-		case <-uh.done:
-			// goroutine 1 may have closed ready immediately before done.
-			// Re-check non-blockingly: if ready is now closed, upstream was
-			// established and we must process it; otherwise bail.
-			select {
-			case <-uh.ready:
-			default:
-				return nil
-			}
-		case <-ctx.Done():
-			return nil
-		}
+	if !waitUpstreamReady(ctx, uh) {
+		return nil
 	}
 
 	// Unify StreamID across the exchange. The upstream Channel generates
@@ -427,13 +696,16 @@ func upstreamToClient(
 	// set-once, so hoist the read out of the per-envelope loop.
 	clientID := sc.get()
 
+	notice := UpgradeNoticeFromContext(ctx)
+
 	for {
-		env, err := uh.ch.Next(ctx)
+		env, err := upstreamNext(ctx, uh.ch, notice)
 		if err != nil {
-			if errors.Is(err, io.EOF) {
-				return nil
-			}
-			return fmt.Errorf("upstream.Next: %w", err)
+			return err
+		}
+		if env == nil {
+			// Normal EOF.
+			return nil
 		}
 
 		if clientID != "" {
@@ -442,6 +714,9 @@ func upstreamToClient(
 
 		env, action, _ := runPipelineTracked(ctx, p, env, reg)
 		if action == pipeline.Drop {
+			if upgradePending(notice) {
+				return ErrUpgradePending
+			}
 			continue
 		}
 
@@ -461,7 +736,70 @@ func upstreamToClient(
 		if err := client.Send(ctx, env); err != nil {
 			return fmt.Errorf("client.Send: %w", err)
 		}
+
+		// Friction 2-C strict ordering: the 101 response (or first SSE
+		// event-stream response) MUST be delivered to the client BEFORE
+		// the goroutine exits. After Send returns we are safe to surface
+		// ErrUpgradePending so the errgroup ctx cancels the peer
+		// goroutine and RunStackSession can reclaim both wires.
+		if upgradePending(notice) {
+			return ErrUpgradePending
+		}
 	}
+}
+
+// waitUpstreamReady blocks until the client-to-upstream goroutine has
+// established the upstream Channel (uh.ready closes), or it exits without
+// establishing one (uh.done closes), or ctx is cancelled. Returns true
+// when upstream is ready and the loop should proceed; false when the loop
+// should return nil immediately.
+//
+// Priority handling: goroutine 1 closes uh.ready before uh.done, so if we
+// see uh.done we must re-check uh.ready before bailing out — the
+// select-random-choice rule means a naive select could pick uh.done even
+// when uh.ready was closed first. The outer non-blocking probe handles
+// the common fast-path where ready is already closed on entry; the inner
+// re-check handles the case where ready closes just before done while we
+// are waiting.
+func waitUpstreamReady(ctx context.Context, uh *upstreamHolder) bool {
+	select {
+	case <-uh.ready:
+		return true
+	default:
+	}
+	select {
+	case <-uh.ready:
+		return true
+	case <-uh.done:
+		select {
+		case <-uh.ready:
+			return true
+		default:
+			return false
+		}
+	case <-ctx.Done():
+		return false
+	}
+}
+
+// upstreamNext encapsulates the read-from-upstream + EOF / upgrade-pending /
+// other-error classification. Returns:
+//
+//	(env, nil)   — successful read; caller proceeds.
+//	(nil, nil)   — normal EOF; caller returns nil.
+//	(nil, err)   — wrap-and-return; either ErrUpgradePending or wrapped err.
+func upstreamNext(ctx context.Context, ch layer.Channel, notice *UpgradeNotice) (*envelope.Envelope, error) {
+	env, err := ch.Next(ctx)
+	if err == nil {
+		return env, nil
+	}
+	if errors.Is(err, io.EOF) {
+		return nil, nil
+	}
+	if upgradePending(notice) {
+		return nil, ErrUpgradePending
+	}
+	return nil, fmt.Errorf("upstream.Next: %w", err)
 }
 
 // lateClientErrorWatcher observes late non-EOF errors on the client Channel
