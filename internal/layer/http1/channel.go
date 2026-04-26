@@ -50,6 +50,15 @@ type channel struct {
 	ctxTmpl   envelope.EnvelopeContext
 	bodyOpts  bodyOpts
 
+	// streamingDetect, when non-nil and direction == Receive, decides
+	// whether to bypass body draining for a parsed response. See
+	// [WithStreamingResponseDetect] / [Layer.DetachStreamingBody].
+	streamingDetect StreamingResponsePredicate
+
+	// streamingBody holds the pending response body io.Reader after the
+	// predicate matched. Layer.DetachStreamingBody claims it.
+	streamingBody io.Reader
+
 	// Per-request state.
 	currentStreamID string // changes per request-response pair
 	sequence        int    // 0=request, 1=response within a pair
@@ -241,6 +250,16 @@ func (c *channel) nextResponse(_ context.Context) (env *envelope.Envelope, retEr
 		return nil, wrapped
 	}
 
+	// Streaming-body bypass (USK-655): when the configured predicate matches
+	// (e.g. text/event-stream), emit the response Envelope with empty body
+	// and stash the still-open body reader on the channel for the swap
+	// orchestrator to claim via Layer.DetachStreamingBody. Draining a
+	// streaming body would block forever (no Content-Length, no end), so
+	// this path is the only safe one for SSE-like responses.
+	if c.streamingDetect != nil && c.streamingDetect(rawResp) {
+		return c.buildStreamingResponseEnvelope(rawResp), nil
+	}
+
 	// Read body. Small bodies are buffered in memory; large bodies spill to a
 	// file-backed BodyBuffer. MaxBodySize is enforced as an absolute cap.
 	bb, body, err := readBodyWithThreshold(rawResp.Body,
@@ -300,6 +319,55 @@ func (c *channel) nextResponse(_ context.Context) (env *envelope.Envelope, retEr
 	}
 
 	return env, nil
+}
+
+// buildStreamingResponseEnvelope assembles the response Envelope for the
+// streaming-body bypass path. The body is NOT drained; the post-headers
+// byte stream on c.reader is stashed on c.streamingBody for
+// [Layer.DetachStreamingBody]. msg.Body and msg.BodyBuffer are nil so
+// RecordStep records a header-only flow.
+//
+// We use c.reader directly (rather than rawResp.Body) because the parser's
+// resolveResponseBody returns io.LimitReader(r,0) for an HTTP/1.1 response
+// with no Content-Length and no chunked Transfer-Encoding — strictly
+// correct per RFC 7230 §3.3.3 but wrong for SSE, which intentionally
+// violates that rule with an open-ended event stream. Chunked-TE SSE is
+// rare in practice (browsers do not require it) and not supported by the
+// bypass path; if encountered, the SSE parser will surface a StreamError
+// on the unexpected chunk markers.
+//
+// No Anomaly is attached for the bypass itself: the wire shape is
+// well-formed; we are deliberately deferring body materialization.
+func (c *channel) buildStreamingResponseEnvelope(rawResp *parser.RawResponse) *envelope.Envelope {
+	statusReason := extractStatusReason(rawResp.Status)
+	anomalies := convertAnomalies(rawResp.Anomalies)
+
+	msg := &envelope.HTTPMessage{
+		Status:       rawResp.StatusCode,
+		StatusReason: statusReason,
+		Headers:      rawHeadersToKV(rawResp.Headers),
+		Anomalies:    anomalies,
+	}
+
+	envCtx := c.ctxTmpl
+	envCtx.ReceivedAt = time.Now()
+
+	c.streamingBody = c.reader
+
+	return &envelope.Envelope{
+		StreamID:  c.currentStreamID,
+		FlowID:    uuid.New().String(),
+		Sequence:  c.sequence + 1,
+		Direction: envelope.Receive,
+		Protocol:  envelope.ProtocolHTTP,
+		Raw:       rawResp.RawBytes,
+		Message:   msg,
+		Context:   envCtx,
+		Opaque: &opaqueHTTP1{
+			rawResp: rawResp,
+			origKV:  cloneKV(msg.Headers),
+		},
+	}
 }
 
 // --- Send() implementation ---

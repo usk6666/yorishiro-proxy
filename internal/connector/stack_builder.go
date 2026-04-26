@@ -551,6 +551,10 @@ func buildStackFromRoute(
 			http1.WithBodySpillDir(cfg.BodySpillDir),
 			http1.WithBodySpillThreshold(cfg.BodySpillThreshold),
 			http1.WithMaxBodySize(cfg.MaxBodySize),
+			// USK-655: bypass body draining for SSE responses so the swap
+			// orchestrator (session.runUpgradeSSE) can hand the still-open
+			// body to sse.Wrap without blocking on a never-ending drain.
+			http1.WithStreamingResponseDetect(http1.IsSSEResponse),
 		)
 		stack.PushUpstream(upstreamLayer)
 

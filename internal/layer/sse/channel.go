@@ -20,11 +20,12 @@ import (
 // drive an SSEParser over a body io.Reader and emit one
 // envelope.SSEMessage per parsed event.
 type sseChannel struct {
-	inner    layer.Channel
-	body     io.Reader
-	firstEnv *envelope.Envelope // pre-shaped first envelope (Protocol=ProtocolSSE)
-	streamID string
-	maxEvent int
+	inner     layer.Channel
+	body      io.Reader
+	firstEnv  *envelope.Envelope // pre-shaped first envelope (Protocol=ProtocolSSE)
+	streamID  string
+	maxEvent  int
+	skipFirst bool // when true, suppress the first-envelope emit (production swap path)
 
 	mu        sync.Mutex
 	parser    *SSEParser
@@ -75,9 +76,14 @@ func (s *sseChannel) Next(ctx context.Context) (*envelope.Envelope, error) {
 	}
 	if !s.firstSent {
 		s.firstSent = true
-		out := s.firstEnv
-		s.mu.Unlock()
-		return out, nil
+		if !s.skipFirst {
+			out := s.firstEnv
+			s.mu.Unlock()
+			return out, nil
+		}
+		// Fall through to parser path on the same call so the caller does
+		// not observe an empty round-trip just because firstSent was
+		// suppressed.
 	}
 	if s.parser == nil {
 		s.parser = NewSSEParser(s.body, s.maxEvent)

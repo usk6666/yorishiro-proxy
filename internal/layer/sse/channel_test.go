@@ -431,3 +431,51 @@ func TestSSEChannel_StreamIDDelegates(t *testing.T) {
 		t.Errorf("StreamID = %q, want %q", got, "the-stream-id")
 	}
 }
+
+// TestSSEChannel_SkipFirstEmit verifies that WithSkipFirstEmit (USK-655)
+// suppresses the first-envelope emit and jumps straight to the parser, so
+// the first Next() returns an SSEMessage rather than the HTTPMessage clone
+// of firstResponse. The Context / streamID derived from firstResponse
+// still applies to the SSE event envelopes.
+func TestSSEChannel_SkipFirstEmit(t *testing.T) {
+	t.Parallel()
+
+	stub := newStubChannel("ssid")
+	first := makeFirstResponse("ssid", 1)
+	first.Context = envelope.EnvelopeContext{ConnID: "test-conn", TargetHost: "h"}
+	body := strings.NewReader("event: ping\ndata: 1\n\n")
+
+	ch := Wrap(stub, first, body, WithSkipFirstEmit())
+	defer ch.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	env, err := ch.Next(ctx)
+	if err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+	if env.Protocol != envelope.ProtocolSSE {
+		t.Errorf("Protocol = %q, want %q (SSEMessage, not HTTPMessage clone)", env.Protocol, envelope.ProtocolSSE)
+	}
+	msg, ok := env.Message.(*envelope.SSEMessage)
+	if !ok {
+		t.Fatalf("Message type = %T, want *SSEMessage", env.Message)
+	}
+	if msg.Event != "ping" || msg.Data != "1" {
+		t.Errorf("event = (%q,%q), want (ping,1)", msg.Event, msg.Data)
+	}
+	if env.Context.ConnID != "test-conn" {
+		t.Errorf("Context.ConnID = %q, want test-conn (derived from firstResponse)", env.Context.ConnID)
+	}
+	// Sequence starts at firstResponse.Sequence + 1 even when first emit
+	// is skipped, matching what the post-swap Pipeline expects.
+	if env.Sequence != 2 {
+		t.Errorf("Sequence = %d, want 2 (firstResponse.Sequence + 1)", env.Sequence)
+	}
+
+	// Subsequent Next returns io.EOF (no more events).
+	if _, err := ch.Next(ctx); err != io.EOF {
+		t.Errorf("trailing Next = %v, want io.EOF", err)
+	}
+}
