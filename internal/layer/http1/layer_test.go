@@ -60,21 +60,125 @@ func TestLayer_Channels_YieldsOneChannel(t *testing.T) {
 	}
 }
 
-func TestLayer_DetachStream_ReturnsError(t *testing.T) {
+// TestLayer_DetachStream_PreservesPostCRLFCRLFBytes verifies that bytes
+// the bufio.Reader pre-read past the final \r\n\r\n of a 101 response
+// remain available on the returned io.Reader. This is the contract
+// WSLayer relies on: the first WebSocket frame has typically already
+// hit the network by the time the proxy processes the 101 response.
+func TestLayer_DetachStream_PreservesPostCRLFCRLFBytes(t *testing.T) {
+	client, server := testConn(t)
+	defer client.Close()
+	defer server.Close()
+
+	l := New(server, "stream-1", envelope.Receive)
+	// NOTE: do not defer l.Close — the test exercises DetachStream's
+	// ownership transfer, after which we close the conn manually.
+
+	// Send a 101 response followed by a fake "WS frame" payload from
+	// the upstream side. The HTTP/1.x parser should consume only the
+	// header block; the bufio.Reader will buffer the remaining bytes.
+	resp := "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\nFRAMEBYTES"
+	go func() {
+		_, _ = client.Write([]byte(resp))
+	}()
+
+	ch := <-l.Channels()
+
+	// Set currentStreamID for completeness (matches the keep-alive flow).
+	ch.(*channel).currentStreamID = "req-1"
+	env, err := ch.Next(context.Background())
+	if err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+	msg := env.Message.(*envelope.HTTPMessage)
+	if msg.Status != 101 {
+		t.Errorf("Status = %d, want 101", msg.Status)
+	}
+
+	reader, _, _, err := l.DetachStream()
+	if err != nil {
+		t.Fatalf("DetachStream: %v", err)
+	}
+	if reader == nil {
+		t.Fatal("DetachStream returned nil reader")
+	}
+
+	// The reader must yield "FRAMEBYTES" — those bytes were buffered by
+	// the bufio.Reader past \r\n\r\n.
+	got := make([]byte, len("FRAMEBYTES"))
+	n, err := io.ReadFull(reader, got)
+	if err != nil {
+		t.Fatalf("ReadFull post-CRLFCRLF bytes: %v (read %d)", err, n)
+	}
+	if string(got) != "FRAMEBYTES" {
+		t.Errorf("post-CRLFCRLF bytes = %q, want FRAMEBYTES", got)
+	}
+
+	// Layer.Close after detach must NOT close the underlying conn —
+	// ownership transferred to the caller. Verify by writing to the
+	// server side after Close and observing the client still reads.
+	if err := l.Close(); err != nil {
+		t.Errorf("Close-after-Detach = %v, want nil", err)
+	}
+	_, err = server.Write([]byte("post-detach"))
+	if err != nil {
+		t.Errorf("write to conn after Layer.Close (detached) failed: %v", err)
+	}
+	// Drain on the client side.
+	got2 := make([]byte, len("post-detach"))
+	if _, err := io.ReadFull(client, got2); err != nil {
+		t.Errorf("client read after Close-after-Detach: %v", err)
+	}
+	if string(got2) != "post-detach" {
+		t.Errorf("post-detach bytes = %q, want post-detach", got2)
+	}
+
+	// Now actually close the conn.
+	_ = server.Close()
+}
+
+// TestLayer_DetachStream_SecondCallReturnsSentinel verifies that calling
+// DetachStream twice returns a sentinel error (not panic, not silent
+// success).
+func TestLayer_DetachStream_SecondCallReturnsSentinel(t *testing.T) {
 	client, server := testConn(t)
 	defer client.Close()
 	defer server.Close()
 
 	l := New(server, "stream-1", envelope.Send)
-	defer l.Close()
 
+	if _, _, _, err := l.DetachStream(); err != nil {
+		t.Fatalf("first DetachStream: %v", err)
+	}
 	_, _, _, err := l.DetachStream()
 	if err == nil {
-		t.Fatal("expected error from DetachStream")
+		t.Fatal("second DetachStream: expected sentinel error, got nil")
 	}
-	if !strings.Contains(err.Error(), "not implemented") {
-		t.Fatalf("unexpected error: %v", err)
+	if !strings.Contains(err.Error(), "already detached") {
+		t.Errorf("unexpected error: %v", err)
 	}
+}
+
+// TestLayer_CloseAfterDetach_DoesNotCloseConn verifies that Close after
+// DetachStream is a no-op on the underlying conn (ownership transferred).
+func TestLayer_CloseAfterDetach_DoesNotCloseConn(t *testing.T) {
+	client, server := testConn(t)
+	defer client.Close()
+
+	l := New(server, "stream-1", envelope.Send)
+
+	if _, _, _, err := l.DetachStream(); err != nil {
+		t.Fatalf("DetachStream: %v", err)
+	}
+	if err := l.Close(); err != nil {
+		t.Errorf("Close = %v, want nil", err)
+	}
+
+	// The conn should still be writable.
+	if _, err := server.Write([]byte("ok")); err != nil {
+		t.Errorf("conn.Write after Layer.Close (detached) failed: %v", err)
+	}
+	server.Close()
 }
 
 // --- Channel.Next() tests ---
