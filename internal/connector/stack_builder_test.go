@@ -724,3 +724,64 @@ func TestPoolKeyForH2_NilCfg(t *testing.T) {
 		t.Error("empty TLSConfigHash for nil cfg")
 	}
 }
+
+// TestBuildConfig_ProtocolLimitsFieldsDefaultZero verifies that the
+// per-protocol limit fields newly added in USK-649 default to zero on a
+// freshly-allocated BuildConfig (Go's zero-value contract). The Resolve*
+// helpers and Layer Options interpret zero as "use default", so leaving
+// these unset is equivalent to using the package-level constants.
+func TestBuildConfig_ProtocolLimitsFieldsDefaultZero(t *testing.T) {
+	cfg := &BuildConfig{}
+	if cfg.WSMaxFrameSize != 0 {
+		t.Errorf("WSMaxFrameSize = %d, want 0", cfg.WSMaxFrameSize)
+	}
+	if cfg.WSDeflateEnabled {
+		t.Errorf("WSDeflateEnabled = true, want false (zero value)")
+	}
+	if cfg.GRPCMaxMessageSize != 0 {
+		t.Errorf("GRPCMaxMessageSize = %d, want 0", cfg.GRPCMaxMessageSize)
+	}
+	if cfg.SSEMaxEventSize != 0 {
+		t.Errorf("SSEMaxEventSize = %d, want 0", cfg.SSEMaxEventSize)
+	}
+}
+
+// TestBuildConfig_ProtocolLimitsFieldsRoundTrip verifies that explicit
+// per-protocol limit values assigned to a BuildConfig survive — i.e., the
+// fields are simple value carriers wired via the Resolve* helpers at
+// construction time.
+func TestBuildConfig_ProtocolLimitsFieldsRoundTrip(t *testing.T) {
+	cfg := &BuildConfig{
+		WSMaxFrameSize:     8192,
+		WSDeflateEnabled:   true,
+		GRPCMaxMessageSize: 1 << 20,
+		SSEMaxEventSize:    16384,
+	}
+	if cfg.WSMaxFrameSize != 8192 {
+		t.Errorf("WSMaxFrameSize = %d, want 8192", cfg.WSMaxFrameSize)
+	}
+	if !cfg.WSDeflateEnabled {
+		t.Error("WSDeflateEnabled = false, want true")
+	}
+	if cfg.GRPCMaxMessageSize != 1<<20 {
+		t.Errorf("GRPCMaxMessageSize = %d, want %d", cfg.GRPCMaxMessageSize, 1<<20)
+	}
+	if cfg.SSEMaxEventSize != 16384 {
+		t.Errorf("SSEMaxEventSize = %d, want 16384", cfg.SSEMaxEventSize)
+	}
+}
+
+// TestGRPCOptionsFromBuildConfig verifies the helper that translates
+// BuildConfig.GRPCMaxMessageSize into the [grpclayer.Option] slice
+// consumed by DispatchH2Stream.
+func TestGRPCOptionsFromBuildConfig(t *testing.T) {
+	if got := GRPCOptionsFromBuildConfig(nil); len(got) != 0 {
+		t.Errorf("nil cfg: len(opts) = %d, want 0", len(got))
+	}
+	if got := GRPCOptionsFromBuildConfig(&BuildConfig{}); len(got) != 0 {
+		t.Errorf("zero cfg: len(opts) = %d, want 0", len(got))
+	}
+	if got := GRPCOptionsFromBuildConfig(&BuildConfig{GRPCMaxMessageSize: 1024}); len(got) != 1 {
+		t.Errorf("with cap: len(opts) = %d, want 1", len(got))
+	}
+}

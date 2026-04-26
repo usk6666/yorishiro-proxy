@@ -77,4 +77,12 @@ const (
 	// but no longer recorded to the flow store. This prevents unbounded DB
 	// growth from very long-lived gRPC streams.
 	MaxGRPCMessagesPerStream = 10000
+
+	// MaxWebSocketFrameSize limits the maximum payload size of a single
+	// WebSocket frame. WebSocket frames can theoretically be up to 2^63
+	// bytes per RFC 6455; this constant caps them at 16 MiB to prevent
+	// memory exhaustion (CWE-400). It is the default for the
+	// WSLayer.WithMaxFrameSize Option and the wire-side validation cap
+	// applied by the WebSocket frame parser.
+	MaxWebSocketFrameSize int64 = 16 << 20 // 16 MiB
 )

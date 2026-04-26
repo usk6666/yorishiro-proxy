@@ -16,7 +16,6 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/layer"
 )
@@ -59,14 +58,20 @@ type channel struct {
 	sendStreamID string
 
 	closeOnce sync.Once
+
+	// maxMessageSize caps the per-LPM length on the wire and the
+	// gunzip-decoded length. Resolved once at Wrap time via the Option
+	// list; always positive (defaults to config.MaxGRPCMessageSize).
+	maxMessageSize uint32
 }
 
 // newChannel constructs the wrapper.
-func newChannel(inner layer.Channel, role Role) *channel {
+func newChannel(inner layer.Channel, role Role, o options) *channel {
 	return &channel{
-		inner:    inner,
-		role:     role,
-		recvDone: make(chan struct{}),
+		inner:          inner,
+		role:           role,
+		recvDone:       make(chan struct{}),
+		maxMessageSize: o.maxMessageSize,
 	}
 }
 
@@ -222,8 +227,9 @@ func (c *channel) refillFromHTTPMessage(ctx context.Context, env *envelope.Envel
 	}
 
 	// Decode body LPMs. Returns ParseResult with DataFrames + optional
-	// TrailerFrame. Empty body → empty result, no error.
-	parsed, parseErr := DecodeBody(bodyBytes, isBase64)
+	// TrailerFrame. Empty body → empty result, no error. The cap is the
+	// per-Channel value resolved from WithMaxMessageSize.
+	parsed, parseErr := DecodeBodyWithMaxMessageSize(bodyBytes, isBase64, c.maxMessageSize)
 	if parseErr != nil {
 		return &layer.StreamError{
 			Code:   layer.ErrorInternalError,
@@ -253,7 +259,7 @@ func (c *channel) refillFromHTTPMessage(ctx context.Context, env *envelope.Envel
 	// Emit one Data envelope per data frame.
 	for i, fr := range parsed.DataFrames {
 		// Decompress payload for inspection convenience (if compressed).
-		payload, derr := maybeDecompress(fr.Payload, fr.Compressed, encoding)
+		payload, derr := maybeDecompress(fr.Payload, fr.Compressed, encoding, c.maxMessageSize)
 		if derr != nil {
 			return derr
 		}
@@ -670,7 +676,12 @@ func base64StdEncode(b []byte) string {
 // compressed=true. encoding is the negotiated grpc-encoding header value
 // ("identity", "gzip", or empty). identity / empty / compressed=false are
 // no-ops. Other encodings produce a *layer.StreamError per design D7-adj.
-func maybeDecompress(payload []byte, compressed bool, encoding string) ([]byte, error) {
+//
+// maxMessageSize bounds the decompressed length (CWE-409 defense against
+// gzip bombs). The caller threads the per-Channel cap resolved at Wrap
+// time (defaulting to config.MaxGRPCMessageSize when no
+// WithMaxMessageSize Option is supplied).
+func maybeDecompress(payload []byte, compressed bool, encoding string, maxMessageSize uint32) ([]byte, error) {
 	if !compressed {
 		return payload, nil
 	}
@@ -688,9 +699,9 @@ func maybeDecompress(payload []byte, compressed bool, encoding string) ([]byte, 
 			}
 		}
 		defer zr.Close()
-		// Bound decompressed length to MaxGRPCMessageSize to defend against
+		// Bound decompressed length to maxMessageSize to defend against
 		// gzip-bomb DoS. Read at most cap+1 so we can detect overflow.
-		cap := int64(config.MaxGRPCMessageSize)
+		cap := int64(maxMessageSize)
 		out, err := io.ReadAll(io.LimitReader(zr, cap+1))
 		if err != nil {
 			return nil, &layer.StreamError{

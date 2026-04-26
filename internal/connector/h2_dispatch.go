@@ -25,6 +25,10 @@ import (
 // aggregator so disk spill behavior matches the HTTP/1.x path; the
 // gRPC Layer manages its own LPM-bounded buffer and ignores lopts.
 //
+// grpcOpts are passed to grpclayer.Wrap on the gRPC branch (e.g.
+// grpclayer.WithMaxMessageSize from BuildConfig.GRPCMaxMessageSize).
+// They are ignored when content-type is not application/grpc*.
+//
 // The returned layer.Channel is what the caller should run RunSession or
 // other consumers against. The first event is replayed as the first
 // emitted envelope (via the firstHeaders argument on Wrap), so no data is
@@ -38,6 +42,7 @@ func DispatchH2Stream(
 	role httpaggregator.Role,
 	lopts httpaggregator.WrapOptions,
 	logger *slog.Logger,
+	grpcOpts ...grpclayer.Option,
 ) (layer.Channel, error) {
 	if logger == nil {
 		logger = slog.Default()
@@ -65,10 +70,25 @@ func DispatchH2Stream(
 			"stream_id", firstEnv.StreamID,
 			"path", evt.Path,
 		)
-		return grpclayer.Wrap(ch, firstEnv, translateRoleForGRPC(role)), nil
+		return grpclayer.Wrap(ch, firstEnv, translateRoleForGRPC(role), grpcOpts...), nil
 	}
 
 	return httpaggregator.Wrap(ch, role, firstEnv, lopts), nil
+}
+
+// GRPCOptionsFromBuildConfig assembles the [grpclayer.Option] slice from
+// BuildConfig fields that the gRPC Layer accepts. Returns an empty slice
+// when cfg is nil or no fields are populated, so the result is safe to
+// splat into DispatchH2Stream regardless of caller context.
+func GRPCOptionsFromBuildConfig(cfg *BuildConfig) []grpclayer.Option {
+	if cfg == nil {
+		return nil
+	}
+	var out []grpclayer.Option
+	if cfg.GRPCMaxMessageSize > 0 {
+		out = append(out, grpclayer.WithMaxMessageSize(cfg.GRPCMaxMessageSize))
+	}
+	return out
 }
 
 // translateRoleForGRPC converts an httpaggregator.Role into the

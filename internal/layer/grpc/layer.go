@@ -1,9 +1,37 @@
 package grpc
 
 import (
+	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/layer"
 )
+
+// options holds the resolved per-Channel configuration applied by Wrap.
+type options struct {
+	// maxMessageSize caps the declared LPM length on Receive (and the
+	// gunzip-decoded length when grpc-encoding=gzip). Zero is replaced
+	// with config.MaxGRPCMessageSize at Wrap time so the on-Channel
+	// value is always positive.
+	maxMessageSize uint32
+}
+
+// Option tunes a Channel produced by Wrap. The Option type intentionally
+// mirrors the shape used by sibling Layers (internal/layer/ws,
+// internal/layer/http2): a function over an internal options struct.
+type Option func(*options)
+
+// WithMaxMessageSize caps the per-LPM payload size enforced by the
+// reassembler and the gzip decoder. n=0 leaves the default
+// (config.MaxGRPCMessageSize, 254 MiB) in place. The cap exists to defend
+// against memory exhaustion (CWE-400) and decompression bombs (CWE-409);
+// operators can lower it via ProxyConfig.GRPC.MaxMessageSize.
+func WithMaxMessageSize(n uint32) Option {
+	return func(o *options) {
+		if n > 0 {
+			o.maxMessageSize = n
+		}
+	}
+}
 
 // Role identifies whether the wrapped Channel is server-side (the local
 // endpoint behaves as the gRPC server) or client-side (the local endpoint
@@ -49,12 +77,23 @@ const (
 //
 // Close on the returned Channel cascades to inner.Close (per N6.7
 // cascade discipline); idempotent via sync.Once.
-func Wrap(stream layer.Channel, firstHeaders *envelope.Envelope, role Role) layer.Channel {
+//
+// Optional Options tune per-Channel behavior such as the wire-LPM cap
+// (WithMaxMessageSize). Pass none to use defaults.
+func Wrap(stream layer.Channel, firstHeaders *envelope.Envelope, role Role, opts ...Option) layer.Channel {
+	o := options{
+		maxMessageSize: config.MaxGRPCMessageSize,
+	}
+	for _, opt := range opts {
+		opt(&o)
+	}
+
 	gc := &grpcChannel{
-		inner:    stream,
-		role:     role,
-		streamID: stream.StreamID(),
-		recvDone: make(chan struct{}),
+		inner:          stream,
+		role:           role,
+		streamID:       stream.StreamID(),
+		recvDone:       make(chan struct{}),
+		maxMessageSize: o.maxMessageSize,
 	}
 	// Apply D5: only replay firstHeaders when it carries real wire bytes.
 	if firstHeaders != nil && len(firstHeaders.Raw) > 0 {

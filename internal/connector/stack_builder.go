@@ -100,6 +100,33 @@ type BuildConfig struct {
 	// layer.StreamError with Code=ErrorInternalError. Zero means the
 	// layer's internal default (config.MaxBodySize, 254 MiB).
 	MaxBodySize int64
+
+	// WSMaxFrameSize is the per-frame WebSocket payload cap applied when
+	// the connector constructs a *ws.Layer. Resolved at BuildConfig
+	// construction time from ProxyConfig.WebSocket via
+	// config.ResolveWSMaxFrameSize. Zero falls back to the Layer default
+	// (config.MaxWebSocketFrameSize, 16 MiB). Read by the N7 Upgrade swap
+	// orchestrator (USK-643); BuildConfig holds the resolved value here so
+	// the swap site does not need to re-resolve.
+	WSMaxFrameSize int64
+
+	// WSDeflateEnabled toggles permessage-deflate (RFC 7692) on the
+	// WebSocket Layer. Defaults to true (config-resolved by
+	// ResolveWSDeflateEnabled). Read by USK-643's Upgrade swap orchestrator.
+	WSDeflateEnabled bool
+
+	// GRPCMaxMessageSize caps the per-LPM payload size on both the gRPC
+	// (internal/layer/grpc) and gRPC-Web (internal/layer/grpcweb) Layers.
+	// Threaded through h2_dispatch into grpc.Wrap; gRPC-Web wiring is
+	// owned by the gRPC-Web wrap site. Zero falls back to the Layer
+	// default (config.MaxGRPCMessageSize, 254 MiB).
+	GRPCMaxMessageSize uint32
+
+	// SSEMaxEventSize caps the per-event raw byte size on the SSE Layer.
+	// Currently consumed only by USK-643's Upgrade swap orchestrator; this
+	// field is the resolved bridge between ProxyConfig.SSE and the
+	// future sse.WithMaxEventSize Option call.
+	SSEMaxEventSize int
 }
 
 // BuildConnectionStack constructs a ConnectionStack for the given CONNECT

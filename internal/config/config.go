@@ -575,6 +575,20 @@ type ProxyConfig struct {
 	// config file, it cannot be modified at runtime via MCP tools.
 	SafetyFilter *SafetyFilterConfig `json:"safety_filter,omitempty"`
 
+	// WebSocket configures the WebSocket Layer runtime limits (max frame
+	// size, deflate). All fields are optional with sensible defaults; an
+	// omitted "web_socket" key behaves identically to one with all fields
+	// unset (project convention: nil/zero = use default).
+	WebSocket *WebSocketLimits `json:"web_socket,omitempty"`
+
+	// GRPC configures the gRPC + gRPC-Web Layer runtime limits (max
+	// Length-Prefixed-Message size). Shared between both protocols since
+	// they enforce identical wire-LPM caps.
+	GRPC *GRPCLimits `json:"grpc,omitempty"`
+
+	// SSE configures the SSE Layer runtime limits (max event size).
+	SSE *SSELimits `json:"sse,omitempty"`
+
 	// RawPassthroughHosts is a list of "host:port" targets that bypass L7
 	// parsing. Traffic to these hosts is relayed as raw bytes through the
 	// ByteChunk layer, enabling HTTP request-smuggling diagnosis.

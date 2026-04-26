@@ -55,7 +55,22 @@ type ParseResult struct {
 // DecodeBody decodes a gRPC-Web response body. If isBase64 is true, the body
 // is base64-decoded before frame parsing. It returns the parsed frames
 // separated into data and trailer frames.
+//
+// DecodeBody uses the default LPM cap (config.MaxGRPCMessageSize); callers
+// that need a configurable cap (e.g. the gRPC-Web Channel applying a
+// per-Channel Option) should use DecodeBodyWithMaxMessageSize.
 func DecodeBody(data []byte, isBase64 bool) (*ParseResult, error) {
+	return DecodeBodyWithMaxMessageSize(data, isBase64, config.MaxGRPCMessageSize)
+}
+
+// DecodeBodyWithMaxMessageSize is like DecodeBody but uses the supplied
+// per-LPM cap for wire-side validation. maxMessageSize=0 falls back to
+// config.MaxGRPCMessageSize so this remains drop-in compatible with the
+// non-configurable variant.
+func DecodeBodyWithMaxMessageSize(data []byte, isBase64 bool, maxMessageSize uint32) (*ParseResult, error) {
+	if maxMessageSize == 0 {
+		maxMessageSize = config.MaxGRPCMessageSize
+	}
 	if isBase64 {
 		decoded, err := decodeBase64(data)
 		if err != nil {
@@ -64,14 +79,16 @@ func DecodeBody(data []byte, isBase64 bool) (*ParseResult, error) {
 		data = decoded
 	}
 
-	return readAllFrames(data)
+	return readAllFrames(data, maxMessageSize)
 }
 
 // ReadAllFrames reads all gRPC-Web Length-Prefixed Messages from the given
 // binary data. Unlike the standard gRPC ReadAllFrames, this function
 // recognizes trailer frames (flags byte MSB set).
 // If the data is empty, it returns an empty ParseResult with no error.
-func readAllFrames(data []byte) (*ParseResult, error) {
+//
+// maxMessageSize bounds the declared LPM length (CWE-400 mitigation).
+func readAllFrames(data []byte, maxMessageSize uint32) (*ParseResult, error) {
 	result := &ParseResult{}
 
 	if len(data) == 0 {
@@ -96,8 +113,8 @@ func readAllFrames(data []byte) (*ParseResult, error) {
 		}
 
 		length := binary.BigEndian.Uint32(data[offset+1 : offset+5])
-		if length > config.MaxGRPCMessageSize {
-			return result, fmt.Errorf("grpc-web message too large: %d > %d", length, config.MaxGRPCMessageSize)
+		if length > maxMessageSize {
+			return result, fmt.Errorf("grpc-web message too large: %d > %d", length, maxMessageSize)
 		}
 
 		offset += frameHeaderSize

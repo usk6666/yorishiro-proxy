@@ -680,11 +680,11 @@ func TestChannel_Deflate_FragmentedCompressedMessage(t *testing.T) {
 func TestValidateFragmentAppend_OverflowReturnsProtocolError(t *testing.T) {
 	t.Parallel()
 	// have+add equals the cap → permitted.
-	if se := validateFragmentAppend(maxCompressedPayloadSize-1, 1); se != nil {
+	if se := validateFragmentAppend(int(maxCompressedPayloadSize)-1, 1); se != nil {
 		t.Errorf("at-cap append rejected: %v", se)
 	}
 	// have+add exceeds the cap by 1 → rejected with ErrorProtocol.
-	se := validateFragmentAppend(maxCompressedPayloadSize, 1)
+	se := validateFragmentAppend(int(maxCompressedPayloadSize), 1)
 	if se == nil {
 		t.Fatal("over-cap append accepted; want StreamError")
 	}

@@ -5,6 +5,8 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+
+	"github.com/usk6666/yorishiro-proxy/internal/config"
 )
 
 // WebSocket opcodes as defined in RFC 6455 Section 11.8.
@@ -20,9 +22,13 @@ const (
 // maxControlPayloadSize is the maximum payload size for control frames (125 bytes per RFC 6455).
 const maxControlPayloadSize = 125
 
-// maxFramePayloadSize limits the maximum payload size to prevent memory exhaustion.
-// WebSocket frames can theoretically be up to 2^63 bytes; we cap at 16MB.
-const maxFramePayloadSize = 16 << 20 // 16MB
+// maxFramePayloadSize limits the maximum payload size to prevent memory
+// exhaustion (CWE-400). WebSocket frames can theoretically be up to 2^63
+// bytes per RFC 6455; we cap at config.MaxWebSocketFrameSize (16 MiB by
+// default). Threading the cap through the public config package keeps the
+// frame-parser's enforcement and the WSLayer.WithMaxFrameSize Option
+// reading from a single source of truth.
+const maxFramePayloadSize = config.MaxWebSocketFrameSize
 
 // Frame represents a parsed WebSocket frame.
 type Frame struct {
@@ -132,7 +138,7 @@ func validateFrameConstraints(f *Frame, payloadLen uint64) error {
 			return fmt.Errorf("control frame must not be fragmented")
 		}
 	}
-	if payloadLen > maxFramePayloadSize {
+	if payloadLen > uint64(maxFramePayloadSize) {
 		return fmt.Errorf("frame payload too large: %d > %d", payloadLen, maxFramePayloadSize)
 	}
 	return nil

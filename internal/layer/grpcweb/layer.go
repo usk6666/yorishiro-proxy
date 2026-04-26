@@ -1,8 +1,37 @@
 package grpcweb
 
 import (
+	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/layer"
 )
+
+// options holds the resolved per-Channel configuration applied by Wrap.
+type options struct {
+	// maxMessageSize caps the declared LPM length on Receive (and the
+	// gunzip-decoded length when grpc-encoding=gzip). Zero is replaced
+	// with config.MaxGRPCMessageSize at Wrap time so the on-Channel
+	// value is always positive.
+	maxMessageSize uint32
+}
+
+// Option tunes a Channel produced by Wrap. The Option type intentionally
+// mirrors the shape used by sibling Layers (internal/layer/grpc,
+// internal/layer/ws): a function over an internal options struct.
+type Option func(*options)
+
+// WithMaxMessageSize caps the per-LPM payload size enforced by the
+// gRPC-Web frame parser and the gzip decoder. n=0 leaves the default
+// (config.MaxGRPCMessageSize, 254 MiB) in place. Operators tune this
+// via ProxyConfig.GRPC.MaxMessageSize (gRPC-Web shares the limit
+// substruct with the gRPC Layer since they enforce identical wire-LPM
+// caps).
+func WithMaxMessageSize(n uint32) Option {
+	return func(o *options) {
+		if n > 0 {
+			o.maxMessageSize = n
+		}
+	}
+}
 
 // Role identifies whether the wrapped Channel is server-side (local endpoint
 // behaves as the gRPC-Web server, sees inbound requests as Send) or
@@ -64,6 +93,15 @@ func (r Role) String() string {
 //
 // Close on the returned Channel cascades to inner.Close (per RFC-001 cascade
 // discipline).
-func Wrap(inner layer.Channel, role Role) layer.Channel {
-	return newChannel(inner, role)
+//
+// Optional Options tune per-Channel behavior such as the wire-LPM cap
+// (WithMaxMessageSize).
+func Wrap(inner layer.Channel, role Role, opts ...Option) layer.Channel {
+	o := options{
+		maxMessageSize: config.MaxGRPCMessageSize,
+	}
+	for _, opt := range opts {
+		opt(&o)
+	}
+	return newChannel(inner, role, o)
 }

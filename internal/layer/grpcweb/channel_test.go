@@ -902,3 +902,38 @@ func hasHeader(kvs []envelope.KeyValue, name string) bool {
 	}
 	return false
 }
+
+// TestWithMaxMessageSize_ConfiguredCapRejectsSmallerLPMs verifies that
+// a tightened cap supplied via WithMaxMessageSize rejects an LPM that
+// the package default would accept. A 200-byte LPM passes the default
+// 254 MiB cap but exceeds a configured 100-byte cap.
+func TestWithMaxMessageSize_ConfiguredCapRejectsSmallerLPMs(t *testing.T) {
+	// 5-byte LPM header declaring 200-byte payload, followed by 200 bytes.
+	hdr := []byte{0x00, 0x00, 0x00, 0x00, 200}
+	body := append(hdr, make([]byte, 200)...)
+
+	headers := []envelope.KeyValue{{Name: "content-type", Value: "application/grpc-web"}}
+	in := mustHTTPResponseEnv("s-cap", headers, body, 200)
+	mock := newMockChannel("s-cap", in)
+	ch := Wrap(mock, RoleClient, WithMaxMessageSize(100))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+
+	// First Next may emit the Start envelope (which is built from headers,
+	// before body parsing). Drain up to 3 calls until we see the error.
+	var sawErr error
+	for i := 0; i < 3 && sawErr == nil; i++ {
+		_, err := ch.Next(ctx)
+		if err != nil {
+			sawErr = err
+		}
+	}
+	if sawErr == nil {
+		t.Fatal("expected StreamError for cap exceeded")
+	}
+	var se *layer.StreamError
+	if !errors.As(sawErr, &se) {
+		t.Fatalf("err = %v, want *layer.StreamError", sawErr)
+	}
+}
