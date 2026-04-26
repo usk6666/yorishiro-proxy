@@ -676,3 +676,97 @@ func TestChannel_Deflate_FragmentedCompressedMessage(t *testing.T) {
 		t.Errorf("FIN envelope: Payload = %q, want decompressed %q", m2.Payload, plain)
 	}
 }
+
+func TestValidateFragmentAppend_OverflowReturnsProtocolError(t *testing.T) {
+	t.Parallel()
+	// have+add equals the cap → permitted.
+	if se := validateFragmentAppend(maxCompressedPayloadSize-1, 1); se != nil {
+		t.Errorf("at-cap append rejected: %v", se)
+	}
+	// have+add exceeds the cap by 1 → rejected with ErrorProtocol.
+	se := validateFragmentAppend(maxCompressedPayloadSize, 1)
+	if se == nil {
+		t.Fatal("over-cap append accepted; want StreamError")
+	}
+	if se.Code != layer.ErrorProtocol {
+		t.Errorf("Code = %v, want ErrorProtocol", se.Code)
+	}
+	if !strings.Contains(se.Reason, "fragment buffer overflow") {
+		t.Errorf("Reason = %q, want it to contain 'fragment buffer overflow'", se.Reason)
+	}
+}
+
+func TestChannel_Next_DeflateFragmentBufferOverflow_RejectsContinuation(t *testing.T) {
+	t.Parallel()
+	// Build a stream where the start fragment already pushes the buffer
+	// to the cap, then the next continuation pushes it over. The Layer
+	// must surface a StreamError(ErrorProtocol) with "fragment buffer
+	// overflow" before any decompression is attempted.
+	//
+	// We don't actually need maxCompressedPayloadSize-many bytes on the
+	// wire — the cap check uses len, so we can target the trip via
+	// math.MaxInt-style arithmetic. But our cap is 16 MiB; it is
+	// cheaper (test-time-wise) to lower the bar via a controlled call
+	// to validateFragmentAppend (already covered above) and verify the
+	// integration end-to-end with a synthetic small-cap regression.
+	//
+	// Instead, exercise the cap check via the actual code path by sending
+	// a 64-byte start fragment, then a continuation that — were
+	// maxCompressedPayloadSize artificially low — would overflow. The
+	// at-cap unit test above and the decompress side cap together
+	// guarantee correctness; this test pins the wire-level integration
+	// for the on-overflow path documented behavior: error returned, fragment
+	// state reset.
+	//
+	// Use a low-cap path: simulate the overflow by directly verifying that
+	// after a synthetic in-place buffer at the cap, validateFragmentAppend
+	// trips the channel. The unit test in TestValidateFragmentAppend
+	// already covers the math.
+
+	// Sanity: at the wire level, a normal fragmented compressed message
+	// must still succeed (we have TestChannel_Deflate_FragmentedCompressedMessage).
+	//
+	// This second case verifies the on-error path in applyDeflate by
+	// manually setting up the fragment state at the cap and exercising the
+	// continuation branch.
+	rwc := newFakeRWC(nil)
+	l := New(rwc, rwc, rwc, "s-1", RoleClient,
+		WithDeflateEnabled(true),
+		WithServerDeflate(deflateParams{enabled: true, contextTakeover: true, windowBits: 15}),
+	)
+	defer l.Close()
+	chIface := <-l.Channels()
+	ch := chIface.(*wsChannel)
+
+	// Manually set the fragment buffer to one byte under the cap and the
+	// fragmentation flag on (Receive direction = serverFragBuf for RoleClient).
+	ch.serverFragBuf = make([]byte, maxCompressedPayloadSize)
+	ch.serverFragOn = true
+
+	// Now hand-craft a continuation frame whose payload is 1 byte —
+	// pushing total to cap+1 → overflow.
+	frame := &Frame{
+		Fin:     false,
+		RSV1:    false,
+		Opcode:  OpcodeContinuation,
+		Payload: []byte{0xAA},
+	}
+	msg := &envelope.WSMessage{
+		Opcode: envelope.WSContinuation,
+	}
+	se := ch.applyDeflate(frame, envelope.Receive, msg)
+	if se == nil {
+		t.Fatal("applyDeflate accepted overflow continuation; want StreamError")
+	}
+	if se.Code != layer.ErrorProtocol {
+		t.Errorf("Code = %v, want ErrorProtocol", se.Code)
+	}
+	// Buffer must be reset on overflow so subsequent legitimate messages
+	// are not contaminated.
+	if len(ch.serverFragBuf) != 0 {
+		t.Errorf("serverFragBuf len after overflow = %d, want 0 (reset)", len(ch.serverFragBuf))
+	}
+	if ch.serverFragOn {
+		t.Error("serverFragOn after overflow = true, want false (reset)")
+	}
+}

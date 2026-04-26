@@ -145,6 +145,14 @@ func (c *wsChannel) Next(ctx context.Context) (*envelope.Envelope, error) {
 		return nil, err
 	}
 
+	// Cached terminal state from a previous Next or a prior Send error:
+	// surface immediately. Checked BEFORE the closeSeen short-circuit so a
+	// prior StreamError is never masked by io.EOF if a future refactor
+	// allows both flags to coexist.
+	if termErr := c.Err(); termErr != nil {
+		return nil, termErr
+	}
+
 	c.mu.Lock()
 	if c.closeSeen {
 		c.mu.Unlock()
@@ -152,11 +160,6 @@ func (c *wsChannel) Next(ctx context.Context) (*envelope.Envelope, error) {
 		return nil, io.EOF
 	}
 	c.mu.Unlock()
-
-	// Cached terminal state from a previous Next: surface immediately.
-	if termErr := c.Err(); termErr != nil {
-		return nil, termErr
-	}
 
 	frame, raw, err := ReadFrameRaw(c.layer.reader)
 	if err != nil {
@@ -259,6 +262,11 @@ func (c *wsChannel) buildEnvelope(frame *Frame, raw []byte, dir envelope.Directi
 
 // applyDeflate handles Compressed-flag detection, fragment buffering,
 // and decompression. Sets msg.Compressed and may overwrite msg.Payload.
+//
+// The cumulative size of the per-direction continuation buffer is capped at
+// maxCompressedPayloadSize to prevent unbounded memory growth from a peer
+// chaining many continuation frames (mirror of the USK-640 / USK-641
+// decompression-bomb defense, applied to the pre-decompress accumulator).
 func (c *wsChannel) applyDeflate(frame *Frame, dir envelope.Direction, msg *envelope.WSMessage) *layer.StreamError {
 	ds := c.deflateForDirection(dir)
 	bufPtr, onPtr := c.fragStateForDirection(dir)
@@ -271,6 +279,11 @@ func (c *wsChannel) applyDeflate(frame *Frame, dir envelope.Direction, msg *enve
 		msg.Compressed = true
 		if !frame.Fin {
 			// Buffer payload for later reassembly; surface verbatim.
+			// Reset to start fresh (any prior buffer state is discarded
+			// by validateFragmentAppend's len-only-check on the new total).
+			if se := validateFragmentAppend(0, len(frame.Payload)); se != nil {
+				return se
+			}
 			*bufPtr = append((*bufPtr)[:0], frame.Payload...)
 			*onPtr = true
 			return nil
@@ -290,6 +303,13 @@ func (c *wsChannel) applyDeflate(frame *Frame, dir envelope.Direction, msg *enve
 	if frame.Opcode == OpcodeContinuation && *onPtr {
 		// Continuation of a compressed message.
 		msg.Compressed = true
+		if se := validateFragmentAppend(len(*bufPtr), len(frame.Payload)); se != nil {
+			// Reset accumulator on overflow so a future legitimate message
+			// is not contaminated by truncated state.
+			*bufPtr = (*bufPtr)[:0]
+			*onPtr = false
+			return se
+		}
 		if !frame.Fin {
 			// Append; surface verbatim.
 			*bufPtr = append(*bufPtr, frame.Payload...)
@@ -312,6 +332,21 @@ func (c *wsChannel) applyDeflate(frame *Frame, dir envelope.Direction, msg *enve
 	}
 
 	// Uncompressed frame — leave msg.Compressed=false and Payload as-is.
+	return nil
+}
+
+// validateFragmentAppend rejects a continuation-buffer append that would
+// exceed maxCompressedPayloadSize. The cap matches the cumulative cap that
+// (*deflateState).decompress enforces on its compressed input, so a chain
+// of fragments cannot grow the accumulator past what decompress will accept
+// on the FIN frame anyway.
+func validateFragmentAppend(have, add int) *layer.StreamError {
+	if int64(have)+int64(add) > maxCompressedPayloadSize {
+		return &layer.StreamError{
+			Code:   layer.ErrorProtocol,
+			Reason: fmt.Sprintf("ws: deflate: fragment buffer overflow: %d + %d > %d", have, add, maxCompressedPayloadSize),
+		}
+	}
 	return nil
 }
 
@@ -357,6 +392,15 @@ func (c *wsChannel) populateCloseFields(msg *envelope.WSMessage, frame *Frame) {
 // Send frame). The Layer never reads env.Direction — it could differ
 // from the role's expected outgoing direction (e.g., Pipeline-replayed
 // envelopes), but the wire shape is determined by Role.
+//
+// Concurrency: Send is NOT safe for concurrent invocation from multiple
+// goroutines on the same Channel. The Pipeline / Session driver is
+// expected to serialize Send (single-flight). When permessage-deflate is
+// enabled, two concurrent Sends would race on the per-direction LZ77
+// dictionary inside (*deflateState).compress and produce frames the peer
+// cannot decompress. Concurrent Send + Next is safe because they use
+// disjoint deflateState instances per Role (Send uses the opposite
+// direction's state from Next).
 //
 // Mask handling:
 //   - RoleClient (writes client→server frames per RFC 6455 §5.3): the
