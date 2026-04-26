@@ -181,6 +181,74 @@ func (ds *deflateState) readDecompressed(reader io.Reader, maxSize int64) (decod
 	return decoded, truncated, nil
 }
 
+// compress compresses a permessage-deflate payload for the Send direction.
+// Per RFC 7692 Section 7.2.1, the 4-byte trailer (0x00 0x00 0xFF 0xFF) MUST
+// be stripped from the compressed output before transmission. The trailer is
+// the empty deflate block that flate.Writer emits on Close.
+//
+// When ds.params.contextTakeover is true and a non-empty dictionary has been
+// accumulated from prior messages, the writer is initialized with
+// flate.NewWriterDict so the LZ77 sliding window matches the peer's
+// decompressor state. After a successful encode, the dictionary is updated
+// with the original (uncompressed) payload bytes — capped at maxDictSize.
+//
+// maxSize bounds the allowed compressed output size. A non-positive maxSize
+// falls back to maxFramePayloadSize (16 MiB).
+func (ds *deflateState) compress(payload []byte, maxSize int64) ([]byte, error) {
+	if maxSize <= 0 {
+		maxSize = maxFramePayloadSize
+	}
+	if len(payload) == 0 {
+		return payload, nil
+	}
+
+	var buf bytes.Buffer
+	var w *flate.Writer
+	var err error
+	if ds.params.contextTakeover && len(ds.dict) > 0 {
+		w, err = flate.NewWriterDict(&buf, flate.DefaultCompression, ds.dict)
+	} else {
+		w, err = flate.NewWriter(&buf, flate.DefaultCompression)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("deflate compress: new writer: %w", err)
+	}
+	if _, err := w.Write(payload); err != nil {
+		_ = w.Close()
+		return nil, fmt.Errorf("deflate compress: write: %w", err)
+	}
+	if err := w.Close(); err != nil {
+		return nil, fmt.Errorf("deflate compress: close: %w", err)
+	}
+
+	out := buf.Bytes()
+	// Strip the RFC 7692 §7.2.1 trailer (the empty BFINAL=0 deflate block
+	// that flate.Writer emits at Close). Verify before stripping so we do
+	// not silently corrupt malformed output from a future flate.Writer.
+	if len(out) < len(flateTrailer) || !bytes.Equal(out[len(out)-len(flateTrailer):], flateTrailer) {
+		return nil, fmt.Errorf("deflate compress: missing RFC 7692 trailer")
+	}
+	out = out[:len(out)-len(flateTrailer)]
+
+	if int64(len(out)) > maxSize {
+		return nil, fmt.Errorf("deflate compress: output too large: %d > %d", len(out), maxSize)
+	}
+
+	// Update the per-direction dictionary with the original input bytes.
+	// The LZ77 window size is capped at maxDictSize.
+	if ds.params.contextTakeover {
+		ds.dict = append(ds.dict, payload...)
+		if len(ds.dict) > maxDictSize {
+			start := len(ds.dict) - maxDictSize
+			newDict := make([]byte, maxDictSize)
+			copy(newDict, ds.dict[start:])
+			ds.dict = newDict
+		}
+	}
+
+	return out, nil
+}
+
 // close releases the decompression resources. Each message creates and closes
 // its own flate reader, so this only needs to clear the accumulated dictionary.
 func (ds *deflateState) close() {

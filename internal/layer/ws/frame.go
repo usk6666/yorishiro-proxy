@@ -1,6 +1,7 @@
 package ws
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -49,10 +50,26 @@ func (f *Frame) IsControl() bool {
 // ReadFrame reads a single WebSocket frame from r.
 // If the frame is masked, the payload is automatically unmasked.
 func ReadFrame(r io.Reader) (*Frame, error) {
+	f, _, err := ReadFrameRaw(r)
+	return f, err
+}
+
+// ReadFrameRaw reads a single WebSocket frame from r and returns both the
+// parsed *Frame (with payload auto-unmasked when Masked is true) AND the
+// verbatim wire bytes (header + extended length + mask key + masked payload
+// exactly as observed). The raw byte slice is suitable for stamping onto
+// Envelope.Raw to preserve wire fidelity per RFC-001 §3.1.
+//
+// On error the raw byte slice is the bytes consumed up to the error point;
+// callers may discard or surface them as part of an Anomaly.
+func ReadFrameRaw(r io.Reader) (*Frame, []byte, error) {
+	var raw bytes.Buffer
+	tee := io.TeeReader(r, &raw)
+
 	// Read the first 2 bytes: FIN, RSV1-3, Opcode, MASK, Payload length.
 	var header [2]byte
-	if _, err := io.ReadFull(r, header[:]); err != nil {
-		return nil, fmt.Errorf("read frame header: %w", err)
+	if _, err := io.ReadFull(tee, header[:]); err != nil {
+		return nil, raw.Bytes(), fmt.Errorf("read frame header: %w", err)
 	}
 
 	f := &Frame{
@@ -64,20 +81,20 @@ func ReadFrame(r io.Reader) (*Frame, error) {
 		Masked: header[1]&0x80 != 0,
 	}
 
-	payloadLen, err := decodePayloadLength(r, header[1]&0x7F)
+	payloadLen, err := decodePayloadLength(tee, header[1]&0x7F)
 	if err != nil {
-		return nil, err
+		return nil, raw.Bytes(), err
 	}
 
 	if err := validateFrameConstraints(f, payloadLen); err != nil {
-		return nil, err
+		return nil, raw.Bytes(), err
 	}
 
-	if err := readMaskAndPayload(r, f, payloadLen); err != nil {
-		return nil, err
+	if err := readMaskAndPayload(tee, f, payloadLen); err != nil {
+		return nil, raw.Bytes(), err
 	}
 
-	return f, nil
+	return f, raw.Bytes(), nil
 }
 
 // decodePayloadLength reads the extended payload length from r based on the

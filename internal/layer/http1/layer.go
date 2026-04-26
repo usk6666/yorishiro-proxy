@@ -17,10 +17,11 @@ import (
 //
 // The Layer owns the connection and closes it on Close().
 type Layer struct {
-	conn    net.Conn
-	ch      chan layer.Channel
-	channel *channel
-	opts    options
+	conn     net.Conn
+	ch       chan layer.Channel
+	channel  *channel
+	opts     options
+	detached bool
 }
 
 // options holds Layer configuration.
@@ -125,7 +126,21 @@ func (l *Layer) Channels() <-chan layer.Channel { return l.ch }
 // It also fires the Channel's Closed signal with io.EOF if the Channel has
 // not already observed a terminal state (covers the idle-Channel race where
 // Close runs with no Next in flight).
+//
+// If DetachStream has transferred ownership of the conn to a subsequent
+// layer (e.g., WSLayer after a 101 Upgrade), Close is a no-op for the conn
+// but still calls markTerminated defensively so any observer parked on
+// the inner Channel's Closed() unblocks.
 func (l *Layer) Close() error {
+	if l.detached {
+		// Ownership of the conn was transferred via DetachStream; the
+		// successor layer owns lifecycle. markTerminated is idempotent so
+		// repeated calls (e.g., from defer cleanup) are safe.
+		if l.channel != nil {
+			l.channel.markTerminated(io.EOF)
+		}
+		return nil
+	}
 	err := l.conn.Close()
 	if l.channel != nil {
 		l.channel.markTerminated(io.EOF)
@@ -136,9 +151,29 @@ func (l *Layer) Close() error {
 // DetachStream tears down the HTTP/1 layer after an Upgrade response and
 // returns the buffered reader, writer, and underlying closer so that the
 // next layer (WebSocket) can be constructed on top of the same wire.
-// The caller takes ownership of these resources; the Layer becomes unusable.
 //
-// Not implemented until N7 (WebSocket Upgrade).
+// Ownership of the returned bufio.Reader, conn (writer), and conn (closer)
+// transfers to the caller. The Layer becomes unusable: subsequent Close()
+// calls are no-ops for the conn (the successor layer is responsible for
+// closing it). The internal Channel is marked terminated so any observer
+// parked on Closed() unblocks.
+//
+// The bufio.Reader retains any bytes the HTTP/1 parser read past the final
+// \r\n\r\n of the 101 Switching Protocols response — those bytes are the
+// first WebSocket frame(s) and must be parsed by the next layer.
+//
+// Calling DetachStream more than once returns a sentinel error.
 func (l *Layer) DetachStream() (io.Reader, io.Writer, io.Closer, error) {
-	return nil, nil, nil, errors.New("http1: DetachStream not implemented (deferred to N7)")
+	if l.detached {
+		return nil, nil, nil, errors.New("http1: stream already detached")
+	}
+	l.detached = true
+	if l.channel != nil {
+		l.channel.markTerminated(io.EOF)
+		return l.channel.reader, l.conn, l.conn, nil
+	}
+	// Defensive: a Layer constructed via New always has a non-nil channel,
+	// but if a future refactor ever leaves channel nil we still surface
+	// the underlying conn so the caller can drive the wire.
+	return l.conn, l.conn, l.conn, nil
 }

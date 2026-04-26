@@ -594,3 +594,110 @@ func TestDeflateState_Decompress_CompressedPayloadTooLarge(t *testing.T) {
 		t.Errorf("error message = %q, want it to contain %q", got, want)
 	}
 }
+
+// --- compress tests (USK-642) ---
+
+func TestDeflateState_Compress_Decompress_RoundTrip(t *testing.T) {
+	params := deflateParams{enabled: true, contextTakeover: false, windowBits: 15}
+	enc := newDeflateState(params)
+	dec := newDeflateState(params)
+	defer enc.close()
+	defer dec.close()
+
+	cases := [][]byte{
+		[]byte("Hello, World!"),
+		bytes.Repeat([]byte("ABCD"), 100),
+		[]byte("short"),
+		[]byte(""),
+	}
+	for i, plain := range cases {
+		compressed, err := enc.compress(plain, maxFramePayloadSize)
+		if err != nil {
+			t.Fatalf("case %d: compress: %v", i, err)
+		}
+		// Empty input passes through.
+		if len(plain) == 0 {
+			if len(compressed) != 0 {
+				t.Errorf("case %d: empty input produced %d bytes, want 0", i, len(compressed))
+			}
+			continue
+		}
+		got, err := dec.decompress(compressed, maxFramePayloadSize)
+		if err != nil {
+			t.Fatalf("case %d: decompress: %v", i, err)
+		}
+		if !bytes.Equal(got, plain) {
+			t.Errorf("case %d: round-trip mismatch:\n got: %q\nwant: %q", i, got, plain)
+		}
+	}
+}
+
+func TestDeflateState_Compress_ContextTakeoverPreservesDictionary(t *testing.T) {
+	params := deflateParams{enabled: true, contextTakeover: true, windowBits: 15}
+	enc := newDeflateState(params)
+	dec := newDeflateState(params)
+	defer enc.close()
+	defer dec.close()
+
+	msgs := [][]byte{
+		[]byte("dictionary-payload-aaaa-bbbb"),
+		[]byte("dictionary-payload-aaaa-bbbb-extended"),
+		[]byte("dictionary-payload-aaaa-bbbb-yet-more"),
+	}
+	for i, m := range msgs {
+		compressed, err := enc.compress(m, maxFramePayloadSize)
+		if err != nil {
+			t.Fatalf("msg %d compress: %v", i, err)
+		}
+		got, err := dec.decompress(compressed, maxFramePayloadSize)
+		if err != nil {
+			t.Fatalf("msg %d decompress: %v", i, err)
+		}
+		if !bytes.Equal(got, m) {
+			t.Errorf("msg %d: got %q, want %q", i, got, m)
+		}
+	}
+	// Dictionary should be populated on the encoder.
+	if len(enc.dict) == 0 {
+		t.Error("encoder dict empty after context-takeover messages")
+	}
+}
+
+func TestDeflateState_Compress_NoContextTakeoverLeavesDictionaryEmpty(t *testing.T) {
+	params := deflateParams{enabled: true, contextTakeover: false, windowBits: 15}
+	enc := newDeflateState(params)
+	defer enc.close()
+
+	if _, err := enc.compress([]byte("test data"), maxFramePayloadSize); err != nil {
+		t.Fatal(err)
+	}
+	if len(enc.dict) != 0 {
+		t.Errorf("dict populated despite contextTakeover=false: len=%d", len(enc.dict))
+	}
+}
+
+func TestDeflateState_Compress_RejectsOversizedOutput(t *testing.T) {
+	params := deflateParams{enabled: true, contextTakeover: false, windowBits: 15}
+	enc := newDeflateState(params)
+	defer enc.close()
+
+	// Random-ish bytes don't compress well; a tiny maxSize forces overflow.
+	payload := make([]byte, 1024)
+	for i := range payload {
+		payload[i] = byte(i ^ (i >> 3))
+	}
+	if _, err := enc.compress(payload, 4); err == nil {
+		t.Fatal("expected error for oversized output")
+	}
+}
+
+func TestDeflateState_Compress_DefaultMaxSize(t *testing.T) {
+	params := deflateParams{enabled: true, contextTakeover: false, windowBits: 15}
+	enc := newDeflateState(params)
+	defer enc.close()
+
+	// maxSize=0 falls back to maxFramePayloadSize.
+	if _, err := enc.compress([]byte("default-cap"), 0); err != nil {
+		t.Fatalf("compress with maxSize=0: %v", err)
+	}
+}

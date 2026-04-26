@@ -754,3 +754,83 @@ type errorWriter struct {
 func (w *errorWriter) Write(p []byte) (int, error) {
 	return 0, w.err
 }
+
+// --- ReadFrameRaw tests (USK-642) ---
+
+func TestReadFrameRaw_UnmaskedRoundTrip(t *testing.T) {
+	wire := buildFrame(t, true, OpcodeText, false, [4]byte{}, []byte("hello"))
+
+	frame, raw, err := ReadFrameRaw(bytes.NewReader(wire))
+	if err != nil {
+		t.Fatalf("ReadFrameRaw: %v", err)
+	}
+	if !bytes.Equal(raw, wire) {
+		t.Errorf("raw bytes = %v, want %v (verbatim wire)", raw, wire)
+	}
+	if frame.Opcode != OpcodeText {
+		t.Errorf("Opcode = %d, want %d", frame.Opcode, OpcodeText)
+	}
+	if string(frame.Payload) != "hello" {
+		t.Errorf("Payload = %q, want hello", frame.Payload)
+	}
+}
+
+func TestReadFrameRaw_MaskedRoundTrip(t *testing.T) {
+	maskKey := [4]byte{0x37, 0xFA, 0x21, 0x3D}
+	masked := []byte("Hello")
+	maskedCopy := make([]byte, len(masked))
+	copy(maskedCopy, masked)
+	maskPayload(maskKey, maskedCopy)
+
+	wire := buildFrame(t, true, OpcodeText, true, maskKey, maskedCopy)
+
+	frame, raw, err := ReadFrameRaw(bytes.NewReader(wire))
+	if err != nil {
+		t.Fatalf("ReadFrameRaw: %v", err)
+	}
+	// raw must include header + mask key + masked payload (NOT unmasked).
+	if !bytes.Equal(raw, wire) {
+		t.Errorf("raw bytes do not equal wire bytes")
+	}
+	// Confirm the mask key bytes are present in raw.
+	if !bytes.Contains(raw, maskKey[:]) {
+		t.Error("raw bytes missing mask key")
+	}
+	// Confirm the masked (NOT plaintext) payload is in raw.
+	if !bytes.Contains(raw, maskedCopy) {
+		t.Error("raw bytes missing masked payload")
+	}
+	if bytes.Contains(raw, []byte("Hello")) {
+		t.Error("raw bytes contained unmasked payload (expected masked)")
+	}
+	// And ReadFrameRaw still auto-unmasks the parsed Frame.Payload.
+	if string(frame.Payload) != "Hello" {
+		t.Errorf("frame.Payload = %q, want Hello (unmasked)", frame.Payload)
+	}
+}
+
+func TestReadFrameRaw_ExtendedLength16Verbatim(t *testing.T) {
+	payload := bytes.Repeat([]byte("A"), 200)
+	wire := buildFrame(t, true, OpcodeBinary, false, [4]byte{}, payload)
+
+	_, raw, err := ReadFrameRaw(bytes.NewReader(wire))
+	if err != nil {
+		t.Fatalf("ReadFrameRaw: %v", err)
+	}
+	if !bytes.Equal(raw, wire) {
+		t.Errorf("raw bytes != wire bytes for 16-bit extended length frame")
+	}
+}
+
+func TestReadFrame_DelegatesToReadFrameRaw(t *testing.T) {
+	// ReadFrame is now a wrapper around ReadFrameRaw; behavior must be
+	// preserved (signature unchanged).
+	wire := buildFrame(t, true, OpcodeText, false, [4]byte{}, []byte("hello"))
+	frame, err := ReadFrame(bytes.NewReader(wire))
+	if err != nil {
+		t.Fatalf("ReadFrame: %v", err)
+	}
+	if string(frame.Payload) != "hello" {
+		t.Errorf("Payload = %q, want hello", frame.Payload)
+	}
+}
