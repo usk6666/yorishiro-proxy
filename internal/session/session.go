@@ -418,7 +418,7 @@ func RunStackSession(
 	case UpgradeWS:
 		return runUpgradeWS(ctx, stack, dial, p, userOpt, upstreamCh)
 	case UpgradeSSE:
-		return runUpgradeSSE(ctx, stack, dial, p, userOpt, upstreamCh)
+		return runUpgradeSSE(ctx, stack, dial, p, userOpt, upstreamCh, notice.SSEFirstResponse())
 	default:
 		// ErrUpgradePending without a kind set is a logic bug; surface it
 		// rather than silently looping.
@@ -487,16 +487,32 @@ func runUpgradeWS(
 	return RunStackSession(ctx, stack, upgradeDial, p, userOpt)
 }
 
-// runUpgradeSSE performs the SSE-side swap: only the upstream side is
-// replaced with sse.Wrap (wrapped in sseLayerAdapter so it satisfies
-// layer.Layer). The client side keeps its existing http1.Layer; SSE is
-// half-duplex (server→client), so the recursive RunStackSession runs with
-// a drainedChannel as the client side.
+// runUpgradeSSE performs the SSE-side swap: the upstream side is replaced
+// with sse.Wrap (adapter wrapping the SSE Channel) and the post-swap
+// session loop is driven directly here rather than via a recursive
+// RunSession. SSE is half-duplex (server→client) so there is no client→
+// upstream traffic to plumb; only the SSE event stream from upstream
+// needs to flow through the Pipeline (for recording) AND onto the client
+// wire (for the browser).
 //
-// SSE end-to-end is currently blocked by an http1.channel.Next that fully
-// drains the body before returning; an integration test for this path is
-// supplied with t.Skip("blocked on http1 streaming-body detach follow-up").
-// The orchestration code below is exercised by unit tests.
+// firstResp is the actual response envelope captured by UpgradeStep at
+// detection time. When non-nil, it provides real Context (TLS / ConnID)
+// and headers to sse.Wrap, and the wrapper is constructed with
+// WithSkipFirstEmit so we do not double-record the response that the
+// pre-swap Pipeline already projected. When nil (test paths exercising
+// runUpgradeSSE directly), a minimal placeholder is synthesized.
+//
+// The upstream HTTP/1.x Layer must have been built with
+// http1.WithStreamingResponseDetect(http1.IsSSEResponse) (USK-655) so the
+// streaming response body did not get drained at parse time. The body
+// reader is then claimed via Layer.DetachStreamingBody.
+//
+// Wire-forwarding is performed via io.TeeReader: as sse.Wrap reads the
+// upstream body bytes for parsing, the same bytes are written to the
+// client wire (the underlying writer of the client http1 Layer, claimed
+// via DetachStream). This is what activates the full chain for SSE
+// (USK-657 deliverable) — without it the recursive session would record
+// events but the browser would never see them.
 func runUpgradeSSE(
 	ctx context.Context,
 	stack *connector.ConnectionStack,
@@ -504,62 +520,107 @@ func runUpgradeSSE(
 	p *pipeline.Pipeline,
 	userOpt SessionOptions,
 	upstreamCh layer.Channel,
-) error {
+	firstResp *envelope.Envelope,
+) (retErr error) {
 	upstreamTop := stack.UpstreamTopmost()
 	upstreamHTTP, ok := upstreamTop.(*http1.Layer)
 	if !ok {
 		return fmt.Errorf("session: sse upgrade requires *http1.Layer upstream topmost, got %T", upstreamTop)
 	}
 
-	// The first SSE response envelope was already forwarded to the client
-	// before the goroutine returned (Friction 2-C). For sse.Wrap we need
-	// to supply a re-shaped first envelope and a body io.Reader carrying
-	// the post-headers byte stream. The body provenance is the deferred
-	// item D1 — production wiring needs an http1 streaming-body-detach
-	// primitive. For now we reuse the http1 reader returned by
-	// DetachStream as the "body" pipe and let the upgrade orchestration
-	// proceed; tests cover the ReplaceUpstreamTop call.
-	upReader, _, _, err := upstreamHTTP.DetachStream()
+	clientTop := stack.ClientTopmost()
+	clientHTTP, ok := clientTop.(*http1.Layer)
+	if !ok {
+		return fmt.Errorf("session: sse upgrade requires *http1.Layer client topmost, got %T", clientTop)
+	}
+
+	// Streaming-body detach: the http1 channel suppressed body draining
+	// for the SSE response (predicate matched), so the body is still
+	// pending on the wire. Hand it to sse.Wrap.
+	upBody, err := upstreamHTTP.DetachStreamingBody()
 	if err != nil {
-		return fmt.Errorf("session: detach upstream http1 (sse): %w", err)
+		return fmt.Errorf("session: detach upstream http1 streaming body (sse): %w", err)
 	}
+	// Close is a no-op for the conn after detach (ownership transferred
+	// to upBody); kept for parity with the WS path so any observer parked
+	// on the inner Channel's Closed() unblocks.
 	_ = upstreamHTTP.Close()
+	defer func() { _ = upBody.Close() }()
 
-	// We need a pre-shaped first envelope that sse.Wrap re-clones. Without
-	// access to the original 101/200 envelope here (it was already sent to
-	// the client and dropped), construct a minimal placeholder so the
-	// wrapper's first emit is well-formed. Production code will plumb the
-	// real envelope through a hook; see D1.
-	first := &envelope.Envelope{
-		StreamID:  upstreamCh.StreamID(),
-		Direction: envelope.Receive,
-		Protocol:  envelope.ProtocolSSE,
-		Message:   &envelope.HTTPMessage{Status: 200, Headers: []envelope.KeyValue{{Name: "Content-Type", Value: "text/event-stream"}}},
+	// Detach the client conn writer so post-swap SSE event bytes can be
+	// forwarded to the browser. DetachStream transfers ownership of the
+	// conn closer; clientHTTP.Close becomes a no-op for the wire (R21).
+	_, clientWriter, clientCloser, err := clientHTTP.DetachStream()
+	if err != nil {
+		return fmt.Errorf("session: detach client http1 (sse): %w", err)
+	}
+	_ = clientHTTP.Close()
+	defer func() { _ = clientCloser.Close() }()
+
+	wrapOpts := []sse.Option{}
+	if firstResp == nil {
+		// Test path: synthesize a minimal placeholder. Production reaches
+		// here via UpgradeStep so firstResp is always non-nil there.
+		firstResp = &envelope.Envelope{
+			StreamID:  upstreamCh.StreamID(),
+			Direction: envelope.Receive,
+			Protocol:  envelope.ProtocolHTTP,
+			Message: &envelope.HTTPMessage{
+				Status:  200,
+				Headers: []envelope.KeyValue{{Name: "Content-Type", Value: "text/event-stream"}},
+			},
+		}
+	} else {
+		// Production path: the response was already recorded pre-swap;
+		// suppress the duplicate emit so the analyst sees one Receive
+		// flow per HTTP response, not two.
+		wrapOpts = append(wrapOpts, sse.WithSkipFirstEmit())
 	}
 
-	sseCh := sse.Wrap(upstreamCh, first, upReader)
+	// io.TeeReader: every byte that sse.Wrap reads for parsing is also
+	// written to the client wire. The browser sees a continuous SSE
+	// stream (200 OK headers from pre-swap + event bytes from here).
+	teedBody := io.TeeReader(upBody, clientWriter)
+
+	sseCh := sse.Wrap(upstreamCh, firstResp, teedBody, wrapOpts...)
 	adapter := newSSELayerAdapter(sseCh)
 	stack.ReplaceUpstreamTop(adapter)
 
-	clientCh := newDrainedChannel(upstreamCh.StreamID())
+	// Use the unified streamID from firstResp so OnComplete and the
+	// SSE event flows recorded by Pipeline all line up under the same
+	// flow.Stream the GET created.
+	streamID := firstResp.StreamID
 
-	upgradeDial := DialFunc(func(_ context.Context, _ *envelope.Envelope) (layer.Channel, error) {
-		return sseCh, nil
-	})
+	defer func() {
+		if errors.Is(retErr, ErrUpgradePending) {
+			// Defensive: SSE has no nested upgrade. If we ever propagate
+			// ErrUpgradePending it would be a logic bug and should not
+			// surface to userOpt.OnComplete, which expects a terminal
+			// session result.
+			return
+		}
+		if userOpt.OnComplete != nil {
+			userOpt.OnComplete(context.WithoutCancel(ctx), streamID, retErr)
+		}
+	}()
 
-	// SSE recursion runs RunSession directly: there is no further upgrade
-	// nested inside SSE, and we do not want to walk the stack again.
-	wrapped := SessionOptions{
-		OnComplete: func(cbCtx context.Context, streamID string, sessErr error) {
-			if errors.Is(sessErr, ErrUpgradePending) {
-				return
+	// Manual session loop. SSE is server→client only, so there is no
+	// clientToUpstream goroutine; we drive sseCh.Next directly and the
+	// Pipeline records each event. Wire forwarding is handled by the
+	// io.TeeReader above.
+	for {
+		env, nerr := sseCh.Next(ctx)
+		if nerr != nil {
+			if errors.Is(nerr, io.EOF) {
+				return nil
 			}
-			if userOpt.OnComplete != nil {
-				userOpt.OnComplete(cbCtx, streamID, sessErr)
-			}
-		},
+			return nerr
+		}
+		if env == nil {
+			continue
+		}
+		_, _, _ = p.Run(ctx, env)
 	}
-	return RunSession(ctx, clientCh, upgradeDial, p, wrapped)
 }
 
 // upgradePending returns true when notice has latched a pending UpgradeKind.
@@ -597,14 +658,19 @@ func clientToUpstream(
 	for {
 		env, nerr := client.Next(ctx)
 		if nerr != nil {
-			if errors.Is(nerr, io.EOF) {
-				return nil
-			}
-			// Unblocked by errgroup ctx cancel after the peer goroutine
-			// latched the upgrade — return the sentinel instead of the
-			// wrapped cancellation.
+			// Upgrade-pending takes precedence over EOF/errors: when the
+			// peer goroutine latched a Pending UpgradeKind, the only
+			// correct exit code is ErrUpgradePending so RunStackSession
+			// can run the swap. Otherwise a client half-close (the SSE
+			// case where the browser sends FIN after the GET, or the WS
+			// case where the client conn closes on Upgrade) would silently
+			// degrade to a normal "session ended" return and the swap
+			// would never run.
 			if upgradePending(notice) {
 				return ErrUpgradePending
+			}
+			if errors.Is(nerr, io.EOF) {
+				return nil
 			}
 			return fmt.Errorf("client.Next: %w", nerr)
 		}

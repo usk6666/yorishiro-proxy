@@ -22,7 +22,8 @@ var ErrSendUnsupported = errors.New("sse: Send not supported (half-duplex Receiv
 // config holds the resolved options for a Wrap call. Zero-value fields
 // fall back to package defaults.
 type config struct {
-	maxEventSize int
+	maxEventSize  int
+	skipFirstEmit bool
 }
 
 // Option tunes the SSE wrapper.
@@ -37,6 +38,17 @@ func WithMaxEventSize(n int) Option {
 			c.maxEventSize = n
 		}
 	}
+}
+
+// WithSkipFirstEmit causes the wrapped Channel to skip emitting the
+// firstResponse envelope on its first Next() call and jump straight to
+// driving the parser. Used by the production HTTP/1.x → SSE swap path
+// (session.runUpgradeSSE) where the response envelope was already
+// recorded by the pre-swap Pipeline run; re-emitting would project a
+// duplicate Receive flow. firstResponse is still required for streamID,
+// sequence, and Context derivation on the SSE event envelopes.
+func WithSkipFirstEmit() Option {
+	return func(c *config) { c.skipFirstEmit = true }
 }
 
 // Wrap consumes an HTTP/1.x Channel that has just produced firstResponse
@@ -77,12 +89,13 @@ func Wrap(inner layer.Channel, firstResponse *envelope.Envelope, body io.Reader,
 	}
 
 	return &sseChannel{
-		inner:    inner,
-		body:     body,
-		firstEnv: first,
-		streamID: inner.StreamID(),
-		nextSeq:  firstResponse.Sequence + 1,
-		maxEvent: cfg.maxEventSize,
-		recvDone: make(chan struct{}),
+		inner:     inner,
+		body:      body,
+		firstEnv:  first,
+		streamID:  inner.StreamID(),
+		nextSeq:   firstResponse.Sequence + 1,
+		maxEvent:  cfg.maxEventSize,
+		recvDone:  make(chan struct{}),
+		skipFirst: cfg.skipFirstEmit,
 	}
 }
