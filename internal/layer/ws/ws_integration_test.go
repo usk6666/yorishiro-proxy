@@ -36,7 +36,6 @@ import (
 	"log/slog"
 	"net"
 	"regexp"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -276,7 +275,11 @@ func newWSHarness(t *testing.T, ctx context.Context, opts harnessOpts) *wsHarnes
 		select {
 		case <-h.sessionDone:
 		case <-time.After(3 * time.Second):
-			t.Logf("harness cleanup: session did not exit within 3s")
+			// A 3s cleanup miss after both wire ends are closed indicates
+			// a leaked session goroutine. Fail loudly rather than silently
+			// logging — the production OnStack cascade (USK-643 D3) is
+			// expected to drain both sides on a one-sided close.
+			t.Errorf("harness cleanup: session did not exit within 3s (leaked session goroutine)")
 		}
 		_ = h.stack.Close()
 	})
@@ -558,20 +561,20 @@ func TestWSUpgrade_TextFrameRoundTrip(t *testing.T) {
 		}
 	}
 	if sentText == nil {
-		t.Error("no Send WS flow with payload hello-from-client")
+		t.Fatal("no Send WS flow with payload hello-from-client")
 	}
 	if recvText == nil {
-		t.Error("no Receive WS flow with payload hello-from-server")
+		t.Fatal("no Receive WS flow with payload hello-from-server")
 	}
 
 	// RawBytes preserves the wire bytes verbatim. For client→server frames
 	// the wire form is masked; for server→client it is unmasked. Either
 	// way the Payload (post-unmask) matches and the RawBytes byte slice
 	// is non-empty.
-	if sentText != nil && len(sentText.RawBytes) == 0 {
+	if len(sentText.RawBytes) == 0 {
 		t.Error("send flow RawBytes empty; expected verbatim wire bytes")
 	}
-	if recvText != nil && len(recvText.RawBytes) == 0 {
+	if len(recvText.RawBytes) == 0 {
 		t.Error("receive flow RawBytes empty; expected verbatim wire bytes")
 	}
 }
@@ -1110,17 +1113,3 @@ func wsFlowsOnly(in []*flow.Flow) []*flow.Flow {
 	}
 	return out
 }
-
-// stringContainsAny is a small assertion helper kept inline so the test
-// file remains self-contained.
-func stringContainsAny(s string, subs ...string) bool {
-	for _, sub := range subs {
-		if strings.Contains(s, sub) {
-			return true
-		}
-	}
-	return false
-}
-
-// _ keeps stringContainsAny alive in case future test additions need it.
-var _ = stringContainsAny
