@@ -348,9 +348,9 @@ func startHTTPMITMProxy(
 			steps = append(steps,
 				pipeline.NewHostScopeStep(nil),
 				pipeline.NewHTTPScopeStep(opts.scope),
-				pipeline.NewSafetyStep(opts.safetyEngine, slog.Default()),
-				pipeline.NewTransformStep(opts.transformEngine),
-				pipeline.NewInterceptStep(opts.interceptEngine, opts.holdQueue, slog.Default()),
+				pipeline.NewSafetyStep(opts.safetyEngine, nil, nil, slog.Default()),
+				pipeline.NewTransformStep(opts.transformEngine, nil, nil),
+				pipeline.NewInterceptStep(opts.interceptEngine, nil, nil, opts.holdQueue, slog.Default()),
 				pipeline.NewRecordStep(store, slog.Default(), recordOpts...),
 			)
 
