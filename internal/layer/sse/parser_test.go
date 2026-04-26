@@ -1,9 +1,12 @@
 package sse
 
 import (
+	"errors"
 	"io"
 	"strings"
 	"testing"
+
+	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 )
 
 func TestSSEParser_Next_BasicEvents(t *testing.T) {
@@ -296,6 +299,158 @@ func TestSSEEvent_String(t *testing.T) {
 	}
 	if !strings.Contains(got, "data: world\n") {
 		t.Errorf("String() should contain 'data: world\\n', got %q", got)
+	}
+}
+
+// errReader wraps an io.Reader and returns a chosen non-EOF error after
+// the underlying reader is exhausted. Used to drive AnomalySSETruncated.
+type errReader struct {
+	r   io.Reader
+	err error
+}
+
+func (e *errReader) Read(p []byte) (int, error) {
+	n, err := e.r.Read(p)
+	if errors.Is(err, io.EOF) {
+		return n, e.err
+	}
+	return n, err
+}
+
+func anomalyTypes(as []envelope.Anomaly) []envelope.AnomalyType {
+	if len(as) == 0 {
+		return nil
+	}
+	out := make([]envelope.AnomalyType, len(as))
+	for i, a := range as {
+		out[i] = a.Type
+	}
+	return out
+}
+
+func containsAnomaly(as []envelope.Anomaly, t envelope.AnomalyType) bool {
+	for _, a := range as {
+		if a.Type == t {
+			return true
+		}
+	}
+	return false
+}
+
+func TestSSEParser_Anomaly_MissingData(t *testing.T) {
+	// Event terminator hit with event:/id:/retry: but no data: line.
+	input := "event: ping\nid: 1\nretry: 3000\n\n"
+	parser := NewSSEParser(strings.NewReader(input), 0)
+
+	ev, err := parser.Next()
+	if err != nil {
+		t.Fatalf("Next() error: %v", err)
+	}
+	if ev.EventType != "ping" || ev.ID != "1" || ev.Retry != "3000" {
+		t.Errorf("event fields = (%q,%q,%q), want (ping,1,3000)", ev.EventType, ev.ID, ev.Retry)
+	}
+	if !containsAnomaly(ev.Anomalies, envelope.AnomalySSEMissingData) {
+		t.Errorf("expected AnomalySSEMissingData, got %v", anomalyTypes(ev.Anomalies))
+	}
+	// Next call must return io.EOF without re-emitting.
+	if _, err := parser.Next(); err != io.EOF {
+		t.Errorf("trailing Next() = %v, want io.EOF", err)
+	}
+}
+
+func TestSSEParser_Anomaly_NoMissingDataWhenDataPresent(t *testing.T) {
+	input := "event: ping\ndata: 1\n\n"
+	parser := NewSSEParser(strings.NewReader(input), 0)
+
+	ev, err := parser.Next()
+	if err != nil {
+		t.Fatalf("Next() error: %v", err)
+	}
+	if len(ev.Anomalies) != 0 {
+		t.Errorf("expected no anomalies, got %v", anomalyTypes(ev.Anomalies))
+	}
+}
+
+func TestSSEParser_Anomaly_DuplicateID(t *testing.T) {
+	// Two id: lines in the same event.
+	input := "id: 1\nid: 2\ndata: payload\n\n"
+	parser := NewSSEParser(strings.NewReader(input), 0)
+
+	ev, err := parser.Next()
+	if err != nil {
+		t.Fatalf("Next() error: %v", err)
+	}
+	if ev.ID != "2" {
+		t.Errorf("ID = %q, want %q (last value wins)", ev.ID, "2")
+	}
+	if !containsAnomaly(ev.Anomalies, envelope.AnomalySSEDuplicateID) {
+		t.Errorf("expected AnomalySSEDuplicateID, got %v", anomalyTypes(ev.Anomalies))
+	}
+}
+
+func TestSSEParser_Anomaly_TruncatedOnReadError(t *testing.T) {
+	// Stream ends mid-event with a non-EOF read error: emit the partial
+	// event with AnomalySSETruncated, then EOF on the next call.
+	wantErr := errors.New("connection reset by peer")
+	r := &errReader{r: strings.NewReader("event: ping\ndata: partial"), err: wantErr}
+	parser := NewSSEParser(r, 0)
+
+	ev, err := parser.Next()
+	if err != nil {
+		t.Fatalf("Next() error: %v (expected nil with truncation anomaly)", err)
+	}
+	if ev.EventType != "ping" || ev.Data != "partial" {
+		t.Errorf("partial event = (event=%q, data=%q), want (ping, partial)", ev.EventType, ev.Data)
+	}
+	if !containsAnomaly(ev.Anomalies, envelope.AnomalySSETruncated) {
+		t.Errorf("expected AnomalySSETruncated, got %v", anomalyTypes(ev.Anomalies))
+	}
+	// The detail should reference the underlying error so the analyst
+	// can correlate with transport-level signals.
+	var found bool
+	for _, a := range ev.Anomalies {
+		if a.Type == envelope.AnomalySSETruncated && strings.Contains(a.Detail, wantErr.Error()) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("AnomalySSETruncated detail did not contain underlying error %q", wantErr.Error())
+	}
+	if _, err := parser.Next(); err != io.EOF {
+		t.Errorf("trailing Next() = %v, want io.EOF", err)
+	}
+}
+
+func TestSSEParser_Anomaly_NoTruncationOnCleanEOF(t *testing.T) {
+	// Stream ends on EOF with no trailing blank line — the spec accepts
+	// this as a valid final event so no truncation anomaly is emitted.
+	input := "data: tail"
+	parser := NewSSEParser(strings.NewReader(input), 0)
+
+	ev, err := parser.Next()
+	if err != nil {
+		t.Fatalf("Next() error: %v", err)
+	}
+	if containsAnomaly(ev.Anomalies, envelope.AnomalySSETruncated) {
+		t.Errorf("clean EOF should not produce AnomalySSETruncated, got %v", anomalyTypes(ev.Anomalies))
+	}
+}
+
+func TestSSEParser_Anomaly_MultipleOnSameEvent(t *testing.T) {
+	// Missing data + duplicate id together.
+	input := "event: ping\nid: 1\nid: 2\n\n"
+	parser := NewSSEParser(strings.NewReader(input), 0)
+
+	ev, err := parser.Next()
+	if err != nil {
+		t.Fatalf("Next() error: %v", err)
+	}
+	if !containsAnomaly(ev.Anomalies, envelope.AnomalySSEMissingData) {
+		t.Errorf("expected AnomalySSEMissingData in %v", anomalyTypes(ev.Anomalies))
+	}
+	if !containsAnomaly(ev.Anomalies, envelope.AnomalySSEDuplicateID) {
+		t.Errorf("expected AnomalySSEDuplicateID in %v", anomalyTypes(ev.Anomalies))
 	}
 }
 

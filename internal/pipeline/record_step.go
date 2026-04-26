@@ -468,7 +468,10 @@ func projectGRPCEnd(m *envelope.GRPCEndMessage, fl *flow.Flow) {
 
 // projectSSE projects an SSEMessage. SSE event fields are independently
 // optional on the wire; emit only when non-empty / non-zero so analysts can
-// distinguish "wire didn't send this field" from "field was empty".
+// distinguish "wire didn't send this field" from "field was empty". Parser-
+// detected Anomalies project into stable per-type sse_anomaly_* keys (USK-656);
+// stream-terminating problems surface as *layer.StreamError elsewhere and
+// never reach this slice.
 func projectSSE(m *envelope.SSEMessage, fl *flow.Flow) {
 	fl.Body = []byte(m.Data)
 	if m.Event != "" {
@@ -479,6 +482,29 @@ func projectSSE(m *envelope.SSEMessage, fl *flow.Flow) {
 	}
 	if m.Retry > 0 {
 		fl.Metadata["sse_retry_ms"] = strconv.FormatInt(m.Retry.Milliseconds(), 10)
+	}
+	for _, a := range m.Anomalies {
+		key := sseAnomalyMetadataKey(a.Type)
+		if key == "" {
+			continue
+		}
+		fl.Metadata[key] = a.Detail
+	}
+}
+
+// sseAnomalyMetadataKey returns the stable Metadata key under which an SSE
+// anomaly's Detail is recorded. Returns empty for unknown / non-SSE anomaly
+// types so projection silently drops them.
+func sseAnomalyMetadataKey(t envelope.AnomalyType) string {
+	switch t {
+	case envelope.AnomalySSEMissingData:
+		return "sse_anomaly_missing_data"
+	case envelope.AnomalySSETruncated:
+		return "sse_anomaly_truncated"
+	case envelope.AnomalySSEDuplicateID:
+		return "sse_anomaly_duplicate_id"
+	default:
+		return ""
 	}
 }
 
