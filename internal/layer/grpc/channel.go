@@ -17,7 +17,6 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/layer"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/http2"
@@ -140,7 +139,8 @@ type lpmFrame struct {
 }
 
 // errMessageTooLarge is returned by reassembler.feed when an LPM length
-// exceeds config.MaxGRPCMessageSize. The channel maps it to a
+// exceeds the per-Channel cap (defaults to config.MaxGRPCMessageSize but
+// is overridable via WithMaxMessageSize). The channel maps it to a
 // *layer.StreamError.
 var errMessageTooLarge = errors.New("grpc: message too large")
 
@@ -182,6 +182,11 @@ type grpcChannel struct {
 	closeOnce sync.Once
 	recvDone  chan struct{}
 	termOnce  sync.Once
+
+	// maxMessageSize caps the per-LPM payload size for both the
+	// reassembler and the gzip decoder. Resolved once at Wrap time;
+	// always positive (defaults to config.MaxGRPCMessageSize).
+	maxMessageSize uint32
 }
 
 // StreamID returns the inner Channel's stream identifier (one RPC = one
@@ -413,7 +418,7 @@ func (c *grpcChannel) absorbHeaders(ev *envelope.Envelope, evt *http2.H2HeadersE
 func (c *grpcChannel) absorbData(ev *envelope.Envelope, evt *http2.H2DataEvent) error {
 	c.mu.Lock()
 	dir := c.dirStateLocked(ev.Direction)
-	frames, err := dir.reasm.feed(evt.Payload, config.MaxGRPCMessageSize)
+	frames, err := dir.reasm.feed(evt.Payload, c.maxMessageSize)
 	if err != nil {
 		c.mu.Unlock()
 		if errors.Is(err, errMessageTooLarge) {
@@ -457,7 +462,7 @@ func (c *grpcChannel) buildDataEnvelopeLocked(ev *envelope.Envelope, dir *direct
 			// negotiated encoding) but per-message-compress can occur even
 			// when encoding header is absent. Surface payload verbatim.
 		case encodingGzip:
-			decoded, derr := gunzip(payload, config.MaxGRPCMessageSize)
+			decoded, derr := gunzip(payload, c.maxMessageSize)
 			if derr != nil {
 				if errors.Is(derr, errMessageTooLarge) {
 					// CWE-409: decompression-bomb cap exceeded. Map to
@@ -1115,7 +1120,9 @@ func statusFor(env *envelope.Envelope, _ *envelope.GRPCStartMessage) int {
 // is capped at max bytes (CWE-409: decompression-bomb mitigation). If the
 // decompressed stream would exceed max, gunzip returns errMessageTooLarge
 // so the channel maps it to *layer.StreamError{Code: ErrorInternalError}
-// and RSTs the stream. The caller passes config.MaxGRPCMessageSize.
+// and RSTs the stream. The caller passes the per-Channel cap resolved at
+// Wrap time (defaulting to config.MaxGRPCMessageSize when no
+// WithMaxMessageSize Option is supplied).
 func gunzip(b []byte, max uint32) ([]byte, error) {
 	r, err := gzip.NewReader(bytes.NewReader(b))
 	if err != nil {

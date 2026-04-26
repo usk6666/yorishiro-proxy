@@ -88,7 +88,7 @@ func (ds *deflateState) decompress(payload []byte, maxSize int64) ([]byte, error
 	// Enforce a hard upper bound on the compressed payload size to avoid
 	// pathological allocations and satisfy static analysis that this value
 	// cannot be arbitrarily large.
-	if len(payload) > maxCompressedPayloadSize {
+	if int64(len(payload)) > maxCompressedPayloadSize {
 		return nil, fmt.Errorf("deflate decompress: compressed payload too large: %d > %d", len(payload), maxCompressedPayloadSize)
 	}
 
