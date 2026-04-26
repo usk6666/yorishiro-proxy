@@ -14,14 +14,13 @@
 // session.runUpgradeSSE never sees a streaming body to wrap. The blocker is
 // documented as deferred item D1 in the USK-643 PR description.
 //
-// Until D1 lands, we provide three direct-Wrap integration tests that
-// exercise sse.Wrap → Pipeline.Run → RunSession without involving
-// RunStackSession or any http1 → SSE swap. They cover the recording
-// projection (Stream/Flow rows + sse_event/sse_id/sse_retry_ms metadata),
-// the Send-sentinel programmer-error contract, and the MaxEventSize
-// StreamError + OnComplete error-path projection. The full-chain swap test
-// and the parser-Anomaly test are kept as t.Skip placeholders so the
-// follow-up issues are visible from the test surface.
+// Until D1 lands, we provide direct-Wrap integration tests that exercise
+// sse.Wrap → Pipeline.Run → RunSession without involving RunStackSession
+// or any http1 → SSE swap. They cover the recording projection (Stream/
+// Flow rows + sse_event/sse_id/sse_retry_ms metadata), the Send-sentinel
+// programmer-error contract, the MaxEventSize StreamError + OnComplete
+// error-path projection, and parser anomaly emission (sse_anomaly_*
+// metadata). The full-chain swap test remains t.Skip until D1 lands.
 package sse_test
 
 import (
@@ -603,14 +602,155 @@ func TestSSE_FullChainSwapEndToEnd(t *testing.T) {
 	t.Skip("not yet implemented: http1 streaming-body detach for SSE — D1 follow-up issue, see USK-643 PR description")
 }
 
-// TestSSE_MalformedEventAnomaly is the parser Anomaly emission test.
-// Currently the SSE parser only surfaces oversize events as
-// *layer.StreamError; it has no Anomaly path for "missing data line",
-// mid-event truncation, or other malformed sequences. The
-// envelope.SSEMessage type itself has no Anomalies field.
-//
-// Activating this test requires extending the parser + SSEMessage with an
-// Anomaly emission contract (separate follow-up).
+// errReader wraps an io.Reader and returns a chosen non-EOF error after
+// the underlying reader is exhausted. Used to drive AnomalySSETruncated
+// through the integration stack.
+type errReader struct {
+	r   io.Reader
+	err error
+}
+
+func (e *errReader) Read(p []byte) (int, error) {
+	n, err := e.r.Read(p)
+	if errors.Is(err, io.EOF) {
+		return n, e.err
+	}
+	return n, err
+}
+
+// TestSSE_MalformedEventAnomaly drives three malformed events through the
+// SSE Channel + Pipeline integration and asserts that recoverable parser
+// anomalies project to flow.Flow.Metadata under stable per-type keys
+// (sse_anomaly_missing_data, sse_anomaly_duplicate_id,
+// sse_anomaly_truncated). Stream-terminating problems (oversize event)
+// are out of scope for this test — they remain *layer.StreamError per the
+// USK-656 non-goals.
 func TestSSE_MalformedEventAnomaly(t *testing.T) {
-	t.Skip("not yet implemented: SSE parser anomaly emission")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	const streamID = "sse-stream-anomaly"
+	const evMissingData = "event: ping\nid: m\n\n"   // no data: line
+	const evDupID = "id: 1\nid: 2\ndata: dup\n\n"    // duplicate id:
+	const evTruncated = "event: tail\ndata: partial" // no trailing blank line; reader returns non-EOF error
+
+	wantConnReset := errors.New("connection reset by peer")
+	body := &errReader{
+		r:   strings.NewReader(evMissingData + evDupID + evTruncated),
+		err: wantConnReset,
+	}
+
+	store := &testStore{}
+
+	seed := makeSSESeedRequest(streamID)
+	clientCh := newSeedClientChannel(streamID, seed)
+
+	inner := newInnerStub(streamID)
+	first := makeSSEFirstResponse(streamID, 1)
+	upstreamCh := sse.Wrap(inner, first, body)
+
+	dial := func(_ context.Context, _ *envelope.Envelope) (layer.Channel, error) {
+		return &sseUpstreamAdapter{inner: upstreamCh}, nil
+	}
+
+	p := buildPipeline(store)
+
+	done := make(chan error, 1)
+	go func() {
+		done <- session.RunSession(ctx, clientCh, dial, p, session.SessionOptions{
+			OnComplete: func(cctx context.Context, sid string, err error) {
+				state := "complete"
+				if err != nil && !errors.Is(err, io.EOF) {
+					state = "error"
+				}
+				if sid != "" {
+					_ = store.UpdateStream(cctx, sid, flow.StreamUpdate{
+						State:         state,
+						FailureReason: session.ClassifyError(err),
+					})
+				}
+			},
+		})
+	}()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		recv := store.flowsByDirection("receive")
+		// 1 first-response + 3 SSE event flows = 4
+		if len(recv) >= 4 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	_ = clientCh.Close()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("RunSession returned error: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("RunSession did not return")
+	}
+
+	streams := store.getStreams()
+	if len(streams) != 1 {
+		t.Fatalf("got %d streams, want 1", len(streams))
+	}
+	if streams[0].Protocol != "sse" {
+		t.Errorf("Stream.Protocol = %q, want %q", streams[0].Protocol, "sse")
+	}
+
+	// Filter to SSE-event flows by presence of any sse_* metadata key set
+	// by the parser. The first-response Receive carries an HTTPMessage and
+	// will not match.
+	var sseFlows []*flow.Flow
+	for _, f := range store.flowsByDirection("receive") {
+		if f.Metadata == nil {
+			continue
+		}
+		if f.Metadata["sse_event"] != "" || f.Metadata["sse_id"] != "" ||
+			f.Metadata["sse_anomaly_missing_data"] != "" ||
+			f.Metadata["sse_anomaly_duplicate_id"] != "" ||
+			f.Metadata["sse_anomaly_truncated"] != "" {
+			sseFlows = append(sseFlows, f)
+		}
+	}
+	if len(sseFlows) != 3 {
+		t.Fatalf("got %d SSE event flows, want 3", len(sseFlows))
+	}
+
+	// flow[0] — missing-data event.
+	if got := sseFlows[0].Metadata["sse_anomaly_missing_data"]; got == "" {
+		t.Errorf("flow[0] missing sse_anomaly_missing_data, got Metadata=%v", sseFlows[0].Metadata)
+	}
+	if got := sseFlows[0].Metadata["sse_anomaly_duplicate_id"]; got != "" {
+		t.Errorf("flow[0] should not have sse_anomaly_duplicate_id, got %q", got)
+	}
+	if got := sseFlows[0].Metadata["sse_event"]; got != "ping" {
+		t.Errorf("flow[0] sse_event = %q, want %q", got, "ping")
+	}
+
+	// flow[1] — duplicate-id event.
+	if got := sseFlows[1].Metadata["sse_anomaly_duplicate_id"]; got == "" {
+		t.Errorf("flow[1] missing sse_anomaly_duplicate_id, got Metadata=%v", sseFlows[1].Metadata)
+	}
+	if got := sseFlows[1].Metadata["sse_id"]; got != "2" {
+		t.Errorf("flow[1] sse_id = %q, want %q (last value wins)", got, "2")
+	}
+	if string(sseFlows[1].Body) != "dup" {
+		t.Errorf("flow[1] Body = %q, want %q", string(sseFlows[1].Body), "dup")
+	}
+
+	// flow[2] — truncated event (non-EOF read error mid-event).
+	trunc := sseFlows[2].Metadata["sse_anomaly_truncated"]
+	if trunc == "" {
+		t.Errorf("flow[2] missing sse_anomaly_truncated, got Metadata=%v", sseFlows[2].Metadata)
+	}
+	if !strings.Contains(trunc, wantConnReset.Error()) {
+		t.Errorf("flow[2] sse_anomaly_truncated = %q, want substring %q", trunc, wantConnReset.Error())
+	}
+	if string(sseFlows[2].Body) != "partial" {
+		t.Errorf("flow[2] Body = %q, want %q", string(sseFlows[2].Body), "partial")
+	}
 }

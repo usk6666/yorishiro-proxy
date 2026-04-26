@@ -112,10 +112,11 @@ func (s *sseChannel) Next(ctx context.Context) (*envelope.Envelope, error) {
 	s.mu.Unlock()
 
 	msg := &envelope.SSEMessage{
-		Event: ev.EventType,
-		Data:  ev.Data,
-		ID:    ev.ID,
-		Retry: parseRetry(ev.Retry),
+		Event:     ev.EventType,
+		Data:      ev.Data,
+		ID:        ev.ID,
+		Retry:     parseRetry(ev.Retry),
+		Anomalies: ev.Anomalies,
 	}
 
 	out := &envelope.Envelope{
