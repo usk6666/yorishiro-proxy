@@ -148,6 +148,16 @@ type EnvelopeContext struct {
 
 	// ReceivedAt is the wall-clock time at Next() invocation.
 	ReceivedAt time.Time
+
+	// UpgradePath is the URL path observed on the HTTP Upgrade request that
+	// initiated a non-HTTP protocol (WebSocket via HTTP/1.1 Upgrade, or HTTP/2
+	// CONNECT with :protocol). Populated by the Layer that consumes the Upgrade
+	// (WSLayer at construction in USK-642). Empty for non-upgraded protocols.
+	UpgradePath string
+
+	// UpgradeQuery is the URL query string observed on the HTTP Upgrade
+	// request. Same semantics as UpgradePath. Empty for non-upgraded protocols.
+	UpgradeQuery string
 }
 
 // TLSSnapshot captures TLS connection metadata observed during handshake.
