@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"strings"
+
+	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 )
 
 // SSEEvent represents a single parsed Server-Sent Events event.
@@ -25,6 +27,10 @@ type SSEEvent struct {
 	// RawBytes is the original raw bytes of the event as read from the stream,
 	// including the terminating blank line.
 	RawBytes []byte
+	// Anomalies records parser-detected deviations for this event. Empty
+	// for well-formed events. The parser still returns the event so the
+	// caller sees the partial / suspicious data.
+	Anomalies []envelope.Anomaly
 }
 
 // String returns the reconstructed SSE event in wire format. This is useful
@@ -59,6 +65,12 @@ func (e *SSEEvent) String() string {
 type SSEParser struct {
 	scanner *bufio.Scanner
 	maxSize int
+	// truncated is set after the parser emitted a final event carrying
+	// AnomalySSETruncated. Subsequent Next() calls return io.EOF so the
+	// caller terminates cleanly without re-surfacing the underlying read
+	// error as a stream-level abort (the truncation was already conveyed
+	// via the anomaly).
+	truncated bool
 }
 
 // NewSSEParser creates a new SSEParser that reads events from r.
@@ -80,14 +92,24 @@ func NewSSEParser(r io.Reader, maxEventSize int) *SSEParser {
 // It returns io.EOF when the stream is exhausted. Comment-only blocks
 // (lines starting with ":") are silently consumed; Next advances past them
 // and returns the next real event.
+//
+// Anomaly contract: parser-detected deviations that do NOT terminate the
+// stream surface on the returned event's Anomalies field; the call still
+// succeeds. Stream-terminating problems (oversize event, framing failure)
+// are returned as the error.
 func (p *SSEParser) Next() (*SSEEvent, error) {
+	if p.truncated {
+		return nil, io.EOF
+	}
 	var (
-		eventType string
-		dataParts []string
-		id        string
-		retry     string
-		rawBuf    bytes.Buffer
-		hasFields bool
+		eventType   string
+		dataParts   []string
+		id          string
+		retry       string
+		rawBuf      bytes.Buffer
+		hasFields   bool
+		hasData     bool
+		idSeenCount int
 	)
 
 	for p.scanner.Scan() {
@@ -108,15 +130,8 @@ func (p *SSEParser) Next() (*SSEEvent, error) {
 				rawBuf.Reset()
 				continue
 			}
-			// Build and return the event.
-			data := strings.Join(dataParts, "\n")
-			return &SSEEvent{
-				EventType: eventType,
-				Data:      data,
-				ID:        id,
-				Retry:     retry,
-				RawBytes:  copyBytes(rawBuf.Bytes()),
-			}, nil
+			return buildEvent(eventType, dataParts, id, retry,
+				rawBuf.Bytes(), hasData, idSeenCount, nil), nil
 		}
 
 		// Comment line (starts with ":").
@@ -134,11 +149,13 @@ func (p *SSEParser) Next() (*SSEEvent, error) {
 		case "data":
 			dataParts = append(dataParts, fieldValue)
 			hasFields = true
+			hasData = true
 		case "id":
 			// Per spec: if the field value does not contain U+0000 NULL,
 			// set the last event ID buffer. We ignore NULL check for simplicity.
 			id = fieldValue
 			hasFields = true
+			idSeenCount++
 		case "retry":
 			retry = fieldValue
 			hasFields = true
@@ -149,24 +166,65 @@ func (p *SSEParser) Next() (*SSEEvent, error) {
 		}
 	}
 
-	if err := p.scanner.Err(); err != nil {
-		return nil, fmt.Errorf("SSE parse error: %w", err)
-	}
+	scanErr := p.scanner.Err()
 
 	// Stream ended. If we have accumulated fields, emit a final event.
-	// This handles the case where the stream closes without a trailing blank line.
+	// A non-EOF read error mid-event is flagged as AnomalySSETruncated and
+	// the partial event is still returned so the analyst can see what was
+	// captured before the read failed; subsequent Next() returns io.EOF.
 	if hasFields {
-		data := strings.Join(dataParts, "\n")
-		return &SSEEvent{
-			EventType: eventType,
-			Data:      data,
-			ID:        id,
-			Retry:     retry,
-			RawBytes:  copyBytes(rawBuf.Bytes()),
-		}, nil
+		if scanErr != nil {
+			p.truncated = true
+		}
+		return buildEvent(eventType, dataParts, id, retry,
+			rawBuf.Bytes(), hasData, idSeenCount, scanErr), nil
 	}
 
+	if scanErr != nil {
+		return nil, fmt.Errorf("SSE parse error: %w", scanErr)
+	}
 	return nil, io.EOF
+}
+
+// buildEvent assembles an SSEEvent from accumulated parser state and
+// attaches anomalies for recoverable deviations. scanErr, when non-nil,
+// is treated as a mid-event truncation marker.
+func buildEvent(
+	eventType string,
+	dataParts []string,
+	id, retry string,
+	raw []byte,
+	hasData bool,
+	idSeenCount int,
+	scanErr error,
+) *SSEEvent {
+	var anomalies []envelope.Anomaly
+	if !hasData {
+		anomalies = append(anomalies, envelope.Anomaly{
+			Type:   envelope.AnomalySSEMissingData,
+			Detail: "event terminated without a data: line",
+		})
+	}
+	if idSeenCount > 1 {
+		anomalies = append(anomalies, envelope.Anomaly{
+			Type:   envelope.AnomalySSEDuplicateID,
+			Detail: fmt.Sprintf("event has %d id: lines (last value wins)", idSeenCount),
+		})
+	}
+	if scanErr != nil {
+		anomalies = append(anomalies, envelope.Anomaly{
+			Type:   envelope.AnomalySSETruncated,
+			Detail: fmt.Sprintf("stream ended mid-event: %v", scanErr),
+		})
+	}
+	return &SSEEvent{
+		EventType: eventType,
+		Data:      strings.Join(dataParts, "\n"),
+		ID:        id,
+		Retry:     retry,
+		RawBytes:  copyBytes(raw),
+		Anomalies: anomalies,
+	}
 }
 
 // parseSSEField splits an SSE line into field name and value.
