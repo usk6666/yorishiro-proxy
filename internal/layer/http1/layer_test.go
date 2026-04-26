@@ -181,6 +181,174 @@ func TestLayer_CloseAfterDetach_DoesNotCloseConn(t *testing.T) {
 	server.Close()
 }
 
+// --- Streaming-body detach (USK-655) ---
+
+// TestIsSSEResponse covers the canonical predicate.
+func TestIsSSEResponse(t *testing.T) {
+	tests := []struct {
+		name string
+		resp *parser.RawResponse
+		want bool
+	}{
+		{name: "nil response", resp: nil, want: false},
+		{name: "200 + text/event-stream", resp: &parser.RawResponse{StatusCode: 200, Headers: parser.RawHeaders{{Name: "Content-Type", Value: "text/event-stream"}}}, want: true},
+		{name: "200 + text/event-stream;charset=utf-8", resp: &parser.RawResponse{StatusCode: 200, Headers: parser.RawHeaders{{Name: "Content-Type", Value: "text/event-stream;charset=utf-8"}}}, want: true},
+		{name: "case-insensitive match", resp: &parser.RawResponse{StatusCode: 200, Headers: parser.RawHeaders{{Name: "content-type", Value: "Text/Event-Stream"}}}, want: true},
+		{name: "206 still SSE (server's choice)", resp: &parser.RawResponse{StatusCode: 206, Headers: parser.RawHeaders{{Name: "Content-Type", Value: "text/event-stream"}}}, want: true},
+		{name: "404 + event-stream rejected", resp: &parser.RawResponse{StatusCode: 404, Headers: parser.RawHeaders{{Name: "Content-Type", Value: "text/event-stream"}}}, want: false},
+		{name: "200 + text/plain rejected", resp: &parser.RawResponse{StatusCode: 200, Headers: parser.RawHeaders{{Name: "Content-Type", Value: "text/plain"}}}, want: false},
+		{name: "200 + no Content-Type rejected", resp: &parser.RawResponse{StatusCode: 200}, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := IsSSEResponse(tt.resp); got != tt.want {
+				t.Errorf("IsSSEResponse = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestLayer_StreamingResponseDetect_BypassesBodyDrain verifies that when
+// the predicate matches, Channel.Next returns the response Envelope with
+// an empty body and DetachStreamingBody yields the still-pending body
+// reader (which the swap orchestrator will hand to sse.Wrap).
+func TestLayer_StreamingResponseDetect_BypassesBodyDrain(t *testing.T) {
+	client, server := testConn(t)
+	defer client.Close()
+
+	l := New(server, "stream-1", envelope.Receive,
+		WithStreamingResponseDetect(IsSSEResponse))
+
+	// Headers + the start of an SSE body. The body intentionally has no
+	// terminator so any reader that tries to drain it would block.
+	resp := "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n" +
+		"event: ping\ndata: 1\n\n"
+	go func() {
+		_, _ = client.Write([]byte(resp))
+	}()
+
+	ch := <-l.Channels()
+	env, err := ch.Next(context.Background())
+	if err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+	msg := env.Message.(*envelope.HTTPMessage)
+	if msg.Status != 200 {
+		t.Errorf("Status = %d, want 200", msg.Status)
+	}
+	if len(msg.Body) != 0 || msg.BodyBuffer != nil {
+		t.Errorf("body should not be drained; got Body=%q BodyBuffer=%v", msg.Body, msg.BodyBuffer)
+	}
+
+	body, err := l.DetachStreamingBody()
+	if err != nil {
+		t.Fatalf("DetachStreamingBody: %v", err)
+	}
+	defer body.Close()
+
+	got := make([]byte, len("event: ping\ndata: 1\n\n"))
+	if _, err := io.ReadFull(body, got); err != nil {
+		t.Fatalf("ReadFull: %v", err)
+	}
+	if string(got) != "event: ping\ndata: 1\n\n" {
+		t.Errorf("body = %q, want SSE event prefix", got)
+	}
+}
+
+// TestLayer_StreamingResponseDetect_NotMatched_DrainsNormally verifies
+// that a non-matching response (e.g. text/plain) still gets its body
+// drained as usual — the detect option is opt-in per response.
+func TestLayer_StreamingResponseDetect_NotMatched_DrainsNormally(t *testing.T) {
+	client, server := testConn(t)
+	defer client.Close()
+	defer server.Close()
+
+	l := New(server, "stream-1", envelope.Receive,
+		WithStreamingResponseDetect(IsSSEResponse))
+	defer l.Close()
+
+	resp := "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 5\r\n\r\nhello"
+	go func() {
+		_, _ = client.Write([]byte(resp))
+		_ = client.Close()
+	}()
+
+	ch := <-l.Channels()
+	env, err := ch.Next(context.Background())
+	if err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+	msg := env.Message.(*envelope.HTTPMessage)
+	if string(msg.Body) != "hello" {
+		t.Errorf("Body = %q, want hello (drained normally)", msg.Body)
+	}
+	if _, err := l.DetachStreamingBody(); err == nil {
+		t.Error("DetachStreamingBody should error when predicate did not match")
+	}
+}
+
+// TestLayer_DetachStreamingBody_BeforeNext_Errors verifies the precondition.
+func TestLayer_DetachStreamingBody_BeforeNext_Errors(t *testing.T) {
+	_, server := testConn(t)
+	defer server.Close()
+
+	l := New(server, "stream-1", envelope.Receive,
+		WithStreamingResponseDetect(IsSSEResponse))
+	defer l.Close()
+
+	if _, err := l.DetachStreamingBody(); err == nil {
+		t.Error("DetachStreamingBody before Next should error")
+	}
+}
+
+// TestLayer_DetachStreamingBody_AfterDetachStream_Errors verifies that the
+// two detach paths are mutually exclusive.
+func TestLayer_DetachStreamingBody_AfterDetachStream_Errors(t *testing.T) {
+	_, server := testConn(t)
+	defer server.Close()
+
+	l := New(server, "stream-1", envelope.Receive,
+		WithStreamingResponseDetect(IsSSEResponse))
+
+	if _, _, _, err := l.DetachStream(); err != nil {
+		t.Fatalf("DetachStream: %v", err)
+	}
+	if _, err := l.DetachStreamingBody(); err == nil {
+		t.Error("DetachStreamingBody after DetachStream should error")
+	}
+}
+
+// TestLayer_StreamingBody_Close_ClosesConn verifies that closing the
+// io.ReadCloser returned by DetachStreamingBody closes the underlying
+// connection (ownership transfer parity with DetachStream).
+func TestLayer_StreamingBody_Close_ClosesConn(t *testing.T) {
+	client, server := testConn(t)
+	defer client.Close()
+
+	l := New(server, "stream-1", envelope.Receive,
+		WithStreamingResponseDetect(IsSSEResponse))
+
+	resp := "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\nx"
+	go func() { _, _ = client.Write([]byte(resp)) }()
+
+	ch := <-l.Channels()
+	if _, err := ch.Next(context.Background()); err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+	body, err := l.DetachStreamingBody()
+	if err != nil {
+		t.Fatalf("DetachStreamingBody: %v", err)
+	}
+	if err := body.Close(); err != nil {
+		t.Errorf("body.Close: %v", err)
+	}
+	// After body.Close, the server side conn is closed; reading from
+	// the client side returns EOF (or a connection-closed error).
+	if _, err := server.Write([]byte("post-close")); err == nil {
+		t.Error("expected error writing to closed conn after body.Close")
+	}
+}
+
 // --- Channel.Next() tests ---
 
 func TestChannel_NextRequest(t *testing.T) {

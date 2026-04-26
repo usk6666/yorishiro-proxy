@@ -55,6 +55,12 @@ type UpgradeNotice struct {
 	// to construct the post-upgrade Layer without re-dialing. Set exactly
 	// once by RunSession before OnComplete fires.
 	upstreamCh layer.Channel
+	// sseFirstResp caches the actual SSE first response envelope captured
+	// by UpgradeStep when it latches pending=UpgradeSSE. runUpgradeSSE
+	// hands this to sse.Wrap together with WithSkipFirstEmit so the
+	// production swap path uses real headers and Context (not a synthesized
+	// placeholder) without re-recording the response post-swap.
+	sseFirstResp *envelope.Envelope
 }
 
 // markSendUpgrade is called by UpgradeStep when it observes a Send envelope
@@ -118,6 +124,59 @@ func (n *UpgradeNotice) Upstream() layer.Channel {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	return n.upstreamCh
+}
+
+// attachSSEFirstResponse caches a defensive deep-clone of the first SSE
+// response envelope so runUpgradeSSE can supply real headers / Context to
+// sse.Wrap. Called by UpgradeStep when it latches pending=UpgradeSSE.
+//
+// We deep-clone because the Pipeline may mutate env.Message downstream of
+// UpgradeStep (e.g. Transform Step swapping headers); the cache must
+// remain stable for the post-swap consumer.
+func (n *UpgradeNotice) attachSSEFirstResponse(env *envelope.Envelope) {
+	if n == nil || env == nil {
+		return
+	}
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.sseFirstResp = cloneEnvelope(env)
+}
+
+// SSEFirstResponse returns the cached first SSE response envelope, or
+// nil if attachSSEFirstResponse was never called.
+func (n *UpgradeNotice) SSEFirstResponse() *envelope.Envelope {
+	if n == nil {
+		return nil
+	}
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.sseFirstResp
+}
+
+// cloneEnvelope returns a defensive deep clone of env. Message is cloned
+// via its CloneMessage method; Raw is byte-copied. Opaque is dropped — the
+// cached envelope is for read-only consumption, not for re-sending on the
+// wire.
+func cloneEnvelope(env *envelope.Envelope) *envelope.Envelope {
+	if env == nil {
+		return nil
+	}
+	out := &envelope.Envelope{
+		StreamID:  env.StreamID,
+		FlowID:    env.FlowID,
+		Sequence:  env.Sequence,
+		Direction: env.Direction,
+		Protocol:  env.Protocol,
+		Context:   env.Context,
+	}
+	if len(env.Raw) > 0 {
+		out.Raw = make([]byte, len(env.Raw))
+		copy(out.Raw, env.Raw)
+	}
+	if env.Message != nil {
+		out.Message = env.Message.CloneMessage()
+	}
+	return out
 }
 
 // upgradeNoticeKey is the unique context key under which the UpgradeNotice
@@ -192,7 +251,9 @@ func (s *UpgradeStep) Process(ctx context.Context, env *envelope.Envelope) pipel
 			return pipeline.Result{}
 		}
 		if isSSEResponse(msg) {
-			notice.trySetPending(UpgradeSSE)
+			if notice.trySetPending(UpgradeSSE) {
+				notice.attachSSEFirstResponse(env)
+			}
 		}
 	}
 	return pipeline.Result{}

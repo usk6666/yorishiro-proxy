@@ -25,22 +25,53 @@
 package sse_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/usk6666/yorishiro-proxy/internal/connector"
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/layer"
+	"github.com/usk6666/yorishiro-proxy/internal/layer/http1"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/sse"
 	"github.com/usk6666/yorishiro-proxy/internal/pipeline"
 	"github.com/usk6666/yorishiro-proxy/internal/session"
 )
+
+// pipePair returns a TCP loopback pair (a is the "browser" side, b is the
+// "proxy" side). Mirrors the same helper in session_upgrade_test.go; we
+// keep an inline copy because Go does not let test files import each
+// other's helpers across packages.
+func pipePair() (a, b net.Conn) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		panic(err)
+	}
+	defer ln.Close()
+	ch := make(chan net.Conn, 1)
+	go func() {
+		c, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		ch <- c
+	}()
+	a, err = net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		panic(err)
+	}
+	b = <-ch
+	return
+}
 
 // ---------------------------------------------------------------------------
 // Test infrastructure
@@ -581,26 +612,246 @@ func TestSSE_DirectChannelOversizeProducesStreamError(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // TestSSE_FullChainSwapEndToEnd is the full http1 → SSE swap e2e test
-// originally specified in USK-653. It is currently skipped because
-// http1.channel.Next drains the response body before returning the response
-// envelope; production SSE streaming requires an http1 streaming-body
-// detach primitive (D1, see USK-643 PR description).
+// originally specified in USK-653 and unblocked by USK-655 (http1
+// streaming-body detach). It exercises the production path:
 //
-// Acceptance criteria that activate when D1 lands:
+//  1. Upstream serves a 200 text/event-stream response and emits three
+//     events on the same connection.
+//  2. The request flows through MITM as HTTP/1.x; UpgradeStep observes
+//     text/event-stream on the response, latches Pending=UpgradeSSE, and
+//     caches the response envelope for runUpgradeSSE.
+//  3. RunStackSession.runUpgradeSSE calls upstreamHTTP.DetachStreamingBody
+//     (the body was NOT drained because of WithStreamingResponseDetect),
+//     constructs sse.Wrap with WithSkipFirstEmit, and recursively re-runs
+//     RunSession.
+//  4. Client receives all three events byte-for-byte.
 //
-//  1. A real upstream serves a 200 text/event-stream response and emits
-//     three events.
-//  2. The request flows through MITM as HTTP/1.x; the response triggers
-//     UpgradeStep + UpgradeNotice with Pending() == UpgradeSSE.
-//  3. RunStackSession.runUpgradeSSE detaches the upstream http1 wire,
-//     constructs sse.Wrap on the body, and recursively re-runs RunSession.
-//  4. The client receives all three events byte-for-byte.
-//  5. Recording shows exactly one Stream (Protocol="sse") with the
-//     pre-swap Send flow and three post-swap Receive flows.
-//  6. No envelope is recorded twice across the swap (no double-recording
-//     of the first response envelope).
+// Recording shape: one Stream (Protocol="http" since the seed is a GET);
+// pre-swap = 1 Send (GET) + 1 Receive (header-only 200, body deferred);
+// post-swap = 3 Receive (SSE events). The 200 response is recorded
+// EXACTLY ONCE — sse.Wrap with WithSkipFirstEmit suppresses the
+// post-swap re-emit per the USK-655 "no double recording" requirement.
 func TestSSE_FullChainSwapEndToEnd(t *testing.T) {
-	t.Skip("not yet implemented: http1 streaming-body detach for SSE — D1 follow-up issue, see USK-643 PR description")
+	clientA, clientB := pipePair()
+	defer clientA.Close()
+	upstreamA, upstreamB := pipePair()
+	defer upstreamB.Close()
+
+	store := &testStore{}
+
+	stack := connector.NewConnectionStack("sse-fullchain-conn")
+	clientLayer := http1.New(clientB, "client-stream", envelope.Send,
+		http1.WithScheme("https"))
+	upstreamLayer := http1.New(upstreamA, "upstream-stream", envelope.Receive,
+		http1.WithScheme("https"),
+		http1.WithStreamingResponseDetect(http1.IsSSEResponse))
+	stack.PushClient(clientLayer)
+	stack.PushUpstream(upstreamLayer)
+
+	// Browser-side: three-phase choreography around the cancel-and-restart
+	// caveat. http1.channel.Next does not honor ctx, so the proxy's
+	// clientToUpstream goroutine is parked on a blocking parser call after
+	// the upgrade is detected. We unblock it cleanly via TCP half-close
+	// (CloseWrite) on the browser side: the proxy's client read returns
+	// io.EOF, and clientToUpstream's upgradePending check (in session.go)
+	// converts that to ErrUpgradePending so the swap can run.
+	//
+	// Order matters: if we wait for events before half-closing,
+	// clientToUpstream stays blocked → RunSession never returns
+	// ErrUpgradePending → runUpgradeSSE never installs the SSE adapter →
+	// no events ever flow. So:
+	//   1. Send the GET.
+	//   2. Read until the 200 OK header block arrives (\r\n\r\n).
+	//   3. Half-close the write side immediately so the proxy's parser
+	//      sees EOF and clientToUpstream returns ErrUpgradePending.
+	//   4. Continue reading; the swap installs sse.Wrap and runUpgradeSSE
+	//      forwards the upstream body bytes (events) to us via TeeReader.
+	//
+	// We use CloseWrite (not Close) so the read direction stays open for
+	// Phase 3 — the proxy still writes events back over clientB→clientA.
+	const event = "event: ping\ndata: %d\nid: %d\nretry: 3000\n\n"
+	clientReadDone := make(chan struct{})
+	clientReceived := make(chan []byte, 1)
+	go func() {
+		defer close(clientReadDone)
+		_, _ = clientA.Write([]byte("GET /events HTTP/1.1\r\n" +
+			"Host: example.com\r\n" +
+			"Accept: text/event-stream\r\n" +
+			"\r\n"))
+
+		all := make([]byte, 0, 4096)
+		buf := make([]byte, 1024)
+
+		// Phase 1: wait for the 200 OK header block.
+		headerDeadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(headerDeadline) {
+			_ = clientA.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+			n, _ := clientA.Read(buf)
+			if n > 0 {
+				all = append(all, buf[:n]...)
+			}
+			if bytes.Contains(all, []byte("\r\n\r\n")) {
+				break
+			}
+		}
+
+		// Phase 2: half-close write so the proxy's client-side parser
+		// sees clean EOF. With Pending=UpgradeSSE already latched, the
+		// upgradePending-before-EOF check in clientToUpstream converts
+		// that to ErrUpgradePending (no phantom envelope, no second
+		// Stream record from a partially-parsed malformed request).
+		if cw, ok := clientA.(interface{ CloseWrite() error }); ok {
+			_ = cw.CloseWrite()
+		}
+
+		// Phase 3: drain events from the post-swap upstream.
+		eventDeadline := time.Now().Add(3 * time.Second)
+		for time.Now().Before(eventDeadline) {
+			_ = clientA.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+			n, _ := clientA.Read(buf)
+			if n > 0 {
+				all = append(all, buf[:n]...)
+			}
+			if bytes.Count(all, []byte("\n\n")) >= 4 { // headers + 3 events
+				break
+			}
+		}
+		_ = clientA.SetReadDeadline(time.Time{})
+		clientReceived <- all
+	}()
+
+	// Server-side: read the request, write 200 + 3 events on the same wire.
+	go func() {
+		buf := make([]byte, 4096)
+		_, _ = upstreamB.Read(buf)
+
+		_, _ = upstreamB.Write([]byte("HTTP/1.1 200 OK\r\n" +
+			"Content-Type: text/event-stream\r\n" +
+			"\r\n"))
+		for i := 1; i <= 3; i++ {
+			_, _ = upstreamB.Write([]byte(fmt.Sprintf(event, i, i)))
+		}
+		// Hold the conn open briefly so the proxy goroutine has time to
+		// parse all three events before we tear down.
+		time.Sleep(200 * time.Millisecond)
+		_ = upstreamB.Close()
+	}()
+
+	dial := func(_ context.Context, _ *envelope.Envelope) (layer.Channel, error) {
+		ch, ok := <-upstreamLayer.Channels()
+		if !ok {
+			return nil, errors.New("upstream Channels closed before yielding")
+		}
+		return ch, nil
+	}
+
+	// UpgradeStep MUST run after RecordStep (R1).
+	p := pipeline.New(
+		pipeline.NewRecordStep(store, slog.Default()),
+		session.NewUpgradeStep(),
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- session.RunStackSession(ctx, stack, dial, p, session.SessionOptions{
+			OnComplete: func(cctx context.Context, sid string, err error) {
+				state := "complete"
+				if err != nil && !errors.Is(err, io.EOF) {
+					state = "error"
+				}
+				if sid != "" {
+					_ = store.UpdateStream(cctx, sid, flow.StreamUpdate{
+						State:         state,
+						FailureReason: session.ClassifyError(err),
+					})
+				}
+			},
+		})
+	}()
+
+	// Wait for the swap to install the SSE adapter on the upstream side.
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		top := stack.UpstreamTopmost()
+		if top != upstreamLayer {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if top := stack.UpstreamTopmost(); top == upstreamLayer {
+		t.Errorf("upstream topmost still original http1.Layer; swap did not install SSE adapter")
+	}
+
+	// Tear down: close pipes so the recursive RunSession returns.
+	_ = clientA.Close()
+	_ = upstreamB.Close()
+	<-clientReadDone
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Error("RunStackSession did not return after teardown")
+	}
+
+	// --- Client-side wire receipt ---
+	wire := <-clientReceived
+	for i := 1; i <= 3; i++ {
+		want := fmt.Sprintf(event, i, i)
+		if !bytes.Contains(wire, []byte(want)) {
+			t.Errorf("client wire missing event %d (%q); wire=%q", i, want, wire)
+		}
+	}
+
+	// --- Recording shape ---
+	streams := store.getStreams()
+	if len(streams) != 1 {
+		t.Fatalf("got %d streams, want 1", len(streams))
+	}
+	streamID := streams[0].ID
+
+	sendFlows := store.flowsByDirection("send")
+	if len(sendFlows) != 1 {
+		t.Errorf("got %d send flows, want 1 (the GET)", len(sendFlows))
+	}
+
+	// Filter to the SSE-event flows by sse_event metadata; the pre-swap
+	// HTTP response Receive carries an HTTPMessage and won't match.
+	recvFlows := store.flowsByDirection("receive")
+	var sseFlows, httpFlows []*flow.Flow
+	for _, f := range recvFlows {
+		if f.StreamID != streamID {
+			t.Errorf("receive flow on unexpected stream %q (want %q): %+v", f.StreamID, streamID, f)
+			continue
+		}
+		if f.Metadata != nil && f.Metadata["sse_event"] != "" {
+			sseFlows = append(sseFlows, f)
+		} else {
+			httpFlows = append(httpFlows, f)
+		}
+	}
+	if len(sseFlows) != 3 {
+		t.Errorf("got %d SSE event flows, want 3", len(sseFlows))
+	}
+	// The pre-swap 200 response is recorded exactly once (header-only,
+	// body deferred to sse.Wrap). WithSkipFirstEmit prevents the post-
+	// swap re-emit; if it fired we would see 2 HTTP receive flows.
+	if len(httpFlows) != 1 {
+		t.Errorf("got %d HTTP receive flows, want 1 (no double-recording across swap)", len(httpFlows))
+	}
+
+	// SSE event flows carry the SSE event payloads byte-perfect.
+	for i, f := range sseFlows {
+		want := fmt.Sprintf("%d", i+1)
+		if string(f.Body) != want {
+			t.Errorf("SSE flow[%d].Body = %q, want %q", i, f.Body, want)
+		}
+		if f.Metadata["sse_event"] != "ping" {
+			t.Errorf("SSE flow[%d].sse_event = %q, want ping", i, f.Metadata["sse_event"])
+		}
+	}
 }
 
 // TestSSE_MalformedEventAnomaly is the parser Anomaly emission test.
