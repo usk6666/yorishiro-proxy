@@ -87,6 +87,21 @@ func (s *stubInner) MarkTerminatedWithRST(code uint32, err error) {
 	s.rstErr = err
 }
 
+// signalTermDoneOnly closes the stub's termDone channel without closing
+// the recv buffer. Mirrors the inner h2 channel's gracefulCloseStream
+// path (RFC-001 §9.1) where RST_STREAM(NO_ERROR) closes termDone while
+// the recv chan still holds buffered Headers/Data/Trailers events.
+// Used to verify the wrapper drains those events before propagating EOF.
+func (s *stubInner) signalTermDoneOnly() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	select {
+	case <-s.termDone:
+	default:
+		close(s.termDone)
+	}
+}
+
 // pushHeaders adds an H2HeadersEvent envelope to the inner queue.
 func (s *stubInner) pushHeaders(dir envelope.Direction, raw []byte, evt *http2.H2HeadersEvent) {
 	s.mu.Lock()
@@ -658,6 +673,102 @@ func TestChannel_NonSyntheticFirstHeadersReplayed(t *testing.T) {
 	sm := env.Message.(*envelope.GRPCStartMessage)
 	if sm.Service != "svc.X" || sm.Method != "Y" {
 		t.Errorf("Service/Method = (%q, %q), want (svc.X, Y)", sm.Service, sm.Method)
+	}
+}
+
+// ----------------------------------------------------------------------
+// USK-662: drain queued + inner-buffered events after early inner
+// termination. Reproduces the upstream-side bug where RST_STREAM(NO_ERROR)
+// fires the inner h2 channel's Closed() while response Headers/Data/
+// Trailers are still buffered in the inner recv chan. The wrapper must
+// surface all three gRPC envelopes before propagating io.EOF.
+// ----------------------------------------------------------------------
+
+func TestChannel_DrainsQueuedAndBufferedAfterEarlyInnerTermination(t *testing.T) {
+	t.Parallel()
+	stub := newStubInner("stream-1")
+	// Buffer the response: HEADERS + 1 DATA + TRAILERS, all on the recv side.
+	stub.pushHeaders(envelope.Receive, []byte("HPACK-resp"), &http2.H2HeadersEvent{
+		Status: 200,
+		Headers: []envelope.KeyValue{
+			{Name: "content-type", Value: "application/grpc"},
+		},
+	})
+	stub.pushData(envelope.Receive, makeLPM(false, []byte("hello")), false)
+	stub.pushTrailers(envelope.Receive, []byte("HPACK-trailers"), []envelope.KeyValue{
+		{Name: "grpc-status", Value: "0"},
+	})
+
+	// Simulate gracefulCloseStream: close termDone before the consumer has
+	// called Next at all. Inner recv chan still holds the three buffered
+	// envelopes — the wrapper must drain them despite Closed() firing.
+	stub.signalTermDoneOnly()
+
+	ch := Wrap(stub, nil, RoleClient)
+	defer ch.Close()
+
+	envs := drainNext(t, ch, 3)
+	if _, ok := envs[0].Message.(*envelope.GRPCStartMessage); !ok {
+		t.Fatalf("envs[0].Message = %T, want *GRPCStartMessage", envs[0].Message)
+	}
+	dm, ok := envs[1].Message.(*envelope.GRPCDataMessage)
+	if !ok {
+		t.Fatalf("envs[1].Message = %T, want *GRPCDataMessage", envs[1].Message)
+	}
+	if !bytes.Equal(dm.Payload, []byte("hello")) {
+		t.Errorf("Data.Payload = %q, want hello", dm.Payload)
+	}
+	end, ok := envs[2].Message.(*envelope.GRPCEndMessage)
+	if !ok {
+		t.Fatalf("envs[2].Message = %T, want *GRPCEndMessage", envs[2].Message)
+	}
+	if end.Status != 0 {
+		t.Errorf("End.Status = %d, want 0 (OK)", end.Status)
+	}
+
+	// After draining the buffered events, the next Next must return EOF
+	// (stub recv exhausted; recvErr defaults to nil → stub returns io.EOF).
+	if _, err := ch.Next(context.Background()); !errors.Is(err, io.EOF) {
+		t.Errorf("Next after drain: err = %v, want io.EOF", err)
+	}
+
+	// Closed() must already be signaled (watchInnerClose forwarded the
+	// termDone close immediately at Wrap time).
+	select {
+	case <-ch.Closed():
+	case <-time.After(time.Second):
+		t.Fatalf("Closed() did not fire after inner termDone signaled")
+	}
+}
+
+// TestChannel_DropsNoQueuedEnvelopeOnLateTermination is the focused
+// regression for the specific drop in USK-662 root-cause #1: an envelope
+// queued by absorbHeaders during one Next call must survive a termErr
+// set between iterations of the same loop.
+func TestChannel_DropsNoQueuedEnvelopeOnLateTermination(t *testing.T) {
+	t.Parallel()
+	stub := newStubInner("stream-1")
+	stub.pushHeaders(envelope.Receive, []byte("HPACK-resp"), &http2.H2HeadersEvent{
+		Status: 200,
+		Headers: []envelope.KeyValue{
+			{Name: "content-type", Value: "application/grpc"},
+		},
+	})
+
+	ch := Wrap(stub, nil, RoleClient)
+	defer ch.Close()
+
+	// Race window: signal termDone immediately so watchInnerClose may set
+	// the wrapper's terminal signal at any point during or after the first
+	// Next call. The first envelope must still be returned.
+	stub.signalTermDoneOnly()
+
+	env, err := ch.Next(context.Background())
+	if err != nil {
+		t.Fatalf("Next: err = %v, want first envelope (queued ahead of termErr)", err)
+	}
+	if _, ok := env.Message.(*envelope.GRPCStartMessage); !ok {
+		t.Fatalf("envs[0].Message = %T, want *GRPCStartMessage", env.Message)
 	}
 }
 
