@@ -421,7 +421,9 @@ func projectWSMessage(m *envelope.WSMessage, fl *flow.Flow) {
 // grpc_method are always present (RPC identity); content_type and encoding
 // are conditional on non-empty values to avoid fabricating wire fields.
 // Metadata KeyValues project to Flow.Headers via the same multimap shape
-// as HTTPMessage.
+// as HTTPMessage. Parser-detected Anomalies project into stable per-type
+// grpc_anomaly_* keys (USK-659); stream-terminating problems surface as
+// *layer.StreamError elsewhere and never reach this slice.
 func projectGRPCStart(m *envelope.GRPCStartMessage, fl *flow.Flow) {
 	fl.Metadata["grpc_event"] = "start"
 	fl.Metadata["grpc_service"] = m.Service
@@ -434,6 +436,29 @@ func projectGRPCStart(m *envelope.GRPCStartMessage, fl *flow.Flow) {
 	}
 	if hdrs := keyValuesToMap(m.Metadata); hdrs != nil {
 		fl.Headers = hdrs
+	}
+	for _, a := range m.Anomalies {
+		key := grpcAnomalyMetadataKey(a.Type)
+		if key == "" {
+			continue
+		}
+		fl.Metadata[key] = a.Detail
+	}
+}
+
+// grpcAnomalyMetadataKey returns the stable Metadata key under which a
+// gRPC-Web anomaly's Detail is recorded. Returns empty for unknown / non-
+// gRPC anomaly types so projection silently drops them.
+func grpcAnomalyMetadataKey(t envelope.AnomalyType) string {
+	switch t {
+	case envelope.AnomalyMalformedGRPCWebBase64:
+		return "grpc_anomaly_malformed_base64"
+	case envelope.AnomalyMalformedGRPCWebLPM:
+		return "grpc_anomaly_malformed_lpm"
+	case envelope.AnomalyMalformedGRPCWebTrailer:
+		return "grpc_anomaly_malformed_trailer"
+	default:
+		return ""
 	}
 }
 
