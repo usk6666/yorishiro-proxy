@@ -1214,6 +1214,245 @@ func TestFormatGRPCTimeout(t *testing.T) {
 	}
 }
 
+// ----------------------------------------------------------------------
+// USK-663: EndStream propagation (request-side terminator)
+// ----------------------------------------------------------------------
+
+// absorbData attaches H2DataEvent.EndStream to the trailing LPM produced
+// from the same DATA frame. Earlier LPMs in the same payload are
+// followed by more bytes within that frame and must not carry the bit.
+func TestChannel_EndStreamFusedWithLastLPM(t *testing.T) {
+	t.Parallel()
+	stub := newStubInner("stream-1")
+	stub.pushHeaders(envelope.Send, []byte("HPACK"), requestStartHeaders("/svc.S/M"))
+
+	a := makeLPM(false, []byte("aaaa"))
+	b := makeLPM(false, []byte("bbbbb"))
+	all := append(append([]byte{}, a...), b...)
+	stub.pushData(envelope.Send, all, true)
+
+	ch := Wrap(stub, nil, RoleServer)
+	defer ch.Close()
+
+	envs := drainNext(t, ch, 3) // Start + 2 Data
+	first := envs[1].Message.(*envelope.GRPCDataMessage)
+	last := envs[2].Message.(*envelope.GRPCDataMessage)
+	if first.EndStream {
+		t.Errorf("envs[1].EndStream = true, want false (only the trailing LPM in the same DATA frame owns the bit)")
+	}
+	if !last.EndStream {
+		t.Errorf("envs[2].EndStream = false, want true (trailing LPM of an END_STREAM frame)")
+	}
+}
+
+// absorbData synthesizes an end-marker envelope when the terminating
+// frame carries no payload — the canonical gRPC-Go CloseSend pattern of
+// `DATA(payload=msg) DATA(payload=, END_STREAM=1)`. The previously-
+// emitted LPM keeps EndStream=false (it was not the wire-frame that
+// carried the bit); a synthetic Payload=nil, EndStream=true envelope is
+// emitted on top so Send can faithfully forward DATA(empty, END_STREAM=1).
+func TestChannel_EndStreamOnTrailingEmptyDataEmitsMarkerEnvelope(t *testing.T) {
+	t.Parallel()
+	stub := newStubInner("stream-1")
+	stub.pushHeaders(envelope.Send, []byte("HPACK"), requestStartHeaders("/svc.S/M"))
+	stub.pushData(envelope.Send, makeLPM(false, []byte("payload")), false)
+	stub.pushData(envelope.Send, []byte{}, true) // trailing empty DATA(EndStream=1)
+
+	ch := Wrap(stub, nil, RoleServer)
+	defer ch.Close()
+
+	envs := drainNext(t, ch, 3) // Start + LPM Data + end-marker Data
+
+	lpm := envs[1].Message.(*envelope.GRPCDataMessage)
+	if lpm.EndStream {
+		t.Errorf("LPM envelope EndStream = true, want false (DATA frame carrying the LPM had end=0)")
+	}
+	if string(lpm.Payload) != "payload" {
+		t.Errorf("LPM Payload = %q, want %q", lpm.Payload, "payload")
+	}
+
+	marker := envs[2].Message.(*envelope.GRPCDataMessage)
+	if !marker.EndStream {
+		t.Errorf("marker envelope EndStream = false, want true")
+	}
+	if marker.Payload != nil || marker.WireLength != 0 || marker.Compressed {
+		t.Errorf("marker shape = (Payload=%q, WireLength=%d, Compressed=%v), want all-zero",
+			marker.Payload, marker.WireLength, marker.Compressed)
+	}
+	if envs[2].Raw != nil {
+		t.Errorf("marker Raw = %x, want nil (no LPM bytes for an end-marker frame)", envs[2].Raw)
+	}
+}
+
+// END_STREAM on a frame that completes a partial LPM in mid-payload
+// must surface as *layer.StreamError{ErrorProtocol} — gRPC requires
+// LPMs to be wire-aligned at termination.
+func TestChannel_EndStreamMidLPMIsProtocolError(t *testing.T) {
+	t.Parallel()
+	stub := newStubInner("stream-1")
+	stub.pushHeaders(envelope.Send, []byte("HPACK"), requestStartHeaders("/svc.S/M"))
+
+	wire := makeLPM(false, []byte("abcdefghij")) // 5 + 10
+	// First DATA carries prefix + first 4 payload bytes (no end).
+	stub.pushData(envelope.Send, wire[:9], false)
+	// Second DATA carries 3 more payload bytes WITH END_STREAM (LPM still
+	// short by 3 bytes). Must surface as protocol error.
+	stub.pushData(envelope.Send, wire[9:12], true)
+
+	ch := Wrap(stub, nil, RoleServer)
+	defer ch.Close()
+
+	// Start drains successfully.
+	if _, err := ch.Next(context.Background()); err != nil {
+		t.Fatalf("Next Start: %v", err)
+	}
+	// Next must return the StreamError before any Data is produced.
+	if _, err := ch.Next(context.Background()); err != nil {
+		var se *layer.StreamError
+		if !errors.As(err, &se) {
+			t.Fatalf("Next: got %v, want *layer.StreamError", err)
+		}
+		if se.Code != layer.ErrorProtocol {
+			t.Errorf("StreamError.Code = %v, want ErrorProtocol", se.Code)
+		}
+		if stub.rstErr == nil {
+			t.Error("inner.MarkTerminatedWithRST was not called")
+		}
+		return
+	}
+	t.Fatal("Next: expected error, got nil")
+}
+
+// Empty DATA(EndStream=1) with no prior LPM emits a marker envelope so
+// the proxy faithfully forwards an empty-body request to the upstream
+// (which, being a real gRPC server, will reject it). Wire-faithful
+// pass-through is the MITM principle; the proxy is not a gRPC validator.
+func TestChannel_EndStreamWithoutAnyLPMEmitsMarkerEnvelope(t *testing.T) {
+	t.Parallel()
+	stub := newStubInner("stream-1")
+	stub.pushHeaders(envelope.Send, []byte("HPACK"), requestStartHeaders("/svc.S/M"))
+	stub.pushData(envelope.Send, []byte{}, true)
+
+	ch := Wrap(stub, nil, RoleServer)
+	defer ch.Close()
+
+	envs := drainNext(t, ch, 2) // Start + end-marker
+	if _, ok := envs[0].Message.(*envelope.GRPCStartMessage); !ok {
+		t.Fatalf("envs[0].Message = %T, want *GRPCStartMessage", envs[0].Message)
+	}
+	marker := envs[1].Message.(*envelope.GRPCDataMessage)
+	if !marker.EndStream {
+		t.Errorf("marker EndStream = false, want true")
+	}
+	if marker.Payload != nil || marker.WireLength != 0 {
+		t.Errorf("marker shape unexpected: Payload=%q WireLength=%d", marker.Payload, marker.WireLength)
+	}
+	if stub.rstErr != nil {
+		t.Error("inner.MarkTerminatedWithRST was called; the proxy must not RST a wire-faithful empty-body request")
+	}
+}
+
+// sendData emits an empty H2 DATA payload with END_STREAM=1 when given a
+// pure end-marker GRPCDataMessage (Payload=nil, WireLength=0,
+// !Compressed, EndStream=true). Distinguishes the marker from a true
+// "0-byte LPM" envelope, which would still serialize as a 5-byte LPM
+// prefix [00 00 00 00 00].
+func TestChannel_SendEndMarkerEmitsEmptyWire(t *testing.T) {
+	t.Parallel()
+	stub := newStubInner("stream-1")
+	ch := Wrap(stub, nil, RoleClient)
+	defer ch.Close()
+
+	startEnv := &envelope.Envelope{
+		StreamID:  "stream-1",
+		Direction: envelope.Send,
+		Protocol:  envelope.ProtocolGRPC,
+		Message:   &envelope.GRPCStartMessage{Service: "svc.S", Method: "M"},
+	}
+	if err := ch.Send(context.Background(), startEnv); err != nil {
+		t.Fatalf("Send Start: %v", err)
+	}
+
+	markerEnv := &envelope.Envelope{
+		StreamID:  "stream-1",
+		Direction: envelope.Send,
+		Protocol:  envelope.ProtocolGRPC,
+		Message: &envelope.GRPCDataMessage{
+			Payload:    nil,
+			WireLength: 0,
+			Compressed: false,
+			EndStream:  true,
+		},
+	}
+	if err := ch.Send(context.Background(), markerEnv); err != nil {
+		t.Fatalf("Send marker: %v", err)
+	}
+
+	stub.mu.Lock()
+	defer stub.mu.Unlock()
+	if len(stub.sent) != 2 {
+		t.Fatalf("inner.sent length = %d, want 2", len(stub.sent))
+	}
+	dataInner := stub.sent[1].Message.(*http2.H2DataEvent)
+	if len(dataInner.Payload) != 0 {
+		t.Errorf("end-marker wire payload length = %d, want 0; got bytes %x", len(dataInner.Payload), dataInner.Payload)
+	}
+	if !dataInner.EndStream {
+		t.Errorf("end-marker EndStream = false, want true")
+	}
+}
+
+// sendData threads m.EndStream onto the outbound H2DataEvent so the
+// inner H2 Layer can stamp END_STREAM=1 on the resulting wire frame.
+func TestChannel_SendDataPropagatesEndStreamToInner(t *testing.T) {
+	t.Parallel()
+	stub := newStubInner("stream-1")
+	ch := Wrap(stub, nil, RoleClient)
+	defer ch.Close()
+
+	startEnv := &envelope.Envelope{
+		StreamID:  "stream-1",
+		Direction: envelope.Send,
+		Protocol:  envelope.ProtocolGRPC,
+		Message: &envelope.GRPCStartMessage{
+			Service: "svc.S",
+			Method:  "M",
+		},
+	}
+	if err := ch.Send(context.Background(), startEnv); err != nil {
+		t.Fatalf("Send Start: %v", err)
+	}
+
+	for _, tc := range []struct{ end bool }{{false}, {true}} {
+		dataEnv := &envelope.Envelope{
+			StreamID:  "stream-1",
+			Direction: envelope.Send,
+			Protocol:  envelope.ProtocolGRPC,
+			Message: &envelope.GRPCDataMessage{
+				Payload:   []byte("body"),
+				EndStream: tc.end,
+			},
+		}
+		if err := ch.Send(context.Background(), dataEnv); err != nil {
+			t.Fatalf("Send Data EndStream=%v: %v", tc.end, err)
+		}
+	}
+
+	stub.mu.Lock()
+	defer stub.mu.Unlock()
+	if len(stub.sent) != 3 {
+		t.Fatalf("inner.sent length = %d, want 3 (Start + 2 Data)", len(stub.sent))
+	}
+	first := stub.sent[1].Message.(*http2.H2DataEvent)
+	second := stub.sent[2].Message.(*http2.H2DataEvent)
+	if first.EndStream {
+		t.Errorf("first.EndStream = true, want false")
+	}
+	if !second.EndStream {
+		t.Errorf("second.EndStream = false, want true")
+	}
+}
+
 func TestPercentEncodeDecodeRoundTrip(t *testing.T) {
 	t.Parallel()
 	cases := []string{
