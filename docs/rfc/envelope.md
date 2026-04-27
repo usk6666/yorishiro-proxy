@@ -263,6 +263,16 @@ type GRPCDataMessage struct {
     // negotiated grpc-encoding. To inject malformed compressed bytes, write
     // Envelope.Raw directly.
     Payload []byte
+
+    // EndStream mirrors the H2 DATA frame's END_STREAM flag. gRPC clients
+    // do not emit trailer headers, so the request side has no analog of
+    // GRPCEndMessage; the wire-level terminator is END_STREAM=1 on the
+    // last DATA frame. Layers attach the bit to the trailing LPM produced
+    // from each frame (or to the previously-queued LPM when the
+    // terminating frame carries empty payload). Termination mid-LPM, or
+    // with no LPM ever emitted on the direction, is a protocol violation
+    // surfaced via *layer.StreamError, not via this field.
+    EndStream bool
 }
 
 // GRPCEndMessage carries the trailer HEADERS frame (with END_STREAM) that
@@ -924,6 +934,7 @@ All five events share a single `Envelope.StreamID` (the HTTP/2 stream ID); `Sequ
 - Metadata on `GRPCDataMessage` (Service, Method) is **read-only denormalization** from the associated `GRPCStartMessage`. To change service/method, intercept the Start envelope.
 - grpc-web is out of scope for this resolution; it has its own layer (`GRPCWebLayer`) that wraps either HTTP/1 or HTTP/2 aggregated `HTTPMessage` (base64 or binary framing). See Friction 4-C in `envelope-implementation.md`.
 - HTTP/2 CONNECT + `:protocol` extended CONNECT (RFC 8441) for WebSocket-over-H2 remains deferred per N7's milestone scope.
+- **Request-side termination (USK-663, 2026-04-27):** `GRPCDataMessage` carries an `EndStream bool` mirroring the H2 DATA frame's END_STREAM flag. gRPC clients emit no trailer headers, so the only request-side terminator on the wire is the END_STREAM bit on the last DATA frame. When a DATA frame's payload completes one or more LPMs and carries END_STREAM=1, the trailing LPM owns the bit. When a terminating frame carries empty payload (the canonical gRPC-Go `Stream.CloseSend` shape `DATA(payload=msg)` then `DATA(payload=, END_STREAM=1)`), the wrapper synthesizes a pure end-marker envelope — `GRPCDataMessage{Payload: nil, WireLength: 0, Compressed: false, EndStream: true}` — so the wire-frame boundary is observable in Pipeline and on Send the wrapper emits an empty H2 DATA payload with END_STREAM=1. Mid-LPM termination (reassembler holds partial bytes when END_STREAM arrives) cannot be faithfully forwarded and surfaces as `*layer.StreamError{ErrorProtocol}`. EndStream is a wire-affecting field for variant-recording purposes (Pipeline Steps that toggle it produce variant rows).
 
 ### 9.3 Starlark Plugin API Shape
 

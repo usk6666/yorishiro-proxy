@@ -880,7 +880,6 @@ func TestGRPC_UnaryRoundTrip(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestGRPC_ServerStreamingRoundTrip(t *testing.T) {
-	t.Skip("not yet implemented: gRPC streaming requires request-side END_STREAM propagation through GRPCDataMessage (USK-663)")
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -943,7 +942,6 @@ func TestGRPC_ServerStreamingRoundTrip(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestGRPC_ClientStreamingRoundTrip(t *testing.T) {
-	t.Skip("not yet implemented: gRPC streaming requires request-side END_STREAM propagation through GRPCDataMessage (USK-663)")
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -1005,7 +1003,6 @@ func TestGRPC_ClientStreamingRoundTrip(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestGRPC_BidiStreamingRoundTrip(t *testing.T) {
-	t.Skip("not yet implemented: gRPC streaming requires request-side END_STREAM propagation through GRPCDataMessage (USK-663)")
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -1342,7 +1339,6 @@ func TestGRPC_VariantRecordingOnTransform(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestGRPC_ProgressiveRecording(t *testing.T) {
-	t.Skip("not yet implemented: bidi progressive recording requires request-side END_STREAM propagation through GRPCDataMessage (USK-663)")
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 

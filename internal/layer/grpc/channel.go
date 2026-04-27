@@ -453,9 +453,29 @@ func (c *grpcChannel) absorbHeaders(ev *envelope.Envelope, evt *http2.H2HeadersE
 // absorbData consumes one H2DataEvent. Payload bytes feed the per-
 // direction LPM reassembler; each completed LPM produces one
 // GRPCDataMessage envelope.
+//
+// END_STREAM propagation (USK-663): the wire bit lives on the H2 DATA
+// frame, not on individual LPMs, so the wrapper places it on whichever
+// gRPC envelope semantically corresponds to the frame boundary:
+//
+//   - When the frame's payload completes one or more LPMs, the trailing
+//     LPM owns the bit (the LPMs ahead of it are followed by more bytes
+//     within the same payload).
+//   - When the frame carries END_STREAM with empty payload — the
+//     canonical gRPC-Go client pattern emitted by `Stream.CloseSend`
+//     (`DATA(payload=msg)` then `DATA(payload=, END_STREAM=1)`) — the
+//     wrapper synthesizes an end-marker GRPCDataMessage (Payload=nil,
+//     WireLength=0, Compressed=false, EndStream=true). On Send, sendData
+//     emits an empty DATA payload with END_STREAM=1, preserving the
+//     client's two-frame wire shape.
+//   - When END_STREAM arrives mid-LPM (reassembler still in prefix or
+//     payload phase with buffered bytes), the half-LPM has no faithful
+//     gRPC envelope representation; surface as
+//     *layer.StreamError{ErrorProtocol}.
 func (c *grpcChannel) absorbData(ev *envelope.Envelope, evt *http2.H2DataEvent) error {
 	c.mu.Lock()
 	dir := c.dirStateLocked(ev.Direction)
+	queuedBefore := len(c.queued)
 	frames, err := dir.reasm.feed(evt.Payload, c.maxMessageSize)
 	if err != nil {
 		c.mu.Unlock()
@@ -482,8 +502,64 @@ func (c *grpcChannel) absorbData(ev *envelope.Envelope, evt *http2.H2DataEvent) 
 		c.queued = append(c.queued, pendingEnvelope{env: dataEnv})
 	}
 
+	if evt.EndStream {
+		// Reject mid-LPM termination: the reassembler still holds a
+		// partial prefix or partial payload after consuming this frame.
+		if dir.reasm.phase != phaseWaitingPrefix || len(dir.reasm.prefBuf) > 0 {
+			c.mu.Unlock()
+			se := &layer.StreamError{
+				Code:   layer.ErrorProtocol,
+				Reason: "grpc: stream ended mid-LPM",
+			}
+			c.rstInner(se)
+			return se
+		}
+		if added := len(c.queued) - queuedBefore; added > 0 {
+			// Fused: stamp END_STREAM on the trailing LPM of this frame.
+			c.queued[len(c.queued)-1].env.Message.(*envelope.GRPCDataMessage).EndStream = true
+		} else {
+			// Separate end-marker frame: emit a synthetic empty
+			// GRPCDataMessage envelope. Roundtrips on Send as DATA(empty,
+			// END_STREAM=1).
+			c.queued = append(c.queued, pendingEnvelope{
+				env: c.buildEndMarkerEnvelopeLocked(ev, dir),
+			})
+		}
+	}
+
 	c.mu.Unlock()
 	return nil
+}
+
+// buildEndMarkerEnvelopeLocked synthesizes a GRPCDataMessage envelope
+// representing a pure END_STREAM marker — no LPM payload, just the wire
+// signal. Identified on Send by the (Payload==nil, WireLength==0,
+// !Compressed, EndStream=true) shape; sendData maps it to an empty H2
+// DATA payload. Must hold c.mu (the caller does).
+func (c *grpcChannel) buildEndMarkerEnvelopeLocked(ev *envelope.Envelope, dir *directionState) *envelope.Envelope {
+	msg := &envelope.GRPCDataMessage{
+		Service:    dir.service,
+		Method:     dir.method,
+		Compressed: false,
+		WireLength: 0,
+		Payload:    nil,
+		EndStream:  true,
+	}
+	out := &envelope.Envelope{
+		StreamID:  ev.StreamID,
+		FlowID:    uuid.New().String(),
+		Sequence:  c.nextSeq,
+		Direction: ev.Direction,
+		Protocol:  envelope.ProtocolGRPC,
+		// Raw is empty: the wire contributes no LPM bytes for an
+		// end-marker frame. sendData detects this shape and emits an
+		// empty H2 DATA payload.
+		Raw:     nil,
+		Message: msg,
+		Context: ev.Context,
+	}
+	c.nextSeq++
+	return out
 }
 
 // buildDataEnvelopeLocked decodes one LPM into a GRPCDataMessage envelope.
@@ -668,12 +744,20 @@ func (c *grpcChannel) sendStart(ctx context.Context, env *envelope.Envelope, m *
 // envelope. When env.Raw is populated (5-byte prefix + compressed
 // payload), it is emitted verbatim. Otherwise the wrapper rebuilds the
 // LPM from m.Payload + m.Compressed + the negotiated grpc-encoding.
+//
+// Pure end-marker envelopes (USK-663) — Payload==nil, WireLength==0,
+// !Compressed, EndStream=true — emit an empty H2 DATA payload, matching
+// the canonical gRPC-Go CloseSend wire shape DATA(empty, END_STREAM=1).
 func (c *grpcChannel) sendData(ctx context.Context, env *envelope.Envelope, m *envelope.GRPCDataMessage) error {
 	var wire []byte
-	if len(env.Raw) > 0 {
+	switch {
+	case len(env.Raw) > 0:
 		// Round-trip exact wire bytes (intercept/transform tests).
 		wire = append([]byte(nil), env.Raw...)
-	} else {
+	case m.Payload == nil && m.WireLength == 0 && !m.Compressed && m.EndStream:
+		// Pure end-marker: empty DATA payload + END_STREAM=1.
+		wire = nil
+	default:
 		c.mu.Lock()
 		dir := c.dirStateLocked(env.Direction)
 		enc := strings.ToLower(strings.TrimSpace(dir.encoding))
@@ -710,7 +794,7 @@ func (c *grpcChannel) sendData(ctx context.Context, env *envelope.Envelope, m *e
 
 	dataEvt := &http2.H2DataEvent{
 		Payload:   wire,
-		EndStream: false,
+		EndStream: m.EndStream,
 	}
 	innerEnv := &envelope.Envelope{
 		StreamID:  env.StreamID,
