@@ -106,7 +106,10 @@ func (m *GRPCDataMessage) CloneMessage() Message {
 }
 
 // GRPCEndMessage carries the trailer HEADERS frame (with END_STREAM) that
-// terminates a gRPC RPC. Always Direction=Receive. See RFC-001 §3.2.3.
+// terminates a gRPC RPC. Direction=Receive in the well-formed case;
+// Direction=Send only when a request body unexpectedly carries an embedded
+// trailer (recorded via AnomalyUnexpectedGRPCWebRequestTrailer). See
+// RFC-001 §3.2.3.
 type GRPCEndMessage struct {
 	// Status is the parsed grpc-status code (codes.OK, codes.Canceled, ...
 	// per the gRPC status code registry).
@@ -124,6 +127,16 @@ type GRPCEndMessage struct {
 	// grpc-status, grpc-message, and grpc-status-details-bin. Order and
 	// casing are preserved as observed on the wire.
 	Trailers []KeyValue
+
+	// Anomalies records parser-detected deviations associated with this
+	// End event. Two cases are produced today by the gRPC-Web Layer:
+	// (1) a synthetic End synthesized to mark a Receive-direction body
+	// that parsed but lacked a terminating trailer LPM, and (2) a real
+	// End attached to a Send-direction request body whose presence of a
+	// trailer LPM is itself anomalous. Variant-recording comparisons
+	// must NOT inspect this field — parser-derived state is wire-derived,
+	// not user-mutated.
+	Anomalies []Anomaly
 }
 
 // Protocol returns ProtocolGRPC.
@@ -136,6 +149,7 @@ func (m *GRPCEndMessage) CloneMessage() Message {
 		Message:       m.Message,
 		StatusDetails: cloneBytes(m.StatusDetails),
 		Trailers:      cloneKeyValues(m.Trailers),
+		Anomalies:     cloneAnomalies(m.Anomalies),
 	}
 }
 
