@@ -89,6 +89,13 @@ type GRPCDataMessage struct {
 	// Payload is always the decompressed bytes, regardless of Compressed.
 	// To inject malformed compressed bytes, write Envelope.Raw directly.
 	Payload []byte
+
+	// EndStream mirrors the wire-level END_STREAM flag carried by the H2
+	// DATA frame that produced this LPM. Because gRPC clients do not emit
+	// trailer headers, the request-side terminator is the END_STREAM bit on
+	// the last DATA frame; without this field the proxy cannot round-trip
+	// the request-side termination signal. See RFC-001 §3.2.3 / §9.2.
+	EndStream bool
 }
 
 // Protocol returns ProtocolGRPC.
@@ -102,6 +109,7 @@ func (m *GRPCDataMessage) CloneMessage() Message {
 		Compressed: m.Compressed,
 		WireLength: m.WireLength,
 		Payload:    cloneBytes(m.Payload),
+		EndStream:  m.EndStream,
 	}
 }
 

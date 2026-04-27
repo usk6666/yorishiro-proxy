@@ -476,6 +476,7 @@ func projectGRPCData(m *envelope.GRPCDataMessage, fl *flow.Flow) {
 	fl.Metadata["grpc_method"] = m.Method
 	fl.Metadata["grpc_compressed"] = strconv.FormatBool(m.Compressed)
 	fl.Metadata["grpc_wire_length"] = strconv.FormatUint(uint64(m.WireLength), 10)
+	fl.Metadata["grpc_end_stream"] = strconv.FormatBool(m.EndStream)
 }
 
 // projectGRPCEnd projects a GRPCEndMessage. grpc_status is always present
@@ -764,6 +765,9 @@ func grpcDataModified(a, b *envelope.GRPCDataMessage) bool {
 		return true
 	}
 	if a.Compressed != b.Compressed || a.WireLength != b.WireLength {
+		return true
+	}
+	if a.EndStream != b.EndStream {
 		return true
 	}
 	return !bytes.Equal(a.Payload, b.Payload)
