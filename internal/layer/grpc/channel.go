@@ -179,9 +179,9 @@ type grpcChannel struct {
 	nextSeq int
 	termErr error // first non-nil terminal error (sticky)
 
-	closeOnce sync.Once
-	recvDone  chan struct{}
-	termOnce  sync.Once
+	closeOnce    sync.Once
+	recvDone     chan struct{}
+	recvDoneOnce sync.Once
 
 	// maxMessageSize caps the per-LPM payload size for both the
 	// reassembler and the gzip decoder. Resolved once at Wrap time;
@@ -196,19 +196,28 @@ func (c *grpcChannel) StreamID() string {
 }
 
 // Closed returns a channel closed when this wrapper has entered its
-// terminal state. The wrapper closes recvDone when:
+// terminal state. recvDone is closed when:
 //   - Next observes a terminal error from inner (or an absorb error),
 //   - Close is invoked by the caller, OR
-//   - the inner Channel terminates abnormally and the watcher goroutine
-//     started in Wrap propagates it (so callers parking on Closed()
-//     observe late RST_STREAM events even when no Next is in flight —
-//     mirroring the contract that internal/session relies on).
+//   - the inner Channel signals Closed() (e.g., late RST_STREAM after EOF)
+//     so callers parking on Closed() observe imminent termination even
+//     when no Next is in flight (mirroring the contract internal/session
+//     relies on via lateClientErrorWatcher).
+//
+// Note: Closed() may fire while Err() still returns nil. This matches the
+// inner h2 channel's existing contract — RST_STREAM(NO_ERROR) closes the
+// inner termDone while leaving response Headers/Data/Trailers buffered
+// in the inner recv chan. The wrapper's Next continues to drain those
+// buffered events on subsequent calls and sets termErr lazily when the
+// inner returns its own EOF/error. Consumers reading Err() after Closed()
+// (e.g., lateClientErrorWatcher) tolerate the no-error case as graceful.
 func (c *grpcChannel) Closed() <-chan struct{} {
 	return c.recvDone
 }
 
 // Err returns the cached terminal error, or nil while the channel is
-// still active.
+// still active. May return nil after Closed() fires until Next observes
+// the inner's EOF/error (see Closed() docs).
 func (c *grpcChannel) Err() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -220,36 +229,51 @@ func (c *grpcChannel) Err() error {
 func (c *grpcChannel) Close() error {
 	c.closeOnce.Do(func() {
 		_ = c.inner.Close()
-		c.terminate(io.EOF)
+		c.setTermErr(io.EOF)
+		c.closeRecvDone()
 	})
 	return nil
 }
 
-// terminate caches err as the terminal error (first call wins) and
-// closes recvDone.
-func (c *grpcChannel) terminate(err error) {
-	c.termOnce.Do(func() {
-		c.mu.Lock()
-		if c.termErr == nil {
-			c.termErr = err
-		}
-		c.mu.Unlock()
+// setTermErr caches err as the terminal error if not already set (first-
+// writer-wins). Independent of recvDone, which has its own sync.Once.
+func (c *grpcChannel) setTermErr(err error) {
+	c.mu.Lock()
+	if c.termErr == nil {
+		c.termErr = err
+	}
+	c.mu.Unlock()
+}
+
+// closeRecvDone closes the recvDone channel exactly once. Safe to call
+// from any goroutine.
+func (c *grpcChannel) closeRecvDone() {
+	c.recvDoneOnce.Do(func() {
 		close(c.recvDone)
 	})
 }
 
-// watchInnerClose blocks until the inner Channel terminates and then
-// propagates the termination to recvDone. Started by Wrap as a goroutine
-// so callers parking on Closed() observe late abnormal events (e.g.,
-// RST_STREAM after EOF) even when no Next is in flight. terminate uses
-// sync.Once so a duplicate call from Close (or from Next) is a no-op.
+// watchInnerClose blocks until the inner Channel signals Closed() and
+// closes recvDone so callers parking on the wrapper's Closed() observe
+// the imminent termination.
+//
+// Termination split:
+//   - Inner terminated with a non-graceful error (not io.EOF, e.g., a
+//     RST_STREAM with a non-zero code surfaced via failStream): propagate
+//     to termErr eagerly so callers reading Err() after Closed() see a
+//     stable terminal state.
+//   - Inner terminated gracefully (io.EOF, e.g., gracefulCloseStream after
+//     RST_STREAM(NO_ERROR)): leave termErr nil. The inner h2 channel's
+//     contract (RFC-001 §9.1) is that termDone closes before draining
+//     the inner recv chan, so any HEADERS/DATA/TRAILERS already buffered
+//     there must still surface through subsequent Next calls. Next sets
+//     termErr lazily when the inner returns its own io.EOF after drain.
 func (c *grpcChannel) watchInnerClose() {
 	<-c.inner.Closed()
-	innerErr := c.inner.Err()
-	if innerErr == nil {
-		innerErr = io.EOF
+	if innerErr := c.inner.Err(); innerErr != nil && !errors.Is(innerErr, io.EOF) {
+		c.setTermErr(innerErr)
 	}
-	c.terminate(innerErr)
+	c.closeRecvDone()
 }
 
 // rstInner asks the inner Channel to emit RST_STREAM(INTERNAL_ERROR) and
@@ -268,20 +292,31 @@ func (c *grpcChannel) rstInner(se *layer.StreamError) {
 // inner events per Next call until at least one envelope has been
 // queued, then drains the queue one envelope at a time on subsequent
 // calls.
+//
+// Ordering: queued envelopes are drained BEFORE the cached termErr is
+// returned. This matters when watchInnerClose has fired between an
+// absorb (which queued a result) and the next loop iteration — without
+// this ordering the absorbed envelope would be silently dropped on the
+// stale termErr check. Inner buffered events also continue to drain
+// after Closed(): termErr is set only when the inner itself returns an
+// error/EOF, not when the inner's Closed() fires.
 func (c *grpcChannel) Next(ctx context.Context) (*envelope.Envelope, error) {
 	for {
-		// Fast path: emit any envelope already queued by a prior round.
 		c.mu.Lock()
-		if c.termErr != nil {
-			err := c.termErr
-			c.mu.Unlock()
-			return nil, err
-		}
+		// Fast path: emit any envelope already queued by a prior round.
+		// Drain queued FIRST so an absorbed envelope is never dropped if
+		// watchInnerClose set termErr between the absorb and the next
+		// loop iteration.
 		if len(c.queued) > 0 {
 			out := c.queued[0].env
 			c.queued = c.queued[1:]
 			c.mu.Unlock()
 			return out, nil
+		}
+		if c.termErr != nil {
+			err := c.termErr
+			c.mu.Unlock()
+			return nil, err
 		}
 		c.mu.Unlock()
 
@@ -289,14 +324,17 @@ func (c *grpcChannel) Next(ctx context.Context) (*envelope.Envelope, error) {
 		ev, err := c.nextInnerEvent(ctx)
 		if err != nil {
 			// Cache the terminal error so subsequent Next calls return it
-			// idempotently. Do NOT cascade to inner.Close; the caller owns
-			// the lifecycle (per Channel contract).
-			c.terminate(err)
+			// idempotently, and signal Closed() for late watchers. Do NOT
+			// cascade to inner.Close; the caller owns the lifecycle (per
+			// Channel contract).
+			c.setTermErr(err)
+			c.closeRecvDone()
 			return nil, err
 		}
 
 		if absorbErr := c.absorb(ev); absorbErr != nil {
-			c.terminate(absorbErr)
+			c.setTermErr(absorbErr)
+			c.closeRecvDone()
 			return nil, absorbErr
 		}
 	}
