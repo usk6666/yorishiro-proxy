@@ -288,11 +288,36 @@ func (c *channel) refillFromHTTPMessage(ctx context.Context, env *envelope.Envel
 		c.emitQueue = append(c.emitQueue, c.buildEnvelopeRaw(env, dir, data, raw))
 	}
 
-	// Emit one End envelope if a trailer frame was present (response side
-	// usually; request side never).
+	// Emit one End envelope.
+	//
+	// Receive direction: an embedded trailer LPM is required to terminate
+	// the response. If present, build the End from its parsed trailers; if
+	// absent (and at least one data frame was emitted, so we know the body
+	// is non-empty), synthesize a placeholder End with Status=0, Raw=nil,
+	// and AnomalyMissingGRPCWebTrailer stamped — this surfaces silent
+	// truncation as a recorded anomaly instead of an empty event tail.
+	//
+	// Send direction: gRPC-Web request bodies must NOT carry an embedded
+	// trailer. If one is observed, emit the End anyway (so the analyst
+	// can inspect what was sent) and stamp
+	// AnomalyUnexpectedGRPCWebRequestTrailer.
 	if parsed.TrailerFrame != nil {
 		end := buildEndFromTrailers(parsed.Trailers)
+		if dir == envelope.Send {
+			end.Anomalies = append(end.Anomalies, envelope.Anomaly{
+				Type:   envelope.AnomalyUnexpectedGRPCWebRequestTrailer,
+				Detail: "gRPC-Web request body carried an embedded trailer LPM frame",
+			})
+		}
 		c.emitQueue = append(c.emitQueue, c.buildEnvelopeRaw(env, dir, end, trailerRawBytes))
+	} else if dir == envelope.Receive && len(parsed.DataFrames) > 0 {
+		end := &envelope.GRPCEndMessage{
+			Anomalies: []envelope.Anomaly{{
+				Type:   envelope.AnomalyMissingGRPCWebTrailer,
+				Detail: "gRPC-Web response body had data frames but no terminating trailer LPM",
+			}},
+		}
+		c.emitQueue = append(c.emitQueue, c.buildEnvelope(env, dir, end, nil))
 	}
 
 	return nil
