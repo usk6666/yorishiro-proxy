@@ -459,12 +459,25 @@ func (c *channel) sendDataLocked(env *envelope.Envelope, m *envelope.GRPCDataMes
 		return errors.New("grpcweb: GRPCDataMessage before GRPCStartMessage on Send")
 	}
 
-	// Fast path: raw bytes provided — write verbatim. We treat Raw on Data
-	// envelopes as the wire-form 5-byte prefix + payload (binary). For
-	// base64-wire output the assembler base64-encodes the full body once at
-	// the end, so Raw at this stage stays binary either way.
+	// Fast path: raw bytes provided — append to the assembly buffer.
+	// Assembly buffer holds binary LPM frames; the final base64 wrap at
+	// sendEndLocked is the only base64 encode applied. For -text wire
+	// formats, refillFromHTTPMessage emits Raw in base64-encoded form per
+	// USK-641, so we must base64-decode here before writing the binary
+	// LPM into the buffer or the final wrap would produce a double-encode.
 	if len(env.Raw) > 0 {
-		c.sendDataBuf.Write(env.Raw)
+		raw := env.Raw
+		if IsBase64Encoded(c.sendStart.ContentType) {
+			decoded, err := decodeBase64(raw)
+			if err != nil {
+				return &layer.StreamError{
+					Code:   layer.ErrorInternalError,
+					Reason: "grpcweb: sendDataLocked decode base64 Raw: " + err.Error(),
+				}
+			}
+			raw = decoded
+		}
+		c.sendDataBuf.Write(raw)
 		return nil
 	}
 
@@ -511,9 +524,23 @@ func (c *channel) sendEndLocked(ctx context.Context, env *envelope.Envelope, m *
 	if embedTrailer {
 		trailerPayload := encodeTrailerPayload(m)
 		if len(env.Raw) > 0 {
-			// Fast path: caller provided raw trailer bytes (binary
-			// LPM-prefixed form expected per RFC §3.2.3 Raw definition).
-			dataBytes = append(dataBytes, env.Raw...)
+			// Fast path: caller provided raw trailer bytes. Assembly buffer
+			// holds binary LPM frames; the final base64 wrap below is the
+			// only base64 encode applied. For -text wire formats Raw is
+			// base64-encoded (USK-641), so decode once here to keep the
+			// buffer binary and avoid a double-encode.
+			rawTrailer := env.Raw
+			if IsBase64Encoded(start.ContentType) {
+				decoded, err := decodeBase64(rawTrailer)
+				if err != nil {
+					return &layer.StreamError{
+						Code:   layer.ErrorInternalError,
+						Reason: "grpcweb: sendEndLocked decode base64 Raw: " + err.Error(),
+					}
+				}
+				rawTrailer = decoded
+			}
+			dataBytes = append(dataBytes, rawTrailer...)
 		} else {
 			dataBytes = append(dataBytes, EncodeFrame(true, false, trailerPayload)...)
 		}
