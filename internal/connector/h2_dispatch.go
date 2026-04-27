@@ -9,25 +9,33 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/layer"
 	grpclayer "github.com/usk6666/yorishiro-proxy/internal/layer/grpc"
+	"github.com/usk6666/yorishiro-proxy/internal/layer/grpcweb"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/http2"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/httpaggregator"
 )
 
 // DispatchH2Stream peeks the first event-granular envelope on an HTTP/2
-// stream Channel, inspects its content-type for gRPC detection, and wraps
-// the channel with the appropriate application-layer wrapper:
+// stream Channel, inspects its content-type for protocol detection, and
+// wraps the channel with the appropriate application-layer chain:
 //
-//   - application/grpc[+proto|+json|...]  → grpclayer.Wrap (per USK-640)
-//   - any other content-type              → httpaggregator.Wrap
+//   - application/grpc-web[-text][+proto|...] → httpaggregator.Wrap →
+//     grpcweb.Wrap (gRPC-Web frames embedded in an HTTP body)
+//   - application/grpc[+proto|+json|...]      → grpclayer.Wrap (USK-640)
+//   - any other content-type                  → httpaggregator.Wrap
 //
-// role selects which direction convention the aggregator (or gRPC Layer)
-// uses. lopts threads the Layer's body-buffer configuration into the
-// aggregator so disk spill behavior matches the HTTP/1.x path; the
-// gRPC Layer manages its own LPM-bounded buffer and ignores lopts.
+// gRPC-Web is checked BEFORE native gRPC. The discriminator is precise
+// enough that branch order does not affect correctness (USK-658), but
+// matching the more specific prefix first is defense-in-depth against
+// future regressions in the native-gRPC matcher.
 //
-// grpcOpts are passed to grpclayer.Wrap on the gRPC branch (e.g.
+// role selects which direction convention the aggregator (and any wrapper
+// above it) uses. lopts threads the Layer's body-buffer configuration
+// into the aggregator so disk spill behavior matches the HTTP/1.x path;
+// the gRPC Layer manages its own LPM-bounded buffer and ignores lopts.
+//
+// grpcOpts are passed to grpclayer.Wrap on the native-gRPC branch (e.g.
 // grpclayer.WithMaxMessageSize from BuildConfig.GRPCMaxMessageSize).
-// They are ignored when content-type is not application/grpc*.
+// They are ignored on the gRPC-Web and default branches.
 //
 // The returned layer.Channel is what the caller should run RunSession or
 // other consumers against. The first event is replayed as the first
@@ -61,11 +69,29 @@ func DispatchH2Stream(
 		return nil, fmt.Errorf("connector: DispatchH2Stream: first envelope is %T, expected *H2HeadersEvent", firstEnv.Message)
 	}
 
-	// gRPC detection: content-type: application/grpc[+proto|+json|...] on
-	// the request HEADERS (or the response HEADERS in ClientRole) signals
-	// a gRPC stream. Wrap with GRPCLayer (USK-640) — it consumes the
-	// peeked first envelope as the initial GRPCStartMessage source.
-	if isGRPCHeaders(evt) {
+	ct := extractContentType(evt)
+
+	// gRPC-Web detection: content-type: application/grpc-web[-text][+proto|...]
+	// indicates gRPC-Web frames embedded in an HTTP body. Wrap with the
+	// httpaggregator so each request/response surfaces as one HTTPMessage,
+	// then layer grpcweb on top to surface GRPCStart/Data/End envelopes.
+	// This must precede the native-gRPC check because pre-USK-658 callers
+	// observed application/grpc-web getting routed to grpclayer.
+	if grpcweb.IsGRPCWebContentType(ct) {
+		logger.Debug("connector: DispatchH2Stream: gRPC-Web content-type detected; wrapping with httpaggregator + grpcweb",
+			"stream_id", firstEnv.StreamID,
+			"path", evt.Path,
+			"content_type", ct,
+		)
+		aggCh := httpaggregator.Wrap(ch, role, firstEnv, lopts)
+		return grpcweb.Wrap(aggCh, translateRoleForGRPCWeb(role)), nil
+	}
+
+	// Native gRPC detection: content-type: application/grpc[+proto|+json|...]
+	// (per RFC 6838 §4.2.8 structured-syntax suffix) signals a gRPC stream
+	// over HTTP/2 trailers. Wrap with GRPCLayer (USK-640) — it consumes
+	// the peeked first envelope as the initial GRPCStartMessage source.
+	if isGRPCContentType(ct) {
 		logger.Debug("connector: DispatchH2Stream: gRPC content-type detected; wrapping with grpclayer",
 			"stream_id", firstEnv.StreamID,
 			"path", evt.Path,
@@ -105,21 +131,50 @@ func translateRoleForGRPC(r httpaggregator.Role) grpclayer.Role {
 	}
 }
 
-// isGRPCHeaders reports whether evt carries a content-type that indicates
-// gRPC (including the +proto / +json subtype variants).
-func isGRPCHeaders(evt *http2.H2HeadersEvent) bool {
+// translateRoleForGRPCWeb converts an httpaggregator.Role into the
+// equivalent grpcweb.Role. The two enums are independent (separate types,
+// per Friction 4-C in envelope-implementation.md) and must not be relied
+// on to coincide numerically.
+func translateRoleForGRPCWeb(r httpaggregator.Role) grpcweb.Role {
+	switch r {
+	case httpaggregator.RoleServer:
+		return grpcweb.RoleServer
+	case httpaggregator.RoleClient:
+		return grpcweb.RoleClient
+	default:
+		return grpcweb.RoleServer
+	}
+}
+
+// extractContentType returns the value of the first content-type header
+// found on evt (case-insensitive name match), or "" if none is present.
+// Multiple content-type headers are not merged; the first wins, matching
+// the pre-USK-658 dispatcher semantics.
+func extractContentType(evt *http2.H2HeadersEvent) string {
 	for _, kv := range evt.Headers {
-		if !strings.EqualFold(kv.Name, "content-type") {
-			continue
-		}
-		// Check only the leading type; subtypes ("+proto", "+json") and
-		// parameters (; charset=...) are permitted variations.
-		v := strings.ToLower(kv.Value)
-		if strings.HasPrefix(v, "application/grpc") {
-			return true
+		if strings.EqualFold(kv.Name, "content-type") {
+			return kv.Value
 		}
 	}
-	return false
+	return ""
+}
+
+// isGRPCContentType reports whether ct is a native-gRPC media type:
+// exactly application/grpc, or application/grpc with a structured-syntax
+// suffix (application/grpc+proto, application/grpc+json, ...). Parameters
+// (; charset=utf-8) are stripped before comparison. Crucially this does
+// NOT match application/grpc-web* — the previous prefix-only check did,
+// which was the USK-658 bug.
+func isGRPCContentType(ct string) bool {
+	mt := ct
+	if i := strings.IndexByte(mt, ';'); i >= 0 {
+		mt = mt[:i]
+	}
+	mt = strings.TrimSpace(strings.ToLower(mt))
+	if mt == "application/grpc" {
+		return true
+	}
+	return strings.HasPrefix(mt, "application/grpc+")
 }
 
 // EnvelopeIsH2Event reports whether env.Message is one of the HTTP/2 event

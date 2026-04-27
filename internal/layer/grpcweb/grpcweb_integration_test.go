@@ -564,15 +564,18 @@ func startGRPCWebHTTP1Proxy(
 }
 
 // ---------------------------------------------------------------------------
-// HTTP/2 MITM proxy harness (manual chain composition: bypass DispatchH2Stream
-// because production isGRPCHeaders over-matches application/grpc-web).
+// HTTP/2 MITM proxy harness (client-side wrapping via connector.DispatchH2Stream;
+// upstream side stays manual because OpenStream returns a fresh Channel that
+// cannot be peeked).
 // ---------------------------------------------------------------------------
 
 // startGRPCWebHTTP2Proxy starts a FullListener with CONNECT routing and
-// composes the gRPC-Web stack manually inside OnHTTP2Stack so the test does
-// not depend on connector.DispatchH2Stream (which currently classifies any
-// "application/grpc*" content-type as native gRPC and wraps with grpclayer
-// instead of grpcweb). Filed as a follow-up issue.
+// dispatches each inbound h2 stream via connector.DispatchH2Stream, which
+// (post-USK-658) routes application/grpc-web* to httpaggregator + grpcweb.
+// The upstream side is constructed manually inside the dial function: a
+// fresh OpenStream Channel emits no events until the proxy sends HEADERS,
+// so the peek-and-classify pattern of DispatchH2Stream cannot be applied
+// there (Friction 4-A).
 func startGRPCWebHTTP2Proxy(
 	t *testing.T,
 	ctx context.Context,
@@ -623,27 +626,20 @@ func startGRPCWebHTTP2Proxy(
 						}
 					}()
 
-					// Manual chain composition for grpc-web/h2 path:
-					// peek the first H2HeadersEvent → check content-type for
-					// application/grpc-web → wrap with httpaggregator(RoleServer)
-					// → wrap with grpcweb(RoleServer) → sendEndInjector.
-					firstEnv, perr := ch.Next(cbCtx)
-					if perr != nil {
+					// connector.DispatchH2Stream peeks the first H2HeadersEvent,
+					// classifies the content-type, and (post-USK-658) routes
+					// application/grpc-web* to httpaggregator + grpcweb. The
+					// returned Channel is wrapped with sendEndInjector to bridge
+					// client-side EOF into a synthetic GRPCEndMessage(Send) that
+					// the upstream-side grpcweb.RoleClient uses as its flush
+					// sentinel.
+					dispatched, derr := connector.DispatchH2Stream(
+						cbCtx, ch, httpaggregator.RoleServer, clientLOpts, slog.Default())
+					if derr != nil {
 						_ = ch.Close()
 						return
 					}
-					hdrEvt, ok := firstEnv.Message.(*intHTTP2.H2HeadersEvent)
-					if !ok {
-						_ = ch.Close()
-						return
-					}
-					if !looksLikeGRPCWebContentType(hdrEvt) {
-						_ = ch.Close()
-						return
-					}
-					aggCh := httpaggregator.Wrap(ch, httpaggregator.RoleServer, firstEnv, clientLOpts)
-					gwClient := grpcweb.Wrap(aggCh, grpcweb.RoleServer)
-					clientCh := newSendEndInjector(gwClient)
+					clientCh := newSendEndInjector(dispatched)
 
 					p := buildPipeline(store, opts)
 					session.RunSession(cbCtx, clientCh, func(dctx context.Context, _ *envelope.Envelope) (layer.Channel, error) {
@@ -694,19 +690,6 @@ func startGRPCWebHTTP2Proxy(
 		t.Fatal("h2 full listener not ready")
 	}
 	return fl.Addr(), store, done
-}
-
-// looksLikeGRPCWebContentType reports whether evt's content-type indicates
-// gRPC-Web (binary or text). It iterates the H2HeadersEvent and delegates
-// the actual content-type matching to grpcweb.IsGRPCWebContentType.
-func looksLikeGRPCWebContentType(evt *intHTTP2.H2HeadersEvent) bool {
-	for _, kv := range evt.Headers {
-		if !strings.EqualFold(kv.Name, "content-type") {
-			continue
-		}
-		return grpcweb.IsGRPCWebContentType(kv.Value)
-	}
-	return false
 }
 
 // ---------------------------------------------------------------------------
