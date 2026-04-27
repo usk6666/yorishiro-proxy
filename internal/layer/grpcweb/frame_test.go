@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/binary"
+	"errors"
 	"testing"
 
 	"github.com/usk6666/yorishiro-proxy/internal/config"
@@ -427,5 +428,85 @@ func TestBase64RoundTrip(t *testing.T) {
 	}
 	if result.Trailers["grpc-status"] != "0" {
 		t.Errorf("Trailers[grpc-status] = %q, want %q", result.Trailers["grpc-status"], "0")
+	}
+}
+
+// TestDecodeBody_ErrorSentinels verifies that DecodeBody wraps each
+// recoverable parser failure with the sentinel error declared in frame.go,
+// so callers (channel.go's classifyParseError) can use errors.Is to map
+// each failure mode to a stable envelope.AnomalyType. Security caps
+// (oversize LPM) intentionally do NOT wrap a sentinel — they remain
+// fmt.Errorf-only so the channel falls through to *layer.StreamError.
+func TestDecodeBody_ErrorSentinels(t *testing.T) {
+	tests := []struct {
+		name    string
+		body    []byte
+		base64  bool
+		wantErr error // nil = expect no sentinel match (security cap path)
+	}{
+		{
+			name:    "malformed base64",
+			body:    []byte("!!!not-valid-base64!!!"),
+			base64:  true,
+			wantErr: ErrMalformedBase64,
+		},
+		{
+			name:    "incomplete frame header",
+			body:    []byte{0x00, 0x00, 0x00}, // 3 bytes, need 5
+			base64:  false,
+			wantErr: ErrMalformedLPM,
+		},
+		{
+			name:    "invalid flags byte",
+			body:    []byte{0x40, 0x00, 0x00, 0x00, 0x00}, // bit 6 set: not compressed/trailer
+			base64:  false,
+			wantErr: ErrMalformedLPM,
+		},
+		{
+			name: "incomplete payload",
+			body: []byte{
+				0x00, 0x00, 0x00, 0x00, 0x05, // declare 5 bytes payload
+				'a', 'b', // only 2 bytes follow
+			},
+			base64:  false,
+			wantErr: ErrMalformedLPM,
+		},
+		{
+			name:    "malformed trailer",
+			body:    EncodeFrame(true, false, []byte("nocolon\r\n")),
+			base64:  false,
+			wantErr: ErrMalformedTrailer,
+		},
+		{
+			name: "oversize LPM (security cap, no sentinel)",
+			body: []byte{
+				0x00,                   // flags
+				0xff, 0xff, 0xff, 0xff, // length 4 GiB > MaxGRPCMessageSize
+			},
+			base64:  false,
+			wantErr: nil, // intentionally no sentinel
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := DecodeBody(tt.body, tt.base64)
+			if err == nil {
+				t.Fatal("DecodeBody returned nil error; want failure")
+			}
+			if tt.wantErr == nil {
+				// Security cap path: must NOT match any of the recoverable
+				// sentinels. Otherwise channel.go would misclassify it as
+				// an Anomaly when it should remain a StreamError.
+				for _, sentinel := range []error{ErrMalformedBase64, ErrMalformedLPM, ErrMalformedTrailer} {
+					if errors.Is(err, sentinel) {
+						t.Errorf("DecodeBody error %v wraps recoverable sentinel %v; security caps must not", err, sentinel)
+					}
+				}
+				return
+			}
+			if !errors.Is(err, tt.wantErr) {
+				t.Errorf("DecodeBody error %v does not wrap %v", err, tt.wantErr)
+			}
+		})
 	}
 }

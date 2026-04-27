@@ -34,6 +34,15 @@ type GRPCStartMessage struct {
 
 	// AcceptEncoding is the parsed grpc-accept-encoding list.
 	AcceptEncoding []string
+
+	// Anomalies records parser-detected deviations observed while
+	// constructing this Start envelope from the underlying HTTP body.
+	// Wire-format failures (malformed base64, malformed LPM framing,
+	// malformed trailer text) populate this slice so an analyst sees the
+	// bad bytes (preserved on Envelope.Raw) alongside a structured tag.
+	// Stream-terminating problems (oversize LPM cap, gzip-bomb cap)
+	// surface as *layer.StreamError instead and never reach this slice.
+	Anomalies []Anomaly
 }
 
 // Protocol returns ProtocolGRPC.
@@ -49,6 +58,7 @@ func (m *GRPCStartMessage) CloneMessage() Message {
 		ContentType:    m.ContentType,
 		Encoding:       m.Encoding,
 		AcceptEncoding: cloneStrings(m.AcceptEncoding),
+		Anomalies:      cloneAnomalies(m.Anomalies),
 	}
 }
 

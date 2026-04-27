@@ -937,3 +937,126 @@ func TestWithMaxMessageSize_ConfiguredCapRejectsSmallerLPMs(t *testing.T) {
 		t.Fatalf("err = %v, want *layer.StreamError", sawErr)
 	}
 }
+
+// --- Anomaly emission (USK-659) ---
+
+// TestClassifyParseError verifies that classifyParseError maps each
+// recoverable parser sentinel to the correct envelope.AnomalyType and
+// returns false for security-cap errors (which must continue to surface
+// as *layer.StreamError).
+func TestClassifyParseError(t *testing.T) {
+	tests := []struct {
+		name     string
+		err      error
+		wantType envelope.AnomalyType
+		wantOK   bool
+	}{
+		{
+			name:     "base64 sentinel",
+			err:      ErrMalformedBase64,
+			wantType: envelope.AnomalyMalformedGRPCWebBase64,
+			wantOK:   true,
+		},
+		{
+			name:     "LPM sentinel",
+			err:      ErrMalformedLPM,
+			wantType: envelope.AnomalyMalformedGRPCWebLPM,
+			wantOK:   true,
+		},
+		{
+			name:     "trailer sentinel",
+			err:      ErrMalformedTrailer,
+			wantType: envelope.AnomalyMalformedGRPCWebTrailer,
+			wantOK:   true,
+		},
+		{
+			name:     "trailer takes precedence over LPM (wrapped both)",
+			err:      newWrappedSentinels(ErrMalformedTrailer, ErrMalformedLPM),
+			wantType: envelope.AnomalyMalformedGRPCWebTrailer,
+			wantOK:   true,
+		},
+		{
+			name:     "security cap (no sentinel)",
+			err:      errors.New("grpc-web message too large: 4294967295 > 268435455"),
+			wantType: "",
+			wantOK:   false,
+		},
+		{
+			name:     "nil error",
+			err:      nil,
+			wantType: "",
+			wantOK:   false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotType, gotOK := classifyParseError(tt.err)
+			if gotType != tt.wantType || gotOK != tt.wantOK {
+				t.Errorf("classifyParseError(%v) = (%q, %v), want (%q, %v)",
+					tt.err, gotType, gotOK, tt.wantType, tt.wantOK)
+			}
+		})
+	}
+}
+
+// newWrappedSentinels returns an error whose chain Is-matches both sentinels.
+// Used to verify classifyParseError's switch order is intentional, not
+// accidental (trailer must win over LPM since trailer parsing is the more
+// specific failure shape).
+func newWrappedSentinels(outer, inner error) error {
+	return wrappedTwo{outer: outer, inner: inner}
+}
+
+type wrappedTwo struct {
+	outer error
+	inner error
+}
+
+func (w wrappedTwo) Error() string { return w.outer.Error() + ": " + w.inner.Error() }
+func (w wrappedTwo) Is(target error) bool {
+	return errors.Is(w.outer, target) || errors.Is(w.inner, target)
+}
+
+// TestEmitAnomalyStart_QueueDrainsThenEOF verifies that after
+// emitAnomalyStart latches terminal EOF, Next returns the queued Anomaly
+// envelope first and only then surfaces io.EOF. This is the load-bearing
+// ordering guarantee for the session: RecordStep must observe the
+// envelope before OnComplete sees termination.
+func TestEmitAnomalyStart_QueueDrainsThenEOF(t *testing.T) {
+	headers := []envelope.KeyValue{{Name: "content-type", Value: "application/grpc-web-text"}}
+	in := mustHTTPRequestEnv("s-anom", headers, []byte("!!!not-base64!!!"), "/pkg.Echo/Say")
+	mock := newMockChannel("s-anom", in)
+	ch := Wrap(mock, RoleServer)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+
+	// First Next: must return the Anomaly Start envelope, NOT an error.
+	env1, err1 := ch.Next(ctx)
+	if err1 != nil {
+		t.Fatalf("first Next() returned err=%v, want envelope", err1)
+	}
+	if env1 == nil {
+		t.Fatal("first Next() returned nil envelope")
+	}
+	start, ok := env1.Message.(*envelope.GRPCStartMessage)
+	if !ok {
+		t.Fatalf("first envelope Message type = %T, want *envelope.GRPCStartMessage", env1.Message)
+	}
+	if len(start.Anomalies) != 1 {
+		t.Fatalf("Start.Anomalies len = %d, want 1", len(start.Anomalies))
+	}
+	if got := start.Anomalies[0].Type; got != envelope.AnomalyMalformedGRPCWebBase64 {
+		t.Errorf("Start.Anomalies[0].Type = %q, want %q", got, envelope.AnomalyMalformedGRPCWebBase64)
+	}
+	// Envelope.Raw carries the malformed body verbatim — wire fidelity.
+	if !bytes.Equal(env1.Raw, []byte("!!!not-base64!!!")) {
+		t.Errorf("Envelope.Raw = %q, want the malformed body bytes", env1.Raw)
+	}
+
+	// Second Next: must return io.EOF (clean termination).
+	env2, err2 := ch.Next(ctx)
+	if !errors.Is(err2, io.EOF) {
+		t.Errorf("second Next() err = %v, want io.EOF; envelope=%v", err2, env2)
+	}
+}

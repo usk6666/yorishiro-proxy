@@ -3,9 +3,31 @@ package grpcweb
 import (
 	"encoding/base64"
 	"encoding/binary"
+	"errors"
 	"fmt"
 
 	"github.com/usk6666/yorishiro-proxy/internal/config"
+)
+
+// Sentinel errors returned by the gRPC-Web body parser. Wrapped via
+// fmt.Errorf("...: %w", sentinel) so callers can use errors.Is to classify
+// recoverable wire-format failures versus security caps. Recoverable
+// failures map to envelope.AnomalyType values in the Channel; security caps
+// (oversize LPM, etc.) intentionally do NOT have a sentinel and continue to
+// surface as *layer.StreamError.
+var (
+	// ErrMalformedBase64 wraps a base64 decode failure on a grpc-web-text
+	// body. See envelope.AnomalyMalformedGRPCWebBase64.
+	ErrMalformedBase64 = errors.New("malformed grpc-web base64")
+
+	// ErrMalformedLPM wraps any length-prefixed message framing failure:
+	// incomplete header, invalid flags byte, or incomplete payload. See
+	// envelope.AnomalyMalformedGRPCWebLPM.
+	ErrMalformedLPM = errors.New("malformed grpc-web LPM")
+
+	// ErrMalformedTrailer wraps a failure to parse the embedded trailer
+	// frame's text payload. See envelope.AnomalyMalformedGRPCWebTrailer.
+	ErrMalformedTrailer = errors.New("malformed grpc-web trailer")
 )
 
 // frameHeaderSize is the size of the gRPC-Web Length-Prefixed Message header.
@@ -74,7 +96,7 @@ func DecodeBodyWithMaxMessageSize(data []byte, isBase64 bool, maxMessageSize uin
 	if isBase64 {
 		decoded, err := decodeBase64(data)
 		if err != nil {
-			return nil, fmt.Errorf("decode grpc-web base64 body: %w", err)
+			return nil, fmt.Errorf("decode grpc-web base64 body: %w: %v", ErrMalformedBase64, err)
 		}
 		data = decoded
 	}
@@ -99,7 +121,7 @@ func readAllFrames(data []byte, maxMessageSize uint32) (*ParseResult, error) {
 	for offset < len(data) {
 		remaining := len(data) - offset
 		if remaining < frameHeaderSize {
-			return result, fmt.Errorf("incomplete grpc-web frame header: %d bytes remaining", remaining)
+			return result, fmt.Errorf("%w: incomplete frame header: %d bytes remaining", ErrMalformedLPM, remaining)
 		}
 
 		flags := data[offset]
@@ -109,18 +131,21 @@ func readAllFrames(data []byte, maxMessageSize uint32) (*ParseResult, error) {
 		// Validate that only known flag bits are set.
 		// Known bits: bit 0 (compressed) and bit 7 (trailer).
 		if flags & ^byte(trailerFlagBit|compressedFlagBit) != 0 {
-			return result, fmt.Errorf("invalid grpc-web flags byte: 0x%02x", flags)
+			return result, fmt.Errorf("%w: invalid flags byte: 0x%02x", ErrMalformedLPM, flags)
 		}
 
 		length := binary.BigEndian.Uint32(data[offset+1 : offset+5])
 		if length > maxMessageSize {
+			// Security cap (CWE-400). Intentionally NOT wrapped with
+			// ErrMalformedLPM — oversize is a DoS-defense termination,
+			// not a wire-format observability signal.
 			return result, fmt.Errorf("grpc-web message too large: %d > %d", length, maxMessageSize)
 		}
 
 		offset += frameHeaderSize
 
 		if uint32(len(data)-offset) < length {
-			return result, fmt.Errorf("incomplete grpc-web payload: want %d bytes, have %d", length, len(data)-offset)
+			return result, fmt.Errorf("%w: incomplete payload: want %d bytes, have %d", ErrMalformedLPM, length, len(data)-offset)
 		}
 
 		payload := make([]byte, length)
@@ -136,7 +161,7 @@ func readAllFrames(data []byte, maxMessageSize uint32) (*ParseResult, error) {
 			result.TrailerFrame = frame
 			trailers, err := ParseTrailers(payload)
 			if err != nil {
-				return result, fmt.Errorf("parse grpc-web trailer: %w", err)
+				return result, fmt.Errorf("%w: %v", ErrMalformedTrailer, err)
 			}
 			result.Trailers = trailers
 		} else {
