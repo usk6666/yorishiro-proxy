@@ -613,10 +613,12 @@ func handleProxyConn(ctx context.Context, t *testing.T, clientConn net.Conn, iss
 							state = "error"
 						}
 						if streamID != "" {
-							store.UpdateStream(cctx, streamID, flow.StreamUpdate{
+							if uerr := store.UpdateStream(cctx, streamID, flow.StreamUpdate{
 								State:         state,
 								FailureReason: session.ClassifyError(err),
-							})
+							}); uerr != nil {
+								t.Logf("proxy: UpdateStream(%s) err=%v", streamID, uerr)
+							}
 						}
 					},
 				})
@@ -825,8 +827,6 @@ func TestGRPC_UnaryRoundTrip(t *testing.T) {
 	req := []byte("hello world")
 	t.Logf("client: invoking unary RPC")
 	if err := cc.Invoke(ctx, echoFullMethod(echoMethodUnary), &req, &resp); err != nil {
-		t.Logf("client: invoke failed at %v: %v", time.Now(), err)
-		time.Sleep(5 * time.Second)
 		t.Fatalf("Invoke: %v", err)
 	}
 	t.Logf("client: invoke succeeded resp=%q", resp)
@@ -1610,10 +1610,9 @@ func TestGRPC_RSTStreamProducesErrorState(t *testing.T) {
 
 // TestGRPC_DirectNoProxy is a sanity check: verifies that the test's
 // hand-rolled gRPC ServiceDesc + raw codec round-trips correctly against a
-// real gRPC client, without any proxy in between. It exists to
-// definitively isolate failures in the proxy harness from failures in the
-// test scaffolding itself. Not part of the 12 required tests; remove once
-// the proxy path is green.
+// real gRPC client, without any proxy in between. Kept as a baseline so
+// regressions in the test scaffolding (codec, server harness) can be
+// distinguished from regressions in the proxy path.
 func TestGRPC_DirectNoProxy(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
