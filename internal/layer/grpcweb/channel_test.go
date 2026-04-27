@@ -391,7 +391,10 @@ func TestGzipRoundTrip(t *testing.T) {
 		t.Fatalf("gzip write: %v", err)
 	}
 	gw.Close()
-	body := EncodeFrame(false, true, gz.Bytes())
+	// Body has data + trailer so the test stays focused on gzip behavior
+	// and is unaffected by the USK-660 missing-trailer anomaly path.
+	body := append([]byte{}, EncodeFrame(false, true, gz.Bytes())...)
+	body = append(body, EncodeFrame(true, false, []byte("grpc-status: 0\r\n"))...)
 
 	headers := []envelope.KeyValue{
 		{Name: "content-type", Value: "application/grpc-web+proto"},
@@ -402,8 +405,8 @@ func TestGzipRoundTrip(t *testing.T) {
 	ch := Wrap(mock, RoleClient)
 
 	envs := drainEnvelopes(t, ch, 5)
-	if len(envs) != 2 {
-		t.Fatalf("got %d envelopes", len(envs))
+	if len(envs) != 3 {
+		t.Fatalf("got %d envelopes, want 3 (Start+Data+End)", len(envs))
 	}
 	data := envs[1].Message.(*envelope.GRPCDataMessage)
 	if !data.Compressed {

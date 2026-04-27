@@ -25,4 +25,21 @@ const (
 	// AnomalyMalformedGRPCWebTrailer marks an embedded trailer frame
 	// whose text payload could not be parsed as "name: value\r\n" lines.
 	AnomalyMalformedGRPCWebTrailer AnomalyType = "MalformedGRPCWebTrailer"
+
+	// AnomalyMissingGRPCWebTrailer marks a Receive-direction body that
+	// parsed cleanly but had no terminating trailer LPM frame after one
+	// or more data frames. A buggy server, an over-eager intermediate
+	// proxy, or a deliberate truncation attack manifests as this signal;
+	// without it the analyst would only see a silently truncated event
+	// sequence. The grpc-web Layer synthesizes a GRPCEndMessage with
+	// Status=0 and an empty Raw slice (so it can be distinguished from a
+	// wire-observed End) and stamps this anomaly on it.
+	AnomalyMissingGRPCWebTrailer AnomalyType = "MissingGRPCWebTrailer"
+
+	// AnomalyUnexpectedGRPCWebRequestTrailer marks a Send-direction
+	// (request) body that contained an embedded trailer LPM frame.
+	// gRPC-Web request bodies must not carry an embedded trailer — the
+	// trailer is a response-side artifact only. Observing one indicates
+	// a client bug or a deliberately crafted request worth recording.
+	AnomalyUnexpectedGRPCWebRequestTrailer AnomalyType = "UnexpectedGRPCWebRequestTrailer"
 )

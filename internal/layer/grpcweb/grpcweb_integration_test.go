@@ -407,6 +407,15 @@ func (s *sendEndInjector) Next(ctx context.Context) (*envelope.Envelope, error) 
 	}
 	s.mu.Lock()
 	s.lastSeq = env.Sequence
+	// If the inner Channel itself emits a real Send-direction End (e.g. the
+	// USK-660 unexpected-request-trailer path), mark emitted so we don't
+	// double up with a synthetic End on subsequent inner-EOF — sendEndLocked
+	// rejects a second End once sendStart has been consumed.
+	if env.Direction == envelope.Send {
+		if _, isEnd := env.Message.(*envelope.GRPCEndMessage); isEnd {
+			s.emitted = true
+		}
+	}
 	s.mu.Unlock()
 	return env, nil
 }
@@ -1459,5 +1468,193 @@ func TestGRPCWeb_GRPCEventMetadataOnFlows(t *testing.T) {
 				t.Errorf("receive-start flow missing grpc_service stamp: %v", f.Metadata)
 			}
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// USK-660: missing-trailer / unexpected-request-trailer anomaly tests
+// ---------------------------------------------------------------------------
+
+// TestGRPCWeb_MissingTrailerProducesAnomaly — a Receive-direction body that
+// parses cleanly (one or more data frames) but lacks a terminating trailer
+// LPM must surface as a recorded GRPCEndMessage envelope on the Receive side
+// stamped with AnomalyMissingGRPCWebTrailer. Without this signal the analyst
+// would only see a silently-truncated event tail and could not distinguish
+// "well-formed RPC with grpc-status=0" from "upstream/proxy/server bug or
+// truncation attack".
+func TestGRPCWeb_MissingTrailerProducesAnomaly(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	respPayload := []byte("hello-no-trailer")
+	upstreamLn, _ := startGRPCWebHTTP1Upstream(t, func(_ []byte) []byte {
+		// Build a response body that contains ONE data frame and NO
+		// terminating trailer LPM. Hand-crafted (intentionally NOT using
+		// buildGRPCWebResponseBody, which always appends a trailer).
+		dataFrame := grpcweb.EncodeFrame(false, false, respPayload)
+		return []byte(fmt.Sprintf(
+			"HTTP/1.1 200 OK\r\nContent-Type: application/grpc-web+proto\r\nContent-Length: %d\r\nConnection: close\r\n\r\n",
+			len(dataFrame)) + string(dataFrame))
+	})
+	defer upstreamLn.Close()
+	target := upstreamLn.Addr().String()
+
+	proxyAddr, store, _, sessionDone := startGRPCWebHTTP1Proxy(t, ctx, pipelineOpts{})
+
+	_ = sendGRPCWebHTTP1Request(t, proxyAddr, target, []byte("ping"), false)
+
+	select {
+	case <-sessionDone:
+	case <-time.After(15 * time.Second):
+		t.Fatal("timeout waiting for session to complete")
+	}
+
+	// The session terminates cleanly — the missing trailer is recorded as an
+	// anomaly, not a *layer.StreamError.
+	streams := store.getStreams()
+	if len(streams) != 1 {
+		t.Fatalf("got %d streams, want 1", len(streams))
+	}
+	if streams[0].State != "complete" {
+		t.Errorf("Stream.State = %q, want %q", streams[0].State, "complete")
+	}
+
+	// Locate the synthetic Receive End flow stamped with the anomaly. The
+	// missing-trailer condition is detected at refill time and emits a
+	// synthetic GRPCEndMessage with Status=0, Raw=nil, and the anomaly key.
+	flows := flowsForFirstStream(store)
+	var endFlow *flow.Flow
+	for _, f := range flows {
+		if f.Direction != "receive" || f.Metadata == nil {
+			continue
+		}
+		if f.Metadata["grpc_event"] != "end" {
+			continue
+		}
+		if _, ok := f.Metadata["grpc_anomaly_missing_trailer"]; !ok {
+			continue
+		}
+		endFlow = f
+		break
+	}
+	if endFlow == nil {
+		t.Fatalf("no Receive end flow with grpc_anomaly_missing_trailer found; flows=%d", len(flows))
+	}
+
+	// Detail is the parser's diagnostic text — non-empty by contract.
+	if endFlow.Metadata["grpc_anomaly_missing_trailer"] == "" {
+		t.Errorf("Metadata[grpc_anomaly_missing_trailer] is empty; want diagnostic text")
+	}
+	// Synthetic End: Raw is empty so the analyst can distinguish synthesized
+	// from wire-observed Ends.
+	if len(endFlow.RawBytes) != 0 {
+		t.Errorf("synthetic End RawBytes = %d bytes (%q), want empty", len(endFlow.RawBytes), truncate(endFlow.RawBytes))
+	}
+	// grpc_status defaults to 0 (placeholder per design).
+	if got := endFlow.Metadata["grpc_status"]; got != "0" {
+		t.Errorf("synthetic End grpc_status = %q, want %q", got, "0")
+	}
+
+	// Receive-side data envelope is still emitted (the body parsed cleanly
+	// before we noticed the absent trailer). Without this the synthesized
+	// End would be the only Receive-direction flow and the test would fail
+	// to distinguish "upstream sent nothing" from "upstream sent data only".
+	if dataF := firstFlowWithEvent(flows, "receive", "data"); dataF == nil {
+		t.Errorf("missing receive-data flow; flows=%d", len(flows))
+	} else if !bytes.Equal(dataF.Body, respPayload) {
+		t.Errorf("receive-data Body = %q, want %q", dataF.Body, respPayload)
+	}
+}
+
+// TestGRPCWeb_UnexpectedRequestTrailerProducesAnomaly — a Send-direction
+// (request) body that carries an embedded trailer LPM frame must produce a
+// recorded GRPCEndMessage envelope on the Send side stamped with
+// AnomalyUnexpectedGRPCWebRequestTrailer. The Anomaly captures both the
+// fact of the protocol violation AND the trailer's wire bytes via
+// flow.RawBytes for analyst inspection.
+func TestGRPCWeb_UnexpectedRequestTrailerProducesAnomaly(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	upstreamLn, _ := startGRPCWebHTTP1Upstream(t, func(_ []byte) []byte {
+		// Upstream replies with a normal grpc-web response so the proxy's
+		// Receive-side path is well-formed (no second anomaly to confuse
+		// the assertion). The request the upstream actually sees has the
+		// trailer stripped (defensive at sendEndLocked when dir==Send).
+		return buildGRPCWebResponseHTTP([]byte("ack"), 0, "OK", false)
+	})
+	defer upstreamLn.Close()
+	target := upstreamLn.Addr().String()
+
+	proxyAddr, store, _, sessionDone := startGRPCWebHTTP1Proxy(t, ctx, pipelineOpts{})
+
+	// Compose a request body: one data frame + one trailer LPM. Under RFC
+	// gRPC-Web semantics the trailer belongs only on the response side.
+	dataFrame := grpcweb.EncodeFrame(false, false, []byte("ping"))
+	trailerFrame := grpcweb.EncodeFrame(true, false, []byte("grpc-status: 0\r\n"))
+	body := append(append([]byte{}, dataFrame...), trailerFrame...)
+
+	tlsConn := connectThroughProxy(t, proxyAddr, target, nil)
+	defer tlsConn.Close()
+	req := fmt.Sprintf(
+		"POST /pkg.Echo/Say HTTP/1.1\r\nHost: %s\r\nContent-Type: application/grpc-web+proto\r\nContent-Length: %d\r\nConnection: close\r\n\r\n",
+		target, len(body))
+	if _, err := tlsConn.Write(append([]byte(req), body...)); err != nil {
+		t.Fatalf("write request: %v", err)
+	}
+	_ = tlsConn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	tmp := make([]byte, 1024)
+	for {
+		_, err := tlsConn.Read(tmp)
+		if err != nil {
+			break
+		}
+	}
+
+	select {
+	case <-sessionDone:
+	case <-time.After(15 * time.Second):
+		t.Fatal("timeout waiting for session to complete")
+	}
+
+	streams := store.getStreams()
+	if len(streams) != 1 {
+		t.Fatalf("got %d streams, want 1", len(streams))
+	}
+	if streams[0].State != "complete" {
+		t.Errorf("Stream.State = %q, want %q", streams[0].State, "complete")
+	}
+
+	// Locate the Send End flow stamped with the unexpected-trailer anomaly.
+	// The harness's sendEndInjector also synthesizes a Send End on inner-EOF,
+	// so multiple Send End flows may be recorded — we filter by anomaly key.
+	flows := flowsForFirstStream(store)
+	var endFlow *flow.Flow
+	for _, f := range flows {
+		if f.Direction != "send" || f.Metadata == nil {
+			continue
+		}
+		if f.Metadata["grpc_event"] != "end" {
+			continue
+		}
+		if _, ok := f.Metadata["grpc_anomaly_unexpected_request_trailer"]; !ok {
+			continue
+		}
+		endFlow = f
+		break
+	}
+	if endFlow == nil {
+		t.Fatalf("no Send end flow with grpc_anomaly_unexpected_request_trailer found; flows=%d", len(flows))
+	}
+
+	if endFlow.Metadata["grpc_anomaly_unexpected_request_trailer"] == "" {
+		t.Errorf("Metadata[grpc_anomaly_unexpected_request_trailer] is empty; want diagnostic text")
+	}
+	// Wire fidelity: the trailer's wire bytes are preserved verbatim on
+	// flow.RawBytes (perFrameRaw produced trailerRawBytes regardless of
+	// direction).
+	if !bytes.Equal(endFlow.RawBytes, trailerFrame) {
+		t.Errorf("RawBytes mismatch:\n got %d bytes: %q\nwant %d bytes: %q",
+			len(endFlow.RawBytes), truncate(endFlow.RawBytes), len(trailerFrame), truncate(trailerFrame))
 	}
 }

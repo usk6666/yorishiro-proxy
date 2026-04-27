@@ -457,6 +457,10 @@ func grpcAnomalyMetadataKey(t envelope.AnomalyType) string {
 		return "grpc_anomaly_malformed_lpm"
 	case envelope.AnomalyMalformedGRPCWebTrailer:
 		return "grpc_anomaly_malformed_trailer"
+	case envelope.AnomalyMissingGRPCWebTrailer:
+		return "grpc_anomaly_missing_trailer"
+	case envelope.AnomalyUnexpectedGRPCWebRequestTrailer:
+		return "grpc_anomaly_unexpected_request_trailer"
 	default:
 		return ""
 	}
@@ -477,6 +481,9 @@ func projectGRPCData(m *envelope.GRPCDataMessage, fl *flow.Flow) {
 // projectGRPCEnd projects a GRPCEndMessage. grpc_status is always present
 // (RPC outcome identity); grpc_message and grpc_status_details_bin are
 // conditional on non-empty values. Trailers project via the multimap shape.
+// Parser-detected Anomalies project into stable per-type grpc_anomaly_* keys
+// (USK-660 missing-trailer / unexpected-request-trailer); stream-terminating
+// problems surface as *layer.StreamError elsewhere and never reach this slice.
 func projectGRPCEnd(m *envelope.GRPCEndMessage, fl *flow.Flow) {
 	fl.Metadata["grpc_event"] = "end"
 	fl.Metadata["grpc_status"] = strconv.FormatUint(uint64(m.Status), 10)
@@ -488,6 +495,13 @@ func projectGRPCEnd(m *envelope.GRPCEndMessage, fl *flow.Flow) {
 	}
 	if trlrs := keyValuesToMap(m.Trailers); trlrs != nil {
 		fl.Trailers = trlrs
+	}
+	for _, a := range m.Anomalies {
+		key := grpcAnomalyMetadataKey(a.Type)
+		if key == "" {
+			continue
+		}
+		fl.Metadata[key] = a.Detail
 	}
 }
 
@@ -755,7 +769,9 @@ func grpcDataModified(a, b *envelope.GRPCDataMessage) bool {
 	return !bytes.Equal(a.Payload, b.Payload)
 }
 
-// grpcEndModified reports whether two GRPCEndMessages differ.
+// grpcEndModified reports whether two GRPCEndMessages differ. Anomalies are
+// intentionally excluded — they are parser-derived state observed on the
+// wire, not user-mutable, so they must not produce variant rows.
 func grpcEndModified(a, b *envelope.GRPCEndMessage) bool {
 	if a.Status != b.Status || a.Message != b.Message {
 		return true
