@@ -1,26 +1,23 @@
 //go:build e2e
 
-// Package sse_test contains e2e tests for the SSE Layer / Channel that drive
-// the Channel + Pipeline + RunSession integration without depending on the
-// http1 streaming-body detach primitive.
+// Package sse_test contains e2e tests for the SSE Layer / Channel covering
+// two complementary paths:
 //
-// Scope rationale (USK-653 / USK-643 D1 deferral):
+//  1. Direct sse.Wrap → Pipeline.Run → RunSession integration (without
+//     RunStackSession or any http1 → SSE swap). These tests exercise the
+//     recording projection (Stream/Flow rows + sse_event/sse_id/sse_retry_ms
+//     metadata), the Send-sentinel programmer-error contract, the
+//     MaxEventSize StreamError + OnComplete error-path projection, and
+//     parser anomaly emission (sse_anomaly_* metadata).
 //
-// The original USK-653 spec asks for a full-chain "Content-Type:
-// text/event-stream detection → Receive-side Layer swap → byte-loss-free
-// passthrough" e2e test. That path is BLOCKED in production today because
-// http1.channel.Next drains the response body before returning the response
-// envelope, which means the swap orchestration in
-// session.runUpgradeSSE never sees a streaming body to wrap. The blocker is
-// documented as deferred item D1 in the USK-643 PR description.
-//
-// Until D1 lands, we provide direct-Wrap integration tests that exercise
-// sse.Wrap → Pipeline.Run → RunSession without involving RunStackSession
-// or any http1 → SSE swap. They cover the recording projection (Stream/
-// Flow rows + sse_event/sse_id/sse_retry_ms metadata), the Send-sentinel
-// programmer-error contract, the MaxEventSize StreamError + OnComplete
-// error-path projection, and parser anomaly emission (sse_anomaly_*
-// metadata). The full-chain swap test remains t.Skip until D1 lands.
+//  2. The full-chain http1 → SSE swap (TestSSE_FullChainSwapEndToEnd),
+//     unblocked by USK-655 (http1 streaming-body detach) and activated by
+//     USK-657. It exercises the production runUpgradeSSE path:
+//     UpgradeStep latches Pending=UpgradeSSE on the response, the upstream
+//     http1 Layer surrenders its still-open body via DetachStreamingBody,
+//     sse.Wrap is constructed with WithSkipFirstEmit so the pre-swap 200
+//     response is recorded exactly once, and the upstream body bytes flow
+//     to the browser via io.TeeReader.
 package sse_test
 
 import (
@@ -607,12 +604,13 @@ func TestSSE_DirectChannelOversizeProducesStreamError(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Skipped placeholders
+// Full-chain http1 → SSE swap (USK-655 unblock, USK-657 activation)
 // ---------------------------------------------------------------------------
 
 // TestSSE_FullChainSwapEndToEnd is the full http1 → SSE swap e2e test
-// originally specified in USK-653 and unblocked by USK-655 (http1
-// streaming-body detach). It exercises the production path:
+// originally specified in USK-653, unblocked by USK-655 (http1
+// streaming-body detach), and activated by USK-657. It exercises the
+// production path:
 //
 //  1. Upstream serves a 200 text/event-stream response and emits three
 //     events on the same connection.

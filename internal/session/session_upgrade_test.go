@@ -315,7 +315,7 @@ func TestRunStackSession_NilStack(t *testing.T) {
 
 // TestRunStackSession_SSE_E2E_DeferredOnHTTP1BodyDetach is the SSE
 // counterpart of the WS integration test. Originally skipped pending
-// USK-655 (http1 streaming-body detach); now activated. The test
+// USK-655 (http1 streaming-body detach); activated by USK-657. The test
 // orchestrates an HTTP/1.x → SSE swap via a real TCP loopback and asserts
 // that:
 //
