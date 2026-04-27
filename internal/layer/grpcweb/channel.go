@@ -231,6 +231,17 @@ func (c *channel) refillFromHTTPMessage(ctx context.Context, env *envelope.Envel
 	// per-Channel value resolved from WithMaxMessageSize.
 	parsed, parseErr := DecodeBodyWithMaxMessageSize(bodyBytes, isBase64, c.maxMessageSize)
 	if parseErr != nil {
+		// Recoverable wire-format failures classify as envelope.Anomaly
+		// values: emit a single Start envelope carrying the malformed
+		// body bytes verbatim on Envelope.Raw, then latch terminal EOF
+		// so the session OnComplete sees a clean termination and the
+		// Stream is recorded with the diagnostic preserved. Unrecoverable
+		// failures (security caps such as the per-LPM size limit) fall
+		// through to *layer.StreamError as before.
+		if anomalyType, ok := classifyParseError(parseErr); ok {
+			c.emitAnomalyStart(env, dir, start, bodyBytes, anomalyType, parseErr.Error())
+			return nil
+		}
 		return &layer.StreamError{
 			Code:   layer.ErrorInternalError,
 			Reason: "grpcweb: parse body: " + parseErr.Error(),
@@ -285,6 +296,54 @@ func (c *channel) refillFromHTTPMessage(ctx context.Context, env *envelope.Envel
 	}
 
 	return nil
+}
+
+// classifyParseError maps a DecodeBody error to a recoverable Anomaly type.
+// Returns ("", false) when the error is a security cap or otherwise
+// unrecoverable; the caller surfaces those as *layer.StreamError. The
+// classification uses errors.Is against the sentinels exported from
+// frame.go and trailer.go so the channel never string-matches.
+func classifyParseError(err error) (envelope.AnomalyType, bool) {
+	switch {
+	case errors.Is(err, ErrMalformedBase64):
+		return envelope.AnomalyMalformedGRPCWebBase64, true
+	case errors.Is(err, ErrMalformedTrailer):
+		return envelope.AnomalyMalformedGRPCWebTrailer, true
+	case errors.Is(err, ErrMalformedLPM):
+		return envelope.AnomalyMalformedGRPCWebLPM, true
+	default:
+		return "", false
+	}
+}
+
+// emitAnomalyStart pushes a single GRPCStartMessage envelope onto emitQueue
+// carrying the parser's diagnostic state (Anomalies populated) and the full
+// inbound body in Envelope.Raw, then latches the channel into a clean
+// terminal-EOF state. Next() drains the queue first (the existing Next loop
+// returns queued envelopes before observing terminalErr) so RecordStep sees
+// the Anomaly envelope before the session OnComplete sees io.EOF and
+// finalizes the Stream cleanly.
+func (c *channel) emitAnomalyStart(
+	src *envelope.Envelope,
+	dir envelope.Direction,
+	start *envelope.GRPCStartMessage,
+	bodyBytes []byte,
+	anomalyType envelope.AnomalyType,
+	detail string,
+) {
+	start.Anomalies = append(start.Anomalies, envelope.Anomaly{
+		Type:   anomalyType,
+		Detail: detail,
+	})
+
+	c.mu.Lock()
+	c.emitQueue = append(c.emitQueue, c.buildEnvelopeRaw(src, dir, start, bodyBytes))
+	c.mu.Unlock()
+
+	// Latch clean termination via the existing helper. terminate()
+	// preserves emitQueue intact, so Next() drains the Anomaly envelope
+	// first and only then observes io.EOF on the next call.
+	c.terminate(io.EOF)
 }
 
 // buildEnvelope constructs an emitted Envelope with no Raw payload. Used for

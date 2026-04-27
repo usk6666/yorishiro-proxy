@@ -1114,44 +1114,41 @@ func TestGRPCWeb_VariantRecordingOnTransform(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Test 7: Malformed base64 produces StreamError(ErrorInternalError)
+// Test 7: Malformed wire-format input produces recorded Anomaly (USK-659)
 // ---------------------------------------------------------------------------
 
-// TestGRPCWeb_MalformedBase64ProducesStreamError — a request with
-// content-type application/grpc-web-text but a body that is not valid
-// base64 must produce a *layer.StreamError with Code=ErrorInternalError on
-// the client-side grpcweb Channel. The session classifies that error and
-// projects FailureReason="internal_error" onto the Stream.
-//
-// Note: the issue text mentions an "Anomaly" path for this case; the
-// current implementation in internal/layer/grpcweb/channel.go emits a
-// StreamError instead. Asserting the behavior the implementation actually
-// produces; the Anomaly path is filed as a separate follow-up issue.
-func TestGRPCWeb_MalformedBase64ProducesStreamError(t *testing.T) {
+// runMalformedAnomalyTest drives a single malformed-body request through the
+// proxy and asserts the recorded Anomaly path. The three Anomaly variants
+// (base64, LPM, trailer) share identical assertion shape — only the body
+// bytes, content-type, and expected metadata key differ.
+func runMalformedAnomalyTest(t *testing.T, body []byte, contentType, anomalyMetadataKey string) {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	upstreamLn, _ := startGRPCWebHTTP1Upstream(t, func(_ []byte) []byte {
-		// Won't be reached because the proxy errors on malformed base64.
+		// Upstream may receive a connection (the proxy dials lazily on
+		// the first upstream.Send carrying the Anomaly Start) but never a
+		// real request body — sendStartLocked just buffers metadata, no
+		// flush sentinel ever follows because the channel latched EOF.
 		return buildGRPCWebResponseHTTP([]byte("never"), 0, "OK", false)
 	})
 	defer upstreamLn.Close()
 	target := upstreamLn.Addr().String()
 
-	proxyAddr, _, result, sessionDone := startGRPCWebHTTP1Proxy(t, ctx, pipelineOpts{})
+	proxyAddr, store, result, sessionDone := startGRPCWebHTTP1Proxy(t, ctx, pipelineOpts{})
 
-	// Hand-roll an HTTP/1.1 POST whose body is NOT valid base64 but whose
-	// Content-Type advertises application/grpc-web-text.
 	tlsConn := connectThroughProxy(t, proxyAddr, target, nil)
 	defer tlsConn.Close()
-	body := []byte("!!!definitely-not-base64!!!")
 	req := fmt.Sprintf(
-		"POST /pkg.Echo/Say HTTP/1.1\r\nHost: %s\r\nContent-Type: application/grpc-web-text+proto\r\nContent-Length: %d\r\nConnection: close\r\n\r\n",
-		target, len(body))
+		"POST /pkg.Echo/Say HTTP/1.1\r\nHost: %s\r\nContent-Type: %s\r\nContent-Length: %d\r\nConnection: close\r\n\r\n",
+		target, contentType, len(body))
 	if _, err := tlsConn.Write(append([]byte(req), body...)); err != nil {
 		t.Fatalf("write malformed request: %v", err)
 	}
-	// Drain any response bytes (proxy will close on error).
+	// Drain any response bytes — the proxy closes the connection cleanly
+	// after the session finalizes (no error response is sent because the
+	// session terminated via EOF, not StreamError).
 	_ = tlsConn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	tmp := make([]byte, 1024)
 	for {
@@ -1167,15 +1164,170 @@ func TestGRPCWeb_MalformedBase64ProducesStreamError(t *testing.T) {
 		t.Fatal("timeout waiting for session to complete")
 	}
 
-	// The grpcweb Channel emits a *layer.StreamError on the very first Next()
-	// because DecodeBody fails before any envelope reaches RecordStep. The
-	// session captures that error in OnComplete and classifies it as
-	// "internal_error" via session.ClassifyError. There is no Stream record
-	// because no envelope ever passed through RecordStep — assert the error
-	// itself instead, which is the diagnostic signal the impl produces.
+	// The session sees clean termination because emitAnomalyStart latches
+	// io.EOF — no *layer.StreamError reaches OnComplete.
+	if gotErr := result.get(); gotErr != nil && !errors.Is(gotErr, io.EOF) {
+		t.Errorf("session error = %v, want nil or io.EOF", gotErr)
+	}
+
+	// Exactly one Stream is recorded with Protocol="grpc-web". The OnComplete
+	// callback transitions State to "complete" because the err is nil/EOF.
+	streams := store.getStreams()
+	if len(streams) != 1 {
+		t.Fatalf("got %d streams, want 1", len(streams))
+	}
+	st := streams[0]
+	if st.Protocol != string(envelope.ProtocolGRPCWeb) {
+		t.Errorf("Stream.Protocol = %q, want %q", st.Protocol, string(envelope.ProtocolGRPCWeb))
+	}
+	if st.State != "complete" {
+		t.Errorf("Stream.State = %q, want %q", st.State, "complete")
+	}
+	if st.FailureReason != "" {
+		t.Errorf("Stream.FailureReason = %q, want empty", st.FailureReason)
+	}
+
+	// Among the recorded flows there must be exactly one Send "start" flow
+	// carrying the Anomaly metadata. The harness's sendEndInjector also
+	// synthesizes a GRPCEndMessage on inner-EOF so a "end" Send flow is
+	// expected too — but the load-bearing assertion is the anomaly Start.
+	flows := store.allFlows()
+	var startFlow *flow.Flow
+	for _, f := range flows {
+		if f.Direction == "send" && f.Metadata["grpc_event"] == "start" {
+			if startFlow != nil {
+				t.Fatalf("multiple Send start flows recorded; want 1")
+			}
+			startFlow = f
+		}
+	}
+	if startFlow == nil {
+		t.Fatalf("no Send start flow recorded; flows=%d", len(flows))
+	}
+
+	// Metadata carries the per-anomaly diagnostic key with the parser's
+	// error text in Detail.
+	detail, ok := startFlow.Metadata[anomalyMetadataKey]
+	if !ok {
+		t.Errorf("Metadata[%s] missing; metadata keys: %v", anomalyMetadataKey, metadataKeys(startFlow.Metadata))
+	} else if detail == "" {
+		t.Errorf("Metadata[%s] is empty; want parser error text", anomalyMetadataKey)
+	}
+
+	// Wire-fidelity acceptance: RawBytes byte-equals the malformed wire
+	// bytes the client sent. This is the load-bearing signal for the
+	// MITM-diagnostic principle that drove USK-659.
+	if !bytes.Equal(startFlow.RawBytes, body) {
+		t.Errorf("RawBytes mismatch:\n got %d bytes: %q\nwant %d bytes: %q",
+			len(startFlow.RawBytes), truncate(startFlow.RawBytes), len(body), truncate(body))
+	}
+}
+
+// metadataKeys returns the keys of m in unspecified order. Used for test
+// failure messages to surface which keys WERE present when the expected
+// key was missing.
+func metadataKeys(m map[string]string) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}
+
+// truncate returns up to the first 64 bytes of b for failure messages.
+func truncate(b []byte) []byte {
+	const maxLen = 64
+	if len(b) <= maxLen {
+		return b
+	}
+	return b[:maxLen]
+}
+
+// TestGRPCWeb_MalformedBase64ProducesAnomaly — a request with content-type
+// application/grpc-web-text+proto but a body that is not valid base64 must
+// emit a recorded Anomaly envelope (Metadata["grpc_anomaly_malformed_base64"])
+// rather than a terminal *layer.StreamError. The malformed wire bytes are
+// preserved verbatim on Flow.RawBytes for analyst inspection.
+func TestGRPCWeb_MalformedBase64ProducesAnomaly(t *testing.T) {
+	body := []byte("!!!definitely-not-base64!!!")
+	runMalformedAnomalyTest(t, body, "application/grpc-web-text+proto", "grpc_anomaly_malformed_base64")
+}
+
+// TestGRPCWeb_MalformedLPMProducesAnomaly — a request whose binary body has
+// a 5-byte LPM header declaring a length larger than the available payload
+// bytes must emit Anomaly("MalformedGRPCWebLPM").
+func TestGRPCWeb_MalformedLPMProducesAnomaly(t *testing.T) {
+	// Frame header claiming 1000 bytes of payload but only 4 bytes follow —
+	// readAllFrames returns ErrMalformedLPM (incomplete payload).
+	body := []byte{
+		0x00,                   // flags: not compressed, not trailer
+		0x00, 0x00, 0x03, 0xe8, // length: 1000 (big-endian)
+		'a', 'b', 'c', 'd', // only 4 payload bytes
+	}
+	runMalformedAnomalyTest(t, body, "application/grpc-web+proto", "grpc_anomaly_malformed_lpm")
+}
+
+// TestGRPCWeb_MalformedTrailerProducesAnomaly — a request with one valid
+// data frame followed by a trailer frame whose text payload lacks the
+// "name: value" colon separator must emit Anomaly("MalformedGRPCWebTrailer").
+func TestGRPCWeb_MalformedTrailerProducesAnomaly(t *testing.T) {
+	dataFrame := grpcweb.EncodeFrame(false, false, []byte("hello"))
+	// Trailer frame payload: a line with no colon. ParseTrailers returns an
+	// error; readAllFrames wraps it with ErrMalformedTrailer.
+	trailerFrame := grpcweb.EncodeFrame(true, false, []byte("nocolon\r\n"))
+	body := append(append([]byte{}, dataFrame...), trailerFrame...)
+	runMalformedAnomalyTest(t, body, "application/grpc-web+proto", "grpc_anomaly_malformed_trailer")
+}
+
+// TestGRPCWeb_OversizeMessageProducesStreamError — the per-LPM size cap
+// (CWE-400 mitigation) is intentionally NOT classified as an Anomaly; an
+// oversize declared length is a security-cap termination, not a wire-format
+// observability signal. The session aborts with *layer.StreamError as
+// before, and ClassifyError yields "internal_error".
+func TestGRPCWeb_OversizeMessageProducesStreamError(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	upstreamLn, _ := startGRPCWebHTTP1Upstream(t, func(_ []byte) []byte {
+		return buildGRPCWebResponseHTTP([]byte("never"), 0, "OK", false)
+	})
+	defer upstreamLn.Close()
+	target := upstreamLn.Addr().String()
+
+	proxyAddr, _, result, sessionDone := startGRPCWebHTTP1Proxy(t, ctx, pipelineOpts{})
+
+	tlsConn := connectThroughProxy(t, proxyAddr, target, nil)
+	defer tlsConn.Close()
+	// Frame header declaring 0xFFFFFFFF (4 GiB) length — exceeds the
+	// default MaxGRPCMessageSize cap, triggers the security-cap path.
+	body := []byte{
+		0x00,
+		0xff, 0xff, 0xff, 0xff,
+	}
+	req := fmt.Sprintf(
+		"POST /pkg.Echo/Say HTTP/1.1\r\nHost: %s\r\nContent-Type: application/grpc-web+proto\r\nContent-Length: %d\r\nConnection: close\r\n\r\n",
+		target, len(body))
+	if _, err := tlsConn.Write(append([]byte(req), body...)); err != nil {
+		t.Fatalf("write oversize request: %v", err)
+	}
+	_ = tlsConn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	tmp := make([]byte, 1024)
+	for {
+		_, err := tlsConn.Read(tmp)
+		if err != nil {
+			break
+		}
+	}
+
+	select {
+	case <-sessionDone:
+	case <-time.After(15 * time.Second):
+		t.Fatal("timeout waiting for session to complete")
+	}
+
 	gotErr := result.get()
 	if gotErr == nil {
-		t.Fatal("expected non-nil session error from malformed base64 body")
+		t.Fatal("expected non-nil session error from oversize LPM body")
 	}
 	var se *layer.StreamError
 	if !errors.As(gotErr, &se) {
@@ -1184,12 +1336,9 @@ func TestGRPCWeb_MalformedBase64ProducesStreamError(t *testing.T) {
 	if se.Code != layer.ErrorInternalError {
 		t.Errorf("StreamError.Code = %s, want %s", se.Code, layer.ErrorInternalError)
 	}
-	if !strings.Contains(se.Reason, "grpcweb") {
-		t.Errorf("StreamError.Reason = %q, want substring %q", se.Reason, "grpcweb")
+	if !strings.Contains(se.Reason, "too large") {
+		t.Errorf("StreamError.Reason = %q, want substring %q", se.Reason, "too large")
 	}
-	// Cross-check: ClassifyError on this StreamError yields "internal_error"
-	// — the value RecordStep would have projected onto Stream.FailureReason
-	// had a Stream existed.
 	if got := session.ClassifyError(gotErr); got != "internal_error" {
 		t.Errorf("ClassifyError = %q, want %q", got, "internal_error")
 	}
