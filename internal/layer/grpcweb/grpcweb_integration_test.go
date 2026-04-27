@@ -421,42 +421,6 @@ func (s *sendEndInjector) Next(ctx context.Context) (*envelope.Envelope, error) 
 }
 
 // ---------------------------------------------------------------------------
-// rawClearOnSend bridges around a known production limitation in grpcweb's
-// base64-wire Send path: refillFromHTTPMessage emits envelopes with
-// Envelope.Raw already base64-encoded for grpc-web-text content-types
-// (RFC §3.2.3), but sendDataLocked writes Raw verbatim and sendEndLocked
-// then base64-encodes the entire send buffer ONCE more — causing a
-// double-encode on any forwarded base64-wire frame. Clearing env.Raw on
-// the Send path forces grpcweb's sendDataLocked to re-encode from
-// GRPCDataMessage.Payload (binary), so sendEndLocked's base64 wrap is the
-// only encode applied. Filed as a follow-up issue.
-type rawClearOnSend struct {
-	inner layer.Channel
-}
-
-func (c *rawClearOnSend) StreamID() string        { return c.inner.StreamID() }
-func (c *rawClearOnSend) Closed() <-chan struct{} { return c.inner.Closed() }
-func (c *rawClearOnSend) Err() error              { return c.inner.Err() }
-func (c *rawClearOnSend) Close() error            { return c.inner.Close() }
-func (c *rawClearOnSend) Next(ctx context.Context) (*envelope.Envelope, error) {
-	return c.inner.Next(ctx)
-}
-func (c *rawClearOnSend) Send(ctx context.Context, env *envelope.Envelope) error {
-	if env != nil {
-		switch env.Message.(type) {
-		case *envelope.GRPCDataMessage, *envelope.GRPCEndMessage:
-			// Shallow-copy the envelope before clearing Raw so any caller
-			// retaining a reference (e.g. a recorder branch in the pipeline
-			// that later inspects env.Raw) sees the original wire bytes.
-			cp := *env
-			cp.Raw = nil
-			return c.inner.Send(ctx, &cp)
-		}
-	}
-	return c.inner.Send(ctx, env)
-}
-
-// ---------------------------------------------------------------------------
 // Pipeline assembly (shared between h1 and h2 paths)
 // ---------------------------------------------------------------------------
 
@@ -474,7 +438,9 @@ func buildPipeline(store flow.Writer, opts pipelineOpts) *pipeline.Pipeline {
 		pipeline.NewSafetyStep(nil, nil, opts.safetyEngine, logger),
 		pipeline.NewTransformStep(nil, nil, opts.transformEngine),
 		pipeline.NewInterceptStep(nil, nil, opts.interceptEngine, nil, logger),
-		pipeline.NewRecordStep(store, logger),
+		pipeline.NewRecordStep(store, logger,
+			pipeline.WithWireEncoder(envelope.ProtocolGRPCWeb, grpcweb.EncodeWireBytes),
+		),
 	}
 	return pipeline.New(steps...)
 }
@@ -542,7 +508,7 @@ func startGRPCWebHTTP1Proxy(
 
 			session.RunSession(streamCtx, clientCh, func(_ context.Context, _ *envelope.Envelope) (layer.Channel, error) {
 				rawUp := <-stack.UpstreamTopmost().Channels()
-				return &rawClearOnSend{inner: grpcweb.Wrap(rawUp, grpcweb.RoleClient)}, nil
+				return grpcweb.Wrap(rawUp, grpcweb.RoleClient), nil
 			}, p, session.SessionOptions{
 				OnComplete: func(cctx context.Context, streamID string, err error) {
 					result.record(err)
@@ -657,7 +623,7 @@ func startGRPCWebHTTP2Proxy(
 							return nil, oerr
 						}
 						aggUp := httpaggregator.Wrap(upStream, httpaggregator.RoleClient, nil, upstreamLOpts)
-						return &rawClearOnSend{inner: grpcweb.Wrap(aggUp, grpcweb.RoleClient)}, nil
+						return grpcweb.Wrap(aggUp, grpcweb.RoleClient), nil
 					}, p, session.SessionOptions{
 						OnComplete: func(cctx context.Context, streamID string, err error) {
 							state := "complete"
@@ -1043,10 +1009,10 @@ func TestGRPCWeb_RawBytesPreservedPerFrame(t *testing.T) {
 
 // TestGRPCWeb_VariantRecordingOnTransform — applying a TransformReplacePayload
 // rule on the Send-side GRPCDataMessage.Payload must produce two flow rows
-// (original + modified) with the modified row tagged variant=modified.
-// Because no WireEncoder is registered for ProtocolGRPCWeb the modified
-// row's Metadata["wire_bytes"] is "unavailable" (the encoder cleared
-// env.Raw on commit).
+// (original + modified) with the modified row tagged variant=modified. With
+// the grpc-web WireEncoder registered (USK-661), the modified row's RawBytes
+// must hold a freshly-encoded LPM frame with the replacement payload — not
+// the cleared env.Raw, and not the original wire bytes.
 func TestGRPCWeb_VariantRecordingOnTransform(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -1106,15 +1072,14 @@ func TestGRPCWeb_VariantRecordingOnTransform(t *testing.T) {
 		t.Errorf("expected >=1 send-data variant=modified flow; got %d (flows=%d)", modCount, len(flows))
 	}
 	if modFlow != nil {
-		// No WireEncoder is registered for ProtocolGRPCWeb in this test (the
-		// proxy code intentionally skips registration since the wire encoder
-		// for grpc-web has not been written yet — filed as a follow-up). On
-		// commit, transform.go clears env.Raw so the modified flow's RawBytes
-		// is empty and no "wire_bytes" tag is added because applyWireEncode
-		// short-circuits with no encoders configured.
-		if len(modFlow.RawBytes) != 0 {
-			t.Errorf("modified flow RawBytes should be empty when no WireEncoder is registered "+
-				"and the rule clears env.Raw on commit; got %d bytes", len(modFlow.RawBytes))
+		// transform.go clears env.Raw on commit; the registered WireEncoder
+		// then re-renders the modified GRPCDataMessage into a binary LPM
+		// frame so the recorded modified variant carries the post-mutation
+		// wire bytes.
+		wantWire := grpcweb.EncodeFrame(false, false, []byte("the-REDACTED-payload"))
+		if !bytes.Equal(modFlow.RawBytes, wantWire) {
+			t.Errorf("modified flow RawBytes mismatch:\n got %d bytes: %x\nwant %d bytes: %x",
+				len(modFlow.RawBytes), modFlow.RawBytes, len(wantWire), wantWire)
 		}
 		if !bytes.Contains(modFlow.Body, []byte("REDACTED")) {
 			t.Errorf("modified flow Body does not contain replacement: %q", modFlow.Body)
@@ -1656,5 +1621,74 @@ func TestGRPCWeb_UnexpectedRequestTrailerProducesAnomaly(t *testing.T) {
 	if !bytes.Equal(endFlow.RawBytes, trailerFrame) {
 		t.Errorf("RawBytes mismatch:\n got %d bytes: %q\nwant %d bytes: %q",
 			len(endFlow.RawBytes), truncate(endFlow.RawBytes), len(trailerFrame), truncate(trailerFrame))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// USK-661: base64 wire fidelity (no double-encode in Send fast path)
+// ---------------------------------------------------------------------------
+
+// TestGRPCWeb_Base64WireNoDoubleEncode — a round-trip on grpc-web-text wire
+// must forward the request body to the upstream as base64-once (binary LPM
+// frame after a single base64 decode), not base64-twice. The previous bug
+// appended Envelope.Raw verbatim in sendDataLocked; refillFromHTTPMessage
+// emits Raw in base64 form for -text content-types (USK-641), and the
+// terminal sendEndLocked wrap then encoded the buffer a second time.
+//
+// This test runs without rawClearOnSend (the harness work-around removed by
+// USK-661), so any regression of the double-encode bug fails here directly.
+func TestGRPCWeb_Base64WireNoDoubleEncode(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	respPayload := []byte("ack-base64")
+	upstreamLn, captured := startGRPCWebHTTP1Upstream(t, func(_ []byte) []byte {
+		return buildGRPCWebResponseHTTP(respPayload, 0, "OK", true)
+	})
+	defer upstreamLn.Close()
+	target := upstreamLn.Addr().String()
+
+	proxyAddr, _, _, sessionDone := startGRPCWebHTTP1Proxy(t, ctx, pipelineOpts{})
+
+	clientPayload := []byte("ping-base64")
+	_ = sendGRPCWebHTTP1Request(t, proxyAddr, target, clientPayload, true)
+
+	select {
+	case <-sessionDone:
+	case <-time.After(15 * time.Second):
+		t.Fatal("timeout waiting for session to complete")
+	}
+
+	upstreamLn.Close()
+
+	reqs := captured()
+	if len(reqs) == 0 {
+		t.Fatal("upstream captured no requests")
+	}
+	upstreamReq := reqs[0]
+
+	hdrEnd := bytes.Index(upstreamReq, []byte("\r\n\r\n"))
+	if hdrEnd < 0 {
+		t.Fatalf("could not locate header terminator in upstream request: %q", truncate(upstreamReq))
+	}
+	upstreamHeaders := upstreamReq[:hdrEnd]
+	upstreamBody := upstreamReq[hdrEnd+4:]
+
+	if !bytes.Contains(bytes.ToLower(upstreamHeaders),
+		[]byte("application/grpc-web-text")) {
+		t.Errorf("upstream content-type lost the -text wire format: headers=%q",
+			truncate(upstreamHeaders))
+	}
+
+	decodedOnce, err := base64.StdEncoding.DecodeString(string(upstreamBody))
+	if err != nil {
+		t.Fatalf("upstream body is not valid base64: %v\nbody=%q",
+			err, truncate(upstreamBody))
+	}
+	wantFrame := grpcweb.EncodeFrame(false, false, clientPayload)
+	if !bytes.Equal(decodedOnce, wantFrame) {
+		t.Errorf("after one base64 decode, upstream body is not the expected LPM frame "+
+			"(double-encode regression?):\n got %d bytes: %x\nwant %d bytes: %x",
+			len(decodedOnce), decodedOnce, len(wantFrame), wantFrame)
 	}
 }

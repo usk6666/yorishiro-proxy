@@ -20,6 +20,18 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/layer"
 )
 
+// opaqueGRPCWeb is per-RPC layer-internal state attached to every
+// envelope emitted by refillFromHTTPMessage. It carries the wire-format
+// signal (binary vs base64) and the negotiated grpc-encoding so the
+// package-level WireEncoder can re-render modified envelopes back to wire
+// form without per-stream lookup tables. Pipeline Steps must not type-
+// assert on Opaque (RFC §3.1) — only the same-package WireEncoder may
+// inspect it.
+type opaqueGRPCWeb struct {
+	wireBase64 bool
+	encoding   string
+}
+
 // channel is the layer.Channel returned by Wrap. It maintains a small
 // emission queue (Receive: one HTTPMessage produces 1+N+1 envelopes) and a
 // Send-side assembly buffer (the caller pushes 1+N+1 events that we
@@ -196,6 +208,12 @@ func (c *channel) refillFromHTTPMessage(ctx context.Context, env *envelope.Envel
 	acceptEnc := splitCSV(headerGet(msg.Headers, "grpc-accept-encoding"))
 	timeout := parseGRPCTimeout(headerGet(msg.Headers, "grpc-timeout"))
 
+	// opaque carries the wire-format signal (binary vs base64) and the
+	// negotiated grpc-encoding so the package-level WireEncoder can re-render
+	// modified envelopes back to wire form. Pipeline Steps must not type-
+	// assert on Opaque (RFC §3.1) — only the same-package WireEncoder does.
+	opaque := &opaqueGRPCWeb{wireBase64: isBase64, encoding: encoding}
+
 	// Service/Method derivation. On the request side (Direction=Send for
 	// RoleServer Next, Direction=Send for assembled outbound) the path is
 	// authoritative. On the response side (Direction=Receive) the path is
@@ -239,7 +257,7 @@ func (c *channel) refillFromHTTPMessage(ctx context.Context, env *envelope.Envel
 		// failures (security caps such as the per-LPM size limit) fall
 		// through to *layer.StreamError as before.
 		if anomalyType, ok := classifyParseError(parseErr); ok {
-			c.emitAnomalyStart(env, dir, start, bodyBytes, anomalyType, parseErr.Error())
+			c.emitAnomalyStart(env, dir, start, bodyBytes, anomalyType, parseErr.Error(), opaque)
 			return nil
 		}
 		return &layer.StreamError{
@@ -265,7 +283,7 @@ func (c *channel) refillFromHTTPMessage(ctx context.Context, env *envelope.Envel
 	// Always emit one Start envelope first.
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.emitQueue = append(c.emitQueue, c.buildEnvelope(env, dir, start, nil))
+	c.emitQueue = append(c.emitQueue, c.buildEnvelope(env, dir, start, nil, opaque))
 
 	// Emit one Data envelope per data frame.
 	for i, fr := range parsed.DataFrames {
@@ -285,7 +303,7 @@ func (c *channel) refillFromHTTPMessage(ctx context.Context, env *envelope.Envel
 		if i < len(frameRawBytes) {
 			raw = frameRawBytes[i]
 		}
-		c.emitQueue = append(c.emitQueue, c.buildEnvelopeRaw(env, dir, data, raw))
+		c.emitQueue = append(c.emitQueue, c.buildEnvelopeRaw(env, dir, data, raw, opaque))
 	}
 
 	// Emit one End envelope.
@@ -309,7 +327,7 @@ func (c *channel) refillFromHTTPMessage(ctx context.Context, env *envelope.Envel
 				Detail: "gRPC-Web request body carried an embedded trailer LPM frame",
 			})
 		}
-		c.emitQueue = append(c.emitQueue, c.buildEnvelopeRaw(env, dir, end, trailerRawBytes))
+		c.emitQueue = append(c.emitQueue, c.buildEnvelopeRaw(env, dir, end, trailerRawBytes, opaque))
 	} else if dir == envelope.Receive && len(parsed.DataFrames) > 0 {
 		end := &envelope.GRPCEndMessage{
 			Anomalies: []envelope.Anomaly{{
@@ -317,7 +335,7 @@ func (c *channel) refillFromHTTPMessage(ctx context.Context, env *envelope.Envel
 				Detail: "gRPC-Web response body had data frames but no terminating trailer LPM",
 			}},
 		}
-		c.emitQueue = append(c.emitQueue, c.buildEnvelope(env, dir, end, nil))
+		c.emitQueue = append(c.emitQueue, c.buildEnvelope(env, dir, end, nil, opaque))
 	}
 
 	return nil
@@ -355,6 +373,7 @@ func (c *channel) emitAnomalyStart(
 	bodyBytes []byte,
 	anomalyType envelope.AnomalyType,
 	detail string,
+	opaque any,
 ) {
 	start.Anomalies = append(start.Anomalies, envelope.Anomaly{
 		Type:   anomalyType,
@@ -362,7 +381,7 @@ func (c *channel) emitAnomalyStart(
 	})
 
 	c.mu.Lock()
-	c.emitQueue = append(c.emitQueue, c.buildEnvelopeRaw(src, dir, start, bodyBytes))
+	c.emitQueue = append(c.emitQueue, c.buildEnvelopeRaw(src, dir, start, bodyBytes, opaque))
 	c.mu.Unlock()
 
 	// Latch clean termination via the existing helper. terminate()
@@ -371,10 +390,11 @@ func (c *channel) emitAnomalyStart(
 	c.terminate(io.EOF)
 }
 
-// buildEnvelope constructs an emitted Envelope with no Raw payload. Used for
-// GRPCStartMessage where the wire bytes belong to the inner HTTPMessage
-// envelope and must not be duplicated.
-func (c *channel) buildEnvelope(src *envelope.Envelope, dir envelope.Direction, msg envelope.Message, raw []byte) *envelope.Envelope {
+// buildEnvelope constructs an emitted Envelope. opaque attaches the per-RPC
+// wire-format / grpc-encoding hints so the package-level WireEncoder can re-
+// render a modified Envelope back to wire form. Pipeline Steps must not
+// type-assert on Envelope.Opaque.
+func (c *channel) buildEnvelope(src *envelope.Envelope, dir envelope.Direction, msg envelope.Message, raw []byte, opaque any) *envelope.Envelope {
 	seq := c.nextSeq
 	c.nextSeq++
 	return &envelope.Envelope{
@@ -386,12 +406,13 @@ func (c *channel) buildEnvelope(src *envelope.Envelope, dir envelope.Direction, 
 		Raw:       raw,
 		Message:   msg,
 		Context:   src.Context,
+		Opaque:    opaque,
 	}
 }
 
 // buildEnvelopeRaw is buildEnvelope with an explicit raw byte slice.
-func (c *channel) buildEnvelopeRaw(src *envelope.Envelope, dir envelope.Direction, msg envelope.Message, raw []byte) *envelope.Envelope {
-	return c.buildEnvelope(src, dir, msg, raw)
+func (c *channel) buildEnvelopeRaw(src *envelope.Envelope, dir envelope.Direction, msg envelope.Message, raw []byte, opaque any) *envelope.Envelope {
+	return c.buildEnvelope(src, dir, msg, raw, opaque)
 }
 
 // Send accepts a gRPC-Web envelope. The caller must push GRPCStartMessage
@@ -438,12 +459,25 @@ func (c *channel) sendDataLocked(env *envelope.Envelope, m *envelope.GRPCDataMes
 		return errors.New("grpcweb: GRPCDataMessage before GRPCStartMessage on Send")
 	}
 
-	// Fast path: raw bytes provided — write verbatim. We treat Raw on Data
-	// envelopes as the wire-form 5-byte prefix + payload (binary). For
-	// base64-wire output the assembler base64-encodes the full body once at
-	// the end, so Raw at this stage stays binary either way.
+	// Fast path: raw bytes provided — append to the assembly buffer.
+	// Assembly buffer holds binary LPM frames; the final base64 wrap at
+	// sendEndLocked is the only base64 encode applied. For -text wire
+	// formats, refillFromHTTPMessage emits Raw in base64-encoded form per
+	// USK-641, so we must base64-decode here before writing the binary
+	// LPM into the buffer or the final wrap would produce a double-encode.
 	if len(env.Raw) > 0 {
-		c.sendDataBuf.Write(env.Raw)
+		raw := env.Raw
+		if IsBase64Encoded(c.sendStart.ContentType) {
+			decoded, err := decodeBase64(raw)
+			if err != nil {
+				return &layer.StreamError{
+					Code:   layer.ErrorInternalError,
+					Reason: "grpcweb: sendDataLocked decode base64 Raw: " + err.Error(),
+				}
+			}
+			raw = decoded
+		}
+		c.sendDataBuf.Write(raw)
 		return nil
 	}
 
@@ -490,9 +524,23 @@ func (c *channel) sendEndLocked(ctx context.Context, env *envelope.Envelope, m *
 	if embedTrailer {
 		trailerPayload := encodeTrailerPayload(m)
 		if len(env.Raw) > 0 {
-			// Fast path: caller provided raw trailer bytes (binary
-			// LPM-prefixed form expected per RFC §3.2.3 Raw definition).
-			dataBytes = append(dataBytes, env.Raw...)
+			// Fast path: caller provided raw trailer bytes. Assembly buffer
+			// holds binary LPM frames; the final base64 wrap below is the
+			// only base64 encode applied. For -text wire formats Raw is
+			// base64-encoded (USK-641), so decode once here to keep the
+			// buffer binary and avoid a double-encode.
+			rawTrailer := env.Raw
+			if IsBase64Encoded(start.ContentType) {
+				decoded, err := decodeBase64(rawTrailer)
+				if err != nil {
+					return &layer.StreamError{
+						Code:   layer.ErrorInternalError,
+						Reason: "grpcweb: sendEndLocked decode base64 Raw: " + err.Error(),
+					}
+				}
+				rawTrailer = decoded
+			}
+			dataBytes = append(dataBytes, rawTrailer...)
 		} else {
 			dataBytes = append(dataBytes, EncodeFrame(true, false, trailerPayload)...)
 		}
