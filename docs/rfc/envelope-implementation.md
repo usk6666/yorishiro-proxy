@@ -48,6 +48,27 @@ Spolsky の警告は「既存コードに蓄積された無数のエッジケー
 
 ## 2. ファイル別 コピー vs スクラッチ判定
 
+### Milestone → spec section map (for token-efficient context load)
+
+`/rfc001` skill (Phase 0-2) uses this table to load only the spec sections relevant to the active milestone, instead of reading `envelope.md` in full. **Always-load tier**: §1-2 of `envelope.md` (Motivation + Non-Goals) plus §3.1-3.3 (Envelope / Message / Layer+Channel) — these are the foundational types every milestone references. **On-demand tier**: per-milestone sections below.
+
+| Milestone | `envelope.md` sections | `envelope-implementation.md` frictions |
+|---|---|---|
+| N1 (ByteChunk + Layer + Channel) | §3.3 (Layer+Channel detail) | Friction 1-A, 1-B |
+| N2 (Vertical slice — raw smuggling E2E) | §4.2 (smuggling scenario), §5 (Variant Snapshot) | Friction 1-A, 1-B |
+| N3 (HTTP/1 layer) | §3.2 (HTTPMessage), §3.5 (Pipeline Step categorization), §4.1 (plain HTTP/1.1) | Friction 9, 11 |
+| N4 (Connector completion) | §3.4 (ConnectionStack), §3.6 (Rule engine split) | Friction 1-A, 9, 10 |
+| N5 (Job + Macro integration) | §3.5, §10.4 (hook system alternative — context only) | Friction 9, 10 |
+| N6 (HTTP/2 layer) | §3.2 (HTTPMessage), §4.4 (H2 multiplexing), §9.1 (OQ#1 resolution) | Friction 3-A, 3-B, 3-C, 3-D, 4-D |
+| N6.5 (disk-backed body) | §3.2 (Body type detail), §9.1 | Friction 3-C |
+| N6.6 (pool / push / wireencode) | §3.4 (ConnectionStack), §5 (Variant Snapshot) | Friction 3-A, 3-B |
+| N6.7 (H2 split → event + httpaggregator) | §3.3, §9.1 (revised), §9.2 | Friction 4-D |
+| N7 (gRPC, gRPC-Web, WS, SSE) | §3.2, §4.3 (WS), §4.4 (gRPC), §9.2 | Friction 4-A, 4-B, 4-C, 2-A, 2-B, 2-C |
+| N8 (Plugin v2 — Starlark) | §3.5, §8 (Relationship to plugin), §9.3 | Friction 5-A, 5-B, 5-C |
+| N9 (Legacy removal + production wiring) | §6 (Migration), §7 (Milestones), §11 (Acceptance) | Friction 12 |
+
+> **Escape hatch**: if the design-reviewer agent flags that a section not listed for the milestone is load-bearing, add it here and re-run. The table is a conservative starting set, not a hard cap.
+
 ### コピー対象 (中身を見ない、package 名と import だけ直す)
 
 | コピー元 | コピー先 | 理由 |
