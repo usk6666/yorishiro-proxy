@@ -73,7 +73,7 @@ type jsonDiff struct {
 
 // handleCompare handles the compare action within the resend tool.
 func (s *Server) handleCompare(ctx context.Context, params compareParams) (*gomcp.CallToolResult, any, error) {
-	if s.deps.store == nil {
+	if s.flowStore.store == nil {
 		return nil, nil, fmt.Errorf("flow store is not initialized")
 	}
 	if params.FlowIDA == "" {
@@ -83,20 +83,20 @@ func (s *Server) handleCompare(ctx context.Context, params compareParams) (*gomc
 		return nil, nil, fmt.Errorf("flow_id_b is required for compare action")
 	}
 
-	flowA, err := s.deps.store.GetStream(ctx, params.FlowIDA)
+	flowA, err := s.flowStore.store.GetStream(ctx, params.FlowIDA)
 	if err != nil {
 		return nil, nil, fmt.Errorf("get flow A (%s): %w", params.FlowIDA, err)
 	}
-	flowB, err := s.deps.store.GetStream(ctx, params.FlowIDB)
+	flowB, err := s.flowStore.store.GetStream(ctx, params.FlowIDB)
 	if err != nil {
 		return nil, nil, fmt.Errorf("get flow B (%s): %w", params.FlowIDB, err)
 	}
 
-	recvA, err := getLastReceiveMessage(ctx, s.deps.store, flowA.ID)
+	recvA, err := getLastReceiveMessage(ctx, s.flowStore.store, flowA.ID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("flow A (%s): %w", params.FlowIDA, err)
 	}
-	recvB, err := getLastReceiveMessage(ctx, s.deps.store, flowB.ID)
+	recvB, err := getLastReceiveMessage(ctx, s.flowStore.store, flowB.ID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("flow B (%s): %w", params.FlowIDB, err)
 	}

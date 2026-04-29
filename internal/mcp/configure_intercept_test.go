@@ -25,7 +25,7 @@ func setupInterceptTestSession(t *testing.T, engine *intercept.Engine) *gomcp.Cl
 		opts = append(opts, WithInterceptEngine(engine))
 	}
 
-	s := NewServer(ctx, nil, nil, nil, opts...)
+	s := newServer(ctx, nil, nil, nil, opts...)
 	ct, st := gomcp.NewInMemoryTransports()
 
 	ss, err := s.server.Connect(ctx, st, nil)

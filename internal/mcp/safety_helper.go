@@ -108,10 +108,10 @@ func rawHeadersToHTTPHeader(rh parser.RawHeaders) http.Header {
 // filterOutputBody applies the SafetyFilter output masking to the given body data.
 // If no safety engine is configured, it returns the body unchanged.
 func (s *Server) filterOutputBody(body []byte) []byte {
-	if s.deps.safetyEngine == nil {
+	if s.pipeline.safetyEngine == nil {
 		return body
 	}
-	result := s.deps.safetyEngine.FilterOutput(body)
+	result := s.pipeline.safetyEngine.FilterOutput(body)
 	if result.Masked {
 		slog.Debug("SafetyFilter output masking applied to body",
 			"matches", len(result.Matches),
@@ -123,10 +123,10 @@ func (s *Server) filterOutputBody(body []byte) []byte {
 // filterOutputHeaders applies the SafetyFilter output masking to the given HTTP headers.
 // If no safety engine is configured, it returns the headers unchanged.
 func (s *Server) filterOutputHeaders(headers http.Header) http.Header {
-	if s.deps.safetyEngine == nil {
+	if s.pipeline.safetyEngine == nil {
 		return headers
 	}
-	filtered, matches := s.deps.safetyEngine.FilterOutputHeaders(httpHeaderToKeyValues(headers))
+	filtered, matches := s.pipeline.safetyEngine.FilterOutputHeaders(httpHeaderToKeyValues(headers))
 	if len(matches) > 0 {
 		slog.Debug("SafetyFilter output masking applied to headers",
 			"matches", len(matches),
@@ -138,10 +138,10 @@ func (s *Server) filterOutputHeaders(headers http.Header) http.Header {
 // filterOutputRawHeaders applies the SafetyFilter output masking to parser.RawHeaders.
 // If no safety engine is configured, it returns the headers unchanged.
 func (s *Server) filterOutputRawHeaders(headers parser.RawHeaders) parser.RawHeaders {
-	if s.deps.safetyEngine == nil {
+	if s.pipeline.safetyEngine == nil {
 		return headers
 	}
-	filtered, matches := s.deps.safetyEngine.FilterOutputHeaders(rawHeadersToKeyValues(headers))
+	filtered, matches := s.pipeline.safetyEngine.FilterOutputHeaders(rawHeadersToKeyValues(headers))
 	if len(matches) > 0 {
 		slog.Debug("SafetyFilter output masking applied to headers",
 			"matches", len(matches),
@@ -154,7 +154,7 @@ func (s *Server) filterOutputRawHeaders(headers parser.RawHeaders) parser.RawHea
 // It masks the body and headers of each message in place. If no safety engine is
 // configured, this is a no-op.
 func (s *Server) filterOutputMessages(entries []queryMessageEntry) {
-	if s.deps.safetyEngine == nil {
+	if s.pipeline.safetyEngine == nil {
 		return
 	}
 	for i := range entries {
@@ -176,7 +176,7 @@ func (s *Server) filterOutputMessages(entries []queryMessageEntry) {
 // It masks the body and headers of each entry in place. If no safety engine is
 // configured, this is a no-op.
 func (s *Server) filterOutputInterceptEntries(entries []queryInterceptQueueEntry) {
-	if s.deps.safetyEngine == nil {
+	if s.pipeline.safetyEngine == nil {
 		return
 	}
 	for i := range entries {

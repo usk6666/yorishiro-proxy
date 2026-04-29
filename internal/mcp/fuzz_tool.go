@@ -142,21 +142,21 @@ func (s *Server) handleFuzzStart(ctx context.Context, params fuzzParams) (*gomcp
 		return nil, nil, err
 	}
 
-	if s.deps.fuzzRunner == nil {
+	if s.jobRunner.fuzzRunner == nil {
 		return nil, nil, fmt.Errorf("fuzz runner is not initialized")
 	}
 
 	cfg := buildFuzzConfig(params)
 
 	if params.Hooks != nil {
-		hooks := newFuzzHookCallbacks(s.deps, params.Hooks)
+		hooks := newFuzzHookCallbacks(s, params.Hooks)
 		cfg.Hooks = hooks
 	}
 
 	// Inject target scope checker to validate URLs after position application
 	// and KV Store template expansion, preventing SSRF via payload injection.
-	if s.deps.targetScope != nil && s.deps.targetScope.HasRules() {
-		ts := s.deps.targetScope
+	if s.connector.targetScope != nil && s.connector.targetScope.HasRules() {
+		ts := s.connector.targetScope
 		cfg.TargetScopeChecker = func(u *url.URL) error {
 			return checkTargetScopeURLHelper(ts, u)
 		}
@@ -164,8 +164,8 @@ func (s *Server) handleFuzzStart(ctx context.Context, params fuzzParams) (*gomcp
 
 	// Inject safety input checker to validate each expanded payload
 	// before sending, preventing destructive payloads via fuzz injection.
-	if s.deps.safetyEngine != nil {
-		se := s.deps.safetyEngine
+	if s.pipeline.safetyEngine != nil {
+		se := s.pipeline.safetyEngine
 		cfg.SafetyInputChecker = func(body []byte, rawURL string, headers []exchange.KeyValue) error {
 			if v := se.CheckInput(body, rawURL, headers); v != nil {
 				return fmt.Errorf("%s", safetyViolationError(v))
@@ -174,7 +174,7 @@ func (s *Server) handleFuzzStart(ctx context.Context, params fuzzParams) (*gomcp
 		}
 	}
 
-	result, err := s.deps.fuzzRunner.Start(s.deps.appCtx, cfg)
+	result, err := s.jobRunner.fuzzRunner.Start(s.misc.appCtx, cfg)
 	if err != nil {
 		return nil, nil, fmt.Errorf("fuzz execution: %w", err)
 	}
@@ -206,10 +206,10 @@ func validateFuzzParams(params fuzzParams) error {
 // This is called before protocol checks so unsupported protocols can be
 // rejected without loading messages.
 func (s *Server) loadFuzzTemplateFlow(ctx context.Context, flowID string) (*flow.Stream, error) {
-	if s.deps.store == nil {
+	if s.flowStore.store == nil {
 		return nil, fmt.Errorf("flow store is not initialized")
 	}
-	fl, err := s.deps.store.GetStream(ctx, flowID)
+	fl, err := s.flowStore.store.GetStream(ctx, flowID)
 	if err != nil {
 		return nil, fmt.Errorf("get template flow: %w", err)
 	}
@@ -218,7 +218,7 @@ func (s *Server) loadFuzzTemplateFlow(ctx context.Context, flowID string) (*flow
 
 // loadFuzzTemplateSendMessages loads the send-direction messages for the given flow.
 func (s *Server) loadFuzzTemplateSendMessages(ctx context.Context, flowID string) ([]*flow.Flow, error) {
-	sendMsgs, err := s.deps.store.GetFlows(ctx, flowID, flow.FlowListOptions{Direction: "send"})
+	sendMsgs, err := s.flowStore.store.GetFlows(ctx, flowID, flow.FlowListOptions{Direction: "send"})
 	if err != nil {
 		return nil, fmt.Errorf("get send messages: %w", err)
 	}
@@ -228,7 +228,7 @@ func (s *Server) loadFuzzTemplateSendMessages(ctx context.Context, flowID string
 // checkFuzzTargetScopeWithData enforces the target scope on pre-loaded template data.
 // If no target scope is configured, this is a no-op.
 func (s *Server) checkFuzzTargetScopeWithData(_ *flow.Stream, sendMsgs []*flow.Flow) error {
-	if s.deps.targetScope == nil || !s.deps.targetScope.HasRules() {
+	if s.connector.targetScope == nil || !s.connector.targetScope.HasRules() {
 		return nil
 	}
 	if len(sendMsgs) > 0 && sendMsgs[0].URL != nil {
@@ -242,7 +242,7 @@ func (s *Server) checkFuzzTargetScopeWithData(_ *flow.Stream, sendMsgs []*flow.F
 // checkFuzzSafetyInputWithData validates pre-loaded template send messages against
 // the safety filter engine. If no safety engine is configured, this is a no-op.
 func (s *Server) checkFuzzSafetyInputWithData(sendMsgs []*flow.Flow) error {
-	if s.deps.safetyEngine == nil {
+	if s.pipeline.safetyEngine == nil {
 		return nil
 	}
 	if len(sendMsgs) == 0 {
@@ -254,7 +254,7 @@ func (s *Server) checkFuzzSafetyInputWithData(sendMsgs []*flow.Flow) error {
 		rawURL = msg.URL.String()
 	}
 	headers := httpHeaderToKeyValues(gohttp.Header(msg.Headers))
-	if v := s.deps.safetyEngine.CheckInput(msg.Body, rawURL, headers); v != nil {
+	if v := s.pipeline.safetyEngine.CheckInput(msg.Body, rawURL, headers); v != nil {
 		return fmt.Errorf("%s", safetyViolationError(v))
 	}
 	return nil
@@ -292,14 +292,14 @@ func buildFuzzConfig(params fuzzParams) fuzzer.RunConfig {
 
 // handleFuzzPauseAction handles the fuzz_pause action within the fuzz tool.
 func (s *Server) handleFuzzPauseAction(params fuzzParams) (*gomcp.CallToolResult, *executeFuzzControlResult, error) {
-	if s.deps.fuzzRunner == nil {
+	if s.jobRunner.fuzzRunner == nil {
 		return nil, nil, fmt.Errorf("fuzz runner is not initialized")
 	}
 	if params.FuzzID == "" {
 		return nil, nil, fmt.Errorf("fuzz_id is required for fuzz_pause action")
 	}
 
-	ctrl := s.deps.fuzzRunner.Registry().Get(params.FuzzID)
+	ctrl := s.jobRunner.fuzzRunner.Registry().Get(params.FuzzID)
 	if ctrl == nil {
 		return nil, nil, fmt.Errorf("fuzz job %q not found or already completed", params.FuzzID)
 	}
@@ -321,14 +321,14 @@ func (s *Server) handleFuzzPauseAction(params fuzzParams) (*gomcp.CallToolResult
 
 // handleFuzzResumeAction handles the fuzz_resume action within the fuzz tool.
 func (s *Server) handleFuzzResumeAction(params fuzzParams) (*gomcp.CallToolResult, *executeFuzzControlResult, error) {
-	if s.deps.fuzzRunner == nil {
+	if s.jobRunner.fuzzRunner == nil {
 		return nil, nil, fmt.Errorf("fuzz runner is not initialized")
 	}
 	if params.FuzzID == "" {
 		return nil, nil, fmt.Errorf("fuzz_id is required for fuzz_resume action")
 	}
 
-	ctrl := s.deps.fuzzRunner.Registry().Get(params.FuzzID)
+	ctrl := s.jobRunner.fuzzRunner.Registry().Get(params.FuzzID)
 	if ctrl == nil {
 		return nil, nil, fmt.Errorf("fuzz job %q not found or already completed", params.FuzzID)
 	}
@@ -351,26 +351,26 @@ func (s *Server) handleFuzzResumeAction(params fuzzParams) (*gomcp.CallToolResul
 // syncFuzzJobStatus updates the fuzz job's status in the DB immediately.
 // This is best-effort; failures are logged but do not propagate errors.
 func (s *Server) syncFuzzJobStatus(fuzzID, status string) {
-	if s.deps.fuzzStore == nil {
+	if s.jobRunner.fuzzStore == nil {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if err := s.deps.fuzzStore.UpdateFuzzJobStatus(ctx, fuzzID, status); err != nil {
+	if err := s.jobRunner.fuzzStore.UpdateFuzzJobStatus(ctx, fuzzID, status); err != nil {
 		slog.Warn("failed to sync fuzz job status to DB", "job_id", fuzzID, "status", status, "error", err)
 	}
 }
 
 // handleFuzzCancelAction handles the fuzz_cancel action within the fuzz tool.
 func (s *Server) handleFuzzCancelAction(params fuzzParams) (*gomcp.CallToolResult, *executeFuzzControlResult, error) {
-	if s.deps.fuzzRunner == nil {
+	if s.jobRunner.fuzzRunner == nil {
 		return nil, nil, fmt.Errorf("fuzz runner is not initialized")
 	}
 	if params.FuzzID == "" {
 		return nil, nil, fmt.Errorf("fuzz_id is required for fuzz_cancel action")
 	}
 
-	ctrl := s.deps.fuzzRunner.Registry().Get(params.FuzzID)
+	ctrl := s.jobRunner.fuzzRunner.Registry().Get(params.FuzzID)
 	if ctrl == nil {
 		return nil, nil, fmt.Errorf("fuzz job %q not found or already completed", params.FuzzID)
 	}

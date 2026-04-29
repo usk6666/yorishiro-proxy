@@ -18,7 +18,7 @@ func setupTestSessionWithPluginEngine(t *testing.T, engine *plugin.Engine) *gomc
 	t.Helper()
 	ctx := context.Background()
 
-	s := NewServer(context.Background(), nil, nil, nil, WithPluginEngine(engine))
+	s := newServer(context.Background(), nil, nil, nil, WithPluginEngine(engine))
 	ct, st := gomcp.NewInMemoryTransports()
 
 	ss, err := s.server.Connect(ctx, st, nil)

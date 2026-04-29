@@ -24,7 +24,7 @@ func setupQueryTestSession(t *testing.T, store flow.Store, opts ...ServerOption)
 	ctx := context.Background()
 
 	ca := newTestCA(t)
-	s := NewServer(ctx, ca, store, nil, opts...)
+	s := newServer(ctx, ca, store, nil, opts...)
 	ct, st := gomcp.NewInMemoryTransports()
 
 	ss, err := s.server.Connect(ctx, st, nil)
@@ -860,7 +860,7 @@ func TestQuery_Config_WithManagerFields(t *testing.T) {
 	manager.SetPeekTimeout(5 * time.Second)
 
 	ca := newTestCA(t)
-	s := NewServer(ctx, ca, store, manager)
+	s := newServer(ctx, ca, store, manager)
 	ct, st := gomcp.NewInMemoryTransports()
 
 	ss, err := s.server.Connect(ctx, st, nil)
@@ -941,7 +941,7 @@ func TestQuery_CACert_Success(t *testing.T) {
 
 	// Build server with the CA directly.
 	ctx := context.Background()
-	s := NewServer(ctx, ca, store, nil)
+	s := newServer(ctx, ca, store, nil)
 	ct, st := gomcp.NewInMemoryTransports()
 	ss, err := s.server.Connect(ctx, st, nil)
 	if err != nil {
@@ -989,7 +989,7 @@ func TestQuery_CACert_NilCA(t *testing.T) {
 	t.Parallel()
 	// Build server without CA.
 	ctx := context.Background()
-	s := NewServer(ctx, nil, nil, nil)
+	s := newServer(ctx, nil, nil, nil)
 	ct, st := gomcp.NewInMemoryTransports()
 	ss, err := s.server.Connect(ctx, st, nil)
 	if err != nil {
@@ -1109,7 +1109,7 @@ func TestQuery_CACert_PersistedFields(t *testing.T) {
 	})
 
 	ctx := context.Background()
-	s := NewServer(ctx, ca, store, nil)
+	s := newServer(ctx, ca, store, nil)
 	ct, st := gomcp.NewInMemoryTransports()
 	ss, err := s.server.Connect(ctx, st, nil)
 	if err != nil {
@@ -1156,7 +1156,7 @@ func TestQuery_CACert_EphemeralFields(t *testing.T) {
 	// No SetSource — defaults to ephemeral (Persisted=false).
 
 	ctx := context.Background()
-	s := NewServer(ctx, ca, store, nil)
+	s := newServer(ctx, ca, store, nil)
 	ct, st := gomcp.NewInMemoryTransports()
 	ss, err := s.server.Connect(ctx, st, nil)
 	if err != nil {

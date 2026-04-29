@@ -22,7 +22,7 @@ func setupConfigureTestSession(t *testing.T, scope *proxy.CaptureScope, pl *prox
 		opts = append(opts, WithPassthroughList(pl))
 	}
 
-	s := NewServer(ctx, nil, nil, nil, opts...)
+	s := newServer(ctx, nil, nil, nil, opts...)
 	ct, st := gomcp.NewInMemoryTransports()
 
 	ss, err := s.server.Connect(ctx, st, nil)

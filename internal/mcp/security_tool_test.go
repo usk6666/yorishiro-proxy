@@ -20,7 +20,7 @@ func setupSecurityTestSession(t *testing.T, ts *proxy.TargetScope) *gomcp.Client
 		opts = append(opts, WithTargetScope(ts))
 	}
 
-	s := NewServer(ctx, nil, nil, nil, opts...)
+	s := newServer(ctx, nil, nil, nil, opts...)
 	ct, st := gomcp.NewInMemoryTransports()
 
 	ss, err := s.server.Connect(ctx, st, nil)

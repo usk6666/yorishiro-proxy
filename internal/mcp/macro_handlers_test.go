@@ -21,8 +21,8 @@ func setupMacroTestSession(t *testing.T, store flow.Store) *gomcp.ClientSession 
 	t.Helper()
 	ctx := context.Background()
 
-	s := NewServer(context.Background(), nil, store, nil)
-	s.deps.replayDoer = newPermissiveClient()
+	s := newServer(context.Background(), nil, store, nil)
+	s.jobRunner.replayDoer = newPermissiveClient()
 	ct, st := gomcp.NewInMemoryTransports()
 
 	ss, err := s.server.Connect(ctx, st, nil)
@@ -892,7 +892,7 @@ func TestExecute_DefineMacro_NoStore(t *testing.T) {
 	t.Parallel()
 	// Test with nil store.
 	ctx := context.Background()
-	s := NewServer(context.Background(), nil, nil, nil)
+	s := newServer(context.Background(), nil, nil, nil)
 	ct, st := gomcp.NewInMemoryTransports()
 
 	ss, err := s.server.Connect(ctx, st, nil)

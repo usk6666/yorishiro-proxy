@@ -15,7 +15,7 @@ func setupResourceTestSession(t *testing.T) *gomcp.ClientSession {
 	ctx := context.Background()
 
 	ca := newTestCA(t)
-	s := NewServer(ctx, ca, nil, nil)
+	s := newServer(ctx, ca, nil, nil)
 	ct, st := gomcp.NewInMemoryTransports()
 
 	ss, err := s.server.Connect(ctx, st, nil)

@@ -42,8 +42,8 @@ func setupTestSessionWithSafety(t *testing.T, store flow.Store, doer httpDoer, e
 	t.Helper()
 	ctx := context.Background()
 
-	s := NewServer(context.Background(), nil, store, nil, WithSafetyEngine(engine))
-	s.deps.replayDoer = doer
+	s := newServer(context.Background(), nil, store, nil, WithSafetyEngine(engine))
+	s.jobRunner.replayDoer = doer
 	ct, st := gomcp.NewInMemoryTransports()
 
 	ss, err := s.server.Connect(ctx, st, nil)
@@ -243,7 +243,7 @@ func TestSafetyFilter_Intercept_ModifyAndForward_BlocksDestructiveBody(t *testin
 
 	ctx := context.Background()
 	queue := intercept.NewQueue()
-	s := NewServer(ctx, nil, store, nil,
+	s := newServer(ctx, nil, store, nil,
 		WithSafetyEngine(safetyEngine),
 		WithInterceptQueue(queue),
 	)
@@ -296,7 +296,7 @@ func TestSafetyFilter_Intercept_ModifyAndForward_AllowsSafe(t *testing.T) {
 
 	ctx := context.Background()
 	queue := intercept.NewQueue()
-	s := NewServer(ctx, nil, store, nil,
+	s := newServer(ctx, nil, store, nil,
 		WithSafetyEngine(safetyEngine),
 		WithInterceptQueue(queue),
 	)
@@ -405,7 +405,7 @@ func TestSafetyFilter_FuzzTemplate_BlocksDestructiveBody(t *testing.T) {
 	flowID := flows[0].ID
 
 	ctx := context.Background()
-	s := NewServer(ctx, nil, store, nil, WithSafetyEngine(safetyEngine))
+	s := newServer(ctx, nil, store, nil, WithSafetyEngine(safetyEngine))
 	ct, st := gomcp.NewInMemoryTransports()
 
 	ss, err := s.server.Connect(ctx, st, nil)
