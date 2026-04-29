@@ -936,13 +936,94 @@ All five events share a single `Envelope.StreamID` (the HTTP/2 stream ID); `Sequ
 - HTTP/2 CONNECT + `:protocol` extended CONNECT (RFC 8441) for WebSocket-over-H2 remains deferred per N7's milestone scope.
 - **Request-side termination (USK-663, 2026-04-27):** `GRPCDataMessage` carries an `EndStream bool` mirroring the H2 DATA frame's END_STREAM flag. gRPC clients emit no trailer headers, so the only request-side terminator on the wire is the END_STREAM bit on the last DATA frame. When a DATA frame's payload completes one or more LPMs and carries END_STREAM=1, the trailing LPM owns the bit. When a terminating frame carries empty payload (the canonical gRPC-Go `Stream.CloseSend` shape `DATA(payload=msg)` then `DATA(payload=, END_STREAM=1)`), the wrapper synthesizes a pure end-marker envelope — `GRPCDataMessage{Payload: nil, WireLength: 0, Compressed: false, EndStream: true}` — so the wire-frame boundary is observable in Pipeline and on Send the wrapper emits an empty H2 DATA payload with END_STREAM=1. Mid-LPM termination (reassembler holds partial bytes when END_STREAM arrives) cannot be faithfully forwarded and surfaces as `*layer.StreamError{ErrorProtocol}`. EndStream is a wire-affecting field for variant-recording purposes (Pipeline Steps that toggle it produce variant rows).
 
-### 9.3 Starlark Plugin API Shape
+### 9.3 Starlark Plugin API Shape — RESOLVED
 
-**Problem:** Current `internal/plugin/` exposes `request.method`, `request.url`, etc. as Starlark values. With typed Messages, plugins must see a protocol-shaped object.
+**Resolved:** 2026-04-29
 
-**Proposal:** Plugin hooks are registered with a Protocol filter, e.g., `register_hook("http", "on_request", ...)`. The handler receives a Starlark dict shaped like HTTPMessage, WSMessage, etc. Protocol-mismatched hooks never fire.
+**Problem:** Legacy `internal/plugin/` exposed `request.method`, `request.url`, etc. as Starlark values with HTTP-only field names and 8 hook names that conflated direction and Pipeline timing (`on_receive_from_client` / `on_before_send_to_server`, etc.). With typed Messages from RFC §3.2, plugins must see a protocol-shaped object, and the hook surface must be uniform across protocols. In addition, plugins need to fire at two distinct Pipeline-relative timings — before user-visible Intercept editing (annotation, fingerprinting) and after all mutations have settled (signing, last-mile mutation). The legacy 4-name pattern conflated these axes; RFC-001 separates them.
 
-**Decision required before N8 starts.**
+**Resolution: Three-axis Hook identity `(protocol, event, phase)` with mutable Starlark dict messages.**
+
+A Hook is uniquely identified by three axes registered together:
+
+```python
+register_hook(protocol, event, fn, phase="pre_pipeline")
+```
+
+- **`protocol`** — string namespace matching either an RFC §3.2 Message type or one of four pseudo-protocols for connection-lifecycle and transport hooks: `"http"`, `"ws"`, `"grpc"`, `"grpc-web"`, `"sse"`, `"raw"`, `"connection"`, `"tls"`, `"socks5"`.
+- **`event`** — string name of the wire event within that protocol. The valid `(protocol, event)` pairs are enumerated in the table below; load-time validation rejects unknown pairs.
+- **`phase`** — `"pre_pipeline"` (default) or `"post_pipeline"`. Determines firing point relative to the Pipeline Step chain. Lifecycle and observation-only hooks (those marked "no phase" below) ignore this argument.
+
+**Hook surface (the complete enumeration):**
+
+| `(protocol, event)` | Phase support | Action surface |
+|---|---|---|
+| `("http", "on_request")` | pre / post | DROP, RESPOND, CONTINUE+mutate |
+| `("http", "on_response")` | pre / post | CONTINUE+mutate, RESPOND-replace |
+| `("ws", "on_upgrade")` | pre / post | DROP, RESPOND, CONTINUE+mutate |
+| `("ws", "on_message")` | pre / post | CONTINUE+mutate |
+| `("ws", "on_close")` | no phase | observe only |
+| `("grpc", "on_start")` | pre / post | DROP, RESPOND-with-status, CONTINUE+mutate |
+| `("grpc", "on_data")` | pre / post | CONTINUE+mutate |
+| `("grpc", "on_end")` | no phase | observe only |
+| `("grpc-web", "on_start")` | pre / post | DROP, RESPOND-with-status, CONTINUE+mutate |
+| `("grpc-web", "on_data")` | pre / post | CONTINUE+mutate |
+| `("grpc-web", "on_end")` | no phase | observe only |
+| `("sse", "on_event")` | pre / post | CONTINUE+mutate |
+| `("raw", "on_chunk")` | pre / post | CONTINUE+mutate |
+| `("tls", "on_handshake")` | no phase | observe only |
+| `("connection", "on_connect")` | no phase | DROP, CONTINUE |
+| `("connection", "on_disconnect")` | no phase | observe only |
+| `("socks5", "on_connect")` | no phase | DROP, CONTINUE |
+
+Any other `(protocol, event)` combination is a load-time error.
+
+**Decision:**
+
+1. **Two-phase Pipeline integration (decoupled from Intercept timing).** The Pipeline contains two plugin Steps: `PluginStepPre` and `PluginStepPost`. The execution order is `Scope → RateLimit → Safety → PluginStepPre → Intercept → Transform → Macro → PluginStepPost → Record → (Layer encode)`. `pre_pipeline` plugins fire after Safety (so Safety blocks before plugin sees) and before Intercept (so plugin annotations are visible to user/AI in the intercept UI). `post_pipeline` plugins fire after all mutations are settled, before Record and wire encode. Resend, Macro fan-out (fuzz), and synthesized Send paths bypass `PluginStepPre` and traverse only `Transform → Macro → PluginStepPost → Record → Layer encode`; consequently, `post_pipeline` plugins receive every wire-bound variant exactly once, while `pre_pipeline` plugins fire only on fresh wire receive.
+
+2. **Mutable dict with WireEncoder regeneration.** Plugins receive `msg` as a snake_case Starlark dict (e.g., `msg["method"]`, `msg["headers"]`). Field key names are derived mechanically from the corresponding Go Message struct field names (PascalCase → snake_case) so future field additions require no manual mapping table. On hook return, the Layer reads back fields and applies them to `Envelope.Message`; if any Message field changed, `Envelope.Raw` is regenerated via the per-protocol WireEncoder (USK-661 grpc-web pattern, USK-N3 http1 pattern). Audit trail is provided by the existing Variant Snapshot mechanism (§5) — plugin mutations that diverge from the snapshot produce a variant row identical in shape to TransformStep mutations.
+
+3. **Headers as ordered list of pairs with case-insensitive read accessor.** `msg["headers"]` is a list of `(name, value)` 2-tuples preserving wire case, order, and duplicates. Mutation operations are `append`, `replace_at(index, pair)`, `delete_first(name)`, etc. — operations that preserve order. A read-only convenience method `headers.get_first(name)` does case-insensitive lookup but does **not** alter the list. The Layer never re-canonicalizes; any plugin attempt to invoke a re-sort or dedup operation raises a Starlark error explicitly (`fail("ordered list operations only")`) rather than silently re-ordering. This satisfies the §1.4 wire-fidelity invariant under plugin mutation.
+
+4. **Both Message and Raw editable; Raw wins if both touched.** A plugin may write `msg["raw"] = b"..."` to inject byte-level content directly. If the plugin modified `msg["raw"]` (compared to its snapshot), the Layer takes the wire-faithful path and writes the bytes verbatim, ignoring any Message-field mutations. This preserves smuggling-test capability (the original motivation for §1.4) under the plugin API. If only Message fields changed, the Layer regenerates Raw via WireEncoder. If neither changed, the original Raw passes through zero-copy.
+
+5. **Action surface depends on event semantics, not direction.** DROP/RESPOND are valid only at transaction-start events (`http.on_request`, `http.on_response`, `ws.on_upgrade`, `grpc.on_start`, `grpc-web.on_start`, `connection.on_connect`, `socks5.on_connect`). Mid-stream events (`on_data`, `on_message`, `on_event`, `on_chunk`) accept only CONTINUE + mutation; "drop a frame" is not wire-realizable for stateful streams without breaking the stream, so plugins that want to terminate must use the protocol's native termination action (e.g., `ctx.rst_stream(code)` for gRPC/HTTP/2, `ctx.close(code, reason)` for WebSocket). Lifecycle observation events accept no actions other than CONTINUE.
+
+6. **Per-stream / per-transaction state via `ctx.stream_state` and `ctx.transaction_state`.** The Layer provides two scoped dict-like objects on the `ctx` argument. `ctx.transaction_state` is bound to a single HTTP request/response pair (or one WS upgrade). `ctx.stream_state` is bound to an HTTP/2 StreamID (used by gRPC, WebSocket-over-H2, future server push); the Layer auto-releases it when the stream ends. Plugins do not manage their own dicts keyed by ID — that pattern leaks if the plugin forgets to clean up.
+
+7. **Strict load-time validation; runtime mismatch silently skips with Debug log.** `register_hook("htttp", "on_request", ...)` (typo) raises a Starlark module-load error against the enumeration above. At runtime, when an envelope of a different `Envelope.Message` type than registered reaches the plugin Step, the plugin is skipped and a single Debug log line is emitted. An MCP introspection tool (`plugin_introspect`) returns the registered `(protocol, event, phase)` tuples per plugin so AI agents can self-verify their hook setup.
+
+8. **No backwards compatibility.** The legacy 8-hook surface (`on_receive_from_client`, etc.) is removed entirely. User scripts must be rewritten against the new shape; a one-page migration table (legacy hook → `(protocol, event, phase)`) ships with N9 release notes. Per RFC-001 implementation discipline rule #5 ("no shims"), no compat alias is introduced.
+
+**Why this resolves the question:**
+
+- Wire fidelity: header mutation preserves case/order/duplicates by construction; Raw byte injection remains available for smuggling diagnostics.
+- L7/L4 duality at the plugin API: Both Message-level and Raw-level editing are first-class. Smuggling-class plugins write `msg["raw"]`; ergonomic transform plugins write fields.
+- Protocol-uniform: every Hook identity is `(protocol, event[, phase])`. Adding a future protocol (e.g., HTTP/3, MQTT) requires only enumerating its `(protocol, event)` pairs and the Pipeline-Step plumbing — no plugin-API changes.
+- AI-agent friendly: `plugin_introspect` tool exposes the registration table; snake_case dict serializes naturally to JSON for MCP transport.
+- Two-phase covers both observation and last-mile mutation use cases (annotation/fingerprinting at `pre_pipeline`; HMAC/signing/Content-Length recomputation at `post_pipeline`); resend/fuzz fire only `post_pipeline` because pre is "fresh wire receive".
+
+**Rejected alternatives:**
+
+- **Single-phase plugin Step (one `PluginStep` between Safety and Intercept, the legacy position):** Cannot express "sign after final mutations are settled". Forces signing plugins to live in TransformStep, but TransformStep is declarative-rule-driven and cannot host arbitrary Starlark.
+- **Direction-prefixed hook names (`on_request_received` / `on_request_sending`, mirroring legacy):** Conflates phase with hook identity. Adding a future "between Intercept and Transform" phase would require new hook names.
+- **Read-only dict + explicit `ctx.modify(field, value)` API:** Verbose for the common case; creates two ways to do the same thing (because Raw-byte injection still needs `msg["raw"] = ...` shape).
+- **Method-call API on Message (`msg.method()`, `msg.set_method(...)`):** Starlark has no struct/class system; the dict shape is idiomatic.
+- **Compatibility shim for legacy 8 hooks:** Violates RFC-001 implementation discipline rule #5; reintroduces HTTP bias via the back door.
+- **Per-protocol hook registration functions (`register_http_hook(...)`, `register_ws_hook(...)`):** Equivalent to the chosen design but multiplies the loadable name surface and breaks the `(protocol, event, phase)` introspection symmetry.
+
+**Sub-decisions recorded here:**
+
+- **Snake-case key derivation is mechanical.** A `convertMessageToDict` helper performs PascalCase → snake_case conversion on Message field names. No manual alias table; future fields appear under their derived name automatically.
+- **`phase` default is `pre_pipeline` and is documented as such.** Plugin authors writing observation/annotation plugins (the majority case) need not pass `phase=` at all. Signing/finalization plugins must explicitly opt in via `phase="post_pipeline"`.
+- **`PluginStepPost` runs once per Macro variant.** A fuzz run that generates 1000 variants invokes `post_pipeline` plugins 1000 times, each receiving the variant-specific final state. Plugin authors must keep `post_pipeline` work O(1) per envelope.
+- **Resend is `PluginStepPost`-only.** The Resend MCP tools (`resend_http`, `resend_ws`, `resend_grpc`, `resend_raw`) construct an Envelope from stored Flow data and inject directly into the Pipeline at `Transform`'s entry. `pre_pipeline` plugins do not fire because the data is not fresh-wire receive. This is the correct semantics for signing plugins (re-sign on each resend) and for forensic plugins (already saw the original wire receive).
+- **`("http", "on_response")` accepts RESPOND-replace** but not RESPOND-with-status (a response already has its status; replacement supersedes the upstream response). DROP is excluded because dropping a response yields a hung client; plugins that want to terminate a response should mutate it to a synthetic 502 instead.
+- **`tls.on_handshake` is observation-only.** The TLS handshake is opaque to higher layers in MITM operation; the proxy already terminates client TLS and re-handshakes upstream. Plugins observe ClientHello, ServerHello, and JA3/JA4 fingerprints but cannot modify them — modification would require re-implementing the TLS state machine in Starlark.
+- **`socks5.on_connect` is the SOCKS5 tunnel-established event** (post-handshake, pre-data). The handshake itself (SOCKS5 method negotiation, auth) is not exposed because the per-method bytes have no useful Starlark abstraction; if needed in the future, a separate `socks5.on_handshake` event can be added under the same `(protocol, event)` enumeration without API change.
+- **`connection.on_connect` accepts DROP** for IP-allowlist plugins. DROP closes the accepted TCP connection before any further Layer is built. This is the only place a plugin can reject a connection without protocol participation.
+- **Plugin-introduced state lifetime.** `ctx.transaction_state` is GC'd when the parent Pipeline session ends (one HTTP request/response pair, or one WS upgrade transaction). `ctx.stream_state` is GC'd when the H2 stream reaches `complete`/`error`/`reset`. Lifetime is enforced by the Layer; plugins cannot extend it.
 
 ---
 
@@ -1034,7 +1115,7 @@ This RFC is **accepted** as of 2026-04-12. Implementation proceeds on N1.
 **Deferred to implementation phase (per-milestone gating):**
 - [x] Open Question #1 (HTTP/2 flow control vs Pipeline latency) — **resolved 2026-04-15; revised 2026-04-23: event-granular HTTP/2 Layer + HTTPAggregatorLayer wrapper (§9.1)**
 - [x] Open Question #2 (gRPC envelope granularity) — **resolved 2026-04-23: event-per-envelope with dedicated GRPCStart/Data/End types (§9.2)**
-- [ ] Open Question #3 (Starlark plugin API shape) — **resolved before N8 starts**
+- [x] Open Question #3 (Starlark plugin API shape) — **resolved 2026-04-29: three-axis Hook identity `(protocol, event, phase)` with two-phase Pipeline integration and mutable Starlark dict messages (§9.3)**
 - [ ] Envelope + Message Go interfaces compiled and validated — **part of N1**
 - [ ] Pseudocode-level InterceptStep implementation proving dispatch pattern — **part of N3**
 - [ ] Migration reuse % validated against actual file sizes — **part of each N milestone retrospective**
