@@ -143,7 +143,7 @@ func validateTransformRuleInput(input transformRuleInput) error {
 
 // applyTransformRules validates and sets auto-transform rules from the input.
 func (s *Server) applyTransformRules(inputs []transformRuleInput) error {
-	return applyTransformRulesHelper(s.deps.transformPipeline, inputs)
+	return applyTransformRulesHelper(s.pipeline.transformPipeline, inputs)
 }
 
 // applyTransformRulesHelper validates and sets auto-transform rules on the given pipeline.

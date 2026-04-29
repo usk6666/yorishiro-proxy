@@ -27,7 +27,7 @@ func setupConfigureTestSessionWithManager(t *testing.T, manager *proxy.Manager, 
 	}
 	opts = append(opts, extraOpts...)
 
-	s := NewServer(ctx, nil, nil, manager, opts...)
+	s := newServer(ctx, nil, nil, manager, opts...)
 	ct, st := gomcp.NewInMemoryTransports()
 
 	ss, err := s.server.Connect(ctx, st, nil)
@@ -542,7 +542,7 @@ func setupQueryStatusTestSession(t *testing.T, store flow.Store, manager *proxy.
 	allOpts := make([]ServerOption, 0, len(opts))
 	allOpts = append(allOpts, opts...)
 
-	s := NewServer(ctx, ca, store, manager, allOpts...)
+	s := newServer(ctx, ca, store, manager, allOpts...)
 	ct, st := gomcp.NewInMemoryTransports()
 
 	ss, err := s.server.Connect(ctx, st, nil)

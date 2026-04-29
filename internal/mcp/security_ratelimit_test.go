@@ -18,7 +18,7 @@ func setupSecurityRateLimitTestSession(t *testing.T, rl *proxy.RateLimiter) *gom
 		opts = append(opts, WithRateLimiter(rl))
 	}
 
-	s := NewServer(ctx, nil, nil, nil, opts...)
+	s := newServer(ctx, nil, nil, nil, opts...)
 	ct, st := gomcp.NewInMemoryTransports()
 
 	ss, err := s.server.Connect(ctx, st, nil)

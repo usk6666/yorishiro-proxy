@@ -42,7 +42,7 @@ func setupTLSFingerprintTestSession(t *testing.T, store flow.Store, manager *pro
 	}
 	allOpts = append(allOpts, opts...)
 
-	s := NewServer(ctx, ca, store, manager, allOpts...)
+	s := newServer(ctx, ca, store, manager, allOpts...)
 	ct, st := gomcp.NewInMemoryTransports()
 
 	ss, err := s.server.Connect(ctx, st, nil)
@@ -310,7 +310,7 @@ func TestProxyStart_TLSFingerprint_ConfigDefault(t *testing.T) {
 	proxyCfg := &config.ProxyConfig{
 		TLSFingerprint: "safari",
 	}
-	s := NewServer(ctx, ca, nil, manager,
+	s := newServer(ctx, ca, nil, manager,
 		WithTLSFingerprintSetter(setter),
 		WithProxyDefaults(proxyCfg),
 	)
@@ -501,7 +501,7 @@ func TestResetSettingsToDefaults_RebuildsTLSTransport(t *testing.T) {
 
 	ctx := context.Background()
 	ca := newTestCA(t)
-	s := NewServer(ctx, ca, nil, nil,
+	s := newServer(ctx, ca, nil, nil,
 		WithTLSFingerprintSetter(setter),
 		WithTLSTransport(initialTransport),
 	)

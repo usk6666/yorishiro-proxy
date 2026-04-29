@@ -171,7 +171,7 @@ type testedTarget struct {
 
 // handleSetTargetScope replaces all agent allow and deny rules.
 func (s *Server) handleSetTargetScope(params securityParams) (*gomcp.CallToolResult, any, error) {
-	if s.deps.targetScope == nil {
+	if s.connector.targetScope == nil {
 		return nil, nil, fmt.Errorf("target scope is not initialized")
 	}
 
@@ -185,16 +185,16 @@ func (s *Server) handleSetTargetScope(params securityParams) (*gomcp.CallToolRes
 
 	allows := toTargetRules(params.Allows)
 	denies := toTargetRules(params.Denies)
-	if err := s.deps.targetScope.SetAgentRules(allows, denies); err != nil {
+	if err := s.connector.targetScope.SetAgentRules(allows, denies); err != nil {
 		return nil, nil, fmt.Errorf("set agent rules: %w", err)
 	}
 
-	currentAllows, currentDenies := s.deps.targetScope.AgentRules()
+	currentAllows, currentDenies := s.connector.targetScope.AgentRules()
 	return nil, &setTargetScopeResult{
 		Status: "updated",
 		Allows: ensureNonNilRules(currentAllows),
 		Denies: ensureNonNilRules(currentDenies),
-		Mode:   targetScopeMode(s.deps.targetScope),
+		Mode:   targetScopeMode(s.connector.targetScope),
 	}, nil
 }
 
@@ -202,7 +202,7 @@ func (s *Server) handleSetTargetScope(params securityParams) (*gomcp.CallToolRes
 // If remove_denies contains rules that match policy deny rules, an error is returned
 // because policy denies are immutable and cannot be removed via the agent layer.
 func (s *Server) handleUpdateTargetScope(params securityParams) (*gomcp.CallToolResult, any, error) {
-	if s.deps.targetScope == nil {
+	if s.connector.targetScope == nil {
 		return nil, nil, fmt.Errorf("target scope is not initialized")
 	}
 
@@ -215,11 +215,11 @@ func (s *Server) handleUpdateTargetScope(params securityParams) (*gomcp.CallTool
 	}
 
 	// Reject removal of policy deny rules.
-	if err := validateNotPolicyDenies(s.deps.targetScope, toTargetRules(params.RemoveDenies)); err != nil {
+	if err := validateNotPolicyDenies(s.connector.targetScope, toTargetRules(params.RemoveDenies)); err != nil {
 		return nil, nil, err
 	}
 
-	if err := s.deps.targetScope.MergeAgentRules(
+	if err := s.connector.targetScope.MergeAgentRules(
 		toTargetRules(params.AddAllows),
 		toTargetRules(params.RemoveAllows),
 		toTargetRules(params.AddDenies),
@@ -228,26 +228,26 @@ func (s *Server) handleUpdateTargetScope(params securityParams) (*gomcp.CallTool
 		return nil, nil, fmt.Errorf("merge agent rules: %w", err)
 	}
 
-	currentAllows, currentDenies := s.deps.targetScope.AgentRules()
+	currentAllows, currentDenies := s.connector.targetScope.AgentRules()
 	return nil, &setTargetScopeResult{
 		Status: "updated",
 		Allows: ensureNonNilRules(currentAllows),
 		Denies: ensureNonNilRules(currentDenies),
-		Mode:   targetScopeMode(s.deps.targetScope),
+		Mode:   targetScopeMode(s.connector.targetScope),
 	}, nil
 }
 
 // handleGetTargetScope returns the current Policy and Agent layer rules and mode.
 func (s *Server) handleGetTargetScope() (*gomcp.CallToolResult, any, error) {
-	if s.deps.targetScope == nil {
+	if s.connector.targetScope == nil {
 		return nil, nil, fmt.Errorf("target scope is not initialized")
 	}
 
-	agentAllows, agentDenies := s.deps.targetScope.AgentRules()
-	policyAllows, policyDenies := s.deps.targetScope.PolicyRules()
+	agentAllows, agentDenies := s.connector.targetScope.AgentRules()
+	policyAllows, policyDenies := s.connector.targetScope.PolicyRules()
 
 	source := "none"
-	if s.deps.targetScope.HasPolicyRules() {
+	if s.connector.targetScope.HasPolicyRules() {
 		source = "config file"
 	}
 
@@ -262,13 +262,13 @@ func (s *Server) handleGetTargetScope() (*gomcp.CallToolResult, any, error) {
 			Allows: ensureNonNilRules(agentAllows),
 			Denies: ensureNonNilRules(agentDenies),
 		},
-		EffectiveMode: targetScopeMode(s.deps.targetScope),
+		EffectiveMode: targetScopeMode(s.connector.targetScope),
 	}, nil
 }
 
 // handleTestTarget checks a URL against the current scope rules.
 func (s *Server) handleTestTarget(params securityParams) (*gomcp.CallToolResult, any, error) {
-	if s.deps.targetScope == nil {
+	if s.connector.targetScope == nil {
 		return nil, nil, fmt.Errorf("target scope is not initialized")
 	}
 
@@ -281,10 +281,10 @@ func (s *Server) handleTestTarget(params securityParams) (*gomcp.CallToolResult,
 		return nil, nil, fmt.Errorf("invalid url %q: %w", params.URL, err)
 	}
 
-	allowed, reason := s.deps.targetScope.CheckURL(u)
+	allowed, reason := s.connector.targetScope.CheckURL(u)
 
 	// Find the matched rule and determine which layer decided.
-	matchedRule, layer := findMatchedRuleAndLayer(s.deps.targetScope, u, allowed, reason)
+	matchedRule, layer := findMatchedRuleAndLayer(s.connector.targetScope, u, allowed, reason)
 
 	scheme := strings.ToLower(u.Scheme)
 	port := targetDefaultPort(scheme, u.Port())
@@ -672,7 +672,7 @@ type getRateLimitsResult struct {
 
 // handleSetRateLimits sets agent layer rate limits.
 func (s *Server) handleSetRateLimits(params securityParams) (*gomcp.CallToolResult, any, error) {
-	if s.deps.rateLimiter == nil {
+	if s.misc.rateLimiter == nil {
 		return nil, nil, fmt.Errorf("rate limiter is not initialized")
 	}
 
@@ -690,27 +690,27 @@ func (s *Server) handleSetRateLimits(params securityParams) (*gomcp.CallToolResu
 		cfg.MaxRequestsPerHostPerSecond = *params.MaxRequestsPerHostPerSecond
 	}
 
-	if err := s.deps.rateLimiter.SetAgentLimits(cfg); err != nil {
+	if err := s.misc.rateLimiter.SetAgentLimits(cfg); err != nil {
 		return nil, nil, fmt.Errorf("set rate limits: %w", err)
 	}
 
 	return nil, &rateLimitResult{
 		Status:    "updated",
-		Effective: s.deps.rateLimiter.EffectiveLimits(),
-		Agent:     s.deps.rateLimiter.AgentLimits(),
+		Effective: s.misc.rateLimiter.EffectiveLimits(),
+		Agent:     s.misc.rateLimiter.AgentLimits(),
 	}, nil
 }
 
 // handleGetRateLimits returns the current rate limit configuration.
 func (s *Server) handleGetRateLimits() (*gomcp.CallToolResult, any, error) {
-	if s.deps.rateLimiter == nil {
+	if s.misc.rateLimiter == nil {
 		return nil, nil, fmt.Errorf("rate limiter is not initialized")
 	}
 
 	return nil, &getRateLimitsResult{
-		Policy:    s.deps.rateLimiter.PolicyLimits(),
-		Agent:     s.deps.rateLimiter.AgentLimits(),
-		Effective: s.deps.rateLimiter.EffectiveLimits(),
+		Policy:    s.misc.rateLimiter.PolicyLimits(),
+		Agent:     s.misc.rateLimiter.AgentLimits(),
+		Effective: s.misc.rateLimiter.EffectiveLimits(),
 	}, nil
 }
 
@@ -738,7 +738,7 @@ type getBudgetResult struct {
 // For merge semantics (only update provided fields, keep others unchanged),
 // use the configure tool's budget section instead.
 func (s *Server) handleSetBudget(params securityParams) (*gomcp.CallToolResult, any, error) {
-	if s.deps.budgetManager == nil {
+	if s.misc.budgetManager == nil {
 		return nil, nil, fmt.Errorf("budget manager is not initialized")
 	}
 
@@ -760,29 +760,29 @@ func (s *Server) handleSetBudget(params securityParams) (*gomcp.CallToolResult, 
 		cfg.MaxDuration = d
 	}
 
-	if err := s.deps.budgetManager.SetAgentBudget(cfg); err != nil {
+	if err := s.misc.budgetManager.SetAgentBudget(cfg); err != nil {
 		return nil, nil, fmt.Errorf("set budget: %w", err)
 	}
 
 	return nil, &budgetResult{
 		Status:    "updated",
-		Effective: s.deps.budgetManager.EffectiveBudget(),
-		Agent:     s.deps.budgetManager.AgentBudget(),
+		Effective: s.misc.budgetManager.EffectiveBudget(),
+		Agent:     s.misc.budgetManager.AgentBudget(),
 	}, nil
 }
 
 // handleGetBudget returns the current budget configuration and usage.
 func (s *Server) handleGetBudget() (*gomcp.CallToolResult, any, error) {
-	if s.deps.budgetManager == nil {
+	if s.misc.budgetManager == nil {
 		return nil, nil, fmt.Errorf("budget manager is not initialized")
 	}
 
 	return nil, &getBudgetResult{
-		Policy:       s.deps.budgetManager.PolicyBudget(),
-		Agent:        s.deps.budgetManager.AgentBudget(),
-		Effective:    s.deps.budgetManager.EffectiveBudget(),
-		RequestCount: s.deps.budgetManager.RequestCount(),
-		StopReason:   s.deps.budgetManager.ShutdownReason(),
+		Policy:       s.misc.budgetManager.PolicyBudget(),
+		Agent:        s.misc.budgetManager.AgentBudget(),
+		Effective:    s.misc.budgetManager.EffectiveBudget(),
+		RequestCount: s.misc.budgetManager.RequestCount(),
+		StopReason:   s.misc.budgetManager.ShutdownReason(),
 	}, nil
 }
 
@@ -811,7 +811,7 @@ type getSafetyFilterResult struct {
 // This is a read-only action — SafetyFilter rules are part of the Policy Layer
 // and cannot be modified at runtime.
 func (s *Server) handleGetSafetyFilter() (*gomcp.CallToolResult, any, error) {
-	if s.deps.safetyEngine == nil {
+	if s.pipeline.safetyEngine == nil {
 		return nil, &getSafetyFilterResult{
 			Enabled:     false,
 			InputRules:  []safetyFilterRuleResult{},
@@ -820,8 +820,8 @@ func (s *Server) handleGetSafetyFilter() (*gomcp.CallToolResult, any, error) {
 		}, nil
 	}
 
-	inputResults := convertRules(s.deps.safetyEngine.InputRules())
-	outputResults := convertRules(s.deps.safetyEngine.OutputRules())
+	inputResults := convertRules(s.pipeline.safetyEngine.InputRules())
+	outputResults := convertRules(s.pipeline.safetyEngine.OutputRules())
 
 	return nil, &getSafetyFilterResult{
 		Enabled:     true,

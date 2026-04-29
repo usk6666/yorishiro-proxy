@@ -30,7 +30,7 @@ func setupProxyStartTestSession(t *testing.T, manager *proxy.Manager, scope *pro
 		opts = append(opts, WithPassthroughList(pl))
 	}
 
-	s := NewServer(ctx, nil, nil, manager, opts...)
+	s := newServer(ctx, nil, nil, manager, opts...)
 	ct, st := gomcp.NewInMemoryTransports()
 
 	ss, err := s.server.Connect(ctx, st, nil)
@@ -868,7 +868,7 @@ func setupProxyStartTestSessionWithTCPHandler(t *testing.T, manager *proxy.Manag
 		opts = append(opts, WithTCPHandler(tcpHandler))
 	}
 
-	s := NewServer(ctx, nil, nil, manager, opts...)
+	s := newServer(ctx, nil, nil, manager, opts...)
 	ct, st := gomcp.NewInMemoryTransports()
 
 	ss, err := s.server.Connect(ctx, st, nil)
@@ -971,7 +971,7 @@ func TestApplyCaptureScope(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s := &Server{deps: &deps{scope: tt.scope}}
+			s := mkServerFromLegacyDeps(legacyDeps{scope: tt.scope})
 			err := s.applyCaptureScope(tt.input)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("applyCaptureScope() error = %v, wantErr %v", err, tt.wantErr)
@@ -1285,7 +1285,7 @@ func setupProxyStartTestSessionWithOptions(t *testing.T, manager *proxy.Manager,
 	}
 	opts = append(opts, extraOpts...)
 
-	s := NewServer(ctx, nil, nil, manager, opts...)
+	s := newServer(ctx, nil, nil, manager, opts...)
 	ct, st := gomcp.NewInMemoryTransports()
 
 	ss, err := s.server.Connect(ctx, st, nil)
@@ -1338,7 +1338,7 @@ func TestApplyTLSPassthrough(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s := &Server{deps: &deps{passthrough: tt.pl}}
+			s := mkServerFromLegacyDeps(legacyDeps{passthrough: tt.pl})
 			err := s.applyTLSPassthrough(tt.patterns)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("applyTLSPassthrough() error = %v, wantErr %v", err, tt.wantErr)
@@ -1356,7 +1356,7 @@ func TestApplyTLSPassthrough(t *testing.T) {
 // Tests for proxy config file default merging via applyProxyDefaults.
 
 func TestApplyProxyDefaults_NilDefaults(t *testing.T) {
-	s := &Server{deps: &deps{proxyDefaults: nil}}
+	s := mkServerFromLegacyDeps(legacyDeps{proxyDefaults: nil})
 	input := proxyStartInput{ListenAddr: "127.0.0.1:0"}
 
 	s.applyProxyDefaults(&input)
@@ -1368,11 +1368,11 @@ func TestApplyProxyDefaults_NilDefaults(t *testing.T) {
 }
 
 func TestApplyProxyDefaults_ListenAddr(t *testing.T) {
-	s := &Server{deps: &deps{
+	s := mkServerFromLegacyDeps(legacyDeps{
 		proxyDefaults: &config.ProxyConfig{
 			ListenAddr: "127.0.0.1:9090",
 		},
-	}}
+	})
 
 	t.Run("uses default when not specified", func(t *testing.T) {
 		input := proxyStartInput{}
@@ -1392,11 +1392,11 @@ func TestApplyProxyDefaults_ListenAddr(t *testing.T) {
 }
 
 func TestApplyProxyDefaults_TLSPassthrough(t *testing.T) {
-	s := &Server{deps: &deps{
+	s := mkServerFromLegacyDeps(legacyDeps{
 		proxyDefaults: &config.ProxyConfig{
 			TLSPassthrough: []string{"pinned.com", "*.googleapis.com"},
 		},
-	}}
+	})
 
 	t.Run("uses default when not specified", func(t *testing.T) {
 		input := proxyStartInput{}
@@ -1419,11 +1419,11 @@ func TestApplyProxyDefaults_TLSPassthrough(t *testing.T) {
 }
 
 func TestApplyProxyDefaults_TCPForwards(t *testing.T) {
-	s := &Server{deps: &deps{
+	s := mkServerFromLegacyDeps(legacyDeps{
 		proxyDefaults: &config.ProxyConfig{
 			TCPForwards: map[string]*config.ForwardConfig{"3306": {Target: "db.example.com:3306", Protocol: "raw"}},
 		},
-	}}
+	})
 
 	t.Run("uses default when not specified", func(t *testing.T) {
 		input := proxyStartInput{}
@@ -1462,11 +1462,11 @@ func TestApplyProxyDefaults_CaptureScope(t *testing.T) {
 		"includes": [{"hostname": "*.target.com"}],
 		"excludes": [{"hostname": "cdn.example.com"}]
 	}`)
-	s := &Server{deps: &deps{
+	s := mkServerFromLegacyDeps(legacyDeps{
 		proxyDefaults: &config.ProxyConfig{
 			CaptureScope: scopeJSON,
 		},
-	}}
+	})
 
 	t.Run("uses default when not specified", func(t *testing.T) {
 		input := proxyStartInput{}
@@ -1501,11 +1501,11 @@ func TestApplyProxyDefaults_InterceptRules(t *testing.T) {
 		"direction": "request",
 		"conditions": {"host_pattern": ".*"}
 	}]`)
-	s := &Server{deps: &deps{
+	s := mkServerFromLegacyDeps(legacyDeps{
 		proxyDefaults: &config.ProxyConfig{
 			InterceptRules: rulesJSON,
 		},
-	}}
+	})
 
 	t.Run("uses default when not specified", func(t *testing.T) {
 		input := proxyStartInput{}
@@ -1538,11 +1538,11 @@ func TestApplyProxyDefaults_AutoTransform(t *testing.T) {
 		"conditions": {},
 		"action": {"type": "set_header", "header": "X-Default", "value": "true"}
 	}]`)
-	s := &Server{deps: &deps{
+	s := mkServerFromLegacyDeps(legacyDeps{
 		proxyDefaults: &config.ProxyConfig{
 			AutoTransform: transformJSON,
 		},
-	}}
+	})
 
 	t.Run("uses default when not specified", func(t *testing.T) {
 		input := proxyStartInput{}
@@ -1568,13 +1568,13 @@ func TestApplyProxyDefaults_AutoTransform(t *testing.T) {
 
 func TestApplyProxyDefaults_InvalidJSON(t *testing.T) {
 	// Invalid JSON in defaults should be silently ignored (not crash).
-	s := &Server{deps: &deps{
+	s := mkServerFromLegacyDeps(legacyDeps{
 		proxyDefaults: &config.ProxyConfig{
 			CaptureScope:   json.RawMessage(`{invalid`),
 			InterceptRules: json.RawMessage(`[{invalid`),
 			AutoTransform:  json.RawMessage(`[{invalid`),
 		},
-	}}
+	})
 
 	input := proxyStartInput{}
 	s.applyProxyDefaults(&input)
@@ -1608,7 +1608,7 @@ func TestProxyStart_WithConfigDefaults_Integration(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	s := NewServer(ctx, nil, nil, manager,
+	s := newServer(ctx, nil, nil, manager,
 		WithCaptureScope(scope),
 		WithPassthroughList(pl),
 		WithProxyDefaults(proxyCfg),
@@ -1670,7 +1670,7 @@ func TestProxyStart_CallerOverridesConfigDefaults_Integration(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	s := NewServer(ctx, nil, nil, manager,
+	s := newServer(ctx, nil, nil, manager,
 		WithCaptureScope(scope),
 		WithPassthroughList(pl),
 		WithProxyDefaults(proxyCfg),
@@ -2016,7 +2016,7 @@ func TestProxyStart_ResetsProtocolsOnRestart(t *testing.T) {
 	// Use a Server directly to inspect deps.
 	ctx := context.Background()
 	scope := proxy.NewCaptureScope()
-	s := NewServer(ctx, nil, nil, manager, WithCaptureScope(scope))
+	s := newServer(ctx, nil, nil, manager, WithCaptureScope(scope))
 	ct, st := gomcp.NewInMemoryTransports()
 	ss, err := s.server.Connect(ctx, st, nil)
 	if err != nil {
@@ -2042,8 +2042,8 @@ func TestProxyStart_ResetsProtocolsOnRestart(t *testing.T) {
 	if result.IsError {
 		t.Fatalf("unexpected error on first start: %v", result.Content)
 	}
-	if len(s.deps.enabledProtocols) != 2 {
-		t.Fatalf("enabled protocols count after first start = %d, want 2", len(s.deps.enabledProtocols))
+	if len(s.connector.enabledProtocols) != 2 {
+		t.Fatalf("enabled protocols count after first start = %d, want 2", len(s.connector.enabledProtocols))
 	}
 
 	// Step 2: Stop and restart without protocols.
@@ -2068,7 +2068,7 @@ func TestProxyStart_ResetsProtocolsOnRestart(t *testing.T) {
 	}
 
 	// Verify protocols were reset to nil (all protocols).
-	if s.deps.enabledProtocols != nil {
-		t.Errorf("enabled protocols after restart = %v, want nil (all protocols)", s.deps.enabledProtocols)
+	if s.connector.enabledProtocols != nil {
+		t.Errorf("enabled protocols after restart = %v, want nil (all protocols)", s.connector.enabledProtocols)
 	}
 }

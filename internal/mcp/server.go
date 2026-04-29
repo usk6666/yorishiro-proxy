@@ -10,73 +10,31 @@ import (
 	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/usk6666/yorishiro-proxy/internal/cert"
 	"github.com/usk6666/yorishiro-proxy/internal/config"
-	"github.com/usk6666/yorishiro-proxy/internal/flow"
-	"github.com/usk6666/yorishiro-proxy/internal/fuzzer"
 	"github.com/usk6666/yorishiro-proxy/internal/mcp/webui"
-	"github.com/usk6666/yorishiro-proxy/internal/plugin"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
-	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
-	"github.com/usk6666/yorishiro-proxy/internal/proxy/rules"
 	"github.com/usk6666/yorishiro-proxy/internal/safety"
 )
 
-// deps holds all shared dependencies for handler structs.
-// This is the extracted "dependency bag" that was previously spread across
-// the Server struct's 28 fields. Each handler struct receives a *deps pointer
-// and accesses only the dependencies it needs.
-type deps struct {
-	appCtx            context.Context
-	ca                *cert.CA
-	issuer            *cert.Issuer
-	store             flow.Store
-	manager           *proxy.Manager
-	passthrough       *proxy.PassthroughList
-	scope             *proxy.CaptureScope
-	interceptEngine   *intercept.Engine
-	interceptQueue    *intercept.Queue
-	transformPipeline *rules.Pipeline
-	fuzzRunner        *fuzzer.Runner
-	fuzzStore         flow.FuzzStore
-	dbPath            string
-	// replayDoer is a legacy net/http.Client-based HTTP doer used by the fuzzer
-	// engine and macro HTTP calls. It will be removed once those paths migrate
-	// to UpstreamRouter.
-	replayDoer httpDoer
-	// replayRouter is a test-injectable UpstreamRouter for the resend tool's
-	// HTTP round-trip path. When nil, resendUpstreamRouter() creates a real
-	// UpstreamRouter with ConnPool.
-	replayRouter          resendRouter
-	rawReplayDialer       rawDialer
-	tcpForwards           map[string]*config.ForwardConfig
-	tcpHandler            tcpForwardHandler
-	detector              proxy.ProtocolDetector
-	enabledProtocols      []string
-	proxyDefaults         *config.ProxyConfig
-	upstreamProxySetters  []upstreamProxySetter
-	requestTimeoutSetters []requestTimeoutSetter
-	targetScopeSetters    []targetScopeSetter
-	targetScope           *proxy.TargetScope
-	rateLimiter           *proxy.RateLimiter
-	rateLimiterSetters    []rateLimiterSetter
-	safetyEngine          *safety.Engine
-	safetyEngineSetters   []safetyEngineSetter
-	budgetManager         *proxy.BudgetManager
-	pluginEngine          *plugin.Engine
-	socks5AuthSetter      socks5AuthSetter
-	tlsTransport          httputil.TLSTransport
-	tlsFingerprintSetters []tlsFingerprintSetter
-	hostTLSRegistry       *httputil.HostTLSRegistry
-}
-
 // Server wraps the MCP server and registers proxy-related tools.
-// It delegates all tool handling to independent handler structs that
-// receive shared dependencies via the deps struct.
+//
+// The dependency surface is split into seven coherent components defined in
+// components.go: Pipeline, Connector, JobRunner, FlowStore, MacroEngine,
+// PluginEngine, and Misc. Tool handler files reach in via the matching field
+// (s.pipeline.X, s.connector.Y, ...). The convention is that any single
+// handler should access at most three components; the two documented
+// exceptions are proxy_start_tool.go (the assembly handler) and
+// query_tool.go (the unified query dispatcher).
 type Server struct {
 	server         *gomcp.Server
-	deps           *deps
+	pipeline       *Pipeline
+	connector      *Connector
+	jobRunner      *JobRunner
+	flowStore      *FlowStore
+	macroEngine    *MacroEngine
+	pluginEngine   *PluginEngine
+	misc           *Misc
 	httpMiddleware func(http.Handler) http.Handler
 	uiDir          string
 	version        string
@@ -143,94 +101,11 @@ type socks5AuthSetter interface {
 	ClearAuthForListener(listenerName string)
 }
 
-// ServerOption configures a Server.
+// ServerOption configures a Server. The remaining options are limited to
+// settings that are not part of the seven dependency components themselves
+// (HTTP middleware, WebUI directory, version string). All component values
+// are passed directly to NewServer; there are no With<Component> options.
 type ServerOption func(*Server)
-
-// WithDBPath sets the path to the SQLite database file for status reporting.
-func WithDBPath(path string) ServerOption {
-	return func(s *Server) {
-		s.deps.dbPath = path
-	}
-}
-
-// WithPassthroughList sets the TLS passthrough list for the MCP server,
-// enabling TLS passthrough configuration via the configure tool.
-func WithPassthroughList(pl *proxy.PassthroughList) ServerOption {
-	return func(s *Server) {
-		s.deps.passthrough = pl
-	}
-}
-
-// WithCaptureScope sets the capture scope for the configure and query tools.
-func WithCaptureScope(scope *proxy.CaptureScope) ServerOption {
-	return func(s *Server) {
-		s.deps.scope = scope
-	}
-}
-
-// WithInterceptEngine sets the intercept rule engine for the MCP server,
-// enabling intercept rule configuration via proxy_start and configure tools.
-func WithInterceptEngine(engine *intercept.Engine) ServerOption {
-	return func(s *Server) {
-		s.deps.interceptEngine = engine
-	}
-}
-
-// WithInterceptQueue sets the intercept queue for the MCP server,
-// enabling intercept queue query and action execution via query and execute tools.
-func WithInterceptQueue(queue *intercept.Queue) ServerOption {
-	return func(s *Server) {
-		s.deps.interceptQueue = queue
-	}
-}
-
-// WithTransformPipeline sets the auto-transform rule pipeline for the MCP server,
-// enabling auto-transform rule configuration via proxy_start and configure tools.
-func WithTransformPipeline(pipeline *rules.Pipeline) ServerOption {
-	return func(s *Server) {
-		s.deps.transformPipeline = pipeline
-	}
-}
-
-// WithFuzzRunner sets the async fuzz runner for the MCP server,
-// enabling asynchronous fuzz job execution, pause, resume, and cancel.
-func WithFuzzRunner(runner *fuzzer.Runner) ServerOption {
-	return func(s *Server) {
-		s.deps.fuzzRunner = runner
-	}
-}
-
-// WithFuzzStore sets the fuzz store for the MCP server,
-// enabling fuzz_jobs and fuzz_results query resources.
-func WithFuzzStore(fs flow.FuzzStore) ServerOption {
-	return func(s *Server) {
-		s.deps.fuzzStore = fs
-	}
-}
-
-// WithIssuer sets the certificate issuer for the MCP server,
-// enabling cache clearing on CA regeneration.
-func WithIssuer(iss *cert.Issuer) ServerOption {
-	return func(s *Server) {
-		s.deps.issuer = iss
-	}
-}
-
-// WithTCPHandler sets the TCP handler for the MCP server, enabling TCP
-// forward listener creation via the proxy_start tool's tcp_forwards parameter.
-func WithTCPHandler(h tcpForwardHandler) ServerOption {
-	return func(s *Server) {
-		s.deps.tcpHandler = h
-	}
-}
-
-// WithDetector sets the protocol detector for TCP forward listeners, enabling
-// peek-based protocol detection on forwarded connections (protocol: "auto").
-func WithDetector(d proxy.ProtocolDetector) ServerOption {
-	return func(s *Server) {
-		s.deps.detector = d
-	}
-}
 
 // WithMiddleware sets an HTTP middleware that wraps the Streamable HTTP
 // handler in RunHTTP. This is used to inject Bearer token authentication
@@ -249,14 +124,6 @@ func WithUIDir(dir string) ServerOption {
 	}
 }
 
-// WithTargetScope sets the target scope for the security tool,
-// enabling target scope rule management via the security MCP tool.
-func WithTargetScope(ts *proxy.TargetScope) ServerOption {
-	return func(s *Server) {
-		s.deps.targetScope = ts
-	}
-}
-
 // WithVersion sets the version string reported in the MCP server implementation.
 // If not set, defaults to "dev".
 func WithVersion(v string) ServerOption {
@@ -265,183 +132,128 @@ func WithVersion(v string) ServerOption {
 	}
 }
 
-// WithProxyDefaults sets the default proxy configuration loaded from a config file.
-// These defaults are applied to proxy_start invocations when the caller does not
-// explicitly provide a value for a given field.
-func WithProxyDefaults(cfg *config.ProxyConfig) ServerOption {
-	return func(s *Server) {
-		s.deps.proxyDefaults = cfg
-	}
-}
-
-// WithUpstreamProxySetter registers a protocol handler that should be updated
-// when the upstream proxy configuration changes. Call this for each handler
-// that implements the upstreamProxySetter interface (e.g., HTTP/1.x, HTTP/2).
-func WithUpstreamProxySetter(setter upstreamProxySetter) ServerOption {
-	return func(s *Server) {
-		s.deps.upstreamProxySetters = append(s.deps.upstreamProxySetters, setter)
-	}
-}
-
-// WithRequestTimeoutSetters registers protocol handlers that support request
-// timeout configuration. When request_timeout_ms is changed via proxy_start
-// or configure, all registered setters are updated.
-func WithRequestTimeoutSetters(setters ...requestTimeoutSetter) ServerOption {
-	return func(s *Server) {
-		s.deps.requestTimeoutSetters = append(s.deps.requestTimeoutSetters, setters...)
-	}
-}
-
-// WithTargetScopeSetter registers a protocol handler that should be updated
-// when the target scope changes. Call this for each handler that implements
-// the targetScopeSetter interface (e.g., HTTP/1.x, HTTP/2).
-func WithTargetScopeSetter(setter targetScopeSetter) ServerOption {
-	return func(s *Server) {
-		s.deps.targetScopeSetters = append(s.deps.targetScopeSetters, setter)
-	}
-}
-
-// WithRateLimiter sets the rate limiter for the MCP server,
-// enabling rate limit management via the security MCP tool.
-func WithRateLimiter(rl *proxy.RateLimiter) ServerOption {
-	return func(s *Server) {
-		s.deps.rateLimiter = rl
-	}
-}
-
-// WithRateLimiterSetter registers a protocol handler that should be updated
-// when the rate limiter is set. Call this for each handler that implements
-// the rateLimiterSetter interface (e.g., HTTP/1.x, HTTP/2, SOCKS5).
-func WithRateLimiterSetter(setter rateLimiterSetter) ServerOption {
-	return func(s *Server) {
-		s.deps.rateLimiterSetters = append(s.deps.rateLimiterSetters, setter)
-	}
-}
-
-// WithSafetyEngine sets the SafetyFilter engine for the MCP server,
-// enabling input validation checks on resend, fuzz, intercept, and macro tools,
-// as well as rule inspection via the security tool's get_safety_filter action.
-func WithSafetyEngine(engine *safety.Engine) ServerOption {
-	return func(s *Server) {
-		s.deps.safetyEngine = engine
-	}
-}
-
-// WithSafetyEngineSetter registers a protocol handler that should be updated
-// when the safety engine is set. Call this for each handler that implements
-// the safetyEngineSetter interface (e.g., HTTP/1.x, HTTP/2).
-func WithSafetyEngineSetter(setter safetyEngineSetter) ServerOption {
-	return func(s *Server) {
-		s.deps.safetyEngineSetters = append(s.deps.safetyEngineSetters, setter)
-	}
-}
-
-// WithBudgetManager sets the budget manager for the MCP server,
-// enabling diagnostic session budget management via the security MCP tool.
-func WithBudgetManager(bm *proxy.BudgetManager) ServerOption {
-	return func(s *Server) {
-		s.deps.budgetManager = bm
-	}
-}
-
-// WithPluginEngine sets the plugin engine for the MCP server,
-// enabling plugin management via the plugin tool (list, reload, enable, disable).
-func WithPluginEngine(engine *plugin.Engine) ServerOption {
-	return func(s *Server) {
-		s.deps.pluginEngine = engine
-	}
-}
-
-// WithTLSFingerprintSetter registers a protocol handler that should be updated
-// when the TLS fingerprint profile changes. Call this for each handler that
-// implements the tlsFingerprintSetter interface (e.g., HTTP/1.x, HTTP/2).
-func WithTLSFingerprintSetter(setter tlsFingerprintSetter) ServerOption {
-	return func(s *Server) {
-		s.deps.tlsFingerprintSetters = append(s.deps.tlsFingerprintSetters, setter)
-	}
-}
-
-// WithSOCKS5Handler sets the SOCKS5 handler for the MCP server,
-// enabling SOCKS5 authentication configuration via proxy_start and configure tools.
-func WithSOCKS5Handler(setter socks5AuthSetter) ServerOption {
-	return func(s *Server) {
-		s.deps.socks5AuthSetter = setter
-	}
-}
-
-// WithTLSTransport sets the TLS transport used for upstream HTTPS connections
-// in resend/resend_raw operations. When set, uTLS fingerprint spoofing is
-// used instead of Go's default TLS stack.
-func WithTLSTransport(t httputil.TLSTransport) ServerOption {
-	return func(s *Server) {
-		s.deps.tlsTransport = t
-	}
-}
-
-// WithHostTLSRegistry sets the host TLS registry for per-host mTLS
-// configuration. The registry is used by proxy_start, configure, and query
-// tools to manage client certificates and TLS verification settings.
-func WithHostTLSRegistry(r *httputil.HostTLSRegistry) ServerOption {
-	return func(s *Server) {
-		s.deps.hostTLSRegistry = r
-	}
-}
-
 // NewServer creates a new MCP server with proxy tools registered.
-// The ctx parameter is the application-level context that controls the proxy lifecycle;
-// when ctx is cancelled, the proxy started via proxy_start will shut down.
-// The ca parameter provides the CA certificate for the query tool's ca_cert resource.
-// If ca is nil, querying ca_cert will return an error.
-// The store parameter provides session storage for session and replay operations.
-// If store is nil, session-related operations will return an error.
-// The manager parameter controls the proxy lifecycle for proxy_start/proxy_stop tools.
-// If manager is nil, those tools will return an error when called.
-func NewServer(ctx context.Context, ca *cert.CA, store flow.Store, manager *proxy.Manager, opts ...ServerOption) *Server {
-	d := &deps{
-		appCtx:  ctx,
-		ca:      ca,
-		store:   store,
-		manager: manager,
+//
+// Each *<Component> argument is required (use the New<Component>(nil…)
+// constructor to pass empty components in tests). The Connector's
+// targetScope and the Misc rateLimiter / budgetManager are initialised to
+// sensible defaults if nil; the Connector's targetScopeSetters and
+// rateLimiterSetters are then notified once those defaults exist. The
+// safetyEngineSetters in Pipeline are notified only when safetyEngine is
+// non-nil.
+func NewServer(
+	misc *Misc,
+	pipeline *Pipeline,
+	connector *Connector,
+	jobRunner *JobRunner,
+	flowStore *FlowStore,
+	macroEngine *MacroEngine,
+	pluginEngine *PluginEngine,
+	opts ...ServerOption,
+) *Server {
+	s := &Server{
+		misc:         orDefaultMisc(misc),
+		pipeline:     orDefaultPipeline(pipeline),
+		connector:    orDefaultConnector(connector),
+		jobRunner:    orDefaultJobRunner(jobRunner),
+		flowStore:    orDefaultFlowStore(flowStore),
+		macroEngine:  orDefaultMacroEngine(macroEngine),
+		pluginEngine: orDefaultPluginEngine(pluginEngine),
+		version:      "dev",
 	}
-	s := &Server{deps: d, version: "dev"}
 	for _, opt := range opts {
 		opt(s)
 	}
 
-	server := gomcp.NewServer(&gomcp.Implementation{
+	s.server = gomcp.NewServer(&gomcp.Implementation{
 		Name:    "yorishiro-proxy",
 		Version: s.version,
 	}, nil)
-	s.server = server
-	// Initialize default TargetScope if not provided via WithTargetScope.
-	if s.deps.targetScope == nil {
-		s.deps.targetScope = proxy.NewTargetScope()
-	}
-	// Propagate target scope to all registered protocol handlers.
-	for _, setter := range s.deps.targetScopeSetters {
-		setter.SetTargetScope(s.deps.targetScope)
-	}
-	// Initialize default RateLimiter if not provided via WithRateLimiter.
-	if s.deps.rateLimiter == nil {
-		s.deps.rateLimiter = proxy.NewRateLimiter()
-	}
-	// Propagate rate limiter to all registered protocol handlers.
-	for _, setter := range s.deps.rateLimiterSetters {
-		setter.SetRateLimiter(s.deps.rateLimiter)
-	}
-	// Propagate safety engine to all registered protocol handlers.
-	if s.deps.safetyEngine != nil {
-		for _, setter := range s.deps.safetyEngineSetters {
-			setter.SetSafetyEngine(s.deps.safetyEngine)
-		}
-	}
-	// Initialize default BudgetManager if not provided via WithBudgetManager.
-	if s.deps.budgetManager == nil {
-		s.deps.budgetManager = proxy.NewBudgetManager()
-	}
+
+	finalizeDefaults(s)
 	s.registerTools()
 	s.registerResources()
 	return s
+}
+
+// finalizeDefaults fills in optional shared services (TargetScope,
+// RateLimiter, BudgetManager) with package defaults when they were not
+// explicitly provided, then propagates them to every registered handler
+// setter. Split out from NewServer so the constructor's cyclomatic
+// complexity stays under the project's lint threshold.
+func finalizeDefaults(s *Server) {
+	if s.connector.targetScope == nil {
+		s.connector.targetScope = proxy.NewTargetScope()
+	}
+	for _, setter := range s.connector.targetScopeSetters {
+		setter.SetTargetScope(s.connector.targetScope)
+	}
+	if s.misc.rateLimiter == nil {
+		s.misc.rateLimiter = proxy.NewRateLimiter()
+	}
+	for _, setter := range s.connector.rateLimiterSetters {
+		setter.SetRateLimiter(s.misc.rateLimiter)
+	}
+	if s.pipeline.safetyEngine != nil {
+		for _, setter := range s.pipeline.safetyEngineSetters {
+			setter.SetSafetyEngine(s.pipeline.safetyEngine)
+		}
+	}
+	if s.misc.budgetManager == nil {
+		s.misc.budgetManager = proxy.NewBudgetManager()
+	}
+}
+
+// orDefault* tiny helpers return the input when non-nil and an empty
+// component when nil. Used by NewServer to keep its body linear.
+
+func orDefaultMisc(m *Misc) *Misc {
+	if m != nil {
+		return m
+	}
+	return NewMisc(context.Background(), nil, nil, "", nil, nil)
+}
+
+func orDefaultPipeline(p *Pipeline) *Pipeline {
+	if p != nil {
+		return p
+	}
+	return NewPipeline(nil, nil, nil, nil, nil)
+}
+
+func orDefaultConnector(c *Connector) *Connector {
+	if c != nil {
+		return c
+	}
+	return NewConnector(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+}
+
+func orDefaultJobRunner(j *JobRunner) *JobRunner {
+	if j != nil {
+		return j
+	}
+	return NewJobRunner(nil, nil, nil, nil, nil)
+}
+
+func orDefaultFlowStore(f *FlowStore) *FlowStore {
+	if f != nil {
+		return f
+	}
+	return NewFlowStore(nil)
+}
+
+func orDefaultMacroEngine(m *MacroEngine) *MacroEngine {
+	if m != nil {
+		return m
+	}
+	return NewMacroEngine()
+}
+
+func orDefaultPluginEngine(p *PluginEngine) *PluginEngine {
+	if p != nil {
+		return p
+	}
+	return NewPluginEngine(nil)
 }
 
 // Run starts the MCP server on the given transport.

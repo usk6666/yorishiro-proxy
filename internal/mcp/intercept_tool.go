@@ -223,7 +223,7 @@ func (s *Server) buildInterceptResult(item *intercept.InterceptedRequest, action
 
 // handleInterceptRelease handles the release action.
 func (s *Server) handleInterceptRelease(_ context.Context, params interceptParams) (*gomcp.CallToolResult, *executeInterceptResult, error) {
-	if s.deps.interceptQueue == nil {
+	if s.pipeline.interceptQueue == nil {
 		return nil, nil, fmt.Errorf("intercept queue is not initialized")
 	}
 	if params.InterceptID == "" {
@@ -237,7 +237,7 @@ func (s *Server) handleInterceptRelease(_ context.Context, params interceptParam
 	}
 
 	// Fetch the intercepted item before responding (Respond removes it from the queue).
-	item, err := s.deps.interceptQueue.Get(params.InterceptID)
+	item, err := s.pipeline.interceptQueue.Get(params.InterceptID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("release: %w", err)
 	}
@@ -251,7 +251,7 @@ func (s *Server) handleInterceptRelease(_ context.Context, params interceptParam
 		Type: intercept.ActionRelease,
 		Mode: mode,
 	}
-	if err := s.deps.interceptQueue.Respond(params.InterceptID, action); err != nil {
+	if err := s.pipeline.interceptQueue.Respond(params.InterceptID, action); err != nil {
 		return nil, nil, fmt.Errorf("release: %w", err)
 	}
 
@@ -260,7 +260,7 @@ func (s *Server) handleInterceptRelease(_ context.Context, params interceptParam
 
 // handleInterceptModifyAndForward handles the modify_and_forward action.
 func (s *Server) handleInterceptModifyAndForward(_ context.Context, params interceptParams) (*gomcp.CallToolResult, *executeInterceptResult, error) {
-	if s.deps.interceptQueue == nil {
+	if s.pipeline.interceptQueue == nil {
 		return nil, nil, fmt.Errorf("intercept queue is not initialized")
 	}
 	if params.InterceptID == "" {
@@ -292,7 +292,7 @@ func (s *Server) handleInterceptModifyAndForwardStructured(params interceptParam
 	}
 
 	// Fetch the intercepted item before responding (Respond removes it from the queue).
-	item, err := s.deps.interceptQueue.Get(params.InterceptID)
+	item, err := s.pipeline.interceptQueue.Get(params.InterceptID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("modify_and_forward: %w", err)
 	}
@@ -321,7 +321,7 @@ func (s *Server) handleInterceptModifyAndForwardStructured(params interceptParam
 		AutoContentLength: params.AutoContentLength,
 	}
 
-	if err := s.deps.interceptQueue.Respond(params.InterceptID, action); err != nil {
+	if err := s.pipeline.interceptQueue.Respond(params.InterceptID, action); err != nil {
 		return nil, nil, fmt.Errorf("modify_and_forward: %w", err)
 	}
 
@@ -408,12 +408,12 @@ func (s *Server) handleInterceptModifyAndForwardRaw(params interceptParams) (*go
 	}
 
 	// Fetch the intercepted item before responding (Respond removes it from the queue).
-	item, err := s.deps.interceptQueue.Get(params.InterceptID)
+	item, err := s.pipeline.interceptQueue.Get(params.InterceptID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("modify_and_forward: %w", err)
 	}
 
-	if err := s.deps.interceptQueue.Respond(params.InterceptID, action); err != nil {
+	if err := s.pipeline.interceptQueue.Respond(params.InterceptID, action); err != nil {
 		return nil, nil, fmt.Errorf("modify_and_forward: %w", err)
 	}
 
@@ -422,7 +422,7 @@ func (s *Server) handleInterceptModifyAndForwardRaw(params interceptParams) (*go
 
 // handleInterceptDrop handles the drop action.
 func (s *Server) handleInterceptDrop(_ context.Context, params interceptParams) (*gomcp.CallToolResult, *executeInterceptResult, error) {
-	if s.deps.interceptQueue == nil {
+	if s.pipeline.interceptQueue == nil {
 		return nil, nil, fmt.Errorf("intercept queue is not initialized")
 	}
 	if params.InterceptID == "" {
@@ -430,7 +430,7 @@ func (s *Server) handleInterceptDrop(_ context.Context, params interceptParams) 
 	}
 
 	// Fetch the intercepted item before responding (Respond removes it from the queue).
-	item, err := s.deps.interceptQueue.Get(params.InterceptID)
+	item, err := s.pipeline.interceptQueue.Get(params.InterceptID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("drop: %w", err)
 	}
@@ -438,7 +438,7 @@ func (s *Server) handleInterceptDrop(_ context.Context, params interceptParams) 
 	action := intercept.InterceptAction{
 		Type: intercept.ActionDrop,
 	}
-	if err := s.deps.interceptQueue.Respond(params.InterceptID, action); err != nil {
+	if err := s.pipeline.interceptQueue.Respond(params.InterceptID, action); err != nil {
 		return nil, nil, fmt.Errorf("drop: %w", err)
 	}
 

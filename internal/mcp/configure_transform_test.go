@@ -24,7 +24,7 @@ func setupTransformTestSession(t *testing.T, pipeline *rules.Pipeline) *gomcp.Cl
 		opts = append(opts, WithTransformPipeline(pipeline))
 	}
 
-	s := NewServer(ctx, nil, nil, nil, opts...)
+	s := newServer(ctx, nil, nil, nil, opts...)
 	ct, st := gomcp.NewInMemoryTransports()
 
 	ss, err := s.server.Connect(ctx, st, nil)

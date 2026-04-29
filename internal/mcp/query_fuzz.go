@@ -37,7 +37,7 @@ type queryFuzzJobsResult struct {
 
 // handleQueryFuzzJobs returns a paginated list of fuzz jobs with optional filtering.
 func (s *Server) handleQueryFuzzJobs(ctx context.Context, input queryInput) (*gomcp.CallToolResult, any, error) {
-	if s.deps.fuzzStore == nil {
+	if s.jobRunner.fuzzStore == nil {
 		return nil, nil, fmt.Errorf("fuzz store is not initialized")
 	}
 
@@ -59,12 +59,12 @@ func (s *Server) handleQueryFuzzJobs(ctx context.Context, input queryInput) (*go
 		opts.Tag = input.Filter.Tag
 	}
 
-	jobs, err := s.deps.fuzzStore.ListFuzzJobs(ctx, opts)
+	jobs, err := s.jobRunner.fuzzStore.ListFuzzJobs(ctx, opts)
 	if err != nil {
 		return nil, nil, fmt.Errorf("list fuzz jobs: %w", err)
 	}
 
-	total, err := s.deps.fuzzStore.CountFuzzJobs(ctx, opts)
+	total, err := s.jobRunner.fuzzStore.CountFuzzJobs(ctx, opts)
 	if err != nil {
 		return nil, nil, fmt.Errorf("count fuzz jobs: %w", err)
 	}
@@ -243,7 +243,7 @@ func (s *Server) prepareOutliersFilter(ctx context.Context, fuzzID string, opts 
 
 // handleQueryFuzzResults returns fuzz results for a specific job with filtering, sorting, and summary.
 func (s *Server) handleQueryFuzzResults(ctx context.Context, input queryInput) (*gomcp.CallToolResult, any, error) {
-	if s.deps.fuzzStore == nil {
+	if s.jobRunner.fuzzStore == nil {
 		return nil, nil, fmt.Errorf("fuzz store is not initialized")
 	}
 	if input.FuzzID == "" {
@@ -273,12 +273,12 @@ func (s *Server) handleQueryFuzzResults(ctx context.Context, input queryInput) (
 		}
 	}
 
-	results, err := s.deps.fuzzStore.ListFuzzResults(ctx, input.FuzzID, opts)
+	results, err := s.jobRunner.fuzzStore.ListFuzzResults(ctx, input.FuzzID, opts)
 	if err != nil {
 		return nil, nil, fmt.Errorf("list fuzz results: %w", err)
 	}
 
-	total, err := s.deps.fuzzStore.CountFuzzResults(ctx, input.FuzzID, opts)
+	total, err := s.jobRunner.fuzzStore.CountFuzzResults(ctx, input.FuzzID, opts)
 	if err != nil {
 		return nil, nil, fmt.Errorf("count fuzz results: %w", err)
 	}
@@ -315,7 +315,7 @@ func (s *Server) buildFuzzResultsSummary(ctx context.Context, fuzzID string, opt
 	allOpts.Offset = 0
 	allOpts.SortBy = ""
 
-	allResults, err := s.deps.fuzzStore.ListFuzzResults(ctx, fuzzID, allOpts)
+	allResults, err := s.jobRunner.fuzzStore.ListFuzzResults(ctx, fuzzID, allOpts)
 	if err != nil {
 		return nil, fmt.Errorf("list all fuzz results for summary: %w", err)
 	}

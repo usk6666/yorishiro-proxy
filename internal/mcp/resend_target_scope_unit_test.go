@@ -73,7 +73,7 @@ func TestCheckTargetScopeURL(t *testing.T) {
 			ts := proxy.NewTargetScope()
 			ts.SetAgentRules(tt.allows, tt.denies)
 
-			s := &Server{deps: &deps{targetScope: ts}}
+			s := mkServerFromLegacyDeps(legacyDeps{targetScope: ts})
 			u, err := url.Parse(tt.url)
 			if err != nil {
 				t.Fatalf("parse URL: %v", err)
@@ -136,7 +136,7 @@ func TestCheckTargetScopeAddr(t *testing.T) {
 			ts := proxy.NewTargetScope()
 			ts.SetAgentRules(tt.allows, tt.denies)
 
-			s := &Server{deps: &deps{targetScope: ts}}
+			s := mkServerFromLegacyDeps(legacyDeps{targetScope: ts})
 			err := s.checkTargetScopeAddr(tt.scheme, tt.addr)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("checkTargetScopeAddr() error = %v, wantErr %v", err, tt.wantErr)
@@ -214,7 +214,7 @@ func TestTargetScopeCheckRedirect(t *testing.T) {
 
 // Test nil target scope (should never block).
 func TestCheckTargetScopeURL_NilScope(t *testing.T) {
-	s := &Server{deps: &deps{targetScope: nil}}
+	s := mkServerFromLegacyDeps(legacyDeps{targetScope: nil})
 	u, _ := url.Parse("http://any-host.com/path")
 	if err := s.checkTargetScopeURL(u); err != nil {
 		t.Errorf("nil targetScope should allow all, got error: %v", err)
@@ -222,7 +222,7 @@ func TestCheckTargetScopeURL_NilScope(t *testing.T) {
 }
 
 func TestCheckTargetScopeAddr_NilScope(t *testing.T) {
-	s := &Server{deps: &deps{targetScope: nil}}
+	s := mkServerFromLegacyDeps(legacyDeps{targetScope: nil})
 	if err := s.checkTargetScopeAddr("http", "any-host.com:80"); err != nil {
 		t.Errorf("nil targetScope should allow all, got error: %v", err)
 	}

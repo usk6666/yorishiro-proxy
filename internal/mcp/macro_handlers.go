@@ -117,7 +117,7 @@ type macroDeleteMacroResult struct {
 // handleDefineMacro handles the define_macro action.
 // It validates the macro definition, serializes the config to JSON, and upserts into DB.
 func (s *Server) handleDefineMacro(ctx context.Context, params macroParams) (*macroDefineMacroResult, error) {
-	if s.deps.store == nil {
+	if s.flowStore.store == nil {
 		return nil, fmt.Errorf("flow store is not initialized")
 	}
 	if params.Name == "" {
@@ -140,7 +140,7 @@ func (s *Server) handleDefineMacro(ctx context.Context, params macroParams) (*ma
 
 	// Check if macro already exists (to determine created vs updated).
 	// Distinguish "not found" (macro is new) from real DB errors.
-	_, getErr := s.deps.store.GetMacro(ctx, params.Name)
+	_, getErr := s.flowStore.store.GetMacro(ctx, params.Name)
 	var isNew bool
 	if getErr != nil {
 		if strings.Contains(getErr.Error(), "not found") {
@@ -161,7 +161,7 @@ func (s *Server) handleDefineMacro(ctx context.Context, params macroParams) (*ma
 		return nil, fmt.Errorf("marshal macro config: %w", err)
 	}
 
-	if err := s.deps.store.SaveMacro(ctx, params.Name, params.Description, string(configJSON)); err != nil {
+	if err := s.flowStore.store.SaveMacro(ctx, params.Name, params.Description, string(configJSON)); err != nil {
 		return nil, fmt.Errorf("save macro: %w", err)
 	}
 
@@ -176,7 +176,7 @@ func (s *Server) handleDefineMacro(ctx context.Context, params macroParams) (*ma
 // It loads the macro from DB, creates a macro.Engine, and runs it.
 // Access control is handled by the target scope enforcement layer.
 func (s *Server) handleRunMacro(ctx context.Context, params macroParams) (*macroRunMacroResult, error) {
-	if s.deps.store == nil {
+	if s.flowStore.store == nil {
 		return nil, fmt.Errorf("flow store is not initialized")
 	}
 	if params.Name == "" {
@@ -201,7 +201,7 @@ func (s *Server) handleRunMacro(ctx context.Context, params macroParams) (*macro
 
 	// Create engine with HTTP client and session fetcher.
 	sendFunc := s.macroSendFunc(params.Name)
-	fetcher := &storeFlowFetcher{store: s.deps.store}
+	fetcher := &storeFlowFetcher{store: s.flowStore.store}
 
 	engine, err := macro.NewEngine(sendFunc, fetcher)
 	if err != nil {
@@ -218,7 +218,7 @@ func (s *Server) handleRunMacro(ctx context.Context, params macroParams) (*macro
 
 // loadAndBuildMacro loads a macro record from DB, parses its config, and builds a macro.Macro.
 func (s *Server) loadAndBuildMacro(ctx context.Context, name string) (*macro.Macro, macroConfig, error) {
-	rec, err := s.deps.store.GetMacro(ctx, name)
+	rec, err := s.flowStore.store.GetMacro(ctx, name)
 	if err != nil {
 		return nil, macroConfig{}, fmt.Errorf("load macro: %w", err)
 	}
@@ -239,7 +239,7 @@ func (s *Server) loadAndBuildMacro(ctx context.Context, name string) (*macro.Mac
 // checkMacroStepsTargetScope checks each macro step's target URL against the target scope rules.
 // It checks both override_url and the flow's original URL for each step.
 func (s *Server) checkMacroStepsTargetScope(ctx context.Context, steps []macroStepInput) error {
-	if s.deps.targetScope == nil || !s.deps.targetScope.HasRules() {
+	if s.connector.targetScope == nil || !s.connector.targetScope.HasRules() {
 		return nil
 	}
 	for _, step := range steps {
@@ -251,7 +251,7 @@ func (s *Server) checkMacroStepsTargetScope(ctx context.Context, steps []macroSt
 				}
 			}
 		}
-		sendMsgs, msgErr := s.deps.store.GetFlows(ctx, step.StreamID, flow.FlowListOptions{Direction: "send"})
+		sendMsgs, msgErr := s.flowStore.store.GetFlows(ctx, step.StreamID, flow.FlowListOptions{Direction: "send"})
 		if msgErr == nil && len(sendMsgs) > 0 && sendMsgs[0].URL != nil {
 			if step.OverrideURL == "" {
 				if scopeErr := s.checkTargetScopeURL(sendMsgs[0].URL); scopeErr != nil {
@@ -288,14 +288,14 @@ func buildRunMacroResult(result *macro.Result) *macroRunMacroResult {
 
 // handleDeleteMacro handles the delete_macro action.
 func (s *Server) handleDeleteMacro(ctx context.Context, params macroParams) (*macroDeleteMacroResult, error) {
-	if s.deps.store == nil {
+	if s.flowStore.store == nil {
 		return nil, fmt.Errorf("flow store is not initialized")
 	}
 	if params.Name == "" {
 		return nil, fmt.Errorf("name is required for delete_macro action")
 	}
 
-	if err := s.deps.store.DeleteMacro(ctx, params.Name); err != nil {
+	if err := s.flowStore.store.DeleteMacro(ctx, params.Name); err != nil {
 		return nil, fmt.Errorf("delete macro: %w", err)
 	}
 
@@ -469,8 +469,8 @@ func validateStepExtractionRules(step *macro.Step) error {
 func (s *Server) macroSendFunc(macroName string) macro.SendFunc {
 	return func(ctx context.Context, req *macro.SendRequest) (*macro.SendResponse, error) {
 		var client httpDoer
-		if s.deps.replayDoer != nil {
-			client = s.deps.replayDoer
+		if s.jobRunner.replayDoer != nil {
+			client = s.jobRunner.replayDoer
 		} else {
 			dialer := &net.Dialer{
 				Timeout: defaultReplayTimeout,
@@ -536,7 +536,7 @@ func (s *Server) macroSendFunc(macroName string) macro.SendFunc {
 		duration := time.Since(start)
 
 		// Record the macro step as a flow so it appears in session history.
-		if s.deps.store != nil {
+		if s.flowStore.store != nil {
 			s.recordMacroStepSession(ctx, macroName, req, resp, respBody, httpReq, start, duration)
 		}
 
@@ -579,7 +579,7 @@ func (s *Server) recordMacroStepSession(
 		Duration:  duration,
 		Tags:      tags,
 	}
-	if err := s.deps.store.SaveStream(ctx, fl); err != nil {
+	if err := s.flowStore.store.SaveStream(ctx, fl); err != nil {
 		slog.WarnContext(ctx, "failed to save macro step session",
 			"macro", macroName, "step", req.StepID, "error", err)
 		return
@@ -603,7 +603,7 @@ func (s *Server) recordMacroStepSession(
 		Headers:   recordedHeaders,
 		Body:      req.Body,
 	}
-	if err := s.deps.store.SaveFlow(ctx, sendMsg); err != nil {
+	if err := s.flowStore.store.SaveFlow(ctx, sendMsg); err != nil {
 		slog.WarnContext(ctx, "failed to save macro step send message",
 			"macro", macroName, "step", req.StepID, "error", err)
 		return
@@ -623,7 +623,7 @@ func (s *Server) recordMacroStepSession(
 		Headers:    respHeaders,
 		Body:       respBody,
 	}
-	if err := s.deps.store.SaveFlow(ctx, recvMsg); err != nil {
+	if err := s.flowStore.store.SaveFlow(ctx, recvMsg); err != nil {
 		slog.WarnContext(ctx, "failed to save macro step receive message",
 			"macro", macroName, "step", req.StepID, "error", err)
 	}

@@ -76,7 +76,7 @@ func setupIntegrationEnvWithOpts(t *testing.T, opts ...ServerOption) *testEnv {
 	})
 
 	// Create MCP server with all components wired.
-	mcpServer := NewServer(ctx, ca, store, manager, opts...)
+	mcpServer := newServer(ctx, ca, store, manager, opts...)
 
 	// Connect server and client via in-memory transport.
 	ct, st := gomcp.NewInMemoryTransports()
@@ -146,7 +146,7 @@ func setupIntegrationEnvWithScopeAndPassthrough(t *testing.T) *testEnv {
 	})
 
 	// Create MCP server with scope and passthrough wired.
-	mcpServer := NewServer(ctx, ca, store, manager,
+	mcpServer := newServer(ctx, ca, store, manager,
 		WithCaptureScope(scope),
 		WithPassthroughList(pl),
 	)

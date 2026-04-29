@@ -66,7 +66,7 @@ func (s *Server) handlePlugin(ctx context.Context, _ *gomcp.CallToolRequest, inp
 		)
 	}()
 
-	if s.deps.pluginEngine == nil {
+	if s.pluginEngine.engine == nil {
 		return nil, nil, fmt.Errorf("plugin engine is not initialized: configure plugins in the config file (-config flag) with a 'plugins' section")
 	}
 
@@ -100,7 +100,7 @@ type pluginListResult struct {
 
 // handlePluginList returns all loaded plugins with metadata.
 func (s *Server) handlePluginList() (*gomcp.CallToolResult, *pluginListResult, error) {
-	infos := s.deps.pluginEngine.Plugins()
+	infos := s.pluginEngine.engine.Plugins()
 	return nil, &pluginListResult{
 		Plugins: infos,
 		Count:   len(infos),
@@ -116,7 +116,7 @@ type pluginReloadResult struct {
 // handlePluginReload reloads a specific plugin or all plugins.
 func (s *Server) handlePluginReload(ctx context.Context, params pluginParams) (*gomcp.CallToolResult, *pluginReloadResult, error) {
 	if params.Name == "" {
-		err := s.deps.pluginEngine.ReloadAll(ctx)
+		err := s.pluginEngine.engine.ReloadAll(ctx)
 		if err != nil {
 			return nil, nil, fmt.Errorf("reload all plugins: %w", err)
 		}
@@ -126,7 +126,7 @@ func (s *Server) handlePluginReload(ctx context.Context, params pluginParams) (*
 		}, nil
 	}
 
-	if err := s.deps.pluginEngine.ReloadPlugin(ctx, params.Name); err != nil {
+	if err := s.pluginEngine.engine.ReloadPlugin(ctx, params.Name); err != nil {
 		return nil, nil, fmt.Errorf("reload plugin: %w", err)
 	}
 	return nil, &pluginReloadResult{
@@ -146,7 +146,7 @@ func (s *Server) handlePluginEnable(params pluginParams) (*gomcp.CallToolResult,
 	if params.Name == "" {
 		return nil, nil, fmt.Errorf("params.name is required for enable action")
 	}
-	if err := s.deps.pluginEngine.SetPluginEnabled(params.Name, true); err != nil {
+	if err := s.pluginEngine.engine.SetPluginEnabled(params.Name, true); err != nil {
 		return nil, nil, fmt.Errorf("enable plugin: %w", err)
 	}
 	return nil, &pluginToggleResult{
@@ -160,7 +160,7 @@ func (s *Server) handlePluginDisable(params pluginParams) (*gomcp.CallToolResult
 	if params.Name == "" {
 		return nil, nil, fmt.Errorf("params.name is required for disable action")
 	}
-	if err := s.deps.pluginEngine.SetPluginEnabled(params.Name, false); err != nil {
+	if err := s.pluginEngine.engine.SetPluginEnabled(params.Name, false); err != nil {
 		return nil, nil, fmt.Errorf("disable plugin: %w", err)
 	}
 	return nil, &pluginToggleResult{

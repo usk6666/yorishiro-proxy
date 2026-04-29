@@ -149,7 +149,7 @@ func TestHandleFuzzStart_RejectsGRPCFlow(t *testing.T) {
 		messages: []*flow.Flow{},
 	}
 
-	srv := &Server{deps: &deps{store: store}}
+	srv := mkServerFromLegacyDeps(legacyDeps{store: store})
 
 	params := fuzzParams{
 		StreamID:   "flow-grpc-1",
@@ -189,7 +189,7 @@ func TestHandleFuzzStart_AllowsHTTPFlow(t *testing.T) {
 
 	// Server with store but no fuzzRunner — should pass the gRPC guard
 	// and fail later at "fuzz runner is not initialized".
-	srv := &Server{deps: &deps{store: store}}
+	srv := mkServerFromLegacyDeps(legacyDeps{store: store})
 
 	params := fuzzParams{
 		StreamID:   "flow-http-1",
@@ -229,7 +229,7 @@ func TestHandleFuzzStart_GRPCWebUnaryAllowed(t *testing.T) {
 
 	// Server with store but no fuzzRunner — should pass protocol checks
 	// and fail at "fuzz runner is not initialized".
-	srv := &Server{deps: &deps{store: store}}
+	srv := mkServerFromLegacyDeps(legacyDeps{store: store})
 
 	params := fuzzParams{
 		StreamID:   "flow-grpcweb-1",

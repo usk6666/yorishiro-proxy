@@ -903,8 +903,8 @@ func TestResendRawH2_ViaServer(t *testing.T) {
 	}
 
 	// Set up MCP server with a raw dialer (no TLS since our echo server doesn't use TLS).
-	s := NewServer(ctx, nil, store, nil)
-	s.deps.rawReplayDialer = &testDialer{}
+	s := newServer(ctx, nil, store, nil)
+	s.jobRunner.rawReplayDialer = &testDialer{}
 
 	ct, st := gomcp.NewInMemoryTransports()
 	ss, err := s.server.Connect(ctx, st, nil)
@@ -1021,7 +1021,7 @@ func TestResendRawH2_DryRun(t *testing.T) {
 		t.Fatalf("AppendMessage: %v", err)
 	}
 
-	s := NewServer(ctx, nil, store, nil)
+	s := newServer(ctx, nil, store, nil)
 	ct, st := gomcp.NewInMemoryTransports()
 	ss, err := s.server.Connect(ctx, st, nil)
 	if err != nil {
@@ -1129,7 +1129,7 @@ func TestResendRawH2_WithPatches(t *testing.T) {
 		t.Fatalf("AppendMessage: %v", err)
 	}
 
-	s := NewServer(ctx, nil, store, nil)
+	s := newServer(ctx, nil, store, nil)
 	ct, st := gomcp.NewInMemoryTransports()
 	ss, err := s.server.Connect(ctx, st, nil)
 	if err != nil {
@@ -1254,8 +1254,8 @@ func TestResendRawH2_GRPCProtocol(t *testing.T) {
 		t.Fatalf("AppendMessage: %v", err)
 	}
 
-	s := NewServer(ctx, nil, store, nil)
-	s.deps.rawReplayDialer = &testDialer{}
+	s := newServer(ctx, nil, store, nil)
+	s.jobRunner.rawReplayDialer = &testDialer{}
 
 	ct, st := gomcp.NewInMemoryTransports()
 	ss, err := s.server.Connect(ctx, st, nil)
@@ -1376,8 +1376,8 @@ func TestResendRawH2_OverrideRawBase64(t *testing.T) {
 	}
 	overrideB64 := base64.StdEncoding.EncodeToString(overrideBuf.Bytes())
 
-	s := NewServer(ctx, nil, store, nil)
-	s.deps.rawReplayDialer = &testDialer{}
+	s := newServer(ctx, nil, store, nil)
+	s.jobRunner.rawReplayDialer = &testDialer{}
 
 	ct, st := gomcp.NewInMemoryTransports()
 	ss, err := s.server.Connect(ctx, st, nil)
@@ -1495,8 +1495,8 @@ func TestResendRawH2_H2CInferTLS(t *testing.T) {
 	}
 
 	// Set up MCP server — do NOT set use_tls; let the server infer from ConnInfo.
-	s := NewServer(ctx, nil, store, nil)
-	s.deps.rawReplayDialer = &testDialer{}
+	s := newServer(ctx, nil, store, nil)
+	s.jobRunner.rawReplayDialer = &testDialer{}
 
 	ct, st := gomcp.NewInMemoryTransports()
 	ss, err := s.server.Connect(ctx, st, nil)
