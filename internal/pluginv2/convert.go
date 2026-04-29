@@ -323,6 +323,12 @@ func buildWSDict(d *MessageDict, m *envelope.WSMessage) {
 		if err := readScalar(d, "opcode", &opcode); err != nil {
 			return nil, err
 		}
+		// Opcode is uint8 on the wire; reject negative or out-of-range
+		// values rather than silently truncating. Symmetry with the
+		// neighboring close_code / wire_length / status checks.
+		if opcode < 0 || opcode > 0xFF {
+			return nil, fmt.Errorf("msg[\"opcode\"]: must fit in uint8, got %d", opcode)
+		}
 		out.Opcode = envelope.WSOpcode(opcode)
 		if err := readScalar(d, "fin", &out.Fin); err != nil {
 			return nil, err
@@ -570,14 +576,28 @@ func anomaliesToStarlark(in []envelope.Anomaly) starlark.Value {
 	return list
 }
 
-// stringsToList renders a []string as a Starlark list of starlark.String.
-// Empty input returns an empty list (not None) for schema uniformity.
+// stringsToList renders a []string as a frozen Starlark list of
+// starlark.String. Empty input returns an empty (still frozen) list for
+// schema uniformity.
+//
+// The list is frozen so plugin in-place mutations (e.g.
+// msg["accept_encoding"].append("gzip")) fail loudly rather than vanishing.
+// *starlark.List mutations do not flow through MessageDict.SetKey, so a
+// non-frozen list would let plugins silently drop changes — violating
+// RFC §9.3 D2's "no silent drop" promise. Plugins that wish to modify a
+// list-typed field must reassign:
+//
+//	msg["accept_encoding"] = ["gzip", "identity"]
+//
+// which trips SetKey and the dirty/messageMutated tracking.
 func stringsToList(in []string) starlark.Value {
 	items := make([]starlark.Value, 0, len(in))
 	for _, s := range in {
 		items = append(items, starlark.String(s))
 	}
-	return starlark.NewList(items)
+	list := starlark.NewList(items)
+	list.Freeze()
+	return list
 }
 
 // readScalar pulls a typed value out of d.values. The output dst pointer

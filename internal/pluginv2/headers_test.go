@@ -3,6 +3,7 @@ package pluginv2
 import (
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 
 	"go.starlark.net/starlark"
@@ -225,6 +226,31 @@ func TestHeadersValue_FrozenRejectsMutation(t *testing.T) {
 			t.Fatalf("expected frozen error for %q", src)
 		}
 	}
+}
+
+// TestHeadersValue_FrozenMutationRaceFree verifies F-2 fix (USK-669
+// review): mutation attempts on a frozen *HeadersValue from concurrent
+// goroutines must not race. Run under -race; failure here indicates a
+// regression in the package-level errHeadersFrozen sentinel.
+func TestHeadersValue_FrozenMutationRaceFree(t *testing.T) {
+	hv := NewHeadersValue([]envelope.KeyValue{{Name: "A", Value: "1"}})
+	hv.Freeze()
+	var wg sync.WaitGroup
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			thread := &starlark.Thread{Name: "race"}
+			fn, _ := hv.Attr("append")
+			builtin := fn.(*starlark.Builtin)
+			_, err := starlark.Call(thread, builtin,
+				starlark.Tuple{starlark.String("X"), starlark.String("y")}, nil)
+			if err == nil {
+				t.Errorf("frozen append must error")
+			}
+		}()
+	}
+	wg.Wait()
 }
 
 // evalHeaders runs a one-off Starlark snippet with `h` bound to hv,

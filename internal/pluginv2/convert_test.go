@@ -2,9 +2,13 @@ package pluginv2
 
 import (
 	"errors"
+	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
+
+	"go.starlark.net/starlark"
 
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 )
@@ -291,5 +295,139 @@ func TestGRPCDataMessage_DictExposesDenormalizedReadOnly(t *testing.T) {
 	}
 	if !d.readOnly["service"] || !d.readOnly["method"] {
 		t.Fatalf("GRPCDataMessage service/method not marked read-only: %v", d.readOnly)
+	}
+}
+
+// TestAcceptEncoding_AppendOnFrozenList rejects loudly verifies the F-1 fix
+// (USK-669 review): in-place mutation of accept_encoding via *starlark.List
+// methods must surface as a "frozen" error rather than silently dropping
+// the change. Plugins that wish to modify accept_encoding must reassign
+// the entire list via msg["accept_encoding"] = [...].
+func TestAcceptEncoding_AppendOnFrozenList(t *testing.T) {
+	m := &envelope.GRPCStartMessage{
+		Service:        "s",
+		Method:         "m",
+		AcceptEncoding: []string{"identity"},
+	}
+	env := &envelope.Envelope{Message: m}
+	_, err := runHook(t, env, `
+def hook(msg):
+    msg["accept_encoding"].append("gzip")
+`)
+	if err == nil {
+		t.Fatal("expected error for in-place append on frozen accept_encoding list")
+	}
+	if !strings.Contains(err.Error(), "frozen") &&
+		!strings.Contains(err.Error(), "cannot append") &&
+		!strings.Contains(err.Error(), "immutable") {
+		t.Fatalf("err = %v; want frozen/immutable phrasing", err)
+	}
+}
+
+// TestAcceptEncoding_ReassignmentIsMessageMutation verifies the supported
+// path for modifying accept_encoding: full reassignment trips SetKey/dirty
+// and round-trips the new list correctly.
+func TestAcceptEncoding_ReassignmentIsMessageMutation(t *testing.T) {
+	m := &envelope.GRPCStartMessage{
+		Service:        "s",
+		Method:         "m",
+		AcceptEncoding: []string{"identity"},
+	}
+	env := &envelope.Envelope{Message: m}
+	d, err := runHook(t, env, `
+def hook(msg):
+    msg["accept_encoding"] = ["gzip", "identity"]
+`)
+	if err != nil {
+		t.Fatalf("hook: %v", err)
+	}
+	if d.classify() != MutationMessageOnly {
+		t.Fatalf("classify = %s, want message_only", d.classify())
+	}
+	got, _, _, err := dictToMessage(d)
+	if err != nil {
+		t.Fatalf("dictToMessage: %v", err)
+	}
+	gm := got.(*envelope.GRPCStartMessage)
+	if !reflect.DeepEqual(gm.AcceptEncoding, []string{"gzip", "identity"}) {
+		t.Fatalf("AcceptEncoding = %v, want [gzip identity]", gm.AcceptEncoding)
+	}
+}
+
+// TestWSMessage_OpcodeRangeValidated verifies S-1 fix (USK-669 review):
+// out-of-range opcode values must be rejected explicitly rather than
+// silently truncated through the int → uint8 cast.
+func TestWSMessage_OpcodeRangeValidated(t *testing.T) {
+	m := &envelope.WSMessage{Opcode: envelope.WSText}
+	env := &envelope.Envelope{Message: m}
+	for _, badOpcode := range []int{-1, 256, 1024} {
+		src := fmt.Sprintf(`
+def hook(msg):
+    msg["opcode"] = %d
+`, badOpcode)
+		d, err := runHook(t, env, src)
+		if err != nil {
+			t.Fatalf("hook for %d: %v", badOpcode, err)
+		}
+		_, _, _, err = dictToMessage(d)
+		if err == nil {
+			t.Fatalf("expected error for opcode=%d", badOpcode)
+		}
+		if !strings.Contains(err.Error(), "uint8") {
+			t.Fatalf("err for opcode=%d: %v; want uint8 mention", badOpcode, err)
+		}
+	}
+}
+
+// TestRawWriteOversized_Rejected verifies S-2 fix (USK-669 review):
+// msg["raw"] writes beyond maxPluginRawSize are rejected loudly so a
+// runaway plugin cannot allocate unbounded memory.
+func TestRawWriteOversized_Rejected(t *testing.T) {
+	env := &envelope.Envelope{Message: &envelope.HTTPMessage{}}
+	d, err := convertMessageToDict(env)
+	if err != nil {
+		t.Fatalf("convert: %v", err)
+	}
+	huge := make([]byte, maxPluginRawSize+1)
+	if err := d.SetKey(starlark.String("raw"), starlark.Bytes(huge)); err == nil {
+		t.Fatal("expected oversize raw to be rejected")
+	} else if !strings.Contains(err.Error(), "exceeds limit") {
+		t.Fatalf("err = %v; want 'exceeds limit'", err)
+	}
+}
+
+// TestSetKey_HeadersWrongTypeRejectedAtSetKey verifies F-4 fix:
+// assigning a non-*HeadersValue value to a headers-typed key must fail
+// at SetKey time rather than deferring the error to the per-type
+// builder. This gives plugin authors clearer feedback.
+func TestSetKey_HeadersWrongTypeRejectedAtSetKey(t *testing.T) {
+	env := &envelope.Envelope{Message: &envelope.HTTPMessage{}}
+	_, err := runHook(t, env, `
+def hook(msg):
+    msg["headers"] = [("X", "1")]
+`)
+	if err == nil {
+		t.Fatal("expected error for assigning list to headers")
+	}
+	if !strings.Contains(err.Error(), "expected headers") {
+		t.Fatalf("err = %v; want 'expected headers'", err)
+	}
+}
+
+// TestMessageDict_FreezeIdempotent verifies F-3 fix (USK-669 review):
+// MessageDict.Freeze short-circuits if already frozen, satisfying the
+// documented Starlark Freeze cycle-defense pattern.
+func TestMessageDict_FreezeIdempotent(t *testing.T) {
+	env := &envelope.Envelope{Message: &envelope.HTTPMessage{Method: "GET"}}
+	d, err := convertMessageToDict(env)
+	if err != nil {
+		t.Fatalf("convert: %v", err)
+	}
+	// Multiple freezes must not panic or recurse.
+	d.Freeze()
+	d.Freeze()
+	d.Freeze()
+	if !d.frozen {
+		t.Fatal("frozen flag not set after Freeze")
 	}
 }

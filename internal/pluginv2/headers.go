@@ -24,11 +24,18 @@ import (
 // intentionally not implemented to prevent positional tuple writes (use
 // replace_at instead — one canonical way to mutate at an index).
 type HeadersValue struct {
-	kvs       []envelope.KeyValue
-	mutated   bool
-	frozen    bool
-	frozenErr error // cached "frozen" error to allocate once on the cold path
+	kvs     []envelope.KeyValue
+	mutated bool
+	frozen  bool
 }
+
+// errHeadersFrozen is returned by every mutation when the HeadersValue
+// has been frozen. It is a package-level variable rather than a per-
+// instance lazily allocated field so that two Starlark Threads racing
+// on a shared frozen value cannot data-race on a per-instance write
+// (see USK-669 review F-2). The frozen path is a cold error path; a
+// shared sentinel adds no observable behavior change.
+var errHeadersFrozen = fmt.Errorf("headers: cannot mutate frozen value")
 
 // NewHeadersValue wraps the given KeyValue slice. The slice is shared by
 // reference; callers that need isolation should clone first via
@@ -157,10 +164,7 @@ func (h *HeadersValue) Attr(name string) (starlark.Value, error) {
 
 func (h *HeadersValue) checkFrozen() error {
 	if h.frozen {
-		if h.frozenErr == nil {
-			h.frozenErr = fmt.Errorf("headers: cannot mutate frozen value")
-		}
-		return h.frozenErr
+		return errHeadersFrozen
 	}
 	return nil
 }

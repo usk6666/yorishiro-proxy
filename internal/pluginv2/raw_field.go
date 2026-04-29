@@ -60,6 +60,16 @@ func (k MutationKind) String() string {
 // for both reads and writes.
 const rawKey = "raw"
 
+// maxPluginRawSize bounds the bytes a plugin can inject through
+// msg["raw"] = b"...". Defense-in-depth against accidental plugin bugs
+// that synthesize unbounded byte strings; operator-authored plugins are
+// trusted (CLAUDE.md threat model) but a 16 MiB ceiling limits the
+// blast radius of a runaway script. The cap is intentionally larger
+// than maxPluginBodySize (1 MiB) because a plugin may legitimately
+// inject a fully reframed wire payload that includes the body plus
+// headers plus framing.
+const maxPluginRawSize = 16 << 20
+
 // MessageDict is the Starlark value handed to a plugin hook as `msg`. It
 // surfaces a snake_case view of an envelope.Message plus the magic "raw"
 // key bound to Envelope.Raw, intercepting writes to detect mutation.
@@ -186,7 +196,15 @@ func (d *MessageDict) String() string {
 
 func (d *MessageDict) Type() string { return "msg" }
 
+// Freeze implements the starlark.Value contract. It is idempotent and
+// cycle-safe: it short-circuits if already frozen before recursing into
+// child values, matching the documented Freeze pattern (set first, then
+// visit). No cycles exist in the current schema, but the guard makes
+// future schema additions safe.
 func (d *MessageDict) Freeze() {
+	if d.frozen {
+		return
+	}
 	d.frozen = true
 	for _, v := range d.values {
 		v.Freeze()
@@ -243,6 +261,9 @@ func (d *MessageDict) SetKey(k, v starlark.Value) error {
 		if !ok {
 			return fmt.Errorf("msg[\"raw\"]: value must be bytes, got %s", v.Type())
 		}
+		if len(b) > maxPluginRawSize {
+			return fmt.Errorf("msg[\"raw\"]: bytes size %d exceeds limit %d", len(b), maxPluginRawSize)
+		}
 		d.rawValue = []byte(b)
 		d.rawMutated = true
 		return nil
@@ -250,8 +271,17 @@ func (d *MessageDict) SetKey(k, v starlark.Value) error {
 	if d.readOnly[s] {
 		return fmt.Errorf("msg[%q]: field is read-only on %s", s, d.typeLabel)
 	}
-	if _, known := d.values[s]; !known {
+	existing, known := d.values[s]
+	if !known {
 		return fmt.Errorf("msg[%q]: unknown field on %s", s, d.typeLabel)
+	}
+	// Type-check at SetKey time for collection-typed fields so plugin
+	// authors see the error at assignment rather than at the per-type
+	// builder's read-back. Headers-typed keys only accept *HeadersValue.
+	if _, isHeaders := existing.(*HeadersValue); isHeaders {
+		if _, ok := v.(*HeadersValue); !ok {
+			return fmt.Errorf("msg[%q]: expected headers, got %s", s, v.Type())
+		}
 	}
 	d.values[s] = v
 	d.messageMutated = true
