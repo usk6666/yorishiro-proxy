@@ -1,5 +1,7 @@
 package pluginv2
 
+import "sort"
+
 // PhaseSupport describes which Phase values are accepted for a surface entry.
 type PhaseSupport uint8
 
@@ -164,11 +166,6 @@ func sortedKeys[V any](m map[string]V) []string {
 	for k := range m {
 		out = append(out, k)
 	}
-	// Insertion-sort: tiny slices, no allocation.
-	for i := 1; i < len(out); i++ {
-		for j := i; j > 0 && out[j-1] > out[j]; j-- {
-			out[j-1], out[j] = out[j], out[j-1]
-		}
-	}
+	sort.Strings(out)
 	return out
 }

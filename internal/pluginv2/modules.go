@@ -74,6 +74,6 @@ func goPrimitiveToStarlark(v any) (starlark.Value, error) {
 	case []byte:
 		return starlark.Bytes(x), nil
 	default:
-		return nil, fmt.Errorf("pluginv2: unsupported config value type %T (allowed: string, bool, int, float, bytes)", v)
+		return nil, fmt.Errorf("pluginv2: unsupported config value type %T (allowed: nil, string, bool, int, float, bytes)", v)
 	}
 }

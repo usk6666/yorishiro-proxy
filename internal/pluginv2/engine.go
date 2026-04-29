@@ -120,10 +120,20 @@ func (e *Engine) LoadPlugins(ctx context.Context, configs []PluginConfig) error 
 	return nil
 }
 
+// maxScriptSize caps a plugin script at 10 MiB. Plugin scripts are operator-
+// controlled, but a defensive cap prevents an accidental multi-GB file from
+// OOMing the proxy at load time.
+const maxScriptSize = 10 << 20
+
 // loadPlugin executes one plugin script with the engine's predeclared
 // modules and register_hook builtin. The script's register_hook() calls
 // populate e.registry as a side effect.
 func (e *Engine) loadPlugin(_ context.Context, cfg PluginConfig) error {
+	if info, err := os.Stat(cfg.Path); err != nil {
+		return fmt.Errorf("stat script: %w", err)
+	} else if info.Size() > maxScriptSize {
+		return fmt.Errorf("script %q size %d exceeds limit %d bytes", cfg.Path, info.Size(), maxScriptSize)
+	}
 	data, err := os.ReadFile(cfg.Path)
 	if err != nil {
 		return fmt.Errorf("read script: %w", err)

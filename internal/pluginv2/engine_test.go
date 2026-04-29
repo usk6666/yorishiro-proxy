@@ -5,7 +5,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 )
 
@@ -62,6 +61,31 @@ register_hook("htttp", "on_request", h)
 	}
 	if le.Protocol != "htttp" {
 		t.Errorf("Protocol = %q, want %q", le.Protocol, "htttp")
+	}
+}
+
+func TestEngine_RegisterHookUnknownEventForKnownProtocolIsLoadTimeError(t *testing.T) {
+	// Event "on_chunk" is valid for ProtoRaw but not for ProtoHTTP. The
+	// engine must reject this with LoadErrUnknownEvent (not UnknownProtocol).
+	path := writeScript(t, `
+def h(env):
+    return None
+register_hook("http", "on_chunk", h)
+`)
+	eng := NewEngine(nil)
+	err := eng.LoadPlugins(context.Background(), []PluginConfig{{Path: path, OnError: string(OnErrorAbort)}})
+	if err == nil {
+		t.Fatal("expected load error for event valid under another protocol")
+	}
+	var le *LoadError
+	if !errors.As(err, &le) {
+		t.Fatalf("expected *LoadError, got %T (%v)", err, err)
+	}
+	if le.Kind != LoadErrUnknownEvent {
+		t.Errorf("Kind = %v, want LoadErrUnknownEvent", le.Kind)
+	}
+	if le.Protocol != "http" || le.Event != "on_chunk" {
+		t.Errorf("(Protocol, Event) = (%q, %q), want (http, on_chunk)", le.Protocol, le.Event)
 	}
 }
 
@@ -224,9 +248,6 @@ for _ in range(10000000):
 	err := eng.LoadPlugins(context.Background(), []PluginConfig{cfg})
 	if err == nil {
 		t.Fatal("expected step-limit error, got nil")
-	}
-	if !strings.Contains(err.Error(), "exec script") && !strings.Contains(err.Error(), "step") {
-		t.Logf("step-limit error message: %v", err)
 	}
 }
 
