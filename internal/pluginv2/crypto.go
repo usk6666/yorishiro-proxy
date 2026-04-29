@@ -8,6 +8,7 @@ import (
 	"crypto/sha1"
 	"crypto/sha256"
 	"crypto/sha512"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
@@ -279,7 +280,14 @@ func pkcs7Pad(data []byte, blockSize int) []byte {
 	return padded
 }
 
-// pkcs7Unpad removes PKCS#7 padding from data.
+// pkcs7Unpad removes PKCS#7 padding from data. Padding-oracle hardening:
+// "padding value out of range" and "padding bytes mismatch" collapse into
+// a single generic error, and byte comparison runs in constant time
+// relative to ciphertext length. Distinguishing the two cases via error
+// message OR timing is the classic CBC padding oracle (CWE-208/CWE-209).
+// Length-shape checks (empty, not a multiple of blockSize) keep their
+// distinct messages because they leak only ciphertext shape, which is
+// already observable to an attacker.
 func pkcs7Unpad(data []byte, blockSize int) ([]byte, error) {
 	if len(data) == 0 {
 		return nil, fmt.Errorf("pkcs7 unpad: empty data")
@@ -288,13 +296,18 @@ func pkcs7Unpad(data []byte, blockSize int) ([]byte, error) {
 		return nil, fmt.Errorf("pkcs7 unpad: data length %d is not a multiple of block size %d", len(data), blockSize)
 	}
 	padding := int(data[len(data)-1])
-	if padding == 0 || padding > blockSize {
-		return nil, fmt.Errorf("pkcs7 unpad: invalid padding value %d", padding)
+	valid := byte(1)
+	if padding < 1 || padding > blockSize {
+		valid = 0
+		padding = blockSize // clamp so the read below stays in range
 	}
-	for i := len(data) - padding; i < len(data); i++ {
-		if data[i] != byte(padding) {
-			return nil, fmt.Errorf("pkcs7 unpad: invalid padding")
-		}
+	var diff byte
+	for _, b := range data[len(data)-padding:] {
+		diff |= b ^ byte(padding)
+	}
+	valid &= byte(subtle.ConstantTimeByteEq(diff, 0))
+	if valid != 1 {
+		return nil, fmt.Errorf("pkcs7 unpad: invalid padding")
 	}
 	return data[:len(data)-padding], nil
 }

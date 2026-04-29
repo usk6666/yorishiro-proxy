@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // writeScript writes contents to t.TempDir() and returns the absolute path.
@@ -248,6 +249,40 @@ for _ in range(10000000):
 	err := eng.LoadPlugins(context.Background(), []PluginConfig{cfg})
 	if err == nil {
 		t.Fatal("expected step-limit error, got nil")
+	}
+}
+
+func TestEngine_LoadPluginCancelsOnContext(t *testing.T) {
+	// A runaway top-level Starlark loop must abort promptly when the caller
+	// cancels the context, instead of waiting for the per-thread step limit
+	// to trip. MaxSteps is set high enough that ctx-cancel is the only way
+	// to terminate the script in test time.
+	path := writeScript(t, `
+n = 0
+for _ in range(1000000000):
+    n = n + 1
+`)
+	eng := NewEngine(nil)
+	cfg := PluginConfig{Path: path, OnError: string(OnErrorAbort), MaxSteps: 1_000_000_000}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		// Cancel shortly after LoadPlugins begins. The Starlark runtime
+		// observes the cancel and returns from ExecFileOptions.
+		time.Sleep(20 * time.Millisecond)
+		cancel()
+	}()
+
+	start := time.Now()
+	err := eng.LoadPlugins(ctx, []PluginConfig{cfg})
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("expected ctx-cancel error, got nil")
+	}
+	// Must abort in well under a second; the loop above would take many
+	// seconds to hit the step limit.
+	if elapsed > 2*time.Second {
+		t.Errorf("LoadPlugins did not honor ctx.Done() in time: %v", elapsed)
 	}
 }
 

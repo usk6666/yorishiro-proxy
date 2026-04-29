@@ -127,16 +127,13 @@ const maxScriptSize = 10 << 20
 
 // loadPlugin executes one plugin script with the engine's predeclared
 // modules and register_hook builtin. The script's register_hook() calls
-// populate e.registry as a side effect.
-func (e *Engine) loadPlugin(_ context.Context, cfg PluginConfig) error {
-	if info, err := os.Stat(cfg.Path); err != nil {
-		return fmt.Errorf("stat script: %w", err)
-	} else if info.Size() > maxScriptSize {
-		return fmt.Errorf("script %q size %d exceeds limit %d bytes", cfg.Path, info.Size(), maxScriptSize)
-	}
-	data, err := os.ReadFile(cfg.Path)
+// populate e.registry as a side effect. ctx cancellation is bridged into
+// the Starlark thread so a runaway top-level statement aborts cleanly on
+// SIGINT instead of waiting for the per-thread step limit to trip.
+func (e *Engine) loadPlugin(ctx context.Context, cfg PluginConfig) error {
+	data, err := readBoundedScript(cfg.Path)
 	if err != nil {
-		return fmt.Errorf("read script: %w", err)
+		return err
 	}
 
 	name := cfg.Name
@@ -160,6 +157,22 @@ func (e *Engine) loadPlugin(_ context.Context, cfg PluginConfig) error {
 	// runaway top-level statement would otherwise hang LoadPlugins.
 	if steps := cfg.maxSteps(); steps > 0 {
 		thread.SetMaxExecutionSteps(steps)
+	}
+
+	// Bridge ctx cancellation into thread.Cancel so external signals
+	// (SIGINT, deadline) abort script execution promptly. The done channel
+	// stops the watcher when ExecFileOptions returns, preventing a goroutine
+	// leak. Pattern mirrors legacy internal/plugin Engine.makeHandler.
+	done := make(chan struct{})
+	defer close(done)
+	if ctx != nil && ctx.Done() != nil {
+		go func() {
+			select {
+			case <-ctx.Done():
+				thread.Cancel(ctx.Err().Error())
+			case <-done:
+			}
+		}()
 	}
 
 	configDict, err := newConfigDict(cfg.Vars)
@@ -187,19 +200,7 @@ func (e *Engine) loadPlugin(_ context.Context, cfg PluginConfig) error {
 		predeclared,
 	)
 	if err != nil {
-		// Surface LoadError unwrapped if it came from register_hook so
-		// callers can errors.As cleanly.
-		var le *LoadError
-		if errors.As(err, &le) {
-			if le.Path == "" {
-				le.Path = cfg.Path
-			}
-			if le.PluginName == "" {
-				le.PluginName = name
-			}
-			return le
-		}
-		return fmt.Errorf("exec script: %w", err)
+		return wrapExecError(err, cfg.Path, name)
 	}
 
 	e.plugins = append(e.plugins, &loadedPlugin{
@@ -207,6 +208,39 @@ func (e *Engine) loadPlugin(_ context.Context, cfg PluginConfig) error {
 		globals: globals,
 	})
 	return nil
+}
+
+// readBoundedScript stat+reads a plugin script, enforcing maxScriptSize as
+// a defense-in-depth cap against accidental multi-GB files.
+func readBoundedScript(path string) ([]byte, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, fmt.Errorf("stat script: %w", err)
+	}
+	if info.Size() > maxScriptSize {
+		return nil, fmt.Errorf("script %q size %d exceeds limit %d bytes", path, info.Size(), maxScriptSize)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read script: %w", err)
+	}
+	return data, nil
+}
+
+// wrapExecError surfaces a *LoadError unwrapped (so callers can errors.As
+// cleanly) and otherwise wraps the Starlark exec error with context.
+func wrapExecError(err error, path, name string) error {
+	var le *LoadError
+	if errors.As(err, &le) {
+		if le.Path == "" {
+			le.Path = path
+		}
+		if le.PluginName == "" {
+			le.PluginName = name
+		}
+		return le
+	}
+	return fmt.Errorf("exec script: %w", err)
 }
 
 func (e *Engine) ensureState(name string) *PluginState {
