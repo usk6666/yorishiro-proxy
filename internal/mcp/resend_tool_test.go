@@ -24,8 +24,8 @@ func setupTestSessionWithExecuteDoer(t *testing.T, store flow.Store, doer httpDo
 	t.Helper()
 	ctx := context.Background()
 
-	s := NewServer(context.Background(), nil, store, nil)
-	s.deps.replayDoer = doer
+	s := newServer(context.Background(), nil, store, nil)
+	s.jobRunner.replayDoer = doer
 	ct, st := gomcp.NewInMemoryTransports()
 
 	ss, err := s.server.Connect(ctx, st, nil)
@@ -53,8 +53,8 @@ func setupTestSessionWithExecuteRawDialer(t *testing.T, store flow.Store, dialer
 	t.Helper()
 	ctx := context.Background()
 
-	s := NewServer(context.Background(), nil, store, nil)
-	s.deps.rawReplayDialer = dialer
+	s := newServer(context.Background(), nil, store, nil)
+	s.jobRunner.rawReplayDialer = dialer
 	ct, st := gomcp.NewInMemoryTransports()
 
 	ss, err := s.server.Connect(ctx, st, nil)
@@ -1513,7 +1513,7 @@ func setupTestSessionForRegenerate(t *testing.T, ca *cert.CA, issuer *cert.Issue
 	if issuer != nil {
 		opts = append(opts, WithIssuer(issuer))
 	}
-	s := NewServer(ctx, ca, nil, nil, opts...)
+	s := newServer(ctx, ca, nil, nil, opts...)
 	ct, st := gomcp.NewInMemoryTransports()
 
 	ss, err := s.server.Connect(ctx, st, nil)
@@ -1686,7 +1686,7 @@ func TestExecute_RegenerateCA_EphemeralMode(t *testing.T) {
 func TestExecute_RegenerateCA_NilCA(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	s := NewServer(ctx, nil, nil, nil)
+	s := newServer(ctx, nil, nil, nil)
 	ct, st := gomcp.NewInMemoryTransports()
 	ss, err := s.server.Connect(ctx, st, nil)
 	if err != nil {

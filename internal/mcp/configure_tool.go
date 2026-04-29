@@ -405,8 +405,8 @@ func (s *Server) configureUpstreamProxy(input configureInput, result *configureR
 		return fmt.Errorf("upstream_proxy: %w", err)
 	}
 	current := ""
-	if s.deps.manager != nil {
-		current = proxy.RedactProxyURL(s.deps.manager.UpstreamProxy())
+	if s.connector.manager != nil {
+		current = proxy.RedactProxyURL(s.connector.manager.UpstreamProxy())
 	}
 	result.UpstreamProxy = &current
 	return nil
@@ -417,13 +417,13 @@ func (s *Server) configureMergeScope(input configureInput, result *configureResu
 	if input.CaptureScope == nil {
 		return nil
 	}
-	if s.deps.scope == nil {
+	if s.connector.scope == nil {
 		return fmt.Errorf("capture scope is not initialized: proxy may not be running")
 	}
 	if err := s.mergeScope(input.CaptureScope); err != nil {
 		return fmt.Errorf("capture_scope merge: %w", err)
 	}
-	includes, excludes := s.deps.scope.Rules()
+	includes, excludes := s.connector.scope.Rules()
 	result.CaptureScope = &configureScopeResult{
 		IncludeCount: len(includes),
 		ExcludeCount: len(excludes),
@@ -436,7 +436,7 @@ func (s *Server) configureReplaceScope(input configureInput, result *configureRe
 	if input.CaptureScope == nil {
 		return nil
 	}
-	if s.deps.scope == nil {
+	if s.connector.scope == nil {
 		return fmt.Errorf("capture scope is not initialized: proxy may not be running")
 	}
 	if err := validateScopeRules("include", input.CaptureScope.Includes); err != nil {
@@ -447,7 +447,7 @@ func (s *Server) configureReplaceScope(input configureInput, result *configureRe
 	}
 	includes := toScopeRules(input.CaptureScope.Includes)
 	excludes := toScopeRules(input.CaptureScope.Excludes)
-	s.deps.scope.SetRules(includes, excludes)
+	s.connector.scope.SetRules(includes, excludes)
 	result.CaptureScope = &configureScopeResult{
 		IncludeCount: len(includes),
 		ExcludeCount: len(excludes),
@@ -460,12 +460,12 @@ func (s *Server) configureMergePassthrough(input configureInput, result *configu
 	if input.TLSPassthrough == nil {
 		return nil
 	}
-	if s.deps.passthrough == nil {
+	if s.connector.passthrough == nil {
 		return fmt.Errorf("TLS passthrough list is not initialized: proxy may not be running")
 	}
 	s.mergePassthrough(input.TLSPassthrough)
 	result.TLSPassthrough = &configurePassthroughResult{
-		TotalPatterns: s.deps.passthrough.Len(),
+		TotalPatterns: s.connector.passthrough.Len(),
 	}
 	return nil
 }
@@ -475,12 +475,12 @@ func (s *Server) configureReplacePassthrough(input configureInput, result *confi
 	if input.TLSPassthrough == nil {
 		return nil
 	}
-	if s.deps.passthrough == nil {
+	if s.connector.passthrough == nil {
 		return fmt.Errorf("TLS passthrough list is not initialized: proxy may not be running")
 	}
 	s.replacePassthrough(input.TLSPassthrough)
 	result.TLSPassthrough = &configurePassthroughResult{
-		TotalPatterns: s.deps.passthrough.Len(),
+		TotalPatterns: s.connector.passthrough.Len(),
 	}
 	return nil
 }
@@ -490,7 +490,7 @@ func (s *Server) configureMergeInterceptRules(input configureInput, result *conf
 	if input.InterceptRules == nil {
 		return nil
 	}
-	if s.deps.interceptEngine == nil {
+	if s.pipeline.interceptEngine == nil {
 		return fmt.Errorf("intercept engine is not initialized: proxy may not be running")
 	}
 	if err := s.mergeInterceptRules(input.InterceptRules); err != nil {
@@ -505,7 +505,7 @@ func (s *Server) configureReplaceInterceptRules(input configureInput, result *co
 	if input.InterceptRules == nil {
 		return nil
 	}
-	if s.deps.interceptEngine == nil {
+	if s.pipeline.interceptEngine == nil {
 		return fmt.Errorf("intercept engine is not initialized: proxy may not be running")
 	}
 	if err := s.replaceInterceptRules(input.InterceptRules); err != nil {
@@ -520,7 +520,7 @@ func (s *Server) configureInterceptQueue(input configureInput, result *configure
 	if input.InterceptQueue == nil {
 		return nil
 	}
-	if s.deps.interceptQueue == nil {
+	if s.pipeline.interceptQueue == nil {
 		return fmt.Errorf("intercept queue is not initialized: proxy may not be running")
 	}
 	if err := s.applyInterceptQueueConfig(input.InterceptQueue); err != nil {
@@ -535,7 +535,7 @@ func (s *Server) configureMergeAutoTransform(input configureInput, result *confi
 	if input.AutoTransform == nil {
 		return nil
 	}
-	if s.deps.transformPipeline == nil {
+	if s.pipeline.transformPipeline == nil {
 		return fmt.Errorf("transform pipeline is not initialized: proxy may not be running")
 	}
 	if err := s.mergeAutoTransform(input.AutoTransform); err != nil {
@@ -550,7 +550,7 @@ func (s *Server) configureReplaceAutoTransform(input configureInput, result *con
 	if input.AutoTransform == nil {
 		return nil
 	}
-	if s.deps.transformPipeline == nil {
+	if s.pipeline.transformPipeline == nil {
 		return fmt.Errorf("transform pipeline is not initialized: proxy may not be running")
 	}
 	if err := s.replaceAutoTransform(input.AutoTransform); err != nil {
@@ -591,25 +591,25 @@ func (s *Server) configureTLSFingerprint(input configureInput, result *configure
 // since these fields are scalar values, not collections.
 func (s *Server) applyConnectionLimits(input configureInput, result *configureResult) error {
 	if input.MaxConnections != nil {
-		if s.deps.manager == nil {
+		if s.connector.manager == nil {
 			return fmt.Errorf("proxy manager is not initialized: proxy may not be running")
 		}
 		n := *input.MaxConnections
 		if n < minMaxConnections || n > maxMaxConnections {
 			return fmt.Errorf("max_connections must be between %d and %d, got %d", minMaxConnections, maxMaxConnections, n)
 		}
-		s.deps.manager.SetMaxConnections(n)
+		s.connector.manager.SetMaxConnections(n)
 		result.MaxConnections = &n
 	}
 	if input.PeekTimeoutMs != nil {
-		if s.deps.manager == nil {
+		if s.connector.manager == nil {
 			return fmt.Errorf("proxy manager is not initialized: proxy may not be running")
 		}
 		ms := *input.PeekTimeoutMs
 		if ms < minTimeoutMs || ms > maxTimeoutMs {
 			return fmt.Errorf("peek_timeout_ms must be between %d and %d, got %d", minTimeoutMs, maxTimeoutMs, ms)
 		}
-		s.deps.manager.SetPeekTimeout(time.Duration(ms) * time.Millisecond)
+		s.connector.manager.SetPeekTimeout(time.Duration(ms) * time.Millisecond)
 		msVal := int64(ms)
 		result.PeekTimeoutMs = &msVal
 	}
@@ -636,7 +636,7 @@ func (s *Server) mergeScope(cfg *configureCaptureScope) error {
 		return err
 	}
 
-	s.deps.scope.MergeRules(
+	s.connector.scope.MergeRules(
 		toScopeRules(cfg.AddIncludes),
 		toScopeRules(cfg.RemoveIncludes),
 		toScopeRules(cfg.AddExcludes),
@@ -648,22 +648,22 @@ func (s *Server) mergeScope(cfg *configureCaptureScope) error {
 // mergePassthrough applies delta add/remove operations to the passthrough list.
 func (s *Server) mergePassthrough(cfg *configureTLSPassthrough) {
 	for _, p := range cfg.Add {
-		s.deps.passthrough.Add(p)
+		s.connector.passthrough.Add(p)
 	}
 	for _, p := range cfg.Remove {
-		s.deps.passthrough.Remove(p)
+		s.connector.passthrough.Remove(p)
 	}
 }
 
 // replacePassthrough replaces the entire passthrough list with new patterns.
 func (s *Server) replacePassthrough(cfg *configureTLSPassthrough) {
 	// Remove all existing patterns.
-	for _, p := range s.deps.passthrough.List() {
-		s.deps.passthrough.Remove(p)
+	for _, p := range s.connector.passthrough.List() {
+		s.connector.passthrough.Remove(p)
 	}
 	// Add new patterns.
 	for _, p := range cfg.Patterns {
-		s.deps.passthrough.Add(p)
+		s.connector.passthrough.Add(p)
 	}
 }
 
@@ -683,28 +683,28 @@ func (s *Server) mergeInterceptRules(cfg *configureInterceptRules) error {
 	// Process additions first.
 	for _, input := range cfg.Add {
 		r := toInterceptRule(input)
-		if err := s.deps.interceptEngine.AddRule(r); err != nil {
+		if err := s.pipeline.interceptEngine.AddRule(r); err != nil {
 			return err
 		}
 	}
 
 	// Process removals.
 	for _, id := range cfg.Remove {
-		if err := s.deps.interceptEngine.RemoveRule(id); err != nil {
+		if err := s.pipeline.interceptEngine.RemoveRule(id); err != nil {
 			return err
 		}
 	}
 
 	// Process enable.
 	for _, id := range cfg.Enable {
-		if err := s.deps.interceptEngine.EnableRule(id, true); err != nil {
+		if err := s.pipeline.interceptEngine.EnableRule(id, true); err != nil {
 			return err
 		}
 	}
 
 	// Process disable.
 	for _, id := range cfg.Disable {
-		if err := s.deps.interceptEngine.EnableRule(id, false); err != nil {
+		if err := s.pipeline.interceptEngine.EnableRule(id, false); err != nil {
 			return err
 		}
 	}
@@ -722,7 +722,7 @@ func (s *Server) replaceInterceptRules(cfg *configureInterceptRules) error {
 
 // interceptRulesResult returns the current intercept rules state.
 func (s *Server) interceptRulesResult() *configureInterceptResult {
-	rules := s.deps.interceptEngine.Rules()
+	rules := s.pipeline.interceptEngine.Rules()
 	enabled := 0
 	for _, r := range rules {
 		if r.Enabled {
@@ -742,12 +742,12 @@ func (s *Server) applyInterceptQueueConfig(cfg *configureInterceptQueue) error {
 		if ms < 1000 {
 			return fmt.Errorf("timeout_ms must be >= 1000, got %d", ms)
 		}
-		s.deps.interceptQueue.SetTimeout(time.Duration(ms) * time.Millisecond)
+		s.pipeline.interceptQueue.SetTimeout(time.Duration(ms) * time.Millisecond)
 	}
 	if cfg.TimeoutBehavior != "" {
 		switch intercept.TimeoutBehavior(cfg.TimeoutBehavior) {
 		case intercept.TimeoutAutoRelease, intercept.TimeoutAutoDrop:
-			s.deps.interceptQueue.SetTimeoutBehavior(intercept.TimeoutBehavior(cfg.TimeoutBehavior))
+			s.pipeline.interceptQueue.SetTimeoutBehavior(intercept.TimeoutBehavior(cfg.TimeoutBehavior))
 		default:
 			return fmt.Errorf("invalid timeout_behavior %q: must be %q or %q",
 				cfg.TimeoutBehavior, intercept.TimeoutAutoRelease, intercept.TimeoutAutoDrop)
@@ -759,9 +759,9 @@ func (s *Server) applyInterceptQueueConfig(cfg *configureInterceptQueue) error {
 // interceptQueueResult returns the current intercept queue configuration state.
 func (s *Server) interceptQueueResult() *configureInterceptQueueResult {
 	return &configureInterceptQueueResult{
-		TimeoutMs:       s.deps.interceptQueue.Timeout().Milliseconds(),
-		TimeoutBehavior: string(s.deps.interceptQueue.TimeoutBehaviorValue()),
-		QueuedItems:     s.deps.interceptQueue.Len(),
+		TimeoutMs:       s.pipeline.interceptQueue.Timeout().Milliseconds(),
+		TimeoutBehavior: string(s.pipeline.interceptQueue.TimeoutBehaviorValue()),
+		QueuedItems:     s.pipeline.interceptQueue.Len(),
 	}
 }
 
@@ -770,28 +770,28 @@ func (s *Server) mergeAutoTransform(cfg *configureAutoTransform) error {
 	// Process additions first.
 	for _, input := range cfg.Add {
 		r := toTransformRule(input)
-		if err := s.deps.transformPipeline.AddRule(r); err != nil {
+		if err := s.pipeline.transformPipeline.AddRule(r); err != nil {
 			return err
 		}
 	}
 
 	// Process removals.
 	for _, id := range cfg.Remove {
-		if err := s.deps.transformPipeline.RemoveRule(id); err != nil {
+		if err := s.pipeline.transformPipeline.RemoveRule(id); err != nil {
 			return err
 		}
 	}
 
 	// Process enable.
 	for _, id := range cfg.Enable {
-		if err := s.deps.transformPipeline.EnableRule(id, true); err != nil {
+		if err := s.pipeline.transformPipeline.EnableRule(id, true); err != nil {
 			return err
 		}
 	}
 
 	// Process disable.
 	for _, id := range cfg.Disable {
-		if err := s.deps.transformPipeline.EnableRule(id, false); err != nil {
+		if err := s.pipeline.transformPipeline.EnableRule(id, false); err != nil {
 			return err
 		}
 	}
@@ -824,7 +824,7 @@ func (s *Server) configureBudgetLimitsWithOp(input configureInput, result *confi
 	if input.Budget == nil {
 		return nil
 	}
-	if s.deps.budgetManager == nil {
+	if s.misc.budgetManager == nil {
 		return fmt.Errorf("budget manager is not initialized")
 	}
 
@@ -832,7 +832,7 @@ func (s *Server) configureBudgetLimitsWithOp(input configureInput, result *confi
 	// In replace mode, start from zero (omitted fields reset to no limit).
 	var cfg proxy.BudgetConfig
 	if op == "merge" {
-		cfg = s.deps.budgetManager.AgentBudget()
+		cfg = s.misc.budgetManager.AgentBudget()
 	}
 
 	if input.Budget.MaxTotalRequests != nil {
@@ -852,13 +852,13 @@ func (s *Server) configureBudgetLimitsWithOp(input configureInput, result *confi
 		cfg.MaxDuration = d
 	}
 
-	if err := s.deps.budgetManager.SetAgentBudget(cfg); err != nil {
+	if err := s.misc.budgetManager.SetAgentBudget(cfg); err != nil {
 		return fmt.Errorf("budget: %w", err)
 	}
 
 	result.Budget = &configureBudgetResult{
-		Effective:    s.deps.budgetManager.EffectiveBudget(),
-		RequestCount: s.deps.budgetManager.RequestCount(),
+		Effective:    s.misc.budgetManager.EffectiveBudget(),
+		RequestCount: s.misc.budgetManager.RequestCount(),
 	}
 	return nil
 }
@@ -868,13 +868,13 @@ func (s *Server) configureClientCertSetting(input configureInput, result *config
 	if input.ClientCert == nil {
 		return nil
 	}
-	if s.deps.hostTLSRegistry == nil {
+	if s.connector.hostTLSRegistry == nil {
 		return fmt.Errorf("host TLS registry is not initialized")
 	}
 
 	// Empty paths mean "remove the global client certificate".
 	if input.ClientCert.CertPath == "" && input.ClientCert.KeyPath == "" {
-		s.deps.hostTLSRegistry.SetGlobal(nil)
+		s.connector.hostTLSRegistry.SetGlobal(nil)
 		result.ClientCert = &configureClientCertResult{Status: "removed"}
 		return nil
 	}
@@ -892,7 +892,7 @@ func (s *Server) configureClientCertSetting(input configureInput, result *config
 
 // autoTransformResult returns the current auto-transform rules state.
 func (s *Server) autoTransformResult() *configureAutoTransformResult {
-	rulesList := s.deps.transformPipeline.Rules()
+	rulesList := s.pipeline.transformPipeline.Rules()
 	enabled := 0
 	for _, r := range rulesList {
 		if r.Enabled {

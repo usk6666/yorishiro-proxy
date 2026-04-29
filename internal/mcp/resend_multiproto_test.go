@@ -17,8 +17,8 @@ func setupMultiProtoExecSession(t *testing.T, store flow.Store) *gomcp.ClientSes
 	ctx := context.Background()
 
 	ca := newTestCA(t)
-	s := NewServer(ctx, ca, store, nil)
-	s.deps.rawReplayDialer = &testDialer{}
+	s := newServer(ctx, ca, store, nil)
+	s.jobRunner.rawReplayDialer = &testDialer{}
 
 	ct, st := gomcp.NewInMemoryTransports()
 

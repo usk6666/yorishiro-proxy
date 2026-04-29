@@ -15,7 +15,7 @@ func setupTestSessionWithInterceptQueue(t *testing.T, queue *intercept.Queue) *g
 	t.Helper()
 	ctx := context.Background()
 
-	s := NewServer(context.Background(), nil, nil, nil, WithInterceptQueue(queue))
+	s := newServer(context.Background(), nil, nil, nil, WithInterceptQueue(queue))
 	ct, st := gomcp.NewInMemoryTransports()
 
 	ss, err := s.server.Connect(ctx, st, nil)

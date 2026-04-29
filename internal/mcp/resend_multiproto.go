@@ -42,7 +42,7 @@ type resendReplayRawResult struct {
 // It retrieves all send messages from the original flow, establishes a TCP connection
 // to the target, sends the data, and reads back the response.
 func (s *Server) handleResendReplayRaw(ctx context.Context, params resendParams) (*gomcp.CallToolResult, *resendReplayRawResult, error) {
-	if s.deps.store == nil {
+	if s.flowStore.store == nil {
 		return nil, nil, fmt.Errorf("flow store is not initialized")
 	}
 
@@ -50,7 +50,7 @@ func (s *Server) handleResendReplayRaw(ctx context.Context, params resendParams)
 		return nil, nil, fmt.Errorf("flow_id is required for tcp_replay action")
 	}
 
-	fl, err := s.deps.store.GetStream(ctx, params.StreamID)
+	fl, err := s.flowStore.store.GetStream(ctx, params.StreamID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("get flow: %w", err)
 	}
@@ -59,7 +59,7 @@ func (s *Server) handleResendReplayRaw(ctx context.Context, params resendParams)
 		return nil, nil, fmt.Errorf("tcp_replay is only supported for TCP sessions, got protocol %q", fl.Protocol)
 	}
 
-	sendMsgs, err := s.deps.store.GetFlows(ctx, fl.ID, flow.FlowListOptions{Direction: "send"})
+	sendMsgs, err := s.flowStore.store.GetFlows(ctx, fl.ID, flow.FlowListOptions{Direction: "send"})
 	if err != nil {
 		return nil, nil, fmt.Errorf("get send messages: %w", err)
 	}
@@ -138,7 +138,7 @@ func (s *Server) replayAllMessages(ctx context.Context, targetAddr string, useTL
 	defer conn.Close()
 
 	if useTLS {
-		conn, err = upgradeTLS(ctx, conn, targetAddr, s.deps.tlsTransport)
+		conn, err = upgradeTLS(ctx, conn, targetAddr, s.connector.tlsTransport)
 		if err != nil {
 			return 0, nil, start, 0, err
 		}
@@ -191,7 +191,7 @@ func (s *Server) recordReplay(ctx context.Context, targetAddr string, params res
 		Timestamp: start, Duration: duration, Tags: tags,
 		ConnInfo: &flow.ConnectionInfo{ServerAddr: targetAddr},
 	}
-	if err := s.deps.store.SaveStream(ctx, newFl); err != nil {
+	if err := s.flowStore.store.SaveStream(ctx, newFl); err != nil {
 		return nil, fmt.Errorf("save replay_raw session: %w", err)
 	}
 
@@ -199,7 +199,7 @@ func (s *Server) recordReplay(ctx context.Context, targetAddr string, params res
 	for _, msg := range sendMsgs {
 		data := messagePayload(msg)
 		if len(data) > 0 {
-			if err := s.deps.store.SaveFlow(ctx, &flow.Flow{
+			if err := s.flowStore.store.SaveFlow(ctx, &flow.Flow{
 				StreamID: newFl.ID, Sequence: seq, Direction: "send",
 				Timestamp: start, RawBytes: data,
 			}); err != nil {
@@ -210,7 +210,7 @@ func (s *Server) recordReplay(ctx context.Context, targetAddr string, params res
 	}
 
 	if len(respData) > 0 {
-		if err := s.deps.store.SaveFlow(ctx, &flow.Flow{
+		if err := s.flowStore.store.SaveFlow(ctx, &flow.Flow{
 			StreamID: newFl.ID, Sequence: seq, Direction: "receive",
 			Timestamp: start.Add(duration), RawBytes: respData,
 		}); err != nil {
@@ -255,12 +255,12 @@ func (s *Server) handleWebSocketResend(ctx context.Context, fl *flow.Stream, par
 		return nil, nil, fmt.Errorf("message_sequence is required for WebSocket resend")
 	}
 
-	targetMsg, err := findSendMessage(ctx, s.deps.store, fl.ID, *params.MessageSequence)
+	targetMsg, err := findSendMessage(ctx, s.flowStore.store, fl.ID, *params.MessageSequence)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	upgradeMsg, err := findUpgradeRequestMessage(ctx, s.deps.store, fl.ID)
+	upgradeMsg, err := findUpgradeRequestMessage(ctx, s.flowStore.store, fl.ID)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -425,7 +425,7 @@ func (s *Server) establishWebSocketAndSend(ctx context.Context, targetAddr strin
 	defer conn.Close()
 
 	if useTLS {
-		conn, err = upgradeTLS(ctx, conn, targetAddr, s.deps.tlsTransport)
+		conn, err = upgradeTLS(ctx, conn, targetAddr, s.connector.tlsTransport)
 		if err != nil {
 			return nil, err
 		}
@@ -702,7 +702,7 @@ func (s *Server) resolveWebSocketTargetAddr(ctx context.Context, fl *flow.Stream
 		return fl.ConnInfo.ServerAddr, nil
 	}
 
-	sendMsgs, _ := s.deps.store.GetFlows(ctx, fl.ID, flow.FlowListOptions{Direction: "send"})
+	sendMsgs, _ := s.flowStore.store.GetFlows(ctx, fl.ID, flow.FlowListOptions{Direction: "send"})
 	for _, m := range sendMsgs {
 		if m.URL != nil {
 			host := m.URL.Hostname()
@@ -772,13 +772,13 @@ func (s *Server) recordWebSocketResend(ctx context.Context, params resendParams,
 		Protocol: "WebSocket", Scheme: wsScheme, State: "complete",
 		Timestamp: wr.start, Duration: wr.duration, Tags: tags,
 	}
-	if err := s.deps.store.SaveStream(ctx, newFl); err != nil {
+	if err := s.flowStore.store.SaveStream(ctx, newFl); err != nil {
 		return nil, fmt.Errorf("save WebSocket resend session: %w", err)
 	}
 
 	// seq=0: Upgrade request (send).
 	// Use the actual headers and URL from the handshake (after overrides).
-	if err := s.deps.store.SaveFlow(ctx, &flow.Flow{
+	if err := s.flowStore.store.SaveFlow(ctx, &flow.Flow{
 		StreamID: newFl.ID, Sequence: 0, Direction: "send",
 		Timestamp: wr.start, Method: wr.upgradeMethod, URL: wr.upgradeURL,
 		Headers: wr.upgradeHeaders,
@@ -788,7 +788,7 @@ func (s *Server) recordWebSocketResend(ctx context.Context, params resendParams,
 
 	// seq=1: Upgrade response (receive).
 	respHeaders := copyHTTPResponseHeaders(wr.upgradeResp)
-	if err := s.deps.store.SaveFlow(ctx, &flow.Flow{
+	if err := s.flowStore.store.SaveFlow(ctx, &flow.Flow{
 		StreamID: newFl.ID, Sequence: 1, Direction: "receive",
 		Timestamp: wr.start, StatusCode: wr.upgradeResp.StatusCode,
 		Headers: respHeaders,
@@ -799,7 +799,7 @@ func (s *Server) recordWebSocketResend(ctx context.Context, params resendParams,
 	// seq=2: Sent data frame.
 	// Copy metadata to avoid aliasing the original message's map.
 	sendMetadata := copyMetadataMap(targetMsg.Metadata)
-	if err := s.deps.store.SaveFlow(ctx, &flow.Flow{
+	if err := s.flowStore.store.SaveFlow(ctx, &flow.Flow{
 		StreamID: newFl.ID, Sequence: 2, Direction: "send",
 		Timestamp: wr.start, Body: wr.sendBody, Metadata: sendMetadata,
 	}); err != nil {
@@ -813,7 +813,7 @@ func (s *Server) recordWebSocketResend(ctx context.Context, params resendParams,
 			"fin":    "true",
 		}
 		recvBody, recvRawBytes := classifyWebSocketPayload(wr.responsePayload, wr.responseOpcode)
-		if err := s.deps.store.SaveFlow(ctx, &flow.Flow{
+		if err := s.flowStore.store.SaveFlow(ctx, &flow.Flow{
 			StreamID: newFl.ID, Sequence: 3, Direction: "receive",
 			Timestamp: wr.start.Add(wr.duration), Body: recvBody,
 			RawBytes: recvRawBytes, Metadata: recvMetadata,

@@ -114,7 +114,7 @@ func fromInterceptRules(rules []intercept.Rule) []interceptRuleOutput {
 // the safety filter engine. When OverrideBody is nil but other mutations are applied,
 // it fetches the original intercepted body to check the combined request.
 func (s *Server) checkInterceptSafety(params interceptParams) error {
-	if s.deps.safetyEngine == nil {
+	if s.pipeline.safetyEngine == nil {
 		return nil
 	}
 	var body []byte
@@ -122,7 +122,7 @@ func (s *Server) checkInterceptSafety(params interceptParams) error {
 		body = []byte(*params.OverrideBody)
 	} else if params.OverrideURL != "" || len(params.OverrideHeaders) > 0 || len(params.AddHeaders) > 0 || len(params.RemoveHeaders) > 0 {
 		// Fetch the original intercepted request body when mutations are applied.
-		origReq, err := s.deps.interceptQueue.Get(params.InterceptID)
+		origReq, err := s.pipeline.interceptQueue.Get(params.InterceptID)
 		if err == nil {
 			body = origReq.Body
 		}
@@ -137,7 +137,7 @@ func (s *Server) checkInterceptSafety(params interceptParams) error {
 			headers.Add(k, v)
 		}
 	}
-	if v := s.deps.safetyEngine.CheckInput(body, params.OverrideURL, httpHeaderToKeyValues(headers)); v != nil {
+	if v := s.pipeline.safetyEngine.CheckInput(body, params.OverrideURL, httpHeaderToKeyValues(headers)); v != nil {
 		return fmt.Errorf("%s", safetyViolationError(v))
 	}
 	return nil
@@ -145,7 +145,7 @@ func (s *Server) checkInterceptSafety(params interceptParams) error {
 
 // applyInterceptRules validates and sets intercept rules from the input.
 func (s *Server) applyInterceptRules(inputs []interceptRuleInput) error {
-	return applyInterceptRulesHelper(s.deps.interceptEngine, inputs)
+	return applyInterceptRulesHelper(s.pipeline.interceptEngine, inputs)
 }
 
 // applyInterceptRulesHelper validates and sets intercept rules on the given engine.

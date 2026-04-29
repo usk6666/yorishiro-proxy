@@ -147,16 +147,21 @@ type hookState struct {
 
 // hookExecutor provides methods to execute pre_send and post_receive hooks
 // using the macro engine. It is created per resend call or per fuzz iteration batch.
+//
+// It holds a *Server reference because hooks need to read from three components
+// (FlowStore for macro persistence, Connector for target scope, JobRunner for
+// the legacy replayDoer). Passing the parent Server is simpler than threading
+// three component pointers through every call site.
 type hookExecutor struct {
-	d     *deps
+	s     *Server
 	hooks *hooksInput
 	state *hookState
 }
 
 // newHookExecutor creates a new hook executor.
-func newHookExecutor(d *deps, hooks *hooksInput, state *hookState) *hookExecutor {
+func newHookExecutor(s *Server, hooks *hooksInput, state *hookState) *hookExecutor {
 	return &hookExecutor{
-		d:     d,
+		s:     s,
 		hooks: hooks,
 		state: state,
 	}
@@ -312,12 +317,12 @@ func (he *hookExecutor) shouldRunPostReceive(h *hookConfig, statusCode int, resp
 
 // runMacro loads a macro from the DB and runs it with the given vars.
 func (he *hookExecutor) runMacro(ctx context.Context, macroName string, vars map[string]string) (*macro.Result, error) {
-	d := he.d
-	if d.store == nil {
+	s := he.s
+	if s.flowStore.store == nil {
 		return nil, fmt.Errorf("flow store is not initialized")
 	}
 
-	m, cfg, err := loadAndBuildMacroDeps(ctx, d, macroName)
+	m, cfg, err := loadAndBuildMacroDeps(ctx, s, macroName)
 	if err != nil {
 		return nil, err
 	}
@@ -325,13 +330,13 @@ func (he *hookExecutor) runMacro(ctx context.Context, macroName string, vars map
 	// Target scope enforcement: check each step's target URL before running.
 	// This mirrors the same check in handleRunMacro to prevent hooks
 	// from bypassing target scope restrictions via macro execution.
-	if err := checkMacroStepsTargetScopeDeps(ctx, d, cfg.Steps); err != nil {
+	if err := checkMacroStepsTargetScopeDeps(ctx, s, cfg.Steps); err != nil {
 		return nil, err
 	}
 
 	// Create engine with HTTP client and session fetcher.
-	sendFunc := hookMacroSendFunc(d, macroName)
-	fetcher := &storeFlowFetcher{store: d.store}
+	sendFunc := hookMacroSendFunc(s, macroName)
+	fetcher := &storeFlowFetcher{store: s.flowStore.store}
 
 	engine, err := macro.NewEngine(sendFunc, fetcher)
 	if err != nil {
@@ -346,9 +351,11 @@ func (he *hookExecutor) runMacro(ctx context.Context, macroName string, vars map
 	return result, nil
 }
 
-// loadAndBuildMacroDeps loads a macro record from DB using deps directly.
-func loadAndBuildMacroDeps(ctx context.Context, d *deps, macroName string) (*macro.Macro, macroConfig, error) {
-	rec, err := d.store.GetMacro(ctx, macroName)
+// loadAndBuildMacroDeps loads a macro record from DB using the Server's
+// FlowStore component. Despite the legacy "Deps" suffix, this helper now
+// reads through *Server; renaming would touch many sites for no benefit.
+func loadAndBuildMacroDeps(ctx context.Context, s *Server, macroName string) (*macro.Macro, macroConfig, error) {
+	rec, err := s.flowStore.store.GetMacro(ctx, macroName)
 	if err != nil {
 		return nil, macroConfig{}, fmt.Errorf("load macro %q: %w", macroName, err)
 	}
@@ -367,25 +374,26 @@ func loadAndBuildMacroDeps(ctx context.Context, d *deps, macroName string) (*mac
 }
 
 // checkMacroStepsTargetScopeDeps checks each macro step's target URL against
-// the target scope rules using deps directly. This is the deps-based variant
-// of Server.checkMacroStepsTargetScope.
-func checkMacroStepsTargetScopeDeps(ctx context.Context, d *deps, steps []macroStepInput) error {
-	if d.targetScope == nil || !d.targetScope.HasRules() {
+// the target scope rules using the Server's Connector + FlowStore components.
+// Despite the legacy "Deps" suffix, this helper now reads through *Server;
+// renaming would touch many sites for no benefit.
+func checkMacroStepsTargetScopeDeps(ctx context.Context, s *Server, steps []macroStepInput) error {
+	if s.connector.targetScope == nil || !s.connector.targetScope.HasRules() {
 		return nil
 	}
 	for _, step := range steps {
 		if step.OverrideURL != "" {
 			u, parseErr := url.Parse(step.OverrideURL)
 			if parseErr == nil && u.Host != "" {
-				if scopeErr := checkTargetScopeURLHelper(d.targetScope, u); scopeErr != nil {
+				if scopeErr := checkTargetScopeURLHelper(s.connector.targetScope, u); scopeErr != nil {
 					return fmt.Errorf("macro step %q: %w", step.ID, scopeErr)
 				}
 			}
 		}
-		sendMsgs, msgErr := d.store.GetFlows(ctx, step.StreamID, flow.FlowListOptions{Direction: "send"})
+		sendMsgs, msgErr := s.flowStore.store.GetFlows(ctx, step.StreamID, flow.FlowListOptions{Direction: "send"})
 		if msgErr == nil && len(sendMsgs) > 0 && sendMsgs[0].URL != nil {
 			if step.OverrideURL == "" {
-				if scopeErr := checkTargetScopeURLHelper(d.targetScope, sendMsgs[0].URL); scopeErr != nil {
+				if scopeErr := checkTargetScopeURLHelper(s.connector.targetScope, sendMsgs[0].URL); scopeErr != nil {
 					return fmt.Errorf("macro step %q: %w", step.ID, scopeErr)
 				}
 			}
@@ -394,13 +402,13 @@ func checkMacroStepsTargetScopeDeps(ctx context.Context, d *deps, steps []macroS
 	return nil
 }
 
-// hookMacroSendFunc creates a macro.SendFunc that uses deps directly.
-// This is used by hookExecutor.runMacro to avoid depending on *Server.
-func hookMacroSendFunc(d *deps, macroName string) macro.SendFunc {
+// hookMacroSendFunc creates a macro.SendFunc that reads from the Server's
+// JobRunner (replayDoer), Connector (targetScope), and FlowStore (store).
+func hookMacroSendFunc(s *Server, macroName string) macro.SendFunc {
 	return func(ctx context.Context, req *macro.SendRequest) (*macro.SendResponse, error) {
 		var client httpDoer
-		if d.replayDoer != nil {
-			client = d.replayDoer
+		if s.jobRunner.replayDoer != nil {
+			client = s.jobRunner.replayDoer
 		} else {
 			dialer := &net.Dialer{
 				Timeout: defaultReplayTimeout,
@@ -440,7 +448,7 @@ func hookMacroSendFunc(d *deps, macroName string) macro.SendFunc {
 		// Target scope enforcement after template expansion: the pre-run check
 		// validates static URLs, but templates like §target_url§ produce the
 		// final URL only at send time. Check httpReq.URL to close the TOCTOU gap.
-		if err := checkTargetScopeURLHelper(d.targetScope, httpReq.URL); err != nil {
+		if err := checkTargetScopeURLHelper(s.connector.targetScope, httpReq.URL); err != nil {
 			return nil, fmt.Errorf("hook macro step target scope check: %w", err)
 		}
 
@@ -458,8 +466,8 @@ func hookMacroSendFunc(d *deps, macroName string) macro.SendFunc {
 		duration := time.Since(start)
 
 		// Record the macro step as a flow so it appears in session history.
-		if d.store != nil {
-			recordMacroStepSessionDeps(ctx, d, macroName, req, resp, respBody, httpReq, start, duration)
+		if s.flowStore.store != nil {
+			recordMacroStepSessionDeps(ctx, s, macroName, req, resp, respBody, httpReq, start, duration)
 		}
 
 		return &macro.SendResponse{
@@ -472,10 +480,10 @@ func hookMacroSendFunc(d *deps, macroName string) macro.SendFunc {
 }
 
 // recordMacroStepSessionDeps saves a macro step's HTTP exchange as a flow.
-// This is a deps-based version used by hookMacroSendFunc.
+// Reads through *Server's FlowStore component.
 func recordMacroStepSessionDeps(
 	ctx context.Context,
-	d *deps,
+	s *Server,
 	macroName string,
 	req *macro.SendRequest,
 	resp *http.Response,
@@ -501,7 +509,7 @@ func recordMacroStepSessionDeps(
 		Duration:  duration,
 		Tags:      tags,
 	}
-	if err := d.store.SaveStream(ctx, fl); err != nil {
+	if err := s.flowStore.store.SaveStream(ctx, fl); err != nil {
 		slog.WarnContext(ctx, "failed to save macro step session",
 			"macro", macroName, "step", req.StepID, "error", err)
 		return
@@ -524,7 +532,7 @@ func recordMacroStepSessionDeps(
 		Headers:   recordedHeaders,
 		Body:      req.Body,
 	}
-	if err := d.store.SaveFlow(ctx, sendMsg); err != nil {
+	if err := s.flowStore.store.SaveFlow(ctx, sendMsg); err != nil {
 		slog.WarnContext(ctx, "failed to save macro step send message",
 			"macro", macroName, "step", req.StepID, "error", err)
 		return
@@ -544,7 +552,7 @@ func recordMacroStepSessionDeps(
 		Headers:    respHeaders,
 		Body:       respBody,
 	}
-	if err := d.store.SaveFlow(ctx, recvMsg); err != nil {
+	if err := s.flowStore.store.SaveFlow(ctx, recvMsg); err != nil {
 		slog.WarnContext(ctx, "failed to save macro step receive message",
 			"macro", macroName, "step", req.StepID, "error", err)
 	}

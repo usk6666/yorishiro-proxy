@@ -19,7 +19,7 @@ func setupSecurityBudgetTestSession(t *testing.T, bm *proxy.BudgetManager) *gomc
 		opts = append(opts, WithBudgetManager(bm))
 	}
 
-	s := NewServer(ctx, nil, nil, nil, opts...)
+	s := newServer(ctx, nil, nil, nil, opts...)
 	ct, st := gomcp.NewInMemoryTransports()
 
 	ss, err := s.server.Connect(ctx, st, nil)

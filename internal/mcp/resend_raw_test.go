@@ -532,8 +532,8 @@ func TestExecute_ResendRaw_OverrideRawBase64_NoOriginalRawBytes(t *testing.T) {
 	overrideB64 := base64.StdEncoding.EncodeToString(rawBuf.Bytes())
 
 	// Set up MCP server with a testDialer (no TLS).
-	s := NewServer(ctx, nil, store, nil)
-	s.deps.rawReplayDialer = &testDialer{}
+	s := newServer(ctx, nil, store, nil)
+	s.jobRunner.rawReplayDialer = &testDialer{}
 
 	ct, st := gomcp.NewInMemoryTransports()
 	ss, err := s.server.Connect(ctx, st, nil)
@@ -1171,9 +1171,9 @@ func setupTestSessionWithRawDialerAndMacro(t *testing.T, store flow.Store, diale
 	t.Helper()
 	ctx := context.Background()
 
-	s := NewServer(context.Background(), nil, store, nil)
-	s.deps.rawReplayDialer = dialer
-	s.deps.replayDoer = newPermissiveClient()
+	s := newServer(context.Background(), nil, store, nil)
+	s.jobRunner.rawReplayDialer = dialer
+	s.jobRunner.replayDoer = newPermissiveClient()
 	ct, st := gomcp.NewInMemoryTransports()
 
 	ss, err := s.server.Connect(ctx, st, nil)

@@ -13,7 +13,7 @@ import (
 )
 
 func TestResendUpstreamRouter_DefaultRouter(t *testing.T) {
-	s := &Server{deps: &deps{}}
+	s := mkServerFromLegacyDeps(legacyDeps{})
 
 	router := s.resendUpstreamRouter(resendParams{})
 	ur, ok := router.(*protohttp.UpstreamRouter)
@@ -39,7 +39,7 @@ func TestResendUpstreamRouter_DefaultRouter(t *testing.T) {
 
 func TestResendUpstreamRouter_TLSTransportPassthrough(t *testing.T) {
 	mock := &mockTLSTransport{}
-	s := &Server{deps: &deps{tlsTransport: mock}}
+	s := mkServerFromLegacyDeps(legacyDeps{tlsTransport: mock})
 
 	router := s.resendUpstreamRouter(resendParams{})
 	ur, ok := router.(*protohttp.UpstreamRouter)
@@ -53,7 +53,7 @@ func TestResendUpstreamRouter_TLSTransportPassthrough(t *testing.T) {
 
 func TestResendUpstreamRouter_ReplayRouterOverride(t *testing.T) {
 	mock := &mockResendRouter{}
-	s := &Server{deps: &deps{replayRouter: mock}}
+	s := mkServerFromLegacyDeps(legacyDeps{replayRouter: mock})
 
 	router := s.resendUpstreamRouter(resendParams{})
 	if router != mock {
@@ -74,7 +74,7 @@ func (m *mockTLSTransport) TLSConnect(_ context.Context, conn net.Conn, _ string
 }
 
 func TestBuildRawRequest_ContentLengthRecalculation(t *testing.T) {
-	s := &Server{deps: &deps{}}
+	s := mkServerFromLegacyDeps(legacyDeps{})
 	u, _ := url.Parse("http://example.com/path")
 
 	tests := []struct {

@@ -14,7 +14,7 @@ func setupTestSessionWithInterceptAll(t *testing.T, engine *intercept.Engine, qu
 	t.Helper()
 	ctx := context.Background()
 
-	s := NewServer(context.Background(), nil, nil, nil,
+	s := newServer(context.Background(), nil, nil, nil,
 		WithInterceptEngine(engine),
 		WithInterceptQueue(queue),
 	)

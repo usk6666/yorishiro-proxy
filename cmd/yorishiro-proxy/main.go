@@ -290,14 +290,23 @@ func runWithFlags(ctx context.Context, fs *flag.FlagSet, args []string) error {
 		cfg.MCPHTTPAddr = ""
 	}
 
-	opts, err := buildMCPOptions(cfg, proxyCfg, store, issuer, passthrough, scope,
-		interceptEngine, interceptQueue, pipeline, proto, targetScope, rateLimiter,
+	mcpComponents, opts, err := buildMCPComponents(ctx, cfg, proxyCfg, ca, issuer, store, manager,
+		passthrough, scope, interceptEngine, interceptQueue, pipeline, proto, targetScope, rateLimiter,
 		safetyEngine, targetScopePolicySource, logger)
 	if err != nil {
 		return err
 	}
 
-	mcpServer := mcp.NewServer(ctx, ca, store, manager, opts...)
+	mcpServer := mcp.NewServer(
+		mcpComponents.misc,
+		mcpComponents.pipeline,
+		mcpComponents.connector,
+		mcpComponents.jobRunner,
+		mcpComponents.flowStore,
+		mcpComponents.macroEngine,
+		mcpComponents.pluginEngine,
+		opts...,
+	)
 
 	logger.Info("starting MCP server", "http_mcp_addr", cfg.MCPHTTPAddr, "stdio_mcp", stdioMCP)
 
@@ -770,12 +779,31 @@ func loadCodecPlugins(proxyCfg *config.ProxyConfig, logger *slog.Logger) error {
 	return nil
 }
 
-// buildMCPOptions assembles the MCP server option slice from all components.
-func buildMCPOptions(
+// mcpComponents groups the seven MCP component pointers built by
+// buildMCPComponents so the call site can pass them to mcp.NewServer in one
+// go without a long argument list at the assembly point.
+type mcpComponents struct {
+	misc         *mcp.Misc
+	pipeline     *mcp.Pipeline
+	connector    *mcp.Connector
+	jobRunner    *mcp.JobRunner
+	flowStore    *mcp.FlowStore
+	macroEngine  *mcp.MacroEngine
+	pluginEngine *mcp.PluginEngine
+}
+
+// buildMCPComponents assembles the seven MCP server components plus the
+// remaining ServerOption slice (middleware / UI dir / version) from the
+// initialized infrastructure. Replaces the previous buildMCPOptions, which
+// chained ~28 mcp.With* builder calls into a single deps bag.
+func buildMCPComponents(
+	ctx context.Context,
 	cfg *config.Config,
 	proxyCfg *config.ProxyConfig,
-	store *flow.SQLiteStore,
+	ca *cert.CA,
 	issuer *cert.Issuer,
+	store *flow.SQLiteStore,
+	manager *proxy.Manager,
 	passthrough *proxy.PassthroughList,
 	scope *proxy.CaptureScope,
 	interceptEngine *intercept.Engine,
@@ -787,71 +815,85 @@ func buildMCPOptions(
 	safetyEngine *safety.Engine,
 	targetScopePolicySource string,
 	logger *slog.Logger,
-) ([]mcp.ServerOption, error) {
-	opts := []mcp.ServerOption{
-		mcp.WithVersion(version),
-		mcp.WithDBPath(cfg.DBPath),
-		mcp.WithPassthroughList(passthrough),
-		mcp.WithCaptureScope(scope),
-		mcp.WithInterceptEngine(interceptEngine),
-		mcp.WithInterceptQueue(interceptQueue),
-		mcp.WithTransformPipeline(pipeline),
-		mcp.WithFuzzRunner(proto.fuzzRunner),
-		mcp.WithFuzzStore(store),
-		mcp.WithIssuer(issuer),
-		mcp.WithTCPHandler(proto.tcpHandler),
-		mcp.WithDetector(proto.detector),
-		mcp.WithUpstreamProxySetter(proto.httpHandler),
-		mcp.WithUpstreamProxySetter(proto.http2Handler),
-		mcp.WithTargetScopeSetter(proto.httpHandler),
-		mcp.WithTargetScopeSetter(proto.http2Handler),
-		mcp.WithTLSFingerprintSetter(proto.httpHandler),
-		mcp.WithTLSFingerprintSetter(proto.http2Handler),
-		mcp.WithSOCKS5Handler(proto.socks5Adapter),
-		mcp.WithRateLimiter(rateLimiter),
-		mcp.WithRateLimiterSetter(proto.httpHandler),
-		mcp.WithRateLimiterSetter(proto.http2Handler),
-		mcp.WithRateLimiterSetter(proto.socks5Handler),
-		mcp.WithSafetyEngineSetter(proto.httpHandler),
-		mcp.WithSafetyEngineSetter(proto.http2Handler),
-	}
+) (*mcpComponents, []mcp.ServerOption, error) {
+	// Connector setter slices wire runtime config changes (upstream proxy,
+	// target scope, TLS fingerprint, rate limiter, request timeout) through
+	// to every protocol handler that supports them.
+	upstreamProxySetters := mcp.UpstreamProxySetters(proto.httpHandler, proto.http2Handler)
+	targetScopeSetters := mcp.TargetScopeSetters(proto.httpHandler, proto.http2Handler)
+	tlsFingerprintSetters := mcp.TLSFingerprintSetters(proto.httpHandler, proto.http2Handler)
+	rateLimiterSetters := mcp.RateLimiterSetters(proto.httpHandler, proto.http2Handler, proto.socks5Handler)
+	safetyEngineSetters := mcp.SafetyEngineSetters(proto.httpHandler, proto.http2Handler)
 
-	if proto.tlsTransport != nil {
-		opts = append(opts, mcp.WithTLSTransport(proto.tlsTransport))
-	}
-	if proto.hostTLSRegistry != nil {
-		opts = append(opts, mcp.WithHostTLSRegistry(proto.hostTLSRegistry))
+	mc := &mcpComponents{
+		misc: mcp.NewMisc(
+			ctx,
+			ca,
+			issuer,
+			cfg.DBPath,
+			rateLimiter,
+			nil, // budget manager — defaulted inside NewServer.
+		),
+		pipeline: mcp.NewPipeline(
+			interceptEngine,
+			interceptQueue,
+			pipeline,
+			safetyEngine,
+			safetyEngineSetters,
+		),
+		connector: mcp.NewConnector(
+			manager,
+			passthrough,
+			scope,
+			targetScope,
+			proto.hostTLSRegistry,
+			proto.tlsTransport,
+			proto.socks5Adapter,
+			proto.tcpHandler,
+			proto.detector,
+			proxyCfg,
+			targetScopeSetters,
+			tlsFingerprintSetters,
+			upstreamProxySetters,
+			nil, // request timeout setters — none registered today.
+			rateLimiterSetters,
+		),
+		jobRunner: mcp.NewJobRunner(
+			proto.fuzzRunner,
+			store,
+			nil, // legacy replayDoer, not pre-populated (set in tests).
+			nil, // resend router, not pre-populated.
+			nil, // raw replay dialer, not pre-populated.
+		),
+		flowStore:    mcp.NewFlowStore(store),
+		macroEngine:  mcp.NewMacroEngine(),
+		pluginEngine: mcp.NewPluginEngine(proto.pluginEngine),
 	}
 
 	if proxyCfg != nil {
-		opts = append(opts, mcp.WithProxyDefaults(proxyCfg))
 		logger.Info("loaded proxy config file defaults")
 	}
-	if proto.pluginEngine != nil {
-		opts = append(opts, mcp.WithPluginEngine(proto.pluginEngine))
-	}
 	if targetScope != nil {
-		opts = append(opts, mcp.WithTargetScope(targetScope))
 		allows, denies := targetScope.PolicyRules()
 		logger.Info("target scope policy loaded",
 			"allows", len(allows),
 			"denies", len(denies),
 			"source", targetScopePolicySource)
 	}
-	if safetyEngine != nil {
-		opts = append(opts, mcp.WithSafetyEngine(safetyEngine))
+
+	opts := []mcp.ServerOption{
+		mcp.WithVersion(version),
 	}
 	if cfg.UIDir != "" {
 		opts = append(opts, mcp.WithUIDir(cfg.UIDir))
 	}
-
 	// Set up Bearer token authentication middleware for HTTP transport.
 	// This is always configured when HTTP MCP is enabled (MCPHTTPAddr != "").
 	// The WebUI URL is logged from startServers once the actual port is known.
 	if cfg.MCPHTTPAddr != "" {
 		token, err := resolveHTTPToken(cfg.MCPHTTPToken, logger)
 		if err != nil {
-			return nil, fmt.Errorf("MCP HTTP token: %w", err)
+			return nil, nil, fmt.Errorf("MCP HTTP token: %w", err)
 		}
 		proto.webUIToken = token
 		opts = append(opts, mcp.WithMiddleware(func(next http.Handler) http.Handler {
@@ -859,7 +901,7 @@ func buildMCPOptions(
 		}))
 	}
 
-	return opts, nil
+	return mc, opts, nil
 }
 
 // startServers launches the MCP HTTP and optional stdio servers using an errgroup.

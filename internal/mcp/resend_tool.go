@@ -314,7 +314,7 @@ func (s *Server) handleResendAction(ctx context.Context, params resendParams) (*
 // and send message, and prepares the method/URL/body/headers for the resend.
 // If the flow is WebSocket, it delegates to handleWebSocketResend and returns the result.
 func (s *Server) validateResendParams(ctx context.Context, params *resendParams) (*resendPrepared, *gomcp.CallToolResult, any, error) {
-	if s.deps.store == nil {
+	if s.flowStore.store == nil {
 		return nil, nil, nil, fmt.Errorf("flow store is not initialized")
 	}
 	if params.StreamID == "" {
@@ -332,7 +332,7 @@ func (s *Server) validateResendParams(ctx context.Context, params *resendParams)
 		return nil, nil, nil, fmt.Errorf("invalid hooks: %w", err)
 	}
 
-	fl, err := s.deps.store.GetStream(ctx, params.StreamID)
+	fl, err := s.flowStore.store.GetStream(ctx, params.StreamID)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("get flow: %w", err)
 	}
@@ -390,7 +390,7 @@ func (s *Server) executePreSendHook(ctx context.Context, params *resendParams) (
 	var kvStore map[string]string
 	if params.Hooks != nil && params.Hooks.PreSend != nil {
 		state := &hookState{}
-		executor := newHookExecutor(s.deps, params.Hooks, state)
+		executor := newHookExecutor(s, params.Hooks, state)
 		var err error
 		kvStore, err = executor.executePreSend(ctx)
 		if err != nil {
@@ -410,7 +410,7 @@ func (s *Server) executePreSendHook(ctx context.Context, params *resendParams) (
 // constraints, and builds the request body. For gRPC flows, the body is
 // reconstructed from data frame messages (sequence 1+).
 func (s *Server) loadResendSendData(ctx context.Context, fl *flow.Stream, params resendParams) (*flow.Flow, []byte, error) {
-	sendMsgs, err := s.deps.store.GetFlows(ctx, fl.ID, flow.FlowListOptions{Direction: "send"})
+	sendMsgs, err := s.flowStore.store.GetFlows(ctx, fl.ID, flow.FlowListOptions{Direction: "send"})
 	if err != nil {
 		return nil, nil, fmt.Errorf("get send messages: %w", err)
 	}
@@ -584,7 +584,7 @@ func (s *Server) executeResend(ctx context.Context, prep *resendPrepared, params
 
 	if params.Hooks != nil && params.Hooks.PostReceive != nil {
 		state := &hookState{}
-		executor := newHookExecutor(s.deps, params.Hooks, state)
+		executor := newHookExecutor(s, params.Hooks, state)
 		if err := executor.executePostReceive(ctx, resp.StatusCode, respBody, prep.kvStore); err != nil {
 			return nil, nil, err
 		}
@@ -683,7 +683,7 @@ func (s *Server) recordResendFlowRaw(ctx context.Context, prep *resendPrepared, 
 		Protocol: prep.flow.Protocol, Scheme: prep.flow.Scheme,
 		Timestamp: start, Duration: duration, Tags: tags,
 	}
-	if err := s.deps.store.SaveStream(ctx, newFl); err != nil {
+	if err := s.flowStore.store.SaveStream(ctx, newFl); err != nil {
 		return fmt.Errorf("save resend flow: %w", err)
 	}
 
@@ -695,7 +695,7 @@ func (s *Server) recordResendFlowRaw(ctx context.Context, prep *resendPrepared, 
 		Timestamp: start, Method: prep.method, URL: prep.url,
 		Headers: rawHeadersToMultiMap(rawReq.Headers), Body: prep.body,
 	}
-	if err := s.deps.store.SaveFlow(ctx, newSendMsg); err != nil {
+	if err := s.flowStore.store.SaveFlow(ctx, newSendMsg); err != nil {
 		return fmt.Errorf("save resend send message: %w", err)
 	}
 
@@ -704,7 +704,7 @@ func (s *Server) recordResendFlowRaw(ctx context.Context, prep *resendPrepared, 
 		Timestamp: start.Add(duration), StatusCode: resp.StatusCode,
 		Headers: rawHeadersToMultiMap(resp.Headers), Body: respBody,
 	}
-	if err := s.deps.store.SaveFlow(ctx, newRecvMsg); err != nil {
+	if err := s.flowStore.store.SaveFlow(ctx, newRecvMsg); err != nil {
 		return fmt.Errorf("save resend receive message: %w", err)
 	}
 
@@ -761,7 +761,7 @@ func (s *Server) recordResendGRPCTrailers(ctx context.Context, prep *resendPrepa
 		Headers:    rawHeadersToMultiMap(trailerHeaders),
 		Metadata:   trailerMeta,
 	}
-	return s.deps.store.SaveFlow(ctx, trailerMsg)
+	return s.flowStore.store.SaveFlow(ctx, trailerMsg)
 }
 
 // isGRPCFlow reports whether the protocol string indicates a gRPC flow,
@@ -926,14 +926,14 @@ type resendRouter interface {
 // diagnostic operation and connection reuse across resends is not needed (YAGNI).
 // AllowH2 is true so that the upstream can negotiate h2 when required (e.g. gRPC).
 func (s *Server) resendUpstreamRouter(_ resendParams) resendRouter {
-	if s.deps.replayRouter != nil {
-		return s.deps.replayRouter
+	if s.jobRunner.replayRouter != nil {
+		return s.jobRunner.replayRouter
 	}
 	pool := &httputil.ConnPool{
 		// Use the user's configured TLS transport as-is (including uTLS fingerprint
 		// profiles). AllowH2 enables ALPN negotiation for both http/1.1 and h2,
 		// allowing gRPC flows to be resent to h2-only upstreams.
-		TLSTransport: s.deps.tlsTransport,
+		TLSTransport: s.connector.tlsTransport,
 		AllowH2:      true,
 	}
 	return &protohttp.UpstreamRouter{
@@ -1010,7 +1010,7 @@ func (s *Server) handleResendActionRaw(ctx context.Context, params resendParams)
 	// Execute post-receive hook if configured.
 	if params.Hooks != nil && params.Hooks.PostReceive != nil {
 		state := &hookState{}
-		executor := newHookExecutor(s.deps, params.Hooks, state)
+		executor := newHookExecutor(s, params.Hooks, state)
 		// Raw mode does not have a structured status code; pass 0.
 		if err := executor.executePostReceive(ctx, 0, respData, kvStore); err != nil {
 			return nil, nil, err
@@ -1040,7 +1040,7 @@ func (s *Server) executeRawPreSendHook(ctx context.Context, params *resendParams
 	}
 
 	state := &hookState{}
-	executor := newHookExecutor(s.deps, params.Hooks, state)
+	executor := newHookExecutor(s, params.Hooks, state)
 	kvStore, err := executor.executePreSend(ctx)
 	if err != nil {
 		return nil, err
@@ -1095,19 +1095,19 @@ func (s *Server) sendAndRecordRaw(ctx context.Context, fl *flow.Stream, params r
 // loadRawResendFlow validates parameters, loads the flow and its first send message,
 // and checks the target scope for the URL.
 func (s *Server) loadRawResendFlow(ctx context.Context, params resendParams) (*flow.Stream, *flow.Flow, error) {
-	if s.deps.store == nil {
+	if s.flowStore.store == nil {
 		return nil, nil, fmt.Errorf("flow store is not initialized")
 	}
 	if params.StreamID == "" {
 		return nil, nil, fmt.Errorf("flow_id is required for resend_raw action")
 	}
 
-	fl, err := s.deps.store.GetStream(ctx, params.StreamID)
+	fl, err := s.flowStore.store.GetStream(ctx, params.StreamID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("get flow: %w", err)
 	}
 
-	sendMsgs, err := s.deps.store.GetFlows(ctx, fl.ID, flow.FlowListOptions{Direction: "send"})
+	sendMsgs, err := s.flowStore.store.GetFlows(ctx, fl.ID, flow.FlowListOptions{Direction: "send"})
 	if err != nil {
 		return nil, nil, fmt.Errorf("get send messages: %w", err)
 	}
@@ -1194,7 +1194,7 @@ func (s *Server) buildAndSendRaw(ctx context.Context, fl *flow.Stream, params re
 	defer conn.Close()
 
 	if useTLS {
-		conn, err = upgradeTLS(ctx, conn, targetAddr, s.deps.tlsTransport)
+		conn, err = upgradeTLS(ctx, conn, targetAddr, s.connector.tlsTransport)
 		if err != nil {
 			return nil, start, 0, err
 		}
@@ -1294,18 +1294,18 @@ func (s *Server) recordRawResend(ctx context.Context, fl *flow.Stream, params re
 		Protocol: fl.Protocol, Scheme: fl.Scheme,
 		Timestamp: start, Duration: duration, Tags: tags,
 	}
-	if err := s.deps.store.SaveStream(ctx, newFl); err != nil {
+	if err := s.flowStore.store.SaveStream(ctx, newFl); err != nil {
 		return "", fmt.Errorf("save resend_raw flow: %w", err)
 	}
 
-	if err := s.deps.store.SaveFlow(ctx, &flow.Flow{
+	if err := s.flowStore.store.SaveFlow(ctx, &flow.Flow{
 		StreamID: newFl.ID, Sequence: 0, Direction: "send",
 		Timestamp: start, RawBytes: rawBytes,
 	}); err != nil {
 		return "", fmt.Errorf("save resend_raw send message: %w", err)
 	}
 
-	if err := s.deps.store.SaveFlow(ctx, &flow.Flow{
+	if err := s.flowStore.store.SaveFlow(ctx, &flow.Flow{
 		StreamID: newFl.ID, Sequence: 1, Direction: "receive",
 		Timestamp: start.Add(duration), RawBytes: respData,
 	}); err != nil {

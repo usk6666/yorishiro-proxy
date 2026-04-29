@@ -954,7 +954,7 @@ func TestExecutePostReceive_KVStoreMerge(t *testing.T) {
 	})
 
 	// Create the hook executor with post_receive hook that has its own vars.
-	s := NewServer(context.Background(), nil, store, nil)
+	s := newServer(context.Background(), nil, store, nil)
 	hooks := &hooksInput{
 		PostReceive: &hookConfig{
 			Macro:       "logout-macro",
@@ -963,7 +963,7 @@ func TestExecutePostReceive_KVStoreMerge(t *testing.T) {
 		},
 	}
 	state := &hookState{}
-	executor := newHookExecutor(s.deps, hooks, state)
+	executor := newHookExecutor(s, hooks, state)
 
 	// Call executePostReceive with KV Store from pre_send that has the same key.
 	// pre_send KV Store should take precedence over hook config vars.
@@ -1013,7 +1013,7 @@ func TestExecutePostReceive_NilKVStore(t *testing.T) {
 		},
 	})
 
-	s := NewServer(context.Background(), nil, store, nil)
+	s := newServer(context.Background(), nil, store, nil)
 	hooks := &hooksInput{
 		PostReceive: &hookConfig{
 			Macro:       "cleanup-macro",
@@ -1022,7 +1022,7 @@ func TestExecutePostReceive_NilKVStore(t *testing.T) {
 		},
 	}
 	state := &hookState{}
-	executor := newHookExecutor(s.deps, hooks, state)
+	executor := newHookExecutor(s, hooks, state)
 
 	// Call with nil kvStore — should not panic or error.
 	err := executor.executePostReceive(ctx, 200, []byte("ok"), nil)
@@ -1070,7 +1070,7 @@ func TestExecutePostReceive_EmptyKVStore(t *testing.T) {
 		},
 	})
 
-	s := NewServer(context.Background(), nil, store, nil)
+	s := newServer(context.Background(), nil, store, nil)
 	hooks := &hooksInput{
 		PostReceive: &hookConfig{
 			Macro:       "cleanup-macro-2",
@@ -1079,7 +1079,7 @@ func TestExecutePostReceive_EmptyKVStore(t *testing.T) {
 		},
 	}
 	state := &hookState{}
-	executor := newHookExecutor(s.deps, hooks, state)
+	executor := newHookExecutor(s, hooks, state)
 
 	// Call with empty kvStore — should not modify behavior.
 	err := executor.executePostReceive(ctx, 200, []byte("ok"), map[string]string{})

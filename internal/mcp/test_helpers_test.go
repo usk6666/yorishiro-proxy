@@ -62,7 +62,7 @@ func setupTestSessionWithStore(t *testing.T, ca *cert.CA, store flow.Store) *gom
 	t.Helper()
 	ctx := context.Background()
 
-	s := NewServer(context.Background(), ca, store, nil)
+	s := newServer(context.Background(), ca, store, nil)
 	ct, st := gomcp.NewInMemoryTransports()
 
 	ss, err := s.server.Connect(ctx, st, nil)
@@ -124,7 +124,7 @@ func setupTestSessionWithManager(t *testing.T, manager *proxy.Manager) *gomcp.Cl
 	t.Helper()
 	ctx := context.Background()
 
-	s := NewServer(context.Background(), nil, nil, manager)
+	s := newServer(context.Background(), nil, nil, manager)
 	ct, st := gomcp.NewInMemoryTransports()
 
 	ss, err := s.server.Connect(ctx, st, nil)

@@ -83,7 +83,7 @@ func (s *Server) buildAndSendRawH2(ctx context.Context, fl *flow.Stream, params 
 		useTLS = *params.UseTLS
 	}
 	if useTLS {
-		conn, err = upgradeTLSH2(ctx, conn, targetAddr, s.deps.tlsTransport)
+		conn, err = upgradeTLSH2(ctx, conn, targetAddr, s.connector.tlsTransport)
 		if err != nil {
 			return nil, start, 0, err
 		}

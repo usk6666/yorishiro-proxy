@@ -399,7 +399,7 @@ func extractFlowSummary(msgs []*flow.Flow) (method, urlStr string, statusCode in
 
 // handleQueryFlows returns a paginated list of flows with message summary data.
 func (s *Server) handleQueryFlows(ctx context.Context, input queryInput) (*gomcp.CallToolResult, *queryFlowsResult, error) {
-	if s.deps.store == nil {
+	if s.flowStore.store == nil {
 		return nil, nil, fmt.Errorf("flow store is not initialized")
 	}
 
@@ -409,12 +409,12 @@ func (s *Server) handleQueryFlows(ctx context.Context, input queryInput) (*gomcp
 
 	opts := buildFlowListOptions(input)
 
-	flowList, err := s.deps.store.ListStreams(ctx, opts)
+	flowList, err := s.flowStore.store.ListStreams(ctx, opts)
 	if err != nil {
 		return nil, nil, fmt.Errorf("list flows: %w", err)
 	}
 
-	total, err := s.deps.store.CountStreams(ctx, opts)
+	total, err := s.flowStore.store.CountStreams(ctx, opts)
 	if err != nil {
 		return nil, nil, fmt.Errorf("count flows: %w", err)
 	}
@@ -422,7 +422,7 @@ func (s *Server) handleQueryFlows(ctx context.Context, input queryInput) (*gomcp
 	entries := make([]queryFlowsEntry, 0, len(flowList))
 	for _, fl := range flowList {
 		// Fetch messages for method/url/status_code/message_count via JOIN data.
-		msgs, err := s.deps.store.GetFlows(ctx, fl.ID, flow.FlowListOptions{})
+		msgs, err := s.flowStore.store.GetFlows(ctx, fl.ID, flow.FlowListOptions{})
 		if err != nil {
 			return nil, nil, fmt.Errorf("get messages for flow %s: %w", fl.ID, err)
 		}
@@ -630,7 +630,7 @@ func buildMessagePreview(msgs []*flow.Flow) []queryMessageEntry {
 
 // handleQueryFlow returns detailed information about a single flow.
 func (s *Server) handleQueryFlow(ctx context.Context, input queryInput) (*gomcp.CallToolResult, *queryFlowResult, error) {
-	if s.deps.store == nil {
+	if s.flowStore.store == nil {
 		return nil, nil, fmt.Errorf("flow store is not initialized")
 	}
 
@@ -638,12 +638,12 @@ func (s *Server) handleQueryFlow(ctx context.Context, input queryInput) (*gomcp.
 		return nil, nil, fmt.Errorf("id is required for flow resource")
 	}
 
-	fl, err := s.deps.store.GetStream(ctx, input.ID)
+	fl, err := s.flowStore.store.GetStream(ctx, input.ID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("get flow: %w", err)
 	}
 
-	msgs, err := s.deps.store.GetFlows(ctx, fl.ID, flow.FlowListOptions{})
+	msgs, err := s.flowStore.store.GetFlows(ctx, fl.ID, flow.FlowListOptions{})
 	if err != nil {
 		return nil, nil, fmt.Errorf("get messages: %w", err)
 	}
@@ -839,7 +839,7 @@ func paginateMessages(msgs []*flow.Flow, offset, limit int) []*flow.Flow {
 
 // handleQueryMessages returns paginated messages for a flow.
 func (s *Server) handleQueryMessages(ctx context.Context, input queryInput) (*gomcp.CallToolResult, *queryMessagesResult, error) {
-	if s.deps.store == nil {
+	if s.flowStore.store == nil {
 		return nil, nil, fmt.Errorf("flow store is not initialized")
 	}
 
@@ -852,13 +852,13 @@ func (s *Server) handleQueryMessages(ctx context.Context, input queryInput) (*go
 	}
 
 	// Verify the flow exists and resolve prefix IDs.
-	fl, err := s.deps.store.GetStream(ctx, input.ID)
+	fl, err := s.flowStore.store.GetStream(ctx, input.ID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("get flow: %w", err)
 	}
 
 	// Get total message count for pagination.
-	total, err := s.deps.store.CountFlows(ctx, fl.ID)
+	total, err := s.flowStore.store.CountFlows(ctx, fl.ID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("count messages: %w", err)
 	}
@@ -868,7 +868,7 @@ func (s *Server) handleQueryMessages(ctx context.Context, input queryInput) (*go
 		return nil, nil, err
 	}
 
-	allMsgs, err := s.deps.store.GetFlows(ctx, fl.ID, msgOpts)
+	allMsgs, err := s.flowStore.store.GetFlows(ctx, fl.ID, msgOpts)
 	if err != nil {
 		return nil, nil, fmt.Errorf("get messages: %w", err)
 	}
@@ -941,21 +941,21 @@ type queryBudgetStatus struct {
 
 // populateManagerStatus fills manager-related fields in the status result.
 func (s *Server) populateManagerStatus(result *queryStatusResult) {
-	if s.deps.manager == nil {
+	if s.connector.manager == nil {
 		return
 	}
-	running, addr := s.deps.manager.Status()
+	running, addr := s.connector.manager.Status()
 	result.Running = running
 	result.ListenAddr = addr
-	result.UpstreamProxy = proxy.RedactProxyURL(s.deps.manager.UpstreamProxy())
-	result.ActiveConnections = s.deps.manager.ActiveConnections()
-	result.MaxConnections = s.deps.manager.MaxConnections()
-	result.PeekTimeoutMs = s.deps.manager.PeekTimeout().Milliseconds()
-	result.UptimeSeconds = int64(s.deps.manager.Uptime().Seconds())
-	result.ListenerCount = s.deps.manager.ListenerCount()
+	result.UpstreamProxy = proxy.RedactProxyURL(s.connector.manager.UpstreamProxy())
+	result.ActiveConnections = s.connector.manager.ActiveConnections()
+	result.MaxConnections = s.connector.manager.MaxConnections()
+	result.PeekTimeoutMs = s.connector.manager.PeekTimeout().Milliseconds()
+	result.UptimeSeconds = int64(s.connector.manager.Uptime().Seconds())
+	result.ListenerCount = s.connector.manager.ListenerCount()
 
 	// Populate per-listener statuses.
-	statuses := s.deps.manager.ListenerStatuses()
+	statuses := s.connector.manager.ListenerStatuses()
 	if len(statuses) > 0 {
 		result.Listeners = make([]queryListenerStatusEntry, 0, len(statuses))
 		for _, st := range statuses {
@@ -989,47 +989,47 @@ func (s *Server) handleQueryStatus(ctx context.Context) (*gomcp.CallToolResult, 
 		result.RequestTimeoutMs = defaultRequestTimeoutMs
 	}
 
-	if s.deps.store != nil {
-		count, err := s.deps.store.CountStreams(ctx, flow.StreamListOptions{})
+	if s.flowStore.store != nil {
+		count, err := s.flowStore.store.CountStreams(ctx, flow.StreamListOptions{})
 		if err != nil {
 			return nil, nil, fmt.Errorf("count flows: %w", err)
 		}
 		result.TotalFlows = count
 	}
 
-	if s.deps.dbPath != "" {
-		info, err := os.Stat(s.deps.dbPath)
+	if s.misc.dbPath != "" {
+		info, err := os.Stat(s.misc.dbPath)
 		if err == nil {
 			result.DBSizeBytes = info.Size()
 		}
 	}
 
-	if s.deps.ca != nil && s.deps.ca.Certificate() != nil {
+	if s.misc.ca != nil && s.misc.ca.Certificate() != nil {
 		result.CAInitialized = true
 	}
 
 	// SOCKS5 availability: enabled if the handler is registered.
-	if s.deps.socks5AuthSetter != nil {
+	if s.connector.socks5AuthSetter != nil {
 		result.SOCKS5Enabled = true
 	}
 
 	result.TLSFingerprint = s.currentTLSFingerprint()
 
-	if s.deps.rateLimiter != nil {
-		effective := s.deps.rateLimiter.EffectiveLimits()
+	if s.misc.rateLimiter != nil {
+		effective := s.misc.rateLimiter.EffectiveLimits()
 		result.RateLimits = &queryRateLimitStatus{
 			Effective: effective,
-			Enabled:   s.deps.rateLimiter.HasLimits(),
+			Enabled:   s.misc.rateLimiter.HasLimits(),
 		}
 	}
 
-	if s.deps.budgetManager != nil {
-		effective := s.deps.budgetManager.EffectiveBudget()
+	if s.misc.budgetManager != nil {
+		effective := s.misc.budgetManager.EffectiveBudget()
 		result.Budget = &queryBudgetStatus{
 			Effective:    effective,
-			Enabled:      s.deps.budgetManager.HasBudget(),
-			RequestCount: s.deps.budgetManager.RequestCount(),
-			StopReason:   s.deps.budgetManager.ShutdownReason(),
+			Enabled:      s.misc.budgetManager.HasBudget(),
+			RequestCount: s.misc.budgetManager.RequestCount(),
+			StopReason:   s.misc.budgetManager.ShutdownReason(),
 		}
 	}
 
@@ -1083,12 +1083,12 @@ type queryPassthroughResult struct {
 func (s *Server) handleQueryConfig() (*gomcp.CallToolResult, *queryConfigResult, error) {
 	result := &queryConfigResult{}
 
-	if s.deps.manager != nil {
-		result.UpstreamProxy = proxy.RedactProxyURL(s.deps.manager.UpstreamProxy())
+	if s.connector.manager != nil {
+		result.UpstreamProxy = proxy.RedactProxyURL(s.connector.manager.UpstreamProxy())
 	}
 
-	if s.deps.scope != nil {
-		includes, excludes := s.deps.scope.Rules()
+	if s.connector.scope != nil {
+		includes, excludes := s.connector.scope.Rules()
 		result.CaptureScope = &queryScopeResult{
 			Includes: fromScopeRules(includes),
 			Excludes: fromScopeRules(excludes),
@@ -1100,8 +1100,8 @@ func (s *Server) handleQueryConfig() (*gomcp.CallToolResult, *queryConfigResult,
 		}
 	}
 
-	if s.deps.passthrough != nil {
-		patterns := s.deps.passthrough.List()
+	if s.connector.passthrough != nil {
+		patterns := s.connector.passthrough.List()
 		sort.Strings(patterns)
 		result.TLSPassthrough = &queryPassthroughResult{
 			Patterns: patterns,
@@ -1114,14 +1114,14 @@ func (s *Server) handleQueryConfig() (*gomcp.CallToolResult, *queryConfigResult,
 		}
 	}
 
-	if len(s.deps.tcpForwards) > 0 {
-		result.TCPForwards = s.deps.tcpForwards
+	if len(s.connector.tcpForwards) > 0 {
+		result.TCPForwards = s.connector.tcpForwards
 	}
-	if len(s.deps.enabledProtocols) > 0 {
-		result.EnabledProtocols = s.deps.enabledProtocols
+	if len(s.connector.enabledProtocols) > 0 {
+		result.EnabledProtocols = s.connector.enabledProtocols
 	}
 
-	if s.deps.socks5AuthSetter != nil {
+	if s.connector.socks5AuthSetter != nil {
 		result.SOCKS5Enabled = true
 	}
 
@@ -1133,11 +1133,11 @@ func (s *Server) handleQueryConfig() (*gomcp.CallToolResult, *queryConfigResult,
 		}
 	}
 
-	if s.deps.safetyEngine != nil {
+	if s.pipeline.safetyEngine != nil {
 		result.SafetyFilter = &querySafetyFilterResult{
 			Enabled:     true,
-			InputRules:  len(s.deps.safetyEngine.InputRules()),
-			OutputRules: len(s.deps.safetyEngine.OutputRules()),
+			InputRules:  len(s.pipeline.safetyEngine.InputRules()),
+			OutputRules: len(s.pipeline.safetyEngine.OutputRules()),
 		}
 	} else {
 		result.SafetyFilter = &querySafetyFilterResult{
@@ -1145,9 +1145,9 @@ func (s *Server) handleQueryConfig() (*gomcp.CallToolResult, *queryConfigResult,
 		}
 	}
 
-	if s.deps.manager != nil {
-		result.MaxConnections = s.deps.manager.MaxConnections()
-		result.PeekTimeoutMs = s.deps.manager.PeekTimeout().Milliseconds()
+	if s.connector.manager != nil {
+		result.MaxConnections = s.connector.manager.MaxConnections()
+		result.PeekTimeoutMs = s.connector.manager.PeekTimeout().Milliseconds()
 	}
 
 	if rt := s.currentRequestTimeout(); rt > 0 {
@@ -1177,16 +1177,16 @@ type queryCACertResult struct {
 
 // handleQueryCACert returns the CA certificate PEM and metadata.
 func (s *Server) handleQueryCACert() (*gomcp.CallToolResult, *queryCACertResult, error) {
-	if s.deps.ca == nil {
+	if s.misc.ca == nil {
 		return nil, nil, fmt.Errorf("CA is not initialized: no CA has been configured for this server")
 	}
 
-	cert := s.deps.ca.Certificate()
+	cert := s.misc.ca.Certificate()
 	if cert == nil {
 		return nil, nil, fmt.Errorf("CA certificate is not available: CA has not been generated or loaded")
 	}
 
-	certPEM := s.deps.ca.CertPEM()
+	certPEM := s.misc.ca.CertPEM()
 	if certPEM == nil {
 		return nil, nil, fmt.Errorf("CA certificate PEM is not available")
 	}
@@ -1194,7 +1194,7 @@ func (s *Server) handleQueryCACert() (*gomcp.CallToolResult, *queryCACertResult,
 	fingerprint := sha256.Sum256(cert.Raw)
 	fingerprintHex := formatFingerprint(fingerprint[:])
 
-	source := s.deps.ca.Source()
+	source := s.misc.ca.Source()
 	result := &queryCACertResult{
 		PEM:         string(certPEM),
 		Fingerprint: fingerprintHex,
@@ -1265,11 +1265,11 @@ type queryInterceptQueueResult struct {
 
 // handleQueryInterceptQueue returns the list of currently intercepted (blocked) requests.
 func (s *Server) handleQueryInterceptQueue(input queryInput) (*gomcp.CallToolResult, *queryInterceptQueueResult, error) {
-	if s.deps.interceptQueue == nil {
+	if s.pipeline.interceptQueue == nil {
 		return nil, nil, fmt.Errorf("intercept queue is not initialized")
 	}
 
-	items := s.deps.interceptQueue.List()
+	items := s.pipeline.interceptQueue.List()
 
 	limit := input.Limit
 	if limit <= 0 || limit > maxListLimit {
@@ -1352,11 +1352,11 @@ type queryMacrosResult struct {
 
 // handleQueryMacros returns a list of all stored macro definitions.
 func (s *Server) handleQueryMacros(ctx context.Context) (*gomcp.CallToolResult, *queryMacrosResult, error) {
-	if s.deps.store == nil {
+	if s.flowStore.store == nil {
 		return nil, nil, fmt.Errorf("flow store is not initialized")
 	}
 
-	records, err := s.deps.store.ListMacros(ctx)
+	records, err := s.flowStore.store.ListMacros(ctx)
 	if err != nil {
 		return nil, nil, fmt.Errorf("list macros: %w", err)
 	}
@@ -1399,14 +1399,14 @@ type queryMacroResult struct {
 
 // handleQueryMacro returns detailed information about a single macro definition.
 func (s *Server) handleQueryMacro(ctx context.Context, input queryInput) (*gomcp.CallToolResult, *queryMacroResult, error) {
-	if s.deps.store == nil {
+	if s.flowStore.store == nil {
 		return nil, nil, fmt.Errorf("flow store is not initialized")
 	}
 	if input.ID == "" {
 		return nil, nil, fmt.Errorf("id is required for macro resource (macro name)")
 	}
 
-	rec, err := s.deps.store.GetMacro(ctx, input.ID)
+	rec, err := s.flowStore.store.GetMacro(ctx, input.ID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("get macro: %w", err)
 	}

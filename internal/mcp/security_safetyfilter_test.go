@@ -19,7 +19,7 @@ func setupSafetyFilterTestSession(t *testing.T, engine *safety.Engine) *gomcp.Cl
 		opts = append(opts, WithSafetyEngine(engine))
 	}
 
-	s := NewServer(ctx, nil, nil, nil, opts...)
+	s := newServer(ctx, nil, nil, nil, opts...)
 	ct, st := gomcp.NewInMemoryTransports()
 
 	ss, err := s.server.Connect(ctx, st, nil)

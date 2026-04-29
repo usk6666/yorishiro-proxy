@@ -361,7 +361,7 @@ func TestWsOpcodeNameFromInt(t *testing.T) {
 
 // TestBuildInterceptResult_WebSocketFrame verifies the result builder includes WS metadata.
 func TestBuildInterceptResult_WebSocketFrame(t *testing.T) {
-	s := NewServer(context.Background(), nil, nil, nil)
+	s := newServer(context.Background(), nil, nil, nil)
 
 	item := &intercept.InterceptedRequest{
 		ID:           "test-ws-id",

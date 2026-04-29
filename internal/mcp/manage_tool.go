@@ -121,7 +121,7 @@ type executeDeleteFlowsResult struct {
 
 // handleManageDeleteFlows handles the delete_flows action within the manage tool.
 func (s *Server) handleManageDeleteFlows(ctx context.Context, params manageParams) (*gomcp.CallToolResult, *executeDeleteFlowsResult, error) {
-	if s.deps.store == nil {
+	if s.flowStore.store == nil {
 		return nil, nil, fmt.Errorf("flow store is not initialized")
 	}
 
@@ -134,7 +134,7 @@ func (s *Server) handleManageDeleteFlows(ctx context.Context, params manageParam
 			return nil, nil, fmt.Errorf("confirm must be true to proceed with age-based deletion")
 		}
 		cutoff := time.Now().UTC().AddDate(0, 0, -days)
-		n, err := s.deps.store.DeleteStreamsOlderThan(ctx, cutoff)
+		n, err := s.flowStore.store.DeleteStreamsOlderThan(ctx, cutoff)
 		if err != nil {
 			return nil, nil, fmt.Errorf("delete old flows: %w", err)
 		}
@@ -145,11 +145,11 @@ func (s *Server) handleManageDeleteFlows(ctx context.Context, params manageParam
 	}
 
 	if params.StreamID != "" {
-		fl, err := s.deps.store.GetStream(ctx, params.StreamID)
+		fl, err := s.flowStore.store.GetStream(ctx, params.StreamID)
 		if err != nil {
 			return nil, nil, fmt.Errorf("flow not found: %s", params.StreamID)
 		}
-		if err := s.deps.store.DeleteStream(ctx, fl.ID); err != nil {
+		if err := s.flowStore.store.DeleteStream(ctx, fl.ID); err != nil {
 			return nil, nil, fmt.Errorf("delete flow: %w", err)
 		}
 		return nil, &executeDeleteFlowsResult{DeletedCount: 1}, nil
@@ -159,7 +159,7 @@ func (s *Server) handleManageDeleteFlows(ctx context.Context, params manageParam
 		if !params.Confirm {
 			return nil, nil, fmt.Errorf("confirm must be true to proceed with protocol-based deletion")
 		}
-		n, err := s.deps.store.DeleteStreamsByProtocol(ctx, params.Protocol)
+		n, err := s.flowStore.store.DeleteStreamsByProtocol(ctx, params.Protocol)
 		if err != nil {
 			return nil, nil, fmt.Errorf("delete flows by protocol: %w", err)
 		}
@@ -167,7 +167,7 @@ func (s *Server) handleManageDeleteFlows(ctx context.Context, params manageParam
 	}
 
 	if params.Confirm {
-		n, err := s.deps.store.DeleteAllStreams(ctx)
+		n, err := s.flowStore.store.DeleteAllStreams(ctx)
 		if err != nil {
 			return nil, nil, fmt.Errorf("delete all flows: %w", err)
 		}
@@ -191,39 +191,39 @@ type executeRegenerateCACertResult struct {
 
 // handleManageRegenerateCA regenerates the CA certificate.
 func (s *Server) handleManageRegenerateCA() (*gomcp.CallToolResult, *executeRegenerateCACertResult, error) {
-	if s.deps.ca == nil {
+	if s.misc.ca == nil {
 		return nil, nil, fmt.Errorf("CA is not initialized")
 	}
 
-	source := s.deps.ca.Source()
+	source := s.misc.ca.Source()
 
 	if source.Explicit {
 		return nil, nil, fmt.Errorf("cannot regenerate user-provided CA (loaded from %s); provide new files via -ca-cert/-ca-key flags instead", source.CertPath)
 	}
 
-	if err := s.deps.ca.Generate(); err != nil {
+	if err := s.misc.ca.Generate(); err != nil {
 		return nil, nil, fmt.Errorf("regenerate CA: %w", err)
 	}
 
-	if s.deps.issuer != nil {
-		s.deps.issuer.ClearCache()
+	if s.misc.issuer != nil {
+		s.misc.issuer.ClearCache()
 	}
 
 	if source.Persisted && source.CertPath != "" {
-		if err := s.deps.ca.Save(source.CertPath, source.KeyPath); err != nil {
+		if err := s.misc.ca.Save(source.CertPath, source.KeyPath); err != nil {
 			slog.Warn("failed to save regenerated CA, continuing with ephemeral CA",
 				"cert_path", source.CertPath, "error", err)
-			s.deps.ca.SetSource(cert.CASource{})
+			s.misc.ca.SetSource(cert.CASource{})
 		} else {
-			s.deps.ca.SetSource(source)
+			s.misc.ca.SetSource(source)
 		}
 	}
 
-	newCert := s.deps.ca.Certificate()
+	newCert := s.misc.ca.Certificate()
 	fingerprint := sha256.Sum256(newCert.Raw)
 	fingerprintHex := formatFingerprint(fingerprint[:])
 
-	newSource := s.deps.ca.Source()
+	newSource := s.misc.ca.Source()
 	result := &executeRegenerateCACertResult{
 		Fingerprint: fingerprintHex,
 		Subject:     newCert.Subject.String(),
@@ -275,7 +275,7 @@ type executeExportFlowsResult struct {
 
 // handleManageExportFlows handles the export_flows action within the manage tool.
 func (s *Server) handleManageExportFlows(ctx context.Context, params manageParams) (*executeExportFlowsResult, error) {
-	if s.deps.store == nil {
+	if s.flowStore.store == nil {
 		return nil, fmt.Errorf("flow store is not initialized")
 	}
 
@@ -393,7 +393,7 @@ func writeToFileAtomic(outputPath string, writeFn func(f *os.File) (int, error))
 // exportFlowsToFile exports flows to a file at the given output path.
 func (s *Server) exportFlowsToFile(ctx context.Context, outputPath, format string, opts flow.ExportOptions) (*executeExportFlowsResult, error) {
 	cleanPath, n, err := writeToFileAtomic(outputPath, func(f *os.File) (int, error) {
-		count, err := flow.ExportStreams(ctx, s.deps.store, f, opts)
+		count, err := flow.ExportStreams(ctx, s.flowStore.store, f, opts)
 		if err != nil {
 			return 0, fmt.Errorf("export flows: %w", err)
 		}
@@ -414,7 +414,7 @@ func (s *Server) exportFlowsToFile(ctx context.Context, outputPath, format strin
 func (s *Server) exportFlowsInline(ctx context.Context, format string, opts flow.ExportOptions) (*executeExportFlowsResult, error) {
 	opts.MaxFlows = maxInlineExportFlows
 	var buf bytes.Buffer
-	n, err := flow.ExportStreams(ctx, s.deps.store, &buf, opts)
+	n, err := flow.ExportStreams(ctx, s.flowStore.store, &buf, opts)
 	if err != nil {
 		return nil, fmt.Errorf("export flows: %w", err)
 	}
@@ -432,7 +432,7 @@ func (s *Server) exportFlowsInline(ctx context.Context, format string, opts flow
 // exportFlowsToHARFile exports flows to a HAR file at the given output path.
 func (s *Server) exportFlowsToHARFile(ctx context.Context, outputPath string, opts flow.ExportOptions) (*executeExportFlowsResult, error) {
 	cleanPath, n, err := writeToFileAtomic(outputPath, func(f *os.File) (int, error) {
-		count, err := flow.ExportHAR(ctx, s.deps.store, f, opts, s.version)
+		count, err := flow.ExportHAR(ctx, s.flowStore.store, f, opts, s.version)
 		if err != nil {
 			return 0, fmt.Errorf("export HAR: %w", err)
 		}
@@ -460,7 +460,7 @@ type executeImportFlowsResult struct {
 
 // handleManageImportFlows handles the import_flows action within the manage tool.
 func (s *Server) handleManageImportFlows(ctx context.Context, params manageParams) (*executeImportFlowsResult, error) {
-	if s.deps.store == nil {
+	if s.flowStore.store == nil {
 		return nil, fmt.Errorf("flow store is not initialized")
 	}
 
@@ -491,7 +491,7 @@ func (s *Server) handleManageImportFlows(ctx context.Context, params manageParam
 	}
 	defer f.Close()
 
-	result, err := flow.ImportStreams(ctx, s.deps.store, f, flow.ImportOptions{
+	result, err := flow.ImportStreams(ctx, s.flowStore.store, f, flow.ImportOptions{
 		OnConflict:       conflict,
 		MaxScannerBuffer: config.MaxImportScannerBuffer,
 		ValidateIDs:      true,

@@ -41,7 +41,7 @@ func setupFuzzQueryTestSession(t *testing.T, store flow.Store, fuzzStore flow.Fu
 		opts = append(opts, WithFuzzStore(fuzzStore))
 	}
 
-	s := NewServer(ctx, nil, store, nil, opts...)
+	s := newServer(ctx, nil, store, nil, opts...)
 	ct, st := gomcp.NewInMemoryTransports()
 
 	ss, err := s.server.Connect(ctx, st, nil)

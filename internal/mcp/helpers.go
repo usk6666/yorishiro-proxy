@@ -127,8 +127,8 @@ func NewDefaultHTTPClient() *http.Client {
 // a default dialer with the replay timeout is returned.
 // Access control is handled by the target scope enforcement layer.
 func (s *Server) rawDialerFunc() rawDialer {
-	if s.deps.rawReplayDialer != nil {
-		return s.deps.rawReplayDialer
+	if s.jobRunner.rawReplayDialer != nil {
+		return s.jobRunner.rawReplayDialer
 	}
 	return &net.Dialer{
 		Timeout: defaultReplayTimeout,
@@ -224,7 +224,7 @@ func fromScopeRules(rules []proxy.ScopeRule) []scopeRuleOutput {
 // Returns nil if the target is allowed or if no rules are configured (open mode).
 // Returns a descriptive error if the target is blocked.
 func (s *Server) checkTargetScopeURL(u *url.URL) error {
-	return checkTargetScopeURLHelper(s.deps.targetScope, u)
+	return checkTargetScopeURLHelper(s.connector.targetScope, u)
 }
 
 // checkTargetScopeURLHelper checks a URL against the given target scope rules.
@@ -245,7 +245,7 @@ func checkTargetScopeURLHelper(ts *proxy.TargetScope, u *url.URL) error {
 // Returns nil if the target is allowed or if no rules are configured (open mode).
 // Returns a descriptive error if the target is blocked.
 func (s *Server) checkTargetScopeAddr(scheme, addr string) error {
-	return checkTargetScopeAddrHelper(s.deps.targetScope, scheme, addr)
+	return checkTargetScopeAddrHelper(s.connector.targetScope, scheme, addr)
 }
 
 // checkTargetScopeAddrHelper checks a host:port address against the given target scope rules.
@@ -292,10 +292,10 @@ func targetScopeCheckRedirect(ts *proxy.TargetScope) func(*http.Request, []*http
 // Returns nil if no safety engine is configured or if the input passes.
 // Returns an InputViolation if the input is blocked.
 func (s *Server) checkSafetyInput(body []byte, rawURL string, headers []exchange.KeyValue) *safety.InputViolation {
-	if s.deps.safetyEngine == nil {
+	if s.pipeline.safetyEngine == nil {
 		return nil
 	}
-	return s.deps.safetyEngine.CheckInput(body, rawURL, headers)
+	return s.pipeline.safetyEngine.CheckInput(body, rawURL, headers)
 }
 
 // safetyViolationError returns a generic error message for MCP clients when a safety

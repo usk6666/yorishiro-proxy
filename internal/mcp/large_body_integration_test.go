@@ -258,7 +258,7 @@ func drainResponseThroughProxy(t *testing.T, proxyAddr, target string) []byte {
 // in-memory client transport. Query calls land on this client.
 func buildMCPClient(t *testing.T, ctx context.Context, ca *cert.CA, store flow.Store) *gomcp.ClientSession {
 	t.Helper()
-	mcpServer := NewServer(ctx, ca, store, nil)
+	mcpServer := newServer(ctx, ca, store, nil)
 
 	ct, st := gomcp.NewInMemoryTransports()
 

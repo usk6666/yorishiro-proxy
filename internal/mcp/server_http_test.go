@@ -13,7 +13,7 @@ import (
 )
 
 func TestRunHTTP_StartAndShutdown(t *testing.T) {
-	s := NewServer(context.Background(), nil, nil, nil)
+	s := newServer(context.Background(), nil, nil, nil)
 
 	// Pick a free port.
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -50,7 +50,7 @@ func TestRunHTTP_StartAndShutdown(t *testing.T) {
 }
 
 func TestRunHTTP_AcceptsMCPRequests(t *testing.T) {
-	s := NewServer(context.Background(), nil, nil, nil)
+	s := newServer(context.Background(), nil, nil, nil)
 
 	// Pick a free port.
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -96,7 +96,7 @@ func TestRunHTTP_AcceptsMCPRequests(t *testing.T) {
 }
 
 func TestRunHTTP_InvalidAddress(t *testing.T) {
-	s := NewServer(context.Background(), nil, nil, nil)
+	s := newServer(context.Background(), nil, nil, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -108,7 +108,7 @@ func TestRunHTTP_InvalidAddress(t *testing.T) {
 }
 
 func TestRunHTTP_RejectsNonLoopbackAddress(t *testing.T) {
-	s := NewServer(context.Background(), nil, nil, nil)
+	s := newServer(context.Background(), nil, nil, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -137,7 +137,7 @@ func TestRunHTTP_GracefulShutdownTimeout(t *testing.T) {
 	shutdownTimeout = 1 * time.Second
 	t.Cleanup(func() { shutdownTimeout = origTimeout })
 
-	s := NewServer(context.Background(), nil, nil, nil)
+	s := newServer(context.Background(), nil, nil, nil)
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -173,7 +173,7 @@ func TestRunHTTP_GracefulShutdownTimeout(t *testing.T) {
 }
 
 func TestRunHTTP_MethodNotAllowed(t *testing.T) {
-	s := NewServer(context.Background(), nil, nil, nil)
+	s := newServer(context.Background(), nil, nil, nil)
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -214,7 +214,7 @@ func TestRunHTTP_MethodNotAllowed(t *testing.T) {
 }
 
 func TestRunHTTP_ServesWebUI(t *testing.T) {
-	s := NewServer(context.Background(), nil, nil, nil)
+	s := newServer(context.Background(), nil, nil, nil)
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -253,7 +253,7 @@ func TestRunHTTP_ServesWebUI(t *testing.T) {
 }
 
 func TestRunHTTP_WebUI_SPAFallback(t *testing.T) {
-	s := NewServer(context.Background(), nil, nil, nil)
+	s := newServer(context.Background(), nil, nil, nil)
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -294,7 +294,7 @@ func TestRunHTTP_WebUI_SPAFallback(t *testing.T) {
 func TestRunHTTP_WebUI_NoAuthRequired(t *testing.T) {
 	// Set up middleware that requires Bearer auth (simulating production setup).
 	token := "test-secret-token"
-	s := NewServer(context.Background(), nil, nil, nil,
+	s := newServer(context.Background(), nil, nil, nil,
 		WithMiddleware(func(next http.Handler) http.Handler {
 			return BearerAuthMiddleware(next, token)
 		}),
@@ -335,7 +335,7 @@ func TestRunHTTP_WebUI_NoAuthRequired(t *testing.T) {
 
 func TestRunHTTP_MCP_RequiresAuth(t *testing.T) {
 	token := "test-secret-token"
-	s := NewServer(context.Background(), nil, nil, nil,
+	s := newServer(context.Background(), nil, nil, nil,
 		WithMiddleware(func(next http.Handler) http.Handler {
 			return BearerAuthMiddleware(next, token)
 		}),
@@ -387,7 +387,7 @@ func TestRunHTTP_WithUIDir(t *testing.T) {
 		t.Fatalf("write index.html: %v", err)
 	}
 
-	s := NewServer(context.Background(), nil, nil, nil, WithUIDir(dir))
+	s := newServer(context.Background(), nil, nil, nil, WithUIDir(dir))
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -425,7 +425,7 @@ func TestRunHTTP_WithUIDir(t *testing.T) {
 }
 
 func TestRunHTTP_OnListeningCallback(t *testing.T) {
-	s := NewServer(context.Background(), nil, nil, nil)
+	s := newServer(context.Background(), nil, nil, nil)
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -466,7 +466,7 @@ func TestRunHTTP_OnListeningCallback(t *testing.T) {
 
 func TestRunHTTP_OnListeningNilCallback(t *testing.T) {
 	// Verify that nil callback does not cause panic.
-	s := NewServer(context.Background(), nil, nil, nil)
+	s := newServer(context.Background(), nil, nil, nil)
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -501,7 +501,7 @@ func TestRunHTTP_OnListeningNilCallback(t *testing.T) {
 
 func TestRunHTTP_NoCallback(t *testing.T) {
 	// Verify backward compatibility: RunHTTP works without onListening argument.
-	s := NewServer(context.Background(), nil, nil, nil)
+	s := newServer(context.Background(), nil, nil, nil)
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

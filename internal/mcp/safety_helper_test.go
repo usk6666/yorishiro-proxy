@@ -67,8 +67,8 @@ func setupTestSessionWithOutputFilter(t *testing.T, store flow.Store, doer httpD
 	t.Helper()
 	ctx := context.Background()
 
-	s := NewServer(context.Background(), nil, store, nil, WithSafetyEngine(engine))
-	s.deps.replayDoer = doer
+	s := newServer(context.Background(), nil, store, nil, WithSafetyEngine(engine))
+	s.jobRunner.replayDoer = doer
 	ct, st := gomcp.NewInMemoryTransports()
 
 	ss, err := s.server.Connect(ctx, st, nil)
@@ -388,8 +388,8 @@ func TestOutputFilter_InterceptQueue_MasksBody(t *testing.T) {
 	)
 
 	ctx := context.Background()
-	s := NewServer(ctx, nil, store, nil, WithSafetyEngine(engine))
-	s.deps.interceptQueue = queue
+	s := newServer(ctx, nil, store, nil, WithSafetyEngine(engine))
+	s.pipeline.interceptQueue = queue
 
 	ct, st := gomcp.NewInMemoryTransports()
 	ss, err := s.server.Connect(ctx, st, nil)
@@ -450,7 +450,7 @@ func setupTestSessionWithInterceptAndSafety(t *testing.T, queue *intercept.Queue
 	t.Helper()
 	ctx := context.Background()
 
-	s := NewServer(ctx, nil, nil, nil, WithInterceptQueue(queue), WithSafetyEngine(engine))
+	s := newServer(ctx, nil, nil, nil, WithInterceptQueue(queue), WithSafetyEngine(engine))
 	ct, st := gomcp.NewInMemoryTransports()
 
 	ss, err := s.server.Connect(ctx, st, nil)
@@ -783,7 +783,7 @@ func TestOutputFilter_NoEngine_PassesThrough(t *testing.T) {
 }
 
 func TestFilterOutputBody_NilEngine(t *testing.T) {
-	s := NewServer(context.Background(), nil, nil, nil)
+	s := newServer(context.Background(), nil, nil, nil)
 	input := []byte("test@example.com sk-abcdefghijklmnop")
 	got := s.filterOutputBody(input)
 	if string(got) != string(input) {
@@ -792,7 +792,7 @@ func TestFilterOutputBody_NilEngine(t *testing.T) {
 }
 
 func TestFilterOutputHeaders_NilEngine(t *testing.T) {
-	s := NewServer(context.Background(), nil, nil, nil)
+	s := newServer(context.Background(), nil, nil, nil)
 	headers := http.Header{"X-Key": {"sk-abcdefghijklmnop"}}
 	got := s.filterOutputHeaders(headers)
 	if got.Get("X-Key") != "sk-abcdefghijklmnop" {
