@@ -103,6 +103,12 @@ func (c *wsChannel) Close() error { return nil }
 // markTerminated caches err as the terminal error (first call wins,
 // guarded by termMu) and closes recvDone exactly once. Safe to call from
 // multiple goroutines.
+//
+// On the first call we also fire the configured pluginv2 state release
+// for this Channel's WS upgrade-pair scope. The call is sequenced AFTER
+// close(recvDone) so a USK-671 dispatch path observing the close can run
+// any terminal-event hook (e.g. ws.on_close) before the backing dict is
+// cleared.
 func (c *wsChannel) markTerminated(err error) {
 	c.termOnce.Do(func() {
 		c.termMu.Lock()
@@ -111,7 +117,22 @@ func (c *wsChannel) markTerminated(err error) {
 		}
 		c.termMu.Unlock()
 		close(c.recvDone)
+		c.releaseTransactionState()
 	})
+}
+
+// releaseTransactionState fires the configured pluginv2.StateReleaser for
+// this Channel's (ConnID, StreamID) — the WS upgrade-pair scope. No-op
+// when no releaser was configured or when the Layer's EnvelopeContext
+// has no ConnID.
+func (c *wsChannel) releaseTransactionState() {
+	if c.opts == nil || c.opts.stateReleaser == nil {
+		return
+	}
+	if c.opts.ctxTmpl.ConnID == "" {
+		return
+	}
+	c.opts.stateReleaser.ReleaseTransaction(c.opts.ctxTmpl.ConnID, c.streamID)
 }
 
 // readDirection returns the Direction stamped on envelopes produced by
