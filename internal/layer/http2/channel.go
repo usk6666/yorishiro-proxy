@@ -94,13 +94,22 @@ func (c *channel) Err() error {
 
 // markTerminated stores err (first-writer-wins) and closes termDone exactly
 // once.
+//
+// On the first call we also fire the Layer's plugin state release so any
+// ctx.stream_state held against this channel's StreamID is GC'd. The call
+// is intentionally placed AFTER close(termDone) so a USK-671 dispatch path
+// observing termDone has already run any terminal-event hook (e.g.
+// grpc.on_end) before the backing dict is cleared.
 func (c *channel) markTerminated(err error) {
 	c.termMu.Lock()
 	if c.termErr == nil {
 		c.termErr = err
 	}
 	c.termMu.Unlock()
-	c.termOnce.Do(func() { close(c.termDone) })
+	c.termOnce.Do(func() {
+		close(c.termDone)
+		c.layer.releaseStreamState(c.streamID)
+	})
 }
 
 // markRecvEnded records that the reader has observed the natural end of the

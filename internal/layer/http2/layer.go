@@ -12,6 +12,7 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/layer"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/http2/frame"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/http2/hpack"
+	"github.com/usk6666/yorishiro-proxy/internal/pluginv2"
 )
 
 // Role identifies whether the Layer is the server side (peer is the client)
@@ -54,6 +55,7 @@ type options struct {
 	bodySpillDir       string
 	bodySpillThreshold int64
 	maxBody            int64
+	stateReleaser      pluginv2.StateReleaser
 }
 
 // Option configures a Layer.
@@ -99,6 +101,16 @@ func WithBodySpillThreshold(n int64) Option {
 // WithMaxBodySize records the absolute body size cap for aggregator use.
 func WithMaxBodySize(n int64) Option {
 	return func(o *options) { o.maxBody = n }
+}
+
+// WithStateReleaser injects a pluginv2.StateReleaser the Layer invokes
+// when a stream reaches its terminal state. nil = no-op (legacy parallel:
+// the Layer compiles and runs without pluginv2 wired up). The release is
+// fired exactly once per stream from channel.markTerminated, regardless
+// of which terminal path triggered it (Close, RST_STREAM, peer GOAWAY-
+// driven failStream, or layer broadcastShutdown).
+func WithStateReleaser(r pluginv2.StateReleaser) Option {
+	return func(o *options) { o.stateReleaser = r }
 }
 
 // BodyBufferOpts exposes the aggregator-relevant body configuration values
@@ -163,6 +175,20 @@ type Layer struct {
 
 // Role returns the Layer's role (ServerRole or ClientRole).
 func (l *Layer) GetRole() Role { return l.role }
+
+// releaseStreamState fires the configured pluginv2.StateReleaser for
+// streamID using the Layer's EnvelopeContext.ConnID. No-op when no
+// releaser was configured (the legacy parallel path) or when ConnID is
+// unset (defensive — refuses to issue a release with an empty key).
+func (l *Layer) releaseStreamState(streamID string) {
+	if l.opts.stateReleaser == nil {
+		return
+	}
+	if l.opts.ctx.ConnID == "" {
+		return
+	}
+	l.opts.stateReleaser.ReleaseStream(l.opts.ctx.ConnID, streamID)
+}
 
 // EnvelopeContextTemplate returns a copy of the EnvelopeContext template
 // stamped onto envelopes produced by this Layer.

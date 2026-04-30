@@ -31,6 +31,14 @@ type Engine struct {
 	logger     *slog.Logger
 	shutdownFn ShutdownFunc
 
+	// transactionStore and streamStore back ctx.transaction_state and
+	// ctx.stream_state respectively (USK-670 / RFC §9.3 D6). Lifetime is
+	// owned by Layers via the StateReleaser interface; engine.NewCtx
+	// looks up (or creates) the per-(ConnID, key) ScopedState for each
+	// hook invocation.
+	transactionStore *scopeStore
+	streamStore      *scopeStore
+
 	// registerHookBuiltin is shared across all plugin loads. Each load sets
 	// the active registry on the calling Starlark thread so the builtin
 	// records hooks against the right Registry.
@@ -55,6 +63,8 @@ func NewEngine(logger *slog.Logger) *Engine {
 		states:              make(map[string]*PluginState),
 		stores:              make(map[string]*PluginStore),
 		logger:              logger,
+		transactionStore:    newScopeStore(logger, "transaction"),
+		streamStore:         newScopeStore(logger, "stream"),
 		registerHookBuiltin: makeRegisterHookBuiltin(),
 	}
 }
@@ -287,6 +297,12 @@ func (e *Engine) Close() error {
 		ps.mu.Unlock()
 	}
 	e.stores = nil
+	if e.transactionStore != nil {
+		e.transactionStore.purge()
+	}
+	if e.streamStore != nil {
+		e.streamStore.purge()
+	}
 	return nil
 }
 
