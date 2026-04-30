@@ -1,7 +1,6 @@
 package pluginv2
 
 import (
-	"context"
 	"net"
 	"strings"
 	"testing"
@@ -357,7 +356,3 @@ func TestEngine_CloseClearsStateStores(t *testing.T) {
 		t.Fatalf("captured txState read after Close = %v, want None", got)
 	}
 }
-
-// silenceContextUnused is a compile-time tether so future refactors that
-// add ctx-bearing helpers don't accidentally break the import.
-var _ = context.TODO

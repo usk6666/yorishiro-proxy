@@ -154,12 +154,24 @@ func newScopeStore(logger *slog.Logger, label string) *scopeStore {
 // getOrCreate returns the *ScopedState for (connID, id), creating a fresh
 // one if absent. Returns nil — and logs a Warn — when connID is empty (a
 // fail-safe against cross-connection collisions on a Layer construction
-// bug) or when the store has reached its outer cap.
+// bug), when id is empty (release() rejects empty ids, so an entry inserted
+// here would leak until Engine.Close), or when the store has reached its
+// outer cap.
 func (s *scopeStore) getOrCreate(connID, id string) *ScopedState {
 	if connID == "" {
 		s.logger.Warn("pluginv2: refusing scope with empty ConnID",
 			slog.String("scope", s.label),
 			slog.String("id", id))
+		return nil
+	}
+	if id == "" {
+		// Symmetric with release(): an empty-id entry could not be
+		// released by ReleaseTransaction/ReleaseStream and would leak
+		// until shutdown. Refuse the insert at the store boundary so the
+		// invariant holds regardless of caller discipline.
+		s.logger.Warn("pluginv2: refusing scope with empty id",
+			slog.String("scope", s.label),
+			slog.String("conn_id", connID))
 		return nil
 	}
 	k := scopeKey{connID: connID, id: id}

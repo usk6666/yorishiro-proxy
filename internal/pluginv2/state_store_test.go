@@ -2,7 +2,6 @@ package pluginv2
 
 import (
 	"bytes"
-	"io"
 	"log/slog"
 	"strings"
 	"sync"
@@ -106,6 +105,24 @@ func TestScopeStore_EmptyConnIDRejected(t *testing.T) {
 	}
 	if got := s.size(); got != 0 {
 		t.Fatalf("size after empty-ConnID call = %d, want 0", got)
+	}
+}
+
+// TestScopeStore_EmptyIDRejected guards the symmetric counterpart to
+// EmptyConnIDRejected: release() returns early on empty id, so an entry
+// inserted with empty id would leak until Engine.Close. getOrCreate must
+// reject it at the store boundary.
+func TestScopeStore_EmptyIDRejected(t *testing.T) {
+	s, buf := newTestScopeStore(t, "transaction")
+
+	if v := s.getOrCreate("conn-A", ""); v != nil {
+		t.Fatalf("expected nil for empty id, got %v", v)
+	}
+	if !strings.Contains(buf.String(), "refusing scope with empty id") {
+		t.Fatalf("expected Warn log, got %q", buf.String())
+	}
+	if got := s.size(); got != 0 {
+		t.Fatalf("size after empty-id call = %d, want 0", got)
 	}
 }
 
@@ -237,6 +254,3 @@ func TestScopedState_ConcurrentAccess(t *testing.T) {
 		t.Fatalf("got %d keys, want %d", len(keys), writers)
 	}
 }
-
-// Ensure that nothing in this file accidentally relies on os.Stderr.
-var _ io.Writer = (*bytes.Buffer)(nil)
