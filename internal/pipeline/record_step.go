@@ -59,9 +59,9 @@ var ErrPartialWireBytes = envelope.ErrPartialWireBytes
 // with the encoder's output so the recorded bytes reflect what the proxy
 // would emit on the wire after the mutation, rather than the ingress Raw.
 type RecordStep struct {
-	store        flow.Writer
-	logger       *slog.Logger
-	wireEncoders map[envelope.Protocol]WireEncoder
+	store    flow.Writer
+	logger   *slog.Logger
+	encoders *WireEncoderRegistry
 	// maxBodySize caps flow.Flow.Body when materializing a BodyBuffer. A
 	// larger materialized body is truncated and Flow.BodyTruncated is set
 	// to true. Zero means use config.MaxBodySize.
@@ -77,16 +77,27 @@ type Option func(*RecordStep)
 // contract on return values.
 //
 // Passing a nil fn removes any previously-registered encoder for proto.
+//
+// Internally registers into the RecordStep's WireEncoderRegistry, which is
+// also accessible via WithWireEncoderRegistry for the case where the same
+// registry is shared with PluginStepPost.
 func WithWireEncoder(proto envelope.Protocol, fn WireEncoder) Option {
 	return func(s *RecordStep) {
-		if s.wireEncoders == nil {
-			s.wireEncoders = make(map[envelope.Protocol]WireEncoder)
+		if s.encoders == nil {
+			s.encoders = NewWireEncoderRegistry()
 		}
-		if fn == nil {
-			delete(s.wireEncoders, proto)
-			return
-		}
-		s.wireEncoders[proto] = fn
+		s.encoders.Register(proto, fn)
+	}
+}
+
+// WithWireEncoderRegistry attaches a pre-built WireEncoderRegistry to the
+// RecordStep. Use this when the same registry is shared with PluginStepPost
+// so both Steps see the same encoder map. If both this Option and
+// WithWireEncoder are applied, the explicit registry wins (the per-protocol
+// Options are no-ops because they would re-register into the wrong map).
+func WithWireEncoderRegistry(reg *WireEncoderRegistry) Option {
+	return func(s *RecordStep) {
+		s.encoders = reg
 	}
 }
 
@@ -283,10 +294,10 @@ func (s *RecordStep) recordVariantFlows(ctx context.Context, snap, current *enve
 //   - Encoder returns any other non-nil error: RawBytes keeps env.Raw, tag
 //     is set to "unavailable" and the error is logged.
 func (s *RecordStep) applyWireEncode(current *envelope.Envelope, modFlow *flow.Flow) {
-	if len(s.wireEncoders) == 0 {
+	if s.encoders == nil || s.encoders.Len() == 0 {
 		return
 	}
-	enc, ok := s.wireEncoders[current.Protocol]
+	enc, ok := s.encoders.Lookup(current.Protocol)
 	if !ok {
 		return
 	}
