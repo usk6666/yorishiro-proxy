@@ -6,6 +6,7 @@ import (
 
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/layer"
+	"github.com/usk6666/yorishiro-proxy/internal/pluginv2"
 )
 
 // options holds resolved configuration for a Layer constructed via New.
@@ -29,6 +30,11 @@ type options struct {
 	// maxFrameSize caps Receive payloads (pre-decompression) and Send
 	// payloads (pre-mask). Default = maxFramePayloadSize (16 MiB).
 	maxFrameSize int64
+
+	// stateReleaser is the optional pluginv2 hook invoked when the Channel
+	// reaches its terminal state. Drives ReleaseTransaction for the WS
+	// upgrade-pair scope. nil = no-op (legacy parallel).
+	stateReleaser pluginv2.StateReleaser
 }
 
 // Option tunes the WSLayer.
@@ -75,6 +81,14 @@ func WithMaxFrameSize(n int64) Option {
 			o.maxFrameSize = n
 		}
 	}
+}
+
+// WithStateReleaser injects a pluginv2.StateReleaser the Layer invokes
+// when the Channel reaches its terminal state. The release fires
+// ReleaseTransaction(ConnID, StreamID) — the WS upgrade-pair is the
+// transaction scope per RFC §9.3 D6. nil = no-op.
+func WithStateReleaser(r pluginv2.StateReleaser) Option {
+	return func(o *options) { o.stateReleaser = r }
 }
 
 // Layer wraps a bidirectional WebSocket byte stream — a (reader, writer,

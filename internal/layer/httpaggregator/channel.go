@@ -48,6 +48,18 @@ type aggregatorChannel struct {
 	bodyLen     int64
 	termErr     error // set when phase == phaseTerminated
 
+	// emittedFlowIDs records the FlowID of every HTTPMessage envelope this
+	// aggregator emitted, so Close can release each corresponding
+	// ctx.transaction_state scope. The slice is bounded by the number of
+	// keep-alive messages on the underlying Channel; for HTTP/2 (one
+	// stream = one exchange) it carries at most one entry per direction.
+	emittedFlowIDs []string
+
+	// connID captures EnvelopeContext.ConnID from the first emitted
+	// envelope so Close can issue ReleaseTransaction with the same key
+	// the engine used at NewCtx time. Empty until the first emission.
+	connID string
+
 	closeOnce sync.Once
 	closed    bool
 	recvDone  chan struct{}
@@ -79,6 +91,12 @@ func (a *aggregatorChannel) Err() error {
 // USK-618 logic in http2.channel.Close) is what signals the peer. Not
 // cascading would leak per-stream state in the inner Layer and leave the
 // peer waiting on an unterminated stream.
+//
+// Close also fires pluginv2.ReleaseTransaction for every FlowID this
+// aggregator emitted, so any ctx.transaction_state stashed against those
+// scopes is GC'd. The release runs AFTER the inner Channel cascades
+// closed so a USK-671 dispatch path watching the inner Closed() signal
+// has already run any terminal-event hook before the dict is cleared.
 func (a *aggregatorChannel) Close() error {
 	a.closeOnce.Do(func() {
 		a.mu.Lock()
@@ -90,11 +108,45 @@ func (a *aggregatorChannel) Close() error {
 			_ = a.bodyBuf.Release()
 			a.bodyBuf = nil
 		}
+		flows := a.emittedFlowIDs
+		connID := a.connID
+		a.emittedFlowIDs = nil
 		a.mu.Unlock()
 		close(a.recvDone)
 		_ = a.inner.Close()
+		a.releaseTransactionStates(connID, flows)
 	})
 	return nil
+}
+
+// releaseTransactionStates fires ReleaseTransaction for every FlowID the
+// aggregator emitted, using the ConnID captured at first emit. No-op
+// when no releaser was configured (legacy parallel) or when the ConnID
+// is empty (aggregator never emitted, or template lacked one).
+func (a *aggregatorChannel) releaseTransactionStates(connID string, flowIDs []string) {
+	if a.opts.StateReleaser == nil || connID == "" {
+		return
+	}
+	for _, id := range flowIDs {
+		if id == "" {
+			continue
+		}
+		a.opts.StateReleaser.ReleaseTransaction(connID, id)
+	}
+}
+
+// recordEmittedLocked stamps the emitted envelope's FlowID onto the
+// release queue and captures ConnID on first call. Caller must hold a.mu.
+func (a *aggregatorChannel) recordEmittedLocked(env *envelope.Envelope) {
+	if env == nil {
+		return
+	}
+	if a.connID == "" {
+		a.connID = env.Context.ConnID
+	}
+	if env.FlowID != "" {
+		a.emittedFlowIDs = append(a.emittedFlowIDs, env.FlowID)
+	}
 }
 
 // Next reads events from the underlying Channel until a complete
@@ -206,6 +258,7 @@ func (a *aggregatorChannel) absorbHeaders(env *envelope.Envelope, evt *http2.H2H
 		// Complete bodyless message. Reset phase so subsequent events
 		// (a second request-response on the same channel) can be
 		// absorbed.
+		a.recordEmittedLocked(outEnv)
 		a.resetLocked()
 		return outEnv, true, nil
 	}
@@ -272,6 +325,7 @@ func (a *aggregatorChannel) absorbData(env *envelope.Envelope, evt *http2.H2Data
 		// file mode → msg.BodyBuffer.
 		a.finalizeBodyLocked()
 		out := a.inflight
+		a.recordEmittedLocked(out)
 		a.resetLocked()
 		return out, true, nil
 	}
@@ -296,6 +350,7 @@ func (a *aggregatorChannel) absorbTrailers(env *envelope.Envelope, evt *http2.H2
 	a.inflight.Raw = append(a.inflight.Raw, env.Raw...)
 	a.finalizeBodyLocked()
 	out := a.inflight
+	a.recordEmittedLocked(out)
 	a.resetLocked()
 	return out, true, nil
 }

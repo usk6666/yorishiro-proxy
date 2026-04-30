@@ -4,6 +4,7 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/layer"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/http2"
+	"github.com/usk6666/yorishiro-proxy/internal/pluginv2"
 )
 
 // Role identifies whether the aggregated Channel is server-side (local
@@ -39,6 +40,12 @@ type WrapOptions struct {
 	// a *layer.StreamError with Code=ErrorInternalError from Next() and
 	// RST_STREAMs the underlying stream. Zero means use config.MaxBodySize.
 	MaxBodySize int64
+
+	// StateReleaser is the optional pluginv2 hook the wrapper invokes at
+	// Close() with each emitted HTTPMessage's (ConnID, FlowID), releasing
+	// the corresponding ctx.transaction_state scope. nil = no-op (legacy
+	// parallel: the aggregator runs without pluginv2 wired up).
+	StateReleaser pluginv2.StateReleaser
 }
 
 // OptionsFromLayer returns a WrapOptions populated from the given HTTP/2
