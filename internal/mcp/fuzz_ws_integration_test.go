@@ -151,25 +151,35 @@ func TestFuzzWS_PayloadPositionGeneratesVariants(t *testing.T) {
 		t.Fatalf("len(Variants) = %d, want %d", len(result.Variants), len(payloads))
 	}
 
-	// AC#3: each variant got the expected payload echoed back.
+	// Per-variant Stream rows + AC#3 echo verification via the recorded
+	// receive Flow body. The variant row only carries scalar metadata
+	// (size + opcode + close fields) — full payloads are intentionally
+	// not stored on the row to bound worst-case memory (CWE-770).
 	seen := map[string]bool{}
-	for _, row := range result.Variants {
-		seen[row.Payload] = true
-	}
-	for _, p := range payloads {
-		if !seen[p] {
-			t.Errorf("upstream did not echo back payload %q", p)
-		}
-	}
-
-	// Per-variant Stream rows.
 	for i, row := range result.Variants {
 		if row.StreamID == "" {
 			t.Errorf("variants[%d].StreamID is empty", i)
+			continue
 		}
 		s, err := store.GetStream(context.Background(), row.StreamID)
 		if err != nil || s == nil {
 			t.Errorf("variants[%d]: GetStream(%s) err=%v", i, row.StreamID, err)
+			continue
+		}
+		flows, err := store.GetFlows(context.Background(), row.StreamID, flow.FlowListOptions{Direction: "receive"})
+		if err != nil {
+			t.Errorf("variants[%d]: GetFlows(%s) err=%v", i, row.StreamID, err)
+			continue
+		}
+		for _, f := range flows {
+			if len(f.Body) > 0 {
+				seen[string(f.Body)] = true
+			}
+		}
+	}
+	for _, p := range payloads {
+		if !seen[p] {
+			t.Errorf("upstream did not echo back payload %q (saw %v)", p, seen)
 		}
 	}
 

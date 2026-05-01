@@ -306,8 +306,7 @@ func (s *Server) runFuzzWSSingleVariant(ctx context.Context, plan *fuzzWSPlan, p
 		row.Compressed = respMsg.Compressed
 		row.CloseCode = respMsg.CloseCode
 		row.CloseReason = respMsg.CloseReason
-		maskedPayload := s.filterOutputBody(respMsg.Payload)
-		row.Payload, row.PayloadEncoding = encodeResendWSPayload(maskedPayload, respMsg.Opcode)
+		row.PayloadSize = len(respMsg.Payload)
 		if respMsg.Opcode == envelope.WSClose {
 			gotClose = true
 		}

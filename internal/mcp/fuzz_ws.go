@@ -110,22 +110,27 @@ type fuzzWSResult struct {
 	Tag               string             `json:"tag,omitempty"`
 }
 
-// fuzzWSVariantRow is one variant's compact result row. Opcode + Payload
-// describe the upstream's terminating frame (the first non-control
-// frame OR a Close frame); empty when the variant errored before send.
+// fuzzWSVariantRow is one variant's compact result row. Opcode + scalar
+// metadata describe the upstream's terminating frame (the first non-
+// control frame OR a Close frame); the full payload is intentionally
+// NOT stored on the row — analysts retrieve it via the `query` MCP
+// tool against the variant's StreamID. Storing the full payload would
+// let a malicious upstream amplify memory use up to maxFuzzWSVariants
+// (1000) × the 16 MiB per-frame Layer cap (CWE-770); mirrors fuzz_http
+// which only stores BodySize. CloseReason stays on the row because RFC
+// 6455 §5.5.1 caps Close payloads at 125 bytes (no DoS surface).
 type fuzzWSVariantRow struct {
-	Index           int               `json:"index"`
-	StreamID        string            `json:"stream_id"`
-	Opcode          string            `json:"opcode,omitempty"`
-	Fin             bool              `json:"fin,omitempty"`
-	Payload         string            `json:"payload,omitempty"`
-	PayloadEncoding string            `json:"payload_encoding,omitempty"`
-	Compressed      bool              `json:"compressed,omitempty"`
-	CloseCode       uint16            `json:"close_code,omitempty"`
-	CloseReason     string            `json:"close_reason,omitempty"`
-	Payloads        map[string]string `json:"payloads"`
-	Error           string            `json:"error,omitempty"`
-	DurationMs      int64             `json:"duration_ms"`
+	Index       int               `json:"index"`
+	StreamID    string            `json:"stream_id"`
+	Opcode      string            `json:"opcode,omitempty"`
+	Fin         bool              `json:"fin,omitempty"`
+	PayloadSize int               `json:"payload_size,omitempty"`
+	Compressed  bool              `json:"compressed,omitempty"`
+	CloseCode   uint16            `json:"close_code,omitempty"`
+	CloseReason string            `json:"close_reason,omitempty"`
+	Payloads    map[string]string `json:"payloads"`
+	Error       string            `json:"error,omitempty"`
+	DurationMs  int64             `json:"duration_ms"`
 }
 
 // registerFuzzWS wires the fuzz_ws tool into the MCP server.
