@@ -116,6 +116,138 @@ func TestBuildProtocolSummary_HTTP(t *testing.T) {
 	if summary != nil {
 		t.Error("summary should be nil for HTTPS")
 	}
+
+	// New canonical "http" spelling: HTTPMessage covers both HTTP/1.x and
+	// HTTP/2 wire versions; the existing legacy summary is HTTP/2-specific
+	// (keyed by literal "HTTP/2"), so generic canonical "http" returns nil
+	// — matching the legacy HTTP/1.x/HTTPS path.
+	summary = buildProtocolSummary("http", msgs)
+	if summary != nil {
+		t.Error("summary should be nil for canonical http (no version distinction)")
+	}
+}
+
+// TestBuildProtocolSummary_NewSpellings verifies that the new lowercase
+// canonical Envelope.Protocol values dispatch through canonicalProtocol to
+// the same summary builders as the legacy spellings.
+func TestBuildProtocolSummary_NewSpellings(t *testing.T) {
+	t.Run("ws", func(t *testing.T) {
+		msgs := []*flow.Flow{
+			{Sequence: 0, Direction: "send", Metadata: map[string]string{"opcode": "1"}},
+			{Sequence: 1, Direction: "receive", Metadata: map[string]string{"opcode": "8"}},
+		}
+		summary := buildProtocolSummary("ws", msgs)
+		if summary == nil {
+			t.Fatal("summary should not be nil for canonical ws")
+		}
+		if summary["message_count"] != "2" {
+			t.Errorf("message_count = %q, want 2", summary["message_count"])
+		}
+		if summary["last_frame_type"] != "Close" {
+			t.Errorf("last_frame_type = %q, want Close", summary["last_frame_type"])
+		}
+	})
+
+	t.Run("grpc", func(t *testing.T) {
+		msgs := []*flow.Flow{
+			{Sequence: 0, Direction: "send", Metadata: map[string]string{"service": "S", "method": "M"}},
+			{Sequence: 1, Direction: "receive", Metadata: map[string]string{"grpc_status": "0"}},
+		}
+		summary := buildProtocolSummary("grpc", msgs)
+		if summary == nil {
+			t.Fatal("summary should not be nil for canonical grpc")
+		}
+		if summary["service"] != "S" || summary["method"] != "M" || summary["grpc_status"] != "0" {
+			t.Errorf("unexpected summary: %+v", summary)
+		}
+	})
+
+	t.Run("grpc-web", func(t *testing.T) {
+		msgs := []*flow.Flow{
+			{Sequence: 0, Direction: "send", Metadata: map[string]string{"service": "S", "method": "M"}},
+		}
+		summary := buildProtocolSummary("grpc-web", msgs)
+		if summary == nil {
+			t.Fatal("summary should not be nil for canonical grpc-web")
+		}
+		if summary["service"] != "S" {
+			t.Errorf("service = %q, want S", summary["service"])
+		}
+	})
+
+	t.Run("raw", func(t *testing.T) {
+		msgs := []*flow.Flow{
+			{Sequence: 0, Direction: "send", Body: []byte("ab")},
+			{Sequence: 1, Direction: "receive", Body: []byte("cde")},
+		}
+		summary := buildProtocolSummary("raw", msgs)
+		if summary == nil {
+			t.Fatal("summary should not be nil for canonical raw")
+		}
+		if summary["send_bytes"] != "2" || summary["receive_bytes"] != "3" {
+			t.Errorf("unexpected raw summary: %+v", summary)
+		}
+	})
+
+	t.Run("sse_returns_nil", func(t *testing.T) {
+		msgs := []*flow.Flow{{Sequence: 0, Direction: "receive"}}
+		if got := buildProtocolSummary("sse", msgs); got != nil {
+			t.Errorf("sse summary should be nil (no dedicated builder), got %+v", got)
+		}
+	})
+
+	t.Run("tls-handshake_returns_nil", func(t *testing.T) {
+		if got := buildProtocolSummary("tls-handshake", nil); got != nil {
+			t.Errorf("tls-handshake summary should be nil, got %+v", got)
+		}
+	})
+
+	t.Run("unknown_returns_nil", func(t *testing.T) {
+		if got := buildProtocolSummary("nonsense-protocol", nil); got != nil {
+			t.Errorf("unknown protocol should yield nil, got %+v", got)
+		}
+	})
+}
+
+// TestCanonicalProtocol verifies the inverse-lookup table is consistent with
+// the family table and covers every literal we expect to see in the store.
+func TestCanonicalProtocol(t *testing.T) {
+	cases := []struct {
+		input string
+		want  string
+	}{
+		// Canonical (new) spellings map to themselves.
+		{"http", "http"},
+		{"ws", "ws"},
+		{"grpc", "grpc"},
+		{"grpc-web", "grpc-web"},
+		{"sse", "sse"},
+		{"raw", "raw"},
+		{"tls-handshake", "tls-handshake"},
+		// Legacy literals map to their canonical families.
+		{"HTTP/1.x", "http"},
+		{"HTTPS", "http"},
+		{"HTTP/2", "http"},
+		{"WebSocket", "ws"},
+		{"gRPC", "grpc"},
+		{"gRPC-Web", "grpc-web"},
+		{"TCP", "raw"},
+		// SOCKS5+ variants map to canonical families.
+		{"SOCKS5+HTTPS", "http"},
+		{"SOCKS5+HTTP/2", "http"},
+		{"SOCKS5+WebSocket", "ws"},
+		{"SOCKS5+TCP", "raw"},
+		// Unknown returns "".
+		{"nonsense", ""},
+		{"", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.input, func(t *testing.T) {
+			if got := canonicalProtocol(tc.input); got != tc.want {
+				t.Errorf("canonicalProtocol(%q) = %q, want %q", tc.input, got, tc.want)
+			}
+		})
+	}
 }
 
 func TestWsOpcodeLabel(t *testing.T) {

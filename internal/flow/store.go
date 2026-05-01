@@ -126,8 +126,16 @@ type Store interface {
 
 // StreamListOptions configures stream listing behavior.
 type StreamListOptions struct {
-	// Protocol filters streams by protocol (e.g. "HTTP/1.x").
+	// Protocol filters streams by an exact protocol literal (e.g. "HTTP/1.x").
+	// Mutually exclusive with Protocols; if both are set, Protocols wins.
 	Protocol string
+	// Protocols filters streams by a set of acceptable protocol literals,
+	// matched as `s.protocol IN (...)`. Used by the MCP query tool to expand
+	// canonical Message-type families (e.g. "http") into the legacy and new
+	// recorded protocol strings that share the family during the RFC-001
+	// parallel-coexistence window. The Store performs no normalization on
+	// the values; callers pass the literal strings to match.
+	Protocols []string
 	// Scheme filters streams by URL scheme / transport indicator
 	// (e.g. "https", "http", "wss", "ws", "tcp").
 	Scheme string
