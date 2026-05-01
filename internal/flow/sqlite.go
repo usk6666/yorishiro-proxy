@@ -332,7 +332,15 @@ func buildStreamWhereClause(opts StreamListOptions) (string, []interface{}) {
 	var conditions []string
 	var args []interface{}
 
-	if opts.Protocol != "" {
+	switch {
+	case len(opts.Protocols) > 0:
+		placeholders := strings.Repeat("?,", len(opts.Protocols))
+		placeholders = placeholders[:len(placeholders)-1]
+		conditions = append(conditions, "s.protocol IN ("+placeholders+")")
+		for _, p := range opts.Protocols {
+			args = append(args, p)
+		}
+	case opts.Protocol != "":
 		conditions = append(conditions, "s.protocol = ?")
 		args = append(args, opts.Protocol)
 	}

@@ -55,10 +55,16 @@ type queryInput struct {
 
 // queryFilter contains filter options for the flows and fuzz resources.
 type queryFilter struct {
-	// Protocol filters flows by exact protocol label. Note: protocol=HTTPS matches only HTTP/1.x over TLS.
-	// HTTPS MITM connections negotiated as HTTP/2 are recorded as protocol=HTTP/2, not HTTPS.
-	// To find all flows over TLS regardless of protocol, use scheme=https instead.
-	Protocol string `json:"protocol,omitempty" jsonschema:"exact protocol label filter (HTTP/1.x, HTTPS, WebSocket, HTTP/2, gRPC, gRPC-Web, TCP, SOCKS5+HTTPS, SOCKS5+HTTP). HTTPS matches only HTTP/1.x over TLS; HTTP/2 over TLS is recorded as HTTP/2. To find all TLS flows use scheme=https instead."`
+	// Protocol filters flows by Message-type family or exact legacy label.
+	// Canonical family values (preferred): http, ws, grpc, grpc-web, sse, raw,
+	// tls-handshake. Each expands to the union of new and legacy spellings
+	// recorded for the family (e.g. protocol=http matches HTTP/1.x, HTTPS,
+	// HTTP/2 and their SOCKS5+ variants).
+	// Legacy values (HTTP/1.x, HTTPS, HTTP/2, WebSocket, gRPC, gRPC-Web, TCP,
+	// SOCKS5+...) stay literal exact-match; protocol=HTTPS does NOT match
+	// HTTP/2-over-TLS recordings. To find all TLS flows regardless of HTTP
+	// version, use scheme=https instead.
+	Protocol string `json:"protocol,omitempty" jsonschema:"protocol filter — canonical Message-type family (http, ws, grpc, grpc-web, sse, raw, tls-handshake) expands to all spellings; legacy (HTTP/1.x, HTTPS, HTTP/2, WebSocket, gRPC, gRPC-Web, TCP, SOCKS5+HTTP/1.x, SOCKS5+HTTPS, SOCKS5+HTTP/2, SOCKS5+WebSocket, SOCKS5+gRPC, SOCKS5+gRPC-Web, SOCKS5+TCP) stays literal. To find all TLS flows use scheme=https instead."`
 	// Scheme filters flows by URL scheme / transport (e.g. "https", "http", "wss", "ws", "tcp").
 	// Use scheme to find TLS flows: filter={scheme: "https"} returns HTTP/1.x, HTTP/2, gRPC flows over TLS.
 	// WebSocket over TLS uses scheme="wss", not "https".
@@ -94,8 +100,13 @@ type queryFilter struct {
 // availableResources lists all valid resource names for error messages.
 var availableResources = []string{"flows", "flow", "messages", "status", "config", "ca_cert", "intercept_queue", "macros", "macro", "fuzz_jobs", "fuzz_results", "technologies"}
 
-// validFilterProtocols lists valid values for filter.protocol.
-var validFilterProtocols = []string{"HTTP/1.x", "HTTPS", "WebSocket", "HTTP/2", "gRPC", "gRPC-Web", "TCP", "SOCKS5+HTTPS", "SOCKS5+HTTP"}
+// validFilterProtocols lists accepted values for filter.protocol. Canonical
+// Message-type families are listed first; legacy literals follow for parallel
+// coexistence until N9. See protocol_family.go for the family expansion table.
+var validFilterProtocols = append(append([]string{},
+	filterProtocolFamilyValues...),
+	filterProtocolLegacyValues...,
+)
 
 // validFilterSchemes lists valid values for filter.scheme.
 var validFilterSchemes = []string{"https", "http", "wss", "ws", "tcp"}
@@ -177,7 +188,7 @@ func (s *Server) registerQuery() {
 			"Set 'resource' to one of: flows, flow, messages, status, config, ca_cert, intercept_queue, macros, macro, fuzz_jobs, fuzz_results, technologies. " +
 			"The 'id' parameter is required for flow, messages, and macro resources. " +
 			"The 'fuzz_id' parameter is required for fuzz_results resource. " +
-			"The 'filter' parameter supports filtering flows by protocol (HTTP/1.x, HTTPS, WebSocket, HTTP/2, gRPC, TCP, SOCKS5+HTTPS, SOCKS5+HTTP), scheme (https, http, wss, ws, tcp — use scheme to find all TLS flows: scheme=https returns HTTP/1.x+HTTP/2+gRPC over TLS), method, url_pattern, status_code, blocked_by (target_scope, intercept_drop, rate_limit), state (active, complete, error), technology (e.g. nginx, wordpress), conn_id (connection ID, exact match), and host (matches server_addr or URL host); " +
+			"The 'filter' parameter supports filtering flows by protocol (canonical Message-type family: http, ws, grpc, grpc-web, sse, raw, tls-handshake — each expands across new and legacy spellings; legacy literals HTTP/1.x, HTTPS, HTTP/2, WebSocket, gRPC, gRPC-Web, TCP and SOCKS5+ variants stay literal), scheme (https, http, wss, ws, tcp — use scheme to find all TLS flows: scheme=https returns HTTP/1.x+HTTP/2+gRPC over TLS), method, url_pattern, status_code, blocked_by (target_scope, intercept_drop, rate_limit), state (active, complete, error), technology (e.g. nginx, wordpress), conn_id (connection ID, exact match), and host (matches server_addr or URL host); " +
 			"messages by direction (send or receive); " +
 			"fuzz_jobs by status and tag; fuzz_results by status_code, body_contains, and outliers_only (returns only outlier results). " +
 			"Flows include protocol_summary with protocol-specific information. " +
@@ -360,7 +371,18 @@ func buildFlowListOptions(input queryInput) flow.StreamListOptions {
 		SortBy: input.SortBy,
 	}
 	if input.Filter != nil {
-		opts.Protocol = input.Filter.Protocol
+		// Translate the user-facing protocol value into Store options.
+		// Canonical family values (http, ws, ...) expand into a list of
+		// new+legacy literal Stream.Protocol spellings via Protocols.
+		// Legacy values (HTTPS, HTTP/2, ...) stay strict via Protocol.
+		// Unknown values are already rejected upstream by validateEnum.
+		if p := input.Filter.Protocol; p != "" {
+			if expanded := expandProtocolFilter(p); len(expanded) > 1 {
+				opts.Protocols = expanded
+			} else {
+				opts.Protocol = p
+			}
+		}
 		opts.Scheme = input.Filter.Scheme
 		opts.Method = input.Filter.Method
 		opts.URLPattern = input.Filter.URLPattern

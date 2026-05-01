@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"reflect"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -1039,6 +1041,188 @@ func TestQuery_Sessions_FilterByProtocol(t *testing.T) {
 	}
 	if out.Flows[0].Protocol != "HTTPS" {
 		t.Errorf("protocol = %q, want HTTPS", out.Flows[0].Protocol)
+	}
+}
+
+// TestQuery_Sessions_FilterByProtocol_Family verifies that the new canonical
+// Envelope.Protocol values (http, ws, grpc, grpc-web, raw) expand into all
+// known family literals (new + legacy spellings) when used as filter input.
+// Each subtest seeds streams with a mix of new and legacy spellings and
+// asserts the family-aliased filter returns every member.
+func TestQuery_Sessions_FilterByProtocol_Family(t *testing.T) {
+	t.Parallel()
+
+	type want struct {
+		filter string
+		ids    []string // expected stream IDs (sorted)
+	}
+	tests := []struct {
+		name  string
+		seed  []struct{ id, protocol string }
+		check []want
+	}{
+		{
+			name: "http_family_covers_legacy_and_new",
+			seed: []struct{ id, protocol string }{
+				{"http-new", "http"},
+				{"http-legacy-1x", "HTTP/1.x"},
+				{"http-legacy-https", "HTTPS"},
+				{"http-legacy-h2", "HTTP/2"},
+				{"http-socks5", "SOCKS5+HTTPS"},
+				{"ws-stream", "ws"}, // not in family, must NOT match
+			},
+			check: []want{
+				{"http", []string{"http-legacy-1x", "http-legacy-h2", "http-legacy-https", "http-new", "http-socks5"}},
+				{"HTTPS", []string{"http-legacy-https"}}, // legacy stays strict
+				{"HTTP/2", []string{"http-legacy-h2"}},   // legacy stays strict
+			},
+		},
+		{
+			name: "ws_family_covers_legacy_and_new",
+			seed: []struct{ id, protocol string }{
+				{"ws-new", "ws"},
+				{"ws-legacy", "WebSocket"},
+				{"ws-socks5", "SOCKS5+WebSocket"},
+				{"raw-stream", "raw"}, // not in family
+			},
+			check: []want{
+				{"ws", []string{"ws-legacy", "ws-new", "ws-socks5"}},
+				{"WebSocket", []string{"ws-legacy"}},
+			},
+		},
+		{
+			name: "grpc_family_covers_legacy_and_new",
+			seed: []struct{ id, protocol string }{
+				{"grpc-new", "grpc"},
+				{"grpc-legacy", "gRPC"},
+				{"grpc-socks5", "SOCKS5+gRPC"},
+				{"grpcw-new", "grpc-web"}, // grpc-web is its OWN family
+			},
+			check: []want{
+				{"grpc", []string{"grpc-legacy", "grpc-new", "grpc-socks5"}},
+				{"gRPC", []string{"grpc-legacy"}},
+			},
+		},
+		{
+			name: "grpc-web_family_covers_legacy_and_new",
+			seed: []struct{ id, protocol string }{
+				{"grpcw-new", "grpc-web"},
+				{"grpcw-legacy", "gRPC-Web"},
+				{"grpc-stream", "grpc"}, // grpc family is separate
+			},
+			check: []want{
+				{"grpc-web", []string{"grpcw-legacy", "grpcw-new"}},
+				{"gRPC-Web", []string{"grpcw-legacy"}},
+			},
+		},
+		{
+			name: "raw_family_covers_legacy_and_new",
+			seed: []struct{ id, protocol string }{
+				{"raw-new", "raw"},
+				{"raw-legacy-tcp", "TCP"},
+				{"raw-socks5", "SOCKS5+TCP"},
+				{"http-stream", "http"}, // not in family
+			},
+			check: []want{
+				{"raw", []string{"raw-legacy-tcp", "raw-new", "raw-socks5"}},
+				{"TCP", []string{"raw-legacy-tcp"}},
+			},
+		},
+		{
+			name: "sse_family_self_only",
+			seed: []struct{ id, protocol string }{
+				{"sse-only", "sse"},
+				{"http-stream", "http"},
+			},
+			check: []want{
+				{"sse", []string{"sse-only"}},
+			},
+		},
+		{
+			name: "tls-handshake_family_self_only",
+			seed: []struct{ id, protocol string }{
+				{"tls-only", "tls-handshake"},
+				{"http-stream", "http"},
+			},
+			check: []want{
+				{"tls-handshake", []string{"tls-only"}},
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			store := newTestStore(t)
+			for _, s := range tc.seed {
+				seedSession(t, store, s.id, s.protocol, "GET", "https://example.com/"+s.id, 200)
+			}
+			cs := setupQueryTestSession(t, store)
+
+			for _, w := range tc.check {
+				t.Run("filter="+w.filter, func(t *testing.T) {
+					result := callQuery(t, cs, queryInput{
+						Resource: "flows",
+						Filter:   &queryFilter{Protocol: w.filter},
+					})
+					if result.IsError {
+						t.Fatalf("filter %q: expected success: %v", w.filter, result.Content)
+					}
+					var out queryFlowsResult
+					unmarshalQueryResult(t, result, &out)
+
+					gotIDs := make([]string, 0, len(out.Flows))
+					for _, f := range out.Flows {
+						gotIDs = append(gotIDs, f.ID)
+					}
+					sort.Strings(gotIDs)
+					wantIDs := append([]string(nil), w.ids...)
+					sort.Strings(wantIDs)
+
+					if !reflect.DeepEqual(gotIDs, wantIDs) {
+						t.Errorf("filter=%q: got IDs %v, want %v", w.filter, gotIDs, wantIDs)
+					}
+					if out.Count != len(wantIDs) {
+						t.Errorf("filter=%q: count = %d, want %d", w.filter, out.Count, len(wantIDs))
+					}
+				})
+			}
+		})
+	}
+}
+
+// TestExpandProtocolFilter unit-tests the family expansion helper directly.
+func TestExpandProtocolFilter(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		input string
+		want  []string
+	}{
+		// Canonical (new) → expand to family literals
+		{"http", []string{"http", "HTTP/1.x", "HTTPS", "HTTP/2", "SOCKS5+HTTP/1.x", "SOCKS5+HTTPS", "SOCKS5+HTTP/2"}},
+		{"ws", []string{"ws", "WebSocket", "SOCKS5+WebSocket"}},
+		{"grpc", []string{"grpc", "gRPC", "SOCKS5+gRPC"}},
+		{"grpc-web", []string{"grpc-web", "gRPC-Web", "SOCKS5+gRPC-Web"}},
+		{"sse", []string{"sse"}},
+		{"raw", []string{"raw", "TCP", "SOCKS5+TCP"}},
+		{"tls-handshake", []string{"tls-handshake"}},
+		// Legacy → single-element passthrough
+		{"HTTPS", []string{"HTTPS"}},
+		{"HTTP/2", []string{"HTTP/2"}},
+		{"WebSocket", []string{"WebSocket"}},
+		{"gRPC", []string{"gRPC"}},
+		{"TCP", []string{"TCP"}},
+		{"SOCKS5+HTTPS", []string{"SOCKS5+HTTPS"}},
+		// Unknown → nil
+		{"nonsense", nil},
+		{"", nil},
+	}
+	for _, tc := range tests {
+		t.Run(tc.input, func(t *testing.T) {
+			got := expandProtocolFilter(tc.input)
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("expandProtocolFilter(%q) = %v, want %v", tc.input, got, tc.want)
+			}
+		})
 	}
 }
 

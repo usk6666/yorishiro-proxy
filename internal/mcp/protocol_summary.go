@@ -9,16 +9,28 @@ import (
 
 // buildProtocolSummary generates a protocol-specific summary map for a flow.
 // The summary provides key information relevant to the flow's protocol type.
+//
+// Dispatch is by Message-type family (canonical Envelope.Protocol value), so
+// flows recorded with either the new lowercase spelling ("ws", "grpc", ...)
+// or the legacy spelling ("WebSocket", "gRPC", ...) yield the same summary
+// shape. Unknown or unmapped protocols return nil.
 func buildProtocolSummary(protocol string, msgs []*flow.Flow) map[string]string {
-	switch protocol {
-	case "WebSocket":
+	switch canonicalProtocol(protocol) {
+	case "ws":
 		return buildWebSocketSummary(msgs)
-	case "HTTP/2":
-		return buildHTTP2Summary(msgs)
-	case "gRPC", "gRPC-Web":
+	case "grpc", "grpc-web":
 		return buildGRPCSummary(msgs)
-	case "TCP":
+	case "raw":
 		return buildTCPSummary(msgs)
+	case "http":
+		// Only HTTP/2 currently has stream-count summary; HTTP/1.x and
+		// HTTPS legacy spellings are not surfaced here. Match the legacy
+		// behaviour by gating on the literal HTTP/2 spellings.
+		switch protocol {
+		case "HTTP/2", "SOCKS5+HTTP/2":
+			return buildHTTP2Summary(msgs)
+		}
+		return nil
 	default:
 		return nil
 	}
