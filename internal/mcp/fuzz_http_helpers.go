@@ -4,6 +4,31 @@
 // hard cap), per-variant payload application against the HTTPMessage
 // envelope, the dial / pipeline factory (reused from resend_http), the
 // per-variant run loop, and result formatting.
+//
+// # Payload passthrough — by design (MITM principle)
+//
+// Position payloads substituted into the HTTPMessage envelope via
+// applyFuzzHTTPPosition / applyFuzzHTTPRoot are written verbatim,
+// including CR/LF and other control characters. This is intentional:
+// fuzz_http is the path most useful for request smuggling, header
+// injection, URL/path injection, and CRLF-injection fuzzing. Adding a
+// CRLF guard at substitution time would defeat the purpose of the tool.
+//
+// This is consistent with the project-wide MITM Implementation Principle
+// "Do not normalize what the wire did not normalize" (CLAUDE.md). Note
+// that this is asymmetric with the base-headers path: validateResendHTTPInput
+// (called via fuzzHTTPInputToResendHTTP / validateHeaderKVList) does
+// reject CR/LF in user-supplied *base* headers, but per-position
+// payloads bypass that guard by design. Callers that need a strict
+// (no-CRLF) mode should pre-filter their payload lists at the call
+// site.
+//
+// SafetyFilter input gating still runs per-variant inside
+// runFuzzHTTPSingleVariant (after position application, before the
+// upstream dial), so the destructive-sql / destructive-os-command
+// presets continue to apply to the substituted payload — fuzzing CRLF
+// is allowed; sending `rm -rf /` is not, when the configured rules say
+// so.
 package mcp
 
 import (
@@ -34,6 +59,14 @@ const maxFuzzHTTPVariants = 1000
 // position, which is mostly useless — practical fuzz jobs use 1-3
 // positions. The cap is generous (32) so it almost never bites.
 const maxFuzzHTTPPositions = 32
+
+// maxFuzzHTTPPayloadSize caps the *decoded* size of a single position
+// payload. Without a cap, a 16 MiB payload * maxFuzzHTTPVariants (1000)
+// would queue up 16 GiB of allocated payload bytes (sequential, not
+// concurrent — but still a footgun). 1 MiB is generous for header /
+// URL / body fuzz cases (resend_http itself caps user-supplied bodies
+// at the same order of magnitude).
+const maxFuzzHTTPPayloadSize = 1 << 20
 
 // validFuzzHTTPRoots lists the HTTPMessage root field paths that
 // fuzz_http accepts. headers[N].name and headers[N].value are matched
@@ -259,6 +292,12 @@ func (s *Server) buildFuzzHTTPPipeline(encoders *pipeline.WireEncoderRegistry) *
 // envelope, applies all position payloads, runs through the pipeline,
 // dials, sends, receives, runs response through the pipeline, returns
 // the row.
+//
+// Per-variant SafetyFilter input gating runs after position application
+// and before the upstream dial (mirroring legacy fuzz_tool.go per-payload
+// semantics). On a violation the variant is recorded with row.Error set
+// and returns statusCode=0 — the caller continues iterating; a single
+// blocked variant does not abort the whole run.
 func (s *Server) runFuzzHTTPSingleVariant(ctx context.Context, plan *fuzzHTTPPlan, p *pipeline.Pipeline, dial session.DialFunc, timeout time.Duration, variantIdx int, payloads map[string]string, tag string) (fuzzHTTPVariantRow, int, error) {
 	row := fuzzHTTPVariantRow{
 		Index:    variantIdx,
@@ -281,11 +320,21 @@ func (s *Server) runFuzzHTTPSingleVariant(ctx context.Context, plan *fuzzHTTPPla
 		}
 	}
 
+	// SafetyFilter input gating: run AFTER position application so the
+	// destructive-sql / destructive-os-command presets see the substituted
+	// payload (matches fuzz_tool.go per-payload semantics). On a violation
+	// we record the variant with row.Error and return statusCode=0 — the
+	// run loop continues to the next variant.
+	row.StreamID = variantEnv.StreamID
+	if v := s.checkSafetyInput(variantMsg.Body, resendHTTPRequestURL(variantMsg).String(), keyValuesToExchangeKV(variantMsg.Headers)); v != nil {
+		row.Error = safetyViolationError(v)
+		return row, 0, nil
+	}
+
 	rtCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	respEnv, err := runFuzzHTTPSingleExchange(rtCtx, variantEnv, dial, p)
-	row.StreamID = variantEnv.StreamID
 	if err != nil {
 		return row, 0, err
 	}
@@ -293,8 +342,11 @@ func (s *Server) runFuzzHTTPSingleVariant(ctx context.Context, plan *fuzzHTTPPla
 		row.StatusCode = respMsg.Status
 		row.BodySize = len(respMsg.Body)
 	}
+	// Tag persistence uses the parent ctx (not the per-variant rtCtx) so
+	// the tag write is not bound to the variant's request timeout —
+	// matches resend_http.go behaviour.
 	if tag != "" && s.flowStore.store != nil {
-		s.applyResendHTTPTag(rtCtx, variantEnv.StreamID, tag)
+		s.applyResendHTTPTag(ctx, variantEnv.StreamID, tag)
 	}
 	return row, row.StatusCode, nil
 }
@@ -354,6 +406,10 @@ func nextIndices(indices []int, positions []fuzzHTTPPosition) {
 // for the current variant index combination into a path → decoded
 // payload string map. Decoding follows the position's encoding
 // ("text" or "base64").
+//
+// Each decoded payload is rejected if it exceeds maxFuzzHTTPPayloadSize
+// — see the constant doc for the rationale. The cap applies post-decode
+// so a 1.4 MiB base64 string that decodes to 1 MiB is allowed.
 func decodeFuzzHTTPPayloads(positions []fuzzHTTPPosition, indices []int) (map[string]string, error) {
 	out := make(map[string]string, len(positions))
 	for i, pos := range positions {
@@ -361,6 +417,9 @@ func decodeFuzzHTTPPayloads(positions []fuzzHTTPPosition, indices []int) (map[st
 		decoded, err := decodeBodyEncoded(raw, pos.Encoding, fmt.Sprintf("positions[%d].payloads[%d]", i, indices[i]))
 		if err != nil {
 			return nil, err
+		}
+		if len(decoded) > maxFuzzHTTPPayloadSize {
+			return nil, fmt.Errorf("positions[%d].payloads[%d]: decoded length %d exceeds %d byte cap", i, indices[i], len(decoded), maxFuzzHTTPPayloadSize)
 		}
 		out[pos.Path] = string(decoded)
 	}
@@ -396,6 +455,16 @@ func applyFuzzHTTPPosition(msg *envelope.HTTPMessage, path, payload string) erro
 
 // applyFuzzHTTPRoot writes payload at a scalar root path on msg.
 // Caller has already validated the path via validFuzzHTTPRoots.
+//
+// All scalar substitutions (method/scheme/authority/path/raw_query/body)
+// pass through verbatim — see the package-level "Payload passthrough"
+// note for the rationale (CRLF / smuggling fuzz is the point).
+//
+// For the body case, msg.BodyBuffer is also cleared to enforce the
+// HTTPMessage invariant "at most one of Body/BodyBuffer is non-nil".
+// flow_id seeding currently only populates Body, so this is dormant
+// today, but enforcing it here keeps the invariant honest if a future
+// caller surfaces a BodyBuffer.
 func applyFuzzHTTPRoot(msg *envelope.HTTPMessage, path, payload string) {
 	switch path {
 	case "method":
@@ -410,18 +479,22 @@ func applyFuzzHTTPRoot(msg *envelope.HTTPMessage, path, payload string) {
 		msg.RawQuery = payload
 	case "body":
 		msg.Body = []byte(payload)
+		msg.BodyBuffer = nil
 	}
 }
 
 // cloneFuzzHTTPEnvelope returns a deep copy of env suitable for per-
-// variant mutation. CloneMessage covers the Message subtree; FlowID
-// is regenerated so each variant gets a unique Send Flow row;
-// StreamID is left empty for the caller to stamp.
+// variant mutation. Delegates the deep-copy semantics (Message subtree
+// via CloneMessage, Raw cloned, Opaque intentionally dropped) to
+// envelope.Envelope.Clone() so the invariants are enforced rather than
+// relied upon. FlowID is regenerated so each variant gets a unique
+// Send Flow row; StreamID is left empty for the caller to stamp; Raw
+// is dropped because variant raw bytes are produced by the encoder
+// inside the pipeline.
 func cloneFuzzHTTPEnvelope(env *envelope.Envelope) *envelope.Envelope {
-	out := *env
+	out := env.Clone()
 	out.FlowID = uuid.NewString()
 	out.StreamID = ""
 	out.Raw = nil
-	out.Message = env.Message.CloneMessage()
-	return &out
+	return out
 }

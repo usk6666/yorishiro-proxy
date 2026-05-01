@@ -88,17 +88,20 @@ func setupFuzzHTTPSession(t *testing.T) (*gomcp.ClientSession, flow.Store, *int3
 
 // startFuzzHTTPEcho stands up a plain-HTTP server that echoes the
 // request method + path + query + body in JSON. Captured request data
-// is exposed via the returned getter.
+// is exposed via the returned getter. The X-Marker request header (if
+// present) is also captured into entry["x_marker"] so header-mutation
+// tests can assert the substituted value reached the wire.
 func startFuzzHTTPEcho(t *testing.T) (*httptest.Server, func() []map[string]any) {
 	t.Helper()
 	var captured atomic.Pointer[[]map[string]any]
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		entry := map[string]any{
-			"method": r.Method,
-			"path":   r.URL.Path,
-			"query":  r.URL.RawQuery,
-			"body":   string(body),
+			"method":   r.Method,
+			"path":     r.URL.Path,
+			"query":    r.URL.RawQuery,
+			"body":     string(body),
+			"x_marker": r.Header.Get("X-Marker"),
 		}
 		// Append-by-CAS so concurrent variants (none today, but defensive)
 		// don't lose entries.
@@ -263,19 +266,32 @@ func TestFuzzHTTP_HeaderIndexPosition(t *testing.T) {
 		t.Fatalf("CompletedVariants = %d, want %d", result.CompletedVariants, len(headerValues))
 	}
 
-	// httptest server lower-cases header keys (canonical http.Header
-	// rules), so look up via the captured map's `body` field which we
-	// don't echo. Instead, just verify all variants hit /probe — header
-	// mutation already proved itself by reaching the server N times
-	// without per-variant errors.
+	// AC#3 mutation assertion: every fuzz payload must reach the wire as
+	// the X-Marker request header value. Without this check the headers[N].value
+	// path could regress to a no-op and the test would still pass.
 	probes := 0
+	seenMarkers := map[string]bool{}
 	for _, entry := range getCaptured() {
-		if entry["path"] == "/probe" {
-			probes++
+		if entry["path"] != "/probe" {
+			continue
+		}
+		probes++
+		if v, ok := entry["x_marker"].(string); ok {
+			seenMarkers[v] = true
 		}
 	}
 	if probes != len(headerValues) {
 		t.Errorf("probes hit /probe = %d, want %d", probes, len(headerValues))
+	}
+	for _, want := range headerValues {
+		if !seenMarkers[want] {
+			t.Errorf("upstream did not see X-Marker=%q (saw %v)", want, seenMarkers)
+		}
+	}
+	// Defensive: the original "ORIGINAL" value must not have leaked
+	// through — every variant should have been mutated.
+	if seenMarkers["ORIGINAL"] {
+		t.Error("upstream saw X-Marker=ORIGINAL — base header leaked into a variant")
 	}
 }
 
@@ -504,5 +520,41 @@ func TestFuzzHTTP_TagAppliedToEachVariantStream(t *testing.T) {
 		if s.Tags["tag"] != "fuzz-tag-7" {
 			t.Errorf("variants[%d].Tags[tag] = %q, want fuzz-tag-7", i, s.Tags["tag"])
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Validation: per-payload decoded size cap (S-3, CWE-770).
+// ---------------------------------------------------------------------------
+
+// TestFuzzHTTP_RejectsExcessivePayloadSize submits a 2 MiB payload and
+// asserts the call returns an error before any variant runs. Caps the
+// memory amplification of large payloads * 1000 variants.
+func TestFuzzHTTP_RejectsExcessivePayloadSize(t *testing.T) {
+	cs, _, _, _ := setupFuzzHTTPSession(t)
+	bigPayload := strings.Repeat("A", 2<<20) // 2 MiB > 1 MiB cap
+	res, _ := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "fuzz_http",
+		Arguments: map[string]any{
+			"method":    "GET",
+			"scheme":    "http",
+			"authority": "127.0.0.1:9999",
+			"path":      "/x",
+			"positions": []map[string]any{
+				{"path": "body", "payloads": []string{bigPayload}},
+			},
+		},
+	})
+	if res == nil || !res.IsError {
+		t.Fatalf("expected error for oversized payload; got %+v", res)
+	}
+	var msg strings.Builder
+	for _, c := range res.Content {
+		if tc, ok := c.(*gomcp.TextContent); ok {
+			msg.WriteString(tc.Text)
+		}
+	}
+	if !strings.Contains(msg.String(), "exceeds") {
+		t.Errorf("error message %q does not mention size cap", msg.String())
 	}
 }
