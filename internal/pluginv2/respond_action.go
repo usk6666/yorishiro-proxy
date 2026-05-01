@@ -2,6 +2,7 @@ package pluginv2
 
 import (
 	"fmt"
+	"math"
 
 	"go.starlark.net/starlark"
 
@@ -104,7 +105,7 @@ func builtinRespondGRPC(_ *starlark.Thread, fn *starlark.Builtin, args starlark.
 	); err != nil {
 		return nil, err
 	}
-	if status < 0 || status > 0xFFFFFFFF {
+	if status < 0 || uint64(status) > math.MaxUint32 {
 		return nil, fmt.Errorf("%s: status must fit in uint32, got %d", fn.Name(), status)
 	}
 	trailers, err := starlarkPairsToKVs(trailersV)
