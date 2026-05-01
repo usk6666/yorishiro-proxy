@@ -9,15 +9,35 @@ import (
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
+	"github.com/usk6666/yorishiro-proxy/internal/rules/common"
 )
 
 // interceptInput is the typed input for the intercept tool.
+//
+// HTTP / WS / GRPCStart / GRPCData / Raw are the per-Message-type modify
+// payloads that drive the new common.HoldQueue path (RFC-001 N8 / USK-676).
+// Exactly one of them must be non-nil for a modify_and_forward action that
+// targets the new HoldQueue; the dispatcher infers Phase + Protocol from
+// the held envelope's Message type and rejects the request when the
+// supplied payload doesn't match. Legacy interceptParams fields continue to
+// drive the pre-N8 intercept.Queue path.
 type interceptInput struct {
 	// Action specifies the intercept action to execute.
 	// Available actions: release, modify_and_forward, drop.
 	Action string `json:"action"`
 	// Params holds action-specific parameters.
 	Params interceptParams `json:"params"`
+
+	// HTTP carries the typed modify payload for an HTTPMessage envelope.
+	HTTP *httpMessageModify `json:"http,omitempty" jsonschema:"typed modify payload for HTTPMessage envelopes (RFC-001 N8 HoldQueue path)"`
+	// WS carries the typed modify payload for a WSMessage envelope.
+	WS *wsMessageModify `json:"ws,omitempty" jsonschema:"typed modify payload for WSMessage envelopes (RFC-001 N8 HoldQueue path)"`
+	// GRPCStart carries the typed modify payload for a GRPCStartMessage envelope.
+	GRPCStart *grpcStartMessageModify `json:"grpc_start,omitempty" jsonschema:"typed modify payload for GRPCStartMessage envelopes (RFC-001 N8 HoldQueue path)"`
+	// GRPCData carries the typed modify payload for a GRPCDataMessage envelope.
+	GRPCData *grpcDataMessageModify `json:"grpc_data,omitempty" jsonschema:"typed modify payload for GRPCDataMessage envelopes (RFC-001 N8 HoldQueue path)"`
+	// Raw carries the typed modify payload for a RawMessage envelope.
+	Raw *rawMessageModify `json:"raw,omitempty" jsonschema:"typed modify payload for RawMessage envelopes (RFC-001 N8 HoldQueue path)"`
 }
 
 // interceptParams holds the union of all intercept action-specific parameters.
@@ -153,17 +173,97 @@ func (s *Server) handleInterceptTool(ctx context.Context, _ *gomcp.CallToolReque
 		)
 	}()
 
-	switch input.Action {
-	case "":
+	if input.Action == "" {
 		return nil, nil, fmt.Errorf("action is required: available actions are %s", strings.Join(availableInterceptActions, ", "))
+	}
+	switch input.Action {
+	case "release", "modify_and_forward", "drop":
+		// valid
+	default:
+		return nil, nil, fmt.Errorf("invalid action %q: available actions are %s", input.Action, strings.Join(availableInterceptActions, ", "))
+	}
+
+	// Stage-1 schema validation that does not depend on the held entry —
+	// run before any queue lookup so a malformed request never consumes a
+	// queue slot. Decision R10 / R24.
+	if err := validateRawMessageModify(input.Raw); err != nil {
+		return nil, nil, err
+	}
+
+	// Try the new RFC-001 N8 HoldQueue first. If the supplied
+	// intercept_id is unknown there, fall through to the legacy queue.
+	if s.pipeline != nil && s.pipeline.holdQueue != nil && input.Params.InterceptID != "" {
+		if entry, err := s.pipeline.holdQueue.Get(input.Params.InterceptID); err == nil {
+			return s.handleInterceptHoldQueue(ctx, input, entry)
+		}
+	}
+
+	switch input.Action {
 	case "release":
 		return s.handleInterceptRelease(ctx, input.Params)
 	case "modify_and_forward":
 		return s.handleInterceptModifyAndForward(ctx, input.Params)
 	case "drop":
 		return s.handleInterceptDrop(ctx, input.Params)
+	}
+	// Unreachable — switch above gates the action set.
+	return nil, nil, fmt.Errorf("invalid action %q", input.Action)
+}
+
+// handleInterceptHoldQueue dispatches an action against an entry in the
+// new common.HoldQueue. Resolves the action via resolveHoldQueueAction
+// (which performs stage-2 validation against the held envelope's type),
+// releases the entry, and returns a structured summary.
+func (s *Server) handleInterceptHoldQueue(_ context.Context, input interceptInput, entry *common.HeldEntry) (*gomcp.CallToolResult, *holdQueueInterceptResult, error) {
+	action, err := resolveHoldQueueAction(entry, input, input.Action)
+	if err != nil {
+		return nil, nil, fmt.Errorf("%s: %w", input.Action, err)
+	}
+
+	if err := s.pipeline.holdQueue.Release(entry.ID, action); err != nil {
+		return nil, nil, fmt.Errorf("%s: %w", input.Action, err)
+	}
+
+	return nil, &holdQueueInterceptResult{
+		InterceptID:  entry.ID,
+		Action:       input.Action,
+		Status:       holdQueueStatusForAction(input.Action),
+		Protocol:     holdQueueProtocolKind(entry.Envelope),
+		Direction:    entry.Envelope.Direction.String(),
+		MatchedRules: entry.MatchedRules,
+		FlowID:       entry.Envelope.FlowID,
+		StreamID:     entry.Envelope.StreamID,
+	}, nil
+}
+
+// holdQueueInterceptResult is the structured response for actions on the
+// new HoldQueue path. Fields are intentionally a subset of
+// executeInterceptResult — the held envelope's full body is not echoed
+// back here because the typed modify payload already round-trips through
+// the dispatch arms.
+type holdQueueInterceptResult struct {
+	InterceptID  string   `json:"intercept_id"`
+	Action       string   `json:"action"`
+	Status       string   `json:"status"`
+	Protocol     string   `json:"protocol"`
+	Direction    string   `json:"direction"`
+	MatchedRules []string `json:"matched_rules,omitempty"`
+	FlowID       string   `json:"flow_id,omitempty"`
+	StreamID     string   `json:"stream_id,omitempty"`
+}
+
+// holdQueueStatusForAction maps the action name to the per-action status
+// label used in the structured response.
+func holdQueueStatusForAction(action string) string {
+	switch action {
+	case "release":
+		return "released"
+	case "modify_and_forward":
+		return "forwarded"
+	case "drop":
+		return "dropped"
 	default:
-		return nil, nil, fmt.Errorf("invalid action %q: available actions are %s", input.Action, strings.Join(availableInterceptActions, ", "))
+		return action
 	}
 }
 

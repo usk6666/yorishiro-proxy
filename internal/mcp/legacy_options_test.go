@@ -20,10 +20,12 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/fuzzer"
 	"github.com/usk6666/yorishiro-proxy/internal/plugin"
+	"github.com/usk6666/yorishiro-proxy/internal/pluginv2"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/rules"
+	"github.com/usk6666/yorishiro-proxy/internal/rules/common"
 	"github.com/usk6666/yorishiro-proxy/internal/safety"
 )
 
@@ -33,12 +35,12 @@ import (
 // the production NewServer to apply ServerOption mutators.
 func newServer(ctx context.Context, ca *cert.CA, store flow.Store, manager *proxy.Manager, opts ...ServerOption) *Server {
 	misc := NewMisc(ctx, ca, nil, "", nil, nil)
-	pipe := NewPipeline(nil, nil, nil, nil, nil)
+	pipe := NewPipeline(nil, nil, nil, nil, nil, nil)
 	conn := NewConnector(manager, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 	jr := NewJobRunner(nil, nil, nil, nil, nil)
 	fs := NewFlowStore(store)
 	me := NewMacroEngine()
-	pe := NewPluginEngine(nil)
+	pe := NewPluginEngine(nil, nil)
 	return NewServer(misc, pipe, conn, jr, fs, me, pe, opts...)
 }
 
@@ -176,6 +178,22 @@ func WithInterceptEngine(engine *intercept.Engine) ServerOption {
 func WithInterceptQueue(queue *intercept.Queue) ServerOption {
 	return func(s *Server) {
 		s.pipeline.interceptQueue = queue
+	}
+}
+
+// WithHoldQueue sets the RFC-001 N8 HoldQueue used by the new
+// (Envelope-based) intercept tool path. Test-only.
+func WithHoldQueue(queue *common.HoldQueue) ServerOption {
+	return func(s *Server) {
+		s.pipeline.holdQueue = queue
+	}
+}
+
+// WithPluginv2Engine sets the pluginv2 engine on the PluginEngine
+// component. Used by plugin_introspect tests. Test-only.
+func WithPluginv2Engine(engine *pluginv2.Engine) ServerOption {
+	return func(s *Server) {
+		s.pluginEngine.pluginv2 = engine
 	}
 }
 

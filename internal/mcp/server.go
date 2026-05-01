@@ -218,7 +218,7 @@ func orDefaultPipeline(p *Pipeline) *Pipeline {
 	if p != nil {
 		return p
 	}
-	return NewPipeline(nil, nil, nil, nil, nil)
+	return NewPipeline(nil, nil, nil, nil, nil, nil)
 }
 
 func orDefaultConnector(c *Connector) *Connector {
@@ -253,7 +253,7 @@ func orDefaultPluginEngine(p *PluginEngine) *PluginEngine {
 	if p != nil {
 		return p
 	}
-	return NewPluginEngine(nil)
+	return NewPluginEngine(nil, nil)
 }
 
 // Run starts the MCP server on the given transport.
@@ -370,4 +370,5 @@ func (s *Server) registerTools() {
 	s.registerIntercept()
 	s.registerSecurity()
 	s.registerPlugin()
+	s.registerPluginIntrospect()
 }

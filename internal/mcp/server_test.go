@@ -11,12 +11,12 @@ import (
 func TestServer_HasSevenComponents(t *testing.T) {
 	s := NewServer(
 		NewMisc(context.Background(), nil, nil, "", nil, nil),
-		NewPipeline(nil, nil, nil, nil, nil),
+		NewPipeline(nil, nil, nil, nil, nil, nil),
 		NewConnector(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil),
 		NewJobRunner(nil, nil, nil, nil, nil),
 		NewFlowStore(nil),
 		NewMacroEngine(),
-		NewPluginEngine(nil),
+		NewPluginEngine(nil, nil),
 	)
 	if s == nil {
 		t.Fatal("NewServer returned nil")
