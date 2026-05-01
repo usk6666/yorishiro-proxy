@@ -6,12 +6,13 @@ import (
 	"go.starlark.net/starlark"
 )
 
-// Thread-local keys used by the engine to thread the registry and the
-// current plugin name into the register_hook builtin. Plugins do not
-// observe these.
+// Thread-local keys used by the engine to thread the registry, the current
+// plugin name, and a pointer to the active loadedPlugin into the
+// register_hook builtin. Plugins do not observe these.
 const (
-	threadLocalRegistry   = "pluginv2.registry"
-	threadLocalPluginName = "pluginv2.plugin_name"
+	threadLocalRegistry      = "pluginv2.registry"
+	threadLocalPluginName    = "pluginv2.plugin_name"
+	threadLocalCurrentPlugin = "pluginv2.current_plugin"
 )
 
 // makeRegisterHookBuiltin returns the Starlark builtin for `register_hook`.
@@ -96,6 +97,20 @@ func registerHook(thread *starlark.Thread, fn *starlark.Builtin, args starlark.T
 		Fn:         callable,
 		PluginName: pluginName,
 	})
+
+	// Mirror the registration onto the active loadedPlugin so
+	// plugin_introspect (USK-676) can surface the loaded hook surface
+	// without consulting the global Registry. Defensive nil check: when
+	// the builtin is invoked outside engine.loadPlugin (e.g. a future
+	// helper that bypasses the engine) the thread local is unset; the
+	// registry record is still authoritative for dispatch.
+	if lp, _ := thread.Local(threadLocalCurrentPlugin).(*loadedPlugin); lp != nil {
+		lp.registrations = append(lp.registrations, registeredHook{
+			Protocol: protocol,
+			Event:    event,
+			Phase:    string(resolvedPhase),
+		})
+	}
 	return starlark.None, nil
 }
 
