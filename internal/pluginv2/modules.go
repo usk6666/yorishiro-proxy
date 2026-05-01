@@ -8,17 +8,18 @@ import (
 )
 
 // newActionModule creates the predeclared "action" module available to
-// scripts. It exposes string constants for the three action verbs.
-//
-// In RFC §9.3 plugins return a result dict whose "action" key carries one
-// of these strings; the Pipeline integration (USK-671) interprets them.
+// scripts. CONTINUE and DROP are sentinel strings the dispatcher recognizes
+// in a hook's return value. RESPOND and RESPOND_GRPC are callable builtins
+// that build a typed *RespondAction the dispatcher converts to a synthesized
+// response envelope (RFC §9.3 D5; USK-671 callable shape per design review).
 func newActionModule() *starlarkstruct.Module {
 	return &starlarkstruct.Module{
 		Name: "action",
 		Members: starlark.StringDict{
-			"CONTINUE": starlark.String("CONTINUE"),
-			"DROP":     starlark.String("DROP"),
-			"RESPOND":  starlark.String("RESPOND"),
+			"CONTINUE":     starlark.String("CONTINUE"),
+			"DROP":         starlark.String("DROP"),
+			"RESPOND":      starlark.NewBuiltin("action.RESPOND", builtinRespond),
+			"RESPOND_GRPC": starlark.NewBuiltin("action.RESPOND_GRPC", builtinRespondGRPC),
 		},
 	}
 }
