@@ -192,10 +192,14 @@ func TestEngine_PredeclaredModulesAreAvailable(t *testing.T) {
 	// covers everything except store. A separate test below covers store.
 	path := writeScript(t, `
 def _check_modules():
-    # action: string constants reachable
+    # action: CONTINUE/DROP are sentinel strings; RESPOND/RESPOND_GRPC are
+    # callable builtins (USK-671 typed-payload form).
     if action.CONTINUE != "CONTINUE": fail("action.CONTINUE")
     if action.DROP != "DROP": fail("action.DROP")
-    if action.RESPOND != "RESPOND": fail("action.RESPOND")
+    resp = action.RESPOND(status_code=204)
+    if resp == None: fail("action.RESPOND returned None")
+    grpc_resp = action.RESPOND_GRPC(status=7)
+    if grpc_resp == None: fail("action.RESPOND_GRPC returned None")
 
     # crypto: hash + encoding round-trip
     digest = crypto.sha256(b"hello")
