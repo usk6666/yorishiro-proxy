@@ -835,6 +835,38 @@ func TestFuzzRaw_RejectsOverrideAndPatchesTogether(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Validation: duplicate position paths rejected (the per-variant payload
+// map is keyed by path, so duplicates would silently lose substitutions
+// while still expanding the cartesian product).
+// ---------------------------------------------------------------------------
+
+func TestFuzzRaw_RejectsDuplicatePositionPaths(t *testing.T) {
+	cs, _, _, _ := setupFuzzRawSession(t)
+	res, _ := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "fuzz_raw",
+		Arguments: map[string]any{
+			"target_addr": "127.0.0.1:9999",
+			"positions": []map[string]any{
+				{"path": "payload", "payloads": []string{"a"}},
+				{"path": "payload", "payloads": []string{"b"}},
+			},
+		},
+	})
+	if res == nil || !res.IsError {
+		t.Fatalf("expected error for duplicate position path; got %+v", res)
+	}
+	var msg strings.Builder
+	for _, c := range res.Content {
+		if tc, ok := c.(*gomcp.TextContent); ok {
+			msg.WriteString(tc.Text)
+		}
+	}
+	if !strings.Contains(msg.String(), "duplicate path") {
+		t.Errorf("error message %q does not mention duplicate path", msg.String())
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Non-raw flow_id is rejected with an explicit pointer to the right tool.
 // ---------------------------------------------------------------------------
 

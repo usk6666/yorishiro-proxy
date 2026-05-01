@@ -154,6 +154,12 @@ func validateFuzzRawOverrideAndPatches(input *fuzzRawInput) error {
 // each entry, enforcing the per-call positions cap and the cartesian
 // product variants cap, and reporting whether any position targets the
 // "payload" path (signal needed for the payload-source rule).
+//
+// Duplicate `path` entries across positions are rejected: the per-variant
+// payload map in decodeFuzzRawPayloads is keyed by path, so two positions
+// sharing the same path would silently lose the earlier substitution while
+// still expanding the cartesian product. Reject up-front so callers see the
+// misconfiguration instead of running ~N redundant variants.
 func validateFuzzRawPositionsList(input *fuzzRawInput) (bool, error) {
 	if len(input.Positions) == 0 {
 		return false, errors.New("positions must contain at least one entry")
@@ -163,10 +169,15 @@ func validateFuzzRawPositionsList(input *fuzzRawInput) (bool, error) {
 	}
 	hasPayloadPosition := false
 	totalVariants := 1
+	seenPaths := make(map[string]int, len(input.Positions))
 	for i, p := range input.Positions {
 		if err := validateFuzzRawPosition(i, p, len(input.Patches)); err != nil {
 			return false, err
 		}
+		if prev, ok := seenPaths[p.Path]; ok {
+			return false, fmt.Errorf("positions[%d]: duplicate path %q (already declared at positions[%d]); each path may appear at most once", i, p.Path, prev)
+		}
+		seenPaths[p.Path] = i
 		if p.Path == "payload" {
 			hasPayloadPosition = true
 		}
