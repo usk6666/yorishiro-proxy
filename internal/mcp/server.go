@@ -370,6 +370,7 @@ func (s *Server) registerTools() {
 	s.registerResendRaw()
 	s.registerManage()
 	s.registerFuzz()
+	s.registerFuzzHTTP()
 	s.registerMacro()
 	s.registerIntercept()
 	s.registerSecurity()
