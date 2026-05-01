@@ -58,6 +58,14 @@ const maxResendWSPayload = 16 << 20
 
 // validateResendWSInput rejects malformed inputs at the schema boundary
 // before any expensive lookups (flow store, dial) run.
+//
+// CRLF guards on user-supplied URL components (path, raw_query, scheme,
+// target_addr) defend against CWE-93 request smuggling on the upstream
+// upgrade leg: serializeRequestLine writes the supplied path verbatim
+// into the request line without sanitization, so an embedded "\r\n"
+// would inject a second request onto the upstream socket. Recovered
+// headers from the flow store are NOT sanitized — preserving wire
+// reality on recorded inputs is a project MITM principle.
 func validateResendWSInput(input *resendWSInput) error {
 	if input.Opcode == "" {
 		return errors.New("opcode is required (text|binary|close|ping|pong)")
@@ -67,6 +75,18 @@ func validateResendWSInput(input *resendWSInput) error {
 	}
 	if input.BodyEncoding != "" && input.BodyEncoding != "text" && input.BodyEncoding != "base64" {
 		return fmt.Errorf("unsupported body_encoding %q: must be text or base64", input.BodyEncoding)
+	}
+	if err := validateResendWSNoCRLF("path", input.Path); err != nil {
+		return err
+	}
+	if err := validateResendWSNoCRLF("raw_query", input.RawQuery); err != nil {
+		return err
+	}
+	if err := validateResendWSNoCRLF("scheme", input.Scheme); err != nil {
+		return err
+	}
+	if err := validateResendWSNoCRLF("target_addr", input.TargetAddr); err != nil {
+		return err
 	}
 	if input.Mask != "" {
 		// Mask is informational on Send (RoleClient regenerates), but
@@ -80,6 +100,16 @@ func validateResendWSInput(input *resendWSInput) error {
 		if err := validateResendWSFromScratch(input); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// validateResendWSNoCRLF rejects values containing CR/LF. Used on
+// user-supplied URL components that are written verbatim into the
+// HTTP/1.1 upgrade request line or Host header.
+func validateResendWSNoCRLF(field, v string) error {
+	if strings.ContainsAny(v, "\r\n") {
+		return fmt.Errorf("%s contains CR/LF characters", field)
 	}
 	return nil
 }
@@ -383,6 +413,13 @@ func resendWSUpgradeURL(scheme, authority, path, rawQuery string) *url.URL {
 // upgrade URL and (when target_addr redirects the dial) the override
 // target. Both must pass; an override that bypasses scope is rejected
 // even when the canonical authority is in-scope.
+//
+// Note: the dialAddr/upgradeURL.Host comparison can fire on the no-port
+// recovered-flow path (e.g. canonical Host "example.com" vs dialAddr
+// "example.com:80"). Both legs target the same logical host in that
+// case, so the extra check is redundant but safe. The simpler rule is
+// preferred over a port-normalizing comparison so the override path
+// stays explicit when target_addr really does redirect the dial.
 func (s *Server) checkResendWSScope(plan *resendWSPlan) error {
 	if err := s.checkTargetScopeURL(plan.upgradeURL); err != nil {
 		return err
@@ -692,6 +729,11 @@ func runResendWSReceiveLoop(ctx context.Context, plan *resendWSPlan, ch interfac
 		respEnv.Sequence = seq
 		seq++
 
+		// Drop / Respond on the receive-side pipeline are intentionally
+		// ignored on resend: the tool surfaces what the upstream
+		// actually sent so a diagnostic caller sees end-to-end
+		// behaviour even when a plugin would normally suppress or
+		// rewrite the frame on the live data path.
 		respEnv, _, _ = p.Run(ctx, respEnv)
 
 		respMsg, ok := respEnv.Message.(*envelope.WSMessage)
