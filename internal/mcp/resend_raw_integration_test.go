@@ -586,6 +586,32 @@ func TestResendRaw_TagAppliedToStreamRow(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Validation: patches[].offset is bounded to maxResendRawPayload at the
+// schema layer (CWE-789, security review S-1). Without this guard,
+// job.ApplyPatches would allocate a multi-GiB destination slice before
+// the post-application size check fires in buildResendRawPlan.
+// ---------------------------------------------------------------------------
+
+func TestResendRaw_RejectsPatchOffsetExceedingPayloadCap(t *testing.T) {
+	cs, store, _ := setupResendRawSession(t)
+	streamID := seedRawStream(t, store, []byte("x"))
+	// 1 GiB offset — well above the 16 MiB payload cap.
+	res, _ := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "resend_raw",
+		Arguments: map[string]any{
+			"flow_id":     streamID,
+			"target_addr": "127.0.0.1:9999",
+			"patches": []map[string]any{
+				{"offset": 1 << 30, "data": "z"},
+			},
+		},
+	})
+	if res == nil || !res.IsError {
+		t.Fatalf("expected error for offset exceeding payload cap; got %+v", res)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Non-raw flow_id is rejected with an explicit pointer to the right tool.
 // ---------------------------------------------------------------------------
 

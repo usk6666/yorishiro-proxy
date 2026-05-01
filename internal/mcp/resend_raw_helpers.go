@@ -108,9 +108,20 @@ func validateResendRawNoCRLF(field, v string) error {
 // validateResendRawPatch enforces non-negative offset, supported
 // data_encoding, and rejects empty data (an empty patch is a no-op;
 // reject loudly so callers don't think their patch applied).
+//
+// The offset is bounded to maxResendRawPayload at the schema boundary
+// (CWE-789, security review S-1): job.ApplyPatches allocates dst :=
+// make([]byte, requiredLen) where requiredLen >= offset, so an
+// unbounded offset would let a caller force a multi-GiB allocation
+// before the post-override size check fires in buildResendRawPlan.
+// Capping at the same byte budget that maxResendRawPayload enforces
+// for the post-application size keeps the allocation bounded.
 func validateResendRawPatch(index int, p resendRawBP) error {
 	if p.Offset < 0 {
 		return fmt.Errorf("patches[%d]: offset must be >= 0, got %d", index, p.Offset)
+	}
+	if p.Offset > maxResendRawPayload {
+		return fmt.Errorf("patches[%d]: offset %d exceeds payload cap %d", index, p.Offset, maxResendRawPayload)
 	}
 	if p.DataEncoding != "" && p.DataEncoding != "text" && p.DataEncoding != "base64" {
 		return fmt.Errorf("patches[%d]: unsupported data_encoding %q: must be text or base64", index, p.DataEncoding)
