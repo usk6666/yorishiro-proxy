@@ -299,10 +299,10 @@ func errString(err error) string {
 // Per-variant SafetyFilter input gating runs after position application
 // and before the upstream dial (mirroring fuzz_http per-variant
 // semantics — USK-677 lesson F-1/S-1). On a violation the variant is
-// recorded with row.Error set and returns statusCode=0 — the run loop
-// continues; a single blocked variant does not abort the whole run
-// (unless stop_on_non_ok is set, in which case the caller treats the
-// blocked variant as a stop trigger).
+// recorded with row.Error set and returns runErr=nil, statusCode=0 — the
+// run loop continues to the next variant. Safety-blocked variants do
+// NOT trigger stop_on_non_ok (which fires only on runErr != nil or a
+// non-zero gRPC status code), matching the fuzz_http precedent.
 func (s *Server) runFuzzGRPCSingleVariant(ctx context.Context, plan *fuzzGRPCPlan, p *pipeline.Pipeline, timeout time.Duration, variantIdx int, payloads map[string]string, tag string) (fuzzGRPCVariantRow, uint32, error) {
 	row := fuzzGRPCVariantRow{
 		Index:    variantIdx,
