@@ -28,6 +28,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -37,6 +38,7 @@ import (
 
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/pluginv2"
+	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 )
 
 // resendHTTPHookCallable wraps a Go counter increment in a Starlark
@@ -406,6 +408,54 @@ func TestResendHTTP_FromScratch_MissingFieldsRejected(t *testing.T) {
 	})
 	if !res.IsError {
 		t.Fatalf("expected IsError=true for empty input, got success")
+	}
+}
+
+// TestResendHTTP_TargetScopeBypassRegression covers review-gate S-1
+// (CWE-918). Authority chars that net/url.URL.String() percent-encodes
+// (e.g. whitespace) used to defeat the canonical-leg scope check because
+// the round-tripped url.Parse rejected the percent escapes and the
+// returned error was silently swallowed. The fix builds *url.URL directly
+// without String/Parse — this test asserts the canonical scope leg now
+// rejects an out-of-scope authority that round-trips badly.
+func TestResendHTTP_TargetScopeBypassRegression(t *testing.T) {
+	store := newTestStore(t)
+	scope := proxy.NewTargetScope()
+	scope.SetPolicyRules(
+		[]proxy.TargetRule{{Hostname: "allowed.local"}},
+		nil,
+	)
+	ctx := context.Background()
+	srv := newServer(ctx, nil, store, nil, WithTargetScope(scope))
+	ct, st := gomcp.NewInMemoryTransports()
+	ss, err := srv.server.Connect(ctx, st, nil)
+	if err != nil {
+		t.Fatalf("server connect: %v", err)
+	}
+	t.Cleanup(func() { ss.Close() })
+	client := gomcp.NewClient(&gomcp.Implementation{Name: "resend-http-scope-test", Version: "v0.0.1"}, nil)
+	cs, err := client.Connect(ctx, ct, nil)
+	if err != nil {
+		t.Fatalf("client connect: %v", err)
+	}
+	t.Cleanup(func() { cs.Close() })
+
+	// Authority "blocked .local" (with whitespace) round-trips through
+	// url.URL.String() as "blocked%20.local" then fails url.Parse — the
+	// pre-fix code treated this as "scope check skipped, allow request".
+	// The fix runs scope on the directly-built *url.URL with Host set to
+	// the literal authority, so blocked.local is rejected.
+	res := callResendHTTP(t, cs, map[string]any{
+		"method":    "GET",
+		"scheme":    "http",
+		"authority": "blocked .local",
+		"path":      "/",
+	})
+	if !res.IsError {
+		t.Fatalf("expected scope rejection, got success — TargetScope bypass regressed")
+	}
+	if got := extractTextContent(res); !strings.Contains(strings.ToLower(got), "scope") {
+		t.Errorf("error message %q does not mention scope", got)
 	}
 }
 

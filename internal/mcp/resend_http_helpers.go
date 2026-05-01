@@ -9,7 +9,6 @@ package mcp
 
 import (
 	"context"
-	"crypto/tls"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -297,11 +296,18 @@ func resolveResendHTTPDial(msg *envelope.HTTPMessage, overrideHost string) (addr
 // request URL and (when override_host is supplied) the override target. Both
 // must pass; an override that bypasses scope is rejected even when the
 // canonical authority is in-scope.
+//
+// Constructs the *url.URL directly from validated HTTPMessage fields rather
+// than round-tripping via String → Parse: net/url's String() percent-encodes
+// problematic Host bytes (whitespace, NUL, control chars) and the resulting
+// "%XX" sequence in the host position is then rejected by Parse, silently
+// swallowing the canonical-leg scope check (USK-672 review S-1, CWE-918).
+// Falling through to the override leg only is not enough — the canonical
+// authority is the path the dial actually takes when override_host is empty.
 func (s *Server) checkResendHTTPScope(msg *envelope.HTTPMessage, addr, overrideHost string) error {
-	if u, err := url.Parse(resendHTTPRequestURL(msg)); err == nil {
-		if err := s.checkTargetScopeURL(u); err != nil {
-			return err
-		}
+	canonical := resendHTTPRequestURL(msg)
+	if err := s.checkTargetScopeURL(canonical); err != nil {
+		return err
 	}
 	if overrideHost != "" {
 		scheme := ""
@@ -315,17 +321,17 @@ func (s *Server) checkResendHTTPScope(msg *envelope.HTTPMessage, addr, overrideH
 	return nil
 }
 
-// resendHTTPRequestURL composes the request URL string used for scope
-// matching and safety filter input. It rebuilds scheme://authority/path?query
-// from the synthesised HTTPMessage.
-func resendHTTPRequestURL(msg *envelope.HTTPMessage) string {
-	u := &url.URL{
+// resendHTTPRequestURL composes the canonical *url.URL used for scope
+// matching and safety filter input. Built directly from validated
+// HTTPMessage fields without a String → Parse round-trip; see
+// checkResendHTTPScope for the rationale.
+func resendHTTPRequestURL(msg *envelope.HTTPMessage) *url.URL {
+	return &url.URL{
 		Scheme:   msg.Scheme,
 		Host:     msg.Authority,
 		Path:     msg.Path,
 		RawQuery: msg.RawQuery,
 	}
-	return u.String()
 }
 
 // keyValuesToExchangeKV adapts envelope.KeyValue (the new RFC-001 type) to
@@ -408,20 +414,14 @@ func buildResendHTTPDialFunc(transport httputilpkg.TLSTransport, addr string, us
 }
 
 // upgradeResendTLS performs the TLS handshake using the configured
-// TLSTransport, falling back to an insecure stdlib handshake when the
-// transport is nil (test fixtures wire the listener directly without going
-// through main.go's transport selection).
+// TLSTransport. A nil transport is rejected — the production wiring always
+// supplies one (StandardTransport or UTLSTransport) and silently falling
+// back to InsecureSkipVerify=true would defeat MITM diagnostics on the
+// resend leg (review-gate S-2). Tests that exercise resend over plain HTTP
+// take the useTLS=false path and never reach this function.
 func upgradeResendTLS(ctx context.Context, transport httputilpkg.TLSTransport, conn net.Conn, sni string) (net.Conn, string, error) {
 	if transport == nil {
-		tlsConn := tls.Client(conn, &tls.Config{
-			ServerName:         sni,
-			InsecureSkipVerify: true, //nolint:gosec // resend dial accepts self-signed targets in dev/test
-			MinVersion:         tls.VersionTLS12,
-		})
-		if err := tlsConn.HandshakeContext(ctx); err != nil {
-			return nil, "", fmt.Errorf("tls handshake %s: %w", sni, err)
-		}
-		return tlsConn, "", nil
+		return nil, "", errors.New("resend_http: TLS upstream requires a configured TLSTransport")
 	}
 	out, alpn, err := transport.TLSConnect(ctx, conn, sni)
 	if err != nil {
@@ -473,9 +473,19 @@ func runResendHTTP(ctx context.Context, env *envelope.Envelope, dial session.Dia
 	if err != nil {
 		return nil, fmt.Errorf("upstream receive: %w", err)
 	}
+	// http1.New(conn, "", envelope.Receive) yielded the upstream Channel
+	// with an empty connID, so respEnv.StreamID is empty. Pin it to the
+	// send envelope's StreamID so RecordStep's variant-snapshot machinery
+	// records the receive Flow under the same Stream row.
 	respEnv.StreamID = sendEnv.StreamID
 	respEnv.Sequence = 1
 
+	// Pipeline.Run on the response envelope is purely for RecordStep + any
+	// post_pipeline plugin that wants to observe the response. Drop /
+	// Respond on the receive side has no meaningful semantics here (the
+	// response is already on the wire to us); discarding the action keeps
+	// the resend tool's contract simple — caller always sees the upstream
+	// reply, masking applied by formatResendHTTPResult.
 	respEnv, _, _ = p.Run(ctx, respEnv)
 	return respEnv, nil
 }
