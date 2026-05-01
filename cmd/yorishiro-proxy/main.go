@@ -26,6 +26,7 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/logging"
 	"github.com/usk6666/yorishiro-proxy/internal/mcp"
 	"github.com/usk6666/yorishiro-proxy/internal/plugin"
+	"github.com/usk6666/yorishiro-proxy/internal/pluginv2"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol"
 	protogrpc "github.com/usk6666/yorishiro-proxy/internal/protocol/grpc"
 	protogrpcweb "github.com/usk6666/yorishiro-proxy/internal/protocol/grpcweb"
@@ -37,6 +38,7 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/rules"
+	rulescommon "github.com/usk6666/yorishiro-proxy/internal/rules/common"
 	"github.com/usk6666/yorishiro-proxy/internal/safety"
 	"golang.org/x/sync/errgroup"
 )
@@ -247,6 +249,21 @@ func runWithFlags(ctx context.Context, fs *flag.FlagSet, args []string) error {
 	interceptEngine := intercept.NewEngine()
 	interceptQueue := intercept.NewQueue()
 
+	// Initialize the RFC-001 N8 HoldQueue used by the new
+	// (Envelope-based) InterceptStep + intercept MCP tool path. This
+	// coexists with the legacy interceptQueue until N9 removes the
+	// legacy types entirely (see internal/mcp/components.go).
+	holdQueue := rulescommon.NewHoldQueue()
+
+	// Initialize the pluginv2 engine. The MCP plugin_introspect tool
+	// reads its loaded-plugin registrations + redacted config vars.
+	// Plugins are not loaded from configuration here (config-side wiring
+	// for pluginv2 is tracked separately under N8); this engine is
+	// constructed empty so the plugin_introspect tool returns a
+	// well-formed empty result.
+	pluginv2Engine := pluginv2.NewEngine(logger)
+	defer pluginv2Engine.Close()
+
 	// Initialize auto-transform pipeline for request/response modification.
 	pipeline := rules.NewPipeline()
 
@@ -291,8 +308,8 @@ func runWithFlags(ctx context.Context, fs *flag.FlagSet, args []string) error {
 	}
 
 	mcpComponents, opts, err := buildMCPComponents(ctx, cfg, proxyCfg, ca, issuer, store, manager,
-		passthrough, scope, interceptEngine, interceptQueue, pipeline, proto, targetScope, rateLimiter,
-		safetyEngine, targetScopePolicySource, logger)
+		passthrough, scope, interceptEngine, interceptQueue, holdQueue, pluginv2Engine, pipeline, proto,
+		targetScope, rateLimiter, safetyEngine, targetScopePolicySource, logger)
 	if err != nil {
 		return err
 	}
@@ -808,6 +825,8 @@ func buildMCPComponents(
 	scope *proxy.CaptureScope,
 	interceptEngine *intercept.Engine,
 	interceptQueue *intercept.Queue,
+	holdQueue *rulescommon.HoldQueue,
+	pluginv2Engine *pluginv2.Engine,
 	pipeline *rules.Pipeline,
 	proto *protocolResult,
 	targetScope *proxy.TargetScope,
@@ -837,6 +856,7 @@ func buildMCPComponents(
 		pipeline: mcp.NewPipeline(
 			interceptEngine,
 			interceptQueue,
+			holdQueue,
 			pipeline,
 			safetyEngine,
 			safetyEngineSetters,
@@ -867,7 +887,7 @@ func buildMCPComponents(
 		),
 		flowStore:    mcp.NewFlowStore(store),
 		macroEngine:  mcp.NewMacroEngine(),
-		pluginEngine: mcp.NewPluginEngine(proto.pluginEngine),
+		pluginEngine: mcp.NewPluginEngine(proto.pluginEngine, pluginv2Engine),
 	}
 
 	if proxyCfg != nil {

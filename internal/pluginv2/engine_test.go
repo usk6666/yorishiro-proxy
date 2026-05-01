@@ -341,6 +341,198 @@ register_hook("http", "on_request", h)
 	}
 }
 
+// TestIntrospect_EmptyEngine verifies an engine with no plugins loaded
+// returns a zero-length slice (not nil sentinel) so the MCP handler can
+// always return a well-formed array.
+func TestIntrospect_EmptyEngine(t *testing.T) {
+	eng := NewEngine(nil)
+	got := eng.Introspect()
+	if got == nil {
+		t.Fatal("Introspect() returned nil; want empty slice")
+	}
+	if len(got) != 0 {
+		t.Errorf("Introspect() returned %d entries, want 0", len(got))
+	}
+}
+
+// TestIntrospect_OneRegistration confirms a single register_hook call is
+// surfaced with the resolved phase, protocol, and event tuple plus the
+// plugin name (basename without extension when Name is unset).
+func TestIntrospect_OneRegistration(t *testing.T) {
+	path := writeScript(t, `
+def my_handler(ctx, m):
+    return None
+
+register_hook("http", "on_request", my_handler, phase="pre_pipeline")
+`)
+	eng := NewEngine(nil)
+	if err := eng.LoadPlugins(context.Background(), []PluginConfig{{Path: path, OnError: string(OnErrorAbort)}}); err != nil {
+		t.Fatalf("LoadPlugins: %v", err)
+	}
+	infos := eng.Introspect()
+	if len(infos) != 1 {
+		t.Fatalf("Introspect() len = %d, want 1", len(infos))
+	}
+	info := infos[0]
+	if info.Name != "p" {
+		t.Errorf("Name = %q, want %q", info.Name, "p")
+	}
+	if info.Path != path {
+		t.Errorf("Path = %q, want %q", info.Path, path)
+	}
+	if !info.Enabled {
+		t.Error("Enabled = false, want true")
+	}
+	if len(info.Registrations) != 1 {
+		t.Fatalf("Registrations len = %d, want 1", len(info.Registrations))
+	}
+	r := info.Registrations[0]
+	if r.Protocol != "http" || r.Event != "on_request" || r.Phase != "pre_pipeline" {
+		t.Errorf("Registration = %+v, want {http, on_request, pre_pipeline}", r)
+	}
+}
+
+// TestIntrospect_MultiplePlugins_MultipleRegistrations verifies multiple
+// plugins each carrying multiple register_hook calls all surface, in load
+// order. Specifically: registrations on each plugin appear in script
+// order, and plugins themselves appear in load order.
+func TestIntrospect_MultiplePlugins_MultipleRegistrations(t *testing.T) {
+	a := writeScript(t, `
+def h1(ctx, m):
+    return None
+def h2(ctx, m):
+    return None
+register_hook("http", "on_request", h1, phase="pre_pipeline")
+register_hook("http", "on_response", h2, phase="post_pipeline")
+`)
+	b := writeScript(t, `
+def h(ctx, m):
+    return None
+register_hook("ws", "on_message", h, phase="pre_pipeline")
+register_hook("connection", "on_connect", h)
+`)
+	eng := NewEngine(nil)
+	if err := eng.LoadPlugins(context.Background(), []PluginConfig{
+		{Name: "alpha", Path: a, OnError: string(OnErrorAbort)},
+		{Name: "beta", Path: b, OnError: string(OnErrorAbort)},
+	}); err != nil {
+		t.Fatalf("LoadPlugins: %v", err)
+	}
+	infos := eng.Introspect()
+	if len(infos) != 2 {
+		t.Fatalf("Introspect() len = %d, want 2", len(infos))
+	}
+	if infos[0].Name != "alpha" || infos[1].Name != "beta" {
+		t.Errorf("plugin order = [%q, %q], want [alpha, beta]", infos[0].Name, infos[1].Name)
+	}
+	if len(infos[0].Registrations) != 2 {
+		t.Errorf("alpha Registrations len = %d, want 2", len(infos[0].Registrations))
+	}
+	if len(infos[1].Registrations) != 2 {
+		t.Errorf("beta Registrations len = %d, want 2", len(infos[1].Registrations))
+	}
+	a0 := infos[0].Registrations[0]
+	if a0.Protocol != "http" || a0.Event != "on_request" || a0.Phase != "pre_pipeline" {
+		t.Errorf("alpha[0] = %+v, want {http, on_request, pre_pipeline}", a0)
+	}
+	a1 := infos[0].Registrations[1]
+	if a1.Protocol != "http" || a1.Event != "on_response" || a1.Phase != "post_pipeline" {
+		t.Errorf("alpha[1] = %+v, want {http, on_response, post_pipeline}", a1)
+	}
+	b0 := infos[1].Registrations[0]
+	if b0.Protocol != "ws" || b0.Event != "on_message" || b0.Phase != "pre_pipeline" {
+		t.Errorf("beta[0] = %+v, want {ws, on_message, pre_pipeline}", b0)
+	}
+	b1 := infos[1].Registrations[1]
+	if b1.Protocol != "connection" || b1.Event != "on_connect" || b1.Phase != "none" {
+		t.Errorf("beta[1] = %+v, want {connection, on_connect, none}", b1)
+	}
+}
+
+// TestIntrospect_RedactKeys verifies that PluginConfig.RedactKeys hides
+// the corresponding Vars values behind the "<redacted>" sentinel, while
+// other keys pass through verbatim.
+func TestIntrospect_RedactKeys(t *testing.T) {
+	path := writeScript(t, `
+def h(ctx, m):
+    return None
+register_hook("http", "on_request", h)
+`)
+	eng := NewEngine(nil)
+	cfg := PluginConfig{
+		Path:       path,
+		OnError:    string(OnErrorAbort),
+		Vars:       map[string]any{"hmac_key": "secret123", "log_level": "debug", "feature_flag": true},
+		RedactKeys: []string{"hmac_key"},
+	}
+	if err := eng.LoadPlugins(context.Background(), []PluginConfig{cfg}); err != nil {
+		t.Fatalf("LoadPlugins: %v", err)
+	}
+	infos := eng.Introspect()
+	if len(infos) != 1 {
+		t.Fatalf("Introspect len = %d, want 1", len(infos))
+	}
+	v := infos[0].Vars
+	if got := v["hmac_key"]; got != "<redacted>" {
+		t.Errorf("hmac_key = %v, want \"<redacted>\"", got)
+	}
+	if got := v["log_level"]; got != "debug" {
+		t.Errorf("log_level = %v, want \"debug\"", got)
+	}
+	if got := v["feature_flag"]; got != true {
+		t.Errorf("feature_flag = %v, want true", got)
+	}
+}
+
+// TestIntrospect_VarsTruncation verifies a string Vars value over the
+// 8 KiB cap is truncated and tagged. Values under the cap pass through
+// unchanged.
+func TestIntrospect_VarsTruncation(t *testing.T) {
+	path := writeScript(t, `
+def h(ctx, m):
+    return None
+register_hook("http", "on_request", h)
+`)
+	eng := NewEngine(nil)
+	huge := make([]byte, 16*1024)
+	for i := range huge {
+		huge[i] = 'A'
+	}
+	cfg := PluginConfig{
+		Path:    path,
+		OnError: string(OnErrorAbort),
+		Vars: map[string]any{
+			"big":   string(huge),
+			"small": "stable",
+		},
+	}
+	if err := eng.LoadPlugins(context.Background(), []PluginConfig{cfg}); err != nil {
+		t.Fatalf("LoadPlugins: %v", err)
+	}
+	infos := eng.Introspect()
+	v := infos[0].Vars
+	bigRet, ok := v["big"].(string)
+	if !ok {
+		t.Fatalf("big: type = %T, want string", v["big"])
+	}
+	if len(bigRet) != redactValueCap+len(redactTruncationMarker) {
+		t.Errorf("big len = %d, want %d", len(bigRet), redactValueCap+len(redactTruncationMarker))
+	}
+	if !endsWithMarker(bigRet) {
+		t.Errorf("big does not end with truncation marker: tail=%q", bigRet[len(bigRet)-32:])
+	}
+	if v["small"] != "stable" {
+		t.Errorf("small = %v, want \"stable\"", v["small"])
+	}
+}
+
+func endsWithMarker(s string) bool {
+	if len(s) < len(redactTruncationMarker) {
+		return false
+	}
+	return s[len(s)-len(redactTruncationMarker):] == redactTruncationMarker
+}
+
 func TestEngine_CloseClearsState(t *testing.T) {
 	path := writeScript(t, `
 state.set("k", "v")

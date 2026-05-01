@@ -47,9 +47,26 @@ type Engine struct {
 
 // loadedPlugin tracks a successfully loaded script so future reload work
 // (out of scope for USK-665) can find it.
+//
+// registrations records the (Protocol, Event, Phase) tuples that the
+// register_hook builtin appended for this plugin during script execution.
+// The plugin_introspect MCP tool (USK-676) reads this slice to surface the
+// loaded surface back to operators.
 type loadedPlugin struct {
-	config  PluginConfig
-	globals starlark.StringDict
+	config        PluginConfig
+	globals       starlark.StringDict
+	registrations []registeredHook
+}
+
+// registeredHook is the per-plugin record of one register_hook call. The
+// fields are pure strings (Phase carried as its string form) so that
+// plugin_introspect can serialise the slice to JSON without re-deriving the
+// surface from the registry. Order matches the script's register_hook call
+// order — which is also the registry's append order for that plugin.
+type registeredHook struct {
+	Protocol string
+	Event    string
+	Phase    string
 }
 
 // NewEngine constructs an Engine. A nil logger falls back to a stderr
@@ -163,6 +180,13 @@ func (e *Engine) loadPlugin(ctx context.Context, cfg PluginConfig) error {
 	thread.SetLocal(threadLocalRegistry, e.registry)
 	thread.SetLocal(threadLocalPluginName, name)
 
+	// loadedPlugin must be allocated up-front so the register_hook builtin
+	// can append to its registrations slice via the threadLocalCurrentPlugin
+	// pointer. We finalize globals and append to e.plugins after
+	// ExecFileOptions returns successfully.
+	lp := &loadedPlugin{config: cfg}
+	thread.SetLocal(threadLocalCurrentPlugin, lp)
+
 	// Apply step budget at load time as well as at runtime — a malicious or
 	// runaway top-level statement would otherwise hang LoadPlugins.
 	if steps := cfg.maxSteps(); steps > 0 {
@@ -213,10 +237,8 @@ func (e *Engine) loadPlugin(ctx context.Context, cfg PluginConfig) error {
 		return wrapExecError(err, cfg.Path, name)
 	}
 
-	e.plugins = append(e.plugins, &loadedPlugin{
-		config:  cfg,
-		globals: globals,
-	})
+	lp.globals = globals
+	e.plugins = append(e.plugins, lp)
 	return nil
 }
 

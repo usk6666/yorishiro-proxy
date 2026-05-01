@@ -39,10 +39,12 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/fuzzer"
 	"github.com/usk6666/yorishiro-proxy/internal/plugin"
+	"github.com/usk6666/yorishiro-proxy/internal/pluginv2"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/rules"
+	"github.com/usk6666/yorishiro-proxy/internal/rules/common"
 	"github.com/usk6666/yorishiro-proxy/internal/safety"
 )
 
@@ -50,9 +52,18 @@ import (
 // intercept rule engine + queue, auto-transform pipeline, and the
 // SafetyFilter engine (plus the protocol-handler setters that need to be
 // notified when the safety engine is configured).
+//
+// holdQueue is the RFC-001 N8 successor to the legacy interceptQueue. The
+// new Envelope-based InterceptStep (internal/pipeline) holds matched
+// envelopes here; the intercept MCP tool dispatches release / drop /
+// modify_and_forward against this queue using per-Message-type modify
+// schemas. The legacy interceptQueue path coexists in parallel until N9
+// removes the legacy types; UUID space is shared across the two queues
+// (MCP looks up by ID in HoldQueue first, then falls back to interceptQueue).
 type Pipeline struct {
 	interceptEngine     *intercept.Engine
 	interceptQueue      *intercept.Queue
+	holdQueue           *common.HoldQueue
 	transformPipeline   *rules.Pipeline
 	safetyEngine        *safety.Engine
 	safetyEngineSetters []safetyEngineSetter
@@ -63,6 +74,7 @@ type Pipeline struct {
 func NewPipeline(
 	interceptEngine *intercept.Engine,
 	interceptQueue *intercept.Queue,
+	holdQueue *common.HoldQueue,
 	transformPipeline *rules.Pipeline,
 	safetyEngine *safety.Engine,
 	safetyEngineSetters []safetyEngineSetter,
@@ -70,6 +82,7 @@ func NewPipeline(
 	return &Pipeline{
 		interceptEngine:     interceptEngine,
 		interceptQueue:      interceptQueue,
+		holdQueue:           holdQueue,
 		transformPipeline:   transformPipeline,
 		safetyEngine:        safetyEngine,
 		safetyEngineSetters: safetyEngineSetters,
@@ -207,16 +220,21 @@ func NewMacroEngine() *MacroEngine {
 	return &MacroEngine{}
 }
 
-// PluginEngine wraps the Starlark plugin engine. Used exclusively by the
-// plugin tool handler.
+// PluginEngine wraps the Starlark plugin engines. Used by the plugin tool
+// handler (legacy engine) and the plugin_introspect tool (pluginv2 engine).
+//
+// The legacy engine is retained until RFC-001 N9 completes; tools that
+// inspect runtime hooks should use pluginv2 instead.
 type PluginEngine struct {
-	engine *plugin.Engine
+	engine   *plugin.Engine
+	pluginv2 *pluginv2.Engine
 }
 
-// NewPluginEngine constructs a PluginEngine. A nil engine is permitted; the
-// plugin tool returns an error when not configured.
-func NewPluginEngine(engine *plugin.Engine) *PluginEngine {
-	return &PluginEngine{engine: engine}
+// NewPluginEngine constructs a PluginEngine. Either engine may be nil; the
+// plugin tool returns an error when the legacy engine is unset, and
+// plugin_introspect returns an empty list when the pluginv2 engine is unset.
+func NewPluginEngine(engine *plugin.Engine, pluginv2Engine *pluginv2.Engine) *PluginEngine {
+	return &PluginEngine{engine: engine, pluginv2: pluginv2Engine}
 }
 
 // Misc holds cross-cutting dependencies that do not fit a single domain
