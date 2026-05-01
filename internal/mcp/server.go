@@ -364,6 +364,7 @@ func (s *Server) registerTools() {
 	s.registerConfigure()
 	s.registerQuery()
 	s.registerResend()
+	s.registerResendHTTP()
 	s.registerManage()
 	s.registerFuzz()
 	s.registerMacro()
