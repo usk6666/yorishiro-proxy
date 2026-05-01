@@ -203,3 +203,60 @@ func TestLayer_Send_OversizedPayload_ErrorAborted(t *testing.T) {
 		t.Fatal("expected error for oversized payload")
 	}
 }
+
+// TestWithDeflateFromExtensionHeader_EnablesBothDirections validates that
+// the new Option parses a wire header value and configures both
+// directions of permessage-deflate. The test exercises the round-trip via
+// channel Send/Next on a single deflate-enabled Layer (RoleClient writes
+// compressed; the same channel reads back compressed frames).
+func TestWithDeflateFromExtensionHeader_EnablesBothDirections(t *testing.T) {
+	t.Parallel()
+
+	o := options{}
+	WithDeflateFromExtensionHeader("permessage-deflate; client_no_context_takeover; server_max_window_bits=15")(&o)
+
+	if !o.deflateEnabled {
+		t.Fatal("deflateEnabled = false, want true")
+	}
+	if !o.clientDeflate.enabled {
+		t.Error("clientDeflate.enabled = false, want true")
+	}
+	if o.clientDeflate.contextTakeover {
+		t.Error("clientDeflate.contextTakeover = true, want false (client_no_context_takeover negotiated)")
+	}
+	if !o.serverDeflate.enabled {
+		t.Error("serverDeflate.enabled = false, want true")
+	}
+	if o.serverDeflate.windowBits != 15 {
+		t.Errorf("serverDeflate.windowBits = %d, want 15", o.serverDeflate.windowBits)
+	}
+}
+
+// TestWithDeflateFromExtensionHeader_EmptyHeaderNoOp ensures an empty
+// header value leaves the Layer in its default deflate-disabled state.
+func TestWithDeflateFromExtensionHeader_EmptyHeaderNoOp(t *testing.T) {
+	t.Parallel()
+
+	o := options{}
+	WithDeflateFromExtensionHeader("")(&o)
+
+	if o.deflateEnabled {
+		t.Error("empty header enabled deflate")
+	}
+	if o.clientDeflate.enabled || o.serverDeflate.enabled {
+		t.Error("empty header populated direction params")
+	}
+}
+
+// TestWithDeflateFromExtensionHeader_NoPermessageDeflate ignores other
+// extension names — only "permessage-deflate" should turn on deflate.
+func TestWithDeflateFromExtensionHeader_NoPermessageDeflate(t *testing.T) {
+	t.Parallel()
+
+	o := options{}
+	WithDeflateFromExtensionHeader("x-some-other-extension; param=1")(&o)
+
+	if o.deflateEnabled {
+		t.Error("unrelated extension enabled deflate")
+	}
+}
