@@ -91,6 +91,32 @@ func WithStateReleaser(r pluginv2.StateReleaser) Option {
 	return func(o *options) { o.stateReleaser = r }
 }
 
+// WithDeflateFromExtensionHeader configures permessage-deflate (RFC 7692)
+// from a Sec-WebSocket-Extensions header value (typically the server's
+// 101 response value, which is authoritative on what got negotiated). The
+// header is parsed for the "permessage-deflate" extension and both
+// directions are configured from the resulting parameters. An empty
+// header or a header without "permessage-deflate" leaves deflate disabled.
+//
+// This is the preferred entry point for callers that recover deflate
+// state from a recorded handshake (e.g. the resend_ws MCP tool). The
+// internal deflateParams shape stays unexported so future RFC 7692
+// parameter additions can land without breaking the caller-visible API.
+func WithDeflateFromExtensionHeader(serverNegotiated string) Option {
+	return func(o *options) {
+		if serverNegotiated == "" {
+			return
+		}
+		client, server := parseDeflateExtension(serverNegotiated)
+		if !client.enabled && !server.enabled {
+			return
+		}
+		o.deflateEnabled = true
+		o.clientDeflate = client
+		o.serverDeflate = server
+	}
+}
+
 // Layer wraps a bidirectional WebSocket byte stream — a (reader, writer,
 // closer) triple typically obtained from http1.Layer.DetachStream after a
 // successful HTTP/1.1 Upgrade — and yields exactly one Channel that emits
