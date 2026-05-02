@@ -902,6 +902,133 @@ func TestRecordStep_VariantRecording_OriginalRawNeverRewrittenByEncoder(t *testi
 	}
 }
 
+// TestRecordStep_ModifiedVariant_RawOnly_RawWins covers USK-686 / RFC §9.3 D4:
+// when a preceding Step (PluginStepPost on MutationRawOnly) marks the
+// context's RawAuthoritative flag, RecordStep must skip applyWireEncode
+// and record env.Raw verbatim into the modified-variant flow's RawBytes.
+// Calling the encoder would overwrite the user's smuggling-test bytes
+// with a "cleaned-up" re-encoded form, destroying the diagnostic signal
+// that motivated D4.
+func TestRecordStep_ModifiedVariant_RawOnly_RawWins(t *testing.T) {
+	w := &mockWriter{}
+	step := NewRecordStep(w, nil,
+		WithWireEncoder(envelope.ProtocolHTTP, func(*envelope.Envelope) ([]byte, error) {
+			t.Fatal("encoder must NOT be called when RawAuthoritative is set (RFC §9.3 D4)")
+			return nil, nil
+		}),
+	)
+
+	original := &envelope.Envelope{
+		StreamID:  "s1",
+		FlowID:    "f1",
+		Direction: envelope.Send,
+		Sequence:  1,
+		Protocol:  envelope.ProtocolHTTP,
+		Raw:       []byte("GET /orig HTTP/1.1\r\n\r\n"),
+		Message:   &envelope.HTTPMessage{Method: "GET", Path: "/orig"},
+	}
+	// MutationRawOnly: Message stays the same as snapshot; Raw is the
+	// user's verbatim bytes (smuggling payload, intentionally malformed).
+	userVerbatim := []byte("GET /orig HTTP/1.1\r\nX-Smuggle: a\r\n\r\nbody")
+	modified := &envelope.Envelope{
+		StreamID:  "s1",
+		FlowID:    "f1",
+		Direction: envelope.Send,
+		Sequence:  1,
+		Protocol:  envelope.ProtocolHTTP,
+		Raw:       userVerbatim,
+		Message:   &envelope.HTTPMessage{Method: "GET", Path: "/orig"},
+	}
+
+	ctx := withWireEncodedState(context.Background())
+	markRawAuthoritative(ctx)
+	ctx = withSnapshot(ctx, original)
+	step.Process(ctx, modified)
+
+	if len(w.flows) != 2 {
+		t.Fatalf("expected 2 flows (original + modified variants), got %d", len(w.flows))
+	}
+	origFlow := w.flows[0]
+	modFlow := w.flows[1]
+
+	if string(origFlow.RawBytes) != "GET /orig HTTP/1.1\r\n\r\n" {
+		t.Errorf("original RawBytes = %q, want snapshot ingress Raw", origFlow.RawBytes)
+	}
+	if !bytes.Equal(modFlow.RawBytes, userVerbatim) {
+		t.Errorf("modified RawBytes = %q, want user-verbatim bytes (D4 raw-wins)",
+			modFlow.RawBytes)
+	}
+	if got := modFlow.Metadata["wire_bytes"]; got != "" {
+		t.Errorf("modified wire_bytes metadata = %q, want empty (encoder skipped, not unavailable)",
+			got)
+	}
+	if modFlow.Metadata["variant"] != "modified" {
+		t.Errorf("modified variant tag = %q, want %q",
+			modFlow.Metadata["variant"], "modified")
+	}
+}
+
+// TestRecordStep_ModifiedVariant_Both_RawWins covers USK-686 / RFC §9.3 D4:
+// when a plugin produces MutationBoth (modifies BOTH msg["raw"] AND a
+// Message field), Raw still wins. RecordStep must record env.Raw verbatim
+// in the modified-variant flow even though the Message field divergence
+// would normally be the encoder's input. The Message-side mutation is
+// preserved in modFlow.Method/Headers/etc. for typed inspection but does
+// NOT drive RawBytes.
+func TestRecordStep_ModifiedVariant_Both_RawWins(t *testing.T) {
+	w := &mockWriter{}
+	step := NewRecordStep(w, nil,
+		WithWireEncoder(envelope.ProtocolHTTP, func(*envelope.Envelope) ([]byte, error) {
+			t.Fatal("encoder must NOT be called when RawAuthoritative is set (RFC §9.3 D4)")
+			return nil, nil
+		}),
+	)
+
+	original := &envelope.Envelope{
+		StreamID:  "s1",
+		FlowID:    "f1",
+		Direction: envelope.Send,
+		Sequence:  1,
+		Protocol:  envelope.ProtocolHTTP,
+		Raw:       []byte("GET /orig HTTP/1.1\r\n\r\n"),
+		Message:   &envelope.HTTPMessage{Method: "GET", Path: "/orig"},
+	}
+	userVerbatim := []byte("POST /modified HTTP/1.1\r\nContent-Length: 4\r\n\r\nDATA")
+	modified := &envelope.Envelope{
+		StreamID:  "s1",
+		FlowID:    "f1",
+		Direction: envelope.Send,
+		Sequence:  1,
+		Protocol:  envelope.ProtocolHTTP,
+		Raw:       userVerbatim,
+		// Both Raw AND Message changed — MutationBoth.
+		Message: &envelope.HTTPMessage{Method: "POST", Path: "/modified"},
+	}
+
+	ctx := withWireEncodedState(context.Background())
+	markRawAuthoritative(ctx)
+	ctx = withSnapshot(ctx, original)
+	step.Process(ctx, modified)
+
+	if len(w.flows) != 2 {
+		t.Fatalf("expected 2 flows, got %d", len(w.flows))
+	}
+	modFlow := w.flows[1]
+
+	if !bytes.Equal(modFlow.RawBytes, userVerbatim) {
+		t.Errorf("modified RawBytes = %q, want user-verbatim bytes (D4 raw-wins despite Message change)",
+			modFlow.RawBytes)
+	}
+	// Message-side projection still reflects the Message divergence.
+	if modFlow.Method != "POST" {
+		t.Errorf("modified Method = %q, want %q (Message projection independent of D4)",
+			modFlow.Method, "POST")
+	}
+	if got := modFlow.Metadata["wire_bytes"]; got != "" {
+		t.Errorf("modified wire_bytes metadata = %q, want empty", got)
+	}
+}
+
 func TestRecordStep_StoreError(t *testing.T) {
 	w := &mockWriter{saveErr: errors.New("store unavailable")}
 	step := NewRecordStep(w, nil)
