@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
@@ -1499,4 +1500,240 @@ func TestChannel_RoundTrip_ZeroCopy(t *testing.T) {
 	if result != wireReq {
 		t.Errorf("round-trip mismatch:\ngot:\n%q\nwant:\n%q", result, wireReq)
 	}
+}
+
+// --- pluginv2 StateReleaser wiring (USK-682) ---
+
+// recordingReleaser captures every ReleaseTransaction call so a test can
+// assert which terminal path released which FlowID. ReleaseStream is a
+// no-op for HTTP/1 — Q26 maps the HTTP transaction scope to (ConnID,
+// FlowID) only.
+type recordingReleaser struct {
+	mu  sync.Mutex
+	txs []releaseEvent
+}
+
+type releaseEvent struct {
+	connID string
+	id     string
+}
+
+func (r *recordingReleaser) ReleaseStream(_, _ string) {}
+
+func (r *recordingReleaser) ReleaseTransaction(connID, id string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.txs = append(r.txs, releaseEvent{connID: connID, id: id})
+}
+
+func (r *recordingReleaser) snapshot() []releaseEvent {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]releaseEvent, len(r.txs))
+	copy(out, r.txs)
+	return out
+}
+
+func (r *recordingReleaser) count() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.txs)
+}
+
+func TestHTTP1Layer_StateReleaserFiresPerTransaction(t *testing.T) {
+	client, server := testConn(t)
+	defer client.Close()
+	defer server.Close()
+
+	rec := &recordingReleaser{}
+	l := New(server, "conn-1", envelope.Send,
+		WithEnvelopeContext(envelope.EnvelopeContext{ConnID: "test-conn"}),
+		WithStateReleaser(rec),
+	)
+
+	// Three keep-alive requests; client.Close at the end drains EOF on
+	// the fourth Next so markTerminated fires from the parse loop.
+	reqs := "GET /first HTTP/1.1\r\nHost: example.com\r\nContent-Length: 0\r\n\r\n" +
+		"GET /second HTTP/1.1\r\nHost: example.com\r\nContent-Length: 0\r\n\r\n" +
+		"GET /third HTTP/1.1\r\nHost: example.com\r\nContent-Length: 0\r\n\r\n"
+	go func() {
+		_, _ = client.Write([]byte(reqs))
+		_ = client.Close()
+	}()
+
+	ch := <-l.Channels()
+
+	flowIDs := make([]string, 0, 3)
+	for i := 0; i < 3; i++ {
+		env, err := ch.Next(context.Background())
+		if err != nil {
+			t.Fatalf("Next #%d: %v", i+1, err)
+		}
+		flowIDs = append(flowIDs, env.FlowID)
+		if env.FlowID == "" {
+			t.Fatalf("Next #%d: empty FlowID", i+1)
+		}
+	}
+
+	// Releases must NOT fire mid-stream — only at terminal.
+	if got := rec.count(); got != 0 {
+		t.Fatalf("releases before terminal = %d, want 0", got)
+	}
+
+	// Drain to EOF to fire markTerminated via the parse loop.
+	if _, err := ch.Next(context.Background()); !errors.Is(err, io.EOF) {
+		t.Fatalf("expected io.EOF, got %v", err)
+	}
+
+	// Defensive Layer.Close after EOF is a no-op for releases (sync.Once).
+	_ = l.Close()
+
+	snap := rec.snapshot()
+	if len(snap) != 3 {
+		t.Fatalf("ReleaseTransaction count = %d, want 3 — snapshot=%+v", len(snap), snap)
+	}
+	for i, ev := range snap {
+		if ev.connID != "test-conn" {
+			t.Errorf("[%d] connID = %q, want test-conn", i, ev.connID)
+		}
+		if ev.id != flowIDs[i] {
+			t.Errorf("[%d] FlowID = %q, want %q", i, ev.id, flowIDs[i])
+		}
+	}
+}
+
+func TestHTTP1Layer_StateReleaserNilSafe(t *testing.T) {
+	client, server := testConn(t)
+	defer client.Close()
+	defer server.Close()
+
+	// No WithStateReleaser → nil internally. Layer must not panic on any
+	// terminal path even though the parse loop will accumulate FlowIDs.
+	l := New(server, "conn-1", envelope.Send,
+		WithEnvelopeContext(envelope.EnvelopeContext{ConnID: "test-conn"}),
+	)
+
+	req := "GET / HTTP/1.1\r\nHost: example.com\r\nContent-Length: 0\r\n\r\n"
+	go func() {
+		_, _ = client.Write([]byte(req))
+		_ = client.Close()
+	}()
+
+	ch := <-l.Channels()
+	if _, err := ch.Next(context.Background()); err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+	if _, err := ch.Next(context.Background()); !errors.Is(err, io.EOF) {
+		t.Fatalf("expected io.EOF, got %v", err)
+	}
+
+	// Layer.Close on top of EOF must not panic.
+	_ = l.Close()
+}
+
+func TestHTTP1Layer_StateReleaserOnConnectionClose(t *testing.T) {
+	// markTerminated has two reach paths: (a) Next() reads io.EOF / parse
+	// error and calls markTerminated directly, (b) Layer.Close calls
+	// markTerminated(io.EOF) defensively. Both must flush emitted FlowIDs.
+
+	t.Run("via Next EOF", func(t *testing.T) {
+		client, server := testConn(t)
+		defer client.Close()
+		defer server.Close()
+
+		rec := &recordingReleaser{}
+		l := New(server, "conn-1", envelope.Send,
+			WithEnvelopeContext(envelope.EnvelopeContext{ConnID: "test-conn"}),
+			WithStateReleaser(rec),
+		)
+		defer l.Close()
+
+		req := "GET / HTTP/1.1\r\nHost: example.com\r\nContent-Length: 0\r\n\r\n"
+		go func() {
+			_, _ = client.Write([]byte(req))
+			_ = client.Close()
+		}()
+
+		ch := <-l.Channels()
+		env1, err := ch.Next(context.Background())
+		if err != nil {
+			t.Fatalf("Next: %v", err)
+		}
+		if _, err := ch.Next(context.Background()); !errors.Is(err, io.EOF) {
+			t.Fatalf("expected io.EOF, got %v", err)
+		}
+
+		snap := rec.snapshot()
+		if len(snap) != 1 {
+			t.Fatalf("releases = %+v, want exactly 1", snap)
+		}
+		if snap[0].id != env1.FlowID || snap[0].connID != "test-conn" {
+			t.Errorf("event = %+v, want {connID=test-conn, id=%s}", snap[0], env1.FlowID)
+		}
+	})
+
+	t.Run("via Layer.Close (no Next EOF)", func(t *testing.T) {
+		client, server := testConn(t)
+		defer client.Close()
+		defer server.Close()
+
+		rec := &recordingReleaser{}
+		l := New(server, "conn-1", envelope.Send,
+			WithEnvelopeContext(envelope.EnvelopeContext{ConnID: "test-conn"}),
+			WithStateReleaser(rec),
+		)
+
+		req := "GET / HTTP/1.1\r\nHost: example.com\r\nContent-Length: 0\r\n\r\n"
+		go func() { _, _ = client.Write([]byte(req)) }()
+
+		ch := <-l.Channels()
+		env1, err := ch.Next(context.Background())
+		if err != nil {
+			t.Fatalf("Next: %v", err)
+		}
+
+		// Close the Layer without driving Next to EOF. markTerminated
+		// must still fire and release the emitted FlowID.
+		_ = l.Close()
+
+		snap := rec.snapshot()
+		if len(snap) != 1 {
+			t.Fatalf("releases = %+v, want exactly 1", snap)
+		}
+		if snap[0].id != env1.FlowID {
+			t.Errorf("FlowID = %q, want %q", snap[0].id, env1.FlowID)
+		}
+	})
+
+	t.Run("empty ConnID is no-op", func(t *testing.T) {
+		client, server := testConn(t)
+		defer client.Close()
+		defer server.Close()
+
+		rec := &recordingReleaser{}
+		l := New(server, "conn-1", envelope.Send,
+			// No WithEnvelopeContext → ConnID is "".
+			WithStateReleaser(rec),
+		)
+		defer l.Close()
+
+		req := "GET / HTTP/1.1\r\nHost: example.com\r\nContent-Length: 0\r\n\r\n"
+		go func() {
+			_, _ = client.Write([]byte(req))
+			_ = client.Close()
+		}()
+
+		ch := <-l.Channels()
+		if _, err := ch.Next(context.Background()); err != nil {
+			t.Fatalf("Next: %v", err)
+		}
+		if _, err := ch.Next(context.Background()); !errors.Is(err, io.EOF) {
+			t.Fatalf("expected io.EOF, got %v", err)
+		}
+
+		// Empty ConnID guard short-circuits the release loop.
+		if got := rec.count(); got != 0 {
+			t.Fatalf("releases with empty ConnID = %d, want 0", got)
+		}
+	})
 }
