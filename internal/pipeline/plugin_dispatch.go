@@ -204,12 +204,21 @@ func (d *pluginDispatcher) dispatch(ctx context.Context, env *envelope.Envelope,
 
 // applyMutation produces the envelope to feed to the next hook (or
 // downstream Steps) given a CONTINUE outcome.
+//
+// The wireEncodedState carried in ctx (USK-684) is updated to reflect
+// whether the produced envelope's Raw IS the WireEncoder output for the
+// current Message. RawOnly and Both arms ship verbatim user bytes per
+// RFC §9.3 D4, so the flag is cleared. Unchanged leaves the flag as-is
+// (Raw and Message both unchanged from the prior chain step). MessageOnly
+// delegates to regenerateRaw, which sets or clears the flag based on
+// encoder outcome.
 func (d *pluginDispatcher) applyMutation(ctx context.Context, env *envelope.Envelope, outcome *pluginv2.HookOutcome) *envelope.Envelope {
 	switch outcome.Mutation {
 	case pluginv2.MutationUnchanged:
 		return env
 	case pluginv2.MutationRawOnly:
 		// New raw bytes; original Message aliased.
+		clearWireEncoded(ctx)
 		next := *env
 		next.Raw = outcome.NewRaw
 		next.Message = outcome.NewMessage
@@ -226,12 +235,23 @@ func (d *pluginDispatcher) applyMutation(ctx context.Context, env *envelope.Enve
 		// "Raw wins" per RFC §9.3 D4: ship new Raw verbatim; new Message
 		// is propagated for variant recording and downstream typed
 		// inspection but does NOT drive wire bytes.
+		clearWireEncoded(ctx)
 		next := *env
 		next.Raw = outcome.NewRaw
 		next.Message = outcome.NewMessage
 		return &next
 	default:
 		return env
+	}
+}
+
+// clearWireEncoded sets the wireEncodedState flag to false when present
+// (no-op when ctx was not produced by Pipeline.Run). Used by the
+// non-MessageOnly mutation arms so the flag does not survive a chain
+// step that did not invoke the encoder.
+func clearWireEncoded(ctx context.Context) {
+	if state := wireEncodedStateFromContext(ctx); state != nil {
+		state.Encoded = false
 	}
 }
 
@@ -247,6 +267,7 @@ func (d *pluginDispatcher) applyMutation(ctx context.Context, env *envelope.Enve
 //   - no encoder registered for env.Protocol        → keep originalRaw + Debug
 func (d *pluginDispatcher) regenerateRaw(ctx context.Context, env *envelope.Envelope, originalRaw []byte) []byte {
 	if d.encoders == nil {
+		clearWireEncoded(ctx)
 		d.logger.DebugContext(ctx, "plugin: no wire encoder registry; preserving original raw",
 			slog.String("protocol", string(env.Protocol)),
 		)
@@ -254,6 +275,7 @@ func (d *pluginDispatcher) regenerateRaw(ctx context.Context, env *envelope.Enve
 	}
 	enc, ok := d.encoders.Lookup(env.Protocol)
 	if !ok {
+		clearWireEncoded(ctx)
 		d.logger.DebugContext(ctx, "plugin: no wire encoder for protocol; preserving original raw",
 			slog.String("protocol", string(env.Protocol)),
 		)
@@ -263,13 +285,20 @@ func (d *pluginDispatcher) regenerateRaw(ctx context.Context, env *envelope.Enve
 	switch {
 	case err == nil:
 		if bytesOut != nil {
+			// USK-684: env.Raw is now the encoder's output for the current
+			// Message. RecordStep can skip its own applyWireEncode call.
+			if state := wireEncodedStateFromContext(ctx); state != nil {
+				state.Encoded = true
+			}
 			return bytesOut
 		}
+		clearWireEncoded(ctx)
 		d.logger.DebugContext(ctx, "plugin: wire encoder returned nil bytes (fail-soft); preserving original raw",
 			slog.String("protocol", string(env.Protocol)),
 		)
 		return originalRaw
 	default:
+		clearWireEncoded(ctx)
 		d.logger.WarnContext(ctx, "plugin: wire encoder failed; preserving original raw",
 			slog.String("protocol", string(env.Protocol)),
 			slog.String("error", err.Error()),
