@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/usk6666/yorishiro-proxy/internal/pluginv2"
 )
 
 // validLogLevels lists the accepted log level strings.
@@ -535,14 +537,14 @@ type ProxyConfig struct {
 	// custom CA bundles, and per-host TLS verification control.
 	HostTLS map[string]*HostTLSEntry `json:"host_tls,omitempty"`
 
-	// Plugins configures Starlark-based plugins for the proxy pipeline.
-	// Each entry specifies a script path, target protocol, subscribed hooks,
-	// and error handling behavior. Plugins are executed in order.
-	//
-	// json.RawMessage is used intentionally to avoid a dependency from the
-	// config package to the plugin package. The raw JSON is decoded into
-	// []plugin.PluginConfig by the caller (e.g. cmd/yorishiro-proxy/main.go).
-	Plugins json.RawMessage `json:"plugins,omitempty"`
+	// Plugins configures Starlark plugins for the proxy pipeline (RFC-001
+	// pluginv2 shape — see RFC §9.3). Each entry is a script path plus
+	// per-plugin runtime options (Vars, OnError, MaxSteps, RedactKeys);
+	// hook registration is script-driven via register_hook() so the legacy
+	// `protocol`/`hooks` config keys are gone. Configs that still carry
+	// those legacy keys are rejected at load time by Validate() with a
+	// pluginv2.LoadErrLegacyField pointing at docs/rfc/plugin-migration.md.
+	Plugins []pluginv2.PluginConfig `json:"plugins,omitempty"`
 
 	// SOCKS5Auth specifies the SOCKS5 authentication method.
 	// Valid values: "none" (default), "password".
@@ -658,6 +660,23 @@ type SafetyFilterRuleConfig struct {
 	// preset rules. Ignored for input rules and custom rules (which use the
 	// section-level action). Only applicable when referencing an output preset.
 	Replacement string `json:"replacement,omitempty"`
+}
+
+// Validate runs per-section validation that must fail at config load time.
+// Currently it validates each Plugins entry via pluginv2.PluginConfig.Validate
+// — this surfaces the legacy `protocol:` / `hooks:` tripwire as a
+// LoadErrLegacyField at load time per RFC §9.3 P-8 (no shims), pointing the
+// user at docs/rfc/plugin-migration.md before the engine constructs.
+//
+// Other ProxyConfig sections (WebSocket / GRPC / SSE limits, SafetyFilter)
+// continue to use their dedicated standalone validators called from main.
+func (c *ProxyConfig) Validate() error {
+	for i := range c.Plugins {
+		if err := c.Plugins[i].Validate(); err != nil {
+			return fmt.Errorf("plugins[%d]: %w", i, err)
+		}
+	}
+	return nil
 }
 
 // UnmarshalJSON implements json.Unmarshaler for ProxyConfig.
