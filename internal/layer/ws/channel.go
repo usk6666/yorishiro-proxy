@@ -13,6 +13,7 @@ import (
 
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/layer"
+	"github.com/usk6666/yorishiro-proxy/internal/pluginv2"
 )
 
 // wsChannel implements layer.Channel for a single WebSocket bidirectional
@@ -56,6 +57,13 @@ type wsChannel struct {
 	termMu   sync.Mutex
 	termErr  error
 	recvDone chan struct{}
+
+	// lastClose caches the wire-observed Close-frame WSMessage so
+	// markTerminated can deliver it to (ws, on_close) hooks. nil when
+	// the connection terminated without ever observing a peer Close
+	// frame; markTerminated then synthesizes a 1006 (abnormal closure)
+	// WSMessage.
+	lastClose *envelope.WSMessage
 }
 
 // newChannel constructs a wsChannel under the given Layer. The Layer
@@ -104,11 +112,20 @@ func (c *wsChannel) Close() error { return nil }
 // guarded by termMu) and closes recvDone exactly once. Safe to call from
 // multiple goroutines.
 //
-// On the first call we also fire the configured pluginv2 state release
-// for this Channel's WS upgrade-pair scope. The call is sequenced AFTER
-// close(recvDone) so a USK-671 dispatch path observing the close can run
-// any terminal-event hook (e.g. ws.on_close) before the backing dict is
-// cleared.
+// On the first call we also fire (ws, on_close) lifecycle hooks (USK-683)
+// and the configured pluginv2 state release. Ordering inside the once
+// block:
+//
+//  1. close(recvDone) — terminal signal observers (e.g. session-level
+//     RST watchers) unblock.
+//  2. fireOnClose — (ws, on_close) hooks run with transaction_state
+//     still live so plugin code can read whatever earlier on_message
+//     hooks stashed.
+//  3. releaseTransactionState — backing ScopedState is cleared after
+//     the hook returns.
+//
+// USK-670 reserved this exact ordering (channel.go documentation); USK-683
+// realises it.
 func (c *wsChannel) markTerminated(err error) {
 	c.termOnce.Do(func() {
 		c.termMu.Lock()
@@ -117,8 +134,51 @@ func (c *wsChannel) markTerminated(err error) {
 		}
 		c.termMu.Unlock()
 		close(c.recvDone)
+		c.fireOnClose()
 		c.releaseTransactionState()
 	})
+}
+
+// fireOnClose dispatches (ws, on_close) hooks via the configured
+// lifecycleEngine. No-op when no Engine is wired. The msg payload is
+// derived from lastClose (the most recent peer Close frame) when
+// available; otherwise a synthetic WSMessage with CloseCode=1006
+// (abnormal closure) is constructed so the plugin always sees a stable
+// shape. Errors from FireLifecycle are swallowed (fail-soft per RFC
+// §9.3): a misbehaving plugin must not break wire teardown.
+func (c *wsChannel) fireOnClose() {
+	if c.opts == nil || c.opts.lifecycleEngine == nil {
+		return
+	}
+	c.termMu.Lock()
+	last := c.lastClose
+	termErr := c.termErr
+	c.termMu.Unlock()
+
+	var payloadMsg *envelope.WSMessage
+	if last != nil {
+		payloadMsg = last
+	} else {
+		reason := ""
+		if termErr != nil {
+			reason = termErr.Error()
+		}
+		payloadMsg = &envelope.WSMessage{
+			Opcode:      envelope.WSClose,
+			Fin:         true,
+			CloseCode:   1006,
+			CloseReason: reason,
+		}
+	}
+	envCtx := c.opts.ctxTmpl
+	env := &envelope.Envelope{
+		StreamID: c.streamID,
+		Protocol: envelope.ProtocolWebSocket,
+		Message:  payloadMsg,
+		Context:  envCtx,
+	}
+	payload := pluginv2.BuildWSCloseDict(payloadMsg)
+	_, _ = c.opts.lifecycleEngine.FireLifecycle(context.Background(), pluginv2.ProtoWS, pluginv2.EventOnClose, env, payload)
 }
 
 // releaseTransactionState fires the configured pluginv2.StateReleaser for
@@ -264,6 +324,15 @@ func (c *wsChannel) buildEnvelope(frame *Frame, raw []byte, dir envelope.Directi
 		c.mu.Lock()
 		c.closeSeen = true
 		c.mu.Unlock()
+		// Cache the wire-observed close so markTerminated can deliver
+		// it to (ws, on_close) hooks (USK-683). Last-writer-wins under
+		// termMu so a peer that sends multiple close frames (RFC 6455
+		// forbids this but we surface what the wire shows) only fires
+		// the hook with the most recent payload.
+		closeCopy := *msg
+		c.termMu.Lock()
+		c.lastClose = &closeCopy
+		c.termMu.Unlock()
 	}
 
 	envCtx := c.opts.ctxTmpl

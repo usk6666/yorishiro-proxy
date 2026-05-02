@@ -18,6 +18,7 @@ import (
 
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/layer"
+	"github.com/usk6666/yorishiro-proxy/internal/pluginv2"
 )
 
 // opaqueGRPCWeb is per-RPC layer-internal state attached to every
@@ -75,16 +76,39 @@ type channel struct {
 	// gunzip-decoded length. Resolved once at Wrap time via the Option
 	// list; always positive (defaults to config.MaxGRPCMessageSize).
 	maxMessageSize uint32
+
+	// lifecycleEngine drives (grpc-web, on_end) hook dispatch (USK-683).
+	// fireOnEnd uses onEndOnce so the hook fires once per Channel even
+	// when the parser's natural-trailer and missing-trailer-anomaly
+	// paths both produce End envelopes.
+	lifecycleEngine *pluginv2.Engine
+	onEndOnce       sync.Once
 }
 
 // newChannel constructs the wrapper.
 func newChannel(inner layer.Channel, role Role, o options) *channel {
 	return &channel{
-		inner:          inner,
-		role:           role,
-		recvDone:       make(chan struct{}),
-		maxMessageSize: o.maxMessageSize,
+		inner:           inner,
+		role:            role,
+		recvDone:        make(chan struct{}),
+		maxMessageSize:  o.maxMessageSize,
+		lifecycleEngine: o.lifecycleEngine,
 	}
+}
+
+// fireOnEnd dispatches (grpc-web, on_end) hooks for the first emitted
+// End envelope. Subsequent calls are no-ops via sync.Once. nil engine
+// and nil End message are no-ops. Errors from FireLifecycle are
+// swallowed (USK-671 fail-soft: a misbehaving plugin must not break
+// wire teardown).
+func (c *channel) fireOnEnd(env *envelope.Envelope, m *envelope.GRPCEndMessage) {
+	if c.lifecycleEngine == nil || env == nil || m == nil {
+		return
+	}
+	c.onEndOnce.Do(func() {
+		payload := pluginv2.BuildGRPCEndDict(m)
+		_, _ = c.lifecycleEngine.FireLifecycle(context.Background(), pluginv2.ProtoGRPCWeb, pluginv2.EventOnEnd, env, payload)
+	})
 }
 
 // terminate marks the channel terminated, caches err, and fires recvDone.
@@ -282,7 +306,6 @@ func (c *channel) refillFromHTTPMessage(ctx context.Context, env *envelope.Envel
 
 	// Always emit one Start envelope first.
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	c.emitQueue = append(c.emitQueue, c.buildEnvelope(env, dir, start, nil, opaque))
 
 	// Emit one Data envelope per data frame.
@@ -290,6 +313,7 @@ func (c *channel) refillFromHTTPMessage(ctx context.Context, env *envelope.Envel
 		// Decompress payload for inspection convenience (if compressed).
 		payload, derr := maybeDecompress(fr.Payload, fr.Compressed, encoding, c.maxMessageSize)
 		if derr != nil {
+			c.mu.Unlock()
 			return derr
 		}
 		data := &envelope.GRPCDataMessage{
@@ -319,6 +343,8 @@ func (c *channel) refillFromHTTPMessage(ctx context.Context, env *envelope.Envel
 	// trailer. If one is observed, emit the End anyway (so the analyst
 	// can inspect what was sent) and stamp
 	// AnomalyUnexpectedGRPCWebRequestTrailer.
+	var firedEndEnv *envelope.Envelope
+	var firedEndMsg *envelope.GRPCEndMessage
 	if parsed.TrailerFrame != nil {
 		end := buildEndFromTrailers(parsed.Trailers)
 		if dir == envelope.Send {
@@ -327,7 +353,10 @@ func (c *channel) refillFromHTTPMessage(ctx context.Context, env *envelope.Envel
 				Detail: "gRPC-Web request body carried an embedded trailer LPM frame",
 			})
 		}
-		c.emitQueue = append(c.emitQueue, c.buildEnvelopeRaw(env, dir, end, trailerRawBytes, opaque))
+		endEnv := c.buildEnvelopeRaw(env, dir, end, trailerRawBytes, opaque)
+		c.emitQueue = append(c.emitQueue, endEnv)
+		firedEndEnv = endEnv
+		firedEndMsg = end
 	} else if dir == envelope.Receive && len(parsed.DataFrames) > 0 {
 		end := &envelope.GRPCEndMessage{
 			Anomalies: []envelope.Anomaly{{
@@ -335,9 +364,18 @@ func (c *channel) refillFromHTTPMessage(ctx context.Context, env *envelope.Envel
 				Detail: "gRPC-Web response body had data frames but no terminating trailer LPM",
 			}},
 		}
-		c.emitQueue = append(c.emitQueue, c.buildEnvelope(env, dir, end, nil, opaque))
+		endEnv := c.buildEnvelope(env, dir, end, nil, opaque)
+		c.emitQueue = append(c.emitQueue, endEnv)
+		firedEndEnv = endEnv
+		firedEndMsg = end
 	}
+	c.mu.Unlock()
 
+	// Fire (grpc-web, on_end) outside the mutex so a slow plugin does not
+	// block the consumer's Next path. fireOnEnd is sync.Once-gated.
+	if firedEndEnv != nil {
+		c.fireOnEnd(firedEndEnv, firedEndMsg)
+	}
 	return nil
 }
 

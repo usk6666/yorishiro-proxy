@@ -4,6 +4,7 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/layer"
+	"github.com/usk6666/yorishiro-proxy/internal/pluginv2"
 )
 
 // options holds the resolved per-Channel configuration applied by Wrap.
@@ -13,6 +14,14 @@ type options struct {
 	// with config.MaxGRPCMessageSize at Wrap time so the on-Channel
 	// value is always positive.
 	maxMessageSize uint32
+
+	// lifecycleEngine is the optional pluginv2 Engine consulted on End
+	// emission to fire (grpc, on_end) hooks per RFC §9.3 PhaseSupportNone.
+	// nil = no-op. The hook fires exactly once per Channel via sync.Once,
+	// at the moment the End envelope is queued for emission (synchronous
+	// with absorb), so the hook runs before the inner HTTP/2 channel
+	// terminates and clears stream_state.
+	lifecycleEngine *pluginv2.Engine
 }
 
 // Option tunes a Channel produced by Wrap. The Option type intentionally
@@ -31,6 +40,16 @@ func WithMaxMessageSize(n uint32) Option {
 			o.maxMessageSize = n
 		}
 	}
+}
+
+// WithLifecycleEngine injects a pluginv2 Engine the wrapper consults on
+// End emission to fire (grpc, on_end) hooks per RFC §9.3 PhaseSupportNone.
+// The hook fires once per Channel — at the queue point of the first
+// emitted GRPCEndMessage, before the inner HTTP/2 channel terminates and
+// stream_state is released — so plugin code observing on_end still sees
+// live stream_state from earlier on_data hooks. nil = no-op.
+func WithLifecycleEngine(e *pluginv2.Engine) Option {
+	return func(o *options) { o.lifecycleEngine = e }
 }
 
 // Role identifies whether the wrapped Channel is server-side (the local
@@ -89,11 +108,12 @@ func Wrap(stream layer.Channel, firstHeaders *envelope.Envelope, role Role, opts
 	}
 
 	gc := &grpcChannel{
-		inner:          stream,
-		role:           role,
-		streamID:       stream.StreamID(),
-		recvDone:       make(chan struct{}),
-		maxMessageSize: o.maxMessageSize,
+		inner:           stream,
+		role:            role,
+		streamID:        stream.StreamID(),
+		recvDone:        make(chan struct{}),
+		maxMessageSize:  o.maxMessageSize,
+		lifecycleEngine: o.lifecycleEngine,
 	}
 	// Apply D5: only replay firstHeaders when it carries real wire bytes.
 	if firstHeaders != nil && len(firstHeaders.Raw) > 0 {

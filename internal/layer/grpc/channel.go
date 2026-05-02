@@ -20,6 +20,7 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/layer"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/http2"
+	"github.com/usk6666/yorishiro-proxy/internal/pluginv2"
 )
 
 // lpmPrefixLen is the size of a gRPC Length-Prefixed Message header on the
@@ -187,6 +188,13 @@ type grpcChannel struct {
 	// reassembler and the gzip decoder. Resolved once at Wrap time;
 	// always positive (defaults to config.MaxGRPCMessageSize).
 	maxMessageSize uint32
+
+	// lifecycleEngine drives (grpc, on_end) hook dispatch (USK-683).
+	// nil = no-op. fireOnEnd uses onEndOnce to guarantee the hook
+	// fires at most once per Channel even when both the trailers-only
+	// (D4) and the absorbTrailers paths produce End envelopes.
+	lifecycleEngine *pluginv2.Engine
+	onEndOnce       sync.Once
 }
 
 // StreamID returns the inner Channel's stream identifier (one RPC = one
@@ -250,6 +258,23 @@ func (c *grpcChannel) setTermErr(err error) {
 func (c *grpcChannel) closeRecvDone() {
 	c.recvDoneOnce.Do(func() {
 		close(c.recvDone)
+	})
+}
+
+// fireOnEnd dispatches (grpc, on_end) hooks for the first emitted End
+// envelope. Subsequent calls are no-ops via sync.Once. nil engine and
+// nil End message are no-ops. The hook fires synchronously from the
+// absorb path so it runs before the inner HTTP/2 channel terminates and
+// any stream_state seeded by on_data hooks is released. Errors from
+// FireLifecycle are swallowed: a misbehaving plugin must not break wire
+// teardown (USK-671 fail-soft contract).
+func (c *grpcChannel) fireOnEnd(env *envelope.Envelope, m *envelope.GRPCEndMessage) {
+	if c.lifecycleEngine == nil || env == nil || m == nil {
+		return
+	}
+	c.onEndOnce.Do(func() {
+		payload := pluginv2.BuildGRPCEndDict(m)
+		_, _ = c.lifecycleEngine.FireLifecycle(context.Background(), pluginv2.ProtoGRPC, pluginv2.EventOnEnd, env, payload)
 	})
 }
 
@@ -418,6 +443,8 @@ func (c *grpcChannel) absorbHeaders(ev *envelope.Envelope, evt *http2.H2HeadersE
 	// carry grpc-status are simultaneously the start AND the end of the
 	// RPC's response side. Synthesize a second GRPCEndMessage envelope
 	// from the same headers.
+	var firedEndEnv *envelope.Envelope
+	var firedEndMsg *envelope.GRPCEndMessage
 	if ev.Direction == envelope.Receive && evt.EndStream && hasGRPCStatus(evt.Headers) {
 		endMsg := buildEndMessage(evt.Headers)
 		endEnv := &envelope.Envelope{
@@ -434,9 +461,19 @@ func (c *grpcChannel) absorbHeaders(ev *envelope.Envelope, evt *http2.H2HeadersE
 		}
 		c.nextSeq++
 		c.queued = append(c.queued, pendingEnvelope{env: endEnv})
+		firedEndEnv = endEnv
+		firedEndMsg = endMsg
 	}
 
 	c.mu.Unlock()
+
+	// Fire (grpc, on_end) outside the mutex so a slow plugin does not
+	// block the consumer's Next path. fireOnEnd is sync.Once-gated, so a
+	// later End from absorbTrailers (which would not happen for a true
+	// trailers-only response, but defensively) is a no-op.
+	if firedEndEnv != nil {
+		c.fireOnEnd(firedEndEnv, firedEndMsg)
+	}
 
 	// Path-warning: log under Warn outside the mutex to keep critical
 	// section short. Service/Method=="" iff buildStartMessage failed to
@@ -651,6 +688,11 @@ func (c *grpcChannel) absorbTrailers(ev *envelope.Envelope, evt *http2.H2Trailer
 	c.nextSeq++
 	c.queued = append(c.queued, pendingEnvelope{env: endEnv})
 	c.mu.Unlock()
+
+	// Fire (grpc, on_end) outside the mutex; sync.Once gates the hook
+	// to a single firing per Channel even when D4 (trailers-only) also
+	// produced an End earlier.
+	c.fireOnEnd(endEnv, endMsg)
 	return nil
 }
 
