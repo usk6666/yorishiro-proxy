@@ -20,6 +20,7 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/envelope/bodybuf"
 	"github.com/usk6666/yorishiro-proxy/internal/layer"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/http1/parser"
+	"github.com/usk6666/yorishiro-proxy/internal/pluginv2"
 )
 
 // opaqueHTTP1 holds Layer-specific data stored in Envelope.Opaque.
@@ -63,6 +64,17 @@ type channel struct {
 	currentStreamID string // changes per request-response pair
 	sequence        int    // 0=request, 1=response within a pair
 	connClosed      bool   // set when Connection: close or HTTP/1.0
+
+	// stateReleaser, when non-nil, is invoked once per emitted FlowID
+	// when the Channel reaches its terminal state. RFC §9.3 D6 / Q26
+	// maps the HTTP transaction scope to (ConnID, FlowID).
+	stateReleaser pluginv2.StateReleaser
+
+	// emittedFlowIDs accumulates the FlowID of every envelope this
+	// Channel emitted via Next. Drained by releaseTransactionStates at
+	// markTerminated time. Append-only, guarded by termMu (which already
+	// guards termErr — both are touched on the terminal path).
+	emittedFlowIDs []string
 
 	// Terminal-state tracking. Populated before termDone closes.
 	termMu   sync.Mutex
@@ -141,13 +153,64 @@ func (c *channel) Err() error {
 
 // markTerminated stores err (first-writer-wins) and closes termDone exactly
 // once. Callers must guarantee err is non-nil.
+//
+// On the first call we also fire the configured pluginv2 state release for
+// every FlowID this Channel emitted via Next. The release is sequenced
+// AFTER close(termDone) so a USK-671 dispatch path observing the close
+// can run any terminal-event hook before the backing transaction_state
+// dict is cleared (matches the http2 / ws ordering contract).
 func (c *channel) markTerminated(err error) {
 	c.termMu.Lock()
 	if c.termErr == nil {
 		c.termErr = err
 	}
 	c.termMu.Unlock()
-	c.termOnce.Do(func() { close(c.termDone) })
+	c.termOnce.Do(func() {
+		close(c.termDone)
+		c.releaseTransactionStates()
+	})
+}
+
+// recordEmittedFlowID appends flowID to the set of envelopes the Channel
+// has produced via Next. Empty FlowIDs are ignored (defensive — every
+// successful Next path mints a uuid, but a future refactor that produces
+// envelopes without FlowID must not leak an empty-string release).
+func (c *channel) recordEmittedFlowID(flowID string) {
+	if flowID == "" {
+		return
+	}
+	c.termMu.Lock()
+	c.emittedFlowIDs = append(c.emittedFlowIDs, flowID)
+	c.termMu.Unlock()
+}
+
+// releaseTransactionStates fires the configured pluginv2.StateReleaser for
+// every FlowID this Channel emitted. No-op when no releaser was configured
+// (legacy parallel path / plain unit tests) or when the Layer's
+// EnvelopeContext has no ConnID (the scope key would be incomplete).
+//
+// Snapshot under termMu, release outside (mirrors httpaggregator.Channel
+// pattern) so a downstream Engine can fan out without holding our mutex.
+func (c *channel) releaseTransactionStates() {
+	if c.stateReleaser == nil {
+		return
+	}
+	if c.ctxTmpl.ConnID == "" {
+		return
+	}
+	c.termMu.Lock()
+	if len(c.emittedFlowIDs) == 0 {
+		c.termMu.Unlock()
+		return
+	}
+	snapshot := make([]string, len(c.emittedFlowIDs))
+	copy(snapshot, c.emittedFlowIDs)
+	c.termMu.Unlock()
+
+	connID := c.ctxTmpl.ConnID
+	for _, flowID := range snapshot {
+		c.stateReleaser.ReleaseTransaction(connID, flowID)
+	}
 }
 
 // --- Next() implementation ---
@@ -235,6 +298,7 @@ func (c *channel) nextRequest(_ context.Context) (env *envelope.Envelope, retErr
 	// Set connection close semantics.
 	c.connClosed = rawReq.Close
 
+	c.recordEmittedFlowID(env.FlowID)
 	return env, nil
 }
 
@@ -318,6 +382,7 @@ func (c *channel) nextResponse(_ context.Context) (env *envelope.Envelope, retEr
 		},
 	}
 
+	c.recordEmittedFlowID(env.FlowID)
 	return env, nil
 }
 
@@ -354,7 +419,7 @@ func (c *channel) buildStreamingResponseEnvelope(rawResp *parser.RawResponse) *e
 
 	c.streamingBody = c.reader
 
-	return &envelope.Envelope{
+	env := &envelope.Envelope{
 		StreamID:  c.currentStreamID,
 		FlowID:    uuid.New().String(),
 		Sequence:  c.sequence + 1,
@@ -368,6 +433,8 @@ func (c *channel) buildStreamingResponseEnvelope(rawResp *parser.RawResponse) *e
 			origKV:  cloneKV(msg.Headers),
 		},
 	}
+	c.recordEmittedFlowID(env.FlowID)
+	return env
 }
 
 // --- Send() implementation ---
