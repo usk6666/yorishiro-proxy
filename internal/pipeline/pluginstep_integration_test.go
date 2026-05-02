@@ -1,6 +1,7 @@
 package pipeline
 
 import (
+	"bytes"
 	"context"
 	"sync/atomic"
 	"testing"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
+	"github.com/usk6666/yorishiro-proxy/internal/layer/http1"
 	"github.com/usk6666/yorishiro-proxy/internal/pluginv2"
 )
 
@@ -401,6 +403,155 @@ func TestPluginIntegration_RawOnly_DedupSignalCleared(t *testing.T) {
 	// pre-USK-684 behavior. Total: 1 call.
 	if got := atomic.LoadInt32(&encodeCalls); got != 1 {
 		t.Errorf("encoder called %d times, want 1 (RawOnly: only RecordStep calls)", got)
+	}
+}
+
+// TestPluginIntegration_PostMutation_HeaderDoubleCasingPreservedOnWire covers
+// USK-681 AC 1.6: a PluginStepPost hook appending two header entries that
+// differ only in case (`X-Test: 1` and `x-test: 2`) must produce wire bytes
+// containing BOTH casings, in order, after http1.EncodeWireBytes regenerates
+// Raw.
+//
+// This is the milestone-cross-cutting assertion that the
+// MITM no-normalize principle holds end-to-end through plugin mutation +
+// WireEncoder regeneration. Per-issue tests cover the dispatch (USK-671) and
+// the encoder regenerate (USK-666); this test guards the *case + duplicate*
+// preservation invariant on the post-mutation wire path that no per-issue
+// test had reason to assert.
+func TestPluginIntegration_PostMutation_HeaderDoubleCasingPreservedOnWire(t *testing.T) {
+	env := http1.BuildSendEnvelope(
+		"GET", "https", "example.com", "/", "",
+		[]envelope.KeyValue{{Name: "Host", Value: "example.com"}},
+		nil,
+	)
+
+	reg := NewWireEncoderRegistry()
+	reg.Register(envelope.ProtocolHTTP, http1.EncodeWireBytes)
+
+	eng := pluginv2.NewEngine(nil)
+	eng.Registry().Register(pluginv2.Hook{
+		Protocol: pluginv2.ProtoHTTP, Event: pluginv2.EventOnRequest,
+		Phase: pluginv2.PhasePostPipeline, PluginName: "double-case",
+		Fn: hookCallable("append-twice", func(args starlark.Tuple) (starlark.Value, error) {
+			msg := args[0].(*pluginv2.MessageDict)
+			hdrsV, _, _ := msg.Get(starlark.String("headers"))
+			hv := hdrsV.(*pluginv2.HeadersValue)
+			appendBuiltin, _ := hv.Attr("append")
+			thread := &starlark.Thread{Name: "test"}
+			if _, err := starlark.Call(thread, appendBuiltin,
+				starlark.Tuple{starlark.String("X-Test"), starlark.String("1")}, nil); err != nil {
+				return nil, err
+			}
+			if _, err := starlark.Call(thread, appendBuiltin,
+				starlark.Tuple{starlark.String("x-test"), starlark.String("2")}, nil); err != nil {
+				return nil, err
+			}
+			return starlark.None, nil
+		}),
+	})
+
+	step := NewPluginStepPost(eng, reg, nil)
+	r := step.Process(context.Background(), env)
+	if r.Envelope == nil {
+		t.Fatal("expected new envelope after MessageOnly mutation")
+	}
+
+	raw := r.Envelope.Raw
+	if !bytes.Contains(raw, []byte("X-Test: 1\r\n")) {
+		t.Errorf("Raw missing upper-case X-Test header line: %q", raw)
+	}
+	if !bytes.Contains(raw, []byte("x-test: 2\r\n")) {
+		t.Errorf("Raw missing lower-case x-test header line: %q", raw)
+	}
+	upperIdx := bytes.Index(raw, []byte("X-Test: 1\r\n"))
+	lowerIdx := bytes.Index(raw, []byte("x-test: 2\r\n"))
+	if upperIdx < 0 || lowerIdx < 0 || upperIdx >= lowerIdx {
+		t.Errorf("header order on wire wrong: X-Test idx=%d, x-test idx=%d (want X-Test before x-test)", upperIdx, lowerIdx)
+	}
+
+	httpMsg, ok := r.Envelope.Message.(*envelope.HTTPMessage)
+	if !ok {
+		t.Fatalf("Message type %T", r.Envelope.Message)
+	}
+	wantTail := []envelope.KeyValue{
+		{Name: "X-Test", Value: "1"},
+		{Name: "x-test", Value: "2"},
+	}
+	if len(httpMsg.Headers) < 2 {
+		t.Fatalf("Headers too short: %+v", httpMsg.Headers)
+	}
+	tail := httpMsg.Headers[len(httpMsg.Headers)-2:]
+	for i, want := range wantTail {
+		if tail[i].Name != want.Name || tail[i].Value != want.Value {
+			t.Errorf("Headers tail[%d] = {%q, %q}, want {%q, %q}",
+				i, tail[i].Name, tail[i].Value, want.Name, want.Value)
+		}
+	}
+}
+
+// TestPluginIntegration_PerConnectionTransactionStateIsolation covers
+// USK-681 AC 1.11: ctx.transaction_state on one connection must not be
+// readable from another connection. The store partitions state by
+// (ConnID, FlowID); this test pins the contract that two envelopes with
+// distinct ConnIDs see independent state values.
+func TestPluginIntegration_PerConnectionTransactionStateIsolation(t *testing.T) {
+	eng := pluginv2.NewEngine(nil)
+
+	type observation struct{ observed string }
+	var seen []observation
+
+	eng.Registry().Register(pluginv2.Hook{
+		Protocol: pluginv2.ProtoHTTP, Event: pluginv2.EventOnRequest,
+		Phase: pluginv2.PhasePostPipeline, PluginName: "isolation",
+		Fn: hookCallable("rw", func(args starlark.Tuple) (starlark.Value, error) {
+			c := args[1].(*pluginv2.Ctx)
+			tx, _ := c.Attr("transaction_state")
+			getBuiltin, _ := tx.(starlark.HasAttrs).Attr("get")
+			setBuiltin, _ := tx.(starlark.HasAttrs).Attr("set")
+			thread := &starlark.Thread{Name: "t"}
+
+			v, err := starlark.Call(thread, getBuiltin,
+				starlark.Tuple{starlark.String("k")}, nil)
+			if err != nil {
+				return nil, err
+			}
+			obs := "<missing>"
+			if s, ok := v.(starlark.String); ok && string(s) != "" {
+				obs = string(s)
+			}
+			seen = append(seen, observation{observed: obs})
+
+			_, err = starlark.Call(thread, setBuiltin,
+				starlark.Tuple{starlark.String("k"), starlark.String("set-on-this-conn")}, nil)
+			return starlark.None, err
+		}),
+	})
+
+	pipeline := New(NewPluginStepPost(eng, nil, nil))
+
+	envA := httpReqEnv()
+	envA.Context.ConnID = "conn-A"
+	envA.FlowID = "flow-A"
+	if _, action, _ := pipeline.Run(context.Background(), envA); action != Continue {
+		t.Fatalf("envA action = %v", action)
+	}
+	envB := httpReqEnv()
+	envB.Context.ConnID = "conn-B"
+	envB.FlowID = "flow-B"
+	if _, action, _ := pipeline.Run(context.Background(), envB); action != Continue {
+		t.Fatalf("envB action = %v", action)
+	}
+
+	if len(seen) != 2 {
+		t.Fatalf("seen = %v, want 2 observations", seen)
+	}
+	if seen[0].observed != "<missing>" {
+		t.Errorf("first observation (conn-A) = %q, want <missing> (state should start empty)",
+			seen[0].observed)
+	}
+	if seen[1].observed != "<missing>" {
+		t.Errorf("second observation (conn-B) leaked from conn-A: got %q, want <missing>",
+			seen[1].observed)
 	}
 }
 
