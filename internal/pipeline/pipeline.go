@@ -89,6 +89,7 @@ func New(steps ...Step) *Pipeline {
 func (p *Pipeline) Run(ctx context.Context, env *envelope.Envelope) (*envelope.Envelope, Action, *envelope.Envelope) {
 	snapshot := env.Clone()
 	ctx = withSnapshot(ctx, snapshot)
+	ctx = withWireEncodedState(ctx)
 
 	for _, step := range p.steps {
 		r := step.Process(ctx, env)

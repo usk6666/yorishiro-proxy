@@ -264,7 +264,7 @@ func (s *RecordStep) recordVariantFlows(ctx context.Context, snap, current *enve
 
 	modFlow := s.envelopeToFlow(ctx, current)
 	modFlow.Metadata["variant"] = "modified"
-	s.applyWireEncode(current, modFlow)
+	s.applyWireEncode(ctx, current, modFlow)
 	if err := s.store.SaveFlow(ctx, modFlow); err != nil {
 		s.logger.Error("record step: modified variant save failed",
 			"stream_id", current.StreamID,
@@ -293,8 +293,21 @@ func (s *RecordStep) recordVariantFlows(ctx context.Context, snap, current *enve
 //     encoder failure).
 //   - Encoder returns any other non-nil error: RawBytes keeps env.Raw, tag
 //     is set to "unavailable" and the error is logged.
-func (s *RecordStep) applyWireEncode(current *envelope.Envelope, modFlow *flow.Flow) {
+func (s *RecordStep) applyWireEncode(ctx context.Context, current *envelope.Envelope, modFlow *flow.Flow) {
 	if s.encoders == nil || s.encoders.Len() == 0 {
+		return
+	}
+	// USK-684: A preceding Step (PluginStepPost today) may have already
+	// rendered the post-mutation wire bytes via the same WireEncoder and
+	// stored them in current.Raw. envelopeToFlow has just copied
+	// current.Raw into modFlow.RawBytes, so a second encoder call here
+	// would produce bit-identical bytes — pure waste on heavy encoders
+	// (HPACK / large bodies). Skip when the Pipeline-internal flag says
+	// "Raw IS encoder output for current Message". The flag is set only
+	// on the encoder-success path, so fail-soft / partial / no-encoder
+	// paths still fall through to the call below and tag modFlow's
+	// Metadata["wire_bytes"] correctly.
+	if wireEncodedFromContext(ctx) {
 		return
 	}
 	enc, ok := s.encoders.Lookup(current.Protocol)
