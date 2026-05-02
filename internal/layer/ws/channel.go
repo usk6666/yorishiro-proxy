@@ -152,22 +152,20 @@ func (c *wsChannel) fireOnClose() {
 	}
 	c.termMu.Lock()
 	last := c.lastClose
-	termErr := c.termErr
 	c.termMu.Unlock()
 
 	var payloadMsg *envelope.WSMessage
 	if last != nil {
 		payloadMsg = last
 	} else {
-		reason := ""
-		if termErr != nil {
-			reason = termErr.Error()
-		}
+		// Synthetic 1006 (abnormal closure). RFC 6455 close reasons are
+		// peer-supplied UTF-8 strings; surfacing the internal Go error
+		// would surprise plugin authors expecting wire-style reasons.
+		// The terminal error is still observable via Channel.Err().
 		payloadMsg = &envelope.WSMessage{
-			Opcode:      envelope.WSClose,
-			Fin:         true,
-			CloseCode:   1006,
-			CloseReason: reason,
+			Opcode:    envelope.WSClose,
+			Fin:       true,
+			CloseCode: 1006,
 		}
 	}
 	envCtx := c.opts.ctxTmpl

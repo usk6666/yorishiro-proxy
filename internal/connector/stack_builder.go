@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"net"
 	"net/url"
-	"time"
 
 	"github.com/google/uuid"
 
@@ -536,7 +535,7 @@ func fireTLSHandshakeHook(ctx context.Context, cfg *BuildConfig, side string, sn
 	if cfg == nil || cfg.PluginV2Engine == nil {
 		return
 	}
-	hookCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	hookCtx, cancel := context.WithTimeout(ctx, hookTimeout)
 	defer cancel()
 	payload := pluginv2.BuildTLSHandshakeDict(side, snap)
 	if _, err := cfg.PluginV2Engine.FireLifecycle(hookCtx, pluginv2.ProtoTLS, pluginv2.EventOnHandshake, nil, payload); err != nil {
