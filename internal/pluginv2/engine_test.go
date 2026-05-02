@@ -313,6 +313,103 @@ register_hook("http", "on_request", h)
 	}
 }
 
+// TestEngine_LoadFailureLeavesRegistryEmpty verifies USK-685: a plugin
+// that successfully calls register_hook(...) and then trips an ExecFile
+// failure (fail() / step-budget exhaustion) must not leak its hooks
+// into the engine Registry. Hooks become observable to runtime dispatch
+// only after ExecFileOptions returns nil.
+func TestEngine_LoadFailureLeavesRegistryEmpty(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		cfg  PluginConfig
+	}{
+		{
+			name: "fail_after_register",
+			body: `
+def h(env):
+    return None
+register_hook("http", "on_request", h)
+fail("intentional load failure")
+`,
+		},
+		{
+			name: "step_budget_after_register",
+			body: `
+def h(env):
+    return None
+register_hook("http", "on_request", h)
+n = 0
+for _ in range(10000000):
+    n = n + 1
+`,
+			cfg: PluginConfig{MaxSteps: 1_000},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := writeScript(t, tc.body)
+			cfg := tc.cfg
+			cfg.Path = path
+			cfg.OnError = string(OnErrorAbort)
+			eng := NewEngine(nil)
+			if err := eng.LoadPlugins(context.Background(), []PluginConfig{cfg}); err == nil {
+				t.Fatal("expected load error")
+			}
+			if got := eng.Registry().Count(); got != 0 {
+				t.Errorf("Registry leaked %d hooks from failed load", got)
+			}
+			if got := eng.PluginCount(); got != 0 {
+				t.Errorf("PluginCount() = %d, want 0 after failed load", got)
+			}
+			if got := eng.Introspect(); len(got) != 0 {
+				t.Errorf("Introspect() leaked %d entries from failed load", len(got))
+			}
+			if got := eng.Registry().Lookup("http", "on_request", PhasePrePipeline); got != nil {
+				t.Errorf("Lookup returned orphan hooks: %+v", got)
+			}
+		})
+	}
+}
+
+// TestEngine_OnErrorSkipDoesNotLeakRegistry verifies USK-685 under
+// OnError: skip — a failing plugin must not leave its register_hook
+// entries in the registry, and a subsequent good plugin must still load
+// cleanly.
+func TestEngine_OnErrorSkipDoesNotLeakRegistry(t *testing.T) {
+	bad := writeScript(t, `
+def h(env):
+    return None
+register_hook("http", "on_request", h)
+fail("oops")
+`)
+	good := writeScript(t, `
+def h(env):
+    return None
+register_hook("http", "on_response", h, phase="post_pipeline")
+`)
+	eng := NewEngine(nil)
+	err := eng.LoadPlugins(context.Background(), []PluginConfig{
+		{Path: bad, OnError: string(OnErrorSkip)},
+		{Path: good, OnError: string(OnErrorAbort)},
+	})
+	if err != nil {
+		t.Fatalf("LoadPlugins: %v", err)
+	}
+	if got := eng.Registry().Count(); got != 1 {
+		t.Errorf("Registry.Count = %d, want 1 (only good plugin's hook)", got)
+	}
+	if got := eng.Registry().Lookup("http", "on_request", PhasePrePipeline); got != nil {
+		t.Errorf("bad plugin's hook leaked into registry: %+v", got)
+	}
+	if got := eng.Registry().Lookup("http", "on_response", PhasePostPipeline); len(got) != 1 {
+		t.Errorf("good plugin's hook missing: %+v", got)
+	}
+	if got := eng.PluginCount(); got != 1 {
+		t.Errorf("PluginCount() = %d, want 1", got)
+	}
+}
+
 func TestEngine_MultiplePluginsAppendInLoadOrder(t *testing.T) {
 	a := writeScript(t, `
 def h(env):
