@@ -8,6 +8,8 @@ import { FuzzResultsPage } from "./pages/Fuzz/FuzzResultsPage.js";
 import { InterceptPage } from "./pages/Intercept/InterceptPage.js";
 import { MacroDetailPage } from "./pages/Macros/MacroDetailPage.js";
 import { MacrosPage } from "./pages/Macros/MacrosPage.js";
+import { PluginDetail } from "./pages/Plugins/PluginDetail.js";
+import { PluginsPage } from "./pages/Plugins/PluginsPage.js";
 import { ResendPage } from "./pages/Resend/ResendPage.js";
 import { SecurityPage } from "./pages/Security/SecurityPage.js";
 import { SettingsPage } from "./pages/Settings/SettingsPage.js";
@@ -26,6 +28,8 @@ function App() {
         <Route path="fuzz/:fuzzId" element={<FuzzResultsPage />} />
         <Route path="macros" element={<MacrosPage />} />
         <Route path="macros/:name" element={<MacroDetailPage />} />
+        <Route path="plugins" element={<PluginsPage />} />
+        <Route path="plugins/:name" element={<PluginDetail />} />
         <Route path="security" element={<SecurityPage />} />
         <Route path="settings" element={<SettingsPage />} />
       </Route>

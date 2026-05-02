@@ -509,8 +509,62 @@ export interface CACertResult {
 /** Intercept phase: request (pre-send), response (post-receive), or websocket_frame. */
 export type InterceptPhase = "request" | "response" | "websocket_frame";
 
-/** Intercept protocol type. */
-export type InterceptProtocol = "http" | "websocket";
+/** Intercept protocol type. Expanded by RFC-001 N8 to cover all Message families. */
+export type InterceptProtocol =
+  | "http"
+  | "websocket"
+  | "grpc"
+  | "grpc-web"
+  | "sse"
+  | "raw";
+
+// ---------------------------------------------------------------------------
+// Per-protocol Message-typed flow shapes (light-touch discriminated union).
+//
+// These types layer over the existing FlowDetailResult wire shape for callers
+// that want to narrow on `flow.protocol`. The MCP wire format is unchanged;
+// these types provide compile-time discrimination and explicit field maps for
+// per-protocol UI components.
+// ---------------------------------------------------------------------------
+
+/** Ordered header pair preserving wire case/order/duplicates. */
+export interface HeaderKV {
+  name: string;
+  value: string;
+}
+
+/** HTTP/1.x or HTTP/2 (and HTTPS) Message-typed flow shape. */
+export interface HTTPMessageFlow extends FlowDetailResult {
+  protocol: "HTTP/1.x" | "HTTP/2" | "HTTPS";
+}
+
+/** WebSocket Message-typed flow shape. */
+export interface WSMessageFlow extends FlowDetailResult {
+  protocol: "WebSocket";
+}
+
+/** gRPC / gRPC-Web Message-typed flow shape (covers Start / Data / End frames). */
+export interface GRPCMessageFlow extends FlowDetailResult {
+  protocol: "gRPC" | "gRPC-Web";
+}
+
+/** SSE (Server-Sent Events) Message-typed flow shape. */
+export interface SSEMessageFlow extends FlowDetailResult {
+  protocol: "SSE";
+}
+
+/** Raw / TCP Message-typed flow shape. */
+export interface RawMessageFlow extends FlowDetailResult {
+  protocol: "TCP" | "Raw";
+}
+
+/** Discriminated Message-typed flow union. */
+export type MessageFlow =
+  | HTTPMessageFlow
+  | WSMessageFlow
+  | GRPCMessageFlow
+  | SSEMessageFlow
+  | RawMessageFlow;
 
 /** Intercept queue entry. */
 export interface InterceptQueueEntry {
@@ -1338,6 +1392,189 @@ export interface PluginToggleResult {
 export interface PluginReloadResult {
   reloaded: string;
   message: string;
+}
+
+// ---------------------------------------------------------------------------
+// plugin_introspect tool — RFC-001 N8 pluginv2 introspection
+// ---------------------------------------------------------------------------
+
+/** Single (protocol, event, phase) registration as recorded by pluginv2.register_hook. */
+export interface PluginHookRegistration {
+  protocol: string;
+  event: string;
+  phase: string;
+}
+
+/** Per-plugin info entry returned by plugin_introspect. */
+export interface PluginIntrospectInfo {
+  /** Plugin's stable identifier. */
+  name: string;
+  /** Filesystem location of the plugin script. */
+  path: string;
+  /** Whether the engine considers the plugin live. */
+  enabled: boolean;
+  /** Each register_hook call the plugin made, in script order. */
+  registrations: PluginHookRegistration[];
+  /** PluginConfig.Vars after redact_keys is applied (server-side). */
+  vars?: Record<string, unknown>;
+}
+
+/** Result of the plugin_introspect MCP tool. */
+export interface PluginIntrospectResult {
+  plugins: PluginIntrospectInfo[];
+}
+
+// ---------------------------------------------------------------------------
+// resend_* protocol-typed tools (RFC-001 N8) — schemas mirror the Go types
+// ---------------------------------------------------------------------------
+
+/** Parameters for the resend_http MCP tool. */
+export interface ResendHTTPParams {
+  flow_id?: string;
+  method?: string;
+  scheme?: string;
+  authority?: string;
+  path?: string;
+  raw_query?: string;
+  headers?: HeaderKV[];
+  body?: string;
+  body_encoding?: string;
+  body_set?: boolean;
+  body_patches?: BodyPatch[];
+  override_host?: string;
+  follow_redirects?: boolean;
+  timeout_ms?: number;
+  tls_fingerprint?: string;
+  tag?: string;
+}
+
+/** Result of the resend_http MCP tool. */
+export interface ResendHTTPResult {
+  stream_id: string;
+  status_code: number;
+  headers: HeaderKV[];
+  body: string;
+  body_encoding: string;
+  duration_ms: number;
+  tag?: string;
+}
+
+/** Parameters for the resend_ws MCP tool. */
+export interface ResendWSParams {
+  flow_id?: string;
+  target_addr?: string;
+  scheme?: string;
+  path?: string;
+  raw_query?: string;
+  opcode: string;
+  fin?: boolean;
+  payload?: string;
+  body_encoding?: string;
+  payload_set?: boolean;
+  masked?: boolean;
+  mask?: string;
+  close_code?: number;
+  close_reason?: string;
+  compressed?: boolean;
+  timeout_ms?: number;
+  tls_fingerprint?: string;
+  tag?: string;
+}
+
+/** Result of the resend_ws MCP tool. */
+export interface ResendWSResult {
+  stream_id: string;
+  opcode: string;
+  fin: boolean;
+  payload: string;
+  payload_encoding: string;
+  compressed?: boolean;
+  close_code?: number;
+  close_reason?: string;
+  duration_ms: number;
+  tag?: string;
+}
+
+/** A single gRPC LPM in the resend_grpc request. */
+export interface ResendGRPCData {
+  payload: string;
+  body_encoding?: string;
+  compressed?: boolean;
+}
+
+/** Parameters for the resend_grpc MCP tool. */
+export interface ResendGRPCParams {
+  flow_id?: string;
+  target_addr?: string;
+  scheme?: string;
+  service?: string;
+  method?: string;
+  metadata?: HeaderKV[];
+  encoding?: string;
+  accept_encoding?: string[];
+  messages?: ResendGRPCData[];
+  trailer_metadata?: HeaderKV[];
+  timeout_ms?: number;
+  tls_fingerprint?: string;
+  tag?: string;
+}
+
+/** Decoded response-side LPM in the resend_grpc result. */
+export interface ResendGRPCDataResult {
+  payload: string;
+  payload_encoding: string;
+  compressed?: boolean;
+}
+
+/** Trailer summary in the resend_grpc result. */
+export interface ResendGRPCEndResult {
+  status: number;
+  message?: string;
+  trailers?: HeaderKV[];
+}
+
+/** Result of the resend_grpc MCP tool. */
+export interface ResendGRPCResult {
+  stream_id: string;
+  start_metadata: HeaderKV[];
+  messages: ResendGRPCDataResult[];
+  end?: ResendGRPCEndResult;
+  duration_ms: number;
+  tag?: string;
+}
+
+/** Offset-based byte patch for resend_raw. */
+export interface ResendRawBytePatch {
+  offset: number;
+  data: string;
+  data_encoding?: string;
+}
+
+/** Parameters for the resend_raw MCP tool. */
+export interface ResendRawParams {
+  flow_id: string;
+  target_addr: string;
+  use_tls?: boolean;
+  sni?: string;
+  override_bytes?: string;
+  override_bytes_encoding?: string;
+  override_bytes_set?: boolean;
+  patches?: ResendRawBytePatch[];
+  insecure_skip_verify?: boolean;
+  tls_fingerprint?: string;
+  timeout_ms?: number;
+  tag?: string;
+}
+
+/** Result of the resend_raw MCP tool. */
+export interface ResendRawTypedResult {
+  stream_id: string;
+  response_bytes: string;
+  response_size: number;
+  response_chunks?: number;
+  truncated?: boolean;
+  duration_ms: number;
+  tag?: string;
 }
 
 // ---------------------------------------------------------------------------

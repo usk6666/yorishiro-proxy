@@ -1,0 +1,151 @@
+/**
+ * Styles for the Plugins list and detail pages.
+ */
+
+.plugins-header {
+  display: flex;
+  flex-direction: column;
+}
+
+.plugins-header-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-md);
+}
+
+.plugins-back-row {
+  margin-bottom: var(--space-sm);
+}
+
+.plugins-detail-meta {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  margin-top: var(--space-xs);
+}
+
+.plugins-detail-path {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  color: var(--text-secondary);
+  word-break: break-all;
+}
+
+.plugins-section {
+  margin-top: var(--space-lg);
+}
+
+.plugins-section-title {
+  font-size: var(--font-size-md);
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 0 0 var(--space-sm) 0;
+}
+
+.plugins-table-wrapper {
+  margin-top: var(--space-sm);
+}
+
+.plugins-table .table tbody tr {
+  cursor: pointer;
+}
+
+.plugins-cell-name {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.plugins-cell-count {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  color: var(--text-secondary);
+}
+
+.plugins-cell-path {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+  max-width: 360px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.plugins-cell-mono {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  color: var(--text-primary);
+}
+
+.plugins-cell-value {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  color: var(--text-primary);
+  word-break: break-all;
+  white-space: pre-wrap;
+}
+
+.plugins-row:hover {
+  background-color: var(--bg-secondary);
+}
+
+.plugins-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 200px;
+  margin-top: var(--space-lg);
+  border: 1px dashed var(--border-default);
+  border-radius: var(--radius-md);
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
+  gap: var(--space-sm);
+  padding: var(--space-md);
+  text-align: center;
+}
+
+.plugins-empty-section {
+  padding: var(--space-md);
+  border: 1px dashed var(--border-default);
+  border-radius: var(--radius-md);
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.plugins-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 200px;
+  margin-top: var(--space-lg);
+}
+
+.plugins-error {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100px;
+  margin-top: var(--space-lg);
+  border: 1px solid var(--accent-danger);
+  border-radius: var(--radius-md);
+  color: var(--accent-danger);
+  font-size: var(--font-size-sm);
+  padding: var(--space-md);
+}
+
+.plugins-vars-note {
+  margin-top: var(--space-sm);
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+}
+
+.plugins-vars-note code {
+  font-family: var(--font-mono);
+  background-color: var(--bg-secondary);
+  padding: 0 var(--space-xs);
+  border-radius: var(--radius-sm);
+}
