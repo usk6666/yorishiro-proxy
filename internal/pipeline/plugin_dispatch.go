@@ -205,20 +205,23 @@ func (d *pluginDispatcher) dispatch(ctx context.Context, env *envelope.Envelope,
 // applyMutation produces the envelope to feed to the next hook (or
 // downstream Steps) given a CONTINUE outcome.
 //
-// The wireEncodedState carried in ctx (USK-684) is updated to reflect
-// whether the produced envelope's Raw IS the WireEncoder output for the
-// current Message. RawOnly and Both arms ship verbatim user bytes per
-// RFC §9.3 D4, so the flag is cleared. Unchanged leaves the flag as-is
-// (Raw and Message both unchanged from the prior chain step). MessageOnly
-// delegates to regenerateRaw, which sets or clears the flag based on
-// encoder outcome.
+// The wireEncodedState carried in ctx is updated to reflect the
+// post-mutation relationship between Raw and Message:
+//
+//   - Unchanged: leave both flags as-is (the prior chain step's truth
+//     still holds — Raw and Message are unchanged).
+//   - RawOnly / Both: mark RawAuthoritative (RFC §9.3 D4: Raw is
+//     user-verbatim; encoder must NOT overwrite it on the modified-variant
+//     record path).
+//   - MessageOnly: delegate to regenerateRaw, which sets Encoded on
+//     success or clears both flags on fail-soft / partial / error.
 func (d *pluginDispatcher) applyMutation(ctx context.Context, env *envelope.Envelope, outcome *pluginv2.HookOutcome) *envelope.Envelope {
 	switch outcome.Mutation {
 	case pluginv2.MutationUnchanged:
 		return env
 	case pluginv2.MutationRawOnly:
-		// New raw bytes; original Message aliased.
-		clearWireEncoded(ctx)
+		// New raw bytes; original Message aliased. Raw wins per D4.
+		markRawAuthoritative(ctx)
 		next := *env
 		next.Raw = outcome.NewRaw
 		next.Message = outcome.NewMessage
@@ -234,24 +237,16 @@ func (d *pluginDispatcher) applyMutation(ctx context.Context, env *envelope.Enve
 	case pluginv2.MutationBoth:
 		// "Raw wins" per RFC §9.3 D4: ship new Raw verbatim; new Message
 		// is propagated for variant recording and downstream typed
-		// inspection but does NOT drive wire bytes.
-		clearWireEncoded(ctx)
+		// inspection but does NOT drive wire bytes. RecordStep must skip
+		// the encoder so the user's bytes survive into the modified-variant
+		// record (USK-686).
+		markRawAuthoritative(ctx)
 		next := *env
 		next.Raw = outcome.NewRaw
 		next.Message = outcome.NewMessage
 		return &next
 	default:
 		return env
-	}
-}
-
-// clearWireEncoded sets the wireEncodedState flag to false when present
-// (no-op when ctx was not produced by Pipeline.Run). Used by the
-// non-MessageOnly mutation arms so the flag does not survive a chain
-// step that did not invoke the encoder.
-func clearWireEncoded(ctx context.Context) {
-	if state := wireEncodedStateFromContext(ctx); state != nil {
-		state.Encoded = false
 	}
 }
 
@@ -285,11 +280,9 @@ func (d *pluginDispatcher) regenerateRaw(ctx context.Context, env *envelope.Enve
 	switch {
 	case err == nil:
 		if bytesOut != nil {
-			// USK-684: env.Raw is now the encoder's output for the current
-			// Message. RecordStep can skip its own applyWireEncode call.
-			if state := wireEncodedStateFromContext(ctx); state != nil {
-				state.Encoded = true
-			}
+			// env.Raw is now the encoder's output for the current Message.
+			// RecordStep can skip its own applyWireEncode call (USK-684).
+			markWireEncoded(ctx)
 			return bytesOut
 		}
 		clearWireEncoded(ctx)
