@@ -2,14 +2,16 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/logging"
-	"github.com/usk6666/yorishiro-proxy/internal/plugin"
+	"github.com/usk6666/yorishiro-proxy/internal/pluginv2"
 	protohttp "github.com/usk6666/yorishiro-proxy/internal/protocol/http"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 	protosocks5 "github.com/usk6666/yorishiro-proxy/internal/protocol/socks5"
@@ -573,11 +575,15 @@ func TestTCPForwards_EmptyByDefault(t *testing.T) {
 func TestPlugins_FromConfigFile(t *testing.T) {
 	dir := t.TempDir()
 
-	// Create a valid Starlark plugin script.
+	// Create a valid Starlark plugin script. The pluginv2 shape has no
+	// protocol/hooks at the config level — register_hook() inside the
+	// script owns hook identity (RFC §9.3).
 	pluginPath := filepath.Join(dir, "my-plugin.star")
 	writeTestFile(t, pluginPath, `
-def on_request(flow):
+def on_request_fn(env, msg, ctx):
     pass
+
+register_hook("http", "on_request", on_request_fn)
 `)
 
 	cfgPath := filepath.Join(dir, "config.json")
@@ -585,8 +591,6 @@ def on_request(flow):
 		"plugins": []map[string]interface{}{
 			{
 				"path":     pluginPath,
-				"protocol": "http",
-				"hooks":    []string{"on_request"},
 				"on_error": "skip",
 			},
 		},
@@ -597,27 +601,18 @@ def on_request(flow):
 	if err != nil {
 		t.Fatalf("load config: %v", err)
 	}
-	if len(proxyCfg.Plugins) == 0 {
-		t.Fatal("expected non-empty Plugins raw JSON")
+	if err := proxyCfg.Validate(); err != nil {
+		t.Fatalf("validate config: %v", err)
 	}
-
-	// Verify the raw JSON can be unmarshalled into plugin configs.
-	var pluginConfigs []plugin.PluginConfig
-	if err := json.Unmarshal(proxyCfg.Plugins, &pluginConfigs); err != nil {
-		t.Fatalf("unmarshal plugins: %v", err)
+	if len(proxyCfg.Plugins) != 1 {
+		t.Fatalf("expected 1 plugin config, got %d", len(proxyCfg.Plugins))
 	}
-	if len(pluginConfigs) != 1 {
-		t.Fatalf("expected 1 plugin config, got %d", len(pluginConfigs))
-	}
-	pc := pluginConfigs[0]
+	pc := proxyCfg.Plugins[0]
 	if pc.Path != pluginPath {
 		t.Errorf("plugin path = %q, want %q", pc.Path, pluginPath)
 	}
-	if pc.Protocol != "http" {
-		t.Errorf("plugin protocol = %q, want %q", pc.Protocol, "http")
-	}
-	if len(pc.Hooks) != 1 || pc.Hooks[0] != "on_request" {
-		t.Errorf("plugin hooks = %v, want [on_request]", pc.Hooks)
+	if pc.OnError != "skip" {
+		t.Errorf("plugin on_error = %q, want %q", pc.OnError, "skip")
 	}
 }
 
@@ -628,9 +623,7 @@ func TestPlugins_WithVars(t *testing.T) {
 		"plugins": [
 			{
 				"path": "/some/plugin.star",
-				"protocol": "http",
-				"hooks": ["on_request"],
-				"vars": {"api_key": "secret123", "region": "ap-northeast-1"}
+				"vars": {"api_key": "secret123", "region": "ap-northeast-1", "max_retries": 3}
 			}
 		]
 	}`)
@@ -639,16 +632,61 @@ func TestPlugins_WithVars(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load config: %v", err)
 	}
+	if err := proxyCfg.Validate(); err != nil {
+		t.Fatalf("validate config: %v", err)
+	}
 
-	var pluginConfigs []plugin.PluginConfig
-	if err := json.Unmarshal(proxyCfg.Plugins, &pluginConfigs); err != nil {
-		t.Fatalf("unmarshal plugins: %v", err)
+	if len(proxyCfg.Plugins) != 1 {
+		t.Fatalf("expected 1 plugin config, got %d", len(proxyCfg.Plugins))
 	}
-	if len(pluginConfigs[0].Vars) != 2 {
-		t.Errorf("expected 2 vars, got %d", len(pluginConfigs[0].Vars))
+	vars := proxyCfg.Plugins[0].Vars
+	if len(vars) != 3 {
+		t.Errorf("expected 3 vars, got %d", len(vars))
 	}
-	if pluginConfigs[0].Vars["api_key"] != "secret123" {
-		t.Errorf("vars[api_key] = %q, want %q", pluginConfigs[0].Vars["api_key"], "secret123")
+	if vars["api_key"] != "secret123" {
+		t.Errorf("vars[api_key] = %v, want %q", vars["api_key"], "secret123")
+	}
+	// pluginv2.PluginConfig.Vars is map[string]any so non-string values
+	// (e.g. JSON numbers) round-trip without lossy coercion.
+	if got, want := vars["max_retries"], float64(3); got != want {
+		t.Errorf("vars[max_retries] = %v, want %v", got, want)
+	}
+}
+
+// TestPlugins_RejectsLegacyFields asserts that a config carrying the
+// pre-RFC-001 `protocol` / `hooks` keys is rejected at load time by
+// ProxyConfig.Validate via the pluginv2 tripwire (RFC §9.3 P-8 — no
+// shims). The migration message points the user at the migration doc.
+func TestPlugins_RejectsLegacyFields(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "legacy-config.json")
+	writeTestFile(t, cfgPath, `{
+		"plugins": [
+			{
+				"path":     "/tmp/x.star",
+				"protocol": "http",
+				"hooks":    ["on_request"]
+			}
+		]
+	}`)
+
+	proxyCfg, err := config.LoadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	err = proxyCfg.Validate()
+	if err == nil {
+		t.Fatal("expected legacy-field rejection, got nil")
+	}
+	var loadErr *pluginv2.LoadError
+	if !errors.As(err, &loadErr) {
+		t.Fatalf("expected *pluginv2.LoadError, got %T (%v)", err, err)
+	}
+	if loadErr.Kind != pluginv2.LoadErrLegacyField {
+		t.Errorf("LoadError.Kind = %v, want LoadErrLegacyField", loadErr.Kind)
+	}
+	if !strings.Contains(err.Error(), "plugin-migration.md") {
+		t.Errorf("error = %q, want substring %q", err.Error(), "plugin-migration.md")
 	}
 }
 
@@ -878,9 +916,7 @@ def on_request(flow):
 		"socks5_password": "secret",
 		"plugins": []map[string]interface{}{
 			{
-				"path":     pluginPath,
-				"protocol": "http",
-				"hooks":    []string{"on_request"},
+				"path": pluginPath,
 			},
 		},
 		"capture_scope": map[string]interface{}{
