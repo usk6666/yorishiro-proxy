@@ -11,6 +11,7 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/layer"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/http1/parser"
+	"github.com/usk6666/yorishiro-proxy/internal/pluginv2"
 )
 
 // Layer wraps a net.Conn in an HTTP/1.x Layer. It yields exactly one Channel
@@ -42,6 +43,12 @@ type options struct {
 	bodySpillThreshold int64
 	maxBody            int64
 	streamingDetect    StreamingResponsePredicate
+
+	// stateReleaser is the optional pluginv2 hook invoked when the Channel
+	// reaches its terminal state. Drives ReleaseTransaction(ConnID, FlowID)
+	// for every envelope this Channel emitted via Next. nil = no-op
+	// (legacy parallel path / tests that don't construct an Engine).
+	stateReleaser pluginv2.StateReleaser
 }
 
 // Option configures a Layer.
@@ -81,6 +88,16 @@ func WithBodySpillThreshold(n int64) Option {
 // Code=layer.ErrorInternalError.
 func WithMaxBodySize(n int64) Option {
 	return func(o *options) { o.maxBody = n }
+}
+
+// WithStateReleaser injects a pluginv2.StateReleaser the Layer invokes
+// when the Channel reaches its terminal state. The release fires
+// ReleaseTransaction(ConnID, FlowID) once for every envelope the Channel
+// emitted via Next during its lifetime — RFC §9.3 D6 / Q26 maps the HTTP
+// transaction scope to (ConnID, FlowID). Mirrors http2 / ws / httpaggregator
+// shape. nil = no-op.
+func WithStateReleaser(r pluginv2.StateReleaser) Option {
+	return func(o *options) { o.stateReleaser = r }
 }
 
 // WithStreamingResponseDetect installs a predicate evaluated against each
@@ -166,6 +183,7 @@ func New(conn net.Conn, streamID string, direction envelope.Direction, opts ...O
 			maxBody:        o.maxBody,
 		},
 		streamingDetect: o.streamingDetect,
+		stateReleaser:   o.stateReleaser,
 	}
 	l.ch <- l.channel
 	close(l.ch)
