@@ -18,6 +18,7 @@ import type {
   InterceptActionParams,
   MacroToolParams,
   ManageParams,
+  PluginIntrospectResult,
   PluginToolParams,
   ProxyStartParams,
   ProxyStartResult,
@@ -715,4 +716,53 @@ export function usePlugin(): UsePluginResult {
   );
 
   return { plugin, loading, error };
+}
+
+// ---------------------------------------------------------------------------
+// usePluginIntrospect — plugin_introspect tool (RFC-001 N8 pluginv2)
+// ---------------------------------------------------------------------------
+
+/** Return type for usePluginIntrospect. */
+export interface UsePluginIntrospectResult {
+  /** Latest introspect snapshot. Null while the first fetch is in flight. */
+  data: PluginIntrospectResult | null;
+  /** Whether a fetch is currently in progress. */
+  loading: boolean;
+  /** Last fetch error, if any. */
+  error: Error | null;
+  /** Manually re-fetch the introspect snapshot. */
+  refetch: () => Promise<void>;
+}
+
+/**
+ * Hook that auto-fetches the plugin_introspect MCP tool when the client
+ * connects. Modelled on useQuery's enabled+refetch pattern but for the
+ * parameterless plugin_introspect tool.
+ */
+export function usePluginIntrospect(): UsePluginIntrospectResult {
+  const { client, status } = useMcpContext();
+  const [data, setData] = useState<PluginIntrospectResult | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<Error | null>(null);
+
+  const refetch = useCallback(async () => {
+    if (!client || status !== "connected") return;
+    setLoading(true);
+    setError(null);
+    try {
+      const result = await client.pluginIntrospect();
+      setData(result);
+    } catch (err) {
+      setError(err instanceof Error ? err : new Error(String(err)));
+    } finally {
+      setLoading(false);
+    }
+  }, [client, status]);
+
+  useEffect(() => {
+    if (status !== "connected") return;
+    refetch();
+  }, [status, refetch]);
+
+  return { data, loading, error, refetch };
 }

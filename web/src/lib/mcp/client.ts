@@ -20,6 +20,7 @@ import type {
   InterceptActionParams,
   MacroToolParams,
   ManageParams,
+  PluginIntrospectResult,
   PluginToolParams,
   ProxyStartParams,
   ProxyStartResult,
@@ -28,6 +29,14 @@ import type {
   QueryParams,
   QueryResource,
   QueryResultMap,
+  ResendGRPCParams,
+  ResendGRPCResult,
+  ResendHTTPParams,
+  ResendHTTPResult,
+  ResendRawParams,
+  ResendRawTypedResult,
+  ResendWSParams,
+  ResendWSResult,
   SecurityParams,
 } from "./types.js";
 
@@ -277,5 +286,46 @@ export class McpClient {
     params: PluginToolParams,
   ): Promise<T> {
     return this.callTool<T>("plugin", params as unknown as Record<string, unknown>);
+  }
+
+  // -----------------------------------------------------------------------
+  // RFC-001 N8 protocol-typed helpers (resend_*, plugin_introspect)
+  // -----------------------------------------------------------------------
+
+  /** Introspect loaded pluginv2 plugins. Returns an empty list when pluginv2 is not configured. */
+  async pluginIntrospect(): Promise<PluginIntrospectResult> {
+    return this.callTool<PluginIntrospectResult>("plugin_introspect", {});
+  }
+
+  /** Resend an HTTP/1.x or HTTP/2 flow via the protocol-typed resend_http tool. */
+  async resendHttp(params: ResendHTTPParams): Promise<ResendHTTPResult> {
+    return this.callTool<ResendHTTPResult>(
+      "resend_http",
+      params as unknown as Record<string, unknown>,
+    );
+  }
+
+  /** Resend a single WebSocket frame via the protocol-typed resend_ws tool. */
+  async resendWs(params: ResendWSParams): Promise<ResendWSResult> {
+    return this.callTool<ResendWSResult>(
+      "resend_ws",
+      params as unknown as Record<string, unknown>,
+    );
+  }
+
+  /** Resend a gRPC RPC via the protocol-typed resend_grpc tool. */
+  async resendGrpc(params: ResendGRPCParams): Promise<ResendGRPCResult> {
+    return this.callTool<ResendGRPCResult>(
+      "resend_grpc",
+      params as unknown as Record<string, unknown>,
+    );
+  }
+
+  /** Resend a recorded raw byte payload via the protocol-typed resend_raw tool. */
+  async resendRaw(params: ResendRawParams): Promise<ResendRawTypedResult> {
+    return this.callTool<ResendRawTypedResult>(
+      "resend_raw",
+      params as unknown as Record<string, unknown>,
+    );
   }
 }
