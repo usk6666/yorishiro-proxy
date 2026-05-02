@@ -6,11 +6,14 @@ import (
 	"go.starlark.net/starlark"
 )
 
-// Thread-local keys used by the engine to thread the registry, the current
-// plugin name, and a pointer to the active loadedPlugin into the
-// register_hook builtin. Plugins do not observe these.
+// Thread-local keys used by the engine to thread the current plugin name
+// and a pointer to the active loadedPlugin into the register_hook builtin.
+// Plugins do not observe these.
+//
+// Hooks are staged on the loadedPlugin and committed to the engine's
+// Registry only after ExecFileOptions returns nil (USK-685). The registry
+// is therefore not bound to the thread.
 const (
-	threadLocalRegistry      = "pluginv2.registry"
 	threadLocalPluginName    = "pluginv2.plugin_name"
 	threadLocalCurrentPlugin = "pluginv2.current_plugin"
 )
@@ -81,36 +84,36 @@ func registerHook(thread *starlark.Thread, fn *starlark.Builtin, args starlark.T
 		}
 	}
 
-	registry, _ := thread.Local(threadLocalRegistry).(*Registry)
-	if registry == nil {
-		// Defensive: engine.loadPlugin always sets this. A missing registry
-		// indicates the builtin was invoked outside an engine load (e.g. from
-		// a test that bypasses the engine). Surface as a Starlark error
-		// rather than panic.
-		return nil, fmt.Errorf("register_hook: no registry bound to thread")
+	lp, _ := thread.Local(threadLocalCurrentPlugin).(*loadedPlugin)
+	if lp == nil {
+		// Defensive: engine.loadPlugin always sets this. A missing
+		// loadedPlugin indicates the builtin was invoked outside an engine
+		// load (e.g. from a test that bypasses the engine). Surface as a
+		// Starlark error rather than panic.
+		return nil, fmt.Errorf("register_hook: no loaded plugin bound to thread")
 	}
 
-	registry.Register(Hook{
+	// Stage the hook on the loadedPlugin. The engine commits pendingHooks
+	// to the Registry only after ExecFileOptions returns nil (USK-685);
+	// if execution fails afterwards (fail(), step-budget, ctx-cancel) the
+	// loadedPlugin is unreachable and the staged hooks GC with it.
+	lp.pendingHooks = append(lp.pendingHooks, Hook{
 		Protocol:   protocol,
 		Event:      event,
 		Phase:      resolvedPhase,
 		Fn:         callable,
 		PluginName: pluginName,
 	})
-
-	// Mirror the registration onto the active loadedPlugin so
-	// plugin_introspect (USK-676) can surface the loaded hook surface
-	// without consulting the global Registry. Defensive nil check: when
-	// the builtin is invoked outside engine.loadPlugin (e.g. a future
-	// helper that bypasses the engine) the thread local is unset; the
-	// registry record is still authoritative for dispatch.
-	if lp, _ := thread.Local(threadLocalCurrentPlugin).(*loadedPlugin); lp != nil {
-		lp.registrations = append(lp.registrations, registeredHook{
-			Protocol: protocol,
-			Event:    event,
-			Phase:    string(resolvedPhase),
-		})
-	}
+	// Mirror the registration onto the loadedPlugin so plugin_introspect
+	// (USK-676) can surface the loaded hook surface without consulting
+	// the global Registry. registrations is observable only via
+	// Engine.Introspect, which walks e.plugins — appended only on
+	// successful load — so failed loads are not visible there either.
+	lp.registrations = append(lp.registrations, registeredHook{
+		Protocol: protocol,
+		Event:    event,
+		Phase:    string(resolvedPhase),
+	})
 	return starlark.None, nil
 }
 
