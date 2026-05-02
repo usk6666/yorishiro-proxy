@@ -5,6 +5,8 @@ import (
 	"errors"
 	"log/slog"
 	"net"
+
+	"github.com/usk6666/yorishiro-proxy/internal/pluginv2"
 )
 
 // SOCKS5HandlerConfig holds dependencies for the SOCKS5 handler factory.
@@ -32,6 +34,13 @@ type SOCKS5HandlerConfig struct {
 
 	// Logger for handler-level logging. Nil uses slog.Default().
 	Logger *slog.Logger
+
+	// PluginV2Engine is the optional pluginv2 Engine consulted for
+	// (socks5, on_connect) lifecycle hooks (USK-683 / RFC §9.3
+	// PhaseSupportNone). The hook fires after Negotiate returns and
+	// BEFORE BuildConnectionStack, so a DROP-returning hook closes the
+	// tunnel before any ConnectionStack is built. nil disables.
+	PluginV2Engine *pluginv2.Engine
 }
 
 // NewSOCKS5Handler returns a HandlerFunc that processes SOCKS5 tunnel
@@ -87,6 +96,12 @@ func NewSOCKS5Handler(cfg SOCKS5HandlerConfig) HandlerFunc {
 
 		connLogger = connLogger.With("target", target, "via", "socks5")
 
+		// pluginv2 (socks5, on_connect) lifecycle dispatch (USK-683).
+		// DROP short-circuits before stack build / passthrough relay.
+		if dispatchSOCKS5OnConnect(ctx, cfg.PluginV2Engine, target, connLogger) {
+			return nil
+		}
+
 		// Step 2: TLS passthrough check.
 		if cfg.PassthroughList != nil {
 			host, _, _ := net.SplitHostPort(target)
@@ -113,4 +128,28 @@ func NewSOCKS5Handler(cfg SOCKS5HandlerConfig) HandlerFunc {
 
 		return nil
 	}
+}
+
+// dispatchSOCKS5OnConnect dispatches the (socks5, on_connect) lifecycle
+// hook and returns true when the caller should abort (DROP outcome).
+// Returns false when the engine is nil, no hooks are registered, all
+// hooks returned CONTINUE, or FireLifecycle errored (fail-soft Warn).
+func dispatchSOCKS5OnConnect(ctx context.Context, engine *pluginv2.Engine, target string, logger *slog.Logger) bool {
+	if engine == nil {
+		return false
+	}
+	hookCtx, cancel := context.WithTimeout(ctx, hookTimeout)
+	defer cancel()
+
+	payload := pluginv2.BuildSOCKS5ConnectDict(ConnIDFromContext(ctx), ClientAddrFromContext(ctx), target)
+	action, err := engine.FireLifecycle(hookCtx, pluginv2.ProtoSOCKS5, pluginv2.EventOnConnect, nil, payload)
+	if err != nil {
+		logger.Warn("pluginv2 socks5 on_connect hook error", "error", err)
+	}
+	if action == pluginv2.ActionDrop {
+		logger.Info("SOCKS5 tunnel dropped by pluginv2 on_connect hook",
+			"target", target, "hook", "socks5.on_connect")
+		return true
+	}
+	return false
 }

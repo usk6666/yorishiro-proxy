@@ -35,6 +35,14 @@ type options struct {
 	// reaches its terminal state. Drives ReleaseTransaction for the WS
 	// upgrade-pair scope. nil = no-op (legacy parallel).
 	stateReleaser pluginv2.StateReleaser
+
+	// lifecycleEngine is the optional pluginv2 Engine consulted on
+	// terminal-state transitions to fire (ws, on_close) hooks. nil =
+	// no-op. The Engine and the StateReleaser are typically the same
+	// *pluginv2.Engine instance but are wired through separate Options
+	// so tests / future N9 production wiring can compose them
+	// independently.
+	lifecycleEngine *pluginv2.Engine
 }
 
 // Option tunes the WSLayer.
@@ -89,6 +97,15 @@ func WithMaxFrameSize(n int64) Option {
 // transaction scope per RFC §9.3 D6. nil = no-op.
 func WithStateReleaser(r pluginv2.StateReleaser) Option {
 	return func(o *options) { o.stateReleaser = r }
+}
+
+// WithLifecycleEngine injects a pluginv2 Engine the Layer consults on
+// terminal-state transitions to fire (ws, on_close) hooks per RFC §9.3
+// PhaseSupportNone. The hook fires once per Channel — between recvDone
+// close and the transaction state release — so plugin code observing
+// the close still sees live transaction_state. nil = no-op.
+func WithLifecycleEngine(e *pluginv2.Engine) Option {
+	return func(o *options) { o.lifecycleEngine = e }
 }
 
 // WithDeflateFromExtensionHeader configures permessage-deflate (RFC 7692)

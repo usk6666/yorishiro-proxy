@@ -18,6 +18,7 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/layer/http2"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/http2/pool"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/tlslayer"
+	"github.com/usk6666/yorishiro-proxy/internal/pluginv2"
 )
 
 // BuildConfig holds configuration for BuildConnectionStack.
@@ -127,6 +128,13 @@ type BuildConfig struct {
 	// field is the resolved bridge between ProxyConfig.SSE and the
 	// future sse.WithMaxEventSize Option call.
 	SSEMaxEventSize int
+
+	// PluginV2Engine is the optional pluginv2 Engine consulted for
+	// (tls, on_handshake) lifecycle hooks (USK-683 / RFC §9.3). The
+	// hook fires once per successful tlslayer.Server (server-side) and
+	// once per successful upstream TLS handshake (client-side) with a
+	// `side` field on the payload distinguishing them. nil disables.
+	PluginV2Engine *pluginv2.Engine
 }
 
 // BuildConnectionStack constructs a ConnectionStack for the given CONNECT
@@ -471,6 +479,7 @@ func performClientMITM(
 	if err != nil {
 		return nil, nil, fmt.Errorf("connector: client TLS MITM handshake: %w", err)
 	}
+	fireTLSHandshakeHook(ctx, cfg, "server", clientSnap)
 	return tlsConn, clientSnap, nil
 }
 
@@ -506,7 +515,33 @@ func dialUpstreamWithALPN(
 		return nil, nil, fmt.Errorf("connector: upstream dial for %s: %w", target, err)
 	}
 
+	// Fire (tls, on_handshake) for the client-side handshake (proxy
+	// dialing upstream). snap is non-nil only when a TLS handshake
+	// actually happened — DialUpstreamRaw returns a nil snap when the
+	// caller's TLSConfig is nil (plain TCP); guard so observation-only
+	// hooks see a real handshake.
+	if snap != nil {
+		fireTLSHandshakeHook(ctx, cfg, "client", snap)
+	}
 	return conn, snap, nil
+}
+
+// fireTLSHandshakeHook dispatches (tls, on_handshake) hooks for one
+// successful TLS handshake. side is "server" when the proxy presented
+// the MITM cert to the client, "client" when the proxy completed the
+// upstream-side handshake. No-op when no PluginV2Engine is wired.
+// Errors are swallowed (USK-671 fail-soft).
+func fireTLSHandshakeHook(ctx context.Context, cfg *BuildConfig, side string, snap *envelope.TLSSnapshot) {
+	if cfg == nil || cfg.PluginV2Engine == nil {
+		return
+	}
+	hookCtx, cancel := context.WithTimeout(ctx, hookTimeout)
+	defer cancel()
+	payload := pluginv2.BuildTLSHandshakeDict(side, snap)
+	if _, err := cfg.PluginV2Engine.FireLifecycle(hookCtx, pluginv2.ProtoTLS, pluginv2.EventOnHandshake, nil, payload); err != nil {
+		slog.WarnContext(ctx, "pluginv2 tls on_handshake hook error",
+			"error", err, "side", side)
+	}
 }
 
 // buildStackFromRoute constructs a ConnectionStack with the appropriate
@@ -719,6 +754,7 @@ func buildRawPassthroughStack(
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("connector: client TLS MITM handshake for %s: %w", target, err)
 	}
+	fireTLSHandshakeHook(ctx, cfg, "server", clientSnap)
 
 	slog.Debug("connector: client-side MITM handshake complete",
 		"target", target,
@@ -765,6 +801,9 @@ func buildRawPassthroughStack(
 	if err != nil {
 		clientTLSConn.Close()
 		return nil, nil, nil, fmt.Errorf("connector: upstream dial for %s: %w", target, err)
+	}
+	if upstreamSnap != nil {
+		fireTLSHandshakeHook(ctx, cfg, "client", upstreamSnap)
 	}
 
 	slog.Debug("connector: upstream connection established",

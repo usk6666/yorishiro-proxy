@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/plugin"
+	"github.com/usk6666/yorishiro-proxy/internal/pluginv2"
 )
 
 // DefaultPeekTimeout is the maximum time the listener waits for the client's
@@ -111,6 +112,14 @@ type Listener struct {
 
 	pluginEngine *plugin.Engine
 
+	// pluginV2Engine drives the new (RFC §9.3) lifecycle hooks
+	// (connection.on_connect, connection.on_disconnect) in parallel
+	// with the legacy pluginEngine. Both will fire concurrently until
+	// N9 retires the legacy plugin engine. atomic.Pointer so callers
+	// can install the engine before or after Start with race-free reads
+	// on the accept goroutine. nil pointer = no-op.
+	pluginV2Engine atomic.Pointer[pluginv2.Engine]
+
 	mu       sync.Mutex
 	listener net.Listener
 	ready    chan struct{}
@@ -163,6 +172,19 @@ func (l *Listener) SetPluginEngine(engine *plugin.Engine) {
 // PluginEngine returns the listener's current plugin engine, or nil.
 func (l *Listener) PluginEngine() *plugin.Engine {
 	return l.pluginEngine
+}
+
+// SetPluginV2Engine wires the pluginv2 engine that will receive RFC §9.3
+// lifecycle hooks (connection.on_connect, connection.on_disconnect). nil
+// disables pluginv2 lifecycle dispatch. Coexists with SetPluginEngine
+// until N9. Safe to call before or after Start (atomic).
+func (l *Listener) SetPluginV2Engine(engine *pluginv2.Engine) {
+	l.pluginV2Engine.Store(engine)
+}
+
+// PluginV2Engine returns the listener's current pluginv2 engine, or nil.
+func (l *Listener) PluginV2Engine() *pluginv2.Engine {
+	return l.pluginV2Engine.Load()
 }
 
 // Start begins accepting connections. It blocks until ctx is cancelled or
@@ -268,6 +290,23 @@ func (l *Listener) handleConn(ctx context.Context, conn net.Conn) {
 
 	l.dispatchOnConnect(ctx, remoteAddr, connLogger)
 	defer l.dispatchOnDisconnect(remoteAddr, connStart, connLogger)
+
+	// pluginv2 (connection, on_disconnect) — register the defer BEFORE
+	// the on_connect dispatch so a DROP outcome still fires on_disconnect
+	// (the connection WAS accepted, then closed; symmetry with the
+	// kernel-accepted-then-rejected case).
+	defer l.dispatchV2OnDisconnect(connID, remoteAddr, connStart, connLogger)
+
+	// pluginv2 (connection, on_connect) lifecycle dispatch (USK-683).
+	// Fires BEFORE protocol detection so a DROP-returning hook closes
+	// the connection without exposing peek bytes / starting any Layer
+	// stack. Coexists with the legacy on_connect path above; both fire
+	// independently until N9 retires the legacy plugin engine.
+	if l.dispatchV2OnConnect(ctx, connID, remoteAddr, connLogger) == pluginv2.ActionDrop {
+		connLogger.Info("connection dropped by pluginv2 on_connect hook",
+			"hook", "connection.on_connect")
+		return
+	}
 
 	// Bound protocol detection by the peek deadline (Slowloris protection).
 	peekTimeout := time.Duration(l.peekTimeoutNs.Load())
@@ -387,6 +426,53 @@ func (l *Listener) dispatchOnConnect(ctx context.Context, clientAddr string, log
 
 	if _, err := l.pluginEngine.Dispatch(hookCtx, plugin.HookOnConnect, data); err != nil {
 		logger.Warn("plugin on_connect hook error", "error", err)
+	}
+}
+
+// dispatchV2OnConnect dispatches (connection, on_connect) hooks via the
+// pluginv2 lifecycle engine. Returns ActionContinue when no engine is
+// wired or no hooks are registered. ActionDrop short-circuits handleConn
+// — the caller closes the connection without further Layer construction.
+//
+// Errors from FireLifecycle are swallowed: a misbehaving plugin must
+// not break wire acceptance. The dispatch is gated by a per-call
+// timeout so a slow plugin cannot stall the accept loop indefinitely.
+func (l *Listener) dispatchV2OnConnect(ctx context.Context, connID, clientAddr string, logger *slog.Logger) pluginv2.Action {
+	engine := l.pluginV2Engine.Load()
+	if engine == nil {
+		return pluginv2.ActionContinue
+	}
+	hookCtx, cancel := context.WithTimeout(ctx, hookTimeout)
+	defer cancel()
+
+	payload := pluginv2.BuildConnectionConnectDict(connID, clientAddr, l.name)
+	action, err := engine.FireLifecycle(hookCtx, pluginv2.ProtoConnection, pluginv2.EventOnConnect, nil, payload)
+	if err != nil {
+		logger.Warn("pluginv2 on_connect hook error", "error", err)
+		return pluginv2.ActionContinue
+	}
+	return action
+}
+
+// dispatchV2OnDisconnect dispatches (connection, on_disconnect) hooks
+// via the pluginv2 lifecycle engine. Uses a fresh context derived from
+// Background so the hook still fires during graceful shutdown, when the
+// parent context has already been cancelled.
+//
+// observation-only — DROP/RESPOND attempts surface as ErrDisallowedAction
+// inside FireLifecycle and are Warn-logged + treated as Continue.
+func (l *Listener) dispatchV2OnDisconnect(connID, clientAddr string, connStart time.Time, logger *slog.Logger) {
+	engine := l.pluginV2Engine.Load()
+	if engine == nil {
+		return
+	}
+	hookCtx, cancel := context.WithTimeout(context.Background(), hookTimeout)
+	defer cancel()
+
+	durationMs := time.Since(connStart).Milliseconds()
+	payload := pluginv2.BuildConnectionDisconnectDict(connID, clientAddr, durationMs)
+	if _, err := engine.FireLifecycle(hookCtx, pluginv2.ProtoConnection, pluginv2.EventOnDisconnect, nil, payload); err != nil {
+		logger.Warn("pluginv2 on_disconnect hook error", "error", err)
 	}
 }
 
