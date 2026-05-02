@@ -360,13 +360,16 @@ func TestPluginIntegration_MessageOnly_EncoderFailSoft_RecordStepRetries(t *test
 	}
 }
 
-// TestPluginIntegration_RawOnly_DedupSignalCleared verifies that a
-// MutationRawOnly outcome does NOT leave the dedup signal set: even though
-// PluginStepPost did not call the encoder (Raw was injected verbatim), the
-// signal must be false so RecordStep's applyWireEncode runs unchanged.
-// This preserves pre-USK-684 behavior on the RawOnly path strictly per the
-// Linear ticket's "out of scope" rule for the cousin MutationBoth bug.
-func TestPluginIntegration_RawOnly_DedupSignalCleared(t *testing.T) {
+// TestPluginIntegration_RawOnly_RawWins_EncoderSkipped covers USK-686 /
+// RFC §9.3 D4 raw-wins: when a plugin produces MutationRawOnly, the
+// modified-variant record path must NOT invoke the encoder. env.Raw IS
+// the plugin-injected verbatim bytes (a smuggling payload, intentionally
+// malformed) and the encoder would overwrite them with a "cleaned-up"
+// re-encoded form, destroying the diagnostic signal D4 was added to
+// preserve. End-to-end: PluginStepPost MutationRawOnly → RecordStep
+// applyWireEncode skipped → modFlow.RawBytes == customRaw, encoder
+// invoked 0 times.
+func TestPluginIntegration_RawOnly_RawWins_EncoderSkipped(t *testing.T) {
 	var encodeCalls int32
 	encoderOutput := []byte("ENCODED-FROM-MESSAGE")
 	spy := func(*envelope.Envelope) ([]byte, error) {
@@ -398,11 +401,92 @@ func TestPluginIntegration_RawOnly_DedupSignalCleared(t *testing.T) {
 		t.Fatalf("action = %v", action)
 	}
 
-	// PluginStepPost did NOT call the encoder (RawOnly path).
-	// RecordStep's applyWireEncode DID call it (signal cleared), preserving
-	// pre-USK-684 behavior. Total: 1 call.
-	if got := atomic.LoadInt32(&encodeCalls); got != 1 {
-		t.Errorf("encoder called %d times, want 1 (RawOnly: only RecordStep calls)", got)
+	if got := atomic.LoadInt32(&encodeCalls); got != 0 {
+		t.Errorf("encoder called %d times, want 0 (RawOnly raw-wins per RFC §9.3 D4)", got)
+	}
+
+	var modFlow *flow.Flow
+	for _, fl := range store.flows {
+		if fl.Metadata["variant"] == "modified" {
+			modFlow = fl
+			break
+		}
+	}
+	if modFlow == nil {
+		t.Fatal("modified variant flow not recorded")
+	}
+	if !bytes.Equal(modFlow.RawBytes, customRaw) {
+		t.Errorf("modified RawBytes = %q, want plugin-injected verbatim bytes %q",
+			modFlow.RawBytes, customRaw)
+	}
+	if got := modFlow.Metadata["wire_bytes"]; got != "" {
+		t.Errorf("wire_bytes metadata = %q, want empty (encoder skipped, not unavailable)", got)
+	}
+}
+
+// TestPluginIntegration_Both_RawWins_EncoderSkipped covers USK-686 /
+// RFC §9.3 D4 raw-wins for MutationBoth: when a plugin modifies BOTH
+// msg["raw"] AND a Message field in the same hook, raw wins. RecordStep
+// must record env.Raw verbatim while Message-side projection (Method,
+// Headers, etc.) still reflects the Message divergence for typed
+// inspection. End-to-end: PluginStepPost MutationBoth → RecordStep
+// applyWireEncode skipped → modFlow.RawBytes == customRaw with
+// modFlow.Method == "POST", encoder invoked 0 times.
+func TestPluginIntegration_Both_RawWins_EncoderSkipped(t *testing.T) {
+	var encodeCalls int32
+	spy := func(*envelope.Envelope) ([]byte, error) {
+		atomic.AddInt32(&encodeCalls, 1)
+		return []byte("ENCODED-NEVER-USED"), nil
+	}
+
+	reg := NewWireEncoderRegistry()
+	reg.Register(envelope.ProtocolHTTP, spy)
+
+	customRaw := []byte("POST /modified HTTP/1.1\r\nContent-Length: 4\r\n\r\nDATA")
+	eng := pluginv2.NewEngine(nil)
+	eng.Registry().Register(pluginv2.Hook{
+		Protocol: pluginv2.ProtoHTTP, Event: pluginv2.EventOnRequest,
+		Phase: pluginv2.PhasePostPipeline, PluginName: "p",
+		Fn: hookCallable("inject-both", func(args starlark.Tuple) (starlark.Value, error) {
+			msg := args[0].(*pluginv2.MessageDict)
+			if err := msg.SetKey(starlark.String("method"), starlark.String("POST")); err != nil {
+				return nil, err
+			}
+			return starlark.None, msg.SetKey(starlark.String("raw"), starlark.Bytes(customRaw))
+		}),
+	})
+
+	store := &mockWriter{}
+	p := New(
+		NewPluginStepPost(eng, reg, nil),
+		NewRecordStep(store, nil, WithWireEncoderRegistry(reg)),
+	)
+
+	if _, action, _ := p.Run(context.Background(), httpReqEnv()); action != Continue {
+		t.Fatalf("action = %v", action)
+	}
+
+	if got := atomic.LoadInt32(&encodeCalls); got != 0 {
+		t.Errorf("encoder called %d times, want 0 (Both raw-wins per RFC §9.3 D4)", got)
+	}
+
+	var modFlow *flow.Flow
+	for _, fl := range store.flows {
+		if fl.Metadata["variant"] == "modified" {
+			modFlow = fl
+			break
+		}
+	}
+	if modFlow == nil {
+		t.Fatal("modified variant flow not recorded")
+	}
+	if !bytes.Equal(modFlow.RawBytes, customRaw) {
+		t.Errorf("modified RawBytes = %q, want plugin-injected verbatim bytes",
+			modFlow.RawBytes)
+	}
+	if modFlow.Method != "POST" {
+		t.Errorf("modified Method = %q, want %q (Message projection independent of D4)",
+			modFlow.Method, "POST")
 	}
 }
 
