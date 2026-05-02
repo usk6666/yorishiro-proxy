@@ -2,11 +2,14 @@ package config
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/usk6666/yorishiro-proxy/internal/pluginv2"
 )
 
 func TestValidate_DefaultConfig(t *testing.T) {
@@ -1104,5 +1107,189 @@ func TestLoadPolicyFile_EmptyFile(t *testing.T) {
 	_, err := LoadPolicyFile(path)
 	if err == nil {
 		t.Fatal("expected error for empty file, got nil")
+	}
+}
+
+// --- ProxyConfig.Plugins (RFC-001 pluginv2 typed list) tests ---
+
+// TestProxyConfig_Plugins_LoadFile_TypedDecode confirms the new typed
+// shape round-trips through encoding/json.
+func TestProxyConfig_Plugins_LoadFile_TypedDecode(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "plugins.json")
+	content := `{
+		"plugins": [
+			{
+				"path": "/tmp/plugin.star",
+				"name": "my-plugin",
+				"on_error": "abort",
+				"max_steps": 500000,
+				"vars": {"region": "ap-northeast-1", "max_retries": 3},
+				"redact_keys": ["region"]
+			}
+		]
+	}`
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatalf("write config file: %v", err)
+	}
+
+	cfg, err := LoadFile(path)
+	if err != nil {
+		t.Fatalf("LoadFile: %v", err)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if len(cfg.Plugins) != 1 {
+		t.Fatalf("Plugins len = %d, want 1", len(cfg.Plugins))
+	}
+	pc := cfg.Plugins[0]
+	if pc.Path != "/tmp/plugin.star" {
+		t.Errorf("Path = %q, want %q", pc.Path, "/tmp/plugin.star")
+	}
+	if pc.Name != "my-plugin" {
+		t.Errorf("Name = %q, want %q", pc.Name, "my-plugin")
+	}
+	if pc.OnError != "abort" {
+		t.Errorf("OnError = %q, want %q", pc.OnError, "abort")
+	}
+	if pc.MaxSteps != 500000 {
+		t.Errorf("MaxSteps = %d, want 500000", pc.MaxSteps)
+	}
+	// JSON numbers decode into any as float64 — confirms map[string]any
+	// gives non-string Vars first-class round-trip (legacy plugin.PluginConfig
+	// used map[string]string which would lose the integer here).
+	if got, want := pc.Vars["max_retries"], float64(3); got != want {
+		t.Errorf("Vars[max_retries] = %v, want %v", got, want)
+	}
+	if len(pc.RedactKeys) != 1 || pc.RedactKeys[0] != "region" {
+		t.Errorf("RedactKeys = %v, want [region]", pc.RedactKeys)
+	}
+}
+
+// TestProxyConfig_Plugins_LegacyFieldsRejected confirms the legacy
+// `protocol:` / `hooks:` keys land in the pluginv2 tripwire and surface
+// as a typed *pluginv2.LoadError pointing at the migration doc.
+func TestProxyConfig_Plugins_LegacyFieldsRejected(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+	}{
+		{
+			name: "legacy protocol field",
+			content: `{
+				"plugins": [
+					{"path": "/tmp/x.star", "protocol": "http"}
+				]
+			}`,
+		},
+		{
+			name: "legacy hooks field",
+			content: `{
+				"plugins": [
+					{"path": "/tmp/x.star", "hooks": ["on_request"]}
+				]
+			}`,
+		},
+		{
+			name: "both legacy fields",
+			content: `{
+				"plugins": [
+					{"path": "/tmp/x.star", "protocol": "http", "hooks": ["on_request"]}
+				]
+			}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "legacy.json")
+			if err := os.WriteFile(path, []byte(tt.content), 0644); err != nil {
+				t.Fatalf("write config file: %v", err)
+			}
+
+			cfg, err := LoadFile(path)
+			if err != nil {
+				t.Fatalf("LoadFile: %v", err)
+			}
+			err = cfg.Validate()
+			if err == nil {
+				t.Fatal("expected legacy-field rejection, got nil")
+			}
+			var loadErr *pluginv2.LoadError
+			if !errors.As(err, &loadErr) {
+				t.Fatalf("expected *pluginv2.LoadError, got %T (%v)", err, err)
+			}
+			if loadErr.Kind != pluginv2.LoadErrLegacyField {
+				t.Errorf("Kind = %v, want LoadErrLegacyField", loadErr.Kind)
+			}
+			if !strings.Contains(err.Error(), "plugin-migration.md") {
+				t.Errorf("error = %q, want substring %q", err.Error(), "plugin-migration.md")
+			}
+			if !strings.Contains(err.Error(), "plugins[0]") {
+				t.Errorf("error = %q, want index prefix %q", err.Error(), "plugins[0]")
+			}
+		})
+	}
+}
+
+// TestProxyConfig_Plugins_RejectsEmptyPath confirms the pluginv2
+// per-entry path-required validation surfaces through ProxyConfig.Validate.
+func TestProxyConfig_Plugins_RejectsEmptyPath(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "no-path.json")
+	if err := os.WriteFile(path, []byte(`{"plugins": [{"on_error": "skip"}]}`), 0644); err != nil {
+		t.Fatalf("write config file: %v", err)
+	}
+	cfg, err := LoadFile(path)
+	if err != nil {
+		t.Fatalf("LoadFile: %v", err)
+	}
+	err = cfg.Validate()
+	if err == nil {
+		t.Fatal("expected empty-path rejection, got nil")
+	}
+	if !strings.Contains(err.Error(), "path must not be empty") {
+		t.Errorf("error = %q, want substring %q", err.Error(), "path must not be empty")
+	}
+}
+
+// TestProxyConfig_Plugins_RejectsWrongType confirms a non-array value
+// fails at LoadFile (json.UnmarshalTypeError) — covers config-shape errors
+// before Validate() is even called.
+func TestProxyConfig_Plugins_RejectsWrongType(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "bad-shape.json")
+	if err := os.WriteFile(path, []byte(`{"plugins": "not an array"}`), 0644); err != nil {
+		t.Fatalf("write config file: %v", err)
+	}
+	_, err := LoadFile(path)
+	if err == nil {
+		t.Fatal("expected unmarshal type error, got nil")
+	}
+	// LoadFile wraps the json error; the underlying error mentions the field type.
+	if !strings.Contains(err.Error(), "plugins") {
+		t.Errorf("error = %q, want substring %q", err.Error(), "plugins")
+	}
+}
+
+// TestProxyConfig_Plugins_EmptyValidateOK confirms Validate is a no-op on
+// configs that omit the plugins key (zero-length slice).
+func TestProxyConfig_Plugins_EmptyValidateOK(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "no-plugins.json")
+	if err := os.WriteFile(path, []byte(`{"listen_addr": "127.0.0.1:0"}`), 0644); err != nil {
+		t.Fatalf("write config file: %v", err)
+	}
+	cfg, err := LoadFile(path)
+	if err != nil {
+		t.Fatalf("LoadFile: %v", err)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("Validate on no-plugins config = %v, want nil", err)
+	}
+	if len(cfg.Plugins) != 0 {
+		t.Errorf("Plugins len = %d, want 0", len(cfg.Plugins))
 	}
 }

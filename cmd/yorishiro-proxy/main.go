@@ -397,6 +397,9 @@ func loadConfigs(configFile, targetPolicyFile string) (*configsResult, error) {
 		if err := config.ValidateProtocolLimits(proxyCfg.WebSocket, proxyCfg.GRPC, proxyCfg.SSE); err != nil {
 			return nil, fmt.Errorf("invalid protocol limits: %w", err)
 		}
+		if err := proxyCfg.Validate(); err != nil {
+			return nil, fmt.Errorf("invalid proxy config: %w", err)
+		}
 	}
 
 	var targetScopePolicy *config.TargetScopePolicyConfig
@@ -624,28 +627,13 @@ func initProtocolHandlers(ctx context.Context, deps protocolDeps) (*protocolResu
 		return nil, err
 	}
 
-	// Initialize plugin engine from config if plugins are configured.
+	// Legacy plugin.Engine wiring removed in USK-687 — proxyCfg.Plugins is
+	// now a typed []pluginv2.PluginConfig and the legacy plugin engine has
+	// nothing to consume from it. Production wiring of pluginv2.Engine
+	// (LoadPlugins + handler fan-out) is owned by USK-690; full deletion
+	// of internal/plugin/ is owned by USK-695. Until then pluginEngine
+	// stays nil and downstream nil-safe handlers leave plugin hooks idle.
 	var pluginEngine *plugin.Engine
-	if deps.proxyCfg != nil && len(deps.proxyCfg.Plugins) > 0 {
-		var pluginConfigs []plugin.PluginConfig
-		if err := json.Unmarshal(deps.proxyCfg.Plugins, &pluginConfigs); err != nil {
-			return nil, fmt.Errorf("parse plugin configs: %w", err)
-		}
-		pluginEngine = plugin.NewEngine(logger)
-		if err := pluginEngine.SetDB(ctx, store.DB()); err != nil {
-			return nil, fmt.Errorf("init plugin store: %w", err)
-		}
-		if err := pluginEngine.LoadPlugins(ctx, pluginConfigs); err != nil {
-			return nil, fmt.Errorf("load plugins: %w", err)
-		}
-		httpHandler.SetPluginEngine(pluginEngine)
-		http2Handler.SetPluginEngine(pluginEngine)
-		grpcHandler.SetPluginEngine(pluginEngine)
-		grpcWebHandler.SetPluginEngine(pluginEngine)
-		tcpHandler.SetPluginEngine(pluginEngine)
-		socks5Handler.SetPluginEngine(pluginEngine)
-		logger.Info("plugins loaded", "count", pluginEngine.PluginCount())
-	}
 
 	// Build SOCKS5 post-handshake dispatch after plugin engine initialization
 	// so the raw TCP relay path can use flow recording and plugin hooks.
