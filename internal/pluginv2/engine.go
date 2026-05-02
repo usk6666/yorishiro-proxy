@@ -52,10 +52,17 @@ type Engine struct {
 // register_hook builtin appended for this plugin during script execution.
 // The plugin_introspect MCP tool (USK-676) reads this slice to surface the
 // loaded surface back to operators.
+//
+// pendingHooks stages the full Hook records that register_hook produced
+// during script execution. The engine commits them to e.registry only
+// after ExecFileOptions returns nil (USK-685); if the script fails after
+// register_hook ran, the loadedPlugin is unreachable and the staged hooks
+// are discarded with it. Cleared after commit.
 type loadedPlugin struct {
 	config        PluginConfig
 	globals       starlark.StringDict
 	registrations []registeredHook
+	pendingHooks  []Hook
 }
 
 // registeredHook is the per-plugin record of one register_hook call. The
@@ -177,13 +184,13 @@ func (e *Engine) loadPlugin(ctx context.Context, cfg PluginConfig) error {
 			)
 		},
 	}
-	thread.SetLocal(threadLocalRegistry, e.registry)
 	thread.SetLocal(threadLocalPluginName, name)
 
 	// loadedPlugin must be allocated up-front so the register_hook builtin
-	// can append to its registrations slice via the threadLocalCurrentPlugin
-	// pointer. We finalize globals and append to e.plugins after
-	// ExecFileOptions returns successfully.
+	// can append to its pendingHooks / registrations slices via the
+	// threadLocalCurrentPlugin pointer. We commit pendingHooks to the
+	// registry, finalize globals, and append to e.plugins only after
+	// ExecFileOptions returns successfully (USK-685).
 	lp := &loadedPlugin{config: cfg}
 	thread.SetLocal(threadLocalCurrentPlugin, lp)
 
@@ -234,8 +241,20 @@ func (e *Engine) loadPlugin(ctx context.Context, cfg PluginConfig) error {
 		predeclared,
 	)
 	if err != nil {
+		// lp (and its pendingHooks / registrations) is unreachable once
+		// loadPlugin returns; the caller never sees the partial registrations
+		// (USK-685). e.registry is untouched.
 		return wrapExecError(err, cfg.Path, name)
 	}
+
+	// Commit the staged hooks. From here on the plugin is observable to
+	// runtime dispatch (Registry.Lookup) and to plugin_introspect (which
+	// walks e.plugins). Both transitions happen inside e.mu so they appear
+	// atomic to readers.
+	for _, h := range lp.pendingHooks {
+		e.registry.Register(h)
+	}
+	lp.pendingHooks = nil
 
 	lp.globals = globals
 	e.plugins = append(e.plugins, lp)
