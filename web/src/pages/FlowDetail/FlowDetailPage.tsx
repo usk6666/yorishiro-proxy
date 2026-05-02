@@ -4,81 +4,25 @@ import { Badge } from "../../components/ui/Badge.js";
 import { Button } from "../../components/ui/Button.js";
 import { useDialog } from "../../components/ui/Dialog.js";
 import { Spinner } from "../../components/ui/Spinner.js";
-import { Tabs } from "../../components/ui/Tabs.js";
 import { useToast } from "../../components/ui/Toast.js";
 import { generateCurl } from "../../lib/export/curl.js";
 import { buildHar, downloadHar } from "../../lib/export/har.js";
+import {
+  isStreamingFlow,
+  pickFlowDetailKind,
+} from "../../lib/mcp/dispatch.js";
 import { useManage, useQuery } from "../../lib/mcp/hooks.js";
 import type {
   FlowDetailResult,
   MessageEntry,
 } from "../../lib/mcp/types.js";
-import { BodyViewer } from "./BodyViewer.js";
+import { FlowDetailGRPCMessage } from "./FlowDetailGRPCMessage.js";
+import { FlowDetailHTTPMessage } from "./FlowDetailHTTPMessage.js";
 import "./FlowDetailPage.css";
-import { GrpcPanel } from "./GrpcPanel.js";
-import { HeadersTable } from "./HeadersTable.js";
-import {
-  Http2Badge,
-  Http2Info,
-  Http2PseudoHeaders,
-  Http2StreamGroups,
-  filterRegularHeaders,
-} from "./Http2Info.js";
-import { MessageList } from "./MessageList.js";
-import { RawBytesViewer } from "./RawBytesViewer.js";
-import { WebSocketMessageList } from "./WebSocketMessageList.js";
-
-// ---------------------------------------------------------------------------
-// Constants
-// ---------------------------------------------------------------------------
-
-const REQUEST_TABS = [
-  { id: "headers", label: "Headers" },
-  { id: "body", label: "Body" },
-];
-
-const REQUEST_TABS_RAW = [
-  { id: "headers", label: "Headers" },
-  { id: "body", label: "Body" },
-  { id: "raw", label: "Raw" },
-];
-
-const REQUEST_TABS_H2 = [
-  { id: "pseudo", label: "Pseudo-Headers" },
-  { id: "headers", label: "Headers" },
-  { id: "body", label: "Body" },
-];
-
-const REQUEST_TABS_H2_RAW = [
-  { id: "pseudo", label: "Pseudo-Headers" },
-  { id: "headers", label: "Headers" },
-  { id: "body", label: "Body" },
-  { id: "raw", label: "Raw" },
-];
-
-const RESPONSE_TABS = [
-  { id: "headers", label: "Headers" },
-  { id: "body", label: "Body" },
-];
-
-const RESPONSE_TABS_RAW = [
-  { id: "headers", label: "Headers" },
-  { id: "body", label: "Body" },
-  { id: "raw", label: "Raw" },
-];
-
-const RESPONSE_TABS_H2 = [
-  { id: "pseudo", label: "Pseudo-Headers" },
-  { id: "headers", label: "Headers" },
-  { id: "body", label: "Body" },
-];
-
-const RESPONSE_TABS_H2_RAW = [
-  { id: "pseudo", label: "Pseudo-Headers" },
-  { id: "headers", label: "Headers" },
-  { id: "body", label: "Body" },
-  { id: "raw", label: "Raw" },
-];
+import { FlowDetailRawMessage } from "./FlowDetailRawMessage.js";
+import { FlowDetailSSEMessage } from "./FlowDetailSSEMessage.js";
+import { FlowDetailWSMessage } from "./FlowDetailWSMessage.js";
+import { Http2Badge, Http2Info, Http2StreamGroups } from "./Http2Info.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -86,6 +30,7 @@ const RESPONSE_TABS_H2_RAW = [
 
 /** Return a shortened flow ID for display (first 8 characters). */
 function shortId(id: string): string {
+  if (!id) return "";
   return id.length > 8 ? id.slice(0, 8) : id;
 }
 
@@ -131,6 +76,7 @@ function formatDuration(ms: number): string {
 
 /** Format an ISO timestamp to a readable local string. */
 function formatTimestamp(ts: string): string {
+  if (!ts) return "";
   try {
     const d = new Date(ts);
     return d.toLocaleString(undefined, {
@@ -148,7 +94,9 @@ function formatTimestamp(ts: string): string {
 }
 
 /** Get the Badge variant for a flow state. */
-function stateVariant(state: string): "default" | "success" | "warning" | "danger" | "info" {
+function stateVariant(
+  state: string,
+): "default" | "success" | "warning" | "danger" | "info" {
   switch (state) {
     case "complete":
       return "success";
@@ -161,25 +109,6 @@ function stateVariant(state: string): "default" | "success" | "warning" | "dange
   }
 }
 
-/** Whether a flow is a streaming type (WebSocket, gRPC server/client streaming). */
-function isStreamingFlow(flow: FlowDetailResult): boolean {
-  return flow.flow_type !== "unary";
-}
-
-/** Whether a flow is a gRPC or gRPC-Web flow. */
-function isGrpcFlow(flow: FlowDetailResult): boolean {
-  return flow.protocol === "gRPC" || flow.protocol === "gRPC-Web";
-}
-
-/** Whether a flow has a response (error/drop flows may not have one). */
-function hasResponse(flow: FlowDetailResult): boolean {
-  return (
-    flow.response_status_code > 0 ||
-    (flow.response_headers != null &&
-      Object.keys(flow.response_headers).length > 0)
-  );
-}
-
 // ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
@@ -190,10 +119,6 @@ export function FlowDetailPage() {
   const { addToast } = useToast();
   const { showDialog } = useDialog();
   const { manage, loading: executeLoading } = useManage();
-
-  // Tabs state
-  const [requestTab, setRequestTab] = useState("headers");
-  const [responseTab, setResponseTab] = useState("headers");
 
   // Messages pagination state (for streaming flows)
   const [messagesOffset, setMessagesOffset] = useState(0);
@@ -238,7 +163,8 @@ export function FlowDetailPage() {
 
     const confirmed = await showDialog({
       title: "Delete Flow",
-      message: "Are you sure you want to delete this flow? This action cannot be undone.",
+      message:
+        "Are you sure you want to delete this flow? This action cannot be undone.",
       variant: "confirm",
       confirmLabel: "Delete",
       confirmVariant: "danger",
@@ -277,7 +203,10 @@ export function FlowDetailPage() {
     try {
       const curl = generateCurl(flowData);
       await navigator.clipboard.writeText(curl);
-      addToast({ type: "success", message: "cURL command copied to clipboard" });
+      addToast({
+        type: "success",
+        message: "cURL command copied to clipboard",
+      });
     } catch (err) {
       addToast({
         type: "error",
@@ -291,7 +220,8 @@ export function FlowDetailPage() {
     if (!flowData) return;
     try {
       const har = buildHar(flowData);
-      const shortFlowId = flowData.id.length > 8 ? flowData.id.slice(0, 8) : flowData.id;
+      const shortFlowId =
+        flowData.id.length > 8 ? flowData.id.slice(0, 8) : flowData.id;
       downloadHar(har, `flow-${shortFlowId}.har`);
       addToast({ type: "success", message: "HAR file downloaded" });
     } catch (err) {
@@ -345,26 +275,14 @@ export function FlowDetailPage() {
   }
 
   const streaming = isStreamingFlow(flowData);
-  const messages: MessageEntry[] = messagesData?.messages ?? flowData.message_preview ?? [];
-  const totalMessages = messagesData?.total ?? flowData.message_count;
-
-  const isH2 = flowData.protocol === "HTTP/2";
-  const hasRawReq = !!flowData.raw_request;
-  const hasRawResp = !!flowData.raw_response;
-  const reqTabs = isH2
-    ? (hasRawReq ? REQUEST_TABS_H2_RAW : REQUEST_TABS_H2)
-    : (hasRawReq ? REQUEST_TABS_RAW : REQUEST_TABS);
-  const resTabs = isH2
-    ? (hasRawResp ? RESPONSE_TABS_H2_RAW : RESPONSE_TABS_H2)
-    : (hasRawResp ? RESPONSE_TABS_RAW : RESPONSE_TABS);
-
-  // For HTTP/2, separate pseudo-headers from regular headers.
-  const displayReqHeaders = isH2
-    ? filterRegularHeaders(flowData.request_headers)
-    : flowData.request_headers;
-  const displayRespHeaders = isH2
-    ? filterRegularHeaders(flowData.response_headers)
-    : flowData.response_headers;
+  const messages: MessageEntry[] =
+    messagesData?.messages ?? flowData.message_preview ?? [];
+  const totalMessages = messagesData?.total ?? flowData.message_count ?? 0;
+  const flowKind = pickFlowDetailKind(flowData.protocol);
+  const flowSafe: FlowDetailResult = flowData;
+  const responseStatus = flowSafe.response_status_code ?? 0;
+  const protoTags = flowSafe.tags ?? {};
+  const anomaliesPresent = !!flowSafe.anomalies?.length;
 
   return (
     <div className="page flow-detail-page">
@@ -381,13 +299,13 @@ export function FlowDetailPage() {
           <div className="sd-header-info">
             <div className="sd-header-title-row">
               <h1 className="page-title">Flow Detail</h1>
-              <span className="sd-flow-id">{shortId(flowData.id)}</span>
+              <span className="sd-flow-id">{shortId(flowSafe.id ?? "")}</span>
             </div>
-            <div className="sd-url-display" title={flowData.url}>
-              {flowData.method && (
-                <span className="sd-method">{flowData.method}</span>
+            <div className="sd-url-display" title={flowSafe.url}>
+              {flowSafe.method && (
+                <span className="sd-method">{flowSafe.method}</span>
               )}
-              <span className="sd-url">{flowData.url}</span>
+              <span className="sd-url">{flowSafe.url}</span>
             </div>
           </div>
           <div className="sd-header-actions">
@@ -408,7 +326,11 @@ export function FlowDetailPage() {
             >
               Delete
             </Button>
-            <Button variant="secondary" size="sm" onClick={() => refetchFlow()}>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => refetchFlow()}
+            >
               Refresh
             </Button>
           </div>
@@ -418,44 +340,50 @@ export function FlowDetailPage() {
         <div className="sd-meta">
           <div className="sd-meta-item">
             <span className="sd-meta-label">Protocol</span>
-            <Badge variant={protocolVariant(flowData.protocol)}>
-              {flowData.protocol}
+            <Badge variant={protocolVariant(flowSafe.protocol ?? "")}>
+              {flowSafe.protocol || "unknown"}
             </Badge>
-            {flowData.protocol === "HTTP/2" && (
-              <Http2Badge flow={flowData} />
-            )}
+            {flowSafe.protocol === "HTTP/2" && <Http2Badge flow={flowSafe} />}
           </div>
-          {flowData.response_status_code > 0 && (
+          {responseStatus > 0 && (
             <div className="sd-meta-item">
               <span className="sd-meta-label">Status</span>
-              <span className={statusCodeClass(flowData.response_status_code)}>
-                {flowData.response_status_code}
+              <span className={statusCodeClass(responseStatus)}>
+                {responseStatus}
               </span>
             </div>
           )}
           <div className="sd-meta-item">
             <span className="sd-meta-label">Duration</span>
             <span className="sd-meta-value">
-              {formatDuration(flowData.duration_ms)}
+              {formatDuration(flowSafe.duration_ms ?? 0)}
             </span>
           </div>
-          {(flowData.send_ms != null || flowData.wait_ms != null || flowData.receive_ms != null) && (
+          {(flowSafe.send_ms != null ||
+            flowSafe.wait_ms != null ||
+            flowSafe.receive_ms != null) && (
             <div className="sd-meta-item">
               <span className="sd-meta-label">Timing</span>
               <span className="sd-meta-value sd-timing-breakdown">
-                {flowData.send_ms != null && (
+                {flowSafe.send_ms != null && (
                   <span className="sd-timing-part" title="Request send time">
-                    Send: {formatDuration(flowData.send_ms)}
+                    Send: {formatDuration(flowSafe.send_ms)}
                   </span>
                 )}
-                {flowData.wait_ms != null && (
-                  <span className="sd-timing-part" title="Server processing wait time">
-                    Wait: {formatDuration(flowData.wait_ms)}
+                {flowSafe.wait_ms != null && (
+                  <span
+                    className="sd-timing-part"
+                    title="Server processing wait time"
+                  >
+                    Wait: {formatDuration(flowSafe.wait_ms)}
                   </span>
                 )}
-                {flowData.receive_ms != null && (
-                  <span className="sd-timing-part" title="Response receive time">
-                    Recv: {formatDuration(flowData.receive_ms)}
+                {flowSafe.receive_ms != null && (
+                  <span
+                    className="sd-timing-part"
+                    title="Response receive time"
+                  >
+                    Recv: {formatDuration(flowSafe.receive_ms)}
                   </span>
                 )}
               </span>
@@ -464,38 +392,43 @@ export function FlowDetailPage() {
           <div className="sd-meta-item">
             <span className="sd-meta-label">Timestamp</span>
             <span className="sd-meta-value">
-              {formatTimestamp(flowData.timestamp)}
+              {formatTimestamp(flowSafe.timestamp ?? "")}
             </span>
           </div>
           <div className="sd-meta-item">
             <span className="sd-meta-label">Type</span>
-            <Badge variant="default">{flowData.flow_type}</Badge>
+            <Badge variant="default">{flowSafe.flow_type || "unknown"}</Badge>
           </div>
           <div className="sd-meta-item">
             <span className="sd-meta-label">State</span>
-            <Badge variant={stateVariant(flowData.state)}>{flowData.state}</Badge>
+            <Badge variant={stateVariant(flowSafe.state ?? "")}>
+              {flowSafe.state || "unknown"}
+            </Badge>
           </div>
-          {flowData.blocked_by && (
+          {flowSafe.blocked_by && (
             <div className="sd-meta-item">
               <span className="sd-meta-label">Blocked By</span>
-              <Badge variant="warning">{flowData.blocked_by}</Badge>
+              <Badge variant="warning">{flowSafe.blocked_by}</Badge>
             </div>
           )}
-          {flowData.message_count > 0 && (
+          {(flowSafe.message_count ?? 0) > 0 && (
             <div className="sd-meta-item">
               <span className="sd-meta-label">Messages</span>
-              <span className="sd-meta-value">{flowData.message_count}</span>
+              <span className="sd-meta-value">{flowSafe.message_count}</span>
             </div>
           )}
         </div>
 
         {/* Anomalies */}
-        {flowData.anomalies && flowData.anomalies.length > 0 && (
+        {flowSafe.anomalies && flowSafe.anomalies.length > 0 && (
           <div className="sd-anomalies">
             <span className="sd-anomalies-label">Anomalies</span>
             <div className="sd-anomalies-list">
-              {flowData.anomalies.map((anomaly, idx) => (
-                <div key={`${anomaly.type}-${idx}`} className="sd-anomaly-item">
+              {flowSafe.anomalies.map((anomaly, idx) => (
+                <div
+                  key={`${anomaly.type}-${idx}`}
+                  className="sd-anomaly-item"
+                >
                   <Badge variant="danger">{anomaly.type}</Badge>
                   {anomaly.detail && (
                     <span className="sd-anomaly-detail">{anomaly.detail}</span>
@@ -507,10 +440,14 @@ export function FlowDetailPage() {
         )}
 
         {/* Tags (excluding smuggling:* which are shown as anomalies above, only when anomalies are present) */}
-        {flowData.tags && Object.keys(flowData.tags).filter(k => flowData.anomalies?.length ? !k.startsWith("smuggling:") : true).length > 0 && (
+        {Object.keys(protoTags).filter((k) =>
+          anomaliesPresent ? !k.startsWith("smuggling:") : true,
+        ).length > 0 && (
           <div className="sd-tags">
-            {Object.entries(flowData.tags)
-              .filter(([key]) => flowData.anomalies?.length ? !key.startsWith("smuggling:") : true)
+            {Object.entries(protoTags)
+              .filter(([key]) =>
+                anomaliesPresent ? !key.startsWith("smuggling:") : true,
+              )
               .map(([key, value]) => (
                 <Badge key={key} variant="info">
                   {key}: {value}
@@ -520,55 +457,55 @@ export function FlowDetailPage() {
         )}
 
         {/* Protocol summary */}
-        {flowData.protocol_summary &&
-          Object.keys(flowData.protocol_summary).length > 0 && (
+        {flowSafe.protocol_summary &&
+          Object.keys(flowSafe.protocol_summary).length > 0 && (
             <div className="sd-protocol-summary">
-              {Object.entries(flowData.protocol_summary).map(([key, value]) => (
-                <div key={key} className="sd-meta-item">
-                  <span className="sd-meta-label">{key}</span>
-                  <span className="sd-meta-value">{value}</span>
-                </div>
-              ))}
+              {Object.entries(flowSafe.protocol_summary).map(
+                ([key, value]) => (
+                  <div key={key} className="sd-meta-item">
+                    <span className="sd-meta-label">{key}</span>
+                    <span className="sd-meta-value">{value}</span>
+                  </div>
+                ),
+              )}
             </div>
           )}
 
         {/* HTTP/2 specific info */}
-        {flowData.protocol === "HTTP/2" && (
-          <Http2Info flow={flowData} />
-        )}
+        {flowSafe.protocol === "HTTP/2" && <Http2Info flow={flowSafe} />}
 
         {/* Connection info */}
-        {flowData.conn_info && (
+        {flowSafe.conn_info && (
           <div className="sd-conn-info">
-            {flowData.conn_info.client_addr && (
+            {flowSafe.conn_info.client_addr && (
               <div className="sd-meta-item">
                 <span className="sd-meta-label">Client</span>
                 <span className="sd-meta-value">
-                  {flowData.conn_info.client_addr}
+                  {flowSafe.conn_info.client_addr}
                 </span>
               </div>
             )}
-            {flowData.conn_info.server_addr && (
+            {flowSafe.conn_info.server_addr && (
               <div className="sd-meta-item">
                 <span className="sd-meta-label">Server</span>
                 <span className="sd-meta-value">
-                  {flowData.conn_info.server_addr}
+                  {flowSafe.conn_info.server_addr}
                 </span>
               </div>
             )}
-            {flowData.conn_info.tls_version && (
+            {flowSafe.conn_info.tls_version && (
               <div className="sd-meta-item">
                 <span className="sd-meta-label">TLS</span>
                 <span className="sd-meta-value">
-                  {flowData.conn_info.tls_version}
+                  {flowSafe.conn_info.tls_version}
                 </span>
               </div>
             )}
-            {flowData.conn_info.tls_alpn && (
+            {flowSafe.conn_info.tls_alpn && (
               <div className="sd-meta-item">
                 <span className="sd-meta-label">ALPN</span>
                 <span className="sd-meta-value">
-                  {flowData.conn_info.tls_alpn}
+                  {flowSafe.conn_info.tls_alpn}
                 </span>
               </div>
             )}
@@ -576,24 +513,19 @@ export function FlowDetailPage() {
         )}
       </div>
 
-      {/* gRPC structured details panel */}
-      {isGrpcFlow(flowData) && (
-        <GrpcPanel flow={flowData} />
-      )}
-
       {/* HTTP/2 Stream Grouping (for multi-stream message previews) */}
-      {flowData.protocol === "HTTP/2" && messages.length > 0 && (
+      {flowSafe.protocol === "HTTP/2" && messages.length > 0 && (
         <div className="sd-section">
           <Http2StreamGroups messages={messages} />
         </div>
       )}
 
-      {/* Streaming flow: Messages list */}
-      {streaming && (
-        <div className="sd-section">
-          <h2 className="sd-section-title">Messages</h2>
-          {flowData.protocol === "WebSocket" ? (
-            <WebSocketMessageList
+      {/* Per-protocol body dispatch */}
+      {flowKind === "ws" && (
+        <>
+          <div className="sd-section">
+            <h2 className="sd-section-title">Messages</h2>
+            <FlowDetailWSMessage
               messages={messages}
               total={totalMessages}
               offset={messagesOffset}
@@ -601,322 +533,56 @@ export function FlowDetailPage() {
               loading={messagesLoading}
               onPageChange={handleMessagesPageChange}
             />
-          ) : (
-            <MessageList
-              messages={messages}
-              total={totalMessages}
-              offset={messagesOffset}
-              limit={messagesLimit}
-              loading={messagesLoading}
-              onPageChange={handleMessagesPageChange}
-              protocol={flowData.protocol}
-            />
-          )}
-        </div>
+          </div>
+          <FlowDetailHTTPMessage flow={flowSafe} />
+        </>
       )}
 
-      {/* Variant diff: original vs modified request */}
-      {flowData.original_request && (
-        <div className="sd-section">
-          <h2 className="sd-section-title">Request Modification (Original vs Modified)</h2>
-          <div className="sd-panels">
-            {/* Original request */}
-            <div className="sd-panel">
-              <div className="sd-panel-header">
-                <span className="sd-panel-title">Original Request</span>
-                <Badge variant="default">original</Badge>
-              </div>
-              <Tabs
-                tabs={reqTabs}
-                activeTab={requestTab}
-                onTabChange={setRequestTab}
-              >
-                {requestTab === "pseudo" && isH2 && (
-                  <Http2PseudoHeaders
-                    headers={flowData.original_request.headers}
-                    type="request"
-                  />
-                )}
-                {requestTab === "headers" && (
-                  <HeadersTable
-                    headers={
-                      isH2
-                        ? filterRegularHeaders(flowData.original_request.headers)
-                        : flowData.original_request.headers
-                    }
-                  />
-                )}
-                {requestTab === "body" && (
-                  <BodyViewer
-                    body={flowData.original_request.body}
-                    encoding={flowData.original_request.body_encoding}
-                    truncated={false}
-                    headers={flowData.original_request.headers}
-                  />
-                )}
-                {requestTab === "raw" && flowData.raw_request && (
-                  <RawBytesViewer rawBytes={flowData.raw_request} label="Raw Request" />
-                )}
-              </Tabs>
-            </div>
-
-            {/* Modified request */}
-            <div className="sd-panel">
-              <div className="sd-panel-header">
-                <span className="sd-panel-title">Modified Request</span>
-                <Badge variant="warning">modified</Badge>
-              </div>
-              <Tabs
-                tabs={reqTabs}
-                activeTab={requestTab}
-                onTabChange={setRequestTab}
-              >
-                {requestTab === "pseudo" && isH2 && (
-                  <Http2PseudoHeaders
-                    headers={flowData.request_headers}
-                    type="request"
-                  />
-                )}
-                {requestTab === "headers" && (
-                  <HeadersTable headers={displayReqHeaders} />
-                )}
-                {requestTab === "body" && (
-                  <BodyViewer
-                    body={flowData.request_body}
-                    encoding={flowData.request_body_encoding}
-                    truncated={flowData.request_body_truncated}
-                    headers={flowData.request_headers}
-                  />
-                )}
-                {requestTab === "raw" && flowData.raw_request && (
-                  <RawBytesViewer rawBytes={flowData.raw_request} label="Raw Request" />
-                )}
-              </Tabs>
-            </div>
-          </div>
-        </div>
+      {flowKind === "grpc" && (
+        <>
+          <FlowDetailGRPCMessage
+            flow={flowSafe}
+            messages={messages}
+            total={totalMessages}
+            offset={messagesOffset}
+            limit={messagesLimit}
+            loading={messagesLoading}
+            onPageChange={handleMessagesPageChange}
+            showMessageTimeline={streaming}
+          />
+          <FlowDetailHTTPMessage flow={flowSafe} />
+        </>
       )}
 
-      {/* Variant diff: original vs modified response */}
-      {flowData.original_response && (
-        <div className="sd-section">
-          <h2 className="sd-section-title">Response Modification (Original vs Modified)</h2>
-          <div className="sd-panels">
-            {/* Original response */}
-            <div className="sd-panel">
-              <div className="sd-panel-header">
-                <span className="sd-panel-title">Original Response</span>
-                <Badge variant="default">original</Badge>
-                {flowData.original_response.status_code > 0 && (
-                  <Badge
-                    variant={
-                      flowData.original_response.status_code < 300
-                        ? "success"
-                        : flowData.original_response.status_code < 400
-                          ? "info"
-                          : flowData.original_response.status_code < 500
-                            ? "warning"
-                            : "danger"
-                    }
-                  >
-                    {flowData.original_response.status_code}
-                  </Badge>
-                )}
-              </div>
-              <Tabs
-                tabs={resTabs}
-                activeTab={responseTab}
-                onTabChange={setResponseTab}
-              >
-                {responseTab === "pseudo" && isH2 && (
-                  <Http2PseudoHeaders
-                    headers={flowData.original_response.headers}
-                    type="response"
-                  />
-                )}
-                {responseTab === "headers" && (
-                  <HeadersTable
-                    headers={
-                      isH2
-                        ? filterRegularHeaders(flowData.original_response.headers)
-                        : flowData.original_response.headers
-                    }
-                  />
-                )}
-                {responseTab === "body" && (
-                  <BodyViewer
-                    body={flowData.original_response.body}
-                    encoding={flowData.original_response.body_encoding}
-                    truncated={flowData.original_response.body_truncated}
-                    headers={flowData.original_response.headers}
-                  />
-                )}
-                {responseTab === "raw" && flowData.raw_response && (
-                  <RawBytesViewer rawBytes={flowData.raw_response} label="Raw Response" />
-                )}
-              </Tabs>
-            </div>
-
-            {/* Modified response */}
-            <div className="sd-panel">
-              <div className="sd-panel-header">
-                <span className="sd-panel-title">Modified Response</span>
-                <Badge variant="warning">modified</Badge>
-                {flowData.response_status_code > 0 && (
-                  <Badge
-                    variant={
-                      flowData.response_status_code < 300
-                        ? "success"
-                        : flowData.response_status_code < 400
-                          ? "info"
-                          : flowData.response_status_code < 500
-                            ? "warning"
-                            : "danger"
-                    }
-                  >
-                    {flowData.response_status_code}
-                  </Badge>
-                )}
-              </div>
-              <Tabs
-                tabs={resTabs}
-                activeTab={responseTab}
-                onTabChange={setResponseTab}
-              >
-                {responseTab === "pseudo" && isH2 && (
-                  <Http2PseudoHeaders
-                    headers={flowData.response_headers}
-                    type="response"
-                  />
-                )}
-                {responseTab === "headers" && (
-                  <HeadersTable headers={displayRespHeaders} />
-                )}
-                {responseTab === "body" && (
-                  <BodyViewer
-                    body={flowData.response_body}
-                    encoding={flowData.response_body_encoding}
-                    truncated={flowData.response_body_truncated}
-                    headers={flowData.response_headers}
-                  />
-                )}
-                {responseTab === "raw" && flowData.raw_response && (
-                  <RawBytesViewer rawBytes={flowData.raw_response} label="Raw Response" />
-                )}
-              </Tabs>
-            </div>
-          </div>
-        </div>
+      {flowKind === "sse" && (
+        <>
+          <FlowDetailSSEMessage
+            flow={flowSafe}
+            messages={messages}
+            total={totalMessages}
+            offset={messagesOffset}
+            limit={messagesLimit}
+            loading={messagesLoading}
+            onPageChange={handleMessagesPageChange}
+          />
+          <FlowDetailHTTPMessage flow={flowSafe} />
+        </>
       )}
 
-      {/* Request / Response panels */}
-      <div className="sd-panels">
-        {/* Request panel (shown when no variant diff) */}
-        {!flowData.original_request && (
-          <div className="sd-panel">
-            <div className="sd-panel-header">
-              <span className="sd-panel-title">Request</span>
-            </div>
-            <Tabs
-              tabs={reqTabs}
-              activeTab={requestTab}
-              onTabChange={setRequestTab}
-            >
-              {requestTab === "pseudo" && isH2 && (
-                <Http2PseudoHeaders
-                  headers={flowData.request_headers}
-                  type="request"
-                />
-              )}
-              {requestTab === "headers" && (
-                <HeadersTable headers={displayReqHeaders} />
-              )}
-              {requestTab === "body" && (
-                <BodyViewer
-                  body={flowData.request_body}
-                  encoding={flowData.request_body_encoding}
-                  truncated={flowData.request_body_truncated}
-                  headers={flowData.request_headers}
-                />
-              )}
-              {requestTab === "raw" && flowData.raw_request && (
-                <RawBytesViewer rawBytes={flowData.raw_request} label="Raw Request" />
-              )}
-            </Tabs>
-          </div>
-        )}
+      {flowKind === "raw" && (
+        <FlowDetailRawMessage
+          flow={flowSafe}
+          messages={messages}
+          total={totalMessages}
+          offset={messagesOffset}
+          limit={messagesLimit}
+          loading={messagesLoading}
+          onPageChange={handleMessagesPageChange}
+          showMessageTimeline={streaming}
+        />
+      )}
 
-        {/* Response panel (shown when no response variant diff) */}
-        {!flowData.original_response && (
-        <div className={flowData.original_request ? "sd-panel sd-panel--full-width" : "sd-panel"}>
-          <div className="sd-panel-header">
-            <span className="sd-panel-title">Response</span>
-            {flowData.response_status_code > 0 && (
-              <Badge
-                variant={
-                  flowData.response_status_code < 300
-                    ? "success"
-                    : flowData.response_status_code < 400
-                      ? "info"
-                      : flowData.response_status_code < 500
-                        ? "warning"
-                        : "danger"
-                }
-              >
-                {flowData.response_status_code}
-              </Badge>
-            )}
-            {!hasResponse(flowData) && (
-              <Badge variant="danger">No Response</Badge>
-            )}
-          </div>
-          {hasResponse(flowData) ? (
-            <Tabs
-              tabs={resTabs}
-              activeTab={responseTab}
-              onTabChange={setResponseTab}
-            >
-              {responseTab === "pseudo" && isH2 && (
-                <Http2PseudoHeaders
-                  headers={flowData.response_headers}
-                  type="response"
-                />
-              )}
-              {responseTab === "headers" && (
-                <HeadersTable headers={displayRespHeaders} />
-              )}
-              {responseTab === "body" && (
-                flowData.tags?.streaming_type === "sse" ? (
-                  <div className="sd-no-response">
-                    SSE (Server-Sent Events) streaming response. The response body was streamed directly to the client and was not recorded.
-                  </div>
-                ) : (
-                  <BodyViewer
-                    body={flowData.response_body}
-                    encoding={flowData.response_body_encoding}
-                    truncated={flowData.response_body_truncated}
-                    headers={flowData.response_headers}
-                  />
-                )
-              )}
-              {responseTab === "raw" && flowData.raw_response && (
-                <RawBytesViewer rawBytes={flowData.raw_response} label="Raw Response" />
-              )}
-            </Tabs>
-          ) : (
-            <div className="sd-no-response">
-              {flowData.state === "error"
-                ? "This flow ended with an error. No response was received from the upstream server."
-                : flowData.state === "active"
-                  ? "This flow is still active. The response has not been received yet."
-                  : flowData.blocked_by === "intercept_drop"
-                    ? "This request was dropped by an intercept rule. No response was generated."
-                    : "No response data available for this flow."}
-            </div>
-          )}
-        </div>
-        )}
-      </div>
+      {flowKind === "http" && <FlowDetailHTTPMessage flow={flowSafe} />}
     </div>
   );
 }

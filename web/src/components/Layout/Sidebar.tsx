@@ -45,6 +45,11 @@ const NAV_ITEMS: NavItem[] = [
     icon: <MacroIcon />,
   },
   {
+    to: "/plugins",
+    label: "Plugins",
+    icon: <PluginIcon />,
+  },
+  {
     to: "/security",
     label: "Security",
     icon: <SecurityIcon />,
@@ -139,6 +144,14 @@ function MacroIcon() {
     <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
       <polyline points="2 4 6 8 2 12" />
       <line x1="8" y1="12" x2="14" y2="12" />
+    </svg>
+  );
+}
+
+function PluginIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M5 3v3H3v3h2v3a2 2 0 0 0 2 2h6V5a2 2 0 0 0-2-2H8v3" />
     </svg>
   );
 }
