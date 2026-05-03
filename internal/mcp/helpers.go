@@ -74,25 +74,6 @@ func validateURLScheme(u *url.URL) error {
 	return nil
 }
 
-// NewDefaultHTTPClient returns an *http.Client with an explicit timeout and
-// redirect suppression. It should be used for outbound HTTP requests initiated
-// by user input (fuzz, resend, macro, etc.). Access control is handled at a
-// higher level by the target scope enforcement layer (TargetScope).
-func NewDefaultHTTPClient() *http.Client {
-	transport := &http.Transport{
-		DialContext: (&net.Dialer{
-			Timeout: defaultReplayTimeout,
-		}).DialContext,
-	}
-	return &http.Client{
-		Timeout:   defaultReplayTimeout,
-		Transport: transport,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-	}
-}
-
 // encodeBody returns the body as a string with its encoding type.
 // If the body is valid UTF-8 text, it is returned as-is with encoding "text".
 // Otherwise, it is Base64-encoded with encoding "base64".
