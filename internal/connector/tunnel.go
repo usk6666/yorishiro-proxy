@@ -200,7 +200,6 @@ func (t *TunnelHandler) Handle(ctx context.Context, conn net.Conn, target, sourc
 	logger.Debug("tunnel: client TLS handshake complete", "target", target,
 		"alpn", state.NegotiatedProtocol, "sni", state.ServerName,
 		"cache_hit", cacheHit)
-	_ = host
 
 	// Step 6: inner protocol detection + Codec pair + RunSession.
 	clientCodec, dialFunc, err := t.buildCodecPair(ctx, tlsConn, target, state.NegotiatedProtocol, cacheKey, cache, holder)

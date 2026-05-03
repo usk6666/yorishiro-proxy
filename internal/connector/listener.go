@@ -281,8 +281,7 @@ func (l *Listener) handleConn(ctx context.Context, conn net.Conn) {
 	// pluginv2 (connection, on_connect) lifecycle dispatch (USK-683).
 	// Fires BEFORE protocol detection so a DROP-returning hook closes
 	// the connection without exposing peek bytes / starting any Layer
-	// stack. Coexists with the legacy on_connect path above; both fire
-	// independently until N9 retires the legacy plugin engine.
+	// stack.
 	if l.dispatchV2OnConnect(ctx, connID, remoteAddr, connLogger) == pluginv2.ActionDrop {
 		connLogger.Info("connection dropped by pluginv2 on_connect hook",
 			"hook", "connection.on_connect")
