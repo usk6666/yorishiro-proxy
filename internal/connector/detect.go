@@ -1,9 +1,6 @@
 package connector
 
-import (
-	"bytes"
-	"sync"
-)
+import "bytes"
 
 // ProtocolKind identifies one of the protocols that the connector knows how
 // to detect from the client's first bytes.
@@ -164,79 +161,4 @@ func isHTTPMethodPrefix(peek []byte) bool {
 		}
 	}
 	return false
-}
-
-// CodecFactory builds the client-side and upstream-side Codecs for a newly
-// accepted connection. It is invoked by the listener once DetectKind has
-// chosen a ProtocolKind and the peek deadline has been cleared.
-//
-// conn is the buffered connection — the bytes that Detection peeked at are
-// still available to the first Codec.Next call. The factory may choose to
-// wrap conn further (e.g. TLS termination) and is responsible for any error
-// handling related to the protocol's own startup sequence.
-//
-// A factory that only produces a client-side Codec and defers upstream
-// dialing to session.RunSession can return a nil upstream Codec; the caller
-// must handle the nil case.
-//
-// Factories are intentionally decoupled from the session.DialFunc: the
-// dialer and upstream Codec setup belong to USK-562 (DialUpstream), which
-// runs in parallel with this Issue.
-type CodecFactory interface {
-	// Kind returns the ProtocolKind this factory handles.
-	Kind() ProtocolKind
-}
-
-// Detector selects CodecFactories by ProtocolKind and exposes a
-// registration API for protocol additions (M40 HTTP/2, etc.).
-//
-// A Detector is safe for concurrent use: Register may be called at start-up
-// and Lookup/Detect may be called from listener goroutines simultaneously.
-type Detector struct {
-	mu        sync.RWMutex
-	factories map[ProtocolKind]CodecFactory
-}
-
-// NewDetector creates a Detector with no factories registered.
-//
-// Callers should register at least the protocols they want to support via
-// Register. The default wiring is performed by the binary's main.go (see
-// cmd/yorishiro-proxy) — not by this package — so tests can swap in mocks.
-func NewDetector() *Detector {
-	return &Detector{
-		factories: make(map[ProtocolKind]CodecFactory),
-	}
-}
-
-// Register installs a CodecFactory for the given ProtocolKind. Registering
-// the same kind twice overwrites the previous factory; this is deliberate
-// so that tests can replace a production factory with a mock.
-//
-// Passing a nil factory clears the registration for that kind (useful for
-// tests and for the M39-only state where HTTP/2 is detected but not yet
-// handled).
-func (d *Detector) Register(kind ProtocolKind, factory CodecFactory) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	if factory == nil {
-		delete(d.factories, kind)
-		return
-	}
-	d.factories[kind] = factory
-}
-
-// Lookup returns the registered factory for the given kind, or nil if none
-// has been registered.
-func (d *Detector) Lookup(kind ProtocolKind) CodecFactory {
-	d.mu.RLock()
-	defer d.mu.RUnlock()
-	return d.factories[kind]
-}
-
-// Detect is a convenience wrapper that runs DetectKind on peek and then
-// Lookup on the result. It returns both the kind (so callers can log it
-// even when no factory is registered) and the factory (which may be nil).
-func (d *Detector) Detect(peek []byte) (ProtocolKind, CodecFactory) {
-	kind := DetectKind(peek)
-	return kind, d.Lookup(kind)
 }
