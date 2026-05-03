@@ -27,7 +27,6 @@ import (
 	h2pool "github.com/usk6666/yorishiro-proxy/internal/layer/http2/pool"
 	"github.com/usk6666/yorishiro-proxy/internal/logging"
 	"github.com/usk6666/yorishiro-proxy/internal/mcp"
-	"github.com/usk6666/yorishiro-proxy/internal/plugin"
 	"github.com/usk6666/yorishiro-proxy/internal/pluginv2"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol"
 	protogrpc "github.com/usk6666/yorishiro-proxy/internal/protocol/grpc"
@@ -281,10 +280,6 @@ func runWithFlags(ctx context.Context, fs *flag.FlagSet, args []string) error {
 	if err != nil {
 		return err
 	}
-	if proto.pluginEngine != nil {
-		defer proto.pluginEngine.Close()
-	}
-
 	// Apply transport flags before building options so MCPHTTPAddr is correct.
 	if noHTTPMCP {
 		cfg.MCPHTTPAddr = ""
@@ -558,13 +553,12 @@ type protocolResult struct {
 	tcpHandler      *prototcp.Handler
 	socks5Handler   *protosocks5.Handler
 	socks5Adapter   *socks5AuthAdapter
-	pluginEngine    *plugin.Engine
 	tlsTransport    httputil.TLSTransport
 	hostTLSRegistry *httputil.HostTLSRegistry
 	webUIToken      string
 }
 
-// initProtocolHandlers builds all protocol handlers and the plugin engine.
+// initProtocolHandlers builds all protocol handlers.
 // It returns a protocolResult containing all initialized components.
 func initProtocolHandlers(ctx context.Context, deps protocolDeps) (*protocolResult, error) {
 	cfg := deps.cfg
@@ -649,22 +643,14 @@ func initProtocolHandlers(ctx context.Context, deps protocolDeps) (*protocolResu
 		return nil, err
 	}
 
-	// Legacy plugin.Engine wiring removed in USK-687 — proxyCfg.Plugins is
-	// now a typed []pluginv2.PluginConfig and the legacy plugin engine has
-	// nothing to consume from it. Production wiring of pluginv2.Engine
-	// (LoadPlugins + handler fan-out) is owned by USK-690; full deletion
-	// of internal/plugin/ is owned by USK-695. Until then pluginEngine
-	// stays nil and downstream nil-safe handlers leave plugin hooks idle.
-	var pluginEngine *plugin.Engine
-
-	// Build SOCKS5 post-handshake dispatch after plugin engine initialization
-	// so the raw TCP relay path can use flow recording and plugin hooks.
+	// Build SOCKS5 post-handshake dispatch.
+	// Raw TCP relay path uses flow recording; pluginv2 lifecycle hooks fire
+	// from the live data path (proxybuild + connector wiring, USK-690).
 	socks5Dispatch := protosocks5.NewPostHandshakeDispatch(protosocks5.DispatchConfig{
 		TunnelHandler: httpHandler,
 		HTTPDetector:  httpHandler,
 		Logger:        logger,
 		FlowWriter:    store,
-		PluginEngine:  pluginEngine,
 	})
 	socks5Handler.SetPostHandshake(socks5Dispatch)
 
@@ -679,7 +665,6 @@ func initProtocolHandlers(ctx context.Context, deps protocolDeps) (*protocolResu
 		tcpHandler:      tcpHandler,
 		socks5Handler:   socks5Handler,
 		socks5Adapter:   socks5Adapter,
-		pluginEngine:    pluginEngine,
 		tlsTransport:    tlsTransport,
 		hostTLSRegistry: hostTLSRegistry,
 	}, nil
@@ -896,7 +881,7 @@ func buildMCPComponents(
 		),
 		flowStore:    mcp.NewFlowStore(store),
 		macroEngine:  mcp.NewMacroEngine(),
-		pluginEngine: mcp.NewPluginEngine(proto.pluginEngine, pluginv2Engine),
+		pluginEngine: mcp.NewPluginEngine(pluginv2Engine),
 	}
 
 	if proxyCfg != nil {

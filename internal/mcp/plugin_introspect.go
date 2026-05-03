@@ -13,9 +13,7 @@ import (
 type pluginIntrospectInput struct{}
 
 // pluginIntrospectResult is the structured response for plugin_introspect.
-// One entry per loaded pluginv2 plugin. The legacy plugin engine is
-// intentionally not surfaced here — it has its own listing tool — and will
-// be retired alongside the legacy intercept queue in RFC-001 N9.
+// One entry per loaded pluginv2 plugin.
 type pluginIntrospectResult struct {
 	Plugins []pluginIntrospectPlugin `json:"plugins"`
 }
@@ -57,8 +55,7 @@ func (s *Server) registerPluginIntrospect() {
 		Name: "plugin_introspect",
 		Description: "Return the list of loaded pluginv2 plugins together with their (protocol, event, phase) " +
 			"register_hook registrations and the PluginConfig.Vars map after applying redact_keys. " +
-			"Returns an empty list when the pluginv2 engine is not configured. " +
-			"Note: the legacy plugin engine is surfaced by the 'plugin' tool, not this one.",
+			"Returns an empty list when the pluginv2 engine is not configured.",
 	}, s.handlePluginIntrospect)
 }
 

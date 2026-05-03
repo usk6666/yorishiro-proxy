@@ -410,7 +410,7 @@ func TestSSEHookContext_NilAllowed(t *testing.T) {
 
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- h.handleSSEStream(context.Background(), server, goRequestToRaw(goReqSSE), goReqSSE.URL, fwd, time.Now(), sendResult, nil, testutil.DiscardLogger())
+		errCh <- h.handleSSEStream(context.Background(), server, goRequestToRaw(goReqSSE), goReqSSE.URL, fwd, time.Now(), sendResult, testutil.DiscardLogger())
 		server.Close()
 	}()
 

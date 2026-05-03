@@ -10,7 +10,6 @@ import (
 
 	"github.com/usk6666/yorishiro-proxy/internal/cert"
 	"github.com/usk6666/yorishiro-proxy/internal/config"
-	"github.com/usk6666/yorishiro-proxy/internal/plugin"
 )
 
 // shutdownTimeout is the maximum time to wait for graceful shutdown.
@@ -160,9 +159,6 @@ type TCPForwardParams struct {
 	// Detector is the protocol detector for "auto" mode. May be nil.
 	Detector ProtocolDetector
 
-	// PluginEngine is the optional plugin engine for lifecycle hooks.
-	PluginEngine *plugin.Engine
-
 	// Issuer is the certificate issuer for TLS MITM termination. May be nil.
 	// Required when any ForwardConfig has TLS=true.
 	Issuer *cert.Issuer
@@ -224,9 +220,6 @@ func (m *Manager) StartTCPForwardsNamed(ctx context.Context, name string, params
 			MaxConnections: m.maxConnections,
 			PeekTimeout:    m.peekTimeout,
 		})
-		if params.PluginEngine != nil {
-			fl.SetPluginEngine(params.PluginEngine)
-		}
 		flCtx, flCancel := context.WithCancel(ctx)
 
 		done := make(chan struct{})

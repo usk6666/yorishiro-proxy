@@ -16,7 +16,6 @@ import (
 
 	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/encoding/protobuf"
-	"github.com/usk6666/yorishiro-proxy/internal/plugin"
 	protogrpc "github.com/usk6666/yorishiro-proxy/internal/protocol/grpc"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/http2/hpack"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
@@ -44,15 +43,8 @@ type grpcStreamState struct {
 	// Used for decompression/recompression of frames during subsystem processing.
 	grpcEncoding string
 
-	// Plugin context for the gRPC stream.
-	pluginConnInfo *plugin.ConnInfo
-
-	// txCtxMu protects txCtx from concurrent access by request/response goroutines.
-	txCtxMu sync.Mutex
-	txCtx   map[string]any
-
 	// reqBlocked is set to true if a request frame was blocked by a subsystem
-	// (safety filter or plugin drop). When true, the stream is terminated.
+	// (safety filter). When true, the stream is terminated.
 	reqBlocked bool
 
 	// respBlocked is set to true if a response frame was blocked by output filter.
@@ -172,13 +164,6 @@ func (h *Handler) handleGRPCStream(sc *streamContext) {
 func (h *Handler) initGRPCStreamState(sc *streamContext) *grpcStreamState {
 	state := &grpcStreamState{
 		grpcEncoding: hpackGetHeader(sc.h2req.AllHeaders, "grpc-encoding"),
-		pluginConnInfo: &plugin.ConnInfo{
-			ClientAddr: sc.clientAddr,
-			TLSVersion: sc.tlsMeta.Version,
-			TLSCipher:  sc.tlsMeta.CipherSuite,
-			TLSALPN:    sc.tlsMeta.ALPN,
-		},
-		txCtx: plugin.NewTxCtx(),
 	}
 
 	// Initialize progressive recorder — creates the flow with State="active".
@@ -238,7 +223,7 @@ func (h *Handler) streamGRPCRequestBody(sc *streamContext, state *grpcStreamStat
 		}
 	}()
 
-	hasSubsystems := h.SafetyEngine != nil || h.pluginEngine != nil || h.transformPipeline != nil
+	hasSubsystems := h.SafetyEngine != nil || h.transformPipeline != nil
 
 	// Use a separate FrameBuffer for subsystem processing that intercepts
 	// frames and writes processed bytes to the pipe. The state's reqFrameBuf
@@ -282,12 +267,9 @@ func (h *Handler) streamGRPCRequestBody(sc *streamContext, state *grpcStreamStat
 // frames through subsystems and writes processed bytes to the pipe writer.
 func (h *Handler) newGRPCRequestSubsystemBuf(sc *streamContext, state *grpcStreamState, pw *io.PipeWriter) *protogrpc.FrameBuffer {
 	return protogrpc.NewFrameBuffer(func(raw []byte, frame *protogrpc.Frame) error {
-		// Lock txCtx for thread-safe plugin hook access.
-		state.txCtxMu.Lock()
 		wireBytes, stop := h.processGRPCRequestFrame(
 			sc, raw, frame.Compressed, frame.Payload,
-			state.grpcEncoding, state.pluginConnInfo, state.txCtx)
-		state.txCtxMu.Unlock()
+			state.grpcEncoding)
 		if stop {
 			state.mu.Lock()
 			state.reqBlocked = true
@@ -511,7 +493,7 @@ func (h *Handler) writeGRPCResponseHeadersH2(sc *streamContext, statusCode int, 
 //
 // If the output filter blocks a frame, the stream is terminated.
 func (h *Handler) streamGRPCResponseBodyH2(sc *streamContext, state *grpcStreamState, result *StreamRoundTripResult) {
-	hasSubsystems := h.SafetyEngine != nil || h.pluginEngine != nil || h.transformPipeline != nil
+	hasSubsystems := h.SafetyEngine != nil || h.transformPipeline != nil
 
 	var subsystemBuf *protogrpc.FrameBuffer
 
@@ -545,13 +527,9 @@ func (h *Handler) streamGRPCResponseBodyH2(sc *streamContext, state *grpcStreamS
 func (h *Handler) newGRPCResponseSubsystemBufH2(sc *streamContext, state *grpcStreamState, result *StreamRoundTripResult) *protogrpc.FrameBuffer {
 	respEncoding := hpackGetHeader(result.Headers, "grpc-encoding")
 	return protogrpc.NewFrameBuffer(func(raw []byte, frame *protogrpc.Frame) error {
-		// Lock txCtx for thread-safe plugin hook access.
-		state.txCtxMu.Lock()
 		wireBytes, blocked := h.processGRPCResponseFrameH2(
 			sc, raw, frame.Compressed, frame.Payload,
-			respEncoding, result.StatusCode, result.Headers,
-			state.pluginConnInfo, state.txCtx)
-		state.txCtxMu.Unlock()
+			respEncoding, result.StatusCode, result.Headers)
 		if blocked {
 			state.mu.Lock()
 			state.respBlocked = true
@@ -734,7 +712,6 @@ func (h *Handler) tryHandleGRPCStream(sc *streamContext) bool {
 	sc.logger.Debug("gRPC stream: per-frame subsystem processing enabled",
 		"url", sc.reqURL.String(),
 		"has_safety_filter", h.SafetyEngine != nil,
-		"has_plugins", h.pluginEngine != nil,
 		"has_transform", h.transformPipeline != nil)
 	h.handleGRPCStream(sc)
 	return true
@@ -1394,7 +1371,7 @@ func applyGRPCResponseInterceptHeaderModsHpack(headers []hpack.HeaderField, acti
 // the response-side subsystem pipeline for a single frame using hpack native
 // types. Used after response intercept when the body has been fully buffered.
 func (h *Handler) runGRPCResponseSubsystemsH2(sc *streamContext, state *grpcStreamState, statusCode int, respHeaders []hpack.HeaderField, body []byte, trailers []hpack.HeaderField) ([]byte, []hpack.HeaderField, []hpack.HeaderField) {
-	hasSubsystems := h.SafetyEngine != nil || h.pluginEngine != nil || h.transformPipeline != nil
+	hasSubsystems := h.SafetyEngine != nil || h.transformPipeline != nil
 	if !hasSubsystems || len(body) < 5 {
 		return body, respHeaders, trailers
 	}
@@ -1409,12 +1386,9 @@ func (h *Handler) runGRPCResponseSubsystemsH2(sc *streamContext, state *grpcStre
 
 	respEncoding := hpackGetHeader(respHeaders, "grpc-encoding")
 
-	state.txCtxMu.Lock()
 	wireBytes, blocked := h.processGRPCResponseFrameH2(
 		sc, body, compressed != 0, payload,
-		respEncoding, statusCode, respHeaders,
-		state.pluginConnInfo, state.txCtx)
-	state.txCtxMu.Unlock()
+		respEncoding, statusCode, respHeaders)
 
 	if blocked {
 		state.mu.Lock()

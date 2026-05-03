@@ -36,12 +36,11 @@ import (
 )
 
 // TestN8Milestone_TypedToolSurfaceCoexists verifies that all N8-introduced
-// typed MCP tools and the legacy single-string tools they coexist with
-// are registered on a default-constructed MCP server.
+// typed MCP tools and the shared cross-cutting tools are registered on a
+// default-constructed MCP server.
 //
-// The legacy entries (`resend`, `fuzz`, `intercept`, `plugin`) deliberately
-// remain registered for parallel coexistence until N9. Their absence
-// would mean a sibling N8 PR removed the `s.register…` call by mistake.
+// The legacy single-string tools (`resend`, `fuzz`, `plugin`) were removed
+// by USK-693 / USK-695 — only the typed siblings remain.
 func TestN8Milestone_TypedToolSurfaceCoexists(t *testing.T) {
 	cs := setupTestSession(t, newTestCA(t))
 
@@ -75,17 +74,15 @@ func TestN8Milestone_TypedToolSurfaceCoexists(t *testing.T) {
 		}
 	}
 
-	// Legacy / shared tools that must remain registered alongside the
-	// typed ones (parallel coexistence until N9).
-	legacy := []string{
+	// Shared / cross-cutting tools that must remain registered.
+	shared := []string{
 		"intercept",
-		"plugin",
 		"query",
 		"macro",
 	}
-	for _, name := range legacy {
+	for _, name := range shared {
 		if !got[name] {
-			t.Errorf("legacy/shared tool %q missing — N8 PR may have dropped a registration", name)
+			t.Errorf("shared tool %q missing — PR may have dropped a registration", name)
 		}
 	}
 }

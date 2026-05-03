@@ -15,7 +15,6 @@ import (
 
 	"github.com/usk6666/yorishiro-proxy/internal/codec/http1/parser"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
-	"github.com/usk6666/yorishiro-proxy/internal/plugin"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 	"github.com/usk6666/yorishiro-proxy/internal/safety"
@@ -257,7 +256,7 @@ func (h *Handler) handlePlaintextCONNECTRequest(ctx context.Context, conn net.Co
 
 	if isSSEResponseRaw(fwd.resp) {
 		sendResult.tags = addSSETags(sendResult.tags)
-		return h.handleSSEStream(ctx, conn, req, reqURL, fwd, start, sendResult, nil, logger)
+		return h.handleSSEStream(ctx, conn, req, reqURL, fwd, start, sendResult, logger)
 	}
 
 	fullRespBody := h.readResponseBody(fwd.resp, logger)
@@ -319,8 +318,6 @@ func (h *Handler) HandleTunnelMITM(ctx context.Context, conn net.Conn, authority
 	logger.Debug("client TLS handshake complete", "host", hostname,
 		"tls_version", tlsMeta.Version, "tls_cipher", tlsMeta.CipherSuite,
 		"alpn", tlsMeta.ALPN)
-
-	h.dispatchOnTLSHandshake(ctx, hostname, tlsMeta)
 
 	logger.Info("TLS tunnel established", "host", authority,
 		"tls_version", tlsMeta.Version, "tls_cipher", tlsMeta.CipherSuite,
@@ -535,10 +532,6 @@ func (h *Handler) handleHTTPSRequest(ctx context.Context, conn net.Conn, connect
 		return h.handleGRPCWeb(ctx, conn, req, reqURL, bodyResult.recordBody, true, extractTLSState(conn), h.connLogger(ctx))
 	}
 
-	// Build plugin ConnInfo.
-	pluginConnInfo := &plugin.ConnInfo{ClientAddr: clientAddr}
-	txCtx := plugin.NewTxCtx()
-
 	sp := sendRecordParams{
 		connID:     connID,
 		clientAddr: clientAddr,
@@ -585,9 +578,6 @@ func (h *Handler) handleHTTPSRequest(ctx context.Context, conn net.Conn, connect
 	bodyResult.recordBody = h.applyTransform(req, reqURL, bodyResult.recordBody)
 	sp.reqBody = bodyResult.recordBody
 
-	// Plugin hook: on_before_send_to_server.
-	req, bodyResult.recordBody = h.dispatchOnBeforeSendToServer(ctx, req, bodyResult.recordBody, pluginConnInfo, txCtx, logger)
-
 	sendResult := h.recordSendWithVariant(ctx, sp, &snap, logger)
 
 	sendStart := time.Now()
@@ -605,9 +595,6 @@ func (h *Handler) handleHTTPSRequest(ctx context.Context, conn net.Conn, connect
 	fullRespBody := h.readResponseBody(fwd.resp, logger)
 	receiveEnd := time.Now()
 
-	// Plugin hook: on_receive_from_server.
-	fwd.resp, fullRespBody = h.dispatchOnReceiveFromServer(ctx, fwd.resp, fullRespBody, req, pluginConnInfo, txCtx, logger)
-
 	respSnap := snapshotRawResponse(fwd.resp.StatusCode, fwd.resp.Headers, fullRespBody)
 
 	rir := h.applyInterceptResponse(ctx, conn, req, reqURL, fwd.resp, fullRespBody, logger)
@@ -615,9 +602,6 @@ func (h *Handler) handleHTTPSRequest(ctx context.Context, conn net.Conn, connect
 		return nil
 	}
 	fwd.resp, fullRespBody = rir.resp, rir.body
-
-	// Plugin hook: on_before_send_to_client.
-	fwd.resp, fullRespBody = h.dispatchOnBeforeSendToClient(ctx, fwd.resp, fullRespBody, req, pluginConnInfo, txCtx, logger)
 
 	rawResponse := serializeRawResponseBytes(fwd.resp, fullRespBody)
 	rawRespBody := make([]byte, len(fullRespBody))
@@ -793,36 +777,6 @@ func (h *Handler) recordBlockedCONNECTSessionWithTags(ctx context.Context, reqHo
 	}
 	if err := h.Store.SaveFlow(ctx, sendMsg); err != nil {
 		logger.Error("blocked CONNECT send message save failed", "error", err)
-	}
-}
-
-const hookTimeout = 5 * time.Second
-
-func (h *Handler) dispatchOnTLSHandshake(ctx context.Context, serverName string, tlsMeta tlsMetadata) {
-	if h.pluginEngine == nil {
-		return
-	}
-	ctx, cancel := context.WithTimeout(ctx, hookTimeout)
-	defer cancel()
-
-	logger := h.connLogger(ctx)
-	clientAddr := proxy.ClientAddrFromContext(ctx)
-
-	connInfo := &plugin.ConnInfo{
-		ClientAddr: clientAddr,
-		TLSVersion: tlsMeta.Version,
-		TLSCipher:  tlsMeta.CipherSuite,
-		TLSALPN:    tlsMeta.ALPN,
-	}
-	data := map[string]any{
-		"event":       "tls_handshake",
-		"conn_info":   connInfo.ToMap(),
-		"server_name": serverName,
-	}
-
-	_, err := h.pluginEngine.Dispatch(ctx, plugin.HookOnTLSHandshake, data)
-	if err != nil {
-		logger.Warn("plugin on_tls_handshake hook error", "error", err)
 	}
 }
 

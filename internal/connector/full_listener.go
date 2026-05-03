@@ -9,8 +9,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"github.com/usk6666/yorishiro-proxy/internal/plugin"
 )
 
 // HandlerFunc is the callback signature for per-protocol connection handling.
@@ -38,10 +36,6 @@ type FullListenerConfig struct {
 	// DefaultMaxConnections. Negative values disable the limit.
 	MaxConnections int
 
-	// PluginEngine dispatches on_connect / on_disconnect lifecycle hooks.
-	// Nil disables hook dispatch.
-	PluginEngine *plugin.Engine
-
 	// Handler callbacks per ProtocolKind. Each handler receives a PeekConn
 	// with detection bytes still buffered and an enriched context.
 	// Nil handlers cause the connection to be closed with a debug log.
@@ -55,16 +49,15 @@ type FullListenerConfig struct {
 // FullListener accepts TCP connections, performs two-stage protocol detection,
 // and dispatches to per-protocol handler callbacks. It replaces MinimalListener
 // with full production features: max_connections enforcement, peek timeout
-// (Slowloris protection), plugin lifecycle hooks, and graceful shutdown.
+// (Slowloris protection), and graceful shutdown.
 //
 // FullListener coexists with the old Listener type (which uses the M39-era
 // Dispatcher+CodecFactory model). MinimalListener is preserved for N2/N3 test
 // backward compatibility. Both will be removed in N9.
 type FullListener struct {
-	name         string
-	addr         string
-	logger       *slog.Logger
-	pluginEngine *plugin.Engine
+	name   string
+	addr   string
+	logger *slog.Logger
 
 	peekTimeoutNs  atomic.Int64 // nanoseconds
 	maxConnections int
@@ -110,7 +103,6 @@ func NewFullListener(cfg FullListenerConfig) *FullListener {
 		name:           name,
 		addr:           cfg.Addr,
 		logger:         logger,
-		pluginEngine:   cfg.PluginEngine,
 		maxConnections: maxConns,
 		onCONNECT:      cfg.OnCONNECT,
 		onSOCKS5:       cfg.OnSOCKS5,
@@ -219,9 +211,6 @@ func (fl *FullListener) handleConn(ctx context.Context, conn net.Conn) {
 	ctx = ContextWithListenerName(ctx, fl.name)
 	ctx = ContextWithLogger(ctx, connLogger)
 
-	fl.dispatchOnConnect(ctx, remoteAddr, connLogger)
-	defer fl.dispatchOnDisconnect(remoteAddr, connStart, connLogger)
-
 	// Bound protocol detection by the peek deadline (Slowloris protection).
 	peekTimeout := time.Duration(fl.peekTimeoutNs.Load())
 	if peekTimeout > 0 {
@@ -326,51 +315,6 @@ func (fl *FullListener) detectProtocol(pc *PeekConn, logger *slog.Logger) (Proto
 	}
 
 	return kind, peek, kind != ProtocolUnknown
-}
-
-// dispatchOnConnect delivers the plugin on_connect hook. Errors are logged
-// and ignored (fail-open) so a buggy plugin cannot stall accept.
-func (fl *FullListener) dispatchOnConnect(ctx context.Context, clientAddr string, logger *slog.Logger) {
-	if fl.pluginEngine == nil {
-		return
-	}
-
-	hookCtx, cancel := context.WithTimeout(ctx, hookTimeout)
-	defer cancel()
-
-	connInfo := &plugin.ConnInfo{ClientAddr: clientAddr}
-	data := map[string]any{
-		"event":     "connect",
-		"conn_info": connInfo.ToMap(),
-	}
-
-	if _, err := fl.pluginEngine.Dispatch(hookCtx, plugin.HookOnConnect, data); err != nil {
-		logger.Warn("plugin on_connect hook error", "error", err)
-	}
-}
-
-// dispatchOnDisconnect delivers the plugin on_disconnect hook. Uses a fresh
-// context derived from Background so disconnect hooks still fire during
-// graceful shutdown when the parent context is already cancelled.
-func (fl *FullListener) dispatchOnDisconnect(clientAddr string, connStart time.Time, logger *slog.Logger) {
-	if fl.pluginEngine == nil {
-		return
-	}
-
-	dispatchCtx, cancel := context.WithTimeout(context.Background(), hookTimeout)
-	defer cancel()
-
-	durationMs := time.Since(connStart).Milliseconds()
-	connInfo := &plugin.ConnInfo{ClientAddr: clientAddr}
-	data := map[string]any{
-		"event":       "disconnect",
-		"conn_info":   connInfo.ToMap(),
-		"duration_ms": durationMs,
-	}
-
-	if _, err := fl.pluginEngine.Dispatch(dispatchCtx, plugin.HookOnDisconnect, data); err != nil {
-		logger.Warn("plugin on_disconnect hook error", "error", err)
-	}
 }
 
 // Addr returns the listener's bound address, or empty string if Start has

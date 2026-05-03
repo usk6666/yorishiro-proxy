@@ -12,7 +12,6 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/codec/http1/parser"
 	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
-	"github.com/usk6666/yorishiro-proxy/internal/plugin"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/grpc"
 )
 
@@ -20,9 +19,8 @@ import (
 // It is not a standalone ProtocolHandler — it is invoked by the HTTP handler
 // when a gRPC-Web Content-Type is detected on a request.
 type Handler struct {
-	store        flow.Writer
-	logger       *slog.Logger
-	pluginEngine *plugin.Engine
+	store  flow.Writer
+	logger *slog.Logger
 }
 
 // NewHandler creates a new gRPC-Web handler with flow recording.
@@ -31,11 +29,6 @@ func NewHandler(store flow.Writer, logger *slog.Logger) *Handler {
 		store:  store,
 		logger: logger,
 	}
-}
-
-// SetPluginEngine sets the plugin engine for hook dispatch.
-func (h *Handler) SetPluginEngine(engine *plugin.Engine) {
-	h.pluginEngine = engine
 }
 
 // StreamInfo holds the information extracted from an HTTP/1.x or HTTP/2 stream
@@ -155,13 +148,6 @@ func (h *Handler) RecordSession(ctx context.Context, info *StreamInfo) error {
 	}
 
 	logger := h.logger.With("flow_id", fl.ID, "service", service, "method", method)
-
-	// Create transaction context shared across all plugin hooks.
-	txCtx := plugin.NewTxCtx()
-
-	// Dispatch plugin hooks.
-	h.dispatchRequestHooks(ctx, logger, info, service, method, grpcEncoding, reqResult.DataFrames, txCtx)
-	h.dispatchResponseHooks(ctx, logger, info, service, method, grpcStatus, grpcMessage, grpcEncoding, respResult.DataFrames, txCtx)
 
 	// Record messages.
 	seq := 0
@@ -331,169 +317,6 @@ func (h *Handler) recordReceiveMessages(
 		}
 		seq++
 	}
-}
-
-// dispatchRequestHooks dispatches on_receive_from_client hooks for gRPC-Web request frames.
-func (h *Handler) dispatchRequestHooks(
-	ctx context.Context,
-	logger *slog.Logger,
-	info *StreamInfo,
-	service, method, grpcEncoding string,
-	frames []*Frame,
-	txCtx map[string]any,
-) {
-	if h.pluginEngine == nil {
-		return
-	}
-
-	connInfo := buildConnInfo(info)
-
-	if len(frames) == 0 {
-		data := buildPluginRequestData(info, service, method, grpcEncoding, nil, false, connInfo)
-		plugin.InjectTxCtx(data, txCtx)
-		h.dispatchHook(ctx, logger, plugin.HookOnReceiveFromClient, data, txCtx)
-		return
-	}
-
-	for _, frame := range frames {
-		data := buildPluginRequestData(info, service, method, grpcEncoding, frame.Payload, frame.Compressed, connInfo)
-		plugin.InjectTxCtx(data, txCtx)
-		h.dispatchHook(ctx, logger, plugin.HookOnReceiveFromClient, data, txCtx)
-	}
-}
-
-// dispatchResponseHooks dispatches on_receive_from_server hooks for gRPC-Web response frames.
-func (h *Handler) dispatchResponseHooks(
-	ctx context.Context,
-	logger *slog.Logger,
-	info *StreamInfo,
-	service, method, grpcStatus, grpcMessage, grpcEncoding string,
-	frames []*Frame,
-	txCtx map[string]any,
-) {
-	if h.pluginEngine == nil {
-		return
-	}
-
-	connInfo := buildConnInfo(info)
-
-	if len(frames) == 0 {
-		data := buildPluginResponseData(info, service, method, grpcStatus, grpcMessage, grpcEncoding, nil, false, connInfo)
-		plugin.InjectTxCtx(data, txCtx)
-		h.dispatchHook(ctx, logger, plugin.HookOnReceiveFromServer, data, txCtx)
-		return
-	}
-
-	for _, frame := range frames {
-		data := buildPluginResponseData(info, service, method, grpcStatus, grpcMessage, grpcEncoding, frame.Payload, frame.Compressed, connInfo)
-		plugin.InjectTxCtx(data, txCtx)
-		h.dispatchHook(ctx, logger, plugin.HookOnReceiveFromServer, data, txCtx)
-	}
-}
-
-// dispatchHook dispatches a single plugin hook and logs any errors.
-func (h *Handler) dispatchHook(ctx context.Context, logger *slog.Logger, hook plugin.Hook, data map[string]any, txCtx map[string]any) {
-	result, err := h.pluginEngine.Dispatch(ctx, hook, data)
-	if err != nil {
-		logger.Warn("gRPC-Web plugin hook error",
-			slog.String("hook", string(hook)),
-			slog.String("error", err.Error()),
-		)
-		return
-	}
-	plugin.ExtractTxCtx(result, txCtx)
-	if result != nil && result.Action != plugin.ActionContinue {
-		logger.Info("gRPC-Web plugin hook returned non-continue action (ignored for gRPC-Web)",
-			slog.String("hook", string(hook)),
-			slog.String("action", result.Action.String()),
-		)
-	}
-}
-
-// buildPluginRequestData constructs the plugin data map for a gRPC-Web request frame.
-func buildPluginRequestData(
-	info *StreamInfo,
-	service, method, encoding string,
-	body []byte,
-	compressed bool,
-	connInfo map[string]any,
-) map[string]any {
-	headers := flattenRawHeaders(info.RequestHeaders)
-
-	data := map[string]any{
-		"protocol":   "grpc-web",
-		"service":    service,
-		"method":     method,
-		"url":        info.URL.String(),
-		"headers":    headers,
-		"compressed": compressed,
-		"conn_info":  connInfo,
-	}
-	if encoding != "" {
-		data["encoding"] = encoding
-	}
-	if body != nil {
-		data["body"] = body
-	}
-	return data
-}
-
-// buildPluginResponseData constructs the plugin data map for a gRPC-Web response frame.
-func buildPluginResponseData(
-	info *StreamInfo,
-	service, method, grpcStatus, grpcMessage, encoding string,
-	body []byte,
-	compressed bool,
-	connInfo map[string]any,
-) map[string]any {
-	headers := flattenRawHeaders(info.ResponseHeaders)
-
-	data := map[string]any{
-		"protocol":    "grpc-web",
-		"service":     service,
-		"method":      method,
-		"status_code": info.StatusCode,
-		"headers":     headers,
-		"compressed":  compressed,
-		"conn_info":   connInfo,
-	}
-	if grpcStatus != "" {
-		data["grpc_status"] = grpcStatus
-	}
-	if grpcMessage != "" {
-		data["grpc_message"] = grpcMessage
-	}
-	if encoding != "" {
-		data["encoding"] = encoding
-	}
-	if body != nil {
-		data["body"] = body
-	}
-	return data
-}
-
-// buildConnInfo constructs a connection info map from StreamInfo.
-func buildConnInfo(info *StreamInfo) map[string]any {
-	ci := map[string]any{
-		"client_addr": info.ClientAddr,
-		"server_addr": info.ServerAddr,
-	}
-	if info.TLS != nil {
-		tlsVersion, tlsCipher, tlsALPN, tlsCertSubject := extractTLSInfo(info.TLS)
-		if tlsVersion != "" {
-			ci["tls_version"] = tlsVersion
-		}
-		if tlsCipher != "" {
-			ci["tls_cipher"] = tlsCipher
-		}
-		if tlsALPN != "" {
-			ci["tls_alpn"] = tlsALPN
-		}
-		if tlsCertSubject != "" {
-			ci["tls_server_cert_subject"] = tlsCertSubject
-		}
-	}
-	return ci
 }
 
 // buildSendMetadata builds metadata for a gRPC-Web send message.

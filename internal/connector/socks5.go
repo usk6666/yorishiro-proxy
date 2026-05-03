@@ -22,8 +22,6 @@ import (
 	"net"
 	"strconv"
 	"time"
-
-	"github.com/usk6666/yorishiro-proxy/internal/plugin"
 )
 
 // SOCKS5 protocol constants (RFC 1928 + RFC 1929). They are intentionally
@@ -71,9 +69,6 @@ const (
 // socks5HandshakeTimeout bounds the entire SOCKS5 handshake phase so a
 // lingering client cannot stall a negotiator goroutine.
 const socks5HandshakeTimeout = 30 * time.Second
-
-// socks5PluginHookTimeout bounds dispatch of on_socks5_connect.
-const socks5PluginHookTimeout = 5 * time.Second
 
 // Sentinel errors returned to the caller so integration glue can identify
 // denial paths without string matching. The negotiator is still responsible
@@ -169,19 +164,9 @@ type SOCKS5Negotiator struct {
 	// disables rate limiting.
 	RateLimiter *RateLimiter
 
-	// PluginEngine dispatches on_socks5_connect. Nil disables the hook.
-	// Errors from the engine are always logged and swallowed (fail-open) so
-	// a buggy plugin cannot block the tunnel.
-	PluginEngine *plugin.Engine
-
 	// Logger is used for handler-wide diagnostics. A per-connection logger
 	// is still pulled out of the context when present.
 	Logger *slog.Logger
-
-	// pluginDispatchOverride is a test-only override that replaces the
-	// PluginEngine.Dispatch call in dispatchOnSOCKS5Connect. It is
-	// intentionally unexported.
-	pluginDispatchOverride pluginHookDispatcher
 }
 
 // NewSOCKS5Negotiator returns a negotiator configured with the given logger.
@@ -286,11 +271,7 @@ func (n *SOCKS5Negotiator) Negotiate(ctx context.Context, conn net.Conn) (contex
 		ctx = ContextWithSOCKS5AuthUser(ctx, authUser)
 	}
 
-	// Step 5: plugin hook (fail-open). Fired BEFORE the reply so the hook
-	// sees a consistent in-handshake state; errors are swallowed.
-	n.dispatchOnSOCKS5Connect(ctx, target, authMethodName, authUser)
-
-	// Step 6: success reply.
+	// Step 5: success reply.
 	if err := writeSOCKS5Reply(conn, socks5ReplySuccess); err != nil {
 		return ctx, "", fmt.Errorf("socks5: write success reply: %w", err)
 	}
@@ -528,48 +509,6 @@ func (n *SOCKS5Negotiator) authenticatorFor(listenerName string) Authenticator {
 		}
 	}
 	return n.Authenticator
-}
-
-// dispatchOnSOCKS5Connect delivers the on_socks5_connect plugin hook. Errors
-// are logged and swallowed so a buggy plugin cannot block the handshake
-// (fail-open). The hook data matches the layout used by the legacy
-// internal/protocol/socks5 handler so existing plugins keep working.
-func (n *SOCKS5Negotiator) dispatchOnSOCKS5Connect(ctx context.Context, target, authMethod, authUser string) {
-	var dispatch pluginHookDispatcher
-	switch {
-	case n.pluginDispatchOverride != nil:
-		dispatch = n.pluginDispatchOverride
-	case n.PluginEngine != nil:
-		dispatch = n.PluginEngine.Dispatch
-	default:
-		return
-	}
-
-	hookCtx, cancel := context.WithTimeout(ctx, socks5PluginHookTimeout)
-	defer cancel()
-
-	host, portStr, splitErr := net.SplitHostPort(target)
-	port := 0
-	if splitErr == nil {
-		if p, perr := strconv.Atoi(portStr); perr == nil {
-			port = p
-		}
-	}
-
-	data := map[string]any{
-		"event":       "socks5_connect",
-		"target_host": host,
-		"target_port": port,
-		"target":      target,
-		"auth_method": authMethod,
-		"auth_user":   authUser,
-		"client_addr": ClientAddrFromContext(ctx),
-	}
-
-	if _, err := dispatch(hookCtx, plugin.HookOnSOCKS5Connect, data); err != nil {
-		n.logger(ctx).Warn("plugin on_socks5_connect hook error",
-			"target", target, "error", err)
-	}
 }
 
 // logger returns the best logger for a given ctx, falling back to the

@@ -123,26 +123,6 @@ func hpackToHeaderMap(fields []hpack.HeaderField) map[string][]string {
 	return m
 }
 
-// hpackHeadersToPluginMap converts hpack header fields to the map format
-// expected by the plugin system, skipping pseudo-headers. Header name casing
-// is preserved as-is (no canonicalization).
-func hpackHeadersToPluginMap(fields []hpack.HeaderField) map[string]any {
-	m := make(map[string]any)
-	for _, hf := range fields {
-		if strings.HasPrefix(hf.Name, ":") {
-			continue
-		}
-		if existing, ok := m[hf.Name]; ok {
-			if list, ok := existing.([]any); ok {
-				m[hf.Name] = append(list, hf.Value)
-			}
-		} else {
-			m[hf.Name] = []any{hf.Value}
-		}
-	}
-	return m
-}
-
 // hpackDelHeader removes all hpack fields matching the given name
 // (case-insensitive comparison). Returns a new slice.
 func hpackDelHeader(fields []hpack.HeaderField, name string) []hpack.HeaderField {

@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
-	"github.com/usk6666/yorishiro-proxy/internal/plugin"
 	prototcp "github.com/usk6666/yorishiro-proxy/internal/protocol/tcp"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 )
@@ -51,10 +50,6 @@ type DispatchConfig struct {
 	// FlowWriter records raw TCP flows. If nil, flow recording is skipped
 	// for the raw TCP relay path.
 	FlowWriter flow.Writer
-
-	// PluginEngine dispatches per-chunk plugin hooks for the raw TCP relay
-	// path. If nil, plugin hooks are skipped.
-	PluginEngine *plugin.Engine
 }
 
 // isTLSClientHello checks if the peeked bytes begin with a TLS ClientHello.
@@ -197,23 +192,12 @@ func relayRawTCP(ctx context.Context, clientConn, upstreamConn net.Conn, target 
 		// Continue relaying even if recording fails.
 	}
 
-	// Build plugin ConnInfo.
-	var pluginConnInfo *plugin.ConnInfo
-	if fl.ConnInfo != nil {
-		pluginConnInfo = &plugin.ConnInfo{
-			ClientAddr: fl.ConnInfo.ClientAddr,
-			ServerAddr: fl.ConnInfo.ServerAddr,
-		}
-	}
-
 	// Run the recording relay.
 	relayErr := prototcp.RunRelay(ctx, clientConn, upstreamConn, prototcp.RelayConfig{
-		Store:        cfg.FlowWriter,
-		StreamID:     fl.ID,
-		Logger:       logger,
-		PluginEngine: cfg.PluginEngine,
-		ConnInfo:     pluginConnInfo,
-		Target:       target,
+		Store:    cfg.FlowWriter,
+		StreamID: fl.ID,
+		Logger:   logger,
+		Target:   target,
 	})
 
 	// Update flow state.

@@ -12,7 +12,6 @@ import (
 
 	"github.com/usk6666/yorishiro-proxy/internal/cert"
 	"github.com/usk6666/yorishiro-proxy/internal/config"
-	"github.com/usk6666/yorishiro-proxy/internal/plugin"
 )
 
 // TCPForwardListenerConfig holds configuration for creating a TCPForwardListener.
@@ -48,8 +47,6 @@ type TCPForwardListener struct {
 	activeConns    atomic.Int64
 	peekTimeoutNs  atomic.Int64 // nanoseconds
 
-	pluginEngine *plugin.Engine
-
 	mu       sync.Mutex
 	listener net.Listener
 	ready    chan struct{}
@@ -81,13 +78,6 @@ func NewTCPForwardListener(cfg TCPForwardListenerConfig) *TCPForwardListener {
 	}
 	l.peekTimeoutNs.Store(int64(peekTimeout))
 	return l
-}
-
-// SetPluginEngine sets the plugin engine used to dispatch lifecycle hook events
-// (on_connect, on_disconnect). If engine is nil, hooks are silently skipped.
-// Must be called before Start.
-func (l *TCPForwardListener) SetPluginEngine(engine *plugin.Engine) {
-	l.pluginEngine = engine
 }
 
 // Start begins accepting connections. It blocks until the context is cancelled.
@@ -177,12 +167,6 @@ func (l *TCPForwardListener) handleConn(ctx context.Context, conn net.Conn) {
 	if l.config != nil && l.config.Target != "" {
 		ctx = ContextWithForwardTarget(ctx, l.config.Target)
 	}
-
-	// Dispatch on_connect lifecycle hook (fail-open).
-	l.dispatchOnConnect(ctx, remoteAddr, connLogger)
-
-	// Dispatch on_disconnect lifecycle hook when this connection closes.
-	defer l.dispatchOnDisconnect(ctx, remoteAddr, connStart, connLogger)
 
 	// TLS MITM termination: when config.TLS is true, terminate TLS and
 	// dispatch the cleartext connection to protocol handlers.
@@ -515,56 +499,6 @@ func tlsVersionName(version uint16) string {
 		return "TLS 1.3"
 	default:
 		return fmt.Sprintf("0x%04x", version)
-	}
-}
-
-// dispatchOnConnect dispatches the on_connect lifecycle hook.
-// Errors are logged but do not block connection processing (fail-open).
-func (l *TCPForwardListener) dispatchOnConnect(ctx context.Context, clientAddr string, logger *slog.Logger) {
-	if l.pluginEngine == nil {
-		return
-	}
-
-	ctx, cancel := context.WithTimeout(ctx, hookTimeout)
-	defer cancel()
-
-	connInfo := &plugin.ConnInfo{
-		ClientAddr: clientAddr,
-	}
-	data := map[string]any{
-		"event":     "connect",
-		"conn_info": connInfo.ToMap(),
-	}
-
-	_, err := l.pluginEngine.Dispatch(ctx, plugin.HookOnConnect, data)
-	if err != nil {
-		logger.Warn("plugin on_connect hook error", "error", err)
-	}
-}
-
-// dispatchOnDisconnect dispatches the on_disconnect lifecycle hook.
-// Uses context.Background() so disconnect hooks run even during shutdown.
-func (l *TCPForwardListener) dispatchOnDisconnect(_ context.Context, clientAddr string, connStart time.Time, logger *slog.Logger) {
-	if l.pluginEngine == nil {
-		return
-	}
-
-	dispatchCtx, cancel := context.WithTimeout(context.Background(), hookTimeout)
-	defer cancel()
-
-	durationMs := time.Since(connStart).Milliseconds()
-	connInfo := &plugin.ConnInfo{
-		ClientAddr: clientAddr,
-	}
-	data := map[string]any{
-		"event":       "disconnect",
-		"conn_info":   connInfo.ToMap(),
-		"duration_ms": durationMs,
-	}
-
-	_, err := l.pluginEngine.Dispatch(dispatchCtx, plugin.HookOnDisconnect, data)
-	if err != nil {
-		logger.Warn("plugin on_disconnect hook error", "error", err)
 	}
 }
 

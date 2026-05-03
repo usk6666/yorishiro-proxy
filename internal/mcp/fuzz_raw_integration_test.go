@@ -576,32 +576,6 @@ func TestFuzzRaw_TagAppliedToEachVariantStream(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// AC#4 — Legacy `fuzz` tool unaffected (parallel coexistence). The MCP server
-// must register both tool names; calling fuzz_raw does not unwire fuzz.
-// ---------------------------------------------------------------------------
-
-func TestFuzzRaw_LegacyFuzzToolStillRegistered(t *testing.T) {
-	cs, _, _, _ := setupFuzzRawSession(t)
-	res, err := cs.ListTools(context.Background(), &gomcp.ListToolsParams{})
-	if err != nil {
-		t.Fatalf("ListTools: %v", err)
-	}
-	names := map[string]bool{}
-	for _, tool := range res.Tools {
-		names[tool.Name] = true
-	}
-	if !names["fuzz"] {
-		t.Error("legacy fuzz tool missing from registry")
-	}
-	if !names["fuzz_raw"] {
-		t.Error("fuzz_raw tool missing from registry")
-	}
-	if !names["resend_raw"] {
-		t.Error("resend_raw tool missing from registry (parallel sibling)")
-	}
-}
-
-// ---------------------------------------------------------------------------
 // Validation: target_addr required.
 // ---------------------------------------------------------------------------
 
