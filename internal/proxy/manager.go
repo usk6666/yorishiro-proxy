@@ -173,6 +173,19 @@ func (m *Manager) StartTCPForwards(ctx context.Context, params TCPForwardParams)
 	return m.StartTCPForwardsNamed(ctx, DefaultListenerName, params)
 }
 
+// StartTCPForwardsNamedAny is the any-typed adapter for the unified
+// connector manager interface defined in internal/mcp/components.go.
+// It type-asserts params to TCPForwardParams and delegates to the
+// concrete StartTCPForwardsNamed. Bridge for USK-690's MCP swap;
+// deleted along with the package by USK-697.
+func (m *Manager) StartTCPForwardsNamedAny(ctx context.Context, name string, params any) error {
+	p, ok := params.(TCPForwardParams)
+	if !ok {
+		return fmt.Errorf("proxy: StartTCPForwardsNamedAny: params must be proxy.TCPForwardParams, got %T", params)
+	}
+	return m.StartTCPForwardsNamed(ctx, name, p)
+}
+
 // StartTCPForwardsNamed creates and starts TCP forward listeners associated with the named listener.
 func (m *Manager) StartTCPForwardsNamed(ctx context.Context, name string, params TCPForwardParams) error {
 	if name == "" {

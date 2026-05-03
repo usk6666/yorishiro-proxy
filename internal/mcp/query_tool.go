@@ -963,7 +963,7 @@ type queryBudgetStatus struct {
 
 // populateManagerStatus fills manager-related fields in the status result.
 func (s *Server) populateManagerStatus(result *queryStatusResult) {
-	if s.connector.manager == nil {
+	if managerIsNil(s.connector.manager) {
 		return
 	}
 	running, addr := s.connector.manager.Status()
@@ -977,16 +977,11 @@ func (s *Server) populateManagerStatus(result *queryStatusResult) {
 	result.ListenerCount = s.connector.manager.ListenerCount()
 
 	// Populate per-listener statuses.
-	statuses := s.connector.manager.ListenerStatuses()
+	statuses := listenerStatuses(s.connector.manager)
 	if len(statuses) > 0 {
 		result.Listeners = make([]queryListenerStatusEntry, 0, len(statuses))
 		for _, st := range statuses {
-			result.Listeners = append(result.Listeners, queryListenerStatusEntry{
-				Name:              st.Name,
-				ListenAddr:        st.ListenAddr,
-				ActiveConnections: st.ActiveConnections,
-				UptimeSeconds:     st.UptimeSeconds,
-			})
+			result.Listeners = append(result.Listeners, queryListenerStatusEntry(st))
 		}
 		// Update Running to true if any listener is running (not just default).
 		if !result.Running && len(statuses) > 0 {
@@ -1105,7 +1100,7 @@ type queryPassthroughResult struct {
 func (s *Server) handleQueryConfig() (*gomcp.CallToolResult, *queryConfigResult, error) {
 	result := &queryConfigResult{}
 
-	if s.connector.manager != nil {
+	if !managerIsNil(s.connector.manager) {
 		result.UpstreamProxy = proxy.RedactProxyURL(s.connector.manager.UpstreamProxy())
 	}
 
@@ -1167,7 +1162,7 @@ func (s *Server) handleQueryConfig() (*gomcp.CallToolResult, *queryConfigResult,
 		}
 	}
 
-	if s.connector.manager != nil {
+	if !managerIsNil(s.connector.manager) {
 		result.MaxConnections = s.connector.manager.MaxConnections()
 		result.PeekTimeoutMs = s.connector.manager.PeekTimeout().Milliseconds()
 	}

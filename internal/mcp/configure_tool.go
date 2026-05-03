@@ -405,7 +405,7 @@ func (s *Server) configureUpstreamProxy(input configureInput, result *configureR
 		return fmt.Errorf("upstream_proxy: %w", err)
 	}
 	current := ""
-	if s.connector.manager != nil {
+	if !managerIsNil(s.connector.manager) {
 		current = proxy.RedactProxyURL(s.connector.manager.UpstreamProxy())
 	}
 	result.UpstreamProxy = &current
@@ -591,7 +591,7 @@ func (s *Server) configureTLSFingerprint(input configureInput, result *configure
 // since these fields are scalar values, not collections.
 func (s *Server) applyConnectionLimits(input configureInput, result *configureResult) error {
 	if input.MaxConnections != nil {
-		if s.connector.manager == nil {
+		if managerIsNil(s.connector.manager) {
 			return fmt.Errorf("proxy manager is not initialized: proxy may not be running")
 		}
 		n := *input.MaxConnections
@@ -602,7 +602,7 @@ func (s *Server) applyConnectionLimits(input configureInput, result *configureRe
 		result.MaxConnections = &n
 	}
 	if input.PeekTimeoutMs != nil {
-		if s.connector.manager == nil {
+		if managerIsNil(s.connector.manager) {
 			return fmt.Errorf("proxy manager is not initialized: proxy may not be running")
 		}
 		ms := *input.PeekTimeoutMs

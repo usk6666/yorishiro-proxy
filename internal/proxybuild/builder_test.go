@@ -127,29 +127,37 @@ func TestBuildLiveStack_PluginV2EngineReachable(t *testing.T) {
 
 // TestBuildLiveStack_DefaultEncodersRegistered verifies the default
 // WireEncoderRegistry registers the four non-conflicting protocol
-// encoders (ws / grpc / grpc-web / sse) but NOT HTTP. The HTTP encoder
-// strategy is owned by USK-690 because http1.EncodeWireBytes and
-// httpaggregator.EncodeWireBytes both register against
-// envelope.ProtocolHTTP and are mutually exclusive.
+// encoders (ws / grpc / grpc-web / sse) plus a route-appropriate HTTP
+// encoder. USK-690 finalised the HTTP encoder strategy: the non-h2 (h1)
+// registry holds http1.EncodeWireBytes and the h2 registry holds
+// httpaggregator.EncodeWireBytes. Both encoders register against
+// envelope.ProtocolHTTP and are mutually exclusive in a single registry,
+// hence the dual-registry split.
 func TestBuildLiveStack_DefaultEncodersRegistered(t *testing.T) {
 	deps := newTestDeps(t)
 	stack, err := BuildLiveStack(context.Background(), deps)
 	if err != nil {
 		t.Fatalf("BuildLiveStack: %v", err)
 	}
-	registered := []envelope.Protocol{
+	shared := []envelope.Protocol{
 		envelope.ProtocolWebSocket,
 		envelope.ProtocolGRPC,
 		envelope.ProtocolGRPCWeb,
 		envelope.ProtocolSSE,
 	}
-	for _, p := range registered {
+	for _, p := range shared {
 		if _, ok := stack.WireEncoderRegistry.Lookup(p); !ok {
-			t.Errorf("default registry missing encoder for %s", p)
+			t.Errorf("h1 registry missing encoder for %s", p)
+		}
+		if _, ok := stack.WireEncoderRegistryH2.Lookup(p); !ok {
+			t.Errorf("h2 registry missing encoder for %s", p)
 		}
 	}
-	if _, ok := stack.WireEncoderRegistry.Lookup(envelope.ProtocolHTTP); ok {
-		t.Error("default registry should NOT register HTTP encoder; selection deferred to USK-690")
+	if _, ok := stack.WireEncoderRegistry.Lookup(envelope.ProtocolHTTP); !ok {
+		t.Error("h1 registry must register HTTP encoder (http1.EncodeWireBytes)")
+	}
+	if _, ok := stack.WireEncoderRegistryH2.Lookup(envelope.ProtocolHTTP); !ok {
+		t.Error("h2 registry must register HTTP encoder (httpaggregator.EncodeWireBytes)")
 	}
 }
 

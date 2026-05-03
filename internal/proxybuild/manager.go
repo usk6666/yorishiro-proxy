@@ -429,7 +429,7 @@ func (m *Manager) Stack(name string) *Stack {
 }
 
 // StartTCPForwardsNamed is a stub that returns ErrTCPForwardsNotSupported.
-// Real TCP forward orchestration is deferred to USK-690 (or a follow-up
+// Real TCP forward orchestration is deferred to USK-697 (or a follow-up
 // issue); the stub preserves signature compatibility with proxy.Manager.
 //
 // The first parameter is unused; the signature accepts a generic params
@@ -437,6 +437,15 @@ func (m *Manager) Stack(name string) *Stack {
 // breaking callers.
 func (m *Manager) StartTCPForwardsNamed(_ context.Context, _ string, _ any) error {
 	return ErrTCPForwardsNotSupported
+}
+
+// StartTCPForwardsNamedAny is the any-typed adapter mirroring the bridge
+// method on proxy.Manager. Both manager types satisfy the same MCP
+// connector interface (internal/mcp/components.go) via this name. proxybuild
+// already accepts `any` natively, so this is a thin alias delegating to
+// StartTCPForwardsNamed.
+func (m *Manager) StartTCPForwardsNamedAny(ctx context.Context, name string, params any) error {
+	return m.StartTCPForwardsNamed(ctx, name, params)
 }
 
 // StartTCPForwards is shorthand for StartTCPForwardsNamed on the default

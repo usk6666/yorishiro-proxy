@@ -19,10 +19,13 @@ import (
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/usk6666/yorishiro-proxy/internal/cert"
 	"github.com/usk6666/yorishiro-proxy/internal/config"
+	"github.com/usk6666/yorishiro-proxy/internal/connector"
 	"github.com/usk6666/yorishiro-proxy/internal/encoding"
 	"github.com/usk6666/yorishiro-proxy/internal/fingerprint"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/fuzzer"
+	"github.com/usk6666/yorishiro-proxy/internal/layer/http2"
+	h2pool "github.com/usk6666/yorishiro-proxy/internal/layer/http2/pool"
 	"github.com/usk6666/yorishiro-proxy/internal/logging"
 	"github.com/usk6666/yorishiro-proxy/internal/mcp"
 	"github.com/usk6666/yorishiro-proxy/internal/plugin"
@@ -38,6 +41,8 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/rules"
+	"github.com/usk6666/yorishiro-proxy/internal/proxybuild"
+	"github.com/usk6666/yorishiro-proxy/internal/pushrecorder"
 	rulescommon "github.com/usk6666/yorishiro-proxy/internal/rules/common"
 	"github.com/usk6666/yorishiro-proxy/internal/safety"
 	"golang.org/x/sync/errgroup"
@@ -255,13 +260,10 @@ func runWithFlags(ctx context.Context, fs *flag.FlagSet, args []string) error {
 	// legacy types entirely (see internal/mcp/components.go).
 	holdQueue := rulescommon.NewHoldQueue()
 
-	// Initialize the pluginv2 engine. The MCP plugin_introspect tool
-	// reads its loaded-plugin registrations + redacted config vars.
-	// Plugins are not loaded from configuration here (config-side wiring
-	// for pluginv2 is tracked separately under N8); this engine is
-	// constructed empty so the plugin_introspect tool returns a
-	// well-formed empty result.
-	pluginv2Engine := pluginv2.NewEngine(logger)
+	pluginv2Engine, err := initPluginV2Engine(ctx, store, proxyCfg, logger)
+	if err != nil {
+		return err
+	}
 	defer pluginv2Engine.Close()
 
 	// Initialize auto-transform pipeline for request/response modification.
@@ -286,26 +288,61 @@ func runWithFlags(ctx context.Context, fs *flag.FlagSet, args []string) error {
 		defer proto.pluginEngine.Close()
 	}
 
-	// Create proxy manager for MCP tool control.
-	manager := proxy.NewManager(proto.detector, logger)
-	manager.SetPeekTimeout(cfg.PeekTimeout)
-	manager.SetMaxConnections(cfg.MaxConnections)
+	// Apply transport flags before building options so MCPHTTPAddr is correct.
+	if noHTTPMCP {
+		cfg.MCPHTTPAddr = ""
+	}
 
-	// Build target scope with policy rules if configured.
+	return assembleAndRunMCPServer(ctx, cfg, proxyCfg, ca, issuer, store, pluginv2Engine,
+		holdQueue, passthrough, scope, interceptEngine, interceptQueue, pipeline, proto,
+		targetScopePolicy, targetScopePolicySource, openBrowser, stdioMCP, logger)
+}
+
+// assembleAndRunMCPServer is the hot final phase of runWithFlags: build the
+// live manager + Safety/TargetScope + MCP components, then hand off to
+// startServers. Extracted as a helper so runWithFlags stays under the
+// gocyclo budget after USK-690 added pluginv2 + proxybuild plumbing.
+func assembleAndRunMCPServer(
+	ctx context.Context,
+	cfg *config.Config,
+	proxyCfg *config.ProxyConfig,
+	ca *cert.CA,
+	issuer *cert.Issuer,
+	store *flow.SQLiteStore,
+	pluginv2Engine *pluginv2.Engine,
+	holdQueue *rulescommon.HoldQueue,
+	passthrough *proxy.PassthroughList,
+	scope *proxy.CaptureScope,
+	interceptEngine *intercept.Engine,
+	interceptQueue *intercept.Queue,
+	pipeline *rules.Pipeline,
+	proto *protocolResult,
+	targetScopePolicy *config.TargetScopePolicyConfig,
+	targetScopePolicySource string,
+	openBrowserFlag, stdioMCP bool,
+	logger *slog.Logger,
+) error {
 	targetScope := initTargetScope(targetScopePolicy, proto.socks5Handler)
-
 	rateLimiter := initRateLimiter(targetScopePolicy, logger)
-
-	// Initialize SafetyFilter engine from config.
 	safetyEngine, err := initSafetyFilter(cfg, proxyCfg, logger)
 	if err != nil {
 		return err
 	}
 
-	// Apply transport flags before building options so MCPHTTPAddr is correct.
-	if noHTTPMCP {
-		cfg.MCPHTTPAddr = ""
+	manager, err := assembleLiveManager(ctx, cfg, proxyCfg, store, issuer, pluginv2Engine, holdQueue, passthrough, scope, rateLimiter, logger)
+	if err != nil {
+		return err
 	}
+	// Order shutdown so all in-flight Pipeline scopes finish releasing
+	// before pluginv2Engine.Close() (deferred in the caller, runWithFlags)
+	// zeroes plugin state. Without this, listener goroutines that hold a
+	// *PluginState pointer can race the engine shutdown's nil-map writes.
+	// 5s bound matches proxybuild.shutdownTimeout for graceful drain.
+	defer func() {
+		sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = manager.StopAll(sctx)
+	}()
 
 	mcpComponents, opts, err := buildMCPComponents(ctx, cfg, proxyCfg, ca, issuer, store, manager,
 		passthrough, scope, interceptEngine, interceptQueue, holdQueue, pluginv2Engine, pipeline, proto,
@@ -326,8 +363,7 @@ func runWithFlags(ctx context.Context, fs *flag.FlagSet, args []string) error {
 	)
 
 	logger.Info("starting MCP server", "http_mcp_addr", cfg.MCPHTTPAddr, "stdio_mcp", stdioMCP)
-
-	return startServers(ctx, cfg, mcpServer, proto.webUIToken, openBrowser, stdioMCP, logger)
+	return startServers(ctx, cfg, mcpServer, proto.webUIToken, openBrowserFlag, stdioMCP, logger)
 }
 
 // applyEnvFallback checks each flag in envVarMap; if the flag was not explicitly
@@ -808,7 +844,7 @@ func buildMCPComponents(
 	ca *cert.CA,
 	issuer *cert.Issuer,
 	store *flow.SQLiteStore,
-	manager *proxy.Manager,
+	manager *proxybuild.Manager,
 	passthrough *proxy.PassthroughList,
 	scope *proxy.CaptureScope,
 	interceptEngine *intercept.Engine,
@@ -1333,4 +1369,170 @@ func (a *staticSOCKS5Auth) Authenticate(username, password string) bool {
 	usernameMatch := subtle.ConstantTimeCompare([]byte(username), []byte(a.username))
 	passwordMatch := subtle.ConstantTimeCompare([]byte(password), []byte(a.password))
 	return usernameMatch == 1 && passwordMatch == 1
+}
+
+// initPluginV2Engine constructs the pluginv2.Engine, ensures the pluginv2_kv
+// table exists, and loads the typed pluginv2 plugin list from
+// proxyCfg.Plugins. Errors propagate so misconfigured plugins fail boot
+// (per-plugin OnError defaults to "skip" so individual broken plugins are
+// tolerated without aborting the proxy).
+func initPluginV2Engine(ctx context.Context, store *flow.SQLiteStore, proxyCfg *config.ProxyConfig, logger *slog.Logger) (*pluginv2.Engine, error) {
+	eng := pluginv2.NewEngine(logger)
+	if err := eng.SetDB(ctx, store.DB()); err != nil {
+		eng.Close()
+		return nil, fmt.Errorf("init pluginv2 store: %w", err)
+	}
+	if proxyCfg != nil && len(proxyCfg.Plugins) > 0 {
+		if err := eng.LoadPlugins(ctx, proxyCfg.Plugins); err != nil {
+			eng.Close()
+			return nil, fmt.Errorf("load pluginv2 plugins: %w", err)
+		}
+		logger.Info("pluginv2 plugins loaded", "count", len(proxyCfg.Plugins))
+	}
+	return eng, nil
+}
+
+// assembleLiveManager assembles the connector.BuildConfig and constructs
+// the live RFC-001 proxybuild.Manager in one step. Extracted from
+// runWithFlags so the latter stays under the gocyclo budget.
+//
+// appCtx is the application lifecycle context — propagated into goroutines
+// (currently only the upstream push recorder) so a SIGINT-triggered
+// cancellation reaches them without waiting for the upstream Layer's
+// channel-close drain path.
+func assembleLiveManager(
+	appCtx context.Context,
+	cfg *config.Config,
+	proxyCfg *config.ProxyConfig,
+	store *flow.SQLiteStore,
+	issuer *cert.Issuer,
+	pluginv2Engine *pluginv2.Engine,
+	holdQueue *rulescommon.HoldQueue,
+	passthrough *proxy.PassthroughList,
+	scope *proxy.CaptureScope,
+	rateLimiter *proxy.RateLimiter,
+	logger *slog.Logger,
+) (*proxybuild.Manager, error) {
+	buildCfg := newLiveBuildConfig(appCtx, cfg, proxyCfg, issuer, pluginv2Engine, store, logger)
+	return newLiveManager(cfg, proxyCfg, store, issuer, pluginv2Engine, holdQueue, passthrough, scope, rateLimiter, buildCfg, logger)
+}
+
+// newLiveBuildConfig assembles the connector.BuildConfig consumed by every
+// per-listener stack. PluginV2Engine reaches every Layer construction site
+// + the tls.on_handshake hook. OnHTTP2UpstreamDialed installs the upstream
+// push recorder so pushed streams are recorded (USK-623). Per-protocol
+// caps (body spill, gRPC LPM, WS frame, SSE event) are resolved from
+// proxyCfg via the config-package helpers.
+//
+// appCtx is the application lifecycle context — passed to
+// pushrecorder.RunUpstream so a SIGINT-triggered cancellation reaches the
+// per-Layer drainer goroutines without waiting for the upstream Layer's
+// own channel-close path.
+func newLiveBuildConfig(
+	appCtx context.Context,
+	cfg *config.Config,
+	proxyCfg *config.ProxyConfig,
+	issuer *cert.Issuer,
+	pluginv2Engine *pluginv2.Engine,
+	store *flow.SQLiteStore,
+	logger *slog.Logger,
+) *connector.BuildConfig {
+	bc := &connector.BuildConfig{
+		ProxyConfig:        proxyCfg,
+		Issuer:             issuer,
+		InsecureSkipVerify: cfg.InsecureSkipVerify,
+		PluginV2Engine:     pluginv2Engine,
+		ALPNCache:          connector.NewALPNCache(connector.DefaultALPNCacheSize, connector.DefaultALPNCacheTTL),
+		HTTP2Pool:          h2pool.New(h2pool.PoolOptions{}),
+		BodySpillDir:       config.ResolveBodySpillDir(cfg),
+		BodySpillThreshold: config.ResolveBodySpillThreshold(cfg),
+	}
+	if proxyCfg != nil {
+		bc.HostTLSResolver = connector.NewHostTLSResolver(proxyCfg.HostTLS)
+		bc.WSMaxFrameSize = config.ResolveWSMaxFrameSize(proxyCfg.WebSocket)
+		bc.WSDeflateEnabled = config.ResolveWSDeflateEnabled(proxyCfg.WebSocket)
+		bc.GRPCMaxMessageSize = uint32(config.ResolveGRPCMaxMessageSize(proxyCfg.GRPC))
+		bc.SSEMaxEventSize = config.ResolveSSEMaxEventSize(proxyCfg.SSE)
+		if proxyCfg.TLSFingerprint != "" {
+			bc.TLSFingerprint = proxyCfg.TLSFingerprint
+		}
+	}
+
+	// Install the upstream push recorder (USK-623). The callback fires
+	// once per freshly-dialed *http2.Layer; pool hits skip it (the
+	// drainer is already running for the cached Layer's lifetime).
+	// appCtx is captured so SIGINT-triggered cancellation propagates to
+	// every push drainer in addition to the Layer.Channels-close path.
+	bc.OnHTTP2UpstreamDialed = func(l *http2.Layer) {
+		go pushrecorder.RunUpstream(appCtx, l, store, logger)
+	}
+
+	return bc
+}
+
+// newLiveManager constructs the live RFC-001 proxybuild.Manager. The
+// StackFactory closure captures the per-process singletons (logger,
+// store, build config, plugin engine, hold queue, scope, rate limiter,
+// passthrough list) so each StartNamed call assembles a Stack pointing
+// at the same dependencies.
+//
+// SetMaxConnections / SetPeekTimeout are seeded from cfg so listener
+// defaults match the legacy behavior; the Manager re-applies them to
+// every newly-started listener via its stored values.
+func newLiveManager(
+	cfg *config.Config,
+	proxyCfg *config.ProxyConfig,
+	store *flow.SQLiteStore,
+	issuer *cert.Issuer,
+	pluginv2Engine *pluginv2.Engine,
+	holdQueue *rulescommon.HoldQueue,
+	passthrough *proxy.PassthroughList,
+	scope *proxy.CaptureScope,
+	rateLimiter *proxy.RateLimiter,
+	buildCfg *connector.BuildConfig,
+	logger *slog.Logger,
+) (*proxybuild.Manager, error) {
+	// proxy.PassthroughList and proxy.RateLimiter are type aliases for the
+	// connector.* equivalents (see internal/proxy/passthrough.go and
+	// internal/proxy/ratelimit.go), so they can be threaded directly into
+	// proxybuild.Deps. The legacy proxy.CaptureScope is NOT aliased (it
+	// predates the connector.TargetScope rewrite); the live data path
+	// therefore cannot honor it yet — Warn loud at boot when the operator
+	// has configured non-empty rules so the policy gap is visible
+	// (USK-697 follow-up will adapt the legacy CaptureScope).
+	if scope != nil && !scope.IsEmpty() {
+		logger.Warn("live data path does not yet honor legacy proxy.CaptureScope; all in-scope hosts will be MITM'd until USK-697 wires the connector.TargetScope adapter",
+			"scope_rules_present", true)
+	}
+
+	factory := func(ctx context.Context, name, addr string) (*proxybuild.Stack, error) {
+		return proxybuild.BuildLiveStack(ctx, proxybuild.Deps{
+			Logger:          logger,
+			ListenerName:    name,
+			ListenAddr:      addr,
+			FlowStore:       store,
+			PluginV2Engine:  pluginv2Engine,
+			BuildConfig:     buildCfg,
+			HoldQueue:       holdQueue,
+			PeekTimeout:     cfg.PeekTimeout,
+			MaxConnections:  cfg.MaxConnections,
+			PassthroughList: passthrough,
+			RateLimiter:     rateLimiter,
+		})
+	}
+	mgr, err := proxybuild.NewManager(proxybuild.ManagerConfig{
+		Logger:       logger,
+		StackFactory: factory,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("init proxybuild manager: %w", err)
+	}
+	mgr.SetPeekTimeout(cfg.PeekTimeout)
+	mgr.SetMaxConnections(cfg.MaxConnections)
+
+	// proxyCfg + issuer are reachable via buildCfg; kept on the parameter
+	// list for future cleanup work (USK-697 connector-adapter migration).
+	_ = proxyCfg
+	_ = issuer
+	return mgr, nil
 }
