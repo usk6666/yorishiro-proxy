@@ -23,7 +23,6 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/encoding"
 	"github.com/usk6666/yorishiro-proxy/internal/fingerprint"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
-	"github.com/usk6666/yorishiro-proxy/internal/fuzzer"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/http2"
 	h2pool "github.com/usk6666/yorishiro-proxy/internal/layer/http2/pool"
 	"github.com/usk6666/yorishiro-proxy/internal/logging"
@@ -560,14 +559,13 @@ type protocolResult struct {
 	socks5Handler   *protosocks5.Handler
 	socks5Adapter   *socks5AuthAdapter
 	pluginEngine    *plugin.Engine
-	fuzzRunner      *fuzzer.Runner
 	tlsTransport    httputil.TLSTransport
 	hostTLSRegistry *httputil.HostTLSRegistry
 	webUIToken      string
 }
 
-// initProtocolHandlers builds all protocol handlers, the plugin engine, and the
-// fuzzer. It returns a protocolResult containing all initialized components.
+// initProtocolHandlers builds all protocol handlers and the plugin engine.
+// It returns a protocolResult containing all initialized components.
 func initProtocolHandlers(ctx context.Context, deps protocolDeps) (*protocolResult, error) {
 	cfg := deps.cfg
 	logger := deps.logger
@@ -624,15 +622,6 @@ func initProtocolHandlers(ctx context.Context, deps protocolDeps) (*protocolResu
 
 	// Link the HTTP/2 handler to the HTTP handler for h2 ALPN delegation.
 	httpHandler.SetH2Handler(http2Handler)
-
-	// Initialize fuzzer components for async fuzz job execution.
-	wordlistDir := fuzzer.DefaultWordlistBaseDir()
-	if err := os.MkdirAll(wordlistDir, 0700); err != nil {
-		logger.Warn("failed to create wordlist directory", "path", wordlistDir, "error", err)
-	}
-	fuzzEngine := fuzzer.NewEngine(store, store, store, mcp.NewDefaultHTTPClient(), wordlistDir)
-	fuzzRegistry := fuzzer.NewJobRegistry()
-	fuzzRunner := fuzzer.NewRunner(fuzzEngine, fuzzRegistry)
 
 	// Raw TCP fallback handler: must be last since Detect() always returns true.
 	tcpHandler := prototcp.NewHandler(store, nil, logger)
@@ -691,7 +680,6 @@ func initProtocolHandlers(ctx context.Context, deps protocolDeps) (*protocolResu
 		socks5Handler:   socks5Handler,
 		socks5Adapter:   socks5Adapter,
 		pluginEngine:    pluginEngine,
-		fuzzRunner:      fuzzRunner,
 		tlsTransport:    tlsTransport,
 		hostTLSRegistry: hostTLSRegistry,
 	}, nil
@@ -902,10 +890,8 @@ func buildMCPComponents(
 			rateLimiterSetters,
 		),
 		jobRunner: mcp.NewJobRunner(
-			proto.fuzzRunner,
 			store,
 			nil, // legacy replayDoer, not pre-populated (set in tests).
-			nil, // resend router, not pre-populated.
 			nil, // raw replay dialer, not pre-populated.
 		),
 		flowStore:    mcp.NewFlowStore(store),

@@ -4,10 +4,8 @@ import (
 	"context"
 	"embed"
 	"fmt"
-	"path/filepath"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/usk6666/yorishiro-proxy/internal/fuzzer"
 )
 
 //go:embed resources/*.md resources/*.json
@@ -46,25 +44,11 @@ var helpResources = []resourceDef{
 		filename:    "resources/help_query.md",
 	},
 	{
-		uri:         "yorishiro://help/resend",
-		name:        "help_resend",
-		description: "Action list, parameter syntax, and usage examples for the resend tool (resend, resend_raw, tcp_replay).",
-		mimeType:    "text/markdown",
-		filename:    "resources/help_resend.md",
-	},
-	{
 		uri:         "yorishiro://help/manage",
 		name:        "help_manage",
 		description: "Action list, parameter syntax, and usage examples for the manage tool (delete_flows, export_flows, import_flows, regenerate_ca_cert).",
 		mimeType:    "text/markdown",
 		filename:    "resources/help_manage.md",
-	},
-	{
-		uri:         "yorishiro://help/fuzz",
-		name:        "help_fuzz",
-		description: "Action list, parameter syntax, and usage examples for the fuzz tool (fuzz, fuzz_pause, fuzz_resume, fuzz_cancel).",
-		mimeType:    "text/markdown",
-		filename:    "resources/help_fuzz.md",
 	},
 	{
 		uri:         "yorishiro://help/macro",
@@ -120,25 +104,11 @@ var schemaResources = []resourceDef{
 		filename:    "resources/schema_query.json",
 	},
 	{
-		uri:         "yorishiro://schema/resend",
-		name:        "schema_resend",
-		description: "JSON Schema for the resend tool input.",
-		mimeType:    "application/json",
-		filename:    "resources/schema_resend.json",
-	},
-	{
 		uri:         "yorishiro://schema/manage",
 		name:        "schema_manage",
 		description: "JSON Schema for the manage tool input.",
 		mimeType:    "application/json",
 		filename:    "resources/schema_manage.json",
-	},
-	{
-		uri:         "yorishiro://schema/fuzz",
-		name:        "schema_fuzz",
-		description: "JSON Schema for the fuzz tool input.",
-		mimeType:    "application/json",
-		filename:    "resources/schema_fuzz.json",
 	},
 	{
 		uri:         "yorishiro://schema/macro",
@@ -181,41 +151,6 @@ func (s *Server) registerResources() {
 		)
 	}
 
-	// Register dynamic resources that depend on runtime values.
-	s.registerWordlistDirResource()
-}
-
-// registerWordlistDirResource registers a dynamic MCP resource that returns
-// the resolved wordlist directory path. AI agents can read this resource to
-// determine where to place wordlist files for file-type payload sets.
-func (s *Server) registerWordlistDirResource() {
-	const uri = "yorishiro://info/wordlist_dir"
-
-	// Compute the wordlist directory once and ensure it is absolute (C-1/F-1).
-	wordlistDir := fuzzer.DefaultWordlistBaseDir()
-	if abs, err := filepath.Abs(wordlistDir); err == nil {
-		wordlistDir = abs
-	}
-
-	s.server.AddResource(
-		&gomcp.Resource{
-			URI:         uri,
-			Name:        "info_wordlist_dir",
-			Description: "Absolute path to the wordlist directory where file-type fuzz payload files should be placed.",
-			MIMEType:    "text/plain",
-		},
-		func(_ context.Context, _ *gomcp.ReadResourceRequest) (*gomcp.ReadResourceResult, error) {
-			return &gomcp.ReadResourceResult{
-				Contents: []*gomcp.ResourceContents{
-					{
-						URI:      uri,
-						MIMEType: "text/plain",
-						Text:     wordlistDir,
-					},
-				},
-			}, nil
-		},
-	)
 }
 
 // makeResourceHandler returns a ResourceHandler that reads the given file from the

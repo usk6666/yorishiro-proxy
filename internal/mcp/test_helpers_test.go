@@ -1,16 +1,9 @@
 package mcp
 
 import (
-	"bufio"
-	"bytes"
 	"context"
-	"encoding/json"
-	"io"
-	"net"
 	"net/http"
-	"net/http/httptest"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -158,34 +151,6 @@ func newPermissiveClient() *http.Client {
 	}
 }
 
-// newEchoServer creates a test HTTP server that echoes back request details as JSON.
-func newEchoServer(t *testing.T) *httptest.Server {
-	t.Helper()
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, _ := io.ReadAll(r.Body)
-		resp := map[string]any{
-			"method":  r.Method,
-			"url":     r.URL.String(),
-			"headers": r.Header,
-			"body":    string(body),
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("X-Echo", "true")
-		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(resp)
-	}))
-	t.Cleanup(server.Close)
-	return server
-}
-
-// testDialer wraps a net.Dialer to satisfy the rawDialer interface for tests.
-// It allows connections to localhost (bypassing SSRF protection).
-type testDialer struct{}
-
-func (d *testDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
-	return (&net.Dialer{Timeout: 5 * time.Second}).DialContext(ctx, network, address)
-}
-
 // extractTextContent returns the text from the first TextContent in a CallToolResult.
 func extractTextContent(result *gomcp.CallToolResult) string {
 	if len(result.Content) == 0 {
@@ -195,40 +160,4 @@ func extractTextContent(result *gomcp.CallToolResult) string {
 		return tc.Text
 	}
 	return ""
-}
-
-// newRawEchoServer creates a TCP server that reads HTTP-like data and echoes back a simple response.
-func newRawEchoServer(t *testing.T) (string, func()) {
-	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-
-	go func() {
-		for {
-			conn, err := ln.Accept()
-			if err != nil {
-				return
-			}
-			go func(c net.Conn) {
-				defer c.Close()
-				// Read the request.
-				reader := bufio.NewReader(c)
-				var reqBuf bytes.Buffer
-				for {
-					line, err := reader.ReadString('\n')
-					reqBuf.WriteString(line)
-					if err != nil || strings.TrimSpace(line) == "" {
-						break
-					}
-				}
-				// Send a simple response.
-				resp := "HTTP/1.1 200 OK\r\nContent-Length: 11\r\nX-Echo: raw\r\n\r\nhello world"
-				c.Write([]byte(resp))
-			}(conn)
-		}
-	}()
-
-	return ln.Addr().String(), func() { ln.Close() }
 }

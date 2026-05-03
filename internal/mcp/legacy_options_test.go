@@ -18,7 +18,6 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/cert"
 	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
-	"github.com/usk6666/yorishiro-proxy/internal/fuzzer"
 	"github.com/usk6666/yorishiro-proxy/internal/plugin"
 	"github.com/usk6666/yorishiro-proxy/internal/pluginv2"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
@@ -39,7 +38,7 @@ func newServer(ctx context.Context, ca *cert.CA, store flow.Store, manager *prox
 	misc := NewMisc(ctx, ca, nil, "", nil, nil)
 	pipe := NewPipeline(nil, nil, nil, nil, nil, nil, nil)
 	conn := NewConnector(manager, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
-	jr := NewJobRunner(nil, nil, nil, nil, nil)
+	jr := NewJobRunner(nil, nil, nil)
 	fs := NewFlowStore(store)
 	me := NewMacroEngine()
 	pe := NewPluginEngine(nil, nil)
@@ -63,11 +62,9 @@ type legacyDeps struct {
 	grpcInterceptEngine   *grpcrules.InterceptEngine
 	holdQueue             *common.HoldQueue
 	transformPipeline     *rules.Pipeline
-	fuzzRunner            *fuzzer.Runner
 	fuzzStore             flow.FuzzStore
 	dbPath                string
 	replayDoer            httpDoer
-	replayRouter          resendRouter
 	rawReplayDialer       rawDialer
 	tcpForwards           map[string]*config.ForwardConfig
 	tcpHandler            tcpForwardHandler
@@ -138,10 +135,8 @@ func mkServerFromLegacyDeps(d legacyDeps) *Server {
 			rateLimiterSetters:    d.rateLimiterSetters,
 		},
 		jobRunner: &JobRunner{
-			fuzzRunner:      d.fuzzRunner,
 			fuzzStore:       d.fuzzStore,
 			replayDoer:      d.replayDoer,
-			replayRouter:    d.replayRouter,
 			rawReplayDialer: d.rawReplayDialer,
 		},
 		flowStore:    &FlowStore{store: d.store},
@@ -213,13 +208,6 @@ func WithPluginv2Engine(engine *pluginv2.Engine) ServerOption {
 func WithTransformPipeline(p *rules.Pipeline) ServerOption {
 	return func(s *Server) {
 		s.pipeline.transformPipeline = p
-	}
-}
-
-// WithFuzzRunner sets the async fuzz runner. Test-only.
-func WithFuzzRunner(runner *fuzzer.Runner) ServerOption {
-	return func(s *Server) {
-		s.jobRunner.fuzzRunner = runner
 	}
 }
 

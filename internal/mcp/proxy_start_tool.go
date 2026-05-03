@@ -654,39 +654,6 @@ var validProtocols = map[string]bool{
 	"TCP":       true,
 }
 
-// validateTCPForwards validates tcp_forwards entries (legacy string map format).
-func validateTCPForwards(forwards map[string]string) error {
-	for port, target := range forwards {
-		if port == "" {
-			return fmt.Errorf("port key cannot be empty")
-		}
-		// Validate port key is a valid port number (0-65535).
-		// Port 0 is allowed as it means OS-assigned ephemeral port.
-		if err := validatePortNumber(port, true); err != nil {
-			return fmt.Errorf("invalid port key %q: %w", port, err)
-		}
-		if target == "" {
-			return fmt.Errorf("target for port %q cannot be empty", port)
-		}
-		// Validate target is host:port format.
-		host, p, err := net.SplitHostPort(target)
-		if err != nil {
-			return fmt.Errorf("invalid target %q for port %q: must be host:port format", target, port)
-		}
-		if host == "" {
-			return fmt.Errorf("invalid target %q for port %q: host cannot be empty", target, port)
-		}
-		if p == "" {
-			return fmt.Errorf("invalid target %q for port %q: port cannot be empty", target, port)
-		}
-		// Validate target port is a valid port number (1-65535).
-		if err := validatePortNumber(p, false); err != nil {
-			return fmt.Errorf("invalid target %q for port %q: %w", target, port, err)
-		}
-	}
-	return nil
-}
-
 // validateTCPForwardsConfig validates tcp_forwards entries with ForwardConfig values.
 func validateTCPForwardsConfig(forwards map[string]*config.ForwardConfig) error {
 	for port, fc := range forwards {

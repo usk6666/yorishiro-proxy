@@ -232,7 +232,7 @@ func orDefaultJobRunner(j *JobRunner) *JobRunner {
 	if j != nil {
 		return j
 	}
-	return NewJobRunner(nil, nil, nil, nil, nil)
+	return NewJobRunner(nil, nil, nil)
 }
 
 func orDefaultFlowStore(f *FlowStore) *FlowStore {
@@ -363,13 +363,11 @@ func (s *Server) registerTools() {
 	s.registerProxyStop()
 	s.registerConfigure()
 	s.registerQuery()
-	s.registerResend()
 	s.registerResendHTTP()
 	s.registerResendWS()
 	s.registerResendGRPC()
 	s.registerResendRaw()
 	s.registerManage()
-	s.registerFuzz()
 	s.registerFuzzHTTP()
 	s.registerFuzzWS()
 	s.registerFuzzGRPC()
