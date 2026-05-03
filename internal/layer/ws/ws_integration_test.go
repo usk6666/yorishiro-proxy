@@ -7,7 +7,7 @@
 // (c) Transform variant recording, (d) Safety filter drop, and
 // (e) error-path classification (TCP RST, malformed frame, abnormal close).
 //
-// Driving model. We do NOT use MinimalListener / connector dial path here.
+// Driving model. We do NOT use FullListener / connector dial path here.
 // Instead we hand-build a ConnectionStack with two pipe-pair backed
 // http1.Layer instances (RoleServer client side, RoleClient upstream side)
 // and call RunStackSession directly. Per the resolved decisions for
