@@ -23,9 +23,11 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/pluginv2"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
-	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/rules"
 	"github.com/usk6666/yorishiro-proxy/internal/rules/common"
+	grpcrules "github.com/usk6666/yorishiro-proxy/internal/rules/grpc"
+	httprules "github.com/usk6666/yorishiro-proxy/internal/rules/http"
+	wsrules "github.com/usk6666/yorishiro-proxy/internal/rules/ws"
 	"github.com/usk6666/yorishiro-proxy/internal/safety"
 )
 
@@ -35,7 +37,7 @@ import (
 // the production NewServer to apply ServerOption mutators.
 func newServer(ctx context.Context, ca *cert.CA, store flow.Store, manager *proxy.Manager, opts ...ServerOption) *Server {
 	misc := NewMisc(ctx, ca, nil, "", nil, nil)
-	pipe := NewPipeline(nil, nil, nil, nil, nil, nil)
+	pipe := NewPipeline(nil, nil, nil, nil, nil, nil, nil)
 	conn := NewConnector(manager, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 	jr := NewJobRunner(nil, nil, nil, nil, nil)
 	fs := NewFlowStore(store)
@@ -56,8 +58,10 @@ type legacyDeps struct {
 	manager               *proxy.Manager
 	passthrough           *proxy.PassthroughList
 	scope                 *proxy.CaptureScope
-	interceptEngine       *intercept.Engine
-	interceptQueue        *intercept.Queue
+	httpInterceptEngine   *httprules.InterceptEngine
+	wsInterceptEngine     *wsrules.InterceptEngine
+	grpcInterceptEngine   *grpcrules.InterceptEngine
+	holdQueue             *common.HoldQueue
 	transformPipeline     *rules.Pipeline
 	fuzzRunner            *fuzzer.Runner
 	fuzzStore             flow.FuzzStore
@@ -106,8 +110,10 @@ func mkServerFromLegacyDeps(d legacyDeps) *Server {
 			budgetManager: d.budgetManager,
 		},
 		pipeline: &Pipeline{
-			interceptEngine:     d.interceptEngine,
-			interceptQueue:      d.interceptQueue,
+			httpInterceptEngine: d.httpInterceptEngine,
+			wsInterceptEngine:   d.wsInterceptEngine,
+			grpcInterceptEngine: d.grpcInterceptEngine,
+			holdQueue:           d.holdQueue,
 			transformPipeline:   d.transformPipeline,
 			safetyEngine:        d.safetyEngine,
 			safetyEngineSetters: d.safetyEngineSetters,
@@ -167,22 +173,28 @@ func WithCaptureScope(scope *proxy.CaptureScope) ServerOption {
 	}
 }
 
-// WithInterceptEngine sets the intercept rule engine. Test-only.
-func WithInterceptEngine(engine *intercept.Engine) ServerOption {
+// WithHTTPInterceptEngine sets the per-protocol HTTP intercept engine. Test-only.
+func WithHTTPInterceptEngine(engine *httprules.InterceptEngine) ServerOption {
 	return func(s *Server) {
-		s.pipeline.interceptEngine = engine
+		s.pipeline.httpInterceptEngine = engine
 	}
 }
 
-// WithInterceptQueue sets the intercept queue. Test-only.
-func WithInterceptQueue(queue *intercept.Queue) ServerOption {
+// WithWSInterceptEngine sets the per-protocol WebSocket intercept engine. Test-only.
+func WithWSInterceptEngine(engine *wsrules.InterceptEngine) ServerOption {
 	return func(s *Server) {
-		s.pipeline.interceptQueue = queue
+		s.pipeline.wsInterceptEngine = engine
 	}
 }
 
-// WithHoldQueue sets the RFC-001 N8 HoldQueue used by the new
-// (Envelope-based) intercept tool path. Test-only.
+// WithGRPCInterceptEngine sets the per-protocol gRPC intercept engine. Test-only.
+func WithGRPCInterceptEngine(engine *grpcrules.InterceptEngine) ServerOption {
+	return func(s *Server) {
+		s.pipeline.grpcInterceptEngine = engine
+	}
+}
+
+// WithHoldQueue sets the RFC-001 HoldQueue used by the intercept tool. Test-only.
 func WithHoldQueue(queue *common.HoldQueue) ServerOption {
 	return func(s *Server) {
 		s.pipeline.holdQueue = queue

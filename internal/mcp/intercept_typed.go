@@ -6,21 +6,18 @@ import (
 	"strings"
 
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
-	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
 	"github.com/usk6666/yorishiro-proxy/internal/rules/common"
 )
 
-// intercept_typed.go implements the RFC-001 N8 intercept tool path that
-// dispatches against the new common.HoldQueue with per-Message-type modify
-// schemas. The legacy intercept.Queue path lives in intercept_tool.go and
-// continues to work unchanged for connections that flow through the
-// pre-N8 pipeline. Tool name remains "intercept" — handleInterceptTool
-// tries the HoldQueue first and falls back to the legacy queue when the
-// supplied intercept_id is unknown to it.
+// intercept_typed.go implements the intercept tool path that dispatches
+// against common.HoldQueue with per-Message-type modify schemas. Tool
+// name is "intercept" — handleInterceptTool routes every modify_and_forward
+// through the typed dispatch arms below.
 //
 // Per Decision R7 in the design review, headers travel as ordered
-// (name, value) pairs end-to-end; map[string]string is rejected on the new
-// path so wire-fidelity (RFC-001 §3.1 / "no normalization") is preserved.
+// (name, value) pairs end-to-end; map[string]string is rejected on the
+// dispatch path so wire-fidelity (RFC-001 §3.1 / "no normalization") is
+// preserved.
 //
 // Per Decision R10, RawMessage modify rejects supplying both bytes_override
 // and patches; the validation runs before the queue lookup so a malformed
@@ -176,8 +173,12 @@ func holdQueueProtocolKind(env *envelope.Envelope) string {
 // held envelope (Decision R9). The returned envelope's Message is a
 // RawMessage and Envelope.Raw equals the decoded bytes; the original
 // Protocol is preserved so downstream tooling can still attribute the
-// modified variant to the original layer.
+// modified variant to the original layer. The decoded payload size is
+// capped at maxRawOverrideSize (CWE-770).
 func applyHoldQueueRawOverride(env *envelope.Envelope, b64 string) (*envelope.Envelope, error) {
+	if err := checkBase64EncodedSize(b64, "raw_override_base64"); err != nil {
+		return nil, err
+	}
 	bytesNew, err := decodeBodyEncoded(b64, "base64", "raw_override_base64")
 	if err != nil {
 		return nil, err
@@ -185,10 +186,33 @@ func applyHoldQueueRawOverride(env *envelope.Envelope, b64 string) (*envelope.En
 	if len(bytesNew) == 0 {
 		return nil, fmt.Errorf("raw_override_base64: decoded to empty bytes")
 	}
+	if len(bytesNew) > maxRawOverrideSize {
+		return nil, fmt.Errorf("raw_override_base64: decoded size %d exceeds limit %d", len(bytesNew), maxRawOverrideSize)
+	}
 	clone := env.Clone()
 	clone.Message = &envelope.RawMessage{Bytes: bytesNew}
 	clone.Raw = bytesNew
 	return clone, nil
+}
+
+// checkBase64EncodedSize rejects an encoded base64 payload whose
+// pre-decode length would exceed the size cap, so the decoder never
+// allocates the full transient buffer for a clearly-too-large input
+// (CWE-770 fail-fast). The post-decode check is retained as a backstop.
+//
+// Formula: a base64 alphabet emits ceil(n/3)*4 characters for n decoded
+// bytes; permitting a small slack absorbs trailing "=" padding and
+// embedded newline/whitespace some clients add.
+//
+// Skips the check entirely for non-base64 encodings: text/utf-8 inputs
+// are bounded by their literal byte length.
+func checkBase64EncodedSize(b64, field string) error {
+	const slack = 16
+	maxEncoded := (maxRawOverrideSize/3+1)*4 + slack
+	if len(b64) > maxEncoded {
+		return fmt.Errorf("%s: encoded size %d exceeds limit (decoded cap %d)", field, len(b64), maxRawOverrideSize)
+	}
+	return nil
 }
 
 // resolveHoldQueueAction validates an MCP intercept input against the held
@@ -206,7 +230,7 @@ func resolveHoldQueueAction(entry *common.HeldEntry, input interceptInput, actio
 		if err != nil {
 			return nil, err
 		}
-		rawMode := mode == intercept.ModeRaw
+		rawMode := mode == releaseModeRaw
 		// raw mode + RawOverrideBase64: build a synthetic Raw envelope
 		// even if the held one wasn't already Raw.
 		if rawMode && input.Params.RawOverrideBase64 != nil {
@@ -433,9 +457,17 @@ func applyRawModify(env *envelope.Envelope, _ *envelope.RawMessage, params *rawM
 	}
 	switch {
 	case params.BytesOverride != nil:
+		if params.BytesEncoding == "base64" {
+			if err := checkBase64EncodedSize(*params.BytesOverride, "bytes_override"); err != nil {
+				return nil, err
+			}
+		}
 		bytesNew, err := decodeBodyEncoded(*params.BytesOverride, params.BytesEncoding, "bytes_override")
 		if err != nil {
 			return nil, err
+		}
+		if len(bytesNew) > maxRawOverrideSize {
+			return nil, fmt.Errorf("bytes_override: decoded size %d exceeds limit %d", len(bytesNew), maxRawOverrideSize)
 		}
 		rm.Bytes = bytesNew
 		if rawMode {
