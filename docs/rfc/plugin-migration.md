@@ -190,11 +190,26 @@ The following files and lines are scheduled for deletion in N9 issues **USK-693*
 
 > **Naming note (vs USK-689 issue text):** the original retire-plan issue listed `s.registerResendRaw()` as "legacy direct H2". That was a transcription slip — `s.registerResendRaw()` (currently `internal/mcp/server.go:370`) is the **new typed** `resend_raw` MCP tool from USK-675 and is **kept**. The legacy direct-H2 path is the `resend_raw` *action* of the legacy `resend` tool, whose helpers live in `resend_raw_h2.go` (a helper file with no `register*` line of its own, called from `resend_tool.go`'s `resend_raw` action handler). No MCP tool is literally named `resend_raw_h2`. Likewise `s.registerFuzzRaw()` (currently L376) is the new typed `fuzz_raw` from USK-680 and is kept.
 
-### USK-694 — legacy fuzzer engine
+### USK-694 — legacy fuzzer engine (partial deletion)
+
+The async legacy engine layered on top of `internal/fuzzer/` is removed, but
+the position-application primitives (`Iterator`, `FuzzCase`, `Position`,
+`RequestData`, `ApplyPosition`) survive — they are consumed by the typed
+fuzz MCP tools via `internal/job/fuzz_http_source.go` (USK-677..USK-680:
+`fuzz_http` / `fuzz_ws` / `fuzz_grpc` / `fuzz_raw`).
 
 | Path | Action | Notes |
 |---|---|---|
-| `internal/fuzzer/` (whole package) | delete | Async fuzzer engine — concurrency limiter, token-bucket rate limiter, overload monitor — consumed only by `internal/mcp/fuzz_tool.go`. The synchronous typed fuzzers (`fuzz_http` / `fuzz_ws` / `fuzz_grpc` / `fuzz_raw`) inline their own variant loop and require no separate engine. |
+| `internal/fuzzer/control.go` + `_test.go` | delete file | Async concurrency limiter for the legacy engine. |
+| `internal/fuzzer/engine.go` + `_test.go` | delete file | Top-level async fuzzer engine consumed only by the legacy `fuzz` MCP tool. |
+| `internal/fuzzer/hooks.go` + `_test.go` | delete file | Legacy `HookCallbacks` / `HookState` plumbing for the async engine. |
+| `internal/fuzzer/monitor.go` + `_test.go` | delete file | `OverloadMonitor` (token-bucket rate limiter / backpressure) for the legacy engine. |
+| `internal/fuzzer/payload.go` + `_test.go` | delete file | Legacy `PayloadSet` / `ResolvePayloads` / `DefaultWordlistBaseDir` resolver. The typed tools resolve payloads in `internal/job/`. |
+| `internal/fuzzer/runner.go` + `_test.go` | delete file | Per-case async runner (`HTTPDoer`, `FlowRecorder`, `FlowFetcher`) for the legacy engine. |
+| `internal/fuzzer/safety_input_test.go` | delete file | Safety-input coverage for the deleted engine path. |
+| `internal/fuzzer/iterator.go` + `_test.go` | **keep** | `Iterator` / `NewIterator` / `FuzzCase` — consumed by `internal/job/fuzz_http_source.go` for the typed fuzz path. |
+| `internal/fuzzer/position.go` + `_test.go` | **keep** | `Position` / `RequestData` / `ApplyPosition` — consumed by `internal/job/fuzz_http_source.go` for the typed fuzz path. |
+| `internal/fuzzer/doc.go` | add file | Package doc-comment narrowing the package's stated scope to position-application primitives only. |
 
 ### Coexistence verified
 
