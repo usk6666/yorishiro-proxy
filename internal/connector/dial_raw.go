@@ -7,11 +7,16 @@ import (
 	"log/slog"
 	"net"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/tlslayer"
 )
+
+// defaultDialTimeout is the fallback dial timeout when DialRawOpts.DialTimeout
+// is zero.
+const defaultDialTimeout = 30 * time.Second
 
 // DialRawOpts configures a DialUpstreamRaw call.
 type DialRawOpts struct {
@@ -47,8 +52,8 @@ type DialRawOpts struct {
 // TLS-wrapped) net.Conn and TLSSnapshot without attaching any Layer. The
 // caller wraps the returned conn with bytechunk.New or http1layer.New.
 //
-// This function reuses the existing dialTCP helper for TCP establishment
-// and delegates TLS to tlslayer.Client.
+// This function reuses the dialTCP helper for TCP establishment and delegates
+// TLS to tlslayer.Client.
 func DialUpstreamRaw(ctx context.Context, target string, opts DialRawOpts) (net.Conn, *envelope.TLSSnapshot, error) {
 	if err := validateTarget(target); err != nil {
 		return nil, nil, err
@@ -91,4 +96,47 @@ func DialUpstreamRaw(ctx context.Context, target string, opts DialRawOpts) (net.
 	)
 
 	return tlsConn, snap, nil
+}
+
+// validateTarget enforces "host:port" form and rejects CRLF so that the
+// target string cannot be smuggled into an HTTP CONNECT request line
+// (CWE-93). It is deliberately stricter than net.SplitHostPort alone.
+func validateTarget(target string) error {
+	if target == "" {
+		return fmt.Errorf("connector: empty target address")
+	}
+	if strings.ContainsAny(target, "\r\n") {
+		return fmt.Errorf("connector: target address contains CR/LF characters")
+	}
+	host, port, err := net.SplitHostPort(target)
+	if err != nil {
+		return fmt.Errorf("connector: invalid target %q: %w", target, err)
+	}
+	if host == "" || port == "" {
+		return fmt.Errorf("connector: target %q missing host or port", target)
+	}
+	return nil
+}
+
+// dialTCP establishes a raw TCP connection, optionally through an upstream
+// proxy. Timeout is already bounded by the caller's context, but the proxy
+// helpers require an explicit duration for compatibility with the
+// DialViaUpstreamProxy API.
+func dialTCP(ctx context.Context, target string, upstreamProxy *url.URL, timeout time.Duration) (net.Conn, error) {
+	if upstreamProxy != nil {
+		slog.Debug("connector: dialing via upstream proxy", "target", target, "proxy", RedactProxyURL(upstreamProxy.String()))
+		conn, err := DialViaUpstreamProxy(ctx, upstreamProxy, target, timeout)
+		if err != nil {
+			return nil, fmt.Errorf("connector: dial via upstream proxy: %w", err)
+		}
+		return conn, nil
+	}
+
+	slog.Debug("connector: dialing direct", "target", target)
+	dialer := &net.Dialer{Timeout: timeout}
+	conn, err := dialer.DialContext(ctx, "tcp", target)
+	if err != nil {
+		return nil, fmt.Errorf("connector: dial %s: %w", target, err)
+	}
+	return conn, nil
 }

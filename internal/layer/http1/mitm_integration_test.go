@@ -292,7 +292,7 @@ type proxyOpts struct {
 	prependCustomSteps []pipeline.Step
 }
 
-// startHTTPMITMProxy starts a MinimalListener configured for HTTP MITM (not
+// startHTTPMITMProxy starts a FullListener configured for HTTP MITM (not
 // raw passthrough). Returns the proxy address, testStore, and a channel that
 // closes when the first session completes.
 func startHTTPMITMProxy(
@@ -312,81 +312,90 @@ func startHTTPMITMProxy(
 	store = &testStore{}
 	done := make(chan struct{})
 
-	mlCfg := connector.MinimalListenerConfig{
-		BuildConfig: &connector.BuildConfig{
-			ProxyConfig: &config.ProxyConfig{
-				// NOT in RawPassthroughHosts — triggers HTTP MITM mode.
+	buildCfg := &connector.BuildConfig{
+		ProxyConfig: &config.ProxyConfig{
+			// NOT in RawPassthroughHosts — triggers HTTP MITM mode.
+		},
+		Issuer:             issuer,
+		InsecureSkipVerify: true,
+		// USK-635: body-spill configuration threads through to http1.New
+		// via stack_builder.go. Zero values fall back to config defaults.
+		BodySpillDir:       opts.bodySpillDir,
+		BodySpillThreshold: opts.bodySpillThreshold,
+		MaxBodySize:        opts.maxBodySize,
+	}
+
+	onStack := func(ctx context.Context, stack *connector.ConnectionStack, _, _ *envelope.TLSSnapshot, _ string) {
+		defer close(done)
+		defer stack.Close()
+
+		clientCh := <-stack.ClientTopmost().Channels()
+
+		// Build RecordStep options. USK-622 wire encoder is unconditional;
+		// USK-635 MaxBodySize override is opt-in for the exceed-cap test.
+		recordOpts := []pipeline.Option{
+			pipeline.WithWireEncoder(envelope.ProtocolHTTP, http1.EncodeWireBytes),
+		}
+		if opts.recordMaxBodySize > 0 {
+			recordOpts = append(recordOpts, pipeline.WithMaxBodySize(opts.recordMaxBodySize))
+		}
+
+		// Build pipeline: HostScope → HTTPScope → Safety → Transform → Intercept → Record.
+		// Optional custom Steps are prepended before HostScope for tests
+		// that need mid-flight inspection without Intercept's HoldQueue.
+		steps := make([]pipeline.Step, 0, 6+len(opts.prependCustomSteps))
+		steps = append(steps, opts.prependCustomSteps...)
+		steps = append(steps,
+			pipeline.NewHostScopeStep(nil),
+			pipeline.NewHTTPScopeStep(opts.scope),
+			pipeline.NewSafetyStep(opts.safetyEngine, nil, nil, slog.Default()),
+			pipeline.NewTransformStep(opts.transformEngine, nil, nil),
+			pipeline.NewInterceptStep(opts.interceptEngine, nil, nil, opts.holdQueue, slog.Default()),
+			pipeline.NewRecordStep(store, slog.Default(), recordOpts...),
+		)
+
+		p := pipeline.New(steps...)
+
+		// Lazy dial: return upstream channel on first forwarded envelope.
+		session.RunSession(ctx, clientCh, func(_ context.Context, _ *envelope.Envelope) (layer.Channel, error) {
+			return <-stack.UpstreamTopmost().Channels(), nil
+		}, p, session.SessionOptions{
+			// USK-635: project State + FailureReason onto Stream so
+			// error-path tests can assert "error" + "internal_error".
+			OnComplete: func(cctx context.Context, streamID string, err error) {
+				state := "complete"
+				if err != nil && !errors.Is(err, io.EOF) {
+					state = "error"
+				}
+				if streamID != "" {
+					_ = store.UpdateStream(cctx, streamID, flow.StreamUpdate{
+						State:         state,
+						FailureReason: session.ClassifyError(err),
+					})
+				}
 			},
-			Issuer:             issuer,
-			InsecureSkipVerify: true,
-			// USK-635: body-spill configuration threads through to http1.New
-			// via stack_builder.go. Zero values fall back to config defaults.
-			BodySpillDir:       opts.bodySpillDir,
-			BodySpillThreshold: opts.bodySpillThreshold,
-			MaxBodySize:        opts.maxBodySize,
-		},
-		OnStack: func(ctx context.Context, stack *connector.ConnectionStack, _, _ *envelope.TLSSnapshot, _ string) {
-			defer close(done)
-			defer stack.Close()
-
-			clientCh := <-stack.ClientTopmost().Channels()
-
-			// Build RecordStep options. USK-622 wire encoder is unconditional;
-			// USK-635 MaxBodySize override is opt-in for the exceed-cap test.
-			recordOpts := []pipeline.Option{
-				pipeline.WithWireEncoder(envelope.ProtocolHTTP, http1.EncodeWireBytes),
-			}
-			if opts.recordMaxBodySize > 0 {
-				recordOpts = append(recordOpts, pipeline.WithMaxBodySize(opts.recordMaxBodySize))
-			}
-
-			// Build pipeline: HostScope → HTTPScope → Safety → Transform → Intercept → Record.
-			// Optional custom Steps are prepended before HostScope for tests
-			// that need mid-flight inspection without Intercept's HoldQueue.
-			steps := make([]pipeline.Step, 0, 6+len(opts.prependCustomSteps))
-			steps = append(steps, opts.prependCustomSteps...)
-			steps = append(steps,
-				pipeline.NewHostScopeStep(nil),
-				pipeline.NewHTTPScopeStep(opts.scope),
-				pipeline.NewSafetyStep(opts.safetyEngine, nil, nil, slog.Default()),
-				pipeline.NewTransformStep(opts.transformEngine, nil, nil),
-				pipeline.NewInterceptStep(opts.interceptEngine, nil, nil, opts.holdQueue, slog.Default()),
-				pipeline.NewRecordStep(store, slog.Default(), recordOpts...),
-			)
-
-			p := pipeline.New(steps...)
-
-			// Lazy dial: return upstream channel on first forwarded envelope.
-			session.RunSession(ctx, clientCh, func(_ context.Context, _ *envelope.Envelope) (layer.Channel, error) {
-				return <-stack.UpstreamTopmost().Channels(), nil
-			}, p, session.SessionOptions{
-				// USK-635: project State + FailureReason onto Stream so
-				// error-path tests can assert "error" + "internal_error".
-				OnComplete: func(cctx context.Context, streamID string, err error) {
-					state := "complete"
-					if err != nil && !errors.Is(err, io.EOF) {
-						state = "error"
-					}
-					if streamID != "" {
-						_ = store.UpdateStream(cctx, streamID, flow.StreamUpdate{
-							State:         state,
-							FailureReason: session.ClassifyError(err),
-						})
-					}
-				},
-			})
-		},
+		})
 	}
 
-	proxyLn, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
+	flCfg := connector.FullListenerConfig{
+		Name: "test",
+		Addr: "127.0.0.1:0",
+		OnCONNECT: connector.NewCONNECTHandler(connector.CONNECTHandlerConfig{
+			Negotiator: connector.NewCONNECTNegotiator(slog.Default()),
+			BuildCfg:   buildCfg,
+			OnStack:    onStack,
+		}),
 	}
-	ml := connector.NewMinimalListenerFromListener(proxyLn, mlCfg)
-	go ml.Serve(ctx)
-	t.Cleanup(func() { ml.Close() })
 
-	return proxyLn.Addr().String(), store, done
+	fl := connector.NewFullListener(flCfg)
+	go fl.Start(ctx)
+	select {
+	case <-fl.Ready():
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for FullListener ready")
+	}
+
+	return fl.Addr(), store, done
 }
 
 // connectThroughProxy connects to the proxy, sends CONNECT for the given

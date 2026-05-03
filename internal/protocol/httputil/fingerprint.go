@@ -3,8 +3,9 @@ package httputil
 import (
 	"encoding/json"
 
-	"github.com/usk6666/yorishiro-proxy/internal/codec/http1/parser"
+	codecparser "github.com/usk6666/yorishiro-proxy/internal/codec/http1/parser"
 	"github.com/usk6666/yorishiro-proxy/internal/fingerprint"
+	layerparser "github.com/usk6666/yorishiro-proxy/internal/layer/http1/parser"
 )
 
 // MergeTechnologyTags runs the fingerprint detector (if non-nil) on the
@@ -12,11 +13,19 @@ import (
 // base tags map. The result is stored as a JSON array under the key
 // "technologies". If the detector is nil or detects nothing, the original
 // tags are returned unchanged.
-func MergeTechnologyTags(baseTags map[string]string, det *fingerprint.Detector, headers parser.RawHeaders, body []byte) map[string]string {
+//
+// The legacy internal/codec/http1/parser.RawHeaders shape is converted to
+// the layer parser shape for fingerprint.Detector.Analyze. The two structs
+// are field-identical; this caller dies with internal/protocol/ at USK-697.
+func MergeTechnologyTags(baseTags map[string]string, det *fingerprint.Detector, headers codecparser.RawHeaders, body []byte) map[string]string {
 	if det == nil {
 		return baseTags
 	}
-	result := det.Analyze(headers, body)
+	layerHeaders := make(layerparser.RawHeaders, len(headers))
+	for i, h := range headers {
+		layerHeaders[i] = layerparser.RawHeader{Name: h.Name, Value: h.Value, RawValue: h.RawValue}
+	}
+	result := det.Analyze(layerHeaders, body)
 	if len(result.Detections) == 0 {
 		return baseTags
 	}

@@ -47,13 +47,10 @@ type FullListenerConfig struct {
 }
 
 // FullListener accepts TCP connections, performs two-stage protocol detection,
-// and dispatches to per-protocol handler callbacks. It replaces MinimalListener
-// with full production features: max_connections enforcement, peek timeout
-// (Slowloris protection), and graceful shutdown.
-//
-// FullListener coexists with the old Listener type (which uses the M39-era
-// Dispatcher+CodecFactory model). MinimalListener is preserved for N2/N3 test
-// backward compatibility. Both will be removed in N9.
+// and dispatches to per-protocol handler callbacks. It is the connector
+// package's sole listener implementation: production features include
+// max_connections enforcement, peek timeout (Slowloris protection), and
+// graceful shutdown.
 type FullListener struct {
 	name   string
 	addr   string

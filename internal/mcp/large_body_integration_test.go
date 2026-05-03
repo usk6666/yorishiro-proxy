@@ -147,47 +147,56 @@ func startMCPLargeProxy(t *testing.T, ctx context.Context, store flow.Writer, re
 
 	sessionDone := make(chan struct{})
 
-	mlCfg := connector.MinimalListenerConfig{
-		BuildConfig: &connector.BuildConfig{
-			ProxyConfig:        &config.ProxyConfig{},
-			Issuer:             issuer,
-			InsecureSkipVerify: true,
-		},
-		OnStack: func(sctx context.Context, stack *connector.ConnectionStack, _, _ *envelope.TLSSnapshot, _ string) {
-			defer close(sessionDone)
-			defer stack.Close()
-
-			clientCh := <-stack.ClientTopmost().Channels()
-
-			recordOpts := []pipeline.Option{
-				pipeline.WithWireEncoder(envelope.ProtocolHTTP, http1.EncodeWireBytes),
-			}
-			if recordCap > 0 {
-				recordOpts = append(recordOpts, pipeline.WithMaxBodySize(recordCap))
-			}
-
-			steps := []pipeline.Step{
-				pipeline.NewHostScopeStep(nil),
-				pipeline.NewHTTPScopeStep(nil),
-				pipeline.NewRecordStep(store, testutil.DiscardLogger(), recordOpts...),
-			}
-			p := pipeline.New(steps...)
-
-			session.RunSession(sctx, clientCh, func(_ context.Context, _ *envelope.Envelope) (layer.Channel, error) {
-				return <-stack.UpstreamTopmost().Channels(), nil
-			}, p)
-		},
+	buildCfg := &connector.BuildConfig{
+		ProxyConfig:        &config.ProxyConfig{},
+		Issuer:             issuer,
+		InsecureSkipVerify: true,
 	}
 
-	proxyLn, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	ml := connector.NewMinimalListenerFromListener(proxyLn, mlCfg)
-	go ml.Serve(ctx)
-	t.Cleanup(func() { ml.Close() })
+	onStack := func(sctx context.Context, stack *connector.ConnectionStack, _, _ *envelope.TLSSnapshot, _ string) {
+		defer close(sessionDone)
+		defer stack.Close()
 
-	return proxyLn.Addr().String(), sessionDone
+		clientCh := <-stack.ClientTopmost().Channels()
+
+		recordOpts := []pipeline.Option{
+			pipeline.WithWireEncoder(envelope.ProtocolHTTP, http1.EncodeWireBytes),
+		}
+		if recordCap > 0 {
+			recordOpts = append(recordOpts, pipeline.WithMaxBodySize(recordCap))
+		}
+
+		steps := []pipeline.Step{
+			pipeline.NewHostScopeStep(nil),
+			pipeline.NewHTTPScopeStep(nil),
+			pipeline.NewRecordStep(store, testutil.DiscardLogger(), recordOpts...),
+		}
+		p := pipeline.New(steps...)
+
+		session.RunSession(sctx, clientCh, func(_ context.Context, _ *envelope.Envelope) (layer.Channel, error) {
+			return <-stack.UpstreamTopmost().Channels(), nil
+		}, p)
+	}
+
+	flCfg := connector.FullListenerConfig{
+		Name: "test",
+		Addr: "127.0.0.1:0",
+		OnCONNECT: connector.NewCONNECTHandler(connector.CONNECTHandlerConfig{
+			Negotiator: connector.NewCONNECTNegotiator(testutil.DiscardLogger()),
+			BuildCfg:   buildCfg,
+			OnStack:    onStack,
+		}),
+	}
+
+	fl := connector.NewFullListener(flCfg)
+	go fl.Start(ctx)
+	select {
+	case <-fl.Ready():
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timeout waiting for FullListener ready")
+	}
+
+	return fl.Addr(), sessionDone
 }
 
 // drainResponseThroughProxy performs CONNECT + TLS + GET against target via

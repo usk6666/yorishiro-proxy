@@ -469,7 +469,7 @@ func (r *sessionResult) get() error {
 	return r.lastErr
 }
 
-// startGRPCWebHTTP1Proxy starts a MinimalListener configured for HTTP MITM.
+// startGRPCWebHTTP1Proxy starts a FullListener configured for HTTP MITM.
 // Inside OnStack, both client and upstream HTTP/1 channels are wrapped with
 // grpcweb (Server / Client roles). The client side is additionally wrapped
 // with sendEndInjector so the upstream's grpcweb.RoleClient buffer flushes
@@ -491,51 +491,60 @@ func startGRPCWebHTTP1Proxy(
 	result = &sessionResult{}
 	done := make(chan struct{})
 
-	mlCfg := connector.MinimalListenerConfig{
-		BuildConfig: &connector.BuildConfig{
-			ProxyConfig:        &config.ProxyConfig{},
-			Issuer:             issuer,
-			InsecureSkipVerify: true,
-		},
-		OnStack: func(streamCtx context.Context, stack *connector.ConnectionStack, _, _ *envelope.TLSSnapshot, _ string) {
-			defer close(done)
-			defer stack.Close()
-
-			rawClientCh := <-stack.ClientTopmost().Channels()
-			clientCh := newSendEndInjector(grpcweb.Wrap(rawClientCh, grpcweb.RoleServer))
-
-			p := buildPipeline(store, opts)
-
-			session.RunSession(streamCtx, clientCh, func(_ context.Context, _ *envelope.Envelope) (layer.Channel, error) {
-				rawUp := <-stack.UpstreamTopmost().Channels()
-				return grpcweb.Wrap(rawUp, grpcweb.RoleClient), nil
-			}, p, session.SessionOptions{
-				OnComplete: func(cctx context.Context, streamID string, err error) {
-					result.record(err)
-					state := "complete"
-					if err != nil && !errors.Is(err, io.EOF) {
-						state = "error"
-					}
-					if streamID != "" {
-						_ = store.UpdateStream(cctx, streamID, flow.StreamUpdate{
-							State:         state,
-							FailureReason: session.ClassifyError(err),
-						})
-					}
-				},
-			})
-		},
+	buildCfg := &connector.BuildConfig{
+		ProxyConfig:        &config.ProxyConfig{},
+		Issuer:             issuer,
+		InsecureSkipVerify: true,
 	}
 
-	proxyLn, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	ml := connector.NewMinimalListenerFromListener(proxyLn, mlCfg)
-	go ml.Serve(ctx) //nolint:errcheck // test
-	t.Cleanup(func() { ml.Close() })
+	onStack := func(streamCtx context.Context, stack *connector.ConnectionStack, _, _ *envelope.TLSSnapshot, _ string) {
+		defer close(done)
+		defer stack.Close()
 
-	return proxyLn.Addr().String(), store, result, done
+		rawClientCh := <-stack.ClientTopmost().Channels()
+		clientCh := newSendEndInjector(grpcweb.Wrap(rawClientCh, grpcweb.RoleServer))
+
+		p := buildPipeline(store, opts)
+
+		session.RunSession(streamCtx, clientCh, func(_ context.Context, _ *envelope.Envelope) (layer.Channel, error) {
+			rawUp := <-stack.UpstreamTopmost().Channels()
+			return grpcweb.Wrap(rawUp, grpcweb.RoleClient), nil
+		}, p, session.SessionOptions{
+			OnComplete: func(cctx context.Context, streamID string, err error) {
+				result.record(err)
+				state := "complete"
+				if err != nil && !errors.Is(err, io.EOF) {
+					state = "error"
+				}
+				if streamID != "" {
+					_ = store.UpdateStream(cctx, streamID, flow.StreamUpdate{
+						State:         state,
+						FailureReason: session.ClassifyError(err),
+					})
+				}
+			},
+		})
+	}
+
+	flCfg := connector.FullListenerConfig{
+		Name: "test",
+		Addr: "127.0.0.1:0",
+		OnCONNECT: connector.NewCONNECTHandler(connector.CONNECTHandlerConfig{
+			Negotiator: connector.NewCONNECTNegotiator(slog.Default()),
+			BuildCfg:   buildCfg,
+			OnStack:    onStack,
+		}),
+	}
+
+	fl := connector.NewFullListener(flCfg)
+	go fl.Start(ctx) //nolint:errcheck // test
+	select {
+	case <-fl.Ready():
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for FullListener ready")
+	}
+
+	return fl.Addr(), store, result, done
 }
 
 // ---------------------------------------------------------------------------

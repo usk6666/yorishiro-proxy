@@ -3,7 +3,7 @@ package fingerprint
 import (
 	"strings"
 
-	"github.com/usk6666/yorishiro-proxy/internal/codec/http1/parser"
+	"github.com/usk6666/yorishiro-proxy/internal/layer/http1/parser"
 )
 
 // Detector performs technology stack detection on HTTP responses.
