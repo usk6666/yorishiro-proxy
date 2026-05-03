@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/usk6666/yorishiro-proxy/internal/codec/http1/parser"
+	"github.com/usk6666/yorishiro-proxy/internal/layer/http1/parser"
 )
 
 // pipeConn creates a synchronous net.Conn pair for in-memory tests.

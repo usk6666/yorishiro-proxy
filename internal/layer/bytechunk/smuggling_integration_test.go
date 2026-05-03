@@ -154,7 +154,7 @@ func startUpstreamTLS(t *testing.T, response string) (net.Listener, func() []byt
 	}
 }
 
-// startRawPassthroughProxy starts a MinimalListener with raw passthrough for
+// startRawPassthroughProxy starts a FullListener with raw passthrough for
 // the given target and wires OnStack → RunSession with Pipeline (HostScopeStep
 // + RecordStep). Returns the proxy address, testStore for flow verification,
 // and a channel that closes when the first session completes.
@@ -174,41 +174,50 @@ func startRawPassthroughProxy(
 	store = &testStore{}
 	done := make(chan struct{})
 
-	mlCfg := connector.MinimalListenerConfig{
-		BuildConfig: &connector.BuildConfig{
-			ProxyConfig: &config.ProxyConfig{
-				RawPassthroughHosts: []string{target},
-			},
-			Issuer:             issuer,
-			InsecureSkipVerify: true,
+	buildCfg := &connector.BuildConfig{
+		ProxyConfig: &config.ProxyConfig{
+			RawPassthroughHosts: []string{target},
 		},
-		OnStack: func(ctx context.Context, stack *connector.ConnectionStack, _, _ *envelope.TLSSnapshot, _ string) {
-			defer close(done)
-			defer stack.Close()
-
-			clientCh := <-stack.ClientTopmost().Channels()
-			upstreamCh := <-stack.UpstreamTopmost().Channels()
-
-			p := pipeline.New(
-				pipeline.NewHostScopeStep(nil), // allow all
-				pipeline.NewRecordStep(store, slog.Default()),
-			)
-
-			session.RunSession(ctx, clientCh, func(_ context.Context, _ *envelope.Envelope) (layer.Channel, error) {
-				return upstreamCh, nil
-			}, p)
-		},
+		Issuer:             issuer,
+		InsecureSkipVerify: true,
 	}
 
-	proxyLn, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	ml := connector.NewMinimalListenerFromListener(proxyLn, mlCfg)
-	go ml.Serve(ctx)
-	t.Cleanup(func() { ml.Close() })
+	onStack := func(ctx context.Context, stack *connector.ConnectionStack, _, _ *envelope.TLSSnapshot, _ string) {
+		defer close(done)
+		defer stack.Close()
 
-	return proxyLn.Addr().String(), store, done
+		clientCh := <-stack.ClientTopmost().Channels()
+		upstreamCh := <-stack.UpstreamTopmost().Channels()
+
+		p := pipeline.New(
+			pipeline.NewHostScopeStep(nil), // allow all
+			pipeline.NewRecordStep(store, slog.Default()),
+		)
+
+		session.RunSession(ctx, clientCh, func(_ context.Context, _ *envelope.Envelope) (layer.Channel, error) {
+			return upstreamCh, nil
+		}, p)
+	}
+
+	flCfg := connector.FullListenerConfig{
+		Name: "test",
+		Addr: "127.0.0.1:0",
+		OnCONNECT: connector.NewCONNECTHandler(connector.CONNECTHandlerConfig{
+			Negotiator: connector.NewCONNECTNegotiator(slog.Default()),
+			BuildCfg:   buildCfg,
+			OnStack:    onStack,
+		}),
+	}
+
+	fl := connector.NewFullListener(flCfg)
+	go fl.Start(ctx)
+	select {
+	case <-fl.Ready():
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for FullListener ready")
+	}
+
+	return fl.Addr(), store, done
 }
 
 // connectThroughProxy connects to the proxy, sends CONNECT for the given
@@ -455,29 +464,37 @@ func TestRawPassthrough_TLSFailure(t *testing.T) {
 
 	onStackCalled := make(chan struct{}, 1)
 
-	mlCfg := connector.MinimalListenerConfig{
-		BuildConfig: &connector.BuildConfig{
-			ProxyConfig: &config.ProxyConfig{
-				RawPassthroughHosts: []string{target},
-			},
-			Issuer:             issuer,
-			InsecureSkipVerify: true,
+	buildCfg := &connector.BuildConfig{
+		ProxyConfig: &config.ProxyConfig{
+			RawPassthroughHosts: []string{target},
 		},
-		OnStack: func(_ context.Context, stack *connector.ConnectionStack, _, _ *envelope.TLSSnapshot, _ string) {
-			defer stack.Close()
-			onStackCalled <- struct{}{}
-		},
+		Issuer:             issuer,
+		InsecureSkipVerify: true,
+	}
+	onStack := func(_ context.Context, stack *connector.ConnectionStack, _, _ *envelope.TLSSnapshot, _ string) {
+		defer stack.Close()
+		onStackCalled <- struct{}{}
 	}
 
-	proxyLn, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
+	flCfg := connector.FullListenerConfig{
+		Name: "test",
+		Addr: "127.0.0.1:0",
+		OnCONNECT: connector.NewCONNECTHandler(connector.CONNECTHandlerConfig{
+			Negotiator: connector.NewCONNECTNegotiator(slog.Default()),
+			BuildCfg:   buildCfg,
+			OnStack:    onStack,
+		}),
 	}
-	ml := connector.NewMinimalListenerFromListener(proxyLn, mlCfg)
-	go ml.Serve(ctx)
-	defer ml.Close()
 
-	conn, err := net.DialTimeout("tcp", proxyLn.Addr().String(), 5*time.Second)
+	fl := connector.NewFullListener(flCfg)
+	go fl.Start(ctx)
+	select {
+	case <-fl.Ready():
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for FullListener ready")
+	}
+
+	conn, err := net.DialTimeout("tcp", fl.Addr(), 5*time.Second)
 	if err != nil {
 		t.Fatalf("dial proxy: %v", err)
 	}
@@ -545,29 +562,37 @@ func TestRawPassthrough_ScopeBlock(t *testing.T) {
 
 	onStackCalled := make(chan struct{}, 1)
 
-	mlCfg := connector.MinimalListenerConfig{
-		BuildConfig: &connector.BuildConfig{
-			ProxyConfig: &config.ProxyConfig{
-				RawPassthroughHosts: []string{"other.host:443"},
-			},
-			Issuer:             issuer,
-			InsecureSkipVerify: true,
+	buildCfg := &connector.BuildConfig{
+		ProxyConfig: &config.ProxyConfig{
+			RawPassthroughHosts: []string{"other.host:443"},
 		},
-		OnStack: func(_ context.Context, stack *connector.ConnectionStack, _, _ *envelope.TLSSnapshot, _ string) {
-			defer stack.Close()
-			onStackCalled <- struct{}{}
-		},
+		Issuer:             issuer,
+		InsecureSkipVerify: true,
+	}
+	onStack := func(_ context.Context, stack *connector.ConnectionStack, _, _ *envelope.TLSSnapshot, _ string) {
+		defer stack.Close()
+		onStackCalled <- struct{}{}
 	}
 
-	proxyLn, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
+	flCfg := connector.FullListenerConfig{
+		Name: "test",
+		Addr: "127.0.0.1:0",
+		OnCONNECT: connector.NewCONNECTHandler(connector.CONNECTHandlerConfig{
+			Negotiator: connector.NewCONNECTNegotiator(slog.Default()),
+			BuildCfg:   buildCfg,
+			OnStack:    onStack,
+		}),
 	}
-	ml := connector.NewMinimalListenerFromListener(proxyLn, mlCfg)
-	go ml.Serve(ctx)
-	defer ml.Close()
 
-	conn, err := net.DialTimeout("tcp", proxyLn.Addr().String(), 5*time.Second)
+	fl := connector.NewFullListener(flCfg)
+	go fl.Start(ctx)
+	select {
+	case <-fl.Ready():
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for FullListener ready")
+	}
+
+	conn, err := net.DialTimeout("tcp", fl.Addr(), 5*time.Second)
 	if err != nil {
 		t.Fatalf("dial proxy: %v", err)
 	}

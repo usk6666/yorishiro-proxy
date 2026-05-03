@@ -149,14 +149,28 @@ func TestDialUpstreamRaw_TLS(t *testing.T) {
 
 func TestDialUpstreamRaw_InvalidTarget(t *testing.T) {
 	ctx := context.Background()
-	_, _, err := DialUpstreamRaw(ctx, "", DialRawOpts{})
-	if err == nil {
-		t.Error("expected error for empty target")
+	cases := []struct {
+		name   string
+		target string
+	}{
+		{"empty", ""},
+		{"no port", "no-port"},
+		// CWE-93 CRLF guards: a target string that smuggles CR/LF must
+		// be rejected before any TCP dial is attempted, so the bytes
+		// cannot leak into a CONNECT request line on the upstream-proxy
+		// path. validateTarget runs first on every DialUpstreamRaw call.
+		{"crlf injection", "evil.example.com:443\r\nX-Evil: 1"},
+		{"only cr", "evil.example.com:443\r"},
+		{"only lf", "evil.example.com:443\n"},
 	}
-
-	_, _, err = DialUpstreamRaw(ctx, "no-port", DialRawOpts{})
-	if err == nil {
-		t.Error("expected error for target without port")
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, err := DialUpstreamRaw(ctx, tc.target, DialRawOpts{})
+			if err == nil {
+				t.Errorf("expected error for target %q", tc.target)
+			}
+		})
 	}
 }
 

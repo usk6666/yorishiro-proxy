@@ -8,8 +8,8 @@ import (
 
 // maxFramePayloadSize is the maximum allowed gRPC frame payload size (254 MB).
 // This matches config.MaxGRPCMessageSize (internal/config/limits.go) and the
-// existing gRPC frame parser (internal/protocol/grpc/frame.go).
-// Any change to config.MaxGRPCMessageSize should be reflected here.
+// gRPC frame parser in internal/layer/grpc/. Any change to
+// config.MaxGRPCMessageSize should be reflected here.
 const maxFramePayloadSize = 254 << 20 // 254 MB
 
 // Frame represents a single gRPC frame with a 5-byte header:
