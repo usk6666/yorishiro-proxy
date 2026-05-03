@@ -359,6 +359,12 @@ func buildPipeline(deps Deps, encoders *pipeline.WireEncoderRegistry, logger *sl
 		pipeline.NewTransformStep(deps.HTTPTransformEngine, deps.WSTransformEngine, deps.GRPCTransformEngine),
 		pipeline.NewPluginStepPost(deps.PluginV2Engine, encoders, logger),
 		pipeline.NewRecordStep(deps.FlowStore, logger, recordOpts...),
+		// UpgradeStep MUST run AFTER RecordStep so the 101 response is
+		// recorded as a normal HTTP envelope before the layer swap (RFC-001
+		// §3.5). Without it, runUpgradeWS / runUpgradeSSE never fire and
+		// (ws, on_message) / (sse, on_event) plugin hooks never reach the
+		// pipeline. USK-690 omitted this step; USK-691 AC 1.4 surfaces the gap.
+		session.NewUpgradeStep(),
 	)
 }
 
