@@ -104,55 +104,6 @@ func TestValidateHeaderKeys_CRLF(t *testing.T) {
 	}
 }
 
-func TestValidateResendHeaders_Clean(t *testing.T) {
-	params := resendParams{
-		OverrideHeaders: HeaderEntries{
-			{Key: "Content-Type", Value: "text/plain"},
-		},
-		AddHeaders: HeaderEntries{
-			{Key: "X-Custom", Value: "value"},
-		},
-		RemoveHeaders: []string{"X-Old"},
-	}
-	if err := validateResendHeaders(params); err != nil {
-		t.Fatalf("expected no error for clean headers, got: %v", err)
-	}
-}
-
-func TestValidateResendHeaders_CRLFInOverride(t *testing.T) {
-	params := resendParams{
-		OverrideHeaders: HeaderEntries{
-			{Key: "X-Evil", Value: "value\r\nInjected: evil"},
-		},
-	}
-	err := validateResendHeaders(params)
-	if err == nil {
-		t.Fatal("expected error for CRLF in override_headers, got nil")
-	}
-}
-
-func TestValidateResendHeaders_CRLFInAdd(t *testing.T) {
-	params := resendParams{
-		AddHeaders: HeaderEntries{
-			{Key: "X-Evil", Value: "value\r\nInjected: evil"},
-		},
-	}
-	err := validateResendHeaders(params)
-	if err == nil {
-		t.Fatal("expected error for CRLF in add_headers, got nil")
-	}
-}
-
-func TestValidateResendHeaders_CRLFInRemoveKey(t *testing.T) {
-	params := resendParams{
-		RemoveHeaders: []string{"X-Evil\r\nInjected"},
-	}
-	err := validateResendHeaders(params)
-	if err == nil {
-		t.Fatal("expected error for CRLF in remove_headers key, got nil")
-	}
-}
-
 // --- Macro override_headers CRLF validation tests (CWE-113) ---
 
 func TestValidateMacroDefinition_OverrideHeaders_CRLFInValue(t *testing.T) {

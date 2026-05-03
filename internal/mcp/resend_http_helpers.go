@@ -50,6 +50,21 @@ var resendHTTPSupportedProtocols = map[string]bool{
 	"http": true,
 }
 
+// validateOverrideHost validates that override_host is in host:port format.
+func validateOverrideHost(host string) error {
+	h, p, err := net.SplitHostPort(host)
+	if err != nil {
+		return fmt.Errorf("must be host:port format: %w", err)
+	}
+	if h == "" {
+		return fmt.Errorf("host cannot be empty")
+	}
+	if p == "" {
+		return fmt.Errorf("port cannot be empty")
+	}
+	return nil
+}
+
 // validateResendHTTPInput rejects malformed inputs at the schema boundary
 // before any expensive lookups (flow store, dial) run. Header CR/LF guards,
 // body-encoding parse, body_patch shape, and required-field rules live here.

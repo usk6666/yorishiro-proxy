@@ -58,11 +58,11 @@ func callMacro(t *testing.T, cs *gomcp.ClientSession, args map[string]any) *gomc
 	return result
 }
 
-// callExecute invokes the execute tool (resend, resend_raw, tcp_replay) and returns the raw result.
-func callExecute(t *testing.T, cs *gomcp.ClientSession, args map[string]any) *gomcp.CallToolResult {
+// manageCallTool is a helper that calls the manage tool with the given arguments.
+func manageCallTool(t *testing.T, cs *gomcp.ClientSession, args map[string]any) *gomcp.CallToolResult {
 	t.Helper()
 	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
-		Name:      "resend",
+		Name:      "manage",
 		Arguments: args,
 	})
 	if err != nil {
@@ -1221,132 +1221,5 @@ func TestExecute_RunMacro_SkippedStepNotRecorded(t *testing.T) {
 	}
 	if len(macroFlows) > 0 && macroFlows[0].Tags["macro_step"] != "login" {
 		t.Errorf("macro_step = %q, want login", macroFlows[0].Tags["macro_step"])
-	}
-}
-
-func TestExecute_RunMacro_HookAlsoRecordsSessions(t *testing.T) {
-	t.Parallel()
-	store := newTestStore(t)
-
-	// Token server for the hook macro step.
-	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("X-Auth-Token", "hook-token")
-		w.WriteHeader(200)
-		w.Write([]byte("ok"))
-	}))
-	defer tokenServer.Close()
-
-	// Target server for the main resend.
-	targetServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/plain")
-		w.WriteHeader(200)
-		w.Write([]byte("target-ok"))
-	}))
-	defer targetServer.Close()
-
-	ctx := context.Background()
-
-	// Save token flow.
-	tokenURL, _ := url.Parse(tokenServer.URL + "/token")
-	tokenSess := &flow.Stream{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
-	if err := store.SaveStream(ctx, tokenSess); err != nil {
-		t.Fatalf("SaveFlow: %v", err)
-	}
-	if err := store.SaveFlow(ctx, &flow.Flow{
-		StreamID: tokenSess.ID, Sequence: 0, Direction: "send",
-		Timestamp: time.Now().UTC(), Method: "GET", URL: tokenURL,
-		Headers: map[string][]string{},
-	}); err != nil {
-		t.Fatalf("AppendMessage: %v", err)
-	}
-
-	// Save target flow.
-	targetURL, _ := url.Parse(targetServer.URL + "/api/data")
-	targetSess := &flow.Stream{Protocol: "HTTP/1.x", Timestamp: time.Now().UTC()}
-	if err := store.SaveStream(ctx, targetSess); err != nil {
-		t.Fatalf("SaveFlow: %v", err)
-	}
-	if err := store.SaveFlow(ctx, &flow.Flow{
-		StreamID: targetSess.ID, Sequence: 0, Direction: "send",
-		Timestamp: time.Now().UTC(), Method: "GET", URL: targetURL,
-		Headers: map[string][]string{},
-	}); err != nil {
-		t.Fatalf("AppendMessage: %v", err)
-	}
-
-	cs := setupMacroTestSession(t, store)
-
-	// Define the hook macro.
-	callMacro(t, cs, map[string]any{
-		"action": "define_macro",
-		"params": map[string]any{
-			"name": "hook-macro",
-			"steps": []any{
-				map[string]any{
-					"id":      "get-token",
-					"flow_id": tokenSess.ID,
-					"extract": []any{
-						map[string]any{
-							"name":        "auth_token",
-							"from":        "response",
-							"source":      "header",
-							"header_name": "X-Auth-Token",
-						},
-					},
-				},
-			},
-		},
-	})
-
-	// Count sessions before resend.
-	beforeSessions, err := store.ListStreams(ctx, flow.StreamListOptions{Limit: 100})
-	if err != nil {
-		t.Fatalf("ListFlows: %v", err)
-	}
-	beforeCount := len(beforeSessions)
-
-	// Resend with pre_send hook.
-	resendResult := callExecute(t, cs, map[string]any{
-		"action": "resend",
-		"params": map[string]any{
-			"flow_id": targetSess.ID,
-			"hooks": map[string]any{
-				"pre_send": map[string]any{
-					"macro":        "hook-macro",
-					"run_interval": "always",
-				},
-			},
-		},
-	})
-	if resendResult.IsError {
-		t.Fatalf("resend with hook failed: %v", resendResult.Content)
-	}
-
-	// Check that the hook macro step was recorded as a flow.
-	afterFlows, err := store.ListStreams(ctx, flow.StreamListOptions{Limit: 100})
-	if err != nil {
-		t.Fatalf("ListFlows: %v", err)
-	}
-
-	var hookFlows []*flow.Stream
-	for _, s := range afterFlows {
-		if s.Tags != nil && s.Tags["macro"] == "hook-macro" {
-			hookFlows = append(hookFlows, s)
-		}
-	}
-
-	if len(hookFlows) != 1 {
-		t.Errorf("hook macro sessions = %d, want 1", len(hookFlows))
-	}
-	if len(hookFlows) > 0 {
-		if hookFlows[0].Tags["macro_step"] != "get-token" {
-			t.Errorf("macro_step = %q, want get-token", hookFlows[0].Tags["macro_step"])
-		}
-	}
-
-	// The total new flows should be at least 2: 1 for the hook macro step + 1 for the resend itself.
-	newCount := len(afterFlows) - beforeCount
-	if newCount < 2 {
-		t.Errorf("new flows = %d, want >= 2 (hook macro + resend)", newCount)
 	}
 }

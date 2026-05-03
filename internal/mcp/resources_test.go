@@ -57,9 +57,7 @@ func TestListResources_AllRegistered(t *testing.T) {
 		"yorishiro://help/proxy_start",
 		"yorishiro://help/proxy_stop",
 		"yorishiro://help/query",
-		"yorishiro://help/resend",
 		"yorishiro://help/manage",
-		"yorishiro://help/fuzz",
 		"yorishiro://help/macro",
 		"yorishiro://help/intercept",
 		"yorishiro://help/configure",
@@ -76,9 +74,7 @@ func TestListResources_AllRegistered(t *testing.T) {
 	expectedSchemaURIs := []string{
 		"yorishiro://schema/proxy_start",
 		"yorishiro://schema/query",
-		"yorishiro://schema/resend",
 		"yorishiro://schema/manage",
-		"yorishiro://schema/fuzz",
 		"yorishiro://schema/macro",
 		"yorishiro://schema/intercept",
 		"yorishiro://schema/configure",
@@ -89,18 +85,8 @@ func TestListResources_AllRegistered(t *testing.T) {
 		}
 	}
 
-	// Verify the dynamic info resource is present.
-	expectedInfoURIs := []string{
-		"yorishiro://info/wordlist_dir",
-	}
-	for _, uri := range expectedInfoURIs {
-		if !gotURIs[uri] {
-			t.Errorf("missing info resource: %s", uri)
-		}
-	}
-
-	// Total expected count = 11 help + 8 schema + 1 info = 20.
-	expectedCount := len(expectedHelpURIs) + len(expectedSchemaURIs) + len(expectedInfoURIs)
+	// Total expected count = 9 help + 6 schema = 15.
+	expectedCount := len(expectedHelpURIs) + len(expectedSchemaURIs)
 	if len(result.Resources) != expectedCount {
 		t.Errorf("resource count = %d, want %d", len(result.Resources), expectedCount)
 	}
@@ -133,12 +119,6 @@ func TestReadResource_HelpResources(t *testing.T) {
 			uri:          "yorishiro://help/query",
 			wantMIMEType: "text/markdown",
 			wantContains: "flows",
-		},
-		{
-			name:         "help/resend",
-			uri:          "yorishiro://help/resend",
-			wantMIMEType: "text/markdown",
-			wantContains: "replay",
 		},
 		{
 			name:         "help/configure",
@@ -213,12 +193,6 @@ func TestReadResource_SchemaResources(t *testing.T) {
 			uri:          "yorishiro://schema/query",
 			wantMIMEType: "application/json",
 			wantTitle:    "query input",
-		},
-		{
-			name:         "schema/resend",
-			uri:          "yorishiro://schema/resend",
-			wantMIMEType: "application/json",
-			wantTitle:    "resend input",
 		},
 		{
 			name:         "schema/configure",
@@ -297,20 +271,6 @@ func TestReadResource_ContentAccuracy(t *testing.T) {
 		}
 	}
 
-	// Verify help/resend mentions all available actions.
-	result, err = cs.ReadResource(context.Background(), &gomcp.ReadResourceParams{
-		URI: "yorishiro://help/resend",
-	})
-	if err != nil {
-		t.Fatalf("ReadResource: %v", err)
-	}
-
-	text = result.Contents[0].Text
-	for _, action := range availableResendActions {
-		if !strings.Contains(text, action) {
-			t.Errorf("help/resend does not mention action %q", action)
-		}
-	}
 }
 
 func TestReadResource_SchemaFieldConsistency(t *testing.T) {
@@ -345,34 +305,6 @@ func TestReadResource_SchemaFieldConsistency(t *testing.T) {
 		}
 	}
 
-	// Verify schema/resend lists the correct action enum values.
-	result, err = cs.ReadResource(context.Background(), &gomcp.ReadResourceParams{
-		URI: "yorishiro://schema/resend",
-	})
-	if err != nil {
-		t.Fatalf("ReadResource: %v", err)
-	}
-
-	var execSchema struct {
-		Properties struct {
-			Action struct {
-				Enum []string `json:"enum"`
-			} `json:"action"`
-		} `json:"properties"`
-	}
-	if err := json.Unmarshal([]byte(result.Contents[0].Text), &execSchema); err != nil {
-		t.Fatalf("unmarshal schema: %v", err)
-	}
-
-	gotActions := make(map[string]bool)
-	for _, a := range execSchema.Properties.Action.Enum {
-		gotActions[a] = true
-	}
-	for _, a := range availableResendActions {
-		if !gotActions[a] {
-			t.Errorf("schema/resend enum missing action %q", a)
-		}
-	}
 }
 
 func TestResourceMetadata(t *testing.T) {
@@ -420,38 +352,6 @@ func TestResourceMetadata(t *testing.T) {
 				t.Errorf("info resource has MIME type %s, want text/plain", r.MIMEType)
 			}
 		})
-	}
-}
-
-func TestReadResource_WordlistDir(t *testing.T) {
-	cs := setupResourceTestSession(t)
-
-	result, err := cs.ReadResource(context.Background(), &gomcp.ReadResourceParams{
-		URI: "yorishiro://info/wordlist_dir",
-	})
-	if err != nil {
-		t.Fatalf("ReadResource: %v", err)
-	}
-
-	if len(result.Contents) == 0 {
-		t.Fatal("result has no contents")
-	}
-
-	content := result.Contents[0]
-	if content.URI != "yorishiro://info/wordlist_dir" {
-		t.Errorf("content URI = %q, want %q", content.URI, "yorishiro://info/wordlist_dir")
-	}
-	if content.MIMEType != "text/plain" {
-		t.Errorf("content MIMEType = %q, want %q", content.MIMEType, "text/plain")
-	}
-	if content.Text == "" {
-		t.Error("content text is empty")
-	}
-	if !strings.Contains(content.Text, ".yorishiro-proxy") {
-		t.Errorf("content text %q does not contain expected directory component", content.Text)
-	}
-	if !strings.Contains(content.Text, "wordlists") {
-		t.Errorf("content text %q does not contain 'wordlists'", content.Text)
 	}
 }
 

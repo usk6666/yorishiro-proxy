@@ -19,7 +19,7 @@
 //
 //   - Pipeline      — intercept / transform / safety request pipeline
 //   - Connector     — network listeners, scope, TLS, protocol handler setters
-//   - JobRunner     — resend, fuzz, raw replay machinery
+//   - JobRunner     — raw replay + macro HTTP machinery
 //   - FlowStore     — sqlite-backed Stream/Flow storage
 //   - MacroEngine   — placeholder for future macro engine state
 //   - PluginEngine  — Starlark plugin engine
@@ -38,7 +38,6 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/cert"
 	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
-	"github.com/usk6666/yorishiro-proxy/internal/fuzzer"
 	"github.com/usk6666/yorishiro-proxy/internal/plugin"
 	"github.com/usk6666/yorishiro-proxy/internal/pluginv2"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
@@ -285,36 +284,26 @@ func NewConnector(
 }
 
 // JobRunner groups outbound-traffic generation dependencies used by the
-// resend, fuzz, and raw replay tools.
+// raw replay tools and macro HTTP calls.
 //
-// replayDoer is a legacy net/http.Client-based HTTP doer used by the fuzzer
-// engine and macro HTTP calls. It will be removed once those paths migrate
-// to UpstreamRouter (see USK-* roadmap).
-//
-// replayRouter is a test-injectable UpstreamRouter for the resend tool's
-// HTTP round-trip path. When nil, resendUpstreamRouter() creates a real
-// UpstreamRouter with a ConnPool at call time.
+// replayDoer is a legacy net/http.Client-based HTTP doer used by macro HTTP
+// calls. It will be removed once those paths migrate to UpstreamRouter
+// (see USK-* roadmap).
 type JobRunner struct {
-	fuzzRunner      *fuzzer.Runner
 	fuzzStore       flow.FuzzStore
 	replayDoer      httpDoer
-	replayRouter    resendRouter
 	rawReplayDialer rawDialer
 }
 
 // NewJobRunner constructs a JobRunner.
 func NewJobRunner(
-	fuzzRunner *fuzzer.Runner,
 	fuzzStore flow.FuzzStore,
 	replayDoer httpDoer,
-	replayRouter resendRouter,
 	rawReplayDialer rawDialer,
 ) *JobRunner {
 	return &JobRunner{
-		fuzzRunner:      fuzzRunner,
 		fuzzStore:       fuzzStore,
 		replayDoer:      replayDoer,
-		replayRouter:    replayRouter,
 		rawReplayDialer: rawReplayDialer,
 	}
 }
