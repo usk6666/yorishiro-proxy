@@ -100,6 +100,31 @@ func (e *InterceptEngine) RemoveRule(id string) {
 	}
 }
 
+// Rules returns a defensive copy of the current rule slice. See
+// rules/http.InterceptEngine.Rules for the rationale (RFC-001 N9
+// configure_tool depends on this getter for rule-count reporting).
+func (e *InterceptEngine) Rules() []InterceptRule {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	out := make([]InterceptRule, len(e.rules))
+	copy(out, e.rules)
+	return out
+}
+
+// EnableRule toggles the Enabled flag on the rule with the given ID.
+// Returns false if no such rule is present.
+func (e *InterceptEngine) EnableRule(id string, enabled bool) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for i := range e.rules {
+		if e.rules[i].ID == id {
+			e.rules[i].Enabled = enabled
+			return true
+		}
+	}
+	return false
+}
+
 // MatchStart evaluates rules against a GRPCStartMessage envelope.
 // Returns the matched rule IDs.
 func (e *InterceptEngine) MatchStart(env *envelope.Envelope, msg *envelope.GRPCStartMessage) []string {

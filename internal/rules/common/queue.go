@@ -70,6 +70,20 @@ func (q *HoldQueue) SetMaxItems(n int) {
 	q.maxItems = n
 }
 
+// Timeout returns the current timeout duration applied to held entries.
+func (q *HoldQueue) Timeout() time.Duration {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.timeout
+}
+
+// TimeoutBehavior returns the current timeout-expiry behavior.
+func (q *HoldQueue) TimeoutBehavior() TimeoutBehavior {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.behavior
+}
+
 // Hold enqueues an envelope and blocks until an action is received,
 // the context is cancelled, or the timeout expires.
 func (q *HoldQueue) Hold(ctx context.Context, env *envelope.Envelope, matchedRules []string) (*HoldAction, error) {

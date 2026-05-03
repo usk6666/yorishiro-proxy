@@ -11,8 +11,8 @@ import (
 
 	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
-	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/rules"
+	httprules "github.com/usk6666/yorishiro-proxy/internal/rules/http"
 	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
 
@@ -1797,11 +1797,11 @@ func TestProxyStart_ResetsInterceptAndTransformOnRestart(t *testing.T) {
 
 	scope := proxy.NewCaptureScope()
 	pl := proxy.NewPassthroughList()
-	interceptEng := intercept.NewEngine()
+	httpInterceptEng := httprules.NewInterceptEngine()
 	transformPipe := rules.NewPipeline()
 
 	cs := setupProxyStartTestSessionWithOptions(t, manager, scope, pl,
-		WithInterceptEngine(interceptEng),
+		WithHTTPInterceptEngine(httpInterceptEng),
 		WithTransformPipeline(transformPipe),
 	)
 
@@ -1812,8 +1812,9 @@ func TestProxyStart_ResetsInterceptAndTransformOnRestart(t *testing.T) {
 			map[string]any{
 				"id":        "rule-1",
 				"enabled":   true,
+				"protocol":  "http",
 				"direction": "request",
-				"conditions": map[string]any{
+				"http": map[string]any{
 					"host_pattern": ".*\\.example\\.com",
 				},
 			},
@@ -1843,8 +1844,8 @@ func TestProxyStart_ResetsInterceptAndTransformOnRestart(t *testing.T) {
 	}
 
 	// Verify rules were applied.
-	if interceptEng.Len() == 0 {
-		t.Fatal("expected intercept engine to have rules after first start")
+	if len(httpInterceptEng.Rules()) == 0 {
+		t.Fatal("expected http intercept engine to have rules after first start")
 	}
 	if transformPipe.Len() == 0 {
 		t.Fatal("expected transform pipeline to have rules after first start")
@@ -1872,8 +1873,8 @@ func TestProxyStart_ResetsInterceptAndTransformOnRestart(t *testing.T) {
 	}
 
 	// Verify rules were cleared.
-	if interceptEng.Len() != 0 {
-		t.Errorf("intercept engine rule count = %d, want 0 after restart", interceptEng.Len())
+	if rs := httpInterceptEng.Rules(); len(rs) != 0 {
+		t.Errorf("http intercept engine rule count = %d, want 0 after restart", len(rs))
 	}
 	if transformPipe.Len() != 0 {
 		t.Errorf("transform pipeline rule count = %d, want 0 after restart", transformPipe.Len())

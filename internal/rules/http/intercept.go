@@ -69,6 +69,32 @@ func (e *InterceptEngine) RemoveRule(id string) {
 	}
 }
 
+// Rules returns a defensive copy of the current rule slice.
+// The HoldQueue + per-protocol-engine architecture (RFC-001 N8/N9) leaves
+// rule listing as the only stable source of truth for tools that report
+// rule counts and enabled state (configure_tool's intercept_rules result).
+func (e *InterceptEngine) Rules() []InterceptRule {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	out := make([]InterceptRule, len(e.rules))
+	copy(out, e.rules)
+	return out
+}
+
+// EnableRule toggles the Enabled flag on the rule with the given ID.
+// Returns false if no such rule is present.
+func (e *InterceptEngine) EnableRule(id string, enabled bool) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for i := range e.rules {
+		if e.rules[i].ID == id {
+			e.rules[i].Enabled = enabled
+			return true
+		}
+	}
+	return false
+}
+
 // MatchRequest checks if an HTTP request matches any intercept rules.
 // Returns matched rule IDs. Empty/nil means no match.
 func (e *InterceptEngine) MatchRequest(env *envelope.Envelope, msg *envelope.HTTPMessage) []string {

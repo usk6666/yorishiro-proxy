@@ -324,9 +324,20 @@ func (s *Server) resetSettingsToDefaults() {
 	// Reset TCP forwards to nil (no forwards).
 	s.connector.tcpForwards = nil
 
-	// Reset intercept rules to empty (no intercept).
-	if s.pipeline.interceptEngine != nil {
-		s.pipeline.interceptEngine.Clear()
+	// Reset per-protocol intercept rules to empty and drain any
+	// in-flight held envelopes so a fresh proxy start observes a clean
+	// slate.
+	if s.pipeline.httpInterceptEngine != nil {
+		s.pipeline.httpInterceptEngine.SetRules(nil)
+	}
+	if s.pipeline.wsInterceptEngine != nil {
+		s.pipeline.wsInterceptEngine.SetRules(nil)
+	}
+	if s.pipeline.grpcInterceptEngine != nil {
+		s.pipeline.grpcInterceptEngine.SetRules(nil)
+	}
+	if s.pipeline.holdQueue != nil {
+		s.pipeline.holdQueue.Clear()
 	}
 
 	// Reset auto-transform rules to empty (no transforms).

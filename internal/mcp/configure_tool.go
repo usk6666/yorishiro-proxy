@@ -4,11 +4,16 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
-	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
+	"github.com/usk6666/yorishiro-proxy/internal/rules/common"
+	grpcrules "github.com/usk6666/yorishiro-proxy/internal/rules/grpc"
+	httprules "github.com/usk6666/yorishiro-proxy/internal/rules/http"
+	wsrules "github.com/usk6666/yorishiro-proxy/internal/rules/ws"
 )
 
 // configureInput is the typed input for the configure tool.
@@ -165,6 +170,60 @@ type configureInterceptRules struct {
 
 	// Replace operation fields: full replacement.
 	Rules []interceptRuleInput `json:"rules,omitempty" jsonschema:"(replace) full list of intercept rules"`
+}
+
+// interceptRuleInput is the JSON shape for an intercept rule. The
+// Protocol discriminator selects which per-protocol conditions struct is
+// consumed (HTTP / WS / GRPC). Empty Protocol defaults to "http" for
+// backwards-friendly rule expression.
+type interceptRuleInput struct {
+	// ID is the unique identifier for this rule.
+	ID string `json:"id" jsonschema:"unique rule identifier"`
+
+	// Enabled indicates whether this rule is active.
+	Enabled bool `json:"enabled" jsonschema:"whether the rule is active"`
+
+	// Protocol selects the rule engine: "http" (default), "ws", or "grpc".
+	Protocol string `json:"protocol,omitempty" jsonschema:"rule engine: http (default), ws, or grpc"`
+
+	// Direction filters by envelope direction. Allowed values depend on
+	// Protocol: HTTP accepts request|response|both; WS/gRPC accept
+	// send|receive|both.
+	Direction string `json:"direction" jsonschema:"direction filter; HTTP: request|response|both; WS/gRPC: send|receive|both"`
+
+	// HTTP carries the HTTP-only conditions when Protocol is "http".
+	HTTP *interceptHTTPConditions `json:"http,omitempty" jsonschema:"conditions for HTTP rules"`
+
+	// WS carries the WebSocket-only conditions when Protocol is "ws".
+	WS *interceptWSConditions `json:"ws,omitempty" jsonschema:"conditions for WebSocket rules"`
+
+	// GRPC carries the gRPC-only conditions when Protocol is "grpc".
+	GRPC *interceptGRPCConditions `json:"grpc,omitempty" jsonschema:"conditions for gRPC rules"`
+}
+
+// interceptHTTPConditions holds HTTP rule conditions. All non-empty
+// fields are AND-combined.
+type interceptHTTPConditions struct {
+	HostPattern string            `json:"host_pattern,omitempty" jsonschema:"regex matched against the request hostname"`
+	PathPattern string            `json:"path_pattern,omitempty" jsonschema:"regex matched against the URL path"`
+	Methods     []string          `json:"methods,omitempty" jsonschema:"HTTP method whitelist (case-insensitive)"`
+	HeaderMatch map[string]string `json:"header_match,omitempty" jsonschema:"header name → regex pattern (case-insensitive name lookup)"`
+}
+
+// interceptWSConditions holds WebSocket rule conditions.
+type interceptWSConditions struct {
+	HostPattern    string   `json:"host_pattern,omitempty" jsonschema:"regex matched against the upgrade request hostname"`
+	PathPattern    string   `json:"path_pattern,omitempty" jsonschema:"regex matched against the upgrade request path"`
+	OpcodeFilter   []string `json:"opcode_filter,omitempty" jsonschema:"opcode names to match: text|binary|close|ping|pong|continuation"`
+	PayloadPattern string   `json:"payload_pattern,omitempty" jsonschema:"regex matched against the decompressed frame payload"`
+}
+
+// interceptGRPCConditions holds gRPC rule conditions.
+type interceptGRPCConditions struct {
+	ServicePattern string            `json:"service_pattern,omitempty" jsonschema:"regex matched against the gRPC service name"`
+	MethodPattern  string            `json:"method_pattern,omitempty" jsonschema:"regex matched against the gRPC method name"`
+	HeaderMatch    map[string]string `json:"header_match,omitempty" jsonschema:"metadata name → regex pattern (case-insensitive)"`
+	PayloadPattern string            `json:"payload_pattern,omitempty" jsonschema:"regex matched against the decompressed LPM payload"`
 }
 
 // configureBudget holds budget configuration for the configure tool.
@@ -490,8 +549,8 @@ func (s *Server) configureMergeInterceptRules(input configureInput, result *conf
 	if input.InterceptRules == nil {
 		return nil
 	}
-	if s.pipeline.interceptEngine == nil {
-		return fmt.Errorf("intercept engine is not initialized: proxy may not be running")
+	if !anyInterceptEngineReady(s.pipeline) {
+		return fmt.Errorf("intercept engines are not initialized: proxy may not be running")
 	}
 	if err := s.mergeInterceptRules(input.InterceptRules); err != nil {
 		return fmt.Errorf("intercept_rules merge: %w", err)
@@ -505,8 +564,8 @@ func (s *Server) configureReplaceInterceptRules(input configureInput, result *co
 	if input.InterceptRules == nil {
 		return nil
 	}
-	if s.pipeline.interceptEngine == nil {
-		return fmt.Errorf("intercept engine is not initialized: proxy may not be running")
+	if !anyInterceptEngineReady(s.pipeline) {
+		return fmt.Errorf("intercept engines are not initialized: proxy may not be running")
 	}
 	if err := s.replaceInterceptRules(input.InterceptRules); err != nil {
 		return fmt.Errorf("intercept_rules replace: %w", err)
@@ -520,7 +579,7 @@ func (s *Server) configureInterceptQueue(input configureInput, result *configure
 	if input.InterceptQueue == nil {
 		return nil
 	}
-	if s.pipeline.interceptQueue == nil {
+	if s.pipeline.holdQueue == nil {
 		return fmt.Errorf("intercept queue is not initialized: proxy may not be running")
 	}
 	if err := s.applyInterceptQueueConfig(input.InterceptQueue); err != nil {
@@ -678,91 +737,389 @@ func validateScopeRules(kind string, rules []scopeRuleInput) error {
 	return nil
 }
 
-// mergeInterceptRules applies delta add/remove/enable/disable operations to intercept rules.
+// mergeInterceptRules applies delta add/remove/enable/disable operations
+// to the per-protocol intercept engines. Each rule's Protocol field
+// (defaulting to "http") routes the operation to the corresponding
+// engine; rule IDs are looked up across all three engines for the
+// remove/enable/disable arms because the input does not carry the
+// protocol on those.
 func (s *Server) mergeInterceptRules(cfg *configureInterceptRules) error {
-	// Process additions first.
-	for _, input := range cfg.Add {
-		r := toInterceptRule(input)
-		if err := s.pipeline.interceptEngine.AddRule(r); err != nil {
-			return err
+	for i, input := range cfg.Add {
+		if err := addInterceptRule(s.pipeline, input); err != nil {
+			return fmt.Errorf("add[%d]: %w", i, err)
 		}
 	}
-
-	// Process removals.
 	for _, id := range cfg.Remove {
-		if err := s.pipeline.interceptEngine.RemoveRule(id); err != nil {
-			return err
-		}
+		removeInterceptRuleAcrossEngines(s.pipeline, id)
 	}
-
-	// Process enable.
 	for _, id := range cfg.Enable {
-		if err := s.pipeline.interceptEngine.EnableRule(id, true); err != nil {
-			return err
-		}
+		enableInterceptRuleAcrossEngines(s.pipeline, id, true)
 	}
-
-	// Process disable.
 	for _, id := range cfg.Disable {
-		if err := s.pipeline.interceptEngine.EnableRule(id, false); err != nil {
-			return err
-		}
+		enableInterceptRuleAcrossEngines(s.pipeline, id, false)
 	}
-
 	return nil
 }
 
-// replaceInterceptRules replaces all intercept rules atomically.
+// replaceInterceptRules replaces all per-protocol rule sets atomically:
+// rules are partitioned by Protocol then SetRules is called on each
+// engine (rules absent from a protocol bucket clear that engine).
 func (s *Server) replaceInterceptRules(cfg *configureInterceptRules) error {
-	rules := make([]interceptRuleInput, len(cfg.Rules))
-	copy(rules, cfg.Rules)
-
-	return s.applyInterceptRules(rules)
+	return s.applyInterceptRules(cfg.Rules)
 }
 
-// interceptRulesResult returns the current intercept rules state.
+// interceptRulesResult returns the union state across the three
+// per-protocol engines (HTTP / WS / gRPC). TotalRules and EnabledRules
+// are summed.
 func (s *Server) interceptRulesResult() *configureInterceptResult {
-	rules := s.pipeline.interceptEngine.Rules()
-	enabled := 0
-	for _, r := range rules {
-		if r.Enabled {
-			enabled++
-		}
-	}
+	total, enabled := countInterceptRules(s.pipeline)
 	return &configureInterceptResult{
-		TotalRules:   len(rules),
+		TotalRules:   total,
 		EnabledRules: enabled,
 	}
 }
 
-// applyInterceptQueueConfig applies intercept queue configuration.
+// applyInterceptQueueConfig applies HoldQueue timeout and timeout-
+// behavior settings.
 func (s *Server) applyInterceptQueueConfig(cfg *configureInterceptQueue) error {
 	if cfg.TimeoutMs != nil {
 		ms := *cfg.TimeoutMs
 		if ms < 1000 {
 			return fmt.Errorf("timeout_ms must be >= 1000, got %d", ms)
 		}
-		s.pipeline.interceptQueue.SetTimeout(time.Duration(ms) * time.Millisecond)
+		s.pipeline.holdQueue.SetTimeout(time.Duration(ms) * time.Millisecond)
 	}
 	if cfg.TimeoutBehavior != "" {
-		switch intercept.TimeoutBehavior(cfg.TimeoutBehavior) {
-		case intercept.TimeoutAutoRelease, intercept.TimeoutAutoDrop:
-			s.pipeline.interceptQueue.SetTimeoutBehavior(intercept.TimeoutBehavior(cfg.TimeoutBehavior))
+		switch common.TimeoutBehavior(cfg.TimeoutBehavior) {
+		case common.TimeoutAutoRelease, common.TimeoutAutoDrop:
+			s.pipeline.holdQueue.SetTimeoutBehavior(common.TimeoutBehavior(cfg.TimeoutBehavior))
 		default:
 			return fmt.Errorf("invalid timeout_behavior %q: must be %q or %q",
-				cfg.TimeoutBehavior, intercept.TimeoutAutoRelease, intercept.TimeoutAutoDrop)
+				cfg.TimeoutBehavior, common.TimeoutAutoRelease, common.TimeoutAutoDrop)
 		}
 	}
 	return nil
 }
 
-// interceptQueueResult returns the current intercept queue configuration state.
+// interceptQueueResult returns the current HoldQueue configuration state.
 func (s *Server) interceptQueueResult() *configureInterceptQueueResult {
 	return &configureInterceptQueueResult{
-		TimeoutMs:       s.pipeline.interceptQueue.Timeout().Milliseconds(),
-		TimeoutBehavior: string(s.pipeline.interceptQueue.TimeoutBehaviorValue()),
-		QueuedItems:     s.pipeline.interceptQueue.Len(),
+		TimeoutMs:       s.pipeline.holdQueue.Timeout().Milliseconds(),
+		TimeoutBehavior: string(s.pipeline.holdQueue.TimeoutBehavior()),
+		QueuedItems:     s.pipeline.holdQueue.Len(),
 	}
+}
+
+// applyInterceptRules partitions input rules by Protocol and SetRules
+// onto the per-protocol engines. A protocol bucket with zero rules
+// clears that engine; the helper validates that the corresponding
+// engine pointer is non-nil before writing.
+func (s *Server) applyInterceptRules(inputs []interceptRuleInput) error {
+	httpRules, wsRules, grpcRules, err := compileInterceptRules(inputs)
+	if err != nil {
+		return err
+	}
+	if s.pipeline.httpInterceptEngine != nil {
+		s.pipeline.httpInterceptEngine.SetRules(httpRules)
+	} else if len(httpRules) > 0 {
+		return fmt.Errorf("http intercept engine is not initialized")
+	}
+	if s.pipeline.wsInterceptEngine != nil {
+		s.pipeline.wsInterceptEngine.SetRules(wsRules)
+	} else if len(wsRules) > 0 {
+		return fmt.Errorf("ws intercept engine is not initialized")
+	}
+	if s.pipeline.grpcInterceptEngine != nil {
+		s.pipeline.grpcInterceptEngine.SetRules(grpcRules)
+	} else if len(grpcRules) > 0 {
+		return fmt.Errorf("grpc intercept engine is not initialized")
+	}
+	return nil
+}
+
+// compileInterceptRules partitions the input slice by Protocol and
+// compiles each entry to its protocol-specific rule type.
+func compileInterceptRules(inputs []interceptRuleInput) (
+	[]httprules.InterceptRule,
+	[]wsrules.InterceptRule,
+	[]grpcrules.InterceptRule,
+	error,
+) {
+	var httpRules []httprules.InterceptRule
+	var wsRules []wsrules.InterceptRule
+	var grpcRules []grpcrules.InterceptRule
+	for i, input := range inputs {
+		proto := protocolOrDefault(input.Protocol)
+		switch proto {
+		case "http":
+			r, err := compileHTTPInterceptRule(input)
+			if err != nil {
+				return nil, nil, nil, fmt.Errorf("rules[%d]: %w", i, err)
+			}
+			httpRules = append(httpRules, *r)
+		case "ws":
+			r, err := compileWSInterceptRule(input)
+			if err != nil {
+				return nil, nil, nil, fmt.Errorf("rules[%d]: %w", i, err)
+			}
+			wsRules = append(wsRules, *r)
+		case "grpc":
+			r, err := compileGRPCInterceptRule(input)
+			if err != nil {
+				return nil, nil, nil, fmt.Errorf("rules[%d]: %w", i, err)
+			}
+			grpcRules = append(grpcRules, *r)
+		default:
+			return nil, nil, nil, fmt.Errorf("rules[%d]: unknown protocol %q (expected http|ws|grpc)", i, input.Protocol)
+		}
+	}
+	return httpRules, wsRules, grpcRules, nil
+}
+
+// addInterceptRule compiles a single input and appends it to the
+// per-protocol engine. Used by the merge path.
+func addInterceptRule(p *Pipeline, input interceptRuleInput) error {
+	proto := protocolOrDefault(input.Protocol)
+	switch proto {
+	case "http":
+		if p.httpInterceptEngine == nil {
+			return fmt.Errorf("http intercept engine is not initialized")
+		}
+		r, err := compileHTTPInterceptRule(input)
+		if err != nil {
+			return err
+		}
+		p.httpInterceptEngine.AddRule(*r)
+	case "ws":
+		if p.wsInterceptEngine == nil {
+			return fmt.Errorf("ws intercept engine is not initialized")
+		}
+		r, err := compileWSInterceptRule(input)
+		if err != nil {
+			return err
+		}
+		p.wsInterceptEngine.AddRule(*r)
+	case "grpc":
+		if p.grpcInterceptEngine == nil {
+			return fmt.Errorf("grpc intercept engine is not initialized")
+		}
+		r, err := compileGRPCInterceptRule(input)
+		if err != nil {
+			return err
+		}
+		p.grpcInterceptEngine.AddRule(*r)
+	default:
+		return fmt.Errorf("unknown protocol %q (expected http|ws|grpc)", input.Protocol)
+	}
+	return nil
+}
+
+// removeInterceptRuleAcrossEngines removes an ID from every per-protocol
+// engine. Each engine's RemoveRule is silently idempotent so this is
+// safe.
+func removeInterceptRuleAcrossEngines(p *Pipeline, id string) {
+	if p.httpInterceptEngine != nil {
+		p.httpInterceptEngine.RemoveRule(id)
+	}
+	if p.wsInterceptEngine != nil {
+		p.wsInterceptEngine.RemoveRule(id)
+	}
+	if p.grpcInterceptEngine != nil {
+		p.grpcInterceptEngine.RemoveRule(id)
+	}
+}
+
+// enableInterceptRuleAcrossEngines toggles Enabled on every engine that
+// owns a rule with the given ID.
+func enableInterceptRuleAcrossEngines(p *Pipeline, id string, enabled bool) {
+	if p.httpInterceptEngine != nil {
+		_ = p.httpInterceptEngine.EnableRule(id, enabled)
+	}
+	if p.wsInterceptEngine != nil {
+		_ = p.wsInterceptEngine.EnableRule(id, enabled)
+	}
+	if p.grpcInterceptEngine != nil {
+		_ = p.grpcInterceptEngine.EnableRule(id, enabled)
+	}
+}
+
+// countInterceptRules sums the rule counts and enabled counts across
+// the three per-protocol engines.
+func countInterceptRules(p *Pipeline) (total, enabled int) {
+	if p.httpInterceptEngine != nil {
+		for _, r := range p.httpInterceptEngine.Rules() {
+			total++
+			if r.Enabled {
+				enabled++
+			}
+		}
+	}
+	if p.wsInterceptEngine != nil {
+		for _, r := range p.wsInterceptEngine.Rules() {
+			total++
+			if r.Enabled {
+				enabled++
+			}
+		}
+	}
+	if p.grpcInterceptEngine != nil {
+		for _, r := range p.grpcInterceptEngine.Rules() {
+			total++
+			if r.Enabled {
+				enabled++
+			}
+		}
+	}
+	return total, enabled
+}
+
+// anyInterceptEngineReady returns true when at least one per-protocol
+// intercept engine is non-nil. The configure_tool's intercept_rules
+// path requires at least one ready engine to make progress.
+func anyInterceptEngineReady(p *Pipeline) bool {
+	return p.httpInterceptEngine != nil || p.wsInterceptEngine != nil || p.grpcInterceptEngine != nil
+}
+
+// protocolOrDefault returns the canonical protocol discriminator value.
+// An empty input is treated as "http" so existing config payloads that
+// omit the field continue to drive HTTP rule matching.
+func protocolOrDefault(p string) string {
+	switch strings.ToLower(strings.TrimSpace(p)) {
+	case "", "http":
+		return "http"
+	case "ws", "websocket":
+		return "ws"
+	case "grpc":
+		return "grpc"
+	default:
+		return p
+	}
+}
+
+// compileHTTPInterceptRule compiles an HTTP interceptRuleInput into a
+// per-protocol rule. Direction and condition fields are validated.
+func compileHTTPInterceptRule(input interceptRuleInput) (*httprules.InterceptRule, error) {
+	if input.HTTP == nil {
+		return nil, fmt.Errorf("http: conditions are required (set http.host_pattern, http.path_pattern, http.methods, or http.header_match)")
+	}
+	dir, err := normalizeHTTPDirection(input.Direction)
+	if err != nil {
+		return nil, err
+	}
+	rule, err := httprules.CompileInterceptRule(
+		input.ID,
+		dir,
+		input.HTTP.HostPattern,
+		input.HTTP.PathPattern,
+		input.HTTP.Methods,
+		input.HTTP.HeaderMatch,
+	)
+	if err != nil {
+		return nil, err
+	}
+	rule.Enabled = input.Enabled
+	return rule, nil
+}
+
+// compileWSInterceptRule compiles a WebSocket interceptRuleInput.
+func compileWSInterceptRule(input interceptRuleInput) (*wsrules.InterceptRule, error) {
+	if input.WS == nil {
+		return nil, fmt.Errorf("ws: conditions are required")
+	}
+	dir, err := normalizeStreamDirection(input.Direction)
+	if err != nil {
+		return nil, err
+	}
+	opcodes, err := compileWSOpcodeFilter(input.WS.OpcodeFilter)
+	if err != nil {
+		return nil, err
+	}
+	rule, err := wsrules.CompileInterceptRule(
+		input.ID,
+		wsrules.RuleDirection(dir),
+		input.WS.HostPattern,
+		input.WS.PathPattern,
+		opcodes,
+		input.WS.PayloadPattern,
+	)
+	if err != nil {
+		return nil, err
+	}
+	rule.Enabled = input.Enabled
+	return rule, nil
+}
+
+// compileGRPCInterceptRule compiles a gRPC interceptRuleInput.
+func compileGRPCInterceptRule(input interceptRuleInput) (*grpcrules.InterceptRule, error) {
+	if input.GRPC == nil {
+		return nil, fmt.Errorf("grpc: conditions are required")
+	}
+	dir, err := normalizeStreamDirection(input.Direction)
+	if err != nil {
+		return nil, err
+	}
+	rule, err := grpcrules.CompileInterceptRule(
+		input.ID,
+		grpcrules.RuleDirection(dir),
+		input.GRPC.ServicePattern,
+		input.GRPC.MethodPattern,
+		input.GRPC.HeaderMatch,
+		input.GRPC.PayloadPattern,
+	)
+	if err != nil {
+		return nil, err
+	}
+	rule.Enabled = input.Enabled
+	return rule, nil
+}
+
+// normalizeHTTPDirection canonicalises the direction string for HTTP
+// rules. Empty defaults to "both".
+func normalizeHTTPDirection(d string) (httprules.RuleDirection, error) {
+	switch strings.ToLower(strings.TrimSpace(d)) {
+	case "", "both":
+		return httprules.DirectionBoth, nil
+	case "request":
+		return httprules.DirectionRequest, nil
+	case "response":
+		return httprules.DirectionResponse, nil
+	default:
+		return "", fmt.Errorf("direction: unknown value %q (expected request|response|both)", d)
+	}
+}
+
+// normalizeStreamDirection canonicalises the direction string for
+// streaming rule kinds (WS, gRPC) that operate on send/receive frames.
+// Empty defaults to "both".
+func normalizeStreamDirection(d string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(d)) {
+	case "", "both":
+		return "both", nil
+	case "send":
+		return "send", nil
+	case "receive":
+		return "receive", nil
+	default:
+		return "", fmt.Errorf("direction: unknown value %q (expected send|receive|both)", d)
+	}
+}
+
+// compileWSOpcodeFilter converts a list of opcode names into the
+// numeric opcode constants used by the WS engine. Empty input means
+// "match all opcodes".
+func compileWSOpcodeFilter(names []string) ([]envelope.WSOpcode, error) {
+	if len(names) == 0 {
+		return nil, nil
+	}
+	out := make([]envelope.WSOpcode, 0, len(names))
+	for _, name := range names {
+		op, err := wsOpcodeFromName(name)
+		if err != nil {
+			return nil, fmt.Errorf("opcode_filter: %w", err)
+		}
+		out = append(out, op)
+	}
+	return out, nil
 }
 
 // mergeAutoTransform applies delta add/remove/enable/disable operations to auto-transform rules.
