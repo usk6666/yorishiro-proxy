@@ -352,38 +352,8 @@ func TestIntegration_FullLifecycle(t *testing.T) {
 		t.Errorf("query flow duration = %d, want >= 0", getResult.DurationMs)
 	}
 
-	// 5. Replay the request via execute tool.
-	// Note: execute replay uses an HTTP client that by default blocks private
-	// networks (SSRF protection). Since our upstream is on loopback, we need
-	// to handle the expected failure.
-	replayResult, replayErr := env.cs.CallTool(context.Background(), &gomcp.CallToolParams{
-		Name: "resend",
-		Arguments: map[string]any{
-			"action": "replay",
-			"params": map[string]any{
-				"flow_id": flowEntry.ID,
-			},
-		},
-	})
-	if replayErr != nil {
-		t.Fatalf("CallTool(execute/replay): %v", replayErr)
-	}
-	// The replay will fail because the target is a private address (SSRF protection).
-	// This is expected behavior — we verify the tool ran and returned an error.
-	if !replayResult.IsError {
-		// If replay succeeded (e.g., SSRF protection is relaxed), verify the result.
-		var rr resendActionResult
-		tc, ok := replayResult.Content[0].(*gomcp.TextContent)
-		if ok {
-			json.Unmarshal([]byte(tc.Text), &rr)
-		}
-		if rr.NewFlowID == "" {
-			t.Error("resend replay returned empty new_flow_id")
-		}
-		if rr.StatusCode != 200 {
-			t.Errorf("execute replay status_code = %d, want 200", rr.StatusCode)
-		}
-	}
+	// 5. (Legacy `resend` step removed in USK-695 — replaced by typed
+	// `resend_http` covered by `internal/mcp/resend_http_integration_test.go`.)
 
 	// 6. Delete the flow via manage tool.
 	deleteResult := callTool[executeDeleteFlowsResult](t, env.cs, "manage", map[string]any{
@@ -507,19 +477,6 @@ func TestIntegration_ExecuteDeleteFlows_NotFound(t *testing.T) {
 	})
 }
 
-// TestIntegration_ExecuteReplay_NoSession verifies that execute replay returns
-// an error when the referenced session does not exist.
-func TestIntegration_ExecuteReplay_NoSession(t *testing.T) {
-	env := setupIntegrationEnv(t)
-
-	callToolExpectError(t, env.cs, "resend", map[string]any{
-		"action": "replay",
-		"params": map[string]any{
-			"flow_id": "nonexistent-flow-id",
-		},
-	})
-}
-
 // TestIntegration_QuerySessions_Empty verifies that query sessions returns an
 // empty list when no sessions have been recorded.
 func TestIntegration_QuerySessions_Empty(t *testing.T) {
@@ -549,16 +506,22 @@ func TestIntegration_ListTools(t *testing.T) {
 	}
 
 	expectedTools := map[string]bool{
-		"proxy_start": false,
-		"proxy_stop":  false,
-		"configure":   false,
-		"query":       false,
-		"resend":      false,
-		"manage":      false,
-		"fuzz":        false,
-		"macro":       false,
-		"intercept":   false,
-		"plugin":      false,
+		"proxy_start":       false,
+		"proxy_stop":        false,
+		"configure":         false,
+		"query":             false,
+		"manage":            false,
+		"macro":             false,
+		"intercept":         false,
+		"plugin_introspect": false,
+		"resend_http":       false,
+		"resend_ws":         false,
+		"resend_grpc":       false,
+		"resend_raw":        false,
+		"fuzz_http":         false,
+		"fuzz_ws":           false,
+		"fuzz_grpc":         false,
+		"fuzz_raw":          false,
 	}
 
 	for _, tool := range toolsResult.Tools {

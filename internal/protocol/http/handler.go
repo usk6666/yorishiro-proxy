@@ -18,7 +18,6 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/fingerprint"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
-	"github.com/usk6666/yorishiro-proxy/internal/plugin"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/grpcweb"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
@@ -74,7 +73,6 @@ type Handler struct {
 	transformPipeline *rules.Pipeline
 	h2Handler         H2Handler
 	grpcWebHandler    *grpcweb.Handler
-	pluginEngine      *plugin.Engine
 	tlsTransport      httputil.TLSTransport
 	detector          *fingerprint.Detector
 	connPool          *ConnPool
@@ -146,17 +144,6 @@ func (h *Handler) SetH2Handler(handler H2Handler) {
 // service/method metadata instead of plain HTTP/1.x flows.
 func (h *Handler) SetGRPCWebHandler(handler *grpcweb.Handler) {
 	h.grpcWebHandler = handler
-}
-
-// SetPluginEngine sets the plugin engine used to dispatch hook events
-// during HTTP request/response processing.
-func (h *Handler) SetPluginEngine(engine *plugin.Engine) {
-	h.pluginEngine = engine
-}
-
-// PluginEngine returns the handler's current plugin engine, or nil.
-func (h *Handler) PluginEngine() *plugin.Engine {
-	return h.pluginEngine
 }
 
 // SetTLSTransport sets the TLS transport used for upstream HTTPS connections.
@@ -394,21 +381,6 @@ func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *parser.
 		return h.handleGRPCWeb(ctx, conn, req, reqURL, bodyResult.recordBody, false, nil, logger)
 	}
 
-	// Build plugin ConnInfo for hook data.
-	pluginConnInfo := &plugin.ConnInfo{ClientAddr: clientAddr}
-	txCtx := plugin.NewTxCtx()
-
-	// Plugin hook: on_receive_from_client.
-	var pluginDropped bool
-	req, bodyResult.recordBody, pluginDropped = h.dispatchOnReceiveFromClient(ctx, conn, req, bodyResult.recordBody, pluginConnInfo, txCtx, logger)
-	if pluginDropped {
-		return nil
-	}
-
-	// Re-derive reqURL after plugin hook — the plugin may have modified
-	// the request URI (CP-7).
-	reqURL = parseRequestURL(ctx, req, "http")
-
 	// Build send record params for progressive recording.
 	sp := sendRecordParams{
 		connID:       connID,
@@ -454,9 +426,6 @@ func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *parser.
 
 	bodyResult.recordBody = h.applyTransform(req, reqURL, bodyResult.recordBody)
 
-	// Plugin hook: on_before_send_to_server.
-	req, bodyResult.recordBody = h.dispatchOnBeforeSendToServer(ctx, req, bodyResult.recordBody, pluginConnInfo, txCtx, logger)
-
 	sp.reqBody = bodyResult.recordBody
 
 	// Progressive recording: record send before forwarding.
@@ -472,15 +441,11 @@ func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *parser.
 	// SSE detection.
 	if isSSEResponseRaw(fwd.resp) {
 		sendResult.tags = addSSETags(sendResult.tags)
-		hookCtx := &sseHookContext{connInfo: pluginConnInfo, txCtx: txCtx}
-		return h.handleSSEStream(ctx, conn, req, reqURL, fwd, start, sendResult, hookCtx, logger)
+		return h.handleSSEStream(ctx, conn, req, reqURL, fwd, start, sendResult, logger)
 	}
 
 	fullRespBody := h.readResponseBody(fwd.resp, logger)
 	receiveEnd := time.Now()
-
-	// Plugin hook: on_receive_from_server.
-	fwd.resp, fullRespBody = h.dispatchOnReceiveFromServer(ctx, fwd.resp, fullRespBody, req, pluginConnInfo, txCtx, logger)
 
 	// Snapshot response before intercept for variant recording.
 	respSnap := snapshotRawResponse(fwd.resp.StatusCode, fwd.resp.Headers, fullRespBody)
@@ -491,9 +456,6 @@ func (h *Handler) handleRequest(ctx context.Context, conn net.Conn, req *parser.
 		return nil
 	}
 	fwd.resp, fullRespBody = rir.resp, rir.body
-
-	// Plugin hook: on_before_send_to_client.
-	fwd.resp, fullRespBody = h.dispatchOnBeforeSendToClient(ctx, fwd.resp, fullRespBody, req, pluginConnInfo, txCtx, logger)
 
 	// Serialize raw response for recording.
 	rawResponse := serializeRawResponseBytes(fwd.resp, fullRespBody)

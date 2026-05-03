@@ -16,7 +16,7 @@ func TestServer_HasSevenComponents(t *testing.T) {
 		NewJobRunner(nil, nil, nil),
 		NewFlowStore(nil),
 		NewMacroEngine(),
-		NewPluginEngine(nil, nil),
+		NewPluginEngine(nil),
 	)
 	if s == nil {
 		t.Fatal("NewServer returned nil")

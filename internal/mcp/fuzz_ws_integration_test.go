@@ -460,30 +460,3 @@ func TestFuzzWS_RejectsExcessivePayloadSize(t *testing.T) {
 		t.Errorf("error message %q does not mention size cap", msg.String())
 	}
 }
-
-// ---------------------------------------------------------------------------
-// AC#4 — Legacy `fuzz` tool unaffected (parallel coexistence).
-// ---------------------------------------------------------------------------
-
-func TestFuzzWS_LegacyCoexists(t *testing.T) {
-	cs, _, _, _ := setupFuzzWSSession(t)
-	res, err := cs.ListTools(context.Background(), &gomcp.ListToolsParams{})
-	if err != nil {
-		t.Fatalf("ListTools: %v", err)
-	}
-	var hasFuzz, hasFuzzWS bool
-	for _, tool := range res.Tools {
-		switch tool.Name {
-		case "fuzz":
-			hasFuzz = true
-		case "fuzz_ws":
-			hasFuzzWS = true
-		}
-	}
-	if !hasFuzz {
-		t.Errorf("legacy 'fuzz' tool missing")
-	}
-	if !hasFuzzWS {
-		t.Errorf("'fuzz_ws' tool missing")
-	}
-}

@@ -39,7 +39,6 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/codec/http1"
 	"github.com/usk6666/yorishiro-proxy/internal/codec/tcp"
 	"github.com/usk6666/yorishiro-proxy/internal/exchange"
-	"github.com/usk6666/yorishiro-proxy/internal/plugin"
 )
 
 // BlockInfo describes a tunnel that was refused before any bytes were
@@ -106,11 +105,6 @@ type TunnelHandler struct {
 	// client codec — sufficient for unit tests with no Pipeline.
 	RunSession SessionRunner
 
-	// PluginEngine receives the on_tls_handshake hook. Nil disables the
-	// hook dispatch. Errors from the engine are always logged and swallowed
-	// (fail-open) so a buggy plugin cannot block the tunnel.
-	PluginEngine *plugin.Engine
-
 	// Logger is used for handler-wide diagnostics. A per-connection logger
 	// is still pulled out of the context when present.
 	Logger *slog.Logger
@@ -123,16 +117,7 @@ type TunnelHandler struct {
 	// Clock is overridable for tests so BlockInfo.Timestamp is
 	// deterministic. nil falls back to time.Now.
 	Clock func() time.Time
-
-	// pluginDispatchOverride is a test-only override that replaces the
-	// PluginEngine.Dispatch call in dispatchOnTLSHandshake. It is
-	// intentionally unexported so production code cannot set it.
-	pluginDispatchOverride pluginHookDispatcher
 }
-
-// tunnelHookTimeout bounds the on_tls_handshake plugin dispatch so a slow
-// plugin cannot stall a tunnel.
-const tunnelHookTimeout = 5 * time.Second
 
 // clientHandshakeTimeout bounds the server-side TLS handshake we perform
 // toward the client. Without this bound, a client that completes CONNECT and
@@ -215,11 +200,9 @@ func (t *TunnelHandler) Handle(ctx context.Context, conn net.Conn, target, sourc
 	logger.Debug("tunnel: client TLS handshake complete", "target", target,
 		"alpn", state.NegotiatedProtocol, "sni", state.ServerName,
 		"cache_hit", cacheHit)
+	_ = host
 
-	// Step 6: plugin hook (fail-open).
-	t.dispatchOnTLSHandshake(ctx, host, state)
-
-	// Step 7+8: inner protocol detection + Codec pair + RunSession.
+	// Step 6: inner protocol detection + Codec pair + RunSession.
 	clientCodec, dialFunc, err := t.buildCodecPair(ctx, tlsConn, target, state.NegotiatedProtocol, cacheKey, cache, holder)
 	if err != nil {
 		logger.Debug("tunnel: codec pair build failed", "target", target, "error", err)
@@ -606,47 +589,6 @@ func bidirectionalCopy(ctx context.Context, a, b net.Conn) error {
 	return err
 }
 
-// pluginHookDispatcher abstracts the plugin.Engine.Dispatch signature so the
-// dispatchOnTLSHandshake unit test can inject a failing stub without having
-// to build a real Starlark plugin. Production code always uses
-// (*plugin.Engine).Dispatch.
-type pluginHookDispatcher func(ctx context.Context, hook plugin.Hook, data map[string]any) (*plugin.HookResult, error)
-
-// dispatchOnTLSHandshake delivers the on_tls_handshake plugin hook, logging
-// any plugin error and swallowing it so the tunnel continues (fail-open).
-func (t *TunnelHandler) dispatchOnTLSHandshake(ctx context.Context, host string, state tls.ConnectionState) {
-	var dispatch pluginHookDispatcher
-	switch {
-	case t.pluginDispatchOverride != nil:
-		dispatch = t.pluginDispatchOverride
-	case t.PluginEngine != nil:
-		dispatch = t.PluginEngine.Dispatch
-	default:
-		return
-	}
-
-	hookCtx, cancel := context.WithTimeout(ctx, tunnelHookTimeout)
-	defer cancel()
-
-	clientAddr := ClientAddrFromContext(ctx)
-
-	connInfo := &plugin.ConnInfo{
-		ClientAddr: clientAddr,
-		TLSVersion: tlsVersionName(state.Version),
-		TLSCipher:  tls.CipherSuiteName(state.CipherSuite),
-		TLSALPN:    state.NegotiatedProtocol,
-	}
-	data := map[string]any{
-		"event":       "tls_handshake",
-		"conn_info":   connInfo.ToMap(),
-		"server_name": host,
-	}
-
-	if _, err := dispatch(hookCtx, plugin.HookOnTLSHandshake, data); err != nil {
-		t.loggerFor(ctx).Warn("plugin on_tls_handshake hook error", "host", host, "error", err)
-	}
-}
-
 // ReportBlock delivers a pre-tunnel block notification via OnBlock. It is
 // used by the SOCKS5Handler adapter to surface denial decisions that occur
 // inside the negotiator (before TunnelHandler.Handle runs) so that callers
@@ -672,23 +614,6 @@ func (t *TunnelHandler) fireBlock(ctx context.Context, target, reason, sourcePro
 	// Use a detached context so downstream Store writes survive a parent
 	// cancellation (mirrors the pattern in Listener.dispatchOnDisconnect).
 	t.OnBlock(context.WithoutCancel(ctx), info)
-}
-
-// tlsVersionName returns the canonical display name for a TLS version.
-// Defined locally so tunnel.go does not import protocol/httputil.
-func tlsVersionName(v uint16) string {
-	switch v {
-	case tls.VersionTLS10:
-		return "TLS 1.0"
-	case tls.VersionTLS11:
-		return "TLS 1.1"
-	case tls.VersionTLS12:
-		return "TLS 1.2"
-	case tls.VersionTLS13:
-		return "TLS 1.3"
-	default:
-		return fmt.Sprintf("TLS 0x%04x", v)
-	}
 }
 
 // atoiSafe parses a decimal port string; invalid input becomes 0 so the

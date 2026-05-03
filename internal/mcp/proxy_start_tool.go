@@ -570,11 +570,10 @@ func (s *Server) startTCPForwards(ctx context.Context, listenerName string, forw
 	s.connector.tcpHandler.SetForwards(forwards)
 
 	params := proxy.TCPForwardParams{
-		Forwards:     forwards,
-		Handler:      s.connector.tcpHandler,
-		Detector:     s.connector.detector,
-		PluginEngine: s.pluginEngine.engine,
-		Issuer:       s.misc.issuer,
+		Forwards: forwards,
+		Handler:  s.connector.tcpHandler,
+		Detector: s.connector.detector,
+		Issuer:   s.misc.issuer,
 	}
 
 	if err := s.connector.manager.StartTCPForwardsNamedAny(s.misc.appCtx, listenerName, params); err != nil {

@@ -459,32 +459,6 @@ func TestResendHTTP_TargetScopeBypassRegression(t *testing.T) {
 	}
 }
 
-// TestResendHTTP_LegacyResendCoexists confirms that registering resend_http
-// did not knock the legacy `resend` tool off the server. Also asserts the
-// new tool is listed.
-func TestResendHTTP_LegacyResendCoexists(t *testing.T) {
-	cs, _, _, _ := setupResendHTTPSession(t)
-	res, err := cs.ListTools(context.Background(), &gomcp.ListToolsParams{})
-	if err != nil {
-		t.Fatalf("ListTools: %v", err)
-	}
-	var hasResend, hasResendHTTP bool
-	for _, tool := range res.Tools {
-		switch tool.Name {
-		case "resend":
-			hasResend = true
-		case "resend_http":
-			hasResendHTTP = true
-		}
-	}
-	if !hasResend {
-		t.Errorf("legacy 'resend' tool missing from registered tool list")
-	}
-	if !hasResendHTTP {
-		t.Errorf("'resend_http' tool missing from registered tool list")
-	}
-}
-
 // mustParseURL is a small helper so the test reads top-down without
 // scattering url.Parse error checks.
 func mustParseURL(t *testing.T, raw string) *url.URL {

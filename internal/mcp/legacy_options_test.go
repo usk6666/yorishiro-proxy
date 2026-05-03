@@ -18,7 +18,6 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/cert"
 	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
-	"github.com/usk6666/yorishiro-proxy/internal/plugin"
 	"github.com/usk6666/yorishiro-proxy/internal/pluginv2"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
@@ -41,7 +40,7 @@ func newServer(ctx context.Context, ca *cert.CA, store flow.Store, manager *prox
 	jr := NewJobRunner(nil, nil, nil)
 	fs := NewFlowStore(store)
 	me := NewMacroEngine()
-	pe := NewPluginEngine(nil, nil)
+	pe := NewPluginEngine(nil)
 	return NewServer(misc, pipe, conn, jr, fs, me, pe, opts...)
 }
 
@@ -80,7 +79,6 @@ type legacyDeps struct {
 	safetyEngine          *safety.Engine
 	safetyEngineSetters   []safetyEngineSetter
 	budgetManager         *proxy.BudgetManager
-	pluginEngine          *plugin.Engine
 	socks5AuthSetter      socks5AuthSetter
 	tlsTransport          httputil.TLSTransport
 	tlsFingerprintSetters []tlsFingerprintSetter
@@ -141,7 +139,7 @@ func mkServerFromLegacyDeps(d legacyDeps) *Server {
 		},
 		flowStore:    &FlowStore{store: d.store},
 		macroEngine:  &MacroEngine{},
-		pluginEngine: &PluginEngine{engine: d.pluginEngine},
+		pluginEngine: &PluginEngine{},
 		version:      "dev",
 	}
 	return s
@@ -309,13 +307,6 @@ func WithSafetyEngineSetter(setter safetyEngineSetter) ServerOption {
 func WithBudgetManager(bm *proxy.BudgetManager) ServerOption {
 	return func(s *Server) {
 		s.misc.budgetManager = bm
-	}
-}
-
-// WithPluginEngine sets the plugin engine. Test-only.
-func WithPluginEngine(engine *plugin.Engine) ServerOption {
-	return func(s *Server) {
-		s.pluginEngine.engine = engine
 	}
 }
 

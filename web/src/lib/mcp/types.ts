@@ -1352,49 +1352,6 @@ export interface SafetyFilterResult {
 }
 
 // ---------------------------------------------------------------------------
-// plugin tool — list, reload, enable, disable
-// ---------------------------------------------------------------------------
-
-/** Available plugin actions. */
-export type PluginAction = "list" | "reload" | "enable" | "disable";
-
-/** Plugin information returned by the plugin tool. */
-export interface PluginInfo {
-  name: string;
-  path: string;
-  protocol: string;
-  hooks: string[];
-  enabled: boolean;
-}
-
-/** Parameters for the plugin tool. */
-export interface PluginToolParams {
-  action: PluginAction;
-  params?: {
-    /** Plugin name (used by reload, enable, disable). If empty for reload, all plugins are reloaded. */
-    name?: string;
-  };
-}
-
-/** Result of plugin list action. */
-export interface PluginListResult {
-  plugins: PluginInfo[];
-  count: number;
-}
-
-/** Result of plugin enable/disable action. */
-export interface PluginToggleResult {
-  name: string;
-  enabled: boolean;
-}
-
-/** Result of plugin reload action. */
-export interface PluginReloadResult {
-  reloaded: string;
-  message: string;
-}
-
-// ---------------------------------------------------------------------------
 // plugin_introspect tool — RFC-001 N8 pluginv2 introspection
 // ---------------------------------------------------------------------------
 

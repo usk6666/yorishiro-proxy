@@ -18,7 +18,6 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/cert"
 	"github.com/usk6666/yorishiro-proxy/internal/codec"
 	"github.com/usk6666/yorishiro-proxy/internal/exchange"
-	"github.com/usk6666/yorishiro-proxy/internal/plugin"
 )
 
 // freshCA generates a throwaway CA for test use.
@@ -452,39 +451,6 @@ func TestTunnelHandler_SingleUpstreamDial(t *testing.T) {
 	}
 	if _, ok := th.ALPNCache.Get(th.cacheKey(target)); !ok {
 		t.Error("cache missing expected entry")
-	}
-}
-
-// TestTunnelHandler_PluginHookNilEngine verifies the on_tls_handshake hook
-// short-circuits cleanly when no PluginEngine is configured.
-func TestTunnelHandler_PluginHookNilEngine(t *testing.T) {
-	th := newTunnelHandler(t)
-	state := tls.ConnectionState{Version: tls.VersionTLS13, NegotiatedProtocol: "http/1.1"}
-	// Should not panic even with nil engine.
-	th.dispatchOnTLSHandshake(context.Background(), "example.com", state)
-}
-
-// TestTunnelHandler_PluginHookFailOpen verifies the on_tls_handshake hook
-// dispatch swallows a dispatcher error and logs it as Warn instead of
-// aborting the tunnel (fail-open by design).
-func TestTunnelHandler_PluginHookFailOpen(t *testing.T) {
-	th := newTunnelHandler(t)
-
-	var called int32
-	th.pluginDispatchOverride = func(_ context.Context, hook plugin.Hook, _ map[string]any) (*plugin.HookResult, error) {
-		atomic.AddInt32(&called, 1)
-		if hook != plugin.HookOnTLSHandshake {
-			t.Errorf("hook = %q, want %q", hook, plugin.HookOnTLSHandshake)
-		}
-		return nil, fmt.Errorf("simulated plugin error")
-	}
-
-	state := tls.ConnectionState{Version: tls.VersionTLS13, NegotiatedProtocol: "http/1.1"}
-	// Must not panic and must not return anything; the error is logged Warn.
-	th.dispatchOnTLSHandshake(context.Background(), "example.com", state)
-
-	if got := atomic.LoadInt32(&called); got != 1 {
-		t.Errorf("dispatcher call count = %d, want 1", got)
 	}
 }
 

@@ -1,7 +1,7 @@
 # Plugin Migration: Legacy Hooks → RFC-001 `register_hook`
 
-**Status:** Draft (USK-665, 2026-04-29; expanded USK-689, 2026-05-03) · Companion to [`envelope.md` §9.3](envelope.md#93-starlark-plugin-api-shape--resolved)
-**Audience:** authors of existing `internal/plugin/` Starlark scripts; consumers of the legacy `resend` / `fuzz` MCP tools
+**Status:** Final (RFC-001 N9, USK-695, 2026-05-03) · Companion to [`envelope.md` §9.3](envelope.md#93-starlark-plugin-api-shape--resolved)
+**Audience:** authors of existing `internal/plugin/` Starlark scripts; consumers of the legacy `resend` / `fuzz` / `plugin` MCP tools
 
 This document maps the legacy 8-hook surface to the RFC-001 §9.3 three-axis hook identity `(protocol, event, phase)`.
 
@@ -153,18 +153,25 @@ The N9 typed surface fixes all three at the schema level.
 
 | Component | Issue | Status |
 |-----------|-------|--------|
-| Foundation: registry, `register_hook`, surface table | USK-665 | this PR |
-| Message → snake-case Starlark dict + ordered headers + `msg["raw"]` | USK-669 | blocked by USK-665 |
-| `ctx.transaction_state` / `ctx.stream_state` lifecycle | USK-670 | blocked by USK-665 |
-| `PluginStepPre` / `PluginStepPost` Pipeline integration with resend bypass | USK-671 | blocked by USK-665 |
-| `plugin_introspect` MCP tool | USK-676 | blocked by USK-665 |
-| End-to-end plugin pipeline E2E suite | USK-681 | blocked by USK-665 |
-| Legacy `internal/plugin/` deletion | N9 | gated on the above |
-| Legacy MCP tool retire-plan (this document's "MCP Tool Migration" section + "Appendix: N9 Removal Inventory") | USK-689 | this PR |
-| Delete legacy `resend` / `fuzz` MCP tool registrations and support files | USK-693 | gated on USK-689 + live-wire baseline (USK-690 / USK-691) |
-| Delete `internal/fuzzer/` async engine | USK-694 | gated on USK-689 + USK-693 |
+| Foundation: registry, `register_hook`, surface table | USK-665 | DONE |
+| Message → snake-case Starlark dict + ordered headers + `msg["raw"]` | USK-669 | DONE |
+| `ctx.transaction_state` / `ctx.stream_state` lifecycle | USK-670 | DONE |
+| `PluginStepPre` / `PluginStepPost` Pipeline integration with resend bypass | USK-671 | DONE |
+| `plugin_introspect` MCP tool | USK-676 | DONE |
+| End-to-end plugin pipeline E2E suite | USK-681 | DONE |
+| Legacy MCP tool retire-plan (this document's "MCP Tool Migration" section + "Appendix: N9 Removal Inventory") | USK-689 | DONE |
+| Delete legacy `resend` / `fuzz` / `compare` MCP tool registrations and support files | USK-693 | DONE |
+| Delete `internal/fuzzer/` async engine (partial; iterator/position kept for typed-fuzz path) | USK-694 | DONE |
+| Delete `internal/plugin/` legacy engine; finalize this document | USK-695 | DONE (this PR) |
 
-This document will be expanded as the downstream issues land. Final form ships with the N9 release notes.
+## Release Notes Snippet
+
+This snippet is intended for inclusion in the N9 release notes (USK-698). Operators upgrading to RFC-001 N9 should be aware of the following:
+
+- **Legacy `internal/plugin/` Starlark engine is removed.** Configuration files that still carry the legacy `protocol:` or `hooks:` YAML keys under `plugins:` are rejected at startup with a pointer to this document. Migrate scripts to `register_hook()` per the [direct migration table](#direct-migration-table) above. There is no compatibility shim.
+- **Legacy MCP tools `plugin`, `resend`, `fuzz`, and `compare` are removed.** Use the typed siblings: `plugin_introspect` (replaces `plugin list`); `resend_http` / `resend_ws` / `resend_grpc` / `resend_raw` (replace `resend`); `fuzz_http` / `fuzz_ws` / `fuzz_grpc` / `fuzz_raw` (replace `fuzz`). The `plugin` actions `reload`/`enable`/`disable` have no replacement by design (RFC §9.3 D2): plugins are loaded once at proxy boot from `config.plugins`. To change the loaded set, edit the config and restart the proxy.
+- **Storage table policy.** New installs use the `plugin_kv` table created and managed by `pluginv2.Engine`. Existing installs from before USK-687 may have a `plugin_kv` table populated by the legacy engine; that table is **not** dropped on upgrade. Both engines used the same table name, so legacy data may still be visible to new pluginv2 plugins reading the same `(plugin, key)`. To start fresh, drop the table manually before upgrading: `sqlite3 <db> 'DROP TABLE IF EXISTS plugin_kv;'`. The proxy will recreate it on next start.
+- **WebUI Plugins panel** (`/plugins` route) now reads exclusively from `plugin_introspect`. The Settings → Plugins panel, which exposed the legacy `reload`/`enable`/`disable` actions, is removed.
 
 ## Appendix: N9 Removal Inventory
 
@@ -211,6 +218,40 @@ fuzz MCP tools via `internal/job/fuzz_http_source.go` (USK-677..USK-680:
 | `internal/fuzzer/position.go` + `_test.go` | **keep** | `Position` / `RequestData` / `ApplyPosition` — consumed by `internal/job/fuzz_http_source.go` for the typed fuzz path. |
 | `internal/fuzzer/doc.go` | add file | Package doc-comment narrowing the package's stated scope to position-application primitives only. |
 
-### Coexistence verified
+### USK-695 — `internal/plugin/` deletion
 
-Until USK-693 / USK-694 land, **both surfaces compile and pass tests in parallel** (`make build` + `make test` green at USK-689 merge time). This appendix exists so the deletion PRs ship as pure-removal diffs with no design surprises.
+The legacy `internal/plugin/` Starlark engine package is deleted in full (35 files: `engine.go`, `hook.go`, `registry.go`, `config.go`, `errors.go`, `convert.go`, `proxy.go`, `store.go`, `state.go`, `txctx.go`, `crypto.go`, `action.go`, `conninfo.go`, `httpconv.go`, `h2conv.go`, `rawconv.go`, `codec.go`, `doc.go`, and corresponding `*_test.go` files). The legacy 8-hook surface is gone.
+
+Plus the following surface scrubs in keeper packages:
+
+| Path | Action | Notes |
+|---|---|---|
+| `internal/mcp/plugin_tool.go` + `plugin_tool_test.go` | delete | Defined the legacy `plugin` MCP tool with actions `list`/`reload`/`enable`/`disable`. The `list` action is replaced by `plugin_introspect` (USK-676); the others have no replacement by design (RFC §9.3 D2). |
+| `internal/mcp/server.go` `s.registerPlugin()` line | remove | Legacy `plugin` registration. `s.registerPluginIntrospect()` (the typed introspect tool) remains. |
+| `internal/mcp/components.go::PluginEngine` | shrink | Drops `engine *plugin.Engine` field, retains `pluginv2 *pluginv2.Engine` only. `NewPluginEngine` signature changes from `(engine, pluginv2Engine)` to `(pluginv2Engine)`. |
+| `internal/mcp/legacy_options_test.go` | scrub | Drops `pluginEngine` field on `legacyDeps` and the `WithPluginEngine` Option. Other Options (`WithFuzzStore`, `WithIssuer`, `WithDetector`, `WithSafetyEngine`, `WithPluginv2Engine`) are kept. |
+| `internal/mcp/proxy_start_tool.go` | scrub | Drops `PluginEngine: s.pluginEngine.engine` from `proxy.TCPForwardParams`. |
+| `internal/mcp/plugin_introspect.go` | scrub | Description string drops the back-reference to the legacy `plugin` tool. |
+| `cmd/yorishiro-proxy/main.go` | scrub | Drops the `*plugin.Engine` import / field on `protocolResult` / dead-coded stub block (introduced as a stub by USK-687) / call to `mcp.NewPluginEngine(proto.pluginEngine, …)`. |
+| `internal/connector/listener.go` | scrub | Drops `pluginEngine *plugin.Engine` field on `Listener` and `Connector`, `SetPluginEngine` / `PluginEngine()` accessors, and the legacy `dispatchOnConnect` / `dispatchOnDisconnect` methods. The pluginv2 path (`SetPluginV2Engine` / `dispatchV2OnConnect` / `dispatchV2OnDisconnect`) is the only lifecycle path. |
+| `internal/connector/full_listener.go` | scrub | Drops `PluginEngine` config field and `dispatchOnConnect` / `dispatchOnDisconnect` methods. pluginv2 lifecycle hooks fan out via `proxybuild.Listener.wrapHandler`. |
+| `internal/connector/coordinator.go` | scrub | Drops `PluginEngine` config field. |
+| `internal/connector/socks5.go` | scrub | Drops `PluginEngine` field on `SOCKS5Negotiator` and the `dispatchOnSOCKS5Connect` method. pluginv2 `socks5.on_connect` fires from `connector/socks5_handler.go`. |
+| `internal/connector/tunnel.go` | scrub | Drops `PluginEngine` field on `TunnelHandler`, `pluginHookDispatcher` type alias, and `dispatchOnTLSHandshake` method. pluginv2 `tls.on_handshake` fires from `connector/stack_builder.go`. |
+| `internal/connector/socks5_test.go` + `tunnel_test.go` | trim | Delete the legacy hook tests. |
+| `internal/proxy/{manager,listener,tcp_forward}.go` | scrub | Drops `PluginEngine` config and the legacy lifecycle dispatch methods. The package itself is deleted in USK-697. |
+| `internal/proxy/listener_lifecycle_test.go` | delete | Whole-file delete (legacy lifecycle hook test). |
+| `internal/protocol/{grpc,grpcweb,http,http2,socks5,tcp,ws}/handler.go` and supporting files | scrub | Drops `pluginEngine` fields, `SetPluginEngine` accessors, `dispatchOn*` methods, and call sites that fired the legacy 8 hooks during request/response processing. The packages themselves are deleted in USK-697. |
+| `internal/protocol/http/plugin_hooks.go` + `plugin_hooks_test.go` | delete | Whole-file delete (legacy plugin hook helpers). |
+| `internal/protocol/http2/plugin_hooks.go` + `plugin_hooks_test.go` | delete | Whole-file delete. |
+| `internal/protocol/http2/grpc_subsystem.go` | scrub | Drops `applyGRPCPluginHook` / `applyGRPCResponsePluginHookH2`; safety filter and auto-transform pipeline retained. |
+| `internal/protocol/http2/grpc_subsystem_test.go` | delete | Whole-file delete (covered legacy plugin path only). |
+| `internal/protocol/{grpc,grpcweb,http,http2,socks5,tcp,ws}/*_test.go` legacy-plugin tests | delete | 10 files: `grpc/plugin_test.go`, `grpcweb/plugin_test.go`, `http/connect_lifecycle_test.go`, `http/plugin_hooks_test.go`, `http2/plugin_hooks_test.go`, `socks5/plugin_hook_test.go`, `tcp/handler_plugin_test.go`, `ws/handler_plugin_test.go`. Pluginv2 e2e parity (USK-691 livewire suite) covers the same scenarios. |
+| `internal/protocol/http2/trailer_test.go::TestTrailers_PluginHook_*` | trim | Delete the legacy plugin hook trailer test only (other trailer tests retained). |
+| `web/src/pages/Settings/PluginPanel.tsx` | delete | WebUI panel that consumed the legacy `plugin` MCP tool's `reload`/`enable`/`disable` actions. |
+| `web/src/pages/Settings/SettingsPage.tsx` | scrub | Drops the `Plugins` tab entry and the `case "plugins"` switch arm. |
+| `web/src/lib/mcp/client.ts`, `hooks.ts`, `types.ts` | scrub | Drops `client.plugin()` method, `usePlugin` hook + `UsePluginResult` interface, and the `PluginAction` / `PluginInfo` / `PluginToolParams` / `PluginListResult` / `PluginToggleResult` / `PluginReloadResult` type interfaces. The `PluginIntrospectResult` interface and `client.pluginIntrospect()` / `usePluginIntrospect()` (read-only, used by `/plugins` route) remain. |
+
+### Coexistence note
+
+Through N7/N8 + N9 batches 1-9 (USK-686..USK-694), both legacy and pluginv2 surfaces compiled and tested in parallel. After USK-695 ships (this PR), the legacy surface is gone. USK-696 collapses the connector Listener API, USK-697 deletes the now-orphan `internal/protocol/` and `internal/proxy/` trees, and USK-698 finalizes README/CHANGELOG with the user-facing snippet above.

@@ -7,11 +7,8 @@ import (
 	"io"
 	"net"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
-
-	"github.com/usk6666/yorishiro-proxy/internal/plugin"
 )
 
 // socks5TestRig runs a single Negotiate call over a net.Pipe and exposes the
@@ -537,69 +534,6 @@ func TestSOCKS5Negotiator_RateLimitBlocked(t *testing.T) {
 	rig.waitDone(2 * time.Second)
 	if !errors.Is(rig.retErr, ErrSOCKS5BlockedByRateLimit) {
 		t.Errorf("err = %v", rig.retErr)
-	}
-}
-
-// --- plugin hook ----------------------------------------------------------
-
-func TestSOCKS5Negotiator_PluginHookFailOpen(t *testing.T) {
-	neg := NewSOCKS5Negotiator(newTestLogger())
-
-	var called atomic.Int32
-	var gotHook plugin.Hook
-	var gotData map[string]any
-	var mu sync.Mutex
-	neg.pluginDispatchOverride = func(_ context.Context, hook plugin.Hook, data map[string]any) (*plugin.HookResult, error) {
-		mu.Lock()
-		defer mu.Unlock()
-		called.Add(1)
-		gotHook = hook
-		gotData = data
-		// Plugin error MUST be swallowed — handshake continues.
-		return nil, errors.New("boom")
-	}
-
-	rig := newSOCKS5TestRig(t, neg)
-	rig.ctx = ContextWithClientAddr(rig.ctx, "10.0.0.1:12345")
-	defer rig.closeAll()
-	rig.start()
-
-	go func() {
-		rig.writeClient(buildMethodGreeting(socks5MethodNoAuth))
-		rig.writeClient(buildConnectDomain("example.com", 8443))
-	}()
-
-	_ = rig.readClient(2)
-	reply := rig.readClient(10)
-	if reply[1] != socks5ReplySuccess {
-		t.Errorf("reply REP = 0x%02x, want 0x00 success (fail-open)", reply[1])
-	}
-	rig.waitDone(2 * time.Second)
-	if rig.retErr != nil {
-		t.Errorf("err = %v; plugin errors must be swallowed", rig.retErr)
-	}
-	if called.Load() != 1 {
-		t.Errorf("plugin called %d times, want 1", called.Load())
-	}
-	mu.Lock()
-	defer mu.Unlock()
-	if gotHook != plugin.HookOnSOCKS5Connect {
-		t.Errorf("hook = %v", gotHook)
-	}
-	if gotData["target"] != "example.com:8443" {
-		t.Errorf("target = %v", gotData["target"])
-	}
-	if gotData["target_host"] != "example.com" {
-		t.Errorf("target_host = %v", gotData["target_host"])
-	}
-	if gotData["target_port"] != 8443 {
-		t.Errorf("target_port = %v", gotData["target_port"])
-	}
-	if gotData["client_addr"] != "10.0.0.1:12345" {
-		t.Errorf("client_addr = %v", gotData["client_addr"])
-	}
-	if gotData["auth_method"] != socks5AuthMethodNone {
-		t.Errorf("auth_method = %v", gotData["auth_method"])
 	}
 }
 
