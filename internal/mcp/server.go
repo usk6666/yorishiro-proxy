@@ -253,7 +253,7 @@ func orDefaultPluginEngine(p *PluginEngine) *PluginEngine {
 	if p != nil {
 		return p
 	}
-	return NewPluginEngine(nil, nil)
+	return NewPluginEngine(nil)
 }
 
 // Run starts the MCP server on the given transport.
@@ -375,6 +375,5 @@ func (s *Server) registerTools() {
 	s.registerMacro()
 	s.registerIntercept()
 	s.registerSecurity()
-	s.registerPlugin()
 	s.registerPluginIntrospect()
 }

@@ -392,31 +392,6 @@ func TestResendWS_NonWSFlowIDRejected(t *testing.T) {
 	}
 }
 
-// TestResendWS_LegacyCoexists covers AC#5 — registering resend_ws does
-// not knock the legacy `resend` tool off the server.
-func TestResendWS_LegacyCoexists(t *testing.T) {
-	cs, _, _, _ := setupResendWSSession(t)
-	res, err := cs.ListTools(context.Background(), &gomcp.ListToolsParams{})
-	if err != nil {
-		t.Fatalf("ListTools: %v", err)
-	}
-	var hasResend, hasResendWS bool
-	for _, tool := range res.Tools {
-		switch tool.Name {
-		case "resend":
-			hasResend = true
-		case "resend_ws":
-			hasResendWS = true
-		}
-	}
-	if !hasResend {
-		t.Errorf("legacy 'resend' tool missing")
-	}
-	if !hasResendWS {
-		t.Errorf("'resend_ws' tool missing")
-	}
-}
-
 // newWSDeflateEchoServer accepts an HTTP Upgrade with permessage-deflate,
 // reads one compressed text frame, decompresses it, captures the
 // decompressed payload (visible via the returned getter), and writes

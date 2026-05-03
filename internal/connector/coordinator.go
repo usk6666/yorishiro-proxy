@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/layer"
-	"github.com/usk6666/yorishiro-proxy/internal/plugin"
 )
 
 // OnStackFunc is defined in connect_handler.go — it is the shared callback
@@ -22,10 +21,6 @@ import (
 type CoordinatorConfig struct {
 	// Logger for coordinator and listener logging. Nil uses slog.Default().
 	Logger *slog.Logger
-
-	// PluginEngine dispatches on_connect / on_disconnect lifecycle hooks.
-	// Nil disables hook dispatch. Shared across all listeners.
-	PluginEngine *plugin.Engine
 
 	// PeekTimeout is the default protocol detection timeout for new listeners.
 	// Zero means DefaultPeekTimeout.
@@ -105,10 +100,9 @@ type CoordinatorConfig struct {
 // Connector type (which used M39-era Detector+Dispatcher) for the RFC-001
 // architecture. The old Connector coexists until N9 cleanup.
 type Coordinator struct {
-	logger       *slog.Logger
-	pluginEngine *plugin.Engine
-	peekTimeout  time.Duration
-	maxConns     int
+	logger      *slog.Logger
+	peekTimeout time.Duration
+	maxConns    int
 
 	connectNeg   *CONNECTNegotiator
 	socks5Neg    *SOCKS5Negotiator
@@ -148,7 +142,6 @@ func NewCoordinator(cfg CoordinatorConfig) *Coordinator {
 	}
 	return &Coordinator{
 		logger:        logger,
-		pluginEngine:  cfg.PluginEngine,
 		peekTimeout:   cfg.PeekTimeout,
 		maxConns:      cfg.MaxConnections,
 		connectNeg:    cfg.CONNECTNegotiator,
@@ -211,7 +204,6 @@ func (c *Coordinator) StartNamed(ctx context.Context, name, addr string) error {
 		Logger:         c.logger,
 		PeekTimeout:    c.peekTimeout,
 		MaxConnections: c.maxConns,
-		PluginEngine:   c.pluginEngine,
 		OnCONNECT:      c.buildCONNECTHandler(),
 		OnSOCKS5:       c.buildSOCKS5Handler(),
 		OnHTTP1:        c.onHTTP1,

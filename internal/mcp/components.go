@@ -38,7 +38,6 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/cert"
 	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
-	"github.com/usk6666/yorishiro-proxy/internal/plugin"
 	"github.com/usk6666/yorishiro-proxy/internal/pluginv2"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
@@ -339,21 +338,16 @@ func NewMacroEngine() *MacroEngine {
 	return &MacroEngine{}
 }
 
-// PluginEngine wraps the Starlark plugin engines. Used by the plugin tool
-// handler (legacy engine) and the plugin_introspect tool (pluginv2 engine).
-//
-// The legacy engine is retained until RFC-001 N9 completes; tools that
-// inspect runtime hooks should use pluginv2 instead.
+// PluginEngine wraps the pluginv2 Starlark engine. Used by the
+// plugin_introspect MCP tool to surface loaded hooks at runtime.
 type PluginEngine struct {
-	engine   *plugin.Engine
 	pluginv2 *pluginv2.Engine
 }
 
-// NewPluginEngine constructs a PluginEngine. Either engine may be nil; the
-// plugin tool returns an error when the legacy engine is unset, and
-// plugin_introspect returns an empty list when the pluginv2 engine is unset.
-func NewPluginEngine(engine *plugin.Engine, pluginv2Engine *pluginv2.Engine) *PluginEngine {
-	return &PluginEngine{engine: engine, pluginv2: pluginv2Engine}
+// NewPluginEngine constructs a PluginEngine. The engine may be nil; in that
+// case plugin_introspect returns an empty list.
+func NewPluginEngine(pluginv2Engine *pluginv2.Engine) *PluginEngine {
+	return &PluginEngine{pluginv2: pluginv2Engine}
 }
 
 // Misc holds cross-cutting dependencies that do not fit a single domain

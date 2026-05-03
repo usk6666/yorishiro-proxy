@@ -21,7 +21,6 @@ import type {
   MacroToolParams,
   ManageParams,
   PluginIntrospectResult,
-  PluginToolParams,
   ProxyStartParams,
   ProxyStartResult,
   ProxyStopParams,
@@ -279,13 +278,6 @@ export class McpClient {
     params: SecurityParams,
   ): Promise<T> {
     return this.callTool<T>("security", params as unknown as Record<string, unknown>);
-  }
-
-  /** Manage Starlark plugins (list, reload, enable, disable). */
-  async plugin<T = unknown>(
-    params: PluginToolParams,
-  ): Promise<T> {
-    return this.callTool<T>("plugin", params as unknown as Record<string, unknown>);
   }
 
   // -----------------------------------------------------------------------

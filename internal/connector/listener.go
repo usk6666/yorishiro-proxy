@@ -10,7 +10,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/usk6666/yorishiro-proxy/internal/plugin"
 	"github.com/usk6666/yorishiro-proxy/internal/pluginv2"
 )
 
@@ -110,14 +109,10 @@ type Listener struct {
 	maxConnections int
 	activeConns    atomic.Int64
 
-	pluginEngine *plugin.Engine
-
-	// pluginV2Engine drives the new (RFC §9.3) lifecycle hooks
-	// (connection.on_connect, connection.on_disconnect) in parallel
-	// with the legacy pluginEngine. Both will fire concurrently until
-	// N9 retires the legacy plugin engine. atomic.Pointer so callers
-	// can install the engine before or after Start with race-free reads
-	// on the accept goroutine. nil pointer = no-op.
+	// pluginV2Engine drives RFC §9.3 lifecycle hooks
+	// (connection.on_connect, connection.on_disconnect). atomic.Pointer
+	// so callers can install the engine before or after Start with
+	// race-free reads on the accept goroutine. nil pointer = no-op.
 	pluginV2Engine atomic.Pointer[pluginv2.Engine]
 
 	mu       sync.Mutex
@@ -163,21 +158,10 @@ func NewListener(cfg ListenerConfig) *Listener {
 	return l
 }
 
-// SetPluginEngine wires the plugin engine that will receive on_connect and
-// on_disconnect lifecycle hooks. Nil disables hook dispatch.
-func (l *Listener) SetPluginEngine(engine *plugin.Engine) {
-	l.pluginEngine = engine
-}
-
-// PluginEngine returns the listener's current plugin engine, or nil.
-func (l *Listener) PluginEngine() *plugin.Engine {
-	return l.pluginEngine
-}
-
 // SetPluginV2Engine wires the pluginv2 engine that will receive RFC §9.3
 // lifecycle hooks (connection.on_connect, connection.on_disconnect). nil
-// disables pluginv2 lifecycle dispatch. Coexists with SetPluginEngine
-// until N9. Safe to call before or after Start (atomic).
+// disables pluginv2 lifecycle dispatch. Safe to call before or after Start
+// (atomic).
 func (l *Listener) SetPluginV2Engine(engine *pluginv2.Engine) {
 	l.pluginV2Engine.Store(engine)
 }
@@ -288,9 +272,6 @@ func (l *Listener) handleConn(ctx context.Context, conn net.Conn) {
 	ctx = ContextWithListenerName(ctx, l.name)
 	ctx = ContextWithLogger(ctx, connLogger)
 
-	l.dispatchOnConnect(ctx, remoteAddr, connLogger)
-	defer l.dispatchOnDisconnect(remoteAddr, connStart, connLogger)
-
 	// pluginv2 (connection, on_disconnect) — register the defer BEFORE
 	// the on_connect dispatch so a DROP outcome still fires on_disconnect
 	// (the connection WAS accepted, then closed; symmetry with the
@@ -300,8 +281,7 @@ func (l *Listener) handleConn(ctx context.Context, conn net.Conn) {
 	// pluginv2 (connection, on_connect) lifecycle dispatch (USK-683).
 	// Fires BEFORE protocol detection so a DROP-returning hook closes
 	// the connection without exposing peek bytes / starting any Layer
-	// stack. Coexists with the legacy on_connect path above; both fire
-	// independently until N9 retires the legacy plugin engine.
+	// stack.
 	if l.dispatchV2OnConnect(ctx, connID, remoteAddr, connLogger) == pluginv2.ActionDrop {
 		connLogger.Info("connection dropped by pluginv2 on_connect hook",
 			"hook", "connection.on_connect")
@@ -408,27 +388,6 @@ func (l *Listener) refineDetection(pc *PeekConn, quickKind ProtocolKind, quickFa
 	return kind, factory, peek
 }
 
-// dispatchOnConnect delivers the plugin on_connect hook. Errors are logged
-// and ignored (fail-open) so that a buggy plugin cannot stall accept.
-func (l *Listener) dispatchOnConnect(ctx context.Context, clientAddr string, logger *slog.Logger) {
-	if l.pluginEngine == nil {
-		return
-	}
-
-	hookCtx, cancel := context.WithTimeout(ctx, hookTimeout)
-	defer cancel()
-
-	connInfo := &plugin.ConnInfo{ClientAddr: clientAddr}
-	data := map[string]any{
-		"event":     "connect",
-		"conn_info": connInfo.ToMap(),
-	}
-
-	if _, err := l.pluginEngine.Dispatch(hookCtx, plugin.HookOnConnect, data); err != nil {
-		logger.Warn("plugin on_connect hook error", "error", err)
-	}
-}
-
 // dispatchV2OnConnect dispatches (connection, on_connect) hooks via the
 // pluginv2 lifecycle engine. Returns ActionContinue when no engine is
 // wired or no hooks are registered. ActionDrop short-circuits handleConn
@@ -473,31 +432,6 @@ func (l *Listener) dispatchV2OnDisconnect(connID, clientAddr string, connStart t
 	payload := pluginv2.BuildConnectionDisconnectDict(connID, clientAddr, durationMs)
 	if _, err := engine.FireLifecycle(hookCtx, pluginv2.ProtoConnection, pluginv2.EventOnDisconnect, nil, payload); err != nil {
 		logger.Warn("pluginv2 on_disconnect hook error", "error", err)
-	}
-}
-
-// dispatchOnDisconnect delivers the plugin on_disconnect hook. It uses a
-// fresh context derived from Background so that disconnect hooks still fire
-// during graceful shutdown, when the parent context has already been
-// cancelled.
-func (l *Listener) dispatchOnDisconnect(clientAddr string, connStart time.Time, logger *slog.Logger) {
-	if l.pluginEngine == nil {
-		return
-	}
-
-	dispatchCtx, cancel := context.WithTimeout(context.Background(), hookTimeout)
-	defer cancel()
-
-	durationMs := time.Since(connStart).Milliseconds()
-	connInfo := &plugin.ConnInfo{ClientAddr: clientAddr}
-	data := map[string]any{
-		"event":       "disconnect",
-		"conn_info":   connInfo.ToMap(),
-		"duration_ms": durationMs,
-	}
-
-	if _, err := l.pluginEngine.Dispatch(dispatchCtx, plugin.HookOnDisconnect, data); err != nil {
-		logger.Warn("plugin on_disconnect hook error", "error", err)
 	}
 }
 
@@ -569,7 +503,6 @@ type Connector struct {
 	detector       *Detector
 	dispatch       Dispatcher
 	logger         *slog.Logger
-	pluginEngine   *plugin.Engine
 	peekTimeout    time.Duration
 	maxConnections int
 
@@ -591,7 +524,6 @@ type ConnectorConfig struct {
 	Detector       *Detector
 	Dispatch       Dispatcher
 	Logger         *slog.Logger
-	PluginEngine   *plugin.Engine
 	PeekTimeout    time.Duration
 	MaxConnections int
 }
@@ -613,7 +545,6 @@ func NewConnector(cfg ConnectorConfig) *Connector {
 		detector:       cfg.Detector,
 		dispatch:       cfg.Dispatch,
 		logger:         logger,
-		pluginEngine:   cfg.PluginEngine,
 		peekTimeout:    cfg.PeekTimeout,
 		maxConnections: cfg.MaxConnections,
 		listeners:      make(map[string]*listenerEntry),
@@ -653,9 +584,6 @@ func (c *Connector) StartNamed(ctx context.Context, name, addr string) error {
 		PeekTimeout:    c.peekTimeout,
 		MaxConnections: c.maxConnections,
 	})
-	if c.pluginEngine != nil {
-		listener.SetPluginEngine(c.pluginEngine)
-	}
 
 	listenerCtx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})

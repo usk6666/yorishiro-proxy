@@ -22,7 +22,6 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/fingerprint"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
-	"github.com/usk6666/yorishiro-proxy/internal/plugin"
 	protogrpc "github.com/usk6666/yorishiro-proxy/internal/protocol/grpc"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/grpcweb"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/http2/hpack"
@@ -71,10 +70,6 @@ type Handler struct {
 	// application/grpc-web or application/grpc-web-text is detected.
 	// If nil, gRPC-Web streams are recorded as plain HTTP/2.
 	grpcWebHandler *grpcweb.Handler
-
-	// pluginEngine dispatches Starlark plugin hooks during HTTP/2 stream processing.
-	// If nil, no plugin hooks are invoked.
-	pluginEngine *plugin.Engine
 
 	// detector performs technology stack detection on HTTP responses.
 	// If nil, fingerprinting is skipped.
@@ -190,17 +185,6 @@ func (h *Handler) SetGRPCHandler(gh *protogrpc.Handler) {
 // are recorded as gRPC-Web sessions instead of plain HTTP/2.
 func (h *Handler) SetGRPCWebHandler(gwh *grpcweb.Handler) {
 	h.grpcWebHandler = gwh
-}
-
-// SetPluginEngine sets the plugin engine used to dispatch hook events
-// during HTTP/2 stream processing.
-func (h *Handler) SetPluginEngine(engine *plugin.Engine) {
-	h.pluginEngine = engine
-}
-
-// PluginEngine returns the handler's current plugin engine, or nil.
-func (h *Handler) PluginEngine() *plugin.Engine {
-	return h.pluginEngine
 }
 
 // SetDetector sets the fingerprint detector for technology stack detection on
@@ -330,8 +314,6 @@ type streamContext struct {
 	// reqRawFrames holds the raw HTTP/2 frame bytes received from the client
 	// for this stream. Extracted from the context set by clientConn.dispatchStream.
 	reqRawFrames [][]byte
-	// respRawFrames holds the raw HTTP/2 frame bytes from the upstream response.
-	respRawFrames [][]byte
 
 	// interceptRawAction holds the intercept action when raw mode is active.
 	// Non-nil indicates raw forwarding should be used instead of standard
@@ -343,10 +325,6 @@ type streamContext struct {
 	// Set by handleResponseIntercept when the intercept action has
 	// AutoContentLength=false.
 	respAutoContentLength bool
-
-	// Plugin state shared across hooks for this stream.
-	pluginConnInfo *plugin.ConnInfo
-	txCtx          map[string]any
 }
 
 // handleStream proxies a single HTTP/2 stream to the upstream server
@@ -390,10 +368,6 @@ func (h *Handler) handleStream(
 		return
 	}
 
-	if h.runClientPluginHook(sc) {
-		return
-	}
-
 	h.refreshRecordParams(sc)
 
 	outHeaders := h.buildOutboundHeaders(sc)
@@ -405,7 +379,7 @@ func (h *Handler) handleStream(
 		return
 	}
 
-	// Raw mode forwarding: bypass L7 transforms, plugins, and standard
+	// Raw mode forwarding: bypass L7 transforms and standard
 	// transport. Send edited raw frames directly to the upstream.
 	if sc.interceptRawAction != nil {
 		h.handleRawForward(sc, &snap)
@@ -413,8 +387,6 @@ func (h *Handler) handleStream(
 	}
 
 	h.applyRequestTransform(sc, &outHeaders)
-
-	outHeaders = h.runServerPluginHook(sc, outHeaders)
 
 	h.forwardAndRecord(sc, outHeaders, &snap)
 }
@@ -476,8 +448,6 @@ func (h *Handler) forwardAndRecord(sc *streamContext, outHeaders []hpack.HeaderF
 	if !ok {
 		return
 	}
-
-	resp = h.runResponsePluginHooks(sc, resp)
 
 	// Save unmasked body and trailers for recording before output filter
 	// masks them. Deep copy to guard against future FilterOutput
@@ -714,35 +684,6 @@ func writeScopeBlockResponse(w h2ResponseWriter, target, reason string) {
 	}
 }
 
-// runClientPluginHook dispatches the on_receive_from_client plugin hook.
-// Returns true if the request was terminated.
-func (h *Handler) runClientPluginHook(sc *streamContext) bool {
-	pluginConnInfo := &plugin.ConnInfo{
-		ClientAddr: sc.clientAddr,
-		TLSVersion: sc.tlsMeta.Version,
-		TLSCipher:  sc.tlsMeta.CipherSuite,
-		TLSALPN:    sc.tlsMeta.ALPN,
-	}
-	txCtx := plugin.NewTxCtx()
-	var terminated bool
-	sc.h2req, sc.reqBody, terminated = h.dispatchOnReceiveFromClient(sc.ctx, sc.w, sc.h2req, sc.reqBody, pluginConnInfo, txCtx, sc.reqRawFrames, sc.logger)
-	if !terminated && h.pluginEngine != nil {
-		// After plugin modification, update reqURL from h2req fields.
-		newURL := h2RequestURL(sc.h2req)
-		// Preserve scheme and host from resolved values.
-		if newURL.Scheme == "" {
-			newURL.Scheme = sc.reqURL.Scheme
-		}
-		if newURL.Host == "" {
-			newURL.Host = sc.reqURL.Host
-		}
-		sc.reqURL = newURL
-	}
-	sc.pluginConnInfo = pluginConnInfo
-	sc.txCtx = txCtx
-	return terminated
-}
-
 // refreshRecordParams updates record params after plugin modification.
 func (h *Handler) refreshRecordParams(sc *streamContext) {
 	if len(sc.reqBody) > int(config.MaxBodySize) {
@@ -879,21 +820,6 @@ func (h *Handler) applyResponseTransform(resp *h2Response) ([]hpack.HeaderField,
 	}
 	kv, newBody := h.transformPipeline.TransformResponse(resp.StatusCode, hpackToKeyValues(resp.Headers), resp.Body)
 	return keyValuesToHpack(kv), newBody
-}
-
-// runServerPluginHook dispatches the on_before_send_to_server hook.
-// Returns the (possibly updated) outbound headers.
-func (h *Handler) runServerPluginHook(sc *streamContext, outHeaders []hpack.HeaderField) []hpack.HeaderField {
-	var body []byte
-	sc.h2req, body = h.dispatchOnBeforeSendToServer(sc.ctx, sc.h2req, sc.reqBody, sc.pluginConnInfo, sc.txCtx, sc.reqRawFrames, sc.logger)
-	if body != nil {
-		sc.reqBody = body
-	}
-	// When plugin engine is active, rebuild outbound headers from h2req.
-	if h.pluginEngine != nil {
-		return buildH2HeadersFromH2Req(sc.h2req)
-	}
-	return outHeaders
 }
 
 // forwardUpstream sends the request to the upstream server and reads the response.
@@ -1102,14 +1028,6 @@ func (h *Handler) handleResponseIntercept(sc *streamContext, resp *h2Response) (
 	default:
 		return resp, true
 	}
-}
-
-// runResponsePluginHooks dispatches the on_receive_from_server and
-// on_before_send_to_client hooks using hpack native types.
-func (h *Handler) runResponsePluginHooks(sc *streamContext, resp *h2Response) *h2Response {
-	resp = h.dispatchOnReceiveFromServerH2(sc.ctx, resp, sc.h2req, sc.pluginConnInfo, sc.txCtx, sc.respRawFrames, sc.logger)
-	resp = h.dispatchOnBeforeSendToClientH2(sc.ctx, resp, sc.h2req, sc.pluginConnInfo, sc.txCtx, sc.respRawFrames, sc.logger)
-	return resp
 }
 
 // writeH2ResponseToClient writes the HTTP/2 response headers, body, and

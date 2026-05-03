@@ -17,7 +17,6 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/exchange"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
-	"github.com/usk6666/yorishiro-proxy/internal/plugin"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
 	"github.com/usk6666/yorishiro-proxy/internal/safety"
 )
@@ -32,33 +31,17 @@ func addSSETags(tags map[string]string) map[string]string {
 	return tags
 }
 
-type sseHookContext struct {
-	connInfo *plugin.ConnInfo
-	txCtx    map[string]any
-}
-
 type sseStreamContext struct {
-	req     *parser.RawRequest
-	reqURL  *url.URL
-	hookCtx *sseHookContext
+	req    *parser.RawRequest
+	reqURL *url.URL
 }
 
 // handleSSEStream handles Server-Sent Events responses.
-func (h *Handler) handleSSEStream(ctx context.Context, conn net.Conn, req *parser.RawRequest, reqURL *url.URL, fwd *forwardResult, start time.Time, sendResult *sendRecordResult, hookCtx *sseHookContext, logger *slog.Logger) error {
-	// Plugin hook: on_receive_from_server (header-level).
-	if hookCtx != nil {
-		fwd.resp, _ = h.dispatchOnReceiveFromServer(ctx, fwd.resp, nil, req, hookCtx.connInfo, hookCtx.txCtx, logger)
-	}
-
+func (h *Handler) handleSSEStream(ctx context.Context, conn net.Conn, req *parser.RawRequest, reqURL *url.URL, fwd *forwardResult, start time.Time, sendResult *sendRecordResult, logger *slog.Logger) error {
 	// Response intercept.
 	if dropped := h.applySSEIntercept(ctx, conn, req, reqURL, fwd.resp, logger); dropped {
 		h.completeSSEFlowOnDrop(ctx, sendResult, fwd, start, "", logger)
 		return nil
-	}
-
-	// Plugin hook: on_before_send_to_client (header-level).
-	if hookCtx != nil {
-		fwd.resp, _ = h.dispatchOnBeforeSendToClient(ctx, fwd.resp, nil, req, hookCtx.connInfo, hookCtx.txCtx, logger)
 	}
 
 	if err := writeRawResponseHeaders(conn, fwd.resp); err != nil {
@@ -76,7 +59,7 @@ func (h *Handler) handleSSEStream(ctx context.Context, conn net.Conn, req *parse
 	var eventSeq atomic.Int64
 	eventSeq.Store(int64(sendResult.recvSequence) + 1)
 
-	sseCtx := &sseStreamContext{req: req, reqURL: reqURL, hookCtx: hookCtx}
+	sseCtx := &sseStreamContext{req: req, reqURL: reqURL}
 	streamErr := h.streamSSEEvents(streamCtx, conn, fwd.resp.Body, sendResult.flowID, &eventSeq, sseCtx, logger)
 
 	duration := time.Since(start)
@@ -231,22 +214,12 @@ func sseEventModified(snap sseEventSnapshot, event *SSEEvent) bool {
 		snap.retry != event.Retry
 }
 
-func (h *Handler) dispatchSSEOnReceiveFromServer(ctx context.Context, event *SSEEvent, sseCtx *sseStreamContext, logger *slog.Logger) *SSEEvent {
-	if h.pluginEngine == nil || sseCtx == nil || sseCtx.hookCtx == nil {
-		return event
-	}
-	resp, body := sseEventToRawResponse(event)
-	resp, body = h.dispatchOnReceiveFromServer(ctx, resp, body, sseCtx.req, sseCtx.hookCtx.connInfo, sseCtx.hookCtx.txCtx, logger)
-	return applyRawResponseToSSEEvent(event, resp, body)
+func (h *Handler) dispatchSSEOnReceiveFromServer(_ context.Context, event *SSEEvent, _ *sseStreamContext, _ *slog.Logger) *SSEEvent {
+	return event
 }
 
-func (h *Handler) dispatchSSEOnBeforeSendToClient(ctx context.Context, event *SSEEvent, sseCtx *sseStreamContext, logger *slog.Logger) *SSEEvent {
-	if h.pluginEngine == nil || sseCtx == nil || sseCtx.hookCtx == nil {
-		return event
-	}
-	resp, body := sseEventToRawResponse(event)
-	resp, body = h.dispatchOnBeforeSendToClient(ctx, resp, body, sseCtx.req, sseCtx.hookCtx.connInfo, sseCtx.hookCtx.txCtx, logger)
-	return applyRawResponseToSSEEvent(event, resp, body)
+func (h *Handler) dispatchSSEOnBeforeSendToClient(_ context.Context, event *SSEEvent, _ *sseStreamContext, _ *slog.Logger) *SSEEvent {
+	return event
 }
 
 // sseEventToRawResponse converts an SSE event into a synthetic RawResponse.

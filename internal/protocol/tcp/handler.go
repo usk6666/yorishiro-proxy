@@ -14,7 +14,6 @@ import (
 
 	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
-	"github.com/usk6666/yorishiro-proxy/internal/plugin"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 )
 
@@ -22,11 +21,10 @@ import (
 // It acts as a fallback handler: Detect always returns true, so it must be
 // registered last in the protocol detector.
 type Handler struct {
-	store        flow.Writer
-	forwards     map[string]*config.ForwardConfig // listen port -> forward config
-	logger       *slog.Logger
-	pluginEngine *plugin.Engine
-	mu           sync.Mutex
+	store    flow.Writer
+	forwards map[string]*config.ForwardConfig // listen port -> forward config
+	logger   *slog.Logger
+	mu       sync.Mutex
 }
 
 // NewHandler creates a new raw TCP handler.
@@ -70,12 +68,6 @@ func (h *Handler) Forwards() map[string]*config.ForwardConfig {
 		out[k] = &copied
 	}
 	return out
-}
-
-// SetPluginEngine sets the plugin engine for dispatching hooks during
-// TCP relay. If engine is nil, plugin hooks are skipped.
-func (h *Handler) SetPluginEngine(engine *plugin.Engine) {
-	h.pluginEngine = engine
 }
 
 // Detect always returns true. This handler is intended as a fallback and must
@@ -132,23 +124,12 @@ func (h *Handler) Handle(ctx context.Context, conn net.Conn) error {
 
 	logger.Info("TCP relay established", "target", target)
 
-	// Build plugin ConnInfo from the flow's ConnectionInfo.
-	var pluginConnInfo *plugin.ConnInfo
-	if fl.ConnInfo != nil {
-		pluginConnInfo = &plugin.ConnInfo{
-			ClientAddr: fl.ConnInfo.ClientAddr,
-			ServerAddr: fl.ConnInfo.ServerAddr,
-		}
-	}
-
 	// Run bidirectional relay with recording.
 	relayErr := RunRelay(ctx, conn, upstream, RelayConfig{
-		Store:        h.store,
-		StreamID:     fl.ID,
-		Logger:       logger,
-		PluginEngine: h.pluginEngine,
-		ConnInfo:     pluginConnInfo,
-		Target:       target,
+		Store:    h.store,
+		StreamID: fl.ID,
+		Logger:   logger,
+		Target:   target,
 	})
 
 	// Update flow state to complete.
