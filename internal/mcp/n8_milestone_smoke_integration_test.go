@@ -78,8 +78,6 @@ func TestN8Milestone_TypedToolSurfaceCoexists(t *testing.T) {
 	// Legacy / shared tools that must remain registered alongside the
 	// typed ones (parallel coexistence until N9).
 	legacy := []string{
-		"resend",
-		"fuzz",
 		"intercept",
 		"plugin",
 		"query",

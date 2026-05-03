@@ -26,9 +26,6 @@ const maxListLimit = 1000
 // defaultReplayTimeout is the default timeout for replay HTTP requests.
 const defaultReplayTimeout = 30 * time.Second
 
-// maxRedirects is the maximum number of HTTP redirects to follow.
-const maxRedirects = 10
-
 // allowedSchemes are the URL schemes permitted for replay requests.
 var allowedSchemes = map[string]bool{
 	"http":  true,
@@ -44,20 +41,6 @@ func validateHeaderValues(headers map[string]string) error {
 		}
 		if strings.ContainsAny(v, "\r\n") {
 			return fmt.Errorf("header value for %q contains CR/LF characters", k)
-		}
-	}
-	return nil
-}
-
-// validateHeaderEntries checks that header entries do not contain CR or LF
-// characters in keys or values, which would enable HTTP header injection (CWE-113).
-func validateHeaderEntries(entries HeaderEntries) error {
-	for _, e := range entries {
-		if strings.ContainsAny(e.Key, "\r\n") {
-			return fmt.Errorf("header key %q contains CR/LF characters", e.Key)
-		}
-		if strings.ContainsAny(e.Value, "\r\n") {
-			return fmt.Errorf("header value for %q contains CR/LF characters", e.Key)
 		}
 	}
 	return nil
@@ -89,50 +72,6 @@ func validateURLScheme(u *url.URL) error {
 		return fmt.Errorf("unsupported URL scheme %q: only http and https are allowed", u.Scheme)
 	}
 	return nil
-}
-
-// safeCheckRedirect validates redirect targets when follow_redirects is enabled.
-// It enforces HTTP/HTTPS-only schemes and a maximum hop limit.
-func safeCheckRedirect(req *http.Request, via []*http.Request) error {
-	if len(via) >= maxRedirects {
-		return fmt.Errorf("too many redirects: %d", len(via))
-	}
-	if req.URL.Scheme != "http" && req.URL.Scheme != "https" {
-		return fmt.Errorf("redirect to non-HTTP scheme: %s", req.URL.Scheme)
-	}
-	return nil
-}
-
-// NewDefaultHTTPClient returns an *http.Client with an explicit timeout and
-// redirect suppression. It should be used for outbound HTTP requests initiated
-// by user input (fuzz, resend, macro, etc.). Access control is handled at a
-// higher level by the target scope enforcement layer (TargetScope).
-func NewDefaultHTTPClient() *http.Client {
-	transport := &http.Transport{
-		DialContext: (&net.Dialer{
-			Timeout: defaultReplayTimeout,
-		}).DialContext,
-	}
-	return &http.Client{
-		Timeout:   defaultReplayTimeout,
-		Transport: transport,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-	}
-}
-
-// rawDialerFunc returns the raw dialer to use for replay_raw connections.
-// If a custom dialer is set (for testing), it is returned; otherwise,
-// a default dialer with the replay timeout is returned.
-// Access control is handled by the target scope enforcement layer.
-func (s *Server) rawDialerFunc() rawDialer {
-	if s.jobRunner.rawReplayDialer != nil {
-		return s.jobRunner.rawReplayDialer
-	}
-	return &net.Dialer{
-		Timeout: defaultReplayTimeout,
-	}
 }
 
 // encodeBody returns the body as a string with its encoding type.
@@ -266,26 +205,6 @@ func checkTargetScopeAddrHelper(ts *proxy.TargetScope, scheme, addr string) erro
 		return fmt.Errorf("request blocked by target scope: host %q is %s", host, reason)
 	}
 	return nil
-}
-
-// targetScopeCheckRedirect returns a CheckRedirect function that enforces
-// both the standard redirect safety checks and target scope rules.
-// If ts is nil or has no rules, it falls back to safeCheckRedirect.
-func targetScopeCheckRedirect(ts *proxy.TargetScope) func(*http.Request, []*http.Request) error {
-	return func(req *http.Request, via []*http.Request) error {
-		// Apply standard redirect safety checks first.
-		if err := safeCheckRedirect(req, via); err != nil {
-			return err
-		}
-		// Apply target scope check on the redirect target.
-		if ts != nil && ts.HasRules() {
-			allowed, reason := ts.CheckURL(req.URL)
-			if !allowed {
-				return fmt.Errorf("redirect blocked by target scope: host %q is %s", req.URL.Hostname(), reason)
-			}
-		}
-		return nil
-	}
 }
 
 // checkSafetyInput validates request data against the safety filter engine.

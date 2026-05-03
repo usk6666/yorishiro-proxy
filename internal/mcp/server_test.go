@@ -13,7 +13,7 @@ func TestServer_HasSevenComponents(t *testing.T) {
 		NewMisc(context.Background(), nil, nil, "", nil, nil),
 		NewPipeline(nil, nil, nil, nil, nil, nil, nil),
 		NewConnector(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil),
-		NewJobRunner(nil, nil, nil, nil, nil),
+		NewJobRunner(nil, nil, nil),
 		NewFlowStore(nil),
 		NewMacroEngine(),
 		NewPluginEngine(nil, nil),
@@ -86,7 +86,6 @@ func TestServer_NewServer_NilComponentsTolerated(t *testing.T) {
 //	--------------------------    -----------------------------------------------    -----
 //	compare_tool.go               flowStore                                          1
 //	configure_tool.go             pipeline, connector, misc                          3
-//	fuzz_tool.go                  jobRunner, flowStore, pipeline, connector, misc    5 (*)
 //	helpers.go                    jobRunner, pipeline, connector                     3
 //	intercept_helpers.go          pipeline                                           1
 //	intercept_tool.go             pipeline                                           1
@@ -98,19 +97,9 @@ func TestServer_NewServer_NilComponentsTolerated(t *testing.T) {
 //	query_fuzz.go                 jobRunner                                          1
 //	query_technologies.go         flowStore                                          1
 //	query_tool.go                 misc, pipeline, connector, flowStore               4 (exception: dispatch handler)
-//	resend_multiproto.go          flowStore, connector                               2
-//	resend_raw_h2.go              connector                                          1
-//	resend_tool.go                jobRunner, flowStore, connector                    3
 //	safety_helper.go              pipeline                                           1
 //	security_tool.go              pipeline, connector, misc                          3
 //	transform_helpers.go          pipeline                                           1
-//
-// (*) fuzz_tool.go uses 5 components (JobRunner.fuzzRunner / fuzzStore,
-// FlowStore.store, Pipeline.safetyEngine, Connector.targetScope,
-// Misc.appCtx). The last three are read-only; appCtx is needed because the
-// fuzz job runs asynchronously beyond the request handler's lifetime.
-// Splitting fuzz_tool.go is out of scope for USK-664 — the same boundaries
-// will be revisited in N8 issues that introduce per-protocol fuzz handlers.
 //
 // TestHandlerComponentCount_DocumentationOnly is a placeholder that the
 // table above is the source of truth.
