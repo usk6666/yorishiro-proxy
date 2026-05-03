@@ -33,6 +33,7 @@ package mcp
 
 import (
 	"context"
+	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/cert"
 	"github.com/usk6666/yorishiro-proxy/internal/config"
@@ -44,6 +45,7 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/rules"
+	"github.com/usk6666/yorishiro-proxy/internal/proxybuild"
 	"github.com/usk6666/yorishiro-proxy/internal/rules/common"
 	"github.com/usk6666/yorishiro-proxy/internal/safety"
 )
@@ -89,14 +91,129 @@ func NewPipeline(
 	}
 }
 
-// Connector groups network/transport-level dependencies: the proxy.Manager
-// that owns listeners, the capture/target scopes, TLS plumbing, the SOCKS5
+// proxyManager is the connector-manager interface satisfied by both the
+// legacy *proxy.Manager and the RFC-001 *proxybuild.Manager. The interface
+// covers exactly the methods MCP tools (proxy_start_tool, proxy_stop_tool,
+// configure_tool, query_tool) reach through Connector.manager.
+//
+// Two managers expose this surface for the duration of the N9 transition
+// (USK-690 wiring → USK-691 parity → USK-697 legacy delete). Internal mcp
+// tests still construct *proxy.Manager directly because the legacy package
+// will not be deleted until USK-697; cmd/main.go installs *proxybuild.Manager
+// for the live data path.
+//
+// StartTCPForwardsNamedAny accepts `any` for the params argument so both
+// manager types satisfy the same signature. proxy.Manager type-asserts to
+// proxy.TCPForwardParams internally; proxybuild.Manager returns
+// proxybuild.ErrTCPForwardsNotSupported (real TCP-forward orchestration is
+// owned by USK-697 or a follow-up).
+//
+// ListenerStatuses is intentionally NOT on this interface — its concrete
+// return type differs between the two managers (proxy.ListenerStatus vs
+// proxybuild.ListenerStatus, structurally identical 4-field shapes). Use
+// the listenerStatuses free function to read uniformly via type-switch.
+type proxyManager interface {
+	Start(ctx context.Context, listenAddr string) error
+	StartNamed(ctx context.Context, name, listenAddr string) error
+	Stop(ctx context.Context) error
+	StopNamed(ctx context.Context, name string) error
+	StopAll(ctx context.Context) error
+	Status() (running bool, listenAddr string)
+	ListenerCount() int
+	ActiveConnections() int
+	Uptime() time.Duration
+	SetMaxConnections(n int)
+	MaxConnections() int
+	SetPeekTimeout(d time.Duration)
+	PeekTimeout() time.Duration
+	SetUpstreamProxy(proxyURL string)
+	UpstreamProxy() string
+	StartTCPForwardsNamedAny(ctx context.Context, name string, params any) error
+}
+
+// ListenerStatus is the mcp-package shape of per-listener status used by
+// query_tool / proxy_start_tool / proxy_stop_tool. Mirrors both
+// proxy.ListenerStatus and proxybuild.ListenerStatus (identical 4-field
+// shape); the listenerStatuses helper converts from either.
+type ListenerStatus struct {
+	Name              string `json:"name"`
+	ListenAddr        string `json:"listen_addr"`
+	ActiveConnections int    `json:"active_connections"`
+	UptimeSeconds     int64  `json:"uptime_seconds"`
+}
+
+// managerIsNil reports whether m is either a nil interface or wraps a
+// typed-nil pointer. configure / proxy_start / proxy_stop / query
+// handlers use this in place of direct `m == nil` because Go's
+// interface-typed nil semantics make `m == nil` false when m wraps a
+// (nil *proxy.Manager) — easy to hit from test helpers that pass a
+// pre-construction nil sentinel.
+func managerIsNil(m proxyManager) bool {
+	if m == nil {
+		return true
+	}
+	switch x := m.(type) {
+	case *proxy.Manager:
+		return x == nil
+	case *proxybuild.Manager:
+		return x == nil
+	default:
+		return false
+	}
+}
+
+// listenerStatuses returns the per-listener status snapshot from m as
+// []ListenerStatus, regardless of whether m is the legacy *proxy.Manager
+// or the RFC-001 *proxybuild.Manager. Returns nil when no listeners are
+// running or when m is nil.
+func listenerStatuses(m proxyManager) []ListenerStatus {
+	if managerIsNil(m) {
+		return nil
+	}
+	switch x := m.(type) {
+	case *proxy.Manager:
+		in := x.ListenerStatuses()
+		if len(in) == 0 {
+			return nil
+		}
+		out := make([]ListenerStatus, len(in))
+		for i, s := range in {
+			out[i] = ListenerStatus{
+				Name:              s.Name,
+				ListenAddr:        s.ListenAddr,
+				ActiveConnections: s.ActiveConnections,
+				UptimeSeconds:     s.UptimeSeconds,
+			}
+		}
+		return out
+	case *proxybuild.Manager:
+		in := x.ListenerStatuses()
+		if len(in) == 0 {
+			return nil
+		}
+		out := make([]ListenerStatus, len(in))
+		for i, s := range in {
+			out[i] = ListenerStatus{
+				Name:              s.Name,
+				ListenAddr:        s.ListenAddr,
+				ActiveConnections: s.ActiveConnections,
+				UptimeSeconds:     s.UptimeSeconds,
+			}
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+// Connector groups network/transport-level dependencies: the manager that
+// owns listeners, the capture/target scopes, TLS plumbing, the SOCKS5
 // authentication setter, the TCP-forward map and handler, the protocol
 // detector, and the per-handler "setter" slices that propagate runtime
 // configuration changes (upstream proxy, request timeout, target scope, rate
 // limiter, TLS fingerprint) to every protocol handler that supports them.
 type Connector struct {
-	manager               *proxy.Manager
+	manager               proxyManager
 	passthrough           *proxy.PassthroughList
 	scope                 *proxy.CaptureScope
 	targetScope           *proxy.TargetScope
@@ -118,8 +235,12 @@ type Connector struct {
 // NewConnector constructs a Connector. Most fields are optional; the manager
 // is required for proxy_start/proxy_stop tools to function. proxyDefaults
 // may be nil when no config file is loaded.
+//
+// manager accepts either the legacy *proxy.Manager (test paths and the
+// transition window) or the RFC-001 *proxybuild.Manager (cmd live data
+// path) — both satisfy the proxyManager interface.
 func NewConnector(
-	manager *proxy.Manager,
+	manager proxyManager,
 	passthrough *proxy.PassthroughList,
 	scope *proxy.CaptureScope,
 	targetScope *proxy.TargetScope,
