@@ -329,10 +329,20 @@ func assembleAndRunMCPServer(
 		return err
 	}
 
-	manager, err := assembleLiveManager(cfg, proxyCfg, store, issuer, pluginv2Engine, holdQueue, passthrough, scope, rateLimiter, logger)
+	manager, err := assembleLiveManager(ctx, cfg, proxyCfg, store, issuer, pluginv2Engine, holdQueue, passthrough, scope, rateLimiter, logger)
 	if err != nil {
 		return err
 	}
+	// Order shutdown so all in-flight Pipeline scopes finish releasing
+	// before pluginv2Engine.Close() (deferred in the caller, runWithFlags)
+	// zeroes plugin state. Without this, listener goroutines that hold a
+	// *PluginState pointer can race the engine shutdown's nil-map writes.
+	// 5s bound matches proxybuild.shutdownTimeout for graceful drain.
+	defer func() {
+		sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = manager.StopAll(sctx)
+	}()
 
 	mcpComponents, opts, err := buildMCPComponents(ctx, cfg, proxyCfg, ca, issuer, store, manager,
 		passthrough, scope, interceptEngine, interceptQueue, holdQueue, pluginv2Engine, pipeline, proto,
@@ -1385,7 +1395,13 @@ func initPluginV2Engine(ctx context.Context, store *flow.SQLiteStore, proxyCfg *
 // assembleLiveManager assembles the connector.BuildConfig and constructs
 // the live RFC-001 proxybuild.Manager in one step. Extracted from
 // runWithFlags so the latter stays under the gocyclo budget.
+//
+// appCtx is the application lifecycle context — propagated into goroutines
+// (currently only the upstream push recorder) so a SIGINT-triggered
+// cancellation reaches them without waiting for the upstream Layer's
+// channel-close drain path.
 func assembleLiveManager(
+	appCtx context.Context,
 	cfg *config.Config,
 	proxyCfg *config.ProxyConfig,
 	store *flow.SQLiteStore,
@@ -1397,7 +1413,7 @@ func assembleLiveManager(
 	rateLimiter *proxy.RateLimiter,
 	logger *slog.Logger,
 ) (*proxybuild.Manager, error) {
-	buildCfg := newLiveBuildConfig(cfg, proxyCfg, issuer, pluginv2Engine, store, logger)
+	buildCfg := newLiveBuildConfig(appCtx, cfg, proxyCfg, issuer, pluginv2Engine, store, logger)
 	return newLiveManager(cfg, proxyCfg, store, issuer, pluginv2Engine, holdQueue, passthrough, scope, rateLimiter, buildCfg, logger)
 }
 
@@ -1407,7 +1423,13 @@ func assembleLiveManager(
 // push recorder so pushed streams are recorded (USK-623). Per-protocol
 // caps (body spill, gRPC LPM, WS frame, SSE event) are resolved from
 // proxyCfg via the config-package helpers.
+//
+// appCtx is the application lifecycle context — passed to
+// pushrecorder.RunUpstream so a SIGINT-triggered cancellation reaches the
+// per-Layer drainer goroutines without waiting for the upstream Layer's
+// own channel-close path.
 func newLiveBuildConfig(
+	appCtx context.Context,
 	cfg *config.Config,
 	proxyCfg *config.ProxyConfig,
 	issuer *cert.Issuer,
@@ -1439,8 +1461,10 @@ func newLiveBuildConfig(
 	// Install the upstream push recorder (USK-623). The callback fires
 	// once per freshly-dialed *http2.Layer; pool hits skip it (the
 	// drainer is already running for the cached Layer's lifetime).
+	// appCtx is captured so SIGINT-triggered cancellation propagates to
+	// every push drainer in addition to the Layer.Channels-close path.
 	bc.OnHTTP2UpstreamDialed = func(l *http2.Layer) {
-		go pushrecorder.RunUpstream(context.Background(), l, store, logger)
+		go pushrecorder.RunUpstream(appCtx, l, store, logger)
 	}
 
 	return bc
@@ -1468,27 +1492,32 @@ func newLiveManager(
 	buildCfg *connector.BuildConfig,
 	logger *slog.Logger,
 ) (*proxybuild.Manager, error) {
+	// proxy.PassthroughList and proxy.RateLimiter are type aliases for the
+	// connector.* equivalents (see internal/proxy/passthrough.go and
+	// internal/proxy/ratelimit.go), so they can be threaded directly into
+	// proxybuild.Deps. The legacy proxy.CaptureScope is NOT aliased (it
+	// predates the connector.TargetScope rewrite); the live data path
+	// therefore cannot honor it yet — Warn loud at boot when the operator
+	// has configured non-empty rules so the policy gap is visible
+	// (USK-697 follow-up will adapt the legacy CaptureScope).
+	if scope != nil && !scope.IsEmpty() {
+		logger.Warn("live data path does not yet honor legacy proxy.CaptureScope; all in-scope hosts will be MITM'd until USK-697 wires the connector.TargetScope adapter",
+			"scope_rules_present", true)
+	}
+
 	factory := func(ctx context.Context, name, addr string) (*proxybuild.Stack, error) {
-		_ = ctx
-		// proxy.* policy types (PassthroughList, CaptureScope,
-		// RateLimiter) coexist with the connector.* equivalents during
-		// the N9 transition. proxybuild expects connector.* policy
-		// values; the legacy types are not yet adapted, so the live
-		// stack runs without policy filtering on the proxybuild side.
-		// MCP tools that mutate scope/passthrough/rateLimiter still
-		// affect the legacy proto handlers (which remain wired to those
-		// instances); the live data path is unfiltered until USK-697
-		// migrates the policy adapters. Documented for the PR.
 		return proxybuild.BuildLiveStack(ctx, proxybuild.Deps{
-			Logger:         logger,
-			ListenerName:   name,
-			ListenAddr:     addr,
-			FlowStore:      store,
-			PluginV2Engine: pluginv2Engine,
-			BuildConfig:    buildCfg,
-			HoldQueue:      holdQueue,
-			PeekTimeout:    cfg.PeekTimeout,
-			MaxConnections: cfg.MaxConnections,
+			Logger:          logger,
+			ListenerName:    name,
+			ListenAddr:      addr,
+			FlowStore:       store,
+			PluginV2Engine:  pluginv2Engine,
+			BuildConfig:     buildCfg,
+			HoldQueue:       holdQueue,
+			PeekTimeout:     cfg.PeekTimeout,
+			MaxConnections:  cfg.MaxConnections,
+			PassthroughList: passthrough,
+			RateLimiter:     rateLimiter,
 		})
 	}
 	mgr, err := proxybuild.NewManager(proxybuild.ManagerConfig{
@@ -1501,11 +1530,8 @@ func newLiveManager(
 	mgr.SetPeekTimeout(cfg.PeekTimeout)
 	mgr.SetMaxConnections(cfg.MaxConnections)
 
-	// Suppress staticcheck on intentionally-unused parameters that may
-	// be wired in follow-up cleanups (USK-697 connector adapter work).
-	_ = passthrough
-	_ = scope
-	_ = rateLimiter
+	// proxyCfg + issuer are reachable via buildCfg; kept on the parameter
+	// list for future cleanup work (USK-697 connector-adapter migration).
 	_ = proxyCfg
 	_ = issuer
 	return mgr, nil

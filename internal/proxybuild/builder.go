@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/url"
 	"sync"
@@ -452,17 +453,44 @@ func buildOnHTTP2Stack(p *pipeline.Pipeline, deps Deps, logger *slog.Logger) con
 	}
 }
 
-// buildSessionOptions populates the pluginv2-aware SessionOptions consumed
-// by post-Upgrade Layer construction (runUpgradeWS). When deps carries no
-// PluginV2Engine the returned options leave the lifecycle / releaser
-// fields nil, so ws.New runs with no lifecycle wiring (matches the
-// pre-USK-690 behavior).
+// buildSessionOptions populates the SessionOptions threaded into every
+// session.RunSession / RunStackSession call from the live data path:
+//
+//   - LifecycleEngine + StateReleaser carry the pluginv2 Engine so that
+//     post-Upgrade Layer constructors (currently runUpgradeWS) attach
+//     WithLifecycleEngine / WithStateReleaser. Both fields are nil when
+//     deps.PluginV2Engine is nil (matches the pre-USK-690 behavior).
+//
+//   - OnComplete finalises the recorded Stream's State + FailureReason via
+//     deps.FlowStore. RecordStep is documented as not managing Stream state
+//     transitions ("That is Session's responsibility via OnComplete" — see
+//     internal/pipeline/record_step.go), so without this callback every
+//     Stream recorded via the live path would stay at State="active"
+//     indefinitely. Mirrors the pattern in
+//     internal/layer/http2/http2_integration_test.go.
+//     OnComplete is omitted when FlowStore is nil (e.g. test stacks that do
+//     not record).
 func buildSessionOptions(deps Deps) session.SessionOptions {
-	if deps.PluginV2Engine == nil {
-		return session.SessionOptions{}
+	opts := session.SessionOptions{}
+	if deps.PluginV2Engine != nil {
+		opts.LifecycleEngine = deps.PluginV2Engine
+		opts.StateReleaser = deps.PluginV2Engine
 	}
-	return session.SessionOptions{
-		LifecycleEngine: deps.PluginV2Engine,
-		StateReleaser:   deps.PluginV2Engine,
+	if deps.FlowStore != nil {
+		store := deps.FlowStore
+		opts.OnComplete = func(ctx context.Context, streamID string, err error) {
+			if streamID == "" {
+				return
+			}
+			state := "complete"
+			if err != nil && !errors.Is(err, io.EOF) {
+				state = "error"
+			}
+			_ = store.UpdateStream(ctx, streamID, flow.StreamUpdate{
+				State:         state,
+				FailureReason: session.ClassifyError(err),
+			})
+		}
 	}
+	return opts
 }
