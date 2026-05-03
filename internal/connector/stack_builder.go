@@ -434,6 +434,7 @@ func buildPoolHitFastPath(
 		http2.WithBodySpillDir(cfg.BodySpillDir),
 		http2.WithBodySpillThreshold(cfg.BodySpillThreshold),
 		http2.WithMaxBodySize(cfg.MaxBodySize),
+		http2.WithStateReleaser(cfg.PluginV2Engine),
 	)
 	if err != nil {
 		cfg.HTTP2Pool.Put(poolKey, pooled)
@@ -577,6 +578,7 @@ func buildStackFromRoute(
 			http1.WithBodySpillDir(cfg.BodySpillDir),
 			http1.WithBodySpillThreshold(cfg.BodySpillThreshold),
 			http1.WithMaxBodySize(cfg.MaxBodySize),
+			http1.WithStateReleaser(cfg.PluginV2Engine),
 		)
 		stack.PushClient(clientLayer)
 
@@ -586,6 +588,7 @@ func buildStackFromRoute(
 			http1.WithBodySpillDir(cfg.BodySpillDir),
 			http1.WithBodySpillThreshold(cfg.BodySpillThreshold),
 			http1.WithMaxBodySize(cfg.MaxBodySize),
+			http1.WithStateReleaser(cfg.PluginV2Engine),
 			// USK-655: bypass body draining for SSE responses so the swap
 			// orchestrator (session.runUpgradeSSE) can hand the still-open
 			// body to sse.Wrap without blocking on a never-ending drain.
@@ -648,6 +651,7 @@ func buildH2Stack(
 		http2.WithBodySpillDir(cfg.BodySpillDir),
 		http2.WithBodySpillThreshold(cfg.BodySpillThreshold),
 		http2.WithMaxBodySize(cfg.MaxBodySize),
+		http2.WithStateReleaser(cfg.PluginV2Engine),
 	)
 	if err != nil {
 		upstreamConn.Close()
@@ -671,6 +675,7 @@ func buildH2Stack(
 			http2.WithBodySpillDir(cfg.BodySpillDir),
 			http2.WithBodySpillThreshold(cfg.BodySpillThreshold),
 			http2.WithMaxBodySize(cfg.MaxBodySize),
+			http2.WithStateReleaser(cfg.PluginV2Engine),
 		)
 		if lerr != nil {
 			// http2.New already closed upstreamConn on failure.

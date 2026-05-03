@@ -49,7 +49,7 @@ func (s *Server) handleProxyStop(ctx context.Context, _ *gomcp.CallToolRequest, 
 		)
 	}()
 
-	if s.connector.manager == nil {
+	if managerIsNil(s.connector.manager) {
 		return nil, nil, fmt.Errorf("proxy manager is not initialized")
 	}
 
@@ -67,7 +67,7 @@ func (s *Server) handleProxyStop(ctx context.Context, _ *gomcp.CallToolRequest, 
 
 	// Stop all listeners.
 	// Collect names before stopping for the response.
-	statuses := s.connector.manager.ListenerStatuses()
+	statuses := listenerStatuses(s.connector.manager)
 	if len(statuses) == 0 {
 		return nil, nil, fmt.Errorf("proxy stop: %w", proxy.ErrNotRunning)
 	}

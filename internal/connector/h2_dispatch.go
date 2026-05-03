@@ -34,8 +34,16 @@ import (
 // the gRPC Layer manages its own LPM-bounded buffer and ignores lopts.
 //
 // grpcOpts are passed to grpclayer.Wrap on the native-gRPC branch (e.g.
-// grpclayer.WithMaxMessageSize from BuildConfig.GRPCMaxMessageSize).
+// grpclayer.WithMaxMessageSize from BuildConfig.GRPCMaxMessageSize,
+// grpclayer.WithLifecycleEngine from BuildConfig.PluginV2Engine).
 // They are ignored on the gRPC-Web and default branches.
+//
+// grpcwebOpts are passed to grpcweb.Wrap on the gRPC-Web branch (e.g.
+// grpcweb.WithLifecycleEngine from BuildConfig.PluginV2Engine). They are
+// ignored on the native-gRPC and default branches. Use a separate
+// dispatcher call (DispatchH2StreamWithOpts) when both option sets need
+// non-empty values; the variadic-only entry preserves call-site
+// readability for the common no-grpcweb-opts path used by tests.
 //
 // The returned layer.Channel is what the caller should run RunSession or
 // other consumers against. The first event is replayed as the first
@@ -51,6 +59,23 @@ func DispatchH2Stream(
 	lopts httpaggregator.WrapOptions,
 	logger *slog.Logger,
 	grpcOpts ...grpclayer.Option,
+) (layer.Channel, error) {
+	return DispatchH2StreamWithOpts(ctx, ch, role, lopts, logger, grpcOpts, nil)
+}
+
+// DispatchH2StreamWithOpts is the explicit-options form of DispatchH2Stream
+// that accepts both grpcOpts (native gRPC) and grpcwebOpts (gRPC-Web). The
+// production wiring (proxybuild.OnHTTP2Stack via main.go) uses this form so
+// pluginv2 lifecycle hooks fire on both gRPC and gRPC-Web routes; tests
+// keep the simpler variadic call.
+func DispatchH2StreamWithOpts(
+	ctx context.Context,
+	ch layer.Channel,
+	role httpaggregator.Role,
+	lopts httpaggregator.WrapOptions,
+	logger *slog.Logger,
+	grpcOpts []grpclayer.Option,
+	grpcwebOpts []grpcweb.Option,
 ) (layer.Channel, error) {
 	if logger == nil {
 		logger = slog.Default()
@@ -84,7 +109,7 @@ func DispatchH2Stream(
 			"content_type", ct,
 		)
 		aggCh := httpaggregator.Wrap(ch, role, firstEnv, lopts)
-		return grpcweb.Wrap(aggCh, translateRoleForGRPCWeb(role)), nil
+		return grpcweb.Wrap(aggCh, translateRoleForGRPCWeb(role), grpcwebOpts...), nil
 	}
 
 	// Native gRPC detection: content-type: application/grpc[+proto|+json|...]
@@ -113,6 +138,23 @@ func GRPCOptionsFromBuildConfig(cfg *BuildConfig) []grpclayer.Option {
 	var out []grpclayer.Option
 	if cfg.GRPCMaxMessageSize > 0 {
 		out = append(out, grpclayer.WithMaxMessageSize(cfg.GRPCMaxMessageSize))
+	}
+	if cfg.PluginV2Engine != nil {
+		out = append(out, grpclayer.WithLifecycleEngine(cfg.PluginV2Engine))
+	}
+	return out
+}
+
+// GRPCWebOptionsFromBuildConfig assembles the [grpcweb.Option] slice from
+// BuildConfig fields that the gRPC-Web Layer accepts. Sibling of
+// GRPCOptionsFromBuildConfig.
+func GRPCWebOptionsFromBuildConfig(cfg *BuildConfig) []grpcweb.Option {
+	if cfg == nil {
+		return nil
+	}
+	var out []grpcweb.Option
+	if cfg.PluginV2Engine != nil {
+		out = append(out, grpcweb.WithLifecycleEngine(cfg.PluginV2Engine))
 	}
 	return out
 }

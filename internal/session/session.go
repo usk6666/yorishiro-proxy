@@ -20,6 +20,7 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/layer/sse"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/ws"
 	"github.com/usk6666/yorishiro-proxy/internal/pipeline"
+	"github.com/usk6666/yorishiro-proxy/internal/pluginv2"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -39,6 +40,23 @@ type SessionOptions struct {
 	// (not the errgroup context), so it remains valid for store writes even
 	// after the errgroup cancels its derived context.
 	OnComplete func(ctx context.Context, streamID string, err error)
+
+	// LifecycleEngine, when non-nil, is the pluginv2 Engine that
+	// upgrade-time Layer constructors (currently runUpgradeWS) attach via
+	// WithLifecycleEngine so terminal-event hooks (ws.on_close) fire from
+	// the post-Upgrade Layer. SessionOptions is the canonical session-scope
+	// plumbing channel for this kind of cross-Layer wiring; threading it
+	// through SessionOptions avoids growing connector.BuildConfig with
+	// session-only fields.
+	LifecycleEngine *pluginv2.Engine
+
+	// StateReleaser, when non-nil, is the pluginv2 StateReleaser that
+	// upgrade-time Layer constructors attach via WithStateReleaser so the
+	// new Layer releases per-transaction / per-stream scoped state at its
+	// own terminal events. *pluginv2.Engine satisfies this interface, so
+	// callers typically populate both LifecycleEngine and StateReleaser
+	// with the same engine pointer.
+	StateReleaser pluginv2.StateReleaser
 }
 
 // streamCapture captures the StreamID from the first Envelope in a
@@ -468,8 +486,9 @@ func runUpgradeWS(
 
 	clientStreamID := upstreamCh.StreamID()
 
-	clientWS := ws.New(clientReader, clientWriter, clientCloser, clientStreamID, ws.RoleServer)
-	upstreamWS := ws.New(upReader, upWriter, upCloser, clientStreamID, ws.RoleClient)
+	wsOpts := wsLifecycleOptions(userOpt)
+	clientWS := ws.New(clientReader, clientWriter, clientCloser, clientStreamID, ws.RoleServer, wsOpts...)
+	upstreamWS := ws.New(upReader, upWriter, upCloser, clientStreamID, ws.RoleClient, wsOpts...)
 
 	stack.ReplaceClientTop(clientWS)
 	stack.ReplaceUpstreamTop(upstreamWS)
@@ -485,6 +504,21 @@ func runUpgradeWS(
 	})
 
 	return RunStackSession(ctx, stack, upgradeDial, p, userOpt)
+}
+
+// wsLifecycleOptions translates SessionOptions plumbing into the
+// pluginv2-shaped Options on the post-Upgrade WebSocket Layer. Returns
+// nil when no engine/releaser is wired, so callers splat into
+// ws.New(... opts...) without conditional branching.
+func wsLifecycleOptions(userOpt SessionOptions) []ws.Option {
+	var out []ws.Option
+	if userOpt.LifecycleEngine != nil {
+		out = append(out, ws.WithLifecycleEngine(userOpt.LifecycleEngine))
+	}
+	if userOpt.StateReleaser != nil {
+		out = append(out, ws.WithStateReleaser(userOpt.StateReleaser))
+	}
+	return out
 }
 
 // runUpgradeSSE performs the SSE-side swap: the upstream side is replaced

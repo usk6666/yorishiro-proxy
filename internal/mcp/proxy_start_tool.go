@@ -231,7 +231,7 @@ func (s *Server) registerProxyStart() {
 func (s *Server) handleProxyStart(ctx context.Context, _ *gomcp.CallToolRequest, input proxyStartInput) (*gomcp.CallToolResult, *proxyStartResult, error) {
 	start := time.Now()
 
-	if s.connector.manager == nil {
+	if managerIsNil(s.connector.manager) {
 		return nil, nil, fmt.Errorf("proxy manager is not initialized")
 	}
 
@@ -335,7 +335,7 @@ func (s *Server) resetSettingsToDefaults() {
 	}
 
 	// Reset connection limits and timeouts to defaults.
-	if s.connector.manager != nil {
+	if !managerIsNil(s.connector.manager) {
 		s.connector.manager.SetMaxConnections(defaultMaxConnections)
 		s.connector.manager.SetPeekTimeout(defaultPeekTimeout)
 	}
@@ -344,7 +344,7 @@ func (s *Server) resetSettingsToDefaults() {
 	s.applyRequestTimeout(defaultRequestTimeout)
 
 	// Reset upstream proxy to direct (no upstream).
-	if s.connector.manager != nil {
+	if !managerIsNil(s.connector.manager) {
 		s.connector.manager.SetUpstreamProxy("")
 	}
 	for _, setter := range s.connector.upstreamProxySetters {
@@ -566,7 +566,7 @@ func (s *Server) startTCPForwards(ctx context.Context, listenerName string, forw
 		Issuer:       s.misc.issuer,
 	}
 
-	if err := s.connector.manager.StartTCPForwardsNamed(s.misc.appCtx, listenerName, params); err != nil {
+	if err := s.connector.manager.StartTCPForwardsNamedAny(s.misc.appCtx, listenerName, params); err != nil {
 		s.connector.manager.StopNamed(ctx, listenerName)
 		return fmt.Errorf("tcp_forwards: %w", err)
 	}
@@ -577,7 +577,7 @@ func (s *Server) startTCPForwards(ctx context.Context, listenerName string, forw
 func (s *Server) resolveListenerAddr(listenerName string) string {
 	_, addr := s.connector.manager.Status()
 	if listenerName != proxy.DefaultListenerName {
-		statuses := s.connector.manager.ListenerStatuses()
+		statuses := listenerStatuses(s.connector.manager)
 		for _, st := range statuses {
 			if st.Name == listenerName {
 				return st.ListenAddr
@@ -881,7 +881,7 @@ func (s *Server) applyUpstreamProxy(rawURL string) error {
 	}
 
 	// Store in manager for status reporting.
-	if s.connector.manager != nil {
+	if !managerIsNil(s.connector.manager) {
 		s.connector.manager.SetUpstreamProxy(rawURL)
 	}
 
