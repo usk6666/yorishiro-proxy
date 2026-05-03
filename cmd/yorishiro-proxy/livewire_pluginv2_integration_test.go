@@ -50,6 +50,10 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 	"github.com/usk6666/yorishiro-proxy/internal/proxybuild"
 	rulescommon "github.com/usk6666/yorishiro-proxy/internal/rules/common"
+	grpcrules "github.com/usk6666/yorishiro-proxy/internal/rules/grpc"
+	httprules "github.com/usk6666/yorishiro-proxy/internal/rules/http"
+	wsrules "github.com/usk6666/yorishiro-proxy/internal/rules/ws"
+	"github.com/usk6666/yorishiro-proxy/internal/safety"
 	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
 
@@ -120,10 +124,15 @@ func setupLiveProxy(t *testing.T, pluginName, pluginScript string) *liveProxy {
 	issuer := cert.NewIssuer(ca)
 
 	holdQueue := rulescommon.NewHoldQueue()
+	httpInterceptEngine := httprules.NewInterceptEngine()
+	wsInterceptEngine := wsrules.NewInterceptEngine()
+	grpcInterceptEngine := grpcrules.NewInterceptEngine()
 	buildCfg := newLiveBuildConfig(ctx, cfg, proxyCfg, issuer, engine, store, logger)
 
 	mgr, err := newLiveManager(cfg, proxyCfg, store, issuer, engine, holdQueue,
+		httpInterceptEngine, wsInterceptEngine, grpcInterceptEngine,
 		(*proxy.PassthroughList)(nil), (*proxy.CaptureScope)(nil), (*proxy.RateLimiter)(nil),
+		(*safety.Engine)(nil),
 		buildCfg, logger)
 	if err != nil {
 		engine.Close()

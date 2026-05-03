@@ -1,196 +1,54 @@
 package mcp
 
-import (
-	"encoding/base64"
-	"fmt"
-	"net/http"
+import "fmt"
 
-	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
+// intercept_helpers.go holds the small primitives shared by the intercept
+// MCP tool and its sibling configure / query handlers: the release-mode
+// string constants, the raw-bytes-override cap, and the base64 decoder
+// used when callers supply RawOverrideBase64.
+//
+// Pre-USK-692 this file also held legacy rule-management helpers and the
+// SafetyEngine fetch-and-revalidate path. Both were unwired by the
+// HoldQueue-only migration: rule management now lives in configure_tool's
+// per-protocol dispatch (see migrateInterceptRules), and SafetyStep runs
+// in the Pipeline before InterceptStep — by hold time the matched
+// envelope has already cleared safety.
+
+// releaseMode is the per-call mode flag attached to the intercept tool's
+// modify_and_forward and release actions. It mirrors the legacy
+// intercept.ReleaseMode constants but lives in the mcp package so the
+// soon-to-be-deleted internal/proxy/intercept tree no longer leaks here
+// (USK-692, USK-697).
+type releaseMode string
+
+const (
+	// releaseModeStructured forwards the intercepted envelope using the
+	// per-Message-type modify dispatch (default).
+	releaseModeStructured releaseMode = "structured"
+	// releaseModeRaw forwards the supplied RawOverrideBase64 bytes
+	// verbatim, building a synthetic RawMessage envelope when the held
+	// envelope is not already Raw (Decision R9).
+	releaseModeRaw releaseMode = "raw"
 )
 
-// interceptRuleInput is the JSON representation of an intercept rule for MCP tool input.
-type interceptRuleInput struct {
-	// ID is the unique identifier for this rule.
-	ID string `json:"id" jsonschema:"unique rule identifier"`
+// maxRawOverrideSize is the upper bound enforced on raw bytes supplied
+// via the modify_and_forward path. Mirrors the legacy
+// intercept.MaxRawBytesSize (CWE-770 — prevent memory exhaustion from
+// excessively large client-supplied payloads). 10 MiB covers any
+// legitimate HTTP/H2/WS payload while bounding abuse.
+const maxRawOverrideSize = 10 * 1024 * 1024
 
-	// Enabled indicates whether this rule is active.
-	Enabled bool `json:"enabled" jsonschema:"whether the rule is active"`
-
-	// Direction specifies whether the rule applies to requests, responses, or both.
-	Direction string `json:"direction" jsonschema:"request, response, or both"`
-
-	// Conditions defines the matching criteria.
-	Conditions interceptConditionsInput `json:"conditions" jsonschema:"matching conditions"`
-}
-
-// interceptConditionsInput is the JSON representation of intercept rule conditions.
-type interceptConditionsInput struct {
-	// HostPattern is a regular expression matched against the request hostname (port excluded).
-	HostPattern string `json:"host_pattern,omitempty" jsonschema:"regex pattern for hostname matching"`
-
-	// PathPattern is a regular expression matched against the request URL path.
-	PathPattern string `json:"path_pattern,omitempty" jsonschema:"regex pattern for URL path matching"`
-
-	// Methods is a whitelist of HTTP methods (case-insensitive).
-	Methods []string `json:"methods,omitempty" jsonschema:"HTTP method whitelist (e.g. POST, PUT, DELETE)"`
-
-	// HeaderMatch maps header names to regular expressions (AND logic).
-	HeaderMatch map[string]string `json:"header_match,omitempty" jsonschema:"header name to regex pattern mapping"`
-
-	// UpgradeURLPattern is a regular expression matched against the WebSocket upgrade request URL.
-	// Exclusive to WebSocket intercept rules; must not be combined with HTTP conditions.
-	UpgradeURLPattern string `json:"upgrade_url_pattern,omitempty" jsonschema:"regex pattern for WebSocket upgrade URL matching"`
-
-	// StreamID specifies a particular WebSocket flow ID to intercept.
-	// Exclusive to WebSocket intercept rules; must not be combined with HTTP conditions.
-	StreamID string `json:"flow_id,omitempty" jsonschema:"WebSocket flow ID to intercept"`
-}
-
-// interceptRuleOutput is the JSON representation of an intercept rule for MCP tool output.
-type interceptRuleOutput struct {
-	ID         string                    `json:"id"`
-	Enabled    bool                      `json:"enabled"`
-	Direction  string                    `json:"direction"`
-	Conditions interceptConditionsOutput `json:"conditions"`
-}
-
-// interceptConditionsOutput is the JSON representation of intercept conditions in output.
-type interceptConditionsOutput struct {
-	HostPattern       string            `json:"host_pattern,omitempty"`
-	PathPattern       string            `json:"path_pattern,omitempty"`
-	Methods           []string          `json:"methods,omitempty"`
-	HeaderMatch       map[string]string `json:"header_match,omitempty"`
-	UpgradeURLPattern string            `json:"upgrade_url_pattern,omitempty"`
-	StreamID          string            `json:"flow_id,omitempty"`
-}
-
-// toInterceptRule converts an MCP input rule to an intercept.Rule.
-func toInterceptRule(input interceptRuleInput) intercept.Rule {
-	return intercept.Rule{
-		ID:        input.ID,
-		Enabled:   input.Enabled,
-		Direction: intercept.Direction(input.Direction),
-		Conditions: intercept.Conditions{
-			HostPattern:       input.Conditions.HostPattern,
-			PathPattern:       input.Conditions.PathPattern,
-			Methods:           input.Conditions.Methods,
-			HeaderMatch:       input.Conditions.HeaderMatch,
-			UpgradeURLPattern: input.Conditions.UpgradeURLPattern,
-			StreamID:          input.Conditions.StreamID,
-		},
-	}
-}
-
-// fromInterceptRule converts an intercept.Rule to an MCP output rule.
-func fromInterceptRule(r intercept.Rule) interceptRuleOutput {
-	return interceptRuleOutput{
-		ID:        r.ID,
-		Enabled:   r.Enabled,
-		Direction: string(r.Direction),
-		Conditions: interceptConditionsOutput{
-			HostPattern:       r.Conditions.HostPattern,
-			PathPattern:       r.Conditions.PathPattern,
-			Methods:           r.Conditions.Methods,
-			HeaderMatch:       r.Conditions.HeaderMatch,
-			UpgradeURLPattern: r.Conditions.UpgradeURLPattern,
-			StreamID:          r.Conditions.StreamID,
-		},
-	}
-}
-
-// fromInterceptRules converts a slice of intercept.Rule to MCP output rules.
-func fromInterceptRules(rules []intercept.Rule) []interceptRuleOutput {
-	if rules == nil {
-		return nil
-	}
-	out := make([]interceptRuleOutput, len(rules))
-	for i, r := range rules {
-		out[i] = fromInterceptRule(r)
-	}
-	return out
-}
-
-// checkInterceptSafety validates the intercept modify_and_forward parameters against
-// the safety filter engine. When OverrideBody is nil but other mutations are applied,
-// it fetches the original intercepted body to check the combined request.
-func (s *Server) checkInterceptSafety(params interceptParams) error {
-	if s.pipeline.safetyEngine == nil {
-		return nil
-	}
-	var body []byte
-	if params.OverrideBody != nil {
-		body = []byte(*params.OverrideBody)
-	} else if params.OverrideURL != "" || len(params.OverrideHeaders) > 0 || len(params.AddHeaders) > 0 || len(params.RemoveHeaders) > 0 {
-		// Fetch the original intercepted request body when mutations are applied.
-		origReq, err := s.pipeline.interceptQueue.Get(params.InterceptID)
-		if err == nil {
-			body = origReq.Body
-		}
-	}
-	var headers http.Header
-	if len(params.OverrideHeaders) > 0 || len(params.AddHeaders) > 0 {
-		headers = make(http.Header)
-		for k, v := range params.OverrideHeaders {
-			headers.Set(k, v)
-		}
-		for k, v := range params.AddHeaders {
-			headers.Add(k, v)
-		}
-	}
-	if v := s.pipeline.safetyEngine.CheckInput(body, params.OverrideURL, httpHeaderToKeyValues(headers)); v != nil {
-		return fmt.Errorf("%s", safetyViolationError(v))
-	}
-	return nil
-}
-
-// applyInterceptRules validates and sets intercept rules from the input.
-func (s *Server) applyInterceptRules(inputs []interceptRuleInput) error {
-	return applyInterceptRulesHelper(s.pipeline.interceptEngine, inputs)
-}
-
-// applyInterceptRulesHelper validates and sets intercept rules on the given engine.
-// This is a standalone version of Server.applyInterceptRules for use by handler structs.
-func applyInterceptRulesHelper(engine *intercept.Engine, inputs []interceptRuleInput) error {
-	if engine == nil {
-		return fmt.Errorf("intercept engine is not initialized")
-	}
-
-	rules := make([]intercept.Rule, len(inputs))
-	for i, input := range inputs {
-		rules[i] = toInterceptRule(input)
-	}
-
-	if err := engine.SetRules(rules); err != nil {
-		return err
-	}
-	return nil
-}
-
-// resolveReleaseMode converts a mode string from the MCP input to an intercept.ReleaseMode.
-// An empty string defaults to ModeStructured for backward compatibility.
-func resolveReleaseMode(mode string) (intercept.ReleaseMode, error) {
+// resolveReleaseMode converts a mode string from the MCP input into the
+// canonical releaseMode constant. An empty string defaults to the
+// structured path so existing callers that omit the field continue to
+// route through the typed modify dispatch.
+func resolveReleaseMode(mode string) (releaseMode, error) {
 	switch mode {
 	case "", "structured":
-		return intercept.ModeStructured, nil
+		return releaseModeStructured, nil
 	case "raw":
-		return intercept.ModeRaw, nil
+		return releaseModeRaw, nil
 	default:
 		return "", fmt.Errorf("invalid mode %q: must be \"structured\" or \"raw\"", mode)
 	}
-}
-
-// decodeRawOverride decodes a Base64-encoded raw override string into bytes.
-// Returns an error if the input is empty or not valid Base64.
-func decodeRawOverride(b64 string) ([]byte, error) {
-	if b64 == "" {
-		return nil, fmt.Errorf("raw_override_base64 must not be empty")
-	}
-	data, err := base64.StdEncoding.DecodeString(b64)
-	if err != nil {
-		return nil, fmt.Errorf("invalid raw_override_base64: %w", err)
-	}
-	if len(data) == 0 {
-		return nil, fmt.Errorf("raw_override_base64 decodes to empty bytes")
-	}
-	return data, nil
 }

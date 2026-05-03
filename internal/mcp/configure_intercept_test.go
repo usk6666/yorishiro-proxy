@@ -3,54 +3,69 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
+
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
-	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
+	"github.com/usk6666/yorishiro-proxy/internal/rules/common"
+	grpcrules "github.com/usk6666/yorishiro-proxy/internal/rules/grpc"
+	httprules "github.com/usk6666/yorishiro-proxy/internal/rules/http"
+	wsrules "github.com/usk6666/yorishiro-proxy/internal/rules/ws"
 )
 
-// setupInterceptTestSession creates a connected MCP client session for intercept rule tests.
-func setupInterceptTestSession(t *testing.T, engine *intercept.Engine) *gomcp.ClientSession {
+// configureSessionWithEngines spins up an MCP server backed by the
+// per-protocol intercept engines (USK-692). nil arguments disable that
+// engine; the configure_tool's nil-engine guard surfaces the
+// "not initialized" error path.
+func configureSessionWithEngines(
+	t *testing.T,
+	httpEngine *httprules.InterceptEngine,
+	wsEngine *wsrules.InterceptEngine,
+	grpcEngine *grpcrules.InterceptEngine,
+) *gomcp.ClientSession {
 	t.Helper()
 	ctx := context.Background()
-
 	scope := proxy.NewCaptureScope()
 	pl := proxy.NewPassthroughList()
+	hold := common.NewHoldQueue()
 
-	var opts []ServerOption
-	opts = append(opts, WithCaptureScope(scope))
-	opts = append(opts, WithPassthroughList(pl))
-	if engine != nil {
-		opts = append(opts, WithInterceptEngine(engine))
+	opts := []ServerOption{
+		WithCaptureScope(scope),
+		WithPassthroughList(pl),
+		WithHoldQueue(hold),
+	}
+	if httpEngine != nil {
+		opts = append(opts, WithHTTPInterceptEngine(httpEngine))
+	}
+	if wsEngine != nil {
+		opts = append(opts, WithWSInterceptEngine(wsEngine))
+	}
+	if grpcEngine != nil {
+		opts = append(opts, WithGRPCInterceptEngine(grpcEngine))
 	}
 
 	s := newServer(ctx, nil, nil, nil, opts...)
 	ct, st := gomcp.NewInMemoryTransports()
-
 	ss, err := s.server.Connect(ctx, st, nil)
 	if err != nil {
 		t.Fatalf("server connect: %v", err)
 	}
 	t.Cleanup(func() { ss.Close() })
 
-	client := gomcp.NewClient(&gomcp.Implementation{
-		Name:    "test-client",
-		Version: "v0.0.1",
-	}, nil)
-
+	client := gomcp.NewClient(&gomcp.Implementation{Name: "test-client", Version: "v0.0.1"}, nil)
 	cs, err := client.Connect(ctx, ct, nil)
 	if err != nil {
 		t.Fatalf("client connect: %v", err)
 	}
 	t.Cleanup(func() { cs.Close() })
-
 	return cs
 }
 
-func TestConfigure_InterceptRules_MergeAdd(t *testing.T) {
-	engine := intercept.NewEngine()
-	cs := setupInterceptTestSession(t, engine)
+func TestConfigure_InterceptRules_MergeAdd_HTTP(t *testing.T) {
+	httpEngine := httprules.NewInterceptEngine()
+	cs := configureSessionWithEngines(t, httpEngine, nil, nil)
 
 	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
 		Name: "configure",
@@ -61,22 +76,20 @@ func TestConfigure_InterceptRules_MergeAdd(t *testing.T) {
 					{
 						ID:        "rule-1",
 						Enabled:   true,
+						Protocol:  "http",
 						Direction: "request",
-						Conditions: interceptConditionsInput{
+						HTTP: &interceptHTTPConditions{
 							PathPattern: "/api/admin.*",
 							Methods:     []string{"POST", "PUT", "DELETE"},
-							HeaderMatch: map[string]string{
-								"Content-Type": "application/json",
-							},
+							HeaderMatch: map[string]string{"Content-Type": "application/json"},
 						},
 					},
 					{
 						ID:        "rule-2",
 						Enabled:   false,
+						Protocol:  "http",
 						Direction: "both",
-						Conditions: interceptConditionsInput{
-							PathPattern: "/api/.*",
-						},
+						HTTP:      &interceptHTTPConditions{PathPattern: "/api/.*"},
 					},
 				},
 			},
@@ -91,7 +104,6 @@ func TestConfigure_InterceptRules_MergeAdd(t *testing.T) {
 
 	var out configureResult
 	configureUnmarshalResult(t, result, &out)
-
 	if out.Status != "configured" {
 		t.Errorf("status = %q, want %q", out.Status, "configured")
 	}
@@ -105,336 +117,290 @@ func TestConfigure_InterceptRules_MergeAdd(t *testing.T) {
 		t.Errorf("enabled_rules = %d, want 1", out.InterceptRules.EnabledRules)
 	}
 
-	// Verify rule was actually added.
-	r, err := engine.GetRule("rule-1")
-	if err != nil {
-		t.Fatalf("GetRule: %v", err)
+	rules := httpEngine.Rules()
+	if len(rules) != 2 {
+		t.Fatalf("engine rules = %d, want 2", len(rules))
 	}
-	if !r.Enabled {
-		t.Error("rule-1 should be enabled")
+	var r1 *httprules.InterceptRule
+	for i := range rules {
+		if rules[i].ID == "rule-1" {
+			r1 = &rules[i]
+		}
 	}
-	if r.Direction != intercept.DirectionRequest {
-		t.Errorf("direction = %q, want %q", r.Direction, intercept.DirectionRequest)
+	if r1 == nil || !r1.Enabled || r1.Direction != httprules.DirectionRequest {
+		t.Errorf("rule-1 unexpected shape: %+v", r1)
 	}
 }
 
 func TestConfigure_InterceptRules_MergeRemove(t *testing.T) {
-	engine := intercept.NewEngine()
-	engine.AddRule(intercept.Rule{
-		ID: "keep", Enabled: true, Direction: intercept.DirectionRequest,
+	httpEngine := httprules.NewInterceptEngine()
+	httpEngine.SetRules([]httprules.InterceptRule{
+		{ID: "keep", Enabled: true, Direction: httprules.DirectionBoth},
+		{ID: "remove-me", Enabled: true, Direction: httprules.DirectionBoth},
 	})
-	engine.AddRule(intercept.Rule{
-		ID: "remove-me", Enabled: true, Direction: intercept.DirectionRequest,
-	})
+	cs := configureSessionWithEngines(t, httpEngine, nil, nil)
 
-	cs := setupInterceptTestSession(t, engine)
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "configure",
+		Arguments: configureMarshal(t, configureInput{
+			Operation:      "merge",
+			InterceptRules: &configureInterceptRules{Remove: []string{"remove-me"}},
+		}),
+	})
+	if err != nil || result.IsError {
+		t.Fatalf("CallTool: err=%v isError=%v", err, result.IsError)
+	}
+	rules := httpEngine.Rules()
+	if len(rules) != 1 || rules[0].ID != "keep" {
+		t.Errorf("unexpected rules after remove: %+v", rules)
+	}
+}
+
+func TestConfigure_InterceptRules_MergeEnableDisable(t *testing.T) {
+	httpEngine := httprules.NewInterceptEngine()
+	httpEngine.SetRules([]httprules.InterceptRule{
+		{ID: "rule-a", Enabled: false, Direction: httprules.DirectionBoth},
+		{ID: "rule-b", Enabled: true, Direction: httprules.DirectionBoth},
+	})
+	cs := configureSessionWithEngines(t, httpEngine, nil, nil)
 
 	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
 		Name: "configure",
 		Arguments: configureMarshal(t, configureInput{
 			Operation: "merge",
 			InterceptRules: &configureInterceptRules{
-				Remove: []string{"remove-me"},
+				Enable:  []string{"rule-a"},
+				Disable: []string{"rule-b"},
 			},
 		}),
 	})
-	if err != nil {
-		t.Fatalf("CallTool: %v", err)
-	}
-	if result.IsError {
-		t.Fatalf("expected success, got error: %v", result.Content)
+	if err != nil || result.IsError {
+		t.Fatalf("CallTool: err=%v isError=%v", err, result.IsError)
 	}
 
-	var out configureResult
-	configureUnmarshalResult(t, result, &out)
-
-	if out.InterceptRules.TotalRules != 1 {
-		t.Errorf("total_rules = %d, want 1", out.InterceptRules.TotalRules)
+	rules := httpEngine.Rules()
+	got := map[string]bool{}
+	for _, r := range rules {
+		got[r.ID] = r.Enabled
 	}
-
-	// Verify removal.
-	_, err = engine.GetRule("remove-me")
-	if err == nil {
-		t.Error("remove-me should have been removed")
-	}
-	_, err = engine.GetRule("keep")
-	if err != nil {
-		t.Error("keep should still exist")
+	if !got["rule-a"] || got["rule-b"] {
+		t.Errorf("unexpected enabled state: %+v", got)
 	}
 }
 
-func TestConfigure_InterceptRules_MergeEnable(t *testing.T) {
-	engine := intercept.NewEngine()
-	engine.AddRule(intercept.Rule{
-		ID: "r1", Enabled: false, Direction: intercept.DirectionRequest,
-	})
+func TestConfigure_InterceptRules_Replace_PartitionsByProtocol(t *testing.T) {
+	httpEngine := httprules.NewInterceptEngine()
+	wsEngine := wsrules.NewInterceptEngine()
+	grpcEngine := grpcrules.NewInterceptEngine()
+	httpEngine.SetRules([]httprules.InterceptRule{{ID: "old-http", Enabled: true, Direction: httprules.DirectionBoth}})
 
-	cs := setupInterceptTestSession(t, engine)
-
-	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
-		Name: "configure",
-		Arguments: configureMarshal(t, configureInput{
-			Operation: "merge",
-			InterceptRules: &configureInterceptRules{
-				Enable: []string{"r1"},
-			},
-		}),
-	})
-	if err != nil {
-		t.Fatalf("CallTool: %v", err)
-	}
-	if result.IsError {
-		t.Fatalf("expected success, got error: %v", result.Content)
-	}
-
-	var out configureResult
-	configureUnmarshalResult(t, result, &out)
-
-	if out.InterceptRules.EnabledRules != 1 {
-		t.Errorf("enabled_rules = %d, want 1", out.InterceptRules.EnabledRules)
-	}
-
-	r, _ := engine.GetRule("r1")
-	if !r.Enabled {
-		t.Error("r1 should be enabled")
-	}
-}
-
-func TestConfigure_InterceptRules_MergeDisable(t *testing.T) {
-	engine := intercept.NewEngine()
-	engine.AddRule(intercept.Rule{
-		ID: "r1", Enabled: true, Direction: intercept.DirectionRequest,
-	})
-
-	cs := setupInterceptTestSession(t, engine)
-
-	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
-		Name: "configure",
-		Arguments: configureMarshal(t, configureInput{
-			Operation: "merge",
-			InterceptRules: &configureInterceptRules{
-				Disable: []string{"r1"},
-			},
-		}),
-	})
-	if err != nil {
-		t.Fatalf("CallTool: %v", err)
-	}
-	if result.IsError {
-		t.Fatalf("expected success, got error: %v", result.Content)
-	}
-
-	var out configureResult
-	configureUnmarshalResult(t, result, &out)
-
-	if out.InterceptRules.EnabledRules != 0 {
-		t.Errorf("enabled_rules = %d, want 0", out.InterceptRules.EnabledRules)
-	}
-
-	r, _ := engine.GetRule("r1")
-	if r.Enabled {
-		t.Error("r1 should be disabled")
-	}
-}
-
-func TestConfigure_InterceptRules_MergeCombined(t *testing.T) {
-	engine := intercept.NewEngine()
-	engine.AddRule(intercept.Rule{
-		ID: "to-remove", Enabled: true, Direction: intercept.DirectionRequest,
-	})
-	engine.AddRule(intercept.Rule{
-		ID: "to-disable", Enabled: true, Direction: intercept.DirectionRequest,
-	})
-
-	cs := setupInterceptTestSession(t, engine)
-
-	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
-		Name: "configure",
-		Arguments: configureMarshal(t, configureInput{
-			Operation: "merge",
-			InterceptRules: &configureInterceptRules{
-				Add: []interceptRuleInput{
-					{ID: "new-rule", Enabled: true, Direction: "request"},
-				},
-				Remove:  []string{"to-remove"},
-				Disable: []string{"to-disable"},
-			},
-		}),
-	})
-	if err != nil {
-		t.Fatalf("CallTool: %v", err)
-	}
-	if result.IsError {
-		t.Fatalf("expected success, got error: %v", result.Content)
-	}
-
-	var out configureResult
-	configureUnmarshalResult(t, result, &out)
-
-	if out.InterceptRules.TotalRules != 2 {
-		t.Errorf("total_rules = %d, want 2", out.InterceptRules.TotalRules)
-	}
-	if out.InterceptRules.EnabledRules != 1 {
-		t.Errorf("enabled_rules = %d, want 1", out.InterceptRules.EnabledRules)
-	}
-}
-
-func TestConfigure_InterceptRules_Replace(t *testing.T) {
-	engine := intercept.NewEngine()
-	engine.AddRule(intercept.Rule{
-		ID: "old-1", Enabled: true, Direction: intercept.DirectionRequest,
-	})
-	engine.AddRule(intercept.Rule{
-		ID: "old-2", Enabled: true, Direction: intercept.DirectionResponse,
-	})
-
-	cs := setupInterceptTestSession(t, engine)
-
+	cs := configureSessionWithEngines(t, httpEngine, wsEngine, grpcEngine)
 	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
 		Name: "configure",
 		Arguments: configureMarshal(t, configureInput{
 			Operation: "replace",
 			InterceptRules: &configureInterceptRules{
 				Rules: []interceptRuleInput{
-					{
-						ID:        "new-1",
-						Enabled:   true,
-						Direction: "both",
-						Conditions: interceptConditionsInput{
-							PathPattern: "/api/.*",
-						},
+					{ID: "h1", Enabled: true, Protocol: "http", Direction: "request", HTTP: &interceptHTTPConditions{PathPattern: "/.*"}},
+					{ID: "w1", Enabled: true, Protocol: "ws", Direction: "send", WS: &interceptWSConditions{HostPattern: "example.com"}},
+					{ID: "g1", Enabled: true, Protocol: "grpc", Direction: "send", GRPC: &interceptGRPCConditions{ServicePattern: "svc"}},
+				},
+			},
+		}),
+	})
+	if err != nil || result.IsError {
+		t.Fatalf("CallTool: err=%v isError=%v", err, result.IsError)
+	}
+
+	if rs := httpEngine.Rules(); len(rs) != 1 || rs[0].ID != "h1" {
+		t.Errorf("http rules: %+v", rs)
+	}
+	if rs := wsEngine.Rules(); len(rs) != 1 || rs[0].ID != "w1" {
+		t.Errorf("ws rules: %+v", rs)
+	}
+	if rs := grpcEngine.Rules(); len(rs) != 1 || rs[0].ID != "g1" {
+		t.Errorf("grpc rules: %+v", rs)
+	}
+
+	var out configureResult
+	configureUnmarshalResult(t, result, &out)
+	if out.InterceptRules == nil || out.InterceptRules.TotalRules != 3 || out.InterceptRules.EnabledRules != 3 {
+		t.Errorf("aggregate counts: %+v", out.InterceptRules)
+	}
+}
+
+func TestConfigure_InterceptRules_ReplaceEmpty_ClearsAll(t *testing.T) {
+	httpEngine := httprules.NewInterceptEngine()
+	httpEngine.SetRules([]httprules.InterceptRule{{ID: "x", Enabled: true, Direction: httprules.DirectionBoth}})
+	cs := configureSessionWithEngines(t, httpEngine, wsrules.NewInterceptEngine(), grpcrules.NewInterceptEngine())
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "configure",
+		Arguments: configureMarshal(t, configureInput{
+			Operation:      "replace",
+			InterceptRules: &configureInterceptRules{Rules: []interceptRuleInput{}},
+		}),
+	})
+	if err != nil || result.IsError {
+		t.Fatalf("CallTool: err=%v isError=%v", err, result.IsError)
+	}
+	if rs := httpEngine.Rules(); len(rs) != 0 {
+		t.Errorf("expected empty engine, got %d rules", len(rs))
+	}
+}
+
+func TestConfigure_InterceptRules_AllEnginesNil_ReturnsError(t *testing.T) {
+	cs := configureSessionWithEngines(t, nil, nil, nil)
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "configure",
+		Arguments: configureMarshal(t, configureInput{
+			Operation: "merge",
+			InterceptRules: &configureInterceptRules{
+				Add: []interceptRuleInput{{ID: "x", Enabled: true, Protocol: "http", Direction: "both", HTTP: &interceptHTTPConditions{}}},
+			},
+		}),
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("expected error result when all engines nil")
+	}
+}
+
+func TestConfigure_InterceptRules_AddInvalidPattern(t *testing.T) {
+	httpEngine := httprules.NewInterceptEngine()
+	cs := configureSessionWithEngines(t, httpEngine, nil, nil)
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "configure",
+		Arguments: configureMarshal(t, configureInput{
+			Operation: "merge",
+			InterceptRules: &configureInterceptRules{
+				Add: []interceptRuleInput{
+					{ID: "bad", Enabled: true, Protocol: "http", Direction: "request",
+						HTTP: &interceptHTTPConditions{PathPattern: "(unbalanced"}},
+				},
+			},
+		}),
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("expected error for invalid regex pattern")
+	}
+}
+
+func TestConfigure_InterceptRules_MergeAdd_WS(t *testing.T) {
+	wsEngine := wsrules.NewInterceptEngine()
+	cs := configureSessionWithEngines(t, nil, wsEngine, nil)
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "configure",
+		Arguments: configureMarshal(t, configureInput{
+			Operation: "merge",
+			InterceptRules: &configureInterceptRules{
+				Add: []interceptRuleInput{{
+					ID: "ws-1", Enabled: true, Protocol: "ws", Direction: "send",
+					WS: &interceptWSConditions{
+						HostPattern:  "example\\.com",
+						OpcodeFilter: []string{"text", "binary"},
 					},
-				},
+				}},
+			},
+		}),
+	})
+	if err != nil || result.IsError {
+		t.Fatalf("CallTool: err=%v isError=%v", err, result.IsError)
+	}
+	rules := wsEngine.Rules()
+	if len(rules) != 1 || rules[0].ID != "ws-1" {
+		t.Fatalf("ws rules: %+v", rules)
+	}
+	if len(rules[0].OpcodeFilter) != 2 {
+		t.Errorf("opcode filter: %+v", rules[0].OpcodeFilter)
+	}
+}
+
+func TestConfigure_InterceptRules_MergeAdd_GRPC(t *testing.T) {
+	grpcEngine := grpcrules.NewInterceptEngine()
+	cs := configureSessionWithEngines(t, nil, nil, grpcEngine)
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "configure",
+		Arguments: configureMarshal(t, configureInput{
+			Operation: "merge",
+			InterceptRules: &configureInterceptRules{
+				Add: []interceptRuleInput{{
+					ID: "g1", Enabled: true, Protocol: "grpc", Direction: "send",
+					GRPC: &interceptGRPCConditions{
+						ServicePattern: "auth\\..*",
+						HeaderMatch:    map[string]string{"x-tenant": ".*"},
+					},
+				}},
+			},
+		}),
+	})
+	if err != nil || result.IsError {
+		t.Fatalf("CallTool: err=%v isError=%v", err, result.IsError)
+	}
+	rules := grpcEngine.Rules()
+	if len(rules) != 1 || rules[0].ID != "g1" {
+		t.Fatalf("grpc rules: %+v", rules)
+	}
+}
+
+func TestConfigure_InterceptRules_DefaultProtocolHTTP(t *testing.T) {
+	httpEngine := httprules.NewInterceptEngine()
+	cs := configureSessionWithEngines(t, httpEngine, nil, nil)
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "configure",
+		Arguments: configureMarshal(t, configureInput{
+			Operation: "merge",
+			InterceptRules: &configureInterceptRules{
+				Add: []interceptRuleInput{{
+					// Protocol omitted — defaults to "http".
+					ID: "default", Enabled: true, Direction: "request",
+					HTTP: &interceptHTTPConditions{PathPattern: "/.*"},
+				}},
+			},
+		}),
+	})
+	if err != nil || result.IsError {
+		t.Fatalf("CallTool: err=%v isError=%v", err, result.IsError)
+	}
+	if rs := httpEngine.Rules(); len(rs) != 1 || rs[0].ID != "default" {
+		t.Errorf("expected default-protocol routing to http engine, got %+v", rs)
+	}
+}
+
+func TestConfigure_InterceptRules_UnknownProtocol(t *testing.T) {
+	cs := configureSessionWithEngines(t, httprules.NewInterceptEngine(), nil, nil)
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "configure",
+		Arguments: configureMarshal(t, configureInput{
+			Operation: "merge",
+			InterceptRules: &configureInterceptRules{
+				Add: []interceptRuleInput{{ID: "x", Enabled: true, Protocol: "tcp", Direction: "both"}},
 			},
 		}),
 	})
 	if err != nil {
 		t.Fatalf("CallTool: %v", err)
 	}
-	if result.IsError {
-		t.Fatalf("expected success, got error: %v", result.Content)
-	}
-
-	var out configureResult
-	configureUnmarshalResult(t, result, &out)
-
-	if out.InterceptRules.TotalRules != 1 {
-		t.Errorf("total_rules = %d, want 1", out.InterceptRules.TotalRules)
-	}
-
-	// Old rules should be gone.
-	_, err = engine.GetRule("old-1")
-	if err == nil {
-		t.Error("old-1 should have been replaced")
-	}
-}
-
-func TestConfigure_InterceptRules_ReplaceEmpty(t *testing.T) {
-	engine := intercept.NewEngine()
-	engine.AddRule(intercept.Rule{
-		ID: "r1", Enabled: true, Direction: intercept.DirectionRequest,
-	})
-
-	cs := setupInterceptTestSession(t, engine)
-
-	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
-		Name: "configure",
-		Arguments: configureMarshal(t, configureInput{
-			Operation: "replace",
-			InterceptRules: &configureInterceptRules{
-				Rules: []interceptRuleInput{},
-			},
-		}),
-	})
-	if err != nil {
-		t.Fatalf("CallTool: %v", err)
-	}
-	if result.IsError {
-		t.Fatalf("expected success, got error: %v", result.Content)
-	}
-
-	var out configureResult
-	configureUnmarshalResult(t, result, &out)
-
-	if out.InterceptRules.TotalRules != 0 {
-		t.Errorf("total_rules = %d, want 0", out.InterceptRules.TotalRules)
-	}
-}
-
-func TestConfigure_InterceptRules_NilEngine(t *testing.T) {
-	cs := setupInterceptTestSession(t, nil) // nil engine
-
-	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
-		Name: "configure",
-		Arguments: configureMarshal(t, configureInput{
-			Operation: "merge",
-			InterceptRules: &configureInterceptRules{
-				Add: []interceptRuleInput{
-					{ID: "r1", Enabled: true, Direction: "request"},
-				},
-			},
-		}),
-	})
-	if err != nil {
-		return // Go-level error is acceptable.
-	}
 	if !result.IsError {
-		t.Fatal("expected error for nil engine, got success")
+		t.Fatal("expected error for unknown protocol")
 	}
 }
 
-func TestConfigure_InterceptRules_NilEngineReplace(t *testing.T) {
-	cs := setupInterceptTestSession(t, nil) // nil engine
-
-	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
-		Name: "configure",
-		Arguments: configureMarshal(t, configureInput{
-			Operation: "replace",
-			InterceptRules: &configureInterceptRules{
-				Rules: []interceptRuleInput{
-					{ID: "r1", Enabled: true, Direction: "request"},
-				},
-			},
-		}),
+// TestConfigure_InterceptRules_MergeAdd_RejectsDuplicateID verifies the
+// duplicate-ID rejection contract preserved from the legacy single-engine
+// intercept.Engine.AddRule (USK-692 review F-1). Adding a rule whose ID
+// already exists in any per-protocol engine must surface an error
+// instead of silently appending a second copy.
+func TestConfigure_InterceptRules_MergeAdd_RejectsDuplicateID(t *testing.T) {
+	httpEngine := httprules.NewInterceptEngine()
+	httpEngine.SetRules([]httprules.InterceptRule{
+		{ID: "dup", Enabled: true, Direction: httprules.DirectionBoth},
 	})
-	if err != nil {
-		return // Go-level error is acceptable.
-	}
-	if !result.IsError {
-		t.Fatal("expected error for nil engine in replace, got success")
-	}
-}
-
-func TestConfigure_InterceptRules_MergeAddDuplicate(t *testing.T) {
-	engine := intercept.NewEngine()
-	engine.AddRule(intercept.Rule{
-		ID: "r1", Enabled: true, Direction: intercept.DirectionRequest,
-	})
-
-	cs := setupInterceptTestSession(t, engine)
-
-	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
-		Name: "configure",
-		Arguments: configureMarshal(t, configureInput{
-			Operation: "merge",
-			InterceptRules: &configureInterceptRules{
-				Add: []interceptRuleInput{
-					{ID: "r1", Enabled: true, Direction: "request"},
-				},
-			},
-		}),
-	})
-	if err != nil {
-		return // Go-level error is acceptable.
-	}
-	if !result.IsError {
-		t.Fatal("expected error for duplicate rule ID, got success")
-	}
-}
-
-func TestConfigure_InterceptRules_MergeAddInvalidPattern(t *testing.T) {
-	engine := intercept.NewEngine()
-	cs := setupInterceptTestSession(t, engine)
+	cs := configureSessionWithEngines(t, httpEngine, nil, nil)
 
 	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
 		Name: "configure",
@@ -443,252 +409,195 @@ func TestConfigure_InterceptRules_MergeAddInvalidPattern(t *testing.T) {
 			InterceptRules: &configureInterceptRules{
 				Add: []interceptRuleInput{
 					{
-						ID:        "bad",
-						Enabled:   true,
-						Direction: "request",
-						Conditions: interceptConditionsInput{
-							PathPattern: "[invalid",
-						},
+						ID: "dup", Enabled: true, Protocol: "http", Direction: "both",
+						HTTP: &interceptHTTPConditions{PathPattern: "/.*"},
 					},
 				},
 			},
 		}),
 	})
 	if err != nil {
-		return // Go-level error is acceptable.
+		t.Fatalf("CallTool: %v", err)
 	}
 	if !result.IsError {
-		t.Fatal("expected error for invalid regex pattern, got success")
+		t.Fatal("expected error for duplicate rule ID")
+	}
+	body := flattenContent(result.Content)
+	if !strings.Contains(body, "dup") || !strings.Contains(body, "already exists") {
+		t.Errorf("error text should mention id and 'already exists', got %q", body)
+	}
+	// Must not have appended a second copy.
+	if got := len(httpEngine.Rules()); got != 1 {
+		t.Errorf("engine rule count after rejected add = %d, want 1", got)
 	}
 }
 
-func TestConfigure_InterceptRules_MergeRemoveNonexistent(t *testing.T) {
-	engine := intercept.NewEngine()
-	cs := setupInterceptTestSession(t, engine)
+// TestConfigure_InterceptRules_MergeAdd_RejectsCrossEngineDuplicateID
+// verifies the duplicate-ID check is global across the three
+// per-protocol engines, not per-engine. An ID present in the WS engine
+// must reject an HTTP add of the same ID.
+func TestConfigure_InterceptRules_MergeAdd_RejectsCrossEngineDuplicateID(t *testing.T) {
+	httpEngine := httprules.NewInterceptEngine()
+	wsEngine := wsrules.NewInterceptEngine()
+	wsEngine.SetRules([]wsrules.InterceptRule{
+		{ID: "shared", Enabled: true},
+	})
+	cs := configureSessionWithEngines(t, httpEngine, wsEngine, nil)
 
 	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
 		Name: "configure",
 		Arguments: configureMarshal(t, configureInput{
 			Operation: "merge",
 			InterceptRules: &configureInterceptRules{
-				Remove: []string{"nonexistent"},
+				Add: []interceptRuleInput{
+					{
+						ID: "shared", Enabled: true, Protocol: "http", Direction: "both",
+						HTTP: &interceptHTTPConditions{PathPattern: "/.*"},
+					},
+				},
 			},
 		}),
 	})
 	if err != nil {
-		return // Go-level error is acceptable.
+		t.Fatalf("CallTool: %v", err)
 	}
 	if !result.IsError {
-		t.Fatal("expected error for nonexistent rule removal, got success")
+		t.Fatal("expected error for cross-engine duplicate rule ID")
 	}
 }
 
-func TestConfigure_InterceptRules_MergeEnableNonexistent(t *testing.T) {
-	engine := intercept.NewEngine()
-	cs := setupInterceptTestSession(t, engine)
+// TestConfigure_InterceptRules_MergeRemove_NonexistentID verifies the
+// missing-ID error contract preserved from the legacy single engine
+// (USK-692 review F-2). Removing an ID not owned by any engine must
+// surface an error instead of silently no-op'ing.
+func TestConfigure_InterceptRules_MergeRemove_NonexistentID(t *testing.T) {
+	httpEngine := httprules.NewInterceptEngine()
+	cs := configureSessionWithEngines(t, httpEngine, nil, nil)
 
 	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
 		Name: "configure",
 		Arguments: configureMarshal(t, configureInput{
-			Operation: "merge",
-			InterceptRules: &configureInterceptRules{
-				Enable: []string{"nonexistent"},
-			},
+			Operation:      "merge",
+			InterceptRules: &configureInterceptRules{Remove: []string{"ghost"}},
 		}),
 	})
 	if err != nil {
-		return // Go-level error is acceptable.
+		t.Fatalf("CallTool: %v", err)
 	}
 	if !result.IsError {
-		t.Fatal("expected error for nonexistent rule enable, got success")
+		t.Fatal("expected error for nonexistent remove ID")
+	}
+	body := flattenContent(result.Content)
+	if !strings.Contains(body, "ghost") || !strings.Contains(body, "not found") {
+		t.Errorf("error text should mention id and 'not found', got %q", body)
 	}
 }
 
-// TestProxyStart_InterceptRules tests that intercept rules can be set via proxy_start.
-// Note: We can't fully test proxy_start since it requires a real manager,
-// but we test the JSON deserialization and structure via raw marshaling.
+// TestConfigure_InterceptRules_MergeEnable_NonexistentID verifies the
+// missing-ID error contract on enable/disable (USK-692 review F-2).
+func TestConfigure_InterceptRules_MergeEnable_NonexistentID(t *testing.T) {
+	httpEngine := httprules.NewInterceptEngine()
+	cs := configureSessionWithEngines(t, httpEngine, nil, nil)
+
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "configure",
+		Arguments: configureMarshal(t, configureInput{
+			Operation:      "merge",
+			InterceptRules: &configureInterceptRules{Enable: []string{"ghost"}},
+		}),
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("expected error for nonexistent enable ID")
+	}
+}
+
+func TestConfigure_InterceptQueue_TimeoutAndBehavior(t *testing.T) {
+	cs := configureSessionWithEngines(t, httprules.NewInterceptEngine(), nil, nil)
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "configure",
+		Arguments: configureMarshal(t, configureInput{
+			InterceptQueue: &configureInterceptQueue{
+				TimeoutMs:       intPtr(30000),
+				TimeoutBehavior: "auto_drop",
+			},
+		}),
+	})
+	if err != nil || result.IsError {
+		t.Fatalf("CallTool: err=%v isError=%v content=%v", err, result.IsError, result.Content)
+	}
+	var out configureResult
+	configureUnmarshalResult(t, result, &out)
+	if out.InterceptQueue == nil {
+		t.Fatal("intercept_queue is nil")
+	}
+	if out.InterceptQueue.TimeoutMs != 30000 {
+		t.Errorf("timeout_ms = %d, want 30000", out.InterceptQueue.TimeoutMs)
+	}
+	if out.InterceptQueue.TimeoutBehavior != "auto_drop" {
+		t.Errorf("timeout_behavior = %q, want auto_drop", out.InterceptQueue.TimeoutBehavior)
+	}
+}
+
+func TestConfigure_InterceptQueue_RejectsBadBehavior(t *testing.T) {
+	cs := configureSessionWithEngines(t, httprules.NewInterceptEngine(), nil, nil)
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "configure",
+		Arguments: configureMarshal(t, configureInput{
+			InterceptQueue: &configureInterceptQueue{TimeoutBehavior: "explode"},
+		}),
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("expected error for invalid timeout_behavior")
+	}
+	body := flattenContent(result.Content)
+	if !strings.Contains(body, "explode") {
+		t.Errorf("error text should mention the bad value, got %q", body)
+	}
+}
+
 func TestProxyStart_InterceptRulesInputSerialization(t *testing.T) {
-	input := proxyStartInput{
-		InterceptRules: []interceptRuleInput{
-			{
-				ID:        "rule-1",
-				Enabled:   true,
-				Direction: "request",
-				Conditions: interceptConditionsInput{
-					PathPattern: "/api/admin.*",
-					Methods:     []string{"POST", "PUT"},
-					HeaderMatch: map[string]string{
-						"Content-Type": "application/json",
-					},
-				},
+	in := []interceptRuleInput{
+		{
+			ID: "r1", Enabled: true, Protocol: "http", Direction: "request",
+			HTTP: &interceptHTTPConditions{
+				HostPattern: "example\\.com",
+				PathPattern: "/api/.*",
+				Methods:     []string{"POST"},
+				HeaderMatch: map[string]string{"X-Foo": "bar"},
 			},
 		},
-	}
-
-	data, err := json.Marshal(input)
-	if err != nil {
-		t.Fatalf("Marshal: %v", err)
-	}
-
-	var decoded proxyStartInput
-	if err := json.Unmarshal(data, &decoded); err != nil {
-		t.Fatalf("Unmarshal: %v", err)
-	}
-
-	if len(decoded.InterceptRules) != 1 {
-		t.Fatalf("InterceptRules len = %d, want 1", len(decoded.InterceptRules))
-	}
-	if decoded.InterceptRules[0].ID != "rule-1" {
-		t.Errorf("ID = %q, want %q", decoded.InterceptRules[0].ID, "rule-1")
-	}
-	if decoded.InterceptRules[0].Conditions.PathPattern != "/api/admin.*" {
-		t.Errorf("PathPattern = %q, want %q", decoded.InterceptRules[0].Conditions.PathPattern, "/api/admin.*")
-	}
-}
-
-func TestInterceptHelpers_ToFromRoundTrip(t *testing.T) {
-	input := interceptRuleInput{
-		ID:        "r1",
-		Enabled:   true,
-		Direction: "both",
-		Conditions: interceptConditionsInput{
-			PathPattern: "/api/.*",
-			Methods:     []string{"POST", "PUT"},
-			HeaderMatch: map[string]string{"Content-Type": "json"},
+		{
+			ID: "r2", Enabled: true, Protocol: "ws", Direction: "send",
+			WS: &interceptWSConditions{HostPattern: "example\\.com", OpcodeFilter: []string{"text"}},
 		},
 	}
-
-	rule := toInterceptRule(input)
-
-	if rule.ID != "r1" {
-		t.Errorf("ID = %q, want %q", rule.ID, "r1")
-	}
-	if rule.Direction != intercept.DirectionBoth {
-		t.Errorf("Direction = %q, want %q", rule.Direction, intercept.DirectionBoth)
-	}
-
-	output := fromInterceptRule(rule)
-
-	if output.ID != "r1" {
-		t.Errorf("output ID = %q, want %q", output.ID, "r1")
-	}
-	if output.Direction != "both" {
-		t.Errorf("output Direction = %q, want %q", output.Direction, "both")
-	}
-	if output.Conditions.PathPattern != "/api/.*" {
-		t.Errorf("output PathPattern = %q, want %q", output.Conditions.PathPattern, "/api/.*")
-	}
-}
-
-func TestInterceptHelpers_WebSocketRoundTrip(t *testing.T) {
-	input := interceptRuleInput{
-		ID:        "ws1",
-		Enabled:   true,
-		Direction: "request",
-		Conditions: interceptConditionsInput{
-			UpgradeURLPattern: "/ws/chat.*",
-			StreamID:          "flow-123",
-		},
-	}
-
-	rule := toInterceptRule(input)
-
-	if rule.Conditions.UpgradeURLPattern != "/ws/chat.*" {
-		t.Errorf("UpgradeURLPattern = %q, want %q", rule.Conditions.UpgradeURLPattern, "/ws/chat.*")
-	}
-	if rule.Conditions.StreamID != "flow-123" {
-		t.Errorf("StreamID = %q, want %q", rule.Conditions.StreamID, "flow-123")
-	}
-
-	output := fromInterceptRule(rule)
-
-	if output.Conditions.UpgradeURLPattern != "/ws/chat.*" {
-		t.Errorf("output UpgradeURLPattern = %q, want %q", output.Conditions.UpgradeURLPattern, "/ws/chat.*")
-	}
-	if output.Conditions.StreamID != "flow-123" {
-		t.Errorf("output StreamID = %q, want %q", output.Conditions.StreamID, "flow-123")
-	}
-}
-
-func TestConfigure_InterceptRules_MergeAddWebSocket(t *testing.T) {
-	engine := intercept.NewEngine()
-	cs := setupInterceptTestSession(t, engine)
-
-	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
-		Name: "configure",
-		Arguments: configureMarshal(t, configureInput{
-			Operation: "merge",
-			InterceptRules: &configureInterceptRules{
-				Add: []interceptRuleInput{
-					{
-						ID:        "ws-rule-1",
-						Enabled:   true,
-						Direction: "request",
-						Conditions: interceptConditionsInput{
-							UpgradeURLPattern: "/ws/chat.*",
-						},
-					},
-				},
-			},
-		}),
-	})
+	data, err := json.Marshal(in)
 	if err != nil {
-		t.Fatalf("CallTool: %v", err)
+		t.Fatalf("marshal: %v", err)
 	}
-	if result.IsError {
-		t.Fatalf("expected success, got error: %v", result.Content)
+	var roundtrip []interceptRuleInput
+	if err := json.Unmarshal(data, &roundtrip); err != nil {
+		t.Fatalf("unmarshal: %v", err)
 	}
-
-	var out configureResult
-	configureUnmarshalResult(t, result, &out)
-
-	if out.InterceptRules.TotalRules != 1 {
-		t.Errorf("total_rules = %d, want 1", out.InterceptRules.TotalRules)
-	}
-
-	r, err := engine.GetRule("ws-rule-1")
-	if err != nil {
-		t.Fatalf("GetRule: %v", err)
-	}
-	if r.Conditions.UpgradeURLPattern != "/ws/chat.*" {
-		t.Errorf("UpgradeURLPattern = %q, want %q", r.Conditions.UpgradeURLPattern, "/ws/chat.*")
+	if len(roundtrip) != 2 || roundtrip[0].HTTP == nil || roundtrip[1].WS == nil {
+		t.Errorf("roundtrip lost discriminator: %+v", roundtrip)
 	}
 }
 
-func TestConfigure_InterceptRules_MergeAddWebSocketMixedConditionsError(t *testing.T) {
-	engine := intercept.NewEngine()
-	cs := setupInterceptTestSession(t, engine)
-
-	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
-		Name: "configure",
-		Arguments: configureMarshal(t, configureInput{
-			Operation: "merge",
-			InterceptRules: &configureInterceptRules{
-				Add: []interceptRuleInput{
-					{
-						ID:        "bad-mixed",
-						Enabled:   true,
-						Direction: "request",
-						Conditions: interceptConditionsInput{
-							UpgradeURLPattern: "/ws/.*",
-							PathPattern:       "/api/.*",
-						},
-					},
-				},
-			},
-		}),
-	})
-	if err != nil {
-		return // Go-level error is acceptable.
+// flattenContent reduces the gomcp Content slice to a single string for
+// substring assertions in error-path tests.
+func flattenContent(content []gomcp.Content) string {
+	var b strings.Builder
+	for _, c := range content {
+		if tc, ok := c.(*gomcp.TextContent); ok {
+			b.WriteString(tc.Text)
+		}
 	}
-	if !result.IsError {
-		t.Fatal("expected error for mixed WebSocket/HTTP conditions, got success")
-	}
-}
-
-func TestInterceptHelpers_FromInterceptRulesNil(t *testing.T) {
-	out := fromInterceptRules(nil)
-	if out != nil {
-		t.Errorf("fromInterceptRules(nil) = %v, want nil", out)
-	}
+	return b.String()
 }

@@ -39,11 +39,13 @@ import (
 	protosocks5 "github.com/usk6666/yorishiro-proxy/internal/protocol/socks5"
 	prototcp "github.com/usk6666/yorishiro-proxy/internal/protocol/tcp"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
-	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/rules"
 	"github.com/usk6666/yorishiro-proxy/internal/proxybuild"
 	"github.com/usk6666/yorishiro-proxy/internal/pushrecorder"
 	rulescommon "github.com/usk6666/yorishiro-proxy/internal/rules/common"
+	grpcrules "github.com/usk6666/yorishiro-proxy/internal/rules/grpc"
+	httprules "github.com/usk6666/yorishiro-proxy/internal/rules/http"
+	wsrules "github.com/usk6666/yorishiro-proxy/internal/rules/ws"
 	"github.com/usk6666/yorishiro-proxy/internal/safety"
 	"golang.org/x/sync/errgroup"
 )
@@ -250,15 +252,13 @@ func runWithFlags(ctx context.Context, fs *flag.FlagSet, args []string) error {
 	// Create shared capture scope for controlling flow recording.
 	scope := proxy.NewCaptureScope()
 
-	// Initialize intercept engine and queue.
-	interceptEngine := intercept.NewEngine()
-	interceptQueue := intercept.NewQueue()
-
-	// Initialize the RFC-001 N8 HoldQueue used by the new
-	// (Envelope-based) InterceptStep + intercept MCP tool path. This
-	// coexists with the legacy interceptQueue until N9 removes the
-	// legacy types entirely (see internal/mcp/components.go).
+	// Initialize the RFC-001 HoldQueue + per-protocol intercept engines
+	// shared between pipeline.InterceptStep (live data path via
+	// proxybuild) and the MCP intercept / configure tools.
 	holdQueue := rulescommon.NewHoldQueue()
+	httpInterceptEngine := httprules.NewInterceptEngine()
+	wsInterceptEngine := wsrules.NewInterceptEngine()
+	grpcInterceptEngine := grpcrules.NewInterceptEngine()
 
 	pluginv2Engine, err := initPluginV2Engine(ctx, store, proxyCfg, logger)
 	if err != nil {
@@ -270,16 +270,14 @@ func runWithFlags(ctx context.Context, fs *flag.FlagSet, args []string) error {
 	pipeline := rules.NewPipeline()
 
 	proto, err := initProtocolHandlers(ctx, protocolDeps{
-		cfg:             cfg,
-		proxyCfg:        proxyCfg,
-		store:           store,
-		issuer:          issuer,
-		passthrough:     passthrough,
-		scope:           scope,
-		interceptEngine: interceptEngine,
-		interceptQueue:  interceptQueue,
-		pipeline:        pipeline,
-		logger:          logger,
+		cfg:         cfg,
+		proxyCfg:    proxyCfg,
+		store:       store,
+		issuer:      issuer,
+		passthrough: passthrough,
+		scope:       scope,
+		pipeline:    pipeline,
+		logger:      logger,
 	})
 	if err != nil {
 		return err
@@ -294,7 +292,8 @@ func runWithFlags(ctx context.Context, fs *flag.FlagSet, args []string) error {
 	}
 
 	return assembleAndRunMCPServer(ctx, cfg, proxyCfg, ca, issuer, store, pluginv2Engine,
-		holdQueue, passthrough, scope, interceptEngine, interceptQueue, pipeline, proto,
+		holdQueue, httpInterceptEngine, wsInterceptEngine, grpcInterceptEngine,
+		passthrough, scope, pipeline, proto,
 		targetScopePolicy, targetScopePolicySource, openBrowser, stdioMCP, logger)
 }
 
@@ -311,10 +310,11 @@ func assembleAndRunMCPServer(
 	store *flow.SQLiteStore,
 	pluginv2Engine *pluginv2.Engine,
 	holdQueue *rulescommon.HoldQueue,
+	httpInterceptEngine *httprules.InterceptEngine,
+	wsInterceptEngine *wsrules.InterceptEngine,
+	grpcInterceptEngine *grpcrules.InterceptEngine,
 	passthrough *proxy.PassthroughList,
 	scope *proxy.CaptureScope,
-	interceptEngine *intercept.Engine,
-	interceptQueue *intercept.Queue,
 	pipeline *rules.Pipeline,
 	proto *protocolResult,
 	targetScopePolicy *config.TargetScopePolicyConfig,
@@ -329,7 +329,9 @@ func assembleAndRunMCPServer(
 		return err
 	}
 
-	manager, err := assembleLiveManager(ctx, cfg, proxyCfg, store, issuer, pluginv2Engine, holdQueue, passthrough, scope, rateLimiter, logger)
+	manager, err := assembleLiveManager(ctx, cfg, proxyCfg, store, issuer, pluginv2Engine,
+		holdQueue, httpInterceptEngine, wsInterceptEngine, grpcInterceptEngine,
+		passthrough, scope, rateLimiter, safetyEngine, logger)
 	if err != nil {
 		return err
 	}
@@ -345,8 +347,9 @@ func assembleAndRunMCPServer(
 	}()
 
 	mcpComponents, opts, err := buildMCPComponents(ctx, cfg, proxyCfg, ca, issuer, store, manager,
-		passthrough, scope, interceptEngine, interceptQueue, holdQueue, pluginv2Engine, pipeline, proto,
-		targetScope, rateLimiter, safetyEngine, targetScopePolicySource, logger)
+		passthrough, scope, holdQueue, httpInterceptEngine, wsInterceptEngine, grpcInterceptEngine,
+		pluginv2Engine, pipeline, proto, targetScope, rateLimiter, safetyEngine,
+		targetScopePolicySource, logger)
 	if err != nil {
 		return err
 	}
@@ -538,16 +541,14 @@ func initInfra(ctx context.Context, cfg *config.Config) (*infraResult, error) {
 
 // protocolDeps holds dependencies needed by initProtocolHandlers.
 type protocolDeps struct {
-	cfg             *config.Config
-	proxyCfg        *config.ProxyConfig
-	store           *flow.SQLiteStore
-	issuer          *cert.Issuer
-	passthrough     *proxy.PassthroughList
-	scope           *proxy.CaptureScope
-	interceptEngine *intercept.Engine
-	interceptQueue  *intercept.Queue
-	pipeline        *rules.Pipeline
-	logger          *slog.Logger
+	cfg         *config.Config
+	proxyCfg    *config.ProxyConfig
+	store       *flow.SQLiteStore
+	issuer      *cert.Issuer
+	passthrough *proxy.PassthroughList
+	scope       *proxy.CaptureScope
+	pipeline    *rules.Pipeline
+	logger      *slog.Logger
 }
 
 // protocolResult holds all protocol handlers and related components.
@@ -578,8 +579,6 @@ func initProtocolHandlers(ctx context.Context, deps protocolDeps) (*protocolResu
 	httpHandler.SetInsecureSkipVerify(cfg.InsecureSkipVerify)
 	httpHandler.SetPassthroughList(deps.passthrough)
 	httpHandler.SetCaptureScope(deps.scope)
-	httpHandler.SetInterceptEngine(deps.interceptEngine)
-	httpHandler.SetInterceptQueue(deps.interceptQueue)
 	httpHandler.SetTransformPipeline(deps.pipeline)
 
 	// Build the host TLS registry and TLS transport.
@@ -611,8 +610,6 @@ func initProtocolHandlers(ctx context.Context, deps protocolDeps) (*protocolResu
 	http2Handler := protohttp2.NewHandler(store, logger)
 	http2Handler.SetInsecureSkipVerify(cfg.InsecureSkipVerify)
 	http2Handler.SetCaptureScope(deps.scope)
-	http2Handler.SetInterceptEngine(deps.interceptEngine)
-	http2Handler.SetInterceptQueue(deps.interceptQueue)
 	http2Handler.SetDetector(fpDetector)
 	http2Handler.SetTransformPipeline(deps.pipeline)
 
@@ -847,9 +844,10 @@ func buildMCPComponents(
 	manager *proxybuild.Manager,
 	passthrough *proxy.PassthroughList,
 	scope *proxy.CaptureScope,
-	interceptEngine *intercept.Engine,
-	interceptQueue *intercept.Queue,
 	holdQueue *rulescommon.HoldQueue,
+	httpInterceptEngine *httprules.InterceptEngine,
+	wsInterceptEngine *wsrules.InterceptEngine,
+	grpcInterceptEngine *grpcrules.InterceptEngine,
 	pluginv2Engine *pluginv2.Engine,
 	pipeline *rules.Pipeline,
 	proto *protocolResult,
@@ -878,8 +876,9 @@ func buildMCPComponents(
 			nil, // budget manager — defaulted inside NewServer.
 		),
 		pipeline: mcp.NewPipeline(
-			interceptEngine,
-			interceptQueue,
+			httpInterceptEngine,
+			wsInterceptEngine,
+			grpcInterceptEngine,
 			holdQueue,
 			pipeline,
 			safetyEngine,
@@ -1408,13 +1407,19 @@ func assembleLiveManager(
 	issuer *cert.Issuer,
 	pluginv2Engine *pluginv2.Engine,
 	holdQueue *rulescommon.HoldQueue,
+	httpInterceptEngine *httprules.InterceptEngine,
+	wsInterceptEngine *wsrules.InterceptEngine,
+	grpcInterceptEngine *grpcrules.InterceptEngine,
 	passthrough *proxy.PassthroughList,
 	scope *proxy.CaptureScope,
 	rateLimiter *proxy.RateLimiter,
+	safetyEngine *safety.Engine,
 	logger *slog.Logger,
 ) (*proxybuild.Manager, error) {
 	buildCfg := newLiveBuildConfig(appCtx, cfg, proxyCfg, issuer, pluginv2Engine, store, logger)
-	return newLiveManager(cfg, proxyCfg, store, issuer, pluginv2Engine, holdQueue, passthrough, scope, rateLimiter, buildCfg, logger)
+	return newLiveManager(cfg, proxyCfg, store, issuer, pluginv2Engine,
+		holdQueue, httpInterceptEngine, wsInterceptEngine, grpcInterceptEngine,
+		passthrough, scope, rateLimiter, safetyEngine, buildCfg, logger)
 }
 
 // newLiveBuildConfig assembles the connector.BuildConfig consumed by every
@@ -1486,9 +1491,13 @@ func newLiveManager(
 	issuer *cert.Issuer,
 	pluginv2Engine *pluginv2.Engine,
 	holdQueue *rulescommon.HoldQueue,
+	httpInterceptEngine *httprules.InterceptEngine,
+	wsInterceptEngine *wsrules.InterceptEngine,
+	grpcInterceptEngine *grpcrules.InterceptEngine,
 	passthrough *proxy.PassthroughList,
 	scope *proxy.CaptureScope,
 	rateLimiter *proxy.RateLimiter,
+	safetyEngine *safety.Engine,
 	buildCfg *connector.BuildConfig,
 	logger *slog.Logger,
 ) (*proxybuild.Manager, error) {
@@ -1507,17 +1516,20 @@ func newLiveManager(
 
 	factory := func(ctx context.Context, name, addr string) (*proxybuild.Stack, error) {
 		return proxybuild.BuildLiveStack(ctx, proxybuild.Deps{
-			Logger:          logger,
-			ListenerName:    name,
-			ListenAddr:      addr,
-			FlowStore:       store,
-			PluginV2Engine:  pluginv2Engine,
-			BuildConfig:     buildCfg,
-			HoldQueue:       holdQueue,
-			PeekTimeout:     cfg.PeekTimeout,
-			MaxConnections:  cfg.MaxConnections,
-			PassthroughList: passthrough,
-			RateLimiter:     rateLimiter,
+			Logger:              logger,
+			ListenerName:        name,
+			ListenAddr:          addr,
+			FlowStore:           store,
+			PluginV2Engine:      pluginv2Engine,
+			BuildConfig:         buildCfg,
+			HoldQueue:           holdQueue,
+			HTTPInterceptEngine: httpInterceptEngine,
+			WSInterceptEngine:   wsInterceptEngine,
+			GRPCInterceptEngine: grpcInterceptEngine,
+			PeekTimeout:         cfg.PeekTimeout,
+			MaxConnections:      cfg.MaxConnections,
+			PassthroughList:     passthrough,
+			RateLimiter:         rateLimiter,
 		})
 	}
 	mgr, err := proxybuild.NewManager(proxybuild.ManagerConfig{
@@ -1532,7 +1544,10 @@ func newLiveManager(
 
 	// proxyCfg + issuer are reachable via buildCfg; kept on the parameter
 	// list for future cleanup work (USK-697 connector-adapter migration).
+	// safetyEngine is reserved for the same wave (per-protocol SafetyEngine
+	// wiring through proxybuild.Deps).
 	_ = proxyCfg
 	_ = issuer
+	_ = safetyEngine
 	return mgr, nil
 }

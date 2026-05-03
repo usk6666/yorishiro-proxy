@@ -15,9 +15,11 @@ import (
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/usk6666/yorishiro-proxy/internal/config"
+	"github.com/usk6666/yorishiro-proxy/internal/envelope"
+	"github.com/usk6666/yorishiro-proxy/internal/exchange"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
-	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
+	"github.com/usk6666/yorishiro-proxy/internal/rules/common"
 )
 
 // defaultRequestTimeoutMs is the default request timeout in milliseconds
@@ -1230,124 +1232,291 @@ func (s *Server) handleQueryCACert() (*gomcp.CallToolResult, *queryCACertResult,
 
 // --- intercept_queue resource ---
 
-// queryInterceptQueueEntry is a single entry in the intercept queue query response.
+// queryInterceptQueueEntry is a single entry in the intercept queue query
+// response. The shape mirrors the held envelope: a per-Message-type union
+// (HTTP / WS / GRPCStart / GRPCData / GRPCEnd / Raw) plus the wire-bytes
+// snapshot. Headers are projected as ordered []headerKV (RFC-001
+// wire-fidelity, no map normalization).
 type queryInterceptQueueEntry struct {
-	// ID is the unique identifier for the intercepted item.
+	// ID is the held envelope's unique identifier.
 	ID string `json:"id"`
-	// Phase indicates whether this is a "request", "response", or "websocket_frame" intercept.
-	Phase string `json:"phase"`
-	// Protocol is the protocol type: "http" or "websocket".
+	// Protocol discriminates the populated per-Message-type field.
+	// One of: http, websocket, grpc_start, grpc_data, grpc_end, raw, unknown.
 	Protocol string `json:"protocol"`
-	// Method is the HTTP method (HTTP only).
-	Method string `json:"method,omitempty"`
-	// URL is the request URL (HTTP only).
-	URL string `json:"url,omitempty"`
-	// StatusCode is the HTTP status code (only set for response phase).
-	StatusCode int `json:"status_code,omitempty"`
-	// Headers are the request/response headers (HTTP only).
-	Headers map[string][]string `json:"headers,omitempty"`
-	// BodyEncoding indicates the encoding of the body/payload ("text" or "base64").
-	BodyEncoding string `json:"body_encoding"`
-	// Body is the request/response body or WebSocket payload as text or Base64-encoded string.
-	Body string `json:"body"`
-	// Timestamp is when the item was intercepted.
-	Timestamp string `json:"timestamp"`
-	// MatchedRules lists the IDs of the rules that matched.
-	MatchedRules []string `json:"matched_rules"`
+	// Direction is the envelope direction: "send" or "receive".
+	Direction string `json:"direction"`
+	// HeldAt is the ISO-8601 timestamp when the envelope was held.
+	HeldAt string `json:"held_at"`
+	// MatchedRules lists the rule IDs that matched.
+	MatchedRules []string `json:"matched_rules,omitempty"`
+	// FlowID identifies the per-stream flow on the held envelope.
+	FlowID string `json:"flow_id,omitempty"`
+	// StreamID identifies the multiplexed stream on the held envelope.
+	StreamID string `json:"stream_id,omitempty"`
 
-	// Metadata holds protocol-specific metadata (e.g. gRPC encoding info).
-	Metadata map[string]string `json:"metadata,omitempty"`
+	// Per-protocol union — exactly one is non-nil, matching Protocol.
+	HTTP      *httpEntryView      `json:"http,omitempty"`
+	WS        *wsEntryView        `json:"ws,omitempty"`
+	GRPCStart *grpcStartEntryView `json:"grpc_start,omitempty"`
+	GRPCData  *grpcDataEntryView  `json:"grpc_data,omitempty"`
+	GRPCEnd   *grpcEndEntryView   `json:"grpc_end,omitempty"`
+	Raw       *rawEntryView       `json:"raw,omitempty"`
 
-	// --- WebSocket frame metadata (phase=websocket_frame only) ---
+	// Wire-bytes snapshot from Envelope.Raw.
+	RawBytesAvailable bool   `json:"raw_bytes_available"`
+	RawBytesSize      int    `json:"raw_bytes_size,omitempty"`
+	RawBytesEncoding  string `json:"raw_bytes_encoding,omitempty"`
+	RawBytes          string `json:"raw_bytes,omitempty"`
+}
 
-	// Opcode is the WebSocket frame opcode name (e.g. "Text", "Binary").
-	Opcode string `json:"opcode,omitempty"`
-	// Direction is the frame direction: "client_to_server" or "server_to_client".
-	Direction string `json:"direction,omitempty"`
-	// StreamID is the WebSocket flow ID this frame belongs to.
-	StreamID string `json:"flow_id,omitempty"`
-	// UpgradeURL is the URL from the original WebSocket upgrade request.
-	UpgradeURL string `json:"upgrade_url,omitempty"`
-	// Sequence is the frame sequence number within the WebSocket connection.
-	Sequence int64 `json:"sequence,omitempty"`
+// httpEntryView is the per-entry projection of an HTTPMessage envelope.
+// Headers and Trailers are order- and case-preserved per RFC-001.
+type httpEntryView struct {
+	Method       string     `json:"method,omitempty"`
+	Scheme       string     `json:"scheme,omitempty"`
+	Authority    string     `json:"authority,omitempty"`
+	Path         string     `json:"path,omitempty"`
+	RawQuery     string     `json:"raw_query,omitempty"`
+	Status       int        `json:"status,omitempty"`
+	StatusReason string     `json:"status_reason,omitempty"`
+	Headers      []headerKV `json:"headers,omitempty"`
+	Trailers     []headerKV `json:"trailers,omitempty"`
+	BodyEncoding string     `json:"body_encoding,omitempty"`
+	Body         string     `json:"body,omitempty"`
+}
+
+// wsEntryView is the per-entry projection of a WSMessage envelope.
+type wsEntryView struct {
+	Opcode          string `json:"opcode,omitempty"`
+	Fin             bool   `json:"fin,omitempty"`
+	Masked          bool   `json:"masked,omitempty"`
+	Compressed      bool   `json:"compressed,omitempty"`
+	CloseCode       uint16 `json:"close_code,omitempty"`
+	CloseReason     string `json:"close_reason,omitempty"`
+	PayloadEncoding string `json:"payload_encoding,omitempty"`
+	Payload         string `json:"payload,omitempty"`
+}
+
+// grpcStartEntryView is the per-entry projection of a GRPCStartMessage envelope.
+type grpcStartEntryView struct {
+	Service     string     `json:"service,omitempty"`
+	Method      string     `json:"method,omitempty"`
+	Encoding    string     `json:"encoding,omitempty"`
+	ContentType string     `json:"content_type,omitempty"`
+	Metadata    []headerKV `json:"metadata,omitempty"`
+}
+
+// grpcDataEntryView is the per-entry projection of a GRPCDataMessage envelope.
+type grpcDataEntryView struct {
+	Service         string `json:"service,omitempty"`
+	Method          string `json:"method,omitempty"`
+	Compressed      bool   `json:"compressed,omitempty"`
+	EndStream       bool   `json:"end_stream,omitempty"`
+	WireLength      uint32 `json:"wire_length,omitempty"`
+	PayloadEncoding string `json:"payload_encoding,omitempty"`
+	Payload         string `json:"payload,omitempty"`
+}
+
+// grpcEndEntryView is the per-entry projection of a GRPCEndMessage envelope.
+type grpcEndEntryView struct {
+	Status   uint32     `json:"status"`
+	Message  string     `json:"message,omitempty"`
+	Trailers []headerKV `json:"trailers,omitempty"`
+}
+
+// rawEntryView is the per-entry projection of a RawMessage envelope.
+type rawEntryView struct {
+	BytesEncoding string `json:"bytes_encoding,omitempty"`
+	Bytes         string `json:"bytes,omitempty"`
 }
 
 // queryInterceptQueueResult is the response for the intercept_queue resource.
 type queryInterceptQueueResult struct {
-	// Items contains the currently blocked requests.
+	// Items contains the currently held envelopes.
 	Items []queryInterceptQueueEntry `json:"items"`
 	// Count is the number of items returned.
 	Count int `json:"count"`
 }
 
-// handleQueryInterceptQueue returns the list of currently intercepted (blocked) requests.
+// handleQueryInterceptQueue returns the list of currently held envelopes
+// from the HoldQueue, projecting each via type-switch on env.Message.
 func (s *Server) handleQueryInterceptQueue(input queryInput) (*gomcp.CallToolResult, *queryInterceptQueueResult, error) {
-	if s.pipeline.interceptQueue == nil {
+	if s.pipeline.holdQueue == nil {
 		return nil, nil, fmt.Errorf("intercept queue is not initialized")
 	}
 
-	items := s.pipeline.interceptQueue.List()
+	items := s.pipeline.holdQueue.List()
 
 	limit := input.Limit
 	if limit <= 0 || limit > maxListLimit {
 		limit = defaultListLimit
 	}
 
-	// Sort by timestamp (oldest first) for consistent ordering.
 	sort.Slice(items, func(i, j int) bool {
-		return items[i].Timestamp.Before(items[j].Timestamp)
+		return items[i].HeldAt.Before(items[j].HeldAt)
 	})
 
-	// Apply limit.
 	if len(items) > limit {
 		items = items[:limit]
 	}
 
 	entries := make([]queryInterceptQueueEntry, 0, len(items))
-	for _, item := range items {
-		bodyStr, bodyEncoding := encodeBody(item.Body)
-
-		entry := queryInterceptQueueEntry{
-			ID:           item.ID,
-			Phase:        string(item.Phase),
-			Body:         bodyStr,
-			BodyEncoding: bodyEncoding,
-			Timestamp:    item.Timestamp.UTC().Format("2006-01-02T15:04:05Z"),
-			MatchedRules: item.MatchedRules,
-		}
-
-		if len(item.Metadata) > 0 {
-			entry.Metadata = item.Metadata
-		}
-
-		if item.Phase == intercept.PhaseWebSocketFrame {
-			entry.Protocol = "websocket"
-			entry.Opcode = wsOpcodeNameFromInt(item.WSOpcode)
-			entry.Direction = item.WSDirection
-			entry.StreamID = item.WSFlowID
-			entry.UpgradeURL = item.WSUpgradeURL
-			entry.Sequence = item.WSSequence
-		} else {
-			entry.Protocol = "http"
-			entry.Method = item.Method
-			entry.StatusCode = item.StatusCode
-			if item.URL != nil {
-				entry.URL = item.URL.String()
-			}
-			// Convert KeyValue headers to map for JSON output.
-			entry.Headers = map[string][]string(kvToHTTPHeader(item.Headers))
-		}
-
-		entries = append(entries, entry)
+	for _, it := range items {
+		entries = append(entries, s.projectHeldEntry(it))
 	}
-
-	// Apply SafetyFilter output masking to intercept queue bodies and headers.
-	s.filterOutputInterceptEntries(entries)
 
 	return nil, &queryInterceptQueueResult{
 		Items: entries,
 		Count: len(entries),
 	}, nil
+}
+
+// projectHeldEntry projects one HoldQueue HeldEntry onto a JSON-friendly
+// queryInterceptQueueEntry. The per-Message-type dispatch fans out into
+// project*View helpers; SafetyEngine output masking is applied inline so
+// each protocol view can mask the right headers/body shape.
+func (s *Server) projectHeldEntry(it *common.HeldEntry) queryInterceptQueueEntry {
+	env := it.Envelope
+	entry := queryInterceptQueueEntry{
+		ID:           it.ID,
+		Protocol:     holdQueueProtocolKind(env),
+		Direction:    env.Direction.String(),
+		HeldAt:       it.HeldAt.UTC().Format("2006-01-02T15:04:05Z"),
+		MatchedRules: it.MatchedRules,
+		FlowID:       env.FlowID,
+		StreamID:     env.StreamID,
+	}
+
+	switch m := env.Message.(type) {
+	case *envelope.HTTPMessage:
+		entry.HTTP = s.projectHTTPView(m)
+	case *envelope.WSMessage:
+		entry.WS = s.projectWSView(m)
+	case *envelope.GRPCStartMessage:
+		entry.GRPCStart = s.projectGRPCStartView(m)
+	case *envelope.GRPCDataMessage:
+		entry.GRPCData = s.projectGRPCDataView(m)
+	case *envelope.GRPCEndMessage:
+		entry.GRPCEnd = s.projectGRPCEndView(m)
+	case *envelope.RawMessage:
+		entry.Raw = s.projectRawView(m)
+	}
+
+	if len(env.Raw) > 0 {
+		entry.RawBytesAvailable = true
+		entry.RawBytesSize = len(env.Raw)
+		filtered := s.filterOutputBody(env.Raw)
+		entry.RawBytes, entry.RawBytesEncoding = encodeBody(filtered)
+	}
+
+	return entry
+}
+
+// projectHTTPView projects an HTTPMessage with output filter applied to
+// body and headers/trailers (preserving order and casing).
+func (s *Server) projectHTTPView(m *envelope.HTTPMessage) *httpEntryView {
+	body := s.filterOutputBody(m.Body)
+	bodyStr, bodyEncoding := encodeBody(body)
+	return &httpEntryView{
+		Method:       m.Method,
+		Scheme:       m.Scheme,
+		Authority:    m.Authority,
+		Path:         m.Path,
+		RawQuery:     m.RawQuery,
+		Status:       m.Status,
+		StatusReason: m.StatusReason,
+		Headers:      s.filterOutputHeaderKVs(m.Headers),
+		Trailers:     s.filterOutputHeaderKVs(m.Trailers),
+		BodyEncoding: bodyEncoding,
+		Body:         bodyStr,
+	}
+}
+
+// projectWSView projects a WSMessage with output filter applied to payload.
+func (s *Server) projectWSView(m *envelope.WSMessage) *wsEntryView {
+	payload := s.filterOutputBody(m.Payload)
+	payStr, payEncoding := encodeBody(payload)
+	return &wsEntryView{
+		Opcode:          wsOpcodeName(m.Opcode),
+		Fin:             m.Fin,
+		Masked:          m.Masked,
+		Compressed:      m.Compressed,
+		CloseCode:       m.CloseCode,
+		CloseReason:     m.CloseReason,
+		PayloadEncoding: payEncoding,
+		Payload:         payStr,
+	}
+}
+
+// projectGRPCStartView projects a GRPCStartMessage with metadata filtered.
+func (s *Server) projectGRPCStartView(m *envelope.GRPCStartMessage) *grpcStartEntryView {
+	return &grpcStartEntryView{
+		Service:     m.Service,
+		Method:      m.Method,
+		Encoding:    m.Encoding,
+		ContentType: m.ContentType,
+		Metadata:    s.filterOutputHeaderKVs(m.Metadata),
+	}
+}
+
+// projectGRPCDataView projects a GRPCDataMessage with output filter on payload.
+func (s *Server) projectGRPCDataView(m *envelope.GRPCDataMessage) *grpcDataEntryView {
+	payload := s.filterOutputBody(m.Payload)
+	payStr, payEncoding := encodeBody(payload)
+	return &grpcDataEntryView{
+		Service:         m.Service,
+		Method:          m.Method,
+		Compressed:      m.Compressed,
+		EndStream:       m.EndStream,
+		WireLength:      m.WireLength,
+		PayloadEncoding: payEncoding,
+		Payload:         payStr,
+	}
+}
+
+// projectGRPCEndView projects a GRPCEndMessage with trailers filtered.
+func (s *Server) projectGRPCEndView(m *envelope.GRPCEndMessage) *grpcEndEntryView {
+	return &grpcEndEntryView{
+		Status:   m.Status,
+		Message:  m.Message,
+		Trailers: s.filterOutputHeaderKVs(m.Trailers),
+	}
+}
+
+// projectRawView projects a RawMessage with output filter on bytes.
+func (s *Server) projectRawView(m *envelope.RawMessage) *rawEntryView {
+	bytesFiltered := s.filterOutputBody(m.Bytes)
+	bytesStr, bytesEncoding := encodeBody(bytesFiltered)
+	return &rawEntryView{
+		BytesEncoding: bytesEncoding,
+		Bytes:         bytesStr,
+	}
+}
+
+// filterOutputHeaderKVs applies SafetyEngine output masking to a list of
+// envelope.KeyValue headers and projects onto the order-preserving
+// []headerKV shape used by the MCP intercept_queue response. Returns nil
+// when the input is nil or empty.
+func (s *Server) filterOutputHeaderKVs(kvs []envelope.KeyValue) []headerKV {
+	if len(kvs) == 0 {
+		return nil
+	}
+	out := make([]headerKV, 0, len(kvs))
+	if s.pipeline.safetyEngine == nil {
+		for _, kv := range kvs {
+			out = append(out, headerKV{Name: kv.Name, Value: kv.Value})
+		}
+		return out
+	}
+	bridged := make([]exchange.KeyValue, len(kvs))
+	for i, kv := range kvs {
+		bridged[i] = exchange.KeyValue{Name: kv.Name, Value: kv.Value}
+	}
+	filtered, _ := s.pipeline.safetyEngine.FilterOutputHeaders(bridged)
+	for _, kv := range filtered {
+		out = append(out, headerKV{Name: kv.Name, Value: kv.Value})
+	}
+	return out
 }
 
 // --- macros resource ---

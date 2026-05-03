@@ -218,7 +218,7 @@ func orDefaultPipeline(p *Pipeline) *Pipeline {
 	if p != nil {
 		return p
 	}
-	return NewPipeline(nil, nil, nil, nil, nil, nil)
+	return NewPipeline(nil, nil, nil, nil, nil, nil, nil)
 }
 
 func orDefaultConnector(c *Connector) *Connector {

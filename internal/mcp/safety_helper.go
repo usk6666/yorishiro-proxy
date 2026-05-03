@@ -9,39 +9,6 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/exchange"
 )
 
-// kvToRawHeaders converts []exchange.KeyValue to parser.RawHeaders.
-func kvToRawHeaders(kv []exchange.KeyValue) parser.RawHeaders {
-	if kv == nil {
-		return nil
-	}
-	rh := make(parser.RawHeaders, len(kv))
-	for i, h := range kv {
-		rh[i] = parser.RawHeader{Name: h.Name, Value: h.Value}
-	}
-	return rh
-}
-
-// kvToHTTPHeader converts []exchange.KeyValue to net/http.Header.
-func kvToHTTPHeader(kv []exchange.KeyValue) http.Header {
-	if kv == nil {
-		return make(http.Header)
-	}
-	h := make(http.Header, len(kv))
-	for _, hdr := range kv {
-		h.Add(hdr.Name, hdr.Value)
-	}
-	return h
-}
-
-// filterOutputKVHeaders applies SafetyFilter output masking to []exchange.KeyValue headers
-// by converting through parser.RawHeaders. If no safety engine is configured, returns the
-// headers converted to HTTP headers unchanged.
-func (s *Server) filterOutputKVHeaders(headers []exchange.KeyValue) http.Header {
-	rh := kvToRawHeaders(headers)
-	filtered := s.filterOutputRawHeaders(rh)
-	return rawHeadersToHTTPHeader(filtered)
-}
-
 // httpHeaderToKeyValues converts net/http.Header (map[string][]string) to
 // []exchange.KeyValue. Header name casing is preserved as-is.
 func httpHeaderToKeyValues(h http.Header) []exchange.KeyValue {
@@ -89,18 +56,6 @@ func keyValuesToHTTPHeader(kvs []exchange.KeyValue) http.Header {
 	h := make(http.Header, len(kvs))
 	for _, kv := range kvs {
 		h.Add(kv.Name, kv.Value)
-	}
-	return h
-}
-
-// rawHeadersToHTTPHeader converts parser.RawHeaders to net/http.Header.
-func rawHeadersToHTTPHeader(rh parser.RawHeaders) http.Header {
-	if rh == nil {
-		return make(http.Header)
-	}
-	h := make(http.Header, len(rh))
-	for _, hdr := range rh {
-		h.Add(hdr.Name, hdr.Value)
 	}
 	return h
 }
@@ -154,28 +109,6 @@ func (s *Server) filterOutputRawHeaders(headers parser.RawHeaders) parser.RawHea
 // It masks the body and headers of each message in place. If no safety engine is
 // configured, this is a no-op.
 func (s *Server) filterOutputMessages(entries []queryMessageEntry) {
-	if s.pipeline.safetyEngine == nil {
-		return
-	}
-	for i := range entries {
-		// Mask body: decode from text/base64, filter, re-encode.
-		bodyData := decodeEntryBody(entries[i].Body, entries[i].BodyEncoding)
-		maskedBody := s.filterOutputBody(bodyData)
-		entries[i].Body, entries[i].BodyEncoding = encodeBody(maskedBody)
-
-		// Mask headers.
-		if len(entries[i].Headers) > 0 {
-			entries[i].Headers = map[string][]string(
-				s.filterOutputHeaders(http.Header(entries[i].Headers)),
-			)
-		}
-	}
-}
-
-// filterOutputInterceptEntries applies SafetyFilter output masking to intercept queue entries.
-// It masks the body and headers of each entry in place. If no safety engine is
-// configured, this is a no-op.
-func (s *Server) filterOutputInterceptEntries(entries []queryInterceptQueueEntry) {
 	if s.pipeline.safetyEngine == nil {
 		return
 	}

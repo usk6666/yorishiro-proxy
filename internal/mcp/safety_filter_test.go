@@ -12,7 +12,6 @@ import (
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
-	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
 	"github.com/usk6666/yorishiro-proxy/internal/safety"
 )
 
@@ -233,114 +232,6 @@ func TestSafetyFilter_Resend_BlocksDestructiveHeaders(t *testing.T) {
 	textContent := result.Content[0].(*gomcp.TextContent)
 	if !strings.Contains(textContent.Text, "SafetyFilter blocked") {
 		t.Errorf("error text = %q, want containing 'SafetyFilter blocked'", textContent.Text)
-	}
-}
-
-func TestSafetyFilter_Intercept_ModifyAndForward_BlocksDestructiveBody(t *testing.T) {
-	t.Parallel()
-	store := newTestStore(t)
-	safetyEngine := newBlockingSafetyEngine(t)
-
-	ctx := context.Background()
-	queue := intercept.NewQueue()
-	s := newServer(ctx, nil, store, nil,
-		WithSafetyEngine(safetyEngine),
-		WithInterceptQueue(queue),
-	)
-	ct, st := gomcp.NewInMemoryTransports()
-
-	ss, err := s.server.Connect(ctx, st, nil)
-	if err != nil {
-		t.Fatalf("server connect: %v", err)
-	}
-	t.Cleanup(func() { ss.Close() })
-
-	client := gomcp.NewClient(&gomcp.Implementation{
-		Name:    "test-client",
-		Version: "v0.0.1",
-	}, nil)
-
-	cs, err := client.Connect(ctx, ct, nil)
-	if err != nil {
-		t.Fatalf("client connect: %v", err)
-	}
-	t.Cleanup(func() { cs.Close() })
-
-	destructiveBody := "DROP TABLE orders;"
-	result, err := cs.CallTool(ctx, &gomcp.CallToolParams{
-		Name: "intercept",
-		Arguments: map[string]any{
-			"action": "modify_and_forward",
-			"params": map[string]any{
-				"intercept_id":  "test-id",
-				"override_body": destructiveBody,
-			},
-		},
-	})
-	if err != nil {
-		t.Fatalf("CallTool: %v", err)
-	}
-	if !result.IsError {
-		t.Fatal("expected IsError=true for destructive body in modify_and_forward")
-	}
-	textContent := result.Content[0].(*gomcp.TextContent)
-	if !strings.Contains(textContent.Text, "SafetyFilter blocked") {
-		t.Errorf("error text = %q, want containing 'SafetyFilter blocked'", textContent.Text)
-	}
-}
-
-func TestSafetyFilter_Intercept_ModifyAndForward_AllowsSafe(t *testing.T) {
-	t.Parallel()
-	store := newTestStore(t)
-	safetyEngine := newBlockingSafetyEngine(t)
-
-	ctx := context.Background()
-	queue := intercept.NewQueue()
-	s := newServer(ctx, nil, store, nil,
-		WithSafetyEngine(safetyEngine),
-		WithInterceptQueue(queue),
-	)
-	ct, st := gomcp.NewInMemoryTransports()
-
-	ss, err := s.server.Connect(ctx, st, nil)
-	if err != nil {
-		t.Fatalf("server connect: %v", err)
-	}
-	t.Cleanup(func() { ss.Close() })
-
-	client := gomcp.NewClient(&gomcp.Implementation{
-		Name:    "test-client",
-		Version: "v0.0.1",
-	}, nil)
-
-	cs, err := client.Connect(ctx, ct, nil)
-	if err != nil {
-		t.Fatalf("client connect: %v", err)
-	}
-	t.Cleanup(func() { cs.Close() })
-
-	// Safe body should pass safety check (will fail at intercept queue, not safety).
-	safeBody := "SELECT * FROM users WHERE id = 1"
-	result, err := cs.CallTool(ctx, &gomcp.CallToolParams{
-		Name: "intercept",
-		Arguments: map[string]any{
-			"action": "modify_and_forward",
-			"params": map[string]any{
-				"intercept_id":  "test-id",
-				"override_body": safeBody,
-			},
-		},
-	})
-	if err != nil {
-		t.Fatalf("CallTool: %v", err)
-	}
-	// The result should NOT be a safety error (it may fail for other reasons like
-	// "intercept queue is not initialized", but not safety).
-	if result.IsError {
-		textContent := result.Content[0].(*gomcp.TextContent)
-		if strings.Contains(textContent.Text, "SafetyFilter blocked") {
-			t.Fatalf("safe body was incorrectly blocked: %s", textContent.Text)
-		}
 	}
 }
 

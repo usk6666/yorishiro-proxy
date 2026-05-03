@@ -43,28 +43,35 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/pluginv2"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
-	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/rules"
 	"github.com/usk6666/yorishiro-proxy/internal/proxybuild"
 	"github.com/usk6666/yorishiro-proxy/internal/rules/common"
+	grpcrules "github.com/usk6666/yorishiro-proxy/internal/rules/grpc"
+	httprules "github.com/usk6666/yorishiro-proxy/internal/rules/http"
+	wsrules "github.com/usk6666/yorishiro-proxy/internal/rules/ws"
 	"github.com/usk6666/yorishiro-proxy/internal/safety"
 )
 
 // Pipeline groups the request-processing pipeline dependencies:
-// intercept rule engine + queue, auto-transform pipeline, and the
+// per-protocol intercept rule engines, the HoldQueue that blocks matched
+// envelopes for external action, the auto-transform pipeline, and the
 // SafetyFilter engine (plus the protocol-handler setters that need to be
 // notified when the safety engine is configured).
 //
-// holdQueue is the RFC-001 N8 successor to the legacy interceptQueue. The
-// new Envelope-based InterceptStep (internal/pipeline) holds matched
-// envelopes here; the intercept MCP tool dispatches release / drop /
-// modify_and_forward against this queue using per-Message-type modify
-// schemas. The legacy interceptQueue path coexists in parallel until N9
-// removes the legacy types; UUID space is shared across the two queues
-// (MCP looks up by ID in HoldQueue first, then falls back to interceptQueue).
+// httpInterceptEngine / wsInterceptEngine / grpcInterceptEngine are the
+// per-protocol rule engines consumed by pipeline.InterceptStep. The
+// configure_tool's intercept_rules surface dispatches to these via a
+// per-rule protocol discriminator.
+//
+// holdQueue is the only queue: the legacy interceptQueue (pre-N8) was
+// removed in USK-692 along with its dual-path fallback. Matched envelopes
+// land here from InterceptStep; the intercept MCP tool dispatches
+// release / drop / modify_and_forward against the held entry using the
+// per-Message-type modify schemas defined in intercept_typed.go.
 type Pipeline struct {
-	interceptEngine     *intercept.Engine
-	interceptQueue      *intercept.Queue
+	httpInterceptEngine *httprules.InterceptEngine
+	wsInterceptEngine   *wsrules.InterceptEngine
+	grpcInterceptEngine *grpcrules.InterceptEngine
 	holdQueue           *common.HoldQueue
 	transformPipeline   *rules.Pipeline
 	safetyEngine        *safety.Engine
@@ -74,16 +81,18 @@ type Pipeline struct {
 // NewPipeline constructs a Pipeline component. All fields are optional;
 // nil fields are tolerated by handlers that guard with nil checks.
 func NewPipeline(
-	interceptEngine *intercept.Engine,
-	interceptQueue *intercept.Queue,
+	httpInterceptEngine *httprules.InterceptEngine,
+	wsInterceptEngine *wsrules.InterceptEngine,
+	grpcInterceptEngine *grpcrules.InterceptEngine,
 	holdQueue *common.HoldQueue,
 	transformPipeline *rules.Pipeline,
 	safetyEngine *safety.Engine,
 	safetyEngineSetters []safetyEngineSetter,
 ) *Pipeline {
 	return &Pipeline{
-		interceptEngine:     interceptEngine,
-		interceptQueue:      interceptQueue,
+		httpInterceptEngine: httpInterceptEngine,
+		wsInterceptEngine:   wsInterceptEngine,
+		grpcInterceptEngine: grpcInterceptEngine,
 		holdQueue:           holdQueue,
 		transformPipeline:   transformPipeline,
 		safetyEngine:        safetyEngine,
