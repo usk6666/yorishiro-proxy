@@ -190,10 +190,31 @@ func (q *HoldQueue) Len() int {
 	return len(q.items)
 }
 
-// Clear removes all entries from the queue without sending actions.
+// Clear removes all entries from the queue and signals any goroutines
+// currently blocked in Hold() with a default action derived from the
+// configured TimeoutBehavior (Release for TimeoutAutoRelease, Drop for
+// TimeoutAutoDrop). Without this signal, blocked goroutines would stay
+// parked until their per-call timeout fires (default 5min). The
+// per-entry actionCh is buffered(1), so the send is non-blocking under
+// the lock — at most one observer per entry.
 func (q *HoldQueue) Clear() {
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	defaultAction := HoldAction{Type: ActionRelease}
+	if q.behavior == TimeoutAutoDrop {
+		defaultAction = HoldAction{Type: ActionDrop}
+	}
+	for _, entry := range q.items {
+		// Non-blocking send: actionCh is buffered(1) and Hold() drains
+		// at most once. A second sender (e.g. a concurrent Release that
+		// already delivered) would be a programmer error elsewhere; the
+		// default case prevents Clear() from blocking under the lock in
+		// that case.
+		select {
+		case entry.actionCh <- defaultAction:
+		default:
+		}
+	}
 	q.items = make(map[string]*HeldEntry)
 }
 

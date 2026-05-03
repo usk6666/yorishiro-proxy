@@ -247,6 +247,104 @@ func TestHoldQueue_ReleaseNotFound(t *testing.T) {
 	}
 }
 
+func TestHoldQueue_Clear_UnblocksHeldGoroutines_AutoRelease(t *testing.T) {
+	q := NewHoldQueue()
+	// Long timeout so the test relies on Clear(), not the timer.
+	q.SetTimeout(time.Hour)
+
+	env := testEnvelope()
+
+	const workers = 5
+	type result struct {
+		action *HoldAction
+		err    error
+	}
+	results := make(chan result, workers)
+
+	for i := 0; i < workers; i++ {
+		go func() {
+			a, err := q.Hold(context.Background(), env, nil)
+			results <- result{action: a, err: err}
+		}()
+	}
+
+	// Wait for all workers to enqueue.
+	deadline := time.Now().Add(time.Second)
+	for q.Len() < workers {
+		if time.Now().After(deadline) {
+			t.Fatalf("only %d/%d workers enqueued before deadline", q.Len(), workers)
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	q.Clear()
+
+	// Each worker should observe a Release action within a deterministic short window.
+	for i := 0; i < workers; i++ {
+		select {
+		case r := <-results:
+			if r.err != nil {
+				t.Errorf("worker %d returned error: %v", i, r.err)
+				continue
+			}
+			if r.action == nil {
+				t.Errorf("worker %d returned nil action", i)
+				continue
+			}
+			if r.action.Type != ActionRelease {
+				t.Errorf("worker %d action = %v, want Release", i, r.action.Type)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("worker %d did not unblock within 1s after Clear()", i)
+		}
+	}
+
+	if q.Len() != 0 {
+		t.Errorf("queue not empty after Clear: %d items", q.Len())
+	}
+}
+
+func TestHoldQueue_Clear_UnblocksHeldGoroutines_AutoDrop(t *testing.T) {
+	q := NewHoldQueue()
+	q.SetTimeout(time.Hour)
+	q.SetTimeoutBehavior(TimeoutAutoDrop)
+
+	env := testEnvelope()
+
+	type result struct {
+		action *HoldAction
+		err    error
+	}
+	results := make(chan result, 1)
+
+	go func() {
+		a, err := q.Hold(context.Background(), env, nil)
+		results <- result{action: a, err: err}
+	}()
+
+	for q.Len() == 0 {
+		time.Sleep(time.Millisecond)
+	}
+
+	q.Clear()
+
+	select {
+	case r := <-results:
+		if r.err != nil {
+			t.Fatalf("worker returned error: %v", r.err)
+		}
+		if r.action == nil || r.action.Type != ActionDrop {
+			t.Fatalf("worker action = %+v, want Drop", r.action)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("worker did not unblock within 1s after Clear()")
+	}
+
+	if q.Len() != 0 {
+		t.Errorf("queue not empty after Clear: %d items", q.Len())
+	}
+}
+
 func TestHoldQueue_List_ReturnsClones(t *testing.T) {
 	q := NewHoldQueue()
 	env := testEnvelope()

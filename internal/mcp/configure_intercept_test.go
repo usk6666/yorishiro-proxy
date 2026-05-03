@@ -390,6 +390,130 @@ func TestConfigure_InterceptRules_UnknownProtocol(t *testing.T) {
 	}
 }
 
+// TestConfigure_InterceptRules_MergeAdd_RejectsDuplicateID verifies the
+// duplicate-ID rejection contract preserved from the legacy single-engine
+// intercept.Engine.AddRule (USK-692 review F-1). Adding a rule whose ID
+// already exists in any per-protocol engine must surface an error
+// instead of silently appending a second copy.
+func TestConfigure_InterceptRules_MergeAdd_RejectsDuplicateID(t *testing.T) {
+	httpEngine := httprules.NewInterceptEngine()
+	httpEngine.SetRules([]httprules.InterceptRule{
+		{ID: "dup", Enabled: true, Direction: httprules.DirectionBoth},
+	})
+	cs := configureSessionWithEngines(t, httpEngine, nil, nil)
+
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "configure",
+		Arguments: configureMarshal(t, configureInput{
+			Operation: "merge",
+			InterceptRules: &configureInterceptRules{
+				Add: []interceptRuleInput{
+					{
+						ID: "dup", Enabled: true, Protocol: "http", Direction: "both",
+						HTTP: &interceptHTTPConditions{PathPattern: "/.*"},
+					},
+				},
+			},
+		}),
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("expected error for duplicate rule ID")
+	}
+	body := flattenContent(result.Content)
+	if !strings.Contains(body, "dup") || !strings.Contains(body, "already exists") {
+		t.Errorf("error text should mention id and 'already exists', got %q", body)
+	}
+	// Must not have appended a second copy.
+	if got := len(httpEngine.Rules()); got != 1 {
+		t.Errorf("engine rule count after rejected add = %d, want 1", got)
+	}
+}
+
+// TestConfigure_InterceptRules_MergeAdd_RejectsCrossEngineDuplicateID
+// verifies the duplicate-ID check is global across the three
+// per-protocol engines, not per-engine. An ID present in the WS engine
+// must reject an HTTP add of the same ID.
+func TestConfigure_InterceptRules_MergeAdd_RejectsCrossEngineDuplicateID(t *testing.T) {
+	httpEngine := httprules.NewInterceptEngine()
+	wsEngine := wsrules.NewInterceptEngine()
+	wsEngine.SetRules([]wsrules.InterceptRule{
+		{ID: "shared", Enabled: true},
+	})
+	cs := configureSessionWithEngines(t, httpEngine, wsEngine, nil)
+
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "configure",
+		Arguments: configureMarshal(t, configureInput{
+			Operation: "merge",
+			InterceptRules: &configureInterceptRules{
+				Add: []interceptRuleInput{
+					{
+						ID: "shared", Enabled: true, Protocol: "http", Direction: "both",
+						HTTP: &interceptHTTPConditions{PathPattern: "/.*"},
+					},
+				},
+			},
+		}),
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("expected error for cross-engine duplicate rule ID")
+	}
+}
+
+// TestConfigure_InterceptRules_MergeRemove_NonexistentID verifies the
+// missing-ID error contract preserved from the legacy single engine
+// (USK-692 review F-2). Removing an ID not owned by any engine must
+// surface an error instead of silently no-op'ing.
+func TestConfigure_InterceptRules_MergeRemove_NonexistentID(t *testing.T) {
+	httpEngine := httprules.NewInterceptEngine()
+	cs := configureSessionWithEngines(t, httpEngine, nil, nil)
+
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "configure",
+		Arguments: configureMarshal(t, configureInput{
+			Operation:      "merge",
+			InterceptRules: &configureInterceptRules{Remove: []string{"ghost"}},
+		}),
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("expected error for nonexistent remove ID")
+	}
+	body := flattenContent(result.Content)
+	if !strings.Contains(body, "ghost") || !strings.Contains(body, "not found") {
+		t.Errorf("error text should mention id and 'not found', got %q", body)
+	}
+}
+
+// TestConfigure_InterceptRules_MergeEnable_NonexistentID verifies the
+// missing-ID error contract on enable/disable (USK-692 review F-2).
+func TestConfigure_InterceptRules_MergeEnable_NonexistentID(t *testing.T) {
+	httpEngine := httprules.NewInterceptEngine()
+	cs := configureSessionWithEngines(t, httpEngine, nil, nil)
+
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "configure",
+		Arguments: configureMarshal(t, configureInput{
+			Operation:      "merge",
+			InterceptRules: &configureInterceptRules{Enable: []string{"ghost"}},
+		}),
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("expected error for nonexistent enable ID")
+	}
+}
+
 func TestConfigure_InterceptQueue_TimeoutAndBehavior(t *testing.T) {
 	cs := configureSessionWithEngines(t, httprules.NewInterceptEngine(), nil, nil)
 	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{

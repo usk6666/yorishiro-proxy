@@ -749,14 +749,20 @@ func (s *Server) mergeInterceptRules(cfg *configureInterceptRules) error {
 			return fmt.Errorf("add[%d]: %w", i, err)
 		}
 	}
-	for _, id := range cfg.Remove {
-		removeInterceptRuleAcrossEngines(s.pipeline, id)
+	for i, id := range cfg.Remove {
+		if err := removeInterceptRuleAcrossEngines(s.pipeline, id); err != nil {
+			return fmt.Errorf("remove[%d]: %w", i, err)
+		}
 	}
-	for _, id := range cfg.Enable {
-		enableInterceptRuleAcrossEngines(s.pipeline, id, true)
+	for i, id := range cfg.Enable {
+		if err := enableInterceptRuleAcrossEngines(s.pipeline, id, true); err != nil {
+			return fmt.Errorf("enable[%d]: %w", i, err)
+		}
 	}
-	for _, id := range cfg.Disable {
-		enableInterceptRuleAcrossEngines(s.pipeline, id, false)
+	for i, id := range cfg.Disable {
+		if err := enableInterceptRuleAcrossEngines(s.pipeline, id, false); err != nil {
+			return fmt.Errorf("disable[%d]: %w", i, err)
+		}
 	}
 	return nil
 }
@@ -878,7 +884,17 @@ func compileInterceptRules(inputs []interceptRuleInput) (
 
 // addInterceptRule compiles a single input and appends it to the
 // per-protocol engine. Used by the merge path.
+//
+// Rejects duplicate IDs across all three engines, matching the legacy
+// single-engine intercept.Engine.AddRule contract that the
+// configure_tool used to surface. Without this check, callers could
+// silently double-register a rule and removeInterceptRuleAcrossEngines
+// (which deletes only the first match per engine) would leave
+// duplicates in place.
 func addInterceptRule(p *Pipeline, input interceptRuleInput) error {
+	if input.ID != "" && interceptRuleIDExists(p, input.ID) {
+		return fmt.Errorf("rule %q already exists", input.ID)
+	}
 	proto := protocolOrDefault(input.Protocol)
 	switch proto {
 	case "http":
@@ -914,10 +930,45 @@ func addInterceptRule(p *Pipeline, input interceptRuleInput) error {
 	return nil
 }
 
+// interceptRuleIDExists scans every per-protocol engine for a rule
+// matching the supplied ID. Used to enforce the duplicate-ID
+// rejection invariant on add and to distinguish missing-rule from
+// silent-no-op on remove/enable/disable.
+func interceptRuleIDExists(p *Pipeline, id string) bool {
+	if p.httpInterceptEngine != nil {
+		for _, r := range p.httpInterceptEngine.Rules() {
+			if r.ID == id {
+				return true
+			}
+		}
+	}
+	if p.wsInterceptEngine != nil {
+		for _, r := range p.wsInterceptEngine.Rules() {
+			if r.ID == id {
+				return true
+			}
+		}
+	}
+	if p.grpcInterceptEngine != nil {
+		for _, r := range p.grpcInterceptEngine.Rules() {
+			if r.ID == id {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // removeInterceptRuleAcrossEngines removes an ID from every per-protocol
-// engine. Each engine's RemoveRule is silently idempotent so this is
-// safe.
-func removeInterceptRuleAcrossEngines(p *Pipeline, id string) {
+// engine. Returns an error if no engine owns a rule with the supplied
+// ID — matching the legacy single-engine intercept.Engine.RemoveRule
+// contract that the configure_tool used to surface. Each engine's
+// RemoveRule is silently idempotent at the engine level, so the
+// pre-scan is the only place where the missing-ID case is observable.
+func removeInterceptRuleAcrossEngines(p *Pipeline, id string) error {
+	if !interceptRuleIDExists(p, id) {
+		return fmt.Errorf("rule %q not found", id)
+	}
 	if p.httpInterceptEngine != nil {
 		p.httpInterceptEngine.RemoveRule(id)
 	}
@@ -927,20 +978,34 @@ func removeInterceptRuleAcrossEngines(p *Pipeline, id string) {
 	if p.grpcInterceptEngine != nil {
 		p.grpcInterceptEngine.RemoveRule(id)
 	}
+	return nil
 }
 
 // enableInterceptRuleAcrossEngines toggles Enabled on every engine that
-// owns a rule with the given ID.
-func enableInterceptRuleAcrossEngines(p *Pipeline, id string, enabled bool) {
+// owns a rule with the given ID. Returns an error if no engine
+// reported a hit — matching the legacy contract surfaced by
+// configure_tool.
+func enableInterceptRuleAcrossEngines(p *Pipeline, id string, enabled bool) error {
+	hit := false
 	if p.httpInterceptEngine != nil {
-		_ = p.httpInterceptEngine.EnableRule(id, enabled)
+		if p.httpInterceptEngine.EnableRule(id, enabled) {
+			hit = true
+		}
 	}
 	if p.wsInterceptEngine != nil {
-		_ = p.wsInterceptEngine.EnableRule(id, enabled)
+		if p.wsInterceptEngine.EnableRule(id, enabled) {
+			hit = true
+		}
 	}
 	if p.grpcInterceptEngine != nil {
-		_ = p.grpcInterceptEngine.EnableRule(id, enabled)
+		if p.grpcInterceptEngine.EnableRule(id, enabled) {
+			hit = true
+		}
 	}
+	if !hit {
+		return fmt.Errorf("rule %q not found", id)
+	}
+	return nil
 }
 
 // countInterceptRules sums the rule counts and enabled counts across

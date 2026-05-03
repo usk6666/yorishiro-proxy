@@ -176,6 +176,9 @@ func holdQueueProtocolKind(env *envelope.Envelope) string {
 // modified variant to the original layer. The decoded payload size is
 // capped at maxRawOverrideSize (CWE-770).
 func applyHoldQueueRawOverride(env *envelope.Envelope, b64 string) (*envelope.Envelope, error) {
+	if err := checkBase64EncodedSize(b64, "raw_override_base64"); err != nil {
+		return nil, err
+	}
 	bytesNew, err := decodeBodyEncoded(b64, "base64", "raw_override_base64")
 	if err != nil {
 		return nil, err
@@ -190,6 +193,26 @@ func applyHoldQueueRawOverride(env *envelope.Envelope, b64 string) (*envelope.En
 	clone.Message = &envelope.RawMessage{Bytes: bytesNew}
 	clone.Raw = bytesNew
 	return clone, nil
+}
+
+// checkBase64EncodedSize rejects an encoded base64 payload whose
+// pre-decode length would exceed the size cap, so the decoder never
+// allocates the full transient buffer for a clearly-too-large input
+// (CWE-770 fail-fast). The post-decode check is retained as a backstop.
+//
+// Formula: a base64 alphabet emits ceil(n/3)*4 characters for n decoded
+// bytes; permitting a small slack absorbs trailing "=" padding and
+// embedded newline/whitespace some clients add.
+//
+// Skips the check entirely for non-base64 encodings: text/utf-8 inputs
+// are bounded by their literal byte length.
+func checkBase64EncodedSize(b64, field string) error {
+	const slack = 16
+	maxEncoded := (maxRawOverrideSize/3+1)*4 + slack
+	if len(b64) > maxEncoded {
+		return fmt.Errorf("%s: encoded size %d exceeds limit (decoded cap %d)", field, len(b64), maxRawOverrideSize)
+	}
+	return nil
 }
 
 // resolveHoldQueueAction validates an MCP intercept input against the held
@@ -434,6 +457,11 @@ func applyRawModify(env *envelope.Envelope, _ *envelope.RawMessage, params *rawM
 	}
 	switch {
 	case params.BytesOverride != nil:
+		if params.BytesEncoding == "base64" {
+			if err := checkBase64EncodedSize(*params.BytesOverride, "bytes_override"); err != nil {
+				return nil, err
+			}
+		}
 		bytesNew, err := decodeBodyEncoded(*params.BytesOverride, params.BytesEncoding, "bytes_override")
 		if err != nil {
 			return nil, err
