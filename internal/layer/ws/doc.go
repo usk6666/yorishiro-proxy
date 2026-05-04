@@ -68,10 +68,4 @@
 //
 //   - [frame.go]: low-level WebSocket frame codec (Read/Write).
 //   - [deflate.go]: per-message-deflate state machine.
-//
-// Note: a parallel copy of frame.go and deflate.go exists in
-// internal/protocol/ws/ during the RFC-001 transition. The legacy copy
-// is consumed by internal/protocol/ws/handler.go and the existing
-// resend code path; both are scheduled for removal in N9 once feature
-// parity is reached.
 package ws

@@ -86,10 +86,9 @@ func LoggerFromContext(ctx context.Context, fallback *slog.Logger) *slog.Logger 
 	return slog.Default()
 }
 
-// Forward target context key for storing TCP forwarding metadata.
-// Defined here (rather than in protocol/tcp) to avoid import cycles: protocol
-// handlers depend on connector and need access to the forwarding target from
-// context.
+// Forward target context key for storing TCP forwarding metadata, used by TCP
+// forward listeners to pass the target to L7 protocol handlers without
+// requiring CONNECT or other protocol-level target resolution.
 
 type forwardTargetCtxKey struct{}
 
@@ -112,10 +111,9 @@ func ForwardTargetFromContext(ctx context.Context) (string, bool) {
 	return "", false
 }
 
-// SOCKS5 context keys for storing SOCKS5 tunnel metadata.
-// These are defined in connector (rather than protocol/socks5) to avoid
-// import cycles: both protocol/socks5 and protocol/http depend on connector,
-// and both need access to these context values.
+// SOCKS5 context keys for storing SOCKS5 tunnel metadata. The SOCKS5
+// negotiator stores the target/auth metadata; downstream protocol handlers
+// read it back via the accessors below.
 
 type socks5TargetCtxKey struct{}
 type socks5AuthMethodCtxKey struct{}

@@ -1142,10 +1142,8 @@ func newLiveManager(
 	buildCfg *connector.BuildConfig,
 	logger *slog.Logger,
 ) (*proxybuild.Manager, error) {
-	// proxy.PassthroughList and proxy.RateLimiter are type aliases for the
-	// connector.* equivalents (see internal/proxy/passthrough.go and
-	// internal/proxy/ratelimit.go), so they can be threaded directly into
-	// proxybuild.Deps.
+	// PassthroughList and RateLimiter come straight from connector.* and are
+	// threaded directly into proxybuild.Deps.
 	factory := func(ctx context.Context, name, addr string) (*proxybuild.Stack, error) {
 		return proxybuild.BuildLiveStack(ctx, proxybuild.Deps{
 			Logger:              logger,

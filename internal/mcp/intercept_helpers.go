@@ -15,10 +15,7 @@ import "fmt"
 // envelope has already cleared safety.
 
 // releaseMode is the per-call mode flag attached to the intercept tool's
-// modify_and_forward and release actions. It mirrors the legacy
-// intercept.ReleaseMode constants but lives in the mcp package so the
-// soon-to-be-deleted internal/proxy/intercept tree no longer leaks here
-// (USK-692, USK-697).
+// modify_and_forward and release actions.
 type releaseMode string
 
 const (
