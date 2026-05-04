@@ -25,13 +25,13 @@ import (
 
 	"github.com/google/uuid"
 
+	httputilpkg "github.com/usk6666/yorishiro-proxy/internal/connector/transport"
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/layer"
 	grpclayer "github.com/usk6666/yorishiro-proxy/internal/layer/grpc"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/http2"
 	"github.com/usk6666/yorishiro-proxy/internal/pipeline"
-	httputilpkg "github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 )
 
 // resendGRPCSupportedProtocols lists the flow.Stream.Protocol values that

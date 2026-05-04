@@ -17,9 +17,9 @@ import (
 
 	"github.com/usk6666/yorishiro-proxy/internal/cert"
 	"github.com/usk6666/yorishiro-proxy/internal/config"
+	"github.com/usk6666/yorishiro-proxy/internal/connector/transport"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/pluginv2"
-	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/rules"
 	"github.com/usk6666/yorishiro-proxy/internal/rules/common"
@@ -33,7 +33,7 @@ import (
 // NewServer(ctx, ca, store, manager, opts...) signature. It builds the
 // seven component pointers from the legacy parameters, then forwards to
 // the production NewServer to apply ServerOption mutators.
-func newServer(ctx context.Context, ca *cert.CA, store flow.Store, manager *proxy.Manager, opts ...ServerOption) *Server {
+func newServer(ctx context.Context, ca *cert.CA, store flow.Store, manager proxyManager, opts ...ServerOption) *Server {
 	misc := NewMisc(ctx, ca, nil, "", nil, nil)
 	pipe := NewPipeline(nil, nil, nil, nil, nil, nil, nil)
 	conn := NewConnector(manager, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
@@ -53,7 +53,7 @@ type legacyDeps struct {
 	ca                    *cert.CA
 	issuer                *cert.Issuer
 	store                 flow.Store
-	manager               *proxy.Manager
+	manager               proxyManager
 	passthrough           *proxy.PassthroughList
 	scope                 *proxy.CaptureScope
 	httpInterceptEngine   *httprules.InterceptEngine
@@ -80,9 +80,9 @@ type legacyDeps struct {
 	safetyEngineSetters   []safetyEngineSetter
 	budgetManager         *proxy.BudgetManager
 	socks5AuthSetter      socks5AuthSetter
-	tlsTransport          httputil.TLSTransport
+	tlsTransport          transport.TLSTransport
 	tlsFingerprintSetters []tlsFingerprintSetter
-	hostTLSRegistry       *httputil.HostTLSRegistry
+	hostTLSRegistry       *transport.HostTLSRegistry
 }
 
 // mkServerFromLegacyDeps builds a *Server whose component pointers are
@@ -325,14 +325,14 @@ func WithSOCKS5Handler(setter socks5AuthSetter) ServerOption {
 }
 
 // WithTLSTransport sets the TLS transport. Test-only.
-func WithTLSTransport(t httputil.TLSTransport) ServerOption {
+func WithTLSTransport(t transport.TLSTransport) ServerOption {
 	return func(s *Server) {
 		s.connector.tlsTransport = t
 	}
 }
 
 // WithHostTLSRegistry sets the host TLS registry. Test-only.
-func WithHostTLSRegistry(r *httputil.HostTLSRegistry) ServerOption {
+func WithHostTLSRegistry(r *transport.HostTLSRegistry) ServerOption {
 	return func(s *Server) {
 		s.connector.hostTLSRegistry = r
 	}

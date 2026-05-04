@@ -24,12 +24,12 @@ import (
 
 	"github.com/google/uuid"
 
+	httputilpkg "github.com/usk6666/yorishiro-proxy/internal/connector/transport"
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/http1"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/ws"
 	"github.com/usk6666/yorishiro-proxy/internal/pipeline"
-	httputilpkg "github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 )
 
 // resendWSSupportedProtocols lists the flow.Stream.Protocol values that

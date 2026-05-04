@@ -11,8 +11,8 @@ import (
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/usk6666/yorishiro-proxy/internal/config"
+	"github.com/usk6666/yorishiro-proxy/internal/connector/transport"
 	"github.com/usk6666/yorishiro-proxy/internal/mcp/webui"
-	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 	"github.com/usk6666/yorishiro-proxy/internal/safety"
 )
@@ -85,7 +85,7 @@ type safetyEngineSetter interface {
 type tlsFingerprintSetter interface {
 	SetTLSFingerprint(profile string)
 	TLSFingerprint() string
-	SetTLSTransport(httputil.TLSTransport)
+	SetTLSTransport(transport.TLSTransport)
 }
 
 // socks5AuthSetter is implemented by a wrapper around the SOCKS5 handler

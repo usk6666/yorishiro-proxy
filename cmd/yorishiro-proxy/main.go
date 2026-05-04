@@ -2,8 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/subtle"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -20,24 +18,14 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/cert"
 	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/connector"
-	"github.com/usk6666/yorishiro-proxy/internal/encoding"
-	"github.com/usk6666/yorishiro-proxy/internal/fingerprint"
+	"github.com/usk6666/yorishiro-proxy/internal/connector/transport"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/http2"
 	h2pool "github.com/usk6666/yorishiro-proxy/internal/layer/http2/pool"
 	"github.com/usk6666/yorishiro-proxy/internal/logging"
 	"github.com/usk6666/yorishiro-proxy/internal/mcp"
 	"github.com/usk6666/yorishiro-proxy/internal/pluginv2"
-	"github.com/usk6666/yorishiro-proxy/internal/protocol"
-	protogrpc "github.com/usk6666/yorishiro-proxy/internal/protocol/grpc"
-	protogrpcweb "github.com/usk6666/yorishiro-proxy/internal/protocol/grpcweb"
-	protohttp "github.com/usk6666/yorishiro-proxy/internal/protocol/http"
-	protohttp2 "github.com/usk6666/yorishiro-proxy/internal/protocol/http2"
-	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
-	protosocks5 "github.com/usk6666/yorishiro-proxy/internal/protocol/socks5"
-	prototcp "github.com/usk6666/yorishiro-proxy/internal/protocol/tcp"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
-	"github.com/usk6666/yorishiro-proxy/internal/proxy/rules"
 	"github.com/usk6666/yorishiro-proxy/internal/proxybuild"
 	"github.com/usk6666/yorishiro-proxy/internal/pushrecorder"
 	rulescommon "github.com/usk6666/yorishiro-proxy/internal/rules/common"
@@ -264,22 +252,6 @@ func runWithFlags(ctx context.Context, fs *flag.FlagSet, args []string) error {
 	}
 	defer pluginv2Engine.Close()
 
-	// Initialize auto-transform pipeline for request/response modification.
-	pipeline := rules.NewPipeline()
-
-	proto, err := initProtocolHandlers(ctx, protocolDeps{
-		cfg:         cfg,
-		proxyCfg:    proxyCfg,
-		store:       store,
-		issuer:      issuer,
-		passthrough: passthrough,
-		scope:       scope,
-		pipeline:    pipeline,
-		logger:      logger,
-	})
-	if err != nil {
-		return err
-	}
 	// Apply transport flags before building options so MCPHTTPAddr is correct.
 	if noHTTPMCP {
 		cfg.MCPHTTPAddr = ""
@@ -287,7 +259,7 @@ func runWithFlags(ctx context.Context, fs *flag.FlagSet, args []string) error {
 
 	return assembleAndRunMCPServer(ctx, cfg, proxyCfg, ca, issuer, store, pluginv2Engine,
 		holdQueue, httpInterceptEngine, wsInterceptEngine, grpcInterceptEngine,
-		passthrough, scope, pipeline, proto,
+		passthrough, scope,
 		targetScopePolicy, targetScopePolicySource, openBrowser, stdioMCP, logger)
 }
 
@@ -309,19 +281,25 @@ func assembleAndRunMCPServer(
 	grpcInterceptEngine *grpcrules.InterceptEngine,
 	passthrough *proxy.PassthroughList,
 	scope *proxy.CaptureScope,
-	pipeline *rules.Pipeline,
-	proto *protocolResult,
 	targetScopePolicy *config.TargetScopePolicyConfig,
 	targetScopePolicySource string,
 	openBrowserFlag, stdioMCP bool,
 	logger *slog.Logger,
 ) error {
-	targetScope := initTargetScope(targetScopePolicy, proto.socks5Handler)
+	targetScope := initTargetScope(targetScopePolicy)
 	rateLimiter := initRateLimiter(targetScopePolicy, logger)
 	safetyEngine, err := initSafetyFilter(cfg, proxyCfg, logger)
 	if err != nil {
 		return err
 	}
+
+	// HostTLS registry + TLS transport for the typed-resend MCP tools.
+	// Also reachable via configure_tool surfaces.
+	hostTLSRegistry, err := initHostTLSRegistry(cfg, proxyCfg, logger)
+	if err != nil {
+		return err
+	}
+	tlsTransport := initTLSTransport(cfg, hostTLSRegistry, logger)
 
 	manager, err := assembleLiveManager(ctx, cfg, proxyCfg, store, issuer, pluginv2Engine,
 		holdQueue, httpInterceptEngine, wsInterceptEngine, grpcInterceptEngine,
@@ -340,9 +318,9 @@ func assembleAndRunMCPServer(
 		_ = manager.StopAll(sctx)
 	}()
 
-	mcpComponents, opts, err := buildMCPComponents(ctx, cfg, proxyCfg, ca, issuer, store, manager,
+	mcpComponents, webUIToken, opts, err := buildMCPComponents(ctx, cfg, proxyCfg, ca, issuer, store, manager,
 		passthrough, scope, holdQueue, httpInterceptEngine, wsInterceptEngine, grpcInterceptEngine,
-		pluginv2Engine, pipeline, proto, targetScope, rateLimiter, safetyEngine,
+		pluginv2Engine, hostTLSRegistry, tlsTransport, targetScope, rateLimiter, safetyEngine,
 		targetScopePolicySource, logger)
 	if err != nil {
 		return err
@@ -360,7 +338,7 @@ func assembleAndRunMCPServer(
 	)
 
 	logger.Info("starting MCP server", "http_mcp_addr", cfg.MCPHTTPAddr, "stdio_mcp", stdioMCP)
-	return startServers(ctx, cfg, mcpServer, proto.webUIToken, openBrowserFlag, stdioMCP, logger)
+	return startServers(ctx, cfg, mcpServer, webUIToken, openBrowserFlag, stdioMCP, logger)
 }
 
 // applyEnvFallback checks each flag in envVarMap; if the flag was not explicitly
@@ -533,263 +511,6 @@ func initInfra(ctx context.Context, cfg *config.Config) (*infraResult, error) {
 	return &infraResult{logger: logger, store: store, cleanup: cleanup}, nil
 }
 
-// protocolDeps holds dependencies needed by initProtocolHandlers.
-type protocolDeps struct {
-	cfg         *config.Config
-	proxyCfg    *config.ProxyConfig
-	store       *flow.SQLiteStore
-	issuer      *cert.Issuer
-	passthrough *proxy.PassthroughList
-	scope       *proxy.CaptureScope
-	pipeline    *rules.Pipeline
-	logger      *slog.Logger
-}
-
-// protocolResult holds all protocol handlers and related components.
-type protocolResult struct {
-	detector        *protocol.Detector
-	httpHandler     *protohttp.Handler
-	http2Handler    *protohttp2.Handler
-	tcpHandler      *prototcp.Handler
-	socks5Handler   *protosocks5.Handler
-	socks5Adapter   *socks5AuthAdapter
-	tlsTransport    httputil.TLSTransport
-	hostTLSRegistry *httputil.HostTLSRegistry
-	webUIToken      string
-}
-
-// initProtocolHandlers builds all protocol handlers.
-// It returns a protocolResult containing all initialized components.
-func initProtocolHandlers(ctx context.Context, deps protocolDeps) (*protocolResult, error) {
-	cfg := deps.cfg
-	logger := deps.logger
-	store := deps.store
-
-	// Build protocol handlers and detector.
-	httpHandler := protohttp.NewHandler(store, deps.issuer, logger)
-	httpHandler.SetRequestTimeout(cfg.RequestTimeout)
-	httpHandler.SetInsecureSkipVerify(cfg.InsecureSkipVerify)
-	httpHandler.SetPassthroughList(deps.passthrough)
-	httpHandler.SetCaptureScope(deps.scope)
-	httpHandler.SetTransformPipeline(deps.pipeline)
-
-	// Build the host TLS registry and TLS transport.
-	hostTLSRegistry, err := initHostTLSRegistry(cfg, deps.proxyCfg, logger)
-	if err != nil {
-		return nil, err
-	}
-	tlsTransport := initTLSTransport(cfg, hostTLSRegistry, httpHandler, logger)
-
-	// Build ConnPool for HTTP/1.x independent engine upstream connections.
-	// NOTE: ConnPool is pre-wired here but not yet consumed in the forwarding path.
-	// It will be used when USK-494 (Handler Rewrite) replaces the HTTP/1.x
-	// forwarding path with the independent engine.
-	// NOTE: UpstreamProxy is not set here because it is configured dynamically
-	// via the MCP proxy_start tool (SetUpstreamProxy). When USK-494 activates
-	// the ConnPool in the forwarding path, SetUpstreamProxy must also sync
-	// ConnPool.UpstreamProxy so upstream proxy chaining works correctly.
-	connPool := &httputil.ConnPool{
-		TLSTransport: tlsTransport,
-		DialTimeout:  cfg.DialTimeout,
-	}
-	httpHandler.SetConnPool(connPool)
-
-	// Configure technology stack fingerprint detector for response analysis.
-	fpDetector := fingerprint.NewDetector()
-	httpHandler.SetDetector(fpDetector)
-
-	// Build HTTP/2 handler for h2c detection and h2 (TLS ALPN) delegation.
-	http2Handler := protohttp2.NewHandler(store, logger)
-	http2Handler.SetInsecureSkipVerify(cfg.InsecureSkipVerify)
-	http2Handler.SetCaptureScope(deps.scope)
-	http2Handler.SetDetector(fpDetector)
-	http2Handler.SetTransformPipeline(deps.pipeline)
-
-	// Build gRPC handler and attach to the HTTP/2 handler for gRPC-specific recording.
-	grpcHandler := protogrpc.NewHandler(store, logger)
-	http2Handler.SetGRPCHandler(grpcHandler)
-
-	// Build gRPC-Web handler and attach to both HTTP/1.x and HTTP/2 handlers.
-	grpcWebHandler := protogrpcweb.NewHandler(store, logger)
-	httpHandler.SetGRPCWebHandler(grpcWebHandler)
-	http2Handler.SetGRPCWebHandler(grpcWebHandler)
-
-	// Link the HTTP/2 handler to the HTTP handler for h2 ALPN delegation.
-	httpHandler.SetH2Handler(http2Handler)
-
-	// Raw TCP fallback handler: must be last since Detect() always returns true.
-	tcpHandler := prototcp.NewHandler(store, nil, logger)
-
-	// Build SOCKS5 handler. Post-handshake dispatch is set after plugin
-	// engine initialization so that the dispatch closure can capture the
-	// plugin engine (which may be nil until then).
-	socks5Handler := protosocks5.NewHandler(logger)
-
-	// Build SOCKS5 auth adapter for MCP tool control.
-	socks5Adapter := newSOCKS5AuthAdapter(socks5Handler)
-
-	// Apply SOCKS5 auth from config file if specified.
-	if deps.proxyCfg != nil && deps.proxyCfg.SOCKS5Auth == "password" {
-		if deps.proxyCfg.SOCKS5Username != "" && deps.proxyCfg.SOCKS5Password != "" {
-			socks5Adapter.SetPasswordAuth(deps.proxyCfg.SOCKS5Username, deps.proxyCfg.SOCKS5Password)
-			logger.Info("SOCKS5 password authentication configured from config file")
-		} else {
-			logger.Warn("SOCKS5 password auth requested but username/password missing in config file")
-		}
-	}
-
-	// Load codec plugins from config if configured.
-	if err := loadCodecPlugins(deps.proxyCfg, logger); err != nil {
-		return nil, err
-	}
-
-	// Build SOCKS5 post-handshake dispatch.
-	// Raw TCP relay path uses flow recording; pluginv2 lifecycle hooks fire
-	// from the live data path (proxybuild + connector wiring, USK-690).
-	socks5Dispatch := protosocks5.NewPostHandshakeDispatch(protosocks5.DispatchConfig{
-		TunnelHandler: httpHandler,
-		HTTPDetector:  httpHandler,
-		Logger:        logger,
-		FlowWriter:    store,
-	})
-	socks5Handler.SetPostHandshake(socks5Dispatch)
-
-	// Register handlers in priority order: h2c -> HTTP/1.x -> SOCKS5 -> raw TCP fallback.
-	detector := protocol.NewDetector(http2Handler, httpHandler, socks5Handler, tcpHandler)
-	detector.SetLogger(logger)
-
-	return &protocolResult{
-		detector:        detector,
-		httpHandler:     httpHandler,
-		http2Handler:    http2Handler,
-		tcpHandler:      tcpHandler,
-		socks5Handler:   socks5Handler,
-		socks5Adapter:   socks5Adapter,
-		tlsTransport:    tlsTransport,
-		hostTLSRegistry: hostTLSRegistry,
-	}, nil
-}
-
-// initHostTLSRegistry builds a HostTLSRegistry from the CLI config and proxy config file.
-// CLI config settings take precedence; proxy config file settings are applied as fallbacks.
-func initHostTLSRegistry(cfg *config.Config, proxyCfg *config.ProxyConfig, logger *slog.Logger) (*httputil.HostTLSRegistry, error) {
-	reg := httputil.NewHostTLSRegistry()
-
-	// Apply global mTLS client certificate from CLI config.
-	if cfg.ClientCertPath != "" && cfg.ClientKeyPath != "" {
-		globalTLS := &httputil.HostTLSConfig{
-			ClientCertPath: cfg.ClientCertPath,
-			ClientKeyPath:  cfg.ClientKeyPath,
-		}
-		if err := globalTLS.Validate(); err != nil {
-			return nil, fmt.Errorf("global client cert: %w", err)
-		}
-		reg.SetGlobal(globalTLS)
-		logger.Info("global mTLS client certificate configured",
-			"cert", cfg.ClientCertPath, "key", cfg.ClientKeyPath)
-	}
-
-	// Apply per-host TLS configs from CLI config.
-	if err := applyHostTLSEntries(reg, cfg.HostTLS, "", logger); err != nil {
-		return nil, err
-	}
-
-	// Apply from proxy config file as fallback.
-	if proxyCfg != nil {
-		if proxyCfg.ClientCertPath != "" && proxyCfg.ClientKeyPath != "" && reg.Global() == nil {
-			globalTLS := &httputil.HostTLSConfig{
-				ClientCertPath: proxyCfg.ClientCertPath,
-				ClientKeyPath:  proxyCfg.ClientKeyPath,
-			}
-			if err := globalTLS.Validate(); err != nil {
-				return nil, fmt.Errorf("proxy config global client cert: %w", err)
-			}
-			reg.SetGlobal(globalTLS)
-			logger.Info("global mTLS client certificate configured from proxy config",
-				"cert", proxyCfg.ClientCertPath, "key", proxyCfg.ClientKeyPath)
-		}
-		if err := applyHostTLSEntries(reg, proxyCfg.HostTLS, "proxy config ", logger); err != nil {
-			return nil, err
-		}
-	}
-
-	return reg, nil
-}
-
-// applyHostTLSEntries adds per-host TLS configurations from a map to the registry.
-func applyHostTLSEntries(reg *httputil.HostTLSRegistry, entries map[string]*config.HostTLSEntry, prefix string, logger *slog.Logger) error {
-	for hostname, entry := range entries {
-		hostCfg := &httputil.HostTLSConfig{
-			ClientCertPath: entry.ClientCertPath,
-			ClientKeyPath:  entry.ClientKeyPath,
-			TLSVerify:      entry.TLSVerify,
-			CABundlePath:   entry.CABundlePath,
-		}
-		if err := hostCfg.Validate(); err != nil {
-			return fmt.Errorf("%shost_tls[%s]: %w", prefix, hostname, err)
-		}
-		reg.Set(hostname, hostCfg)
-		logger.Info("per-host TLS configured", "source", prefix+"config", "host", hostname)
-	}
-	return nil
-}
-
-// initTLSTransport creates the TLS transport with HostTLS support and attaches
-// it to the HTTP handler. If a TLS fingerprint profile is configured, uTLS is used;
-// otherwise StandardTransport is used.
-func initTLSTransport(cfg *config.Config, reg *httputil.HostTLSRegistry, httpHandler *protohttp.Handler, logger *slog.Logger) httputil.TLSTransport {
-	if cfg.TLSFingerprint != "" {
-		profile, err := httputil.ParseBrowserProfile(cfg.TLSFingerprint)
-		if err != nil {
-			// This was already validated earlier; log and use standard transport.
-			logger.Warn("invalid TLS fingerprint profile, using standard transport", "error", err)
-			return initStandardTransport(cfg, reg, httpHandler)
-		}
-		t := &httputil.UTLSTransport{
-			Profile:            profile,
-			InsecureSkipVerify: cfg.InsecureSkipVerify,
-			HostTLS:            reg,
-		}
-		httpHandler.SetTLSTransport(t)
-		logger.Info("uTLS fingerprint enabled", "profile", profile.String())
-		return t
-	}
-	return initStandardTransport(cfg, reg, httpHandler)
-}
-
-// initStandardTransport creates a StandardTransport with HostTLS and sets it on the handler.
-func initStandardTransport(cfg *config.Config, reg *httputil.HostTLSRegistry, httpHandler *protohttp.Handler) httputil.TLSTransport {
-	t := &httputil.StandardTransport{
-		InsecureSkipVerify: cfg.InsecureSkipVerify,
-		HostTLS:            reg,
-	}
-	httpHandler.SetTLSTransport(t)
-	return t
-}
-
-// loadCodecPlugins loads Starlark codec plugins from the proxy config.
-// Codec plugins are registered with the default codec registry.
-func loadCodecPlugins(proxyCfg *config.ProxyConfig, logger *slog.Logger) error {
-	if proxyCfg == nil || len(proxyCfg.CodecPlugins) == 0 {
-		return nil
-	}
-	var codecConfigs []encoding.CodecPluginConfig
-	if err := json.Unmarshal(proxyCfg.CodecPlugins, &codecConfigs); err != nil {
-		return fmt.Errorf("parse codec plugin configs: %w", err)
-	}
-	logWarn := func(msg string, args ...any) {
-		logger.Warn(msg, args...)
-	}
-	n, err := encoding.LoadCodecPlugins(encoding.DefaultRegistry(), codecConfigs, logWarn)
-	if err != nil {
-		return fmt.Errorf("load codec plugins: %w", err)
-	}
-	if n > 0 {
-		logger.Info("codec plugins loaded", "count", n)
-	}
-	return nil
-}
-
 // mcpComponents groups the seven MCP component pointers built by
 // buildMCPComponents so the call site can pass them to mcp.NewServer in one
 // go without a long argument list at the assembly point.
@@ -805,8 +526,12 @@ type mcpComponents struct {
 
 // buildMCPComponents assembles the seven MCP server components plus the
 // remaining ServerOption slice (middleware / UI dir / version) from the
-// initialized infrastructure. Replaces the previous buildMCPOptions, which
-// chained ~28 mcp.With* builder calls into a single deps bag.
+// initialized infrastructure. The legacy per-protocol-handler setter slices
+// are gone — the live data path runs through proxybuild + connector +
+// pluginv2 wiring (USK-690), so per-handler runtime config propagation
+// happens inside the proxybuild Stack instead of via mcp.NewConnector
+// setter slices. webUIToken is returned so startServers can write
+// server.json without back-channel mutation.
 func buildMCPComponents(
 	ctx context.Context,
 	cfg *config.Config,
@@ -822,23 +547,14 @@ func buildMCPComponents(
 	wsInterceptEngine *wsrules.InterceptEngine,
 	grpcInterceptEngine *grpcrules.InterceptEngine,
 	pluginv2Engine *pluginv2.Engine,
-	pipeline *rules.Pipeline,
-	proto *protocolResult,
+	hostTLSRegistry *transport.HostTLSRegistry,
+	tlsTransport transport.TLSTransport,
 	targetScope *proxy.TargetScope,
 	rateLimiter *proxy.RateLimiter,
 	safetyEngine *safety.Engine,
 	targetScopePolicySource string,
 	logger *slog.Logger,
-) (*mcpComponents, []mcp.ServerOption, error) {
-	// Connector setter slices wire runtime config changes (upstream proxy,
-	// target scope, TLS fingerprint, rate limiter, request timeout) through
-	// to every protocol handler that supports them.
-	upstreamProxySetters := mcp.UpstreamProxySetters(proto.httpHandler, proto.http2Handler)
-	targetScopeSetters := mcp.TargetScopeSetters(proto.httpHandler, proto.http2Handler)
-	tlsFingerprintSetters := mcp.TLSFingerprintSetters(proto.httpHandler, proto.http2Handler)
-	rateLimiterSetters := mcp.RateLimiterSetters(proto.httpHandler, proto.http2Handler, proto.socks5Handler)
-	safetyEngineSetters := mcp.SafetyEngineSetters(proto.httpHandler, proto.http2Handler)
-
+) (*mcpComponents, string, []mcp.ServerOption, error) {
 	mc := &mcpComponents{
 		misc: mcp.NewMisc(
 			ctx,
@@ -853,26 +569,26 @@ func buildMCPComponents(
 			wsInterceptEngine,
 			grpcInterceptEngine,
 			holdQueue,
-			pipeline,
+			nil, // legacy auto-transform pipeline — USK-705 routes auto_transform via httprules.TransformEngine.
 			safetyEngine,
-			safetyEngineSetters,
+			nil, // safetyEngineSetters — legacy per-handler propagation gone with USK-706.
 		),
 		connector: mcp.NewConnector(
 			manager,
 			passthrough,
 			scope,
 			targetScope,
-			proto.hostTLSRegistry,
-			proto.tlsTransport,
-			proto.socks5Adapter,
-			proto.tcpHandler,
-			proto.detector,
+			hostTLSRegistry,
+			tlsTransport,
+			nil, // socks5AuthSetter — connector.SOCKS5Negotiator owns auth via BuildConfig (USK-690).
+			nil, // tcpHandler — TCP forward orchestration owned by USK-697 follow-up.
+			nil, // detector — protocol detection runs inside proxybuild Stack via connector.DetectKind.
 			proxyCfg,
-			targetScopeSetters,
-			tlsFingerprintSetters,
-			upstreamProxySetters,
-			nil, // request timeout setters — none registered today.
-			rateLimiterSetters,
+			nil, // targetScopeSetters — propagation handled by connector wiring.
+			nil, // tlsFingerprintSetters — proxybuild rebuilds Stacks on configure.
+			nil, // upstreamProxySetters — proxybuild Manager.SetUpstreamProxy is canonical.
+			nil, // requestTimeoutSetters — none registered today.
+			nil, // rateLimiterSetters — connector.SOCKS5Negotiator.RateLimiter is canonical.
 		),
 		jobRunner: mcp.NewJobRunner(
 			store,
@@ -904,18 +620,19 @@ func buildMCPComponents(
 	// Set up Bearer token authentication middleware for HTTP transport.
 	// This is always configured when HTTP MCP is enabled (MCPHTTPAddr != "").
 	// The WebUI URL is logged from startServers once the actual port is known.
+	var webUIToken string
 	if cfg.MCPHTTPAddr != "" {
 		token, err := resolveHTTPToken(cfg.MCPHTTPToken, logger)
 		if err != nil {
-			return nil, nil, fmt.Errorf("MCP HTTP token: %w", err)
+			return nil, "", nil, fmt.Errorf("MCP HTTP token: %w", err)
 		}
-		proto.webUIToken = token
+		webUIToken = token
 		opts = append(opts, mcp.WithMiddleware(func(next http.Handler) http.Handler {
 			return mcp.BearerAuthMiddleware(next, token)
 		}))
 	}
 
-	return mc, opts, nil
+	return mc, webUIToken, opts, nil
 }
 
 // startServers launches the MCP HTTP and optional stdio servers using an errgroup.
@@ -1129,9 +846,10 @@ func initPassthroughList(cfg *config.Config, logger *slog.Logger) *proxy.Passthr
 	return passthrough
 }
 
-// initTargetScope builds a TargetScope from the policy config and attaches it
-// to the SOCKS5 handler. Returns nil if no policy is configured.
-func initTargetScope(policy *config.TargetScopePolicyConfig, socks5Handler *protosocks5.Handler) *proxy.TargetScope {
+// initTargetScope builds a TargetScope from the policy config. Returns
+// nil if no policy is configured. The SOCKS5 negotiator picks up the
+// scope via connector wiring (USK-690), not via a per-handler setter.
+func initTargetScope(policy *config.TargetScopePolicyConfig) *proxy.TargetScope {
 	if policy == nil {
 		return nil
 	}
@@ -1139,11 +857,8 @@ func initTargetScope(policy *config.TargetScopePolicyConfig, socks5Handler *prot
 	allows := convertTargetRules(policy.Allows)
 	denies := convertTargetRules(policy.Denies)
 	targetScope.SetPolicyRules(allows, denies)
-	socks5Handler.SetTargetScope(targetScope)
 	return targetScope
 }
-
-// convertTargetRules converts config TargetRuleConfig values to proxy TargetRule values.
 func convertTargetRules(cfgRules []config.TargetRuleConfig) []proxy.TargetRule {
 	if len(cfgRules) == 0 {
 		return nil
@@ -1285,60 +1000,6 @@ func initCAAutoPersist(cfg *config.Config, logger *slog.Logger) (*cert.CA, error
 		"cert_path", certPath,
 		"install_hint", "Install the CA certificate from the path above into your OS/browser trust store for HTTPS interception")
 	return ca, nil
-}
-
-// socks5AuthAdapter bridges the MCP server's socks5AuthSetter interface to the
-// SOCKS5 handler's SetAuthenticator method. It avoids importing the socks5
-// package from the mcp package by keeping the adapter in main.
-type socks5AuthAdapter struct {
-	handler *protosocks5.Handler
-}
-
-// newSOCKS5AuthAdapter creates a new adapter around a SOCKS5 handler.
-func newSOCKS5AuthAdapter(h *protosocks5.Handler) *socks5AuthAdapter {
-	return &socks5AuthAdapter{handler: h}
-}
-
-// SetPasswordAuth enables username/password authentication on the SOCKS5 handler.
-func (a *socks5AuthAdapter) SetPasswordAuth(username, password string) {
-	a.handler.SetAuthenticator(&staticSOCKS5Auth{
-		username: username,
-		password: password,
-	})
-}
-
-// ClearAuth resets the SOCKS5 handler to no-authentication mode (default/global).
-func (a *socks5AuthAdapter) ClearAuth() {
-	a.handler.SetAuthenticator(nil)
-}
-
-// SetPasswordAuthForListener enables username/password authentication for a specific listener.
-func (a *socks5AuthAdapter) SetPasswordAuthForListener(listenerName, username, password string) {
-	a.handler.SetListenerAuthenticator(listenerName, &staticSOCKS5Auth{
-		username: username,
-		password: password,
-	})
-}
-
-// ClearAuthForListener resets a specific listener to no-authentication mode,
-// falling back to the default authenticator.
-func (a *socks5AuthAdapter) ClearAuthForListener(listenerName string) {
-	a.handler.SetListenerAuthenticator(listenerName, nil)
-}
-
-// staticSOCKS5Auth is a simple authenticator that validates against a single
-// username/password pair.
-type staticSOCKS5Auth struct {
-	username string
-	password string
-}
-
-// Authenticate returns true if the credentials match.
-// Uses constant-time comparison to prevent timing side-channel attacks.
-func (a *staticSOCKS5Auth) Authenticate(username, password string) bool {
-	usernameMatch := subtle.ConstantTimeCompare([]byte(username), []byte(a.username))
-	passwordMatch := subtle.ConstantTimeCompare([]byte(password), []byte(a.password))
-	return usernameMatch == 1 && passwordMatch == 1
 }
 
 // initPluginV2Engine constructs the pluginv2.Engine, ensures the pluginv2_kv
@@ -1521,4 +1182,94 @@ func newLiveManager(
 	_ = issuer
 	_ = safetyEngine
 	return mgr, nil
+}
+
+// initHostTLSRegistry builds a transport.HostTLSRegistry from the CLI
+// config and proxy config file. CLI config settings take precedence;
+// proxy config file settings are applied as fallbacks.
+func initHostTLSRegistry(cfg *config.Config, proxyCfg *config.ProxyConfig, logger *slog.Logger) (*transport.HostTLSRegistry, error) {
+	reg := transport.NewHostTLSRegistry()
+
+	if cfg.ClientCertPath != "" && cfg.ClientKeyPath != "" {
+		globalTLS := &transport.HostTLSConfig{
+			ClientCertPath: cfg.ClientCertPath,
+			ClientKeyPath:  cfg.ClientKeyPath,
+		}
+		if err := globalTLS.Validate(); err != nil {
+			return nil, fmt.Errorf("global client cert: %w", err)
+		}
+		reg.SetGlobal(globalTLS)
+		logger.Info("global mTLS client certificate configured",
+			"cert", cfg.ClientCertPath, "key", cfg.ClientKeyPath)
+	}
+
+	if err := applyHostTLSEntries(reg, cfg.HostTLS, "", logger); err != nil {
+		return nil, err
+	}
+
+	if proxyCfg != nil {
+		if proxyCfg.ClientCertPath != "" && proxyCfg.ClientKeyPath != "" && reg.Global() == nil {
+			globalTLS := &transport.HostTLSConfig{
+				ClientCertPath: proxyCfg.ClientCertPath,
+				ClientKeyPath:  proxyCfg.ClientKeyPath,
+			}
+			if err := globalTLS.Validate(); err != nil {
+				return nil, fmt.Errorf("proxy config global client cert: %w", err)
+			}
+			reg.SetGlobal(globalTLS)
+			logger.Info("global mTLS client certificate configured from proxy config",
+				"cert", proxyCfg.ClientCertPath, "key", proxyCfg.ClientKeyPath)
+		}
+		if err := applyHostTLSEntries(reg, proxyCfg.HostTLS, "proxy config ", logger); err != nil {
+			return nil, err
+		}
+	}
+
+	return reg, nil
+}
+
+// applyHostTLSEntries adds per-host TLS configurations from a map to the registry.
+func applyHostTLSEntries(reg *transport.HostTLSRegistry, entries map[string]*config.HostTLSEntry, prefix string, logger *slog.Logger) error {
+	for hostname, entry := range entries {
+		hostCfg := &transport.HostTLSConfig{
+			ClientCertPath: entry.ClientCertPath,
+			ClientKeyPath:  entry.ClientKeyPath,
+			TLSVerify:      entry.TLSVerify,
+			CABundlePath:   entry.CABundlePath,
+		}
+		if err := hostCfg.Validate(); err != nil {
+			return fmt.Errorf("%shost_tls[%s]: %w", prefix, hostname, err)
+		}
+		reg.Set(hostname, hostCfg)
+		logger.Info("per-host TLS configured", "source", prefix+"config", "host", hostname)
+	}
+	return nil
+}
+
+// initTLSTransport builds the transport.TLSTransport implementation used
+// by the typed-resend MCP tools (and exposed via configure_tool). uTLS
+// transport is selected when a TLS fingerprint profile is set; the
+// standard transport is used otherwise. The HostTLSRegistry threaded in
+// here applies per-host mTLS / verify overrides.
+func initTLSTransport(cfg *config.Config, reg *transport.HostTLSRegistry, logger *slog.Logger) transport.TLSTransport {
+	if cfg.TLSFingerprint != "" {
+		profile, err := transport.ParseBrowserProfile(cfg.TLSFingerprint)
+		if err != nil {
+			logger.Warn("invalid TLS fingerprint profile, using standard transport", "error", err)
+			return &transport.StandardTransport{
+				InsecureSkipVerify: cfg.InsecureSkipVerify,
+				HostTLS:            reg,
+			}
+		}
+		logger.Info("uTLS fingerprint enabled", "profile", profile.String())
+		return &transport.UTLSTransport{
+			Profile:            profile,
+			InsecureSkipVerify: cfg.InsecureSkipVerify,
+			HostTLS:            reg,
+		}
+	}
+	return &transport.StandardTransport{
+		InsecureSkipVerify: cfg.InsecureSkipVerify,
+		HostTLS:            reg,
+	}
 }

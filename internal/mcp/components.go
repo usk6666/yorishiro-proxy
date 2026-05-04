@@ -37,9 +37,9 @@ import (
 
 	"github.com/usk6666/yorishiro-proxy/internal/cert"
 	"github.com/usk6666/yorishiro-proxy/internal/config"
+	"github.com/usk6666/yorishiro-proxy/internal/connector/transport"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/pluginv2"
-	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/rules"
 	"github.com/usk6666/yorishiro-proxy/internal/proxybuild"
@@ -225,8 +225,8 @@ type Connector struct {
 	scope                 *proxy.CaptureScope
 	targetScope           *proxy.TargetScope
 	targetScopeSetters    []targetScopeSetter
-	hostTLSRegistry       *httputil.HostTLSRegistry
-	tlsTransport          httputil.TLSTransport
+	hostTLSRegistry       *transport.HostTLSRegistry
+	tlsTransport          transport.TLSTransport
 	tlsFingerprintSetters []tlsFingerprintSetter
 	socks5AuthSetter      socks5AuthSetter
 	tcpForwards           map[string]*config.ForwardConfig
@@ -251,8 +251,8 @@ func NewConnector(
 	passthrough *proxy.PassthroughList,
 	scope *proxy.CaptureScope,
 	targetScope *proxy.TargetScope,
-	hostTLSRegistry *httputil.HostTLSRegistry,
-	tlsTransport httputil.TLSTransport,
+	hostTLSRegistry *transport.HostTLSRegistry,
+	tlsTransport transport.TLSTransport,
 	socks5AuthSetter socks5AuthSetter,
 	tcpHandler tcpForwardHandler,
 	detector proxy.ProtocolDetector,

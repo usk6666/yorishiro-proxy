@@ -12,7 +12,7 @@ import (
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/usk6666/yorishiro-proxy/internal/config"
-	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
+	"github.com/usk6666/yorishiro-proxy/internal/connector/transport"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 )
 
@@ -461,7 +461,7 @@ func (s *Server) applyClientCert(certPath, keyPath string) error {
 	if s.connector.hostTLSRegistry == nil {
 		return fmt.Errorf("host TLS registry is not initialized")
 	}
-	cfg := &httputil.HostTLSConfig{
+	cfg := &transport.HostTLSConfig{
 		ClientCertPath: certPath,
 		ClientKeyPath:  keyPath,
 	}
@@ -927,26 +927,26 @@ func (s *Server) applyTLSFingerprint(profile string) error {
 // buildTLSTransport creates a TLSTransport for the given profile name.
 // "none" produces a StandardTransport (Go crypto/tls); all others produce
 // a UTLSTransport with the matching browser fingerprint.
-func (s *Server) buildTLSTransport(profile string) httputil.TLSTransport {
+func (s *Server) buildTLSTransport(profile string) transport.TLSTransport {
 	insecure := s.currentInsecureSkipVerify()
 
 	if profile == "none" {
-		return &httputil.StandardTransport{
+		return &transport.StandardTransport{
 			InsecureSkipVerify: insecure,
 			HostTLS:            s.connector.hostTLSRegistry,
 		}
 	}
 
-	bp, err := httputil.ParseBrowserProfile(profile)
+	bp, err := transport.ParseBrowserProfile(profile)
 	if err != nil {
 		// Fallback — should not happen since profile was validated above.
-		return &httputil.StandardTransport{
+		return &transport.StandardTransport{
 			InsecureSkipVerify: insecure,
 			HostTLS:            s.connector.hostTLSRegistry,
 		}
 	}
 
-	return &httputil.UTLSTransport{
+	return &transport.UTLSTransport{
 		Profile:            bp,
 		InsecureSkipVerify: insecure,
 		HostTLS:            s.connector.hostTLSRegistry,
@@ -957,9 +957,9 @@ func (s *Server) buildTLSTransport(profile string) httputil.TLSTransport {
 // current connector.tlsTransport. Returns false when no transport is set.
 func (s *Server) currentInsecureSkipVerify() bool {
 	switch t := s.connector.tlsTransport.(type) {
-	case *httputil.UTLSTransport:
+	case *transport.UTLSTransport:
 		return t.InsecureSkipVerify
-	case *httputil.StandardTransport:
+	case *transport.StandardTransport:
 		return t.InsecureSkipVerify
 	default:
 		return false
