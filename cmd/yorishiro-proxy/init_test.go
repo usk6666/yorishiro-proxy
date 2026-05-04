@@ -526,8 +526,11 @@ func TestLoadConfigs_NoFiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if result.proxyCfg != nil {
-		t.Error("expected nil proxyCfg when no config file specified")
+	// loadConfigs guarantees a non-nil zero-valued ProxyConfig when no
+	// -config file is provided so downstream consumers (proxybuild.BuildLiveStack)
+	// can rely on the non-nil contract.
+	if result.proxyCfg == nil {
+		t.Fatal("expected non-nil proxyCfg (zero-valued) when no config file specified")
 	}
 	if result.targetScopePolicy != nil {
 		t.Error("expected nil targetScopePolicy when no files specified")
@@ -563,8 +566,10 @@ func TestLoadConfigs_PolicyFileOnly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if result.proxyCfg != nil {
-		t.Error("expected nil proxyCfg when no config file specified")
+	// loadConfigs guarantees a non-nil zero-valued ProxyConfig when no
+	// -config file is provided.
+	if result.proxyCfg == nil {
+		t.Fatal("expected non-nil proxyCfg (zero-valued) when no config file specified")
 	}
 	if result.targetScopePolicy == nil {
 		t.Fatal("expected non-nil targetScopePolicy")
