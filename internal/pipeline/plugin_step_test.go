@@ -14,7 +14,7 @@ import (
 
 func TestPluginStep_NilEngine(t *testing.T) {
 	step := NewPluginStep(nil, PhaseRecv, nil)
-	ex := &exchange.Exchange{Direction: exchange.Send}
+	ex := &exchange.Exchange{Direction: envelope.Send}
 	result := step.Process(context.Background(), ex)
 	if result.Action != Continue {
 		t.Fatalf("expected Continue, got %v", result.Action)
@@ -31,25 +31,25 @@ func TestPluginStep_ResolveHook(t *testing.T) {
 		{
 			name:     "PhaseRecv+Send -> on_receive_from_client",
 			phase:    PhaseRecv,
-			dir:      exchange.Send,
+			dir:      envelope.Send,
 			wantHook: plugin.HookOnReceiveFromClient,
 		},
 		{
 			name:     "PhaseRecv+Receive -> on_receive_from_server",
 			phase:    PhaseRecv,
-			dir:      exchange.Receive,
+			dir:      envelope.Receive,
 			wantHook: plugin.HookOnReceiveFromServer,
 		},
 		{
 			name:     "PhaseSend+Send -> on_before_send_to_server",
 			phase:    PhaseSend,
-			dir:      exchange.Send,
+			dir:      envelope.Send,
 			wantHook: plugin.HookOnBeforeSendToServer,
 		},
 		{
 			name:     "PhaseSend+Receive -> on_before_send_to_client",
 			phase:    PhaseSend,
-			dir:      exchange.Receive,
+			dir:      envelope.Receive,
 			wantHook: plugin.HookOnBeforeSendToClient,
 		},
 	}
@@ -68,7 +68,7 @@ func TestPluginStep_ResolveHook(t *testing.T) {
 func TestExchangeToMap_Send(t *testing.T) {
 	u, _ := url.Parse("http://example.com/path")
 	ex := &exchange.Exchange{
-		Direction: exchange.Send,
+		Direction: envelope.Send,
 		Method:    "GET",
 		URL:       u,
 		Headers: []exchange.KeyValue{
@@ -76,7 +76,7 @@ func TestExchangeToMap_Send(t *testing.T) {
 			{Name: "Accept", Value: "text/html"},
 		},
 		Body:     []byte("hello"),
-		Protocol: exchange.HTTP1,
+		Protocol: envelope.HTTP1,
 	}
 
 	m := exchangeToMap(ex)
@@ -105,13 +105,13 @@ func TestExchangeToMap_Send(t *testing.T) {
 
 func TestExchangeToMap_Receive(t *testing.T) {
 	ex := &exchange.Exchange{
-		Direction: exchange.Receive,
+		Direction: envelope.Receive,
 		Status:    404,
 		Headers: []exchange.KeyValue{
 			{Name: "Content-Type", Value: "text/plain"},
 		},
 		Body:     []byte("not found"),
-		Protocol: exchange.HTTP2,
+		Protocol: envelope.HTTP2,
 	}
 
 	m := exchangeToMap(ex)
@@ -122,7 +122,7 @@ func TestExchangeToMap_Receive(t *testing.T) {
 }
 
 func TestExchangeToMap_NilURL(t *testing.T) {
-	ex := &exchange.Exchange{Direction: exchange.Send}
+	ex := &exchange.Exchange{Direction: envelope.Send}
 	m := exchangeToMap(ex)
 	if m["url"] != "" {
 		t.Errorf("url = %v, want empty string", m["url"])
@@ -131,8 +131,8 @@ func TestExchangeToMap_NilURL(t *testing.T) {
 
 func TestExchangeToMap_Metadata(t *testing.T) {
 	ex := &exchange.Exchange{
-		Direction: exchange.Send,
-		Protocol:  exchange.GRPC,
+		Direction: envelope.Send,
+		Protocol:  envelope.GRPC,
 		Metadata: map[string]any{
 			"service":    "greeter.Greeter",
 			"method":     "SayHello",
@@ -155,7 +155,7 @@ func TestExchangeToMap_Metadata(t *testing.T) {
 
 func TestExchangeToMap_Trailers(t *testing.T) {
 	ex := &exchange.Exchange{
-		Direction: exchange.Receive,
+		Direction: envelope.Receive,
 		Status:    200,
 		Trailers: []exchange.KeyValue{
 			{Name: "grpc-status", Value: "0"},
@@ -175,7 +175,7 @@ func TestExchangeToMap_Trailers(t *testing.T) {
 }
 
 func TestExchangeToMap_NoTrailers(t *testing.T) {
-	ex := &exchange.Exchange{Direction: exchange.Send}
+	ex := &exchange.Exchange{Direction: envelope.Send}
 	m := exchangeToMap(ex)
 	if _, ok := m["trailers"]; ok {
 		t.Error("trailers should not be set when empty")
@@ -315,7 +315,7 @@ func TestBuildResponseFromPlugin_Nil(t *testing.T) {
 	if resp.Status != 200 {
 		t.Errorf("Status = %d, want 200", resp.Status)
 	}
-	if resp.Direction != exchange.Receive {
+	if resp.Direction != envelope.Receive {
 		t.Errorf("Direction = %v, want Receive", resp.Direction)
 	}
 }
@@ -362,7 +362,7 @@ def on_receive_from_client(data):
 
 	step := NewPluginStep(engine, PhaseRecv, nil)
 	ex := &exchange.Exchange{
-		Direction: exchange.Send,
+		Direction: envelope.Send,
 		Method:    "GET",
 	}
 
@@ -389,7 +389,7 @@ def on_receive_from_client(data):
 
 	step := NewPluginStep(engine, PhaseRecv, nil)
 	ex := &exchange.Exchange{
-		Direction: exchange.Send,
+		Direction: envelope.Send,
 		Method:    "POST",
 	}
 
@@ -424,7 +424,7 @@ def on_receive_from_client(data):
 
 	step := NewPluginStep(engine, PhaseRecv, nil)
 	ex := &exchange.Exchange{
-		Direction: exchange.Send,
+		Direction: envelope.Send,
 		Method:    "GET",
 		Headers: []exchange.KeyValue{
 			{Name: "Host", Value: "example.com"},
@@ -455,7 +455,7 @@ def on_before_send_to_server(data):
 
 	step := NewPluginStep(engine, PhaseSend, nil)
 	ex := &exchange.Exchange{
-		Direction: exchange.Send,
+		Direction: envelope.Send,
 		Method:    "GET",
 	}
 
@@ -481,7 +481,7 @@ def on_receive_from_server(data):
 
 	step := NewPluginStep(engine, PhaseRecv, nil)
 	ex := &exchange.Exchange{
-		Direction: exchange.Receive,
+		Direction: envelope.Receive,
 		Status:    200,
 	}
 
@@ -504,7 +504,7 @@ def on_before_send_to_client(data):
 
 	step := NewPluginStep(engine, PhaseSend, nil)
 	ex := &exchange.Exchange{
-		Direction: exchange.Receive,
+		Direction: envelope.Receive,
 		Status:    200,
 	}
 

@@ -16,5 +16,5 @@
 //
 // Keep-alive is handled internally: each request-response pair gets a unique
 // StreamID. Connection: close or HTTP/1.0 semantics cause Next() to return
-// io.EOF after the current exchange.
+// io.EOF after the current envelope.
 package http1

@@ -16,7 +16,6 @@ import (
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
-	"github.com/usk6666/yorishiro-proxy/internal/exchange"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 	"github.com/usk6666/yorishiro-proxy/internal/rules/common"
@@ -1508,9 +1507,9 @@ func (s *Server) filterOutputHeaderKVs(kvs []envelope.KeyValue) []headerKV {
 		}
 		return out
 	}
-	bridged := make([]exchange.KeyValue, len(kvs))
+	bridged := make([]envelope.KeyValue, len(kvs))
 	for i, kv := range kvs {
-		bridged[i] = exchange.KeyValue{Name: kv.Name, Value: kv.Value}
+		bridged[i] = envelope.KeyValue{Name: kv.Name, Value: kv.Value}
 	}
 	filtered, _ := s.pipeline.safetyEngine.FilterOutputHeaders(bridged)
 	for _, kv := range filtered {

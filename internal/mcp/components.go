@@ -41,7 +41,6 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/pluginv2"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
-	"github.com/usk6666/yorishiro-proxy/internal/proxy/rules"
 	"github.com/usk6666/yorishiro-proxy/internal/proxybuild"
 	"github.com/usk6666/yorishiro-proxy/internal/rules/common"
 	grpcrules "github.com/usk6666/yorishiro-proxy/internal/rules/grpc"
@@ -71,7 +70,7 @@ type Pipeline struct {
 	wsInterceptEngine   *wsrules.InterceptEngine
 	grpcInterceptEngine *grpcrules.InterceptEngine
 	holdQueue           *common.HoldQueue
-	transformPipeline   *rules.Pipeline
+	transformHTTPEngine *httprules.TransformEngine
 	safetyEngine        *safety.Engine
 	safetyEngineSetters []safetyEngineSetter
 }
@@ -83,7 +82,7 @@ func NewPipeline(
 	wsInterceptEngine *wsrules.InterceptEngine,
 	grpcInterceptEngine *grpcrules.InterceptEngine,
 	holdQueue *common.HoldQueue,
-	transformPipeline *rules.Pipeline,
+	transformHTTPEngine *httprules.TransformEngine,
 	safetyEngine *safety.Engine,
 	safetyEngineSetters []safetyEngineSetter,
 ) *Pipeline {
@@ -92,7 +91,7 @@ func NewPipeline(
 		wsInterceptEngine:   wsInterceptEngine,
 		grpcInterceptEngine: grpcInterceptEngine,
 		holdQueue:           holdQueue,
-		transformPipeline:   transformPipeline,
+		transformHTTPEngine: transformHTTPEngine,
 		safetyEngine:        safetyEngine,
 		safetyEngineSetters: safetyEngineSetters,
 	}

@@ -29,7 +29,7 @@ func TestScopeStep_Process(t *testing.T) {
 		{
 			name: "send direction with denied URL returns Drop",
 			ex: &exchange.Exchange{
-				Direction: exchange.Send,
+				Direction: envelope.Send,
 				URL:       mustParseURL("http://example.com/path"),
 			},
 			wantAction: Drop,
@@ -38,7 +38,7 @@ func TestScopeStep_Process(t *testing.T) {
 		{
 			name: "send direction with allowed URL returns Continue",
 			ex: &exchange.Exchange{
-				Direction: exchange.Send,
+				Direction: envelope.Send,
 				URL:       mustParseURL("http://allowed.com/path"),
 			},
 			wantAction: Continue,
@@ -46,7 +46,7 @@ func TestScopeStep_Process(t *testing.T) {
 		{
 			name: "receive direction is skipped",
 			ex: &exchange.Exchange{
-				Direction: exchange.Receive,
+				Direction: envelope.Receive,
 				URL:       mustParseURL("http://example.com/path"),
 			},
 			wantAction: Continue,
@@ -54,7 +54,7 @@ func TestScopeStep_Process(t *testing.T) {
 		{
 			name: "nil URL (TCP) returns Continue",
 			ex: &exchange.Exchange{
-				Direction: exchange.Send,
+				Direction: envelope.Send,
 				URL:       nil,
 			},
 			wantAction: Continue,
@@ -82,7 +82,7 @@ func TestScopeStep_Process(t *testing.T) {
 func TestScopeStep_Process_NilScope(t *testing.T) {
 	step := NewScopeStep(nil)
 	ex := &exchange.Exchange{
-		Direction: exchange.Send,
+		Direction: envelope.Send,
 		URL:       mustParseURL("http://example.com/"),
 	}
 	r := step.Process(context.Background(), ex)
@@ -95,7 +95,7 @@ func TestScopeStep_Process_NoRules(t *testing.T) {
 	scope := proxy.NewTargetScope() // no rules configured
 	step := NewScopeStep(scope)
 	ex := &exchange.Exchange{
-		Direction: exchange.Send,
+		Direction: envelope.Send,
 		URL:       mustParseURL("http://example.com/"),
 	}
 	r := step.Process(context.Background(), ex)
@@ -114,7 +114,7 @@ func TestScopeStep_Process_PolicyAllow(t *testing.T) {
 
 	t.Run("URL in allow list passes", func(t *testing.T) {
 		ex := &exchange.Exchange{
-			Direction: exchange.Send,
+			Direction: envelope.Send,
 			URL:       mustParseURL("http://allowed.com/"),
 		}
 		r := step.Process(context.Background(), ex)
@@ -125,7 +125,7 @@ func TestScopeStep_Process_PolicyAllow(t *testing.T) {
 
 	t.Run("URL not in allow list is dropped", func(t *testing.T) {
 		ex := &exchange.Exchange{
-			Direction: exchange.Send,
+			Direction: envelope.Send,
 			URL:       mustParseURL("http://other.com/"),
 		}
 		r := step.Process(context.Background(), ex)

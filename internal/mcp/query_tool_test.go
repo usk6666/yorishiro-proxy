@@ -800,7 +800,7 @@ func TestQuery_Config_Default(t *testing.T) {
 func TestQuery_Config_WithScopeAndPassthrough(t *testing.T) {
 	t.Parallel()
 	store := newTestStore(t)
-	scope := proxy.NewCaptureScope()
+	scope := connector.NewTargetScope()
 	scope.SetRules(
 		[]proxy.ScopeRule{{Hostname: "target.com"}},
 		[]proxy.ScopeRule{{Hostname: "excluded.com"}},
@@ -810,7 +810,7 @@ func TestQuery_Config_WithScopeAndPassthrough(t *testing.T) {
 	pl.Add("*.cdn.example.com")
 
 	cs := setupQueryTestSession(t, store,
-		WithCaptureScope(scope),
+		WithTargetScope(scope),
 		WithPassthroughList(pl),
 	)
 

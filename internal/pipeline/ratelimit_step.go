@@ -28,7 +28,7 @@ func NewRateLimitStep(limiter *proxy.RateLimiter) *RateLimitStep {
 // Process checks the Exchange's target hostname against the RateLimiter.
 // Returns Drop if the request is rate limited, Continue otherwise.
 func (s *RateLimitStep) Process(_ context.Context, ex *exchange.Exchange) Result {
-	if ex.Direction != exchange.Send {
+	if ex.Direction != envelope.Send {
 		return Result{}
 	}
 	if ex.URL == nil {

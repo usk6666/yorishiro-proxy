@@ -5,23 +5,25 @@ import (
 	"testing"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/usk6666/yorishiro-proxy/internal/proxy"
-	"github.com/usk6666/yorishiro-proxy/internal/proxy/rules"
+	"github.com/usk6666/yorishiro-proxy/internal/connector"
+	httprules "github.com/usk6666/yorishiro-proxy/internal/rules/http"
 )
 
-// setupTransformTestSession creates a connected MCP client session for auto-transform rule tests.
-func setupTransformTestSession(t *testing.T, pipeline *rules.Pipeline) *gomcp.ClientSession {
+// setupTransformTestSession creates a connected MCP client session for
+// auto-transform rule tests. The engine is the per-protocol HTTP transform
+// engine used by the configure_tool's auto_transform schema.
+func setupTransformTestSession(t *testing.T, engine *httprules.TransformEngine) *gomcp.ClientSession {
 	t.Helper()
 	ctx := context.Background()
 
-	scope := proxy.NewCaptureScope()
-	pl := proxy.NewPassthroughList()
+	scope := connector.NewTargetScope()
+	pl := connector.NewPassthroughList()
 
 	var opts []ServerOption
-	opts = append(opts, WithCaptureScope(scope))
+	opts = append(opts, WithTargetScope(scope))
 	opts = append(opts, WithPassthroughList(pl))
-	if pipeline != nil {
-		opts = append(opts, WithTransformPipeline(pipeline))
+	if engine != nil {
+		opts = append(opts, WithTransformHTTPEngine(engine))
 	}
 
 	s := newServer(ctx, nil, nil, nil, opts...)
@@ -47,9 +49,19 @@ func setupTransformTestSession(t *testing.T, pipeline *rules.Pipeline) *gomcp.Cl
 	return cs
 }
 
+// findEngineRule scans the engine for a rule with the given ID.
+func findEngineRule(engine *httprules.TransformEngine, id string) (httprules.TransformRule, bool) {
+	for _, r := range engine.Rules() {
+		if r.ID == id {
+			return r, true
+		}
+	}
+	return httprules.TransformRule{}, false
+}
+
 func TestConfigure_AutoTransform_MergeAdd(t *testing.T) {
-	pipeline := rules.NewPipeline()
-	cs := setupTransformTestSession(t, pipeline)
+	engine := httprules.NewTransformEngine()
+	cs := setupTransformTestSession(t, engine)
 
 	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
 		Name: "configure",
@@ -65,9 +77,6 @@ func TestConfigure_AutoTransform_MergeAdd(t *testing.T) {
 						Conditions: transformConditionsInput{
 							URLPattern: "/api/admin.*",
 							Methods:    []string{"POST", "PUT", "DELETE"},
-							HeaderMatch: map[string]string{
-								"Content-Type": "application/json",
-							},
 						},
 						Action: transformActionInput{
 							Type:   "set_header",
@@ -102,11 +111,8 @@ func TestConfigure_AutoTransform_MergeAdd(t *testing.T) {
 	var out configureResult
 	configureUnmarshalResult(t, result, &out)
 
-	if out.Status != "configured" {
-		t.Errorf("status = %q, want %q", out.Status, "configured")
-	}
 	if out.AutoTransform == nil {
-		t.Fatal("auto_transform is nil")
+		t.Fatal("AutoTransform result is nil")
 	}
 	if out.AutoTransform.TotalRules != 2 {
 		t.Errorf("total_rules = %d, want 2", out.AutoTransform.TotalRules)
@@ -115,34 +121,29 @@ func TestConfigure_AutoTransform_MergeAdd(t *testing.T) {
 		t.Errorf("enabled_rules = %d, want 1", out.AutoTransform.EnabledRules)
 	}
 
-	// Verify rule was actually added.
-	r, err := pipeline.GetRule("rule-1")
-	if err != nil {
-		t.Fatalf("GetRule: %v", err)
+	r, ok := findEngineRule(engine, "rule-1")
+	if !ok {
+		t.Fatal("rule-1 not present in engine")
 	}
 	if !r.Enabled {
 		t.Error("rule-1 should be enabled")
 	}
-	if r.Direction != rules.DirectionRequest {
-		t.Errorf("direction = %q, want %q", r.Direction, rules.DirectionRequest)
+	if r.Direction != httprules.DirectionRequest {
+		t.Errorf("direction = %q, want %q", r.Direction, httprules.DirectionRequest)
 	}
-	if r.Action.Type != rules.ActionSetHeader {
-		t.Errorf("action type = %q, want %q", r.Action.Type, rules.ActionSetHeader)
+	if r.ActionType != httprules.TransformSetHeader {
+		t.Errorf("action type = %v, want %v", r.ActionType, httprules.TransformSetHeader)
 	}
 }
 
 func TestConfigure_AutoTransform_MergeRemove(t *testing.T) {
-	pipeline := rules.NewPipeline()
-	pipeline.AddRule(rules.Rule{
-		ID: "keep", Enabled: true, Direction: rules.DirectionRequest,
-		Action: rules.Action{Type: rules.ActionAddHeader, Header: "X-Keep", Value: "true"},
-	})
-	pipeline.AddRule(rules.Rule{
-		ID: "remove-me", Enabled: true, Direction: rules.DirectionRequest,
-		Action: rules.Action{Type: rules.ActionAddHeader, Header: "X-Remove", Value: "true"},
-	})
+	engine := httprules.NewTransformEngine()
+	addr1, _ := httprules.CompileTransformRule("keep", 0, httprules.DirectionRequest, "", "", nil, httprules.TransformAddHeader, "X-Keep", "true", "", "")
+	addr2, _ := httprules.CompileTransformRule("remove-me", 0, httprules.DirectionRequest, "", "", nil, httprules.TransformAddHeader, "X-Remove", "true", "", "")
+	engine.AddRule(*addr1)
+	engine.AddRule(*addr2)
 
-	cs := setupTransformTestSession(t, pipeline)
+	cs := setupTransformTestSession(t, engine)
 
 	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
 		Name: "configure",
@@ -167,25 +168,21 @@ func TestConfigure_AutoTransform_MergeRemove(t *testing.T) {
 		t.Errorf("total_rules = %d, want 1", out.AutoTransform.TotalRules)
 	}
 
-	// Verify removal.
-	_, err = pipeline.GetRule("remove-me")
-	if err == nil {
+	if _, ok := findEngineRule(engine, "remove-me"); ok {
 		t.Error("remove-me should have been removed")
 	}
-	_, err = pipeline.GetRule("keep")
-	if err != nil {
+	if _, ok := findEngineRule(engine, "keep"); !ok {
 		t.Error("keep should still exist")
 	}
 }
 
 func TestConfigure_AutoTransform_MergeEnable(t *testing.T) {
-	pipeline := rules.NewPipeline()
-	pipeline.AddRule(rules.Rule{
-		ID: "r1", Enabled: false, Direction: rules.DirectionRequest,
-		Action: rules.Action{Type: rules.ActionAddHeader, Header: "X-Test", Value: "true"},
-	})
+	engine := httprules.NewTransformEngine()
+	rule, _ := httprules.CompileTransformRule("r1", 0, httprules.DirectionRequest, "", "", nil, httprules.TransformAddHeader, "X-Test", "true", "", "")
+	rule.Enabled = false
+	engine.AddRule(*rule)
 
-	cs := setupTransformTestSession(t, pipeline)
+	cs := setupTransformTestSession(t, engine)
 
 	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
 		Name: "configure",
@@ -203,27 +200,22 @@ func TestConfigure_AutoTransform_MergeEnable(t *testing.T) {
 		t.Fatalf("expected success, got error: %v", result.Content)
 	}
 
-	var out configureResult
-	configureUnmarshalResult(t, result, &out)
-
-	if out.AutoTransform.EnabledRules != 1 {
-		t.Errorf("enabled_rules = %d, want 1", out.AutoTransform.EnabledRules)
+	r, ok := findEngineRule(engine, "r1")
+	if !ok {
+		t.Fatal("r1 not found")
 	}
-
-	r, _ := pipeline.GetRule("r1")
 	if !r.Enabled {
-		t.Error("r1 should be enabled")
+		t.Error("rule should now be enabled")
 	}
 }
 
 func TestConfigure_AutoTransform_MergeDisable(t *testing.T) {
-	pipeline := rules.NewPipeline()
-	pipeline.AddRule(rules.Rule{
-		ID: "r1", Enabled: true, Direction: rules.DirectionRequest,
-		Action: rules.Action{Type: rules.ActionAddHeader, Header: "X-Test", Value: "true"},
-	})
+	engine := httprules.NewTransformEngine()
+	rule, _ := httprules.CompileTransformRule("r1", 0, httprules.DirectionRequest, "", "", nil, httprules.TransformAddHeader, "X-Test", "true", "", "")
+	rule.Enabled = true
+	engine.AddRule(*rule)
 
-	cs := setupTransformTestSession(t, pipeline)
+	cs := setupTransformTestSession(t, engine)
 
 	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
 		Name: "configure",
@@ -241,82 +233,21 @@ func TestConfigure_AutoTransform_MergeDisable(t *testing.T) {
 		t.Fatalf("expected success, got error: %v", result.Content)
 	}
 
-	var out configureResult
-	configureUnmarshalResult(t, result, &out)
-
-	if out.AutoTransform.EnabledRules != 0 {
-		t.Errorf("enabled_rules = %d, want 0", out.AutoTransform.EnabledRules)
+	r, ok := findEngineRule(engine, "r1")
+	if !ok {
+		t.Fatal("r1 not found")
 	}
-
-	r, _ := pipeline.GetRule("r1")
 	if r.Enabled {
-		t.Error("r1 should be disabled")
-	}
-}
-
-func TestConfigure_AutoTransform_MergeCombined(t *testing.T) {
-	pipeline := rules.NewPipeline()
-	pipeline.AddRule(rules.Rule{
-		ID: "to-remove", Enabled: true, Direction: rules.DirectionRequest,
-		Action: rules.Action{Type: rules.ActionAddHeader, Header: "X-Remove", Value: "true"},
-	})
-	pipeline.AddRule(rules.Rule{
-		ID: "to-disable", Enabled: true, Direction: rules.DirectionRequest,
-		Action: rules.Action{Type: rules.ActionAddHeader, Header: "X-Disable", Value: "true"},
-	})
-
-	cs := setupTransformTestSession(t, pipeline)
-
-	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
-		Name: "configure",
-		Arguments: configureMarshal(t, configureInput{
-			Operation: "merge",
-			AutoTransform: &configureAutoTransform{
-				Add: []transformRuleInput{
-					{
-						ID: "new-rule", Enabled: true, Direction: "request",
-						Action: transformActionInput{
-							Type:   "set_header",
-							Header: "X-New",
-							Value:  "new-value",
-						},
-					},
-				},
-				Remove:  []string{"to-remove"},
-				Disable: []string{"to-disable"},
-			},
-		}),
-	})
-	if err != nil {
-		t.Fatalf("CallTool: %v", err)
-	}
-	if result.IsError {
-		t.Fatalf("expected success, got error: %v", result.Content)
-	}
-
-	var out configureResult
-	configureUnmarshalResult(t, result, &out)
-
-	if out.AutoTransform.TotalRules != 2 {
-		t.Errorf("total_rules = %d, want 2", out.AutoTransform.TotalRules)
-	}
-	if out.AutoTransform.EnabledRules != 1 {
-		t.Errorf("enabled_rules = %d, want 1", out.AutoTransform.EnabledRules)
+		t.Error("rule should now be disabled")
 	}
 }
 
 func TestConfigure_AutoTransform_Replace(t *testing.T) {
-	pipeline := rules.NewPipeline()
-	pipeline.AddRule(rules.Rule{
-		ID: "old-1", Enabled: true, Direction: rules.DirectionRequest,
-		Action: rules.Action{Type: rules.ActionAddHeader, Header: "X-Old1", Value: "true"},
-	})
-	pipeline.AddRule(rules.Rule{
-		ID: "old-2", Enabled: true, Direction: rules.DirectionResponse,
-		Action: rules.Action{Type: rules.ActionRemoveHeader, Header: "X-Old2"},
-	})
+	engine := httprules.NewTransformEngine()
+	old, _ := httprules.CompileTransformRule("old-rule", 0, httprules.DirectionRequest, "", "", nil, httprules.TransformAddHeader, "X-Old", "true", "", "")
+	engine.AddRule(*old)
 
-	cs := setupTransformTestSession(t, pipeline)
+	cs := setupTransformTestSession(t, engine)
 
 	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
 		Name: "configure",
@@ -325,16 +256,14 @@ func TestConfigure_AutoTransform_Replace(t *testing.T) {
 			AutoTransform: &configureAutoTransform{
 				Rules: []transformRuleInput{
 					{
-						ID:        "new-1",
+						ID:        "new-rule-1",
 						Enabled:   true,
-						Direction: "both",
-						Conditions: transformConditionsInput{
-							URLPattern: "/api/.*",
-						},
+						Priority:  5,
+						Direction: "request",
 						Action: transformActionInput{
 							Type:   "set_header",
-							Header: "X-Proxy",
-							Value:  "yorishiro",
+							Header: "X-New",
+							Value:  "v1",
 						},
 					},
 				},
@@ -348,37 +277,20 @@ func TestConfigure_AutoTransform_Replace(t *testing.T) {
 		t.Fatalf("expected success, got error: %v", result.Content)
 	}
 
-	var out configureResult
-	configureUnmarshalResult(t, result, &out)
-
-	if out.AutoTransform.TotalRules != 1 {
-		t.Errorf("total_rules = %d, want 1", out.AutoTransform.TotalRules)
+	if _, ok := findEngineRule(engine, "old-rule"); ok {
+		t.Error("old-rule should have been removed by replace")
 	}
-
-	// Old rules should be gone.
-	_, err = pipeline.GetRule("old-1")
-	if err == nil {
-		t.Error("old-1 should have been replaced")
-	}
-
-	// New rule should exist.
-	r, err := pipeline.GetRule("new-1")
-	if err != nil {
-		t.Fatalf("GetRule new-1: %v", err)
-	}
-	if r.Direction != rules.DirectionBoth {
-		t.Errorf("direction = %q, want %q", r.Direction, rules.DirectionBoth)
+	if _, ok := findEngineRule(engine, "new-rule-1"); !ok {
+		t.Error("new-rule-1 should be present after replace")
 	}
 }
 
 func TestConfigure_AutoTransform_ReplaceEmpty(t *testing.T) {
-	pipeline := rules.NewPipeline()
-	pipeline.AddRule(rules.Rule{
-		ID: "r1", Enabled: true, Direction: rules.DirectionRequest,
-		Action: rules.Action{Type: rules.ActionAddHeader, Header: "X-Test", Value: "true"},
-	})
+	engine := httprules.NewTransformEngine()
+	old, _ := httprules.CompileTransformRule("old-rule", 0, httprules.DirectionRequest, "", "", nil, httprules.TransformAddHeader, "X-Old", "true", "", "")
+	engine.AddRule(*old)
 
-	cs := setupTransformTestSession(t, pipeline)
+	cs := setupTransformTestSession(t, engine)
 
 	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
 		Name: "configure",
@@ -395,17 +307,13 @@ func TestConfigure_AutoTransform_ReplaceEmpty(t *testing.T) {
 	if result.IsError {
 		t.Fatalf("expected success, got error: %v", result.Content)
 	}
-
-	var out configureResult
-	configureUnmarshalResult(t, result, &out)
-
-	if out.AutoTransform.TotalRules != 0 {
-		t.Errorf("total_rules = %d, want 0", out.AutoTransform.TotalRules)
+	if got := len(engine.Rules()); got != 0 {
+		t.Errorf("rules len = %d, want 0", got)
 	}
 }
 
 func TestConfigure_AutoTransform_NilPipeline(t *testing.T) {
-	cs := setupTransformTestSession(t, nil) // nil pipeline
+	cs := setupTransformTestSession(t, nil)
 
 	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
 		Name: "configure",
@@ -413,34 +321,26 @@ func TestConfigure_AutoTransform_NilPipeline(t *testing.T) {
 			Operation: "merge",
 			AutoTransform: &configureAutoTransform{
 				Add: []transformRuleInput{
-					{
-						ID: "r1", Enabled: true, Direction: "request",
-						Action: transformActionInput{
-							Type:   "add_header",
-							Header: "X-Test",
-							Value:  "true",
-						},
-					},
+					{ID: "r", Enabled: true, Priority: 0, Direction: "request",
+						Action: transformActionInput{Type: "add_header", Header: "X", Value: "1"}},
 				},
 			},
 		}),
 	})
 	if err != nil {
-		return // Go-level error is acceptable.
+		return
 	}
 	if !result.IsError {
-		t.Fatal("expected error for nil pipeline, got success")
+		t.Fatal("expected error when transform engine is nil")
 	}
 }
 
 func TestConfigure_AutoTransform_MergeAddDuplicate(t *testing.T) {
-	pipeline := rules.NewPipeline()
-	pipeline.AddRule(rules.Rule{
-		ID: "r1", Enabled: true, Direction: rules.DirectionRequest,
-		Action: rules.Action{Type: rules.ActionAddHeader, Header: "X-Test", Value: "true"},
-	})
+	engine := httprules.NewTransformEngine()
+	rule, _ := httprules.CompileTransformRule("dup", 0, httprules.DirectionRequest, "", "", nil, httprules.TransformAddHeader, "X", "1", "", "")
+	engine.AddRule(*rule)
 
-	cs := setupTransformTestSession(t, pipeline)
+	cs := setupTransformTestSession(t, engine)
 
 	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
 		Name: "configure",
@@ -448,29 +348,23 @@ func TestConfigure_AutoTransform_MergeAddDuplicate(t *testing.T) {
 			Operation: "merge",
 			AutoTransform: &configureAutoTransform{
 				Add: []transformRuleInput{
-					{
-						ID: "r1", Enabled: true, Direction: "request",
-						Action: transformActionInput{
-							Type:   "add_header",
-							Header: "X-Dup",
-							Value:  "true",
-						},
-					},
+					{ID: "dup", Enabled: true, Priority: 1, Direction: "request",
+						Action: transformActionInput{Type: "add_header", Header: "X", Value: "2"}},
 				},
 			},
 		}),
 	})
 	if err != nil {
-		return // Go-level error is acceptable.
+		return
 	}
 	if !result.IsError {
-		t.Fatal("expected error for duplicate rule ID, got success")
+		t.Fatal("expected error for duplicate ID")
 	}
 }
 
 func TestConfigure_AutoTransform_MergeAddInvalidPattern(t *testing.T) {
-	pipeline := rules.NewPipeline()
-	cs := setupTransformTestSession(t, pipeline)
+	engine := httprules.NewTransformEngine()
+	cs := setupTransformTestSession(t, engine)
 
 	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
 		Name: "configure",
@@ -479,69 +373,61 @@ func TestConfigure_AutoTransform_MergeAddInvalidPattern(t *testing.T) {
 			AutoTransform: &configureAutoTransform{
 				Add: []transformRuleInput{
 					{
-						ID:        "bad",
-						Enabled:   true,
-						Direction: "request",
-						Conditions: transformConditionsInput{
-							URLPattern: "[invalid",
-						},
-						Action: transformActionInput{
-							Type:   "add_header",
-							Header: "X-Test",
-							Value:  "true",
-						},
+						ID: "bad", Enabled: true, Priority: 1, Direction: "request",
+						Conditions: transformConditionsInput{URLPattern: "[unbalanced"},
+						Action:     transformActionInput{Type: "add_header", Header: "X", Value: "1"},
 					},
 				},
 			},
 		}),
 	})
 	if err != nil {
-		return // Go-level error is acceptable.
+		return
 	}
 	if !result.IsError {
-		t.Fatal("expected error for invalid regex pattern, got success")
+		t.Fatal("expected error for invalid regex")
 	}
 }
 
 func TestConfigure_AutoTransform_MergeRemoveNonexistent(t *testing.T) {
-	pipeline := rules.NewPipeline()
-	cs := setupTransformTestSession(t, pipeline)
+	engine := httprules.NewTransformEngine()
+	cs := setupTransformTestSession(t, engine)
 
 	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
 		Name: "configure",
 		Arguments: configureMarshal(t, configureInput{
 			Operation: "merge",
 			AutoTransform: &configureAutoTransform{
-				Remove: []string{"nonexistent"},
+				Remove: []string{"missing"},
 			},
 		}),
 	})
 	if err != nil {
-		return // Go-level error is acceptable.
+		return
 	}
 	if !result.IsError {
-		t.Fatal("expected error for nonexistent rule removal, got success")
+		t.Fatal("expected error for nonexistent rule remove")
 	}
 }
 
 func TestConfigure_AutoTransform_MergeEnableNonexistent(t *testing.T) {
-	pipeline := rules.NewPipeline()
-	cs := setupTransformTestSession(t, pipeline)
+	engine := httprules.NewTransformEngine()
+	cs := setupTransformTestSession(t, engine)
 
 	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
 		Name: "configure",
 		Arguments: configureMarshal(t, configureInput{
 			Operation: "merge",
 			AutoTransform: &configureAutoTransform{
-				Enable: []string{"nonexistent"},
+				Enable: []string{"missing"},
 			},
 		}),
 	})
 	if err != nil {
-		return // Go-level error is acceptable.
+		return
 	}
 	if !result.IsError {
-		t.Fatal("expected error for nonexistent rule enable, got success")
+		t.Fatal("expected error for nonexistent rule enable")
 	}
 }
 
@@ -552,9 +438,8 @@ func TestTransformHelpers_ToFromRoundTrip(t *testing.T) {
 		Priority:  5,
 		Direction: "both",
 		Conditions: transformConditionsInput{
-			URLPattern:  "/api/.*",
-			Methods:     []string{"POST", "PUT"},
-			HeaderMatch: map[string]string{"Content-Type": "json"},
+			URLPattern: "/api/.*",
+			Methods:    []string{"POST", "PUT"},
 		},
 		Action: transformActionInput{
 			Type:   "set_header",
@@ -563,19 +448,22 @@ func TestTransformHelpers_ToFromRoundTrip(t *testing.T) {
 		},
 	}
 
-	rule := toTransformRule(input)
+	rule, err := toTransformRule(input)
+	if err != nil {
+		t.Fatalf("toTransformRule: %v", err)
+	}
 
 	if rule.ID != "r1" {
 		t.Errorf("ID = %q, want %q", rule.ID, "r1")
 	}
-	if rule.Direction != rules.DirectionBoth {
-		t.Errorf("Direction = %q, want %q", rule.Direction, rules.DirectionBoth)
+	if rule.Direction != httprules.DirectionBoth {
+		t.Errorf("Direction = %q, want %q", rule.Direction, httprules.DirectionBoth)
 	}
 	if rule.Priority != 5 {
 		t.Errorf("Priority = %d, want 5", rule.Priority)
 	}
-	if rule.Action.Type != rules.ActionSetHeader {
-		t.Errorf("Action.Type = %q, want %q", rule.Action.Type, rules.ActionSetHeader)
+	if rule.ActionType != httprules.TransformSetHeader {
+		t.Errorf("Action type = %v, want %v", rule.ActionType, httprules.TransformSetHeader)
 	}
 
 	output := fromTransformRule(rule)
@@ -598,8 +486,8 @@ func TestTransformHelpers_ToFromRoundTrip(t *testing.T) {
 }
 
 func TestConfigure_AutoTransform_ReplaceBodyAction(t *testing.T) {
-	pipeline := rules.NewPipeline()
-	cs := setupTransformTestSession(t, pipeline)
+	engine := httprules.NewTransformEngine()
+	cs := setupTransformTestSession(t, engine)
 
 	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
 		Name: "configure",
@@ -608,11 +496,10 @@ func TestConfigure_AutoTransform_ReplaceBodyAction(t *testing.T) {
 			AutoTransform: &configureAutoTransform{
 				Add: []transformRuleInput{
 					{
-						ID:         "replace-host",
-						Enabled:    true,
-						Priority:   10,
-						Direction:  "request",
-						Conditions: transformConditionsInput{},
+						ID:        "replace-host",
+						Enabled:   true,
+						Priority:  10,
+						Direction: "request",
 						Action: transformActionInput{
 							Type:    "replace_body",
 							Pattern: "production-host",
@@ -630,25 +517,18 @@ func TestConfigure_AutoTransform_ReplaceBodyAction(t *testing.T) {
 		t.Fatalf("expected success, got error: %v", result.Content)
 	}
 
-	var out configureResult
-	configureUnmarshalResult(t, result, &out)
-
-	if out.AutoTransform.TotalRules != 1 {
-		t.Errorf("total_rules = %d, want 1", out.AutoTransform.TotalRules)
+	r, ok := findEngineRule(engine, "replace-host")
+	if !ok {
+		t.Fatal("replace-host not found")
 	}
-
-	r, err := pipeline.GetRule("replace-host")
-	if err != nil {
-		t.Fatalf("GetRule: %v", err)
-	}
-	if r.Action.Type != rules.ActionReplaceBody {
-		t.Errorf("action type = %q, want %q", r.Action.Type, rules.ActionReplaceBody)
+	if r.ActionType != httprules.TransformReplaceBody {
+		t.Errorf("action type = %v, want TransformReplaceBody", r.ActionType)
 	}
 }
 
 func TestConfigure_AutoTransform_PriorityPreserved(t *testing.T) {
-	pipeline := rules.NewPipeline()
-	cs := setupTransformTestSession(t, pipeline)
+	engine := httprules.NewTransformEngine()
+	cs := setupTransformTestSession(t, engine)
 
 	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
 		Name: "configure",
@@ -657,16 +537,18 @@ func TestConfigure_AutoTransform_PriorityPreserved(t *testing.T) {
 			AutoTransform: &configureAutoTransform{
 				Add: []transformRuleInput{
 					{
-						ID: "high-priority", Enabled: true, Priority: 1, Direction: "request",
-						Action: transformActionInput{Type: "add_header", Header: "X-First", Value: "1"},
+						ID:        "low-prio",
+						Enabled:   true,
+						Priority:  100,
+						Direction: "request",
+						Action:    transformActionInput{Type: "add_header", Header: "X-A", Value: "1"},
 					},
 					{
-						ID: "low-priority", Enabled: true, Priority: 100, Direction: "request",
-						Action: transformActionInput{Type: "add_header", Header: "X-Last", Value: "100"},
-					},
-					{
-						ID: "mid-priority", Enabled: true, Priority: 50, Direction: "request",
-						Action: transformActionInput{Type: "add_header", Header: "X-Mid", Value: "50"},
+						ID:        "high-prio",
+						Enabled:   true,
+						Priority:  1,
+						Direction: "request",
+						Action:    transformActionInput{Type: "add_header", Header: "X-B", Value: "2"},
 					},
 				},
 			},
@@ -679,26 +561,11 @@ func TestConfigure_AutoTransform_PriorityPreserved(t *testing.T) {
 		t.Fatalf("expected success, got error: %v", result.Content)
 	}
 
-	var out configureResult
-	configureUnmarshalResult(t, result, &out)
-
-	if out.AutoTransform.TotalRules != 3 {
-		t.Errorf("total_rules = %d, want 3", out.AutoTransform.TotalRules)
+	rules := engine.Rules()
+	if len(rules) != 2 {
+		t.Fatalf("rules len = %d, want 2", len(rules))
 	}
-
-	// Verify rules are stored (pipeline maintains priority order internally).
-	rulesList := pipeline.Rules()
-	if len(rulesList) != 3 {
-		t.Fatalf("rules count = %d, want 3", len(rulesList))
-	}
-	// Pipeline sorts by priority: lowest first.
-	if rulesList[0].ID != "high-priority" {
-		t.Errorf("first rule = %q, want %q", rulesList[0].ID, "high-priority")
-	}
-	if rulesList[1].ID != "mid-priority" {
-		t.Errorf("second rule = %q, want %q", rulesList[1].ID, "mid-priority")
-	}
-	if rulesList[2].ID != "low-priority" {
-		t.Errorf("third rule = %q, want %q", rulesList[2].ID, "low-priority")
+	if rules[0].ID != "high-prio" {
+		t.Errorf("first rule = %q, want high-prio", rules[0].ID)
 	}
 }

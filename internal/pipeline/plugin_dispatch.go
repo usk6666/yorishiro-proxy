@@ -73,7 +73,7 @@ func grpcProtoFor(p envelope.Protocol) string {
 }
 
 // isWebSocketUpgradeHTTP reports whether an HTTPMessage represents a
-// WebSocket upgrade exchange. Both the upgrade request (Send) and the 101
+// WebSocket upgrade envelope. Both the upgrade request (Send) and the 101
 // response (Receive) carry Upgrade: websocket — so this same predicate
 // fires (ws, on_upgrade) for both directions, matching the surface table
 // row that does not split request/response (only one event name).

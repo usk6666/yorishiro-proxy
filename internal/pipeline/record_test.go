@@ -49,10 +49,10 @@ func TestRecordStep_SendCreatesStreamAndFlow(t *testing.T) {
 		StreamID:  "stream-1",
 		FlowID:    "flow-1",
 		Sequence:  0,
-		Direction: exchange.Send,
+		Direction: envelope.Send,
 		Method:    "GET",
 		URL:       &url.URL{Scheme: "https", Host: "example.com", Path: "/"},
-		Protocol:  exchange.HTTP1,
+		Protocol:  envelope.HTTP1,
 		Headers: []exchange.KeyValue{
 			{Name: "Host", Value: "example.com"},
 		},
@@ -129,9 +129,9 @@ func TestRecordStep_ReceiveCreatesFlowOnly(t *testing.T) {
 		StreamID:  "stream-1",
 		FlowID:    "flow-2",
 		Sequence:  1,
-		Direction: exchange.Receive,
+		Direction: envelope.Receive,
 		Status:    200,
-		Protocol:  exchange.HTTP1,
+		Protocol:  envelope.HTTP1,
 		Headers: []exchange.KeyValue{
 			{Name: "Content-Type", Value: "text/plain"},
 		},
@@ -177,9 +177,9 @@ func TestRecordStep_SubsequentSendCreatesFlowOnly(t *testing.T) {
 		StreamID:  "stream-1",
 		FlowID:    "flow-3",
 		Sequence:  2,
-		Direction: exchange.Send,
+		Direction: envelope.Send,
 		Method:    "POST",
-		Protocol:  exchange.HTTP1,
+		Protocol:  envelope.HTTP1,
 		Body:      []byte("second request"),
 	}
 
@@ -215,9 +215,9 @@ func TestRecordStep_VariantOnSendHeaderChange(t *testing.T) {
 		StreamID:  "stream-1",
 		FlowID:    "flow-1",
 		Sequence:  0,
-		Direction: exchange.Send,
+		Direction: envelope.Send,
 		Method:    "POST",
-		Protocol:  exchange.HTTP1,
+		Protocol:  envelope.HTTP1,
 		Headers: []exchange.KeyValue{
 			{Name: "X-Original", Value: "yes"},
 		},
@@ -278,9 +278,9 @@ func TestRecordStep_VariantOnReceiveBodyChange(t *testing.T) {
 		StreamID:  "stream-1",
 		FlowID:    "flow-2",
 		Sequence:  1,
-		Direction: exchange.Receive,
+		Direction: envelope.Receive,
 		Status:    200,
-		Protocol:  exchange.HTTP1,
+		Protocol:  envelope.HTTP1,
 		Headers: []exchange.KeyValue{
 			{Name: "Content-Type", Value: "text/plain"},
 		},
@@ -326,9 +326,9 @@ func TestRecordStep_NoVariantWhenUnchanged(t *testing.T) {
 		StreamID:  "stream-1",
 		FlowID:    "flow-1",
 		Sequence:  0,
-		Direction: exchange.Send,
+		Direction: envelope.Send,
 		Method:    "GET",
-		Protocol:  exchange.HTTP1,
+		Protocol:  envelope.HTTP1,
 		Headers: []exchange.KeyValue{
 			{Name: "Host", Value: "example.com"},
 		},
@@ -356,7 +356,7 @@ func TestRecordStep_NilStoreReturnsImmediately(t *testing.T) {
 	ex := &exchange.Exchange{
 		StreamID:  "stream-1",
 		FlowID:    "flow-1",
-		Direction: exchange.Send,
+		Direction: envelope.Send,
 	}
 
 	r := step.Process(context.Background(), ex)
@@ -373,9 +373,9 @@ func TestRecordStep_NilSnapshotRecordsSingleFlow(t *testing.T) {
 		StreamID:  "stream-1",
 		FlowID:    "flow-1",
 		Sequence:  0,
-		Direction: exchange.Send,
+		Direction: envelope.Send,
 		Method:    "GET",
-		Protocol:  exchange.HTTP1,
+		Protocol:  envelope.HTTP1,
 		Headers: []exchange.KeyValue{
 			{Name: "Host", Value: "example.com"},
 		},
@@ -401,8 +401,8 @@ func TestRecordStep_HeaderConversion(t *testing.T) {
 		StreamID:  "stream-1",
 		FlowID:    "flow-1",
 		Sequence:  0,
-		Direction: exchange.Send,
-		Protocol:  exchange.HTTP1,
+		Direction: envelope.Send,
+		Protocol:  envelope.HTTP1,
 		Headers: []exchange.KeyValue{
 			{Name: "Set-Cookie", Value: "a=1"},
 			{Name: "set-cookie", Value: "b=2"},
@@ -437,8 +437,8 @@ func TestRecordStep_MetadataConversion(t *testing.T) {
 		StreamID:  "stream-1",
 		FlowID:    "flow-1",
 		Sequence:  0,
-		Direction: exchange.Send,
-		Protocol:  exchange.HTTP1,
+		Direction: envelope.Send,
+		Protocol:  envelope.HTTP1,
 		Metadata: map[string]any{
 			"ws_opcode": "text",
 			"grpc_code": 0,
@@ -468,9 +468,9 @@ func TestRecordStep_NilBodyPassthrough(t *testing.T) {
 		StreamID:  "stream-1",
 		FlowID:    "flow-1",
 		Sequence:  0,
-		Direction: exchange.Send,
+		Direction: envelope.Send,
 		Method:    "GET",
-		Protocol:  exchange.HTTP1,
+		Protocol:  envelope.HTTP1,
 		Headers: []exchange.KeyValue{
 			{Name: "Host", Value: "example.com"},
 		},
@@ -495,9 +495,9 @@ func TestRecordStep_VariantOnRawBytesChange(t *testing.T) {
 		StreamID:  "stream-1",
 		FlowID:    "flow-1",
 		Sequence:  0,
-		Direction: exchange.Send,
+		Direction: envelope.Send,
 		Method:    "GET",
-		Protocol:  exchange.HTTP1,
+		Protocol:  envelope.HTTP1,
 		RawBytes:  []byte("original raw"),
 	}
 
@@ -529,8 +529,8 @@ func TestRecordStep_SaveStreamErrorSkipsFlowRecord(t *testing.T) {
 		StreamID:  "stream-1",
 		FlowID:    "flow-1",
 		Sequence:  0,
-		Direction: exchange.Send,
-		Protocol:  exchange.HTTP1,
+		Direction: envelope.Send,
+		Protocol:  envelope.HTTP1,
 	}
 
 	r := step.Process(context.Background(), ex)

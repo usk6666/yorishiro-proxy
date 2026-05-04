@@ -108,13 +108,13 @@ func (s *PluginStep) Process(ctx context.Context, ex *exchange.Exchange) Result 
 //	PhaseSend + Receive -> on_before_send_to_client
 func (s *PluginStep) resolveHook(dir exchange.Direction) plugin.Hook {
 	if s.phase == PhaseRecv {
-		if dir == exchange.Send {
+		if dir == envelope.Send {
 			return plugin.HookOnReceiveFromClient
 		}
 		return plugin.HookOnReceiveFromServer
 	}
 	// PhaseSend
-	if dir == exchange.Send {
+	if dir == envelope.Send {
 		return plugin.HookOnBeforeSendToServer
 	}
 	return plugin.HookOnBeforeSendToClient
@@ -131,7 +131,7 @@ func exchangeToMap(ex *exchange.Exchange) map[string]any {
 		"headers": headersToListOfPairs(ex.Headers),
 	}
 
-	if ex.Direction == exchange.Receive {
+	if ex.Direction == envelope.Receive {
 		m["status_code"] = ex.Status
 	}
 
@@ -266,7 +266,7 @@ func toBytes(v any) []byte {
 // action's ResponseData map.
 func buildResponseFromPlugin(responseData map[string]any) *exchange.Exchange {
 	resp := &exchange.Exchange{
-		Direction: exchange.Receive,
+		Direction: envelope.Receive,
 		Status:    200,
 	}
 	if responseData == nil {

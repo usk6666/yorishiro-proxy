@@ -17,11 +17,11 @@ import (
 
 	"github.com/usk6666/yorishiro-proxy/internal/cert"
 	"github.com/usk6666/yorishiro-proxy/internal/config"
+	"github.com/usk6666/yorishiro-proxy/internal/connector"
+	"github.com/usk6666/yorishiro-proxy/internal/connector/transport"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/pluginv2"
-	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
-	"github.com/usk6666/yorishiro-proxy/internal/proxy"
-	"github.com/usk6666/yorishiro-proxy/internal/proxy/rules"
+	"github.com/usk6666/yorishiro-proxy/internal/proxybuild"
 	"github.com/usk6666/yorishiro-proxy/internal/rules/common"
 	grpcrules "github.com/usk6666/yorishiro-proxy/internal/rules/grpc"
 	httprules "github.com/usk6666/yorishiro-proxy/internal/rules/http"
@@ -33,7 +33,11 @@ import (
 // NewServer(ctx, ca, store, manager, opts...) signature. It builds the
 // seven component pointers from the legacy parameters, then forwards to
 // the production NewServer to apply ServerOption mutators.
-func newServer(ctx context.Context, ca *cert.CA, store flow.Store, manager *proxy.Manager, opts ...ServerOption) *Server {
+//
+// USK-697: manager is now *proxybuild.Manager only — the legacy
+// *proxy.Manager type died with internal/proxy/. Tests that need a real
+// manager use newTestProxybuildManager(t) (Q6 helper).
+func newServer(ctx context.Context, ca *cert.CA, store flow.Store, manager *proxybuild.Manager, opts ...ServerOption) *Server {
 	misc := NewMisc(ctx, ca, nil, "", nil, nil)
 	pipe := NewPipeline(nil, nil, nil, nil, nil, nil, nil)
 	conn := NewConnector(manager, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
@@ -53,47 +57,38 @@ type legacyDeps struct {
 	ca                    *cert.CA
 	issuer                *cert.Issuer
 	store                 flow.Store
-	manager               *proxy.Manager
-	passthrough           *proxy.PassthroughList
-	scope                 *proxy.CaptureScope
+	manager               *proxybuild.Manager
+	passthrough           *connector.PassthroughList
 	httpInterceptEngine   *httprules.InterceptEngine
 	wsInterceptEngine     *wsrules.InterceptEngine
 	grpcInterceptEngine   *grpcrules.InterceptEngine
 	holdQueue             *common.HoldQueue
-	transformPipeline     *rules.Pipeline
+	transformHTTPEngine   *httprules.TransformEngine
 	fuzzStore             flow.FuzzStore
 	dbPath                string
 	replayDoer            httpDoer
 	rawReplayDialer       rawDialer
 	tcpForwards           map[string]*config.ForwardConfig
 	tcpHandler            tcpForwardHandler
-	detector              proxy.ProtocolDetector
 	enabledProtocols      []string
 	proxyDefaults         *config.ProxyConfig
 	upstreamProxySetters  []upstreamProxySetter
 	requestTimeoutSetters []requestTimeoutSetter
 	targetScopeSetters    []targetScopeSetter
-	targetScope           *proxy.TargetScope
-	rateLimiter           *proxy.RateLimiter
+	targetScope           *connector.TargetScope
+	rateLimiter           *connector.RateLimiter
 	rateLimiterSetters    []rateLimiterSetter
 	safetyEngine          *safety.Engine
 	safetyEngineSetters   []safetyEngineSetter
-	budgetManager         *proxy.BudgetManager
+	budgetManager         *connector.BudgetManager
 	socks5AuthSetter      socks5AuthSetter
-	tlsTransport          httputil.TLSTransport
+	tlsTransport          transport.TLSTransport
 	tlsFingerprintSetters []tlsFingerprintSetter
-	hostTLSRegistry       *httputil.HostTLSRegistry
+	hostTLSRegistry       *transport.HostTLSRegistry
 }
 
 // mkServerFromLegacyDeps builds a *Server whose component pointers are
-// populated from the given legacyDeps. Tests previously did
-// `&Server{deps: &deps{X: y}}`; rewriting them to use this helper avoids
-// duplicating the components.go field-distribution logic in each test.
-//
-// Unlike NewServer, this helper does NOT register MCP tools or initialise
-// the underlying gomcp.Server — it returns a "bare" *Server whose
-// component fields are populated. Tests that need tool registration
-// should call newServer(ctx, ca, store, manager, opts...) instead.
+// populated from the given legacyDeps.
 func mkServerFromLegacyDeps(d legacyDeps) *Server {
 	s := &Server{
 		misc: &Misc{
@@ -109,14 +104,13 @@ func mkServerFromLegacyDeps(d legacyDeps) *Server {
 			wsInterceptEngine:   d.wsInterceptEngine,
 			grpcInterceptEngine: d.grpcInterceptEngine,
 			holdQueue:           d.holdQueue,
-			transformPipeline:   d.transformPipeline,
+			transformHTTPEngine: d.transformHTTPEngine,
 			safetyEngine:        d.safetyEngine,
 			safetyEngineSetters: d.safetyEngineSetters,
 		},
 		connector: &Connector{
 			manager:               d.manager,
 			passthrough:           d.passthrough,
-			scope:                 d.scope,
 			targetScope:           d.targetScope,
 			targetScopeSetters:    d.targetScopeSetters,
 			hostTLSRegistry:       d.hostTLSRegistry,
@@ -125,7 +119,6 @@ func mkServerFromLegacyDeps(d legacyDeps) *Server {
 			socks5AuthSetter:      d.socks5AuthSetter,
 			tcpForwards:           d.tcpForwards,
 			tcpHandler:            d.tcpHandler,
-			detector:              d.detector,
 			enabledProtocols:      d.enabledProtocols,
 			proxyDefaults:         d.proxyDefaults,
 			upstreamProxySetters:  d.upstreamProxySetters,
@@ -153,16 +146,9 @@ func WithDBPath(path string) ServerOption {
 }
 
 // WithPassthroughList sets the TLS passthrough list. Test-only.
-func WithPassthroughList(pl *proxy.PassthroughList) ServerOption {
+func WithPassthroughList(pl *connector.PassthroughList) ServerOption {
 	return func(s *Server) {
 		s.connector.passthrough = pl
-	}
-}
-
-// WithCaptureScope sets the capture scope. Test-only.
-func WithCaptureScope(scope *proxy.CaptureScope) ServerOption {
-	return func(s *Server) {
-		s.connector.scope = scope
 	}
 }
 
@@ -202,10 +188,10 @@ func WithPluginv2Engine(engine *pluginv2.Engine) ServerOption {
 	}
 }
 
-// WithTransformPipeline sets the auto-transform pipeline. Test-only.
-func WithTransformPipeline(p *rules.Pipeline) ServerOption {
+// WithTransformHTTPEngine sets the HTTP per-protocol auto-transform engine. Test-only.
+func WithTransformHTTPEngine(engine *httprules.TransformEngine) ServerOption {
 	return func(s *Server) {
-		s.pipeline.transformPipeline = p
+		s.pipeline.transformHTTPEngine = engine
 	}
 }
 
@@ -230,18 +216,11 @@ func WithTCPHandler(h tcpForwardHandler) ServerOption {
 	}
 }
 
-// WithDetector sets the protocol detector. Test-only.
-func WithDetector(d proxy.ProtocolDetector) ServerOption {
-	return func(s *Server) {
-		s.connector.detector = d
-	}
-}
-
 // WithTargetScope sets the target scope. Test-only.
 // Note: NewServer initialises a default TargetScope before applying options;
 // this option overrides it. Re-running registered targetScopeSetters is the
 // caller's responsibility (tests rarely need this).
-func WithTargetScope(ts *proxy.TargetScope) ServerOption {
+func WithTargetScope(ts *connector.TargetScope) ServerOption {
 	return func(s *Server) {
 		s.connector.targetScope = ts
 	}
@@ -276,7 +255,7 @@ func WithTargetScopeSetter(setter targetScopeSetter) ServerOption {
 }
 
 // WithRateLimiter sets the rate limiter. Test-only.
-func WithRateLimiter(rl *proxy.RateLimiter) ServerOption {
+func WithRateLimiter(rl *connector.RateLimiter) ServerOption {
 	return func(s *Server) {
 		s.misc.rateLimiter = rl
 	}
@@ -304,7 +283,7 @@ func WithSafetyEngineSetter(setter safetyEngineSetter) ServerOption {
 }
 
 // WithBudgetManager sets the budget manager. Test-only.
-func WithBudgetManager(bm *proxy.BudgetManager) ServerOption {
+func WithBudgetManager(bm *connector.BudgetManager) ServerOption {
 	return func(s *Server) {
 		s.misc.budgetManager = bm
 	}
@@ -325,14 +304,14 @@ func WithSOCKS5Handler(setter socks5AuthSetter) ServerOption {
 }
 
 // WithTLSTransport sets the TLS transport. Test-only.
-func WithTLSTransport(t httputil.TLSTransport) ServerOption {
+func WithTLSTransport(t transport.TLSTransport) ServerOption {
 	return func(s *Server) {
 		s.connector.tlsTransport = t
 	}
 }
 
 // WithHostTLSRegistry sets the host TLS registry. Test-only.
-func WithHostTLSRegistry(r *httputil.HostTLSRegistry) ServerOption {
+func WithHostTLSRegistry(r *transport.HostTLSRegistry) ServerOption {
 	return func(s *Server) {
 		s.connector.hostTLSRegistry = r
 	}

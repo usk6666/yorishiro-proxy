@@ -341,8 +341,8 @@ func (s *Server) resetSettingsToDefaults() {
 	}
 
 	// Reset auto-transform rules to empty (no transforms).
-	if s.pipeline.transformPipeline != nil {
-		s.pipeline.transformPipeline.Clear()
+	if s.pipeline.transformHTTPEngine != nil {
+		s.pipeline.transformHTTPEngine.SetRules(nil)
 	}
 
 	// Reset connection limits and timeouts to defaults.

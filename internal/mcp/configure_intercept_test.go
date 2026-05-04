@@ -27,12 +27,12 @@ func configureSessionWithEngines(
 ) *gomcp.ClientSession {
 	t.Helper()
 	ctx := context.Background()
-	scope := proxy.NewCaptureScope()
+	scope := connector.NewTargetScope()
 	pl := proxy.NewPassthroughList()
 	hold := common.NewHoldQueue()
 
 	opts := []ServerOption{
-		WithCaptureScope(scope),
+		WithTargetScope(scope),
 		WithPassthroughList(pl),
 		WithHoldQueue(hold),
 	}

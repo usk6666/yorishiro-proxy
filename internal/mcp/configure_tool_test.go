@@ -6,17 +6,17 @@ import (
 	"testing"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/usk6666/yorishiro-proxy/internal/proxy"
+	"github.com/usk6666/yorishiro-proxy/internal/connector"
 )
 
 // setupConfigureTestSession creates a connected MCP client session for configure tool tests.
-func setupConfigureTestSession(t *testing.T, scope *proxy.CaptureScope, pl *proxy.PassthroughList) *gomcp.ClientSession {
+func setupConfigureTestSession(t *testing.T, scope *connector.TargetScope, pl *connector.PassthroughList) *gomcp.ClientSession {
 	t.Helper()
 	ctx := context.Background()
 
 	var opts []ServerOption
 	if scope != nil {
-		opts = append(opts, WithCaptureScope(scope))
+		opts = append(opts, WithTargetScope(scope))
 	}
 	if pl != nil {
 		opts = append(opts, WithPassthroughList(pl))
@@ -75,12 +75,12 @@ func configureUnmarshalResult(t *testing.T, result *gomcp.CallToolResult, dest a
 }
 
 func TestConfigure_MergeAddIncludes(t *testing.T) {
-	scope := proxy.NewCaptureScope()
+	scope := connector.NewTargetScope()
 	scope.SetRules(
-		[]proxy.ScopeRule{{Hostname: "existing.com"}},
+		[]connector.ScopeRule{{Hostname: "existing.com"}},
 		nil,
 	)
-	pl := proxy.NewPassthroughList()
+	pl := connector.NewPassthroughList()
 	cs := setupConfigureTestSession(t, scope, pl)
 
 	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
@@ -134,16 +134,16 @@ func TestConfigure_MergeAddIncludes(t *testing.T) {
 }
 
 func TestConfigure_MergeRemoveIncludes(t *testing.T) {
-	scope := proxy.NewCaptureScope()
+	scope := connector.NewTargetScope()
 	scope.SetRules(
-		[]proxy.ScopeRule{
+		[]connector.ScopeRule{
 			{Hostname: "keep.com"},
 			{Hostname: "remove-me.com"},
 			{Hostname: "also-keep.com"},
 		},
 		nil,
 	)
-	pl := proxy.NewPassthroughList()
+	pl := connector.NewPassthroughList()
 	cs := setupConfigureTestSession(t, scope, pl)
 
 	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
@@ -180,12 +180,12 @@ func TestConfigure_MergeRemoveIncludes(t *testing.T) {
 }
 
 func TestConfigure_MergeAddRemoveExcludes(t *testing.T) {
-	scope := proxy.NewCaptureScope()
+	scope := connector.NewTargetScope()
 	scope.SetRules(
 		nil,
-		[]proxy.ScopeRule{{Hostname: "old-cdn.com"}},
+		[]connector.ScopeRule{{Hostname: "old-cdn.com"}},
 	)
-	pl := proxy.NewPassthroughList()
+	pl := connector.NewPassthroughList()
 	cs := setupConfigureTestSession(t, scope, pl)
 
 	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
@@ -219,8 +219,8 @@ func TestConfigure_MergeAddRemoveExcludes(t *testing.T) {
 }
 
 func TestConfigure_MergeTLSPassthroughAddRemove(t *testing.T) {
-	scope := proxy.NewCaptureScope()
-	pl := proxy.NewPassthroughList()
+	scope := connector.NewTargetScope()
+	pl := connector.NewPassthroughList()
 	pl.Add("existing.com")
 	pl.Add("to-remove.com")
 	cs := setupConfigureTestSession(t, scope, pl)
@@ -265,8 +265,8 @@ func TestConfigure_MergeTLSPassthroughAddRemove(t *testing.T) {
 }
 
 func TestConfigure_MergeBothSections(t *testing.T) {
-	scope := proxy.NewCaptureScope()
-	pl := proxy.NewPassthroughList()
+	scope := connector.NewTargetScope()
+	pl := connector.NewPassthroughList()
 	cs := setupConfigureTestSession(t, scope, pl)
 
 	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
@@ -306,12 +306,12 @@ func TestConfigure_MergeBothSections(t *testing.T) {
 }
 
 func TestConfigure_ReplaceCaptureScope(t *testing.T) {
-	scope := proxy.NewCaptureScope()
+	scope := connector.NewTargetScope()
 	scope.SetRules(
-		[]proxy.ScopeRule{{Hostname: "old.com"}, {Hostname: "old2.com"}},
-		[]proxy.ScopeRule{{Hostname: "old-exclude.com"}},
+		[]connector.ScopeRule{{Hostname: "old.com"}, {Hostname: "old2.com"}},
+		[]connector.ScopeRule{{Hostname: "old-exclude.com"}},
 	)
-	pl := proxy.NewPassthroughList()
+	pl := connector.NewPassthroughList()
 	cs := setupConfigureTestSession(t, scope, pl)
 
 	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
@@ -351,8 +351,8 @@ func TestConfigure_ReplaceCaptureScope(t *testing.T) {
 }
 
 func TestConfigure_ReplaceTLSPassthrough(t *testing.T) {
-	scope := proxy.NewCaptureScope()
-	pl := proxy.NewPassthroughList()
+	scope := connector.NewTargetScope()
+	pl := connector.NewPassthroughList()
 	pl.Add("old-1.com")
 	pl.Add("old-2.com")
 	cs := setupConfigureTestSession(t, scope, pl)
@@ -393,8 +393,8 @@ func TestConfigure_ReplaceTLSPassthrough(t *testing.T) {
 }
 
 func TestConfigure_InvalidOperation(t *testing.T) {
-	scope := proxy.NewCaptureScope()
-	pl := proxy.NewPassthroughList()
+	scope := connector.NewTargetScope()
+	pl := connector.NewPassthroughList()
 	cs := setupConfigureTestSession(t, scope, pl)
 
 	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
@@ -412,7 +412,7 @@ func TestConfigure_InvalidOperation(t *testing.T) {
 }
 
 func TestConfigure_NilScope(t *testing.T) {
-	pl := proxy.NewPassthroughList()
+	pl := connector.NewPassthroughList()
 	cs := setupConfigureTestSession(t, nil, pl)
 
 	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
@@ -433,7 +433,7 @@ func TestConfigure_NilScope(t *testing.T) {
 }
 
 func TestConfigure_NilPassthrough(t *testing.T) {
-	scope := proxy.NewCaptureScope()
+	scope := connector.NewTargetScope()
 	cs := setupConfigureTestSession(t, scope, nil)
 
 	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
@@ -454,8 +454,8 @@ func TestConfigure_NilPassthrough(t *testing.T) {
 }
 
 func TestConfigure_DefaultOperationIsMerge(t *testing.T) {
-	scope := proxy.NewCaptureScope()
-	pl := proxy.NewPassthroughList()
+	scope := connector.NewTargetScope()
+	pl := connector.NewPassthroughList()
 	cs := setupConfigureTestSession(t, scope, pl)
 
 	// Omit operation field; should default to merge.
@@ -486,8 +486,8 @@ func TestConfigure_DefaultOperationIsMerge(t *testing.T) {
 }
 
 func TestConfigure_EmptyInput(t *testing.T) {
-	scope := proxy.NewCaptureScope()
-	pl := proxy.NewPassthroughList()
+	scope := connector.NewTargetScope()
+	pl := connector.NewPassthroughList()
 	cs := setupConfigureTestSession(t, scope, pl)
 
 	// No capture_scope or tls_passthrough specified; should succeed with no changes.
@@ -519,12 +519,12 @@ func TestConfigure_EmptyInput(t *testing.T) {
 }
 
 func TestConfigure_MergeDuplicateAddIgnored(t *testing.T) {
-	scope := proxy.NewCaptureScope()
+	scope := connector.NewTargetScope()
 	scope.SetRules(
-		[]proxy.ScopeRule{{Hostname: "existing.com"}},
+		[]connector.ScopeRule{{Hostname: "existing.com"}},
 		nil,
 	)
-	pl := proxy.NewPassthroughList()
+	pl := connector.NewPassthroughList()
 	cs := setupConfigureTestSession(t, scope, pl)
 
 	// Adding a rule that already exists should not create a duplicate.
@@ -553,12 +553,12 @@ func TestConfigure_MergeDuplicateAddIgnored(t *testing.T) {
 }
 
 func TestConfigure_MergeRemoveNonexistent(t *testing.T) {
-	scope := proxy.NewCaptureScope()
+	scope := connector.NewTargetScope()
 	scope.SetRules(
-		[]proxy.ScopeRule{{Hostname: "keep.com"}},
+		[]connector.ScopeRule{{Hostname: "keep.com"}},
 		nil,
 	)
-	pl := proxy.NewPassthroughList()
+	pl := connector.NewPassthroughList()
 	cs := setupConfigureTestSession(t, scope, pl)
 
 	// Removing a rule that doesn't exist should succeed without error.
@@ -587,7 +587,7 @@ func TestConfigure_MergeRemoveNonexistent(t *testing.T) {
 }
 
 func TestConfigure_ReplaceNilScope(t *testing.T) {
-	pl := proxy.NewPassthroughList()
+	pl := connector.NewPassthroughList()
 	cs := setupConfigureTestSession(t, nil, pl)
 
 	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
@@ -608,7 +608,7 @@ func TestConfigure_ReplaceNilScope(t *testing.T) {
 }
 
 func TestConfigure_ReplaceNilPassthrough(t *testing.T) {
-	scope := proxy.NewCaptureScope()
+	scope := connector.NewTargetScope()
 	cs := setupConfigureTestSession(t, scope, nil)
 
 	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
@@ -629,12 +629,12 @@ func TestConfigure_ReplaceNilPassthrough(t *testing.T) {
 }
 
 func TestConfigure_MergeScopeRuleWithAllFields(t *testing.T) {
-	scope := proxy.NewCaptureScope()
+	scope := connector.NewTargetScope()
 	scope.SetRules(
-		[]proxy.ScopeRule{{Hostname: "api.example.com", URLPrefix: "/v1/", Method: "POST"}},
+		[]connector.ScopeRule{{Hostname: "api.example.com", URLPrefix: "/v1/", Method: "POST"}},
 		nil,
 	)
-	pl := proxy.NewPassthroughList()
+	pl := connector.NewPassthroughList()
 	cs := setupConfigureTestSession(t, scope, pl)
 
 	// Remove rule that matches all fields exactly.
@@ -676,8 +676,8 @@ func TestConfigure_MergeScopeRuleWithAllFields(t *testing.T) {
 }
 
 func TestConfigure_ReplaceTLSPassthroughEmptyList(t *testing.T) {
-	scope := proxy.NewCaptureScope()
-	pl := proxy.NewPassthroughList()
+	scope := connector.NewTargetScope()
+	pl := connector.NewPassthroughList()
 	pl.Add("a.com")
 	pl.Add("b.com")
 	cs := setupConfigureTestSession(t, scope, pl)
@@ -711,8 +711,8 @@ func TestConfigure_ReplaceTLSPassthroughEmptyList(t *testing.T) {
 }
 
 func TestConfigure_MergeRejectsEmptyAddIncludeRule(t *testing.T) {
-	scope := proxy.NewCaptureScope()
-	pl := proxy.NewPassthroughList()
+	scope := connector.NewTargetScope()
+	pl := connector.NewPassthroughList()
 	cs := setupConfigureTestSession(t, scope, pl)
 
 	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
@@ -742,8 +742,8 @@ func TestConfigure_MergeRejectsEmptyAddIncludeRule(t *testing.T) {
 }
 
 func TestConfigure_MergeRejectsEmptyAddExcludeRule(t *testing.T) {
-	scope := proxy.NewCaptureScope()
-	pl := proxy.NewPassthroughList()
+	scope := connector.NewTargetScope()
+	pl := connector.NewPassthroughList()
 	cs := setupConfigureTestSession(t, scope, pl)
 
 	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
@@ -766,8 +766,8 @@ func TestConfigure_MergeRejectsEmptyAddExcludeRule(t *testing.T) {
 }
 
 func TestConfigure_ReplaceRejectsEmptyIncludeRule(t *testing.T) {
-	scope := proxy.NewCaptureScope()
-	pl := proxy.NewPassthroughList()
+	scope := connector.NewTargetScope()
+	pl := connector.NewPassthroughList()
 	cs := setupConfigureTestSession(t, scope, pl)
 
 	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
@@ -791,8 +791,8 @@ func TestConfigure_ReplaceRejectsEmptyIncludeRule(t *testing.T) {
 }
 
 func TestConfigure_ReplaceRejectsEmptyExcludeRule(t *testing.T) {
-	scope := proxy.NewCaptureScope()
-	pl := proxy.NewPassthroughList()
+	scope := connector.NewTargetScope()
+	pl := connector.NewPassthroughList()
 	cs := setupConfigureTestSession(t, scope, pl)
 
 	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{

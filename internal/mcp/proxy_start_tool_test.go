@@ -18,13 +18,13 @@ import (
 
 // setupProxyStartTestSession creates an MCP client flow with Manager, CaptureScope,
 // and PassthroughList for testing the proxy_start tool.
-func setupProxyStartTestSession(t *testing.T, manager *proxy.Manager, scope *proxy.CaptureScope, pl *proxy.PassthroughList) *gomcp.ClientSession {
+func setupProxyStartTestSession(t *testing.T, manager *proxy.Manager, scope *connector.TargetScope, pl *proxy.PassthroughList) *gomcp.ClientSession {
 	t.Helper()
 	ctx := context.Background()
 
 	var opts []ServerOption
 	if scope != nil {
-		opts = append(opts, WithCaptureScope(scope))
+		opts = append(opts, WithTargetScope(scope))
 	}
 	if pl != nil {
 		opts = append(opts, WithPassthroughList(pl))
@@ -225,13 +225,13 @@ func TestProxyStart_InvalidAddr(t *testing.T) {
 	}
 }
 
-func TestProxyStart_WithCaptureScope(t *testing.T) {
+func TestProxyStart_WithTargetScope(t *testing.T) {
 	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 	t.Cleanup(func() { manager.Stop(context.Background()) })
 
-	scope := proxy.NewCaptureScope()
+	scope := connector.NewTargetScope()
 	cs := setupProxyStartTestSession(t, manager, scope, nil)
 
 	result, err := callProxyStart(t, cs, map[string]any{
@@ -279,13 +279,13 @@ func TestProxyStart_WithCaptureScope(t *testing.T) {
 	}
 }
 
-func TestProxyStart_WithCaptureScope_IncludesOnly(t *testing.T) {
+func TestProxyStart_WithTargetScope_IncludesOnly(t *testing.T) {
 	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 	t.Cleanup(func() { manager.Stop(context.Background()) })
 
-	scope := proxy.NewCaptureScope()
+	scope := connector.NewTargetScope()
 	cs := setupProxyStartTestSession(t, manager, scope, nil)
 
 	result, err := callProxyStart(t, cs, map[string]any{
@@ -312,13 +312,13 @@ func TestProxyStart_WithCaptureScope_IncludesOnly(t *testing.T) {
 	}
 }
 
-func TestProxyStart_WithCaptureScope_ExcludesOnly(t *testing.T) {
+func TestProxyStart_WithTargetScope_ExcludesOnly(t *testing.T) {
 	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 	t.Cleanup(func() { manager.Stop(context.Background()) })
 
-	scope := proxy.NewCaptureScope()
+	scope := connector.NewTargetScope()
 	cs := setupProxyStartTestSession(t, manager, scope, nil)
 
 	result, err := callProxyStart(t, cs, map[string]any{
@@ -345,12 +345,12 @@ func TestProxyStart_WithCaptureScope_ExcludesOnly(t *testing.T) {
 	}
 }
 
-func TestProxyStart_WithCaptureScope_EmptyRuleError(t *testing.T) {
+func TestProxyStart_WithTargetScope_EmptyRuleError(t *testing.T) {
 	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 
-	scope := proxy.NewCaptureScope()
+	scope := connector.NewTargetScope()
 	cs := setupProxyStartTestSession(t, manager, scope, nil)
 
 	// Include rule with no fields set should error.
@@ -370,12 +370,12 @@ func TestProxyStart_WithCaptureScope_EmptyRuleError(t *testing.T) {
 	}
 }
 
-func TestProxyStart_WithCaptureScope_EmptyExcludeRuleError(t *testing.T) {
+func TestProxyStart_WithTargetScope_EmptyExcludeRuleError(t *testing.T) {
 	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 
-	scope := proxy.NewCaptureScope()
+	scope := connector.NewTargetScope()
 	cs := setupProxyStartTestSession(t, manager, scope, nil)
 
 	// Exclude rule with no fields set should error.
@@ -395,7 +395,7 @@ func TestProxyStart_WithCaptureScope_EmptyExcludeRuleError(t *testing.T) {
 	}
 }
 
-func TestProxyStart_WithCaptureScope_NilScope(t *testing.T) {
+func TestProxyStart_WithTargetScope_NilScope(t *testing.T) {
 	logger := testutil.DiscardLogger()
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
@@ -502,7 +502,7 @@ func TestProxyStart_WithAllConfig(t *testing.T) {
 	manager := proxy.NewManager(detector, logger)
 	t.Cleanup(func() { manager.Stop(context.Background()) })
 
-	scope := proxy.NewCaptureScope()
+	scope := connector.NewTargetScope()
 	pl := proxy.NewPassthroughList()
 	cs := setupProxyStartTestSession(t, manager, scope, pl)
 
@@ -554,7 +554,7 @@ func TestProxyStart_WithEmptyCaptureScope(t *testing.T) {
 	manager := proxy.NewManager(detector, logger)
 	t.Cleanup(func() { manager.Stop(context.Background()) })
 
-	scope := proxy.NewCaptureScope()
+	scope := connector.NewTargetScope()
 	// Pre-set some rules to verify empty scope object does not clear them.
 	scope.SetRules(
 		[]proxy.ScopeRule{{Hostname: "existing.com"}},
@@ -592,7 +592,7 @@ func TestProxyStart_WithoutCaptureScope(t *testing.T) {
 	manager := proxy.NewManager(detector, logger)
 	t.Cleanup(func() { manager.Stop(context.Background()) })
 
-	scope := proxy.NewCaptureScope()
+	scope := connector.NewTargetScope()
 	// Pre-set some rules to verify that proxy_start resets them when
 	// capture_scope is omitted (USK-407: proxy_start resets all settings).
 	scope.SetRules(
@@ -668,7 +668,7 @@ func TestProxyStart_ScopeAppliedBeforeStart(t *testing.T) {
 	detector := &stubDetector{}
 	manager := proxy.NewManager(detector, logger)
 
-	scope := proxy.NewCaptureScope()
+	scope := connector.NewTargetScope()
 	cs := setupProxyStartTestSession(t, manager, scope, nil)
 
 	// Invalid scope rule should prevent proxy from starting.
@@ -853,13 +853,13 @@ func TestProxyStart_WithTCPForwards_InvalidTarget(t *testing.T) {
 
 // setupProxyStartTestSessionWithTCPHandler creates an MCP client flow with Manager,
 // CaptureScope, PassthroughList, and TCP handler for testing the proxy_start tool.
-func setupProxyStartTestSessionWithTCPHandler(t *testing.T, manager *proxy.Manager, scope *proxy.CaptureScope, pl *proxy.PassthroughList, tcpHandler tcpForwardHandler) *gomcp.ClientSession {
+func setupProxyStartTestSessionWithTCPHandler(t *testing.T, manager *proxy.Manager, scope *connector.TargetScope, pl *proxy.PassthroughList, tcpHandler tcpForwardHandler) *gomcp.ClientSession {
 	t.Helper()
 	ctx := context.Background()
 
 	var opts []ServerOption
 	if scope != nil {
-		opts = append(opts, WithCaptureScope(scope))
+		opts = append(opts, WithTargetScope(scope))
 	}
 	if pl != nil {
 		opts = append(opts, WithPassthroughList(pl))
@@ -920,7 +920,7 @@ func TestValidateLoopbackAddr(t *testing.T) {
 func TestApplyCaptureScope(t *testing.T) {
 	tests := []struct {
 		name        string
-		scope       *proxy.CaptureScope
+		scope       *connector.TargetScope
 		input       *captureScopeInput
 		wantErr     bool
 		wantInclude int
@@ -936,7 +936,7 @@ func TestApplyCaptureScope(t *testing.T) {
 		},
 		{
 			name:  "valid includes and excludes",
-			scope: proxy.NewCaptureScope(),
+			scope: connector.NewTargetScope(),
 			input: &captureScopeInput{
 				Includes: []scopeRuleInput{{Hostname: "*.target.com"}},
 				Excludes: []scopeRuleInput{{Hostname: "cdn.target.com"}},
@@ -946,7 +946,7 @@ func TestApplyCaptureScope(t *testing.T) {
 		},
 		{
 			name:  "empty include rule returns error",
-			scope: proxy.NewCaptureScope(),
+			scope: connector.NewTargetScope(),
 			input: &captureScopeInput{
 				Includes: []scopeRuleInput{{}},
 			},
@@ -954,7 +954,7 @@ func TestApplyCaptureScope(t *testing.T) {
 		},
 		{
 			name:  "empty exclude rule returns error",
-			scope: proxy.NewCaptureScope(),
+			scope: connector.NewTargetScope(),
 			input: &captureScopeInput{
 				Excludes: []scopeRuleInput{{}},
 			},
@@ -962,7 +962,7 @@ func TestApplyCaptureScope(t *testing.T) {
 		},
 		{
 			name:        "empty input sets empty rules",
-			scope:       proxy.NewCaptureScope(),
+			scope:       connector.NewTargetScope(),
 			input:       &captureScopeInput{},
 			wantInclude: 0,
 			wantExclude: 0,
@@ -1272,13 +1272,13 @@ func TestProxyStart_InvalidMaxConnections_DoesNotStartProxy(t *testing.T) {
 
 // setupProxyStartTestSessionWithOptions creates an MCP client session with
 // arbitrary ServerOption values for testing.
-func setupProxyStartTestSessionWithOptions(t *testing.T, manager *proxy.Manager, scope *proxy.CaptureScope, pl *proxy.PassthroughList, extraOpts ...ServerOption) *gomcp.ClientSession {
+func setupProxyStartTestSessionWithOptions(t *testing.T, manager *proxy.Manager, scope *connector.TargetScope, pl *proxy.PassthroughList, extraOpts ...ServerOption) *gomcp.ClientSession {
 	t.Helper()
 	ctx := context.Background()
 
 	var opts []ServerOption
 	if scope != nil {
-		opts = append(opts, WithCaptureScope(scope))
+		opts = append(opts, WithTargetScope(scope))
 	}
 	if pl != nil {
 		opts = append(opts, WithPassthroughList(pl))
@@ -1599,7 +1599,7 @@ func TestProxyStart_WithConfigDefaults_Integration(t *testing.T) {
 	manager := proxy.NewManager(detector, logger)
 	t.Cleanup(func() { manager.Stop(context.Background()) })
 
-	scope := proxy.NewCaptureScope()
+	scope := connector.NewTargetScope()
 	pl := proxy.NewPassthroughList()
 
 	proxyCfg := &config.ProxyConfig{
@@ -1609,7 +1609,7 @@ func TestProxyStart_WithConfigDefaults_Integration(t *testing.T) {
 
 	ctx := context.Background()
 	s := newServer(ctx, nil, nil, manager,
-		WithCaptureScope(scope),
+		WithTargetScope(scope),
 		WithPassthroughList(pl),
 		WithProxyDefaults(proxyCfg),
 	)
@@ -1661,7 +1661,7 @@ func TestProxyStart_CallerOverridesConfigDefaults_Integration(t *testing.T) {
 	manager := proxy.NewManager(detector, logger)
 	t.Cleanup(func() { manager.Stop(context.Background()) })
 
-	scope := proxy.NewCaptureScope()
+	scope := connector.NewTargetScope()
 	pl := proxy.NewPassthroughList()
 
 	proxyCfg := &config.ProxyConfig{
@@ -1671,7 +1671,7 @@ func TestProxyStart_CallerOverridesConfigDefaults_Integration(t *testing.T) {
 
 	ctx := context.Background()
 	s := newServer(ctx, nil, nil, manager,
-		WithCaptureScope(scope),
+		WithTargetScope(scope),
 		WithPassthroughList(pl),
 		WithProxyDefaults(proxyCfg),
 	)
@@ -1726,7 +1726,7 @@ func TestProxyStart_ResetsSettingsOnRestart(t *testing.T) {
 	manager := proxy.NewManager(detector, logger)
 	t.Cleanup(func() { manager.Stop(context.Background()) })
 
-	scope := proxy.NewCaptureScope()
+	scope := connector.NewTargetScope()
 	pl := proxy.NewPassthroughList()
 
 	cs := setupProxyStartTestSessionWithOptions(t, manager, scope, pl)
@@ -1795,7 +1795,7 @@ func TestProxyStart_ResetsInterceptAndTransformOnRestart(t *testing.T) {
 	manager := proxy.NewManager(detector, logger)
 	t.Cleanup(func() { manager.Stop(context.Background()) })
 
-	scope := proxy.NewCaptureScope()
+	scope := connector.NewTargetScope()
 	pl := proxy.NewPassthroughList()
 	httpInterceptEng := httprules.NewInterceptEngine()
 	transformPipe := rules.NewPipeline()
@@ -2016,8 +2016,8 @@ func TestProxyStart_ResetsProtocolsOnRestart(t *testing.T) {
 
 	// Use a Server directly to inspect deps.
 	ctx := context.Background()
-	scope := proxy.NewCaptureScope()
-	s := newServer(ctx, nil, nil, manager, WithCaptureScope(scope))
+	scope := connector.NewTargetScope()
+	s := newServer(ctx, nil, nil, manager, WithTargetScope(scope))
 	ct, st := gomcp.NewInMemoryTransports()
 	ss, err := s.server.Connect(ctx, st, nil)
 	if err != nil {

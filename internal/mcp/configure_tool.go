@@ -594,8 +594,8 @@ func (s *Server) configureMergeAutoTransform(input configureInput, result *confi
 	if input.AutoTransform == nil {
 		return nil
 	}
-	if s.pipeline.transformPipeline == nil {
-		return fmt.Errorf("transform pipeline is not initialized: proxy may not be running")
+	if s.pipeline.transformHTTPEngine == nil {
+		return fmt.Errorf("transform engine is not initialized: proxy may not be running")
 	}
 	if err := s.mergeAutoTransform(input.AutoTransform); err != nil {
 		return fmt.Errorf("auto_transform merge: %w", err)
@@ -609,8 +609,8 @@ func (s *Server) configureReplaceAutoTransform(input configureInput, result *con
 	if input.AutoTransform == nil {
 		return nil
 	}
-	if s.pipeline.transformPipeline == nil {
-		return fmt.Errorf("transform pipeline is not initialized: proxy may not be running")
+	if s.pipeline.transformHTTPEngine == nil {
+		return fmt.Errorf("transform engine is not initialized: proxy may not be running")
 	}
 	if err := s.replaceAutoTransform(input.AutoTransform); err != nil {
 		return fmt.Errorf("auto_transform replace: %w", err)
@@ -1187,34 +1187,51 @@ func compileWSOpcodeFilter(names []string) ([]envelope.WSOpcode, error) {
 	return out, nil
 }
 
-// mergeAutoTransform applies delta add/remove/enable/disable operations to auto-transform rules.
+// mergeAutoTransform applies delta add/remove/enable/disable operations to
+// auto-transform rules. Currently dispatches to the HTTP per-protocol engine
+// (the auto_transform schema is HTTP-only); a follow-up Issue will introduce
+// per-protocol dispatch mirroring intercept_rules.
 func (s *Server) mergeAutoTransform(cfg *configureAutoTransform) error {
+	engine := s.pipeline.transformHTTPEngine
 	// Process additions first.
 	for _, input := range cfg.Add {
-		r := toTransformRule(input)
-		if err := s.pipeline.transformPipeline.AddRule(r); err != nil {
+		if err := validateTransformRuleInput(input); err != nil {
 			return err
 		}
+		// Reject duplicate IDs across the engine to match the legacy
+		// AddRule contract that callers depended on.
+		if input.ID != "" {
+			for _, existing := range engine.Rules() {
+				if existing.ID == input.ID {
+					return fmt.Errorf("rule %q already exists", input.ID)
+				}
+			}
+		}
+		r, err := toTransformRule(input)
+		if err != nil {
+			return err
+		}
+		engine.AddRule(r)
 	}
 
 	// Process removals.
 	for _, id := range cfg.Remove {
-		if err := s.pipeline.transformPipeline.RemoveRule(id); err != nil {
-			return err
+		if !engine.RemoveRule(id) {
+			return fmt.Errorf("rule %q not found", id)
 		}
 	}
 
 	// Process enable.
 	for _, id := range cfg.Enable {
-		if err := s.pipeline.transformPipeline.EnableRule(id, true); err != nil {
-			return err
+		if !engine.EnableRule(id, true) {
+			return fmt.Errorf("rule %q not found", id)
 		}
 	}
 
 	// Process disable.
 	for _, id := range cfg.Disable {
-		if err := s.pipeline.transformPipeline.EnableRule(id, false); err != nil {
-			return err
+		if !engine.EnableRule(id, false) {
+			return fmt.Errorf("rule %q not found", id)
 		}
 	}
 
@@ -1312,9 +1329,13 @@ func (s *Server) configureClientCertSetting(input configureInput, result *config
 	return nil
 }
 
-// autoTransformResult returns the current auto-transform rules state.
+// autoTransformResult returns the current auto-transform rules state across
+// the HTTP per-protocol engine.
 func (s *Server) autoTransformResult() *configureAutoTransformResult {
-	rulesList := s.pipeline.transformPipeline.Rules()
+	if s.pipeline.transformHTTPEngine == nil {
+		return &configureAutoTransformResult{}
+	}
+	rulesList := s.pipeline.transformHTTPEngine.Rules()
 	enabled := 0
 	for _, r := range rulesList {
 		if r.Enabled {

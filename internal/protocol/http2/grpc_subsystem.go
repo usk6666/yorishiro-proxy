@@ -6,6 +6,7 @@ import (
 	"log/slog"
 
 	"github.com/usk6666/yorishiro-proxy/internal/encoding/protobuf"
+	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/protocol/http2/hpack"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/rules"
 	"github.com/usk6666/yorishiro-proxy/internal/safety"
@@ -63,7 +64,15 @@ func applyGRPCSafetyFilter(engine *safety.Engine, jsonBody string, rawURL string
 	if engine == nil {
 		return nil
 	}
-	return engine.CheckInput([]byte(jsonBody), rawURL, hpackToKeyValues(headers))
+	// Bridge exchange.KeyValue → envelope.KeyValue. The struct shapes are
+	// identical (Name/Value); the conversion is a no-op copy. Once the
+	// legacy http2 handler dies in USK-697 commit 3 this bridge dies with it.
+	src := hpackToKeyValues(headers)
+	dst := make([]envelope.KeyValue, len(src))
+	for i, kv := range src {
+		dst[i] = envelope.KeyValue{Name: kv.Name, Value: kv.Value}
+	}
+	return engine.CheckInput([]byte(jsonBody), rawURL, dst)
 }
 
 // scMethod returns the request method from h2req.

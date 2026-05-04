@@ -18,11 +18,11 @@ func setupConfigureTestSessionWithManager(t *testing.T, manager *proxy.Manager, 
 	t.Helper()
 	ctx := context.Background()
 
-	scope := proxy.NewCaptureScope()
+	scope := connector.NewTargetScope()
 	pl := proxy.NewPassthroughList()
 
 	opts := []ServerOption{
-		WithCaptureScope(scope),
+		WithTargetScope(scope),
 		WithPassthroughList(pl),
 	}
 	opts = append(opts, extraOpts...)

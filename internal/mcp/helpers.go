@@ -12,7 +12,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/usk6666/yorishiro-proxy/internal/exchange"
+	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 	"github.com/usk6666/yorishiro-proxy/internal/safety"
 )
@@ -210,7 +210,7 @@ func checkTargetScopeAddrHelper(ts *proxy.TargetScope, scheme, addr string) erro
 // checkSafetyInput validates request data against the safety filter engine.
 // Returns nil if no safety engine is configured or if the input passes.
 // Returns an InputViolation if the input is blocked.
-func (s *Server) checkSafetyInput(body []byte, rawURL string, headers []exchange.KeyValue) *safety.InputViolation {
+func (s *Server) checkSafetyInput(body []byte, rawURL string, headers []envelope.KeyValue) *safety.InputViolation {
 	if s.pipeline.safetyEngine == nil {
 		return nil
 	}

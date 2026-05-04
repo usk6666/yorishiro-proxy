@@ -56,7 +56,7 @@ func (s *RecordStep) Process(ctx context.Context, ex *exchange.Exchange) Result 
 	}
 
 	// Create Stream on first Send (Sequence==0).
-	if ex.Direction == exchange.Send && ex.Sequence == 0 {
+	if ex.Direction == envelope.Send && ex.Sequence == 0 {
 		s.createStream(ctx, ex)
 	}
 
@@ -166,7 +166,7 @@ func exchangeToFlow(ex *exchange.Exchange) *flow.Flow {
 		fl.Headers = hdrs
 	}
 
-	// Convert exchange.Metadata (map[string]any) to flow.Flow.Metadata (map[string]string).
+	// Convert envelope.Metadata (map[string]any) to flow.Flow.Metadata (map[string]string).
 	if len(ex.Metadata) > 0 {
 		meta := make(map[string]string, len(ex.Metadata))
 		for k, v := range ex.Metadata {
@@ -184,9 +184,9 @@ func exchangeToFlow(ex *exchange.Exchange) *flow.Flow {
 // suitable for flow.Flow.Direction ("send" or "receive").
 func directionString(d exchange.Direction) string {
 	switch d {
-	case exchange.Send:
+	case envelope.Send:
 		return "send"
-	case exchange.Receive:
+	case envelope.Receive:
 		return "receive"
 	default:
 		return "unknown"

@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/codec/http1/parser"
-	"github.com/usk6666/yorishiro-proxy/internal/exchange"
+	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
 	"github.com/usk6666/yorishiro-proxy/internal/safety"
@@ -285,24 +285,24 @@ func TruncateForLog(s string, maxLen int) string {
 	return s[:maxLen] + "..."
 }
 
-// RawHeadersToKeyValues converts parser.RawHeaders to []exchange.KeyValue.
+// RawHeadersToKeyValues converts parser.RawHeaders to []envelope.KeyValue.
 // This bridges existing protocol-specific code to the protocol-agnostic
 // safety engine API.
-func RawHeadersToKeyValues(rh parser.RawHeaders) []exchange.KeyValue {
+func RawHeadersToKeyValues(rh parser.RawHeaders) []envelope.KeyValue {
 	if rh == nil {
 		return nil
 	}
-	kvs := make([]exchange.KeyValue, len(rh))
+	kvs := make([]envelope.KeyValue, len(rh))
 	for i, h := range rh {
-		kvs[i] = exchange.KeyValue{Name: h.Name, Value: h.Value}
+		kvs[i] = envelope.KeyValue{Name: h.Name, Value: h.Value}
 	}
 	return kvs
 }
 
-// KeyValuesToRawHeaders converts []exchange.KeyValue to parser.RawHeaders.
+// KeyValuesToRawHeaders converts []envelope.KeyValue to parser.RawHeaders.
 // This bridges the protocol-agnostic safety engine API back to
 // protocol-specific types.
-func KeyValuesToRawHeaders(kvs []exchange.KeyValue) parser.RawHeaders {
+func KeyValuesToRawHeaders(kvs []envelope.KeyValue) parser.RawHeaders {
 	if kvs == nil {
 		return nil
 	}

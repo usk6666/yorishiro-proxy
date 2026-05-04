@@ -22,7 +22,6 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
-	"github.com/usk6666/yorishiro-proxy/internal/exchange"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/layer"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/http1"
@@ -349,17 +348,18 @@ func resendHTTPRequestURL(msg *envelope.HTTPMessage) *url.URL {
 	}
 }
 
-// keyValuesToExchangeKV adapts envelope.KeyValue (the new RFC-001 type) to
-// exchange.KeyValue (the legacy type the SafetyEngine still consumes).
-// Same-shape struct copy; no normalization.
-func keyValuesToExchangeKV(kvs []envelope.KeyValue) []exchange.KeyValue {
+// keyValuesToExchangeKV is retained as an identity helper after the
+// SafetyEngine was decoupled from internal/exchange in USK-697. It used
+// to bridge envelope.KeyValue → exchange.KeyValue; both types are now
+// envelope.KeyValue. The defensive copy is preserved because callers in
+// fuzz_*_helpers / resend_*.go pass slices that may be aliased to the
+// envelope's own Headers field.
+func keyValuesToExchangeKV(kvs []envelope.KeyValue) []envelope.KeyValue {
 	if len(kvs) == 0 {
 		return nil
 	}
-	out := make([]exchange.KeyValue, len(kvs))
-	for i, kv := range kvs {
-		out[i] = exchange.KeyValue{Name: kv.Name, Value: kv.Value}
-	}
+	out := make([]envelope.KeyValue, len(kvs))
+	copy(out, kvs)
 	return out
 }
 

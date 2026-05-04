@@ -28,7 +28,7 @@ func NewScopeStep(scope *proxy.TargetScope) *ScopeStep {
 // Process checks the Exchange's URL against the TargetScope rules.
 // Returns Drop if the target is blocked, Continue otherwise.
 func (s *ScopeStep) Process(_ context.Context, ex *exchange.Exchange) Result {
-	if ex.Direction != exchange.Send {
+	if ex.Direction != envelope.Send {
 		return Result{}
 	}
 	if ex.URL == nil {

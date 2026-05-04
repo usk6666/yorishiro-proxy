@@ -20,7 +20,7 @@ func TestRateLimitStep_Process(t *testing.T) {
 		{
 			name: "receive direction is skipped",
 			ex: &exchange.Exchange{
-				Direction: exchange.Receive,
+				Direction: envelope.Receive,
 				URL:       mustParseURL("http://example.com/"),
 			},
 			wantAction: Continue,
@@ -28,7 +28,7 @@ func TestRateLimitStep_Process(t *testing.T) {
 		{
 			name: "nil URL returns Continue",
 			ex: &exchange.Exchange{
-				Direction: exchange.Send,
+				Direction: envelope.Send,
 				URL:       nil,
 			},
 			wantAction: Continue,
@@ -56,7 +56,7 @@ func TestRateLimitStep_Process(t *testing.T) {
 func TestRateLimitStep_Process_NilLimiter(t *testing.T) {
 	step := NewRateLimitStep(nil)
 	ex := &exchange.Exchange{
-		Direction: exchange.Send,
+		Direction: envelope.Send,
 		URL:       mustParseURL("http://example.com/"),
 	}
 	r := step.Process(context.Background(), ex)
@@ -69,7 +69,7 @@ func TestRateLimitStep_Process_NoLimits(t *testing.T) {
 	limiter := proxy.NewRateLimiter() // no limits configured
 	step := NewRateLimitStep(limiter)
 	ex := &exchange.Exchange{
-		Direction: exchange.Send,
+		Direction: envelope.Send,
 		URL:       mustParseURL("http://example.com/"),
 	}
 	r := step.Process(context.Background(), ex)
@@ -86,7 +86,7 @@ func TestRateLimitStep_Process_WithinRate(t *testing.T) {
 	step := NewRateLimitStep(limiter)
 
 	ex := &exchange.Exchange{
-		Direction: exchange.Send,
+		Direction: envelope.Send,
 		URL:       mustParseURL("http://example.com/"),
 	}
 	r := step.Process(context.Background(), ex)
@@ -106,7 +106,7 @@ func TestRateLimitStep_Process_ExceedsRate(t *testing.T) {
 
 	makeExchange := func() *exchange.Exchange {
 		return &exchange.Exchange{
-			Direction: exchange.Send,
+			Direction: envelope.Send,
 			URL: &url.URL{
 				Scheme: "http",
 				Host:   "example.com",
