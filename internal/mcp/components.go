@@ -197,12 +197,11 @@ func listenerStatuses(m proxyManager) []ListenerStatus {
 // protocol handler that supports them.
 //
 // tcpHandler and detector are inert in the live data path post-USK-707
-// (TCP forward orchestration is owned by USK-697; protocol detection
-// runs inside proxybuild Stack). They remain on the struct only for
-// legacy_options_test.go (USK-708 will retire those test scaffolds along
-// with the legacy proxy package). detector is typed as `any` so this
-// non-test file does not import internal/proxy; tests still set it via
-// the WithDetector helper which receives proxy.ProtocolDetector.
+// (TCP forward orchestration is owned by USK-711; protocol detection
+// runs inside proxybuild Stack). They remain on the struct only because
+// legacy_options_test.go's newServer wrapper still passes positional
+// arguments to NewConnector. detector is typed as `any` so this file
+// does not depend on any soon-to-be-deleted detector interface.
 type Connector struct {
 	manager               proxyManager
 	passthrough           *connector.PassthroughList
@@ -231,7 +230,8 @@ type Connector struct {
 // tcpHandler and detector are kept as parameters only because
 // legacy_options_test.go's newServer wrapper passes them in. The live
 // data path (cmd/yorishiro-proxy/main.go) supplies nil for both —
-// USK-697/USK-708 will retire these along with the legacy proxy package.
+// USK-711 (TCP forwards) will retire tcpHandler; the detector
+// parameter falls away once legacy_options_test.go is rewritten.
 func NewConnector(
 	manager proxyManager,
 	passthrough *connector.PassthroughList,

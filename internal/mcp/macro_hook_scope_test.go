@@ -11,9 +11,9 @@ import (
 	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/usk6666/yorishiro-proxy/internal/connector"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/macro"
-	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 )
 
 // TestMacroSendFunc_TargetScope_BlocksAfterTemplateExpansion verifies that
@@ -21,8 +21,8 @@ import (
 // requests to out-of-scope hosts even when the URL was produced by template
 // expansion (TOCTOU fix for USK-210).
 func TestMacroSendFunc_TargetScope_BlocksAfterTemplateExpansion(t *testing.T) {
-	ts := proxy.NewTargetScope()
-	ts.SetAgentRules([]proxy.TargetRule{
+	ts := connector.NewTargetScope()
+	_ = ts.SetAgentRules([]connector.TargetRule{
 		{Hostname: "allowed.example.com"},
 	}, nil)
 
@@ -54,8 +54,8 @@ func TestMacroSendFunc_TargetScope_AllowsInScope(t *testing.T) {
 
 	serverURL, _ := url.Parse(echoServer.URL)
 
-	ts := proxy.NewTargetScope()
-	ts.SetAgentRules([]proxy.TargetRule{
+	ts := connector.NewTargetScope()
+	_ = ts.SetAgentRules([]connector.TargetRule{
 		{Hostname: serverURL.Hostname()},
 	}, nil)
 
@@ -85,7 +85,7 @@ func TestMacroSendFunc_TargetScope_NoRulesAllowsAll(t *testing.T) {
 	defer echoServer.Close()
 
 	// No target scope rules.
-	s := mkServerFromLegacyDeps(legacyDeps{targetScope: proxy.NewTargetScope()})
+	s := mkServerFromLegacyDeps(legacyDeps{targetScope: connector.NewTargetScope()})
 	sendFunc := s.macroSendFunc("test-macro")
 
 	resp, err := sendFunc(context.Background(), &macro.SendRequest{
@@ -105,8 +105,8 @@ func TestMacroSendFunc_TargetScope_NoRulesAllowsAll(t *testing.T) {
 // hookMacroSendFunc checks httpReq.URL against target scope rules, blocking
 // requests to out-of-scope hosts (TOCTOU fix for USK-210).
 func TestHookMacroSendFunc_TargetScope_BlocksAfterTemplateExpansion(t *testing.T) {
-	ts := proxy.NewTargetScope()
-	ts.SetAgentRules([]proxy.TargetRule{
+	ts := connector.NewTargetScope()
+	_ = ts.SetAgentRules([]connector.TargetRule{
 		{Hostname: "allowed.example.com"},
 	}, nil)
 
@@ -138,8 +138,8 @@ func TestHookMacroSendFunc_TargetScope_AllowsInScope(t *testing.T) {
 
 	serverURL, _ := url.Parse(echoServer.URL)
 
-	ts := proxy.NewTargetScope()
-	ts.SetAgentRules([]proxy.TargetRule{
+	ts := connector.NewTargetScope()
+	_ = ts.SetAgentRules([]connector.TargetRule{
 		{Hostname: serverURL.Hostname()},
 	}, nil)
 
@@ -168,7 +168,7 @@ func TestHookMacroSendFunc_TargetScope_NoRulesAllowsAll(t *testing.T) {
 	}))
 	defer echoServer.Close()
 
-	s := mkServerFromLegacyDeps(legacyDeps{targetScope: proxy.NewTargetScope()})
+	s := mkServerFromLegacyDeps(legacyDeps{targetScope: connector.NewTargetScope()})
 	sendFunc := hookMacroSendFunc(s, "hook-macro")
 
 	resp, err := sendFunc(context.Background(), &macro.SendRequest{
@@ -292,8 +292,8 @@ func TestRunMacro_TemplateExpansion_TargetScopeBypass_Blocked(t *testing.T) {
 	step1URLParsed, _ := url.Parse(step1Server.URL)
 
 	// Set up target scope: only allow the step1 server.
-	ts := proxy.NewTargetScope()
-	ts.SetAgentRules([]proxy.TargetRule{
+	ts := connector.NewTargetScope()
+	_ = ts.SetAgentRules([]connector.TargetRule{
 		{Hostname: step1URLParsed.Hostname()},
 	}, nil)
 
@@ -427,8 +427,8 @@ func TestHookMacro_TemplateExpansion_TargetScopeBypass_Blocked(t *testing.T) {
 	macroURLParsed, _ := url.Parse(macroServer.URL)
 
 	// Target scope: only allow macroServer.
-	ts := proxy.NewTargetScope()
-	ts.SetAgentRules([]proxy.TargetRule{
+	ts := connector.NewTargetScope()
+	_ = ts.SetAgentRules([]connector.TargetRule{
 		{Hostname: macroURLParsed.Hostname()},
 	}, nil)
 

@@ -6,11 +6,11 @@ import (
 	"testing"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/usk6666/yorishiro-proxy/internal/proxy"
+	"github.com/usk6666/yorishiro-proxy/internal/connector"
 )
 
 // setupConfigureTestSession creates a connected MCP client session for configure tool tests.
-func setupConfigureTestSession(t *testing.T, pl *proxy.PassthroughList) *gomcp.ClientSession {
+func setupConfigureTestSession(t *testing.T, pl *connector.PassthroughList) *gomcp.ClientSession {
 	t.Helper()
 	ctx := context.Background()
 
@@ -72,7 +72,7 @@ func configureUnmarshalResult(t *testing.T, result *gomcp.CallToolResult, dest a
 }
 
 func TestConfigure_MergeTLSPassthroughAddRemove(t *testing.T) {
-	pl := proxy.NewPassthroughList()
+	pl := connector.NewPassthroughList()
 	pl.Add("existing.com")
 	pl.Add("to-remove.com")
 	cs := setupConfigureTestSession(t, pl)
@@ -116,7 +116,7 @@ func TestConfigure_MergeTLSPassthroughAddRemove(t *testing.T) {
 }
 
 func TestConfigure_ReplaceTLSPassthrough(t *testing.T) {
-	pl := proxy.NewPassthroughList()
+	pl := connector.NewPassthroughList()
 	pl.Add("old-1.com")
 	pl.Add("old-2.com")
 	cs := setupConfigureTestSession(t, pl)
@@ -157,7 +157,7 @@ func TestConfigure_ReplaceTLSPassthrough(t *testing.T) {
 }
 
 func TestConfigure_ReplaceTLSPassthroughEmptyList(t *testing.T) {
-	pl := proxy.NewPassthroughList()
+	pl := connector.NewPassthroughList()
 	pl.Add("existing.com")
 	cs := setupConfigureTestSession(t, pl)
 
@@ -183,7 +183,7 @@ func TestConfigure_ReplaceTLSPassthroughEmptyList(t *testing.T) {
 }
 
 func TestConfigure_InvalidOperation(t *testing.T) {
-	pl := proxy.NewPassthroughList()
+	pl := connector.NewPassthroughList()
 	cs := setupConfigureTestSession(t, pl)
 
 	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
@@ -241,7 +241,7 @@ func TestConfigure_ReplaceNilPassthrough(t *testing.T) {
 }
 
 func TestConfigure_DefaultOperationIsMerge(t *testing.T) {
-	pl := proxy.NewPassthroughList()
+	pl := connector.NewPassthroughList()
 	cs := setupConfigureTestSession(t, pl)
 
 	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
@@ -271,7 +271,7 @@ func TestConfigure_DefaultOperationIsMerge(t *testing.T) {
 }
 
 func TestConfigure_EmptyInput(t *testing.T) {
-	pl := proxy.NewPassthroughList()
+	pl := connector.NewPassthroughList()
 	cs := setupConfigureTestSession(t, pl)
 
 	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{

@@ -7,11 +7,11 @@ import (
 	"testing"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/usk6666/yorishiro-proxy/internal/proxy"
+	"github.com/usk6666/yorishiro-proxy/internal/connector"
 )
 
 // setupSecurityTestSession creates an MCP client flow with a TargetScope for testing.
-func setupSecurityTestSession(t *testing.T, ts *proxy.TargetScope) *gomcp.ClientSession {
+func setupSecurityTestSession(t *testing.T, ts *connector.TargetScope) *gomcp.ClientSession {
 	t.Helper()
 	ctx := context.Background()
 
@@ -73,7 +73,7 @@ func securityUnmarshalResult(t *testing.T, result *gomcp.CallToolResult, dest an
 }
 
 func TestSecurity_GetTargetScope_EmptyDefault(t *testing.T) {
-	ts := proxy.NewTargetScope()
+	ts := connector.NewTargetScope()
 	cs := setupSecurityTestSession(t, ts)
 
 	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
@@ -113,14 +113,14 @@ func TestSecurity_GetTargetScope_EmptyDefault(t *testing.T) {
 }
 
 func TestSecurity_GetTargetScope_WithPolicyAndAgent(t *testing.T) {
-	ts := proxy.NewTargetScope()
+	ts := connector.NewTargetScope()
 	ts.SetPolicyRules(
-		[]proxy.TargetRule{{Hostname: "*.target.com"}},
-		[]proxy.TargetRule{{Hostname: "*.internal.corp"}},
+		[]connector.TargetRule{{Hostname: "*.target.com"}},
+		[]connector.TargetRule{{Hostname: "*.internal.corp"}},
 	)
-	ts.SetAgentRules(
-		[]proxy.TargetRule{{Hostname: "api.target.com"}},
-		[]proxy.TargetRule{{Hostname: "admin.target.com"}},
+	_ = ts.SetAgentRules(
+		[]connector.TargetRule{{Hostname: "api.target.com"}},
+		[]connector.TargetRule{{Hostname: "admin.target.com"}},
 	)
 	cs := setupSecurityTestSession(t, ts)
 
@@ -165,7 +165,7 @@ func TestSecurity_GetTargetScope_WithPolicyAndAgent(t *testing.T) {
 }
 
 func TestSecurity_SetGetRoundtrip(t *testing.T) {
-	ts := proxy.NewTargetScope()
+	ts := connector.NewTargetScope()
 	cs := setupSecurityTestSession(t, ts)
 	ctx := context.Background()
 
@@ -237,10 +237,10 @@ func TestSecurity_SetGetRoundtrip(t *testing.T) {
 }
 
 func TestSecurity_SetClearsRules(t *testing.T) {
-	ts := proxy.NewTargetScope()
-	ts.SetAgentRules(
-		[]proxy.TargetRule{{Hostname: "existing.com"}},
-		[]proxy.TargetRule{{Hostname: "blocked.com"}},
+	ts := connector.NewTargetScope()
+	_ = ts.SetAgentRules(
+		[]connector.TargetRule{{Hostname: "existing.com"}},
+		[]connector.TargetRule{{Hostname: "blocked.com"}},
 	)
 	cs := setupSecurityTestSession(t, ts)
 	ctx := context.Background()
@@ -275,9 +275,9 @@ func TestSecurity_SetClearsRules(t *testing.T) {
 }
 
 func TestSecurity_SetTargetScope_PolicyBoundaryError(t *testing.T) {
-	ts := proxy.NewTargetScope()
+	ts := connector.NewTargetScope()
 	ts.SetPolicyRules(
-		[]proxy.TargetRule{{Hostname: "*.target.com"}},
+		[]connector.TargetRule{{Hostname: "*.target.com"}},
 		nil,
 	)
 	cs := setupSecurityTestSession(t, ts)
@@ -303,9 +303,9 @@ func TestSecurity_SetTargetScope_PolicyBoundaryError(t *testing.T) {
 }
 
 func TestSecurity_UpdateMerge_AddRemove(t *testing.T) {
-	ts := proxy.NewTargetScope()
-	ts.SetAgentRules(
-		[]proxy.TargetRule{{Hostname: "existing.com"}},
+	ts := connector.NewTargetScope()
+	_ = ts.SetAgentRules(
+		[]connector.TargetRule{{Hostname: "existing.com"}},
 		nil,
 	)
 	cs := setupSecurityTestSession(t, ts)
@@ -342,9 +342,9 @@ func TestSecurity_UpdateMerge_AddRemove(t *testing.T) {
 }
 
 func TestSecurity_UpdateMerge_SkipsDuplicates(t *testing.T) {
-	ts := proxy.NewTargetScope()
-	ts.SetAgentRules(
-		[]proxy.TargetRule{{Hostname: "existing.com"}},
+	ts := connector.NewTargetScope()
+	_ = ts.SetAgentRules(
+		[]connector.TargetRule{{Hostname: "existing.com"}},
 		nil,
 	)
 	cs := setupSecurityTestSession(t, ts)
@@ -373,10 +373,10 @@ func TestSecurity_UpdateMerge_SkipsDuplicates(t *testing.T) {
 }
 
 func TestSecurity_UpdateTargetScope_RemovePolicyDenyError(t *testing.T) {
-	ts := proxy.NewTargetScope()
+	ts := connector.NewTargetScope()
 	ts.SetPolicyRules(
-		[]proxy.TargetRule{{Hostname: "*.target.com"}},
-		[]proxy.TargetRule{{Hostname: "*.internal.corp"}},
+		[]connector.TargetRule{{Hostname: "*.target.com"}},
+		[]connector.TargetRule{{Hostname: "*.internal.corp"}},
 	)
 	cs := setupSecurityTestSession(t, ts)
 
@@ -409,10 +409,10 @@ func TestSecurity_UpdateTargetScope_RemovePolicyDenyError(t *testing.T) {
 }
 
 func TestSecurity_UpdateTargetScope_RemoveAgentDenyAllowed(t *testing.T) {
-	ts := proxy.NewTargetScope()
-	ts.SetAgentRules(
+	ts := connector.NewTargetScope()
+	_ = ts.SetAgentRules(
 		nil,
-		[]proxy.TargetRule{{Hostname: "agent-blocked.com"}},
+		[]connector.TargetRule{{Hostname: "agent-blocked.com"}},
 	)
 	cs := setupSecurityTestSession(t, ts)
 
@@ -444,9 +444,9 @@ func TestSecurity_UpdateTargetScope_RemoveAgentDenyAllowed(t *testing.T) {
 }
 
 func TestSecurity_UpdateTargetScope_AddAllowsOutsidePolicy(t *testing.T) {
-	ts := proxy.NewTargetScope()
+	ts := connector.NewTargetScope()
 	ts.SetPolicyRules(
-		[]proxy.TargetRule{{Hostname: "*.target.com"}},
+		[]connector.TargetRule{{Hostname: "*.target.com"}},
 		nil,
 	)
 	cs := setupSecurityTestSession(t, ts)
@@ -472,7 +472,7 @@ func TestSecurity_UpdateTargetScope_AddAllowsOutsidePolicy(t *testing.T) {
 }
 
 func TestSecurity_TestTarget_AllowedInOpenMode(t *testing.T) {
-	ts := proxy.NewTargetScope()
+	ts := connector.NewTargetScope()
 	cs := setupSecurityTestSession(t, ts)
 	ctx := context.Background()
 
@@ -520,8 +520,8 @@ func TestSecurity_TestTarget_AllowedInOpenMode(t *testing.T) {
 }
 
 func TestSecurity_TestTarget_BlockedByAgentDeny(t *testing.T) {
-	ts := proxy.NewTargetScope()
-	ts.SetAgentRules(nil, []proxy.TargetRule{{Hostname: "blocked.com"}})
+	ts := connector.NewTargetScope()
+	_ = ts.SetAgentRules(nil, []connector.TargetRule{{Hostname: "blocked.com"}})
 	cs := setupSecurityTestSession(t, ts)
 	ctx := context.Background()
 
@@ -559,10 +559,10 @@ func TestSecurity_TestTarget_BlockedByAgentDeny(t *testing.T) {
 }
 
 func TestSecurity_TestTarget_BlockedByPolicyDeny(t *testing.T) {
-	ts := proxy.NewTargetScope()
+	ts := connector.NewTargetScope()
 	ts.SetPolicyRules(
 		nil,
-		[]proxy.TargetRule{{Hostname: "policy-blocked.com"}},
+		[]connector.TargetRule{{Hostname: "policy-blocked.com"}},
 	)
 	cs := setupSecurityTestSession(t, ts)
 
@@ -594,9 +594,9 @@ func TestSecurity_TestTarget_BlockedByPolicyDeny(t *testing.T) {
 }
 
 func TestSecurity_TestTarget_NotInPolicyAllowList(t *testing.T) {
-	ts := proxy.NewTargetScope()
+	ts := connector.NewTargetScope()
 	ts.SetPolicyRules(
-		[]proxy.TargetRule{{Hostname: "*.target.com"}},
+		[]connector.TargetRule{{Hostname: "*.target.com"}},
 		nil,
 	)
 	cs := setupSecurityTestSession(t, ts)
@@ -633,9 +633,9 @@ func TestSecurity_TestTarget_NotInPolicyAllowList(t *testing.T) {
 }
 
 func TestSecurity_TestTarget_NotInAgentAllowList(t *testing.T) {
-	ts := proxy.NewTargetScope()
-	ts.SetAgentRules(
-		[]proxy.TargetRule{{Hostname: "allowed.com"}},
+	ts := connector.NewTargetScope()
+	_ = ts.SetAgentRules(
+		[]connector.TargetRule{{Hostname: "allowed.com"}},
 		nil,
 	)
 	cs := setupSecurityTestSession(t, ts)
@@ -672,9 +672,9 @@ func TestSecurity_TestTarget_NotInAgentAllowList(t *testing.T) {
 }
 
 func TestSecurity_TestTarget_AllowedByAgentRule(t *testing.T) {
-	ts := proxy.NewTargetScope()
-	ts.SetAgentRules(
-		[]proxy.TargetRule{{Hostname: "*.example.com", Schemes: []string{"https"}}},
+	ts := connector.NewTargetScope()
+	_ = ts.SetAgentRules(
+		[]connector.TargetRule{{Hostname: "*.example.com", Schemes: []string{"https"}}},
 		nil,
 	)
 	cs := setupSecurityTestSession(t, ts)
@@ -711,9 +711,9 @@ func TestSecurity_TestTarget_AllowedByAgentRule(t *testing.T) {
 }
 
 func TestSecurity_TestTarget_WithPortAndPath(t *testing.T) {
-	ts := proxy.NewTargetScope()
-	ts.SetAgentRules(
-		[]proxy.TargetRule{{
+	ts := connector.NewTargetScope()
+	_ = ts.SetAgentRules(
+		[]connector.TargetRule{{
 			Hostname:   "target.internal",
 			Ports:      []int{8080, 8443},
 			PathPrefix: "/api/",
@@ -777,7 +777,7 @@ func TestSecurity_TestTarget_WithPortAndPath(t *testing.T) {
 }
 
 func TestSecurity_InvalidAction(t *testing.T) {
-	ts := proxy.NewTargetScope()
+	ts := connector.NewTargetScope()
 	cs := setupSecurityTestSession(t, ts)
 
 	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
@@ -795,7 +795,7 @@ func TestSecurity_InvalidAction(t *testing.T) {
 }
 
 func TestSecurity_EmptyAction(t *testing.T) {
-	ts := proxy.NewTargetScope()
+	ts := connector.NewTargetScope()
 	cs := setupSecurityTestSession(t, ts)
 
 	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
@@ -813,7 +813,7 @@ func TestSecurity_EmptyAction(t *testing.T) {
 }
 
 func TestSecurity_SetTargetScope_EmptyHostname(t *testing.T) {
-	ts := proxy.NewTargetScope()
+	ts := connector.NewTargetScope()
 	cs := setupSecurityTestSession(t, ts)
 
 	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
@@ -836,7 +836,7 @@ func TestSecurity_SetTargetScope_EmptyHostname(t *testing.T) {
 }
 
 func TestSecurity_UpdateTargetScope_EmptyHostname(t *testing.T) {
-	ts := proxy.NewTargetScope()
+	ts := connector.NewTargetScope()
 	cs := setupSecurityTestSession(t, ts)
 
 	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
@@ -859,7 +859,7 @@ func TestSecurity_UpdateTargetScope_EmptyHostname(t *testing.T) {
 }
 
 func TestSecurity_TestTarget_EmptyURL(t *testing.T) {
-	ts := proxy.NewTargetScope()
+	ts := connector.NewTargetScope()
 	cs := setupSecurityTestSession(t, ts)
 
 	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
@@ -880,7 +880,7 @@ func TestSecurity_TestTarget_EmptyURL(t *testing.T) {
 }
 
 func TestSecurity_TestTarget_InvalidURL(t *testing.T) {
-	ts := proxy.NewTargetScope()
+	ts := connector.NewTargetScope()
 	cs := setupSecurityTestSession(t, ts)
 
 	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
@@ -923,10 +923,10 @@ func TestSecurity_DefaultTargetScopeInitialized(t *testing.T) {
 }
 
 func TestSecurity_DenyTakesPrecedence(t *testing.T) {
-	ts := proxy.NewTargetScope()
-	ts.SetAgentRules(
-		[]proxy.TargetRule{{Hostname: "*.example.com"}},
-		[]proxy.TargetRule{{Hostname: "blocked.example.com"}},
+	ts := connector.NewTargetScope()
+	_ = ts.SetAgentRules(
+		[]connector.TargetRule{{Hostname: "*.example.com"}},
+		[]connector.TargetRule{{Hostname: "blocked.example.com"}},
 	)
 	cs := setupSecurityTestSession(t, ts)
 	ctx := context.Background()
@@ -959,7 +959,7 @@ func TestSecurity_DenyTakesPrecedence(t *testing.T) {
 }
 
 func TestSecurity_SetThenUpdate(t *testing.T) {
-	ts := proxy.NewTargetScope()
+	ts := connector.NewTargetScope()
 	cs := setupSecurityTestSession(t, ts)
 	ctx := context.Background()
 
@@ -1009,7 +1009,7 @@ func TestSecurity_SetThenUpdate(t *testing.T) {
 // TestSecurity_JSONNullArrays verifies that empty allows/denies are serialized
 // as empty JSON arrays [] rather than null.
 func TestSecurity_JSONNullArrays(t *testing.T) {
-	ts := proxy.NewTargetScope()
+	ts := connector.NewTargetScope()
 	cs := setupSecurityTestSession(t, ts)
 
 	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
@@ -1060,9 +1060,9 @@ func TestSecurity_JSONNullArrays(t *testing.T) {
 // TestSecurity_TestTarget_DefaultPort verifies that default ports are inferred
 // for http (80) and https (443) when not explicitly specified in the URL.
 func TestSecurity_TestTarget_DefaultPort(t *testing.T) {
-	ts := proxy.NewTargetScope()
-	ts.SetAgentRules(
-		[]proxy.TargetRule{{Hostname: "example.com", Ports: []int{443}}},
+	ts := connector.NewTargetScope()
+	_ = ts.SetAgentRules(
+		[]connector.TargetRule{{Hostname: "example.com", Ports: []int{443}}},
 		nil,
 	)
 	cs := setupSecurityTestSession(t, ts)
@@ -1100,14 +1100,14 @@ func TestSecurity_TestTarget_DefaultPort(t *testing.T) {
 // TestSecurity_TestTarget_BothLayersDecide verifies that test_target correctly
 // reports the layer for a target that passes policy but is blocked by agent.
 func TestSecurity_TestTarget_BothLayersDecide(t *testing.T) {
-	ts := proxy.NewTargetScope()
+	ts := connector.NewTargetScope()
 	ts.SetPolicyRules(
-		[]proxy.TargetRule{{Hostname: "*.target.com"}},
+		[]connector.TargetRule{{Hostname: "*.target.com"}},
 		nil,
 	)
-	ts.SetAgentRules(
+	_ = ts.SetAgentRules(
 		nil,
-		[]proxy.TargetRule{{Hostname: "admin.target.com"}},
+		[]connector.TargetRule{{Hostname: "admin.target.com"}},
 	)
 	cs := setupSecurityTestSession(t, ts)
 
@@ -1141,7 +1141,7 @@ func TestSecurity_TestTarget_BothLayersDecide(t *testing.T) {
 // TestSecurity_NoPolicyBackwardCompat verifies backward compatibility when no
 // policy is configured - the tool should work as before.
 func TestSecurity_NoPolicyBackwardCompat(t *testing.T) {
-	ts := proxy.NewTargetScope()
+	ts := connector.NewTargetScope()
 	cs := setupSecurityTestSession(t, ts)
 	ctx := context.Background()
 
@@ -1525,7 +1525,7 @@ func TestToTargetRules_Empty(t *testing.T) {
 }
 
 func TestEnsureNonNilRules(t *testing.T) {
-	var nilRules []proxy.TargetRule
+	var nilRules []connector.TargetRule
 	result := ensureNonNilRules(nilRules)
 	if result == nil {
 		t.Error("expected non-nil result for nil input")
@@ -1534,7 +1534,7 @@ func TestEnsureNonNilRules(t *testing.T) {
 		t.Errorf("expected empty slice, got %v", result)
 	}
 
-	existing := []proxy.TargetRule{{Hostname: "test.com"}}
+	existing := []connector.TargetRule{{Hostname: "test.com"}}
 	result = ensureNonNilRules(existing)
 	if len(result) != 1 {
 		t.Errorf("expected 1 rule, got %d", len(result))
@@ -1545,12 +1545,12 @@ func TestTargetScopeMode(t *testing.T) {
 	if mode := targetScopeMode(nil); mode != "open" {
 		t.Errorf("mode = %q, want %q for nil scope", mode, "open")
 	}
-	tsEmpty := proxy.NewTargetScope()
+	tsEmpty := connector.NewTargetScope()
 	if mode := targetScopeMode(tsEmpty); mode != "open" {
 		t.Errorf("mode = %q, want %q for empty scope", mode, "open")
 	}
-	tsWithRules := proxy.NewTargetScope()
-	tsWithRules.SetAgentRules([]proxy.TargetRule{{Hostname: "x"}}, nil)
+	tsWithRules := connector.NewTargetScope()
+	_ = tsWithRules.SetAgentRules([]connector.TargetRule{{Hostname: "x"}}, nil)
 	if mode := targetScopeMode(tsWithRules); mode != "enforcing" {
 		t.Errorf("mode = %q, want %q for scope with rules", mode, "enforcing")
 	}
@@ -1580,10 +1580,10 @@ func TestLayerFromReason(t *testing.T) {
 }
 
 func TestValidateNotPolicyDenies(t *testing.T) {
-	ts := proxy.NewTargetScope()
+	ts := connector.NewTargetScope()
 	ts.SetPolicyRules(
 		nil,
-		[]proxy.TargetRule{
+		[]connector.TargetRule{
 			{Hostname: "*.internal.corp"},
 			{Hostname: "admin.target.com", Ports: []int{443}},
 		},
@@ -1591,7 +1591,7 @@ func TestValidateNotPolicyDenies(t *testing.T) {
 
 	tests := []struct {
 		name         string
-		removeDenies []proxy.TargetRule
+		removeDenies []connector.TargetRule
 		wantErr      bool
 	}{
 		{
@@ -1601,22 +1601,22 @@ func TestValidateNotPolicyDenies(t *testing.T) {
 		},
 		{
 			name:         "remove non-policy deny",
-			removeDenies: []proxy.TargetRule{{Hostname: "other.com"}},
+			removeDenies: []connector.TargetRule{{Hostname: "other.com"}},
 			wantErr:      false,
 		},
 		{
 			name:         "remove matching policy deny",
-			removeDenies: []proxy.TargetRule{{Hostname: "*.internal.corp"}},
+			removeDenies: []connector.TargetRule{{Hostname: "*.internal.corp"}},
 			wantErr:      true,
 		},
 		{
 			name:         "remove matching policy deny with ports",
-			removeDenies: []proxy.TargetRule{{Hostname: "admin.target.com", Ports: []int{443}}},
+			removeDenies: []connector.TargetRule{{Hostname: "admin.target.com", Ports: []int{443}}},
 			wantErr:      true,
 		},
 		{
 			name:         "remove similar but different hostname",
-			removeDenies: []proxy.TargetRule{{Hostname: "admin.target.com"}},
+			removeDenies: []connector.TargetRule{{Hostname: "admin.target.com"}},
 			wantErr:      false,
 		},
 	}
@@ -1634,44 +1634,44 @@ func TestValidateNotPolicyDenies(t *testing.T) {
 func TestTargetRuleMatchesLocal(t *testing.T) {
 	tests := []struct {
 		name string
-		a    proxy.TargetRule
-		b    proxy.TargetRule
+		a    connector.TargetRule
+		b    connector.TargetRule
 		want bool
 	}{
 		{
 			name: "exact match",
-			a:    proxy.TargetRule{Hostname: "example.com"},
-			b:    proxy.TargetRule{Hostname: "example.com"},
+			a:    connector.TargetRule{Hostname: "example.com"},
+			b:    connector.TargetRule{Hostname: "example.com"},
 			want: true,
 		},
 		{
 			name: "case insensitive hostname",
-			a:    proxy.TargetRule{Hostname: "Example.COM"},
-			b:    proxy.TargetRule{Hostname: "example.com"},
+			a:    connector.TargetRule{Hostname: "Example.COM"},
+			b:    connector.TargetRule{Hostname: "example.com"},
 			want: true,
 		},
 		{
 			name: "different hostname",
-			a:    proxy.TargetRule{Hostname: "a.com"},
-			b:    proxy.TargetRule{Hostname: "b.com"},
+			a:    connector.TargetRule{Hostname: "a.com"},
+			b:    connector.TargetRule{Hostname: "b.com"},
 			want: false,
 		},
 		{
 			name: "with matching ports",
-			a:    proxy.TargetRule{Hostname: "a.com", Ports: []int{80, 443}},
-			b:    proxy.TargetRule{Hostname: "a.com", Ports: []int{80, 443}},
+			a:    connector.TargetRule{Hostname: "a.com", Ports: []int{80, 443}},
+			b:    connector.TargetRule{Hostname: "a.com", Ports: []int{80, 443}},
 			want: true,
 		},
 		{
 			name: "different ports",
-			a:    proxy.TargetRule{Hostname: "a.com", Ports: []int{80}},
-			b:    proxy.TargetRule{Hostname: "a.com", Ports: []int{443}},
+			a:    connector.TargetRule{Hostname: "a.com", Ports: []int{80}},
+			b:    connector.TargetRule{Hostname: "a.com", Ports: []int{443}},
 			want: false,
 		},
 		{
 			name: "with matching schemes",
-			a:    proxy.TargetRule{Hostname: "a.com", Schemes: []string{"HTTPS"}},
-			b:    proxy.TargetRule{Hostname: "a.com", Schemes: []string{"https"}},
+			a:    connector.TargetRule{Hostname: "a.com", Schemes: []string{"HTTPS"}},
+			b:    connector.TargetRule{Hostname: "a.com", Schemes: []string{"https"}},
 			want: true,
 		},
 	}

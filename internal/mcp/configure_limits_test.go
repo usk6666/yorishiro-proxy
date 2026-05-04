@@ -7,8 +7,8 @@ import (
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/usk6666/yorishiro-proxy/internal/connector"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
-	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 )
 
 // setupConfigureTestSessionWithManager creates a connected MCP client flow
@@ -17,7 +17,7 @@ func setupConfigureTestSessionWithManager(t *testing.T, manager proxyManager, ex
 	t.Helper()
 	ctx := context.Background()
 
-	pl := proxy.NewPassthroughList()
+	pl := connector.NewPassthroughList()
 
 	opts := []ServerOption{
 		WithPassthroughList(pl),

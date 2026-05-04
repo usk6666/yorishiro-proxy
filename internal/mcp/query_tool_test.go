@@ -12,8 +12,8 @@ import (
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/usk6666/yorishiro-proxy/internal/cert"
+	"github.com/usk6666/yorishiro-proxy/internal/connector"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
-	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 )
 
 // setupQueryTestSession creates an MCP client session for query tool tests.
@@ -788,7 +788,7 @@ func TestQuery_Config_Default(t *testing.T) {
 func TestQuery_Config_WithPassthrough(t *testing.T) {
 	t.Parallel()
 	store := newTestStore(t)
-	pl := proxy.NewPassthroughList()
+	pl := connector.NewPassthroughList()
 	pl.Add("pinned.example.com")
 	pl.Add("*.cdn.example.com")
 

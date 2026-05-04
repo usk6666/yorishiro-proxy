@@ -44,10 +44,10 @@ import (
 
 	"github.com/usk6666/yorishiro-proxy/internal/cert"
 	"github.com/usk6666/yorishiro-proxy/internal/config"
+	"github.com/usk6666/yorishiro-proxy/internal/connector"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
+	"github.com/usk6666/yorishiro-proxy/internal/layer/ws"
 	"github.com/usk6666/yorishiro-proxy/internal/pluginv2"
-	"github.com/usk6666/yorishiro-proxy/internal/protocol/ws"
-	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 	"github.com/usk6666/yorishiro-proxy/internal/proxybuild"
 	rulescommon "github.com/usk6666/yorishiro-proxy/internal/rules/common"
 	grpcrules "github.com/usk6666/yorishiro-proxy/internal/rules/grpc"
@@ -133,7 +133,7 @@ func setupLiveProxy(t *testing.T, pluginName, pluginScript string) *liveProxy {
 	mgr, err := newLiveManager(cfg, proxyCfg, store, issuer, engine, holdQueue,
 		httpInterceptEngine, wsInterceptEngine, grpcInterceptEngine,
 		httpTransformEngine,
-		(*proxy.PassthroughList)(nil), (*proxy.RateLimiter)(nil),
+		(*connector.PassthroughList)(nil), (*connector.RateLimiter)(nil),
 		(*safety.Engine)(nil),
 		buildCfg, logger)
 	if err != nil {
