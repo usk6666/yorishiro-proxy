@@ -1,8 +1,6 @@
-// upstream_proxy.go holds upstream-proxy helpers moved from
-// internal/proxy/upstream.go. These helpers implement HTTP CONNECT and SOCKS5
+// upstream_proxy.go holds upstream-proxy helpers: HTTP CONNECT and SOCKS5
 // tunnelling to an upstream proxy plus the parsing / redaction helpers for
-// proxy URLs. CRLF injection (CWE-93) guards for HTTP CONNECT are preserved
-// from the original implementation.
+// proxy URLs. CRLF injection (CWE-93) guards apply to the HTTP CONNECT path.
 package connector
 
 import (

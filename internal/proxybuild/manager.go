@@ -46,16 +46,15 @@ type ManagerConfig struct {
 	StackFactory func(ctx context.Context, name, addr string) (*Stack, error)
 }
 
-// Manager orchestrates one or more named live Stacks. Its public API is
-// signature-compatible with internal/proxy.Manager so MCP proxy_start /
-// proxy_stop tools can swap implementations without changing call sites
-// (USK-690).
+// Manager orchestrates one or more named live Stacks. It exposes
+// Start/Stop/Status/SetMaxConnections/SetPeekTimeout/SetUpstreamProxy and
+// the related methods consumed by the MCP proxy_start / proxy_stop tools.
 //
-// What does NOT match proxy.Manager:
+// Caveats:
 //
 //   - StartTCPForwardsNamed / TCPForwardAddrs are stub methods returning
 //     ErrTCPForwardsNotSupported. Real TCP forward orchestration is
-//     deferred (see doc.go).
+//     tracked separately (see doc.go).
 //   - SetMaxConnections / SetPeekTimeout fan-out applies to the wrapped
 //     Listener.SetMaxConnections / SetPeekTimeout (which mutate the
 //     underlying connector.FullListener).

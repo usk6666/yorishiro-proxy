@@ -8,15 +8,11 @@
 //     Pipeline (HostScope → HTTPScope → Safety → PluginPre → Intercept →
 //     Transform → PluginPost → Record), and a shared WireEncoderRegistry.
 //
-//   - Manager orchestrates one or more named live Stacks. Its public API is
-//     signature-compatible with the legacy internal/proxy.Manager so MCP
-//     proxy_start / proxy_stop tools (USK-690) can swap implementations
-//     without changing call sites.
+//   - Manager orchestrates one or more named live Stacks. It exposes
+//     Start/Stop/Status/SetMaxConnections/SetPeekTimeout/SetUpstreamProxy and
+//     related methods consumed by the MCP proxy_start / proxy_stop tools.
 //
-// proxybuild is the single seam where RFC-001 stack assembly lives. It is
-// intentionally NEW (not an evolution of internal/connector.Connector or
-// internal/proxy.Manager — both of which are M39-era and slated for removal
-// in N9 per the rfc001 implementation guide).
+// proxybuild is the single seam where RFC-001 stack assembly lives.
 //
 // What proxybuild does NOT do (deferred):
 //

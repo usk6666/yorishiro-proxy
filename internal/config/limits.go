@@ -16,10 +16,10 @@ package config
 //	MaxBodySize × 2 (req + resp) × MaxConnections
 //	= 254 MB × 2 × 128 = ~63.5 GB
 //
-// The default MaxConnections (128, internal/proxy/listener.go) is chosen to
-// keep this theoretical maximum manageable. Operators should consider total
-// memory capacity and adjust MaxConnections via the proxy_start MCP tool or
-// configure_limits when running under heavy load.
+// The default MaxConnections (128, internal/connector/listener_common.go) is
+// chosen to keep this theoretical maximum manageable. Operators should
+// consider total memory capacity and adjust MaxConnections via the
+// proxy_start MCP tool or configure_limits when running under heavy load.
 
 const (
 	// MaxBodySize is the unified maximum size for both reading upstream
