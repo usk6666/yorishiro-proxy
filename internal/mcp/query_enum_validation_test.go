@@ -64,7 +64,7 @@ func TestValidateFlowFilters(t *testing.T) {
 		},
 		{
 			name:  "valid protocol",
-			input: queryInput{Resource: "flows", Filter: &queryFilter{Protocol: "HTTPS"}},
+			input: queryInput{Resource: "flows", Filter: &queryFilter{Protocol: "http"}},
 		},
 		{
 			name:    "invalid protocol",
@@ -122,7 +122,7 @@ func TestValidateFlowFilters(t *testing.T) {
 				Resource: "flows",
 				SortBy:   "duration_ms",
 				Filter: &queryFilter{
-					Protocol:  "HTTP/2",
+					Protocol:  "http",
 					Scheme:    "https",
 					State:     "active",
 					BlockedBy: "rate_limit",
@@ -283,7 +283,7 @@ func TestQuery_Flows_InvalidProtocol(t *testing.T) {
 	if !strings.Contains(text.Text, "invalid protocol") {
 		t.Errorf("error should mention invalid protocol, got: %s", text.Text)
 	}
-	if !strings.Contains(text.Text, "HTTPS") {
+	if !strings.Contains(text.Text, "http") {
 		t.Errorf("error should list valid values, got: %s", text.Text)
 	}
 }
@@ -297,7 +297,7 @@ func TestQuery_Flows_ValidFiltersStillWork(t *testing.T) {
 		Resource: "flows",
 		SortBy:   "timestamp",
 		Filter: &queryFilter{
-			Protocol: "HTTPS",
+			Protocol: "http",
 			Scheme:   "https",
 			State:    "complete",
 		},

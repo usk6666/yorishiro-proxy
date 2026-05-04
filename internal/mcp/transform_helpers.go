@@ -4,10 +4,11 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/usk6666/yorishiro-proxy/internal/proxy/rules"
+	httprules "github.com/usk6666/yorishiro-proxy/internal/rules/http"
 )
 
-// transformRuleInput is the JSON representation of an auto-transform rule for MCP tool input.
+// transformRuleInput is the JSON representation of an auto-transform rule
+// for MCP tool input. The shape mirrors httprules.TransformRule.
 type transformRuleInput struct {
 	// ID is the unique identifier for this rule.
 	ID string `json:"id" jsonschema:"unique rule identifier"`
@@ -21,121 +22,156 @@ type transformRuleInput struct {
 	// Direction specifies whether the rule applies to requests, responses, or both.
 	Direction string `json:"direction" jsonschema:"request, response, or both"`
 
-	// Conditions defines the matching criteria.
-	Conditions transformConditionsInput `json:"conditions" jsonschema:"matching conditions"`
+	// HostPattern is a regex matched against the request hostname.
+	HostPattern string `json:"host_pattern,omitempty" jsonschema:"regex matched against the request hostname"`
 
-	// Action defines the transformation to apply.
-	Action transformActionInput `json:"action" jsonschema:"transformation action"`
-}
-
-// transformConditionsInput is the JSON representation of auto-transform rule conditions.
-type transformConditionsInput struct {
-	// URLPattern is a regular expression matched against the full request URL.
-	URLPattern string `json:"url_pattern,omitempty" jsonschema:"regex pattern for URL matching"`
+	// PathPattern is a regex matched against the URL path.
+	PathPattern string `json:"path_pattern,omitempty" jsonschema:"regex matched against the URL path"`
 
 	// Methods is a whitelist of HTTP methods (case-insensitive).
-	Methods []string `json:"methods,omitempty" jsonschema:"HTTP method whitelist (e.g. POST, PUT, DELETE)"`
+	Methods []string `json:"methods,omitempty" jsonschema:"HTTP method whitelist (case-insensitive)"`
 
-	// HeaderMatch maps header names to regular expressions (AND logic).
-	HeaderMatch map[string]string `json:"header_match,omitempty" jsonschema:"header name to regex pattern mapping"`
-}
+	// BodyPattern is the search pattern (regex) for replace_body actions.
+	BodyPattern string `json:"body_pattern,omitempty" jsonschema:"search pattern (regex) for replace_body action"`
 
-// transformActionInput is the JSON representation of a transform action.
-type transformActionInput struct {
-	// Type is the action type: add_header, set_header, remove_header, or replace_body.
-	Type string `json:"type" jsonschema:"action type: add_header, set_header, remove_header, or replace_body"`
+	// ActionType is the action type: add_header, set_header, remove_header, or replace_body.
+	ActionType string `json:"action_type" jsonschema:"action type: add_header, set_header, remove_header, or replace_body"`
 
-	// Header is the header name (for add_header, set_header, remove_header).
-	Header string `json:"header,omitempty" jsonschema:"header name for header actions"`
+	// HeaderName is the header name (for add_header, set_header, remove_header).
+	HeaderName string `json:"header_name,omitempty" jsonschema:"header name for header actions"`
 
-	// Value is the header value (for add_header, set_header) or replacement string (for replace_body).
-	Value string `json:"value,omitempty" jsonschema:"header value or replacement string"`
+	// HeaderValue is the header value (for add_header, set_header).
+	HeaderValue string `json:"header_value,omitempty" jsonschema:"header value for add_header / set_header"`
 
-	// Pattern is the search pattern (regex) for replace_body.
-	Pattern string `json:"pattern,omitempty" jsonschema:"search pattern (regex) for replace_body"`
+	// BodyReplace is the replacement string for replace_body (supports $1, $2 capture groups).
+	BodyReplace string `json:"body_replace,omitempty" jsonschema:"replacement for replace_body (supports $1, $2 capture groups)"`
 }
 
 // transformRuleOutput is the JSON representation of an auto-transform rule for MCP tool output.
 type transformRuleOutput struct {
-	ID         string                    `json:"id"`
-	Enabled    bool                      `json:"enabled"`
-	Priority   int                       `json:"priority"`
-	Direction  string                    `json:"direction"`
-	Conditions transformConditionsOutput `json:"conditions"`
-	Action     transformActionOutput     `json:"action"`
+	ID          string   `json:"id"`
+	Enabled     bool     `json:"enabled"`
+	Priority    int      `json:"priority"`
+	Direction   string   `json:"direction"`
+	HostPattern string   `json:"host_pattern,omitempty"`
+	PathPattern string   `json:"path_pattern,omitempty"`
+	Methods     []string `json:"methods,omitempty"`
+	BodyPattern string   `json:"body_pattern,omitempty"`
+	ActionType  string   `json:"action_type"`
+	HeaderName  string   `json:"header_name,omitempty"`
+	HeaderValue string   `json:"header_value,omitempty"`
+	BodyReplace string   `json:"body_replace,omitempty"`
 }
 
-// transformConditionsOutput is the JSON representation of transform conditions in output.
-type transformConditionsOutput struct {
-	URLPattern  string            `json:"url_pattern,omitempty"`
-	Methods     []string          `json:"methods,omitempty"`
-	HeaderMatch map[string]string `json:"header_match,omitempty"`
+// compileTransformRule compiles a transformRuleInput into an
+// httprules.TransformRule. Validation includes CWE-113 CRLF rejection on
+// header name/value, action-type enum decoding, and pattern compilation.
+func compileTransformRule(input transformRuleInput) (*httprules.TransformRule, error) {
+	if err := validateTransformRuleInput(input); err != nil {
+		return nil, err
+	}
+	dir, err := normalizeHTTPDirection(input.Direction)
+	if err != nil {
+		return nil, err
+	}
+	action, err := transformActionFromName(input.ActionType)
+	if err != nil {
+		return nil, err
+	}
+	rule, err := httprules.CompileTransformRule(
+		input.ID,
+		input.Priority,
+		dir,
+		input.HostPattern,
+		input.PathPattern,
+		input.Methods,
+		action,
+		input.HeaderName,
+		input.HeaderValue,
+		input.BodyPattern,
+		input.BodyReplace,
+	)
+	if err != nil {
+		return nil, err
+	}
+	rule.Enabled = input.Enabled
+	return rule, nil
 }
 
-// transformActionOutput is the JSON representation of a transform action in output.
-type transformActionOutput struct {
-	Type    string `json:"type"`
-	Header  string `json:"header,omitempty"`
-	Value   string `json:"value,omitempty"`
-	Pattern string `json:"pattern,omitempty"`
+// fromTransformRule converts an httprules.TransformRule into the JSON
+// output shape used by MCP tools.
+func fromTransformRule(r httprules.TransformRule) transformRuleOutput {
+	out := transformRuleOutput{
+		ID:          r.ID,
+		Enabled:     r.Enabled,
+		Priority:    r.Priority,
+		Direction:   string(r.Direction),
+		Methods:     r.Methods,
+		ActionType:  transformActionName(r.ActionType),
+		HeaderName:  r.HeaderName,
+		HeaderValue: r.HeaderValue,
+		BodyReplace: r.BodyReplace,
+	}
+	if r.HostPattern != nil {
+		out.HostPattern = r.HostPattern.String()
+	}
+	if r.PathPattern != nil {
+		out.PathPattern = r.PathPattern.String()
+	}
+	if r.BodyPattern != nil {
+		out.BodyPattern = r.BodyPattern.String()
+	}
+	return out
 }
 
-// toTransformRule converts an MCP input rule to a rules.Rule.
-func toTransformRule(input transformRuleInput) rules.Rule {
-	return rules.Rule{
-		ID:        input.ID,
-		Enabled:   input.Enabled,
-		Priority:  input.Priority,
-		Direction: rules.Direction(input.Direction),
-		Conditions: rules.Conditions{
-			URLPattern:  input.Conditions.URLPattern,
-			Methods:     input.Conditions.Methods,
-			HeaderMatch: input.Conditions.HeaderMatch,
-		},
-		Action: rules.Action{
-			Type:    rules.ActionType(input.Action.Type),
-			Header:  input.Action.Header,
-			Value:   input.Action.Value,
-			Pattern: input.Action.Pattern,
-		},
+// transformActionFromName decodes the JSON action_type string into the
+// httprules.TransformActionType enum.
+func transformActionFromName(name string) (httprules.TransformActionType, error) {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "add_header":
+		return httprules.TransformAddHeader, nil
+	case "set_header":
+		return httprules.TransformSetHeader, nil
+	case "remove_header":
+		return httprules.TransformRemoveHeader, nil
+	case "replace_body":
+		return httprules.TransformReplaceBody, nil
+	default:
+		return 0, fmt.Errorf("action_type: unknown value %q (expected add_header|set_header|remove_header|replace_body)", name)
 	}
 }
 
-// fromTransformRule converts a rules.Rule to an MCP output rule.
-func fromTransformRule(r rules.Rule) transformRuleOutput {
-	return transformRuleOutput{
-		ID:        r.ID,
-		Enabled:   r.Enabled,
-		Priority:  r.Priority,
-		Direction: string(r.Direction),
-		Conditions: transformConditionsOutput{
-			URLPattern:  r.Conditions.URLPattern,
-			Methods:     r.Conditions.Methods,
-			HeaderMatch: r.Conditions.HeaderMatch,
-		},
-		Action: transformActionOutput{
-			Type:    string(r.Action.Type),
-			Header:  r.Action.Header,
-			Value:   r.Action.Value,
-			Pattern: r.Action.Pattern,
-		},
+// transformActionName encodes the httprules.TransformActionType enum to
+// its JSON action_type string.
+func transformActionName(t httprules.TransformActionType) string {
+	switch t {
+	case httprules.TransformAddHeader:
+		return "add_header"
+	case httprules.TransformSetHeader:
+		return "set_header"
+	case httprules.TransformRemoveHeader:
+		return "remove_header"
+	case httprules.TransformReplaceBody:
+		return "replace_body"
+	default:
+		return ""
 	}
 }
 
 // validateTransformRuleInput checks a transform rule for CRLF injection in
 // header names and values (CWE-113).
 func validateTransformRuleInput(input transformRuleInput) error {
-	switch input.Action.Type {
+	switch strings.ToLower(strings.TrimSpace(input.ActionType)) {
 	case "add_header", "set_header":
-		if strings.ContainsAny(input.Action.Header, "\r\n") {
-			return fmt.Errorf("rule %q: header name contains CR/LF characters", input.ID)
+		if strings.ContainsAny(input.HeaderName, "\r\n") {
+			return fmt.Errorf("rule %q: header_name contains CR/LF characters", input.ID)
 		}
-		if strings.ContainsAny(input.Action.Value, "\r\n") {
-			return fmt.Errorf("rule %q: header value contains CR/LF characters", input.ID)
+		if strings.ContainsAny(input.HeaderValue, "\r\n") {
+			return fmt.Errorf("rule %q: header_value contains CR/LF characters", input.ID)
 		}
 	case "remove_header":
-		if strings.ContainsAny(input.Action.Header, "\r\n") {
-			return fmt.Errorf("rule %q: header name contains CR/LF characters", input.ID)
+		if strings.ContainsAny(input.HeaderName, "\r\n") {
+			return fmt.Errorf("rule %q: header_name contains CR/LF characters", input.ID)
 		}
 	}
 	return nil
@@ -143,26 +179,24 @@ func validateTransformRuleInput(input transformRuleInput) error {
 
 // applyTransformRules validates and sets auto-transform rules from the input.
 func (s *Server) applyTransformRules(inputs []transformRuleInput) error {
-	return applyTransformRulesHelper(s.pipeline.transformPipeline, inputs)
+	return applyTransformRulesHelper(s.pipeline.transformHTTPEngine, inputs)
 }
 
-// applyTransformRulesHelper validates and sets auto-transform rules on the given pipeline.
-// This is a standalone version of Server.applyTransformRules for use by handler structs.
-func applyTransformRulesHelper(pipeline *rules.Pipeline, inputs []transformRuleInput) error {
-	if pipeline == nil {
-		return fmt.Errorf("transform pipeline is not initialized")
+// applyTransformRulesHelper validates and sets auto-transform rules on the
+// given engine. Standalone for use by handler structs that don't carry
+// the full Server.
+func applyTransformRulesHelper(engine *httprules.TransformEngine, inputs []transformRuleInput) error {
+	if engine == nil {
+		return fmt.Errorf("transform engine is not initialized")
 	}
-
-	rulesList := make([]rules.Rule, len(inputs))
+	rulesList := make([]httprules.TransformRule, len(inputs))
 	for i, input := range inputs {
-		if err := validateTransformRuleInput(input); err != nil {
-			return err
+		r, err := compileTransformRule(input)
+		if err != nil {
+			return fmt.Errorf("rules[%d]: %w", i, err)
 		}
-		rulesList[i] = toTransformRule(input)
+		rulesList[i] = *r
 	}
-
-	if err := pipeline.SetRules(rulesList); err != nil {
-		return err
-	}
+	engine.SetRules(rulesList)
 	return nil
 }

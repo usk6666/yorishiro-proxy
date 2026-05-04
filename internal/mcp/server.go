@@ -225,7 +225,7 @@ func orDefaultConnector(c *Connector) *Connector {
 	if c != nil {
 		return c
 	}
-	return NewConnector(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	return NewConnector(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 }
 
 func orDefaultJobRunner(j *JobRunner) *JobRunner {

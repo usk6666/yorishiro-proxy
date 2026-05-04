@@ -102,13 +102,14 @@ type queryFilter struct {
 // availableResources lists all valid resource names for error messages.
 var availableResources = []string{"flows", "flow", "messages", "status", "config", "ca_cert", "intercept_queue", "macros", "macro", "fuzz_jobs", "fuzz_results", "technologies"}
 
-// validFilterProtocols lists accepted values for filter.protocol. Canonical
-// Message-type families are listed first; legacy literals follow for parallel
-// coexistence until N9. See protocol_family.go for the family expansion table.
-var validFilterProtocols = append(append([]string{},
-	filterProtocolFamilyValues...),
-	filterProtocolLegacyValues...,
-)
+// validFilterProtocols lists accepted values for filter.protocol. The
+// query tool accepts canonical Envelope.Protocol values only; the legacy
+// spellings ("HTTP/1.x", "HTTPS", "HTTP/2", "WebSocket", "gRPC", "gRPC-Web",
+// "TCP", "SOCKS5+*") that lived through the parallel-coexistence window
+// were retired in USK-705 (RFC-001 N9 design review Q8).
+var validFilterProtocols = []string{
+	"http", "ws", "grpc", "grpc-web", "sse", "raw", "tls-handshake",
+}
 
 // validFilterSchemes lists valid values for filter.scheme.
 var validFilterSchemes = []string{"https", "http", "wss", "ws", "tcp"}
@@ -373,17 +374,11 @@ func buildFlowListOptions(input queryInput) flow.StreamListOptions {
 		SortBy: input.SortBy,
 	}
 	if input.Filter != nil {
-		// Translate the user-facing protocol value into Store options.
-		// Canonical family values (http, ws, ...) expand into a list of
-		// new+legacy literal Stream.Protocol spellings via Protocols.
-		// Legacy values (HTTPS, HTTP/2, ...) stay strict via Protocol.
-		// Unknown values are already rejected upstream by validateEnum.
+		// Filter.Protocol accepts canonical Envelope.Protocol values only
+		// (http, ws, grpc, grpc-web, sse, raw, tls-handshake). Unknown
+		// values are rejected upstream by validateEnum.
 		if p := input.Filter.Protocol; p != "" {
-			if expanded := expandProtocolFilter(p); len(expanded) > 1 {
-				opts.Protocols = expanded
-			} else {
-				opts.Protocol = p
-			}
+			opts.Protocol = p
 		}
 		opts.Scheme = input.Filter.Scheme
 		opts.Method = input.Filter.Method
@@ -1060,7 +1055,6 @@ func (s *Server) handleQueryStatus(ctx context.Context) (*gomcp.CallToolResult, 
 // queryConfigResult is the response for the config resource.
 type queryConfigResult struct {
 	UpstreamProxy    string                           `json:"upstream_proxy"`
-	CaptureScope     *queryScopeResult                `json:"capture_scope"`
 	TLSPassthrough   *queryPassthroughResult          `json:"tls_passthrough"`
 	TCPForwards      map[string]*config.ForwardConfig `json:"tcp_forwards,omitempty"`
 	EnabledProtocols []string                         `json:"enabled_protocols,omitempty"`
@@ -1086,37 +1080,18 @@ type queryClientCertResult struct {
 	KeyPath  string `json:"key_path"`
 }
 
-// queryScopeResult holds capture scope rules in the config response.
-type queryScopeResult struct {
-	Includes []scopeRuleOutput `json:"includes"`
-	Excludes []scopeRuleOutput `json:"excludes"`
-}
-
 // queryPassthroughResult holds TLS passthrough patterns in the config response.
 type queryPassthroughResult struct {
 	Patterns []string `json:"patterns"`
 	Count    int      `json:"count"`
 }
 
-// handleQueryConfig returns the current configuration (capture scope + TLS passthrough).
+// handleQueryConfig returns the current configuration (TLS passthrough + connector knobs).
 func (s *Server) handleQueryConfig() (*gomcp.CallToolResult, *queryConfigResult, error) {
 	result := &queryConfigResult{}
 
 	if !managerIsNil(s.connector.manager) {
 		result.UpstreamProxy = proxy.RedactProxyURL(s.connector.manager.UpstreamProxy())
-	}
-
-	if s.connector.scope != nil {
-		includes, excludes := s.connector.scope.Rules()
-		result.CaptureScope = &queryScopeResult{
-			Includes: fromScopeRules(includes),
-			Excludes: fromScopeRules(excludes),
-		}
-	} else {
-		result.CaptureScope = &queryScopeResult{
-			Includes: []scopeRuleOutput{},
-			Excludes: []scopeRuleOutput{},
-		}
 	}
 
 	if s.connector.passthrough != nil {

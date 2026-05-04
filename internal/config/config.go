@@ -496,15 +496,12 @@ func (d *Duration) UnmarshalJSON(data []byte) error {
 // so users can reuse the same JSON structure for both file-based configuration
 // and runtime proxy_start invocations.
 //
-// Complex nested fields (capture_scope, intercept_rules, auto_transform) are
-// stored as json.RawMessage to defer parsing to the MCP layer, avoiding
-// circular dependencies between the config and mcp packages.
+// Complex nested fields (intercept_rules, auto_transform) are stored as
+// json.RawMessage to defer parsing to the MCP layer, avoiding circular
+// dependencies between the config and mcp packages.
 type ProxyConfig struct {
 	// ListenAddr is the TCP address the proxy listens on (e.g. "127.0.0.1:8080").
 	ListenAddr string `json:"listen_addr,omitempty"`
-
-	// CaptureScope configures which requests are recorded to the flow store.
-	CaptureScope json.RawMessage `json:"capture_scope,omitempty"`
 
 	// TLSPassthrough is a list of domain patterns that bypass TLS interception.
 	TLSPassthrough []string `json:"tls_passthrough,omitempty"`

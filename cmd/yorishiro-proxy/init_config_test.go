@@ -700,36 +700,6 @@ func TestLogging_FromProxyConfigFile(t *testing.T) {
 	}
 }
 
-// --- Capture Scope config tests ---
-
-func TestCaptureScope_FromConfigFile(t *testing.T) {
-	dir := t.TempDir()
-	cfgPath := filepath.Join(dir, "config.json")
-	writeTestFile(t, cfgPath, `{
-		"capture_scope": {
-			"include": ["*.example.com"],
-			"exclude": ["static.example.com"]
-		}
-	}`)
-
-	proxyCfg, err := config.LoadFile(cfgPath)
-	if err != nil {
-		t.Fatalf("load config: %v", err)
-	}
-	if len(proxyCfg.CaptureScope) == 0 {
-		t.Fatal("expected non-empty CaptureScope raw JSON")
-	}
-
-	// Verify it is valid JSON that can be parsed.
-	var scope map[string]interface{}
-	if err := json.Unmarshal(proxyCfg.CaptureScope, &scope); err != nil {
-		t.Fatalf("unmarshal capture_scope: %v", err)
-	}
-	if _, ok := scope["include"]; !ok {
-		t.Error("expected 'include' key in capture_scope")
-	}
-}
-
 // --- Intercept Rules config tests ---
 
 func TestInterceptRules_FromConfigFile(t *testing.T) {
@@ -828,9 +798,6 @@ def on_request(flow):
 				"path": pluginPath,
 			},
 		},
-		"capture_scope": map[string]interface{}{
-			"include": []string{"*.example.com"},
-		},
 		"intercept_rules": []map[string]interface{}{
 			{"match": map[string]string{"url_pattern": "*"}},
 		},
@@ -888,9 +855,6 @@ def on_request(flow):
 	}
 	if len(proxyCfg.Plugins) == 0 {
 		t.Error("expected non-empty Plugins")
-	}
-	if len(proxyCfg.CaptureScope) == 0 {
-		t.Error("expected non-empty CaptureScope")
 	}
 	if len(proxyCfg.InterceptRules) == 0 {
 		t.Error("expected non-empty InterceptRules")

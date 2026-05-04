@@ -97,26 +97,6 @@ func formatFingerprint(b []byte) string {
 	return strings.Join(parts, ":")
 }
 
-// scopeRuleInput is the JSON representation of a scope rule for MCP tool input.
-type scopeRuleInput struct {
-	// Hostname matches the request's hostname (case-insensitive, exact match).
-	// Supports wildcard prefix "*.example.com" to match all subdomains.
-	Hostname string `json:"hostname,omitempty" jsonschema:"hostname pattern (e.g. example.com, *.example.com)"`
-
-	// URLPrefix matches the beginning of the request URL path (case-sensitive).
-	URLPrefix string `json:"url_prefix,omitempty" jsonschema:"URL path prefix (e.g. /api/)"`
-
-	// Method matches the HTTP method (case-insensitive, exact match).
-	Method string `json:"method,omitempty" jsonschema:"HTTP method (e.g. GET, POST)"`
-}
-
-// scopeRuleOutput is the JSON representation of a scope rule in MCP tool output.
-type scopeRuleOutput struct {
-	Hostname  string `json:"hostname,omitempty"`
-	URLPrefix string `json:"url_prefix,omitempty"`
-	Method    string `json:"method,omitempty"`
-}
-
 // connInfoResult is the connection metadata in the get_session/query response.
 type connInfoResult struct {
 	// ClientAddr is the client's remote address (e.g., "192.168.1.100:54321").
@@ -131,32 +111,6 @@ type connInfoResult struct {
 	TLSALPN string `json:"tls_alpn,omitempty"`
 	// TLSServerCertSubject is the subject DN of the upstream server certificate.
 	TLSServerCertSubject string `json:"tls_server_cert_subject,omitempty"`
-}
-
-// toScopeRules converts MCP input rules to proxy.ScopeRule slice.
-func toScopeRules(inputs []scopeRuleInput) []proxy.ScopeRule {
-	rules := make([]proxy.ScopeRule, len(inputs))
-	for i, in := range inputs {
-		rules[i] = proxy.ScopeRule{
-			Hostname:  in.Hostname,
-			URLPrefix: in.URLPrefix,
-			Method:    in.Method,
-		}
-	}
-	return rules
-}
-
-// fromScopeRules converts proxy.ScopeRule slice to MCP output rules.
-func fromScopeRules(rules []proxy.ScopeRule) []scopeRuleOutput {
-	out := make([]scopeRuleOutput, len(rules))
-	for i, r := range rules {
-		out[i] = scopeRuleOutput{
-			Hostname:  r.Hostname,
-			URLPrefix: r.URLPrefix,
-			Method:    r.Method,
-		}
-	}
-	return out
 }
 
 // checkTargetScopeURL checks a URL against the target scope rules.

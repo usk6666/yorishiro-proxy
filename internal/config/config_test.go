@@ -1,7 +1,6 @@
 package config
 
 import (
-	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -393,10 +392,6 @@ func TestLoadFile_ValidConfig(t *testing.T) {
 
 	content := `{
 		"listen_addr": "127.0.0.1:9090",
-		"capture_scope": {
-			"includes": [{"hostname": "*.target.com"}],
-			"excludes": [{"hostname": "cdn.example.com"}]
-		},
 		"tls_passthrough": ["pinned-service.com"],
 		"intercept_rules": [],
 		"auto_transform": [],
@@ -424,9 +419,6 @@ func TestLoadFile_ValidConfig(t *testing.T) {
 			got = fc.Target
 		}
 		t.Errorf("TCPForwards[3306].Target = %q, want %q", got, "db.example.com:3306")
-	}
-	if cfg.CaptureScope == nil {
-		t.Fatal("CaptureScope is nil, want non-nil")
 	}
 }
 
@@ -510,53 +502,6 @@ func TestLoadFile_EmptyFile(t *testing.T) {
 	_, err := LoadFile(path)
 	if err == nil {
 		t.Fatal("expected error for empty file, got nil")
-	}
-}
-
-func TestLoadFile_CaptureScope_RawMessage(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "scope.json")
-
-	content := `{
-		"capture_scope": {
-			"includes": [{"hostname": "api.example.com", "url_prefix": "/v1/", "method": "POST"}],
-			"excludes": [{"hostname": "static.example.com"}]
-		}
-	}`
-	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
-		t.Fatalf("write config file: %v", err)
-	}
-
-	cfg, err := LoadFile(path)
-	if err != nil {
-		t.Fatalf("LoadFile: %v", err)
-	}
-
-	// Verify capture_scope is stored as raw JSON and can be unmarshalled.
-	var scope struct {
-		Includes []struct {
-			Hostname  string `json:"hostname"`
-			URLPrefix string `json:"url_prefix"`
-			Method    string `json:"method"`
-		} `json:"includes"`
-		Excludes []struct {
-			Hostname string `json:"hostname"`
-		} `json:"excludes"`
-	}
-	if err := json.Unmarshal(cfg.CaptureScope, &scope); err != nil {
-		t.Fatalf("unmarshal CaptureScope: %v", err)
-	}
-	if len(scope.Includes) != 1 {
-		t.Fatalf("includes = %d, want 1", len(scope.Includes))
-	}
-	if scope.Includes[0].Hostname != "api.example.com" {
-		t.Errorf("includes[0].hostname = %q, want %q", scope.Includes[0].Hostname, "api.example.com")
-	}
-	if scope.Includes[0].URLPrefix != "/v1/" {
-		t.Errorf("includes[0].url_prefix = %q, want %q", scope.Includes[0].URLPrefix, "/v1/")
-	}
-	if len(scope.Excludes) != 1 {
-		t.Fatalf("excludes = %d, want 1", len(scope.Excludes))
 	}
 }
 
