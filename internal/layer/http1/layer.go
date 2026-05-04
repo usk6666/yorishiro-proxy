@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"strings"
+	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
@@ -172,6 +173,7 @@ func New(conn net.Conn, streamID string, direction envelope.Direction, opts ...O
 	l.channel = &channel{
 		reader:    reader,
 		writer:    conn,
+		conn:      conn,
 		streamID:  streamID,
 		direction: direction,
 		scheme:    o.scheme,
@@ -233,12 +235,18 @@ func (l *Layer) Close() error {
 // \r\n\r\n of the 101 Switching Protocols response — those bytes are the
 // first WebSocket frame(s) and must be parsed by the next layer.
 //
+// Any read deadline previously installed by [Layer.Interrupt] is reset to
+// zero so the successor Layer's reads operate without a stale past-deadline.
+//
 // Calling DetachStream more than once returns a sentinel error.
 func (l *Layer) DetachStream() (io.Reader, io.Writer, io.Closer, error) {
 	if l.detached {
 		return nil, nil, nil, errors.New("http1: stream already detached")
 	}
 	l.detached = true
+	// Clear any past-deadline a prior Interrupt installed; the successor
+	// Layer (ws / sse) must read without inheriting the wake-up trigger.
+	_ = l.conn.SetReadDeadline(time.Time{})
 	if l.channel != nil {
 		l.channel.markTerminated(io.EOF)
 		return l.channel.reader, l.conn, l.conn, nil
@@ -247,6 +255,31 @@ func (l *Layer) DetachStream() (io.Reader, io.Writer, io.Closer, error) {
 	// but if a future refactor ever leaves channel nil we still surface
 	// the underlying conn so the caller can drive the wire.
 	return l.conn, l.conn, l.conn, nil
+}
+
+// Interrupt forwards to the channel's Interrupt method so external callers
+// (and tests) can wake a goroutine parked inside Channel.Next without going
+// through the unexported channel type. session.upstreamToClient prefers the
+// direct Channel.Interrupt path via the channelInterrupter interface; this
+// Layer-level wrapper is for callers that hold the Layer rather than the
+// Channel (e.g., unit tests).
+//
+// See channel.Interrupt for the mechanism and limitations.
+//
+// Returns nil after DetachStream (the channel keeps its conn pointer until
+// terminated; SetReadDeadline on a closed conn returns an error which we
+// surface, but Interrupt itself does not close the conn).
+func (l *Layer) Interrupt() error {
+	if l.detached {
+		return nil
+	}
+	if l.channel != nil {
+		return l.channel.Interrupt()
+	}
+	if l.conn == nil {
+		return nil
+	}
+	return l.conn.SetReadDeadline(time.Now())
 }
 
 // DetachStreamingBody hands the still-open response body io.ReadCloser to
@@ -260,6 +293,9 @@ func (l *Layer) DetachStream() (io.Reader, io.Writer, io.Closer, error) {
 // for the conn (the successor (e.g. sse.Channel) is responsible for closing
 // it). The internal Channel is marked terminated so any observer parked on
 // Closed() unblocks.
+//
+// Any read deadline previously installed by [Layer.Interrupt] is reset to
+// zero so the successor reader operates without a stale past-deadline.
 func (l *Layer) DetachStreamingBody() (io.ReadCloser, error) {
 	if l.detached {
 		return nil, errors.New("http1: stream already detached")
@@ -270,6 +306,9 @@ func (l *Layer) DetachStreamingBody() (io.ReadCloser, error) {
 	body := l.channel.streamingBody
 	l.channel.streamingBody = nil
 	l.detached = true
+	// Clear any past-deadline a prior Interrupt installed; the successor
+	// (sse) must read without inheriting the wake-up trigger.
+	_ = l.conn.SetReadDeadline(time.Time{})
 	l.channel.markTerminated(io.EOF)
 	return &streamingBodyCloser{r: body, conn: l.conn}, nil
 }

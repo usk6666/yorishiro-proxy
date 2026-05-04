@@ -14,17 +14,13 @@
 // USK-650, this keeps the test focused on the layer/ws + upgrade swap
 // plumbing without dragging the production OnStack wiring into scope.
 //
-// USK-643 "ctx-deafness" workaround. http1.channel.Next does not honour
-// ctx, so once the upstream-side goroutine returns ErrUpgradePending the
-// client-side goroutine remains parked on its next Next call. We mirror
-// the precedent set by internal/session/session_upgrade_test.go (search
-// TestRunStackSession_WSUpgrade_SwapsBothLayers): the "browser" goroutine
-// writes a deliberately malformed second "request" on the client wire
-// after seeing the 101, which forces clientToUpstream's parked Next to
-// return a parse error. clientToUpstream then converts that parse error
-// into ErrUpgradePending because the receive-side goroutine already
-// latched the notice. This is a TEST-ONLY mechanism — the production
-// unblock for HTTP/1.x WS upgrade is downstream of USK-643's PR (D2).
+// USK-701: production WS upgrade unblock. http1.channel.Next does not honor
+// ctx, but session.runUpgradeWS now calls http1.Layer.Interrupt() before
+// DetachStream — which surfaces os.ErrDeadlineExceeded to the parked
+// clientToUpstream Next() so RunStackSession can perform the swap without
+// any test-only sacrificial bytes. The "browser" goroutine here uses the
+// compliant RFC 6455 §4.1 sequence (write Upgrade, read 101, then wait for
+// the swap to complete).
 package ws_test
 
 import (
@@ -212,24 +208,6 @@ func newWSHarness(t *testing.T, ctx context.Context, opts harnessOpts) *wsHarnes
 
 	logger := slog.Default()
 	steps := []pipeline.Step{
-		// USK-643 unblock side-effect mitigation. Once UpgradeStep latches
-		// the receive-side notice, the next client-side Next call may
-		// surface the test-only malformed-bytes "unblock" sequence as a
-		// bogus HTTPMessage envelope (the http1 parser fills in defaults
-		// for missing fields rather than rejecting outright). Dropping
-		// every Send envelope while the upgrade is pending prevents that
-		// bogus request from being serialized onto the upstream wire,
-		// where it would corrupt the WS frame stream the test reads next.
-		// This is a TEST-ONLY guard; production code paths do not need
-		// it because the production OnStack wiring (USK-643 PR D2) will
-		// replace the malformed-bytes mechanism entirely.
-		stepFunc(func(ctx context.Context, env *envelope.Envelope) pipeline.Result {
-			notice := session.UpgradeNoticeFromContext(ctx)
-			if notice != nil && notice.Pending() != "" && env.Direction == envelope.Send {
-				return pipeline.Result{Action: pipeline.Drop}
-			}
-			return pipeline.Result{}
-		}),
 		pipeline.NewHostScopeStep(nil),
 		pipeline.NewHTTPScopeStep(nil),
 		pipeline.NewSafetyStep(nil, opts.safetyEngine, nil, logger),
@@ -277,8 +255,8 @@ func newWSHarness(t *testing.T, ctx context.Context, opts harnessOpts) *wsHarnes
 		case <-time.After(3 * time.Second):
 			// A 3s cleanup miss after both wire ends are closed indicates
 			// a leaked session goroutine. Fail loudly rather than silently
-			// logging — the production OnStack cascade (USK-643 D3) is
-			// expected to drain both sides on a one-sided close.
+			// logging — the production OnStack cascade is expected to
+			// drain both sides on a one-sided close.
 			t.Errorf("harness cleanup: session did not exit within 3s (leaked session goroutine)")
 		}
 		_ = h.stack.Close()
@@ -288,18 +266,17 @@ func newWSHarness(t *testing.T, ctx context.Context, opts harnessOpts) *wsHarnes
 }
 
 // performUpgrade drives the HTTP/1 WebSocket Upgrade handshake from both
-// sides, then writes the test-only USK-643 unblock byte sequence on the
-// browser side after the 101 has been read.
+// sides. The upstream "server" goroutine reads the upgrade request and
+// writes a 101 response. The "browser" goroutine writes the upgrade
+// request and reads the 101 — the compliant RFC 6455 §4.1 sequence with
+// no further writes until the swap completes.
 //
-// The upstream "server" goroutine reads the upgrade request, writes a 101
-// response. The browser goroutine writes the upgrade request, reads the
-// 101, then writes the malformed-bytes unblock sequence (see package
-// docstring + USK-643 references).
+// Production unblock (USK-701): runUpgradeWS calls http1.Layer.Interrupt()
+// before DetachStream, so the proxy's parked clientToUpstream Next() wakes
+// on os.ErrDeadlineExceeded and the swap proceeds without test-only bytes.
 //
 // performUpgrade returns when both layers have been swapped to *ws.Layer
-// (verified by polling stack.ClientTopmost). The returned readerCh signals
-// the upstreamB-side bufio.Reader so subsequent frame round-trips can
-// continue from the bytes the http1 parser left in the buffer.
+// (verified by polling stack.ClientTopmost).
 func (h *wsHarness) performUpgrade(ctx context.Context) {
 	h.t.Helper()
 
@@ -318,9 +295,7 @@ func (h *wsHarness) performUpgrade(ctx context.Context) {
 		"\r\n"
 
 	// Server: read request, write 101.
-	upstreamReady := make(chan struct{})
 	go func() {
-		defer close(upstreamReady)
 		br := bufio.NewReader(h.upstreamB)
 		// Drain the request headers up to and including the blank line.
 		for {
@@ -335,16 +310,11 @@ func (h *wsHarness) performUpgrade(ctx context.Context) {
 		_, _ = h.upstreamB.Write([]byte(resp101))
 	}()
 
-	// Browser: write request, read 101, then write the test-only unblock
-	// byte sequence to release the proxy's parked clientToUpstream Next.
-	// USK-643 PR D2: production WS upgrade plumbing replaces this with a
-	// real OnStack-driven detach. Tests retain this mechanism.
+	// Browser: write upgrade request, then read the 101 response.
 	if _, err := h.clientA.Write([]byte(req)); err != nil {
 		h.t.Fatalf("write upgrade request: %v", err)
 	}
 
-	// Drain the 101 response. The http1 parser may emit extra body bytes
-	// (none expected here), so we just consume up to the blank line.
 	clientReader := bufio.NewReader(h.clientA)
 	for {
 		_ = h.clientA.SetReadDeadline(time.Now().Add(3 * time.Second))
@@ -357,20 +327,6 @@ func (h *wsHarness) performUpgrade(ctx context.Context) {
 		}
 	}
 	_ = h.clientA.SetReadDeadline(time.Time{})
-
-	// Wait for the server goroutine to finish writing the 101 so the
-	// proxy has fully observed the upgrade pair before we issue the
-	// unblock sequence.
-	select {
-	case <-upstreamReady:
-	case <-time.After(3 * time.Second):
-		h.t.Fatalf("server did not write 101 in time")
-	}
-
-	// USK-643 unblock — see package docstring.
-	if _, err := h.clientA.Write([]byte("\x00\x00\x00\x00\r\n\r\n")); err != nil {
-		h.t.Fatalf("write unblock: %v", err)
-	}
 
 	// Poll for the swap. The recursive RunStackSession installs the
 	// new ws.Layer pair before resuming reads.
@@ -1090,17 +1046,6 @@ func TestWSUpgrade_AbnormalCloseNoCloseFrame(t *testing.T) {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-// stepFunc adapts a closure into a pipeline.Step. Used to inject the
-// test-only "drop Send envelopes once upgrade is pending" guard without
-// adding production code. Match the pipeline.Step interface contract:
-// Process(ctx, env) Result.
-type stepFunc func(ctx context.Context, env *envelope.Envelope) pipeline.Result
-
-// Process implements pipeline.Step.
-func (f stepFunc) Process(ctx context.Context, env *envelope.Envelope) pipeline.Result {
-	return f(ctx, env)
-}
 
 // wsFlowsOnly returns flows whose Metadata["protocol"]=="ws", filtering out
 // the HTTP envelopes recorded for the Upgrade request/101 response.

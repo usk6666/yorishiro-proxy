@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/url"
 	"strconv"
 	"strings"
@@ -45,6 +46,7 @@ type bodyOpts struct {
 type channel struct {
 	reader    *bufio.Reader // created by Layer
 	writer    io.Writer
+	conn      net.Conn // same underlying conn as reader/writer; held for SetReadDeadline (USK-701)
 	streamID  string
 	direction envelope.Direction
 	scheme    string
@@ -85,6 +87,35 @@ type channel struct {
 
 // StreamID returns the connection-level identifier for this channel.
 func (c *channel) StreamID() string { return c.streamID }
+
+// Interrupt unblocks any goroutine currently parked inside Next on the
+// underlying conn. Mechanism is conn.SetReadDeadline(time.Now()) — the
+// in-flight Read inside parser.ParseRequest → bufio.Reader → conn.Read
+// surfaces os.ErrDeadlineExceeded so Next returns and the session-level
+// upgrade-pending precedence rule (clientToUpstream / upstreamToClient
+// in session.go) maps the parse-error to ErrUpgradePending.
+//
+// Used by the swap orchestrator (session.upstreamToClient) the moment it
+// observes UpgradeNotice.Pending() != "" so that the parked peer goroutine
+// can exit, errgroup.Wait can return, and runUpgradeWS / runUpgradeSSE
+// can run DetachStream + ws.New / sse.Wrap. http1.channel.Next does not
+// honor ctx, so the errgroup ctx cancellation alone is insufficient.
+//
+// Idempotent: a second call (or a call on a never-parked channel) is a
+// cheap stdlib no-op. Layer.DetachStream resets the deadline before
+// transferring conn ownership so the post-swap Layer reads normally.
+//
+// LIMITATION: a non-RFC-6455-compliant client that pipelines its first
+// WebSocket frame into the same TCP segment as the Upgrade request can
+// still have those frame bytes consumed by a synchronous failing parse
+// before Interrupt has a chance to fire. RFC 6455 §4.1 forbids that
+// pipelining.
+func (c *channel) Interrupt() error {
+	if c.conn == nil {
+		return nil
+	}
+	return c.conn.SetReadDeadline(time.Now())
+}
 
 // Next reads the next HTTP message from the wire and returns it as an Envelope.
 //
