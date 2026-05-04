@@ -5,7 +5,11 @@
 // Wire bytes -> Codec.Next() -> Exchange -> Pipeline.Run() -> Exchange -> Codec.Send() -> Wire bytes
 package exchange
 
-import "net/url"
+import (
+	"net/url"
+
+	"github.com/usk6666/yorishiro-proxy/internal/envelope"
+)
 
 // Direction indicates the data flow direction.
 type Direction int
@@ -48,10 +52,11 @@ func (p Protocol) String() string {
 }
 
 // KeyValue is a single header entry. Order and case are preserved.
-type KeyValue struct {
-	Name  string
-	Value string
-}
+//
+// Aliased to envelope.KeyValue so the safety engine (rehomed to operate on
+// envelope.KeyValue at USK-704) accepts headers from this dying tree without
+// per-call-site conversions. Both packages die together at USK-697 final.
+type KeyValue = envelope.KeyValue
 
 // Exchange is the protocol-agnostic message unit.
 //

@@ -358,7 +358,7 @@ func keyValuesToExchangeKV(kvs []envelope.KeyValue) []exchange.KeyValue {
 	}
 	out := make([]exchange.KeyValue, len(kvs))
 	for i, kv := range kvs {
-		out[i] = exchange.KeyValue{Name: kv.Name, Value: kv.Value}
+		out[i] = exchange.KeyValue(kv)
 	}
 	return out
 }
