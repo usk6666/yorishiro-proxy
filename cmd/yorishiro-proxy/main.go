@@ -235,9 +235,6 @@ func runWithFlags(ctx context.Context, fs *flag.FlagSet, args []string) error {
 	// Initialize TLS passthrough list and populate from config.
 	passthrough := initPassthroughList(cfg, logger)
 
-	// Create shared capture scope for controlling flow recording.
-	scope := proxy.NewCaptureScope()
-
 	// Initialize the RFC-001 HoldQueue + per-protocol intercept engines
 	// shared between pipeline.InterceptStep (live data path via
 	// proxybuild) and the MCP intercept / configure tools.
@@ -252,6 +249,13 @@ func runWithFlags(ctx context.Context, fs *flag.FlagSet, args []string) error {
 	}
 	defer pluginv2Engine.Close()
 
+	// Initialize the per-protocol HTTP transform engine. Threaded into
+	// both proxybuild.Deps (live data path TransformStep) and mcp.Pipeline
+	// so MCP-driven configure auto_transform changes reach the wire.
+	// WS/gRPC transform engines are not yet exposed by the auto_transform
+	// MCP schema (deferred per RFC-001 N9 design review 2026-05-04).
+	httpTransformEngine := httprules.NewTransformEngine()
+
 	// Apply transport flags before building options so MCPHTTPAddr is correct.
 	if noHTTPMCP {
 		cfg.MCPHTTPAddr = ""
@@ -259,7 +263,7 @@ func runWithFlags(ctx context.Context, fs *flag.FlagSet, args []string) error {
 
 	return assembleAndRunMCPServer(ctx, cfg, proxyCfg, ca, issuer, store, pluginv2Engine,
 		holdQueue, httpInterceptEngine, wsInterceptEngine, grpcInterceptEngine,
-		passthrough, scope,
+		httpTransformEngine, passthrough,
 		targetScopePolicy, targetScopePolicySource, openBrowser, stdioMCP, logger)
 }
 
@@ -279,8 +283,8 @@ func assembleAndRunMCPServer(
 	httpInterceptEngine *httprules.InterceptEngine,
 	wsInterceptEngine *wsrules.InterceptEngine,
 	grpcInterceptEngine *grpcrules.InterceptEngine,
+	httpTransformEngine *httprules.TransformEngine,
 	passthrough *proxy.PassthroughList,
-	scope *proxy.CaptureScope,
 	targetScopePolicy *config.TargetScopePolicyConfig,
 	targetScopePolicySource string,
 	openBrowserFlag, stdioMCP bool,
@@ -303,7 +307,7 @@ func assembleAndRunMCPServer(
 
 	manager, err := assembleLiveManager(ctx, cfg, proxyCfg, store, issuer, pluginv2Engine,
 		holdQueue, httpInterceptEngine, wsInterceptEngine, grpcInterceptEngine,
-		passthrough, scope, rateLimiter, safetyEngine, logger)
+		httpTransformEngine, passthrough, rateLimiter, safetyEngine, logger)
 	if err != nil {
 		return err
 	}
@@ -319,8 +323,8 @@ func assembleAndRunMCPServer(
 	}()
 
 	mcpComponents, webUIToken, opts, err := buildMCPComponents(ctx, cfg, proxyCfg, ca, issuer, store, manager,
-		passthrough, scope, holdQueue, httpInterceptEngine, wsInterceptEngine, grpcInterceptEngine,
-		pluginv2Engine, hostTLSRegistry, tlsTransport, targetScope, rateLimiter, safetyEngine,
+		passthrough, holdQueue, httpInterceptEngine, wsInterceptEngine, grpcInterceptEngine,
+		pluginv2Engine, httpTransformEngine, hostTLSRegistry, tlsTransport, targetScope, rateLimiter, safetyEngine,
 		targetScopePolicySource, logger)
 	if err != nil {
 		return err
@@ -541,12 +545,12 @@ func buildMCPComponents(
 	store *flow.SQLiteStore,
 	manager *proxybuild.Manager,
 	passthrough *proxy.PassthroughList,
-	scope *proxy.CaptureScope,
 	holdQueue *rulescommon.HoldQueue,
 	httpInterceptEngine *httprules.InterceptEngine,
 	wsInterceptEngine *wsrules.InterceptEngine,
 	grpcInterceptEngine *grpcrules.InterceptEngine,
 	pluginv2Engine *pluginv2.Engine,
+	httpTransformEngine *httprules.TransformEngine,
 	hostTLSRegistry *transport.HostTLSRegistry,
 	tlsTransport transport.TLSTransport,
 	targetScope *proxy.TargetScope,
@@ -569,14 +573,13 @@ func buildMCPComponents(
 			wsInterceptEngine,
 			grpcInterceptEngine,
 			holdQueue,
-			nil, // legacy auto-transform pipeline — USK-705 routes auto_transform via httprules.TransformEngine.
+			httpTransformEngine,
 			safetyEngine,
 			nil, // safetyEngineSetters — legacy per-handler propagation gone with USK-706.
 		),
 		connector: mcp.NewConnector(
 			manager,
 			passthrough,
-			scope,
 			targetScope,
 			hostTLSRegistry,
 			tlsTransport,
@@ -1042,8 +1045,8 @@ func assembleLiveManager(
 	httpInterceptEngine *httprules.InterceptEngine,
 	wsInterceptEngine *wsrules.InterceptEngine,
 	grpcInterceptEngine *grpcrules.InterceptEngine,
+	httpTransformEngine *httprules.TransformEngine,
 	passthrough *proxy.PassthroughList,
-	scope *proxy.CaptureScope,
 	rateLimiter *proxy.RateLimiter,
 	safetyEngine *safety.Engine,
 	logger *slog.Logger,
@@ -1051,7 +1054,7 @@ func assembleLiveManager(
 	buildCfg := newLiveBuildConfig(appCtx, cfg, proxyCfg, issuer, pluginv2Engine, store, logger)
 	return newLiveManager(cfg, proxyCfg, store, issuer, pluginv2Engine,
 		holdQueue, httpInterceptEngine, wsInterceptEngine, grpcInterceptEngine,
-		passthrough, scope, rateLimiter, safetyEngine, buildCfg, logger)
+		httpTransformEngine, passthrough, rateLimiter, safetyEngine, buildCfg, logger)
 }
 
 // newLiveBuildConfig assembles the connector.BuildConfig consumed by every
@@ -1109,7 +1112,7 @@ func newLiveBuildConfig(
 
 // newLiveManager constructs the live RFC-001 proxybuild.Manager. The
 // StackFactory closure captures the per-process singletons (logger,
-// store, build config, plugin engine, hold queue, scope, rate limiter,
+// store, build config, plugin engine, hold queue, rate limiter,
 // passthrough list) so each StartNamed call assembles a Stack pointing
 // at the same dependencies.
 //
@@ -1126,8 +1129,8 @@ func newLiveManager(
 	httpInterceptEngine *httprules.InterceptEngine,
 	wsInterceptEngine *wsrules.InterceptEngine,
 	grpcInterceptEngine *grpcrules.InterceptEngine,
+	httpTransformEngine *httprules.TransformEngine,
 	passthrough *proxy.PassthroughList,
-	scope *proxy.CaptureScope,
 	rateLimiter *proxy.RateLimiter,
 	safetyEngine *safety.Engine,
 	buildCfg *connector.BuildConfig,
@@ -1136,16 +1139,7 @@ func newLiveManager(
 	// proxy.PassthroughList and proxy.RateLimiter are type aliases for the
 	// connector.* equivalents (see internal/proxy/passthrough.go and
 	// internal/proxy/ratelimit.go), so they can be threaded directly into
-	// proxybuild.Deps. The legacy proxy.CaptureScope is NOT aliased (it
-	// predates the connector.TargetScope rewrite); the live data path
-	// therefore cannot honor it yet — Warn loud at boot when the operator
-	// has configured non-empty rules so the policy gap is visible
-	// (USK-697 follow-up will adapt the legacy CaptureScope).
-	if scope != nil && !scope.IsEmpty() {
-		logger.Warn("live data path does not yet honor legacy proxy.CaptureScope; all in-scope hosts will be MITM'd until USK-697 wires the connector.TargetScope adapter",
-			"scope_rules_present", true)
-	}
-
+	// proxybuild.Deps.
 	factory := func(ctx context.Context, name, addr string) (*proxybuild.Stack, error) {
 		return proxybuild.BuildLiveStack(ctx, proxybuild.Deps{
 			Logger:              logger,
@@ -1158,6 +1152,7 @@ func newLiveManager(
 			HTTPInterceptEngine: httpInterceptEngine,
 			WSInterceptEngine:   wsInterceptEngine,
 			GRPCInterceptEngine: grpcInterceptEngine,
+			HTTPTransformEngine: httpTransformEngine,
 			PeekTimeout:         cfg.PeekTimeout,
 			MaxConnections:      cfg.MaxConnections,
 			PassthroughList:     passthrough,

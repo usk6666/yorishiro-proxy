@@ -21,7 +21,6 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/pluginv2"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
-	"github.com/usk6666/yorishiro-proxy/internal/proxy/rules"
 	"github.com/usk6666/yorishiro-proxy/internal/rules/common"
 	grpcrules "github.com/usk6666/yorishiro-proxy/internal/rules/grpc"
 	httprules "github.com/usk6666/yorishiro-proxy/internal/rules/http"
@@ -36,7 +35,7 @@ import (
 func newServer(ctx context.Context, ca *cert.CA, store flow.Store, manager proxyManager, opts ...ServerOption) *Server {
 	misc := NewMisc(ctx, ca, nil, "", nil, nil)
 	pipe := NewPipeline(nil, nil, nil, nil, nil, nil, nil)
-	conn := NewConnector(manager, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	conn := NewConnector(manager, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 	jr := NewJobRunner(nil, nil, nil)
 	fs := NewFlowStore(store)
 	me := NewMacroEngine()
@@ -55,12 +54,11 @@ type legacyDeps struct {
 	store                 flow.Store
 	manager               proxyManager
 	passthrough           *proxy.PassthroughList
-	scope                 *proxy.CaptureScope
 	httpInterceptEngine   *httprules.InterceptEngine
 	wsInterceptEngine     *wsrules.InterceptEngine
 	grpcInterceptEngine   *grpcrules.InterceptEngine
 	holdQueue             *common.HoldQueue
-	transformPipeline     *rules.Pipeline
+	transformHTTPEngine   *httprules.TransformEngine
 	fuzzStore             flow.FuzzStore
 	dbPath                string
 	replayDoer            httpDoer
@@ -109,14 +107,13 @@ func mkServerFromLegacyDeps(d legacyDeps) *Server {
 			wsInterceptEngine:   d.wsInterceptEngine,
 			grpcInterceptEngine: d.grpcInterceptEngine,
 			holdQueue:           d.holdQueue,
-			transformPipeline:   d.transformPipeline,
+			transformHTTPEngine: d.transformHTTPEngine,
 			safetyEngine:        d.safetyEngine,
 			safetyEngineSetters: d.safetyEngineSetters,
 		},
 		connector: &Connector{
 			manager:               d.manager,
 			passthrough:           d.passthrough,
-			scope:                 d.scope,
 			targetScope:           d.targetScope,
 			targetScopeSetters:    d.targetScopeSetters,
 			hostTLSRegistry:       d.hostTLSRegistry,
@@ -159,13 +156,6 @@ func WithPassthroughList(pl *proxy.PassthroughList) ServerOption {
 	}
 }
 
-// WithCaptureScope sets the capture scope. Test-only.
-func WithCaptureScope(scope *proxy.CaptureScope) ServerOption {
-	return func(s *Server) {
-		s.connector.scope = scope
-	}
-}
-
 // WithHTTPInterceptEngine sets the per-protocol HTTP intercept engine. Test-only.
 func WithHTTPInterceptEngine(engine *httprules.InterceptEngine) ServerOption {
 	return func(s *Server) {
@@ -202,10 +192,10 @@ func WithPluginv2Engine(engine *pluginv2.Engine) ServerOption {
 	}
 }
 
-// WithTransformPipeline sets the auto-transform pipeline. Test-only.
-func WithTransformPipeline(p *rules.Pipeline) ServerOption {
+// WithHTTPTransformEngine sets the per-protocol HTTP transform engine. Test-only.
+func WithHTTPTransformEngine(e *httprules.TransformEngine) ServerOption {
 	return func(s *Server) {
-		s.pipeline.transformPipeline = p
+		s.pipeline.transformHTTPEngine = e
 	}
 }
 

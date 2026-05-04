@@ -29,11 +29,6 @@ type configureInput struct {
 	// If omitted (nil pointer), the setting is not changed.
 	UpstreamProxy *string `json:"upstream_proxy,omitempty" jsonschema:"upstream proxy URL (empty string to disable, omit to keep current)"`
 
-	// CaptureScope configures request capture scope rules.
-	// For merge: use add_includes/remove_includes/add_excludes/remove_excludes.
-	// For replace: use includes/excludes to replace all rules.
-	CaptureScope *configureCaptureScope `json:"capture_scope,omitempty" jsonschema:"capture scope configuration"`
-
 	// TLSPassthrough configures TLS passthrough patterns.
 	// For merge: use add/remove arrays.
 	// For replace: use a string array to replace all patterns.
@@ -122,19 +117,6 @@ type configureInterceptQueue struct {
 	// TimeoutBehavior specifies what happens when a blocked request times out.
 	// Valid values: "auto_release" (default) or "auto_drop".
 	TimeoutBehavior string `json:"timeout_behavior,omitempty" jsonschema:"timeout behavior: auto_release (default) or auto_drop"`
-}
-
-// configureCaptureScope holds capture scope configuration for both merge and replace operations.
-type configureCaptureScope struct {
-	// Merge operation fields: delta add/remove.
-	AddIncludes    []scopeRuleInput `json:"add_includes,omitempty" jsonschema:"(merge) rules to add to includes"`
-	RemoveIncludes []scopeRuleInput `json:"remove_includes,omitempty" jsonschema:"(merge) rules to remove from includes"`
-	AddExcludes    []scopeRuleInput `json:"add_excludes,omitempty" jsonschema:"(merge) rules to add to excludes"`
-	RemoveExcludes []scopeRuleInput `json:"remove_excludes,omitempty" jsonschema:"(merge) rules to remove from excludes"`
-
-	// Replace operation fields: full replacement.
-	Includes []scopeRuleInput `json:"includes,omitempty" jsonschema:"(replace) full list of include rules"`
-	Excludes []scopeRuleInput `json:"excludes,omitempty" jsonschema:"(replace) full list of exclude rules"`
 }
 
 // configureTLSPassthrough holds TLS passthrough configuration for both merge and replace operations.
@@ -251,9 +233,6 @@ type configureResult struct {
 	// UpstreamProxy shows the current upstream proxy URL (empty string means direct).
 	UpstreamProxy *string `json:"upstream_proxy,omitempty"`
 
-	// CaptureScope summarizes the current capture scope state.
-	CaptureScope *configureScopeResult `json:"capture_scope,omitempty"`
-
 	// TLSPassthrough summarizes the current TLS passthrough state.
 	TLSPassthrough *configurePassthroughResult `json:"tls_passthrough,omitempty"`
 
@@ -302,12 +281,6 @@ type configureInterceptQueueResult struct {
 	QueuedItems     int    `json:"queued_items"`
 }
 
-// configureScopeResult summarizes capture scope state in the configure response.
-type configureScopeResult struct {
-	IncludeCount int `json:"include_count"`
-	ExcludeCount int `json:"exclude_count"`
-}
-
 // configurePassthroughResult summarizes TLS passthrough state in the configure response.
 type configurePassthroughResult struct {
 	TotalPatterns int `json:"total_patterns"`
@@ -329,11 +302,10 @@ type configureInterceptResult struct {
 func (s *Server) registerConfigure() {
 	gomcp.AddTool(s.server, &gomcp.Tool{
 		Name: "configure",
-		Description: "Configure runtime proxy settings including upstream proxy, capture scope, TLS passthrough, intercept rules, intercept queue, auto-transform rules, SOCKS5 authentication, TLS fingerprint profile, and connection limits/timeouts. " +
+		Description: "Configure runtime proxy settings including upstream proxy, TLS passthrough, intercept rules, intercept queue, auto-transform rules, SOCKS5 authentication, TLS fingerprint profile, and connection limits/timeouts. " +
 			"Supports two operations: 'merge' (default) applies incremental add/remove changes, " +
 			"'replace' replaces entire configuration sections. " +
 			"Upstream proxy routes all outgoing traffic through an HTTP CONNECT or SOCKS5 proxy; set to empty string to disable. " +
-			"Capture scope controls which requests are recorded (include/exclude rules with hostname, url_prefix, method). " +
 			"TLS passthrough controls which CONNECT destinations bypass MITM interception. " +
 			"Intercept rules define conditions for intercepting requests/responses (host_pattern regex, path_pattern regex, method whitelist, header regex). " +
 			"Intercept queue configures timeout and timeout behavior for blocked requests. " +
@@ -380,9 +352,6 @@ func (s *Server) handleConfigureMerge(input configureInput) (*gomcp.CallToolResu
 	if err := s.configureUpstreamProxy(input, result); err != nil {
 		return nil, nil, err
 	}
-	if err := s.configureMergeScope(input, result); err != nil {
-		return nil, nil, err
-	}
 	if err := s.configureMergePassthrough(input, result); err != nil {
 		return nil, nil, err
 	}
@@ -419,9 +388,6 @@ func (s *Server) handleConfigureReplace(input configureInput) (*gomcp.CallToolRe
 	result := &configureResult{Status: "configured"}
 
 	if err := s.configureUpstreamProxy(input, result); err != nil {
-		return nil, nil, err
-	}
-	if err := s.configureReplaceScope(input, result); err != nil {
 		return nil, nil, err
 	}
 	if err := s.configureReplacePassthrough(input, result); err != nil {
@@ -468,49 +434,6 @@ func (s *Server) configureUpstreamProxy(input configureInput, result *configureR
 		current = proxy.RedactProxyURL(s.connector.manager.UpstreamProxy())
 	}
 	result.UpstreamProxy = &current
-	return nil
-}
-
-// configureMergeScope applies merge (delta) capture scope changes if provided.
-func (s *Server) configureMergeScope(input configureInput, result *configureResult) error {
-	if input.CaptureScope == nil {
-		return nil
-	}
-	if s.connector.scope == nil {
-		return fmt.Errorf("capture scope is not initialized: proxy may not be running")
-	}
-	if err := s.mergeScope(input.CaptureScope); err != nil {
-		return fmt.Errorf("capture_scope merge: %w", err)
-	}
-	includes, excludes := s.connector.scope.Rules()
-	result.CaptureScope = &configureScopeResult{
-		IncludeCount: len(includes),
-		ExcludeCount: len(excludes),
-	}
-	return nil
-}
-
-// configureReplaceScope replaces the entire capture scope if provided.
-func (s *Server) configureReplaceScope(input configureInput, result *configureResult) error {
-	if input.CaptureScope == nil {
-		return nil
-	}
-	if s.connector.scope == nil {
-		return fmt.Errorf("capture scope is not initialized: proxy may not be running")
-	}
-	if err := validateScopeRules("include", input.CaptureScope.Includes); err != nil {
-		return fmt.Errorf("capture_scope replace: %w", err)
-	}
-	if err := validateScopeRules("exclude", input.CaptureScope.Excludes); err != nil {
-		return fmt.Errorf("capture_scope replace: %w", err)
-	}
-	includes := toScopeRules(input.CaptureScope.Includes)
-	excludes := toScopeRules(input.CaptureScope.Excludes)
-	s.connector.scope.SetRules(includes, excludes)
-	result.CaptureScope = &configureScopeResult{
-		IncludeCount: len(includes),
-		ExcludeCount: len(excludes),
-	}
 	return nil
 }
 
@@ -594,8 +517,8 @@ func (s *Server) configureMergeAutoTransform(input configureInput, result *confi
 	if input.AutoTransform == nil {
 		return nil
 	}
-	if s.pipeline.transformPipeline == nil {
-		return fmt.Errorf("transform pipeline is not initialized: proxy may not be running")
+	if s.pipeline.transformHTTPEngine == nil {
+		return fmt.Errorf("transform engine is not initialized: proxy may not be running")
 	}
 	if err := s.mergeAutoTransform(input.AutoTransform); err != nil {
 		return fmt.Errorf("auto_transform merge: %w", err)
@@ -609,8 +532,8 @@ func (s *Server) configureReplaceAutoTransform(input configureInput, result *con
 	if input.AutoTransform == nil {
 		return nil
 	}
-	if s.pipeline.transformPipeline == nil {
-		return fmt.Errorf("transform pipeline is not initialized: proxy may not be running")
+	if s.pipeline.transformHTTPEngine == nil {
+		return fmt.Errorf("transform engine is not initialized: proxy may not be running")
 	}
 	if err := s.replaceAutoTransform(input.AutoTransform); err != nil {
 		return fmt.Errorf("auto_transform replace: %w", err)
@@ -684,26 +607,6 @@ func (s *Server) applyConnectionLimits(input configureInput, result *configureRe
 	return nil
 }
 
-// mergeScope applies delta add/remove operations to the capture scope.
-// It uses CaptureScope.MergeRules for atomic read-modify-write.
-func (s *Server) mergeScope(cfg *configureCaptureScope) error {
-	// Validate rules before applying.
-	if err := validateScopeRules("add_includes", cfg.AddIncludes); err != nil {
-		return err
-	}
-	if err := validateScopeRules("add_excludes", cfg.AddExcludes); err != nil {
-		return err
-	}
-
-	s.connector.scope.MergeRules(
-		toScopeRules(cfg.AddIncludes),
-		toScopeRules(cfg.RemoveIncludes),
-		toScopeRules(cfg.AddExcludes),
-		toScopeRules(cfg.RemoveExcludes),
-	)
-	return nil
-}
-
 // mergePassthrough applies delta add/remove operations to the passthrough list.
 func (s *Server) mergePassthrough(cfg *configureTLSPassthrough) {
 	for _, p := range cfg.Add {
@@ -724,17 +627,6 @@ func (s *Server) replacePassthrough(cfg *configureTLSPassthrough) {
 	for _, p := range cfg.Patterns {
 		s.connector.passthrough.Add(p)
 	}
-}
-
-// validateScopeRules checks that every rule has at least one non-empty field.
-// It returns an error indicating the first invalid rule found.
-func validateScopeRules(kind string, rules []scopeRuleInput) error {
-	for i, r := range rules {
-		if r.Hostname == "" && r.URLPrefix == "" && r.Method == "" {
-			return fmt.Errorf("%s rule %d has no fields set: at least one of hostname, url_prefix, or method must be specified", kind, i)
-		}
-	}
-	return nil
 }
 
 // mergeInterceptRules applies delta add/remove/enable/disable operations
@@ -1187,43 +1079,58 @@ func compileWSOpcodeFilter(names []string) ([]envelope.WSOpcode, error) {
 	return out, nil
 }
 
-// mergeAutoTransform applies delta add/remove/enable/disable operations to auto-transform rules.
+// mergeAutoTransform applies delta add/remove/enable/disable operations to
+// auto-transform rules on the per-protocol HTTP engine. Mirrors the
+// per-rule dispatch pattern from intercept_rules (USK-692) collapsed to a
+// single engine because the auto_transform schema is HTTP-only.
 func (s *Server) mergeAutoTransform(cfg *configureAutoTransform) error {
-	// Process additions first.
-	for _, input := range cfg.Add {
-		r := toTransformRule(input)
-		if err := s.pipeline.transformPipeline.AddRule(r); err != nil {
-			return err
+	engine := s.pipeline.transformHTTPEngine
+	for i, input := range cfg.Add {
+		if input.ID != "" && transformRuleIDExists(engine, input.ID) {
+			return fmt.Errorf("add[%d]: rule %q already exists", i, input.ID)
+		}
+		r, err := compileTransformRule(input)
+		if err != nil {
+			return fmt.Errorf("add[%d]: %w", i, err)
+		}
+		engine.AddRule(*r)
+	}
+	for i, id := range cfg.Remove {
+		if !engine.RemoveRule(id) {
+			return fmt.Errorf("remove[%d]: rule %q not found", i, id)
 		}
 	}
-
-	// Process removals.
-	for _, id := range cfg.Remove {
-		if err := s.pipeline.transformPipeline.RemoveRule(id); err != nil {
-			return err
+	for i, id := range cfg.Enable {
+		if !engine.EnableRule(id, true) {
+			return fmt.Errorf("enable[%d]: rule %q not found", i, id)
 		}
 	}
-
-	// Process enable.
-	for _, id := range cfg.Enable {
-		if err := s.pipeline.transformPipeline.EnableRule(id, true); err != nil {
-			return err
+	for i, id := range cfg.Disable {
+		if !engine.EnableRule(id, false) {
+			return fmt.Errorf("disable[%d]: rule %q not found", i, id)
 		}
 	}
-
-	// Process disable.
-	for _, id := range cfg.Disable {
-		if err := s.pipeline.transformPipeline.EnableRule(id, false); err != nil {
-			return err
-		}
-	}
-
 	return nil
 }
 
 // replaceAutoTransform replaces all auto-transform rules atomically.
 func (s *Server) replaceAutoTransform(cfg *configureAutoTransform) error {
 	return s.applyTransformRules(cfg.Rules)
+}
+
+// transformRuleIDExists returns true when the engine already holds a rule
+// with the supplied ID. Used for duplicate-ID rejection on the merge add
+// path.
+func transformRuleIDExists(engine *httprules.TransformEngine, id string) bool {
+	if engine == nil {
+		return false
+	}
+	for _, r := range engine.Rules() {
+		if r.ID == id {
+			return true
+		}
+	}
+	return false
 }
 
 // configureBudgetLimits applies budget configuration if provided.
@@ -1314,7 +1221,7 @@ func (s *Server) configureClientCertSetting(input configureInput, result *config
 
 // autoTransformResult returns the current auto-transform rules state.
 func (s *Server) autoTransformResult() *configureAutoTransformResult {
-	rulesList := s.pipeline.transformPipeline.Rules()
+	rulesList := s.pipeline.transformHTTPEngine.Rules()
 	enabled := 0
 	for _, r := range rulesList {
 		if r.Enabled {
