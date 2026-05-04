@@ -8,7 +8,7 @@ import (
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"github.com/usk6666/yorishiro-proxy/internal/proxy"
+	"github.com/usk6666/yorishiro-proxy/internal/connector"
 	"github.com/usk6666/yorishiro-proxy/internal/rules/common"
 	grpcrules "github.com/usk6666/yorishiro-proxy/internal/rules/grpc"
 	httprules "github.com/usk6666/yorishiro-proxy/internal/rules/http"
@@ -27,7 +27,7 @@ func configureSessionWithEngines(
 ) *gomcp.ClientSession {
 	t.Helper()
 	ctx := context.Background()
-	pl := proxy.NewPassthroughList()
+	pl := connector.NewPassthroughList()
 	hold := common.NewHoldQueue()
 
 	opts := []ServerOption{

@@ -10,13 +10,13 @@ import (
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/usk6666/yorishiro-proxy/internal/config"
-	"github.com/usk6666/yorishiro-proxy/internal/proxy"
+	"github.com/usk6666/yorishiro-proxy/internal/connector"
 	httprules "github.com/usk6666/yorishiro-proxy/internal/rules/http"
 )
 
 // setupProxyStartTestSession creates an MCP client flow with Manager and
 // PassthroughList for testing the proxy_start tool.
-func setupProxyStartTestSession(t *testing.T, manager proxyManager, pl *proxy.PassthroughList) *gomcp.ClientSession {
+func setupProxyStartTestSession(t *testing.T, manager proxyManager, pl *connector.PassthroughList) *gomcp.ClientSession {
 	t.Helper()
 	ctx := context.Background()
 
@@ -210,7 +210,7 @@ func TestProxyStart_InvalidAddr(t *testing.T) {
 func TestProxyStart_WithTLSPassthrough(t *testing.T) {
 	manager := newTestProxybuildManager(t)
 
-	pl := proxy.NewPassthroughList()
+	pl := connector.NewPassthroughList()
 	cs := setupProxyStartTestSession(t, manager, pl)
 
 	result, err := callProxyStart(t, cs, map[string]any{
@@ -244,7 +244,7 @@ func TestProxyStart_WithTLSPassthrough(t *testing.T) {
 func TestProxyStart_WithTLSPassthrough_EmptyPattern(t *testing.T) {
 	manager := newTestProxybuildManager(t)
 
-	pl := proxy.NewPassthroughList()
+	pl := connector.NewPassthroughList()
 	cs := setupProxyStartTestSession(t, manager, pl)
 
 	result, err := callProxyStart(t, cs, map[string]any{
@@ -280,7 +280,7 @@ func TestProxyStart_WithTLSPassthrough_NilPassthrough(t *testing.T) {
 func TestProxyStart_WithAllConfig(t *testing.T) {
 	manager := newTestProxybuildManager(t)
 
-	pl := proxy.NewPassthroughList()
+	pl := connector.NewPassthroughList()
 	cs := setupProxyStartTestSession(t, manager, pl)
 
 	result, err := callProxyStart(t, cs, map[string]any{
@@ -351,7 +351,7 @@ func TestProxyStart_PassthroughAppliedBeforeStart(t *testing.T) {
 	// If passthrough validation fails, proxy should NOT start.
 	manager := newTestProxybuildManager(t)
 
-	pl := proxy.NewPassthroughList()
+	pl := connector.NewPassthroughList()
 	cs := setupProxyStartTestSession(t, manager, pl)
 
 	// Empty passthrough pattern should prevent proxy from starting.
@@ -400,7 +400,7 @@ func (h *mockTCPHandler) SetForwards(forwards map[string]*config.ForwardConfig) 
 }
 
 func TestProxyStart_WithTCPForwards(t *testing.T) {
-	t.Skip("proxybuild.Manager returns ErrTCPForwardsNotSupported; TCP forward orchestration is owned by a USK-697 follow-up")
+	t.Skip("proxybuild.Manager returns ErrTCPForwardsNotSupported; TCP forward orchestration is owned by USK-711")
 	manager := newTestProxybuildManager(t)
 
 	tcpHandler := &mockTCPHandler{}
@@ -497,7 +497,7 @@ func TestProxyStart_WithTCPForwards_InvalidTarget(t *testing.T) {
 
 // setupProxyStartTestSessionWithTCPHandler creates an MCP client flow with Manager,
 // PassthroughList, and TCP handler for testing the proxy_start tool.
-func setupProxyStartTestSessionWithTCPHandler(t *testing.T, manager proxyManager, pl *proxy.PassthroughList, tcpHandler tcpForwardHandler) *gomcp.ClientSession {
+func setupProxyStartTestSessionWithTCPHandler(t *testing.T, manager proxyManager, pl *connector.PassthroughList, tcpHandler tcpForwardHandler) *gomcp.ClientSession {
 	t.Helper()
 	ctx := context.Background()
 
@@ -820,7 +820,7 @@ func TestProxyStart_InvalidMaxConnections_DoesNotStartProxy(t *testing.T) {
 
 // setupProxyStartTestSessionWithOptions creates an MCP client session with
 // arbitrary ServerOption values for testing.
-func setupProxyStartTestSessionWithOptions(t *testing.T, manager proxyManager, pl *proxy.PassthroughList, extraOpts ...ServerOption) *gomcp.ClientSession {
+func setupProxyStartTestSessionWithOptions(t *testing.T, manager proxyManager, pl *connector.PassthroughList, extraOpts ...ServerOption) *gomcp.ClientSession {
 	t.Helper()
 	ctx := context.Background()
 
@@ -856,7 +856,7 @@ func setupProxyStartTestSessionWithOptions(t *testing.T, manager proxyManager, p
 func TestApplyTLSPassthrough(t *testing.T) {
 	tests := []struct {
 		name     string
-		pl       *proxy.PassthroughList
+		pl       *connector.PassthroughList
 		patterns []string
 		wantErr  bool
 		wantLen  int
@@ -869,13 +869,13 @@ func TestApplyTLSPassthrough(t *testing.T) {
 		},
 		{
 			name:     "valid patterns",
-			pl:       proxy.NewPassthroughList(),
+			pl:       connector.NewPassthroughList(),
 			patterns: []string{"example.com", "*.googleapis.com"},
 			wantLen:  2,
 		},
 		{
 			name:     "empty pattern returns error",
-			pl:       proxy.NewPassthroughList(),
+			pl:       connector.NewPassthroughList(),
 			patterns: []string{"valid.com", ""},
 			wantErr:  true,
 		},
@@ -1100,7 +1100,7 @@ func TestProxyStart_WithConfigDefaults_Integration(t *testing.T) {
 	// is called without arguments via the MCP protocol.
 	manager := newTestProxybuildManager(t)
 
-	pl := proxy.NewPassthroughList()
+	pl := connector.NewPassthroughList()
 
 	proxyCfg := &config.ProxyConfig{
 		ListenAddr:     "127.0.0.1:0",
@@ -1157,7 +1157,7 @@ func TestProxyStart_CallerOverridesConfigDefaults_Integration(t *testing.T) {
 	// Integration test: verify that caller arguments override config file defaults.
 	manager := newTestProxybuildManager(t)
 
-	pl := proxy.NewPassthroughList()
+	pl := connector.NewPassthroughList()
 
 	proxyCfg := &config.ProxyConfig{
 		ListenAddr:     "127.0.0.1:0",
@@ -1217,7 +1217,7 @@ func TestProxyStart_CallerOverridesConfigDefaults_Integration(t *testing.T) {
 func TestProxyStart_ResetsSettingsOnRestart(t *testing.T) {
 	manager := newTestProxybuildManager(t)
 
-	pl := proxy.NewPassthroughList()
+	pl := connector.NewPassthroughList()
 
 	cs := setupProxyStartTestSessionWithOptions(t, manager, pl)
 
@@ -1271,7 +1271,7 @@ func TestProxyStart_ResetsSettingsOnRestart(t *testing.T) {
 func TestProxyStart_ResetsInterceptAndTransformOnRestart(t *testing.T) {
 	manager := newTestProxybuildManager(t)
 
-	pl := proxy.NewPassthroughList()
+	pl := connector.NewPassthroughList()
 	httpInterceptEng := httprules.NewInterceptEngine()
 	transformEng := httprules.NewTransformEngine()
 

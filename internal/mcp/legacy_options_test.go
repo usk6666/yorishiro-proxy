@@ -11,16 +11,19 @@ package mcp
 // construction, mirroring what the old options did via a single deps bag.
 // New tests SHOULD construct components directly via mcp.NewPipeline /
 // mcp.NewConnector / etc., but existing tests continue to use this API.
+// The plumbing types (PassthroughList, TargetScope, RateLimiter,
+// BudgetManager) were rehomed to internal/connector during USK-704/USK-707;
+// this file consumes those connector.* types directly.
 
 import (
 	"context"
 
 	"github.com/usk6666/yorishiro-proxy/internal/cert"
 	"github.com/usk6666/yorishiro-proxy/internal/config"
+	"github.com/usk6666/yorishiro-proxy/internal/connector"
 	"github.com/usk6666/yorishiro-proxy/internal/connector/transport"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/pluginv2"
-	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 	"github.com/usk6666/yorishiro-proxy/internal/rules/common"
 	grpcrules "github.com/usk6666/yorishiro-proxy/internal/rules/grpc"
 	httprules "github.com/usk6666/yorishiro-proxy/internal/rules/http"
@@ -53,7 +56,7 @@ type legacyDeps struct {
 	issuer                *cert.Issuer
 	store                 flow.Store
 	manager               proxyManager
-	passthrough           *proxy.PassthroughList
+	passthrough           *connector.PassthroughList
 	httpInterceptEngine   *httprules.InterceptEngine
 	wsInterceptEngine     *wsrules.InterceptEngine
 	grpcInterceptEngine   *grpcrules.InterceptEngine
@@ -65,18 +68,17 @@ type legacyDeps struct {
 	rawReplayDialer       rawDialer
 	tcpForwards           map[string]*config.ForwardConfig
 	tcpHandler            tcpForwardHandler
-	detector              proxy.ProtocolDetector
 	enabledProtocols      []string
 	proxyDefaults         *config.ProxyConfig
 	upstreamProxySetters  []upstreamProxySetter
 	requestTimeoutSetters []requestTimeoutSetter
 	targetScopeSetters    []targetScopeSetter
-	targetScope           *proxy.TargetScope
-	rateLimiter           *proxy.RateLimiter
+	targetScope           *connector.TargetScope
+	rateLimiter           *connector.RateLimiter
 	rateLimiterSetters    []rateLimiterSetter
 	safetyEngine          *safety.Engine
 	safetyEngineSetters   []safetyEngineSetter
-	budgetManager         *proxy.BudgetManager
+	budgetManager         *connector.BudgetManager
 	socks5AuthSetter      socks5AuthSetter
 	tlsTransport          transport.TLSTransport
 	tlsFingerprintSetters []tlsFingerprintSetter
@@ -122,7 +124,6 @@ func mkServerFromLegacyDeps(d legacyDeps) *Server {
 			socks5AuthSetter:      d.socks5AuthSetter,
 			tcpForwards:           d.tcpForwards,
 			tcpHandler:            d.tcpHandler,
-			detector:              d.detector,
 			enabledProtocols:      d.enabledProtocols,
 			proxyDefaults:         d.proxyDefaults,
 			upstreamProxySetters:  d.upstreamProxySetters,
@@ -150,7 +151,7 @@ func WithDBPath(path string) ServerOption {
 }
 
 // WithPassthroughList sets the TLS passthrough list. Test-only.
-func WithPassthroughList(pl *proxy.PassthroughList) ServerOption {
+func WithPassthroughList(pl *connector.PassthroughList) ServerOption {
 	return func(s *Server) {
 		s.connector.passthrough = pl
 	}
@@ -220,18 +221,11 @@ func WithTCPHandler(h tcpForwardHandler) ServerOption {
 	}
 }
 
-// WithDetector sets the protocol detector. Test-only.
-func WithDetector(d proxy.ProtocolDetector) ServerOption {
-	return func(s *Server) {
-		s.connector.detector = d
-	}
-}
-
 // WithTargetScope sets the target scope. Test-only.
 // Note: NewServer initialises a default TargetScope before applying options;
 // this option overrides it. Re-running registered targetScopeSetters is the
 // caller's responsibility (tests rarely need this).
-func WithTargetScope(ts *proxy.TargetScope) ServerOption {
+func WithTargetScope(ts *connector.TargetScope) ServerOption {
 	return func(s *Server) {
 		s.connector.targetScope = ts
 	}
@@ -266,7 +260,7 @@ func WithTargetScopeSetter(setter targetScopeSetter) ServerOption {
 }
 
 // WithRateLimiter sets the rate limiter. Test-only.
-func WithRateLimiter(rl *proxy.RateLimiter) ServerOption {
+func WithRateLimiter(rl *connector.RateLimiter) ServerOption {
 	return func(s *Server) {
 		s.misc.rateLimiter = rl
 	}
@@ -294,7 +288,7 @@ func WithSafetyEngineSetter(setter safetyEngineSetter) ServerOption {
 }
 
 // WithBudgetManager sets the budget manager. Test-only.
-func WithBudgetManager(bm *proxy.BudgetManager) ServerOption {
+func WithBudgetManager(bm *connector.BudgetManager) ServerOption {
 	return func(s *Server) {
 		s.misc.budgetManager = bm
 	}

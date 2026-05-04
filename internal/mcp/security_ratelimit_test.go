@@ -5,11 +5,11 @@ import (
 	"testing"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/usk6666/yorishiro-proxy/internal/proxy"
+	"github.com/usk6666/yorishiro-proxy/internal/connector"
 )
 
 // setupSecurityRateLimitTestSession creates an MCP client session with rate limiter.
-func setupSecurityRateLimitTestSession(t *testing.T, rl *proxy.RateLimiter) *gomcp.ClientSession {
+func setupSecurityRateLimitTestSession(t *testing.T, rl *connector.RateLimiter) *gomcp.ClientSession {
 	t.Helper()
 	ctx := context.Background()
 
@@ -42,7 +42,7 @@ func setupSecurityRateLimitTestSession(t *testing.T, rl *proxy.RateLimiter) *gom
 }
 
 func TestSecurity_GetRateLimits_EmptyDefault(t *testing.T) {
-	rl := proxy.NewRateLimiter()
+	rl := connector.NewRateLimiter()
 	cs := setupSecurityRateLimitTestSession(t, rl)
 
 	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
@@ -67,7 +67,7 @@ func TestSecurity_GetRateLimits_EmptyDefault(t *testing.T) {
 }
 
 func TestSecurity_SetRateLimits_AgentOnly(t *testing.T) {
-	rl := proxy.NewRateLimiter()
+	rl := connector.NewRateLimiter()
 	cs := setupSecurityRateLimitTestSession(t, rl)
 
 	rps := float64(10)
@@ -99,8 +99,8 @@ func TestSecurity_SetRateLimits_AgentOnly(t *testing.T) {
 }
 
 func TestSecurity_SetRateLimits_WithPolicy(t *testing.T) {
-	rl := proxy.NewRateLimiter()
-	rl.SetPolicyLimits(proxy.RateLimitConfig{
+	rl := connector.NewRateLimiter()
+	rl.SetPolicyLimits(connector.RateLimitConfig{
 		MaxRequestsPerSecond: 20,
 	})
 	cs := setupSecurityRateLimitTestSession(t, rl)
@@ -128,8 +128,8 @@ func TestSecurity_SetRateLimits_WithPolicy(t *testing.T) {
 }
 
 func TestSecurity_SetRateLimits_ExceedsPolicy(t *testing.T) {
-	rl := proxy.NewRateLimiter()
-	rl.SetPolicyLimits(proxy.RateLimitConfig{
+	rl := connector.NewRateLimiter()
+	rl.SetPolicyLimits(connector.RateLimitConfig{
 		MaxRequestsPerSecond: 10,
 	})
 	cs := setupSecurityRateLimitTestSession(t, rl)
@@ -154,7 +154,7 @@ func TestSecurity_SetRateLimits_ExceedsPolicy(t *testing.T) {
 }
 
 func TestSecurity_SetRateLimits_NegativeValue(t *testing.T) {
-	rl := proxy.NewRateLimiter()
+	rl := connector.NewRateLimiter()
 	cs := setupSecurityRateLimitTestSession(t, rl)
 
 	negative := float64(-1)
@@ -176,7 +176,7 @@ func TestSecurity_SetRateLimits_NegativeValue(t *testing.T) {
 }
 
 func TestSecurity_SetRateLimits_ClearLimits(t *testing.T) {
-	rl := proxy.NewRateLimiter()
+	rl := connector.NewRateLimiter()
 	cs := setupSecurityRateLimitTestSession(t, rl)
 
 	// Set limits.
