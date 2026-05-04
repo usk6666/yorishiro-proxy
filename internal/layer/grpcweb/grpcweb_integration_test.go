@@ -437,7 +437,7 @@ func buildPipeline(store flow.Writer, opts pipelineOpts) *pipeline.Pipeline {
 		pipeline.NewHTTPScopeStep(nil),
 		pipeline.NewSafetyStep(nil, nil, opts.safetyEngine, logger),
 		pipeline.NewTransformStep(nil, nil, opts.transformEngine),
-		pipeline.NewInterceptStep(nil, nil, opts.interceptEngine, nil, logger),
+		pipeline.NewInterceptStep(nil, nil, opts.interceptEngine, nil, nil, logger),
 		pipeline.NewRecordStep(store, logger,
 			pipeline.WithWireEncoder(envelope.ProtocolGRPCWeb, grpcweb.EncodeWireBytes),
 		),

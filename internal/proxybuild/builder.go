@@ -350,12 +350,15 @@ func buildPipeline(deps Deps, encoders *pipeline.WireEncoderRegistry, logger *sl
 		recordOpts = append(recordOpts, pipeline.WithMaxBodySize(deps.RecordMaxBodySize))
 	}
 
+	safetyStep := pipeline.NewSafetyStep(deps.HTTPSafetyEngine, deps.WSSafetyEngine, deps.GRPCSafetyEngine, logger)
 	return pipeline.New(
 		pipeline.NewHostScopeStep(deps.Scope),
 		pipeline.NewHTTPScopeStep(deps.Scope),
-		pipeline.NewSafetyStep(deps.HTTPSafetyEngine, deps.WSSafetyEngine, deps.GRPCSafetyEngine, logger),
+		safetyStep,
 		pipeline.NewPluginStepPre(deps.PluginV2Engine, encoders, logger),
-		pipeline.NewInterceptStep(deps.HTTPInterceptEngine, deps.WSInterceptEngine, deps.GRPCInterceptEngine, deps.HoldQueue, logger),
+		// safetyStep is shared with InterceptStep so a modify_and_forward
+		// release re-runs the same per-protocol input checks (USK-702).
+		pipeline.NewInterceptStep(deps.HTTPInterceptEngine, deps.WSInterceptEngine, deps.GRPCInterceptEngine, deps.HoldQueue, safetyStep, logger),
 		pipeline.NewTransformStep(deps.HTTPTransformEngine, deps.WSTransformEngine, deps.GRPCTransformEngine),
 		pipeline.NewPluginStepPost(deps.PluginV2Engine, encoders, logger),
 		pipeline.NewRecordStep(deps.FlowStore, logger, recordOpts...),

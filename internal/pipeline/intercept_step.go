@@ -17,25 +17,34 @@ import (
 // protocol InterceptEngines (rules/http, rules/ws, rules/grpc). SSE has no
 // per-protocol engine (N7 scope-out: half-duplex Receive-only) and passes
 // through unchanged. Unknown Message types pass through.
+//
+// On ActionModifyAndForward, the user-supplied modified envelope is re-checked
+// against the SafetyStep before being released downstream — defense-in-depth
+// for the case where SafetyStep already gated the original held envelope but
+// the modify_and_forward payload re-introduces a destructive pattern (USK-702).
 type InterceptStep struct {
 	http   *httprules.InterceptEngine
 	ws     *wsrules.InterceptEngine
 	grpc   *grpcrules.InterceptEngine
 	queue  *common.HoldQueue
+	safety *SafetyStep
 	logger *slog.Logger
 }
 
 // NewInterceptStep creates an InterceptStep. Any nil engine causes the
 // corresponding protocol arm to gracefully degrade (pass-through). A nil
 // queue causes all matching arms to pass through (no hold without queue).
+// A nil safety disables the modify_and_forward re-check (callers without a
+// SafetyStep — e.g. tests not exercising safety — pass nil).
 //
 // Engine arguments are positional in protocol order: http, ws, grpc.
-func NewInterceptStep(httpEngine *httprules.InterceptEngine, wsEngine *wsrules.InterceptEngine, grpcEngine *grpcrules.InterceptEngine, queue *common.HoldQueue, logger *slog.Logger) *InterceptStep {
+func NewInterceptStep(httpEngine *httprules.InterceptEngine, wsEngine *wsrules.InterceptEngine, grpcEngine *grpcrules.InterceptEngine, queue *common.HoldQueue, safety *SafetyStep, logger *slog.Logger) *InterceptStep {
 	return &InterceptStep{
 		http:   httpEngine,
 		ws:     wsEngine,
 		grpc:   grpcEngine,
 		queue:  queue,
+		safety: safety,
 		logger: logger,
 	}
 }
@@ -153,6 +162,25 @@ func (s *InterceptStep) holdAndDispatch(ctx context.Context, env *envelope.Envel
 	case common.ActionDrop:
 		return Result{Action: Drop}
 	case common.ActionModifyAndForward:
+		// Defense-in-depth: re-check the user-supplied modified envelope
+		// against SafetyStep. The original held envelope already passed
+		// SafetyStep at hold time (Pipeline order: Safety → Intercept), but
+		// modify_and_forward lets the operator/AI agent inject content that
+		// bypasses that gate. Mirroring SafetyStep ensures the same Send-
+		// only / per-protocol coverage as the inline check (USK-702).
+		if s.safety != nil {
+			recheck := s.safety.Process(ctx, action.Modified)
+			if recheck.Action == Drop {
+				if s.logger != nil {
+					s.logger.DebugContext(ctx, "intercept: modify_and_forward dropped by safety re-check",
+						slog.String("flow_id", env.FlowID),
+						slog.String("direction", env.Direction.String()),
+						slog.String("protocol", string(env.Protocol)),
+					)
+				}
+				return Result{Action: Drop}
+			}
+		}
 		return Result{Envelope: action.Modified}
 	default:
 		return Result{}
