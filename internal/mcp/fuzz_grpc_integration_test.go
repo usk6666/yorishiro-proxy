@@ -44,9 +44,9 @@ import (
 	_ "google.golang.org/grpc/encoding/gzip"
 
 	"github.com/usk6666/yorishiro-proxy/internal/cert"
+	"github.com/usk6666/yorishiro-proxy/internal/connector/transport"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/pluginv2"
-	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
 )
 
 // ---------------------------------------------------------------------------
@@ -281,7 +281,7 @@ func setupFuzzGRPCSession(t *testing.T) (*gomcp.ClientSession, flow.Store, *fuzz
 	ctx := context.Background()
 	srv := newServer(ctx, nil, store, nil,
 		WithPluginv2Engine(engine),
-		WithTLSTransport(&httputil.StandardTransport{InsecureSkipVerify: true}),
+		WithTLSTransport(&transport.StandardTransport{InsecureSkipVerify: true}),
 	)
 	ct, st := gomcp.NewInMemoryTransports()
 	ss, err := srv.server.Connect(ctx, st, nil)

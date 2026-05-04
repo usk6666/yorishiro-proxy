@@ -7,7 +7,7 @@ import (
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"github.com/usk6666/yorishiro-proxy/internal/proxy"
+	"github.com/usk6666/yorishiro-proxy/internal/connector"
 )
 
 // setupMultiListenerTestSession creates an MCP client flow with a Manager for
@@ -82,8 +82,8 @@ func TestProxyStart_DefaultNameWhenOmitted(t *testing.T) {
 		t.Fatalf("unmarshal: %v", err)
 	}
 
-	if out.Name != proxy.DefaultListenerName {
-		t.Errorf("name = %q, want %q", out.Name, proxy.DefaultListenerName)
+	if out.Name != connector.DefaultListenerName {
+		t.Errorf("name = %q, want %q", out.Name, connector.DefaultListenerName)
 	}
 }
 

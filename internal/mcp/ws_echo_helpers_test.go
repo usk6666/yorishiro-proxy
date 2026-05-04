@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/usk6666/yorishiro-proxy/internal/protocol/ws"
+	"github.com/usk6666/yorishiro-proxy/internal/layer/ws"
 )
 
 // newWebSocketEchoServer creates a TCP server that accepts HTTP Upgrade requests,

@@ -36,9 +36,9 @@ import (
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"go.starlark.net/starlark"
 
+	"github.com/usk6666/yorishiro-proxy/internal/connector"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/pluginv2"
-	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 )
 
 // resendHTTPHookCallable wraps a Go counter increment in a Starlark
@@ -420,9 +420,9 @@ func TestResendHTTP_FromScratch_MissingFieldsRejected(t *testing.T) {
 // rejects an out-of-scope authority that round-trips badly.
 func TestResendHTTP_TargetScopeBypassRegression(t *testing.T) {
 	store := newTestStore(t)
-	scope := proxy.NewTargetScope()
+	scope := connector.NewTargetScope()
 	scope.SetPolicyRules(
-		[]proxy.TargetRule{{Hostname: "allowed.local"}},
+		[]connector.TargetRule{{Hostname: "allowed.local"}},
 		nil,
 	)
 	ctx := context.Background()

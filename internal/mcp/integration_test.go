@@ -18,8 +18,8 @@ import (
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/usk6666/yorishiro-proxy/internal/cert"
+	"github.com/usk6666/yorishiro-proxy/internal/connector"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
-	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
 
@@ -28,7 +28,7 @@ type testEnv struct {
 	cs          *gomcp.ClientSession
 	store       flow.Store
 	manager     proxyManager
-	passthrough *proxy.PassthroughList
+	passthrough *connector.PassthroughList
 }
 
 // setupIntegrationEnv creates a fully-wired MCP test environment with a real
@@ -116,7 +116,7 @@ func setupIntegrationEnvWithPassthrough(t *testing.T) *testEnv {
 	}
 
 	// Create shared passthrough.
-	pl := proxy.NewPassthroughList()
+	pl := connector.NewPassthroughList()
 
 	// Create proxy manager.
 	manager := newTestProxybuildManagerWithStore(t, store)
@@ -241,7 +241,7 @@ func proxyHTTPClient(proxyAddr string) *gohttp.Client {
 // proxy_start -> HTTP request through proxy -> query sessions -> query flow
 // -> execute replay -> execute delete_flows -> proxy_stop.
 func TestIntegration_FullLifecycle(t *testing.T) {
-	t.Skip("requires plain-HTTP forward proxy in proxybuild — pending USK-697 follow-up; tested via legacy stack at internal/proxy/integration_test.go")
+	t.Skip("requires plain-HTTP forward proxy (proxybuild OnHTTP1) — pending USK-710")
 	upstreamAddr := startUpstreamServer(t)
 	env := setupIntegrationEnv(t)
 
@@ -560,7 +560,7 @@ func TestIntegration_ProxyStartStopRestart(t *testing.T) {
 // TestIntegration_MultipleRequests verifies that multiple HTTP requests are
 // recorded as separate sessions and can be listed/filtered.
 func TestIntegration_MultipleRequests(t *testing.T) {
-	t.Skip("requires plain-HTTP forward proxy in proxybuild — pending USK-697 follow-up; tested via legacy stack at internal/proxy/integration_test.go")
+	t.Skip("requires plain-HTTP forward proxy (proxybuild OnHTTP1) — pending USK-710")
 	upstreamAddr := startUpstreamServer(t)
 	env := setupIntegrationEnv(t)
 
@@ -794,7 +794,7 @@ func TestIntegration_Configure_ProxyNotRunning(t *testing.T) {
 // send/receive messages for a recorded HTTP flow, including sequence, direction,
 // method, URL, headers, and body fields.
 func TestIntegration_QueryMessages(t *testing.T) {
-	t.Skip("requires plain-HTTP forward proxy in proxybuild — pending USK-697 follow-up; tested via legacy stack at internal/proxy/integration_test.go")
+	t.Skip("requires plain-HTTP forward proxy (proxybuild OnHTTP1) — pending USK-710")
 	upstreamAddr := startUpstreamServer(t)
 	env := setupIntegrationEnv(t)
 

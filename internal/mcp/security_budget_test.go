@@ -6,11 +6,11 @@ import (
 	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/usk6666/yorishiro-proxy/internal/proxy"
+	"github.com/usk6666/yorishiro-proxy/internal/connector"
 )
 
 // setupSecurityBudgetTestSession creates an MCP client session with a budget manager.
-func setupSecurityBudgetTestSession(t *testing.T, bm *proxy.BudgetManager) *gomcp.ClientSession {
+func setupSecurityBudgetTestSession(t *testing.T, bm *connector.BudgetManager) *gomcp.ClientSession {
 	t.Helper()
 	ctx := context.Background()
 
@@ -43,7 +43,7 @@ func setupSecurityBudgetTestSession(t *testing.T, bm *proxy.BudgetManager) *gomc
 }
 
 func TestSecurity_GetBudget_EmptyDefault(t *testing.T) {
-	bm := proxy.NewBudgetManager()
+	bm := connector.NewBudgetManager()
 	cs := setupSecurityBudgetTestSession(t, bm)
 
 	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
@@ -71,7 +71,7 @@ func TestSecurity_GetBudget_EmptyDefault(t *testing.T) {
 }
 
 func TestSecurity_SetBudget_AgentOnly(t *testing.T) {
-	bm := proxy.NewBudgetManager()
+	bm := connector.NewBudgetManager()
 	cs := setupSecurityBudgetTestSession(t, bm)
 
 	maxReqs := int64(500)
@@ -105,8 +105,8 @@ func TestSecurity_SetBudget_AgentOnly(t *testing.T) {
 }
 
 func TestSecurity_SetBudget_WithPolicy(t *testing.T) {
-	bm := proxy.NewBudgetManager()
-	bm.SetPolicyBudget(proxy.BudgetConfig{
+	bm := connector.NewBudgetManager()
+	bm.SetPolicyBudget(connector.BudgetConfig{
 		MaxTotalRequests: 1000,
 		MaxDuration:      time.Hour,
 	})
@@ -135,8 +135,8 @@ func TestSecurity_SetBudget_WithPolicy(t *testing.T) {
 }
 
 func TestSecurity_SetBudget_ExceedsPolicy(t *testing.T) {
-	bm := proxy.NewBudgetManager()
-	bm.SetPolicyBudget(proxy.BudgetConfig{
+	bm := connector.NewBudgetManager()
+	bm.SetPolicyBudget(connector.BudgetConfig{
 		MaxTotalRequests: 100,
 	})
 	cs := setupSecurityBudgetTestSession(t, bm)
@@ -160,7 +160,7 @@ func TestSecurity_SetBudget_ExceedsPolicy(t *testing.T) {
 }
 
 func TestSecurity_SetBudget_NegativeValue(t *testing.T) {
-	bm := proxy.NewBudgetManager()
+	bm := connector.NewBudgetManager()
 	cs := setupSecurityBudgetTestSession(t, bm)
 
 	maxReqs := int64(-1)
@@ -182,7 +182,7 @@ func TestSecurity_SetBudget_NegativeValue(t *testing.T) {
 }
 
 func TestSecurity_SetBudget_InvalidDuration(t *testing.T) {
-	bm := proxy.NewBudgetManager()
+	bm := connector.NewBudgetManager()
 	cs := setupSecurityBudgetTestSession(t, bm)
 
 	maxDur := "invalid"
@@ -204,7 +204,7 @@ func TestSecurity_SetBudget_InvalidDuration(t *testing.T) {
 }
 
 func TestSecurity_SetBudget_ClearBudget(t *testing.T) {
-	bm := proxy.NewBudgetManager()
+	bm := connector.NewBudgetManager()
 	cs := setupSecurityBudgetTestSession(t, bm)
 
 	// Set budget first.

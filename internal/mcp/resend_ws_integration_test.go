@@ -42,8 +42,8 @@ import (
 	"go.starlark.net/starlark"
 
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
+	"github.com/usk6666/yorishiro-proxy/internal/layer/ws"
 	"github.com/usk6666/yorishiro-proxy/internal/pluginv2"
-	legacyws "github.com/usk6666/yorishiro-proxy/internal/protocol/ws"
 )
 
 // resendWSHookCallable wraps a Go counter increment in a Starlark
@@ -442,7 +442,7 @@ func handleWSDeflateEchoConn(conn net.Conn, observed *atomic.Pointer[string]) {
 		return
 	}
 
-	frame, err := legacyws.ReadFrame(r)
+	frame, err := ws.ReadFrame(r)
 	if err != nil {
 		return
 	}
@@ -456,8 +456,8 @@ func handleWSDeflateEchoConn(conn net.Conn, observed *atomic.Pointer[string]) {
 	observed.Store(&str)
 
 	// Echo the decompressed bytes back as an uncompressed text frame.
-	echo := &legacyws.Frame{Fin: true, Opcode: legacyws.OpcodeText, Payload: decoded}
-	_ = legacyws.WriteFrame(conn, echo)
+	echo := &ws.Frame{Fin: true, Opcode: ws.OpcodeText, Payload: decoded}
+	_ = ws.WriteFrame(conn, echo)
 }
 
 func truncate(s string, n int) string {

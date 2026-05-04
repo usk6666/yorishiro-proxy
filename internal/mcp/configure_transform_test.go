@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/usk6666/yorishiro-proxy/internal/proxy"
+	"github.com/usk6666/yorishiro-proxy/internal/connector"
 	httprules "github.com/usk6666/yorishiro-proxy/internal/rules/http"
 )
 
@@ -17,7 +17,7 @@ func setupTransformTestSession(t *testing.T, engine *httprules.TransformEngine) 
 	t.Helper()
 	ctx := context.Background()
 
-	pl := proxy.NewPassthroughList()
+	pl := connector.NewPassthroughList()
 	opts := []ServerOption{WithPassthroughList(pl)}
 	if engine != nil {
 		opts = append(opts, WithHTTPTransformEngine(engine))
