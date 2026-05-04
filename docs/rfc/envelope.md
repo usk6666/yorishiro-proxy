@@ -1116,9 +1116,20 @@ This RFC is **accepted** as of 2026-04-12. Implementation proceeds on N1.
 - [x] Open Question #1 (HTTP/2 flow control vs Pipeline latency) — **resolved 2026-04-15; revised 2026-04-23: event-granular HTTP/2 Layer + HTTPAggregatorLayer wrapper (§9.1)**
 - [x] Open Question #2 (gRPC envelope granularity) — **resolved 2026-04-23: event-per-envelope with dedicated GRPCStart/Data/End types (§9.2)**
 - [x] Open Question #3 (Starlark plugin API shape) — **resolved 2026-04-29: three-axis Hook identity `(protocol, event, phase)` with two-phase Pipeline integration and mutable Starlark dict messages (§9.3)**
-- [ ] Envelope + Message Go interfaces compiled and validated — **part of N1**
-- [ ] Pseudocode-level InterceptStep implementation proving dispatch pattern — **part of N3**
-- [ ] Migration reuse % validated against actual file sizes — **part of each N milestone retrospective**
+- [x] Envelope + Message Go interfaces compiled and validated — **completed in N1**
+- [x] Pseudocode-level InterceptStep implementation proving dispatch pattern — **completed in N3**
+- [x] Migration reuse % validated against actual file sizes — **closed at N9; weighted reuse % held within the ~70% estimate from §6 (e.g. http1 parser preserved verbatim, Pipeline.Run snapshot mechanism reused, TLS handshake / cert / macro / flow store packages reused)**
+
+**Milestone completion record:**
+- [x] N1 (Foundation Types) — DONE
+- [x] N2 (TCP + TLS + ByteChunk + raw smuggling E2E) — DONE
+- [x] N3 (HTTP/1.x Layer + normal HTTPS MITM E2E) — DONE
+- [x] N4 (Connector Completion) — DONE
+- [x] N5 (Job + Macro Integration) — DONE
+- [x] N6 / N6.5 / N6.6 / N6.7 (HTTP/2 Layer + event-granular split + httpaggregator) — DONE
+- [x] N7 (gRPC, gRPC-Web, WS, SSE Layers + per-protocol rule engines) — DONE
+- [x] N8 (Plugin v2 — Starlark; MCP + WebUI Reconnection) — DONE
+- [x] N9 (Legacy Removal + Documentation) — DONE <!-- USK-700 stamps the close date when the v0.x release tag is cut -->
 
 ---
 

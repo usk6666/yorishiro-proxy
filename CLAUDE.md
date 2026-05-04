@@ -5,18 +5,9 @@ Operates as an MCP (Model Context Protocol) server, providing traffic intercepti
 
 **Status**: OSS (Apache License 2.0) · Under active development
 
-## Active Rewrite (RFC-001)
-
-> **M36-M44 (Codec + Pipeline + Session) is cancelled.** Superseded by [RFC-001: Envelope + Layered Connection Model](docs/rfc/envelope.md) which fixes the HTTP bias in the Exchange/Codec abstractions.
-> **Before working on any N1-N9 Issue, invoke the `/rfc001` skill** — it loads the spec, implementation guide, Linear state, and presents the implementation rules automatically.
-
-- **Spec**: [`docs/rfc/envelope.md`](docs/rfc/envelope.md) (English) / [`docs/rfc/envelope-ja.md`](docs/rfc/envelope-ja.md) (Japanese)
-- **Implementation strategy**: [`docs/rfc/envelope-implementation.md`](docs/rfc/envelope-implementation.md)
-- **Branch**: `rewrite/rfc-001`
-- **Active milestones**: N1-N9 (see Linear). M36-M44 are `[Cancelled]` in Linear.
-- **Entry point**: `/rfc001` skill or `/rfc001 <Issue ID>`
-
 ## Architecture
+
+Design: [RFC-001 Envelope + Layered Connection Model](docs/rfc/envelope.md). Implementation strategy: [`docs/rfc/envelope-implementation.md`](docs/rfc/envelope-implementation.md).
 
 ### Principle: L7-first, L4-capable
 
@@ -28,38 +19,47 @@ Operates as an MCP (Model Context Protocol) server, providing traffic intercepti
 
 ```
 TCP Listener (Layer 4)
-  → Protocol Detection (peek bytes)
-    → Protocol Handler (HTTP/S, HTTP/2, gRPC, WebSocket, Raw TCP)
-      → Session Recording (L7 structured + L4 raw bytes)
-        → MCP Tool (Intercept / Replay / Search)
+  → Protocol Detection (peek bytes / ALPN)
+    → Connection Stack (TCP → TLS → HTTP/1 | HTTP/2 → WS | gRPC | gRPC-Web | SSE | Raw)
+      → Pipeline Steps
+          (HostScope → HTTPScope → Safety → PluginPre → Intercept → Transform → Macro → PluginPost → Record)
+        → Flow Recording (L7 Message + L4 Envelope.Raw)
+          → MCP Tool (Intercept / Replay / Search / Plugin Introspect)
 ```
+
+Each connection is an explicit stack of `Layer`s (RFC-001 §3.3); each Layer yields one or more `Channel`s; the Pipeline runs on `Envelope`s drawn from those Channels. The data model is:
+
+- **`Envelope`** — protocol-agnostic outer container with identity (StreamID/FlowID/Sequence/Direction), provenance (Protocol), wire fidelity (Raw bytes), and a typed `Message`.
+- **`Message`** — protocol-specific payload (`HTTPMessage`, `WSMessage`, `GRPCStartMessage`/`GRPCDataMessage`/`GRPCEndMessage`, `SSEMessage`, `RawMessage`, `TLSHandshakeMessage`).
 
 ### L7/L4 Support Status by Protocol
 
 | Protocol | L7 Structured View | L4 raw bytes | Notes |
 |----------|-------------------|--------------|-------|
-| HTTP/1.x | YES | YES (parser built-in) | Independent engine in M32; net/http removed |
-| HTTP/2 | YES | YES (frame codec) | Custom frame engine implemented in M26 |
-| gRPC | YES | YES (via HTTP/2) | |
-| gRPC-Web | YES | YES (via HTTP/1.x or HTTP/2) | M33; binary + base64 wire formats |
-| WebSocket | YES | YES (per frame) | |
-| Raw TCP | N/A | YES (byte stream) | |
-| SOCKS5 | N/A | N/A (excluded as transport layer itself) | Apply raw bytes/L7 to protocol delegated after handshake/tunnel |
+| HTTP/1.x | YES | YES | Custom parser; `net/http` not used in data path |
+| HTTP/2 | YES | YES | Custom frame engine; event-granular Channel + per-stream BodyBuffer |
+| gRPC | YES | YES (via HTTP/2) | Native LPM reassembly; GRPCStart/Data/End envelope events |
+| gRPC-Web | YES | YES (via HTTP/1.x or HTTP/2) | Binary + base64 wire formats |
+| WebSocket | YES | YES (per frame) | Per-message-deflate (RFC 7692) supported |
+| SSE | YES | YES | Per-event envelopes; streaming-aware Pipeline |
+| Raw TCP | N/A | YES (byte stream) | Smuggling-safe pass-through (`bytechunk` Layer) |
+| SOCKS5 | N/A | N/A (excluded as transport layer itself) | Apply raw bytes/L7 to the protocol delegated after handshake/tunnel |
+| TLS handshake | YES (observation) | N/A | `TLSHandshakeMessage` envelope; SNI / ALPN / JA3 / JA4 visible to plugins |
 
 ### Design Principles
 
-- Accept connections at Layer 4 (TCP) and route to modular protocol handlers
-- No external proxy libraries — built on standard library
+- Accept connections at Layer 4 (TCP) and route to a per-connection `ConnectionStack` of `Layer`s
+- No external proxy libraries — built on the standard library
 - MCP-first: all operations are exposed as MCP tools
 
 ### MITM Implementation Principles
 
-As a MITM proxy, yorishiro-proxy must faithfully represent wire-level reality. The following principles apply to all data path code (`internal/protocol/`, `internal/proxy/`, `internal/flow/`, `internal/plugin/`).
+As a MITM proxy, yorishiro-proxy must faithfully represent wire-level reality. The following principles apply to all data path code (`internal/envelope/`, `internal/layer/`, `internal/connector/`, `internal/pipeline/`, `internal/pluginv2/`, `internal/flow/`).
 
 1. **Do not normalize what the wire did not normalize** — Header name casing, header order, duplicate headers with different casing, and whitespace must be preserved exactly as observed on the wire. If the wire sends `Set-Cookie: a=1` and `set-cookie: b=2`, they are two distinct headers with different names. Do not merge, canonicalize, or reorder.
 2. **Each protocol has its own canonical form; do not unify across protocols** — HTTP/1.x headers are case-insensitive but preserve wire casing. HTTP/2 headers are lowercase by spec (RFC 9113). These are different realities and must be handled by protocol-specific code paths, not forced into a shared normalized representation.
-3. **Prefer lossless representations over convenient ones** — Use ordered arrays (`[{name, value}, ...]`) over maps (`{name: [values]}`) for headers. Use protocol-native types (RawHeaders for HTTP/1.x, hpack.HeaderField for HTTP/2) over bridge types (gohttp.Header). Convenience helpers may be provided on top but must not be the storage format.
-4. **`net/http` usage policy** — Data path code must not use `net/http` types for transport or data representation. Use internal types (RawRequest/RawResponse, hpack types). `net/http` is permitted only in the control plane: MCP server (`internal/mcp/`), CLI (`cmd/`), self-update (`internal/selfupdate/`), and status code constants (via `internal/protocol/httputil` shared package, see USK-522).
+3. **Prefer lossless representations over convenient ones** — Use ordered arrays (`[]KeyValue`) over maps (`map[string][]string`) for headers. Use protocol-native types (`parser.RawHeaders` for HTTP/1.x, `hpack.HeaderField` for HTTP/2) over bridge types. Convenience helpers may be provided on top but must not be the storage format.
+4. **`net/http` usage policy** — Data path code must not use `net/http` types for transport or data representation. Use internal types (`internal/layer/http1/parser` `RawRequest`/`RawResponse`, hpack types). `net/http` is permitted only in the control plane: MCP server (`internal/mcp/`), CLI (`cmd/`), and self-update (`internal/selfupdate/`).
 
 ## Package Layout
 
@@ -70,35 +70,68 @@ cmd/yorishiro-proxy/       # Entry point
   client_params.go         # Flag → JSON parameter conversion engine
   client_format.go         # Result formatting (JSON / table output)
   serverjson.go            # server.json multi-instance entry management (used for client auto-discovery)
+  install.go, upgrade.go,  # Subcommand handlers
+  version.go, browser.go
 internal/
-  exchange/                # Protocol-agnostic message unit (Exchange, Direction, KeyValue)
-  pipeline/                # Pipeline Step chain (Scope→RateLimit→Safety→Plugin→Intercept→Transform→Record)
+  envelope/                # Protocol-agnostic Envelope + typed Message
+                           #   envelope.go (Envelope, EnvelopeContext, TLSSnapshot, Direction, Protocol, KeyValue)
+                           #   message.go (Message interface) + per-protocol files
+                           #   http.go (HTTPMessage), ws.go (WSMessage),
+                           #   grpc.go (GRPCStartMessage/GRPCDataMessage/GRPCEndMessage),
+                           #   grpcweb.go, sse.go, raw.go
+                           #   bodybuf/ (memory-then-spill BodyBuffer for HTTP/2 streams)
+  layer/                   # Layer + Channel interfaces; per-protocol implementations
+                           #   layer.go (Layer interface), channel.go (Channel interface),
+                           #   errors.go (StreamError)
+                           #   bytechunk/ (raw TCP), tlslayer/ (TLS handshake),
+                           #   http1/ (with parser/), http2/ (event-granular),
+                           #   httpaggregator/ (folds H2 events into HTTPMessage),
+                           #   grpc/, grpcweb/, ws/, sse/
+  pipeline/                # Pipeline Step chain (HostScope → HTTPScope → Safety → PluginPre →
+                           #   Intercept → Transform → Macro → PluginPost → Record).
+                           #   Steps dispatch via type-switch on env.Message.
+                           #   WireEncoderRegistry (per-protocol on-Send re-encode).
+  connector/               # TCP listener, ConnectionStack builder, per-connection plumbing
+                           #   full_listener.go (the sole listener API),
+                           #   coordinator.go (multi-listener orchestrator),
+                           #   connection_stack.go, detect.go, alpn_routing.go,
+                           #   connect_handler.go (CONNECT tunnel), socks5_handler.go,
+                           #   h2_dispatch.go, h2_pool.go, h2c_handler.go,
+                           #   transport/ (TLS / uTLS / mTLS dial; per-host TLS config)
+  proxybuild/              # Live data-path stack assembly + multi-listener Manager
+                           #   builder.go (BuildLiveStack), manager.go,
+                           #   listener.go (lifecycle wrapper)
+  pluginv2/                # RFC-001 §9.3 Starlark plugin engine
+                           #   register_hook builtin, (protocol, event, phase) 3-axis identity,
+                           #   17-entry hook surface, mutable Starlark dict messages,
+                           #   ctx.transaction_state / ctx.stream_state, plugin_introspect
+  rules/                   # Per-protocol rule engines (Intercept, Transform, Safety)
+                           #   common/ (HoldQueue, pattern compiler, presets)
+                           #   http/, ws/, grpc/, sse/, raw/
+  safety/                  # SafetyFilter Engine (envelope-native; Input Filter + Output Filter)
+                           #   engine.go, rule.go, preset.go (destructive-sql,
+                           #   destructive-os-command), preset_pii.go (credit-card,
+                           #   japan-my-number, email, japan-phone)
+  job/                     # Job runner with EnvelopeSource interface
+                           #   http_source.go, ws_source.go, grpc_source.go, raw_source.go,
+                           #   fuzz_http_source.go, fuzz_raw_source.go,
+                           #   macro_adapter.go (Macro adapter)
+  macro/                   # Macro engine: template / guard / extract / encoder
+  flow/                    # Stream/Flow Store (sqlite); HAR / JSONL / cURL export, import
+  pushrecorder/            # Drains upstream HTTP/2 pushed streams via OnHTTP2UpstreamDialed
+  cert/                    # Root CA + dynamic server cert issuance
+  config/                  # Configuration loading + validation (incl. Plugins, body-spill, limits)
+  fingerprint/             # TLS fingerprint detection (JA3 / JA4)
+  encoding/                # Protobuf framing helper
+  fuzzer/                  # Iterator / Position / RequestData primitives for typed-fuzz path
+  mcp/                     # MCP server, tools, handlers
+                           #   typed resend: resend_http / resend_ws / resend_grpc / resend_raw
+                           #   typed fuzz:   fuzz_http   / fuzz_ws   / fuzz_grpc   / fuzz_raw
+                           #   plugin_introspect, query (with Protocol filter), intercept,
+                           #   macro, manage, configure, security, proxy_start / proxy_stop
   session/                 # RunSession (universal session loop, OnComplete hook)
-  mcp/                     # MCP server, tool definitions, handlers
-  proxy/
-    listener.go            # TCP listener (Layer 4)
-    handler.go             # ProtocolHandler interface
-    peekconn.go            # Buffered net.Conn wrapper
-  protocol/
-    detect.go              # Protocol detection logic
-    http/                  # HTTP/1.x, HTTPS MITM implementation
-      handler.go           # HTTP forward proxy handler
-      connect.go           # CONNECT tunnel, HTTPS MITM
-      parser/              # HTTP/1.x parser (RawRequest, RawResponse, Anomaly)
-    grpcweb/               # gRPC-Web frame parsing, handler, request builder
-    httputil/              # HTTP common utilities (TLS transport, per-host TLS config, timing)
-  safety/                  # SafetyFilter engine (Input Filter + Output Filter)
-    engine.go              # Rule compilation, CheckInput, FilterOutput
-    rule.go                # Rule/Target/Action type definitions, Preset structures
-    preset.go              # Input Filter presets (destructive-sql, destructive-os-command)
-    preset_pii.go          # Output Filter PII presets (credit-card, japan-my-number, email, japan-phone)
-  plugin/                  # Starlark plugin engine and registry
-  flow/                    # Stream/Flow recording, management, HAR export
-  cert/                    # TLS certificate generation, CA management
-    ca.go                  # Root CA generation and loading
-    issuer.go              # Dynamic server certificate issuance
-  config/                  # Configuration loading
   logging/                 # Structured logging (log/slog)
+  payload/, setup/, testutil/, selfupdate/
 ```
 
 ## Build & Test
@@ -134,15 +167,17 @@ but also subsystem integration. Confirm that the following checklist is satisfie
 - [ ] **Stream recording**: Stream saved to Store with correct protocol name (`Protocol`), State, and Scheme
 - [ ] **Flow recording**: Individual Flows (Send/Receive) correctly recorded with direction, sequence, headers, and body
 - [ ] **State transitions**: Progressive recording works correctly (`State` transitions from `active` → `complete`)
-- [ ] **Plugin hook firing**: The relevant hook is called for the protocol (for plugin-enabled protocols)
+- [ ] **Plugin hook firing**: The relevant `(protocol, event, phase)` hook is dispatched via `pluginv2.Engine` for the protocol
 - [ ] **Error paths**: Flow is recorded with `State="error"` on connection failure or timeout
-- [ ] **Raw bytes recording**: Wire-observed raw bytes (`Message.RawBytes`) are correctly recorded (L4-capable principle, established in M26/M27)
-- [ ] **Variant recording**: On intercept/transform modification, both original and modified variants are recorded (introduced in M27)
-- [ ] **MCP tool integration**: Flows are correctly retrievable via the `query` tool (with `resource: "flows"` / `resource: "flow"` parameters)
+- [ ] **Raw bytes recording**: Wire-observed raw bytes (`Envelope.Raw`) are correctly recorded — L4-capable principle
+- [ ] **Variant recording**: On intercept/transform modification, both original and modified variants are recorded
+- [ ] **MCP tool integration**: Flows are correctly retrievable via the `query` tool (with `resource: "flows"` / `resource: "flow"` parameters; Protocol family filter accepts `http`/`ws`/`grpc`/`grpc-web`/`sse`/`raw`/`tls-handshake`)
 
 > **Applicability**: Not all items are required for every test. Verify relevant items based on protocol characteristics and test purpose.
 > Example: Raw TCP has no L7 structured view, so header validation under "message content" is not required.
 > SOCKS5 is excluded from flow recording as a transport layer; validate at the tunneled protocol instead.
+>
+> **Reference patterns**: see `internal/connector/full_listener_integration_test.go` (the canonical end-to-end harness) and per-Layer harnesses such as `internal/layer/http1/mitm_integration_test.go`, `internal/layer/http2/http2_integration_test.go`, `internal/layer/grpc/grpc_integration_test.go`, `internal/layer/ws/ws_integration_test.go`, `internal/layer/sse/sse_integration_test.go`, `internal/layer/grpcweb/grpcweb_integration_test.go`, `internal/layer/bytechunk/smuggling_integration_test.go`.
 
 ## Coding Conventions
 
@@ -233,12 +268,12 @@ This prevents config support from being omitted as an implicit assumption.
 When splitting Issues for a new protocol with `/project plan`, treat the following as mandatory checks.
 This prevents gaps in e2e test coverage. Refer to the "e2e Test Subsystem Verification Checklist" for individual test verification details.
 
-- [ ] e2e test for successful proxy communication (`internal/proxy/*_integration_test.go`)
+- [ ] e2e test for successful proxy communication (`internal/connector/*_integration_test.go` and/or `internal/layer/*/*_integration_test.go`)
 - [ ] Stream/Flow recording completeness verification (protocol name, State transitions, Flow count per Stream)
 - [ ] Raw bytes recording completeness verification (frame boundaries, binary data round-trip) — L4-capable principle
 - [ ] Variant recording test (original/modified save on intercept modification)
 - [ ] Progressive recording test (intermediate state verification for streaming protocols)
-- [ ] Plugin hook firing verification (if relevant hooks exist for the protocol)
+- [ ] Plugin hook firing verification (relevant `(protocol, event, phase)` hooks dispatched via `pluginv2.Engine`)
 - [ ] Safety Filter / Output Filter application verification
 - [ ] Error path e2e tests (connection failure, timeout, malformed data)
 - [ ] Independent tests for derived protocols (e.g., HTTP/2 → gRPC) if they exist
