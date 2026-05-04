@@ -7,16 +7,14 @@ import (
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/usk6666/yorishiro-proxy/internal/config"
+	"github.com/usk6666/yorishiro-proxy/internal/connector/transport"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
-	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
-	"github.com/usk6666/yorishiro-proxy/internal/proxy"
-	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
 
 // mockTLSFingerprintSetter implements tlsFingerprintSetter for testing.
 type mockTLSFingerprintSetter struct {
 	profile   string
-	transport httputil.TLSTransport
+	transport transport.TLSTransport
 }
 
 func (m *mockTLSFingerprintSetter) SetTLSFingerprint(profile string) {
@@ -27,12 +25,12 @@ func (m *mockTLSFingerprintSetter) TLSFingerprint() string {
 	return m.profile
 }
 
-func (m *mockTLSFingerprintSetter) SetTLSTransport(t httputil.TLSTransport) {
+func (m *mockTLSFingerprintSetter) SetTLSTransport(t transport.TLSTransport) {
 	m.transport = t
 }
 
 // setupTLSFingerprintTestSession creates an MCP client session with TLS fingerprint setter.
-func setupTLSFingerprintTestSession(t *testing.T, store flow.Store, manager *proxy.Manager, setter *mockTLSFingerprintSetter, opts ...ServerOption) *gomcp.ClientSession {
+func setupTLSFingerprintTestSession(t *testing.T, store flow.Store, manager proxyManager, setter *mockTLSFingerprintSetter, opts ...ServerOption) *gomcp.ClientSession {
 	t.Helper()
 	ctx := context.Background()
 
@@ -227,10 +225,7 @@ func TestConfigure_TLSFingerprint_OmittedDoesNotChange(t *testing.T) {
 }
 
 func TestProxyStart_TLSFingerprint_ValidProfile(t *testing.T) {
-	logger := testutil.DiscardLogger()
-	detector := &stubDetector{}
-	manager := proxy.NewManager(detector, logger)
-	t.Cleanup(func() { manager.Stop(context.Background()) })
+	manager := newTestProxybuildManager(t)
 
 	setter := &mockTLSFingerprintSetter{}
 	cs := setupTLSFingerprintTestSession(t, nil, manager, setter)
@@ -252,10 +247,7 @@ func TestProxyStart_TLSFingerprint_ValidProfile(t *testing.T) {
 }
 
 func TestProxyStart_TLSFingerprint_InvalidProfile(t *testing.T) {
-	logger := testutil.DiscardLogger()
-	detector := &stubDetector{}
-	manager := proxy.NewManager(detector, logger)
-	t.Cleanup(func() { manager.Stop(context.Background()) })
+	manager := newTestProxybuildManager(t)
 
 	setter := &mockTLSFingerprintSetter{}
 	cs := setupTLSFingerprintTestSession(t, nil, manager, setter)
@@ -273,10 +265,7 @@ func TestProxyStart_TLSFingerprint_InvalidProfile(t *testing.T) {
 }
 
 func TestProxyStart_TLSFingerprint_None(t *testing.T) {
-	logger := testutil.DiscardLogger()
-	detector := &stubDetector{}
-	manager := proxy.NewManager(detector, logger)
-	t.Cleanup(func() { manager.Stop(context.Background()) })
+	manager := newTestProxybuildManager(t)
 
 	setter := &mockTLSFingerprintSetter{}
 	cs := setupTLSFingerprintTestSession(t, nil, manager, setter)
@@ -298,10 +287,7 @@ func TestProxyStart_TLSFingerprint_None(t *testing.T) {
 }
 
 func TestProxyStart_TLSFingerprint_ConfigDefault(t *testing.T) {
-	logger := testutil.DiscardLogger()
-	detector := &stubDetector{}
-	manager := proxy.NewManager(detector, logger)
-	t.Cleanup(func() { manager.Stop(context.Background()) })
+	manager := newTestProxybuildManager(t)
 
 	setter := &mockTLSFingerprintSetter{}
 	ctx := context.Background()
@@ -352,13 +338,13 @@ func TestConfigure_TLSFingerprint_TransportRebuilt(t *testing.T) {
 	tests := []struct {
 		profile       string
 		wantUTLS      bool // true → UTLSTransport, false → StandardTransport
-		wantProfileBP httputil.BrowserProfile
+		wantProfileBP transport.BrowserProfile
 	}{
-		{"chrome", true, httputil.ProfileChrome},
-		{"firefox", true, httputil.ProfileFirefox},
-		{"safari", true, httputil.ProfileSafari},
-		{"edge", true, httputil.ProfileEdge},
-		{"random", true, httputil.ProfileRandom},
+		{"chrome", true, transport.ProfileChrome},
+		{"firefox", true, transport.ProfileFirefox},
+		{"safari", true, transport.ProfileSafari},
+		{"edge", true, transport.ProfileEdge},
+		{"random", true, transport.ProfileRandom},
 		{"none", false, 0},
 	}
 
@@ -366,8 +352,8 @@ func TestConfigure_TLSFingerprint_TransportRebuilt(t *testing.T) {
 		t.Run(tt.profile, func(t *testing.T) {
 			setter := &mockTLSFingerprintSetter{}
 			// Provide an initial transport so InsecureSkipVerify can be read.
-			initialTransport := &httputil.UTLSTransport{
-				Profile:            httputil.ProfileChrome,
+			initialTransport := &transport.UTLSTransport{
+				Profile:            transport.ProfileChrome,
 				InsecureSkipVerify: true,
 			}
 			cs := setupTLSFingerprintTestSession(t, nil, nil, setter,
@@ -401,9 +387,9 @@ func TestConfigure_TLSFingerprint_TransportRebuilt(t *testing.T) {
 			}
 
 			if tt.wantUTLS {
-				ut, ok := setter.transport.(*httputil.UTLSTransport)
+				ut, ok := setter.transport.(*transport.UTLSTransport)
 				if !ok {
-					t.Fatalf("transport type = %T, want *httputil.UTLSTransport", setter.transport)
+					t.Fatalf("transport type = %T, want *transport.UTLSTransport", setter.transport)
 				}
 				if ut.Profile != tt.wantProfileBP {
 					t.Errorf("transport profile = %v, want %v", ut.Profile, tt.wantProfileBP)
@@ -412,9 +398,9 @@ func TestConfigure_TLSFingerprint_TransportRebuilt(t *testing.T) {
 					t.Error("InsecureSkipVerify not inherited from initial transport")
 				}
 			} else {
-				st, ok := setter.transport.(*httputil.StandardTransport)
+				st, ok := setter.transport.(*transport.StandardTransport)
 				if !ok {
-					t.Fatalf("transport type = %T, want *httputil.StandardTransport", setter.transport)
+					t.Fatalf("transport type = %T, want *transport.StandardTransport", setter.transport)
 				}
 				if !st.InsecureSkipVerify {
 					t.Error("InsecureSkipVerify not inherited from initial transport")
@@ -425,14 +411,11 @@ func TestConfigure_TLSFingerprint_TransportRebuilt(t *testing.T) {
 }
 
 func TestProxyStart_TLSFingerprint_TransportRebuilt(t *testing.T) {
-	logger := testutil.DiscardLogger()
-	detector := &stubDetector{}
-	manager := proxy.NewManager(detector, logger)
-	t.Cleanup(func() { manager.Stop(context.Background()) })
+	manager := newTestProxybuildManager(t)
 
 	setter := &mockTLSFingerprintSetter{}
-	initialTransport := &httputil.UTLSTransport{
-		Profile:            httputil.ProfileChrome,
+	initialTransport := &transport.UTLSTransport{
+		Profile:            transport.ProfileChrome,
 		InsecureSkipVerify: true,
 	}
 	cs := setupTLSFingerprintTestSession(t, nil, manager, setter,
@@ -453,24 +436,21 @@ func TestProxyStart_TLSFingerprint_TransportRebuilt(t *testing.T) {
 	if setter.transport == nil {
 		t.Fatal("transport was not set on setter")
 	}
-	ut, ok := setter.transport.(*httputil.UTLSTransport)
+	ut, ok := setter.transport.(*transport.UTLSTransport)
 	if !ok {
-		t.Fatalf("transport type = %T, want *httputil.UTLSTransport", setter.transport)
+		t.Fatalf("transport type = %T, want *transport.UTLSTransport", setter.transport)
 	}
-	if ut.Profile != httputil.ProfileFirefox {
+	if ut.Profile != transport.ProfileFirefox {
 		t.Errorf("transport profile = %v, want ProfileFirefox", ut.Profile)
 	}
 }
 
 func TestProxyStart_TLSFingerprint_NoneUsesStandardTransport(t *testing.T) {
-	logger := testutil.DiscardLogger()
-	detector := &stubDetector{}
-	manager := proxy.NewManager(detector, logger)
-	t.Cleanup(func() { manager.Stop(context.Background()) })
+	manager := newTestProxybuildManager(t)
 
 	setter := &mockTLSFingerprintSetter{}
 	cs := setupTLSFingerprintTestSession(t, nil, manager, setter,
-		WithTLSTransport(&httputil.StandardTransport{}),
+		WithTLSTransport(&transport.StandardTransport{}),
 	)
 
 	result, err := callProxyStart(t, cs, map[string]any{
@@ -487,15 +467,15 @@ func TestProxyStart_TLSFingerprint_NoneUsesStandardTransport(t *testing.T) {
 	if setter.transport == nil {
 		t.Fatal("transport was not set on setter")
 	}
-	if _, ok := setter.transport.(*httputil.StandardTransport); !ok {
-		t.Fatalf("transport type = %T, want *httputil.StandardTransport", setter.transport)
+	if _, ok := setter.transport.(*transport.StandardTransport); !ok {
+		t.Fatalf("transport type = %T, want *transport.StandardTransport", setter.transport)
 	}
 }
 
 func TestResetSettingsToDefaults_RebuildsTLSTransport(t *testing.T) {
 	setter := &mockTLSFingerprintSetter{profile: "firefox"}
-	initialTransport := &httputil.UTLSTransport{
-		Profile:            httputil.ProfileFirefox,
+	initialTransport := &transport.UTLSTransport{
+		Profile:            transport.ProfileFirefox,
 		InsecureSkipVerify: true,
 	}
 
@@ -518,11 +498,11 @@ func TestResetSettingsToDefaults_RebuildsTLSTransport(t *testing.T) {
 	if setter.transport == nil {
 		t.Fatal("transport was not set after reset")
 	}
-	ut, ok := setter.transport.(*httputil.UTLSTransport)
+	ut, ok := setter.transport.(*transport.UTLSTransport)
 	if !ok {
-		t.Fatalf("transport type = %T, want *httputil.UTLSTransport", setter.transport)
+		t.Fatalf("transport type = %T, want *transport.UTLSTransport", setter.transport)
 	}
-	if ut.Profile != httputil.ProfileChrome {
+	if ut.Profile != transport.ProfileChrome {
 		t.Errorf("transport profile = %v, want ProfileChrome", ut.Profile)
 	}
 	if !ut.InsecureSkipVerify {
