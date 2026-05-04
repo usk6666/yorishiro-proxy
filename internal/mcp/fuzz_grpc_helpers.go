@@ -335,7 +335,7 @@ func (s *Server) runFuzzGRPCSingleVariant(ctx context.Context, plan *fuzzGRPCPla
 	// payloads (matches fuzz_http per-variant semantics — USK-677 F-1/S-1
 	// lesson). On a violation we record row.Error and return statusCode=0;
 	// the run loop continues to the next variant.
-	if v := s.checkSafetyInput(concatResendGRPCPayloads(variantPlan), variantPlan.canonicalURL.String(), keyValuesToExchangeKV(variantPlan.metadata)); v != nil {
+	if v := s.checkSafetyInput(concatResendGRPCPayloads(variantPlan), variantPlan.canonicalURL.String(), variantPlan.metadata); v != nil {
 		row.Error = safetyViolationError(v)
 		return row, 0, nil
 	}

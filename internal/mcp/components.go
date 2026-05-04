@@ -37,10 +37,10 @@ import (
 
 	"github.com/usk6666/yorishiro-proxy/internal/cert"
 	"github.com/usk6666/yorishiro-proxy/internal/config"
+	"github.com/usk6666/yorishiro-proxy/internal/connector"
 	"github.com/usk6666/yorishiro-proxy/internal/connector/transport"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/pluginv2"
-	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 	"github.com/usk6666/yorishiro-proxy/internal/proxybuild"
 	"github.com/usk6666/yorishiro-proxy/internal/rules/common"
 	grpcrules "github.com/usk6666/yorishiro-proxy/internal/rules/grpc"
@@ -97,27 +97,22 @@ func NewPipeline(
 	}
 }
 
-// proxyManager is the connector-manager interface satisfied by both the
-// legacy *proxy.Manager and the RFC-001 *proxybuild.Manager. The interface
-// covers exactly the methods MCP tools (proxy_start_tool, proxy_stop_tool,
-// configure_tool, query_tool) reach through Connector.manager.
+// proxyManager is the connector-manager interface satisfied by the
+// RFC-001 *proxybuild.Manager. The interface covers exactly the methods
+// MCP tools (proxy_start_tool, proxy_stop_tool, configure_tool,
+// query_tool) reach through Connector.manager. The legacy *proxy.Manager
+// branch was removed in USK-707; tests that still rely on it import the
+// legacy tree directly and live in *_test.go files which USK-708 will
+// migrate (USK-697 deletes the legacy tree).
 //
-// Two managers expose this surface for the duration of the N9 transition
-// (USK-690 wiring → USK-691 parity → USK-697 legacy delete). Internal mcp
-// tests still construct *proxy.Manager directly because the legacy package
-// will not be deleted until USK-697; cmd/main.go installs *proxybuild.Manager
-// for the live data path.
+// StartTCPForwardsNamedAny accepts `any` for the params argument so the
+// manager type satisfies the same signature; proxybuild.Manager returns
+// proxybuild.ErrTCPForwardsNotSupported (real TCP-forward orchestration
+// is owned by USK-697 or a follow-up).
 //
-// StartTCPForwardsNamedAny accepts `any` for the params argument so both
-// manager types satisfy the same signature. proxy.Manager type-asserts to
-// proxy.TCPForwardParams internally; proxybuild.Manager returns
-// proxybuild.ErrTCPForwardsNotSupported (real TCP-forward orchestration is
-// owned by USK-697 or a follow-up).
-//
-// ListenerStatuses is intentionally NOT on this interface — its concrete
-// return type differs between the two managers (proxy.ListenerStatus vs
-// proxybuild.ListenerStatus, structurally identical 4-field shapes). Use
-// the listenerStatuses free function to read uniformly via type-switch.
+// ListenerStatuses is intentionally NOT on this interface — the
+// concrete return type lives on the manager. Use the listenerStatuses
+// free function to read uniformly via type-switch.
 type proxyManager interface {
 	Start(ctx context.Context, listenAddr string) error
 	StartNamed(ctx context.Context, name, listenAddr string) error
@@ -138,9 +133,9 @@ type proxyManager interface {
 }
 
 // ListenerStatus is the mcp-package shape of per-listener status used by
-// query_tool / proxy_start_tool / proxy_stop_tool. Mirrors both
-// proxy.ListenerStatus and proxybuild.ListenerStatus (identical 4-field
-// shape); the listenerStatuses helper converts from either.
+// query_tool / proxy_start_tool / proxy_stop_tool. Mirrors
+// proxybuild.ListenerStatus (4-field shape); the listenerStatuses helper
+// converts from the manager's concrete type.
 type ListenerStatus struct {
 	Name              string `json:"name"`
 	ListenAddr        string `json:"listen_addr"`
@@ -152,15 +147,13 @@ type ListenerStatus struct {
 // typed-nil pointer. configure / proxy_start / proxy_stop / query
 // handlers use this in place of direct `m == nil` because Go's
 // interface-typed nil semantics make `m == nil` false when m wraps a
-// (nil *proxy.Manager) — easy to hit from test helpers that pass a
+// (nil *proxybuild.Manager) — easy to hit from test helpers that pass a
 // pre-construction nil sentinel.
 func managerIsNil(m proxyManager) bool {
 	if m == nil {
 		return true
 	}
 	switch x := m.(type) {
-	case *proxy.Manager:
-		return x == nil
 	case *proxybuild.Manager:
 		return x == nil
 	default:
@@ -169,29 +162,13 @@ func managerIsNil(m proxyManager) bool {
 }
 
 // listenerStatuses returns the per-listener status snapshot from m as
-// []ListenerStatus, regardless of whether m is the legacy *proxy.Manager
-// or the RFC-001 *proxybuild.Manager. Returns nil when no listeners are
-// running or when m is nil.
+// []ListenerStatus when m is the RFC-001 *proxybuild.Manager. Returns
+// nil when no listeners are running or when m is nil.
 func listenerStatuses(m proxyManager) []ListenerStatus {
 	if managerIsNil(m) {
 		return nil
 	}
 	switch x := m.(type) {
-	case *proxy.Manager:
-		in := x.ListenerStatuses()
-		if len(in) == 0 {
-			return nil
-		}
-		out := make([]ListenerStatus, len(in))
-		for i, s := range in {
-			out[i] = ListenerStatus{
-				Name:              s.Name,
-				ListenAddr:        s.ListenAddr,
-				ActiveConnections: s.ActiveConnections,
-				UptimeSeconds:     s.UptimeSeconds,
-			}
-		}
-		return out
 	case *proxybuild.Manager:
 		in := x.ListenerStatuses()
 		if len(in) == 0 {
@@ -214,14 +191,22 @@ func listenerStatuses(m proxyManager) []ListenerStatus {
 
 // Connector groups network/transport-level dependencies: the manager that
 // owns listeners, the capture/target scopes, TLS plumbing, the SOCKS5
-// authentication setter, the TCP-forward map and handler, the protocol
-// detector, and the per-handler "setter" slices that propagate runtime
-// configuration changes (upstream proxy, request timeout, target scope, rate
-// limiter, TLS fingerprint) to every protocol handler that supports them.
+// authentication setter, the TCP-forward map, and the per-handler "setter"
+// slices that propagate runtime configuration changes (upstream proxy,
+// request timeout, target scope, rate limiter, TLS fingerprint) to every
+// protocol handler that supports them.
+//
+// tcpHandler and detector are inert in the live data path post-USK-707
+// (TCP forward orchestration is owned by USK-697; protocol detection
+// runs inside proxybuild Stack). They remain on the struct only for
+// legacy_options_test.go (USK-708 will retire those test scaffolds along
+// with the legacy proxy package). detector is typed as `any` so this
+// non-test file does not import internal/proxy; tests still set it via
+// the WithDetector helper which receives proxy.ProtocolDetector.
 type Connector struct {
 	manager               proxyManager
-	passthrough           *proxy.PassthroughList
-	targetScope           *proxy.TargetScope
+	passthrough           *connector.PassthroughList
+	targetScope           *connector.TargetScope
 	targetScopeSetters    []targetScopeSetter
 	hostTLSRegistry       *transport.HostTLSRegistry
 	tlsTransport          transport.TLSTransport
@@ -229,7 +214,7 @@ type Connector struct {
 	socks5AuthSetter      socks5AuthSetter
 	tcpForwards           map[string]*config.ForwardConfig
 	tcpHandler            tcpForwardHandler
-	detector              proxy.ProtocolDetector
+	detector              any
 	enabledProtocols      []string
 	proxyDefaults         *config.ProxyConfig
 	upstreamProxySetters  []upstreamProxySetter
@@ -241,18 +226,21 @@ type Connector struct {
 // is required for proxy_start/proxy_stop tools to function. proxyDefaults
 // may be nil when no config file is loaded.
 //
-// manager accepts either the legacy *proxy.Manager (test paths and the
-// transition window) or the RFC-001 *proxybuild.Manager (cmd live data
-// path) — both satisfy the proxyManager interface.
+// manager is the RFC-001 *proxybuild.Manager (cmd live data path).
+//
+// tcpHandler and detector are kept as parameters only because
+// legacy_options_test.go's newServer wrapper passes them in. The live
+// data path (cmd/yorishiro-proxy/main.go) supplies nil for both —
+// USK-697/USK-708 will retire these along with the legacy proxy package.
 func NewConnector(
 	manager proxyManager,
-	passthrough *proxy.PassthroughList,
-	targetScope *proxy.TargetScope,
+	passthrough *connector.PassthroughList,
+	targetScope *connector.TargetScope,
 	hostTLSRegistry *transport.HostTLSRegistry,
 	tlsTransport transport.TLSTransport,
 	socks5AuthSetter socks5AuthSetter,
 	tcpHandler tcpForwardHandler,
-	detector proxy.ProtocolDetector,
+	detector any,
 	proxyDefaults *config.ProxyConfig,
 	targetScopeSetters []targetScopeSetter,
 	tlsFingerprintSetters []tlsFingerprintSetter,
@@ -357,8 +345,8 @@ type Misc struct {
 	ca            *cert.CA
 	issuer        *cert.Issuer
 	dbPath        string
-	rateLimiter   *proxy.RateLimiter
-	budgetManager *proxy.BudgetManager
+	rateLimiter   *connector.RateLimiter
+	budgetManager *connector.BudgetManager
 }
 
 // NewMisc constructs a Misc component. ctx should be the application
@@ -368,8 +356,8 @@ func NewMisc(
 	ca *cert.CA,
 	issuer *cert.Issuer,
 	dbPath string,
-	rateLimiter *proxy.RateLimiter,
-	budgetManager *proxy.BudgetManager,
+	rateLimiter *connector.RateLimiter,
+	budgetManager *connector.BudgetManager,
 ) *Misc {
 	return &Misc{
 		appCtx:        ctx,
