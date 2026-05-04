@@ -41,7 +41,6 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/pluginv2"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
-	"github.com/usk6666/yorishiro-proxy/internal/proxy/rules"
 	"github.com/usk6666/yorishiro-proxy/internal/proxybuild"
 	"github.com/usk6666/yorishiro-proxy/internal/rules/common"
 	grpcrules "github.com/usk6666/yorishiro-proxy/internal/rules/grpc"
@@ -71,7 +70,7 @@ type Pipeline struct {
 	wsInterceptEngine   *wsrules.InterceptEngine
 	grpcInterceptEngine *grpcrules.InterceptEngine
 	holdQueue           *common.HoldQueue
-	transformPipeline   *rules.Pipeline
+	transformHTTPEngine *httprules.TransformEngine
 	safetyEngine        *safety.Engine
 	safetyEngineSetters []safetyEngineSetter
 }
@@ -83,7 +82,7 @@ func NewPipeline(
 	wsInterceptEngine *wsrules.InterceptEngine,
 	grpcInterceptEngine *grpcrules.InterceptEngine,
 	holdQueue *common.HoldQueue,
-	transformPipeline *rules.Pipeline,
+	transformHTTPEngine *httprules.TransformEngine,
 	safetyEngine *safety.Engine,
 	safetyEngineSetters []safetyEngineSetter,
 ) *Pipeline {
@@ -92,7 +91,7 @@ func NewPipeline(
 		wsInterceptEngine:   wsInterceptEngine,
 		grpcInterceptEngine: grpcInterceptEngine,
 		holdQueue:           holdQueue,
-		transformPipeline:   transformPipeline,
+		transformHTTPEngine: transformHTTPEngine,
 		safetyEngine:        safetyEngine,
 		safetyEngineSetters: safetyEngineSetters,
 	}
@@ -222,7 +221,6 @@ func listenerStatuses(m proxyManager) []ListenerStatus {
 type Connector struct {
 	manager               proxyManager
 	passthrough           *proxy.PassthroughList
-	scope                 *proxy.CaptureScope
 	targetScope           *proxy.TargetScope
 	targetScopeSetters    []targetScopeSetter
 	hostTLSRegistry       *transport.HostTLSRegistry
@@ -249,7 +247,6 @@ type Connector struct {
 func NewConnector(
 	manager proxyManager,
 	passthrough *proxy.PassthroughList,
-	scope *proxy.CaptureScope,
 	targetScope *proxy.TargetScope,
 	hostTLSRegistry *transport.HostTLSRegistry,
 	tlsTransport transport.TLSTransport,
@@ -266,7 +263,6 @@ func NewConnector(
 	return &Connector{
 		manager:               manager,
 		passthrough:           passthrough,
-		scope:                 scope,
 		targetScope:           targetScope,
 		hostTLSRegistry:       hostTLSRegistry,
 		tlsTransport:          tlsTransport,

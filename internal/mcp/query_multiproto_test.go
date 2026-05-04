@@ -54,14 +54,14 @@ func seedStreamingSession(t *testing.T, store flow.Store, id, protocol, sessionT
 func TestQuery_Sessions_FilterByProtocol_WebSocket(t *testing.T) {
 	t.Parallel()
 	store := newTestStore(t)
-	seedSession(t, store, "http-1", "HTTPS", "GET", "https://example.com", 200)
-	seedStreamingSession(t, store, "ws-1", "WebSocket", "bidirectional", 4, map[string]string{"opcode": "1"})
+	seedSession(t, store, "http-1", "http", "GET", "https://example.com", 200)
+	seedStreamingSession(t, store, "ws-1", "ws", "bidirectional", 4, map[string]string{"opcode": "1"})
 
 	cs := setupQueryTestSession(t, store)
 
 	result := callQuery(t, cs, queryInput{
 		Resource: "flows",
-		Filter:   &queryFilter{Protocol: "WebSocket"},
+		Filter:   &queryFilter{Protocol: "ws"},
 	})
 	if result.IsError {
 		t.Fatalf("expected success: %v", result.Content)
@@ -73,22 +73,22 @@ func TestQuery_Sessions_FilterByProtocol_WebSocket(t *testing.T) {
 	if out.Count != 1 {
 		t.Errorf("count = %d, want 1", out.Count)
 	}
-	if out.Flows[0].Protocol != "WebSocket" {
-		t.Errorf("protocol = %q, want WebSocket", out.Flows[0].Protocol)
+	if out.Flows[0].Protocol != "ws" {
+		t.Errorf("protocol = %q, want ws", out.Flows[0].Protocol)
 	}
 }
 
 func TestQuery_Sessions_FilterByProtocol_TCP(t *testing.T) {
 	t.Parallel()
 	store := newTestStore(t)
-	seedSession(t, store, "http-1", "HTTPS", "GET", "https://example.com", 200)
-	seedStreamingSession(t, store, "tcp-1", "TCP", "bidirectional", 4, nil)
+	seedSession(t, store, "http-1", "http", "GET", "https://example.com", 200)
+	seedStreamingSession(t, store, "tcp-1", "raw", "bidirectional", 4, nil)
 
 	cs := setupQueryTestSession(t, store)
 
 	result := callQuery(t, cs, queryInput{
 		Resource: "flows",
-		Filter:   &queryFilter{Protocol: "TCP"},
+		Filter:   &queryFilter{Protocol: "raw"},
 	})
 	if result.IsError {
 		t.Fatalf("expected success: %v", result.Content)
@@ -100,55 +100,16 @@ func TestQuery_Sessions_FilterByProtocol_TCP(t *testing.T) {
 	if out.Count != 1 {
 		t.Errorf("count = %d, want 1", out.Count)
 	}
-	if out.Flows[0].Protocol != "TCP" {
-		t.Errorf("protocol = %q, want TCP", out.Flows[0].Protocol)
+	if out.Flows[0].Protocol != "raw" {
+		t.Errorf("protocol = %q, want raw", out.Flows[0].Protocol)
 	}
 }
 
 func TestQuery_Sessions_FilterByProtocol_GRPC(t *testing.T) {
 	t.Parallel()
 	store := newTestStore(t)
-	seedSession(t, store, "http-1", "HTTPS", "GET", "https://example.com", 200)
-	seedStreamingSession(t, store, "grpc-1", "gRPC", "unary", 2, map[string]string{"service": "UserService", "method": "GetUser", "grpc_status": "0"})
-
-	cs := setupQueryTestSession(t, store)
-
-	result := callQuery(t, cs, queryInput{
-		Resource: "flows",
-		Filter:   &queryFilter{Protocol: "gRPC"},
-	})
-	if result.IsError {
-		t.Fatalf("expected success: %v", result.Content)
-	}
-
-	var out queryFlowsResult
-	unmarshalQueryResult(t, result, &out)
-
-	if out.Count != 1 {
-		t.Errorf("count = %d, want 1", out.Count)
-	}
-	if out.Flows[0].Protocol != "gRPC" {
-		t.Errorf("protocol = %q, want gRPC", out.Flows[0].Protocol)
-	}
-}
-
-// TestQuery_Sessions_FilterByProtocol_CanonicalGRPCFamily covers
-// USK-681 AC 4.1: filter `protocol: "grpc"` is a canonical Message-type
-// family alias and must match flows recorded under either the new
-// canonical spelling ("grpc") or the legacy spelling ("gRPC"). Other
-// families (HTTPS) must NOT match.
-//
-// The expansion table is `protocol_family.go`; this test is the
-// milestone-cross-cutting assertion that the table is wired into the
-// query tool's filter dispatch (USK-667).
-func TestQuery_Sessions_FilterByProtocol_CanonicalGRPCFamily(t *testing.T) {
-	t.Parallel()
-	store := newTestStore(t)
-	seedSession(t, store, "https-1", "HTTPS", "GET", "https://example.com", 200)
-	seedStreamingSession(t, store, "grpc-canon-1", "grpc", "unary", 2,
-		map[string]string{"service": "S", "method": "M"})
-	seedStreamingSession(t, store, "grpc-legacy-1", "gRPC", "unary", 2,
-		map[string]string{"service": "S", "method": "M"})
+	seedSession(t, store, "http-1", "http", "GET", "https://example.com", 200)
+	seedStreamingSession(t, store, "grpc-1", "grpc", "unary", 2, map[string]string{"service": "UserService", "method": "GetUser", "grpc_status": "0"})
 
 	cs := setupQueryTestSession(t, store)
 
@@ -163,84 +124,11 @@ func TestQuery_Sessions_FilterByProtocol_CanonicalGRPCFamily(t *testing.T) {
 	var out queryFlowsResult
 	unmarshalQueryResult(t, result, &out)
 
-	if out.Count != 2 {
-		t.Errorf("count = %d, want 2 (canonical + legacy gRPC flows must both match)", out.Count)
-	}
-	gotProtocols := map[string]int{}
-	for _, fl := range out.Flows {
-		gotProtocols[fl.Protocol]++
-	}
-	if gotProtocols["grpc"] != 1 || gotProtocols["gRPC"] != 1 {
-		t.Errorf("filter expansion miss: got %v, want exactly one of each {grpc, gRPC}", gotProtocols)
-	}
-}
-
-// TestQuery_Sessions_FilterByProtocol_CanonicalHTTPFamily covers
-// USK-681 AC 4.1+4.2: filter `protocol: "http"` expands to match HTTPS,
-// HTTP/2, HTTP/1.x, and the new canonical "http" — the broadest family.
-// gRPC is also HTTP/2-on-the-wire but its Stream.Protocol is "gRPC"
-// (recorded distinctly), so it must NOT match the http family.
-func TestQuery_Sessions_FilterByProtocol_CanonicalHTTPFamily(t *testing.T) {
-	t.Parallel()
-	store := newTestStore(t)
-	seedSession(t, store, "https-1", "HTTPS", "GET", "https://example.com", 200)
-	seedSession(t, store, "h2-1", "HTTP/2", "GET", "https://example.com", 200)
-	seedSession(t, store, "h1-1", "HTTP/1.x", "GET", "http://example.com", 200)
-	seedSession(t, store, "http-canon-1", "http", "GET", "https://example.com", 200)
-	seedStreamingSession(t, store, "grpc-1", "gRPC", "unary", 2,
-		map[string]string{"service": "S", "method": "M"})
-
-	cs := setupQueryTestSession(t, store)
-
-	result := callQuery(t, cs, queryInput{
-		Resource: "flows",
-		Filter:   &queryFilter{Protocol: "http"},
-	})
-	if result.IsError {
-		t.Fatalf("expected success: %v", result.Content)
-	}
-
-	var out queryFlowsResult
-	unmarshalQueryResult(t, result, &out)
-
-	if out.Count != 4 {
-		t.Errorf("count = %d, want 4 (HTTPS + HTTP/2 + HTTP/1.x + http; gRPC excluded)", out.Count)
-	}
-	for _, fl := range out.Flows {
-		if fl.Protocol == "gRPC" {
-			t.Errorf("http family should not include gRPC flow: %+v", fl)
-		}
-	}
-}
-
-// TestQuery_Sessions_FilterByProtocol_LegacyLiteralIsStrict covers
-// USK-681 AC 4.2: a legacy literal protocol filter ("HTTPS") stays
-// strict — it must NOT expand into other family members. This protects
-// callers that intentionally distinguish HTTPS from HTTP/2.
-func TestQuery_Sessions_FilterByProtocol_LegacyLiteralIsStrict(t *testing.T) {
-	t.Parallel()
-	store := newTestStore(t)
-	seedSession(t, store, "https-1", "HTTPS", "GET", "https://example.com", 200)
-	seedSession(t, store, "h2-1", "HTTP/2", "GET", "https://example.com", 200)
-
-	cs := setupQueryTestSession(t, store)
-
-	result := callQuery(t, cs, queryInput{
-		Resource: "flows",
-		Filter:   &queryFilter{Protocol: "HTTPS"},
-	})
-	if result.IsError {
-		t.Fatalf("expected success: %v", result.Content)
-	}
-
-	var out queryFlowsResult
-	unmarshalQueryResult(t, result, &out)
-
 	if out.Count != 1 {
-		t.Errorf("count = %d, want 1 (legacy HTTPS literal must NOT expand to HTTP/2)", out.Count)
+		t.Errorf("count = %d, want 1", out.Count)
 	}
-	if out.Count == 1 && out.Flows[0].Protocol != "HTTPS" {
-		t.Errorf("protocol = %q, want HTTPS", out.Flows[0].Protocol)
+	if out.Flows[0].Protocol != "grpc" {
+		t.Errorf("protocol = %q, want grpc", out.Flows[0].Protocol)
 	}
 }
 
@@ -249,7 +137,7 @@ func TestQuery_Sessions_FilterByProtocol_LegacyLiteralIsStrict(t *testing.T) {
 func TestQuery_Sessions_ProtocolSummary_WebSocket(t *testing.T) {
 	t.Parallel()
 	store := newTestStore(t)
-	seedStreamingSession(t, store, "ws-1", "WebSocket", "bidirectional", 3, map[string]string{"opcode": "1"})
+	seedStreamingSession(t, store, "ws-1", "ws", "bidirectional", 3, map[string]string{"opcode": "1"})
 
 	cs := setupQueryTestSession(t, store)
 
@@ -280,7 +168,7 @@ func TestQuery_Sessions_ProtocolSummary_TCP(t *testing.T) {
 
 	fl := &flow.Stream{
 		ID:        "tcp-1",
-		Protocol:  "TCP",
+		Protocol:  "raw",
 		State:     "complete",
 		Timestamp: time.Now().UTC(),
 		Duration:  100 * time.Millisecond,
@@ -345,7 +233,7 @@ func TestQuery_Sessions_ProtocolSummary_GRPC(t *testing.T) {
 
 	fl := &flow.Stream{
 		ID:        "grpc-1",
-		Protocol:  "gRPC",
+		Protocol:  "grpc",
 		State:     "complete",
 		Timestamp: time.Now().UTC(),
 		Duration:  50 * time.Millisecond,
@@ -419,7 +307,7 @@ func TestQuery_Sessions_ProtocolSummary_GRPC(t *testing.T) {
 func TestQuery_Session_StreamingPreview(t *testing.T) {
 	t.Parallel()
 	store := newTestStore(t)
-	seedStreamingSession(t, store, "ws-detail", "WebSocket", "bidirectional", 15, map[string]string{"opcode": "1"})
+	seedStreamingSession(t, store, "ws-detail", "ws", "bidirectional", 15, map[string]string{"opcode": "1"})
 
 	cs := setupQueryTestSession(t, store)
 

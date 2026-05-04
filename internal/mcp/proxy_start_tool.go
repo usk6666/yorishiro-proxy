@@ -37,18 +37,6 @@ const (
 	defaultRequestTimeout = 60 * time.Second
 )
 
-// captureScopeInput is the JSON representation of capture scope configuration
-// for the proxy_start tool.
-type captureScopeInput struct {
-	// Includes are rules for requests that should be captured.
-	// If non-empty, only requests matching at least one include rule are captured.
-	Includes []scopeRuleInput `json:"includes,omitempty" jsonschema:"include rules (capture only matching requests)"`
-
-	// Excludes are rules for requests that should NOT be captured.
-	// Exclude rules take precedence over include rules.
-	Excludes []scopeRuleInput `json:"excludes,omitempty" jsonschema:"exclude rules (skip matching requests, takes precedence over includes)"`
-}
-
 // proxyStartInput is the input for the proxy_start tool.
 type proxyStartInput struct {
 	// Name is an optional name for this listener instance.
@@ -66,10 +54,6 @@ type proxyStartInput struct {
 	// If omitted, traffic is sent directly to the target (no upstream proxy).
 	// This setting takes precedence over HTTP_PROXY/HTTPS_PROXY environment variables.
 	UpstreamProxy string `json:"upstream_proxy,omitempty" jsonschema:"upstream proxy URL (http://host:port or socks5://host:port) for chaining proxies"`
-
-	// CaptureScope configures which requests are recorded to the flow store.
-	// If omitted, all requests are captured (default behavior).
-	CaptureScope *captureScopeInput `json:"capture_scope,omitempty" jsonschema:"capture scope configuration to control which requests are recorded"`
 
 	// TLSPassthrough is a list of domain patterns that should bypass TLS interception.
 	// Supported formats: exact match ("example.com") or wildcard ("*.example.com").
@@ -211,7 +195,6 @@ func (s *Server) registerProxyStart() {
 			"The proxy listens on the specified address and begins intercepting HTTP/HTTPS/SOCKS5 traffic. " +
 			"Accepts optional name to identify this listener (default: 'default'), " +
 			"upstream_proxy to route all traffic through an upstream proxy (http://host:port or socks5://[user:pass@]host:port), " +
-			"capture_scope to control which requests are recorded, " +
 			"tls_passthrough to specify domains that bypass TLS interception, " +
 			"intercept_rules to define conditions for intercepting requests/responses, " +
 			"auto_transform to configure automatic request/response modification rules, " +
@@ -223,7 +206,7 @@ func (s *Server) registerProxyStart() {
 			"max_connections to set the concurrent connection limit (default: 128), " +
 			"peek_timeout_ms for protocol detection timeout (default: 30000ms), " +
 			"and request_timeout_ms for HTTP request header read timeout (default: 60000ms). " +
-			"All fields are optional; defaults: name=default, listen_addr=127.0.0.1:8080, upstream_proxy=direct, scope=capture all, passthrough=empty, intercept_rules=empty, auto_transform=empty, tcp_forwards=empty, protocols=all, socks5_auth=none, tls_fingerprint=chrome, max_connections=128, peek_timeout_ms=30000, request_timeout_ms=60000.",
+			"All fields are optional; defaults: name=default, listen_addr=127.0.0.1:8080, upstream_proxy=direct, passthrough=empty, intercept_rules=empty, auto_transform=empty, tcp_forwards=empty, protocols=all, socks5_auth=none, tls_fingerprint=chrome, max_connections=128, peek_timeout_ms=30000, request_timeout_ms=60000.",
 	}, s.handleProxyStart)
 }
 
@@ -308,11 +291,6 @@ func (s *Server) handleProxyStart(ctx context.Context, _ *gomcp.CallToolRequest,
 // This is called in handleProxyStart after StartNamed succeeds, ensuring a
 // clean state without risk of clearing active configuration on start failure.
 func (s *Server) resetSettingsToDefaults() {
-	// Reset capture scope to empty (capture all).
-	if s.connector.scope != nil {
-		s.connector.scope.Clear()
-	}
-
 	// Reset TLS passthrough to empty (intercept all).
 	if s.connector.passthrough != nil {
 		s.connector.passthrough.Clear()
@@ -341,8 +319,8 @@ func (s *Server) resetSettingsToDefaults() {
 	}
 
 	// Reset auto-transform rules to empty (no transforms).
-	if s.pipeline.transformPipeline != nil {
-		s.pipeline.transformPipeline.Clear()
+	if s.pipeline.transformHTTPEngine != nil {
+		s.pipeline.transformHTTPEngine.SetRules(nil)
 	}
 
 	// Reset connection limits and timeouts to defaults.
@@ -373,8 +351,8 @@ func (s *Server) resetSettingsToDefaults() {
 }
 
 // applyProxyStartSettings validates and applies all proxy configuration sections
-// from the proxy_start input. It handles listen address, upstream proxy, capture
-// scope, TLS passthrough, intercept rules, auto-transform, TCP forwards,
+// from the proxy_start input. It handles listen address, upstream proxy,
+// TLS passthrough, intercept rules, auto-transform, TCP forwards,
 // protocols, SOCKS5 auth, and connection limits/timeouts.
 //
 // NOTE: resetSettingsToDefaults() is intentionally NOT called here. The caller
@@ -398,8 +376,8 @@ func (s *Server) applyProxyStartSettings(input *proxyStartInput, parsedForwards 
 }
 
 // applyProxyStartPipeline validates and applies the proxy pipeline settings:
-// listen address, upstream proxy, capture scope, TLS passthrough, intercept rules,
-// and auto-transform rules.
+// listen address, upstream proxy, TLS passthrough, intercept rules, and
+// auto-transform rules.
 func (s *Server) applyProxyStartPipeline(input *proxyStartInput) error {
 	if input.ListenAddr != "" {
 		if err := validateLoopbackAddr(input.ListenAddr); err != nil {
@@ -409,11 +387,6 @@ func (s *Server) applyProxyStartPipeline(input *proxyStartInput) error {
 	if input.UpstreamProxy != "" {
 		if err := s.applyUpstreamProxy(input.UpstreamProxy); err != nil {
 			return fmt.Errorf("upstream_proxy: %w", err)
-		}
-	}
-	if input.CaptureScope != nil {
-		if err := s.applyCaptureScope(input.CaptureScope); err != nil {
-			return fmt.Errorf("capture_scope: %w", err)
 		}
 	}
 	if len(input.TLSPassthrough) > 0 {
@@ -617,31 +590,6 @@ func validateLoopbackAddr(addr string) error {
 	return nil
 }
 
-// applyCaptureScope validates and sets the capture scope rules from the input.
-func (s *Server) applyCaptureScope(input *captureScopeInput) error {
-	if s.connector.scope == nil {
-		return fmt.Errorf("capture scope is not initialized")
-	}
-
-	// Validate that each rule has at least one field set.
-	for i, r := range input.Includes {
-		if r.Hostname == "" && r.URLPrefix == "" && r.Method == "" {
-			return fmt.Errorf("include rule %d has no fields set: at least one of hostname, url_prefix, or method must be specified", i)
-		}
-	}
-	for i, r := range input.Excludes {
-		if r.Hostname == "" && r.URLPrefix == "" && r.Method == "" {
-			return fmt.Errorf("exclude rule %d has no fields set: at least one of hostname, url_prefix, or method must be specified", i)
-		}
-	}
-
-	includes := toScopeRules(input.Includes)
-	excludes := toScopeRules(input.Excludes)
-
-	s.connector.scope.SetRules(includes, excludes)
-	return nil
-}
-
 // validProtocols is the set of protocol names accepted by the protocols parameter.
 var validProtocols = map[string]bool{
 	"HTTP/1.x":  true,
@@ -767,15 +715,9 @@ func (s *Server) applyProxyDefaultTLSStrings(input *proxyStartInput, d *config.P
 	}
 }
 
-// applyProxyDefaultJSON merges JSON-encoded defaults (capture scope, intercept rules,
+// applyProxyDefaultJSON merges JSON-encoded defaults (intercept rules,
 // auto-transform) from config into the input.
 func (s *Server) applyProxyDefaultJSON(input *proxyStartInput, d *config.ProxyConfig) {
-	if input.CaptureScope == nil && len(d.CaptureScope) > 0 {
-		var scope captureScopeInput
-		if json.Unmarshal(d.CaptureScope, &scope) == nil {
-			input.CaptureScope = &scope
-		}
-	}
 	if len(input.InterceptRules) == 0 && len(d.InterceptRules) > 0 {
 		var rules []interceptRuleInput
 		if json.Unmarshal(d.InterceptRules, &rules) == nil {
