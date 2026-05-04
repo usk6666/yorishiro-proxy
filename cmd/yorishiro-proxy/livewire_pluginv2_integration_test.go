@@ -534,28 +534,20 @@ register_hook("ws", "on_message", on_ws_message)
 	}
 	tlsConn.SetReadDeadline(time.Time{})
 
-	// Write the test-only "USK-643 unblock" sequence (4 NUL bytes +
-	// CRLF-CRLF) so the proxy's parked client-side http1.Layer Next call
-	// returns a parse error AFTER UpgradeStep has flipped the notice.
-	// session_upgrade_test.go:172-223 documents this is required for
-	// HTTP/1.x → WS swap on real conns until the production unblock
-	// orchestrator lands (tracked by USK-701 — drop this workaround once
-	// USK-701 ships). The unblock bytes are consumed by the failing
-	// parser and never reach the new ws.Layer.
-	if _, err := tlsConn.Write([]byte("\x00\x00\x00\x00\r\n\r\n")); err != nil {
-		t.Fatalf("write ws unblock: %v", err)
-	}
-
-	// Wait for the layer swap to install ws.Layer on both sides. The
-	// new layers' goroutines need to spawn before any further bytes
-	// reach them. 200ms is generous given pipePair-equivalent timings
-	// in session_upgrade_test.go:266-272.
-	time.Sleep(200 * time.Millisecond)
-
-	// Now write a real masked text frame (RFC 6455 §5.3 — client→server
-	// frames must be masked). The new ws.Layer (RoleServer client side)
-	// reads this from the conn (which is now read by the post-swap
-	// reader, not the discarded http1 parser).
+	// USK-701: production WS unblock — session.upstreamToClient fires
+	// http1.channel.Interrupt() right after Send(101), so the proxy's
+	// parked client-side http1 parser wakes on os.ErrDeadlineExceeded and
+	// runUpgradeWS proceeds with DetachStream (which resets the deadline)
+	// + ws.New. No test-only sacrificial bytes or settle sleep needed —
+	// the swap + recursive RunStackSession run on the proxy side while we
+	// proceed to write the WS frame here. Frame bytes land in the kernel
+	// buffer of the proxy's client-side conn and are picked up by the new
+	// ws.Layer's read goroutine once it spawns.
+	//
+	// Write a real masked text frame (RFC 6455 §5.3 — client→server frames
+	// must be masked). The upstream echo on br (read below) is the natural
+	// synchronization point — it cannot arrive until the proxy has fully
+	// swapped both sides and round-tripped the frame.
 	frame := &ws.Frame{
 		Fin:     true,
 		Opcode:  ws.OpcodeText,
@@ -580,6 +572,123 @@ register_hook("ws", "on_message", on_ws_message)
 	dumpPluginKV(t, lp.store.DB(), pluginName)
 
 	waitForPluginKV(t, lp.store.DB(), pluginName, "ac:ws_on_message", "1")
+}
+
+// TestLiveWire_WSUpgrade_ProductionUnblock_NoSacrificialBytes is the
+// dedicated USK-701 AC-1 deliverable: a real WebSocket client (RFC 6455
+// §4.1 compliant — write Upgrade, read 101, then write frames with no
+// test-only \x00\x00\x00\x00\r\n\r\n unblock sequence) must complete a
+// frame round-trip through proxybuild.Manager AND the WS Stream + Flow
+// records must land in the SQLite store.
+//
+// Distinct from TestLiveWire_PluginV2_WSOnMessage: that test exercises
+// hook firing and best-effort drains the echo without assertion. This
+// one focuses on the production unblock path (no plugin interference)
+// and asserts the round-trip payload matches AND the recording shape.
+//
+// Pre-USK-701 this test would either time out (the proxy's parked http1
+// parser never returns ErrUpgradePending) or lose the WS frame bytes to
+// the failing parse. Post-USK-701, session.upstreamToClient fires
+// http1.channel.Interrupt() right after Send(101), the parker wakes on
+// os.ErrDeadlineExceeded, runUpgradeWS performs DetachStream + ws.New,
+// and the WS frame round-trip completes naturally.
+func TestLiveWire_WSUpgrade_ProductionUnblock_NoSacrificialBytes(t *testing.T) {
+	// Empty plugin script — we do not depend on hooks for this test.
+	const pluginName = "usk701_ws_unblock_noplugin"
+	script := `
+def on_noop(msg, ctx):
+    pass
+
+register_hook("http", "on_request", on_noop, phase="post_pipeline")
+`
+	lp := setupLiveProxy(t, pluginName, script)
+	upstream := startUpstreamHTTPSWS(t)
+
+	tlsConn := dialMITM(t, lp.addr, upstream.Addr().String())
+	defer tlsConn.Close()
+
+	// RFC 6455 §4.1 compliant client sequence: write Upgrade, read 101,
+	// then send WS frames. No test-only sacrificial bytes.
+	req := "GET /ws HTTP/1.1\r\n" +
+		"Host: " + upstream.Addr().String() + "\r\n" +
+		"Upgrade: websocket\r\n" +
+		"Connection: Upgrade\r\n" +
+		"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n" +
+		"Sec-WebSocket-Version: 13\r\n" +
+		"\r\n"
+	if _, err := tlsConn.Write([]byte(req)); err != nil {
+		t.Fatalf("write upgrade: %v", err)
+	}
+
+	br := bufio.NewReader(tlsConn)
+	tlsConn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	statusLine, err := br.ReadString('\n')
+	if err != nil {
+		t.Fatalf("read 101 status: %v", err)
+	}
+	if !strings.Contains(statusLine, "101") {
+		t.Fatalf("upgrade status = %q, want 101", statusLine)
+	}
+	for {
+		line, err := br.ReadString('\n')
+		if err != nil {
+			t.Fatalf("read upgrade headers: %v", err)
+		}
+		if line == "\r\n" {
+			break
+		}
+	}
+	tlsConn.SetReadDeadline(time.Time{})
+
+	// Write a real masked WS text frame. The proxy's swap orchestrator
+	// (session.upstreamToClient) has already fired Interrupt against the
+	// parked client-side http1 parser; the swap is happening concurrently
+	// while we proceed here. Frame bytes land in the proxy's kernel buffer
+	// and the post-swap ws.Layer picks them up.
+	const wantPayload = "usk-701-roundtrip"
+	frame := &ws.Frame{
+		Fin:     true,
+		Opcode:  ws.OpcodeText,
+		Masked:  true,
+		MaskKey: [4]byte{0x12, 0x34, 0x56, 0x78},
+		Payload: []byte(wantPayload),
+	}
+	if err := ws.WriteFrame(tlsConn, frame); err != nil {
+		t.Fatalf("write ws frame: %v", err)
+	}
+
+	// Read the upstream echo. This is the natural synchronization point —
+	// the echo cannot arrive until the proxy has fully completed both
+	// Layer swaps and round-tripped the frame.
+	tlsConn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	echo, err := ws.ReadFrame(br)
+	if err != nil {
+		t.Fatalf("read ws echo: %v", err)
+	}
+	if echo.Opcode != ws.OpcodeText {
+		t.Errorf("echo opcode = %v, want OpcodeText", echo.Opcode)
+	}
+	if string(echo.Payload) != wantPayload {
+		t.Errorf("echo payload = %q, want %q", echo.Payload, wantPayload)
+	}
+
+	// Send a Close frame so the upstream returns cleanly. (Server-→client
+	// close payload is unmasked per RFC 6455 §5.5.1.)
+	closeFrame := &ws.Frame{
+		Fin:     true,
+		Opcode:  ws.OpcodeClose,
+		Masked:  true,
+		MaskKey: [4]byte{0xab, 0xcd, 0xef, 0x01},
+	}
+	_ = ws.WriteFrame(tlsConn, closeFrame)
+	tlsConn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, _ = ws.ReadFrame(br) // best-effort drain of close echo
+	tlsConn.Close()
+
+	// Recording assertion: a WS Stream lands with State=complete and at
+	// least one Send + one Receive WS Flow with non-empty RawBytes. The
+	// canonical Protocol label for WebSocket Streams is "ws".
+	assertHTTPStreamRecorded(t, lp.store, "ws")
 }
 
 // TestLiveWire_PluginV2_ConnectionOnConnect covers USK-681 AC 1.5. The

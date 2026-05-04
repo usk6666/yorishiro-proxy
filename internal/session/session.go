@@ -843,8 +843,36 @@ func upstreamToClient(
 		// ErrUpgradePending so the errgroup ctx cancels the peer
 		// goroutine and RunStackSession can reclaim both wires.
 		if upgradePending(notice) {
+			// USK-701: also poke the peer goroutine awake. clientToUpstream
+			// is parked inside client.Next which, for HTTP/1.x, does not
+			// honor ctx (parser.ParseRequest → bufio.Reader → conn.Read).
+			// Without an active wake the errgroup ctx cancellation cannot
+			// propagate and g.Wait() never returns, so the swap orchestrator
+			// (runUpgradeWS / runUpgradeSSE) cannot reclaim the wires.
+			// Interrupt is idempotent + a no-op for Channels that don't need
+			// it (h2 / ws / sse / httpaggregator are already ctx-aware).
+			interruptChannel(client)
 			return ErrUpgradePending
 		}
+	}
+}
+
+// channelInterrupter is satisfied by Channels (currently only http1) that
+// expose a cancel-the-parked-Next primitive. The session orchestrator uses
+// it to wake a peer goroutine that would otherwise stay parked because the
+// underlying Channel.Next does not honor ctx.
+//
+// Implementations: http1.channel.Interrupt (SetReadDeadline(time.Now())).
+type channelInterrupter interface {
+	Interrupt() error
+}
+
+// interruptChannel is the type-assertion wrapper used by the session
+// orchestrator. Cheap no-op for Channels that do not implement
+// channelInterrupter.
+func interruptChannel(ch layer.Channel) {
+	if ic, ok := ch.(channelInterrupter); ok {
+		_ = ic.Interrupt()
 	}
 }
 

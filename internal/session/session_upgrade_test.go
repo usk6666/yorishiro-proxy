@@ -169,17 +169,11 @@ func TestRunStackSession_NonUpgrade_PassesThroughCleanly(t *testing.T) {
 // sides, ws.Layer construction, and ReplaceClientTop / ReplaceUpstreamTop.
 // After the swap, both topmost Layers must be *ws.Layer.
 //
-// Cancel-and-restart caveat (RFC-001 N7, USK-643): http1.channel.Next does
-// not honor ctx, so once the upstream-side goroutine returns
-// ErrUpgradePending the client-side goroutine remains parked on its next
-// Next call. The test therefore writes a deliberately malformed second
-// "request" on the client wire — a single byte that the HTTP parser
-// rejects — so the client goroutine returns a parse error AFTER the
-// upgrade notice has been latched. The clientToUpstream code path
-// converts that parse error into ErrUpgradePending (notice was already
-// set by the receive side). This is NOT a production unblock mechanism;
-// production HTTP/1.x WS upgrade integration is covered by USK-643's
-// downstream wiring (see PR description).
+// USK-701: The "browser" goroutine no longer needs to write a sacrificial
+// \x00\x00\x00\x00\r\n\r\n unblock sequence — runUpgradeWS now calls
+// http1.Layer.Interrupt() before DetachStream, which surfaces
+// os.ErrDeadlineExceeded to the parked clientToUpstream Next() and the
+// existing upgrade-pending precedence rule maps that to ErrUpgradePending.
 func TestRunStackSession_WSUpgrade_SwapsBothLayers(t *testing.T) {
 	clientA, clientB := pipePair()
 	defer clientA.Close()
@@ -192,11 +186,9 @@ func TestRunStackSession_WSUpgrade_SwapsBothLayers(t *testing.T) {
 	stack.PushClient(clientLayer)
 	stack.PushUpstream(upstreamLayer)
 
-	// "Browser" sequence:
-	//   1. Send the WS Upgrade request immediately.
-	//   2. Wait for the proxy to forward the 101 response back.
-	//   3. Send a deliberately malformed byte to unblock the proxy's
-	//      client-side http1 parser (see test docstring).
+	// "Browser" sequence: send Upgrade request, drain the 101 response.
+	// Compliant RFC 6455 §4.1 client behavior — no further writes until
+	// the proxy completes the swap.
 	req := "GET /chat HTTP/1.1\r\n" +
 		"Host: example.com\r\n" +
 		"Upgrade: websocket\r\n" +
@@ -213,14 +205,6 @@ func TestRunStackSession_WSUpgrade_SwapsBothLayers(t *testing.T) {
 		// Drain the 101 response.
 		respBuf := make([]byte, 4096)
 		_, _ = clientA.Read(respBuf)
-
-		// Now the upgrade has been observed by the proxy; write a
-		// CRLF-terminated invalid request line so the client-side http1
-		// parser hits an error instead of waiting for more bytes. This
-		// is a test-only mechanism to unblock clientToUpstream's parked
-		// Next call (http1.channel.Next does not honor ctx; the
-		// production unblock mechanism is downstream of USK-643).
-		_, _ = clientA.Write([]byte("\x00\x00\x00\x00\r\n\r\n"))
 	}()
 
 	// "Server" reads the proxied request, then writes a 101 + a single
@@ -329,9 +313,9 @@ func TestRunStackSession_NilStack(t *testing.T) {
 // internal/layer/sse/sse_integration_test.go::TestSSE_FullChainSwapEndToEnd.
 // This test focuses on the session-level swap orchestration only.
 //
-// Same cancel-and-restart caveat as the WS test: http1.channel.Next does
-// not honor ctx, so the client side writes a malformed second "request"
-// after the swap to unblock the parked parser.
+// USK-701: Same simplification as the WS test — runUpgradeSSE now calls
+// http1.Layer.Interrupt() before DetachStreamingBody / DetachStream, so the
+// "browser" no longer needs the test-only \x00\x00... unblock sequence.
 func TestRunStackSession_SSE_E2E_DeferredOnHTTP1BodyDetach(t *testing.T) {
 	clientA, clientB := pipePair()
 	defer clientA.Close()
@@ -349,13 +333,11 @@ func TestRunStackSession_SSE_E2E_DeferredOnHTTP1BodyDetach(t *testing.T) {
 		_, _ = clientA.Write([]byte("GET /events HTTP/1.1\r\n" +
 			"Host: example.com\r\n" +
 			"Accept: text/event-stream\r\n\r\n"))
-		// Drain whatever the proxy forwards back, then unblock the
-		// http1 client-side parser with a malformed byte.
+		// Drain the 200 OK + first SSE event the proxy forwards back.
 		buf := make([]byte, 4096)
 		_ = clientA.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
 		_, _ = clientA.Read(buf)
 		_ = clientA.SetReadDeadline(time.Time{})
-		_, _ = clientA.Write([]byte("\x00\x00\x00\x00\r\n\r\n"))
 	}()
 
 	go func() {

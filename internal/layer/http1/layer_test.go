@@ -6,9 +6,11 @@ import (
 	"errors"
 	"io"
 	"net"
+	"os"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/envelope/bodybuf"
@@ -1736,4 +1738,154 @@ func TestHTTP1Layer_StateReleaserOnConnectionClose(t *testing.T) {
 			t.Fatalf("releases with empty ConnID = %d, want 0", got)
 		}
 	})
+}
+
+// --- USK-701: Layer.Interrupt + DetachStream deadline reset tests ---
+
+// TestLayer_Interrupt_UnblocksParkedNext verifies that calling Interrupt
+// on a Layer whose channel.Next is parked waiting for the next request
+// returns the parker with an error containing os.ErrDeadlineExceeded —
+// without consuming any bytes from the kernel buffer. This is the
+// production primitive session.upstreamToClient relies on to wake a
+// peer goroutine that cannot honor ctx (parser.ParseRequest →
+// bufio.Reader → conn.Read).
+func TestLayer_Interrupt_UnblocksParkedNext(t *testing.T) {
+	client, server := testConn(t)
+	defer client.Close()
+	defer server.Close()
+
+	l := New(server, "stream-int", envelope.Send)
+	defer l.Close()
+
+	ch := <-l.Channels()
+
+	// Park a goroutine inside Next on an empty conn.
+	type result struct {
+		env *envelope.Envelope
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		env, err := ch.Next(context.Background())
+		done <- result{env, err}
+	}()
+
+	// Give the parker a beat to actually enter the read.
+	time.Sleep(50 * time.Millisecond)
+
+	// Interrupt the parker.
+	if err := l.Interrupt(); err != nil {
+		t.Fatalf("Interrupt: %v", err)
+	}
+
+	select {
+	case r := <-done:
+		if r.env != nil {
+			t.Errorf("Next returned non-nil envelope after Interrupt")
+		}
+		if r.err == nil {
+			t.Fatal("Next returned nil error after Interrupt")
+		}
+		// The parser wraps the underlying read error. The original
+		// os.ErrDeadlineExceeded is expected to be reachable via
+		// errors.Is across that wrapping.
+		if !errors.Is(r.err, os.ErrDeadlineExceeded) {
+			t.Errorf("expected error wrapping os.ErrDeadlineExceeded, got %v", r.err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Next did not return within 2s after Interrupt")
+	}
+}
+
+// TestLayer_DetachStream_ResetsReadDeadline verifies that DetachStream
+// clears any past-deadline a prior Interrupt installed, so the successor
+// reader (handed the bufio.Reader) operates without a stale deadline that
+// would otherwise immediately error on its first Read.
+func TestLayer_DetachStream_ResetsReadDeadline(t *testing.T) {
+	client, server := testConn(t)
+	defer client.Close()
+	defer server.Close()
+
+	l := New(server, "stream-rst", envelope.Send)
+
+	// Install a past-deadline.
+	if err := l.Interrupt(); err != nil {
+		t.Fatalf("Interrupt: %v", err)
+	}
+
+	// Detach — must reset the deadline.
+	r, _, _, err := l.DetachStream()
+	if err != nil {
+		t.Fatalf("DetachStream: %v", err)
+	}
+
+	// Write a byte from the client so the post-detach Read has data.
+	go func() {
+		_, _ = client.Write([]byte("X"))
+	}()
+
+	buf := make([]byte, 1)
+	deadline := time.Now().Add(2 * time.Second)
+	server.SetReadDeadline(deadline)
+	n, err := r.Read(buf)
+	if err != nil {
+		t.Fatalf("post-detach Read: %v (deadline reset failed?)", err)
+	}
+	if n != 1 || buf[0] != 'X' {
+		t.Errorf("post-detach Read = %d %q, want 1 \"X\"", n, buf)
+	}
+}
+
+// TestLayer_Interrupt_AfterDetach_NoOp verifies Interrupt is a safe no-op
+// after DetachStream has transferred conn ownership.
+func TestLayer_Interrupt_AfterDetach_NoOp(t *testing.T) {
+	client, server := testConn(t)
+	defer client.Close()
+	defer server.Close()
+
+	l := New(server, "stream-noop", envelope.Send)
+	if _, _, _, err := l.DetachStream(); err != nil {
+		t.Fatalf("DetachStream: %v", err)
+	}
+	if err := l.Interrupt(); err != nil {
+		t.Errorf("Interrupt after DetachStream returned %v, want nil", err)
+	}
+}
+
+// TestLayer_Interrupt_DoesNotCloseConn verifies Interrupt does NOT close
+// the conn — only the deadline is touched. The session orchestrator
+// requires the conn to remain alive so DetachStream can transfer
+// ownership to the post-swap Layer (ws / sse).
+func TestLayer_Interrupt_DoesNotCloseConn(t *testing.T) {
+	client, server := testConn(t)
+	defer client.Close()
+	defer server.Close()
+
+	l := New(server, "stream-keepalive", envelope.Send)
+	defer l.Close()
+
+	if err := l.Interrupt(); err != nil {
+		t.Fatalf("Interrupt: %v", err)
+	}
+
+	// After Interrupt + deadline reset, the conn must still be writable
+	// from the peer side and readable here. Reset the deadline manually
+	// (Layer.DetachStream would normally do this).
+	if err := server.SetReadDeadline(time.Time{}); err != nil {
+		t.Fatalf("SetReadDeadline reset: %v", err)
+	}
+
+	go func() {
+		_, _ = client.Write([]byte("alive"))
+	}()
+
+	buf := make([]byte, 5)
+	server.SetReadDeadline(time.Now().Add(2 * time.Second))
+	n, err := io.ReadFull(server, buf)
+	if err != nil {
+		t.Fatalf("post-Interrupt Read: %v (conn closed?)", err)
+	}
+	if n != 5 || string(buf) != "alive" {
+		t.Errorf("post-Interrupt Read = %q, want %q", buf[:n], "alive")
+	}
 }
