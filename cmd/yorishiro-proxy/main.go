@@ -417,6 +417,13 @@ func loadConfigs(configFile, targetPolicyFile string) (*configsResult, error) {
 		}
 	}
 
+	if proxyCfg == nil {
+		// proxybuild.BuildLiveStack requires a non-nil ProxyConfig.
+		// When no -config file is provided, supply a zero-valued config so
+		// downstream consumers can rely on the non-nil contract.
+		proxyCfg = &config.ProxyConfig{}
+	}
+
 	var targetScopePolicy *config.TargetScopePolicyConfig
 	var targetScopePolicySource string
 	if targetPolicyFile != "" {
