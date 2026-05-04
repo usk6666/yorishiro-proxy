@@ -100,6 +100,45 @@ func (e *TransformEngine) AddRule(rule TransformRule) {
 	sortTransformRules(e.rules)
 }
 
+// RemoveRule removes the rule with the given ID. Returns true if a rule
+// was removed. The configure_tool's auto_transform dispatcher uses this
+// to scan all per-protocol engines for a matching ID.
+func (e *TransformEngine) RemoveRule(id string) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for i := range e.rules {
+		if e.rules[i].ID == id {
+			e.rules = append(e.rules[:i], e.rules[i+1:]...)
+			return true
+		}
+	}
+	return false
+}
+
+// EnableRule toggles the Enabled flag on the rule with the given ID.
+// Returns true if a rule with that ID exists.
+func (e *TransformEngine) EnableRule(id string, enabled bool) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for i := range e.rules {
+		if e.rules[i].ID == id {
+			e.rules[i].Enabled = enabled
+			return true
+		}
+	}
+	return false
+}
+
+// Rules returns a defensive copy of the current rule slice for inspection
+// (rule count / enabled count) by configure_tool's auto_transform result.
+func (e *TransformEngine) Rules() []TransformRule {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	out := make([]TransformRule, len(e.rules))
+	copy(out, e.rules)
+	return out
+}
+
 func sortTransformRules(rules []TransformRule) {
 	sort.SliceStable(rules, func(i, j int) bool {
 		return rules[i].Priority < rules[j].Priority

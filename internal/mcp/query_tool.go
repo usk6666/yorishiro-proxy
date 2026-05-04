@@ -1510,7 +1510,7 @@ func (s *Server) filterOutputHeaderKVs(kvs []envelope.KeyValue) []headerKV {
 	}
 	bridged := make([]exchange.KeyValue, len(kvs))
 	for i, kv := range kvs {
-		bridged[i] = exchange.KeyValue{Name: kv.Name, Value: kv.Value}
+		bridged[i] = exchange.KeyValue(kv)
 	}
 	filtered, _ := s.pipeline.safetyEngine.FilterOutputHeaders(bridged)
 	for _, kv := range filtered {
