@@ -103,7 +103,7 @@ func serializeResponseHeader(resp *parser.RawResponse) []byte {
 }
 
 // statusTextMap maps HTTP status codes to their reason phrases.
-// Local lookup table to avoid depending on net/http or internal/protocol/httputil.
+// Local lookup table to avoid depending on net/http (data-path code).
 var statusTextMap = map[int]string{
 	100: "Continue",
 	101: "Switching Protocols",
