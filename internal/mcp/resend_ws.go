@@ -136,7 +136,7 @@ func (s *Server) handleResendWS(ctx context.Context, _ *gomcp.CallToolRequest, i
 	if err := s.checkResendWSScope(plan); err != nil {
 		return nil, nil, err
 	}
-	if v := s.checkSafetyInput(plan.payload, plan.upgradeURL.String(), keyValuesToExchangeKV(plan.upgradeHeaders)); v != nil {
+	if v := s.checkSafetyInput(plan.payload, plan.upgradeURL.String(), plan.upgradeHeaders); v != nil {
 		return nil, nil, fmt.Errorf("%s", safetyViolationError(v))
 	}
 

@@ -7,7 +7,7 @@ import (
 	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/usk6666/yorishiro-proxy/internal/proxy"
+	"github.com/usk6666/yorishiro-proxy/internal/proxybuild"
 )
 
 // proxyStopInput is the input for the proxy_stop tool.
@@ -69,7 +69,7 @@ func (s *Server) handleProxyStop(ctx context.Context, _ *gomcp.CallToolRequest, 
 	// Collect names before stopping for the response.
 	statuses := listenerStatuses(s.connector.manager)
 	if len(statuses) == 0 {
-		return nil, nil, fmt.Errorf("proxy stop: %w", proxy.ErrNotRunning)
+		return nil, nil, fmt.Errorf("proxy stop: %w", proxybuild.ErrNotRunning)
 	}
 
 	names := make([]string, 0, len(statuses))

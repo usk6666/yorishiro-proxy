@@ -5,39 +5,39 @@ import (
 	"log/slog"
 	"net/http"
 
-	"github.com/usk6666/yorishiro-proxy/internal/codec/http1/parser"
-	"github.com/usk6666/yorishiro-proxy/internal/exchange"
+	"github.com/usk6666/yorishiro-proxy/internal/envelope"
+	"github.com/usk6666/yorishiro-proxy/internal/layer/http1/parser"
 )
 
 // httpHeaderToKeyValues converts net/http.Header (map[string][]string) to
-// []exchange.KeyValue. Header name casing is preserved as-is.
-func httpHeaderToKeyValues(h http.Header) []exchange.KeyValue {
+// []envelope.KeyValue. Header name casing is preserved as-is.
+func httpHeaderToKeyValues(h http.Header) []envelope.KeyValue {
 	if h == nil {
 		return nil
 	}
-	var kvs []exchange.KeyValue
+	var kvs []envelope.KeyValue
 	for name, vals := range h {
 		for _, v := range vals {
-			kvs = append(kvs, exchange.KeyValue{Name: name, Value: v})
+			kvs = append(kvs, envelope.KeyValue{Name: name, Value: v})
 		}
 	}
 	return kvs
 }
 
-// rawHeadersToKeyValues converts parser.RawHeaders to []exchange.KeyValue.
-func rawHeadersToKeyValues(rh parser.RawHeaders) []exchange.KeyValue {
+// rawHeadersToKeyValues converts parser.RawHeaders to []envelope.KeyValue.
+func rawHeadersToKeyValues(rh parser.RawHeaders) []envelope.KeyValue {
 	if rh == nil {
 		return nil
 	}
-	kvs := make([]exchange.KeyValue, len(rh))
+	kvs := make([]envelope.KeyValue, len(rh))
 	for i, h := range rh {
-		kvs[i] = exchange.KeyValue{Name: h.Name, Value: h.Value}
+		kvs[i] = envelope.KeyValue{Name: h.Name, Value: h.Value}
 	}
 	return kvs
 }
 
-// keyValuesToRawHeaders converts []exchange.KeyValue to parser.RawHeaders.
-func keyValuesToRawHeaders(kvs []exchange.KeyValue) parser.RawHeaders {
+// keyValuesToRawHeaders converts []envelope.KeyValue to parser.RawHeaders.
+func keyValuesToRawHeaders(kvs []envelope.KeyValue) parser.RawHeaders {
 	if kvs == nil {
 		return nil
 	}
@@ -48,8 +48,8 @@ func keyValuesToRawHeaders(kvs []exchange.KeyValue) parser.RawHeaders {
 	return rh
 }
 
-// keyValuesToHTTPHeader converts []exchange.KeyValue to net/http.Header.
-func keyValuesToHTTPHeader(kvs []exchange.KeyValue) http.Header {
+// keyValuesToHTTPHeader converts []envelope.KeyValue to net/http.Header.
+func keyValuesToHTTPHeader(kvs []envelope.KeyValue) http.Header {
 	if kvs == nil {
 		return make(http.Header)
 	}

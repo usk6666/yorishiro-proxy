@@ -124,7 +124,7 @@ func (s *Server) handleResendHTTP(ctx context.Context, _ *gomcp.CallToolRequest,
 	if err := s.checkResendHTTPScope(msg, addr, input.OverrideHost); err != nil {
 		return nil, nil, err
 	}
-	if v := s.checkSafetyInput(msg.Body, resendHTTPRequestURL(msg).String(), keyValuesToExchangeKV(msg.Headers)); v != nil {
+	if v := s.checkSafetyInput(msg.Body, resendHTTPRequestURL(msg).String(), msg.Headers); v != nil {
 		return nil, nil, fmt.Errorf("%s", safetyViolationError(v))
 	}
 

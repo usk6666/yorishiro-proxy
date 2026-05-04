@@ -8,8 +8,8 @@ import (
 	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/usk6666/yorishiro-proxy/internal/connector"
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
-	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 	"github.com/usk6666/yorishiro-proxy/internal/rules/common"
 	grpcrules "github.com/usk6666/yorishiro-proxy/internal/rules/grpc"
 	httprules "github.com/usk6666/yorishiro-proxy/internal/rules/http"
@@ -221,8 +221,8 @@ type configureBudget struct {
 
 // configureBudgetResult summarizes budget state in the configure response.
 type configureBudgetResult struct {
-	Effective    proxy.BudgetConfig `json:"effective"`
-	RequestCount int64              `json:"request_count"`
+	Effective    connector.BudgetConfig `json:"effective"`
+	RequestCount int64                  `json:"request_count"`
 }
 
 // configureResult is the structured output of the configure tool.
@@ -431,7 +431,7 @@ func (s *Server) configureUpstreamProxy(input configureInput, result *configureR
 	}
 	current := ""
 	if !managerIsNil(s.connector.manager) {
-		current = proxy.RedactProxyURL(s.connector.manager.UpstreamProxy())
+		current = connector.RedactProxyURL(s.connector.manager.UpstreamProxy())
 	}
 	result.UpstreamProxy = &current
 	return nil
@@ -1159,7 +1159,7 @@ func (s *Server) configureBudgetLimitsWithOp(input configureInput, result *confi
 
 	// In merge mode, start from the current agent config (preserve omitted fields).
 	// In replace mode, start from zero (omitted fields reset to no limit).
-	var cfg proxy.BudgetConfig
+	var cfg connector.BudgetConfig
 	if op == "merge" {
 		cfg = s.misc.budgetManager.AgentBudget()
 	}

@@ -15,10 +15,9 @@ import (
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/usk6666/yorishiro-proxy/internal/config"
+	"github.com/usk6666/yorishiro-proxy/internal/connector"
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
-	"github.com/usk6666/yorishiro-proxy/internal/exchange"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
-	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 	"github.com/usk6666/yorishiro-proxy/internal/rules/common"
 )
 
@@ -946,16 +945,16 @@ type queryStatusResult struct {
 
 // queryRateLimitStatus holds rate limit information for the status response.
 type queryRateLimitStatus struct {
-	Effective proxy.RateLimitConfig `json:"effective"`
-	Enabled   bool                  `json:"enabled"`
+	Effective connector.RateLimitConfig `json:"effective"`
+	Enabled   bool                      `json:"enabled"`
 }
 
 // queryBudgetStatus holds budget information for the status response.
 type queryBudgetStatus struct {
-	Effective    proxy.BudgetConfig `json:"effective"`
-	Enabled      bool               `json:"enabled"`
-	RequestCount int64              `json:"request_count"`
-	StopReason   string             `json:"stop_reason,omitempty"`
+	Effective    connector.BudgetConfig `json:"effective"`
+	Enabled      bool                   `json:"enabled"`
+	RequestCount int64                  `json:"request_count"`
+	StopReason   string                 `json:"stop_reason,omitempty"`
 }
 
 // populateManagerStatus fills manager-related fields in the status result.
@@ -966,7 +965,7 @@ func (s *Server) populateManagerStatus(result *queryStatusResult) {
 	running, addr := s.connector.manager.Status()
 	result.Running = running
 	result.ListenAddr = addr
-	result.UpstreamProxy = proxy.RedactProxyURL(s.connector.manager.UpstreamProxy())
+	result.UpstreamProxy = connector.RedactProxyURL(s.connector.manager.UpstreamProxy())
 	result.ActiveConnections = s.connector.manager.ActiveConnections()
 	result.MaxConnections = s.connector.manager.MaxConnections()
 	result.PeekTimeoutMs = s.connector.manager.PeekTimeout().Milliseconds()
@@ -1091,7 +1090,7 @@ func (s *Server) handleQueryConfig() (*gomcp.CallToolResult, *queryConfigResult,
 	result := &queryConfigResult{}
 
 	if !managerIsNil(s.connector.manager) {
-		result.UpstreamProxy = proxy.RedactProxyURL(s.connector.manager.UpstreamProxy())
+		result.UpstreamProxy = connector.RedactProxyURL(s.connector.manager.UpstreamProxy())
 	}
 
 	if s.connector.passthrough != nil {
@@ -1483,11 +1482,7 @@ func (s *Server) filterOutputHeaderKVs(kvs []envelope.KeyValue) []headerKV {
 		}
 		return out
 	}
-	bridged := make([]exchange.KeyValue, len(kvs))
-	for i, kv := range kvs {
-		bridged[i] = exchange.KeyValue(kv)
-	}
-	filtered, _ := s.pipeline.safetyEngine.FilterOutputHeaders(bridged)
+	filtered, _ := s.pipeline.safetyEngine.FilterOutputHeaders(kvs)
 	for _, kv := range filtered {
 		out = append(out, headerKV{Name: kv.Name, Value: kv.Value})
 	}

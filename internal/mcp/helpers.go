@@ -12,8 +12,8 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/usk6666/yorishiro-proxy/internal/exchange"
-	"github.com/usk6666/yorishiro-proxy/internal/proxy"
+	"github.com/usk6666/yorishiro-proxy/internal/connector"
+	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/safety"
 )
 
@@ -122,7 +122,7 @@ func (s *Server) checkTargetScopeURL(u *url.URL) error {
 
 // checkTargetScopeURLHelper checks a URL against the given target scope rules.
 // This is a standalone version of Server.checkTargetScopeURL for use by handler structs.
-func checkTargetScopeURLHelper(ts *proxy.TargetScope, u *url.URL) error {
+func checkTargetScopeURLHelper(ts *connector.TargetScope, u *url.URL) error {
 	if ts == nil || !ts.HasRules() {
 		return nil
 	}
@@ -143,7 +143,7 @@ func (s *Server) checkTargetScopeAddr(scheme, addr string) error {
 
 // checkTargetScopeAddrHelper checks a host:port address against the given target scope rules.
 // This is a standalone version of Server.checkTargetScopeAddr for use by handler structs.
-func checkTargetScopeAddrHelper(ts *proxy.TargetScope, scheme, addr string) error {
+func checkTargetScopeAddrHelper(ts *connector.TargetScope, scheme, addr string) error {
 	if ts == nil || !ts.HasRules() {
 		return nil
 	}
@@ -164,7 +164,7 @@ func checkTargetScopeAddrHelper(ts *proxy.TargetScope, scheme, addr string) erro
 // checkSafetyInput validates request data against the safety filter engine.
 // Returns nil if no safety engine is configured or if the input passes.
 // Returns an InputViolation if the input is blocked.
-func (s *Server) checkSafetyInput(body []byte, rawURL string, headers []exchange.KeyValue) *safety.InputViolation {
+func (s *Server) checkSafetyInput(body []byte, rawURL string, headers []envelope.KeyValue) *safety.InputViolation {
 	if s.pipeline.safetyEngine == nil {
 		return nil
 	}

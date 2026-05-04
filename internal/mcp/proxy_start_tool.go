@@ -12,8 +12,9 @@ import (
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/usk6666/yorishiro-proxy/internal/config"
+	"github.com/usk6666/yorishiro-proxy/internal/connector"
 	"github.com/usk6666/yorishiro-proxy/internal/connector/transport"
-	"github.com/usk6666/yorishiro-proxy/internal/proxy"
+	"github.com/usk6666/yorishiro-proxy/internal/proxybuild"
 )
 
 const (
@@ -27,10 +28,10 @@ const (
 	maxTimeoutMs = 600000
 
 	// defaultMaxConnections is the default concurrent connection limit.
-	// Must match proxy.defaultMaxConnections (128).
+	// Must match connector.DefaultMaxConnections (128).
 	defaultMaxConnections = 128
 	// defaultPeekTimeout is the default protocol detection timeout.
-	// Must match proxy.defaultPeekTimeout (30s).
+	// Must match connector.DefaultPeekTimeout (30s).
 	defaultPeekTimeout = 30 * time.Second
 	// defaultRequestTimeout is the default HTTP request header read timeout.
 	// Must match http.defaultRequestTimeout (60s).
@@ -224,7 +225,7 @@ func (s *Server) handleProxyStart(ctx context.Context, _ *gomcp.CallToolRequest,
 	// Resolve listener name (default: "default").
 	listenerName := input.Name
 	if listenerName == "" {
-		listenerName = proxy.DefaultListenerName
+		listenerName = proxybuild.DefaultListenerName
 	}
 
 	slog.DebugContext(ctx, "MCP tool invoked",
@@ -469,9 +470,6 @@ func (s *Server) applyTCPForwardsConfig(forwards map[string]*config.ForwardConfi
 	if err := validateTCPForwardsConfig(forwards); err != nil {
 		return fmt.Errorf("tcp_forwards: %w", err)
 	}
-	if s.connector.tcpHandler == nil {
-		return fmt.Errorf("tcp_forwards: TCP handler is not initialized")
-	}
 	s.connector.tcpForwards = forwards
 	return nil
 }
@@ -499,7 +497,7 @@ func (s *Server) applySOCKS5AuthFromInput(input *proxyStartInput) error {
 	}
 	listenerName := input.Name
 	if listenerName == "" {
-		listenerName = proxy.DefaultListenerName
+		listenerName = proxybuild.DefaultListenerName
 	}
 	if err := s.applySOCKS5Auth(authMethod, input.SOCKS5Username, input.SOCKS5Password, listenerName); err != nil {
 		return fmt.Errorf("socks5_auth: %w", err)
@@ -536,30 +534,17 @@ func (s *Server) applyProxyStartLimits(input *proxyStartInput) error {
 
 // startTCPForwards starts TCP forward listeners for the given listener name.
 // If no forwards are configured, it is a no-op.
-func (s *Server) startTCPForwards(ctx context.Context, listenerName string, forwards map[string]*config.ForwardConfig) error {
+func (s *Server) startTCPForwards(_ context.Context, _ string, forwards map[string]*config.ForwardConfig) error {
 	if len(forwards) == 0 {
 		return nil
 	}
-	s.connector.tcpHandler.SetForwards(forwards)
-
-	params := proxy.TCPForwardParams{
-		Forwards: forwards,
-		Handler:  s.connector.tcpHandler,
-		Detector: s.connector.detector,
-		Issuer:   s.misc.issuer,
-	}
-
-	if err := s.connector.manager.StartTCPForwardsNamedAny(s.misc.appCtx, listenerName, params); err != nil {
-		s.connector.manager.StopNamed(ctx, listenerName)
-		return fmt.Errorf("tcp_forwards: %w", err)
-	}
-	return nil
+	return fmt.Errorf("tcp_forwards: %w", proxybuild.ErrTCPForwardsNotSupported)
 }
 
 // resolveListenerAddr returns the listen address for the given listener name.
 func (s *Server) resolveListenerAddr(listenerName string) string {
 	_, addr := s.connector.manager.Status()
-	if listenerName != proxy.DefaultListenerName {
+	if listenerName != proxybuild.DefaultListenerName {
 		statuses := listenerStatuses(s.connector.manager)
 		for _, st := range statuses {
 			if st.Name == listenerName {
@@ -794,7 +779,7 @@ func (s *Server) applySOCKS5Auth(authMethod, username, password, listenerName st
 // applyUpstreamProxy validates the upstream proxy URL and configures it on
 // the manager and all registered protocol handlers.
 func (s *Server) applyUpstreamProxy(rawURL string) error {
-	proxyURL, err := proxy.ParseUpstreamProxy(rawURL)
+	proxyURL, err := connector.ParseUpstreamProxy(rawURL)
 	if err != nil {
 		return err
 	}

@@ -181,7 +181,7 @@ func (s *Server) handleResendGRPC(ctx context.Context, _ *gomcp.CallToolRequest,
 	if err := s.checkResendGRPCScope(plan); err != nil {
 		return nil, nil, err
 	}
-	if v := s.checkSafetyInput(concatResendGRPCPayloads(plan), plan.canonicalURL.String(), keyValuesToExchangeKV(plan.metadata)); v != nil {
+	if v := s.checkSafetyInput(concatResendGRPCPayloads(plan), plan.canonicalURL.String(), plan.metadata); v != nil {
 		return nil, nil, fmt.Errorf("%s", safetyViolationError(v))
 	}
 
