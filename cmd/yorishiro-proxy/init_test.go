@@ -1,14 +1,12 @@
 package main
 
 import (
-	"encoding/json"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/usk6666/yorishiro-proxy/internal/config"
-	"github.com/usk6666/yorishiro-proxy/internal/encoding"
 )
 
 // testLogger returns a quiet logger for test use.
@@ -522,142 +520,6 @@ func TestInitHostTLSRegistry_GlobalFromProxyConfigFallback(t *testing.T) {
 		t.Errorf("global ClientCertPath = %q, want proxy cert %q", reg.Global().ClientCertPath, proxyCert)
 	}
 }
-
-// --- loadCodecPlugins tests ---
-
-func TestLoadCodecPlugins_NilProxyConfig(t *testing.T) {
-	logger := testLogger(t)
-
-	err := loadCodecPlugins(nil, logger)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-}
-
-func TestLoadCodecPlugins_EmptyCodecPlugins(t *testing.T) {
-	logger := testLogger(t)
-	proxyCfg := &config.ProxyConfig{}
-
-	err := loadCodecPlugins(proxyCfg, logger)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-}
-
-func TestLoadCodecPlugins_ValidPlugin(t *testing.T) {
-	logger := testLogger(t)
-	dir := t.TempDir()
-
-	// Write a valid Starlark codec plugin.
-	pluginPath := filepath.Join(dir, "rot13.star")
-	writeTestFile(t, pluginPath, `
-name = "rot13-test"
-
-def encode(s):
-    result = ""
-    for c in s.elems():
-        o = ord(c)
-        if o >= ord("a") and o <= ord("z"):
-            result += chr((o - ord("a") + 13) % 26 + ord("a"))
-        elif o >= ord("A") and o <= ord("Z"):
-            result += chr((o - ord("A") + 13) % 26 + ord("A"))
-        else:
-            result += c
-    return result
-
-def decode(s):
-    return encode(s)
-`)
-
-	codecCfgs := []encoding.CodecPluginConfig{{Path: pluginPath}}
-	raw, err := json.Marshal(codecCfgs)
-	if err != nil {
-		t.Fatalf("marshal codec configs: %v", err)
-	}
-
-	proxyCfg := &config.ProxyConfig{
-		CodecPlugins: raw,
-	}
-
-	// NOTE: Registers into global DefaultRegistry(); test codec names must be
-	// unique across test functions to avoid cross-test interference.
-	err = loadCodecPlugins(proxyCfg, logger)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	// Verify the codec was registered.
-	reg := encoding.DefaultRegistry()
-	if _, ok := reg.Get("rot13-test"); !ok {
-		t.Error("expected rot13-test codec to be registered")
-	}
-}
-
-func TestLoadCodecPlugins_InvalidJSON(t *testing.T) {
-	logger := testLogger(t)
-	proxyCfg := &config.ProxyConfig{
-		CodecPlugins: json.RawMessage(`[{"path": invalid`),
-	}
-
-	err := loadCodecPlugins(proxyCfg, logger)
-	if err == nil {
-		t.Fatal("expected error for invalid JSON")
-	}
-}
-
-func TestLoadCodecPlugins_NonexistentPath(t *testing.T) {
-	logger := testLogger(t)
-	codecCfgs := []encoding.CodecPluginConfig{{Path: "/nonexistent/plugin.star"}}
-	raw, err := json.Marshal(codecCfgs)
-	if err != nil {
-		t.Fatalf("marshal codec configs: %v", err)
-	}
-
-	proxyCfg := &config.ProxyConfig{
-		CodecPlugins: raw,
-	}
-
-	// Nonexistent paths are logged and skipped, not errored.
-	err = loadCodecPlugins(proxyCfg, logger)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-}
-
-func TestLoadCodecPlugins_DirectoryOfPlugins(t *testing.T) {
-	logger := testLogger(t)
-	dir := t.TempDir()
-
-	writeTestFile(t, filepath.Join(dir, "upper2.star"), `
-name = "upper2-test"
-def encode(s):
-    return s.upper()
-`)
-
-	codecCfgs := []encoding.CodecPluginConfig{{Path: dir}}
-	raw, err := json.Marshal(codecCfgs)
-	if err != nil {
-		t.Fatalf("marshal codec configs: %v", err)
-	}
-
-	proxyCfg := &config.ProxyConfig{
-		CodecPlugins: raw,
-	}
-
-	// NOTE: Registers into global DefaultRegistry(); test codec names must be
-	// unique across test functions to avoid cross-test interference.
-	err = loadCodecPlugins(proxyCfg, logger)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	reg := encoding.DefaultRegistry()
-	if _, ok := reg.Get("upper2-test"); !ok {
-		t.Error("expected upper2-test codec to be registered from directory")
-	}
-}
-
-// --- loadConfigs tests ---
 
 func TestLoadConfigs_NoFiles(t *testing.T) {
 	result, err := loadConfigs("", "")

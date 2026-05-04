@@ -11,7 +11,6 @@ import (
 
 	"github.com/usk6666/yorishiro-proxy/internal/cert"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
-	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
 
@@ -107,13 +106,8 @@ func saveTestEntry(t *testing.T, store flow.Store, fl *flow.Stream, send *flow.F
 	return &testEntry{Session: fl, Send: send, Receive: recv}
 }
 
-// stubDetector is a minimal ProtocolDetector for testing.
-type stubDetector struct{}
-
-func (d *stubDetector) Detect(_ []byte) proxy.ProtocolHandler { return nil }
-
 // setupTestSessionWithManager creates an MCP client flow with a ProxyManager for testing.
-func setupTestSessionWithManager(t *testing.T, manager *proxy.Manager) *gomcp.ClientSession {
+func setupTestSessionWithManager(t *testing.T, manager proxyManager) *gomcp.ClientSession {
 	t.Helper()
 	ctx := context.Background()
 

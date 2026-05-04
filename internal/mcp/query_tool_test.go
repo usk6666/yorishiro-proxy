@@ -16,7 +16,6 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/cert"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/proxy"
-	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
 
 // setupQueryTestSession creates an MCP client session for query tool tests.
@@ -848,14 +847,11 @@ func TestQuery_Config_WithScopeAndPassthrough(t *testing.T) {
 func TestQuery_Config_WithManagerFields(t *testing.T) {
 	t.Parallel()
 	store := newTestStore(t)
-	logger := testutil.DiscardLogger()
-	detector := &stubDetector{}
-	manager := proxy.NewManager(detector, logger)
+	manager := newTestProxybuildManager(t)
 	ctx := context.Background()
 	if err := manager.Start(ctx, "127.0.0.1:0"); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	t.Cleanup(func() { manager.Stop(context.Background()) })
 
 	// Set non-default values so we can verify them.
 	manager.SetMaxConnections(512)
