@@ -25,7 +25,6 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/logging"
 	"github.com/usk6666/yorishiro-proxy/internal/mcp"
 	"github.com/usk6666/yorishiro-proxy/internal/pluginv2"
-	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 	"github.com/usk6666/yorishiro-proxy/internal/proxybuild"
 	"github.com/usk6666/yorishiro-proxy/internal/pushrecorder"
 	rulescommon "github.com/usk6666/yorishiro-proxy/internal/rules/common"
@@ -284,7 +283,7 @@ func assembleAndRunMCPServer(
 	wsInterceptEngine *wsrules.InterceptEngine,
 	grpcInterceptEngine *grpcrules.InterceptEngine,
 	httpTransformEngine *httprules.TransformEngine,
-	passthrough *proxy.PassthroughList,
+	passthrough *connector.PassthroughList,
 	targetScopePolicy *config.TargetScopePolicyConfig,
 	targetScopePolicySource string,
 	openBrowserFlag, stdioMCP bool,
@@ -544,7 +543,7 @@ func buildMCPComponents(
 	issuer *cert.Issuer,
 	store *flow.SQLiteStore,
 	manager *proxybuild.Manager,
-	passthrough *proxy.PassthroughList,
+	passthrough *connector.PassthroughList,
 	holdQueue *rulescommon.HoldQueue,
 	httpInterceptEngine *httprules.InterceptEngine,
 	wsInterceptEngine *wsrules.InterceptEngine,
@@ -553,8 +552,8 @@ func buildMCPComponents(
 	httpTransformEngine *httprules.TransformEngine,
 	hostTLSRegistry *transport.HostTLSRegistry,
 	tlsTransport transport.TLSTransport,
-	targetScope *proxy.TargetScope,
-	rateLimiter *proxy.RateLimiter,
+	targetScope *connector.TargetScope,
+	rateLimiter *connector.RateLimiter,
 	safetyEngine *safety.Engine,
 	targetScopePolicySource string,
 	logger *slog.Logger,
@@ -821,10 +820,10 @@ func initSafetyFilter(cfg *config.Config, proxyCfg *config.ProxyConfig, logger *
 }
 
 // initRateLimiter creates a RateLimiter and applies policy limits from the config.
-func initRateLimiter(policy *config.TargetScopePolicyConfig, logger *slog.Logger) *proxy.RateLimiter {
-	rl := proxy.NewRateLimiter()
+func initRateLimiter(policy *config.TargetScopePolicyConfig, logger *slog.Logger) *connector.RateLimiter {
+	rl := connector.NewRateLimiter()
 	if policy != nil && policy.RateLimits != nil {
-		rl.SetPolicyLimits(proxy.RateLimitConfig{
+		rl.SetPolicyLimits(connector.RateLimitConfig{
 			MaxRequestsPerSecond:        policy.RateLimits.MaxRequestsPerSecond,
 			MaxRequestsPerHostPerSecond: policy.RateLimits.MaxRequestsPerHostPerSecond,
 		})
@@ -836,8 +835,8 @@ func initRateLimiter(policy *config.TargetScopePolicyConfig, logger *slog.Logger
 }
 
 // initPassthroughList creates and populates the TLS passthrough list from config.
-func initPassthroughList(cfg *config.Config, logger *slog.Logger) *proxy.PassthroughList {
-	passthrough := proxy.NewPassthroughList()
+func initPassthroughList(cfg *config.Config, logger *slog.Logger) *connector.PassthroughList {
+	passthrough := connector.NewPassthroughList()
 	for _, pattern := range cfg.TLSPassthrough {
 		if !passthrough.Add(pattern) {
 			logger.Warn("ignoring invalid TLS passthrough pattern", "pattern", pattern)
@@ -852,23 +851,23 @@ func initPassthroughList(cfg *config.Config, logger *slog.Logger) *proxy.Passthr
 // initTargetScope builds a TargetScope from the policy config. Returns
 // nil if no policy is configured. The SOCKS5 negotiator picks up the
 // scope via connector wiring (USK-690), not via a per-handler setter.
-func initTargetScope(policy *config.TargetScopePolicyConfig) *proxy.TargetScope {
+func initTargetScope(policy *config.TargetScopePolicyConfig) *connector.TargetScope {
 	if policy == nil {
 		return nil
 	}
-	targetScope := proxy.NewTargetScope()
+	targetScope := connector.NewTargetScope()
 	allows := convertTargetRules(policy.Allows)
 	denies := convertTargetRules(policy.Denies)
 	targetScope.SetPolicyRules(allows, denies)
 	return targetScope
 }
-func convertTargetRules(cfgRules []config.TargetRuleConfig) []proxy.TargetRule {
+func convertTargetRules(cfgRules []config.TargetRuleConfig) []connector.TargetRule {
 	if len(cfgRules) == 0 {
 		return nil
 	}
-	rules := make([]proxy.TargetRule, len(cfgRules))
+	rules := make([]connector.TargetRule, len(cfgRules))
 	for i, r := range cfgRules {
-		rules[i] = proxy.TargetRule{
+		rules[i] = connector.TargetRule{
 			Hostname:   r.Hostname,
 			Ports:      r.Ports,
 			PathPrefix: r.PathPrefix,
@@ -1046,8 +1045,8 @@ func assembleLiveManager(
 	wsInterceptEngine *wsrules.InterceptEngine,
 	grpcInterceptEngine *grpcrules.InterceptEngine,
 	httpTransformEngine *httprules.TransformEngine,
-	passthrough *proxy.PassthroughList,
-	rateLimiter *proxy.RateLimiter,
+	passthrough *connector.PassthroughList,
+	rateLimiter *connector.RateLimiter,
 	safetyEngine *safety.Engine,
 	logger *slog.Logger,
 ) (*proxybuild.Manager, error) {
@@ -1130,8 +1129,8 @@ func newLiveManager(
 	wsInterceptEngine *wsrules.InterceptEngine,
 	grpcInterceptEngine *grpcrules.InterceptEngine,
 	httpTransformEngine *httprules.TransformEngine,
-	passthrough *proxy.PassthroughList,
-	rateLimiter *proxy.RateLimiter,
+	passthrough *connector.PassthroughList,
+	rateLimiter *connector.RateLimiter,
 	safetyEngine *safety.Engine,
 	buildCfg *connector.BuildConfig,
 	logger *slog.Logger,

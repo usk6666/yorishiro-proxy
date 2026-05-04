@@ -326,7 +326,7 @@ func (s *Server) runFuzzHTTPSingleVariant(ctx context.Context, plan *fuzzHTTPPla
 	// we record the variant with row.Error and return statusCode=0 — the
 	// run loop continues to the next variant.
 	row.StreamID = variantEnv.StreamID
-	if v := s.checkSafetyInput(variantMsg.Body, resendHTTPRequestURL(variantMsg).String(), keyValuesToExchangeKV(variantMsg.Headers)); v != nil {
+	if v := s.checkSafetyInput(variantMsg.Body, resendHTTPRequestURL(variantMsg).String(), variantMsg.Headers); v != nil {
 		row.Error = safetyViolationError(v)
 		return row, 0, nil
 	}

@@ -23,7 +23,6 @@ import (
 
 	httputilpkg "github.com/usk6666/yorishiro-proxy/internal/connector/transport"
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
-	"github.com/usk6666/yorishiro-proxy/internal/exchange"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/layer"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/http1"
@@ -349,20 +348,6 @@ func resendHTTPRequestURL(msg *envelope.HTTPMessage) *url.URL {
 	}
 }
 
-// keyValuesToExchangeKV adapts envelope.KeyValue (the new RFC-001 type) to
-// exchange.KeyValue (the legacy type the SafetyEngine still consumes).
-// Same-shape struct copy; no normalization.
-func keyValuesToExchangeKV(kvs []envelope.KeyValue) []exchange.KeyValue {
-	if len(kvs) == 0 {
-		return nil
-	}
-	out := make([]exchange.KeyValue, len(kvs))
-	for i, kv := range kvs {
-		out[i] = exchange.KeyValue(kv)
-	}
-	return out
-}
-
 // buildResendHTTPPipeline constructs the resend Pipeline:
 //
 //	PluginStepPost → RecordStep
@@ -565,7 +550,7 @@ func filterResendHTTPHeaders(s *Server, kvs []envelope.KeyValue) []headerKV {
 	if len(kvs) == 0 {
 		return nil
 	}
-	rh := keyValuesToRawHeaders(keyValuesToExchangeKV(kvs))
+	rh := keyValuesToRawHeaders(kvs)
 	masked := s.filterOutputRawHeaders(rh)
 	out := make([]headerKV, len(masked))
 	for i, h := range masked {

@@ -11,9 +11,9 @@ import (
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/usk6666/yorishiro-proxy/internal/config"
+	"github.com/usk6666/yorishiro-proxy/internal/connector"
 	"github.com/usk6666/yorishiro-proxy/internal/connector/transport"
 	"github.com/usk6666/yorishiro-proxy/internal/mcp/webui"
-	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 	"github.com/usk6666/yorishiro-proxy/internal/safety"
 )
 
@@ -40,10 +40,15 @@ type Server struct {
 	version        string
 }
 
-// tcpForwardHandler extends proxy.ProtocolHandler with the ability to update
-// forward mappings at runtime. This interface is satisfied by tcp.Handler.
+// tcpForwardHandler is the legacy TCP-forward dispatcher interface, kept
+// only for legacy_options_test.go scaffolding. The live data path no
+// longer touches this surface (USK-707); USK-708 retires the test
+// helpers. Body inlined from the legacy proxy.ProtocolHandler so this
+// package no longer imports internal/proxy.
 type tcpForwardHandler interface {
-	proxy.ProtocolHandler
+	Name() string
+	Detect(peek []byte) bool
+	Handle(ctx context.Context, conn net.Conn) error
 	SetForwards(forwards map[string]*config.ForwardConfig)
 }
 
@@ -63,13 +68,13 @@ type requestTimeoutSetter interface {
 // targetScopeSetter is implemented by protocol handlers that support
 // target scope enforcement (HTTP/1.x and HTTP/2 handlers).
 type targetScopeSetter interface {
-	SetTargetScope(scope *proxy.TargetScope)
+	SetTargetScope(scope *connector.TargetScope)
 }
 
 // rateLimiterSetter is implemented by protocol handlers that support
 // rate limiting (HTTP/1.x, HTTP/2, and SOCKS5 handlers).
 type rateLimiterSetter interface {
-	SetRateLimiter(rl *proxy.RateLimiter)
+	SetRateLimiter(rl *connector.RateLimiter)
 }
 
 // safetyEngineSetter is implemented by protocol handlers that support
@@ -183,13 +188,13 @@ func NewServer(
 // complexity stays under the project's lint threshold.
 func finalizeDefaults(s *Server) {
 	if s.connector.targetScope == nil {
-		s.connector.targetScope = proxy.NewTargetScope()
+		s.connector.targetScope = connector.NewTargetScope()
 	}
 	for _, setter := range s.connector.targetScopeSetters {
 		setter.SetTargetScope(s.connector.targetScope)
 	}
 	if s.misc.rateLimiter == nil {
-		s.misc.rateLimiter = proxy.NewRateLimiter()
+		s.misc.rateLimiter = connector.NewRateLimiter()
 	}
 	for _, setter := range s.connector.rateLimiterSetters {
 		setter.SetRateLimiter(s.misc.rateLimiter)
@@ -200,7 +205,7 @@ func finalizeDefaults(s *Server) {
 		}
 	}
 	if s.misc.budgetManager == nil {
-		s.misc.budgetManager = proxy.NewBudgetManager()
+		s.misc.budgetManager = connector.NewBudgetManager()
 	}
 }
 
