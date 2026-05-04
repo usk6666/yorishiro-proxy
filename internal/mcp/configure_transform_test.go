@@ -563,6 +563,81 @@ func TestConfigure_AutoTransform_ReplaceBodyAction(t *testing.T) {
 	}
 }
 
+// TestConfigure_AutoTransform_RejectsCRLFInHeaderFields verifies the
+// validateTransformRuleInput CWE-113 guard fires for the new schema's
+// flat header_name / header_value fields across all three header
+// actions. The guard runs before regex compile and rejects the rule
+// at MCP boundary.
+func TestConfigure_AutoTransform_RejectsCRLFInHeaderFields(t *testing.T) {
+	tests := []struct {
+		name  string
+		input transformRuleInput
+	}{
+		{
+			name: "add_header CR in header_name",
+			input: transformRuleInput{
+				ID: "add-cr-name", Enabled: true, Direction: "request",
+				ActionType: "add_header", HeaderName: "X-Test\r", HeaderValue: "1",
+			},
+		},
+		{
+			name: "add_header LF in header_value",
+			input: transformRuleInput{
+				ID: "add-lf-value", Enabled: true, Direction: "request",
+				ActionType: "add_header", HeaderName: "X-Test", HeaderValue: "1\n",
+			},
+		},
+		{
+			name: "set_header CRLF in header_name",
+			input: transformRuleInput{
+				ID: "set-crlf-name", Enabled: true, Direction: "request",
+				ActionType: "set_header", HeaderName: "X-T\r\nInjected", HeaderValue: "v",
+			},
+		},
+		{
+			name: "set_header CRLF in header_value",
+			input: transformRuleInput{
+				ID: "set-crlf-value", Enabled: true, Direction: "request",
+				ActionType: "set_header", HeaderName: "X-T", HeaderValue: "v\r\nInjected: smuggled",
+			},
+		},
+		{
+			name: "remove_header CR in header_name",
+			input: transformRuleInput{
+				ID: "remove-cr-name", Enabled: true, Direction: "request",
+				ActionType: "remove_header", HeaderName: "X-Test\r",
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			engine := httprules.NewTransformEngine()
+			cs := setupTransformTestSession(t, engine)
+
+			result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+				Name: "configure",
+				Arguments: configureMarshal(t, configureInput{
+					Operation: "merge",
+					AutoTransform: &configureAutoTransform{
+						Add: []transformRuleInput{tc.input},
+					},
+				}),
+			})
+			if err != nil {
+				return
+			}
+			if !result.IsError {
+				t.Fatal("expected error for CR/LF in header field, got success")
+			}
+
+			// Engine must NOT have stored the rule.
+			if len(engine.Rules()) != 0 {
+				t.Errorf("engine.Rules() len = %d, want 0 (rule must be rejected before AddRule)", len(engine.Rules()))
+			}
+		})
+	}
+}
+
 func TestConfigure_AutoTransform_PriorityPreserved(t *testing.T) {
 	engine := httprules.NewTransformEngine()
 	cs := setupTransformTestSession(t, engine)
