@@ -15,11 +15,21 @@
 // Coexistence with internal/mcp/*_integration_test.go (in-memory, Class
 // B) is intentional: the in-memory harness stays the fast path for
 // per-tool detail tests; this harness is the wiring path.
+//
+// The harness passes -insecure to mcpserver.Run by default. The reason:
+// httptest.NewTLSServer (used by buildUpstream) issues a self-signed
+// leaf certificate, and any test driving traffic through the proxy
+// would otherwise be rejected at upstream-TLS verification. Tests that
+// want verification on (e.g. to assert verification failure surfaces a
+// specific error) will need a future HarnessOptions knob to suppress
+// -insecure — left as future work; not implemented today.
 package mcptest
 
 import (
 	"context"
 	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"flag"
 	"fmt"
@@ -54,8 +64,15 @@ type HarnessOptions struct {
 	UpstreamProto string
 
 	// EnableMTLS, when true, configures the upstream test server to
-	// require client certificates. Reserved for USK-725; not yet
-	// implemented — passing true today panics with a TODO.
+	// require client certificates and provisions a fresh test CA +
+	// client cert + key for the test. The CA cert is loaded into the
+	// upstream server's ClientCAs pool; the client cert/key paths land
+	// on Harness.MTLS so the test can pass them as proxy_start's
+	// client_cert / client_key arguments.
+	//
+	// Requires UpstreamProto != "" (currently only "http/1.1") so the
+	// upstream test server actually exists. Passing EnableMTLS=true
+	// without an upstream is rejected by validateOptions.
 	EnableMTLS bool
 
 	// PreStartTools is a sequence of tool calls invoked AFTER the MCP
@@ -101,6 +118,12 @@ type Harness struct {
 	// listener and then issue requests targeting UpstreamTLS.URL.
 	UpstreamTLS *httptest.Server
 
+	// MTLS is the per-harness mutual-TLS material, populated only when
+	// HarnessOptions.EnableMTLS is true. Tests pass MTLS.ClientCertPath
+	// / MTLS.ClientKeyPath to proxy_start so the proxy presents the
+	// client certificate when dialling UpstreamTLS. Nil otherwise.
+	MTLS *MTLSMaterial
+
 	// Cleanup tears down the harness in this order: client session ->
 	// upstream test server -> MCP server (via context cancel + wait).
 	// Idempotent: calling more than once is a no-op. t.Cleanup is also
@@ -138,7 +161,11 @@ func StartHarness(t *testing.T, opts HarnessOptions) *Harness {
 	t.Cleanup(restoreServerJSON)
 
 	args := buildRunArgs(t, opts, token)
-	upstream := buildUpstream(opts)
+	mtlsDir := t.TempDir()
+	upstream, mtls, err := buildUpstream(opts, mtlsDir)
+	if err != nil {
+		t.Fatalf("mcptest: build upstream: %v", err)
+	}
 
 	runCtx, runCancel := context.WithCancel(context.Background())
 	addrCh := make(chan string, 1)
@@ -171,6 +198,7 @@ func StartHarness(t *testing.T, opts HarnessOptions) *Harness {
 		Token:       token,
 		Client:      client,
 		UpstreamTLS: upstream,
+		MTLS:        mtls,
 		Cleanup:     cleanup,
 	}
 
@@ -239,8 +267,11 @@ func validateOptions(t *testing.T, opts HarnessOptions) {
 	default:
 		t.Fatalf("mcptest: UpstreamProto=%q is not a recognised value", opts.UpstreamProto)
 	}
-	if opts.EnableMTLS {
-		t.Fatalf("mcptest: EnableMTLS=true not yet implemented (deferred to USK-725)")
+	if opts.EnableMTLS && opts.UpstreamProto == "" {
+		// EnableMTLS requires an upstream server to anchor the client-cert
+		// requirement against. Silently allowing it would let tests believe
+		// they're verifying mTLS while no upstream is even running.
+		t.Fatalf("mcptest: EnableMTLS=true requires UpstreamProto to be set (e.g. \"http/1.1\")")
 	}
 }
 
@@ -260,6 +291,12 @@ func buildRunArgs(t *testing.T, opts HarnessOptions, token string) []string {
 		"-db", dbPath,
 		"-ca-ephemeral",
 		"-log-level", logLevel,
+		// httptest.NewTLSServer uses a self-signed leaf certificate that
+		// the proxy's upstream-TLS verification would otherwise reject.
+		// The harness is a test fixture targeting only loopback test
+		// upstreams, so skipping verification is safe and necessary for
+		// any scenario that drives traffic through the proxy.
+		"-insecure",
 	}
 	if opts.TLSFingerprint != "" {
 		args = append(args, "-tls-fingerprint", opts.TLSFingerprint)
@@ -267,18 +304,59 @@ func buildRunArgs(t *testing.T, opts HarnessOptions, token string) []string {
 	return args
 }
 
-// buildUpstream constructs the optional upstream test server. Returns
-// nil when no upstream is requested. Currently only "http/1.1" is
-// supported; validateOptions has already rejected other variants.
-func buildUpstream(opts HarnessOptions) *httptest.Server {
+// buildUpstream constructs the optional upstream test server.
+// Returns (nil, nil, nil) when no upstream is requested. When EnableMTLS
+// is set, the returned server is configured with
+// tls.RequireAndVerifyClientCert plus a ClientCAs pool seeded from a
+// freshly-generated test CA, and the corresponding client material is
+// returned so the harness can hand the on-disk paths to the test.
+//
+// Currently only "http/1.1" is supported; validateOptions has already
+// rejected other variants. The handler echoes a constant body for the
+// non-mTLS case and reports the verified client CommonName for the
+// mTLS case so tests can assert the client cert was actually
+// presented.
+func buildUpstream(opts HarnessOptions, mtlsDir string) (*httptest.Server, *MTLSMaterial, error) {
 	if opts.UpstreamProto != "http/1.1" {
-		return nil
+		return nil, nil, nil
 	}
-	return httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.WriteHeader(http.StatusOK)
+		// In mTLS mode echo the verified client CN so tests can assert
+		// the cert really reached the server. In plain mode emit the
+		// historical fixed body so existing smoke tests keep matching.
+		if r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
+			_, _ = fmt.Fprintf(w, "mcptest upstream echo (client_cn=%s)\n",
+				r.TLS.PeerCertificates[0].Subject.CommonName)
+			return
+		}
 		_, _ = io.WriteString(w, "mcptest upstream echo\n")
-	}))
+	})
+
+	if !opts.EnableMTLS {
+		return httptest.NewTLSServer(handler), nil, nil
+	}
+
+	mtls, err := generateMTLSMaterial(mtlsDir)
+	if err != nil {
+		return nil, nil, fmt.Errorf("generate mTLS material: %w", err)
+	}
+
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(mtls.CACertPEM) {
+		return nil, nil, fmt.Errorf("append test CA to pool")
+	}
+
+	srv := httptest.NewUnstartedServer(handler)
+	srv.TLS = &tls.Config{
+		MinVersion: tls.VersionTLS12,
+		ClientAuth: tls.RequireAndVerifyClientCert,
+		ClientCAs:  pool,
+	}
+	srv.StartTLS()
+	return srv, mtls, nil
 }
 
 // runMCPServer is the goroutine entry point for the boot path. It
