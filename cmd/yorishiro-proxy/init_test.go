@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/usk6666/yorishiro-proxy/internal/config"
+	"github.com/usk6666/yorishiro-proxy/internal/connector/transport"
 )
 
 // testLogger returns a quiet logger for test use.
@@ -429,6 +430,90 @@ func TestInitHostTLSRegistry_PerHostFromProxyConfig(t *testing.T) {
 	}
 	if hostCfg.TLSVerify == nil || *hostCfg.TLSVerify {
 		t.Error("expected TLSVerify=false for *.staging.com")
+	}
+}
+
+// --- initTLSTransport tests (USK-719) ---
+
+// TestInitTLSTransport_Default verifies the no-fingerprint case yields a
+// StandardTransport.
+func TestInitTLSTransport_Default(t *testing.T) {
+	logger := testLogger(t)
+	cfg := config.Default()
+
+	got := initTLSTransport(cfg, nil, nil, logger)
+	if _, ok := got.(*transport.StandardTransport); !ok {
+		t.Errorf("got %T, want *StandardTransport", got)
+	}
+}
+
+// TestInitTLSTransport_FromProxyConfig verifies the CLI flag / proxy-config
+// path: ProxyConfig.TLSFingerprint must build a UTLSTransport. Pre-USK-719
+// this was silently ignored because initTLSTransport only read
+// Config.TLSFingerprint.
+func TestInitTLSTransport_FromProxyConfig(t *testing.T) {
+	logger := testLogger(t)
+	cfg := config.Default()
+	proxyCfg := &config.ProxyConfig{TLSFingerprint: "chrome"}
+
+	got := initTLSTransport(cfg, proxyCfg, nil, logger)
+	utls, ok := got.(*transport.UTLSTransport)
+	if !ok {
+		t.Fatalf("got %T, want *UTLSTransport", got)
+	}
+	if utls.Profile != transport.ProfileChrome {
+		t.Errorf("Profile = %v, want ProfileChrome", utls.Profile)
+	}
+}
+
+// TestInitTLSTransport_FromTopLevelConfig keeps the legacy
+// Config.TLSFingerprint surface working when proxyCfg is nil.
+func TestInitTLSTransport_FromTopLevelConfig(t *testing.T) {
+	logger := testLogger(t)
+	cfg := config.Default()
+	cfg.TLSFingerprint = "firefox"
+
+	got := initTLSTransport(cfg, nil, nil, logger)
+	utls, ok := got.(*transport.UTLSTransport)
+	if !ok {
+		t.Fatalf("got %T, want *UTLSTransport", got)
+	}
+	if utls.Profile != transport.ProfileFirefox {
+		t.Errorf("Profile = %v, want ProfileFirefox", utls.Profile)
+	}
+}
+
+// TestInitTLSTransport_ProxyConfigBeatsTopLevel asserts the documented
+// resolution order: ProxyConfig.TLSFingerprint takes precedence over
+// Config.TLSFingerprint when both are set, because the former is what the
+// CLI flag / proxy.json populates and is the surface most users reach for.
+func TestInitTLSTransport_ProxyConfigBeatsTopLevel(t *testing.T) {
+	logger := testLogger(t)
+	cfg := config.Default()
+	cfg.TLSFingerprint = "firefox"
+	proxyCfg := &config.ProxyConfig{TLSFingerprint: "safari"}
+
+	got := initTLSTransport(cfg, proxyCfg, nil, logger)
+	utls, ok := got.(*transport.UTLSTransport)
+	if !ok {
+		t.Fatalf("got %T, want *UTLSTransport", got)
+	}
+	if utls.Profile != transport.ProfileSafari {
+		t.Errorf("Profile = %v, want ProfileSafari (proxyCfg should win)", utls.Profile)
+	}
+}
+
+// TestInitTLSTransport_InvalidProfileFallback ensures an unrecognised
+// fingerprint name does not crash the boot — a Warn is logged and we fall
+// back to StandardTransport so the server still starts.
+func TestInitTLSTransport_InvalidProfileFallback(t *testing.T) {
+	logger := testLogger(t)
+	cfg := config.Default()
+	proxyCfg := &config.ProxyConfig{TLSFingerprint: "not-a-browser"}
+
+	got := initTLSTransport(cfg, proxyCfg, nil, logger)
+	if _, ok := got.(*transport.StandardTransport); !ok {
+		t.Errorf("got %T, want *StandardTransport on invalid profile", got)
 	}
 }
 

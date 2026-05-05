@@ -302,7 +302,7 @@ func assembleAndRunMCPServer(
 	if err != nil {
 		return err
 	}
-	tlsTransport := initTLSTransport(cfg, hostTLSRegistry, logger)
+	tlsTransport := initTLSTransport(cfg, proxyCfg, hostTLSRegistry, logger)
 
 	manager, err := assembleLiveManager(ctx, cfg, proxyCfg, store, issuer, pluginv2Engine,
 		holdQueue, httpInterceptEngine, wsInterceptEngine, grpcInterceptEngine,
@@ -1250,9 +1250,27 @@ func applyHostTLSEntries(reg *transport.HostTLSRegistry, entries map[string]*con
 // transport is selected when a TLS fingerprint profile is set; the
 // standard transport is used otherwise. The HostTLSRegistry threaded in
 // here applies per-host mTLS / verify overrides.
-func initTLSTransport(cfg *config.Config, reg *transport.HostTLSRegistry, logger *slog.Logger) transport.TLSTransport {
-	if cfg.TLSFingerprint != "" {
-		profile, err := transport.ParseBrowserProfile(cfg.TLSFingerprint)
+//
+// TLSFingerprint resolution order (USK-719):
+//
+//  1. proxyCfg.TLSFingerprint — populated by `-tls-fingerprint` CLI flag
+//     and by the proxy-config file's `tls_fingerprint`. This is the
+//     surface most users discover first.
+//  2. cfg.TLSFingerprint — populated by the top-level config file's
+//     `tls_fingerprint`. Kept for backward compatibility.
+//  3. empty — falls back to StandardTransport.
+//
+// proxyCfg may be nil when no proxy-config file was loaded.
+func initTLSTransport(cfg *config.Config, proxyCfg *config.ProxyConfig, reg *transport.HostTLSRegistry, logger *slog.Logger) transport.TLSTransport {
+	fingerprint := ""
+	if proxyCfg != nil && proxyCfg.TLSFingerprint != "" {
+		fingerprint = proxyCfg.TLSFingerprint
+	} else if cfg.TLSFingerprint != "" {
+		fingerprint = cfg.TLSFingerprint
+	}
+
+	if fingerprint != "" {
+		profile, err := transport.ParseBrowserProfile(fingerprint)
 		if err != nil {
 			logger.Warn("invalid TLS fingerprint profile, using standard transport", "error", err)
 			return &transport.StandardTransport{

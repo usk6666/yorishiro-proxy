@@ -504,6 +504,12 @@ func (s *Server) buildResendWSPipeline(encoders *pipeline.WireEncoderRegistry) *
 
 // dialResendWSUpstream dials addr (TLS-upgraded for wss). Returns a
 // connection owned by the caller.
+//
+// For wss the TLSTransport is cloned with NextProtos=["http/1.1"]: the
+// WebSocket Upgrade dance speaks HTTP/1.1 on the post-handshake conn, so
+// silently negotiating h2 from the default ALPN (StandardTransport offers
+// ["h2","http/1.1"], uTLS Chrome offers the same) would break the upgrade
+// (USK-717).
 func dialResendWSUpstream(ctx context.Context, transport httputilpkg.TLSTransport, addr string, useTLS bool, sni string) (net.Conn, error) {
 	dialer := &net.Dialer{Timeout: defaultReplayTimeout}
 	conn, err := dialer.DialContext(ctx, "tcp", addr)
@@ -515,7 +521,8 @@ func dialResendWSUpstream(ctx context.Context, transport httputilpkg.TLSTranspor
 			_ = conn.Close()
 			return nil, errors.New("resend_ws: TLS upstream requires a configured TLSTransport")
 		}
-		tlsConn, _, tlsErr := transport.TLSConnect(ctx, conn, sni)
+		http1Transport := httputilpkg.WithNextProtos(transport, []string{"http/1.1"})
+		tlsConn, _, tlsErr := http1Transport.TLSConnect(ctx, conn, sni)
 		if tlsErr != nil {
 			_ = conn.Close()
 			return nil, fmt.Errorf("tls handshake %s: %w", sni, tlsErr)

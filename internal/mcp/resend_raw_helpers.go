@@ -11,7 +11,6 @@ package mcp
 
 import (
 	"context"
-	"crypto/tls"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -23,7 +22,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/usk6666/yorishiro-proxy/internal/connector"
+	httputilpkg "github.com/usk6666/yorishiro-proxy/internal/connector/transport"
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/job"
@@ -272,25 +271,50 @@ func (s *Server) buildResendRawPipeline(encoders *pipeline.WireEncoderRegistry) 
 	return pipeline.New(steps...)
 }
 
-// dialResendRawUpstream uses connector.DialUpstreamRaw to establish
-// either a plain TCP or TLS-wrapped connection. Returns a connection
-// owned by the caller (the bytechunk Layer takes ownership via Layer.New
-// and closes it via Layer.Close).
-func dialResendRawUpstream(ctx context.Context, plan *resendRawPlan) (net.Conn, error) {
-	opts := connector.DialRawOpts{
-		DialTimeout: defaultReplayTimeout,
-	}
-	if plan.useTLS {
-		opts.TLSConfig = &tls.Config{
-			ServerName: plan.sni,
-			MinVersion: tls.VersionTLS12,
-		}
-		opts.InsecureSkipVerify = plan.insecureSkipVerify
-		opts.OfferALPN = []string{"http/1.1"}
-	}
-	conn, _, err := connector.DialUpstreamRaw(ctx, plan.dialAddr, opts)
+// dialResendRawUpstream establishes either a plain TCP or TLS-wrapped
+// connection via the configured TLSTransport, matching resend_http /
+// resend_ws / resend_grpc. Returns a connection owned by the caller (the
+// bytechunk Layer takes ownership via Layer.New and closes it via
+// Layer.Close).
+//
+// Pre-USK-718 this used connector.DialUpstreamRaw with a naked tls.Config
+// and an empty UTLSProfile, which silently bypassed any uTLS fingerprint
+// configured for the live data path. Routing TLS through the shared
+// TLSTransport now means resend_raw also picks up per-host HostTLS
+// (mTLS, custom CA, verify overrides) for free.
+//
+// transport may be nil when plan.useTLS is false; a nil transport on the
+// TLS path is a wiring bug and is rejected explicitly.
+func dialResendRawUpstream(ctx context.Context, transport httputilpkg.TLSTransport, plan *resendRawPlan) (net.Conn, error) {
+	dialer := &net.Dialer{Timeout: defaultReplayTimeout}
+	conn, err := dialer.DialContext(ctx, "tcp", plan.dialAddr)
 	if err != nil {
 		return nil, fmt.Errorf("dial %s: %w", plan.dialAddr, err)
+	}
+	if plan.useTLS {
+		if transport == nil {
+			_ = conn.Close()
+			return nil, errors.New("resend_raw: TLS upstream requires a configured TLSTransport")
+		}
+		// Pin ALPN to http/1.1: resend_raw's bytechunk Layer is
+		// protocol-agnostic, but offering h2 here would let modern
+		// servers commit to HTTP/2 framing on the wire which the raw
+		// pass-through cannot reflect back to the analyst as a coherent
+		// Stream (USK-717 sibling). Keep the rest of the fingerprint
+		// (cipher suites, extensions order) intact. Also honor the
+		// per-call insecure_skip_verify flag from the schema so a
+		// resend can deliberately accept a self-signed target without
+		// flipping the global transport setting.
+		t := httputilpkg.WithNextProtos(transport, []string{"http/1.1"})
+		if plan.insecureSkipVerify {
+			t = httputilpkg.WithInsecureSkipVerify(t, true)
+		}
+		tlsConn, _, tlsErr := t.TLSConnect(ctx, conn, plan.sni)
+		if tlsErr != nil {
+			_ = conn.Close()
+			return nil, fmt.Errorf("tls handshake %s: %w", plan.sni, tlsErr)
+		}
+		conn = tlsConn
 	}
 	return conn, nil
 }
@@ -328,7 +352,7 @@ func (s *Server) runResendRaw(ctx context.Context, plan *resendRawPlan, p *pipel
 		return respMsg.Bytes, 1, false, nil
 	}
 
-	conn, err := dialResendRawUpstream(ctx, plan)
+	conn, err := dialResendRawUpstream(ctx, s.connector.tlsTransport, plan)
 	if err != nil {
 		return nil, 0, false, err
 	}

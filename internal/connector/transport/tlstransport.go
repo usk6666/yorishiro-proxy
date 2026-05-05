@@ -351,3 +351,45 @@ func WrapTLSConn(conn net.Conn) net.Conn {
 		return conn
 	}
 }
+
+// WithNextProtos returns a shallow copy of t with NextProtos overridden.
+// Callers that need to constrain ALPN for a single TLSConnect (e.g. the
+// resend MCP tools wrapping the post-handshake conn in an HTTP/1.x Layer)
+// must NOT mutate the shared transport directly: t is the same pointer
+// stored on the live data path and other resend paths.
+//
+// Returns t unchanged when the concrete type is unrecognised so callers
+// fail-soft to whatever ALPN that transport offers by default.
+func WithNextProtos(t TLSTransport, protos []string) TLSTransport {
+	switch x := t.(type) {
+	case *StandardTransport:
+		c := *x
+		c.NextProtos = append([]string(nil), protos...)
+		return &c
+	case *UTLSTransport:
+		c := *x
+		c.NextProtos = append([]string(nil), protos...)
+		return &c
+	default:
+		return t
+	}
+}
+
+// WithInsecureSkipVerify returns a shallow copy of t with InsecureSkipVerify
+// overridden. Used by resend_raw to honor its per-call insecure_skip_verify
+// schema flag without mutating the shared transport. Returns t unchanged
+// when the concrete type is unrecognised.
+func WithInsecureSkipVerify(t TLSTransport, skip bool) TLSTransport {
+	switch x := t.(type) {
+	case *StandardTransport:
+		c := *x
+		c.InsecureSkipVerify = skip
+		return &c
+	case *UTLSTransport:
+		c := *x
+		c.InsecureSkipVerify = skip
+		return &c
+	default:
+		return t
+	}
+}

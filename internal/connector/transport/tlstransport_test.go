@@ -488,3 +488,126 @@ func TestTLSConnectionState_PlainConn(t *testing.T) {
 		t.Error("TLSConnectionState should return false for plain net.Conn")
 	}
 }
+
+// TestWithNextProtos_ClonesStandardTransport asserts that overriding ALPN
+// on a StandardTransport returns a fresh copy without mutating the source.
+// This is the property the resend MCP tools rely on (USK-717).
+func TestWithNextProtos_ClonesStandardTransport(t *testing.T) {
+	src := &StandardTransport{
+		InsecureSkipVerify: true,
+		NextProtos:         []string{"h2", "http/1.1"},
+	}
+	got := WithNextProtos(src, []string{"http/1.1"})
+
+	st, ok := got.(*StandardTransport)
+	if !ok {
+		t.Fatalf("WithNextProtos returned %T, want *StandardTransport", got)
+	}
+	if st == src {
+		t.Fatal("WithNextProtos returned the same pointer; expected a clone")
+	}
+	if !st.InsecureSkipVerify {
+		t.Error("clone lost InsecureSkipVerify")
+	}
+	if len(st.NextProtos) != 1 || st.NextProtos[0] != "http/1.1" {
+		t.Errorf("clone NextProtos = %v, want [http/1.1]", st.NextProtos)
+	}
+	if len(src.NextProtos) != 2 {
+		t.Errorf("source NextProtos mutated: got %v, want [h2 http/1.1]", src.NextProtos)
+	}
+}
+
+// TestWithNextProtos_ClonesUTLSTransport asserts the same clone-and-override
+// semantics for UTLSTransport — uTLS Chrome is the production default and
+// must not have its ALPN extension mutated by per-call overrides.
+func TestWithNextProtos_ClonesUTLSTransport(t *testing.T) {
+	src := &UTLSTransport{
+		Profile:            ProfileChrome,
+		InsecureSkipVerify: true,
+	}
+	got := WithNextProtos(src, []string{"http/1.1"})
+
+	ut, ok := got.(*UTLSTransport)
+	if !ok {
+		t.Fatalf("WithNextProtos returned %T, want *UTLSTransport", got)
+	}
+	if ut == src {
+		t.Fatal("WithNextProtos returned the same pointer; expected a clone")
+	}
+	if ut.Profile != ProfileChrome {
+		t.Errorf("clone Profile = %v, want ProfileChrome", ut.Profile)
+	}
+	if len(ut.NextProtos) != 1 || ut.NextProtos[0] != "http/1.1" {
+		t.Errorf("clone NextProtos = %v, want [http/1.1]", ut.NextProtos)
+	}
+	if len(src.NextProtos) != 0 {
+		t.Errorf("source NextProtos mutated: got %v, want nil", src.NextProtos)
+	}
+}
+
+// TestWithInsecureSkipVerify_ClonesTransports asserts the per-call
+// InsecureSkipVerify override is independent of the shared transport's
+// setting (USK-718, exercised by resend_raw's per-call schema flag).
+func TestWithInsecureSkipVerify_ClonesTransports(t *testing.T) {
+	std := &StandardTransport{InsecureSkipVerify: false}
+	clone := WithInsecureSkipVerify(std, true)
+	st, ok := clone.(*StandardTransport)
+	if !ok {
+		t.Fatalf("WithInsecureSkipVerify returned %T, want *StandardTransport", clone)
+	}
+	if st == std {
+		t.Fatal("returned the same pointer; expected a clone")
+	}
+	if !st.InsecureSkipVerify {
+		t.Error("clone InsecureSkipVerify = false, want true")
+	}
+	if std.InsecureSkipVerify {
+		t.Error("source InsecureSkipVerify mutated")
+	}
+
+	utls := &UTLSTransport{Profile: ProfileChrome, InsecureSkipVerify: false}
+	uclone := WithInsecureSkipVerify(utls, true)
+	ut, ok := uclone.(*UTLSTransport)
+	if !ok {
+		t.Fatalf("WithInsecureSkipVerify returned %T, want *UTLSTransport", uclone)
+	}
+	if !ut.InsecureSkipVerify {
+		t.Error("UTLS clone InsecureSkipVerify = false, want true")
+	}
+	if utls.InsecureSkipVerify {
+		t.Error("UTLS source InsecureSkipVerify mutated")
+	}
+}
+
+// TestWithNextProtos_UTLSChromeNegotiatesHTTP11 verifies the end-to-end
+// invariant the resend MCP tools depend on: cloning a UTLSTransport with
+// NextProtos=["http/1.1"] makes the actual handshake commit to HTTP/1.1
+// even when the server offers both h2 and http/1.1. Pre-USK-717 the resend
+// path skipped this clone and silently negotiated h2 with modern servers,
+// breaking the http1.New Layer wrapping the post-handshake conn.
+func TestWithNextProtos_UTLSChromeNegotiatesHTTP11(t *testing.T) {
+	cert := generateTestCert(t, "localhost")
+	ln := startTLSServer(t, cert, []string{"h2", "http/1.1"})
+	defer ln.Close()
+
+	src := &UTLSTransport{Profile: ProfileChrome, InsecureSkipVerify: true}
+	pinned := WithNextProtos(src, []string{"http/1.1"})
+
+	rawConn, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer rawConn.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	tlsConn, proto, err := pinned.TLSConnect(ctx, rawConn, "localhost")
+	if err != nil {
+		t.Fatalf("TLSConnect: %v", err)
+	}
+	defer tlsConn.Close()
+
+	if proto != "http/1.1" {
+		t.Errorf("negotiated ALPN = %q, want http/1.1", proto)
+	}
+}

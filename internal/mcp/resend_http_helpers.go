@@ -392,6 +392,14 @@ func pluginEngineForResend(s *Server) *pluginv2.Engine {
 // useTLS is decided by the caller from msg.Scheme + override_host. SNI is
 // the override host when provided so that wrong-server routing produces a
 // matching ClientHello.
+//
+// The TLSTransport is cloned with NextProtos=["http/1.1"] before use: the
+// post-handshake conn is wrapped in an http1 Layer, so any server that
+// negotiates h2 over the default ALPN (StandardTransport offers
+// ["h2","http/1.1"], uTLS Chrome offers the same as part of the browser
+// fingerprint) would silently break the receive side. Pinning to http/1.1
+// keeps the rest of the fingerprint (cipher suites, extensions order) intact
+// while guaranteeing the negotiated wire matches the Layer we drive (USK-717).
 func buildResendHTTPDialFunc(transport httputilpkg.TLSTransport, addr string, useTLS bool, sni string) session.DialFunc {
 	return func(ctx context.Context, _ *envelope.Envelope) (layer.Channel, error) {
 		dialer := &net.Dialer{Timeout: defaultReplayTimeout}
@@ -400,7 +408,8 @@ func buildResendHTTPDialFunc(transport httputilpkg.TLSTransport, addr string, us
 			return nil, fmt.Errorf("dial %s: %w", addr, err)
 		}
 		if useTLS {
-			tlsConn, _, tlsErr := upgradeResendTLS(ctx, transport, conn, sni)
+			http1Transport := httputilpkg.WithNextProtos(transport, []string{"http/1.1"})
+			tlsConn, _, tlsErr := upgradeResendTLS(ctx, http1Transport, conn, sni)
 			if tlsErr != nil {
 				_ = conn.Close()
 				return nil, tlsErr

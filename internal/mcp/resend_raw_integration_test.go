@@ -42,6 +42,7 @@ import (
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"go.starlark.net/starlark"
 
+	"github.com/usk6666/yorishiro-proxy/internal/connector/transport"
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/pluginv2"
@@ -79,7 +80,14 @@ func setupResendRawSession(t *testing.T) (*gomcp.ClientSession, flow.Store, *int
 	})
 
 	ctx := context.Background()
-	srv := newServer(ctx, nil, store, nil, WithPluginv2Engine(engine))
+	// Production assembleAndRunMCPServer always supplies a TLSTransport
+	// (StandardTransport when no fingerprint is configured); USK-718 made
+	// resend_raw consult it for the TLS dial path. Wire a default standard
+	// transport here so TLS-using tests don't have to opt in.
+	srv := newServer(ctx, nil, store, nil,
+		WithPluginv2Engine(engine),
+		WithTLSTransport(&transport.StandardTransport{InsecureSkipVerify: true}),
+	)
 	ct, st := gomcp.NewInMemoryTransports()
 	ss, err := srv.server.Connect(ctx, st, nil)
 	if err != nil {
