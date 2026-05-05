@@ -17,7 +17,7 @@ package mcp
 //         disturb its registration
 //
 // Pattern follows large_body_integration_test.go (in-memory MCP transports
-// + sqlite flow store) for store coverage and pluginstep_integration_test.go
+// + sqlite flow store) for store coverage and pluginstep_test.go
 // for hook-counter assertions, but stays self-contained — no shared helpers
 // from other integration tests are needed here.
 
