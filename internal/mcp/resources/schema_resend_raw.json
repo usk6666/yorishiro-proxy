@@ -1,0 +1,70 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "resend_raw input",
+  "description": "Input schema for the resend_raw tool (RFC-001 N8 typed raw resend).",
+  "type": "object",
+  "required": ["flow_id", "target_addr"],
+  "properties": {
+    "flow_id": {
+      "type": "string",
+      "description": "Recorded raw stream id. REQUIRED — resend_raw has no from-scratch path."
+    },
+    "target_addr": {
+      "type": "string",
+      "description": "Upstream host:port. REQUIRED. Explicit port required (no defaulting)."
+    },
+    "use_tls": {
+      "type": "boolean",
+      "description": "True to upgrade the dialed connection to TLS via tlslayer.Client."
+    },
+    "sni": {
+      "type": "string",
+      "description": "SNI server name; defaults to target_addr host portion when use_tls=true."
+    },
+    "override_bytes": {
+      "type": "string",
+      "description": "Replacement payload interpreted per override_bytes_encoding; mutually exclusive with patches."
+    },
+    "override_bytes_encoding": {
+      "type": "string",
+      "description": "Encoding for override_bytes. Default text. base64 required for binary smuggling payloads.",
+      "enum": ["text", "base64"]
+    },
+    "override_bytes_set": {
+      "type": "boolean",
+      "description": "Set true to replace with empty bytes; otherwise an empty override_bytes string is treated as no override."
+    },
+    "patches": {
+      "type": "array",
+      "description": "Offset-based byte patches applied to the recovered bytes; mutually exclusive with override_bytes.",
+      "items": {
+        "type": "object",
+        "required": ["offset", "data"],
+        "properties": {
+          "offset": { "type": "integer", "minimum": 0, "description": "Zero-based byte offset in the recovered payload." },
+          "data": { "type": "string", "description": "Replacement bytes interpreted per data_encoding." },
+          "data_encoding": { "type": "string", "enum": ["text", "base64"] }
+        },
+        "additionalProperties": false
+      }
+    },
+    "insecure_skip_verify": {
+      "type": "boolean",
+      "description": "Skip TLS server certificate verification when use_tls=true."
+    },
+    "tls_fingerprint": {
+      "type": "string",
+      "description": "Informational v1; per-call selection deferred."
+    },
+    "timeout_ms": {
+      "type": "integer",
+      "description": "Per-call timeout in milliseconds. Default 30000.",
+      "minimum": 1
+    },
+    "tag": {
+      "type": "string",
+      "description": "Tag stored on the new flow's Tags map."
+    }
+  },
+  "additionalProperties": false
+}

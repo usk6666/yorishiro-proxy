@@ -1,0 +1,125 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "fuzz_http input",
+  "description": "Input schema for the fuzz_http tool (RFC-001 N8 typed HTTP fuzzer).",
+  "type": "object",
+  "required": ["positions"],
+  "properties": {
+    "flow_id": {
+      "type": "string",
+      "description": "Recorded HTTP stream id; when set, omitted base fields are inherited."
+    },
+    "method": {
+      "type": "string",
+      "description": "HTTP method base; required when flow_id is empty."
+    },
+    "scheme": {
+      "type": "string",
+      "description": "URL scheme; required when flow_id is empty.",
+      "enum": ["http", "https"]
+    },
+    "authority": {
+      "type": "string",
+      "description": "Host / :authority; required when flow_id is empty."
+    },
+    "path": {
+      "type": "string",
+      "description": "Request path; required when flow_id is empty."
+    },
+    "raw_query": {
+      "type": "string",
+      "description": "Raw query string without leading '?'."
+    },
+    "headers": {
+      "type": "array",
+      "description": "Ordered base header list; positions can target headers[N].value / .name.",
+      "items": {
+        "type": "object",
+        "required": ["name", "value"],
+        "properties": {
+          "name": { "type": "string" },
+          "value": { "type": "string" }
+        },
+        "additionalProperties": false
+      }
+    },
+    "body": {
+      "type": "string",
+      "description": "Base body interpreted per body_encoding."
+    },
+    "body_encoding": {
+      "type": "string",
+      "description": "Encoding of body. Default text.",
+      "enum": ["text", "base64"]
+    },
+    "body_set": {
+      "type": "boolean",
+      "description": "Set true to override body to empty; otherwise omitting body inherits the original."
+    },
+    "body_patches": {
+      "type": "array",
+      "description": "Body patches applied to base body before positions.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "json_path": { "type": "string" },
+          "value": {},
+          "regex": { "type": "string" },
+          "replace": { "type": "string" },
+          "encoding": { "type": "array", "items": { "type": "string" } }
+        },
+        "additionalProperties": false
+      }
+    },
+    "override_host": {
+      "type": "string",
+      "description": "Redirect dial target while preserving the request's Host/:authority."
+    },
+    "tls_fingerprint": {
+      "type": "string",
+      "description": "Informational v1; per-call selection deferred."
+    },
+    "timeout_ms": {
+      "type": "integer",
+      "description": "Per-variant timeout in milliseconds; default 30000.",
+      "minimum": 1
+    },
+    "tag": {
+      "type": "string",
+      "description": "Tag stored on every variant Stream's Tags map."
+    },
+    "positions": {
+      "type": "array",
+      "description": "Ordered position list. The cartesian product yields the variant sequence (capped at 1000).",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["path", "payloads"],
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Typed path into HTTPMessage.",
+            "pattern": "^(method|scheme|authority|path|raw_query|body|headers\\[\\d+\\]\\.(name|value))$"
+          },
+          "payloads": {
+            "type": "array",
+            "description": "Payload values to substitute at this path.",
+            "minItems": 1,
+            "items": { "type": "string" }
+          },
+          "encoding": {
+            "type": "string",
+            "description": "Applies to every payload; default text.",
+            "enum": ["text", "base64"]
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "stop_on_5xx": {
+      "type": "boolean",
+      "description": "When true, abort the remaining variants once any variant returns a 5xx response."
+    }
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,100 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "resend_http input",
+  "description": "Input schema for the resend_http tool (RFC-001 N8 typed HTTP resend).",
+  "type": "object",
+  "properties": {
+    "flow_id": {
+      "type": "string",
+      "description": "Recorded HTTP stream id. When set, omitted fields are inherited from the original send."
+    },
+    "method": {
+      "type": "string",
+      "description": "HTTP method (GET, POST, ...). Required when flow_id is empty."
+    },
+    "scheme": {
+      "type": "string",
+      "description": "URL scheme. Required when flow_id is empty.",
+      "enum": ["http", "https"]
+    },
+    "authority": {
+      "type": "string",
+      "description": "Host header / :authority value. Required when flow_id is empty."
+    },
+    "path": {
+      "type": "string",
+      "description": "Request path including the leading slash. Required when flow_id is empty."
+    },
+    "raw_query": {
+      "type": "string",
+      "description": "Raw query string without the leading '?'."
+    },
+    "headers": {
+      "type": "array",
+      "description": "Ordered header list; preserves wire case, order and duplicates.",
+      "items": {
+        "type": "object",
+        "required": ["name", "value"],
+        "properties": {
+          "name": { "type": "string" },
+          "value": { "type": "string" }
+        },
+        "additionalProperties": false
+      }
+    },
+    "body": {
+      "type": "string",
+      "description": "Request body interpreted per body_encoding."
+    },
+    "body_encoding": {
+      "type": "string",
+      "description": "Encoding of the body field. Default text.",
+      "enum": ["text", "base64"]
+    },
+    "body_set": {
+      "type": "boolean",
+      "description": "Set to true to override the body to empty; otherwise omitting body inherits the original (when flow_id is set)."
+    },
+    "body_patches": {
+      "type": "array",
+      "description": "Body modifications applied on top of any body replacement.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "json_path": { "type": "string", "description": "Dot-notation JSON path (e.g. $.user.name)." },
+          "value": { "description": "Replacement value for json_path patching." },
+          "regex": { "type": "string", "description": "Regex pattern for text-based body patching." },
+          "replace": { "type": "string", "description": "Replacement string for regex patching (supports $1, $2, ${name})." },
+          "encoding": {
+            "type": "array",
+            "description": "Optional codec chain applied to the patch value.",
+            "items": { "type": "string" }
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "override_host": {
+      "type": "string",
+      "description": "Redirect the dial target (host:port) while preserving the request's Host/:authority."
+    },
+    "follow_redirects": {
+      "type": "boolean",
+      "description": "Unsupported. Setting true returns an explicit error."
+    },
+    "timeout_ms": {
+      "type": "integer",
+      "description": "Per-request timeout in milliseconds. Default 30000.",
+      "minimum": 1
+    },
+    "tls_fingerprint": {
+      "type": "string",
+      "description": "Informational v1; per-call selection deferred. Server uses its configured fingerprint."
+    },
+    "tag": {
+      "type": "string",
+      "description": "Tag stored on the new flow's Tags map."
+    }
+  },
+  "additionalProperties": false
+}

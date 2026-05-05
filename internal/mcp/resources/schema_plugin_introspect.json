@@ -1,0 +1,7 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "plugin_introspect input",
+  "description": "Input schema for the plugin_introspect tool. Takes no parameters; pass an empty object.",
+  "type": "object",
+  "additionalProperties": false
+}

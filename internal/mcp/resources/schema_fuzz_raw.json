@@ -1,0 +1,100 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "fuzz_raw input",
+  "description": "Input schema for the fuzz_raw tool (RFC-001 N8 typed raw fuzzer).",
+  "type": "object",
+  "required": ["target_addr", "positions"],
+  "properties": {
+    "flow_id": {
+      "type": "string",
+      "description": "Recorded raw stream id; OPTIONAL — when empty, override_bytes or a 'payload' position must supply the variant bytes."
+    },
+    "target_addr": {
+      "type": "string",
+      "description": "Upstream host:port. REQUIRED. Explicit port required (no defaulting)."
+    },
+    "use_tls": {
+      "type": "boolean",
+      "description": "True to upgrade the dialed connection to TLS via tlslayer.Client."
+    },
+    "sni": {
+      "type": "string",
+      "description": "SNI server name; defaults to target_addr host portion when use_tls=true."
+    },
+    "override_bytes": {
+      "type": "string",
+      "description": "Replacement payload interpreted per override_bytes_encoding; mutually exclusive with patches."
+    },
+    "override_bytes_encoding": {
+      "type": "string",
+      "description": "Encoding for override_bytes. Default text.",
+      "enum": ["text", "base64"]
+    },
+    "override_bytes_set": {
+      "type": "boolean",
+      "description": "Set true to replace with empty bytes."
+    },
+    "patches": {
+      "type": "array",
+      "description": "Offset-based byte patches applied to the base bytes; mutually exclusive with override_bytes. Used as a base for 'patches[N].data' positions.",
+      "items": {
+        "type": "object",
+        "required": ["offset", "data"],
+        "properties": {
+          "offset": { "type": "integer", "minimum": 0 },
+          "data": { "type": "string" },
+          "data_encoding": { "type": "string", "enum": ["text", "base64"] }
+        },
+        "additionalProperties": false
+      }
+    },
+    "insecure_skip_verify": {
+      "type": "boolean",
+      "description": "Skip TLS server certificate verification when use_tls=true."
+    },
+    "tls_fingerprint": {
+      "type": "string",
+      "description": "Informational v1; per-call selection deferred."
+    },
+    "timeout_ms": {
+      "type": "integer",
+      "description": "Per-variant timeout in milliseconds. Default 30000.",
+      "minimum": 1
+    },
+    "tag": {
+      "type": "string",
+      "description": "Tag stored on every variant Stream's Tags map."
+    },
+    "positions": {
+      "type": "array",
+      "description": "Ordered position list. The cartesian product yields the variant sequence (capped at 1000).",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["path", "payloads"],
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Typed path: payload | patches[N].data.",
+            "pattern": "^(payload|patches\\[\\d+\\]\\.data)$"
+          },
+          "payloads": {
+            "type": "array",
+            "minItems": 1,
+            "items": { "type": "string" }
+          },
+          "encoding": {
+            "type": "string",
+            "enum": ["text", "base64"]
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "stop_on_error": {
+      "type": "boolean",
+      "description": "When true, abort the remaining variants once any variant fails (network error, timeout, or pipeline drop)."
+    }
+  },
+  "additionalProperties": false
+}

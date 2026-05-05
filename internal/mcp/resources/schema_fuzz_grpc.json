@@ -1,0 +1,124 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "fuzz_grpc input",
+  "description": "Input schema for the fuzz_grpc tool (RFC-001 N8 typed gRPC fuzzer).",
+  "type": "object",
+  "required": ["positions"],
+  "properties": {
+    "flow_id": {
+      "type": "string",
+      "description": "Recorded gRPC stream id; when set, omitted Start fields and the encoding hint are inherited."
+    },
+    "target_addr": {
+      "type": "string",
+      "description": "Upstream host:port. Required when flow_id is empty."
+    },
+    "scheme": {
+      "type": "string",
+      "description": "Defaults to https. http selects plaintext h2c.",
+      "enum": ["http", "https"]
+    },
+    "service": {
+      "type": "string",
+      "description": "gRPC service name. Required when flow_id is empty."
+    },
+    "method": {
+      "type": "string",
+      "description": "gRPC method name. Required when flow_id is empty."
+    },
+    "metadata": {
+      "type": "array",
+      "description": "Ordered metadata list; preserves wire case, order and duplicates.",
+      "items": {
+        "type": "object",
+        "required": ["name", "value"],
+        "properties": {
+          "name": { "type": "string" },
+          "value": { "type": "string" }
+        },
+        "additionalProperties": false
+      }
+    },
+    "encoding": {
+      "type": "string",
+      "description": "grpc-encoding for outgoing messages.",
+      "enum": ["identity", "gzip"]
+    },
+    "accept_encoding": {
+      "type": "array",
+      "description": "grpc-accept-encoding list.",
+      "items": { "type": "string" }
+    },
+    "messages": {
+      "type": "array",
+      "description": "Request-side LPM list; at least one element required (positions can target messages[N].payload).",
+      "items": {
+        "type": "object",
+        "required": ["payload"],
+        "properties": {
+          "payload": { "type": "string" },
+          "body_encoding": { "type": "string", "enum": ["text", "base64"] },
+          "compressed": { "type": "boolean" }
+        },
+        "additionalProperties": false
+      }
+    },
+    "trailer_metadata": {
+      "type": "array",
+      "description": "Optional Send-direction trailer HEADERS.",
+      "items": {
+        "type": "object",
+        "required": ["name", "value"],
+        "properties": {
+          "name": { "type": "string" },
+          "value": { "type": "string" }
+        },
+        "additionalProperties": false
+      }
+    },
+    "timeout_ms": {
+      "type": "integer",
+      "description": "Per-variant timeout in milliseconds. Default 30000.",
+      "minimum": 1
+    },
+    "tls_fingerprint": {
+      "type": "string",
+      "description": "Informational v1; per-call selection deferred."
+    },
+    "tag": {
+      "type": "string",
+      "description": "Tag stored on every variant Stream's Tags map."
+    },
+    "positions": {
+      "type": "array",
+      "description": "Ordered position list. The cartesian product yields the variant sequence (capped at 1000).",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["path", "payloads"],
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Typed path: service | method | metadata[N].name | metadata[N].value | messages[N].payload.",
+            "pattern": "^(service|method|metadata\\[\\d+\\]\\.(name|value)|messages\\[\\d+\\]\\.payload)$"
+          },
+          "payloads": {
+            "type": "array",
+            "minItems": 1,
+            "items": { "type": "string" }
+          },
+          "encoding": {
+            "type": "string",
+            "enum": ["text", "base64"]
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "stop_on_non_ok": {
+      "type": "boolean",
+      "description": "When true, abort the remaining variants once any variant returns a non-OK gRPC status."
+    }
+  },
+  "additionalProperties": false
+}

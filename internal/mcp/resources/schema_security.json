@@ -1,0 +1,112 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "security input",
+  "description": "Input schema for the security tool.",
+  "type": "object",
+  "required": ["action"],
+  "properties": {
+    "action": {
+      "type": "string",
+      "description": "The security action to execute.",
+      "enum": [
+        "set_target_scope",
+        "update_target_scope",
+        "get_target_scope",
+        "test_target",
+        "set_rate_limits",
+        "get_rate_limits",
+        "set_budget",
+        "get_budget",
+        "get_safety_filter"
+      ]
+    },
+    "params": {
+      "type": "object",
+      "description": "Action-specific parameters. Only fields relevant to the specified action are used.",
+      "properties": {
+        "allows": {
+          "type": "array",
+          "description": "Allow rules (set_target_scope).",
+          "items": { "$ref": "#/definitions/targetRule" }
+        },
+        "denies": {
+          "type": "array",
+          "description": "Deny rules (set_target_scope).",
+          "items": { "$ref": "#/definitions/targetRule" }
+        },
+        "add_allows": {
+          "type": "array",
+          "description": "Allow rules to add (update_target_scope).",
+          "items": { "$ref": "#/definitions/targetRule" }
+        },
+        "remove_allows": {
+          "type": "array",
+          "description": "Allow rules to remove (update_target_scope).",
+          "items": { "$ref": "#/definitions/targetRule" }
+        },
+        "add_denies": {
+          "type": "array",
+          "description": "Deny rules to add (update_target_scope).",
+          "items": { "$ref": "#/definitions/targetRule" }
+        },
+        "remove_denies": {
+          "type": "array",
+          "description": "Deny rules to remove (update_target_scope). Cannot remove Policy deny rules.",
+          "items": { "$ref": "#/definitions/targetRule" }
+        },
+        "url": {
+          "type": "string",
+          "description": "URL to test against target scope rules (test_target)."
+        },
+        "max_requests_per_second": {
+          "type": "number",
+          "description": "Global rate limit in RPS (set_rate_limits). 0 means no limit.",
+          "minimum": 0
+        },
+        "max_requests_per_host_per_second": {
+          "type": "number",
+          "description": "Per-host rate limit in RPS (set_rate_limits). 0 means no limit.",
+          "minimum": 0
+        },
+        "max_total_requests": {
+          "type": "integer",
+          "description": "Max total requests for the session (set_budget). 0 means no limit.",
+          "minimum": 0
+        },
+        "max_duration": {
+          "type": "string",
+          "description": "Max session duration as a Go duration string (e.g. '30m', '1h', '2h30m'). '0s' means no limit (set_budget)."
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false,
+  "definitions": {
+    "targetRule": {
+      "type": "object",
+      "required": ["hostname"],
+      "properties": {
+        "hostname": {
+          "type": "string",
+          "description": "Required. Exact match or wildcard '*.example.com'. Also accepts IPv4 or bracketed IPv6 ('[::1]')."
+        },
+        "ports": {
+          "type": "array",
+          "description": "Optional. Match specific ports. Empty = all ports.",
+          "items": { "type": "integer", "minimum": 1, "maximum": 65535 }
+        },
+        "path_prefix": {
+          "type": "string",
+          "description": "Optional. Match URL path prefix. Empty = all paths."
+        },
+        "schemes": {
+          "type": "array",
+          "description": "Optional. Match URL schemes. Empty = all schemes.",
+          "items": { "type": "string", "enum": ["http", "https"] }
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

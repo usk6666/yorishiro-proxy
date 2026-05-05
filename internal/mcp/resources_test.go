@@ -63,6 +63,15 @@ func TestListResources_AllRegistered(t *testing.T) {
 		"yorishiro://help/configure",
 		"yorishiro://help/examples",
 		"yorishiro://help/security",
+		"yorishiro://help/resend_http",
+		"yorishiro://help/resend_ws",
+		"yorishiro://help/resend_grpc",
+		"yorishiro://help/resend_raw",
+		"yorishiro://help/fuzz_http",
+		"yorishiro://help/fuzz_ws",
+		"yorishiro://help/fuzz_grpc",
+		"yorishiro://help/fuzz_raw",
+		"yorishiro://help/plugin_introspect",
 	}
 	for _, uri := range expectedHelpURIs {
 		if !gotURIs[uri] {
@@ -78,6 +87,16 @@ func TestListResources_AllRegistered(t *testing.T) {
 		"yorishiro://schema/macro",
 		"yorishiro://schema/intercept",
 		"yorishiro://schema/configure",
+		"yorishiro://schema/security",
+		"yorishiro://schema/resend_http",
+		"yorishiro://schema/resend_ws",
+		"yorishiro://schema/resend_grpc",
+		"yorishiro://schema/resend_raw",
+		"yorishiro://schema/fuzz_http",
+		"yorishiro://schema/fuzz_ws",
+		"yorishiro://schema/fuzz_grpc",
+		"yorishiro://schema/fuzz_raw",
+		"yorishiro://schema/plugin_introspect",
 	}
 	for _, uri := range expectedSchemaURIs {
 		if !gotURIs[uri] {
@@ -85,7 +104,7 @@ func TestListResources_AllRegistered(t *testing.T) {
 		}
 	}
 
-	// Total expected count = 9 help + 6 schema = 15.
+	// Total expected count = 18 help + 16 schema = 34.
 	expectedCount := len(expectedHelpURIs) + len(expectedSchemaURIs)
 	if len(result.Resources) != expectedCount {
 		t.Errorf("resource count = %d, want %d", len(result.Resources), expectedCount)

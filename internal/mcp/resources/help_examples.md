@@ -124,18 +124,142 @@ Confirm the fingerprint has changed and `persisted` is true.
 
 ## HTTP Request Smuggling Analysis
 
-### Resend raw bytes to preserve header formatting
+### Resend raw bytes verbatim to preserve header formatting
 ```json
-// resend
+// resend_raw
 {
-  "action": "resend_raw",
-  "params": {
-    "flow_id": "<flow-id>",
-    "target_addr": "target.example.com:443",
-    "use_tls": true
-  }
+  "flow_id": "<flow-id>",
+  "target_addr": "target.example.com:443",
+  "use_tls": true
 }
 ```
+
+### Resend raw bytes with a single-byte offset patch
+```json
+// resend_raw
+{
+  "flow_id": "<flow-id>",
+  "target_addr": "target.example.com:443",
+  "use_tls": true,
+  "patches": [
+    {"offset": 16, "data": "QQ==", "data_encoding": "base64"}
+  ]
+}
+```
+
+### Fuzz raw bytes for CL/TE smuggling templates
+```json
+// fuzz_raw
+{
+  "target_addr": "target.example.com:443",
+  "use_tls": true,
+  "positions": [
+    {
+      "path": "payload",
+      "encoding": "base64",
+      "payloads": [
+        "UE9TVCAvIEhUVFAvMS4xDQpIb3N0OiB0YXJnZXQNCkNvbnRlbnQtTGVuZ3RoOiA2DQpUcmFuc2Zlci1FbmNvZGluZzogY2h1bmtlZA0KDQowDQoNCkc=",
+        "UE9TVCAvIEhUVFAvMS4xDQpIb3N0OiB0YXJnZXQNCkNvbnRlbnQtTGVuZ3RoOiAxMQ0KVHJhbnNmZXItRW5jb2Rpbmc6IGNodW5rZWQNCg0KMA0KRw0KDQo="
+      ]
+    }
+  ],
+  "stop_on_error": true
+}
+```
+
+## Typed Resend (HTTPMessage / WSMessage / GRPCStart-Data-End)
+
+### Replay an HTTP flow with a different Authorization header
+```json
+// resend_http
+{
+  "flow_id": "<flow-id>",
+  "headers": [
+    {"name": "Host", "value": "api.target.com"},
+    {"name": "Authorization", "value": "Bearer <other-user-token>"}
+  ]
+}
+```
+
+### Replay a WebSocket text frame with a new payload
+```json
+// resend_ws
+{
+  "flow_id": "<ws-flow-id>",
+  "opcode": "text",
+  "payload": "{\"action\":\"subscribe\",\"channel\":\"admin\"}"
+}
+```
+
+### Replay a gRPC unary RPC with a modified request body
+```json
+// resend_grpc
+{
+  "flow_id": "<grpc-flow-id>",
+  "messages": [
+    {"payload": "CgZhZG1pbjE=", "body_encoding": "base64"}
+  ]
+}
+```
+
+## Typed Fuzz (cartesian product, capped at 1000 variants per call)
+
+### Fuzz an HTTP header value across a payload list
+```json
+// fuzz_http
+{
+  "flow_id": "<flow-id>",
+  "positions": [
+    {
+      "path": "headers[1].value",
+      "payloads": ["alice", "bob", "admin", "../../../etc/passwd"]
+    }
+  ],
+  "stop_on_5xx": true
+}
+```
+
+### Fuzz a gRPC metadata value
+```json
+// fuzz_grpc
+{
+  "flow_id": "<grpc-flow-id>",
+  "messages": [
+    {"payload": "CgVhbGljZQ==", "body_encoding": "base64"}
+  ],
+  "positions": [
+    {
+      "path": "metadata[0].value",
+      "payloads": ["Bearer A", "Bearer admin", ""]
+    }
+  ]
+}
+```
+
+### Fuzz a WebSocket close-frame reason
+```json
+// fuzz_ws
+{
+  "flow_id": "<ws-flow-id>",
+  "opcode": "close",
+  "close_code": 1000,
+  "positions": [
+    {
+      "path": "close_reason",
+      "payloads": ["bye", " ", "<script>alert(1)</script>"]
+    }
+  ]
+}
+```
+
+## Plugin Introspection
+
+### List loaded plugins, hook registrations, and (redacted) Vars
+```json
+// plugin_introspect
+{}
+```
+The response contains a `plugins[]` array with `name`, `path`, `enabled`, ordered `registrations[]` (`{protocol, event, phase}`), and `vars` (with `redact_keys` already applied — secrets show as `"<redacted>"`).
 
 ## Scope Management
 

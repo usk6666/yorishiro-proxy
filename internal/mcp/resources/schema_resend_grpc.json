@@ -1,0 +1,93 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "resend_grpc input",
+  "description": "Input schema for the resend_grpc tool (RFC-001 N8 typed gRPC resend).",
+  "type": "object",
+  "properties": {
+    "flow_id": {
+      "type": "string",
+      "description": "Recorded gRPC stream id; when set, omitted Start fields and the encoding hint are inherited."
+    },
+    "target_addr": {
+      "type": "string",
+      "description": "Upstream host:port. Required when flow_id is empty. Redirects dial target while preserving :authority when supplied with flow_id."
+    },
+    "scheme": {
+      "type": "string",
+      "description": "Defaults to https. http selects plaintext h2c.",
+      "enum": ["http", "https"]
+    },
+    "service": {
+      "type": "string",
+      "description": "gRPC service name (e.g. pkg.Greeter). Required when flow_id is empty."
+    },
+    "method": {
+      "type": "string",
+      "description": "gRPC method name (e.g. SayHello). Required when flow_id is empty."
+    },
+    "metadata": {
+      "type": "array",
+      "description": "Ordered metadata list; preserves wire case, order and duplicates.",
+      "items": {
+        "type": "object",
+        "required": ["name", "value"],
+        "properties": {
+          "name": { "type": "string" },
+          "value": { "type": "string" }
+        },
+        "additionalProperties": false
+      }
+    },
+    "encoding": {
+      "type": "string",
+      "description": "grpc-encoding for outgoing messages.",
+      "enum": ["identity", "gzip"]
+    },
+    "accept_encoding": {
+      "type": "array",
+      "description": "grpc-accept-encoding list.",
+      "items": { "type": "string" }
+    },
+    "messages": {
+      "type": "array",
+      "description": "Request-side LPM list; at least one element required.",
+      "items": {
+        "type": "object",
+        "required": ["payload"],
+        "properties": {
+          "payload": { "type": "string", "description": "LPM payload interpreted per body_encoding." },
+          "body_encoding": { "type": "string", "enum": ["text", "base64"] },
+          "compressed": { "type": "boolean", "description": "Set the LPM compression flag; requires encoding to be set." }
+        },
+        "additionalProperties": false
+      }
+    },
+    "trailer_metadata": {
+      "type": "array",
+      "description": "Optional Send-direction trailer HEADERS; when supplied, the request terminates via a trailer frame instead of END_STREAM on the last DATA.",
+      "items": {
+        "type": "object",
+        "required": ["name", "value"],
+        "properties": {
+          "name": { "type": "string" },
+          "value": { "type": "string" }
+        },
+        "additionalProperties": false
+      }
+    },
+    "timeout_ms": {
+      "type": "integer",
+      "description": "Per-call timeout in milliseconds. Default 30000.",
+      "minimum": 1
+    },
+    "tls_fingerprint": {
+      "type": "string",
+      "description": "Informational v1; per-call selection deferred."
+    },
+    "tag": {
+      "type": "string",
+      "description": "Tag stored on the new flow's Tags map."
+    }
+  },
+  "additionalProperties": false
+}

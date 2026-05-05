@@ -1,0 +1,86 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "resend_ws input",
+  "description": "Input schema for the resend_ws tool (RFC-001 N8 typed WebSocket resend).",
+  "type": "object",
+  "required": ["opcode"],
+  "properties": {
+    "flow_id": {
+      "type": "string",
+      "description": "Recorded WebSocket stream id; when set, the upgrade dance inherits URL/headers/extensions from the recorded flow."
+    },
+    "target_addr": {
+      "type": "string",
+      "description": "Upstream host:port. Required when flow_id is empty."
+    },
+    "scheme": {
+      "type": "string",
+      "description": "WebSocket scheme. Required when flow_id is empty (defaults to ws).",
+      "enum": ["ws", "wss"]
+    },
+    "path": {
+      "type": "string",
+      "description": "Upgrade request path. Required when flow_id is empty."
+    },
+    "raw_query": {
+      "type": "string",
+      "description": "Upgrade request raw query string without the leading '?'."
+    },
+    "opcode": {
+      "type": "string",
+      "description": "Frame opcode.",
+      "enum": ["text", "binary", "close", "ping", "pong"]
+    },
+    "fin": {
+      "type": "boolean",
+      "description": "FIN bit. Defaults to true."
+    },
+    "payload": {
+      "type": "string",
+      "description": "Frame payload interpreted per body_encoding."
+    },
+    "body_encoding": {
+      "type": "string",
+      "description": "Encoding of payload. Default text.",
+      "enum": ["text", "base64"]
+    },
+    "payload_set": {
+      "type": "boolean",
+      "description": "Set true to send an empty payload; otherwise an empty payload field is treated as no override."
+    },
+    "masked": {
+      "type": "boolean",
+      "description": "Informational; upstream-facing layer auto-masks per RFC 6455 §5.3 regardless."
+    },
+    "mask": {
+      "type": "string",
+      "description": "Informational 4-byte mask key; ignored on Send."
+    },
+    "close_code": {
+      "type": "integer",
+      "description": "RFC 6455 status code for Close frames."
+    },
+    "close_reason": {
+      "type": "string",
+      "description": "Optional UTF-8 reason for Close frames."
+    },
+    "compressed": {
+      "type": "boolean",
+      "description": "Per-message-deflate (RFC 7692); requires the upgrade to negotiate deflate via flow_id."
+    },
+    "timeout_ms": {
+      "type": "integer",
+      "description": "Per-call timeout in milliseconds covering dial+upgrade+send+receive. Default 30000.",
+      "minimum": 1
+    },
+    "tls_fingerprint": {
+      "type": "string",
+      "description": "Informational v1; per-call selection deferred."
+    },
+    "tag": {
+      "type": "string",
+      "description": "Tag stored on the new flow's Tags map."
+    }
+  },
+  "additionalProperties": false
+}
