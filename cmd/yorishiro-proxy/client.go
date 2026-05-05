@@ -359,6 +359,7 @@ func printToolHelp(w io.Writer, toolName string) error {
 // listServersEntry is an entry in the list-servers output.
 type listServersEntry struct {
 	Addr      string    `json:"addr"`
+	Token     string    `json:"token"`
 	PID       int       `json:"pid"`
 	StartedAt time.Time `json:"started_at"`
 	Status    string    `json:"status"`
@@ -398,6 +399,7 @@ func runListServers(w io.Writer, args []string) error {
 		}
 		result = append(result, listServersEntry{
 			Addr:      e.Addr,
+			Token:     e.Token,
 			PID:       e.PID,
 			StartedAt: e.StartedAt,
 			Status:    status,
@@ -425,18 +427,35 @@ func printListServersJSON(w io.Writer, entries []listServersEntry) error {
 }
 
 // printListServersTable outputs the server list as a human-readable table.
+// The Token column is truncated to the first 8 characters followed by "..."
+// to keep the table compact; use --format json to retrieve the full token.
 func printListServersTable(w io.Writer, entries []listServersEntry) error {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "ADDR\tPID\tSTARTED\tSTATUS")
+	fmt.Fprintln(tw, "ADDR\tTOKEN\tPID\tSTARTED\tSTATUS")
 	for _, e := range entries {
-		fmt.Fprintf(tw, "%s\t%d\t%s\t%s\n",
+		fmt.Fprintf(tw, "%s\t%s\t%d\t%s\t%s\n",
 			e.Addr,
+			truncateTokenForTable(e.Token),
 			e.PID,
 			e.StartedAt.UTC().Format(time.RFC3339),
 			e.Status,
 		)
 	}
 	return tw.Flush()
+}
+
+// truncateTokenForTable returns a short visual representation of a Bearer
+// token suitable for the table output. Empty tokens render as the empty
+// string. Tokens of 8 or more characters are truncated to the first 8
+// characters followed by "...". Shorter non-empty tokens are returned as-is.
+func truncateTokenForTable(token string) string {
+	if token == "" {
+		return ""
+	}
+	if len(token) >= 8 {
+		return token[:8] + "..."
+	}
+	return token
 }
 
 // resolveClientConn resolves the server address and Bearer token for the MCP client.

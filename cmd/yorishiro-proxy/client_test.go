@@ -170,8 +170,9 @@ func TestResolveClientConn_ExplicitAddrMatchingEntry_TokenTaken(t *testing.T) {
 // --- runListServers tests ---
 
 func TestRunListServers_JSONOutput(t *testing.T) {
+	const fullToken = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 	withTempServerJSON(t, []ServerJSON{
-		{Addr: "127.0.0.1:8080", Token: "tok1", PID: os.Getpid(), StartedAt: time.Date(2026, 3, 25, 10, 0, 0, 0, time.UTC)},
+		{Addr: "127.0.0.1:8080", Token: fullToken, PID: os.Getpid(), StartedAt: time.Date(2026, 3, 25, 10, 0, 0, 0, time.UTC)},
 		{Addr: "127.0.0.1:8081", Token: "tok2", PID: 0, StartedAt: time.Date(2026, 3, 25, 11, 0, 0, 0, time.UTC)},
 	})
 
@@ -197,20 +198,27 @@ func TestRunListServers_JSONOutput(t *testing.T) {
 	if entries[0].Status != "active" {
 		t.Errorf("entries[0].Status = %q, want active", entries[0].Status)
 	}
-	// Token must not appear in output.
-	if strings.Contains(buf.String(), "tok1") {
-		t.Error("token should not appear in list-servers output")
+	// JSON output must include the full token (USK-501).
+	if entries[0].Token != fullToken {
+		t.Errorf("entries[0].Token = %q, want %q", entries[0].Token, fullToken)
+	}
+	if !strings.Contains(buf.String(), fullToken) {
+		t.Errorf("JSON output should contain full token, got: %s", buf.String())
 	}
 
 	// Second entry: dead PID.
 	if entries[1].Status != "stale" {
 		t.Errorf("entries[1].Status = %q, want stale", entries[1].Status)
 	}
+	if entries[1].Token != "tok2" {
+		t.Errorf("entries[1].Token = %q, want tok2", entries[1].Token)
+	}
 }
 
 func TestRunListServers_TableOutput(t *testing.T) {
+	const fullToken = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 	withTempServerJSON(t, []ServerJSON{
-		{Addr: "127.0.0.1:8080", Token: "tok1", PID: os.Getpid(), StartedAt: time.Date(2026, 3, 25, 10, 0, 0, 0, time.UTC)},
+		{Addr: "127.0.0.1:8080", Token: fullToken, PID: os.Getpid(), StartedAt: time.Date(2026, 3, 25, 10, 0, 0, 0, time.UTC)},
 	})
 
 	var buf bytes.Buffer
@@ -223,15 +231,66 @@ func TestRunListServers_TableOutput(t *testing.T) {
 	if !strings.Contains(output, "ADDR") {
 		t.Errorf("table output missing ADDR header: %q", output)
 	}
+	if !strings.Contains(output, "TOKEN") {
+		t.Errorf("table output missing TOKEN header: %q", output)
+	}
 	if !strings.Contains(output, "127.0.0.1:8080") {
 		t.Errorf("table output missing address: %q", output)
 	}
 	if !strings.Contains(output, "active") {
 		t.Errorf("table output missing active status: %q", output)
 	}
-	// Token must not appear.
-	if strings.Contains(output, "tok1") {
-		t.Error("token should not appear in table output")
+	// Truncated token must appear (first 8 chars + "...").
+	wantTrunc := fullToken[:8] + "..."
+	if !strings.Contains(output, wantTrunc) {
+		t.Errorf("table output missing truncated token %q, got: %s", wantTrunc, output)
+	}
+	// Full token must NOT appear in the table view (truncation only).
+	if strings.Contains(output, fullToken) {
+		t.Errorf("table output should not contain full token, got: %s", output)
+	}
+}
+
+func TestRunListServers_TableOutput_EmptyToken(t *testing.T) {
+	// Legacy entries (or test fixtures) may have an empty token; the table
+	// must render an empty string in that column rather than panicking.
+	withTempServerJSON(t, []ServerJSON{
+		{Addr: "127.0.0.1:8080", Token: "", PID: os.Getpid(), StartedAt: time.Date(2026, 3, 25, 10, 0, 0, 0, time.UTC)},
+	})
+
+	var buf bytes.Buffer
+	err := runListServers(&buf, []string{"--format", "table"})
+	if err != nil {
+		t.Fatalf("runListServers table empty-token: %v", err)
+	}
+
+	output := buf.String()
+	if !strings.Contains(output, "127.0.0.1:8080") {
+		t.Errorf("table output missing address: %q", output)
+	}
+	if strings.Contains(output, "...") {
+		t.Errorf("empty token should render as empty string, got: %s", output)
+	}
+}
+
+func TestTruncateTokenForTable(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"empty", "", ""},
+		{"short", "abc", "abc"},
+		{"exactly7", "abcdefg", "abcdefg"},
+		{"exactly8", "abcdefgh", "abcdefgh..."},
+		{"long_hex64", "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "01234567..."},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := truncateTokenForTable(tc.in); got != tc.want {
+				t.Errorf("truncateTokenForTable(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
 	}
 }
 
