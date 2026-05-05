@@ -65,8 +65,18 @@ type channel struct {
 
 	// Per-request state.
 	currentStreamID string // changes per request-response pair
-	sequence        int    // 0=request, 1=response within a pair
+	sequence        int    // 0=request, 1=final response within a pair
 	connClosed      bool   // set when Connection: close or HTTP/1.0
+
+	// USK-721: priorRespWasInformational tracks whether the previously
+	// emitted response on this Channel was a 1xx informational. The next
+	// response within the same exchange must then advance the sequence so
+	// the 1xx and the final response (or another 1xx) are recorded with
+	// distinct values. Reset back to false (and sequence reset to 0) when
+	// a final response (status >= 200) is emitted, restoring the 0/1
+	// ordering for the next request-response pair on a keep-alive channel.
+	// Receive-direction only: ignored on Send.
+	priorRespWasInformational bool
 
 	// stateReleaser, when non-nil, is invoked once per emitted FlowID
 	// when the Channel reaches its terminal state. RFC §9.3 D6 / Q26
@@ -432,10 +442,29 @@ func (c *channel) nextResponse(_ context.Context) (env *envelope.Envelope, retEr
 	envCtx := c.ctxTmpl
 	envCtx.ReceivedAt = time.Now()
 
+	// USK-721: assign Sequence with 1xx awareness on a Receive-direction
+	// keep-alive channel. The simple rule: the request half uses
+	// Sequence=0 (set by nextRequest on the request-side channel — this
+	// channel may never see one); the *final* response uses Sequence=1.
+	// 1xx informationals preceding a final get 1, 2, … so each emit is
+	// distinct. After a final response we reset to restore the 0/1
+	// ordering for the next exchange on a keep-alive connection.
+	isInformational := rawResp.StatusCode >= 100 && rawResp.StatusCode < 200
+	if c.priorRespWasInformational {
+		c.sequence++
+	}
+	emitSeq := c.sequence + 1
+	if isInformational {
+		c.priorRespWasInformational = true
+	} else {
+		c.priorRespWasInformational = false
+		c.sequence = 0
+	}
+
 	env = &envelope.Envelope{
 		StreamID:  c.currentStreamID,
 		FlowID:    uuid.New().String(),
-		Sequence:  c.sequence + 1,
+		Sequence:  emitSeq,
 		Direction: envelope.Receive,
 		Protocol:  envelope.ProtocolHTTP,
 		Raw:       rawResp.RawBytes,
@@ -486,10 +515,22 @@ func (c *channel) buildStreamingResponseEnvelope(rawResp *parser.RawResponse) *e
 
 	c.streamingBody = c.reader
 
+	// SSE responses are by definition final (status 200 with text/event-stream).
+	// Use the same 1xx-aware accounting as nextResponse: if the previous
+	// response on this exchange was informational, advance c.sequence; then
+	// reset for any post-streaming continuation (defensive — the streaming
+	// bypass closes the response side so no more nextResponse calls follow).
+	if c.priorRespWasInformational {
+		c.sequence++
+	}
+	emitSeq := c.sequence + 1
+	c.priorRespWasInformational = false
+	c.sequence = 0
+
 	env := &envelope.Envelope{
 		StreamID:  c.currentStreamID,
 		FlowID:    uuid.New().String(),
-		Sequence:  c.sequence + 1,
+		Sequence:  emitSeq,
 		Direction: envelope.Receive,
 		Protocol:  envelope.ProtocolHTTP,
 		Raw:       rawResp.RawBytes,

@@ -223,6 +223,13 @@ func (a *aggregatorChannel) absorb(ev *envelope.Envelope) (*envelope.Envelope, b
 // absorbHeaders consumes an H2HeadersEvent. If the event carries
 // EndStream=true, an HTTPMessage envelope is emitted immediately (bodyless
 // message). Otherwise the aggregator transitions to phaseCollectingBody.
+//
+// USK-721: 1xx informational responses (100 Continue, 102 Processing, 103
+// Early Hints; RFC 9110 §15.2) precede the actual final response on the
+// same stream and never carry a body. They are emitted immediately as
+// bodyless complete messages and the aggregator stays in phaseIdle so the
+// subsequent HEADERS (which may be another 1xx, or the final response) is
+// absorbed as a new initial HEADERS.
 func (a *aggregatorChannel) absorbHeaders(env *envelope.Envelope, evt *http2.H2HeadersEvent) (*envelope.Envelope, bool, error) {
 	if a.phase == phaseCollectingBody {
 		// Trailers path should not come through H2HeadersEvent — the Layer
@@ -254,6 +261,15 @@ func (a *aggregatorChannel) absorbHeaders(env *envelope.Envelope, evt *http2.H2H
 		Context:   env.Context,
 	}
 
+	// 1xx informational: emit as complete bodyless message and stay in
+	// phaseIdle so the next HEADERS is treated as a fresh initial block.
+	// Direction == Receive guards request HEADERS (Status == 0 there).
+	if env.Direction == envelope.Receive && isInformationalStatus(evt.Status) {
+		a.recordEmittedLocked(outEnv)
+		a.resetLocked()
+		return outEnv, true, nil
+	}
+
 	if evt.EndStream {
 		// Complete bodyless message. Reset phase so subsequent events
 		// (a second request-response on the same channel) can be
@@ -269,6 +285,13 @@ func (a *aggregatorChannel) absorbHeaders(env *envelope.Envelope, evt *http2.H2H
 	a.inflightMsg = msg
 	a.phase = phaseCollectingBody
 	return nil, false, nil
+}
+
+// isInformationalStatus reports whether code is a 1xx informational status
+// per RFC 9110 §15.2. Mirror of http2.isInformationalStatus, kept private
+// here so the aggregator does not depend on http2 internal helpers.
+func isInformationalStatus(code int) bool {
+	return code >= 100 && code < 200
 }
 
 // absorbData consumes an H2DataEvent. Payload is appended to the in-flight

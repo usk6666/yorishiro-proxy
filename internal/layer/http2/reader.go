@@ -544,6 +544,17 @@ func (l *Layer) deliverEnvelope(ch *channel, env *envelope.Envelope, asm *eventA
 		return
 	default:
 	}
+	// USK-721 safety net: if the recv channel has been closed (by an
+	// assembler-driven terminal that did NOT also close termDone), skip
+	// the send. Without this check a stray frame after asm.phaseDone —
+	// e.g. a non-conforming peer that writes DATA after END_STREAM, or a
+	// future assembler bug that walks past phaseDone — would land on a
+	// closed channel and panic the reader goroutine (no recover() exists
+	// in the production data path).
+	if ch.recvClosed.Load() {
+		ch.recvMu.Unlock()
+		return
+	}
 	select {
 	case ch.recv <- env:
 	case <-l.shutdown:
@@ -564,10 +575,18 @@ func (l *Layer) deliverEnvelope(ch *channel, env *envelope.Envelope, asm *eventA
 
 // closeChannelRecv idempotently closes ch's recv chan. Acquires ch.recvMu
 // to serialize against the reader goroutine's send in deliverEnvelope.
+//
+// USK-721: also flips ch.recvClosed atomically so deliverEnvelope can
+// short-circuit before its send-select if a stray frame arrives after the
+// assembler reached terminal state. Distinct from markTerminated /
+// termDone so this path does NOT install a terminal error — letting a
+// later RST_STREAM (failStream) win the first-writer-wins race in
+// markTerminated.
 func (l *Layer) closeChannelRecv(ch *channel) {
 	ch.recvMu.Lock()
 	defer ch.recvMu.Unlock()
 	ch.closeRecvOnce.Do(func() {
+		ch.recvClosed.Store(true)
 		close(ch.recv)
 	})
 }

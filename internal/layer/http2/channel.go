@@ -7,6 +7,7 @@ import (
 	"io"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/google/uuid"
 
@@ -47,6 +48,15 @@ type channel struct {
 	errCh         chan *layer.StreamError
 	closeRecvOnce sync.Once
 	closeSendOnce sync.Once
+
+	// recvClosed is set atomically by closeChannelRecv before closing
+	// ch.recv. deliverEnvelope reads it under recvMu (USK-721) to skip
+	// the send-select when recv has been closed by an assembler-driven
+	// terminal — for example, when an upstream that violated the protocol
+	// keeps writing DATA after END_STREAM. Distinct from termDone so a
+	// later RST_STREAM (failStream) can still install its own terminal
+	// error via markTerminated without being shadowed by an io.EOF stamp.
+	recvClosed atomic.Bool
 
 	mu         sync.Mutex
 	sequence   int
@@ -146,12 +156,16 @@ func (c *channel) H2StreamID() uint32 { return c.h2Stream }
 //
 // Note: this intentionally does NOT close ch.recv. Closing from this
 // external goroutine would race with the reader goroutine's in-flight
-// ch.recv <- env send (the reader's `select` + defer-recover protects
-// against the panic but the race detector still flags concurrent
-// close+send). markTerminated closes termDone which the reader observes
-// in deliverEnvelope's select; subsequent sends for this stream are
-// short-circuited. Any ch.recv close happens later when the caller
-// eventually invokes channel.Close (bilateral close or session teardown).
+// ch.recv <- env send. We rely on markTerminated closing termDone, which
+// deliverEnvelope's select observes to short-circuit subsequent sends
+// before they would land on a closed channel. (USK-721: there is NO
+// process-wide recover() — an earlier comment claimed a "defer-recover
+// protects" mechanism that does not actually exist; the safety here is
+// purely the termDone gate. The matching ch.recvClosed atomic also
+// short-circuits the assembler-terminal close path, which closes recv
+// without closing termDone.) Any ch.recv close happens later when the
+// caller eventually invokes channel.Close (bilateral close or session
+// teardown).
 func (c *channel) MarkTerminatedWithRST(code uint32, err error) {
 	c.layer.enqueueWrite(writeRequest{rst: &writeRST{streamID: c.h2Stream, code: code}})
 	if err == nil {

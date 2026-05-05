@@ -50,9 +50,13 @@ type streamEventPhase uint8
 
 const (
 	// phaseInitialHeaders waits for the initial HEADERS (plus CONTINUATION*).
+	// Re-entered after a 1xx informational HEADERS so the next HEADERS is
+	// processed as a fresh initial block (per RFC 9110 §15.2: any number of
+	// 1xx responses may precede the final response).
 	phaseInitialHeaders streamEventPhase = iota
-	// phaseBodyOrTrailers has already emitted initial H2HeadersEvent and is
-	// waiting for DATA frames or a trailer HEADERS frame.
+	// phaseBodyOrTrailers has emitted the *final* response/request HEADERS
+	// (status >= 200, or any request HEADERS) and is waiting for DATA
+	// frames or a trailer HEADERS frame.
 	phaseBodyOrTrailers
 	// phaseTrailers is coalescing a trailer HEADERS block (HEADERS-after-DATA).
 	phaseTrailers
@@ -332,6 +336,14 @@ func statusReason(code int) string {
 	return statusReasonTable[code]
 }
 
+// isInformationalStatus reports whether code is a 1xx informational status
+// (RFC 9110 §15.2). 1xx responses precede the *real* final response on the
+// same HTTP/2 stream and must not transition the assembler out of the
+// initial-headers phase. See USK-721 for the reproducer that motivates this.
+func isInformationalStatus(code int) bool {
+	return code >= 100 && code < 200
+}
+
 // handleHeadersFrame processes a HEADERS (or CONTINUATION) fragment. When
 // END_HEADERS is observed, the decoded block is converted to an event
 // envelope (H2HeadersEvent for phaseInitialHeaders, H2TrailersEvent for
@@ -359,6 +371,10 @@ func (a *eventAssembler) handleHeadersFrame(
 
 	if a.phase == phaseBodyOrTrailers {
 		// HEADERS-after-DATA = trailers. Switch to trailer collection.
+		// 1xx informational responses do NOT reach this branch because the
+		// initial-headers handler keeps phase == phaseInitialHeaders for
+		// any 1xx :status — see the post-decode classification below
+		// (USK-721).
 		a.phase = phaseTrailers
 	}
 
@@ -401,6 +417,16 @@ func (a *eventAssembler) handleHeadersFrame(
 			Protocol:  envelope.ProtocolHTTP,
 			Raw:       rawBlock,
 			Message:   evt,
+		}
+		// USK-721: 1xx informational responses (RFC 9110 §15.2: 100 Continue,
+		// 102 Processing, 103 Early Hints) precede the *real* final response
+		// on the same stream. They are bodyless and never carry END_STREAM.
+		// Stay in phaseInitialHeaders so the next HEADERS is treated as a
+		// fresh initial block (could be another 1xx, or the final response).
+		// Direction == Receive guards request-side HEADERS (which never have
+		// :status and would parse as Status == 0).
+		if direction == envelope.Receive && isInformationalStatus(evt.Status) {
+			return env, nil
 		}
 		if endStream {
 			a.phase = phaseDone
