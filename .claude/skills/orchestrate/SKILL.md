@@ -232,7 +232,33 @@ When all sub-agents in a batch have completed:
 4. **Handle failures**: Determine whether a failed Issue blocks subsequent batches
    - If a blocker: Try to fix it, or exclude the blocked Issue from subsequent batches
    - If not a blocker: Continue with subsequent batches and address the failed Issue later
-5. **Launch next batch**: Proceed to the next batch once the above is complete
+   - If the sub-agent reports "scope is materially larger than spec implies": apply the **Split Oversized Issue** procedure (see 2-2-A below) instead of retrying.
+5. **Verify main-clone branch**: Run `git branch --show-current` and `git worktree list` in the main clone. Sub-agents' Edit-tool race occasionally lands edits in the main clone; if main is off-base, switch back with `git checkout <base> && git pull --rebase origin <base>` before launching the next batch.
+6. **Launch next batch**: Proceed to the next batch once the above is complete
+
+#### 2-2-A. Split Oversized Issue
+
+Trust the sub-agent's bottom-up scope reassessment when it has actually attempted the work — the agent estimates from compile errors and test ripples, which is grounded; the design review estimates from documentation and is sometimes optimistic. Do **not** push harder; split.
+
+**Red flags during planning that suggest oversize** — if any of these were true at plan time, the issue was already too big:
+
+- Multiple unrelated decision axes (e.g., "delete vs migrate" on more than one feature)
+- Plan invokes a "may briefly break green within the PR" exemption
+- Test fixture migration count > 20 sites
+- Multiple new packages must be created
+- A single file edit is projected to exceed 200 lines
+
+**Salvage and split**:
+
+1. Push the partial work as `wip/<original-issue-id>-partial-salvage` (single commit, descriptive message tagging what is salvageable and what is **not**). Stash-only is fragile — a worktree cleanup can lose it.
+2. Re-read the user direction. The sub-agent may have misinterpreted (e.g., treated "delete X" as "migrate X"). Do not propagate the misinterpretation into the split.
+3. Create N follow-up issues. Each split issue body must include:
+   - Pointer to the salvage branch + commit SHA
+   - Explicit "take vs ignore from salvage" list (the salvage often contains contradictory partial work)
+   - Single-source-of-truth design citation (link the design-review answers, not the original Linear body which is now superseded)
+   - `blockedBy` chain so Linear shows the order
+4. Update the parent issue (do **not** close it). It becomes the "final cleanup + audit" PR after splits land. Set `blockedBy` to the new split issues. Move state back to `Backlog`.
+5. Cleanup discipline: remove only the worktrees this session launched. Use `git worktree remove -f -f <path>` to override locks (the failed sub-agent may have left lock files). Do not bulk-delete other sessions' worktrees.
 
 #### 2-3. Parallel Launch Example
 

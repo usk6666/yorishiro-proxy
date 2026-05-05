@@ -54,11 +54,15 @@ yorishiro-proxy threat model:
 ### 1. TLS / Certificates
 
 - CA private key protection (file permissions, zeroing in memory)
-- TLS version restriction (enforcing TLS 1.2 or higher)
-- Only safe cipher suites are used
+- Only safe cipher suites are used **for the proxy's own listener** (where the proxy is the server)
 - Certificate verification bypass is intentional and controlled
 - Certificate expiration settings are appropriate
 - `InsecureSkipVerify` usage is appropriately scoped
+
+> **MITM-specific exception — do NOT flag these as findings:**
+>
+> 1. **Low or unset `tls.Config.MinVersion` in the upstream-dial path** (`internal/connector/transport/`, `internal/layer/tls/`, any data-path dial). yorishiro-proxy is a pentesting proxy; legacy TLS versions and weak ciphers are valid pentest targets. Clamping `MinVersion` to TLS 1.2+ removes a feature. The control plane (MCP server, CLI, self-update) is a different story — there `MinVersion` should be enforced.
+> 2. **No cipher-suite restriction on the upstream side.** Same reason: a pentester must be able to negotiate weak ciphers on the upstream to fingerprint or exploit the target.
 
 ### 2. Network
 

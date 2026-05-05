@@ -90,6 +90,22 @@ For each question, record:
 - **DEFERRED** — Explicitly out of scope for this work, with citation of which milestone/issue owns it
 - **UNRESOLVED** — Cannot be derived from any source above. State why each source was insufficient.
 
+### Step 3.5: Live-Bug Precondition Check (only when scope is "fix a review finding")
+
+If the scope being reviewed comes from a code/security review finding (especially CWE-prefixed ones), construct the **concrete failure scenario** in plain language before recommending implementation:
+
+- Name the actual callers, the actual config values, and the actual sequence of events that triggers the bug.
+- Verify each precondition is reachable from current code (grep for the call site, read the surrounding logic).
+- If you cannot produce a runnable repro precondition from current code, the bug is **not live**.
+
+Classify the result:
+
+- **Live bug** — preconditions exist; proceed to Step 4.
+- **Defense-in-depth / contract hardening** — the code is fragile but the failure mode requires architecture not yet present (hot-reload, multi-tenant pool, runtime override injection, etc.). Recommend **defer with documented re-open trigger** rather than implementing now. Spell out the trigger condition: "re-open when X lands". Do not run this under the same urgency as a live bug fix.
+- **Pattern-match false positive** — the reviewer pattern-matched on code shape ("function takes X but doesn't hash Y") without verifying the precondition chain. Recommend **close as not-applicable** with a one-line justification.
+
+This step exists because review findings are a **hypothesis**, not a verdict — implementing a hypothetical bug is "designing for hypothetical future requirements", which CLAUDE.md explicitly prohibits.
+
 ### Step 4: Fitness Check
 
 Review the proposed scope against the product identity and principles:

@@ -33,3 +33,26 @@ A skill for creating Pull Requests.
 
 - If build or tests fail, do not create the PR and report the problem instead
 - Default base branch is `main`
+
+## Stacked PRs
+
+When PR B is stacked on PR A's branch (`B.base == A.head_branch`) and you merge PR A with `gh pr merge --delete-branch`, GitHub auto-closes PR B because its base branch no longer exists. Auto-closed PRs cannot be reopened (`gh pr reopen` returns "Could not open the pull request") nor have their base changed (`gh pr edit --base` returns "Cannot change the base branch of a closed pull request").
+
+Two safe sequences:
+
+1. **Retarget before merging upstream** (preferred when you have time):
+   ```bash
+   gh pr edit <B>  --base <A's base>     # B will temporarily show A's diff too — fine if A merges first
+   gh pr merge <A> --squash --admin --delete-branch
+   ```
+
+2. **Recreate downstream after merging upstream**:
+   ```bash
+   gh pr merge <A> --squash --admin --delete-branch     # closes B
+   # in a worktree on B's branch:
+   git rebase --onto origin/<base> <A's-original-head-commit>     # drops A's commits, replays only B's
+   git push --force-with-lease
+   gh pr create --base <base> --head <B's-branch>
+   ```
+
+Do **not** use `--delete-branch` on the upstream PR if the downstream has not been retargeted — you lose the PR thread (closed PRs are still readable but lose `OPEN` semantics for review-gate and merge-queue tooling).
