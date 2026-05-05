@@ -44,14 +44,15 @@ type bodyOpts struct {
 
 // channel implements layer.Channel for HTTP/1.x.
 type channel struct {
-	reader    *bufio.Reader // created by Layer
-	writer    io.Writer
-	conn      net.Conn // same underlying conn as reader/writer; held for SetReadDeadline (USK-701)
-	streamID  string
-	direction envelope.Direction
-	scheme    string
-	ctxTmpl   envelope.EnvelopeContext
-	bodyOpts  bodyOpts
+	reader        *bufio.Reader           // created by Layer; sits atop captureReader
+	captureReader *interruptCaptureReader // wraps conn for read; replay buffer for USK-715
+	writer        io.Writer
+	conn          net.Conn // same underlying conn as reader/writer; held for SetReadDeadline (USK-701)
+	streamID      string
+	direction     envelope.Direction
+	scheme        string
+	ctxTmpl       envelope.EnvelopeContext
+	bodyOpts      bodyOpts
 
 	// streamingDetect, when non-nil and direction == Receive, decides
 	// whether to bypass body draining for a parsed response. See
@@ -105,16 +106,51 @@ func (c *channel) StreamID() string { return c.streamID }
 // cheap stdlib no-op. Layer.DetachStream resets the deadline before
 // transferring conn ownership so the post-swap Layer reads normally.
 //
+// USK-715: Interrupt also enables a side-buffer capture on the conn read
+// wrapper so that any post-Upgrade bytes the kernel hands the in-flight
+// conn.Read syscall — between the Send(101) returning and the read
+// deadline taking effect — are recorded for replay by [Layer.DetachStream].
+// Without the capture those bytes get fed into bufio.Reader, eaten by the
+// parser as it tries to parse "the next request", and discarded when the
+// parse fails. With the capture they are replayed ahead of bufio.Reader's
+// remainder so the new ws.Layer reads them in their original wire order.
+//
 // LIMITATION: a non-RFC-6455-compliant client that pipelines its first
 // WebSocket frame into the same TCP segment as the Upgrade request can
-// still have those frame bytes consumed by a synchronous failing parse
-// before Interrupt has a chance to fire. RFC 6455 §4.1 forbids that
-// pipelining.
+// still have those frame bytes consumed by the http1 parser BEFORE
+// PrepareSwap or Interrupt is even called (the first parse run consumes
+// them while looking for additional headers / body). The capture mechanism
+// only catches bytes that arrive between PrepareSwap and the parser's
+// exit. RFC 6455 §4.1 forbids same-segment pipelining.
 func (c *channel) Interrupt() error {
 	if c.conn == nil {
 		return nil
 	}
+	if c.captureReader != nil {
+		// Idempotent — PrepareSwap may already have started capture. If
+		// so, this is a no-op. We still call it here so direct callers
+		// of Interrupt (without a preceding PrepareSwap) still get the
+		// capture-then-deadline ordering.
+		c.captureReader.StartCapture()
+	}
 	return c.conn.SetReadDeadline(time.Now())
+}
+
+// PrepareSwap enables the post-Upgrade side-buffer capture WITHOUT arming
+// the read deadline. The session orchestrator calls this BEFORE Send(101)
+// when a Pipeline UpgradeStep has flipped the upgrade notice — closing
+// the race window where the test client could write the first WS frame
+// between Send(101) returning and Interrupt's SetReadDeadline taking
+// effect, causing the parser's in-flight conn.Read to return successfully
+// with WS bytes BEFORE capture is enabled.
+//
+// PrepareSwap is idempotent: subsequent calls (or a follow-up Interrupt)
+// are no-ops on the capture state. Channels that do not implement
+// channelSwapPreparer in the session orchestrator skip this call.
+func (c *channel) PrepareSwap() {
+	if c.captureReader != nil {
+		c.captureReader.StartCapture()
+	}
 }
 
 // Next reads the next HTTP message from the wire and returns it as an Envelope.

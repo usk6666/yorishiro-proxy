@@ -94,8 +94,13 @@ func TestRunStackSession_NonUpgrade_PassesThroughCleanly(t *testing.T) {
 	stack.PushUpstream(upstreamLayer)
 	defer stack.Close()
 
-	// "Browser" writes a plain GET request.
-	req := "GET / HTTP/1.1\r\nHost: example.com\r\n\r\n"
+	// "Browser" writes a plain GET request with Connection: close so the
+	// proxy's http1 parser short-circuits to io.EOF on the second Next
+	// call (set by rawReq.Close). Without this, the test relies on the
+	// kernel's close → EOF/RST behavior on the proxy's parked parser,
+	// which on a slow / loopback CI runner surfaces as "connection reset
+	// by peer" instead of clean EOF (USK-715 flake #3).
+	req := "GET / HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n"
 	go func() {
 		_, _ = clientA.Write([]byte(req))
 	}()

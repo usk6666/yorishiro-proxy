@@ -1852,6 +1852,113 @@ func TestLayer_Interrupt_AfterDetach_NoOp(t *testing.T) {
 	}
 }
 
+// TestLayer_DetachStream_ReplaysCapturedAfterInterrupt is the USK-715
+// regression. It simulates the slow-CI race where the test client's first
+// WS frame lands in the proxy's kernel TCP buffer between Send(101) and
+// Interrupt's SetReadDeadline taking effect. In production:
+//
+//  1. The parser's in-flight conn.Read returns successfully with the WS
+//     frame bytes (the netpoll wake races the deadline timer and wins).
+//  2. The bytes flow into bufio.Reader.
+//  3. The parser tries to interpret them as the next request and fails;
+//     the bytes are consumed from bufio.Reader's buffer (b.r advanced
+//     past them) and discarded when the parser returns the wrapped
+//     "parse request line" error.
+//
+// Without the capture-and-replay, those bytes are unrecoverable. With it,
+// DetachStream returns an io.MultiReader that yields the captured-but-lost
+// bytes ahead of bufio.Reader's remainder.
+//
+// We deterministically simulate the race by injecting a successful read
+// (write from the peer side), enabling capture, then having a goroutine
+// run a parse that consumes the bytes and fails, then verifying the
+// DetachStream reader yields those bytes.
+func TestLayer_DetachStream_ReplaysCapturedAfterInterrupt(t *testing.T) {
+	client, server := testConn(t)
+	defer client.Close()
+
+	l := New(server, "stream-replay", envelope.Send)
+	// Do not defer Close — we are exercising DetachStream.
+
+	ch := <-l.Channels()
+
+	// Park a goroutine inside Next. It will read whatever the peer writes
+	// next as if it were a request line.
+	type result struct {
+		env *envelope.Envelope
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		env, err := ch.Next(context.Background())
+		done <- result{env, err}
+	}()
+
+	// Give the parker a beat to enter the read.
+	time.Sleep(50 * time.Millisecond)
+
+	// Simulate the race: enable capture FIRST (mimicking what Interrupt
+	// would do BEFORE SetReadDeadline), then write a non-HTTP byte stream
+	// (a WS frame's worth of binary). The parser's in-flight conn.Read
+	// will return these bytes successfully before the deadline trips.
+	//
+	// Using the channel's captureReader directly to start capture; in
+	// production Interrupt() does this for us. We split the actions so the
+	// test can deterministically force "capture started, bytes consumed,
+	// then deadline" rather than relying on netpoll races.
+	innerCh, ok := ch.(*channel)
+	if !ok {
+		t.Fatalf("Channel is not *channel (test internals): %T", ch)
+	}
+	innerCh.captureReader.StartCapture()
+
+	wsFrame := []byte{0x81, 0x87, 0xa1, 0xb2, 0xc3, 0xd4, 0xc8, 0xc1, 0xa9, 0xa0, 0xa9, 0xb0, 0xb3}
+	if _, err := client.Write(wsFrame); err != nil {
+		t.Fatalf("client.Write ws frame: %v", err)
+	}
+
+	// Now arm the deadline so the parser's NEXT read (after consuming the
+	// bytes already returned) trips and the parse aborts.
+	if err := server.SetReadDeadline(time.Now()); err != nil {
+		t.Fatalf("SetReadDeadline: %v", err)
+	}
+
+	// Wait for the parser to exit with an error.
+	select {
+	case r := <-done:
+		if r.err == nil {
+			t.Fatalf("parser unexpectedly succeeded: env=%+v", r.env)
+		}
+		// The parser should have surfaced os.ErrDeadlineExceeded on its
+		// follow-up read (after consuming wsFrame on the first read).
+		if !errors.Is(r.err, os.ErrDeadlineExceeded) {
+			// Another classification (e.g. parse error wrapping a
+			// truncation) is also acceptable as long as DetachStream
+			// recovers the bytes.
+			t.Logf("parser exit err = %v (acceptable so long as bytes are replayed)", r.err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("parser did not exit within 3s")
+	}
+
+	// DetachStream must replay the WS frame bytes. Read all bytes back
+	// and verify they match the original WS frame.
+	reader, _, _, err := l.DetachStream()
+	if err != nil {
+		t.Fatalf("DetachStream: %v", err)
+	}
+	got := make([]byte, len(wsFrame))
+	if err := server.SetReadDeadline(time.Time{}); err != nil {
+		t.Fatalf("SetReadDeadline reset: %v", err)
+	}
+	if _, err := io.ReadFull(reader, got); err != nil {
+		t.Fatalf("post-detach ReadFull: %v", err)
+	}
+	if !bytes.Equal(got, wsFrame) {
+		t.Errorf("post-detach bytes = %x, want %x", got, wsFrame)
+	}
+}
+
 // TestLayer_Interrupt_DoesNotCloseConn verifies Interrupt does NOT close
 // the conn — only the deadline is touched. The session orchestrator
 // requires the conn to remain alive so DetachStream can transfer
