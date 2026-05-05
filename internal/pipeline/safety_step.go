@@ -20,6 +20,11 @@ import (
 // half-duplex Receive-only). gRPC End events are skipped — End carries no
 // Send-side user content (grpc-web sentinel has empty trailers/Status=0;
 // native gRPC End is always Receive). Unknown Message types pass through.
+//
+// Wire fidelity invariant (RFC-001 Principle 1): SafetyStep.Process MUST
+// NOT mutate env, env.Message, env.Raw, or any field reachable from them.
+// Result is restricted to {} (pass) or {Action: Drop} (block). PII / body
+// masking belongs to internal/safety on the MCP response path, never here.
 type SafetyStep struct {
 	http   *httprules.SafetyEngine
 	ws     *wsrules.SafetyEngine

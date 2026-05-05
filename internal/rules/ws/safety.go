@@ -24,6 +24,17 @@ const (
 	TargetOpcode common.Target = "opcode"
 )
 
+// SafetyEngine in this package is the live-path WebSocket safety filter.
+// It is invoked by internal/pipeline/safety_step.go on every Send-direction
+// WS frame and MAY only return a Violation that drives a block / drop
+// decision.
+//
+// Per RFC-001 Principle 1 (Wire fidelity), this engine MUST NOT mutate
+// Envelope.Raw, WSMessage.Payload, opcode, or any other message field.
+// Output masking (PII redaction) is the exclusive responsibility of
+// internal/safety, which is invoked at MCP response time — never before
+// recording.
+
 // Violation records a safety rule match on a WS frame.
 type Violation struct {
 	RuleID   string

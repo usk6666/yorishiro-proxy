@@ -1,6 +1,7 @@
 package pipeline
 
 import (
+	"bytes"
 	"context"
 	"testing"
 
@@ -323,6 +324,143 @@ func TestSafetyStep_GRPC_NilEngine(t *testing.T) {
 	result := step.Process(context.Background(), env)
 	if result.Action != Continue {
 		t.Errorf("GRPC_NilEngine: got action %v, want Continue", result.Action)
+	}
+}
+
+// TestSafetyStep_HTTP_WireFidelity_OnDrop is the wire-fidelity guard
+// (RFC-001 Principle 1) for the HTTP arm of SafetyStep. Even when the
+// step returns Drop, env.Raw, msg.Body, msg.Headers, and the underlying
+// byte slices must be byte-for-byte unchanged so the recorder captures
+// the original wire bytes.
+func TestSafetyStep_HTTP_WireFidelity_OnDrop(t *testing.T) {
+	engine := newTestSafetyEngine(t)
+	step := NewSafetyStep(engine, nil, nil, nil)
+
+	bodyOriginal := []byte("DROP TABLE users -- payload")
+	rawOriginal := []byte("POST /api HTTP/1.1\r\nHost: example.com\r\nContent-Length: 27\r\n\r\nDROP TABLE users -- payload")
+	headers := []envelope.KeyValue{
+		{Name: "Host", Value: "example.com"},
+		{Name: "Content-Type", Value: "application/sql"},
+	}
+	msg := &envelope.HTTPMessage{
+		Method:    "POST",
+		Scheme:    "https",
+		Authority: "example.com",
+		Path:      "/api",
+		Headers:   headers,
+		Body:      bodyOriginal,
+	}
+	env := &envelope.Envelope{
+		Direction: envelope.Send,
+		Protocol:  envelope.ProtocolHTTP,
+		Message:   msg,
+		Raw:       rawOriginal,
+	}
+
+	bodySnap := append([]byte(nil), bodyOriginal...)
+	rawSnap := append([]byte(nil), rawOriginal...)
+	headerSnap := append([]envelope.KeyValue(nil), headers...)
+
+	if result := step.Process(context.Background(), env); result.Action != Drop {
+		t.Fatalf("expected Drop action; got %v (rule precondition failed)", result.Action)
+	}
+
+	if !bytes.Equal(msg.Body, bodySnap) {
+		t.Errorf("HTTPMessage.Body mutated after Drop: got %q, want %q", string(msg.Body), string(bodySnap))
+	}
+	if !bytes.Equal(bodyOriginal, bodySnap) {
+		t.Errorf("underlying body slice mutated after Drop: got %q, want %q", string(bodyOriginal), string(bodySnap))
+	}
+	if !bytes.Equal(env.Raw, rawSnap) {
+		t.Errorf("env.Raw mutated after Drop: got %q, want %q", string(env.Raw), string(rawSnap))
+	}
+	if !bytes.Equal(rawOriginal, rawSnap) {
+		t.Errorf("underlying env.Raw slice mutated after Drop: got %q, want %q", string(rawOriginal), string(rawSnap))
+	}
+	for i := range msg.Headers {
+		if msg.Headers[i] != headerSnap[i] {
+			t.Errorf("Headers[%d] mutated after Drop: got %+v, want %+v", i, msg.Headers[i], headerSnap[i])
+		}
+	}
+}
+
+// TestSafetyStep_WS_WireFidelity_OnDrop is the wire-fidelity guard for
+// the WebSocket arm. The WS engine has no mask method; this test locks
+// in that even on Drop the WSMessage.Payload and env.Raw remain the
+// original wire bytes.
+func TestSafetyStep_WS_WireFidelity_OnDrop(t *testing.T) {
+	wsEngine := newTestWSSafetyEngine(t)
+	step := NewSafetyStep(nil, wsEngine, nil, nil)
+
+	payloadOriginal := []byte(`{"login":"admin","password=hunter2"}`)
+	rawOriginal := []byte("\x81\x24" + string(payloadOriginal)) // text frame, no mask
+	msg := &envelope.WSMessage{
+		Opcode:  envelope.WSText,
+		Fin:     true,
+		Payload: payloadOriginal,
+	}
+	env := &envelope.Envelope{
+		Direction: envelope.Send,
+		Protocol:  envelope.ProtocolWebSocket,
+		Message:   msg,
+		Raw:       rawOriginal,
+	}
+
+	payloadSnap := append([]byte(nil), payloadOriginal...)
+	rawSnap := append([]byte(nil), rawOriginal...)
+
+	if result := step.Process(context.Background(), env); result.Action != Drop {
+		t.Fatalf("expected Drop action; got %v (rule precondition failed)", result.Action)
+	}
+
+	if !bytes.Equal(msg.Payload, payloadSnap) {
+		t.Errorf("WSMessage.Payload mutated after Drop: got %q, want %q", string(msg.Payload), string(payloadSnap))
+	}
+	if !bytes.Equal(payloadOriginal, payloadSnap) {
+		t.Errorf("underlying payload slice mutated after Drop: got %q, want %q", string(payloadOriginal), string(payloadSnap))
+	}
+	if !bytes.Equal(env.Raw, rawSnap) {
+		t.Errorf("env.Raw mutated after Drop: got %q, want %q", string(env.Raw), string(rawSnap))
+	}
+}
+
+// TestSafetyStep_GRPC_WireFidelity_OnDrop is the wire-fidelity guard for
+// the gRPC arm. On Drop the GRPCDataMessage.Payload and env.Raw must
+// remain the original wire bytes.
+func TestSafetyStep_GRPC_WireFidelity_OnDrop(t *testing.T) {
+	grpcEngine := newTestGRPCSafetyEngine(t)
+	step := NewSafetyStep(nil, nil, grpcEngine, nil)
+
+	payloadOriginal := []byte("DROP TABLE users")
+	rawOriginal := []byte("\x00\x00\x00\x00\x10DROP TABLE users") // LPM-framed
+	msg := &envelope.GRPCDataMessage{
+		Service:    "Admin",
+		Method:     "Query",
+		Payload:    payloadOriginal,
+		WireLength: uint32(len(payloadOriginal)),
+	}
+	env := &envelope.Envelope{
+		Direction: envelope.Send,
+		Protocol:  envelope.ProtocolGRPC,
+		Message:   msg,
+		Raw:       rawOriginal,
+	}
+
+	payloadSnap := append([]byte(nil), payloadOriginal...)
+	rawSnap := append([]byte(nil), rawOriginal...)
+
+	if result := step.Process(context.Background(), env); result.Action != Drop {
+		t.Fatalf("expected Drop action; got %v (rule precondition failed)", result.Action)
+	}
+
+	if !bytes.Equal(msg.Payload, payloadSnap) {
+		t.Errorf("GRPCDataMessage.Payload mutated after Drop: got %q, want %q", string(msg.Payload), string(payloadSnap))
+	}
+	if !bytes.Equal(payloadOriginal, payloadSnap) {
+		t.Errorf("underlying payload slice mutated after Drop: got %q, want %q", string(payloadOriginal), string(payloadSnap))
+	}
+	if !bytes.Equal(env.Raw, rawSnap) {
+		t.Errorf("env.Raw mutated after Drop: got %q, want %q", string(env.Raw), string(rawSnap))
 	}
 }
 

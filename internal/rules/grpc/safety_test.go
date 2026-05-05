@@ -1,6 +1,7 @@
 package grpc
 
 import (
+	"bytes"
 	"context"
 	"testing"
 
@@ -221,6 +222,115 @@ func TestSafetyEngine_CheckMetadataTarget(t *testing.T) {
 	// Missing metadata returns nil.
 	if v := e.CheckMetadataTarget(metadata, "x-missing", rule); v != nil {
 		t.Errorf("expected nil for missing metadata, got %+v", v)
+	}
+}
+
+// TestSafetyEngine_CheckInput_DoesNotMutateMessage_NoMatch confirms the
+// wire-fidelity invariant (RFC-001 Principle 1) for the no-match path on
+// gRPC Data envelopes: the live-path engine must leave Payload and the
+// underlying byte slice untouched.
+func TestSafetyEngine_CheckInput_DoesNotMutateDataMessage_NoMatch(t *testing.T) {
+	e := NewSafetyEngine()
+	if err := e.LoadPreset(common.PresetDestructiveSQL); err != nil {
+		t.Fatal(err)
+	}
+
+	payloadOriginal := []byte("benign rpc payload")
+	env, msg := makeDataEnv(envelope.Send, "svc", "M", payloadOriginal)
+	rawOriginal := []byte("frame-bytes-from-the-wire")
+	env.Raw = rawOriginal
+
+	payloadSnap := append([]byte(nil), payloadOriginal...)
+	rawSnap := append([]byte(nil), rawOriginal...)
+	service, method := msg.Service, msg.Method
+
+	if v := e.CheckInput(context.Background(), env, msg); v != nil {
+		t.Fatalf("unexpected violation: %+v", v)
+	}
+
+	if !bytes.Equal(msg.Payload, payloadSnap) {
+		t.Errorf("Payload mutated: got %q, want %q", string(msg.Payload), string(payloadSnap))
+	}
+	if !bytes.Equal(payloadOriginal, payloadSnap) {
+		t.Errorf("underlying payload slice mutated: got %q, want %q", string(payloadOriginal), string(payloadSnap))
+	}
+	if !bytes.Equal(env.Raw, rawSnap) {
+		t.Errorf("env.Raw mutated: got %q, want %q", string(env.Raw), string(rawSnap))
+	}
+	if !bytes.Equal(rawOriginal, rawSnap) {
+		t.Errorf("underlying env.Raw slice mutated: got %q, want %q", string(rawOriginal), string(rawSnap))
+	}
+	if msg.Service != service || msg.Method != method {
+		t.Errorf("scalar field mutated: service=%q method=%q", msg.Service, msg.Method)
+	}
+}
+
+// TestSafetyEngine_CheckInput_DoesNotMutateDataMessage_OnMatch confirms
+// the wire-fidelity invariant (RFC-001 Principle 1) on the matched-rule
+// path: even on Drop, the engine must leave the payload byte-for-byte
+// identical so the recorder captures the original wire bytes.
+func TestSafetyEngine_CheckInput_DoesNotMutateDataMessage_OnMatch(t *testing.T) {
+	e := NewSafetyEngine()
+	if err := e.LoadPreset(common.PresetDestructiveSQL); err != nil {
+		t.Fatal(err)
+	}
+
+	payloadOriginal := []byte("DROP TABLE users\n--rest-of-payload")
+	env, msg := makeDataEnv(envelope.Send, "svc", "M", payloadOriginal)
+	rawOriginal := []byte("wire-frame-prefix DROP TABLE users wire-frame-suffix")
+	env.Raw = rawOriginal
+
+	payloadSnap := append([]byte(nil), payloadOriginal...)
+	rawSnap := append([]byte(nil), rawOriginal...)
+
+	if v := e.CheckInput(context.Background(), env, msg); v == nil {
+		t.Fatal("expected violation; rule precondition for the test failed")
+	}
+
+	if !bytes.Equal(msg.Payload, payloadSnap) {
+		t.Errorf("Payload mutated after match: got %q, want %q", string(msg.Payload), string(payloadSnap))
+	}
+	if !bytes.Equal(payloadOriginal, payloadSnap) {
+		t.Errorf("underlying payload slice mutated after match: got %q, want %q", string(payloadOriginal), string(payloadSnap))
+	}
+	if !bytes.Equal(env.Raw, rawSnap) {
+		t.Errorf("env.Raw mutated after match: got %q, want %q", string(env.Raw), string(rawSnap))
+	}
+}
+
+// TestSafetyEngine_CheckInput_DoesNotMutateStartMessage_NoMatch confirms
+// the wire-fidelity invariant (RFC-001 Principle 1) for gRPC Start
+// envelopes: metadata and message fields must remain untouched.
+func TestSafetyEngine_CheckInput_DoesNotMutateStartMessage_NoMatch(t *testing.T) {
+	e := NewSafetyEngine()
+	pat, err := common.CompilePattern(`Bearer\s+[a-z0-9]+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.AddRule(common.CompiledRule{
+		ID:      "custom:auth-leak",
+		Pattern: pat,
+		Targets: []common.Target{TargetMetadata},
+	})
+
+	metadata := []envelope.KeyValue{
+		{Name: "Authorization", Value: "Basic abcdef"},
+		{Name: "x-trace-id", Value: "xyz-1"},
+	}
+	env, msg := makeStartEnv(envelope.Send, "svc", "M", metadata)
+	metaSnap := append([]envelope.KeyValue(nil), metadata...)
+
+	if v := e.CheckInput(context.Background(), env, msg); v != nil {
+		t.Fatalf("unexpected violation: %+v", v)
+	}
+
+	if len(msg.Metadata) != len(metaSnap) {
+		t.Errorf("Metadata length mutated: got %d, want %d", len(msg.Metadata), len(metaSnap))
+	}
+	for i := range msg.Metadata {
+		if msg.Metadata[i] != metaSnap[i] {
+			t.Errorf("Metadata[%d] mutated: got %+v, want %+v", i, msg.Metadata[i], metaSnap[i])
+		}
 	}
 }
 

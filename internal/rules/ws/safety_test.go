@@ -1,6 +1,7 @@
 package ws
 
 import (
+	"bytes"
 	"context"
 	"testing"
 
@@ -197,5 +198,82 @@ func TestSafetyEngine_UnknownTarget_Skipped(t *testing.T) {
 	msg := &envelope.WSMessage{Opcode: envelope.WSText, Payload: []byte("hello")}
 	if v := e.CheckInput(context.Background(), msg); v != nil {
 		t.Errorf("unknown target should be skipped, got %+v", v)
+	}
+}
+
+// TestSafetyEngine_CheckInput_DoesNotMutateMessage_NoMatch confirms the
+// wire-fidelity invariant (RFC-001 Principle 1) for the no-match path:
+// the live-path WS SafetyEngine must leave WSMessage fields untouched.
+func TestSafetyEngine_CheckInput_DoesNotMutateMessage_NoMatch(t *testing.T) {
+	e := NewSafetyEngine()
+	pat, err := common.CompilePattern(`(?i)password=`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.AddRule(common.CompiledRule{
+		ID:      "ws:password-leak",
+		Name:    "password leak",
+		Pattern: pat,
+		Targets: []common.Target{TargetPayload},
+	})
+
+	payloadOriginal := []byte("benign message no creds here")
+	msg := &envelope.WSMessage{
+		Opcode:  envelope.WSText,
+		Fin:     true,
+		Payload: payloadOriginal,
+	}
+	payloadSnapshot := append([]byte(nil), payloadOriginal...)
+	opcode, fin := msg.Opcode, msg.Fin
+
+	if v := e.CheckInput(context.Background(), msg); v != nil {
+		t.Fatalf("unexpected violation: %+v", v)
+	}
+
+	if !bytes.Equal(msg.Payload, payloadSnapshot) {
+		t.Errorf("Payload mutated: got %q, want %q", string(msg.Payload), string(payloadSnapshot))
+	}
+	if !bytes.Equal(payloadOriginal, payloadSnapshot) {
+		t.Errorf("underlying payload slice mutated: got %q, want %q", string(payloadOriginal), string(payloadSnapshot))
+	}
+	if msg.Opcode != opcode || msg.Fin != fin {
+		t.Errorf("scalar field mutated: opcode=%v fin=%v", msg.Opcode, msg.Fin)
+	}
+}
+
+// TestSafetyEngine_CheckInput_DoesNotMutateMessage_OnMatch confirms the
+// wire-fidelity invariant (RFC-001 Principle 1) for the matched-rule path:
+// even on Drop, the engine must leave WSMessage.Payload untouched so the
+// recorder captures the original wire bytes.
+func TestSafetyEngine_CheckInput_DoesNotMutateMessage_OnMatch(t *testing.T) {
+	e := NewSafetyEngine()
+	pat, err := common.CompilePattern(`(?i)password=`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.AddRule(common.CompiledRule{
+		ID:      "ws:password-leak",
+		Name:    "password leak",
+		Pattern: pat,
+		Targets: []common.Target{TargetPayload},
+	})
+
+	payloadOriginal := []byte(`{"login":"admin","password=hunter2"}`)
+	msg := &envelope.WSMessage{
+		Opcode:  envelope.WSText,
+		Fin:     true,
+		Payload: payloadOriginal,
+	}
+	payloadSnapshot := append([]byte(nil), payloadOriginal...)
+
+	if v := e.CheckInput(context.Background(), msg); v == nil {
+		t.Fatal("expected violation; rule precondition for the test failed")
+	}
+
+	if !bytes.Equal(msg.Payload, payloadSnapshot) {
+		t.Errorf("Payload mutated after match: got %q, want %q", string(msg.Payload), string(payloadSnapshot))
+	}
+	if !bytes.Equal(payloadOriginal, payloadSnapshot) {
+		t.Errorf("underlying payload slice mutated after match: got %q, want %q", string(payloadOriginal), string(payloadSnapshot))
 	}
 }

@@ -20,6 +20,17 @@ const (
 	TargetMethod   common.Target = "method"
 )
 
+// SafetyEngine in this package is the live-path gRPC safety filter. It is
+// invoked by internal/pipeline/safety_step.go on every Send-direction gRPC
+// Start / Data envelope and MAY only return a Violation that drives a
+// block / drop decision.
+//
+// Per RFC-001 Principle 1 (Wire fidelity), this engine MUST NOT mutate
+// Envelope.Raw, GRPCStartMessage.Metadata, GRPCDataMessage.Payload, or any
+// other message field. Output masking (PII redaction) is the exclusive
+// responsibility of internal/safety, which is invoked at MCP response
+// time — never before recording.
+
 // Violation records a safety rule match on a gRPC event. Per the
 // design review the type is per-protocol (rules/grpc.Violation), not
 // promoted to common.

@@ -338,3 +338,89 @@ func TestAllHeadersString_NoNormalization(t *testing.T) {
 		t.Errorf("allHeadersString = %q", result)
 	}
 }
+
+// TestSafetyEngine_CheckInput_DoesNotMutateMessage_NoMatch confirms the
+// wire-fidelity invariant (RFC-001 Principle 1) for the no-match path:
+// neither the HTTPMessage nor any byte slice it owns may be mutated by
+// the live-path SafetyEngine, regardless of which targets the rules cover.
+func TestSafetyEngine_CheckInput_DoesNotMutateMessage_NoMatch(t *testing.T) {
+	e := NewSafetyEngine()
+	if err := e.LoadPreset(common.PresetDestructiveSQL); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.LoadPreset(common.PresetCreditCard); err != nil {
+		t.Fatal(err)
+	}
+
+	bodyOriginal := []byte("benign payload with no destructive markers")
+	headers := []envelope.KeyValue{
+		{Name: "Content-Type", Value: "text/plain"},
+		{Name: "X-Trace-Id", Value: "abc-123"},
+	}
+	msg := testSafetyMsg("POST", "/api", "example.com", "k=v", headers, bodyOriginal)
+
+	bodySnapshot := append([]byte(nil), bodyOriginal...)
+	headerSnapshot := append([]envelope.KeyValue(nil), headers...)
+	method, path, scheme, authority, query := msg.Method, msg.Path, msg.Scheme, msg.Authority, msg.RawQuery
+
+	if v := e.CheckInput(context.Background(), msg); v != nil {
+		t.Fatalf("unexpected violation: %+v", v)
+	}
+
+	if !bytes.Equal(msg.Body, bodySnapshot) {
+		t.Errorf("Body mutated: got %q, want %q", string(msg.Body), string(bodySnapshot))
+	}
+	if !bytes.Equal(bodyOriginal, bodySnapshot) {
+		t.Errorf("underlying body slice mutated: got %q, want %q", string(bodyOriginal), string(bodySnapshot))
+	}
+	if len(msg.Headers) != len(headerSnapshot) {
+		t.Errorf("Headers length mutated: got %d, want %d", len(msg.Headers), len(headerSnapshot))
+	}
+	for i := range msg.Headers {
+		if msg.Headers[i] != headerSnapshot[i] {
+			t.Errorf("Headers[%d] mutated: got %+v, want %+v", i, msg.Headers[i], headerSnapshot[i])
+		}
+	}
+	if msg.Method != method || msg.Path != path || msg.Scheme != scheme || msg.Authority != authority || msg.RawQuery != query {
+		t.Errorf("scalar field mutated: got method=%q path=%q scheme=%q authority=%q query=%q",
+			msg.Method, msg.Path, msg.Scheme, msg.Authority, msg.RawQuery)
+	}
+}
+
+// TestSafetyEngine_CheckInput_DoesNotMutateMessage_OnMatch confirms the
+// wire-fidelity invariant (RFC-001 Principle 1) for the matched-rule path:
+// even when a rule fires and the request will be dropped by the pipeline,
+// the engine must leave the message bytes untouched so the recorder
+// captures the original wire bytes.
+func TestSafetyEngine_CheckInput_DoesNotMutateMessage_OnMatch(t *testing.T) {
+	e := NewSafetyEngine()
+	if err := e.LoadPreset(common.PresetDestructiveSQL); err != nil {
+		t.Fatal(err)
+	}
+
+	bodyOriginal := []byte("payload prefix DROP TABLE users payload suffix")
+	headers := []envelope.KeyValue{
+		{Name: "Content-Type", Value: "application/sql"},
+	}
+	msg := testSafetyMsg("POST", "/api", "example.com", "", headers, bodyOriginal)
+
+	bodySnapshot := append([]byte(nil), bodyOriginal...)
+	headerSnapshot := append([]envelope.KeyValue(nil), headers...)
+
+	v := e.CheckInput(context.Background(), msg)
+	if v == nil {
+		t.Fatal("expected violation; rule precondition for the test failed")
+	}
+
+	if !bytes.Equal(msg.Body, bodySnapshot) {
+		t.Errorf("Body mutated after match: got %q, want %q", string(msg.Body), string(bodySnapshot))
+	}
+	if !bytes.Equal(bodyOriginal, bodySnapshot) {
+		t.Errorf("underlying body slice mutated after match: got %q, want %q", string(bodyOriginal), string(bodySnapshot))
+	}
+	for i := range msg.Headers {
+		if msg.Headers[i] != headerSnapshot[i] {
+			t.Errorf("Headers[%d] mutated after match: got %+v, want %+v", i, msg.Headers[i], headerSnapshot[i])
+		}
+	}
+}

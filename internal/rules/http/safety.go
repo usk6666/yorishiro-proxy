@@ -9,6 +9,17 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/rules/common"
 )
 
+// SafetyEngine in this package is the live-path HTTP safety filter. It is
+// invoked by internal/pipeline/safety_step.go on every Send-direction HTTP
+// envelope and MAY only return a Violation that drives a block / drop
+// decision.
+//
+// Per RFC-001 Principle 1 (Wire fidelity), this engine MUST NOT mutate
+// Envelope.Raw, HTTPMessage.Body, BodyBuffer, Headers, or any other
+// message field. Output masking (PII redaction, header redaction) is the
+// exclusive responsibility of internal/safety, which is invoked at MCP
+// response time — never before recording.
+
 // Violation records a safety rule match on an HTTP request.
 type Violation struct {
 	RuleID   string
