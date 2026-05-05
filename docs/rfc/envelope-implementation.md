@@ -50,7 +50,7 @@ Spolsky の警告は「既存コードに蓄積された無数のエッジケー
 
 ### Milestone → spec section map (for token-efficient context load)
 
-`/rfc001` skill (Phase 0-2) uses this table to load only the spec sections relevant to the active milestone, instead of reading `envelope.md` in full. **Always-load tier**: §1-2 of `envelope.md` (Motivation + Non-Goals) plus §3.1-3.3 (Envelope / Message / Layer+Channel) — these are the foundational types every milestone references. **On-demand tier**: per-milestone sections below.
+This table maps each milestone to the spec sections it depends on. Use it for token-efficient context load when reading the implementation history of a milestone, instead of reading `envelope.md` in full. **Always-load tier**: §1-2 of `envelope.md` (Motivation + Non-Goals) plus §3.1-3.3 (Envelope / Message / Layer+Channel) — these are the foundational types every milestone references. **On-demand tier**: per-milestone sections below.
 
 | Milestone | `envelope.md` sections | `envelope-implementation.md` frictions |
 |---|---|---|
