@@ -74,6 +74,16 @@ type RunOptions struct {
 	// UsageBanner is the program identifier shown in fs.Usage. Defaults to
 	// "yorishiro-proxy" when empty.
 	UsageBanner string
+
+	// OnHTTPListening, when non-nil, is invoked once the HTTP MCP listener
+	// has bound to its address and is ready to accept connections. The
+	// resolved address is passed in (important when -mcp-http-addr uses a
+	// :0 port). The hook fires in addition to the production behavior
+	// (server.json write, WebUI URL log, optional browser open) — it does
+	// not replace it. Intended for the JSON-RPC e2e harness in
+	// internal/mcptest/ (USK-724) which needs to learn the OS-assigned
+	// port before issuing tools/call requests.
+	OnHTTPListening func(addr string)
 }
 
 // Run parses CLI flags from args using fs, then performs the full server
@@ -229,7 +239,7 @@ func Run(ctx context.Context, fs *flag.FlagSet, args []string, opts RunOptions) 
 	return assembleAndRunMCPServer(ctx, cfg, proxyCfg, ca, issuer, store, pluginv2Engine,
 		holdQueue, httpInterceptEngine, wsInterceptEngine, grpcInterceptEngine,
 		httpTransformEngine, passthrough,
-		targetScopePolicy, targetScopePolicySource, openBrowser, stdioMCP, versionStr, logger)
+		targetScopePolicy, targetScopePolicySource, openBrowser, stdioMCP, versionStr, opts.OnHTTPListening, logger)
 }
 
 // assembleAndRunMCPServer is the hot final phase of Run: build the live
@@ -254,6 +264,7 @@ func assembleAndRunMCPServer(
 	targetScopePolicySource string,
 	openBrowserFlag, stdioMCP bool,
 	version string,
+	onHTTPListening func(addr string),
 	logger *slog.Logger,
 ) error {
 	targetScope := InitTargetScope(targetScopePolicy)
@@ -308,7 +319,7 @@ func assembleAndRunMCPServer(
 	)
 
 	logger.Info("starting MCP server", "http_mcp_addr", cfg.MCPHTTPAddr, "stdio_mcp", stdioMCP)
-	return startServers(ctx, cfg, mcpServer, webUIToken, openBrowserFlag, stdioMCP, logger)
+	return startServers(ctx, cfg, mcpServer, webUIToken, openBrowserFlag, stdioMCP, onHTTPListening, logger)
 }
 
 // ApplyEnvFallback checks each flag in EnvVarMap; if the flag was not
@@ -538,7 +549,7 @@ func buildMCPComponents(
 // started (default). When stdioMCP is true, the stdio MCP transport is
 // also started. server.json is written once the HTTP server starts
 // listening and removed on exit.
-func startServers(ctx context.Context, cfg *config.Config, mcpServer *mcp.Server, webUIToken string, openBrowserFlag bool, stdioMCP bool, logger *slog.Logger) error {
+func startServers(ctx context.Context, cfg *config.Config, mcpServer *mcp.Server, webUIToken string, openBrowserFlag bool, stdioMCP bool, onHTTPListening func(addr string), logger *slog.Logger) error {
 	g, gctx := errgroup.WithContext(ctx)
 
 	// Optionally start stdio MCP transport (opt-in via -stdio-mcp).
@@ -590,6 +601,15 @@ func startServers(ctx context.Context, cfg *config.Config, mcpServer *mcp.Server
 						logger.Warn("failed to open browser", "url", baseURL, "error", err)
 						logger.Debug("failed to open browser (full url)", "url", webURL, "error", err)
 					}
+				}
+
+				// Fire the test hook last so harnesses observe the same
+				// post-bind state production sees (server.json written,
+				// WebUI URL logged). The hook is intentionally invoked
+				// even on server.json write failure — the harness still
+				// needs the address to issue tool calls.
+				if onHTTPListening != nil {
+					onHTTPListening(addr)
 				}
 			}
 			defer func() {
