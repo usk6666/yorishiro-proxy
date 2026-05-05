@@ -21,7 +21,15 @@
   "pnpm": {
     "onlyBuiltDependencies": [
       "esbuild"
-    ]
+    ],
+    "overrides": {
+      "postcss": "^8.5.10",
+      "hono": "^4.12.14",
+      "@hono/node-server": "^1.19.13",
+      "path-to-regexp": "^8.4.0",
+      "picomatch": "^4.0.4",
+      "flatted": "^3.4.2"
+    }
   },
   "devDependencies": {
     "@eslint/js": "^9.39.3",
@@ -34,7 +42,7 @@
     "globals": "^16.5.0",
     "typescript": "~5.8.3",
     "typescript-eslint": "^8.56.1",
-    "vite": "^6.4.1",
+    "vite": "^6.4.2",
     "vitest": "^4.0.18"
   }
 }
