@@ -1,10 +1,14 @@
 package pluginv2
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -628,6 +632,133 @@ func endsWithMarker(s string) bool {
 		return false
 	}
 	return s[len(s)-len(redactTruncationMarker):] == redactTruncationMarker
+}
+
+// TestEngine_LoadPluginsWarnsOnPartialLoad verifies USK-712: when one or
+// more configured plugins are skipped due to OnError=skip, LoadPlugins
+// emits exactly one aggregated Warn line carrying configured/loaded
+// counts and the list of skipped plugin paths. When all configured
+// plugins load successfully, no such Warn must be emitted. Per-plugin
+// OnError=skip semantics are unchanged: the bad plugin's Warn from the
+// per-skip path is still expected.
+func TestEngine_LoadPluginsWarnsOnPartialLoad(t *testing.T) {
+	t.Run("partial_load_emits_single_warn", func(t *testing.T) {
+		bad := writeScript(t, `register_hook("htttp", "on_request", lambda env: None)`)
+		good := writeScript(t, `
+def h(env):
+    return None
+register_hook("http", "on_request", h)
+`)
+		var buf bytes.Buffer
+		logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+		eng := NewEngine(logger)
+		err := eng.LoadPlugins(context.Background(), []PluginConfig{
+			{Path: bad, OnError: string(OnErrorSkip)},
+			{Path: good, OnError: string(OnErrorAbort)},
+		})
+		if err != nil {
+			t.Fatalf("LoadPlugins: %v", err)
+		}
+
+		records := parseSlogJSONLines(t, buf.Bytes())
+		var partial []map[string]any
+		for _, rec := range records {
+			if rec["level"] == "WARN" && rec["msg"] == "pluginv2: partial plugin load" {
+				partial = append(partial, rec)
+			}
+		}
+		if len(partial) != 1 {
+			t.Fatalf("partial-load Warn records = %d, want 1; full log:\n%s", len(partial), buf.String())
+		}
+		rec := partial[0]
+		if got := toInt(rec["configured"]); got != 2 {
+			t.Errorf("configured = %d, want 2", got)
+		}
+		if got := toInt(rec["loaded"]); got != 1 {
+			t.Errorf("loaded = %d, want 1", got)
+		}
+		skipped, ok := rec["skipped"].([]any)
+		if !ok {
+			t.Fatalf("skipped attribute is not a list: %T (%v)", rec["skipped"], rec["skipped"])
+		}
+		if len(skipped) != 1 {
+			t.Fatalf("skipped len = %d, want 1", len(skipped))
+		}
+		if s, _ := skipped[0].(string); s != bad {
+			t.Errorf("skipped[0] = %q, want %q", s, bad)
+		}
+	})
+
+	t.Run("full_load_emits_no_warn", func(t *testing.T) {
+		a := writeScript(t, `
+def h(env):
+    return None
+register_hook("http", "on_request", h)
+`)
+		b := writeScript(t, `
+def h(env):
+    return None
+register_hook("http", "on_response", h)
+`)
+		var buf bytes.Buffer
+		logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+		eng := NewEngine(logger)
+		err := eng.LoadPlugins(context.Background(), []PluginConfig{
+			{Path: a, OnError: string(OnErrorAbort)},
+			{Path: b, OnError: string(OnErrorAbort)},
+		})
+		if err != nil {
+			t.Fatalf("LoadPlugins: %v", err)
+		}
+
+		records := parseSlogJSONLines(t, buf.Bytes())
+		for _, rec := range records {
+			if rec["level"] == "WARN" && rec["msg"] == "pluginv2: partial plugin load" {
+				t.Errorf("unexpected partial-load Warn on full load: %+v", rec)
+			}
+		}
+	})
+
+	t.Run("empty_config_emits_no_warn", func(t *testing.T) {
+		var buf bytes.Buffer
+		logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+		eng := NewEngine(logger)
+		if err := eng.LoadPlugins(context.Background(), nil); err != nil {
+			t.Fatalf("LoadPlugins: %v", err)
+		}
+		records := parseSlogJSONLines(t, buf.Bytes())
+		for _, rec := range records {
+			if rec["level"] == "WARN" && rec["msg"] == "pluginv2: partial plugin load" {
+				t.Errorf("unexpected partial-load Warn on empty config: %+v", rec)
+			}
+		}
+	})
+}
+
+// parseSlogJSONLines splits a JSON-handler buffer into one record per
+// line and decodes each into a generic map.
+func parseSlogJSONLines(t *testing.T, raw []byte) []map[string]any {
+	t.Helper()
+	var out []map[string]any
+	for _, line := range strings.Split(strings.TrimRight(string(raw), "\n"), "\n") {
+		if line == "" {
+			continue
+		}
+		var rec map[string]any
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			t.Fatalf("decode slog line %q: %v", line, err)
+		}
+		out = append(out, rec)
+	}
+	return out
+}
+
+// toInt coerces a JSON-decoded numeric (always float64) to int.
+func toInt(v any) int {
+	if f, ok := v.(float64); ok {
+		return int(f)
+	}
+	return -1
 }
 
 func TestEngine_CloseClearsState(t *testing.T) {

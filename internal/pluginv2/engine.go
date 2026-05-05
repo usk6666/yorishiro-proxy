@@ -124,6 +124,11 @@ func (e *Engine) SetDB(ctx context.Context, db *sql.DB) error {
 // the migration message) then executes each script once with register_hook
 // + the predeclared module set bound to the Starlark thread. A failed
 // load is handled per cfg.OnError: skip logs and continues; abort returns.
+//
+// On completion, if one or more plugins were skipped under OnError=skip
+// (i.e. loaded < configured), a single boot-time Warn is emitted listing
+// the skipped plugin paths so an operator can spot a silent partial load
+// (USK-712). Per-plugin OnError semantics are unchanged.
 func (e *Engine) LoadPlugins(ctx context.Context, configs []PluginConfig) error {
 	for i := range configs {
 		if err := configs[i].Validate(); err != nil {
@@ -133,6 +138,10 @@ func (e *Engine) LoadPlugins(ctx context.Context, configs []PluginConfig) error 
 
 	e.mu.Lock()
 	defer e.mu.Unlock()
+
+	configured := len(configs)
+	loaded := 0
+	var skipped []string
 
 	for i := range configs {
 		cfg := configs[i]
@@ -145,10 +154,24 @@ func (e *Engine) LoadPlugins(ctx context.Context, configs []PluginConfig) error 
 				slog.String("plugin", cfg.Path),
 				slog.String("error", err.Error()),
 			)
+			skipped = append(skipped, cfg.Path)
 			continue
 		}
+		loaded++
 		e.logger.InfoContext(ctx, "pluginv2: loaded plugin",
 			slog.String("plugin", cfg.Path),
+		)
+	}
+
+	// Single aggregated Warn so operators notice silent partial loads
+	// (e.g. typo in a path, missing file). Per-plugin Warn lines above
+	// already carry the underlying error; this line surfaces the count
+	// mismatch at a glance. (USK-712)
+	if loaded < configured {
+		e.logger.WarnContext(ctx, "pluginv2: partial plugin load",
+			slog.Int("configured", configured),
+			slog.Int("loaded", loaded),
+			slog.Any("skipped", skipped),
 		)
 	}
 	return nil
