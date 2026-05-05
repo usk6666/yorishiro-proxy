@@ -833,6 +833,20 @@ func upstreamToClient(
 			continue
 		}
 
+		// USK-715: when the Pipeline flipped the upgrade notice, prime
+		// the post-Upgrade side-buffer capture on the client Channel
+		// BEFORE Send(101) writes the response. This closes the race
+		// window where the test client receives 101, writes a WS frame,
+		// and the proxy's parker.conn.Read returns successfully with
+		// those WS bytes BEFORE Interrupt can set the read deadline (and
+		// thus before capture is enabled). With PrepareSwap pre-Send,
+		// any post-101 byte arrival is recorded for replay by
+		// http1.Layer.DetachStream regardless of which goroutine wins
+		// the netpoll-vs-deadline race.
+		if upgradePending(notice) {
+			prepareChannelSwap(client)
+		}
+
 		if err := client.Send(ctx, env); err != nil {
 			return fmt.Errorf("client.Send: %w", err)
 		}
@@ -873,6 +887,23 @@ type channelInterrupter interface {
 func interruptChannel(ch layer.Channel) {
 	if ic, ok := ch.(channelInterrupter); ok {
 		_ = ic.Interrupt()
+	}
+}
+
+// channelSwapPreparer is satisfied by Channels (currently only http1) that
+// support priming an Interrupt-time side-buffer BEFORE the deadline arms.
+// The session orchestrator calls PrepareSwap right after the Pipeline
+// flips the upgrade notice and BEFORE client.Send(101). See
+// http1.channel.PrepareSwap for the rationale (USK-715).
+type channelSwapPreparer interface {
+	PrepareSwap()
+}
+
+// prepareChannelSwap is the type-assertion wrapper for channelSwapPreparer.
+// Cheap no-op for Channels that do not implement the interface.
+func prepareChannelSwap(ch layer.Channel) {
+	if sp, ok := ch.(channelSwapPreparer); ok {
+		sp.PrepareSwap()
 	}
 }
 

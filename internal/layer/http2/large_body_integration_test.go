@@ -659,15 +659,23 @@ func TestLargeBody_HTTP2_ConcurrentStreamsIndependent(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
 	defer cancel()
 
-	// 3 streams × 25 MiB = ~75 MiB in flight. The isolation property
-	// (per-stream BodyBuffer, independent spill files, no cross-contamination)
-	// holds at n=3; higher values stress x/net/http2 server limits in CI.
+	// 3 streams × 12 MiB = ~36 MiB in flight. USK-715 stabilization:
+	// dropped from 25 MiB so the concurrent test does not race
+	// x/net/http2 server's per-connection memory ceiling on a 2-vCPU CI
+	// runner with `-race` enabled. 12 MiB is still > the disk-spill
+	// threshold (10 MiB) so the disk-spill code path is exercised
+	// per-stream — the isolation property the test verifies is
+	// disk-spill-aware. The original 25 MiB value remains in single-
+	// stream tests above (e.g. TestLargeBody_HTTP2_VariantRecording...)
+	// where the H2 server doesn't multiplex 3× the load on one
+	// connection.
 	const nStreams = 3
+	const concurrentBodySize = 12 << 20 // 12 MiB
 
 	// Per-stream deterministic body: marker byte at offset 0 of each body
 	// distinguishes streams without costing a full per-stream allocation of
-	// 25 MiB × 5 = 125 MiB upstream-side.
-	baseBody := makeH2LargeBody(h2LargeBodySize25MiB)
+	// 12 MiB × 5 = 60 MiB upstream-side.
+	baseBody := makeH2LargeBody(concurrentBodySize)
 
 	// Upstream reads X-Stream-Id and stamps a marker byte at offset 0 of the
 	// response body it writes. Concurrent streams thus each get a body that
@@ -735,8 +743,8 @@ func TestLargeBody_HTTP2_ConcurrentStreamsIndependent(t *testing.T) {
 			t.Errorf("stream %d: %v", r.id, r.err)
 			continue
 		}
-		if r.n != int64(h2LargeBodySize25MiB) {
-			t.Errorf("stream %d: body length = %d, want %d", r.id, r.n, h2LargeBodySize25MiB)
+		if r.n != int64(concurrentBodySize) {
+			t.Errorf("stream %d: body length = %d, want %d", r.id, r.n, concurrentBodySize)
 			continue
 		}
 		// Compute the expected hash: baseBody with byte(id+1) at offset 0.
@@ -785,7 +793,7 @@ func TestLargeBody_HTTP2_ConcurrentStreamsIndependent(t *testing.T) {
 			if sid == "warm" {
 				continue
 			}
-			if len(recvF.Body) != h2LargeBodySize25MiB {
+			if len(recvF.Body) != concurrentBodySize {
 				continue
 			}
 			linked++
@@ -796,7 +804,7 @@ func TestLargeBody_HTTP2_ConcurrentStreamsIndependent(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 	}
 	if linked != nStreams {
-		t.Errorf("concurrent linked send+recv pairs with 25 MiB body = %d, want %d", linked, nStreams)
+		t.Errorf("concurrent linked send+recv pairs with 12 MiB body = %d, want %d", linked, nStreams)
 	}
 
 	// All BodyBuffers must have been released; zero leftover spill files.

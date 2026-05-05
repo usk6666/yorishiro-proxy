@@ -2,6 +2,7 @@ package http1
 
 import (
 	"bufio"
+	"bytes"
 	"errors"
 	"io"
 	"net"
@@ -168,17 +169,23 @@ func New(conn net.Conn, streamID string, direction envelope.Direction, opts ...O
 		opts: o,
 	}
 
-	reader := bufio.NewReaderSize(conn, o.bufSize)
+	// USK-715: bufio.Reader sits atop interruptCaptureReader rather than the
+	// raw conn so a post-Interrupt SetReadDeadline race that lets a
+	// successful conn.Read return WS frame bytes to bufio (where the parser
+	// would consume + lose them) is mitigated by replay at DetachStream.
+	captureReader := newInterruptCaptureReader(conn)
+	reader := bufio.NewReaderSize(captureReader, o.bufSize)
 
 	l.channel = &channel{
-		reader:    reader,
-		writer:    conn,
-		conn:      conn,
-		streamID:  streamID,
-		direction: direction,
-		scheme:    o.scheme,
-		ctxTmpl:   o.ctx,
-		termDone:  make(chan struct{}),
+		reader:        reader,
+		captureReader: captureReader,
+		writer:        conn,
+		conn:          conn,
+		streamID:      streamID,
+		direction:     direction,
+		scheme:        o.scheme,
+		ctxTmpl:       o.ctx,
+		termDone:      make(chan struct{}),
 		bodyOpts: bodyOpts{
 			spillDir:       o.bodySpillDir,
 			spillThreshold: o.bodySpillThreshold,
@@ -238,6 +245,14 @@ func (l *Layer) Close() error {
 // Any read deadline previously installed by [Layer.Interrupt] is reset to
 // zero so the successor Layer's reads operate without a stale past-deadline.
 //
+// USK-715: when [Layer.Interrupt] enabled side-buffer capture before the
+// parser exited, DetachStream drains the capture and returns an
+// io.MultiReader that replays any "lost" bytes (bytes the parser pulled
+// from bufio.Reader and discarded on parse failure) ahead of bufio.Reader's
+// own remainder. This rebuilds wire-order on a slow CI runner where a
+// post-Send(101) race can let WS frame bytes reach the parser before the
+// read deadline takes effect.
+//
 // Calling DetachStream more than once returns a sentinel error.
 func (l *Layer) DetachStream() (io.Reader, io.Writer, io.Closer, error) {
 	if l.detached {
@@ -249,7 +264,32 @@ func (l *Layer) DetachStream() (io.Reader, io.Writer, io.Closer, error) {
 	_ = l.conn.SetReadDeadline(time.Time{})
 	if l.channel != nil {
 		l.channel.markTerminated(io.EOF)
-		return l.channel.reader, l.conn, l.conn, nil
+
+		// USK-715: drain the post-Interrupt capture and prepend any bytes
+		// the parser consumed-and-lost (the prefix of `captured` that is
+		// no longer in bufio.Reader's buffer).
+		var reader io.Reader = l.channel.reader
+		if l.channel.captureReader != nil {
+			captured := l.channel.captureReader.Drain()
+			if n := len(captured); n > 0 {
+				buffered := l.channel.reader.Buffered()
+				if buffered < n {
+					// `lost` = the prefix of `captured` that bufio.Reader
+					// no longer holds (parser advanced bufio's read cursor
+					// past it). bufio's Buffered() bytes are the suffix of
+					// `captured` (everything bufio holds was pulled from
+					// captureReader after capture started).
+					lost := captured[:n-buffered]
+					reader = io.MultiReader(bytes.NewReader(lost), l.channel.reader)
+				}
+				// If buffered >= n, bufio had bytes from before capture
+				// started (e.g., a non-RFC-6455 client pipelined the WS
+				// frame in the same TCP segment as the Upgrade request).
+				// In that case bufio already holds every captured byte
+				// plus pre-capture content, so use bufio as-is.
+			}
+		}
+		return reader, l.conn, l.conn, nil
 	}
 	// Defensive: a Layer constructed via New always has a non-nil channel,
 	// but if a future refactor ever leaves channel nil we still surface
@@ -282,6 +322,22 @@ func (l *Layer) Interrupt() error {
 	return l.conn.SetReadDeadline(time.Now())
 }
 
+// PrepareSwap forwards to the channel's PrepareSwap method. The session
+// orchestrator calls this BEFORE Send(101) when a Pipeline UpgradeStep
+// has flipped the upgrade notice, so the post-Upgrade side-buffer
+// capture is enabled before the test client could write the first WS
+// frame in response to 101. See channel.PrepareSwap for details.
+//
+// No-op after DetachStream.
+func (l *Layer) PrepareSwap() {
+	if l.detached {
+		return
+	}
+	if l.channel != nil {
+		l.channel.PrepareSwap()
+	}
+}
+
 // DetachStreamingBody hands the still-open response body io.ReadCloser to
 // the swap orchestrator. Pre-condition: the most recent Channel.Next() must
 // have emitted a response Envelope whose body draining was suppressed by
@@ -309,6 +365,14 @@ func (l *Layer) DetachStreamingBody() (io.ReadCloser, error) {
 	// Clear any past-deadline a prior Interrupt installed; the successor
 	// (sse) must read without inheriting the wake-up trigger.
 	_ = l.conn.SetReadDeadline(time.Time{})
+	// USK-715: drop any post-Interrupt capture so its retained slice does
+	// not outlive the channel. The streaming-body path does not have a
+	// post-Interrupt parse-and-lose race (the SSE upgrade is half-duplex;
+	// the http1 layer never tries to parse a "next request" after the SSE
+	// response); the drain is for memory hygiene only.
+	if l.channel.captureReader != nil {
+		_ = l.channel.captureReader.Drain()
+	}
 	l.channel.markTerminated(io.EOF)
 	return &streamingBodyCloser{r: body, conn: l.conn}, nil
 }
