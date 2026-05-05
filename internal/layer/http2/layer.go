@@ -204,6 +204,22 @@ func (l *Layer) LastReaderError() error {
 	return l.lastErr
 }
 
+// GoAwayClosed reports whether this Layer can no longer accept new streams
+// because GOAWAY has been sent (locally) or received (from peer). OpenStream
+// returns *layer.StreamError{Code: ErrorRefused} in either case (see
+// Layer.OpenStream below); the connection pool calls this to evict dead
+// entries before handing them out, so a request that pool-hits a recycled
+// upstream conn does not surface a spurious "refused" failure.
+func (l *Layer) GoAwayClosed() bool {
+	if sent, _ := l.conn.GoAwaySent(); sent {
+		return true
+	}
+	if recv, _, _ := l.conn.GoAwayReceived(); recv {
+		return true
+	}
+	return false
+}
+
 // ActiveStreamCount returns the number of streams currently open or
 // half-closed.
 func (l *Layer) ActiveStreamCount() int {

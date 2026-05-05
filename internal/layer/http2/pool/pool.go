@@ -68,6 +68,7 @@ type poolLayer interface {
 	ActiveStreamCount() int
 	PeerMaxConcurrentStreams() uint32
 	LastReaderError() error
+	GoAwayClosed() bool
 	Close() error
 }
 
@@ -164,6 +165,18 @@ func (p *Pool) selectLocked(key PoolKey) *entry {
 		if e.layer.LastReaderError() != nil {
 			dead = append(dead, e)
 			slog.Debug("h2pool dead-reader evict", "key", key.String())
+			continue
+		}
+		// GOAWAY-closed entries are protocol-valid but cannot accept new
+		// streams: OpenStream would return Refused for any caller. Cloud
+		// edges (AWS ALB, Cloudflare, etc.) routinely send GOAWAY to recycle
+		// idle upstream connections; without this check, the next request
+		// after the recycle pool-hits the dead entry and surfaces as
+		// state=error/failure_reason=refused even though a fresh dial would
+		// succeed.
+		if e.layer.GoAwayClosed() {
+			dead = append(dead, e)
+			slog.Debug("h2pool goaway evict", "key", key.String())
 			continue
 		}
 		kept = append(kept, e)

@@ -21,6 +21,7 @@ type fakeLayer struct {
 	peerMax           atomic.Uint32
 	lastErrMu         sync.Mutex
 	lastErr           error
+	goawayClosed      atomic.Bool
 	closeBlockCh      chan struct{} // when non-nil, Close blocks on it
 	closed            atomic.Bool
 	closeCount        atomic.Int32
@@ -31,6 +32,7 @@ func newFakeLayer(id string) *fakeLayer { return &fakeLayer{id: id} }
 
 func (f *fakeLayer) ActiveStreamCount() int           { return int(f.active.Load()) }
 func (f *fakeLayer) PeerMaxConcurrentStreams() uint32 { return f.peerMax.Load() }
+func (f *fakeLayer) GoAwayClosed() bool               { return f.goawayClosed.Load() }
 
 func (f *fakeLayer) LastReaderError() error {
 	f.lastErrMu.Lock()
@@ -43,6 +45,8 @@ func (f *fakeLayer) setReaderErr(err error) {
 	f.lastErr = err
 	f.lastErrMu.Unlock()
 }
+
+func (f *fakeLayer) setGoAwayClosed(v bool) { f.goawayClosed.Store(v) }
 
 func (f *fakeLayer) Close() error {
 	f.closeCount.Add(1)
@@ -561,6 +565,38 @@ func TestLivenessProbe_DeadReader(t *testing.T) {
 		t.Fatalf("dead layer should not be returned")
 	}
 	waitUntil(t, func() bool { return fake.closeCount.Load() > 0 })
+}
+
+// TestLivenessProbe_GoAwayClosed covers USK-716: when the upstream peer has
+// recycled the connection via GOAWAY, the layer is protocol-valid (no reader
+// error) but cannot accept new streams — OpenStream would refuse. The pool
+// must evict it so the next caller dials a fresh connection rather than
+// surfacing a spurious "refused" failure.
+func TestLivenessProbe_GoAwayClosed(t *testing.T) {
+	p := New(PoolOptions{})
+	defer p.Close()
+	key := PoolKey{HostPort: "h:443", TLSConfigHash: "x"}
+	fake := newFakeLayer("goaway")
+	fake.setGoAwayClosed(true)
+	putFake(t, p, key, fake)
+
+	g, err := getFake(t, p, key)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if g != nil {
+		t.Fatalf("GOAWAY-closed layer should not be returned")
+	}
+	waitUntil(t, func() bool { return fake.closeCount.Load() > 0 })
+
+	// Bucket must be empty after eviction so the next GetOrDial goes through
+	// to a fresh dial rather than returning the dead entry again.
+	p.mu.Lock()
+	_, present := p.entries[key]
+	p.mu.Unlock()
+	if present {
+		t.Fatalf("evicted GOAWAY entry still present in bucket")
+	}
 }
 
 func TestConcurrent_GetPutEvict_NoRace(t *testing.T) {
