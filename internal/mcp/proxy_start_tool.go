@@ -532,13 +532,22 @@ func (s *Server) applyProxyStartLimits(input *proxyStartInput) error {
 	return nil
 }
 
-// startTCPForwards starts TCP forward listeners for the given listener name.
-// If no forwards are configured, it is a no-op.
-func (s *Server) startTCPForwards(_ context.Context, _ string, forwards map[string]*config.ForwardConfig) error {
+// startTCPForwards starts TCP forward listeners for the given listener name
+// by delegating to the proxybuild Manager. If no forwards are configured,
+// it is a no-op. Errors are wrapped with the "tcp_forwards" prefix so MCP
+// callers see a consistent failure message.
+func (s *Server) startTCPForwards(ctx context.Context, listenerName string, forwards map[string]*config.ForwardConfig) error {
 	if len(forwards) == 0 {
 		return nil
 	}
-	return fmt.Errorf("tcp_forwards: %w", proxybuild.ErrTCPForwardsNotSupported)
+	if managerIsNil(s.connector.manager) {
+		return fmt.Errorf("tcp_forwards: proxy manager is not initialized")
+	}
+	params := proxybuild.TCPForwardParams{Forwards: forwards}
+	if err := s.connector.manager.StartTCPForwardsNamedAny(ctx, listenerName, params); err != nil {
+		return fmt.Errorf("tcp_forwards: %w", err)
+	}
+	return nil
 }
 
 // resolveListenerAddr returns the listen address for the given listener name.

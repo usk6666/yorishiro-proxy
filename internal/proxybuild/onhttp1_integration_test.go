@@ -22,11 +22,13 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
 
-// flowStoreCapture is a flow.Writer test double that captures Streams and
-// Flows under a mutex so the assertions can read them without races.
+// flowStoreCapture is a flow.Writer test double that captures Streams,
+// StreamUpdates, and Flows under a mutex so the assertions can read them
+// without races.
 type flowStoreCapture struct {
 	mu      sync.Mutex
 	streams []*flow.Stream
+	updates map[string][]flow.StreamUpdate
 	flows   []*flow.Flow
 }
 
@@ -37,7 +39,13 @@ func (s *flowStoreCapture) SaveStream(_ context.Context, st *flow.Stream) error 
 	return nil
 }
 
-func (s *flowStoreCapture) UpdateStream(_ context.Context, _ string, _ flow.StreamUpdate) error {
+func (s *flowStoreCapture) UpdateStream(_ context.Context, streamID string, upd flow.StreamUpdate) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.updates == nil {
+		s.updates = make(map[string][]flow.StreamUpdate)
+	}
+	s.updates[streamID] = append(s.updates[streamID], upd)
 	return nil
 }
 
@@ -53,6 +61,20 @@ func (s *flowStoreCapture) Streams() []*flow.Stream {
 	defer s.mu.Unlock()
 	out := make([]*flow.Stream, len(s.streams))
 	copy(out, s.streams)
+	return out
+}
+
+// StreamUpdates returns a snapshot of the StreamUpdates captured for the
+// given streamID. Returns nil when no updates were recorded for that ID.
+func (s *flowStoreCapture) StreamUpdates(streamID string) []flow.StreamUpdate {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	src := s.updates[streamID]
+	if len(src) == 0 {
+		return nil
+	}
+	out := make([]flow.StreamUpdate, len(src))
+	copy(out, src)
 	return out
 }
 

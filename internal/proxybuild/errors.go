@@ -19,6 +19,13 @@ var ErrListenerExists = errors.New("proxybuild: listener with this name already 
 // non-default listener name does not exist.
 var ErrListenerNotFound = errors.New("proxybuild: listener not found")
 
-// ErrTCPForwardsNotSupported is returned by the stub TCP forward methods.
-// Real TCP forward support is owned by USK-690 (or a follow-up issue).
+// ErrTCPForwardsNotSupported is retained as a sentinel for the legacy
+// pre-USK-711 stub return value. The current implementation never returns
+// it (StartTCPForwardsNamed orchestrates real listeners as of USK-711);
+// it remains exported so external callers that already match against it
+// via errors.Is do not break at compile time. New code should not depend
+// on this value.
+//
+// Deprecated: TCP forward orchestration is implemented; do not match
+// against this error.
 var ErrTCPForwardsNotSupported = errors.New("proxybuild: tcp forward listeners not yet supported")

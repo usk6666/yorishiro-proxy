@@ -20,10 +20,11 @@
 //     WithLifecycleEngine on ws/grpc/grpcweb). These threaded into
 //     connector.BuildConfig.PluginV2Engine consumers are owned by USK-690.
 //   - LoadPlugins from ProxyConfig.Plugins. Owned by USK-690.
-//   - TCP forward listeners (StartTCPForwardsNamed, TCPForwardAddrs).
-//     Manager exposes stub methods returning ErrTCPForwardsNotSupported so
-//     signature compatibility with proxy.Manager holds; the real impl folds
-//     into USK-690 or a sub-issue.
+//   - L7-mode TCP forwards (protocol values "http", "http2", "grpc",
+//     "websocket") and tls=true on a TCP forward port. USK-711 implements
+//     "raw" / "auto" / "" forwarding with raw bytes flow recording via the
+//     parent listener's Pipeline; full L7 dispatch on aux ports is a
+//     follow-up issue.
 //   - Hot-swap of the pluginv2.Engine after construction.
 //
 // HTTP wire encoder note: HTTP/1.x (http1.EncodeWireBytes) and HTTP/2

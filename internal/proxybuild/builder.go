@@ -186,6 +186,14 @@ type Stack struct {
 	// passed to connector.BuildConnectionStack inside the per-protocol
 	// handlers.
 	BuildConfig *connector.BuildConfig
+
+	// FlowStore is the flow.Writer wired into the canonical RecordStep.
+	// Held on the Stack so collaborators that share this Stack's Pipeline
+	// (notably TCP forward listeners — USK-711 — which piggyback on the
+	// parent Stack's recording surface) can build SessionOptions.OnComplete
+	// callbacks that finalise Stream state. May be nil when no recording
+	// is configured.
+	FlowStore flow.Writer
 }
 
 // BuildLiveStack assembles a per-listener Stack from deps. Validates
@@ -300,6 +308,7 @@ func BuildLiveStack(_ context.Context, deps Deps) (*Stack, error) {
 		WireEncoderRegistryH2: encodersH2,
 		HoldQueue:             deps.HoldQueue,
 		BuildConfig:           deps.BuildConfig,
+		FlowStore:             deps.FlowStore,
 	}, nil
 }
 

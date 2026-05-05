@@ -400,8 +400,41 @@ func (h *mockTCPHandler) SetForwards(forwards map[string]*config.ForwardConfig) 
 }
 
 func TestProxyStart_WithTCPForwards(t *testing.T) {
-	t.Skip("proxybuild.Manager returns ErrTCPForwardsNotSupported; TCP forward orchestration is owned by USK-711")
 	manager := newTestProxybuildManager(t)
+
+	// USK-711: the live data path no longer routes TCP forwards through the
+	// legacy tcpForwardHandler interface — proxybuild.Manager owns the
+	// per-port net.Listener and dispatches via the parent Stack's Pipeline.
+	// We still attach a mock handler so the legacy connector wiring path
+	// is exercised (no-op SetForwards call); the assertions below cover
+	// the new path: TCPForwardAddrs reports a bound address and the
+	// listener accepts a TCP dial.
+	//
+	// The forward target is a local listener (not 127.0.0.1:9999) so the
+	// proxy's upstream dial succeeds — when the upstream is unreachable the
+	// proxy closes the client conn immediately after accept, and a fast
+	// kernel may surface that as ECONNRESET on the client's Dial. Using a
+	// real reachable target keeps the assertion stable.
+	upstreamLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("upstream listen: %v", err)
+	}
+	defer upstreamLn.Close()
+	go func() {
+		for {
+			c, accErr := upstreamLn.Accept()
+			if accErr != nil {
+				return
+			}
+			// Hold the conn idle so the proxy session stays alive long
+			// enough for the test's Dial+Close to complete.
+			go func(c net.Conn) {
+				buf := make([]byte, 1024)
+				_, _ = c.Read(buf)
+				c.Close()
+			}(c)
+		}
+	}()
 
 	tcpHandler := &mockTCPHandler{}
 	cs := setupProxyStartTestSessionWithTCPHandler(t, manager, nil, tcpHandler)
@@ -409,7 +442,7 @@ func TestProxyStart_WithTCPForwards(t *testing.T) {
 	result, err := callProxyStart(t, cs, map[string]any{
 		"listen_addr": "127.0.0.1:0",
 		"tcp_forwards": map[string]any{
-			"0": "127.0.0.1:9999",
+			"0": upstreamLn.Addr().String(),
 		},
 	})
 	if err != nil {
@@ -427,17 +460,8 @@ func TestProxyStart_WithTCPForwards(t *testing.T) {
 		t.Error("expected non-empty tcp_forwards in result")
 	}
 
-	// Verify forward mappings were set on the handler.
-	fc := tcpHandler.forwards["0"]
-	if fc == nil || fc.Target != "127.0.0.1:9999" {
-		var got string
-		if fc != nil {
-			got = fc.Target
-		}
-		t.Errorf("tcpHandler forwards[0].Target = %q, want %q", got, "127.0.0.1:9999")
-	}
-
-	// Verify the forward listener is accessible.
+	// Verify the forward listener is accessible (proxybuild.Manager bound
+	// a real net.Listener for port "0").
 	addrs := manager.TCPForwardAddrs()
 	if addrs == nil {
 		t.Fatal("expected non-nil TCPForwardAddrs")
@@ -456,6 +480,12 @@ func TestProxyStart_WithTCPForwards(t *testing.T) {
 }
 
 func TestProxyStart_WithTCPForwards_NilHandler(t *testing.T) {
+	// USK-711: the live data path no longer needs an externally-supplied TCP
+	// handler. proxybuild.Manager binds the per-port listener itself and
+	// dispatches via the parent Stack's Pipeline. proxy_start with
+	// tcp_forwards must therefore succeed even when no tcpForwardHandler is
+	// wired into the MCP server (the previous "expected error" assertion
+	// was a legacy-path constraint).
 	manager := newTestProxybuildManager(t)
 
 	// No TCP handler configured.
@@ -470,8 +500,14 @@ func TestProxyStart_WithTCPForwards_NilHandler(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CallTool: %v", err)
 	}
-	if !result.IsError {
-		t.Fatal("expected error when TCP handler is not initialized")
+	if result.IsError {
+		t.Fatalf("expected success without TCP handler, got error: %v", result.Content)
+	}
+
+	// Forward addr must be exposed via the manager.
+	addrs := manager.TCPForwardAddrs()
+	if addrs == nil || addrs["0"] == "" {
+		t.Fatalf("expected TCPForwardAddrs[%q] non-empty after proxy_start, got %v", "0", addrs)
 	}
 }
 

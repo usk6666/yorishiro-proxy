@@ -27,6 +27,18 @@ type listenerEntry struct {
 	done       chan struct{}
 	listenAddr string
 	startedAt  time.Time
+
+	// listenerCtx is the per-listener context derived from the StartNamed
+	// caller's ctx. It is cancelled by entry.cancel; TCP forward listeners
+	// derive their own per-port contexts from this so a forward outlives
+	// the caller's (shorter-lived) MCP request ctx but is torn down with
+	// the parent listener.
+	listenerCtx context.Context
+
+	// tcpForwards tracks the per-port forward listeners associated with this
+	// parent listener. nil until the first StartTCPForwardsNamed call.
+	// Mutations protected by Manager.mu.
+	tcpForwards map[string]*tcpForwardEntry
 }
 
 // ManagerConfig configures a Manager. The factory is invoked per StartNamed
@@ -52,12 +64,15 @@ type ManagerConfig struct {
 //
 // Caveats:
 //
-//   - StartTCPForwardsNamed / TCPForwardAddrs are stub methods returning
-//     ErrTCPForwardsNotSupported. Real TCP forward orchestration is
-//     tracked separately (see doc.go).
 //   - SetMaxConnections / SetPeekTimeout fan-out applies to the wrapped
 //     Listener.SetMaxConnections / SetPeekTimeout (which mutate the
 //     underlying connector.FullListener).
+//   - StartTCPForwardsNamed binds an extra net.Listener per port and
+//     reuses the parent listener's Pipeline + FlowStore for recording.
+//     First-iteration scope (USK-711) supports the "raw" / "auto" / ""
+//     protocol modes; L7-mode dispatch (http, http2, grpc, websocket)
+//     and tls=true are deferred to a follow-up issue and rejected at
+//     start time.
 type Manager struct {
 	logger        *slog.Logger
 	factory       func(ctx context.Context, name, addr string) (*Stack, error)
@@ -156,11 +171,12 @@ func (m *Manager) StartNamed(ctx context.Context, name string, listenAddr string
 	}
 
 	m.listeners[name] = &listenerEntry{
-		stack:      stack,
-		cancel:     cancel,
-		done:       done,
-		listenAddr: stack.Listener.Addr(),
-		startedAt:  time.Now(),
+		stack:       stack,
+		cancel:      cancel,
+		done:        done,
+		listenAddr:  stack.Listener.Addr(),
+		startedAt:   time.Now(),
+		listenerCtx: listenerCtx,
 	}
 
 	m.logger.Info("proxy started", "name", name, "listen_addr", stack.Listener.Addr())
@@ -215,9 +231,32 @@ func (m *Manager) StopAll(ctx context.Context) error {
 	return firstErr
 }
 
-// shutdownEntry cancels the listener's context and waits for the goroutine
-// to exit (bounded by shutdownTimeout or ctx).
+// shutdownEntry cancels the listener's context, drains any associated TCP
+// forward listeners, and waits for the parent listener goroutine to exit
+// (bounded by shutdownTimeout or ctx). TCP forwards are torn down BEFORE
+// the parent so plugin lifecycle hooks running in forward sessions can
+// observe a still-live parent Stack on their way out.
 func (m *Manager) shutdownEntry(ctx context.Context, name string, entry *listenerEntry) error {
+	// Snapshot + clear entry.tcpForwards under m.mu so a concurrent
+	// StartTCPForwardsNamed (which captured this entry pointer before
+	// StopNamed/StopAll removed it from m.listeners) cannot race with our
+	// iteration and cannot write to a nil map after we clear it. After this
+	// critical section the post-bind re-check in StartTCPForwardsNamed
+	// observes tcpForwards==nil and discards the freshly-bound forward
+	// instead of panicking on a nil-map assignment.
+	m.mu.Lock()
+	forwards := entry.tcpForwards
+	entry.tcpForwards = nil
+	m.mu.Unlock()
+
+	// Cancel TCP forwards first so accept goroutines stop returning new
+	// conns. Each stopTCPForwardEntry call blocks on the forward goroutine
+	// (bounded by shutdownTimeout) so handlers complete before we close the
+	// parent — matching legacy proxy.Manager.shutdownEntry semantics.
+	for port, fwd := range forwards {
+		m.stopTCPForwardEntry(name, port, fwd)
+	}
+
 	entry.cancel()
 
 	select {
@@ -315,18 +354,29 @@ func (m *Manager) Uptime() time.Duration {
 }
 
 // SetMaxConnections updates the concurrent-connection cap for new accepts.
-// The change applies immediately to all running listeners; in-flight
-// connections drain naturally.
+// The change applies immediately to all running listeners (including TCP
+// forward listeners attached to each entry); in-flight connections drain
+// naturally.
 func (m *Manager) SetMaxConnections(n int) {
 	m.mu.Lock()
 	m.maxConns = n
 	listeners := make([]*Listener, 0, len(m.listeners))
+	forwards := make([]*tcpForwardEntry, 0)
 	for _, entry := range m.listeners {
 		listeners = append(listeners, entry.stack.Listener)
+		for _, fwd := range entry.tcpForwards {
+			forwards = append(forwards, fwd)
+		}
 	}
 	m.mu.Unlock()
 	for _, l := range listeners {
 		l.SetMaxConnections(n)
+	}
+	// Fan out to TCP forward listeners. Storing 0 disables the per-forward
+	// cap (matches FullListener semantics where SetMaxConnections(0) means
+	// unlimited). The accept loop reads maxConns atomically.
+	for _, fwd := range forwards {
+		fwd.maxConns.Store(int64(n))
 	}
 }
 
@@ -427,33 +477,181 @@ func (m *Manager) Stack(name string) *Stack {
 	return entry.stack
 }
 
-// StartTCPForwardsNamed is a stub that returns ErrTCPForwardsNotSupported.
-// Real TCP forward orchestration is deferred to USK-697 (or a follow-up
-// issue); the stub preserves signature compatibility with proxy.Manager.
+// StartTCPForwardsNamed binds a per-port net.Listener for each entry in
+// params.Forwards and dispatches accepted connections through the parent
+// listener's Pipeline so raw bytes flow recording captures the forwarded
+// stream end-to-end.
 //
-// The first parameter is unused; the signature accepts a generic params
-// argument so the eventual real implementation can extend it without
-// breaking callers.
-func (m *Manager) StartTCPForwardsNamed(_ context.Context, _ string, _ any) error {
-	return ErrTCPForwardsNotSupported
+// Semantics:
+//   - params must be (or unwrap to) TCPForwardParams. Other types are
+//     rejected with a typed error so MCP callers see a clear failure.
+//   - Ports already bound on this entry are skipped (idempotent re-call).
+//   - On any per-port bind failure, ports added by THIS call are torn
+//     down in reverse order; ports established by earlier calls survive.
+//   - Returns ErrNotRunning when the parent listener is not running
+//     (mirrors legacy proxy.Manager.StartTCPForwardsNamed semantics).
+func (m *Manager) StartTCPForwardsNamed(ctx context.Context, name string, params any) error {
+	if name == "" {
+		name = DefaultListenerName
+	}
+	// Fast-fail if the caller's ctx is already cancelled — avoids the
+	// per-port bind syscall when the caller has lost interest.
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("start tcp forwards on %q: %w", name, err)
+	}
+
+	tp, err := coerceTCPForwardParams(params)
+	if err != nil {
+		return err
+	}
+	if len(tp.Forwards) == 0 {
+		return nil
+	}
+	// Defensive port-key validation at the package boundary. The MCP layer
+	// already validates these via validatePortNumber, but a programmatic
+	// caller passing a malformed key (empty / non-numeric / out-of-range)
+	// would otherwise reach net.Listen with a confusing bind-address error.
+	for port := range tp.Forwards {
+		if err := validateForwardPortKey(port); err != nil {
+			return fmt.Errorf("start tcp forwards on %q: %w", name, err)
+		}
+	}
+
+	m.mu.Lock()
+	entry, exists := m.listeners[name]
+	if !exists {
+		m.mu.Unlock()
+		if name == DefaultListenerName {
+			return ErrNotRunning
+		}
+		return fmt.Errorf("listener %q: %w", name, ErrListenerNotFound)
+	}
+	if entry.tcpForwards == nil {
+		entry.tcpForwards = make(map[string]*tcpForwardEntry)
+	}
+	m.mu.Unlock()
+
+	// Track ports started by THIS call so a mid-loop bind error rolls back
+	// only the new ones (legacy semantics: previously-running forwards
+	// survive a partial failure).
+	//
+	// Forward listeners derive their lifetime context from the parent
+	// listener's listenerCtx — NOT from the caller's ctx. The MCP
+	// proxy_start handler calls this with the per-request ctx which is
+	// cancelled when the response is sent, so deriving from `ctx` would
+	// tear down forwards immediately. Using parent.listenerCtx keeps
+	// forwards alive until StopNamed cancels the parent.
+	parentCtx := entry.listenerCtx
+	if parentCtx == nil {
+		parentCtx = context.Background()
+	}
+	var started []string
+	for port, fc := range tp.Forwards {
+		m.mu.Lock()
+		if _, dup := entry.tcpForwards[port]; dup {
+			m.mu.Unlock()
+			continue
+		}
+		m.mu.Unlock()
+
+		fwd, startErr := m.startTCPForwardListener(parentCtx, name, port, fc)
+		if startErr != nil {
+			m.rollbackTCPForwards(name, entry, started)
+			return fmt.Errorf("start tcp forward on port %s: %w", port, startErr)
+		}
+
+		// Re-check the parent listener has not been stopped between our
+		// previous Unlock and this Lock. shutdownEntry nils
+		// entry.tcpForwards under m.mu; without this check we would either
+		// panic on a nil-map assignment or leak the freshly-bound listener.
+		m.mu.Lock()
+		if entry.tcpForwards == nil {
+			m.mu.Unlock()
+			m.stopTCPForwardEntry(name, port, fwd)
+			m.rollbackTCPForwards(name, entry, started)
+			return fmt.Errorf("start tcp forward on port %s: %w", port, ErrNotRunning)
+		}
+		entry.tcpForwards[port] = fwd
+		m.mu.Unlock()
+		started = append(started, port)
+
+		m.logger.Info("tcp forward listener started",
+			"name", name,
+			"port", port,
+			"upstream", fc.Target,
+			"protocol", fc.Protocol,
+			"listen_addr", fwd.addr,
+		)
+	}
+	return nil
 }
 
-// StartTCPForwardsNamedAny is the any-typed adapter mirroring the bridge
-// method on proxy.Manager. Both manager types satisfy the same MCP
-// connector interface (internal/mcp/components.go) via this name. proxybuild
-// already accepts `any` natively, so this is a thin alias delegating to
-// StartTCPForwardsNamed.
+// rollbackTCPForwards tears down forwards added by an in-progress
+// StartTCPForwardsNamed call after a per-port failure. Caller must NOT hold
+// m.mu (stopTCPForwardEntry blocks on the listener goroutine).
+func (m *Manager) rollbackTCPForwards(name string, entry *listenerEntry, started []string) {
+	for _, port := range started {
+		m.mu.Lock()
+		fwd, ok := entry.tcpForwards[port]
+		if ok {
+			delete(entry.tcpForwards, port)
+		}
+		m.mu.Unlock()
+		if !ok {
+			continue
+		}
+		m.stopTCPForwardEntry(name, port, fwd)
+	}
+}
+
+// StartTCPForwardsNamedAny is the any-typed adapter; identical signature to
+// StartTCPForwardsNamed (kept for parity with the legacy *proxy.Manager
+// surface that the MCP proxyManager interface speaks).
 func (m *Manager) StartTCPForwardsNamedAny(ctx context.Context, name string, params any) error {
 	return m.StartTCPForwardsNamed(ctx, name, params)
 }
 
 // StartTCPForwards is shorthand for StartTCPForwardsNamed on the default
-// listener. Stub.
+// listener.
 func (m *Manager) StartTCPForwards(ctx context.Context, params any) error {
 	return m.StartTCPForwardsNamed(ctx, DefaultListenerName, params)
 }
 
-// TCPForwardAddrs returns nil. Stub.
+// TCPForwardAddrs returns a snapshot of port -> bound listen address for the
+// default listener's TCP forwards. Returns nil when the default listener is
+// not running or has no forwards (mirrors legacy semantics — the MCP
+// proxy_start tool publishes only the default listener's forward map).
 func (m *Manager) TCPForwardAddrs() map[string]string {
-	return nil
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	entry, exists := m.listeners[DefaultListenerName]
+	if !exists || len(entry.tcpForwards) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(entry.tcpForwards))
+	for port, fwd := range entry.tcpForwards {
+		out[port] = fwd.addr
+	}
+	return out
+}
+
+// coerceTCPForwardParams accepts either TCPForwardParams (production form)
+// or *TCPForwardParams (in case a caller threads a pointer) and returns a
+// concrete value. Other types — including nil and the zero-value `any` —
+// produce a typed error. nil-empty Forwards is accepted (the caller
+// short-circuits before bind).
+func coerceTCPForwardParams(params any) (TCPForwardParams, error) {
+	switch v := params.(type) {
+	case TCPForwardParams:
+		return v, nil
+	case *TCPForwardParams:
+		if v == nil {
+			return TCPForwardParams{}, nil
+		}
+		return *v, nil
+	case nil:
+		return TCPForwardParams{}, nil
+	default:
+		return TCPForwardParams{}, fmt.Errorf("proxybuild: StartTCPForwardsNamed: params must be TCPForwardParams, got %T", params)
+	}
 }
