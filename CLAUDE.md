@@ -60,6 +60,8 @@ As a MITM proxy, yorishiro-proxy must faithfully represent wire-level reality. T
 2. **Each protocol has its own canonical form; do not unify across protocols** — HTTP/1.x headers are case-insensitive but preserve wire casing. HTTP/2 headers are lowercase by spec (RFC 9113). These are different realities and must be handled by protocol-specific code paths, not forced into a shared normalized representation.
 3. **Prefer lossless representations over convenient ones** — Use ordered arrays (`[]KeyValue`) over maps (`map[string][]string`) for headers. Use protocol-native types (`parser.RawHeaders` for HTTP/1.x, `hpack.HeaderField` for HTTP/2) over bridge types. Convenience helpers may be provided on top but must not be the storage format.
 4. **`net/http` usage policy** — Data path code must not use `net/http` types for transport or data representation. Use internal types (`internal/layer/http1/parser` `RawRequest`/`RawResponse`, hpack types). `net/http` is permitted only in the control plane: MCP server (`internal/mcp/`), CLI (`cmd/`), and self-update (`internal/selfupdate/`).
+5. **Attacker-controlled input must be handled gracefully** — Parsers must not panic on malformed input. Surface anomalies via `parser.Anomaly` (HTTP/1.x) or equivalent typed anomaly fields (`grpcweb.Anomaly*`, etc.) so they are recorded with the flow rather than crashing the proxy. Buffer limits (`MaxBodySize`, `MaxLineLength`, etc.) must be enforced at parse time — not assumed by the caller.
+6. **Pre-implementation reality check on hypothetical bugs** — Before implementing a code/security review finding (especially CWE-prefixed ones), construct the concrete scenario that triggers the bug and confirm the preconditions exist in the current architecture. If the failure mode requires architecture not yet present (hot-reload, multi-tenant pool, runtime override injection), defer with a documented re-open trigger rather than designing for hypothetical future requirements.
 
 ## Package Layout
 
@@ -189,6 +191,17 @@ but also subsystem integration. Confirm that the following checklist is satisfie
 - The pattern of using `t.Logf` to record unverified behavior is prohibited. Use `t.Skip("not yet implemented: <issue-id>")` for unimplemented features
 - Do not expose `internal/` packages externally
 
+### Concurrency Checklist
+
+When implementation involves goroutines, channels, or `io.Pipe`, verify the following before opening a PR. Iterating on these in review (rather than designing them upfront) historically causes multi-round review cycles.
+
+- [ ] **Termination condition is explicit for every goroutine** — context cancel, channel close, EOF, or a named `Closed()`/`Err()` interface. No "this should usually finish" assumptions.
+- [ ] **Channel close ownership is single-writer** — wrap with `sync.Once` if multiple paths can request teardown. Never close the same channel from two code paths.
+- [ ] **Teardown is centralized** — concentrate close logic in one `abort()` / `Close()` method. Callers signal; they do not close primitives directly.
+- [ ] **Read loops do not block on external backpressure** — decouple slow consumers (e.g., `io.Pipe` writes that wait on a reader) with buffered channels or explicit drop policies.
+- [ ] **Body / channel `Close()` stops every associated goroutine** — sender, writer, drainer. A leaked goroutine here often holds a reference to wire data.
+- [ ] **Cascade-close is conditional on error** — for proxy session goroutines (`clientToUpstream` etc.), defer the upstream `Close()` only on non-nil error. Closing on `io.EOF` aborts in-flight responses on HTTP/1.x.
+
 ### Log Level Guidelines
 
 Level selection for `log/slog` follows these criteria:
@@ -292,6 +305,8 @@ To prevent git conflicts during parallel work by sub-agents, apply the following
 
 - **Lock the main worktree (the repository clone origin) to the main branch and prohibit direct work** — All branch switching and commits happen inside worktrees. The main branch cannot be pushed to directly due to branch protection
 - **All sub-agents are launched with `isolation: "worktree"`** — During parallel execution, checking out the main worktree's HEAD conflicts with the code state read by other agents, so even read-only review agents are isolated in worktrees
+- **Never `git checkout` the main worktree to a different branch when the user has parallel work in progress** — Run `git status` first; if the working tree has user-owned modifications, treat the main worktree as locked. Use `git worktree add -b <new-branch> .claude/worktrees/<short-name> <base>` to materialise side tasks in an isolated checkout instead. Do not reuse `.claude/worktrees/agent-*` paths (those are reserved for sub-agents) — pick a descriptive sibling.
+- **Verify main-worktree branch after parallel-agent return** — Sub-agents launched with `isolation: "worktree"` occasionally write edits into the main clone instead of the worktree (Edit-tool race), leaving the main clone on a feature branch. After every parallel-agent return, run `git branch --show-current` and `git worktree list`; if the main clone is off-base, switch back with `git checkout <base> && git pull --rebase origin <base>` before launching downstream agents.
 
 ### Classification in Task Tool
 
