@@ -4,7 +4,7 @@ All notable changes to yorishiro-proxy are documented in this file.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.15.0] - 2026-05-05
 
 This release ships the [RFC-001 Envelope + Layered Connection Model](docs/rfc/envelope.md) rewrite (milestones N1–N9). The data path is rebuilt around an `Envelope` + typed `Message` + `Layer` + `Channel` model that fixes the HTTP bias of the previous `Exchange`/`Codec` abstractions and unlocks structurally-honest support for HTTP/2 multiplexing, gRPC, gRPC-Web, WebSocket, SSE, and raw-byte smuggling diagnostics.
 
@@ -55,4 +55,4 @@ This release contains breaking changes for plugin authors and MCP clients. There
 
 Pre-RFC-001 history is preserved as git tags `v0.3.0` through `v0.14.1` and in their corresponding GitHub Releases. The pre-rewrite architecture used the now-deleted `internal/exchange/` (`Exchange` struct), `internal/codec/` (`Codec` interface), `internal/protocol/` (per-protocol handlers), and `internal/proxy/` (listener / manager). Detailed per-tag changelogs were not maintained at the time; consult `git log` for fine-grained history of those releases.
 
-[Unreleased]: https://github.com/usk6666/yorishiro-proxy/compare/v0.14.1...HEAD
+[0.15.0]: https://github.com/usk6666/yorishiro-proxy/compare/v0.14.1...v0.15.0

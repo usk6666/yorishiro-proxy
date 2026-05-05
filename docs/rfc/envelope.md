@@ -1129,7 +1129,7 @@ This RFC is **accepted** as of 2026-04-12. Implementation proceeds on N1.
 - [x] N6 / N6.5 / N6.6 / N6.7 (HTTP/2 Layer + event-granular split + httpaggregator) — DONE
 - [x] N7 (gRPC, gRPC-Web, WS, SSE Layers + per-protocol rule engines) — DONE
 - [x] N8 (Plugin v2 — Starlark; MCP + WebUI Reconnection) — DONE
-- [x] N9 (Legacy Removal + Documentation) — DONE <!-- USK-700 stamps the close date when the v0.x release tag is cut -->
+- [x] N9 (Legacy Removal + Documentation) — DONE (closed 2026-05-05)
 
 ---
 
