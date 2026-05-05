@@ -1,7 +1,7 @@
 // alpn_cache.go implements a small LRU + TTL cache that remembers which ALPN
-// protocol an upstream host negotiates. TunnelHandler consults the cache on
-// every tunnel so that a cache hit can offer the right ALPN to the client
-// without having to dial upstream first just to learn it.
+// protocol an upstream host negotiates. BuildConnectionStack consults the
+// cache on every tunnel so that a cache hit can offer the right ALPN to the
+// client without having to dial upstream first just to learn it.
 //
 // The cache key is a triple (host:port, uTLS fingerprint, mTLS cert hash)
 // because real-world anti-bot deployments change their ALPN response based on
@@ -142,9 +142,9 @@ func (c *ALPNCache) Set(key ALPNCacheKey, protocol string) {
 	}
 }
 
-// Delete removes the entry for key if it exists. This is called by
-// TunnelHandler when a cache-hit path observes an ALPN mismatch so the next
-// connection can re-learn.
+// Delete removes the entry for key if it exists. This is called when a
+// cache-hit path observes an ALPN mismatch so the next connection can
+// re-learn.
 func (c *ALPNCache) Delete(key ALPNCacheKey) {
 	c.mu.Lock()
 	defer c.mu.Unlock()

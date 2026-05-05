@@ -14,7 +14,7 @@ func setupMacroQueryTestSession(t *testing.T, store flow.Store) *gomcp.ClientSes
 	t.Helper()
 	ctx := context.Background()
 
-	s := NewServer(ctx, nil, store, nil)
+	s := newServer(ctx, nil, store, nil)
 	ct, st := gomcp.NewInMemoryTransports()
 
 	ss, err := s.server.Connect(ctx, st, nil)
@@ -231,7 +231,7 @@ func TestQuery_Macro_MissingID(t *testing.T) {
 
 func TestQuery_Macros_NoStore(t *testing.T) {
 	ctx := context.Background()
-	s := NewServer(ctx, nil, nil, nil)
+	s := newServer(ctx, nil, nil, nil)
 	ct, st := gomcp.NewInMemoryTransports()
 
 	ss, err := s.server.Connect(ctx, st, nil)

@@ -4,76 +4,137 @@ import (
 	"context"
 	"log/slog"
 
-	"github.com/usk6666/yorishiro-proxy/internal/exchange"
-	"github.com/usk6666/yorishiro-proxy/internal/safety"
+	"github.com/usk6666/yorishiro-proxy/internal/envelope"
+	grpcrules "github.com/usk6666/yorishiro-proxy/internal/rules/grpc"
+	httprules "github.com/usk6666/yorishiro-proxy/internal/rules/http"
+	wsrules "github.com/usk6666/yorishiro-proxy/internal/rules/ws"
 )
 
-// SafetyStep enforces the safety engine's input filter rules on Send-direction
-// Exchanges. Receive-direction Exchanges pass through unchanged.
+// SafetyStep is a Message-typed Pipeline Step that checks Send-direction
+// messages against input safety rules. If a violation is detected, the
+// envelope is dropped. Receive-direction messages always pass through
+// (Input Filter is Send-only).
 //
-// OutputFilter (PII masking) is NOT handled here — it stays in the MCP layer
-// and is applied when returning data to the client.
+// HTTP / WebSocket / gRPC messages are dispatched to their respective
+// per-protocol SafetyEngines. SSE has no per-protocol engine (N7 scope-out:
+// half-duplex Receive-only). gRPC End events are skipped — End carries no
+// Send-side user content (grpc-web sentinel has empty trailers/Status=0;
+// native gRPC End is always Receive). Unknown Message types pass through.
 type SafetyStep struct {
-	engine *safety.Engine
+	http   *httprules.SafetyEngine
+	ws     *wsrules.SafetyEngine
+	grpc   *grpcrules.SafetyEngine
+	logger *slog.Logger
 }
 
-// NewSafetyStep creates a SafetyStep with the given safety engine.
-// A nil engine is permitted; Process will return Continue for all Exchanges.
-func NewSafetyStep(engine *safety.Engine) *SafetyStep {
-	return &SafetyStep{engine: engine}
+// NewSafetyStep creates a SafetyStep. Any nil engine causes the corresponding
+// protocol arm to pass through. Engine arguments are positional in protocol
+// order: http, ws, grpc.
+func NewSafetyStep(httpEngine *httprules.SafetyEngine, wsEngine *wsrules.SafetyEngine, grpcEngine *grpcrules.SafetyEngine, logger *slog.Logger) *SafetyStep {
+	return &SafetyStep{
+		http:   httpEngine,
+		ws:     wsEngine,
+		grpc:   grpcEngine,
+		logger: logger,
+	}
 }
 
-// Process checks the Exchange against the safety engine's input rules.
-// Only Send-direction Exchanges are inspected. If a blocking violation is
-// found, the Exchange is dropped. If the engine is nil or the direction is
-// Receive, Continue is returned.
-func (s *SafetyStep) Process(_ context.Context, ex *exchange.Exchange) Result {
-	if s.engine == nil {
-		return Result{}
-	}
-	if ex.Direction != exchange.Send {
+// Process checks Send-direction envelopes against safety rules. Receive
+// direction always passes through.
+func (s *SafetyStep) Process(ctx context.Context, env *envelope.Envelope) Result {
+	if env.Direction != envelope.Send {
 		return Result{}
 	}
 
-	var rawURL string
-	if ex.URL != nil {
-		rawURL = ex.URL.String()
+	switch msg := env.Message.(type) {
+	case *envelope.HTTPMessage:
+		return s.processHTTP(ctx, msg)
+	case *envelope.WSMessage:
+		return s.processWS(ctx, msg)
+	case *envelope.GRPCStartMessage:
+		return s.processGRPC(ctx, env, msg)
+	case *envelope.GRPCDataMessage:
+		return s.processGRPC(ctx, env, msg)
+	case *envelope.GRPCEndMessage:
+		// End carries no Send-side user content (grpc-web sentinel has
+		// empty trailers/Status=0; native gRPC End is always Receive).
+		// gRPC SafetyEngine has no End-target rules — skip.
+		_ = msg
+		return Result{}
+	case *envelope.SSEMessage:
+		// N7 scope-out: SSE has no Send-side data — half-duplex Receive-only.
+		_ = msg
+		return Result{}
+	default:
+		return Result{}
 	}
+}
 
-	// Body nil (passthrough mode): skip body check, check URL + headers only.
-	var body []byte
-	if ex.Body != nil {
-		body = ex.Body
-	}
-
-	violation := s.engine.CheckInput(body, rawURL, ex.Headers)
-	if violation == nil {
+func (s *SafetyStep) processHTTP(ctx context.Context, msg *envelope.HTTPMessage) Result {
+	if s.http == nil {
 		return Result{}
 	}
 
-	action := lookupInputAction(s.engine, violation.RuleID)
-
-	slog.Info("SafetyStep matched input filter",
-		slog.String("rule_id", violation.RuleID),
-		slog.String("rule_name", violation.RuleName),
-		slog.String("target", violation.Target.String()),
-		slog.String("action", action.String()),
-	)
-
-	if action == safety.ActionBlock {
+	violation := s.http.CheckInput(ctx, msg)
+	if violation != nil {
+		if s.logger != nil {
+			s.logger.InfoContext(ctx, "safety: request blocked",
+				slog.String("rule_id", violation.RuleID),
+				slog.String("rule_name", violation.RuleName),
+				slog.String("target", violation.Target),
+				slog.String("match", violation.Match),
+			)
+		}
 		return Result{Action: Drop}
 	}
 
 	return Result{}
 }
 
-// lookupInputAction finds the action for the given rule ID from the engine's
-// input rules. Returns ActionBlock if the rule is not found (fail-safe).
-func lookupInputAction(engine *safety.Engine, ruleID string) safety.Action {
-	for _, r := range engine.InputRules() {
-		if r.ID == ruleID {
-			return r.Action
-		}
+func (s *SafetyStep) processWS(ctx context.Context, msg *envelope.WSMessage) Result {
+	if s.ws == nil {
+		return Result{}
 	}
-	return safety.ActionBlock
+
+	// WS SafetyEngine.CheckInput takes (ctx, msg) — no env. Surface
+	// asymmetry vs gRPC is preserved.
+	violation := s.ws.CheckInput(ctx, msg)
+	if violation != nil {
+		if s.logger != nil {
+			s.logger.InfoContext(ctx, "safety: request blocked",
+				slog.String("rule_id", violation.RuleID),
+				slog.String("rule_name", violation.RuleName),
+				slog.String("target", violation.Target),
+				slog.String("match", violation.Match),
+			)
+		}
+		return Result{Action: Drop}
+	}
+
+	return Result{}
+}
+
+// processGRPC is a single helper shared by GRPCStart and GRPCData arms.
+// gRPC SafetyEngine.CheckInput takes (ctx, env, msg envelope.Message); the
+// caller passes the typed message verbatim and the engine type-switches
+// internally to extract per-target data.
+func (s *SafetyStep) processGRPC(ctx context.Context, env *envelope.Envelope, msg envelope.Message) Result {
+	if s.grpc == nil {
+		return Result{}
+	}
+
+	violation := s.grpc.CheckInput(ctx, env, msg)
+	if violation != nil {
+		if s.logger != nil {
+			s.logger.InfoContext(ctx, "safety: request blocked",
+				slog.String("rule_id", violation.RuleID),
+				slog.String("rule_name", violation.RuleName),
+				slog.String("target", violation.Target),
+				slog.String("match", violation.Match),
+			)
+		}
+		return Result{Action: Drop}
+	}
+
+	return Result{}
 }

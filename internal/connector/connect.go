@@ -3,10 +3,11 @@
 // CONNECT is the first half of the HTTPS MITM dance: the client sends
 // "CONNECT host:port HTTP/1.1" + headers, we reply with
 // "HTTP/1.1 200 Connection Established", and from that point on the
-// connection becomes an opaque tunnel that TunnelHandler takes over.
+// connection becomes an opaque tunnel that the post-CONNECT handler takes
+// over (see connect_handler.go::NewCONNECTHandler).
 //
 // This file only handles the HTTP verb parsing + reply. It does NOT perform
-// TLS MITM or inner protocol detection; that is TunnelHandler's job.
+// TLS MITM or inner protocol detection; that is BuildConnectionStack's job.
 package connector
 
 import (
@@ -18,7 +19,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/usk6666/yorishiro-proxy/internal/codec/http1/parser"
+	"github.com/usk6666/yorishiro-proxy/internal/layer/http1/parser"
 )
 
 // connectOKResponse is the fixed 200 reply sent once CONNECT has been parsed.
@@ -28,11 +29,13 @@ const connectOKResponse = "HTTP/1.1 200 Connection Established\r\n\r\n"
 
 // CONNECTNegotiator parses the HTTP CONNECT verb off a freshly accepted
 // connection, writes the 200 OK reply, and returns the target host:port so
-// the caller can hand the raw tunnel off to TunnelHandler.
+// the caller can hand the raw tunnel off to the post-CONNECT handler.
 //
 // The negotiator is stateless; a single instance can be shared by the entire
 // listener. The Logger is used for anomaly warnings only; detailed per-conn
 // logging is the caller's responsibility.
+//
+// CONNECTNegotiator is consumed by NewCONNECTHandler (connect_handler.go).
 type CONNECTNegotiator struct {
 	Logger *slog.Logger
 }

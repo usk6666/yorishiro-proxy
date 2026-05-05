@@ -26,6 +26,13 @@ type Stream struct {
 	// State indicates the stream lifecycle state:
 	// "active" (in progress), "complete" (finished), or "error" (failed).
 	State string
+	// FailureReason classifies the stream-level error for diagnostic use.
+	// Empty when State != "error" or when no classified error was surfaced.
+	// Canonical values come from layer.ErrorCode.String(): "refused",
+	// "canceled", "aborted", "internal_error", "protocol_error".
+	// Analysts use this to distinguish GOAWAY-refused streams from
+	// cancelled streams and protocol errors without inspecting raw bytes.
+	FailureReason string
 	// Timestamp is the time the stream was initiated.
 	Timestamp time.Time
 	// Duration is the total duration of the stream.
@@ -89,6 +96,11 @@ type Flow struct {
 	Timestamp time.Time
 	// Headers holds HTTP-style headers. May be nil for non-HTTP protocols.
 	Headers map[string][]string
+	// Trailers holds HTTP message trailers (HTTP/2 trailer-HEADERS and
+	// HTTP/1.1 chunked trailer lines). Nil for non-HTTP protocols and for
+	// messages without trailers. Storage shape mirrors Headers; wire-level
+	// ordering and case of duplicate names live in RawBytes.
+	Trailers map[string][]string
 	// Body holds the flow body content.
 	Body []byte
 	// RawBytes holds the original raw bytes as captured on the wire.
@@ -115,6 +127,9 @@ type Flow struct {
 type StreamUpdate struct {
 	// State sets the stream state (e.g., "complete", "error").
 	State string
+	// FailureReason sets the classification label for an errored stream.
+	// Only applied when non-empty. See Stream.FailureReason for valid values.
+	FailureReason string
 	// Duration sets the stream duration.
 	Duration time.Duration
 	// Tags replaces the stream tags.
@@ -122,6 +137,15 @@ type StreamUpdate struct {
 	// ServerAddr sets the upstream server address in ConnInfo.
 	// Only applied when non-empty.
 	ServerAddr string
+	// TLSVersion sets the negotiated TLS version in ConnInfo
+	// (e.g., "TLS 1.3"). Only applied when non-empty.
+	TLSVersion string
+	// TLSCipher sets the negotiated TLS cipher suite name in ConnInfo
+	// (e.g., "TLS_AES_128_GCM_SHA256"). Only applied when non-empty.
+	TLSCipher string
+	// TLSALPN sets the negotiated ALPN protocol in ConnInfo
+	// (e.g., "h2", "http/1.1"). Only applied when non-empty.
+	TLSALPN string
 	// TLSServerCertSubject sets the upstream server TLS certificate subject in ConnInfo.
 	// Only applied when non-empty.
 	TLSServerCertSubject string

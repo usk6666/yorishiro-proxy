@@ -16,10 +16,10 @@ package config
 //	MaxBodySize × 2 (req + resp) × MaxConnections
 //	= 254 MB × 2 × 128 = ~63.5 GB
 //
-// The default MaxConnections (128, internal/proxy/listener.go) is chosen to
-// keep this theoretical maximum manageable. Operators should consider total
-// memory capacity and adjust MaxConnections via the proxy_start MCP tool or
-// configure_limits when running under heavy load.
+// The default MaxConnections (128, internal/connector/listener_common.go) is
+// chosen to keep this theoretical maximum manageable. Operators should
+// consider total memory capacity and adjust MaxConnections via the
+// proxy_start MCP tool or configure_limits when running under heavy load.
 
 const (
 	// MaxBodySize is the unified maximum size for both reading upstream
@@ -77,4 +77,12 @@ const (
 	// but no longer recorded to the flow store. This prevents unbounded DB
 	// growth from very long-lived gRPC streams.
 	MaxGRPCMessagesPerStream = 10000
+
+	// MaxWebSocketFrameSize limits the maximum payload size of a single
+	// WebSocket frame. WebSocket frames can theoretically be up to 2^63
+	// bytes per RFC 6455; this constant caps them at 16 MiB to prevent
+	// memory exhaustion (CWE-400). It is the default for the
+	// WSLayer.WithMaxFrameSize Option and the wire-side validation cap
+	// applied by the WebSocket frame parser.
+	MaxWebSocketFrameSize int64 = 16 << 20 // 16 MiB
 )

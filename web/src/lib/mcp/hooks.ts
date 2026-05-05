@@ -18,7 +18,7 @@ import type {
   InterceptActionParams,
   MacroToolParams,
   ManageParams,
-  PluginToolParams,
+  PluginIntrospectResult,
   ProxyStartParams,
   ProxyStartResult,
   ProxyStopParams,
@@ -664,55 +664,50 @@ export function useProxyControl(): UseProxyControlResult {
 }
 
 // ---------------------------------------------------------------------------
-// usePlugin — plugin tool (list, reload, enable, disable)
+// usePluginIntrospect — plugin_introspect tool (RFC-001 N8 pluginv2)
 // ---------------------------------------------------------------------------
 
-/** Return type for usePlugin. */
-export interface UsePluginResult {
-  /** Execute a plugin action. Returns the tool result. */
-  plugin: <T = unknown>(params: PluginToolParams) => Promise<T>;
-  /** Whether a plugin operation is in progress. */
+/** Return type for usePluginIntrospect. */
+export interface UsePluginIntrospectResult {
+  /** Latest introspect snapshot. Null while the first fetch is in flight. */
+  data: PluginIntrospectResult | null;
+  /** Whether a fetch is currently in progress. */
   loading: boolean;
-  /** Last plugin error, if any. */
+  /** Last fetch error, if any. */
   error: Error | null;
+  /** Manually re-fetch the introspect snapshot. */
+  refetch: () => Promise<void>;
 }
 
 /**
- * Hook to call the MCP plugin tool (list, reload, enable, disable).
- *
- * @example
- * ```tsx
- * const { plugin, loading, error } = usePlugin();
- * const result = await plugin({ action: "list" });
- * ```
+ * Hook that auto-fetches the plugin_introspect MCP tool when the client
+ * connects. Modelled on useQuery's enabled+refetch pattern but for the
+ * parameterless plugin_introspect tool.
  */
-export function usePlugin(): UsePluginResult {
+export function usePluginIntrospect(): UsePluginIntrospectResult {
   const { client, status } = useMcpContext();
+  const [data, setData] = useState<PluginIntrospectResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<Error | null>(null);
 
-  const plugin = useCallback(
-    async <T = unknown>(params: PluginToolParams): Promise<T> => {
-      if (!client || status !== "connected") {
-        throw new Error("MCP client is not connected");
-      }
+  const refetch = useCallback(async () => {
+    if (!client || status !== "connected") return;
+    setLoading(true);
+    setError(null);
+    try {
+      const result = await client.pluginIntrospect();
+      setData(result);
+    } catch (err) {
+      setError(err instanceof Error ? err : new Error(String(err)));
+    } finally {
+      setLoading(false);
+    }
+  }, [client, status]);
 
-      setLoading(true);
-      setError(null);
+  useEffect(() => {
+    if (status !== "connected") return;
+    refetch();
+  }, [status, refetch]);
 
-      try {
-        const result = await client.plugin<T>(params);
-        return result;
-      } catch (err) {
-        const e = err instanceof Error ? err : new Error(String(err));
-        setError(e);
-        throw e;
-      } finally {
-        setLoading(false);
-      }
-    },
-    [client, status],
-  );
-
-  return { plugin, loading, error };
+  return { data, loading, error, refetch };
 }

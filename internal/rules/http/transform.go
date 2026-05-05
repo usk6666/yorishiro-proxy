@@ -1,0 +1,293 @@
+package http
+
+import (
+	"bytes"
+	"context"
+	"fmt"
+	"log/slog"
+	"regexp"
+	"sort"
+	"strings"
+	"sync"
+
+	"github.com/usk6666/yorishiro-proxy/internal/envelope"
+	"github.com/usk6666/yorishiro-proxy/internal/rules/common"
+)
+
+// TransformActionType specifies the kind of transformation.
+type TransformActionType int
+
+const (
+	TransformAddHeader    TransformActionType = iota // append header (allows duplicates)
+	TransformSetHeader                               // delete all matching, then add
+	TransformRemoveHeader                            // delete all matching
+	TransformReplaceBody                             // regex replace on body bytes
+)
+
+// TransformRule defines a single transformation with match conditions and action.
+type TransformRule struct {
+	ID       string
+	Enabled  bool
+	Priority int // lower values applied first
+
+	// Match conditions (AND-combined, empty = match all).
+	Direction   RuleDirection
+	HostPattern *regexp.Regexp
+	PathPattern *regexp.Regexp
+	Methods     []string
+
+	// Action.
+	ActionType  TransformActionType
+	HeaderName  string // for Add/Set/Remove
+	HeaderValue string // for Add/Set
+	BodyPattern *regexp.Regexp
+	BodyReplace string // replacement (supports $1, $2 capture groups)
+}
+
+// TransformEngine applies transform rules to HTTP messages. Thread-safe.
+type TransformEngine struct {
+	mu    sync.RWMutex
+	rules []TransformRule
+}
+
+// NewTransformEngine creates an empty TransformEngine.
+func NewTransformEngine() *TransformEngine {
+	return &TransformEngine{}
+}
+
+// SetRules replaces all rules atomically. Rules are sorted by priority.
+func (e *TransformEngine) SetRules(rules []TransformRule) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.rules = rules
+	sort.SliceStable(e.rules, func(i, j int) bool {
+		return e.rules[i].Priority < e.rules[j].Priority
+	})
+}
+
+// AddRule adds a rule and re-sorts by priority.
+func (e *TransformEngine) AddRule(rule TransformRule) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.rules = append(e.rules, rule)
+	sort.SliceStable(e.rules, func(i, j int) bool {
+		return e.rules[i].Priority < e.rules[j].Priority
+	})
+}
+
+// RemoveRule removes the rule with the given ID. Returns true if a rule
+// was removed. The configure_tool's auto_transform dispatcher uses this
+// to scan all per-protocol engines for a matching ID.
+func (e *TransformEngine) RemoveRule(id string) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for i := range e.rules {
+		if e.rules[i].ID == id {
+			e.rules = append(e.rules[:i], e.rules[i+1:]...)
+			return true
+		}
+	}
+	return false
+}
+
+// EnableRule toggles the Enabled flag on the rule with the given ID.
+// Returns true if a rule with that ID exists.
+func (e *TransformEngine) EnableRule(id string, enabled bool) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for i := range e.rules {
+		if e.rules[i].ID == id {
+			e.rules[i].Enabled = enabled
+			return true
+		}
+	}
+	return false
+}
+
+// Rules returns a defensive copy of the current rule slice for inspection
+// (rule count / enabled count) by configure_tool's auto_transform result.
+func (e *TransformEngine) Rules() []TransformRule {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	out := make([]TransformRule, len(e.rules))
+	copy(out, e.rules)
+	return out
+}
+
+// TransformRequest applies matching rules to an HTTP request.
+// Modifies msg in-place. Returns true if any modification was applied.
+//
+// ctx is threaded down to BodyBuffer.Bytes(ctx) so that disk-backed body
+// materialization honors cancellation. On materialization error (e.g. ctx
+// cancelled), the TransformReplaceBody action is skipped silently.
+func (e *TransformEngine) TransformRequest(ctx context.Context, env *envelope.Envelope, msg *envelope.HTTPMessage) bool {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+
+	modified := false
+	for _, rule := range e.rules {
+		if !rule.Enabled {
+			continue
+		}
+		if rule.Direction != DirectionRequest && rule.Direction != DirectionBoth {
+			continue
+		}
+		if !e.matchesConditions(&rule, env, msg) {
+			continue
+		}
+		if e.applyAction(ctx, &rule, msg) {
+			modified = true
+		}
+	}
+	return modified
+}
+
+// TransformResponse applies matching rules to an HTTP response.
+// Modifies msg in-place. Returns true if any modification was applied.
+func (e *TransformEngine) TransformResponse(ctx context.Context, env *envelope.Envelope, msg *envelope.HTTPMessage) bool {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+
+	modified := false
+	for _, rule := range e.rules {
+		if !rule.Enabled {
+			continue
+		}
+		if rule.Direction != DirectionResponse && rule.Direction != DirectionBoth {
+			continue
+		}
+		if !e.matchesConditions(&rule, env, msg) {
+			continue
+		}
+		if e.applyAction(ctx, &rule, msg) {
+			modified = true
+		}
+	}
+	return modified
+}
+
+func (e *TransformEngine) matchesConditions(rule *TransformRule, env *envelope.Envelope, msg *envelope.HTTPMessage) bool {
+	if rule.HostPattern != nil {
+		host := extractHostname(env.Context.TargetHost)
+		if !rule.HostPattern.MatchString(host) {
+			return false
+		}
+	}
+	if rule.PathPattern != nil {
+		if !rule.PathPattern.MatchString(msg.Path) {
+			return false
+		}
+	}
+	if len(rule.Methods) > 0 {
+		found := false
+		for _, m := range rule.Methods {
+			if strings.EqualFold(m, msg.Method) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
+}
+
+func (e *TransformEngine) applyAction(ctx context.Context, rule *TransformRule, msg *envelope.HTTPMessage) bool {
+	switch rule.ActionType {
+	case TransformAddHeader:
+		if containsCRLF(rule.HeaderName) || containsCRLF(rule.HeaderValue) {
+			return false // CWE-113: reject CRLF in headers
+		}
+		msg.Headers = headerAdd(msg.Headers, rule.HeaderName, rule.HeaderValue)
+		return true
+
+	case TransformSetHeader:
+		if containsCRLF(rule.HeaderName) || containsCRLF(rule.HeaderValue) {
+			return false
+		}
+		msg.Headers = headerDel(msg.Headers, rule.HeaderName)
+		msg.Headers = headerAdd(msg.Headers, rule.HeaderName, rule.HeaderValue)
+		return true
+
+	case TransformRemoveHeader:
+		before := len(msg.Headers)
+		msg.Headers = headerDel(msg.Headers, rule.HeaderName)
+		return len(msg.Headers) != before
+
+	case TransformReplaceBody:
+		if rule.BodyPattern == nil {
+			return false
+		}
+		// Materialize the body from Body []byte or BodyBuffer (disk-backed).
+		// Note: when sourced from BodyBuffer.Bytes, target is a defensive
+		// copy owned by this invocation — safe to use as regex input.
+		target, err := materializeBody(ctx, msg)
+		if err != nil {
+			slog.DebugContext(ctx, "transform: materialize body failed", "err", err)
+			return false
+		}
+		if target == nil {
+			return false // passthrough mode: skip body transform
+		}
+		replaced := rule.BodyPattern.ReplaceAll(target, []byte(rule.BodyReplace))
+		if bytes.Equal(replaced, target) {
+			return false
+		}
+		// Commit: move authoritative body into msg.Body and release the
+		// BodyBuffer reference held by this HTTPMessage. The pipeline
+		// snapshot holds its own Retain (via CloneMessage), so the buffer
+		// survives for variant recording. See USK-631 isBodyChanged
+		// pointer-identity precedent.
+		msg.Body = replaced
+		if msg.BodyBuffer != nil {
+			_ = msg.BodyBuffer.Release()
+			msg.BodyBuffer = nil
+		}
+		return true
+
+	default:
+		return false
+	}
+}
+
+// CompileTransformRule compiles a transform rule from config values.
+func CompileTransformRule(id string, priority int, direction RuleDirection, hostPattern, pathPattern string, methods []string, actionType TransformActionType, headerName, headerValue, bodyPattern, bodyReplace string) (*TransformRule, error) {
+	rule := &TransformRule{
+		ID:          id,
+		Enabled:     true,
+		Priority:    priority,
+		Direction:   direction,
+		ActionType:  actionType,
+		HeaderName:  headerName,
+		HeaderValue: headerValue,
+		BodyReplace: bodyReplace,
+	}
+
+	if hostPattern != "" {
+		re, err := common.CompilePattern(hostPattern)
+		if err != nil {
+			return nil, fmt.Errorf("host pattern: %w", err)
+		}
+		rule.HostPattern = re
+	}
+	if pathPattern != "" {
+		re, err := common.CompilePattern(pathPattern)
+		if err != nil {
+			return nil, fmt.Errorf("path pattern: %w", err)
+		}
+		rule.PathPattern = re
+	}
+	if len(methods) > 0 {
+		rule.Methods = methods
+	}
+	if bodyPattern != "" {
+		re, err := common.CompilePattern(bodyPattern)
+		if err != nil {
+			return nil, fmt.Errorf("body pattern: %w", err)
+		}
+		rule.BodyPattern = re
+	}
+
+	return rule, nil
+}

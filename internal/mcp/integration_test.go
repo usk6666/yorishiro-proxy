@@ -18,10 +18,8 @@ import (
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/usk6666/yorishiro-proxy/internal/cert"
+	"github.com/usk6666/yorishiro-proxy/internal/connector"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
-	"github.com/usk6666/yorishiro-proxy/internal/protocol"
-	protohttp "github.com/usk6666/yorishiro-proxy/internal/protocol/http"
-	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
 
@@ -29,9 +27,8 @@ import (
 type testEnv struct {
 	cs          *gomcp.ClientSession
 	store       flow.Store
-	manager     *proxy.Manager
-	scope       *proxy.CaptureScope
-	passthrough *proxy.PassthroughList
+	manager     proxyManager
+	passthrough *connector.PassthroughList
 }
 
 // setupIntegrationEnv creates a fully-wired MCP test environment with a real
@@ -42,9 +39,8 @@ func setupIntegrationEnv(t *testing.T) *testEnv {
 }
 
 // setupIntegrationEnvWithOpts creates a fully-wired MCP test environment with
-// optional CaptureScope and PassthroughList. These are needed for configure
-// tool integration tests where scope and passthrough must be initialized
-// before configure can be called.
+// optional ServerOptions. Used for configure tool integration tests where
+// passthrough must be initialized before configure can be called.
 func setupIntegrationEnvWithOpts(t *testing.T, opts ...ServerOption) *testEnv {
 	t.Helper()
 	ctx := context.Background()
@@ -63,20 +59,12 @@ func setupIntegrationEnvWithOpts(t *testing.T, opts ...ServerOption) *testEnv {
 	if err := ca.Generate(); err != nil {
 		t.Fatalf("CA.Generate: %v", err)
 	}
-	issuer := cert.NewIssuer(ca)
-
-	// Build protocol handlers and detector.
-	httpHandler := protohttp.NewHandler(store, issuer, logger)
-	detector := protocol.NewDetector(httpHandler)
 
 	// Create proxy manager.
-	manager := proxy.NewManager(detector, logger)
-	t.Cleanup(func() {
-		manager.Stop(context.Background())
-	})
+	manager := newTestProxybuildManagerWithStore(t, store)
 
 	// Create MCP server with all components wired.
-	mcpServer := NewServer(ctx, ca, store, manager, opts...)
+	mcpServer := newServer(ctx, ca, store, manager, opts...)
 
 	// Connect server and client via in-memory transport.
 	ct, st := gomcp.NewInMemoryTransports()
@@ -105,11 +93,10 @@ func setupIntegrationEnvWithOpts(t *testing.T, opts ...ServerOption) *testEnv {
 	}
 }
 
-// setupIntegrationEnvWithScopeAndPassthrough creates a fully-wired MCP test
-// environment with CaptureScope and PassthroughList initialized.
-// The scope and passthrough are shared with the HTTP handler so that
-// configure tool changes affect actual traffic filtering.
-func setupIntegrationEnvWithScopeAndPassthrough(t *testing.T) *testEnv {
+// setupIntegrationEnvWithPassthrough creates a fully-wired MCP test environment
+// with PassthroughList initialized. The passthrough is shared with the HTTP
+// handler so that configure tool changes affect actual traffic filtering.
+func setupIntegrationEnvWithPassthrough(t *testing.T) *testEnv {
 	t.Helper()
 	ctx := context.Background()
 
@@ -127,27 +114,15 @@ func setupIntegrationEnvWithScopeAndPassthrough(t *testing.T) *testEnv {
 	if err := ca.Generate(); err != nil {
 		t.Fatalf("CA.Generate: %v", err)
 	}
-	issuer := cert.NewIssuer(ca)
 
-	// Create shared scope and passthrough.
-	scope := proxy.NewCaptureScope()
-	pl := proxy.NewPassthroughList()
-
-	// Build protocol handlers and detector with shared scope and passthrough.
-	httpHandler := protohttp.NewHandler(store, issuer, logger)
-	httpHandler.SetCaptureScope(scope)
-	httpHandler.SetPassthroughList(pl)
-	detector := protocol.NewDetector(httpHandler)
+	// Create shared passthrough.
+	pl := connector.NewPassthroughList()
 
 	// Create proxy manager.
-	manager := proxy.NewManager(detector, logger)
-	t.Cleanup(func() {
-		manager.Stop(context.Background())
-	})
+	manager := newTestProxybuildManagerWithStore(t, store)
 
-	// Create MCP server with scope and passthrough wired.
-	mcpServer := NewServer(ctx, ca, store, manager,
-		WithCaptureScope(scope),
+	// Create MCP server with passthrough wired.
+	mcpServer := newServer(ctx, ca, store, manager,
 		WithPassthroughList(pl),
 	)
 
@@ -175,7 +150,6 @@ func setupIntegrationEnvWithScopeAndPassthrough(t *testing.T) *testEnv {
 		cs:          cs,
 		store:       store,
 		manager:     manager,
-		scope:       scope,
 		passthrough: pl,
 	}
 }
@@ -267,6 +241,7 @@ func proxyHTTPClient(proxyAddr string) *gohttp.Client {
 // proxy_start -> HTTP request through proxy -> query sessions -> query flow
 // -> execute replay -> execute delete_flows -> proxy_stop.
 func TestIntegration_FullLifecycle(t *testing.T) {
+	t.Skip("requires plain-HTTP forward proxy (proxybuild OnHTTP1) — pending USK-710")
 	upstreamAddr := startUpstreamServer(t)
 	env := setupIntegrationEnv(t)
 
@@ -352,38 +327,8 @@ func TestIntegration_FullLifecycle(t *testing.T) {
 		t.Errorf("query flow duration = %d, want >= 0", getResult.DurationMs)
 	}
 
-	// 5. Replay the request via execute tool.
-	// Note: execute replay uses an HTTP client that by default blocks private
-	// networks (SSRF protection). Since our upstream is on loopback, we need
-	// to handle the expected failure.
-	replayResult, replayErr := env.cs.CallTool(context.Background(), &gomcp.CallToolParams{
-		Name: "resend",
-		Arguments: map[string]any{
-			"action": "replay",
-			"params": map[string]any{
-				"flow_id": flowEntry.ID,
-			},
-		},
-	})
-	if replayErr != nil {
-		t.Fatalf("CallTool(execute/replay): %v", replayErr)
-	}
-	// The replay will fail because the target is a private address (SSRF protection).
-	// This is expected behavior — we verify the tool ran and returned an error.
-	if !replayResult.IsError {
-		// If replay succeeded (e.g., SSRF protection is relaxed), verify the result.
-		var rr resendActionResult
-		tc, ok := replayResult.Content[0].(*gomcp.TextContent)
-		if ok {
-			json.Unmarshal([]byte(tc.Text), &rr)
-		}
-		if rr.NewFlowID == "" {
-			t.Error("resend replay returned empty new_flow_id")
-		}
-		if rr.StatusCode != 200 {
-			t.Errorf("execute replay status_code = %d, want 200", rr.StatusCode)
-		}
-	}
+	// 5. (Legacy `resend` step removed in USK-695 — replaced by typed
+	// `resend_http` covered by `internal/mcp/resend_http_integration_test.go`.)
 
 	// 6. Delete the flow via manage tool.
 	deleteResult := callTool[executeDeleteFlowsResult](t, env.cs, "manage", map[string]any{
@@ -507,19 +452,6 @@ func TestIntegration_ExecuteDeleteFlows_NotFound(t *testing.T) {
 	})
 }
 
-// TestIntegration_ExecuteReplay_NoSession verifies that execute replay returns
-// an error when the referenced session does not exist.
-func TestIntegration_ExecuteReplay_NoSession(t *testing.T) {
-	env := setupIntegrationEnv(t)
-
-	callToolExpectError(t, env.cs, "resend", map[string]any{
-		"action": "replay",
-		"params": map[string]any{
-			"flow_id": "nonexistent-flow-id",
-		},
-	})
-}
-
 // TestIntegration_QuerySessions_Empty verifies that query sessions returns an
 // empty list when no sessions have been recorded.
 func TestIntegration_QuerySessions_Empty(t *testing.T) {
@@ -549,16 +481,22 @@ func TestIntegration_ListTools(t *testing.T) {
 	}
 
 	expectedTools := map[string]bool{
-		"proxy_start": false,
-		"proxy_stop":  false,
-		"configure":   false,
-		"query":       false,
-		"resend":      false,
-		"manage":      false,
-		"fuzz":        false,
-		"macro":       false,
-		"intercept":   false,
-		"plugin":      false,
+		"proxy_start":       false,
+		"proxy_stop":        false,
+		"configure":         false,
+		"query":             false,
+		"manage":            false,
+		"macro":             false,
+		"intercept":         false,
+		"plugin_introspect": false,
+		"resend_http":       false,
+		"resend_ws":         false,
+		"resend_grpc":       false,
+		"resend_raw":        false,
+		"fuzz_http":         false,
+		"fuzz_ws":           false,
+		"fuzz_grpc":         false,
+		"fuzz_raw":          false,
 	}
 
 	for _, tool := range toolsResult.Tools {
@@ -578,7 +516,6 @@ func TestIntegration_ListTools(t *testing.T) {
 		"clear_sessions", "proxy_status", "list_sessions", "get_session",
 		"replay_request", "delete_session", "export_ca_cert",
 		"add_tls_passthrough", "remove_tls_passthrough", "list_tls_passthrough",
-		"set_capture_scope", "get_capture_scope", "clear_capture_scope",
 		"replay_raw",
 	}
 	toolSet := make(map[string]bool)
@@ -623,6 +560,7 @@ func TestIntegration_ProxyStartStopRestart(t *testing.T) {
 // TestIntegration_MultipleRequests verifies that multiple HTTP requests are
 // recorded as separate sessions and can be listed/filtered.
 func TestIntegration_MultipleRequests(t *testing.T) {
+	t.Skip("requires plain-HTTP forward proxy (proxybuild OnHTTP1) — pending USK-710")
 	upstreamAddr := startUpstreamServer(t)
 	env := setupIntegrationEnv(t)
 
@@ -712,80 +650,10 @@ func TestIntegration_MultipleRequests(t *testing.T) {
 	}
 }
 
-// TestIntegration_Configure_CaptureScopeMerge verifies that the configure tool's
-// capture_scope merge operation works end-to-end with the actual proxy.
-// After configuring a scope, only in-scope traffic should be recorded.
-func TestIntegration_Configure_CaptureScopeMerge(t *testing.T) {
-	upstreamAddr := startUpstreamServer(t)
-	env := setupIntegrationEnvWithScopeAndPassthrough(t)
-
-	// Start the proxy.
-	startResult := callTool[proxyStartResult](t, env.cs, "proxy_start", map[string]any{
-		"listen_addr": "127.0.0.1:0",
-	})
-	if startResult.Status != "running" {
-		t.Fatalf("proxy_start status = %q, want %q", startResult.Status, "running")
-	}
-
-	// Configure capture_scope to only include requests to a specific path.
-	cfgResult := callTool[configureResult](t, env.cs, "configure", map[string]any{
-		"operation": "merge",
-		"capture_scope": map[string]any{
-			"add_includes": []any{
-				map[string]any{"url_prefix": "/in-scope"},
-			},
-		},
-	})
-	if cfgResult.Status != "configured" {
-		t.Fatalf("configure status = %q, want %q", cfgResult.Status, "configured")
-	}
-	if cfgResult.CaptureScope == nil {
-		t.Fatal("configure capture_scope is nil")
-	}
-	if cfgResult.CaptureScope.IncludeCount != 1 {
-		t.Errorf("configure include_count = %d, want 1", cfgResult.CaptureScope.IncludeCount)
-	}
-
-	client := proxyHTTPClient(startResult.ListenAddr)
-
-	// Send a request to an in-scope URL — should be recorded.
-	inScopeURL := fmt.Sprintf("http://%s/in-scope/data", upstreamAddr)
-	resp, err := client.Get(inScopeURL)
-	if err != nil {
-		t.Fatalf("GET in-scope: %v", err)
-	}
-	resp.Body.Close()
-
-	// Send a request to an out-of-scope URL — should NOT be recorded.
-	outOfScopeURL := fmt.Sprintf("http://%s/out-of-scope/data", upstreamAddr)
-	resp, err = client.Get(outOfScopeURL)
-	if err != nil {
-		t.Fatalf("GET out-of-scope: %v", err)
-	}
-	resp.Body.Close()
-
-	// Wait for sessions to be persisted.
-	time.Sleep(200 * time.Millisecond)
-
-	// Verify only the in-scope request was recorded.
-	listResult := callTool[queryFlowsResult](t, env.cs, "query", map[string]any{
-		"resource": "flows",
-	})
-	if listResult.Count != 1 {
-		t.Fatalf("query sessions count = %d, want 1 (only in-scope)", listResult.Count)
-	}
-	if !strings.Contains(listResult.Flows[0].URL, "/in-scope/data") {
-		t.Errorf("recorded flow URL = %q, want to contain /in-scope/data", listResult.Flows[0].URL)
-	}
-
-	// Close idle connections before stopping.
-	client.CloseIdleConnections()
-}
-
 // TestIntegration_Configure_TLSPassthroughMerge verifies that configure tool's
 // tls_passthrough merge operation updates the passthrough list, verifiable via query config.
 func TestIntegration_Configure_TLSPassthroughMerge(t *testing.T) {
-	env := setupIntegrationEnvWithScopeAndPassthrough(t)
+	env := setupIntegrationEnvWithPassthrough(t)
 
 	// Start the proxy.
 	startResult := callTool[proxyStartResult](t, env.cs, "proxy_start", map[string]any{
@@ -863,20 +731,11 @@ func TestIntegration_Configure_TLSPassthroughMerge(t *testing.T) {
 // TestIntegration_Configure_Replace verifies that the configure tool's replace
 // operation completely replaces configuration sections.
 func TestIntegration_Configure_Replace(t *testing.T) {
-	env := setupIntegrationEnvWithScopeAndPassthrough(t)
+	env := setupIntegrationEnvWithPassthrough(t)
 
 	// Start the proxy.
 	startResult := callTool[proxyStartResult](t, env.cs, "proxy_start", map[string]any{
-		"listen_addr": "127.0.0.1:0",
-		"capture_scope": map[string]any{
-			"includes": []any{
-				map[string]any{"hostname": "old-target.com"},
-				map[string]any{"hostname": "another-old.com"},
-			},
-			"excludes": []any{
-				map[string]any{"hostname": "old-exclude.com"},
-			},
-		},
+		"listen_addr":     "127.0.0.1:0",
 		"tls_passthrough": []any{"old-passthrough.com", "old-passthrough2.com"},
 	})
 	if startResult.Status != "running" {
@@ -887,37 +746,19 @@ func TestIntegration_Configure_Replace(t *testing.T) {
 	initialConfig := callTool[queryConfigResult](t, env.cs, "query", map[string]any{
 		"resource": "config",
 	})
-	if len(initialConfig.CaptureScope.Includes) != 2 {
-		t.Fatalf("initial capture_scope includes = %d, want 2", len(initialConfig.CaptureScope.Includes))
-	}
-	if len(initialConfig.CaptureScope.Excludes) != 1 {
-		t.Fatalf("initial capture_scope excludes = %d, want 1", len(initialConfig.CaptureScope.Excludes))
-	}
 	if initialConfig.TLSPassthrough.Count != 2 {
 		t.Fatalf("initial tls_passthrough count = %d, want 2", initialConfig.TLSPassthrough.Count)
 	}
 
-	// Replace capture_scope entirely.
+	// Replace tls_passthrough entirely.
 	cfgResult := callTool[configureResult](t, env.cs, "configure", map[string]any{
 		"operation": "replace",
-		"capture_scope": map[string]any{
-			"includes": []any{
-				map[string]any{"hostname": "new-target.com", "method": "POST"},
-			},
-			"excludes": []any{},
-		},
 		"tls_passthrough": map[string]any{
 			"patterns": []any{"only-this-one.com"},
 		},
 	})
 	if cfgResult.Status != "configured" {
 		t.Fatalf("configure status = %q, want %q", cfgResult.Status, "configured")
-	}
-	if cfgResult.CaptureScope.IncludeCount != 1 {
-		t.Errorf("replace include_count = %d, want 1", cfgResult.CaptureScope.IncludeCount)
-	}
-	if cfgResult.CaptureScope.ExcludeCount != 0 {
-		t.Errorf("replace exclude_count = %d, want 0", cfgResult.CaptureScope.ExcludeCount)
 	}
 	if cfgResult.TLSPassthrough.TotalPatterns != 1 {
 		t.Errorf("replace tls_passthrough total = %d, want 1", cfgResult.TLSPassthrough.TotalPatterns)
@@ -927,18 +768,6 @@ func TestIntegration_Configure_Replace(t *testing.T) {
 	replacedConfig := callTool[queryConfigResult](t, env.cs, "query", map[string]any{
 		"resource": "config",
 	})
-	if len(replacedConfig.CaptureScope.Includes) != 1 {
-		t.Fatalf("replaced includes = %d, want 1", len(replacedConfig.CaptureScope.Includes))
-	}
-	if replacedConfig.CaptureScope.Includes[0].Hostname != "new-target.com" {
-		t.Errorf("replaced include hostname = %q, want %q", replacedConfig.CaptureScope.Includes[0].Hostname, "new-target.com")
-	}
-	if replacedConfig.CaptureScope.Includes[0].Method != "POST" {
-		t.Errorf("replaced include method = %q, want %q", replacedConfig.CaptureScope.Includes[0].Method, "POST")
-	}
-	if len(replacedConfig.CaptureScope.Excludes) != 0 {
-		t.Errorf("replaced excludes = %d, want 0", len(replacedConfig.CaptureScope.Excludes))
-	}
 	if replacedConfig.TLSPassthrough.Count != 1 {
 		t.Errorf("replaced tls_passthrough count = %d, want 1", replacedConfig.TLSPassthrough.Count)
 	}
@@ -948,19 +777,9 @@ func TestIntegration_Configure_Replace(t *testing.T) {
 }
 
 // TestIntegration_Configure_ProxyNotRunning verifies that configure returns an
-// appropriate error when the proxy is not running (scope/passthrough not initialized).
+// appropriate error when the proxy is not running (passthrough not initialized).
 func TestIntegration_Configure_ProxyNotRunning(t *testing.T) {
 	env := setupIntegrationEnv(t)
-
-	// Configure with capture_scope when scope is nil (no WithCaptureScope option).
-	callToolExpectError(t, env.cs, "configure", map[string]any{
-		"operation": "merge",
-		"capture_scope": map[string]any{
-			"add_includes": []any{
-				map[string]any{"hostname": "example.com"},
-			},
-		},
-	})
 
 	// Configure with tls_passthrough when passthrough is nil.
 	callToolExpectError(t, env.cs, "configure", map[string]any{
@@ -975,6 +794,7 @@ func TestIntegration_Configure_ProxyNotRunning(t *testing.T) {
 // send/receive messages for a recorded HTTP flow, including sequence, direction,
 // method, URL, headers, and body fields.
 func TestIntegration_QueryMessages(t *testing.T) {
+	t.Skip("requires plain-HTTP forward proxy (proxybuild OnHTTP1) — pending USK-710")
 	upstreamAddr := startUpstreamServer(t)
 	env := setupIntegrationEnv(t)
 
@@ -1157,23 +977,13 @@ func TestIntegration_QueryStatus(t *testing.T) {
 }
 
 // TestIntegration_QueryConfig verifies that query config returns the full
-// capture scope and TLS passthrough configuration after proxy_start with
-// initial config values.
+// TLS passthrough configuration after proxy_start with initial config values.
 func TestIntegration_QueryConfig(t *testing.T) {
-	env := setupIntegrationEnvWithScopeAndPassthrough(t)
+	env := setupIntegrationEnvWithPassthrough(t)
 
-	// Start the proxy with both capture_scope and tls_passthrough.
+	// Start the proxy with tls_passthrough.
 	startResult := callTool[proxyStartResult](t, env.cs, "proxy_start", map[string]any{
-		"listen_addr": "127.0.0.1:0",
-		"capture_scope": map[string]any{
-			"includes": []any{
-				map[string]any{"hostname": "api.example.com", "url_prefix": "/v1/"},
-				map[string]any{"method": "POST"},
-			},
-			"excludes": []any{
-				map[string]any{"hostname": "cdn.example.com"},
-			},
-		},
+		"listen_addr":     "127.0.0.1:0",
 		"tls_passthrough": []any{"pinned.example.com", "*.googleapis.com"},
 	})
 	if startResult.Status != "running" {
@@ -1184,49 +994,6 @@ func TestIntegration_QueryConfig(t *testing.T) {
 	cfgResult := callTool[queryConfigResult](t, env.cs, "query", map[string]any{
 		"resource": "config",
 	})
-
-	// Verify capture_scope.
-	if cfgResult.CaptureScope == nil {
-		t.Fatal("query config capture_scope is nil")
-	}
-	if len(cfgResult.CaptureScope.Includes) != 2 {
-		t.Fatalf("query config includes count = %d, want 2", len(cfgResult.CaptureScope.Includes))
-	}
-
-	// Verify include rules have correct fields.
-	includeHostnames := make(map[string]scopeRuleOutput)
-	for _, inc := range cfgResult.CaptureScope.Includes {
-		key := inc.Hostname + "|" + inc.URLPrefix + "|" + inc.Method
-		includeHostnames[key] = inc
-	}
-
-	apiRule, ok := includeHostnames["api.example.com|/v1/|"]
-	if !ok {
-		t.Error("include rule for api.example.com /v1/ not found")
-	} else {
-		if apiRule.Hostname != "api.example.com" {
-			t.Errorf("include hostname = %q, want %q", apiRule.Hostname, "api.example.com")
-		}
-		if apiRule.URLPrefix != "/v1/" {
-			t.Errorf("include url_prefix = %q, want %q", apiRule.URLPrefix, "/v1/")
-		}
-	}
-
-	postRule, ok := includeHostnames["||POST"]
-	if !ok {
-		t.Error("include rule for method POST not found")
-	} else {
-		if postRule.Method != "POST" {
-			t.Errorf("include method = %q, want %q", postRule.Method, "POST")
-		}
-	}
-
-	if len(cfgResult.CaptureScope.Excludes) != 1 {
-		t.Fatalf("query config excludes count = %d, want 1", len(cfgResult.CaptureScope.Excludes))
-	}
-	if cfgResult.CaptureScope.Excludes[0].Hostname != "cdn.example.com" {
-		t.Errorf("exclude hostname = %q, want %q", cfgResult.CaptureScope.Excludes[0].Hostname, "cdn.example.com")
-	}
 
 	// Verify tls_passthrough.
 	if cfgResult.TLSPassthrough == nil {

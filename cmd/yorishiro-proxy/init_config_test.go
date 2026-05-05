@@ -2,17 +2,15 @@ package main
 
 import (
 	"encoding/json"
-	"log/slog"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/logging"
-	"github.com/usk6666/yorishiro-proxy/internal/plugin"
-	protohttp "github.com/usk6666/yorishiro-proxy/internal/protocol/http"
-	"github.com/usk6666/yorishiro-proxy/internal/protocol/httputil"
-	protosocks5 "github.com/usk6666/yorishiro-proxy/internal/protocol/socks5"
+	"github.com/usk6666/yorishiro-proxy/internal/pluginv2"
 )
 
 // --- initPassthroughList tests ---
@@ -202,86 +200,8 @@ func TestApplyTLSFingerprintFlag_FromConfigFile(t *testing.T) {
 
 // --- initTLSTransport / initStandardTransport tests ---
 
-func TestInitTLSTransport_NoFingerprint(t *testing.T) {
-	logger := testLogger(t)
-	cfg := config.Default()
-	cfg.TLSFingerprint = ""
-	reg := httputil.NewHostTLSRegistry()
-
-	// We need a real HTTP handler. Use nil store/issuer since we won't make connections.
-	httpHandler := newTestHTTPHandler(t)
-
-	transport := initTLSTransport(cfg, reg, httpHandler, logger)
-	if transport == nil {
-		t.Fatal("expected non-nil transport")
-	}
-	if _, ok := transport.(*httputil.StandardTransport); !ok {
-		t.Errorf("expected StandardTransport, got %T", transport)
-	}
-}
-
-func TestInitTLSTransport_WithFingerprint(t *testing.T) {
-	logger := testLogger(t)
-	cfg := config.Default()
-	cfg.TLSFingerprint = "chrome"
-	reg := httputil.NewHostTLSRegistry()
-
-	httpHandler := newTestHTTPHandler(t)
-
-	transport := initTLSTransport(cfg, reg, httpHandler, logger)
-	if transport == nil {
-		t.Fatal("expected non-nil transport")
-	}
-	ut, ok := transport.(*httputil.UTLSTransport)
-	if !ok {
-		t.Fatalf("expected UTLSTransport, got %T", transport)
-	}
-	if ut.Profile != httputil.ProfileChrome {
-		t.Errorf("profile = %v, want ProfileChrome", ut.Profile)
-	}
-}
-
-func TestInitTLSTransport_InsecureSkipVerify(t *testing.T) {
-	logger := testLogger(t)
-	cfg := config.Default()
-	cfg.InsecureSkipVerify = true
-	cfg.TLSFingerprint = ""
-	reg := httputil.NewHostTLSRegistry()
-
-	httpHandler := newTestHTTPHandler(t)
-
-	transport := initTLSTransport(cfg, reg, httpHandler, logger)
-	st, ok := transport.(*httputil.StandardTransport)
-	if !ok {
-		t.Fatalf("expected StandardTransport, got %T", transport)
-	}
-	if !st.InsecureSkipVerify {
-		t.Error("expected InsecureSkipVerify=true on transport")
-	}
-}
-
-func TestInitStandardTransport_HostTLS(t *testing.T) {
-	logger := testLogger(t)
-	cfg := config.Default()
-	reg := httputil.NewHostTLSRegistry()
-
-	httpHandler := newTestHTTPHandler(t)
-
-	transport := initStandardTransport(cfg, reg, httpHandler)
-	_ = logger // Used only for doc consistency.
-	st, ok := transport.(*httputil.StandardTransport)
-	if !ok {
-		t.Fatalf("expected StandardTransport, got %T", transport)
-	}
-	if st.HostTLS != reg {
-		t.Error("expected HostTLS registry to be attached to transport")
-	}
-}
-
-// --- initTargetScope tests ---
-
 func TestInitTargetScope_NilPolicy(t *testing.T) {
-	scope := initTargetScope(nil, nil)
+	scope := initTargetScope(nil)
 	if scope != nil {
 		t.Error("expected nil scope for nil policy")
 	}
@@ -298,12 +218,7 @@ func TestInitTargetScope_WithAllowsAndDenies(t *testing.T) {
 		},
 	}
 
-	// initTargetScope requires a socks5 handler but we can't easily create one
-	// without a logger. Use a minimal one.
-	logger := testLogger(t)
-	socks5Handler := newTestSOCKS5Handler(t, logger)
-
-	scope := initTargetScope(policy, socks5Handler)
+	scope := initTargetScope(policy)
 	if scope == nil {
 		t.Fatal("expected non-nil scope")
 	}
@@ -342,11 +257,7 @@ func TestInitTargetScope_FromConfigFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadConfigs: %v", err)
 	}
-
-	logger := testLogger(t)
-	socks5Handler := newTestSOCKS5Handler(t, logger)
-
-	scope := initTargetScope(result.targetScopePolicy, socks5Handler)
+	scope := initTargetScope(result.targetScopePolicy)
 	if scope == nil {
 		t.Fatal("expected non-nil scope")
 	}
@@ -573,11 +484,15 @@ func TestTCPForwards_EmptyByDefault(t *testing.T) {
 func TestPlugins_FromConfigFile(t *testing.T) {
 	dir := t.TempDir()
 
-	// Create a valid Starlark plugin script.
+	// Create a valid Starlark plugin script. The pluginv2 shape has no
+	// protocol/hooks at the config level — register_hook() inside the
+	// script owns hook identity (RFC §9.3).
 	pluginPath := filepath.Join(dir, "my-plugin.star")
 	writeTestFile(t, pluginPath, `
-def on_request(flow):
+def on_request_fn(env, msg, ctx):
     pass
+
+register_hook("http", "on_request", on_request_fn)
 `)
 
 	cfgPath := filepath.Join(dir, "config.json")
@@ -585,8 +500,6 @@ def on_request(flow):
 		"plugins": []map[string]interface{}{
 			{
 				"path":     pluginPath,
-				"protocol": "http",
-				"hooks":    []string{"on_request"},
 				"on_error": "skip",
 			},
 		},
@@ -597,27 +510,18 @@ def on_request(flow):
 	if err != nil {
 		t.Fatalf("load config: %v", err)
 	}
-	if len(proxyCfg.Plugins) == 0 {
-		t.Fatal("expected non-empty Plugins raw JSON")
+	if err := proxyCfg.Validate(); err != nil {
+		t.Fatalf("validate config: %v", err)
 	}
-
-	// Verify the raw JSON can be unmarshalled into plugin configs.
-	var pluginConfigs []plugin.PluginConfig
-	if err := json.Unmarshal(proxyCfg.Plugins, &pluginConfigs); err != nil {
-		t.Fatalf("unmarshal plugins: %v", err)
+	if len(proxyCfg.Plugins) != 1 {
+		t.Fatalf("expected 1 plugin config, got %d", len(proxyCfg.Plugins))
 	}
-	if len(pluginConfigs) != 1 {
-		t.Fatalf("expected 1 plugin config, got %d", len(pluginConfigs))
-	}
-	pc := pluginConfigs[0]
+	pc := proxyCfg.Plugins[0]
 	if pc.Path != pluginPath {
 		t.Errorf("plugin path = %q, want %q", pc.Path, pluginPath)
 	}
-	if pc.Protocol != "http" {
-		t.Errorf("plugin protocol = %q, want %q", pc.Protocol, "http")
-	}
-	if len(pc.Hooks) != 1 || pc.Hooks[0] != "on_request" {
-		t.Errorf("plugin hooks = %v, want [on_request]", pc.Hooks)
+	if pc.OnError != "skip" {
+		t.Errorf("plugin on_error = %q, want %q", pc.OnError, "skip")
 	}
 }
 
@@ -628,9 +532,7 @@ func TestPlugins_WithVars(t *testing.T) {
 		"plugins": [
 			{
 				"path": "/some/plugin.star",
-				"protocol": "http",
-				"hooks": ["on_request"],
-				"vars": {"api_key": "secret123", "region": "ap-northeast-1"}
+				"vars": {"api_key": "secret123", "region": "ap-northeast-1", "max_retries": 3}
 			}
 		]
 	}`)
@@ -639,16 +541,61 @@ func TestPlugins_WithVars(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load config: %v", err)
 	}
+	if err := proxyCfg.Validate(); err != nil {
+		t.Fatalf("validate config: %v", err)
+	}
 
-	var pluginConfigs []plugin.PluginConfig
-	if err := json.Unmarshal(proxyCfg.Plugins, &pluginConfigs); err != nil {
-		t.Fatalf("unmarshal plugins: %v", err)
+	if len(proxyCfg.Plugins) != 1 {
+		t.Fatalf("expected 1 plugin config, got %d", len(proxyCfg.Plugins))
 	}
-	if len(pluginConfigs[0].Vars) != 2 {
-		t.Errorf("expected 2 vars, got %d", len(pluginConfigs[0].Vars))
+	vars := proxyCfg.Plugins[0].Vars
+	if len(vars) != 3 {
+		t.Errorf("expected 3 vars, got %d", len(vars))
 	}
-	if pluginConfigs[0].Vars["api_key"] != "secret123" {
-		t.Errorf("vars[api_key] = %q, want %q", pluginConfigs[0].Vars["api_key"], "secret123")
+	if vars["api_key"] != "secret123" {
+		t.Errorf("vars[api_key] = %v, want %q", vars["api_key"], "secret123")
+	}
+	// pluginv2.PluginConfig.Vars is map[string]any so non-string values
+	// (e.g. JSON numbers) round-trip without lossy coercion.
+	if got, want := vars["max_retries"], float64(3); got != want {
+		t.Errorf("vars[max_retries] = %v, want %v", got, want)
+	}
+}
+
+// TestPlugins_RejectsLegacyFields asserts that a config carrying the
+// pre-RFC-001 `protocol` / `hooks` keys is rejected at load time by
+// ProxyConfig.Validate via the pluginv2 tripwire (RFC §9.3 P-8 — no
+// shims). The migration message points the user at the migration doc.
+func TestPlugins_RejectsLegacyFields(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "legacy-config.json")
+	writeTestFile(t, cfgPath, `{
+		"plugins": [
+			{
+				"path":     "/tmp/x.star",
+				"protocol": "http",
+				"hooks":    ["on_request"]
+			}
+		]
+	}`)
+
+	proxyCfg, err := config.LoadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	err = proxyCfg.Validate()
+	if err == nil {
+		t.Fatal("expected legacy-field rejection, got nil")
+	}
+	var loadErr *pluginv2.LoadError
+	if !errors.As(err, &loadErr) {
+		t.Fatalf("expected *pluginv2.LoadError, got %T (%v)", err, err)
+	}
+	if loadErr.Kind != pluginv2.LoadErrLegacyField {
+		t.Errorf("LoadError.Kind = %v, want LoadErrLegacyField", loadErr.Kind)
+	}
+	if !strings.Contains(err.Error(), "plugin-migration.md") {
+		t.Errorf("error = %q, want substring %q", err.Error(), "plugin-migration.md")
 	}
 }
 
@@ -753,36 +700,6 @@ func TestLogging_FromProxyConfigFile(t *testing.T) {
 	}
 }
 
-// --- Capture Scope config tests ---
-
-func TestCaptureScope_FromConfigFile(t *testing.T) {
-	dir := t.TempDir()
-	cfgPath := filepath.Join(dir, "config.json")
-	writeTestFile(t, cfgPath, `{
-		"capture_scope": {
-			"include": ["*.example.com"],
-			"exclude": ["static.example.com"]
-		}
-	}`)
-
-	proxyCfg, err := config.LoadFile(cfgPath)
-	if err != nil {
-		t.Fatalf("load config: %v", err)
-	}
-	if len(proxyCfg.CaptureScope) == 0 {
-		t.Fatal("expected non-empty CaptureScope raw JSON")
-	}
-
-	// Verify it is valid JSON that can be parsed.
-	var scope map[string]interface{}
-	if err := json.Unmarshal(proxyCfg.CaptureScope, &scope); err != nil {
-		t.Fatalf("unmarshal capture_scope: %v", err)
-	}
-	if _, ok := scope["include"]; !ok {
-		t.Error("expected 'include' key in capture_scope")
-	}
-}
-
 // --- Intercept Rules config tests ---
 
 func TestInterceptRules_FromConfigFile(t *testing.T) {
@@ -878,13 +795,8 @@ def on_request(flow):
 		"socks5_password": "secret",
 		"plugins": []map[string]interface{}{
 			{
-				"path":     pluginPath,
-				"protocol": "http",
-				"hooks":    []string{"on_request"},
+				"path": pluginPath,
 			},
-		},
-		"capture_scope": map[string]interface{}{
-			"include": []string{"*.example.com"},
 		},
 		"intercept_rules": []map[string]interface{}{
 			{"match": map[string]string{"url_pattern": "*"}},
@@ -944,9 +856,6 @@ def on_request(flow):
 	if len(proxyCfg.Plugins) == 0 {
 		t.Error("expected non-empty Plugins")
 	}
-	if len(proxyCfg.CaptureScope) == 0 {
-		t.Error("expected non-empty CaptureScope")
-	}
 	if len(proxyCfg.InterceptRules) == 0 {
 		t.Error("expected non-empty InterceptRules")
 	}
@@ -1002,17 +911,3 @@ def on_request(flow):
 }
 
 // --- test helpers ---
-
-// newTestHTTPHandler creates a minimal HTTP handler for testing transport initialization.
-// The handler is not connected to a real store or issuer.
-func newTestHTTPHandler(t *testing.T) *protohttp.Handler {
-	t.Helper()
-	logger := testLogger(t)
-	return protohttp.NewHandler(nil, nil, logger)
-}
-
-// newTestSOCKS5Handler creates a minimal SOCKS5 handler for testing.
-func newTestSOCKS5Handler(t *testing.T, logger *slog.Logger) *protosocks5.Handler {
-	t.Helper()
-	return protosocks5.NewHandler(logger)
-}

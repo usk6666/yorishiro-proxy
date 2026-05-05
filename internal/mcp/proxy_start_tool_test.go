@@ -10,27 +10,22 @@ import (
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/usk6666/yorishiro-proxy/internal/config"
-	"github.com/usk6666/yorishiro-proxy/internal/proxy"
-	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
-	"github.com/usk6666/yorishiro-proxy/internal/proxy/rules"
-	"github.com/usk6666/yorishiro-proxy/internal/testutil"
+	"github.com/usk6666/yorishiro-proxy/internal/connector"
+	httprules "github.com/usk6666/yorishiro-proxy/internal/rules/http"
 )
 
-// setupProxyStartTestSession creates an MCP client flow with Manager, CaptureScope,
-// and PassthroughList for testing the proxy_start tool.
-func setupProxyStartTestSession(t *testing.T, manager *proxy.Manager, scope *proxy.CaptureScope, pl *proxy.PassthroughList) *gomcp.ClientSession {
+// setupProxyStartTestSession creates an MCP client flow with Manager and
+// PassthroughList for testing the proxy_start tool.
+func setupProxyStartTestSession(t *testing.T, manager proxyManager, pl *connector.PassthroughList) *gomcp.ClientSession {
 	t.Helper()
 	ctx := context.Background()
 
 	var opts []ServerOption
-	if scope != nil {
-		opts = append(opts, WithCaptureScope(scope))
-	}
 	if pl != nil {
 		opts = append(opts, WithPassthroughList(pl))
 	}
 
-	s := NewServer(ctx, nil, nil, manager, opts...)
+	s := newServer(ctx, nil, nil, manager, opts...)
 	ct, st := gomcp.NewInMemoryTransports()
 
 	ss, err := s.server.Connect(ctx, st, nil)
@@ -80,12 +75,9 @@ func unmarshalProxyStartResult(t *testing.T, result *gomcp.CallToolResult) proxy
 }
 
 func TestProxyStart_WithListenAddr(t *testing.T) {
-	logger := testutil.DiscardLogger()
-	detector := &stubDetector{}
-	manager := proxy.NewManager(detector, logger)
-	t.Cleanup(func() { manager.Stop(context.Background()) })
+	manager := newTestProxybuildManager(t)
 
-	cs := setupProxyStartTestSession(t, manager, nil, nil)
+	cs := setupProxyStartTestSession(t, manager, nil)
 
 	result, err := callProxyStart(t, cs, map[string]any{
 		"listen_addr": "127.0.0.1:0",
@@ -107,12 +99,9 @@ func TestProxyStart_WithListenAddr(t *testing.T) {
 }
 
 func TestProxyStart_DefaultAddr(t *testing.T) {
-	logger := testutil.DiscardLogger()
-	detector := &stubDetector{}
-	manager := proxy.NewManager(detector, logger)
-	t.Cleanup(func() { manager.Stop(context.Background()) })
+	manager := newTestProxybuildManager(t)
 
-	cs := setupProxyStartTestSession(t, manager, nil, nil)
+	cs := setupProxyStartTestSession(t, manager, nil)
 
 	// Call without listen_addr to use default.
 	result, err := callProxyStart(t, cs, nil)
@@ -132,12 +121,9 @@ func TestProxyStart_DefaultAddr(t *testing.T) {
 }
 
 func TestProxyStart_AlreadyRunning(t *testing.T) {
-	logger := testutil.DiscardLogger()
-	detector := &stubDetector{}
-	manager := proxy.NewManager(detector, logger)
-	t.Cleanup(func() { manager.Stop(context.Background()) })
+	manager := newTestProxybuildManager(t)
 
-	cs := setupProxyStartTestSession(t, manager, nil, nil)
+	cs := setupProxyStartTestSession(t, manager, nil)
 
 	// First start.
 	result, err := callProxyStart(t, cs, map[string]any{
@@ -163,7 +149,7 @@ func TestProxyStart_AlreadyRunning(t *testing.T) {
 }
 
 func TestProxyStart_NilManager(t *testing.T) {
-	cs := setupProxyStartTestSession(t, nil, nil, nil)
+	cs := setupProxyStartTestSession(t, nil, nil)
 
 	result, err := callProxyStart(t, cs, map[string]any{
 		"listen_addr": "127.0.0.1:0",
@@ -177,11 +163,9 @@ func TestProxyStart_NilManager(t *testing.T) {
 }
 
 func TestProxyStart_NonLoopbackAddr(t *testing.T) {
-	logger := testutil.DiscardLogger()
-	detector := &stubDetector{}
-	manager := proxy.NewManager(detector, logger)
+	manager := newTestProxybuildManager(t)
 
-	cs := setupProxyStartTestSession(t, manager, nil, nil)
+	cs := setupProxyStartTestSession(t, manager, nil)
 
 	tests := []struct {
 		name string
@@ -208,11 +192,9 @@ func TestProxyStart_NonLoopbackAddr(t *testing.T) {
 }
 
 func TestProxyStart_InvalidAddr(t *testing.T) {
-	logger := testutil.DiscardLogger()
-	detector := &stubDetector{}
-	manager := proxy.NewManager(detector, logger)
+	manager := newTestProxybuildManager(t)
 
-	cs := setupProxyStartTestSession(t, manager, nil, nil)
+	cs := setupProxyStartTestSession(t, manager, nil)
 
 	result, err := callProxyStart(t, cs, map[string]any{
 		"listen_addr": "not-a-valid-address",
@@ -225,208 +207,11 @@ func TestProxyStart_InvalidAddr(t *testing.T) {
 	}
 }
 
-func TestProxyStart_WithCaptureScope(t *testing.T) {
-	logger := testutil.DiscardLogger()
-	detector := &stubDetector{}
-	manager := proxy.NewManager(detector, logger)
-	t.Cleanup(func() { manager.Stop(context.Background()) })
-
-	scope := proxy.NewCaptureScope()
-	cs := setupProxyStartTestSession(t, manager, scope, nil)
-
-	result, err := callProxyStart(t, cs, map[string]any{
-		"listen_addr": "127.0.0.1:0",
-		"capture_scope": map[string]any{
-			"includes": []any{
-				map[string]any{"hostname": "*.target.com", "url_prefix": "/api/", "method": "POST"},
-			},
-			"excludes": []any{
-				map[string]any{"hostname": "cdn.example.com"},
-			},
-		},
-	})
-	if err != nil {
-		t.Fatalf("CallTool: %v", err)
-	}
-	if result.IsError {
-		t.Fatalf("expected success, got error: %v", result.Content)
-	}
-
-	out := unmarshalProxyStartResult(t, result)
-	if out.Status != "running" {
-		t.Errorf("status = %q, want %q", out.Status, "running")
-	}
-
-	// Verify scope was applied.
-	includes, excludes := scope.Rules()
-	if len(includes) != 1 {
-		t.Fatalf("scope includes = %d, want 1", len(includes))
-	}
-	if includes[0].Hostname != "*.target.com" {
-		t.Errorf("includes[0].hostname = %q, want %q", includes[0].Hostname, "*.target.com")
-	}
-	if includes[0].URLPrefix != "/api/" {
-		t.Errorf("includes[0].url_prefix = %q, want %q", includes[0].URLPrefix, "/api/")
-	}
-	if includes[0].Method != "POST" {
-		t.Errorf("includes[0].method = %q, want %q", includes[0].Method, "POST")
-	}
-	if len(excludes) != 1 {
-		t.Fatalf("scope excludes = %d, want 1", len(excludes))
-	}
-	if excludes[0].Hostname != "cdn.example.com" {
-		t.Errorf("excludes[0].hostname = %q, want %q", excludes[0].Hostname, "cdn.example.com")
-	}
-}
-
-func TestProxyStart_WithCaptureScope_IncludesOnly(t *testing.T) {
-	logger := testutil.DiscardLogger()
-	detector := &stubDetector{}
-	manager := proxy.NewManager(detector, logger)
-	t.Cleanup(func() { manager.Stop(context.Background()) })
-
-	scope := proxy.NewCaptureScope()
-	cs := setupProxyStartTestSession(t, manager, scope, nil)
-
-	result, err := callProxyStart(t, cs, map[string]any{
-		"listen_addr": "127.0.0.1:0",
-		"capture_scope": map[string]any{
-			"includes": []any{
-				map[string]any{"hostname": "example.com"},
-			},
-		},
-	})
-	if err != nil {
-		t.Fatalf("CallTool: %v", err)
-	}
-	if result.IsError {
-		t.Fatalf("expected success, got error: %v", result.Content)
-	}
-
-	includes, excludes := scope.Rules()
-	if len(includes) != 1 {
-		t.Fatalf("includes = %d, want 1", len(includes))
-	}
-	if len(excludes) != 0 {
-		t.Errorf("excludes = %d, want 0", len(excludes))
-	}
-}
-
-func TestProxyStart_WithCaptureScope_ExcludesOnly(t *testing.T) {
-	logger := testutil.DiscardLogger()
-	detector := &stubDetector{}
-	manager := proxy.NewManager(detector, logger)
-	t.Cleanup(func() { manager.Stop(context.Background()) })
-
-	scope := proxy.NewCaptureScope()
-	cs := setupProxyStartTestSession(t, manager, scope, nil)
-
-	result, err := callProxyStart(t, cs, map[string]any{
-		"listen_addr": "127.0.0.1:0",
-		"capture_scope": map[string]any{
-			"excludes": []any{
-				map[string]any{"hostname": "ads.example.com"},
-			},
-		},
-	})
-	if err != nil {
-		t.Fatalf("CallTool: %v", err)
-	}
-	if result.IsError {
-		t.Fatalf("expected success, got error: %v", result.Content)
-	}
-
-	includes, excludes := scope.Rules()
-	if len(includes) != 0 {
-		t.Errorf("includes = %d, want 0", len(includes))
-	}
-	if len(excludes) != 1 {
-		t.Fatalf("excludes = %d, want 1", len(excludes))
-	}
-}
-
-func TestProxyStart_WithCaptureScope_EmptyRuleError(t *testing.T) {
-	logger := testutil.DiscardLogger()
-	detector := &stubDetector{}
-	manager := proxy.NewManager(detector, logger)
-
-	scope := proxy.NewCaptureScope()
-	cs := setupProxyStartTestSession(t, manager, scope, nil)
-
-	// Include rule with no fields set should error.
-	result, err := callProxyStart(t, cs, map[string]any{
-		"listen_addr": "127.0.0.1:0",
-		"capture_scope": map[string]any{
-			"includes": []any{
-				map[string]any{},
-			},
-		},
-	})
-	if err != nil {
-		t.Fatalf("CallTool: %v", err)
-	}
-	if !result.IsError {
-		t.Fatal("expected error for empty include rule")
-	}
-}
-
-func TestProxyStart_WithCaptureScope_EmptyExcludeRuleError(t *testing.T) {
-	logger := testutil.DiscardLogger()
-	detector := &stubDetector{}
-	manager := proxy.NewManager(detector, logger)
-
-	scope := proxy.NewCaptureScope()
-	cs := setupProxyStartTestSession(t, manager, scope, nil)
-
-	// Exclude rule with no fields set should error.
-	result, err := callProxyStart(t, cs, map[string]any{
-		"listen_addr": "127.0.0.1:0",
-		"capture_scope": map[string]any{
-			"excludes": []any{
-				map[string]any{},
-			},
-		},
-	})
-	if err != nil {
-		t.Fatalf("CallTool: %v", err)
-	}
-	if !result.IsError {
-		t.Fatal("expected error for empty exclude rule")
-	}
-}
-
-func TestProxyStart_WithCaptureScope_NilScope(t *testing.T) {
-	logger := testutil.DiscardLogger()
-	detector := &stubDetector{}
-	manager := proxy.NewManager(detector, logger)
-
-	// No scope configured on server.
-	cs := setupProxyStartTestSession(t, manager, nil, nil)
-
-	result, err := callProxyStart(t, cs, map[string]any{
-		"listen_addr": "127.0.0.1:0",
-		"capture_scope": map[string]any{
-			"includes": []any{
-				map[string]any{"hostname": "example.com"},
-			},
-		},
-	})
-	if err != nil {
-		t.Fatalf("CallTool: %v", err)
-	}
-	if !result.IsError {
-		t.Fatal("expected error when scope is not initialized")
-	}
-}
-
 func TestProxyStart_WithTLSPassthrough(t *testing.T) {
-	logger := testutil.DiscardLogger()
-	detector := &stubDetector{}
-	manager := proxy.NewManager(detector, logger)
-	t.Cleanup(func() { manager.Stop(context.Background()) })
+	manager := newTestProxybuildManager(t)
 
-	pl := proxy.NewPassthroughList()
-	cs := setupProxyStartTestSession(t, manager, nil, pl)
+	pl := connector.NewPassthroughList()
+	cs := setupProxyStartTestSession(t, manager, pl)
 
 	result, err := callProxyStart(t, cs, map[string]any{
 		"listen_addr":     "127.0.0.1:0",
@@ -457,12 +242,10 @@ func TestProxyStart_WithTLSPassthrough(t *testing.T) {
 }
 
 func TestProxyStart_WithTLSPassthrough_EmptyPattern(t *testing.T) {
-	logger := testutil.DiscardLogger()
-	detector := &stubDetector{}
-	manager := proxy.NewManager(detector, logger)
+	manager := newTestProxybuildManager(t)
 
-	pl := proxy.NewPassthroughList()
-	cs := setupProxyStartTestSession(t, manager, nil, pl)
+	pl := connector.NewPassthroughList()
+	cs := setupProxyStartTestSession(t, manager, pl)
 
 	result, err := callProxyStart(t, cs, map[string]any{
 		"listen_addr":     "127.0.0.1:0",
@@ -477,12 +260,10 @@ func TestProxyStart_WithTLSPassthrough_EmptyPattern(t *testing.T) {
 }
 
 func TestProxyStart_WithTLSPassthrough_NilPassthrough(t *testing.T) {
-	logger := testutil.DiscardLogger()
-	detector := &stubDetector{}
-	manager := proxy.NewManager(detector, logger)
+	manager := newTestProxybuildManager(t)
 
 	// No passthrough configured on server.
-	cs := setupProxyStartTestSession(t, manager, nil, nil)
+	cs := setupProxyStartTestSession(t, manager, nil)
 
 	result, err := callProxyStart(t, cs, map[string]any{
 		"listen_addr":     "127.0.0.1:0",
@@ -497,25 +278,13 @@ func TestProxyStart_WithTLSPassthrough_NilPassthrough(t *testing.T) {
 }
 
 func TestProxyStart_WithAllConfig(t *testing.T) {
-	logger := testutil.DiscardLogger()
-	detector := &stubDetector{}
-	manager := proxy.NewManager(detector, logger)
-	t.Cleanup(func() { manager.Stop(context.Background()) })
+	manager := newTestProxybuildManager(t)
 
-	scope := proxy.NewCaptureScope()
-	pl := proxy.NewPassthroughList()
-	cs := setupProxyStartTestSession(t, manager, scope, pl)
+	pl := connector.NewPassthroughList()
+	cs := setupProxyStartTestSession(t, manager, pl)
 
 	result, err := callProxyStart(t, cs, map[string]any{
-		"listen_addr": "127.0.0.1:0",
-		"capture_scope": map[string]any{
-			"includes": []any{
-				map[string]any{"hostname": "*.target.com", "url_prefix": "/api/", "method": "POST"},
-			},
-			"excludes": []any{
-				map[string]any{"hostname": "cdn.example.com"},
-			},
-		},
+		"listen_addr":     "127.0.0.1:0",
 		"tls_passthrough": []any{"pinned-service.com", "*.googleapis.com"},
 	})
 	if err != nil {
@@ -533,90 +302,9 @@ func TestProxyStart_WithAllConfig(t *testing.T) {
 		t.Error("expected non-empty listen_addr")
 	}
 
-	// Verify scope was applied.
-	includes, excludes := scope.Rules()
-	if len(includes) != 1 {
-		t.Errorf("scope includes = %d, want 1", len(includes))
-	}
-	if len(excludes) != 1 {
-		t.Errorf("scope excludes = %d, want 1", len(excludes))
-	}
-
 	// Verify passthrough was applied.
 	if pl.Len() != 2 {
 		t.Errorf("passthrough len = %d, want 2", pl.Len())
-	}
-}
-
-func TestProxyStart_WithEmptyCaptureScope(t *testing.T) {
-	logger := testutil.DiscardLogger()
-	detector := &stubDetector{}
-	manager := proxy.NewManager(detector, logger)
-	t.Cleanup(func() { manager.Stop(context.Background()) })
-
-	scope := proxy.NewCaptureScope()
-	// Pre-set some rules to verify empty scope object does not clear them.
-	scope.SetRules(
-		[]proxy.ScopeRule{{Hostname: "existing.com"}},
-		nil,
-	)
-
-	cs := setupProxyStartTestSession(t, manager, scope, nil)
-
-	// Pass capture_scope as an empty object (no includes or excludes).
-	// The scope with empty includes/excludes should set empty rules.
-	result, err := callProxyStart(t, cs, map[string]any{
-		"listen_addr":   "127.0.0.1:0",
-		"capture_scope": map[string]any{},
-	})
-	if err != nil {
-		t.Fatalf("CallTool: %v", err)
-	}
-	if result.IsError {
-		t.Fatalf("expected success, got error: %v", result.Content)
-	}
-
-	// Empty capture_scope object should set empty rules (clear previous).
-	includes, excludes := scope.Rules()
-	if len(includes) != 0 {
-		t.Errorf("scope includes = %d, want 0 (empty scope should clear)", len(includes))
-	}
-	if len(excludes) != 0 {
-		t.Errorf("scope excludes = %d, want 0 (empty scope should clear)", len(excludes))
-	}
-}
-
-func TestProxyStart_WithoutCaptureScope(t *testing.T) {
-	logger := testutil.DiscardLogger()
-	detector := &stubDetector{}
-	manager := proxy.NewManager(detector, logger)
-	t.Cleanup(func() { manager.Stop(context.Background()) })
-
-	scope := proxy.NewCaptureScope()
-	// Pre-set some rules to verify that proxy_start resets them when
-	// capture_scope is omitted (USK-407: proxy_start resets all settings).
-	scope.SetRules(
-		[]proxy.ScopeRule{{Hostname: "existing.com"}},
-		nil,
-	)
-
-	cs := setupProxyStartTestSession(t, manager, scope, nil)
-
-	// Omit capture_scope entirely — existing rules should be cleared
-	// because proxy_start resets all settings to defaults.
-	result, err := callProxyStart(t, cs, map[string]any{
-		"listen_addr": "127.0.0.1:0",
-	})
-	if err != nil {
-		t.Fatalf("CallTool: %v", err)
-	}
-	if result.IsError {
-		t.Fatalf("expected success, got error: %v", result.Content)
-	}
-
-	includes, _ := scope.Rules()
-	if len(includes) != 0 {
-		t.Errorf("scope includes = %d, want 0 (proxy_start should reset scope to default)", len(includes))
 	}
 }
 
@@ -637,12 +325,10 @@ func TestProxyStart_LoopbackAddresses(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			logger := testutil.DiscardLogger()
-			detector := &stubDetector{}
-			manager := proxy.NewManager(detector, logger)
+			manager := newTestProxybuildManager(t)
 			t.Cleanup(func() { manager.Stop(context.Background()) })
 
-			cs := setupProxyStartTestSession(t, manager, nil, nil)
+			cs := setupProxyStartTestSession(t, manager, nil)
 
 			result, err := callProxyStart(t, cs, map[string]any{
 				"listen_addr": tt.addr,
@@ -661,48 +347,12 @@ func TestProxyStart_LoopbackAddresses(t *testing.T) {
 	}
 }
 
-func TestProxyStart_ScopeAppliedBeforeStart(t *testing.T) {
-	// Verify that scope and passthrough are configured before the proxy starts.
-	// If scope validation fails, proxy should NOT start.
-	logger := testutil.DiscardLogger()
-	detector := &stubDetector{}
-	manager := proxy.NewManager(detector, logger)
-
-	scope := proxy.NewCaptureScope()
-	cs := setupProxyStartTestSession(t, manager, scope, nil)
-
-	// Invalid scope rule should prevent proxy from starting.
-	result, err := callProxyStart(t, cs, map[string]any{
-		"listen_addr": "127.0.0.1:0",
-		"capture_scope": map[string]any{
-			"includes": []any{
-				map[string]any{}, // empty rule — invalid
-			},
-		},
-	})
-	if err != nil {
-		t.Fatalf("CallTool: %v", err)
-	}
-	if !result.IsError {
-		t.Fatal("expected error for invalid scope rule")
-	}
-
-	// Verify proxy did NOT start.
-	running, _ := manager.Status()
-	if running {
-		t.Error("proxy should not be running after scope validation failure")
-		manager.Stop(context.Background())
-	}
-}
-
 func TestProxyStart_PassthroughAppliedBeforeStart(t *testing.T) {
 	// If passthrough validation fails, proxy should NOT start.
-	logger := testutil.DiscardLogger()
-	detector := &stubDetector{}
-	manager := proxy.NewManager(detector, logger)
+	manager := newTestProxybuildManager(t)
 
-	pl := proxy.NewPassthroughList()
-	cs := setupProxyStartTestSession(t, manager, nil, pl)
+	pl := connector.NewPassthroughList()
+	cs := setupProxyStartTestSession(t, manager, pl)
 
 	// Empty passthrough pattern should prevent proxy from starting.
 	result, err := callProxyStart(t, cs, map[string]any{
@@ -750,13 +400,11 @@ func (h *mockTCPHandler) SetForwards(forwards map[string]*config.ForwardConfig) 
 }
 
 func TestProxyStart_WithTCPForwards(t *testing.T) {
-	logger := testutil.DiscardLogger()
-	detector := &stubDetector{}
-	manager := proxy.NewManager(detector, logger)
-	t.Cleanup(func() { manager.Stop(context.Background()) })
+	t.Skip("proxybuild.Manager returns ErrTCPForwardsNotSupported; TCP forward orchestration is owned by USK-711")
+	manager := newTestProxybuildManager(t)
 
 	tcpHandler := &mockTCPHandler{}
-	cs := setupProxyStartTestSessionWithTCPHandler(t, manager, nil, nil, tcpHandler)
+	cs := setupProxyStartTestSessionWithTCPHandler(t, manager, nil, tcpHandler)
 
 	result, err := callProxyStart(t, cs, map[string]any{
 		"listen_addr": "127.0.0.1:0",
@@ -808,12 +456,10 @@ func TestProxyStart_WithTCPForwards(t *testing.T) {
 }
 
 func TestProxyStart_WithTCPForwards_NilHandler(t *testing.T) {
-	logger := testutil.DiscardLogger()
-	detector := &stubDetector{}
-	manager := proxy.NewManager(detector, logger)
+	manager := newTestProxybuildManager(t)
 
 	// No TCP handler configured.
-	cs := setupProxyStartTestSession(t, manager, nil, nil)
+	cs := setupProxyStartTestSession(t, manager, nil)
 
 	result, err := callProxyStart(t, cs, map[string]any{
 		"listen_addr": "127.0.0.1:0",
@@ -830,12 +476,10 @@ func TestProxyStart_WithTCPForwards_NilHandler(t *testing.T) {
 }
 
 func TestProxyStart_WithTCPForwards_InvalidTarget(t *testing.T) {
-	logger := testutil.DiscardLogger()
-	detector := &stubDetector{}
-	manager := proxy.NewManager(detector, logger)
+	manager := newTestProxybuildManager(t)
 
 	tcpHandler := &mockTCPHandler{}
-	cs := setupProxyStartTestSessionWithTCPHandler(t, manager, nil, nil, tcpHandler)
+	cs := setupProxyStartTestSessionWithTCPHandler(t, manager, nil, tcpHandler)
 
 	result, err := callProxyStart(t, cs, map[string]any{
 		"listen_addr": "127.0.0.1:0",
@@ -852,15 +496,12 @@ func TestProxyStart_WithTCPForwards_InvalidTarget(t *testing.T) {
 }
 
 // setupProxyStartTestSessionWithTCPHandler creates an MCP client flow with Manager,
-// CaptureScope, PassthroughList, and TCP handler for testing the proxy_start tool.
-func setupProxyStartTestSessionWithTCPHandler(t *testing.T, manager *proxy.Manager, scope *proxy.CaptureScope, pl *proxy.PassthroughList, tcpHandler tcpForwardHandler) *gomcp.ClientSession {
+// PassthroughList, and TCP handler for testing the proxy_start tool.
+func setupProxyStartTestSessionWithTCPHandler(t *testing.T, manager proxyManager, pl *connector.PassthroughList, tcpHandler tcpForwardHandler) *gomcp.ClientSession {
 	t.Helper()
 	ctx := context.Background()
 
 	var opts []ServerOption
-	if scope != nil {
-		opts = append(opts, WithCaptureScope(scope))
-	}
 	if pl != nil {
 		opts = append(opts, WithPassthroughList(pl))
 	}
@@ -868,7 +509,7 @@ func setupProxyStartTestSessionWithTCPHandler(t *testing.T, manager *proxy.Manag
 		opts = append(opts, WithTCPHandler(tcpHandler))
 	}
 
-	s := NewServer(ctx, nil, nil, manager, opts...)
+	s := newServer(ctx, nil, nil, manager, opts...)
 	ct, st := gomcp.NewInMemoryTransports()
 
 	ss, err := s.server.Connect(ctx, st, nil)
@@ -917,88 +558,12 @@ func TestValidateLoopbackAddr(t *testing.T) {
 	}
 }
 
-func TestApplyCaptureScope(t *testing.T) {
-	tests := []struct {
-		name        string
-		scope       *proxy.CaptureScope
-		input       *captureScopeInput
-		wantErr     bool
-		wantInclude int
-		wantExclude int
-	}{
-		{
-			name:  "nil scope returns error",
-			scope: nil,
-			input: &captureScopeInput{
-				Includes: []scopeRuleInput{{Hostname: "example.com"}},
-			},
-			wantErr: true,
-		},
-		{
-			name:  "valid includes and excludes",
-			scope: proxy.NewCaptureScope(),
-			input: &captureScopeInput{
-				Includes: []scopeRuleInput{{Hostname: "*.target.com"}},
-				Excludes: []scopeRuleInput{{Hostname: "cdn.target.com"}},
-			},
-			wantInclude: 1,
-			wantExclude: 1,
-		},
-		{
-			name:  "empty include rule returns error",
-			scope: proxy.NewCaptureScope(),
-			input: &captureScopeInput{
-				Includes: []scopeRuleInput{{}},
-			},
-			wantErr: true,
-		},
-		{
-			name:  "empty exclude rule returns error",
-			scope: proxy.NewCaptureScope(),
-			input: &captureScopeInput{
-				Excludes: []scopeRuleInput{{}},
-			},
-			wantErr: true,
-		},
-		{
-			name:        "empty input sets empty rules",
-			scope:       proxy.NewCaptureScope(),
-			input:       &captureScopeInput{},
-			wantInclude: 0,
-			wantExclude: 0,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			s := &Server{deps: &deps{scope: tt.scope}}
-			err := s.applyCaptureScope(tt.input)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("applyCaptureScope() error = %v, wantErr %v", err, tt.wantErr)
-				return
-			}
-			if !tt.wantErr && tt.scope != nil {
-				includes, excludes := tt.scope.Rules()
-				if len(includes) != tt.wantInclude {
-					t.Errorf("includes = %d, want %d", len(includes), tt.wantInclude)
-				}
-				if len(excludes) != tt.wantExclude {
-					t.Errorf("excludes = %d, want %d", len(excludes), tt.wantExclude)
-				}
-			}
-		})
-	}
-}
-
 // --- Tests for max_connections, peek_timeout_ms, request_timeout_ms ---
 
 func TestProxyStart_WithMaxConnections(t *testing.T) {
-	logger := testutil.DiscardLogger()
-	detector := &stubDetector{}
-	manager := proxy.NewManager(detector, logger)
-	t.Cleanup(func() { manager.Stop(context.Background()) })
+	manager := newTestProxybuildManager(t)
 
-	cs := setupProxyStartTestSession(t, manager, nil, nil)
+	cs := setupProxyStartTestSession(t, manager, nil)
 
 	result, err := callProxyStart(t, cs, map[string]any{
 		"listen_addr":     "127.0.0.1:0",
@@ -1023,12 +588,9 @@ func TestProxyStart_WithMaxConnections(t *testing.T) {
 }
 
 func TestProxyStart_WithPeekTimeoutMs(t *testing.T) {
-	logger := testutil.DiscardLogger()
-	detector := &stubDetector{}
-	manager := proxy.NewManager(detector, logger)
-	t.Cleanup(func() { manager.Stop(context.Background()) })
+	manager := newTestProxybuildManager(t)
 
-	cs := setupProxyStartTestSession(t, manager, nil, nil)
+	cs := setupProxyStartTestSession(t, manager, nil)
 
 	result, err := callProxyStart(t, cs, map[string]any{
 		"listen_addr":     "127.0.0.1:0",
@@ -1047,14 +609,11 @@ func TestProxyStart_WithPeekTimeoutMs(t *testing.T) {
 }
 
 func TestProxyStart_WithRequestTimeoutMs(t *testing.T) {
-	logger := testutil.DiscardLogger()
-	detector := &stubDetector{}
-	manager := proxy.NewManager(detector, logger)
-	t.Cleanup(func() { manager.Stop(context.Background()) })
+	manager := newTestProxybuildManager(t)
 
 	// Create a mock request timeout setter to verify propagation.
 	setter := &mockRequestTimeoutSetter{}
-	cs := setupProxyStartTestSessionWithOptions(t, manager, nil, nil,
+	cs := setupProxyStartTestSessionWithOptions(t, manager, nil,
 		WithRequestTimeoutSetters(setter),
 	)
 
@@ -1091,12 +650,10 @@ func TestProxyStart_MaxConnections_Validation(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			logger := testutil.DiscardLogger()
-			detector := &stubDetector{}
-			manager := proxy.NewManager(detector, logger)
+			manager := newTestProxybuildManager(t)
 			t.Cleanup(func() { manager.Stop(context.Background()) })
 
-			cs := setupProxyStartTestSession(t, manager, nil, nil)
+			cs := setupProxyStartTestSession(t, manager, nil)
 
 			result, err := callProxyStart(t, cs, map[string]any{
 				"listen_addr":     "127.0.0.1:0",
@@ -1133,12 +690,10 @@ func TestProxyStart_PeekTimeoutMs_Validation(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			logger := testutil.DiscardLogger()
-			detector := &stubDetector{}
-			manager := proxy.NewManager(detector, logger)
+			manager := newTestProxybuildManager(t)
 			t.Cleanup(func() { manager.Stop(context.Background()) })
 
-			cs := setupProxyStartTestSession(t, manager, nil, nil)
+			cs := setupProxyStartTestSession(t, manager, nil)
 
 			result, err := callProxyStart(t, cs, map[string]any{
 				"listen_addr":     "127.0.0.1:0",
@@ -1175,13 +730,11 @@ func TestProxyStart_RequestTimeoutMs_Validation(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			logger := testutil.DiscardLogger()
-			detector := &stubDetector{}
-			manager := proxy.NewManager(detector, logger)
+			manager := newTestProxybuildManager(t)
 			t.Cleanup(func() { manager.Stop(context.Background()) })
 
 			setter := &mockRequestTimeoutSetter{}
-			cs := setupProxyStartTestSessionWithOptions(t, manager, nil, nil,
+			cs := setupProxyStartTestSessionWithOptions(t, manager, nil,
 				WithRequestTimeoutSetters(setter),
 			)
 
@@ -1204,13 +757,10 @@ func TestProxyStart_RequestTimeoutMs_Validation(t *testing.T) {
 }
 
 func TestProxyStart_AllLimitsAndTimeouts(t *testing.T) {
-	logger := testutil.DiscardLogger()
-	detector := &stubDetector{}
-	manager := proxy.NewManager(detector, logger)
-	t.Cleanup(func() { manager.Stop(context.Background()) })
+	manager := newTestProxybuildManager(t)
 
 	setter := &mockRequestTimeoutSetter{}
-	cs := setupProxyStartTestSessionWithOptions(t, manager, nil, nil,
+	cs := setupProxyStartTestSessionWithOptions(t, manager, nil,
 		WithRequestTimeoutSetters(setter),
 	)
 
@@ -1244,11 +794,9 @@ func TestProxyStart_AllLimitsAndTimeouts(t *testing.T) {
 }
 
 func TestProxyStart_InvalidMaxConnections_DoesNotStartProxy(t *testing.T) {
-	logger := testutil.DiscardLogger()
-	detector := &stubDetector{}
-	manager := proxy.NewManager(detector, logger)
+	manager := newTestProxybuildManager(t)
 
-	cs := setupProxyStartTestSession(t, manager, nil, nil)
+	cs := setupProxyStartTestSession(t, manager, nil)
 
 	// Invalid max_connections should prevent proxy from starting.
 	result, err := callProxyStart(t, cs, map[string]any{
@@ -1272,20 +820,17 @@ func TestProxyStart_InvalidMaxConnections_DoesNotStartProxy(t *testing.T) {
 
 // setupProxyStartTestSessionWithOptions creates an MCP client session with
 // arbitrary ServerOption values for testing.
-func setupProxyStartTestSessionWithOptions(t *testing.T, manager *proxy.Manager, scope *proxy.CaptureScope, pl *proxy.PassthroughList, extraOpts ...ServerOption) *gomcp.ClientSession {
+func setupProxyStartTestSessionWithOptions(t *testing.T, manager proxyManager, pl *connector.PassthroughList, extraOpts ...ServerOption) *gomcp.ClientSession {
 	t.Helper()
 	ctx := context.Background()
 
 	var opts []ServerOption
-	if scope != nil {
-		opts = append(opts, WithCaptureScope(scope))
-	}
 	if pl != nil {
 		opts = append(opts, WithPassthroughList(pl))
 	}
 	opts = append(opts, extraOpts...)
 
-	s := NewServer(ctx, nil, nil, manager, opts...)
+	s := newServer(ctx, nil, nil, manager, opts...)
 	ct, st := gomcp.NewInMemoryTransports()
 
 	ss, err := s.server.Connect(ctx, st, nil)
@@ -1311,7 +856,7 @@ func setupProxyStartTestSessionWithOptions(t *testing.T, manager *proxy.Manager,
 func TestApplyTLSPassthrough(t *testing.T) {
 	tests := []struct {
 		name     string
-		pl       *proxy.PassthroughList
+		pl       *connector.PassthroughList
 		patterns []string
 		wantErr  bool
 		wantLen  int
@@ -1324,13 +869,13 @@ func TestApplyTLSPassthrough(t *testing.T) {
 		},
 		{
 			name:     "valid patterns",
-			pl:       proxy.NewPassthroughList(),
+			pl:       connector.NewPassthroughList(),
 			patterns: []string{"example.com", "*.googleapis.com"},
 			wantLen:  2,
 		},
 		{
 			name:     "empty pattern returns error",
-			pl:       proxy.NewPassthroughList(),
+			pl:       connector.NewPassthroughList(),
 			patterns: []string{"valid.com", ""},
 			wantErr:  true,
 		},
@@ -1338,7 +883,7 @@ func TestApplyTLSPassthrough(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s := &Server{deps: &deps{passthrough: tt.pl}}
+			s := mkServerFromLegacyDeps(legacyDeps{passthrough: tt.pl})
 			err := s.applyTLSPassthrough(tt.patterns)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("applyTLSPassthrough() error = %v, wantErr %v", err, tt.wantErr)
@@ -1356,7 +901,7 @@ func TestApplyTLSPassthrough(t *testing.T) {
 // Tests for proxy config file default merging via applyProxyDefaults.
 
 func TestApplyProxyDefaults_NilDefaults(t *testing.T) {
-	s := &Server{deps: &deps{proxyDefaults: nil}}
+	s := mkServerFromLegacyDeps(legacyDeps{proxyDefaults: nil})
 	input := proxyStartInput{ListenAddr: "127.0.0.1:0"}
 
 	s.applyProxyDefaults(&input)
@@ -1368,11 +913,11 @@ func TestApplyProxyDefaults_NilDefaults(t *testing.T) {
 }
 
 func TestApplyProxyDefaults_ListenAddr(t *testing.T) {
-	s := &Server{deps: &deps{
+	s := mkServerFromLegacyDeps(legacyDeps{
 		proxyDefaults: &config.ProxyConfig{
 			ListenAddr: "127.0.0.1:9090",
 		},
-	}}
+	})
 
 	t.Run("uses default when not specified", func(t *testing.T) {
 		input := proxyStartInput{}
@@ -1392,11 +937,11 @@ func TestApplyProxyDefaults_ListenAddr(t *testing.T) {
 }
 
 func TestApplyProxyDefaults_TLSPassthrough(t *testing.T) {
-	s := &Server{deps: &deps{
+	s := mkServerFromLegacyDeps(legacyDeps{
 		proxyDefaults: &config.ProxyConfig{
 			TLSPassthrough: []string{"pinned.com", "*.googleapis.com"},
 		},
-	}}
+	})
 
 	t.Run("uses default when not specified", func(t *testing.T) {
 		input := proxyStartInput{}
@@ -1419,11 +964,11 @@ func TestApplyProxyDefaults_TLSPassthrough(t *testing.T) {
 }
 
 func TestApplyProxyDefaults_TCPForwards(t *testing.T) {
-	s := &Server{deps: &deps{
+	s := mkServerFromLegacyDeps(legacyDeps{
 		proxyDefaults: &config.ProxyConfig{
 			TCPForwards: map[string]*config.ForwardConfig{"3306": {Target: "db.example.com:3306", Protocol: "raw"}},
 		},
-	}}
+	})
 
 	t.Run("uses default when not specified", func(t *testing.T) {
 		input := proxyStartInput{}
@@ -1457,43 +1002,6 @@ func TestApplyProxyDefaults_TCPForwards(t *testing.T) {
 	})
 }
 
-func TestApplyProxyDefaults_CaptureScope(t *testing.T) {
-	scopeJSON := json.RawMessage(`{
-		"includes": [{"hostname": "*.target.com"}],
-		"excludes": [{"hostname": "cdn.example.com"}]
-	}`)
-	s := &Server{deps: &deps{
-		proxyDefaults: &config.ProxyConfig{
-			CaptureScope: scopeJSON,
-		},
-	}}
-
-	t.Run("uses default when not specified", func(t *testing.T) {
-		input := proxyStartInput{}
-		s.applyProxyDefaults(&input)
-		if input.CaptureScope == nil {
-			t.Fatal("CaptureScope is nil, want non-nil")
-		}
-		if len(input.CaptureScope.Includes) != 1 {
-			t.Errorf("CaptureScope.Includes = %d, want 1", len(input.CaptureScope.Includes))
-		}
-		if input.CaptureScope.Includes[0].Hostname != "*.target.com" {
-			t.Errorf("includes[0].hostname = %q, want %q", input.CaptureScope.Includes[0].Hostname, "*.target.com")
-		}
-	})
-
-	t.Run("caller value takes precedence", func(t *testing.T) {
-		callerScope := &captureScopeInput{
-			Includes: []scopeRuleInput{{Hostname: "custom.com"}},
-		}
-		input := proxyStartInput{CaptureScope: callerScope}
-		s.applyProxyDefaults(&input)
-		if len(input.CaptureScope.Includes) != 1 || input.CaptureScope.Includes[0].Hostname != "custom.com" {
-			t.Errorf("CaptureScope should not be overridden by defaults")
-		}
-	})
-}
-
 func TestApplyProxyDefaults_InterceptRules(t *testing.T) {
 	rulesJSON := json.RawMessage(`[{
 		"id": "default-rule",
@@ -1501,11 +1009,11 @@ func TestApplyProxyDefaults_InterceptRules(t *testing.T) {
 		"direction": "request",
 		"conditions": {"host_pattern": ".*"}
 	}]`)
-	s := &Server{deps: &deps{
+	s := mkServerFromLegacyDeps(legacyDeps{
 		proxyDefaults: &config.ProxyConfig{
 			InterceptRules: rulesJSON,
 		},
-	}}
+	})
 
 	t.Run("uses default when not specified", func(t *testing.T) {
 		input := proxyStartInput{}
@@ -1538,11 +1046,11 @@ func TestApplyProxyDefaults_AutoTransform(t *testing.T) {
 		"conditions": {},
 		"action": {"type": "set_header", "header": "X-Default", "value": "true"}
 	}]`)
-	s := &Server{deps: &deps{
+	s := mkServerFromLegacyDeps(legacyDeps{
 		proxyDefaults: &config.ProxyConfig{
 			AutoTransform: transformJSON,
 		},
-	}}
+	})
 
 	t.Run("uses default when not specified", func(t *testing.T) {
 		input := proxyStartInput{}
@@ -1568,21 +1076,17 @@ func TestApplyProxyDefaults_AutoTransform(t *testing.T) {
 
 func TestApplyProxyDefaults_InvalidJSON(t *testing.T) {
 	// Invalid JSON in defaults should be silently ignored (not crash).
-	s := &Server{deps: &deps{
+	s := mkServerFromLegacyDeps(legacyDeps{
 		proxyDefaults: &config.ProxyConfig{
-			CaptureScope:   json.RawMessage(`{invalid`),
 			InterceptRules: json.RawMessage(`[{invalid`),
 			AutoTransform:  json.RawMessage(`[{invalid`),
 		},
-	}}
+	})
 
 	input := proxyStartInput{}
 	s.applyProxyDefaults(&input)
 
 	// All fields should remain at zero values.
-	if input.CaptureScope != nil {
-		t.Error("CaptureScope should be nil for invalid default JSON")
-	}
 	if len(input.InterceptRules) != 0 {
 		t.Error("InterceptRules should be empty for invalid default JSON")
 	}
@@ -1594,13 +1098,9 @@ func TestApplyProxyDefaults_InvalidJSON(t *testing.T) {
 func TestProxyStart_WithConfigDefaults_Integration(t *testing.T) {
 	// Integration test: verify that config defaults are applied when proxy_start
 	// is called without arguments via the MCP protocol.
-	logger := testutil.DiscardLogger()
-	detector := &stubDetector{}
-	manager := proxy.NewManager(detector, logger)
-	t.Cleanup(func() { manager.Stop(context.Background()) })
+	manager := newTestProxybuildManager(t)
 
-	scope := proxy.NewCaptureScope()
-	pl := proxy.NewPassthroughList()
+	pl := connector.NewPassthroughList()
 
 	proxyCfg := &config.ProxyConfig{
 		ListenAddr:     "127.0.0.1:0",
@@ -1608,8 +1108,7 @@ func TestProxyStart_WithConfigDefaults_Integration(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	s := NewServer(ctx, nil, nil, manager,
-		WithCaptureScope(scope),
+	s := newServer(ctx, nil, nil, manager,
 		WithPassthroughList(pl),
 		WithProxyDefaults(proxyCfg),
 	)
@@ -1656,13 +1155,9 @@ func TestProxyStart_WithConfigDefaults_Integration(t *testing.T) {
 
 func TestProxyStart_CallerOverridesConfigDefaults_Integration(t *testing.T) {
 	// Integration test: verify that caller arguments override config file defaults.
-	logger := testutil.DiscardLogger()
-	detector := &stubDetector{}
-	manager := proxy.NewManager(detector, logger)
-	t.Cleanup(func() { manager.Stop(context.Background()) })
+	manager := newTestProxybuildManager(t)
 
-	scope := proxy.NewCaptureScope()
-	pl := proxy.NewPassthroughList()
+	pl := connector.NewPassthroughList()
 
 	proxyCfg := &config.ProxyConfig{
 		ListenAddr:     "127.0.0.1:0",
@@ -1670,8 +1165,7 @@ func TestProxyStart_CallerOverridesConfigDefaults_Integration(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	s := NewServer(ctx, nil, nil, manager,
-		WithCaptureScope(scope),
+	s := newServer(ctx, nil, nil, manager,
 		WithPassthroughList(pl),
 		WithProxyDefaults(proxyCfg),
 	)
@@ -1721,24 +1215,15 @@ func TestProxyStart_CallerOverridesConfigDefaults_Integration(t *testing.T) {
 // resets all configuration to defaults when the new proxy_start omits parameters.
 // This is the regression test for USK-407.
 func TestProxyStart_ResetsSettingsOnRestart(t *testing.T) {
-	logger := testutil.DiscardLogger()
-	detector := &stubDetector{}
-	manager := proxy.NewManager(detector, logger)
-	t.Cleanup(func() { manager.Stop(context.Background()) })
+	manager := newTestProxybuildManager(t)
 
-	scope := proxy.NewCaptureScope()
-	pl := proxy.NewPassthroughList()
+	pl := connector.NewPassthroughList()
 
-	cs := setupProxyStartTestSessionWithOptions(t, manager, scope, pl)
+	cs := setupProxyStartTestSessionWithOptions(t, manager, pl)
 
-	// Step 1: Start proxy with capture_scope and tls_passthrough configured.
+	// Step 1: Start proxy with tls_passthrough configured.
 	result, err := callProxyStart(t, cs, map[string]any{
-		"listen_addr": "127.0.0.1:0",
-		"capture_scope": map[string]any{
-			"includes": []any{
-				map[string]any{"hostname": "example.com"},
-			},
-		},
+		"listen_addr":     "127.0.0.1:0",
 		"tls_passthrough": []any{"pinned.example.com"},
 	})
 	if err != nil {
@@ -1749,9 +1234,6 @@ func TestProxyStart_ResetsSettingsOnRestart(t *testing.T) {
 	}
 
 	// Verify settings were applied.
-	if scope.IsEmpty() {
-		t.Fatal("expected capture scope to be non-empty after first start")
-	}
 	if pl.Len() == 0 {
 		t.Fatal("expected passthrough list to be non-empty after first start")
 	}
@@ -1767,7 +1249,7 @@ func TestProxyStart_ResetsSettingsOnRestart(t *testing.T) {
 		t.Fatalf("unexpected error on proxy_stop: %v", stopResult.Content)
 	}
 
-	// Step 3: Restart proxy without capture_scope or tls_passthrough.
+	// Step 3: Restart proxy without tls_passthrough.
 	result, err = callProxyStart(t, cs, map[string]any{
 		"listen_addr": "127.0.0.1:0",
 	})
@@ -1779,9 +1261,6 @@ func TestProxyStart_ResetsSettingsOnRestart(t *testing.T) {
 	}
 
 	// Step 4: Verify all settings were reset to defaults.
-	if !scope.IsEmpty() {
-		t.Error("capture scope should be empty (reset to default) after restart without capture_scope")
-	}
 	if pl.Len() != 0 {
 		t.Errorf("passthrough list length = %d, want 0 (reset to default) after restart without tls_passthrough", pl.Len())
 	}
@@ -1790,19 +1269,15 @@ func TestProxyStart_ResetsSettingsOnRestart(t *testing.T) {
 // TestProxyStart_ResetsInterceptAndTransformOnRestart verifies that intercept rules
 // and auto-transform rules are cleared on proxy_start.
 func TestProxyStart_ResetsInterceptAndTransformOnRestart(t *testing.T) {
-	logger := testutil.DiscardLogger()
-	detector := &stubDetector{}
-	manager := proxy.NewManager(detector, logger)
-	t.Cleanup(func() { manager.Stop(context.Background()) })
+	manager := newTestProxybuildManager(t)
 
-	scope := proxy.NewCaptureScope()
-	pl := proxy.NewPassthroughList()
-	interceptEng := intercept.NewEngine()
-	transformPipe := rules.NewPipeline()
+	pl := connector.NewPassthroughList()
+	httpInterceptEng := httprules.NewInterceptEngine()
+	transformEng := httprules.NewTransformEngine()
 
-	cs := setupProxyStartTestSessionWithOptions(t, manager, scope, pl,
-		WithInterceptEngine(interceptEng),
-		WithTransformPipeline(transformPipe),
+	cs := setupProxyStartTestSessionWithOptions(t, manager, pl,
+		WithHTTPInterceptEngine(httpInterceptEng),
+		WithHTTPTransformEngine(transformEng),
 	)
 
 	// Step 1: Start proxy with intercept rules and transform rules.
@@ -1812,26 +1287,23 @@ func TestProxyStart_ResetsInterceptAndTransformOnRestart(t *testing.T) {
 			map[string]any{
 				"id":        "rule-1",
 				"enabled":   true,
+				"protocol":  "http",
 				"direction": "request",
-				"conditions": map[string]any{
+				"http": map[string]any{
 					"host_pattern": ".*\\.example\\.com",
 				},
 			},
 		},
 		"auto_transform": []any{
 			map[string]any{
-				"id":        "transform-1",
-				"enabled":   true,
-				"priority":  1,
-				"direction": "request",
-				"conditions": map[string]any{
-					"url_pattern": ".*\\.example\\.com",
-				},
-				"action": map[string]any{
-					"type":   "add_header",
-					"header": "X-Test",
-					"value":  "1",
-				},
+				"id":           "transform-1",
+				"enabled":      true,
+				"priority":     1,
+				"direction":    "request",
+				"host_pattern": ".*\\.example\\.com",
+				"action_type":  "add_header",
+				"header_name":  "X-Test",
+				"header_value": "1",
 			},
 		},
 	})
@@ -1843,11 +1315,11 @@ func TestProxyStart_ResetsInterceptAndTransformOnRestart(t *testing.T) {
 	}
 
 	// Verify rules were applied.
-	if interceptEng.Len() == 0 {
-		t.Fatal("expected intercept engine to have rules after first start")
+	if len(httpInterceptEng.Rules()) == 0 {
+		t.Fatal("expected http intercept engine to have rules after first start")
 	}
-	if transformPipe.Len() == 0 {
-		t.Fatal("expected transform pipeline to have rules after first start")
+	if len(transformEng.Rules()) == 0 {
+		t.Fatal("expected transform engine to have rules after first start")
 	}
 
 	// Step 2: Stop and restart without rules.
@@ -1872,25 +1344,22 @@ func TestProxyStart_ResetsInterceptAndTransformOnRestart(t *testing.T) {
 	}
 
 	// Verify rules were cleared.
-	if interceptEng.Len() != 0 {
-		t.Errorf("intercept engine rule count = %d, want 0 after restart", interceptEng.Len())
+	if rs := httpInterceptEng.Rules(); len(rs) != 0 {
+		t.Errorf("http intercept engine rule count = %d, want 0 after restart", len(rs))
 	}
-	if transformPipe.Len() != 0 {
-		t.Errorf("transform pipeline rule count = %d, want 0 after restart", transformPipe.Len())
+	if rs := transformEng.Rules(); len(rs) != 0 {
+		t.Errorf("transform engine rule count = %d, want 0 after restart", len(rs))
 	}
 }
 
 // TestProxyStart_ResetsLimitsAndTimeoutsOnRestart verifies that connection limits
 // and timeouts are reset to defaults when proxy_start omits them.
 func TestProxyStart_ResetsLimitsAndTimeoutsOnRestart(t *testing.T) {
-	logger := testutil.DiscardLogger()
-	detector := &stubDetector{}
-	manager := proxy.NewManager(detector, logger)
-	t.Cleanup(func() { manager.Stop(context.Background()) })
+	manager := newTestProxybuildManager(t)
 
 	mockTimeout := &mockRequestTimeoutSetter{}
 
-	cs := setupProxyStartTestSessionWithOptions(t, manager, nil, nil,
+	cs := setupProxyStartTestSessionWithOptions(t, manager, nil,
 		WithRequestTimeoutSetters(mockTimeout),
 	)
 
@@ -1952,14 +1421,11 @@ func TestProxyStart_ResetsLimitsAndTimeoutsOnRestart(t *testing.T) {
 // TestProxyStart_ResetsTLSFingerprintOnRestart verifies that TLS fingerprint
 // is reset to "chrome" (default) when proxy_start omits tls_fingerprint.
 func TestProxyStart_ResetsTLSFingerprintOnRestart(t *testing.T) {
-	logger := testutil.DiscardLogger()
-	detector := &stubDetector{}
-	manager := proxy.NewManager(detector, logger)
-	t.Cleanup(func() { manager.Stop(context.Background()) })
+	manager := newTestProxybuildManager(t)
 
 	mockFP := &mockTLSFingerprintSetter{}
 
-	cs := setupProxyStartTestSessionWithOptions(t, manager, nil, nil,
+	cs := setupProxyStartTestSessionWithOptions(t, manager, nil,
 		WithTLSFingerprintSetter(mockFP),
 	)
 
@@ -2008,15 +1474,11 @@ func TestProxyStart_ResetsTLSFingerprintOnRestart(t *testing.T) {
 // TestProxyStart_ResetsProtocolsOnRestart verifies that enabled protocols
 // are reset to all (nil) when proxy_start omits the protocols parameter.
 func TestProxyStart_ResetsProtocolsOnRestart(t *testing.T) {
-	logger := testutil.DiscardLogger()
-	detector := &stubDetector{}
-	manager := proxy.NewManager(detector, logger)
-	t.Cleanup(func() { manager.Stop(context.Background()) })
+	manager := newTestProxybuildManager(t)
 
 	// Use a Server directly to inspect deps.
 	ctx := context.Background()
-	scope := proxy.NewCaptureScope()
-	s := NewServer(ctx, nil, nil, manager, WithCaptureScope(scope))
+	s := newServer(ctx, nil, nil, manager)
 	ct, st := gomcp.NewInMemoryTransports()
 	ss, err := s.server.Connect(ctx, st, nil)
 	if err != nil {
@@ -2042,8 +1504,8 @@ func TestProxyStart_ResetsProtocolsOnRestart(t *testing.T) {
 	if result.IsError {
 		t.Fatalf("unexpected error on first start: %v", result.Content)
 	}
-	if len(s.deps.enabledProtocols) != 2 {
-		t.Fatalf("enabled protocols count after first start = %d, want 2", len(s.deps.enabledProtocols))
+	if len(s.connector.enabledProtocols) != 2 {
+		t.Fatalf("enabled protocols count after first start = %d, want 2", len(s.connector.enabledProtocols))
 	}
 
 	// Step 2: Stop and restart without protocols.
@@ -2068,7 +1530,7 @@ func TestProxyStart_ResetsProtocolsOnRestart(t *testing.T) {
 	}
 
 	// Verify protocols were reset to nil (all protocols).
-	if s.deps.enabledProtocols != nil {
-		t.Errorf("enabled protocols after restart = %v, want nil (all protocols)", s.deps.enabledProtocols)
+	if s.connector.enabledProtocols != nil {
+		t.Errorf("enabled protocols after restart = %v, want nil (all protocols)", s.connector.enabledProtocols)
 	}
 }

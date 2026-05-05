@@ -6,116 +6,86 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 )
 
-func TestBuildProtocolSummary_WebSocket(t *testing.T) {
-	msgs := []*flow.Flow{
-		{Sequence: 0, Direction: "send", Body: []byte("hello"), Metadata: map[string]string{"opcode": "1"}},
-		{Sequence: 1, Direction: "receive", Body: []byte("world"), Metadata: map[string]string{"opcode": "1"}},
-		{Sequence: 2, Direction: "send", Body: []byte("bye"), Metadata: map[string]string{"opcode": "8"}},
-	}
+// TestBuildProtocolSummary_CanonicalSpellings verifies the canonical
+// Envelope.Protocol values dispatch correctly. Legacy spellings were
+// retired in USK-705 (RFC-001 N9 design review Q8).
+func TestBuildProtocolSummary_CanonicalSpellings(t *testing.T) {
+	t.Run("ws", func(t *testing.T) {
+		msgs := []*flow.Flow{
+			{Sequence: 0, Direction: "send", Metadata: map[string]string{"opcode": "1"}},
+			{Sequence: 1, Direction: "receive", Metadata: map[string]string{"opcode": "8"}},
+		}
+		summary := buildProtocolSummary("ws", msgs)
+		if summary == nil {
+			t.Fatal("summary should not be nil for canonical ws")
+		}
+		if summary["message_count"] != "2" {
+			t.Errorf("message_count = %q, want 2", summary["message_count"])
+		}
+		if summary["last_frame_type"] != "Close" {
+			t.Errorf("last_frame_type = %q, want Close", summary["last_frame_type"])
+		}
+	})
 
-	summary := buildProtocolSummary("WebSocket", msgs)
+	t.Run("grpc", func(t *testing.T) {
+		msgs := []*flow.Flow{
+			{Sequence: 0, Direction: "send", Metadata: map[string]string{"service": "S", "method": "M"}},
+			{Sequence: 1, Direction: "receive", Metadata: map[string]string{"grpc_status": "0"}},
+		}
+		summary := buildProtocolSummary("grpc", msgs)
+		if summary == nil {
+			t.Fatal("summary should not be nil for canonical grpc")
+		}
+		if summary["service"] != "S" || summary["method"] != "M" || summary["grpc_status"] != "0" {
+			t.Errorf("unexpected summary: %+v", summary)
+		}
+	})
 
-	if summary == nil {
-		t.Fatal("summary should not be nil for WebSocket")
-	}
-	if summary["message_count"] != "3" {
-		t.Errorf("message_count = %q, want 3", summary["message_count"])
-	}
-	if summary["last_frame_type"] != "Close" {
-		t.Errorf("last_frame_type = %q, want Close", summary["last_frame_type"])
-	}
-}
+	t.Run("grpc-web", func(t *testing.T) {
+		msgs := []*flow.Flow{
+			{Sequence: 0, Direction: "send", Metadata: map[string]string{"service": "S", "method": "M"}},
+		}
+		summary := buildProtocolSummary("grpc-web", msgs)
+		if summary == nil {
+			t.Fatal("summary should not be nil for canonical grpc-web")
+		}
+		if summary["service"] != "S" {
+			t.Errorf("service = %q, want S", summary["service"])
+		}
+	})
 
-func TestBuildProtocolSummary_WebSocket_Empty(t *testing.T) {
-	summary := buildProtocolSummary("WebSocket", nil)
+	t.Run("raw", func(t *testing.T) {
+		msgs := []*flow.Flow{
+			{Sequence: 0, Direction: "send", Body: []byte("ab")},
+			{Sequence: 1, Direction: "receive", Body: []byte("cde")},
+		}
+		summary := buildProtocolSummary("raw", msgs)
+		if summary == nil {
+			t.Fatal("summary should not be nil for canonical raw")
+		}
+		if summary["send_bytes"] != "2" || summary["receive_bytes"] != "3" {
+			t.Errorf("unexpected raw summary: %+v", summary)
+		}
+	})
 
-	if summary == nil {
-		t.Fatal("summary should not be nil")
-	}
-	if summary["message_count"] != "0" {
-		t.Errorf("message_count = %q, want 0", summary["message_count"])
-	}
-	if _, ok := summary["last_frame_type"]; ok {
-		t.Error("last_frame_type should not be present for empty messages")
-	}
-}
+	t.Run("sse_returns_nil", func(t *testing.T) {
+		msgs := []*flow.Flow{{Sequence: 0, Direction: "receive"}}
+		if got := buildProtocolSummary("sse", msgs); got != nil {
+			t.Errorf("sse summary should be nil (no dedicated builder), got %+v", got)
+		}
+	})
 
-func TestBuildProtocolSummary_HTTP2(t *testing.T) {
-	msgs := []*flow.Flow{
-		{Sequence: 0, Direction: "send", Method: "GET"},
-		{Sequence: 1, Direction: "receive", StatusCode: 200},
-	}
+	t.Run("tls-handshake_returns_nil", func(t *testing.T) {
+		if got := buildProtocolSummary("tls-handshake", nil); got != nil {
+			t.Errorf("tls-handshake summary should be nil, got %+v", got)
+		}
+	})
 
-	summary := buildProtocolSummary("HTTP/2", msgs)
-
-	if summary == nil {
-		t.Fatal("summary should not be nil for HTTP/2")
-	}
-	if summary["stream_count"] != "1" {
-		t.Errorf("stream_count = %q, want 1", summary["stream_count"])
-	}
-}
-
-func TestBuildProtocolSummary_GRPC(t *testing.T) {
-	msgs := []*flow.Flow{
-		{Sequence: 0, Direction: "send", Metadata: map[string]string{"service": "UserService", "method": "GetUser"}},
-		{Sequence: 1, Direction: "receive", Metadata: map[string]string{"grpc_status": "0"}},
-	}
-
-	summary := buildProtocolSummary("gRPC", msgs)
-
-	if summary == nil {
-		t.Fatal("summary should not be nil for gRPC")
-	}
-	if summary["service"] != "UserService" {
-		t.Errorf("service = %q, want UserService", summary["service"])
-	}
-	if summary["method"] != "GetUser" {
-		t.Errorf("method = %q, want GetUser", summary["method"])
-	}
-	if summary["grpc_status"] != "0" {
-		t.Errorf("grpc_status = %q, want 0", summary["grpc_status"])
-	}
-	if summary["grpc_status_name"] != "OK" {
-		t.Errorf("grpc_status_name = %q, want OK", summary["grpc_status_name"])
-	}
-}
-
-func TestBuildProtocolSummary_TCP(t *testing.T) {
-	msgs := []*flow.Flow{
-		{Sequence: 0, Direction: "send", Body: []byte("hello")},
-		{Sequence: 1, Direction: "receive", Body: []byte("world!")},
-		{Sequence: 2, Direction: "send", Body: []byte("bye")},
-	}
-
-	summary := buildProtocolSummary("TCP", msgs)
-
-	if summary == nil {
-		t.Fatal("summary should not be nil for TCP")
-	}
-	if summary["send_bytes"] != "8" { // "hello" + "bye" = 5 + 3
-		t.Errorf("send_bytes = %q, want 8", summary["send_bytes"])
-	}
-	if summary["receive_bytes"] != "6" { // "world!"
-		t.Errorf("receive_bytes = %q, want 6", summary["receive_bytes"])
-	}
-}
-
-func TestBuildProtocolSummary_HTTP(t *testing.T) {
-	msgs := []*flow.Flow{
-		{Sequence: 0, Direction: "send"},
-		{Sequence: 1, Direction: "receive"},
-	}
-
-	summary := buildProtocolSummary("HTTP/1.x", msgs)
-	if summary != nil {
-		t.Error("summary should be nil for HTTP/1.x")
-	}
-
-	summary = buildProtocolSummary("HTTPS", msgs)
-	if summary != nil {
-		t.Error("summary should be nil for HTTPS")
-	}
+	t.Run("unknown_returns_nil", func(t *testing.T) {
+		if got := buildProtocolSummary("nonsense-protocol", nil); got != nil {
+			t.Errorf("unknown protocol should yield nil, got %+v", got)
+		}
+	})
 }
 
 func TestWsOpcodeLabel(t *testing.T) {

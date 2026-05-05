@@ -2,13 +2,9 @@
 //
 // Responsibility: handshake, authentication, CONNECT command parsing, and
 // target validation against the scope/rate-limit policies. Once Negotiate
-// returns, the raw post-handshake tunnel is handed off to the shared
-// TunnelHandler from USK-560 which owns all TLS MITM / ALPN detection /
-// plugin dispatch / RunSession plumbing.
-//
-// This file intentionally does NOT import from internal/protocol/socks5/.
-// That package is M44-doomed. The wire-format parsing here is a self
-// contained re-implementation that matches the same RFCs.
+// returns, the raw post-handshake tunnel is handed off to NewSOCKS5Handler
+// (socks5_handler.go) which builds the ConnectionStack and dispatches the
+// resulting Layer pair.
 package connector
 
 import (
@@ -22,13 +18,9 @@ import (
 	"net"
 	"strconv"
 	"time"
-
-	"github.com/usk6666/yorishiro-proxy/internal/plugin"
 )
 
-// SOCKS5 protocol constants (RFC 1928 + RFC 1929). They are intentionally
-// duplicated here rather than imported from internal/protocol/socks5 so the
-// M44 removal of the old package is a clean delete.
+// SOCKS5 protocol constants (RFC 1928 + RFC 1929).
 const (
 	socks5Version byte = 0x05
 
@@ -60,9 +52,7 @@ const (
 	socks5ReplyAddrTypeNotSupported byte = 0x08
 )
 
-// Auth method labels exposed via context / plugin hook data. They match the
-// strings used by the legacy internal/protocol/socks5 handler so downstream
-// consumers (plugins, tags, logs) continue to see identical values.
+// Auth method labels exposed via context / plugin hook data.
 const (
 	socks5AuthMethodNone             = "none"
 	socks5AuthMethodUsernamePassword = "username_password"
@@ -71,9 +61,6 @@ const (
 // socks5HandshakeTimeout bounds the entire SOCKS5 handshake phase so a
 // lingering client cannot stall a negotiator goroutine.
 const socks5HandshakeTimeout = 30 * time.Second
-
-// socks5PluginHookTimeout bounds dispatch of on_socks5_connect.
-const socks5PluginHookTimeout = 5 * time.Second
 
 // Sentinel errors returned to the caller so integration glue can identify
 // denial paths without string matching. The negotiator is still responsible
@@ -143,12 +130,12 @@ func (s *StaticAuthenticator) Authenticate(username, password string) bool {
 
 // SOCKS5Negotiator drives the SOCKS5 handshake (RFC 1928 method negotiation,
 // optional RFC 1929 sub-negotiation, CONNECT command parsing, scope / rate
-// limit checks, plugin hook dispatch, and the success reply). After a
-// successful Negotiate the raw post-handshake connection is handed to the
-// shared TunnelHandler by the caller.
+// limit checks, and the success reply). After a successful Negotiate the raw
+// post-handshake connection is handed to NewSOCKS5Handler (socks5_handler.go)
+// which builds the ConnectionStack.
 //
 // All fields are optional except where noted. The zero value is usable and
-// behaves as "accept NO_AUTH, no policy enforcement, no plugin hook".
+// behaves as "accept NO_AUTH, no policy enforcement".
 type SOCKS5Negotiator struct {
 	// Authenticator is the default RFC 1929 authenticator. When non-nil, the
 	// negotiator prefers USERNAME_PASSWORD over NO_AUTH during method
@@ -169,19 +156,9 @@ type SOCKS5Negotiator struct {
 	// disables rate limiting.
 	RateLimiter *RateLimiter
 
-	// PluginEngine dispatches on_socks5_connect. Nil disables the hook.
-	// Errors from the engine are always logged and swallowed (fail-open) so
-	// a buggy plugin cannot block the tunnel.
-	PluginEngine *plugin.Engine
-
 	// Logger is used for handler-wide diagnostics. A per-connection logger
 	// is still pulled out of the context when present.
 	Logger *slog.Logger
-
-	// pluginDispatchOverride is a test-only override that replaces the
-	// PluginEngine.Dispatch call in dispatchOnSOCKS5Connect. It is
-	// intentionally unexported.
-	pluginDispatchOverride pluginHookDispatcher
 }
 
 // NewSOCKS5Negotiator returns a negotiator configured with the given logger.
@@ -198,9 +175,8 @@ func NewSOCKS5Negotiator(logger *slog.Logger) *SOCKS5Negotiator {
 // enriched ctx (carrying the authenticated username / auth method / target
 // so downstream hooks can observe it) and the parsed "host:port" target.
 //
-// Negotiate does NOT close conn. The caller (the SOCKS5Handler adapter) is
-// responsible for handing conn to TunnelHandler, which owns it from that
-// point on.
+// Negotiate does NOT close conn. The caller (NewSOCKS5Handler) is responsible
+// for handing conn to BuildConnectionStack, which owns it from that point on.
 //
 // Error paths:
 //
@@ -235,17 +211,13 @@ func (n *SOCKS5Negotiator) Negotiate(ctx context.Context, conn net.Conn) (contex
 		return ctx, "", fmt.Errorf("socks5: request: %w", err)
 	}
 
-	// Step 3: TargetScope check. Duplicate with TunnelHandler's own scope
-	// check; that is intentional per the Issue's Design Judgment #2 — SOCKS5
-	// needs to send REP=0x02 BEFORE any tunnel bytes, which TunnelHandler's
-	// later check cannot provide.
+	// Step 3: TargetScope check. Performed inline because SOCKS5 needs to
+	// send REP=0x02 BEFORE any tunnel bytes — a downstream check at
+	// BuildConnectionStack time cannot meet that requirement.
 	//
 	// Scheme is passed as "" because at handshake time SOCKS5 does not know
 	// the tunneled protocol. Scope rules that are restricted by Schemes
-	// (e.g. Schemes: ["https"]) will not match here and will instead be
-	// enforced downstream by TunnelHandler with scheme="https". This means
-	// scheme-aware denial for scheme-restricted rules is deferred by one
-	// step but not bypassed.
+	// (e.g. Schemes: ["https"]) will not match here.
 	if n.Scope != nil && n.Scope.HasRules() {
 		host, portStr, splitErr := net.SplitHostPort(target)
 		port := 0
@@ -286,11 +258,7 @@ func (n *SOCKS5Negotiator) Negotiate(ctx context.Context, conn net.Conn) (contex
 		ctx = ContextWithSOCKS5AuthUser(ctx, authUser)
 	}
 
-	// Step 5: plugin hook (fail-open). Fired BEFORE the reply so the hook
-	// sees a consistent in-handshake state; errors are swallowed.
-	n.dispatchOnSOCKS5Connect(ctx, target, authMethodName, authUser)
-
-	// Step 6: success reply.
+	// Step 5: success reply.
 	if err := writeSOCKS5Reply(conn, socks5ReplySuccess); err != nil {
 		return ctx, "", fmt.Errorf("socks5: write success reply: %w", err)
 	}
@@ -502,8 +470,8 @@ func readSOCKS5Address(conn net.Conn, atyp byte) (string, error) {
 
 // writeSOCKS5Reply emits a SOCKS5 reply with the given REP code and
 // BND.ADDR / BND.PORT = 0.0.0.0:0. We do not echo the actual upstream bind
-// address because the upstream dial has not yet happened — TunnelHandler
-// may defer it, and most clients do not inspect BND.* for non-BIND flows.
+// address because the upstream dial has not yet happened, and most clients
+// do not inspect BND.* for non-BIND flows.
 func writeSOCKS5Reply(conn net.Conn, rep byte) error {
 	reply := []byte{
 		socks5Version,
@@ -530,48 +498,6 @@ func (n *SOCKS5Negotiator) authenticatorFor(listenerName string) Authenticator {
 	return n.Authenticator
 }
 
-// dispatchOnSOCKS5Connect delivers the on_socks5_connect plugin hook. Errors
-// are logged and swallowed so a buggy plugin cannot block the handshake
-// (fail-open). The hook data matches the layout used by the legacy
-// internal/protocol/socks5 handler so existing plugins keep working.
-func (n *SOCKS5Negotiator) dispatchOnSOCKS5Connect(ctx context.Context, target, authMethod, authUser string) {
-	var dispatch pluginHookDispatcher
-	switch {
-	case n.pluginDispatchOverride != nil:
-		dispatch = n.pluginDispatchOverride
-	case n.PluginEngine != nil:
-		dispatch = n.PluginEngine.Dispatch
-	default:
-		return
-	}
-
-	hookCtx, cancel := context.WithTimeout(ctx, socks5PluginHookTimeout)
-	defer cancel()
-
-	host, portStr, splitErr := net.SplitHostPort(target)
-	port := 0
-	if splitErr == nil {
-		if p, perr := strconv.Atoi(portStr); perr == nil {
-			port = p
-		}
-	}
-
-	data := map[string]any{
-		"event":       "socks5_connect",
-		"target_host": host,
-		"target_port": port,
-		"target":      target,
-		"auth_method": authMethod,
-		"auth_user":   authUser,
-		"client_addr": ClientAddrFromContext(ctx),
-	}
-
-	if _, err := dispatch(hookCtx, plugin.HookOnSOCKS5Connect, data); err != nil {
-		n.logger(ctx).Warn("plugin on_socks5_connect hook error",
-			"target", target, "error", err)
-	}
-}
-
 // logger returns the best logger for a given ctx, falling back to the
 // negotiator's own logger and finally slog.Default().
 func (n *SOCKS5Negotiator) logger(ctx context.Context) *slog.Logger {
@@ -579,47 +505,4 @@ func (n *SOCKS5Negotiator) logger(ctx context.Context) *slog.Logger {
 		return l
 	}
 	return slog.Default()
-}
-
-// --- Handler adapter -------------------------------------------------------
-
-// SOCKS5Handler builds a Dispatcher-compatible handler function that runs the
-// SOCKS5 negotiator, then hands the raw post-handshake connection to the
-// shared TunnelHandler. Either argument may be nil — the handler returns an
-// error in that case rather than silently dropping connections.
-func SOCKS5Handler(negotiator *SOCKS5Negotiator, tunnel *TunnelHandler) func(ctx context.Context, conn *PeekConn, factory CodecFactory) error {
-	return func(ctx context.Context, conn *PeekConn, _ CodecFactory) error {
-		if negotiator == nil {
-			return errors.New("connector: SOCKS5 negotiator not configured")
-		}
-		if tunnel == nil {
-			return errors.New("connector: tunnel handler not configured")
-		}
-		newCtx, target, err := negotiator.Negotiate(ctx, conn)
-		if err != nil {
-			// Scope / rate-limit / auth denials have already delivered the
-			// correct SOCKS5 reply to the client. Return nil so the listener
-			// logs at Debug instead of Error; the dispatcher-level log path
-			// remains reserved for truly unexpected failures.
-			//
-			// Scope and rate-limit denials are surfaced through TunnelHandler's
-			// OnBlock callback so observers (tests, flow recording in main.go)
-			// can treat them identically to CONNECT-path denials.
-			switch {
-			case errors.Is(err, ErrSOCKS5BlockedByScope):
-				tunnel.ReportBlock(newCtx, target, "target_scope", "SOCKS5")
-				return nil
-			case errors.Is(err, ErrSOCKS5BlockedByRateLimit):
-				tunnel.ReportBlock(newCtx, target, "rate_limit", "SOCKS5")
-				return nil
-			case errors.Is(err, ErrSOCKS5AuthFailed),
-				errors.Is(err, ErrSOCKS5UnsupportedCommand),
-				errors.Is(err, ErrSOCKS5UnsupportedAddrType),
-				errors.Is(err, ErrSOCKS5NoAcceptableMethods):
-				return nil
-			}
-			return fmt.Errorf("connector: SOCKS5 negotiate: %w", err)
-		}
-		return tunnel.Handle(newCtx, conn, target, "SOCKS5")
-	}
 }

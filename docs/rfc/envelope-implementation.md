@@ -48,6 +48,27 @@ Spolsky の警告は「既存コードに蓄積された無数のエッジケー
 
 ## 2. ファイル別 コピー vs スクラッチ判定
 
+### Milestone → spec section map (for token-efficient context load)
+
+`/rfc001` skill (Phase 0-2) uses this table to load only the spec sections relevant to the active milestone, instead of reading `envelope.md` in full. **Always-load tier**: §1-2 of `envelope.md` (Motivation + Non-Goals) plus §3.1-3.3 (Envelope / Message / Layer+Channel) — these are the foundational types every milestone references. **On-demand tier**: per-milestone sections below.
+
+| Milestone | `envelope.md` sections | `envelope-implementation.md` frictions |
+|---|---|---|
+| N1 (ByteChunk + Layer + Channel) | §3.3 (Layer+Channel detail) | Friction 1-A, 1-B |
+| N2 (Vertical slice — raw smuggling E2E) | §4.2 (smuggling scenario), §5 (Variant Snapshot) | Friction 1-A, 1-B |
+| N3 (HTTP/1 layer) | §3.2 (HTTPMessage), §3.5 (Pipeline Step categorization), §4.1 (plain HTTP/1.1) | Friction 9, 11 |
+| N4 (Connector completion) | §3.4 (ConnectionStack), §3.6 (Rule engine split) | Friction 1-A, 9, 10 |
+| N5 (Job + Macro integration) | §3.5, §10.4 (hook system alternative — context only) | Friction 9, 10 |
+| N6 (HTTP/2 layer) | §3.2 (HTTPMessage), §4.4 (H2 multiplexing), §9.1 (OQ#1 resolution) | Friction 3-A, 3-B, 3-C, 3-D, 4-D |
+| N6.5 (disk-backed body) | §3.2 (Body type detail), §9.1 | Friction 3-C |
+| N6.6 (pool / push / wireencode) | §3.4 (ConnectionStack), §5 (Variant Snapshot) | Friction 3-A, 3-B |
+| N6.7 (H2 split → event + httpaggregator) | §3.3, §9.1 (revised), §9.2 | Friction 4-D |
+| N7 (gRPC, gRPC-Web, WS, SSE) | §3.2, §4.3 (WS), §4.4 (gRPC), §9.2 | Friction 4-A, 4-B, 4-C, 2-A, 2-B, 2-C |
+| N8 (Plugin v2 — Starlark) | §3.5, §8 (Relationship to plugin), §9.3 | Friction 5-A, 5-B, 5-C |
+| N9 (Legacy removal + production wiring) | §6 (Migration), §7 (Milestones), §11 (Acceptance) | Friction 12 |
+
+> **Escape hatch**: if the design-reviewer agent flags that a section not listed for the milestone is load-bearing, add it here and re-run. The table is a conservative starting set, not a hard cap.
+
 ### コピー対象 (中身を見ない、package 名と import だけ直す)
 
 | コピー元 | コピー先 | 理由 |
@@ -73,6 +94,7 @@ Spolsky の警告は「既存コードに蓄積された無数のエッジケー
 | `internal/layer/tlslayer/` | TLS handshake の関数群を Server/Client の関数として再編 |
 | `internal/layer/http1/layer.go`, `channel.go` | parser は流用、しかし Codec → Layer の concept 変換がある |
 | `internal/layer/http2/` 全体 | HTTP/2 の multiplexing を layer として再設計 (M40 以前の設計は放棄) |
+| `internal/layer/httpaggregator/` (新規) | 2026-04-23 §9.1/§9.2 改訂の aftermath。event-granular H2 Channel 上で HTTPMessage を作る wrapper。N6.7 で N6/N6.5/N6.6 の aggregation ロジックをここに切り出す (アルゴリズム流用 85%) |
 | `internal/layer/ws/`, `grpc/`, `grpcweb/`, `sse/` | application layer として再設計 |
 | `internal/pipeline/*_step.go` 全部 | type-switch dispatch の書き方は現行と別物 |
 | `internal/pipeline/pipeline.go`, `snapshot.go` | interface 自体はほぼ同じだが、Envelope 型になるのと Message.CloneMessage() を使うので書き直し (コピペではなく) |
@@ -241,7 +263,8 @@ RFC を accepted にした以上、実装時の誘惑に抗うために明示化
    - 結論なしで実装に入ると手戻りコストが極端に高い (特に #1: HTTP/2 flow control は後から変えると layer 構造まで影響する)
 
 8. **Starlark plugin の hook シグネチャを「なんとなく残す」をしない**
-   - Open Question #3 の結論が出るまで plugin 関連は触らない
+   - **OQ#3 RESOLVED (2026-04-29)**: hook identity は `(protocol, event, phase)` の 3 軸。Pipeline 上に `PluginStepPre` / `PluginStepPost` の 2 段。詳細は RFC §9.3
+   - 旧 8-hook (`on_receive_from_client` 等) は完全廃止。compat alias は禁止 (rule 5「shim 無し」と整合)
    - 中途半端な互換 hook を書くと削除コストが発生する
 
 9. **WebUI を「後で対応」と言って temporarily broken にしない**
@@ -258,7 +281,7 @@ RFC を accepted にした以上、実装時の誘惑に抗うために明示化
 | Scrap-and-build が当初見積より遅延する | branch 上で作業するので main は安全。遅延しても本体が壊れない。Stuck したら RFC に立ち返る |
 | N2 の vertical slice で致命的な設計欠陥が見つかる | むしろそれが目的。N2 は **設計検証マイルストーン** と位置付ける。欠陥が見つかったら RFC を draft に戻して改訂 OK |
 | コピーしたファイルの中に古い型依存が残る (例: parser が Exchange 参照) | 事前に grep で "exchange" / "codec" / "proxy" への参照を洗い出しておく |
-| Starlark plugin hook インターフェース変更でユーザ script が全部壊れる | OSS としてのユーザ互換性の話。RFC §9.3 で決める予定。N8 前までは決定を延ばす |
+| Starlark plugin hook インターフェース変更でユーザ script が全部壊れる | **解決 (2026-04-29, RFC §9.3 resolved)**: hard break + 1ページ migration table を N9 release notes に同梱。Hook identity は `(protocol, event, phase)` の 3 軸。`PluginStepPre` / `PluginStepPost` の 2 段構成で Pipeline 前後どちらでも fire 可能 (resend/fuzz は post のみ)。compat shim 無し |
 | HTTP/2 flow control 問題 (§9.1) の解決が N6 に間に合わない | N6 の最初に「Flow Control 設計ミニセッション」を単独で実行。他の作業に着手する前にブロック |
 | gRPC granularity (§9.2) の frame-per-envelope 暫定案が実装時に破綻 | 暫定案が破綻したら N7 を一時中断して §9.2 を再議論。破綻パターンを記録してからでないと代替案を選べない |
 | flow/store の DB migration で既存の test データが失われる | yorishiro は開発中なので既存データは捨ててよい。ただし migration script は書かず drop-and-create で十分 |
@@ -350,9 +373,9 @@ RFC を accepted にした以上、実装時の誘惑に抗うために明示化
 2. Pipeline 駆動の back-pressure
 3. Intercept を非同期化
 
-**解決 (RFC 提案):** Option 1 + per-stream buffer cap + 超過時 RST_STREAM。
+**解決 (RFC 正式 resolution, 2026-04-23 再起草版):** event-granular HTTP/2 Layer + per-stream BodyBuffer + soft/hard cap。WINDOW_UPDATE は buffer append 時点で送信 (Pipeline 消費とは decouple)。plain HTTP 用の aggregation は `HTTPAggregatorLayer` に分離 (Friction 4-D 参照)。
 
-**状態:** Open Question #1 として追跡。**N6 着手前に決定必須**。
+**状態:** **RESOLVED** (RFC §9.1 正式 resolution, 2026-04-23 再起草)。実装は N6 / N6.5 / N6.6 で in-layer aggregation 版が完了しており、N6.7 で event-granular + HTTPAggregatorLayer へリファクタする。
 
 ### Friction 3-D: stream lifecycle error の区別
 
@@ -377,18 +400,47 @@ HTTP/2 layer が RST_STREAM frame を受けたとき、ErrorCode を翻訳して
 
 **状態:** 解決済み (RFC §3.3.2, §4.4 に反映)
 
-### Friction 4-B: gRPC Envelope 粒度
+### Friction 4-B: gRPC Envelope 粒度 [RESOLVED 2026-04-23]
 
 **問題:** 1 gRPC RPC = HEADERS + DATA* + trailer-HEADERS。これをどう Envelope に割るか。
 
-**選択肢 (RFC §9.2 に記載済み):**
-1. frame-per-envelope (HEADERS = HTTPMessage, each DATA = GRPCMessage, trailers = HTTPMessage with Trailers)
-2. message-per-envelope (aggregate)
-3. rpc-per-envelope (unary only works)
+**解決 (RFC §9.2 正式 resolution):** **event-per-envelope + 専用 Message 型**。
+- `GRPCStartMessage` (HEADERS; request-side / response-side 各 1)
+- `GRPCDataMessage` (each length-prefixed gRPC message; LPM 単位で reassembly)
+- `GRPCEndMessage` (trailer HEADERS; grpc-status / grpc-message / grpc-status-details-bin を parsed で持つ)
 
-**解決 (暫定):** Option 1。Pipeline Step が複数 Envelope をまたいで accumulate したい場合は StreamID で束ねる。
+粒度は **LPM 単位** であって HTTP/2 DATA frame 単位ではない (frame 境界と LPM 境界は独立)。`Envelope.Raw` は wire そのままの bytes を持つ (compressed なら compressed のまま)。`GRPCDataMessage.Payload` は常に decompressed (UI/intercept での観察容易性)。
 
-**状態:** Open Question #2 として追跡。**N7 着手前に決定必須**。
+**HTTPMessage は流用しない**。理由: trailers を HTTPMessage に詰めると Method/URL/Status/Body 空の "type-system lie" が生まれ、§3.1 design rule に反する。
+
+**関連決定 (Friction 4-D / 4-E として分離管理)**:
+- §9.1 の "in-layer aggregation" 初版 resolution は、gRPC streaming と両立しないため 2026-04-23 に再起草。HTTP/2 Layer は event-granular になり、aggregation は `HTTPAggregatorLayer` wrapper に分離 (下記 Friction 4-D 参照)。
+- N6/N6.5/N6.6 で実装した HTTP/2 Layer の aggregation ロジックは破棄せず、HTTPAggregatorLayer へそのまま移設する (N6.7 aftermath、85% 流用)。
+
+**状態:** **RESOLVED**。N7 着手前の blocker は解除。実装詳細は N6.7 で Layer 切り分け完了後に N7 (gRPC 実装) に着手する。
+
+### Friction 4-D: HTTP/2 Layer 分割 (N6 aftermath)
+
+**問題:** §9.1 初版 resolution は HTTP/2 Layer が HEADERS+DATA+TRAILERS を aggregate して HTTPMessage を返す設計だった。しかし §9.2 で gRPC streaming を first-class に扱うことが決まった (event-per-envelope)。streaming RPC では aggregate する対象 (END_STREAM) がいつ来るか分からないため、in-layer aggregation は成立しない。
+
+**解決:** HTTP/2 Layer を二層構造に分解する。
+
+```
+internal/layer/http2/          ← event-granular (H2HeadersEvent / H2DataEvent / H2TrailersEvent)
+                                  BodyBuffer-driven flow control
+                                  per-stream soft cap → stream-level stall / disk spill
+                                  per-stream hard cap → RST_STREAM
+internal/layer/httpaggregator/ ← wrapper: 上記 event stream → HTTPMessage (plain HTTP/2 向け)
+                                  GRPCLayer は別 wrapper として並列に存在
+```
+
+**移設方針:**
+- 現 http2 Layer の内部 aggregation ロジック・BodyBuffer integration は **アルゴリズムそのまま** httpaggregator へ。
+- 公開 API: 現 http2 Channel の Next() が HTTPMessage を返していたのを、event 型 (H2HeadersEvent / H2DataEvent / H2TrailersEvent) を返すように変更。
+- plain HTTP/2 呼び出し経路に httpaggregator.Wrap を挿入。ユーザから見た挙動は完全に変わらない (N6.5 の e2e test がそのまま通るのが受け入れ基準)。
+- gRPC 検出経路 (peek first HEADERS → isGRPC) は httpaggregator を通さず、直接 GRPCLayer.Wrap に渡す。
+
+**状態:** **N6.7 として Linear に追加**。N7 (gRPC) 着手の prerequisite。N6.5 の BodyBuffer 資産がそのまま per-stream buffer として効く (新規実装ほぼ不要)。
 
 ### Friction 4-C: gRPC-Web の HTTP/1 と HTTP/2 両対応
 
@@ -397,6 +449,61 @@ HTTP/2 layer が RST_STREAM frame を受けたとき、ErrorCode を翻訳して
 **解決:** grpcweblayer.Wrap は下層 Channel の type を問わない (Channel interface さえ満たしていれば動く)。下層が yield する HTTPMessage envelope を読んで、grpc-web frame format (binary or base64) をパースする。
 
 **状態:** 解決済み (Channel interface が protocol-agnostic なので自動的に両対応)
+
+### Friction 5-A: Plugin の Pipeline 配置と resend/fuzz 経路 [RESOLVED 2026-04-29]
+
+**問題:** Plugin が Pipeline 上のどこで fire するかが、ユースケースで分裂する。
+
+1. **observation/annotation 系** (URL fingerprint、危険パターン警告タグ付け、AI agent が intercept UI で見るための注釈付与): Intercept より **前** で fire したい。Safety を経由してから走る必要があるが、user/AI が intercept で編集する前であるべき
+2. **signing/last-mile 系** (HMAC、`Content-Length` 再計算、最終 wire の forensic stamping): Intercept/Transform/Macro variant 全部の確定後、Layer encode の **直前** で fire したい
+
+旧 8-hook 設計の `on_receive_from_client` / `on_before_send_to_server` の対は、direction と Pipeline timing を 1 つの hook 名に conflate していたためスケールしない。RFC-001 で hook 名を `(protocol, event)` の 2 軸に整理する以上、この timing 軸は別軸として持つ必要がある。
+
+**解決 (RFC §9.3 resolution):**
+
+- Pipeline に plugin Step を **2 段** 設置:
+
+```
+Layer decode → Scope → RateLimit → Safety → PluginStepPre → Intercept
+            → Transform → Macro → PluginStepPost → Record → Layer encode
+```
+
+- Hook 登録時に `phase="pre_pipeline"` (default) / `phase="post_pipeline"` を指定。`PluginStepPre` は前者だけ、`PluginStepPost` は後者だけを fire させる
+- **Resend / Fuzz / Macro variant 経路は `PluginStepPre` を bypass** し、`Transform → Macro → PluginStepPost → Record → Layer encode` だけを通る。よって `post_pipeline` plugin は通常 wire でも resend でも fuzz でも「Send 直前の最終形を 1 回見る」セマンティクスで一貫して fire し、signing plugin は 1 回の登録で全経路をカバーできる
+- 中間 phase (例: 「Intercept 後 Transform 前」) は **意図的に提供しない**。Pipeline Step の内部順序に plugin が依存すると将来の Step 追加で plugin が壊れる。Plugin が頼って良いのは「declarative な変更が全部入ったかどうか」の二値だけ
+- Lifecycle / 観察専用 hook (`connection.on_*`, `tls.on_handshake`, `socks5.on_connect`, `*.on_close`, `grpc.on_end`) には phase 軸を持たせない (Pipeline を通過しないため)
+
+**状態:** 解決済み (RFC §9.3 Decision item 1, item 5)
+
+### Friction 5-B: Plugin の Message dict と Header mutation の wire 忠実性 [RESOLVED 2026-04-29]
+
+**問題:** Plugin に Message を渡すとき、
+
+1. Header を Go の `gohttp.Header` 風 map で渡すと case と order と duplicate が壊れる (CLAUDE.md MITM 原則違反)
+2. Message field 名を Go 側の PascalCase で渡すと Starlark 慣習 (snake_case) と乖離し、AI agent script が読みにくい
+3. Plugin が Raw byte を直接編集できないと smuggling 診断 (N2 vertical slice) のユースケースが pluging API でカバーできない
+4. Mutation した結果を `Envelope.Raw` に正しく反映しないと wire との同期が崩れる
+
+**解決 (RFC §9.3 resolution):**
+
+- **dict は snake_case** (Go field 名から機械的変換、`convertMessageToDict` ヘルパで実装)
+- **Header は ordered list of `(name, value)` 2-tuple**。case/order/duplicate を保つ。`headers.append` / `replace_at` / `delete_first` のみ提供。`headers.get_first(name)` は **read-only** な case-insensitive lookup ヘルパ。re-sort や dedup を試みた場合は `fail("ordered list operations only")` で明示エラー (silent 正規化禁止)
+- **Raw 編集は first-class**: `msg["raw"] = b"..."` で byte 直接注入可能。Hook return 後、Layer は (a) raw が変わっていれば raw を wire に書き出し、(b) Message field が変わっていれば WireEncoder で raw 再生成、(c) どちらも変わっていなければ original.raw zero-copy。raw と Message 両方変更時は raw が勝つ (smuggling 用途優先)
+- **監査証跡** は既存の Variant Snapshot メカニズム (RFC §5) で自動カバー。plugin mutation も TransformStep mutation と同じ shape の variant row を生成
+
+**状態:** 解決済み (RFC §9.3 Decision item 2, 3, 4)
+
+### Friction 5-C: Plugin の per-stream / per-transaction 状態管理 [RESOLVED 2026-04-29]
+
+**問題:** gRPC bidi / WebSocket / SSE のような long-lived stream で plugin が「同じ stream の前のイベントの値を覚える」必要がある (例: `grpc.on_start` で取った `service`/`method` を `grpc.on_data` で参照)。Plugin が自前 dict を持つと、stream 終了時の cleanup を plugin が忘れた瞬間にメモリリーク。
+
+**解決 (RFC §9.3 resolution):**
+
+- `ctx` 引数に `ctx.transaction_state` (HTTP request/response 1 対 / WS upgrade 1 対 単位) と `ctx.stream_state` (HTTP/2 StreamID 単位) を提供
+- Lifetime は Layer が管理。`transaction_state` は Pipeline session 終了で GC、`stream_state` は H2 stream の `complete`/`error`/`reset` で GC
+- Plugin が独自 dict を `streams[stream_id] = {...}` で管理する pattern は **禁止しないが推奨もしない**。leak 検出はできないので、自前管理する plugin が leak したら自己責任
+
+**状態:** 解決済み (RFC §9.3 Decision item 6)
 
 ### Friction 9: Layer lifecycle と Close() cascading
 
@@ -693,9 +800,9 @@ RFC-001 の Envelope.StreamID / Envelope.FlowID はこの schema にそのまま
 
 ### Open Questions の解決タイミング (再掲)
 
-- **Open Question #1 (HTTP/2 flow control × Pipeline latency)** — N6 着手前に解決必須
-- **Open Question #2 (gRPC envelope granularity)** — N7 着手前に解決必須
-- **Open Question #3 (Starlark plugin API shape)** — N8 着手前に解決必須
+- **Open Question #1 (HTTP/2 flow control × Pipeline latency)** — ✅ **RESOLVED** 2026-04-15 (初版) / 2026-04-23 (再起草: event-granular Layer + HTTPAggregatorLayer wrapper)
+- **Open Question #2 (gRPC envelope granularity)** — ✅ **RESOLVED** 2026-04-23 (event-per-envelope + GRPCStart/Data/End 型)
+- **Open Question #3 (Starlark plugin API shape)** — ✅ **RESOLVED** 2026-04-29 (`(protocol, event, phase)` 3 軸 hook identity + `PluginStepPre`/`PluginStepPost` 2 段 Pipeline + mutable Starlark dict + Raw 編集可能)
 
 解決は「RFC §9 を読み返す → 選択肢の pros/cons を再評価 → RFC に decision ブロックを追加 → 実装開始」の順。
 
@@ -728,6 +835,6 @@ RFC-001 の Envelope.StreamID / Envelope.FlowID はこの schema にそのまま
 
 ---
 
-**最終更新:** 2026-04-12
+**最終更新:** 2026-04-29 (§9.3 resolved + Friction 5-A 追加 + 全 Open Question 解決済み)
 
-**次の変更タイミング:** N2 (raw smuggling E2E) 完了時、N6 着手前 (Open Question #1 解決時)、N7 着手前 (同 #2)、N8 着手前 (同 #3)。各タイミングで本文書を更新し、解決した Open Question は §7 から正式な「決定事項」へ昇格させる。
+**次の変更タイミング:** N8 (Plugin + MCP + WebUI Reconnection) 完了時、N9 (Legacy Removal) 完了時。N9 完了をもって本文書は移行ガイドとしての役割を終え、CLAUDE.md / README.md に統合される。

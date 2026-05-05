@@ -7,21 +7,18 @@ import (
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"github.com/usk6666/yorishiro-proxy/internal/proxy"
-	"github.com/usk6666/yorishiro-proxy/internal/testutil"
+	"github.com/usk6666/yorishiro-proxy/internal/connector"
 )
 
 // setupMultiListenerTestSession creates an MCP client flow with a Manager for
 // testing multi-listener features.
-func setupMultiListenerTestSession(t *testing.T, manager *proxy.Manager) *gomcp.ClientSession {
+func setupMultiListenerTestSession(t *testing.T, manager proxyManager) *gomcp.ClientSession {
 	t.Helper()
 	return setupTestSessionWithManager(t, manager)
 }
 
 func TestProxyStart_WithName(t *testing.T) {
-	logger := testutil.DiscardLogger()
-	detector := &stubDetector{}
-	manager := proxy.NewManager(detector, logger)
+	manager := newTestProxybuildManager(t)
 
 	cs := setupMultiListenerTestSession(t, manager)
 	defer manager.StopAll(context.Background())
@@ -61,9 +58,7 @@ func TestProxyStart_WithName(t *testing.T) {
 }
 
 func TestProxyStart_DefaultNameWhenOmitted(t *testing.T) {
-	logger := testutil.DiscardLogger()
-	detector := &stubDetector{}
-	manager := proxy.NewManager(detector, logger)
+	manager := newTestProxybuildManager(t)
 
 	cs := setupMultiListenerTestSession(t, manager)
 	defer manager.StopAll(context.Background())
@@ -87,15 +82,13 @@ func TestProxyStart_DefaultNameWhenOmitted(t *testing.T) {
 		t.Fatalf("unmarshal: %v", err)
 	}
 
-	if out.Name != proxy.DefaultListenerName {
-		t.Errorf("name = %q, want %q", out.Name, proxy.DefaultListenerName)
+	if out.Name != connector.DefaultListenerName {
+		t.Errorf("name = %q, want %q", out.Name, connector.DefaultListenerName)
 	}
 }
 
 func TestProxyStart_MultipleNamedListeners(t *testing.T) {
-	logger := testutil.DiscardLogger()
-	detector := &stubDetector{}
-	manager := proxy.NewManager(detector, logger)
+	manager := newTestProxybuildManager(t)
 
 	cs := setupMultiListenerTestSession(t, manager)
 	defer manager.StopAll(context.Background())
@@ -137,9 +130,7 @@ func TestProxyStart_MultipleNamedListeners(t *testing.T) {
 }
 
 func TestProxyStart_DuplicateName_Error(t *testing.T) {
-	logger := testutil.DiscardLogger()
-	detector := &stubDetector{}
-	manager := proxy.NewManager(detector, logger)
+	manager := newTestProxybuildManager(t)
 
 	cs := setupMultiListenerTestSession(t, manager)
 	defer manager.StopAll(context.Background())
@@ -176,9 +167,7 @@ func TestProxyStart_DuplicateName_Error(t *testing.T) {
 }
 
 func TestProxyStop_WithName(t *testing.T) {
-	logger := testutil.DiscardLogger()
-	detector := &stubDetector{}
-	manager := proxy.NewManager(detector, logger)
+	manager := newTestProxybuildManager(t)
 
 	cs := setupMultiListenerTestSession(t, manager)
 
@@ -237,9 +226,7 @@ func TestProxyStop_WithName(t *testing.T) {
 }
 
 func TestProxyStop_WithoutName_StopsAll(t *testing.T) {
-	logger := testutil.DiscardLogger()
-	detector := &stubDetector{}
-	manager := proxy.NewManager(detector, logger)
+	manager := newTestProxybuildManager(t)
 
 	cs := setupMultiListenerTestSession(t, manager)
 
@@ -293,9 +280,7 @@ func TestProxyStop_WithoutName_StopsAll(t *testing.T) {
 }
 
 func TestProxyStop_NamedNotFound_Error(t *testing.T) {
-	logger := testutil.DiscardLogger()
-	detector := &stubDetector{}
-	manager := proxy.NewManager(detector, logger)
+	manager := newTestProxybuildManager(t)
 
 	cs := setupMultiListenerTestSession(t, manager)
 
@@ -314,9 +299,7 @@ func TestProxyStop_NamedNotFound_Error(t *testing.T) {
 }
 
 func TestQueryStatus_MultipleListeners(t *testing.T) {
-	logger := testutil.DiscardLogger()
-	detector := &stubDetector{}
-	manager := proxy.NewManager(detector, logger)
+	manager := newTestProxybuildManager(t)
 
 	cs := setupMultiListenerTestSession(t, manager)
 	defer manager.StopAll(context.Background())
@@ -384,9 +367,7 @@ func TestQueryStatus_MultipleListeners(t *testing.T) {
 }
 
 func TestQueryStatus_NoListeners(t *testing.T) {
-	logger := testutil.DiscardLogger()
-	detector := &stubDetector{}
-	manager := proxy.NewManager(detector, logger)
+	manager := newTestProxybuildManager(t)
 
 	cs := setupMultiListenerTestSession(t, manager)
 
@@ -418,9 +399,7 @@ func TestQueryStatus_NoListeners(t *testing.T) {
 }
 
 func TestQueryStatus_OnlyNamedListeners_RunningTrue(t *testing.T) {
-	logger := testutil.DiscardLogger()
-	detector := &stubDetector{}
-	manager := proxy.NewManager(detector, logger)
+	manager := newTestProxybuildManager(t)
 
 	cs := setupMultiListenerTestSession(t, manager)
 	defer manager.StopAll(context.Background())

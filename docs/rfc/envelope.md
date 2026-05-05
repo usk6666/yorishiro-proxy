@@ -221,26 +221,83 @@ type WSMessage struct {
 }
 ```
 
-#### 3.2.3 GRPCMessage
+#### 3.2.3 gRPC Messages
 
-Represents one length-prefixed gRPC message on an HTTP/2 stream. Metadata and trailers are *not* on `GRPCMessage` — they belong to the HTTP/2 layer's `HTTPMessage`. gRPC is modeled as "wrapping one HTTP/2 stream" where HEADERS frames become `HTTPMessage` envelopes and DATA frames become `GRPCMessage` envelopes on the same Channel.
+A gRPC RPC is surfaced as a **stream of three event types** on a single Channel. Each event type is its own Message implementation. Metadata and trailers have their own types; HTTPMessage is **not** reused for gRPC. See §9.2 for the resolution and rationale.
 
 ```go
-type GRPCMessage struct {
-    // Derived from HTTP/2 stream's :path; denormalized here for convenience
+// GRPCStartMessage carries the gRPC metadata (HEADERS frame) for both
+// request-side and response-side openings. One per direction per RPC.
+type GRPCStartMessage struct {
+    // Derived from :path on the request side; mirrored on the response side.
     Service string
     Method  string
 
-    // The 5-byte gRPC frame header
-    Compressed bool
-    Length     uint32
+    // gRPC metadata — custom and reserved. HTTP/2 pseudo-headers (:method,
+    // :path, :status, etc.) are NOT included here; they belong to the
+    // transport layer and are observable via Envelope.Context if needed.
+    Metadata []KeyValue
 
-    // The message body (raw protobuf or compressed blob)
+    // Parsed gRPC-specific metadata for convenience. Wire copies also
+    // remain in Metadata (wire fidelity).
+    Timeout        time.Duration // grpc-timeout parsed (0 = unset)
+    ContentType    string        // application/grpc[+proto|+json|...]
+    Encoding       string        // grpc-encoding (identity, gzip, deflate, ...)
+    AcceptEncoding []string      // grpc-accept-encoding
+}
+
+// GRPCDataMessage carries one length-prefixed gRPC message (LPM), reassembled
+// from the underlying H2 DATA event stream (LPM boundaries are independent of
+// DATA frame boundaries).
+type GRPCDataMessage struct {
+    // Denormalized from the associated GRPCStartMessage. Read-only.
+    Service string
+    Method  string
+
+    // Wire-level fields (from the 5-byte LPM prefix).
+    Compressed bool   // first byte of the 5-byte prefix
+    WireLength uint32 // uint32 length field of the 5-byte prefix
+
+    // Always decompressed bytes, regardless of Compressed flag, for inspection
+    // convenience. On Send, the Layer re-compresses per Compressed + the
+    // negotiated grpc-encoding. To inject malformed compressed bytes, write
+    // Envelope.Raw directly.
     Payload []byte
+
+    // EndStream mirrors the H2 DATA frame's END_STREAM flag. gRPC clients
+    // do not emit trailer headers, so the request side has no analog of
+    // GRPCEndMessage; the wire-level terminator is END_STREAM=1 on the
+    // last DATA frame. Layers attach the bit to the trailing LPM produced
+    // from each frame (or to the previously-queued LPM when the
+    // terminating frame carries empty payload). Termination mid-LPM, or
+    // with no LPM ever emitted on the direction, is a protocol violation
+    // surfaced via *layer.StreamError, not via this field.
+    EndStream bool
+}
+
+// GRPCEndMessage carries the trailer HEADERS frame (with END_STREAM) that
+// terminates a gRPC RPC. Always Direction=Receive.
+type GRPCEndMessage struct {
+    // grpc-status parsed (codes.OK, codes.Canceled, ...)
+    Status uint32
+    // grpc-message parsed (percent-decoded)
+    Message string
+    // grpc-status-details-bin parsed bytes (raw protobuf Status message;
+    // decoding schema-dependent; left as bytes).
+    StatusDetails []byte
+
+    // Remaining trailer metadata (after removing grpc-status, grpc-message,
+    // grpc-status-details-bin).
+    Trailers []KeyValue
 }
 ```
 
-**Open Question #2 (see §9.2):** whether a gRPC RPC surfaces as one Envelope-per-frame (HEADERS + DATA* + HEADERS-trailer) or aggregated. This RFC documents the frame-per-envelope default; alternative is tracked in §9.2.
+**Envelope.Raw for gRPC envelopes** contains the wire bytes specific to that event:
+- `GRPCStartMessage`: the encoded HPACK block of the HEADERS frame (not the HTTP/2 frame wrapper).
+- `GRPCDataMessage`: the 5-byte LPM prefix + compressed payload, exactly as observed on the wire.
+- `GRPCEndMessage`: the encoded HPACK block of the trailer HEADERS frame.
+
+HTTP/2 frame-level bytes (frame headers, SETTINGS, WINDOW_UPDATE, etc.) are owned by the HTTP/2 Layer and are not exposed on gRPC envelopes. To observe them, attach to the HTTP/2 Layer's event stream directly (see §3.3.2).
 
 #### 3.2.4 RawMessage
 
@@ -373,7 +430,34 @@ package http2layer
 // New wraps a net.Conn in an HTTP/2 layer. Yields one Channel per HTTP/2
 // stream. The returned Layer manages HPACK state, connection-level flow
 // control, SETTINGS negotiation, and stream lifecycle.
+//
+// Each per-stream Channel is EVENT-GRANULAR: Next() yields H2HeadersEvent,
+// H2DataEvent (for each DATA frame, or each BodyBuffer drain chunk), and
+// H2TrailersEvent. Pipeline consumers that want an aggregated HTTPMessage
+// must wrap with HTTPAggregatorLayer (see below); gRPC consumers wrap with
+// GRPCLayer. See §9.1 revised resolution for the rationale.
+//
+// Flow control: the Layer appends DATA bytes to a per-stream BodyBuffer and
+// sends WINDOW_UPDATE at append time, independent of whether the Pipeline
+// has consumed the event yet. Per-stream soft cap triggers stream-level
+// stall + disk spill; hard cap triggers RST_STREAM. Connection-level WINDOW
+// is decoupled from Pipeline latency.
 func New(conn net.Conn, role Role) layer.Layer
+```
+
+```go
+package httpaggregator
+// Wrap consumes an HTTP/2 (or HTTP/1.x event-granular) stream Channel and
+// produces one HTTPMessage envelope per request/response. Used for plain
+// HTTP/2 traffic that the user wants to treat as request-response pairs
+// (intercept/transform on full message) rather than as an event stream.
+//
+// Aggregation reuses the N6.5 BodyBuffer: small bodies land in HTTPMessage.Body,
+// large bodies land in HTTPMessage.BodyBuffer with the same materialize semantics.
+//
+// For gRPC streams (content-type: application/grpc), the caller must use
+// GRPCLayer.Wrap instead; HTTPAggregatorLayer cannot represent streaming.
+func Wrap(stream layer.Channel, role Role) layer.Channel
 ```
 
 ```go
@@ -386,11 +470,18 @@ func New(reader io.Reader, writer io.Writer, closer io.Closer, role Role) layer.
 
 ```go
 package grpclayer
-// Wrap takes an HTTP/2 stream Channel and wraps it so that DATA frames are
-// surfaced as GRPCMessage envelopes. HEADERS-derived HTTPMessage envelopes
-// from the underlying stream pass through unchanged. Requires the first
-// HTTPMessage envelope to be peeked already (for content-type detection).
-func Wrap(stream layer.Channel, firstHTTP *envelope.Envelope, role Role) layer.Channel
+// Wrap takes an event-granular HTTP/2 stream Channel and surfaces its events
+// as gRPC envelopes. The mapping is:
+//   H2HeadersEvent  → GRPCStartMessage envelope
+//   H2DataEvent*    → GRPCDataMessage envelope (one per LPM; LPM reassembly
+//                     happens inside the wrapper, independent of DATA frame
+//                     boundaries)
+//   H2TrailersEvent → GRPCEndMessage envelope
+//
+// Requires the caller to have peeked the first H2HeadersEvent for content-type
+// detection before calling Wrap. The peeked event is consumed by Wrap and
+// re-emitted as the first envelope on the wrapped Channel.
+func Wrap(stream layer.Channel, firstHeaders *envelope.Envelope, role Role) layer.Channel
 ```
 
 ### 3.4 ConnectionStack
@@ -572,24 +663,30 @@ Step 5 (cancel-and-restart) is the ugly part. An alternative is to make `RunSess
 
 ```
 Initial stack:
-  Client:   [TCP → TLS(ALPN=h2) → HTTP/2]
-  Upstream: [TCP → TLS(ALPN=h2) → HTTP/2]  (pooled)
+  Client:   [TCP → TLS(ALPN=h2) → HTTP/2]  (event-granular)
+  Upstream: [TCP → TLS(ALPN=h2) → HTTP/2]  (event-granular, pooled)
 
-HTTP/2 layer's Channels() yields one Channel per new client stream:
+HTTP/2 layer's Channels() yields one event-granular Channel per new stream:
   for clientStreamChan := range clientH2.Channels():
     go handleStream(clientStreamChan)
 
 handleStream(clientStreamChan):
-  Peek first envelope (HTTPMessage from HEADERS)
-  if isGRPC(firstHTTPMessage):
-    // Wrap with gRPC layer
-    grpcChan := grpclayer.Wrap(clientStreamChan, firstHTTPMessage, ServerRole)
-    upstreamStreamChan := upstreamH2.OpenStream(ctx)
-    upstreamGRPCChan := grpclayer.Wrap(upstreamStreamChan, firstHTTPMessage, ClientRole)
-    Session.RunSession(grpcChan, staticDial(upstreamGRPCChan), pipeline)
+  // Peek the first event on the raw H2 Channel (H2HeadersEvent).
+  firstHeaders := clientStreamChan.Next(ctx)
+
+  upstreamStreamChan := upstreamH2.OpenStream(ctx)
+
+  if isGRPC(firstHeaders):
+    // Wrap each side with GRPCLayer: GRPCStart + GRPCData* + GRPCEnd
+    clientGRPC   := grpclayer.Wrap(clientStreamChan, firstHeaders, ServerRole)
+    upstreamGRPC := grpclayer.Wrap(upstreamStreamChan, firstHeaders, ClientRole)
+    Session.RunSession(clientGRPC, staticDial(upstreamGRPC), pipeline)
   else:
-    upstreamStreamChan := upstreamH2.OpenStream(ctx)
-    Session.RunSession(clientStreamChan, staticDial(upstreamStreamChan), pipeline)
+    // Plain HTTP/2: wrap with HTTPAggregatorLayer for one HTTPMessage per
+    // request/response (same user-visible ergonomics as HTTP/1.x).
+    clientHTTP   := httpaggregator.Wrap(clientStreamChan, ServerRole, firstHeaders)
+    upstreamHTTP := httpaggregator.Wrap(upstreamStreamChan, ClientRole, nil)
+    Session.RunSession(clientHTTP, staticDial(upstreamHTTP), pipeline)
 ```
 
 HTTP/2 layer internally handles:
@@ -637,6 +734,8 @@ Mapping current files/packages to RFC-001 structure:
 | `internal/codec/http1/codec.go` | Rewritten as `internal/layer/http1/layer.go` (Layer interface) + `channel.go` (Channel interface). The raw-first patching and `opaqueHTTP1` diff logic moves into the new Channel's `Send` path. | 50% |
 | `internal/codec/tcp/tcp.go` | Rewritten as `internal/layer/bytechunk/layer.go` | 90% |
 | `internal/codec/codec.go` (Codec interface) | **Deleted.** Replaced by `internal/layer/layer.go` (Layer + Channel interfaces). | 0% |
+| `internal/layer/http2/` (HTTP/2 Layer built in N6/N6.5/N6.6 with in-layer aggregation) | **Split** into `internal/layer/http2/` (event-granular Channel: H2HeadersEvent/H2DataEvent/H2TrailersEvent, BodyBuffer-driven flow control) + `internal/layer/httpaggregator/` (wrapper that produces HTTPMessage for plain HTTP/2). Aggregation algorithm + BodyBuffer integration preserved verbatim — only API boundary moves. Tracked as N6.7 aftermath. | 85% |
+| `internal/rules/grpc/` (new) | gRPC-typed engines: InterceptEngine/TransformEngine/SafetyEngine operating on GRPCStartMessage / GRPCDataMessage / GRPCEndMessage. LPM reassembly handled at Layer; engines see logical events. | 0% (new) |
 | `internal/connector/dial.go` (DialUpstream) | Mostly unchanged; add `DialUpstreamRaw` for raw mode and expose stack-construction helpers. TLS/uTLS/mTLS handshake code preserved. | 90% |
 | `internal/connector/listener.go`, `detect.go`, `tunnel.go`, `socks5.go` (via USK-561) | Mostly unchanged structurally; updated to build `ConnectionStack` instead of picking a single Codec | 70% |
 | `internal/session/session.go` | Renamed Codec → Channel; add support for `Stack.ReplaceClientTop`-driven session restart | 70% |
@@ -690,13 +789,24 @@ N5: Job + Macro Integration
     Macro hook invocation around Job.Run
     Deliverable: resend_http, resend_raw both work; smuggling payload fuzz works
 
-N6: HTTP/2 Layer
+N6: HTTP/2 Layer  [DONE as of N6 / N6.5 / N6.6]
     http2 layer (frame codec, HPACK, per-stream channels)
     Upstream connection pool (basic: per-target, LRU eviction)
     Deliverable: HTTPS + h2 normal traffic works
 
+N6.7: HTTP/2 Layer Split (aftermath)  [BLOCKS N7]
+    Split current HTTP/2 Layer (in-layer aggregation) into:
+      - internal/layer/http2/ — event-granular Channel (H2HeadersEvent /
+        H2DataEvent / H2TrailersEvent); BodyBuffer-driven flow control
+      - internal/layer/httpaggregator/ — wrapper producing HTTPMessage
+    BodyBuffer and aggregation algorithm preserved verbatim; only API moves.
+    Rationale: §9.1 revised resolution (2026-04-23) + §9.2 resolution.
+    Deliverable: plain HTTP/2 traffic unchanged end-to-end; event-granular
+                 Channel available for GRPCLayer (N7).
+
 N7: Application Layers
-    grpclayer (wraps http2 stream channels)
+    grpclayer: consumes event-granular HTTP/2 Channel, emits
+               GRPCStartMessage / GRPCDataMessage / GRPCEndMessage envelopes
     wslayer (from HTTP/1 Upgrade; HTTP/2 CONNECT+:protocol for RFC 8441 deferred)
     ssehlayer (from HTTP/1 response)
     Corresponding rule engines in internal/rules/{ws,grpc}/
@@ -715,7 +825,7 @@ N9: Legacy Removal + Documentation
     Deliverable: single architecture, docs consistent
 ```
 
-**Milestone dependency:** N1 → N2 → N3 → (N4 || N5) → N6 → N7 → N8 → N9. N4 and N5 can proceed in parallel after N3 lands.
+**Milestone dependency:** N1 → N2 → N3 → (N4 || N5) → N6 → N6.7 → N7 → N8 → N9. N4 and N5 can proceed in parallel after N3 lands. N6.7 is an aftermath of the §9.1/§9.2 resolution (2026-04-23) and blocks N7.
 
 ---
 
@@ -746,39 +856,174 @@ N9: Legacy Removal + Documentation
 
 ## 9. Open Questions
 
-### 9.1 HTTP/2 Flow Control × Long-Blocking Pipeline Steps
+### 9.1 HTTP/2 Flow Control × Long-Blocking Pipeline Steps — RESOLVED
+
+**Resolved:** 2026-04-15
+**Revised:** 2026-04-23 (supersedes the 2026-04-15 in-layer aggregation model; see OQ#2 resolution for motivation)
 
 **Problem:** HTTP/2 has per-stream and per-connection flow control (WINDOW_UPDATE frames). If a Pipeline Step blocks for minutes (e.g., `InterceptStep` waiting for AI agent action), the stream's WINDOW fills and the downstream side stalls. If *many* concurrent streams on the same connection all block simultaneously, connection-level WINDOW fills and the entire HTTP/2 connection stalls, impacting unrelated streams.
 
-**Options:**
-1. **Per-stream Pipeline goroutine, decoupled from Layer read loop.** The HTTP/2 Layer drains frames into per-stream channels as fast as the frame parser can read. Pipeline runs on its own goroutine per stream. Flow-control window updates are sent as frames are consumed by the stream, not as the Pipeline finishes processing. **Risk:** the Layer buffers potentially unlimited data in memory for blocked streams.
-2. **Pipeline-driven back-pressure.** The Layer only ACKs window bytes after the Pipeline consumes them. Blocked streams stall naturally. **Risk:** Intercept with slow AI response stalls the stream, and if many streams block, the connection stalls.
-3. **Intercept is async.** Instead of a blocking Step, Intercept is a Pipeline "fork" — the envelope is queued for AI review and the main Pipeline continues. If the AI later decides to drop, it has to be idempotent (already sent). **Risk:** breaks the current "intercept blocks forwarding" semantic.
+**Resolution: Event-granular HTTP/2 Layer with bounded per-stream buffers; aggregation is an upper-layer wrapper.**
 
-**Proposal:** default to Option 1 with a configurable per-stream buffer cap. When the cap is hit, the stream is terminated with RST_STREAM and logged. This matches how most real proxies handle the corner case.
+The initial resolution (2026-04-15) folded aggregation inside the HTTP/2 Layer so `Channel.Next()` returned one complete `HTTPMessage` per stream. Work on OQ#2 (gRPC granularity) revealed this model cannot coexist with streaming gRPC — long-lived bidi streams never "complete", so there is nothing to aggregate. The underlying design mistake was letting Pipeline latency propagate into the transport layer. The revision below fixes that by decoupling the two concerns.
 
-**Decision required before N6 starts.**
+**Decision:**
 
-### 9.2 gRPC Message Envelope Granularity
+1. **HTTP/2 Layer is always event-granular.** Its Channels yield three event types on each stream: `H2HeadersEvent` (from HEADERS frame), `H2DataEvent` (from DATA frame *or* from a BodyBuffer chunk — see below), and `H2TrailersEvent` (from trailer HEADERS frame with END_STREAM).
+2. **Per-stream buffer drives flow control.** Each stream owns a `BodyBuffer` (reusing the N6.5 memory-then-spill primitive). DATA frames are appended to the buffer as they arrive; the Layer sends WINDOW_UPDATE **at append time**, not at Pipeline-consume time. Connection-level WINDOW is therefore decoupled from Pipeline latency entirely — no Pipeline hold, however long, can affect other streams on the same connection.
+3. **Back-pressure is stream-scoped, not connection-scoped.** If a stream's BodyBuffer grows past a per-stream soft cap while the Pipeline holds it, the Layer stops replenishing *that stream's* WINDOW (stream-level stall), then spills to disk, then RST_STREAMs if a hard cap is breached. Other streams are never affected.
+4. **Aggregation is a wrapper Layer, not a property of HTTP/2 Layer.** For plain HTTP/2 traffic the `HTTPAggregatorLayer` consumes H2 events and produces one `HTTPMessage` per request/response (preserving the N6.5 user-visible behavior for HTTP/1.x parity). For gRPC, `GRPCLayer` consumes the same events and produces `GRPCStartMessage` / `GRPCDataMessage` / `GRPCEndMessage` without ever aggregating.
 
-**Problem:** A gRPC RPC consists of (request HEADERS) + (request DATA*) + (response HEADERS) + (response DATA*) + (trailers HEADERS). How are these surfaced to the Pipeline?
+**Why this resolves the flow control concern:**
 
-**Options:**
-1. **Frame-per-envelope.** HEADERS → HTTPMessage envelope (on the gRPC Channel). Each DATA frame → GRPCMessage envelope. Trailers → HTTPMessage envelope with `Trailers` populated. Pipeline sees a mix of types on the same Channel.
-2. **Aggregated-per-message.** One envelope per gRPC message, carrying both metadata and payload. Streaming RPCs yield multiple envelopes; unary is one. Simpler Pipeline, but delays the metadata until the full first message is assembled.
-3. **Aggregated-per-RPC.** One envelope per RPC, with internal streaming representation. Works only for unary — streaming doesn't fit.
+- Transport-layer ACKing is now independent of application-layer processing speed. WINDOW_UPDATE fires as soon as the byte reaches the per-stream buffer, which happens within microseconds of the frame reader goroutine pulling it off the socket. Pipeline blocking an individual stream cannot backpressure the connection.
+- Worst-case memory per connection is `perStreamSoftCap × MAX_CONCURRENT_STREAMS`. Once the soft cap is reached for a stream, that stream spills to disk; the soft cap itself is tunable. The disk-spill path is already proven in N6.5.
+- Plain HTTP users see the same "one HTTPMessage per exchange" ergonomics as before, via HTTPAggregatorLayer. Streaming-protocol users (gRPC, future SSE) see events as they arrive.
 
-**Proposal (tentative):** Option 1. It matches wire reality, is naturally composable with the HTTPMessage type we already have, and doesn't require a new aggregation state machine. Pipeline Steps that care about "the full message" can accumulate across envelopes if needed, keyed by `Envelope.StreamID`.
+**Rejected alternatives:**
+- **In-layer aggregation (the 2026-04-15 resolution):** Cannot support streaming gRPC; forces passthrough-mode body skipping for any bidi stream.
+- **Frame-per-envelope streaming without buffering (original pre-2026-04-15 proposal):** Pipeline holds cause connection-level WINDOW stall. Fixed here by decoupling buffer drain from Pipeline drain.
+- **Pipeline-driven back-pressure:** Same connection-level stall problem.
+- **Async Intercept:** Breaks the "intercept blocks forwarding" contract that the MCP tool surface depends on.
 
-**Decision required before N7 starts.**
+**Migration note:** The HTTP/2 Layer built in N6 / N6.5 / N6.6 implements in-layer aggregation. Splitting it into `HTTP2Layer` (event-granular) + `HTTPAggregatorLayer` (wrapper) is tracked as an N6-series aftermath Issue (see N6.7). The aggregation algorithm and BodyBuffer integration survive verbatim — only the API boundary moves.
 
-### 9.3 Starlark Plugin API Shape
+### 9.2 gRPC Message Envelope Granularity — RESOLVED
 
-**Problem:** Current `internal/plugin/` exposes `request.method`, `request.url`, etc. as Starlark values. With typed Messages, plugins must see a protocol-shaped object.
+**Resolved:** 2026-04-23
 
-**Proposal:** Plugin hooks are registered with a Protocol filter, e.g., `register_hook("http", "on_request", ...)`. The handler receives a Starlark dict shaped like HTTPMessage, WSMessage, etc. Protocol-mismatched hooks never fire.
+**Problem:** A gRPC RPC is a stream of events: (request HEADERS) + (request DATA*) + (response HEADERS) + (response DATA*) + (trailers HEADERS). Even unary is conceptually "start + 1 message + end". How should these be surfaced to the Pipeline?
 
-**Decision required before N8 starts.**
+**Resolution: Event-per-envelope with dedicated gRPC Message types.**
+
+Each logically distinct gRPC event becomes its own Envelope with its own Message type. Unlike the original tentative proposal, HTTPMessage is **not** reused for headers/trailers — gRPC has its own semantics (grpc-status, grpc-timeout, grpc-encoding) that do not survive the HTTPMessage type-system contract ("any field on HTTPMessage must be meaningful as HTTP"). The new message types are:
+
+| Wire event | Envelope.Message type | When it fires |
+|------------|----------------------|---------------|
+| Request HEADERS | `GRPCStartMessage` | Direction=Send, Sequence=0 |
+| Each length-prefixed request message | `GRPCDataMessage` | Direction=Send, one per LPM |
+| Response HEADERS | `GRPCStartMessage` | Direction=Receive, Sequence=0 |
+| Each length-prefixed response message | `GRPCDataMessage` | Direction=Receive, one per LPM |
+| Trailer HEADERS (with END_STREAM) | `GRPCEndMessage` | Direction=Receive, last |
+
+All five events share a single `Envelope.StreamID` (the HTTP/2 stream ID); `Sequence` orders them within the stream. Pipeline Steps operating on the "full RPC" aggregate across envelopes keyed by StreamID.
+
+**Granularity is the length-prefixed gRPC message (LPM), not the HTTP/2 DATA frame.** A single gRPC message may span multiple DATA frames; a DATA frame may contain multiple gRPC messages. The gRPC Layer reassembles LPM boundaries from the raw byte stream surfaced by the H2 Layer (`H2DataEvent`). `Envelope.Raw` on a `GRPCDataMessage` envelope is exactly the 5-byte prefix + payload wire bytes (compressed form, if compression is in use).
+
+**Compression handling:**
+- `GRPCDataMessage.Compressed` reflects the wire-level flag (first byte of 5-byte prefix).
+- `GRPCDataMessage.Payload` is **always decompressed** bytes for inspection convenience.
+- `GRPCDataMessage.WireLength` is the wire-level length (compressed bytes length).
+- `Envelope.Raw` carries the exact wire bytes (5-byte prefix + compressed payload).
+- On Send: if `Compressed=true`, the gRPC Layer re-compresses `Payload` using the negotiated `grpc-encoding` before writing. If a user wants to inject deliberately malformed compressed bytes, they write `Envelope.Raw` directly via a low-level bypass (same pattern as raw TCP layer).
+
+**Why this resolves the question:**
+
+- Matches wire reality (wire is an event stream, type system reflects it).
+- gRPC streaming is first-class: bidi streams produce events as they arrive, Pipeline can intercept/transform any single message without waiting for stream completion.
+- No `HTTPMessage`-shaped lies: every field on every Message type is meaningful for that protocol at that event.
+- Pipeline flow-control concerns delegated to the revised §9.1 resolution (transport-layer buffers are decoupled from Pipeline).
+- MCP `resend_grpc` tool maps naturally to "replay this stream of events, with optional per-event edits".
+
+**Rejected alternatives:**
+- **Frame-per-envelope reusing HTTPMessage for headers/trailers (original tentative proposal):** Creates "HTTPMessage with only Trailers populated" instances, violating the §3.1 design rule that every field must be meaningful for its type. gRPC semantics (status code, timeout, encoding negotiation) have no natural home on HTTPMessage.
+- **Aggregated-per-message with metadata bundled into first message:** Delays headers observation until the first LPM is fully received, which interacts badly with server-streaming (headers may be observable long before first message arrives).
+- **Aggregated-per-RPC:** Works only for unary; cannot represent streaming.
+
+**Sub-decisions recorded here:**
+- Metadata on `GRPCDataMessage` (Service, Method) is **read-only denormalization** from the associated `GRPCStartMessage`. To change service/method, intercept the Start envelope.
+- grpc-web is out of scope for this resolution; it has its own layer (`GRPCWebLayer`) that wraps either HTTP/1 or HTTP/2 aggregated `HTTPMessage` (base64 or binary framing). See Friction 4-C in `envelope-implementation.md`.
+- HTTP/2 CONNECT + `:protocol` extended CONNECT (RFC 8441) for WebSocket-over-H2 remains deferred per N7's milestone scope.
+- **Request-side termination (USK-663, 2026-04-27):** `GRPCDataMessage` carries an `EndStream bool` mirroring the H2 DATA frame's END_STREAM flag. gRPC clients emit no trailer headers, so the only request-side terminator on the wire is the END_STREAM bit on the last DATA frame. When a DATA frame's payload completes one or more LPMs and carries END_STREAM=1, the trailing LPM owns the bit. When a terminating frame carries empty payload (the canonical gRPC-Go `Stream.CloseSend` shape `DATA(payload=msg)` then `DATA(payload=, END_STREAM=1)`), the wrapper synthesizes a pure end-marker envelope — `GRPCDataMessage{Payload: nil, WireLength: 0, Compressed: false, EndStream: true}` — so the wire-frame boundary is observable in Pipeline and on Send the wrapper emits an empty H2 DATA payload with END_STREAM=1. Mid-LPM termination (reassembler holds partial bytes when END_STREAM arrives) cannot be faithfully forwarded and surfaces as `*layer.StreamError{ErrorProtocol}`. EndStream is a wire-affecting field for variant-recording purposes (Pipeline Steps that toggle it produce variant rows).
+
+### 9.3 Starlark Plugin API Shape — RESOLVED
+
+**Resolved:** 2026-04-29
+
+**Problem:** Legacy `internal/plugin/` exposed `request.method`, `request.url`, etc. as Starlark values with HTTP-only field names and 8 hook names that conflated direction and Pipeline timing (`on_receive_from_client` / `on_before_send_to_server`, etc.). With typed Messages from RFC §3.2, plugins must see a protocol-shaped object, and the hook surface must be uniform across protocols. In addition, plugins need to fire at two distinct Pipeline-relative timings — before user-visible Intercept editing (annotation, fingerprinting) and after all mutations have settled (signing, last-mile mutation). The legacy 4-name pattern conflated these axes; RFC-001 separates them.
+
+**Resolution: Three-axis Hook identity `(protocol, event, phase)` with mutable Starlark dict messages.**
+
+A Hook is uniquely identified by three axes registered together:
+
+```python
+register_hook(protocol, event, fn, phase="pre_pipeline")
+```
+
+- **`protocol`** — string namespace matching either an RFC §3.2 Message type or one of four pseudo-protocols for connection-lifecycle and transport hooks: `"http"`, `"ws"`, `"grpc"`, `"grpc-web"`, `"sse"`, `"raw"`, `"connection"`, `"tls"`, `"socks5"`.
+- **`event`** — string name of the wire event within that protocol. The valid `(protocol, event)` pairs are enumerated in the table below; load-time validation rejects unknown pairs.
+- **`phase`** — `"pre_pipeline"` (default) or `"post_pipeline"`. Determines firing point relative to the Pipeline Step chain. Lifecycle and observation-only hooks (those marked "no phase" below) ignore this argument.
+
+**Hook surface (the complete enumeration):**
+
+| `(protocol, event)` | Phase support | Action surface |
+|---|---|---|
+| `("http", "on_request")` | pre / post | DROP, RESPOND, CONTINUE+mutate |
+| `("http", "on_response")` | pre / post | CONTINUE+mutate, RESPOND-replace |
+| `("ws", "on_upgrade")` | pre / post | DROP, RESPOND, CONTINUE+mutate |
+| `("ws", "on_message")` | pre / post | CONTINUE+mutate |
+| `("ws", "on_close")` | no phase | observe only |
+| `("grpc", "on_start")` | pre / post | DROP, RESPOND-with-status, CONTINUE+mutate |
+| `("grpc", "on_data")` | pre / post | CONTINUE+mutate |
+| `("grpc", "on_end")` | no phase | observe only |
+| `("grpc-web", "on_start")` | pre / post | DROP, RESPOND-with-status, CONTINUE+mutate |
+| `("grpc-web", "on_data")` | pre / post | CONTINUE+mutate |
+| `("grpc-web", "on_end")` | no phase | observe only |
+| `("sse", "on_event")` | pre / post | CONTINUE+mutate |
+| `("raw", "on_chunk")` | pre / post | CONTINUE+mutate |
+| `("tls", "on_handshake")` | no phase | observe only |
+| `("connection", "on_connect")` | no phase | DROP, CONTINUE |
+| `("connection", "on_disconnect")` | no phase | observe only |
+| `("socks5", "on_connect")` | no phase | DROP, CONTINUE |
+
+Any other `(protocol, event)` combination is a load-time error.
+
+**Decision:**
+
+1. **Two-phase Pipeline integration (decoupled from Intercept timing).** The Pipeline contains two plugin Steps: `PluginStepPre` and `PluginStepPost`. The execution order is `Scope → RateLimit → Safety → PluginStepPre → Intercept → Transform → Macro → PluginStepPost → Record → (Layer encode)`. `pre_pipeline` plugins fire after Safety (so Safety blocks before plugin sees) and before Intercept (so plugin annotations are visible to user/AI in the intercept UI). `post_pipeline` plugins fire after all mutations are settled, before Record and wire encode. Resend, Macro fan-out (fuzz), and synthesized Send paths bypass `PluginStepPre` and traverse only `Transform → Macro → PluginStepPost → Record → Layer encode`; consequently, `post_pipeline` plugins receive every wire-bound variant exactly once, while `pre_pipeline` plugins fire only on fresh wire receive.
+
+2. **Mutable dict with WireEncoder regeneration.** Plugins receive `msg` as a snake_case Starlark dict (e.g., `msg["method"]`, `msg["headers"]`). Field key names are derived mechanically from the corresponding Go Message struct field names (PascalCase → snake_case) so future field additions require no manual mapping table. On hook return, the Layer reads back fields and applies them to `Envelope.Message`; if any Message field changed, `Envelope.Raw` is regenerated via the per-protocol WireEncoder (USK-661 grpc-web pattern, USK-N3 http1 pattern). Audit trail is provided by the existing Variant Snapshot mechanism (§5) — plugin mutations that diverge from the snapshot produce a variant row identical in shape to TransformStep mutations.
+
+3. **Headers as ordered list of pairs with case-insensitive read accessor.** `msg["headers"]` is a list of `(name, value)` 2-tuples preserving wire case, order, and duplicates. Mutation operations are `append`, `replace_at(index, pair)`, `delete_first(name)`, etc. — operations that preserve order. A read-only convenience method `headers.get_first(name)` does case-insensitive lookup but does **not** alter the list. The Layer never re-canonicalizes; any plugin attempt to invoke a re-sort or dedup operation raises a Starlark error explicitly (`fail("ordered list operations only")`) rather than silently re-ordering. This satisfies the §1.4 wire-fidelity invariant under plugin mutation.
+
+4. **Both Message and Raw editable; Raw wins if both touched.** A plugin may write `msg["raw"] = b"..."` to inject byte-level content directly. If the plugin modified `msg["raw"]` (compared to its snapshot), the Layer takes the wire-faithful path and writes the bytes verbatim, ignoring any Message-field mutations. This preserves smuggling-test capability (the original motivation for §1.4) under the plugin API. If only Message fields changed, the Layer regenerates Raw via WireEncoder. If neither changed, the original Raw passes through zero-copy.
+
+5. **Action surface depends on event semantics, not direction.** DROP/RESPOND are valid only at transaction-start events (`http.on_request`, `http.on_response`, `ws.on_upgrade`, `grpc.on_start`, `grpc-web.on_start`, `connection.on_connect`, `socks5.on_connect`). Mid-stream events (`on_data`, `on_message`, `on_event`, `on_chunk`) accept only CONTINUE + mutation; "drop a frame" is not wire-realizable for stateful streams without breaking the stream, so plugins that want to terminate must use the protocol's native termination action (e.g., `ctx.rst_stream(code)` for gRPC/HTTP/2, `ctx.close(code, reason)` for WebSocket). Lifecycle observation events accept no actions other than CONTINUE.
+
+6. **Per-stream / per-transaction state via `ctx.stream_state` and `ctx.transaction_state`.** The Layer provides two scoped dict-like objects on the `ctx` argument. `ctx.transaction_state` is bound to a single HTTP request/response pair (or one WS upgrade). `ctx.stream_state` is bound to an HTTP/2 StreamID (used by gRPC, WebSocket-over-H2, future server push); the Layer auto-releases it when the stream ends. Plugins do not manage their own dicts keyed by ID — that pattern leaks if the plugin forgets to clean up.
+
+7. **Strict load-time validation; runtime mismatch silently skips with Debug log.** `register_hook("htttp", "on_request", ...)` (typo) raises a Starlark module-load error against the enumeration above. At runtime, when an envelope of a different `Envelope.Message` type than registered reaches the plugin Step, the plugin is skipped and a single Debug log line is emitted. An MCP introspection tool (`plugin_introspect`) returns the registered `(protocol, event, phase)` tuples per plugin so AI agents can self-verify their hook setup.
+
+8. **No backwards compatibility.** The legacy 8-hook surface (`on_receive_from_client`, etc.) is removed entirely. User scripts must be rewritten against the new shape; a one-page migration table (legacy hook → `(protocol, event, phase)`) ships with N9 release notes. Per RFC-001 implementation discipline rule #5 ("no shims"), no compat alias is introduced.
+
+**Why this resolves the question:**
+
+- Wire fidelity: header mutation preserves case/order/duplicates by construction; Raw byte injection remains available for smuggling diagnostics.
+- L7/L4 duality at the plugin API: Both Message-level and Raw-level editing are first-class. Smuggling-class plugins write `msg["raw"]`; ergonomic transform plugins write fields.
+- Protocol-uniform: every Hook identity is `(protocol, event[, phase])`. Adding a future protocol (e.g., HTTP/3, MQTT) requires only enumerating its `(protocol, event)` pairs and the Pipeline-Step plumbing — no plugin-API changes.
+- AI-agent friendly: `plugin_introspect` tool exposes the registration table; snake_case dict serializes naturally to JSON for MCP transport.
+- Two-phase covers both observation and last-mile mutation use cases (annotation/fingerprinting at `pre_pipeline`; HMAC/signing/Content-Length recomputation at `post_pipeline`); resend/fuzz fire only `post_pipeline` because pre is "fresh wire receive".
+
+**Rejected alternatives:**
+
+- **Single-phase plugin Step (one `PluginStep` between Safety and Intercept, the legacy position):** Cannot express "sign after final mutations are settled". Forces signing plugins to live in TransformStep, but TransformStep is declarative-rule-driven and cannot host arbitrary Starlark.
+- **Direction-prefixed hook names (`on_request_received` / `on_request_sending`, mirroring legacy):** Conflates phase with hook identity. Adding a future "between Intercept and Transform" phase would require new hook names.
+- **Read-only dict + explicit `ctx.modify(field, value)` API:** Verbose for the common case; creates two ways to do the same thing (because Raw-byte injection still needs `msg["raw"] = ...` shape).
+- **Method-call API on Message (`msg.method()`, `msg.set_method(...)`):** Starlark has no struct/class system; the dict shape is idiomatic.
+- **Compatibility shim for legacy 8 hooks:** Violates RFC-001 implementation discipline rule #5; reintroduces HTTP bias via the back door.
+- **Per-protocol hook registration functions (`register_http_hook(...)`, `register_ws_hook(...)`):** Equivalent to the chosen design but multiplies the loadable name surface and breaks the `(protocol, event, phase)` introspection symmetry.
+
+**Sub-decisions recorded here:**
+
+- **Snake-case key derivation is mechanical.** A `convertMessageToDict` helper performs PascalCase → snake_case conversion on Message field names. No manual alias table; future fields appear under their derived name automatically.
+- **`phase` default is `pre_pipeline` and is documented as such.** Plugin authors writing observation/annotation plugins (the majority case) need not pass `phase=` at all. Signing/finalization plugins must explicitly opt in via `phase="post_pipeline"`.
+- **`PluginStepPost` runs once per Macro variant.** A fuzz run that generates 1000 variants invokes `post_pipeline` plugins 1000 times, each receiving the variant-specific final state. Plugin authors must keep `post_pipeline` work O(1) per envelope.
+- **Resend is `PluginStepPost`-only.** The Resend MCP tools (`resend_http`, `resend_ws`, `resend_grpc`, `resend_raw`) construct an Envelope from stored Flow data and inject directly into the Pipeline at `Transform`'s entry. `pre_pipeline` plugins do not fire because the data is not fresh-wire receive. This is the correct semantics for signing plugins (re-sign on each resend) and for forensic plugins (already saw the original wire receive).
+- **`("http", "on_response")` accepts RESPOND-replace** but not RESPOND-with-status (a response already has its status; replacement supersedes the upstream response). DROP is excluded because dropping a response yields a hung client; plugins that want to terminate a response should mutate it to a synthetic 502 instead.
+- **`tls.on_handshake` is observation-only.** The TLS handshake is opaque to higher layers in MITM operation; the proxy already terminates client TLS and re-handshakes upstream. Plugins observe ClientHello, ServerHello, and JA3/JA4 fingerprints but cannot modify them — modification would require re-implementing the TLS state machine in Starlark.
+- **`socks5.on_connect` is the SOCKS5 tunnel-established event** (post-handshake, pre-data). The handshake itself (SOCKS5 method negotiation, auth) is not exposed because the per-method bytes have no useful Starlark abstraction; if needed in the future, a separate `socks5.on_handshake` event can be added under the same `(protocol, event)` enumeration without API change.
+- **`connection.on_connect` accepts DROP** for IP-allowlist plugins. DROP closes the accepted TCP connection before any further Layer is built. This is the only place a plugin can reject a connection without protocol participation.
+- **Plugin-introduced state lifetime.** `ctx.transaction_state` is GC'd when the parent Pipeline session ends (one HTTP request/response pair, or one WS upgrade transaction). `ctx.stream_state` is GC'd when the H2 stream reaches `complete`/`error`/`reset`. Lifetime is enforced by the Layer; plugins cannot extend it.
 
 ---
 
@@ -868,12 +1113,23 @@ This RFC is **accepted** as of 2026-04-12. Implementation proceeds on N1.
 - [x] M36–M44 milestones and incomplete issues moved to Cancelled
 
 **Deferred to implementation phase (per-milestone gating):**
-- [ ] Open Question #1 (HTTP/2 flow control vs Pipeline latency) — **resolved before N6 starts**
-- [ ] Open Question #2 (gRPC envelope granularity) — **resolved before N7 starts**
-- [ ] Open Question #3 (Starlark plugin API shape) — **resolved before N8 starts**
-- [ ] Envelope + Message Go interfaces compiled and validated — **part of N1**
-- [ ] Pseudocode-level InterceptStep implementation proving dispatch pattern — **part of N3**
-- [ ] Migration reuse % validated against actual file sizes — **part of each N milestone retrospective**
+- [x] Open Question #1 (HTTP/2 flow control vs Pipeline latency) — **resolved 2026-04-15; revised 2026-04-23: event-granular HTTP/2 Layer + HTTPAggregatorLayer wrapper (§9.1)**
+- [x] Open Question #2 (gRPC envelope granularity) — **resolved 2026-04-23: event-per-envelope with dedicated GRPCStart/Data/End types (§9.2)**
+- [x] Open Question #3 (Starlark plugin API shape) — **resolved 2026-04-29: three-axis Hook identity `(protocol, event, phase)` with two-phase Pipeline integration and mutable Starlark dict messages (§9.3)**
+- [x] Envelope + Message Go interfaces compiled and validated — **completed in N1**
+- [x] Pseudocode-level InterceptStep implementation proving dispatch pattern — **completed in N3**
+- [x] Migration reuse % validated against actual file sizes — **closed at N9; weighted reuse % held within the ~70% estimate from §6 (e.g. http1 parser preserved verbatim, Pipeline.Run snapshot mechanism reused, TLS handshake / cert / macro / flow store packages reused)**
+
+**Milestone completion record:**
+- [x] N1 (Foundation Types) — DONE
+- [x] N2 (TCP + TLS + ByteChunk + raw smuggling E2E) — DONE
+- [x] N3 (HTTP/1.x Layer + normal HTTPS MITM E2E) — DONE
+- [x] N4 (Connector Completion) — DONE
+- [x] N5 (Job + Macro Integration) — DONE
+- [x] N6 / N6.5 / N6.6 / N6.7 (HTTP/2 Layer + event-granular split + httpaggregator) — DONE
+- [x] N7 (gRPC, gRPC-Web, WS, SSE Layers + per-protocol rule engines) — DONE
+- [x] N8 (Plugin v2 — Starlark; MCP + WebUI Reconnection) — DONE
+- [x] N9 (Legacy Removal + Documentation) — DONE (closed 2026-05-05)
 
 ---
 

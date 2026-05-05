@@ -12,8 +12,8 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/usk6666/yorishiro-proxy/internal/exchange"
-	"github.com/usk6666/yorishiro-proxy/internal/proxy"
+	"github.com/usk6666/yorishiro-proxy/internal/connector"
+	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/safety"
 )
 
@@ -25,9 +25,6 @@ const maxListLimit = 1000
 
 // defaultReplayTimeout is the default timeout for replay HTTP requests.
 const defaultReplayTimeout = 30 * time.Second
-
-// maxRedirects is the maximum number of HTTP redirects to follow.
-const maxRedirects = 10
 
 // allowedSchemes are the URL schemes permitted for replay requests.
 var allowedSchemes = map[string]bool{
@@ -44,20 +41,6 @@ func validateHeaderValues(headers map[string]string) error {
 		}
 		if strings.ContainsAny(v, "\r\n") {
 			return fmt.Errorf("header value for %q contains CR/LF characters", k)
-		}
-	}
-	return nil
-}
-
-// validateHeaderEntries checks that header entries do not contain CR or LF
-// characters in keys or values, which would enable HTTP header injection (CWE-113).
-func validateHeaderEntries(entries HeaderEntries) error {
-	for _, e := range entries {
-		if strings.ContainsAny(e.Key, "\r\n") {
-			return fmt.Errorf("header key %q contains CR/LF characters", e.Key)
-		}
-		if strings.ContainsAny(e.Value, "\r\n") {
-			return fmt.Errorf("header value for %q contains CR/LF characters", e.Key)
 		}
 	}
 	return nil
@@ -91,50 +74,6 @@ func validateURLScheme(u *url.URL) error {
 	return nil
 }
 
-// safeCheckRedirect validates redirect targets when follow_redirects is enabled.
-// It enforces HTTP/HTTPS-only schemes and a maximum hop limit.
-func safeCheckRedirect(req *http.Request, via []*http.Request) error {
-	if len(via) >= maxRedirects {
-		return fmt.Errorf("too many redirects: %d", len(via))
-	}
-	if req.URL.Scheme != "http" && req.URL.Scheme != "https" {
-		return fmt.Errorf("redirect to non-HTTP scheme: %s", req.URL.Scheme)
-	}
-	return nil
-}
-
-// NewDefaultHTTPClient returns an *http.Client with an explicit timeout and
-// redirect suppression. It should be used for outbound HTTP requests initiated
-// by user input (fuzz, resend, macro, etc.). Access control is handled at a
-// higher level by the target scope enforcement layer (TargetScope).
-func NewDefaultHTTPClient() *http.Client {
-	transport := &http.Transport{
-		DialContext: (&net.Dialer{
-			Timeout: defaultReplayTimeout,
-		}).DialContext,
-	}
-	return &http.Client{
-		Timeout:   defaultReplayTimeout,
-		Transport: transport,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-	}
-}
-
-// rawDialerFunc returns the raw dialer to use for replay_raw connections.
-// If a custom dialer is set (for testing), it is returned; otherwise,
-// a default dialer with the replay timeout is returned.
-// Access control is handled by the target scope enforcement layer.
-func (s *Server) rawDialerFunc() rawDialer {
-	if s.deps.rawReplayDialer != nil {
-		return s.deps.rawReplayDialer
-	}
-	return &net.Dialer{
-		Timeout: defaultReplayTimeout,
-	}
-}
-
 // encodeBody returns the body as a string with its encoding type.
 // If the body is valid UTF-8 text, it is returned as-is with encoding "text".
 // Otherwise, it is Base64-encoded with encoding "base64".
@@ -158,26 +97,6 @@ func formatFingerprint(b []byte) string {
 	return strings.Join(parts, ":")
 }
 
-// scopeRuleInput is the JSON representation of a scope rule for MCP tool input.
-type scopeRuleInput struct {
-	// Hostname matches the request's hostname (case-insensitive, exact match).
-	// Supports wildcard prefix "*.example.com" to match all subdomains.
-	Hostname string `json:"hostname,omitempty" jsonschema:"hostname pattern (e.g. example.com, *.example.com)"`
-
-	// URLPrefix matches the beginning of the request URL path (case-sensitive).
-	URLPrefix string `json:"url_prefix,omitempty" jsonschema:"URL path prefix (e.g. /api/)"`
-
-	// Method matches the HTTP method (case-insensitive, exact match).
-	Method string `json:"method,omitempty" jsonschema:"HTTP method (e.g. GET, POST)"`
-}
-
-// scopeRuleOutput is the JSON representation of a scope rule in MCP tool output.
-type scopeRuleOutput struct {
-	Hostname  string `json:"hostname,omitempty"`
-	URLPrefix string `json:"url_prefix,omitempty"`
-	Method    string `json:"method,omitempty"`
-}
-
 // connInfoResult is the connection metadata in the get_session/query response.
 type connInfoResult struct {
 	// ClientAddr is the client's remote address (e.g., "192.168.1.100:54321").
@@ -194,42 +113,16 @@ type connInfoResult struct {
 	TLSServerCertSubject string `json:"tls_server_cert_subject,omitempty"`
 }
 
-// toScopeRules converts MCP input rules to proxy.ScopeRule slice.
-func toScopeRules(inputs []scopeRuleInput) []proxy.ScopeRule {
-	rules := make([]proxy.ScopeRule, len(inputs))
-	for i, in := range inputs {
-		rules[i] = proxy.ScopeRule{
-			Hostname:  in.Hostname,
-			URLPrefix: in.URLPrefix,
-			Method:    in.Method,
-		}
-	}
-	return rules
-}
-
-// fromScopeRules converts proxy.ScopeRule slice to MCP output rules.
-func fromScopeRules(rules []proxy.ScopeRule) []scopeRuleOutput {
-	out := make([]scopeRuleOutput, len(rules))
-	for i, r := range rules {
-		out[i] = scopeRuleOutput{
-			Hostname:  r.Hostname,
-			URLPrefix: r.URLPrefix,
-			Method:    r.Method,
-		}
-	}
-	return out
-}
-
 // checkTargetScopeURL checks a URL against the target scope rules.
 // Returns nil if the target is allowed or if no rules are configured (open mode).
 // Returns a descriptive error if the target is blocked.
 func (s *Server) checkTargetScopeURL(u *url.URL) error {
-	return checkTargetScopeURLHelper(s.deps.targetScope, u)
+	return checkTargetScopeURLHelper(s.connector.targetScope, u)
 }
 
 // checkTargetScopeURLHelper checks a URL against the given target scope rules.
 // This is a standalone version of Server.checkTargetScopeURL for use by handler structs.
-func checkTargetScopeURLHelper(ts *proxy.TargetScope, u *url.URL) error {
+func checkTargetScopeURLHelper(ts *connector.TargetScope, u *url.URL) error {
 	if ts == nil || !ts.HasRules() {
 		return nil
 	}
@@ -245,12 +138,12 @@ func checkTargetScopeURLHelper(ts *proxy.TargetScope, u *url.URL) error {
 // Returns nil if the target is allowed or if no rules are configured (open mode).
 // Returns a descriptive error if the target is blocked.
 func (s *Server) checkTargetScopeAddr(scheme, addr string) error {
-	return checkTargetScopeAddrHelper(s.deps.targetScope, scheme, addr)
+	return checkTargetScopeAddrHelper(s.connector.targetScope, scheme, addr)
 }
 
 // checkTargetScopeAddrHelper checks a host:port address against the given target scope rules.
 // This is a standalone version of Server.checkTargetScopeAddr for use by handler structs.
-func checkTargetScopeAddrHelper(ts *proxy.TargetScope, scheme, addr string) error {
+func checkTargetScopeAddrHelper(ts *connector.TargetScope, scheme, addr string) error {
 	if ts == nil || !ts.HasRules() {
 		return nil
 	}
@@ -268,34 +161,14 @@ func checkTargetScopeAddrHelper(ts *proxy.TargetScope, scheme, addr string) erro
 	return nil
 }
 
-// targetScopeCheckRedirect returns a CheckRedirect function that enforces
-// both the standard redirect safety checks and target scope rules.
-// If ts is nil or has no rules, it falls back to safeCheckRedirect.
-func targetScopeCheckRedirect(ts *proxy.TargetScope) func(*http.Request, []*http.Request) error {
-	return func(req *http.Request, via []*http.Request) error {
-		// Apply standard redirect safety checks first.
-		if err := safeCheckRedirect(req, via); err != nil {
-			return err
-		}
-		// Apply target scope check on the redirect target.
-		if ts != nil && ts.HasRules() {
-			allowed, reason := ts.CheckURL(req.URL)
-			if !allowed {
-				return fmt.Errorf("redirect blocked by target scope: host %q is %s", req.URL.Hostname(), reason)
-			}
-		}
-		return nil
-	}
-}
-
 // checkSafetyInput validates request data against the safety filter engine.
 // Returns nil if no safety engine is configured or if the input passes.
 // Returns an InputViolation if the input is blocked.
-func (s *Server) checkSafetyInput(body []byte, rawURL string, headers []exchange.KeyValue) *safety.InputViolation {
-	if s.deps.safetyEngine == nil {
+func (s *Server) checkSafetyInput(body []byte, rawURL string, headers []envelope.KeyValue) *safety.InputViolation {
+	if s.pipeline.safetyEngine == nil {
 		return nil
 	}
-	return s.deps.safetyEngine.CheckInput(body, rawURL, headers)
+	return s.pipeline.safetyEngine.CheckInput(body, rawURL, headers)
 }
 
 // safetyViolationError returns a generic error message for MCP clients when a safety

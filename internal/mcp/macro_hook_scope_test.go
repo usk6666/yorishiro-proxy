@@ -11,9 +11,9 @@ import (
 	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/usk6666/yorishiro-proxy/internal/connector"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/macro"
-	"github.com/usk6666/yorishiro-proxy/internal/proxy"
 )
 
 // TestMacroSendFunc_TargetScope_BlocksAfterTemplateExpansion verifies that
@@ -21,12 +21,12 @@ import (
 // requests to out-of-scope hosts even when the URL was produced by template
 // expansion (TOCTOU fix for USK-210).
 func TestMacroSendFunc_TargetScope_BlocksAfterTemplateExpansion(t *testing.T) {
-	ts := proxy.NewTargetScope()
-	ts.SetAgentRules([]proxy.TargetRule{
+	ts := connector.NewTargetScope()
+	_ = ts.SetAgentRules([]connector.TargetRule{
 		{Hostname: "allowed.example.com"},
 	}, nil)
 
-	s := &Server{deps: &deps{targetScope: ts}}
+	s := mkServerFromLegacyDeps(legacyDeps{targetScope: ts})
 	sendFunc := s.macroSendFunc("test-macro")
 
 	// Simulate a request to a blocked host (as if template expanded to this URL).
@@ -54,12 +54,12 @@ func TestMacroSendFunc_TargetScope_AllowsInScope(t *testing.T) {
 
 	serverURL, _ := url.Parse(echoServer.URL)
 
-	ts := proxy.NewTargetScope()
-	ts.SetAgentRules([]proxy.TargetRule{
+	ts := connector.NewTargetScope()
+	_ = ts.SetAgentRules([]connector.TargetRule{
 		{Hostname: serverURL.Hostname()},
 	}, nil)
 
-	s := &Server{deps: &deps{targetScope: ts}}
+	s := mkServerFromLegacyDeps(legacyDeps{targetScope: ts})
 	sendFunc := s.macroSendFunc("test-macro")
 
 	resp, err := sendFunc(context.Background(), &macro.SendRequest{
@@ -85,7 +85,7 @@ func TestMacroSendFunc_TargetScope_NoRulesAllowsAll(t *testing.T) {
 	defer echoServer.Close()
 
 	// No target scope rules.
-	s := &Server{deps: &deps{targetScope: proxy.NewTargetScope()}}
+	s := mkServerFromLegacyDeps(legacyDeps{targetScope: connector.NewTargetScope()})
 	sendFunc := s.macroSendFunc("test-macro")
 
 	resp, err := sendFunc(context.Background(), &macro.SendRequest{
@@ -105,13 +105,13 @@ func TestMacroSendFunc_TargetScope_NoRulesAllowsAll(t *testing.T) {
 // hookMacroSendFunc checks httpReq.URL against target scope rules, blocking
 // requests to out-of-scope hosts (TOCTOU fix for USK-210).
 func TestHookMacroSendFunc_TargetScope_BlocksAfterTemplateExpansion(t *testing.T) {
-	ts := proxy.NewTargetScope()
-	ts.SetAgentRules([]proxy.TargetRule{
+	ts := connector.NewTargetScope()
+	_ = ts.SetAgentRules([]connector.TargetRule{
 		{Hostname: "allowed.example.com"},
 	}, nil)
 
-	d := &deps{targetScope: ts}
-	sendFunc := hookMacroSendFunc(d, "hook-macro")
+	s := mkServerFromLegacyDeps(legacyDeps{targetScope: ts})
+	sendFunc := hookMacroSendFunc(s, "hook-macro")
 
 	// Simulate a request to a blocked host.
 	_, err := sendFunc(context.Background(), &macro.SendRequest{
@@ -138,13 +138,13 @@ func TestHookMacroSendFunc_TargetScope_AllowsInScope(t *testing.T) {
 
 	serverURL, _ := url.Parse(echoServer.URL)
 
-	ts := proxy.NewTargetScope()
-	ts.SetAgentRules([]proxy.TargetRule{
+	ts := connector.NewTargetScope()
+	_ = ts.SetAgentRules([]connector.TargetRule{
 		{Hostname: serverURL.Hostname()},
 	}, nil)
 
-	d := &deps{targetScope: ts}
-	sendFunc := hookMacroSendFunc(d, "hook-macro")
+	s := mkServerFromLegacyDeps(legacyDeps{targetScope: ts})
+	sendFunc := hookMacroSendFunc(s, "hook-macro")
 
 	resp, err := sendFunc(context.Background(), &macro.SendRequest{
 		Method: "GET",
@@ -168,8 +168,8 @@ func TestHookMacroSendFunc_TargetScope_NoRulesAllowsAll(t *testing.T) {
 	}))
 	defer echoServer.Close()
 
-	d := &deps{targetScope: proxy.NewTargetScope()}
-	sendFunc := hookMacroSendFunc(d, "hook-macro")
+	s := mkServerFromLegacyDeps(legacyDeps{targetScope: connector.NewTargetScope()})
+	sendFunc := hookMacroSendFunc(s, "hook-macro")
 
 	resp, err := sendFunc(context.Background(), &macro.SendRequest{
 		Method: "GET",
@@ -193,7 +193,7 @@ func TestMacroSendFunc_TargetScope_NilScope(t *testing.T) {
 	}))
 	defer echoServer.Close()
 
-	s := &Server{deps: &deps{targetScope: nil}}
+	s := mkServerFromLegacyDeps(legacyDeps{targetScope: nil})
 	sendFunc := s.macroSendFunc("test-macro")
 
 	resp, err := sendFunc(context.Background(), &macro.SendRequest{
@@ -218,8 +218,8 @@ func TestHookMacroSendFunc_TargetScope_NilScope(t *testing.T) {
 	}))
 	defer echoServer.Close()
 
-	d := &deps{targetScope: nil}
-	sendFunc := hookMacroSendFunc(d, "hook-macro")
+	s := mkServerFromLegacyDeps(legacyDeps{targetScope: nil})
+	sendFunc := hookMacroSendFunc(s, "hook-macro")
 
 	resp, err := sendFunc(context.Background(), &macro.SendRequest{
 		Method: "GET",
@@ -292,12 +292,12 @@ func TestRunMacro_TemplateExpansion_TargetScopeBypass_Blocked(t *testing.T) {
 	step1URLParsed, _ := url.Parse(step1Server.URL)
 
 	// Set up target scope: only allow the step1 server.
-	ts := proxy.NewTargetScope()
-	ts.SetAgentRules([]proxy.TargetRule{
+	ts := connector.NewTargetScope()
+	_ = ts.SetAgentRules([]connector.TargetRule{
 		{Hostname: step1URLParsed.Hostname()},
 	}, nil)
 
-	s := NewServer(ctx, nil, store, nil, WithTargetScope(ts))
+	s := newServer(ctx, nil, store, nil, WithTargetScope(ts))
 	ct, st := gomcp.NewInMemoryTransports()
 	ss, err := s.server.Connect(ctx, st, nil)
 	if err != nil {
@@ -427,15 +427,15 @@ func TestHookMacro_TemplateExpansion_TargetScopeBypass_Blocked(t *testing.T) {
 	macroURLParsed, _ := url.Parse(macroServer.URL)
 
 	// Target scope: only allow macroServer.
-	ts := proxy.NewTargetScope()
-	ts.SetAgentRules([]proxy.TargetRule{
+	ts := connector.NewTargetScope()
+	_ = ts.SetAgentRules([]connector.TargetRule{
 		{Hostname: macroURLParsed.Hostname()},
 	}, nil)
 
-	d := &deps{
+	s := mkServerFromLegacyDeps(legacyDeps{
 		store:       store,
 		targetScope: ts,
-	}
+	})
 
 	// Define a 2-step macro: step 1 extracts URL, step 2 uses it.
 	cfg := macroConfig{
@@ -468,7 +468,7 @@ func TestHookMacro_TemplateExpansion_TargetScopeBypass_Blocked(t *testing.T) {
 	}
 
 	// Run the macro via hookExecutor.
-	he := newHookExecutor(d, &hooksInput{
+	he := newHookExecutor(s, &hooksInput{
 		PreSend: &hookConfig{
 			Macro:       "evil-hook-macro",
 			RunInterval: "always",

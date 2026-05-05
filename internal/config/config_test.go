@@ -1,12 +1,14 @@
 package config
 
 import (
-	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/usk6666/yorishiro-proxy/internal/pluginv2"
 )
 
 func TestValidate_DefaultConfig(t *testing.T) {
@@ -390,10 +392,6 @@ func TestLoadFile_ValidConfig(t *testing.T) {
 
 	content := `{
 		"listen_addr": "127.0.0.1:9090",
-		"capture_scope": {
-			"includes": [{"hostname": "*.target.com"}],
-			"excludes": [{"hostname": "cdn.example.com"}]
-		},
 		"tls_passthrough": ["pinned-service.com"],
 		"intercept_rules": [],
 		"auto_transform": [],
@@ -421,9 +419,6 @@ func TestLoadFile_ValidConfig(t *testing.T) {
 			got = fc.Target
 		}
 		t.Errorf("TCPForwards[3306].Target = %q, want %q", got, "db.example.com:3306")
-	}
-	if cfg.CaptureScope == nil {
-		t.Fatal("CaptureScope is nil, want non-nil")
 	}
 }
 
@@ -507,53 +502,6 @@ func TestLoadFile_EmptyFile(t *testing.T) {
 	_, err := LoadFile(path)
 	if err == nil {
 		t.Fatal("expected error for empty file, got nil")
-	}
-}
-
-func TestLoadFile_CaptureScope_RawMessage(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "scope.json")
-
-	content := `{
-		"capture_scope": {
-			"includes": [{"hostname": "api.example.com", "url_prefix": "/v1/", "method": "POST"}],
-			"excludes": [{"hostname": "static.example.com"}]
-		}
-	}`
-	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
-		t.Fatalf("write config file: %v", err)
-	}
-
-	cfg, err := LoadFile(path)
-	if err != nil {
-		t.Fatalf("LoadFile: %v", err)
-	}
-
-	// Verify capture_scope is stored as raw JSON and can be unmarshalled.
-	var scope struct {
-		Includes []struct {
-			Hostname  string `json:"hostname"`
-			URLPrefix string `json:"url_prefix"`
-			Method    string `json:"method"`
-		} `json:"includes"`
-		Excludes []struct {
-			Hostname string `json:"hostname"`
-		} `json:"excludes"`
-	}
-	if err := json.Unmarshal(cfg.CaptureScope, &scope); err != nil {
-		t.Fatalf("unmarshal CaptureScope: %v", err)
-	}
-	if len(scope.Includes) != 1 {
-		t.Fatalf("includes = %d, want 1", len(scope.Includes))
-	}
-	if scope.Includes[0].Hostname != "api.example.com" {
-		t.Errorf("includes[0].hostname = %q, want %q", scope.Includes[0].Hostname, "api.example.com")
-	}
-	if scope.Includes[0].URLPrefix != "/v1/" {
-		t.Errorf("includes[0].url_prefix = %q, want %q", scope.Includes[0].URLPrefix, "/v1/")
-	}
-	if len(scope.Excludes) != 1 {
-		t.Fatalf("excludes = %d, want 1", len(scope.Excludes))
 	}
 }
 
@@ -735,6 +683,126 @@ func TestValidateProjectName(t *testing.T) {
 				t.Errorf("validateProjectName(%q) = %v, want nil", tt.input, err)
 			}
 		})
+	}
+}
+
+func TestValidate_BodySpillDir_Valid(t *testing.T) {
+	dir := t.TempDir()
+	cfg := Default()
+	cfg.BodySpillDir = dir
+
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("Validate() with valid BodySpillDir = %v, want nil", err)
+	}
+}
+
+func TestValidate_BodySpillDir_Empty(t *testing.T) {
+	cfg := Default()
+	cfg.BodySpillDir = ""
+
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("Validate() with empty BodySpillDir = %v, want nil (skips fs checks)", err)
+	}
+}
+
+func TestValidate_BodySpillDir_NonExistent(t *testing.T) {
+	cfg := Default()
+	cfg.BodySpillDir = filepath.Join(t.TempDir(), "does-not-exist")
+
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected error for non-existent BodySpillDir, got nil")
+	}
+	if !strings.Contains(err.Error(), "does not exist") {
+		t.Errorf("error = %q, want substring %q", err.Error(), "does not exist")
+	}
+}
+
+func TestValidate_BodySpillDir_IsFile(t *testing.T) {
+	tmp := t.TempDir()
+	filePath := filepath.Join(tmp, "not-a-dir")
+	if err := os.WriteFile(filePath, []byte("x"), 0600); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	cfg := Default()
+	cfg.BodySpillDir = filePath
+
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected error for file-not-dir BodySpillDir, got nil")
+	}
+	if !strings.Contains(err.Error(), "is not a directory") {
+		t.Errorf("error = %q, want substring %q", err.Error(), "is not a directory")
+	}
+}
+
+func TestValidate_BodySpillDir_NotWritable(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("skipping non-writable test: root bypasses 0500 permission")
+	}
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0500); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() {
+		// Restore write perm so t.TempDir()'s cleanup can remove the directory.
+		_ = os.Chmod(dir, 0700)
+	})
+
+	cfg := Default()
+	cfg.BodySpillDir = dir
+
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected error for non-writable BodySpillDir, got nil")
+	}
+	if !strings.Contains(err.Error(), "is not writable") {
+		t.Errorf("error = %q, want substring %q", err.Error(), "is not writable")
+	}
+}
+
+func TestValidate_BodySpillThreshold_Negative(t *testing.T) {
+	cfg := Default()
+	cfg.BodySpillThreshold = -1
+
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected error for negative BodySpillThreshold, got nil")
+	}
+	if !strings.Contains(err.Error(), "body_spill_threshold must be >= 0") {
+		t.Errorf("error = %q, want substring %q", err.Error(), "body_spill_threshold must be >= 0")
+	}
+}
+
+func TestValidate_BodySpillThreshold_ExceedsMaxBodySize(t *testing.T) {
+	cfg := Default()
+	cfg.BodySpillThreshold = MaxBodySize + 1
+
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected error for BodySpillThreshold > MaxBodySize, got nil")
+	}
+	if !strings.Contains(err.Error(), "must be <= MaxBodySize") {
+		t.Errorf("error = %q, want substring %q", err.Error(), "must be <= MaxBodySize")
+	}
+}
+
+func TestValidate_BodySpillThreshold_Zero(t *testing.T) {
+	cfg := Default()
+	cfg.BodySpillThreshold = 0
+
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("Validate() with BodySpillThreshold=0 = %v, want nil (zero means default)", err)
+	}
+}
+
+func TestValidate_BodySpillThreshold_AtMaxBodySize(t *testing.T) {
+	cfg := Default()
+	cfg.BodySpillThreshold = MaxBodySize
+
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("Validate() with BodySpillThreshold=MaxBodySize = %v, want nil (upper bound inclusive)", err)
 	}
 }
 
@@ -984,5 +1052,189 @@ func TestLoadPolicyFile_EmptyFile(t *testing.T) {
 	_, err := LoadPolicyFile(path)
 	if err == nil {
 		t.Fatal("expected error for empty file, got nil")
+	}
+}
+
+// --- ProxyConfig.Plugins (RFC-001 pluginv2 typed list) tests ---
+
+// TestProxyConfig_Plugins_LoadFile_TypedDecode confirms the new typed
+// shape round-trips through encoding/json.
+func TestProxyConfig_Plugins_LoadFile_TypedDecode(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "plugins.json")
+	content := `{
+		"plugins": [
+			{
+				"path": "/tmp/plugin.star",
+				"name": "my-plugin",
+				"on_error": "abort",
+				"max_steps": 500000,
+				"vars": {"region": "ap-northeast-1", "max_retries": 3},
+				"redact_keys": ["region"]
+			}
+		]
+	}`
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatalf("write config file: %v", err)
+	}
+
+	cfg, err := LoadFile(path)
+	if err != nil {
+		t.Fatalf("LoadFile: %v", err)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if len(cfg.Plugins) != 1 {
+		t.Fatalf("Plugins len = %d, want 1", len(cfg.Plugins))
+	}
+	pc := cfg.Plugins[0]
+	if pc.Path != "/tmp/plugin.star" {
+		t.Errorf("Path = %q, want %q", pc.Path, "/tmp/plugin.star")
+	}
+	if pc.Name != "my-plugin" {
+		t.Errorf("Name = %q, want %q", pc.Name, "my-plugin")
+	}
+	if pc.OnError != "abort" {
+		t.Errorf("OnError = %q, want %q", pc.OnError, "abort")
+	}
+	if pc.MaxSteps != 500000 {
+		t.Errorf("MaxSteps = %d, want 500000", pc.MaxSteps)
+	}
+	// JSON numbers decode into any as float64 — confirms map[string]any
+	// gives non-string Vars first-class round-trip (legacy plugin.PluginConfig
+	// used map[string]string which would lose the integer here).
+	if got, want := pc.Vars["max_retries"], float64(3); got != want {
+		t.Errorf("Vars[max_retries] = %v, want %v", got, want)
+	}
+	if len(pc.RedactKeys) != 1 || pc.RedactKeys[0] != "region" {
+		t.Errorf("RedactKeys = %v, want [region]", pc.RedactKeys)
+	}
+}
+
+// TestProxyConfig_Plugins_LegacyFieldsRejected confirms the legacy
+// `protocol:` / `hooks:` keys land in the pluginv2 tripwire and surface
+// as a typed *pluginv2.LoadError pointing at the migration doc.
+func TestProxyConfig_Plugins_LegacyFieldsRejected(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+	}{
+		{
+			name: "legacy protocol field",
+			content: `{
+				"plugins": [
+					{"path": "/tmp/x.star", "protocol": "http"}
+				]
+			}`,
+		},
+		{
+			name: "legacy hooks field",
+			content: `{
+				"plugins": [
+					{"path": "/tmp/x.star", "hooks": ["on_request"]}
+				]
+			}`,
+		},
+		{
+			name: "both legacy fields",
+			content: `{
+				"plugins": [
+					{"path": "/tmp/x.star", "protocol": "http", "hooks": ["on_request"]}
+				]
+			}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "legacy.json")
+			if err := os.WriteFile(path, []byte(tt.content), 0644); err != nil {
+				t.Fatalf("write config file: %v", err)
+			}
+
+			cfg, err := LoadFile(path)
+			if err != nil {
+				t.Fatalf("LoadFile: %v", err)
+			}
+			err = cfg.Validate()
+			if err == nil {
+				t.Fatal("expected legacy-field rejection, got nil")
+			}
+			var loadErr *pluginv2.LoadError
+			if !errors.As(err, &loadErr) {
+				t.Fatalf("expected *pluginv2.LoadError, got %T (%v)", err, err)
+			}
+			if loadErr.Kind != pluginv2.LoadErrLegacyField {
+				t.Errorf("Kind = %v, want LoadErrLegacyField", loadErr.Kind)
+			}
+			if !strings.Contains(err.Error(), "plugin-migration.md") {
+				t.Errorf("error = %q, want substring %q", err.Error(), "plugin-migration.md")
+			}
+			if !strings.Contains(err.Error(), "plugins[0]") {
+				t.Errorf("error = %q, want index prefix %q", err.Error(), "plugins[0]")
+			}
+		})
+	}
+}
+
+// TestProxyConfig_Plugins_RejectsEmptyPath confirms the pluginv2
+// per-entry path-required validation surfaces through ProxyConfig.Validate.
+func TestProxyConfig_Plugins_RejectsEmptyPath(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "no-path.json")
+	if err := os.WriteFile(path, []byte(`{"plugins": [{"on_error": "skip"}]}`), 0644); err != nil {
+		t.Fatalf("write config file: %v", err)
+	}
+	cfg, err := LoadFile(path)
+	if err != nil {
+		t.Fatalf("LoadFile: %v", err)
+	}
+	err = cfg.Validate()
+	if err == nil {
+		t.Fatal("expected empty-path rejection, got nil")
+	}
+	if !strings.Contains(err.Error(), "path must not be empty") {
+		t.Errorf("error = %q, want substring %q", err.Error(), "path must not be empty")
+	}
+}
+
+// TestProxyConfig_Plugins_RejectsWrongType confirms a non-array value
+// fails at LoadFile (json.UnmarshalTypeError) — covers config-shape errors
+// before Validate() is even called.
+func TestProxyConfig_Plugins_RejectsWrongType(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "bad-shape.json")
+	if err := os.WriteFile(path, []byte(`{"plugins": "not an array"}`), 0644); err != nil {
+		t.Fatalf("write config file: %v", err)
+	}
+	_, err := LoadFile(path)
+	if err == nil {
+		t.Fatal("expected unmarshal type error, got nil")
+	}
+	// LoadFile wraps the json error; the underlying error mentions the field type.
+	if !strings.Contains(err.Error(), "plugins") {
+		t.Errorf("error = %q, want substring %q", err.Error(), "plugins")
+	}
+}
+
+// TestProxyConfig_Plugins_EmptyValidateOK confirms Validate is a no-op on
+// configs that omit the plugins key (zero-length slice).
+func TestProxyConfig_Plugins_EmptyValidateOK(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "no-plugins.json")
+	if err := os.WriteFile(path, []byte(`{"listen_addr": "127.0.0.1:0"}`), 0644); err != nil {
+		t.Fatalf("write config file: %v", err)
+	}
+	cfg, err := LoadFile(path)
+	if err != nil {
+		t.Fatalf("LoadFile: %v", err)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("Validate on no-plugins config = %v, want nil", err)
+	}
+	if len(cfg.Plugins) != 0 {
+		t.Errorf("Plugins len = %d, want 0", len(cfg.Plugins))
 	}
 }

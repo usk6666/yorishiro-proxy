@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/usk6666/yorishiro-proxy/internal/pluginv2"
 )
 
 // validLogLevels lists the accepted log level strings.
@@ -47,6 +49,41 @@ func (c *Config) Validate() error {
 	}
 	if c.CleanupInterval < 0 {
 		return fmt.Errorf("cleanup_interval must be >= 0, got %s", c.CleanupInterval)
+	}
+	if err := c.validateBodySpill(); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validateBodySpill checks BodySpillDir (existence, is-dir, writable) and
+// BodySpillThreshold (non-negative, <= MaxBodySize). An empty BodySpillDir
+// is treated as "use os.TempDir()" and skips filesystem checks.
+func (c *Config) validateBodySpill() error {
+	if c.BodySpillDir != "" {
+		fi, err := os.Stat(c.BodySpillDir)
+		if err != nil {
+			return fmt.Errorf("body_spill_dir %q does not exist: %w", c.BodySpillDir, err)
+		}
+		if !fi.IsDir() {
+			return fmt.Errorf("body_spill_dir %q is not a directory", c.BodySpillDir)
+		}
+		tmp, err := os.CreateTemp(c.BodySpillDir, BodySpillPrefix+"validate-*")
+		if err != nil {
+			return fmt.Errorf("body_spill_dir %q is not writable: %w", c.BodySpillDir, err)
+		}
+		// Close before Remove so the unlink succeeds on Windows, where
+		// os.Remove fails on files with open handles. Matches the pattern in
+		// internal/selfupdate/updater.go (checkWritePermission).
+		name := tmp.Name()
+		tmp.Close()
+		os.Remove(name)
+	}
+	if c.BodySpillThreshold < 0 {
+		return fmt.Errorf("body_spill_threshold must be >= 0, got %d", c.BodySpillThreshold)
+	}
+	if c.BodySpillThreshold > MaxBodySize {
+		return fmt.Errorf("body_spill_threshold (%d) must be <= MaxBodySize (%d)", c.BodySpillThreshold, MaxBodySize)
 	}
 	return nil
 }
@@ -166,6 +203,14 @@ type Config struct {
 	// file's safety_filter.enabled value.
 	// CLI flag: -safety-filter, env: YP_SAFETY_FILTER_ENABLED.
 	SafetyFilterEnabled *bool `json:"-"`
+
+	// BodySpillDir is the directory used for temp files storing bodies that
+	// exceed BodySpillThreshold. Empty means os.TempDir().
+	BodySpillDir string `json:"body_spill_dir,omitempty"`
+
+	// BodySpillThreshold is the size threshold above which bodies spill to disk.
+	// Zero means 10<<20 (10 MiB). Must be <= MaxBodySize.
+	BodySpillThreshold int64 `json:"body_spill_threshold,omitempty"`
 }
 
 // Default returns a Config with sensible defaults.
@@ -451,15 +496,12 @@ func (d *Duration) UnmarshalJSON(data []byte) error {
 // so users can reuse the same JSON structure for both file-based configuration
 // and runtime proxy_start invocations.
 //
-// Complex nested fields (capture_scope, intercept_rules, auto_transform) are
-// stored as json.RawMessage to defer parsing to the MCP layer, avoiding
-// circular dependencies between the config and mcp packages.
+// Complex nested fields (intercept_rules, auto_transform) are stored as
+// json.RawMessage to defer parsing to the MCP layer, avoiding circular
+// dependencies between the config and mcp packages.
 type ProxyConfig struct {
 	// ListenAddr is the TCP address the proxy listens on (e.g. "127.0.0.1:8080").
 	ListenAddr string `json:"listen_addr,omitempty"`
-
-	// CaptureScope configures which requests are recorded to the flow store.
-	CaptureScope json.RawMessage `json:"capture_scope,omitempty"`
 
 	// TLSPassthrough is a list of domain patterns that bypass TLS interception.
 	TLSPassthrough []string `json:"tls_passthrough,omitempty"`
@@ -492,14 +534,14 @@ type ProxyConfig struct {
 	// custom CA bundles, and per-host TLS verification control.
 	HostTLS map[string]*HostTLSEntry `json:"host_tls,omitempty"`
 
-	// Plugins configures Starlark-based plugins for the proxy pipeline.
-	// Each entry specifies a script path, target protocol, subscribed hooks,
-	// and error handling behavior. Plugins are executed in order.
-	//
-	// json.RawMessage is used intentionally to avoid a dependency from the
-	// config package to the plugin package. The raw JSON is decoded into
-	// []plugin.PluginConfig by the caller (e.g. cmd/yorishiro-proxy/main.go).
-	Plugins json.RawMessage `json:"plugins,omitempty"`
+	// Plugins configures Starlark plugins for the proxy pipeline (RFC-001
+	// pluginv2 shape — see RFC §9.3). Each entry is a script path plus
+	// per-plugin runtime options (Vars, OnError, MaxSteps, RedactKeys);
+	// hook registration is script-driven via register_hook() so the legacy
+	// `protocol`/`hooks` config keys are gone. Configs that still carry
+	// those legacy keys are rejected at load time by Validate() with a
+	// pluginv2.LoadErrLegacyField pointing at docs/rfc/plugin-migration.md.
+	Plugins []pluginv2.PluginConfig `json:"plugins,omitempty"`
 
 	// SOCKS5Auth specifies the SOCKS5 authentication method.
 	// Valid values: "none" (default), "password".
@@ -531,6 +573,26 @@ type ProxyConfig struct {
 	// destructive payloads. This is a Policy Layer setting: once loaded from a
 	// config file, it cannot be modified at runtime via MCP tools.
 	SafetyFilter *SafetyFilterConfig `json:"safety_filter,omitempty"`
+
+	// WebSocket configures the WebSocket Layer runtime limits (max frame
+	// size, deflate). All fields are optional with sensible defaults; an
+	// omitted "web_socket" key behaves identically to one with all fields
+	// unset (project convention: nil/zero = use default).
+	WebSocket *WebSocketLimits `json:"web_socket,omitempty"`
+
+	// GRPC configures the gRPC + gRPC-Web Layer runtime limits (max
+	// Length-Prefixed-Message size). Shared between both protocols since
+	// they enforce identical wire-LPM caps.
+	GRPC *GRPCLimits `json:"grpc,omitempty"`
+
+	// SSE configures the SSE Layer runtime limits (max event size).
+	SSE *SSELimits `json:"sse,omitempty"`
+
+	// RawPassthroughHosts is a list of "host:port" targets that bypass L7
+	// parsing. Traffic to these hosts is relayed as raw bytes through the
+	// ByteChunk layer, enabling HTTP request-smuggling diagnosis.
+	// Matching is case-insensitive exact match (wildcard deferred to N4).
+	RawPassthroughHosts []string `json:"raw_passthrough_hosts,omitempty"`
 }
 
 // SafetyFilterConfig holds the SafetyFilter engine configuration.
@@ -595,6 +657,23 @@ type SafetyFilterRuleConfig struct {
 	// preset rules. Ignored for input rules and custom rules (which use the
 	// section-level action). Only applicable when referencing an output preset.
 	Replacement string `json:"replacement,omitempty"`
+}
+
+// Validate runs per-section validation that must fail at config load time.
+// Currently it validates each Plugins entry via pluginv2.PluginConfig.Validate
+// — this surfaces the legacy `protocol:` / `hooks:` tripwire as a
+// LoadErrLegacyField at load time per RFC §9.3 P-8 (no shims), pointing the
+// user at docs/rfc/plugin-migration.md before the engine constructs.
+//
+// Other ProxyConfig sections (WebSocket / GRPC / SSE limits, SafetyFilter)
+// continue to use their dedicated standalone validators called from main.
+func (c *ProxyConfig) Validate() error {
+	for i := range c.Plugins {
+		if err := c.Plugins[i].Validate(); err != nil {
+			return fmt.Errorf("plugins[%d]: %w", i, err)
+		}
+	}
+	return nil
 }
 
 // UnmarshalJSON implements json.Unmarshaler for ProxyConfig.

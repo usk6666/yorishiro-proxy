@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -168,31 +167,6 @@ func TestInitCA_ErrorPaths(t *testing.T) {
 				}
 			}
 		})
-	}
-}
-
-// TestLoadCodecPlugins_SyntaxErrorInStarlark verifies that a Starlark script
-// with syntax errors is gracefully skipped (logged as warning, not returned
-// as error). This is the intended graceful degradation behavior.
-func TestLoadCodecPlugins_SyntaxErrorInStarlark(t *testing.T) {
-	dir := t.TempDir()
-	badScript := filepath.Join(dir, "bad_codec.star")
-	if err := os.WriteFile(badScript, []byte(`
-def encode(this is not valid python or starlark
-`), 0644); err != nil {
-		t.Fatalf("write bad script: %v", err)
-	}
-
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
-	proxyCfg := &config.ProxyConfig{
-		CodecPlugins: json.RawMessage(`[{"path": "` + badScript + `"}]`),
-	}
-
-	// Starlark codec loading errors are logged as warnings and skipped
-	// (graceful degradation), not returned as errors.
-	err := loadCodecPlugins(proxyCfg, logger)
-	if err != nil {
-		t.Fatalf("expected nil error (graceful degradation), got: %v", err)
 	}
 }
 

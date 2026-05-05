@@ -7,27 +7,24 @@ import (
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/usk6666/yorishiro-proxy/internal/connector"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
-	"github.com/usk6666/yorishiro-proxy/internal/proxy"
-	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
 
 // setupConfigureTestSessionWithManager creates a connected MCP client flow
 // with a running proxy manager for testing configure tool limits/timeouts.
-func setupConfigureTestSessionWithManager(t *testing.T, manager *proxy.Manager, extraOpts ...ServerOption) *gomcp.ClientSession {
+func setupConfigureTestSessionWithManager(t *testing.T, manager proxyManager, extraOpts ...ServerOption) *gomcp.ClientSession {
 	t.Helper()
 	ctx := context.Background()
 
-	scope := proxy.NewCaptureScope()
-	pl := proxy.NewPassthroughList()
+	pl := connector.NewPassthroughList()
 
 	opts := []ServerOption{
-		WithCaptureScope(scope),
 		WithPassthroughList(pl),
 	}
 	opts = append(opts, extraOpts...)
 
-	s := NewServer(ctx, nil, nil, manager, opts...)
+	s := newServer(ctx, nil, nil, manager, opts...)
 	ct, st := gomcp.NewInMemoryTransports()
 
 	ss, err := s.server.Connect(ctx, st, nil)
@@ -51,14 +48,11 @@ func setupConfigureTestSessionWithManager(t *testing.T, manager *proxy.Manager, 
 }
 
 func TestConfigure_MergeMaxConnections(t *testing.T) {
-	logger := testutil.DiscardLogger()
-	detector := &stubDetector{}
-	manager := proxy.NewManager(detector, logger)
+	manager := newTestProxybuildManager(t)
 	ctx := context.Background()
 	if err := manager.Start(ctx, "127.0.0.1:0"); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	t.Cleanup(func() { manager.Stop(context.Background()) })
 
 	cs := setupConfigureTestSessionWithManager(t, manager)
 
@@ -93,14 +87,11 @@ func TestConfigure_MergeMaxConnections(t *testing.T) {
 }
 
 func TestConfigure_MergePeekTimeoutMs(t *testing.T) {
-	logger := testutil.DiscardLogger()
-	detector := &stubDetector{}
-	manager := proxy.NewManager(detector, logger)
+	manager := newTestProxybuildManager(t)
 	ctx := context.Background()
 	if err := manager.Start(ctx, "127.0.0.1:0"); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	t.Cleanup(func() { manager.Stop(context.Background()) })
 
 	cs := setupConfigureTestSessionWithManager(t, manager)
 
@@ -132,14 +123,11 @@ func TestConfigure_MergePeekTimeoutMs(t *testing.T) {
 }
 
 func TestConfigure_MergeRequestTimeoutMs(t *testing.T) {
-	logger := testutil.DiscardLogger()
-	detector := &stubDetector{}
-	manager := proxy.NewManager(detector, logger)
+	manager := newTestProxybuildManager(t)
 	ctx := context.Background()
 	if err := manager.Start(ctx, "127.0.0.1:0"); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	t.Cleanup(func() { manager.Stop(context.Background()) })
 
 	setter := &mockRequestTimeoutSetter{}
 	cs := setupConfigureTestSessionWithManager(t, manager, WithRequestTimeoutSetters(setter))
@@ -186,9 +174,7 @@ func TestConfigure_MaxConnections_Validation(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			logger := testutil.DiscardLogger()
-			detector := &stubDetector{}
-			manager := proxy.NewManager(detector, logger)
+			manager := newTestProxybuildManager(t)
 			ctx := context.Background()
 			if err := manager.Start(ctx, "127.0.0.1:0"); err != nil {
 				t.Fatalf("Start: %v", err)
@@ -233,9 +219,7 @@ func TestConfigure_PeekTimeoutMs_Validation(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			logger := testutil.DiscardLogger()
-			detector := &stubDetector{}
-			manager := proxy.NewManager(detector, logger)
+			manager := newTestProxybuildManager(t)
 			ctx := context.Background()
 			if err := manager.Start(ctx, "127.0.0.1:0"); err != nil {
 				t.Fatalf("Start: %v", err)
@@ -280,9 +264,7 @@ func TestConfigure_RequestTimeoutMs_Validation(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			logger := testutil.DiscardLogger()
-			detector := &stubDetector{}
-			manager := proxy.NewManager(detector, logger)
+			manager := newTestProxybuildManager(t)
 			ctx := context.Background()
 			if err := manager.Start(ctx, "127.0.0.1:0"); err != nil {
 				t.Fatalf("Start: %v", err)
@@ -334,14 +316,11 @@ func TestConfigure_NilManager_MaxConnections(t *testing.T) {
 
 func TestConfigure_ReplaceLimits(t *testing.T) {
 	// Verify that replace operation also applies limits/timeouts.
-	logger := testutil.DiscardLogger()
-	detector := &stubDetector{}
-	manager := proxy.NewManager(detector, logger)
+	manager := newTestProxybuildManager(t)
 	ctx := context.Background()
 	if err := manager.Start(ctx, "127.0.0.1:0"); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	t.Cleanup(func() { manager.Stop(context.Background()) })
 
 	setter := &mockRequestTimeoutSetter{}
 	cs := setupConfigureTestSessionWithManager(t, manager, WithRequestTimeoutSetters(setter))
@@ -388,14 +367,11 @@ func TestConfigure_ReplaceLimits(t *testing.T) {
 
 func TestConfigure_OmittedLimits_NoChange(t *testing.T) {
 	// When limits are omitted, they should not appear in the result.
-	logger := testutil.DiscardLogger()
-	detector := &stubDetector{}
-	manager := proxy.NewManager(detector, logger)
+	manager := newTestProxybuildManager(t)
 	ctx := context.Background()
 	if err := manager.Start(ctx, "127.0.0.1:0"); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	t.Cleanup(func() { manager.Stop(context.Background()) })
 
 	cs := setupConfigureTestSessionWithManager(t, manager)
 
@@ -430,9 +406,7 @@ func TestConfigure_OmittedLimits_NoChange(t *testing.T) {
 
 func TestQuery_Status_ShowsLimitsAndTimeouts(t *testing.T) {
 	store := newTestStore(t)
-	logger := testutil.DiscardLogger()
-	detector := &stubDetector{}
-	manager := proxy.NewManager(detector, logger)
+	manager := newTestProxybuildManager(t)
 
 	// Set custom values before starting.
 	manager.SetMaxConnections(512)
@@ -442,7 +416,6 @@ func TestQuery_Status_ShowsLimitsAndTimeouts(t *testing.T) {
 	if err := manager.Start(ctx, "127.0.0.1:0"); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	t.Cleanup(func() { manager.Stop(context.Background()) })
 
 	setter := &mockRequestTimeoutSetter{}
 	setter.SetRequestTimeout(90 * time.Second)
@@ -473,15 +446,12 @@ func TestQuery_Status_ShowsLimitsAndTimeouts(t *testing.T) {
 
 func TestQuery_Status_DefaultLimitsAndTimeouts(t *testing.T) {
 	store := newTestStore(t)
-	logger := testutil.DiscardLogger()
-	detector := &stubDetector{}
-	manager := proxy.NewManager(detector, logger)
+	manager := newTestProxybuildManager(t)
 
 	ctx := context.Background()
 	if err := manager.Start(ctx, "127.0.0.1:0"); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	t.Cleanup(func() { manager.Stop(context.Background()) })
 
 	cs := setupQueryStatusTestSession(t, store, manager)
 
@@ -534,7 +504,7 @@ func TestQuery_Status_NoManager_ShowsDefaults(t *testing.T) {
 }
 
 // setupQueryStatusTestSession creates an MCP client flow with a manager for query status tests.
-func setupQueryStatusTestSession(t *testing.T, store flow.Store, manager *proxy.Manager, opts ...ServerOption) *gomcp.ClientSession {
+func setupQueryStatusTestSession(t *testing.T, store flow.Store, manager proxyManager, opts ...ServerOption) *gomcp.ClientSession {
 	t.Helper()
 	ctx := context.Background()
 
@@ -542,7 +512,7 @@ func setupQueryStatusTestSession(t *testing.T, store flow.Store, manager *proxy.
 	allOpts := make([]ServerOption, 0, len(opts))
 	allOpts = append(allOpts, opts...)
 
-	s := NewServer(ctx, ca, store, manager, allOpts...)
+	s := newServer(ctx, ca, store, manager, allOpts...)
 	ct, st := gomcp.NewInMemoryTransports()
 
 	ss, err := s.server.Connect(ctx, st, nil)

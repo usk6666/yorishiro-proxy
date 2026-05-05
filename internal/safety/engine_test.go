@@ -4,11 +4,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/usk6666/yorishiro-proxy/internal/exchange"
+	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 )
 
 // kvGet returns the value of the first header matching name (case-insensitive).
-func kvGet(kvs []exchange.KeyValue, name string) string {
+func kvGet(kvs []envelope.KeyValue, name string) string {
 	for _, kv := range kvs {
 		if strings.EqualFold(kv.Name, name) {
 			return kv.Value
@@ -266,7 +266,7 @@ func TestCheckInput_HeaderMatch(t *testing.T) {
 		},
 	})
 
-	h := []exchange.KeyValue{{Name: "X-Custom", Value: "this is evil"}}
+	h := []envelope.KeyValue{{Name: "X-Custom", Value: "this is evil"}}
 	v := e.CheckInput(nil, "", h)
 	if v == nil {
 		t.Fatal("expected violation for header match")
@@ -283,7 +283,7 @@ func TestCheckInput_HeadersMatch(t *testing.T) {
 		},
 	})
 
-	h := []exchange.KeyValue{{Name: "X-Secret", Value: "token123"}}
+	h := []envelope.KeyValue{{Name: "X-Secret", Value: "token123"}}
 	v := e.CheckInput(nil, "", h)
 	if v == nil {
 		t.Fatal("expected violation for headers match")
@@ -423,7 +423,7 @@ func TestFilterOutputHeaders_Mask(t *testing.T) {
 		},
 	})
 
-	h := []exchange.KeyValue{{Name: "Authorization", Value: "Bearer abc123"}}
+	h := []envelope.KeyValue{{Name: "Authorization", Value: "Bearer abc123"}}
 	result, matches := e.FilterOutputHeaders(h)
 	if len(matches) != 1 {
 		t.Fatalf("expected 1 match, got %d", len(matches))
@@ -446,7 +446,7 @@ func TestFilterOutputHeaders_NoModifyOriginal(t *testing.T) {
 		},
 	})
 
-	h := []exchange.KeyValue{{Name: "X-Data", Value: "secret"}}
+	h := []envelope.KeyValue{{Name: "X-Data", Value: "secret"}}
 	_, _ = e.FilterOutputHeaders(h)
 	// Original should be unchanged.
 	if kvGet(h, "X-Data") != "secret" {
@@ -552,7 +552,7 @@ func TestCheckInput_HeaderColonTarget_SpecificHeader(t *testing.T) {
 	})
 
 	// Should match when the specific header contains the pattern.
-	h := []exchange.KeyValue{{Name: "Location", Value: "http://evil.com"}}
+	h := []envelope.KeyValue{{Name: "Location", Value: "http://evil.com"}}
 	v := e.CheckInput(nil, "", h)
 	if v == nil {
 		t.Fatal("expected violation for Location header match")
@@ -562,7 +562,7 @@ func TestCheckInput_HeaderColonTarget_SpecificHeader(t *testing.T) {
 	}
 
 	// Should NOT match when a different header contains the pattern.
-	h2 := []exchange.KeyValue{{Name: "X-Other", Value: "evil-value"}}
+	h2 := []envelope.KeyValue{{Name: "X-Other", Value: "evil-value"}}
 	v2 := e.CheckInput(nil, "", h2)
 	if v2 != nil {
 		t.Errorf("expected nil for non-Location header, got %+v", v2)
@@ -582,7 +582,7 @@ func TestFilterOutputHeaders_SpecificHeader(t *testing.T) {
 		},
 	})
 
-	h := []exchange.KeyValue{
+	h := []envelope.KeyValue{
 		{Name: "Location", Value: "http://evil.com"},
 		{Name: "X-Other", Value: "also evil"},
 	}
@@ -898,7 +898,7 @@ func TestFilterOutputHeaders_ValidatorAccepts(t *testing.T) {
 		return match[0] == '1'
 	}
 
-	h := []exchange.KeyValue{{Name: "X-Data", Value: "id=1234 code=5678"}}
+	h := []envelope.KeyValue{{Name: "X-Data", Value: "id=1234 code=5678"}}
 	result, matches := e.FilterOutputHeaders(h)
 	if len(matches) != 1 {
 		t.Fatalf("expected 1 match, got %d", len(matches))
@@ -932,7 +932,7 @@ func TestFilterOutputHeaders_ValidatorRejectsAll(t *testing.T) {
 		return false
 	}
 
-	h := []exchange.KeyValue{{Name: "X-Val", Value: "abc 123"}}
+	h := []envelope.KeyValue{{Name: "X-Val", Value: "abc 123"}}
 	result, matches := e.FilterOutputHeaders(h)
 	if len(matches) != 0 {
 		t.Errorf("expected 0 matches, got %d", len(matches))
@@ -962,7 +962,7 @@ func TestFilterOutputHeaders_ValidatorSpecificHeader(t *testing.T) {
 		return len(match) > 6 && match[6] == '1'
 	}
 
-	h := []exchange.KeyValue{
+	h := []envelope.KeyValue{
 		{Name: "X-Token", Value: "secret1 secret2"},
 		{Name: "X-Other", Value: "secret1"},
 	}

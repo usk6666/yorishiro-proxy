@@ -2,248 +2,187 @@ package pipeline
 
 import (
 	"context"
-	"encoding/base64"
 	"log/slog"
-	"net/url"
 
-	"github.com/usk6666/yorishiro-proxy/internal/exchange"
-	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
+	"github.com/usk6666/yorishiro-proxy/internal/envelope"
+	"github.com/usk6666/yorishiro-proxy/internal/rules/common"
+	grpcrules "github.com/usk6666/yorishiro-proxy/internal/rules/grpc"
+	httprules "github.com/usk6666/yorishiro-proxy/internal/rules/http"
+	wsrules "github.com/usk6666/yorishiro-proxy/internal/rules/ws"
 )
 
-// InterceptStep holds intercepted Exchanges in a Queue until an AI agent
-// decides the action (release, modify, or drop). It is a blocking Step:
-// Pipeline execution pauses until the agent responds or a timeout fires.
+// InterceptStep is a Message-typed Pipeline Step that holds envelopes matching
+// intercept rules and waits for an external action (release, drop, or modify).
+// HTTP / WebSocket / gRPC messages are dispatched to their respective per-
+// protocol InterceptEngines (rules/http, rules/ws, rules/grpc). SSE has no
+// per-protocol engine (N7 scope-out: half-duplex Receive-only) and passes
+// through unchanged. Unknown Message types pass through.
 //
-// When engine or queue is nil, the Step is a no-op (returns Continue).
+// On ActionModifyAndForward, the user-supplied modified envelope is re-checked
+// against the SafetyStep before being released downstream — defense-in-depth
+// for the case where SafetyStep already gated the original held envelope but
+// the modify_and_forward payload re-introduces a destructive pattern (USK-702).
 type InterceptStep struct {
-	engine *intercept.Engine
-	queue  *intercept.Queue
+	http   *httprules.InterceptEngine
+	ws     *wsrules.InterceptEngine
+	grpc   *grpcrules.InterceptEngine
+	queue  *common.HoldQueue
+	safety *SafetyStep
+	logger *slog.Logger
 }
 
-// NewInterceptStep creates an InterceptStep with the given Engine and Queue.
-// If either is nil, Process always returns Continue.
-func NewInterceptStep(engine *intercept.Engine, queue *intercept.Queue) *InterceptStep {
-	return &InterceptStep{engine: engine, queue: queue}
+// NewInterceptStep creates an InterceptStep. Any nil engine causes the
+// corresponding protocol arm to gracefully degrade (pass-through). A nil
+// queue causes all matching arms to pass through (no hold without queue).
+// A nil safety disables the modify_and_forward re-check (callers without a
+// SafetyStep — e.g. tests not exercising safety — pass nil).
+//
+// Engine arguments are positional in protocol order: http, ws, grpc.
+func NewInterceptStep(httpEngine *httprules.InterceptEngine, wsEngine *wsrules.InterceptEngine, grpcEngine *grpcrules.InterceptEngine, queue *common.HoldQueue, safety *SafetyStep, logger *slog.Logger) *InterceptStep {
+	return &InterceptStep{
+		http:   httpEngine,
+		ws:     wsEngine,
+		grpc:   grpcEngine,
+		queue:  queue,
+		safety: safety,
+		logger: logger,
+	}
 }
 
-// Process evaluates intercept rules against the Exchange and, on a match,
-// enqueues it into the Queue and blocks until an action is received or the
-// timeout expires. The action is applied in-place on the Exchange.
-func (s *InterceptStep) Process(ctx context.Context, ex *exchange.Exchange) Result {
-	if s.engine == nil || s.queue == nil {
+// Process type-switches on env.Message and dispatches to the per-protocol
+// InterceptEngine arm. Unknown Message types pass through.
+func (s *InterceptStep) Process(ctx context.Context, env *envelope.Envelope) Result {
+	switch msg := env.Message.(type) {
+	case *envelope.HTTPMessage:
+		return s.processHTTP(ctx, env, msg)
+	case *envelope.WSMessage:
+		return s.processWS(ctx, env, msg)
+	case *envelope.GRPCStartMessage:
+		return s.processGRPCStart(ctx, env, msg)
+	case *envelope.GRPCDataMessage:
+		return s.processGRPCData(ctx, env, msg)
+	case *envelope.GRPCEndMessage:
+		return s.processGRPCEnd(ctx, env, msg)
+	case *envelope.SSEMessage:
+		// N7 scope-out: SSE has no per-protocol intercept engine; pass
+		// through. Half-duplex Receive-only — no Send-side rules to apply.
+		_ = msg
+		return Result{}
+	default:
+		return Result{}
+	}
+}
+
+func (s *InterceptStep) processHTTP(ctx context.Context, env *envelope.Envelope, msg *envelope.HTTPMessage) Result {
+	if s.http == nil || s.queue == nil {
 		return Result{}
 	}
 
-	switch ex.Direction {
-	case exchange.Send:
-		matched := s.engine.MatchRequestRules(ex.Method, ex.URL, ex.Headers)
-		if len(matched) == 0 {
-			return Result{}
-		}
-		return s.waitForAction(ctx, ex, matched)
-	case exchange.Receive:
-		matched := s.engine.MatchResponseRules(ex.Status, ex.Headers)
-		if len(matched) == 0 {
-			return Result{}
-		}
-		return s.waitForAction(ctx, ex, matched)
+	var matchedRules []string
+	switch env.Direction {
+	case envelope.Send:
+		matchedRules = s.http.MatchRequest(env, msg)
+	case envelope.Receive:
+		matchedRules = s.http.MatchResponse(env, msg)
 	}
-	return Result{}
+
+	return s.holdAndDispatch(ctx, env, matchedRules)
 }
 
-// waitForAction enqueues the Exchange into the intercept queue and blocks
-// until the AI agent responds or the configured timeout fires.
-func (s *InterceptStep) waitForAction(ctx context.Context, ex *exchange.Exchange, matchedRules []string) Result {
-	var id string
-	var actionCh <-chan intercept.InterceptAction
+func (s *InterceptStep) processWS(ctx context.Context, env *envelope.Envelope, msg *envelope.WSMessage) Result {
+	if s.ws == nil || s.queue == nil {
+		return Result{}
+	}
+	// WS has no Send/Receive asymmetry like HTTP request/response, so a
+	// single Match call covers both directions; the rule's Direction field
+	// gates evaluation inside the engine.
+	matchedRules := s.ws.Match(env, msg)
+	return s.holdAndDispatch(ctx, env, matchedRules)
+}
 
-	var opts []intercept.EnqueueOpts
-	if len(ex.RawBytes) > 0 {
-		opts = append(opts, intercept.EnqueueOpts{RawBytes: ex.RawBytes})
+func (s *InterceptStep) processGRPCStart(ctx context.Context, env *envelope.Envelope, msg *envelope.GRPCStartMessage) Result {
+	if s.grpc == nil || s.queue == nil {
+		return Result{}
+	}
+	matchedRules := s.grpc.MatchStart(env, msg)
+	return s.holdAndDispatch(ctx, env, matchedRules)
+}
+
+func (s *InterceptStep) processGRPCData(ctx context.Context, env *envelope.Envelope, msg *envelope.GRPCDataMessage) Result {
+	if s.grpc == nil || s.queue == nil {
+		return Result{}
+	}
+	matchedRules := s.grpc.MatchData(env, msg)
+	return s.holdAndDispatch(ctx, env, matchedRules)
+}
+
+func (s *InterceptStep) processGRPCEnd(ctx context.Context, env *envelope.Envelope, msg *envelope.GRPCEndMessage) Result {
+	if s.grpc == nil || s.queue == nil {
+		return Result{}
+	}
+	// grpc-web flushes a Send-side End sentinel (empty trailers, Status=0)
+	// at the close of the request body; native gRPC End is always Receive.
+	// MatchEnd only filters by direction + Enabled, so a catch-all rule
+	// with Direction=both/send would block the request flush. Skip MatchEnd
+	// on Send to keep grpc-web flushes flowing.
+	if env.Direction == envelope.Send {
+		return Result{}
+	}
+	matchedRules := s.grpc.MatchEnd(env, msg)
+	return s.holdAndDispatch(ctx, env, matchedRules)
+}
+
+// holdAndDispatch holds the envelope on a non-empty match and translates the
+// resulting HoldAction into a Pipeline Result. Shared across all protocol arms
+// so that hold/release/drop/modify behaviour is identical regardless of the
+// matching engine.
+func (s *InterceptStep) holdAndDispatch(ctx context.Context, env *envelope.Envelope, matchedRules []string) Result {
+	if len(matchedRules) == 0 {
+		return Result{}
 	}
 
-	switch ex.Direction {
-	case exchange.Send:
-		id, actionCh = s.queue.Enqueue(ex.Method, ex.URL, ex.Headers, ex.Body, matchedRules, opts...)
-	case exchange.Receive:
-		id, actionCh = s.queue.EnqueueResponse(ex.Method, ex.URL, ex.Status, ex.Headers, ex.Body, matchedRules, opts...)
-	}
-	defer s.queue.Remove(id)
-
-	slog.Debug("exchange held in intercept queue",
-		slog.String("intercept_id", id),
-		slog.String("direction", ex.Direction.String()),
-		slog.Any("matched_rules", matchedRules),
-	)
-
-	timeout := s.queue.Timeout()
-	timeoutCtx, timeoutCancel := context.WithTimeout(ctx, timeout)
-	defer timeoutCancel()
-
-	var action intercept.InterceptAction
-	select {
-	case action = <-actionCh:
-	case <-timeoutCtx.Done():
-		behavior := s.queue.TimeoutBehaviorValue()
-		if ctx.Err() != nil {
-			slog.Debug("intercepted exchange cancelled", slog.String("intercept_id", id))
-			return Result{Action: Drop}
-		}
-		slog.Debug("intercepted exchange timed out",
-			slog.String("intercept_id", id),
-			slog.String("behavior", string(behavior)),
+	if s.logger != nil {
+		s.logger.DebugContext(ctx, "intercept: envelope held",
+			slog.String("flow_id", env.FlowID),
+			slog.String("direction", env.Direction.String()),
+			slog.String("protocol", string(env.Protocol)),
+			slog.Any("matched_rules", matchedRules),
 		)
-		switch behavior {
-		case intercept.TimeoutAutoDrop:
-			return Result{Action: Drop}
-		default:
-			// auto_release: continue pipeline with original Exchange.
-			return Result{}
-		}
 	}
 
-	return s.applyAction(ex, action)
-}
-
-// applyAction applies the InterceptAction to the Exchange in-place.
-func (s *InterceptStep) applyAction(ex *exchange.Exchange, action intercept.InterceptAction) Result {
-	switch action.Type {
-	case intercept.ActionDrop:
+	action, err := s.queue.Hold(ctx, env, matchedRules)
+	if err != nil {
+		// Context cancelled while waiting.
 		return Result{Action: Drop}
+	}
 
-	case intercept.ActionRelease:
-		if action.IsRawMode() {
-			// Raw mode release: use original RawBytes (already on the Exchange).
-			return Result{}
-		}
+	switch action.Type {
+	case common.ActionRelease:
 		return Result{}
-
-	case intercept.ActionModifyAndForward:
-		if action.IsRawMode() {
-			// Raw mode: replace RawBytes on the Exchange.
-			ex.RawBytes = action.RawOverride
-			return Result{}
-		}
-		s.applyStructuredModifications(ex, action)
-		return Result{}
-	}
-
-	return Result{}
-}
-
-// applyStructuredModifications applies structured (L7) modifications from the
-// InterceptAction to the Exchange in-place.
-func (s *InterceptStep) applyStructuredModifications(ex *exchange.Exchange, action intercept.InterceptAction) {
-	switch ex.Direction {
-	case exchange.Send:
-		s.applyRequestModifications(ex, action)
-	case exchange.Receive:
-		s.applyResponseModifications(ex, action)
-	}
-}
-
-// applyRequestModifications applies request-level structured modifications.
-func (s *InterceptStep) applyRequestModifications(ex *exchange.Exchange, action intercept.InterceptAction) {
-	if action.OverrideMethod != "" {
-		ex.Method = action.OverrideMethod
-	}
-
-	if action.OverrideURL != "" {
-		// Best-effort URL parse; ignore errors to match existing behavior.
-		if u, err := parseURL(action.OverrideURL); err == nil {
-			ex.URL = u
-		}
-	}
-
-	ex.Headers = applyHeaderModifications(ex.Headers, action.OverrideHeaders, action.AddHeaders, action.RemoveHeaders)
-
-	if action.OverrideBody != nil {
-		ex.Body = []byte(*action.OverrideBody)
-	}
-	if action.OverrideBodyBase64 != nil {
-		if decoded, err := decodeBase64Body(*action.OverrideBodyBase64); err == nil {
-			ex.Body = decoded
-		}
-	}
-}
-
-// applyResponseModifications applies response-level structured modifications.
-func (s *InterceptStep) applyResponseModifications(ex *exchange.Exchange, action intercept.InterceptAction) {
-	if action.OverrideStatus > 0 {
-		ex.Status = action.OverrideStatus
-	}
-
-	ex.Headers = applyHeaderModifications(ex.Headers, action.OverrideResponseHeaders, action.AddResponseHeaders, action.RemoveResponseHeaders)
-
-	if action.OverrideResponseBody != nil {
-		ex.Body = []byte(*action.OverrideResponseBody)
-	}
-}
-
-// applyHeaderModifications applies override, add, and remove header modifications
-// to a []exchange.KeyValue slice and returns the result.
-func applyHeaderModifications(headers []exchange.KeyValue, overrides map[string]string, adds map[string]string, removes []string) []exchange.KeyValue {
-	// Apply overrides: replace value of first matching header (case-insensitive).
-	for name, value := range overrides {
-		found := false
-		for i, h := range headers {
-			if equalFoldASCII(h.Name, name) {
-				headers[i].Value = value
-				found = true
-				break
+	case common.ActionDrop:
+		return Result{Action: Drop}
+	case common.ActionModifyAndForward:
+		// Defense-in-depth: re-check the user-supplied modified envelope
+		// against SafetyStep. The original held envelope already passed
+		// SafetyStep at hold time (Pipeline order: Safety → Intercept), but
+		// modify_and_forward lets the operator/AI agent inject content that
+		// bypasses that gate. Mirroring SafetyStep ensures the same Send-
+		// only / per-protocol coverage as the inline check (USK-702).
+		if s.safety != nil {
+			recheck := s.safety.Process(ctx, action.Modified)
+			if recheck.Action == Drop {
+				if s.logger != nil {
+					s.logger.DebugContext(ctx, "intercept: modify_and_forward dropped by safety re-check",
+						slog.String("flow_id", env.FlowID),
+						slog.String("direction", env.Direction.String()),
+						slog.String("protocol", string(env.Protocol)),
+					)
+				}
+				return Result{Action: Drop}
 			}
 		}
-		if !found {
-			headers = append(headers, exchange.KeyValue{Name: name, Value: value})
-		}
+		return Result{Envelope: action.Modified}
+	default:
+		return Result{}
 	}
-
-	// Apply adds: append new headers.
-	for name, value := range adds {
-		headers = append(headers, exchange.KeyValue{Name: name, Value: value})
-	}
-
-	// Apply removes: delete all matching headers (case-insensitive).
-	for _, name := range removes {
-		n := 0
-		for _, h := range headers {
-			if !equalFoldASCII(h.Name, name) {
-				headers[n] = h
-				n++
-			}
-		}
-		headers = headers[:n]
-	}
-
-	return headers
-}
-
-// equalFoldASCII performs ASCII case-insensitive string comparison.
-func equalFoldASCII(a, b string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := 0; i < len(a); i++ {
-		ca, cb := a[i], b[i]
-		if 'A' <= ca && ca <= 'Z' {
-			ca += 'a' - 'A'
-		}
-		if 'A' <= cb && cb <= 'Z' {
-			cb += 'a' - 'A'
-		}
-		if ca != cb {
-			return false
-		}
-	}
-	return true
-}
-
-// parseURL parses a URL string.
-func parseURL(rawURL string) (*url.URL, error) {
-	return url.Parse(rawURL)
-}
-
-// decodeBase64Body decodes a base64-encoded string.
-func decodeBase64Body(s string) ([]byte, error) {
-	return base64.StdEncoding.DecodeString(s)
 }

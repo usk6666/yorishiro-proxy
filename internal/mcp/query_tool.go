@@ -15,9 +15,10 @@ import (
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/usk6666/yorishiro-proxy/internal/config"
+	"github.com/usk6666/yorishiro-proxy/internal/connector"
+	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
-	"github.com/usk6666/yorishiro-proxy/internal/proxy"
-	"github.com/usk6666/yorishiro-proxy/internal/proxy/intercept"
+	"github.com/usk6666/yorishiro-proxy/internal/rules/common"
 )
 
 // defaultRequestTimeoutMs is the default request timeout in milliseconds
@@ -55,10 +56,16 @@ type queryInput struct {
 
 // queryFilter contains filter options for the flows and fuzz resources.
 type queryFilter struct {
-	// Protocol filters flows by exact protocol label. Note: protocol=HTTPS matches only HTTP/1.x over TLS.
-	// HTTPS MITM connections negotiated as HTTP/2 are recorded as protocol=HTTP/2, not HTTPS.
-	// To find all flows over TLS regardless of protocol, use scheme=https instead.
-	Protocol string `json:"protocol,omitempty" jsonschema:"exact protocol label filter (HTTP/1.x, HTTPS, WebSocket, HTTP/2, gRPC, gRPC-Web, TCP, SOCKS5+HTTPS, SOCKS5+HTTP). HTTPS matches only HTTP/1.x over TLS; HTTP/2 over TLS is recorded as HTTP/2. To find all TLS flows use scheme=https instead."`
+	// Protocol filters flows by Message-type family or exact legacy label.
+	// Canonical family values (preferred): http, ws, grpc, grpc-web, sse, raw,
+	// tls-handshake. Each expands to the union of new and legacy spellings
+	// recorded for the family (e.g. protocol=http matches HTTP/1.x, HTTPS,
+	// HTTP/2 and their SOCKS5+ variants).
+	// Legacy values (HTTP/1.x, HTTPS, HTTP/2, WebSocket, gRPC, gRPC-Web, TCP,
+	// SOCKS5+...) stay literal exact-match; protocol=HTTPS does NOT match
+	// HTTP/2-over-TLS recordings. To find all TLS flows regardless of HTTP
+	// version, use scheme=https instead.
+	Protocol string `json:"protocol,omitempty" jsonschema:"protocol filter — canonical Message-type family (http, ws, grpc, grpc-web, sse, raw, tls-handshake) expands to all spellings; legacy (HTTP/1.x, HTTPS, HTTP/2, WebSocket, gRPC, gRPC-Web, TCP, SOCKS5+HTTP/1.x, SOCKS5+HTTPS, SOCKS5+HTTP/2, SOCKS5+WebSocket, SOCKS5+gRPC, SOCKS5+gRPC-Web, SOCKS5+TCP) stays literal. To find all TLS flows use scheme=https instead."`
 	// Scheme filters flows by URL scheme / transport (e.g. "https", "http", "wss", "ws", "tcp").
 	// Use scheme to find TLS flows: filter={scheme: "https"} returns HTTP/1.x, HTTP/2, gRPC flows over TLS.
 	// WebSocket over TLS uses scheme="wss", not "https".
@@ -94,8 +101,14 @@ type queryFilter struct {
 // availableResources lists all valid resource names for error messages.
 var availableResources = []string{"flows", "flow", "messages", "status", "config", "ca_cert", "intercept_queue", "macros", "macro", "fuzz_jobs", "fuzz_results", "technologies"}
 
-// validFilterProtocols lists valid values for filter.protocol.
-var validFilterProtocols = []string{"HTTP/1.x", "HTTPS", "WebSocket", "HTTP/2", "gRPC", "gRPC-Web", "TCP", "SOCKS5+HTTPS", "SOCKS5+HTTP"}
+// validFilterProtocols lists accepted values for filter.protocol. The
+// query tool accepts canonical Envelope.Protocol values only; the legacy
+// spellings ("HTTP/1.x", "HTTPS", "HTTP/2", "WebSocket", "gRPC", "gRPC-Web",
+// "TCP", "SOCKS5+*") that lived through the parallel-coexistence window
+// were retired in USK-705 (RFC-001 N9 design review Q8).
+var validFilterProtocols = []string{
+	"http", "ws", "grpc", "grpc-web", "sse", "raw", "tls-handshake",
+}
 
 // validFilterSchemes lists valid values for filter.scheme.
 var validFilterSchemes = []string{"https", "http", "wss", "ws", "tcp"}
@@ -177,7 +190,7 @@ func (s *Server) registerQuery() {
 			"Set 'resource' to one of: flows, flow, messages, status, config, ca_cert, intercept_queue, macros, macro, fuzz_jobs, fuzz_results, technologies. " +
 			"The 'id' parameter is required for flow, messages, and macro resources. " +
 			"The 'fuzz_id' parameter is required for fuzz_results resource. " +
-			"The 'filter' parameter supports filtering flows by protocol (HTTP/1.x, HTTPS, WebSocket, HTTP/2, gRPC, TCP, SOCKS5+HTTPS, SOCKS5+HTTP), scheme (https, http, wss, ws, tcp — use scheme to find all TLS flows: scheme=https returns HTTP/1.x+HTTP/2+gRPC over TLS), method, url_pattern, status_code, blocked_by (target_scope, intercept_drop, rate_limit), state (active, complete, error), technology (e.g. nginx, wordpress), conn_id (connection ID, exact match), and host (matches server_addr or URL host); " +
+			"The 'filter' parameter supports filtering flows by protocol (canonical Message-type family: http, ws, grpc, grpc-web, sse, raw, tls-handshake — each expands across new and legacy spellings; legacy literals HTTP/1.x, HTTPS, HTTP/2, WebSocket, gRPC, gRPC-Web, TCP and SOCKS5+ variants stay literal), scheme (https, http, wss, ws, tcp — use scheme to find all TLS flows: scheme=https returns HTTP/1.x+HTTP/2+gRPC over TLS), method, url_pattern, status_code, blocked_by (target_scope, intercept_drop, rate_limit), state (active, complete, error), technology (e.g. nginx, wordpress), conn_id (connection ID, exact match), and host (matches server_addr or URL host); " +
 			"messages by direction (send or receive); " +
 			"fuzz_jobs by status and tag; fuzz_results by status_code, body_contains, and outliers_only (returns only outlier results). " +
 			"Flows include protocol_summary with protocol-specific information. " +
@@ -360,7 +373,12 @@ func buildFlowListOptions(input queryInput) flow.StreamListOptions {
 		SortBy: input.SortBy,
 	}
 	if input.Filter != nil {
-		opts.Protocol = input.Filter.Protocol
+		// Filter.Protocol accepts canonical Envelope.Protocol values only
+		// (http, ws, grpc, grpc-web, sse, raw, tls-handshake). Unknown
+		// values are rejected upstream by validateEnum.
+		if p := input.Filter.Protocol; p != "" {
+			opts.Protocol = p
+		}
 		opts.Scheme = input.Filter.Scheme
 		opts.Method = input.Filter.Method
 		opts.URLPattern = input.Filter.URLPattern
@@ -399,7 +417,7 @@ func extractFlowSummary(msgs []*flow.Flow) (method, urlStr string, statusCode in
 
 // handleQueryFlows returns a paginated list of flows with message summary data.
 func (s *Server) handleQueryFlows(ctx context.Context, input queryInput) (*gomcp.CallToolResult, *queryFlowsResult, error) {
-	if s.deps.store == nil {
+	if s.flowStore.store == nil {
 		return nil, nil, fmt.Errorf("flow store is not initialized")
 	}
 
@@ -409,12 +427,12 @@ func (s *Server) handleQueryFlows(ctx context.Context, input queryInput) (*gomcp
 
 	opts := buildFlowListOptions(input)
 
-	flowList, err := s.deps.store.ListStreams(ctx, opts)
+	flowList, err := s.flowStore.store.ListStreams(ctx, opts)
 	if err != nil {
 		return nil, nil, fmt.Errorf("list flows: %w", err)
 	}
 
-	total, err := s.deps.store.CountStreams(ctx, opts)
+	total, err := s.flowStore.store.CountStreams(ctx, opts)
 	if err != nil {
 		return nil, nil, fmt.Errorf("count flows: %w", err)
 	}
@@ -422,7 +440,7 @@ func (s *Server) handleQueryFlows(ctx context.Context, input queryInput) (*gomcp
 	entries := make([]queryFlowsEntry, 0, len(flowList))
 	for _, fl := range flowList {
 		// Fetch messages for method/url/status_code/message_count via JOIN data.
-		msgs, err := s.deps.store.GetFlows(ctx, fl.ID, flow.FlowListOptions{})
+		msgs, err := s.flowStore.store.GetFlows(ctx, fl.ID, flow.FlowListOptions{})
 		if err != nil {
 			return nil, nil, fmt.Errorf("get messages for flow %s: %w", fl.ID, err)
 		}
@@ -630,7 +648,7 @@ func buildMessagePreview(msgs []*flow.Flow) []queryMessageEntry {
 
 // handleQueryFlow returns detailed information about a single flow.
 func (s *Server) handleQueryFlow(ctx context.Context, input queryInput) (*gomcp.CallToolResult, *queryFlowResult, error) {
-	if s.deps.store == nil {
+	if s.flowStore.store == nil {
 		return nil, nil, fmt.Errorf("flow store is not initialized")
 	}
 
@@ -638,12 +656,12 @@ func (s *Server) handleQueryFlow(ctx context.Context, input queryInput) (*gomcp.
 		return nil, nil, fmt.Errorf("id is required for flow resource")
 	}
 
-	fl, err := s.deps.store.GetStream(ctx, input.ID)
+	fl, err := s.flowStore.store.GetStream(ctx, input.ID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("get flow: %w", err)
 	}
 
-	msgs, err := s.deps.store.GetFlows(ctx, fl.ID, flow.FlowListOptions{})
+	msgs, err := s.flowStore.store.GetFlows(ctx, fl.ID, flow.FlowListOptions{})
 	if err != nil {
 		return nil, nil, fmt.Errorf("get messages: %w", err)
 	}
@@ -839,7 +857,7 @@ func paginateMessages(msgs []*flow.Flow, offset, limit int) []*flow.Flow {
 
 // handleQueryMessages returns paginated messages for a flow.
 func (s *Server) handleQueryMessages(ctx context.Context, input queryInput) (*gomcp.CallToolResult, *queryMessagesResult, error) {
-	if s.deps.store == nil {
+	if s.flowStore.store == nil {
 		return nil, nil, fmt.Errorf("flow store is not initialized")
 	}
 
@@ -852,13 +870,13 @@ func (s *Server) handleQueryMessages(ctx context.Context, input queryInput) (*go
 	}
 
 	// Verify the flow exists and resolve prefix IDs.
-	fl, err := s.deps.store.GetStream(ctx, input.ID)
+	fl, err := s.flowStore.store.GetStream(ctx, input.ID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("get flow: %w", err)
 	}
 
 	// Get total message count for pagination.
-	total, err := s.deps.store.CountFlows(ctx, fl.ID)
+	total, err := s.flowStore.store.CountFlows(ctx, fl.ID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("count messages: %w", err)
 	}
@@ -868,7 +886,7 @@ func (s *Server) handleQueryMessages(ctx context.Context, input queryInput) (*go
 		return nil, nil, err
 	}
 
-	allMsgs, err := s.deps.store.GetFlows(ctx, fl.ID, msgOpts)
+	allMsgs, err := s.flowStore.store.GetFlows(ctx, fl.ID, msgOpts)
 	if err != nil {
 		return nil, nil, fmt.Errorf("get messages: %w", err)
 	}
@@ -927,44 +945,39 @@ type queryStatusResult struct {
 
 // queryRateLimitStatus holds rate limit information for the status response.
 type queryRateLimitStatus struct {
-	Effective proxy.RateLimitConfig `json:"effective"`
-	Enabled   bool                  `json:"enabled"`
+	Effective connector.RateLimitConfig `json:"effective"`
+	Enabled   bool                      `json:"enabled"`
 }
 
 // queryBudgetStatus holds budget information for the status response.
 type queryBudgetStatus struct {
-	Effective    proxy.BudgetConfig `json:"effective"`
-	Enabled      bool               `json:"enabled"`
-	RequestCount int64              `json:"request_count"`
-	StopReason   string             `json:"stop_reason,omitempty"`
+	Effective    connector.BudgetConfig `json:"effective"`
+	Enabled      bool                   `json:"enabled"`
+	RequestCount int64                  `json:"request_count"`
+	StopReason   string                 `json:"stop_reason,omitempty"`
 }
 
 // populateManagerStatus fills manager-related fields in the status result.
 func (s *Server) populateManagerStatus(result *queryStatusResult) {
-	if s.deps.manager == nil {
+	if managerIsNil(s.connector.manager) {
 		return
 	}
-	running, addr := s.deps.manager.Status()
+	running, addr := s.connector.manager.Status()
 	result.Running = running
 	result.ListenAddr = addr
-	result.UpstreamProxy = proxy.RedactProxyURL(s.deps.manager.UpstreamProxy())
-	result.ActiveConnections = s.deps.manager.ActiveConnections()
-	result.MaxConnections = s.deps.manager.MaxConnections()
-	result.PeekTimeoutMs = s.deps.manager.PeekTimeout().Milliseconds()
-	result.UptimeSeconds = int64(s.deps.manager.Uptime().Seconds())
-	result.ListenerCount = s.deps.manager.ListenerCount()
+	result.UpstreamProxy = connector.RedactProxyURL(s.connector.manager.UpstreamProxy())
+	result.ActiveConnections = s.connector.manager.ActiveConnections()
+	result.MaxConnections = s.connector.manager.MaxConnections()
+	result.PeekTimeoutMs = s.connector.manager.PeekTimeout().Milliseconds()
+	result.UptimeSeconds = int64(s.connector.manager.Uptime().Seconds())
+	result.ListenerCount = s.connector.manager.ListenerCount()
 
 	// Populate per-listener statuses.
-	statuses := s.deps.manager.ListenerStatuses()
+	statuses := listenerStatuses(s.connector.manager)
 	if len(statuses) > 0 {
 		result.Listeners = make([]queryListenerStatusEntry, 0, len(statuses))
 		for _, st := range statuses {
-			result.Listeners = append(result.Listeners, queryListenerStatusEntry{
-				Name:              st.Name,
-				ListenAddr:        st.ListenAddr,
-				ActiveConnections: st.ActiveConnections,
-				UptimeSeconds:     st.UptimeSeconds,
-			})
+			result.Listeners = append(result.Listeners, queryListenerStatusEntry(st))
 		}
 		// Update Running to true if any listener is running (not just default).
 		if !result.Running && len(statuses) > 0 {
@@ -989,47 +1002,47 @@ func (s *Server) handleQueryStatus(ctx context.Context) (*gomcp.CallToolResult, 
 		result.RequestTimeoutMs = defaultRequestTimeoutMs
 	}
 
-	if s.deps.store != nil {
-		count, err := s.deps.store.CountStreams(ctx, flow.StreamListOptions{})
+	if s.flowStore.store != nil {
+		count, err := s.flowStore.store.CountStreams(ctx, flow.StreamListOptions{})
 		if err != nil {
 			return nil, nil, fmt.Errorf("count flows: %w", err)
 		}
 		result.TotalFlows = count
 	}
 
-	if s.deps.dbPath != "" {
-		info, err := os.Stat(s.deps.dbPath)
+	if s.misc.dbPath != "" {
+		info, err := os.Stat(s.misc.dbPath)
 		if err == nil {
 			result.DBSizeBytes = info.Size()
 		}
 	}
 
-	if s.deps.ca != nil && s.deps.ca.Certificate() != nil {
+	if s.misc.ca != nil && s.misc.ca.Certificate() != nil {
 		result.CAInitialized = true
 	}
 
 	// SOCKS5 availability: enabled if the handler is registered.
-	if s.deps.socks5AuthSetter != nil {
+	if s.connector.socks5AuthSetter != nil {
 		result.SOCKS5Enabled = true
 	}
 
 	result.TLSFingerprint = s.currentTLSFingerprint()
 
-	if s.deps.rateLimiter != nil {
-		effective := s.deps.rateLimiter.EffectiveLimits()
+	if s.misc.rateLimiter != nil {
+		effective := s.misc.rateLimiter.EffectiveLimits()
 		result.RateLimits = &queryRateLimitStatus{
 			Effective: effective,
-			Enabled:   s.deps.rateLimiter.HasLimits(),
+			Enabled:   s.misc.rateLimiter.HasLimits(),
 		}
 	}
 
-	if s.deps.budgetManager != nil {
-		effective := s.deps.budgetManager.EffectiveBudget()
+	if s.misc.budgetManager != nil {
+		effective := s.misc.budgetManager.EffectiveBudget()
 		result.Budget = &queryBudgetStatus{
 			Effective:    effective,
-			Enabled:      s.deps.budgetManager.HasBudget(),
-			RequestCount: s.deps.budgetManager.RequestCount(),
-			StopReason:   s.deps.budgetManager.ShutdownReason(),
+			Enabled:      s.misc.budgetManager.HasBudget(),
+			RequestCount: s.misc.budgetManager.RequestCount(),
+			StopReason:   s.misc.budgetManager.ShutdownReason(),
 		}
 	}
 
@@ -1041,7 +1054,6 @@ func (s *Server) handleQueryStatus(ctx context.Context) (*gomcp.CallToolResult, 
 // queryConfigResult is the response for the config resource.
 type queryConfigResult struct {
 	UpstreamProxy    string                           `json:"upstream_proxy"`
-	CaptureScope     *queryScopeResult                `json:"capture_scope"`
 	TLSPassthrough   *queryPassthroughResult          `json:"tls_passthrough"`
 	TCPForwards      map[string]*config.ForwardConfig `json:"tcp_forwards,omitempty"`
 	EnabledProtocols []string                         `json:"enabled_protocols,omitempty"`
@@ -1067,41 +1079,22 @@ type queryClientCertResult struct {
 	KeyPath  string `json:"key_path"`
 }
 
-// queryScopeResult holds capture scope rules in the config response.
-type queryScopeResult struct {
-	Includes []scopeRuleOutput `json:"includes"`
-	Excludes []scopeRuleOutput `json:"excludes"`
-}
-
 // queryPassthroughResult holds TLS passthrough patterns in the config response.
 type queryPassthroughResult struct {
 	Patterns []string `json:"patterns"`
 	Count    int      `json:"count"`
 }
 
-// handleQueryConfig returns the current configuration (capture scope + TLS passthrough).
+// handleQueryConfig returns the current configuration (TLS passthrough + connector knobs).
 func (s *Server) handleQueryConfig() (*gomcp.CallToolResult, *queryConfigResult, error) {
 	result := &queryConfigResult{}
 
-	if s.deps.manager != nil {
-		result.UpstreamProxy = proxy.RedactProxyURL(s.deps.manager.UpstreamProxy())
+	if !managerIsNil(s.connector.manager) {
+		result.UpstreamProxy = connector.RedactProxyURL(s.connector.manager.UpstreamProxy())
 	}
 
-	if s.deps.scope != nil {
-		includes, excludes := s.deps.scope.Rules()
-		result.CaptureScope = &queryScopeResult{
-			Includes: fromScopeRules(includes),
-			Excludes: fromScopeRules(excludes),
-		}
-	} else {
-		result.CaptureScope = &queryScopeResult{
-			Includes: []scopeRuleOutput{},
-			Excludes: []scopeRuleOutput{},
-		}
-	}
-
-	if s.deps.passthrough != nil {
-		patterns := s.deps.passthrough.List()
+	if s.connector.passthrough != nil {
+		patterns := s.connector.passthrough.List()
 		sort.Strings(patterns)
 		result.TLSPassthrough = &queryPassthroughResult{
 			Patterns: patterns,
@@ -1114,14 +1107,14 @@ func (s *Server) handleQueryConfig() (*gomcp.CallToolResult, *queryConfigResult,
 		}
 	}
 
-	if len(s.deps.tcpForwards) > 0 {
-		result.TCPForwards = s.deps.tcpForwards
+	if len(s.connector.tcpForwards) > 0 {
+		result.TCPForwards = s.connector.tcpForwards
 	}
-	if len(s.deps.enabledProtocols) > 0 {
-		result.EnabledProtocols = s.deps.enabledProtocols
+	if len(s.connector.enabledProtocols) > 0 {
+		result.EnabledProtocols = s.connector.enabledProtocols
 	}
 
-	if s.deps.socks5AuthSetter != nil {
+	if s.connector.socks5AuthSetter != nil {
 		result.SOCKS5Enabled = true
 	}
 
@@ -1133,11 +1126,11 @@ func (s *Server) handleQueryConfig() (*gomcp.CallToolResult, *queryConfigResult,
 		}
 	}
 
-	if s.deps.safetyEngine != nil {
+	if s.pipeline.safetyEngine != nil {
 		result.SafetyFilter = &querySafetyFilterResult{
 			Enabled:     true,
-			InputRules:  len(s.deps.safetyEngine.InputRules()),
-			OutputRules: len(s.deps.safetyEngine.OutputRules()),
+			InputRules:  len(s.pipeline.safetyEngine.InputRules()),
+			OutputRules: len(s.pipeline.safetyEngine.OutputRules()),
 		}
 	} else {
 		result.SafetyFilter = &querySafetyFilterResult{
@@ -1145,9 +1138,9 @@ func (s *Server) handleQueryConfig() (*gomcp.CallToolResult, *queryConfigResult,
 		}
 	}
 
-	if s.deps.manager != nil {
-		result.MaxConnections = s.deps.manager.MaxConnections()
-		result.PeekTimeoutMs = s.deps.manager.PeekTimeout().Milliseconds()
+	if !managerIsNil(s.connector.manager) {
+		result.MaxConnections = s.connector.manager.MaxConnections()
+		result.PeekTimeoutMs = s.connector.manager.PeekTimeout().Milliseconds()
 	}
 
 	if rt := s.currentRequestTimeout(); rt > 0 {
@@ -1177,16 +1170,16 @@ type queryCACertResult struct {
 
 // handleQueryCACert returns the CA certificate PEM and metadata.
 func (s *Server) handleQueryCACert() (*gomcp.CallToolResult, *queryCACertResult, error) {
-	if s.deps.ca == nil {
+	if s.misc.ca == nil {
 		return nil, nil, fmt.Errorf("CA is not initialized: no CA has been configured for this server")
 	}
 
-	cert := s.deps.ca.Certificate()
+	cert := s.misc.ca.Certificate()
 	if cert == nil {
 		return nil, nil, fmt.Errorf("CA certificate is not available: CA has not been generated or loaded")
 	}
 
-	certPEM := s.deps.ca.CertPEM()
+	certPEM := s.misc.ca.CertPEM()
 	if certPEM == nil {
 		return nil, nil, fmt.Errorf("CA certificate PEM is not available")
 	}
@@ -1194,7 +1187,7 @@ func (s *Server) handleQueryCACert() (*gomcp.CallToolResult, *queryCACertResult,
 	fingerprint := sha256.Sum256(cert.Raw)
 	fingerprintHex := formatFingerprint(fingerprint[:])
 
-	source := s.deps.ca.Source()
+	source := s.misc.ca.Source()
 	result := &queryCACertResult{
 		PEM:         string(certPEM),
 		Fingerprint: fingerprintHex,
@@ -1213,124 +1206,287 @@ func (s *Server) handleQueryCACert() (*gomcp.CallToolResult, *queryCACertResult,
 
 // --- intercept_queue resource ---
 
-// queryInterceptQueueEntry is a single entry in the intercept queue query response.
+// queryInterceptQueueEntry is a single entry in the intercept queue query
+// response. The shape mirrors the held envelope: a per-Message-type union
+// (HTTP / WS / GRPCStart / GRPCData / GRPCEnd / Raw) plus the wire-bytes
+// snapshot. Headers are projected as ordered []headerKV (RFC-001
+// wire-fidelity, no map normalization).
 type queryInterceptQueueEntry struct {
-	// ID is the unique identifier for the intercepted item.
+	// ID is the held envelope's unique identifier.
 	ID string `json:"id"`
-	// Phase indicates whether this is a "request", "response", or "websocket_frame" intercept.
-	Phase string `json:"phase"`
-	// Protocol is the protocol type: "http" or "websocket".
+	// Protocol discriminates the populated per-Message-type field.
+	// One of: http, websocket, grpc_start, grpc_data, grpc_end, raw, unknown.
 	Protocol string `json:"protocol"`
-	// Method is the HTTP method (HTTP only).
-	Method string `json:"method,omitempty"`
-	// URL is the request URL (HTTP only).
-	URL string `json:"url,omitempty"`
-	// StatusCode is the HTTP status code (only set for response phase).
-	StatusCode int `json:"status_code,omitempty"`
-	// Headers are the request/response headers (HTTP only).
-	Headers map[string][]string `json:"headers,omitempty"`
-	// BodyEncoding indicates the encoding of the body/payload ("text" or "base64").
-	BodyEncoding string `json:"body_encoding"`
-	// Body is the request/response body or WebSocket payload as text or Base64-encoded string.
-	Body string `json:"body"`
-	// Timestamp is when the item was intercepted.
-	Timestamp string `json:"timestamp"`
-	// MatchedRules lists the IDs of the rules that matched.
-	MatchedRules []string `json:"matched_rules"`
+	// Direction is the envelope direction: "send" or "receive".
+	Direction string `json:"direction"`
+	// HeldAt is the ISO-8601 timestamp when the envelope was held.
+	HeldAt string `json:"held_at"`
+	// MatchedRules lists the rule IDs that matched.
+	MatchedRules []string `json:"matched_rules,omitempty"`
+	// FlowID identifies the per-stream flow on the held envelope.
+	FlowID string `json:"flow_id,omitempty"`
+	// StreamID identifies the multiplexed stream on the held envelope.
+	StreamID string `json:"stream_id,omitempty"`
 
-	// Metadata holds protocol-specific metadata (e.g. gRPC encoding info).
-	Metadata map[string]string `json:"metadata,omitempty"`
+	// Per-protocol union — exactly one is non-nil, matching Protocol.
+	HTTP      *httpEntryView      `json:"http,omitempty"`
+	WS        *wsEntryView        `json:"ws,omitempty"`
+	GRPCStart *grpcStartEntryView `json:"grpc_start,omitempty"`
+	GRPCData  *grpcDataEntryView  `json:"grpc_data,omitempty"`
+	GRPCEnd   *grpcEndEntryView   `json:"grpc_end,omitempty"`
+	Raw       *rawEntryView       `json:"raw,omitempty"`
 
-	// --- WebSocket frame metadata (phase=websocket_frame only) ---
+	// Wire-bytes snapshot from Envelope.Raw.
+	RawBytesAvailable bool   `json:"raw_bytes_available"`
+	RawBytesSize      int    `json:"raw_bytes_size,omitempty"`
+	RawBytesEncoding  string `json:"raw_bytes_encoding,omitempty"`
+	RawBytes          string `json:"raw_bytes,omitempty"`
+}
 
-	// Opcode is the WebSocket frame opcode name (e.g. "Text", "Binary").
-	Opcode string `json:"opcode,omitempty"`
-	// Direction is the frame direction: "client_to_server" or "server_to_client".
-	Direction string `json:"direction,omitempty"`
-	// StreamID is the WebSocket flow ID this frame belongs to.
-	StreamID string `json:"flow_id,omitempty"`
-	// UpgradeURL is the URL from the original WebSocket upgrade request.
-	UpgradeURL string `json:"upgrade_url,omitempty"`
-	// Sequence is the frame sequence number within the WebSocket connection.
-	Sequence int64 `json:"sequence,omitempty"`
+// httpEntryView is the per-entry projection of an HTTPMessage envelope.
+// Headers and Trailers are order- and case-preserved per RFC-001.
+type httpEntryView struct {
+	Method       string     `json:"method,omitempty"`
+	Scheme       string     `json:"scheme,omitempty"`
+	Authority    string     `json:"authority,omitempty"`
+	Path         string     `json:"path,omitempty"`
+	RawQuery     string     `json:"raw_query,omitempty"`
+	Status       int        `json:"status,omitempty"`
+	StatusReason string     `json:"status_reason,omitempty"`
+	Headers      []headerKV `json:"headers,omitempty"`
+	Trailers     []headerKV `json:"trailers,omitempty"`
+	BodyEncoding string     `json:"body_encoding,omitempty"`
+	Body         string     `json:"body,omitempty"`
+}
+
+// wsEntryView is the per-entry projection of a WSMessage envelope.
+type wsEntryView struct {
+	Opcode          string `json:"opcode,omitempty"`
+	Fin             bool   `json:"fin,omitempty"`
+	Masked          bool   `json:"masked,omitempty"`
+	Compressed      bool   `json:"compressed,omitempty"`
+	CloseCode       uint16 `json:"close_code,omitempty"`
+	CloseReason     string `json:"close_reason,omitempty"`
+	PayloadEncoding string `json:"payload_encoding,omitempty"`
+	Payload         string `json:"payload,omitempty"`
+}
+
+// grpcStartEntryView is the per-entry projection of a GRPCStartMessage envelope.
+type grpcStartEntryView struct {
+	Service     string     `json:"service,omitempty"`
+	Method      string     `json:"method,omitempty"`
+	Encoding    string     `json:"encoding,omitempty"`
+	ContentType string     `json:"content_type,omitempty"`
+	Metadata    []headerKV `json:"metadata,omitempty"`
+}
+
+// grpcDataEntryView is the per-entry projection of a GRPCDataMessage envelope.
+type grpcDataEntryView struct {
+	Service         string `json:"service,omitempty"`
+	Method          string `json:"method,omitempty"`
+	Compressed      bool   `json:"compressed,omitempty"`
+	EndStream       bool   `json:"end_stream,omitempty"`
+	WireLength      uint32 `json:"wire_length,omitempty"`
+	PayloadEncoding string `json:"payload_encoding,omitempty"`
+	Payload         string `json:"payload,omitempty"`
+}
+
+// grpcEndEntryView is the per-entry projection of a GRPCEndMessage envelope.
+type grpcEndEntryView struct {
+	Status   uint32     `json:"status"`
+	Message  string     `json:"message,omitempty"`
+	Trailers []headerKV `json:"trailers,omitempty"`
+}
+
+// rawEntryView is the per-entry projection of a RawMessage envelope.
+type rawEntryView struct {
+	BytesEncoding string `json:"bytes_encoding,omitempty"`
+	Bytes         string `json:"bytes,omitempty"`
 }
 
 // queryInterceptQueueResult is the response for the intercept_queue resource.
 type queryInterceptQueueResult struct {
-	// Items contains the currently blocked requests.
+	// Items contains the currently held envelopes.
 	Items []queryInterceptQueueEntry `json:"items"`
 	// Count is the number of items returned.
 	Count int `json:"count"`
 }
 
-// handleQueryInterceptQueue returns the list of currently intercepted (blocked) requests.
+// handleQueryInterceptQueue returns the list of currently held envelopes
+// from the HoldQueue, projecting each via type-switch on env.Message.
 func (s *Server) handleQueryInterceptQueue(input queryInput) (*gomcp.CallToolResult, *queryInterceptQueueResult, error) {
-	if s.deps.interceptQueue == nil {
+	if s.pipeline.holdQueue == nil {
 		return nil, nil, fmt.Errorf("intercept queue is not initialized")
 	}
 
-	items := s.deps.interceptQueue.List()
+	items := s.pipeline.holdQueue.List()
 
 	limit := input.Limit
 	if limit <= 0 || limit > maxListLimit {
 		limit = defaultListLimit
 	}
 
-	// Sort by timestamp (oldest first) for consistent ordering.
 	sort.Slice(items, func(i, j int) bool {
-		return items[i].Timestamp.Before(items[j].Timestamp)
+		return items[i].HeldAt.Before(items[j].HeldAt)
 	})
 
-	// Apply limit.
 	if len(items) > limit {
 		items = items[:limit]
 	}
 
 	entries := make([]queryInterceptQueueEntry, 0, len(items))
-	for _, item := range items {
-		bodyStr, bodyEncoding := encodeBody(item.Body)
-
-		entry := queryInterceptQueueEntry{
-			ID:           item.ID,
-			Phase:        string(item.Phase),
-			Body:         bodyStr,
-			BodyEncoding: bodyEncoding,
-			Timestamp:    item.Timestamp.UTC().Format("2006-01-02T15:04:05Z"),
-			MatchedRules: item.MatchedRules,
-		}
-
-		if len(item.Metadata) > 0 {
-			entry.Metadata = item.Metadata
-		}
-
-		if item.Phase == intercept.PhaseWebSocketFrame {
-			entry.Protocol = "websocket"
-			entry.Opcode = wsOpcodeNameFromInt(item.WSOpcode)
-			entry.Direction = item.WSDirection
-			entry.StreamID = item.WSFlowID
-			entry.UpgradeURL = item.WSUpgradeURL
-			entry.Sequence = item.WSSequence
-		} else {
-			entry.Protocol = "http"
-			entry.Method = item.Method
-			entry.StatusCode = item.StatusCode
-			if item.URL != nil {
-				entry.URL = item.URL.String()
-			}
-			// Convert KeyValue headers to map for JSON output.
-			entry.Headers = map[string][]string(kvToHTTPHeader(item.Headers))
-		}
-
-		entries = append(entries, entry)
+	for _, it := range items {
+		entries = append(entries, s.projectHeldEntry(it))
 	}
-
-	// Apply SafetyFilter output masking to intercept queue bodies and headers.
-	s.filterOutputInterceptEntries(entries)
 
 	return nil, &queryInterceptQueueResult{
 		Items: entries,
 		Count: len(entries),
 	}, nil
+}
+
+// projectHeldEntry projects one HoldQueue HeldEntry onto a JSON-friendly
+// queryInterceptQueueEntry. The per-Message-type dispatch fans out into
+// project*View helpers; SafetyEngine output masking is applied inline so
+// each protocol view can mask the right headers/body shape.
+func (s *Server) projectHeldEntry(it *common.HeldEntry) queryInterceptQueueEntry {
+	env := it.Envelope
+	entry := queryInterceptQueueEntry{
+		ID:           it.ID,
+		Protocol:     holdQueueProtocolKind(env),
+		Direction:    env.Direction.String(),
+		HeldAt:       it.HeldAt.UTC().Format("2006-01-02T15:04:05Z"),
+		MatchedRules: it.MatchedRules,
+		FlowID:       env.FlowID,
+		StreamID:     env.StreamID,
+	}
+
+	switch m := env.Message.(type) {
+	case *envelope.HTTPMessage:
+		entry.HTTP = s.projectHTTPView(m)
+	case *envelope.WSMessage:
+		entry.WS = s.projectWSView(m)
+	case *envelope.GRPCStartMessage:
+		entry.GRPCStart = s.projectGRPCStartView(m)
+	case *envelope.GRPCDataMessage:
+		entry.GRPCData = s.projectGRPCDataView(m)
+	case *envelope.GRPCEndMessage:
+		entry.GRPCEnd = s.projectGRPCEndView(m)
+	case *envelope.RawMessage:
+		entry.Raw = s.projectRawView(m)
+	}
+
+	if len(env.Raw) > 0 {
+		entry.RawBytesAvailable = true
+		entry.RawBytesSize = len(env.Raw)
+		filtered := s.filterOutputBody(env.Raw)
+		entry.RawBytes, entry.RawBytesEncoding = encodeBody(filtered)
+	}
+
+	return entry
+}
+
+// projectHTTPView projects an HTTPMessage with output filter applied to
+// body and headers/trailers (preserving order and casing).
+func (s *Server) projectHTTPView(m *envelope.HTTPMessage) *httpEntryView {
+	body := s.filterOutputBody(m.Body)
+	bodyStr, bodyEncoding := encodeBody(body)
+	return &httpEntryView{
+		Method:       m.Method,
+		Scheme:       m.Scheme,
+		Authority:    m.Authority,
+		Path:         m.Path,
+		RawQuery:     m.RawQuery,
+		Status:       m.Status,
+		StatusReason: m.StatusReason,
+		Headers:      s.filterOutputHeaderKVs(m.Headers),
+		Trailers:     s.filterOutputHeaderKVs(m.Trailers),
+		BodyEncoding: bodyEncoding,
+		Body:         bodyStr,
+	}
+}
+
+// projectWSView projects a WSMessage with output filter applied to payload.
+func (s *Server) projectWSView(m *envelope.WSMessage) *wsEntryView {
+	payload := s.filterOutputBody(m.Payload)
+	payStr, payEncoding := encodeBody(payload)
+	return &wsEntryView{
+		Opcode:          wsOpcodeName(m.Opcode),
+		Fin:             m.Fin,
+		Masked:          m.Masked,
+		Compressed:      m.Compressed,
+		CloseCode:       m.CloseCode,
+		CloseReason:     m.CloseReason,
+		PayloadEncoding: payEncoding,
+		Payload:         payStr,
+	}
+}
+
+// projectGRPCStartView projects a GRPCStartMessage with metadata filtered.
+func (s *Server) projectGRPCStartView(m *envelope.GRPCStartMessage) *grpcStartEntryView {
+	return &grpcStartEntryView{
+		Service:     m.Service,
+		Method:      m.Method,
+		Encoding:    m.Encoding,
+		ContentType: m.ContentType,
+		Metadata:    s.filterOutputHeaderKVs(m.Metadata),
+	}
+}
+
+// projectGRPCDataView projects a GRPCDataMessage with output filter on payload.
+func (s *Server) projectGRPCDataView(m *envelope.GRPCDataMessage) *grpcDataEntryView {
+	payload := s.filterOutputBody(m.Payload)
+	payStr, payEncoding := encodeBody(payload)
+	return &grpcDataEntryView{
+		Service:         m.Service,
+		Method:          m.Method,
+		Compressed:      m.Compressed,
+		EndStream:       m.EndStream,
+		WireLength:      m.WireLength,
+		PayloadEncoding: payEncoding,
+		Payload:         payStr,
+	}
+}
+
+// projectGRPCEndView projects a GRPCEndMessage with trailers filtered.
+func (s *Server) projectGRPCEndView(m *envelope.GRPCEndMessage) *grpcEndEntryView {
+	return &grpcEndEntryView{
+		Status:   m.Status,
+		Message:  m.Message,
+		Trailers: s.filterOutputHeaderKVs(m.Trailers),
+	}
+}
+
+// projectRawView projects a RawMessage with output filter on bytes.
+func (s *Server) projectRawView(m *envelope.RawMessage) *rawEntryView {
+	bytesFiltered := s.filterOutputBody(m.Bytes)
+	bytesStr, bytesEncoding := encodeBody(bytesFiltered)
+	return &rawEntryView{
+		BytesEncoding: bytesEncoding,
+		Bytes:         bytesStr,
+	}
+}
+
+// filterOutputHeaderKVs applies SafetyEngine output masking to a list of
+// envelope.KeyValue headers and projects onto the order-preserving
+// []headerKV shape used by the MCP intercept_queue response. Returns nil
+// when the input is nil or empty.
+func (s *Server) filterOutputHeaderKVs(kvs []envelope.KeyValue) []headerKV {
+	if len(kvs) == 0 {
+		return nil
+	}
+	out := make([]headerKV, 0, len(kvs))
+	if s.pipeline.safetyEngine == nil {
+		for _, kv := range kvs {
+			out = append(out, headerKV{Name: kv.Name, Value: kv.Value})
+		}
+		return out
+	}
+	filtered, _ := s.pipeline.safetyEngine.FilterOutputHeaders(kvs)
+	for _, kv := range filtered {
+		out = append(out, headerKV{Name: kv.Name, Value: kv.Value})
+	}
+	return out
 }
 
 // --- macros resource ---
@@ -1352,11 +1508,11 @@ type queryMacrosResult struct {
 
 // handleQueryMacros returns a list of all stored macro definitions.
 func (s *Server) handleQueryMacros(ctx context.Context) (*gomcp.CallToolResult, *queryMacrosResult, error) {
-	if s.deps.store == nil {
+	if s.flowStore.store == nil {
 		return nil, nil, fmt.Errorf("flow store is not initialized")
 	}
 
-	records, err := s.deps.store.ListMacros(ctx)
+	records, err := s.flowStore.store.ListMacros(ctx)
 	if err != nil {
 		return nil, nil, fmt.Errorf("list macros: %w", err)
 	}
@@ -1399,14 +1555,14 @@ type queryMacroResult struct {
 
 // handleQueryMacro returns detailed information about a single macro definition.
 func (s *Server) handleQueryMacro(ctx context.Context, input queryInput) (*gomcp.CallToolResult, *queryMacroResult, error) {
-	if s.deps.store == nil {
+	if s.flowStore.store == nil {
 		return nil, nil, fmt.Errorf("flow store is not initialized")
 	}
 	if input.ID == "" {
 		return nil, nil, fmt.Errorf("id is required for macro resource (macro name)")
 	}
 
-	rec, err := s.deps.store.GetMacro(ctx, input.ID)
+	rec, err := s.flowStore.store.GetMacro(ctx, input.ID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("get macro: %w", err)
 	}

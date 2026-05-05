@@ -12,9 +12,8 @@ import (
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/usk6666/yorishiro-proxy/internal/cert"
+	"github.com/usk6666/yorishiro-proxy/internal/connector"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
-	"github.com/usk6666/yorishiro-proxy/internal/proxy"
-	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
 
 // setupQueryTestSession creates an MCP client session for query tool tests.
@@ -24,7 +23,7 @@ func setupQueryTestSession(t *testing.T, store flow.Store, opts ...ServerOption)
 	ctx := context.Background()
 
 	ca := newTestCA(t)
-	s := NewServer(ctx, ca, store, nil, opts...)
+	s := newServer(ctx, ca, store, nil, opts...)
 	ct, st := gomcp.NewInMemoryTransports()
 
 	ss, err := s.server.Connect(ctx, st, nil)
@@ -777,16 +776,7 @@ func TestQuery_Config_Default(t *testing.T) {
 	var out queryConfigResult
 	unmarshalQueryResult(t, result, &out)
 
-	// No scope/passthrough configured, should have empty defaults.
-	if out.CaptureScope == nil {
-		t.Fatal("capture_scope is nil")
-	}
-	if len(out.CaptureScope.Includes) != 0 {
-		t.Errorf("includes len = %d, want 0", len(out.CaptureScope.Includes))
-	}
-	if len(out.CaptureScope.Excludes) != 0 {
-		t.Errorf("excludes len = %d, want 0", len(out.CaptureScope.Excludes))
-	}
+	// No passthrough configured, should have empty defaults.
 	if out.TLSPassthrough == nil {
 		t.Fatal("tls_passthrough is nil")
 	}
@@ -795,20 +785,14 @@ func TestQuery_Config_Default(t *testing.T) {
 	}
 }
 
-func TestQuery_Config_WithScopeAndPassthrough(t *testing.T) {
+func TestQuery_Config_WithPassthrough(t *testing.T) {
 	t.Parallel()
 	store := newTestStore(t)
-	scope := proxy.NewCaptureScope()
-	scope.SetRules(
-		[]proxy.ScopeRule{{Hostname: "target.com"}},
-		[]proxy.ScopeRule{{Hostname: "excluded.com"}},
-	)
-	pl := proxy.NewPassthroughList()
+	pl := connector.NewPassthroughList()
 	pl.Add("pinned.example.com")
 	pl.Add("*.cdn.example.com")
 
 	cs := setupQueryTestSession(t, store,
-		WithCaptureScope(scope),
 		WithPassthroughList(pl),
 	)
 
@@ -820,15 +804,6 @@ func TestQuery_Config_WithScopeAndPassthrough(t *testing.T) {
 	var out queryConfigResult
 	unmarshalQueryResult(t, result, &out)
 
-	if len(out.CaptureScope.Includes) != 1 {
-		t.Errorf("includes len = %d, want 1", len(out.CaptureScope.Includes))
-	}
-	if out.CaptureScope.Includes[0].Hostname != "target.com" {
-		t.Errorf("includes[0].hostname = %q, want target.com", out.CaptureScope.Includes[0].Hostname)
-	}
-	if len(out.CaptureScope.Excludes) != 1 {
-		t.Errorf("excludes len = %d, want 1", len(out.CaptureScope.Excludes))
-	}
 	if out.TLSPassthrough.Count != 2 {
 		t.Errorf("tls_passthrough.count = %d, want 2", out.TLSPassthrough.Count)
 	}
@@ -846,21 +821,18 @@ func TestQuery_Config_WithScopeAndPassthrough(t *testing.T) {
 func TestQuery_Config_WithManagerFields(t *testing.T) {
 	t.Parallel()
 	store := newTestStore(t)
-	logger := testutil.DiscardLogger()
-	detector := &stubDetector{}
-	manager := proxy.NewManager(detector, logger)
+	manager := newTestProxybuildManager(t)
 	ctx := context.Background()
 	if err := manager.Start(ctx, "127.0.0.1:0"); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	t.Cleanup(func() { manager.Stop(context.Background()) })
 
 	// Set non-default values so we can verify them.
 	manager.SetMaxConnections(512)
 	manager.SetPeekTimeout(5 * time.Second)
 
 	ca := newTestCA(t)
-	s := NewServer(ctx, ca, store, manager)
+	s := newServer(ctx, ca, store, manager)
 	ct, st := gomcp.NewInMemoryTransports()
 
 	ss, err := s.server.Connect(ctx, st, nil)
@@ -941,7 +913,7 @@ func TestQuery_CACert_Success(t *testing.T) {
 
 	// Build server with the CA directly.
 	ctx := context.Background()
-	s := NewServer(ctx, ca, store, nil)
+	s := newServer(ctx, ca, store, nil)
 	ct, st := gomcp.NewInMemoryTransports()
 	ss, err := s.server.Connect(ctx, st, nil)
 	if err != nil {
@@ -989,7 +961,7 @@ func TestQuery_CACert_NilCA(t *testing.T) {
 	t.Parallel()
 	// Build server without CA.
 	ctx := context.Background()
-	s := NewServer(ctx, nil, nil, nil)
+	s := newServer(ctx, nil, nil, nil)
 	ct, st := gomcp.NewInMemoryTransports()
 	ss, err := s.server.Connect(ctx, st, nil)
 	if err != nil {
@@ -1018,14 +990,14 @@ func TestQuery_CACert_NilCA(t *testing.T) {
 func TestQuery_Sessions_FilterByProtocol(t *testing.T) {
 	t.Parallel()
 	store := newTestStore(t)
-	seedSession(t, store, "https-1", "HTTPS", "GET", "https://example.com", 200)
-	seedSession(t, store, "http-1", "HTTP/1.x", "GET", "http://example.com", 200)
+	seedSession(t, store, "http-1", "http", "GET", "https://example.com", 200)
+	seedSession(t, store, "ws-1", "ws", "GET", "https://example.com", 200)
 
 	cs := setupQueryTestSession(t, store)
 
 	result := callQuery(t, cs, queryInput{
 		Resource: "flows",
-		Filter:   &queryFilter{Protocol: "HTTPS"},
+		Filter:   &queryFilter{Protocol: "http"},
 	})
 	if result.IsError {
 		t.Fatalf("expected success: %v", result.Content)
@@ -1037,8 +1009,8 @@ func TestQuery_Sessions_FilterByProtocol(t *testing.T) {
 	if out.Count != 1 {
 		t.Errorf("count = %d, want 1", out.Count)
 	}
-	if out.Flows[0].Protocol != "HTTPS" {
-		t.Errorf("protocol = %q, want HTTPS", out.Flows[0].Protocol)
+	if out.Flows[0].Protocol != "http" {
+		t.Errorf("protocol = %q, want http", out.Flows[0].Protocol)
 	}
 }
 
@@ -1109,7 +1081,7 @@ func TestQuery_CACert_PersistedFields(t *testing.T) {
 	})
 
 	ctx := context.Background()
-	s := NewServer(ctx, ca, store, nil)
+	s := newServer(ctx, ca, store, nil)
 	ct, st := gomcp.NewInMemoryTransports()
 	ss, err := s.server.Connect(ctx, st, nil)
 	if err != nil {
@@ -1156,7 +1128,7 @@ func TestQuery_CACert_EphemeralFields(t *testing.T) {
 	// No SetSource — defaults to ephemeral (Persisted=false).
 
 	ctx := context.Background()
-	s := NewServer(ctx, ca, store, nil)
+	s := newServer(ctx, ca, store, nil)
 	ct, st := gomcp.NewInMemoryTransports()
 	ss, err := s.server.Connect(ctx, st, nil)
 	if err != nil {

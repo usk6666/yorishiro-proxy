@@ -6,15 +6,22 @@ import { Input } from "../../components/ui/Input.js";
 import { Spinner } from "../../components/ui/Spinner.js";
 import { Tabs } from "../../components/ui/Tabs.js";
 import { useToast } from "../../components/ui/Toast.js";
+import { useMcpContext } from "../../lib/mcp/context.js";
+import { pickResendTool } from "../../lib/mcp/dispatch.js";
 import { useResend, useQuery } from "../../lib/mcp/hooks.js";
 import type {
   BodyPatch,
   FlowDetailResult,
+  HeaderKV,
   HooksInput,
   MacrosEntry,
   MessageEntry,
   MessagesResult,
   RawPatch,
+  ResendHTTPParams,
+  ResendHTTPResult,
+  ResendRawParams,
+  ResendRawTypedResult,
 } from "../../lib/mcp/types.js";
 import { HookConfigEditor } from "../../components/hooks/HookConfigEditor.js";
 import { BodyPatchEditor } from "./BodyPatchEditor.js";
@@ -230,6 +237,35 @@ function extractUseTls(flow: FlowDetailResult): boolean {
 }
 
 /**
+ * Split a request URL into the scheme/authority/path/raw_query tuple expected
+ * by the resend_http MCP tool. Falls back to a path-only override when URL
+ * parsing fails so unusual flow URLs don't block the protocol-typed dispatch.
+ */
+function splitUrlForResendHTTP(urlStr: string): {
+  scheme?: string;
+  authority?: string;
+  path?: string;
+  rawQuery?: string;
+} {
+  if (!urlStr) return {};
+  try {
+    const parsed = new URL(urlStr);
+    const scheme = parsed.protocol.replace(/:$/, "");
+    const authority = parsed.host;
+    const path = parsed.pathname || "/";
+    const rawQuery = parsed.search.replace(/^\?/, "");
+    return {
+      scheme: scheme || undefined,
+      authority: authority || undefined,
+      path,
+      rawQuery: rawQuery || undefined,
+    };
+  } catch {
+    return { path: urlStr };
+  }
+}
+
+/**
  * Encode a string to base64 (handles binary content).
  */
 function stringToBase64(str: string): string {
@@ -255,6 +291,12 @@ export function ResendPage() {
   const navigate = useNavigate();
   const { addToast } = useToast();
   const { resend, loading: executing } = useResend();
+  const { client } = useMcpContext();
+
+  // Use the RFC-001 N8 protocol-typed resend tools (resend_http / resend_ws /
+  // resend_grpc / resend_raw) when the flow protocol is recognized. Defaults
+  // to true; users can flip to "force legacy" via the toggle in the action bar.
+  const [useTypedTools, setUseTypedTools] = useState(true);
 
   // Page mode: derived from URL searchParams for reactivity to URL changes.
   const pageMode: "resend" | "compare" = searchParams.get("mode") === "compare" ? "compare" : "resend";
@@ -452,7 +494,82 @@ export function ResendPage() {
       const hooksParam =
         hooks.pre_send || hooks.post_receive ? hooks : undefined;
 
+      // Decide the dispatch: protocol-typed resend_http when (a) the toggle is
+      // on, (b) the flow protocol resolves to resend_http, (c) no hooks are
+      // configured (the new tool ignores them; legacy still honours hooks),
+      // and (d) we're not in dry-run mode (the new tool has no dry_run flag).
+      const toolName =
+        flow != null ? pickResendTool(flow.protocol) : "resend";
+      const canUseTyped =
+        useTypedTools &&
+        toolName === "resend_http" &&
+        client != null &&
+        !isDryRun &&
+        !hooksParam;
+
       try {
+        if (canUseTyped) {
+          const split = splitUrlForResendHTTP(url);
+          const headerKVs: HeaderKV[] = overrideHeaders.map((h) => ({
+            name: h.key,
+            value: h.value,
+          }));
+          const params: ResendHTTPParams = {
+            flow_id: activeFlowId,
+            method: method || undefined,
+            scheme: split.scheme,
+            authority: split.authority,
+            path: split.path,
+            raw_query: split.rawQuery,
+            headers: headerKVs.length > 0 ? headerKVs : undefined,
+            body: body || undefined,
+            body_patches: bodyPatches.length > 0 ? bodyPatches : undefined,
+            tag: tag || undefined,
+          };
+          const typedResult: ResendHTTPResult = await client!.resendHttp(
+            params,
+          );
+
+          // Map the typed result back to the legacy ResendResult shape so
+          // ResponseViewer keeps working unchanged.
+          const responseHeaders: Record<string, string[]> = {};
+          for (const h of typedResult.headers ?? []) {
+            const list = responseHeaders[h.name] ?? [];
+            list.push(h.value);
+            responseHeaders[h.name] = list;
+          }
+          const adaptedResult: ResendResult = {
+            new_flow_id: typedResult.stream_id,
+            response_status_code: typedResult.status_code,
+            response_headers: responseHeaders,
+            response_body: typedResult.body,
+            response_body_encoding: typedResult.body_encoding,
+            duration_ms: typedResult.duration_ms,
+            tag: typedResult.tag,
+          };
+          setHttpResponse(adaptedResult);
+          setHistory((prev) => [
+            {
+              timestamp: new Date().toISOString(),
+              protocol: "http",
+              action: "resend_http",
+              method,
+              url,
+              statusCode: typedResult.status_code,
+              durationMs: typedResult.duration_ms,
+              dryRun: false,
+              tag,
+              flowId: typedResult.stream_id,
+            },
+            ...prev,
+          ]);
+          addToast({
+            type: "success",
+            message: `Request sent (${typedResult.status_code ?? "?"})`,
+          });
+          return;
+        }
+
         const result = await resend<ResendResult>({
           action: "resend",
           params: {
@@ -499,7 +616,21 @@ export function ResendPage() {
         });
       }
     },
-    [activeFlowId, method, url, headers, body, bodyPatches, tag, hooks, resend, addToast],
+    [
+      activeFlowId,
+      method,
+      url,
+      headers,
+      body,
+      bodyPatches,
+      tag,
+      hooks,
+      resend,
+      addToast,
+      flow,
+      client,
+      useTypedTools,
+    ],
   );
 
   /** Send HTTP raw resend request (raw mode). */
@@ -584,7 +715,71 @@ export function ResendPage() {
         return;
       }
 
+      // Dispatch to the protocol-typed resend_raw tool when applicable.
+      // The typed tool only supports offset-based patches with byte-level data
+      // (no regex/find-replace), so legacy stays the path for those modes
+      // and for dry-run / hooks (the typed tool exposes neither).
+      const toolName =
+        flow != null ? pickResendTool(flow.protocol) : "resend";
+      const patchesAreOffsetOnly = rawPatches.every(
+        (p) => p.offset != null && p.data_base64 != null,
+      );
+      const canUseTyped =
+        useTypedTools &&
+        toolName === "resend_raw" &&
+        client != null &&
+        !isDryRun &&
+        patchesAreOffsetOnly;
+
       try {
+        if (canUseTyped) {
+          const params: ResendRawParams = {
+            flow_id: activeFlowId,
+            target_addr: targetAddr.trim(),
+            use_tls: useTls || undefined,
+            patches:
+              rawPatches.length > 0
+                ? rawPatches.map((p) => ({
+                    offset: p.offset ?? 0,
+                    data: p.data_base64 ?? "",
+                    data_encoding: "base64",
+                  }))
+                : undefined,
+            tag: tag || undefined,
+          };
+          const typedResult: ResendRawTypedResult = await client!.resendRaw(
+            params,
+          );
+          const adapted: TcpResendResult = {
+            new_flow_id: typedResult.stream_id,
+            response_data: typedResult.response_bytes,
+            response_size: typedResult.response_size,
+            duration_ms: typedResult.duration_ms,
+            tag: typedResult.tag,
+          };
+          setTcpResponse(adapted);
+          setHistory((prev) => [
+            {
+              timestamp: new Date().toISOString(),
+              protocol: "tcp",
+              action: "resend_raw",
+              method: "RAW",
+              url: targetAddr.trim(),
+              responseSize: typedResult.response_size,
+              durationMs: typedResult.duration_ms,
+              dryRun: false,
+              tag,
+              flowId: typedResult.stream_id,
+            },
+            ...prev,
+          ]);
+          addToast({
+            type: "success",
+            message: `Raw resend complete (${typedResult.response_size ?? 0} bytes)`,
+          });
+          return;
+        }
+
         const result = await resend<TcpResendResult>({
           action: "resend_raw",
           params: {
@@ -628,7 +823,18 @@ export function ResendPage() {
         });
       }
     },
-    [activeFlowId, targetAddr, useTls, rawPatches, tag, resend, addToast],
+    [
+      activeFlowId,
+      targetAddr,
+      useTls,
+      rawPatches,
+      tag,
+      resend,
+      addToast,
+      flow,
+      client,
+      useTypedTools,
+    ],
   );
 
   /** Send TCP replay request. */
@@ -858,6 +1064,17 @@ export function ResendPage() {
                       onChange={(e) => setDryRun(e.target.checked)}
                     />
                     <span>Default dry-run</span>
+                  </label>
+                  <label
+                    className="resend-dryrun-toggle"
+                    title="When on, recognized protocols dispatch to resend_http / resend_ws / resend_grpc / resend_raw. Disable to force the legacy 'resend' tool."
+                  >
+                    <input
+                      type="checkbox"
+                      checked={useTypedTools}
+                      onChange={(e) => setUseTypedTools(e.target.checked)}
+                    />
+                    <span>Use typed tools</span>
                   </label>
                 </div>
               </>
@@ -1127,6 +1344,17 @@ export function ResendPage() {
                       onChange={(e) => setDryRun(e.target.checked)}
                     />
                     <span>Default dry-run</span>
+                  </label>
+                  <label
+                    className="resend-dryrun-toggle"
+                    title="When on, recognized protocols dispatch to resend_http / resend_ws / resend_grpc / resend_raw. Disable to force the legacy 'resend' tool."
+                  >
+                    <input
+                      type="checkbox"
+                      checked={useTypedTools}
+                      onChange={(e) => setUseTypedTools(e.target.checked)}
+                    />
+                    <span>Use typed tools</span>
                   </label>
                 </>
               ) : (

@@ -7,7 +7,6 @@ import { CaptureScope } from "./CaptureScope.js";
 import { ClientCertificate } from "./ClientCertificate.js";
 import { ConnectionSettings } from "./ConnectionSettings.js";
 import { InterceptRules } from "./InterceptRules.js";
-import { PluginPanel } from "./PluginPanel.js";
 import { ProtocolFilter } from "./ProtocolFilter.js";
 import { ProxyControl } from "./ProxyControl.js";
 import "./SettingsPage.css";
@@ -28,7 +27,6 @@ const TABS = [
   { id: "client-cert", label: "Client Certificate" },
   { id: "connection", label: "Connection" },
   { id: "ca-cert", label: "CA Certificate" },
-  { id: "plugins", label: "Plugins" },
 ];
 
 /**
@@ -188,9 +186,6 @@ export function SettingsPage() {
 
       case "ca-cert":
         return <CACertPanel onRefresh={handleRefresh} />;
-
-      case "plugins":
-        return <PluginPanel />;
 
       default:
         return null;

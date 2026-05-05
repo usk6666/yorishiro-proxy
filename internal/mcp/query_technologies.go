@@ -35,7 +35,7 @@ type queryTechnologiesResult struct {
 
 // handleQueryTechnologies aggregates detected technologies per host across all flows.
 func (s *Server) handleQueryTechnologies(ctx context.Context, input queryInput) (*gomcp.CallToolResult, *queryTechnologiesResult, error) {
-	if s.deps.store == nil {
+	if s.flowStore.store == nil {
 		return nil, nil, fmt.Errorf("flow store is not initialized")
 	}
 
@@ -44,7 +44,7 @@ func (s *Server) handleQueryTechnologies(ctx context.Context, input queryInput) 
 		State: "complete",
 		Limit: maxListLimit,
 	}
-	flowList, err := s.deps.store.ListStreams(ctx, opts)
+	flowList, err := s.flowStore.store.ListStreams(ctx, opts)
 	if err != nil {
 		return nil, nil, fmt.Errorf("list flows: %w", err)
 	}
@@ -141,7 +141,7 @@ func buildSortedHosts(hostMap map[string]map[string]technologyEntry) []hostTechn
 
 // extractHostFromFlow retrieves the host from the first send message of a flow.
 func extractHostFromFlow(ctx context.Context, s *Server, fl *flow.Stream) string {
-	msgs, err := s.deps.store.GetFlows(ctx, fl.ID, flow.FlowListOptions{Direction: "send"})
+	msgs, err := s.flowStore.store.GetFlows(ctx, fl.ID, flow.FlowListOptions{Direction: "send"})
 	if err != nil || len(msgs) == 0 {
 		return ""
 	}

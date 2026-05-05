@@ -54,14 +54,14 @@ func seedStreamingSession(t *testing.T, store flow.Store, id, protocol, sessionT
 func TestQuery_Sessions_FilterByProtocol_WebSocket(t *testing.T) {
 	t.Parallel()
 	store := newTestStore(t)
-	seedSession(t, store, "http-1", "HTTPS", "GET", "https://example.com", 200)
-	seedStreamingSession(t, store, "ws-1", "WebSocket", "bidirectional", 4, map[string]string{"opcode": "1"})
+	seedSession(t, store, "http-1", "http", "GET", "https://example.com", 200)
+	seedStreamingSession(t, store, "ws-1", "ws", "bidirectional", 4, map[string]string{"opcode": "1"})
 
 	cs := setupQueryTestSession(t, store)
 
 	result := callQuery(t, cs, queryInput{
 		Resource: "flows",
-		Filter:   &queryFilter{Protocol: "WebSocket"},
+		Filter:   &queryFilter{Protocol: "ws"},
 	})
 	if result.IsError {
 		t.Fatalf("expected success: %v", result.Content)
@@ -73,22 +73,22 @@ func TestQuery_Sessions_FilterByProtocol_WebSocket(t *testing.T) {
 	if out.Count != 1 {
 		t.Errorf("count = %d, want 1", out.Count)
 	}
-	if out.Flows[0].Protocol != "WebSocket" {
-		t.Errorf("protocol = %q, want WebSocket", out.Flows[0].Protocol)
+	if out.Flows[0].Protocol != "ws" {
+		t.Errorf("protocol = %q, want ws", out.Flows[0].Protocol)
 	}
 }
 
 func TestQuery_Sessions_FilterByProtocol_TCP(t *testing.T) {
 	t.Parallel()
 	store := newTestStore(t)
-	seedSession(t, store, "http-1", "HTTPS", "GET", "https://example.com", 200)
-	seedStreamingSession(t, store, "tcp-1", "TCP", "bidirectional", 4, nil)
+	seedSession(t, store, "http-1", "http", "GET", "https://example.com", 200)
+	seedStreamingSession(t, store, "tcp-1", "raw", "bidirectional", 4, nil)
 
 	cs := setupQueryTestSession(t, store)
 
 	result := callQuery(t, cs, queryInput{
 		Resource: "flows",
-		Filter:   &queryFilter{Protocol: "TCP"},
+		Filter:   &queryFilter{Protocol: "raw"},
 	})
 	if result.IsError {
 		t.Fatalf("expected success: %v", result.Content)
@@ -100,22 +100,22 @@ func TestQuery_Sessions_FilterByProtocol_TCP(t *testing.T) {
 	if out.Count != 1 {
 		t.Errorf("count = %d, want 1", out.Count)
 	}
-	if out.Flows[0].Protocol != "TCP" {
-		t.Errorf("protocol = %q, want TCP", out.Flows[0].Protocol)
+	if out.Flows[0].Protocol != "raw" {
+		t.Errorf("protocol = %q, want raw", out.Flows[0].Protocol)
 	}
 }
 
 func TestQuery_Sessions_FilterByProtocol_GRPC(t *testing.T) {
 	t.Parallel()
 	store := newTestStore(t)
-	seedSession(t, store, "http-1", "HTTPS", "GET", "https://example.com", 200)
-	seedStreamingSession(t, store, "grpc-1", "gRPC", "unary", 2, map[string]string{"service": "UserService", "method": "GetUser", "grpc_status": "0"})
+	seedSession(t, store, "http-1", "http", "GET", "https://example.com", 200)
+	seedStreamingSession(t, store, "grpc-1", "grpc", "unary", 2, map[string]string{"service": "UserService", "method": "GetUser", "grpc_status": "0"})
 
 	cs := setupQueryTestSession(t, store)
 
 	result := callQuery(t, cs, queryInput{
 		Resource: "flows",
-		Filter:   &queryFilter{Protocol: "gRPC"},
+		Filter:   &queryFilter{Protocol: "grpc"},
 	})
 	if result.IsError {
 		t.Fatalf("expected success: %v", result.Content)
@@ -127,8 +127,8 @@ func TestQuery_Sessions_FilterByProtocol_GRPC(t *testing.T) {
 	if out.Count != 1 {
 		t.Errorf("count = %d, want 1", out.Count)
 	}
-	if out.Flows[0].Protocol != "gRPC" {
-		t.Errorf("protocol = %q, want gRPC", out.Flows[0].Protocol)
+	if out.Flows[0].Protocol != "grpc" {
+		t.Errorf("protocol = %q, want grpc", out.Flows[0].Protocol)
 	}
 }
 
@@ -137,7 +137,7 @@ func TestQuery_Sessions_FilterByProtocol_GRPC(t *testing.T) {
 func TestQuery_Sessions_ProtocolSummary_WebSocket(t *testing.T) {
 	t.Parallel()
 	store := newTestStore(t)
-	seedStreamingSession(t, store, "ws-1", "WebSocket", "bidirectional", 3, map[string]string{"opcode": "1"})
+	seedStreamingSession(t, store, "ws-1", "ws", "bidirectional", 3, map[string]string{"opcode": "1"})
 
 	cs := setupQueryTestSession(t, store)
 
@@ -168,7 +168,7 @@ func TestQuery_Sessions_ProtocolSummary_TCP(t *testing.T) {
 
 	fl := &flow.Stream{
 		ID:        "tcp-1",
-		Protocol:  "TCP",
+		Protocol:  "raw",
 		State:     "complete",
 		Timestamp: time.Now().UTC(),
 		Duration:  100 * time.Millisecond,
@@ -233,7 +233,7 @@ func TestQuery_Sessions_ProtocolSummary_GRPC(t *testing.T) {
 
 	fl := &flow.Stream{
 		ID:        "grpc-1",
-		Protocol:  "gRPC",
+		Protocol:  "grpc",
 		State:     "complete",
 		Timestamp: time.Now().UTC(),
 		Duration:  50 * time.Millisecond,
@@ -307,7 +307,7 @@ func TestQuery_Sessions_ProtocolSummary_GRPC(t *testing.T) {
 func TestQuery_Session_StreamingPreview(t *testing.T) {
 	t.Parallel()
 	store := newTestStore(t)
-	seedStreamingSession(t, store, "ws-detail", "WebSocket", "bidirectional", 15, map[string]string{"opcode": "1"})
+	seedStreamingSession(t, store, "ws-detail", "ws", "bidirectional", 15, map[string]string{"opcode": "1"})
 
 	cs := setupQueryTestSession(t, store)
 
@@ -596,9 +596,9 @@ func TestQuery_Config_WithTCPForwards(t *testing.T) {
 
 	ctx := context.Background()
 	ca := newTestCA(t)
-	s := NewServer(ctx, ca, store, nil)
-	s.deps.tcpForwards = map[string]*config.ForwardConfig{"3306": {Target: "db.example.com:3306", Protocol: "raw"}}
-	s.deps.enabledProtocols = []string{"HTTP/1.x", "HTTPS", "gRPC"}
+	s := newServer(ctx, ca, store, nil)
+	s.connector.tcpForwards = map[string]*config.ForwardConfig{"3306": {Target: "db.example.com:3306", Protocol: "raw"}}
+	s.connector.enabledProtocols = []string{"HTTP/1.x", "HTTPS", "gRPC"}
 
 	ct, st := gomcp.NewInMemoryTransports()
 	ss, err := s.server.Connect(ctx, st, nil)

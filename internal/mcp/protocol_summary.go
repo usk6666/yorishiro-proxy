@@ -9,15 +9,17 @@ import (
 
 // buildProtocolSummary generates a protocol-specific summary map for a flow.
 // The summary provides key information relevant to the flow's protocol type.
+//
+// Dispatch is by canonical Envelope.Protocol value. The legacy spellings
+// (HTTP/1.x, HTTPS, HTTP/2, WebSocket, gRPC, gRPC-Web, TCP, SOCKS5+*) were
+// retired in USK-705. Unknown or unmapped protocols return nil.
 func buildProtocolSummary(protocol string, msgs []*flow.Flow) map[string]string {
 	switch protocol {
-	case "WebSocket":
+	case "ws":
 		return buildWebSocketSummary(msgs)
-	case "HTTP/2":
-		return buildHTTP2Summary(msgs)
-	case "gRPC", "gRPC-Web":
+	case "grpc", "grpc-web":
 		return buildGRPCSummary(msgs)
-	case "TCP":
+	case "raw":
 		return buildTCPSummary(msgs)
 	default:
 		return nil
@@ -36,28 +38,6 @@ func buildWebSocketSummary(msgs []*flow.Flow) map[string]string {
 		if opcode, ok := last.Metadata["opcode"]; ok {
 			summary["last_frame_type"] = wsOpcodeLabel(opcode)
 		}
-	}
-
-	return summary
-}
-
-// buildHTTP2Summary generates summary info for HTTP/2 sessions.
-func buildHTTP2Summary(msgs []*flow.Flow) map[string]string {
-	// Count streams: in HTTP/2, each send+receive pair is one stream.
-	sendCount := 0
-	for _, msg := range msgs {
-		if msg.Direction == "send" {
-			sendCount++
-		}
-	}
-	summary := map[string]string{
-		"stream_count": strconv.Itoa(sendCount),
-	}
-
-	// Check for ALPN info from flow metadata if available.
-	// For HTTP/2, the first send message typically has the method and URL.
-	if len(msgs) > 0 && msgs[0].Direction == "send" && msgs[0].URL != nil {
-		summary["scheme"] = msgs[0].URL.Scheme
 	}
 
 	return summary
