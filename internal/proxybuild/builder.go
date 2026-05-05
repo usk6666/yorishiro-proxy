@@ -255,6 +255,16 @@ func BuildLiveStack(_ context.Context, deps Deps) (*Stack, error) {
 		Logger:          logger,
 		PluginV2Engine:  deps.PluginV2Engine,
 	})
+	// USK-710: plain-HTTP forward proxy. Plain HTTP cannot route to h2 (no
+	// ALPN, no TLS), so OnHTTP2Stack is intentionally omitted — the handler
+	// always invokes OnStack.
+	http1ForwardHandler := connector.NewHTTP1ForwardHandler(connector.HTTP1ForwardHandlerConfig{
+		BuildCfg:    deps.BuildConfig,
+		Scope:       deps.Scope,
+		RateLimiter: deps.RateLimiter,
+		OnStack:     buildOnStack(p, deps, logger),
+		Logger:      logger,
+	})
 
 	// proxybuild.Listener wraps the FullListener so it can interpose
 	// connection.on_connect / on_disconnect lifecycle hooks. The wrapper
@@ -273,10 +283,11 @@ func BuildLiveStack(_ context.Context, deps Deps) (*Stack, error) {
 		MaxConnections: deps.MaxConnections,
 		OnCONNECT:      wrapper.wrapHandler(connectHandler),
 		OnSOCKS5:       wrapper.wrapHandler(socks5Handler),
-		// HTTP1, HTTP2, TCP handlers are scaffold-deferred. Live
-		// production wiring of forward-proxy HTTP and raw TCP belongs
-		// to USK-690; CONNECT + SOCKS5 cover the common MITM entry
-		// points exercised by integration tests today.
+		OnHTTP1:        wrapper.wrapHandler(http1ForwardHandler),
+		// USK-710: OnHTTP1 wired for plain-HTTP forward proxy. OnHTTP2
+		// (h2c) and OnTCP (raw TCP forward) remain scaffold-deferred —
+		// the h2c entry point has no Linear issue today and TCP forward
+		// orchestration belongs to USK-711.
 	}
 	wrapper.full = connector.NewFullListener(flCfg)
 
@@ -379,12 +390,46 @@ func buildPipeline(deps Deps, encoders *pipeline.WireEncoderRegistry, logger *sl
 // WithStateReleaser. h2 routes are dispatched separately via
 // buildOnHTTP2Stack.
 //
+// USK-710 ctx-cancellation cleanup: a watcher goroutine closes the stack
+// (and therefore the underlying client + upstream conns) when ctx is
+// cancelled. http1.Channel.Next is parked in conn.Read which does not
+// observe ctx; without this active close the Read stays parked until the
+// peer closes the socket, and listener shutdown via Manager.shutdownEntry
+// times out (30 s) waiting for the handler goroutine to exit. The CONNECT
+// integration tests don't exercise this because they send Connection:
+// close, but a normal HTTP keep-alive client (Go's default http.Transport)
+// hits this every time. Closing the stack on ctx.Done is idempotent —
+// stack.Close is also called from this function's defer when the session
+// returns normally.
+//
 // Pattern mirrors the proven recipe in
 // internal/connector/full_listener_integration_test.go.
 func buildOnStack(p *pipeline.Pipeline, deps Deps, logger *slog.Logger) connector.OnStackFunc {
 	sessOpts := buildSessionOptions(deps)
 	return func(ctx context.Context, stack *connector.ConnectionStack, _, _ *envelope.TLSSnapshot, target string) {
 		defer stack.Close()
+
+		// Watcher: close the stack when the parent ctx is cancelled so that
+		// any goroutine parked inside http1.Channel.Next (conn.Read) is
+		// unblocked. doneCh is closed by the deferred wg.Wait below before
+		// stack.Close runs again, so the watcher exits cleanly even when
+		// the session returns naturally.
+		doneCh := make(chan struct{})
+		var watcherWG sync.WaitGroup
+		watcherWG.Add(1)
+		go func() {
+			defer watcherWG.Done()
+			select {
+			case <-ctx.Done():
+				_ = stack.Close()
+			case <-doneCh:
+			}
+		}()
+		defer func() {
+			close(doneCh)
+			watcherWG.Wait()
+		}()
+
 		dial := func(_ context.Context, _ *envelope.Envelope) (layer.Channel, error) {
 			ch, ok := <-stack.UpstreamTopmost().Channels()
 			if !ok {

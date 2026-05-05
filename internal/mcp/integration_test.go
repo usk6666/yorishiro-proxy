@@ -241,7 +241,6 @@ func proxyHTTPClient(proxyAddr string) *gohttp.Client {
 // proxy_start -> HTTP request through proxy -> query sessions -> query flow
 // -> execute replay -> execute delete_flows -> proxy_stop.
 func TestIntegration_FullLifecycle(t *testing.T) {
-	t.Skip("requires plain-HTTP forward proxy (proxybuild OnHTTP1) — pending USK-710")
 	upstreamAddr := startUpstreamServer(t)
 	env := setupIntegrationEnv(t)
 
@@ -560,7 +559,6 @@ func TestIntegration_ProxyStartStopRestart(t *testing.T) {
 // TestIntegration_MultipleRequests verifies that multiple HTTP requests are
 // recorded as separate sessions and can be listed/filtered.
 func TestIntegration_MultipleRequests(t *testing.T) {
-	t.Skip("requires plain-HTTP forward proxy (proxybuild OnHTTP1) — pending USK-710")
 	upstreamAddr := startUpstreamServer(t)
 	env := setupIntegrationEnv(t)
 
@@ -794,7 +792,6 @@ func TestIntegration_Configure_ProxyNotRunning(t *testing.T) {
 // send/receive messages for a recorded HTTP flow, including sequence, direction,
 // method, URL, headers, and body fields.
 func TestIntegration_QueryMessages(t *testing.T) {
-	t.Skip("requires plain-HTTP forward proxy (proxybuild OnHTTP1) — pending USK-710")
 	upstreamAddr := startUpstreamServer(t)
 	env := setupIntegrationEnv(t)
 
