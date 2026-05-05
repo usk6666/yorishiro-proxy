@@ -1,4 +1,4 @@
-package main
+package mcpserver
 
 import (
 	"crypto/sha256"
@@ -125,7 +125,7 @@ func TestInitCA(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := tt.setup(t)
-			ca, err := initCA(cfg, logger)
+			ca, err := InitCA(cfg, logger)
 
 			if tt.wantErr {
 				if err == nil {
@@ -175,9 +175,9 @@ func TestInitCA_ExplicitMode_SetsSource(t *testing.T) {
 		CAKeyPath:  keyPath,
 	}
 
-	ca, err := initCA(cfg, logger)
+	ca, err := InitCA(cfg, logger)
 	if err != nil {
-		t.Fatalf("initCA: %v", err)
+		t.Fatalf("InitCA: %v", err)
 	}
 
 	source := ca.Source()
@@ -201,9 +201,9 @@ func TestInitCA_EphemeralMode_SourceNotPersisted(t *testing.T) {
 		CAEphemeral: true,
 	}
 
-	ca, err := initCA(cfg, logger)
+	ca, err := InitCA(cfg, logger)
 	if err != nil {
-		t.Fatalf("initCA: %v", err)
+		t.Fatalf("InitCA: %v", err)
 	}
 
 	source := ca.Source()
@@ -222,9 +222,9 @@ func TestInitCA_AutoPersist_FirstRun(t *testing.T) {
 		CADataDir: dir,
 	}
 
-	ca, err := initCA(cfg, logger)
+	ca, err := InitCA(cfg, logger)
 	if err != nil {
-		t.Fatalf("initCA: %v", err)
+		t.Fatalf("InitCA: %v", err)
 	}
 
 	if ca.Certificate() == nil {
@@ -259,21 +259,21 @@ func TestInitCA_AutoPersist_SecondRun(t *testing.T) {
 	}
 
 	// First run: generate and save.
-	ca1, err := initCA(cfg, logger)
+	ca1, err := InitCA(cfg, logger)
 	if err != nil {
-		t.Fatalf("first initCA: %v", err)
+		t.Fatalf("first InitCA: %v", err)
 	}
 	fingerprint1 := sha256.Sum256(ca1.Certificate().Raw)
 
 	// Second run: should load the same CA.
-	ca2, err := initCA(cfg, logger)
+	ca2, err := InitCA(cfg, logger)
 	if err != nil {
-		t.Fatalf("second initCA: %v", err)
+		t.Fatalf("second InitCA: %v", err)
 	}
 	fingerprint2 := sha256.Sum256(ca2.Certificate().Raw)
 
 	if fingerprint1 != fingerprint2 {
-		t.Error("second initCA loaded a different CA than the first; expected same fingerprint")
+		t.Error("second InitCA loaded a different CA than the first; expected same fingerprint")
 	}
 
 	source := ca2.Source()
@@ -298,9 +298,9 @@ func TestInitCA_AutoPersist_SaveFailureFallback(t *testing.T) {
 		CADataDir: filepath.Join(readOnlyDir, "subdir"),
 	}
 
-	ca, err := initCA(cfg, logger)
+	ca, err := InitCA(cfg, logger)
 	if err != nil {
-		t.Fatalf("initCA: %v", err)
+		t.Fatalf("InitCA: %v", err)
 	}
 
 	// CA should be generated successfully even if save fails.
@@ -317,7 +317,7 @@ func TestInitCA_AutoPersist_SaveFailureFallback(t *testing.T) {
 
 // registerTestFlags registers all CLI flags on fs in the same way as runWithFlags.
 // It returns pointers to the config file and target policy file path variables
-// for use with applyEnvFallback.
+// for use with ApplyEnvFallback.
 func registerTestFlags(fs *flag.FlagSet, cfg *config.Config) (*string, *string) {
 	var configFile string
 	var targetPolicyFile string
@@ -461,7 +461,7 @@ func TestApplyEnvFallback_Priority(t *testing.T) {
 				t.Fatalf("flag.Parse: %v", err)
 			}
 
-			applyEnvFallback(fs)
+			ApplyEnvFallback(fs)
 
 			got := getStringConfigField(cfg, tt.field)
 			if got != tt.want {
@@ -502,7 +502,7 @@ func TestApplyEnvFallback_BoolFlags(t *testing.T) {
 				t.Fatalf("flag.Parse: %v", err)
 			}
 
-			applyEnvFallback(fs)
+			ApplyEnvFallback(fs)
 
 			got := getBoolConfigField(cfg, tt.field)
 			if got != tt.want {
@@ -541,8 +541,8 @@ func TestEnvVarMap_AllFlagsHaveMapping(t *testing.T) {
 	_, _ = registerTestFlags(fs, cfg)
 
 	fs.VisitAll(func(f *flag.Flag) {
-		if _, ok := envVarMap[f.Name]; !ok {
-			t.Errorf("flag %q has no entry in envVarMap", f.Name)
+		if _, ok := EnvVarMap[f.Name]; !ok {
+			t.Errorf("flag %q has no entry in EnvVarMap", f.Name)
 		}
 	})
 }
@@ -644,7 +644,7 @@ func TestConfigFlag_EnvVarFallback(t *testing.T) {
 		t.Fatalf("flag.Parse: %v", err)
 	}
 
-	applyEnvFallback(fs)
+	ApplyEnvFallback(fs)
 
 	if *cfgFile != cfgPath {
 		t.Errorf("configFile = %q, want %q", *cfgFile, cfgPath)
@@ -672,7 +672,7 @@ func TestConfigFlag_CLIOverridesEnvVar(t *testing.T) {
 		t.Fatalf("flag.Parse: %v", err)
 	}
 
-	applyEnvFallback(fs)
+	ApplyEnvFallback(fs)
 
 	// CLI flag should take precedence over YP_CONFIG env var.
 	if *cfgFile != flagPath {
@@ -705,7 +705,7 @@ func TestTargetPolicyFileFlag_EnvVarFallback(t *testing.T) {
 		t.Fatalf("flag.Parse: %v", err)
 	}
 
-	applyEnvFallback(fs)
+	ApplyEnvFallback(fs)
 
 	if *policyFile != policyPath {
 		t.Errorf("targetPolicyFile = %q, want %q", *policyFile, policyPath)
@@ -733,7 +733,7 @@ func TestTargetPolicyFileFlag_CLIOverridesEnvVar(t *testing.T) {
 		t.Fatalf("flag.Parse: %v", err)
 	}
 
-	applyEnvFallback(fs)
+	ApplyEnvFallback(fs)
 
 	// CLI flag should take precedence over YP_TARGET_POLICY_FILE env var.
 	if *policyFile != flagPath {
@@ -782,9 +782,9 @@ func TestConvertTargetRules(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := convertTargetRules(tt.input)
+			got := ConvertTargetRules(tt.input)
 			if len(got) != tt.want {
-				t.Fatalf("convertTargetRules() returned %d rules, want %d", len(got), tt.want)
+				t.Fatalf("ConvertTargetRules() returned %d rules, want %d", len(got), tt.want)
 			}
 		})
 	}
@@ -800,9 +800,9 @@ func TestConvertTargetRules_FieldMapping(t *testing.T) {
 		},
 	}
 
-	got := convertTargetRules(input)
+	got := ConvertTargetRules(input)
 	if len(got) != 1 {
-		t.Fatalf("convertTargetRules() returned %d rules, want 1", len(got))
+		t.Fatalf("ConvertTargetRules() returned %d rules, want 1", len(got))
 	}
 
 	rule := got[0]
@@ -873,7 +873,7 @@ func TestOpenBrowserFlag(t *testing.T) {
 				t.Fatalf("flag.Parse: %v", err)
 			}
 
-			applyEnvFallback(fs)
+			ApplyEnvFallback(fs)
 
 			if openBrowser != tt.want {
 				t.Errorf("open-browser = %v, want %v", openBrowser, tt.want)
@@ -924,7 +924,7 @@ func TestStdioMCPFlag(t *testing.T) {
 				t.Fatalf("flag.Parse: %v", err)
 			}
 
-			applyEnvFallback(fs)
+			ApplyEnvFallback(fs)
 
 			if stdioMCP != tt.want {
 				t.Errorf("stdio-mcp = %v, want %v", stdioMCP, tt.want)
@@ -975,7 +975,7 @@ func TestNoHTTPMCPFlag(t *testing.T) {
 				t.Fatalf("flag.Parse: %v", err)
 			}
 
-			applyEnvFallback(fs)
+			ApplyEnvFallback(fs)
 
 			if noHTTPMCP != tt.want {
 				t.Errorf("no-http-mcp = %v, want %v", noHTTPMCP, tt.want)

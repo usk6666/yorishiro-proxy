@@ -1,4 +1,4 @@
-package main
+package mcpserver
 
 import (
 	"fmt"
@@ -6,11 +6,11 @@ import (
 	"runtime"
 )
 
-// openBrowser opens the given URL in the user's default browser.
-// It uses a platform-specific command (open, xdg-open, or cmd /c start)
-// and runs it asynchronously via exec.Command().Start() so it does not
-// block the caller. Errors are returned but should be treated as
-// best-effort (logged as warning, not fatal).
+// openBrowser opens the given URL in the user's default browser. It uses
+// a platform-specific command (open, xdg-open, or cmd /c start) and runs
+// it asynchronously via exec.Command().Start() so it does not block the
+// caller. Errors are returned but should be treated as best-effort
+// (logged as warning, not fatal).
 func openBrowser(url string) error {
 	switch runtime.GOOS {
 	case "darwin":

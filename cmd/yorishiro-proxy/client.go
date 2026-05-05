@@ -14,6 +14,7 @@ import (
 	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/usk6666/yorishiro-proxy/internal/mcpserver"
 )
 
 // clientToolHelp maps tool names to their hardcoded parameter descriptions.
@@ -380,12 +381,12 @@ func runListServers(w io.Writer, args []string) error {
 		return err
 	}
 
-	path, err := serverJSONPath()
+	path, err := mcpserver.ServerJSONPath()
 	if err != nil {
 		return fmt.Errorf("resolve server.json path: %w", err)
 	}
 
-	entries, err := readServerJSONSlice(path)
+	entries, err := mcpserver.ReadServerJSONSlice(path)
 	if err != nil {
 		return fmt.Errorf("read server.json: %w", err)
 	}
@@ -394,7 +395,7 @@ func runListServers(w io.Writer, args []string) error {
 	result := make([]listServersEntry, 0, len(entries))
 	for _, e := range entries {
 		status := "active"
-		if !isProcessAlive(e.PID) {
+		if !mcpserver.IsProcessAlive(e.PID) {
 			status = "stale"
 		}
 		result = append(result, listServersEntry{
@@ -488,16 +489,16 @@ func resolveClientConn(flagAddr, flagToken string) (addr, token string, err erro
 // fillFromServerJSON fills missing addr/token from a live server.json entry.
 // When addr is already known, only tokens from entries with a matching Addr are accepted.
 func fillFromServerJSON(addr, token string) (string, string) {
-	path, pathErr := serverJSONPath()
+	path, pathErr := mcpserver.ServerJSONPath()
 	if pathErr != nil {
 		return addr, token
 	}
-	entries, readErr := readServerJSONSlice(path)
+	entries, readErr := mcpserver.ReadServerJSONSlice(path)
 	if readErr != nil {
 		return addr, token
 	}
 	for _, e := range entries {
-		if !isProcessAlive(e.PID) {
+		if !mcpserver.IsProcessAlive(e.PID) {
 			continue
 		}
 		if addr != "" && token == "" {

@@ -1,4 +1,4 @@
-package main
+package mcpserver
 
 import (
 	"encoding/json"
@@ -31,9 +31,9 @@ func TestWriteServerJSON_WritesFile(t *testing.T) {
 	}
 
 	// Verify the file exists and can be read back as an array.
-	entries, err := readServerJSONSlice(path)
+	entries, err := ReadServerJSONSlice(path)
 	if err != nil {
-		t.Fatalf("readServerJSONSlice: %v", err)
+		t.Fatalf("ReadServerJSONSlice: %v", err)
 	}
 	if len(entries) != 1 {
 		t.Fatalf("expected 1 entry, got %d", len(entries))
@@ -105,9 +105,9 @@ func TestWriteServerJSON_MultiInstance(t *testing.T) {
 		t.Fatalf("writeServerJSON third: %v", err)
 	}
 
-	entries, err := readServerJSONSlice(path)
+	entries, err := ReadServerJSONSlice(path)
 	if err != nil {
-		t.Fatalf("readServerJSONSlice: %v", err)
+		t.Fatalf("ReadServerJSONSlice: %v", err)
 	}
 	if len(entries) != 3 {
 		t.Fatalf("expected 3 entries, got %d: %+v", len(entries), entries)
@@ -146,9 +146,9 @@ func TestWriteServerJSON_StaleEntriesFiltered(t *testing.T) {
 		t.Fatalf("writeServerJSON: %v", err)
 	}
 
-	entries, err := readServerJSONSlice(path)
+	entries, err := ReadServerJSONSlice(path)
 	if err != nil {
-		t.Fatalf("readServerJSONSlice: %v", err)
+		t.Fatalf("ReadServerJSONSlice: %v", err)
 	}
 	if len(entries) != 1 {
 		t.Fatalf("expected 1 entry after stale filter, got %d: %+v", len(entries), entries)
@@ -187,9 +187,9 @@ func TestRemoveServerJSON_OwnPIDOnly(t *testing.T) {
 
 	removeServerJSON()
 
-	entries, err := readServerJSONSlice(path)
+	entries, err := ReadServerJSONSlice(path)
 	if err != nil {
-		t.Fatalf("readServerJSONSlice after remove: %v", err)
+		t.Fatalf("ReadServerJSONSlice after remove: %v", err)
 	}
 	if len(entries) != 1 {
 		t.Fatalf("expected 1 remaining entry, got %d: %+v", len(entries), entries)
@@ -236,10 +236,10 @@ func TestRemoveServerJSON_KeepsFileWithEmptyArrayWhenEmpty(t *testing.T) {
 		t.Errorf("expected empty array content %q, got %q", "[]\n", string(data))
 	}
 
-	// readServerJSONSlice should return an empty slice.
-	entries, err := readServerJSONSlice(path)
+	// ReadServerJSONSlice should return an empty slice.
+	entries, err := ReadServerJSONSlice(path)
 	if err != nil {
-		t.Fatalf("readServerJSONSlice: %v", err)
+		t.Fatalf("ReadServerJSONSlice: %v", err)
 	}
 	if len(entries) != 0 {
 		t.Errorf("expected 0 entries, got %d: %+v", len(entries), entries)
@@ -250,7 +250,7 @@ func TestReadServerJSONSlice_NotExist(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "nonexistent.json")
 
-	entries, err := readServerJSONSlice(path)
+	entries, err := ReadServerJSONSlice(path)
 	if err != nil {
 		t.Fatalf("expected no error, got: %v", err)
 	}
@@ -266,7 +266,7 @@ func TestReadServerJSONSlice_CorruptFile(t *testing.T) {
 		t.Fatalf("setup: %v", err)
 	}
 
-	entries, err := readServerJSONSlice(path)
+	entries, err := ReadServerJSONSlice(path)
 	if err != nil {
 		t.Fatalf("expected no error for corrupt file (treat as stale), got: %v", err)
 	}
@@ -277,8 +277,8 @@ func TestReadServerJSONSlice_CorruptFile(t *testing.T) {
 
 func TestIsProcessAlive_CurrentProcess(t *testing.T) {
 	pid := os.Getpid()
-	if !isProcessAlive(pid) {
-		t.Errorf("isProcessAlive(%d) = false, want true (current process)", pid)
+	if !IsProcessAlive(pid) {
+		t.Errorf("IsProcessAlive(%d) = false, want true (current process)", pid)
 	}
 }
 
@@ -293,9 +293,9 @@ func TestIsProcessAlive_InvalidPID(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := isProcessAlive(tt.pid)
+			got := IsProcessAlive(tt.pid)
 			if got != tt.want {
-				t.Errorf("isProcessAlive(%d) = %v, want %v", tt.pid, got, tt.want)
+				t.Errorf("IsProcessAlive(%d) = %v, want %v", tt.pid, got, tt.want)
 			}
 		})
 	}
@@ -312,21 +312,21 @@ func TestIsProcessAlive_DeadPID(t *testing.T) {
 	}
 	// Process has exited; PID should not be alive.
 	// Note: PID reuse is possible but extremely unlikely in a test.
-	if isProcessAlive(pid) {
-		t.Errorf("isProcessAlive(%d) = true after process exited, want false", pid)
+	if IsProcessAlive(pid) {
+		t.Errorf("IsProcessAlive(%d) = true after process exited, want false", pid)
 	}
 }
 
 func TestServerJSONPath(t *testing.T) {
-	path, err := serverJSONPath()
+	path, err := ServerJSONPath()
 	if err != nil {
-		t.Fatalf("serverJSONPath() error = %v", err)
+		t.Fatalf("ServerJSONPath() error = %v", err)
 	}
 	if path == "" {
-		t.Error("serverJSONPath() returned empty string")
+		t.Error("ServerJSONPath() returned empty string")
 	}
 	// Should end with server.json
 	if filepath.Base(path) != "server.json" {
-		t.Errorf("serverJSONPath() base = %q, want server.json", filepath.Base(path))
+		t.Errorf("ServerJSONPath() base = %q, want server.json", filepath.Base(path))
 	}
 }

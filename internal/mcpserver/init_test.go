@@ -1,4 +1,4 @@
-package main
+package mcpserver
 
 import (
 	"log/slog"
@@ -19,13 +19,13 @@ func testLogger(t *testing.T) *slog.Logger {
 // boolPtr returns a pointer to the given bool value.
 func boolPtr(b bool) *bool { return &b }
 
-// --- initSafetyFilter tests ---
+// --- InitSafetyFilter tests ---
 
 func TestInitSafetyFilter_DisabledByDefault(t *testing.T) {
 	logger := testLogger(t)
 	cfg := config.Default()
 
-	engine, err := initSafetyFilter(cfg, &config.ProxyConfig{}, logger)
+	engine, err := InitSafetyFilter(cfg, &config.ProxyConfig{}, logger)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -48,7 +48,7 @@ func TestInitSafetyFilter_EnabledViaConfigFile(t *testing.T) {
 		},
 	}
 
-	engine, err := initSafetyFilter(cfg, proxyCfg, logger)
+	engine, err := InitSafetyFilter(cfg, proxyCfg, logger)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -66,7 +66,7 @@ func TestInitSafetyFilter_EnabledViaCLIOverride(t *testing.T) {
 	cfg.SafetyFilterEnabled = boolPtr(true)
 
 	// Zero proxy config, but CLI override enables the filter.
-	engine, err := initSafetyFilter(cfg, &config.ProxyConfig{}, logger)
+	engine, err := InitSafetyFilter(cfg, &config.ProxyConfig{}, logger)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -91,7 +91,7 @@ func TestInitSafetyFilter_CLIDisableOverridesConfig(t *testing.T) {
 		},
 	}
 
-	engine, err := initSafetyFilter(cfg, proxyCfg, logger)
+	engine, err := InitSafetyFilter(cfg, proxyCfg, logger)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -119,7 +119,7 @@ func TestInitSafetyFilter_InputAndOutputRules(t *testing.T) {
 		},
 	}
 
-	engine, err := initSafetyFilter(cfg, proxyCfg, logger)
+	engine, err := InitSafetyFilter(cfg, proxyCfg, logger)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -154,7 +154,7 @@ func TestInitSafetyFilter_CustomInputRule(t *testing.T) {
 		},
 	}
 
-	engine, err := initSafetyFilter(cfg, proxyCfg, logger)
+	engine, err := InitSafetyFilter(cfg, proxyCfg, logger)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -191,7 +191,7 @@ func TestInitSafetyFilter_CustomOutputRule(t *testing.T) {
 		},
 	}
 
-	engine, err := initSafetyFilter(cfg, proxyCfg, logger)
+	engine, err := InitSafetyFilter(cfg, proxyCfg, logger)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -259,7 +259,7 @@ func TestInitSafetyFilter_SectionLevelAction(t *testing.T) {
 				},
 			}
 
-			engine, err := initSafetyFilter(cfg, proxyCfg, logger)
+			engine, err := InitSafetyFilter(cfg, proxyCfg, logger)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -288,7 +288,7 @@ func TestInitSafetyFilter_ZeroProxyConfig(t *testing.T) {
 	logger := testLogger(t)
 	cfg := config.Default()
 
-	engine, err := initSafetyFilter(cfg, &config.ProxyConfig{}, logger)
+	engine, err := InitSafetyFilter(cfg, &config.ProxyConfig{}, logger)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -306,7 +306,7 @@ func TestInitSafetyFilter_EnabledButNoRules(t *testing.T) {
 		},
 	}
 
-	engine, err := initSafetyFilter(cfg, proxyCfg, logger)
+	engine, err := InitSafetyFilter(cfg, proxyCfg, logger)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -338,7 +338,7 @@ func TestInitSafetyFilter_OutputReplacementOverride(t *testing.T) {
 		},
 	}
 
-	engine, err := initSafetyFilter(cfg, proxyCfg, logger)
+	engine, err := InitSafetyFilter(cfg, proxyCfg, logger)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -356,13 +356,13 @@ func TestInitSafetyFilter_OutputReplacementOverride(t *testing.T) {
 	}
 }
 
-// --- initHostTLSRegistry tests ---
+// --- InitHostTLSRegistry tests ---
 
 func TestInitHostTLSRegistry_EmptyConfig(t *testing.T) {
 	logger := testLogger(t)
 	cfg := config.Default()
 
-	reg, err := initHostTLSRegistry(cfg, &config.ProxyConfig{}, logger)
+	reg, err := InitHostTLSRegistry(cfg, &config.ProxyConfig{}, logger)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -390,7 +390,7 @@ func TestInitHostTLSRegistry_PerHostFromCLIConfig(t *testing.T) {
 		},
 	}
 
-	reg, err := initHostTLSRegistry(cfg, &config.ProxyConfig{}, logger)
+	reg, err := InitHostTLSRegistry(cfg, &config.ProxyConfig{}, logger)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -420,7 +420,7 @@ func TestInitHostTLSRegistry_PerHostFromProxyConfig(t *testing.T) {
 		},
 	}
 
-	reg, err := initHostTLSRegistry(cfg, proxyCfg, logger)
+	reg, err := InitHostTLSRegistry(cfg, proxyCfg, logger)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -433,7 +433,7 @@ func TestInitHostTLSRegistry_PerHostFromProxyConfig(t *testing.T) {
 	}
 }
 
-// --- initTLSTransport tests (USK-719) ---
+// --- InitTLSTransport tests (USK-719) ---
 
 // TestInitTLSTransport_Default verifies the no-fingerprint case yields a
 // StandardTransport.
@@ -441,7 +441,7 @@ func TestInitTLSTransport_Default(t *testing.T) {
 	logger := testLogger(t)
 	cfg := config.Default()
 
-	got := initTLSTransport(cfg, &config.ProxyConfig{}, nil, logger)
+	got := InitTLSTransport(cfg, &config.ProxyConfig{}, nil, logger)
 	if _, ok := got.(*transport.StandardTransport); !ok {
 		t.Errorf("got %T, want *StandardTransport", got)
 	}
@@ -449,14 +449,14 @@ func TestInitTLSTransport_Default(t *testing.T) {
 
 // TestInitTLSTransport_FromProxyConfig verifies the CLI flag / proxy-config
 // path: ProxyConfig.TLSFingerprint must build a UTLSTransport. Pre-USK-719
-// this was silently ignored because initTLSTransport only read
+// this was silently ignored because InitTLSTransport only read
 // Config.TLSFingerprint.
 func TestInitTLSTransport_FromProxyConfig(t *testing.T) {
 	logger := testLogger(t)
 	cfg := config.Default()
 	proxyCfg := &config.ProxyConfig{TLSFingerprint: "chrome"}
 
-	got := initTLSTransport(cfg, proxyCfg, nil, logger)
+	got := InitTLSTransport(cfg, proxyCfg, nil, logger)
 	utls, ok := got.(*transport.UTLSTransport)
 	if !ok {
 		t.Fatalf("got %T, want *UTLSTransport", got)
@@ -473,7 +473,7 @@ func TestInitTLSTransport_FromTopLevelConfig(t *testing.T) {
 	cfg := config.Default()
 	cfg.TLSFingerprint = "firefox"
 
-	got := initTLSTransport(cfg, &config.ProxyConfig{}, nil, logger)
+	got := InitTLSTransport(cfg, &config.ProxyConfig{}, nil, logger)
 	utls, ok := got.(*transport.UTLSTransport)
 	if !ok {
 		t.Fatalf("got %T, want *UTLSTransport", got)
@@ -493,7 +493,7 @@ func TestInitTLSTransport_ProxyConfigBeatsTopLevel(t *testing.T) {
 	cfg.TLSFingerprint = "firefox"
 	proxyCfg := &config.ProxyConfig{TLSFingerprint: "safari"}
 
-	got := initTLSTransport(cfg, proxyCfg, nil, logger)
+	got := InitTLSTransport(cfg, proxyCfg, nil, logger)
 	utls, ok := got.(*transport.UTLSTransport)
 	if !ok {
 		t.Fatalf("got %T, want *UTLSTransport", got)
@@ -511,7 +511,7 @@ func TestInitTLSTransport_InvalidProfileFallback(t *testing.T) {
 	cfg := config.Default()
 	proxyCfg := &config.ProxyConfig{TLSFingerprint: "not-a-browser"}
 
-	got := initTLSTransport(cfg, proxyCfg, nil, logger)
+	got := InitTLSTransport(cfg, proxyCfg, nil, logger)
 	if _, ok := got.(*transport.StandardTransport); !ok {
 		t.Errorf("got %T, want *StandardTransport on invalid profile", got)
 	}
@@ -532,7 +532,7 @@ func TestInitHostTLSRegistry_GlobalFromCLIConfig(t *testing.T) {
 		ClientKeyPath:  keyPath,
 	}
 
-	reg, err := initHostTLSRegistry(cfg, &config.ProxyConfig{}, logger)
+	reg, err := InitHostTLSRegistry(cfg, &config.ProxyConfig{}, logger)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -566,7 +566,7 @@ func TestInitHostTLSRegistry_GlobalCLIPrecedence(t *testing.T) {
 		ClientKeyPath:  proxyKey,
 	}
 
-	reg, err := initHostTLSRegistry(cfg, proxyCfg, logger)
+	reg, err := InitHostTLSRegistry(cfg, proxyCfg, logger)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -594,7 +594,7 @@ func TestInitHostTLSRegistry_GlobalFromProxyConfigFallback(t *testing.T) {
 		ClientKeyPath:  proxyKey,
 	}
 
-	reg, err := initHostTLSRegistry(cfg, proxyCfg, logger)
+	reg, err := InitHostTLSRegistry(cfg, proxyCfg, logger)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -607,21 +607,21 @@ func TestInitHostTLSRegistry_GlobalFromProxyConfigFallback(t *testing.T) {
 }
 
 func TestLoadConfigs_NoFiles(t *testing.T) {
-	result, err := loadConfigs("", "")
+	result, err := LoadConfigs("", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	// loadConfigs guarantees a non-nil zero-valued ProxyConfig when no
+	// LoadConfigs guarantees a non-nil zero-valued ProxyConfig when no
 	// -config file is provided so downstream consumers (proxybuild.BuildLiveStack)
 	// can rely on the non-nil contract.
-	if result.proxyCfg == nil {
+	if result.ProxyCfg == nil {
 		t.Fatal("expected non-nil proxyCfg (zero-valued) when no config file specified")
 	}
-	if result.targetScopePolicy != nil {
+	if result.TargetScopePolicy != nil {
 		t.Error("expected nil targetScopePolicy when no files specified")
 	}
-	if result.targetScopePolicySource != "" {
-		t.Errorf("expected empty source, got %q", result.targetScopePolicySource)
+	if result.TargetScopePolicySource != "" {
+		t.Errorf("expected empty source, got %q", result.TargetScopePolicySource)
 	}
 }
 
@@ -630,15 +630,15 @@ func TestLoadConfigs_ConfigFileOnly(t *testing.T) {
 	cfgPath := filepath.Join(dir, "config.json")
 	writeTestFile(t, cfgPath, `{"listen_addr": "127.0.0.1:9090"}`)
 
-	result, err := loadConfigs(cfgPath, "")
+	result, err := LoadConfigs(cfgPath, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if result.proxyCfg == nil {
+	if result.ProxyCfg == nil {
 		t.Fatal("expected non-nil proxyCfg")
 	}
-	if result.proxyCfg.ListenAddr != "127.0.0.1:9090" {
-		t.Errorf("ListenAddr = %q, want %q", result.proxyCfg.ListenAddr, "127.0.0.1:9090")
+	if result.ProxyCfg.ListenAddr != "127.0.0.1:9090" {
+		t.Errorf("ListenAddr = %q, want %q", result.ProxyCfg.ListenAddr, "127.0.0.1:9090")
 	}
 }
 
@@ -647,23 +647,23 @@ func TestLoadConfigs_PolicyFileOnly(t *testing.T) {
 	policyPath := filepath.Join(dir, "policy.json")
 	writeTestFile(t, policyPath, `{"allows": [{"hostname": "*.target.com"}]}`)
 
-	result, err := loadConfigs("", policyPath)
+	result, err := LoadConfigs("", policyPath)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	// loadConfigs guarantees a non-nil zero-valued ProxyConfig when no
+	// LoadConfigs guarantees a non-nil zero-valued ProxyConfig when no
 	// -config file is provided.
-	if result.proxyCfg == nil {
+	if result.ProxyCfg == nil {
 		t.Fatal("expected non-nil proxyCfg (zero-valued) when no config file specified")
 	}
-	if result.targetScopePolicy == nil {
+	if result.TargetScopePolicy == nil {
 		t.Fatal("expected non-nil targetScopePolicy")
 	}
-	if len(result.targetScopePolicy.Allows) != 1 {
-		t.Fatalf("expected 1 allow rule, got %d", len(result.targetScopePolicy.Allows))
+	if len(result.TargetScopePolicy.Allows) != 1 {
+		t.Fatalf("expected 1 allow rule, got %d", len(result.TargetScopePolicy.Allows))
 	}
-	if result.targetScopePolicySource != "policy file" {
-		t.Errorf("source = %q, want %q", result.targetScopePolicySource, "policy file")
+	if result.TargetScopePolicySource != "policy file" {
+		t.Errorf("source = %q, want %q", result.TargetScopePolicySource, "policy file")
 	}
 }
 
@@ -682,23 +682,23 @@ func TestLoadConfigs_PolicyFilePrecedence(t *testing.T) {
 	policyPath := filepath.Join(dir, "policy.json")
 	writeTestFile(t, policyPath, `{"allows": [{"hostname": "from-policy-file.com"}]}`)
 
-	result, err := loadConfigs(cfgPath, policyPath)
+	result, err := LoadConfigs(cfgPath, policyPath)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if result.targetScopePolicy == nil {
+	if result.TargetScopePolicy == nil {
 		t.Fatal("expected non-nil targetScopePolicy")
 	}
 	// Policy file should take precedence over config file's target_scope_policy.
-	if len(result.targetScopePolicy.Allows) != 1 {
-		t.Fatalf("expected 1 allow rule, got %d", len(result.targetScopePolicy.Allows))
+	if len(result.TargetScopePolicy.Allows) != 1 {
+		t.Fatalf("expected 1 allow rule, got %d", len(result.TargetScopePolicy.Allows))
 	}
-	if result.targetScopePolicy.Allows[0].Hostname != "from-policy-file.com" {
+	if result.TargetScopePolicy.Allows[0].Hostname != "from-policy-file.com" {
 		t.Errorf("hostname = %q, want %q (policy file should take precedence)",
-			result.targetScopePolicy.Allows[0].Hostname, "from-policy-file.com")
+			result.TargetScopePolicy.Allows[0].Hostname, "from-policy-file.com")
 	}
-	if result.targetScopePolicySource != "policy file" {
-		t.Errorf("source = %q, want %q", result.targetScopePolicySource, "policy file")
+	if result.TargetScopePolicySource != "policy file" {
+		t.Errorf("source = %q, want %q", result.TargetScopePolicySource, "policy file")
 	}
 }
 
@@ -712,21 +712,21 @@ func TestLoadConfigs_PolicyFromConfigFile(t *testing.T) {
 		}
 	}`)
 
-	result, err := loadConfigs(cfgPath, "")
+	result, err := LoadConfigs(cfgPath, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if result.targetScopePolicy == nil {
+	if result.TargetScopePolicy == nil {
 		t.Fatal("expected non-nil targetScopePolicy from config file")
 	}
-	if len(result.targetScopePolicy.Allows) != 1 {
-		t.Fatalf("expected 1 allow rule, got %d", len(result.targetScopePolicy.Allows))
+	if len(result.TargetScopePolicy.Allows) != 1 {
+		t.Fatalf("expected 1 allow rule, got %d", len(result.TargetScopePolicy.Allows))
 	}
-	if len(result.targetScopePolicy.Denies) != 1 {
-		t.Fatalf("expected 1 deny rule, got %d", len(result.targetScopePolicy.Denies))
+	if len(result.TargetScopePolicy.Denies) != 1 {
+		t.Fatalf("expected 1 deny rule, got %d", len(result.TargetScopePolicy.Denies))
 	}
-	if result.targetScopePolicySource != "config file" {
-		t.Errorf("source = %q, want %q", result.targetScopePolicySource, "config file")
+	if result.TargetScopePolicySource != "config file" {
+		t.Errorf("source = %q, want %q", result.TargetScopePolicySource, "config file")
 	}
 }
 
@@ -735,14 +735,14 @@ func TestLoadConfigs_InvalidConfigFile(t *testing.T) {
 	cfgPath := filepath.Join(dir, "bad.json")
 	writeTestFile(t, cfgPath, `{invalid json}`)
 
-	_, err := loadConfigs(cfgPath, "")
+	_, err := LoadConfigs(cfgPath, "")
 	if err == nil {
 		t.Fatal("expected error for invalid config file")
 	}
 }
 
 func TestLoadConfigs_NonexistentConfigFile(t *testing.T) {
-	_, err := loadConfigs("/nonexistent/config.json", "")
+	_, err := LoadConfigs("/nonexistent/config.json", "")
 	if err == nil {
 		t.Fatal("expected error for nonexistent config file")
 	}
@@ -753,14 +753,14 @@ func TestLoadConfigs_InvalidPolicyFile(t *testing.T) {
 	policyPath := filepath.Join(dir, "bad-policy.json")
 	writeTestFile(t, policyPath, `not json`)
 
-	_, err := loadConfigs("", policyPath)
+	_, err := LoadConfigs("", policyPath)
 	if err == nil {
 		t.Fatal("expected error for invalid policy file")
 	}
 }
 
 func TestLoadConfigs_NonexistentPolicyFile(t *testing.T) {
-	_, err := loadConfigs("", "/nonexistent/policy.json")
+	_, err := LoadConfigs("", "/nonexistent/policy.json")
 	if err == nil {
 		t.Fatal("expected error for nonexistent policy file")
 	}

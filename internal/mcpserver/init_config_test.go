@@ -1,4 +1,4 @@
-package main
+package mcpserver
 
 import (
 	"encoding/json"
@@ -13,14 +13,14 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/pluginv2"
 )
 
-// --- initPassthroughList tests ---
+// --- InitPassthroughList tests ---
 
 func TestInitPassthroughList_EmptyConfig(t *testing.T) {
 	logger := testLogger(t)
 	cfg := config.Default()
 	cfg.TLSPassthrough = nil
 
-	pl := initPassthroughList(cfg, logger)
+	pl := InitPassthroughList(cfg, logger)
 	if pl == nil {
 		t.Fatal("expected non-nil passthrough list")
 	}
@@ -34,7 +34,7 @@ func TestInitPassthroughList_MultiplePatterns(t *testing.T) {
 	cfg := config.Default()
 	cfg.TLSPassthrough = []string{"example.com", "*.internal.corp", "bank.co.jp"}
 
-	pl := initPassthroughList(cfg, logger)
+	pl := InitPassthroughList(cfg, logger)
 	if pl.Len() != 3 {
 		t.Fatalf("expected 3 patterns, got %d", pl.Len())
 	}
@@ -57,7 +57,7 @@ func TestInitPassthroughList_InvalidPatterns(t *testing.T) {
 	cfg := config.Default()
 	cfg.TLSPassthrough = []string{"valid.com", "", "  ", "also-valid.com"}
 
-	pl := initPassthroughList(cfg, logger)
+	pl := InitPassthroughList(cfg, logger)
 	// Empty/whitespace patterns are skipped.
 	if pl.Len() != 2 {
 		t.Errorf("expected 2 valid patterns, got %d", pl.Len())
@@ -79,7 +79,7 @@ func TestInitPassthroughList_FromConfigFile(t *testing.T) {
 	logger := testLogger(t)
 	cfg := config.Default()
 	// Simulate main.go behavior: config file tls_passthrough goes into cfg.TLSPassthrough
-	// via proxy defaults merge. In reality, initPassthroughList reads from cfg directly.
+	// via proxy defaults merge. In reality, InitPassthroughList reads from cfg directly.
 	// The config file's tls_passthrough is stored in proxyCfg.TLSPassthrough.
 	// Let's verify that config.LoadFile properly parses tls_passthrough.
 	if len(proxyCfg.TLSPassthrough) != 2 {
@@ -88,7 +88,7 @@ func TestInitPassthroughList_FromConfigFile(t *testing.T) {
 
 	// Copy to cfg to simulate the CLI->runtime path.
 	cfg.TLSPassthrough = proxyCfg.TLSPassthrough
-	pl := initPassthroughList(cfg, logger)
+	pl := InitPassthroughList(cfg, logger)
 	if pl.Len() != 2 {
 		t.Errorf("expected 2 patterns, got %d", pl.Len())
 	}
@@ -100,12 +100,12 @@ func TestInitPassthroughList_FromConfigFile(t *testing.T) {
 	}
 }
 
-// --- applyTLSFingerprintFlag tests ---
+// --- ApplyTLSFingerprintFlag tests ---
 
 func TestApplyTLSFingerprintFlag_Empty(t *testing.T) {
 	proxyCfg := &config.ProxyConfig{TLSFingerprint: "firefox"}
 
-	result, err := applyTLSFingerprintFlag("", proxyCfg)
+	result, err := ApplyTLSFingerprintFlag("", proxyCfg)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -132,7 +132,7 @@ func TestApplyTLSFingerprintFlag_ValidProfiles(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result, err := applyTLSFingerprintFlag(tt.profile, &config.ProxyConfig{})
+			result, err := ApplyTLSFingerprintFlag(tt.profile, &config.ProxyConfig{})
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -144,14 +144,14 @@ func TestApplyTLSFingerprintFlag_ValidProfiles(t *testing.T) {
 }
 
 func TestApplyTLSFingerprintFlag_InvalidProfile(t *testing.T) {
-	_, err := applyTLSFingerprintFlag("invalid-browser", &config.ProxyConfig{})
+	_, err := ApplyTLSFingerprintFlag("invalid-browser", &config.ProxyConfig{})
 	if err == nil {
 		t.Fatal("expected error for invalid profile")
 	}
 }
 
 func TestApplyTLSFingerprintFlag_ZeroProxyCfg(t *testing.T) {
-	result, err := applyTLSFingerprintFlag("chrome", &config.ProxyConfig{})
+	result, err := ApplyTLSFingerprintFlag("chrome", &config.ProxyConfig{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -166,7 +166,7 @@ func TestApplyTLSFingerprintFlag_ZeroProxyCfg(t *testing.T) {
 func TestApplyTLSFingerprintFlag_CLIOverridesConfig(t *testing.T) {
 	proxyCfg := &config.ProxyConfig{TLSFingerprint: "firefox"}
 
-	result, err := applyTLSFingerprintFlag("safari", proxyCfg)
+	result, err := ApplyTLSFingerprintFlag("safari", proxyCfg)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -189,7 +189,7 @@ func TestApplyTLSFingerprintFlag_FromConfigFile(t *testing.T) {
 	}
 
 	// Empty CLI flag should preserve the config file value.
-	result, err := applyTLSFingerprintFlag("", proxyCfg)
+	result, err := ApplyTLSFingerprintFlag("", proxyCfg)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -198,10 +198,10 @@ func TestApplyTLSFingerprintFlag_FromConfigFile(t *testing.T) {
 	}
 }
 
-// --- initTLSTransport / initStandardTransport tests ---
+// --- InitTLSTransport / initStandardTransport tests ---
 
 func TestInitTargetScope_NilPolicy(t *testing.T) {
-	scope := initTargetScope(nil)
+	scope := InitTargetScope(nil)
 	if scope != nil {
 		t.Error("expected nil scope for nil policy")
 	}
@@ -218,7 +218,7 @@ func TestInitTargetScope_WithAllowsAndDenies(t *testing.T) {
 		},
 	}
 
-	scope := initTargetScope(policy)
+	scope := InitTargetScope(policy)
 	if scope == nil {
 		t.Fatal("expected non-nil scope")
 	}
@@ -253,11 +253,11 @@ func TestInitTargetScope_FromConfigFile(t *testing.T) {
 		}
 	}`)
 
-	result, err := loadConfigs(cfgPath, "")
+	result, err := LoadConfigs(cfgPath, "")
 	if err != nil {
-		t.Fatalf("loadConfigs: %v", err)
+		t.Fatalf("LoadConfigs: %v", err)
 	}
-	scope := initTargetScope(result.targetScopePolicy)
+	scope := InitTargetScope(result.TargetScopePolicy)
 	if scope == nil {
 		t.Fatal("expected non-nil scope")
 	}
@@ -283,10 +283,10 @@ func TestInitTargetScope_FromConfigFile(t *testing.T) {
 	}
 }
 
-// --- convertTargetRules tests ---
+// --- ConvertTargetRules tests ---
 
 func TestConvertTargetRules_Empty(t *testing.T) {
-	rules := convertTargetRules(nil)
+	rules := ConvertTargetRules(nil)
 	if rules != nil {
 		t.Errorf("expected nil for empty input, got %v", rules)
 	}
@@ -302,7 +302,7 @@ func TestConvertTargetRules_FullFields(t *testing.T) {
 		},
 	}
 
-	rules := convertTargetRules(cfgRules)
+	rules := ConvertTargetRules(cfgRules)
 	if len(rules) != 1 {
 		t.Fatalf("expected 1 rule, got %d", len(rules))
 	}
@@ -321,11 +321,11 @@ func TestConvertTargetRules_FullFields(t *testing.T) {
 	}
 }
 
-// --- initRateLimiter tests ---
+// --- InitRateLimiter tests ---
 
 func TestInitRateLimiter_NilPolicy(t *testing.T) {
 	logger := testLogger(t)
-	rl := initRateLimiter(nil, logger)
+	rl := InitRateLimiter(nil, logger)
 	if rl == nil {
 		t.Fatal("expected non-nil rate limiter")
 	}
@@ -347,7 +347,7 @@ func TestInitRateLimiter_WithLimits(t *testing.T) {
 		},
 	}
 
-	rl := initRateLimiter(policy, logger)
+	rl := InitRateLimiter(policy, logger)
 	limits := rl.PolicyLimits()
 	if limits.MaxRequestsPerSecond != 100.0 {
 		t.Errorf("MaxRequestsPerSecond = %f, want 100.0", limits.MaxRequestsPerSecond)
@@ -363,7 +363,7 @@ func TestInitRateLimiter_NoRateLimitsInPolicy(t *testing.T) {
 		Allows: []config.TargetRuleConfig{{Hostname: "*.example.com"}},
 	}
 
-	rl := initRateLimiter(policy, logger)
+	rl := InitRateLimiter(policy, logger)
 	limits := rl.PolicyLimits()
 	if limits.MaxRequestsPerSecond != 0 {
 		t.Errorf("expected 0 global RPS, got %f", limits.MaxRequestsPerSecond)
@@ -382,13 +382,13 @@ func TestInitRateLimiter_FromConfigFile(t *testing.T) {
 		}
 	}`)
 
-	result, err := loadConfigs(cfgPath, "")
+	result, err := LoadConfigs(cfgPath, "")
 	if err != nil {
-		t.Fatalf("loadConfigs: %v", err)
+		t.Fatalf("LoadConfigs: %v", err)
 	}
 
 	logger := testLogger(t)
-	rl := initRateLimiter(result.targetScopePolicy, logger)
+	rl := InitRateLimiter(result.TargetScopePolicy, logger)
 	limits := rl.PolicyLimits()
 	if limits.MaxRequestsPerSecond != 50.0 {
 		t.Errorf("MaxRequestsPerSecond = %f, want 50.0", limits.MaxRequestsPerSecond)
@@ -875,32 +875,32 @@ def on_request(flow):
 	// TLS Passthrough
 	cfg := config.Default()
 	cfg.TLSPassthrough = proxyCfg.TLSPassthrough
-	pl := initPassthroughList(cfg, logger)
+	pl := InitPassthroughList(cfg, logger)
 	if pl.Len() != 1 {
 		t.Errorf("passthrough patterns = %d, want 1", pl.Len())
 	}
 
 	// TLS Fingerprint
-	resultCfg, err := applyTLSFingerprintFlag("", proxyCfg)
+	resultCfg, err := ApplyTLSFingerprintFlag("", proxyCfg)
 	if err != nil {
-		t.Fatalf("applyTLSFingerprintFlag: %v", err)
+		t.Fatalf("ApplyTLSFingerprintFlag: %v", err)
 	}
 	if resultCfg.TLSFingerprint != "firefox" {
-		t.Errorf("after applyTLSFingerprintFlag, TLSFingerprint = %q, want %q",
+		t.Errorf("after ApplyTLSFingerprintFlag, TLSFingerprint = %q, want %q",
 			resultCfg.TLSFingerprint, "firefox")
 	}
 
 	// Rate Limiter
-	rl := initRateLimiter(proxyCfg.TargetScopePolicy, logger)
+	rl := InitRateLimiter(proxyCfg.TargetScopePolicy, logger)
 	limits := rl.PolicyLimits()
 	if limits.MaxRequestsPerSecond != 100 {
 		t.Errorf("rate limit RPS = %f, want 100", limits.MaxRequestsPerSecond)
 	}
 
 	// Safety Filter
-	engine, err := initSafetyFilter(config.Default(), proxyCfg, logger)
+	engine, err := InitSafetyFilter(config.Default(), proxyCfg, logger)
 	if err != nil {
-		t.Fatalf("initSafetyFilter: %v", err)
+		t.Fatalf("InitSafetyFilter: %v", err)
 	}
 	if engine == nil {
 		t.Fatal("expected non-nil safety engine")

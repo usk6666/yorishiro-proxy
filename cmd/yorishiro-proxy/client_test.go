@@ -11,11 +11,13 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/usk6666/yorishiro-proxy/internal/mcpserver"
 )
 
 // --- resolveClientConn tests ---
 
-func withTempServerJSON(t *testing.T, entries []ServerJSON) {
+func withTempServerJSON(t *testing.T, entries []mcpserver.ServerJSON) {
 	t.Helper()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "server.json")
@@ -28,14 +30,13 @@ func withTempServerJSON(t *testing.T, entries []ServerJSON) {
 		t.Fatalf("write server.json: %v", err)
 	}
 
-	orig := serverJSONPathFunc
-	serverJSONPathFunc = func() (string, error) { return path, nil }
-	t.Cleanup(func() { serverJSONPathFunc = orig })
+	restore := mcpserver.SetServerJSONPathForTest(func() (string, error) { return path, nil })
+	t.Cleanup(restore)
 }
 
 func TestResolveClientConn_FlagsTakePriority(t *testing.T) {
 	// Set up server.json with one live entry.
-	withTempServerJSON(t, []ServerJSON{
+	withTempServerJSON(t, []mcpserver.ServerJSON{
 		{Addr: "127.0.0.1:9999", Token: "from-json", PID: os.Getpid(), StartedAt: time.Now()},
 	})
 	// Set env vars.
@@ -56,7 +57,7 @@ func TestResolveClientConn_FlagsTakePriority(t *testing.T) {
 }
 
 func TestResolveClientConn_EnvVarOverridesServerJSON(t *testing.T) {
-	withTempServerJSON(t, []ServerJSON{
+	withTempServerJSON(t, []mcpserver.ServerJSON{
 		{Addr: "127.0.0.1:9999", Token: "from-json", PID: os.Getpid(), StartedAt: time.Now()},
 	})
 	t.Setenv("YP_CLIENT_ADDR", "127.0.0.1:7777")
@@ -75,7 +76,7 @@ func TestResolveClientConn_EnvVarOverridesServerJSON(t *testing.T) {
 }
 
 func TestResolveClientConn_ServerJSONFallback(t *testing.T) {
-	withTempServerJSON(t, []ServerJSON{
+	withTempServerJSON(t, []mcpserver.ServerJSON{
 		{Addr: "127.0.0.1:5432", Token: "json-token", PID: os.Getpid(), StartedAt: time.Now()},
 	})
 	// Ensure env vars are not set.
@@ -97,11 +98,10 @@ func TestResolveClientConn_ServerJSONFallback(t *testing.T) {
 func TestResolveClientConn_NoServerJSON_NoEnv_Error(t *testing.T) {
 	// Point server.json at a non-existent file.
 	dir := t.TempDir()
-	orig := serverJSONPathFunc
-	serverJSONPathFunc = func() (string, error) {
+	restore := mcpserver.SetServerJSONPathForTest(func() (string, error) {
 		return filepath.Join(dir, "server.json"), nil
-	}
-	t.Cleanup(func() { serverJSONPathFunc = orig })
+	})
+	t.Cleanup(restore)
 
 	t.Setenv("YP_CLIENT_ADDR", "")
 	t.Setenv("YP_CLIENT_TOKEN", "")
@@ -114,7 +114,7 @@ func TestResolveClientConn_NoServerJSON_NoEnv_Error(t *testing.T) {
 
 func TestResolveClientConn_StaleServerJSON_NoLiveEntry(t *testing.T) {
 	// All entries are stale (PID 0).
-	withTempServerJSON(t, []ServerJSON{
+	withTempServerJSON(t, []mcpserver.ServerJSON{
 		{Addr: "127.0.0.1:9999", Token: "stale-token", PID: 0, StartedAt: time.Now()},
 	})
 	t.Setenv("YP_CLIENT_ADDR", "")
@@ -128,7 +128,7 @@ func TestResolveClientConn_StaleServerJSON_NoLiveEntry(t *testing.T) {
 
 func TestResolveClientConn_ExplicitAddrNoMatchingEntry_TokenEmpty(t *testing.T) {
 	// server.json has a live entry for a different addr.
-	withTempServerJSON(t, []ServerJSON{
+	withTempServerJSON(t, []mcpserver.ServerJSON{
 		{Addr: "127.0.0.1:9999", Token: "other-token", PID: os.Getpid(), StartedAt: time.Now()},
 	})
 	t.Setenv("YP_CLIENT_ADDR", "")
@@ -149,7 +149,7 @@ func TestResolveClientConn_ExplicitAddrNoMatchingEntry_TokenEmpty(t *testing.T) 
 
 func TestResolveClientConn_ExplicitAddrMatchingEntry_TokenTaken(t *testing.T) {
 	// server.json has a live entry that matches the explicit addr.
-	withTempServerJSON(t, []ServerJSON{
+	withTempServerJSON(t, []mcpserver.ServerJSON{
 		{Addr: "127.0.0.1:8080", Token: "correct-token", PID: os.Getpid(), StartedAt: time.Now()},
 	})
 	t.Setenv("YP_CLIENT_ADDR", "")
@@ -171,7 +171,7 @@ func TestResolveClientConn_ExplicitAddrMatchingEntry_TokenTaken(t *testing.T) {
 
 func TestRunListServers_JSONOutput(t *testing.T) {
 	const fullToken = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-	withTempServerJSON(t, []ServerJSON{
+	withTempServerJSON(t, []mcpserver.ServerJSON{
 		{Addr: "127.0.0.1:8080", Token: fullToken, PID: os.Getpid(), StartedAt: time.Date(2026, 3, 25, 10, 0, 0, 0, time.UTC)},
 		{Addr: "127.0.0.1:8081", Token: "tok2", PID: 0, StartedAt: time.Date(2026, 3, 25, 11, 0, 0, 0, time.UTC)},
 	})
@@ -217,7 +217,7 @@ func TestRunListServers_JSONOutput(t *testing.T) {
 
 func TestRunListServers_TableOutput(t *testing.T) {
 	const fullToken = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-	withTempServerJSON(t, []ServerJSON{
+	withTempServerJSON(t, []mcpserver.ServerJSON{
 		{Addr: "127.0.0.1:8080", Token: fullToken, PID: os.Getpid(), StartedAt: time.Date(2026, 3, 25, 10, 0, 0, 0, time.UTC)},
 	})
 
@@ -254,7 +254,7 @@ func TestRunListServers_TableOutput(t *testing.T) {
 func TestRunListServers_TableOutput_EmptyToken(t *testing.T) {
 	// Legacy entries (or test fixtures) may have an empty token; the table
 	// must render an empty string in that column rather than panicking.
-	withTempServerJSON(t, []ServerJSON{
+	withTempServerJSON(t, []mcpserver.ServerJSON{
 		{Addr: "127.0.0.1:8080", Token: "", PID: os.Getpid(), StartedAt: time.Date(2026, 3, 25, 10, 0, 0, 0, time.UTC)},
 	})
 
@@ -297,11 +297,10 @@ func TestTruncateTokenForTable(t *testing.T) {
 func TestRunListServers_EmptyJSON(t *testing.T) {
 	// Non-existent server.json should produce empty array.
 	dir := t.TempDir()
-	orig := serverJSONPathFunc
-	serverJSONPathFunc = func() (string, error) {
+	restore := mcpserver.SetServerJSONPathForTest(func() (string, error) {
 		return filepath.Join(dir, "server.json"), nil
-	}
-	t.Cleanup(func() { serverJSONPathFunc = orig })
+	})
+	t.Cleanup(restore)
 
 	var buf bytes.Buffer
 	err := runListServers(&buf, []string{})
@@ -319,7 +318,7 @@ func TestRunListServers_EmptyJSON(t *testing.T) {
 }
 
 func TestRunListServers_UnknownFormat_Error(t *testing.T) {
-	withTempServerJSON(t, []ServerJSON{
+	withTempServerJSON(t, []mcpserver.ServerJSON{
 		{Addr: "127.0.0.1:8080", Token: "tok1", PID: os.Getpid(), StartedAt: time.Now()},
 	})
 
@@ -454,9 +453,8 @@ func TestRunClientTool_ConnectError(t *testing.T) {
 
 	// Point to a non-existent server.json so no auto-detection occurs.
 	dir := t.TempDir()
-	orig := serverJSONPathFunc
-	serverJSONPathFunc = func() (string, error) { return filepath.Join(dir, "server.json"), nil }
-	t.Cleanup(func() { serverJSONPathFunc = orig })
+	restore := mcpserver.SetServerJSONPathForTest(func() (string, error) { return filepath.Join(dir, "server.json"), nil })
+	t.Cleanup(restore)
 
 	err := runClientTool(context.Background(), "query", []string{"-server-addr=127.0.0.1:1", "resource=flows"})
 	if err == nil {
@@ -470,9 +468,8 @@ func TestRunClientTool_SpaceSeparatedServerAddr_Error(t *testing.T) {
 	t.Setenv("YP_CLIENT_TOKEN", "")
 
 	dir := t.TempDir()
-	orig := serverJSONPathFunc
-	serverJSONPathFunc = func() (string, error) { return filepath.Join(dir, "server.json"), nil }
-	t.Cleanup(func() { serverJSONPathFunc = orig })
+	restore := mcpserver.SetServerJSONPathForTest(func() (string, error) { return filepath.Join(dir, "server.json"), nil })
+	t.Cleanup(restore)
 
 	err := runClientTool(context.Background(), "query", []string{"-server-addr", "127.0.0.1:1", "resource=flows"})
 	// Should fail with a connection error, not a flag parse error.
@@ -489,9 +486,8 @@ func TestRunClientTool_NoAddress_Error(t *testing.T) {
 	t.Setenv("YP_CLIENT_TOKEN", "")
 
 	dir := t.TempDir()
-	orig := serverJSONPathFunc
-	serverJSONPathFunc = func() (string, error) { return filepath.Join(dir, "server.json"), nil }
-	t.Cleanup(func() { serverJSONPathFunc = orig })
+	restore := mcpserver.SetServerJSONPathForTest(func() (string, error) { return filepath.Join(dir, "server.json"), nil })
+	t.Cleanup(restore)
 
 	err := runClientTool(context.Background(), "query", []string{"resource=flows"})
 	if err == nil {

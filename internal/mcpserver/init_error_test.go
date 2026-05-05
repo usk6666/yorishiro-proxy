@@ -1,4 +1,4 @@
-package main
+package mcpserver
 
 import (
 	"context"
@@ -11,7 +11,7 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/config"
 )
 
-// TestInitInfra_DBPathCreationFailure verifies that initInfra returns an error
+// TestInitInfra_DBPathCreationFailure verifies that InitInfra returns an error
 // when the DB directory cannot be created (e.g. parent is not writable).
 func TestInitInfra_DBPathCreationFailure(t *testing.T) {
 	dir := t.TempDir()
@@ -27,7 +27,7 @@ func TestInitInfra_DBPathCreationFailure(t *testing.T) {
 	cfg.DBPath = filepath.Join(readOnlyDir, "subdir", "test.db")
 
 	ctx := context.Background()
-	_, err := initInfra(ctx, cfg)
+	_, err := InitInfra(ctx, cfg)
 	if err == nil {
 		t.Fatal("expected error for unwritable DB directory, got nil")
 	}
@@ -36,7 +36,7 @@ func TestInitInfra_DBPathCreationFailure(t *testing.T) {
 	}
 }
 
-// TestInitInfra_InvalidLogLevel verifies that initInfra propagates logger
+// TestInitInfra_InvalidLogLevel verifies that InitInfra propagates logger
 // setup errors for invalid log levels. This validates the error path through
 // the logging.Setup call.
 func TestInitInfra_InvalidLogLevel(t *testing.T) {
@@ -45,7 +45,7 @@ func TestInitInfra_InvalidLogLevel(t *testing.T) {
 	cfg.LogLevel = "INVALID_LEVEL"
 
 	ctx := context.Background()
-	_, err := initInfra(ctx, cfg)
+	_, err := InitInfra(ctx, cfg)
 	if err == nil {
 		t.Fatal("expected error for invalid log level, got nil")
 	}
@@ -54,7 +54,7 @@ func TestInitInfra_InvalidLogLevel(t *testing.T) {
 	}
 }
 
-// TestInitInfra_CorruptDBPath verifies that initInfra returns an error when
+// TestInitInfra_CorruptDBPath verifies that InitInfra returns an error when
 // the DB path points to an invalid location (e.g. a file where a directory
 // is expected).
 func TestInitInfra_CorruptDBPath(t *testing.T) {
@@ -69,34 +69,34 @@ func TestInitInfra_CorruptDBPath(t *testing.T) {
 	cfg.DBPath = filepath.Join(blockingFile, "subdir", "test.db")
 
 	ctx := context.Background()
-	_, err := initInfra(ctx, cfg)
+	_, err := InitInfra(ctx, cfg)
 	if err == nil {
 		t.Fatal("expected error when DB parent is a file, got nil")
 	}
 }
 
-// TestInitInfra_Success verifies the happy path: initInfra returns a valid
+// TestInitInfra_Success verifies the happy path: InitInfra returns a valid
 // infraResult with logger, store, and cleanup function.
 func TestInitInfra_Success(t *testing.T) {
 	cfg := config.Default()
 	cfg.DBPath = filepath.Join(t.TempDir(), "test.db")
 
 	ctx := context.Background()
-	result, err := initInfra(ctx, cfg)
+	result, err := InitInfra(ctx, cfg)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	defer result.cleanup()
+	defer result.Cleanup()
 
-	if result.logger == nil {
+	if result.Logger == nil {
 		t.Error("expected non-nil logger")
 	}
-	if result.store == nil {
+	if result.Store == nil {
 		t.Error("expected non-nil store")
 	}
 }
 
-// TestInitCA_ErrorPaths exercises error conditions for initCA not covered
+// TestInitCA_ErrorPaths exercises error conditions for InitCA not covered
 // by the existing TestInitCA in main_test.go: unreadable cert files and
 // corrupt auto-persist CA files.
 func TestInitCA_ErrorPaths(t *testing.T) {
@@ -153,7 +153,7 @@ func TestInitCA_ErrorPaths(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := tt.setup(t)
-			_, err := initCA(cfg, logger)
+			_, err := InitCA(cfg, logger)
 			if tt.wantErr {
 				if err == nil {
 					t.Fatal("expected error, got nil")
@@ -309,7 +309,7 @@ func TestInitSafetyFilter_ErrorPaths(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			engine, err := initSafetyFilter(tt.cfg, tt.proxyCfg, logger)
+			engine, err := InitSafetyFilter(tt.cfg, tt.proxyCfg, logger)
 			if tt.wantErr {
 				if err == nil {
 					t.Fatal("expected error, got nil")
@@ -383,7 +383,7 @@ func TestApplyTLSFingerprintFlag_ErrorPaths(t *testing.T) {
 			if proxyCfg == nil {
 				proxyCfg = &config.ProxyConfig{}
 			}
-			result, err := applyTLSFingerprintFlag(tt.fingerprint, proxyCfg)
+			result, err := ApplyTLSFingerprintFlag(tt.fingerprint, proxyCfg)
 			if tt.wantErr {
 				if err == nil {
 					t.Fatal("expected error, got nil")
@@ -444,7 +444,7 @@ func TestInitPassthroughList_Patterns(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := config.Default()
 			cfg.TLSPassthrough = tt.patterns
-			list := initPassthroughList(cfg, logger)
+			list := InitPassthroughList(cfg, logger)
 			if list.Len() != tt.wantLen {
 				t.Errorf("passthrough list len = %d, want %d", list.Len(), tt.wantLen)
 			}
@@ -482,7 +482,7 @@ func TestInitRateLimiter_Configurations(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			rl := initRateLimiter(tt.policy, logger)
+			rl := InitRateLimiter(tt.policy, logger)
 			if rl == nil {
 				t.Fatal("expected non-nil rate limiter")
 			}
@@ -495,7 +495,7 @@ func TestResolveHTTPToken(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 
 	t.Run("explicit token returned as-is", func(t *testing.T) {
-		token, err := resolveHTTPToken("my-secret-token", logger)
+		token, err := ResolveHTTPToken("my-secret-token", logger)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -505,7 +505,7 @@ func TestResolveHTTPToken(t *testing.T) {
 	})
 
 	t.Run("empty token generates random token", func(t *testing.T) {
-		token, err := resolveHTTPToken("", logger)
+		token, err := ResolveHTTPToken("", logger)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -513,7 +513,7 @@ func TestResolveHTTPToken(t *testing.T) {
 			t.Error("expected non-empty generated token")
 		}
 		// Verify uniqueness by generating another.
-		token2, err := resolveHTTPToken("", logger)
+		token2, err := ResolveHTTPToken("", logger)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}

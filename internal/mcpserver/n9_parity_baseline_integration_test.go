@@ -1,6 +1,6 @@
 //go:build e2e
 
-package main
+package mcpserver
 
 // n9_parity_baseline_test.go — RFC-001 N9 (USK-691)
 // Pre-deletion parity baseline for the proxybuild + pluginv2 live
@@ -17,7 +17,7 @@ package main
 //
 // Scenario: single HTTPS-via-CONNECT GET request through the proxybuild
 // Manager with an empty (no-op) pluginv2 plugin loaded — proves the
-// boot-time `proxyCfg.Plugins → initPluginV2Engine → LoadPlugins` path
+// boot-time `proxyCfg.Plugins → InitPluginV2Engine → LoadPlugins` path
 // still parses typed configs after legacy removal, even when the plugin
 // registers no hooks.
 //

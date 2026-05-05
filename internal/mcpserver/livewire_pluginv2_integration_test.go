@@ -1,6 +1,6 @@
 //go:build e2e
 
-package main
+package mcpserver
 
 // livewire_pluginv2_integration_test.go — RFC-001 N9 (USK-691)
 // Live-wire pluginv2 e2e parity tests for the proxybuild + pluginv2
@@ -69,7 +69,7 @@ type liveProxy struct {
 // setupLiveProxy wires together a pluginv2.Engine, an ephemeral CA, a
 // SQLite flow store, and a proxybuild.Manager listening on a loopback
 // port. The plugin script is materialised into t.TempDir() and loaded
-// via initPluginV2Engine (the same code path runWithFlags uses in
+// via InitPluginV2Engine (the same code path runWithFlags uses in
 // production, so the test exercises real config-driven plugin loading).
 //
 // Cleanup runs in t.Cleanup in this order: manager.StopAll → engine.Close
@@ -109,10 +109,10 @@ func setupLiveProxy(t *testing.T, pluginName, pluginScript string) *liveProxy {
 		}},
 	}
 
-	engine, err := initPluginV2Engine(ctx, store, proxyCfg, logger)
+	engine, err := InitPluginV2Engine(ctx, store, proxyCfg, logger)
 	if err != nil {
 		store.Close()
-		t.Fatalf("initPluginV2Engine: %v", err)
+		t.Fatalf("InitPluginV2Engine: %v", err)
 	}
 
 	ca := &cert.CA{}
@@ -128,9 +128,9 @@ func setupLiveProxy(t *testing.T, pluginName, pluginScript string) *liveProxy {
 	wsInterceptEngine := wsrules.NewInterceptEngine()
 	grpcInterceptEngine := grpcrules.NewInterceptEngine()
 	httpTransformEngine := httprules.NewTransformEngine()
-	buildCfg := newLiveBuildConfig(ctx, cfg, proxyCfg, issuer, engine, store, logger)
+	buildCfg := NewLiveBuildConfig(ctx, cfg, proxyCfg, issuer, engine, store, logger)
 
-	mgr, err := newLiveManager(cfg, proxyCfg, store, issuer, engine, holdQueue,
+	mgr, err := NewLiveManager(cfg, proxyCfg, store, issuer, engine, holdQueue,
 		httpInterceptEngine, wsInterceptEngine, grpcInterceptEngine,
 		httpTransformEngine,
 		(*connector.PassthroughList)(nil), (*connector.RateLimiter)(nil),
@@ -139,7 +139,7 @@ func setupLiveProxy(t *testing.T, pluginName, pluginScript string) *liveProxy {
 	if err != nil {
 		engine.Close()
 		store.Close()
-		t.Fatalf("newLiveManager: %v", err)
+		t.Fatalf("NewLiveManager: %v", err)
 	}
 
 	if err := mgr.Start(ctx, "127.0.0.1:0"); err != nil {

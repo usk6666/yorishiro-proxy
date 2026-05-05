@@ -1,4 +1,4 @@
-package main
+package mcpserver
 
 import (
 	"encoding/json"
@@ -10,8 +10,8 @@ import (
 	"time"
 )
 
-// ServerJSON holds the data written to ~/.yorishiro-proxy/server.json
-// when the HTTP MCP transport is active.
+// ServerJSON holds the data written to ~/.yorishiro-proxy/server.json when
+// the HTTP MCP transport is active.
 type ServerJSON struct {
 	// Addr is the actual HTTP MCP listen address (e.g. "127.0.0.1:54321").
 	Addr string `json:"addr"`
@@ -26,11 +26,12 @@ type ServerJSON struct {
 	StartedAt time.Time `json:"started_at"`
 }
 
-// serverJSONPathFunc returns the path for server.json.
-// It is a variable to allow test overrides (similar to timeNow).
+// serverJSONPathFunc returns the path for server.json. It is a variable
+// to allow test overrides (similar to timeNow).
 var serverJSONPathFunc = defaultServerJSONPath
 
-// defaultServerJSONPath returns the default path for server.json: ~/.yorishiro-proxy/server.json.
+// defaultServerJSONPath returns the default path for server.json:
+// ~/.yorishiro-proxy/server.json.
 func defaultServerJSONPath() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -39,13 +40,26 @@ func defaultServerJSONPath() (string, error) {
 	return filepath.Join(home, ".yorishiro-proxy", "server.json"), nil
 }
 
-// serverJSONPath returns the path for server.json, delegating to serverJSONPathFunc.
-func serverJSONPath() (string, error) {
+// ServerJSONPath returns the path for server.json, delegating to
+// serverJSONPathFunc. Exported so the CLI client subcommand can locate
+// the same file written by the server.
+func ServerJSONPath() (string, error) {
 	return serverJSONPathFunc()
 }
 
-// writeServerJSON writes server.json to the default path using an array format
-// that supports multiple concurrent instances.
+// SetServerJSONPathForTest swaps the resolver returned by ServerJSONPath
+// and returns a restore function. Tests use it to redirect server.json
+// reads/writes into a t.TempDir() so they do not collide with a real
+// server.json on the developer's machine. Production code MUST NOT call
+// this — the path is owned by the binary entry point.
+func SetServerJSONPathForTest(fn func() (string, error)) (restore func()) {
+	prev := serverJSONPathFunc
+	serverJSONPathFunc = fn
+	return func() { serverJSONPathFunc = prev }
+}
+
+// writeServerJSON writes server.json to the default path using an array
+// format that supports multiple concurrent instances.
 //
 // The write sequence is:
 //  1. Read existing server.json (treat missing file as empty slice)
@@ -56,7 +70,7 @@ func serverJSONPath() (string, error) {
 // The caller is responsible for removing the entry when the server exits
 // (see removeServerJSON).
 func writeServerJSON(data *ServerJSON) error {
-	path, err := serverJSONPath()
+	path, err := ServerJSONPath()
 	if err != nil {
 		return err
 	}
@@ -68,7 +82,7 @@ func writeServerJSON(data *ServerJSON) error {
 	}
 
 	// Read existing entries; treat missing file as empty slice.
-	entries, err := readServerJSONSlice(path)
+	entries, err := ReadServerJSONSlice(path)
 	if err != nil {
 		return err
 	}
@@ -76,7 +90,7 @@ func writeServerJSON(data *ServerJSON) error {
 	// Filter out stale entries (dead PIDs).
 	live := entries[:0]
 	for _, e := range entries {
-		if isProcessAlive(e.PID) {
+		if IsProcessAlive(e.PID) {
 			live = append(live, e)
 		}
 	}
@@ -112,16 +126,17 @@ func writeServerJSON(data *ServerJSON) error {
 	return nil
 }
 
-// removeServerJSON removes only the entry for the current process from server.json.
-// If no entries remain after removal, the file is kept with an empty JSON array.
-// It is a best-effort operation: errors are ignored because the process is exiting.
+// removeServerJSON removes only the entry for the current process from
+// server.json. If no entries remain after removal, the file is kept with
+// an empty JSON array. It is a best-effort operation: errors are ignored
+// because the process is exiting.
 func removeServerJSON() {
-	path, err := serverJSONPath()
+	path, err := ServerJSONPath()
 	if err != nil {
 		return
 	}
 
-	entries, err := readServerJSONSlice(path)
+	entries, err := ReadServerJSONSlice(path)
 	if err != nil {
 		return
 	}
@@ -163,9 +178,11 @@ func removeServerJSON() {
 	_ = os.Rename(tmpName, path)
 }
 
-// readServerJSONSlice reads and parses server.json from the given path as an array.
-// Returns an empty slice if the file does not exist or is corrupt.
-func readServerJSONSlice(path string) ([]ServerJSON, error) {
+// ReadServerJSONSlice reads and parses server.json from the given path as
+// an array. Returns an empty slice if the file does not exist or is
+// corrupt. Exported so the CLI client subcommand can read the file
+// without re-implementing the parser.
+func ReadServerJSONSlice(path string) ([]ServerJSON, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -181,11 +198,11 @@ func readServerJSONSlice(path string) ([]ServerJSON, error) {
 	return entries, nil
 }
 
-// isProcessAlive returns true if a process with the given PID exists and is running.
-// On Unix, os.FindProcess always succeeds; we use kill(pid, 0) via Signal(0) to
-// check liveness. EPERM means the process exists but we lack signal permission —
-// it is treated as alive.
-func isProcessAlive(pid int) bool {
+// IsProcessAlive returns true if a process with the given PID exists and
+// is running. On Unix, os.FindProcess always succeeds; we use kill(pid, 0)
+// via Signal(0) to check liveness. EPERM means the process exists but we
+// lack signal permission — it is treated as alive.
+func IsProcessAlive(pid int) bool {
 	if pid <= 0 {
 		return false
 	}
