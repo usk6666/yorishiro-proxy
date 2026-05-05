@@ -21,7 +21,7 @@
 
 ---
 
-Yorishiro Proxy runs as an [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) server, giving AI agents full control over proxy operations through eleven MCP tools. Designed for use with Claude Code and other MCP-compatible agents, it enables automated security testing workflows without manual UI interaction. An embedded Web UI is also available for visual inspection and interactive use.
+Yorishiro Proxy runs as an [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) server, giving AI agents full control over proxy operations through a typed-per-protocol MCP tool surface. Designed for use with Claude Code and other MCP-compatible agents, it enables automated security testing workflows without manual UI interaction. An embedded Web UI is also available for visual inspection and interactive use.
 
 <p align="center">
   <img src="docs/images/yorishiro-proxy_webui_flows.png" alt="Web UI - Flows" width="800">
@@ -30,13 +30,13 @@ Yorishiro Proxy runs as an [MCP (Model Context Protocol)](https://modelcontextpr
 ## Features
 
 - **Traffic Interception & Recording** -- MITM proxy with automatic CA certificate management
-- **Resender** -- Replay requests with header/body/URL overrides, JSON patches, and raw HTTP editing
-- **Fuzzer** -- Automated payload injection with sequential/parallel modes and async execution
+- **Per-Protocol Resend** -- Replay recorded flows with typed schemas (`resend_http`, `resend_ws`, `resend_grpc`, `resend_raw`) including header/body/URL overrides, JSON patches, and raw byte editing
+- **Per-Protocol Fuzz** -- Typed fuzzers (`fuzz_http`, `fuzz_ws`, `fuzz_grpc`, `fuzz_raw`) with payload sets and position-driven mutations
 - **Macro** -- Multi-step request sequences with variable extraction and template substitution
 - **Intercept** -- Hold and inspect requests/responses in real time, then release, modify, or drop
 - **Auto-Transform** -- Automatic request/response modification rules for matching traffic
 - **Target Scope** -- Two-layer security boundary (Policy + Agent) to restrict reachable hosts
-- **Multi-Protocol** -- HTTP/1.x, HTTPS (MITM), HTTP/2 (h2c/h2), gRPC, WebSocket, Raw TCP, SOCKS5
+- **Multi-Protocol** -- HTTP/1.x, HTTPS (MITM), HTTP/2 (h2c/h2), gRPC, gRPC-Web, WebSocket, SSE, Raw TCP, SOCKS5
 - **Multi-Listener** -- Multiple proxy listeners on different ports simultaneously
 - **mTLS Client Certificates** -- Per-host client certificate support for mutual TLS authentication
 - **TLS Verification Control** -- Per-host TLS verification and custom CA configuration
@@ -45,9 +45,8 @@ Yorishiro Proxy runs as an [MCP (Model Context Protocol)](https://modelcontextpr
 - **SOCKS5 Listener** -- SOCKS5 proxy with optional username/password authentication for proxychains integration
 - **Upstream Proxy** -- Chain through HTTP or SOCKS5 proxies
 - **Streamable HTTP MCP** -- Multi-agent shared access with Bearer token authentication
-- **Comparer** -- Structural diff between two flows (status code, headers, body length, timing, JSON key-level diff)
 - **AI Safety** -- SafetyFilter blocks destructive payloads (DROP TABLE, rm -rf, etc.) at the Input Filter before they reach the target; Output Filter masks PII (credit card numbers, email addresses, phone numbers, etc.) in responses before returning to AI agents while preserving raw data in the flow store; rate limiting (global/per-host RPS) and diagnostic budgets (request count/duration limits) with two-layer Policy+Agent architecture
-- **Plugin System** -- Extend proxy behavior with [Starlark](https://github.com/google/starlark-go) scripts that hook into the request/response pipeline
+- **Plugin System** -- Extend proxy behavior with [Starlark](https://github.com/google/starlark-go) scripts using the typed `register_hook(protocol, event, phase)` API; introspect loaded hooks via `plugin_introspect`
 - **Web UI** -- Embedded React/Vite dashboard for visual inspection and interactive testing
 
 ## Quick Start
@@ -112,21 +111,21 @@ Once the MCP server is running, the AI agent can start capturing traffic:
 
 ## MCP Tools
 
-All proxy operations are exposed through eleven MCP tools:
+All proxy operations are exposed through typed MCP tools:
 
 | Tool | Purpose |
 |------|---------|
 | `proxy_start` | Start a proxy listener with capture scope, TLS passthrough, intercept rules, auto-transform, TCP forwarding, and protocol settings |
 | `proxy_stop` | Graceful shutdown of one or all listeners |
 | `configure` | Runtime configuration changes (upstream proxy, capture scope, TLS passthrough, intercept rules, auto-transform, connection limits) |
-| `query` | Unified information retrieval: flows, flow details, messages, proxy status, config, CA certificate, intercept queue, macros, fuzz jobs/results |
-| `resend` | Replay recorded requests with mutations (method/URL/header/body overrides, JSON patches, raw byte patches, dry-run) and compare two flows structurally |
-| `fuzz` | Execute fuzz testing campaigns with payload sets, positions, concurrency control, and stop conditions |
+| `query` | Unified information retrieval: flows, flow details, messages, proxy status, config, CA certificate, intercept queue, macros, fuzz jobs/results. Accepts a Protocol family filter (`http`/`ws`/`grpc`/`grpc-web`/`sse`/`raw`/`tls-handshake`) |
+| `resend_http` / `resend_ws` / `resend_grpc` / `resend_raw` | Replay recorded flows with the protocol-typed schema (HTTPMessage / WSMessage / GRPC{Start,Data,End}Message / RawMessage); supports header/body/URL overrides, JSON patches, raw byte patches, and dry-run |
+| `fuzz_http` / `fuzz_ws` / `fuzz_grpc` / `fuzz_raw` | Position-driven payload fuzzing with per-variant safety gating |
 | `macro` | Define and execute multi-step macro workflows with variable extraction, guards, and hooks |
 | `intercept` | Act on intercepted requests: release, modify and forward, or drop |
 | `manage` | Manage flow data (delete/export/import) and CA certificate regeneration |
 | `security` | Configure target scope rules, rate limits, diagnostic budgets, and SafetyFilter inspection (Policy Layer + Agent Layer) |
-| `plugin` | List, reload, enable, and disable Starlark plugins at runtime |
+| `plugin_introspect` | Read-only listing of loaded Starlark plugins and their `(protocol, event, phase)` hook registrations |
 
 ## Web UI
 
@@ -137,10 +136,11 @@ The embedded Web UI is served on the HTTP MCP address (enabled by default).
 | **Flows** | Flow list with filtering by protocol, method, status code, and URL pattern |
 | **Dashboard** | Flow statistics overview with real-time traffic summary |
 | **Intercept** | Real-time request/response interception with inline editing |
-| **Resender** | Replay requests with overrides, JSON patches, raw HTTP editing, and dry-run preview |
+| **Resender** | Replay requests with overrides, JSON patches, raw HTTP editing, and dry-run preview (per-protocol UIs) |
 | **Fuzz** | Create and manage fuzz campaigns with payload sets and result analysis |
 | **Macros** | Multi-step request workflows with variable extraction |
 | **Security** | Target scope configuration (Policy + Agent Layer) with URL testing |
+| **Plugins** | Read-only view of loaded Starlark plugins and their hook registrations |
 | **Settings** | Proxy control, TLS passthrough, auto-transform rules, CA management, and more |
 
 The Web UI communicates with the backend via Streamable HTTP MCP -- the same protocol used by AI agents.
@@ -182,16 +182,19 @@ For the full list of server flags, client options, and environment variables, ru
 
 ```
 Layer 4 TCP Listener
-  -> Protocol Detection (peek bytes)
-    -> Protocol Handler (HTTP/S, HTTP/2, gRPC, WebSocket, Raw TCP)
-      -> Flow Recording (Request/Response)
-        -> MCP Tool (Intercept / Replay / Search)
+  -> Protocol Detection (peek bytes / ALPN)
+    -> Connection Stack (TCP -> TLS -> HTTP/1 | HTTP/2 -> WS | gRPC | gRPC-Web | SSE | Raw)
+      -> Pipeline (HostScope -> Safety -> PluginPre -> Intercept -> Transform -> Macro -> PluginPost -> Record)
+        -> Flow Recording (L7 Message + L4 Envelope.Raw)
+          -> MCP Tool (Intercept / Replay / Search)
 ```
 
-- Accepts connections at Layer 4 (TCP) and routes to modular protocol handlers
-- No external proxy libraries -- built on Go standard library
+- Accepts connections at Layer 4 (TCP) and builds a per-connection `Layer` stack
+- No external proxy libraries -- built on the Go standard library
 - MCP-first: all operations are exposed exclusively as MCP tools
 - Embedded Web UI built with React/Vite, served via Streamable HTTP
+
+For the design rationale and data model, see [RFC-001 Envelope + Layered Connection Model](docs/rfc/envelope.md).
 
 ## Documentation
 

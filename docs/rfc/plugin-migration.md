@@ -162,7 +162,8 @@ The N9 typed surface fixes all three at the schema level.
 | Legacy MCP tool retire-plan (this document's "MCP Tool Migration" section + "Appendix: N9 Removal Inventory") | USK-689 | DONE |
 | Delete legacy `resend` / `fuzz` / `compare` MCP tool registrations and support files | USK-693 | DONE |
 | Delete `internal/fuzzer/` async engine (partial; iterator/position kept for typed-fuzz path) | USK-694 | DONE |
-| Delete `internal/plugin/` legacy engine; finalize this document | USK-695 | DONE (this PR) |
+| Delete `internal/plugin/` legacy engine; finalize this document | USK-695 | DONE |
+| Final docs rewrite (CLAUDE.md / README / CHANGELOG / RFC §11 close) | USK-698 | DONE |
 
 ## Release Notes Snippet
 
