@@ -3,6 +3,7 @@ module github.com/usk6666/yorishiro-proxy
 go 1.25.4
 
 require (
+	github.com/andybalholm/brotli v1.0.6
 	github.com/google/uuid v1.6.0
 	github.com/klauspost/compress v1.18.4
 	github.com/modelcontextprotocol/go-sdk v1.4.1
@@ -16,7 +17,6 @@ require (
 )
 
 require (
-	github.com/andybalholm/brotli v1.0.6 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/google/jsonschema-go v0.4.2 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect

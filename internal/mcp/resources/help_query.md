@@ -46,6 +46,11 @@ Maximum number of items to return. Default: 50, max: 1000. Applies to `flows`, `
 ### offset (integer, optional)
 Number of items to skip for pagination. Must be >= 0. Applies to `flows`, `messages`, `fuzz_jobs`, and `fuzz_results`.
 
+### decode_bodies (boolean, optional, default `true`)
+Decode HTTP `Content-Encoding` (`gzip`, `deflate`, `br`, `zstd`) bodies in `flow` and `messages` responses. When `true`, additive `*_body_decoded` / `*_body_encoding_applied` fields are populated alongside the original wire-form `*_body` fields. Set to `false` to skip decompression.
+
+The original (compressed) body is always returned in `*_body` regardless of this flag, preserving wire fidelity for downstream tools and `resend_*`. Decode failures (unknown codec, malformed input, decoded size > 16 MiB cap, multi-codec chain) surface a `*_body_decode_anomaly` field; the wire-form body is left intact.
+
 ## Resource Details
 
 ### flows
@@ -79,6 +84,8 @@ Use the `messages` resource with `limit`/`offset` to page through all messages.
 Requires: `id` (flow ID).
 
 Returns: id, conn_id, protocol, state, method, url, request/response headers and bodies, raw bytes (base64), connection info, protocol_summary, message_preview (for streaming), original_request (for variant flows), timestamps.
+
+When `decode_bodies` is `true` (the default) and the body has a recognised `Content-Encoding`, the response also includes `request_body_decoded` / `response_body_decoded` (plaintext after Output Filter masking), `request_body_decoded_encoding` / `response_body_decoded_encoding` (`text` or `base64`), `request_body_encoding_applied` / `response_body_encoding_applied` (codec name, e.g. `gzip`). On decode failure, `request_body_decode_anomaly` / `response_body_decode_anomaly` carry `{type, detail}` (`unknown_encoding`, `malformed`, `size_exceeded`, `chain_rejected`, `truncated_decode`).
 
 ### messages
 Get paginated messages within a flow. Supports direction filtering for streaming protocols.

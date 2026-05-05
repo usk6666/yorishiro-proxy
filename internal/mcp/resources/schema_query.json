@@ -112,6 +112,10 @@
       "type": "integer",
       "description": "Number of items to skip for pagination.",
       "minimum": 0
+    },
+    "decode_bodies": {
+      "type": "boolean",
+      "description": "Decode HTTP Content-Encoding (gzip/deflate/br/zstd) bodies in flow and messages responses. Default true. The wire-form body is always returned unchanged regardless of this flag."
     }
   },
   "additionalProperties": false

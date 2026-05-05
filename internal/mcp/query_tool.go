@@ -14,6 +14,7 @@ import (
 	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/usk6666/yorishiro-proxy/internal/bodydecode"
 	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/connector"
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
@@ -52,6 +53,14 @@ type queryInput struct {
 
 	// Offset is the number of items to skip for pagination.
 	Offset int `json:"offset,omitempty" jsonschema:"number of items to skip for pagination (must be >= 0)"`
+
+	// DecodeBodies controls whether the flow / messages handlers decode HTTP
+	// Content-Encoding (gzip / deflate / br / zstd) bodies into additive
+	// `*_body_decoded` fields for AI-agent readability. Default is true. Set
+	// to false to skip decompression when fidelity-only inspection is desired.
+	// The original wire-form body is always returned in `*_body` regardless
+	// of this flag (CLAUDE.md MITM principle #1).
+	DecodeBodies *bool `json:"decode_bodies,omitempty" jsonschema:"decode HTTP Content-Encoding bodies (gzip/deflate/br/zstd) into *_body_decoded fields (default true)"`
 }
 
 // queryFilter contains filter options for the flows and fuzz resources.
@@ -497,20 +506,41 @@ type queryFlowResult struct {
 	ResponseBodyEncoding  string              `json:"response_body_encoding"`
 	RequestBodyTruncated  bool                `json:"request_body_truncated"`
 	ResponseBodyTruncated bool                `json:"response_body_truncated"`
-	Timestamp             string              `json:"timestamp"`
-	DurationMs            int64               `json:"duration_ms"`
-	SendMs                *int64              `json:"send_ms,omitempty"`
-	WaitMs                *int64              `json:"wait_ms,omitempty"`
-	ReceiveMs             *int64              `json:"receive_ms,omitempty"`
-	Tags                  map[string]string   `json:"tags,omitempty"`
-	Anomalies             []queryAnomaly      `json:"anomalies,omitempty"`
-	BlockedBy             string              `json:"blocked_by,omitempty"`
-	RawRequest            string              `json:"raw_request,omitempty"`
-	RawResponse           string              `json:"raw_response,omitempty"`
-	ConnInfo              *connInfoResult     `json:"conn_info,omitempty"`
-	MessageCount          int                 `json:"message_count"`
-	ProtocolSummary       map[string]string   `json:"protocol_summary,omitempty"`
-	MessagePreview        []queryMessageEntry `json:"message_preview,omitempty"`
+	// RequestBodyDecoded holds the request body after Content-Encoding decode
+	// (gzip / deflate / br / zstd). Empty when decode is disabled, the body
+	// has no Content-Encoding (or `identity`), or decode failed (see
+	// RequestBodyDecodeAnomaly).
+	RequestBodyDecoded string `json:"request_body_decoded,omitempty"`
+	// RequestBodyDecodedEncoding is "text" or "base64" describing the
+	// transport encoding of RequestBodyDecoded (matches RequestBodyEncoding
+	// semantics).
+	RequestBodyDecodedEncoding string `json:"request_body_decoded_encoding,omitempty"`
+	// RequestBodyEncodingApplied names the codec applied (e.g. "gzip", "br").
+	// Empty when no decode happened.
+	RequestBodyEncodingApplied string `json:"request_body_encoding_applied,omitempty"`
+	// RequestBodyDecodeAnomaly is set when Content-Encoding decode was
+	// attempted but rejected or failed; the wire-form body is preserved in
+	// RequestBody.
+	RequestBodyDecodeAnomaly *queryDecodeAnomaly `json:"request_body_decode_anomaly,omitempty"`
+	// ResponseBodyDecoded mirrors RequestBodyDecoded for the response side.
+	ResponseBodyDecoded         string              `json:"response_body_decoded,omitempty"`
+	ResponseBodyDecodedEncoding string              `json:"response_body_decoded_encoding,omitempty"`
+	ResponseBodyEncodingApplied string              `json:"response_body_encoding_applied,omitempty"`
+	ResponseBodyDecodeAnomaly   *queryDecodeAnomaly `json:"response_body_decode_anomaly,omitempty"`
+	Timestamp                   string              `json:"timestamp"`
+	DurationMs                  int64               `json:"duration_ms"`
+	SendMs                      *int64              `json:"send_ms,omitempty"`
+	WaitMs                      *int64              `json:"wait_ms,omitempty"`
+	ReceiveMs                   *int64              `json:"receive_ms,omitempty"`
+	Tags                        map[string]string   `json:"tags,omitempty"`
+	Anomalies                   []queryAnomaly      `json:"anomalies,omitempty"`
+	BlockedBy                   string              `json:"blocked_by,omitempty"`
+	RawRequest                  string              `json:"raw_request,omitempty"`
+	RawResponse                 string              `json:"raw_response,omitempty"`
+	ConnInfo                    *connInfoResult     `json:"conn_info,omitempty"`
+	MessageCount                int                 `json:"message_count"`
+	ProtocolSummary             map[string]string   `json:"protocol_summary,omitempty"`
+	MessagePreview              []queryMessageEntry `json:"message_preview,omitempty"`
 	// OriginalRequest holds the original (pre-modification) request data
 	// when a variant exists (intercept/transform modified the request).
 	// Only populated when the flow contains variant messages.
@@ -521,22 +551,38 @@ type queryFlowResult struct {
 	OriginalResponse *queryVariantResponse `json:"original_response,omitempty"`
 }
 
+// queryDecodeAnomaly is a structured anomaly entry surfaced when
+// Content-Encoding decode is rejected or fails. Wire-form bytes are always
+// preserved in the sibling *_body field.
+type queryDecodeAnomaly struct {
+	Type   string `json:"type"`
+	Detail string `json:"detail,omitempty"`
+}
+
 // queryVariantRequest represents the original request before intercept/transform modification.
 type queryVariantRequest struct {
-	Method       string              `json:"method"`
-	URL          string              `json:"url"`
-	Headers      map[string][]string `json:"headers"`
-	Body         string              `json:"body"`
-	BodyEncoding string              `json:"body_encoding"`
+	Method              string              `json:"method"`
+	URL                 string              `json:"url"`
+	Headers             map[string][]string `json:"headers"`
+	Body                string              `json:"body"`
+	BodyEncoding        string              `json:"body_encoding"`
+	BodyDecoded         string              `json:"body_decoded,omitempty"`
+	BodyDecodedEncoding string              `json:"body_decoded_encoding,omitempty"`
+	BodyEncodingApplied string              `json:"body_encoding_applied,omitempty"`
+	BodyDecodeAnomaly   *queryDecodeAnomaly `json:"body_decode_anomaly,omitempty"`
 }
 
 // queryVariantResponse represents the original response before intercept modification.
 type queryVariantResponse struct {
-	StatusCode    int                 `json:"status_code"`
-	Headers       map[string][]string `json:"headers"`
-	Body          string              `json:"body"`
-	BodyEncoding  string              `json:"body_encoding"`
-	BodyTruncated bool                `json:"body_truncated"`
+	StatusCode          int                 `json:"status_code"`
+	Headers             map[string][]string `json:"headers"`
+	Body                string              `json:"body"`
+	BodyEncoding        string              `json:"body_encoding"`
+	BodyTruncated       bool                `json:"body_truncated"`
+	BodyDecoded         string              `json:"body_decoded,omitempty"`
+	BodyDecodedEncoding string              `json:"body_decoded_encoding,omitempty"`
+	BodyEncodingApplied string              `json:"body_encoding_applied,omitempty"`
+	BodyDecodeAnomaly   *queryDecodeAnomaly `json:"body_decode_anomaly,omitempty"`
 }
 
 // streamPreviewLimit is the maximum number of messages to include in a streaming flow preview.
@@ -601,9 +647,80 @@ func resolveVariantPair(msgs []*flow.Flow) (effective, original *flow.Flow) {
 	return effective, original
 }
 
+// decodedBodyView is the additive body-decoded form produced from a stored
+// Flow.Body. The wire-form encoded fields (Body / BodyEncoding) are computed
+// separately by encodeBody on the original (compressed) bytes and remain
+// unchanged for backward compatibility (CLAUDE.md MITM principle #1).
+type decodedBodyView struct {
+	Body         string
+	BodyEncoding string
+	Applied      string
+	Anomaly      *queryDecodeAnomaly
+}
+
+// findContentEncoding case-insensitively returns the first value of the
+// Content-Encoding header from a flow's Headers map. Empty when absent.
+func findContentEncoding(headers map[string][]string) string {
+	for k, v := range headers {
+		if strings.EqualFold(k, "Content-Encoding") && len(v) > 0 {
+			return v[0]
+		}
+	}
+	return ""
+}
+
+// computeDecodedBody attempts to decode rawBody using the Content-Encoding
+// header value, then applies SafetyFilter output masking on the plaintext —
+// closing the bug where the masking step previously ran on compressed bytes
+// that no PII regex could ever match. Returns the zero value when decode is
+// disabled, the body has no Content-Encoding (or `identity`), rawBody is
+// empty, or the decoded form would simply duplicate rawBody.
+func (s *Server) computeDecodedBody(rawBody []byte, headers map[string][]string, decodeEnabled, truncated bool) decodedBodyView {
+	if !decodeEnabled || len(rawBody) == 0 {
+		return decodedBodyView{}
+	}
+	contentEncoding := findContentEncoding(headers)
+	decoded, applied, anomaly := bodydecode.Decode(rawBody, contentEncoding, bodydecode.DefaultMaxDecodedSize)
+	if anomaly == nil && applied == "" {
+		// identity / no CE: decoded form equals rawBody, so do not duplicate.
+		return decodedBodyView{}
+	}
+	if anomaly != nil {
+		// Mid-stream truncation often manifests as a malformed gzip/zstd
+		// tail. Reclassify so callers can distinguish a corrupted upstream
+		// body from a truncated-at-storage condition.
+		view := decodedBodyView{}
+		if anomaly.Type == bodydecode.AnomalyMalformed && truncated {
+			view.Anomaly = &queryDecodeAnomaly{
+				Type:   "truncated_decode",
+				Detail: "decode failed because body was truncated at storage time",
+			}
+		} else {
+			view.Anomaly = &queryDecodeAnomaly{Type: anomaly.Type, Detail: anomaly.Detail}
+		}
+		return view
+	}
+	masked := s.filterOutputBody(decoded)
+	bodyStr, bodyEnc := encodeBody(masked)
+	return decodedBodyView{
+		Body:         bodyStr,
+		BodyEncoding: bodyEnc,
+		Applied:      applied,
+	}
+}
+
+// resolveDecodeBodies returns the effective value of the decode_bodies query
+// input flag, applying its default of true when omitted.
+func resolveDecodeBodies(input queryInput) bool {
+	if input.DecodeBodies == nil {
+		return true
+	}
+	return *input.DecodeBodies
+}
+
 // buildOriginalRequest builds a queryVariantRequest from the original send message.
 // Returns nil if originalMsg is nil.
-func buildOriginalRequest(originalMsg *flow.Flow) *queryVariantRequest {
+func (s *Server) buildOriginalRequest(originalMsg *flow.Flow, decodeEnabled bool) *queryVariantRequest {
 	if originalMsg == nil {
 		return nil
 	}
@@ -612,38 +729,50 @@ func buildOriginalRequest(originalMsg *flow.Flow) *queryVariantRequest {
 	if originalMsg.URL != nil {
 		origURLStr = originalMsg.URL.String()
 	}
-	return &queryVariantRequest{
+	v := &queryVariantRequest{
 		Method:       originalMsg.Method,
 		URL:          origURLStr,
 		Headers:      originalMsg.Headers,
 		Body:         origBodyStr,
 		BodyEncoding: origBodyEnc,
 	}
+	dec := s.computeDecodedBody(originalMsg.Body, originalMsg.Headers, decodeEnabled, originalMsg.BodyTruncated)
+	v.BodyDecoded = dec.Body
+	v.BodyDecodedEncoding = dec.BodyEncoding
+	v.BodyEncodingApplied = dec.Applied
+	v.BodyDecodeAnomaly = dec.Anomaly
+	return v
 }
 
 // buildOriginalResponse builds a queryVariantResponse from the original receive message.
 // Returns nil if originalMsg is nil.
-func buildOriginalResponse(originalMsg *flow.Flow) *queryVariantResponse {
+func (s *Server) buildOriginalResponse(originalMsg *flow.Flow, decodeEnabled bool) *queryVariantResponse {
 	if originalMsg == nil {
 		return nil
 	}
 	origBodyStr, origBodyEnc := encodeBody(originalMsg.Body)
-	return &queryVariantResponse{
+	v := &queryVariantResponse{
 		StatusCode:    originalMsg.StatusCode,
 		Headers:       originalMsg.Headers,
 		Body:          origBodyStr,
 		BodyEncoding:  origBodyEnc,
 		BodyTruncated: originalMsg.BodyTruncated,
 	}
+	dec := s.computeDecodedBody(originalMsg.Body, originalMsg.Headers, decodeEnabled, originalMsg.BodyTruncated)
+	v.BodyDecoded = dec.Body
+	v.BodyDecodedEncoding = dec.BodyEncoding
+	v.BodyEncodingApplied = dec.Applied
+	v.BodyDecodeAnomaly = dec.Anomaly
+	return v
 }
 
 // buildMessagePreview creates a preview of messages for streaming flows, limited to streamPreviewLimit.
-func buildMessagePreview(msgs []*flow.Flow) []queryMessageEntry {
+func (s *Server) buildMessagePreview(msgs []*flow.Flow, decodeEnabled bool) []queryMessageEntry {
 	previewLimit := streamPreviewLimit
 	if previewLimit > len(msgs) {
 		previewLimit = len(msgs)
 	}
-	return convertMessagesToEntries(msgs[:previewLimit])
+	return s.convertMessagesToEntries(msgs[:previewLimit], decodeEnabled)
 }
 
 // handleQueryFlow returns detailed information about a single flow.
@@ -667,6 +796,7 @@ func (s *Server) handleQueryFlow(ctx context.Context, input queryInput) (*gomcp.
 	}
 
 	cat := categorizeMessages(msgs)
+	decodeEnabled := resolveDecodeBodies(input)
 
 	var urlStr, method string
 	var reqHeaders, respHeaders map[string][]string
@@ -674,6 +804,7 @@ func (s *Server) handleQueryFlow(ctx context.Context, input queryInput) (*gomcp.
 	var reqTruncated, respTruncated bool
 	var statusCode int
 	var rawReqStr, rawRespStr string
+	var reqDecoded, respDecoded decodedBodyView
 
 	if cat.sendMsg != nil {
 		method = cat.sendMsg.Method
@@ -686,6 +817,10 @@ func (s *Server) handleQueryFlow(ctx context.Context, input queryInput) (*gomcp.
 		if len(cat.sendMsg.RawBytes) > 0 {
 			rawReqStr = base64.StdEncoding.EncodeToString(s.filterOutputBody(cat.sendMsg.RawBytes))
 		}
+		// Decode against the original (pre-mask) body so the codec sees the
+		// real wire bytes — the SafetyFilter on compressed bytes is a no-op
+		// today, but if a future filter mutates them the decoder would fail.
+		reqDecoded = s.computeDecodedBody(cat.sendMsg.Body, cat.sendMsg.Headers, decodeEnabled, cat.sendMsg.BodyTruncated)
 	}
 	if cat.recvMsg != nil {
 		statusCode = cat.recvMsg.StatusCode
@@ -695,6 +830,7 @@ func (s *Server) handleQueryFlow(ctx context.Context, input queryInput) (*gomcp.
 		if len(cat.recvMsg.RawBytes) > 0 {
 			rawRespStr = base64.StdEncoding.EncodeToString(s.filterOutputBody(cat.recvMsg.RawBytes))
 		}
+		respDecoded = s.computeDecodedBody(cat.recvMsg.Body, cat.recvMsg.Headers, decodeEnabled, cat.recvMsg.BodyTruncated)
 	}
 
 	// Ensure headers are never nil to avoid null in JSON serialization.
@@ -723,37 +859,45 @@ func (s *Server) handleQueryFlow(ctx context.Context, input queryInput) (*gomcp.
 	summary := buildProtocolSummary(fl.Protocol, msgs)
 
 	result := &queryFlowResult{
-		ID:                    fl.ID,
-		ConnID:                fl.ConnID,
-		Protocol:              fl.Protocol,
-		Scheme:                fl.Scheme,
-		State:                 fl.State,
-		Method:                method,
-		URL:                   urlStr,
-		RequestHeaders:        reqHeaders,
-		RequestBody:           reqBodyStr,
-		RequestBodyEncoding:   reqEncoding,
-		ResponseStatusCode:    statusCode,
-		ResponseHeaders:       respHeaders,
-		ResponseBody:          respBodyStr,
-		ResponseBodyEncoding:  respEncoding,
-		RequestBodyTruncated:  reqTruncated,
-		ResponseBodyTruncated: respTruncated,
-		Timestamp:             fl.Timestamp.UTC().Format("2006-01-02T15:04:05Z"),
-		DurationMs:            fl.Duration.Milliseconds(),
-		SendMs:                fl.SendMs,
-		WaitMs:                fl.WaitMs,
-		ReceiveMs:             fl.ReceiveMs,
-		Tags:                  fl.Tags,
-		Anomalies:             extractAnomalies(fl.Tags),
-		BlockedBy:             fl.BlockedBy,
-		RawRequest:            rawReqStr,
-		RawResponse:           rawRespStr,
-		ConnInfo:              connInfo,
-		MessageCount:          len(msgs),
-		ProtocolSummary:       summary,
-		OriginalRequest:       buildOriginalRequest(cat.originalSendMsg),
-		OriginalResponse:      buildOriginalResponse(cat.originalRecvMsg),
+		ID:                          fl.ID,
+		ConnID:                      fl.ConnID,
+		Protocol:                    fl.Protocol,
+		Scheme:                      fl.Scheme,
+		State:                       fl.State,
+		Method:                      method,
+		URL:                         urlStr,
+		RequestHeaders:              reqHeaders,
+		RequestBody:                 reqBodyStr,
+		RequestBodyEncoding:         reqEncoding,
+		RequestBodyDecoded:          reqDecoded.Body,
+		RequestBodyDecodedEncoding:  reqDecoded.BodyEncoding,
+		RequestBodyEncodingApplied:  reqDecoded.Applied,
+		RequestBodyDecodeAnomaly:    reqDecoded.Anomaly,
+		ResponseStatusCode:          statusCode,
+		ResponseHeaders:             respHeaders,
+		ResponseBody:                respBodyStr,
+		ResponseBodyEncoding:        respEncoding,
+		ResponseBodyDecoded:         respDecoded.Body,
+		ResponseBodyDecodedEncoding: respDecoded.BodyEncoding,
+		ResponseBodyEncodingApplied: respDecoded.Applied,
+		ResponseBodyDecodeAnomaly:   respDecoded.Anomaly,
+		RequestBodyTruncated:        reqTruncated,
+		ResponseBodyTruncated:       respTruncated,
+		Timestamp:                   fl.Timestamp.UTC().Format("2006-01-02T15:04:05Z"),
+		DurationMs:                  fl.Duration.Milliseconds(),
+		SendMs:                      fl.SendMs,
+		WaitMs:                      fl.WaitMs,
+		ReceiveMs:                   fl.ReceiveMs,
+		Tags:                        fl.Tags,
+		Anomalies:                   extractAnomalies(fl.Tags),
+		BlockedBy:                   fl.BlockedBy,
+		RawRequest:                  rawReqStr,
+		RawResponse:                 rawRespStr,
+		ConnInfo:                    connInfo,
+		MessageCount:                len(msgs),
+		ProtocolSummary:             summary,
+		OriginalRequest:             s.buildOriginalRequest(cat.originalSendMsg, decodeEnabled),
+		OriginalResponse:            s.buildOriginalResponse(cat.originalRecvMsg, decodeEnabled),
 	}
 
 	// Apply output filter to original request/response variants.
@@ -763,7 +907,7 @@ func (s *Server) handleQueryFlow(ctx context.Context, input queryInput) (*gomcp.
 	// For streaming protocols, include a message preview instead of full request/response.
 	// Streams with more than 2 flows are streaming (unary has exactly 1 send + 1 receive).
 	if len(msgs) > 2 {
-		result.MessagePreview = buildMessagePreview(msgs)
+		result.MessagePreview = s.buildMessagePreview(msgs, decodeEnabled)
 		s.filterOutputMessages(result.MessagePreview)
 	}
 
@@ -774,17 +918,21 @@ func (s *Server) handleQueryFlow(ctx context.Context, input queryInput) (*gomcp.
 
 // queryMessageEntry is a single message in the messages query response.
 type queryMessageEntry struct {
-	ID           string              `json:"id"`
-	Sequence     int                 `json:"sequence"`
-	Direction    string              `json:"direction"`
-	Method       string              `json:"method,omitempty"`
-	URL          string              `json:"url,omitempty"`
-	StatusCode   int                 `json:"status_code,omitempty"`
-	Headers      map[string][]string `json:"headers,omitempty"`
-	Body         string              `json:"body"`
-	BodyEncoding string              `json:"body_encoding"`
-	Metadata     map[string]string   `json:"metadata,omitempty"`
-	Timestamp    string              `json:"timestamp"`
+	ID                  string              `json:"id"`
+	Sequence            int                 `json:"sequence"`
+	Direction           string              `json:"direction"`
+	Method              string              `json:"method,omitempty"`
+	URL                 string              `json:"url,omitempty"`
+	StatusCode          int                 `json:"status_code,omitempty"`
+	Headers             map[string][]string `json:"headers,omitempty"`
+	Body                string              `json:"body"`
+	BodyEncoding        string              `json:"body_encoding"`
+	BodyDecoded         string              `json:"body_decoded,omitempty"`
+	BodyDecodedEncoding string              `json:"body_decoded_encoding,omitempty"`
+	BodyEncodingApplied string              `json:"body_encoding_applied,omitempty"`
+	BodyDecodeAnomaly   *queryDecodeAnomaly `json:"body_decode_anomaly,omitempty"`
+	Metadata            map[string]string   `json:"metadata,omitempty"`
+	Timestamp           string              `json:"timestamp"`
 }
 
 // queryMessagesResult is the response for the messages resource.
@@ -796,12 +944,17 @@ type queryMessagesResult struct {
 
 // convertMessagesToEntries converts flow messages to queryMessageEntry slice.
 // It uses Body for text content and falls back to RawBytes for binary protocols.
-func convertMessagesToEntries(msgs []*flow.Flow) []queryMessageEntry {
+// When decodeEnabled is true, HTTP Content-Encoding (gzip/br/deflate/zstd) is
+// decoded into the additive *_decoded fields; the wire-form body in `body`
+// is preserved unchanged.
+func (s *Server) convertMessagesToEntries(msgs []*flow.Flow, decodeEnabled bool) []queryMessageEntry {
 	entries := make([]queryMessageEntry, 0, len(msgs))
 	for _, msg := range msgs {
 		bodyData := msg.Body
+		usedRawBytes := false
 		if len(bodyData) == 0 && len(msg.RawBytes) > 0 {
 			bodyData = msg.RawBytes
+			usedRawBytes = true
 		}
 		bodyStr, bodyEnc := encodeBody(bodyData)
 
@@ -810,7 +963,7 @@ func convertMessagesToEntries(msgs []*flow.Flow) []queryMessageEntry {
 			urlStr = msg.URL.String()
 		}
 
-		entries = append(entries, queryMessageEntry{
+		entry := queryMessageEntry{
 			ID:           msg.ID,
 			Sequence:     msg.Sequence,
 			Direction:    msg.Direction,
@@ -822,7 +975,18 @@ func convertMessagesToEntries(msgs []*flow.Flow) []queryMessageEntry {
 			BodyEncoding: bodyEnc,
 			Metadata:     msg.Metadata,
 			Timestamp:    msg.Timestamp.UTC().Format("2006-01-02T15:04:05Z"),
-		})
+		}
+		// Only decode the L7-parsed Body. RawBytes are wire bytes and must not
+		// be reinterpreted (Content-Encoding decoding presumes the parser has
+		// already extracted the L7 payload).
+		if !usedRawBytes {
+			dec := s.computeDecodedBody(bodyData, msg.Headers, decodeEnabled, msg.BodyTruncated)
+			entry.BodyDecoded = dec.Body
+			entry.BodyDecodedEncoding = dec.BodyEncoding
+			entry.BodyEncodingApplied = dec.Applied
+			entry.BodyDecodeAnomaly = dec.Anomaly
+		}
+		entries = append(entries, entry)
 	}
 	return entries
 }
@@ -898,7 +1062,7 @@ func (s *Server) handleQueryMessages(ctx context.Context, input queryInput) (*go
 	}
 
 	pageMsgs := paginateMessages(allMsgs, input.Offset, input.Limit)
-	entries := convertMessagesToEntries(pageMsgs)
+	entries := s.convertMessagesToEntries(pageMsgs, resolveDecodeBodies(input))
 
 	// Apply SafetyFilter output masking to message bodies and headers.
 	s.filterOutputMessages(entries)
