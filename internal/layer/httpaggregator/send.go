@@ -21,6 +21,14 @@ const sendChunkSize = 64 * 1024
 // (optionally). EndStream placement follows RFC 9113 §8.1 (trailers carry
 // END_STREAM when present, else the last DATA, else the HEADERS event).
 //
+// 1xx informational responses (RFC 9110 §15.2: 100 Continue, 102 Processing,
+// 103 Early Hints) are emitted as bodyless HEADERS but MUST NOT carry
+// END_STREAM — the actual final response follows on the same stream.
+// Sending END_STREAM on a 1xx pushes the stream into half-closed (remote)
+// from the peer's view, so the subsequent final response HEADERS is
+// rejected as a STREAM_CLOSED stream error (observed against Vercel-hosted
+// origins emitting 103 Early Hints; symptom: page never paints).
+//
 // TODO(USK-637 follow-up / USK-617 perf): Opaque zero-copy fast path
 // dropped for N6.7 — Send always re-encodes via the event path. Restore
 // if profiling warrants.
@@ -32,6 +40,7 @@ func (a *aggregatorChannel) Send(ctx context.Context, env *envelope.Envelope) er
 
 	hasBody := len(msg.Body) > 0 || msg.BodyBuffer != nil || msg.BodyStream != nil
 	hasTrailers := len(msg.Trailers) > 0
+	isInformational := isInformationalStatus(msg.Status)
 
 	// 1. HEADERS event.
 	hdrEvt := &http2.H2HeadersEvent{
@@ -43,7 +52,7 @@ func (a *aggregatorChannel) Send(ctx context.Context, env *envelope.Envelope) er
 		Status:       msg.Status,
 		StatusReason: msg.StatusReason,
 		Headers:      cloneKVs(msg.Headers),
-		EndStream:    !hasBody && !hasTrailers,
+		EndStream:    !isInformational && !hasBody && !hasTrailers,
 	}
 	hdrEnv := &envelope.Envelope{
 		StreamID:  env.StreamID,

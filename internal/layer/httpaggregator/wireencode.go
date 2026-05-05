@@ -53,7 +53,11 @@ func EncodeWireBytes(env *envelope.Envelope) ([]byte, error) {
 
 	hasBody := len(bodyBytes) > 0
 	hasTrailers := len(trailers) > 0
-	headersEndStream := !hasBody && !hasTrailers
+	// 1xx informational responses (RFC 9110 §15.2) never carry END_STREAM
+	// — the actual final response follows on the same stream. Mirror the
+	// live Send path's behaviour so the recorded variant matches what the
+	// proxy would put on the wire.
+	headersEndStream := !isInformationalStatus(msg.Status) && !hasBody && !hasTrailers
 
 	enc := hpack.NewEncoder(defaultEncoderTableSize, true)
 	headerBlock := enc.Encode(headers)

@@ -126,6 +126,124 @@ func TestAggregator_EarlyHints_PhaseResetsToIdle(t *testing.T) {
 	}
 }
 
+// Send path: 1xx informational responses MUST NOT carry END_STREAM on the
+// HEADERS event, even though they have no body and no trailers. The actual
+// final response follows on the same stream; closing it from the proxy
+// side leaves the peer in half-closed (remote) state and the subsequent
+// final-response HEADERS is rejected as a STREAM_CLOSED stream error.
+//
+// Reproducer: Vercel-hosted origins (buzzriya.com, …) emit 103 Early Hints
+// before the actual 200; with the bug, the browser receives the 103 then
+// silently drops the 200 — page never paints.
+func TestAggregator_Send_Informational_NoEndStream(t *testing.T) {
+	cases := []struct {
+		name   string
+		status int
+	}{
+		{"100 Continue", 100},
+		{"102 Processing", 102},
+		{"103 Early Hints", 103},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			inner := newFakeChannel()
+			ch := Wrap(inner, RoleServer, nil, WrapOptions{})
+
+			err := ch.Send(context.Background(), &envelope.Envelope{
+				Direction: envelope.Receive,
+				Protocol:  envelope.ProtocolHTTP,
+				Message: &envelope.HTTPMessage{
+					Status:  tc.status,
+					Headers: []envelope.KeyValue{{Name: "link", Value: "</a.css>; rel=preload"}},
+				},
+			})
+			if err != nil {
+				t.Fatalf("Send: %v", err)
+			}
+			if len(inner.sent) != 1 {
+				t.Fatalf("sent = %d events, want 1 (HEADERS only, no DATA, no trailers)", len(inner.sent))
+			}
+			evt, ok := inner.sent[0].Message.(*http2.H2HeadersEvent)
+			if !ok {
+				t.Fatalf("sent[0].Message = %T, want *H2HeadersEvent", inner.sent[0].Message)
+			}
+			if evt.Status != tc.status {
+				t.Errorf("Status = %d, want %d", evt.Status, tc.status)
+			}
+			if evt.EndStream {
+				t.Errorf("EndStream = true on %d HEADERS; 1xx must not END_STREAM "+
+					"(final response follows on the same stream — peer would reject it as STREAM_CLOSED)",
+					tc.status)
+			}
+		})
+	}
+}
+
+// Send path: a 1xx followed by a 200 with body must produce HEADERS(1xx, no
+// END_STREAM) then HEADERS(200, no END_STREAM) then DATA(END_STREAM) on the
+// same Channel — the wire shape that lets the peer accept the final
+// response without a STREAM_CLOSED error.
+func TestAggregator_Send_Informational_ThenFinal(t *testing.T) {
+	inner := newFakeChannel()
+	ch := Wrap(inner, RoleServer, nil, WrapOptions{})
+
+	// 103 Early Hints.
+	if err := ch.Send(context.Background(), &envelope.Envelope{
+		Direction: envelope.Receive,
+		Protocol:  envelope.ProtocolHTTP,
+		Message: &envelope.HTTPMessage{
+			Status:  103,
+			Headers: []envelope.KeyValue{{Name: "link", Value: "</a.css>; rel=preload"}},
+		},
+	}); err != nil {
+		t.Fatalf("Send 103: %v", err)
+	}
+
+	// 200 OK with body.
+	if err := ch.Send(context.Background(), &envelope.Envelope{
+		Direction: envelope.Receive,
+		Protocol:  envelope.ProtocolHTTP,
+		Message: &envelope.HTTPMessage{
+			Status:  200,
+			Headers: []envelope.KeyValue{{Name: "content-type", Value: "text/html"}},
+			Body:    []byte("<html>hi</html>"),
+		},
+	}); err != nil {
+		t.Fatalf("Send 200: %v", err)
+	}
+
+	if len(inner.sent) != 3 {
+		t.Fatalf("sent = %d events, want 3 (HEADERS-103, HEADERS-200, DATA)", len(inner.sent))
+	}
+
+	hdr103, ok := inner.sent[0].Message.(*http2.H2HeadersEvent)
+	if !ok || hdr103.Status != 103 {
+		t.Fatalf("sent[0] = %T (status=%d), want *H2HeadersEvent status=103", inner.sent[0].Message, hdr103.Status)
+	}
+	if hdr103.EndStream {
+		t.Error("103 HEADERS EndStream = true, want false")
+	}
+
+	hdr200, ok := inner.sent[1].Message.(*http2.H2HeadersEvent)
+	if !ok || hdr200.Status != 200 {
+		t.Fatalf("sent[1] = %T (status=%d), want *H2HeadersEvent status=200", inner.sent[1].Message, hdr200.Status)
+	}
+	if hdr200.EndStream {
+		t.Error("200 HEADERS EndStream = true, want false (DATA follows)")
+	}
+
+	data, ok := inner.sent[2].Message.(*http2.H2DataEvent)
+	if !ok {
+		t.Fatalf("sent[2] = %T, want *H2DataEvent", inner.sent[2].Message)
+	}
+	if !data.EndStream {
+		t.Error("DATA EndStream = false, want true")
+	}
+	if string(data.Payload) != "<html>hi</html>" {
+		t.Errorf("DATA Payload = %q, want <html>hi</html>", data.Payload)
+	}
+}
+
 // Regression guard: a Send-direction HEADERS (request) with Status==0 must
 // NOT be misclassified as a 1xx. (Requests legitimately have :status absent,
 // surfaced as Status == 0 by buildHeadersEvent.)
