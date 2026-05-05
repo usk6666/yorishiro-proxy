@@ -135,6 +135,18 @@ type BuildConfig struct {
 	// once per successful upstream TLS handshake (client-side) with a
 	// `side` field on the payload distinguishing them. nil disables.
 	PluginV2Engine *pluginv2.Engine
+
+	// MaxConcurrentStreams caps the per-connection HTTP/2 stream
+	// concurrency advertised to clients via SETTINGS_MAX_CONCURRENT_STREAMS
+	// on the client-facing (ServerRole) Layer. Streams beyond this cap are
+	// rejected with REFUSED_STREAM per RFC 9113 §5.1.2, bounding the
+	// per-connection goroutine fan-out under load. Zero means use the H2
+	// layer's compile-time default (currently 100); see
+	// internal/layer/http2/connstate.go defaultMaxConcurrentStreams.
+	// Applied only to the inbound (client-facing) Layer; the outbound
+	// (upstream / ClientRole) Layer continues to honour the peer's
+	// advertised limit.
+	MaxConcurrentStreams uint32
 }
 
 // BuildConnectionStack constructs a ConnectionStack for the given CONNECT
@@ -193,6 +205,19 @@ type resolvedTLS struct {
 	insecureSkip bool
 	clientCert   *tls.Certificate
 	rootCAs      *tls.Config
+}
+
+// clientH2MaxConcurrentStreamsOption returns an http2.Option threading the
+// configured SETTINGS_MAX_CONCURRENT_STREAMS into the client-facing
+// (ServerRole) Layer's preface. Returns nil when cfg.MaxConcurrentStreams
+// is zero so the Layer keeps its compile-time default
+// (defaultMaxConcurrentStreams in internal/layer/http2/connstate.go).
+// Callers must guard against nil before appending.
+func clientH2MaxConcurrentStreamsOption(cfg *BuildConfig) http2.Option {
+	if cfg == nil || cfg.MaxConcurrentStreams == 0 {
+		return nil
+	}
+	return http2.WithMaxConcurrentStreams(cfg.MaxConcurrentStreams)
 }
 
 // resolvePerHostTLS resolves per-host TLS overrides from the BuildConfig.
@@ -428,14 +453,18 @@ func buildPoolHitFastPath(
 		TLS:        clientSnap,
 	}
 
-	clientLayer, err := http2.New(clientTLSConn, connID+"/client", http2.ServerRole,
+	clientH2Opts := []http2.Option{
 		http2.WithScheme("https"),
 		http2.WithEnvelopeContext(clientEnvCtx),
 		http2.WithBodySpillDir(cfg.BodySpillDir),
 		http2.WithBodySpillThreshold(cfg.BodySpillThreshold),
 		http2.WithMaxBodySize(cfg.MaxBodySize),
 		http2.WithStateReleaser(cfg.PluginV2Engine),
-	)
+	}
+	if mcsOpt := clientH2MaxConcurrentStreamsOption(cfg); mcsOpt != nil {
+		clientH2Opts = append(clientH2Opts, mcsOpt)
+	}
+	clientLayer, err := http2.New(clientTLSConn, connID+"/client", http2.ServerRole, clientH2Opts...)
 	if err != nil {
 		cfg.HTTP2Pool.Put(poolKey, pooled)
 		clientTLSConn.Close()
@@ -645,14 +674,18 @@ func buildH2Stack(
 	cfg *BuildConfig,
 ) (*ConnectionStack, *envelope.TLSSnapshot, *envelope.TLSSnapshot, error) {
 	// Client-side Layer (ServerRole = local acts as HTTP/2 server).
-	clientLayer, err := http2.New(clientConn, connID+"/client", http2.ServerRole,
+	clientH2Opts := []http2.Option{
 		http2.WithScheme("https"),
 		http2.WithEnvelopeContext(clientEnvCtx),
 		http2.WithBodySpillDir(cfg.BodySpillDir),
 		http2.WithBodySpillThreshold(cfg.BodySpillThreshold),
 		http2.WithMaxBodySize(cfg.MaxBodySize),
 		http2.WithStateReleaser(cfg.PluginV2Engine),
-	)
+	}
+	if mcsOpt := clientH2MaxConcurrentStreamsOption(cfg); mcsOpt != nil {
+		clientH2Opts = append(clientH2Opts, mcsOpt)
+	}
+	clientLayer, err := http2.New(clientConn, connID+"/client", http2.ServerRole, clientH2Opts...)
 	if err != nil {
 		upstreamConn.Close()
 		clientConn.Close()

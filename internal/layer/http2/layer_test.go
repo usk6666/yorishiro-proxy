@@ -344,6 +344,116 @@ func TestLayer_WithInitialSettings(t *testing.T) {
 	_ = l
 }
 
+// TestLayer_WithMaxConcurrentStreams_AdvertisesValue verifies that
+// WithMaxConcurrentStreams overrides only the SETTINGS_MAX_CONCURRENT_STREAMS
+// value in the preface SETTINGS frame, leaving the other defaults
+// (notably the 16 MiB InitialWindowSize bump) untouched. This is the
+// per-field shortcut used by the connector to surface USK-713's
+// proxybuild-level cap without the caller needing to construct a full
+// Settings struct.
+func TestLayer_WithMaxConcurrentStreams_AdvertisesValue(t *testing.T) {
+	l, peer, cleanup := startServerLayer(t, WithMaxConcurrentStreams(11))
+	defer cleanup()
+
+	f, err := peer.rd.ReadFrame()
+	if err != nil {
+		t.Fatalf("read SETTINGS: %v", err)
+	}
+	if f.Header.Type != frame.TypeSettings {
+		t.Fatalf("got %s, want SETTINGS", f.Header.Type)
+	}
+	params, err := f.SettingsParams()
+	if err != nil {
+		t.Fatalf("parse SETTINGS: %v", err)
+	}
+	gotMCS, gotIWS := uint32(0), uint32(0)
+	mcsFound, iwsFound := false, false
+	for _, p := range params {
+		switch p.ID {
+		case frame.SettingMaxConcurrentStreams:
+			gotMCS = p.Value
+			mcsFound = true
+		case frame.SettingInitialWindowSize:
+			gotIWS = p.Value
+			iwsFound = true
+		}
+	}
+	if !mcsFound || gotMCS != 11 {
+		t.Errorf("MaxConcurrentStreams = %d (found=%v), want 11", gotMCS, mcsFound)
+	}
+	// The H2 layer bumps InitialWindowSize to 16 MiB by default; the
+	// per-field override must not silently regress that.
+	const wantIWS = 16 * 1024 * 1024
+	if !iwsFound || gotIWS != wantIWS {
+		t.Errorf("InitialWindowSize = %d (found=%v), want %d", gotIWS, iwsFound, wantIWS)
+	}
+	_ = l
+}
+
+// TestLayer_WithMaxConcurrentStreams_ZeroIsNoOp verifies that passing 0 to
+// WithMaxConcurrentStreams keeps the layer's compile-time default (100).
+// Zero is the documented "use default" sentinel — without this contract
+// the BuildConfig zero-value would advertise 0 and effectively disable
+// the limit.
+func TestLayer_WithMaxConcurrentStreams_ZeroIsNoOp(t *testing.T) {
+	l, peer, cleanup := startServerLayer(t, WithMaxConcurrentStreams(0))
+	defer cleanup()
+
+	f, err := peer.rd.ReadFrame()
+	if err != nil {
+		t.Fatalf("read SETTINGS: %v", err)
+	}
+	params, err := f.SettingsParams()
+	if err != nil {
+		t.Fatalf("parse SETTINGS: %v", err)
+	}
+	for _, p := range params {
+		if p.ID == frame.SettingMaxConcurrentStreams {
+			if p.Value != defaultMaxConcurrentStreams {
+				t.Errorf("MaxConcurrentStreams = %d, want default %d", p.Value, defaultMaxConcurrentStreams)
+			}
+			_ = l
+			return
+		}
+	}
+	t.Errorf("SETTINGS did not include MaxConcurrentStreams entry: %+v", params)
+}
+
+// TestLayer_WithMaxConcurrentStreams_InitialSettingsWins verifies the
+// documented precedence: when the caller supplies WithInitialSettings,
+// the explicit full-Settings override wins over the per-field
+// WithMaxConcurrentStreams shortcut. This guards against ambiguity when
+// both options are layered (e.g., a high-level helper sets MCS while a
+// test injects a custom Settings struct).
+func TestLayer_WithMaxConcurrentStreams_InitialSettingsWins(t *testing.T) {
+	custom := DefaultSettings()
+	custom.MaxConcurrentStreams = 5
+	l, peer, cleanup := startServerLayer(t,
+		WithMaxConcurrentStreams(99),
+		WithInitialSettings(custom),
+	)
+	defer cleanup()
+
+	f, err := peer.rd.ReadFrame()
+	if err != nil {
+		t.Fatalf("read SETTINGS: %v", err)
+	}
+	params, err := f.SettingsParams()
+	if err != nil {
+		t.Fatalf("parse SETTINGS: %v", err)
+	}
+	for _, p := range params {
+		if p.ID == frame.SettingMaxConcurrentStreams {
+			if p.Value != 5 {
+				t.Errorf("MaxConcurrentStreams = %d, want 5 (WithInitialSettings should win over WithMaxConcurrentStreams)", p.Value)
+			}
+			_ = l
+			return
+		}
+	}
+	t.Errorf("SETTINGS did not include MaxConcurrentStreams entry: %+v", params)
+}
+
 // --- EnvelopeContextTemplate ---
 
 // TestLayer_EnvelopeContextTemplate_ReturnsStored verifies the accessor

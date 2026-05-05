@@ -226,4 +226,42 @@ func TestBuildLiveStack_MissingRequired(t *testing.T) {
 	}
 }
 
+// TestBuildLiveStack_MaxConcurrentStreamsPropagates verifies the
+// USK-713 H2 stream-concurrency cap is preserved on the BuildConfig
+// embedded in the resulting Stack. The actual SETTINGS advertisement
+// and REFUSED_STREAM enforcement are exercised at the H2 layer level
+// (TestMaxConcurrentStreams_AdvertisedAndEnforced); this test is the
+// config → runtime path assertion.
+func TestBuildLiveStack_MaxConcurrentStreamsPropagates(t *testing.T) {
+	deps := newTestDeps(t)
+	deps.BuildConfig.MaxConcurrentStreams = 250
+
+	stack, err := BuildLiveStack(context.Background(), deps)
+	if err != nil {
+		t.Fatalf("BuildLiveStack: %v", err)
+	}
+	if stack.BuildConfig == nil {
+		t.Fatal("Stack.BuildConfig is nil")
+	}
+	if got := stack.BuildConfig.MaxConcurrentStreams; got != 250 {
+		t.Errorf("Stack.BuildConfig.MaxConcurrentStreams = %d, want 250", got)
+	}
+}
+
+// TestBuildLiveStack_MaxConcurrentStreamsZeroDefault confirms the
+// zero-value sentinel survives BuildLiveStack unchanged so the
+// downstream H2 layer can fall back to its compile-time default.
+func TestBuildLiveStack_MaxConcurrentStreamsZeroDefault(t *testing.T) {
+	deps := newTestDeps(t)
+	// Field intentionally left at zero on the freshly-constructed BuildConfig.
+
+	stack, err := BuildLiveStack(context.Background(), deps)
+	if err != nil {
+		t.Fatalf("BuildLiveStack: %v", err)
+	}
+	if got := stack.BuildConfig.MaxConcurrentStreams; got != 0 {
+		t.Errorf("Stack.BuildConfig.MaxConcurrentStreams = %d, want 0 (sentinel for layer default)", got)
+	}
+}
+
 var _ = errors.Is // sentinel for future errors.Is assertions on package errors

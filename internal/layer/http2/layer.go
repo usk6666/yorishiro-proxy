@@ -48,14 +48,15 @@ func (r Role) String() string {
 // threading configuration through BuildConfig unchanged; the aggregator
 // consults BodyOpts when wrapping the Layer's event-granular Channels.
 type options struct {
-	scheme             string
-	ctx                envelope.EnvelopeContext
-	initialSettings    *Settings
-	maxHeaderListSize  uint32
-	bodySpillDir       string
-	bodySpillThreshold int64
-	maxBody            int64
-	stateReleaser      pluginv2.StateReleaser
+	scheme               string
+	ctx                  envelope.EnvelopeContext
+	initialSettings      *Settings
+	maxConcurrentStreams uint32
+	maxHeaderListSize    uint32
+	bodySpillDir         string
+	bodySpillThreshold   int64
+	maxBody              int64
+	stateReleaser        pluginv2.StateReleaser
 }
 
 // Option configures a Layer.
@@ -78,6 +79,16 @@ func WithInitialSettings(s Settings) Option {
 		copyS := s
 		o.initialSettings = &copyS
 	}
+}
+
+// WithMaxConcurrentStreams overrides only the SETTINGS_MAX_CONCURRENT_STREAMS
+// value advertised in the preface SETTINGS frame, leaving every other
+// default (including the large flow-control window) intact. Zero is treated
+// as "use default" and is ignored. When both WithMaxConcurrentStreams and
+// WithInitialSettings are supplied, WithInitialSettings wins (the explicit
+// full-Settings override takes precedence over the per-field override).
+func WithMaxConcurrentStreams(n uint32) Option {
+	return func(o *options) { o.maxConcurrentStreams = n }
 }
 
 // WithMaxHeaderListSize sets the local SETTINGS_MAX_HEADER_LIST_SIZE value
@@ -252,6 +263,12 @@ func New(conn net.Conn, streamID string, role Role, opts ...Option) (*Layer, err
 	} else {
 		def := DefaultSettings()
 		def.InitialWindowSize = defaultLargeStreamWindow
+		// Apply per-field MaxConcurrentStreams override only when the
+		// caller did not supply a full WithInitialSettings; the explicit
+		// override wins per the WithMaxConcurrentStreams contract.
+		if o.maxConcurrentStreams != 0 {
+			def.MaxConcurrentStreams = o.maxConcurrentStreams
+		}
 		if err := httpConn.SetLocalSettings(def); err != nil {
 			return nil, err
 		}

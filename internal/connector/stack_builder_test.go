@@ -771,6 +771,48 @@ func TestBuildConfig_ProtocolLimitsFieldsRoundTrip(t *testing.T) {
 	}
 }
 
+// TestClientH2MaxConcurrentStreamsOption_NilCfg returns nil so callers can
+// safely append-with-guard. nil BuildConfig is the unconfigured fallback.
+func TestClientH2MaxConcurrentStreamsOption_NilCfg(t *testing.T) {
+	if got := clientH2MaxConcurrentStreamsOption(nil); got != nil {
+		t.Errorf("nil cfg: got non-nil option, want nil (use H2 layer default)")
+	}
+}
+
+// TestClientH2MaxConcurrentStreamsOption_ZeroValue returns nil when the
+// field is unset (zero) so the H2 layer keeps its compile-time default.
+// This is the documented "preserve current behaviour" sentinel for
+// USK-713.
+func TestClientH2MaxConcurrentStreamsOption_ZeroValue(t *testing.T) {
+	cfg := &BuildConfig{}
+	if got := clientH2MaxConcurrentStreamsOption(cfg); got != nil {
+		t.Errorf("zero cfg: got non-nil option, want nil (use H2 layer default)")
+	}
+}
+
+// TestClientH2MaxConcurrentStreamsOption_NonZeroProducesOption returns a
+// non-nil option when the field is set. The option's effect is exercised
+// at the H2 layer level (TestLayer_WithMaxConcurrentStreams_*).
+func TestClientH2MaxConcurrentStreamsOption_NonZeroProducesOption(t *testing.T) {
+	cfg := &BuildConfig{MaxConcurrentStreams: 42}
+	if got := clientH2MaxConcurrentStreamsOption(cfg); got == nil {
+		t.Errorf("non-zero cfg: got nil option, want non-nil")
+	}
+}
+
+// TestBuildConfig_MaxConcurrentStreamsRoundTrip verifies the new field
+// is a simple value carrier on BuildConfig (USK-713).
+func TestBuildConfig_MaxConcurrentStreamsRoundTrip(t *testing.T) {
+	cfg := &BuildConfig{}
+	if cfg.MaxConcurrentStreams != 0 {
+		t.Errorf("default MaxConcurrentStreams = %d, want 0 (sentinel for layer default)", cfg.MaxConcurrentStreams)
+	}
+	cfg.MaxConcurrentStreams = 250
+	if cfg.MaxConcurrentStreams != 250 {
+		t.Errorf("MaxConcurrentStreams = %d, want 250", cfg.MaxConcurrentStreams)
+	}
+}
+
 // TestGRPCOptionsFromBuildConfig verifies the helper that translates
 // BuildConfig.GRPCMaxMessageSize into the [grpclayer.Option] slice
 // consumed by DispatchH2Stream.
