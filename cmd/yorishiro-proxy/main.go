@@ -385,9 +385,6 @@ func applyTLSFingerprintFlag(tlsFingerprint string, proxyCfg *config.ProxyConfig
 	if !validProfiles[tlsFingerprint] {
 		return nil, fmt.Errorf("invalid -tls-fingerprint value %q: valid values are chrome, firefox, safari, edge, random, none", tlsFingerprint)
 	}
-	if proxyCfg == nil {
-		proxyCfg = &config.ProxyConfig{}
-	}
 	proxyCfg.TLSFingerprint = tlsFingerprint
 	return proxyCfg, nil
 }
@@ -432,7 +429,7 @@ func loadConfigs(configFile, targetPolicyFile string) (*configsResult, error) {
 			return nil, fmt.Errorf("load target policy file: %w", err)
 		}
 		targetScopePolicySource = "policy file"
-	} else if proxyCfg != nil && proxyCfg.TargetScopePolicy != nil {
+	} else if proxyCfg.TargetScopePolicy != nil {
 		targetScopePolicy = proxyCfg.TargetScopePolicy
 		targetScopePolicySource = "config file"
 	}
@@ -609,9 +606,7 @@ func buildMCPComponents(
 		pluginEngine: mcp.NewPluginEngine(pluginv2Engine),
 	}
 
-	if proxyCfg != nil {
-		logger.Info("loaded proxy config file defaults")
-	}
+	logger.Info("loaded proxy config file defaults")
 	if targetScope != nil {
 		allows, denies := targetScope.PolicyRules()
 		logger.Info("target scope policy loaded",
@@ -743,10 +738,7 @@ func mustServerJSONPath() string {
 // initSafetyFilter creates a SafetyFilter engine from config file settings and
 // CLI/env overrides. Returns nil if SafetyFilter is not enabled or not configured.
 func initSafetyFilter(cfg *config.Config, proxyCfg *config.ProxyConfig, logger *slog.Logger) (*safety.Engine, error) {
-	var sfCfg *config.SafetyFilterConfig
-	if proxyCfg != nil {
-		sfCfg = proxyCfg.SafetyFilter
-	}
+	sfCfg := proxyCfg.SafetyFilter
 
 	// Determine if SafetyFilter is enabled.
 	// Priority: CLI flag/env var > config file > default (disabled).
@@ -1022,7 +1014,7 @@ func initPluginV2Engine(ctx context.Context, store *flow.SQLiteStore, proxyCfg *
 		eng.Close()
 		return nil, fmt.Errorf("init pluginv2 store: %w", err)
 	}
-	if proxyCfg != nil && len(proxyCfg.Plugins) > 0 {
+	if len(proxyCfg.Plugins) > 0 {
 		if err := eng.LoadPlugins(ctx, proxyCfg.Plugins); err != nil {
 			eng.Close()
 			return nil, fmt.Errorf("load pluginv2 plugins: %w", err)
@@ -1093,15 +1085,13 @@ func newLiveBuildConfig(
 		BodySpillDir:       config.ResolveBodySpillDir(cfg),
 		BodySpillThreshold: config.ResolveBodySpillThreshold(cfg),
 	}
-	if proxyCfg != nil {
-		bc.HostTLSResolver = connector.NewHostTLSResolver(proxyCfg.HostTLS)
-		bc.WSMaxFrameSize = config.ResolveWSMaxFrameSize(proxyCfg.WebSocket)
-		bc.WSDeflateEnabled = config.ResolveWSDeflateEnabled(proxyCfg.WebSocket)
-		bc.GRPCMaxMessageSize = uint32(config.ResolveGRPCMaxMessageSize(proxyCfg.GRPC))
-		bc.SSEMaxEventSize = config.ResolveSSEMaxEventSize(proxyCfg.SSE)
-		if proxyCfg.TLSFingerprint != "" {
-			bc.TLSFingerprint = proxyCfg.TLSFingerprint
-		}
+	bc.HostTLSResolver = connector.NewHostTLSResolver(proxyCfg.HostTLS)
+	bc.WSMaxFrameSize = config.ResolveWSMaxFrameSize(proxyCfg.WebSocket)
+	bc.WSDeflateEnabled = config.ResolveWSDeflateEnabled(proxyCfg.WebSocket)
+	bc.GRPCMaxMessageSize = uint32(config.ResolveGRPCMaxMessageSize(proxyCfg.GRPC))
+	bc.SSEMaxEventSize = config.ResolveSSEMaxEventSize(proxyCfg.SSE)
+	if proxyCfg.TLSFingerprint != "" {
+		bc.TLSFingerprint = proxyCfg.TLSFingerprint
 	}
 
 	// Install the upstream push recorder (USK-623). The callback fires
@@ -1206,22 +1196,20 @@ func initHostTLSRegistry(cfg *config.Config, proxyCfg *config.ProxyConfig, logge
 		return nil, err
 	}
 
-	if proxyCfg != nil {
-		if proxyCfg.ClientCertPath != "" && proxyCfg.ClientKeyPath != "" && reg.Global() == nil {
-			globalTLS := &transport.HostTLSConfig{
-				ClientCertPath: proxyCfg.ClientCertPath,
-				ClientKeyPath:  proxyCfg.ClientKeyPath,
-			}
-			if err := globalTLS.Validate(); err != nil {
-				return nil, fmt.Errorf("proxy config global client cert: %w", err)
-			}
-			reg.SetGlobal(globalTLS)
-			logger.Info("global mTLS client certificate configured from proxy config",
-				"cert", proxyCfg.ClientCertPath, "key", proxyCfg.ClientKeyPath)
+	if proxyCfg.ClientCertPath != "" && proxyCfg.ClientKeyPath != "" && reg.Global() == nil {
+		globalTLS := &transport.HostTLSConfig{
+			ClientCertPath: proxyCfg.ClientCertPath,
+			ClientKeyPath:  proxyCfg.ClientKeyPath,
 		}
-		if err := applyHostTLSEntries(reg, proxyCfg.HostTLS, "proxy config ", logger); err != nil {
-			return nil, err
+		if err := globalTLS.Validate(); err != nil {
+			return nil, fmt.Errorf("proxy config global client cert: %w", err)
 		}
+		reg.SetGlobal(globalTLS)
+		logger.Info("global mTLS client certificate configured from proxy config",
+			"cert", proxyCfg.ClientCertPath, "key", proxyCfg.ClientKeyPath)
+	}
+	if err := applyHostTLSEntries(reg, proxyCfg.HostTLS, "proxy config ", logger); err != nil {
+		return nil, err
 	}
 
 	return reg, nil
@@ -1259,11 +1247,9 @@ func applyHostTLSEntries(reg *transport.HostTLSRegistry, entries map[string]*con
 //  2. cfg.TLSFingerprint — populated by the top-level config file's
 //     `tls_fingerprint`. Kept for backward compatibility.
 //  3. empty — falls back to StandardTransport.
-//
-// proxyCfg may be nil when no proxy-config file was loaded.
 func initTLSTransport(cfg *config.Config, proxyCfg *config.ProxyConfig, reg *transport.HostTLSRegistry, logger *slog.Logger) transport.TLSTransport {
 	fingerprint := ""
-	if proxyCfg != nil && proxyCfg.TLSFingerprint != "" {
+	if proxyCfg.TLSFingerprint != "" {
 		fingerprint = proxyCfg.TLSFingerprint
 	} else if cfg.TLSFingerprint != "" {
 		fingerprint = cfg.TLSFingerprint

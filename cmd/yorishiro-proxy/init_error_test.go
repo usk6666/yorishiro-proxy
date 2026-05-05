@@ -369,9 +369,9 @@ func TestApplyTLSFingerprintFlag_ErrorPaths(t *testing.T) {
 			errSubstr:   "invalid -tls-fingerprint value",
 		},
 		{
-			name:        "nil proxy config gets initialized",
+			name:        "zero proxy config accepts fingerprint",
 			fingerprint: "safari",
-			proxyCfg:    nil,
+			proxyCfg:    &config.ProxyConfig{},
 			wantErr:     false,
 			wantFP:      "safari",
 		},
@@ -379,7 +379,11 @@ func TestApplyTLSFingerprintFlag_ErrorPaths(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result, err := applyTLSFingerprintFlag(tt.fingerprint, tt.proxyCfg)
+			proxyCfg := tt.proxyCfg
+			if proxyCfg == nil {
+				proxyCfg = &config.ProxyConfig{}
+			}
+			result, err := applyTLSFingerprintFlag(tt.fingerprint, proxyCfg)
 			if tt.wantErr {
 				if err == nil {
 					t.Fatal("expected error, got nil")

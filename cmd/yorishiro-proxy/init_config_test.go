@@ -132,7 +132,7 @@ func TestApplyTLSFingerprintFlag_ValidProfiles(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result, err := applyTLSFingerprintFlag(tt.profile, nil)
+			result, err := applyTLSFingerprintFlag(tt.profile, &config.ProxyConfig{})
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -144,19 +144,19 @@ func TestApplyTLSFingerprintFlag_ValidProfiles(t *testing.T) {
 }
 
 func TestApplyTLSFingerprintFlag_InvalidProfile(t *testing.T) {
-	_, err := applyTLSFingerprintFlag("invalid-browser", nil)
+	_, err := applyTLSFingerprintFlag("invalid-browser", &config.ProxyConfig{})
 	if err == nil {
 		t.Fatal("expected error for invalid profile")
 	}
 }
 
-func TestApplyTLSFingerprintFlag_NilProxyCfg(t *testing.T) {
-	result, err := applyTLSFingerprintFlag("chrome", nil)
+func TestApplyTLSFingerprintFlag_ZeroProxyCfg(t *testing.T) {
+	result, err := applyTLSFingerprintFlag("chrome", &config.ProxyConfig{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if result == nil {
-		t.Fatal("expected non-nil proxyCfg to be created")
+		t.Fatal("expected non-nil proxyCfg")
 	}
 	if result.TLSFingerprint != "chrome" {
 		t.Errorf("TLSFingerprint = %q, want %q", result.TLSFingerprint, "chrome")

@@ -25,7 +25,7 @@ func TestInitSafetyFilter_DisabledByDefault(t *testing.T) {
 	logger := testLogger(t)
 	cfg := config.Default()
 
-	engine, err := initSafetyFilter(cfg, nil, logger)
+	engine, err := initSafetyFilter(cfg, &config.ProxyConfig{}, logger)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -65,8 +65,8 @@ func TestInitSafetyFilter_EnabledViaCLIOverride(t *testing.T) {
 	cfg := config.Default()
 	cfg.SafetyFilterEnabled = boolPtr(true)
 
-	// No proxy config, but CLI override enables the filter.
-	engine, err := initSafetyFilter(cfg, nil, logger)
+	// Zero proxy config, but CLI override enables the filter.
+	engine, err := initSafetyFilter(cfg, &config.ProxyConfig{}, logger)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -284,16 +284,16 @@ func TestInitSafetyFilter_SectionLevelAction(t *testing.T) {
 	}
 }
 
-func TestInitSafetyFilter_NilProxyConfig(t *testing.T) {
+func TestInitSafetyFilter_ZeroProxyConfig(t *testing.T) {
 	logger := testLogger(t)
 	cfg := config.Default()
 
-	engine, err := initSafetyFilter(cfg, nil, logger)
+	engine, err := initSafetyFilter(cfg, &config.ProxyConfig{}, logger)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if engine != nil {
-		t.Fatal("expected nil engine with nil proxyCfg and no CLI override")
+		t.Fatal("expected nil engine with zero proxyCfg and no CLI override")
 	}
 }
 
@@ -362,7 +362,7 @@ func TestInitHostTLSRegistry_EmptyConfig(t *testing.T) {
 	logger := testLogger(t)
 	cfg := config.Default()
 
-	reg, err := initHostTLSRegistry(cfg, nil, logger)
+	reg, err := initHostTLSRegistry(cfg, &config.ProxyConfig{}, logger)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -390,7 +390,7 @@ func TestInitHostTLSRegistry_PerHostFromCLIConfig(t *testing.T) {
 		},
 	}
 
-	reg, err := initHostTLSRegistry(cfg, nil, logger)
+	reg, err := initHostTLSRegistry(cfg, &config.ProxyConfig{}, logger)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -441,7 +441,7 @@ func TestInitTLSTransport_Default(t *testing.T) {
 	logger := testLogger(t)
 	cfg := config.Default()
 
-	got := initTLSTransport(cfg, nil, nil, logger)
+	got := initTLSTransport(cfg, &config.ProxyConfig{}, nil, logger)
 	if _, ok := got.(*transport.StandardTransport); !ok {
 		t.Errorf("got %T, want *StandardTransport", got)
 	}
@@ -467,13 +467,13 @@ func TestInitTLSTransport_FromProxyConfig(t *testing.T) {
 }
 
 // TestInitTLSTransport_FromTopLevelConfig keeps the legacy
-// Config.TLSFingerprint surface working when proxyCfg is nil.
+// Config.TLSFingerprint surface working when proxyCfg has no fingerprint set.
 func TestInitTLSTransport_FromTopLevelConfig(t *testing.T) {
 	logger := testLogger(t)
 	cfg := config.Default()
 	cfg.TLSFingerprint = "firefox"
 
-	got := initTLSTransport(cfg, nil, nil, logger)
+	got := initTLSTransport(cfg, &config.ProxyConfig{}, nil, logger)
 	utls, ok := got.(*transport.UTLSTransport)
 	if !ok {
 		t.Fatalf("got %T, want *UTLSTransport", got)
@@ -532,7 +532,7 @@ func TestInitHostTLSRegistry_GlobalFromCLIConfig(t *testing.T) {
 		ClientKeyPath:  keyPath,
 	}
 
-	reg, err := initHostTLSRegistry(cfg, nil, logger)
+	reg, err := initHostTLSRegistry(cfg, &config.ProxyConfig{}, logger)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
