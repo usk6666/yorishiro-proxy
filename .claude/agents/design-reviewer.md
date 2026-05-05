@@ -1,7 +1,7 @@
 # Design Review Agent Prompt Template
 
 This file is used as the prompt parameter for the Agent tool by skills that need pre-implementation design analysis.
-Reusable across `/rfc001`, `/implement`, `/orchestrate`, and any skill that modifies architecture.
+Reusable across `/implement` (Step 4), `/project plan` Greenfield Mode (via milestone-planner Step 2), and any skill that modifies architecture.
 
 ## Placeholders
 

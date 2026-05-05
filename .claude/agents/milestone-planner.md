@@ -1,7 +1,7 @@
 # Milestone Planner Agent Prompt Template
 
 This file is used as the prompt parameter for the Agent tool by skills that need to break a milestone into implementable issues.
-Reusable across `/rfc001`, `/project plan`, and any skill that creates Linear issues from a milestone.
+Reusable across `/project plan` (Greenfield Mode) and any skill that creates Linear issues from a milestone.
 
 ## Placeholders
 

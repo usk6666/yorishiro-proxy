@@ -166,11 +166,7 @@ Task tool settings for each Issue:
 
 **Building `{{PRODUCT_CONTEXT}}`:**
 
-From the information gathered in Phase 0, build a **dynamic-only** summary.
-Sub-agents read `CLAUDE.md` as their first step, so do not duplicate static architecture
-or package layout information that is already documented there.
-
-Focus on milestone-specific and Issue-specific context:
+The static product/security context (architecture, data path packages, threat model) lives in **`/review-gate` SKILL.md Phase 1-4** as the single source of truth. Sub-agents already read `CLAUDE.md`, which covers conventions and package layout. Do **not** duplicate either source here — only add milestone-specific and Issue-specific context on top:
 
 ```
 Current milestone: <Milestone name>

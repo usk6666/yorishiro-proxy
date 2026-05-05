@@ -17,7 +17,7 @@ Provides milestone progress overview, Issue creation from the roadmap, and post-
 ## Subcommands
 
 - `/project status` — Overview of milestone progress
-- `/project plan <milestone>` — Gap analysis between roadmap and Linear Issues, with Issue creation
+- `/project plan <milestone>` — Gap analysis between roadmap and Linear Issues, with Issue creation. If the roadmap has no Issue table for the target milestone (greenfield), run the milestone-planner agent to derive Issues from the milestone description + spec — see "Greenfield Mode" below.
 - `/project sync` — Update roadmap documents after implementation is complete
 
 ---
@@ -132,6 +132,40 @@ At the final stage of Issue splitting, confirm the following (see "Config Checkl
 - Do not create Issues not in the roadmap
 - When overwriting an existing Issue's description, show the diff explicitly
 - Infer dependency relationships from Issue content and set blockedBy/blocks
+
+### Greenfield Mode (no roadmap Issue table)
+
+When the roadmap has only a milestone description (no per-Issue table) — typical for newly-added milestones — run the milestone-planner agent to derive a structured Issue breakdown from the milestone description, completed-milestone public surface, and applicable specs.
+
+#### Steps
+
+1. Confirm with the user that greenfield-mode planning is wanted (otherwise the roadmap is the source of truth and Step 2-7 above apply as-is).
+2. Read `.claude/agents/milestone-planner.md` and `.claude/agents/design-reviewer.md` (the planner injects design-reviewer as a sub-step).
+3. Replace the planner's placeholders:
+
+| Placeholder | Value |
+|---|---|
+| `{{MILESTONE_NAME}}` | Target milestone name (e.g., "M5") |
+| `{{MILESTONE_DESCRIPTION}}` | Full description from `mcp__linear-server__get_milestone` |
+| `{{SPEC_REFERENCES}}` | Paths to spec/design docs that apply (e.g., `docs/rfc/envelope.md`, protocol RFCs) |
+| `{{COMPLETED_CONTEXT}}` | One-paragraph summary of public surface from completed milestones the new work will integrate with |
+| `{{PRODUCT_IDENTITY}}` | Read from `.claude/skills/review-gate/SKILL.md` Phase 1-4 "Product context" block — single source of truth |
+| `{{PRINCIPLES}}` | The MITM Implementation Principles from `CLAUDE.md` (the 6-item list). Quote verbatim. |
+| `{{DESIGN_REVIEW_AGENT}}` | Full Prompt Body section from `.claude/agents/design-reviewer.md` (the planner runs design review at milestone scope as Step 2 of its process) |
+| `{{CHECKLISTS}}` | Whichever of "Config Checklist for New Feature Milestones" / "e2e Test Checklist for New Protocol Addition" (both from CLAUDE.md) apply. Quote verbatim — the planner enforces them as mandatory checks. |
+
+4. Launch:
+
+```
+Agent(
+  description="Plan milestone <name>",
+  subagent_type="general-purpose",
+  prompt=<composed prompt>
+)
+```
+
+5. Present the planner's output — Issue breakdown, dependency graph, resolved decisions, unresolved decisions for user input, recommended order — and get user approval.
+6. After approval, create each Issue via `mcp__linear-server__save_issue` with priority, scope, dependencies (`blockedBy`), and acceptance criteria. Then update the roadmap document to embed the new Issue table so subsequent `/project plan` runs hit the regular gap-analysis path instead of greenfield mode.
 
 ---
 

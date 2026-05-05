@@ -45,11 +45,22 @@ and fetch details with `mcp__linear-server__get_issue`.
 
 #### 1-4. Build Context
 
+> **Single source of truth.** Other skills (`/orchestrate`, `/implement`, `/code-review`, `/security-review`) **must** read these blocks from this section instead of redefining their own. Updating the architecture description in this one place propagates everywhere.
+
 **Product context:**
 ```
 yorishiro-proxy is a network proxy (MCP server) for AI agents.
 Provides traffic interception, recording, and replay capabilities for vulnerability assessment.
-Architecture: TCP Listener → Protocol Detection → Protocol Handler → Session Recording → MCP Tool
+Architecture: TCP Listener → Protocol Detection → Layer Stack (TCP→TLS→HTTP/1|HTTP/2→WS|gRPC|gRPC-Web|SSE|Raw)
+              → Pipeline Steps (HostScope→HTTPScope→Safety→PluginPre→Intercept→Transform→Macro→PluginPost→Record)
+              → Flow Recording (L7 Message + L4 Envelope.Raw) → MCP Tool
+
+Data path packages (MITM triage targets):
+  internal/envelope/, internal/layer/, internal/connector/, internal/pipeline/,
+  internal/pluginv2/, internal/proxybuild/, internal/rules/, internal/safety/,
+  internal/flow/, internal/session/
+
+Control plane (net/http allowed): internal/mcp/, cmd/, internal/selfupdate/
 ```
 
 **Security context:**
@@ -59,6 +70,14 @@ yorishiro-proxy operates as a MITM proxy, therefore:
 - It holds the CA private key and dynamically issues certificates
 - Session recordings may contain credentials (auth tokens, passwords)
 - AI agents execute commands via MCP
+
+Threat model:
+- Anomalous wire input (malformed headers, smuggling attempts, oversized frames) is in-scope
+  by design — the parser must surface anomalies via typed Anomaly fields, not panic
+- Plugin Starlark code is sandboxed but plugins are partially trusted (loaded from disk)
+- Wire fidelity is a security property: header dedup / Host=URL enforcement / case
+  normalization in data path code blocks pentest scenarios — see Phase 3-3 MITM
+  Compatibility Triage below
 ```
 
 ---
@@ -130,7 +149,9 @@ yorishiro-proxy is a pentesting MITM proxy. Users intentionally craft anomalous 
 (duplicate headers, Host ≠ URL, mixed-case header names, etc.) for security testing.
 
 **Reject a finding (`REJECTED_MITM`) if it suggests any of the following in data path code**
-(`internal/protocol/`, `internal/proxy/`, `internal/flow/`, `internal/plugin/`):
+(see Product context above for the canonical list — `internal/envelope/`, `internal/layer/`,
+`internal/connector/`, `internal/pipeline/`, `internal/pluginv2/`, `internal/proxybuild/`,
+`internal/rules/`, `internal/safety/`, `internal/flow/`, `internal/session/`):
 
 | Pattern | Example suggestion | Why reject |
 |---------|-------------------|------------|
