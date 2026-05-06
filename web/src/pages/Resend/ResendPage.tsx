@@ -456,7 +456,9 @@ export function ResendPage() {
       setRawTargetAddr(extractTargetAddr(flow));
       setRawUseTls(extractUseTls(flow));
     }
-  }, [flow]);
+    // re-fetch must not overwrite in-flight edits; trigger only on flow id change
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [flow?.id]);
 
   // Sync route param changes.
   useEffect(() => {
