@@ -54,8 +54,7 @@ import (
 // maxFuzzRawVariants caps the cartesian product across all positions.
 // Mirrors maxFuzzHTTPVariants — 1000 variants is a balance between
 // meaningful synchronous fuzz runs and bounded server-side resource
-// use; callers that need more should chain calls or use the legacy
-// `fuzz` tool with its async runner.
+// use; callers that need more should chain calls.
 const maxFuzzRawVariants = 1000
 
 // maxFuzzRawPositions caps the number of positions per call. Mirrors

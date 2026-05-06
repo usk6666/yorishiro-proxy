@@ -1,13 +1,11 @@
-// Package mcp fuzz_grpc.go implements the RFC-001 N8 protocol-typed
-// fuzz_grpc MCP tool. Builds on top of resend_grpc: the same
-// validation / plan / dial / pipeline machinery, iterated N times with
-// per-position payload substitution against the GRPCStart / GRPCData
-// envelopes that compose one gRPC unary RPC.
-//
-// fuzz_grpc coexists with the legacy `fuzz` tool. Each variant becomes
-// one independent gRPC stream — fresh ConnID, fresh StreamID, fresh
-// dial — so per-variant state observed by analysts (Stream rows,
-// PluginStepPost firing) is symmetric with the resend_grpc surface.
+// Package mcp fuzz_grpc.go implements the protocol-typed fuzz_grpc MCP
+// tool. Builds on top of resend_grpc: the same validation / plan / dial /
+// pipeline machinery, iterated N times with per-position payload
+// substitution against the GRPCStart / GRPCData envelopes that compose
+// one gRPC unary RPC. Each variant becomes one independent gRPC stream —
+// fresh ConnID, fresh StreamID, fresh dial — so per-variant state observed
+// by analysts (Stream rows, PluginStepPost firing) is symmetric with the
+// resend_grpc surface.
 //
 // Pipeline placement (RFC §9.3 D1): each variant traverses
 //
@@ -134,14 +132,11 @@ type fuzzGRPCVariantRow struct {
 func (s *Server) registerFuzzGRPC() {
 	gomcp.AddTool(s.server, &gomcp.Tool{
 		Name: "fuzz_grpc",
-		Description: "Synchronously fuzz a gRPC unary RPC with GRPCStart/Data-typed positions. Schema mirrors resend_grpc " +
-			"(flow_id + target_addr + service/method + metadata + messages + trailer_metadata + tag) plus a positions[] list — " +
-			"each position is a typed path (service | method | metadata[N].name | metadata[N].value | messages[N].payload) " +
-			"with a payloads[] list. The cartesian product of all positions yields the variant sequence (capped at 1000 " +
-			"variants per call). Each variant traverses the same self-contained PluginStepPost → RecordStep pipeline as " +
-			"resend_grpc (PluginStepPre is bypassed per RFC-001 §9.3) and is dialed as a fresh independent stream. Legacy " +
-			"`fuzz` tool with concurrency / rate limit / overload monitor coexists in parallel. stop_on_non_ok aborts " +
-			"remaining variants once any variant returns a non-OK gRPC status.",
+		Description: "Synchronously fuzz a gRPC unary RPC. Schema mirrors resend_grpc plus a positions[] list — " +
+			"each position is a typed path (service | method | metadata[N].name | metadata[N].value | " +
+			"messages[N].payload) with payloads[]. The cartesian product of positions yields the variant " +
+			"sequence (capped at 1000 per call). Each variant runs on an independent stream. " +
+			"stop_on_non_ok aborts on the first non-OK gRPC status. See yorishiro://help/fuzz_grpc.",
 	}, s.handleFuzzGRPC)
 }
 

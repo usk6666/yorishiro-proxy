@@ -302,18 +302,11 @@ type configureInterceptResult struct {
 func (s *Server) registerConfigure() {
 	gomcp.AddTool(s.server, &gomcp.Tool{
 		Name: "configure",
-		Description: "Configure runtime proxy settings including upstream proxy, TLS passthrough, intercept rules, intercept queue, auto-transform rules, SOCKS5 authentication, TLS fingerprint profile, and connection limits/timeouts. " +
-			"Supports two operations: 'merge' (default) applies incremental add/remove changes, " +
-			"'replace' replaces entire configuration sections. " +
-			"Upstream proxy routes all outgoing traffic through an HTTP CONNECT or SOCKS5 proxy; set to empty string to disable. " +
-			"TLS passthrough controls which CONNECT destinations bypass MITM interception. " +
-			"Intercept rules define conditions for intercepting requests/responses (host_pattern regex, path_pattern regex, method whitelist, header regex). " +
-			"Intercept queue configures timeout and timeout behavior for blocked requests. " +
-			"Auto-transform rules automatically modify matching requests/responses (add/set/remove headers, replace body patterns). " +
-			"max_connections dynamically changes the concurrent connection limit. " +
-			"peek_timeout_ms and request_timeout_ms dynamically change protocol detection and HTTP request timeouts. " +
-			"All sections are optional; only specified sections are modified. " +
-			"Note: all settings are session-only (in-memory); they are lost when the proxy restarts. To persist settings, define them in the config file (-config flag).",
+		Description: "Update runtime proxy settings on a running listener (upstream proxy, TLS passthrough, " +
+			"intercept rules + queue, auto-transform, SOCKS5 auth, TLS fingerprint, connection/timeout limits). " +
+			"operation='merge' (default) applies incremental add/remove changes; 'replace' replaces entire sections. " +
+			"Only specified sections are modified. Settings are session-only — to persist them use the config file. " +
+			"See yorishiro://help/configure.",
 	}, s.handleConfigure)
 }
 

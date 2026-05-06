@@ -1,16 +1,12 @@
-// Package mcp resend_raw.go implements the RFC-001 N8 protocol-typed
-// resend_raw MCP tool. Schema fields mirror envelope.RawMessage so AI
-// agents address arbitrary TCP / TLS-passthrough payloads by raw byte
-// content (with optional offset-based patches) instead of a typed L7
-// shape. This is the smuggling-and-anomaly-test surface — the wire
-// bytes ARE the message, and the proxy is forbidden from normalising
-// them anywhere on the path.
-//
-// resend_raw coexists with the legacy `resend_raw_h2` and other legacy
-// raw-resend entry points. Those keep working until RFC-001 N9 retires
-// them. This new tool restricts itself to a flow_id-driven recovery
+// Package mcp resend_raw.go implements the protocol-typed resend_raw
+// MCP tool. Schema fields mirror envelope.RawMessage so AI agents
+// address arbitrary TCP / TLS-passthrough payloads by raw byte content
+// (with optional offset-based patches) instead of a typed L7 shape.
+// This is the smuggling-and-anomaly-test surface — the wire bytes ARE
+// the message, and the proxy is forbidden from normalising them anywhere
+// on the path. The tool restricts itself to a flow_id-driven recovery
 // path; from-scratch raw injection (no recorded flow) belongs to
-// fuzz_raw (USK-680) which composes overrides per fuzz iteration.
+// fuzz_raw which composes overrides per fuzz iteration.
 //
 // Pipeline placement (RFC §9.3 D1): resend traverses
 //
@@ -95,14 +91,12 @@ type resendRawTypedResult struct {
 func (s *Server) registerResendRaw() {
 	gomcp.AddTool(s.server, &gomcp.Tool{
 		Name: "resend_raw",
-		Description: "Resend a recorded raw byte payload via a freshly dialled TCP (or TLS) upstream connection. " +
-			"flow_id is REQUIRED — resend_raw has no from-scratch path (use fuzz_raw for ad-hoc injection). " +
-			"override_bytes replaces the payload entirely; patches apply offset-based byte replacements; the two are mutually exclusive. " +
-			"target_addr requires an explicit port (raw is protocol-agnostic; no port defaulting). " +
-			"PluginStepPost fires once on the resend; PluginStepPre is bypassed (RFC-001 §9.3). " +
-			"Wire bytes (override_bytes, patches[].data, recovered Flow.RawBytes) are NEVER normalized — they reach the wire verbatim. " +
-			"This is the smuggling-and-anomaly-test surface; analysts use it to send dual-CL/TE, malformed framing, and other deliberate wire anomalies. " +
-			"Legacy `resend_raw_h2` and other raw entry points coexist in parallel.",
+		Description: "Resend a recorded raw byte payload on a freshly dialled TCP/TLS upstream. " +
+			"flow_id is REQUIRED — use fuzz_raw for ad-hoc injection. override_bytes replaces the payload " +
+			"entirely; patches[] applies offset-based byte replacements (mutually exclusive). target_addr " +
+			"requires an explicit port. Wire bytes are NEVER normalized — they reach the wire verbatim, " +
+			"making this the smuggling/anomaly-test surface (dual-CL/TE, malformed framing, etc.). " +
+			"See yorishiro://help/resend_raw.",
 	}, s.handleResendRaw)
 }
 
@@ -142,8 +136,7 @@ func (s *Server) handleResendRaw(ctx context.Context, _ *gomcp.CallToolRequest, 
 	}
 	// Safety filter: feed the full payload as the body input. URL is empty
 	// (no L7 view), headers nil — raw bytes carry the entire wire surface
-	// so the body argument exhaustively represents the request. Mirrors
-	// the legacy resend_raw safety check at internal/mcp/resend_multiproto.go.
+	// so the body argument exhaustively represents the request.
 	if v := s.checkSafetyInput(plan.payload, "", nil); v != nil {
 		return nil, nil, fmt.Errorf("%s", safetyViolationError(v))
 	}

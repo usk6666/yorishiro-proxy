@@ -1,14 +1,9 @@
-// Package mcp fuzz_http.go implements the RFC-001 N8 protocol-typed
-// fuzz_http MCP tool. Builds on top of resend_http: the same
-// validation / dial / pipeline machinery, iterated N times with per-
-// position payload substitution against the HTTPMessage envelope.
-//
-// fuzz_http coexists with the legacy `fuzz` tool. Legacy continues to
-// work unchanged for HTTP fuzz jobs that need the full async runner
-// (concurrency / rate limit / overload monitor / job registry). This
-// new tool is a *synchronous* per-call fuzzer suitable for small to
-// medium variant counts (≤ maxFuzzHTTPVariants=1000); larger jobs
-// should still use the legacy tool until N9 retires it.
+// Package mcp fuzz_http.go implements the protocol-typed fuzz_http MCP
+// tool. Builds on top of resend_http: the same validation / dial /
+// pipeline machinery, iterated N times with per-position payload
+// substitution against the HTTPMessage envelope. This is a *synchronous*
+// per-call fuzzer suitable for small to medium variant counts
+// (≤ maxFuzzHTTPVariants=1000).
 //
 // Pipeline placement (RFC §9.3 D1): each variant traverses
 //
@@ -34,7 +29,7 @@
 // Variant generation: cartesian product across positions (full N-way
 // product). Total variant count is capped at maxFuzzHTTPVariants=1000
 // to keep the synchronous tool bounded; callers that need more should
-// either chain multiple invocations or use the legacy `fuzz` tool.
+// chain multiple invocations.
 package mcp
 
 import (
@@ -134,14 +129,11 @@ type fuzzHTTPVariantRow struct {
 func (s *Server) registerFuzzHTTP() {
 	gomcp.AddTool(s.server, &gomcp.Tool{
 		Name: "fuzz_http",
-		Description: "Synchronously fuzz an HTTP request with HTTPMessage-typed positions. Schema mirrors resend_http " +
-			"(flow_id + base fields + override_host + tag) plus a positions[] list — each position is a typed path into " +
-			"the HTTPMessage (method | scheme | authority | path | raw_query | body | headers[N].name | headers[N].value) " +
-			"with a payloads[] list. The cartesian product of all positions yields the variant sequence (capped at " +
-			"1000 variants per call). Each variant traverses the same self-contained PluginStepPost → RecordStep " +
-			"pipeline as resend_http (PluginStepPre is bypassed per RFC-001 §9.3). Variants are executed sequentially " +
-			"with a fresh dial per variant; legacy `fuzz` tool with concurrency / rate limit / overload monitor coexists " +
-			"in parallel. stop_on_5xx aborts remaining variants once any variant gets a 5xx response.",
+		Description: "Synchronously fuzz an HTTP request. Schema mirrors resend_http plus a positions[] list — " +
+			"each position is a typed path (method | scheme | authority | path | raw_query | body | " +
+			"headers[N].name | headers[N].value) with payloads[]. The cartesian product of positions yields " +
+			"the variant sequence (capped at 1000 per call). Variants run sequentially with a fresh dial each. " +
+			"stop_on_5xx aborts on the first 5xx response. See yorishiro://help/fuzz_http.",
 	}, s.handleFuzzHTTP)
 }
 

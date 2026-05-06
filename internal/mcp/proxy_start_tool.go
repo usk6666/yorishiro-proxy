@@ -191,23 +191,12 @@ type proxyStartResult struct {
 func (s *Server) registerProxyStart() {
 	gomcp.AddTool(s.server, &gomcp.Tool{
 		Name: "proxy_start",
-		Description: "Start a proxy listener with optional configuration. " +
-			"Supports multiple simultaneous listeners with different names (use 'name' parameter). " +
-			"The proxy listens on the specified address and begins intercepting HTTP/HTTPS/SOCKS5 traffic. " +
-			"Accepts optional name to identify this listener (default: 'default'), " +
-			"upstream_proxy to route all traffic through an upstream proxy (http://host:port or socks5://[user:pass@]host:port), " +
-			"tls_passthrough to specify domains that bypass TLS interception, " +
-			"intercept_rules to define conditions for intercepting requests/responses, " +
-			"auto_transform to configure automatic request/response modification rules, " +
-			"tcp_forwards to map local ports to upstream TCP addresses (string format: 'host:port' for raw TCP, or structured ForwardConfig: {target, protocol, tls} for L7 detection), " +
-			"protocols to specify which protocols are enabled for detection (including SOCKS5), " +
-			"socks5_auth to set SOCKS5 authentication method ('none' or 'password'), " +
-			"socks5_username and socks5_password for SOCKS5 password authentication, " +
-			"tls_fingerprint to set the TLS ClientHello fingerprint profile ('chrome' (default), 'firefox', 'safari', 'edge', 'random', 'none' for standard crypto/tls), " +
-			"max_connections to set the concurrent connection limit (default: 128), " +
-			"peek_timeout_ms for protocol detection timeout (default: 30000ms), " +
-			"and request_timeout_ms for HTTP request header read timeout (default: 60000ms). " +
-			"All fields are optional; defaults: name=default, listen_addr=127.0.0.1:8080, upstream_proxy=direct, passthrough=empty, intercept_rules=empty, auto_transform=empty, tcp_forwards=empty, protocols=all, socks5_auth=none, tls_fingerprint=chrome, max_connections=128, peek_timeout_ms=30000, request_timeout_ms=60000.",
+		Description: "Start a proxy listener on a loopback address with HTTP/HTTPS/SOCKS5 MITM. " +
+			"Multiple named listeners are supported via 'name' (default: 'default'). " +
+			"All configuration sections (upstream proxy, TLS passthrough, intercept/transform rules, " +
+			"SOCKS5 auth, TLS fingerprint, connection/timeout limits, tcp_forwards, protocols) are session-only " +
+			"and are reset to defaults on each invocation; persistent settings belong in the config file. " +
+			"See yorishiro://help/proxy_start for parameter details.",
 	}, s.handleProxyStart)
 }
 

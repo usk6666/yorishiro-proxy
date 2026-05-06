@@ -66,13 +66,12 @@ var availableInterceptActions = []string{"release", "modify_and_forward", "drop"
 func (s *Server) registerIntercept() {
 	gomcp.AddTool(s.server, &gomcp.Tool{
 		Name: "intercept",
-		Description: "Act on a held envelope in the HoldQueue. " +
-			"Supply intercept_id (required), an action, and the per-Message-type modify payload (http / ws / grpc_start / grpc_data / raw) when modifying. " +
-			"Available actions: " +
-			"'release' forwards the held envelope as-is; " +
-			"'modify_and_forward' applies the supplied typed payload (one of http/ws/grpc_start/grpc_data/raw, matching the envelope's Message type), or with mode=\"raw\" + raw_override_base64 forwards a synthetic RawMessage envelope built from the supplied bytes; " +
-			"'drop' discards the held envelope and unblocks the pipeline. " +
-			"Headers in the typed payloads MUST be order-preserved arrays of {name, value} objects (RFC-001 wire-fidelity).",
+		Description: "Act on a held envelope (intercept_id required). " +
+			"Actions: 'release' forwards as-is; 'modify_and_forward' applies a typed payload " +
+			"(http | ws | grpc_start | grpc_data | raw — matching the envelope's Message type), " +
+			"or with mode=\"raw\" + raw_override_base64 forwards a synthetic RawMessage; " +
+			"'drop' discards the envelope. Headers in modify payloads MUST be order-preserved " +
+			"[{name, value}] arrays (wire fidelity). See yorishiro://help/intercept.",
 	}, s.handleInterceptTool)
 }
 

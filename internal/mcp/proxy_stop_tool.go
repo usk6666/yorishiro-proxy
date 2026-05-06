@@ -29,9 +29,9 @@ type proxyStopResult struct {
 func (s *Server) registerProxyStop() {
 	gomcp.AddTool(s.server, &gomcp.Tool{
 		Name: "proxy_stop",
-		Description: "Stop proxy listener(s). If 'name' is specified, stops only that listener. " +
-			"If 'name' is omitted, stops all running listeners. " +
-			"Performs a graceful shutdown, waiting for existing connections to complete before stopping.",
+		Description: "Stop a named proxy listener (or all running listeners when 'name' is omitted). " +
+			"Performs a graceful shutdown waiting for in-flight connections to complete. " +
+			"See yorishiro://help/proxy_stop.",
 	}, s.handleProxyStop)
 }
 

@@ -1,14 +1,9 @@
-// Package mcp fuzz_ws.go implements the RFC-001 N8 protocol-typed
-// fuzz_ws MCP tool. Builds on top of resend_ws: the same validation /
-// flow-recovery / upgrade-dance / pipeline machinery, iterated N times
-// with per-position payload substitution against the WSMessage envelope.
-//
-// fuzz_ws coexists with the legacy `fuzz` tool. Legacy continues to
-// work unchanged for fuzz jobs that need the full async runner
-// (concurrency / rate limit / overload monitor / job registry). This
-// new tool is a *synchronous* per-call fuzzer suitable for small to
-// medium variant counts (≤ maxFuzzWSVariants=1000); larger jobs should
-// still use the legacy tool until N9 retires it.
+// Package mcp fuzz_ws.go implements the protocol-typed fuzz_ws MCP tool.
+// Builds on top of resend_ws: the same validation / flow-recovery /
+// upgrade-dance / pipeline machinery, iterated N times with per-position
+// payload substitution against the WSMessage envelope. This is a
+// *synchronous* per-call fuzzer suitable for small to medium variant
+// counts (≤ maxFuzzWSVariants=1000).
 //
 // Pipeline placement (RFC §9.3 D1): each variant traverses
 //
@@ -28,7 +23,7 @@
 // Variant generation: cartesian product across positions (full N-way
 // product). Total variant count is capped at maxFuzzWSVariants=1000
 // to keep the synchronous tool bounded; callers that need more should
-// either chain multiple invocations or use the legacy `fuzz` tool.
+// chain multiple invocations.
 //
 // Per variant: one WebSocket frame to a freshly dialled + upgraded
 // upstream. Each variant gets its own TCP connection, upgrade dance,
@@ -137,14 +132,11 @@ type fuzzWSVariantRow struct {
 func (s *Server) registerFuzzWS() {
 	gomcp.AddTool(s.server, &gomcp.Tool{
 		Name: "fuzz_ws",
-		Description: "Synchronously fuzz a WebSocket frame with WSMessage-typed positions. Schema mirrors resend_ws " +
-			"(flow_id + target_addr + opcode + base payload + close_code/reason + compressed + tag) plus a positions[] list — " +
-			"each position is a typed path into the WSMessage (payload | close_reason) with a payloads[] list. The cartesian " +
-			"product of all positions yields the variant sequence (capped at 1000 variants per call). Each variant traverses " +
-			"the same self-contained PluginStepPost → RecordStep pipeline as resend_ws (PluginStepPre is bypassed per " +
-			"RFC-001 §9.3) on a freshly dialled + upgraded WebSocket connection. Variants are executed sequentially; legacy " +
-			"`fuzz` tool with concurrency / rate limit / overload monitor coexists in parallel. stop_on_close aborts " +
-			"remaining variants once any variant receives a Close frame from upstream.",
+		Description: "Synchronously fuzz a WebSocket frame. Schema mirrors resend_ws plus a positions[] list — " +
+			"each position is a typed path (payload | close_reason) with payloads[]. The cartesian product " +
+			"of positions yields the variant sequence (capped at 1000 per call). Variants run sequentially over " +
+			"a freshly dialled and upgraded connection. stop_on_close aborts on the first upstream Close frame. " +
+			"See yorishiro://help/fuzz_ws.",
 	}, s.handleFuzzWS)
 }
 

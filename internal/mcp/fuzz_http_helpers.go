@@ -51,7 +51,7 @@ import (
 // maxFuzzHTTPVariants caps the cartesian product across all positions.
 // 1000 variants is a balance between meaningful synchronous fuzz runs
 // and bounded server-side resource use; callers that need more should
-// chain calls or use the legacy `fuzz` tool with its async runner.
+// chain calls.
 const maxFuzzHTTPVariants = 1000
 
 // maxFuzzHTTPPositions caps the number of positions per call. With 1000
@@ -294,10 +294,9 @@ func (s *Server) buildFuzzHTTPPipeline(encoders *pipeline.WireEncoderRegistry) *
 // the row.
 //
 // Per-variant SafetyFilter input gating runs after position application
-// and before the upstream dial (mirroring legacy fuzz_tool.go per-payload
-// semantics). On a violation the variant is recorded with row.Error set
-// and returns statusCode=0 — the caller continues iterating; a single
-// blocked variant does not abort the whole run.
+// and before the upstream dial. On a violation the variant is recorded
+// with row.Error set and returns statusCode=0 — the caller continues
+// iterating; a single blocked variant does not abort the whole run.
 func (s *Server) runFuzzHTTPSingleVariant(ctx context.Context, plan *fuzzHTTPPlan, p *pipeline.Pipeline, dial session.DialFunc, timeout time.Duration, variantIdx int, payloads map[string]string, tag string) (fuzzHTTPVariantRow, int, error) {
 	row := fuzzHTTPVariantRow{
 		Index:    variantIdx,

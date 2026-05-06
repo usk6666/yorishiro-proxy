@@ -1,14 +1,10 @@
-// Package mcp resend_ws.go implements the RFC-001 N8 protocol-typed
-// resend_ws MCP tool. Schema fields mirror envelope.WSMessage
+// Package mcp resend_ws.go implements the protocol-typed resend_ws MCP
+// tool. Schema fields mirror envelope.WSMessage
 // (opcode/fin/payload/close_code/close_reason/compressed) so AI agents
 // address WebSocket frames by structured field instead of round-tripping
-// an opaque message_sequence index.
-//
-// resend_ws coexists with the legacy `resend` tool. The legacy tool
-// remains the entry point for HTTP, gRPC, gRPC-Web, raw, and WebSocket
-// resends until RFC-001 N9 retires it. This new tool restricts itself
-// to WebSocket flows; non-WS flow_ids are rejected with an explicit
-// pointer to the matching protocol-typed tool.
+// an opaque message_sequence index. The tool restricts itself to
+// WebSocket flows; non-WS flow_ids are rejected with an explicit pointer
+// to the matching protocol-typed tool.
 //
 // Pipeline placement (RFC §9.3 D1): resend traverses
 //
@@ -93,13 +89,12 @@ type resendWSResult struct {
 func (s *Server) registerResendWS() {
 	gomcp.AddTool(s.server, &gomcp.Tool{
 		Name: "resend_ws",
-		Description: "Resend a single WebSocket frame via a freshly dialled upstream connection with WSMessage-typed schema fields " +
-			"(opcode/fin/payload/close_code/close_reason/compressed). When flow_id is set, the upgrade dance inherits URL, " +
-			"request headers, and the negotiated permessage-deflate extension from the recorded flow; when flow_id is empty, " +
-			"target_addr + path are required and no compressed-frame round-trip is possible. " +
-			"PluginStepPost fires once on the resend; PluginStepPre is bypassed (RFC-001 §9.3). " +
-			"target_addr redirects the dial target while preserving the recovered :authority. " +
-			"For non-WebSocket flows use resend_http / resend_grpc / resend_raw (legacy resend tool also remains).",
+		Description: "Resend a single WebSocket frame on a freshly dialled upstream connection. " +
+			"With flow_id, the upgrade handshake (URL, request headers, negotiated permessage-deflate) " +
+			"is recovered from the recorded flow; otherwise target_addr + path are required and " +
+			"compressed frames are unsupported. target_addr redirects the dial target while preserving " +
+			"the recovered :authority. For non-WebSocket flows use resend_http / resend_grpc / resend_raw. " +
+			"See yorishiro://help/resend_ws.",
 	}, s.handleResendWS)
 }
 

@@ -43,11 +43,9 @@ var availableMacroActions = []string{"define_macro", "run_macro", "delete_macro"
 func (s *Server) registerMacro() {
 	gomcp.AddTool(s.server, &gomcp.Tool{
 		Name: "macro",
-		Description: "Define and execute macro workflows for multi-step security testing. " +
-			"Available actions: " +
-			"'define_macro' saves a macro definition (upsert) with steps, extraction rules, and guards; " +
-			"'run_macro' executes a stored macro for testing; " +
-			"'delete_macro' removes a stored macro definition.",
+		Description: "Define and execute multi-step macro workflows for chained security testing. " +
+			"Actions: 'define_macro' (upsert, with steps, extraction rules, and guards), " +
+			"'run_macro' (execute a stored macro), 'delete_macro'. See yorishiro://help/macro.",
 	}, s.handleMacroTool)
 }
 

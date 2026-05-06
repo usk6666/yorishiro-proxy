@@ -18,10 +18,7 @@
 //   - have a "payload" position with payloads listed (the variant
 //     payload itself defines the bytes — base bytes can be empty).
 //
-// fuzz_raw coexists with the legacy `fuzz` tool. Legacy continues to
-// work unchanged for HTTP fuzz jobs that need the full async runner
-// (concurrency / rate limit / overload monitor / job registry). This
-// new tool is a *synchronous* per-call fuzzer suitable for small to
+// fuzz_raw is a *synchronous* per-call fuzzer suitable for small to
 // medium variant counts (≤ maxFuzzRawVariants=1000).
 //
 // Pipeline placement (RFC §9.3 D1): each variant traverses
@@ -136,17 +133,12 @@ type fuzzRawVariantRow struct {
 func (s *Server) registerFuzzRaw() {
 	gomcp.AddTool(s.server, &gomcp.Tool{
 		Name: "fuzz_raw",
-		Description: "Synchronously fuzz a raw byte payload with RawMessage-typed positions. Schema mirrors resend_raw " +
-			"(flow_id + target_addr + use_tls + sni + override_bytes + patches + tag) plus a positions[] list — each position " +
-			"is a typed path into the payload (payload | patches[N].data) with a payloads[] list. flow_id is OPTIONAL " +
-			"(fuzz_raw owns ad-hoc-bytes injection); when empty, override_bytes or a 'payload' position must supply the variant " +
-			"bytes. The cartesian product of all positions yields the variant sequence (capped at 1000 variants per call). " +
-			"Each variant traverses the same self-contained PluginStepPost → RecordStep pipeline as resend_raw " +
-			"(PluginStepPre is bypassed per RFC-001 §9.3). Variants are executed sequentially with a fresh dial per variant. " +
-			"Wire bytes (override_bytes, patches[].data, position payloads, recovered Flow.RawBytes) are NEVER normalized — " +
-			"they reach the wire verbatim. This is the central HTTP smuggling fuzzing surface. " +
-			"Legacy `fuzz` tool with concurrency / rate limit / overload monitor coexists in parallel. " +
-			"stop_on_error aborts remaining variants once any variant fails.",
+		Description: "Synchronously fuzz a raw byte payload — the central HTTP smuggling fuzzing surface. " +
+			"Schema mirrors resend_raw plus a positions[] list (typed path: payload | patches[N].data) with payloads[]. " +
+			"flow_id is OPTIONAL; when empty, override_bytes or a 'payload' position must supply the variant bytes. " +
+			"The cartesian product of positions yields the variant sequence (capped at 1000 per call). " +
+			"Wire bytes are NEVER normalized — they reach the wire verbatim. " +
+			"stop_on_error aborts on the first failure. See yorishiro://help/fuzz_raw.",
 	}, s.handleFuzzRaw)
 }
 

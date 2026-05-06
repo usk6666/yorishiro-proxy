@@ -28,8 +28,8 @@ const defaultRequestTimeoutMs = 60000
 
 // queryInput is the typed input for the query tool.
 type queryInput struct {
-	// Resource specifies what to query: flows, flow, messages, status, config, ca_cert, macros, macro, fuzz_jobs, fuzz_results, technologies.
-	Resource string `json:"resource" jsonschema:"resource to query: flows, flow, messages, status, config, ca_cert, macros, macro, fuzz_jobs, fuzz_results, technologies"`
+	// Resource specifies what to query: flows, flow, messages, status, config, ca_cert, intercept_queue, macros, macro, fuzz_jobs, fuzz_results, technologies.
+	Resource string `json:"resource" jsonschema:"resource to query: flows, flow, messages, status, config, ca_cert, intercept_queue, macros, macro, fuzz_jobs, fuzz_results, technologies"`
 
 	// ID is required for flow and messages resources.
 	// For flow: the flow ID. For messages: the flow_id.
@@ -65,16 +65,12 @@ type queryInput struct {
 
 // queryFilter contains filter options for the flows and fuzz resources.
 type queryFilter struct {
-	// Protocol filters flows by Message-type family or exact legacy label.
-	// Canonical family values (preferred): http, ws, grpc, grpc-web, sse, raw,
-	// tls-handshake. Each expands to the union of new and legacy spellings
-	// recorded for the family (e.g. protocol=http matches HTTP/1.x, HTTPS,
-	// HTTP/2 and their SOCKS5+ variants).
-	// Legacy values (HTTP/1.x, HTTPS, HTTP/2, WebSocket, gRPC, gRPC-Web, TCP,
-	// SOCKS5+...) stay literal exact-match; protocol=HTTPS does NOT match
-	// HTTP/2-over-TLS recordings. To find all TLS flows regardless of HTTP
-	// version, use scheme=https instead.
-	Protocol string `json:"protocol,omitempty" jsonschema:"protocol filter — canonical Message-type family (http, ws, grpc, grpc-web, sse, raw, tls-handshake) expands to all spellings; legacy (HTTP/1.x, HTTPS, HTTP/2, WebSocket, gRPC, gRPC-Web, TCP, SOCKS5+HTTP/1.x, SOCKS5+HTTPS, SOCKS5+HTTP/2, SOCKS5+WebSocket, SOCKS5+gRPC, SOCKS5+gRPC-Web, SOCKS5+TCP) stays literal. To find all TLS flows use scheme=https instead."`
+	// Protocol filters flows by canonical Message-type family. Accepted values:
+	// http, ws, grpc, grpc-web, sse, raw, tls-handshake. Each family expands
+	// across all wire spellings recorded for it (e.g. protocol=http matches
+	// HTTP/1.x, HTTPS, HTTP/2 and their SOCKS5+ variants). To find all TLS flows
+	// regardless of HTTP version, use scheme=https instead.
+	Protocol string `json:"protocol,omitempty" jsonschema:"protocol filter — canonical Message-type family: http, ws, grpc, grpc-web, sse, raw, tls-handshake. Each family expands across all wire spellings. Use scheme=https to find all TLS flows regardless of HTTP version."`
 	// Scheme filters flows by URL scheme / transport (e.g. "https", "http", "wss", "ws", "tcp").
 	// Use scheme to find TLS flows: filter={scheme: "https"} returns HTTP/1.x, HTTP/2, gRPC flows over TLS.
 	// WebSocket over TLS uses scheme="wss", not "https".
@@ -194,26 +190,14 @@ func validateFuzzResultFilters(input queryInput) error {
 func (s *Server) registerQuery() {
 	gomcp.AddTool(s.server, &gomcp.Tool{
 		Name: "query",
-		Description: "Unified information query tool. Retrieve flows, flow details, messages, " +
-			"proxy status, configuration, CA certificate, intercept queue, macro definitions, fuzz results, or technology stack detections. " +
-			"Set 'resource' to one of: flows, flow, messages, status, config, ca_cert, intercept_queue, macros, macro, fuzz_jobs, fuzz_results, technologies. " +
-			"The 'id' parameter is required for flow, messages, and macro resources. " +
-			"The 'fuzz_id' parameter is required for fuzz_results resource. " +
-			"The 'filter' parameter supports filtering flows by protocol (canonical Message-type family: http, ws, grpc, grpc-web, sse, raw, tls-handshake — each expands across new and legacy spellings; legacy literals HTTP/1.x, HTTPS, HTTP/2, WebSocket, gRPC, gRPC-Web, TCP and SOCKS5+ variants stay literal), scheme (https, http, wss, ws, tcp — use scheme to find all TLS flows: scheme=https returns HTTP/1.x+HTTP/2+gRPC over TLS), method, url_pattern, status_code, blocked_by (target_scope, intercept_drop, rate_limit), state (active, complete, error), technology (e.g. nginx, wordpress), conn_id (connection ID, exact match), and host (matches server_addr or URL host); " +
-			"messages by direction (send or receive); " +
-			"fuzz_jobs by status and tag; fuzz_results by status_code, body_contains, and outliers_only (returns only outlier results). " +
-			"Flows include protocol_summary with protocol-specific information. " +
-			"Flow state indicates lifecycle: 'active' (in progress), 'complete' (finished), 'error' (failed with 502 etc.). " +
-			"Streaming protocols (more than 2 flows) include message_preview with the first 10 messages. " +
-			"Messages include metadata with protocol-specific fields (e.g. WebSocket opcode, gRPC service/method/grpc_status, variant original/modified). " +
-			"When intercept/transform modifies a request, the flow contains variant messages: original (seq=0, variant=original) and modified (seq=1, variant=modified). " +
-			"Similarly, when intercept modifies a response, the flow contains variant receive messages with original_response in the flow detail. " +
-			"The 'fields' parameter controls which fields are returned in the response (fuzz_jobs, fuzz_results). " +
-			"The 'sort_by' parameter sorts flows (timestamp, duration_ms) and fuzz_results by the specified field. " +
-			"Results are paginated with limit/offset for flows, messages, fuzz_jobs, and fuzz_results resources. " +
-			"fuzz_results include aggregate statistics (status_code_distribution, body_length, timing_ms with min/max/median/stddev) and outlier detection (by_status_code, by_body_length, by_timing). " +
-			"'intercept_queue' returns currently blocked requests and responses (with phase field) waiting for release/modify_and_forward/drop actions. " +
-			"'technologies' aggregates detected technology stacks per host across all flows.",
+		Description: "Unified read-only query: flows, flow detail, messages, status, config, ca_cert, " +
+			"intercept_queue, macros, macro, fuzz_jobs, fuzz_results, technologies. " +
+			"Set 'resource' to one of those values; 'id' supplies the flow/macro/messages ID and 'fuzz_id' " +
+			"supplies the fuzz job ID. 'filter' / 'fields' / 'sort_by' / 'limit' / 'offset' shape result sets. " +
+			"Protocol filter accepts canonical Message-type families (http, ws, grpc, grpc-web, sse, raw, tls-handshake) " +
+			"each expanding across all wire spellings; use scheme=https to find all TLS flows regardless of HTTP version. " +
+			"Modified flows surface both original and modified variants (variant=original|modified). " +
+			"See yorishiro://help/query for the full filter / field / sort reference.",
 	}, s.handleQuery)
 }
 

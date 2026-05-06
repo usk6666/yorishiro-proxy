@@ -1,15 +1,11 @@
-// Package mcp resend_grpc.go implements the RFC-001 N8 protocol-typed
-// resend_grpc MCP tool. Schema fields mirror envelope.GRPCStartMessage /
+// Package mcp resend_grpc.go implements the protocol-typed resend_grpc
+// MCP tool. Schema fields mirror envelope.GRPCStartMessage /
 // envelope.GRPCDataMessage / envelope.GRPCEndMessage so AI agents address
 // gRPC RPCs by structured event (Start headers, Data LPMs, optional End
 // trailers) instead of round-tripping an opaque message_sequence index.
-//
-// resend_grpc coexists with the legacy `resend` tool. The legacy tool
-// remains the entry point for HTTP, gRPC, gRPC-Web, raw, and WebSocket
-// resends until RFC-001 N9 retires it. This new tool restricts itself
-// to native gRPC flows; non-gRPC flow_ids are rejected with an explicit
-// pointer to the matching protocol-typed tool (resend_http / resend_ws /
-// resend_raw).
+// The tool restricts itself to native gRPC flows; non-gRPC flow_ids are
+// rejected with an explicit pointer to the matching protocol-typed tool
+// (resend_http / resend_ws / resend_raw).
 //
 // Pipeline placement (RFC §9.3 D1): resend traverses
 //
@@ -134,15 +130,14 @@ type resendGRPCEndResult struct {
 func (s *Server) registerResendGRPC() {
 	gomcp.AddTool(s.server, &gomcp.Tool{
 		Name: "resend_grpc",
-		Description: "Resend a gRPC RPC via a freshly dialled HTTP/2 upstream connection with GRPCStart/Data/End-typed schema. " +
-			"messages[] is the request-side LPM list (at least one element required). When flow_id is set, Service/Method/Metadata/Encoding " +
-			"are inherited from the recorded send and overridden by user-supplied fields. When flow_id is empty, target_addr + service + " +
-			"method are required. metadata is an ordered list of {name, value} pairs preserving wire case/order/duplicates. " +
-			"trailer_metadata is optional; when omitted the request terminates via END_STREAM on the last DATA, when supplied a " +
-			"Send-direction trailer HEADERS frame is sent. " +
-			"PluginStepPost fires once per Start + per Data envelope (End is observation-only per RFC §9.3 surface table); PluginStepPre is bypassed (RFC-001 §9.3). " +
-			"target_addr redirects the dial target while preserving the recovered :authority. " +
-			"For non-gRPC flows use resend_http / resend_ws / resend_raw (legacy resend tool also remains).",
+		Description: "Resend a gRPC unary RPC on a freshly dialled HTTP/2 upstream. messages[] is the " +
+			"request-side length-prefixed message list (at least one entry required). With flow_id, " +
+			"service/method/metadata/encoding inherit from the recorded send and are overridden by user fields; " +
+			"otherwise target_addr + service + method are required. metadata is an ordered [{name, value}] list " +
+			"preserving wire case/order/duplicates. trailer_metadata is optional — when set, the request " +
+			"terminates via a trailer HEADERS frame instead of END_STREAM on the last DATA. target_addr " +
+			"redirects the dial target while preserving the recovered :authority. For non-gRPC flows use " +
+			"resend_http / resend_ws / resend_raw. See yorishiro://help/resend_grpc.",
 	}, s.handleResendGRPC)
 }
 

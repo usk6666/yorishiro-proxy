@@ -63,21 +63,11 @@ var availableSecurityActions = []string{"set_target_scope", "update_target_scope
 func (s *Server) registerSecurity() {
 	gomcp.AddTool(s.server, &gomcp.Tool{
 		Name: "security",
-		Description: "Configure runtime security settings including target scope rules, rate limits, and diagnostic budgets. " +
-			"Target scope uses a two-layer architecture: Policy Layer (immutable, set by config) " +
-			"and Agent Layer (mutable via this tool). This tool only modifies Agent Layer rules; " +
-			"Policy Layer rules are read-only. Agent allow rules must fall within the Policy " +
-			"allow boundary. Rate limits and budgets also use the two-layer architecture. " +
-			"Available actions: " +
-			"'set_target_scope' replaces all Agent Layer allow/deny rules (use empty arrays to clear rules); " +
-			"'update_target_scope' applies incremental add/remove changes to Agent Layer rules; " +
-			"'get_target_scope' returns Policy and Agent Layer rules with enforcement mode; " +
-			"'test_target' checks a URL against current rules and reports which layer decided; " +
-			"'set_rate_limits' sets Agent Layer rate limits (max_requests_per_second, max_requests_per_host_per_second); " +
-			"'get_rate_limits' returns Policy and Agent Layer rate limits with effective values; " +
-			"'set_budget' sets Agent Layer diagnostic budget (max_total_requests, max_duration); " +
-			"'get_budget' returns Policy and Agent Layer budgets with effective values and current usage; " +
-			"'get_safety_filter' returns the current SafetyFilter configuration and rules (read-only).",
+		Description: "Configure runtime security settings (target scope, rate limits, diagnostic budgets) " +
+			"on the Agent Layer. The Policy Layer (set by config) is read-only and bounds Agent rules. " +
+			"Actions: set_target_scope, update_target_scope, get_target_scope, test_target, " +
+			"set_rate_limits, get_rate_limits, set_budget, get_budget, get_safety_filter. " +
+			"See yorishiro://help/security.",
 	}, s.handleSecurity)
 }
 

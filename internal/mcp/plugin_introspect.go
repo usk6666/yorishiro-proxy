@@ -53,9 +53,9 @@ type hookRegistration struct {
 func (s *Server) registerPluginIntrospect() {
 	gomcp.AddTool(s.server, &gomcp.Tool{
 		Name: "plugin_introspect",
-		Description: "Return the list of loaded pluginv2 plugins together with their (protocol, event, phase) " +
-			"register_hook registrations and the PluginConfig.Vars map after applying redact_keys. " +
-			"Returns an empty list when the pluginv2 engine is not configured.",
+		Description: "List loaded plugins with their (protocol, event, phase) hook registrations and " +
+			"the redacted PluginConfig.Vars map. Returns an empty list when no plugin engine is configured. " +
+			"See yorishiro://help/plugin_introspect.",
 	}, s.handlePluginIntrospect)
 }
 

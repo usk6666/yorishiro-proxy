@@ -46,7 +46,7 @@ import (
 // maxFuzzGRPCVariants caps the cartesian product across all positions.
 // 1000 variants is a balance between meaningful synchronous fuzz runs
 // and bounded server-side resource use; callers that need more should
-// chain calls or use the legacy `fuzz` tool with its async runner.
+// chain calls.
 const maxFuzzGRPCVariants = 1000
 
 // maxFuzzGRPCPositions caps the number of positions per call. The cap

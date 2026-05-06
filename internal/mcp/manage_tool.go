@@ -63,12 +63,12 @@ var availableManageActions = []string{"delete_flows", "export_flows", "import_fl
 func (s *Server) registerManage() {
 	gomcp.AddTool(s.server, &gomcp.Tool{
 		Name: "manage",
-		Description: "Manage flow data and CA certificates. " +
-			"Available actions: " +
-			"'delete_flows' deletes flows by ID, by age (older_than_days), by protocol, or all (confirm required); " +
-			"'export_flows' exports flows to JSONL or HAR (HTTP Archive 1.2) format (optionally filtered, with or without bodies, to file or inline for JSONL, file-only for HAR); " +
-			"'import_flows' imports flows from a JSONL file (supports skip/replace on ID conflict); " +
-			"'regenerate_ca_cert' regenerates the CA certificate (auto-persist mode: saves to disk; ephemeral mode: in-memory only; explicit mode: error).",
+		Description: "Manage flow data and CA certificates. Actions: " +
+			"'delete_flows' (by ID, age, protocol, or all — confirm required); " +
+			"'export_flows' (JSONL or HAR 1.2, optionally filtered, with/without bodies); " +
+			"'import_flows' (JSONL with skip/replace on ID conflict); " +
+			"'regenerate_ca_cert' (depends on CA persistence mode). " +
+			"See yorishiro://help/manage.",
 	}, s.handleManage)
 }
 

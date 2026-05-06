@@ -33,8 +33,8 @@ import (
 
 // resendHTTPSupportedProtocols lists the flow.Stream.Protocol values that
 // resend_http accepts via flow_id. Non-HTTP protocols are rejected with an
-// explicit pointer to the protocol-typed counterpart tool. The set mirrors
-// the legacy resend tool's HTTP path plus SOCKS5 prefixes.
+// explicit pointer to the protocol-typed counterpart tool. The set covers
+// the HTTP variants plus SOCKS5-prefixed projections.
 var resendHTTPSupportedProtocols = map[string]bool{
 	"HTTP":          true,
 	"HTTPS":         true,

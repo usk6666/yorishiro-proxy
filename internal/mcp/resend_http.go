@@ -1,14 +1,10 @@
-// Package mcp resend_http.go implements the RFC-001 N8 protocol-typed
-// resend_http MCP tool. Schema fields mirror envelope.HTTPMessage
+// Package mcp resend_http.go implements the protocol-typed resend_http
+// MCP tool. Schema fields mirror envelope.HTTPMessage
 // (method/scheme/authority/path/raw_query/headers/body) so AI agents address
 // HTTP fields by name instead of round-tripping a single opaque URL string.
-//
-// resend_http coexists with the legacy `resend` tool. The legacy tool stays
-// the entry point for HTTP, gRPC, gRPC-Web, WebSocket, and raw resends until
-// RFC-001 N9 retires it. The new tool restricts itself to plain HTTP/1.x and
-// HTTP/2 flows; non-HTTP flow_ids are rejected with an explicit error
-// pointing at the matching protocol-typed tool (resend_ws / resend_grpc /
-// resend_raw — added in successive N8 issues).
+// The tool restricts itself to plain HTTP/1.x and HTTP/2 flows; non-HTTP
+// flow_ids are rejected with an explicit error pointing at the matching
+// protocol-typed tool (resend_ws / resend_grpc / resend_raw).
 //
 // Pipeline placement (RFC §9.3 D1): resend traverses
 //
@@ -78,13 +74,12 @@ type resendHTTPResult struct {
 func (s *Server) registerResendHTTP() {
 	gomcp.AddTool(s.server, &gomcp.Tool{
 		Name: "resend_http",
-		Description: "Resend or construct an HTTP request via the RFC-001 layer stack with HTTPMessage-typed schema fields " +
-			"(method/scheme/authority/path/raw_query/headers/body). When flow_id is set, omitted fields are inherited from " +
-			"the recorded send; when flow_id is empty, method/scheme/authority/path are required. headers is an ordered list " +
-			"of {name, value} pairs preserving wire case/order/duplicates. body is text or base64 per body_encoding. " +
-			"PluginStepPost fires once on the resend; PluginStepPre is bypassed (RFC-001 §9.3). " +
+		Description: "Resend or construct an HTTP request through the proxy stack. " +
+			"With flow_id, omitted fields inherit from the recorded send; otherwise " +
+			"method/scheme/authority/path are required. headers is an ordered [{name, value}] list " +
+			"preserving wire case/order/duplicates; body is text or base64 per body_encoding. " +
 			"override_host redirects the dial target while preserving the request's :authority. " +
-			"For non-HTTP flows use resend_ws / resend_grpc / resend_raw (legacy resend tool also remains).",
+			"For non-HTTP flows use resend_ws / resend_grpc / resend_raw. See yorishiro://help/resend_http.",
 	}, s.handleResendHTTP)
 }
 
