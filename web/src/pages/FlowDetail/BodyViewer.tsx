@@ -5,7 +5,8 @@
  * - JSON: formatted with indentation
  * - HTML/XML: displayed as-is with syntax highlighting
  * - Binary (base64): hex dump display
- * - Images: inline preview for image/* content types
+ * - Images: inline preview for an allowlisted set of safe image MIME types
+ *   (PNG/JPEG/GIF/WebP/AVIF). SVG is excluded — see PREVIEWABLE_IMAGE_TYPES.
  *
  * When the server reports a Content-Encoding decode (gzip / br / deflate /
  * zstd) via `bodyEncodingApplied` (USK-731), an additional source toggle is
@@ -87,9 +88,32 @@ function isXmlContentType(ct: string): boolean {
   return ct.includes("text/xml") || ct.includes("application/xml") || ct.includes("+xml");
 }
 
-/** Check if Content-Type indicates an image. */
-function isImageContentType(ct: string): boolean {
-  return ct.startsWith("image/");
+/**
+ * MIME types that are safe to render via `<img src="data:...">`.
+ *
+ * `image/svg+xml` is intentionally excluded: SVG can carry inline `<script>`
+ * which executes in the `data:` origin, and the WebUI renders attacker-
+ * controlled MITM-observed bodies. With no CSP yet (USK-743), this allowlist
+ * is the sole barrier against SVG-based XSS through the body preview.
+ */
+const PREVIEWABLE_IMAGE_TYPES = new Set<string>([
+  "image/png",
+  "image/jpeg",
+  "image/jpg",
+  "image/gif",
+  "image/webp",
+  "image/avif",
+]);
+
+/**
+ * Check if Content-Type is an image format that is safe to inline as a
+ * `data:` URL. Strips parameters (e.g. `; charset=...`), trims whitespace,
+ * and lowercases the main type before matching against `PREVIEWABLE_IMAGE_TYPES`.
+ */
+export function isPreviewableImage(ct: string | null | undefined): boolean {
+  if (!ct) return false;
+  const main = ct.split(";")[0].trim().toLowerCase();
+  return PREVIEWABLE_IMAGE_TYPES.has(main);
 }
 
 /** Try to pretty-print JSON. Returns null if not valid JSON. */
@@ -220,7 +244,7 @@ export function BodyViewer({
 
   const contentType = getContentType(headers);
   const isBinary = activeEncoding === "base64";
-  const isImage = isImageContentType(contentType);
+  const isImage = isPreviewableImage(contentType);
 
   // Determine available view modes based on the *active* body, so that a
   // gzip-decoded JSON body offers Pretty mode even though the wire encoding

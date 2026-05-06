@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   anomalyLabel,
+  isPreviewableImage,
   resolveBodySourceState,
 } from "./BodyViewer.js";
 import type { DecodeAnomaly } from "../../lib/mcp/types.js";
@@ -100,5 +101,70 @@ describe("anomalyLabel", () => {
     // the floor — show the raw key until a label is added.
     expect(anomalyLabel("future_codec_x")).toBe("future_codec_x");
     expect(anomalyLabel("")).toBe("");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// isPreviewableImage — image MIME allowlist (USK-742)
+//
+// The `<img src="data:...">` preview path renders attacker-controlled body
+// bytes. Only an explicit safe-MIME allowlist may pass; in particular,
+// image/svg+xml must never be previewable because SVG can carry inline
+// `<script>` that executes in the data: origin.
+// ---------------------------------------------------------------------------
+
+describe("isPreviewableImage", () => {
+  it("allows the canonical safe image MIME types", () => {
+    for (const ct of [
+      "image/png",
+      "image/jpeg",
+      "image/jpg",
+      "image/gif",
+      "image/webp",
+      "image/avif",
+    ]) {
+      expect(isPreviewableImage(ct), ct).toBe(true);
+    }
+  });
+
+  it("rejects image/svg+xml regardless of casing or parameters", () => {
+    // The SVG XSS sink — every reasonable spelling must fail closed.
+    for (const ct of [
+      "image/svg+xml",
+      "Image/SVG+XML",
+      "IMAGE/SVG+XML",
+      "image/svg+xml; charset=utf-8",
+      "  image/svg+xml  ",
+    ]) {
+      expect(isPreviewableImage(ct), ct).toBe(false);
+    }
+  });
+
+  it("strips parameters and whitespace before matching", () => {
+    expect(isPreviewableImage("image/png; charset=binary")).toBe(true);
+    expect(isPreviewableImage("  image/jpeg  ")).toBe(true);
+    expect(isPreviewableImage("IMAGE/WEBP")).toBe(true);
+  });
+
+  it("rejects unknown or non-image MIME types", () => {
+    for (const ct of [
+      "application/octet-stream",
+      "text/html",
+      "image/bmp",
+      "image/x-icon",
+      "image/tiff",
+      "image/heic",
+      "image/",
+      "imagepng", // missing slash
+      "not a mime",
+    ]) {
+      expect(isPreviewableImage(ct), ct).toBe(false);
+    }
+  });
+
+  it("rejects empty / null / undefined content types", () => {
+    expect(isPreviewableImage("")).toBe(false);
+    expect(isPreviewableImage(null)).toBe(false);
+    expect(isPreviewableImage(undefined)).toBe(false);
   });
 });
