@@ -195,118 +195,144 @@ func TestLayer_OpenStream_ServerRoleRejected(t *testing.T) {
 	}
 }
 
+// TestLayer_OpenStream_AllocatesOddIDs verifies the lazy-allocation
+// contract introduced by USK-740: OpenStream is a pure constructor —
+// h2Stream reads as 0 until the first sendHeadersEvent — and the wire
+// id appears (1, 3, 5) only after Send drives allocation under l.mu.
 func TestLayer_OpenStream_AllocatesOddIDs(t *testing.T) {
 	l, peer, cleanup := startClientLayer(t)
 	defer cleanup()
 	peer.consumePeerSettings(t)
 
-	ids := []uint32{}
-	for i := 0; i < 3; i++ {
+	const numStreams = 3
+	chs := make([]*channel, numStreams)
+	for i := 0; i < numStreams; i++ {
 		ch, err := l.OpenStream(context.Background())
 		if err != nil {
 			t.Fatalf("OpenStream %d: %v", i, err)
 		}
 		c := ch.(*channel)
-		ids = append(ids, c.h2Stream)
+		// Pre-Send invariant: lazy allocation means h2Stream == 0.
+		if got := c.H2StreamID(); got != 0 {
+			t.Fatalf("OpenStream %d: pre-Send H2StreamID = %d, want 0 (lazy allocation)", i, got)
+		}
+		chs[i] = c
 	}
+
+	// Drive a Send on each channel sequentially; each Send allocates the
+	// next odd id and enqueues HEADERS. Run drainHeaders in parallel so
+	// the writer-queue does not back up (the test peer reads from the
+	// pipe).
+	drainDone := make(chan struct{})
+	go func() {
+		defer close(drainDone)
+		for i := 0; i < numStreams; i++ {
+			drainUntil(t, peer, frame.TypeHeaders)
+		}
+	}()
+
+	for i, c := range chs {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		err := c.Send(ctx, &envelope.Envelope{
+			Direction: envelope.Send,
+			Message: &H2HeadersEvent{
+				Method: "GET", Scheme: "https", Authority: "example.com", Path: "/",
+				EndStream: true,
+			},
+		})
+		cancel()
+		if err != nil {
+			t.Fatalf("Send on stream %d: %v", i, err)
+		}
+	}
+	<-drainDone
+
+	ids := []uint32{chs[0].H2StreamID(), chs[1].H2StreamID(), chs[2].H2StreamID()}
 	for _, id := range ids {
 		if id%2 == 0 {
-			t.Errorf("OpenStream returned even ID %d", id)
+			t.Errorf("post-Send id %d is even", id)
 		}
 	}
 	if ids[0] != 1 || ids[1] != 3 || ids[2] != 5 {
-		t.Errorf("OpenStream IDs = %v, want [1 3 5]", ids)
+		t.Errorf("post-Send IDs = %v, want [1 3 5]", ids)
 	}
 }
 
-// TestLayer_OpenStream_HeadersOrderGate verifies the chained "previous
-// stream's first HEADERS landed" gate that protects RFC 9113 §5.1.1
-// wire-order across concurrent OpenStream + Send.
+// TestLayer_OpenStream_LazyAllocation_FirstSendOrder verifies the
+// USK-740 invariant that replaces the chained HEADERS-order gate: when
+// N goroutines race OpenStream + Send, the goroutine whose Send wins
+// the l.mu critical section first gets the lower id, and its HEADERS
+// reaches the writer queue before any later allocation's HEADERS. ID
+// ordering equals enqueue ordering by construction.
 //
-// Without the gate, two goroutines that race their first sendHeadersEvent
-// can enqueue HEADERS for the higher stream id ahead of the lower one,
-// which a strict peer (e.g., x/net/http2) treats as a connection-level
-// PROTOCOL_ERROR. The cases below cover:
-//
-//   - the "skip-Send" path: a channel that goes straight to Close must
-//     still release its gate so the next stream's first Send is not
-//     blocked indefinitely;
-//   - broadcastShutdown: when Layer.Close fires while channels are still
-//     parked, every dangling gate is released.
-//
-// They do NOT verify wire-frame order — the writer goroutine + the
-// underlying frame.Writer already serialise frames; the gate only matters
-// for which goroutine wins the *enqueue* race.
-func TestLayer_OpenStream_HeadersOrderGate_CloseReleasesGate(t *testing.T) {
+// The test asserts on the wire by reading HEADERS frames in arrival
+// order and checking that the stream-id sequence is strictly
+// increasing.
+func TestLayer_OpenStream_LazyAllocation_FirstSendOrder(t *testing.T) {
 	l, peer, cleanup := startClientLayer(t)
 	defer cleanup()
 	peer.consumePeerSettings(t)
 
-	// First stream: never sends, only closes. Its gate must release so
-	// stream 3's prevHeadersGate fires.
-	ch1, err := l.OpenStream(context.Background())
-	if err != nil {
-		t.Fatalf("OpenStream 1: %v", err)
-	}
-	ch2, err := l.OpenStream(context.Background())
-	if err != nil {
-		t.Fatalf("OpenStream 2: %v", err)
-	}
-
-	// ch2's prevHeadersGate is ch1's headersGate. Closing ch1 must close
-	// it (the OpenStream-without-Send path).
-	c2 := ch2.(*channel)
-	select {
-	case <-c2.prevHeadersGate:
-		t.Fatal("ch2.prevHeadersGate already closed before ch1.Close")
-	default:
-	}
-	if err := ch1.Close(); err != nil {
-		t.Fatalf("ch1.Close: %v", err)
-	}
-	select {
-	case <-c2.prevHeadersGate:
-		// expected
-	case <-time.After(time.Second):
-		t.Fatal("ch1.Close did not release ch2.prevHeadersGate within 1s")
-	}
-}
-
-func TestLayer_OpenStream_HeadersOrderGate_BroadcastShutdownReleasesAll(t *testing.T) {
-	l, peer, _ := startClientLayer(t)
-	peer.consumePeerSettings(t)
-
-	ch1, err := l.OpenStream(context.Background())
-	if err != nil {
-		t.Fatalf("OpenStream 1: %v", err)
-	}
-	ch2, err := l.OpenStream(context.Background())
-	if err != nil {
-		t.Fatalf("OpenStream 2: %v", err)
-	}
-	ch3, err := l.OpenStream(context.Background())
-	if err != nil {
-		t.Fatalf("OpenStream 3: %v", err)
+	const numStreams = 8
+	chs := make([]layer.Channel, numStreams)
+	for i := 0; i < numStreams; i++ {
+		ch, err := l.OpenStream(context.Background())
+		if err != nil {
+			t.Fatalf("OpenStream %d: %v", i, err)
+		}
+		chs[i] = ch
 	}
 
-	c1 := ch1.(*channel)
-	c2 := ch2.(*channel)
-	c3 := ch3.(*channel)
-
-	// Layer.Close must release every dangling headersGate so any
-	// goroutine blocked in waitFirstHeadersOrder can unwind. broadcastShutdown
-	// is responsible for this; verify directly that all three gates fire.
-	if err := l.Close(); err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrClosedPipe) {
-		t.Fatalf("Layer.Close: %v", err)
+	// Concurrently kick off the first Send on every channel. With lazy
+	// allocation, the goroutine that wins the l.mu critical section
+	// first gets id=1 and enqueues first; the next gets id=3; etc.
+	type sendResult struct {
+		idx int
+		err error
 	}
-	_ = peer.conn.Close()
+	results := make(chan sendResult, numStreams)
+	start := make(chan struct{})
+	for i, ch := range chs {
+		i, ch := i, ch
+		go func() {
+			<-start
+			err := ch.Send(context.Background(), &envelope.Envelope{
+				Direction: envelope.Send,
+				Message: &H2HeadersEvent{
+					Method: "GET", Scheme: "https", Authority: "example.com", Path: "/",
+					EndStream: true,
+				},
+			})
+			results <- sendResult{idx: i, err: err}
+		}()
+	}
+	close(start)
 
-	for i, ch := range []*channel{c1, c2, c3} {
-		select {
-		case <-ch.headersGate:
-			// expected
-		case <-time.After(time.Second):
-			t.Fatalf("channel %d headersGate not released by broadcastShutdown", i+1)
+	// Read HEADERS frames as they arrive. The writer-queue is FIFO and
+	// allocation is under l.mu, so the wire ids must arrive strictly
+	// monotonic.
+	seen := make([]uint32, 0, numStreams)
+	for len(seen) < numStreams {
+		f, err := peer.rd.ReadFrame()
+		if err != nil {
+			t.Fatalf("read frame: %v", err)
+		}
+		if f.Header.Type != frame.TypeHeaders {
+			continue
+		}
+		seen = append(seen, f.Header.StreamID)
+	}
+	for i := 1; i < len(seen); i++ {
+		if seen[i] <= seen[i-1] {
+			t.Errorf("HEADERS arrived out of id order: seen[%d]=%d <= seen[%d]=%d (full=%v)",
+				i, seen[i], i-1, seen[i-1], seen)
+		}
+	}
+
+	for i := 0; i < numStreams; i++ {
+		r := <-results
+		if r.err != nil {
+			t.Errorf("Send goroutine %d: %v", r.idx, r.err)
 		}
 	}
 }

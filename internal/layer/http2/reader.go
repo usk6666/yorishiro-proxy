@@ -656,11 +656,6 @@ func (l *Layer) broadcastShutdown() {
 	l.mu.Unlock()
 
 	for _, ch := range channels {
-		// Publish the headers-order gate so any later channel waiting for
-		// this one's first HEADERS unblocks (channels created via
-		// OpenStream that never sent HEADERS keep the next allocation
-		// blocked otherwise).
-		ch.releaseFirstHeadersGate()
 		ch.markTerminated(io.EOF)
 		l.closeChannelRecv(ch)
 	}

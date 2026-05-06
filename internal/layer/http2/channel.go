@@ -31,7 +31,24 @@ const perStreamEventChanCap = 32
 type channel struct {
 	layer    *Layer
 	streamID string // UUID-based identifier returned by StreamID()
-	h2Stream uint32 // HTTP/2 stream identifier
+	// h2Stream is the HTTP/2 stream identifier.
+	//
+	// For client-initiated channels (created via Layer.OpenStream) the
+	// id is allocated lazily, on the first sendHeadersEvent, under l.mu
+	// — this guarantees id order matches enqueue order on the writer
+	// queue, satisfying RFC 9113 §5.1.1 wire-order without the chained
+	// HEADERS-order gate that USK-739 introduced (USK-740). Until the
+	// first Send, h2Stream reads as 0; Close() and MarkTerminatedWithRST
+	// guard h2Stream == 0 to avoid emitting RST_STREAM on a stream the
+	// peer has never seen (RFC 9113 §5.4.2 forbids RST on idle streams).
+	//
+	// For peer-initiated channels (server-role: client HEADERS arrives;
+	// push: PUSH_PROMISE) the id is set at construction time from the
+	// frame and never mutates.
+	//
+	// Stored as atomic.Uint32 so the id-allocating Send path and any
+	// concurrent reader (tests, aggregator inspection paths) cannot race.
+	h2Stream atomic.Uint32
 	isPush   bool
 
 	// originStreamID is set on push channels (isPush=true) to the UUID
@@ -58,30 +75,6 @@ type channel struct {
 	// error via markTerminated without being shadowed by an io.EOF stamp.
 	recvClosed atomic.Bool
 
-	// prevHeadersGate is closed once the previous client-initiated stream's
-	// first HEADERS frame has been enqueued (or that stream was canceled
-	// before sending any HEADERS). The first sendHeadersEvent on this
-	// channel waits on prevHeadersGate before enqueuing its own HEADERS, so
-	// HEADERS for client-initiated streams reach the writer queue in
-	// numeric stream-ID order — required by RFC 9113 §5.1.1, and observed
-	// in CI as a connection-level PROTOCOL_ERROR + GOAWAY when violated
-	// under concurrent load. nil for non-client-initiated channels (push,
-	// peer-initiated server streams).
-	prevHeadersGate <-chan struct{}
-	// headersGate publishes this channel's first-HEADERS milestone. It is
-	// closed by sendHeadersEvent immediately after enqueueing the first
-	// HEADERS, or by Close if the channel is torn down before any HEADERS
-	// is sent — either way, downstream channels (those holding this
-	// headersGate as their prevHeadersGate) unblock. nil for non-client-
-	// initiated channels.
-	headersGate chan struct{}
-	// firstHeadersOnce makes releaseFirstHeadersGate idempotent across the
-	// success path (sendHeadersEvent), the cancel path (Close), and the
-	// layer shutdown path (broadcastShutdown). The "first HEADERS only
-	// waits" semantic is enforced separately by the headersHas check in
-	// waitFirstHeadersOrder; this Once just guards the close-once contract.
-	firstHeadersOnce sync.Once
-
 	mu         sync.Mutex
 	sequence   int
 	headersHas bool // true after first request HEADERS sent (client side)
@@ -103,16 +96,21 @@ type channel struct {
 }
 
 // newChannel constructs a channel bound to layer for h2 stream id.
+//
+// Pass h2Stream=0 for client-initiated channels (the id is allocated
+// lazily on the first sendHeadersEvent — see h2Stream's docstring).
+// For peer-initiated channels, pass the wire id from the inbound frame.
 func newChannel(l *Layer, h2Stream uint32, isPush bool) *channel {
-	return &channel{
+	c := &channel{
 		layer:    l,
 		streamID: uuid.New().String(),
-		h2Stream: h2Stream,
 		isPush:   isPush,
 		recv:     make(chan *envelope.Envelope, perStreamEventChanCap),
 		errCh:    make(chan *layer.StreamError, 1),
 		termDone: make(chan struct{}),
 	}
+	c.h2Stream.Store(h2Stream)
+	return c
 }
 
 // Closed returns a channel closed when this Channel has reached its terminal
@@ -170,13 +168,25 @@ func (c *channel) StreamID() string { return c.streamID }
 // H2StreamID returns the underlying HTTP/2 stream id. Used by tests and by
 // the aggregator's Send path when it needs to reference the wire-level
 // stream id (e.g., for RST_STREAM on MaxBodySize enforcement).
-func (c *channel) H2StreamID() uint32 { return c.h2Stream }
+//
+// Returns 0 for client-initiated channels that have not yet sent HEADERS
+// (the id is allocated lazily on the first sendHeadersEvent, USK-740).
+func (c *channel) H2StreamID() uint32 { return c.h2Stream.Load() }
 
 // MarkTerminatedWithRST emits RST_STREAM with the given wire error code and
 // marks the channel terminated locally. Intended for the aggregator's
 // MaxBodySize enforcement path, where the aggregator needs to reset the
 // underlying stream without closing the whole channel surface itself.
 // err becomes the channel's terminal Err.
+//
+// USK-740 guard: when h2Stream == 0 the peer has never been told this
+// stream exists (lazy allocation: the id is reserved on the first
+// sendHeadersEvent). Emitting RST_STREAM on an idle stream is a
+// connection-level error per RFC 9113 §5.4.2, so we skip the wire emit
+// and only run the local-teardown half. In practice the aggregator only
+// reaches this entry point after HEADERS has been observed (post-Send
+// receive paths), but the guard is defensive — any future caller that
+// races allocation against teardown is covered.
 //
 // Note: this intentionally does NOT close ch.recv. Closing from this
 // external goroutine would race with the reader goroutine's in-flight
@@ -191,7 +201,9 @@ func (c *channel) H2StreamID() uint32 { return c.h2Stream }
 // caller eventually invokes channel.Close (bilateral close or session
 // teardown).
 func (c *channel) MarkTerminatedWithRST(code uint32, err error) {
-	c.layer.enqueueWrite(writeRequest{rst: &writeRST{streamID: c.h2Stream, code: code}})
+	if id := c.h2Stream.Load(); id != 0 {
+		c.layer.enqueueWrite(writeRequest{rst: &writeRST{streamID: id, code: code}})
+	}
 	if err == nil {
 		err = errors.New("http2: aggregator-initiated RST")
 	}
@@ -296,28 +308,23 @@ func (c *channel) Send(ctx context.Context, env *envelope.Envelope) error {
 // and writes HEADERS (+ CONTINUATION*) frames. When evt.EndStream is true,
 // END_STREAM is placed on the last frame.
 //
-// For client-initiated channels, the first call waits on prevHeadersGate so
-// the first HEADERS frame reaches the writer queue in numeric stream-ID
-// order across concurrent OpenStream callers. After enqueueing, headersGate
-// is closed so the next stream can proceed.
+// For client-initiated channels (h2Stream == 0 on entry), the first call
+// allocates the wire-level stream id under l.mu atomically with the
+// state-machine Transition, registerChannel, and writer-queue enqueue —
+// this guarantees id order matches enqueue order on the writer queue
+// (RFC 9113 §5.1.1 wire-order), without the chained HEADERS-order gate
+// that USK-739 introduced. Subsequent HEADERS frames (trailer HEADERS,
+// retry on the same channel) reuse the already-allocated id. Server-role
+// and push channels arrive here with h2Stream pre-populated from the
+// inbound frame and skip allocation.
 func (c *channel) sendHeadersEvent(ctx context.Context, env *envelope.Envelope, evt *H2HeadersEvent) error {
-	if err := c.waitFirstHeadersOrder(ctx); err != nil {
-		return err
-	}
 	fields := BuildHeaderFieldsFromEvent(env, evt)
 	done := make(chan error, 1)
-	c.layer.enqueueWrite(writeRequest{headers: &writeHeaders{
-		streamID:  c.h2Stream,
-		fields:    fields,
-		endStream: evt.EndStream,
-		done:      done,
-	}})
-	// Publish first-HEADERS milestone now that the frame is queued: the
-	// writer goroutine processes the queue in FIFO order, so any later
-	// stream waiting on this gate will see its HEADERS land after ours on
-	// the wire. Releasing before waitDone keeps concurrent OpenStream
-	// callers from serialising on per-frame flush latency.
-	c.releaseFirstHeadersGate()
+
+	if err := c.allocateAndEnqueueFirstHeaders(ctx, fields, evt.EndStream, done); err != nil {
+		return err
+	}
+
 	if err := waitDone(ctx, done, c.layer.shutdown); err != nil {
 		return err
 	}
@@ -330,47 +337,96 @@ func (c *channel) sendHeadersEvent(ctx context.Context, env *envelope.Envelope, 
 	return nil
 }
 
-// waitFirstHeadersOrder blocks the very first sendHeadersEvent on a
-// client-initiated channel until the previously allocated client stream has
-// either enqueued its first HEADERS or been canceled. Subsequent HEADERS
-// (e.g., trailer HEADERS) skip the wait. ctx and shutdown abort the wait.
-func (c *channel) waitFirstHeadersOrder(ctx context.Context) error {
-	if c.prevHeadersGate == nil {
+// allocateAndEnqueueFirstHeaders performs the lazy id-allocation +
+// state-machine Transition + registerChannel + writer-queue enqueue
+// sequence atomically under l.mu when this is the first HEADERS frame on
+// a client-initiated channel. For subsequent HEADERS or for channels
+// constructed with a pre-assigned id (server-role / push), it just
+// enqueues using the already-stored id.
+//
+// Holding l.mu across the four steps is what makes the refactor work:
+// because the writer queue is FIFO, any other goroutine racing through
+// this same critical section serialises behind us — its allocation gets
+// the next id, its enqueue lands strictly after ours. ID order matches
+// wire order by construction; the explicit headers-order gate is no
+// longer needed (USK-740).
+func (c *channel) allocateAndEnqueueFirstHeaders(ctx context.Context, fields []hpack.HeaderField, endStream bool, done chan error) error {
+	// Fast path: id is already populated (peer-initiated channel, or this
+	// is a follow-up HEADERS on a client-initiated channel). No allocation
+	// required; just enqueue with the existing id.
+	if id := c.h2Stream.Load(); id != 0 {
+		c.layer.enqueueWrite(writeRequest{headers: &writeHeaders{
+			streamID:  id,
+			fields:    fields,
+			endStream: endStream,
+			done:      done,
+		}})
 		return nil
 	}
-	c.mu.Lock()
-	first := !c.headersHas
-	c.mu.Unlock()
-	if !first {
-		return nil
-	}
-	select {
-	case <-c.prevHeadersGate:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-c.layer.shutdown:
+
+	// Lazy-allocation path: client-initiated, no id yet. Acquire l.mu and
+	// (under it) re-check the shutdown flag, allocate the next odd id,
+	// transition the stream-state machine, register the channel, then
+	// enqueue. enqueueWrite must be called inside the lock so a concurrent
+	// caller that wins the next allocation cannot enqueue ahead of us.
+	l := c.layer
+	l.mu.Lock()
+	if l.closed {
+		l.mu.Unlock()
 		return errWriterClosed
 	}
-}
 
-// releaseFirstHeadersGate closes headersGate exactly once. Safe to call
-// from both the success path (sendHeadersEvent) and the cancel path (Close
-// before any HEADERS was sent) — firstHeadersOnce makes it idempotent.
-func (c *channel) releaseFirstHeadersGate() {
-	if c.headersGate == nil {
-		return
+	id := l.nextClientStreamID
+	l.nextClientStreamID += 2
+	c.h2Stream.Store(id)
+
+	_ = l.conn.Streams().Transition(id, EventSendHeaders)
+	l.channels[id] = c
+	l.assemblers[id] = newEventAssembler(id, c)
+
+	// Inline the writer-queue enqueue rather than calling enqueueWrite so
+	// the send happens under l.mu. The shutdown branch returns
+	// errWriterClosed to the caller; we already checked l.closed above,
+	// but a concurrent Close may close shutdown between the check and the
+	// send — handle that case explicitly.
+	req := writeRequest{headers: &writeHeaders{
+		streamID:  id,
+		fields:    fields,
+		endStream: endStream,
+		done:      done,
+	}}
+	select {
+	case l.writerQueue <- req:
+		l.mu.Unlock()
+		return nil
+	case <-l.shutdown:
+		l.mu.Unlock()
+		failWriteRequest(req, errWriterClosed)
+		return errWriterClosed
+	case <-ctx.Done():
+		l.mu.Unlock()
+		failWriteRequest(req, ctx.Err())
+		return ctx.Err()
 	}
-	c.firstHeadersOnce.Do(func() { close(c.headersGate) })
 }
 
 // sendDataEvent writes a DATA frame (or splits the payload into multiple
 // DATA frames per MAX_FRAME_SIZE), respecting flow control. When
 // evt.EndStream is true, END_STREAM is placed on the final DATA frame.
+//
+// Requires that a HEADERS frame has already been sent on this channel
+// (h2Stream != 0). DATA before HEADERS is a protocol violation; the
+// nominal call sites (aggregator's request-body path, gRPC frame writer)
+// always invoke Send(HEADERS) first, but we reject defensively here so a
+// misuse surfaces as a clean error rather than emitting DATA on stream 0.
 func (c *channel) sendDataEvent(ctx context.Context, evt *H2DataEvent) error {
+	id := c.h2Stream.Load()
+	if id == 0 {
+		return errors.New("http2: DATA before HEADERS — channel has no allocated stream id")
+	}
 	done := make(chan error, 1)
 	c.layer.enqueueWrite(writeRequest{dataEvent: &writeDataEvent{
-		streamID:  c.h2Stream,
+		streamID:  id,
 		payload:   evt.Payload,
 		endStream: evt.EndStream,
 		done:      done,
@@ -388,7 +444,15 @@ func (c *channel) sendDataEvent(ctx context.Context, evt *H2DataEvent) error {
 
 // sendTrailersEvent encodes the trailer fields into HPACK and writes a
 // trailer HEADERS frame with END_STREAM per RFC 9113 §8.1.
+//
+// Requires h2Stream != 0; trailers without a preceding HEADERS frame is
+// a protocol violation. See sendDataEvent's docstring for the same
+// rationale.
 func (c *channel) sendTrailersEvent(ctx context.Context, evt *H2TrailersEvent) error {
+	id := c.h2Stream.Load()
+	if id == 0 {
+		return errors.New("http2: TRAILERS before HEADERS — channel has no allocated stream id")
+	}
 	// Convert KeyValues → hpack fields. Anomalies for pseudo-header-in-
 	// trailers are surfaced by the aggregator via evt.Anomalies at decode
 	// time; on Send, we drop pseudo-headers to avoid emitting an invalid
@@ -407,7 +471,7 @@ func (c *channel) sendTrailersEvent(ctx context.Context, evt *H2TrailersEvent) e
 	}
 	done := make(chan error, 1)
 	c.layer.enqueueWrite(writeRequest{headers: &writeHeaders{
-		streamID:  c.h2Stream,
+		streamID:  id,
 		fields:    fields,
 		endStream: true, // trailers always END_STREAM
 		done:      done,
@@ -423,22 +487,29 @@ func (c *channel) sendTrailersEvent(ctx context.Context, evt *H2TrailersEvent) e
 
 // Close tears down the receive side and, for abnormal terminations, emits
 // RST_STREAM(CANCEL). Idempotent.
+//
+// USK-740 guard: when h2Stream == 0 we have not yet told the peer this
+// stream exists (lazy id allocation: OpenStream is a pure constructor;
+// the wire id is reserved on the first sendHeadersEvent). Emitting
+// RST_STREAM on an idle stream is a connection-level error per RFC 9113
+// §5.4.2, so we skip the wire emit on the close-before-send path. The
+// local teardown half (markTerminated, closeChannelRecv) still runs.
 func (c *channel) Close() error {
 	c.closeSendOnce.Do(func() {
-		// If OpenStream allocated an id but the caller never sent HEADERS
-		// (e.g., Close-on-error path), publish the first-HEADERS milestone
-		// anyway so the next client stream is not blocked indefinitely.
-		c.releaseFirstHeadersGate()
-
 		c.mu.Lock()
 		c.closed = true
 		sentEnd := c.sentEndStream
 		recvEnd := c.recvEndStream
 		c.mu.Unlock()
 
-		if c.isPush || !sentEnd || !recvEnd {
+		// Only emit RST_STREAM if the peer has been told this stream
+		// exists (h2Stream != 0) AND the close is abnormal (push, or one
+		// side still open). The h2Stream guard makes the close-before-
+		// send path spec-compliant; the abnormal-close guard preserves
+		// the USK-618 bilateral-close contract.
+		if id := c.h2Stream.Load(); id != 0 && (c.isPush || !sentEnd || !recvEnd) {
 			c.layer.enqueueWrite(writeRequest{rst: &writeRST{
-				streamID: c.h2Stream,
+				streamID: id,
 				code:     ErrCodeCancel,
 			}})
 		}

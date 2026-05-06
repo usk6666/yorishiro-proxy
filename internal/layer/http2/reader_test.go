@@ -263,8 +263,8 @@ func TestReader_PushPromise_EmitsChannelAndSyntheticEnvelope(t *testing.T) {
 	if !c.isPush {
 		t.Errorf("push channel isPush = false, want true")
 	}
-	if c.h2Stream != 2 {
-		t.Errorf("push channel h2Stream = %d, want 2", c.h2Stream)
+	if got := c.H2StreamID(); got != 2 {
+		t.Errorf("push channel h2Stream = %d, want 2", got)
 	}
 
 	// USK-623: originStreamID must point back to the originating channel's

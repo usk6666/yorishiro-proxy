@@ -13,7 +13,8 @@ import (
 
 func newTestAssembler() (*eventAssembler, *channel) {
 	l := &Layer{role: ServerRole}
-	ch := &channel{layer: l, streamID: "fake-ch-id", h2Stream: 1}
+	ch := &channel{layer: l, streamID: "fake-ch-id"}
+	ch.h2Stream.Store(1)
 	asm := newEventAssembler(1, ch)
 	return asm, ch
 }

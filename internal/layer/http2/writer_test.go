@@ -202,7 +202,7 @@ func TestWriter_FlowControlBlocksAndUnblocks(t *testing.T) {
 	if err := peer.wr.WriteWindowUpdate(0, 1<<20); err != nil {
 		t.Fatalf("WriteWindowUpdate conn: %v", err)
 	}
-	if err := peer.wr.WriteWindowUpdate(chStruct.h2Stream, 1<<20); err != nil {
+	if err := peer.wr.WriteWindowUpdate(chStruct.H2StreamID(), 1<<20); err != nil {
 		t.Fatalf("WriteWindowUpdate stream: %v", err)
 	}
 
