@@ -1,0 +1,44 @@
+name: Nightly e2e (full)
+
+# Runs the full e2e test suite (`-tags e2e`, includes both smoke and exhaustive
+# tests) on a nightly cadence. The per-PR gate runs only the smoke subset via
+# `ci.yml`'s `test-e2e-smoke` job — see USK-728 for the tier split rationale.
+#
+# 17:00 UTC ≈ 02:00 JST, well outside the project's primary working hours.
+# `workflow_dispatch` lets maintainers re-run on demand without waiting for
+# the next scheduled fire.
+
+on:
+  schedule:
+    - cron: "0 17 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  e2e-full:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v5.0.0
+        with:
+          version: 9
+
+      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        with:
+          node-version: "24"
+          cache: "pnpm"
+          cache-dependency-path: web/pnpm-lock.yaml
+
+      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version: "1.25.x"
+
+      - name: Build UI
+        run: make build-ui
+
+      - name: Test (e2e full)
+        run: go test -race -v -tags e2e -timeout 30m ./...

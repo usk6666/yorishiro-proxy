@@ -101,10 +101,13 @@ jobs:
       - name: Test
         run: go test -race -v -timeout 4m ./...
 
-  e2e:
+  # test-e2e-smoke is the merge-gate tier (USK-728): runs M46 harness scenarios
+  # plus a representative connector / layer subset. Full e2e (-tags e2e only)
+  # runs nightly via `.github/workflows/nightly-e2e.yml`.
+  test-e2e-smoke:
     needs: setup
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
@@ -117,5 +120,5 @@ jobs:
           name: ui-dist
           path: internal/mcp/webui/dist/
 
-      - name: Test (e2e)
-        run: go test -race -v -tags e2e -timeout 6m ./...
+      - name: Test (e2e smoke)
+        run: go test -race -v -tags 'e2e e2e_smoke' -timeout 10m ./...

@@ -1,4 +1,4 @@
-//go:build e2e
+//go:build e2e && !e2e_smoke
 
 // USK-654 — N7 final-gate cross-cutting test for the gRPC Layer.
 //

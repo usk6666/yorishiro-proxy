@@ -142,8 +142,10 @@ internal/
 make build          # build-ui → vet → go build (always rebuilds UI)
 make build-ui       # Build the React/Vite app in web/ and generate dist/
 make ensure-ui      # Run build-ui only if dist/ does not exist (lightweight)
-make test           # ensure-ui → go test -race -v ./... (unit tests only)
-make test-e2e       # ensure-ui → go test -race -v -tags e2e ./... (all tests including e2e)
+make test           # fast tier: ensure-ui → go test -race -v ./... (unit tests only)
+make test-fast      # alias for `make test`; explicit naming for the fast tier (USK-728)
+make test-e2e-smoke # smoke tier (merge gate): ensure-ui → go test -race -v -tags 'e2e e2e_smoke' ./...
+make test-e2e       # full tier (nightly): ensure-ui → go test -race -v -tags e2e ./...
 make test-cover     # ensure-ui → test with coverage report
 make vet            # ensure-ui → go vet ./...
 make fmt            # Format all files with gofmt -w .
@@ -152,9 +154,14 @@ make bench          # ensure-ui → run benchmarks
 make clean          # Delete build artifacts
 ```
 
-> **e2e tests**: `*_integration_test.go` files have the `//go:build e2e` tag.
-> They are skipped by `make test` and run by `make test-e2e`.
-> Always include this tag when adding new integration tests.
+> **e2e test tiers (USK-728)**: e2e tests are split into three tiers.
+> - **fast** (`make test`/`make test-fast`): untagged unit tests only.
+> - **smoke** (`make test-e2e-smoke`): merge-gate subset — files with `//go:build e2e` only. Run by CI on every PR.
+> - **full** (`make test-e2e`): every e2e file — smoke ∪ exhaustive. Run nightly via `.github/workflows/nightly-e2e.yml`.
+>
+> The `e2e_smoke` build tag is an **exclusion filter**: smoke files keep plain `//go:build e2e`; exhaustive files use `//go:build e2e && !e2e_smoke` so they drop out of the smoke tier but remain in the full tier under `-tags e2e` alone. This guarantees `smoke ⊂ full`.
+>
+> When adding a new integration test, default to `//go:build e2e && !e2e_smoke` (exhaustive). Promote to plain `//go:build e2e` only when the test is part of the per-PR merge gate.
 
 > **Important**: Do not run `go test` / `go vet` / `go build` directly.
 > `internal/mcp/webui/embed.go` embeds the Web UI with `//go:embed dist/*`,

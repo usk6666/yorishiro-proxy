@@ -8,7 +8,7 @@ COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 DATE    ?= $(shell date -u '+%Y-%m-%dT%H:%M:%SZ')
 LDFLAGS := -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.date=$(DATE)
 
-.PHONY: build build-ui ensure-ui dev-ui test test-ui test-e2e test-cover vet lint fmt clean bench bench-compare
+.PHONY: build build-ui ensure-ui dev-ui test test-fast test-ui test-e2e test-e2e-smoke test-cover vet lint fmt clean bench bench-compare
 
 build: build-ui vet
 	go build -ldflags "$(LDFLAGS)" -o $(BINDIR)/$(BINARY) ./cmd/yorishiro-proxy
@@ -25,11 +25,28 @@ dev-ui:
 test-ui:
 	cd web && pnpm install --frozen-lockfile && pnpm test
 
+# test runs the fast tier: untagged unit tests only. Used as the per-PR gate.
 test: ensure-ui
 	go test -race -v -timeout 4m ./...
 
+# test-fast is an alias for `test` to make the 3-tier naming (fast/smoke/full)
+# explicit at the call site (see USK-728).
+test-fast: test
+
+# test-e2e-smoke is the merge-gate tier: M46 harness scenarios (USK-722–USK-727)
+# plus a representative subset of connector / layer e2e tests covering each
+# critical protocol path. The `e2e_smoke` build tag is an EXCLUSION filter:
+# files marked `//go:build e2e && !e2e_smoke` are excluded from the smoke
+# tier (they run only under `make test-e2e`). Files in the smoke tier keep
+# the plain `//go:build e2e` constraint.
+test-e2e-smoke: ensure-ui
+	go test -race -v -timeout 10m -tags 'e2e e2e_smoke' ./...
+
+# test-e2e is the full tier: every test guarded by `//go:build e2e` (smoke
+# files included). Run nightly via the `nightly-e2e.yml` workflow; not part
+# of the per-PR gate.
 test-e2e: ensure-ui
-	go test -race -v -timeout 6m -tags e2e ./...
+	go test -race -v -timeout 30m -tags e2e ./...
 
 test-cover: ensure-ui
 	go test -race -coverprofile=coverage.out ./...
