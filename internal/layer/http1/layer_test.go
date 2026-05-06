@@ -54,12 +54,16 @@ func TestLayer_Channels_YieldsOneChannel(t *testing.T) {
 	l := New(server, "stream-1", envelope.Send)
 	defer l.Close()
 
-	count := 0
-	for range l.Channels() {
-		count++
-	}
-	if count != 1 {
-		t.Fatalf("expected 1 channel, got %d", count)
+	// USK-730: HTTP/1.x Layer yields one Channel per request-response
+	// exchange (per RFC-001 §3.3 — Channel granularity is the logical
+	// stream, not the connection). The auto-yielded initial Channel is
+	// available immediately for back-compat single-shot consumers, with
+	// the spawn loop yielding additional Channels lazily as more requests
+	// arrive on the wire. We assert receipt of the initial here; for
+	// keep-alive multi-exchange coverage see the mitm integration tests.
+	ch := <-l.Channels()
+	if ch == nil {
+		t.Fatal("Channels() yielded nil before any request")
 	}
 }
 
@@ -500,10 +504,14 @@ func TestChannel_KeepAlive_MultipleRequests(t *testing.T) {
 		client.Close()
 	}()
 
-	ch := <-l.Channels()
-
-	// First request.
-	env1, err := ch.Next(context.Background())
+	// USK-730: per-exchange Channel — each keep-alive request yields its
+	// own Channel via Channels(). The spawn loop waits for the previous
+	// Channel's termDone before parsing the next request to keep the
+	// bufio.Reader and conn access strictly sequential with the consumer's
+	// session. In production, session.RunSession's deferred client.Close
+	// fires markTerminated; tests must call ch.Close() explicitly.
+	ch1 := <-l.Channels()
+	env1, err := ch1.Next(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -511,9 +519,10 @@ func TestChannel_KeepAlive_MultipleRequests(t *testing.T) {
 	if msg1.Path != "/first" {
 		t.Errorf("Path = %q, want /first", msg1.Path)
 	}
+	_ = ch1.Close()
 
-	// Second request.
-	env2, err := ch.Next(context.Background())
+	ch2 := <-l.Channels()
+	env2, err := ch2.Next(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -521,13 +530,13 @@ func TestChannel_KeepAlive_MultipleRequests(t *testing.T) {
 	if msg2.Path != "/second" {
 		t.Errorf("Path = %q, want /second", msg2.Path)
 	}
+	_ = ch2.Close()
 
-	// StreamIDs should differ between requests.
 	if env1.StreamID == env2.StreamID {
 		t.Error("keep-alive requests should have different StreamIDs")
 	}
 
-	// Sequences should both be 0 (reset per pair).
+	// Per-exchange Channels reset Sequence to 0 for each request.
 	if env1.Sequence != 0 || env2.Sequence != 0 {
 		t.Errorf("Sequences = (%d, %d), want (0, 0)", env1.Sequence, env2.Sequence)
 	}
@@ -1563,10 +1572,19 @@ func TestHTTP1Layer_StateReleaserFiresPerTransaction(t *testing.T) {
 		_ = client.Close()
 	}()
 
-	ch := <-l.Channels()
-
+	// USK-730: per-exchange Channel — each request gets its own Channel,
+	// each Channel terminates after its single Next, and ReleaseTransaction
+	// fires once per Channel's terminal markTerminated. Iterate Channels()
+	// to drain all three exchanges.
+	// The spawn loop waits for the previous Channel's termDone before
+	// yielding the next (HTTP/1.1 wire-serial); the test must Close()
+	// each Channel after Next() to advance.
 	flowIDs := make([]string, 0, 3)
 	for i := 0; i < 3; i++ {
+		ch := <-l.Channels()
+		if ch == nil {
+			t.Fatalf("Channels() yielded nil at i=%d", i)
+		}
 		env, err := ch.Next(context.Background())
 		if err != nil {
 			t.Fatalf("Next #%d: %v", i+1, err)
@@ -1575,31 +1593,25 @@ func TestHTTP1Layer_StateReleaserFiresPerTransaction(t *testing.T) {
 		if env.FlowID == "" {
 			t.Fatalf("Next #%d: empty FlowID", i+1)
 		}
+		_ = ch.Close()
 	}
 
-	// Releases must NOT fire mid-stream — only at terminal.
-	if got := rec.count(); got != 0 {
-		t.Fatalf("releases before terminal = %d, want 0", got)
-	}
-
-	// Drain to EOF to fire markTerminated via the parse loop.
-	if _, err := ch.Next(context.Background()); !errors.Is(err, io.EOF) {
-		t.Fatalf("expected io.EOF, got %v", err)
-	}
-
-	// Defensive Layer.Close after EOF is a no-op for releases (sync.Once).
 	_ = l.Close()
 
 	snap := rec.snapshot()
 	if len(snap) != 3 {
 		t.Fatalf("ReleaseTransaction count = %d, want 3 — snapshot=%+v", len(snap), snap)
 	}
+	wantIDs := map[string]bool{}
+	for _, id := range flowIDs {
+		wantIDs[id] = true
+	}
 	for i, ev := range snap {
 		if ev.connID != "test-conn" {
 			t.Errorf("[%d] connID = %q, want test-conn", i, ev.connID)
 		}
-		if ev.id != flowIDs[i] {
-			t.Errorf("[%d] FlowID = %q, want %q", i, ev.id, flowIDs[i])
+		if !wantIDs[ev.id] {
+			t.Errorf("[%d] FlowID %q not among emitted FlowIDs %v", i, ev.id, flowIDs)
 		}
 	}
 }
@@ -1634,11 +1646,16 @@ func TestHTTP1Layer_StateReleaserNilSafe(t *testing.T) {
 }
 
 func TestHTTP1Layer_StateReleaserOnConnectionClose(t *testing.T) {
-	// markTerminated has two reach paths: (a) Next() reads io.EOF / parse
-	// error and calls markTerminated directly, (b) Layer.Close calls
-	// markTerminated(io.EOF) defensively. Both must flush emitted FlowIDs.
+	// markTerminated has two reach paths: (a) explicit Channel.Close (the
+	// session loop's deferred client.Close fires this after the exchange
+	// completes), (b) Layer.Close calls markTerminated(io.EOF) defensively.
+	// Both must flush emitted FlowIDs.
+	//
+	// USK-730: a second Channel.Next returning io.EOF no longer fires
+	// markTerminated — the session decides termination via Close, so we
+	// drive Close explicitly here.
 
-	t.Run("via Next EOF", func(t *testing.T) {
+	t.Run("via Channel.Close", func(t *testing.T) {
 		client, server := testConn(t)
 		defer client.Close()
 		defer server.Close()
@@ -1664,6 +1681,11 @@ func TestHTTP1Layer_StateReleaserOnConnectionClose(t *testing.T) {
 		if _, err := ch.Next(context.Background()); !errors.Is(err, io.EOF) {
 			t.Fatalf("expected io.EOF, got %v", err)
 		}
+
+		// Mirror the session's defer client.Close(): explicit Close is what
+		// fires markTerminated for the per-exchange Channel under the new
+		// USK-730 contract.
+		_ = ch.Close()
 
 		snap := rec.snapshot()
 		if len(snap) != 1 {
@@ -1910,7 +1932,9 @@ func TestLayer_DetachStream_ReplaysCapturedAfterInterrupt(t *testing.T) {
 	if !ok {
 		t.Fatalf("Channel is not *channel (test internals): %T", ch)
 	}
-	innerCh.captureReader.StartCapture()
+	// USK-730: captureReader moved to the Layer. PrepareSwap is the
+	// production-equivalent entry point.
+	innerCh.PrepareSwap()
 
 	wsFrame := []byte{0x81, 0x87, 0xa1, 0xb2, 0xc3, 0xd4, 0xc8, 0xc1, 0xa9, 0xa0, 0xa9, 0xb0, 0xb3}
 	if _, err := client.Write(wsFrame); err != nil {

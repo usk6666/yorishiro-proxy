@@ -329,8 +329,6 @@ func startHTTPMITMProxy(
 		defer close(done)
 		defer stack.Close()
 
-		clientCh := <-stack.ClientTopmost().Channels()
-
 		// Build RecordStep options. USK-622 wire encoder is unconditional;
 		// USK-635 MaxBodySize override is opt-in for the exceed-cap test.
 		recordOpts := []pipeline.Option{
@@ -341,8 +339,6 @@ func startHTTPMITMProxy(
 		}
 
 		// Build pipeline: HostScope → HTTPScope → Safety → Transform → Intercept → Record.
-		// Optional custom Steps are prepended before HostScope for tests
-		// that need mid-flight inspection without Intercept's HoldQueue.
 		steps := make([]pipeline.Step, 0, 6+len(opts.prependCustomSteps))
 		steps = append(steps, opts.prependCustomSteps...)
 		steps = append(steps,
@@ -356,10 +352,7 @@ func startHTTPMITMProxy(
 
 		p := pipeline.New(steps...)
 
-		// Lazy dial: return upstream channel on first forwarded envelope.
-		session.RunSession(ctx, clientCh, func(_ context.Context, _ *envelope.Envelope) (layer.Channel, error) {
-			return <-stack.UpstreamTopmost().Channels(), nil
-		}, p, session.SessionOptions{
+		sessOpts := session.SessionOptions{
 			// USK-635: project State + FailureReason onto Stream so
 			// error-path tests can assert "error" + "internal_error".
 			OnComplete: func(cctx context.Context, streamID string, err error) {
@@ -374,7 +367,55 @@ func startHTTPMITMProxy(
 					})
 				}
 			},
-		})
+		}
+
+		// USK-730: per-exchange Channel granularity. The HTTP/1.x client
+		// Layer yields one Channel per request-response exchange; iterate
+		// Channels() and run a session per Channel mirroring proxybuild's
+		// runHTTP1ExchangeLoop. The upstream Layer's OpenExchange() mints
+		// the per-exchange upstream Channel for each session's dial.
+		clientH1, ok := stack.ClientTopmost().(*http1.Layer)
+		if !ok {
+			// Non-HTTP/1.x topology (e.g., bytechunk or other layered tests
+			// that reuse this harness). Fall back to single-Channel pattern.
+			clientCh := <-stack.ClientTopmost().Channels()
+			if clientCh == nil {
+				return
+			}
+			session.RunSession(ctx, clientCh, func(_ context.Context, _ *envelope.Envelope) (layer.Channel, error) {
+				return <-stack.UpstreamTopmost().Channels(), nil
+			}, p, sessOpts)
+			return
+		}
+		upstreamH1, _ := stack.UpstreamTopmost().(*http1.Layer)
+
+		var wg sync.WaitGroup
+		for {
+			select {
+			case <-ctx.Done():
+				wg.Wait()
+				return
+			case clientCh, ok := <-clientH1.Channels():
+				if !ok {
+					wg.Wait()
+					return
+				}
+				wg.Add(1)
+				go func(ch layer.Channel) {
+					defer wg.Done()
+					dial := func(_ context.Context, _ *envelope.Envelope) (layer.Channel, error) {
+						if upstreamH1 != nil {
+							if upCh := upstreamH1.OpenExchange(); upCh != nil {
+								return upCh, nil
+							}
+						}
+						// Fallback for non-h1 upstream (kept for harness flexibility).
+						return <-stack.UpstreamTopmost().Channels(), nil
+					}
+					session.RunStackSessionExchange(ctx, stack, ch, dial, p, sessOpts)
+				}(clientCh)
+			}
+		}
 	}
 
 	flCfg := connector.FullListenerConfig{
@@ -1092,6 +1133,25 @@ func TestHTTPSMITM_KeepAlive(t *testing.T) {
 		if f.Sequence != 1 {
 			t.Errorf("receive flow %d: Sequence=%d, want 1", i, f.Sequence)
 		}
+	}
+
+	// USK-730: each keep-alive request creates its own Stream and each
+	// Stream must transition to state="complete" via its own per-exchange
+	// session's OnComplete. Prior to USK-730, only the first Stream's
+	// OnComplete fired (streamCapture set-once + 1 RunStackSession per
+	// connection), so the 2nd-and-later Streams remained "active" forever.
+	streams := store.getStreams()
+	if len(streams) < 3 {
+		t.Fatalf("expected at least 3 streams (one per keep-alive exchange), got %d", len(streams))
+	}
+	completed := 0
+	for _, s := range streams {
+		if s.State == "complete" {
+			completed++
+		}
+	}
+	if completed < 3 {
+		t.Errorf("only %d of %d Streams transitioned to state=complete; per-exchange Stream lifecycle (USK-730) requires N completes for N exchanges", completed, len(streams))
 	}
 }
 

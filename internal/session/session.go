@@ -386,11 +386,6 @@ func RunStackSession(
 		return errors.New("session: RunStackSession requires non-nil ConnectionStack")
 	}
 
-	var userOpt SessionOptions
-	if len(opts) > 0 {
-		userOpt = opts[0]
-	}
-
 	clientTop := stack.ClientTopmost()
 	if clientTop == nil {
 		return errors.New("session: ConnectionStack has no client topmost layer")
@@ -402,6 +397,39 @@ func RunStackSession(
 	clientCh, ok := <-clientTop.Channels()
 	if !ok || clientCh == nil {
 		return errors.New("session: client topmost layer produced no Channel")
+	}
+
+	return RunStackSessionExchange(ctx, stack, clientCh, dial, p, opts...)
+}
+
+// RunStackSessionExchange is the per-exchange variant of RunStackSession.
+// It accepts a pre-fetched client Channel rather than pulling one from
+// stack.ClientTopmost().Channels(). This is the entry point used by HTTP/1.x
+// keep-alive (USK-730), where the proxybuild OnStack wiring iterates the
+// client Layer's Channels() and runs one session per exchange.
+//
+// Upgrade orchestration is unchanged: an upgrading exchange detaches the
+// client + upstream HTTP/1 Layers, swaps them with ws / sse Layers, and
+// recursively calls RunStackSession (which pulls one Channel from the new
+// Layer's Channels()). The recursion depth is still bounded by 2.
+func RunStackSessionExchange(
+	ctx context.Context,
+	stack *connector.ConnectionStack,
+	clientCh layer.Channel,
+	dial DialFunc,
+	p *pipeline.Pipeline,
+	opts ...SessionOptions,
+) error {
+	if stack == nil {
+		return errors.New("session: RunStackSessionExchange requires non-nil ConnectionStack")
+	}
+	if clientCh == nil {
+		return errors.New("session: RunStackSessionExchange requires non-nil client Channel")
+	}
+
+	var userOpt SessionOptions
+	if len(opts) > 0 {
+		userOpt = opts[0]
 	}
 
 	notice := &UpgradeNotice{}

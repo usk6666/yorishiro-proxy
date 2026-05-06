@@ -2,11 +2,12 @@ package http1
 
 import (
 	"bufio"
-	"bytes"
+	"context"
 	"errors"
 	"io"
 	"net"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/config"
@@ -16,24 +17,77 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/pluginv2"
 )
 
-// Layer wraps a net.Conn in an HTTP/1.x Layer. It yields exactly one Channel
-// that produces HTTPMessage envelopes for each request or response in
-// keep-alive order.
+// Layer wraps a net.Conn in an HTTP/1.x Layer. It yields one Channel per
+// HTTP request-response exchange (RFC-001 §3.3 — Channel granularity is the
+// logical stream, not the connection). Multiple exchanges on a keep-alive
+// connection produce multiple Channels.
 //
-// The Layer owns the connection and closes it on Close().
+// Direction semantics:
+//   - envelope.Send (server-facing): a spawn loop parses each incoming request
+//     and yields a per-exchange Channel via Channels(). The Channel carries
+//     the request envelope on its first Next() call; Send writes the response
+//     back to the wire.
+//   - envelope.Receive (upstream-facing): callers obtain a per-exchange
+//     Channel via OpenExchange(); they Send the request, then Next() returns
+//     the parsed response. Channels() also yields these for back-compat with
+//     test/MCP-resend single-shot consumers.
+//
+// The Layer owns the connection and closes it on Close(). It enforces
+// HTTP/1.1 wire-serialization across exchanges (only one write at a time;
+// upstream responses are demultiplexed in FIFO request-send order).
 type Layer struct {
-	conn     net.Conn
-	ch       chan layer.Channel
-	channel  *channel
-	opts     options
+	conn          net.Conn
+	reader        *bufio.Reader
+	captureReader *interruptCaptureReader
+	streamID      string
+	direction     envelope.Direction
+	opts          options
+
+	// chOut is the channel returned by Channels(). The spawn goroutine
+	// writes per-exchange Channels here; closed when the spawn loop exits.
+	chOut chan layer.Channel
+
+	// closed is signalled by Close() to shut down the spawn goroutine.
+	closed    chan struct{}
+	closeOnce sync.Once
+
+	// writeMu serializes Channel.Send across all exchanges so concurrent
+	// Sends on different per-exchange Channels never interleave wire bytes.
+	// HTTP/1.1 is strictly serial on the wire (RFC 9112 §9.5).
+	writeMu sync.Mutex
+
+	// Receive-direction state: pendingQ is the FIFO of Channels awaiting
+	// their response. consumers add to it via OpenExchange (after registering)
+	// then Send the request. The spawn loop pops from the head when ready
+	// to parse the next response.
+	pendingMu     sync.Mutex
+	pendingQ      []*channel
+	pendingNotify chan struct{} // wakes the receive spawn loop
+
+	// activeMu guards `active`, the most-recently-yielded Channel. Layer-level
+	// upgrade primitives (Interrupt / PrepareSwap / DetachStream /
+	// DetachStreamingBody) forward to it for back-compat with callers that
+	// hold the Layer rather than the Channel.
+	activeMu sync.RWMutex
+	active   *channel
+
+	// detached is set when DetachStream / DetachStreamingBody transfers
+	// conn ownership to a successor Layer (ws / sse). Subsequent Close
+	// calls become conn-close no-ops.
 	detached bool
+
+	// stateReleaser invocation is per-Channel; the Layer-level field is held
+	// only so newly spawned channels inherit it.
+
+	// connInfo stable across exchanges
+	envCtx envelope.EnvelopeContext
 }
 
 // StreamingResponsePredicate decides whether a Receive-direction response
 // should bypass body draining. The Channel evaluates this predicate against
 // the parsed response (headers + status, before the body is consumed). When
 // true, the response Envelope is emitted with an empty body and the still-
-// open body reader is held on the Layer for [Layer.DetachStreamingBody].
+// open body reader is held on the Channel for [Channel.DetachStreamingBody].
 type StreamingResponsePredicate func(*parser.RawResponse) bool
 
 // options holds Layer configuration.
@@ -46,10 +100,9 @@ type options struct {
 	maxBody            int64
 	streamingDetect    StreamingResponsePredicate
 
-	// stateReleaser is the optional pluginv2 hook invoked when the Channel
+	// stateReleaser is the optional pluginv2 hook invoked when a Channel
 	// reaches its terminal state. Drives ReleaseTransaction(ConnID, FlowID)
-	// for every envelope this Channel emitted via Next. nil = no-op
-	// (legacy parallel path / tests that don't construct an Engine).
+	// for every envelope the Channel emitted via Next. nil = no-op.
 	stateReleaser pluginv2.StateReleaser
 }
 
@@ -62,7 +115,7 @@ func WithScheme(scheme string) Option {
 }
 
 // WithEnvelopeContext sets the template EnvelopeContext stamped onto every
-// envelope produced by this Layer's Channel. ReceivedAt is overwritten
+// envelope produced by Channels of this Layer. ReceivedAt is overwritten
 // per-envelope.
 func WithEnvelopeContext(ctx envelope.EnvelopeContext) Option {
 	return func(o *options) { o.ctx = ctx }
@@ -92,8 +145,8 @@ func WithMaxBodySize(n int64) Option {
 	return func(o *options) { o.maxBody = n }
 }
 
-// WithStateReleaser injects a pluginv2.StateReleaser the Layer invokes
-// when the Channel reaches its terminal state. The release fires
+// WithStateReleaser injects a pluginv2.StateReleaser invoked when each
+// per-exchange Channel reaches its terminal state. The release fires
 // ReleaseTransaction(ConnID, FlowID) once for every envelope the Channel
 // emitted via Next during its lifetime — RFC §9.3 D6 / Q26 maps the HTTP
 // transaction scope to (ConnID, FlowID). Mirrors http2 / ws / httpaggregator
@@ -105,9 +158,10 @@ func WithStateReleaser(r pluginv2.StateReleaser) Option {
 // WithStreamingResponseDetect installs a predicate evaluated against each
 // response on a Receive-direction Channel. When the predicate returns true,
 // Channel.Next emits the response Envelope with an empty body and keeps the
-// still-open body reader pending on the Layer; the swap orchestrator can
-// then claim the body via [Layer.DetachStreamingBody]. The predicate is a
-// no-op on Send-direction Channels (which read requests, not responses).
+// still-open body reader pending on the Channel; the swap orchestrator can
+// then claim the body via [Channel.DetachStreamingBody] (or the Layer
+// shorthand of the same name). The predicate is a no-op on Send-direction
+// Channels (which read requests, not responses).
 //
 // This is the primitive that makes HTTP/1.x → SSE swap possible without
 // blocking on a body that has no end (text/event-stream is open-ended; a
@@ -146,27 +200,27 @@ func IsSSEResponse(rawResp *parser.RawResponse) bool {
 
 // New creates an HTTP/1.x Layer wrapping conn.
 //
-// direction determines what the Channel parses:
-//   - envelope.Send: parses requests (server-facing / client-side layer)
-//   - envelope.Receive: parses responses (client-facing / upstream-side layer)
+// direction determines the Layer role:
+//   - envelope.Send: server-facing; spawn loop parses incoming requests and
+//     yields one Channel per request via Channels().
+//   - envelope.Receive: upstream-facing; callers must call OpenExchange() to
+//     register a Channel, then Send a request and Next a response. For
+//     back-compat with single-shot consumers (tests, MCP resend), one
+//     auto-opened Channel is also yielded via Channels().
 //
-// streamID is the connection-level identifier returned by Channel.StreamID().
+// streamID is the connection-level identifier returned by Channel.StreamID()
+// for diagnostic correlation; envelopes themselves carry per-exchange
+// StreamIDs minted by the spawn loop.
 func New(conn net.Conn, streamID string, direction envelope.Direction, opts ...Option) *Layer {
 	o := options{
 		scheme:             "http",
 		bufSize:            4096,
-		bodySpillDir:       "", // resolved to os.TempDir() by bodybuf.NewFile
+		bodySpillDir:       "",
 		bodySpillThreshold: config.DefaultBodySpillThreshold,
 		maxBody:            config.MaxBodySize,
 	}
 	for _, opt := range opts {
 		opt(&o)
-	}
-
-	l := &Layer{
-		conn: conn,
-		ch:   make(chan layer.Channel, 1),
-		opts: o,
 	}
 
 	// USK-715: bufio.Reader sits atop interruptCaptureReader rather than the
@@ -176,145 +230,423 @@ func New(conn net.Conn, streamID string, direction envelope.Direction, opts ...O
 	captureReader := newInterruptCaptureReader(conn)
 	reader := bufio.NewReaderSize(captureReader, o.bufSize)
 
-	l.channel = &channel{
+	l := &Layer{
+		conn:          conn,
 		reader:        reader,
 		captureReader: captureReader,
-		writer:        conn,
-		conn:          conn,
 		streamID:      streamID,
 		direction:     direction,
-		scheme:        o.scheme,
-		ctxTmpl:       o.ctx,
-		termDone:      make(chan struct{}),
-		bodyOpts: bodyOpts{
-			spillDir:       o.bodySpillDir,
-			spillThreshold: o.bodySpillThreshold,
-			maxBody:        o.maxBody,
-		},
-		streamingDetect: o.streamingDetect,
-		stateReleaser:   o.stateReleaser,
+		opts:          o,
+		envCtx:        o.ctx,
+		chOut:         make(chan layer.Channel),
+		closed:        make(chan struct{}),
+		pendingNotify: make(chan struct{}, 1),
 	}
-	l.ch <- l.channel
-	close(l.ch)
+
+	switch direction {
+	case envelope.Send:
+		// Pre-yield one initial Channel before the spawn loop starts so
+		// legacy single-shot consumers (tests that do `<-l.Channels()`
+		// without explicitly waiting for a parsed request) still see a
+		// Channel immediately. The initial Channel's Next() reaches into
+		// the parent Layer's reader on first call (deferred parse). The
+		// spawn loop yields additional Channels (one per subsequent
+		// keep-alive request) AFTER the initial has been consumed and the
+		// parse handed off, so the bufio.Reader is never accessed
+		// concurrently.
+		initial := l.newChannelLocked()
+		initial.deferredParse = true
+		go func() {
+			defer close(l.chOut)
+			select {
+			case l.chOut <- initial:
+			case <-l.closed:
+				return
+			}
+			// Wait for the initial exchange to fully terminate (session
+			// closed the Channel, parse failed, or Layer-level close)
+			// BEFORE entering the spawn loop. Doing so keeps the spawn
+			// loop's reader access strictly sequential with the session's
+			// per-exchange Channel access — necessary because HTTP/1.1 is
+			// wire-serial and because Upgrade flows (WS / SSE) call
+			// DetachStream synchronously on a still-open Layer; a
+			// concurrently parking spawn loop on conn.Read would race
+			// with the Detach handover. termDone fires from:
+			//   - session.RunSession's deferred client.Close (normal end)
+			//   - parser error inside nextSend's deferred parse path
+			//   - Upgrade flow's DetachStream → markTerminated
+			//   - Layer.Close pulling all pending Channels down
+			select {
+			case <-initial.termDone:
+			case <-l.closed:
+				return
+			}
+			// Skip the spawn loop on terminal conditions:
+			//   - connClosed: request had Connection: close → no more reqs
+			//   - isDetached: upgrade transferred conn ownership
+			//   - parseFailed: parseRequest error left the bufio in a bad
+			//     state; another parse would just compound the failure
+			if initial.connClosed || l.isDetached() || initial.parseFailed {
+				return
+			}
+			l.spawnLoopSend()
+		}()
+	case envelope.Receive:
+		// For back-compat with single-shot consumers (tests, MCP resend), the
+		// Layer auto-yields one Channel via Channels() so the legacy pattern
+		// `ch := <-l.Channels(); ch.Send(req); ch.Next()` keeps working.
+		// Multi-exchange consumers (production keep-alive) call OpenExchange
+		// for each additional exchange. Channels are added to pendingQ
+		// lazily inside sendRequest (atomically with the wire write under
+		// writeMu) so FIFO order matches the on-wire request-send order even
+		// when multiple Channels are interleaved.
+		//
+		// USK-730: appendPending is deferred until the consumer either Sends
+		// (production path) or Next's (legacy back-compat path with no Send).
+		// Eager appending here would wake spawnLoopReceive before the test
+		// has finished mutating the Channel, racing tests like
+		// TestChannel_NextResponse_EarlyHints_ThenFinal that pre-set
+		// currentStreamID after Channels() and before Next.
+		initial := l.newChannelLocked()
+		go func() {
+			defer close(l.chOut)
+			select {
+			case l.chOut <- initial:
+			case <-l.closed:
+				return
+			}
+			<-l.closed
+		}()
+		go l.spawnLoopReceive()
+	}
+
 	return l
 }
 
-// Channels returns a channel that yields exactly one Channel, then closes.
-func (l *Layer) Channels() <-chan layer.Channel { return l.ch }
-
-// Close closes the underlying connection. The Layer owns the connection.
-// It also fires the Channel's Closed signal with io.EOF if the Channel has
-// not already observed a terminal state (covers the idle-Channel race where
-// Close runs with no Next in flight).
+// Channels returns a channel that yields per-exchange Channels.
 //
-// If DetachStream has transferred ownership of the conn to a subsequent
-// layer (e.g., WSLayer after a 101 Upgrade), Close is a no-op for the conn
-// but still calls markTerminated defensively so any observer parked on
-// the inner Channel's Closed() unblocks.
-func (l *Layer) Close() error {
-	if l.detached {
-		// Ownership of the conn was transferred via DetachStream; the
-		// successor layer owns lifecycle. markTerminated is idempotent so
-		// repeated calls (e.g., from defer cleanup) are safe.
-		if l.channel != nil {
-			l.channel.markTerminated(io.EOF)
-		}
+// Send direction: the spawn loop yields one Channel per parsed request,
+// closing the result when the connection EOFs or errors.
+//
+// Receive direction: yields one auto-opened Channel for back-compat with
+// single-shot use; additional Channels must be obtained via OpenExchange().
+// The result closes when Close() is called.
+func (l *Layer) Channels() <-chan layer.Channel { return l.chOut }
+
+// OpenExchange returns a new per-exchange Channel for the upstream (Receive
+// direction) Layer. The caller MUST then Send a request on the returned
+// Channel; the Layer's spawn loop will demultiplex the next response
+// (in FIFO send order) to the Channel's Next().
+//
+// The returned Channel is registered in the parent Layer's response queue
+// only on Send (atomically with the wire write under writeMu) so the
+// receive FIFO matches the on-wire request order regardless of consumer
+// interleaving.
+//
+// Calling OpenExchange on a Send-direction Layer returns nil — the spawn
+// loop already produces Channels via Channels().
+//
+// After Close(), OpenExchange returns nil.
+func (l *Layer) OpenExchange() layer.Channel {
+	if l.direction != envelope.Receive {
 		return nil
 	}
-	err := l.conn.Close()
-	if l.channel != nil {
-		l.channel.markTerminated(io.EOF)
+	select {
+	case <-l.closed:
+		return nil
+	default:
 	}
+	return l.newChannelLocked()
+}
+
+// newChannelLocked constructs a fresh per-exchange channel inheriting
+// Layer-level configuration. Caller must NOT hold any of l's mutexes.
+func (l *Layer) newChannelLocked() *channel {
+	ch := &channel{
+		layer:           l,
+		streamID:        l.streamID,
+		direction:       l.direction,
+		scheme:          l.opts.scheme,
+		ctxTmpl:         l.envCtx,
+		bodyOpts:        bodyOpts{spillDir: l.opts.bodySpillDir, spillThreshold: l.opts.bodySpillThreshold, maxBody: l.opts.maxBody},
+		streamingDetect: l.opts.streamingDetect,
+		stateReleaser:   l.opts.stateReleaser,
+		termDone:        make(chan struct{}),
+		responseReady:   make(chan responseDelivery, 4),
+		readerReleased:  make(chan struct{}),
+	}
+	l.activeMu.Lock()
+	l.active = ch
+	l.activeMu.Unlock()
+	return ch
+}
+
+// appendPending registers ch as awaiting its response and wakes the parser
+// goroutine. Idempotent per Channel: a Channel can be registered via two
+// paths (sendRequest's per-Send append, or the back-compat
+// "Channels() consumed" hook for tests) and the second is a no-op.
+// Receive-direction only.
+func (l *Layer) appendPending(ch *channel) {
+	if ch == nil {
+		return
+	}
+	ch.pendingOnce.Do(func() {
+		l.pendingMu.Lock()
+		l.pendingQ = append(l.pendingQ, ch)
+		l.pendingMu.Unlock()
+		select {
+		case l.pendingNotify <- struct{}{}:
+		default:
+		}
+	})
+}
+
+// popPending removes and returns the head of pendingQ, or nil if empty.
+func (l *Layer) popPending() *channel {
+	l.pendingMu.Lock()
+	defer l.pendingMu.Unlock()
+	if len(l.pendingQ) == 0 {
+		return nil
+	}
+	ch := l.pendingQ[0]
+	l.pendingQ = l.pendingQ[1:]
+	return ch
+}
+
+// peekPending returns the head of pendingQ without removing it. Used while
+// streaming 1xx informational responses on the same exchange.
+func (l *Layer) peekPending() *channel {
+	l.pendingMu.Lock()
+	defer l.pendingMu.Unlock()
+	if len(l.pendingQ) == 0 {
+		return nil
+	}
+	return l.pendingQ[0]
+}
+
+// spawnLoopSend parses requests sequentially and yields one Channel per
+// request to chOut. Each iteration waits for the previously yielded Channel
+// to fully terminate (session.Close fires markTerminated → close(termDone))
+// before parsing the next request, so the bufio.Reader and the conn are
+// never accessed concurrently with a still-active session — necessary for
+// safe DetachStream handover on Upgrade flows and for HTTP/1.1's
+// wire-serial semantics.
+//
+// Exits on EOF / parse error / Connection: close / Layer detach. The
+// caller is responsible for closing l.chOut after this returns (the
+// deferred-parse goroutine in New() handles that via its own defer).
+func (l *Layer) spawnLoopSend() {
+	for {
+		select {
+		case <-l.closed:
+			return
+		default:
+		}
+
+		// Build a fresh Channel before the parse so the Channel can be the
+		// receiver of any error envelope (terminal state propagation).
+		ch := l.newChannelLocked()
+		env, perr := ch.parseRequest()
+		if perr != nil {
+			ch.markTerminated(perr)
+			if errors.Is(perr, io.EOF) {
+				return
+			}
+			// Yield the channel so consumers see the terminal state, then
+			// exit (the conn is unlikely to recover from a parse error).
+			select {
+			case l.chOut <- ch:
+			case <-l.closed:
+			}
+			return
+		}
+		ch.queuedEnv = env
+
+		select {
+		case l.chOut <- ch:
+		case <-l.closed:
+			return
+		}
+
+		// Wait for the yielded Channel's session to fully terminate
+		// before parsing the next keep-alive request. This serializes
+		// the spawn loop with the consumer's session loop and avoids
+		// concurrent access to the bufio.Reader / conn during Upgrade
+		// (WS / SSE) DetachStream handovers.
+		select {
+		case <-ch.termDone:
+		case <-l.closed:
+			return
+		}
+
+		// USK-655: if the just-completed exchange triggered an Upgrade
+		// (DetachStream → markDetached), the bufio.Reader / conn are now
+		// owned by the successor Layer; we must not parse another
+		// request.
+		if l.isDetached() {
+			return
+		}
+		// connection-close honored from the parsed request: stop spawning
+		// because the peer will close the wire after this response.
+		if ch.connClosed {
+			return
+		}
+	}
+}
+
+// spawnLoopReceive parses responses and demultiplexes them in FIFO order to
+// the head of pendingQ. Handles 1xx informational responses by leaving the
+// head Channel in place across multiple deliveries until a final response
+// (status >= 200) arrives.
+func (l *Layer) spawnLoopReceive() {
+	for {
+		select {
+		case <-l.closed:
+			return
+		case <-l.pendingNotify:
+		}
+
+		// Drain all currently pending exchanges. Each iteration parses one
+		// response; on 1xx we keep the head, on final we pop.
+		for {
+			head := l.peekPending()
+			if head == nil {
+				break
+			}
+
+			// USK-715 / detach hygiene: if the conn was reclaimed, fail any
+			// still-pending channels with EOF.
+			if l.isDetached() {
+				for ch := l.popPending(); ch != nil; ch = l.popPending() {
+					ch.deliverResponse(nil, io.EOF)
+				}
+				return
+			}
+
+			env, isInformational, perr := head.parseResponse()
+			if perr != nil {
+				// Drain all remaining pending channels with the terminal err.
+				for ch := l.popPending(); ch != nil; ch = l.popPending() {
+					ch.deliverResponse(nil, perr)
+				}
+				return
+			}
+			head.deliverResponse(env, nil)
+			if !isInformational {
+				_ = l.popPending()
+				if head.connClosed || l.isDetached() {
+					// Peer signalled connection-close; remaining pendings are
+					// futile.
+					for ch := l.popPending(); ch != nil; ch = l.popPending() {
+						ch.deliverResponse(nil, io.EOF)
+					}
+					return
+				}
+			}
+		}
+	}
+}
+
+// isDetached reports whether DetachStream / DetachStreamingBody transferred
+// conn ownership to a successor Layer.
+func (l *Layer) isDetached() bool {
+	l.activeMu.RLock()
+	defer l.activeMu.RUnlock()
+	return l.detached
+}
+
+// Close closes the underlying connection (unless DetachStream transferred
+// ownership) and signals all live Channels and the spawn loop to terminate.
+func (l *Layer) Close() error {
+	var err error
+	l.closeOnce.Do(func() {
+		close(l.closed)
+
+		l.activeMu.Lock()
+		detached := l.detached
+		l.activeMu.Unlock()
+		if !detached {
+			err = l.conn.Close()
+		}
+
+		// Mark every pending Channel terminated so observers parked on
+		// Closed() unblock.
+		l.pendingMu.Lock()
+		pending := l.pendingQ
+		l.pendingQ = nil
+		l.pendingMu.Unlock()
+		for _, ch := range pending {
+			// Best-effort wake of any Next() parked on responseReady. Use
+			// closeResponseReady (sync.Once) instead of a raw send so a
+			// concurrent close from spawnLoopReceive (or a prior Channel
+			// .Close) does not turn into a "send on closed channel" panic.
+			ch.markTerminated(io.EOF)
+			ch.closeResponseReady()
+		}
+		l.activeMu.RLock()
+		active := l.active
+		l.activeMu.RUnlock()
+		if active != nil {
+			active.markTerminated(io.EOF)
+		}
+	})
 	return err
 }
 
-// DetachStream tears down the HTTP/1 layer after an Upgrade response and
-// returns the buffered reader, writer, and underlying closer so that the
-// next layer (WebSocket) can be constructed on top of the same wire.
-//
-// Ownership of the returned bufio.Reader, conn (writer), and conn (closer)
-// transfers to the caller. The Layer becomes unusable: subsequent Close()
-// calls are no-ops for the conn (the successor layer is responsible for
-// closing it). The internal Channel is marked terminated so any observer
-// parked on Closed() unblocks.
-//
-// The bufio.Reader retains any bytes the HTTP/1 parser read past the final
-// \r\n\r\n of the 101 Switching Protocols response — those bytes are the
-// first WebSocket frame(s) and must be parsed by the next layer.
-//
-// Any read deadline previously installed by [Layer.Interrupt] is reset to
-// zero so the successor Layer's reads operate without a stale past-deadline.
-//
-// USK-715: when [Layer.Interrupt] enabled side-buffer capture before the
-// parser exited, DetachStream drains the capture and returns an
-// io.MultiReader that replays any "lost" bytes (bytes the parser pulled
-// from bufio.Reader and discarded on parse failure) ahead of bufio.Reader's
-// own remainder. This rebuilds wire-order on a slow CI runner where a
-// post-Send(101) race can let WS frame bytes reach the parser before the
-// read deadline takes effect.
-//
-// Calling DetachStream more than once returns a sentinel error.
-func (l *Layer) DetachStream() (io.Reader, io.Writer, io.Closer, error) {
-	if l.detached {
-		return nil, nil, nil, errors.New("http1: stream already detached")
-	}
-	l.detached = true
-	// Clear any past-deadline a prior Interrupt installed; the successor
-	// Layer (ws / sse) must read without inheriting the wake-up trigger.
-	_ = l.conn.SetReadDeadline(time.Time{})
-	if l.channel != nil {
-		l.channel.markTerminated(io.EOF)
-
-		// USK-715: drain the post-Interrupt capture and prepend any bytes
-		// the parser consumed-and-lost (the prefix of `captured` that is
-		// no longer in bufio.Reader's buffer).
-		var reader io.Reader = l.channel.reader
-		if l.channel.captureReader != nil {
-			captured := l.channel.captureReader.Drain()
-			if n := len(captured); n > 0 {
-				buffered := l.channel.reader.Buffered()
-				if buffered < n {
-					// `lost` = the prefix of `captured` that bufio.Reader
-					// no longer holds (parser advanced bufio's read cursor
-					// past it). bufio's Buffered() bytes are the suffix of
-					// `captured` (everything bufio holds was pulled from
-					// captureReader after capture started).
-					lost := captured[:n-buffered]
-					reader = io.MultiReader(bytes.NewReader(lost), l.channel.reader)
-				}
-				// If buffered >= n, bufio had bytes from before capture
-				// started (e.g., a non-RFC-6455 client pipelined the WS
-				// frame in the same TCP segment as the Upgrade request).
-				// In that case bufio already holds every captured byte
-				// plus pre-capture content, so use bufio as-is.
-			}
-		}
-		return reader, l.conn, l.conn, nil
-	}
-	// Defensive: a Layer constructed via New always has a non-nil channel,
-	// but if a future refactor ever leaves channel nil we still surface
-	// the underlying conn so the caller can drive the wire.
-	return l.conn, l.conn, l.conn, nil
+// activeChannel returns the most-recently-yielded Channel for Layer-level
+// upgrade primitives. Returns nil if no Channel has been yielded yet.
+func (l *Layer) activeChannel() *channel {
+	l.activeMu.RLock()
+	defer l.activeMu.RUnlock()
+	return l.active
 }
 
-// Interrupt forwards to the channel's Interrupt method so external callers
-// (and tests) can wake a goroutine parked inside Channel.Next without going
-// through the unexported channel type. session.upstreamToClient prefers the
-// direct Channel.Interrupt path via the channelInterrupter interface; this
-// Layer-level wrapper is for callers that hold the Layer rather than the
-// Channel (e.g., unit tests).
+// markDetached transfers conn ownership to a successor Layer. After this
+// call, Close becomes a conn-close no-op and the spawn loop exits.
+func (l *Layer) markDetached() {
+	l.activeMu.Lock()
+	l.detached = true
+	l.activeMu.Unlock()
+	// Wake any parker (spawn loops, pending Channel Next).
+	select {
+	case l.pendingNotify <- struct{}{}:
+	default:
+	}
+}
+
+// DetachStream tears down the HTTP/1 layer after an Upgrade response and
+// returns the buffered reader, writer, and underlying closer so the next
+// layer (WebSocket) can be constructed on top of the same wire.
 //
-// See channel.Interrupt for the mechanism and limitations.
+// Forwards to the active Channel (the one that just emitted the 101). After
+// this call, the Layer becomes unusable and the spawn loop exits.
 //
-// Returns nil after DetachStream (the channel keeps its conn pointer until
-// terminated; SetReadDeadline on a closed conn returns an error which we
-// surface, but Interrupt itself does not close the conn).
-func (l *Layer) Interrupt() error {
+// Returns a sentinel error if no active Channel exists or if DetachStream
+// was already called.
+func (l *Layer) DetachStream() (io.Reader, io.Writer, io.Closer, error) {
+	l.activeMu.RLock()
 	if l.detached {
+		l.activeMu.RUnlock()
+		return nil, nil, nil, errors.New("http1: stream already detached")
+	}
+	active := l.active
+	l.activeMu.RUnlock()
+	if active == nil {
+		return nil, nil, nil, errors.New("http1: no active channel to detach")
+	}
+	return active.detachStream()
+}
+
+// Interrupt forwards to the active Channel's Interrupt method.
+//
+// See channel.Interrupt for the mechanism. Returns nil if no active Channel
+// exists or after DetachStream.
+func (l *Layer) Interrupt() error {
+	if l.isDetached() {
 		return nil
 	}
-	if l.channel != nil {
-		return l.channel.Interrupt()
+	if active := l.activeChannel(); active != nil {
+		return active.Interrupt()
 	}
 	if l.conn == nil {
 		return nil
@@ -322,59 +654,32 @@ func (l *Layer) Interrupt() error {
 	return l.conn.SetReadDeadline(time.Now())
 }
 
-// PrepareSwap forwards to the channel's PrepareSwap method. The session
-// orchestrator calls this BEFORE Send(101) when a Pipeline UpgradeStep
-// has flipped the upgrade notice, so the post-Upgrade side-buffer
-// capture is enabled before the test client could write the first WS
-// frame in response to 101. See channel.PrepareSwap for details.
+// PrepareSwap forwards to the active Channel's PrepareSwap method. The
+// session orchestrator calls this BEFORE Send(101) when a Pipeline
+// UpgradeStep has flipped the upgrade notice.
 //
-// No-op after DetachStream.
+// No-op after DetachStream or when no Channel is active.
 func (l *Layer) PrepareSwap() {
-	if l.detached {
+	if l.isDetached() {
 		return
 	}
-	if l.channel != nil {
-		l.channel.PrepareSwap()
+	if active := l.activeChannel(); active != nil {
+		active.PrepareSwap()
 	}
 }
 
-// DetachStreamingBody hands the still-open response body io.ReadCloser to
-// the swap orchestrator. Pre-condition: the most recent Channel.Next() must
-// have emitted a response Envelope whose body draining was suppressed by
-// the configured [WithStreamingResponseDetect] predicate. Returns sentinel
-// errors when the precondition is not met.
-//
-// The returned ReadCloser owns the underlying connection; closing it closes
-// the conn. The Layer becomes unusable: subsequent Close calls are no-ops
-// for the conn (the successor (e.g. sse.Channel) is responsible for closing
-// it). The internal Channel is marked terminated so any observer parked on
-// Closed() unblocks.
-//
-// Any read deadline previously installed by [Layer.Interrupt] is reset to
-// zero so the successor reader operates without a stale past-deadline.
+// DetachStreamingBody forwards to the active Channel's DetachStreamingBody.
+// Pre-condition: the most recent Channel.Next() must have emitted a response
+// Envelope whose body draining was suppressed by [WithStreamingResponseDetect].
 func (l *Layer) DetachStreamingBody() (io.ReadCloser, error) {
-	if l.detached {
+	if l.isDetached() {
 		return nil, errors.New("http1: stream already detached")
 	}
-	if l.channel == nil || l.channel.streamingBody == nil {
-		return nil, errors.New("http1: no streaming body pending (predicate did not match or channel never read)")
+	active := l.activeChannel()
+	if active == nil {
+		return nil, errors.New("http1: no active channel for streaming body")
 	}
-	body := l.channel.streamingBody
-	l.channel.streamingBody = nil
-	l.detached = true
-	// Clear any past-deadline a prior Interrupt installed; the successor
-	// (sse) must read without inheriting the wake-up trigger.
-	_ = l.conn.SetReadDeadline(time.Time{})
-	// USK-715: drop any post-Interrupt capture so its retained slice does
-	// not outlive the channel. The streaming-body path does not have a
-	// post-Interrupt parse-and-lose race (the SSE upgrade is half-duplex;
-	// the http1 layer never tries to parse a "next request" after the SSE
-	// response); the drain is for memory hygiene only.
-	if l.channel.captureReader != nil {
-		_ = l.channel.captureReader.Drain()
-	}
-	l.channel.markTerminated(io.EOF)
-	return &streamingBodyCloser{r: body, conn: l.conn}, nil
+	return active.detachStreamingBody()
 }
 
 // streamingBodyCloser pairs the parser's body reader with the conn so the
@@ -386,3 +691,20 @@ type streamingBodyCloser struct {
 
 func (s *streamingBodyCloser) Read(p []byte) (int, error) { return s.r.Read(p) }
 func (s *streamingBodyCloser) Close() error               { return s.conn.Close() }
+
+// responseDelivery carries the parser result from spawnLoopReceive to a
+// pending Channel's Next() goroutine.
+type responseDelivery struct {
+	env *envelope.Envelope
+	err error
+}
+
+// ctxOrBackground is a tiny helper: returns ctx if non-nil, else
+// context.Background. Used to keep the parser's cancellation surface
+// uniform regardless of whether the caller threaded a ctx.
+func ctxOrBackground(ctx context.Context) context.Context {
+	if ctx == nil {
+		return context.Background()
+	}
+	return ctx
+}

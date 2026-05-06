@@ -439,6 +439,20 @@ func buildOnStack(p *pipeline.Pipeline, deps Deps, logger *slog.Logger) connecto
 			watcherWG.Wait()
 		}()
 
+		// USK-730: HTTP/1.x keep-alive runs one session per request-response
+		// exchange, mirroring the H2 per-stream pattern. Other routes
+		// (bytechunk Raw TCP) fall back to the single-Channel RunStackSession.
+		if clientH1, ok := stack.ClientTopmost().(*http1.Layer); ok {
+			upstreamH1, ok := stack.UpstreamTopmost().(*http1.Layer)
+			if !ok {
+				logger.Debug("proxybuild: http1 client topmost without http1 upstream", "target", target,
+					"upstream_type", fmt.Sprintf("%T", stack.UpstreamTopmost()))
+				return
+			}
+			runHTTP1ExchangeLoop(ctx, stack, clientH1, upstreamH1, p, sessOpts, target, logger)
+			return
+		}
+
 		dial := func(_ context.Context, _ *envelope.Envelope) (layer.Channel, error) {
 			ch, ok := <-stack.UpstreamTopmost().Channels()
 			if !ok {
@@ -448,6 +462,53 @@ func buildOnStack(p *pipeline.Pipeline, deps Deps, logger *slog.Logger) connecto
 		}
 		if err := session.RunStackSession(ctx, stack, dial, p, sessOpts); err != nil && !errors.Is(err, context.Canceled) {
 			logger.Debug("proxybuild: session ended with error", "target", target, "error", err)
+		}
+	}
+}
+
+// runHTTP1ExchangeLoop iterates the HTTP/1.x client Layer's Channels()
+// (one per request-response exchange) and spawns one goroutine per
+// exchange running session.RunStackSessionExchange. Mirrors the H2
+// per-stream dispatch (buildOnHTTP2Stack). The upstream HTTP/1.x Layer is
+// shared across all exchanges; each goroutine's dial closure calls
+// upstreamH1.OpenExchange() to register its per-exchange response slot.
+//
+// Upgrade flow (WS / SSE) is owned by RunStackSessionExchange; on detach
+// the http1 Layer's spawn loop closes Channels() and the loop exits.
+func runHTTP1ExchangeLoop(
+	ctx context.Context,
+	stack *connector.ConnectionStack,
+	clientH1, upstreamH1 *http1.Layer,
+	p *pipeline.Pipeline,
+	sessOpts session.SessionOptions,
+	target string,
+	logger *slog.Logger,
+) {
+	var wg sync.WaitGroup
+	for {
+		select {
+		case <-ctx.Done():
+			wg.Wait()
+			return
+		case clientCh, ok := <-clientH1.Channels():
+			if !ok {
+				wg.Wait()
+				return
+			}
+			wg.Add(1)
+			go func(ch layer.Channel) {
+				defer wg.Done()
+				dial := func(_ context.Context, _ *envelope.Envelope) (layer.Channel, error) {
+					upCh := upstreamH1.OpenExchange()
+					if upCh == nil {
+						return nil, fmt.Errorf("proxybuild: upstream http1 layer closed before opening exchange for %s", target)
+					}
+					return upCh, nil
+				}
+				if err := session.RunStackSessionExchange(ctx, stack, ch, dial, p, sessOpts); err != nil && !errors.Is(err, context.Canceled) {
+					logger.Debug("proxybuild: http1 exchange ended with error", "target", target, "error", err)
+				}
+			}(clientCh)
 		}
 	}
 }
