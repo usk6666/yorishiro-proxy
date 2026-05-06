@@ -147,6 +147,7 @@ export function FlowDetailHTTPMessage({ flow }: FlowDetailHTTPMessageProps) {
                 )}
                 {requestTab === "body" && (
                   <BodyViewer
+                    key={`${flow.id}-original-request`}
                     body={flow.original_request.body}
                     encoding={flow.original_request.body_encoding}
                     truncated={false}
@@ -188,6 +189,7 @@ export function FlowDetailHTTPMessage({ flow }: FlowDetailHTTPMessageProps) {
                 )}
                 {requestTab === "body" && (
                   <BodyViewer
+                    key={`${flow.id}-modified-request`}
                     body={flow.request_body}
                     encoding={flow.request_body_encoding}
                     truncated={flow.request_body_truncated}
@@ -262,6 +264,7 @@ export function FlowDetailHTTPMessage({ flow }: FlowDetailHTTPMessageProps) {
                 )}
                 {responseTab === "body" && (
                   <BodyViewer
+                    key={`${flow.id}-original-response`}
                     body={flow.original_response.body}
                     encoding={flow.original_response.body_encoding}
                     truncated={flow.original_response.body_truncated}
@@ -318,6 +321,7 @@ export function FlowDetailHTTPMessage({ flow }: FlowDetailHTTPMessageProps) {
                 )}
                 {responseTab === "body" && (
                   <BodyViewer
+                    key={`${flow.id}-modified-response`}
                     body={flow.response_body}
                     encoding={flow.response_body_encoding}
                     truncated={flow.response_body_truncated}
@@ -363,6 +367,7 @@ export function FlowDetailHTTPMessage({ flow }: FlowDetailHTTPMessageProps) {
               )}
               {requestTab === "body" && (
                 <BodyViewer
+                  key={`${flow.id}-request`}
                   body={flow.request_body}
                   encoding={flow.request_body_encoding}
                   truncated={flow.request_body_truncated}
@@ -434,6 +439,7 @@ export function FlowDetailHTTPMessage({ flow }: FlowDetailHTTPMessageProps) {
                     </div>
                   ) : (
                     <BodyViewer
+                      key={`${flow.id}-response`}
                       body={flow.response_body}
                       encoding={flow.response_body_encoding}
                       truncated={flow.response_body_truncated}

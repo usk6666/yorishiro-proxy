@@ -235,6 +235,7 @@ export function MessageList({
           <div className="sd-message-detail-section">
             <span className="sd-message-detail-section-title">Body</span>
             <BodyViewer
+              key={expandedMessage.id}
               body={expandedMessage.body}
               encoding={expandedMessage.body_encoding}
               truncated={false}

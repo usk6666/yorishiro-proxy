@@ -20,8 +20,12 @@
 
 import { useMemo, useState } from "react";
 import { CodeViewer } from "../../components/ui/CodeViewer.js";
+import { decodeBase64, formatHexDump } from "../../lib/rawBytes.js";
 import type { DecodeAnomaly } from "../../lib/mcp/types.js";
 import "./FlowDetailPage.css";
+
+/** Cap on bytes shown in the hex-dump preview (4 KB). */
+const HEX_DUMP_MAX_BYTES = 4096;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -126,48 +130,18 @@ function tryPrettyJson(body: string): string | null {
   }
 }
 
-/** Convert a base64 string to a hex dump display. */
+/**
+ * Convert a base64 string to a hex dump display.
+ *
+ * Delegates to `lib/rawBytes.formatHexDump` so the dump format stays in lock
+ * step with `RawBytesViewer` / `RawBytesEditor`. `decodeBase64` returns an
+ * empty `Uint8Array` on decode failure, which we surface via the existing
+ * error string rather than rendering an empty pane.
+ */
 function hexDump(base64: string): string {
-  let bytes: Uint8Array;
-  try {
-    const binary = atob(base64);
-    bytes = new Uint8Array(binary.length);
-    for (let i = 0; i < binary.length; i++) {
-      bytes[i] = binary.charCodeAt(i);
-    }
-  } catch {
-    return "(Failed to decode base64 content)";
-  }
-
-  const lines: string[] = [];
-  const maxBytes = Math.min(bytes.length, 4096); // Limit display to 4KB
-
-  for (let offset = 0; offset < maxBytes; offset += 16) {
-    const hexParts: string[] = [];
-    const asciiParts: string[] = [];
-
-    for (let i = 0; i < 16; i++) {
-      if (offset + i < maxBytes) {
-        const byte = bytes[offset + i];
-        hexParts.push(byte.toString(16).padStart(2, "0"));
-        asciiParts.push(byte >= 0x20 && byte < 0x7f ? String.fromCharCode(byte) : ".");
-      } else {
-        hexParts.push("  ");
-        asciiParts.push(" ");
-      }
-    }
-
-    const offsetStr = offset.toString(16).padStart(8, "0");
-    const hex = hexParts.slice(0, 8).join(" ") + "  " + hexParts.slice(8).join(" ");
-    const ascii = asciiParts.join("");
-    lines.push(`${offsetStr}  ${hex}  |${ascii}|`);
-  }
-
-  if (bytes.length > maxBytes) {
-    lines.push(`... (${bytes.length - maxBytes} more bytes truncated)`);
-  }
-
-  return lines.join("\n");
+  const bytes = decodeBase64(base64);
+  if (bytes.length === 0) return "(Failed to decode base64 content)";
+  return formatHexDump(bytes, HEX_DUMP_MAX_BYTES);
 }
 
 /**
