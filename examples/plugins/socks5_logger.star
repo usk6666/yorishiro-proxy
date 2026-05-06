@@ -1,32 +1,27 @@
 # socks5_logger.star
 #
-# Logs SOCKS5 CONNECT events including target, authentication method,
-# and client address. This is useful for monitoring which destinations
-# are accessed through the SOCKS5 proxy.
+# Logs SOCKS5 CONNECT events: which client established a tunnel to which
+# destination. Useful for monitoring proxy egress.
 #
-# Configuration:
-#   protocol: "socks5"
-#   hooks: ["on_socks5_connect"]
+# Hook identity (RFC-001 §9.3):
+#   register_hook("socks5", "on_connect", fn)
 #
-# Usage example (plugin config):
+# `(socks5, on_connect)` is a lifecycle event — `phase=` must NOT be passed
+# (PhaseSupportNone in internal/pluginv2/surface.go). The dict shape comes
+# from BuildSOCKS5ConnectDict (internal/pluginv2/lifecycle.go):
+#   conn_id / client_addr / target_addr
+# Returning action.DROP refuses the tunnel; CONTINUE lets it proceed.
+#
+# Plugin config:
 #   {
 #     "path": "examples/plugins/socks5_logger.star",
-#     "protocol": "socks5",
-#     "hooks": ["on_socks5_connect"]
+#     "on_error": "skip"
 #   }
 
-def on_socks5_connect(data):
+def log_socks5_connect(msg, ctx):
     """Log SOCKS5 tunnel establishment details."""
-    target = data.get("target", "unknown")
-    auth_method = data.get("auth_method", "unknown")
-    auth_user = data.get("auth_user", "")
-    client_addr = data.get("client_addr", "unknown")
+    print("SOCKS5 CONNECT: target=%s client=%s conn=%s" % (
+        msg["target_addr"], msg["client_addr"], msg["conn_id"]))
+    return None  # CONTINUE
 
-    if auth_user:
-        print("SOCKS5 CONNECT: target=%s auth=%s user=%s client=%s" % (
-            target, auth_method, auth_user, client_addr))
-    else:
-        print("SOCKS5 CONNECT: target=%s auth=%s client=%s" % (
-            target, auth_method, client_addr))
-
-    return {"action": action.CONTINUE}
+register_hook("socks5", "on_connect", log_socks5_connect)

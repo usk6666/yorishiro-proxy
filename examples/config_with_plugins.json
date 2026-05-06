@@ -3,20 +3,17 @@
   "plugins": [
     {
       "path": "examples/plugins/request_inspector.star",
-      "protocol": "http",
-      "hooks": ["on_receive_from_client", "on_before_send_to_server"],
-      "on_error": "skip"
-    },
-    {
-      "path": "examples/plugins/request_inspector.star",
-      "protocol": "https",
-      "hooks": ["on_receive_from_client", "on_before_send_to_server"],
       "on_error": "skip"
     },
     {
       "path": "examples/plugins/mock_api.star",
-      "protocol": "http",
-      "hooks": ["on_receive_from_client"],
+      "on_error": "skip"
+    },
+    {
+      "path": "examples/plugins/add_auth_header.star",
+      "vars": {
+        "auth_token": "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.example"
+      },
       "on_error": "skip"
     }
   ]

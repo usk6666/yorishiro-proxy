@@ -1,34 +1,40 @@
 # ws_filter.star
 #
-# Filters WebSocket messages based on content patterns.
-# Messages containing the blocked pattern are dropped; all others
-# are passed through.
+# Redacts WebSocket text frames containing a forbidden pattern. Demonstrates
+# in-place mutation of msg["payload"] at the (ws, on_message) hook.
 #
-# Configuration:
-#   protocol: "websocket"
-#   hooks: ["on_receive_from_client"]
+# Hook identity (RFC-001 §9.3):
+#   register_hook("ws", "on_message", fn)
 #
-# Usage example (plugin config):
+# Mid-stream events accept CONTINUE only — terminating a WebSocket session
+# uses a native close frame, not action.DROP (see internal/pluginv2/surface.go).
+# To stop a flow, the operator should configure an Intercept rule or close
+# the upstream Channel; plugins observe and rewrite, they do not terminate.
+#
+# The Starlark dict shape mirrors *envelope.WSMessage: opcode / fin / masked /
+# mask / payload (bytes) / close_code / close_reason / compressed.
+# Opcode values: 0x1 = text, 0x2 = binary, 0x8 = close, 0x9 = ping, 0xA = pong.
+#
+# Plugin config:
 #   {
 #     "path": "examples/plugins/ws_filter.star",
-#     "protocol": "websocket",
-#     "hooks": ["on_receive_from_client"]
+#     "on_error": "skip"
 #   }
 
-# Pattern to block. Messages containing this string are dropped.
-BLOCKED_PATTERN = "FORBIDDEN_COMMAND"
+WS_OPCODE_TEXT = 1
+BLOCKED_PATTERN = b"FORBIDDEN_COMMAND"
+REDACTION = b"[redacted by ws_filter]"
 
-def on_receive_from_client(data):
-    """Drop WebSocket messages containing the blocked pattern."""
-    payload = data.get("payload", "")
+def redact_blocked(msg, ctx):
+    """Replace text payloads matching BLOCKED_PATTERN with a redaction marker."""
+    # Only inspect text frames; binary/control frames are passed through.
+    if msg["opcode"] != WS_OPCODE_TEXT:
+        return None
 
-    # Only filter text messages.
-    is_text = data.get("is_text", False)
-    if not is_text:
-        return {"action": action.CONTINUE}
-
+    payload = msg["payload"]
     if BLOCKED_PATTERN in payload:
-        print("ws_filter: dropping message containing '%s'" % BLOCKED_PATTERN)
-        return {"action": action.DROP}
+        print("ws_filter: redacting message containing %r" % BLOCKED_PATTERN)
+        msg["payload"] = REDACTION
+    return None  # CONTINUE
 
-    return {"action": action.CONTINUE}
+register_hook("ws", "on_message", redact_blocked)

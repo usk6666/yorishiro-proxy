@@ -1,46 +1,39 @@
 # request_inspector.star
 #
-# HTTP Request Inspector - inspects and annotates HTTP requests for testing.
-# Logs request details (method, URL, headers) to the proxy log via print(),
-# and injects tracking headers so plugin activity is visible in flow records.
+# HTTP Request Inspector — logs incoming requests and stamps tracking
+# headers on outgoing ones.
 #
-# This plugin uses two hooks:
-#   - on_receive_from_client: logs incoming request details
-#   - on_before_send_to_server: adds tracking headers to outgoing requests
+# This plugin demonstrates registering two hooks at distinct phases on the
+# same (protocol, event) — pre_pipeline observes the request as the client
+# sent it, post_pipeline stamps after Intercept/Transform have settled.
 #
-# Configuration:
-#   protocol: "http" (also works with "https" and "h2")
-#   hooks: ["on_receive_from_client", "on_before_send_to_server"]
-#   on_error: "skip"
+# Hook identity (RFC-001 §9.3):
+#   register_hook("http", "on_request", log_request)                  # pre_pipeline (default)
+#   register_hook("http", "on_request", stamp_request, phase="post_pipeline")
 #
-# Usage example (plugin config):
+# Plugin config (examples/config_with_plugins.json):
 #   {
 #     "path": "examples/plugins/request_inspector.star",
-#     "protocol": "http",
-#     "hooks": ["on_receive_from_client", "on_before_send_to_server"],
 #     "on_error": "skip"
 #   }
 
-def on_receive_from_client(data):
-    """Log incoming request details."""
-    method = data.get("method", "?")
-    url = data.get("url", "?")
-    headers = data.get("headers", {})
-    content_type = headers.get("Content-Type", headers.get("content-type", "none"))
+def log_request(msg, ctx):
+    """Log the request as observed on the wire (pre_pipeline)."""
+    method = msg["method"]
+    path = msg["path"]
+    # HeadersValue exposes get_first(name) — case-insensitive, returns
+    # None when no match. Use `or` to default for printing.
+    content_type = msg["headers"].get_first("Content-Type") or "none"
+    print("[inspector] %s %s (Content-Type: %s, headers=%d)" % (
+        method, path, content_type, len(msg["headers"])))
+    return None  # CONTINUE
 
-    print("[inspector] %s %s (Content-Type: %s)" % (method, url, content_type))
+def stamp_request(msg, ctx):
+    """Append tracking headers after Intercept/Transform (post_pipeline)."""
+    msg["headers"].append("X-Yorishiro-Inspected", "true")
+    msg["headers"].append("X-Yorishiro-Method", msg["method"])
+    print("[inspector] stamped tracking headers on %s" % msg["path"])
+    return None  # CONTINUE
 
-    header_count = len(headers)
-    print("[inspector] request has %d headers" % header_count)
-
-    return {"action": action.CONTINUE}
-
-def on_before_send_to_server(data):
-    """Add tracking headers to the outgoing request."""
-    headers = data.get("headers", {})
-    headers["X-Yorishiro-Inspected"] = "true"
-    headers["X-Yorishiro-Method"] = data.get("method", "UNKNOWN")
-    data["headers"] = headers
-
-    print("[inspector] added tracking headers to %s" % data.get("url", "?"))
-    return {"action": action.CONTINUE, "data": data}
+register_hook("http", "on_request", log_request)
+register_hook("http", "on_request", stamp_request, phase="post_pipeline")
