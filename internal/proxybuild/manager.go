@@ -74,11 +74,12 @@ type ManagerConfig struct {
 //     and tls=true are deferred to a follow-up issue and rejected at
 //     start time.
 type Manager struct {
-	logger        *slog.Logger
-	factory       func(ctx context.Context, name, addr string) (*Stack, error)
-	peekTimeout   time.Duration
-	maxConns      int
-	upstreamProxy string
+	logger           *slog.Logger
+	factory          func(ctx context.Context, name, addr string) (*Stack, error)
+	peekTimeout      time.Duration
+	maxConns         int
+	upstreamProxy    string
+	enabledProtocols []string
 
 	mu        sync.Mutex
 	listeners map[string]*listenerEntry
@@ -141,13 +142,16 @@ func (m *Manager) StartNamed(ctx context.Context, name string, listenAddr string
 	}
 
 	// Apply manager-level tunables to the new Listener so a runtime
-	// SetMaxConnections / SetPeekTimeout call before any listener
-	// existed is honored when the listener comes up.
+	// SetMaxConnections / SetPeekTimeout / SetEnabledProtocols call
+	// before any listener existed is honored when the listener comes up.
 	if m.maxConns > 0 {
 		stack.Listener.SetMaxConnections(m.maxConns)
 	}
 	if m.peekTimeout > 0 {
 		stack.Listener.SetPeekTimeout(m.peekTimeout)
+	}
+	if len(m.enabledProtocols) > 0 {
+		stack.Listener.SetEnabledProtocols(m.enabledProtocols)
 	}
 
 	listenerCtx, cancel := context.WithCancel(ctx)
@@ -428,6 +432,43 @@ func (m *Manager) PeekTimeout() time.Duration {
 		return first.PeekTimeout()
 	}
 	return stored
+}
+
+// SetEnabledProtocols updates the runtime protocol allow-list applied
+// at peek-based detection. Empty (nil or zero-length) restores "accept
+// all detected kinds". The change applies immediately to all running
+// listeners and is remembered so listeners started later inherit it.
+// USK-732 wiring: pairs with proxybuild.Listener.SetEnabledProtocols.
+func (m *Manager) SetEnabledProtocols(protocols []string) {
+	var stored []string
+	if len(protocols) > 0 {
+		stored = make([]string, len(protocols))
+		copy(stored, protocols)
+	}
+	m.mu.Lock()
+	m.enabledProtocols = stored
+	listeners := make([]*Listener, 0, len(m.listeners))
+	for _, entry := range m.listeners {
+		listeners = append(listeners, entry.stack.Listener)
+	}
+	m.mu.Unlock()
+	for _, l := range listeners {
+		l.SetEnabledProtocols(stored)
+	}
+}
+
+// EnabledProtocols returns a snapshot of the configured allow-list, or
+// nil when no filter is active. Reads the manager-level stored value so
+// the answer is correct even when no listener is currently running.
+func (m *Manager) EnabledProtocols() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.enabledProtocols) == 0 {
+		return nil
+	}
+	out := make([]string, len(m.enabledProtocols))
+	copy(out, m.enabledProtocols)
+	return out
 }
 
 // SetUpstreamProxy stores an upstream proxy URL. The string form is

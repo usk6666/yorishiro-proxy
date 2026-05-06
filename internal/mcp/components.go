@@ -129,6 +129,11 @@ type proxyManager interface {
 	PeekTimeout() time.Duration
 	SetUpstreamProxy(proxyURL string)
 	UpstreamProxy() string
+	// SetEnabledProtocols forwards the user-facing protocol allow-list
+	// down to the underlying connector.FullListener so detection-time
+	// rejection enforces it on inbound traffic (USK-732). Empty/nil
+	// resets the listener to "accept all detected kinds".
+	SetEnabledProtocols(protocols []string)
 	StartTCPForwardsNamedAny(ctx context.Context, name string, params any) error
 }
 

@@ -122,7 +122,7 @@ var validFilterSchemes = []string{"https", "http", "wss", "ws", "tcp"}
 var validFilterStates = []string{"active", "complete", "error"}
 
 // validFilterBlockedBy lists valid values for filter.blocked_by.
-var validFilterBlockedBy = []string{"target_scope", "intercept_drop", "rate_limit", "safety_filter"}
+var validFilterBlockedBy = []string{"target_scope", "intercept_drop", "rate_limit", "safety_filter", "enabled_protocols"}
 
 // validFilterFuzzJobStatuses lists valid values for filter.status (fuzz_jobs).
 var validFilterFuzzJobStatuses = []string{"running", "paused", "completed", "cancelled", "error"}

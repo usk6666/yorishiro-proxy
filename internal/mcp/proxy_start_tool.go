@@ -288,6 +288,9 @@ func (s *Server) resetSettingsToDefaults() {
 
 	// Reset enabled protocols to nil (all protocols).
 	s.connector.enabledProtocols = nil
+	if !managerIsNil(s.connector.manager) {
+		s.connector.manager.SetEnabledProtocols(nil)
+	}
 
 	// Reset TCP forwards to nil (no forwards).
 	s.connector.tcpForwards = nil
@@ -463,7 +466,9 @@ func (s *Server) applyTCPForwardsConfig(forwards map[string]*config.ForwardConfi
 	return nil
 }
 
-// applyProtocolsConfig validates and stores enabled protocols.
+// applyProtocolsConfig validates and stores enabled protocols. The
+// allow-list is forwarded to the proxybuild manager so the running
+// listener's data path enforces it at peek-based detection (USK-732).
 func (s *Server) applyProtocolsConfig(protocols []string) error {
 	if len(protocols) == 0 {
 		return nil
@@ -472,6 +477,9 @@ func (s *Server) applyProtocolsConfig(protocols []string) error {
 		return fmt.Errorf("protocols: %w", err)
 	}
 	s.connector.enabledProtocols = protocols
+	if !managerIsNil(s.connector.manager) {
+		s.connector.manager.SetEnabledProtocols(protocols)
+	}
 	return nil
 }
 

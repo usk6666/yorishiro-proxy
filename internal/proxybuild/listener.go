@@ -100,6 +100,25 @@ func (l *Listener) SetPeekTimeout(d time.Duration) {
 	l.full.SetPeekTimeout(d)
 }
 
+// SetEnabledProtocols updates the runtime protocol allow-list applied
+// after peek-based detection. nil/empty restores the default ("all
+// detected kinds accepted"). USK-732 wiring.
+func (l *Listener) SetEnabledProtocols(protocols []string) {
+	if l == nil || l.full == nil {
+		return
+	}
+	l.full.SetEnabledProtocols(protocols)
+}
+
+// EnabledProtocols returns a snapshot of the listener's runtime allow-list
+// or nil when none is configured.
+func (l *Listener) EnabledProtocols() []string {
+	if l == nil || l.full == nil {
+		return nil
+	}
+	return l.full.EnabledProtocols()
+}
+
 // Name returns the listener's name as supplied at construction.
 func (l *Listener) Name() string {
 	return l.name

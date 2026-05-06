@@ -61,6 +61,76 @@ func (k ProtocolKind) String() string {
 	}
 }
 
+// UserName returns the canonical user-facing protocol name corresponding
+// to this ProtocolKind. Used by the EnabledProtocols allow-list (USK-732)
+// to compare detected kinds against names accepted by the proxy_start
+// MCP tool ("HTTP/1.x", "HTTPS", "HTTP/2", "SOCKS5", "TCP").
+//
+// Note that the listener-level kind ProtocolHTTPConnect maps to the
+// user-facing name "HTTPS" — clients reach the proxy with a CONNECT
+// request when they intend to tunnel TLS, so HTTPS is the user-visible
+// protocol of the connection from the operator's perspective. Kinds
+// that have no user-facing equivalent return the empty string.
+func (k ProtocolKind) UserName() string {
+	switch k {
+	case ProtocolSOCKS5:
+		return "SOCKS5"
+	case ProtocolHTTPConnect:
+		return "HTTPS"
+	case ProtocolHTTP1:
+		return "HTTP/1.x"
+	case ProtocolHTTP2:
+		return "HTTP/2"
+	case ProtocolTCP:
+		return "TCP"
+	default:
+		return ""
+	}
+}
+
+// kindMatchesEnabledNames reports whether the detected ProtocolKind is
+// permitted under the user-facing allow-list. Recognises the canonical
+// UserName() mapping plus the inner-protocol family names that ride on
+// HTTPS ("HTTP/2", "WebSocket", "gRPC"): when the operator enabled any
+// of these, HTTPS connections are accepted at the listener level so
+// post-CONNECT ALPN can deliver the requested inner protocol.
+//
+// "HTTP/2" deserves a special note: at the listener level it covers
+// cleartext h2c (ProtocolHTTP2). When the operator enables "HTTP/2" it
+// also implies that h2 over TLS (an HTTPS connection followed by ALPN
+// negotiation to "h2") should be allowed; we therefore accept
+// ProtocolHTTPConnect as a precondition to HTTP/2-over-TLS.
+//
+// The inner-protocol set is anchored on the proxy_start MCP tool's
+// validProtocols accept-list ("HTTP/2", "WebSocket", "gRPC"). gRPC-Web
+// and SSE are deliberately omitted: they are not currently accepted as
+// values for the proxy_start `protocols` argument, so a branch handling
+// them here would be unreachable. Add them back here only if the MCP
+// accept-list grows to include them.
+func kindMatchesEnabledNames(kind ProtocolKind, names []string) bool {
+	canonical := kind.UserName()
+	if canonical == "" {
+		return false
+	}
+	for _, n := range names {
+		if n == canonical {
+			return true
+		}
+		// HTTPS is the listener-level pre-condition for the protocols
+		// that ride inside a TLS tunnel. When the operator enables any
+		// of those names we must let CONNECT (HTTPS) through so the
+		// tunnel can be established and ALPN/upgrade can deliver the
+		// inner protocol.
+		if kind == ProtocolHTTPConnect {
+			switch n {
+			case "HTTP/2", "WebSocket", "gRPC":
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // http2Preface is the HTTP/2 connection preface (RFC 9113 §3.4).
 // Clients speaking h2c (cleartext HTTP/2) send this sequence before any frame.
 var http2Preface = []byte("PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n")

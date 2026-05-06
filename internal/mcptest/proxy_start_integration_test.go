@@ -151,14 +151,12 @@ func TestE2E_ProxyStart_SOCKS5UpstreamAuth(t *testing.T) {
 }
 
 // TestE2E_ProxyStart_ProtocolSubset_Filters covers proxy_start's
-// "protocols" parameter wiring. The acceptance side (proxy_start
-// returns the requested subset and the connector stores it) is
-// verified here. The runtime-enforcement side (HTTP/2 traffic
-// rejected when protocols=["HTTP/1.x"]) is deferred — the connector's
-// protocol-detection pipeline does not yet read enabledProtocols as
-// a filter; the field is currently consumed only by the `query`
-// resource=config response. Per the USK-725 spec the deferred path
-// is split into a follow-up Issue rather than weakened in place.
+// "protocols" parameter wiring. Both sides of the contract are
+// asserted: (a) proxy_start returns the requested subset and the
+// connector stores it; (b) the runtime data path rejects connections
+// whose detected protocol is not in the subset (USK-732), surfacing the
+// rejection as a flow Stream with state="error" and
+// blocked_by="enabled_protocols" rather than a silent close.
 func TestE2E_ProxyStart_ProtocolSubset_Filters(t *testing.T) {
 	t.Run("http1_only_accepted_by_proxy_start", func(t *testing.T) {
 		h := mcptest.StartHarness(t, mcptest.HarnessOptions{})
@@ -211,15 +209,117 @@ func TestE2E_ProxyStart_ProtocolSubset_Filters(t *testing.T) {
 		}, "unknown protocol")
 	})
 
-	t.Run("runtime_enforcement_skipped", func(t *testing.T) {
-		// The Issue's negative path ("HTTP/2 traffic rejected when
-		// protocols=[HTTP/1.x]") cannot be exercised today: the
-		// connector's protocol-detection pipeline does not read
-		// connector.enabledProtocols as a runtime filter. The field
-		// is config-acceptance only. Skip with a sticky reference so
-		// CI does not silently regress.
-		t.Skip("not yet implemented: connector data-path does not enforce enabledProtocols (split off USK-732)")
+	t.Run("http2_traffic_rejected_when_only_http1_enabled", func(t *testing.T) {
+		// USK-732: with protocols=["HTTP/1.x"], an HTTP/2 client (h2c
+		// preface) MUST be rejected at peek-based detection before any
+		// stack is built. The rejection MUST be visible in flow
+		// recording (Stream with state="error" and
+		// blocked_by="enabled_protocols") so MITM observability is
+		// preserved.
+		h := mcptest.StartHarness(t, mcptest.HarnessOptions{})
+
+		startRes := h.MustOK(t, "proxy_start", map[string]any{
+			"listen_addr": "127.0.0.1:0",
+			"protocols":   []any{"HTTP/1.x"},
+		})
+		proxyAddr := proxyListenAddrFromStartResult(t, startRes)
+		if proxyAddr == "" {
+			t.Fatalf("proxy_start did not return listen_addr; full result: %s", startRes.Text)
+		}
+
+		// Send the HTTP/2 cleartext (h2c) connection preface — 24 bytes
+		// per RFC 9113 §3.4. Detection only inspects 16 of these
+		// before classifying the connection as ProtocolHTTP2; we send
+		// the full preface for realism.
+		const h2Preface = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
+		conn, err := net.DialTimeout("tcp", proxyAddr, 5*time.Second)
+		if err != nil {
+			t.Fatalf("dial proxy %s: %v", proxyAddr, err)
+		}
+		_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+		if _, err := conn.Write([]byte(h2Preface)); err != nil {
+			// EPIPE here is acceptable — proxy may have closed before
+			// our write completes — what matters is the recorded flow.
+			t.Logf("write preface: %v (acceptable if proxy closed early)", err)
+		}
+		// Read until EOF / error. The proxy MUST close the connection
+		// silently — no HTTP-style response, just the rejection record.
+		buf := make([]byte, 64)
+		_, _ = conn.Read(buf)
+		_ = conn.Close()
+
+		// Poll for the rejection Stream to appear in flow recording.
+		// SaveStream runs on a background-derived context inside the
+		// rejection callback so the listener's accept loop is not
+		// blocked; a bounded poll handles that lag.
+		streamID, blockedBy, gotProto := waitForRejectedStream(t, h, 3*time.Second)
+		if streamID == "" {
+			t.Fatalf("no rejected Stream observed after HTTP/2 client connection")
+		}
+		if blockedBy != "enabled_protocols" {
+			t.Errorf("rejected Stream blocked_by = %q, want %q", blockedBy, "enabled_protocols")
+		}
+		if gotProto != "HTTP/2" {
+			t.Errorf("rejected Stream protocol = %q, want %q", gotProto, "HTTP/2")
+		}
 	})
+}
+
+// proxyListenAddrFromStartResult extracts the listen_addr field from a
+// proxy_start ToolResult; returns "" if absent. Defined here because
+// the USK-725 helpers above are scoped to the protocols field only.
+func proxyListenAddrFromStartResult(t *testing.T, res mcptest.ToolResult) string {
+	t.Helper()
+	if res.Decoded != nil {
+		if addr, ok := res.Decoded["listen_addr"].(string); ok {
+			return addr
+		}
+	}
+	var parsed struct {
+		ListenAddr string `json:"listen_addr"`
+	}
+	if err := json.Unmarshal([]byte(res.Text), &parsed); err != nil {
+		t.Fatalf("decode proxy_start listen_addr: %v (text=%q)", err, res.Text)
+	}
+	return parsed.ListenAddr
+}
+
+// waitForRejectedStream polls query("flows", state="error") until a
+// rejected Stream appears or the timeout expires. Returns the first
+// matching Stream's id, blocked_by, and protocol. Empty id means no
+// match before deadline.
+func waitForRejectedStream(t *testing.T, h *mcptest.Harness, timeout time.Duration) (id, blockedBy, protocol string) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	const pollInterval = 50 * time.Millisecond
+	for {
+		res := h.MustOK(t, "query", map[string]any{
+			"resource": "flows",
+			"filter": map[string]any{
+				"state": "error",
+			},
+		})
+		var parsed struct {
+			Flows []struct {
+				ID        string `json:"id"`
+				Protocol  string `json:"protocol"`
+				State     string `json:"state"`
+				BlockedBy string `json:"blocked_by"`
+			} `json:"flows"`
+		}
+		if err := json.Unmarshal([]byte(res.Text), &parsed); err != nil {
+			t.Fatalf("decode query(flows) response: %v (text=%q)", err, res.Text)
+		}
+		for _, f := range parsed.Flows {
+			if f.State == "error" && f.BlockedBy == "enabled_protocols" {
+				return f.ID, f.BlockedBy, f.Protocol
+			}
+		}
+		if time.Now().After(deadline) {
+			return "", "", ""
+		}
+		time.Sleep(pollInterval)
+	}
 }
 
 // TestE2E_ProxyStart_MTLSClientCert verifies the client_cert /
