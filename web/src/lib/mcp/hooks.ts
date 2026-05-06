@@ -7,7 +7,7 @@
  * configure the proxy, and control proxy listeners.
  */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMcpContext } from "./context.js";
 import type { McpClient } from "./client.js";
 import type {
@@ -132,6 +132,19 @@ export async function runMcpAction<P, R>(
  * loading/error state machine used by every action hook below. The 8
  * concrete action hooks (`useResend`, `useManage`, ...) are thin
  * re-exports of this hook with the matching `client.<method>` plumbed in.
+ *
+ * Identity stability: callsites typically pass an inline arrow such as
+ * `(c, p) => c.resend(p)`, which is a fresh function on every render.
+ * Listing it in `useCallback`'s dependency array would defeat the
+ * purpose of memoisation — `execute` would change every render and
+ * cascade through every consumer's `useEffect` deps. Instead, we capture
+ * the latest `call` in a ref (refreshed via `useEffect` so the swap
+ * happens after commit) and read through the ref at execution time. The
+ * `useCallback` deps then narrow to `[client, status]`, so `execute`
+ * only changes when the connection state actually changes. Our `call`s
+ * are pure delegations to `client.<method>(params)`, so the
+ * concurrent-rendering tearing concern that normally accompanies the
+ * `callRef` pattern does not apply here (USK-750).
  */
 export function useMcpAction<P, R>(
   call: (client: McpClient, params: P) => Promise<R>,
@@ -140,10 +153,21 @@ export function useMcpAction<P, R>(
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<Error | null>(null);
 
+  // Latest-call ref. Initialised with the first `call` so the first
+  // synchronous `execute` invocation (e.g., from a `useLayoutEffect` in
+  // a consumer) sees the current call rather than `undefined`.
+  const callRef = useRef(call);
+  useEffect(() => {
+    callRef.current = call;
+  });
+
   const execute = useCallback(
     (params: P): Promise<R> =>
-      runMcpAction(call, client, status, params, { setLoading, setError }),
-    [client, status, call],
+      runMcpAction(callRef.current, client, status, params, {
+        setLoading,
+        setError,
+      }),
+    [client, status],
   );
 
   return { execute, loading, error };
@@ -218,7 +242,10 @@ export function useQuery<R extends QueryResource>(
   // Stable JSON key over the request-shaping fields. Order matters and
   // must stay in lock-step with the query call below so consumers get
   // a deterministic cache hit when option identity changes between
-  // renders but the values themselves are equal.
+  // renders but the values themselves are equal. The JSON string acts
+  // as a value-equality fingerprint: when option object identity churns
+  // but values do not, the string compares `===` and `useCallback`
+  // below stays stable.
   const optionsKey = useMemo(
     () =>
       JSON.stringify({
@@ -241,20 +268,27 @@ export function useQuery<R extends QueryResource>(
     ],
   );
 
+  // Pre-parsed options, materialised once per `optionsKey` change. This
+  // avoids re-running `JSON.parse(optionsKey)` on every `fetchData`
+  // invocation (USK-750 F-3). The memo's deps are `[optionsKey]`, the
+  // same value-equality fingerprint used by `useCallback` below, so
+  // both stay in lock-step.
+  const parsedOptions = useMemo(
+    () =>
+      JSON.parse(optionsKey) as {
+        filter: QueryFilter | null;
+        fields: string[] | null;
+        sort_by: string | null;
+        limit: number | null;
+        offset: number | null;
+        id: string | null;
+        fuzzId: string | null;
+      },
+    [optionsKey],
+  );
+
   const fetchData = useCallback(async () => {
     if (!client || status !== "connected") return;
-
-    // Re-parse the stable key rather than capturing the raw options
-    // object, so the callback identity tracks `optionsKey` exactly.
-    const opts = JSON.parse(optionsKey) as {
-      filter: QueryFilter | null;
-      fields: string[] | null;
-      sort_by: string | null;
-      limit: number | null;
-      offset: number | null;
-      id: string | null;
-      fuzzId: string | null;
-    };
 
     setLoading(true);
     setError(null);
@@ -262,13 +296,13 @@ export function useQuery<R extends QueryResource>(
     try {
       const result = await client.query({
         resource,
-        id: opts.id ?? undefined,
-        fuzz_id: opts.fuzzId ?? undefined,
-        filter: opts.filter ?? undefined,
-        fields: opts.fields ?? undefined,
-        sort_by: opts.sort_by ?? undefined,
-        limit: opts.limit ?? undefined,
-        offset: opts.offset ?? undefined,
+        id: parsedOptions.id ?? undefined,
+        fuzz_id: parsedOptions.fuzzId ?? undefined,
+        filter: parsedOptions.filter ?? undefined,
+        fields: parsedOptions.fields ?? undefined,
+        sort_by: parsedOptions.sort_by ?? undefined,
+        limit: parsedOptions.limit ?? undefined,
+        offset: parsedOptions.offset ?? undefined,
       });
       setData(result);
     } catch (err) {
@@ -276,7 +310,7 @@ export function useQuery<R extends QueryResource>(
     } finally {
       setLoading(false);
     }
-  }, [client, status, resource, optionsKey]);
+  }, [client, status, resource, parsedOptions]);
 
   // Execute query when connected and enabled.
   useEffect(() => {
@@ -598,13 +632,19 @@ export function useProxyControl(): UseProxyControlResult {
     (client: McpClient, params: ProxyStopParams) => client.proxyStop(params),
   );
 
+  // Track only `.execute` identity rather than the wrapper object so
+  // `start` / `stop` stay stable across re-renders that don't change the
+  // connection state (USK-750 F-2). `useMcpAction` now stabilises its
+  // `execute` reference, so this `useCallback` wraps a stable inner.
+  const startExecute = startAction.execute;
+  const stopExecute = stopAction.execute;
   const start = useCallback(
-    (params: ProxyStartParams = {}) => startAction.execute(params),
-    [startAction],
+    (params: ProxyStartParams = {}) => startExecute(params),
+    [startExecute],
   );
   const stop = useCallback(
-    (params: ProxyStopParams = {}) => stopAction.execute(params),
-    [stopAction],
+    (params: ProxyStopParams = {}) => stopExecute(params),
+    [stopExecute],
   );
 
   // Surface either action's pending state / latest error.
