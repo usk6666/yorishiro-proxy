@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"net/url"
+	"sync/atomic"
 
 	"github.com/google/uuid"
 
@@ -41,8 +42,20 @@ type BuildConfig struct {
 	ClientCert *tls.Certificate
 
 	// UpstreamProxy, if non-nil, tunnels upstream connections through an
-	// HTTP CONNECT or SOCKS5 proxy.
+	// HTTP CONNECT or SOCKS5 proxy. This is the static (init-time) value;
+	// runtime updates from proxy_start / configure flow through
+	// SetUpstreamProxy and EffectiveUpstreamProxy. Live data-path readers
+	// MUST call EffectiveUpstreamProxy() — direct field reads observe only
+	// the boot-time value (USK-734).
 	UpstreamProxy *url.URL
+
+	// upstreamProxyDynamic stores the runtime-mutable upstream proxy URL
+	// installed by proxy_start / configure (USK-734). It overrides the
+	// static UpstreamProxy field when non-nil. atomic.Pointer is used so
+	// dial-path readers (per-connection goroutines) and the MCP-tool
+	// writer (proxy_start handler goroutine) do not race on the *url.URL
+	// pointer. A nil load means "fall back to UpstreamProxy".
+	upstreamProxyDynamic atomic.Pointer[url.URL]
 
 	// HostTLSResolver resolves per-host TLS overrides (InsecureSkipVerify,
 	// ClientCert, RootCAs). Nil means use global settings for all hosts.
@@ -168,6 +181,36 @@ type BuildConfig struct {
 	// (upstream / ClientRole) Layer continues to honour the peer's
 	// advertised limit.
 	MaxConcurrentStreams uint32
+}
+
+// EffectiveUpstreamProxy returns the upstream proxy URL the live data path
+// should consult for the next dial. Runtime updates installed via
+// SetUpstreamProxy take precedence over the static UpstreamProxy field set
+// at boot. Returns nil when neither is configured (direct dial). This is
+// the canonical accessor for live dial-path code (USK-734); callers MUST
+// NOT read the UpstreamProxy field directly because it observes only the
+// boot-time value.
+func (c *BuildConfig) EffectiveUpstreamProxy() *url.URL {
+	if c == nil {
+		return nil
+	}
+	if dyn := c.upstreamProxyDynamic.Load(); dyn != nil {
+		return dyn
+	}
+	return c.UpstreamProxy
+}
+
+// SetUpstreamProxy installs a runtime override for the upstream proxy URL.
+// Subsequent calls to EffectiveUpstreamProxy return u (or fall back to the
+// static UpstreamProxy field when u is nil). The runtime override is the
+// wire-up consumed by proxy_start / configure to make the URL change
+// reach the live dial path (USK-734); writes are atomic with respect to
+// concurrent dial-path reads. Passing nil clears the override.
+func (c *BuildConfig) SetUpstreamProxy(u *url.URL) {
+	if c == nil {
+		return
+	}
+	c.upstreamProxyDynamic.Store(u)
 }
 
 // BuildConnectionStack constructs a ConnectionStack for the given CONNECT
@@ -610,7 +653,7 @@ func dialUpstreamWithALPN(
 		UTLSProfile:        cfg.TLSFingerprint,
 		ClientCert:         clientCert,
 		OfferALPN:          offerALPN,
-		UpstreamProxy:      cfg.UpstreamProxy,
+		UpstreamProxy:      cfg.EffectiveUpstreamProxy(),
 	})
 	if err != nil {
 		return nil, nil, fmt.Errorf("connector: upstream dial for %s: %w", target, err)
@@ -895,7 +938,7 @@ func buildRawPassthroughStack(
 		UTLSProfile:        cfg.TLSFingerprint,
 		ClientCert:         clientCert,
 		OfferALPN:          []string{"http/1.1"},
-		UpstreamProxy:      cfg.UpstreamProxy,
+		UpstreamProxy:      cfg.EffectiveUpstreamProxy(),
 	})
 	if err != nil {
 		clientTLSConn.Close()

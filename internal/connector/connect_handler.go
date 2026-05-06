@@ -78,10 +78,13 @@ type CONNECTHandlerConfig struct {
 
 // passDialOpts builds DialRawOpts for TLS passthrough relay. It safely
 // handles a nil BuildCfg (only UpstreamProxy is needed for passthrough).
+// EffectiveUpstreamProxy is consulted (rather than the static field) so a
+// runtime proxy_start / configure switch reaches the next passthrough
+// dial (USK-734).
 func passDialOpts(buildCfg *BuildConfig) DialRawOpts {
 	var opts DialRawOpts
 	if buildCfg != nil {
-		opts.UpstreamProxy = buildCfg.UpstreamProxy
+		opts.UpstreamProxy = buildCfg.EffectiveUpstreamProxy()
 	}
 	return opts
 }

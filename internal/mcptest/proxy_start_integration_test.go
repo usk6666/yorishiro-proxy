@@ -17,6 +17,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	gohttp "net/http"
 	"net/url"
 	"strconv"
 	"strings"
@@ -82,24 +83,15 @@ func TestE2E_ProxyStart_ListenAddrValidation(t *testing.T) {
 //     (visible via query("config").upstream_proxy with redacted creds).
 //   - Malformed values (unsupported scheme, parse failure) surface
 //     errors at proxy_start time.
-//
-// The end-to-end transit assertion (CONNECT through the proxy →
-// SOCKS5 server → upstream) is split into a follow-up Issue
-// (USK-734). proxybuild.Manager.SetUpstreamProxy is documented in
-// internal/proxybuild/manager.go to "store" the URL only — the
-// live data path is wired separately by USK-690. Until that lands,
-// the proxy dials direct (visible in trace as "connector: dialing
-// direct"), so a transit assertion would always fail.
+//   - Live transit (USK-734): once proxy_start succeeds, an HTTP
+//     request through the proxy listener actually transits the
+//     configured SOCKS5 server. RFC 1929 user/pass auth is exercised
+//     when credentials are supplied in the URL.
 func TestE2E_ProxyStart_SOCKS5UpstreamAuth(t *testing.T) {
 	t.Run("socks5_upstream_url_stored_and_redacted", func(t *testing.T) {
 		const wantUser, wantPass = "alice", "s3cret"
-		// Even though the live transit is split off, we still bind a
-		// loopback TCP listener here so the wiring tests use a real
-		// reachable address (the manager validates the URL string but
-		// does not connect at start time). The placeholder accepts no
-		// auth and runs no SOCKS5 handshake — when USK-734 lands the
-		// fixture grows into a handshake-capable SOCKS5 server and the
-		// user/pass values plumb through to it for assertion.
+		// Acceptance-only sub-case: just a placeholder listener so the
+		// URL is reachable. No traffic actually flows through it.
 		socks5 := startPlaceholderSOCKS5Listener(t)
 
 		h := mcptest.StartHarness(t, mcptest.HarnessOptions{})
@@ -141,13 +133,134 @@ func TestE2E_ProxyStart_SOCKS5UpstreamAuth(t *testing.T) {
 		}, "upstream_proxy")
 	})
 
-	t.Run("transit_through_socks5_skipped", func(t *testing.T) {
-		// Per spec, the Issue's positive transit assertion (proxy
-		// routes through SOCKS5; auth failure case observed at the
-		// SOCKS5 server) is split into a follow-up Issue. Skip with
-		// a reference rather than weakening the assertion in place.
-		t.Skip("not yet implemented: proxybuild.Manager.SetUpstreamProxy stores but does not wire the URL into the live dial path (split off USK-734, see internal/proxybuild/manager.go SetUpstreamProxy comment)")
+	// USK-734: live-transit sub-case. After proxy_start sets
+	// upstream_proxy=socks5://user:pass@..., a CONNECT issued through
+	// the proxy listener must transit the configured SOCKS5 server.
+	t.Run("transit_through_socks5", func(t *testing.T) {
+		const wantUser, wantPass = "alice", "s3cret"
+
+		socks5 := startSOCKS5Server(t, wantUser, wantPass)
+		h := mcptest.StartHarness(t, mcptest.HarnessOptions{
+			UpstreamProto: "http/1.1",
+		})
+
+		startRes := h.MustOK(t, "proxy_start", map[string]any{
+			"listen_addr":    "127.0.0.1:0",
+			"upstream_proxy": fmt.Sprintf("socks5://%s:%s@%s", wantUser, wantPass, socks5.Addr()),
+		})
+		proxyAddr, ok := startRes.Decoded["listen_addr"].(string)
+		if !ok || proxyAddr == "" {
+			t.Fatalf("proxy_start: missing listen_addr in result: %+v", startRes.Decoded)
+		}
+
+		// Drive an HTTPS request through the proxy. The proxy's
+		// upstream-CONNECT path will dial the upstream test server's
+		// loopback ip:port via the SOCKS5 server.
+		client := proxyTLSClient(t, proxyAddr)
+		resp, err := client.Get(h.UpstreamTLS.URL + "/")
+		if err != nil {
+			t.Fatalf("GET via proxy: %v", err)
+		}
+		_ = resp.Body.Close()
+
+		if got := socks5.Connections(); got < 1 {
+			t.Errorf("SOCKS5 saw %d successful CONNECT bridges, want >= 1", got)
+		}
+		// The SOCKS5 server's lastTarget should match the upstream
+		// test server's address — sanity-check the proxy did not bypass
+		// the SOCKS5 layer for any reason.
+		upstreamHost := stripURLScheme(t, h.UpstreamTLS.URL)
+		if got := socks5.LastTarget(); got != upstreamHost {
+			t.Errorf("SOCKS5 last target = %q, want %q", got, upstreamHost)
+		}
+		if got := socks5.AuthFailures(); got != 0 {
+			t.Errorf("SOCKS5 saw %d auth failures, want 0", got)
+		}
 	})
+
+	// USK-734: bad-creds sub-case. If the SOCKS5 server rejects the
+	// password, the proxy's upstream dial must fail with a clear error
+	// and the SOCKS5 server's failure counter must increment.
+	t.Run("transit_with_bad_creds_fails", func(t *testing.T) {
+		const wantUser, wantPass = "alice", "s3cret"
+
+		socks5 := startSOCKS5Server(t, wantUser, wantPass)
+		h := mcptest.StartHarness(t, mcptest.HarnessOptions{
+			UpstreamProto: "http/1.1",
+		})
+
+		// Wrong password — SOCKS5 server should reject with 0xFF.
+		startRes := h.MustOK(t, "proxy_start", map[string]any{
+			"listen_addr":    "127.0.0.1:0",
+			"upstream_proxy": fmt.Sprintf("socks5://%s:%s@%s", wantUser, "wrong", socks5.Addr()),
+		})
+		proxyAddr, ok := startRes.Decoded["listen_addr"].(string)
+		if !ok || proxyAddr == "" {
+			t.Fatalf("proxy_start: missing listen_addr in result: %+v", startRes.Decoded)
+		}
+
+		client := proxyTLSClient(t, proxyAddr)
+		resp, err := client.Get(h.UpstreamTLS.URL + "/")
+		if err == nil {
+			_ = resp.Body.Close()
+			t.Fatalf("GET via proxy with bad SOCKS5 creds unexpectedly succeeded")
+		}
+		// The SOCKS5 server should record the auth failure even when
+		// the proxy bubbles up the error to the HTTP client. Allow a
+		// brief settle so the dial-side goroutine increments the
+		// counter before the assertion.
+		deadline := time.Now().Add(5 * time.Second)
+		for socks5.AuthFailures() == 0 && time.Now().Before(deadline) {
+			time.Sleep(20 * time.Millisecond)
+		}
+		if got := socks5.AuthFailures(); got < 1 {
+			t.Errorf("SOCKS5 auth failures = %d, want >= 1", got)
+		}
+		if got := socks5.Connections(); got != 0 {
+			t.Errorf("SOCKS5 successful connections = %d, want 0 with bad creds", got)
+		}
+	})
+}
+
+// proxyTLSClient builds an http.Client that issues HTTPS requests
+// through the proxy at proxyAddr. The proxy MITMs the TLS connection
+// (re-issuing a leaf from its ephemeral CA) so the client must skip
+// verification; the transit assertion does not depend on cert
+// validation, only on bytes flowing via SOCKS5.
+func proxyTLSClient(t *testing.T, proxyAddr string) *gohttp.Client {
+	t.Helper()
+	pURL, err := url.Parse("http://" + proxyAddr)
+	if err != nil {
+		t.Fatalf("parse proxy URL: %v", err)
+	}
+	return &gohttp.Client{
+		Transport: &gohttp.Transport{
+			Proxy:             gohttp.ProxyURL(pURL),
+			DisableKeepAlives: true,
+			TLSClientConfig: &tls.Config{
+				InsecureSkipVerify: true, //nolint:gosec // proxy MITM: ephemeral CA, test only
+			},
+		},
+		Timeout: 15 * time.Second,
+	}
+}
+
+// stripURLScheme returns the host:port portion of a "https://host:port"
+// URL string. Used to compare against socks5Server.LastTarget which
+// stores the bridged dial address in host:port form.
+func stripURLScheme(t *testing.T, raw string) string {
+	t.Helper()
+	u, err := url.Parse(raw)
+	if err != nil {
+		t.Fatalf("parse upstream URL %q: %v", raw, err)
+	}
+	host := u.Host
+	// httptest.Server.URL always includes an explicit port for TLS
+	// servers, so a missing port here would be a regression.
+	if _, _, err := net.SplitHostPort(host); err != nil {
+		t.Fatalf("upstream URL host %q missing port", host)
+	}
+	return host
 }
 
 // TestE2E_ProxyStart_ProtocolSubset_Filters covers proxy_start's

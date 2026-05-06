@@ -691,17 +691,23 @@ func TestPoolKeyForH2_StableAndDistinct(t *testing.T) {
 	}
 
 	// Different InsecureSkipVerify -> different hash.
-	altCfg := *baseCfg
-	altCfg.InsecureSkipVerify = true
-	kAlt := poolKeyForH2(target, &altCfg)
+	// BuildConfig embeds atomic.Pointer (non-copyable), so build alternates
+	// as fresh struct literals rather than copying baseCfg.
+	altCfg := &BuildConfig{
+		InsecureSkipVerify: true,
+		TLSFingerprint:     "chrome",
+	}
+	kAlt := poolKeyForH2(target, altCfg)
 	if kAlt.TLSConfigHash == k1.TLSConfigHash {
 		t.Error("InsecureSkipVerify change did not affect hash")
 	}
 
 	// Different TLSFingerprint -> different hash.
-	altCfg2 := *baseCfg
-	altCfg2.TLSFingerprint = "firefox"
-	kAlt2 := poolKeyForH2(target, &altCfg2)
+	altCfg2 := &BuildConfig{
+		InsecureSkipVerify: false,
+		TLSFingerprint:     "firefox",
+	}
+	kAlt2 := poolKeyForH2(target, altCfg2)
 	if kAlt2.TLSConfigHash == k1.TLSConfigHash {
 		t.Error("TLSFingerprint change did not affect hash")
 	}

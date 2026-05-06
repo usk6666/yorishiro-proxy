@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"sync"
 	"time"
+
+	"github.com/usk6666/yorishiro-proxy/internal/connector"
 )
 
 // shutdownTimeout bounds the wait for a listener goroutine to exit during
@@ -56,6 +58,16 @@ type ManagerConfig struct {
 	// listener name and addr resolved by StartNamed (defaults applied).
 	// All other Deps fields the factory must source from its closure.
 	StackFactory func(ctx context.Context, name, addr string) (*Stack, error)
+
+	// BuildConfig, when non-nil, is the connector.BuildConfig instance
+	// shared by every Stack produced by StackFactory. The Manager mutates
+	// its dynamic upstream-proxy slot when SetUpstreamProxy is called so
+	// the URL change reaches the live dial path (USK-734). nil disables
+	// the wire-up — SetUpstreamProxy still records the URL for status
+	// reporting via UpstreamProxy() but no dial-path mutation occurs (the
+	// historical pre-USK-734 behaviour, retained for tests and adapters
+	// that do not own the live BuildConfig).
+	BuildConfig *connector.BuildConfig
 }
 
 // Manager orchestrates one or more named live Stacks. It exposes
@@ -76,6 +88,7 @@ type ManagerConfig struct {
 type Manager struct {
 	logger           *slog.Logger
 	factory          func(ctx context.Context, name, addr string) (*Stack, error)
+	buildCfg         *connector.BuildConfig
 	peekTimeout      time.Duration
 	maxConns         int
 	upstreamProxy    string
@@ -99,6 +112,7 @@ func NewManager(cfg ManagerConfig) (*Manager, error) {
 	return &Manager{
 		logger:    logger,
 		factory:   cfg.StackFactory,
+		buildCfg:  cfg.BuildConfig,
 		listeners: make(map[string]*listenerEntry),
 	}, nil
 }
@@ -471,13 +485,39 @@ func (m *Manager) EnabledProtocols() []string {
 	return out
 }
 
-// SetUpstreamProxy stores an upstream proxy URL. The string form is
-// reflected back via UpstreamProxy() for status reporting; the live data
-// path is wired by USK-690.
+// SetUpstreamProxy stores an upstream proxy URL and, when ManagerConfig
+// supplied a BuildConfig, mutates that BuildConfig's dynamic
+// upstream-proxy slot so the next live data-path dial transits the
+// configured proxy (USK-734). The string form is reflected back via
+// UpstreamProxy() for status reporting; an empty string clears both the
+// status state and the dynamic dial-path override.
+//
+// Parsing failures fall back to the historical "store-only" behaviour
+// (status surfaces the raw string but the dial path stays direct). The
+// MCP layer (proxy_start_tool / configure_tool) validates the URL via
+// connector.ParseUpstreamProxy before reaching here, so a parse failure
+// at this layer means an internal mis-call rather than a malformed
+// user input — logging at Warn matches that severity.
 func (m *Manager) SetUpstreamProxy(proxyURL string) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	m.upstreamProxy = proxyURL
+	bc := m.buildCfg
+	m.mu.Unlock()
+
+	if bc == nil {
+		return
+	}
+	if proxyURL == "" {
+		bc.SetUpstreamProxy(nil)
+		return
+	}
+	parsed, err := connector.ParseUpstreamProxy(proxyURL)
+	if err != nil {
+		m.logger.Warn("upstream proxy URL not applied to live dial path",
+			"url", connector.RedactProxyURL(proxyURL), "error", err)
+		return
+	}
+	bc.SetUpstreamProxy(parsed)
 }
 
 // UpstreamProxy returns the stored upstream proxy URL, or empty string.

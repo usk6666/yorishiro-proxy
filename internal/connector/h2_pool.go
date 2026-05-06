@@ -51,9 +51,15 @@ func poolKeyForH2(target string, cfg *BuildConfig) pool.PoolKey {
 	}
 	writeField(&buf, "utls", profile)
 
+	// Use EffectiveUpstreamProxy so a runtime proxy_start / configure URL
+	// switch produces a distinct pool key — pooled h2 Layers established
+	// via the previous proxy must not be reused for dials that should now
+	// transit a different upstream proxy (USK-734).
 	proxyURL := ""
-	if cfg != nil && cfg.UpstreamProxy != nil {
-		proxyURL = cfg.UpstreamProxy.String()
+	if cfg != nil {
+		if u := cfg.EffectiveUpstreamProxy(); u != nil {
+			proxyURL = u.String()
+		}
 	}
 	writeField(&buf, "proxy", proxyURL)
 

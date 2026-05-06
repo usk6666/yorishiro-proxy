@@ -139,8 +139,10 @@ type Deps struct {
 	// --- Optional manager-level state (consumed by Manager wiring) ---
 
 	// UpstreamProxy is the initial upstream proxy URL. Stored on the
-	// stack for read-back via Manager.UpstreamProxy(); not consulted by
-	// the live data path until wired by USK-690.
+	// stack for read-back via Manager.UpstreamProxy(). Runtime updates
+	// installed via Manager.SetUpstreamProxy now flow into
+	// BuildConfig's dynamic slot so the live dial path picks them up
+	// (USK-734).
 	UpstreamProxy *url.URL
 }
 

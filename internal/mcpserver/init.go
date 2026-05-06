@@ -540,6 +540,11 @@ func NewLiveManager(
 	mgr, err := proxybuild.NewManager(proxybuild.ManagerConfig{
 		Logger:       logger,
 		StackFactory: factory,
+		// BuildConfig is the process-singleton handed to every Stack via
+		// the factory closure. Sharing the same pointer with the Manager
+		// lets Manager.SetUpstreamProxy mutate the live dial-path's
+		// dynamic upstream-proxy slot at runtime (USK-734).
+		BuildConfig: buildCfg,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("init proxybuild manager: %w", err)
