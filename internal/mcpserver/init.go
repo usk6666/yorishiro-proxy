@@ -423,9 +423,10 @@ func assembleLiveManager(
 	passthrough *connector.PassthroughList,
 	rateLimiter *connector.RateLimiter,
 	safetyEngine *safety.Engine,
+	hostTLSRegistry *transport.HostTLSRegistry,
 	logger *slog.Logger,
 ) (*proxybuild.Manager, error) {
-	buildCfg := NewLiveBuildConfig(appCtx, cfg, proxyCfg, issuer, pluginv2Engine, store, logger)
+	buildCfg := NewLiveBuildConfig(appCtx, cfg, proxyCfg, issuer, pluginv2Engine, store, hostTLSRegistry, logger)
 	return NewLiveManager(cfg, proxyCfg, store, issuer, pluginv2Engine,
 		holdQueue, httpInterceptEngine, wsInterceptEngine, grpcInterceptEngine,
 		httpTransformEngine, passthrough, rateLimiter, safetyEngine, buildCfg, logger)
@@ -449,6 +450,7 @@ func NewLiveBuildConfig(
 	issuer *cert.Issuer,
 	pluginv2Engine *pluginv2.Engine,
 	store *flow.SQLiteStore,
+	hostTLSRegistry *transport.HostTLSRegistry,
 	logger *slog.Logger,
 ) *connector.BuildConfig {
 	bc := &connector.BuildConfig{
@@ -460,6 +462,12 @@ func NewLiveBuildConfig(
 		HTTP2Pool:          h2pool.New(h2pool.PoolOptions{}),
 		BodySpillDir:       config.ResolveBodySpillDir(cfg),
 		BodySpillThreshold: config.ResolveBodySpillThreshold(cfg),
+		// USK-733: thread the runtime-mutable HostTLSRegistry into the live
+		// dial path so `proxy_start(client_cert=..., client_key=...)`
+		// updates reach the next outbound TLS handshake. The startup-time
+		// HostTLSResolver and ClientCert snapshot below are kept as
+		// fallbacks for hosts the registry has no entry for.
+		HostTLSRegistry: hostTLSRegistry,
 	}
 	bc.HostTLSResolver = connector.NewHostTLSResolver(proxyCfg.HostTLS)
 	bc.WSMaxFrameSize = config.ResolveWSMaxFrameSize(proxyCfg.WebSocket)

@@ -12,6 +12,7 @@ import (
 
 	"github.com/usk6666/yorishiro-proxy/internal/cert"
 	"github.com/usk6666/yorishiro-proxy/internal/config"
+	"github.com/usk6666/yorishiro-proxy/internal/connector/transport"
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/bytechunk"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/http1"
@@ -46,6 +47,26 @@ type BuildConfig struct {
 	// HostTLSResolver resolves per-host TLS overrides (InsecureSkipVerify,
 	// ClientCert, RootCAs). Nil means use global settings for all hosts.
 	HostTLSResolver *HostTLSResolver
+
+	// HostTLSRegistry, when non-nil, is consulted at dial time for runtime
+	// per-host TLS material — including the global mTLS client certificate
+	// installed by `proxy_start(client_cert=..., client_key=...)`. Lookup
+	// happens on the dial hot path; the registry is concurrency-safe
+	// (sync.RWMutex) and falls back to the global slot when no host-specific
+	// entry matches.
+	//
+	// Resolution order at dial time (USK-733):
+	//
+	//  1. HostTLSRegistry per-host entry (runtime-mutable; includes
+	//     wildcard match → global fallback within the registry).
+	//  2. HostTLSResolver per-host entry (built at startup from the
+	//     proxy config file's `host_tls` map).
+	//  3. BuildConfig.ClientCert / InsecureSkipVerify (the legacy
+	//     `-client-cert` flag snapshot).
+	//
+	// The registry surfaces runtime updates from proxy_start that the
+	// startup-time HostTLSResolver and ClientCert snapshot cannot.
+	HostTLSRegistry *transport.HostTLSRegistry
 
 	// ALPNCache caches upstream ALPN negotiation results to avoid an extra
 	// upstream dial for ALPN learning on subsequent connections.
@@ -221,32 +242,82 @@ func clientH2MaxConcurrentStreamsOption(cfg *BuildConfig) http2.Option {
 }
 
 // resolvePerHostTLS resolves per-host TLS overrides from the BuildConfig.
+//
+// Resolution order (USK-733):
+//  1. Static cfg.ClientCert / cfg.InsecureSkipVerify (boot-time fallbacks).
+//  2. cfg.HostTLSResolver per-host entry (startup-time proxy config map).
+//  3. cfg.HostTLSRegistry per-host entry (runtime-mutable; takes precedence
+//     so `proxy_start(client_cert=..., client_key=...)` and other runtime
+//     installers reach the live dial path).
+//
+// Each layer overrides only the fields it provides, so a runtime registry
+// entry that sets only ClientCert leaves InsecureSkipVerify / RootCAs from
+// earlier layers untouched.
 func resolvePerHostTLS(target string, cfg *BuildConfig) (*resolvedTLS, error) {
 	r := &resolvedTLS{
 		insecureSkip: cfg.InsecureSkipVerify,
 		clientCert:   cfg.ClientCert,
 	}
-	if cfg.HostTLSResolver == nil {
-		return r, nil
+
+	if cfg.HostTLSResolver != nil {
+		resolved, err := cfg.HostTLSResolver.Resolve(target)
+		if err != nil {
+			return nil, fmt.Errorf("connector: resolve host TLS for %s: %w", target, err)
+		}
+		if resolved != nil {
+			if resolved.InsecureSkipVerify != nil {
+				r.insecureSkip = *resolved.InsecureSkipVerify
+			}
+			if resolved.ClientCert != nil {
+				r.clientCert = resolved.ClientCert
+			}
+			if resolved.RootCAs != nil {
+				r.rootCAs = &tls.Config{RootCAs: resolved.RootCAs}
+			}
+		}
 	}
 
-	resolved, err := cfg.HostTLSResolver.Resolve(target)
-	if err != nil {
-		return nil, fmt.Errorf("connector: resolve host TLS for %s: %w", target, err)
+	if cfg.HostTLSRegistry != nil {
+		if err := applyHostTLSRegistry(r, target, cfg.HostTLSRegistry); err != nil {
+			return nil, fmt.Errorf("connector: resolve host TLS for %s: %w", target, err)
+		}
 	}
-	if resolved == nil {
-		return r, nil
-	}
-	if resolved.InsecureSkipVerify != nil {
-		r.insecureSkip = *resolved.InsecureSkipVerify
-	}
-	if resolved.ClientCert != nil {
-		r.clientCert = resolved.ClientCert
-	}
-	if resolved.RootCAs != nil {
-		r.rootCAs = &tls.Config{RootCAs: resolved.RootCAs}
-	}
+
 	return r, nil
+}
+
+// applyHostTLSRegistry consults the runtime-mutable HostTLSRegistry and
+// overlays its lookup result onto the partially-resolved tls knobs. Empty
+// fields in the registry entry leave the corresponding slot untouched so a
+// registry entry that only carries a client cert does not clobber an earlier
+// layer's RootCAs / InsecureSkipVerify.
+//
+// The registry's Lookup performs exact → wildcard → global fallback under a
+// single RLock so the dial-time read is consistent.
+func applyHostTLSRegistry(r *resolvedTLS, target string, reg *transport.HostTLSRegistry) error {
+	host := extractHost(target)
+	hostCfg := reg.Lookup(host)
+	if hostCfg == nil {
+		return nil
+	}
+	cert, err := hostCfg.LoadClientCert()
+	if err != nil {
+		return err
+	}
+	if cert != nil {
+		r.clientCert = cert
+	}
+	if hostCfg.TLSVerify != nil {
+		r.insecureSkip = !*hostCfg.TLSVerify
+	}
+	pool, err := hostCfg.LoadCABundle()
+	if err != nil {
+		return err
+	}
+	if pool != nil {
+		r.rootCAs = &tls.Config{RootCAs: pool}
+	}
+	return nil
 }
 
 func buildALPNRoutedStack(
@@ -805,27 +876,17 @@ func buildRawPassthroughStack(
 		ServerName: host,
 	}
 
-	insecureSkip := cfg.InsecureSkipVerify
-	clientCert := cfg.ClientCert
-
-	// Apply per-host TLS overrides if configured.
-	if cfg.HostTLSResolver != nil {
-		resolved, resolveErr := cfg.HostTLSResolver.Resolve(target)
-		if resolveErr != nil {
-			clientTLSConn.Close()
-			return nil, nil, nil, fmt.Errorf("connector: resolve host TLS for %s: %w", target, resolveErr)
-		}
-		if resolved != nil {
-			if resolved.InsecureSkipVerify != nil {
-				insecureSkip = *resolved.InsecureSkipVerify
-			}
-			if resolved.ClientCert != nil {
-				clientCert = resolved.ClientCert
-			}
-			if resolved.RootCAs != nil {
-				upstreamTLSCfg.RootCAs = resolved.RootCAs
-			}
-		}
+	// Apply per-host TLS overrides. Resolution order (USK-733):
+	// HostTLSResolver (startup-time) → HostTLSRegistry (runtime-mutable).
+	hostTLS, resolveErr := resolvePerHostTLS(target, cfg)
+	if resolveErr != nil {
+		clientTLSConn.Close()
+		return nil, nil, nil, resolveErr
+	}
+	insecureSkip := hostTLS.insecureSkip
+	clientCert := hostTLS.clientCert
+	if hostTLS.rootCAs != nil {
+		upstreamTLSCfg.RootCAs = hostTLS.rootCAs.RootCAs
 	}
 
 	upstreamConn, upstreamSnap, err := DialUpstreamRaw(ctx, target, DialRawOpts{

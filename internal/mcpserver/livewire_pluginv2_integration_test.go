@@ -128,7 +128,7 @@ func setupLiveProxy(t *testing.T, pluginName, pluginScript string) *liveProxy {
 	wsInterceptEngine := wsrules.NewInterceptEngine()
 	grpcInterceptEngine := grpcrules.NewInterceptEngine()
 	httpTransformEngine := httprules.NewTransformEngine()
-	buildCfg := NewLiveBuildConfig(ctx, cfg, proxyCfg, issuer, engine, store, logger)
+	buildCfg := NewLiveBuildConfig(ctx, cfg, proxyCfg, issuer, engine, store, nil, logger)
 
 	mgr, err := NewLiveManager(cfg, proxyCfg, store, issuer, engine, holdQueue,
 		httpInterceptEngine, wsInterceptEngine, grpcInterceptEngine,

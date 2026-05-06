@@ -12,11 +12,16 @@
 package mcptest_test
 
 import (
+	"bytes"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"net"
+	"net/url"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/mcptest"
 )
@@ -220,17 +225,13 @@ func TestE2E_ProxyStart_ProtocolSubset_Filters(t *testing.T) {
 // TestE2E_ProxyStart_MTLSClientCert verifies the client_cert /
 // client_key arguments to proxy_start (a) are accepted and validated
 // by the tool, (b) round-trip into the connector's HostTLSRegistry
-// global slot. The end-to-end transit assertion ("upstream sees the
-// client cert") is split into a follow-up Issue (USK-733): the live
-// MITM data path consumes BuildConfig.ClientCert (resolved at stack
-// build time from the legacy `-client-cert` CLI flag), not the
-// registry that proxy_start writes to. Wiring the runtime
-// registry update into the live data path requires a production
-// change outside this Issue's scope.
+// global slot, and (c) USK-733: the live MITM dial path consults the
+// runtime-mutable HostTLSRegistry at handshake time, so the upstream
+// observes the client cert installed by proxy_start.
 //
-// Negative cases (missing path, cert without key) DO exercise live
-// validation in applyClientCert before the listener takes traffic,
-// so they stay enabled here.
+// Negative cases (missing path, cert without key) exercise the live
+// validation path in applyClientCert before the listener takes
+// traffic.
 func TestE2E_ProxyStart_MTLSClientCert(t *testing.T) {
 	t.Run("client_cert_argument_accepted", func(t *testing.T) {
 		// Acceptance + reachable-config wiring: proxy_start succeeds
@@ -274,14 +275,39 @@ func TestE2E_ProxyStart_MTLSClientCert(t *testing.T) {
 	})
 
 	t.Run("client_cert_presented_to_upstream", func(t *testing.T) {
-		// The Issue's positive end-to-end path (proxy presents the
-		// client cert to upstream) cannot pass on main today: the
-		// MCP tool writes to connector.hostTLSRegistry, but the live
-		// MITM connection-stack reads BuildConfig.ClientCert (a
-		// resolve-once snapshot taken at stack-build from the
-		// `-client-cert` CLI flag and proxy config file). Bridging
-		// the two is a production change outside test scope.
-		t.Skip("not yet implemented: connector live MITM data-path does not consume hostTLSRegistry runtime updates (split off USK-733)")
+		// USK-733: the live MITM dial path now consults the runtime
+		// HostTLSRegistry at handshake time. proxy_start(client_cert=...)
+		// writes the cert into the registry; the next outbound TLS
+		// handshake to the upstream pulls the cert from there and
+		// presents it. The upstream test handler echoes the verified
+		// client CommonName when mTLS succeeds (see harness.buildUpstream),
+		// so the assertion is "the response body contains client_cn=...".
+		h := mcptest.StartHarness(t, mcptest.HarnessOptions{
+			UpstreamProto: "http/1.1",
+			EnableMTLS:    true,
+		})
+		if h.MTLS == nil {
+			t.Fatal("EnableMTLS=true but Harness.MTLS is nil")
+		}
+
+		startRes := h.MustOK(t, "proxy_start", map[string]any{
+			"listen_addr": "127.0.0.1:0",
+			"client_cert": h.MTLS.ClientCertPath,
+			"client_key":  h.MTLS.ClientKeyPath,
+		})
+
+		proxyAddr := proxyListenAddrFromResult(t, startRes)
+		upstreamHostPort := upstreamHostPortFromURL(t, h.UpstreamTLS.URL)
+
+		// CONNECT through the proxy + GET / and assert the upstream
+		// echoed the verified client CommonName. If the registry update
+		// did not reach the dial path, the upstream's
+		// RequireAndVerifyClientCert handshake fails before the request
+		// is delivered (handshake error visible to the client).
+		respBody := connectAndGetThroughProxy(t, proxyAddr, upstreamHostPort, "/")
+		if !strings.Contains(respBody, "client_cn=") {
+			t.Fatalf("upstream did not echo client CN; client cert was not presented (USK-733 wiring broken). body=%q", respBody)
+		}
 	})
 
 	t.Run("missing_cert_path_surfaces_error", func(t *testing.T) {
@@ -336,6 +362,161 @@ func protocolsFromStartResult(t *testing.T, res mcptest.ToolResult) []string {
 	return parsed.Protocols
 }
 
-// (CONNECT-through-proxy traffic helpers were removed when the
-// USK-733/734 skips landed. They will return when the follow-up
-// Issues add the actual transit assertions.)
+// proxyListenAddrFromResult extracts the listen_addr field from a
+// proxy_start ToolResult. The harness gives us a 127.0.0.1:0 placeholder
+// in the request; the resolved port is what the test actually needs to
+// dial.
+func proxyListenAddrFromResult(t *testing.T, res mcptest.ToolResult) string {
+	t.Helper()
+	if res.Decoded != nil {
+		if v, ok := res.Decoded["listen_addr"].(string); ok && v != "" {
+			return v
+		}
+	}
+	var parsed struct {
+		ListenAddr string `json:"listen_addr"`
+	}
+	if err := json.Unmarshal([]byte(res.Text), &parsed); err != nil {
+		t.Fatalf("decode proxy_start result for listen_addr: %v (text=%q)", err, res.Text)
+	}
+	if parsed.ListenAddr == "" {
+		t.Fatalf("proxy_start result missing listen_addr: %s", res.Text)
+	}
+	return parsed.ListenAddr
+}
+
+// upstreamHostPortFromURL parses an httptest server URL ("https://host:port")
+// into a "host:port" string suitable for the proxy CONNECT target.
+func upstreamHostPortFromURL(t *testing.T, rawURL string) string {
+	t.Helper()
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		t.Fatalf("parse upstream URL %q: %v", rawURL, err)
+	}
+	host := u.Hostname()
+	port := u.Port()
+	if port == "" {
+		port = "443"
+	}
+	return host + ":" + port
+}
+
+// connectAndGetThroughProxy connects to the proxy, issues a CONNECT to
+// the given target, performs the (MITM) TLS handshake, sends a GET for
+// path, and returns the response body. InsecureSkipVerify is set on the
+// MITM TLS handshake because the proxy presents a freshly-issued cert
+// from its ephemeral CA — the test does not pin against that CA.
+func connectAndGetThroughProxy(t *testing.T, proxyAddr, target, path string) string {
+	t.Helper()
+
+	conn, err := net.DialTimeout("tcp", proxyAddr, 5*time.Second)
+	if err != nil {
+		t.Fatalf("dial proxy %s: %v", proxyAddr, err)
+	}
+	defer conn.Close()
+
+	connectReq := fmt.Sprintf("CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", target, target)
+	if _, err := conn.Write([]byte(connectReq)); err != nil {
+		t.Fatalf("write CONNECT: %v", err)
+	}
+	if err := conn.SetReadDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		t.Fatalf("set read deadline: %v", err)
+	}
+
+	buf := make([]byte, 256)
+	n, err := conn.Read(buf)
+	if err != nil {
+		t.Fatalf("read CONNECT response: %v", err)
+	}
+	if got := string(buf[:n]); !strings.HasPrefix(got, "HTTP/1.1 200") {
+		t.Fatalf("unexpected CONNECT response: %q", got)
+	}
+
+	host, _, err := net.SplitHostPort(target)
+	if err != nil {
+		t.Fatalf("split target host: %v", err)
+	}
+	tlsConn := tls.Client(conn, &tls.Config{
+		ServerName:         host,
+		InsecureSkipVerify: true, //nolint:gosec // proxy MITM cert is ephemeral
+	})
+	if err := tlsConn.Handshake(); err != nil {
+		t.Fatalf("TLS handshake through proxy to %s: %v", target, err)
+	}
+	defer tlsConn.Close()
+
+	getReq := fmt.Sprintf("GET %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n", path, target)
+	if _, err := tlsConn.Write([]byte(getReq)); err != nil {
+		t.Fatalf("write GET: %v", err)
+	}
+	if err := tlsConn.SetReadDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		t.Fatalf("set TLS read deadline: %v", err)
+	}
+
+	var respBuf bytes.Buffer
+	tmp := make([]byte, 4096)
+	for {
+		m, rerr := tlsConn.Read(tmp)
+		if m > 0 {
+			respBuf.Write(tmp[:m])
+		}
+		if rerr != nil {
+			break
+		}
+	}
+
+	resp := respBuf.String()
+	idx := strings.Index(resp, "\r\n\r\n")
+	if idx < 0 {
+		t.Fatalf("no header/body split in response: %q", resp)
+	}
+	body := resp[idx+4:]
+	// Strip a leading chunked-size line if Transfer-Encoding: chunked.
+	// httptest's HTTP/1.1 server commonly sends a single chunk; trim
+	// the surrounding framing so callers can substring-match the
+	// payload directly.
+	headerLower := strings.ToLower(resp[:idx])
+	if strings.Contains(headerLower, "transfer-encoding: chunked") {
+		body = stripChunkedFraming(body)
+	}
+	return body
+}
+
+// stripChunkedFraming removes HTTP/1.1 chunked transfer-encoding
+// framing from a response body. It is intentionally minimal — only
+// expected to handle the small, single-chunk responses our test
+// upstream sends.
+func stripChunkedFraming(body string) string {
+	var out bytes.Buffer
+	rest := body
+	for {
+		nl := strings.Index(rest, "\r\n")
+		if nl < 0 {
+			break
+		}
+		sizeStr := rest[:nl]
+		// Strip optional chunk extensions (";k=v").
+		if semi := strings.IndexByte(sizeStr, ';'); semi >= 0 {
+			sizeStr = sizeStr[:semi]
+		}
+		size, err := strconv.ParseInt(strings.TrimSpace(sizeStr), 16, 64)
+		if err != nil || size < 0 {
+			return body
+		}
+		if size == 0 {
+			break
+		}
+		start := nl + 2
+		end := start + int(size)
+		if end > len(rest) {
+			return body
+		}
+		out.WriteString(rest[start:end])
+		// Skip trailing CRLF after the chunk payload.
+		rest = rest[end:]
+		if strings.HasPrefix(rest, "\r\n") {
+			rest = rest[2:]
+		}
+	}
+	return out.String()
+}

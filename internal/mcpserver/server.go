@@ -284,7 +284,7 @@ func assembleAndRunMCPServer(
 
 	manager, err := assembleLiveManager(ctx, cfg, proxyCfg, store, issuer, pluginv2Engine,
 		holdQueue, httpInterceptEngine, wsInterceptEngine, grpcInterceptEngine,
-		httpTransformEngine, passthrough, rateLimiter, safetyEngine, logger)
+		httpTransformEngine, passthrough, rateLimiter, safetyEngine, hostTLSRegistry, logger)
 	if err != nil {
 		return err
 	}

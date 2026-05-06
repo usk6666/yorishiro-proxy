@@ -12,6 +12,7 @@ import (
 
 	"github.com/usk6666/yorishiro-proxy/internal/cert"
 	"github.com/usk6666/yorishiro-proxy/internal/config"
+	"github.com/usk6666/yorishiro-proxy/internal/connector/transport"
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/http2"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/http2/pool"
@@ -825,5 +826,140 @@ func TestGRPCOptionsFromBuildConfig(t *testing.T) {
 	}
 	if got := GRPCOptionsFromBuildConfig(&BuildConfig{GRPCMaxMessageSize: 1024}); len(got) != 1 {
 		t.Errorf("with cap: len(opts) = %d, want 1", len(got))
+	}
+}
+
+// TestResolvePerHostTLS_RegistryRuntimeUpdate verifies USK-733: a runtime
+// SetGlobal on the HostTLSRegistry surfaces in the next resolvePerHostTLS
+// call, even though the BuildConfig was assembled before the registry was
+// populated. This is the gating behaviour for proxy_start(client_cert=...)
+// reaching the live MITM dial path without a server restart.
+func TestResolvePerHostTLS_RegistryRuntimeUpdate(t *testing.T) {
+	dir := t.TempDir()
+	certPath, keyPath := generateTestCertFiles(t, dir)
+
+	reg := transport.NewHostTLSRegistry()
+	cfg := &BuildConfig{
+		HostTLSRegistry: reg,
+	}
+
+	// Before SetGlobal: registry is empty, fallbacks (nil ClientCert,
+	// false InsecureSkipVerify) win.
+	resolved, err := resolvePerHostTLS("api.example.com:443", cfg)
+	if err != nil {
+		t.Fatalf("resolvePerHostTLS pre-SetGlobal: %v", err)
+	}
+	if resolved.clientCert != nil {
+		t.Errorf("pre-SetGlobal: clientCert = %v, want nil", resolved.clientCert)
+	}
+
+	// Runtime SetGlobal — this is what proxy_start(client_cert=...) does.
+	reg.SetGlobal(&transport.HostTLSConfig{
+		ClientCertPath: certPath,
+		ClientKeyPath:  keyPath,
+	})
+
+	// After SetGlobal: the same BuildConfig now resolves with the cert.
+	resolved, err = resolvePerHostTLS("api.example.com:443", cfg)
+	if err != nil {
+		t.Fatalf("resolvePerHostTLS post-SetGlobal: %v", err)
+	}
+	if resolved.clientCert == nil {
+		t.Fatal("post-SetGlobal: clientCert is nil; registry update did not reach the dial path (USK-733)")
+	}
+	if len(resolved.clientCert.Certificate) == 0 {
+		t.Errorf("post-SetGlobal: clientCert.Certificate is empty")
+	}
+}
+
+// TestResolvePerHostTLS_RegistryPerHostOverride verifies a per-host
+// registry entry takes precedence over the registry global slot.
+func TestResolvePerHostTLS_RegistryPerHostOverride(t *testing.T) {
+	dir := t.TempDir()
+	globalCert, globalKey := generateTestCertFiles(t, dir)
+
+	hostDir := t.TempDir()
+	hostCert, hostKey := generateTestCertFiles(t, hostDir)
+
+	reg := transport.NewHostTLSRegistry()
+	reg.SetGlobal(&transport.HostTLSConfig{
+		ClientCertPath: globalCert,
+		ClientKeyPath:  globalKey,
+	})
+	reg.Set("special.example.com", &transport.HostTLSConfig{
+		ClientCertPath: hostCert,
+		ClientKeyPath:  hostKey,
+	})
+
+	cfg := &BuildConfig{HostTLSRegistry: reg}
+
+	// Per-host hit: special.example.com resolves to hostCert.
+	specialResolved, err := resolvePerHostTLS("special.example.com:443", cfg)
+	if err != nil {
+		t.Fatalf("resolvePerHostTLS special: %v", err)
+	}
+	if specialResolved.clientCert == nil {
+		t.Fatal("special host: clientCert is nil")
+	}
+
+	// Global fallback: api.example.com resolves to globalCert.
+	apiResolved, err := resolvePerHostTLS("api.example.com:443", cfg)
+	if err != nil {
+		t.Fatalf("resolvePerHostTLS api: %v", err)
+	}
+	if apiResolved.clientCert == nil {
+		t.Fatal("api host: global fallback returned nil clientCert")
+	}
+
+	// The two certs must be distinct (different DER bytes).
+	if specialResolved.clientCert == apiResolved.clientCert {
+		t.Error("special and api resolved to the same *tls.Certificate; per-host override did not take precedence")
+	}
+}
+
+// TestResolvePerHostTLS_RegistryOverridesResolverFallback verifies the
+// runtime registry entry takes precedence over a stale HostTLSResolver
+// match for the same host. This locks the documented resolution order
+// (resolver → registry; registry wins).
+func TestResolvePerHostTLS_RegistryOverridesResolverFallback(t *testing.T) {
+	dir := t.TempDir()
+	resolverCert, resolverKey := generateTestCertFiles(t, dir)
+
+	regDir := t.TempDir()
+	regCert, regKey := generateTestCertFiles(t, regDir)
+
+	resolver := NewHostTLSResolver(map[string]*config.HostTLSEntry{
+		"example.com": {
+			ClientCertPath: resolverCert,
+			ClientKeyPath:  resolverKey,
+		},
+	})
+
+	reg := transport.NewHostTLSRegistry()
+	reg.Set("example.com", &transport.HostTLSConfig{
+		ClientCertPath: regCert,
+		ClientKeyPath:  regKey,
+	})
+
+	cfg := &BuildConfig{
+		HostTLSResolver: resolver,
+		HostTLSRegistry: reg,
+	}
+
+	resolved, err := resolvePerHostTLS("example.com:443", cfg)
+	if err != nil {
+		t.Fatalf("resolvePerHostTLS: %v", err)
+	}
+	if resolved.clientCert == nil {
+		t.Fatal("clientCert is nil")
+	}
+	// The cert reached should be the registry's, not the resolver's.
+	// We compare DER bytes of the leaf to disambiguate.
+	wantCert, err := tls.LoadX509KeyPair(regCert, regKey)
+	if err != nil {
+		t.Fatalf("load registry cert for compare: %v", err)
+	}
+	if !bytes.Equal(resolved.clientCert.Certificate[0], wantCert.Certificate[0]) {
+		t.Error("registry cert did not win; resolver cert leaked through")
 	}
 }
