@@ -17,7 +17,7 @@
 // per-tool detail tests; this harness is the wiring path.
 //
 // The harness passes -insecure to mcpserver.Run by default. The reason:
-// httptest.NewTLSServer (used by buildUpstream) issues a self-signed
+// httptest.Server.StartTLS (used by buildUpstream) issues a self-signed
 // leaf certificate, and any test driving traffic through the proxy
 // would otherwise be rejected at upstream-TLS verification. Tests that
 // want verification on (e.g. to assert verification failure surfaces a
@@ -124,6 +124,15 @@ type Harness struct {
 	// client certificate when dialling UpstreamTLS. Nil otherwise.
 	MTLS *MTLSMaterial
 
+	// UpstreamFingerprint records the TLS ClientHello observed by the
+	// upstream test server, used by tests that assert the proxy's
+	// configured TLS fingerprint profile actually shaped the wire (e.g.
+	// USK-727 boot-order regression: -tls-fingerprint=chrome must take
+	// effect even before proxy_start). Populated whenever UpstreamTLS is
+	// non-nil; nil otherwise. See FingerprintObserver for the detection
+	// contract.
+	UpstreamFingerprint *FingerprintObserver
+
 	// Cleanup tears down the harness in this order: client session ->
 	// upstream test server -> MCP server (via context cancel + wait).
 	// Idempotent: calling more than once is a no-op. t.Cleanup is also
@@ -162,7 +171,7 @@ func StartHarness(t *testing.T, opts HarnessOptions) *Harness {
 
 	args := buildRunArgs(t, opts, token)
 	mtlsDir := t.TempDir()
-	upstream, mtls, err := buildUpstream(opts, mtlsDir)
+	upstream, mtls, fpObserver, err := buildUpstream(opts, mtlsDir)
 	if err != nil {
 		t.Fatalf("mcptest: build upstream: %v", err)
 	}
@@ -194,12 +203,13 @@ func StartHarness(t *testing.T, opts HarnessOptions) *Harness {
 	t.Cleanup(cleanup)
 
 	h := &Harness{
-		BaseURL:     baseURL,
-		Token:       token,
-		Client:      client,
-		UpstreamTLS: upstream,
-		MTLS:        mtls,
-		Cleanup:     cleanup,
+		BaseURL:             baseURL,
+		Token:               token,
+		Client:              client,
+		UpstreamTLS:         upstream,
+		MTLS:                mtls,
+		UpstreamFingerprint: fpObserver,
+		Cleanup:             cleanup,
 	}
 
 	for _, tc := range opts.PreStartTools {
@@ -305,20 +315,25 @@ func buildRunArgs(t *testing.T, opts HarnessOptions, token string) []string {
 }
 
 // buildUpstream constructs the optional upstream test server.
-// Returns (nil, nil, nil) when no upstream is requested. When EnableMTLS
-// is set, the returned server is configured with
+// Returns (nil, nil, nil, nil) when no upstream is requested. When
+// EnableMTLS is set, the returned server is configured with
 // tls.RequireAndVerifyClientCert plus a ClientCAs pool seeded from a
 // freshly-generated test CA, and the corresponding client material is
 // returned so the harness can hand the on-disk paths to the test.
+//
+// Every upstream is wired with a FingerprintObserver via
+// installFingerprintObserver so tests can assert the TLS fingerprint
+// profile (e.g. uTLS Chrome) configured on the proxy actually shaped
+// the ClientHello on the wire (USK-727).
 //
 // Currently only "http/1.1" is supported; validateOptions has already
 // rejected other variants. The handler echoes a constant body for the
 // non-mTLS case and reports the verified client CommonName for the
 // mTLS case so tests can assert the client cert was actually
 // presented.
-func buildUpstream(opts HarnessOptions, mtlsDir string) (*httptest.Server, *MTLSMaterial, error) {
+func buildUpstream(opts HarnessOptions, mtlsDir string) (*httptest.Server, *MTLSMaterial, *FingerprintObserver, error) {
 	if opts.UpstreamProto != "http/1.1" {
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
 
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -336,27 +351,36 @@ func buildUpstream(opts HarnessOptions, mtlsDir string) (*httptest.Server, *MTLS
 	})
 
 	if !opts.EnableMTLS {
-		return httptest.NewTLSServer(handler), nil, nil
+		// httptest.NewTLSServer auto-configures a self-signed leaf cert
+		// during StartTLS; we use NewUnstartedServer + a templated
+		// tls.Config so we can layer GetConfigForClient on top for the
+		// fingerprint observation hook.
+		srv := httptest.NewUnstartedServer(handler)
+		tlsCfg, fpObs := installFingerprintObserver(nil)
+		srv.TLS = tlsCfg
+		srv.StartTLS()
+		return srv, nil, fpObs, nil
 	}
 
 	mtls, err := generateMTLSMaterial(mtlsDir)
 	if err != nil {
-		return nil, nil, fmt.Errorf("generate mTLS material: %w", err)
+		return nil, nil, nil, fmt.Errorf("generate mTLS material: %w", err)
 	}
 
 	pool := x509.NewCertPool()
 	if !pool.AppendCertsFromPEM(mtls.CACertPEM) {
-		return nil, nil, fmt.Errorf("append test CA to pool")
+		return nil, nil, nil, fmt.Errorf("append test CA to pool")
 	}
 
 	srv := httptest.NewUnstartedServer(handler)
-	srv.TLS = &tls.Config{
+	tlsCfg, fpObs := installFingerprintObserver(&tls.Config{
 		MinVersion: tls.VersionTLS12,
 		ClientAuth: tls.RequireAndVerifyClientCert,
 		ClientCAs:  pool,
-	}
+	})
+	srv.TLS = tlsCfg
 	srv.StartTLS()
-	return srv, mtls, nil
+	return srv, mtls, fpObs, nil
 }
 
 // runMCPServer is the goroutine entry point for the boot path. It
