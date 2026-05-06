@@ -426,16 +426,20 @@ func TestBuildToolParams_PositionalArgs_Query(t *testing.T) {
 	}
 }
 
-func TestBuildToolParams_PositionalArgs_Execute(t *testing.T) {
-	params, err := buildToolParams("execute", []string{"resend", "--flow_id=abc"}, nil, nil)
+func TestBuildToolParams_PositionalArgs_InterceptAction(t *testing.T) {
+	// intercept retains "action" as the first positional argument (the typed
+	// resend/fuzz tools dropped action entirely with USK-693). This test
+	// covers the positional-arg + flag-style key/value path: the bare word
+	// "release" lands in params["action"] and --intercept_id is parsed normally.
+	params, err := buildToolParams("intercept", []string{"release", "--intercept_id=abc"}, nil, nil)
 	if err != nil {
 		t.Fatalf("buildToolParams: %v", err)
 	}
-	if params["action"] != "resend" {
-		t.Errorf("action = %v, want 'resend'", params["action"])
+	if params["action"] != "release" {
+		t.Errorf("action = %v, want 'release'", params["action"])
 	}
-	if params["flow_id"] != "abc" {
-		t.Errorf("flow_id = %v, want 'abc'", params["flow_id"])
+	if params["intercept_id"] != "abc" {
+		t.Errorf("intercept_id = %v, want 'abc'", params["intercept_id"])
 	}
 }
 
@@ -508,7 +512,7 @@ func TestBuildToolParams_ArrayParam_CommaSeparated(t *testing.T) {
 		enums:      map[string][]string{},
 	}
 
-	params, err := buildToolParams("fuzz", []string{"--payloads=a,b,c"}, schema, nil)
+	params, err := buildToolParams("fuzz_http", []string{"--payloads=a,b,c"}, schema, nil)
 	if err != nil {
 		t.Fatalf("buildToolParams: %v", err)
 	}

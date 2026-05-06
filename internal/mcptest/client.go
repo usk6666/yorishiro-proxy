@@ -159,6 +159,45 @@ func (c *Client) CallTool(t *testing.T, name string, args any) ToolResult {
 	return out
 }
 
+// ListTools issues a tools/list request over the wire and returns the
+// names of every registered tool. Mirrors the CLI client's
+// fetchToolSchema discovery path so regression tests can assert that
+// the server-side registerTools() output stays in sync with the CLI's
+// hardcoded clientToolList.
+//
+// On transport error the test fails via t.Fatalf — listings are
+// effectively a precondition for any downstream assertion, so a
+// soft-error path would just push the failure to a less informative
+// site.
+func (c *Client) ListTools(t *testing.T) []string {
+	t.Helper()
+
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		t.Fatalf("mcptest: client is closed")
+	}
+	session := c.session
+	parent := c.parentCtx
+	c.mu.Unlock()
+
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parent, 30*time.Second)
+	defer cancel()
+
+	res, err := session.ListTools(ctx, &gomcp.ListToolsParams{})
+	if err != nil {
+		t.Fatalf("mcptest: ListTools: %v", err)
+	}
+	names := make([]string, 0, len(res.Tools))
+	for _, tool := range res.Tools {
+		names = append(names, tool.Name)
+	}
+	return names
+}
+
 // Close terminates the underlying client session. Safe to call more
 // than once. Called automatically by Harness.Cleanup; tests should not
 // need to invoke directly.

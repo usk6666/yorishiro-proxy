@@ -10,19 +10,30 @@ import (
 
 // positionalArgMapping defines the positional argument mapping for each tool.
 // The slice elements are the parameter names, in order, for bare-word arguments.
+//
+// Typed tools (resend_http/ws/grpc/raw, fuzz_http/ws/grpc/raw, plugin_introspect)
+// have no "action" concept — every parameter is named explicitly in the
+// InputSchema — so most carry an empty positional slice. The remaining
+// shared / cross-cutting tools keep "action" as the first positional for
+// convenience, matching their pre-typed-split CLI ergonomics.
 var positionalArgMapping = map[string][]string{
-	"query":       {"resource", "id"},
-	"execute":     {"action"},
-	"intercept":   {"action"},
-	"resend":      {"action"},
-	"manage":      {"action"},
-	"security":    {"action"},
-	"macro":       {"action"},
-	"fuzz":        {"action"},
-	"plugin":      {"action"},
-	"proxy_start": {},
-	"proxy_stop":  {},
-	"configure":   {},
+	"query":             {"resource", "id"},
+	"intercept":         {"action"},
+	"manage":            {"action"},
+	"security":          {"action"},
+	"macro":             {"action"},
+	"proxy_start":       {},
+	"proxy_stop":        {},
+	"configure":         {},
+	"resend_http":       {},
+	"resend_ws":         {},
+	"resend_grpc":       {},
+	"resend_raw":        {},
+	"fuzz_http":         {},
+	"fuzz_ws":           {},
+	"fuzz_grpc":         {},
+	"fuzz_raw":          {},
+	"plugin_introspect": {},
 }
 
 // toolSchema holds the parsed properties from a tool's JSON Schema InputSchema.

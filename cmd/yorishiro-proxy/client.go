@@ -121,30 +121,102 @@ Examples:
   yorishiro-proxy client intercept action=drop params.intercept_id=abc123
   yorishiro-proxy client intercept action=modify_and_forward params.intercept_id=abc123 params.override_body='{"new":"data"}'`,
 
-	"resend": `resend: Resend and replay recorded proxy requests.
+	"resend_http": `resend_http: Resend or construct an HTTP request through the proxy stack.
 
-Parameters (key=value):
-  action=<action>                   Action to perform (required)
-    resend                          Resend an HTTP request
-    resend_raw                      Resend raw bytes
-    tcp_replay                      Replay TCP connection
-    compare                         Compare two flows
-  params.flow_id=<id>               Flow ID (required for resend/resend_raw/tcp_replay)
-  params.override_method=<method>   HTTP method override
-  params.override_url=<url>         URL override
-  params.override_body=<body>       Body override (text)
-  params.override_host=<host:port>  Connection target override
-  params.follow_redirects=true      Follow HTTP redirects (default: false)
-  params.timeout_ms=<n>             Request timeout in ms (default: 30000)
-  params.dry_run=true               Preview without sending
-  params.tag=<tag>                  Tag for result flow
-  params.flow_id_a=<id>             First flow ID (for compare)
-  params.flow_id_b=<id>             Second flow ID (for compare)
+Parameters (key=value or --key=value):
+  flow_id=<id>             Recorded HTTP stream id; when set, omitted fields inherit from the recorded send
+  method=<method>          HTTP method (GET, POST, ...); required when flow_id is empty
+  scheme=<http|https>      Required when flow_id is empty
+  authority=<host[:port]>  Host header / :authority value; required when flow_id is empty
+  path=<path>              Request path including leading slash; required when flow_id is empty
+  raw_query=<query>        Raw query string without the leading '?'
+  body=<text|base64>       Request body interpreted per body_encoding
+  body_encoding=<enc>      text|base64; default text
+  body_set=true            Set true to override body to empty; otherwise omitting body inherits the original
+  override_host=<host:port> Redirect dial target while preserving the request's Host/:authority
+  follow_redirects=<bool>  Unsupported; setting true returns an error
+  timeout_ms=<n>           Per-request timeout in milliseconds (default: 30000)
+  tls_fingerprint=<prof>   Informational v1; per-call selection deferred
+  tag=<tag>                Tag stored on the new flow's Tags map
+
+Note: headers ([{name, value}] ordered list) and body_patches require JSON input — use the MCP
+      client (or pass the parameter as a JSON string) for full structured definitions.
 
 Examples:
-  yorishiro-proxy client resend action=resend params.flow_id=abc123
-  yorishiro-proxy client resend action=resend params.flow_id=abc123 params.override_method=POST
-  yorishiro-proxy client resend action=compare params.flow_id_a=abc params.flow_id_b=def`,
+  yorishiro-proxy client resend_http flow_id=abc123
+  yorishiro-proxy client resend_http flow_id=abc123 method=POST body='{"x":1}' body_encoding=text
+  yorishiro-proxy client resend_http method=GET scheme=https authority=example.com path=/api`,
+
+	"resend_ws": `resend_ws: Resend a single WebSocket frame on a freshly dialled upstream connection.
+
+Parameters (key=value or --key=value):
+  flow_id=<id>             Recorded WebSocket stream id; when set, the upgrade dance inherits URL/headers/extensions
+  target_addr=<host:port>  Upstream host:port. Required when flow_id is empty (overrides dial target with flow_id)
+  scheme=<ws|wss>          Required when flow_id is empty (defaults to ws)
+  path=<path>              Upgrade request path; required when flow_id is empty
+  raw_query=<query>        Upgrade request raw query string without the leading '?'
+  opcode=<text|binary|close|ping|pong>  Frame opcode (REQUIRED)
+  fin=<bool>               FIN bit; defaults to true
+  payload=<text|base64>    Frame payload interpreted per body_encoding
+  body_encoding=<enc>      text|base64; defaults to text
+  payload_set=true         Set true to send an empty payload; otherwise empty is treated as no override
+  masked=<bool>            Informational; the layer auto-masks per RFC 6455 §5.3
+  mask=<hex|b64>           Informational 4-byte mask key; ignored on Send
+  close_code=<n>           RFC 6455 status code for Close frames
+  close_reason=<text>      Optional UTF-8 reason for Close frames
+  compressed=<bool>        Per-message-deflate (RFC 7692); requires negotiation via flow_id
+  timeout_ms=<n>           Per-call timeout in milliseconds (default: 30000)
+  tls_fingerprint=<prof>   Informational v1; per-call selection deferred
+  tag=<tag>                Tag stored on the new flow's Tags map
+
+Examples:
+  yorishiro-proxy client resend_ws flow_id=abc123 opcode=text payload=hello
+  yorishiro-proxy client resend_ws target_addr=127.0.0.1:8080 scheme=ws path=/socket opcode=ping`,
+
+	"resend_grpc": `resend_grpc: Resend a gRPC unary RPC on a freshly dialled HTTP/2 upstream.
+
+Parameters (key=value or --key=value):
+  flow_id=<id>             Recorded gRPC stream id; when set, omitted Start fields inherit from the original RPC
+  target_addr=<host:port>  Upstream host:port. Required when flow_id is empty
+  scheme=<http|https>      Defaults to https. http selects plaintext h2c
+  service=<service>        gRPC service name (e.g. pkg.Greeter); required when flow_id is empty
+  method=<name>            gRPC method name (e.g. SayHello); required when flow_id is empty
+  encoding=<enc>           grpc-encoding for outgoing messages (identity or gzip)
+  accept_encoding=<list>   grpc-accept-encoding list (e.g. gzip,identity)
+  timeout_ms=<n>           Per-call timeout in milliseconds (default: 30000)
+  tls_fingerprint=<prof>   Informational v1; per-call selection deferred
+  tag=<tag>                Tag stored on the new flow's Tags map
+
+Note: messages ([{payload, body_encoding, compressed}]) and metadata / trailer_metadata
+      ([{name, value}] lists) require JSON input — use the MCP client for full definitions.
+      messages requires at least one element.
+
+Examples:
+  yorishiro-proxy client resend_grpc flow_id=abc123
+  yorishiro-proxy client resend_grpc target_addr=127.0.0.1:50051 service=pkg.Greeter method=SayHello`,
+
+	"resend_raw": `resend_raw: Resend a recorded raw byte payload on a freshly dialled TCP/TLS upstream.
+
+Parameters (key=value or --key=value):
+  flow_id=<id>                       Recorded raw stream id (REQUIRED — use fuzz_raw for ad-hoc injection)
+  target_addr=<host:port>            Upstream host:port (REQUIRED, explicit port required)
+  use_tls=<bool>                     True to upgrade the dialed connection to TLS
+  sni=<name>                         SNI server name; defaults to target_addr host when use_tls=true
+  override_bytes=<text|base64>       Replacement payload (mutually exclusive with patches)
+  override_bytes_encoding=<enc>      text|base64; defaults to text
+  override_bytes_set=true            Set true to replace with empty bytes
+  insecure_skip_verify=<bool>        Skip TLS server certificate verification when use_tls=true
+  tls_fingerprint=<prof>             Informational v1; per-call selection deferred
+  timeout_ms=<n>                     Per-call timeout in milliseconds (default: 30000)
+  tag=<tag>                          Tag stored on the new flow's Tags map
+
+Note: patches ([{offset, data, data_encoding}]) requires JSON input — use the MCP client
+      for full definitions. Wire bytes are NEVER normalized — they reach the wire verbatim,
+      making this the smuggling/anomaly-test surface.
+
+Examples:
+  yorishiro-proxy client resend_raw flow_id=abc123 target_addr=127.0.0.1:8080
+  yorishiro-proxy client resend_raw flow_id=abc123 target_addr=example.com:443 use_tls=true`,
 
 	"manage": `manage: Manage flow data and CA certificates.
 
@@ -211,74 +283,165 @@ Examples:
   yorishiro-proxy client macro action=run_macro params.name=my_macro
   yorishiro-proxy client macro action=delete_macro params.name=my_macro`,
 
-	"fuzz": `fuzz: Execute fuzz testing campaigns.
+	"fuzz_http": `fuzz_http: Synchronously fuzz an HTTP request (cartesian product, capped at 1000 variants).
 
-Parameters (key=value):
-  action=<action>                   Action to perform (required)
-    fuzz                            Start a fuzz job
-    fuzz_pause                      Pause a running fuzz job
-    fuzz_resume                     Resume a paused fuzz job
-    fuzz_cancel                     Cancel a fuzz job
-  params.flow_id=<id>               Template flow ID (required for fuzz)
-  params.fuzz_id=<id>               Fuzz job ID (required for pause/resume/cancel)
-  params.concurrency=<n>            Concurrent workers (default: 1, max: 100)
-  params.rate_limit_rps=<n>         Requests per second limit (0=unlimited)
-  params.delay_ms=<n>               Delay between requests in ms
-  params.timeout_ms=<n>             Request timeout in ms (default: 30000)
-  params.tag=<tag>                  Tag for the fuzz job
+Parameters (key=value or --key=value):
+  flow_id=<id>             Recorded HTTP stream id; when set, omitted base fields are inherited
+  method=<method>          HTTP method base; required when flow_id is empty
+  scheme=<http|https>      Required when flow_id is empty
+  authority=<host[:port]>  Host / :authority; required when flow_id is empty
+  path=<path>              Request path; required when flow_id is empty
+  raw_query=<query>        Raw query string without leading '?'
+  body=<text|base64>       Base body interpreted per body_encoding
+  body_encoding=<enc>      text|base64; default text
+  body_set=true            Set true to override body to empty
+  override_host=<host:port> Redirect dial target while preserving the request's Host/:authority
+  timeout_ms=<n>           Per-variant timeout in milliseconds (default: 30000)
+  tls_fingerprint=<prof>   Informational v1; per-call selection deferred
+  stop_on_5xx=<bool>       Abort remaining variants once a variant returns 5xx
+  tag=<tag>                Tag stored on every variant Stream's Tags map
 
-Note: fuzz action requires 'positions' and 'payload_sets' — use JSON input or MCP client for full definitions.
-      Use 'query resource=fuzz_jobs' to list jobs, 'query resource=fuzz_results fuzz_id=<id>' for results.
-
-Examples:
-  yorishiro-proxy client fuzz action=fuzz_pause params.fuzz_id=xyz789
-  yorishiro-proxy client fuzz action=fuzz_cancel params.fuzz_id=xyz789`,
-
-	"plugin": `plugin: Manage Starlark plugins.
-
-Parameters (key=value):
-  action=<action>                   Action to perform (required)
-    list                            List all registered plugins
-    reload                          Reload a plugin (or all if name omitted)
-    enable                          Enable a disabled plugin
-    disable                         Disable a plugin
-  params.name=<name>                Plugin name (required for enable/disable, optional for reload)
+Note: positions[] is REQUIRED — each is {path, payloads[], encoding}. Supported paths:
+      method | scheme | authority | path | raw_query | body | headers[N].name | headers[N].value
+      Use JSON input or MCP client for the positions / headers / body_patches arrays.
 
 Examples:
-  yorishiro-proxy client plugin action=list
-  yorishiro-proxy client plugin action=reload params.name=myplugin
-  yorishiro-proxy client plugin action=enable params.name=myplugin
-  yorishiro-proxy client plugin action=disable params.name=myplugin`,
+  yorishiro-proxy client fuzz_http flow_id=abc123  (positions supplied via JSON)
+  yorishiro-proxy client fuzz_http flow_id=abc123 stop_on_5xx=true tag=path-fuzz`,
+
+	"fuzz_ws": `fuzz_ws: Synchronously fuzz a WebSocket frame (cartesian product, capped at 1000 variants).
+
+Parameters (key=value or --key=value):
+  flow_id=<id>             Recorded WebSocket stream id
+  target_addr=<host:port>  Upstream host:port; required when flow_id is empty
+  scheme=<ws|wss>          Required when flow_id is empty (defaults to ws)
+  path=<path>              Upgrade request path; required when flow_id is empty
+  raw_query=<query>        Upgrade request raw query string without leading '?'
+  opcode=<text|binary|close|ping|pong>  Frame opcode (REQUIRED)
+  fin=<bool>               FIN bit; defaults to true
+  payload=<text|base64>    Base frame payload
+  body_encoding=<enc>      text|base64; defaults to text
+  payload_set=true         Set true to send an empty base payload
+  masked=<bool>            Informational; layer auto-masks per RFC 6455 §5.3
+  mask=<base64>            Informational 4-byte mask key; ignored on Send
+  close_code=<n>           RFC 6455 status code for Close frames
+  close_reason=<text>      Base UTF-8 reason for Close frames
+  compressed=<bool>        Per-message-deflate; requires negotiation via flow_id
+  timeout_ms=<n>           Per-variant timeout in milliseconds (default: 30000)
+  tls_fingerprint=<prof>   Informational v1; per-call selection deferred
+  stop_on_close=<bool>     Abort remaining variants once a variant receives a Close frame
+  tag=<tag>                Tag stored on every variant Stream's Tags map
+
+Note: positions[] is REQUIRED — each is {path, payloads[], encoding}. Supported paths:
+      payload | close_reason. Use JSON input or MCP client for the positions array.
+
+Examples:
+  yorishiro-proxy client fuzz_ws flow_id=abc123 opcode=text  (positions supplied via JSON)`,
+
+	"fuzz_grpc": `fuzz_grpc: Synchronously fuzz a gRPC unary RPC (cartesian product, capped at 1000 variants).
+
+Parameters (key=value or --key=value):
+  flow_id=<id>             Recorded gRPC stream id
+  target_addr=<host:port>  Upstream host:port; required when flow_id is empty
+  scheme=<http|https>      Defaults to https; http selects plaintext h2c
+  service=<service>        gRPC service name; required when flow_id is empty
+  method=<name>            gRPC method name; required when flow_id is empty
+  encoding=<enc>           grpc-encoding for outgoing messages (identity or gzip)
+  accept_encoding=<list>   grpc-accept-encoding list (e.g. gzip,identity)
+  timeout_ms=<n>           Per-variant timeout in milliseconds (default: 30000)
+  tls_fingerprint=<prof>   Informational v1; per-call selection deferred
+  stop_on_non_ok=<bool>    Abort remaining variants on first non-OK gRPC status
+  tag=<tag>                Tag stored on every variant Stream's Tags map
+
+Note: positions[] is REQUIRED — each is {path, payloads[], encoding}. Supported paths:
+      service | method | metadata[N].name | metadata[N].value | messages[N].payload
+      messages / metadata / trailer_metadata / positions arrays require JSON input —
+      use the MCP client for full definitions. messages requires at least one element.
+
+Examples:
+  yorishiro-proxy client fuzz_grpc flow_id=abc123  (positions supplied via JSON)`,
+
+	"fuzz_raw": `fuzz_raw: Synchronously fuzz a raw byte payload (HTTP smuggling surface, capped at 1000 variants).
+
+Parameters (key=value or --key=value):
+  flow_id=<id>                       Recorded raw stream id (OPTIONAL)
+  target_addr=<host:port>            Upstream host:port (REQUIRED, explicit port)
+  use_tls=<bool>                     True to upgrade the dialed connection to TLS
+  sni=<name>                         SNI server name; defaults to target_addr host when use_tls=true
+  override_bytes=<text|base64>       Replacement base payload (mutually exclusive with patches)
+  override_bytes_encoding=<enc>      text|base64; defaults to text
+  override_bytes_set=true            Set true to replace with empty bytes
+  insecure_skip_verify=<bool>        Skip TLS server certificate verification when use_tls=true
+  tls_fingerprint=<prof>             Informational v1; per-call selection deferred
+  timeout_ms=<n>                     Per-variant timeout in milliseconds (default: 30000)
+  stop_on_error=<bool>               Abort remaining variants on first failure (network error, timeout, drop)
+  tag=<tag>                          Tag stored on every variant Stream's Tags map
+
+Note: positions[] is REQUIRED — each is {path, payloads[], encoding}. Supported paths:
+      payload | patches[N].data. patches[] (the base) and positions[] arrays require JSON
+      input — use the MCP client for full definitions.
+      Wire bytes are NEVER normalized — they reach the wire verbatim.
+
+Examples:
+  yorishiro-proxy client fuzz_raw flow_id=abc123 target_addr=127.0.0.1:8080  (positions via JSON)`,
+
+	"plugin_introspect": `plugin_introspect: List loaded Starlark plugins with their hook registrations.
+
+Parameters: none.
+
+Returns one entry per loaded pluginv2 plugin: name, path, enabled flag, the list of
+(protocol, event, phase) hook registrations the plugin made via register_hook, and
+the redacted PluginConfig.Vars map (RedactKeys substitute "<redacted>"; large values truncated).
+
+Examples:
+  yorishiro-proxy client plugin_introspect`,
 }
 
 // clientToolList is the ordered list of available MCP tools for help display.
+// The list MUST stay in sync with the server's registerTools() in
+// internal/mcp/server.go. The TestRegression_ClientToolList_MatchesServer e2e
+// test boots a real MCP server and asserts set equality both directions —
+// adding a new server tool without updating this list (or vice versa) fails
+// that test.
 var clientToolList = []string{
 	"query",
 	"proxy_start",
 	"proxy_stop",
 	"configure",
 	"intercept",
-	"resend",
+	"resend_http",
+	"resend_ws",
+	"resend_grpc",
+	"resend_raw",
 	"manage",
 	"security",
 	"macro",
-	"fuzz",
-	"plugin",
+	"fuzz_http",
+	"fuzz_ws",
+	"fuzz_grpc",
+	"fuzz_raw",
+	"plugin_introspect",
 }
 
 // clientToolDescriptions maps tool names to their short descriptions for list display.
 var clientToolDescriptions = map[string]string{
-	"query":       "Unified query for flows, status, config, etc.",
-	"proxy_start": "Start a proxy listener",
-	"proxy_stop":  "Stop proxy listener(s)",
-	"configure":   "Configure runtime proxy settings",
-	"intercept":   "Act on intercepted requests in the queue",
-	"resend":      "Resend/replay recorded proxy requests",
-	"manage":      "Manage flow data and CA certificates",
-	"security":    "Configure runtime security settings",
-	"macro":       "Define and execute macro workflows",
-	"fuzz":        "Execute fuzz testing campaigns",
-	"plugin":      "Manage Starlark plugins",
+	"query":             "Unified query for flows, status, config, etc.",
+	"proxy_start":       "Start a proxy listener",
+	"proxy_stop":        "Stop proxy listener(s)",
+	"configure":         "Configure runtime proxy settings",
+	"intercept":         "Act on intercepted requests in the queue",
+	"resend_http":       "Resend or construct an HTTP request",
+	"resend_ws":         "Resend a single WebSocket frame",
+	"resend_grpc":       "Resend a gRPC unary RPC",
+	"resend_raw":        "Resend a recorded raw byte payload",
+	"manage":            "Manage flow data and CA certificates",
+	"security":          "Configure runtime security settings",
+	"macro":             "Define and execute macro workflows",
+	"fuzz_http":         "Synchronously fuzz an HTTP request",
+	"fuzz_ws":           "Synchronously fuzz a WebSocket frame",
+	"fuzz_grpc":         "Synchronously fuzz a gRPC unary RPC",
+	"fuzz_raw":          "Synchronously fuzz a raw byte payload",
+	"plugin_introspect": "List loaded Starlark plugins and hook registrations",
 }
 
 // runClient is the entry point for the "client" subcommand.
