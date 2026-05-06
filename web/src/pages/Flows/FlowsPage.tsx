@@ -340,8 +340,7 @@ export function FlowsPage() {
   );
 
   // --- Selection ---
-  const toggleSelect = useCallback((id: string, e: React.MouseEvent) => {
-    e.stopPropagation();
+  const toggleSelect = useCallback((id: string) => {
     setSelectedIds((prev) => {
       const next = new Set(prev);
       if (next.has(id)) {
@@ -830,8 +829,8 @@ export function FlowsPage() {
                       <input
                         type="checkbox"
                         checked={selectedIds.has(flow.id)}
-                        onClick={(e) => toggleSelect(flow.id, e)}
-                        readOnly
+                        onChange={() => toggleSelect(flow.id)}
+                        onClick={(e) => e.stopPropagation()}
                       />
                     </td>
                     <td className="flows-cell-id">{shortId(flow.id)}</td>

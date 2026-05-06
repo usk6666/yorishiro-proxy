@@ -27,6 +27,11 @@
   color: var(--text-primary);
 }
 
+.tabs-tab:focus-visible {
+  outline: 2px solid var(--accent-primary);
+  outline-offset: -2px;
+}
+
 .tabs-tab--active {
   color: var(--text-primary);
   border-bottom-color: var(--accent-primary);

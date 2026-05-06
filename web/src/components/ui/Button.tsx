@@ -22,7 +22,12 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
       .join(" ");
 
     return (
-      <button ref={ref} className={classes} {...props}>
+      <button
+        ref={ref}
+        className={classes}
+        {...props}
+        type={props.type ?? "button"}
+      >
         {children}
       </button>
     );
