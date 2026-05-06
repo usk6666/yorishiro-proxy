@@ -576,13 +576,31 @@ func (s *SQLiteStore) saveFlowSync(ctx context.Context, f *Flow) error {
 		urlStr = f.URL.String()
 	}
 
+	// Project Metadata["variant"] into the dedicated column so the V11
+	// UNIQUE(stream_id, sequence, direction, variant) constraint can
+	// distinguish the original and modified records of an intercepted
+	// flow. Non-variant flows persist as variant='' (V8 behavior).
+	//
+	// The variant value is intentionally duplicated into both the column
+	// (for the UNIQUE constraint) and the metadata JSON column (for read
+	// consumers — flowColumns SELECT does not project the variant column,
+	// so all readers go through Metadata["variant"]). The column is the
+	// source of truth for the constraint; metadata remains the single
+	// source of truth for read paths (see categorizeMessages /
+	// resolveVariantPair in internal/mcp/query_tool.go).
+	variant := ""
+	if f.Metadata != nil {
+		variant = f.Metadata["variant"]
+	}
+
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO flows (id, stream_id, sequence, direction, timestamp, headers, body, raw_bytes, body_truncated, method, url, status_code, metadata, trailers)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO flows (id, stream_id, sequence, direction, variant, timestamp, headers, body, raw_bytes, body_truncated, method, url, status_code, metadata, trailers)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		f.ID,
 		f.StreamID,
 		f.Sequence,
 		f.Direction,
+		variant,
 		f.Timestamp.UTC().Format(time.RFC3339Nano),
 		headers,
 		f.Body,

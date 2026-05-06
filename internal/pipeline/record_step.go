@@ -263,6 +263,13 @@ func (s *RecordStep) recordVariantFlows(ctx context.Context, snap, current *enve
 	}
 
 	modFlow := s.envelopeToFlow(ctx, current)
+	// Suffix the modified-variant FlowID symmetric to "-original" above so
+	// the two records do not collide on the flow table's
+	// UNIQUE(stream_id, sequence, direction) constraint. The base FlowID
+	// alone matches the snapshot's identity, so without this suffix the
+	// SaveFlow below would silently fail with "constraint failed" on every
+	// intercept(modify_and_forward), losing the modified record entirely.
+	modFlow.ID = current.FlowID + "-modified"
 	modFlow.Metadata["variant"] = "modified"
 	s.applyWireEncode(ctx, current, modFlow)
 	if err := s.store.SaveFlow(ctx, modFlow); err != nil {

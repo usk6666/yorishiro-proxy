@@ -280,6 +280,57 @@ const schemaV10 = `
 ALTER TABLE flows ADD COLUMN trailers TEXT NOT NULL DEFAULT '{}';
 `
 
+// schemaV11 widens the flows UNIQUE constraint so the original/modified
+// variant pair recorded by RecordStep on intercept(modify_and_forward) can
+// coexist (USK-735). Both variants share (stream_id, sequence, direction)
+// — only the FlowID and Metadata["variant"] disambiguate them — so the
+// previous UNIQUE(stream_id, sequence, direction) constraint dropped the
+// modified variant insert with "UNIQUE constraint failed", losing every
+// post-modification record.
+//
+// The new constraint adds a `variant` column populated from
+// Metadata["variant"] (” / 'original' / 'modified'). Non-variant flows
+// keep variant=” so the constraint reduces to the V8 behavior for them.
+const schemaV11 = `
+-- Recreate flows table with the variant column added to UNIQUE.
+CREATE TABLE flows_new (
+	id              TEXT PRIMARY KEY,
+	stream_id       TEXT NOT NULL REFERENCES streams(id) ON DELETE CASCADE,
+	sequence        INTEGER NOT NULL,
+	direction       TEXT NOT NULL,
+	variant         TEXT NOT NULL DEFAULT '',
+	timestamp       DATETIME NOT NULL,
+	headers         TEXT NOT NULL DEFAULT '{}',
+	body            BLOB,
+	raw_bytes       BLOB,
+	body_truncated  INTEGER NOT NULL DEFAULT 0,
+	method          TEXT NOT NULL DEFAULT '',
+	url             TEXT NOT NULL DEFAULT '',
+	status_code     INTEGER NOT NULL DEFAULT 0,
+	metadata        TEXT NOT NULL DEFAULT '{}',
+	trailers        TEXT NOT NULL DEFAULT '{}',
+	UNIQUE(stream_id, sequence, direction, variant)
+);
+
+-- Pre-populate variant from metadata JSON for any pre-existing rows that
+-- already encoded the variant marker (json_extract returns NULL when the
+-- key is absent — coalesce to empty string).
+INSERT INTO flows_new (id, stream_id, sequence, direction, variant, timestamp, headers, body, raw_bytes, body_truncated, method, url, status_code, metadata, trailers)
+SELECT id, stream_id, sequence, direction,
+       COALESCE(json_extract(metadata, '$.variant'), ''),
+       timestamp, headers, body, raw_bytes, body_truncated, method, url, status_code, metadata, trailers
+FROM flows;
+
+DROP TABLE flows;
+ALTER TABLE flows_new RENAME TO flows;
+
+CREATE INDEX IF NOT EXISTS idx_flows_stream_id ON flows(stream_id);
+CREATE INDEX IF NOT EXISTS idx_flows_direction ON flows(direction);
+CREATE INDEX IF NOT EXISTS idx_flows_method ON flows(method);
+CREATE INDEX IF NOT EXISTS idx_flows_url ON flows(url);
+CREATE INDEX IF NOT EXISTS idx_flows_status_code ON flows(status_code);
+`
+
 var migrations = map[int]string{
 	1:  schemaV1,
 	2:  schemaV2,
@@ -291,6 +342,7 @@ var migrations = map[int]string{
 	8:  schemaV8,
 	9:  schemaV9,
 	10: schemaV10,
+	11: schemaV11,
 }
 
 func migrate(ctx context.Context, db *sql.DB) error {
@@ -318,7 +370,12 @@ func migrate(ctx context.Context, db *sql.DB) error {
 		// we toggle it outside the migration transaction.
 		// Migrations that recreate FK-referencing tables require foreign keys
 		// to be temporarily disabled. PRAGMA cannot run inside a transaction.
-		needsFKOff := v == 7 || v == 8
+		// V11 follows the V8 recreate-and-swap pattern on the FK-referencing
+		// flows table, so it joins V7 / V8 here for consistency. (Empirically
+		// V11 also works without the toggle because no other table has an FK
+		// pointing to flows; we keep the toggle anyway to remain symmetric
+		// with V8 and to be safe if future schema gains such a reference.)
+		needsFKOff := v == 7 || v == 8 || v == 11
 		if needsFKOff {
 			if _, err := db.ExecContext(ctx, "PRAGMA foreign_keys = OFF"); err != nil {
 				return fmt.Errorf("disable foreign keys for migration v%d: %w", v, err)

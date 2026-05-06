@@ -2143,3 +2143,116 @@ func TestSQLiteStore_FlowTrailers_EmptyStaysNil(t *testing.T) {
 		t.Errorf("Trailers = %v, want nil for message without trailers", got.Trailers)
 	}
 }
+
+// TestSQLiteStore_VariantPairCoexists pins USK-735: the V11 schema must
+// allow the original/modified variant pair recorded by RecordStep on
+// intercept(modify_and_forward) to coexist. Both records share
+// (stream_id, sequence, direction); only the FlowID and Metadata["variant"]
+// disambiguate them. Before V11 the second SaveFlow failed with
+// "UNIQUE constraint failed: flows.stream_id, flows.sequence, flows.direction"
+// and lost the modified record.
+func TestSQLiteStore_VariantPairCoexists(t *testing.T) {
+	t.Parallel()
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	st := &Stream{Protocol: "HTTP/1.x", State: "active", Timestamp: time.Now().UTC()}
+	if err := store.SaveStream(ctx, st); err != nil {
+		t.Fatalf("SaveStream: %v", err)
+	}
+
+	now := time.Now().UTC()
+	orig := &Flow{
+		ID:        "f1-original",
+		StreamID:  st.ID,
+		Sequence:  0,
+		Direction: "send",
+		Timestamp: now,
+		Method:    "GET",
+		Metadata:  map[string]string{"variant": "original"},
+	}
+	mod := &Flow{
+		ID:        "f1-modified",
+		StreamID:  st.ID,
+		Sequence:  0,
+		Direction: "send",
+		Timestamp: now,
+		Method:    "POST",
+		Metadata:  map[string]string{"variant": "modified"},
+	}
+
+	if err := store.SaveFlow(ctx, orig); err != nil {
+		t.Fatalf("SaveFlow original: %v", err)
+	}
+	if err := store.SaveFlow(ctx, mod); err != nil {
+		t.Fatalf("SaveFlow modified: %v (the V11 UNIQUE(stream_id, sequence, direction, variant) constraint should allow the variant pair to coexist)", err)
+	}
+
+	got, err := store.GetFlows(ctx, st.ID, FlowListOptions{})
+	if err != nil {
+		t.Fatalf("GetFlows: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("GetFlows len = %d, want 2 (original + modified)", len(got))
+	}
+
+	// The modified-variant Metadata is round-tripped through the metadata
+	// JSON column — confirm the variant resolver in MCP query path can
+	// still distinguish them.
+	var origGot, modGot *Flow
+	for _, f := range got {
+		switch f.Metadata["variant"] {
+		case "original":
+			origGot = f
+		case "modified":
+			modGot = f
+		}
+	}
+	if origGot == nil || modGot == nil {
+		t.Fatalf("could not locate variant pair in result: %+v", got)
+	}
+	if origGot.Method != "GET" || modGot.Method != "POST" {
+		t.Errorf("variant Method mismatch: orig=%q mod=%q", origGot.Method, modGot.Method)
+	}
+}
+
+// TestSQLiteStore_DuplicateNonVariantStillRejected pins that the V11
+// constraint preserves the V8 invariant for non-variant flows: two
+// non-variant records with the same (stream_id, sequence, direction)
+// continue to violate the UNIQUE constraint. variant=” on both sides
+// makes the constraint effectively (stream_id, sequence, direction).
+func TestSQLiteStore_DuplicateNonVariantStillRejected(t *testing.T) {
+	t.Parallel()
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	st := &Stream{Protocol: "HTTP/1.x", State: "active", Timestamp: time.Now().UTC()}
+	if err := store.SaveStream(ctx, st); err != nil {
+		t.Fatalf("SaveStream: %v", err)
+	}
+
+	now := time.Now().UTC()
+	first := &Flow{
+		ID:        "f-1",
+		StreamID:  st.ID,
+		Sequence:  0,
+		Direction: "send",
+		Timestamp: now,
+		Method:    "GET",
+	}
+	second := &Flow{
+		ID:        "f-2",
+		StreamID:  st.ID,
+		Sequence:  0,
+		Direction: "send",
+		Timestamp: now,
+		Method:    "GET",
+	}
+
+	if err := store.SaveFlow(ctx, first); err != nil {
+		t.Fatalf("SaveFlow first: %v", err)
+	}
+	if err := store.SaveFlow(ctx, second); err == nil {
+		t.Fatal("SaveFlow second: expected UNIQUE constraint violation, got nil")
+	}
+}

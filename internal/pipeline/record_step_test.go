@@ -8,6 +8,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/base64"
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -47,6 +48,41 @@ func (m *mockWriter) SaveFlow(_ context.Context, f *flow.Flow) error {
 	if m.saveErr != nil {
 		return m.saveErr
 	}
+	m.flows = append(m.flows, f)
+	return nil
+}
+
+// uniqueConstraintWriter is a flow.Writer test double that mimics the SQLite
+// schema's V11 UNIQUE(stream_id, sequence, direction, variant) constraint on
+// the flows table. It is used by USK-735 regression tests to assert that the
+// modified-variant record can coexist with the original under that constraint.
+type uniqueConstraintWriter struct {
+	streams    []*flow.Stream
+	flows      []*flow.Flow
+	seen       map[string]struct{}
+	collisions int
+}
+
+func (m *uniqueConstraintWriter) SaveStream(_ context.Context, s *flow.Stream) error {
+	m.streams = append(m.streams, s)
+	return nil
+}
+
+func (m *uniqueConstraintWriter) UpdateStream(_ context.Context, _ string, _ flow.StreamUpdate) error {
+	return nil
+}
+
+func (m *uniqueConstraintWriter) SaveFlow(_ context.Context, f *flow.Flow) error {
+	variant := ""
+	if f.Metadata != nil {
+		variant = f.Metadata["variant"]
+	}
+	key := f.StreamID + "\x00" + f.Direction + "\x00" + strconv.Itoa(f.Sequence) + "\x00" + variant
+	if _, dup := m.seen[key]; dup {
+		m.collisions++
+		return errors.New("UNIQUE constraint failed: flows.stream_id, flows.sequence, flows.direction, flows.variant")
+	}
+	m.seen[key] = struct{}{}
 	m.flows = append(m.flows, f)
 	return nil
 }
@@ -486,14 +522,64 @@ func TestRecordStep_VariantRecording(t *testing.T) {
 		t.Errorf("original RawBytes = %q, want %q", origFlow.RawBytes, "original-data")
 	}
 
-	if modFlow.ID != "f1" {
-		t.Errorf("modified flow ID = %q, want %q", modFlow.ID, "f1")
+	if modFlow.ID != "f1-modified" {
+		t.Errorf("modified flow ID = %q, want %q", modFlow.ID, "f1-modified")
 	}
 	if modFlow.Metadata["variant"] != "modified" {
 		t.Errorf("modified variant = %q, want %q", modFlow.Metadata["variant"], "modified")
 	}
 	if string(modFlow.RawBytes) != "modified-data" {
 		t.Errorf("modified RawBytes = %q, want %q", modFlow.RawBytes, "modified-data")
+	}
+	// USK-735: the original and modified variant FlowIDs must differ so the
+	// SQLite UNIQUE(stream_id, sequence, direction) constraint does not
+	// drop the modified record. (StreamID/Sequence/Direction are identical
+	// across the variant pair by design — only the FlowID disambiguates.)
+	if origFlow.ID == modFlow.ID {
+		t.Errorf("variant FlowIDs collide: orig=%q mod=%q", origFlow.ID, modFlow.ID)
+	}
+}
+
+// TestRecordStep_VariantRecording_NoSaveError pins USK-735: a real flow.Writer
+// (the SQLite-style UNIQUE(stream_id, sequence, direction) constraint) must
+// not produce a save error when both variants of an intercept rewrite are
+// recorded. Before USK-735 the modified variant inherited the same FlowID as
+// the snapshot and only the FlowID column on flow.Flow distinguishes the two,
+// so SaveFlow silently failed on every modify_and_forward.
+func TestRecordStep_VariantRecording_NoSaveError(t *testing.T) {
+	w := &uniqueConstraintWriter{
+		seen: make(map[string]struct{}),
+	}
+	step := NewRecordStep(w, nil)
+
+	original := &envelope.Envelope{
+		StreamID:  "s1",
+		FlowID:    "f1",
+		Direction: envelope.Send,
+		Sequence:  1,
+		Protocol:  envelope.ProtocolRaw,
+		Raw:       []byte("original-data"),
+		Message:   &envelope.RawMessage{Bytes: []byte("original-data")},
+	}
+	modified := &envelope.Envelope{
+		StreamID:  "s1",
+		FlowID:    "f1",
+		Direction: envelope.Send,
+		Sequence:  1,
+		Protocol:  envelope.ProtocolRaw,
+		Raw:       []byte("modified-data"),
+		Message:   &envelope.RawMessage{Bytes: []byte("modified-data")},
+	}
+
+	ctx := withSnapshot(context.Background(), original)
+	step.Process(ctx, modified)
+
+	if w.collisions != 0 {
+		t.Errorf("UNIQUE collision occurred %d time(s); modified variant FlowID must differ from original",
+			w.collisions)
+	}
+	if len(w.flows) != 2 {
+		t.Fatalf("expected 2 flows persisted, got %d", len(w.flows))
 	}
 }
 
@@ -1837,7 +1923,7 @@ func TestRecordStep_VariantRecordingGRPCData(t *testing.T) {
 	if w.flows[0].ID != "rpc-1-data-0-original" || w.flows[0].Metadata["variant"] != "original" {
 		t.Errorf("flow[0] = %+v, want original variant", w.flows[0])
 	}
-	if w.flows[1].ID != "rpc-1-data-0" || w.flows[1].Metadata["variant"] != "modified" {
+	if w.flows[1].ID != "rpc-1-data-0-modified" || w.flows[1].Metadata["variant"] != "modified" {
 		t.Errorf("flow[1] = %+v, want modified variant", w.flows[1])
 	}
 	if string(w.flows[0].Body) != "abc" || string(w.flows[1].Body) != "xyz" {
