@@ -302,6 +302,20 @@ export interface AnomalyEntry {
   detail: string;
 }
 
+/**
+ * Structured anomaly surfaced when Content-Encoding decode is rejected or
+ * fails. Mirrors `queryDecodeAnomaly` in internal/mcp/query_tool.go (USK-731).
+ * Wire-form bytes are always preserved in the sibling *_body field.
+ */
+export interface DecodeAnomaly {
+  /**
+   * "unknown_encoding" | "malformed" | "size_exceeded" | "chain_rejected"
+   * | "truncated_decode"
+   */
+  type: string;
+  detail?: string;
+}
+
 /** Flow entry in the flows list. */
 export interface FlowEntry {
   id: string;
@@ -342,6 +356,14 @@ export interface MessageEntry {
   headers?: Record<string, string[]>;
   body: string;
   body_encoding: string;
+  /** Body after Content-Encoding decode (USK-731). Empty when no codec applied. */
+  body_decoded?: string;
+  /** "text" | "base64" — transport encoding of body_decoded. */
+  body_decoded_encoding?: string;
+  /** Codec applied to produce body_decoded ("gzip" | "br" | "deflate" | "zstd"). */
+  body_encoding_applied?: string;
+  /** Anomaly detail when decode was attempted but rejected or failed. */
+  body_decode_anomaly?: DecodeAnomaly;
   metadata?: Record<string, string>;
   timestamp: string;
 }
@@ -353,6 +375,14 @@ export interface VariantRequest {
   headers: Record<string, string[]>;
   body: string;
   body_encoding: string;
+  /** Body after Content-Encoding decode (USK-731). Empty when no codec applied. */
+  body_decoded?: string;
+  /** "text" | "base64" — transport encoding of body_decoded. */
+  body_decoded_encoding?: string;
+  /** Codec applied to produce body_decoded ("gzip" | "br" | "deflate" | "zstd"). */
+  body_encoding_applied?: string;
+  /** Anomaly detail when decode was attempted but rejected or failed. */
+  body_decode_anomaly?: DecodeAnomaly;
 }
 
 /** Original response data before intercept modification. */
@@ -362,6 +392,14 @@ export interface VariantResponse {
   body: string;
   body_encoding: string;
   body_truncated: boolean;
+  /** Body after Content-Encoding decode (USK-731). Empty when no codec applied. */
+  body_decoded?: string;
+  /** "text" | "base64" — transport encoding of body_decoded. */
+  body_decoded_encoding?: string;
+  /** Codec applied to produce body_decoded ("gzip" | "br" | "deflate" | "zstd"). */
+  body_encoding_applied?: string;
+  /** Anomaly detail when decode was attempted but rejected or failed. */
+  body_decode_anomaly?: DecodeAnomaly;
 }
 
 /** Response for query resource="flow". */
@@ -377,10 +415,26 @@ export interface FlowDetailResult {
   request_headers: Record<string, string[]> | null;
   request_body: string;
   request_body_encoding: string;
+  /** Request body after Content-Encoding decode (USK-731). Empty when no codec applied. */
+  request_body_decoded?: string;
+  /** "text" | "base64" — transport encoding of request_body_decoded. */
+  request_body_decoded_encoding?: string;
+  /** Codec applied to produce request_body_decoded ("gzip" | "br" | "deflate" | "zstd"). */
+  request_body_encoding_applied?: string;
+  /** Anomaly detail when request body decode was attempted but rejected or failed. */
+  request_body_decode_anomaly?: DecodeAnomaly;
   response_status_code: number;
   response_headers: Record<string, string[]> | null;
   response_body: string;
   response_body_encoding: string;
+  /** Response body after Content-Encoding decode (USK-731). Empty when no codec applied. */
+  response_body_decoded?: string;
+  /** "text" | "base64" — transport encoding of response_body_decoded. */
+  response_body_decoded_encoding?: string;
+  /** Codec applied to produce response_body_decoded ("gzip" | "br" | "deflate" | "zstd"). */
+  response_body_encoding_applied?: string;
+  /** Anomaly detail when response body decode was attempted but rejected or failed. */
+  response_body_decode_anomaly?: DecodeAnomaly;
   request_body_truncated: boolean;
   response_body_truncated: boolean;
   timestamp: string;

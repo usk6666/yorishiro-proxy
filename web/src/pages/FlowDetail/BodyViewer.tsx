@@ -7,12 +7,19 @@
  * - Binary (base64): hex dump display
  * - Images: inline preview for image/* content types
  *
+ * When the server reports a Content-Encoding decode (gzip / br / deflate /
+ * zstd) via `bodyEncodingApplied` (USK-731), an additional source toggle is
+ * shown so the operator can view the decoded plaintext (default) or fall back
+ * to the original compressed bytes. CLAUDE.md MITM principle #1 is preserved
+ * because the original wire bytes remain accessible via the toggle.
+ *
  * Text modes (raw / pretty) delegate rendering to CodeViewer for
  * syntax highlighting, line numbers, copy, and word-wrap support.
  */
 
 import { useMemo, useState } from "react";
 import { CodeViewer } from "../../components/ui/CodeViewer.js";
+import type { DecodeAnomaly } from "../../lib/mcp/types.js";
 import "./FlowDetailPage.css";
 
 // ---------------------------------------------------------------------------
@@ -24,9 +31,30 @@ export interface BodyViewerProps {
   encoding: string;
   truncated: boolean;
   headers?: Record<string, string[]> | null;
+  /**
+   * Body after Content-Encoding decode (USK-731). When non-empty and
+   * `bodyEncodingApplied` is set, the decoded form is shown by default.
+   */
+  bodyDecoded?: string;
+  /** "text" | "base64" — transport encoding of `bodyDecoded`. */
+  bodyDecodedEncoding?: string;
+  /** Codec that was applied ("gzip" | "br" | "deflate" | "zstd"). */
+  bodyEncodingApplied?: string;
+  /** Anomaly detail when decode was attempted but rejected or failed. */
+  bodyDecodeAnomaly?: DecodeAnomaly;
 }
 
 type ViewMode = "raw" | "pretty" | "hex" | "preview";
+export type BodySource = "decoded" | "original";
+
+export interface BodySourceState {
+  /** Whether the source toggle should be shown at all. */
+  showToggle: boolean;
+  /** Whether the "Decoded" toggle button should be selectable. */
+  decodedAvailable: boolean;
+  /** Default source to select on first render. */
+  defaultSource: BodySource;
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -118,16 +146,85 @@ function hexDump(base64: string): string {
   return lines.join("\n");
 }
 
+/**
+ * Resolve which body source toggle state should be shown for a body.
+ *
+ * - If a codec was applied AND a decoded body is present, the toggle is
+ *   shown and "decoded" is the default (this is the user's main reason for
+ *   visiting the panel: read the body content).
+ * - If decode was attempted but produced an anomaly, the toggle is still
+ *   shown (so the operator can see the warning + Original) but the Decoded
+ *   button is disabled.
+ * - If neither happened (no Content-Encoding, identity, or server-side decode
+ *   disabled), the toggle is hidden and the original body is shown — exactly
+ *   the pre-USK-738 behavior.
+ */
+export function resolveBodySourceState(
+  bodyDecoded: string | undefined,
+  bodyEncodingApplied: string | undefined,
+  bodyDecodeAnomaly: DecodeAnomaly | undefined,
+): BodySourceState {
+  const decodedAvailable =
+    !!bodyEncodingApplied && bodyEncodingApplied !== "" && !!bodyDecoded && bodyDecoded.length > 0;
+  const showToggle = decodedAvailable || !!bodyDecodeAnomaly;
+  return {
+    showToggle,
+    decodedAvailable,
+    defaultSource: decodedAvailable ? "decoded" : "original",
+  };
+}
+
+/** Render-friendly label for an anomaly type. */
+export function anomalyLabel(type: string): string {
+  switch (type) {
+    case "unknown_encoding":
+      return "Unknown Content-Encoding";
+    case "malformed":
+      return "Malformed compressed body";
+    case "size_exceeded":
+      return "Decoded body exceeds size cap";
+    case "chain_rejected":
+      return "Chained Content-Encoding not supported";
+    case "truncated_decode":
+      return "Body was truncated at storage time";
+    default:
+      return type;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
 
-export function BodyViewer({ body, encoding, truncated, headers }: BodyViewerProps) {
+export function BodyViewer({
+  body,
+  encoding,
+  truncated,
+  headers,
+  bodyDecoded,
+  bodyDecodedEncoding,
+  bodyEncodingApplied,
+  bodyDecodeAnomaly,
+}: BodyViewerProps) {
+  const sourceState = useMemo(
+    () => resolveBodySourceState(bodyDecoded, bodyEncodingApplied, bodyDecodeAnomaly),
+    [bodyDecoded, bodyEncodingApplied, bodyDecodeAnomaly],
+  );
+  const [source, setSource] = useState<BodySource>(sourceState.defaultSource);
+
+  const effectiveSource: BodySource = sourceState.decodedAvailable ? source : "original";
+  const useDecoded = effectiveSource === "decoded";
+
+  const activeBody = useDecoded ? (bodyDecoded ?? "") : body;
+  const activeEncoding = useDecoded ? (bodyDecodedEncoding ?? "text") : encoding;
+
   const contentType = getContentType(headers);
-  const isBinary = encoding === "base64";
+  const isBinary = activeEncoding === "base64";
   const isImage = isImageContentType(contentType);
 
-  // Determine available view modes
+  // Determine available view modes based on the *active* body, so that a
+  // gzip-decoded JSON body offers Pretty mode even though the wire encoding
+  // is base64.
   const availableModes = useMemo<ViewMode[]>(() => {
     if (isBinary) {
       const modes: ViewMode[] = ["hex"];
@@ -144,7 +241,8 @@ export function BodyViewer({ body, encoding, truncated, headers }: BodyViewerPro
     return modes;
   }, [isBinary, isImage, contentType]);
 
-  // Default mode
+  // Default mode (recomputed when source changes so a Decoded JSON body opens
+  // in Pretty by default, while flipping to Original drops back to Hex).
   const defaultMode = useMemo<ViewMode>(() => {
     if (isBinary && isImage) return "preview";
     if (isBinary) return "hex";
@@ -154,28 +252,36 @@ export function BodyViewer({ body, encoding, truncated, headers }: BodyViewerPro
 
   const [viewMode, setViewMode] = useState<ViewMode>(defaultMode);
 
+  // Clamp the user-selected mode to one that is available for the active
+  // body. When the source toggles (e.g. Decoded JSON ⇄ Original base64), the
+  // set of available modes can change, and the previous selection may no
+  // longer be valid; fall back to the default for the new body.
+  const effectiveViewMode: ViewMode = availableModes.includes(viewMode)
+    ? viewMode
+    : defaultMode;
+
   // Formatted content for text modes
   const displayContent = useMemo<string>(() => {
-    if (!body) return "";
+    if (!activeBody) return "";
 
-    if (viewMode === "hex") {
+    if (effectiveViewMode === "hex") {
       if (isBinary) {
-        return hexDump(body);
+        return hexDump(activeBody);
       }
       const encoded = btoa(
-        Array.from(new TextEncoder().encode(body))
+        Array.from(new TextEncoder().encode(activeBody))
           .map((b) => String.fromCharCode(b))
           .join(""),
       );
       return hexDump(encoded);
     }
 
-    if (viewMode === "pretty") {
+    if (effectiveViewMode === "pretty") {
       if (isJsonContentType(contentType)) {
-        const pretty = tryPrettyJson(body);
+        const pretty = tryPrettyJson(activeBody);
         if (pretty) return pretty;
       }
-      return body;
+      return activeBody;
     }
 
     // raw or preview fallback
@@ -183,25 +289,64 @@ export function BodyViewer({ body, encoding, truncated, headers }: BodyViewerPro
       return "(Binary content, base64 encoded)";
     }
 
-    return body;
-  }, [body, viewMode, isBinary, contentType]);
+    return activeBody;
+  }, [activeBody, effectiveViewMode, isBinary, contentType]);
 
   // Whether to use CodeViewer (text-based modes, not hex or preview)
-  const useCodeViewer = viewMode === "raw" || viewMode === "pretty";
+  const useCodeViewer = effectiveViewMode === "raw" || effectiveViewMode === "pretty";
 
-  if (!body) {
+  if (!body && !bodyDecoded) {
     return <div className="sd-empty-section">Empty body</div>;
   }
 
   return (
     <div className="sd-body-viewer">
-      {/* View mode selector */}
+      {/* Source toggle (Decoded / Original) — shown only when Content-Encoding
+          decode applied or produced an anomaly. */}
+      {sourceState.showToggle && (
+        <div className="sd-body-controls">
+          <div className="sd-body-mode-selector">
+            <button
+              className={`sd-body-mode-btn ${effectiveSource === "decoded" ? "sd-body-mode-btn--active" : ""}`}
+              onClick={() => setSource("decoded")}
+              disabled={!sourceState.decodedAvailable}
+              title={
+                sourceState.decodedAvailable
+                  ? `Decoded (${bodyEncodingApplied})`
+                  : "Decoded view unavailable due to decode anomaly"
+              }
+            >
+              {bodyEncodingApplied
+                ? `Decoded (${bodyEncodingApplied})`
+                : "Decoded"}
+            </button>
+            <button
+              className={`sd-body-mode-btn ${effectiveSource === "original" ? "sd-body-mode-btn--active" : ""}`}
+              onClick={() => setSource("original")}
+              title="Original wire bytes (compressed)"
+            >
+              Original
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Decode anomaly warning (always shown when present, regardless of
+          which source is currently active). */}
+      {bodyDecodeAnomaly && (
+        <div className="sd-body-truncated">
+          {anomalyLabel(bodyDecodeAnomaly.type)}
+          {bodyDecodeAnomaly.detail ? `: ${bodyDecodeAnomaly.detail}` : ""}
+        </div>
+      )}
+
+      {/* View mode selector (Raw / Pretty / Hex / Preview). */}
       <div className="sd-body-controls">
         <div className="sd-body-mode-selector">
           {availableModes.map((mode) => (
             <button
               key={mode}
-              className={`sd-body-mode-btn ${viewMode === mode ? "sd-body-mode-btn--active" : ""}`}
+              className={`sd-body-mode-btn ${effectiveViewMode === mode ? "sd-body-mode-btn--active" : ""}`}
               onClick={() => setViewMode(mode)}
             >
               {mode.charAt(0).toUpperCase() + mode.slice(1)}
@@ -221,10 +366,10 @@ export function BodyViewer({ body, encoding, truncated, headers }: BodyViewerPro
       )}
 
       {/* Image preview */}
-      {viewMode === "preview" && isBinary && isImage && (
+      {effectiveViewMode === "preview" && isBinary && isImage && (
         <div className="sd-body-image-preview">
           <img
-            src={`data:${contentType};base64,${body}`}
+            src={`data:${contentType};base64,${activeBody}`}
             alt="Response body"
             className="sd-body-image"
           />
@@ -240,7 +385,7 @@ export function BodyViewer({ body, encoding, truncated, headers }: BodyViewerPro
       )}
 
       {/* Hex dump (not highlighted, uses existing monospace style) */}
-      {viewMode === "hex" && (
+      {effectiveViewMode === "hex" && (
         <pre className="sd-body-content sd-body-content--hex">
           {displayContent}
         </pre>

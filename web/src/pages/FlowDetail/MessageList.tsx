@@ -239,6 +239,10 @@ export function MessageList({
               encoding={expandedMessage.body_encoding}
               truncated={false}
               headers={expandedMessage.headers}
+              bodyDecoded={expandedMessage.body_decoded}
+              bodyDecodedEncoding={expandedMessage.body_decoded_encoding}
+              bodyEncodingApplied={expandedMessage.body_encoding_applied}
+              bodyDecodeAnomaly={expandedMessage.body_decode_anomaly}
             />
           </div>
         </div>

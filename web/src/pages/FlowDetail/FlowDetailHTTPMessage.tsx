@@ -151,6 +151,10 @@ export function FlowDetailHTTPMessage({ flow }: FlowDetailHTTPMessageProps) {
                     encoding={flow.original_request.body_encoding}
                     truncated={false}
                     headers={flow.original_request.headers}
+                    bodyDecoded={flow.original_request.body_decoded}
+                    bodyDecodedEncoding={flow.original_request.body_decoded_encoding}
+                    bodyEncodingApplied={flow.original_request.body_encoding_applied}
+                    bodyDecodeAnomaly={flow.original_request.body_decode_anomaly}
                   />
                 )}
                 {requestTab === "raw" && flow.raw_request && (
@@ -188,6 +192,10 @@ export function FlowDetailHTTPMessage({ flow }: FlowDetailHTTPMessageProps) {
                     encoding={flow.request_body_encoding}
                     truncated={flow.request_body_truncated}
                     headers={flow.request_headers}
+                    bodyDecoded={flow.request_body_decoded}
+                    bodyDecodedEncoding={flow.request_body_decoded_encoding}
+                    bodyEncodingApplied={flow.request_body_encoding_applied}
+                    bodyDecodeAnomaly={flow.request_body_decode_anomaly}
                   />
                 )}
                 {requestTab === "raw" && flow.raw_request && (
@@ -258,6 +266,10 @@ export function FlowDetailHTTPMessage({ flow }: FlowDetailHTTPMessageProps) {
                     encoding={flow.original_response.body_encoding}
                     truncated={flow.original_response.body_truncated}
                     headers={flow.original_response.headers}
+                    bodyDecoded={flow.original_response.body_decoded}
+                    bodyDecodedEncoding={flow.original_response.body_decoded_encoding}
+                    bodyEncodingApplied={flow.original_response.body_encoding_applied}
+                    bodyDecodeAnomaly={flow.original_response.body_decode_anomaly}
                   />
                 )}
                 {responseTab === "raw" && flow.raw_response && (
@@ -310,6 +322,10 @@ export function FlowDetailHTTPMessage({ flow }: FlowDetailHTTPMessageProps) {
                     encoding={flow.response_body_encoding}
                     truncated={flow.response_body_truncated}
                     headers={flow.response_headers}
+                    bodyDecoded={flow.response_body_decoded}
+                    bodyDecodedEncoding={flow.response_body_decoded_encoding}
+                    bodyEncodingApplied={flow.response_body_encoding_applied}
+                    bodyDecodeAnomaly={flow.response_body_decode_anomaly}
                   />
                 )}
                 {responseTab === "raw" && flow.raw_response && (
@@ -351,6 +367,10 @@ export function FlowDetailHTTPMessage({ flow }: FlowDetailHTTPMessageProps) {
                   encoding={flow.request_body_encoding}
                   truncated={flow.request_body_truncated}
                   headers={flow.request_headers}
+                  bodyDecoded={flow.request_body_decoded}
+                  bodyDecodedEncoding={flow.request_body_decoded_encoding}
+                  bodyEncodingApplied={flow.request_body_encoding_applied}
+                  bodyDecodeAnomaly={flow.request_body_decode_anomaly}
                 />
               )}
               {requestTab === "raw" && flow.raw_request && (
@@ -418,6 +438,10 @@ export function FlowDetailHTTPMessage({ flow }: FlowDetailHTTPMessageProps) {
                       encoding={flow.response_body_encoding}
                       truncated={flow.response_body_truncated}
                       headers={flow.response_headers}
+                      bodyDecoded={flow.response_body_decoded}
+                      bodyDecodedEncoding={flow.response_body_decoded_encoding}
+                      bodyEncodingApplied={flow.response_body_encoding_applied}
+                      bodyDecodeAnomaly={flow.response_body_decode_anomaly}
                     />
                   ))}
                 {responseTab === "raw" && flow.raw_response && (
