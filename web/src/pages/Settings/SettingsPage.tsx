@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { type ReactNode, useCallback, useState } from "react";
 import { Badge, Spinner, Tabs } from "../../components/ui/index.js";
 import { useQuery } from "../../lib/mcp/hooks.js";
 import { AutoTransformRules } from "./AutoTransformRules.js";
@@ -28,6 +28,31 @@ const TABS = [
   { id: "connection", label: "Connection" },
   { id: "ca-cert", label: "CA Certificate" },
 ];
+
+interface TabContentProps<T> {
+  loading: boolean;
+  error: Error | null;
+  data: T | null;
+  resourceLabel: string;
+  children: (data: T) => ReactNode;
+}
+
+/**
+ * TabContent — file-local helper that absorbs the shared loading / error /
+ * empty guards used by most Settings tabs. Renders a spinner while loading,
+ * an error banner on failure, nothing while data is absent, and otherwise
+ * delegates to the render-prop child with the non-null data.
+ */
+function TabContent<T>({ loading, error, data, resourceLabel, children }: TabContentProps<T>): ReactNode {
+  if (loading && !data) {
+    return <div className="settings-loading"><Spinner size="md" /></div>;
+  }
+  if (error) {
+    return <div className="settings-error">Error loading {resourceLabel}: {error.message}</div>;
+  }
+  if (!data) return null;
+  return children(data);
+}
 
 /**
  * SettingsPage — main settings panel with tabbed navigation for proxy configuration.
@@ -95,94 +120,67 @@ export function SettingsPage() {
         );
 
       case "capture":
-        if (configLoading && !configData) {
-          return <div className="settings-loading"><Spinner size="md" /></div>;
-        }
-        if (configError) {
-          return <div className="settings-error">Error loading config: {configError.message}</div>;
-        }
-        if (!configData) return null;
-        return <CaptureScope config={configData} onRefresh={handleRefresh} />;
+        return (
+          <TabContent loading={configLoading} error={configError} data={configData} resourceLabel="config">
+            {(c) => <CaptureScope config={c} onRefresh={handleRefresh} />}
+          </TabContent>
+        );
 
       case "tls":
-        if (configLoading && !configData) {
-          return <div className="settings-loading"><Spinner size="md" /></div>;
-        }
-        if (configError) {
-          return <div className="settings-error">Error loading config: {configError.message}</div>;
-        }
-        if (!configData) return null;
-        return <TlsPassthrough config={configData} onRefresh={handleRefresh} />;
+        return (
+          <TabContent loading={configLoading} error={configError} data={configData} resourceLabel="config">
+            {(c) => <TlsPassthrough config={c} onRefresh={handleRefresh} />}
+          </TabContent>
+        );
 
       case "tcp-forwards":
-        if (configLoading && !configData) {
-          return <div className="settings-loading"><Spinner size="md" /></div>;
-        }
-        if (configError) {
-          return <div className="settings-error">Error loading config: {configError.message}</div>;
-        }
-        if (!configData) return null;
-        return <TcpForwards config={configData} onRefresh={handleRefresh} />;
+        return (
+          <TabContent loading={configLoading} error={configError} data={configData} resourceLabel="config">
+            {(c) => <TcpForwards config={c} onRefresh={handleRefresh} />}
+          </TabContent>
+        );
 
       case "intercept":
-        if (configLoading && !configData) {
-          return <div className="settings-loading"><Spinner size="md" /></div>;
-        }
-        if (configError) {
-          return <div className="settings-error">Error loading config: {configError.message}</div>;
-        }
-        if (!configData) return null;
-        return <InterceptRules config={configData} onRefresh={handleRefresh} />;
+        return (
+          <TabContent loading={configLoading} error={configError} data={configData} resourceLabel="config">
+            {(c) => <InterceptRules config={c} onRefresh={handleRefresh} />}
+          </TabContent>
+        );
 
       case "transform":
-        if (configLoading && !configData) {
-          return <div className="settings-loading"><Spinner size="md" /></div>;
-        }
-        if (configError) {
-          return <div className="settings-error">Error loading config: {configError.message}</div>;
-        }
-        if (!configData) return null;
-        return <AutoTransformRules config={configData} onRefresh={handleRefresh} />;
+        return (
+          <TabContent loading={configLoading} error={configError} data={configData} resourceLabel="config">
+            {(c) => <AutoTransformRules config={c} onRefresh={handleRefresh} />}
+          </TabContent>
+        );
 
       case "socks5-auth":
-        if (configLoading && !configData) {
-          return <div className="settings-loading"><Spinner size="md" /></div>;
-        }
-        if (configError) {
-          return <div className="settings-error">Error loading config: {configError.message}</div>;
-        }
-        if (!configData) return null;
-        return <Socks5Auth config={configData} onRefresh={handleRefresh} />;
+        return (
+          <TabContent loading={configLoading} error={configError} data={configData} resourceLabel="config">
+            {(c) => <Socks5Auth config={c} onRefresh={handleRefresh} />}
+          </TabContent>
+        );
 
       case "tls-fingerprint":
-        if (statusLoading && !statusData) {
-          return <div className="settings-loading"><Spinner size="md" /></div>;
-        }
-        if (statusError) {
-          return <div className="settings-error">Error loading status: {statusError.message}</div>;
-        }
-        if (!statusData) return null;
-        return <TlsFingerprint status={statusData} onRefresh={handleRefresh} />;
+        return (
+          <TabContent loading={statusLoading} error={statusError} data={statusData} resourceLabel="status">
+            {(s) => <TlsFingerprint status={s} onRefresh={handleRefresh} />}
+          </TabContent>
+        );
 
       case "client-cert":
-        if (configLoading && !configData) {
-          return <div className="settings-loading"><Spinner size="md" /></div>;
-        }
-        if (configError) {
-          return <div className="settings-error">Error loading config: {configError.message}</div>;
-        }
-        if (!configData) return null;
-        return <ClientCertificate config={configData} onRefresh={handleRefresh} />;
+        return (
+          <TabContent loading={configLoading} error={configError} data={configData} resourceLabel="config">
+            {(c) => <ClientCertificate config={c} onRefresh={handleRefresh} />}
+          </TabContent>
+        );
 
       case "connection":
-        if (statusLoading && !statusData) {
-          return <div className="settings-loading"><Spinner size="md" /></div>;
-        }
-        if (statusError) {
-          return <div className="settings-error">Error loading status: {statusError.message}</div>;
-        }
-        if (!statusData) return null;
-        return <ConnectionSettings status={statusData} onRefresh={handleRefresh} />;
+        return (
+          <TabContent loading={statusLoading} error={statusError} data={statusData} resourceLabel="status">
+            {(s) => <ConnectionSettings status={s} onRefresh={handleRefresh} />}
+          </TabContent>
+        );
 
       case "ca-cert":
         return <CACertPanel onRefresh={handleRefresh} />;
