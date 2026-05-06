@@ -1,8 +1,10 @@
 package transport
 
 import (
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"os"
@@ -29,16 +31,22 @@ type HostTLSConfig struct {
 	// root certificates. Multiple certificates can be concatenated.
 	CABundlePath string `json:"ca_bundle,omitempty"`
 
-	// certOnce and caOnce guard lazy loading of the client certificate and
-	// CA bundle respectively. The parsed results are cached after first load
-	// to avoid repeated disk I/O and TOCTOU issues.
+	// certOnce guards lazy loading of the client certificate. The parsed
+	// result is cached after first load to avoid repeated disk I/O and
+	// TOCTOU issues.
 	certOnce sync.Once
 	certVal  *tls.Certificate
 	certErr  error
 
-	caOnce sync.Once
-	caVal  *x509.CertPool
-	caErr  error
+	// caOnce guards a single read of the CA bundle PEM file. One read
+	// populates both caVal (parsed *x509.CertPool used by LoadCABundle)
+	// and caHashVal (stable hex digest used by CABundleHash for cache
+	// keying), so the file is read at most once per HostTLSConfig
+	// instance and the parsed pool can never disagree with the hash.
+	caOnce    sync.Once
+	caVal     *x509.CertPool
+	caHashVal string
+	caErr     error
 }
 
 // Validate checks that the HostTLSConfig fields are consistent.
@@ -87,13 +95,16 @@ func (c *HostTLSConfig) LoadClientCert() (*tls.Certificate, error) {
 	return c.certVal, c.certErr
 }
 
-// LoadCABundle loads the custom CA bundle from the configured path.
-// The result is cached after the first successful load.
-// Returns nil if no CA bundle is configured.
-func (c *HostTLSConfig) LoadCABundle() (*x509.CertPool, error) {
-	if c.CABundlePath == "" {
-		return nil, nil
-	}
+// loadCAOnce reads the CA bundle PEM file at most once and populates both
+// the parsed *x509.CertPool and a stable hex digest of the raw PEM bytes
+// from the same byte slice. A single sync.Once eliminates the inter-read
+// TOCTOU window and halves cold-dial I/O compared with parsing the file
+// twice (once for LoadCABundle, once for CABundleHash).
+//
+// No-op when CABundlePath is empty: caVal / caHashVal stay zero-valued
+// and caErr stays nil. Both LoadCABundle and CABundleHash short-circuit
+// before calling this for the empty-path case.
+func (c *HostTLSConfig) loadCAOnce() {
 	c.caOnce.Do(func() {
 		data, err := os.ReadFile(c.CABundlePath)
 		if err != nil {
@@ -106,8 +117,36 @@ func (c *HostTLSConfig) LoadCABundle() (*x509.CertPool, error) {
 			return
 		}
 		c.caVal = pool
+		sum := sha256.Sum256(data)
+		c.caHashVal = hex.EncodeToString(sum[:8])
 	})
+}
+
+// LoadCABundle loads the custom CA bundle from the configured path.
+// The result is cached after the first successful load.
+// Returns nil if no CA bundle is configured.
+func (c *HostTLSConfig) LoadCABundle() (*x509.CertPool, error) {
+	if c.CABundlePath == "" {
+		return nil, nil
+	}
+	c.loadCAOnce()
 	return c.caVal, c.caErr
+}
+
+// CABundleHash returns a stable hex-encoded hash of the configured CA bundle
+// file's PEM bytes. The hash is cached after the first successful read.
+// Returns an empty string when no CA bundle is configured.
+//
+// The hash is suitable as a cache-key fragment so that replacing the CA
+// bundle at runtime (via HostTLSRegistry.Set / SetGlobal swapping the
+// HostTLSConfig pointer for a host) yields a different hash and forces
+// downstream caches (e.g. the H2 connection pool) to invalidate.
+func (c *HostTLSConfig) CABundleHash() (string, error) {
+	if c.CABundlePath == "" {
+		return "", nil
+	}
+	c.loadCAOnce()
+	return c.caHashVal, c.caErr
 }
 
 // HostTLSRegistry manages per-host TLS configurations and a global default.

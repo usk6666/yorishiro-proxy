@@ -2,26 +2,34 @@ package connector
 
 import (
 	"bytes"
+	"crypto/tls"
 	"strconv"
 
 	"github.com/usk6666/yorishiro-proxy/internal/layer/http2/pool"
 )
 
 // poolKeyForH2 builds a pool.PoolKey for the given CONNECT target using the
-// TLS-relevant knobs from cfg. The TLSConfigHash canonicalises a byte form
-// covering:
+// TLS-relevant knobs from cfg and the per-host overlay in hostTLS. The
+// TLSConfigHash canonicalises a byte form covering:
 //   - ServerName (host portion of the target)
 //   - NextProtos ({"h2"}, since this is the h2-specific hash)
-//   - InsecureSkipVerify
-//   - ClientCert hash (first DER bytes via hashCert)
+//   - InsecureSkipVerify (resolved per-host; falls back to cfg)
+//   - ClientCert hash (first DER bytes via hashCert; resolved per-host)
+//   - CA bundle hash (when a per-host CA bundle is in effect)
 //   - UTLSProfile (TLSFingerprint)
 //   - UpstreamProxy URL string
 //
 // Two connections with identical values above produce identical keys and
-// therefore share a pooled upstream Layer. Callers MUST pass the same cfg
-// that was used for the upstream dial — diverging here yields a silent
-// cache miss rather than a correctness issue, but is wasteful.
-func poolKeyForH2(target string, cfg *BuildConfig) pool.PoolKey {
+// therefore share a pooled upstream Layer. Callers MUST pass the
+// resolvedTLS snapshot that was used for the upstream dial; diverging here
+// would mint a different pool key than the one used at insertion and yield
+// a silent cache miss. hostTLS may be nil — in that case the caller has
+// no per-host overlay and the key falls back entirely to cfg fields.
+//
+// USK-737: hostTLS folds the runtime-mutable HostTLSRegistry overlay into
+// the key so a `proxy_start(client_cert=...)` (or CA / TLS-verify swap)
+// invalidates pooled H2 connections established under the prior overlay.
+func poolKeyForH2(target string, cfg *BuildConfig, hostTLS *resolvedTLS) pool.PoolKey {
 	var buf bytes.Buffer
 
 	// ServerName. Kept under a length prefix so "a"+"b" never collides with
@@ -32,18 +40,28 @@ func poolKeyForH2(target string, cfg *BuildConfig) pool.PoolKey {
 	// NextProtos — always {"h2"} for this helper.
 	writeField(&buf, "np", "h2")
 
-	// TLS knobs.
+	// Resolve TLS knobs from the per-host overlay, falling back to cfg.
+	insecureSkip := false
+	var clientCert *tls.Certificate
+	caHash := ""
+	if hostTLS != nil {
+		insecureSkip = hostTLS.insecureSkip
+		clientCert = hostTLS.clientCert
+		caHash = hostTLS.caBundleHash
+	} else if cfg != nil {
+		insecureSkip = cfg.InsecureSkipVerify
+		clientCert = cfg.ClientCert
+	}
+
 	insec := "0"
-	if cfg != nil && cfg.InsecureSkipVerify {
+	if insecureSkip {
 		insec = "1"
 	}
 	writeField(&buf, "insecure", insec)
 
-	certHash := ""
-	if cfg != nil {
-		certHash = hashCert(cfg.ClientCert)
-	}
-	writeField(&buf, "clientcert", certHash)
+	writeField(&buf, "clientcert", hashCert(clientCert))
+
+	writeField(&buf, "ca", caHash)
 
 	profile := ""
 	if cfg != nil {

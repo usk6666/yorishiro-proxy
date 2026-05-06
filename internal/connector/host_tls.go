@@ -1,8 +1,10 @@
 package connector
 
 import (
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/hex"
 	"fmt"
 	"net"
 	"os"
@@ -23,6 +25,13 @@ type ResolvedHostTLS struct {
 
 	// RootCAs overrides the system CA pool when non-nil.
 	RootCAs *x509.CertPool
+
+	// CABundleHash is a stable hex-encoded hash of the CA bundle PEM bytes
+	// when RootCAs was loaded from a configured ca_bundle file. Empty when
+	// no CA bundle was configured. Used as a cache-key fragment so that
+	// downstream caches (e.g. h2 pool) invalidate when the on-disk bundle
+	// is replaced at runtime.
+	CABundleHash string
 }
 
 // hostTLSEntry wraps a config.HostTLSEntry with lazy-loaded, cached TLS objects.
@@ -33,9 +42,15 @@ type hostTLSEntry struct {
 	cert     *tls.Certificate
 	certErr  error
 
-	caOnce sync.Once
-	caPool *x509.CertPool
-	caErr  error
+	// caOnce guards a single read of the CA bundle PEM file. One read
+	// populates both the parsed *x509.CertPool (loadCA) and the stable
+	// hex digest used for cache keying (loadCAHash) from the same byte
+	// slice, so the file is read at most once per hostTLSEntry and the
+	// pool can never disagree with the hash.
+	caOnce    sync.Once
+	caPool    *x509.CertPool
+	caHashVal string
+	caErr     error
 }
 
 // loadCert lazily loads and caches the client certificate.
@@ -54,12 +69,17 @@ func (e *hostTLSEntry) loadCert() (*tls.Certificate, error) {
 	return e.cert, e.certErr
 }
 
-// loadCA lazily loads and caches the CA bundle.
-func (e *hostTLSEntry) loadCA() (*x509.CertPool, error) {
+// loadCABundleOnce reads the CA bundle PEM file at most once and populates
+// both the parsed *x509.CertPool and a stable hex digest of the raw PEM
+// bytes from the same byte slice. A single sync.Once eliminates the
+// inter-read TOCTOU window and halves cold-dial I/O compared with
+// parsing the file twice (once for loadCA, once for loadCAHash).
+//
+// No-op when CABundlePath is empty: caPool / caHashVal stay zero-valued
+// and caErr stays nil. Both loadCA and loadCAHash short-circuit before
+// calling this for the empty-path case.
+func (e *hostTLSEntry) loadCABundleOnce() {
 	e.caOnce.Do(func() {
-		if e.cfg.CABundlePath == "" {
-			return
-		}
 		pem, err := os.ReadFile(e.cfg.CABundlePath)
 		if err != nil {
 			e.caErr = fmt.Errorf("host_tls: read CA bundle %s: %w", e.cfg.CABundlePath, err)
@@ -71,8 +91,28 @@ func (e *hostTLSEntry) loadCA() (*x509.CertPool, error) {
 			return
 		}
 		e.caPool = pool
+		sum := sha256.Sum256(pem)
+		e.caHashVal = hex.EncodeToString(sum[:8])
 	})
+}
+
+// loadCA lazily loads and caches the CA bundle.
+func (e *hostTLSEntry) loadCA() (*x509.CertPool, error) {
+	if e.cfg.CABundlePath == "" {
+		return nil, nil
+	}
+	e.loadCABundleOnce()
 	return e.caPool, e.caErr
+}
+
+// loadCAHash lazily loads and caches a stable hex-encoded hash of the CA
+// bundle PEM bytes. Returns the empty string when no CA bundle is configured.
+func (e *hostTLSEntry) loadCAHash() (string, error) {
+	if e.cfg.CABundlePath == "" {
+		return "", nil
+	}
+	e.loadCABundleOnce()
+	return e.caHashVal, e.caErr
 }
 
 // HostTLSResolver resolves per-host TLS configuration from a map of hostname
@@ -150,6 +190,12 @@ func (r *HostTLSResolver) Resolve(target string) (*ResolvedHostTLS, error) {
 		return nil, err
 	}
 	result.RootCAs = caPool
+
+	caHash, err := entry.loadCAHash()
+	if err != nil {
+		return nil, err
+	}
+	result.CABundleHash = caHash
 
 	return result, nil
 }

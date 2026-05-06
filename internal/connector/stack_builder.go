@@ -269,6 +269,13 @@ type resolvedTLS struct {
 	insecureSkip bool
 	clientCert   *tls.Certificate
 	rootCAs      *tls.Config
+
+	// caBundleHash is a stable hex-encoded hash of the CA bundle PEM bytes
+	// that produced rootCAs (when rootCAs was set from a per-host config).
+	// Empty when the global / system CA pool is in effect. Used by the
+	// h2 pool key (poolKeyForH2) so that runtime CA-bundle replacement
+	// invalidates pooled connections established under the prior bundle.
+	caBundleHash string
 }
 
 // clientH2MaxConcurrentStreamsOption returns an http2.Option threading the
@@ -316,6 +323,7 @@ func resolvePerHostTLS(target string, cfg *BuildConfig) (*resolvedTLS, error) {
 			}
 			if resolved.RootCAs != nil {
 				r.rootCAs = &tls.Config{RootCAs: resolved.RootCAs}
+				r.caBundleHash = resolved.CABundleHash
 			}
 		}
 	}
@@ -359,6 +367,11 @@ func applyHostTLSRegistry(r *resolvedTLS, target string, reg *transport.HostTLSR
 	}
 	if pool != nil {
 		r.rootCAs = &tls.Config{RootCAs: pool}
+		hash, herr := hostCfg.CABundleHash()
+		if herr != nil {
+			return herr
+		}
+		r.caBundleHash = hash
 	}
 	return nil
 }
@@ -391,7 +404,7 @@ func buildALPNRoutedStack(
 	// ErrClosed, a dead Layer, or a capacity-capped Layer) fall through
 	// to the existing ALPN-cache / upstream-dial flow.
 	if cfg.HTTP2Pool != nil {
-		poolKey := poolKeyForH2(target, cfg)
+		poolKey := poolKeyForH2(target, cfg, hostTLS)
 		if pooled, perr := cfg.HTTP2Pool.Get(poolKey); perr == nil && pooled != nil {
 			return buildPoolHitFastPath(ctx, clientConn, target, host, connID, pooled, poolKey, cfg)
 		}
@@ -440,7 +453,7 @@ func buildALPNRoutedStack(
 		"alpn", negotiatedALPN, "route", route, "cache_hit", cacheHit,
 	)
 
-	return buildStackFromRoute(ctx, clientTLSConn, upstreamConn, target, connID, route, clientSnap, upstreamSnap, cfg)
+	return buildStackFromRoute(ctx, clientTLSConn, upstreamConn, target, connID, route, clientSnap, upstreamSnap, hostTLS, cfg)
 }
 
 // buildCacheHitPath handles the ALPN cache hit: client MITM first (offering
@@ -698,6 +711,7 @@ func buildStackFromRoute(
 	clientConn, upstreamConn net.Conn,
 	target, connID, route string,
 	clientSnap, upstreamSnap *envelope.TLSSnapshot,
+	hostTLS *resolvedTLS,
 	cfg *BuildConfig,
 ) (*ConnectionStack, *envelope.TLSSnapshot, *envelope.TLSSnapshot, error) {
 	clientEnvCtx := envelope.EnvelopeContext{
@@ -740,7 +754,7 @@ func buildStackFromRoute(
 		stack.PushUpstream(upstreamLayer)
 
 	case "h2":
-		return buildH2Stack(ctx, stack, clientConn, upstreamConn, target, connID, clientEnvCtx, upstreamEnvCtx, clientSnap, upstreamSnap, cfg)
+		return buildH2Stack(ctx, stack, clientConn, upstreamConn, target, connID, clientEnvCtx, upstreamEnvCtx, clientSnap, upstreamSnap, hostTLS, cfg)
 
 	case "bytechunk":
 		clientLayer := bytechunk.New(clientConn, connID+"/client", envelope.Send)
@@ -785,6 +799,7 @@ func buildH2Stack(
 	target, connID string,
 	clientEnvCtx, upstreamEnvCtx envelope.EnvelopeContext,
 	clientSnap, upstreamSnap *envelope.TLSSnapshot,
+	hostTLS *resolvedTLS,
 	cfg *BuildConfig,
 ) (*ConnectionStack, *envelope.TLSSnapshot, *envelope.TLSSnapshot, error) {
 	// Client-side Layer (ServerRole = local acts as HTTP/2 server).
@@ -807,7 +822,7 @@ func buildH2Stack(
 	}
 	stack.PushClient(clientLayer)
 
-	poolKey := poolKeyForH2(target, cfg)
+	poolKey := poolKeyForH2(target, cfg, hostTLS)
 
 	// consumed tracks whether dialFn ran (true = upstreamConn is owned by
 	// http2.New and must not be closed by the caller). On pool hit, remains

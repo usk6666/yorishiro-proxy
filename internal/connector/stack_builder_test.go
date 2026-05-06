@@ -451,8 +451,14 @@ func TestBuildConnectionStack_H2MITMStack(t *testing.T) {
 			t.Error("UpstreamH2Layer is nil; expected pooled layer")
 		}
 
-		// PoolKey should match what the stack builder computed.
-		wantKey := poolKeyForH2(target, buildCfg)
+		// PoolKey should match what the stack builder computed. The builder
+		// folds the resolvedTLS overlay into the key (USK-737), so resolve
+		// the same overlay here for an apples-to-apples comparison.
+		wantHostTLS, hostTLSErr := resolvePerHostTLS(target, buildCfg)
+		if hostTLSErr != nil {
+			t.Fatalf("resolvePerHostTLS: %v", hostTLSErr)
+		}
+		wantKey := poolKeyForH2(target, buildCfg, wantHostTLS)
 		if gotKey := stack.PoolKey(); gotKey != wantKey {
 			t.Errorf("PoolKey = %+v, want %+v", gotKey, wantKey)
 		}
@@ -597,7 +603,11 @@ func TestBuildConnectionStack_H2PoolFastPath_ClientMITMFailReleasesReservation(t
 		TLS:        &envelope.TLSSnapshot{ALPN: "h2", SNI: "cached-marker"},
 	})
 	defer teardown()
-	poolKey := poolKeyForH2(target, buildCfg)
+	hostTLSForKey, err := resolvePerHostTLS(target, buildCfg)
+	if err != nil {
+		t.Fatalf("resolvePerHostTLS: %v", err)
+	}
+	poolKey := poolKeyForH2(target, buildCfg, hostTLSForKey)
 	h2Pool.Put(poolKey, cached)
 
 	// Sanity: pool returns the cached Layer on first Get (and increments
@@ -678,8 +688,8 @@ func TestPoolKeyForH2_StableAndDistinct(t *testing.T) {
 	}
 	target := "example.com:443"
 
-	k1 := poolKeyForH2(target, baseCfg)
-	k2 := poolKeyForH2(target, baseCfg)
+	k1 := poolKeyForH2(target, baseCfg, nil)
+	k2 := poolKeyForH2(target, baseCfg, nil)
 	if k1 != k2 {
 		t.Errorf("stable: k1=%+v k2=%+v", k1, k2)
 	}
@@ -697,7 +707,7 @@ func TestPoolKeyForH2_StableAndDistinct(t *testing.T) {
 		InsecureSkipVerify: true,
 		TLSFingerprint:     "chrome",
 	}
-	kAlt := poolKeyForH2(target, altCfg)
+	kAlt := poolKeyForH2(target, altCfg, nil)
 	if kAlt.TLSConfigHash == k1.TLSConfigHash {
 		t.Error("InsecureSkipVerify change did not affect hash")
 	}
@@ -707,14 +717,14 @@ func TestPoolKeyForH2_StableAndDistinct(t *testing.T) {
 		InsecureSkipVerify: false,
 		TLSFingerprint:     "firefox",
 	}
-	kAlt2 := poolKeyForH2(target, altCfg2)
+	kAlt2 := poolKeyForH2(target, altCfg2, nil)
 	if kAlt2.TLSConfigHash == k1.TLSConfigHash {
 		t.Error("TLSFingerprint change did not affect hash")
 	}
 
 	// Different target -> different HostPort (hash may collide if canonical
 	// bytes happen to match, but HostPort differs which is part of the key).
-	kOther := poolKeyForH2("other.example.com:443", baseCfg)
+	kOther := poolKeyForH2("other.example.com:443", baseCfg, nil)
 	if kOther == k1 {
 		t.Error("different target produced identical PoolKey")
 	}
@@ -723,12 +733,147 @@ func TestPoolKeyForH2_StableAndDistinct(t *testing.T) {
 // TestPoolKeyForH2_NilCfg ensures the helper survives a nil BuildConfig
 // (used by some tunnel paths that only carry an UpstreamProxy).
 func TestPoolKeyForH2_NilCfg(t *testing.T) {
-	k := poolKeyForH2("example.com:443", nil)
+	k := poolKeyForH2("example.com:443", nil, nil)
 	if k.HostPort != "example.com:443" {
 		t.Errorf("HostPort = %q, want %q", k.HostPort, "example.com:443")
 	}
 	if k.TLSConfigHash == "" {
 		t.Error("empty TLSConfigHash for nil cfg")
+	}
+}
+
+// TestPoolKeyForH2_RegistryClientCertReplacement verifies USK-737: when a
+// runtime HostTLSRegistry update replaces the client certificate for a
+// host, poolKeyForH2 (called with the post-update resolvedTLS) must mint a
+// distinct key from the pre-update one. Without this, an H2 pool entry
+// established under cert A would silently be reused for requests that
+// should now be sent under cert B.
+func TestPoolKeyForH2_RegistryClientCertReplacement(t *testing.T) {
+	target := "api.example.com:443"
+
+	dirA := t.TempDir()
+	certA, keyA := generateTestCertFiles(t, dirA)
+	dirB := t.TempDir()
+	certB, keyB := generateTestCertFiles(t, dirB)
+
+	reg := transport.NewHostTLSRegistry()
+	cfg := &BuildConfig{HostTLSRegistry: reg}
+
+	// Step 1: install cert A. Resolve and mint the pool key under A.
+	reg.SetGlobal(&transport.HostTLSConfig{
+		ClientCertPath: certA,
+		ClientKeyPath:  keyA,
+	})
+	hostTLSA, err := resolvePerHostTLS(target, cfg)
+	if err != nil {
+		t.Fatalf("resolvePerHostTLS A: %v", err)
+	}
+	keyUnderA := poolKeyForH2(target, cfg, hostTLSA)
+
+	// Step 2: replace with cert B. Resolve and mint the pool key under B.
+	reg.SetGlobal(&transport.HostTLSConfig{
+		ClientCertPath: certB,
+		ClientKeyPath:  keyB,
+	})
+	hostTLSB, err := resolvePerHostTLS(target, cfg)
+	if err != nil {
+		t.Fatalf("resolvePerHostTLS B: %v", err)
+	}
+	keyUnderB := poolKeyForH2(target, cfg, hostTLSB)
+
+	if keyUnderA == keyUnderB {
+		t.Fatalf("pool key did not change after registry cert replacement: %+v", keyUnderA)
+	}
+
+	// Step 3: install no cert at all (clearing the registry). Key must
+	// differ from both A and B.
+	reg.SetGlobal(nil)
+	hostTLSNone, err := resolvePerHostTLS(target, cfg)
+	if err != nil {
+		t.Fatalf("resolvePerHostTLS none: %v", err)
+	}
+	keyNoCert := poolKeyForH2(target, cfg, hostTLSNone)
+	if keyNoCert == keyUnderA || keyNoCert == keyUnderB {
+		t.Fatalf("clearing registry did not change pool key: noCert=%+v A=%+v B=%+v", keyNoCert, keyUnderA, keyUnderB)
+	}
+}
+
+// TestPoolKeyForH2_RegistryInsecureSkipVerifyToggle verifies that flipping
+// the runtime registry's TLS-verify flag invalidates the pool key, so a
+// connection established under verify=true is not reused after the
+// operator switches to verify=false (or vice versa).
+func TestPoolKeyForH2_RegistryInsecureSkipVerifyToggle(t *testing.T) {
+	target := "api.example.com:443"
+
+	verifyTrue := true
+	verifyFalse := false
+
+	reg := transport.NewHostTLSRegistry()
+	cfg := &BuildConfig{HostTLSRegistry: reg}
+
+	reg.SetGlobal(&transport.HostTLSConfig{TLSVerify: &verifyTrue})
+	hostTLSVerify, err := resolvePerHostTLS(target, cfg)
+	if err != nil {
+		t.Fatalf("resolvePerHostTLS verify=true: %v", err)
+	}
+	keyVerify := poolKeyForH2(target, cfg, hostTLSVerify)
+
+	reg.SetGlobal(&transport.HostTLSConfig{TLSVerify: &verifyFalse})
+	hostTLSInsecure, err := resolvePerHostTLS(target, cfg)
+	if err != nil {
+		t.Fatalf("resolvePerHostTLS verify=false: %v", err)
+	}
+	keyInsecure := poolKeyForH2(target, cfg, hostTLSInsecure)
+
+	if keyVerify == keyInsecure {
+		t.Fatalf("pool key did not change after TLSVerify toggle: %+v", keyVerify)
+	}
+}
+
+// TestPoolKeyForH2_RegistryCABundleReplacement verifies that replacing the
+// runtime registry's CA bundle for a host invalidates the pool key.
+// Pre-fix, the pool key did not include the CA bundle at all, so
+// connections established under bundle A would silently be reused after
+// the operator swapped to bundle B.
+func TestPoolKeyForH2_RegistryCABundleReplacement(t *testing.T) {
+	target := "api.example.com:443"
+
+	// Reuse generateTestCertFiles to produce real PEM cert files that
+	// AppendCertsFromPEM accepts (the resolver's CA loader rejects bundles
+	// with no parseable certificates). Each call produces a distinct file
+	// because ecdsa.GenerateKey returns a fresh key per invocation.
+	dirA := t.TempDir()
+	caA, _ := generateTestCertFiles(t, dirA)
+	dirB := t.TempDir()
+	caB, _ := generateTestCertFiles(t, dirB)
+
+	reg := transport.NewHostTLSRegistry()
+	cfg := &BuildConfig{HostTLSRegistry: reg}
+
+	// Bundle A.
+	reg.SetGlobal(&transport.HostTLSConfig{CABundlePath: caA})
+	hostTLSA, err := resolvePerHostTLS(target, cfg)
+	if err != nil {
+		t.Fatalf("resolvePerHostTLS A: %v", err)
+	}
+	if hostTLSA.caBundleHash == "" {
+		t.Fatal("caBundleHash empty after CA bundle install (USK-737)")
+	}
+	keyUnderA := poolKeyForH2(target, cfg, hostTLSA)
+
+	// Bundle B.
+	reg.SetGlobal(&transport.HostTLSConfig{CABundlePath: caB})
+	hostTLSB, err := resolvePerHostTLS(target, cfg)
+	if err != nil {
+		t.Fatalf("resolvePerHostTLS B: %v", err)
+	}
+	if hostTLSB.caBundleHash == hostTLSA.caBundleHash {
+		t.Fatal("caBundleHash did not change after CA bundle replacement")
+	}
+	keyUnderB := poolKeyForH2(target, cfg, hostTLSB)
+
+	if keyUnderA == keyUnderB {
+		t.Fatalf("pool key did not change after CA bundle replacement: %+v", keyUnderA)
 	}
 }
 
