@@ -10,6 +10,7 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type ReactNode,
@@ -43,27 +44,40 @@ export interface McpProviderProps {
 /**
  * McpProvider manages the MCP client lifecycle and provides it to the component tree.
  *
- * It connects on mount and disconnects on unmount. Connection status and errors
- * are tracked in React state.
+ * It connects on mount and disconnects on unmount. Connection status, errors,
+ * and the McpClient instance itself are tracked in React state so that
+ * consumers re-render reliably when the client is replaced (e.g., on reconnect).
  */
 export function McpProvider({ config, children }: McpProviderProps) {
+  const [client, setClient] = useState<McpClient | null>(null);
   const [status, setStatus] = useState<ConnectionStatus>("disconnected");
   const [error, setError] = useState<Error | null>(null);
-  const clientRef = useRef<McpClient | null>(null);
-  // Track current config to detect changes.
+
+  // Track the latest config so connect() picks up updates without
+  // re-running on every config object identity change.
   const configRef = useRef(config);
   configRef.current = config;
 
+  // Hold the active client outside React state for cleanup; the same
+  // instance is mirrored into `client` state above so consumers
+  // re-render when it is replaced (e.g., on reconnect).
+  const activeClientRef = useRef<McpClient | null>(null);
+
   const connect = useCallback(async () => {
-    // Disconnect existing client if any.
-    if (clientRef.current) {
-      await clientRef.current.disconnect();
+    // Disconnect any prior client. Fire-and-forget; the new client
+    // does not need to wait for the old one's teardown.
+    const previous = activeClientRef.current;
+    if (previous) {
+      void previous.disconnect();
     }
 
-    const client = new McpClient(configRef.current);
+    const newClient = new McpClient(configRef.current);
+    activeClientRef.current = newClient;
 
     // Subscribe to status events.
-    client.on((event) => {
+    newClient.on((event) => {
+      // Drop late events from a client that has already been replaced.
+      if (activeClientRef.current !== newClient) return;
       if (event.type === "status") {
         setStatus(event.status);
         setError(event.error ?? null);
@@ -72,10 +86,10 @@ export function McpProvider({ config, children }: McpProviderProps) {
       }
     });
 
-    clientRef.current = client;
+    setClient(newClient);
 
     try {
-      await client.connect();
+      await newClient.connect();
     } catch (err) {
       if (isAuthError(err)) {
         clearStoredToken();
@@ -92,17 +106,19 @@ export function McpProvider({ config, children }: McpProviderProps) {
     connect();
 
     return () => {
-      clientRef.current?.disconnect();
-      clientRef.current = null;
+      const previous = activeClientRef.current;
+      activeClientRef.current = null;
+      if (previous) {
+        void previous.disconnect();
+      }
+      setClient(null);
     };
   }, [connect]);
 
-  const value: McpContextValue = {
-    client: clientRef.current,
-    status,
-    error,
-    reconnect,
-  };
+  const value = useMemo<McpContextValue>(
+    () => ({ client, status, error, reconnect }),
+    [client, status, error, reconnect],
+  );
 
   return <McpContext.Provider value={value}>{children}</McpContext.Provider>;
 }

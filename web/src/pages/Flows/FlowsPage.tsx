@@ -228,18 +228,6 @@ export function FlowsPage() {
   const flows = data?.flows ?? [];
   const total = data?.total ?? 0;
 
-  // Trigger refetch when filter/pagination options change.
-  // useQuery stores options in a ref so changing them does not automatically
-  // re-execute the query. This effect ensures an explicit refetch fires.
-  const prevFilterKey = useRef("");
-  useEffect(() => {
-    const key = JSON.stringify({ filter, sortBy, limit: pageSize, offset });
-    if (prevFilterKey.current && prevFilterKey.current !== key) {
-      refetch();
-    }
-    prevFilterKey.current = key;
-  }, [filter, sortBy, pageSize, offset, refetch]);
-
   // Reset offset and selection when debounced text filters change
   const prevTextFilterKey = useRef("");
   useEffect(() => {

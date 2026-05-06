@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { Badge } from "../../components/ui/Badge.js";
 import { Button } from "../../components/ui/Button.js";
@@ -139,23 +139,12 @@ export function FlowDetailPage() {
   const {
     data: messagesData,
     loading: messagesLoading,
-    refetch: refetchMessages,
   } = useQuery("messages", {
     id: id ?? "",
     limit: messagesLimit,
     offset: messagesOffset,
     enabled: !!id && !!flowData && isStreamingFlow(flowData),
   });
-
-  // Refetch messages when offset changes
-  const prevOffsetKey = useRef("");
-  useEffect(() => {
-    const key = JSON.stringify({ offset: messagesOffset });
-    if (prevOffsetKey.current && prevOffsetKey.current !== key) {
-      refetchMessages();
-    }
-    prevOffsetKey.current = key;
-  }, [messagesOffset, refetchMessages]);
 
   // Delete flow handler
   const handleDelete = useCallback(async () => {

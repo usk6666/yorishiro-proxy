@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { Badge } from "../../components/ui/Badge.js";
 import { Button } from "../../components/ui/Button.js";
@@ -167,21 +167,6 @@ export function FuzzResultsPage() {
   const results = resultsData?.results ?? [];
   const total = resultsData?.total ?? 0;
   const summary = resultsData?.summary;
-
-  // Trigger refetch when filter/pagination/sort changes
-  const prevFilterKey = useRef("");
-  useEffect(() => {
-    const key = JSON.stringify({
-      filter: resultsFilter,
-      sortBy,
-      limit: pageSize,
-      offset,
-    });
-    if (prevFilterKey.current && prevFilterKey.current !== key) {
-      refetchResults();
-    }
-    prevFilterKey.current = key;
-  }, [resultsFilter, sortBy, pageSize, offset, refetchResults]);
 
   // --- Filter change handler ---
   const handleFilterChange = useCallback(() => {

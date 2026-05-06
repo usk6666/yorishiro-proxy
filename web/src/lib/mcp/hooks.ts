@@ -7,8 +7,9 @@
  * configure the proxy, and control proxy listeners.
  */
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useMcpContext } from "./context.js";
+import type { McpClient } from "./client.js";
 import type {
   ConfigureParams,
   ConfigureResult,
@@ -61,6 +62,94 @@ export function useMcpClient(): UseMcpClientResult {
 }
 
 // ---------------------------------------------------------------------------
+// useMcpAction — shared action hook foundation
+// ---------------------------------------------------------------------------
+
+/** Return shape shared by every MCP action hook. */
+export interface UseMcpActionResult<P, R> {
+  /** Execute the action with the given params. Throws if disconnected. */
+  execute: (params: P) => Promise<R>;
+  /** Whether an execution is in progress. */
+  loading: boolean;
+  /** Last execution error, if any. */
+  error: Error | null;
+}
+
+/**
+ * Sentinel error message thrown when an action is invoked while the MCP
+ * client is not connected. Exported so unit tests can match on it.
+ */
+export const MCP_NOT_CONNECTED_MESSAGE = "MCP client is not connected";
+
+/**
+ * Pure runner for MCP actions. Encapsulates the loading/error state
+ * machine shared by every action hook so the logic is unit-testable in
+ * isolation (without React). The wrapper hook below threads React state
+ * setters through this function.
+ *
+ * @param call    The protocol method to invoke (`(client, params) => Promise<R>`).
+ * @param client  The connected MCP client, or null when disconnected.
+ * @param status  The connection status from McpContext.
+ * @param params  The arguments to pass through to `call`.
+ * @param sinks   Hooks for state mutation. Tests pass plain mutators;
+ *                the React hook below passes its `setLoading`/`setError`.
+ * @throws Error("MCP client is not connected") when `client` is null
+ *         or `status !== "connected"`.
+ * @throws The original error from `call`, after recording it via `setError`.
+ */
+export async function runMcpAction<P, R>(
+  call: (client: McpClient, params: P) => Promise<R>,
+  client: McpClient | null,
+  status: ConnectionStatus,
+  params: P,
+  sinks: {
+    setLoading: (v: boolean) => void;
+    setError: (e: Error | null) => void;
+  },
+): Promise<R> {
+  if (!client || status !== "connected") {
+    throw new Error(MCP_NOT_CONNECTED_MESSAGE);
+  }
+
+  sinks.setLoading(true);
+  sinks.setError(null);
+
+  try {
+    return await call(client, params);
+  } catch (err) {
+    const e = err instanceof Error ? err : new Error(String(err));
+    sinks.setError(e);
+    throw e;
+  } finally {
+    sinks.setLoading(false);
+  }
+}
+
+/**
+ * Generic foundation hook for the MCP action tools.
+ *
+ * Wraps a `(client, params) => Promise<result>` call in the standard
+ * loading/error state machine used by every action hook below. The 8
+ * concrete action hooks (`useResend`, `useManage`, ...) are thin
+ * re-exports of this hook with the matching `client.<method>` plumbed in.
+ */
+export function useMcpAction<P, R>(
+  call: (client: McpClient, params: P) => Promise<R>,
+): UseMcpActionResult<P, R> {
+  const { client, status } = useMcpContext();
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<Error | null>(null);
+
+  const execute = useCallback(
+    (params: P): Promise<R> =>
+      runMcpAction(call, client, status, params, { setLoading, setError }),
+    [client, status, call],
+  );
+
+  return { execute, loading, error };
+}
+
+// ---------------------------------------------------------------------------
 // useQuery — query tool
 // ---------------------------------------------------------------------------
 
@@ -101,7 +190,10 @@ export interface UseQueryResult<T> {
 /**
  * Hook to call the MCP query tool with typed results.
  *
- * Supports automatic polling and conditional execution.
+ * Supports automatic polling and conditional execution. The query
+ * automatically re-fetches when filter / fields / sortBy / limit /
+ * offset / id / fuzzId change — a stable JSON cache key is derived
+ * from those fields and used as the fetch callback dependency.
  *
  * @example
  * ```tsx
@@ -120,30 +212,63 @@ export function useQuery<R extends QueryResource>(
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<Error | null>(null);
 
-  // Use a ref for the options to avoid re-creating the fetch callback on every render,
-  // while still using the latest options when the callback is invoked.
-  const optionsRef = useRef(options);
-  optionsRef.current = options;
-
   const enabled = options.enabled !== false;
+  const pollInterval = options.pollInterval;
+
+  // Stable JSON key over the request-shaping fields. Order matters and
+  // must stay in lock-step with the query call below so consumers get
+  // a deterministic cache hit when option identity changes between
+  // renders but the values themselves are equal.
+  const optionsKey = useMemo(
+    () =>
+      JSON.stringify({
+        filter: options.filter ?? null,
+        fields: options.fields ?? null,
+        sort_by: options.sortBy ?? null,
+        limit: options.limit ?? null,
+        offset: options.offset ?? null,
+        id: options.id ?? null,
+        fuzzId: options.fuzzId ?? null,
+      }),
+    [
+      options.filter,
+      options.fields,
+      options.sortBy,
+      options.limit,
+      options.offset,
+      options.id,
+      options.fuzzId,
+    ],
+  );
 
   const fetchData = useCallback(async () => {
     if (!client || status !== "connected") return;
 
-    const opts = optionsRef.current;
+    // Re-parse the stable key rather than capturing the raw options
+    // object, so the callback identity tracks `optionsKey` exactly.
+    const opts = JSON.parse(optionsKey) as {
+      filter: QueryFilter | null;
+      fields: string[] | null;
+      sort_by: string | null;
+      limit: number | null;
+      offset: number | null;
+      id: string | null;
+      fuzzId: string | null;
+    };
+
     setLoading(true);
     setError(null);
 
     try {
       const result = await client.query({
         resource,
-        id: opts.id,
-        fuzz_id: opts.fuzzId,
-        filter: opts.filter,
-        fields: opts.fields,
-        sort_by: opts.sortBy,
-        limit: opts.limit,
-        offset: opts.offset,
+        id: opts.id ?? undefined,
+        fuzz_id: opts.fuzzId ?? undefined,
+        filter: opts.filter ?? undefined,
+        fields: opts.fields ?? undefined,
+        sort_by: opts.sort_by ?? undefined,
+        limit: opts.limit ?? undefined,
+        offset: opts.offset ?? undefined,
       });
       setData(result);
     } catch (err) {
@@ -151,7 +276,7 @@ export function useQuery<R extends QueryResource>(
     } finally {
       setLoading(false);
     }
-  }, [client, status, resource]);
+  }, [client, status, resource, optionsKey]);
 
   // Execute query when connected and enabled.
   useEffect(() => {
@@ -161,7 +286,6 @@ export function useQuery<R extends QueryResource>(
 
   // Polling.
   useEffect(() => {
-    const pollInterval = optionsRef.current.pollInterval;
     if (!enabled || !pollInterval || pollInterval <= 0 || status !== "connected") {
       return;
     }
@@ -171,7 +295,7 @@ export function useQuery<R extends QueryResource>(
     }, pollInterval);
 
     return () => clearInterval(timer);
-  }, [enabled, status, fetchData, options.pollInterval]);
+  }, [enabled, status, fetchData, pollInterval]);
 
   return { data, loading, error, refetch: fetchData };
 }
@@ -203,36 +327,14 @@ export interface UseResendResult {
  * ```
  */
 export function useResend(): UseResendResult {
-  const { client, status } = useMcpContext();
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<Error | null>(null);
-
-  const resend = useCallback(
-    async <T = unknown>(params: ExecuteParams): Promise<T> => {
-      if (!client || status !== "connected") {
-        throw new Error("MCP client is not connected");
-      }
-
-      setLoading(true);
-      setError(null);
-
-      try {
-        const result = await client.resend<T>(params);
-        return result;
-      } catch (err) {
-        const e = err instanceof Error ? err : new Error(String(err));
-        setError(e);
-        throw e;
-      } finally {
-        setLoading(false);
-      }
-    },
-    [client, status],
+  const { execute, loading, error } = useMcpAction(
+    (client: McpClient, params: ExecuteParams) => client.resend(params),
   );
-
-  return { resend, loading, error };
-
-  // Backward-compatible alias.
+  return {
+    resend: execute as <T = unknown>(params: ExecuteParams) => Promise<T>,
+    loading,
+    error,
+  };
 }
 
 /** @deprecated Use useResend instead. */
@@ -267,34 +369,14 @@ export interface UseManageResult {
  * ```
  */
 export function useManage(): UseManageResult {
-  const { client, status } = useMcpContext();
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<Error | null>(null);
-
-  const manage = useCallback(
-    async <T = unknown>(params: ManageParams): Promise<T> => {
-      if (!client || status !== "connected") {
-        throw new Error("MCP client is not connected");
-      }
-
-      setLoading(true);
-      setError(null);
-
-      try {
-        const result = await client.manage<T>(params);
-        return result;
-      } catch (err) {
-        const e = err instanceof Error ? err : new Error(String(err));
-        setError(e);
-        throw e;
-      } finally {
-        setLoading(false);
-      }
-    },
-    [client, status],
+  const { execute, loading, error } = useMcpAction(
+    (client: McpClient, params: ManageParams) => client.manage(params),
   );
-
-  return { manage, loading, error };
+  return {
+    manage: execute as <T = unknown>(params: ManageParams) => Promise<T>,
+    loading,
+    error,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -324,34 +406,14 @@ export interface UseFuzzResult {
  * ```
  */
 export function useFuzz(): UseFuzzResult {
-  const { client, status } = useMcpContext();
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<Error | null>(null);
-
-  const fuzz = useCallback(
-    async <T = unknown>(params: FuzzToolParams): Promise<T> => {
-      if (!client || status !== "connected") {
-        throw new Error("MCP client is not connected");
-      }
-
-      setLoading(true);
-      setError(null);
-
-      try {
-        const result = await client.fuzz<T>(params);
-        return result;
-      } catch (err) {
-        const e = err instanceof Error ? err : new Error(String(err));
-        setError(e);
-        throw e;
-      } finally {
-        setLoading(false);
-      }
-    },
-    [client, status],
+  const { execute, loading, error } = useMcpAction(
+    (client: McpClient, params: FuzzToolParams) => client.fuzz(params),
   );
-
-  return { fuzz, loading, error };
+  return {
+    fuzz: execute as <T = unknown>(params: FuzzToolParams) => Promise<T>,
+    loading,
+    error,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -381,34 +443,14 @@ export interface UseMacroResult {
  * ```
  */
 export function useMacro(): UseMacroResult {
-  const { client, status } = useMcpContext();
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<Error | null>(null);
-
-  const macro = useCallback(
-    async <T = unknown>(params: MacroToolParams): Promise<T> => {
-      if (!client || status !== "connected") {
-        throw new Error("MCP client is not connected");
-      }
-
-      setLoading(true);
-      setError(null);
-
-      try {
-        const result = await client.macro<T>(params);
-        return result;
-      } catch (err) {
-        const e = err instanceof Error ? err : new Error(String(err));
-        setError(e);
-        throw e;
-      } finally {
-        setLoading(false);
-      }
-    },
-    [client, status],
+  const { execute, loading, error } = useMcpAction(
+    (client: McpClient, params: MacroToolParams) => client.macro(params),
   );
-
-  return { macro, loading, error };
+  return {
+    macro: execute as <T = unknown>(params: MacroToolParams) => Promise<T>,
+    loading,
+    error,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -438,34 +480,17 @@ export interface UseInterceptActionResult {
  * ```
  */
 export function useInterceptAction(): UseInterceptActionResult {
-  const { client, status } = useMcpContext();
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<Error | null>(null);
-
-  const interceptAction = useCallback(
-    async <T = unknown>(params: InterceptActionParams): Promise<T> => {
-      if (!client || status !== "connected") {
-        throw new Error("MCP client is not connected");
-      }
-
-      setLoading(true);
-      setError(null);
-
-      try {
-        const result = await client.interceptAction<T>(params);
-        return result;
-      } catch (err) {
-        const e = err instanceof Error ? err : new Error(String(err));
-        setError(e);
-        throw e;
-      } finally {
-        setLoading(false);
-      }
-    },
-    [client, status],
+  const { execute, loading, error } = useMcpAction(
+    (client: McpClient, params: InterceptActionParams) =>
+      client.interceptAction(params),
   );
-
-  return { interceptAction, loading, error };
+  return {
+    interceptAction: execute as <T = unknown>(
+      params: InterceptActionParams,
+    ) => Promise<T>,
+    loading,
+    error,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -495,34 +520,14 @@ export interface UseSecurityResult {
  * ```
  */
 export function useSecurity(): UseSecurityResult {
-  const { client, status } = useMcpContext();
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<Error | null>(null);
-
-  const security = useCallback(
-    async <T = unknown>(params: SecurityParams): Promise<T> => {
-      if (!client || status !== "connected") {
-        throw new Error("MCP client is not connected");
-      }
-
-      setLoading(true);
-      setError(null);
-
-      try {
-        const result = await client.security<T>(params);
-        return result;
-      } catch (err) {
-        const e = err instanceof Error ? err : new Error(String(err));
-        setError(e);
-        throw e;
-      } finally {
-        setLoading(false);
-      }
-    },
-    [client, status],
+  const { execute, loading, error } = useMcpAction(
+    (client: McpClient, params: SecurityParams) => client.security(params),
   );
-
-  return { security, loading, error };
+  return {
+    security: execute as <T = unknown>(params: SecurityParams) => Promise<T>,
+    loading,
+    error,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -553,34 +558,10 @@ export interface UseConfigureResult {
  * ```
  */
 export function useConfigure(): UseConfigureResult {
-  const { client, status } = useMcpContext();
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<Error | null>(null);
-
-  const configure = useCallback(
-    async (params: ConfigureParams): Promise<ConfigureResult> => {
-      if (!client || status !== "connected") {
-        throw new Error("MCP client is not connected");
-      }
-
-      setLoading(true);
-      setError(null);
-
-      try {
-        const result = await client.configure(params);
-        return result;
-      } catch (err) {
-        const e = err instanceof Error ? err : new Error(String(err));
-        setError(e);
-        throw e;
-      } finally {
-        setLoading(false);
-      }
-    },
-    [client, status],
+  const { execute, loading, error } = useMcpAction(
+    (client: McpClient, params: ConfigureParams) => client.configure(params),
   );
-
-  return { configure, loading, error };
+  return { configure: execute, loading, error };
 }
 
 // ---------------------------------------------------------------------------
@@ -610,57 +591,29 @@ export interface UseProxyControlResult {
  * ```
  */
 export function useProxyControl(): UseProxyControlResult {
-  const { client, status } = useMcpContext();
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<Error | null>(null);
+  const startAction = useMcpAction(
+    (client: McpClient, params: ProxyStartParams) => client.proxyStart(params),
+  );
+  const stopAction = useMcpAction(
+    (client: McpClient, params: ProxyStopParams) => client.proxyStop(params),
+  );
 
   const start = useCallback(
-    async (params: ProxyStartParams = {}): Promise<ProxyStartResult> => {
-      if (!client || status !== "connected") {
-        throw new Error("MCP client is not connected");
-      }
-
-      setLoading(true);
-      setError(null);
-
-      try {
-        const result = await client.proxyStart(params);
-        return result;
-      } catch (err) {
-        const e = err instanceof Error ? err : new Error(String(err));
-        setError(e);
-        throw e;
-      } finally {
-        setLoading(false);
-      }
-    },
-    [client, status],
+    (params: ProxyStartParams = {}) => startAction.execute(params),
+    [startAction],
   );
-
   const stop = useCallback(
-    async (params: ProxyStopParams = {}): Promise<ProxyStopResult> => {
-      if (!client || status !== "connected") {
-        throw new Error("MCP client is not connected");
-      }
-
-      setLoading(true);
-      setError(null);
-
-      try {
-        const result = await client.proxyStop(params);
-        return result;
-      } catch (err) {
-        const e = err instanceof Error ? err : new Error(String(err));
-        setError(e);
-        throw e;
-      } finally {
-        setLoading(false);
-      }
-    },
-    [client, status],
+    (params: ProxyStopParams = {}) => stopAction.execute(params),
+    [stopAction],
   );
 
-  return { start, stop, loading, error };
+  // Surface either action's pending state / latest error.
+  return {
+    start,
+    stop,
+    loading: startAction.loading || stopAction.loading,
+    error: startAction.error ?? stopAction.error,
+  };
 }
 
 // ---------------------------------------------------------------------------
