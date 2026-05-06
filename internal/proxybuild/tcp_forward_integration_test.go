@@ -201,6 +201,10 @@ func TestProxybuild_TCPForward_RawBytesFlowRecording(t *testing.T) {
 		// proxybuild.tcpForwardSessionOpts) must have called UpdateStream
 		// with State="complete" once the round-trip finished. Without this
 		// hook every Stream recorded via the forward path stays at "active".
+		// (tcp_forward.go's OnComplete treats context.Canceled — the result
+		// of mgr.Stop cancelling the connCtx mid-session — as a graceful
+		// end-of-life for raw TCP, so this assertion holds whether the
+		// session ended on natural EOF or on listener shutdown.)
 		var sawComplete bool
 		for _, upd := range store.StreamUpdates(rawStreamID) {
 			if upd.State == "complete" {

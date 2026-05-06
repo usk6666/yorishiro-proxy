@@ -219,6 +219,98 @@ func TestLayer_OpenStream_AllocatesOddIDs(t *testing.T) {
 	}
 }
 
+// TestLayer_OpenStream_HeadersOrderGate verifies the chained "previous
+// stream's first HEADERS landed" gate that protects RFC 9113 §5.1.1
+// wire-order across concurrent OpenStream + Send.
+//
+// Without the gate, two goroutines that race their first sendHeadersEvent
+// can enqueue HEADERS for the higher stream id ahead of the lower one,
+// which a strict peer (e.g., x/net/http2) treats as a connection-level
+// PROTOCOL_ERROR. The cases below cover:
+//
+//   - the "skip-Send" path: a channel that goes straight to Close must
+//     still release its gate so the next stream's first Send is not
+//     blocked indefinitely;
+//   - broadcastShutdown: when Layer.Close fires while channels are still
+//     parked, every dangling gate is released.
+//
+// They do NOT verify wire-frame order — the writer goroutine + the
+// underlying frame.Writer already serialise frames; the gate only matters
+// for which goroutine wins the *enqueue* race.
+func TestLayer_OpenStream_HeadersOrderGate_CloseReleasesGate(t *testing.T) {
+	l, peer, cleanup := startClientLayer(t)
+	defer cleanup()
+	peer.consumePeerSettings(t)
+
+	// First stream: never sends, only closes. Its gate must release so
+	// stream 3's prevHeadersGate fires.
+	ch1, err := l.OpenStream(context.Background())
+	if err != nil {
+		t.Fatalf("OpenStream 1: %v", err)
+	}
+	ch2, err := l.OpenStream(context.Background())
+	if err != nil {
+		t.Fatalf("OpenStream 2: %v", err)
+	}
+
+	// ch2's prevHeadersGate is ch1's headersGate. Closing ch1 must close
+	// it (the OpenStream-without-Send path).
+	c2 := ch2.(*channel)
+	select {
+	case <-c2.prevHeadersGate:
+		t.Fatal("ch2.prevHeadersGate already closed before ch1.Close")
+	default:
+	}
+	if err := ch1.Close(); err != nil {
+		t.Fatalf("ch1.Close: %v", err)
+	}
+	select {
+	case <-c2.prevHeadersGate:
+		// expected
+	case <-time.After(time.Second):
+		t.Fatal("ch1.Close did not release ch2.prevHeadersGate within 1s")
+	}
+}
+
+func TestLayer_OpenStream_HeadersOrderGate_BroadcastShutdownReleasesAll(t *testing.T) {
+	l, peer, _ := startClientLayer(t)
+	peer.consumePeerSettings(t)
+
+	ch1, err := l.OpenStream(context.Background())
+	if err != nil {
+		t.Fatalf("OpenStream 1: %v", err)
+	}
+	ch2, err := l.OpenStream(context.Background())
+	if err != nil {
+		t.Fatalf("OpenStream 2: %v", err)
+	}
+	ch3, err := l.OpenStream(context.Background())
+	if err != nil {
+		t.Fatalf("OpenStream 3: %v", err)
+	}
+
+	c1 := ch1.(*channel)
+	c2 := ch2.(*channel)
+	c3 := ch3.(*channel)
+
+	// Layer.Close must release every dangling headersGate so any
+	// goroutine blocked in waitFirstHeadersOrder can unwind. broadcastShutdown
+	// is responsible for this; verify directly that all three gates fire.
+	if err := l.Close(); err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrClosedPipe) {
+		t.Fatalf("Layer.Close: %v", err)
+	}
+	_ = peer.conn.Close()
+
+	for i, ch := range []*channel{c1, c2, c3} {
+		select {
+		case <-ch.headersGate:
+			// expected
+		case <-time.After(time.Second):
+			t.Fatalf("channel %d headersGate not released by broadcastShutdown", i+1)
+		}
+	}
+}
+
 func TestLayer_Close_NoGoroutineLeak(t *testing.T) {
 	before := runtime.NumGoroutine()
 

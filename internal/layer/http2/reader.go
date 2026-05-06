@@ -555,6 +555,17 @@ func (l *Layer) deliverEnvelope(ch *channel, env *envelope.Envelope, asm *eventA
 		ch.recvMu.Unlock()
 		return
 	}
+	// Mark recvEndStream BEFORE delivering the terminal envelope. A consumer
+	// that reads the final event and immediately calls Close() must see
+	// recvEndStream=true so the channel does not emit RST_STREAM(CANCEL) on a
+	// stream that finished cleanly. Without this pre-send mark, Close races
+	// the post-send markRecvEnded below and surfaces as a spurious CANCEL on
+	// the wire (e2e flake observed in TestRawBytesRecording_ContainsWireFrames
+	// and friends).
+	terminal := asm != nil && asm.isDone()
+	if terminal {
+		ch.markRecvEnded()
+	}
 	select {
 	case ch.recv <- env:
 	case <-l.shutdown:
@@ -566,9 +577,9 @@ func (l *Layer) deliverEnvelope(ch *channel, env *envelope.Envelope, asm *eventA
 	}
 	ch.recvMu.Unlock()
 
-	// If the assembler reached terminal state, close the channel's recv side.
-	if asm != nil && asm.isDone() {
-		ch.markRecvEnded()
+	// recv close still runs after delivery so the consumer's next Next call
+	// returns io.EOF rather than racing the in-flight send.
+	if terminal {
 		l.closeChannelRecv(ch)
 	}
 }
@@ -645,6 +656,11 @@ func (l *Layer) broadcastShutdown() {
 	l.mu.Unlock()
 
 	for _, ch := range channels {
+		// Publish the headers-order gate so any later channel waiting for
+		// this one's first HEADERS unblocks (channels created via
+		// OpenStream that never sent HEADERS keep the next allocation
+		// blocked otherwise).
+		ch.releaseFirstHeadersGate()
 		ch.markTerminated(io.EOF)
 		l.closeChannelRecv(ch)
 	}

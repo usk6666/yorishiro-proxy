@@ -315,7 +315,7 @@ func (m *Manager) handleTCPForwardConn(
 		return ch, nil
 	}
 
-	if err := session.RunStackSession(connCtx, stack, dial, parentStack.Pipeline, m.tcpForwardSessionOpts(parentStack)); err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, io.EOF) {
+	if err := session.RunStackSession(connCtx, stack, dial, parentStack.Pipeline, m.tcpForwardSessionOpts(parentStack, connCtx)); err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, io.EOF) {
 		connLogger.Debug("tcp forward session ended with error", "error", err)
 	}
 }
@@ -328,7 +328,13 @@ func (m *Manager) handleTCPForwardConn(
 // PluginV2Engine threading and FlowStore-driven OnComplete are both copied
 // from the parent so plugin lifecycle hooks and Stream state finalisation
 // behave identically to a CONNECT-routed raw flow.
-func (m *Manager) tcpForwardSessionOpts(parent *Stack) session.SessionOptions {
+//
+// connCtx is captured by the OnComplete closure so it can distinguish
+// "listener-shutdown closed the stack" from "upstream/peer closed the
+// socket". RunSession passes a context.WithoutCancel context to OnComplete,
+// so we cannot ask the OnComplete-supplied ctx whether teardown was our
+// doing — only connCtx.Err() answers that question.
+func (m *Manager) tcpForwardSessionOpts(parent *Stack, connCtx context.Context) session.SessionOptions {
 	opts := session.SessionOptions{}
 	if parent == nil {
 		return opts
@@ -347,9 +353,32 @@ func (m *Manager) tcpForwardSessionOpts(parent *Stack) session.SessionOptions {
 			if streamID == "" {
 				return
 			}
+			// Raw TCP forwarding has no application-protocol "natural EOF"
+			// signal apart from one peer closing its half. The session loop
+			// returns nil on a clean EOF from clientToUpstream. If instead
+			// the listener shuts down mid-exchange, the watcher in
+			// runTCPForwardSession closes the stack, which races the
+			// session's in-flight read/write: depending on which side wins,
+			// the session can surface context.Canceled (read drained the
+			// ctx-Done case first) or a wrapped "use of closed network
+			// connection" from the underlying conn.Write. Both are
+			// listener-shutdown artefacts, not wire-level failures.
+			//
+			// We only treat them as graceful when the connection's own
+			// context (connCtx, captured at session start) is cancelled —
+			// that is, the close was driven by our listener teardown, not
+			// by an upstream peer closing its socket mid-flow. A malicious
+			// or buggy upstream sending TCP RST would also surface as
+			// net.ErrClosed via Go's net stack; gating on connCtx.Err()
+			// keeps that case classified as "error" so MITM recordings
+			// still flag the abort.
 			state := "complete"
 			if err != nil && !errors.Is(err, io.EOF) {
-				state = "error"
+				if (errors.Is(err, context.Canceled) || errors.Is(err, net.ErrClosed)) && connCtx.Err() != nil {
+					// Listener-shutdown path: keep state="complete".
+				} else {
+					state = "error"
+				}
 			}
 			_ = store.UpdateStream(ctx, streamID, flow.StreamUpdate{
 				State:         state,

@@ -180,6 +180,19 @@ type Layer struct {
 
 	nextClientStreamID uint32
 
+	// prevHeadersGate is the headersGate of the most recently allocated
+	// client-initiated stream. When OpenStream allocates a new stream, the
+	// new channel captures this as its "wait for the previous stream's
+	// HEADERS to be enqueued" signal, then publishes its own headersGate as
+	// the next prevHeadersGate. The chain enforces that first-HEADERS frames
+	// for client streams reach the writer queue (and therefore the wire) in
+	// numeric stream-ID order, satisfying RFC 9113 §5.1.1 — without
+	// serialising OpenStream itself (the test harness allocates several
+	// channels in a row without sending, and a hold-style mutex would
+	// deadlock that pattern). Guarded by mu. Initial value: a pre-closed
+	// channel so the first OpenStream's Send proceeds immediately.
+	prevHeadersGate chan struct{}
+
 	lastErrMu sync.Mutex
 	lastErr   error
 }
@@ -300,6 +313,7 @@ func New(conn net.Conn, streamID string, role Role, opts ...Option) (*Layer, err
 		shutdown:           make(chan struct{}),
 		windowUpdated:      make(chan struct{}, 1),
 		nextClientStreamID: 1,
+		prevHeadersGate:    closedChan,
 		encoderTableSize:   local.HeaderTableSize,
 	}
 
@@ -337,8 +351,37 @@ const closeDrainTimeout = 100 * time.Millisecond
 // Channels yields one event-granular Channel per HTTP/2 stream.
 func (l *Layer) Channels() <-chan layer.Channel { return l.channelOut }
 
+// closedChan is a pre-closed receive channel used as the "no previous
+// stream to wait on" sentinel for the first client-initiated OpenStream's
+// HEADERS-order gate. Reusing one package-level value keeps initialisation
+// allocation-free.
+var closedChan = func() chan struct{} {
+	c := make(chan struct{})
+	close(c)
+	return c
+}()
+
 // OpenStream creates a new client-initiated stream and returns its Channel.
 // Only valid in ClientRole.
+//
+// OpenStream itself does NOT serialise concurrent callers: id allocation is
+// brief and lock-free from the caller's perspective. Instead, the returned
+// channel carries a chained "previous stream's HEADERS landed" gate that
+// the channel's first sendHeadersEvent waits on before enqueuing HEADERS.
+// This preserves RFC 9113 §5.1.1 wire-order ("the identifier of a newly
+// established stream MUST be numerically greater than all streams that the
+// initiating endpoint has opened or reserved") without blocking allocation,
+// so test patterns that allocate several channels without sending continue
+// to work.
+//
+// CALLER CONTRACT: every successful OpenStream MUST be paired with a
+// Close() on the returned Channel — even when no Send ever happens. The
+// gate chain depends on each channel either calling sendHeadersEvent
+// (which closes the gate after enqueuing) or Close (which closes the gate
+// without enqueuing). A channel orphaned between OpenStream and the first
+// Send/Close blocks every subsequent client stream on the same h2
+// connection until layer shutdown. Standard Go discipline (defer Close on
+// allocation success) is sufficient.
 func (l *Layer) OpenStream(ctx context.Context) (layer.Channel, error) {
 	if l.role != ClientRole {
 		return nil, errors.New("http2: OpenStream is only valid in ClientRole")
@@ -358,14 +401,24 @@ func (l *Layer) OpenStream(ctx context.Context) (layer.Channel, error) {
 		return nil, &layer.StreamError{Code: layer.ErrorRefused, Reason: "GOAWAY received"}
 	}
 
+	// Allocate id and chain the headers-order gate atomically: the new
+	// channel's prevHeadersGate is the previous stream's headersGate; this
+	// new channel's headersGate becomes the next prevHeadersGate. Closing
+	// happens later — by the new channel's first sendHeadersEvent (success)
+	// or its Close (cancel).
 	l.mu.Lock()
 	id := l.nextClientStreamID
 	l.nextClientStreamID += 2
+	prevGate := l.prevHeadersGate
+	myGate := make(chan struct{})
+	l.prevHeadersGate = myGate
 	l.mu.Unlock()
 
 	_ = l.conn.Streams().Transition(id, EventSendHeaders)
 
 	ch := newChannel(l, id, false)
+	ch.prevHeadersGate = prevGate
+	ch.headersGate = myGate
 	l.registerChannel(id, ch)
 	return ch, nil
 }

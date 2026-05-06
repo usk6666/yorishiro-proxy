@@ -58,6 +58,30 @@ type channel struct {
 	// error via markTerminated without being shadowed by an io.EOF stamp.
 	recvClosed atomic.Bool
 
+	// prevHeadersGate is closed once the previous client-initiated stream's
+	// first HEADERS frame has been enqueued (or that stream was canceled
+	// before sending any HEADERS). The first sendHeadersEvent on this
+	// channel waits on prevHeadersGate before enqueuing its own HEADERS, so
+	// HEADERS for client-initiated streams reach the writer queue in
+	// numeric stream-ID order — required by RFC 9113 §5.1.1, and observed
+	// in CI as a connection-level PROTOCOL_ERROR + GOAWAY when violated
+	// under concurrent load. nil for non-client-initiated channels (push,
+	// peer-initiated server streams).
+	prevHeadersGate <-chan struct{}
+	// headersGate publishes this channel's first-HEADERS milestone. It is
+	// closed by sendHeadersEvent immediately after enqueueing the first
+	// HEADERS, or by Close if the channel is torn down before any HEADERS
+	// is sent — either way, downstream channels (those holding this
+	// headersGate as their prevHeadersGate) unblock. nil for non-client-
+	// initiated channels.
+	headersGate chan struct{}
+	// firstHeadersOnce makes releaseFirstHeadersGate idempotent across the
+	// success path (sendHeadersEvent), the cancel path (Close), and the
+	// layer shutdown path (broadcastShutdown). The "first HEADERS only
+	// waits" semantic is enforced separately by the headersHas check in
+	// waitFirstHeadersOrder; this Once just guards the close-once contract.
+	firstHeadersOnce sync.Once
+
 	mu         sync.Mutex
 	sequence   int
 	headersHas bool // true after first request HEADERS sent (client side)
@@ -187,7 +211,35 @@ func (c *channel) MarkTerminatedWithRST(code uint32, err error) {
 //
 // Returns io.EOF on normal close, *layer.StreamError on stream error,
 // ctx.Err() on cancellation.
+//
+// Drain priority: already-buffered envelopes on c.recv take precedence over
+// c.errCh. The reader goroutine populates both independently — when the peer
+// sends HEADERS, DATA(END_STREAM), and a trailing RST_STREAM in quick
+// succession (e.g., x/net/http2 server emits RST after a handler returns
+// without draining the request body), the multi-way select would otherwise
+// pick the StreamError before the consumer drains the response envelopes
+// already sitting in recv. That race surfaces as a phantom upstream error on
+// a stream whose response actually arrived intact, which then cascades into
+// a spurious RST_STREAM(CANCEL) toward the original client because the
+// session never gets to deliver the response.
 func (c *channel) Next(ctx context.Context) (*envelope.Envelope, error) {
+	// Fast path: drain any envelope already sitting in recv before consulting
+	// errCh. This is non-blocking — if recv is empty we fall through to the
+	// multi-way select below.
+	select {
+	case env, ok := <-c.recv:
+		if ok {
+			return env, nil
+		}
+		// recv is closed; drain a pending error if any, otherwise EOF.
+		select {
+		case se := <-c.errCh:
+			return nil, se
+		default:
+		}
+		return nil, io.EOF
+	default:
+	}
 	select {
 	case env, ok := <-c.recv:
 		if !ok {
@@ -243,7 +295,15 @@ func (c *channel) Send(ctx context.Context, env *envelope.Envelope) error {
 // sendHeadersEvent encodes the event's pseudo-headers + headers into HPACK
 // and writes HEADERS (+ CONTINUATION*) frames. When evt.EndStream is true,
 // END_STREAM is placed on the last frame.
+//
+// For client-initiated channels, the first call waits on prevHeadersGate so
+// the first HEADERS frame reaches the writer queue in numeric stream-ID
+// order across concurrent OpenStream callers. After enqueueing, headersGate
+// is closed so the next stream can proceed.
 func (c *channel) sendHeadersEvent(ctx context.Context, env *envelope.Envelope, evt *H2HeadersEvent) error {
+	if err := c.waitFirstHeadersOrder(ctx); err != nil {
+		return err
+	}
 	fields := BuildHeaderFieldsFromEvent(env, evt)
 	done := make(chan error, 1)
 	c.layer.enqueueWrite(writeRequest{headers: &writeHeaders{
@@ -252,6 +312,12 @@ func (c *channel) sendHeadersEvent(ctx context.Context, env *envelope.Envelope, 
 		endStream: evt.EndStream,
 		done:      done,
 	}})
+	// Publish first-HEADERS milestone now that the frame is queued: the
+	// writer goroutine processes the queue in FIFO order, so any later
+	// stream waiting on this gate will see its HEADERS land after ours on
+	// the wire. Releasing before waitDone keeps concurrent OpenStream
+	// callers from serialising on per-frame flush latency.
+	c.releaseFirstHeadersGate()
 	if err := waitDone(ctx, done, c.layer.shutdown); err != nil {
 		return err
 	}
@@ -262,6 +328,40 @@ func (c *channel) sendHeadersEvent(ctx context.Context, env *envelope.Envelope, 
 	}
 	c.mu.Unlock()
 	return nil
+}
+
+// waitFirstHeadersOrder blocks the very first sendHeadersEvent on a
+// client-initiated channel until the previously allocated client stream has
+// either enqueued its first HEADERS or been canceled. Subsequent HEADERS
+// (e.g., trailer HEADERS) skip the wait. ctx and shutdown abort the wait.
+func (c *channel) waitFirstHeadersOrder(ctx context.Context) error {
+	if c.prevHeadersGate == nil {
+		return nil
+	}
+	c.mu.Lock()
+	first := !c.headersHas
+	c.mu.Unlock()
+	if !first {
+		return nil
+	}
+	select {
+	case <-c.prevHeadersGate:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-c.layer.shutdown:
+		return errWriterClosed
+	}
+}
+
+// releaseFirstHeadersGate closes headersGate exactly once. Safe to call
+// from both the success path (sendHeadersEvent) and the cancel path (Close
+// before any HEADERS was sent) — firstHeadersOnce makes it idempotent.
+func (c *channel) releaseFirstHeadersGate() {
+	if c.headersGate == nil {
+		return
+	}
+	c.firstHeadersOnce.Do(func() { close(c.headersGate) })
 }
 
 // sendDataEvent writes a DATA frame (or splits the payload into multiple
@@ -325,6 +425,11 @@ func (c *channel) sendTrailersEvent(ctx context.Context, evt *H2TrailersEvent) e
 // RST_STREAM(CANCEL). Idempotent.
 func (c *channel) Close() error {
 	c.closeSendOnce.Do(func() {
+		// If OpenStream allocated an id but the caller never sent HEADERS
+		// (e.g., Close-on-error path), publish the first-HEADERS milestone
+		// anyway so the next client stream is not blocked indefinitely.
+		c.releaseFirstHeadersGate()
+
 		c.mu.Lock()
 		c.closed = true
 		sentEnd := c.sentEndStream
