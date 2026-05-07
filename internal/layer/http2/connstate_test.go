@@ -27,6 +27,12 @@ func TestDefaultSettings(t *testing.T) {
 	if s.MaxHeaderListSize != 0 {
 		t.Errorf("MaxHeaderListSize = %d, want 0", s.MaxHeaderListSize)
 	}
+	// USK-764: the extended-CONNECT advertisement is opt-in (RFC 8441 §3),
+	// so DefaultSettings() leaves it disabled. ServerRole flips it on at
+	// Layer construction; ClientRole keeps it off.
+	if s.EnableConnectProtocol != 0 {
+		t.Errorf("EnableConnectProtocol = %d, want 0", s.EnableConnectProtocol)
+	}
 }
 
 func TestSettings_Apply(t *testing.T) {
@@ -137,6 +143,44 @@ func TestSettings_Apply(t *testing.T) {
 			},
 		},
 		{
+			name: "enable connect protocol 0",
+			params: []frame.Setting{
+				{ID: frame.SettingEnableConnectProtocol, Value: 0},
+			},
+			check: func(t *testing.T, s Settings) {
+				t.Helper()
+				if s.EnableConnectProtocol != 0 {
+					t.Errorf("EnableConnectProtocol = %d, want 0", s.EnableConnectProtocol)
+				}
+			},
+		},
+		{
+			name: "enable connect protocol 1",
+			params: []frame.Setting{
+				{ID: frame.SettingEnableConnectProtocol, Value: 1},
+			},
+			check: func(t *testing.T, s Settings) {
+				t.Helper()
+				if s.EnableConnectProtocol != 1 {
+					t.Errorf("EnableConnectProtocol = %d, want 1", s.EnableConnectProtocol)
+				}
+			},
+		},
+		{
+			name: "enable connect protocol invalid (2)",
+			params: []frame.Setting{
+				{ID: frame.SettingEnableConnectProtocol, Value: 2},
+			},
+			wantErr: true,
+		},
+		{
+			name: "enable connect protocol invalid (max uint32)",
+			params: []frame.Setting{
+				{ID: frame.SettingEnableConnectProtocol, Value: 0xFFFFFFFF},
+			},
+			wantErr: true,
+		},
+		{
 			name: "unknown setting ignored",
 			params: []frame.Setting{
 				{ID: frame.SettingID(0xFF), Value: 42},
@@ -193,6 +237,26 @@ func TestSettings_Apply_ErrorTypes(t *testing.T) {
 	}
 	if _, ok := err.(*ConnError); !ok {
 		t.Errorf("expected *ConnError, got %T", err)
+	}
+}
+
+// TestSettings_Apply_EnableConnectProtocol_ErrorCode pins the error code
+// emitted when a peer advertises an out-of-range ENABLE_CONNECT_PROTOCOL
+// value. RFC 8441 §3 says the only valid values are 0 and 1; out-of-range
+// values are a connection error of type PROTOCOL_ERROR per the
+// inheritance from RFC 9113 §6.5.2.
+func TestSettings_Apply_EnableConnectProtocol_ErrorCode(t *testing.T) {
+	s := DefaultSettings()
+	err := s.Apply([]frame.Setting{{ID: frame.SettingEnableConnectProtocol, Value: 2}})
+	if err == nil {
+		t.Fatal("expected error for ENABLE_CONNECT_PROTOCOL=2")
+	}
+	ce, ok := err.(*ConnError)
+	if !ok {
+		t.Fatalf("expected *ConnError, got %T", err)
+	}
+	if ce.Code != ErrCodeProtocol {
+		t.Errorf("error code = %d, want ErrCodeProtocol (%d)", ce.Code, ErrCodeProtocol)
 	}
 }
 

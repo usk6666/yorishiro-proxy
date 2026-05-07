@@ -248,6 +248,39 @@ func TestWriter_WriteSettings(t *testing.T) {
 	}
 }
 
+// TestWriter_WriteSettings_EnableConnectProtocol verifies that a SETTINGS
+// frame carrying the RFC 8441 ENABLE_CONNECT_PROTOCOL parameter (id 0x08)
+// round-trips through Writer + Reader without corruption — the new
+// SettingID constant USK-764 introduces is wire-compatible with the
+// existing 6-octet (id, value) parameter format.
+func TestWriter_WriteSettings_EnableConnectProtocol(t *testing.T) {
+	var buf bytes.Buffer
+	w := NewWriter(&buf)
+
+	settings := []Setting{
+		{ID: SettingEnableConnectProtocol, Value: 1},
+	}
+	if err := w.WriteSettings(settings); err != nil {
+		t.Fatalf("WriteSettings() error: %v", err)
+	}
+
+	r := NewReader(&buf)
+	f, err := r.ReadFrame()
+	if err != nil {
+		t.Fatalf("ReadFrame() error: %v", err)
+	}
+	got, err := f.SettingsParams()
+	if err != nil {
+		t.Fatalf("SettingsParams() error: %v", err)
+	}
+	if len(got) != 1 || got[0] != settings[0] {
+		t.Fatalf("SettingsParams() = %+v, want %+v", got, settings)
+	}
+	if got[0].ID != 0x08 {
+		t.Errorf("ID = 0x%02x, want 0x08", uint16(got[0].ID))
+	}
+}
+
 func TestWriter_WriteSettingsAck(t *testing.T) {
 	var buf bytes.Buffer
 	w := NewWriter(&buf)

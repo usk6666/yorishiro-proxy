@@ -44,15 +44,16 @@ func (a *aggregatorChannel) Send(ctx context.Context, env *envelope.Envelope) er
 
 	// 1. HEADERS event.
 	hdrEvt := &http2.H2HeadersEvent{
-		Method:       msg.Method,
-		Scheme:       msg.Scheme,
-		Authority:    msg.Authority,
-		Path:         msg.Path,
-		RawQuery:     msg.RawQuery,
-		Status:       msg.Status,
-		StatusReason: msg.StatusReason,
-		Headers:      cloneKVs(msg.Headers),
-		EndStream:    !isInformational && !hasBody && !hasTrailers,
+		Method:          msg.Method,
+		Scheme:          msg.Scheme,
+		Authority:       msg.Authority,
+		Path:            msg.Path,
+		RawQuery:        msg.RawQuery,
+		ConnectProtocol: msg.ConnectProtocol,
+		Status:          msg.Status,
+		StatusReason:    msg.StatusReason,
+		Headers:         cloneKVs(msg.Headers),
+		EndStream:       !isInformational && !hasBody && !hasTrailers,
 	}
 	hdrEnv := &envelope.Envelope{
 		StreamID:  env.StreamID,

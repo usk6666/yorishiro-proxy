@@ -118,8 +118,10 @@ func newEventAssembler(streamID uint32, ch *channel) *eventAssembler {
 type pseudoFields struct {
 	method, scheme, authority, path string
 	status                          string
+	protocol                        string
 	hasMethod, hasScheme, hasAuth   bool
 	hasPath, hasStatus              bool
+	hasProtocol                     bool
 	dupAnomalies                    []envelope.Anomaly
 	regularBeforePseudo             bool
 	invalidNames                    []string
@@ -150,7 +152,11 @@ func splitHeaders(decoded []hpack.HeaderField) (pf pseudoFields, regular []envel
 }
 
 // applyPseudo records a pseudo-header into pf, flagging duplicates and
-// unknown names.
+// unknown names. The :protocol pseudo-header (RFC 8441 §4, used by the
+// extended CONNECT method to bootstrap WebSocket / other protocols over
+// HTTP/2) is accepted unconditionally here; the :method == CONNECT
+// precondition is enforced post-walk in flushAnomalies so duplicate
+// :protocol detection still uses recordOnce.
 func (pf *pseudoFields) applyPseudo(hf hpack.HeaderField) {
 	switch hf.Name {
 	case ":method":
@@ -163,6 +169,8 @@ func (pf *pseudoFields) applyPseudo(hf hpack.HeaderField) {
 		pf.recordOnce(&pf.hasPath, &pf.path, hf)
 	case ":status":
 		pf.recordOnce(&pf.hasStatus, &pf.status, hf)
+	case ":protocol":
+		pf.recordOnce(&pf.hasProtocol, &pf.protocol, hf)
 	default:
 		pf.invalidNames = append(pf.invalidNames, hf.Name)
 	}
@@ -181,6 +189,13 @@ func (pf *pseudoFields) recordOnce(seen *bool, dst *string, hf hpack.HeaderField
 
 // flushAnomalies returns the anomalies accumulated in pf (regular-before-pseudo,
 // invalid pseudo names, duplicates).
+//
+// :protocol enforcement (RFC 8441 §4): :protocol is only valid on extended
+// CONNECT requests, so a :protocol with :method != "CONNECT" surfaces as
+// H2InvalidPseudoHeader. The accept-then-flag pattern keeps the parsing
+// loop simple — the precondition is a cross-pseudo-header invariant that
+// can only be evaluated after every pseudo header in the block has been
+// observed.
 func (pf *pseudoFields) flushAnomalies() []envelope.Anomaly {
 	var out []envelope.Anomaly
 	if pf.regularBeforePseudo {
@@ -194,6 +209,32 @@ func (pf *pseudoFields) flushAnomalies() []envelope.Anomaly {
 			Type:   envelope.H2InvalidPseudoHeader,
 			Detail: n,
 		})
+	}
+	if pf.hasProtocol && pf.method != "CONNECT" {
+		out = append(out, envelope.Anomaly{
+			Type:   envelope.H2InvalidPseudoHeader,
+			Detail: ":protocol with :method=" + pf.method,
+		})
+	}
+	// RFC 8441 §4: extended CONNECT (CONNECT + :protocol) MUST include
+	// :scheme and :path. Classic CONNECT is the inverse case (MUST NOT
+	// include them) — that's enforced elsewhere; here we only flag the
+	// extended-CONNECT-missing-required-pseudo-header path. Each missing
+	// pseudo-header is reported separately so the operator can see which
+	// element of the header set was malformed.
+	if pf.hasProtocol && pf.method == "CONNECT" {
+		if !pf.hasScheme {
+			out = append(out, envelope.Anomaly{
+				Type:   envelope.H2InvalidPseudoHeader,
+				Detail: "extended CONNECT missing :scheme",
+			})
+		}
+		if !pf.hasPath {
+			out = append(out, envelope.Anomaly{
+				Type:   envelope.H2InvalidPseudoHeader,
+				Detail: "extended CONNECT missing :path",
+			})
+		}
 	}
 	out = append(out, pf.dupAnomalies...)
 	return out
@@ -260,6 +301,15 @@ func buildHeadersEvent(decoded []hpack.HeaderField, direction envelope.Direction
 		evt.Scheme = pf.scheme
 		evt.Authority = pf.authority
 		evt.Path, evt.RawQuery = splitPath(pf.path)
+		// RFC 8441 §4: :protocol is only meaningful on extended CONNECT.
+		// flushAnomalies has already flagged :protocol with non-CONNECT
+		// methods as H2InvalidPseudoHeader, so the field is propagated
+		// only when the precondition holds. This keeps downstream
+		// (httpaggregator → HTTPMessage.ConnectProtocol → session) free
+		// of the "drop on Method!=CONNECT" branch.
+		if pf.hasProtocol && pf.method == "CONNECT" {
+			evt.ConnectProtocol = pf.protocol
+		}
 	} else {
 		if pf.hasStatus {
 			if n, err := strconv.Atoi(pf.status); err == nil {

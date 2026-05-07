@@ -27,6 +27,17 @@ type H2HeadersEvent struct {
 	Status       int
 	StatusReason string
 
+	// ConnectProtocol carries the value of the :protocol pseudo-header
+	// from extended CONNECT requests (RFC 8441 §4) — for example
+	// "websocket". Empty for normal HTTP requests, classic CONNECT
+	// requests, and all responses. The value is propagated verbatim from
+	// the wire (HPACK already lowercases the header name; the value is
+	// unchanged).
+	//
+	// Named ConnectProtocol (not Protocol) to avoid colliding with the
+	// Message-interface Protocol() method on this same type.
+	ConnectProtocol string
+
 	// Headers is the regular (non-pseudo) header list in wire order. HPACK
 	// yields lowercase names per RFC 9113 §8.2.1; case is preserved as-is
 	// (including anomalous uppercase, with an H2UppercaseHeaderName anomaly
@@ -54,16 +65,17 @@ func (*H2HeadersEvent) Protocol() envelope.Protocol { return envelope.ProtocolHT
 // itself never mutates emitted events.
 func (e *H2HeadersEvent) CloneMessage() envelope.Message {
 	clone := &H2HeadersEvent{
-		Method:       e.Method,
-		Scheme:       e.Scheme,
-		Authority:    e.Authority,
-		Path:         e.Path,
-		RawQuery:     e.RawQuery,
-		Status:       e.Status,
-		StatusReason: e.StatusReason,
-		EndStream:    e.EndStream,
-		Headers:      cloneKVs(e.Headers),
-		Anomalies:    cloneEvAnomalies(e.Anomalies),
+		Method:          e.Method,
+		Scheme:          e.Scheme,
+		Authority:       e.Authority,
+		Path:            e.Path,
+		RawQuery:        e.RawQuery,
+		Status:          e.Status,
+		StatusReason:    e.StatusReason,
+		ConnectProtocol: e.ConnectProtocol,
+		EndStream:       e.EndStream,
+		Headers:         cloneKVs(e.Headers),
+		Anomalies:       cloneEvAnomalies(e.Anomalies),
 	}
 	return clone
 }

@@ -360,6 +360,13 @@ const (
 	SettingMaxFrameSize SettingID = 0x05
 	// SettingMaxHeaderListSize corresponds to SETTINGS_MAX_HEADER_LIST_SIZE (0x06).
 	SettingMaxHeaderListSize SettingID = 0x06
+	// SettingEnableConnectProtocol corresponds to
+	// SETTINGS_ENABLE_CONNECT_PROTOCOL (0x08), defined in RFC 8441 §3.
+	// When advertised by a server with value 1, clients may use the
+	// extended CONNECT method (a CONNECT request that carries a
+	// :protocol pseudo-header) to bootstrap a non-HTTP protocol such as
+	// WebSocket over an HTTP/2 stream.
+	SettingEnableConnectProtocol SettingID = 0x08
 )
 
 // String returns the human-readable name of the setting ID.
@@ -377,6 +384,8 @@ func (id SettingID) String() string {
 		return "MAX_FRAME_SIZE"
 	case SettingMaxHeaderListSize:
 		return "MAX_HEADER_LIST_SIZE"
+	case SettingEnableConnectProtocol:
+		return "ENABLE_CONNECT_PROTOCOL"
 	default:
 		return fmt.Sprintf("UNKNOWN(0x%04x)", uint16(id))
 	}

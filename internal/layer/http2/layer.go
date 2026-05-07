@@ -57,6 +57,12 @@ type options struct {
 	bodySpillThreshold   int64
 	maxBody              int64
 	stateReleaser        pluginv2.StateReleaser
+	// enableConnectProtocol overrides the ServerRole-only default
+	// advertisement of SETTINGS_ENABLE_CONNECT_PROTOCOL. Tracked as a
+	// pointer so the zero value of options can be distinguished from
+	// "explicitly disabled". nil = use role default (ServerRole = 1,
+	// ClientRole = 0); non-nil = use the supplied bool.
+	enableConnectProtocol *bool
 }
 
 // Option configures a Layer.
@@ -112,6 +118,25 @@ func WithBodySpillThreshold(n int64) Option {
 // WithMaxBodySize records the absolute body size cap for aggregator use.
 func WithMaxBodySize(n int64) Option {
 	return func(o *options) { o.maxBody = n }
+}
+
+// WithEnableConnectProtocol overrides whether SETTINGS_ENABLE_CONNECT_PROTOCOL
+// (RFC 8441 §3) is advertised in the initial SETTINGS frame. By default
+// ServerRole advertises 1 (extended CONNECT permitted) and ClientRole
+// advertises nothing for this setting. Passing true on either role forces
+// advertisement of value 1; passing false on either role suppresses
+// advertisement entirely. Per RFC 8441 §3, only servers SHOULD advertise
+// this setting in production; the override is provided so tests and
+// diagnostic configurations can mirror the server's setting from the client
+// side.
+//
+// USK-764: introduced solely to let tests exercise the off-path. The live
+// data path always uses the role default.
+func WithEnableConnectProtocol(enable bool) Option {
+	return func(o *options) {
+		v := enable
+		o.enableConnectProtocol = &v
+	}
 }
 
 // WithStateReleaser injects a pluginv2.StateReleaser the Layer invokes
@@ -264,7 +289,9 @@ func New(conn net.Conn, streamID string, role Role, opts ...Option) (*Layer, err
 
 	httpConn := NewConn()
 	if o.initialSettings != nil {
-		if err := httpConn.SetLocalSettings(*o.initialSettings); err != nil {
+		settings := *o.initialSettings
+		applyEnableConnectProtocolDefault(&settings, role, o.enableConnectProtocol)
+		if err := httpConn.SetLocalSettings(settings); err != nil {
 			return nil, err
 		}
 	} else {
@@ -276,6 +303,7 @@ func New(conn net.Conn, streamID string, role Role, opts ...Option) (*Layer, err
 		if o.maxConcurrentStreams != 0 {
 			def.MaxConcurrentStreams = o.maxConcurrentStreams
 		}
+		applyEnableConnectProtocolDefault(&def, role, o.enableConnectProtocol)
 		if err := httpConn.SetLocalSettings(def); err != nil {
 			return nil, err
 		}
@@ -467,13 +495,57 @@ func (l *Layer) runPreface() error {
 
 // settingsToFrame converts a Settings struct into a list of frame.Setting
 // suitable for sending in a SETTINGS frame.
+//
+// SETTINGS_ENABLE_CONNECT_PROTOCOL (0x08) is included only when the field
+// is non-zero. RFC 8441 §3 says only servers advertise it; clients ignore
+// the setting when sending. Endpoints that have not opted in (the default
+// for ClientRole, and ServerRole when WithEnableConnectProtocol(false) is
+// supplied) leave the field at 0 and the setting is omitted from the
+// initial SETTINGS frame entirely. This keeps the wire output identical
+// to the pre-USK-764 behaviour for endpoints that do not support extended
+// CONNECT.
 func settingsToFrame(s Settings) []frame.Setting {
-	return []frame.Setting{
+	out := []frame.Setting{
 		{ID: frame.SettingHeaderTableSize, Value: s.HeaderTableSize},
 		{ID: frame.SettingEnablePush, Value: s.EnablePush},
 		{ID: frame.SettingMaxConcurrentStreams, Value: s.MaxConcurrentStreams},
 		{ID: frame.SettingInitialWindowSize, Value: s.InitialWindowSize},
 		{ID: frame.SettingMaxFrameSize, Value: s.MaxFrameSize},
 		{ID: frame.SettingMaxHeaderListSize, Value: s.MaxHeaderListSize},
+	}
+	if s.EnableConnectProtocol != 0 {
+		out = append(out, frame.Setting{
+			ID:    frame.SettingEnableConnectProtocol,
+			Value: s.EnableConnectProtocol,
+		})
+	}
+	return out
+}
+
+// applyEnableConnectProtocolDefault sets s.EnableConnectProtocol per the
+// USK-764 advertisement policy:
+//
+//   - When override is non-nil, use its bool (true → 1, false → 0). This
+//     covers WithEnableConnectProtocol(true|false) on either role.
+//   - Otherwise, ServerRole defaults to 1 (advertise extended CONNECT
+//     support per RFC 8441 §3) and ClientRole defaults to 0 (clients do
+//     not advertise this setting per RFC 8441 §3).
+//
+// Any pre-existing s.EnableConnectProtocol from a caller-supplied
+// WithInitialSettings is unconditionally overwritten — the role default
+// and explicit option are the only paths that flip the bit.
+func applyEnableConnectProtocolDefault(s *Settings, role Role, override *bool) {
+	if override != nil {
+		if *override {
+			s.EnableConnectProtocol = 1
+		} else {
+			s.EnableConnectProtocol = 0
+		}
+		return
+	}
+	if role == ServerRole {
+		s.EnableConnectProtocol = 1
+	} else {
+		s.EnableConnectProtocol = 0
 	}
 }

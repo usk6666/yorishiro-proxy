@@ -239,15 +239,16 @@ func (a *aggregatorChannel) absorbHeaders(env *envelope.Envelope, evt *http2.H2H
 	}
 
 	msg := &envelope.HTTPMessage{
-		Method:       evt.Method,
-		Scheme:       evt.Scheme,
-		Authority:    evt.Authority,
-		Path:         evt.Path,
-		RawQuery:     evt.RawQuery,
-		Status:       evt.Status,
-		StatusReason: evt.StatusReason,
-		Headers:      cloneKVs(evt.Headers),
-		Anomalies:    cloneAnomalies(evt.Anomalies),
+		Method:          evt.Method,
+		Scheme:          evt.Scheme,
+		Authority:       evt.Authority,
+		Path:            evt.Path,
+		RawQuery:        evt.RawQuery,
+		ConnectProtocol: evt.ConnectProtocol,
+		Status:          evt.Status,
+		StatusReason:    evt.StatusReason,
+		Headers:         cloneKVs(evt.Headers),
+		Anomalies:       cloneAnomalies(evt.Anomalies),
 	}
 
 	outEnv := &envelope.Envelope{

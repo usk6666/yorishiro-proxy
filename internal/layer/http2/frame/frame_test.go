@@ -32,6 +32,32 @@ func TestType_String(t *testing.T) {
 	}
 }
 
+// TestSettingID_Values pins the wire encoding of each SettingID constant.
+// USK-764 added SettingEnableConnectProtocol (0x08) per RFC 8441 §3; the
+// remaining values are RFC 9113 §6.5.2.
+func TestSettingID_Values(t *testing.T) {
+	tests := []struct {
+		name string
+		id   SettingID
+		want uint16
+	}{
+		{"HEADER_TABLE_SIZE", SettingHeaderTableSize, 0x01},
+		{"ENABLE_PUSH", SettingEnablePush, 0x02},
+		{"MAX_CONCURRENT_STREAMS", SettingMaxConcurrentStreams, 0x03},
+		{"INITIAL_WINDOW_SIZE", SettingInitialWindowSize, 0x04},
+		{"MAX_FRAME_SIZE", SettingMaxFrameSize, 0x05},
+		{"MAX_HEADER_LIST_SIZE", SettingMaxHeaderListSize, 0x06},
+		{"ENABLE_CONNECT_PROTOCOL", SettingEnableConnectProtocol, 0x08},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if uint16(tt.id) != tt.want {
+				t.Errorf("%s = 0x%02x, want 0x%02x", tt.name, uint16(tt.id), tt.want)
+			}
+		})
+	}
+}
+
 func TestSettingID_String(t *testing.T) {
 	tests := []struct {
 		id   SettingID
@@ -43,6 +69,7 @@ func TestSettingID_String(t *testing.T) {
 		{SettingInitialWindowSize, "INITIAL_WINDOW_SIZE"},
 		{SettingMaxFrameSize, "MAX_FRAME_SIZE"},
 		{SettingMaxHeaderListSize, "MAX_HEADER_LIST_SIZE"},
+		{SettingEnableConnectProtocol, "ENABLE_CONNECT_PROTOCOL"},
 		{SettingID(0xFFFF), "UNKNOWN(0xffff)"},
 	}
 	for _, tt := range tests {

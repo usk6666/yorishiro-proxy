@@ -569,6 +569,13 @@ func BuildHeaderFieldsFromEvent(env *envelope.Envelope, evt *H2HeadersEvent) []h
 			path = path + "?" + evt.RawQuery
 		}
 		out = append(out, hpack.HeaderField{Name: ":path", Value: path})
+		// RFC 8441 §4: extended CONNECT carries :protocol on the request.
+		// Emit it only when the event actually populates the field — this
+		// keeps classic CONNECT (Method=CONNECT, ConnectProtocol="")
+		// wire-compatible with HTTP/2 Layer's pre-USK-764 output.
+		if evt.Method == "CONNECT" && evt.ConnectProtocol != "" {
+			out = append(out, hpack.HeaderField{Name: ":protocol", Value: evt.ConnectProtocol})
+		}
 	}
 
 	for _, kv := range evt.Headers {

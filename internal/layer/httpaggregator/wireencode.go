@@ -107,14 +107,15 @@ func resolveBodyForEncode(msg *envelope.HTTPMessage) ([]byte, error) {
 // a synthetic H2HeadersEvent so pseudo-header selection stays in one place.
 func buildHeaderFieldsFromMessage(env *envelope.Envelope, msg *envelope.HTTPMessage) []hpack.HeaderField {
 	evt := &http2.H2HeadersEvent{
-		Method:       msg.Method,
-		Scheme:       msg.Scheme,
-		Authority:    msg.Authority,
-		Path:         msg.Path,
-		RawQuery:     msg.RawQuery,
-		Status:       msg.Status,
-		StatusReason: msg.StatusReason,
-		Headers:      msg.Headers,
+		Method:          msg.Method,
+		Scheme:          msg.Scheme,
+		Authority:       msg.Authority,
+		Path:            msg.Path,
+		RawQuery:        msg.RawQuery,
+		ConnectProtocol: msg.ConnectProtocol,
+		Status:          msg.Status,
+		StatusReason:    msg.StatusReason,
+		Headers:         msg.Headers,
 	}
 	return http2.BuildHeaderFieldsFromEvent(env, evt)
 }

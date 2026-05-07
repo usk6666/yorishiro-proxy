@@ -38,18 +38,28 @@ type Settings struct {
 	MaxFrameSize uint32
 	// MaxHeaderListSize is the maximum size of header list the sender will accept.
 	MaxHeaderListSize uint32
+	// EnableConnectProtocol controls whether the extended CONNECT method
+	// defined in RFC 8441 §3 is permitted. Servers advertise value 1 to
+	// allow clients to use :method=CONNECT with a :protocol pseudo-header
+	// (e.g., :protocol=websocket) to bootstrap a non-HTTP protocol over an
+	// HTTP/2 stream. Defaults to 0 (disabled). Per RFC 8441, only values
+	// 0 and 1 are valid; any other value is a connection PROTOCOL_ERROR.
+	EnableConnectProtocol uint32
 }
 
 // DefaultSettings returns Settings populated with default values
-// per RFC 9113 Section 6.5.2.
+// per RFC 9113 Section 6.5.2. EnableConnectProtocol defaults to 0
+// (RFC 8441 §3): the extended CONNECT method is opt-in and must be
+// explicitly advertised by the server.
 func DefaultSettings() Settings {
 	return Settings{
-		HeaderTableSize:      defaultHeaderTableSize,
-		EnablePush:           defaultEnablePush,
-		MaxConcurrentStreams: defaultMaxConcurrentStreams,
-		InitialWindowSize:    defaultInitialWindowSize,
-		MaxFrameSize:         defaultMaxFrameSize,
-		MaxHeaderListSize:    defaultMaxHeaderListSize,
+		HeaderTableSize:       defaultHeaderTableSize,
+		EnablePush:            defaultEnablePush,
+		MaxConcurrentStreams:  defaultMaxConcurrentStreams,
+		InitialWindowSize:     defaultInitialWindowSize,
+		MaxFrameSize:          defaultMaxFrameSize,
+		MaxHeaderListSize:     defaultMaxHeaderListSize,
+		EnableConnectProtocol: 0,
 	}
 }
 
@@ -97,6 +107,16 @@ func (s *Settings) applySingle(p frame.Setting) error {
 		s.MaxFrameSize = p.Value
 	case frame.SettingMaxHeaderListSize:
 		s.MaxHeaderListSize = p.Value
+	case frame.SettingEnableConnectProtocol:
+		// RFC 8441 §3: only values 0 and 1 are valid; any other value is
+		// a connection error of type PROTOCOL_ERROR.
+		if p.Value > 1 {
+			return &ConnError{
+				Code:   ErrCodeProtocol,
+				Reason: fmt.Sprintf("ENABLE_CONNECT_PROTOCOL must be 0 or 1, got %d", p.Value),
+			}
+		}
+		s.EnableConnectProtocol = p.Value
 	default:
 		// Per RFC 9113 Section 6.5.2: unknown settings MUST be ignored.
 	}

@@ -63,6 +63,20 @@ type HTTPMessage struct {
 	// RawQuery is the raw query string (without leading '?').
 	RawQuery string
 
+	// ConnectProtocol carries the value of the HTTP/2 :protocol
+	// pseudo-header from RFC 8441 extended CONNECT requests (e.g.
+	// "websocket"). Empty for normal HTTP requests, classic CONNECT
+	// requests, all responses, and all HTTP/1.x messages. Session-level
+	// code uses Method=="CONNECT" + ConnectProtocol!="" to recognise
+	// that the stream is bootstrapping a non-HTTP protocol over HTTP/2;
+	// the actual layer swap to the tunnelled protocol is handled by the
+	// connector orchestrator (USK-765), not the parsing path.
+	//
+	// Named ConnectProtocol (not Protocol) to avoid colliding with the
+	// Message-interface Protocol() method (which returns ProtocolHTTP
+	// for this type).
+	ConnectProtocol string
+
 	// --- Response-side fields ---
 
 	// Status is the HTTP status code.
@@ -109,17 +123,18 @@ func (m *HTTPMessage) Protocol() Protocol { return ProtocolHTTP }
 // the terminal reference.
 func (m *HTTPMessage) CloneMessage() Message {
 	clone := &HTTPMessage{
-		Method:       m.Method,
-		Scheme:       m.Scheme,
-		Authority:    m.Authority,
-		Path:         m.Path,
-		RawQuery:     m.RawQuery,
-		Status:       m.Status,
-		StatusReason: m.StatusReason,
-		Headers:      cloneKeyValues(m.Headers),
-		Trailers:     cloneKeyValues(m.Trailers),
-		Body:         cloneBytes(m.Body),
-		Anomalies:    cloneAnomalies(m.Anomalies),
+		Method:          m.Method,
+		Scheme:          m.Scheme,
+		Authority:       m.Authority,
+		Path:            m.Path,
+		RawQuery:        m.RawQuery,
+		ConnectProtocol: m.ConnectProtocol,
+		Status:          m.Status,
+		StatusReason:    m.StatusReason,
+		Headers:         cloneKeyValues(m.Headers),
+		Trailers:        cloneKeyValues(m.Trailers),
+		Body:            cloneBytes(m.Body),
+		Anomalies:       cloneAnomalies(m.Anomalies),
 		// BodyStream intentionally not cloned (one-shot reader).
 	}
 	if m.BodyBuffer != nil {
