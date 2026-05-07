@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"net"
+	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/pluginv2"
 )
@@ -31,6 +32,12 @@ type SOCKS5HandlerConfig struct {
 	// See OnHTTP2StackFunc for the callback contract. When nil, h2 stacks are
 	// closed immediately after Pool.Put.
 	OnHTTP2Stack OnHTTP2StackFunc
+
+	// InnerPeekTimeout bounds how long the handler waits for the first
+	// inner byte after the SOCKS5 200 reply (USK-762). Zero means
+	// DefaultInnerPeekTimeout. Misbehaving clients that complete SOCKS5
+	// then send nothing release the goroutine after this deadline.
+	InnerPeekTimeout time.Duration
 
 	// Logger for handler-level logging. Nil uses slog.Default().
 	Logger *slog.Logger
@@ -62,36 +69,10 @@ func NewSOCKS5Handler(cfg SOCKS5HandlerConfig) HandlerFunc {
 		connLogger := LoggerFromContext(ctx, logger)
 
 		// Step 1: SOCKS5 handshake (auth + CONNECT + scope + ratelimit).
-		// PeekConn embeds net.Conn so it satisfies the net.Conn interface.
-		// The negotiator returns enriched context with SOCKS5 metadata.
 		ctx, target, err := cfg.Negotiator.Negotiate(ctx, pc)
 		if err != nil {
-			// Sentinel errors: negotiator already sent the SOCKS5 reply.
-			switch {
-			case errors.Is(err, ErrSOCKS5BlockedByScope):
-				connLogger.Info("SOCKS5 target blocked by scope",
-					"target", SOCKS5TargetFromContext(ctx))
-				return nil
-			case errors.Is(err, ErrSOCKS5BlockedByRateLimit):
-				connLogger.Info("SOCKS5 target blocked by rate limit",
-					"target", SOCKS5TargetFromContext(ctx))
-				return nil
-			case errors.Is(err, ErrSOCKS5AuthFailed):
-				connLogger.Info("SOCKS5 authentication failed")
-				return nil
-			case errors.Is(err, ErrSOCKS5NoAcceptableMethods):
-				connLogger.Debug("SOCKS5 no acceptable auth methods")
-				return nil
-			case errors.Is(err, ErrSOCKS5UnsupportedCommand):
-				connLogger.Debug("SOCKS5 unsupported command")
-				return nil
-			case errors.Is(err, ErrSOCKS5UnsupportedAddrType):
-				connLogger.Debug("SOCKS5 unsupported address type")
-				return nil
-			default:
-				connLogger.Debug("SOCKS5 negotiation failed", "error", err)
-				return nil
-			}
+			handleSOCKS5NegotiateErr(ctx, err, connLogger)
+			return nil
 		}
 
 		connLogger = connLogger.With("target", target, "via", "socks5")
@@ -103,31 +84,76 @@ func NewSOCKS5Handler(cfg SOCKS5HandlerConfig) HandlerFunc {
 		}
 
 		// Step 2: TLS passthrough check.
-		if cfg.PassthroughList != nil {
-			host, _, _ := net.SplitHostPort(target)
-			if cfg.PassthroughList.Contains(host) {
-				connLogger.Debug("TLS passthrough relay", "target", target)
-				if err := RelayTLSPassthrough(ctx, pc, target, passDialOpts(cfg.BuildCfg)); err != nil {
-					connLogger.Debug("TLS passthrough ended", "error", err)
-				}
-				return nil
-			}
-		}
-
-		// Step 3: Build ConnectionStack.
-		stack, clientSnap, upstreamSnap, err := BuildConnectionStack(ctx, pc, target, cfg.BuildCfg)
-		if err != nil {
-			connLogger.Warn("stack build failed", "error", err)
+		if socks5Passthrough(ctx, cfg, pc, target, connLogger) {
 			return nil
 		}
 
-		connLogger.Debug("connection stack built")
+		// Step 3: inner-byte peek + dispatch (USK-762).
+		if !socks5ShouldRunTLSMITM(ctx, cfg, pc, target, connLogger) {
+			return nil
+		}
 
-		// Step 4: Hand off to the appropriate callback based on ALPN route.
-		dispatchStack(ctx, stack, clientSnap, upstreamSnap, target, cfg.BuildCfg, cfg.OnStack, cfg.OnHTTP2Stack)
-
+		// Step 4-5: TLS MITM path (existing behaviour).
+		runTLSMITM(ctx, cfg.BuildCfg, pc, target, cfg.OnStack, cfg.OnHTTP2Stack, connLogger)
 		return nil
 	}
+}
+
+// handleSOCKS5NegotiateErr maps the SOCKS5 negotiator's sentinel errors to
+// the appropriate log level so the handler's main loop stays small.
+func handleSOCKS5NegotiateErr(ctx context.Context, err error, logger *slog.Logger) {
+	switch {
+	case errors.Is(err, ErrSOCKS5BlockedByScope):
+		logger.Info("SOCKS5 target blocked by scope",
+			"target", SOCKS5TargetFromContext(ctx))
+	case errors.Is(err, ErrSOCKS5BlockedByRateLimit):
+		logger.Info("SOCKS5 target blocked by rate limit",
+			"target", SOCKS5TargetFromContext(ctx))
+	case errors.Is(err, ErrSOCKS5AuthFailed):
+		logger.Info("SOCKS5 authentication failed")
+	case errors.Is(err, ErrSOCKS5NoAcceptableMethods):
+		logger.Debug("SOCKS5 no acceptable auth methods")
+	case errors.Is(err, ErrSOCKS5UnsupportedCommand):
+		logger.Debug("SOCKS5 unsupported command")
+	case errors.Is(err, ErrSOCKS5UnsupportedAddrType):
+		logger.Debug("SOCKS5 unsupported address type")
+	default:
+		logger.Debug("SOCKS5 negotiation failed", "error", err)
+	}
+}
+
+// socks5Passthrough engages the TLS passthrough relay when the target
+// matches. Returns true when the relay was used (caller returns).
+func socks5Passthrough(ctx context.Context, cfg SOCKS5HandlerConfig, pc *PeekConn, target string, logger *slog.Logger) bool {
+	if cfg.PassthroughList == nil {
+		return false
+	}
+	host, _, _ := net.SplitHostPort(target)
+	if !cfg.PassthroughList.Contains(host) {
+		return false
+	}
+	logger.Debug("TLS passthrough relay", "target", target)
+	if err := RelayTLSPassthrough(ctx, pc, target, passDialOpts(cfg.BuildCfg)); err != nil {
+		logger.Debug("TLS passthrough ended", "error", err)
+	}
+	return true
+}
+
+// socks5ShouldRunTLSMITM peeks the inner byte stream and returns true when
+// the caller should run the TLS MITM path. Plain HTTP / h2c / bytechunk
+// branches are dispatched in-place; raw passthrough hosts skip the peek.
+func socks5ShouldRunTLSMITM(ctx context.Context, cfg SOCKS5HandlerConfig, pc *PeekConn, target string, logger *slog.Logger) bool {
+	if cfg.BuildCfg != nil && cfg.BuildCfg.ProxyConfig != nil &&
+		cfg.BuildCfg.ProxyConfig.IsRawPassthrough(target) {
+		return true
+	}
+	return dispatchInnerProtocol(ctx, pc, target, innerDispatchConfig{
+		PeekTimeout:  cfg.InnerPeekTimeout,
+		BuildCfg:     cfg.BuildCfg,
+		OnStack:      cfg.OnStack,
+		OnHTTP2Stack: cfg.OnHTTP2Stack,
+		Logger:       logger,
+	})
 }
 
 // dispatchSOCKS5OnConnect dispatches the (socks5, on_connect) lifecycle

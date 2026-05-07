@@ -16,6 +16,9 @@ func TestNewCONNECTHandler_SuccessfulPipeline(t *testing.T) {
 	handler := NewCONNECTHandler(CONNECTHandlerConfig{
 		Negotiator: NewCONNECTNegotiator(nil),
 		BuildCfg:   nil, // Will cause stack build to fail — that's OK for this test
+		// Short inner-peek so the test does not wait the production default
+		// (5s) for a client that sends no inner bytes.
+		InnerPeekTimeout: 50 * time.Millisecond,
 		OnStack: func(ctx context.Context, stack *ConnectionStack, clientSnap, upstreamSnap *envelope.TLSSnapshot, target string) {
 			stackReceived.Store(true)
 			defer stack.Close()
@@ -163,9 +166,10 @@ func TestNewCONNECTHandler_NotCONNECT(t *testing.T) {
 func TestNewCONNECTHandler_NilOnStack(t *testing.T) {
 	// When OnStack is nil, stack should be closed (not leaked)
 	handler := NewCONNECTHandler(CONNECTHandlerConfig{
-		Negotiator: NewCONNECTNegotiator(nil),
-		BuildCfg:   nil, // stack build will fail
-		OnStack:    nil,
+		Negotiator:       NewCONNECTNegotiator(nil),
+		BuildCfg:         nil, // stack build will fail
+		InnerPeekTimeout: 50 * time.Millisecond,
+		OnStack:          nil,
 	})
 
 	clientConn, serverConn := net.Pipe()
@@ -190,10 +194,11 @@ func TestNewCONNECTHandler_NilOnStack(t *testing.T) {
 func TestNewCONNECTHandler_NilScope_NilRateLimiter(t *testing.T) {
 	// Nil Scope and RateLimiter should not panic — just skip the checks
 	handler := NewCONNECTHandler(CONNECTHandlerConfig{
-		Negotiator:  NewCONNECTNegotiator(nil),
-		BuildCfg:    nil, // stack build will fail
-		Scope:       nil,
-		RateLimiter: nil,
+		Negotiator:       NewCONNECTNegotiator(nil),
+		BuildCfg:         nil, // stack build will fail
+		Scope:            nil,
+		RateLimiter:      nil,
+		InnerPeekTimeout: 50 * time.Millisecond,
 	})
 
 	clientConn, serverConn := net.Pipe()
@@ -244,9 +249,10 @@ func TestNewCONNECTHandler_ScopeAllowed(t *testing.T) {
 	}, nil)
 
 	handler := NewCONNECTHandler(CONNECTHandlerConfig{
-		Negotiator: NewCONNECTNegotiator(nil),
-		BuildCfg:   nil, // stack build fails — OK, just testing scope passes
-		Scope:      scope,
+		Negotiator:       NewCONNECTNegotiator(nil),
+		BuildCfg:         nil, // stack build fails — OK, just testing scope passes
+		Scope:            scope,
+		InnerPeekTimeout: 50 * time.Millisecond,
 	})
 
 	clientConn, serverConn := net.Pipe()

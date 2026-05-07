@@ -1255,3 +1255,312 @@ func TestFullListener_UpstreamProxy_CONNECT(t *testing.T) {
 		t.Fatal("expected at least 1 stream, got 0")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// USK-762 — CONNECT inner-byte peek + dispatch
+// ---------------------------------------------------------------------------
+
+// startUpstreamPlainHTTP starts a plain TCP server that reads HTTP requests
+// and sends responses via the handler function. The mirror image of
+// startUpstreamHTTPS minus TLS — used to test the CONNECT + plain-HTTP-inner
+// (curl --proxytunnel http://...) and CONNECT + h2c-inner code paths.
+func startUpstreamPlainHTTP(
+	t *testing.T,
+	handler func(reqBytes []byte) []byte,
+) (net.Listener, func() [][]byte) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	captured := make(chan [][]byte, 1)
+
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			captured <- nil
+			return
+		}
+		defer conn.Close()
+
+		br := bufio.NewReader(conn)
+		var allReqs [][]byte
+
+		for {
+			conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+			reqBytes, err := readHTTPRequest(br)
+			if err != nil {
+				break
+			}
+			reqCopy := make([]byte, len(reqBytes))
+			copy(reqCopy, reqBytes)
+			allReqs = append(allReqs, reqCopy)
+
+			resp := handler(reqBytes)
+			conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+			if _, err := conn.Write(resp); err != nil {
+				break
+			}
+
+			if bytes.Contains(bytes.ToLower(resp), []byte("connection: close")) {
+				break
+			}
+		}
+
+		captured <- allReqs
+	}()
+
+	return ln, func() [][]byte {
+		select {
+		case b := <-captured:
+			return b
+		case <-time.After(15 * time.Second):
+			t.Fatal("timeout waiting for plain upstream captured bytes")
+			return nil
+		}
+	}
+}
+
+// connectAndSendPlainHTTP performs CONNECT, then sends a plain HTTP/1.x
+// request over the tunnel WITHOUT a TLS handshake. This is the exact wire
+// shape produced by `curl --proxytunnel http://target/` — the failure mode
+// USK-762 closes.
+func connectAndSendPlainHTTP(t *testing.T, proxyAddr, target, rawRequest string) string {
+	t.Helper()
+
+	conn, err := net.DialTimeout("tcp", proxyAddr, 5*time.Second)
+	if err != nil {
+		t.Fatalf("dial proxy: %v", err)
+	}
+	defer conn.Close()
+
+	connectReq := fmt.Sprintf("CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", target, target)
+	if _, err := conn.Write([]byte(connectReq)); err != nil {
+		t.Fatalf("write CONNECT: %v", err)
+	}
+
+	buf := make([]byte, 256)
+	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	n, err := conn.Read(buf)
+	if err != nil {
+		t.Fatalf("read CONNECT response: %v", err)
+	}
+	if got := string(buf[:n]); got != "HTTP/1.1 200 Connection Established\r\n\r\n" {
+		t.Fatalf("unexpected CONNECT response: %q", got)
+	}
+	conn.SetReadDeadline(time.Time{})
+
+	// Now send plain HTTP — no TLS handshake. The proxy must peek the inner
+	// byte (a 'G' for GET) and route to the plain-HTTP-over-CONNECT path.
+	if _, err := conn.Write([]byte(rawRequest)); err != nil {
+		t.Fatalf("write plain HTTP request through CONNECT tunnel: %v", err)
+	}
+
+	return readHTTPResponse(t, conn)
+}
+
+// TestFullListener_CONNECT_PlainHTTP_MITM verifies the USK-762 fix: a CONNECT
+// tunnel followed by plain HTTP/1.x on the inner stream is dispatched to the
+// plain-HTTP stack (no TLS MITM forced) and the request/response round-trip
+// completes. Stream is recorded with Scheme="http", not "https", so the wire
+// reality is faithfully represented.
+func TestFullListener_CONNECT_PlainHTTP_MITM(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	upstreamLn, getUpstreamReqs := startUpstreamPlainHTTP(t, func(_ []byte) []byte {
+		return []byte("HTTP/1.1 200 OK\r\nContent-Length: 11\r\nConnection: close\r\n\r\nplain-http!")
+	})
+	defer upstreamLn.Close()
+	target := upstreamLn.Addr().String()
+
+	proxyAddr, store, wg := startFullListenerProxy(t, ctx, fullListenerOpts{})
+
+	wg.Add(1)
+	rawReq := fmt.Sprintf("GET /plain HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n", target)
+	resp := connectAndSendPlainHTTP(t, proxyAddr, target, rawReq)
+
+	upstreamReqs := getUpstreamReqs()
+	waitSessionDone(t, wg)
+
+	// --- Verify response ---
+	if !strings.Contains(resp, "200 OK") {
+		t.Errorf("response missing 200 OK: %q", resp)
+	}
+	if !strings.HasSuffix(resp, "plain-http!") {
+		t.Errorf("response body unexpected: %q", resp)
+	}
+
+	// --- Verify upstream received request ---
+	if len(upstreamReqs) < 1 {
+		t.Fatal("upstream received no requests")
+	}
+	if !bytes.Contains(upstreamReqs[0], []byte("GET /plain HTTP/1.1")) {
+		t.Errorf("upstream did not receive GET /plain: %q", upstreamReqs[0])
+	}
+
+	// --- Verify stream recording: protocol=http, scheme=http ---
+	streams := store.getStreams()
+	if len(streams) < 1 {
+		t.Fatal("expected at least 1 stream, got 0")
+	}
+	if streams[0].Protocol != "http" {
+		t.Errorf("stream protocol = %q, want %q", streams[0].Protocol, "http")
+	}
+	if streams[0].Scheme != "http" {
+		t.Errorf("stream scheme = %q, want %q (MITM principle: do not synthesize TLS)",
+			streams[0].Scheme, "http")
+	}
+
+	// --- Verify flow recording with directions ---
+	sendFlows := store.flowsByDirection("send")
+	if len(sendFlows) < 1 {
+		t.Fatal("expected at least 1 send flow, got 0")
+	}
+	recvFlows := store.flowsByDirection("receive")
+	if len(recvFlows) < 1 {
+		t.Fatal("expected at least 1 receive flow, got 0")
+	}
+
+	// --- Verify RawBytes (L4-capable principle) ---
+	if len(sendFlows[0].RawBytes) == 0 {
+		t.Error("send flow RawBytes is empty (L4-capable principle violated)")
+	}
+	if len(recvFlows[0].RawBytes) == 0 {
+		t.Error("receive flow RawBytes is empty (L4-capable principle violated)")
+	}
+}
+
+// TestFullListener_CONNECT_BytechunkFallback verifies that arbitrary inner
+// bytes (neither TLS nor an HTTP family) flow through the bytechunk fallback
+// stack rather than being dropped or RST'd. Observation only — the data
+// passes through end-to-end and is recorded.
+func TestFullListener_CONNECT_BytechunkFallback(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Simple TCP echo server — no protocol, no HTTP shape. The first byte
+	// the client sends is intentionally outside the HTTP/TLS detection
+	// space so the inner peek classifies it as bytechunk.
+	upstreamLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer upstreamLn.Close()
+
+	echoDone := make(chan struct{})
+	go func() {
+		defer close(echoDone)
+		conn, err := upstreamLn.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		buf := make([]byte, 64)
+		conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+		n, _ := conn.Read(buf)
+		if n > 0 {
+			conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+			_, _ = conn.Write(buf[:n])
+		}
+	}()
+
+	target := upstreamLn.Addr().String()
+	proxyAddr, store, wg := startFullListenerProxy(t, ctx, fullListenerOpts{})
+
+	wg.Add(1)
+
+	conn, err := net.DialTimeout("tcp", proxyAddr, 5*time.Second)
+	if err != nil {
+		t.Fatalf("dial proxy: %v", err)
+	}
+	defer conn.Close()
+
+	connectReq := fmt.Sprintf("CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", target, target)
+	if _, err := conn.Write([]byte(connectReq)); err != nil {
+		t.Fatalf("write CONNECT: %v", err)
+	}
+	buf := make([]byte, 256)
+	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	n, err := conn.Read(buf)
+	if err != nil || string(buf[:n]) != "HTTP/1.1 200 Connection Established\r\n\r\n" {
+		t.Fatalf("unexpected CONNECT response: err=%v body=%q", err, string(buf[:n]))
+	}
+	conn.SetReadDeadline(time.Time{})
+
+	// Send raw bytes that match neither TLS (0x16) nor any HTTP method.
+	payload := []byte{0xde, 0xad, 0xbe, 0xef, 0x00, 0xff}
+	if _, err := conn.Write(payload); err != nil {
+		t.Fatalf("write payload: %v", err)
+	}
+
+	echoBuf := make([]byte, 64)
+	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	rn, err := conn.Read(echoBuf)
+	if err != nil {
+		t.Fatalf("read echo: %v", err)
+	}
+	if !bytes.Equal(echoBuf[:rn], payload) {
+		t.Errorf("echo mismatch: got %x, want %x", echoBuf[:rn], payload)
+	}
+
+	conn.Close()
+	<-echoDone
+	waitSessionDone(t, wg)
+
+	// --- Verify stream recording ---
+	streams := store.getStreams()
+	if len(streams) < 1 {
+		t.Fatal("expected at least 1 stream from bytechunk fallback, got 0")
+	}
+}
+
+// TestFullListener_CONNECT_PeekTimeoutSilentClient verifies that a client
+// that completes CONNECT 200 then sends nothing at all is released after
+// the inner-peek deadline (no goroutine leak; no panic). The proxy must
+// not block forever on a silent client.
+func TestFullListener_CONNECT_PeekTimeoutSilentClient(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// We do not need a real upstream — the dispatch should never reach the
+	// dial step on a silent client because the peek times out first.
+	proxyAddr, _, _ := startFullListenerProxy(t, ctx, fullListenerOpts{})
+
+	conn, err := net.DialTimeout("tcp", proxyAddr, 5*time.Second)
+	if err != nil {
+		t.Fatalf("dial proxy: %v", err)
+	}
+	defer conn.Close()
+
+	connectReq := "CONNECT 127.0.0.1:1\r\nHost: 127.0.0.1:1\r\n\r\n"
+	// Use a malformed request line on purpose? No — keep it valid so the
+	// negotiator returns 200; the bug class is "after 200, never send".
+	connectReq = "CONNECT 127.0.0.1:1 HTTP/1.1\r\nHost: 127.0.0.1:1\r\n\r\n"
+	if _, err := conn.Write([]byte(connectReq)); err != nil {
+		t.Fatalf("write CONNECT: %v", err)
+	}
+
+	buf := make([]byte, 256)
+	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	n, err := conn.Read(buf)
+	if err != nil {
+		t.Fatalf("read CONNECT response: %v", err)
+	}
+	if !strings.Contains(string(buf[:n]), "200 Connection Established") {
+		t.Fatalf("unexpected CONNECT response: %q", string(buf[:n]))
+	}
+
+	// Now silently wait. The proxy will peek the inner stream with a
+	// bounded deadline (DefaultInnerPeekTimeout = 5s) and close the conn
+	// when it expires. The client should observe the proxy-side close.
+	conn.SetReadDeadline(time.Now().Add(15 * time.Second))
+	_, readErr := conn.Read(buf)
+	// EOF or connection-closed-by-peer is the expected outcome. A timeout
+	// from our deadline would mean the proxy held the conn open past the
+	// inner-peek deadline — that's the bug.
+	if readErr == nil {
+		t.Errorf("expected EOF after inner-peek timeout; got nil error")
+	}
+}

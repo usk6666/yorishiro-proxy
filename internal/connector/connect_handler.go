@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net"
 	"strconv"
+	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/http2"
@@ -72,6 +73,12 @@ type CONNECTHandlerConfig struct {
 	// closed immediately after Pool.Put.
 	OnHTTP2Stack OnHTTP2StackFunc
 
+	// InnerPeekTimeout bounds how long the handler waits for the first
+	// inner byte after CONNECT 200 (USK-762). Zero means
+	// DefaultInnerPeekTimeout. Misbehaving clients that complete CONNECT
+	// then send nothing release the goroutine after this deadline.
+	InnerPeekTimeout time.Duration
+
 	// Logger for handler-level logging. Nil uses slog.Default().
 	Logger *slog.Logger
 }
@@ -118,59 +125,114 @@ func NewCONNECTHandler(cfg CONNECTHandlerConfig) HandlerFunc {
 
 		connLogger = connLogger.With("target", target)
 
-		// Step 2: TargetScope check.
-		if cfg.Scope != nil && cfg.Scope.HasRules() {
-			host, portStr, splitErr := net.SplitHostPort(target)
-			if splitErr != nil {
-				connLogger.Debug("invalid CONNECT target", "error", splitErr)
-				return nil
-			}
-			port, _ := strconv.Atoi(portStr)
-			allowed, reason := cfg.Scope.CheckTarget("https", host, port, "")
-			if !allowed {
-				connLogger.Info("CONNECT target blocked by scope",
-					"reason", reason)
-				return nil
-			}
-		}
-
-		// Step 3: RateLimit check.
-		if cfg.RateLimiter != nil {
-			host, _, _ := net.SplitHostPort(target)
-			if denial := cfg.RateLimiter.Check(host); denial != nil {
-				connLogger.Info("CONNECT target blocked by rate limit",
-					"limit_type", denial.LimitType,
-					"effective_rps", denial.EffectiveRPS)
-				return nil
-			}
-		}
-
-		// Step 4: TLS passthrough check.
-		if cfg.PassthroughList != nil {
-			host, _, _ := net.SplitHostPort(target)
-			if cfg.PassthroughList.Contains(host) {
-				connLogger.Debug("TLS passthrough relay", "target", target)
-				if err := RelayTLSPassthrough(ctx, pc, target, passDialOpts(cfg.BuildCfg)); err != nil {
-					connLogger.Debug("TLS passthrough ended", "error", err)
-				}
-				return nil
-			}
-		}
-
-		// Step 5: Build ConnectionStack.
-		stack, clientSnap, upstreamSnap, err := BuildConnectionStack(ctx, pc, target, cfg.BuildCfg)
-		if err != nil {
-			connLogger.Warn("stack build failed", "error", err)
+		// Step 2-3: scope and rate-limit policy checks.
+		if !connectPolicyAllow(cfg, target, connLogger) {
 			return nil
 		}
 
-		connLogger.Debug("connection stack built")
+		// Step 4: TLS passthrough check.
+		if connectPassthrough(ctx, cfg, pc, target, connLogger) {
+			return nil
+		}
 
-		// Step 6: Hand off to the appropriate callback based on ALPN route.
-		dispatchStack(ctx, stack, clientSnap, upstreamSnap, target, cfg.BuildCfg, cfg.OnStack, cfg.OnHTTP2Stack)
+		// Step 5: inner-byte peek + dispatch (USK-762). Returns true when
+		// the peek classified the inner stream as TLS and the caller should
+		// drive the existing BuildConnectionStack path.
+		if !connectShouldRunTLSMITM(ctx, cfg, pc, target, connLogger) {
+			return nil
+		}
 
+		// Step 6: TLS MITM path (existing behaviour).
+		runTLSMITM(ctx, cfg.BuildCfg, pc, target, cfg.OnStack, cfg.OnHTTP2Stack, connLogger)
 		return nil
 	}
+}
+
+// connectPolicyAllow runs the scope and rate-limit gates. Returns false when
+// the connection has been rejected (a log line was emitted; caller returns).
+func connectPolicyAllow(cfg CONNECTHandlerConfig, target string, logger *slog.Logger) bool {
+	if cfg.Scope != nil && cfg.Scope.HasRules() {
+		host, portStr, splitErr := net.SplitHostPort(target)
+		if splitErr != nil {
+			logger.Debug("invalid CONNECT target", "error", splitErr)
+			return false
+		}
+		port, _ := strconv.Atoi(portStr)
+		allowed, reason := cfg.Scope.CheckTarget("https", host, port, "")
+		if !allowed {
+			logger.Info("CONNECT target blocked by scope", "reason", reason)
+			return false
+		}
+	}
+	if cfg.RateLimiter != nil {
+		host, _, _ := net.SplitHostPort(target)
+		if denial := cfg.RateLimiter.Check(host); denial != nil {
+			logger.Info("CONNECT target blocked by rate limit",
+				"limit_type", denial.LimitType,
+				"effective_rps", denial.EffectiveRPS)
+			return false
+		}
+	}
+	return true
+}
+
+// connectPassthrough handles the TLS passthrough relay. Returns true when
+// the relay engaged (caller returns).
+func connectPassthrough(ctx context.Context, cfg CONNECTHandlerConfig, pc *PeekConn, target string, logger *slog.Logger) bool {
+	if cfg.PassthroughList == nil {
+		return false
+	}
+	host, _, _ := net.SplitHostPort(target)
+	if !cfg.PassthroughList.Contains(host) {
+		return false
+	}
+	logger.Debug("TLS passthrough relay", "target", target)
+	if err := RelayTLSPassthrough(ctx, pc, target, passDialOpts(cfg.BuildCfg)); err != nil {
+		logger.Debug("TLS passthrough ended", "error", err)
+	}
+	return true
+}
+
+// connectShouldRunTLSMITM peeks the inner byte stream and returns true when
+// the caller should run the TLS MITM path. Returns false on every other
+// outcome (plain HTTP / h2c / bytechunk dispatched in-place, or peek
+// failed and the connection was closed).
+//
+// Raw passthrough hosts (config-level) skip the inner peek entirely so the
+// IsRawPassthrough override remains identical to its pre-USK-762 behaviour.
+func connectShouldRunTLSMITM(ctx context.Context, cfg CONNECTHandlerConfig, pc *PeekConn, target string, logger *slog.Logger) bool {
+	if cfg.BuildCfg != nil && cfg.BuildCfg.ProxyConfig != nil &&
+		cfg.BuildCfg.ProxyConfig.IsRawPassthrough(target) {
+		return true
+	}
+	return dispatchInnerProtocol(ctx, pc, target, innerDispatchConfig{
+		PeekTimeout:  cfg.InnerPeekTimeout,
+		BuildCfg:     cfg.BuildCfg,
+		OnStack:      cfg.OnStack,
+		OnHTTP2Stack: cfg.OnHTTP2Stack,
+		Logger:       logger,
+	})
+}
+
+// runTLSMITM drives the existing BuildConnectionStack TLS path and dispatches
+// the resulting stack to OnStack / OnHTTP2Stack. Shared by CONNECT and SOCKS5
+// handlers so the TLS branch behaves identically across tunnel entry points.
+func runTLSMITM(
+	ctx context.Context,
+	buildCfg *BuildConfig,
+	pc *PeekConn,
+	target string,
+	onStack OnStackFunc,
+	onHTTP2Stack OnHTTP2StackFunc,
+	logger *slog.Logger,
+) {
+	stack, clientSnap, upstreamSnap, err := BuildConnectionStack(ctx, pc, target, buildCfg)
+	if err != nil {
+		logger.Warn("stack build failed", "error", err)
+		return
+	}
+	logger.Debug("connection stack built")
+	dispatchStack(ctx, stack, clientSnap, upstreamSnap, target, buildCfg, onStack, onHTTP2Stack)
 }
 
 // dispatchStack picks between OnHTTP2Stack (when the stack has a pooled
