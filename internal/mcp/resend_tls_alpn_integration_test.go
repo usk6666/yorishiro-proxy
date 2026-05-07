@@ -1,5 +1,14 @@
 //go:build e2e && !e2e_smoke
 
+// USK-756 follow-up: promoting this file to the smoke tier requires
+// extracting `callResendHTTP` / `decodeStructuredResult` /
+// `seedRawStream` (currently colocated with `e2e && !e2e_smoke`
+// integration tests) into a smoke-eligible helper file. That refactor
+// is out of scope for USK-756 — the smoke happy-path coverage now
+// lives in internal/mcptest/resend_smoke_integration_test.go via the
+// production JSON-RPC harness, which is the canonical smoke surface.
+// Re-evaluate promoting this file when the helper extraction lands.
+
 package mcp
 
 // resend_tls_alpn_integration_test.go — USK-717 / USK-718 acceptance gate

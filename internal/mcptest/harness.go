@@ -36,6 +36,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -85,6 +86,15 @@ type HarnessOptions struct {
 	// "error" so test output stays quiet; set "debug" while iterating
 	// on a flaky test.
 	LogLevel string
+
+	// ConfigJSON, when non-empty, is written to a temp file and passed
+	// as the `-config <path>` flag to mcpserver.Run. Use this to load
+	// proxy configuration that has no dedicated CLI flag (Plugins,
+	// SafetyFilter rules, body-spill limits, etc.). The string MUST
+	// parse as a yorishiro-proxy config JSON document; mcpserver.Run
+	// rejects malformed input at boot, so misconfigured tests fail loudly
+	// in waitForListening rather than at first tool call.
+	ConfigJSON string
 }
 
 // ToolCall is a (name, args) pair used for HarnessOptions.PreStartTools.
@@ -311,7 +321,21 @@ func buildRunArgs(t *testing.T, opts HarnessOptions, token string) []string {
 	if opts.TLSFingerprint != "" {
 		args = append(args, "-tls-fingerprint", opts.TLSFingerprint)
 	}
+	if opts.ConfigJSON != "" {
+		cfgPath := filepath.Join(t.TempDir(), "harness-config.json")
+		if err := writeConfigFile(cfgPath, opts.ConfigJSON); err != nil {
+			t.Fatalf("mcptest: write config file: %v", err)
+		}
+		args = append(args, "-config", cfgPath)
+	}
 	return args
+}
+
+// writeConfigFile materialises HarnessOptions.ConfigJSON to disk so that
+// mcpserver.Run's `-config` flag can pick it up. Split out so tests that
+// fake the filesystem can swap it without touching buildRunArgs.
+func writeConfigFile(path, content string) error {
+	return os.WriteFile(path, []byte(content), 0o600)
 }
 
 // buildUpstream constructs the optional upstream test server.
