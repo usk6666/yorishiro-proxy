@@ -423,13 +423,14 @@ func assembleLiveManager(
 	passthrough *connector.PassthroughList,
 	rateLimiter *connector.RateLimiter,
 	safetyEngine *safety.Engine,
+	perProtoSafety PerProtocolSafetyEngines,
 	hostTLSRegistry *transport.HostTLSRegistry,
 	logger *slog.Logger,
 ) (*proxybuild.Manager, error) {
 	buildCfg := NewLiveBuildConfig(appCtx, cfg, proxyCfg, issuer, pluginv2Engine, store, hostTLSRegistry, logger)
 	return NewLiveManager(cfg, proxyCfg, store, issuer, pluginv2Engine,
 		holdQueue, httpInterceptEngine, wsInterceptEngine, grpcInterceptEngine,
-		httpTransformEngine, passthrough, rateLimiter, safetyEngine, buildCfg, logger)
+		httpTransformEngine, passthrough, rateLimiter, safetyEngine, perProtoSafety, buildCfg, logger)
 }
 
 // NewLiveBuildConfig assembles the connector.BuildConfig consumed by every
@@ -513,6 +514,7 @@ func NewLiveManager(
 	passthrough *connector.PassthroughList,
 	rateLimiter *connector.RateLimiter,
 	safetyEngine *safety.Engine,
+	perProtoSafety PerProtocolSafetyEngines,
 	buildCfg *connector.BuildConfig,
 	logger *slog.Logger,
 ) (*proxybuild.Manager, error) {
@@ -531,6 +533,9 @@ func NewLiveManager(
 			WSInterceptEngine:   wsInterceptEngine,
 			GRPCInterceptEngine: grpcInterceptEngine,
 			HTTPTransformEngine: httpTransformEngine,
+			HTTPSafetyEngine:    perProtoSafety.HTTP,
+			WSSafetyEngine:      perProtoSafety.WS,
+			GRPCSafetyEngine:    perProtoSafety.GRPC,
 			PeekTimeout:         cfg.PeekTimeout,
 			MaxConnections:      cfg.MaxConnections,
 			PassthroughList:     passthrough,
@@ -554,8 +559,9 @@ func NewLiveManager(
 
 	// proxyCfg + issuer are reachable via buildCfg; kept on the parameter
 	// list for future cleanup work (USK-697 connector-adapter migration).
-	// safetyEngine is reserved for the same wave (per-protocol SafetyEngine
-	// wiring through proxybuild.Deps).
+	// safetyEngine is the read-only Policy Layer view consumed by the
+	// `security` MCP tool — wired via mcp.NewPipeline in
+	// buildMCPComponents, not via proxybuild.Deps.
 	_ = proxyCfg
 	_ = issuer
 	_ = safetyEngine

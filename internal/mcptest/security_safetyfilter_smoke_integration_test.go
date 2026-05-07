@@ -55,15 +55,11 @@ const safetyFilterDestructiveSQLConfig = `{
 // so any divergence in the result narrows directly to
 // pipeline.SafetyStep behavior.
 //
-// CURRENT STATE (USK-760): the SafetyFilter engine is built from
-// config but is NOT wired into proxybuild.Deps.HTTPSafetyEngine, so
-// the live SafetyStep receives nil and falls through to "pass". This
-// test is the smoking gun for that bug; it is t.Skip'd here per the
-// MITM-diagnostic test philosophy (file the gap, do not weaken the
-// assertion). Remove the Skip when USK-760 lands.
+// USK-760 closed the wiring gap: NewLiveManager now populates
+// proxybuild.Deps.HTTPSafetyEngine via InitPerProtocolSafetyEngines,
+// so the live SafetyStep enforces the configured presets and this
+// test passes against the production server assembly.
 func TestE2E_SafetyFilter_BlocksDestructiveSQL(t *testing.T) {
-	t.Skip("USK-760: SafetyFilter not yet wired into live HTTP data path (Deps.HTTPSafetyEngine not populated by NewLiveManager). Engine is built and observable via security.get_safety_filter, but SafetyStep falls through to pass. Remove this Skip when USK-760 closes.")
-
 	upstreamAddr, upstreamObs := startObservedUpstream(t)
 
 	h := mcptest.StartHarness(t, mcptest.HarnessOptions{

@@ -273,6 +273,15 @@ func assembleAndRunMCPServer(
 	if err != nil {
 		return err
 	}
+	// Build the per-protocol live SafetyEngines from the same source-of-truth
+	// (cfg.SafetyFilter) so the live pipeline.SafetyStep enforces the
+	// configured rules. The read-only `safetyEngine` above feeds the
+	// `security` MCP tool's Policy Layer view; this trio drives the data
+	// path. (USK-760)
+	perProtoSafety, err := InitPerProtocolSafetyEngines(cfg, proxyCfg)
+	if err != nil {
+		return err
+	}
 
 	// HostTLS registry + TLS transport for the typed-resend MCP tools.
 	// Also reachable via configure_tool surfaces.
@@ -284,7 +293,7 @@ func assembleAndRunMCPServer(
 
 	manager, err := assembleLiveManager(ctx, cfg, proxyCfg, store, issuer, pluginv2Engine,
 		holdQueue, httpInterceptEngine, wsInterceptEngine, grpcInterceptEngine,
-		httpTransformEngine, passthrough, rateLimiter, safetyEngine, hostTLSRegistry, logger)
+		httpTransformEngine, passthrough, rateLimiter, safetyEngine, perProtoSafety, hostTLSRegistry, logger)
 	if err != nil {
 		return err
 	}

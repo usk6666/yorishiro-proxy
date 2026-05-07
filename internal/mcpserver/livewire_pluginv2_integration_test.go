@@ -135,6 +135,7 @@ func setupLiveProxy(t *testing.T, pluginName, pluginScript string) *liveProxy {
 		httpTransformEngine,
 		(*connector.PassthroughList)(nil), (*connector.RateLimiter)(nil),
 		(*safety.Engine)(nil),
+		PerProtocolSafetyEngines{},
 		buildCfg, logger)
 	if err != nil {
 		engine.Close()
