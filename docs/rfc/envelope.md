@@ -465,7 +465,61 @@ package wslayer
 // New wraps an already-upgraded bidirectional byte stream in a WebSocket
 // layer. The reader may be a bufio.Reader holding pre-upgrade buffered
 // bytes from HTTP/1 layer detachment.
+//
+// The same constructor serves both transport modes:
+//   - HTTP/1.1 Upgrade (RFC 6455): (reader, writer, closer) is the triple
+//     returned by http1.Layer.DetachStream(). Wire framing is full WS.
+//   - HTTP/2 extended CONNECT (RFC 8441) — "h2 mode": (reader, writer,
+//     closer) is the per-stream byte triple returned by
+//     http2.Layer.DetachStream(streamID). The Layer MUST be constructed
+//     in h2 mode (selected via Option / Role pair documented at
+//     implementation time) so that the framing rules below are honoured.
+//
+// h2-mode semantics (normative):
+//   - **Masking.** Per RFC 8441 §5.3, client→server WS frames over an
+//     HTTP/2 stream MUST NOT have the MASK bit set, regardless of Role.
+//     The Layer MUST emit unmasked frames in both directions in h2 mode
+//     and MUST surface a *layer.StreamError on receive if a peer sets
+//     MASK=1 (RFC 8441 §5.3 violation).
+//   - **Termination.** Stream end is signaled by HTTP/2 END_STREAM, NOT
+//     by a WS Close frame. The Layer in h2 mode MUST NOT generate a WS
+//     Close frame on stream termination, and MUST tolerate (record but
+//     not double-close) an inbound WS Close frame from the peer.
+//   - **No `Connection`/`Upgrade` headers.** Those HTTP/1.1 hop-by-hop
+//     headers are absent from extended CONNECT; the Layer relies solely
+//     on the per-stream byte stream surfaced by http2.Layer.DetachStream.
 func New(reader io.Reader, writer io.Writer, closer io.Closer, role Role) layer.Layer
+```
+
+For the HTTP/2 extended CONNECT path, http2.Layer exposes a per-stream variant of `DetachStream` that yields a `(reader, writer, closer)` triple bound to a single stream — distinct from http1's connection-level variant:
+
+```go
+// DetachStream tears down http2.Layer's framing for one stream and returns
+// a per-stream byte reader / writer / closer triple, leaving the rest of
+// the HTTP/2 connection (sibling streams, HPACK state, connection-level
+// flow control) untouched. The returned reader emits the stream's DATA
+// payload bytes in arrival order (END_STREAM surfaces as io.EOF on the
+// reader); the returned writer accepts opaque bytes and frames them as
+// DATA on the same stream id. closer terminates the per-stream framing
+// without closing the connection.
+//
+// Used in conjunction with ws.New (h2 mode) to swap a single stream into
+// WebSocket framing under RFC 8441 extended CONNECT, with all sibling
+// streams continuing as standard HTTP/2.
+//
+// Bytes that arrived on the stream between the trigger envelope (the
+// 2xx response to the extended CONNECT) and the DetachStream call are
+// surfaced on the returned reader in arrival order — the per-stream
+// BodyBuffer (§9.1 revised resolution) is the source of truth, so DATA
+// frames the server sent immediately after the 2xx are not lost. Callers
+// MUST drain the reader before generating new outbound DATA on the
+// per-stream writer to preserve causal order on the wire.
+//
+// Distinct from http1.Layer.DetachStream(): the http2 variant takes a
+// stream id argument and returns io.ReadCloser / io.WriteCloser, because
+// the underlying HTTP/2 connection survives detachment and the per-stream
+// framing layer needs its own Close hook.
+func (l *Layer) DetachStream(streamID string) (io.ReadCloser, io.WriteCloser, func() error, error)
 ```
 
 ```go
@@ -513,6 +567,88 @@ func (s *ConnectionStack) ReplaceUpstreamTop(l layer.Layer) (old layer.Layer)
 ```
 
 The stack is mutable — WebSocket Upgrade is expressed as `ReplaceClientTop(wsLayer)`. Session observes the current topmost channel at the start of each iteration; when a replacement happens, the existing goroutines must be signaled to tear down and restart on the new channel (see §4.3).
+
+#### 3.4.1 Per-Stream Sub-Stack Overlay (HTTP/2 Extended CONNECT)
+
+`ReplaceClientTop` / `ReplaceUpstreamTop` swap the *connection-level* topmost layer. That is the right primitive for HTTP/1.1 → WebSocket Upgrade (where the whole connection becomes WS) but it is **structurally wrong** for the HTTP/2 extended CONNECT case (RFC 8441), because an HTTP/2 connection multiplexes many concurrent streams. Replacing the connection-level topmost layer would tear down framing for *every* sibling stream when only the extended-CONNECT stream needs WebSocket semantics.
+
+To localize the swap to a single stream without disturbing siblings, `ConnectionStack` carries a per-stream **sub-stack overlay** keyed by stream id. The overlay is empty by default; the connection-level chain is unchanged when no entry is registered. When an extended CONNECT swap occurs (USK-765), the orchestrator constructs a `ws.Layer` pair in h2 mode (see §3.3.2) over the per-stream byte triple returned by `http2.Layer.DetachStream(streamID)` and registers it on the overlay for that stream id only.
+
+```go
+package connector
+
+type ConnectionStack struct {
+    ConnID string
+    Client struct {
+        Layers  []layer.Layer
+        Topmost layer.Layer
+    }
+    Upstream struct {
+        Layers  []layer.Layer
+        Topmost layer.Layer
+    }
+
+    // streamSubStacks holds per-stream Layer overlays installed by
+    // protocol upgrades that affect a single h2 stream (e.g. RFC 8441
+    // extended CONNECT → WebSocket-over-h2). Empty by default; the
+    // connection-level Topmost is the source of truth when no entry
+    // is registered for a stream id.
+    //
+    // Map key is envelope.StreamID (the same string returned by
+    // layer.Channel.StreamID()). Values are stream-scoped Layer pairs
+    // that own the per-stream byte triple obtained via
+    // http2.Layer.DetachStream(streamID).
+    streamSubStacks map[string]*sideSubStack
+}
+
+type sideSubStack struct {
+    Client   layer.Layer // ws.Layer in h2 mode (RoleServer)
+    Upstream layer.Layer // ws.Layer in h2 mode (RoleClient)
+}
+
+// RegisterStreamSubStack installs a per-stream Layer pair on `streamID`.
+// The connection-level Layers are unchanged. Sibling streams are
+// unaffected and continue to be processed by the connection-level h2
+// Layer.
+//
+// Single-writer invariant: registration MUST happen exactly once per
+// stream id, on the same goroutine that observed the trigger envelope
+// (the extended CONNECT response), under the existing ConnectionStack
+// mutex. Re-registration on the same id is a programming error and
+// returns an error without mutating state.
+func (s *ConnectionStack) RegisterStreamSubStack(streamID string, client, upstream layer.Layer) error
+
+// ClientTopmostForStream returns the per-stream client Layer if a
+// sub-stack is registered for streamID; otherwise it falls back to
+// ClientTopmost(). Pipeline / Session per-stream channel iteration
+// MUST consult this method (or the symmetric upstream variant) rather
+// than ClientTopmost() directly.
+func (s *ConnectionStack) ClientTopmostForStream(streamID string) layer.Layer
+
+// UpstreamTopmostForStream is the upstream-side counterpart of
+// ClientTopmostForStream.
+func (s *ConnectionStack) UpstreamTopmostForStream(streamID string) layer.Layer
+```
+
+**Normative invariants:**
+
+- **Multiplex isolation (MUST).** Registering a sub-stack on stream N MUST NOT affect any other stream on the same h2 connection. Sibling streams continue to be processed by the connection-level HTTP/2 Layer with no observable change.
+- **Per-stream lookup is the source of truth (MUST).** Pipeline Steps and Session loops that operate on a specific stream MUST resolve the topmost via `*ForStream(streamID)`. The plain `ClientTopmost()` / `UpstreamTopmost()` accessors remain valid only for the connection-level fallback (e.g. building the initial channel iterator) — they MUST NOT be used to fetch the framing layer for a stream that may have been swapped. Whether the per-stream lookup is achieved via `*ForStream` calls on `ConnectionStack` or by carrying a sub-stack reference inside the per-stream `layer.Channel` is an implementation detail of the connector / session glue — pick one and keep it consistent within a single milestone.
+- **Sub-stack lifetime tracks the stream (MUST).** When the underlying h2 stream reaches `complete` / `error` / `reset`, the sub-stack entry is removed and its Layer pair Closed. The connection-level Layers remain alive for sibling streams.
+- **Goroutine safety (MUST).** All `streamSubStacks` mutations and reads happen under the existing `ConnectionStack` mutex. The map itself is never exposed; callers interact only via the `RegisterStreamSubStack` / `*ForStream` API surface.
+- **Recognized `:protocol` values.** Only `:protocol = "websocket"` triggers a sub-stack swap in this milestone. Other `:protocol` values are a forward-compat extension point and MUST currently produce no swap: the stream falls back to the connection-level h2 Layer with the unrecognized value recorded as a stream-level anomaly. The policy for additional `:protocol` registrations is deferred to a follow-up.
+
+**Why this design (option #2 over #1 / #3):**
+
+- **#1 — per-stream `ConnectionStack` (full refactor)** would push every connection-level concern (HPACK state, connection-level flow control, write serialization) into per-stream copies. Rejected: structurally invalid for h2.
+- **#3 — `bytechunk` fallback** would record the extended-CONNECT stream as raw bytes only, abandoning structured WS observation for any h2-mode wss endpoint. Rejected: violates the §1.4 L7-first principle whenever the stream is in fact a recognizable WS conversation.
+- **#2 — sub-stack overlay (this design)** localizes the swap to the single affected stream, leaves connection-level h2 Layer intact for siblings, and keeps WS framing observable in L7. The cost is one extra map and the `*ForStream` indirection; both are O(1) on the hot path.
+
+**Out of scope for this section (deferred):**
+
+- Default-Chrome `wss://` end-to-end ergonomics depend on USK-763 (deferred); the overlay design is independent of that work.
+- HTTP/3 / QUIC extended CONNECT is a separate milestone; the overlay is described against the HTTP/2 framing surface only.
+- gRPC / SSE behavior under extended CONNECT is unchanged: those layers do not participate in extended-CONNECT-driven swaps.
 
 ### 3.5 Pipeline Step Categorization
 
@@ -697,6 +833,61 @@ HTTP/2 layer internally handles:
 
 Upstream `http2.Layer.OpenStream()` is the API for Session/Job to request a new outbound stream on an existing upstream connection. Connection pool key is `(target_host, tls_config_hash)`; pool management is out of scope for this RFC (§2).
 
+### 4.5 HTTP/2 Extended CONNECT → WebSocket (RFC 8441)
+
+```
+Initial stack (per-connection, unchanged from §4.4):
+  Client:   [TCP → TLS(ALPN=h2) → HTTP/2]  (event-granular)
+  Upstream: [TCP → TLS(ALPN=h2) → HTTP/2]  (event-granular, pooled)
+
+handleStream(clientStreamChan):
+  firstHeaders := clientStreamChan.Next(ctx)
+
+  // Recognize extended CONNECT: :method=CONNECT + :protocol=websocket
+  // (HTTPMessage.Method=="CONNECT", HTTPMessage.ConnectProtocol=="websocket").
+  // The h2 Layer surfaces :protocol via HTTPMessage.ConnectProtocol — the
+  // ENABLE_CONNECT_PROTOCOL settings + parse path landed in USK-764.
+  if isExtendedConnectWS(firstHeaders):
+    upstreamStreamChan := upstreamH2.OpenStream(ctx)
+
+    // Wait for the 200 response on the same stream that signals
+    // server-side acceptance of the extended CONNECT.
+    if !awaitExtendedConnectAccept(upstreamStreamChan):
+      // Server rejected; stream falls back to standard h2 handling
+      // (the response body, if any, flows through HTTPAggregatorLayer).
+      // No swap occurs — return to the standard §4.4 path.
+      return
+
+    // Per-stream byte detachment: framing for THIS stream only is
+    // peeled off the connection-level h2 Layer. DetachStream surfaces
+    // any DATA bytes that arrived between the 2xx and this call on the
+    // returned reader (BodyBuffer drain) — see §3.3.2 DetachStream doc.
+    cR, cW, cClose, _ := clientH2.DetachStream(streamID)
+    uR, uW, uClose, _ := upstreamH2.DetachStream(streamID)
+
+    // Construct ws.Layer pair in h2 mode (no MASK; END_STREAM-driven
+    // termination — see §3.3.2 ws-layer h2-mode contract).
+    clientWS   := wslayer.New(cR, cW, cClose, RoleServer /* h2 mode */)
+    upstreamWS := wslayer.New(uR, uW, uClose, RoleClient /* h2 mode */)
+
+    // Register on the per-stream sub-stack overlay (§3.4.1). The
+    // connection-level Layers stay live and continue serving sibling
+    // streams — only THIS stream id swaps to WS framing.
+    stack.RegisterStreamSubStack(streamID, clientWS, upstreamWS)
+
+    // Pipeline / Session iterate the swapped stream via
+    // ClientTopmostForStream(streamID) / UpstreamTopmostForStream(streamID).
+    // Single-channel layers (wslayer) yield exactly one Channel on
+    // Channels() then close, so reading once is sufficient.
+    Session.RunSession(<-clientWS.Channels(), staticDial(<-upstreamWS.Channels()), pipeline)
+  else:
+    // (existing §4.4 fork: gRPC or plain HTTP/2)
+```
+
+The crucial difference from §4.3 (HTTP/1.1 → WS) is that the underlying connection is **not** consumed by the swap. `clientH2` and `upstreamH2` keep running for every other stream on the same h2 connection; only stream id N is detached and rewrapped.
+
+The `:protocol=websocket` recognition relies on HTTPMessage.ConnectProtocol carrying the parsed `:protocol` pseudo-header value (USK-764 / PR #754). Other `:protocol` values currently produce no swap — see §3.4.1 *Recognized `:protocol` values*.
+
 ---
 
 ## 5. Variant Snapshot (unchanged)
@@ -807,7 +998,9 @@ N6.7: HTTP/2 Layer Split (aftermath)  [BLOCKS N7]
 N7: Application Layers
     grpclayer: consumes event-granular HTTP/2 Channel, emits
                GRPCStartMessage / GRPCDataMessage / GRPCEndMessage envelopes
-    wslayer (from HTTP/1 Upgrade; HTTP/2 CONNECT+:protocol for RFC 8441 deferred)
+    wslayer (from HTTP/1 Upgrade; HTTP/2 CONNECT+:protocol for RFC 8441
+             deferred from N7 — design landed in §3.4.1 / §4.5,
+             implementation in USK-765)
     ssehlayer (from HTTP/1 response)
     Corresponding rule engines in internal/rules/{ws,grpc}/
     Deliverable: WS/gRPC/SSE flows recordable and intercept-able
@@ -933,7 +1126,7 @@ All five events share a single `Envelope.StreamID` (the HTTP/2 stream ID); `Sequ
 **Sub-decisions recorded here:**
 - Metadata on `GRPCDataMessage` (Service, Method) is **read-only denormalization** from the associated `GRPCStartMessage`. To change service/method, intercept the Start envelope.
 - grpc-web is out of scope for this resolution; it has its own layer (`GRPCWebLayer`) that wraps either HTTP/1 or HTTP/2 aggregated `HTTPMessage` (base64 or binary framing). See Friction 4-C in `envelope-implementation.md`.
-- HTTP/2 CONNECT + `:protocol` extended CONNECT (RFC 8441) for WebSocket-over-H2 remains deferred per N7's milestone scope.
+- HTTP/2 CONNECT + `:protocol` extended CONNECT (RFC 8441) for WebSocket-over-H2 was deferred from N7's milestone scope; the design now lives in §3.4.1 (Per-Stream Sub-Stack Overlay) and §4.5, with implementation tracked under USK-765.
 - **Request-side termination (USK-663, 2026-04-27):** `GRPCDataMessage` carries an `EndStream bool` mirroring the H2 DATA frame's END_STREAM flag. gRPC clients emit no trailer headers, so the only request-side terminator on the wire is the END_STREAM bit on the last DATA frame. When a DATA frame's payload completes one or more LPMs and carries END_STREAM=1, the trailing LPM owns the bit. When a terminating frame carries empty payload (the canonical gRPC-Go `Stream.CloseSend` shape `DATA(payload=msg)` then `DATA(payload=, END_STREAM=1)`), the wrapper synthesizes a pure end-marker envelope — `GRPCDataMessage{Payload: nil, WireLength: 0, Compressed: false, EndStream: true}` — so the wire-frame boundary is observable in Pipeline and on Send the wrapper emits an empty H2 DATA payload with END_STREAM=1. Mid-LPM termination (reassembler holds partial bytes when END_STREAM arrives) cannot be faithfully forwarded and surfaces as `*layer.StreamError{ErrorProtocol}`. EndStream is a wire-affecting field for variant-recording purposes (Pipeline Steps that toggle it produce variant rows).
 
 ### 9.3 Starlark Plugin API Shape — RESOLVED
