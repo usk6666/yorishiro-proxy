@@ -539,8 +539,13 @@ func runHTTP1ExchangeLoop(
 // internal/layer/http2/http2_integration_test.go, it iterates the client
 // HTTP/2 Layer's Channels(), dispatches each stream through
 // connector.DispatchH2StreamWithOpts (so plugin lifecycle hooks reach
-// grpc / grpcweb / httpaggregator wrappers), and runs session.RunSession
-// per stream against the upstream Layer's OpenStream-issued Channel.
+// grpc / grpcweb / httpaggregator wrappers), and runs
+// session.RunStackSessionExchange per stream against the upstream Layer's
+// OpenStream-issued Channel. RunStackSessionExchange is the upgrade-aware
+// entry point — it detects ErrUpgradePending and dispatches to
+// runUpgradeWSOverH2 (RFC 8441 extended CONNECT → per-stream WS swap) so
+// the wss-over-h2 swap orchestrator (USK-765) is reachable on the live
+// data path. Mirrors the per-exchange h1 dispatch in runHTTP1ExchangeLoop.
 //
 // The connector's dispatch path returns the h2 Layer to the HTTP/2 pool on
 // exit (handler-config-level guarantee), so this closure must not Close
@@ -605,7 +610,10 @@ func buildOnHTTP2Stack(p *pipeline.Pipeline, deps Deps, logger *slog.Logger) con
 							upCh, reqProto, upstreamLOpts, grpcOpts, grpcwebOpts,
 						), nil
 					}
-					session.RunSession(ctx, aggCh, dial, p, sessOpts)
+					if err := session.RunStackSessionExchange(ctx, stack, aggCh, dial, p, sessOpts); err != nil && !errors.Is(err, context.Canceled) {
+						logger.Debug("proxybuild: h2 stream exchange ended with error",
+							"target", target, "stream_id", ch.StreamID(), "error", err)
+					}
 				}(clientCh)
 			}
 		}

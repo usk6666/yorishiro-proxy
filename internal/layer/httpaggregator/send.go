@@ -42,6 +42,9 @@ func (a *aggregatorChannel) Send(ctx context.Context, env *envelope.Envelope) er
 	hasTrailers := len(msg.Trailers) > 0
 	isInformational := isInformationalStatus(msg.Status)
 
+	endStream := !isInformational && !hasBody && !hasTrailers
+	endStream = a.applyTunnelExchangeOnSend(env, msg, endStream)
+
 	// 1. HEADERS event.
 	hdrEvt := &http2.H2HeadersEvent{
 		Method:          msg.Method,
@@ -53,7 +56,7 @@ func (a *aggregatorChannel) Send(ctx context.Context, env *envelope.Envelope) er
 		Status:          msg.Status,
 		StatusReason:    msg.StatusReason,
 		Headers:         cloneKVs(msg.Headers),
-		EndStream:       !isInformational && !hasBody && !hasTrailers,
+		EndStream:       endStream,
 	}
 	hdrEnv := &envelope.Envelope{
 		StreamID:  env.StreamID,
@@ -176,4 +179,38 @@ func (a *aggregatorChannel) streamBodyFromReader(ctx context.Context, env *envel
 			return nil
 		}
 	}
+}
+
+// applyTunnelExchangeOnSend updates aggregator state for an extended
+// CONNECT exchange and returns the END_STREAM flag the HEADERS event
+// should carry. USK-775 / RFC 8441: neither the request HEADERS nor the
+// matching 2xx response HEADERS may close the stream; the post-swap
+// wrapper (ws.Layer) drives the wire afterwards.
+//
+//   - Send-side request (Direction=Send, :method=CONNECT, :protocol set):
+//     mark the stream tunnelled.
+//   - Send-side response (Direction=Receive, 2xx) on a tunnelled stream:
+//     latch tunnelExchangeDone so subsequent Next() calls park rather
+//     than try to absorb the post-swap DATA frames.
+//
+// In either tunnelled-bootstrap case the returned END_STREAM is forced
+// false so the stream stays open for the negotiated protocol's frames.
+func (a *aggregatorChannel) applyTunnelExchangeOnSend(env *envelope.Envelope, msg *envelope.HTTPMessage, endStream bool) bool {
+	isExtCONNECT := msg.Method == "CONNECT" && msg.ConnectProtocol != "" && env.Direction == envelope.Send
+	isTunnelAccept := env.Direction == envelope.Receive && msg.Status >= 200 && msg.Status < 300
+
+	a.mu.Lock()
+	if !a.tunnelled && isExtCONNECT {
+		a.tunnelled = true
+	}
+	tunnelled := a.tunnelled
+	if tunnelled && isTunnelAccept {
+		a.tunnelExchangeDone = true
+	}
+	a.mu.Unlock()
+
+	if endStream && tunnelled && (isExtCONNECT || isTunnelAccept) {
+		return false
+	}
+	return endStream
 }

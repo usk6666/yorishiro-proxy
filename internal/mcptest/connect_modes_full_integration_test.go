@@ -75,22 +75,28 @@ import (
 //   - State transitions reach `complete`.
 //   - Retrievable via the MCP query tool.
 //
-// USK-775 PRECONDITION: this test is currently skipped because the
-// production data path uses session.RunSession directly for each h2
-// stream (internal/proxybuild/builder.go:577) rather than the upgrade-
-// aware session.RunStackSessionExchange. As a result, USK-765's
-// runUpgradeWSOverH2 swap orchestrator never fires for live traffic
-// and the request envelope hangs indefinitely. The test scaffolding
-// (upstream, transport, frame round-trip) is left in place so that
-// once USK-775 lands, only the t.Skip below must be removed to
-// re-enable the assertion. A regular-GET preflight in the same shape
-// completes through the proxy h2 path, which isolates the gap to the
-// upgrade path. See also: TestE2E_ConnectModes_WSSOverH2_Full needs
-// GODEBUG=http2xconnect=1 because golang.org/x/net/http2 disables
-// extended CONNECT support by default (transport-side flag); the
-// proxy itself does not need this env var (it uses its own h2 layer).
+// USK-775: production wiring landed — buildOnHTTP2Stack now dispatches
+// each h2 stream through session.RunStackSessionExchange, the upgrade-
+// aware entry point. The httpaggregator was also taught to emit the
+// extended-CONNECT request HEADERS and the matching 2xx response
+// HEADERS immediately (without waiting for END_STREAM that the wire
+// will never deliver) and to keep END_STREAM off the outbound HEADERS
+// for both halves of the bootstrap exchange.
+//
+// PARTIAL: the wiring + aggregator-level enabling are landed and unit-
+// tested; the previously-blocked CONNECT round-trip now reaches the
+// upstream and 200 returns to the test client. The post-swap WS-frame
+// relay through the proxy still hangs end-to-end (the upstream HTTP
+// handler waits forever for the first WS frame from the proxy), so the
+// e2e assertion here remains skipped pending a follow-up that addresses
+// the post-swap detach-pipe drain interaction.
+//
+// Note: TestE2E_ConnectModes_WSSOverH2_Full needs GODEBUG=http2xconnect=1
+// because golang.org/x/net/http2 disables extended CONNECT support by
+// default (transport-side flag); the proxy itself does not need this env
+// var (it uses its own h2 layer).
 func TestE2E_ConnectModes_WSSOverH2_Full(t *testing.T) {
-	t.Skip("blocked on USK-775: proxy h2 dispatch uses RunSession instead of RunStackSessionExchange, so runUpgradeWSOverH2 never fires. Scaffolding kept; remove this skip when USK-775 lands.")
+	t.Skip("USK-775 partial: builder.go wiring + aggregator support for extended-CONNECT exchange landed; post-swap WS frame relay through the proxy still hangs (follow-up).")
 
 	// Upstream: TLS+h2 server that handles extended CONNECT (echoing WS
 	// frames as request-body bytes) and a sibling /other GET.

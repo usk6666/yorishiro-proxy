@@ -11,6 +11,107 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/layer/http2/hpack"
 )
 
+// TestAggregator_ExtendedCONNECT_RequestEmitsWithoutEndStream is the
+// USK-775 client-side regression gate. RFC 8441 extended CONNECT opens
+// a bidirectional stream; the request HEADERS does not carry END_STREAM
+// because the client keeps the stream open for the negotiated
+// protocol's frames (WS DATA, etc.). Pre-fix the aggregator parked in
+// phaseCollectingBody waiting for an END_STREAM that never arrived,
+// blocking the request HTTPMessage from reaching the Pipeline and
+// preventing UpgradeStep / runUpgradeWSOverH2 from firing.
+func TestAggregator_ExtendedCONNECT_RequestEmitsWithoutEndStream(t *testing.T) {
+	inner := newFakeChannel()
+	// Request: extended CONNECT, NO END_STREAM (the wire-realistic shape).
+	inner.queue(&envelope.Envelope{
+		Direction: envelope.Send,
+		Protocol:  envelope.ProtocolHTTP,
+		Message: &http2.H2HeadersEvent{
+			Method:          "CONNECT",
+			Scheme:          "https",
+			Authority:       "echo.example.com",
+			Path:            "/chat",
+			ConnectProtocol: "websocket",
+			EndStream:       false,
+		},
+	})
+
+	// RoleServer = client-side aggregator (Next=>Send/requests).
+	ch := Wrap(inner, RoleServer, nil, WrapOptions{})
+
+	// Request must emit immediately even without END_STREAM.
+	envReq, err := ch.Next(context.Background())
+	if err != nil {
+		t.Fatalf("Next (request): %v", err)
+	}
+	reqMsg, ok := envReq.Message.(*envelope.HTTPMessage)
+	if !ok {
+		t.Fatalf("request Message = %T, want *HTTPMessage", envReq.Message)
+	}
+	if reqMsg.Method != "CONNECT" {
+		t.Errorf("request Method = %q, want CONNECT", reqMsg.Method)
+	}
+	if reqMsg.ConnectProtocol != "websocket" {
+		t.Errorf("request ConnectProtocol = %q, want websocket", reqMsg.ConnectProtocol)
+	}
+	if envReq.Direction != envelope.Send {
+		t.Errorf("request Direction = %v, want Send", envReq.Direction)
+	}
+}
+
+// TestAggregator_ExtendedCONNECT_ResponseEmitsWithoutEndStream verifies
+// the upstream-side (RoleClient) short-circuit: a 2xx response on a
+// stream where Send already saw an extended-CONNECT request must emit
+// immediately so UpgradeStep can flip Pending=UpgradeWSOverH2 even
+// though the upstream keeps the stream open for the negotiated
+// protocol's frames.
+func TestAggregator_ExtendedCONNECT_ResponseEmitsWithoutEndStream(t *testing.T) {
+	inner := newFakeChannel()
+	// 2xx response, no END_STREAM (upstream keeps the stream open).
+	inner.queue(&envelope.Envelope{
+		Direction: envelope.Receive,
+		Protocol:  envelope.ProtocolHTTP,
+		Message: &http2.H2HeadersEvent{
+			Status:    200,
+			EndStream: false,
+		},
+	})
+
+	// RoleClient = upstream-side aggregator (Next=>Receive/responses).
+	ch := Wrap(inner, RoleClient, nil, WrapOptions{})
+
+	// Simulate Send-side bootstrap: in production the proxy session
+	// invokes Send(extended-CONNECT request) which marks the aggregator
+	// tunnelled before any Next() pulls the response.
+	if err := ch.Send(context.Background(), &envelope.Envelope{
+		Direction: envelope.Send,
+		Protocol:  envelope.ProtocolHTTP,
+		Message: &envelope.HTTPMessage{
+			Method:          "CONNECT",
+			Scheme:          "https",
+			Authority:       "echo.example.com",
+			Path:            "/chat",
+			ConnectProtocol: "websocket",
+		},
+	}); err != nil {
+		t.Fatalf("Send(extended CONNECT): %v", err)
+	}
+
+	envResp, err := ch.Next(context.Background())
+	if err != nil {
+		t.Fatalf("Next (response): %v", err)
+	}
+	respMsg, ok := envResp.Message.(*envelope.HTTPMessage)
+	if !ok {
+		t.Fatalf("response Message = %T, want *HTTPMessage", envResp.Message)
+	}
+	if respMsg.Status != 200 {
+		t.Errorf("response Status = %d, want 200", respMsg.Status)
+	}
+	if envResp.Direction != envelope.Receive {
+		t.Errorf("response Direction = %v, want Receive", envResp.Direction)
+	}
+}
+
 // TestAggregator_ExtendedCONNECT_PropagatesProtocol verifies the USK-764
 // plumbing: an H2HeadersEvent carrying Protocol="websocket" folds into
 // an HTTPMessage with the same Protocol value, while Method stays

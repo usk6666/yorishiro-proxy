@@ -63,6 +63,23 @@ type aggregatorChannel struct {
 	closeOnce sync.Once
 	closed    bool
 	recvDone  chan struct{}
+
+	// tunnelled records whether a Send-side extended-CONNECT request
+	// (RFC 8441: :method=CONNECT + non-empty :protocol) has been observed
+	// on this stream. The flag is sticky for the lifetime of the
+	// aggregator and tells absorbHeaders to short-circuit the matching
+	// 2xx response HEADERS even though it does not carry END_STREAM.
+	// USK-775.
+	tunnelled bool
+
+	// tunnelExchangeDone latches once the receive-side 2xx accept has
+	// been emitted on a tunnelled stream. After it flips, Next() parks
+	// on ctx.Done() instead of pulling further events — the post-swap
+	// wire (WebSocket-over-h2 frames, etc.) is opaque to the aggregator
+	// and the upgrade orchestrator (USK-765 runUpgradeWSOverH2) detaches
+	// the stream from the connection-level h2 Layer; subsequent events
+	// belong to the post-swap wrapper. USK-775.
+	tunnelExchangeDone bool
 }
 
 // StreamID delegates to the underlying Channel.
@@ -166,6 +183,18 @@ func (a *aggregatorChannel) recordEmittedLocked(env *envelope.Envelope) {
 // Next reads events from the underlying Channel until a complete
 // HTTPMessage is aggregated (or a terminal error occurs), then returns
 // the aggregated envelope.
+//
+// USK-775: once an extended-CONNECT bootstrap exchange has been emitted
+// (request HEADERS via the Send-side short-circuit, response HEADERS via
+// the matching receive-side short-circuit), Next() must NOT consume any
+// further events from the underlying Channel. The follow-on DATA frames
+// belong to the post-swap ws.Layer (via http2.Layer.DetachStream's drain
+// of the same recv queue) — pulling them into the aggregator here would
+// either drop them (with no DATA-bearing END_STREAM there is no place to
+// put them) or surface as a "DATA in phase 0" protocol violation. Park
+// on ctx.Done() instead so the upgrade orchestrator's
+// errgroup-cancellation reaches us and cleanly returns control to
+// runUpgradeWSOverH2.
 func (a *aggregatorChannel) Next(ctx context.Context) (*envelope.Envelope, error) {
 	a.mu.Lock()
 	if a.phase == phaseTerminated {
@@ -176,7 +205,29 @@ func (a *aggregatorChannel) Next(ctx context.Context) (*envelope.Envelope, error
 		}
 		return nil, io.EOF
 	}
+	// Park policy on a tunnelled stream depends on the aggregator role:
+	//   - RoleServer (client-side, Next=>Send/requests): once the bootstrap
+	//     CONNECT request HEADERS has been emitted (a.tunnelled=true), no
+	//     further request envelopes belong here — the post-swap ws.Layer
+	//     drives client→upstream WS frames.
+	//   - RoleClient (upstream-side, Next=>Receive/responses): the 2xx
+	//     accept is the only response that flows; we can safely keep
+	//     reading until that arrives, then park (tunnelExchangeDone=true).
+	park := a.phase == phaseIdle && ((a.role == RoleServer && a.tunnelled) || a.tunnelExchangeDone)
 	a.mu.Unlock()
+
+	if park {
+		// Park until the orchestrator cancels ctx (errgroup-driven). No
+		// more aggregator-shaped envelopes are coming on this stream:
+		// the post-swap wire is opaque to the http aggregator.
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-a.recvDone:
+			// Close was called; honour it as graceful EOF.
+			return nil, io.EOF
+		}
+	}
 
 	for {
 		ev, err := a.nextEvent(ctx)
@@ -285,6 +336,42 @@ func (a *aggregatorChannel) absorbHeaders(env *envelope.Envelope, evt *http2.H2H
 		return outEnv, true, nil
 	}
 
+	// USK-775: extended CONNECT (RFC 8441) opens a bidirectional stream
+	// that carries the negotiated protocol's frames as DATA. Neither the
+	// request HEADERS nor the 2xx response HEADERS carry END_STREAM —
+	// the stream stays open for the protocol frames. Without this
+	// short-circuit the aggregator would park in phaseCollectingBody
+	// waiting for an END_STREAM that will never arrive, blocking the
+	// session-side upgrade detection (UpgradeStep + runUpgradeWSOverH2,
+	// USK-765) from ever firing.
+	//
+	//   - Send-side: discriminator is :method=CONNECT plus a non-empty
+	//     :protocol pseudo-header (parsed into evt.ConnectProtocol by
+	//     USK-764). Mark the stream as tunnelled so the matching
+	//     response HEADERS short-circuits too.
+	//   - Receive-side: a 2xx response on a tunnelled stream is the
+	//     upgrade accept. Emit immediately so UpgradeStep flips
+	//     Pending=UpgradeWSOverH2 and the orchestrator detaches the
+	//     stream before any DATA reaches this aggregator.
+	//
+	// Aggregator state is reset to phaseIdle after the emit so an
+	// unforeseen post-swap event lands in a coherent state. The DATA
+	// frames that follow (WS frames) are NOT consumed here — the upgrade
+	// orchestrator detaches the stream from the connection-level h2
+	// Layer before any DATA is read by this aggregator.
+	if isExtendedConnectRequest(env, evt) {
+		a.tunnelled = true
+		a.recordEmittedLocked(outEnv)
+		a.resetLocked()
+		return outEnv, true, nil
+	}
+	if a.tunnelled && env.Direction == envelope.Receive && evt.Status >= 200 && evt.Status < 300 {
+		a.tunnelExchangeDone = true
+		a.recordEmittedLocked(outEnv)
+		a.resetLocked()
+		return outEnv, true, nil
+	}
+
 	if evt.EndStream {
 		// Complete bodyless message. Reset phase so subsequent events
 		// (a second request-response on the same channel) can be
@@ -307,6 +394,25 @@ func (a *aggregatorChannel) absorbHeaders(env *envelope.Envelope, evt *http2.H2H
 // here so the aggregator does not depend on http2 internal helpers.
 func isInformationalStatus(code int) bool {
 	return code >= 100 && code < 200
+}
+
+// isExtendedConnectRequest reports whether the supplied HEADERS event is a
+// Send-side RFC 8441 extended CONNECT request bootstrapping a non-HTTP
+// protocol (websocket today; webtransport / etc. forward-compat). The
+// discriminator is :method=CONNECT plus a non-empty :protocol pseudo-
+// header (parsed into evt.ConnectProtocol by USK-764). USK-775 uses this
+// to short-circuit the request HEADERS so the aggregator does not park
+// in phaseCollectingBody waiting for an END_STREAM that the wire will
+// never deliver — the stream stays open for the negotiated protocol's
+// frames.
+func isExtendedConnectRequest(env *envelope.Envelope, evt *http2.H2HeadersEvent) bool {
+	if env == nil || evt == nil {
+		return false
+	}
+	if env.Direction != envelope.Send {
+		return false
+	}
+	return evt.Method == "CONNECT" && evt.ConnectProtocol != ""
 }
 
 // absorbData consumes an H2DataEvent. Payload is appended to the in-flight
