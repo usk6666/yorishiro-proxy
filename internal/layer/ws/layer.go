@@ -61,6 +61,18 @@ type options struct {
 	//
 	// Default false (HTTP/1.1 Upgrade transport — RFC 6455 framing).
 	h2Mode bool
+
+	// initialSequence seeds the per-direction Sequence counter the
+	// Channel emits on each Envelope. Zero (the default) starts from 0
+	// — the natural choice for a freshly-Upgraded WebSocket where no
+	// pre-Upgrade flow records exist on the same StreamID. Non-zero is
+	// used by the wss-over-h2 swap path (USK-781) where the pre-swap
+	// CONNECT request and 2xx response already occupy Sequence 0 in the
+	// flow store under the same StreamID; setting initialSequence to
+	// the next free Sequence prevents the post-swap WS frame flow
+	// records from colliding with the pre-swap pair on the
+	// (stream_id, sequence, direction, variant) UNIQUE constraint.
+	initialSequence int
 }
 
 // Option tunes the WSLayer.
@@ -124,6 +136,19 @@ func WithStateReleaser(r pluginv2.StateReleaser) Option {
 // the close still sees live transaction_state. nil = no-op.
 func WithLifecycleEngine(e *pluginv2.Engine) Option {
 	return func(o *options) { o.lifecycleEngine = e }
+}
+
+// WithInitialSequence seeds the Channel's Sequence counter to start so
+// that the first emitted Envelope carries Sequence == start. The default
+// (start <= 0) keeps the canonical Sequence-0 origin. Use this on the
+// wss-over-h2 swap path so post-swap flow records do not collide with
+// the pre-swap CONNECT pair under the same StreamID. USK-781.
+func WithInitialSequence(start int) Option {
+	return func(o *options) {
+		if start > 0 {
+			o.initialSequence = start
+		}
+	}
 }
 
 // WithH2Mode toggles RFC 8441 extended CONNECT framing semantics:

@@ -34,6 +34,7 @@ import (
 	"math/big"
 	"net"
 	gohttp "net/http"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -83,20 +84,29 @@ import (
 // will never deliver) and to keep END_STREAM off the outbound HEADERS
 // for both halves of the bootstrap exchange.
 //
-// PARTIAL: the wiring + aggregator-level enabling are landed and unit-
-// tested; the previously-blocked CONNECT round-trip now reaches the
-// upstream and 200 returns to the test client. The post-swap WS-frame
-// relay through the proxy still hangs end-to-end (the upstream HTTP
-// handler waits forever for the first WS frame from the proxy), so the
-// e2e assertion here remains skipped pending a follow-up that addresses
-// the post-swap detach-pipe drain interaction.
+// USK-781: the post-swap WS frame relay landed — runUpgradeWSOverH2 now
+// looks up the upstream HTTP/2 Layer via stack.UpstreamH2Layer() (it
+// lives in the connection pool, not on stack.UpstreamTopmost), and
+// drives a custom relay loop that propagates END_STREAM cascades on
+// graceful EOF in either direction so the upstream HTTP handler's
+// r.Body.Read returns when the client half-closes.
 //
 // Note: TestE2E_ConnectModes_WSSOverH2_Full needs GODEBUG=http2xconnect=1
 // because golang.org/x/net/http2 disables extended CONNECT support by
 // default (transport-side flag); the proxy itself does not need this env
 // var (it uses its own h2 layer).
 func TestE2E_ConnectModes_WSSOverH2_Full(t *testing.T) {
-	t.Skip("USK-775 partial: builder.go wiring + aggregator support for extended-CONNECT exchange landed; post-swap WS frame relay through the proxy still hangs (follow-up).")
+	// golang.org/x/net/http2 disables extended CONNECT (RFC 8441) by
+	// default; the test driver and the upstream test fixture both rely
+	// on it. The flag is read at package init, so it must be in the
+	// process environment BEFORE `go test` starts — the Makefile's
+	// `test-e2e` target sets it. Skip gracefully when the env var is
+	// missing so a developer running `go test` directly gets a useful
+	// diagnostic instead of a CANCEL stream error. The proxy itself
+	// does not need GODEBUG.
+	if !strings.Contains(os.Getenv("GODEBUG"), "http2xconnect=1") {
+		t.Skip("requires GODEBUG=http2xconnect=1 (Makefile test-e2e sets it; run via `make test-e2e` or export the env var)")
+	}
 
 	// Upstream: TLS+h2 server that handles extended CONNECT (echoing WS
 	// frames as request-body bytes) and a sibling /other GET.
@@ -158,8 +168,12 @@ func TestE2E_ConnectModes_WSSOverH2_Full(t *testing.T) {
 		t.Fatalf("sibling plain GET on multiplexed h2 conn: %v", err)
 	}
 
-	// Verify recordings via MCP query tool.
-	wsFlow := waitForConnectModeFlow(t, h, "/ws-over-h2", "websocket", 5*time.Second)
+	// Verify recordings via MCP query tool. The Stream's Protocol field
+	// is the canonical envelope.Protocol string — "ws" — set on the
+	// post-swap retag (USK-781). The pre-swap CONNECT request created
+	// the Stream as "http" but the recorder's first WS-frame retag
+	// updates it to "ws" so the analyst sees the upgraded protocol.
+	wsFlow := waitForConnectModeFlow(t, h, "/ws-over-h2", "ws", 5*time.Second)
 	if wsFlow.State != "complete" {
 		t.Errorf("ws flow state = %q, want %q", wsFlow.State, "complete")
 	}

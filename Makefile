@@ -45,8 +45,14 @@ test-e2e-smoke: ensure-ui
 # test-e2e is the full tier: every test guarded by `//go:build e2e` (smoke
 # files included). Run nightly via the `nightly-e2e.yml` workflow; not part
 # of the per-PR gate.
+#
+# GODEBUG=http2xconnect=1 enables RFC 8441 extended CONNECT in the
+# golang.org/x/net/http2 transport AND server (read at package init).
+# Required by the wss-over-h2 e2e tests (USK-781 in connector,
+# TestE2E_ConnectModes_WSSOverH2_Full in mcptest); the proxy itself uses
+# its own HTTP/2 layer and does not need this flag.
 test-e2e: ensure-ui
-	go test -race -v -timeout 30m -tags e2e ./...
+	GODEBUG=http2xconnect=1 go test -race -v -timeout 30m -tags e2e ./...
 
 test-cover: ensure-ui
 	go test -race -coverprofile=coverage.out ./...

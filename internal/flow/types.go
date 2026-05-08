@@ -125,6 +125,12 @@ type Flow struct {
 // StreamUpdate holds the fields that can be updated on an existing stream.
 // Only non-zero/non-nil fields are applied.
 type StreamUpdate struct {
+	// Protocol overrides the stream's recorded protocol name. Used by
+	// the wss-over-h2 swap path (USK-781) to retag a Stream that was
+	// initially created from the pre-swap CONNECT request envelope
+	// (Protocol="http") to the post-swap value (Protocol="websocket")
+	// once the upgrade fires. Only applied when non-empty.
+	Protocol string
 	// State sets the stream state (e.g., "complete", "error").
 	State string
 	// FailureReason sets the classification label for an errored stream.

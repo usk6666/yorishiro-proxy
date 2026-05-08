@@ -76,6 +76,7 @@ func newChannel(l *Layer, streamID string, role Role, opts *options) *wsChannel 
 		role:     role,
 		opts:     opts,
 		recvDone: make(chan struct{}),
+		nextSeq:  opts.initialSequence,
 	}
 	if opts.deflateEnabled {
 		if opts.clientDeflate.enabled {

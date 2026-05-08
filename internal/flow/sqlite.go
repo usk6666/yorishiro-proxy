@@ -227,6 +227,7 @@ func buildStreamUpdateSets(update StreamUpdate) ([]string, []interface{}, error)
 		args = append(args, *value)
 	}
 
+	addString("protocol", update.Protocol)
 	addString("state", update.State)
 	addString("failure_reason", update.FailureReason)
 	if update.Duration != 0 {

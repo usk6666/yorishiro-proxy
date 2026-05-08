@@ -77,6 +77,19 @@ type RecordStep struct {
 	// larger materialized body is truncated and Flow.BodyTruncated is set
 	// to true. Zero means use config.MaxBodySize.
 	maxBodySize int64
+	// protocolRetagged tracks streamIDs whose Stream.Protocol has already
+	// been updated past the initial createStream value. Used by the
+	// upgrade path retag (USK-781): when a non-HTTP envelope arrives on
+	// a stream that was created from a pre-swap HTTPMessage (CONNECT
+	// request), the first such envelope triggers a single
+	// store.UpdateStream(Protocol=…) call and stamps the streamID here
+	// so subsequent envelopes do not re-issue the same write.
+	//
+	// sync.Map suits the keys-set-once pattern (LoadOrStore is the
+	// hot-path operation); the map is bounded by the number of streams
+	// that survive an upgrade per process lifetime, which is the same
+	// bound the rest of the recorder already accepts (no eviction).
+	protocolRetagged sync.Map
 
 	// scope filters which envelopes are recorded. nil = capture all
 	// (current behaviour). When non-nil, ShouldRecord is consulted for
@@ -207,6 +220,16 @@ func (s *RecordStep) Process(ctx context.Context, env *envelope.Envelope) Result
 		s.createStream(ctx, env)
 	}
 
+	// USK-781: retag the Stream's Protocol when an envelope on a non-
+	// HTTP protocol arrives on a Stream that was created from a pre-
+	// swap HTTPMessage. This handles wss-over-h2 where the pre-swap
+	// CONNECT request creates the Stream as Protocol="http"; the post-
+	// swap WS frames carry Protocol="websocket" and the analyst
+	// expects to see the upgraded protocol in the query("flows") view.
+	// One UpdateStream per Stream — gated by the protocolRetagged
+	// LoadOrStore so subsequent WS frames are write-free.
+	s.maybeRetagProtocol(ctx, env)
+
 	// On Receive, project upstream TLS snapshot (if present) onto
 	// Stream.ConnInfo. The Send side carries the synthetic MITM cert we
 	// presented to the client; Receive carries the real upstream TLS
@@ -258,6 +281,35 @@ func (s *RecordStep) updateStreamTLS(ctx context.Context, env *envelope.Envelope
 	if err := s.store.UpdateStream(ctx, env.StreamID, update); err != nil {
 		s.logger.Error("record step: TLS snapshot update failed",
 			"stream_id", env.StreamID,
+			"error", err,
+		)
+	}
+}
+
+// maybeRetagProtocol updates the Stream's Protocol when env carries a
+// non-HTTP Protocol but the Stream was already created (so we cannot
+// rewrite Protocol via createStream). Fires at most once per StreamID
+// per process lifetime — gated by the protocolRetagged sync.Map.
+//
+// Skipped on:
+//   - Empty / unset Protocol (no information to retag with).
+//   - HTTP-family envelopes (the createStream path already covers them
+//     and a same-value rewrite is wasteful).
+//   - Empty StreamID (defensive — the LoadOrStore key would alias).
+func (s *RecordStep) maybeRetagProtocol(ctx context.Context, env *envelope.Envelope) {
+	if env == nil || env.StreamID == "" {
+		return
+	}
+	if env.Protocol == "" || env.Protocol == envelope.ProtocolHTTP {
+		return
+	}
+	if _, loaded := s.protocolRetagged.LoadOrStore(env.StreamID, struct{}{}); loaded {
+		return
+	}
+	if err := s.store.UpdateStream(ctx, env.StreamID, flow.StreamUpdate{Protocol: string(env.Protocol)}); err != nil {
+		s.logger.Error("record step: protocol retag update failed",
+			"stream_id", env.StreamID,
+			"protocol", string(env.Protocol),
 			"error", err,
 		)
 	}

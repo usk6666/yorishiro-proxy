@@ -624,7 +624,15 @@ func runUpgradeWSOverH2(
 	// pre-swap CONNECT request and 2xx response in flow records.
 	sessionStreamID := clientCh.StreamID()
 
-	wsOpts := append([]ws.Option{ws.WithH2Mode(true)}, wsLifecycleOptions(userOpt)...)
+	// Sequence 0 on the post-swap StreamID is already occupied by the
+	// pre-swap CONNECT request (Send) and 2xx response (Receive) flow
+	// records. The post-swap WS Channels must skip past 0 so the flow
+	// store's (stream_id, sequence, direction, variant) UNIQUE constraint
+	// does not reject the first WS frame in either direction. USK-781.
+	wsOpts := append([]ws.Option{
+		ws.WithH2Mode(true),
+		ws.WithInitialSequence(1),
+	}, wsLifecycleOptions(userOpt)...)
 	clientWS := ws.New(cR, cW, &detachCloserAdapter{f: cClose}, sessionStreamID, ws.RoleServer, wsOpts...)
 	upstreamWS := ws.New(uR, uW, &detachCloserAdapter{f: uClose}, sessionStreamID, ws.RoleClient, wsOpts...)
 
@@ -655,30 +663,175 @@ func runUpgradeWSOverH2(
 		return err
 	}
 
-	// Upgrade-dial: hand the recursive RunSession the pre-acquired
-	// upstream ws Channel without re-dialing.
-	upgradeDial := DialFunc(func(_ context.Context, _ *envelope.Envelope) (layer.Channel, error) {
-		return upstreamWSCh, nil
-	})
-
-	// Recursion is bounded — WebSocket-over-h2 has no nested upgrade. We
-	// pass the user OnComplete through so the post-swap WS exchange's
-	// terminal state surfaces to the recorder.
-	return RunSession(ctx, clientWSCh, upgradeDial, p, userOpt)
+	// Run a custom WS relay loop instead of recursing into RunSession.
+	// USK-781 rationale: the generic RunSession does not know how to
+	// propagate a per-stream half-close across the swap. When the client
+	// emits HTTP/2 END_STREAM (e.g. half-closing the WS bytestream), the
+	// proxy must mirror that signal onto the upstream h2 stream — not by
+	// closing the connection (which would kill sibling streams) but by
+	// writing an empty END_STREAM DATA frame on the SAME stream id. The
+	// detach writers returned by http2.Layer.DetachStream do exactly that
+	// on Close (see detachWriter.Close), so the relay calls them on EOF
+	// in either direction.
+	return runWSOverH2Relay(ctx, p, userOpt, clientWSCh, upstreamWSCh, cW, uW, sessionStreamID)
 }
 
-// h2LayersFromStack type-asserts the connection-level Topmost on each
-// side as *http2.Layer, returning a wrapped error otherwise.
+// runWSOverH2Relay drives the post-swap WS-over-h2 session. Two goroutines
+// shuttle WS envelopes through the Pipeline in opposite directions; on EOF
+// in either direction the corresponding upstream/client h2 detach writer is
+// closed so an empty END_STREAM DATA frame propagates the half-close to
+// the peer. Without this propagation the upstream HTTP handler stays parked
+// on r.Body.Read forever after the client half-closes, even though the
+// proxy itself has correctly observed the END_STREAM DATA frame on the
+// client side.
+//
+// Concurrency notes (CLAUDE.md Concurrency Checklist):
+//   - Termination: clientToUpstream goroutine exits on clientWSCh.Next EOF
+//     OR ctx cancel; same for the reverse direction. Each defers a single
+//     Close on the OPPOSITE side's detach writer to half-close the wire,
+//     which causes the peer goroutine's Next to surface EOF in turn.
+//   - Single-writer close: each io.Closer is a *detachWriter; its Close
+//     uses sync.Mutex + closed flag so re-entry is safe even if both
+//     directions race to close on errors.
+//   - Cascade-close: half-close ONLY on EOF (graceful). On any other
+//     terminal error we surface the error to the errgroup which cancels
+//     the peer ctx; the deferred sub-stack release closes both detach
+//     writers via Layer.Close → closeDetached().
+func runWSOverH2Relay(
+	ctx context.Context,
+	p *pipeline.Pipeline,
+	userOpt SessionOptions,
+	clientWSCh, upstreamWSCh layer.Channel,
+	clientDetachW, upstreamDetachW io.WriteCloser,
+	sessionStreamID string,
+) (retErr error) {
+	origCtx := ctx
+	g, ctx := errgroup.WithContext(ctx)
+
+	reg := &bodyBufRegistry{}
+	defer reg.drain()
+
+	// client → upstream: read WS frames from client wire, run Pipeline,
+	// forward to upstream. On graceful EOF, half-close the upstream write
+	// side so the upstream HTTP handler observes EOF on its request body.
+	g.Go(func() error {
+		err := wsRelayDirection(ctx, p, reg, clientWSCh, upstreamWSCh)
+		if err == nil {
+			// Graceful EOF on client side: half-close the upstream wire.
+			// detachWriter.Close emits empty DATA(END_STREAM) on the
+			// upstream h2 stream id. Errors are intentionally swallowed —
+			// the writer may already be closed by a concurrent terminal
+			// path (Layer.Close cascade), and the detachWriter itself
+			// is safe against double-Close (sync.Mutex + closed flag).
+			_ = upstreamDetachW.Close()
+		}
+		return err
+	})
+
+	// upstream → client: read WS frames from upstream wire, run Pipeline,
+	// forward to client. On graceful EOF, half-close the client write
+	// side so the test client observes EOF on the response body (and the
+	// h2 stream cleanly transitions to closed).
+	g.Go(func() error {
+		err := wsRelayDirection(ctx, p, reg, upstreamWSCh, clientWSCh)
+		if err == nil {
+			_ = clientDetachW.Close()
+		}
+		return err
+	})
+
+	result := g.Wait()
+
+	// userOpt.OnComplete is invoked exactly once at the end of the post-
+	// swap session so the recorder marks the Stream as complete (or
+	// error) once both directions have terminated. The orchestrator
+	// (RunStackSessionExchange) deliberately suppresses the first-session
+	// OnComplete with ErrUpgradePending, so this is the only place the
+	// post-swap result surfaces to the user callback.
+	if userOpt.OnComplete != nil {
+		userOpt.OnComplete(context.WithoutCancel(origCtx), sessionStreamID, result)
+	}
+	return result
+}
+
+// wsRelayDirection reads envelopes from src, runs them through the
+// Pipeline, and Sends each non-Drop envelope on dst. Returns nil on
+// graceful EOF and a wrapped error otherwise. Drop / Respond actions are
+// honoured (Respond writes back to src for symmetry with RunSession,
+// matching plugin / intercept semantics).
+func wsRelayDirection(
+	ctx context.Context,
+	p *pipeline.Pipeline,
+	reg *bodyBufRegistry,
+	src, dst layer.Channel,
+) error {
+	for {
+		env, err := src.Next(ctx)
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return nil
+			}
+			if errors.Is(err, context.Canceled) {
+				return ctx.Err()
+			}
+			return fmt.Errorf("ws/h2 relay: src.Next: %w", err)
+		}
+		env, action, resp := runPipelineTracked(ctx, p, env, reg)
+		switch action {
+		case pipeline.Drop:
+			continue
+		case pipeline.Respond:
+			if resp == nil {
+				continue
+			}
+			if serr := src.Send(ctx, resp); serr != nil {
+				return fmt.Errorf("ws/h2 relay: src.Send (respond): %w", serr)
+			}
+			continue
+		}
+		if env == nil {
+			continue
+		}
+		if serr := dst.Send(ctx, env); serr != nil {
+			return fmt.Errorf("ws/h2 relay: dst.Send: %w", serr)
+		}
+	}
+}
+
+// h2LayersFromStack returns the client and upstream connection-level
+// HTTP/2 Layers for the ws-over-h2 swap. The client-side Layer is always
+// the stack's ClientTopmost. The upstream-side Layer lives in one of two
+// places depending on how the stack was built:
+//
+//   - "h2" ALPN route (the production wss-over-h2 case): the upstream
+//     HTTP/2 Layer is held by the connection pool and exposed via
+//     stack.UpstreamH2Layer(). It is NOT pushed onto stack.upstream so
+//     that its lifecycle stays with the pool — stack.Close() must not
+//     close a pooled Layer (RFC-001 §3.4.1; see stack_builder.go
+//     buildH2Stack rationale).
+//   - Test paths that wire the upstream H2 Layer via PushUpstream: the
+//     Layer surfaces through stack.UpstreamTopmost(). Older session-
+//     level tests (session_upgrade_test.go) follow this shape, so the
+//     fallback keeps them working without forcing every caller to hand
+//     the Layer in separately.
+//
+// USK-781: before this fallback, runUpgradeWSOverH2 always asked for
+// UpstreamTopmost() and failed with a "<nil>" error on the live h2 route,
+// silently aborting the post-swap session before any WS frame could
+// flow.
 func h2LayersFromStack(stack *connector.ConnectionStack) (*http2.Layer, *http2.Layer, error) {
 	clientTop := stack.ClientTopmost()
 	clientH2, ok := clientTop.(*http2.Layer)
 	if !ok {
 		return nil, nil, fmt.Errorf("session: ws/h2 upgrade requires *http2.Layer client topmost, got %T", clientTop)
 	}
+	if pooled := stack.UpstreamH2Layer(); pooled != nil {
+		return clientH2, pooled, nil
+	}
 	upstreamTop := stack.UpstreamTopmost()
 	upstreamH2, ok := upstreamTop.(*http2.Layer)
 	if !ok {
-		return nil, nil, fmt.Errorf("session: ws/h2 upgrade requires *http2.Layer upstream topmost, got %T", upstreamTop)
+		return nil, nil, fmt.Errorf("session: ws/h2 upgrade requires *http2.Layer upstream layer (pool or topmost), got %T", upstreamTop)
 	}
 	return clientH2, upstreamH2, nil
 }
@@ -950,7 +1103,6 @@ func clientToUpstream(
 			}
 			return fmt.Errorf("client.Next: %w", nerr)
 		}
-
 		sc.set(env.StreamID)
 
 		env, action, resp := runPipelineTracked(ctx, p, env, reg)

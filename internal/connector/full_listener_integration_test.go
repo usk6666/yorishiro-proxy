@@ -53,7 +53,23 @@ func (s *testStore) SaveStream(_ context.Context, st *flow.Stream) error {
 	return nil
 }
 
-func (s *testStore) UpdateStream(_ context.Context, _ string, _ flow.StreamUpdate) error {
+func (s *testStore) UpdateStream(_ context.Context, id string, update flow.StreamUpdate) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, st := range s.streams {
+		if st.ID != id {
+			continue
+		}
+		if update.Protocol != "" {
+			st.Protocol = update.Protocol
+		}
+		if update.State != "" {
+			st.State = update.State
+		}
+		if update.FailureReason != "" {
+			st.FailureReason = update.FailureReason
+		}
+	}
 	return nil
 }
 
