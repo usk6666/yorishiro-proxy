@@ -496,6 +496,15 @@ func (l *Layer) runPreface() error {
 // settingsToFrame converts a Settings struct into a list of frame.Setting
 // suitable for sending in a SETTINGS frame.
 //
+// SETTINGS_MAX_HEADER_LIST_SIZE (0x06) is included only when the field is
+// non-zero. RFC 9113 §6.5.2 specifies the default as "unlimited", which on
+// the wire means omitting the setting entirely. Emitting the setting with
+// value 0 advertises a hard zero header-list limit to the peer; gRPC-go
+// clients interpret that as "any header byte violates the server limit"
+// and reject every RPC with `header list size to send violates the maximum
+// size (0 bytes) set by server`. The same gap is documented (and side-
+// stepped via WithMaxHeaderListSize) by the gRPC layer integration suite.
+//
 // SETTINGS_ENABLE_CONNECT_PROTOCOL (0x08) is included only when the field
 // is non-zero. RFC 8441 §3 says only servers advertise it; clients ignore
 // the setting when sending. Endpoints that have not opted in (the default
@@ -511,7 +520,12 @@ func settingsToFrame(s Settings) []frame.Setting {
 		{ID: frame.SettingMaxConcurrentStreams, Value: s.MaxConcurrentStreams},
 		{ID: frame.SettingInitialWindowSize, Value: s.InitialWindowSize},
 		{ID: frame.SettingMaxFrameSize, Value: s.MaxFrameSize},
-		{ID: frame.SettingMaxHeaderListSize, Value: s.MaxHeaderListSize},
+	}
+	if s.MaxHeaderListSize != 0 {
+		out = append(out, frame.Setting{
+			ID:    frame.SettingMaxHeaderListSize,
+			Value: s.MaxHeaderListSize,
+		})
 	}
 	if s.EnableConnectProtocol != 0 {
 		out = append(out, frame.Setting{
