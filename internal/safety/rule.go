@@ -20,15 +20,50 @@ const (
 	TargetHeader
 	// TargetHeaders matches against all header values concatenated.
 	TargetHeaders
+
+	// Per-protocol targets accepted at config-load time so a single
+	// SafetyFilter Input rule list can address WS and gRPC envelopes
+	// (the live SafetyFilter path applies the same compiled rule set
+	// across HTTP / WS / gRPC per-protocol engines — see
+	// internal/mcpserver/safety_perprotocol.go::compileCustomInputRule).
+	// The Policy Layer Engine here (internal/safety) consumes only
+	// HTTP-shaped data via CheckInput(body, rawURL, headers), so these
+	// targets are intentionally no-ops in matchTarget — the per-protocol
+	// engines (internal/rules/{ws,grpc}) carry the actual semantics.
+	// Without this acceptance, custom rules with WS/gRPC-local targets
+	// would fail at boot before reaching the per-protocol engines that
+	// understand them.
+
+	// TargetPayload matches the WS frame payload (internal/rules/ws::TargetPayload)
+	// or the gRPC message payload (internal/rules/grpc::TargetPayload). Shared
+	// spelling because both protocols treat the message body as "payload".
+	TargetPayload
+	// TargetOpcode matches the WS frame opcode rendered as a hex string
+	// (internal/rules/ws::TargetOpcode). WS-only.
+	TargetOpcode
+	// TargetMetadata matches gRPC metadata (internal/rules/grpc::TargetMetadata).
+	// gRPC-only.
+	TargetMetadata
+	// TargetService matches the gRPC service name (internal/rules/grpc::TargetService).
+	// gRPC-only.
+	TargetService
+	// TargetMethod matches the gRPC method name (internal/rules/grpc::TargetMethod).
+	// gRPC-only.
+	TargetMethod
 )
 
 // targetNames maps Target values to their string representation.
 var targetNames = map[Target]string{
-	TargetBody:    "body",
-	TargetURL:     "url",
-	TargetQuery:   "query",
-	TargetHeader:  "header",
-	TargetHeaders: "headers",
+	TargetBody:     "body",
+	TargetURL:      "url",
+	TargetQuery:    "query",
+	TargetHeader:   "header",
+	TargetHeaders:  "headers",
+	TargetPayload:  "payload",
+	TargetOpcode:   "opcode",
+	TargetMetadata: "metadata",
+	TargetService:  "service",
+	TargetMethod:   "method",
 }
 
 // String returns the human-readable name of the target.
@@ -40,9 +75,11 @@ func (t Target) String() string {
 }
 
 // ParseTarget converts a string to a Target value.
-// It accepts "body", "url", "query", "header", and "headers".
-// Header-specific targets like "header:Location" should be parsed by the
-// caller; this function only handles the base target names.
+// It accepts the HTTP-canonical targets ("body", "url", "query", "header",
+// "headers") and the per-protocol targets ("payload", "opcode", "metadata",
+// "service", "method"). Header-specific targets like "header:Location"
+// should be parsed by the caller; this function only handles the base
+// target names.
 func ParseTarget(s string) (Target, error) {
 	switch strings.ToLower(s) {
 	case "body":
@@ -55,6 +92,16 @@ func ParseTarget(s string) (Target, error) {
 		return TargetHeader, nil
 	case "headers":
 		return TargetHeaders, nil
+	case "payload":
+		return TargetPayload, nil
+	case "opcode":
+		return TargetOpcode, nil
+	case "metadata":
+		return TargetMetadata, nil
+	case "service":
+		return TargetService, nil
+	case "method":
+		return TargetMethod, nil
 	default:
 		return 0, fmt.Errorf("unknown target: %q", s)
 	}

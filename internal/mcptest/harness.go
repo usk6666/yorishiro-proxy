@@ -66,10 +66,13 @@ type HarnessOptions struct {
 	// http2.Server hosting a binary-wire (application/grpc-web+proto)
 	// echo handler that decodes inbound LPM frames and writes back a
 	// data frame plus a trailer frame; the handler records per-method
-	// invocations on Harness.GRPCWebObservedHits. Remaining values
-	// ("h2", "h2c", "ws", "raw") are reserved for downstream Issues —
-	// passing them today t.Fatals with a TODO referencing the consuming
-	// Issue rather than silently no-op'ing.
+	// invocations on Harness.GRPCWebObservedHits. "ws" stands up a TLS
+	// (NextProtos=http/1.1) HTTP/1.1 server that performs the RFC 6455
+	// WebSocket handshake on /ws and counts every data frame received;
+	// the counter is exposed on Harness.WSObservedHits. Remaining values
+	// ("h2", "h2c", "raw") are reserved for downstream Issues — passing
+	// them today t.Fatals with a TODO referencing the consuming Issue
+	// rather than silently no-op'ing.
 	UpstreamProto string
 
 	// EnableMTLS, when true, configures the upstream test server to
@@ -168,6 +171,15 @@ type Harness struct {
 	// proxy.
 	GRPCWebObservedHits *GRPCWebHitCounter
 
+	// WSObservedHits is the WebSocket sibling of GRPCObservedHits,
+	// populated by the "ws" UpstreamProto. nil for other protocols.
+	// The counter is incremented inside the WS upstream serve loop for
+	// every data frame (text/binary/continuation) received from the
+	// proxy — i.e. AFTER any pipeline step that dropped the envelope
+	// earlier in the proxy. Used by USK-767 SafetyFilter smoke as the
+	// durable assertion that pipeline.SafetyStep enforced its WS arm.
+	WSObservedHits *WSHitCounter
+
 	// Cleanup tears down the harness in this order: client session ->
 	// upstream test server -> MCP server (via context cancel + wait).
 	// Idempotent: calling more than once is a no-op. t.Cleanup is also
@@ -206,7 +218,7 @@ func StartHarness(t *testing.T, opts HarnessOptions) *Harness {
 
 	args := buildRunArgs(t, opts, token)
 	mtlsDir := t.TempDir()
-	upstream, mtls, fpObserver, grpcHits, grpcWebHits, err := buildUpstream(opts, mtlsDir)
+	upstream, mtls, fpObserver, grpcHits, grpcWebHits, wsHits, err := buildUpstream(opts, mtlsDir)
 	if err != nil {
 		t.Fatalf("mcptest: build upstream: %v", err)
 	}
@@ -246,6 +258,7 @@ func StartHarness(t *testing.T, opts HarnessOptions) *Harness {
 		UpstreamFingerprint: fpObserver,
 		GRPCObservedHits:    grpcHits,
 		GRPCWebObservedHits: grpcWebHits,
+		WSObservedHits:      wsHits,
 		Cleanup:             cleanup,
 	}
 
@@ -305,12 +318,10 @@ func (h *Harness) ExpectError(t *testing.T, name string, args any, errSubstring 
 func validateOptions(t *testing.T, opts HarnessOptions) {
 	t.Helper()
 	switch opts.UpstreamProto {
-	case "", "http/1.1", "grpc", "grpc-web":
+	case "", "http/1.1", "grpc", "grpc-web", "ws":
 		// supported
 	case "h2", "h2c":
 		t.Fatalf("mcptest: UpstreamProto=%q not yet implemented (deferred to USK-726)", opts.UpstreamProto)
-	case "ws":
-		t.Fatalf("mcptest: UpstreamProto=%q not yet implemented (deferred to USK-767)", opts.UpstreamProto)
 	case "raw":
 		t.Fatalf("mcptest: UpstreamProto=%q not yet implemented (deferred to USK-727)", opts.UpstreamProto)
 	default:
@@ -322,10 +333,12 @@ func validateOptions(t *testing.T, opts HarnessOptions) {
 		// they're verifying mTLS while no upstream is even running.
 		t.Fatalf("mcptest: EnableMTLS=true requires UpstreamProto to be set (e.g. \"http/1.1\")")
 	}
-	if opts.EnableMTLS && (opts.UpstreamProto == "grpc" || opts.UpstreamProto == "grpc-web") {
-		// The gRPC and gRPC-Web upstream paths do not currently provision a
-		// client-cert requirement; only http/1.1 supports mTLS. Surface this
-		// so tests fail loudly instead of silently running without mTLS.
+	if opts.EnableMTLS && (opts.UpstreamProto == "grpc" || opts.UpstreamProto == "grpc-web" || opts.UpstreamProto == "ws") {
+		// The gRPC, gRPC-Web, and WS upstream paths do not currently
+		// provision a client-cert requirement; only http/1.1 supports
+		// mTLS. Surface this so tests fail loudly instead of silently
+		// running without mTLS. (USK-767 SafetyFilter scope is the WS
+		// Send-direction filter, not mTLS-over-WS.)
 		t.Fatalf("mcptest: EnableMTLS=true is not supported with UpstreamProto=%q", opts.UpstreamProto)
 	}
 }
@@ -374,8 +387,8 @@ func writeConfigFile(path, content string) error {
 }
 
 // buildUpstream constructs the optional upstream test server.
-// Returns (nil, nil, nil, nil, nil) when no upstream is requested. When
-// EnableMTLS is set, the returned server is configured with
+// Returns (nil, nil, nil, nil, nil, nil) when no upstream is requested.
+// When EnableMTLS is set, the returned server is configured with
 // tls.RequireAndVerifyClientCert plus a ClientCAs pool seeded from a
 // freshly-generated test CA, and the corresponding client material is
 // returned so the harness can hand the on-disk paths to the test.
@@ -399,30 +412,41 @@ func writeConfigFile(path, content string) error {
 //     writes back a single data frame plus a trailer frame. The fifth
 //     return value is a gRPC-Web hit counter incremented inside the
 //     handler. mTLS not supported.
+//   - "ws": TLS (NextProtos=http/1.1) HTTP/1.1 server that performs the
+//     RFC 6455 WebSocket handshake on /ws and counts every data frame
+//     received. The sixth return value is a WS hit counter incremented
+//     inside the WS serve loop so SafetyFilter tests can assert blocked
+//     frames never reached the upstream. mTLS not supported.
 //
 // validateOptions has already rejected unrecognised variants by the
 // time this is called.
-func buildUpstream(opts HarnessOptions, mtlsDir string) (*httptest.Server, *MTLSMaterial, *FingerprintObserver, *GRPCHitCounter, *GRPCWebHitCounter, error) {
+func buildUpstream(opts HarnessOptions, mtlsDir string) (*httptest.Server, *MTLSMaterial, *FingerprintObserver, *GRPCHitCounter, *GRPCWebHitCounter, *WSHitCounter, error) {
 	switch opts.UpstreamProto {
 	case "":
-		return nil, nil, nil, nil, nil, nil
+		return nil, nil, nil, nil, nil, nil, nil
 	case "grpc":
 		srv, fpObs, hits, err := buildGRPCUpstream()
 		if err != nil {
-			return nil, nil, nil, nil, nil, fmt.Errorf("build grpc upstream: %w", err)
+			return nil, nil, nil, nil, nil, nil, fmt.Errorf("build grpc upstream: %w", err)
 		}
-		return srv, nil, fpObs, hits, nil, nil
+		return srv, nil, fpObs, hits, nil, nil, nil
 	case "grpc-web":
 		srv, fpObs, hits, err := buildGRPCWebUpstream()
 		if err != nil {
-			return nil, nil, nil, nil, nil, fmt.Errorf("build grpc-web upstream: %w", err)
+			return nil, nil, nil, nil, nil, nil, fmt.Errorf("build grpc-web upstream: %w", err)
 		}
-		return srv, nil, fpObs, nil, hits, nil
+		return srv, nil, fpObs, nil, hits, nil, nil
+	case "ws":
+		srv, fpObs, hits, err := buildWSUpstream()
+		if err != nil {
+			return nil, nil, nil, nil, nil, nil, fmt.Errorf("build ws upstream: %w", err)
+		}
+		return srv, nil, fpObs, nil, nil, hits, nil
 	case "http/1.1":
 		// fall through to the HTTP/1.1 implementation below
 	default:
 		// Should be unreachable: validateOptions already filtered.
-		return nil, nil, nil, nil, nil, fmt.Errorf("unsupported UpstreamProto: %q", opts.UpstreamProto)
+		return nil, nil, nil, nil, nil, nil, fmt.Errorf("unsupported UpstreamProto: %q", opts.UpstreamProto)
 	}
 
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -448,17 +472,17 @@ func buildUpstream(opts HarnessOptions, mtlsDir string) (*httptest.Server, *MTLS
 		tlsCfg, fpObs := installFingerprintObserver(nil)
 		srv.TLS = tlsCfg
 		srv.StartTLS()
-		return srv, nil, fpObs, nil, nil, nil
+		return srv, nil, fpObs, nil, nil, nil, nil
 	}
 
 	mtls, err := generateMTLSMaterial(mtlsDir)
 	if err != nil {
-		return nil, nil, nil, nil, nil, fmt.Errorf("generate mTLS material: %w", err)
+		return nil, nil, nil, nil, nil, nil, fmt.Errorf("generate mTLS material: %w", err)
 	}
 
 	pool := x509.NewCertPool()
 	if !pool.AppendCertsFromPEM(mtls.CACertPEM) {
-		return nil, nil, nil, nil, nil, fmt.Errorf("append test CA to pool")
+		return nil, nil, nil, nil, nil, nil, fmt.Errorf("append test CA to pool")
 	}
 
 	srv := httptest.NewUnstartedServer(handler)
@@ -469,7 +493,7 @@ func buildUpstream(opts HarnessOptions, mtlsDir string) (*httptest.Server, *MTLS
 	})
 	srv.TLS = tlsCfg
 	srv.StartTLS()
-	return srv, mtls, fpObs, nil, nil, nil
+	return srv, mtls, fpObs, nil, nil, nil, nil
 }
 
 // runMCPServer is the goroutine entry point for the boot path. It

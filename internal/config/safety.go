@@ -49,12 +49,36 @@ func ValidateSafetyFilterConfig(cfg *SafetyFilterConfig) error {
 }
 
 // validInputTargets lists the accepted target values for input filter rules.
+//
+// HTTP-canonical targets (body / url / query / header / headers) and the
+// WS-local (payload / opcode) and gRPC-local (payload / metadata / service /
+// method) targets are all listed here because the live SafetyFilter Input
+// rule path applies a single rule list across all three per-protocol
+// engines (internal/mcpserver/safety_perprotocol.go::compileCustomInputRule).
+// Each engine silently skips targets it does not understand at evaluation
+// time (e.g. wsrules.SafetyEngine.extractTarget on TargetBody returns ""),
+// so the config validator must accept any target that any engine recognises
+// — otherwise per-protocol rules would fail to load even though the engine
+// would correctly evaluate them at runtime.
+//
+// "payload" is the WS-local (TargetPayload) and gRPC-local target name —
+// they share the spelling because both protocols treat the message body as
+// "payload"; the per-protocol engine selects the right field.
 var validInputTargets = map[string]bool{
+	// HTTP-canonical
 	"body":    true,
 	"url":     true,
 	"query":   true,
 	"header":  true,
 	"headers": true,
+	// WS-local (internal/rules/ws/safety.go: TargetPayload, TargetOpcode)
+	// + gRPC-local (internal/rules/grpc/safety.go: TargetPayload, TargetMetadata,
+	// TargetService, TargetMethod). "payload" is shared between WS and gRPC.
+	"payload":  true,
+	"opcode":   true,
+	"metadata": true,
+	"service":  true,
+	"method":   true,
 }
 
 // validOutputTargets lists the accepted target values for output filter rules.
