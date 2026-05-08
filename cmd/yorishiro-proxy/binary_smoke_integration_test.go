@@ -23,15 +23,19 @@
 package main_test
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
+	gohttp "net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"testing"
@@ -323,4 +327,192 @@ func (l *lockedBuffer) Write(p []byte) (int, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.buf.Write(p)
+}
+
+// TestE2E_Binary_CurlProxytunnel_Smoke is the USK-766 binary-level
+// proof that `curl --proxytunnel http://upstream/` works against a
+// production-built yorishiro-proxy. The wire shape is:
+//
+//  1. curl opens a TCP connection to the proxy.
+//  2. curl writes `CONNECT upstream:port HTTP/1.1`; proxy answers 200.
+//  3. curl writes a plain `GET / HTTP/1.1` (no TLS) on the SAME socket.
+//  4. The proxy peeks the inner byte ('G' for GET), classifies it as
+//     InnerHTTP1, and dispatches through the plain-HTTP-over-CONNECT
+//     stack (USK-762 wiring).
+//  5. The upstream answers 200; curl exits 0 with the body on stdout.
+//
+// The test uses the production-built binary (not mcpserver.Run) so a
+// regression in subcommand routing or boot-order plumbing surfaces in
+// the per-PR merge gate. If `curl` is not on PATH (rare in CI but
+// possible in some sandboxes), the test skips with a clear message
+// rather than failing.
+func TestE2E_Binary_CurlProxytunnel_Smoke(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("curl + signal-based shutdown semantics are awkward on Windows; smoke focuses on Unix-like CI runners")
+	}
+	if _, err := exec.LookPath("curl"); err != nil {
+		t.Skip("curl not on PATH; --proxytunnel smoke skipped (mention this in the PR description for reviewers)")
+	}
+
+	// Upstream is a plain HTTP/1.1 server. Lives outside the binary so
+	// the proxy must dial it on a separate socket — exercising the
+	// full proxy → upstream leg.
+	upstreamAddr, upstreamShutdown := startBinarySmokeUpstream(t)
+	defer upstreamShutdown()
+
+	binary := buildBinary(t)
+	mcpPort := pickFreeBinaryPort(t)
+	proxyPort := pickFreeBinaryPort(t)
+	token := "binary-smoke-curl-token-0123456789abcdef"
+	dbPath := filepath.Join(t.TempDir(), "binary-smoke-curl.db")
+
+	srv := startServerProcess(t, binary, mcpPort, token, dbPath)
+	defer srv.terminate(t)
+
+	if !waitForListener(net.JoinHostPort("127.0.0.1", strconv.Itoa(mcpPort)), 15*time.Second) {
+		srv.terminate(t)
+		t.Fatalf("binary server did not bind 127.0.0.1:%d within 15s; stderr so far:\n%s",
+			mcpPort, srv.stderrSnapshot())
+	}
+
+	// Use the client subcommand to invoke proxy_start. The proxy must
+	// be explicitly started before curl can route through it.
+	startProxyViaClient(t, binary, mcpPort, token, proxyPort)
+
+	if !waitForListener(net.JoinHostPort("127.0.0.1", strconv.Itoa(proxyPort)), 10*time.Second) {
+		srv.terminate(t)
+		t.Fatalf("proxy listener did not bind 127.0.0.1:%d after proxy_start; stderr so far:\n%s",
+			proxyPort, srv.stderrSnapshot())
+	}
+
+	// Drive curl --proxytunnel http://upstream/ through the proxy. On
+	// success, curl exits 0 and stdout contains the upstream body.
+	body, exitCode := runCurlProxytunnel(t, proxyPort, upstreamAddr)
+	if exitCode != 0 {
+		t.Fatalf("curl --proxytunnel exit = %d, want 0; stdout=%q", exitCode, body)
+	}
+	if !strings.Contains(body, "binary-smoke-ok") {
+		t.Errorf("curl stdout = %q, want substring %q", body, "binary-smoke-ok")
+	}
+
+	// Graceful shutdown.
+	if err := srv.cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatalf("send SIGTERM to server: %v", err)
+	}
+	if err := srv.waitWithTimeout(10 * time.Second); err != nil {
+		t.Errorf("server did not shut down cleanly after SIGTERM: %v\nstderr:\n%s", err, srv.stderrSnapshot())
+	}
+}
+
+// startProxyViaClient calls the client subcommand to issue proxy_start.
+// Argument order matches client.go's splitClientToolArgs contract:
+// connection flags must follow the tool name; the listen_addr key=value
+// is a positional tool param.
+func startProxyViaClient(t *testing.T, binary string, mcpPort int, token string, proxyPort int) {
+	t.Helper()
+	cmd := exec.Command(binary,
+		"client",
+		"proxy_start",
+		"--server-addr", net.JoinHostPort("127.0.0.1", strconv.Itoa(mcpPort)),
+		"--token", token,
+		"--format", "json",
+		"listen_addr=127.0.0.1:"+strconv.Itoa(proxyPort),
+	)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	timeoutCh := time.AfterFunc(15*time.Second, func() {
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+	})
+	defer timeoutCh.Stop()
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("client proxy_start exit error: %v\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
+	}
+}
+
+// runCurlProxytunnel invokes `curl --proxytunnel http://upstream/` via
+// exec.Command, returning the stdout body and exit code. The
+// --proxytunnel flag forces curl to issue CONNECT even for http://
+// URLs (the wire shape USK-762 closes).
+func runCurlProxytunnel(t *testing.T, proxyPort int, upstreamAddr string) (string, int) {
+	t.Helper()
+	url := "http://" + upstreamAddr + "/binary-smoke"
+	cmd := exec.Command("curl",
+		"--silent",
+		"--show-error",
+		"--max-time", "10",
+		"--proxytunnel",
+		"--proxy", "http://127.0.0.1:"+strconv.Itoa(proxyPort),
+		url,
+	)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	if err != nil {
+		// curl exited non-zero; surface stderr for diagnostics.
+		t.Logf("curl stderr: %s", stderr.String())
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			return stdout.String(), exitErr.ExitCode()
+		}
+		return stdout.String(), -1
+	}
+	return stdout.String(), 0
+}
+
+// startBinarySmokeUpstream binds a plain HTTP/1.1 server that answers
+// any request with a fixed body ("binary-smoke-ok"). Used by the
+// curl --proxytunnel smoke. Returns (addr, shutdown).
+func startBinarySmokeUpstream(t *testing.T) (string, func()) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("upstream listen: %v", err)
+	}
+	stopCh := make(chan struct{})
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go serveBinarySmokeConn(conn, stopCh)
+		}
+	}()
+	return ln.Addr().String(), func() {
+		close(stopCh)
+		_ = ln.Close()
+	}
+}
+
+// serveBinarySmokeConn reads HTTP/1.1 requests on conn and answers
+// each with a 200 response containing the smoke marker body. The
+// connection is closed after the first response (Connection: close).
+func serveBinarySmokeConn(conn net.Conn, stopCh <-chan struct{}) {
+	defer conn.Close()
+	br := bufio.NewReader(conn)
+	for {
+		select {
+		case <-stopCh:
+			return
+		default:
+		}
+		_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+		req, err := gohttp.ReadRequest(br)
+		if err != nil {
+			return
+		}
+		_, _ = io.ReadAll(req.Body)
+		_ = req.Body.Close()
+		// gohttp.ReadRequest is fine here because this is the upstream
+		// (test fixture), not the proxy data path. CLAUDE.md prohibits
+		// net/http in the proxy data path; test upstreams may use it.
+		const body = "binary-smoke-ok"
+		_, _ = fmt.Fprintf(conn,
+			"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s",
+			len(body), body)
+		return
+	}
 }
