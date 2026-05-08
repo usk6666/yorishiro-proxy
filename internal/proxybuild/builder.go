@@ -567,12 +567,25 @@ func buildOnHTTP2Stack(p *pipeline.Pipeline, deps Deps, logger *slog.Logger) con
 						_ = ch.Close()
 						return
 					}
-					dial := func(dctx context.Context, _ *envelope.Envelope) (layer.Channel, error) {
+					dial := func(dctx context.Context, env *envelope.Envelope) (layer.Channel, error) {
 						upCh, oerr := upstreamH2.OpenStream(dctx)
 						if oerr != nil {
 							return nil, oerr
 						}
-						return httpaggregator.Wrap(upCh, httpaggregator.RoleClient, nil, upstreamLOpts), nil
+						// USK-771: wrap the upstream channel with the same
+						// per-protocol layer the client side chose. Without
+						// this dispatch the upstream stayed httpaggregator-
+						// wrapped and rejected GRPCStartMessage on the first
+						// Send, which the session translated into an upstream
+						// stream Close → RST_STREAM(CANCEL) before any
+						// envelope reached the Pipeline.
+						var reqProto envelope.Protocol
+						if env != nil {
+							reqProto = env.Protocol
+						}
+						return connector.WrapH2UpstreamForDispatch(
+							upCh, reqProto, upstreamLOpts, grpcOpts, grpcwebOpts,
+						), nil
 					}
 					session.RunSession(ctx, aggCh, dial, p, sessOpts)
 				}(clientCh)

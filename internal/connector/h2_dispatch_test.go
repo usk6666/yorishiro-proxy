@@ -1,9 +1,12 @@
 package connector
 
 import (
+	"context"
+	"sync"
 	"testing"
 
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
+	"github.com/usk6666/yorishiro-proxy/internal/layer"
 	grpclayer "github.com/usk6666/yorishiro-proxy/internal/layer/grpc"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/grpcweb"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/http2"
@@ -157,6 +160,110 @@ func TestTranslateRoleForGRPCWeb(t *testing.T) {
 		})
 	}
 }
+
+// TestWrapH2UpstreamForDispatch verifies per-Protocol dispatch of the
+// USK-771 upstream wrapper. The Channel returned for ProtocolGRPC must
+// accept a *envelope.GRPCStartMessage on Send (whereas the default
+// httpaggregator path rejects it as a type mismatch — that mismatch is
+// the original USK-771 bug).
+func TestWrapH2UpstreamForDispatch(t *testing.T) {
+	tests := []struct {
+		name    string
+		proto   envelope.Protocol
+		message envelope.Message
+		// wantSendOK is true when wrapping under proto produces a Channel
+		// whose Send accepts message without a type-mismatch error. The
+		// fakeUpstreamChannel below silently absorbs any inner Send so a
+		// nil error from the wrapper means the wrapper accepted the
+		// envelope.
+		wantSendOK bool
+	}{
+		{
+			name:       "gRPC accepts GRPCStartMessage",
+			proto:      envelope.ProtocolGRPC,
+			message:    &envelope.GRPCStartMessage{Service: "x.Y", Method: "Z", ContentType: "application/grpc"},
+			wantSendOK: true,
+		},
+		{
+			name:       "gRPC-Web accepts GRPCStartMessage",
+			proto:      envelope.ProtocolGRPCWeb,
+			message:    &envelope.GRPCStartMessage{Service: "x.Y", Method: "Z", ContentType: "application/grpc-web+proto"},
+			wantSendOK: true,
+		},
+		{
+			name:       "default rejects GRPCStartMessage",
+			proto:      envelope.ProtocolHTTP,
+			message:    &envelope.GRPCStartMessage{Service: "x.Y", Method: "Z", ContentType: "application/grpc"},
+			wantSendOK: false,
+		},
+		{
+			name:    "default accepts HTTPMessage",
+			proto:   envelope.ProtocolHTTP,
+			message: &envelope.HTTPMessage{Method: "POST", Path: "/foo", Headers: []envelope.KeyValue{{Name: "host", Value: "x"}}},
+			// wrapping is the default httpaggregator; HTTPMessage Send goes
+			// through, so the call succeeds.
+			wantSendOK: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fake := newFakeUpstreamChannel()
+			ch := WrapH2UpstreamForDispatch(fake, tt.proto, httpaggregator.WrapOptions{}, nil, nil)
+			if ch == nil {
+				t.Fatalf("WrapH2UpstreamForDispatch returned nil for proto=%v", tt.proto)
+			}
+			defer ch.Close()
+
+			env := &envelope.Envelope{
+				StreamID:  "test",
+				Direction: envelope.Send,
+				Protocol:  tt.proto,
+				Message:   tt.message,
+			}
+			err := ch.Send(context.Background(), env)
+			if tt.wantSendOK && err != nil {
+				t.Fatalf("Send rejected envelope unexpectedly: proto=%v msg=%T err=%v", tt.proto, tt.message, err)
+			}
+			if !tt.wantSendOK && err == nil {
+				t.Fatalf("Send accepted envelope unexpectedly: proto=%v msg=%T", tt.proto, tt.message)
+			}
+		})
+	}
+}
+
+// fakeUpstreamChannel is a layer.Channel test double that silently
+// absorbs every Send. It is intentionally dumb: we only need to verify
+// the WRAPPER's Send-time type acceptance, not the inner Channel's
+// behavior. The closed channel is allocated up-front so concurrent
+// access to Closed() / Close() is race-free under -race.
+type fakeUpstreamChannel struct {
+	closed   chan struct{}
+	closedOn sync.Once
+}
+
+func newFakeUpstreamChannel() *fakeUpstreamChannel {
+	return &fakeUpstreamChannel{closed: make(chan struct{})}
+}
+
+func (f *fakeUpstreamChannel) StreamID() string { return "fake-up" }
+func (f *fakeUpstreamChannel) Next(_ context.Context) (*envelope.Envelope, error) {
+	return nil, nil
+}
+
+func (f *fakeUpstreamChannel) Send(_ context.Context, _ *envelope.Envelope) error { return nil }
+
+func (f *fakeUpstreamChannel) Close() error {
+	f.closedOn.Do(func() { close(f.closed) })
+	return nil
+}
+
+func (f *fakeUpstreamChannel) Closed() <-chan struct{} { return f.closed }
+
+func (f *fakeUpstreamChannel) Err() error { return nil }
+
+// compile-time assertion: fakeUpstreamChannel implements layer.Channel.
+var _ layer.Channel = (*fakeUpstreamChannel)(nil)
 
 // TestTranslateRoleForGRPC mirrors the gRPC-Web role test for the existing
 // translator. Keeps both translators covered so a future refactor that

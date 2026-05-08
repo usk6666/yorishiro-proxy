@@ -127,6 +127,53 @@ func DispatchH2StreamWithOpts(
 	return httpaggregator.Wrap(ch, role, firstEnv, lopts), nil
 }
 
+// WrapH2UpstreamForDispatch wraps a freshly opened upstream HTTP/2 stream
+// Channel with the same per-protocol layer the client-side dispatcher
+// chose for the request. The session loop calls Send on this Channel
+// with envelopes drawn from the client side, so the upstream Channel's
+// Send method MUST accept the same Message types.
+//
+// Concretely:
+//
+//   - reqProto == envelope.ProtocolGRPC  → wrap with grpclayer.Wrap so
+//     GRPCStartMessage / GRPCDataMessage / GRPCEndMessage round-trip back
+//     to HTTP/2 frames on the upstream wire.
+//   - reqProto == envelope.ProtocolGRPCWeb → wrap with httpaggregator
+//     then grpcweb so the gRPC-Web Send path (which accepts GRPC
+//     envelopes too) reaches the wire correctly.
+//   - any other Protocol (or empty) → wrap with httpaggregator only,
+//     matching the existing default H2-as-HTTP request/response shape.
+//
+// firstHeaders is intentionally nil on the upstream side: per RFC-001
+// §3.3.2 / Friction 4-A and grpc.Wrap's D5 special case, an upstream
+// dispatch establishes the wire AFTER the proxy decided to dial, so
+// there is no peeked HEADERS frame to replay. Layers honour this.
+//
+// USK-771: before this helper existed, proxybuild.buildOnHTTP2Stack
+// always wrapped the upstream with httpaggregator regardless of the
+// client-side dispatch decision. For a real gRPC client that produced a
+// type-mismatch on the first upstream Send (httpaggregator rejected
+// *envelope.GRPCStartMessage), the resulting error cascade closed the
+// upstream stream and surfaced as RST_STREAM(CANCEL) on the inner gRPC
+// stream before any envelope reached Pipeline.
+func WrapH2UpstreamForDispatch(
+	upCh layer.Channel,
+	reqProto envelope.Protocol,
+	upstreamLOpts httpaggregator.WrapOptions,
+	grpcOpts []grpclayer.Option,
+	grpcwebOpts []grpcweb.Option,
+) layer.Channel {
+	switch reqProto {
+	case envelope.ProtocolGRPC:
+		return grpclayer.Wrap(upCh, nil, grpclayer.RoleClient, grpcOpts...)
+	case envelope.ProtocolGRPCWeb:
+		aggCh := httpaggregator.Wrap(upCh, httpaggregator.RoleClient, nil, upstreamLOpts)
+		return grpcweb.Wrap(aggCh, grpcweb.RoleClient, grpcwebOpts...)
+	default:
+		return httpaggregator.Wrap(upCh, httpaggregator.RoleClient, nil, upstreamLOpts)
+	}
+}
+
 // GRPCOptionsFromBuildConfig assembles the [grpclayer.Option] slice from
 // BuildConfig fields that the gRPC Layer accepts. Returns an empty slice
 // when cfg is nil or no fields are populated, so the result is safe to
