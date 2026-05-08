@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
@@ -14,7 +13,6 @@ import (
 	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/config"
-	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/macro"
 )
@@ -537,8 +535,11 @@ func (s *Server) macroSendFunc(macroName string) macro.SendFunc {
 		duration := time.Since(start)
 
 		// Record the macro step as a flow so it appears in session history.
+		// Shares the recordMacroStepSessionDeps helper with the hook executor
+		// path (hooks.go) so a single helper governs Protocol canonicalisation
+		// and other recording invariants — see USK-779 / USK-774.
 		if s.flowStore.store != nil {
-			s.recordMacroStepSession(ctx, macroName, req, resp, respBody, httpReq, start, duration)
+			recordMacroStepSessionDeps(ctx, s, macroName, req, resp, respBody, httpReq, start, duration)
 		}
 
 		return &macro.SendResponse{
@@ -547,86 +548,6 @@ func (s *Server) macroSendFunc(macroName string) macro.SendFunc {
 			Body:       respBody,
 			URL:        resp.Request.URL.String(),
 		}, nil
-	}
-}
-
-// recordMacroStepSession saves a macro step's HTTP exchange as a flow with
-// send and receive messages. Errors are logged but not propagated to avoid
-// disrupting macro execution when flow recording fails.
-func (s *Server) recordMacroStepSession(
-	ctx context.Context,
-	macroName string,
-	req *macro.SendRequest,
-	resp *http.Response,
-	respBody []byte,
-	httpReq *http.Request,
-	start time.Time,
-	duration time.Duration,
-) {
-	tags := map[string]string{
-		"macro":      macroName,
-		"macro_step": req.StepID,
-	}
-
-	scheme := "http"
-	if httpReq.URL != nil && httpReq.URL.Scheme == "https" {
-		scheme = "https"
-	}
-	fl := &flow.Stream{
-		Protocol:  string(envelope.ProtocolHTTP),
-		Scheme:    scheme,
-		State:     "complete",
-		Timestamp: start,
-		Duration:  duration,
-		Tags:      tags,
-	}
-	if err := s.flowStore.store.SaveStream(ctx, fl); err != nil {
-		slog.WarnContext(ctx, "failed to save macro step session",
-			"macro", macroName, "step", req.StepID, "error", err)
-		return
-	}
-
-	// Build recorded request headers from the actual http.Request.
-	recordedHeaders := make(map[string][]string)
-	for key, values := range httpReq.Header {
-		recordedHeaders[key] = values
-	}
-
-	parsedURL := httpReq.URL
-
-	sendMsg := &flow.Flow{
-		StreamID:  fl.ID,
-		Sequence:  0,
-		Direction: "send",
-		Timestamp: start,
-		Method:    req.Method,
-		URL:       parsedURL,
-		Headers:   recordedHeaders,
-		Body:      req.Body,
-	}
-	if err := s.flowStore.store.SaveFlow(ctx, sendMsg); err != nil {
-		slog.WarnContext(ctx, "failed to save macro step send message",
-			"macro", macroName, "step", req.StepID, "error", err)
-		return
-	}
-
-	respHeaders := make(map[string][]string)
-	for key, values := range resp.Header {
-		respHeaders[key] = values
-	}
-
-	recvMsg := &flow.Flow{
-		StreamID:   fl.ID,
-		Sequence:   1,
-		Direction:  "receive",
-		Timestamp:  start.Add(duration),
-		StatusCode: resp.StatusCode,
-		Headers:    respHeaders,
-		Body:       respBody,
-	}
-	if err := s.flowStore.store.SaveFlow(ctx, recvMsg); err != nil {
-		slog.WarnContext(ctx, "failed to save macro step receive message",
-			"macro", macroName, "step", req.StepID, "error", err)
 	}
 }
 

@@ -480,8 +480,13 @@ func hookMacroSendFunc(s *Server, macroName string) macro.SendFunc {
 	}
 }
 
-// recordMacroStepSessionDeps saves a macro step's HTTP exchange as a flow.
-// Reads through *Server's FlowStore component.
+// recordMacroStepSessionDeps saves a macro step's HTTP exchange as a flow with
+// send and receive messages. It is the single recorder shared by both the hook
+// executor path (hooks.go) and the direct macro handler path (macro_handlers.go);
+// having one helper prevents the lockstep-edit drift class that produced USK-774,
+// where two duplicate sites had to be patched together to canonicalise Protocol.
+// Reads through *Server's FlowStore component. Errors are logged but not
+// propagated to avoid disrupting macro execution when flow recording fails.
 func recordMacroStepSessionDeps(
 	ctx context.Context,
 	s *Server,
