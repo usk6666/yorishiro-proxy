@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
+	"github.com/usk6666/yorishiro-proxy/internal/macro"
 )
 
 // --- validateHooks tests ---
@@ -478,5 +479,66 @@ func TestExecutePostReceive_EmptyKVStore(t *testing.T) {
 	err := executor.executePostReceive(ctx, 200, []byte("ok"), map[string]string{})
 	if err != nil {
 		t.Fatalf("executePostReceive with empty kvStore: %v", err)
+	}
+}
+
+// TestRecordMacroStepSessionDeps_RecordsCanonicalProtocol is a regression guard
+// for USK-774: recordMacroStepSessionDeps must persist the canonical
+// envelope.ProtocolHTTP value ("http"), not the legacy "HTTP/1.x" spelling, so
+// macro-recorded streams match the query MCP tool's protocol filter (canonical
+// only since USK-705 / PR #694).
+func TestRecordMacroStepSessionDeps_RecordsCanonicalProtocol(t *testing.T) {
+	t.Parallel()
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	s := newServer(context.Background(), nil, store, nil)
+
+	reqURL, _ := url.Parse("http://example.test/api/v1/login")
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", reqURL.String(), strings.NewReader("{}"))
+	if err != nil {
+		t.Fatalf("NewRequestWithContext: %v", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	resp := &http.Response{
+		StatusCode: 200,
+		Header:     http.Header{"Content-Type": {"application/json"}},
+	}
+	respBody := []byte(`{"ok":true}`)
+	macroReq := &macro.SendRequest{
+		Method: "POST",
+		URL:    reqURL.String(),
+		Body:   []byte("{}"),
+		StepID: "login",
+	}
+	start := time.Now().UTC()
+	duration := 10 * time.Millisecond
+
+	recordMacroStepSessionDeps(ctx, s, "login-macro", macroReq, resp, respBody, httpReq, start, duration)
+
+	streams, err := store.ListStreams(ctx, flow.StreamListOptions{Limit: 100})
+	if err != nil {
+		t.Fatalf("ListStreams: %v", err)
+	}
+	if len(streams) != 1 {
+		t.Fatalf("ListStreams returned %d, want 1", len(streams))
+	}
+	got := streams[0]
+	if got.Protocol != "http" {
+		t.Errorf("Stream.Protocol = %q, want %q (canonical envelope.ProtocolHTTP)", got.Protocol, "http")
+	}
+	if got.Tags["macro"] != "login-macro" || got.Tags["macro_step"] != "login" {
+		t.Errorf("Tags = %#v, want macro=login-macro, macro_step=login", got.Tags)
+	}
+
+	// Round-trip via the query-style protocol filter to confirm the canonical
+	// value flows through StreamListOptions.Protocol matching.
+	matched, err := store.ListStreams(ctx, flow.StreamListOptions{Protocol: "http", Limit: 100})
+	if err != nil {
+		t.Fatalf("ListStreams(protocol=http): %v", err)
+	}
+	if len(matched) != 1 || matched[0].ID != got.ID {
+		t.Errorf("ListStreams(protocol=http) returned %d entries, want exactly the macro-recorded stream", len(matched))
 	}
 }

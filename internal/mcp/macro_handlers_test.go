@@ -1062,10 +1062,13 @@ func TestExecute_RunMacro_RecordsSessions(t *testing.T) {
 	}
 
 	// Verify each macro session has the correct tags and messages.
+	// Protocol must be the canonical envelope.ProtocolHTTP value ("http")
+	// so the query MCP tool's protocol filter (canonical-only since USK-705)
+	// matches macro-recorded streams. Regression guard for USK-774.
 	stepIDs := map[string]bool{}
 	for _, ms := range macroFlows {
-		if ms.Protocol != "HTTP/1.x" {
-			t.Errorf("flow %s: Protocol = %q, want HTTP/1.x", ms.ID, ms.Protocol)
+		if ms.Protocol != "http" {
+			t.Errorf("flow %s: Protocol = %q, want %q (canonical envelope.ProtocolHTTP)", ms.ID, ms.Protocol, "http")
 		}
 		if ms.State != "complete" {
 			t.Errorf("flow %s: State = %q, want complete", ms.ID, ms.State)

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/config"
+	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/macro"
 )
@@ -572,7 +573,7 @@ func (s *Server) recordMacroStepSession(
 		scheme = "https"
 	}
 	fl := &flow.Stream{
-		Protocol:  "HTTP/1.x",
+		Protocol:  string(envelope.ProtocolHTTP),
 		Scheme:    scheme,
 		State:     "complete",
 		Timestamp: start,
