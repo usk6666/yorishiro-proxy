@@ -17,6 +17,18 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/safety"
 )
 
+// schemaCache is a process-wide cache of resolved JSON schemas, shared by
+// every MCP Server instance built in this process.
+//
+// The 17 tool input/output struct types registered by registerTools are
+// fixed at compile time, so caching by reflect.Type is unconditionally
+// correct. The cache is concurrent-safe (gomcp.SchemaCache uses sync.Map
+// internally) and cheaply amortises a 1+ second per-server reflection cost
+// that otherwise dominates the fast-tier test suite — every test that
+// constructs an mcp.Server pays that cost without the cache, and the
+// internal/mcp package alone has 100+ such call sites (USK-778).
+var schemaCache = gomcp.NewSchemaCache()
+
 // Server wraps the MCP server and registers proxy-related tools.
 //
 // The dependency surface is split into seven coherent components defined in
@@ -173,7 +185,7 @@ func NewServer(
 	s.server = gomcp.NewServer(&gomcp.Implementation{
 		Name:    "yorishiro-proxy",
 		Version: s.version,
-	}, nil)
+	}, &gomcp.ServerOptions{SchemaCache: schemaCache})
 
 	finalizeDefaults(s)
 	s.registerTools()
@@ -287,6 +299,14 @@ func (s *Server) RunHTTP(ctx context.Context, addr string, onListening ...func(a
 		return fmt.Errorf("MCP HTTP server: %w", err)
 	}
 
+	// Snapshot shutdownTimeout at function entry so the shutdown goroutine
+	// closes over a local copy. Without this, the goroutine reads the
+	// package-level variable at shutdown time, which races with tests that
+	// reset shutdownTimeout via t.Cleanup (see USK-778: schema cache
+	// shortens RunHTTP startup enough that overlapping test goroutines
+	// surfaced the latent race).
+	shutdownDeadline := shutdownTimeout
+
 	// Build MCP handler with auth middleware.
 	var mcpHandler http.Handler = gomcp.NewStreamableHTTPHandler(func(_ *http.Request) *gomcp.Server {
 		return s.server
@@ -336,7 +356,7 @@ func (s *Server) RunHTTP(ctx context.Context, addr string, onListening ...func(a
 		defer close(shutdownDone)
 		<-ctx.Done()
 
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownDeadline)
 		defer cancel()
 
 		slog.Info("shutting down MCP HTTP server", "addr", listenAddr)
