@@ -1,6 +1,7 @@
 package envelope
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -354,3 +355,94 @@ var (
 	_ Message = (*GRPCEndMessage)(nil)
 	_ Message = (*SSEMessage)(nil)
 )
+
+// USK-773: Envelope.WireBytes returns Raw when RawBuffer is nil (the memory
+// path). Disk-spill of RawBuffer arrives in USK-772.
+func TestEnvelope_WireBytes_MemoryPath(t *testing.T) {
+	wire := []byte("HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello")
+	e := &Envelope{Raw: wire}
+	got, err := e.WireBytes(context.Background())
+	if err != nil {
+		t.Fatalf("WireBytes error: %v", err)
+	}
+	if string(got) != string(wire) {
+		t.Errorf("WireBytes = %q, want %q", got, wire)
+	}
+}
+
+// TestEnvelope_WireBytes_NilEnvelope verifies the nil receiver guard so
+// callers do not need to nil-check before reading the wire snapshot.
+func TestEnvelope_WireBytes_NilEnvelope(t *testing.T) {
+	var e *Envelope
+	got, err := e.WireBytes(context.Background())
+	if err != nil {
+		t.Fatalf("WireBytes(nil) error: %v", err)
+	}
+	if got != nil {
+		t.Errorf("WireBytes(nil) = %q, want nil", got)
+	}
+}
+
+// TestEnvelope_WireBytes_RawBufferPath verifies that when RawBuffer is set
+// (USK-772 future path), WireBytes materializes from the buffer rather than
+// returning Raw. For USK-773 RawBuffer is always nil; this test exercises
+// the API shape so USK-772 has a fixture to extend.
+func TestEnvelope_WireBytes_RawBufferPath(t *testing.T) {
+	wire := []byte("from-rawbuffer")
+	bb := bodybuf.NewMemory(wire)
+	defer bb.Release()
+
+	e := &Envelope{
+		// Raw is intentionally a different value to prove RawBuffer wins
+		// when both are populated. In real use only one will be set.
+		Raw:       []byte("DECOY-not-from-rawbuffer"),
+		RawBuffer: bb,
+	}
+	got, err := e.WireBytes(context.Background())
+	if err != nil {
+		t.Fatalf("WireBytes error: %v", err)
+	}
+	if string(got) != string(wire) {
+		t.Errorf("WireBytes = %q, want %q (RawBuffer must take precedence over Raw)",
+			got, wire)
+	}
+}
+
+// TestEnvelope_Clone_RawBufferRetained verifies that cloning an Envelope
+// with a non-nil RawBuffer shares the buffer pointer and Retains it so the
+// clone and original both hold live references. Mirrors the
+// HTTPMessage.BodyBuffer cloning contract. USK-772 will rely on this to
+// keep variant snapshots' wire bytes alive when the original is released.
+func TestEnvelope_Clone_RawBufferRetained(t *testing.T) {
+	bb := bodybuf.NewMemory([]byte("shared-wire-bytes"))
+	orig := &Envelope{
+		StreamID:  "s1",
+		Protocol:  ProtocolHTTP,
+		RawBuffer: bb,
+		Message:   &HTTPMessage{Method: "GET"},
+	}
+
+	cloned := orig.Clone()
+
+	if cloned.RawBuffer != orig.RawBuffer {
+		t.Fatal("Clone should share RawBuffer pointer with original")
+	}
+
+	// Release the original owner; the clone must still be able to read the
+	// buffer because Clone called Retain.
+	if err := orig.RawBuffer.Release(); err != nil {
+		t.Fatalf("first Release (orig): %v", err)
+	}
+	got, err := cloned.RawBuffer.Bytes(context.Background())
+	if err != nil {
+		t.Fatalf("clone.RawBuffer.Bytes: %v", err)
+	}
+	if string(got) != "shared-wire-bytes" {
+		t.Errorf("clone.RawBuffer.Bytes = %q, want %q", got, "shared-wire-bytes")
+	}
+
+	// Final release: clone drops the last reference.
+	if err := cloned.RawBuffer.Release(); err != nil {
+		t.Fatalf("second Release (clone): %v", err)
+	}
+}

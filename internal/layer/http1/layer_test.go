@@ -424,12 +424,18 @@ func TestChannel_NextRequest(t *testing.T) {
 		t.Error("Raw is empty")
 	}
 
-	// Verify Raw contains headers only (not body).
-	if bytes.Contains(env.Raw, []byte("hello")) {
-		t.Error("Raw should not contain body")
+	// USK-773: Raw is the complete wire snapshot — header section + on-wire
+	// body section. For Content-Length=5 "hello" the body bytes appear
+	// verbatim after the header CRLFCRLF terminator.
+	if !bytes.Contains(env.Raw, []byte("hello")) {
+		t.Error("Raw should contain on-wire body bytes (USK-773)")
 	}
 	if !bytes.Contains(env.Raw, []byte("GET /path")) {
 		t.Error("Raw should contain request line")
+	}
+	// Wire-fidelity check: Raw must match request bytes exactly.
+	if string(env.Raw) != req {
+		t.Errorf("Raw wire-fidelity mismatch:\n got=%q\nwant=%q", string(env.Raw), req)
 	}
 
 	// Verify Channel.StreamID() is connection-level.

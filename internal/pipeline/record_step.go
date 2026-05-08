@@ -380,8 +380,14 @@ func (s *RecordStep) envelopeToFlow(ctx context.Context, env *envelope.Envelope)
 		Sequence:  env.Sequence,
 		Direction: env.Direction.String(),
 		Timestamp: time.Now(),
-		RawBytes:  env.Raw,
-		Metadata:  map[string]string{"protocol": string(env.Protocol)},
+		// TODO(USK-772): switch to env.WireBytes(ctx) once RawBuffer is
+		// populated for disk-spilled bodies. While RawBuffer is always nil
+		// (USK-773 memory-only path) env.Raw IS the full wire snapshot and
+		// WireBytes would just be a more expensive read; once USK-772 lands
+		// and Raw may be nil with RawBuffer non-nil, this projection will
+		// silently drop wire bytes from Flow.RawBytes unless updated.
+		RawBytes: env.Raw,
+		Metadata: map[string]string{"protocol": string(env.Protocol)},
 	}
 
 	switch m := env.Message.(type) {

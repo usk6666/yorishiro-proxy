@@ -313,6 +313,28 @@ func TestFullListener_ChunkedResponse_Passthrough_HTTP1Forward(t *testing.T) {
 	if len(recvFlows) < 1 {
 		t.Fatal("expected at least 1 receive flow, got 0")
 	}
+
+	// USK-773: Flow.RawBytes must contain the COMPLETE wire bytes (header
+	// section + chunk-framed body section), not just the header section.
+	// This is the Flow Store / WebUI / `query` MCP tool surface — the
+	// header-only behaviour was the user-facing UX bug closed by USK-773.
+	wantWire := chunkedResponseBytes()
+	gotRaw := recvFlows[0].RawBytes
+	if !bytes.Equal(gotRaw, wantWire) {
+		t.Errorf("recv Flow.RawBytes does not match upstream wire (USK-773):\n got=\n%swant=\n%s",
+			hex.Dump(gotRaw), hex.Dump(wantWire))
+	}
+	// Sanity: chunk framing markers survived projection into the Flow Store.
+	for _, marker := range []string{
+		"5\r\nhello\r\n",
+		"6;name=val\r\n",
+		"A\r\n0123456789\r\n",
+		"0\r\nX-Trailer: yes\r\n\r\n",
+	} {
+		if !bytes.Contains(gotRaw, []byte(marker)) {
+			t.Errorf("recv Flow.RawBytes missing chunk marker %q", marker)
+		}
+	}
 }
 
 // TestFullListener_ChunkedResponse_Passthrough_SOCKS5Plain is the merge-gate
@@ -373,5 +395,16 @@ func TestFullListener_ChunkedResponse_Passthrough_SOCKS5Plain(t *testing.T) {
 	}
 	if streams[0].Scheme != "" && !strings.EqualFold(streams[0].Scheme, "http") {
 		t.Errorf("stream scheme = %q, want %q", streams[0].Scheme, "http")
+	}
+
+	// USK-773: same Flow Store full-wire-bytes assertion as the CONNECT path.
+	recvFlows := store.flowsByDirection("receive")
+	if len(recvFlows) < 1 {
+		t.Fatal("expected at least 1 receive flow, got 0")
+	}
+	wantWire := chunkedResponseBytes()
+	if !bytes.Equal(recvFlows[0].RawBytes, wantWire) {
+		t.Errorf("recv Flow.RawBytes does not match upstream wire (USK-773 SOCKS5):\n got=\n%swant=\n%s",
+			hex.Dump(recvFlows[0].RawBytes), hex.Dump(wantWire))
 	}
 }

@@ -1,12 +1,15 @@
 package envelope
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
 	"fmt"
 	"net"
 	"time"
+
+	"github.com/usk6666/yorishiro-proxy/internal/envelope/bodybuf"
 )
 
 // ErrPartialWireBytes is returned by a per-protocol wire-encode helper to
@@ -82,8 +85,45 @@ type Envelope struct {
 
 	// --- Wire fidelity (read-only view for Pipeline; authoritative bytes) ---
 
-	// Raw contains the wire-observed bytes exactly as captured.
+	// Raw contains the complete wire-observed bytes for this Envelope as
+	// captured during parsing — header section concatenated with the on-wire
+	// body section. For HTTP/1.x with chunked Transfer-Encoding, Raw includes
+	// chunk-size lines, chunk extensions, optional trailers, and the
+	// terminating "0\r\n\r\n" exactly as observed on the wire. For identity
+	// bodies (Content-Length / EOF-delimited) Raw includes the verbatim body
+	// bytes after the header CRLFCRLF terminator. For bodyless messages
+	// (HEAD response, 204, 304) Raw contains the header section only.
+	//
+	// Body capture is bounded by parser.MaxRawCaptureSize. On cap breach the
+	// HTTP/1.x parser surfaces AnomalyRawBodyTruncated on the message and Raw
+	// holds the truncated header+body prefix.
+	//
+	// Memory profile on the variant-record path: Clone deep-copies these
+	// bytes via cloneBytes, so an intercept that produces both an original
+	// and a modified variant peaks at roughly 2 × len(Raw) per flow on top of
+	// the existing HTTPMessage.Body deep-copy. With Raw promoted to full wire
+	// bytes (header + body, up to MaxRawCaptureSize), peak residency on
+	// intercept-heavy sessions is appreciably higher than under the
+	// pre-USK-773 header-only semantics; size session limits accordingly.
+	//
+	// USK-773: prior to this Issue Raw held only the header section for
+	// HTTP/1.x; the on-wire body section was reconstructed at re-encode time.
+	// Raw is now the complete wire snapshot so Flow Store BLOB columns,
+	// `query` MCP tool, and WebUI hex viewers see the full wire bytes
+	// (RFC-001 §3.1).
 	Raw []byte
+
+	// RawBuffer optionally carries the complete wire bytes when the body was
+	// large enough to spill to disk. When non-nil, RawBuffer is the
+	// authoritative source for the wire snapshot and Raw may be nil.
+	// Consumers should call WireBytes to read the wire snapshot regardless of
+	// which side is populated.
+	//
+	// USK-773 introduces the field with a memory-only path (RawBuffer is left
+	// nil; Raw holds the full wire bytes). USK-772 will populate RawBuffer
+	// when the parser produces a disk-spilled RawBody so multi-MiB bodies do
+	// not double up in memory.
+	RawBuffer *bodybuf.BodyBuffer
 
 	// --- Protocol-specific structured view ---
 
@@ -104,6 +144,12 @@ type Envelope struct {
 
 // Clone returns a deep copy of the envelope suitable for variant snapshotting.
 // Opaque is not cloned — that is the Layer's responsibility.
+//
+// RawBuffer is shared via Retain (when non-nil) so variant snapshots see the
+// same disk-backed wire snapshot; the session OnComplete backstop releases
+// the terminal reference. This mirrors HTTPMessage.BodyBuffer cloning
+// semantics. RawBuffer remains nil for the USK-773 memory path; a future
+// Issue (USK-772) is responsible for populating it.
 func (e *Envelope) Clone() *Envelope {
 	clone := &Envelope{
 		StreamID:  e.StreamID,
@@ -115,10 +161,48 @@ func (e *Envelope) Clone() *Envelope {
 		Context:   e.Context, // shallow copy; TLS is a pointer (shared, immutable)
 		// Opaque intentionally not cloned
 	}
+	if e.RawBuffer != nil {
+		// TODO(USK-772): the Retain here is symmetric with
+		// HTTPMessage.BodyBuffer's Retain in HTTPMessage.CloneMessage, but
+		// the corresponding terminal Release lives in
+		// internal/session/session.go bodyBufRegistry.trackEnvelope, which
+		// today only tracks HTTPMessage.BodyBuffer. While RawBuffer is
+		// always nil (USK-773 memory-only path) this branch never runs and
+		// nothing leaks. When USK-772 starts populating RawBuffer, extend
+		// trackEnvelope to also track env.RawBuffer or this Retain leaks one
+		// refcount per Clone.
+		e.RawBuffer.Retain()
+		clone.RawBuffer = e.RawBuffer
+	}
 	if e.Message != nil {
 		clone.Message = e.Message.CloneMessage()
 	}
 	return clone
+}
+
+// WireBytes returns the complete wire bytes for this Envelope. When
+// RawBuffer is non-nil, it is materialized via BodyBuffer.Bytes(ctx);
+// otherwise Raw is returned directly. For the USK-773 memory path
+// RawBuffer is always nil and WireBytes returns Raw. USK-772 will populate
+// RawBuffer for spilled bodies; consumers should prefer this helper to read
+// the wire snapshot so they do not need to know which storage path produced
+// the envelope.
+//
+// Errors are surfaced from BodyBuffer.Bytes only (e.g. read errors on a
+// disk-backed buffer or ctx cancellation). When RawBuffer is nil the call
+// cannot fail.
+func (e *Envelope) WireBytes(ctx context.Context) ([]byte, error) {
+	if e == nil {
+		return nil, nil
+	}
+	if e.RawBuffer != nil {
+		b, err := e.RawBuffer.Bytes(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("envelope: read RawBuffer: %w", err)
+		}
+		return b, nil
+	}
+	return e.Raw, nil
 }
 
 // cloneBytes returns a copy of b, or nil if b is nil.

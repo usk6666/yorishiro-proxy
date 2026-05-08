@@ -1115,6 +1115,143 @@ func TestRecordStep_ModifiedVariant_Both_RawWins(t *testing.T) {
 	}
 }
 
+// TestRecordStep_FlowRawBytes_FullWireBytes is a USK-773 regression guard:
+// when an HTTP/1.x channel hands a chunked envelope with Envelope.Raw
+// containing the complete wire bytes (header section + chunk-framed body),
+// the RecordStep must project those full bytes into Flow.RawBytes verbatim
+// without any normalization, dechunking, or truncation.
+func TestRecordStep_FlowRawBytes_FullWireBytes(t *testing.T) {
+	w := &mockWriter{}
+	step := NewRecordStep(w, nil)
+
+	// Hand-crafted chunked wire: header + multi-chunk body + trailer.
+	wire := []byte("HTTP/1.1 200 OK\r\n" +
+		"Transfer-Encoding: chunked\r\n" +
+		"Content-Type: text/plain\r\n" +
+		"\r\n" +
+		"5\r\nhello\r\n" +
+		"6;ext=v\r\n world\r\n" +
+		"A\r\n0123456789\r\n" +
+		"0\r\nX-Trailer: yes\r\n\r\n")
+	env := &envelope.Envelope{
+		StreamID:  "s1",
+		FlowID:    "f1",
+		Direction: envelope.Receive,
+		Sequence:  1,
+		Protocol:  envelope.ProtocolHTTP,
+		Raw:       wire,
+		Message: &envelope.HTTPMessage{
+			Status:       200,
+			StatusReason: "OK",
+			Body:         []byte("hello world0123456789"),
+		},
+	}
+
+	step.Process(context.Background(), env)
+
+	if len(w.flows) != 1 {
+		t.Fatalf("expected 1 flow, got %d", len(w.flows))
+	}
+	fl := w.flows[0]
+	if !bytes.Equal(fl.RawBytes, wire) {
+		t.Errorf("Flow.RawBytes does not preserve full wire snapshot:\n got=%q\nwant=%q",
+			fl.RawBytes, wire)
+	}
+	// Sanity: chunk framing markers survived projection.
+	for _, marker := range []string{
+		"Transfer-Encoding: chunked",
+		"5\r\nhello\r\n",
+		"6;ext=v\r\n",
+		"0\r\nX-Trailer: yes\r\n\r\n",
+	} {
+		if !bytes.Contains(fl.RawBytes, []byte(marker)) {
+			t.Errorf("Flow.RawBytes missing chunk marker %q", marker)
+		}
+	}
+}
+
+// TestRecordStep_FlowRawBytes_VariantPreservesFullWire is a USK-773 + USK-686
+// regression guard: when both original and modified envelopes carry full
+// wire bytes (USK-773 promotes Envelope.Raw to header+body), the variant
+// recording path must preserve the full wire bytes for the original variant
+// (snap.Raw is verbatim) and use the WireEncoder output (which is also full
+// wire bytes) for the modified variant.
+func TestRecordStep_FlowRawBytes_VariantPreservesFullWire(t *testing.T) {
+	origWire := []byte("HTTP/1.1 200 OK\r\n" +
+		"Content-Length: 5\r\n" +
+		"\r\n" +
+		"hello")
+	modWire := []byte("HTTP/1.1 200 OK\r\n" +
+		"Content-Length: 7\r\n" +
+		"X-Injected: yes\r\n" +
+		"\r\n" +
+		"goodbye")
+
+	w := &mockWriter{}
+	step := NewRecordStep(w, nil,
+		WithWireEncoder(envelope.ProtocolHTTP, func(e *envelope.Envelope) ([]byte, error) {
+			// Stand-in for the http1 layer's EncodeWireBytes — returns the
+			// full wire snapshot for the modified variant.
+			return modWire, nil
+		}),
+	)
+
+	original := &envelope.Envelope{
+		StreamID:  "s1",
+		FlowID:    "f1",
+		Direction: envelope.Receive,
+		Sequence:  1,
+		Protocol:  envelope.ProtocolHTTP,
+		Raw:       origWire,
+		Message: &envelope.HTTPMessage{
+			Status:  200,
+			Headers: []envelope.KeyValue{{Name: "Content-Length", Value: "5"}},
+			Body:    []byte("hello"),
+		},
+	}
+	modified := &envelope.Envelope{
+		StreamID:  "s1",
+		FlowID:    "f1",
+		Direction: envelope.Receive,
+		Sequence:  1,
+		Protocol:  envelope.ProtocolHTTP,
+		Raw:       origWire, // ingress Raw still snap.Raw — encoder produces post-mutation bytes
+		Message: &envelope.HTTPMessage{
+			Status: 200,
+			Headers: []envelope.KeyValue{
+				{Name: "Content-Length", Value: "7"},
+				{Name: "X-Injected", Value: "yes"},
+			},
+			Body: []byte("goodbye"),
+		},
+	}
+
+	ctx := withSnapshot(context.Background(), original)
+	step.Process(ctx, modified)
+
+	if len(w.flows) != 2 {
+		t.Fatalf("expected 2 flows (original + modified), got %d", len(w.flows))
+	}
+	origFlow, modFlow := w.flows[0], w.flows[1]
+
+	if !bytes.Equal(origFlow.RawBytes, origWire) {
+		t.Errorf("original Flow.RawBytes lost full wire snapshot:\n got=%q\nwant=%q",
+			origFlow.RawBytes, origWire)
+	}
+	if !bytes.Equal(modFlow.RawBytes, modWire) {
+		t.Errorf("modified Flow.RawBytes did not match encoder output:\n got=%q\nwant=%q",
+			modFlow.RawBytes, modWire)
+	}
+
+	// Variant tags.
+	if origFlow.Metadata["variant"] != "original" {
+		t.Errorf("original variant tag = %q, want %q", origFlow.Metadata["variant"], "original")
+	}
+	if modFlow.Metadata["variant"] != "modified" {
+		t.Errorf("modified variant tag = %q, want %q", modFlow.Metadata["variant"], "modified")
+	}
+}
+
 func TestRecordStep_StoreError(t *testing.T) {
 	w := &mockWriter{saveErr: errors.New("store unavailable")}
 	step := NewRecordStep(w, nil)

@@ -548,9 +548,15 @@ func (c *channel) parseRequest() (*envelope.Envelope, error) {
 		Sequence:  c.sequence,
 		Direction: envelope.Send,
 		Protocol:  envelope.ProtocolHTTP,
-		Raw:       rawReq.RawBytes,
-		Message:   msg,
-		Context:   envCtx,
+		// USK-773: Envelope.Raw is the complete wire snapshot (header section
+		// + on-wire body section). For chunked TE the body section preserves
+		// chunk framing, extensions, trailers, and the terminating
+		// "0\r\n\r\n"; for identity bodies it is the verbatim body bytes.
+		// rawReq.RawBytes (header-only) remains the source of truth for
+		// header-section-only consumers (e.g. opaque send fast path).
+		Raw:     concatWireBytes(rawReq.RawBytes, rawReq.RawBody),
+		Message: msg,
+		Context: envCtx,
 		Opaque: &opaqueHTTP1{
 			rawReq:         rawReq,
 			origKV:         cloneKV(msg.Headers),
@@ -653,9 +659,11 @@ func (c *channel) parseResponse() (*envelope.Envelope, bool, error) {
 		Sequence:  emitSeq,
 		Direction: envelope.Receive,
 		Protocol:  envelope.ProtocolHTTP,
-		Raw:       rawResp.RawBytes,
-		Message:   msg,
-		Context:   envCtx,
+		// USK-773: Envelope.Raw is the complete wire snapshot (header section
+		// + on-wire body section). See parseRequest for rationale.
+		Raw:     concatWireBytes(rawResp.RawBytes, rawResp.RawBody),
+		Message: msg,
+		Context: envCtx,
 		Opaque: &opaqueHTTP1{
 			rawResp:        rawResp,
 			origKV:         cloneKV(msg.Headers),
@@ -1165,4 +1173,23 @@ func extractRawBody(parserBody io.Reader) ([]byte, bool) {
 		return nil, false
 	}
 	return rp.RawBody(), rp.RawBodyTruncated()
+}
+
+// concatWireBytes returns the full wire snapshot of an HTTP/1.x message:
+// the header section bytes captured by the parser concatenated with the
+// on-wire body bytes (chunk framing for chunked TE, identity bytes
+// otherwise). Returns headerBytes verbatim (no allocation) when bodyBytes
+// is empty.
+//
+// USK-773: this is the projection point that promotes Envelope.Raw from
+// "header section only" to "complete wire bytes" so Flow Store / WebUI /
+// `query` MCP tool consumers see chunked frames + trailers + extensions.
+func concatWireBytes(headerBytes, bodyBytes []byte) []byte {
+	if len(bodyBytes) == 0 {
+		return headerBytes
+	}
+	out := make([]byte, 0, len(headerBytes)+len(bodyBytes))
+	out = append(out, headerBytes...)
+	out = append(out, bodyBytes...)
+	return out
 }
