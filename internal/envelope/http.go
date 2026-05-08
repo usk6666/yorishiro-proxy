@@ -27,6 +27,11 @@ const (
 	AnomalyTrailerPseudoHeader   AnomalyType = "TrailerPseudoHeader"
 	AnomalyTrailerForbidden      AnomalyType = "TrailerForbidden"
 	AnomalyTrailersInPassthrough AnomalyType = "TrailersInPassthrough"
+	// AnomalyRawBodyTruncated indicates that the on-wire raw body bytes
+	// exceeded MaxRawCaptureSize; the captured RawBody is a prefix only.
+	// The semantic body (HTTPMessage.Body / BodyBuffer) is not affected by
+	// this cap (it is bounded independently by spillThreshold / MaxBodySize).
+	AnomalyRawBodyTruncated AnomalyType = "RawBodyTruncated"
 
 	// HTTP/2 specific anomalies.
 	H2DuplicatePseudoHeader    AnomalyType = "H2DuplicatePseudoHeader"

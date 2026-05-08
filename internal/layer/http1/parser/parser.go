@@ -484,14 +484,14 @@ func resolveRequestBody(r *bufio.Reader, headers RawHeaders, proto string) io.Re
 		n, err := strconv.ParseInt(strings.TrimSpace(cl), 10, 64)
 		if err != nil || n < 0 {
 			// Invalid Content-Length: return empty body.
-			return io.LimitReader(r, 0)
+			return newIdentityBodyReader(io.LimitReader(r, 0))
 		}
-		return io.LimitReader(r, n)
+		return newIdentityBodyReader(io.LimitReader(r, n))
 	}
 
 	// No Content-Length, no chunked TE.
 	// For requests, no body is assumed (unlike responses which use EOF).
-	return io.LimitReader(r, 0)
+	return newIdentityBodyReader(io.LimitReader(r, 0))
 }
 
 // resolveResponseBody creates an appropriate body reader for a response.
@@ -500,7 +500,7 @@ func resolveRequestBody(r *bufio.Reader, headers RawHeaders, proto string) io.Re
 func resolveResponseBody(r *bufio.Reader, headers RawHeaders, proto string, statusCode int) io.Reader {
 	// 1xx, 204, 304 responses have no body.
 	if (statusCode >= 100 && statusCode < 200) || statusCode == 204 || statusCode == 304 {
-		return io.LimitReader(r, 0)
+		return newIdentityBodyReader(io.LimitReader(r, 0))
 	}
 
 	// chunked Transfer-Encoding: decode to plain data.
@@ -517,16 +517,62 @@ func resolveResponseBody(r *bufio.Reader, headers RawHeaders, proto string, stat
 	if cl := headers.Get("Content-Length"); cl != "" {
 		n, err := strconv.ParseInt(strings.TrimSpace(cl), 10, 64)
 		if err != nil || n < 0 {
-			return io.LimitReader(r, 0)
+			return newIdentityBodyReader(io.LimitReader(r, 0))
 		}
-		return io.LimitReader(r, n)
+		return newIdentityBodyReader(io.LimitReader(r, n))
 	}
 
 	// HTTP/1.0 or Connection: close: body ends at EOF.
 	if proto == "HTTP/1.0" || shouldClose(headers, proto) {
-		return r
+		return newIdentityBodyReader(r)
 	}
 
 	// HTTP/1.1 with no Content-Length and no chunked TE: no body.
-	return io.LimitReader(r, 0)
+	return newIdentityBodyReader(io.LimitReader(r, 0))
+}
+
+// identityBodyReader wraps a body io.Reader and tees the bytes it produces
+// into a captureWriter so the consumer can retrieve the on-wire body bytes
+// after the body has been fully drained. Used for Content-Length and
+// EOF-delimited (HTTP/1.0 / Connection: close) bodies.
+//
+// For identity bodies the dechunked semantic body and the on-wire RawBody are
+// identical, but the tee preserves the property that RawBody is always
+// available — uniformly across chunked and identity paths — so opaque
+// send paths can always re-emit RawBody.
+type identityBodyReader struct {
+	r          io.Reader
+	rawCapture *captureWriter
+}
+
+func newIdentityBodyReader(r io.Reader) *identityBodyReader {
+	return &identityBodyReader{r: r, rawCapture: &captureWriter{}}
+}
+
+// Read implements io.Reader.
+func (ir *identityBodyReader) Read(p []byte) (int, error) {
+	n, err := ir.r.Read(p)
+	if n > 0 {
+		ir.rawCapture.write(p[:n])
+	}
+	return n, err
+}
+
+// RawBody returns the on-wire body bytes captured during reads. For
+// identity-encoded bodies this is identical to the dechunked semantic body.
+// Call after the body has been fully drained.
+func (ir *identityBodyReader) RawBody() []byte {
+	if ir.rawCapture == nil {
+		return nil
+	}
+	return ir.rawCapture.bytes()
+}
+
+// RawBodyTruncated reports whether captured RawBody was capped at
+// MaxRawCaptureSize.
+func (ir *identityBodyReader) RawBodyTruncated() bool {
+	if ir.rawCapture == nil {
+		return false
+	}
+	return ir.rawCapture.truncated
 }

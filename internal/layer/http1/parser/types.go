@@ -51,6 +51,11 @@ const (
 	// Trailer values are drained by the downstream writer but are not surfaced
 	// on HTTPMessage.Trailers. Parallels H2TrailersAfterPassthrough for HTTP/2.
 	AnomalyTrailersInPassthrough AnomalyType = "TrailersInPassthrough"
+	// AnomalyRawBodyTruncated indicates that the on-wire raw body bytes
+	// exceeded MaxRawCaptureSize and the captured RawBody is a prefix only.
+	// The semantic body (Body / BodyBuffer) is unaffected and capped by the
+	// independent body-spill / MaxBodySize policies.
+	AnomalyRawBodyTruncated AnomalyType = "RawBodyTruncated"
 )
 
 // TrailerProvider is implemented by body readers that parse chunked trailers
@@ -65,6 +70,28 @@ type TrailerProvider interface {
 	// TrailerAnomalies returns anomalies detected during trailer parsing
 	// (pseudo-header, forbidden header, obs-fold, header injection).
 	TrailerAnomalies() []Anomaly
+}
+
+// RawBodyProvider is implemented by body readers that capture the on-wire
+// body bytes verbatim (chunk framing for chunked Transfer-Encoding, raw
+// content bytes for Content-Length / EOF-delimited bodies). Callers may
+// type-assert a RawRequest.Body or RawResponse.Body to RawBodyProvider after
+// the body has been fully drained to retrieve the captured bytes.
+//
+// RawBody preserves chunk-size hex, chunk extensions, optional trailers, and
+// the terminating "0\r\n\r\n" exactly as observed on the wire — opaque
+// pass-through send paths re-emit these bytes verbatim, satisfying
+// RFC-001 §3.1 (wire-observed raw bytes must not be destroyed or modified).
+//
+// Truncation at MaxRawCaptureSize is signalled via RawBodyTruncated().
+type RawBodyProvider interface {
+	// RawBody returns the on-wire body bytes captured during parsing. May be
+	// nil for messages with no body (HEAD / 204 / 304 / no Content-Length).
+	RawBody() []byte
+	// RawBodyTruncated reports whether RawBody was capped at MaxRawCaptureSize
+	// and is a prefix of the actual on-wire bytes. The semantic body
+	// (Body / BodyBuffer) is unaffected by this cap.
+	RawBodyTruncated() bool
 }
 
 // Anomaly records a single protocol-level anomaly found during parsing.
@@ -152,8 +179,22 @@ type RawRequest struct {
 	Headers    RawHeaders
 	Body       io.Reader
 	RawBytes   []byte // complete raw bytes of the header section (request-line + headers + CRLF CRLF)
-	Anomalies  []Anomaly
-	Close      bool // true if Connection: close or HTTP/1.0 default
+	// RawBody is the on-wire body bytes captured during parsing. For chunked
+	// Transfer-Encoding it preserves the chunk framing (chunk-size hex,
+	// extensions, trailing CRLF after each chunk, the terminal "0" chunk, and
+	// any trailer headers + final CRLF). For Content-Length / EOF-delimited
+	// bodies it is identical to the dechunked semantic body. Empty for
+	// bodyless messages (HEAD / 204 / 304 / no body).
+	//
+	// RawBody is populated by the consumer of Body after the io.Reader has
+	// been fully drained, by type-asserting Body to RawBodyProvider. The
+	// parser itself returns RawBody == nil; the field is filled in by
+	// internal/layer/http1/channel.go after readBodyWithThreshold.
+	RawBody []byte
+	// RawBodyTruncated is true when RawBody was capped at MaxRawCaptureSize.
+	RawBodyTruncated bool
+	Anomalies        []Anomaly
+	Close            bool // true if Connection: close or HTTP/1.0 default
 
 	// Truncated is true when RawBytes was capped at MaxRawCaptureSize.
 	Truncated bool
@@ -167,7 +208,12 @@ type RawResponse struct {
 	Headers    RawHeaders
 	Body       io.Reader
 	RawBytes   []byte
-	Anomalies  []Anomaly
+	// RawBody is the on-wire body bytes captured during parsing. See
+	// RawRequest.RawBody for semantics.
+	RawBody []byte
+	// RawBodyTruncated is true when RawBody was capped at MaxRawCaptureSize.
+	RawBodyTruncated bool
+	Anomalies        []Anomaly
 
 	// Truncated is true when RawBytes was capped at MaxRawCaptureSize.
 	Truncated bool

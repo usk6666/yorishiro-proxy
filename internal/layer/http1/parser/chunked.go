@@ -132,6 +132,13 @@ func IsChunked(headers RawHeaders) bool {
 // Chunked trailers (per RFC 7230 §4.1.2) are parsed, not discarded. After the
 // reader returns io.EOF, Trailers() and TrailerAnomalies() surface the parsed
 // trailer section. The dechunkedReader satisfies TrailerProvider.
+//
+// USK-769: dechunkedReader also captures the on-wire body bytes (chunk
+// framing, chunk-size hex, extensions, trailing CRLFs, terminal "0" chunk,
+// and trailer section) into a captureWriter so opaque pass-through send
+// paths can re-emit the body byte-for-byte. Capture is bounded by
+// MaxRawCaptureSize; truncation flips rawBodyTruncated. The dechunkedReader
+// satisfies RawBodyProvider once the body has been fully drained.
 type dechunkedReader struct {
 	r                *bufio.Reader
 	remaining        int64 // bytes remaining in the current chunk
@@ -139,10 +146,14 @@ type dechunkedReader struct {
 	err              error
 	trailers         RawHeaders
 	trailerAnomalies []Anomaly
+
+	// rawCapture accumulates the on-wire body bytes (chunk framing + data +
+	// trailers). Read from RawBody() after drain.
+	rawCapture *captureWriter
 }
 
 func newDechunkedReader(r *bufio.Reader) *dechunkedReader {
-	return &dechunkedReader{r: r}
+	return &dechunkedReader{r: r, rawCapture: &captureWriter{}}
 }
 
 // Trailers returns the parsed chunked trailers in wire order. Call after the
@@ -152,6 +163,24 @@ func (dr *dechunkedReader) Trailers() RawHeaders { return dr.trailers }
 // TrailerAnomalies returns anomalies observed while parsing the trailer
 // section (pseudo-header, forbidden header, obs-fold, injection).
 func (dr *dechunkedReader) TrailerAnomalies() []Anomaly { return dr.trailerAnomalies }
+
+// RawBody returns the on-wire body bytes captured during dechunking, including
+// chunk framing. Call after the reader has returned io.EOF.
+func (dr *dechunkedReader) RawBody() []byte {
+	if dr.rawCapture == nil {
+		return nil
+	}
+	return dr.rawCapture.bytes()
+}
+
+// RawBodyTruncated reports whether captured RawBody was capped at
+// MaxRawCaptureSize.
+func (dr *dechunkedReader) RawBodyTruncated() bool {
+	if dr.rawCapture == nil {
+		return false
+	}
+	return dr.rawCapture.truncated
+}
 
 // Read implements io.Reader. It returns decoded chunk data without markers.
 func (dr *dechunkedReader) Read(p []byte) (int, error) {
@@ -184,6 +213,9 @@ func (dr *dechunkedReader) readChunkData(p []byte) (int, error) {
 	}
 	n, err := dr.r.Read(p[:toRead])
 	dr.remaining -= int64(n)
+	if n > 0 {
+		dr.rawCapture.write(p[:n])
+	}
 	if err != nil {
 		dr.err = err
 		return n, err
@@ -195,6 +227,7 @@ func (dr *dechunkedReader) readChunkData(p []byte) (int, error) {
 			dr.err = crlfErr
 			return n, crlfErr
 		}
+		dr.rawCapture.write(crlf[:])
 	}
 	return n, nil
 }
@@ -236,13 +269,22 @@ const maxChunkSizeLineLen = 4096
 
 // readChunkSizeLine reads a chunk-size line, handling bufio.ErrBufferFull
 // for very long lines, and returns the trimmed hex size string.
+//
+// The full line (including chunk extensions and the terminating CRLF) is
+// captured into dr.rawCapture for byte-for-byte wire fidelity.
 func (dr *dechunkedReader) readChunkSizeLine() (string, error) {
 	line, lineErr := dr.r.ReadSlice('\n')
 	if lineErr != nil && lineErr != bufio.ErrBufferFull {
+		// Capture whatever was read (may be empty on hard EOF) for diagnostic
+		// purposes — analysts see the partial wire bytes via RawBody.
+		if len(line) > 0 {
+			dr.rawCapture.write(line)
+		}
 		return "", lineErr
 	}
 	for lineErr == bufio.ErrBufferFull {
 		if len(line) > maxChunkSizeLineLen {
+			dr.rawCapture.write(line[:maxChunkSizeLineLen])
 			return "", fmt.Errorf("chunk-size line exceeds maximum length %d", maxChunkSizeLineLen)
 		}
 		var extra []byte
@@ -250,8 +292,11 @@ func (dr *dechunkedReader) readChunkSizeLine() (string, error) {
 		line = append(line, extra...)
 	}
 	if len(line) > maxChunkSizeLineLen {
+		dr.rawCapture.write(line[:maxChunkSizeLineLen])
 		return "", fmt.Errorf("chunk-size line exceeds maximum length %d", maxChunkSizeLineLen)
 	}
+
+	dr.rawCapture.write(line)
 
 	lineNoEOL := stripLineTerminator(line)
 	sizeStr := string(lineNoEOL)
@@ -272,8 +317,12 @@ func (dr *dechunkedReader) readChunkSizeLine() (string, error) {
 // anomalies but kept in the Trailers slice (wire fidelity: do not drop).
 // Total trailer bytes are capped at maxHeaderSize to bound attacker-controlled
 // input.
+//
+// The trailer section bytes (each line + terminating blank line) are also
+// captured into dr.rawCapture so opaque pass-through send paths re-emit them
+// verbatim alongside the chunk framing.
 func (dr *dechunkedReader) consumeTrailers() {
-	trailers, anomalies, err := parseHeaderLines(dr.r, nil, maxHeaderSize)
+	trailers, anomalies, err := parseHeaderLines(dr.r, dr.rawCapture, maxHeaderSize)
 	if err != nil {
 		// Preserve whatever was successfully parsed for diagnostics even when
 		// the section overflows or a read fails.

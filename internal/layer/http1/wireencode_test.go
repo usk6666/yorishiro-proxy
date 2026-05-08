@@ -26,6 +26,9 @@ func parseReqFixture(t *testing.T, raw string) *envelope.Envelope {
 	if bb != nil {
 		t.Cleanup(func() { _ = bb.Release() })
 	}
+	// USK-769: populate RawBody after drain so the opaque encoder branch
+	// behaves identically to the channel.go production path.
+	rawReq.RawBody, rawReq.RawBodyTruncated = extractRawBody(rawReq.Body)
 	path, rawQuery, authority := parseRequestURI(rawReq.RequestURI, rawReq.Headers)
 	msg := &envelope.HTTPMessage{
 		Method:     rawReq.Method,
@@ -64,6 +67,8 @@ func parseRespFixture(t *testing.T, raw string) *envelope.Envelope {
 	if bb != nil {
 		t.Cleanup(func() { _ = bb.Release() })
 	}
+	// USK-769: populate RawBody after drain.
+	rawResp.RawBody, rawResp.RawBodyTruncated = extractRawBody(rawResp.Body)
 	msg := &envelope.HTTPMessage{
 		Status:       rawResp.StatusCode,
 		StatusReason: extractStatusReason(rawResp.Status),
@@ -241,6 +246,108 @@ func TestEncodeWireBytes_BufferBackedBodyMaterialized(t *testing.T) {
 	if !bytes.HasSuffix(out, largeBody) {
 		t.Errorf("encoded output does not end with the full body (len=%d, got tail %d bytes)",
 			len(out), len(out)-bytes.Index(out, []byte("\r\n\r\n"))-4)
+	}
+}
+
+// USK-769: end-to-end round-trip — chunked Transfer-Encoding response goes
+// through parser then encoder unchanged, and the wire output is byte-for-byte
+// identical to the upstream wire input.
+func TestEncodeWireBytes_OpaqueResponse_TEChunkedPassthrough(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+	}{
+		{
+			name: "two chunks no extension",
+			raw:  "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nContent-Type: text/plain\r\n\r\n5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n",
+		},
+		{
+			name: "uppercase hex with extension",
+			raw:  "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nA;name=val\r\n0123456789\r\n0\r\n\r\n",
+		},
+		{
+			name: "with trailers",
+			raw:  "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\nX-Sig: abc\r\n\r\n",
+		},
+		{
+			name: "single zero chunk",
+			raw:  "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			env := parseRespFixture(t, tt.raw)
+			out, err := EncodeWireBytes(env)
+			if err != nil {
+				t.Fatalf("EncodeWireBytes: %v", err)
+			}
+			if !bytes.Equal(out, []byte(tt.raw)) {
+				t.Errorf("wire round-trip mismatch:\n got=%q\nwant=%q", out, tt.raw)
+			}
+		})
+	}
+}
+
+// USK-769: when only headers change but body stays unchanged, RawBody must
+// be re-emitted verbatim (chunk framing intact) alongside the patched
+// header section.
+func TestEncodeWireBytes_OpaqueResponse_HeaderModified_BodyUnchanged(t *testing.T) {
+	raw := "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nServer: orig\r\n\r\n5\r\nhello\r\n0\r\n\r\n"
+	env := parseRespFixture(t, raw)
+	msg := env.Message.(*envelope.HTTPMessage)
+	// Mutate the Server header value (do not alter Transfer-Encoding).
+	for i := range msg.Headers {
+		if msg.Headers[i].Name == "Server" {
+			msg.Headers[i].Value = "patched"
+		}
+	}
+
+	out, err := EncodeWireBytes(env)
+	if err != nil {
+		t.Fatalf("EncodeWireBytes: %v", err)
+	}
+	want := "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nServer: patched\r\n\r\n5\r\nhello\r\n0\r\n\r\n"
+	if !bytes.Equal(out, []byte(want)) {
+		t.Errorf("header-modified body-unchanged mismatch:\n got=%q\nwant=%q", out, want)
+	}
+}
+
+// USK-769: regression guard — when the body is mutated, the existing TE→CL
+// rewrite must still take effect (wire structure cannot be preserved once
+// the body is rewritten).
+func TestEncodeWireBytes_OpaqueResponse_BodyModified(t *testing.T) {
+	raw := "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n"
+	env := parseRespFixture(t, raw)
+	msg := env.Message.(*envelope.HTTPMessage)
+	msg.Body = []byte("new-body")
+
+	out, err := EncodeWireBytes(env)
+	if err != nil {
+		t.Fatalf("EncodeWireBytes: %v", err)
+	}
+	if bytes.Contains(out, []byte("Transfer-Encoding")) {
+		t.Errorf("TE not removed after body modify:\n%s", out)
+	}
+	if !bytes.Contains(out, []byte("Content-Length: 8\r\n")) {
+		t.Errorf("Content-Length not re-stamped to 8:\n%s", out)
+	}
+	if !bytes.HasSuffix(out, []byte("new-body")) {
+		t.Errorf("new body not appended:\n%s", out)
+	}
+}
+
+// USK-769: identity-encoded (Content-Length) responses are also re-emitted
+// verbatim under the unchanged-body opaque path.
+func TestEncodeWireBytes_OpaqueResponse_IdentityPassthrough(t *testing.T) {
+	raw := "HTTP/1.1 200 OK\r\nContent-Length: 11\r\nContent-Type: text/plain\r\n\r\nhello world"
+	env := parseRespFixture(t, raw)
+	out, err := EncodeWireBytes(env)
+	if err != nil {
+		t.Fatalf("EncodeWireBytes: %v", err)
+	}
+	if !bytes.Equal(out, []byte(raw)) {
+		t.Errorf("identity round-trip mismatch:\n got=%q\nwant=%q", out, raw)
 	}
 }
 

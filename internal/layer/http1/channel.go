@@ -511,7 +511,18 @@ func (c *channel) parseRequest() (*envelope.Envelope, error) {
 		}
 	}()
 
+	// USK-769: populate RawBody from the body reader's RawBodyProvider after
+	// the body has been fully drained. RawBody preserves the on-wire bytes
+	// (chunk framing for chunked TE, identity bytes otherwise) so opaque
+	// pass-through send paths re-emit them verbatim.
+	rawReq.RawBody, rawReq.RawBodyTruncated = extractRawBody(rawReq.Body)
 	anomalies := convertAnomalies(rawReq.Anomalies)
+	if rawReq.RawBodyTruncated {
+		anomalies = append(anomalies, envelope.Anomaly{
+			Type:   envelope.AnomalyRawBodyTruncated,
+			Detail: fmt.Sprintf("RawBody capped at MaxRawCaptureSize=%d", parser.MaxRawCaptureSize),
+		})
+	}
 	trailers, trailerAnomalies := extractTrailers(rawReq.Body)
 	anomalies = append(anomalies, trailerAnomalies...)
 
@@ -587,7 +598,16 @@ func (c *channel) parseResponse() (*envelope.Envelope, bool, error) {
 	}()
 
 	statusReason := extractStatusReason(rawResp.Status)
+	// USK-769: populate RawBody from the body reader's RawBodyProvider after
+	// drain. See parseRequest for rationale.
+	rawResp.RawBody, rawResp.RawBodyTruncated = extractRawBody(rawResp.Body)
 	anomalies := convertAnomalies(rawResp.Anomalies)
+	if rawResp.RawBodyTruncated {
+		anomalies = append(anomalies, envelope.Anomaly{
+			Type:   envelope.AnomalyRawBodyTruncated,
+			Detail: fmt.Sprintf("RawBody capped at MaxRawCaptureSize=%d", parser.MaxRawCaptureSize),
+		})
+	}
 	trailers, trailerAnomalies := extractTrailers(rawResp.Body)
 	anomalies = append(anomalies, trailerAnomalies...)
 
@@ -733,72 +753,123 @@ func (c *channel) sendResponse(msg *envelope.HTTPMessage, env *envelope.Envelope
 
 // --- Send Path 1: Opaque-based (raw-first patching) ---
 
+// opaqueSendDecision summarises the four-way classification on which the
+// opaque HTTP/1.x send paths dispatch:
+//
+//   - useRawBody: the upstream wire was chunked-Transfer-Encoded and the
+//     captured RawBody fits in MaxRawCaptureSize, so it can be re-emitted
+//     verbatim (preserves chunk framing).
+//   - rewriteTEToCL: the upstream wire was chunked but RawBody overflowed
+//     the capture cap. We must drop Transfer-Encoding and re-stamp
+//     Content-Length from the dechunked body so the wire stays internally
+//     consistent. The truncation surfaces as AnomalyRawBodyTruncated on
+//     the envelope.
+//   - headersChanged / bodyChanged are also reported here so callers can
+//     skip the zero-copy fast path when either is set.
+//
+// USK-769.
+type opaqueSendDecision struct {
+	headersChanged bool
+	bodyChanged    bool
+	useRawBody     bool
+	rewriteTEToCL  bool
+}
+
+// classifyOpaqueSend computes the decision for a request/response opaque send.
+// The wire chunked check is shared via parser.IsChunked.
+func classifyOpaqueSend(headers parser.RawHeaders, rawBody []byte, rawBodyTruncated, headersChanged, bodyChanged bool) opaqueSendDecision {
+	wireChunked := parser.IsChunked(headers)
+	d := opaqueSendDecision{
+		headersChanged: headersChanged,
+		bodyChanged:    bodyChanged,
+	}
+	if !bodyChanged && wireChunked {
+		if rawBodyTruncated {
+			d.rewriteTEToCL = true
+		} else if len(rawBody) > 0 {
+			d.useRawBody = true
+		}
+	}
+	return d
+}
+
+// applyTEToCLRewrite drops Transfer-Encoding and re-stamps Content-Length on
+// rawHeaders based on msg's body. Used by the bodyChanged and
+// rewriteTEToCL paths in the opaque send branches.
+func applyTEToCLRewrite(rawHeaders *parser.RawHeaders, msg *envelope.HTTPMessage) {
+	rawHeaders.Del("Transfer-Encoding")
+	switch {
+	case msg.Body != nil:
+		rawHeaders.Set("Content-Length", strconv.Itoa(len(msg.Body)))
+	case msg.BodyBuffer != nil:
+		rawHeaders.Set("Content-Length", strconv.FormatInt(msg.BodyBuffer.Len(), 10))
+	default:
+		rawHeaders.Set("Content-Length", "0")
+	}
+}
+
 func (c *channel) sendRequestOpaque(msg *envelope.HTTPMessage, opaque *opaqueHTTP1) error {
 	rawReq := opaque.rawReq
-	headersChanged := !kvEqual(msg.Headers, opaque.origKV)
-	bodyChanged := isBodyChanged(msg, opaque)
+	d := classifyOpaqueSend(rawReq.Headers, rawReq.RawBody, rawReq.RawBodyTruncated,
+		!kvEqual(msg.Headers, opaque.origKV), isBodyChanged(msg, opaque))
 
-	if !headersChanged && !bodyChanged && len(rawReq.RawBytes) > 0 {
+	// Zero-copy fast path: nothing changed and we don't need a TE→CL rewrite.
+	if !d.headersChanged && !d.bodyChanged && !d.rewriteTEToCL && len(rawReq.RawBytes) > 0 {
 		if _, err := c.layer.conn.Write(rawReq.RawBytes); err != nil {
 			return fmt.Errorf("http1: send request raw: %w", err)
 		}
-		return c.writeBody(msg)
+		return c.writeOpaqueBody(msg, rawReq.RawBody, d.useRawBody, "request")
 	}
 
-	if headersChanged {
+	if d.headersChanged {
 		rawReq.Headers = applyHeaderPatch(opaque.origKV, msg.Headers, rawReq.Headers)
 	}
-
-	if bodyChanged {
-		rawReq.Headers.Del("Transfer-Encoding")
-		switch {
-		case msg.Body != nil:
-			rawReq.Headers.Set("Content-Length", strconv.Itoa(len(msg.Body)))
-		case msg.BodyBuffer != nil:
-			rawReq.Headers.Set("Content-Length", strconv.FormatInt(msg.BodyBuffer.Len(), 10))
-		default:
-			rawReq.Headers.Set("Content-Length", "0")
-		}
+	if d.bodyChanged || d.rewriteTEToCL {
+		applyTEToCLRewrite(&rawReq.Headers, msg)
 	}
 
 	headerBytes := serializeRequestHeader(rawReq)
 	if _, err := c.layer.conn.Write(headerBytes); err != nil {
 		return fmt.Errorf("http1: send request: %w", err)
 	}
-	return c.writeBody(msg)
+	return c.writeOpaqueBody(msg, rawReq.RawBody, d.useRawBody, "request")
 }
 
 func (c *channel) sendResponseOpaque(msg *envelope.HTTPMessage, opaque *opaqueHTTP1) error {
 	rawResp := opaque.rawResp
-	headersChanged := !kvEqual(msg.Headers, opaque.origKV)
-	bodyChanged := isBodyChanged(msg, opaque)
+	d := classifyOpaqueSend(rawResp.Headers, rawResp.RawBody, rawResp.RawBodyTruncated,
+		!kvEqual(msg.Headers, opaque.origKV), isBodyChanged(msg, opaque))
 
-	if !headersChanged && !bodyChanged && len(rawResp.RawBytes) > 0 {
+	if !d.headersChanged && !d.bodyChanged && !d.rewriteTEToCL && len(rawResp.RawBytes) > 0 {
 		if _, err := c.layer.conn.Write(rawResp.RawBytes); err != nil {
 			return fmt.Errorf("http1: send response raw: %w", err)
 		}
-		return c.writeBody(msg)
+		return c.writeOpaqueBody(msg, rawResp.RawBody, d.useRawBody, "response")
 	}
 
-	if headersChanged {
+	if d.headersChanged {
 		rawResp.Headers = applyHeaderPatch(opaque.origKV, msg.Headers, rawResp.Headers)
 	}
-
-	if bodyChanged {
-		rawResp.Headers.Del("Transfer-Encoding")
-		switch {
-		case msg.Body != nil:
-			rawResp.Headers.Set("Content-Length", strconv.Itoa(len(msg.Body)))
-		case msg.BodyBuffer != nil:
-			rawResp.Headers.Set("Content-Length", strconv.FormatInt(msg.BodyBuffer.Len(), 10))
-		default:
-			rawResp.Headers.Set("Content-Length", "0")
-		}
+	if d.bodyChanged || d.rewriteTEToCL {
+		applyTEToCLRewrite(&rawResp.Headers, msg)
 	}
 
 	headerBytes := serializeResponseHeader(rawResp)
 	if _, err := c.layer.conn.Write(headerBytes); err != nil {
 		return fmt.Errorf("http1: send response: %w", err)
+	}
+	return c.writeOpaqueBody(msg, rawResp.RawBody, d.useRawBody, "response")
+}
+
+// writeOpaqueBody writes either the on-wire RawBody (when useRawBody is true,
+// preserving chunk framing) or the dechunked semantic body via writeBody.
+// kind is "request" or "response" — used purely for error wrapping.
+func (c *channel) writeOpaqueBody(msg *envelope.HTTPMessage, rawBody []byte, useRawBody bool, kind string) error {
+	if useRawBody {
+		if _, err := c.layer.conn.Write(rawBody); err != nil {
+			return fmt.Errorf("http1: send %s raw body: %w", kind, err)
+		}
+		return nil
 	}
 	return c.writeBody(msg)
 }
@@ -1078,4 +1149,20 @@ func extractTrailers(parserBody io.Reader) ([]envelope.KeyValue, []envelope.Anom
 	}
 	anomalies := convertAnomalies(tp.TrailerAnomalies())
 	return trailers, anomalies
+}
+
+// extractRawBody returns the on-wire body bytes captured by the parser body
+// reader (chunked framing for chunked TE, identity bytes otherwise). The
+// second return value is true when capture was capped at MaxRawCaptureSize.
+//
+// USK-769: opaque pass-through send paths use these bytes to re-emit the
+// body verbatim, satisfying RFC-001 §3.1 (wire-observed raw bytes must not
+// be destroyed or modified). For bodies whose reader does not implement
+// RawBodyProvider (e.g. legacy test fixtures), returns (nil, false).
+func extractRawBody(parserBody io.Reader) ([]byte, bool) {
+	rp, ok := parserBody.(parser.RawBodyProvider)
+	if !ok {
+		return nil, false
+	}
+	return rp.RawBody(), rp.RawBodyTruncated()
 }
