@@ -8,10 +8,7 @@ Common workflows for using yorishiro-proxy as an AI-driven vulnerability assessm
 ```json
 // proxy_start
 {
-  "listen_addr": "127.0.0.1:8080",
-  "capture_scope": {
-    "includes": [{"hostname": "target.example.com"}]
-  }
+  "listen_addr": "127.0.0.1:8080"
 }
 ```
 
@@ -261,18 +258,7 @@ Confirm the fingerprint has changed and `persisted` is true.
 ```
 The response contains a `plugins[]` array with `name`, `path`, `enabled`, ordered `registrations[]` (`{protocol, event, phase}`), and `vars` (with `redact_keys` already applied — secrets show as `"<redacted>"`).
 
-## Scope Management
-
-### Narrow scope during testing
-```json
-// configure
-{
-  "capture_scope": {
-    "add_includes": [{"hostname": "api.target.com", "url_prefix": "/v2/"}],
-    "add_excludes": [{"url_prefix": "/health"}]
-  }
-}
-```
+## TLS Passthrough Management
 
 ### Bypass TLS for pinned services
 ```json
@@ -290,10 +276,7 @@ The response contains a `plugins[]` array with `name`, `path`, `enabled`, ordere
 ```json
 // proxy_start
 {
-  "listen_addr": "127.0.0.1:1080",
-  "capture_scope": {
-    "includes": [{"hostname": "target.example.com"}]
-  }
+  "listen_addr": "127.0.0.1:1080"
 }
 ```
 

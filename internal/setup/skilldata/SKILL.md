@@ -24,9 +24,9 @@ yorishiro-proxy provides 11 MCP tools:
 
 | Tool | Purpose |
 |------|---------|
-| `proxy_start` | Start proxy, configure capture scope. Supports multi-listener and SOCKS5 |
+| `proxy_start` | Start proxy. Supports multi-listener and SOCKS5 |
 | `proxy_stop` | Stop proxy. Stop by name for individual listeners, or omit to stop all |
-| `configure` | Change running proxy settings (scope, TLS passthrough, intercept rules, auto-transform, upstream proxy, connection limits, SOCKS5 auth, etc.) |
+| `configure` | Change running proxy settings (TLS passthrough, intercept rules, auto-transform, upstream proxy, connection limits, SOCKS5 auth, etc.) |
 | `query` | Unified information retrieval (resource: flows, flow, messages, status, config, ca_cert, intercept_queue, macros, macro, fuzz_jobs, fuzz_results, technologies) |
 | `resend` | Request resend/replay/compare (action: resend, resend_raw, tcp_replay, compare) |
 | `manage` | Flow data management and CA certificate (action: delete_flows, export_flows, import_flows, regenerate_ca_cert) |
@@ -62,10 +62,6 @@ If you are unsure of the exact parameter structure, always consult the help reso
 // Basic startup
 {
   "listen_addr": "127.0.0.1:8080",
-  "capture_scope": {
-    "includes": [{"hostname": "target.example.com"}],
-    "excludes": [{"hostname": "static.example.com"}]
-  },
   "tls_passthrough": ["*.googleapis.com"]
 }
 
@@ -88,7 +84,6 @@ If you are unsure of the exact parameter structure, always consult the help reso
 | `name` | string | Listener name (default: "default"). Used for identification with multiple listeners |
 | `listen_addr` | string | Listen address (default: "127.0.0.1:8080") |
 | `upstream_proxy` | string | Upstream proxy URL (http:// or socks5://[user:pass@]host:port) |
-| `capture_scope` | object | Capture scope (includes/excludes) |
 | `tls_passthrough` | string[] | TLS passthrough target patterns |
 | `intercept_rules` | object[] | Intercept rules (id, enabled, direction, conditions) |
 | `auto_transform` | object[] | Auto-transform rules (id, enabled, priority, direction, conditions, action) |
@@ -642,7 +637,6 @@ Dynamically change running proxy settings.
 |-----------|-------------|
 | `operation` | "merge" (default) or "replace" |
 | `upstream_proxy` | Upstream proxy URL |
-| `capture_scope` | Capture scope |
 | `tls_passthrough` | TLS passthrough settings |
 | `intercept_rules` | Intercept rules |
 | `intercept_queue` | Intercept queue (timeout_ms, timeout_behavior) |

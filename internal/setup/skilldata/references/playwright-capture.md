@@ -13,30 +13,21 @@ Combine yorishiro-proxy with playwright-cli to capture traffic from browser oper
 
 ## Step 1: Start the Proxy
 
-Start with a scope configured to capture only the target host.
+Start the proxy and configure transport-level options as needed. Recording-time scope filtering is no longer available; narrow the result set with `query` filters or restrict outbound traffic with the `security` tool's `set_target_scope` action.
 
 ```json
 // proxy_start
 {
   "listen_addr": "127.0.0.1:8080",
-  "capture_scope": {
-    "includes": [
-      {"hostname": "target.example.com"}
-    ],
-    "excludes": [
-      {"hostname": "static.example.com"},
-      {"url_prefix": "/assets/"}
-    ]
-  },
   "tls_passthrough": ["*.googleapis.com", "*.gstatic.com"]
 }
 ```
 
 **Scope design tips:**
-- Use `includes` to limit to the target host only (reduces noise)
-- Use `excludes` to filter out static assets, health checks, etc.
 - Use `tls_passthrough` to exclude services with certificate pinning
 - If bot detection triggers on Cloudflare or similar WAFs, configure `tls_fingerprint` (default: "chrome")
+- To restrict which hosts the proxy will talk to at all, use `security set_target_scope` (allow/deny) — this gates transmission, not recording
+- After capture, use `query` filters (`host`, `url_pattern`, `protocol`, ...) to narrow what you analyse
 
 ## Step 2: Browser Operations with playwright-cli
 
@@ -81,7 +72,7 @@ The browser is not routing through the proxy. Fix using the following steps:
 
 **Do not skip this step.** If you continue without a proxy connection:
 - All operations must be redone (flows were not recorded)
-- `capture_scope` and `security` target scope controls will not function
+- `security` target scope controls will not function
 
 ## Step 3: Review Captured Flows
 
@@ -131,21 +122,30 @@ logout-flow:         <flow-id-6>  -- Logout
 
 Reference these flow IDs as `flow_id` in each step of the Macro definition (`define_macro`).
 
-## Changing Scope During Testing
+## Narrowing Results During Analysis
 
-If you need to change scope during testing, use `configure`:
+Recording-time scope filtering is not available. To focus on a subset of captured traffic, apply `query` filters at read time:
 
 ```json
-// configure
+// query
 {
-  "capture_scope": {
-    "add_includes": [{"hostname": "api2.target.example.com"}]
-  }
+  "resource": "flows",
+  "filter": {"host": "api2.target.example.com"},
+  "limit": 50
+}
+```
+
+To restrict which hosts the proxy will talk to at all, use the `security` tool:
+
+```json
+// security
+{
+  "action": "set_target_scope",
+  "allows": [{"hostname": "*.target.example.com"}]
 }
 ```
 
 ## Tips
 
-- If unwanted flows accumulate during capture, narrow the scope
 - Use `filter` and `limit` when the flow list gets large
-- Check WebSocket flows using the `protocol` filter: `{"filter": {"protocol": "WebSocket"}}`
+- Check WebSocket flows using the `protocol` filter: `{"filter": {"protocol": "ws"}}`

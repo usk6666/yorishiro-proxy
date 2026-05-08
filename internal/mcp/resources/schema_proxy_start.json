@@ -17,23 +17,6 @@
       "type": "string",
       "description": "Upstream proxy URL to route all outgoing traffic through (e.g. http://host:port, socks5://host:port)."
     },
-    "capture_scope": {
-      "type": "object",
-      "description": "Controls which requests are recorded. If omitted, all requests are captured.",
-      "properties": {
-        "includes": {
-          "type": "array",
-          "description": "Include rules. Only matching requests are captured.",
-          "items": { "$ref": "#/$defs/scope_rule" }
-        },
-        "excludes": {
-          "type": "array",
-          "description": "Exclude rules. Takes precedence over includes.",
-          "items": { "$ref": "#/$defs/scope_rule" }
-        }
-      },
-      "additionalProperties": false
-    },
     "tls_passthrough": {
       "type": "array",
       "description": "Domain patterns that bypass TLS interception.",
@@ -141,25 +124,6 @@
   },
   "additionalProperties": false,
   "$defs": {
-    "scope_rule": {
-      "type": "object",
-      "description": "A scope rule. At least one field must be set.",
-      "properties": {
-        "hostname": {
-          "type": "string",
-          "description": "Hostname pattern. Exact match or wildcard (e.g. *.example.com)."
-        },
-        "url_prefix": {
-          "type": "string",
-          "description": "URL path prefix match."
-        },
-        "method": {
-          "type": "string",
-          "description": "HTTP method (e.g. GET, POST)."
-        }
-      },
-      "additionalProperties": false
-    },
     "intercept_rule": {
       "type": "object",
       "description": "An intercept rule with matching conditions.",

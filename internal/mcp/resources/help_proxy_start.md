@@ -21,19 +21,6 @@ Upstream proxy URL to route all outgoing traffic through.
 - If omitted, traffic is sent directly to the target
 - Takes precedence over HTTP_PROXY/HTTPS_PROXY environment variables
 
-### capture_scope (object, optional)
-Controls which requests are recorded to the flow store. If omitted, all requests are captured.
-
-- **includes** (array of scope rules): Only matching requests are captured. If empty, all requests match.
-- **excludes** (array of scope rules): Matching requests are excluded. Takes precedence over includes.
-
-Each scope rule has:
-- **hostname** (string): Hostname pattern. Exact match or wildcard prefix (e.g. `"example.com"`, `"*.example.com"`).
-- **url_prefix** (string): URL path prefix match (e.g. `"/api/"`).
-- **method** (string): HTTP method match (e.g. `"GET"`, `"POST"`).
-
-At least one field must be set per rule.
-
 ### tls_passthrough (array of strings, optional)
 Domain patterns that bypass TLS interception (no MITM). Useful for certificate-pinned services.
 - Exact match: `"pinned-service.com"`
@@ -145,19 +132,10 @@ Auto-transform rules for automatic request/response modification at startup. Sam
 }
 ```
 
-### Start with capture scope
+### Start with TLS passthrough
 ```json
 {
   "listen_addr": "127.0.0.1:8080",
-  "capture_scope": {
-    "includes": [
-      {"hostname": "api.target.com"},
-      {"hostname": "*.target.com", "url_prefix": "/api/"}
-    ],
-    "excludes": [
-      {"hostname": "static.target.com"}
-    ]
-  },
   "tls_passthrough": ["*.googleapis.com", "accounts.google.com"]
 }
 ```

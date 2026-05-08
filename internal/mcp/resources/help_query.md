@@ -103,9 +103,9 @@ Get current proxy status and health metrics. No additional parameters.
 Returns: running, listen_addr, active_connections, total_flows, db_size_bytes, uptime_seconds, ca_initialized, tls_fingerprint.
 
 ### config
-Get current configuration including capture scope, TLS passthrough, TCP forwards, and enabled protocols. No additional parameters.
+Get current configuration including upstream proxy, TLS passthrough, TCP forwards, enabled protocols, and runtime knobs. No additional parameters.
 
-Returns: capture_scope (includes, excludes), tls_passthrough (patterns, count), tcp_forwards (port->target map), enabled_protocols (list).
+Returns: upstream_proxy, tls_passthrough (patterns, count), tcp_forwards (port->target map), enabled_protocols (list), socks5_enabled, client_cert, safety_filter (enabled, input_rules, output_rules), max_connections, peek_timeout_ms, request_timeout_ms, tls_fingerprint.
 
 ### ca_cert
 Get the CA certificate PEM, metadata, and persistence state. No additional parameters.
