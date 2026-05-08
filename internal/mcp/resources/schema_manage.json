@@ -29,7 +29,7 @@
         },
         "protocol": {
           "type": "string",
-          "description": "Protocol filter for delete_flows (e.g. HTTP/1.x, HTTPS, WebSocket, HTTP/2, gRPC, gRPC-Web, TCP)."
+          "description": "Protocol filter for delete_flows; matches Stream.Protocol exactly (canonical values: http, ws, grpc, grpc-web, sse, raw, tls-handshake)."
         },
         "format": {
           "type": "string",
@@ -42,7 +42,7 @@
           "properties": {
             "protocol": {
               "type": "string",
-              "description": "Filter by protocol (e.g., HTTPS, HTTP/1.x)."
+              "description": "Filter by protocol; matches Stream.Protocol exactly (canonical values: http, ws, grpc, grpc-web, sse, raw, tls-handshake)."
             },
             "url_pattern": {
               "type": "string",

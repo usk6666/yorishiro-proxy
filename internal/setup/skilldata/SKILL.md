@@ -121,8 +121,8 @@ If you are unsure of the exact parameter structure, always consult the help reso
 // State filter (active/complete/error)
 {"resource": "flows", "filter": {"state": "complete", "tag": "idor-test"}}
 
-// Protocol filter
-{"resource": "flows", "filter": {"protocol": "SOCKS5+HTTPS"}}
+// Protocol filter (canonical values only: http, ws, grpc, grpc-web, sse, raw, tls-handshake)
+{"resource": "flows", "filter": {"protocol": "http"}}
 
 // Blocked flows
 {"resource": "flows", "filter": {"blocked_by": "target_scope"}}
@@ -153,7 +153,7 @@ If you are unsure of the exact parameter structure, always consult the help reso
 
 | Parameter | Target Resource | Description |
 |-----------|----------------|-------------|
-| `protocol` | flows | Protocol name (HTTP/1.x, HTTPS, WebSocket, HTTP/2, gRPC, TCP, SOCKS5+HTTPS, etc.) |
+| `protocol` | flows | Protocol name. Canonical values only: http, ws, grpc, grpc-web, sse, raw, tls-handshake (legacy spellings rejected as of USK-705) |
 | `scheme` | flows | URL scheme / transport filter ("https", "http", "wss", "ws", "tcp"). Used to search TLS flows |
 | `method` | flows | HTTP method |
 | `url_pattern` | flows | URL substring search |
@@ -368,8 +368,8 @@ Flow details include `protocol_summary` (protocol-specific info), and streaming 
 ### manage -- Flow Data Management
 
 ```json
-// Delete flows (with protocol filter)
-{"action": "delete_flows", "params": {"protocol": "TCP", "older_than_days": 7, "confirm": true}}
+// Delete flows (with protocol filter; matches Stream.Protocol exactly)
+{"action": "delete_flows", "params": {"protocol": "raw", "older_than_days": 7, "confirm": true}}
 
 // Export flows (with filter and body control)
 {
@@ -378,7 +378,7 @@ Flow details include `protocol_summary` (protocol-specific info), and streaming 
     "format": "jsonl",
     "output_path": "/tmp/export.jsonl",
     "include_bodies": false,
-    "filter": {"protocol": "HTTPS", "url_pattern": "/api/"}
+    "filter": {"protocol": "http", "url_pattern": "/api/"}
   }
 }
 

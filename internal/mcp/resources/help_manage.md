@@ -18,7 +18,7 @@ Delete flows by ID, by age, by protocol, or all at once.
 **Parameters:**
 - **flow_id** (string, optional): Delete a specific flow by ID.
 - **older_than_days** (integer, optional): Delete flows older than this many days. Must be >= 1. Requires `confirm: true`.
-- **protocol** (string, optional): Delete flows by protocol (e.g. `"TCP"`, `"WebSocket"`). Requires `confirm: true`.
+- **protocol** (string, optional): Delete flows by protocol. Matches `Stream.Protocol` exactly; canonical values are `"http"`, `"ws"`, `"grpc"`, `"grpc-web"`, `"sse"`, `"raw"`, `"tls-handshake"`. Requires `confirm: true`.
 - **confirm** (boolean): Required for bulk deletion (older_than_days, protocol, or all). Set to `true` to proceed.
 
 One of `flow_id`, `older_than_days`, `protocol` (with confirm), or `confirm` (for delete-all) must be specified.
@@ -42,7 +42,7 @@ Export flows to JSONL or HAR (HTTP Archive 1.2) format with optional filtering.
 **Parameters:**
 - **format** (string, optional): Export format. `"jsonl"` (default) for JSONL or `"har"` for HAR 1.2.
 - **filter** (object, optional): Flow filter criteria:
-  - **protocol** (string, optional): Filter by protocol (e.g. `"HTTPS"`, `"HTTP/1.x"`).
+  - **protocol** (string, optional): Filter by protocol. Matches `Stream.Protocol` exactly; canonical values are `"http"`, `"ws"`, `"grpc"`, `"grpc-web"`, `"sse"`, `"raw"`, `"tls-handshake"`.
   - **url_pattern** (string, optional): Filter by URL substring.
   - **time_after** (string, optional): Include flows after this time (RFC3339 format).
   - **time_before** (string, optional): Include flows before this time (RFC3339 format).
@@ -129,7 +129,7 @@ Returns: imported, skipped, errors, source.
   "params": {
     "format": "har",
     "filter": {
-      "protocol": "HTTPS",
+      "protocol": "http",
       "url_pattern": "/api/"
     },
     "output_path": "/tmp/api-flows.har"
@@ -144,7 +144,7 @@ Returns: imported, skipped, errors, source.
   "params": {
     "format": "jsonl",
     "filter": {
-      "protocol": "HTTPS",
+      "protocol": "http",
       "url_pattern": "/api/",
       "time_after": "2026-02-01T00:00:00Z",
       "time_before": "2026-02-28T23:59:59Z"

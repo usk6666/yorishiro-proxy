@@ -24,8 +24,8 @@
       "properties": {
         "protocol": {
           "type": "string",
-          "description": "Protocol filter (e.g. HTTP/1.x, HTTPS, WebSocket, HTTP/2, gRPC, gRPC-Web, TCP).",
-          "enum": ["HTTP/1.x", "HTTPS", "WebSocket", "HTTP/2", "gRPC", "gRPC-Web", "TCP", "SOCKS5+HTTPS", "SOCKS5+HTTP"]
+          "description": "Protocol filter (canonical Envelope.Protocol values only; legacy spellings rejected as of USK-705).",
+          "enum": ["http", "ws", "grpc", "grpc-web", "sse", "raw", "tls-handshake"]
         },
         "scheme": {
           "type": "string",

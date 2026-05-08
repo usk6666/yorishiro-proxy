@@ -15,7 +15,7 @@ Fuzz job ID. Required for `fuzz_results` resource.
 
 ### filter (object, optional)
 Filter options for the `flows`, `messages`, `fuzz_jobs`, and `fuzz_results` resources.
-- **protocol** (string): Protocol filter for flows (e.g. `"HTTP/1.x"`, `"HTTPS"`, `"WebSocket"`, `"HTTP/2"`, `"gRPC"`, `"gRPC-Web"`, `"TCP"`, `"SOCKS5+HTTPS"`, `"SOCKS5+HTTP"`).
+- **protocol** (string): Protocol filter for flows. Canonical values only (`"http"`, `"ws"`, `"grpc"`, `"grpc-web"`, `"sse"`, `"raw"`, `"tls-handshake"`); legacy spellings (`"HTTP/1.x"`, `"HTTPS"`, `"HTTP/2"`, `"WebSocket"`, `"gRPC"`, `"gRPC-Web"`, `"TCP"`, `"SOCKS5+*"`) are rejected as of USK-705.
 - **scheme** (string): URL scheme / transport filter for flows (e.g. `"https"`, `"http"`, `"wss"`, `"ws"`, `"tcp"`). Use to find TLS flows: `"https"` returns HTTP/1.x, HTTP/2, gRPC flows over TLS. WebSocket over TLS uses `"wss"`, not `"https"`.
 - **method** (string): HTTP method filter for flows (e.g. `"GET"`, `"POST"`).
 - **url_pattern** (string): URL substring match for flows (e.g. `"/api/"`).
@@ -56,11 +56,11 @@ The original (compressed) body is always returned in `*_body` regardless of this
 ### flows
 List recorded proxy flows with optional filtering and pagination.
 
-Each flow entry includes a `protocol_summary` field with protocol-specific information:
-- **WebSocket**: `message_count`, `last_frame_type` (Text/Binary/Close/Ping/Pong)
-- **HTTP/2**: `stream_count`, `scheme`
-- **gRPC**: `service`, `method`, `grpc_status`, `grpc_status_name`
-- **TCP**: `send_bytes`, `receive_bytes`
+Each flow entry includes a `protocol_summary` field with protocol-specific information (dispatched by canonical `Stream.Protocol`):
+- **`ws`**: `message_count`, `last_frame_type` (Text/Binary/Close/Ping/Pong)
+- **`grpc`, `grpc-web`**: `service`, `method`, `grpc_status`, `grpc_status_name`
+- **`raw`**: `send_bytes`, `receive_bytes`
+- **`http`, `sse`, `tls-handshake`**: no protocol_summary entry
 
 Returns: `flows[]` (id, protocol, state, method, url, status_code, message_count, protocol_summary, timestamp, duration_ms), `count`, `total`.
 
@@ -138,7 +138,7 @@ Returns for WebSocket items: `items[]` (id, phase, protocol, opcode, direction, 
 ```json
 {
   "resource": "flows",
-  "filter": {"protocol": "WebSocket"}
+  "filter": {"protocol": "ws"}
 }
 ```
 
@@ -146,7 +146,7 @@ Returns for WebSocket items: `items[]` (id, phase, protocol, opcode, direction, 
 ```json
 {
   "resource": "flows",
-  "filter": {"protocol": "gRPC"}
+  "filter": {"protocol": "grpc"}
 }
 ```
 
