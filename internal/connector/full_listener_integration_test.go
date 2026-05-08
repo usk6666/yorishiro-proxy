@@ -448,6 +448,9 @@ func startFullListenerProxy(
 	if opts.rateLimiter != nil {
 		socks5Neg.RateLimiter = opts.rateLimiter
 	}
+	if opts.socks5Authenticator != nil {
+		socks5Neg.SetAuthenticator(opts.socks5Authenticator)
+	}
 
 	onStack := func(ctx context.Context, stack *connector.ConnectionStack, clientSnap, upstreamSnap *envelope.TLSSnapshot, target string) {
 		defer wg.Done()
@@ -510,6 +513,12 @@ type fullListenerOpts struct {
 	passthroughList *connector.PassthroughList
 	upstreamProxy   *url.URL
 	onStack         connector.OnStackFunc
+
+	// socks5Authenticator, when non-nil, is installed on the SOCKS5
+	// negotiator before the listener starts so SOCKS5 password-auth
+	// smoke tests can exercise the RFC 1929 sub-negotiation path.
+	// USK-770.
+	socks5Authenticator connector.Authenticator
 }
 
 // waitSessionDone waits for the WaitGroup with a timeout.
@@ -732,6 +741,178 @@ func TestFullListener_SOCKS5_HTTPS_MITM(t *testing.T) {
 	if len(recvFlows[0].RawBytes) == 0 {
 		t.Error("receive flow RawBytes is empty")
 	}
+}
+
+// TestFullListener_SOCKS5_PasswordAuth_Smoke covers the RFC 1929 user/pass
+// sub-negotiation path through the live FullListener (USK-770). The
+// negotiator is pre-loaded with a single credential pair via
+// SetAuthenticator (the same mutator the MCP control plane uses); the
+// test driver issues a USERNAME_PASSWORD greeting + sub-negotiation +
+// CONNECT, and confirms the bridged HTTPS roundtrip lands on the upstream.
+//
+// Smoke tier (no e2e_smoke exclusion) so the SOCKS5 password-auth wire-up
+// is part of the per-PR merge gate.
+func TestFullListener_SOCKS5_PasswordAuth_Smoke(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	upstreamLn, getUpstreamReqs := startUpstreamHTTPS(t, func(_ []byte) []byte {
+		return []byte("HTTP/1.1 200 OK\r\nContent-Length: 11\r\nConnection: close\r\n\r\nsocks5-auth")
+	})
+	defer upstreamLn.Close()
+	target := upstreamLn.Addr().String()
+
+	const wantUser, wantPass = "smoke-user", "smoke-pass"
+	proxyAddr, store, wg := startFullListenerProxy(t, ctx, fullListenerOpts{
+		socks5Authenticator: connector.NewStaticAuthenticator(map[string]string{
+			wantUser: wantPass,
+		}),
+	})
+
+	// Sub-test 1: NO_AUTH greeting must be rejected (negotiator picks 0xFF).
+	t.Run("no_auth_rejected", func(t *testing.T) {
+		c, err := net.DialTimeout("tcp", proxyAddr, 5*time.Second)
+		if err != nil {
+			t.Fatalf("dial proxy: %v", err)
+		}
+		defer c.Close()
+		if _, err := c.Write([]byte{0x05, 0x01, 0x00}); err != nil {
+			t.Fatalf("write greeting: %v", err)
+		}
+		_ = c.SetReadDeadline(time.Now().Add(2 * time.Second))
+		mResp := make([]byte, 2)
+		if _, err := io.ReadFull(c, mResp); err != nil {
+			t.Fatalf("read method selection: %v", err)
+		}
+		if mResp[0] != 0x05 || mResp[1] != 0xFF {
+			t.Errorf("method selection = %x, want 05 FF", mResp)
+		}
+	})
+
+	// Sub-test 2: USERNAME_PASSWORD with valid creds must complete the
+	// handshake and reach the upstream HTTPS server.
+	t.Run("password_accepted", func(t *testing.T) {
+		wg.Add(1)
+		rawReq := fmt.Sprintf("GET /smoke HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n", target)
+		resp := socks5AuthConnectAndSendHTTP(t, proxyAddr, target, wantUser, wantPass, rawReq)
+		if !strings.Contains(resp, "200 OK") || !strings.HasSuffix(resp, "socks5-auth") {
+			t.Errorf("response missing expected body: %q", resp)
+		}
+
+		upstreamReqs := getUpstreamReqs()
+		waitSessionDone(t, wg)
+
+		if len(upstreamReqs) < 1 {
+			t.Fatal("upstream received no requests")
+		}
+		if !bytes.Contains(upstreamReqs[0], []byte("GET /smoke HTTP/1.1")) {
+			t.Errorf("upstream did not receive GET /smoke: %q", upstreamReqs[0])
+		}
+
+		// Stream / flow recording sanity: the SOCKS5 layer is excluded
+		// from flow recording (CLAUDE.md L7/L4 table) but the tunneled
+		// HTTP exchange must still land in the store.
+		streams := store.getStreams()
+		if len(streams) < 1 {
+			t.Fatal("expected at least 1 stream, got 0")
+		}
+		if streams[0].Protocol != "http" {
+			t.Errorf("stream protocol = %q, want %q", streams[0].Protocol, "http")
+		}
+	})
+}
+
+// socks5AuthConnectAndSendHTTP performs a SOCKS5 USERNAME_PASSWORD
+// handshake + sub-negotiation + CONNECT through proxyAddr to target,
+// then runs a TLS roundtrip and writes rawRequest. Returns the response
+// text. Test fatals on any wire-level error.
+func socks5AuthConnectAndSendHTTP(t *testing.T, proxyAddr, target, user, pass, rawRequest string) string {
+	t.Helper()
+
+	host, portStr, err := net.SplitHostPort(target)
+	if err != nil {
+		t.Fatalf("split host port: %v", err)
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		t.Fatalf("parse port: %v", err)
+	}
+
+	conn, err := net.DialTimeout("tcp", proxyAddr, 5*time.Second)
+	if err != nil {
+		t.Fatalf("dial proxy: %v", err)
+	}
+	// VER=5, NMETHODS=1, METHOD=USERNAME_PASSWORD(0x02)
+	if _, err := conn.Write([]byte{0x05, 0x01, 0x02}); err != nil {
+		conn.Close()
+		t.Fatalf("write greeting: %v", err)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	mResp := make([]byte, 2)
+	if _, err := io.ReadFull(conn, mResp); err != nil {
+		conn.Close()
+		t.Fatalf("read method selection: %v", err)
+	}
+	if mResp[1] != 0x02 {
+		conn.Close()
+		t.Fatalf("method selection = %x, want USERNAME_PASSWORD", mResp)
+	}
+	// Sub-negotiation.
+	sub := []byte{0x01, byte(len(user))}
+	sub = append(sub, []byte(user)...)
+	sub = append(sub, byte(len(pass)))
+	sub = append(sub, []byte(pass)...)
+	if _, err := conn.Write(sub); err != nil {
+		conn.Close()
+		t.Fatalf("write sub-negotiation: %v", err)
+	}
+	authResp := make([]byte, 2)
+	if _, err := io.ReadFull(conn, authResp); err != nil {
+		conn.Close()
+		t.Fatalf("read sub-negotiation reply: %v", err)
+	}
+	if authResp[1] != 0x00 {
+		conn.Close()
+		t.Fatalf("sub-negotiation status = %x, want success", authResp[1])
+	}
+
+	// CONNECT.
+	connectReq := []byte{0x05, 0x01, 0x00, 0x03, byte(len(host))}
+	connectReq = append(connectReq, []byte(host)...)
+	portBytes := make([]byte, 2)
+	binary.BigEndian.PutUint16(portBytes, uint16(port))
+	connectReq = append(connectReq, portBytes...)
+	if _, err := conn.Write(connectReq); err != nil {
+		conn.Close()
+		t.Fatalf("write CONNECT: %v", err)
+	}
+	reply := make([]byte, 10)
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if _, err := io.ReadFull(conn, reply); err != nil {
+		conn.Close()
+		t.Fatalf("read CONNECT reply: %v", err)
+	}
+	if reply[1] != 0x00 {
+		conn.Close()
+		t.Fatalf("CONNECT REP = %x, want success", reply[1])
+	}
+	_ = conn.SetReadDeadline(time.Time{})
+
+	// TLS handshake.
+	tlsConn := tls.Client(conn, &tls.Config{
+		InsecureSkipVerify: true, //nolint:gosec // test
+	})
+	if err := tlsConn.Handshake(); err != nil {
+		conn.Close()
+		t.Fatalf("TLS handshake: %v", err)
+	}
+	defer tlsConn.Close()
+
+	if _, err := tlsConn.Write([]byte(rawRequest)); err != nil {
+		t.Fatalf("write request: %v", err)
+	}
+
+	return readHTTPResponse(t, tlsConn)
 }
 
 // TestCoordinator_MultipleListeners starts two listeners via Coordinator and

@@ -291,9 +291,18 @@ func assembleAndRunMCPServer(
 	}
 	tlsTransport := InitTLSTransport(cfg, proxyCfg, hostTLSRegistry, logger)
 
+	// USK-770: process-singleton SOCKS5Negotiator owned here so the MCP
+	// control plane (mcp.socks5AuthSetter wired below) and the live data
+	// path (proxybuild.Deps.SOCKS5Negotiator) reference the same instance.
+	// Runtime auth mutations from `proxy_start socks5_auth=...` /
+	// `configure socks5_auth=...` therefore reach in-flight listeners
+	// without restart.
+	socks5Negotiator := connector.NewSOCKS5Negotiator(logger)
+
 	manager, err := assembleLiveManager(ctx, cfg, proxyCfg, store, issuer, pluginv2Engine,
 		holdQueue, httpInterceptEngine, wsInterceptEngine, grpcInterceptEngine,
-		httpTransformEngine, passthrough, rateLimiter, safetyEngine, perProtoSafety, hostTLSRegistry, logger)
+		httpTransformEngine, passthrough, rateLimiter, safetyEngine, perProtoSafety, hostTLSRegistry,
+		socks5Negotiator, logger)
 	if err != nil {
 		return err
 	}
@@ -308,10 +317,11 @@ func assembleAndRunMCPServer(
 		_ = manager.StopAll(sctx)
 	}()
 
+	socks5AuthSetter := newSOCKS5AuthAdapter(socks5Negotiator, logger)
 	mcpComps, webUIToken, opts, err := buildMCPComponents(ctx, cfg, proxyCfg, ca, issuer, store, manager,
 		passthrough, holdQueue, httpInterceptEngine, wsInterceptEngine, grpcInterceptEngine,
 		pluginv2Engine, httpTransformEngine, hostTLSRegistry, tlsTransport, targetScope, rateLimiter, safetyEngine,
-		targetScopePolicySource, version, logger)
+		socks5AuthSetter, targetScopePolicySource, version, logger)
 	if err != nil {
 		return err
 	}
@@ -472,6 +482,7 @@ func buildMCPComponents(
 	targetScope *connector.TargetScope,
 	rateLimiter *connector.RateLimiter,
 	safetyEngine *safety.Engine,
+	socks5AuthSetter *socks5AuthAdapter,
 	targetScopePolicySource string,
 	version string,
 	logger *slog.Logger,
@@ -500,9 +511,9 @@ func buildMCPComponents(
 			targetScope,
 			hostTLSRegistry,
 			tlsTransport,
-			nil, // socks5AuthSetter — connector.SOCKS5Negotiator owns auth via BuildConfig (USK-690).
-			nil, // tcpHandler — TCP forward orchestration owned by USK-697 follow-up.
-			nil, // detector — protocol detection runs inside proxybuild Stack via connector.DetectKind.
+			socks5AuthSetter, // USK-770: bridge MCP socks5_auth -> live connector.SOCKS5Negotiator
+			nil,              // tcpHandler — TCP forward orchestration owned by USK-697 follow-up.
+			nil,              // detector — protocol detection runs inside proxybuild Stack via connector.DetectKind.
 			proxyCfg,
 			nil, // targetScopeSetters — propagation handled by connector wiring.
 			nil, // tlsFingerprintSetters — proxybuild rebuilds Stacks on configure.

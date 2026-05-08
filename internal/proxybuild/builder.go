@@ -91,6 +91,17 @@ type Deps struct {
 	// MITM (bidirectional io.Copy). nil = no passthrough.
 	PassthroughList *connector.PassthroughList
 
+	// SOCKS5Negotiator is the process-singleton SOCKS5 handshake driver
+	// used by every SOCKS5 listener built from this Deps. When non-nil,
+	// BuildLiveStack uses the supplied negotiator instead of constructing
+	// a fresh one — so the MCP control plane (mcpserver) can hold a
+	// reference and mutate Authenticator / ListenerAuthOverride at runtime
+	// via SOCKS5Negotiator.SetAuthenticator / SetListenerAuth /
+	// ClearListenerAuth (USK-770). When nil, BuildLiveStack constructs a
+	// negotiator scoped to this listener (legacy single-listener path
+	// retained for tests).
+	SOCKS5Negotiator *connector.SOCKS5Negotiator
+
 	// --- Optional Pipeline rule engines ---
 
 	HTTPSafetyEngine    *httprules.SafetyEngine
@@ -254,7 +265,14 @@ func BuildLiveStack(_ context.Context, deps Deps) (*Stack, error) {
 		OnHTTP2Stack:    buildOnHTTP2Stack(pH2, deps, logger),
 		Logger:          logger,
 	})
-	socks5Negotiator := connector.NewSOCKS5Negotiator(logger)
+	// USK-770: prefer the process-singleton SOCKS5Negotiator supplied via
+	// Deps (owned by mcpserver) so MCP control-plane Set*Auth calls reach
+	// the live data path. Fresh construction is retained for tests that
+	// build a Stack without going through mcpserver.
+	socks5Negotiator := deps.SOCKS5Negotiator
+	if socks5Negotiator == nil {
+		socks5Negotiator = connector.NewSOCKS5Negotiator(logger)
+	}
 	socks5Negotiator.Scope = deps.Scope
 	socks5Negotiator.RateLimiter = deps.RateLimiter
 	socks5Handler := connector.NewSOCKS5Handler(connector.SOCKS5HandlerConfig{

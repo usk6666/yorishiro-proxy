@@ -118,6 +118,15 @@ type socks5AuthSetter interface {
 	ClearAuthForListener(listenerName string)
 }
 
+// socks5AuthQuerier is an optional extension implemented by a socks5AuthSetter
+// that can also report whether any authenticator is currently configured.
+// The MCP `query resource=status` tool uses this to populate `socks5_enabled`
+// with the actual runtime auth state — falling back to "is the wire-up
+// present" when the setter does not implement this extension. (USK-770)
+type socks5AuthQuerier interface {
+	HasAnyAuth() bool
+}
+
 // ServerOption configures a Server. The remaining options are limited to
 // settings that are not part of the seven dependency components themselves
 // (HTTP middleware, WebUI directory, version string). All component values

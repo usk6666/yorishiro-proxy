@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"net"
+	"sync"
 	"testing"
 	"time"
 )
@@ -655,5 +657,306 @@ func TestStaticAuthenticator(t *testing.T) {
 	var nilA *StaticAuthenticator
 	if nilA.Authenticate("alice", "p1") {
 		t.Error("nil StaticAuthenticator accepted credentials")
+	}
+}
+
+// --- runtime auth mutate (USK-770) ----------------------------------------
+
+// TestSOCKS5Negotiator_SetAuthenticator_RuntimeMutate exercises the
+// SetAuthenticator path used by the MCP proxy_start / configure tools to
+// install a global authenticator without listener restart. The first
+// handshake runs with NO_AUTH; SetAuthenticator is then called and the
+// second handshake exercises USERNAME_PASSWORD against the new credentials.
+func TestSOCKS5Negotiator_SetAuthenticator_RuntimeMutate(t *testing.T) {
+	neg := NewSOCKS5Negotiator(newTestLogger())
+
+	// Phase 1: no authenticator installed — NO_AUTH must succeed.
+	t.Run("phase_no_auth", func(t *testing.T) {
+		rig := newSOCKS5TestRig(t, neg)
+		defer rig.closeAll()
+		rig.start()
+		go func() {
+			rig.writeClient(buildMethodGreeting(socks5MethodNoAuth))
+			rig.writeClient(buildConnectIPv4([4]byte{127, 0, 0, 1}, 80))
+		}()
+		methodResp := rig.readClient(2)
+		if methodResp[1] != socks5MethodNoAuth {
+			t.Errorf("method = 0x%02x, want NO_AUTH", methodResp[1])
+		}
+		_ = rig.readClient(10)
+		rig.waitDone(2 * time.Second)
+		if rig.retErr != nil {
+			t.Fatalf("Negotiate: %v", rig.retErr)
+		}
+	})
+
+	// Phase 2: install an authenticator at runtime — handshake must
+	// switch to USERNAME_PASSWORD.
+	neg.SetAuthenticator(NewStaticAuthenticator(map[string]string{"u": "p"}))
+
+	t.Run("phase_password_after_set", func(t *testing.T) {
+		rig := newSOCKS5TestRig(t, neg)
+		defer rig.closeAll()
+		rig.start()
+		go func() {
+			// Client offers both methods; negotiator must pick UP.
+			rig.writeClient(buildMethodGreeting(socks5MethodNoAuth, socks5MethodUsernamePassword))
+			rig.writeClient(buildAuthSub("u", "p"))
+			rig.writeClient(buildConnectIPv4([4]byte{127, 0, 0, 1}, 80))
+		}()
+		methodResp := rig.readClient(2)
+		if methodResp[1] != socks5MethodUsernamePassword {
+			t.Errorf("method = 0x%02x, want USERNAME_PASSWORD", methodResp[1])
+		}
+		authResp := rig.readClient(2)
+		if authResp[1] != socks5AuthSuccess {
+			t.Errorf("auth STATUS = 0x%02x", authResp[1])
+		}
+		_ = rig.readClient(10)
+		rig.waitDone(2 * time.Second)
+		if rig.retErr != nil {
+			t.Fatalf("Negotiate: %v", rig.retErr)
+		}
+	})
+
+	// Phase 3: clear the authenticator at runtime — handshake reverts.
+	neg.SetAuthenticator(nil)
+
+	t.Run("phase_no_auth_after_clear", func(t *testing.T) {
+		rig := newSOCKS5TestRig(t, neg)
+		defer rig.closeAll()
+		rig.start()
+		go func() {
+			rig.writeClient(buildMethodGreeting(socks5MethodNoAuth))
+			rig.writeClient(buildConnectIPv4([4]byte{127, 0, 0, 1}, 80))
+		}()
+		methodResp := rig.readClient(2)
+		if methodResp[1] != socks5MethodNoAuth {
+			t.Errorf("method = 0x%02x, want NO_AUTH (auth cleared)", methodResp[1])
+		}
+		_ = rig.readClient(10)
+		rig.waitDone(2 * time.Second)
+		if rig.retErr != nil {
+			t.Fatalf("Negotiate: %v", rig.retErr)
+		}
+	})
+}
+
+// TestSOCKS5Negotiator_SetListenerAuth_RuntimeMutate verifies the
+// per-listener override mutators preserve USK-242 multi-listener semantics:
+// (1) installing override A then swapping to B applies B for the next
+// handshake on that listener; (2) ClearListenerAuth falls back to the
+// global authenticator; (3) other listeners are unaffected.
+func TestSOCKS5Negotiator_SetListenerAuth_RuntimeMutate(t *testing.T) {
+	neg := NewSOCKS5Negotiator(newTestLogger())
+	neg.SetAuthenticator(NewStaticAuthenticator(map[string]string{"global": "global-pw"}))
+
+	// Install override A on listener "alpha".
+	neg.SetListenerAuth("alpha", NewStaticAuthenticator(map[string]string{"alpha-A": "pw-A"}))
+
+	t.Run("override_A_active", func(t *testing.T) {
+		rig := newSOCKS5TestRig(t, neg)
+		rig.ctx = ContextWithListenerName(context.Background(), "alpha")
+		defer rig.closeAll()
+		rig.start()
+		go func() {
+			rig.writeClient(buildMethodGreeting(socks5MethodUsernamePassword))
+			rig.writeClient(buildAuthSub("alpha-A", "pw-A"))
+			rig.writeClient(buildConnectDomain("example.com", 443))
+		}()
+		_ = rig.readClient(2)
+		authResp := rig.readClient(2)
+		if authResp[1] != socks5AuthSuccess {
+			t.Errorf("override A: STATUS = 0x%02x", authResp[1])
+		}
+		_ = rig.readClient(10)
+		rig.waitDone(2 * time.Second)
+	})
+
+	// Swap to override B on the same listener.
+	neg.SetListenerAuth("alpha", NewStaticAuthenticator(map[string]string{"alpha-B": "pw-B"}))
+
+	t.Run("override_B_replaces_A", func(t *testing.T) {
+		// New B credentials accepted.
+		rig := newSOCKS5TestRig(t, neg)
+		rig.ctx = ContextWithListenerName(context.Background(), "alpha")
+		defer rig.closeAll()
+		rig.start()
+		go func() {
+			rig.writeClient(buildMethodGreeting(socks5MethodUsernamePassword))
+			rig.writeClient(buildAuthSub("alpha-B", "pw-B"))
+			rig.writeClient(buildConnectDomain("example.com", 443))
+		}()
+		_ = rig.readClient(2)
+		authResp := rig.readClient(2)
+		if authResp[1] != socks5AuthSuccess {
+			t.Errorf("override B: STATUS = 0x%02x", authResp[1])
+		}
+		_ = rig.readClient(10)
+		rig.waitDone(2 * time.Second)
+	})
+
+	t.Run("old_A_rejected_after_swap", func(t *testing.T) {
+		// Old A credentials must now fail.
+		rig := newSOCKS5TestRig(t, neg)
+		rig.ctx = ContextWithListenerName(context.Background(), "alpha")
+		defer rig.closeAll()
+		rig.start()
+		go func() {
+			rig.writeClient(buildMethodGreeting(socks5MethodUsernamePassword))
+			rig.writeClient(buildAuthSub("alpha-A", "pw-A"))
+		}()
+		_ = rig.readClient(2)
+		authResp := rig.readClient(2)
+		if authResp[1] != socks5AuthFailure {
+			t.Errorf("old override A creds STATUS = 0x%02x, want failure", authResp[1])
+		}
+		rig.waitDone(2 * time.Second)
+		if !errors.Is(rig.retErr, ErrSOCKS5AuthFailed) {
+			t.Errorf("err = %v, want ErrSOCKS5AuthFailed", rig.retErr)
+		}
+	})
+
+	// Clear the override and confirm the global authenticator takes over
+	// for handshakes on this listener.
+	neg.ClearListenerAuth("alpha")
+
+	t.Run("clear_falls_through_to_global", func(t *testing.T) {
+		rig := newSOCKS5TestRig(t, neg)
+		rig.ctx = ContextWithListenerName(context.Background(), "alpha")
+		defer rig.closeAll()
+		rig.start()
+		go func() {
+			rig.writeClient(buildMethodGreeting(socks5MethodUsernamePassword))
+			rig.writeClient(buildAuthSub("global", "global-pw"))
+			rig.writeClient(buildConnectDomain("example.com", 443))
+		}()
+		_ = rig.readClient(2)
+		authResp := rig.readClient(2)
+		if authResp[1] != socks5AuthSuccess {
+			t.Errorf("global fallback: STATUS = 0x%02x", authResp[1])
+		}
+		_ = rig.readClient(10)
+		rig.waitDone(2 * time.Second)
+	})
+
+	t.Run("other_listener_unaffected", func(t *testing.T) {
+		// Independent listener "beta" never had an override installed, so
+		// it always saw the global authenticator. Confirm USK-242
+		// independence under runtime mutate.
+		rig := newSOCKS5TestRig(t, neg)
+		rig.ctx = ContextWithListenerName(context.Background(), "beta")
+		defer rig.closeAll()
+		rig.start()
+		go func() {
+			rig.writeClient(buildMethodGreeting(socks5MethodUsernamePassword))
+			rig.writeClient(buildAuthSub("global", "global-pw"))
+			rig.writeClient(buildConnectDomain("example.com", 443))
+		}()
+		_ = rig.readClient(2)
+		authResp := rig.readClient(2)
+		if authResp[1] != socks5AuthSuccess {
+			t.Errorf("listener beta: STATUS = 0x%02x", authResp[1])
+		}
+		_ = rig.readClient(10)
+		rig.waitDone(2 * time.Second)
+	})
+}
+
+// TestSOCKS5Negotiator_AuthMutate_RaceFree exercises concurrent reads
+// (authenticatorFor via in-flight handshakes) racing against writes
+// (SetAuthenticator / SetListenerAuth / ClearListenerAuth from the MCP
+// control plane). The -race detector is the assertion: the test passes
+// when no data race is reported.
+func TestSOCKS5Negotiator_AuthMutate_RaceFree(t *testing.T) {
+	neg := NewSOCKS5Negotiator(newTestLogger())
+	neg.SetAuthenticator(NewStaticAuthenticator(map[string]string{"u": "p"}))
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+
+	// Reader goroutines call authenticatorFor (the handshake-time read
+	// path) directly to maximise contention.
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			listener := fmt.Sprintf("listener-%d", id%2)
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					_ = neg.authenticatorFor(listener)
+					_ = neg.HasAnyAuthenticator()
+				}
+			}
+		}(i)
+	}
+
+	// Writer goroutines mutate auth state aggressively.
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			auth := NewStaticAuthenticator(map[string]string{"u": fmt.Sprintf("pw-%d", id)})
+			listener := fmt.Sprintf("listener-%d", id%2)
+			for j := 0; j < 200; j++ {
+				select {
+				case <-stop:
+					return
+				default:
+					switch j % 3 {
+					case 0:
+						neg.SetAuthenticator(auth)
+					case 1:
+						neg.SetListenerAuth(listener, auth)
+					case 2:
+						neg.ClearListenerAuth(listener)
+					}
+				}
+			}
+		}(i)
+	}
+
+	// Let readers and writers race for a short window then signal stop.
+	time.Sleep(150 * time.Millisecond)
+	close(stop)
+	wg.Wait()
+
+	// HasAnyAuthenticator should still return true (global auth installed
+	// at the start; clear-listener does not touch it).
+	if !neg.HasAnyAuthenticator() {
+		t.Error("HasAnyAuthenticator() = false, want true")
+	}
+}
+
+// TestSOCKS5Negotiator_HasAnyAuthenticator covers the predicate the MCP
+// `query resource=status` tool consumes via the socks5AuthQuerier
+// extension to surface `socks5_enabled` (USK-770).
+func TestSOCKS5Negotiator_HasAnyAuthenticator(t *testing.T) {
+	neg := NewSOCKS5Negotiator(newTestLogger())
+	if neg.HasAnyAuthenticator() {
+		t.Error("fresh negotiator: HasAnyAuthenticator() = true, want false")
+	}
+
+	// Per-listener-only is enough.
+	neg.SetListenerAuth("L1", NewStaticAuthenticator(map[string]string{"u": "p"}))
+	if !neg.HasAnyAuthenticator() {
+		t.Error("after SetListenerAuth: HasAnyAuthenticator() = false")
+	}
+	neg.ClearListenerAuth("L1")
+	if neg.HasAnyAuthenticator() {
+		t.Error("after ClearListenerAuth: HasAnyAuthenticator() = true")
+	}
+
+	// Global only.
+	neg.SetAuthenticator(NewStaticAuthenticator(map[string]string{"u": "p"}))
+	if !neg.HasAnyAuthenticator() {
+		t.Error("after SetAuthenticator: HasAnyAuthenticator() = false")
+	}
+	neg.SetAuthenticator(nil)
+	if neg.HasAnyAuthenticator() {
+		t.Error("after SetAuthenticator(nil): HasAnyAuthenticator() = true")
 	}
 }

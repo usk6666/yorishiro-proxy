@@ -425,12 +425,14 @@ func assembleLiveManager(
 	safetyEngine *safety.Engine,
 	perProtoSafety PerProtocolSafetyEngines,
 	hostTLSRegistry *transport.HostTLSRegistry,
+	socks5Negotiator *connector.SOCKS5Negotiator,
 	logger *slog.Logger,
 ) (*proxybuild.Manager, error) {
 	buildCfg := NewLiveBuildConfig(appCtx, cfg, proxyCfg, issuer, pluginv2Engine, store, hostTLSRegistry, logger)
 	return NewLiveManager(cfg, proxyCfg, store, issuer, pluginv2Engine,
 		holdQueue, httpInterceptEngine, wsInterceptEngine, grpcInterceptEngine,
-		httpTransformEngine, passthrough, rateLimiter, safetyEngine, perProtoSafety, buildCfg, logger)
+		httpTransformEngine, passthrough, rateLimiter, safetyEngine, perProtoSafety, buildCfg,
+		socks5Negotiator, logger)
 }
 
 // NewLiveBuildConfig assembles the connector.BuildConfig consumed by every
@@ -516,10 +518,13 @@ func NewLiveManager(
 	safetyEngine *safety.Engine,
 	perProtoSafety PerProtocolSafetyEngines,
 	buildCfg *connector.BuildConfig,
+	socks5Negotiator *connector.SOCKS5Negotiator,
 	logger *slog.Logger,
 ) (*proxybuild.Manager, error) {
 	// PassthroughList and RateLimiter come straight from connector.* and are
-	// threaded directly into proxybuild.Deps.
+	// threaded directly into proxybuild.Deps. socks5Negotiator is the
+	// process-singleton owned by the caller (USK-770) so MCP socks5_auth
+	// runtime mutations reach every listener built from this factory.
 	factory := func(ctx context.Context, name, addr string) (*proxybuild.Stack, error) {
 		return proxybuild.BuildLiveStack(ctx, proxybuild.Deps{
 			Logger:              logger,
@@ -540,6 +545,7 @@ func NewLiveManager(
 			MaxConnections:      cfg.MaxConnections,
 			PassthroughList:     passthrough,
 			RateLimiter:         rateLimiter,
+			SOCKS5Negotiator:    socks5Negotiator,
 		})
 	}
 	mgr, err := proxybuild.NewManager(proxybuild.ManagerConfig{

@@ -1169,9 +1169,17 @@ func (s *Server) handleQueryStatus(ctx context.Context) (*gomcp.CallToolResult, 
 		result.CAInitialized = true
 	}
 
-	// SOCKS5 availability: enabled if the handler is registered.
+	// SOCKS5 availability: when the setter exposes the runtime-state
+	// extension (USK-770), report whether any authenticator is currently
+	// configured (global or per-listener). Older setters without the
+	// extension surface "is the wire-up present" — preserves the legacy
+	// reading for tests that inject a stub.
 	if s.connector.socks5AuthSetter != nil {
-		result.SOCKS5Enabled = true
+		if q, ok := s.connector.socks5AuthSetter.(socks5AuthQuerier); ok {
+			result.SOCKS5Enabled = q.HasAnyAuth()
+		} else {
+			result.SOCKS5Enabled = true
+		}
 	}
 
 	result.TLSFingerprint = s.currentTLSFingerprint()
@@ -1263,7 +1271,11 @@ func (s *Server) handleQueryConfig() (*gomcp.CallToolResult, *queryConfigResult,
 	}
 
 	if s.connector.socks5AuthSetter != nil {
-		result.SOCKS5Enabled = true
+		if q, ok := s.connector.socks5AuthSetter.(socks5AuthQuerier); ok {
+			result.SOCKS5Enabled = q.HasAnyAuth()
+		} else {
+			result.SOCKS5Enabled = true
+		}
 	}
 
 	certPath, keyPath := s.currentClientCert()

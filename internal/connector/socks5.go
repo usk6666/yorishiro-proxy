@@ -17,6 +17,7 @@ import (
 	"log/slog"
 	"net"
 	"strconv"
+	"sync"
 	"time"
 )
 
@@ -136,16 +137,43 @@ func (s *StaticAuthenticator) Authenticate(username, password string) bool {
 //
 // All fields are optional except where noted. The zero value is usable and
 // behaves as "accept NO_AUTH, no policy enforcement".
+//
+// Concurrency: the auth fields (Authenticator / ListenerAuthOverride) are
+// guarded by an internal sync.RWMutex (USK-770). Direct field assignment is
+// safe only during initialization, before any handshake goroutine starts.
+// At runtime use SetAuthenticator / SetListenerAuth / ClearListenerAuth to
+// mutate auth state — these acquire the write lock; the negotiator's
+// per-handshake authenticatorFor read takes the read lock.
 type SOCKS5Negotiator struct {
+	// authMu guards Authenticator and ListenerAuthOverride for runtime
+	// mutate-from-MCP support (USK-770). Scope/RateLimiter/Logger are
+	// NOT guarded by this mutex; with the singleton wiring (USK-770)
+	// `proxybuild.BuildLiveStack` may overwrite Scope/RateLimiter once
+	// per listener startup, but the production wiring in mcpserver
+	// passes the same RateLimiter pointer and a nil Scope to every
+	// listener — so these writes are effectively idempotent and serialise
+	// behind `proxybuild.Manager`'s startup mutex. Callers that need
+	// per-listener Scope/RateLimiter divergence under the singleton must
+	// extend authMu coverage to those fields first.
+	authMu sync.RWMutex
+
 	// Authenticator is the default RFC 1929 authenticator. When non-nil, the
 	// negotiator prefers USERNAME_PASSWORD over NO_AUTH during method
 	// selection. When nil (and no per-listener override matches), only
 	// NO_AUTH is accepted.
+	//
+	// Initialization-time direct assignment is still supported for
+	// backwards compatibility with construction-site builders; runtime
+	// mutation must go through SetAuthenticator (USK-770).
 	Authenticator Authenticator
 
 	// ListenerAuthOverride maps listener names to per-listener
 	// authenticators. Consulted via ListenerNameFromContext; falls back to
 	// Authenticator when the listener name has no entry.
+	//
+	// Initialization-time direct assignment is still supported; runtime
+	// mutation must go through SetListenerAuth / ClearListenerAuth so the
+	// authMu guard is honoured.
 	ListenerAuthOverride map[string]Authenticator
 
 	// Scope enforces target allow/deny rules before the SOCKS5 reply is
@@ -486,16 +514,84 @@ func writeSOCKS5Reply(conn net.Conn, rep byte) error {
 }
 
 // authenticatorFor returns the authenticator for the given listener name,
-// falling back to the default. Must be called WITHOUT holding any lock; the
-// negotiator's fields are immutable after construction so no synchronization
-// is needed here.
+// falling back to the default. The lookup is RLock-guarded so it is safe to
+// call concurrently with SetAuthenticator / SetListenerAuth /
+// ClearListenerAuth (USK-770 runtime mutate-from-MCP support).
 func (n *SOCKS5Negotiator) authenticatorFor(listenerName string) Authenticator {
+	n.authMu.RLock()
+	defer n.authMu.RUnlock()
 	if listenerName != "" && n.ListenerAuthOverride != nil {
 		if auth, ok := n.ListenerAuthOverride[listenerName]; ok {
 			return auth
 		}
 	}
 	return n.Authenticator
+}
+
+// SetAuthenticator installs auth as the default RFC 1929 authenticator,
+// taking effect on the next handshake. A nil auth resets to "accept NO_AUTH"
+// behaviour (subject to per-listener overrides). Safe for concurrent use.
+//
+// USK-770: invoked by the MCP control plane (`proxy_start socks5_auth=...` /
+// `configure socks5_auth=...`) to mutate auth at runtime without restarting
+// the listener.
+func (n *SOCKS5Negotiator) SetAuthenticator(auth Authenticator) {
+	n.authMu.Lock()
+	n.Authenticator = auth
+	n.authMu.Unlock()
+}
+
+// SetListenerAuth installs auth as the per-listener authenticator for the
+// given listener name. The listener name is matched against the value
+// carried by ContextWithListenerName at handshake time. An empty listenerName
+// is rejected as a no-op (the global setter is SetAuthenticator). A nil auth
+// is recorded as "this listener has no authenticator" (i.e. NO_AUTH allowed
+// even if the global default has one) — to fall back to the global default
+// use ClearListenerAuth.
+//
+// USK-770: preserves USK-242's per-listener auth independence under runtime
+// mutate.
+func (n *SOCKS5Negotiator) SetListenerAuth(listenerName string, auth Authenticator) {
+	if listenerName == "" {
+		return
+	}
+	n.authMu.Lock()
+	if n.ListenerAuthOverride == nil {
+		n.ListenerAuthOverride = make(map[string]Authenticator)
+	}
+	n.ListenerAuthOverride[listenerName] = auth
+	n.authMu.Unlock()
+}
+
+// ClearListenerAuth removes the per-listener override for the given listener
+// name so subsequent handshakes for that listener fall back to the global
+// authenticator. An empty listenerName or an unknown listener is a no-op.
+// Safe for concurrent use.
+func (n *SOCKS5Negotiator) ClearListenerAuth(listenerName string) {
+	if listenerName == "" {
+		return
+	}
+	n.authMu.Lock()
+	delete(n.ListenerAuthOverride, listenerName)
+	n.authMu.Unlock()
+}
+
+// HasAnyAuthenticator reports whether the negotiator has at least one
+// authenticator configured (global or per-listener). Used by the MCP query
+// `status` resource to populate the `socks5_enabled` field with the actual
+// runtime state rather than a static "is the wire-up present" flag.
+func (n *SOCKS5Negotiator) HasAnyAuthenticator() bool {
+	n.authMu.RLock()
+	defer n.authMu.RUnlock()
+	if n.Authenticator != nil {
+		return true
+	}
+	for _, a := range n.ListenerAuthOverride {
+		if a != nil {
+			return true
+		}
+	}
+	return false
 }
 
 // logger returns the best logger for a given ctx, falling back to the
