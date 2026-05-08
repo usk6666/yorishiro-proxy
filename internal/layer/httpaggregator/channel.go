@@ -70,6 +70,20 @@ func (a *aggregatorChannel) StreamID() string {
 	return a.inner.StreamID()
 }
 
+// H2StreamID returns the underlying h2 stream id when the aggregator
+// wraps an *http2.channel; returns 0 when the inner Channel does not
+// expose an h2 stream id (e.g. tests using a fake Channel). Used by
+// the upgrade orchestrator (USK-765) to call
+// http2.Layer.DetachStream(streamID) on the right wire id without
+// reaching past the aggregator's encapsulation boundary.
+func (a *aggregatorChannel) H2StreamID() uint32 {
+	type h2StreamIDer interface{ H2StreamID() uint32 }
+	if v, ok := a.inner.(h2StreamIDer); ok {
+		return v.H2StreamID()
+	}
+	return 0
+}
+
 // Closed returns the underlying Channel's Closed signal. Aggregator does
 // not add its own Closed signal — terminal events (EOF, StreamError) are
 // surfaced through Next per the Channel contract.

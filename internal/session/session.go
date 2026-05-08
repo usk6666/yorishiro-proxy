@@ -17,6 +17,7 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/envelope/bodybuf"
 	"github.com/usk6666/yorishiro-proxy/internal/layer"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/http1"
+	"github.com/usk6666/yorishiro-proxy/internal/layer/http2"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/sse"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/ws"
 	"github.com/usk6666/yorishiro-proxy/internal/pipeline"
@@ -463,6 +464,8 @@ func RunStackSessionExchange(
 	switch notice.Pending() {
 	case UpgradeWS:
 		return runUpgradeWS(ctx, stack, dial, p, userOpt, upstreamCh)
+	case UpgradeWSOverH2:
+		return runUpgradeWSOverH2(ctx, stack, p, userOpt, clientCh, upstreamCh)
 	case UpgradeSSE:
 		return runUpgradeSSE(ctx, stack, dial, p, userOpt, upstreamCh, notice.SSEFirstResponse())
 	default:
@@ -547,6 +550,217 @@ func wsLifecycleOptions(userOpt SessionOptions) []ws.Option {
 		out = append(out, ws.WithStateReleaser(userOpt.StateReleaser))
 	}
 	return out
+}
+
+// h2StreamIDer is the optional surface a layer.Channel may implement to
+// expose its underlying HTTP/2 stream id. Both *http2.channel and
+// *httpaggregator.aggregatorChannel implement this; the upgrade
+// orchestrator type-asserts via this interface so it does not have to
+// import either concrete type (avoids an import cycle from session to
+// http2).
+type h2StreamIDer interface {
+	H2StreamID() uint32
+}
+
+// extractH2StreamID returns the h2 stream id carried by ch, or 0 with a
+// descriptive error when ch does not expose one. The empty-id case is an
+// orchestrator pre-condition violation: an h2 extended-CONNECT upgrade
+// cannot be performed without knowing the wire stream id.
+func extractH2StreamID(ch layer.Channel, side string) (uint32, error) {
+	if ch == nil {
+		return 0, fmt.Errorf("session: h2 ws upgrade: %s channel is nil", side)
+	}
+	idr, ok := ch.(h2StreamIDer)
+	if !ok {
+		return 0, fmt.Errorf("session: h2 ws upgrade: %s channel %T does not expose H2StreamID", side, ch)
+	}
+	id := idr.H2StreamID()
+	if id == 0 {
+		return 0, fmt.Errorf("session: h2 ws upgrade: %s channel reports h2 stream id 0", side)
+	}
+	return id, nil
+}
+
+// runUpgradeWSOverH2 performs the per-stream WS-over-h2 swap (RFC-001
+// §3.4.1 / §4.5; RFC 8441 extended CONNECT). Distinct from runUpgradeWS:
+//
+//   - The connection-level Layers stay *http2.Layer for sibling streams.
+//     ReplaceClient/UpstreamTop is INTENTIONALLY NOT CALLED — multiplex
+//     correctness MUST is preserved by the per-stream sub-stack overlay.
+//   - DetachStream(streamID) on each h2 Layer peels framing for the
+//     affected stream only; the returned (reader, writer, closer) triple
+//     is opaque bytes that ws.New(... ws.WithH2Mode(true) ...) wraps.
+//   - The new ws.Layer pair is registered on stack.streamSubStacks.
+//     ClientTopmostForStream(streamID) returns the per-stream client
+//     ws.Layer; sibling-stream lookups still resolve to the connection-
+//     level h2 Layer.
+//
+// The post-swap session loop runs on the new ws Channels. On terminal
+// state, the sub-stack is released so the connection-level h2 Layer is
+// the sole reference to the stream id again (RFC-001 §3.4.1 lifetime
+// MUST).
+func runUpgradeWSOverH2(
+	ctx context.Context,
+	stack *connector.ConnectionStack,
+	p *pipeline.Pipeline,
+	userOpt SessionOptions,
+	clientCh, upstreamCh layer.Channel,
+) (retErr error) {
+	clientH2, upstreamH2, err := h2LayersFromStack(stack)
+	if err != nil {
+		return err
+	}
+	clientStreamID, upstreamStreamID, err := h2StreamIDsForUpgrade(clientCh, upstreamCh)
+	if err != nil {
+		return err
+	}
+	cR, cW, cClose, uR, uW, uClose, err := detachBothSides(clientH2, upstreamH2, clientStreamID, upstreamStreamID)
+	if err != nil {
+		return err
+	}
+
+	// Stable session-scope identifier — reuse the client channel's
+	// envelope StreamID (a UUID) so post-swap flows correlate with the
+	// pre-swap CONNECT request and 2xx response in flow records.
+	sessionStreamID := clientCh.StreamID()
+
+	wsOpts := append([]ws.Option{ws.WithH2Mode(true)}, wsLifecycleOptions(userOpt)...)
+	clientWS := ws.New(cR, cW, &detachCloserAdapter{f: cClose}, sessionStreamID, ws.RoleServer, wsOpts...)
+	upstreamWS := ws.New(uR, uW, &detachCloserAdapter{f: uClose}, sessionStreamID, ws.RoleClient, wsOpts...)
+
+	if regErr := stack.RegisterStreamSubStack(sessionStreamID, clientWS, upstreamWS); regErr != nil {
+		_ = clientWS.Close()
+		_ = upstreamWS.Close()
+		return fmt.Errorf("session: register sub-stack for stream %d (%s): %w", clientStreamID, sessionStreamID, regErr)
+	}
+
+	// Lifetime release: when the post-swap session terminates (graceful
+	// EOF, error, or context cancel), the sub-stack is removed and the
+	// per-stream Layer pair is closed. Sibling streams continue running.
+	defer func() {
+		// ReleaseStreamSubStack is idempotent — Close inside the session
+		// loop's OnComplete may have already torn things down. Errors are
+		// joined into retErr only when retErr is nil so we don't shadow
+		// the actual session result.
+		if relErr := stack.ReleaseStreamSubStack(sessionStreamID); relErr != nil && retErr == nil {
+			retErr = relErr
+		}
+	}()
+
+	clientWSCh, upstreamWSCh, err := pullWSChannels(clientWS, upstreamWS)
+	if err != nil {
+		return err
+	}
+	if err := assertSubStackLookups(stack, sessionStreamID, clientWS, upstreamWS); err != nil {
+		return err
+	}
+
+	// Upgrade-dial: hand the recursive RunSession the pre-acquired
+	// upstream ws Channel without re-dialing.
+	upgradeDial := DialFunc(func(_ context.Context, _ *envelope.Envelope) (layer.Channel, error) {
+		return upstreamWSCh, nil
+	})
+
+	// Recursion is bounded — WebSocket-over-h2 has no nested upgrade. We
+	// pass the user OnComplete through so the post-swap WS exchange's
+	// terminal state surfaces to the recorder.
+	return RunSession(ctx, clientWSCh, upgradeDial, p, userOpt)
+}
+
+// h2LayersFromStack type-asserts the connection-level Topmost on each
+// side as *http2.Layer, returning a wrapped error otherwise.
+func h2LayersFromStack(stack *connector.ConnectionStack) (*http2.Layer, *http2.Layer, error) {
+	clientTop := stack.ClientTopmost()
+	clientH2, ok := clientTop.(*http2.Layer)
+	if !ok {
+		return nil, nil, fmt.Errorf("session: ws/h2 upgrade requires *http2.Layer client topmost, got %T", clientTop)
+	}
+	upstreamTop := stack.UpstreamTopmost()
+	upstreamH2, ok := upstreamTop.(*http2.Layer)
+	if !ok {
+		return nil, nil, fmt.Errorf("session: ws/h2 upgrade requires *http2.Layer upstream topmost, got %T", upstreamTop)
+	}
+	return clientH2, upstreamH2, nil
+}
+
+// h2StreamIDsForUpgrade extracts both the client- and upstream-side h2
+// stream ids from the channels passed by the orchestrator.
+func h2StreamIDsForUpgrade(clientCh, upstreamCh layer.Channel) (uint32, uint32, error) {
+	c, err := extractH2StreamID(clientCh, "client")
+	if err != nil {
+		return 0, 0, err
+	}
+	u, err := extractH2StreamID(upstreamCh, "upstream")
+	if err != nil {
+		return 0, 0, err
+	}
+	return c, u, nil
+}
+
+// detachBothSides peels per-stream framing on both Layers; rolls back
+// the client-side detach if the upstream-side fails, so the wire is not
+// left in an inconsistent state.
+func detachBothSides(clientH2, upstreamH2 *http2.Layer, clientStreamID, upstreamStreamID uint32) (
+	io.ReadCloser, io.WriteCloser, func() error,
+	io.ReadCloser, io.WriteCloser, func() error,
+	error,
+) {
+	cR, cW, cClose, err := clientH2.DetachStream(clientStreamID)
+	if err != nil {
+		return nil, nil, nil, nil, nil, nil, fmt.Errorf("session: detach client h2 stream %d: %w", clientStreamID, err)
+	}
+	uR, uW, uClose, err := upstreamH2.DetachStream(upstreamStreamID)
+	if err != nil {
+		_ = cClose()
+		return nil, nil, nil, nil, nil, nil, fmt.Errorf("session: detach upstream h2 stream %d: %w", upstreamStreamID, err)
+	}
+	return cR, cW, cClose, uR, uW, uClose, nil
+}
+
+// pullWSChannels fetches the single Channel each ws Layer yields.
+func pullWSChannels(clientWS, upstreamWS *ws.Layer) (layer.Channel, layer.Channel, error) {
+	cCh, ok := <-clientWS.Channels()
+	if !ok || cCh == nil {
+		return nil, nil, errors.New("session: client ws/h2 layer produced no Channel")
+	}
+	uCh, ok := <-upstreamWS.Channels()
+	if !ok || uCh == nil {
+		return nil, nil, errors.New("session: upstream ws/h2 layer produced no Channel")
+	}
+	return cCh, uCh, nil
+}
+
+// assertSubStackLookups defends against a silent registration failure:
+// if the stack does not surface the registered ws Layers via *ForStream,
+// proceeding would hand the post-swap session the connection-level h2
+// Layer — a multiplex-isolation violation.
+func assertSubStackLookups(stack *connector.ConnectionStack, streamID string, clientWS, upstreamWS *ws.Layer) error {
+	if got := stack.ClientTopmostForStream(streamID); got != clientWS {
+		return fmt.Errorf("session: ClientTopmostForStream(%s) returned %T, expected registered ws.Layer", streamID, got)
+	}
+	if got := stack.UpstreamTopmostForStream(streamID); got != upstreamWS {
+		return fmt.Errorf("session: UpstreamTopmostForStream(%s) returned %T, expected registered ws.Layer", streamID, got)
+	}
+	return nil
+}
+
+// detachCloserAdapter adapts a func() error returned by
+// http2.Layer.DetachStream into the io.Closer that ws.New expects. The
+// underlying h2 connection is NOT closed; only the per-stream framing is.
+type detachCloserAdapter struct {
+	f    func() error
+	once sync.Once
+	err  error
+}
+
+// Close is idempotent.
+func (c *detachCloserAdapter) Close() error {
+	c.once.Do(func() {
+		if c.f != nil {
+			c.err = c.f()
+		}
+	})
+	return c.err
 }
 
 // runUpgradeSSE performs the SSE-side swap: the upstream side is replaced

@@ -456,3 +456,231 @@ func (f *fakeChannelCloser) Closed() <-chan struct{} {
 	return f.done
 }
 func (f *fakeChannelCloser) Err() error { return io.EOF }
+
+// --- USK-765: h2 extended CONNECT detection ---
+
+func TestIsExtendedConnectWSRequest(t *testing.T) {
+	cases := []struct {
+		name string
+		msg  *envelope.HTTPMessage
+		want bool
+	}{
+		{
+			name: "CONNECT + websocket",
+			msg:  &envelope.HTTPMessage{Method: "CONNECT", ConnectProtocol: "websocket"},
+			want: true,
+		},
+		{
+			name: "CONNECT + WebSocket (mixed-case from non-conforming peer)",
+			msg:  &envelope.HTTPMessage{Method: "CONNECT", ConnectProtocol: "WebSocket"},
+			want: true,
+		},
+		{
+			name: "lowercase connect (case-insensitive Method)",
+			msg:  &envelope.HTTPMessage{Method: "connect", ConnectProtocol: "websocket"},
+			want: true,
+		},
+		{
+			name: "GET with :protocol — not extended CONNECT",
+			msg:  &envelope.HTTPMessage{Method: "GET", ConnectProtocol: "websocket"},
+			want: false,
+		},
+		{
+			name: "classic CONNECT (no :protocol)",
+			msg:  &envelope.HTTPMessage{Method: "CONNECT", ConnectProtocol: ""},
+			want: false,
+		},
+		{
+			name: "CONNECT + h2c (forward-compat protocol; not WS)",
+			msg:  &envelope.HTTPMessage{Method: "CONNECT", ConnectProtocol: "h2c"},
+			want: false,
+		},
+		{
+			name: "nil msg",
+			msg:  nil,
+			want: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isExtendedConnectWSRequest(tc.msg); got != tc.want {
+				t.Errorf("isExtendedConnectWSRequest = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestIsExtendedConnectAccept(t *testing.T) {
+	cases := []struct {
+		name string
+		msg  *envelope.HTTPMessage
+		want bool
+	}{
+		{name: "200", msg: &envelope.HTTPMessage{Status: 200}, want: true},
+		{name: "201", msg: &envelope.HTTPMessage{Status: 201}, want: true},
+		{name: "299 (upper bound)", msg: &envelope.HTTPMessage{Status: 299}, want: true},
+		{name: "100 informational not 2xx", msg: &envelope.HTTPMessage{Status: 100}, want: false},
+		{name: "300 redirect not 2xx", msg: &envelope.HTTPMessage{Status: 300}, want: false},
+		{name: "404", msg: &envelope.HTTPMessage{Status: 404}, want: false},
+		{name: "500", msg: &envelope.HTTPMessage{Status: 500}, want: false},
+		{name: "nil msg", msg: nil, want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isExtendedConnectAccept(tc.msg); got != tc.want {
+				t.Errorf("isExtendedConnectAccept = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestUpgradeNotice_HasSendUpgradeH2_Independent verifies that
+// markSendUpgradeH2 does not flip the HTTP/1.1 send-upgrade flag, and
+// vice versa. The two flags drive different swap orchestrators
+// (runUpgradeWS vs runUpgradeWSOverH2); cross-contamination would route
+// an h2 swap through the h1 orchestrator (which type-asserts to
+// *http1.Layer and would fail with a mismatch error).
+func TestUpgradeNotice_HasSendUpgradeH2_Independent(t *testing.T) {
+	n := &UpgradeNotice{}
+	if n.hasSendUpgradeH2() {
+		t.Fatal("zero-value notice must not report seenSendUpgradeH2")
+	}
+	n.markSendUpgradeH2()
+	if !n.hasSendUpgradeH2() {
+		t.Error("after markSendUpgradeH2, hasSendUpgradeH2 should return true")
+	}
+	if n.hasSendUpgrade() {
+		t.Error("markSendUpgradeH2 must not flip the h1 send-upgrade flag")
+	}
+
+	m := &UpgradeNotice{}
+	m.markSendUpgrade()
+	if !m.hasSendUpgrade() {
+		t.Error("after markSendUpgrade, hasSendUpgrade should return true")
+	}
+	if m.hasSendUpgradeH2() {
+		t.Error("markSendUpgrade must not flip the h2 send-upgrade flag")
+	}
+}
+
+// TestUpgradeStep_ExtendedCONNECTThen2xx_PendingWSOverH2 covers the happy
+// path: a CONNECT+:protocol=websocket Send envelope followed by a 2xx
+// response on the same stream latches Pending=UpgradeWSOverH2.
+func TestUpgradeStep_ExtendedCONNECTThen2xx_PendingWSOverH2(t *testing.T) {
+	notice := &UpgradeNotice{}
+	ctx := WithUpgradeNotice(context.Background(), notice)
+	step := NewUpgradeStep()
+
+	req := &envelope.Envelope{
+		Direction: envelope.Send, Protocol: envelope.ProtocolHTTP,
+		Message: &envelope.HTTPMessage{
+			Method:          "CONNECT",
+			ConnectProtocol: "websocket",
+			Authority:       "echo.example.com",
+			Scheme:          "https",
+			Path:            "/chat",
+		},
+	}
+	if r := step.Process(ctx, req); r.Action != pipeline.Continue {
+		t.Errorf("send action = %v, want Continue", r.Action)
+	}
+	if !notice.hasSendUpgradeH2() {
+		t.Error("notice should observe h2 send upgrade")
+	}
+	if notice.hasSendUpgrade() {
+		t.Error("notice must not also latch the h1 send-upgrade flag")
+	}
+	if notice.Pending() != "" {
+		t.Errorf("notice should NOT yet be pending after send-only, got %q", notice.Pending())
+	}
+
+	resp := &envelope.Envelope{
+		Direction: envelope.Receive, Protocol: envelope.ProtocolHTTP,
+		Message: &envelope.HTTPMessage{Status: 200},
+	}
+	step.Process(ctx, resp)
+	if got := notice.Pending(); got != UpgradeWSOverH2 {
+		t.Errorf("notice.Pending = %q, want %q", got, UpgradeWSOverH2)
+	}
+}
+
+// TestUpgradeStep_ExtendedCONNECT_NonWSProtocol_NoMatch verifies that a
+// CONNECT with a forward-compat :protocol value other than "websocket"
+// (e.g. "webtransport", "h2c") does NOT latch the h2 send-upgrade flag,
+// so the matching 2xx will fall back to standard h2 handling without a
+// per-stream sub-stack swap.
+func TestUpgradeStep_ExtendedCONNECT_NonWSProtocol_NoMatch(t *testing.T) {
+	step := NewUpgradeStep()
+	for _, proto := range []string{"webtransport", "h2c", "bt", ""} {
+		t.Run(proto, func(t *testing.T) {
+			n := &UpgradeNotice{}
+			c := WithUpgradeNotice(context.Background(), n)
+			req := &envelope.Envelope{
+				Direction: envelope.Send, Protocol: envelope.ProtocolHTTP,
+				Message: &envelope.HTTPMessage{
+					Method:          "CONNECT",
+					ConnectProtocol: proto,
+				},
+			}
+			step.Process(c, req)
+			if n.hasSendUpgradeH2() {
+				t.Errorf(":protocol=%q should not latch h2 send-upgrade", proto)
+			}
+			resp := &envelope.Envelope{
+				Direction: envelope.Receive, Protocol: envelope.ProtocolHTTP,
+				Message: &envelope.HTTPMessage{Status: 200},
+			}
+			step.Process(c, resp)
+			if got := n.Pending(); got != "" {
+				t.Errorf(":protocol=%q latched Pending=%q, want empty", proto, got)
+			}
+		})
+	}
+}
+
+// TestUpgradeStep_ExtendedCONNECT_2xxWithoutSendH2_NoMatch verifies that
+// a 2xx response without a preceding extended-CONNECT request must not
+// flip Pending=UpgradeWSOverH2. This guards against false positives on
+// regular HTTP/2 200 responses that share the receive-side trigger
+// pattern with extended CONNECT.
+func TestUpgradeStep_ExtendedCONNECT_2xxWithoutSendH2_NoMatch(t *testing.T) {
+	notice := &UpgradeNotice{}
+	ctx := WithUpgradeNotice(context.Background(), notice)
+	step := NewUpgradeStep()
+
+	resp := &envelope.Envelope{
+		Direction: envelope.Receive, Protocol: envelope.ProtocolHTTP,
+		Message: &envelope.HTTPMessage{Status: 200},
+	}
+	step.Process(ctx, resp)
+	if got := notice.Pending(); got != "" {
+		t.Errorf("notice.Pending = %q, want empty (no Send-side extended CONNECT)", got)
+	}
+}
+
+// TestUpgradeStep_H1AndH2_NotEntangled verifies that latching the h2
+// flag does not satisfy the h1 trigger and vice versa: a CONNECT +
+// :protocol=websocket request followed by a 101 response (h1 trigger)
+// should NOT latch UpgradeWS — the 101 has no matching hasSendUpgrade.
+func TestUpgradeStep_H1AndH2_NotEntangled(t *testing.T) {
+	n := &UpgradeNotice{}
+	ctx := WithUpgradeNotice(context.Background(), n)
+	step := NewUpgradeStep()
+
+	step.Process(ctx, &envelope.Envelope{
+		Direction: envelope.Send, Protocol: envelope.ProtocolHTTP,
+		Message: &envelope.HTTPMessage{Method: "CONNECT", ConnectProtocol: "websocket"},
+	})
+	step.Process(ctx, &envelope.Envelope{
+		Direction: envelope.Receive, Protocol: envelope.ProtocolHTTP,
+		Message: &envelope.HTTPMessage{Status: 101, Headers: []envelope.KeyValue{
+			{Name: "Upgrade", Value: "websocket"},
+			{Name: "Connection", Value: "Upgrade"},
+		}},
+	})
+	if got := n.Pending(); got != "" {
+		// A 101 with no hasSendUpgrade (h1) flag should not match the h1
+		// branch. The h2 branch matches only on 2xx, not 101.
+		t.Errorf("notice.Pending = %q, want empty (h1 path requires hasSendUpgrade)", got)
+	}
+}

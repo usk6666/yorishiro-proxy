@@ -43,6 +43,24 @@ type options struct {
 	// so tests / future N9 production wiring can compose them
 	// independently.
 	lifecycleEngine *pluginv2.Engine
+
+	// h2Mode toggles the RFC 8441 extended CONNECT framing semantics:
+	//
+	//   - Outbound client→server frames are emitted UNMASKED (RFC 8441
+	//     §5.3 forbids the MASK bit when WS rides over HTTP/2 because
+	//     the h2 connection itself is already encrypted / framed).
+	//   - Inbound MASK=1 from the peer is recorded as a stream-level
+	//     protocol error per §5.3 ("Note that this means that
+	//     intermediaries MUST NOT change the masking of the data")
+	//     rather than panicking or silently passing through.
+	//   - Stream termination is signalled by the underlying h2 stream's
+	//     END_STREAM (surfaced as io.EOF on the per-stream byte reader).
+	//     The Layer MUST NOT generate a WS Close frame on termination,
+	//     and MUST tolerate (record but not double-close) an inbound WS
+	//     Close from the peer.
+	//
+	// Default false (HTTP/1.1 Upgrade transport — RFC 6455 framing).
+	h2Mode bool
 }
 
 // Option tunes the WSLayer.
@@ -106,6 +124,23 @@ func WithStateReleaser(r pluginv2.StateReleaser) Option {
 // the close still sees live transaction_state. nil = no-op.
 func WithLifecycleEngine(e *pluginv2.Engine) Option {
 	return func(o *options) { o.lifecycleEngine = e }
+}
+
+// WithH2Mode toggles RFC 8441 extended CONNECT framing semantics:
+//
+//   - No MASK bit on outbound client→server frames (h2 is the security
+//     boundary; RFC 8441 §5.3).
+//   - Inbound MASK=1 surfaces an *layer.StreamError per §5.3 violation.
+//   - No WS Close frame generated on stream termination — h2 END_STREAM
+//     is the canonical signal. An inbound WS Close from the peer is
+//     recorded but does not double-close the wire.
+//
+// The flag is consulted by the per-Channel send/receive paths via the
+// shared options pointer; toggling it after Layer construction has no
+// effect (set the option at New time). Default false (HTTP/1.1 Upgrade
+// transport — RFC 6455 framing).
+func WithH2Mode(enable bool) Option {
+	return func(o *options) { o.h2Mode = enable }
 }
 
 // WithDeflateFromExtensionHeader configures permessage-deflate (RFC 7692)

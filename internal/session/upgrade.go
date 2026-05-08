@@ -19,8 +19,19 @@ type UpgradeKind string
 
 const (
 	// UpgradeWS marks an HTTP→WebSocket Upgrade (RFC 6455). Both the
-	// client side and the upstream side swap to ws.Layer.
+	// client side and the upstream side swap to ws.Layer over the
+	// HTTP/1.x detached byte stream.
 	UpgradeWS UpgradeKind = "ws"
+	// UpgradeWSOverH2 marks an RFC 8441 extended-CONNECT → WebSocket
+	// transition over an HTTP/2 stream. Only the affected stream swaps
+	// (per-stream sub-stack overlay, RFC-001 §3.4.1); sibling streams
+	// on the same h2 connection continue with standard h2 framing.
+	// The client and upstream Layers remain *http2.Layer at the
+	// connection level — the swap installs ws.Layer pairs in h2 mode
+	// on the per-stream sub-stack. Distinct from UpgradeWS so the
+	// orchestrator can dispatch to runUpgradeWSOverH2 instead of
+	// runUpgradeWS (which detaches the entire HTTP/1.x connection).
+	UpgradeWSOverH2 UpgradeKind = "ws-h2"
 	// UpgradeSSE marks an HTTP→Server-Sent-Events response (text/event-stream).
 	// Only the upstream side swaps; the client side keeps its http1.Layer
 	// because the response body is server-to-client only (RFC 8895, RFC-001
@@ -48,8 +59,14 @@ var ErrUpgradePending = errors.New("session: upgrade pending")
 // per RFC-001 N7 — at most a handful of calls per upgraded session).
 type UpgradeNotice struct {
 	mu              sync.Mutex
-	seenSendUpgrade bool        // saw a Send envelope carrying Upgrade: websocket + Connection: upgrade
-	pending         UpgradeKind // empty until the swap is required
+	seenSendUpgrade bool // saw a Send envelope carrying Upgrade: websocket + Connection: upgrade (HTTP/1.1)
+	// seenSendUpgradeH2 is set when UpgradeStep observes a Send envelope
+	// shaped like RFC 8441 extended CONNECT (Method=="CONNECT" +
+	// ConnectProtocol=="websocket"). Tracked independently from
+	// seenSendUpgrade so the Receive-side trigger can pick the right
+	// UpgradeKind without re-inspecting the request.
+	seenSendUpgradeH2 bool
+	pending           UpgradeKind // empty until the swap is required
 	// upstreamCh holds the live upstream Channel at the moment the first
 	// session exited with ErrUpgradePending. RunStackSession reads it back
 	// to construct the post-upgrade Layer without re-dialing. Set exactly
@@ -77,6 +94,25 @@ func (n *UpgradeNotice) hasSendUpgrade() bool {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	return n.seenSendUpgrade
+}
+
+// markSendUpgradeH2 is called by UpgradeStep when it observes a Send
+// envelope shaped like RFC 8441 extended CONNECT (Method=="CONNECT" +
+// ConnectProtocol=="websocket"). The pending kind is NOT set yet — only
+// the matching 2xx response on the Receive side flips pending to
+// UpgradeWSOverH2.
+func (n *UpgradeNotice) markSendUpgradeH2() {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.seenSendUpgradeH2 = true
+}
+
+// hasSendUpgradeH2 reports whether the h2 extended-CONNECT request side
+// has been observed.
+func (n *UpgradeNotice) hasSendUpgradeH2() bool {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.seenSendUpgradeH2
 }
 
 // trySetPending records the upgrade kind exactly once. Returns true if
@@ -231,32 +267,57 @@ func (s *UpgradeStep) Process(ctx context.Context, env *envelope.Envelope) pipel
 	if notice == nil || env == nil || env.Message == nil {
 		return pipeline.Result{}
 	}
-
 	msg, ok := env.Message.(*envelope.HTTPMessage)
 	if !ok || msg == nil {
 		return pipeline.Result{}
 	}
-
 	switch env.Direction {
 	case envelope.Send:
-		if isWSUpgradeRequest(msg) {
-			notice.markSendUpgrade()
-		}
+		processUpgradeSend(notice, msg)
 	case envelope.Receive:
-		// WS branch: 101 + Upgrade: websocket + Connection: upgrade after
-		// a matching Send-side request. SSE check is independent (no
-		// Send-side prerequisite).
-		if notice.hasSendUpgrade() && isWS101Response(msg) {
-			notice.trySetPending(UpgradeWS)
-			return pipeline.Result{}
-		}
-		if isSSEResponse(msg) {
-			if notice.trySetPending(UpgradeSSE) {
-				notice.attachSSEFirstResponse(env)
-			}
-		}
+		processUpgradeReceive(notice, env, msg)
 	}
 	return pipeline.Result{}
+}
+
+// processUpgradeSend latches the appropriate Send-side flag on notice
+// when msg matches an h1 RFC 6455 upgrade request OR an h2 RFC 8441
+// extended CONNECT request. No-op for any other Send envelope.
+func processUpgradeSend(notice *UpgradeNotice, msg *envelope.HTTPMessage) {
+	// HTTP/1.1 RFC 6455 Upgrade.
+	if isWSUpgradeRequest(msg) {
+		notice.markSendUpgrade()
+		return
+	}
+	// RFC 8441 §4 extended CONNECT (HTTP/2): :method=CONNECT +
+	// :protocol=websocket. The HTTPMessage carries the parsed :protocol
+	// value in ConnectProtocol (USK-764). We mark the send-side upgrade
+	// AND remember it was h2-shaped so the matching 2xx flips the kind
+	// to UpgradeWSOverH2 rather than UpgradeWS.
+	if isExtendedConnectWSRequest(msg) {
+		notice.markSendUpgradeH2()
+	}
+}
+
+// processUpgradeReceive flips notice.pending to the matching UpgradeKind
+// when the incoming response completes a previously-observed Send-side
+// trigger. The h2-extended-CONNECT branch is checked before the h1 101
+// branch because UpgradeStep cannot distinguish the two from the response
+// shape alone — the corresponding Send-side flag is the discriminator.
+func processUpgradeReceive(notice *UpgradeNotice, env *envelope.Envelope, msg *envelope.HTTPMessage) {
+	if notice.hasSendUpgradeH2() && isExtendedConnectAccept(msg) {
+		notice.trySetPending(UpgradeWSOverH2)
+		return
+	}
+	if notice.hasSendUpgrade() && isWS101Response(msg) {
+		notice.trySetPending(UpgradeWS)
+		return
+	}
+	if isSSEResponse(msg) {
+		if notice.trySetPending(UpgradeSSE) {
+			notice.attachSSEFirstResponse(env)
+		}
+	}
 }
 
 // isWSUpgradeRequest reports whether msg looks like an HTTP request that
@@ -300,6 +361,46 @@ func isWS101Response(msg *envelope.HTTPMessage) bool {
 		return false
 	}
 	return true
+}
+
+// isExtendedConnectWSRequest reports whether msg looks like an HTTP/2
+// RFC 8441 extended CONNECT request bootstrapping WebSocket: Method=="CONNECT"
+// AND ConnectProtocol (parsed from the :protocol pseudo-header by USK-764)
+// case-insensitive equals "websocket".
+//
+// The case-insensitive comparison matches RFC 8441 §4 ("The :protocol
+// pseudo-header field includes the value of the Upgrade token" — RFC 6455
+// itself treats Upgrade tokens as case-insensitive). Empty ConnectProtocol
+// or non-CONNECT method does not match.
+//
+// Headers Upgrade / Connection are NOT consulted: those HTTP/1.1 hop-by-
+// hop tokens have no place over HTTP/2 (the assembler tags them with
+// H2ConnectionSpecificHeader anomalies but does not strip them). We rely
+// on the parsed pseudo-header alone.
+func isExtendedConnectWSRequest(msg *envelope.HTTPMessage) bool {
+	if msg == nil {
+		return false
+	}
+	if !strings.EqualFold(msg.Method, "CONNECT") {
+		return false
+	}
+	return strings.EqualFold(msg.ConnectProtocol, "websocket")
+}
+
+// isExtendedConnectAccept reports whether msg is a 2xx HTTP response on
+// the stream that initiated the extended CONNECT — RFC 8441 §5 says "a
+// 2xx response indicates that the WebSocket connection has been
+// established", with 200 the typical and recommended value.
+//
+// The proxy proxies whatever the server says, so we accept any 2xx
+// (including 201/204/206 which a non-standard server might use). The
+// caller has already gated this on hasSendUpgradeH2 so we do not need to
+// inspect Content-Type or any other header.
+func isExtendedConnectAccept(msg *envelope.HTTPMessage) bool {
+	if msg == nil {
+		return false
+	}
+	return msg.Status >= 200 && msg.Status < 300
 }
 
 // isSSEResponse reports whether msg is a 2xx HTTP response whose

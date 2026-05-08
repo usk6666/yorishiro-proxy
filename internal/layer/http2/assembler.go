@@ -309,6 +309,18 @@ func buildHeadersEvent(decoded []hpack.HeaderField, direction envelope.Direction
 		// of the "drop on Method!=CONNECT" branch.
 		if pf.hasProtocol && pf.method == "CONNECT" {
 			evt.ConnectProtocol = pf.protocol
+			// USK-765 / RFC-001 §3.4.1: any :protocol value other than
+			// "websocket" surfaces an H2UnsupportedConnectProtocol anomaly
+			// so the no-swap fallback is observable in recorded flows.
+			// Case-insensitive comparison mirrors the upgrade-detection
+			// helper in internal/session/upgrade.go (ConnectProtocol may
+			// arrive in any case from non-conforming peers).
+			if !strings.EqualFold(pf.protocol, "websocket") {
+				evt.Anomalies = append(evt.Anomalies, envelope.Anomaly{
+					Type:   envelope.H2UnsupportedConnectProtocol,
+					Detail: pf.protocol,
+				})
+			}
 		}
 	} else {
 		if pf.hasStatus {

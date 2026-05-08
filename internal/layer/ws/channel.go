@@ -246,6 +246,20 @@ func (c *wsChannel) Next(ctx context.Context) (*envelope.Envelope, error) {
 	}
 
 	dir := c.readDirection()
+	// RFC 8441 §5.3: in h2 mode, MASK MUST NOT be set in either
+	// direction. A peer that violates this is reported as a stream-level
+	// protocol error so the operator can see the deviation in the flow
+	// record, while the proxy stays alive (no panic, no silent fallback).
+	// Checked on the parsed Frame BEFORE buildEnvelope so the observed
+	// payload is preserved in Envelope.Raw via the caller's path.
+	if c.opts != nil && c.opts.h2Mode && frame.Masked {
+		se := &layer.StreamError{
+			Code:   layer.ErrorProtocol,
+			Reason: "ws: h2 mode: peer set MASK bit (RFC 8441 §5.3 violation)",
+		}
+		c.markTerminated(se)
+		return nil, se
+	}
 	env, buildErr := c.buildEnvelope(frame, raw, dir)
 	if buildErr != nil {
 		c.markTerminated(buildErr)
@@ -569,19 +583,8 @@ func (c *wsChannel) Send(ctx context.Context, env *envelope.Envelope) error {
 	}
 	frame.Payload = payload
 
-	// Mask iff RoleClient. crypto/rand for entropy per RFC 6455 §5.3.
-	if c.role == RoleClient {
-		var key [4]byte
-		if _, rerr := rand.Read(key[:]); rerr != nil {
-			se := &layer.StreamError{
-				Code:   layer.ErrorAborted,
-				Reason: "ws: send: mask gen: " + rerr.Error(),
-			}
-			c.markTerminated(se)
-			return se
-		}
-		frame.Masked = true
-		frame.MaskKey = key
+	if se := c.applySendMask(frame); se != nil {
+		return se
 	}
 
 	if werr := WriteFrame(c.layer.writer, frame); werr != nil {
@@ -592,6 +595,37 @@ func (c *wsChannel) Send(ctx context.Context, env *envelope.Envelope) error {
 		c.markTerminated(se)
 		return se
 	}
+	return nil
+}
+
+// applySendMask installs a fresh per-frame mask key on frame iff the
+// Layer is RoleClient AND not in h2 mode. RFC 6455 §5.3 mandates
+// client-side masking on a TCP transport; RFC 8441 §5.3 inverts that
+// rule for extended CONNECT (h2 is the security boundary, masking is
+// forbidden). h2Mode is checked FIRST so a future caller that flips the
+// flag at build time gets the right wire output regardless of role.
+//
+// Returns a non-nil *layer.StreamError when the crypto/rand read fails
+// (and marks the channel terminated); nil on success or when no mask is
+// required.
+func (c *wsChannel) applySendMask(frame *Frame) *layer.StreamError {
+	if c.role != RoleClient {
+		return nil
+	}
+	if c.opts != nil && c.opts.h2Mode {
+		return nil
+	}
+	var key [4]byte
+	if _, rerr := rand.Read(key[:]); rerr != nil {
+		se := &layer.StreamError{
+			Code:   layer.ErrorAborted,
+			Reason: "ws: send: mask gen: " + rerr.Error(),
+		}
+		c.markTerminated(se)
+		return se
+	}
+	frame.Masked = true
+	frame.MaskKey = key
 	return nil
 }
 

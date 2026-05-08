@@ -36,6 +36,16 @@ const (
 	H2ConnectionSpecificHeader AnomalyType = "H2ConnectionSpecificHeader"
 	H2TrailersAfterPassthrough AnomalyType = "H2TrailersAfterPassthrough"
 	H2PushPromise              AnomalyType = "H2PushPromise"
+	// H2UnsupportedConnectProtocol marks an extended CONNECT request
+	// (RFC 8441 §4) that carries a :protocol value other than "websocket".
+	// The proxy currently only swaps WebSocket streams (USK-765); other
+	// :protocol values fall back to standard HTTP/2 framing without a
+	// per-stream sub-stack swap. The anomaly Detail carries the verbatim
+	// wire :protocol value so analysts can identify forward-compat
+	// candidates (h2c, webtransport, …) in recorded flows. The connection
+	// itself stays alive — this is a forward-compat advisory, not a
+	// fatal protocol error.
+	H2UnsupportedConnectProtocol AnomalyType = "H2UnsupportedConnectProtocol"
 )
 
 // Anomaly records a single protocol-level anomaly found during parsing.

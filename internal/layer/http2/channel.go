@@ -93,6 +93,26 @@ type channel struct {
 	termErr  error
 	termOnce sync.Once
 	termDone chan struct{}
+
+	// detached is set to true exactly once when DetachStream(streamID)
+	// transitions this channel into per-stream byte mode (RFC-001 §3.3.2).
+	// Read by tests via detachActive(); writes happen under l.mu inside
+	// the DetachStream constructor.
+	detached atomic.Bool
+	// detachWriter is the producer side of the io.Pipe that DetachStream
+	// returns as the reader. Set under l.mu inside DetachStream;
+	// written-to by the runDetachDrain goroutine; closed by
+	// closeDetached. nil before detach.
+	detachWriter *io.PipeWriter
+	// detachPipeReader is the consumer-side handle. Stored on the channel
+	// for symmetry; the actual reader returned to the caller wraps this
+	// in a detachReader so future telemetry can hook in without changing
+	// the io.Pipe surface.
+	detachPipeReader *io.PipeReader
+	// detachDrainDone fires when runDetachDrain exits.
+	detachDrainDone chan struct{}
+	// detachCloseOnce guards closeDetached against re-entry.
+	detachCloseOnce sync.Once
 }
 
 // newChannel constructs a channel bound to layer for h2 stream id.

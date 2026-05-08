@@ -260,3 +260,148 @@ func TestWithDeflateFromExtensionHeader_NoPermessageDeflate(t *testing.T) {
 		t.Error("unrelated extension enabled deflate")
 	}
 }
+
+// --- USK-765: WS h2 mode (RFC 8441 §5.3) ---
+
+// TestLayer_H2Mode_RoleClient_NoMASKBitOnSend verifies that a RoleClient
+// Layer constructed with WithH2Mode(true) emits unmasked client→server
+// frames — the inverse of RFC 6455 §5.3 masking, mandated by RFC 8441
+// §5.3 because the underlying h2 stream is the security boundary.
+func TestLayer_H2Mode_RoleClient_NoMASKBitOnSend(t *testing.T) {
+	t.Parallel()
+	a, b := net.Pipe()
+	defer a.Close()
+	defer b.Close()
+
+	l := New(b, b, b, "stream-1", RoleClient, WithH2Mode(true))
+	defer l.Close()
+	ch := <-l.Channels()
+
+	type readResult struct {
+		frame *Frame
+		err   error
+	}
+	resCh := make(chan readResult, 1)
+	go func() {
+		f, _, err := ReadFrameRaw(a)
+		resCh <- readResult{f, err}
+	}()
+
+	env := &envelope.Envelope{
+		Direction: envelope.Send,
+		Protocol:  envelope.ProtocolWebSocket,
+		Message: &envelope.WSMessage{
+			Opcode:  envelope.WSText,
+			Fin:     true,
+			Payload: []byte("hello"),
+		},
+	}
+	if err := ch.Send(context.Background(), env); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	res := <-resCh
+	if res.err != nil {
+		t.Fatalf("ReadFrameRaw: %v", res.err)
+	}
+	if res.frame.Masked {
+		t.Error("h2-mode RoleClient wrote a MASKED frame; RFC 8441 §5.3 requires unmasked")
+	}
+	if string(res.frame.Payload) != "hello" {
+		t.Errorf("payload = %q, want hello", res.frame.Payload)
+	}
+}
+
+// TestLayer_H2Mode_InboundMaskedFrame_StreamError verifies that in h2
+// mode the receive path treats an inbound MASK=1 frame as a stream-level
+// protocol error (RFC 8441 §5.3 violation) — the proxy stays alive but
+// surfaces the deviation in flow records via *layer.StreamError.
+func TestLayer_H2Mode_InboundMaskedFrame_StreamError(t *testing.T) {
+	t.Parallel()
+	a, b := net.Pipe()
+	defer a.Close()
+	defer b.Close()
+
+	// RoleServer in h2 mode reads client→server frames. Per RFC 8441 it
+	// expects them unmasked; a peer that sets MASK=1 violates the spec.
+	l := New(b, b, b, "stream-1", RoleServer, WithH2Mode(true))
+	defer l.Close()
+	ch := <-l.Channels()
+
+	// Drive a malformed (masked) Text frame from `a` toward the Layer.
+	go func() {
+		f := &Frame{
+			Fin:     true,
+			Opcode:  byte(envelope.WSText),
+			Masked:  true,
+			MaskKey: [4]byte{1, 2, 3, 4},
+			Payload: []byte("hello"),
+		}
+		_ = WriteFrame(a, f)
+	}()
+
+	_, err := ch.Next(context.Background())
+	if err == nil {
+		t.Fatal("Next on h2-mode masked frame returned nil error; want StreamError")
+	}
+	// The error message indicates RFC 8441 §5.3 violation.
+	if msg := err.Error(); !contains(msg, "MASK") {
+		t.Errorf("error %q does not mention MASK violation", msg)
+	}
+}
+
+// TestLayer_H2Mode_RoleServer_StillUnmasked_Send verifies the
+// RoleServer h2-mode send path stays unmasked (it already was — server
+// never masks per RFC 6455). This is a no-regression check on RoleServer.
+func TestLayer_H2Mode_RoleServer_StillUnmasked_Send(t *testing.T) {
+	t.Parallel()
+	a, b := net.Pipe()
+	defer a.Close()
+	defer b.Close()
+
+	l := New(b, b, b, "stream-1", RoleServer, WithH2Mode(true))
+	defer l.Close()
+	ch := <-l.Channels()
+
+	type readResult struct {
+		frame *Frame
+		err   error
+	}
+	resCh := make(chan readResult, 1)
+	go func() {
+		f, _, err := ReadFrameRaw(a)
+		resCh <- readResult{f, err}
+	}()
+
+	env := &envelope.Envelope{
+		Direction: envelope.Receive,
+		Protocol:  envelope.ProtocolWebSocket,
+		Message: &envelope.WSMessage{
+			Opcode:  envelope.WSText,
+			Fin:     true,
+			Payload: []byte("server-says"),
+		},
+	}
+	if err := ch.Send(context.Background(), env); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	res := <-resCh
+	if res.err != nil {
+		t.Fatalf("ReadFrameRaw: %v", res.err)
+	}
+	if res.frame.Masked {
+		t.Error("h2-mode RoleServer wrote masked frame (regression: server frames are never masked)")
+	}
+}
+
+// contains is a small helper to keep test imports tidy (avoids pulling in
+// "strings" just for substring matching).
+func contains(s, sub string) bool {
+	for i := 0; i+len(sub) <= len(s); i++ {
+		if s[i:i+len(sub)] == sub {
+			return true
+		}
+	}
+	return false
+}
