@@ -118,6 +118,33 @@ Timeout in milliseconds for reading HTTP request headers.
 Auto-transform rules for automatic request/response modification at startup. Same format as the `configure` tool's auto_transform rules.
 - If omitted, no auto-transform rules are active
 
+### capture_scope (object, optional)
+Recording-only observability filter. Limits which flows are persisted to the flow store **without altering wire transmission** — out-of-scope traffic is still proxied normally, it is just not stored.
+
+Use `capture_scope` to suppress noise from third-party CDNs / analytics / fonts during browser-driven sessions, keeping the flow store and AI-agent context window focused on the assets under test. Distinct from `target_scope` (transmission gate, configured via the `security` tool): blocking with `target_scope` would break page rendering whenever a tested page also fetches from out-of-scope hosts.
+
+Each rule is AND-evaluated across `hostname` / `url_prefix` / `method`; at least one field per rule must be non-empty. `excludes` are evaluated before `includes`. Empty `includes` means "all flows are eligible". `*.example.com` wildcard matches subdomains but NOT the apex `example.com`.
+
+Non-HTTP envelopes (WebSocket frames, gRPC frames, SSE events, raw TCP) carry no method/path; rules that require either field never match those envelopes. To capture an entire WebSocket / gRPC stream by hostname, set the rule on the upgrade / first-Send envelope (HTTP) — the recording decision is cached per-stream and applied to subsequent frames.
+
+Blocked flows (target_scope deny / rate_limit / safety_filter blocks) are recorded by their respective recorder paths; capture_scope governs only the normal Pipeline-Record code path.
+
+Example:
+```json
+{
+  "capture_scope": {
+    "includes": [
+      {"hostname": "api.target.com"},
+      {"hostname": "*.target.com", "url_prefix": "/api/"}
+    ],
+    "excludes": [
+      {"hostname": "static.target.com"},
+      {"url_prefix": "/healthz"}
+    ]
+  }
+}
+```
+
 ## Usage Examples
 
 ### Start with defaults

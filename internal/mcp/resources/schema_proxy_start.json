@@ -120,6 +120,23 @@
       "description": "HTTP request header read timeout in milliseconds. Default: 60000.",
       "minimum": 100,
       "maximum": 600000
+    },
+    "capture_scope": {
+      "type": "object",
+      "description": "Recording-only observability filter (USK-776). Out-of-scope flows are still proxied but not persisted to the flow store. Use to suppress noise from third-party CDNs / analytics / fonts during browser-driven testing without breaking page rendering. Distinct from target_scope (transmission gate, configured via the security tool).",
+      "properties": {
+        "includes": {
+          "type": "array",
+          "description": "Rules whose match opts a flow into recording. An empty list means 'all flows are eligible'.",
+          "items": { "$ref": "#/$defs/scope_rule" }
+        },
+        "excludes": {
+          "type": "array",
+          "description": "Rules whose match opts a flow out of recording. Excludes are evaluated before includes.",
+          "items": { "$ref": "#/$defs/scope_rule" }
+        }
+      },
+      "additionalProperties": false
     }
   },
   "additionalProperties": false,
@@ -204,6 +221,25 @@
         },
         "conditions": { "$ref": "#/$defs/intercept_conditions" },
         "action": { "$ref": "#/$defs/transform_action" }
+      },
+      "additionalProperties": false
+    },
+    "scope_rule": {
+      "type": "object",
+      "description": "A single capture_scope rule. Hostname / url_prefix / method are AND-evaluated; at least one must be non-empty.",
+      "properties": {
+        "hostname": {
+          "type": "string",
+          "description": "Hostname matcher. Case-insensitive. Supports the '*.example.com' wildcard prefix (matches subdomains, NOT the apex)."
+        },
+        "url_prefix": {
+          "type": "string",
+          "description": "Byte-prefix match against the URL path. Case- and percent-encoding-sensitive."
+        },
+        "method": {
+          "type": "string",
+          "description": "HTTP method (case-insensitive). Inert against non-HTTP envelopes."
+        }
       },
       "additionalProperties": false
     },

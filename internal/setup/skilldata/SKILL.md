@@ -98,6 +98,18 @@ If you are unsure of the exact parameter structure, always consult the help reso
 | `tls_fingerprint` | string | TLS fingerprint profile ("chrome", "firefox", "safari", "edge", "random", "none". default: "chrome") |
 | `client_cert` | string | PEM client certificate path (for mTLS, used with client_key) |
 | `client_key` | string | PEM client private key path (for mTLS, used with client_cert) |
+| `capture_scope` | object | Recording-only filter (USK-776). `{includes: [scope_rule], excludes: [scope_rule]}`. Each `scope_rule` has `hostname` (supports `*.example.com`), `url_prefix`, `method` (AND-evaluated). Out-of-scope flows are still proxied but not stored. Distinct from `target_scope` (transmission gate via `security` tool) |
+
+#### Recording filter vs transmission gate
+
+Two scopes exist with distinct responsibilities — pick the one that matches your goal:
+
+| Concept | What it does | Where to set it | When to use |
+|---------|-------------|-----------------|-------------|
+| `capture_scope` (proxy_start / configure) | Suppresses **flow recording** for out-of-scope traffic. Wire transmission is unaffected. | `proxy_start.capture_scope` and `configure.capture_scope` | Browser-driven testing where 3rd-party CDNs / analytics / fonts are noise but pages must still load. |
+| `target_scope` (security tool) | Suppresses **transmission** of out-of-scope traffic. Out-of-scope requests are blocked at the connector boundary. | `security` tool with `action: set_target_scope` / `update_target_scope` | When you intentionally want to prevent the proxy from contacting unscoped hosts (data exfiltration prevention, time-boxed engagement boundaries). |
+
+Blocked flows (target_scope deny / rate_limit / safety_filter) are recorded by their respective recorder paths; capture_scope governs only the normal recording path.
 
 ### proxy_stop -- Stop Proxy
 
@@ -648,6 +660,7 @@ Dynamically change running proxy settings.
 | `tls_fingerprint` | Change TLS fingerprint profile |
 | `budget` | Diagnostic budget (max_total_requests, max_duration) |
 | `client_cert` | mTLS client certificate settings (cert_path, key_path) |
+| `capture_scope` | Recording-only observability filter (USK-776). Use `add_includes` / `remove_includes` / `add_excludes` / `remove_excludes` for `operation: merge`; `includes` / `excludes` for `operation: replace`. See the recording-vs-transmission table above. |
 
 ### plugin -- Plugin Management
 

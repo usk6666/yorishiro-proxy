@@ -40,7 +40,7 @@ func newServer(ctx context.Context, ca *cert.CA, store flow.Store, manager proxy
 	pipe := NewPipeline(nil, nil, nil, nil, nil, nil, nil)
 	conn := NewConnector(manager, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 	jr := NewJobRunner(nil, nil, nil)
-	fs := NewFlowStore(store)
+	fs := NewFlowStore(store, nil)
 	me := NewMacroEngine()
 	pe := NewPluginEngine(nil)
 	return NewServer(misc, pipe, conn, jr, fs, me, pe, opts...)

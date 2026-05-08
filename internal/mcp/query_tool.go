@@ -1220,6 +1220,20 @@ type queryConfigResult struct {
 	PeekTimeoutMs    int64                            `json:"peek_timeout_ms"`
 	RequestTimeoutMs int64                            `json:"request_timeout_ms"`
 	TLSFingerprint   string                           `json:"tls_fingerprint"`
+	// CaptureScope echoes the current recording-only observability
+	// filter (USK-776). Always present (an empty struct means
+	// "capture every flow"). target_scope is intentionally NOT
+	// echoed here — that surface is owned by the `security` MCP tool
+	// (different lifecycle and audit semantics).
+	CaptureScope *queryCaptureScopeResult `json:"capture_scope"`
+}
+
+// queryCaptureScopeResult is the JSON shape returned for the
+// capture_scope field of the config resource. Includes / Excludes are
+// always non-nil arrays so the field shape is stable for clients.
+type queryCaptureScopeResult struct {
+	Includes []scopeRuleInput `json:"includes"`
+	Excludes []scopeRuleInput `json:"excludes"`
 }
 
 // querySafetyFilterResult holds SafetyFilter status in the config response.
@@ -1311,8 +1325,27 @@ func (s *Server) handleQueryConfig() (*gomcp.CallToolResult, *queryConfigResult,
 	}
 
 	result.TLSFingerprint = s.currentTLSFingerprint()
+	result.CaptureScope = s.currentCaptureScope()
 
 	return nil, result, nil
+}
+
+// currentCaptureScope returns a JSON-friendly snapshot of the active
+// capture-scope filter (USK-776). Always returns a non-nil result so
+// the response shape is stable; an unconfigured scope yields empty
+// arrays.
+func (s *Server) currentCaptureScope() *queryCaptureScopeResult {
+	out := &queryCaptureScopeResult{
+		Includes: []scopeRuleInput{},
+		Excludes: []scopeRuleInput{},
+	}
+	if s.flowStore == nil || s.flowStore.recordScope == nil {
+		return out
+	}
+	includes, excludes := s.flowStore.recordScope.Rules()
+	out.Includes = scopeRulesInputFromFlow(includes)
+	out.Excludes = scopeRulesInputFromFlow(excludes)
+	return out
 }
 
 // --- ca_cert resource ---

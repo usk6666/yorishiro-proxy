@@ -426,13 +426,14 @@ func assembleLiveManager(
 	perProtoSafety PerProtocolSafetyEngines,
 	hostTLSRegistry *transport.HostTLSRegistry,
 	socks5Negotiator *connector.SOCKS5Negotiator,
+	recordScope *flow.RecordScope,
 	logger *slog.Logger,
 ) (*proxybuild.Manager, error) {
 	buildCfg := NewLiveBuildConfig(appCtx, cfg, proxyCfg, issuer, pluginv2Engine, store, hostTLSRegistry, logger)
 	return NewLiveManager(cfg, proxyCfg, store, issuer, pluginv2Engine,
 		holdQueue, httpInterceptEngine, wsInterceptEngine, grpcInterceptEngine,
 		httpTransformEngine, passthrough, rateLimiter, safetyEngine, perProtoSafety, buildCfg,
-		socks5Negotiator, logger)
+		socks5Negotiator, recordScope, logger)
 }
 
 // NewLiveBuildConfig assembles the connector.BuildConfig consumed by every
@@ -519,6 +520,7 @@ func NewLiveManager(
 	perProtoSafety PerProtocolSafetyEngines,
 	buildCfg *connector.BuildConfig,
 	socks5Negotiator *connector.SOCKS5Negotiator,
+	recordScope *flow.RecordScope,
 	logger *slog.Logger,
 ) (*proxybuild.Manager, error) {
 	// PassthroughList and RateLimiter come straight from connector.* and are
@@ -546,6 +548,7 @@ func NewLiveManager(
 			PassthroughList:     passthrough,
 			RateLimiter:         rateLimiter,
 			SOCKS5Negotiator:    socks5Negotiator,
+			RecordScope:         recordScope,
 		})
 	}
 	mgr, err := proxybuild.NewManager(proxybuild.ManagerConfig{

@@ -83,6 +83,14 @@ type Deps struct {
 	// SOCKS5 negotiations. nil = allow all.
 	Scope *connector.TargetScope
 
+	// RecordScope is the recording-only observability filter applied by
+	// RecordStep (USK-776). nil = capture every flow (current default).
+	// When non-nil, the same pointer is shared with the MCP control
+	// plane (proxy_start_tool / configure_tool / query_tool) so runtime
+	// updates take effect on the live data path without rebuilding the
+	// Pipeline.
+	RecordScope *flow.RecordScope
+
 	// RateLimiter is the per-host rate-limit policy applied to CONNECT
 	// and SOCKS5 negotiations. nil = unlimited.
 	RateLimiter *connector.RateLimiter
@@ -390,6 +398,9 @@ func buildPipeline(deps Deps, encoders *pipeline.WireEncoderRegistry, logger *sl
 	}
 	if deps.RecordMaxBodySize > 0 {
 		recordOpts = append(recordOpts, pipeline.WithMaxBodySize(deps.RecordMaxBodySize))
+	}
+	if deps.RecordScope != nil {
+		recordOpts = append(recordOpts, pipeline.WithRecordScope(deps.RecordScope))
 	}
 
 	safetyStep := pipeline.NewSafetyStep(deps.HTTPSafetyEngine, deps.WSSafetyEngine, deps.GRPCSafetyEngine, logger)

@@ -75,6 +75,11 @@ type configureInput struct {
 	// ClientCert configures the global mTLS client certificate for upstream connections.
 	// Set both cert and key paths to enable, or set both to empty strings to disable.
 	ClientCert *configureClientCert `json:"client_cert,omitempty" jsonschema:"global mTLS client certificate configuration"`
+
+	// CaptureScope updates the recording-only observability filter
+	// (USK-776). Honours the top-level Operation discriminator: merge
+	// applies add/remove deltas; replace overwrites the rule lists.
+	CaptureScope *configureCaptureScope `json:"capture_scope,omitempty" jsonschema:"recording-only observability filter (USK-776)"`
 }
 
 // configureClientCert holds mTLS client certificate configuration.
@@ -265,6 +270,17 @@ type configureResult struct {
 
 	// ClientCert summarizes the current mTLS client certificate state (set when changed).
 	ClientCert *configureClientCertResult `json:"client_cert,omitempty"`
+
+	// CaptureScope summarizes the current capture scope state (set when changed).
+	CaptureScope *configureCaptureScopeResult `json:"capture_scope,omitempty"`
+}
+
+// configureCaptureScopeResult summarises capture-scope state in the
+// configure response. Counts mirror the runtime rule counts so the
+// caller can confirm a merge / replace landed.
+type configureCaptureScopeResult struct {
+	Includes int `json:"includes"`
+	Excludes int `json:"excludes"`
 }
 
 // configureClientCertResult summarizes client cert state in the configure response.
@@ -372,6 +388,9 @@ func (s *Server) handleConfigureMerge(input configureInput) (*gomcp.CallToolResu
 	if err := s.configureClientCertSetting(input, result); err != nil {
 		return nil, nil, err
 	}
+	if err := s.configureCaptureScope("merge", input.CaptureScope, result); err != nil {
+		return nil, nil, err
+	}
 
 	return nil, result, nil
 }
@@ -410,8 +429,32 @@ func (s *Server) handleConfigureReplace(input configureInput) (*gomcp.CallToolRe
 	if err := s.configureClientCertSetting(input, result); err != nil {
 		return nil, nil, err
 	}
+	if err := s.configureCaptureScope("replace", input.CaptureScope, result); err != nil {
+		return nil, nil, err
+	}
 
 	return nil, result, nil
+}
+
+// configureCaptureScope applies a capture_scope merge or replace
+// payload (USK-776) and reports the resulting include/exclude counts.
+// Returns nil when the input is nil so the section is opt-in.
+func (s *Server) configureCaptureScope(operation string, in *configureCaptureScope, result *configureResult) error {
+	if in == nil {
+		return nil
+	}
+	if s.flowStore == nil || s.flowStore.recordScope == nil {
+		return fmt.Errorf("capture_scope: record scope not initialised")
+	}
+	if err := s.applyConfigureCaptureScope(operation, in); err != nil {
+		return fmt.Errorf("capture_scope: %w", err)
+	}
+	includes, excludes := s.flowStore.recordScope.Rules()
+	result.CaptureScope = &configureCaptureScopeResult{
+		Includes: len(includes),
+		Excludes: len(excludes),
+	}
+	return nil
 }
 
 // configureUpstreamProxy applies upstream proxy configuration if provided.

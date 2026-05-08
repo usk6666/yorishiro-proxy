@@ -14,7 +14,7 @@ func TestServer_HasSevenComponents(t *testing.T) {
 		NewPipeline(nil, nil, nil, nil, nil, nil, nil),
 		NewConnector(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil),
 		NewJobRunner(nil, nil, nil),
-		NewFlowStore(nil),
+		NewFlowStore(nil, nil),
 		NewMacroEngine(),
 		NewPluginEngine(nil),
 	)

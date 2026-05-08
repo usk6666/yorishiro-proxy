@@ -1,0 +1,235 @@
+package flow
+
+import (
+	"net"
+	"net/url"
+	"testing"
+
+	"github.com/usk6666/yorishiro-proxy/internal/envelope"
+)
+
+func httpEnv(method, authority, path string) *envelope.Envelope {
+	return &envelope.Envelope{
+		Protocol: envelope.ProtocolHTTP,
+		Message: &envelope.HTTPMessage{
+			Method:    method,
+			Authority: authority,
+			Path:      path,
+		},
+	}
+}
+
+func nonHTTPEnvWithCtx(targetHost string, sni string) *envelope.Envelope {
+	env := &envelope.Envelope{
+		Protocol: envelope.ProtocolWebSocket,
+		Message:  &envelope.WSMessage{Opcode: envelope.WSText, Payload: []byte("hi")},
+		Context: envelope.EnvelopeContext{
+			ClientAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 9000},
+			TargetHost: targetHost,
+		},
+	}
+	if sni != "" {
+		env.Context.TLS = &envelope.TLSSnapshot{SNI: sni}
+	}
+	return env
+}
+
+func TestNewRecordScope_EmptyAllowsAll(t *testing.T) {
+	rs := NewRecordScope()
+	if !rs.IsEmpty() {
+		t.Fatal("new RecordScope should be empty")
+	}
+	if !rs.ShouldRecord(httpEnv("GET", "api.example.com", "/")) {
+		t.Error("empty scope must capture all flows")
+	}
+}
+
+func TestRecordScope_NilSafe(t *testing.T) {
+	var rs *RecordScope
+	if !rs.IsEmpty() {
+		t.Error("nil RecordScope.IsEmpty should be true")
+	}
+	if !rs.ShouldRecord(httpEnv("GET", "api.example.com", "/")) {
+		t.Error("nil RecordScope.ShouldRecord should record everything")
+	}
+}
+
+func TestRecordScope_ScopeRule_IsEmpty(t *testing.T) {
+	if !(ScopeRule{}).IsEmpty() {
+		t.Error("zero-value ScopeRule must report empty")
+	}
+	if (ScopeRule{Hostname: "x"}).IsEmpty() {
+		t.Error("rule with hostname must not be empty")
+	}
+	if (ScopeRule{Method: "GET"}).IsEmpty() {
+		t.Error("rule with method must not be empty")
+	}
+	if (ScopeRule{URLPrefix: "/x"}).IsEmpty() {
+		t.Error("rule with url_prefix must not be empty")
+	}
+}
+
+func TestRecordScope_IncludeOnly(t *testing.T) {
+	rs := NewRecordScope()
+	rs.SetRules([]ScopeRule{{Hostname: "api.target.com"}}, nil)
+
+	cases := []struct {
+		env  *envelope.Envelope
+		want bool
+		why  string
+	}{
+		{httpEnv("GET", "api.target.com", "/"), true, "in-scope hostname"},
+		{httpEnv("GET", "API.Target.COM", "/"), true, "case-insensitive hostname"},
+		{httpEnv("GET", "static.target.com", "/"), false, "different hostname"},
+		{httpEnv("GET", "api.target.com:8443", "/"), true, "port stripped"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.why, func(t *testing.T) {
+			if got := rs.ShouldRecord(tc.env); got != tc.want {
+				t.Errorf("ShouldRecord = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestRecordScope_ExcludeBeatsInclude(t *testing.T) {
+	rs := NewRecordScope()
+	rs.SetRules(
+		[]ScopeRule{{Hostname: "*.target.com"}},
+		[]ScopeRule{{Hostname: "static.target.com"}},
+	)
+	if rs.ShouldRecord(httpEnv("GET", "static.target.com", "/")) {
+		t.Error("exclude must override include")
+	}
+	if !rs.ShouldRecord(httpEnv("GET", "api.target.com", "/")) {
+		t.Error("non-excluded include match must record")
+	}
+}
+
+func TestRecordScope_WildcardHostnameApex(t *testing.T) {
+	rs := NewRecordScope()
+	rs.SetRules([]ScopeRule{{Hostname: "*.target.com"}}, nil)
+	if rs.ShouldRecord(httpEnv("GET", "target.com", "/")) {
+		t.Error("'*.target.com' must NOT match the apex 'target.com'")
+	}
+	if !rs.ShouldRecord(httpEnv("GET", "sub.target.com", "/")) {
+		t.Error("'*.target.com' must match 'sub.target.com'")
+	}
+	if !rs.ShouldRecord(httpEnv("GET", "deep.sub.target.com", "/")) {
+		t.Error("'*.target.com' must match 'deep.sub.target.com'")
+	}
+}
+
+func TestRecordScope_URLPrefix(t *testing.T) {
+	rs := NewRecordScope()
+	rs.SetRules([]ScopeRule{{Hostname: "api.target.com", URLPrefix: "/api/"}}, nil)
+	if !rs.ShouldRecord(httpEnv("GET", "api.target.com", "/api/v1/widgets")) {
+		t.Error("matching prefix must record")
+	}
+	if rs.ShouldRecord(httpEnv("GET", "api.target.com", "/healthz")) {
+		t.Error("non-matching prefix must filter")
+	}
+	if rs.ShouldRecord(httpEnv("GET", "api.target.com", "")) {
+		t.Error("empty path must filter when prefix required")
+	}
+}
+
+func TestRecordScope_Method(t *testing.T) {
+	rs := NewRecordScope()
+	rs.SetRules([]ScopeRule{{Hostname: "api.target.com", Method: "post"}}, nil)
+	if !rs.ShouldRecord(httpEnv("POST", "api.target.com", "/x")) {
+		t.Error("method should match case-insensitively")
+	}
+	if rs.ShouldRecord(httpEnv("GET", "api.target.com", "/x")) {
+		t.Error("non-matching method must filter")
+	}
+}
+
+func TestRecordScope_NonHTTPHostname_FromTargetHost(t *testing.T) {
+	rs := NewRecordScope()
+	rs.SetRules([]ScopeRule{{Hostname: "api.target.com"}}, nil)
+	env := nonHTTPEnvWithCtx("api.target.com:443", "")
+	if !rs.ShouldRecord(env) {
+		t.Error("WS frame: hostname should resolve from Context.TargetHost")
+	}
+}
+
+func TestRecordScope_NonHTTPHostname_FromSNI(t *testing.T) {
+	rs := NewRecordScope()
+	rs.SetRules([]ScopeRule{{Hostname: "api.target.com"}}, nil)
+	env := nonHTTPEnvWithCtx("", "api.target.com")
+	if !rs.ShouldRecord(env) {
+		t.Error("WS frame without TargetHost: hostname should resolve from TLS SNI")
+	}
+}
+
+func TestRecordScope_NonHTTP_URLPrefixRule_DoesNotMatch(t *testing.T) {
+	// Per the design, rules that require url_prefix or method do not match
+	// non-HTTP envelopes (they have no path / method). The recording
+	// decision is made at the stream's first Send (HTTP upgrade) and
+	// cached at the RecordStep level — see record_step.go.
+	rs := NewRecordScope()
+	rs.SetRules([]ScopeRule{{Hostname: "api.target.com", URLPrefix: "/api/"}}, nil)
+	env := nonHTTPEnvWithCtx("api.target.com:443", "")
+	if rs.ShouldRecord(env) {
+		t.Error("rule requiring url_prefix must not match non-HTTP envelope on its own")
+	}
+}
+
+func TestRecordScope_MergeRules(t *testing.T) {
+	rs := NewRecordScope()
+	rs.SetRules([]ScopeRule{{Hostname: "a.com"}}, []ScopeRule{{Hostname: "b.com"}})
+	rs.MergeRules(
+		[]ScopeRule{{Hostname: "c.com"}, {Hostname: "a.com"}},
+		[]ScopeRule{{Hostname: "a.com"}},
+		[]ScopeRule{{Hostname: "d.com"}},
+		[]ScopeRule{{Hostname: "b.com"}},
+	)
+	includes, excludes := rs.Rules()
+	if len(includes) != 1 || includes[0].Hostname != "c.com" {
+		t.Errorf("includes after merge = %v, want [c.com]", includes)
+	}
+	if len(excludes) != 1 || excludes[0].Hostname != "d.com" {
+		t.Errorf("excludes after merge = %v, want [d.com]", excludes)
+	}
+}
+
+func TestRecordScope_Clear(t *testing.T) {
+	rs := NewRecordScope()
+	rs.SetRules([]ScopeRule{{Hostname: "a"}}, []ScopeRule{{Hostname: "b"}})
+	rs.Clear()
+	if !rs.IsEmpty() {
+		t.Error("Clear should empty the scope")
+	}
+}
+
+func TestRecordScope_RulesReturnsCopy(t *testing.T) {
+	rs := NewRecordScope()
+	rs.SetRules([]ScopeRule{{Hostname: "a"}}, []ScopeRule{{Hostname: "b"}})
+	includes, excludes := rs.Rules()
+	includes[0].Hostname = "MUTATED"
+	excludes[0].Hostname = "MUTATED"
+	gotInc, gotExc := rs.Rules()
+	if gotInc[0].Hostname != "a" || gotExc[0].Hostname != "b" {
+		t.Error("Rules must return independent copies")
+	}
+}
+
+// Round-trip a minimal HTTPMessage through the matcher to catch regressions
+// in field extraction. The auxiliary url.URL is here to surface accidental
+// reuse in extractScopeFields.
+func TestRecordScope_HTTPMessage_AuthorityWins(t *testing.T) {
+	rs := NewRecordScope()
+	rs.SetRules([]ScopeRule{{Hostname: "api.target.com"}}, nil)
+	env := &envelope.Envelope{
+		Protocol: envelope.ProtocolHTTP,
+		Context: envelope.EnvelopeContext{
+			TargetHost: "different.example.com",
+		},
+		Message: &envelope.HTTPMessage{Method: "GET", Authority: "api.target.com", Path: "/"},
+	}
+	if !rs.ShouldRecord(env) {
+		t.Error("HTTPMessage.Authority should override Context.TargetHost for hostname resolution")
+	}
+	_ = url.URL{}
+}

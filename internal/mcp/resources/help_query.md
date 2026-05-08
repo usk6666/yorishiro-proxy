@@ -105,7 +105,9 @@ Returns: running, listen_addr, active_connections, total_flows, db_size_bytes, u
 ### config
 Get current configuration including upstream proxy, TLS passthrough, TCP forwards, enabled protocols, and runtime knobs. No additional parameters.
 
-Returns: upstream_proxy, tls_passthrough (patterns, count), tcp_forwards (port->target map), enabled_protocols (list), socks5_enabled, client_cert, safety_filter (enabled, input_rules, output_rules), max_connections, peek_timeout_ms, request_timeout_ms, tls_fingerprint.
+Returns: upstream_proxy, tls_passthrough (patterns, count), tcp_forwards (port->target map), enabled_protocols (list), socks5_enabled, client_cert, safety_filter (enabled, input_rules, output_rules), max_connections, peek_timeout_ms, request_timeout_ms, tls_fingerprint, capture_scope (includes, excludes).
+
+> Note: `target_scope` (transmission gate) is intentionally NOT echoed here — it is owned by the `security` MCP tool and queried via `security` with `action: "get_target_scope"`. `capture_scope` (recording-only filter, USK-776) IS echoed here.
 
 ### ca_cert
 Get the CA certificate PEM, metadata, and persistence state. No additional parameters.

@@ -299,10 +299,18 @@ func assembleAndRunMCPServer(
 	// without restart.
 	socks5Negotiator := connector.NewSOCKS5Negotiator(logger)
 
+	// USK-776: build the recording-only observability filter once and
+	// share the pointer between the live data path (via
+	// proxybuild.Deps.RecordScope inside assembleLiveManager) and the
+	// MCP control plane (via mcp.NewFlowStore inside buildMCPComponents)
+	// so configure / proxy_start / query mutate the same instance the
+	// live RecordStep reads.
+	recordScope := flow.NewRecordScope()
+
 	manager, err := assembleLiveManager(ctx, cfg, proxyCfg, store, issuer, pluginv2Engine,
 		holdQueue, httpInterceptEngine, wsInterceptEngine, grpcInterceptEngine,
 		httpTransformEngine, passthrough, rateLimiter, safetyEngine, perProtoSafety, hostTLSRegistry,
-		socks5Negotiator, logger)
+		socks5Negotiator, recordScope, logger)
 	if err != nil {
 		return err
 	}
@@ -321,7 +329,7 @@ func assembleAndRunMCPServer(
 	mcpComps, webUIToken, opts, err := buildMCPComponents(ctx, cfg, proxyCfg, ca, issuer, store, manager,
 		passthrough, holdQueue, httpInterceptEngine, wsInterceptEngine, grpcInterceptEngine,
 		pluginv2Engine, httpTransformEngine, hostTLSRegistry, tlsTransport, targetScope, rateLimiter, safetyEngine,
-		socks5AuthSetter, targetScopePolicySource, version, logger)
+		socks5AuthSetter, recordScope, targetScopePolicySource, version, logger)
 	if err != nil {
 		return err
 	}
@@ -483,6 +491,7 @@ func buildMCPComponents(
 	rateLimiter *connector.RateLimiter,
 	safetyEngine *safety.Engine,
 	socks5AuthSetter *socks5AuthAdapter,
+	recordScope *flow.RecordScope,
 	targetScopePolicySource string,
 	version string,
 	logger *slog.Logger,
@@ -526,7 +535,7 @@ func buildMCPComponents(
 			nil, // legacy replayDoer, not pre-populated (set in tests).
 			nil, // raw replay dialer, not pre-populated.
 		),
-		flowStore:    mcp.NewFlowStore(store),
+		flowStore:    mcp.NewFlowStore(store, recordScope),
 		macroEngine:  mcp.NewMacroEngine(),
 		pluginEngine: mcp.NewPluginEngine(pluginv2Engine),
 	}

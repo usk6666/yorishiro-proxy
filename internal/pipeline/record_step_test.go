@@ -2068,3 +2068,224 @@ func TestRecordStep_VariantRecordingGRPCData(t *testing.T) {
 			w.flows[0].Body, w.flows[1].Body)
 	}
 }
+
+// --- USK-776: capture_scope (recording-only filter) ---
+
+func newRecordScopeForTest(includes, excludes []flow.ScopeRule) *flow.RecordScope {
+	rs := flow.NewRecordScope()
+	rs.SetRules(includes, excludes)
+	return rs
+}
+
+func httpSendEnv(streamID, host, path string) *envelope.Envelope {
+	return &envelope.Envelope{
+		StreamID:  streamID,
+		FlowID:    streamID + "-0",
+		Direction: envelope.Send,
+		Sequence:  0,
+		Protocol:  envelope.ProtocolHTTP,
+		Message: &envelope.HTTPMessage{
+			Method:    "GET",
+			Authority: host,
+			Path:      path,
+		},
+	}
+}
+
+func httpReceiveEnv(streamID, host, path string) *envelope.Envelope {
+	return &envelope.Envelope{
+		StreamID:  streamID,
+		FlowID:    streamID + "-resp",
+		Direction: envelope.Receive,
+		Sequence:  1,
+		Protocol:  envelope.ProtocolHTTP,
+		Message: &envelope.HTTPMessage{
+			Method:    "GET",
+			Authority: host,
+			Path:      path,
+			Status:    200,
+		},
+	}
+}
+
+func TestRecordStep_CaptureScope_NilScope_RecordsAll(t *testing.T) {
+	w := &mockWriter{}
+	step := NewRecordStep(w, nil, WithRecordScope(nil))
+	step.Process(context.Background(), httpSendEnv("s1", "static.cdn.com", "/asset.js"))
+	if len(w.flows) != 1 || len(w.streams) != 1 {
+		t.Fatalf("nil scope should record everything; got %d streams, %d flows", len(w.streams), len(w.flows))
+	}
+}
+
+func TestRecordStep_CaptureScope_EmptyScope_RecordsAll(t *testing.T) {
+	w := &mockWriter{}
+	rs := flow.NewRecordScope()
+	step := NewRecordStep(w, nil, WithRecordScope(rs))
+	step.Process(context.Background(), httpSendEnv("s1", "any.example.com", "/"))
+	if len(w.flows) != 1 || len(w.streams) != 1 {
+		t.Fatalf("empty RecordScope should record everything; got %d streams, %d flows", len(w.streams), len(w.flows))
+	}
+}
+
+func TestRecordStep_CaptureScope_FilterOutDoesNotCreateStream(t *testing.T) {
+	w := &mockWriter{}
+	rs := newRecordScopeForTest(
+		[]flow.ScopeRule{{Hostname: "api.target.com"}},
+		nil,
+	)
+	step := NewRecordStep(w, nil, WithRecordScope(rs))
+
+	step.Process(context.Background(), httpSendEnv("filtered-1", "static.cdn.com", "/asset.js"))
+
+	if len(w.streams) != 0 {
+		t.Errorf("filtered stream must not be created (FK invariant); got %d streams", len(w.streams))
+	}
+	if len(w.flows) != 0 {
+		t.Errorf("filtered flow must not be saved; got %d flows", len(w.flows))
+	}
+}
+
+func TestRecordStep_CaptureScope_InScopeRecorded(t *testing.T) {
+	w := &mockWriter{}
+	rs := newRecordScopeForTest(
+		[]flow.ScopeRule{{Hostname: "api.target.com"}},
+		nil,
+	)
+	step := NewRecordStep(w, nil, WithRecordScope(rs))
+
+	step.Process(context.Background(), httpSendEnv("s1", "api.target.com", "/v1/widgets"))
+
+	if len(w.streams) != 1 {
+		t.Fatalf("in-scope stream must be created; got %d streams", len(w.streams))
+	}
+	if len(w.flows) != 1 {
+		t.Fatalf("in-scope flow must be saved; got %d flows", len(w.flows))
+	}
+}
+
+func TestRecordStep_CaptureScope_PerStreamConsistency(t *testing.T) {
+	// First Send is in-scope → Stream + Flow saved. Receive on the same
+	// stream must also be saved (it inherits the cached "record" decision)
+	// regardless of any field that's missing on the response envelope.
+	w := &mockWriter{}
+	rs := newRecordScopeForTest(
+		[]flow.ScopeRule{{Hostname: "api.target.com"}},
+		nil,
+	)
+	step := NewRecordStep(w, nil, WithRecordScope(rs))
+
+	step.Process(context.Background(), httpSendEnv("s1", "api.target.com", "/x"))
+	step.Process(context.Background(), httpReceiveEnv("s1", "api.target.com", "/x"))
+
+	if len(w.streams) != 1 {
+		t.Fatalf("expected exactly 1 stream, got %d", len(w.streams))
+	}
+	if len(w.flows) != 2 {
+		t.Fatalf("expected 2 flows (send + receive), got %d", len(w.flows))
+	}
+}
+
+func TestRecordStep_CaptureScope_FilteredStream_SubsequentEnvelopesAlsoFiltered(t *testing.T) {
+	// First Send is filtered → Stream NOT created. The cache marks the
+	// stream as "do not record"; subsequent Receive on the same stream must
+	// also be filtered (otherwise SaveFlow would FK-violate against the
+	// missing parent Stream row).
+	w := &mockWriter{}
+	rs := newRecordScopeForTest(
+		[]flow.ScopeRule{{Hostname: "api.target.com"}},
+		nil,
+	)
+	step := NewRecordStep(w, nil, WithRecordScope(rs))
+
+	step.Process(context.Background(), httpSendEnv("filtered-1", "static.cdn.com", "/asset.js"))
+	step.Process(context.Background(), httpReceiveEnv("filtered-1", "static.cdn.com", "/asset.js"))
+
+	if len(w.streams) != 0 || len(w.flows) != 0 {
+		t.Fatalf("filtered stream must filter every envelope; got %d streams, %d flows",
+			len(w.streams), len(w.flows))
+	}
+}
+
+func TestRecordStep_CaptureScope_NonFirstSendCacheMissDefaultsToFilter(t *testing.T) {
+	// Receive without a prior cached decision (e.g. cache eviction) must
+	// default to filter so the FK invariant is not violated. We simulate
+	// this by sending a Receive on a never-seen stream when the scope is
+	// non-empty.
+	w := &mockWriter{}
+	rs := newRecordScopeForTest(
+		[]flow.ScopeRule{{Hostname: "api.target.com"}},
+		nil,
+	)
+	step := NewRecordStep(w, nil, WithRecordScope(rs))
+
+	step.Process(context.Background(), httpReceiveEnv("orphan", "api.target.com", "/x"))
+	if len(w.flows) != 0 {
+		t.Fatalf("orphan Receive must not be recorded; got %d flows", len(w.flows))
+	}
+}
+
+func TestRecordStep_CaptureScope_DecisionCacheLRUEviction(t *testing.T) {
+	w := &mockWriter{}
+	rs := newRecordScopeForTest(
+		[]flow.ScopeRule{{Hostname: "api.target.com"}},
+		nil,
+	)
+	step := NewRecordStep(w, nil, WithRecordScope(rs))
+	step.decisionCache = newRecordDecisionCache(2)
+
+	step.Process(context.Background(), httpSendEnv("a", "api.target.com", "/"))
+	step.Process(context.Background(), httpSendEnv("b", "api.target.com", "/"))
+	step.Process(context.Background(), httpSendEnv("c", "api.target.com", "/"))
+
+	if got := step.decisionCache.len(); got != 2 {
+		t.Errorf("LRU cache size should be capped at 2, got %d", got)
+	}
+}
+
+func TestRecordStep_CaptureScope_ExcludesWin(t *testing.T) {
+	w := &mockWriter{}
+	rs := newRecordScopeForTest(
+		[]flow.ScopeRule{{Hostname: "*.target.com"}},
+		[]flow.ScopeRule{{Hostname: "static.target.com"}},
+	)
+	step := NewRecordStep(w, nil, WithRecordScope(rs))
+
+	step.Process(context.Background(), httpSendEnv("s1", "api.target.com", "/x"))
+	step.Process(context.Background(), httpSendEnv("s2", "static.target.com", "/x"))
+
+	if len(w.streams) != 1 || w.streams[0].ID != "s1" {
+		t.Fatalf("expected only s1 stream, got %+v", w.streams)
+	}
+	if len(w.flows) != 1 || w.flows[0].StreamID != "s1" {
+		t.Fatalf("expected only s1 flow, got %+v", w.flows)
+	}
+}
+
+func TestRecordStep_CaptureScope_RuntimeUpdate(t *testing.T) {
+	// The same RecordScope pointer flows from configure_tool to RecordStep,
+	// so a runtime SetRules call must take effect on the next envelope.
+	w := &mockWriter{}
+	rs := flow.NewRecordScope()
+	step := NewRecordStep(w, nil, WithRecordScope(rs))
+
+	// Initially empty scope → record.
+	step.Process(context.Background(), httpSendEnv("s1", "noisy.cdn.com", "/x"))
+	if len(w.flows) != 1 {
+		t.Fatalf("empty scope should have recorded; got %d flows", len(w.flows))
+	}
+
+	// Tighten scope via the shared pointer.
+	rs.SetRules([]flow.ScopeRule{{Hostname: "api.target.com"}}, nil)
+
+	// New stream against out-of-scope host → filtered.
+	step.Process(context.Background(), httpSendEnv("s2", "noisy.cdn.com", "/y"))
+	if len(w.flows) != 1 {
+		t.Errorf("scope tightening should have filtered s2; got %d flows", len(w.flows))
+	}
+
+	// New stream against in-scope host → recorded.
+	step.Process(context.Background(), httpSendEnv("s3", "api.target.com", "/z"))
+	if len(w.flows) != 2 {
+		t.Errorf("in-scope stream after retightening should record; got %d flows", len(w.flows))
+	}
+}

@@ -270,6 +270,60 @@ The response contains a `plugins[]` array with `name`, `path`, `enabled`, ordere
 }
 ```
 
+## Capture Scope (Recording-Only Filter)
+
+`capture_scope` (USK-776) suppresses persistence of out-of-scope flows **without altering wire transmission**. Pages keep loading because all third-party requests still flow; only the in-scope flows reach the flow store. Distinct from `target_scope` (transmission gate) which would break page rendering.
+
+### Start with a focused recording scope
+```json
+// proxy_start
+{
+  "listen_addr": "127.0.0.1:8080",
+  "capture_scope": {
+    "includes": [
+      {"hostname": "api.target.com"},
+      {"hostname": "*.target.com", "url_prefix": "/api/"}
+    ],
+    "excludes": [
+      {"hostname": "static.target.com"},
+      {"url_prefix": "/healthz"}
+    ]
+  }
+}
+```
+
+### Add a CDN exclude rule at runtime (merge)
+```json
+// configure
+{
+  "operation": "merge",
+  "capture_scope": {
+    "add_excludes": [
+      {"hostname": "*.cloudfront.net"}
+    ]
+  }
+}
+```
+
+### Replace the entire capture scope with a known-good preset
+```json
+// configure
+{
+  "operation": "replace",
+  "capture_scope": {
+    "includes": [{"hostname": "*.target.com", "url_prefix": "/api/"}],
+    "excludes": []
+  }
+}
+```
+
+### Read the active capture scope
+```json
+// query
+{"resource": "config"}
+// → response.capture_scope = {"includes":[…], "excludes":[…]}
+```
+
 ## SOCKS5 / proxychains Workflow
 
 ### 1. Start proxy with SOCKS5 support

@@ -2,18 +2,29 @@ package pipeline
 
 import (
 	"bytes"
+	"container/list"
 	"context"
 	"encoding/base64"
 	"errors"
 	"log/slog"
 	"net/url"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 )
+
+// defaultRecordCacheCapacity bounds RecordStep's per-Stream
+// recording-decision cache. The cache exists so that streams whose
+// recording decision was made on first-Send (with full HTTP method/path
+// context) carry that decision through to subsequent envelopes that lack
+// HTTP-typed context (WS frames, gRPC data messages, SSE events). 10000
+// matches the magnitude of RetentionMaxSessions and bounds memory under
+// any realistic concurrent-stream load. See WithRecordScope.
+const defaultRecordCacheCapacity = 10000
 
 // WireEncoder re-encodes an Envelope's post-mutation Message into wire-form
 // bytes. It is used by RecordStep when recording the "modified" variant of
@@ -66,6 +77,14 @@ type RecordStep struct {
 	// larger materialized body is truncated and Flow.BodyTruncated is set
 	// to true. Zero means use config.MaxBodySize.
 	maxBodySize int64
+
+	// scope filters which envelopes are recorded. nil = capture all
+	// (current behaviour). When non-nil, ShouldRecord is consulted for
+	// every envelope and the result is cached per StreamID in
+	// decisionCache so non-HTTP frames inherit the decision made at the
+	// stream's first Send (where method/path were observable).
+	scope         *flow.RecordScope
+	decisionCache *recordDecisionCache
 }
 
 // Option configures a RecordStep.
@@ -98,6 +117,34 @@ func WithWireEncoder(proto envelope.Protocol, fn WireEncoder) Option {
 func WithWireEncoderRegistry(reg *WireEncoderRegistry) Option {
 	return func(s *RecordStep) {
 		s.encoders = reg
+	}
+}
+
+// WithRecordScope attaches a recording-only observability filter to the
+// RecordStep (USK-776). When the scope is non-empty, RecordStep evaluates
+// ShouldRecord against the first Send envelope of each stream, caches
+// the decision keyed by StreamID, and applies it to every subsequent
+// envelope on the same stream — including non-HTTP frames (WS / gRPC /
+// SSE) whose Message types do not carry method/path context.
+//
+// A nil scope is permitted and means "capture all" (current default
+// behaviour). The same pointer is shared between MCP tools (writers)
+// and the live data-path RecordStep (reader); flow.RecordScope's
+// internal RWMutex coordinates concurrent access.
+//
+// The decision cache is bounded at defaultRecordCacheCapacity (10000
+// entries). On cache eviction a subsequent non-first-Send envelope on
+// the evicted stream defaults to NOT-recorded, which prevents flow rows
+// from being inserted without their parent Stream row (the foreign-key
+// guard in internal/flow/schema.go). The bound is large enough that
+// realistic concurrent-stream load never trips eviction; under a sustained
+// burst above the bound, the proxy under-records rather than crashing.
+func WithRecordScope(scope *flow.RecordScope) Option {
+	return func(s *RecordStep) {
+		s.scope = scope
+		if scope != nil && s.decisionCache == nil {
+			s.decisionCache = newRecordDecisionCache(defaultRecordCacheCapacity)
+		}
 	}
 }
 
@@ -137,6 +184,21 @@ func NewRecordStep(store flow.Writer, logger *slog.Logger, opts ...Option) *Reco
 // the Envelope or interrupts the Pipeline.
 func (s *RecordStep) Process(ctx context.Context, env *envelope.Envelope) Result {
 	if s.store == nil {
+		return Result{}
+	}
+
+	// USK-776: capture-scope filter gate. When the scope filters out this
+	// envelope (or its parent stream), skip both Stream creation and Flow
+	// recording. Wire transmission is unaffected — the Pipeline returns
+	// Continue/no-mutation as usual; only persistence is suppressed.
+	if !s.shouldRecord(env) {
+		s.logger.DebugContext(ctx, "record: out-of-scope; flow not captured",
+			"stream_id", env.StreamID,
+			"flow_id", env.FlowID,
+			"direction", env.Direction.String(),
+			"sequence", env.Sequence,
+			"protocol", string(env.Protocol),
+		)
 		return Result{}
 	}
 
@@ -835,4 +897,121 @@ func grpcEndModified(a, b *envelope.GRPCEndMessage) bool {
 // sseMessageModified reports whether two SSEMessages differ.
 func sseMessageModified(a, b *envelope.SSEMessage) bool {
 	return a.Event != b.Event || a.Data != b.Data || a.ID != b.ID || a.Retry != b.Retry
+}
+
+// shouldRecord reports whether env passes the capture-scope filter and
+// must therefore be persisted.
+//
+// The decision is cached per StreamID so streams whose recording status
+// was decided on first Send (where method/path are observable) carry
+// that decision through every subsequent envelope — including non-HTTP
+// frames whose Message types do not carry HTTP fields. This keeps the
+// flows.stream_id foreign-key invariant intact: filtered streams never
+// get a Stream row, so any Flow that survives the gate must arrive on a
+// Stream that does exist.
+//
+// The fallback for cache misses on non-first-Send envelopes is
+// "do not record". Under realistic load (concurrent stream count well
+// below cache capacity) misses do not occur. Above capacity the proxy
+// trades a small amount of under-recording for foreign-key safety.
+func (s *RecordStep) shouldRecord(env *envelope.Envelope) bool {
+	if s.scope == nil || s.scope.IsEmpty() {
+		return true
+	}
+	streamID := env.StreamID
+	if streamID == "" {
+		// No stable cache key. Evaluate per envelope; this only fires
+		// for synthetic test stacks that omit StreamID.
+		return s.scope.ShouldRecord(env)
+	}
+	if s.decisionCache != nil {
+		if decision, ok := s.decisionCache.get(streamID); ok {
+			return decision
+		}
+	}
+	if env.Direction == envelope.Send && env.Sequence == 0 {
+		decision := s.scope.ShouldRecord(env)
+		if s.decisionCache != nil {
+			s.decisionCache.put(streamID, decision)
+		}
+		return decision
+	}
+	// Cache miss on a non-first-Send envelope. We cannot recover the
+	// stream's recording status from the envelope alone (later WS / gRPC
+	// frames carry no method or path), so fail closed to keep the FK
+	// invariant on flows.stream_id intact. Document this in the
+	// WithRecordScope option doc.
+	return false
+}
+
+// recordDecisionCache is a small bounded LRU keyed by StreamID. It is
+// safe for concurrent use; RecordStep.Process is invoked from many
+// goroutines (one per active stream + per envelope direction).
+type recordDecisionCache struct {
+	mu       sync.Mutex
+	capacity int
+	items    map[string]*list.Element
+	lru      *list.List
+}
+
+// recordDecisionEntry is the value type stored in recordDecisionCache.
+// It is referenced from both the lookup map and the LRU list.
+type recordDecisionEntry struct {
+	streamID string
+	record   bool
+}
+
+// newRecordDecisionCache returns a cache with the given fixed capacity.
+// A capacity of zero or negative degenerates to a no-op cache (every
+// access misses); RecordStep guards capacity via the WithRecordScope
+// option which always uses defaultRecordCacheCapacity.
+func newRecordDecisionCache(capacity int) *recordDecisionCache {
+	if capacity <= 0 {
+		capacity = defaultRecordCacheCapacity
+	}
+	return &recordDecisionCache{
+		capacity: capacity,
+		items:    make(map[string]*list.Element, capacity),
+		lru:      list.New(),
+	}
+}
+
+// get returns the cached recording decision for streamID, or false +
+// ok=false on miss. A hit refreshes the entry's LRU position.
+func (c *recordDecisionCache) get(streamID string) (bool, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if e, ok := c.items[streamID]; ok {
+		c.lru.MoveToFront(e)
+		return e.Value.(*recordDecisionEntry).record, true
+	}
+	return false, false
+}
+
+// put inserts or updates the recording decision for streamID. If the
+// cache is at capacity, the least-recently-used entry is evicted.
+func (c *recordDecisionCache) put(streamID string, record bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if e, ok := c.items[streamID]; ok {
+		e.Value.(*recordDecisionEntry).record = record
+		c.lru.MoveToFront(e)
+		return
+	}
+	e := c.lru.PushFront(&recordDecisionEntry{streamID: streamID, record: record})
+	c.items[streamID] = e
+	if c.lru.Len() > c.capacity {
+		oldest := c.lru.Back()
+		if oldest != nil {
+			c.lru.Remove(oldest)
+			delete(c.items, oldest.Value.(*recordDecisionEntry).streamID)
+		}
+	}
+}
+
+// len reports the current number of cached entries. Test-only helper.
+func (c *recordDecisionCache) len() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.lru.Len()
 }

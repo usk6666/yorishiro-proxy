@@ -13,6 +13,7 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/connector"
 	"github.com/usk6666/yorishiro-proxy/internal/connector/transport"
+	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/mcp/webui"
 	"github.com/usk6666/yorishiro-proxy/internal/safety"
 )
@@ -228,6 +229,13 @@ func finalizeDefaults(s *Server) {
 	if s.misc.budgetManager == nil {
 		s.misc.budgetManager = connector.NewBudgetManager()
 	}
+	// USK-776: install an empty RecordScope when nil so configure /
+	// proxy_start can mutate the same pointer that is also handed to
+	// proxybuild.Deps.RecordScope. Live wiring populates this; tests
+	// that omit it pass nil and get an empty (capture-all) default.
+	if s.flowStore.recordScope == nil {
+		s.flowStore.recordScope = flow.NewRecordScope()
+	}
 }
 
 // orDefault* tiny helpers return the input when non-nil and an empty
@@ -265,7 +273,7 @@ func orDefaultFlowStore(f *FlowStore) *FlowStore {
 	if f != nil {
 		return f
 	}
-	return NewFlowStore(nil)
+	return NewFlowStore(nil, nil)
 }
 
 func orDefaultMacroEngine(m *MacroEngine) *MacroEngine {

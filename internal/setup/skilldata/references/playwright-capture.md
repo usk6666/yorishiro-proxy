@@ -13,21 +13,31 @@ Combine yorishiro-proxy with playwright-cli to capture traffic from browser oper
 
 ## Step 1: Start the Proxy
 
-Start the proxy and configure transport-level options as needed. Recording-time scope filtering is no longer available; narrow the result set with `query` filters or restrict outbound traffic with the `security` tool's `set_target_scope` action.
+Start the proxy with the recording filter (`capture_scope`) tuned to the assets under test. Out-of-scope third-party requests still flow through the proxy unchanged — only persistence to the flow store is suppressed — so the page renders normally while the flow store stays focused.
 
 ```json
 // proxy_start
 {
   "listen_addr": "127.0.0.1:8080",
-  "tls_passthrough": ["*.googleapis.com", "*.gstatic.com"]
+  "tls_passthrough": ["*.googleapis.com", "*.gstatic.com"],
+  "capture_scope": {
+    "includes": [
+      {"hostname": "*.target.com"}
+    ],
+    "excludes": [
+      {"hostname": "*.cloudfront.net"},
+      {"url_prefix": "/healthz"}
+    ]
+  }
 }
 ```
 
 **Scope design tips:**
-- Use `tls_passthrough` to exclude services with certificate pinning
-- If bot detection triggers on Cloudflare or similar WAFs, configure `tls_fingerprint` (default: "chrome")
-- To restrict which hosts the proxy will talk to at all, use `security set_target_scope` (allow/deny) — this gates transmission, not recording
-- After capture, use `query` filters (`host`, `url_pattern`, `protocol`, ...) to narrow what you analyse
+- Use `capture_scope` (USK-776) to drop CDN / analytics / font noise from the flow store — wire transmission is unaffected, so pages still load.
+- Use `tls_passthrough` to exclude services with certificate pinning (TLS interception is what breaks them, not recording).
+- If bot detection triggers on Cloudflare or similar WAFs, configure `tls_fingerprint` (default: "chrome").
+- To restrict which hosts the proxy will talk to **at all** (transmission gate), use `security set_target_scope` (allow/deny) instead. That blocks third-party requests entirely — useful for time-boxed engagements but typically breaks browser-driven flows because pages depend on third-party resources.
+- After capture, use `query` filters (`host`, `url_pattern`, `protocol`, ...) to narrow what you analyse further.
 
 ## Step 2: Browser Operations with playwright-cli
 
@@ -124,26 +134,42 @@ Reference these flow IDs as `flow_id` in each step of the Macro definition (`def
 
 ## Narrowing Results During Analysis
 
-Recording-time scope filtering is not available. To focus on a subset of captured traffic, apply `query` filters at read time:
+Three layers of filtering apply, in order from cheapest to most invasive:
 
-```json
-// query
-{
-  "resource": "flows",
-  "filter": {"host": "api2.target.example.com"},
-  "limit": 50
-}
-```
+1. **`capture_scope` at proxy_start / configure** (recording filter — recommended): persists only the scoped flows. Out-of-scope traffic still flows through the proxy so the page keeps loading. Tune at startup, refine via `configure` mid-session.
 
-To restrict which hosts the proxy will talk to at all, use the `security` tool:
+   ```json
+   // configure
+   {
+     "operation": "merge",
+     "capture_scope": {
+       "add_excludes": [
+         {"hostname": "*.cloudfront.net"}
+       ]
+     }
+   }
+   ```
 
-```json
-// security
-{
-  "action": "set_target_scope",
-  "allows": [{"hostname": "*.target.example.com"}]
-}
-```
+2. **`query` filters at read time**: when you want to keep recording everything but only analyse a subset.
+
+   ```json
+   // query
+   {
+     "resource": "flows",
+     "filter": {"host": "api2.target.example.com"},
+     "limit": 50
+   }
+   ```
+
+3. **`security set_target_scope` (transmission gate, not recording)**: blocks the proxy from contacting unscoped hosts entirely. Use only for time-boxed / data-exfil-prevention engagements — pages that depend on out-of-scope third-party resources will break.
+
+   ```json
+   // security
+   {
+     "action": "set_target_scope",
+     "allows": [{"hostname": "*.target.example.com"}]
+   }
+   ```
 
 ## Tips
 

@@ -119,6 +119,12 @@ type proxyStartInput struct {
 	// RequestTimeoutMs is the timeout in milliseconds for reading HTTP request headers.
 	// Defaults to 60000 (60s) if omitted or zero.
 	RequestTimeoutMs *int `json:"request_timeout_ms,omitempty" jsonschema:"HTTP request header read timeout in milliseconds (default: 60000)"`
+
+	// CaptureScope filters which flows are persisted to the flow store
+	// without altering wire transmission (USK-776). Use this to suppress
+	// noise from third-party CDNs, analytics, fonts, etc. while keeping
+	// browser-driven sessions functional. See yorishiro://help/proxy_start.
+	CaptureScope *captureScopeInput `json:"capture_scope,omitempty" jsonschema:"recording-only observability filter; out-of-scope flows are still proxied but not stored"`
 }
 
 // parseTCPForwardsAny parses TCP forward values from the MCP input into structured ForwardConfig.
@@ -341,6 +347,13 @@ func (s *Server) resetSettingsToDefaults() {
 	if s.connector.hostTLSRegistry != nil {
 		s.connector.hostTLSRegistry.SetGlobal(nil)
 	}
+
+	// USK-776: reset capture_scope back to "capture all" so each
+	// proxy_start observes a clean recording filter; subsequent
+	// applyCaptureScope reinstalls user-provided rules.
+	if s.flowStore != nil && s.flowStore.recordScope != nil {
+		s.flowStore.recordScope.Clear()
+	}
 }
 
 // applyProxyStartSettings validates and applies all proxy configuration sections
@@ -395,6 +408,11 @@ func (s *Server) applyProxyStartPipeline(input *proxyStartInput) error {
 	if len(input.AutoTransform) > 0 {
 		if err := s.applyTransformRules(input.AutoTransform); err != nil {
 			return fmt.Errorf("auto_transform: %w", err)
+		}
+	}
+	if input.CaptureScope != nil {
+		if err := s.applyCaptureScope(input.CaptureScope); err != nil {
+			return fmt.Errorf("capture_scope: %w", err)
 		}
 	}
 	return s.applyProxyStartTLS(input)

@@ -300,14 +300,24 @@ func NewJobRunner(
 // component for symmetry with the other components and to give a name to
 // the dependency that handlers like compare_tool / query_technologies /
 // macro_handlers need for read access.
+//
+// recordScope is the recording-only observability filter (USK-776). The
+// same pointer is shared with proxybuild.Deps.RecordScope so MCP tools
+// (proxy_start_tool / configure_tool / query_tool) and the live
+// data-path RecordStep mutate / read a single instance. nil = capture
+// every flow (current default behaviour).
 type FlowStore struct {
-	store flow.Store
+	store       flow.Store
+	recordScope *flow.RecordScope
 }
 
-// NewFlowStore constructs a FlowStore wrapping the given store. A nil store
-// is permitted; tool handlers will return errors when invoked.
-func NewFlowStore(store flow.Store) *FlowStore {
-	return &FlowStore{store: store}
+// NewFlowStore constructs a FlowStore wrapping the given store and
+// recording filter. A nil store is permitted; tool handlers will return
+// errors when invoked. A nil recordScope is permitted and means
+// "capture every flow"; Server.finalizeDefaults installs an empty
+// flow.RecordScope when nil so configure / proxy_start can mutate it.
+func NewFlowStore(store flow.Store, recordScope *flow.RecordScope) *FlowStore {
+	return &FlowStore{store: store, recordScope: recordScope}
 }
 
 // MacroEngine is a placeholder component for future macro-engine state

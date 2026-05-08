@@ -376,6 +376,55 @@ Global mTLS client certificate configuration for upstream connections.
 - **cert_path** (string): Path to PEM-encoded client certificate. Set to `""` to disable.
 - **key_path** (string): Path to PEM-encoded client private key. Set to `""` to disable.
 
+### capture_scope (object, optional)
+Recording-only observability filter (USK-776). Limits which flows are persisted to the flow store **without altering wire transmission**. Distinct from `target_scope` (transmission gate, configured via the `security` tool): use `capture_scope` to suppress noise from third-party CDNs / analytics during browser-driven testing without breaking page rendering.
+
+Honours the top-level `operation` discriminator:
+- `"merge"` (default): applies `add_includes` / `remove_includes` / `add_excludes` / `remove_excludes` deltas.
+- `"replace"`: overwrites both rule lists with `includes` / `excludes`.
+
+Each rule is AND-evaluated across `hostname` / `url_prefix` / `method`; at least one field must be non-empty. Excludes win over includes.
+
+#### Add a capture include rule (merge)
+```json
+{
+  "operation": "merge",
+  "capture_scope": {
+    "add_includes": [
+      {"hostname": "api.target.com"}
+    ]
+  }
+}
+```
+
+#### Drop noise from third-party CDNs (merge)
+```json
+{
+  "operation": "merge",
+  "capture_scope": {
+    "add_excludes": [
+      {"hostname": "*.cloudfront.net"},
+      {"url_prefix": "/healthz"}
+    ]
+  }
+}
+```
+
+#### Replace all capture rules
+```json
+{
+  "operation": "replace",
+  "capture_scope": {
+    "includes": [
+      {"hostname": "*.target.com", "url_prefix": "/api/"}
+    ],
+    "excludes": [
+      {"url_prefix": "/api/internal/heartbeat"}
+    ]
+  }
+}
+```
+
 ### Combined update
 ```json
 {
