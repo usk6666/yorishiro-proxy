@@ -850,6 +850,23 @@ func wsRelayDirection(
 // silently aborting the post-swap session before any WS frame could
 // flow.
 func h2LayersFromStack(stack *connector.ConnectionStack) (*http2.Layer, *http2.Layer, error) {
+	return h2LayersFromAccessor(stack)
+}
+
+// h2StackAccessor is the slice of *connector.ConnectionStack that
+// h2LayersFromStack needs. Extracting this interface lets unit tests
+// fake the stack without constructing real *http2.Layer instances on
+// both sides (USK-783). Production code passes a *connector.ConnectionStack
+// (which satisfies this interface verbatim).
+type h2StackAccessor interface {
+	ClientTopmost() layer.Layer
+	UpstreamTopmost() layer.Layer
+	UpstreamH2Layer() *http2.Layer
+}
+
+// h2LayersFromAccessor is the test-shaped implementation of
+// h2LayersFromStack. Behavior is identical; only the input type differs.
+func h2LayersFromAccessor(stack h2StackAccessor) (*http2.Layer, *http2.Layer, error) {
 	clientTop := stack.ClientTopmost()
 	clientH2, ok := clientTop.(*http2.Layer)
 	if !ok {
