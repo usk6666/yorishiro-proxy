@@ -384,35 +384,58 @@ func TestEnvelope_WireBytes_NilEnvelope(t *testing.T) {
 }
 
 // TestEnvelope_WireBytes_RawBufferPath verifies that when RawBuffer is set
-// (USK-772 future path), WireBytes materializes from the buffer rather than
-// returning Raw. For USK-773 RawBuffer is always nil; this test exercises
-// the API shape so USK-772 has a fixture to extend.
+// (USK-772 disk-spill path), WireBytes stitches the in-memory header section
+// in Raw with the disk-backed body section in RawBuffer. The HTTP/1.x parser
+// only spills the body portion of the wire snapshot to disk; the header
+// section stays in Raw because it is bounded and small.
 func TestEnvelope_WireBytes_RawBufferPath(t *testing.T) {
-	wire := []byte("from-rawbuffer")
-	bb := bodybuf.NewMemory(wire)
+	header := []byte("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n")
+	body := []byte("5\r\nhello\r\n0\r\n\r\n")
+	bb := bodybuf.NewMemory(body)
 	defer bb.Release()
 
 	e := &Envelope{
-		// Raw is intentionally a different value to prove RawBuffer wins
-		// when both are populated. In real use only one will be set.
-		Raw:       []byte("DECOY-not-from-rawbuffer"),
+		Raw:       header,
 		RawBuffer: bb,
 	}
 	got, err := e.WireBytes(context.Background())
 	if err != nil {
 		t.Fatalf("WireBytes error: %v", err)
 	}
-	if string(got) != string(wire) {
-		t.Errorf("WireBytes = %q, want %q (RawBuffer must take precedence over Raw)",
-			got, wire)
+	want := append(append([]byte{}, header...), body...)
+	if string(got) != string(want) {
+		t.Errorf("WireBytes = %q, want %q (Raw header + RawBuffer body must concatenate)",
+			got, want)
+	}
+}
+
+// TestEnvelope_WireBytes_RawBufferOnly verifies the boundary case where Raw
+// is empty (header section was unavailable, e.g. error path) but RawBuffer
+// still carries the body bytes — WireBytes should return the buffer bytes
+// alone with no leading nil bytes.
+func TestEnvelope_WireBytes_RawBufferOnly(t *testing.T) {
+	body := []byte("just-body-bytes")
+	bb := bodybuf.NewMemory(body)
+	defer bb.Release()
+
+	e := &Envelope{
+		Raw:       nil,
+		RawBuffer: bb,
+	}
+	got, err := e.WireBytes(context.Background())
+	if err != nil {
+		t.Fatalf("WireBytes error: %v", err)
+	}
+	if string(got) != string(body) {
+		t.Errorf("WireBytes = %q, want %q", got, body)
 	}
 }
 
 // TestEnvelope_Clone_RawBufferRetained verifies that cloning an Envelope
 // with a non-nil RawBuffer shares the buffer pointer and Retains it so the
 // clone and original both hold live references. Mirrors the
-// HTTPMessage.BodyBuffer cloning contract. USK-772 will rely on this to
-// keep variant snapshots' wire bytes alive when the original is released.
+// HTTPMessage.BodyBuffer cloning contract. USK-772 relies on this to keep
+// variant snapshots' wire bytes alive when the original is released.
 func TestEnvelope_Clone_RawBufferRetained(t *testing.T) {
 	bb := bodybuf.NewMemory([]byte("shared-wire-bytes"))
 	orig := &Envelope{
@@ -444,5 +467,51 @@ func TestEnvelope_Clone_RawBufferRetained(t *testing.T) {
 	// Final release: clone drops the last reference.
 	if err := cloned.RawBuffer.Release(); err != nil {
 		t.Fatalf("second Release (clone): %v", err)
+	}
+}
+
+// TestEnvelope_Clone_RawBuffer_FileBackedRefcount is the disk-backed twin of
+// TestEnvelope_Clone_RawBufferRetained: it confirms that Clone's Retain /
+// terminal Release contract holds for a file-backed bodybuf, and that the
+// underlying temp file is removed only on the last Release. This is the
+// concrete behavior USK-772 relies on for variant snapshotting against a
+// disk-spilled wire body.
+func TestEnvelope_Clone_RawBuffer_FileBackedRefcount(t *testing.T) {
+	bb, err := bodybuf.NewFile(t.TempDir(), "envelope-clone-test-", 0)
+	if err != nil {
+		t.Fatalf("NewFile: %v", err)
+	}
+	wire := []byte("disk-backed-wire-bytes")
+	if _, err := bb.Write(wire); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	orig := &Envelope{Protocol: ProtocolHTTP, RawBuffer: bb}
+	cloned := orig.Clone()
+
+	if cloned.RawBuffer != orig.RawBuffer {
+		t.Fatal("Clone should share RawBuffer pointer for file-backed buffer")
+	}
+
+	// First Release: refcount drops to 1 — file must still exist.
+	if err := orig.RawBuffer.Release(); err != nil {
+		t.Fatalf("first Release: %v", err)
+	}
+	got, err := cloned.RawBuffer.Bytes(context.Background())
+	if err != nil {
+		t.Fatalf("clone.RawBuffer.Bytes after first Release: %v", err)
+	}
+	if string(got) != string(wire) {
+		t.Errorf("clone.RawBuffer.Bytes = %q, want %q", got, wire)
+	}
+
+	// Final Release: refcount drops to 0 — file is removed.
+	if err := cloned.RawBuffer.Release(); err != nil {
+		t.Fatalf("final Release: %v", err)
+	}
+	// After the terminal Release, Bytes returns an error ("bytes after
+	// release"), which proves the buffer is dead.
+	if _, err := cloned.RawBuffer.Bytes(context.Background()); err == nil {
+		t.Error("expected error reading from RawBuffer after terminal Release")
 	}
 }

@@ -120,8 +120,10 @@ func (r *bodyBufRegistry) track(b *bodybuf.BodyBuffer) {
 	r.bufs = append(r.bufs, b)
 }
 
-// trackEnvelope tracks the BodyBuffer carried by env if env is HTTP-typed.
-// Non-HTTP envelopes (Raw, WS, gRPC, etc.) have no BodyBuffer and are skipped.
+// trackEnvelope tracks the BodyBuffer carried by env if env is HTTP-typed,
+// plus env.RawBuffer (USK-772) when populated by the HTTP/1.x parser's
+// disk-spill path. Non-HTTP envelopes have no BodyBuffer; pre-USK-772
+// envelopes have no RawBuffer.
 //
 // Contract for callers that synthesize Respond-path envelopes (rules,
 // plugins, safety Steps): the response Envelope's HTTPMessage.BodyBuffer MUST
@@ -130,9 +132,16 @@ func (r *bodyBufRegistry) track(b *bodybuf.BodyBuffer) {
 // issue. Aliasing without a compensating Retain would cause drain() to
 // double-Release the shared pointer, panicking on the zero-refcount contract
 // of bodybuf.Release. No current Step aliases, and the panic is fail-loud
-// rather than fail-silent, so regressions surface immediately.
+// rather than fail-silent, so regressions surface immediately. The same
+// constraint applies to env.RawBuffer.
 func (r *bodyBufRegistry) trackEnvelope(env *envelope.Envelope) {
-	if env == nil || env.Message == nil {
+	if env == nil {
+		return
+	}
+	if env.RawBuffer != nil {
+		r.track(env.RawBuffer)
+	}
+	if env.Message == nil {
 		return
 	}
 	if m, ok := env.Message.(*envelope.HTTPMessage); ok && m != nil {
@@ -196,9 +205,13 @@ func runPipelineTracked(
 	reg *bodyBufRegistry,
 ) (*envelope.Envelope, pipeline.Action, *envelope.Envelope) {
 	var pre *bodybuf.BodyBuffer
-	if env != nil && env.Message != nil {
-		if m, ok := env.Message.(*envelope.HTTPMessage); ok && m != nil {
-			pre = m.BodyBuffer
+	var preRaw *bodybuf.BodyBuffer
+	if env != nil {
+		preRaw = env.RawBuffer
+		if env.Message != nil {
+			if m, ok := env.Message.(*envelope.HTTPMessage); ok && m != nil {
+				pre = m.BodyBuffer
+			}
 		}
 	}
 
@@ -214,6 +227,23 @@ func runPipelineTracked(
 		if m, ok := outEnv.Message.(*envelope.HTTPMessage); ok && m != nil && m.BodyBuffer == pre {
 			reg.track(pre)
 		}
+	}
+	if preRaw != nil {
+		// USK-772: env.RawBuffer carries two outstanding Retains entering
+		// runPipelineTracked, mirroring HTTPMessage.BodyBuffer:
+		//
+		//  1. The Layer-owned Retain from bodybuf.NewFile at parse time
+		//     (the parser's disk-spill bodybuf is created with refCount=1
+		//     and that reference is transferred to env.RawBuffer).
+		//  2. The Pipeline.Run variant-snapshot Retain from Envelope.Clone
+		//     (when a snapshot lives on for variant recording).
+		//
+		// No production Step currently mutates env.RawBuffer (unlike
+		// HTTPMessage.BodyBuffer where Transform may swap it), so the Layer
+		// Retain is always outstanding post-Run; we register both
+		// unconditionally.
+		reg.track(preRaw)
+		reg.track(preRaw)
 	}
 	if action == pipeline.Respond {
 		reg.trackEnvelope(resp)

@@ -500,9 +500,19 @@ func (c *channel) parseRequest() (*envelope.Envelope, error) {
 
 	path, rawQuery, authority := parseRequestURI(rawReq.RequestURI, rawReq.Headers)
 
+	// USK-772: configure raw-body disk-spill on the parser body reader before
+	// drain so chunked / identity bodies above BodySpillThreshold are captured
+	// to a temp file rather than truncated at MaxRawCaptureSize.
+	configureRawBodySpill(rawReq.Body, c.bodyOpts)
+
 	bb, body, err := readBodyWithThreshold(rawReq.Body,
 		c.bodyOpts.spillDir, c.bodyOpts.spillThreshold, c.bodyOpts.maxBody)
 	if err != nil {
+		// USK-772: the parser body reader's bodyCaptureSink may have
+		// promoted to a temp file before readBodyWithThreshold tripped its
+		// cap. Release that orphan so it is not left for the startup
+		// orphan sweep.
+		releaseOrphanRawBodyBuffer(rawReq.Body)
 		return nil, fmt.Errorf("http1: read request body: %w", err)
 	}
 	defer func() {
@@ -515,12 +525,21 @@ func (c *channel) parseRequest() (*envelope.Envelope, error) {
 	// the body has been fully drained. RawBody preserves the on-wire bytes
 	// (chunk framing for chunked TE, identity bytes otherwise) so opaque
 	// pass-through send paths re-emit them verbatim.
-	rawReq.RawBody, rawReq.RawBodyTruncated = extractRawBody(rawReq.Body)
+	// USK-772: when the captured body crossed the spill threshold, the disk-
+	// backed bodybuf is returned alongside; in that case RawBody is nil and
+	// RawBodyBuffer holds the wire bytes.
+	rawReq.RawBody, rawReq.RawBodyBuffer, rawReq.RawBodyTruncated = extractRawBody(rawReq.Body)
+	defer func() {
+		if err != nil && rawReq.RawBodyBuffer != nil {
+			_ = rawReq.RawBodyBuffer.Release()
+		}
+	}()
 	anomalies := convertAnomalies(rawReq.Anomalies)
 	if rawReq.RawBodyTruncated {
+		cap := capForTruncationDetail(c.bodyOpts, rawReq.RawBodyBuffer != nil)
 		anomalies = append(anomalies, envelope.Anomaly{
 			Type:   envelope.AnomalyRawBodyTruncated,
-			Detail: fmt.Sprintf("RawBody capped at MaxRawCaptureSize=%d", parser.MaxRawCaptureSize),
+			Detail: fmt.Sprintf("RawBody capped at %d bytes", cap),
 		})
 	}
 	trailers, trailerAnomalies := extractTrailers(rawReq.Body)
@@ -554,9 +573,13 @@ func (c *channel) parseRequest() (*envelope.Envelope, error) {
 		// "0\r\n\r\n"; for identity bodies it is the verbatim body bytes.
 		// rawReq.RawBytes (header-only) remains the source of truth for
 		// header-section-only consumers (e.g. opaque send fast path).
-		Raw:     concatWireBytes(rawReq.RawBytes, rawReq.RawBody),
-		Message: msg,
-		Context: envCtx,
+		// USK-772: when the body was disk-spilled, Raw is nil and RawBuffer
+		// carries the disk-backed wire bytes; consumers must call WireBytes(ctx)
+		// to read the snapshot uniformly.
+		Raw:       concatRawWireBytes(rawReq.RawBytes, rawReq.RawBody, rawReq.RawBodyBuffer),
+		RawBuffer: rawReq.RawBodyBuffer,
+		Message:   msg,
+		Context:   envCtx,
 		Opaque: &opaqueHTTP1{
 			rawReq:         rawReq,
 			origKV:         cloneKV(msg.Headers),
@@ -592,31 +615,21 @@ func (c *channel) parseResponse() (*envelope.Envelope, bool, error) {
 		return c.buildStreamingResponseEnvelope(rawResp), false, nil
 	}
 
-	bb, body, err := readBodyWithThreshold(rawResp.Body,
-		c.bodyOpts.spillDir, c.bodyOpts.spillThreshold, c.bodyOpts.maxBody)
+	bb, body, anomalies, trailers, err := c.assembleResponseBody(rawResp)
 	if err != nil {
-		return nil, false, fmt.Errorf("http1: read response body: %w", err)
+		return nil, false, err
 	}
 	defer func() {
 		if err != nil && bb != nil {
 			_ = bb.Release()
 		}
+		if err != nil && rawResp.RawBodyBuffer != nil {
+			_ = rawResp.RawBodyBuffer.Release()
+		}
 	}()
+	anomalies = append(anomalies, convertAnomalies(rawResp.Anomalies)...)
 
 	statusReason := extractStatusReason(rawResp.Status)
-	// USK-769: populate RawBody from the body reader's RawBodyProvider after
-	// drain. See parseRequest for rationale.
-	rawResp.RawBody, rawResp.RawBodyTruncated = extractRawBody(rawResp.Body)
-	anomalies := convertAnomalies(rawResp.Anomalies)
-	if rawResp.RawBodyTruncated {
-		anomalies = append(anomalies, envelope.Anomaly{
-			Type:   envelope.AnomalyRawBodyTruncated,
-			Detail: fmt.Sprintf("RawBody capped at MaxRawCaptureSize=%d", parser.MaxRawCaptureSize),
-		})
-	}
-	trailers, trailerAnomalies := extractTrailers(rawResp.Body)
-	anomalies = append(anomalies, trailerAnomalies...)
-
 	msg := &envelope.HTTPMessage{
 		Status:       rawResp.StatusCode,
 		StatusReason: statusReason,
@@ -630,21 +643,7 @@ func (c *channel) parseResponse() (*envelope.Envelope, bool, error) {
 	envCtx := c.ctxTmpl
 	envCtx.ReceivedAt = time.Now()
 
-	// USK-721: 1xx-aware sequence accounting on a single exchange.
-	// USK-730: 101 Switching Protocols is excluded from "informational"
-	// because it is the final HTTP message on the wire — everything after
-	// it belongs to the upgraded protocol. Keeping the spawn loop parsing
-	// HTTP after 101 races with DetachStream's bufio access.
-	isInformational := rawResp.StatusCode >= 100 && rawResp.StatusCode < 200 && rawResp.StatusCode != 101
-	if c.priorRespWasInformational {
-		c.sequence++
-	}
-	emitSeq := c.sequence + 1
-	if isInformational {
-		c.priorRespWasInformational = true
-	} else {
-		c.priorRespWasInformational = false
-	}
+	emitSeq, isInformational := c.advanceResponseSequence(rawResp.StatusCode)
 
 	// Mint per-exchange StreamID on first response if Send direction never
 	// ran (Receive-direction Channel obtained via OpenExchange inherits the
@@ -660,10 +659,14 @@ func (c *channel) parseResponse() (*envelope.Envelope, bool, error) {
 		Direction: envelope.Receive,
 		Protocol:  envelope.ProtocolHTTP,
 		// USK-773: Envelope.Raw is the complete wire snapshot (header section
-		// + on-wire body section). See parseRequest for rationale.
-		Raw:     concatWireBytes(rawResp.RawBytes, rawResp.RawBody),
-		Message: msg,
-		Context: envCtx,
+		// + on-wire body section). See parseRequest for rationale. USK-772:
+		// when the body was disk-spilled, Raw is nil and RawBuffer carries
+		// the disk-backed wire bytes; consumers should call WireBytes(ctx)
+		// to read the snapshot uniformly.
+		Raw:       concatRawWireBytes(rawResp.RawBytes, rawResp.RawBody, rawResp.RawBodyBuffer),
+		RawBuffer: rawResp.RawBodyBuffer,
+		Message:   msg,
+		Context:   envCtx,
 		Opaque: &opaqueHTTP1{
 			rawResp:        rawResp,
 			origKV:         cloneKV(msg.Headers),
@@ -785,7 +788,12 @@ type opaqueSendDecision struct {
 
 // classifyOpaqueSend computes the decision for a request/response opaque send.
 // The wire chunked check is shared via parser.IsChunked.
-func classifyOpaqueSend(headers parser.RawHeaders, rawBody []byte, rawBodyTruncated, headersChanged, bodyChanged bool) opaqueSendDecision {
+//
+// USK-772: rawBodyBuffered signals that the on-wire body was captured to a
+// disk-backed bodybuf because it crossed the spill threshold. The chunked
+// passthrough path streams from the buffer instead of copying memory bytes —
+// see writeOpaqueBody.
+func classifyOpaqueSend(headers parser.RawHeaders, rawBody []byte, rawBodyBuffered, rawBodyTruncated, headersChanged, bodyChanged bool) opaqueSendDecision {
 	wireChunked := parser.IsChunked(headers)
 	d := opaqueSendDecision{
 		headersChanged: headersChanged,
@@ -794,7 +802,7 @@ func classifyOpaqueSend(headers parser.RawHeaders, rawBody []byte, rawBodyTrunca
 	if !bodyChanged && wireChunked {
 		if rawBodyTruncated {
 			d.rewriteTEToCL = true
-		} else if len(rawBody) > 0 {
+		} else if len(rawBody) > 0 || rawBodyBuffered {
 			d.useRawBody = true
 		}
 	}
@@ -818,7 +826,7 @@ func applyTEToCLRewrite(rawHeaders *parser.RawHeaders, msg *envelope.HTTPMessage
 
 func (c *channel) sendRequestOpaque(msg *envelope.HTTPMessage, opaque *opaqueHTTP1) error {
 	rawReq := opaque.rawReq
-	d := classifyOpaqueSend(rawReq.Headers, rawReq.RawBody, rawReq.RawBodyTruncated,
+	d := classifyOpaqueSend(rawReq.Headers, rawReq.RawBody, rawReq.RawBodyBuffer != nil, rawReq.RawBodyTruncated,
 		!kvEqual(msg.Headers, opaque.origKV), isBodyChanged(msg, opaque))
 
 	// Zero-copy fast path: nothing changed and we don't need a TE→CL rewrite.
@@ -826,7 +834,7 @@ func (c *channel) sendRequestOpaque(msg *envelope.HTTPMessage, opaque *opaqueHTT
 		if _, err := c.layer.conn.Write(rawReq.RawBytes); err != nil {
 			return fmt.Errorf("http1: send request raw: %w", err)
 		}
-		return c.writeOpaqueBody(msg, rawReq.RawBody, d.useRawBody, "request")
+		return c.writeOpaqueBody(msg, rawReq.RawBody, rawReq.RawBodyBuffer, d.useRawBody, "request")
 	}
 
 	if d.headersChanged {
@@ -840,19 +848,19 @@ func (c *channel) sendRequestOpaque(msg *envelope.HTTPMessage, opaque *opaqueHTT
 	if _, err := c.layer.conn.Write(headerBytes); err != nil {
 		return fmt.Errorf("http1: send request: %w", err)
 	}
-	return c.writeOpaqueBody(msg, rawReq.RawBody, d.useRawBody, "request")
+	return c.writeOpaqueBody(msg, rawReq.RawBody, rawReq.RawBodyBuffer, d.useRawBody, "request")
 }
 
 func (c *channel) sendResponseOpaque(msg *envelope.HTTPMessage, opaque *opaqueHTTP1) error {
 	rawResp := opaque.rawResp
-	d := classifyOpaqueSend(rawResp.Headers, rawResp.RawBody, rawResp.RawBodyTruncated,
+	d := classifyOpaqueSend(rawResp.Headers, rawResp.RawBody, rawResp.RawBodyBuffer != nil, rawResp.RawBodyTruncated,
 		!kvEqual(msg.Headers, opaque.origKV), isBodyChanged(msg, opaque))
 
 	if !d.headersChanged && !d.bodyChanged && !d.rewriteTEToCL && len(rawResp.RawBytes) > 0 {
 		if _, err := c.layer.conn.Write(rawResp.RawBytes); err != nil {
 			return fmt.Errorf("http1: send response raw: %w", err)
 		}
-		return c.writeOpaqueBody(msg, rawResp.RawBody, d.useRawBody, "response")
+		return c.writeOpaqueBody(msg, rawResp.RawBody, rawResp.RawBodyBuffer, d.useRawBody, "response")
 	}
 
 	if d.headersChanged {
@@ -866,14 +874,32 @@ func (c *channel) sendResponseOpaque(msg *envelope.HTTPMessage, opaque *opaqueHT
 	if _, err := c.layer.conn.Write(headerBytes); err != nil {
 		return fmt.Errorf("http1: send response: %w", err)
 	}
-	return c.writeOpaqueBody(msg, rawResp.RawBody, d.useRawBody, "response")
+	return c.writeOpaqueBody(msg, rawResp.RawBody, rawResp.RawBodyBuffer, d.useRawBody, "response")
 }
 
-// writeOpaqueBody writes either the on-wire RawBody (when useRawBody is true,
-// preserving chunk framing) or the dechunked semantic body via writeBody.
+// writeOpaqueBody writes either the on-wire RawBody (preserving chunk
+// framing) or the dechunked semantic body via writeBody. When rawBodyBuffer
+// is non-nil and useRawBody is true, the body is streamed from the disk-
+// backed buffer via io.Copy; the in-memory rawBody is preferred otherwise.
 // kind is "request" or "response" — used purely for error wrapping.
-func (c *channel) writeOpaqueBody(msg *envelope.HTTPMessage, rawBody []byte, useRawBody bool, kind string) error {
+//
+// USK-772: rawBodyBuffer streaming preserves byte-level wire fidelity for
+// chunked bodies that exceeded MaxRawCaptureSize. The body cap (MaxBodySize)
+// already bounded what was captured; the relay path itself does not apply
+// further truncation.
+func (c *channel) writeOpaqueBody(msg *envelope.HTTPMessage, rawBody []byte, rawBodyBuffer *bodybuf.BodyBuffer, useRawBody bool, kind string) error {
 	if useRawBody {
+		if rawBodyBuffer != nil {
+			r, err := rawBodyBuffer.Reader()
+			if err != nil {
+				return fmt.Errorf("http1: open %s raw body buffer: %w", kind, err)
+			}
+			defer r.Close()
+			if _, err := io.Copy(c.layer.conn, r); err != nil {
+				return fmt.Errorf("http1: send %s raw body: %w", kind, err)
+			}
+			return nil
+		}
 		if _, err := c.layer.conn.Write(rawBody); err != nil {
 			return fmt.Errorf("http1: send %s raw body: %w", kind, err)
 		}
@@ -1161,18 +1187,76 @@ func extractTrailers(parserBody io.Reader) ([]envelope.KeyValue, []envelope.Anom
 
 // extractRawBody returns the on-wire body bytes captured by the parser body
 // reader (chunked framing for chunked TE, identity bytes otherwise). The
-// second return value is true when capture was capped at MaxRawCaptureSize.
+// second return value is the disk-backed bodybuf when the body crossed the
+// spill threshold (USK-772), nil otherwise. The third return value is true
+// when capture was capped at the absolute byte cap.
 //
 // USK-769: opaque pass-through send paths use these bytes to re-emit the
 // body verbatim, satisfying RFC-001 §3.1 (wire-observed raw bytes must not
 // be destroyed or modified). For bodies whose reader does not implement
-// RawBodyProvider (e.g. legacy test fixtures), returns (nil, false).
-func extractRawBody(parserBody io.Reader) ([]byte, bool) {
+// RawBodyProvider (e.g. legacy test fixtures), returns (nil, nil, false).
+func extractRawBody(parserBody io.Reader) ([]byte, *bodybuf.BodyBuffer, bool) {
 	rp, ok := parserBody.(parser.RawBodyProvider)
 	if !ok {
-		return nil, false
+		return nil, nil, false
 	}
-	return rp.RawBody(), rp.RawBodyTruncated()
+	return rp.RawBody(), rp.RawBodyBuffer(), rp.RawBodyTruncated()
+}
+
+// releaseOrphanRawBodyBuffer is the error-path companion of extractRawBody:
+// it pulls the disk-backed bodybuf off the parser body reader (if any) and
+// Releases it. Used when the dechunked-body assembler errors before
+// extractRawBody runs — without this the spill file would only be reaped on
+// the next-process startup orphan sweep.
+//
+// USK-772.
+func releaseOrphanRawBodyBuffer(parserBody io.Reader) {
+	if parserBody == nil {
+		return
+	}
+	rp, ok := parserBody.(parser.RawBodyProvider)
+	if !ok {
+		return
+	}
+	if buf := rp.RawBodyBuffer(); buf != nil {
+		_ = buf.Release()
+	}
+}
+
+// configureRawBodySpill installs USK-772 disk-spill on the parser body
+// reader (when it satisfies the optional rawBodySpiller interface), so the
+// captured RawBody can survive bodies larger than MaxRawCaptureSize. Body
+// readers backed by *parser.dechunkedReader / *parser.identityBodyReader
+// (the production paths) implement the interface; legacy test fixtures may
+// not, in which case this is a no-op.
+func configureRawBodySpill(parserBody io.Reader, opts bodyOpts) {
+	if parserBody == nil {
+		return
+	}
+	type rawBodySpiller interface {
+		EnableRawBodySpill(dir, prefix string, threshold, maxSize int64)
+	}
+	sp, ok := parserBody.(rawBodySpiller)
+	if !ok {
+		return
+	}
+	threshold := opts.spillThreshold
+	if threshold <= 0 {
+		threshold = config.DefaultBodySpillThreshold
+	}
+	maxSize := opts.maxBody
+	if maxSize <= 0 {
+		maxSize = config.MaxBodySize
+	}
+	// rawSpillPrefix is distinct from BodySpillPrefix so analysts (and
+	// orphan-sweep observers) can tell apart dechunked-body spill files
+	// (yorishiro-body-*) from raw-body spill files (yorishiro-body-*-raw).
+	// The prefix bodybuf appends "-*" to is "yorishiro-body-raw-" so the
+	// generated name is e.g. "yorishiro-body-raw-12345678". Both spill
+	// types share the BodySpillPrefix substring "yorishiro-body-" so the
+	// orphan sweep (config.SweepOrphanBodyFiles) cleans both without code
+	// changes — verified in TestSweepOrphanBodyFiles_RawSpillPrefix.
+	sp.EnableRawBodySpill(opts.spillDir, config.BodySpillPrefix+"raw-", threshold, maxSize)
 }
 
 // concatWireBytes returns the full wire snapshot of an HTTP/1.x message:
@@ -1192,4 +1276,90 @@ func concatWireBytes(headerBytes, bodyBytes []byte) []byte {
 	out = append(out, headerBytes...)
 	out = append(out, bodyBytes...)
 	return out
+}
+
+// assembleResponseBody drains the body, configures USK-772 disk-spill, and
+// returns the dechunked-body BodyBuffer/bytes plus the anomalies and
+// trailers that the caller must merge into the resulting HTTPMessage.
+//
+// Pulled out of parseResponse to keep that function under the
+// gocyclo threshold (15) — the body extraction + anomaly accumulation
+// is a single logical concern.
+func (c *channel) assembleResponseBody(rawResp *parser.RawResponse) (*bodybuf.BodyBuffer, []byte, []envelope.Anomaly, []envelope.KeyValue, error) {
+	// USK-772: configure raw-body disk-spill on the parser body reader before
+	// drain. See parseRequest for rationale.
+	configureRawBodySpill(rawResp.Body, c.bodyOpts)
+
+	bb, body, err := readBodyWithThreshold(rawResp.Body,
+		c.bodyOpts.spillDir, c.bodyOpts.spillThreshold, c.bodyOpts.maxBody)
+	if err != nil {
+		// USK-772: same rationale as parseRequest — release any spilled
+		// raw-body temp file the parser sink had already promoted before
+		// readBodyWithThreshold tripped its cap.
+		releaseOrphanRawBodyBuffer(rawResp.Body)
+		return nil, nil, nil, nil, fmt.Errorf("http1: read response body: %w", err)
+	}
+
+	// USK-769: populate RawBody from the body reader's RawBodyProvider after
+	// drain. USK-772: capture RawBodyBuffer when the on-wire body crossed
+	// the spill threshold.
+	rawResp.RawBody, rawResp.RawBodyBuffer, rawResp.RawBodyTruncated = extractRawBody(rawResp.Body)
+
+	var anomalies []envelope.Anomaly
+	if rawResp.RawBodyTruncated {
+		cap := capForTruncationDetail(c.bodyOpts, rawResp.RawBodyBuffer != nil)
+		anomalies = append(anomalies, envelope.Anomaly{
+			Type:   envelope.AnomalyRawBodyTruncated,
+			Detail: fmt.Sprintf("RawBody capped at %d bytes", cap),
+		})
+	}
+	trailers, trailerAnomalies := extractTrailers(rawResp.Body)
+	anomalies = append(anomalies, trailerAnomalies...)
+	return bb, body, anomalies, trailers, nil
+}
+
+// advanceResponseSequence applies the USK-721 1xx-aware sequence accounting
+// for the next response on this Channel and returns the Sequence to emit.
+// USK-730: 101 Switching Protocols is excluded from "informational" because
+// it is the final HTTP message on the wire.
+func (c *channel) advanceResponseSequence(statusCode int) (emitSeq int, isInformational bool) {
+	isInformational = statusCode >= 100 && statusCode < 200 && statusCode != 101
+	if c.priorRespWasInformational {
+		c.sequence++
+	}
+	emitSeq = c.sequence + 1
+	c.priorRespWasInformational = isInformational
+	return emitSeq, isInformational
+}
+
+// concatRawWireBytes assembles the in-memory portion of Envelope.Raw for an
+// HTTP/1.x message. When the body was disk-spilled (rawBodyBuffer non-nil),
+// only the header section bytes are kept in Raw and the body section lives
+// in Envelope.RawBuffer; Envelope.WireBytes(ctx) stitches the two for
+// callers that want the full wire snapshot.
+//
+// USK-772: introduced to express the memory/disk split for Raw vs RawBuffer.
+// See concatWireBytes for the memory-only path.
+func concatRawWireBytes(headerBytes, bodyBytes []byte, rawBodyBuffer *bodybuf.BodyBuffer) []byte {
+	if rawBodyBuffer != nil {
+		// Disk-spill path: keep just the header section in Raw; WireBytes
+		// concatenates Raw with RawBuffer.Bytes(ctx) on demand.
+		out := make([]byte, len(headerBytes))
+		copy(out, headerBytes)
+		return out
+	}
+	return concatWireBytes(headerBytes, bodyBytes)
+}
+
+// capForTruncationDetail returns the byte cap that a truncation anomaly
+// detail string should reference. The value depends on whether the capture
+// path was memory-only (MaxRawCaptureSize) or disk-spill (MaxBodySize).
+func capForTruncationDetail(opts bodyOpts, spilled bool) int64 {
+	if !spilled {
+		return int64(parser.MaxRawCaptureSize)
+	}
+	if opts.maxBody > 0 {
+		return opts.maxBody
+	}
+	return config.MaxBodySize
 }

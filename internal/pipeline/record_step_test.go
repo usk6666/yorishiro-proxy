@@ -2069,6 +2069,95 @@ func TestRecordStep_VariantRecordingGRPCData(t *testing.T) {
 	}
 }
 
+// TestRecordStep_FlowRawBytes_SpillPath_FullCapture verifies that when an
+// envelope arrives with a disk-spilled RawBuffer (USK-772) and the total
+// wire bytes fit within the BLOB cap, the projection materializes the full
+// header + body via Envelope.WireBytes(ctx).
+func TestRecordStep_FlowRawBytes_SpillPath_FullCapture(t *testing.T) {
+	w := &mockWriter{}
+	// Generous cap so the spilled body fits.
+	step := NewRecordStep(w, nil, WithMaxBodySize(64<<10))
+
+	header := []byte("HTTP/1.1 200 OK\r\n" +
+		"Transfer-Encoding: chunked\r\n" +
+		"\r\n")
+	body := []byte("5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n")
+	bb := bodybuf.NewMemory(body)
+	defer bb.Release()
+
+	env := &envelope.Envelope{
+		StreamID:  "s1",
+		FlowID:    "f1",
+		Direction: envelope.Receive,
+		Sequence:  1,
+		Protocol:  envelope.ProtocolHTTP,
+		Raw:       header,
+		RawBuffer: bb,
+		Message: &envelope.HTTPMessage{
+			Status:       200,
+			StatusReason: "OK",
+			Body:         []byte("hello world"),
+		},
+	}
+
+	step.Process(context.Background(), env)
+
+	if len(w.flows) != 1 {
+		t.Fatalf("expected 1 flow, got %d", len(w.flows))
+	}
+	want := append(append([]byte{}, header...), body...)
+	if !bytes.Equal(w.flows[0].RawBytes, want) {
+		t.Errorf("Flow.RawBytes mismatch:\n got=%q\nwant=%q", w.flows[0].RawBytes, want)
+	}
+}
+
+// TestRecordStep_FlowRawBytes_SpillPath_BlobTruncated verifies that the
+// BLOB-projection cap (RecordStep.maxBodySize, defaulting to
+// config.MaxBodySize) kicks in when the total wire bytes exceed it. The
+// network passthrough path is independent (the Channel write streams from
+// RawBuffer without applying this cap), so the test only validates the BLOB
+// truncation. No Anomaly is emitted by RecordStep because the wire bytes
+// were complete on the wire.
+func TestRecordStep_FlowRawBytes_SpillPath_BlobTruncated(t *testing.T) {
+	w := &mockWriter{}
+	const cap = 32
+	step := NewRecordStep(w, nil, WithMaxBodySize(cap))
+
+	header := []byte("HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n")
+	body := bytes.Repeat([]byte("X"), 100)
+	bb := bodybuf.NewMemory(body)
+	defer bb.Release()
+
+	env := &envelope.Envelope{
+		StreamID:  "s1",
+		FlowID:    "f1",
+		Direction: envelope.Receive,
+		Sequence:  1,
+		Protocol:  envelope.ProtocolHTTP,
+		Raw:       header,
+		RawBuffer: bb,
+		Message: &envelope.HTTPMessage{
+			Status: 200,
+			Body:   body,
+		},
+	}
+
+	step.Process(context.Background(), env)
+
+	if len(w.flows) != 1 {
+		t.Fatalf("expected 1 flow, got %d", len(w.flows))
+	}
+	full := append(append([]byte{}, header...), body...)
+	got := w.flows[0].RawBytes
+	if int64(len(got)) != cap {
+		t.Errorf("Flow.RawBytes len = %d, want cap %d", len(got), cap)
+	}
+	if !bytes.Equal(got, full[:cap]) {
+		t.Errorf("Flow.RawBytes prefix mismatch (truncation must keep leading bytes):\n got=%q\nwant=%q",
+			got, full[:cap])
+	}
+}
+
 // --- USK-776: capture_scope (recording-only filter) ---
 
 func newRecordScopeForTest(includes, excludes []flow.ScopeRule) *flow.RecordScope {

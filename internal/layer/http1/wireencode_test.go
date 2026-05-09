@@ -27,8 +27,10 @@ func parseReqFixture(t *testing.T, raw string) *envelope.Envelope {
 		t.Cleanup(func() { _ = bb.Release() })
 	}
 	// USK-769: populate RawBody after drain so the opaque encoder branch
-	// behaves identically to the channel.go production path.
-	rawReq.RawBody, rawReq.RawBodyTruncated = extractRawBody(rawReq.Body)
+	// behaves identically to the channel.go production path. USK-772 added
+	// RawBodyBuffer to the return tuple; tests below stay in the memory
+	// path because no fixture exercises body sizes above DefaultBodySpillThreshold.
+	rawReq.RawBody, rawReq.RawBodyBuffer, rawReq.RawBodyTruncated = extractRawBody(rawReq.Body)
 	path, rawQuery, authority := parseRequestURI(rawReq.RequestURI, rawReq.Headers)
 	msg := &envelope.HTTPMessage{
 		Method:     rawReq.Method,
@@ -67,8 +69,8 @@ func parseRespFixture(t *testing.T, raw string) *envelope.Envelope {
 	if bb != nil {
 		t.Cleanup(func() { _ = bb.Release() })
 	}
-	// USK-769: populate RawBody after drain.
-	rawResp.RawBody, rawResp.RawBodyTruncated = extractRawBody(rawResp.Body)
+	// USK-769: populate RawBody after drain. USK-772 added RawBodyBuffer.
+	rawResp.RawBody, rawResp.RawBodyBuffer, rawResp.RawBodyTruncated = extractRawBody(rawResp.Body)
 	msg := &envelope.HTTPMessage{
 		Status:       rawResp.StatusCode,
 		StatusReason: extractStatusReason(rawResp.Status),

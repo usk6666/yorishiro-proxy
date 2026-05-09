@@ -3,6 +3,8 @@ package parser
 import (
 	"io"
 	"strings"
+
+	"github.com/usk6666/yorishiro-proxy/internal/envelope/bodybuf"
 )
 
 // hasConnectionToken reports whether any Connection header value contains the
@@ -83,14 +85,26 @@ type TrailerProvider interface {
 // pass-through send paths re-emit these bytes verbatim, satisfying
 // RFC-001 §3.1 (wire-observed raw bytes must not be destroyed or modified).
 //
-// Truncation at MaxRawCaptureSize is signalled via RawBodyTruncated().
+// Memory vs disk-backed (USK-772): the body capture sink supports two
+// storage modes. Below the configured spill threshold, RawBody returns the
+// captured bytes from memory and RawBodyBuffer returns nil. Above the
+// threshold the sink promotes to a disk-backed bodybuf.BodyBuffer; RawBody
+// then returns nil and RawBodyBuffer returns the populated buffer. Callers
+// check both. Truncation at the absolute cap (MaxRawCaptureSize for memory,
+// the configured maxSize for spill) is signalled via RawBodyTruncated().
 type RawBodyProvider interface {
-	// RawBody returns the on-wire body bytes captured during parsing. May be
-	// nil for messages with no body (HEAD / 204 / 304 / no Content-Length).
+	// RawBody returns the on-wire body bytes captured during parsing when the
+	// body fit in memory. Nil when capture spilled to disk (consult
+	// RawBodyBuffer instead) or for messages with no body.
 	RawBody() []byte
-	// RawBodyTruncated reports whether RawBody was capped at MaxRawCaptureSize
-	// and is a prefix of the actual on-wire bytes. The semantic body
-	// (Body / BodyBuffer) is unaffected by this cap.
+	// RawBodyBuffer returns the disk-backed bodybuf when the captured body
+	// crossed the spill threshold. Nil when capture stayed in memory. The
+	// returned buffer carries one outstanding Retain; the caller assumes
+	// ownership and must arrange for a matching Release.
+	RawBodyBuffer() *bodybuf.BodyBuffer
+	// RawBodyTruncated reports whether RawBody / RawBodyBuffer was capped at
+	// the absolute byte cap and is a prefix of the actual on-wire bytes. The
+	// semantic body (Body / BodyBuffer) is unaffected by this cap.
 	RawBodyTruncated() bool
 }
 
@@ -190,8 +204,23 @@ type RawRequest struct {
 	// been fully drained, by type-asserting Body to RawBodyProvider. The
 	// parser itself returns RawBody == nil; the field is filled in by
 	// internal/layer/http1/channel.go after readBodyWithThreshold.
+	//
+	// USK-772: RawBody is nil when the captured body crossed the spill
+	// threshold; in that case RawBodyBuffer holds the disk-backed bytes.
 	RawBody []byte
-	// RawBodyTruncated is true when RawBody was capped at MaxRawCaptureSize.
+	// RawBodyBuffer is the disk-backed body capture buffer populated when the
+	// on-wire body crossed the spill threshold. Nil when capture stayed in
+	// memory (use RawBody instead). The buffer carries one outstanding Retain
+	// — the channel layer transfers ownership to Envelope.RawBuffer; the
+	// terminal Release is the session bodyBufRegistry's responsibility.
+	//
+	// USK-772: introduced so multi-MiB chunked bodies can be re-emitted
+	// byte-for-byte through the opaque passthrough send path without
+	// hitting the MaxRawCaptureSize memory cap.
+	RawBodyBuffer *bodybuf.BodyBuffer
+	// RawBodyTruncated is true when RawBody / RawBodyBuffer was capped at
+	// the absolute byte cap (MaxRawCaptureSize for memory mode, MaxBodySize
+	// for spill mode).
 	RawBodyTruncated bool
 	Anomalies        []Anomaly
 	Close            bool // true if Connection: close or HTTP/1.0 default
@@ -211,7 +240,11 @@ type RawResponse struct {
 	// RawBody is the on-wire body bytes captured during parsing. See
 	// RawRequest.RawBody for semantics.
 	RawBody []byte
-	// RawBodyTruncated is true when RawBody was capped at MaxRawCaptureSize.
+	// RawBodyBuffer is the disk-backed body capture buffer (USK-772). See
+	// RawRequest.RawBodyBuffer for semantics.
+	RawBodyBuffer *bodybuf.BodyBuffer
+	// RawBodyTruncated is true when RawBody / RawBodyBuffer was capped at
+	// the absolute byte cap.
 	RawBodyTruncated bool
 	Anomalies        []Anomaly
 

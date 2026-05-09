@@ -98,6 +98,24 @@ func TestSweepOrphanBodyFiles_MissingDir(t *testing.T) {
 	SweepOrphanBodyFiles(missing, newDiscardLogger())
 }
 
+// TestSweepOrphanBodyFiles_RawSpillPrefix verifies the USK-772 raw-body
+// spill files (named "yorishiro-body-raw-*") are also reaped by the orphan
+// sweep. The sweep matches by the BodySpillPrefix substring ("yorishiro-
+// body-"), and the raw-spill prefix used by the HTTP/1.x layer is
+// BodySpillPrefix + "raw-" so it matches without code changes — this test
+// guards against a future rename that would break the match.
+func TestSweepOrphanBodyFiles_RawSpillPrefix(t *testing.T) {
+	dir := t.TempDir()
+	rawSpill := filepath.Join(dir, BodySpillPrefix+"raw-deadbeef.tmp")
+	writeFileWithModTime(t, rawSpill, []byte("stale-raw"), time.Now().Add(-2*time.Hour))
+
+	SweepOrphanBodyFiles(dir, newDiscardLogger())
+
+	if _, err := os.Stat(rawSpill); !os.IsNotExist(err) {
+		t.Fatalf("raw-spill orphan should have been removed, stat err = %v", err)
+	}
+}
+
 func TestSweepOrphanBodyFiles_NilLoggerDefaultsToSlogDefault(t *testing.T) {
 	dir := t.TempDir()
 	// Empty dir; should not panic when logger is nil.

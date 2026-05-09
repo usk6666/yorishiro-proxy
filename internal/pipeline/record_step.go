@@ -487,6 +487,14 @@ func (s *RecordStep) applyWireEncode(ctx context.Context, current *envelope.Enve
 // RecordStep never Releases the BodyBuffer — terminal release is owned by
 // the Session OnComplete backstop (USK-634). Snapshot and current each hold
 // independent Retain counts from CloneMessage().
+//
+// USK-772: when env.RawBuffer is non-nil (disk-spilled wire body), RawBytes
+// is materialized via env.WireBytes(ctx) and capped at the BLOB-projection
+// size. The cap intentionally differs from the network passthrough — the
+// relayed wire bytes are always complete (the Channel send path streams
+// from the buffer); only the BLOB-projected snapshot is truncated. A
+// truncation here is logged but not surfaced as an Anomaly because the
+// underlying wire fidelity is preserved on the wire.
 func (s *RecordStep) envelopeToFlow(ctx context.Context, env *envelope.Envelope) *flow.Flow {
 	fl := &flow.Flow{
 		ID:        env.FlowID,
@@ -494,14 +502,8 @@ func (s *RecordStep) envelopeToFlow(ctx context.Context, env *envelope.Envelope)
 		Sequence:  env.Sequence,
 		Direction: env.Direction.String(),
 		Timestamp: time.Now(),
-		// TODO(USK-772): switch to env.WireBytes(ctx) once RawBuffer is
-		// populated for disk-spilled bodies. While RawBuffer is always nil
-		// (USK-773 memory-only path) env.Raw IS the full wire snapshot and
-		// WireBytes would just be a more expensive read; once USK-772 lands
-		// and Raw may be nil with RawBuffer non-nil, this projection will
-		// silently drop wire bytes from Flow.RawBytes unless updated.
-		RawBytes: env.Raw,
-		Metadata: map[string]string{"protocol": string(env.Protocol)},
+		RawBytes:  s.projectRawBytes(ctx, env),
+		Metadata:  map[string]string{"protocol": string(env.Protocol)},
 	}
 
 	switch m := env.Message.(type) {
@@ -540,6 +542,49 @@ func (s *RecordStep) envelopeToFlow(ctx context.Context, env *envelope.Envelope)
 	}
 
 	return fl
+}
+
+// projectRawBytes returns the wire bytes for the Flow.RawBytes BLOB
+// projection. When env.RawBuffer is nil this is just env.Raw (zero-copy).
+// When env.RawBuffer is non-nil (USK-772 disk-spill path) the helper calls
+// env.WireBytes(ctx) which stitches header (Raw) + body (RawBuffer.Bytes).
+// The materialized result is capped at the configured BLOB cap; truncation
+// is logged at Warn so the operator can correlate a truncated BLOB with
+// the captured-bytes count, but does NOT surface as a flow Anomaly because
+// the wire passthrough was complete (the Channel write path streams from
+// the same RawBuffer without applying this cap).
+func (s *RecordStep) projectRawBytes(ctx context.Context, env *envelope.Envelope) []byte {
+	if env == nil {
+		return nil
+	}
+	if env.RawBuffer == nil {
+		return env.Raw
+	}
+	wire, err := env.WireBytes(ctx)
+	if err != nil {
+		s.logger.Warn("record step: read wire bytes from RawBuffer failed",
+			"stream_id", env.StreamID,
+			"flow_id", env.FlowID,
+			"protocol", string(env.Protocol),
+			"error", err,
+		)
+		return nil
+	}
+	cap := s.maxBodySize
+	if cap <= 0 {
+		cap = config.MaxBodySize
+	}
+	if int64(len(wire)) > cap {
+		s.logger.Warn("record step: wire bytes BLOB truncated for flow projection",
+			"stream_id", env.StreamID,
+			"flow_id", env.FlowID,
+			"protocol", string(env.Protocol),
+			"captured_bytes", len(wire),
+			"cap", cap,
+		)
+		return wire[:cap]
+	}
+	return wire
 }
 
 // keyValuesToMap projects an ordered KeyValue slice into the flow.Flow

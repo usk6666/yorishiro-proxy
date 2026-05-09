@@ -454,6 +454,15 @@ func startFullListenerProxy(
 	if opts.upstreamProxy != nil {
 		buildCfg.UpstreamProxy = opts.upstreamProxy
 	}
+	if opts.bodySpillDir != "" {
+		buildCfg.BodySpillDir = opts.bodySpillDir
+	}
+	if opts.bodySpillThreshold > 0 {
+		buildCfg.BodySpillThreshold = opts.bodySpillThreshold
+	}
+	if opts.bodyMaxSize > 0 {
+		buildCfg.MaxBodySize = opts.bodyMaxSize
+	}
 
 	connectNeg := connector.NewCONNECTNegotiator(slog.Default())
 	socks5Neg := connector.NewSOCKS5Negotiator(slog.Default())
@@ -535,6 +544,13 @@ type fullListenerOpts struct {
 	// smoke tests can exercise the RFC 1929 sub-negotiation path.
 	// USK-770.
 	socks5Authenticator connector.Authenticator
+
+	// USK-772: optional body-spill knobs forwarded to BuildConfig so
+	// integration tests can exercise the disk-spill path with reduced
+	// thresholds (production defaults are too large for test bodies).
+	bodySpillDir       string
+	bodySpillThreshold int64
+	bodyMaxSize        int64
 }
 
 // waitSessionDone waits for the WaitGroup with a timeout.

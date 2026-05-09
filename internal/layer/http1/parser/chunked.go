@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"strings"
+
+	"github.com/usk6666/yorishiro-proxy/internal/envelope/bodybuf"
 )
 
 // hexVal returns the numeric value of a hex digit, or -1 for invalid digits.
@@ -135,10 +137,12 @@ func IsChunked(headers RawHeaders) bool {
 //
 // USK-769: dechunkedReader also captures the on-wire body bytes (chunk
 // framing, chunk-size hex, extensions, trailing CRLFs, terminal "0" chunk,
-// and trailer section) into a captureWriter so opaque pass-through send
+// and trailer section) into a bodyCaptureSink so opaque pass-through send
 // paths can re-emit the body byte-for-byte. Capture is bounded by
-// MaxRawCaptureSize; truncation flips rawBodyTruncated. The dechunkedReader
-// satisfies RawBodyProvider once the body has been fully drained.
+// MaxRawCaptureSize in memory-only mode, or by maxSize when USK-772
+// disk-spill is configured via EnableRawBodySpill. Truncation flips
+// rawBodyTruncated. The dechunkedReader satisfies RawBodyProvider once the
+// body has been fully drained.
 type dechunkedReader struct {
 	r                *bufio.Reader
 	remaining        int64 // bytes remaining in the current chunk
@@ -148,12 +152,28 @@ type dechunkedReader struct {
 	trailerAnomalies []Anomaly
 
 	// rawCapture accumulates the on-wire body bytes (chunk framing + data +
-	// trailers). Read from RawBody() after drain.
-	rawCapture *captureWriter
+	// trailers). Read from RawBody() (memory) or RawBodyBuffer() (spilled)
+	// after drain.
+	rawCapture *bodyCaptureSink
 }
 
 func newDechunkedReader(r *bufio.Reader) *dechunkedReader {
-	return &dechunkedReader{r: r, rawCapture: &captureWriter{}}
+	return &dechunkedReader{r: r, rawCapture: newBodyCaptureSink()}
+}
+
+// EnableRawBodySpill installs the disk-spill knobs on the body capture sink.
+// Call before the first Read to allow chunked bodies above threshold to be
+// captured to a temp file rather than truncated at MaxRawCaptureSize.
+func (dr *dechunkedReader) EnableRawBodySpill(dir, prefix string, threshold, maxSize int64) {
+	if dr == nil || dr.rawCapture == nil {
+		return
+	}
+	dr.rawCapture.enableSpill(rawBodySpillConfig{
+		dir:       dir,
+		prefix:    prefix,
+		threshold: threshold,
+		maxSize:   maxSize,
+	})
 }
 
 // Trailers returns the parsed chunked trailers in wire order. Call after the
@@ -164,8 +184,10 @@ func (dr *dechunkedReader) Trailers() RawHeaders { return dr.trailers }
 // section (pseudo-header, forbidden header, obs-fold, injection).
 func (dr *dechunkedReader) TrailerAnomalies() []Anomaly { return dr.trailerAnomalies }
 
-// RawBody returns the on-wire body bytes captured during dechunking, including
-// chunk framing. Call after the reader has returned io.EOF.
+// RawBody returns the on-wire body bytes captured during dechunking when the
+// body fit in memory. Returns nil when the sink spilled to disk (use
+// RawBodyBuffer for the disk-backed path). Call after the reader has
+// returned io.EOF.
 func (dr *dechunkedReader) RawBody() []byte {
 	if dr.rawCapture == nil {
 		return nil
@@ -173,13 +195,24 @@ func (dr *dechunkedReader) RawBody() []byte {
 	return dr.rawCapture.bytes()
 }
 
-// RawBodyTruncated reports whether captured RawBody was capped at
-// MaxRawCaptureSize.
+// RawBodyBuffer returns the disk-backed bodybuf when the chunked body crossed
+// the spill threshold during capture. Returns nil otherwise (use RawBody for
+// the memory path). The bodybuf carries one outstanding Retain at this
+// point; the caller assumes ownership.
+func (dr *dechunkedReader) RawBodyBuffer() *bodybuf.BodyBuffer {
+	if dr.rawCapture == nil {
+		return nil
+	}
+	return dr.rawCapture.buffer()
+}
+
+// RawBodyTruncated reports whether captured RawBody was capped (at
+// MaxRawCaptureSize for memory mode, or maxSize for spill mode).
 func (dr *dechunkedReader) RawBodyTruncated() bool {
 	if dr.rawCapture == nil {
 		return false
 	}
-	return dr.rawCapture.truncated
+	return dr.rawCapture.isTruncated()
 }
 
 // Read implements io.Reader. It returns decoded chunk data without markers.

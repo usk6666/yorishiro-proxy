@@ -7,6 +7,7 @@ import (
 	"strconv"
 
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
+	"github.com/usk6666/yorishiro-proxy/internal/envelope/bodybuf"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/http1/parser"
 )
 
@@ -72,9 +73,14 @@ func EncodeWireBytes(env *envelope.Envelope) ([]byte, error) {
 // (chunk framing intact) verbatim. When the body has been mutated — or the
 // chunked RawBody overflowed the capture cap — the encoder falls back to
 // TE→CL rewrite + Body / BodyBuffer assembly.
+//
+// USK-772: when the captured RawBody was disk-spilled, the encoder reads the
+// disk-backed bodybuf via Bytes(ctx) and stitches header + body. The encoder
+// runs in pipeline.RecordStep, where context.Background is acceptable for
+// the synchronous Bytes call (no incoming ctx flows here).
 func encodeRequestOpaque(msg *envelope.HTTPMessage, opaque *opaqueHTTP1) ([]byte, error) {
 	rawReq := cloneRawRequest(opaque.rawReq)
-	d := classifyOpaqueSend(rawReq.Headers, rawReq.RawBody, rawReq.RawBodyTruncated,
+	d := classifyOpaqueSend(rawReq.Headers, rawReq.RawBody, rawReq.RawBodyBuffer != nil, rawReq.RawBodyTruncated,
 		!kvEqual(msg.Headers, opaque.origKV), isBodyChanged(msg, opaque))
 
 	if d.headersChanged {
@@ -86,7 +92,7 @@ func encodeRequestOpaque(msg *envelope.HTTPMessage, opaque *opaqueHTTP1) ([]byte
 
 	headerBytes := serializeRequestHeader(rawReq)
 	if d.useRawBody {
-		return appendRawBody(headerBytes, rawReq.RawBody), nil
+		return appendRawBody(headerBytes, rawReq.RawBody, rawReq.RawBodyBuffer)
 	}
 	return assembleWithBody(headerBytes, msg)
 }
@@ -94,7 +100,7 @@ func encodeRequestOpaque(msg *envelope.HTTPMessage, opaque *opaqueHTTP1) ([]byte
 // encodeResponseOpaque is the response-side twin of encodeRequestOpaque.
 func encodeResponseOpaque(msg *envelope.HTTPMessage, opaque *opaqueHTTP1) ([]byte, error) {
 	rawResp := cloneRawResponse(opaque.rawResp)
-	d := classifyOpaqueSend(rawResp.Headers, rawResp.RawBody, rawResp.RawBodyTruncated,
+	d := classifyOpaqueSend(rawResp.Headers, rawResp.RawBody, rawResp.RawBodyBuffer != nil, rawResp.RawBodyTruncated,
 		!kvEqual(msg.Headers, opaque.origKV), isBodyChanged(msg, opaque))
 
 	if d.headersChanged {
@@ -106,19 +112,31 @@ func encodeResponseOpaque(msg *envelope.HTTPMessage, opaque *opaqueHTTP1) ([]byt
 
 	headerBytes := serializeResponseHeader(rawResp)
 	if d.useRawBody {
-		return appendRawBody(headerBytes, rawResp.RawBody), nil
+		return appendRawBody(headerBytes, rawResp.RawBody, rawResp.RawBodyBuffer)
 	}
 	return assembleWithBody(headerBytes, msg)
 }
 
-// appendRawBody concatenates headerBytes and rawBody. Used by the
+// appendRawBody concatenates headerBytes and the wire body bytes. When
+// rawBodyBuffer is non-nil (USK-772 disk-spill), bytes are materialized via
+// Bytes(ctx); otherwise rawBody (memory) is used directly. Used by the
 // !bodyChanged branch of the opaque encoders so the chunk framing in
 // rawBody is preserved on the wire.
-func appendRawBody(headerBytes, rawBody []byte) []byte {
+func appendRawBody(headerBytes, rawBody []byte, rawBodyBuffer *bodybuf.BodyBuffer) ([]byte, error) {
+	if rawBodyBuffer != nil {
+		body, err := rawBodyBuffer.Bytes(context.Background())
+		if err != nil {
+			return nil, fmt.Errorf("http1: wireencode read raw body buffer: %w", err)
+		}
+		out := make([]byte, 0, len(headerBytes)+len(body))
+		out = append(out, headerBytes...)
+		out = append(out, body...)
+		return out, nil
+	}
 	out := make([]byte, 0, len(headerBytes)+len(rawBody))
 	out = append(out, headerBytes...)
 	out = append(out, rawBody...)
-	return out
+	return out, nil
 }
 
 // encodeRequestSynthetic renders a request without reference to any original
@@ -212,7 +230,8 @@ func appendBody(headerBytes []byte, msg *envelope.HTTPMessage) ([]byte, error) {
 // EncodeWireBytes does not mutate the opaque state stored on the envelope.
 // Body is intentionally not copied: it is an io.Reader owned elsewhere and
 // this encoder never consumes it. RawBytes / RawBody slices are aliased
-// (the encoder only reads them).
+// (the encoder only reads them). RawBodyBuffer is shared by pointer; the
+// encoder never Releases.
 func cloneRawRequest(r *parser.RawRequest) *parser.RawRequest {
 	return &parser.RawRequest{
 		Method:           r.Method,
@@ -222,6 +241,7 @@ func cloneRawRequest(r *parser.RawRequest) *parser.RawRequest {
 		Body:             r.Body,
 		RawBytes:         r.RawBytes,
 		RawBody:          r.RawBody,
+		RawBodyBuffer:    r.RawBodyBuffer,
 		RawBodyTruncated: r.RawBodyTruncated,
 		Anomalies:        r.Anomalies,
 		Close:            r.Close,
@@ -239,6 +259,7 @@ func cloneRawResponse(r *parser.RawResponse) *parser.RawResponse {
 		Body:             r.Body,
 		RawBytes:         r.RawBytes,
 		RawBody:          r.RawBody,
+		RawBodyBuffer:    r.RawBodyBuffer,
 		RawBodyTruncated: r.RawBodyTruncated,
 		Anomalies:        r.Anomalies,
 		Truncated:        r.Truncated,

@@ -7,6 +7,8 @@ import (
 	"io"
 	"strconv"
 	"strings"
+
+	"github.com/usk6666/yorishiro-proxy/internal/envelope/bodybuf"
 )
 
 // Limits to prevent resource exhaustion.
@@ -28,6 +30,21 @@ const (
 	// maxHeaderCount limits the number of individual header lines.
 	maxHeaderCount = 10000
 )
+
+// rawSink is the minimal write/truncation interface used by readLine and
+// parseHeaderLines. Two implementations satisfy it:
+//
+//   - *captureWriter for header-section capture (RawBytes), capped at
+//     MaxRawCaptureSize and memory-only (header sections never spill).
+//   - *bodyCaptureSink for body capture (RawBody), where USK-772 added a
+//     memory-then-disk-spill mode bounded by MaxBodySize.
+//
+// A nil rawSink is permitted (treated as a no-op writer) so that
+// downstream parser internals can share the same code regardless of whether
+// the caller wants capture.
+type rawSink interface {
+	write(p []byte)
+}
 
 // captureWriter records bytes written to it up to MaxRawCaptureSize.
 type captureWriter struct {
@@ -147,7 +164,7 @@ func ParseResponse(r *bufio.Reader) (*RawResponse, error) {
 }
 
 // parseRequestLine reads the request line (e.g., "GET /path HTTP/1.1\r\n").
-func parseRequestLine(r *bufio.Reader, cw *captureWriter) (method, requestURI, proto string, err error) {
+func parseRequestLine(r *bufio.Reader, cw rawSink) (method, requestURI, proto string, err error) {
 	line, err := readLine(r, cw, maxRequestLineSize)
 	if err != nil {
 		return "", "", "", fmt.Errorf("read request line: %w", err)
@@ -170,7 +187,7 @@ func parseRequestLine(r *bufio.Reader, cw *captureWriter) (method, requestURI, p
 }
 
 // parseStatusLine reads the status line (e.g., "HTTP/1.1 200 OK\r\n").
-func parseStatusLine(r *bufio.Reader, cw *captureWriter) (proto string, statusCode int, status string, err error) {
+func parseStatusLine(r *bufio.Reader, cw rawSink) (proto string, statusCode int, status string, err error) {
 	line, err := readLine(r, cw, maxRequestLineSize)
 	if err != nil {
 		return "", 0, "", fmt.Errorf("read status line: %w", err)
@@ -207,7 +224,7 @@ func parseStatusLine(r *bufio.Reader, cw *captureWriter) (proto string, statusCo
 // readLine reads a CRLF- or LF-terminated line from r, capturing bytes.
 // Returns the line content without the terminator.
 // Returns an error if the line exceeds maxLen.
-func readLine(r *bufio.Reader, cw *captureWriter, maxLen int) (string, error) {
+func readLine(r *bufio.Reader, cw rawSink, maxLen int) (string, error) {
 	var line []byte
 	for {
 		segment, err := r.ReadSlice('\n')
@@ -215,14 +232,16 @@ func readLine(r *bufio.Reader, cw *captureWriter, maxLen int) (string, error) {
 		// Check maxLen BEFORE appending to prevent large allocations.
 		if len(line)+len(segment) > maxLen {
 			remaining := maxLen - len(line)
-			if remaining > 0 {
+			if remaining > 0 && cw != nil {
 				cw.write(segment[:remaining])
 			}
 			return "", fmt.Errorf("line exceeds maximum length %d", maxLen)
 		}
 
 		line = append(line, segment...)
-		cw.write(segment)
+		if cw != nil {
+			cw.write(segment)
+		}
 
 		if err == nil {
 			break
@@ -261,13 +280,17 @@ func parseHeaders(r *bufio.Reader, cw *captureWriter) (RawHeaders, []Anomaly, er
 
 // parseHeaderLines implements the shared line-by-line header/trailer parser.
 // Used by parseHeaders for initial header sections (with cw capturing RawBytes)
-// and by dechunkedReader.consumeTrailers for chunked trailer sections (with cw
-// nil). Honors obs-fold, OWS preservation, embedded-CR detection, space-before-
-// colon detection, and colon-less line fallback.
+// and by dechunkedReader.consumeTrailers for chunked trailer sections (with
+// the body capture sink). Honors obs-fold, OWS preservation, embedded-CR
+// detection, space-before-colon detection, and colon-less line fallback.
+//
+// cw may be nil — in that case bytes are not captured. Both *captureWriter
+// (header capture) and *bodyCaptureSink (body capture; USK-772) satisfy the
+// rawSink interface.
 //
 // maxSize caps the total line bytes (including approximated CRLF overhead).
 // Header count is capped at maxHeaderCount.
-func parseHeaderLines(r *bufio.Reader, cw *captureWriter, maxSize int) (RawHeaders, []Anomaly, error) {
+func parseHeaderLines(r *bufio.Reader, cw rawSink, maxSize int) (RawHeaders, []Anomaly, error) {
 	var headers RawHeaders
 	var anomalies []Anomaly
 	var totalSize int
@@ -532,7 +555,7 @@ func resolveResponseBody(r *bufio.Reader, headers RawHeaders, proto string, stat
 }
 
 // identityBodyReader wraps a body io.Reader and tees the bytes it produces
-// into a captureWriter so the consumer can retrieve the on-wire body bytes
+// into a bodyCaptureSink so the consumer can retrieve the on-wire body bytes
 // after the body has been fully drained. Used for Content-Length and
 // EOF-delimited (HTTP/1.0 / Connection: close) bodies.
 //
@@ -540,13 +563,32 @@ func resolveResponseBody(r *bufio.Reader, headers RawHeaders, proto string, stat
 // identical, but the tee preserves the property that RawBody is always
 // available — uniformly across chunked and identity paths — so opaque
 // send paths can always re-emit RawBody.
+//
+// USK-772: the sink supports memory-then-disk-spill so multi-MiB bodies can be
+// captured without losing wire fidelity to the MaxRawCaptureSize cap. Spill is
+// configured by the channel layer via EnableRawBodySpill before drain.
 type identityBodyReader struct {
 	r          io.Reader
-	rawCapture *captureWriter
+	rawCapture *bodyCaptureSink
 }
 
 func newIdentityBodyReader(r io.Reader) *identityBodyReader {
-	return &identityBodyReader{r: r, rawCapture: &captureWriter{}}
+	return &identityBodyReader{r: r, rawCapture: newBodyCaptureSink()}
+}
+
+// EnableRawBodySpill installs the disk-spill knobs on the body capture sink.
+// Call before the first Read to allow large bodies to spill to disk above
+// threshold while preserving the RawBody wire-fidelity contract.
+func (ir *identityBodyReader) EnableRawBodySpill(dir, prefix string, threshold, maxSize int64) {
+	if ir == nil || ir.rawCapture == nil {
+		return
+	}
+	ir.rawCapture.enableSpill(rawBodySpillConfig{
+		dir:       dir,
+		prefix:    prefix,
+		threshold: threshold,
+		maxSize:   maxSize,
+	})
 }
 
 // Read implements io.Reader.
@@ -558,9 +600,10 @@ func (ir *identityBodyReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
-// RawBody returns the on-wire body bytes captured during reads. For
-// identity-encoded bodies this is identical to the dechunked semantic body.
-// Call after the body has been fully drained.
+// RawBody returns the on-wire body bytes captured during reads when the body
+// fit in memory. Returns nil when the sink spilled to disk (use
+// RawBodyBuffer for the disk-backed path). Call after the body has been
+// fully drained.
 func (ir *identityBodyReader) RawBody() []byte {
 	if ir.rawCapture == nil {
 		return nil
@@ -568,11 +611,22 @@ func (ir *identityBodyReader) RawBody() []byte {
 	return ir.rawCapture.bytes()
 }
 
-// RawBodyTruncated reports whether captured RawBody was capped at
-// MaxRawCaptureSize.
+// RawBodyBuffer returns the disk-backed bodybuf when the body crossed the
+// spill threshold during capture. Returns nil otherwise (use RawBody for the
+// memory path). The bodybuf carries one outstanding Retain at this point;
+// the caller assumes ownership.
+func (ir *identityBodyReader) RawBodyBuffer() *bodybuf.BodyBuffer {
+	if ir.rawCapture == nil {
+		return nil
+	}
+	return ir.rawCapture.buffer()
+}
+
+// RawBodyTruncated reports whether captured RawBody was capped (at
+// MaxRawCaptureSize for memory mode, or maxSize for spill mode).
 func (ir *identityBodyReader) RawBodyTruncated() bool {
 	if ir.rawCapture == nil {
 		return false
 	}
-	return ir.rawCapture.truncated
+	return ir.rawCapture.isTruncated()
 }

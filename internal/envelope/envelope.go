@@ -111,18 +111,26 @@ type Envelope struct {
 	// Raw is now the complete wire snapshot so Flow Store BLOB columns,
 	// `query` MCP tool, and WebUI hex viewers see the full wire bytes
 	// (RFC-001 §3.1).
+	//
+	// USK-772: when the on-wire body crosses the parser disk-spill threshold,
+	// Raw holds only the header section bytes and RawBuffer holds the body
+	// section. Consumers should call WireBytes(ctx) for the full wire snapshot
+	// instead of reading Raw directly when the spill path may be active.
 	Raw []byte
 
-	// RawBuffer optionally carries the complete wire bytes when the body was
-	// large enough to spill to disk. When non-nil, RawBuffer is the
-	// authoritative source for the wire snapshot and Raw may be nil.
-	// Consumers should call WireBytes to read the wire snapshot regardless of
-	// which side is populated.
+	// RawBuffer optionally carries the disk-backed body portion of the wire
+	// snapshot when the on-wire body crossed the disk-spill threshold during
+	// parsing. When non-nil, the Raw field holds the header section bytes
+	// only (memory) and RawBuffer holds the body section bytes (disk-backed
+	// via bodybuf.BodyBuffer). Consumers must call WireBytes to read the
+	// complete wire snapshot — it stitches header (Raw) + body (RawBuffer)
+	// transparently.
 	//
-	// USK-773 introduces the field with a memory-only path (RawBuffer is left
-	// nil; Raw holds the full wire bytes). USK-772 will populate RawBuffer
-	// when the parser produces a disk-spilled RawBody so multi-MiB bodies do
-	// not double up in memory.
+	// USK-773 introduced the field with a memory-only path (RawBuffer is
+	// left nil; Raw holds the full wire bytes). USK-772 populates RawBuffer
+	// when the HTTP/1.x parser disk-spills a chunked or identity body so
+	// multi-MiB bodies do not double up in memory and survive past the
+	// MaxRawCaptureSize cap.
 	RawBuffer *bodybuf.BodyBuffer
 
 	// --- Protocol-specific structured view ---
@@ -147,9 +155,10 @@ type Envelope struct {
 //
 // RawBuffer is shared via Retain (when non-nil) so variant snapshots see the
 // same disk-backed wire snapshot; the session OnComplete backstop releases
-// the terminal reference. This mirrors HTTPMessage.BodyBuffer cloning
-// semantics. RawBuffer remains nil for the USK-773 memory path; a future
-// Issue (USK-772) is responsible for populating it.
+// the terminal reference (see bodyBufRegistry.trackEnvelope in
+// internal/session/session.go which tracks env.RawBuffer alongside
+// HTTPMessage.BodyBuffer). USK-772 populates RawBuffer when the HTTP/1.x
+// parser disk-spills a chunked or identity body.
 func (e *Envelope) Clone() *Envelope {
 	clone := &Envelope{
 		StreamID:  e.StreamID,
@@ -162,15 +171,10 @@ func (e *Envelope) Clone() *Envelope {
 		// Opaque intentionally not cloned
 	}
 	if e.RawBuffer != nil {
-		// TODO(USK-772): the Retain here is symmetric with
-		// HTTPMessage.BodyBuffer's Retain in HTTPMessage.CloneMessage, but
-		// the corresponding terminal Release lives in
-		// internal/session/session.go bodyBufRegistry.trackEnvelope, which
-		// today only tracks HTTPMessage.BodyBuffer. While RawBuffer is
-		// always nil (USK-773 memory-only path) this branch never runs and
-		// nothing leaks. When USK-772 starts populating RawBuffer, extend
-		// trackEnvelope to also track env.RawBuffer or this Retain leaks one
-		// refcount per Clone.
+		// USK-772: Retain is symmetric with HTTPMessage.BodyBuffer's Retain
+		// in HTTPMessage.CloneMessage. The corresponding terminal Release
+		// lives in internal/session/session.go bodyBufRegistry.trackEnvelope
+		// which now also tracks env.RawBuffer.
 		e.RawBuffer.Retain()
 		clone.RawBuffer = e.RawBuffer
 	}
@@ -181,12 +185,15 @@ func (e *Envelope) Clone() *Envelope {
 }
 
 // WireBytes returns the complete wire bytes for this Envelope. When
-// RawBuffer is non-nil, it is materialized via BodyBuffer.Bytes(ctx);
-// otherwise Raw is returned directly. For the USK-773 memory path
-// RawBuffer is always nil and WireBytes returns Raw. USK-772 will populate
-// RawBuffer for spilled bodies; consumers should prefer this helper to read
-// the wire snapshot so they do not need to know which storage path produced
-// the envelope.
+// RawBuffer is non-nil, the body section is materialized via
+// BodyBuffer.Bytes(ctx) and concatenated after the header section in Raw;
+// otherwise Raw is returned directly.
+//
+// USK-773 memory path: RawBuffer is nil and WireBytes returns Raw verbatim.
+// USK-772 disk-spill path: Raw holds the header section bytes (captured in
+// memory by the parser, capped at MaxRawCaptureSize) and RawBuffer holds the
+// disk-backed body bytes; WireBytes stitches them so callers do not need to
+// know which storage path produced the envelope.
 //
 // Errors are surfaced from BodyBuffer.Bytes only (e.g. read errors on a
 // disk-backed buffer or ctx cancellation). When RawBuffer is nil the call
@@ -196,11 +203,25 @@ func (e *Envelope) WireBytes(ctx context.Context) ([]byte, error) {
 		return nil, nil
 	}
 	if e.RawBuffer != nil {
-		b, err := e.RawBuffer.Bytes(ctx)
+		body, err := e.RawBuffer.Bytes(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("envelope: read RawBuffer: %w", err)
 		}
-		return b, nil
+		if len(e.Raw) == 0 {
+			return body, nil
+		}
+		// Bound the stitched size to a safe constant (1 GiB) before
+		// allocating. Header is bounded by MaxRawCaptureSize and body by
+		// MaxBodySize, so the sum cannot reach the cap under current caps.
+		// The explicit constant cap satisfies CodeQL
+		// (go/allocation-size-overflow) which cannot infer the parser-side
+		// caps statically.
+		const maxStitchedWireBytes = 1 << 30 // 1 GiB sanity cap
+		if len(e.Raw) > maxStitchedWireBytes-len(body) {
+			return nil, fmt.Errorf("envelope: WireBytes stitched size exceeds %d (header=%d body=%d)", maxStitchedWireBytes, len(e.Raw), len(body))
+		}
+		out := append(append(make([]byte, 0, len(e.Raw)), e.Raw...), body...)
+		return out, nil
 	}
 	return e.Raw, nil
 }
