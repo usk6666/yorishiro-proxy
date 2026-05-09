@@ -35,6 +35,63 @@ func alpnRoute(negotiatedALPN string) (string, error) {
 // On cache hit, only the cached ALPN is offered.
 var defaultALPNOffer = []string{ALPNProtocolH2, ALPNProtocolHTTP11}
 
+// clientALPNOffersForUpstream returns the ALPN list the proxy should
+// advertise to the client during MITM TLS handshake, given what we know
+// about the upstream's selected ALPN.
+//
+// USK-793: the proxy MUST offer a superset of what the client might want,
+// not only the upstream's choice. Otherwise a client that only speaks
+// http/1.1 hitting an upstream that supports h2 sees a server-Hello with
+// no overlapping ALPN, completes TLS with NegotiatedProtocol="" (Go's
+// crypto/tls behaviour — silent fallback rather than no_application_protocol
+// alert in many code paths), then speaks HTTP/1.x on a connection the proxy
+// would otherwise route through the HTTP/2 stack — yielding "invalid client
+// preface" errors and 0-byte timeouts.
+//
+// Order matters: the proxy advertises the upstream-preferred protocol
+// first, so a client that supports both still ends up on h2.
+//
+// upstreamALPN values:
+//   - "h2": offer ["h2", "http/1.1"]
+//   - "http/1.1": offer ["http/1.1"]
+//   - "" (no upstream ALPN): offer ["http/1.1"]
+//   - anything else (unrecognised): offer ["http/1.1"] — alpnRoute would
+//     fall through to bytechunk anyway, and we don't want to mislead the
+//     client into thinking we speak the unknown protocol.
+func clientALPNOffersForUpstream(upstreamALPN string) []string {
+	switch upstreamALPN {
+	case ALPNProtocolH2:
+		return []string{ALPNProtocolH2, ALPNProtocolHTTP11}
+	default:
+		return []string{ALPNProtocolHTTP11}
+	}
+}
+
+// clientALPNMatchesUpstream reports whether a client-negotiated ALPN
+// produces the same dispatch route as upstream's. Used by
+// buildCacheMissPath / buildCacheHitPath to decide whether to re-dial
+// upstream so the inner stack stays single-protocol end-to-end.
+//
+// An empty client ALPN matches an empty or "http/1.1" upstream ALPN
+// because alpnRoute collapses both to "http1".
+func clientALPNMatchesUpstream(clientALPN, upstreamALPN string) bool {
+	clientRoute, _ := alpnRoute(clientALPN)
+	upstreamRoute, _ := alpnRoute(upstreamALPN)
+	return clientRoute == upstreamRoute
+}
+
+// canonicalRedialALPNOffer returns the ALPN list to offer upstream when
+// re-dialing after a client/upstream mismatch. It collapses the empty
+// client ALPN (no offer / no overlap) to ["http/1.1"] because that is
+// the protocol Go's TLS server falls back to when no overlap exists,
+// and the only protocol the proxy can actually serve in that mode.
+func canonicalRedialALPNOffer(clientALPN string) []string {
+	if clientALPN == "" {
+		return []string{ALPNProtocolHTTP11}
+	}
+	return []string{clientALPN}
+}
+
 // ALPNCacheKeyFromConfig constructs an ALPNCacheKey for the given target
 // using the TLS configuration from BuildConfig.
 func ALPNCacheKeyFromConfig(target string, cfg *BuildConfig) ALPNCacheKey {

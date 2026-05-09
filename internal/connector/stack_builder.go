@@ -436,12 +436,23 @@ func buildALPNRoutedStack(
 		return nil, nil, nil, err
 	}
 
-	negotiatedALPN := ""
+	// USK-793: route the post-CONNECT dispatch off the CLIENT-side
+	// negotiated ALPN, not upstream. After the redial logic in
+	// buildCacheMissPath / buildCacheHitPath upstream's ALPN matches the
+	// client's, but the source of truth is the client because that is
+	// what determines what bytes the proxy will see arriving on
+	// clientTLSConn next. An empty client ALPN (no offer / no overlap)
+	// collapses to http/1.1 in alpnRoute.
+	clientALPN := ""
+	if clientSnap != nil {
+		clientALPN = clientSnap.ALPN
+	}
+	upstreamALPNObserved := ""
 	if upstreamSnap != nil {
-		negotiatedALPN = upstreamSnap.ALPN
+		upstreamALPNObserved = upstreamSnap.ALPN
 	}
 
-	route, routeErr := alpnRoute(negotiatedALPN)
+	route, routeErr := alpnRoute(clientALPN)
 	if routeErr != nil {
 		upstreamConn.Close()
 		clientTLSConn.Close()
@@ -450,14 +461,26 @@ func buildALPNRoutedStack(
 
 	slog.Debug("connector: ALPN routed",
 		"target", target, "conn_id", connID,
-		"alpn", negotiatedALPN, "route", route, "cache_hit", cacheHit,
+		"client_alpn", clientALPN, "upstream_alpn", upstreamALPNObserved,
+		"route", route, "cache_hit", cacheHit,
 	)
 
 	return buildStackFromRoute(ctx, clientTLSConn, upstreamConn, target, connID, route, clientSnap, upstreamSnap, hostTLS, cfg)
 }
 
-// buildCacheHitPath handles the ALPN cache hit: client MITM first (offering
-// cached ALPN), then upstream dial (offering cached ALPN), verify match.
+// buildCacheHitPath handles the ALPN cache hit: client MITM first offering
+// both the cached ALPN and http/1.1 fallback (USK-793), then upstream dial
+// using whatever the client actually negotiated. Verify upstream agrees.
+//
+// Why offer both protocols even on a cache hit (USK-793): the cache reflects
+// what _previous_ clients negotiated with upstream, not what the current
+// client speaks. If the proxy advertised only the cached "h2" and the
+// current client offered only "http/1.1", Go's crypto/tls would complete
+// the handshake with empty NegotiatedProtocol, and the client would speak
+// HTTP/1.x on a stack the proxy then dispatched as HTTP/2. By advertising
+// both we let the client pick a protocol it can actually speak, and the
+// upstream re-dial below honours that choice.
+//
 // Returns the TLS-wrapped client connection (not the original plain conn)
 // plus both TLS snapshots.
 func buildCacheHitPath(
@@ -468,37 +491,77 @@ func buildCacheHitPath(
 	hostTLS *resolvedTLS,
 	cfg *BuildConfig,
 ) (clientTLSConn net.Conn, upstreamConn net.Conn, clientSnap, upstreamSnap *envelope.TLSSnapshot, err error) {
-	clientTLSConn, clientSnap, err = performClientMITM(ctx, clientConn, host, cachedALPN, cfg)
+	clientOffers := clientALPNOffersForUpstream(cachedALPN)
+	clientTLSConn, clientSnap, err = performClientMITM(ctx, clientConn, host, clientOffers, cfg)
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
 
+	clientALPN := ""
+	if clientSnap != nil {
+		clientALPN = clientSnap.ALPN
+	}
+
+	// Dial upstream offering only the protocol the client picked so the
+	// data path stays single-protocol end-to-end. An empty client ALPN
+	// (no offers, or offers with no overlap) collapses to http/1.1.
+	upstreamOffer := canonicalRedialALPNOffer(clientALPN)
 	upstreamConn, upstreamSnap, err = dialUpstreamWithALPN(ctx, target, host,
-		[]string{cachedALPN}, hostTLS.insecureSkip, hostTLS.clientCert, hostTLS.rootCAs, cfg)
+		upstreamOffer, hostTLS.insecureSkip, hostTLS.clientCert, hostTLS.rootCAs, cfg)
 	if err != nil {
-		clientConn.Close()
+		_ = clientTLSConn.Close()
 		return nil, nil, nil, nil, err
 	}
 
-	negotiatedALPN := ""
+	upstreamALPN := ""
 	if upstreamSnap != nil {
-		negotiatedALPN = upstreamSnap.ALPN
+		upstreamALPN = upstreamSnap.ALPN
 	}
-	if negotiatedALPN != cachedALPN {
-		cfg.ALPNCache.Delete(cacheKey)
-		upstreamConn.Close()
-		clientConn.Close()
-		return nil, nil, nil, nil, fmt.Errorf("connector: ALPN mismatch for %s: cached %q, got %q",
-			target, cachedALPN, negotiatedALPN)
+	if !clientALPNMatchesUpstream(clientALPN, upstreamALPN) {
+		// Upstream changed its mind since the cached value was learned.
+		// Invalidate so the next CONNECT relearns from scratch.
+		if cfg.ALPNCache != nil {
+			cfg.ALPNCache.Delete(cacheKey)
+		}
+		_ = upstreamConn.Close()
+		_ = clientTLSConn.Close()
+		return nil, nil, nil, nil, fmt.Errorf("connector: ALPN mismatch for %s: client %q, upstream %q",
+			target, clientALPN, upstreamALPN)
+	}
+
+	// Refresh cache so a subsequent connection sees the now-current
+	// upstream behaviour (especially when the client picked the alternative
+	// to the cached protocol).
+	if cfg.ALPNCache != nil && upstreamALPN != cachedALPN {
+		cfg.ALPNCache.Set(cacheKey, upstreamALPN)
 	}
 
 	return clientTLSConn, upstreamConn, clientSnap, upstreamSnap, nil
 }
 
 // buildCacheMissPath handles the ALPN cache miss: upstream dial first (to
-// learn ALPN), then client MITM (offering learned ALPN).
-// Returns the TLS-wrapped client connection (not the original plain conn)
-// plus both TLS snapshots.
+// learn ALPN), then client MITM offering the upstream-supported protocols
+// (h2 and http/1.1) so the client picks one it actually speaks.
+//
+// Why offer both to the client (USK-793): if the proxy only advertises the
+// upstream-selected ALPN (e.g. only "h2") and the client cannot speak it
+// (curl --http1.1 offers only "http/1.1"), Go's crypto/tls server silently
+// completes the handshake with NegotiatedProtocol="" and the client speaks
+// HTTP/1.x on a connection the proxy then routes through the HTTP/2 stack.
+// Result: "http2: invalid client preface" and a 0-byte timeout. By offering
+// both protocols and letting the client choose, the post-TLS dispatch can
+// honour what the client actually negotiated.
+//
+// If the client picks an ALPN that does not match upstream's selection
+// (e.g. upstream chose h2 but client picked http/1.1), the cache is
+// invalidated and the upstream connection is re-dialled with only the
+// client's ALPN so the on-the-wire stack matches end-to-end. This keeps
+// stack_builder honest about its single-protocol-per-stack invariant: we
+// do not bridge h1↔h2 in the data path.
+//
+// Returns the TLS-wrapped client connection plus both TLS snapshots. The
+// upstreamConn returned reflects the (possibly redialed) connection whose
+// ALPN matches the client's negotiation.
 func buildCacheMissPath(
 	ctx context.Context,
 	clientConn net.Conn,
@@ -513,31 +576,67 @@ func buildCacheMissPath(
 		return nil, nil, nil, nil, err
 	}
 
-	negotiatedALPN := ""
+	upstreamALPN := ""
 	if upstreamSnap != nil {
-		negotiatedALPN = upstreamSnap.ALPN
+		upstreamALPN = upstreamSnap.ALPN
 	}
 
 	// Validate ALPN route early so we don't waste a client MITM handshake.
-	if _, routeErr := alpnRoute(negotiatedALPN); routeErr != nil {
+	if _, routeErr := alpnRoute(upstreamALPN); routeErr != nil {
 		upstreamConn.Close()
 		return nil, nil, nil, nil, fmt.Errorf("connector: %s: %w", target, routeErr)
 	}
 
-	// Cache the learned ALPN.
+	// Cache the learned upstream ALPN. If the client subsequently picks a
+	// different protocol we invalidate this entry below.
 	if cfg.ALPNCache != nil {
-		cfg.ALPNCache.Set(cacheKey, negotiatedALPN)
+		cfg.ALPNCache.Set(cacheKey, upstreamALPN)
 	}
 
-	// Client MITM offering the learned ALPN.
-	alpnOffer := negotiatedALPN
-	if alpnOffer == "" {
-		alpnOffer = ALPNProtocolHTTP11
-	}
-	clientTLSConn, clientSnap, err = performClientMITM(ctx, clientConn, host, alpnOffer, cfg)
+	// Offer the client every ALPN we believe upstream supports plus the
+	// fallback http/1.1, so a client that cannot speak h2 still negotiates
+	// a non-empty protocol the proxy can dispatch on. See function comment
+	// for the rationale (USK-793).
+	clientOffers := clientALPNOffersForUpstream(upstreamALPN)
+	clientTLSConn, clientSnap, err = performClientMITM(ctx, clientConn, host, clientOffers, cfg)
 	if err != nil {
 		upstreamConn.Close()
 		return nil, nil, nil, nil, err
+	}
+
+	clientALPN := ""
+	if clientSnap != nil {
+		clientALPN = clientSnap.ALPN
+	}
+
+	if !clientALPNMatchesUpstream(clientALPN, upstreamALPN) {
+		// Client picked something different from upstream — usually means
+		// the client speaks h1 but upstream offered h2, or vice versa. The
+		// existing upstreamConn is unusable for this client, so re-dial
+		// with the client's negotiated ALPN and invalidate the cached
+		// upstream-only result.
+		slog.Debug("connector: client/upstream ALPN mismatch; re-dialing upstream",
+			"target", target, "client_alpn", clientALPN, "upstream_alpn", upstreamALPN,
+		)
+		if cfg.ALPNCache != nil {
+			cfg.ALPNCache.Delete(cacheKey)
+		}
+		_ = upstreamConn.Close()
+		upstreamConn = nil
+		upstreamSnap = nil
+
+		redialOffer := canonicalRedialALPNOffer(clientALPN)
+		upstreamConn, upstreamSnap, err = dialUpstreamWithALPN(ctx, target, host,
+			redialOffer, hostTLS.insecureSkip, hostTLS.clientCert, hostTLS.rootCAs, cfg)
+		if err != nil {
+			_ = clientTLSConn.Close()
+			return nil, nil, nil, nil, err
+		}
+		// Refresh the cache with the now-known client-side ALPN reality so
+		// the next CONNECT to the same target reuses the matching path.
+		if cfg.ALPNCache != nil && upstreamSnap != nil {
+			cfg.ALPNCache.Set(cacheKey, upstreamSnap.ALPN)
+		}
 	}
 
 	return clientTLSConn, upstreamConn, clientSnap, upstreamSnap, nil
@@ -552,6 +651,14 @@ func buildCacheMissPath(
 // healthy — Evict would destroy a reusable connection for an unrelated
 // client-side problem).
 //
+// USK-793: the client MITM offers both [h2, http/1.1] so a client that
+// cannot speak h2 (e.g. curl --http1.1) negotiates a non-empty protocol
+// the proxy can dispatch on. If the client picks anything other than h2,
+// the pool reservation is released (Put, not Evict — the cached Layer is
+// healthy) and we fall back to a fresh ALPN-routed dial that re-negotiates
+// upstream with http/1.1 to match the client. The pooled h2 Layer remains
+// available for the next CONNECT whose client _can_ speak h2.
+//
 // Returns (stack, clientSnap, upstreamSnap, err). The upstreamSnap is read
 // from pooled.EnvelopeContextTemplate() — authoritative per USK-619 (the
 // stored snap was captured at the cached Layer's original dial).
@@ -563,13 +670,33 @@ func buildPoolHitFastPath(
 	poolKey pool.PoolKey,
 	cfg *BuildConfig,
 ) (*ConnectionStack, *envelope.TLSSnapshot, *envelope.TLSSnapshot, error) {
-	clientTLSConn, clientSnap, err := performClientMITM(ctx, clientConn, host, ALPNProtocolH2, cfg)
+	clientOffers := clientALPNOffersForUpstream(ALPNProtocolH2)
+	clientTLSConn, clientSnap, err := performClientMITM(ctx, clientConn, host, clientOffers, cfg)
 	if err != nil {
 		// Release the pool reservation — Layer is healthy, we just didn't
 		// complete the client-side handshake. Put (not Evict) keeps the
 		// Layer available for the next caller.
 		cfg.HTTP2Pool.Put(poolKey, pooled)
 		return nil, nil, nil, err
+	}
+
+	clientALPN := ""
+	if clientSnap != nil {
+		clientALPN = clientSnap.ALPN
+	}
+	if clientALPN != ALPNProtocolH2 {
+		// Client cannot (or will not) speak h2; the pooled h2 Layer is
+		// unusable for this connection. Release the reservation (the
+		// pooled Layer is still healthy for h2-capable clients) and fall
+		// back to a fresh dial that re-negotiates upstream with the
+		// client's chosen protocol. fallbackPoolHitToFreshDial owns the
+		// rest of the stack build using the already-handshaked client
+		// TLS connection.
+		cfg.HTTP2Pool.Put(poolKey, pooled)
+		slog.Debug("connector: pool hit but client picked non-h2 ALPN; falling back to fresh dial",
+			"target", target, "conn_id", connID, "client_alpn", clientALPN,
+		)
+		return fallbackPoolHitToFreshDial(ctx, clientTLSConn, clientSnap, target, host, connID, cfg)
 	}
 
 	upstreamSnap := pooled.EnvelopeContextTemplate().TLS
@@ -609,15 +736,78 @@ func buildPoolHitFastPath(
 	return stack, clientSnap, upstreamSnap, nil
 }
 
+// fallbackPoolHitToFreshDial completes a stack build after a pool-hit
+// fast path discovered a client/upstream ALPN mismatch (USK-793). The
+// client TLS handshake has already happened (clientTLSConn is live and
+// clientSnap reflects what the client negotiated). The caller has already
+// returned the pool reservation, so this function only owns the upstream
+// dial and the post-dispatch stack assembly.
+//
+// The upstream is dialed with only the client's negotiated ALPN so the
+// resulting stack is single-protocol end-to-end. On dial failure or
+// post-dial route validation failure clientTLSConn is closed.
+func fallbackPoolHitToFreshDial(
+	ctx context.Context,
+	clientTLSConn net.Conn,
+	clientSnap *envelope.TLSSnapshot,
+	target, host, connID string,
+	cfg *BuildConfig,
+) (*ConnectionStack, *envelope.TLSSnapshot, *envelope.TLSSnapshot, error) {
+	hostTLS, err := resolvePerHostTLS(target, cfg)
+	if err != nil {
+		_ = clientTLSConn.Close()
+		return nil, nil, nil, err
+	}
+
+	clientALPN := ""
+	if clientSnap != nil {
+		clientALPN = clientSnap.ALPN
+	}
+	upstreamOffer := canonicalRedialALPNOffer(clientALPN)
+
+	upstreamConn, upstreamSnap, err := dialUpstreamWithALPN(ctx, target, host,
+		upstreamOffer, hostTLS.insecureSkip, hostTLS.clientCert, hostTLS.rootCAs, cfg)
+	if err != nil {
+		_ = clientTLSConn.Close()
+		return nil, nil, nil, err
+	}
+
+	route, routeErr := alpnRoute(clientALPN)
+	if routeErr != nil {
+		_ = upstreamConn.Close()
+		_ = clientTLSConn.Close()
+		return nil, nil, nil, fmt.Errorf("connector: %s: %w", target, routeErr)
+	}
+
+	slog.Debug("connector: ALPN routed (pool fallback)",
+		"target", target, "conn_id", connID,
+		"client_alpn", clientALPN, "route", route,
+	)
+
+	return buildStackFromRoute(ctx, clientTLSConn, upstreamConn, target, connID, route, clientSnap, upstreamSnap, hostTLS, cfg)
+}
+
 // performClientMITM performs the client-side TLS MITM handshake, issuing a
-// certificate for the given host and offering the specified ALPN protocol.
+// certificate for the given host and offering the specified ALPN protocols.
 // Returns the TLS-wrapped connection (which must be used for subsequent I/O
 // instead of the original plain connection) and the TLS snapshot.
+//
+// alpnOffers are the ALPN protocols the proxy advertises to the client. The
+// client picks one (or none) and the result is observable via
+// clientSnap.ALPN. The caller MUST consult clientSnap.ALPN — not the upstream
+// negotiation result — when selecting the post-TLS dispatch route (USK-793):
+// when clientSnap.ALPN is empty the client either offered no ALPN or offered
+// a set with no overlap, in which case Go's crypto/tls server completes the
+// handshake silently and the client almost certainly speaks HTTP/1.x next.
+//
+// An empty / nil alpnOffers leaves NextProtos unset so the client never sees
+// the ALPN extension; the client will speak whatever default it prefers
+// (HTTP/1.x for browsers and curl).
 func performClientMITM(
 	ctx context.Context,
 	clientConn net.Conn,
 	host string,
-	alpnOffer string,
+	alpnOffers []string,
 	cfg *BuildConfig,
 ) (net.Conn, *envelope.TLSSnapshot, error) {
 	mitmCert, err := cfg.Issuer.GetCertificate(host)
@@ -628,8 +818,9 @@ func performClientMITM(
 	serverTLSCfg := &tls.Config{
 		Certificates: []tls.Certificate{*mitmCert},
 	}
-	if alpnOffer != "" {
-		serverTLSCfg.NextProtos = []string{alpnOffer}
+	if len(alpnOffers) > 0 {
+		// Defensive copy: tls.Config retains a reference to the slice.
+		serverTLSCfg.NextProtos = append([]string(nil), alpnOffers...)
 	}
 
 	tlsConn, clientSnap, err := tlslayer.Server(ctx, clientConn, serverTLSCfg)
