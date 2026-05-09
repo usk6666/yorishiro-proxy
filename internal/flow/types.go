@@ -187,8 +187,21 @@ type StreamUpdate struct {
 	BlockedBy string
 	// Duration sets the stream duration.
 	Duration time.Duration
-	// Tags replaces the stream tags.
+	// Tags replaces the stream tags. Mutually exclusive with AppendTags;
+	// callers must pick one or the other in a single update.
 	Tags map[string]string
+	// AppendTags merges the supplied entries into the stream's existing
+	// tags column without clobbering keys that are not present in the
+	// map. Used by the live OnComplete recorder (USK-797) so the
+	// classification "error" tag does not erase tags written earlier in
+	// the stream's lifetime (e.g. TLS metadata, USK-790 tls-handshake
+	// meta tags).
+	//
+	// Concurrency: the merge is performed inside the SQLiteStore's
+	// single-writer goroutine, so it is atomic with respect to other
+	// UpdateStream / SaveStream calls. Mutually exclusive with Tags;
+	// implementations reject updates that set both.
+	AppendTags map[string]string
 	// ServerAddr sets the upstream server address in ConnInfo.
 	// Only applied when non-empty.
 	ServerAddr string

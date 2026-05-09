@@ -195,8 +195,34 @@ func (s *SQLiteStore) saveStreamSync(ctx context.Context, st *Stream) error {
 }
 
 // UpdateStream applies partial updates to an existing stream.
+//
+// When update.AppendTags is non-nil and non-empty, the existing tags JSON
+// blob is read inside the single-writer goroutine, the supplied entries
+// are merged on top of the existing map (later keys win), and the merged
+// JSON is written back. AppendTags is mutually exclusive with Tags; an
+// update that sets both is rejected to avoid ambiguous semantics
+// (USK-797). When the row is missing a tags blob the merge starts from
+// an empty map; AppendTags also writes when the row currently has no
+// tags so the classification "error" tag is not lost.
 func (s *SQLiteStore) UpdateStream(ctx context.Context, id string, update StreamUpdate) error {
+	if update.Tags != nil && len(update.AppendTags) > 0 {
+		return fmt.Errorf("update stream %s: Tags and AppendTags are mutually exclusive", id)
+	}
 	return s.enqueueWrite(ctx, func(ctx context.Context) error {
+		// Resolve AppendTags into a concrete Tags assignment by reading
+		// the current row and merging. Performed inside the write
+		// goroutine so the read+write is atomic with respect to other
+		// queued writes; concurrent reads from outside the goroutine
+		// only see the post-commit state.
+		if len(update.AppendTags) > 0 {
+			merged, err := s.mergeStreamTagsLocked(ctx, id, update.AppendTags)
+			if err != nil {
+				return err
+			}
+			update.AppendTags = nil
+			update.Tags = merged
+		}
+
 		sets, args, err := buildStreamUpdateSets(update)
 		if err != nil {
 			return err
@@ -212,6 +238,59 @@ func (s *SQLiteStore) UpdateStream(ctx context.Context, id string, update Stream
 		}
 		return nil
 	})
+}
+
+// mergeStreamTagsLocked reads the current tags column for id, decodes
+// the JSON blob into a map, overlays the supplied entries on top, and
+// returns the merged map. A missing row, an empty / "{}" tags value, or
+// a malformed JSON blob all degrade to "treat the existing tags as
+// empty"; the caller's writes still land. Errors are reserved for SQL
+// driver failures so the queued write can surface them up.
+//
+// Must be called from inside the SQLiteStore.writeLoop goroutine — the
+// caller is responsible for the single-writer discipline that makes the
+// read+merge+write atomic.
+func (s *SQLiteStore) mergeStreamTagsLocked(ctx context.Context, id string, overlay map[string]string) (map[string]string, error) {
+	var current string
+	row := s.db.QueryRowContext(ctx, `SELECT tags FROM streams WHERE id = ?`, id)
+	if err := row.Scan(&current); err != nil {
+		if err == sql.ErrNoRows {
+			// Row missing: nothing to merge against. The downstream
+			// UPDATE will be a no-op (rowcount 0), but returning the
+			// overlay here keeps the write path uniform.
+			merged := make(map[string]string, len(overlay))
+			for k, v := range overlay {
+				merged[k] = v
+			}
+			return merged, nil
+		}
+		return nil, fmt.Errorf("read tags for stream %s: %w", id, err)
+	}
+	merged := make(map[string]string, len(overlay))
+	if current != "" && current != "{}" {
+		if err := json.Unmarshal([]byte(current), &merged); err != nil {
+			// Treat a corrupt blob as "no prior tags" — the alternative
+			// is dropping the operator-visible "error" tag the caller is
+			// trying to record, which is strictly worse for diagnostics.
+			s.logger.Warn("failed to parse stream tags during merge",
+				"stream_id", id,
+				"value", current,
+				"error", err,
+			)
+			merged = make(map[string]string, len(overlay))
+		}
+	}
+	if merged == nil {
+		// Unmarshal of literal JSON "null" (or any future blob that decodes
+		// to a nil map) leaves merged == nil; the overlay assignment below
+		// would then panic inside the writeLoop goroutine. Re-init so the
+		// caller's writes still land.
+		merged = make(map[string]string, len(overlay))
+	}
+	for k, v := range overlay {
+		merged[k] = v
+	}
+	return merged, nil
 }
 
 // buildStreamUpdateSets translates a StreamUpdate into SQL SET clauses and

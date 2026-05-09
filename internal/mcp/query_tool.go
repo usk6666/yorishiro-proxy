@@ -361,10 +361,17 @@ func extractAnomalies(tags map[string]string) []queryAnomaly {
 
 // queryFlowsEntry is a single flow entry in the flows query response.
 type queryFlowsEntry struct {
-	ID              string            `json:"id"`
-	Protocol        string            `json:"protocol"`
-	Scheme          string            `json:"scheme,omitempty"`
-	State           string            `json:"state"`
+	ID       string `json:"id"`
+	Protocol string `json:"protocol"`
+	Scheme   string `json:"scheme,omitempty"`
+	State    string `json:"state"`
+	// FailureReason carries the canonical layer.ErrorCode label
+	// (refused / canceled / aborted / internal_error / protocol_error)
+	// or one of the recorder-specific labels (e.g. "upstream_tls_error")
+	// when state == "error". Empty for state != "error" or for errored
+	// streams that did not surface a classifiable signal (USK-797 makes
+	// this column visible to MCP clients).
+	FailureReason   string            `json:"failure_reason,omitempty"`
 	Method          string            `json:"method"`
 	URL             string            `json:"url"`
 	StatusCode      int               `json:"status_code"`
@@ -482,6 +489,7 @@ func (s *Server) handleQueryFlows(ctx context.Context, input queryInput) (*gomcp
 			Protocol:        fl.Protocol,
 			Scheme:          fl.Scheme,
 			State:           fl.State,
+			FailureReason:   fl.FailureReason,
 			Method:          method,
 			URL:             urlStr,
 			StatusCode:      statusCode,
@@ -521,8 +529,15 @@ type queryFlowResult struct {
 	// flow when present; otherwise from the response-side flow as a
 	// fallback so observability holds even when the request is missing
 	// (e.g. partial captures).
-	HTTPVersion           string              `json:"http_version,omitempty"`
-	State                 string              `json:"state"`
+	HTTPVersion string `json:"http_version,omitempty"`
+	State       string `json:"state"`
+	// FailureReason carries the canonical layer.ErrorCode label
+	// (refused / canceled / aborted / internal_error / protocol_error)
+	// or one of the recorder-specific labels (e.g. "upstream_tls_error")
+	// when state == "error". Empty otherwise. The full err.Error()
+	// string for the same event is available under tags["error"]
+	// (USK-797).
+	FailureReason         string              `json:"failure_reason,omitempty"`
 	Method                string              `json:"method"`
 	URL                   string              `json:"url"`
 	RequestHeaders        map[string][]string `json:"request_headers"`
@@ -909,6 +924,7 @@ func (s *Server) handleQueryFlow(ctx context.Context, input queryInput) (*gomcp.
 		Scheme:                      fl.Scheme,
 		HTTPVersion:                 resolveHTTPVersion(cat),
 		State:                       fl.State,
+		FailureReason:               fl.FailureReason,
 		Method:                      method,
 		URL:                         urlStr,
 		RequestHeaders:              reqHeaders,

@@ -2206,6 +2206,166 @@ func TestSQLiteStore_StreamFailureReason_EmptySkipsUpdate(t *testing.T) {
 	}
 }
 
+// TestSQLiteStore_StreamUpdate_AppendTags_MergesWithExisting (USK-797)
+// pins the merge semantics introduced for OnComplete error tagging:
+// AppendTags must overlay onto the row's current tags column, not
+// replace it. Earlier-written tags (e.g. RecordStep TLS metadata,
+// USK-790 tls-handshake meta) are preserved; conflicting keys take the
+// AppendTags value.
+func TestSQLiteStore_StreamUpdate_AppendTags_MergesWithExisting(t *testing.T) {
+	t.Parallel()
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	st := &Stream{
+		Protocol:  "HTTP/2",
+		State:     "active",
+		Timestamp: time.Now().UTC(),
+		Tags: map[string]string{
+			"prior":    "kept",
+			"conflict": "before",
+		},
+	}
+	if err := store.SaveStream(ctx, st); err != nil {
+		t.Fatalf("SaveStream: %v", err)
+	}
+
+	if err := store.UpdateStream(ctx, st.ID, StreamUpdate{
+		State: "error",
+		AppendTags: map[string]string{
+			"error":    "dial: stream error refused: layer shutdown",
+			"conflict": "after",
+		},
+	}); err != nil {
+		t.Fatalf("UpdateStream: %v", err)
+	}
+
+	got, err := store.GetStream(ctx, st.ID)
+	if err != nil {
+		t.Fatalf("GetStream: %v", err)
+	}
+	if got.Tags["prior"] != "kept" {
+		t.Errorf("Tags[\"prior\"] = %q, want %q (must survive merge)", got.Tags["prior"], "kept")
+	}
+	if got.Tags["error"] != "dial: stream error refused: layer shutdown" {
+		t.Errorf("Tags[\"error\"] = %q, want the appended value", got.Tags["error"])
+	}
+	if got.Tags["conflict"] != "after" {
+		t.Errorf("Tags[\"conflict\"] = %q, want %q (overlay wins)", got.Tags["conflict"], "after")
+	}
+}
+
+// TestSQLiteStore_StreamUpdate_AppendTags_OnEmptyExisting verifies the
+// "no prior tags" path: AppendTags must still write its entries when
+// the row's tags column is empty / missing.
+func TestSQLiteStore_StreamUpdate_AppendTags_OnEmptyExisting(t *testing.T) {
+	t.Parallel()
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	st := &Stream{
+		Protocol:  "HTTP/2",
+		State:     "active",
+		Timestamp: time.Now().UTC(),
+	}
+	if err := store.SaveStream(ctx, st); err != nil {
+		t.Fatalf("SaveStream: %v", err)
+	}
+
+	if err := store.UpdateStream(ctx, st.ID, StreamUpdate{
+		State:         "error",
+		FailureReason: "refused",
+		AppendTags: map[string]string{
+			"error": "boom",
+		},
+	}); err != nil {
+		t.Fatalf("UpdateStream: %v", err)
+	}
+
+	got, err := store.GetStream(ctx, st.ID)
+	if err != nil {
+		t.Fatalf("GetStream: %v", err)
+	}
+	if got.Tags["error"] != "boom" {
+		t.Errorf("Tags[\"error\"] = %q, want %q", got.Tags["error"], "boom")
+	}
+	if got.FailureReason != "refused" {
+		t.Errorf("FailureReason = %q, want %q", got.FailureReason, "refused")
+	}
+}
+
+// TestSQLiteStore_StreamUpdate_AppendTags_RejectsBothTagFields verifies
+// the defensive guard against ambiguous semantics: a single update may
+// not set both Tags (replace) and AppendTags (merge).
+func TestSQLiteStore_StreamUpdate_AppendTags_RejectsBothTagFields(t *testing.T) {
+	t.Parallel()
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	st := &Stream{
+		Protocol:  "HTTP/2",
+		State:     "active",
+		Timestamp: time.Now().UTC(),
+	}
+	if err := store.SaveStream(ctx, st); err != nil {
+		t.Fatalf("SaveStream: %v", err)
+	}
+
+	err := store.UpdateStream(ctx, st.ID, StreamUpdate{
+		Tags:       map[string]string{"a": "1"},
+		AppendTags: map[string]string{"b": "2"},
+	})
+	if err == nil {
+		t.Fatal("UpdateStream with both Tags and AppendTags should fail")
+	}
+}
+
+// TestSQLiteStore_StreamUpdate_AppendTags_HandlesJSONNullTags is the defensive
+// guard against a literal JSON "null" stored in the tags column. No in-tree
+// write path emits this today, but a regression or external mutation would
+// otherwise panic the writeLoop goroutine on `merged[k] = v` (assignment
+// to a nil map). The merge must treat null the same as an empty / missing
+// value and let the overlay land.
+func TestSQLiteStore_StreamUpdate_AppendTags_HandlesJSONNullTags(t *testing.T) {
+	t.Parallel()
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	st := &Stream{
+		Protocol:  "HTTP/2",
+		State:     "active",
+		Timestamp: time.Now().UTC(),
+	}
+	if err := store.SaveStream(ctx, st); err != nil {
+		t.Fatalf("SaveStream: %v", err)
+	}
+
+	// Plant the literal JSON null directly via the underlying DB so the
+	// merge path actually decodes it. Goes through enqueueWrite to keep
+	// the single-writer discipline intact.
+	if err := store.enqueueWrite(ctx, func(ctx context.Context) error {
+		_, err := store.db.ExecContext(ctx,
+			`UPDATE streams SET tags = ? WHERE id = ?`, "null", st.ID)
+		return err
+	}); err != nil {
+		t.Fatalf("seed null tags: %v", err)
+	}
+
+	if err := store.UpdateStream(ctx, st.ID, StreamUpdate{
+		AppendTags: map[string]string{"error": "boom"},
+	}); err != nil {
+		t.Fatalf("UpdateStream: %v", err)
+	}
+
+	got, err := store.GetStream(ctx, st.ID)
+	if err != nil {
+		t.Fatalf("GetStream: %v", err)
+	}
+	if got.Tags["error"] != "boom" {
+		t.Errorf("Tags[\"error\"] = %q, want %q", got.Tags["error"], "boom")
+	}
+}
+
 // TestSQLiteStore_FlowTrailers_RoundTrip covers the USK-621 trailers column:
 // Flow.Trailers persists through SaveFlow and is read back via GetFlow /
 // GetFlows, preserving duplicate values and value order.

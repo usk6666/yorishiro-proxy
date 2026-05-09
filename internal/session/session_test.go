@@ -523,6 +523,69 @@ func TestRunSession_DialFailure(t *testing.T) {
 	}
 }
 
+// TestRunSession_DialFailure_StreamErrorReachesOnComplete (USK-797)
+// pins the contract that a stream-level dial failure (HTTP/2
+// upstreamH2.OpenStream returning *layer.StreamError{Code: ErrorRefused}
+// when the layer is shutting down) reaches the OnComplete callback with
+// the StreamError still in the unwrap chain. ClassifyError must be able
+// to extract the canonical "refused" label from this err so
+// proxybuild's session OnComplete can persist it as
+// flow.failure_reason.
+//
+// This is the session-level half of the USK-797 wiring; the
+// proxybuild-level half (failure_reason + tags["error"] persisted)
+// lives in internal/proxybuild/oncomplete_error_test.go.
+func TestRunSession_DialFailure_StreamErrorReachesOnComplete(t *testing.T) {
+	req := makeEnvelopeWithStreamID(envelope.Send, 0, "h2-stream-797")
+	clientCh := &mockChannel{
+		streamID:      "client",
+		nextEnvelopes: []*envelope.Envelope{req},
+	}
+
+	streamErr := &layer.StreamError{Code: layer.ErrorRefused, Reason: "layer shutdown"}
+	dial := func(_ context.Context, _ *envelope.Envelope) (layer.Channel, error) {
+		return nil, streamErr
+	}
+	p := pipeline.New(passStep{})
+
+	var (
+		called      bool
+		gotStreamID string
+		gotErr      error
+	)
+	opts := SessionOptions{
+		OnComplete: func(_ context.Context, streamID string, err error) {
+			called = true
+			gotStreamID = streamID
+			gotErr = err
+		},
+	}
+
+	err := RunSession(context.Background(), clientCh, dial, p, opts)
+	if err == nil {
+		t.Fatal("RunSession should return error on stream-level dial failure")
+	}
+	if !errors.Is(err, streamErr) {
+		t.Errorf("RunSession err = %v, does not wrap %v", err, streamErr)
+	}
+	if !called {
+		t.Fatal("OnComplete was not called")
+	}
+	if gotStreamID != "h2-stream-797" {
+		t.Errorf("OnComplete streamID = %q, want %q", gotStreamID, "h2-stream-797")
+	}
+	var se *layer.StreamError
+	if !errors.As(gotErr, &se) {
+		t.Fatalf("OnComplete err = %v, want unwrappable to *layer.StreamError", gotErr)
+	}
+	if se.Code != layer.ErrorRefused {
+		t.Errorf("StreamError.Code = %v, want %v", se.Code, layer.ErrorRefused)
+	}
+	if got := ClassifyError(gotErr); got != "refused" {
+		t.Errorf("ClassifyError(OnComplete err) = %q, want %q", got, "refused")
+	}
+}
+
 func TestRunSession_ContextCancel(t *testing.T) {
 	clientCh := &mockChannel{
 		streamID:  "stream",

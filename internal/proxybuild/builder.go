@@ -714,14 +714,60 @@ func buildSessionOptions(deps Deps, listenerName string) session.SessionOptions 
 			if err != nil && !errors.Is(err, io.EOF) {
 				state = "error"
 			}
-			_ = store.UpdateStream(ctx, streamID, flow.StreamUpdate{
+			update := flow.StreamUpdate{
 				State:         state,
 				FailureReason: session.ClassifyError(err),
-			})
+			}
+			// USK-797: persist the raw err string under tags["error"] so
+			// operators can distinguish e.g. "dial: stream error refused:
+			// layer shutdown" from "client.Next: read tcp ...: use of
+			// closed network connection" without re-deriving it from the
+			// log stream. ClassifyError only returns the canonical
+			// taxonomy label (refused / canceled / aborted / ...); the
+			// full message is what makes the row actionable. AppendTags
+			// preserves any tags previously written by RecordStep / TLS
+			// metadata projections (CLAUDE.md MITM principle: do not
+			// clobber what the wire / earlier steps already recorded).
+			if state == "error" && err != nil {
+				update.AppendTags = map[string]string{
+					"error": truncateErrorTag(err.Error()),
+				}
+			}
+			_ = store.UpdateStream(ctx, streamID, update)
 		}
 		opts.OnPipelineDrop = buildPipelineDropRecorder(store, listenerName, deps.Logger, blocked)
 	}
 	return opts
+}
+
+// errorTagMaxLen caps the size of the err.Error() string persisted under
+// tags["error"] (USK-797). Stream tags are loaded into memory and shipped
+// over MCP per query — a runaway nested-wrap chain or a multi-MB
+// transport-layer error message must not be allowed to balloon the row.
+// 1 KiB is large enough for "dial: stream error refused: ..." patterns
+// (~40 chars) plus several layers of fmt.Errorf wrap context, which is
+// the actionable information; anything beyond that is structural noise.
+const errorTagMaxLen = 1024
+
+// truncateErrorTag returns msg, or msg truncated to errorTagMaxLen with
+// a marker suffix when the source exceeds the cap. The marker uses the
+// ASCII ellipsis sequence so the output remains valid UTF-8 even if the
+// truncation lands mid-rune (multi-byte runes are dropped wholesale).
+func truncateErrorTag(msg string) string {
+	if len(msg) <= errorTagMaxLen {
+		return msg
+	}
+	const marker = "...[truncated]"
+	if errorTagMaxLen <= len(marker) {
+		return msg[:errorTagMaxLen]
+	}
+	cut := errorTagMaxLen - len(marker)
+	// Walk back to a rune boundary so we don't slice in the middle of a
+	// multi-byte UTF-8 sequence.
+	for cut > 0 && (msg[cut]&0xC0) == 0x80 {
+		cut--
+	}
+	return msg[:cut] + marker
 }
 
 // blockedStreamSet is a tiny concurrent-safe set of streamIDs that have

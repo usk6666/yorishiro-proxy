@@ -341,6 +341,84 @@ func TestQuery_Sessions_NilStore(t *testing.T) {
 	}
 }
 
+// TestQuery_Sessions_SurfacesFailureReason (USK-797) verifies the
+// flows / flow MCP responses expose Stream.FailureReason as the
+// "failure_reason" JSON field. Before this fix the column was
+// populated in SQLite but elided from the DTO, leaving operators with
+// state="error" rows and no clue what went wrong.
+func TestQuery_Sessions_SurfacesFailureReason(t *testing.T) {
+	t.Parallel()
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	st := &flow.Stream{
+		ID:            "sess-err",
+		ConnID:        "conn-err",
+		Protocol:      "HTTP/2",
+		State:         "error",
+		FailureReason: "refused",
+		Timestamp:     time.Now().UTC(),
+		Tags:          map[string]string{"error": "dial: stream error refused: layer shutdown"},
+	}
+	if err := store.SaveStream(ctx, st); err != nil {
+		t.Fatalf("SaveStream: %v", err)
+	}
+
+	cs := setupQueryTestSession(t, store)
+
+	// flows resource — list view.
+	result := callQuery(t, cs, queryInput{Resource: "flows"})
+	if result.IsError {
+		t.Fatalf("flows query: %v", result.Content)
+	}
+	var listOut queryFlowsResult
+	unmarshalQueryResult(t, result, &listOut)
+	if len(listOut.Flows) != 1 {
+		t.Fatalf("flows = %d, want 1", len(listOut.Flows))
+	}
+	if listOut.Flows[0].FailureReason != "refused" {
+		t.Errorf("flows[0].FailureReason = %q, want %q", listOut.Flows[0].FailureReason, "refused")
+	}
+	if got := listOut.Flows[0].Tags["error"]; got == "" {
+		t.Error("flows[0].Tags[\"error\"] is empty; want the err string")
+	}
+
+	// flow resource — detail view.
+	result = callQuery(t, cs, queryInput{Resource: "flow", ID: "sess-err"})
+	if result.IsError {
+		t.Fatalf("flow query: %v", result.Content)
+	}
+	var detail queryFlowResult
+	unmarshalQueryResult(t, result, &detail)
+	if detail.FailureReason != "refused" {
+		t.Errorf("flow.FailureReason = %q, want %q", detail.FailureReason, "refused")
+	}
+	if detail.Tags["error"] == "" {
+		t.Error("flow.Tags[\"error\"] is empty; want the err string")
+	}
+
+	// Verify the JSON shape uses the snake_case column name so the
+	// USK-797 fix matches existing column conventions (other Stream
+	// fields use snake_case in MCP output).
+	if !strings.Contains(textPayload(t, result), `"failure_reason":"refused"`) {
+		t.Errorf("flow JSON does not contain expected failure_reason field: %s", textPayload(t, result))
+	}
+}
+
+// textPayload extracts the TextContent payload from a CallToolResult so
+// JSON-shape assertions can run without re-encoding.
+func textPayload(t *testing.T, result *gomcp.CallToolResult) string {
+	t.Helper()
+	if len(result.Content) == 0 {
+		t.Fatal("result has no content")
+	}
+	tc, ok := result.Content[0].(*gomcp.TextContent)
+	if !ok {
+		t.Fatalf("content[0] type = %T, want *TextContent", result.Content[0])
+	}
+	return tc.Text
+}
+
 // --- Test: flow resource ---
 
 func TestQuery_Session_Success(t *testing.T) {
