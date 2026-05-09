@@ -263,6 +263,31 @@ func (l *Layer) GoAwayClosed() bool {
 	return false
 }
 
+// IsShutdown reports whether this Layer's shutdown channel has been closed.
+// A closed shutdown channel means the Layer can no longer accept new streams
+// — OpenStream returns *layer.StreamError{Code: ErrorRefused, Reason: "layer
+// shutdown"} for any caller in this state.
+//
+// USK-796: complements GoAwayClosed for the upstream-clean-EOF path. When
+// handleReadError observes io.EOF (upstream FIN), it closes the shutdown
+// channel without setting lastErr and without exchanging GOAWAY, so neither
+// LastReaderError() nor GoAwayClosed() flags the Layer as dead. The pool
+// must consult IsShutdown() to evict such entries before handing them to
+// the next CONNECT, otherwise the pool fast-path immediately surfaces
+// "layer shutdown" failures.
+//
+// Implemented as a non-blocking select on the existing shutdown channel:
+// no new state, no new locks, safe to call concurrently with the writer
+// path that closes the channel via shutdownOnce.
+func (l *Layer) IsShutdown() bool {
+	select {
+	case <-l.shutdown:
+		return true
+	default:
+		return false
+	}
+}
+
 // ActiveStreamCount returns the number of streams currently open or
 // half-closed.
 func (l *Layer) ActiveStreamCount() int {

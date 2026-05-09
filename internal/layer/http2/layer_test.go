@@ -430,6 +430,90 @@ func TestLayer_Channels_ChannelEmittedOnPeerHeaders(t *testing.T) {
 	}
 }
 
+// --- IsShutdown ---
+
+// TestLayer_IsShutdown_FalseBeforeShutdown verifies that a freshly-constructed
+// Layer reports IsShutdown() == false before any teardown signal is observed.
+// This is the pool-fast-path "healthy" precondition — selectLocked must
+// retain the entry rather than evicting it.
+func TestLayer_IsShutdown_FalseBeforeShutdown(t *testing.T) {
+	l, peer, cleanup := startClientLayer(t)
+	defer cleanup()
+	peer.consumePeerSettings(t)
+
+	if l.IsShutdown() {
+		t.Fatalf("IsShutdown() before any shutdown = true, want false")
+	}
+}
+
+// TestLayer_IsShutdown_TrueAfterClose verifies that IsShutdown() observes the
+// Close() teardown — Close shuts the writer queue via shutdownOnce.Do, and
+// IsShutdown reads via non-blocking select on the same channel. Repeated
+// calls remain idempotent (the underlying select on a closed channel is
+// monotonic).
+//
+// USK-796: this is the pool-evict signal for the upstream-clean-EOF path.
+// After the upstream sends FIN, handleReadError closes l.shutdown via the
+// same shutdownOnce.Do; IsShutdown() must surface that to the pool.
+func TestLayer_IsShutdown_TrueAfterClose(t *testing.T) {
+	l, peer, _ := startClientLayer(t)
+	peer.consumePeerSettings(t)
+
+	if err := l.Close(); err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrClosedPipe) {
+		t.Fatalf("Close: %v", err)
+	}
+	_ = peer.conn.Close()
+
+	if !l.IsShutdown() {
+		t.Fatalf("IsShutdown() after Close = false, want true")
+	}
+	// Idempotent: repeated reads on a closed channel keep returning true.
+	for i := 0; i < 3; i++ {
+		if !l.IsShutdown() {
+			t.Fatalf("IsShutdown() call #%d = false, want true (idempotent)", i)
+		}
+	}
+}
+
+// TestLayer_IsShutdown_TrueAfterUpstreamEOF verifies the precise USK-796
+// regression: when the underlying conn observes io.EOF (upstream FIN),
+// handleReadError closes l.shutdown without setting lastErr and without
+// exchanging GOAWAY. IsShutdown() must flip to true so the pool can evict
+// the dead Layer.
+//
+// The peer simulates "clean upstream FIN" by closing its end of the pipe,
+// which surfaces as io.EOF in the Layer's reader loop.
+func TestLayer_IsShutdown_TrueAfterUpstreamEOF(t *testing.T) {
+	l, peer, cleanup := startClientLayer(t)
+	defer cleanup()
+	peer.consumePeerSettings(t)
+
+	// Pre-EOF invariant: not shut down yet.
+	if l.IsShutdown() {
+		t.Fatalf("IsShutdown() before EOF = true, want false")
+	}
+
+	// Close the peer end → reader observes io.EOF → handleReadError closes
+	// shutdown via shutdownOnce.Do without touching lastErr.
+	_ = peer.conn.Close()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if l.IsShutdown() {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !l.IsShutdown() {
+		t.Fatalf("IsShutdown() after upstream EOF = false, want true")
+	}
+	// USK-796 invariant: lastErr stays nil for clean EOF, so the pool must
+	// rely on IsShutdown() (not LastReaderError) to evict.
+	if got := l.LastReaderError(); got != nil {
+		t.Errorf("LastReaderError() after clean EOF = %v, want nil (USK-796 precondition)", got)
+	}
+}
+
 // --- WithInitialSettings ---
 
 func TestLayer_WithInitialSettings(t *testing.T) {

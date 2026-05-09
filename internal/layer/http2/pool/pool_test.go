@@ -22,6 +22,7 @@ type fakeLayer struct {
 	lastErrMu         sync.Mutex
 	lastErr           error
 	goawayClosed      atomic.Bool
+	shutdown          atomic.Bool
 	closeBlockCh      chan struct{} // when non-nil, Close blocks on it
 	closed            atomic.Bool
 	closeCount        atomic.Int32
@@ -33,6 +34,7 @@ func newFakeLayer(id string) *fakeLayer { return &fakeLayer{id: id} }
 func (f *fakeLayer) ActiveStreamCount() int           { return int(f.active.Load()) }
 func (f *fakeLayer) PeerMaxConcurrentStreams() uint32 { return f.peerMax.Load() }
 func (f *fakeLayer) GoAwayClosed() bool               { return f.goawayClosed.Load() }
+func (f *fakeLayer) IsShutdown() bool                 { return f.shutdown.Load() }
 
 func (f *fakeLayer) LastReaderError() error {
 	f.lastErrMu.Lock()
@@ -47,6 +49,8 @@ func (f *fakeLayer) setReaderErr(err error) {
 }
 
 func (f *fakeLayer) setGoAwayClosed(v bool) { f.goawayClosed.Store(v) }
+
+func (f *fakeLayer) setShutdown(v bool) { f.shutdown.Store(v) }
 
 func (f *fakeLayer) Close() error {
 	f.closeCount.Add(1)
@@ -565,6 +569,72 @@ func TestLivenessProbe_DeadReader(t *testing.T) {
 		t.Fatalf("dead layer should not be returned")
 	}
 	waitUntil(t, func() bool { return fake.closeCount.Load() > 0 })
+}
+
+// TestLivenessProbe_Shutdown covers USK-796: when the upstream peer cleanly
+// closes the h2 connection (FIN), handleReadError closes the Layer's
+// shutdown channel without setting lastErr and without exchanging GOAWAY.
+// LastReaderError() and GoAwayClosed() both return falsy values, so before
+// this fix the pool retained the dead Layer and the next CONNECT
+// fast-path-hit it, immediately surfacing "layer shutdown" via OpenStream.
+// The pool must consult IsShutdown() to evict such entries so the next
+// caller dials a fresh connection.
+func TestLivenessProbe_Shutdown(t *testing.T) {
+	p := New(PoolOptions{})
+	defer p.Close()
+	key := PoolKey{HostPort: "h:443", TLSConfigHash: "x"}
+	fake := newFakeLayer("shutdown")
+	fake.setShutdown(true)
+	putFake(t, p, key, fake)
+
+	g, err := getFake(t, p, key)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if g != nil {
+		t.Fatalf("shutdown layer should not be returned")
+	}
+	waitUntil(t, func() bool { return fake.closeCount.Load() > 0 })
+
+	// Bucket must be empty after eviction so the next GetOrDial goes through
+	// to a fresh dial rather than returning the dead entry again.
+	p.mu.Lock()
+	_, present := p.entries[key]
+	p.mu.Unlock()
+	if present {
+		t.Fatalf("evicted shutdown entry still present in bucket")
+	}
+}
+
+// TestLivenessProbe_Shutdown_GetOrDialDialsFresh confirms the regression-
+// driving symptom: a pool entry whose IsShutdown() returns true must not be
+// returned by the GetOrDial fast path. Instead, GetOrDial should dial a
+// fresh Layer. This is the precise failure mode reported in USK-796 (the
+// pool fast-path returning a dead Layer to the next CONNECT).
+func TestLivenessProbe_Shutdown_GetOrDialDialsFresh(t *testing.T) {
+	p := New(PoolOptions{})
+	defer p.Close()
+	key := PoolKey{HostPort: "h:443", TLSConfigHash: "x"}
+	dead := newFakeLayer("dead")
+	dead.setShutdown(true)
+	putFake(t, p, key, dead)
+
+	fresh := newFakeLayer("fresh")
+	var dialCount atomic.Int32
+	got, err := getOrDialFake(t, p, key, func() (*fakeLayer, error) {
+		dialCount.Add(1)
+		return fresh, nil
+	})
+	if err != nil {
+		t.Fatalf("GetOrDial: %v", err)
+	}
+	if got != fresh {
+		t.Fatalf("GetOrDial returned dead layer; want fresh dial")
+	}
+	if dialCount.Load() != 1 {
+		t.Fatalf("dialFn called %d times, want 1 (fresh dial after shutdown evict)", dialCount.Load())
+	}
+	waitUntil(t, func() bool { return dead.closeCount.Load() > 0 })
 }
 
 // TestLivenessProbe_GoAwayClosed covers USK-716: when the upstream peer has

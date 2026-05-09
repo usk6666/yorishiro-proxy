@@ -69,6 +69,7 @@ type poolLayer interface {
 	PeerMaxConcurrentStreams() uint32
 	LastReaderError() error
 	GoAwayClosed() bool
+	IsShutdown() bool
 	Close() error
 }
 
@@ -177,6 +178,20 @@ func (p *Pool) selectLocked(key PoolKey) *entry {
 		if e.layer.GoAwayClosed() {
 			dead = append(dead, e)
 			slog.Debug("h2pool goaway evict", "key", key.String())
+			continue
+		}
+		// Shutdown-closed entries cover the upstream-clean-EOF path
+		// (USK-796). When the upstream sends FIN on an idle h2 conn,
+		// handleReadError closes the Layer's shutdown channel without
+		// setting lastErr and without exchanging GOAWAY, so neither
+		// LastReaderError nor GoAwayClosed catches the dead entry. Edge
+		// cases like nghttp2.org / GFE recycle idle connections this way;
+		// without this check the pool fast-path returns the dead Layer to
+		// the next CONNECT and OpenStream immediately fails with "layer
+		// shutdown".
+		if e.layer.IsShutdown() {
+			dead = append(dead, e)
+			slog.Debug("h2pool shutdown evict", "key", key.String())
 			continue
 		}
 		kept = append(kept, e)
