@@ -230,6 +230,7 @@ func buildStreamUpdateSets(update StreamUpdate) ([]string, []interface{}, error)
 	addString("protocol", update.Protocol)
 	addString("state", update.State)
 	addString("failure_reason", update.FailureReason)
+	addString("blocked_by", update.BlockedBy)
 	if update.Duration != 0 {
 		sets = append(sets, "duration_ms = ?")
 		args = append(args, update.Duration.Milliseconds())

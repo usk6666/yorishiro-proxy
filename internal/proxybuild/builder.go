@@ -447,7 +447,7 @@ func buildPipeline(deps Deps, encoders *pipeline.WireEncoderRegistry, logger *sl
 // Pattern mirrors the proven recipe in
 // internal/connector/full_listener_integration_test.go.
 func buildOnStack(p *pipeline.Pipeline, deps Deps, logger *slog.Logger) connector.OnStackFunc {
-	sessOpts := buildSessionOptions(deps)
+	sessOpts := buildSessionOptions(deps, deps.ListenerName)
 	return func(ctx context.Context, stack *connector.ConnectionStack, _, _ *envelope.TLSSnapshot, target string) {
 		defer stack.Close()
 
@@ -562,7 +562,7 @@ func runHTTP1ExchangeLoop(
 // exit (handler-config-level guarantee), so this closure must not Close
 // upstreamH2; only the per-stream channels and the WaitGroup ordering matter.
 func buildOnHTTP2Stack(p *pipeline.Pipeline, deps Deps, logger *slog.Logger) connector.OnHTTP2StackFunc {
-	sessOpts := buildSessionOptions(deps)
+	sessOpts := buildSessionOptions(deps, deps.ListenerName)
 	grpcOpts := connector.GRPCOptionsFromBuildConfig(deps.BuildConfig)
 	grpcwebOpts := connector.GRPCWebOptionsFromBuildConfig(deps.BuildConfig)
 	return func(ctx context.Context, stack *connector.ConnectionStack, upstreamH2 *http2.Layer, _, _ *envelope.TLSSnapshot, target string) {
@@ -648,7 +648,13 @@ func buildOnHTTP2Stack(p *pipeline.Pipeline, deps Deps, logger *slog.Logger) con
 //     internal/layer/http2/http2_integration_test.go.
 //     OnComplete is omitted when FlowStore is nil (e.g. test stacks that do
 //     not record).
-func buildSessionOptions(deps Deps) session.SessionOptions {
+//
+//   - OnPipelineDrop persists an audit Stream when the Pipeline Drops an
+//     envelope with a BlockedBy attribution (USK-782). This bypasses the
+//     RecordScope filter — blocked envelopes are always recorded so the
+//     operator can see what was rejected even when capture_scope hides
+//     normal traffic.
+func buildSessionOptions(deps Deps, listenerName string) session.SessionOptions {
 	opts := session.SessionOptions{}
 	if deps.PluginV2Engine != nil {
 		opts.LifecycleEngine = deps.PluginV2Engine
@@ -656,8 +662,25 @@ func buildSessionOptions(deps Deps) session.SessionOptions {
 	}
 	if deps.FlowStore != nil {
 		store := deps.FlowStore
+		// USK-782: shared state between OnPipelineDrop and OnComplete so
+		// the session's terminal state-finaliser does not clobber the
+		// audit Stream that OnPipelineDrop wrote. OnComplete fires with
+		// err=nil on a clean client disconnect after a Drop, which would
+		// otherwise rewrite State="error"+BlockedBy=* to State="complete".
+		blocked := newBlockedStreamSet()
 		opts.OnComplete = func(ctx context.Context, streamID string, err error) {
 			if streamID == "" {
+				return
+			}
+			if blocked.contains(streamID) {
+				// The stream was already finalised by the audit recorder;
+				// skip the normal completion update. Evict the marker now
+				// that we've consumed it so the per-listener set does not
+				// accumulate entries for the proxy's lifetime (USK-782
+				// review fix; CWE-400). OnComplete fires after RunSession's
+				// errgroup.Wait, so no further references to streamID exist
+				// past this point.
+				blocked.remove(streamID)
 				return
 			}
 			state := "complete"
@@ -669,8 +692,158 @@ func buildSessionOptions(deps Deps) session.SessionOptions {
 				FailureReason: session.ClassifyError(err),
 			})
 		}
+		opts.OnPipelineDrop = buildPipelineDropRecorder(store, listenerName, deps.Logger, blocked)
 	}
 	return opts
+}
+
+// blockedStreamSet is a tiny concurrent-safe set of streamIDs that have
+// been finalised as blocked audit Streams. OnPipelineDrop writes; OnComplete
+// reads. Both fire from the session goroutines so contention is bounded by
+// the per-session envelope rate.
+type blockedStreamSet struct {
+	mu  sync.Mutex
+	ids map[string]struct{}
+}
+
+func newBlockedStreamSet() *blockedStreamSet {
+	return &blockedStreamSet{ids: make(map[string]struct{})}
+}
+
+func (b *blockedStreamSet) add(id string) {
+	if id == "" {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.ids[id] = struct{}{}
+}
+
+func (b *blockedStreamSet) contains(id string) bool {
+	if id == "" {
+		return false
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	_, ok := b.ids[id]
+	return ok
+}
+
+// remove evicts the streamID from the set. OnComplete calls this once it
+// has observed the contains() guard so the entry does not accumulate for
+// the lifetime of the listener — the session is terminating and no further
+// references to streamID survive past OnComplete. Without this eviction the
+// per-listener blockedStreamSet grew unboundedly across an attacker-driven
+// stream of Pipeline-Drops (USK-782 review fix; CWE-400).
+func (b *blockedStreamSet) remove(id string) {
+	if id == "" {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	delete(b.ids, id)
+}
+
+// buildPipelineDropRecorder returns a callback that persists a Pipeline-Drop
+// envelope as a flow.Stream with State="error" and BlockedBy=<reason>. It
+// mirrors buildProtocolRejectedRecorder for the Pipeline-Drop path: the
+// Stream is intentionally minimal (no Flow rows) for envelopes whose
+// Drop happened before any L7 message could be projected — but when an
+// HTTPMessage is available (the common case for HostScope/HTTPScope/Safety
+// drops on Send), the Stream's Scheme is populated so MCP query tools can
+// distinguish https vs http audit Streams. Flow rows are never written
+// from this path: blocked envelopes are recorded for audit, not for replay.
+//
+// The recorder always overwrites an existing Stream identified by env.StreamID
+// — Pipeline-Drop emits the audit Stream BEFORE the live path would have
+// otherwise saved a "normal" one, so SaveStream's primary-key conflict on a
+// concurrent reuse is impossible in practice (Drop short-circuits the
+// Pipeline; no Continue path runs after).
+func buildPipelineDropRecorder(store flow.Writer, listenerName string, logger *slog.Logger, blocked *blockedStreamSet) func(context.Context, *envelope.Envelope, string) {
+	if store == nil {
+		return nil
+	}
+	if listenerName == "" {
+		listenerName = DefaultListenerName
+	}
+	return func(ctx context.Context, env *envelope.Envelope, blockedBy string) {
+		if env == nil || blockedBy == "" {
+			return
+		}
+
+		streamID := env.StreamID
+		if streamID == "" {
+			streamID = uuid.New().String()
+		}
+		// Mark this stream as finalised so the session OnComplete callback
+		// does not overwrite our audit attribution. Add up-front so the
+		// guard fires even if SaveStream/UpdateStream below errors.
+		if blocked != nil {
+			blocked.add(streamID)
+		}
+		connID := env.Context.ConnID
+		if connID == "" {
+			connID = connector.ConnIDFromContext(ctx)
+		}
+		clientAddr := connector.ClientAddrFromContext(ctx)
+
+		st := &flow.Stream{
+			ID:        streamID,
+			ConnID:    connID,
+			Protocol:  string(env.Protocol),
+			State:     "error",
+			BlockedBy: blockedBy,
+			Timestamp: time.Now(),
+		}
+		// Project HTTP-typed identity fields when available. Following the
+		// "do not unify across protocols" principle (CLAUDE.md), the Stream
+		// is left minimal for non-HTTP envelopes — RawMessage, WSMessage,
+		// gRPC have no notion of a request URL/method that maps to Stream
+		// fields. Scheme is the only HTTP-derived field on Stream.
+		if msg, ok := env.Message.(*envelope.HTTPMessage); ok && msg != nil {
+			if msg.Scheme != "" {
+				st.Scheme = msg.Scheme
+			}
+		}
+		if clientAddr != "" {
+			st.ConnInfo = &flow.ConnectionInfo{ClientAddr: clientAddr}
+		}
+
+		// Use a background-derived context so a cancelled handler ctx does
+		// not abort the audit record — matches buildProtocolRejectedRecorder.
+		recordCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		// Try SaveStream first. The common path (first Send dropped by
+		// HostScope/HTTPScope/Safety) has no prior Stream row, so this
+		// succeeds. For mid-stream Drops on streaming protocols (gRPC /
+		// WS data frame blocked by SafetyStep) RecordStep already created
+		// a Stream on the first Send; the INSERT then fails with a
+		// constraint violation and we fall back to UpdateStream so the
+		// audit fields (State, BlockedBy) overwrite the active state.
+		if err := store.SaveStream(recordCtx, st); err == nil {
+			return
+		}
+		// Fallback: update the existing Stream with the audit attribution.
+		// We never know upfront which path we're on, so always attempt
+		// SaveStream first to keep the no-prior-row path single-statement.
+		// On a streaming protocol mid-Drop (gRPC / WS data frame blocked
+		// by SafetyStep) the first Send has already created an active
+		// Stream; this UpdateStream rewrites it as a blocked audit record.
+		if uerr := store.UpdateStream(recordCtx, streamID, flow.StreamUpdate{
+			State:     "error",
+			BlockedBy: blockedBy,
+		}); uerr != nil {
+			if logger != nil {
+				logger.Error("proxybuild: pipeline-drop stream save failed",
+					"listener", listenerName,
+					"stream_id", streamID,
+					"blocked_by", blockedBy,
+					"protocol", string(env.Protocol),
+					"error", uerr,
+				)
+			}
+		}
+	}
 }
 
 // buildProtocolRejectedRecorder returns a connector.ProtocolRejectedFunc

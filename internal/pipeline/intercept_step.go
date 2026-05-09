@@ -152,7 +152,10 @@ func (s *InterceptStep) holdAndDispatch(ctx context.Context, env *envelope.Envel
 
 	action, err := s.queue.Hold(ctx, env, matchedRules)
 	if err != nil {
-		// Context cancelled while waiting.
+		// Context cancelled while waiting. No user action ever resolved
+		// the hold; do not attribute this to intercept_drop because no
+		// drop decision was made — the surrounding session is being
+		// torn down.
 		return Result{Action: Drop}
 	}
 
@@ -160,7 +163,7 @@ func (s *InterceptStep) holdAndDispatch(ctx context.Context, env *envelope.Envel
 	case common.ActionRelease:
 		return Result{}
 	case common.ActionDrop:
-		return Result{Action: Drop}
+		return Result{Action: Drop, BlockedBy: BlockedByInterceptDrop}
 	case common.ActionModifyAndForward:
 		// Defense-in-depth: re-check the user-supplied modified envelope
 		// against SafetyStep. The original held envelope already passed
@@ -178,7 +181,11 @@ func (s *InterceptStep) holdAndDispatch(ctx context.Context, env *envelope.Envel
 						slog.String("protocol", string(env.Protocol)),
 					)
 				}
-				return Result{Action: Drop}
+				// Attribute to the underlying Drop reason emitted by the
+				// re-checked SafetyStep (BlockedBySafetyFilter) so the
+				// recorded Stream surfaces the same audit trail as a
+				// direct safety block.
+				return Result{Action: Drop, BlockedBy: recheck.BlockedBy}
 			}
 		}
 		return Result{Envelope: action.Modified}

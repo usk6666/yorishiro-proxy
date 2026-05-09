@@ -77,6 +77,80 @@ func TestRun_DropStopsExecution(t *testing.T) {
 	}
 }
 
+// TestRunWithBlockedBy_DropPropagatesAttribution verifies that the BlockedBy
+// label set on a Drop Step's Result reaches the caller via RunWithBlockedBy
+// (USK-782). This is the session-side hook the audit recorder consumes.
+func TestRunWithBlockedBy_DropPropagatesAttribution(t *testing.T) {
+	s1 := &mockStep{result: Result{Action: Continue}}
+	s2 := &mockStep{result: Result{Action: Drop, BlockedBy: BlockedByTargetScope}}
+	s3 := &mockStep{result: Result{Action: Continue}}
+
+	p := New(s1, s2, s3)
+	env := &envelope.Envelope{StreamID: "s1", Message: &envelope.RawMessage{Bytes: []byte("data")}}
+	_, action, _, blockedBy := p.RunWithBlockedBy(context.Background(), env)
+
+	if action != Drop {
+		t.Fatalf("expected Drop, got %v", action)
+	}
+	if blockedBy != BlockedByTargetScope {
+		t.Errorf("BlockedBy = %q, want %q", blockedBy, BlockedByTargetScope)
+	}
+}
+
+// TestRunWithBlockedBy_DropWithoutAttribution verifies that a Drop without
+// BlockedBy (e.g. plugin ActionDrop, intercept context-cancel) returns the
+// empty string — recorder callbacks must skip those (USK-782 scope guards).
+func TestRunWithBlockedBy_DropWithoutAttribution(t *testing.T) {
+	s1 := &mockStep{result: Result{Action: Drop}}
+
+	p := New(s1)
+	env := &envelope.Envelope{StreamID: "s1", Message: &envelope.RawMessage{Bytes: []byte("data")}}
+	_, action, _, blockedBy := p.RunWithBlockedBy(context.Background(), env)
+
+	if action != Drop {
+		t.Fatalf("expected Drop, got %v", action)
+	}
+	if blockedBy != "" {
+		t.Errorf("BlockedBy = %q, want empty (no attribution provided)", blockedBy)
+	}
+}
+
+// TestRunWithBlockedBy_ContinuePathReturnsEmpty verifies the BlockedBy
+// surface is empty for non-Drop terminal Actions. RunWithBlockedBy reserves
+// the field strictly for the Drop case.
+func TestRunWithBlockedBy_ContinuePathReturnsEmpty(t *testing.T) {
+	s1 := &mockStep{result: Result{Action: Continue}}
+	p := New(s1)
+	env := &envelope.Envelope{StreamID: "s1", Message: &envelope.RawMessage{Bytes: []byte("data")}}
+	_, action, _, blockedBy := p.RunWithBlockedBy(context.Background(), env)
+	if action != Continue {
+		t.Fatalf("expected Continue, got %v", action)
+	}
+	if blockedBy != "" {
+		t.Errorf("BlockedBy = %q, want empty for Continue", blockedBy)
+	}
+}
+
+// TestRunWithBlockedBy_RespondPathIgnoresBlockedBy verifies that even if a
+// Step erroneously sets BlockedBy on a Respond Result, the function does not
+// surface it — only Drop is a valid attribution carrier.
+func TestRunWithBlockedBy_RespondPathIgnoresBlockedBy(t *testing.T) {
+	respEnv := &envelope.Envelope{StreamID: "resp"}
+	s1 := &mockStep{result: Result{Action: Respond, Response: respEnv, BlockedBy: BlockedByTargetScope}}
+	p := New(s1)
+	env := &envelope.Envelope{StreamID: "s1", Message: &envelope.RawMessage{Bytes: []byte("data")}}
+	_, action, resp, blockedBy := p.RunWithBlockedBy(context.Background(), env)
+	if action != Respond {
+		t.Fatalf("expected Respond, got %v", action)
+	}
+	if resp != respEnv {
+		t.Fatal("expected response envelope")
+	}
+	if blockedBy != "" {
+		t.Errorf("BlockedBy = %q, want empty for Respond Action", blockedBy)
+	}
+}
+
 func TestRun_RespondReturnsResponse(t *testing.T) {
 	respEnv := &envelope.Envelope{
 		StreamID: "resp",

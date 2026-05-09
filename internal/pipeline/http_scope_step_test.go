@@ -56,6 +56,9 @@ func TestHTTPScopeStep_OutsideScope(t *testing.T) {
 	if result.Action != Drop {
 		t.Errorf("OutsideScope: got action %v, want Drop", result.Action)
 	}
+	if result.BlockedBy != BlockedByTargetScope {
+		t.Errorf("OutsideScope: BlockedBy = %q, want %q", result.BlockedBy, BlockedByTargetScope)
+	}
 }
 
 func TestHTTPScopeStep_ReceiveDirection_Skip(t *testing.T) {

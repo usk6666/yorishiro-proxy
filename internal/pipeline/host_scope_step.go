@@ -50,7 +50,7 @@ func (s *HostScopeStep) Process(_ context.Context, env *envelope.Envelope) Resul
 	// check that only validates hostname and port.
 	allowed, _ := s.scope.CheckTarget("", host, port, "")
 	if !allowed {
-		return Result{Action: Drop}
+		return Result{Action: Drop, BlockedBy: BlockedByTargetScope}
 	}
 	return Result{}
 }

@@ -57,6 +57,18 @@ type Result struct {
 	// Response holds the custom response Envelope when Action is Respond.
 	// It is ignored for other Action values.
 	Response *envelope.Envelope
+
+	// BlockedBy carries the reason a Drop Action was emitted so the session
+	// loop can record an audit Stream for the blocked envelope (USK-782).
+	// It is ignored for non-Drop Actions and may be empty when a Step Drops
+	// without an attribution (e.g. plugin ActionDrop, intercept user-action
+	// drop on receive — explicitly out of scope per USK-782 design).
+	//
+	// Canonical values are the same set accepted by the MCP query tool's
+	// blocked_by filter: "target_scope", "intercept_drop", "rate_limit",
+	// "safety_filter". "enabled_protocols" is reserved for the peek-time
+	// connector path and never set by a Pipeline Step.
+	BlockedBy string
 }
 
 // Step is an individual processing unit within a Pipeline.
@@ -86,7 +98,21 @@ func New(steps ...Step) *Pipeline {
 // of Message via CloneMessage()) and stores the snapshot in the context.
 // RecordStep uses this snapshot to detect modifications made by preceding
 // Steps and record both original and modified variants.
+//
+// Run is the legacy 3-tuple entry point preserved for callers that do not
+// need the BlockedBy audit signal. New callers (notably session.RunSession)
+// should use RunWithBlockedBy.
 func (p *Pipeline) Run(ctx context.Context, env *envelope.Envelope) (*envelope.Envelope, Action, *envelope.Envelope) {
+	out, action, resp, _ := p.RunWithBlockedBy(ctx, env)
+	return out, action, resp
+}
+
+// RunWithBlockedBy is identical to Run but additionally surfaces the
+// Result.BlockedBy attribution emitted by the Drop-causing Step. The
+// session loop forwards this label to a recorder callback so blocked
+// envelopes are persisted as audit Streams (USK-782). For non-Drop
+// Actions the returned BlockedBy is the empty string.
+func (p *Pipeline) RunWithBlockedBy(ctx context.Context, env *envelope.Envelope) (*envelope.Envelope, Action, *envelope.Envelope, string) {
 	snapshot := env.Clone()
 	ctx = withSnapshot(ctx, snapshot)
 	ctx = withWireEncodedState(ctx)
@@ -94,13 +120,17 @@ func (p *Pipeline) Run(ctx context.Context, env *envelope.Envelope) (*envelope.E
 	for _, step := range p.steps {
 		r := step.Process(ctx, env)
 		if r.Action != Continue {
-			return env, r.Action, r.Response
+			blockedBy := ""
+			if r.Action == Drop {
+				blockedBy = r.BlockedBy
+			}
+			return env, r.Action, r.Response, blockedBy
 		}
 		if r.Envelope != nil {
 			env = r.Envelope
 		}
 	}
-	return env, Continue, nil
+	return env, Continue, nil, ""
 }
 
 // Without returns a new Pipeline that excludes all Steps whose concrete type

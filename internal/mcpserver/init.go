@@ -421,6 +421,7 @@ func assembleLiveManager(
 	grpcInterceptEngine *grpcrules.InterceptEngine,
 	httpTransformEngine *httprules.TransformEngine,
 	passthrough *connector.PassthroughList,
+	targetScope *connector.TargetScope,
 	rateLimiter *connector.RateLimiter,
 	safetyEngine *safety.Engine,
 	perProtoSafety PerProtocolSafetyEngines,
@@ -432,7 +433,7 @@ func assembleLiveManager(
 	buildCfg := NewLiveBuildConfig(appCtx, cfg, proxyCfg, issuer, pluginv2Engine, store, hostTLSRegistry, logger)
 	return NewLiveManager(cfg, proxyCfg, store, issuer, pluginv2Engine,
 		holdQueue, httpInterceptEngine, wsInterceptEngine, grpcInterceptEngine,
-		httpTransformEngine, passthrough, rateLimiter, safetyEngine, perProtoSafety, buildCfg,
+		httpTransformEngine, passthrough, targetScope, rateLimiter, safetyEngine, perProtoSafety, buildCfg,
 		socks5Negotiator, recordScope, logger)
 }
 
@@ -515,6 +516,7 @@ func NewLiveManager(
 	grpcInterceptEngine *grpcrules.InterceptEngine,
 	httpTransformEngine *httprules.TransformEngine,
 	passthrough *connector.PassthroughList,
+	targetScope *connector.TargetScope,
 	rateLimiter *connector.RateLimiter,
 	safetyEngine *safety.Engine,
 	perProtoSafety PerProtocolSafetyEngines,
@@ -523,10 +525,13 @@ func NewLiveManager(
 	recordScope *flow.RecordScope,
 	logger *slog.Logger,
 ) (*proxybuild.Manager, error) {
-	// PassthroughList and RateLimiter come straight from connector.* and are
-	// threaded directly into proxybuild.Deps. socks5Negotiator is the
-	// process-singleton owned by the caller (USK-770) so MCP socks5_auth
-	// runtime mutations reach every listener built from this factory.
+	// PassthroughList, RateLimiter, and TargetScope come straight from
+	// connector.* and are threaded directly into proxybuild.Deps so the
+	// per-listener Pipeline's HostScopeStep / HTTPScopeStep enforces the
+	// configured policy (USK-782 wiring fix surfacing as part of the
+	// blocked-recording AC). socks5Negotiator is the process-singleton
+	// owned by the caller (USK-770) so MCP socks5_auth runtime mutations
+	// reach every listener built from this factory.
 	factory := func(ctx context.Context, name, addr string) (*proxybuild.Stack, error) {
 		return proxybuild.BuildLiveStack(ctx, proxybuild.Deps{
 			Logger:              logger,
@@ -546,6 +551,7 @@ func NewLiveManager(
 			PeekTimeout:         cfg.PeekTimeout,
 			MaxConnections:      cfg.MaxConnections,
 			PassthroughList:     passthrough,
+			Scope:               targetScope,
 			RateLimiter:         rateLimiter,
 			SOCKS5Negotiator:    socks5Negotiator,
 			RecordScope:         recordScope,

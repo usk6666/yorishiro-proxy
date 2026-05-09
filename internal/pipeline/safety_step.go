@@ -90,7 +90,7 @@ func (s *SafetyStep) processHTTP(ctx context.Context, msg *envelope.HTTPMessage)
 				slog.String("match", violation.Match),
 			)
 		}
-		return Result{Action: Drop}
+		return Result{Action: Drop, BlockedBy: BlockedBySafetyFilter}
 	}
 
 	return Result{}
@@ -113,7 +113,7 @@ func (s *SafetyStep) processWS(ctx context.Context, msg *envelope.WSMessage) Res
 				slog.String("match", violation.Match),
 			)
 		}
-		return Result{Action: Drop}
+		return Result{Action: Drop, BlockedBy: BlockedBySafetyFilter}
 	}
 
 	return Result{}
@@ -138,7 +138,7 @@ func (s *SafetyStep) processGRPC(ctx context.Context, env *envelope.Envelope, ms
 				slog.String("match", violation.Match),
 			)
 		}
-		return Result{Action: Drop}
+		return Result{Action: Drop, BlockedBy: BlockedBySafetyFilter}
 	}
 
 	return Result{}

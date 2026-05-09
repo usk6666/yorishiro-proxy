@@ -58,6 +58,24 @@ type SessionOptions struct {
 	// callers typically populate both LifecycleEngine and StateReleaser
 	// with the same engine pointer.
 	StateReleaser pluginv2.StateReleaser
+
+	// OnPipelineDrop, when non-nil, is invoked once per Pipeline.Run that
+	// returned Action=Drop with a non-empty BlockedBy attribution. The
+	// session calls this AFTER it has skipped wire forwarding, so the
+	// callback runs while the session goroutines are still scheduled —
+	// store writes complete before the session terminates.
+	//
+	// Production wiring (proxybuild.buildPipelineDropRecorder) writes a
+	// flow.Stream with State="error" and BlockedBy=blockedBy. The
+	// callback is not consulted for the capture_scope filter (USK-776):
+	// blocked envelopes are always recorded regardless of scope, which
+	// is the AC #3 deferral that USK-782 closes.
+	//
+	// env is the (possibly Pipeline-mutated) Envelope that was Dropped.
+	// Implementations must not retain env beyond the call — its Message
+	// may share BodyBuffer references with the snapshot held by the
+	// bodyBufRegistry.
+	OnPipelineDrop func(ctx context.Context, env *envelope.Envelope, blockedBy string)
 }
 
 // streamCapture captures the StreamID from the first Envelope in a
@@ -203,7 +221,7 @@ func runPipelineTracked(
 	p *pipeline.Pipeline,
 	env *envelope.Envelope,
 	reg *bodyBufRegistry,
-) (*envelope.Envelope, pipeline.Action, *envelope.Envelope) {
+) (*envelope.Envelope, pipeline.Action, *envelope.Envelope, string) {
 	var pre *bodybuf.BodyBuffer
 	var preRaw *bodybuf.BodyBuffer
 	if env != nil {
@@ -215,7 +233,7 @@ func runPipelineTracked(
 		}
 	}
 
-	outEnv, action, resp := p.Run(ctx, env)
+	outEnv, action, resp, blockedBy := p.RunWithBlockedBy(ctx, env)
 
 	if pre != nil {
 		// Always register the Pipeline snapshot Retain (Clone added one).
@@ -249,7 +267,7 @@ func runPipelineTracked(
 		reg.trackEnvelope(resp)
 	}
 
-	return outEnv, action, resp
+	return outEnv, action, resp, blockedBy
 }
 
 // upstreamHolder passes the upstream Channel from goroutine 1 to goroutine 2
@@ -347,12 +365,12 @@ func RunSession(ctx context.Context, client layer.Channel, dial DialFunc, p *pip
 
 	g.Go(func() error {
 		defer close(uh.done)
-		return clientToUpstream(ctx, client, dial, p, uh, sc, reg)
+		return clientToUpstream(ctx, client, dial, p, uh, sc, reg, opt.OnPipelineDrop)
 	})
 
 	g.Go(func() error {
 		defer close(upstreamDone)
-		return upstreamToClient(ctx, client, p, uh, sc, reg)
+		return upstreamToClient(ctx, client, p, uh, sc, reg, opt.OnPipelineDrop)
 	})
 
 	g.Go(func() error {
@@ -467,16 +485,18 @@ func RunStackSessionExchange(
 	sessCtx := WithUpgradeNotice(ctx, notice)
 
 	// Wrap user OnComplete: suppress the first session's callback when it
-	// fires with ErrUpgradePending, otherwise pass through.
-	wrapped := SessionOptions{
-		OnComplete: func(cbCtx context.Context, streamID string, err error) {
-			if errors.Is(err, ErrUpgradePending) {
-				return
-			}
-			if userOpt.OnComplete != nil {
-				userOpt.OnComplete(cbCtx, streamID, err)
-			}
-		},
+	// fires with ErrUpgradePending, otherwise pass through. All other
+	// SessionOptions fields are preserved verbatim so terminal-event hooks
+	// (LifecycleEngine, StateReleaser) and audit hooks (OnPipelineDrop —
+	// USK-782) reach RunSession unmodified.
+	wrapped := userOpt
+	wrapped.OnComplete = func(cbCtx context.Context, streamID string, err error) {
+		if errors.Is(err, ErrUpgradePending) {
+			return
+		}
+		if userOpt.OnComplete != nil {
+			userOpt.OnComplete(cbCtx, streamID, err)
+		}
 	}
 
 	err := RunSession(sessCtx, clientCh, dial, p, wrapped)
@@ -745,7 +765,7 @@ func runWSOverH2Relay(
 	// forward to upstream. On graceful EOF, half-close the upstream write
 	// side so the upstream HTTP handler observes EOF on its request body.
 	g.Go(func() error {
-		err := wsRelayDirection(ctx, p, reg, clientWSCh, upstreamWSCh)
+		err := wsRelayDirection(ctx, p, reg, clientWSCh, upstreamWSCh, userOpt.OnPipelineDrop)
 		if err == nil {
 			// Graceful EOF on client side: half-close the upstream wire.
 			// detachWriter.Close emits empty DATA(END_STREAM) on the
@@ -763,7 +783,7 @@ func runWSOverH2Relay(
 	// side so the test client observes EOF on the response body (and the
 	// h2 stream cleanly transitions to closed).
 	g.Go(func() error {
-		err := wsRelayDirection(ctx, p, reg, upstreamWSCh, clientWSCh)
+		err := wsRelayDirection(ctx, p, reg, upstreamWSCh, clientWSCh, userOpt.OnPipelineDrop)
 		if err == nil {
 			_ = clientDetachW.Close()
 		}
@@ -794,6 +814,7 @@ func wsRelayDirection(
 	p *pipeline.Pipeline,
 	reg *bodyBufRegistry,
 	src, dst layer.Channel,
+	onDrop func(context.Context, *envelope.Envelope, string),
 ) error {
 	for {
 		env, err := src.Next(ctx)
@@ -806,9 +827,12 @@ func wsRelayDirection(
 			}
 			return fmt.Errorf("ws/h2 relay: src.Next: %w", err)
 		}
-		env, action, resp := runPipelineTracked(ctx, p, env, reg)
+		env, action, resp, blockedBy := runPipelineTracked(ctx, p, env, reg)
 		switch action {
 		case pipeline.Drop:
+			if blockedBy != "" && onDrop != nil {
+				onDrop(ctx, env, blockedBy)
+			}
 			continue
 		case pipeline.Respond:
 			if resp == nil {
@@ -1117,6 +1141,7 @@ func clientToUpstream(
 	uh *upstreamHolder,
 	sc *streamCapture,
 	reg *bodyBufRegistry,
+	onDrop func(context.Context, *envelope.Envelope, string),
 ) (err error) {
 	// Cascade-close discipline (feedback_session_cascade_pattern.md):
 	//   * Genuine err → close upstream so peer goroutine unblocks promptly.
@@ -1152,7 +1177,15 @@ func clientToUpstream(
 		}
 		sc.set(env.StreamID)
 
-		env, action, resp := runPipelineTracked(ctx, p, env, reg)
+		env, action, resp, blockedBy := runPipelineTracked(ctx, p, env, reg)
+		// USK-782: surface the BlockedBy attribution to the session-side
+		// recorder before continuing the loop. Wire forwarding still
+		// short-circuits on Drop (dispatchClientAction returns nil); the
+		// recorder fires synchronously so the audit Stream is persisted
+		// while the goroutine is still scheduled.
+		if action == pipeline.Drop && blockedBy != "" && onDrop != nil {
+			onDrop(ctx, env, blockedBy)
+		}
 		if perr := dispatchClientAction(ctx, client, uh, dial, env, resp, action); perr != nil {
 			return perr
 		}
@@ -1218,6 +1251,7 @@ func upstreamToClient(
 	uh *upstreamHolder,
 	sc *streamCapture,
 	reg *bodyBufRegistry,
+	onDrop func(context.Context, *envelope.Envelope, string),
 ) error {
 	if !waitUpstreamReady(ctx, uh) {
 		return nil
@@ -1253,8 +1287,15 @@ func upstreamToClient(
 			env.StreamID = clientID
 		}
 
-		env, action, _ := runPipelineTracked(ctx, p, env, reg)
+		env, action, _, blockedBy := runPipelineTracked(ctx, p, env, reg)
 		if action == pipeline.Drop {
+			// USK-782: receive-direction Drops (e.g. Safety on a Receive
+			// arm — currently no engine emits one, but the path is wired
+			// for future per-protocol Output Filters) surface to the
+			// audit recorder symmetrically with Send-direction Drops.
+			if blockedBy != "" && onDrop != nil {
+				onDrop(ctx, env, blockedBy)
+			}
 			if upgradePending(notice) {
 				return ErrUpgradePending
 			}

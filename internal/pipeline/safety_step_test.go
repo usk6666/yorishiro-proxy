@@ -41,6 +41,9 @@ func TestSafetyStep_DangerousSQL_Drop(t *testing.T) {
 	if result.Action != Drop {
 		t.Errorf("DangerousSQL: got action %v, want Drop", result.Action)
 	}
+	if result.BlockedBy != BlockedBySafetyFilter {
+		t.Errorf("DangerousSQL: BlockedBy = %q, want %q", result.BlockedBy, BlockedBySafetyFilter)
+	}
 }
 
 func TestSafetyStep_SafeRequest_Continue(t *testing.T) {
@@ -170,6 +173,9 @@ func TestSafetyStep_WS_DangerousPayload_Drop(t *testing.T) {
 	if result.Action != Drop {
 		t.Errorf("WS_Dangerous: got action %v, want Drop", result.Action)
 	}
+	if result.BlockedBy != BlockedBySafetyFilter {
+		t.Errorf("WS_Dangerous: BlockedBy = %q, want %q", result.BlockedBy, BlockedBySafetyFilter)
+	}
 }
 
 func TestSafetyStep_WS_SafePayload_Continue(t *testing.T) {
@@ -251,6 +257,9 @@ func TestSafetyStep_GRPCData_DangerousPayload_Drop(t *testing.T) {
 	result := step.Process(context.Background(), env)
 	if result.Action != Drop {
 		t.Errorf("GRPCData_Dangerous: got action %v, want Drop", result.Action)
+	}
+	if result.BlockedBy != BlockedBySafetyFilter {
+		t.Errorf("GRPCData_Dangerous: BlockedBy = %q, want %q", result.BlockedBy, BlockedBySafetyFilter)
 	}
 }
 

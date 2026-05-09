@@ -67,7 +67,7 @@ func (s *HTTPScopeStep) processHTTP(msg *envelope.HTTPMessage) Result {
 
 	allowed, _ := s.scope.CheckTarget(scheme, host, port, path)
 	if !allowed {
-		return Result{Action: Drop}
+		return Result{Action: Drop, BlockedBy: BlockedByTargetScope}
 	}
 	return Result{}
 }

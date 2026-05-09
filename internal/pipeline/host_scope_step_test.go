@@ -73,6 +73,9 @@ func TestHostScopeStep_BlockedHost(t *testing.T) {
 	if r.Action != Drop {
 		t.Errorf("blocked host: got action %v, want Drop", r.Action)
 	}
+	if r.BlockedBy != BlockedByTargetScope {
+		t.Errorf("blocked host: BlockedBy = %q, want %q", r.BlockedBy, BlockedByTargetScope)
+	}
 }
 
 func TestHostScopeStep_DeniedHost(t *testing.T) {
@@ -90,6 +93,9 @@ func TestHostScopeStep_DeniedHost(t *testing.T) {
 	r := step.Process(context.Background(), env)
 	if r.Action != Drop {
 		t.Errorf("denied host: got action %v, want Drop", r.Action)
+	}
+	if r.BlockedBy != BlockedByTargetScope {
+		t.Errorf("denied host: BlockedBy = %q, want %q", r.BlockedBy, BlockedByTargetScope)
 	}
 }
 

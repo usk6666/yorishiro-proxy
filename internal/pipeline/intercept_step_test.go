@@ -105,6 +105,9 @@ func TestInterceptStep_Drop(t *testing.T) {
 	if result.Action != Drop {
 		t.Errorf("Drop: got action %v, want Drop", result.Action)
 	}
+	if result.BlockedBy != BlockedByInterceptDrop {
+		t.Errorf("Drop: BlockedBy = %q, want %q", result.BlockedBy, BlockedByInterceptDrop)
+	}
 }
 
 func TestInterceptStep_ModifyAndForward(t *testing.T) {
@@ -279,6 +282,11 @@ func TestInterceptStep_ContextCancellation(t *testing.T) {
 	result := step.Process(ctx, env)
 	if result.Action != Drop {
 		t.Errorf("ContextCancellation: got action %v, want Drop", result.Action)
+	}
+	// USK-782: context-cancelled hold path is intentionally not attributed
+	// to intercept_drop — no user action ever resolved the hold.
+	if result.BlockedBy != "" {
+		t.Errorf("ContextCancellation: BlockedBy = %q, want empty (session teardown is not an intercept_drop)", result.BlockedBy)
 	}
 }
 

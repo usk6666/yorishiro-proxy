@@ -136,6 +136,12 @@ type StreamUpdate struct {
 	// FailureReason sets the classification label for an errored stream.
 	// Only applied when non-empty. See Stream.FailureReason for valid values.
 	FailureReason string
+	// BlockedBy sets the audit attribution label for a blocked stream
+	// (USK-782 mid-stream Drop path). Canonical values mirror
+	// Stream.BlockedBy — see internal/pipeline/blocked_by.go for the
+	// Pipeline-emitted set ("target_scope", "safety_filter",
+	// "intercept_drop", "rate_limit"). Only applied when non-empty.
+	BlockedBy string
 	// Duration sets the stream duration.
 	Duration time.Duration
 	// Tags replaces the stream tags.

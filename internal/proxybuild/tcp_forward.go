@@ -349,8 +349,19 @@ func (m *Manager) tcpForwardSessionOpts(parent *Stack, connCtx context.Context) 
 	// recorded via the forward path stays at "active".
 	if parent.FlowStore != nil {
 		store := parent.FlowStore
+		blocked := newBlockedStreamSet()
 		opts.OnComplete = func(ctx context.Context, streamID string, err error) {
 			if streamID == "" {
+				return
+			}
+			if blocked.contains(streamID) {
+				// USK-782: skip terminal-state finalisation for streams
+				// already finalised by the audit recorder. Without this
+				// the normal-EOF state="complete" overwrite would clobber
+				// the BlockedBy attribution. Evict for consistency with
+				// the live-path recorder (the per-connection set is
+				// short-lived here, but keep the contract uniform).
+				blocked.remove(streamID)
 				return
 			}
 			// Raw TCP forwarding has no application-protocol "natural EOF"
@@ -385,6 +396,11 @@ func (m *Manager) tcpForwardSessionOpts(parent *Stack, connCtx context.Context) 
 				FailureReason: session.ClassifyError(err),
 			})
 		}
+		// USK-782: persist Pipeline-Drop audit Streams for the forward
+		// session as well — the parent Stack's Pipeline includes the
+		// scope / safety / intercept Steps that may emit a BlockedBy
+		// attribution against forwarded traffic.
+		opts.OnPipelineDrop = buildPipelineDropRecorder(store, "", m.logger, blocked)
 	}
 	return opts
 }

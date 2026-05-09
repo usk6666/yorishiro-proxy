@@ -183,6 +183,16 @@ func (dropStep) Process(_ context.Context, _ *envelope.Envelope) pipeline.Result
 	return pipeline.Result{Action: pipeline.Drop}
 }
 
+// attributedDropStep drops envelopes with a fixed BlockedBy attribution
+// so session-side recorder hooks can be exercised in tests.
+type attributedDropStep struct {
+	blockedBy string
+}
+
+func (s attributedDropStep) Process(_ context.Context, _ *envelope.Envelope) pipeline.Result {
+	return pipeline.Result{Action: pipeline.Drop, BlockedBy: s.blockedBy}
+}
+
 // respondStep responds with a fixed Envelope for Send-direction messages.
 type respondStep struct {
 	resp *envelope.Envelope
@@ -369,6 +379,80 @@ func TestRunSession_PipelineDrop(t *testing.T) {
 
 	if !clientCh.isClosed() {
 		t.Error("client channel not closed")
+	}
+}
+
+// TestRunSession_OnPipelineDrop_AttributedDrop verifies the OnPipelineDrop
+// callback fires once per Drop with the BlockedBy attribution forwarded
+// from the Pipeline (USK-782). The session must invoke the callback before
+// the loop continues so the audit Stream is persisted while the goroutine
+// is still scheduled.
+func TestRunSession_OnPipelineDrop_AttributedDrop(t *testing.T) {
+	req := makeEnvelopeWithStreamID(envelope.Send, 0, "stream-blocked")
+
+	clientCh := &mockChannel{
+		streamID:      "stream-blocked",
+		nextEnvelopes: []*envelope.Envelope{req},
+	}
+	dial := func(_ context.Context, _ *envelope.Envelope) (layer.Channel, error) {
+		return &mockChannel{}, nil
+	}
+	p := pipeline.New(attributedDropStep{blockedBy: "target_scope"})
+
+	type call struct {
+		blockedBy string
+		streamID  string
+	}
+	var calls []call
+	opts := SessionOptions{
+		OnPipelineDrop: func(_ context.Context, env *envelope.Envelope, blockedBy string) {
+			calls = append(calls, call{blockedBy: blockedBy, streamID: env.StreamID})
+		},
+	}
+
+	if err := RunSession(context.Background(), clientCh, dial, p, opts); err != nil {
+		t.Fatalf("RunSession: %v", err)
+	}
+
+	if len(calls) != 1 {
+		t.Fatalf("OnPipelineDrop calls = %d, want 1", len(calls))
+	}
+	if calls[0].blockedBy != "target_scope" {
+		t.Errorf("OnPipelineDrop blockedBy = %q, want %q", calls[0].blockedBy, "target_scope")
+	}
+	if calls[0].streamID != "stream-blocked" {
+		t.Errorf("OnPipelineDrop env.StreamID = %q, want %q", calls[0].streamID, "stream-blocked")
+	}
+}
+
+// TestRunSession_OnPipelineDrop_UnattributedDropSkipped verifies that a Drop
+// with no BlockedBy attribution does NOT fire the recorder callback. Plugin
+// ActionDrop and intercept context-cancel paths must remain silent under the
+// USK-782 design scope guards.
+func TestRunSession_OnPipelineDrop_UnattributedDropSkipped(t *testing.T) {
+	req := makeEnvelope(envelope.Send, 0)
+
+	clientCh := &mockChannel{
+		streamID:      "stream",
+		nextEnvelopes: []*envelope.Envelope{req},
+	}
+	dial := func(_ context.Context, _ *envelope.Envelope) (layer.Channel, error) {
+		return &mockChannel{}, nil
+	}
+	p := pipeline.New(dropStep{}) // no BlockedBy
+
+	called := false
+	opts := SessionOptions{
+		OnPipelineDrop: func(_ context.Context, _ *envelope.Envelope, _ string) {
+			called = true
+		},
+	}
+
+	if err := RunSession(context.Background(), clientCh, dial, p, opts); err != nil {
+		t.Fatalf("RunSession: %v", err)
+	}
+	if called {
+		t.Error("OnPipelineDrop should not fire for a Drop with no BlockedBy attribution")
 	}
 }
 
