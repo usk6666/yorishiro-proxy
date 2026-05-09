@@ -269,7 +269,13 @@ func BuildLiveStack(_ context.Context, deps Deps) (*Stack, error) {
 	// than disappearing silently. Nil store yields a nil callback so the
 	// connector's drop path engages — matches the pre-USK-784 behaviour
 	// for tests that omit a flow store.
-	upstreamTLSErrorRecorder := buildUpstreamTLSErrorRecorder(deps.FlowStore, listenerName, logger)
+	//
+	// USK-791: the recorder also consults RecordScope so out-of-scope hosts
+	// (e.g. HSTS-pinned services the browser tries on its own) are not
+	// recorded when the operator scoped capture to a specific host. The
+	// CONNECT/SOCKS5 authority carries the host even when no L7 message
+	// reached the proxy.
+	upstreamTLSErrorRecorder := buildUpstreamTLSErrorRecorder(deps.FlowStore, deps.RecordScope, listenerName, logger)
 
 	// Construct the per-protocol HandlerFunc closures.
 	connectHandler := connector.NewCONNECTHandler(connector.CONNECTHandlerConfig{
@@ -955,7 +961,17 @@ func buildProtocolRejectedRecorder(store flow.Writer, listenerName string, logge
 // handshake reject never produced one. The error string is preserved
 // verbatim in Tags["error"] so MCP users can distinguish cert-expired
 // from self-signed from CA-untrusted without parsing FailureReason.
-func buildUpstreamTLSErrorRecorder(store flow.Writer, listenerName string, logger *slog.Logger) connector.OnUpstreamTLSErrorFunc {
+//
+// USK-791: when scope is non-nil and non-empty, the recorder consults
+// flow.RecordScope.ShouldRecord with a synthetic envelope carrying the
+// CONNECT/SOCKS5 authority as the only identity field. Out-of-scope
+// hosts (e.g. HSTS-pinned services the browser dials on its own when
+// the operator only includes httpbin.org) are dropped at slog.Debug —
+// the same fail-closed semantics applied by RecordStep on the live
+// path. URL-prefix / method matchers are inert at this stage because
+// the inner TLS handshake never completed; hostname matchers are the
+// only meaningful axis for unrecorded-protocol error paths.
+func buildUpstreamTLSErrorRecorder(store flow.Writer, scope *flow.RecordScope, listenerName string, logger *slog.Logger) connector.OnUpstreamTLSErrorFunc {
 	if store == nil {
 		return nil
 	}
@@ -966,6 +982,29 @@ func buildUpstreamTLSErrorRecorder(store flow.Writer, listenerName string, logge
 		if buildErr == nil {
 			return
 		}
+
+		// USK-791: skip recording for out-of-scope hosts. The synthetic
+		// envelope carries only Context.TargetHost (the CONNECT/SOCKS5
+		// authority) so RecordScope.ShouldRecord can evaluate hostname
+		// matchers; URL-prefix / method matchers in the rule set are
+		// inert at this stage and are silently ignored by the
+		// matchScopeRule AND-of-non-empty-fields semantics.
+		if !scope.IsEmpty() {
+			scopeEnv := &envelope.Envelope{
+				Context: envelope.EnvelopeContext{TargetHost: target},
+			}
+			if !scope.ShouldRecord(scopeEnv) {
+				if logger != nil {
+					logger.Debug("proxybuild: upstream TLS error out of capture_scope; skipped recording",
+						"listener", listenerName,
+						"target", target,
+						"error", buildErr.Error(),
+					)
+				}
+				return
+			}
+		}
+
 		// Resolve the connection identity. ConnIDFromContext is populated
 		// by FullListener.handleConn before it dispatches to the handler,
 		// so this is non-empty in the production path.

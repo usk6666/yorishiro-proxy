@@ -7,6 +7,7 @@ import (
 
 	"github.com/usk6666/yorishiro-proxy/internal/connector"
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
+	"github.com/usk6666/yorishiro-proxy/internal/flow"
 )
 
 // TestBuildUpstreamTLSErrorRecorder_NilStore verifies the recorder returns
@@ -14,7 +15,7 @@ import (
 // fallback path consistent with buildProtocolRejectedRecorder /
 // buildPipelineDropRecorder.
 func TestBuildUpstreamTLSErrorRecorder_NilStore(t *testing.T) {
-	rec := buildUpstreamTLSErrorRecorder(nil, "test", silentLogger())
+	rec := buildUpstreamTLSErrorRecorder(nil, nil, "test", silentLogger())
 	if rec != nil {
 		t.Fatal("expected nil callback when store is nil")
 	}
@@ -27,7 +28,7 @@ func TestBuildUpstreamTLSErrorRecorder_NilStore(t *testing.T) {
 // to the new "upstream_tls_error" classification.
 func TestBuildUpstreamTLSErrorRecorder_HappyPath(t *testing.T) {
 	store := &recordingFlowStore{}
-	rec := buildUpstreamTLSErrorRecorder(store, "live", silentLogger())
+	rec := buildUpstreamTLSErrorRecorder(store, nil, "live", silentLogger())
 	if rec == nil {
 		t.Fatal("expected non-nil recorder")
 	}
@@ -94,7 +95,7 @@ func TestBuildUpstreamTLSErrorRecorder_HappyPath(t *testing.T) {
 // against future refactors.
 func TestBuildUpstreamTLSErrorRecorder_NilError_NoOp(t *testing.T) {
 	store := &recordingFlowStore{}
-	rec := buildUpstreamTLSErrorRecorder(store, "live", silentLogger())
+	rec := buildUpstreamTLSErrorRecorder(store, nil, "live", silentLogger())
 	rec(context.Background(), "example.com:443", nil)
 	if got := len(store.saved); got != 0 {
 		t.Errorf("SaveStream count = %d, want 0 (nil error ignored)", got)
@@ -108,7 +109,7 @@ func TestBuildUpstreamTLSErrorRecorder_NilError_NoOp(t *testing.T) {
 // buildProtocolRejectedRecorder.
 func TestBuildUpstreamTLSErrorRecorder_NoConnID_GeneratesFallback(t *testing.T) {
 	store := &recordingFlowStore{}
-	rec := buildUpstreamTLSErrorRecorder(store, "live", silentLogger())
+	rec := buildUpstreamTLSErrorRecorder(store, nil, "live", silentLogger())
 	rec(context.Background(), "example.com:443", errors.New("test error"))
 	if got := len(store.saved); got != 1 {
 		t.Fatalf("SaveStream count = %d, want 1", got)
@@ -132,7 +133,7 @@ func TestBuildUpstreamTLSErrorRecorder_AuthorityVerbatim(t *testing.T) {
 	for _, target := range cases {
 		t.Run(target, func(t *testing.T) {
 			store := &recordingFlowStore{}
-			rec := buildUpstreamTLSErrorRecorder(store, "live", silentLogger())
+			rec := buildUpstreamTLSErrorRecorder(store, nil, "live", silentLogger())
 			rec(context.Background(), target, errors.New("err"))
 			if got := len(store.saved); got != 1 {
 				t.Fatalf("SaveStream count = %d, want 1", got)
@@ -145,5 +146,162 @@ func TestBuildUpstreamTLSErrorRecorder_AuthorityVerbatim(t *testing.T) {
 					got, target)
 			}
 		})
+	}
+}
+
+// TestBuildUpstreamTLSErrorRecorder_OutOfScope_NotRecorded asserts USK-791:
+// when capture_scope.includes restricts recording to specific hosts, an
+// upstream TLS handshake failure for an out-of-scope host (e.g. a
+// browser dialling an HSTS-pinned service the operator never asked
+// about) is dropped at slog.Debug rather than persisted as a
+// state="error" Stream.
+//
+// The CONNECT/SOCKS5 authority is the only identity field available at
+// this stage — RecordScope hostname matchers must succeed using just
+// the synthetic envelope's Context.TargetHost. URLPrefix / Method
+// matchers in the rule set are inert here and that is correct (no
+// inner request reached the proxy).
+func TestBuildUpstreamTLSErrorRecorder_OutOfScope_NotRecorded(t *testing.T) {
+	store := &recordingFlowStore{}
+	scope := flow.NewRecordScope()
+	scope.SetRules([]flow.ScopeRule{{Hostname: "httpbin.org"}}, nil)
+
+	rec := buildUpstreamTLSErrorRecorder(store, scope, "live", silentLogger())
+	if rec == nil {
+		t.Fatal("expected non-nil recorder")
+	}
+
+	rec(context.Background(), "accounts.google.com:443",
+		errors.New("tls: failed to verify certificate"))
+
+	if got := len(store.saved); got != 0 {
+		t.Fatalf("SaveStream count = %d, want 0 (out-of-scope host must not be recorded); saved=%+v",
+			got, store.saved)
+	}
+}
+
+// TestBuildUpstreamTLSErrorRecorder_InScope_Recorded asserts the
+// USK-784 contract is preserved when capture_scope is set: an in-scope
+// host's TLS handshake failure still produces the state="error"
+// Stream so MITM diagnostic users can audit the failure.
+func TestBuildUpstreamTLSErrorRecorder_InScope_Recorded(t *testing.T) {
+	store := &recordingFlowStore{}
+	scope := flow.NewRecordScope()
+	scope.SetRules([]flow.ScopeRule{{Hostname: "httpbin.org"}}, nil)
+
+	rec := buildUpstreamTLSErrorRecorder(store, scope, "live", silentLogger())
+
+	rec(context.Background(), "httpbin.org:443",
+		errors.New("tls: failed to verify certificate"))
+
+	if got := len(store.saved); got != 1 {
+		t.Fatalf("SaveStream count = %d, want 1 (in-scope host must record per USK-784)",
+			got)
+	}
+	st := store.saved[0]
+	if st.State != "error" {
+		t.Errorf("Stream.State = %q, want %q", st.State, "error")
+	}
+	if st.Tags == nil || st.Tags["target"] != "httpbin.org:443" {
+		t.Errorf("Tags[target] = %q, want %q", st.Tags["target"], "httpbin.org:443")
+	}
+}
+
+// TestBuildUpstreamTLSErrorRecorder_NilScope_RecordsAll asserts the
+// pre-USK-791 default: a nil RecordScope is treated as capture-all so
+// every TLS handshake failure is recorded (USK-784 default).
+func TestBuildUpstreamTLSErrorRecorder_NilScope_RecordsAll(t *testing.T) {
+	store := &recordingFlowStore{}
+	rec := buildUpstreamTLSErrorRecorder(store, nil, "live", silentLogger())
+
+	rec(context.Background(), "any.example.test:443", errors.New("err"))
+
+	if got := len(store.saved); got != 1 {
+		t.Fatalf("SaveStream count = %d, want 1 (nil scope = capture-all)", got)
+	}
+}
+
+// TestBuildUpstreamTLSErrorRecorder_EmptyScope_RecordsAll asserts the
+// scope's IsEmpty fast path: an instantiated but empty scope is
+// equivalent to nil (capture-all).
+func TestBuildUpstreamTLSErrorRecorder_EmptyScope_RecordsAll(t *testing.T) {
+	store := &recordingFlowStore{}
+	scope := flow.NewRecordScope() // no rules
+
+	rec := buildUpstreamTLSErrorRecorder(store, scope, "live", silentLogger())
+
+	rec(context.Background(), "any.example.test:443", errors.New("err"))
+
+	if got := len(store.saved); got != 1 {
+		t.Fatalf("SaveStream count = %d, want 1 (empty scope = capture-all)", got)
+	}
+}
+
+// TestBuildUpstreamTLSErrorRecorder_ExcludeOnlyScope asserts an
+// exclude-only scope: the host in the exclude list is dropped, every
+// other host is recorded.
+func TestBuildUpstreamTLSErrorRecorder_ExcludeOnlyScope(t *testing.T) {
+	store := &recordingFlowStore{}
+	scope := flow.NewRecordScope()
+	scope.SetRules(nil, []flow.ScopeRule{{Hostname: "noisy.example.test"}})
+
+	rec := buildUpstreamTLSErrorRecorder(store, scope, "live", silentLogger())
+
+	rec(context.Background(), "noisy.example.test:443", errors.New("err"))
+	rec(context.Background(), "ok.example.test:443", errors.New("err"))
+
+	if got := len(store.saved); got != 1 {
+		t.Fatalf("SaveStream count = %d, want 1 (excluded host dropped, ok host recorded)", got)
+	}
+	if st := store.saved[0]; st.Tags["target"] != "ok.example.test:443" {
+		t.Errorf("Tags[target] = %q, want %q", st.Tags["target"], "ok.example.test:443")
+	}
+}
+
+// TestBuildUpstreamTLSErrorRecorder_WildcardScope asserts the "*.x"
+// wildcard hostname matcher applies to the synthetic-envelope path:
+// every direct or indirect subdomain of the apex matches.
+func TestBuildUpstreamTLSErrorRecorder_WildcardScope(t *testing.T) {
+	store := &recordingFlowStore{}
+	scope := flow.NewRecordScope()
+	scope.SetRules([]flow.ScopeRule{{Hostname: "*.example.com"}}, nil)
+
+	rec := buildUpstreamTLSErrorRecorder(store, scope, "live", silentLogger())
+
+	// In-scope: subdomain of example.com.
+	rec(context.Background(), "api.example.com:443", errors.New("err"))
+	// Out-of-scope: apex itself does not match a wildcard (per
+	// matchScopeHostname semantics).
+	rec(context.Background(), "example.com:443", errors.New("err"))
+	// Out-of-scope: unrelated host.
+	rec(context.Background(), "evil.test:443", errors.New("err"))
+
+	if got := len(store.saved); got != 1 {
+		t.Fatalf("SaveStream count = %d, want 1 (only wildcard subdomain matches)", got)
+	}
+	if st := store.saved[0]; st.Tags["target"] != "api.example.com:443" {
+		t.Errorf("Tags[target] = %q, want %q", st.Tags["target"], "api.example.com:443")
+	}
+}
+
+// TestBuildUpstreamTLSErrorRecorder_URLPrefixOnlyScope_NoRecord asserts
+// the conservative behaviour for include rules that only carry a
+// URL-prefix matcher: at TLS-handshake-error time no path is observable
+// so the include rule cannot match → out-of-scope → not recorded.
+// This matches the documented matchScopeRule AND-of-non-empty-fields
+// semantics and avoids the surprise of recording every host when the
+// operator restricts capture to a URL prefix.
+func TestBuildUpstreamTLSErrorRecorder_URLPrefixOnlyScope_NoRecord(t *testing.T) {
+	store := &recordingFlowStore{}
+	scope := flow.NewRecordScope()
+	scope.SetRules([]flow.ScopeRule{{URLPrefix: "/api"}}, nil)
+
+	rec := buildUpstreamTLSErrorRecorder(store, scope, "live", silentLogger())
+
+	rec(context.Background(), "host.example.test:443", errors.New("err"))
+
+	if got := len(store.saved); got != 0 {
+		t.Fatalf("SaveStream count = %d, want 0 (url_prefix-only include cannot match TLS-handshake-error path)",
+			got)
 	}
 }
