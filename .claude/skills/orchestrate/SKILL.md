@@ -140,6 +140,81 @@ Present the plan to the user in the following format and get approval:
 
 ---
 
+### Phase 1.5: Per-Issue Design Review (Parallel)
+
+Run a pre-implementation design review for each Issue in the upcoming batch — in parallel, read-only.
+This catches ambiguity, principle violations, and pattern-match false positives **before** any
+implementer agent starts coding. Especially important for ad-hoc Issues filed from test-stage
+findings (e.g., bug reports surfaced during e2e or manual verification), which did not pass
+through `/project plan` milestone planning and therefore have no upstream design vetting.
+
+The design-reviewer Agent template is the same one used by `/implement` Step 4 and
+`/project plan` Greenfield Mode — see `.claude/agents/design-reviewer.md`. This phase mirrors
+that invocation pattern so all three skills stay in sync.
+
+#### 1.5-1. Skip Rules
+
+Skip the design review for an Issue when **all** of the following are true:
+
+- No new public types and no interface changes
+- No more than a single call site touched
+- Test-only, docstring-only, or comment-only change
+
+Record the skip reason in the Phase 1-3 plan you presented to the user, alongside the
+Issue row. When in doubt, do not skip — design review is read-only and cheap relative to
+discovering a wrong approach during implementation.
+
+#### 1.5-2. Launch Design Reviewers in Parallel
+
+For each non-skipped Issue in the upcoming batch, launch a design-reviewer Agent in parallel
+(single message, multiple Task calls):
+
+```
+Task(
+  description="Design review: <Issue ID>",
+  subagent_type="general-purpose",
+  isolation="worktree",
+  prompt=<composed from .claude/agents/design-reviewer.md>
+)
+```
+
+**Placeholder values** (mirrors `/implement` Step 4 invocation — keep in sync):
+
+| Placeholder | Value |
+|---|---|
+| `{{SCOPE_DESCRIPTION}}` | Issue title + description + tentative file actions (new / modified) inferred from the Issue body |
+| `{{SPEC_REFERENCES}}` | Paths to relevant spec/design docs. Cite specific sections (`docs/rfc/envelope.md §3.3`), not whole files. For data-path Issues, always include `docs/rfc/envelope.md`. |
+| `{{PACKAGES_TO_SURVEY}}` | Packages the Issue creates, modifies, or depends on |
+| `{{COMPLETED_CONTEXT}}` | The `{{DEPENDENCY_CONTEXT}}` you already built in Phase 1 (outputs of completed dependency Issues — types, interfaces, file paths) |
+| `{{PRODUCT_IDENTITY}}` | Read from `.claude/skills/review-gate/SKILL.md` Phase 1-4 "Product context" block — single source of truth |
+| `{{PRINCIPLES}}` | The 6 MITM Implementation Principles from `CLAUDE.md` (quoted verbatim) |
+
+**Concurrency**: same cap as the implementer batch (max 3 from Notes). If the upcoming batch
+has more than 3 Issues, run design reviews in sub-batches matching the implementer parallel
+groups.
+
+#### 1.5-3. Process Each `DESIGN_REVIEW_RESULT`
+
+Each design-reviewer Agent returns a structured `DESIGN_REVIEW_RESULT` (see
+`.claude/agents/design-reviewer.md` Step 5 for the format). Triage per Issue:
+
+| Outcome | Action |
+|---|---|
+| All resolved + fitness PASS | Fold the **Resolved** table and **Boundary Survey Summary** into `{{DESIGN_REVIEW_CONTEXT}}` for the implementer (see Phase 2-1). Proceed to Phase 2 for this Issue. |
+| Unresolved items exist | **Pause orchestrate**. Present only the unresolved questions to the user with the agent's proposed answers and trade-offs. After user input, fold both resolved + user-resolved decisions into `{{DESIGN_REVIEW_CONTEXT}}`. Do not re-ask resolved questions. |
+| Fitness check FAIL | **Pause orchestrate**. Report scope adjustment recommendations. Ask the user whether to (a) adjust the Issue scope and re-run design review, (b) split the Issue per Phase 2-2-A, or (c) drop this Issue from the batch. Do not launch the implementer for this Issue until the fitness failure is resolved. |
+| Step 3.5 says "Defense-in-depth" or "Pattern-match false positive" | Surface the classification to the user and request an explicit decision: proceed / defer with re-open trigger / close as not-applicable. The default for these classifications is **not** to implement — see CLAUDE.md MITM Principle #6. |
+
+If multiple Issues in the batch produce unresolved/fitness-fail results, batch the user
+prompts together (one message per orchestrate run, not one per Issue) to avoid pause-fatigue.
+
+#### 1.5-4. Cleanup Tracking
+
+Record each design-reviewer's `agentId` (from the Task tool return value). Phase 3-3
+worktree cleanup will remove these worktrees alongside the implementer worktrees.
+
+---
+
 ### Phase 2: Sub-Agent Launch and Management
 
 #### 2-1. Per-Batch Execution
@@ -163,6 +238,7 @@ Task tool settings for each Issue:
 - `{{BRANCH_TYPE}}` → `feat` / `fix` / `chore`
 - `{{PRODUCT_CONTEXT}}` → Product context built in Phase 0 (described below)
 - `{{DEPENDENCY_CONTEXT}}` → Dependency context for this Issue (described below)
+- `{{DESIGN_REVIEW_CONTEXT}}` → Design review findings folded in from Phase 1.5 (described below). For Issues that skipped Phase 1.5, set to a one-line note stating the skip reason (e.g., `"Skipped: test-only change"`).
 
 **Building `{{PRODUCT_CONTEXT}}`:**
 
@@ -209,6 +285,36 @@ This Issue depends on the outputs of the following completed Issues:
 Gather dependency context information from the PRs and actual codebase of completed Issues.
 Including specific type names, method signatures, and file paths lets sub-agents
 integrate accurately with existing code.
+
+**Building `{{DESIGN_REVIEW_CONTEXT}}`:**
+
+For Issues that ran through Phase 1.5, fold the design-reviewer's `DESIGN_REVIEW_RESULT` into a
+condensed block the implementer can act on:
+
+```
+## Design Review Findings (Phase 1.5)
+
+### Boundary Survey
+<2-4 line summary of key types/interfaces/data flows the agent discovered>
+
+### Resolved Decisions
+| # | Question | Answer | Source |
+|---|----------|--------|--------|
+| 1 | ... | ... | RFC §X.Y / Principle #N / Sibling: <pkg> |
+
+### Decisions Confirmed by User (if any)
+| # | Question | Decision | Notes |
+|---|----------|----------|-------|
+
+### Fitness Check
+PASS — all 6 MITM Principles upheld.
+```
+
+For Issues skipped per Phase 1.5-1, set `{{DESIGN_REVIEW_CONTEXT}}` to:
+
+```
+Design review skipped — <skip reason>. Implement directly per Issue description.
+```
 
 **Branch name determination rules:**
 - Issue labels or title contains "bug" / "fix" → `fix/`
@@ -439,11 +545,12 @@ do not bulk-delete. **Only target the worktrees of sub-agents you launched.**
 
 **Steps:**
 
-1. Record agent IDs from each Task call result in Phase 2
+1. Record agent IDs from each Task call result in Phase 1.5 (design-reviewer) and Phase 2 (implementer)
    (the `agentId` field in the Task tool return value)
 2. In addition to the Phase 2.5 review gate Agent's agent ID,
    also collect the `agent_ids` list in the review gate Agent's output (IDs of sub-agents it launched internally)
-3. After all batches and review cycles complete, run the following for each recorded agent ID:
+3. After all batches and review cycles complete, run the following for each recorded agent ID
+   (design-reviewer + implementer + review-gate + nested fixer/code-reviewer/security-reviewer IDs):
 
 ```bash
 git worktree remove .claude/worktrees/agent-<agentId> --force 2>/dev/null || true

@@ -10,6 +10,7 @@ The orchestrator replaces the following with actual values:
 - `{{BRANCH_NAME}}`, `{{BRANCH_TYPE}}`
 - `{{PRODUCT_CONTEXT}}` — Product overview, current phase, summary of relevant design decisions
 - `{{DEPENDENCY_CONTEXT}}` — Outputs of completed Issues this Issue depends on, and the types/interfaces they provide
+- `{{DESIGN_REVIEW_CONTEXT}}` — Findings from the Phase 1.5 design review (resolved decisions, boundary survey, fitness check). Or a one-line skip notice for trivial Issues.
 
 ---
 
@@ -41,10 +42,24 @@ Write high-quality code, ensure sufficient test coverage, and strictly follow pr
 
 {{DEPENDENCY_CONTEXT}}
 
+## Design Review Findings
+
+{{DESIGN_REVIEW_CONTEXT}}
+
+The design review above is the authoritative pre-implementation analysis for this Issue. Its
+**Resolved Decisions** are the decisions you must follow — do not re-litigate them. Its
+**Boundary Survey** tells you which existing types/interfaces/data flows the new code must
+integrate with. If a question is not in the table, fall back to first principles (CLAUDE.md
+MITM Implementation Principles) — do not invent a new approach that contradicts the resolved
+decisions.
+
+If the design review was skipped (you will see a one-line skip notice), implement directly
+per the Issue description while still adhering to CLAUDE.md conventions.
+
 ## First Steps
 
 1. Read `CLAUDE.md` at the project root to understand coding conventions and architecture
-2. Read the "Product Context" and "Dependency Context" above to understand where your Issue fits in the overall product
+2. Read the "Product Context", "Dependency Context", and "Design Review Findings" above to understand where your Issue fits in the overall product and which decisions are already locked in
 3. Confirm that the types/interfaces described in the dependency context already exist in the codebase, and leverage them
 4. Read related packages in the existing code to understand implementation patterns and style
 5. Check dependencies in `go.mod`
