@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -91,8 +92,18 @@ type channel struct {
 	// Next() for the Receive direction. Buffered to allow 1xx + final to
 	// queue without blocking the spawn loop. Closed when no more responses
 	// will be delivered (final received, EOF, error).
-	responseReady chan responseDelivery
-	closeOnce     sync.Once
+	//
+	// USK-798: responseReadyMu serializes close(responseReady) against sends
+	// from spawnLoopReceive (deliverResponse). The producer holds it for the
+	// duration of a send-select; closeResponseReady acquires it before closing.
+	// Close() sequences markTerminated → closeResponseReady so a producer
+	// blocked in the send-select unblocks via the termDone case and releases
+	// responseReadyMu before close runs — no deadlock. Mirrors the HTTP/2
+	// recvMu pattern (USK-739/USK-740).
+	responseReady       chan responseDelivery
+	responseReadyMu     sync.Mutex
+	responseReadyClosed atomic.Bool
+	closeOnce           sync.Once
 
 	// Per-exchange state.
 	currentStreamID string // minted in parseRequest / inherited via response delivery
@@ -339,28 +350,45 @@ func (c *channel) nextReceive(ctx context.Context) (*envelope.Envelope, error) {
 // response or error, this is the last delivery and responseReady is closed
 // after the send.
 //
-// Race-safety: Channel.Close (via Layer.Close or session.go's defer) may
-// have already closed c.responseReady by the time we get here. We use a
-// recover guard around the send to convert "send on closed channel" panics
-// into a no-op — the consumer is already gone, so dropping the delivery
-// is correct.
+// USK-798 race-safety: Channel.Close (via Layer.Close or session.go's defer)
+// may attempt to close c.responseReady concurrently with this send. The
+// previous recover()-based guard suppressed the resulting panic but did not
+// eliminate the underlying memory data race that -race flags. We now hold
+// c.responseReadyMu around the send-select and re-check c.responseReadyClosed
+// under the lock so close-vs-send is mutually exclusive. Close() sequences
+// markTerminated (closes termDone) → closeResponseReady (acquires the mutex)
+// so any send-select blocked here observes termDone first, releases the
+// lock, and lets close proceed — no deadlock. Mirrors HTTP/2 deliverEnvelope
+// (USK-739/USK-740).
 func (c *channel) deliverResponse(env *envelope.Envelope, err error) {
-	defer func() {
-		_ = recover()
-	}()
 	if err != nil {
+		c.responseReadyMu.Lock()
+		if c.responseReadyClosed.Load() {
+			c.responseReadyMu.Unlock()
+			return
+		}
 		select {
 		case c.responseReady <- responseDelivery{err: err}:
 		default:
 		}
+		c.responseReadyMu.Unlock()
 		c.closeResponseReady()
+		return
+	}
+	c.responseReadyMu.Lock()
+	// Re-check under the lock; Close() may have closed responseReady between
+	// the producer's entry and lock acquisition.
+	if c.responseReadyClosed.Load() {
+		c.responseReadyMu.Unlock()
 		return
 	}
 	select {
 	case c.responseReady <- responseDelivery{env: env}:
 	case <-c.termDone:
+		c.responseReadyMu.Unlock()
 		return
 	}
+	c.responseReadyMu.Unlock()
 	if env == nil {
 		c.closeResponseReady()
 		return
@@ -372,8 +400,18 @@ func (c *channel) deliverResponse(env *envelope.Envelope, err error) {
 	}
 }
 
+// closeResponseReady idempotently closes c.responseReady. Acquires
+// c.responseReadyMu so the close cannot race deliverResponse's send.
+//
+// USK-798: callers MUST close termDone (via markTerminated) before invoking
+// closeResponseReady — otherwise a producer parked on the send-select can
+// hold responseReadyMu indefinitely (it has no other unblock signal once
+// the buffer is full). Close() and Layer.Close obey this ordering.
 func (c *channel) closeResponseReady() {
+	c.responseReadyMu.Lock()
+	defer c.responseReadyMu.Unlock()
 	c.closeOnce.Do(func() {
+		c.responseReadyClosed.Store(true)
 		close(c.responseReady)
 	})
 }
@@ -413,6 +451,12 @@ func (c *channel) Send(ctx context.Context, env *envelope.Envelope) error {
 // Close marks this exchange's Channel terminated. The underlying conn is
 // owned by the parent Layer and survives Channel.Close so the next
 // exchange's Channel can keep using it.
+//
+// USK-798 ordering: markTerminated MUST run before closeResponseReady so
+// any producer (spawnLoopReceive's deliverResponse) blocked in the
+// send-select observes termDone, releases responseReadyMu, and then lets
+// closeResponseReady acquire the mutex to close the channel. Reversing
+// this order would deadlock against a full responseReady buffer.
 func (c *channel) Close() error {
 	c.markTerminated(io.EOF)
 	c.closeResponseReady()
