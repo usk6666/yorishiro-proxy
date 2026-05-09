@@ -486,10 +486,18 @@ func (s *Server) handleQueryFlows(ctx context.Context, input queryInput) (*gomcp
 
 // queryFlowResult is the response for the flow resource.
 type queryFlowResult struct {
-	ID                    string              `json:"id"`
-	ConnID                string              `json:"conn_id"`
-	Protocol              string              `json:"protocol"`
-	Scheme                string              `json:"scheme,omitempty"`
+	ID       string `json:"id"`
+	ConnID   string `json:"conn_id"`
+	Protocol string `json:"protocol"`
+	Scheme   string `json:"scheme,omitempty"`
+	// HTTPVersion is the wire-observed HTTP protocol version stamped on
+	// the request flow (USK-788). Canonical lowercased values:
+	// "http/1.0", "http/1.1", "h2", "h2c". Empty for non-HTTP flows and
+	// for any pre-USK-788 stored row. Populated from the request-side
+	// flow when present; otherwise from the response-side flow as a
+	// fallback so observability holds even when the request is missing
+	// (e.g. partial captures).
+	HTTPVersion           string              `json:"http_version,omitempty"`
 	State                 string              `json:"state"`
 	Method                string              `json:"method"`
 	URL                   string              `json:"url"`
@@ -615,6 +623,22 @@ func categorizeMessages(msgs []*flow.Flow) categorizedMessages {
 	result.sendMsg, result.originalSendMsg = resolveVariantPair(sendMsgs)
 	result.recvMsg, result.originalRecvMsg = resolveVariantPair(recvMsgs)
 	return result
+}
+
+// resolveHTTPVersion returns the wire-observed HTTP version for a flow
+// detail projection (USK-788). The request flow is authoritative —
+// downstream filters key on the request side; we fall back to the
+// response flow only when the send side is missing or carries no
+// HTTPVersion (partial capture / pre-USK-788 row). Empty result is the
+// "unknown" sentinel and projects as the omitted JSON field.
+func resolveHTTPVersion(cat categorizedMessages) string {
+	if cat.sendMsg != nil && cat.sendMsg.HTTPVersion != "" {
+		return cat.sendMsg.HTTPVersion
+	}
+	if cat.recvMsg != nil {
+		return cat.recvMsg.HTTPVersion
+	}
+	return ""
 }
 
 // resolveVariantPair determines the effective and original messages from a slice of
@@ -859,6 +883,7 @@ func (s *Server) handleQueryFlow(ctx context.Context, input queryInput) (*gomcp.
 		ConnID:                      fl.ConnID,
 		Protocol:                    fl.Protocol,
 		Scheme:                      fl.Scheme,
+		HTTPVersion:                 resolveHTTPVersion(cat),
 		State:                       fl.State,
 		Method:                      method,
 		URL:                         urlStr,

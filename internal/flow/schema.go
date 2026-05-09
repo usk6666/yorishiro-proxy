@@ -343,6 +343,18 @@ ALTER TABLE streams ADD COLUMN origin TEXT NOT NULL DEFAULT 'proxy';
 CREATE INDEX IF NOT EXISTS idx_streams_origin ON streams(origin);
 `
 
+// schemaV13 adds the http_version column to flows (USK-788). Carries the
+// wire-observed HTTP protocol version with canonical lowercased values
+// matching the ALPN registry: 'http/1.0', 'http/1.1', 'h2', 'h2c'. Empty
+// for non-HTTP protocols and for rows backfilled from earlier schema
+// versions. The companion idx_flows_http_version index mirrors the
+// status_code / method treatment so USK-792's `manage export_flows` /
+// `delete_flows` filter on http_version runs as a predicate scan.
+const schemaV13 = `
+ALTER TABLE flows ADD COLUMN http_version TEXT NOT NULL DEFAULT '';
+CREATE INDEX IF NOT EXISTS idx_flows_http_version ON flows(http_version);
+`
+
 var migrations = map[int]string{
 	1:  schemaV1,
 	2:  schemaV2,
@@ -356,6 +368,7 @@ var migrations = map[int]string{
 	10: schemaV10,
 	11: schemaV11,
 	12: schemaV12,
+	13: schemaV13,
 }
 
 func migrate(ctx context.Context, db *sql.DB) error {

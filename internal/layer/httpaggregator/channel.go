@@ -310,10 +310,16 @@ func (a *aggregatorChannel) absorbHeaders(env *envelope.Envelope, evt *http2.H2H
 		Path:            evt.Path,
 		RawQuery:        evt.RawQuery,
 		ConnectProtocol: evt.ConnectProtocol,
-		Status:          evt.Status,
-		StatusReason:    evt.StatusReason,
-		Headers:         cloneKVs(evt.Headers),
-		Anomalies:       cloneAnomalies(evt.Anomalies),
+		// USK-788: stamp the canonical HTTP/2 wire-version. The HTTP/2 Layer
+		// is constructed with WithScheme("http") only by the h2c handler
+		// (internal/connector/h2c_handler.go); every other producer uses
+		// WithScheme("https"). Reading evt.Scheme keeps the version source
+		// co-located with the rest of the pseudo-header projection.
+		HTTPVersion:  envelope.HTTPVersionFromH2Scheme(evt.Scheme),
+		Status:       evt.Status,
+		StatusReason: evt.StatusReason,
+		Headers:      cloneKVs(evt.Headers),
+		Anomalies:    cloneAnomalies(evt.Anomalies),
 	}
 
 	outEnv := &envelope.Envelope{

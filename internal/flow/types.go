@@ -152,6 +152,15 @@ type Flow struct {
 	// StatusCode is the HTTP response status code.
 	// Only set for HTTP receive flows.
 	StatusCode int
+	// HTTPVersion is the wire-observed HTTP protocol version (USK-788).
+	// Canonical lowercased values: "http/1.0", "http/1.1", "h2", "h2c".
+	// Empty for non-HTTP protocols and for any pre-USK-788 row stored
+	// before schemaV13 added the column. Mirrors the source-of-truth
+	// envelope.HTTPMessage.HTTPVersion field set by the producing Layer
+	// (HTTP/1.x parser → http/1.0 / http/1.1; HTTP/2 aggregator → h2 / h2c
+	// based on the Layer scheme). Downstream filters (USK-792 manage
+	// export_flows / delete_flows) read this column directly.
+	HTTPVersion string
 	// Metadata holds protocol-specific key-value metadata for this flow.
 	Metadata map[string]string
 }

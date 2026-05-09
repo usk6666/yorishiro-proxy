@@ -402,6 +402,51 @@ func TestRecordStep_FlowFieldsHTTP(t *testing.T) {
 	}
 }
 
+// TestRecordStep_HTTPVersionProjectedToFlow pins that HTTPMessage.HTTPVersion
+// (USK-788) is copied onto the persisted Flow. Each canonical wire-version
+// value is exercised so any future projection refactor cannot silently
+// regress to leaving the field empty.
+func TestRecordStep_HTTPVersionProjectedToFlow(t *testing.T) {
+	cases := []struct {
+		name        string
+		httpVersion string
+	}{
+		{name: "http/1.0", httpVersion: envelope.HTTPVersion10},
+		{name: "http/1.1", httpVersion: envelope.HTTPVersion11},
+		{name: "h2", httpVersion: envelope.HTTPVersionH2},
+		{name: "h2c", httpVersion: envelope.HTTPVersionH2C},
+		{name: "empty (non-HTTP / legacy)", httpVersion: ""},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			w := &mockWriter{}
+			step := NewRecordStep(w, nil)
+			env := &envelope.Envelope{
+				StreamID:  "s1",
+				FlowID:    "f1",
+				Direction: envelope.Send,
+				Sequence:  0,
+				Protocol:  envelope.ProtocolHTTP,
+				Raw:       []byte("GET / HTTP/1.1\r\n\r\n"),
+				Message: &envelope.HTTPMessage{
+					Method:      "GET",
+					Path:        "/",
+					HTTPVersion: tc.httpVersion,
+				},
+			}
+			step.Process(context.Background(), env)
+
+			if len(w.flows) != 1 {
+				t.Fatalf("expected 1 flow, got %d", len(w.flows))
+			}
+			if got := w.flows[0].HTTPVersion; got != tc.httpVersion {
+				t.Errorf("flow HTTPVersion = %q, want %q", got, tc.httpVersion)
+			}
+		})
+	}
+}
+
 func TestRecordStep_HTTPTrailersProjectedToFlow(t *testing.T) {
 	// Response with trailers (HTTP/2 trailer-HEADERS or HTTP/1.1 chunked
 	// trailers). Projection must be symmetric to Headers and retain

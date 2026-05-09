@@ -13,6 +13,36 @@ import (
 // when Envelope.Direction == Send.
 // Response-side fields (Status, StatusReason) are valid when
 // Envelope.Direction == Receive.
+
+// HTTP wire-version canonical values (USK-788).
+//
+// HTTPMessage.HTTPVersion carries the wire-observed HTTP protocol version
+// for the request/response. Values are lowercase and align with the ALPN
+// token registry (RFC 7301 / IANA "TLS Application-Layer Protocol
+// Negotiation (ALPN) Protocol IDs") so a flow's HTTPVersion can be
+// compared directly against ConnectionInfo.TLSALPN without case-folding
+// or slash-form normalization.
+//
+// The canonical set is closed: producers that cannot determine the
+// version (or write before this field is wired up) leave HTTPVersion
+// empty. Empty is treated as "unknown" by readers and is the persisted
+// shape for any pre-USK-788 row in the SQLite store.
+const (
+	// HTTPVersion10 is the HTTP/1.0 wire version (RFC 1945).
+	HTTPVersion10 = "http/1.0"
+	// HTTPVersion11 is the HTTP/1.1 wire version (RFC 9112). Default for
+	// most HTTP/1.x deployments.
+	HTTPVersion11 = "http/1.1"
+	// HTTPVersionH2 is HTTP/2 over TLS (RFC 9113), matching the ALPN
+	// token "h2".
+	HTTPVersionH2 = "h2"
+	// HTTPVersionH2C is HTTP/2 over cleartext TCP (RFC 9113 §3.1).
+	// Matches the ALPN token "h2c" even though h2c is not negotiated via
+	// ALPN in production deployments — keeping the same string lets
+	// downstream filters reuse a single value space.
+	HTTPVersionH2C = "h2c"
+)
+
 // AnomalyType classifies the kind of HTTP anomaly detected during parsing.
 // Anomaly types are defined as strings matching the parser's type constants.
 type AnomalyType string
@@ -92,6 +122,31 @@ type HTTPMessage struct {
 	// for this type).
 	ConnectProtocol string
 
+	// HTTPVersion is the wire-observed HTTP protocol version (USK-788).
+	// Canonical values are HTTPVersion10 / HTTPVersion11 / HTTPVersionH2 /
+	// HTTPVersionH2C ("http/1.0" / "http/1.1" / "h2" / "h2c") — see the
+	// constants above for the full canonical set and rationale.
+	//
+	// Set by the producing Layer:
+	//   - HTTP/1.x channel translates parser.RawRequest.Proto /
+	//     parser.RawResponse.Proto ("HTTP/1.0" / "HTTP/1.1") to the
+	//     lowercased canonical form.
+	//   - HTTP/2 aggregator stamps HTTPVersionH2 when evt.Scheme=="https"
+	//     and HTTPVersionH2C when evt.Scheme=="http" (the h2c handler in
+	//     internal/connector/h2c_handler.go is the sole producer of the
+	//     latter — it constructs the HTTP/2 Layer with WithScheme("http")).
+	//
+	// The field is informational; the wire-format encoding of an
+	// outgoing request/response is not driven from HTTPVersion. The
+	// HTTP/1.x re-encode path uses opaque rawReq/rawResp.Proto, and the
+	// HTTP/2 re-encode runs through HPACK regardless of HTTPVersion.
+	// Downstream filters (e.g. USK-792 manage export_flows / delete_flows)
+	// filter on HTTPVersion as recorded; they do not infer it from the
+	// scheme or ALPN.
+	//
+	// Empty for non-HTTP messages and for any pre-USK-788 stored row.
+	HTTPVersion string
+
 	// --- Response-side fields ---
 
 	// Status is the HTTP status code.
@@ -144,6 +199,7 @@ func (m *HTTPMessage) CloneMessage() Message {
 		Path:            m.Path,
 		RawQuery:        m.RawQuery,
 		ConnectProtocol: m.ConnectProtocol,
+		HTTPVersion:     m.HTTPVersion,
 		Status:          m.Status,
 		StatusReason:    m.StatusReason,
 		Headers:         cloneKeyValues(m.Headers),
@@ -173,6 +229,35 @@ func HasPushPromiseAnomaly(m *HTTPMessage) bool {
 		}
 	}
 	return false
+}
+
+// HTTPVersionFromProto translates an HTTP/1.x parser proto string
+// ("HTTP/1.0" / "HTTP/1.1") to the canonical lowercased HTTPVersion form
+// (USK-788). Unknown values fall through unchanged so downstream readers
+// can surface oddities (e.g. a "HTTP/0.9" appearance) verbatim instead of
+// silently masking them.
+func HTTPVersionFromProto(proto string) string {
+	switch proto {
+	case "HTTP/1.0":
+		return HTTPVersion10
+	case "HTTP/1.1":
+		return HTTPVersion11
+	default:
+		return proto
+	}
+}
+
+// HTTPVersionFromH2Scheme returns the canonical HTTP/2 wire-version
+// constant for a given scheme stamped on an HTTP/2 Layer (USK-788). The
+// h2c handler in internal/connector/h2c_handler.go is the sole producer
+// of scheme="http"; every other HTTP/2 path uses scheme="https". Unknown
+// values yield HTTPVersionH2 since the HTTP/2 wire format itself is
+// identical regardless of transport.
+func HTTPVersionFromH2Scheme(scheme string) string {
+	if scheme == "http" {
+		return HTTPVersionH2C
+	}
+	return HTTPVersionH2
 }
 
 // cloneAnomalies returns a deep copy of an Anomaly slice.

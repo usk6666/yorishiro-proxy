@@ -546,16 +546,17 @@ func (c *channel) parseRequest() (*envelope.Envelope, error) {
 	anomalies = append(anomalies, trailerAnomalies...)
 
 	msg := &envelope.HTTPMessage{
-		Method:     rawReq.Method,
-		Scheme:     c.scheme,
-		Authority:  authority,
-		Path:       path,
-		RawQuery:   rawQuery,
-		Headers:    rawHeadersToKV(rawReq.Headers),
-		Trailers:   trailers,
-		Body:       body,
-		BodyBuffer: bb,
-		Anomalies:  anomalies,
+		Method:      rawReq.Method,
+		Scheme:      c.scheme,
+		Authority:   authority,
+		Path:        path,
+		RawQuery:    rawQuery,
+		HTTPVersion: envelope.HTTPVersionFromProto(rawReq.Proto),
+		Headers:     rawHeadersToKV(rawReq.Headers),
+		Trailers:    trailers,
+		Body:        body,
+		BodyBuffer:  bb,
+		Anomalies:   anomalies,
 	}
 
 	envCtx := c.ctxTmpl
@@ -633,6 +634,7 @@ func (c *channel) parseResponse() (*envelope.Envelope, bool, error) {
 	msg := &envelope.HTTPMessage{
 		Status:       rawResp.StatusCode,
 		StatusReason: statusReason,
+		HTTPVersion:  envelope.HTTPVersionFromProto(rawResp.Proto),
 		Headers:      rawHeadersToKV(rawResp.Headers),
 		Trailers:     trailers,
 		Body:         body,
@@ -689,6 +691,7 @@ func (c *channel) buildStreamingResponseEnvelope(rawResp *parser.RawResponse) *e
 	msg := &envelope.HTTPMessage{
 		Status:       rawResp.StatusCode,
 		StatusReason: statusReason,
+		HTTPVersion:  envelope.HTTPVersionFromProto(rawResp.Proto),
 		Headers:      rawHeadersToKV(rawResp.Headers),
 		Anomalies:    anomalies,
 	}

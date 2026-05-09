@@ -610,8 +610,8 @@ func (s *SQLiteStore) saveFlowSync(ctx context.Context, f *Flow) error {
 	}
 
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO flows (id, stream_id, sequence, direction, variant, timestamp, headers, body, raw_bytes, body_truncated, method, url, status_code, metadata, trailers)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO flows (id, stream_id, sequence, direction, variant, timestamp, headers, body, raw_bytes, body_truncated, method, url, status_code, metadata, trailers, http_version)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		f.ID,
 		f.StreamID,
 		f.Sequence,
@@ -627,6 +627,7 @@ func (s *SQLiteStore) saveFlowSync(ctx context.Context, f *Flow) error {
 		f.StatusCode,
 		metadata,
 		trailers,
+		f.HTTPVersion,
 	)
 	if err != nil {
 		return fmt.Errorf("insert flow: %w", err)
@@ -634,8 +635,10 @@ func (s *SQLiteStore) saveFlowSync(ctx context.Context, f *Flow) error {
 	return nil
 }
 
-// flowColumns is the list of columns selected in flow queries.
-const flowColumns = `id, stream_id, sequence, direction, timestamp, headers, body, raw_bytes, body_truncated, method, url, status_code, metadata, trailers`
+// flowColumns is the list of columns selected in flow queries. http_version
+// (USK-788) is appended at the tail so any future flow column added by
+// migrations stays grouped with this scan/projection list.
+const flowColumns = `id, stream_id, sequence, direction, timestamp, headers, body, raw_bytes, body_truncated, method, url, status_code, metadata, trailers, http_version`
 
 // GetFlow retrieves a flow by ID.
 func (s *SQLiteStore) GetFlow(ctx context.Context, id string) (*Flow, error) {
@@ -887,6 +890,7 @@ func scanFlow(row scannable) (*Flow, error) {
 		bodyTruncated int
 		metadataStr   string
 		trailersStr   string
+		httpVersion   string
 	)
 
 	err := row.Scan(
@@ -904,6 +908,7 @@ func scanFlow(row scannable) (*Flow, error) {
 		&f.StatusCode,
 		&metadataStr,
 		&trailersStr,
+		&httpVersion,
 	)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -939,6 +944,7 @@ func scanFlow(row scannable) (*Flow, error) {
 	}
 	f.Timestamp = ts
 	f.BodyTruncated = bodyTruncated != 0
+	f.HTTPVersion = httpVersion
 
 	return &f, nil
 }

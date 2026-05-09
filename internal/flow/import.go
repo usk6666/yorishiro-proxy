@@ -304,6 +304,7 @@ func exportToFlow(ef *ExportFlow) (*Flow, error) {
 		BodyTruncated: ef.BodyTruncated,
 		Method:        ef.Method,
 		StatusCode:    ef.StatusCode,
+		HTTPVersion:   ef.HTTPVersion,
 		Metadata:      ef.Metadata,
 	}
 

@@ -713,6 +713,42 @@ func TestProtocolToHTTPVersion(t *testing.T) {
 	}
 }
 
+// TestHarHTTPVersion pins the HAR-format httpVersion mapping when a flow
+// carries a recorded HTTPVersion (USK-788). The HAR spec example uses
+// uppercased "HTTP/1.0" / "HTTP/1.1" so the canonical lowercased
+// envelope value must be re-cased on the way out; "h2" / "h2c" are
+// preferred verbatim. Empty flowVersion falls back to the protocol-name
+// mapping for backward compatibility with pre-USK-788 rows. Unknown
+// non-empty values are passed through unchanged so a future canonical
+// value surfaces verbatim instead of being silently masked to the
+// protocol-name fallback.
+func TestHarHTTPVersion(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		flowVersion string
+		protocol    string
+		want        string
+	}{
+		{name: "http/1.0 → HTTP/1.0", flowVersion: "http/1.0", protocol: "HTTP/1.x", want: "HTTP/1.0"},
+		{name: "http/1.1 → HTTP/1.1", flowVersion: "http/1.1", protocol: "HTTP/1.x", want: "HTTP/1.1"},
+		{name: "h2 verbatim", flowVersion: "h2", protocol: "HTTP/2", want: "h2"},
+		{name: "h2c verbatim", flowVersion: "h2c", protocol: "HTTP/2", want: "h2c"},
+		{name: "empty falls back to protocol HTTP/1.x", flowVersion: "", protocol: "HTTP/1.x", want: "HTTP/1.1"},
+		{name: "empty falls back to protocol HTTP/2", flowVersion: "", protocol: "HTTP/2", want: "h2"},
+		{name: "unknown passes through verbatim", flowVersion: "http/0.9", protocol: "HTTP/1.x", want: "http/0.9"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := harHTTPVersion(tc.flowVersion, tc.protocol)
+			if got != tc.want {
+				t.Errorf("harHTTPVersion(%q, %q) = %q, want %q", tc.flowVersion, tc.protocol, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestHeadersToHAR_Sorted(t *testing.T) {
 	t.Parallel()
 	headers := map[string][]string{

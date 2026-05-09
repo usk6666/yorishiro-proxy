@@ -540,6 +540,12 @@ func (s *RecordStep) envelopeToFlow(ctx context.Context, env *envelope.Envelope)
 	case *envelope.HTTPMessage:
 		fl.Method = m.Method
 		fl.StatusCode = m.Status
+		// USK-788: project the HTTPMessage's wire-version (set by the
+		// producing Layer — http1.channel for HTTP/1.x, httpaggregator
+		// for HTTP/2) onto the persisted Flow so MCP query consumers and
+		// downstream filters (USK-792) can branch on the canonical value
+		// without re-parsing raw bytes or guessing from ALPN.
+		fl.HTTPVersion = m.HTTPVersion
 		s.projectHTTPBody(ctx, env, m, fl)
 
 		if m.Path != "" || m.Authority != "" {

@@ -89,7 +89,11 @@ type ExportFlow struct {
 	Method        string              `json:"method,omitempty"`
 	URL           string              `json:"url,omitempty"`
 	StatusCode    int                 `json:"status_code,omitempty"`
-	Metadata      map[string]string   `json:"metadata,omitempty"`
+	// HTTPVersion is the wire-observed HTTP protocol version (USK-788).
+	// Canonical lowercased values: "http/1.0", "http/1.1", "h2", "h2c".
+	// Empty for non-HTTP flows and for any pre-USK-788 row.
+	HTTPVersion string            `json:"http_version,omitempty"`
+	Metadata    map[string]string `json:"metadata,omitempty"`
 }
 
 // ExportStreams exports streams matching the filter to a JSONL writer.
@@ -193,6 +197,7 @@ func flowsToExport(flows []*Flow, includeBodies bool) []*ExportFlow {
 			BodyTruncated: f.BodyTruncated,
 			Method:        f.Method,
 			StatusCode:    f.StatusCode,
+			HTTPVersion:   f.HTTPVersion,
 			Metadata:      f.Metadata,
 		}
 		if f.URL != nil {

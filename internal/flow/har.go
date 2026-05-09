@@ -331,7 +331,7 @@ func buildHARRequest(f *Flow, protocol string, includeBodies bool) *HARRequest {
 	req := &HARRequest{
 		Method:      method,
 		URL:         reqURL,
-		HTTPVersion: protocolToHTTPVersion(protocol),
+		HTTPVersion: harHTTPVersion(f.HTTPVersion, protocol),
 		Headers:     headersToHAR(f.Headers),
 		QueryString: queryParams,
 		HeadersSize: -1,
@@ -372,7 +372,7 @@ func buildHARResponse(f *Flow, protocol string, includeBodies bool) *HARResponse
 	resp := &HARResponse{
 		Status:      f.StatusCode,
 		StatusText:  statusText(f.StatusCode),
-		HTTPVersion: protocolToHTTPVersion(protocol),
+		HTTPVersion: harHTTPVersion(f.HTTPVersion, protocol),
 		Headers:     headersToHAR(f.Headers),
 		HeadersSize: -1,
 		BodySize:    int64(len(f.Body)),
@@ -487,6 +487,26 @@ func headerValue(headers map[string][]string, name string) string {
 		}
 	}
 	return ""
+}
+
+// harHTTPVersion returns the HAR-format httpVersion string preferring the
+// flow's recorded HTTPVersion (USK-788) over the protocol-name fallback.
+// HAR consumers expect uppercased "HTTP/1.0" / "HTTP/1.1" for HTTP/1.x
+// (per the HAR spec example values), so we restore the slash-form casing
+// from the lowercased canonical envelope value before emitting.
+func harHTTPVersion(flowVersion, protocol string) string {
+	switch flowVersion {
+	case "http/1.0":
+		return "HTTP/1.0"
+	case "http/1.1":
+		return "HTTP/1.1"
+	case "h2", "h2c":
+		return flowVersion
+	case "":
+		return protocolToHTTPVersion(protocol)
+	default:
+		return flowVersion
+	}
 }
 
 // protocolToHTTPVersion maps proxy protocol names to HAR httpVersion strings.
