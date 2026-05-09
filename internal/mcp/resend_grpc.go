@@ -199,6 +199,11 @@ func (s *Server) handleResendGRPC(ctx context.Context, _ *gomcp.CallToolRequest,
 	pipe := s.buildResendGRPCPipeline(encoders)
 
 	endEnv, recvData, recvStartMeta, err := s.runResendGRPC(rtCtx, plan, pipe)
+	// USK-789: resend bypasses session.RunSession so the proxy path's
+	// OnComplete-driven Stream finalisation never fires. Mirror the
+	// contract here so the new Stream transitions out of State="active"
+	// before the MCP result returns.
+	finalizeResendStream(ctx, s.flowStore.store, plan.streamID, err)
 	if err != nil {
 		return nil, nil, fmt.Errorf("resend_grpc: %w", err)
 	}

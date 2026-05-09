@@ -234,6 +234,12 @@ func TestResendWS_TextFrame_RoundTrip(t *testing.T) {
 	if stream.Tags["tag"] != "text-rt" {
 		t.Errorf("Stream.Tags[tag] = %q, want text-rt", stream.Tags["tag"])
 	}
+	// USK-789: resend bypasses session.RunSession so Stream-state
+	// finalisation is the handler's responsibility. After a successful
+	// round-trip the Stream must transition out of State="active".
+	if stream.State != "complete" {
+		t.Errorf("Stream.State = %q, want %q (USK-789: resend must finalise stream lifecycle)", stream.State, "complete")
+	}
 }
 
 // TestResendWS_BinaryFrame_RoundTrip covers AC#1 (binary frame).

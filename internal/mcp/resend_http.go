@@ -142,6 +142,11 @@ func (s *Server) handleResendHTTP(ctx context.Context, _ *gomcp.CallToolRequest,
 	dial := buildResendHTTPDialFunc(s.connector.tlsTransport, addr, useTLS, sni)
 
 	respEnv, err := runResendHTTP(rtCtx, env, dial, pipe)
+	// USK-789: resend bypasses session.RunSession so the proxy path's
+	// OnComplete-driven Stream finalisation never fires. Mirror the
+	// contract here so the new Stream transitions out of State="active"
+	// before the MCP result returns.
+	finalizeResendStream(ctx, s.flowStore.store, env.StreamID, err)
 	if err != nil {
 		return nil, nil, fmt.Errorf("resend_http: %w", err)
 	}

@@ -583,14 +583,24 @@ func TestResendRaw_TagAppliedToStreamRow(t *testing.T) {
 	})
 
 	deadline := time.Now().Add(2 * time.Second)
+	var stream *flow.Stream
 	for time.Now().Before(deadline) {
 		s, err := store.GetStream(context.Background(), result.StreamID)
 		if err == nil && s != nil && s.Tags["tag"] == "raw-resend-tag-1" {
-			return
+			stream = s
+			break
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	t.Fatalf("tag did not propagate to stream %s within deadline", result.StreamID)
+	if stream == nil {
+		t.Fatalf("tag did not propagate to stream %s within deadline", result.StreamID)
+	}
+	// USK-789: resend bypasses session.RunSession so Stream-state
+	// finalisation is the handler's responsibility. After a successful
+	// raw exchange the Stream must transition out of State="active".
+	if stream.State != "complete" {
+		t.Errorf("Stream.State = %q, want %q (USK-789: resend must finalise stream lifecycle)", stream.State, "complete")
+	}
 }
 
 // ---------------------------------------------------------------------------

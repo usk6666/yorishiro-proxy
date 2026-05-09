@@ -575,6 +575,12 @@ func TestResendGRPC_TagAppliedToStreamRow(t *testing.T) {
 	if stream == nil {
 		t.Fatalf("tag did not propagate to stream %s within deadline", result.StreamID)
 	}
+	// USK-789: resend bypasses session.RunSession so Stream-state
+	// finalisation is the handler's responsibility. After a successful
+	// gRPC exchange the Stream must transition out of State="active".
+	if stream.State != "complete" {
+		t.Errorf("Stream.State = %q, want %q (USK-789: resend must finalise stream lifecycle)", stream.State, "complete")
+	}
 }
 
 // ---------------------------------------------------------------------------

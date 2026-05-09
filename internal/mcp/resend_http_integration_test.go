@@ -25,6 +25,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -261,6 +262,15 @@ func TestResendHTTP_FromScratch_RoundTrip(t *testing.T) {
 	if stream.Origin != flow.OriginResend {
 		t.Errorf("Stream.Origin = %q, want %q (resend pipeline must stamp Origin)", stream.Origin, flow.OriginResend)
 	}
+	// USK-789: resend bypasses session.RunSession so Stream-state
+	// finalisation is the handler's responsibility. After a successful
+	// round-trip the Stream must transition out of State="active".
+	if stream.State != "complete" {
+		t.Errorf("Stream.State = %q, want %q (USK-789: resend must finalise stream lifecycle)", stream.State, "complete")
+	}
+	if stream.FailureReason != "" {
+		t.Errorf("Stream.FailureReason = %q, want empty (success path must not classify a failure)", stream.FailureReason)
+	}
 
 	flows, err := store.GetFlows(ctx, out.StreamID, flow.FlowListOptions{})
 	if err != nil {
@@ -473,4 +483,64 @@ func mustParseURL(t *testing.T, raw string) *url.URL {
 		t.Fatalf("parse %q: %v", raw, err)
 	}
 	return u
+}
+
+// TestResendHTTP_DialFailure_FinalisesStreamAsError covers the USK-789
+// error path: when runResendHTTP fails after the Stream row has been
+// created (e.g. the upstream dial fails because the port is closed),
+// the handler must still transition the Stream out of State="active"
+// so the recording reflects that the resend ended in an error rather
+// than staying pinned active forever.
+//
+// Note: dial happens after PluginStepPost runs on the send envelope,
+// which means RecordStep has already created the Stream + send Flow
+// rows. The assertion is that the lifecycle finaliser runs even when
+// the handler returns an error to the MCP caller.
+func TestResendHTTP_DialFailure_FinalisesStreamAsError(t *testing.T) {
+	cs, store, _, _ := setupResendHTTPSession(t)
+
+	// Reserve a closed port: bind, capture the address, then close —
+	// the address is highly likely to refuse a fresh dial within the
+	// test window.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	closedAddr := ln.Addr().String()
+	_ = ln.Close()
+
+	res := callResendHTTP(t, cs, map[string]any{
+		"method":     "GET",
+		"scheme":     "http",
+		"authority":  closedAddr,
+		"path":       "/",
+		"timeout_ms": 2000,
+	})
+	if !res.IsError {
+		t.Fatalf("expected dial failure to surface as IsError, got success")
+	}
+
+	// Find the Stream the resend pipeline created for this attempt. The
+	// MCP error result does not carry stream_id directly when the
+	// handler returns the error wrapped via fmt.Errorf, so we list
+	// streams and pick the one stamped Origin=resend.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	streams, err := store.ListStreams(ctx, flow.StreamListOptions{})
+	if err != nil {
+		t.Fatalf("ListStreams: %v", err)
+	}
+	var resendStream *flow.Stream
+	for _, s := range streams {
+		if s.Origin == flow.OriginResend {
+			resendStream = s
+			break
+		}
+	}
+	if resendStream == nil {
+		t.Fatalf("no Origin=resend Stream recorded; got %d streams total", len(streams))
+	}
+	if resendStream.State != "error" {
+		t.Errorf("Stream.State = %q, want %q (USK-789: dial-failure resend must finalise to error)", resendStream.State, "error")
+	}
 }
