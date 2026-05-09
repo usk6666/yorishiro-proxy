@@ -225,7 +225,7 @@
 .resend-history-title {
   font-size: var(--font-size-md);
   color: var(--text-primary);
-  margin-bottom: var(--space-sm);
+  margin: 0;
 }
 
 .resend-history-list {
@@ -243,10 +243,48 @@
   background-color: var(--bg-secondary);
   border-radius: var(--radius-sm);
   transition: background-color var(--transition-fast);
+  /* When rendered as a <button>, reset native button chrome so the row
+     keeps its existing visual idiom but becomes keyboard-accessible
+     (Enter / Space activate, focus ring honoured). */
+  width: 100%;
+  text-align: left;
+  border: 1px solid transparent;
+  font: inherit;
+  color: inherit;
 }
 
 .resend-history-entry:hover {
   background-color: var(--bg-tertiary);
+}
+
+.resend-history-entry--clickable {
+  cursor: pointer;
+}
+
+.resend-history-entry--clickable:focus-visible {
+  outline: none;
+  border-color: var(--accent-primary);
+}
+
+.resend-history-header-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  margin-bottom: var(--space-sm);
+}
+
+.resend-history-pagination {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  margin-top: var(--space-sm);
+  padding: var(--space-xs) 0;
+}
+
+.resend-history-pagination-info {
+  font-size: var(--font-size-xs);
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
 }
 
 .resend-history-method {

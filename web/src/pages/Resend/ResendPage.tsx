@@ -12,6 +12,8 @@ import { useResend, useQuery } from "../../lib/mcp/hooks.js";
 import type {
   BodyPatch,
   FlowDetailResult,
+  FlowEntry,
+  FlowsResult,
   HeaderKV,
   HooksInput,
   MacrosEntry,
@@ -92,19 +94,75 @@ export interface ResendResult {
   tag?: string;
 }
 
-/** A history entry for resends. */
+/**
+ * A Stream-derived history entry for resends (USK-787).
+ *
+ * Backed by server-side Stream Store rows pre-filtered by `origin = "resend"`.
+ * The optimistic-prepend buffer also produces values of this shape so the
+ * "fresh resend just landed" row appears before the server fetch resolves.
+ */
 interface HistoryEntry {
-  timestamp: string;
-  protocol: "http" | "tcp";
-  action: string;
+  /** FlowEntry.id — used for row key + navigation to /flows/:id. */
+  id: string;
+  protocol: string;
   method: string;
   url: string;
   statusCode?: number;
-  responseSize?: number;
   durationMs?: number;
-  dryRun: boolean;
-  tag: string;
-  flowId?: string;
+  tag?: string;
+  /** ISO 8601 timestamp from the server (or `new Date().toISOString()` for optimistic rows). */
+  timestamp: string;
+}
+
+/** Page size for the server-driven Send History pager (USK-787). */
+const HISTORY_PAGE_SIZE = 50;
+
+/**
+ * Map a `FlowEntry` returned by the `flows` MCP query (already pre-filtered
+ * by `origin = "resend"`) to the `HistoryEntry` render shape.
+ *
+ * `FlowEntry.tags` is server-side metadata (e.g. user-supplied resend `tag`
+ * argument); we surface a single representative value when present so the
+ * existing tag badge keeps working.
+ */
+function flowEntryToHistoryEntry(entry: FlowEntry): HistoryEntry {
+  let tag: string | undefined;
+  if (entry.tags) {
+    // Prefer a "tag" key when the server stored the resend tag under that
+    // name; otherwise pick the first defined value so the badge still
+    // surfaces useful metadata. Drop empty strings.
+    if (typeof entry.tags.tag === "string" && entry.tags.tag !== "") {
+      tag = entry.tags.tag;
+    } else {
+      for (const v of Object.values(entry.tags)) {
+        if (typeof v === "string" && v !== "") {
+          tag = v;
+          break;
+        }
+      }
+    }
+  }
+  return {
+    id: entry.id,
+    protocol: entry.protocol,
+    method: entry.method,
+    url: entry.url,
+    statusCode: entry.status_code,
+    durationMs: entry.duration_ms,
+    tag,
+    timestamp: entry.timestamp,
+  };
+}
+
+/** Get the Badge variant for an HTTP status code. */
+function statusBadgeVariant(
+  code: number | undefined,
+): "default" | "success" | "warning" | "danger" | "info" {
+  if (code == null || code === 0) return "default";
+  if (code < 300) return "success";
+  if (code < 400) return "info";
+  if (code < 500) return "warning";
+  return "danger";
 }
 
 /** Detect whether a flow uses TCP/raw protocol. */
@@ -356,7 +414,102 @@ export function ResendPage() {
   const [httpResponse, setHttpResponse] = useState<ResendResult | null>(null);
   const [tcpResponse, setTcpResponse] = useState<TcpResendResult | null>(null);
   const [rawResponse, setRawResponse] = useState<TcpResendResult | null>(null);
-  const [history, setHistory] = useState<HistoryEntry[]>([]);
+
+  // -------------------------------------------------------------------------
+  // Send History (USK-787)
+  // -------------------------------------------------------------------------
+  //
+  // Server-driven. `useQuery("flows", { filter: { origin: "resend" }, ... })`
+  // returns the most recent resend Streams from the server-side Stream Store,
+  // so reload preserves the list. `optimisticEntries` is a transient buffer
+  // that prepends a freshly-resent row before the next refetch resolves; it
+  // is cleared on page change and trimmed when entries land in the server
+  // response (de-duplicated by id below at render time).
+  // -------------------------------------------------------------------------
+  const [historyOffset, setHistoryOffset] = useState(0);
+  const [optimisticEntries, setOptimisticEntries] = useState<HistoryEntry[]>([]);
+
+  const {
+    data: historyData,
+    loading: historyLoading,
+    error: historyError,
+    refetch: refetchHistory,
+  } = useQuery("flows", {
+    filter: { origin: "resend" },
+    limit: HISTORY_PAGE_SIZE,
+    offset: historyOffset,
+    // The server's `flows` resource sorts by timestamp descending by default,
+    // matching FlowsPage's pattern of omitting `sortBy`. Schema's `sort_by`
+    // exposes `timestamp` / `duration_ms` for flows but the implicit default
+    // is the most-recent-first order we want here.
+  });
+
+  /** Composed display rows: optimistic prepend + server entries, de-duped by id. */
+  const displayedHistory = useMemo<HistoryEntry[]>(() => {
+    const serverRows: HistoryEntry[] = (historyData as FlowsResult | null)?.flows
+      ? (historyData as FlowsResult).flows.map(flowEntryToHistoryEntry)
+      : [];
+    const seen = new Set<string>();
+    const out: HistoryEntry[] = [];
+    for (const e of optimisticEntries) {
+      if (e.id && !seen.has(e.id)) {
+        seen.add(e.id);
+        out.push(e);
+      } else if (!e.id) {
+        // Defensive: optimistic rows should always have an id (we only push
+        // after we have a stream_id from the resend result), but allow
+        // through to avoid silently swallowing rows.
+        out.push(e);
+      }
+    }
+    for (const e of serverRows) {
+      if (!seen.has(e.id)) {
+        seen.add(e.id);
+        out.push(e);
+      }
+    }
+    return out.slice(0, HISTORY_PAGE_SIZE);
+  }, [optimisticEntries, historyData]);
+
+  // When the server response includes an optimistic row's id, drop it from
+  // the optimistic buffer to avoid retaining stale client-side state.
+  useEffect(() => {
+    if (optimisticEntries.length === 0) return;
+    const flows = (historyData as FlowsResult | null)?.flows;
+    if (!flows || flows.length === 0) return;
+    const serverIds = new Set(flows.map((f) => f.id));
+    if (optimisticEntries.some((e) => serverIds.has(e.id))) {
+      setOptimisticEntries((prev) => prev.filter((e) => !serverIds.has(e.id)));
+    }
+  }, [historyData, optimisticEntries]);
+
+  const historyTotal = (historyData as FlowsResult | null)?.total ?? 0;
+  const historyHasNext = historyOffset + HISTORY_PAGE_SIZE < historyTotal;
+  const historyHasPrev = historyOffset > 0;
+
+  /** Pump a freshly-completed resend into the optimistic buffer + trigger a refetch. */
+  const recordResendSuccess = useCallback(
+    (entry: HistoryEntry | null) => {
+      if (entry && entry.id) {
+        setOptimisticEntries((prev) => {
+          const next = [entry, ...prev.filter((e) => e.id !== entry.id)];
+          return next.slice(0, HISTORY_PAGE_SIZE);
+        });
+      }
+      // Re-sync the visible page with the server. Failure to refetch (e.g.
+      // transient network issue) is non-fatal — the optimistic row stays
+      // until a later refetch succeeds. We deliberately do NOT await the
+      // promise so the calling resend handler doesn't block on it.
+      void refetchHistory();
+    },
+    [refetchHistory],
+  );
+
+  /** Reset optimistic buffer when paging away (it only covers the current page). */
+  const goToHistoryPage = useCallback((nextOffset: number) => {
+    setOptimisticEntries([]);
+    setHistoryOffset(Math.max(0, nextOffset));
+  }, []);
 
   // Fetch original flow data when activeFlowId changes.
   const {
@@ -550,21 +703,16 @@ export function ResendPage() {
             tag: typedResult.tag,
           };
           setHttpResponse(adaptedResult);
-          setHistory((prev) => [
-            {
-              timestamp: new Date().toISOString(),
-              protocol: "http",
-              action: "resend_http",
-              method,
-              url,
-              statusCode: typedResult.status_code,
-              durationMs: typedResult.duration_ms,
-              dryRun: false,
-              tag,
-              flowId: typedResult.stream_id,
-            },
-            ...prev,
-          ]);
+          recordResendSuccess({
+            id: typedResult.stream_id,
+            protocol: flow?.protocol ?? "HTTP",
+            method,
+            url,
+            statusCode: typedResult.status_code,
+            durationMs: typedResult.duration_ms,
+            tag: tag || undefined,
+            timestamp: new Date().toISOString(),
+          });
           addToast({
             type: "success",
             message: `Request sent (${typedResult.status_code ?? "?"})`,
@@ -589,21 +737,22 @@ export function ResendPage() {
 
         setHttpResponse(result);
 
-        setHistory((prev) => [
-          {
-            timestamp: new Date().toISOString(),
-            protocol: "http",
-            action: "resend",
+        // Dry-run requests don't create a server-side Stream record, so the
+        // optimistic row would never reconcile with a server entry. Skip
+        // recording in dry-run mode (USK-787 explicitly drops dry-run from
+        // history; the response panel still shows the preview).
+        if (!isDryRun && result.new_flow_id) {
+          recordResendSuccess({
+            id: result.new_flow_id,
+            protocol: flow?.protocol ?? "HTTP",
             method,
             url,
             statusCode: result.response_status_code,
             durationMs: result.duration_ms,
-            dryRun: isDryRun,
-            tag,
-            flowId: result.new_flow_id,
-          },
-          ...prev,
-        ]);
+            tag: tag || undefined,
+            timestamp: new Date().toISOString(),
+          });
+        }
 
         addToast({
           type: "success",
@@ -632,6 +781,7 @@ export function ResendPage() {
       flow,
       client,
       useTypedTools,
+      recordResendSuccess,
     ],
   );
 
@@ -673,21 +823,17 @@ export function ResendPage() {
 
         setRawResponse(result);
 
-        setHistory((prev) => [
-          {
-            timestamp: new Date().toISOString(),
-            protocol: "http",
-            action: "resend_raw",
+        if (!isDryRun && result.new_flow_id) {
+          recordResendSuccess({
+            id: result.new_flow_id,
+            protocol: flow?.protocol ?? "Raw",
             method: "RAW",
             url: rawTargetAddr.trim(),
-            responseSize: result.response_size,
             durationMs: result.duration_ms,
-            dryRun: isDryRun,
-            tag,
-            flowId: result.new_flow_id,
-          },
-          ...prev,
-        ]);
+            tag: tag || undefined,
+            timestamp: new Date().toISOString(),
+          });
+        }
 
         addToast({
           type: "success",
@@ -702,7 +848,18 @@ export function ResendPage() {
         });
       }
     },
-    [activeFlowId, rawTargetAddr, rawUseTls, rawHttpText, tag, hooks, resend, addToast],
+    [
+      activeFlowId,
+      rawTargetAddr,
+      rawUseTls,
+      rawHttpText,
+      tag,
+      hooks,
+      resend,
+      addToast,
+      flow,
+      recordResendSuccess,
+    ],
   );
 
   /** Send TCP resend_raw request. */
@@ -760,21 +917,15 @@ export function ResendPage() {
             tag: typedResult.tag,
           };
           setTcpResponse(adapted);
-          setHistory((prev) => [
-            {
-              timestamp: new Date().toISOString(),
-              protocol: "tcp",
-              action: "resend_raw",
-              method: "RAW",
-              url: targetAddr.trim(),
-              responseSize: typedResult.response_size,
-              durationMs: typedResult.duration_ms,
-              dryRun: false,
-              tag,
-              flowId: typedResult.stream_id,
-            },
-            ...prev,
-          ]);
+          recordResendSuccess({
+            id: typedResult.stream_id,
+            protocol: flow?.protocol ?? "TCP",
+            method: "RAW",
+            url: targetAddr.trim(),
+            durationMs: typedResult.duration_ms,
+            tag: tag || undefined,
+            timestamp: new Date().toISOString(),
+          });
           addToast({
             type: "success",
             message: `Raw resend complete (${typedResult.response_size ?? 0} bytes)`,
@@ -796,21 +947,17 @@ export function ResendPage() {
 
         setTcpResponse(result);
 
-        setHistory((prev) => [
-          {
-            timestamp: new Date().toISOString(),
-            protocol: "tcp",
-            action: "resend_raw",
+        if (!isDryRun && result.new_flow_id) {
+          recordResendSuccess({
+            id: result.new_flow_id,
+            protocol: flow?.protocol ?? "TCP",
             method: "RAW",
             url: targetAddr.trim(),
-            responseSize: result.response_size,
             durationMs: result.duration_ms,
-            dryRun: isDryRun,
-            tag,
-            flowId: result.new_flow_id,
-          },
-          ...prev,
-        ]);
+            tag: tag || undefined,
+            timestamp: new Date().toISOString(),
+          });
+        }
 
         addToast({
           type: "success",
@@ -836,6 +983,7 @@ export function ResendPage() {
       flow,
       client,
       useTypedTools,
+      recordResendSuccess,
     ],
   );
 
@@ -863,21 +1011,17 @@ export function ResendPage() {
 
       setTcpResponse(result);
 
-      setHistory((prev) => [
-        {
-          timestamp: new Date().toISOString(),
-          protocol: "tcp",
-          action: "tcp_replay",
+      if (result.new_flow_id) {
+        recordResendSuccess({
+          id: result.new_flow_id,
+          protocol: flow?.protocol ?? "TCP",
           method: "REPLAY",
           url: targetAddr.trim(),
-          responseSize: result.response_size,
           durationMs: result.duration_ms,
-          dryRun: false,
-          tag,
-          flowId: result.new_flow_id,
-        },
-        ...prev,
-      ]);
+          tag: tag || undefined,
+          timestamp: new Date().toISOString(),
+        });
+      }
 
       addToast({
         type: "success",
@@ -889,7 +1033,16 @@ export function ResendPage() {
         message: err instanceof Error ? err.message : "TCP replay failed",
       });
     }
-  }, [activeFlowId, targetAddr, useTls, tag, resend, addToast]);
+  }, [
+    activeFlowId,
+    targetAddr,
+    useTls,
+    tag,
+    resend,
+    addToast,
+    flow,
+    recordResendSuccess,
+  ]);
 
   /** Whether the editor has a loaded flow. */
   const hasFlow = activeFlowId.length > 0 && flow != null;
@@ -1404,38 +1557,48 @@ export function ResendPage() {
         </div>
       )}
 
-      {/* History */}
-      {history.length > 0 && (
-        <div className="resend-history">
+      {/* Send History — server-driven (USK-787).
+        *
+        * Backed by `query("flows", { filter: { origin: "resend" }, limit, offset })`
+        * so the list survives browser reload. Optimistic prepend covers the
+        * gap between resend completion and the next refetch. Each row navigates
+        * to the corresponding Stream detail page (`/flows/:id`).
+        */}
+      <div className="resend-history">
+        <div className="resend-history-header-row">
           <h3 className="resend-history-title">Send History</h3>
+          {historyLoading && historyOffset === 0 && (
+            <Spinner size="sm" />
+          )}
+        </div>
+        {historyError && (
+          <div className="resend-error">
+            Failed to load history: {historyError.message}
+          </div>
+        )}
+        {displayedHistory.length === 0 && !historyLoading && !historyError && (
+          <div className="resend-empty-response">
+            No resend history yet. Submit a resend to see it appear here.
+          </div>
+        )}
+        {displayedHistory.length > 0 && (
           <div className="resend-history-list">
-            {history.map((entry, idx) => (
-              <div key={idx} className="resend-history-entry">
-                {entry.protocol === "http" && entry.action !== "resend_raw" ? (
-                  <Badge
-                    variant={
-                      entry.statusCode == null
-                        ? "default"
-                        : entry.statusCode < 300
-                          ? "success"
-                          : entry.statusCode < 500
-                            ? "warning"
-                            : "danger"
-                    }
-                  >
-                    {entry.statusCode ?? "---"}
-                  </Badge>
-                ) : (
-                  <Badge variant="info">
-                    {entry.responseSize != null ? `${entry.responseSize}B` : "TCP"}
-                  </Badge>
-                )}
+            {displayedHistory.map((entry) => (
+              <button
+                key={entry.id}
+                type="button"
+                className="resend-history-entry resend-history-entry--clickable"
+                onClick={() => navigate(`/flows/${entry.id}`)}
+                title={`Open Stream ${entry.id}`}
+              >
+                <Badge variant={statusBadgeVariant(entry.statusCode)}>
+                  {entry.statusCode != null && entry.statusCode > 0
+                    ? entry.statusCode
+                    : "---"}
+                </Badge>
+                <Badge variant="default">{entry.protocol}</Badge>
                 <span className="resend-history-method">{entry.method}</span>
                 <span className="resend-history-url">{entry.url}</span>
-                {(entry.protocol === "tcp" || entry.action === "resend_raw") && (
-                  <Badge variant="warning">{entry.action === "tcp_replay" ? "REPLAY" : "RAW"}</Badge>
-                )}
-                {entry.dryRun && <Badge variant="warning">DRY</Badge>}
                 {entry.tag && <Badge variant="info">{entry.tag}</Badge>}
                 {entry.durationMs != null && (
                   <span className="resend-history-duration">
@@ -1445,11 +1608,39 @@ export function ResendPage() {
                 <span className="resend-history-time">
                   {new Date(entry.timestamp).toLocaleTimeString()}
                 </span>
-              </div>
+              </button>
             ))}
           </div>
-        </div>
-      )}
+        )}
+        {(historyHasPrev || historyHasNext) && (
+          <div className="resend-history-pagination">
+            <Button
+              variant="ghost"
+              size="sm"
+              disabled={!historyHasPrev}
+              onClick={() => goToHistoryPage(historyOffset - HISTORY_PAGE_SIZE)}
+            >
+              Prev
+            </Button>
+            <span className="resend-history-pagination-info">
+              {historyTotal > 0
+                ? `${historyOffset + 1}–${Math.min(
+                    historyOffset + HISTORY_PAGE_SIZE,
+                    historyTotal,
+                  )} of ${historyTotal}`
+                : "0"}
+            </span>
+            <Button
+              variant="ghost"
+              size="sm"
+              disabled={!historyHasNext}
+              onClick={() => goToHistoryPage(historyOffset + HISTORY_PAGE_SIZE)}
+            >
+              Next
+            </Button>
+          </div>
+        )}
+      </div>
         </>
       )}
     </div>

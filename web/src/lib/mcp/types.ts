@@ -278,6 +278,13 @@ export interface QueryFilter {
   outliers_only?: boolean;
   status?: string;
   tag?: string;
+  /**
+   * Stream origin classification (USK-786 server filter).
+   * - "proxy": live MITM-recorded traffic
+   * - "resend": streams created by the resend_* MCP tools
+   * - "fuzz":  reserved for fuzz campaigns
+   */
+  origin?: "proxy" | "resend" | "fuzz";
 }
 
 /** Parameters for the query tool. */
