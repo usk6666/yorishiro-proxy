@@ -32,6 +32,11 @@
           "description": "URL scheme / transport filter for flows (e.g. https, http, wss, ws, tcp).",
           "enum": ["https", "http", "wss", "ws", "tcp"]
         },
+        "http_version": {
+          "type": "string",
+          "description": "HTTP wire-version filter for flows. Empty string matches pre-USK-788 rows that lack a recorded version. Mirrors manage tool filter (USK-792).",
+          "enum": ["", "http/1.0", "http/1.1", "h2", "h2c"]
+        },
         "conn_id": {
           "type": "string",
           "description": "Connection ID filter for flows (exact match)."

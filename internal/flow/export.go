@@ -14,8 +14,22 @@ const ExportFormatVersion = "1"
 
 // ExportFilter specifies criteria for filtering streams during export.
 type ExportFilter struct {
-	// Protocol filters by protocol name (e.g. "HTTPS", "HTTP/1.x").
+	// Protocol filters by canonical Stream.Protocol value (e.g. "http",
+	// "ws", "grpc", "tls-handshake"). Matched as an exact equality
+	// against the streams.protocol column.
 	Protocol string
+	// Scheme filters by Stream.Scheme — the URL scheme / transport
+	// indicator ("https", "http", "wss", "ws", "tcp"). Matched as an
+	// exact equality against the streams.scheme column. Mirrors the
+	// query MCP tool's filter.scheme axis (USK-792) so analysts can
+	// pick HTTPS-only flows for archival.
+	Scheme string
+	// HTTPVersion filters streams whose flows include at least one row
+	// with this http_version value (USK-788/USK-792). Canonical
+	// lowercased values: "http/1.0", "http/1.1", "h2", "h2c". Nil means
+	// the predicate is omitted; the non-nil empty string matches
+	// streams whose flows have an empty http_version (pre-USK-788).
+	HTTPVersion *string
 	// URLPattern filters by URL substring match.
 	URLPattern string
 	// TimeAfter includes only streams with timestamps at or after this time.
@@ -102,8 +116,10 @@ type ExportFlow struct {
 func ExportStreams(ctx context.Context, store Store, w io.Writer, opts ExportOptions) (int, error) {
 	// Build list options from filter, fetching all matching streams (no limit).
 	listOpts := StreamListOptions{
-		Protocol:   opts.Filter.Protocol,
-		URLPattern: opts.Filter.URLPattern,
+		Protocol:    opts.Filter.Protocol,
+		Scheme:      opts.Filter.Scheme,
+		HTTPVersion: opts.Filter.HTTPVersion,
+		URLPattern:  opts.Filter.URLPattern,
 	}
 
 	streams, err := store.ListStreams(ctx, listOpts)

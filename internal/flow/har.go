@@ -112,8 +112,10 @@ type HARWebSocketMessage struct {
 // Returns the number of entries exported.
 func ExportHAR(ctx context.Context, store Store, w io.Writer, opts ExportOptions, creatorVersion string) (int, error) {
 	listOpts := StreamListOptions{
-		Protocol:   opts.Filter.Protocol,
-		URLPattern: opts.Filter.URLPattern,
+		Protocol:    opts.Filter.Protocol,
+		Scheme:      opts.Filter.Scheme,
+		HTTPVersion: opts.Filter.HTTPVersion,
+		URLPattern:  opts.Filter.URLPattern,
 	}
 
 	streams, err := store.ListStreams(ctx, listOpts)

@@ -35,7 +35,18 @@ type manageParams struct {
 	// delete_flows parameters
 	OlderThanDays *int   `json:"older_than_days,omitempty" jsonschema:"delete flows older than this many days"`
 	Confirm       bool   `json:"confirm,omitempty" jsonschema:"confirm bulk deletion"`
-	Protocol      string `json:"protocol,omitempty" jsonschema:"protocol filter for delete_flows; matches Stream.Protocol exactly (canonical values: http, ws, grpc, grpc-web, sse, raw, tls-handshake)"`
+	Protocol      string `json:"protocol,omitempty" jsonschema:"protocol filter for delete_flows; matches Stream.Protocol exactly (canonical values: http, ws, grpc, grpc-web, sse, raw, tls-handshake). Mirrors query tool filter.protocol semantics."`
+	// Scheme filters delete_flows by Stream.Scheme. Canonical lowercased
+	// values: http, https, ws, wss, tcp. Mirrors the query tool's
+	// filter.scheme axis (USK-792).
+	Scheme string `json:"scheme,omitempty" jsonschema:"scheme filter for delete_flows; matches Stream.Scheme exactly (canonical values: http, https, ws, wss, tcp). Mirrors query tool filter.scheme semantics."`
+	// HTTPVersion filters delete_flows by an associated Flow's
+	// http_version. Canonical lowercased values: http/1.0, http/1.1,
+	// h2, h2c. Use a pointer so callers can request a literal
+	// empty-string filter (matches pre-USK-788 rows that lack a
+	// recorded version) by sending "" explicitly. Omit the key to
+	// disable the predicate. Mirrors query tool filter semantics.
+	HTTPVersion *string `json:"http_version,omitempty" jsonschema:"http_version filter for delete_flows; matches Flow.http_version (canonical values: http/1.0, http/1.1, h2, h2c). Empty-string explicit value matches pre-USK-788 rows."`
 
 	// export_flows parameters
 	Format        string        `json:"format,omitempty" jsonschema:"export format: jsonl (default) or har (HTTP Archive 1.2)"`
@@ -49,11 +60,26 @@ type manageParams struct {
 }
 
 // exportFilter holds filter parameters for the export_flows action.
+// Filter axes mirror the query MCP tool's filter so analysts can
+// archive / drop the same set of flows they were inspecting (USK-792).
 type exportFilter struct {
-	Protocol   string `json:"protocol,omitempty"`
-	URLPattern string `json:"url_pattern,omitempty"`
-	TimeAfter  string `json:"time_after,omitempty"`
-	TimeBefore string `json:"time_before,omitempty"`
+	// Protocol matches Stream.Protocol exactly. Canonical lowercased
+	// values: http, ws, grpc, grpc-web, sse, raw, tls-handshake.
+	Protocol string `json:"protocol,omitempty" jsonschema:"protocol filter; matches Stream.Protocol exactly (canonical values: http, ws, grpc, grpc-web, sse, raw, tls-handshake). Mirrors query tool filter.protocol semantics."`
+	// Scheme matches Stream.Scheme exactly. Canonical lowercased
+	// values: http, https, ws, wss, tcp. Mirrors the query tool's
+	// filter.scheme axis. Use scheme=https to export HTTPS flows
+	// regardless of HTTP version.
+	Scheme string `json:"scheme,omitempty" jsonschema:"scheme filter; matches Stream.Scheme exactly (canonical values: http, https, ws, wss, tcp). Mirrors query tool filter.scheme semantics."`
+	// HTTPVersion matches Flow.http_version via an EXISTS subquery on
+	// the flows table. Canonical lowercased values: http/1.0,
+	// http/1.1, h2, h2c. Pointer so an explicit empty string can
+	// request the pre-USK-788 (unknown-version) bucket; omitting the
+	// key disables the predicate.
+	HTTPVersion *string `json:"http_version,omitempty" jsonschema:"http_version filter; matches Flow.http_version (canonical values: http/1.0, http/1.1, h2, h2c). Empty-string explicit value matches pre-USK-788 rows."`
+	URLPattern  string  `json:"url_pattern,omitempty"`
+	TimeAfter   string  `json:"time_after,omitempty"`
+	TimeBefore  string  `json:"time_before,omitempty"`
 }
 
 // availableManageActions lists the valid action names for the manage tool.
@@ -64,10 +90,12 @@ func (s *Server) registerManage() {
 	gomcp.AddTool(s.server, &gomcp.Tool{
 		Name: "manage",
 		Description: "Manage flow data and CA certificates. Actions: " +
-			"'delete_flows' (by ID, age, protocol, or all — confirm required); " +
-			"'export_flows' (JSONL or HAR 1.2, optionally filtered, with/without bodies); " +
+			"'delete_flows' (by ID, age, or filter — protocol / scheme / http_version with confirm — or all); " +
+			"'export_flows' (JSONL or HAR 1.2, optionally filtered by protocol / scheme / http_version / url_pattern / time, with/without bodies); " +
 			"'import_flows' (JSONL with skip/replace on ID conflict); " +
 			"'regenerate_ca_cert' (depends on CA persistence mode). " +
+			"Filter axes (protocol / scheme / http_version) mirror the query tool's filter so analysts can " +
+			"export / delete the same set of flows they were inspecting. " +
 			"See yorishiro://help/manage.",
 	}, s.handleManage)
 }
@@ -155,13 +183,27 @@ func (s *Server) handleManageDeleteFlows(ctx context.Context, params manageParam
 		return nil, &executeDeleteFlowsResult{DeletedCount: 1}, nil
 	}
 
-	if params.Protocol != "" {
+	// Bulk filter-based deletion: any combination of protocol / scheme /
+	// http_version. All non-zero filter fields combine with AND. A
+	// confirm guard is required because the filter can match many
+	// streams. Empty filter falls through to the unconditional
+	// delete-all branch below.
+	deleteFilter, err := buildDeleteFilter(params)
+	if err != nil {
+		return nil, nil, err
+	}
+	if !deleteFilter.IsZero() {
 		if !params.Confirm {
-			return nil, nil, fmt.Errorf("confirm must be true to proceed with protocol-based deletion")
+			return nil, nil, fmt.Errorf("confirm must be true to proceed with filter-based deletion")
 		}
-		n, err := s.flowStore.store.DeleteStreamsByProtocol(ctx, params.Protocol)
+		slog.DebugContext(ctx, "delete_flows filter applied",
+			"protocol", deleteFilter.Protocol,
+			"scheme", deleteFilter.Scheme,
+			"http_version", debugHTTPVersionPtr(deleteFilter.HTTPVersion),
+		)
+		n, err := s.flowStore.store.DeleteStreamsByFilter(ctx, deleteFilter)
 		if err != nil {
-			return nil, nil, fmt.Errorf("delete flows by protocol: %w", err)
+			return nil, nil, fmt.Errorf("delete flows by filter: %w", err)
 		}
 		return nil, &executeDeleteFlowsResult{DeletedCount: n}, nil
 	}
@@ -174,7 +216,73 @@ func (s *Server) handleManageDeleteFlows(ctx context.Context, params manageParam
 		return nil, &executeDeleteFlowsResult{DeletedCount: n}, nil
 	}
 
-	return nil, nil, fmt.Errorf("delete_flows requires one of: flow_id, older_than_days, protocol (with confirm), or confirm=true for all deletion")
+	return nil, nil, fmt.Errorf("delete_flows requires one of: flow_id, older_than_days, filter (protocol/scheme/http_version with confirm), or confirm=true for all deletion")
+}
+
+// buildDeleteFilter assembles a flow.StreamDeleteFilter from the manage
+// params, validating that supplied values match the canonical
+// MCP-tool enums (mirror of the query tool). An empty filter (no
+// protocol / scheme / http_version) returns a zero filter so the
+// caller can treat that as "delete all" rather than a degenerate
+// single-axis predicate.
+func buildDeleteFilter(params manageParams) (flow.StreamDeleteFilter, error) {
+	if err := validateManageDeleteFilter(params); err != nil {
+		return flow.StreamDeleteFilter{}, err
+	}
+	return flow.StreamDeleteFilter{
+		Protocol:    params.Protocol,
+		Scheme:      params.Scheme,
+		HTTPVersion: params.HTTPVersion,
+	}, nil
+}
+
+// validateManageDeleteFilter validates the delete_flows filter values
+// against the canonical MCP enum sets so callers get the same error
+// messages as the query tool. http_version uses a pointer with the
+// non-nil empty-string sentinel meaning "match pre-USK-788 rows", so
+// only non-empty pointer values are checked against the enum.
+func validateManageDeleteFilter(params manageParams) error {
+	if err := validateEnum("protocol", params.Protocol, validFilterProtocols); err != nil {
+		return err
+	}
+	if err := validateEnum("scheme", params.Scheme, validFilterSchemes); err != nil {
+		return err
+	}
+	if v := params.HTTPVersion; v != nil && *v != "" {
+		if err := validateEnum("http_version", *v, validFilterHTTPVersions); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateManageExportFilter validates the export_flows filter values
+// against the same canonical MCP enum sets used by the query tool and
+// delete_flows path.
+func validateManageExportFilter(filter *exportFilter) error {
+	if err := validateEnum("protocol", filter.Protocol, validFilterProtocols); err != nil {
+		return err
+	}
+	if err := validateEnum("scheme", filter.Scheme, validFilterSchemes); err != nil {
+		return err
+	}
+	if v := filter.HTTPVersion; v != nil && *v != "" {
+		if err := validateEnum("http_version", *v, validFilterHTTPVersions); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// debugHTTPVersionPtr formats a *string http_version filter for slog
+// without panicking on nil. Nil is rendered as "<unset>" so debug
+// readers can distinguish "predicate omitted" from "match empty
+// http_version".
+func debugHTTPVersionPtr(p *string) string {
+	if p == nil {
+		return "<unset>"
+	}
+	return *p
 }
 
 // --- Regenerate CA cert ---
@@ -318,7 +426,12 @@ func buildExportOptions(params manageParams) (flow.ExportOptions, error) {
 	}
 
 	if params.Filter != nil {
+		if err := validateManageExportFilter(params.Filter); err != nil {
+			return flow.ExportOptions{}, err
+		}
 		opts.Filter.Protocol = params.Filter.Protocol
+		opts.Filter.Scheme = params.Filter.Scheme
+		opts.Filter.HTTPVersion = params.Filter.HTTPVersion
 		opts.Filter.URLPattern = params.Filter.URLPattern
 
 		if params.Filter.TimeAfter != "" {

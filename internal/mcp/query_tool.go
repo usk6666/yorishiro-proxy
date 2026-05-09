@@ -75,6 +75,13 @@ type queryFilter struct {
 	// Use scheme to find TLS flows: filter={scheme: "https"} returns HTTP/1.x, HTTP/2, gRPC flows over TLS.
 	// WebSocket over TLS uses scheme="wss", not "https".
 	Scheme string `json:"scheme,omitempty" jsonschema:"URL scheme / transport filter (https, http, wss, ws, tcp)"`
+	// HTTPVersion filters flows that have at least one Flow row with
+	// the matching http_version value (USK-788/USK-792). Canonical
+	// lowercased values: "http/1.0", "http/1.1", "h2", "h2c". Mirrors
+	// the manage tool's filter.http_version axis. Use a pointer so
+	// callers may explicitly pass "" to match pre-USK-788 rows; omit
+	// the key entirely to disable the predicate.
+	HTTPVersion *string `json:"http_version,omitempty" jsonschema:"http_version filter (http/1.0, http/1.1, h2, h2c). Empty-string explicit value matches pre-USK-788 rows."`
 	// Method filters flows by HTTP method (e.g. "GET", "POST").
 	Method string `json:"method,omitempty" jsonschema:"HTTP method filter (e.g. GET, POST)"`
 	// URLPattern filters flows by URL using a substring search pattern.
@@ -121,6 +128,14 @@ var validFilterProtocols = []string{
 
 // validFilterSchemes lists valid values for filter.scheme.
 var validFilterSchemes = []string{"https", "http", "wss", "ws", "tcp"}
+
+// validFilterHTTPVersions lists valid values for filter.http_version.
+// Mirrors the canonical lowercased values stamped on Flow.HTTPVersion
+// by USK-788. The empty string is a separately-meaningful sentinel
+// (pre-USK-788 rows) and is accepted by the filter when sent as an
+// explicit empty value, but it is not enumerated here because
+// validateEnum treats "" as "filter not applied".
+var validFilterHTTPVersions = []string{"http/1.0", "http/1.1", "h2", "h2c"}
 
 // validFilterStates lists valid values for filter.state.
 var validFilterStates = []string{"active", "complete", "error"}
@@ -171,6 +186,14 @@ func validateFlowFilters(input queryInput) error {
 		}
 		if err := validateEnum("origin", input.Filter.Origin, validFilterOrigins); err != nil {
 			return err
+		}
+		// http_version uses a pointer to keep the empty-string sentinel
+		// available; only validate against the enum when a non-empty
+		// value is supplied.
+		if v := input.Filter.HTTPVersion; v != nil && *v != "" {
+			if err := validateEnum("http_version", *v, validFilterHTTPVersions); err != nil {
+				return err
+			}
 		}
 	}
 	if err := validateEnum("sort_by", input.SortBy, validFlowSortByValues); err != nil {
@@ -384,6 +407,7 @@ func buildFlowListOptions(input queryInput) flow.StreamListOptions {
 			opts.Protocol = p
 		}
 		opts.Scheme = input.Filter.Scheme
+		opts.HTTPVersion = input.Filter.HTTPVersion
 		opts.Method = input.Filter.Method
 		opts.URLPattern = input.Filter.URLPattern
 		opts.StatusCode = input.Filter.StatusCode

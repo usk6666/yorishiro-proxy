@@ -360,6 +360,14 @@ func buildStreamWhereClause(opts StreamListOptions) (string, []interface{}) {
 		conditions = append(conditions, "s.scheme = ?")
 		args = append(args, opts.Scheme)
 	}
+	if opts.HTTPVersion != nil {
+		// EXISTS subquery: any flow on the stream matching the
+		// http_version value selects the stream. Empty string matches
+		// pre-USK-788 rows (schemaV13's DEFAULT ''). The
+		// idx_flows_http_version index makes the subquery cheap.
+		conditions = append(conditions, "EXISTS (SELECT 1 FROM flows m WHERE m.stream_id = s.id AND m.http_version = ?)")
+		args = append(args, *opts.HTTPVersion)
+	}
 	if opts.Method != "" {
 		conditions = append(conditions, "EXISTS (SELECT 1 FROM flows m WHERE m.stream_id = s.id AND m.direction = 'send' AND m.method = ?)")
 		args = append(args, opts.Method)
@@ -503,11 +511,53 @@ func (s *SQLiteStore) DeleteAllStreams(ctx context.Context) (int64, error) {
 }
 
 // DeleteStreamsByProtocol removes streams matching the given protocol.
+//
+// Deprecated: callers should migrate to DeleteStreamsByFilter so they
+// can compose protocol with scheme / http_version (USK-792). This shim
+// is implemented over DeleteStreamsByFilter to avoid divergent SQL.
 func (s *SQLiteStore) DeleteStreamsByProtocol(ctx context.Context, protocol string) (int64, error) {
-	result, err := s.db.ExecContext(ctx,
-		"DELETE FROM streams WHERE protocol = ?", protocol)
+	return s.DeleteStreamsByFilter(ctx, StreamDeleteFilter{Protocol: protocol})
+}
+
+// DeleteStreamsByFilter removes streams matching all non-zero fields of
+// filter (AND-combined). It rejects a fully zero filter to avoid an
+// accidental DELETE that erases every stream — callers must use
+// DeleteAllStreams for that explicit case.
+//
+// The query is parameterised throughout; no filter value is ever
+// interpolated into the SQL string. The http_version predicate is an
+// EXISTS subquery on the flows table because http_version lives there
+// (schemaV13). The idx_flows_http_version index makes the subquery
+// cheap. Cascade deletion of associated flows is handled by the
+// foreign key (ON DELETE CASCADE), the same way DeleteStream does it.
+func (s *SQLiteStore) DeleteStreamsByFilter(ctx context.Context, filter StreamDeleteFilter) (int64, error) {
+	if filter.IsZero() {
+		return 0, fmt.Errorf("delete streams by filter: filter must specify at least one of protocol, scheme, http_version")
+	}
+
+	var conditions []string
+	var args []interface{}
+	if filter.Protocol != "" {
+		conditions = append(conditions, "protocol = ?")
+		args = append(args, filter.Protocol)
+	}
+	if filter.Scheme != "" {
+		conditions = append(conditions, "scheme = ?")
+		args = append(args, filter.Scheme)
+	}
+	if filter.HTTPVersion != nil {
+		// streams.id (not an alias) — DELETE has no FROM-alias slot, so the
+		// subquery references the table by name. Mirrors the
+		// idx_flows_http_version-backed predicate used in
+		// buildStreamWhereClause (which aliases as s.id under SELECT).
+		conditions = append(conditions, "EXISTS (SELECT 1 FROM flows m WHERE m.stream_id = streams.id AND m.http_version = ?)")
+		args = append(args, *filter.HTTPVersion)
+	}
+
+	query := "DELETE FROM streams WHERE " + strings.Join(conditions, " AND ")
+	result, err := s.db.ExecContext(ctx, query, args...)
 	if err != nil {
-		return 0, fmt.Errorf("delete streams by protocol %q: %w", protocol, err)
+		return 0, fmt.Errorf("delete streams by filter: %w", err)
 	}
 	n, err := result.RowsAffected()
 	if err != nil {

@@ -51,6 +51,9 @@ func (m *mockHARStore) DeleteAllStreams(_ context.Context) (int64, error)       
 func (m *mockHARStore) DeleteStreamsByProtocol(_ context.Context, _ string) (int64, error) {
 	return 0, nil
 }
+func (m *mockHARStore) DeleteStreamsByFilter(_ context.Context, _ StreamDeleteFilter) (int64, error) {
+	return 0, nil
+}
 func (m *mockHARStore) DeleteStreamsOlderThan(_ context.Context, _ time.Time) (int64, error) {
 	return 0, nil
 }

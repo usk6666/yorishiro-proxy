@@ -73,6 +73,36 @@ type Writer interface {
 	FlowWriter
 }
 
+// StreamDeleteFilter selects which streams a bulk-delete operation
+// targets. All non-zero fields combine with AND, mirroring the manage
+// MCP tool's filter semantics (see USK-792). At least one field must be
+// set; an empty filter is rejected by callers to avoid mass deletion
+// disguised as a filtered call.
+type StreamDeleteFilter struct {
+	// Protocol matches Stream.Protocol exactly. Canonical lowercased
+	// values: "http", "ws", "grpc", "grpc-web", "sse", "raw",
+	// "tls-handshake".
+	Protocol string
+	// Scheme matches Stream.Scheme exactly. Canonical lowercased values:
+	// "http", "https", "ws", "wss", "tcp".
+	Scheme string
+	// HTTPVersion matches an associated Flow's http_version column via
+	// an EXISTS subquery. Canonical lowercased values: "http/1.0",
+	// "http/1.1", "h2", "h2c". Nil means the predicate is omitted; the
+	// non-nil empty string means "match streams whose flows have an
+	// empty http_version" (pre-USK-788 rows). Empty string is the
+	// source-of-truth marker for unknown / pre-migration data per
+	// schemaV13's `DEFAULT ''`.
+	HTTPVersion *string
+}
+
+// IsZero reports whether the filter selects no streams (every field is
+// at its zero value). Callers reject zero filters to prevent accidental
+// mass deletion via an empty filter object.
+func (f StreamDeleteFilter) IsZero() bool {
+	return f.Protocol == "" && f.Scheme == "" && f.HTTPVersion == nil
+}
+
 // StreamDeleter provides deletion operations for streams.
 type StreamDeleter interface {
 	// DeleteStream removes a stream and its associated flows by ID.
@@ -85,7 +115,19 @@ type StreamDeleter interface {
 	// DeleteStreamsByProtocol removes streams matching the given protocol,
 	// returning the number of deleted streams.
 	// Associated flows are cascade-deleted.
+	//
+	// Deprecated: prefer DeleteStreamsByFilter for new callers; this
+	// shim is preserved so existing callers and mocks compile unchanged
+	// during the USK-792 transition. It is implemented as a thin
+	// wrapper over DeleteStreamsByFilter on the SQLite store.
 	DeleteStreamsByProtocol(ctx context.Context, protocol string) (int64, error)
+
+	// DeleteStreamsByFilter removes streams matching the supplied
+	// StreamDeleteFilter, returning the number of deleted streams. All
+	// non-zero filter fields combine with AND. Associated flows are
+	// cascade-deleted via the foreign key on the flows table.
+	// Implementations must reject a zero-valued filter.
+	DeleteStreamsByFilter(ctx context.Context, filter StreamDeleteFilter) (int64, error)
 
 	// DeleteStreamsOlderThan removes streams with timestamps before the
 	// given cutoff, returning the number of deleted streams.
@@ -139,6 +181,15 @@ type StreamListOptions struct {
 	// Scheme filters streams by URL scheme / transport indicator
 	// (e.g. "https", "http", "wss", "ws", "tcp").
 	Scheme string
+	// HTTPVersion filters streams whose flows have at least one row
+	// matching this http_version value (USK-792). Canonical lowercased
+	// values: "http/1.0", "http/1.1", "h2", "h2c". Nil means the
+	// predicate is omitted; non-nil empty string ("") matches streams
+	// whose flows have an empty http_version (pre-USK-788 rows). The
+	// match runs as `EXISTS (SELECT 1 FROM flows m WHERE m.stream_id =
+	// s.id AND m.http_version = ?)` — i.e. a single matching flow makes
+	// the whole stream selected, mirroring how Method/StatusCode work.
+	HTTPVersion *string
 	// Method filters streams that have a send flow with this HTTP method.
 	Method string
 	// URLPattern filters streams that have a send flow with a URL

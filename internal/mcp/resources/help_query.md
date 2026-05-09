@@ -17,6 +17,7 @@ Fuzz job ID. Required for `fuzz_results` resource.
 Filter options for the `flows`, `messages`, `fuzz_jobs`, and `fuzz_results` resources.
 - **protocol** (string): Protocol filter for flows. Canonical values only (`"http"`, `"ws"`, `"grpc"`, `"grpc-web"`, `"sse"`, `"raw"`, `"tls-handshake"`); legacy spellings (`"HTTP/1.x"`, `"HTTPS"`, `"HTTP/2"`, `"WebSocket"`, `"gRPC"`, `"gRPC-Web"`, `"TCP"`, `"SOCKS5+*"`) are rejected as of USK-705.
 - **scheme** (string): URL scheme / transport filter for flows (e.g. `"https"`, `"http"`, `"wss"`, `"ws"`, `"tcp"`). Use to find TLS flows: `"https"` returns HTTP/1.x, HTTP/2, gRPC flows over TLS. WebSocket over TLS uses `"wss"`, not `"https"`.
+- **http_version** (string): HTTP wire-version filter for flows (`"http/1.0"`, `"http/1.1"`, `"h2"`, `"h2c"`). Matches when at least one flow on the stream recorded that version. Use `""` (explicit empty string) to match pre-USK-788 rows that lack a recorded version. Mirrors the `manage` tool's filter axis (USK-792).
 - **method** (string): HTTP method filter for flows (e.g. `"GET"`, `"POST"`).
 - **url_pattern** (string): URL substring match for flows (e.g. `"/api/"`).
 - **status_code** (integer): HTTP status code filter for flows and fuzz_results (e.g. `200`, `404`).

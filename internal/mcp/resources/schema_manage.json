@@ -25,11 +25,22 @@
         },
         "confirm": {
           "type": "boolean",
-          "description": "Confirm bulk deletion (required for older_than_days, protocol, or delete-all)."
+          "description": "Confirm bulk deletion (required for older_than_days, filter axes, or delete-all)."
         },
         "protocol": {
           "type": "string",
-          "description": "Protocol filter for delete_flows; matches Stream.Protocol exactly (canonical values: http, ws, grpc, grpc-web, sse, raw, tls-handshake)."
+          "description": "Protocol filter for delete_flows; matches Stream.Protocol exactly. Mirrors query.filter.protocol.",
+          "enum": ["http", "ws", "grpc", "grpc-web", "sse", "raw", "tls-handshake"]
+        },
+        "scheme": {
+          "type": "string",
+          "description": "Scheme filter for delete_flows; matches Stream.Scheme exactly. Mirrors query.filter.scheme.",
+          "enum": ["http", "https", "ws", "wss", "tcp"]
+        },
+        "http_version": {
+          "type": "string",
+          "description": "HTTP wire-version filter for delete_flows; matches an associated flow's http_version. Empty string matches pre-USK-788 rows. Mirrors query.filter.http_version.",
+          "enum": ["", "http/1.0", "http/1.1", "h2", "h2c"]
         },
         "format": {
           "type": "string",
@@ -38,11 +49,22 @@
         },
         "filter": {
           "type": "object",
-          "description": "Flow filter for export_flows.",
+          "description": "Flow filter for export_flows. Filter axes mirror the query tool.",
           "properties": {
             "protocol": {
               "type": "string",
-              "description": "Filter by protocol; matches Stream.Protocol exactly (canonical values: http, ws, grpc, grpc-web, sse, raw, tls-handshake)."
+              "description": "Filter by Stream.Protocol. Mirrors query.filter.protocol.",
+              "enum": ["http", "ws", "grpc", "grpc-web", "sse", "raw", "tls-handshake"]
+            },
+            "scheme": {
+              "type": "string",
+              "description": "Filter by Stream.Scheme. Mirrors query.filter.scheme.",
+              "enum": ["http", "https", "ws", "wss", "tcp"]
+            },
+            "http_version": {
+              "type": "string",
+              "description": "Filter by associated flow http_version. Empty string matches pre-USK-788 rows. Mirrors query.filter.http_version.",
+              "enum": ["", "http/1.0", "http/1.1", "h2", "h2c"]
             },
             "url_pattern": {
               "type": "string",

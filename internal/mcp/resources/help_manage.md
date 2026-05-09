@@ -13,15 +13,17 @@ Action-specific parameters (see below).
 ## Actions
 
 ### delete_flows
-Delete flows by ID, by age, by protocol, or all at once.
+Delete flows by ID, by age, by filter (protocol / scheme / http_version), or all at once.
 
 **Parameters:**
 - **flow_id** (string, optional): Delete a specific flow by ID.
 - **older_than_days** (integer, optional): Delete flows older than this many days. Must be >= 1. Requires `confirm: true`.
-- **protocol** (string, optional): Delete flows by protocol. Matches `Stream.Protocol` exactly; canonical values are `"http"`, `"ws"`, `"grpc"`, `"grpc-web"`, `"sse"`, `"raw"`, `"tls-handshake"`. Requires `confirm: true`.
-- **confirm** (boolean): Required for bulk deletion (older_than_days, protocol, or all). Set to `true` to proceed.
+- **protocol** (string, optional): Filter axis — matches `Stream.Protocol` exactly. Canonical values: `"http"`, `"ws"`, `"grpc"`, `"grpc-web"`, `"sse"`, `"raw"`, `"tls-handshake"`. Mirrors `query.filter.protocol`. Requires `confirm: true`.
+- **scheme** (string, optional): Filter axis — matches `Stream.Scheme` exactly. Canonical values: `"http"`, `"https"`, `"ws"`, `"wss"`, `"tcp"`. Use `"https"` to delete only TLS flows (cleartext untouched). Mirrors `query.filter.scheme`. Requires `confirm: true`.
+- **http_version** (string, optional): Filter axis — matches an associated flow's `http_version`. Canonical values: `"http/1.0"`, `"http/1.1"`, `"h2"`, `"h2c"`. The explicit empty string `""` matches pre-USK-788 rows that lack a recorded version. Mirrors `query.filter.http_version`. Requires `confirm: true`.
+- **confirm** (boolean): Required for any bulk deletion (older_than_days, filter axes, or delete-all). Set to `true` to proceed.
 
-One of `flow_id`, `older_than_days`, `protocol` (with confirm), or `confirm` (for delete-all) must be specified.
+`protocol`, `scheme`, and `http_version` combine with AND when multiple are supplied. One of `flow_id`, `older_than_days`, any filter axis (with confirm), or `confirm` (for delete-all) must be specified.
 
 Returns: deleted_count, cutoff_time (for age-based deletion).
 
@@ -41,8 +43,10 @@ Export flows to JSONL or HAR (HTTP Archive 1.2) format with optional filtering.
 
 **Parameters:**
 - **format** (string, optional): Export format. `"jsonl"` (default) for JSONL or `"har"` for HAR 1.2.
-- **filter** (object, optional): Flow filter criteria:
-  - **protocol** (string, optional): Filter by protocol. Matches `Stream.Protocol` exactly; canonical values are `"http"`, `"ws"`, `"grpc"`, `"grpc-web"`, `"sse"`, `"raw"`, `"tls-handshake"`.
+- **filter** (object, optional): Flow filter criteria. Filter axes mirror the `query` tool so analysts can export the same set of flows they were inspecting.
+  - **protocol** (string, optional): Filter by `Stream.Protocol`. Canonical values: `"http"`, `"ws"`, `"grpc"`, `"grpc-web"`, `"sse"`, `"raw"`, `"tls-handshake"`.
+  - **scheme** (string, optional): Filter by `Stream.Scheme`. Canonical values: `"http"`, `"https"`, `"ws"`, `"wss"`, `"tcp"`. Use `"https"` to export only TLS flows.
+  - **http_version** (string, optional): Filter by associated flow `http_version`. Canonical values: `"http/1.0"`, `"http/1.1"`, `"h2"`, `"h2c"`. The explicit empty string `""` matches pre-USK-788 rows.
   - **url_pattern** (string, optional): Filter by URL substring.
   - **time_after** (string, optional): Include flows after this time (RFC3339 format).
   - **time_before** (string, optional): Include flows before this time (RFC3339 format).
@@ -90,6 +94,35 @@ Returns: imported, skipped, errors, source.
 }
 ```
 
+### Delete only HTTPS flows (cleartext untouched)
+```json
+{
+  "action": "delete_flows",
+  "params": {"scheme": "https", "confirm": true}
+}
+```
+
+### Delete only HTTP/2 flows
+```json
+{
+  "action": "delete_flows",
+  "params": {"http_version": "h2", "confirm": true}
+}
+```
+
+### Delete combination (AND): HTTP family over TLS on h2
+```json
+{
+  "action": "delete_flows",
+  "params": {
+    "protocol": "http",
+    "scheme": "https",
+    "http_version": "h2",
+    "confirm": true
+  }
+}
+```
+
 ### Regenerate CA certificate
 ```json
 {
@@ -133,6 +166,30 @@ Returns: imported, skipped, errors, source.
       "url_pattern": "/api/"
     },
     "output_path": "/tmp/api-flows.har"
+  }
+}
+```
+
+### Export only HTTPS flows to JSONL
+```json
+{
+  "action": "export_flows",
+  "params": {
+    "format": "jsonl",
+    "filter": {"scheme": "https"},
+    "output_path": "/tmp/https-flows.jsonl"
+  }
+}
+```
+
+### Export only HTTP/2 flows to JSONL
+```json
+{
+  "action": "export_flows",
+  "params": {
+    "format": "jsonl",
+    "filter": {"http_version": "h2"},
+    "output_path": "/tmp/h2-flows.jsonl"
   }
 }
 ```
