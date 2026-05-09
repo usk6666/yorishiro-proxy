@@ -1343,6 +1343,198 @@ func TestQuery_Session_NormalHasNoBlockedBy(t *testing.T) {
 	}
 }
 
+// --- Test: origin filter (USK-786) ---
+
+// seedSessionWithOrigin creates a stream with an explicit Origin classification
+// and one send + one receive flow. Mirrors seedSession but threads Origin onto
+// the Stream record so the streams.origin column is populated explicitly.
+func seedSessionWithOrigin(t *testing.T, store flow.Store, id, urlStr string, origin flow.Origin) {
+	t.Helper()
+	ctx := context.Background()
+
+	st := &flow.Stream{
+		ID:        id,
+		ConnID:    "conn-" + id,
+		Protocol:  "HTTPS",
+		State:     "complete",
+		Timestamp: time.Now().UTC(),
+		Duration:  50 * time.Millisecond,
+		Origin:    origin,
+	}
+	if err := store.SaveStream(ctx, st); err != nil {
+		t.Fatalf("SaveStream(%s): %v", id, err)
+	}
+
+	parsedURL, _ := url.Parse(urlStr)
+	sendMsg := &flow.Flow{
+		ID:        id + "-send",
+		StreamID:  id,
+		Sequence:  0,
+		Direction: "send",
+		Timestamp: time.Now().UTC(),
+		Method:    "GET",
+		URL:       parsedURL,
+		Headers:   map[string][]string{"Host": {"example.com"}},
+	}
+	if err := store.SaveFlow(ctx, sendMsg); err != nil {
+		t.Fatalf("SaveFlow(send): %v", err)
+	}
+	recvMsg := &flow.Flow{
+		ID:         id + "-recv",
+		StreamID:   id,
+		Sequence:   1,
+		Direction:  "receive",
+		Timestamp:  time.Now().UTC(),
+		StatusCode: 200,
+		Headers:    map[string][]string{"Content-Type": {"text/plain"}},
+		Body:       []byte("ok"),
+	}
+	if err := store.SaveFlow(ctx, recvMsg); err != nil {
+		t.Fatalf("SaveFlow(receive): %v", err)
+	}
+}
+
+func TestQuery_Flows_FilterByOrigin(t *testing.T) {
+	t.Parallel()
+	store := newTestStore(t)
+	// One proxy stream (default origin).
+	seedSession(t, store, "p1", "HTTPS", "GET", "https://example.com/a", 200)
+	// Two resend streams.
+	seedSessionWithOrigin(t, store, "r1", "https://example.com/r1", flow.OriginResend)
+	seedSessionWithOrigin(t, store, "r2", "https://example.com/r2", flow.OriginResend)
+	// One fuzz stream (reserved origin).
+	seedSessionWithOrigin(t, store, "f1", "https://example.com/f1", flow.OriginFuzz)
+
+	cs := setupQueryTestSession(t, store)
+
+	tests := []struct {
+		name      string
+		origin    string
+		wantIDs   []string
+		wantTotal int
+	}{
+		{"no filter returns all", "", []string{"p1", "r1", "r2", "f1"}, 4},
+		{"origin=proxy", "proxy", []string{"p1"}, 1},
+		{"origin=resend", "resend", []string{"r1", "r2"}, 2},
+		{"origin=fuzz", "fuzz", []string{"f1"}, 1},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			input := queryInput{Resource: "flows"}
+			if tt.origin != "" {
+				input.Filter = &queryFilter{Origin: tt.origin}
+			}
+			result := callQuery(t, cs, input)
+			if result.IsError {
+				t.Fatalf("expected success, got error: %v", result.Content)
+			}
+
+			var out queryFlowsResult
+			unmarshalQueryResult(t, result, &out)
+
+			if out.Count != tt.wantTotal {
+				t.Errorf("count = %d, want %d", out.Count, tt.wantTotal)
+			}
+			if out.Total != tt.wantTotal {
+				t.Errorf("total = %d, want %d", out.Total, tt.wantTotal)
+			}
+
+			gotIDs := make(map[string]bool, len(out.Flows))
+			for _, f := range out.Flows {
+				gotIDs[f.ID] = true
+			}
+			for _, id := range tt.wantIDs {
+				if !gotIDs[id] {
+					t.Errorf("expected stream %s in result for origin=%q, got IDs: %v", id, tt.origin, gotIDs)
+				}
+			}
+			if len(out.Flows) != len(tt.wantIDs) {
+				t.Errorf("got %d streams, want %d (IDs=%v)", len(out.Flows), len(tt.wantIDs), gotIDs)
+			}
+		})
+	}
+}
+
+// TestQuery_Flows_OriginFilter_PaginatesWithLimitOffset confirms the existing
+// limit/offset wiring on the flows resource composes correctly with the new
+// origin filter — a precondition for WebUI Resend History (USK-787).
+func TestQuery_Flows_OriginFilter_PaginatesWithLimitOffset(t *testing.T) {
+	t.Parallel()
+	store := newTestStore(t)
+	for i := 0; i < 3; i++ {
+		seedSessionWithOrigin(t, store, fmt.Sprintf("r%d", i), "https://example.com/", flow.OriginResend)
+	}
+	seedSession(t, store, "p1", "HTTPS", "GET", "https://example.com/proxy", 200)
+
+	cs := setupQueryTestSession(t, store)
+
+	// Limit=1 with origin=resend: Count=1 (page size), Total=3 (full match set).
+	result := callQuery(t, cs, queryInput{
+		Resource: "flows",
+		Filter:   &queryFilter{Origin: "resend"},
+		Limit:    1,
+	})
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+	var page1 queryFlowsResult
+	unmarshalQueryResult(t, result, &page1)
+	if page1.Count != 1 {
+		t.Errorf("page1 count = %d, want 1", page1.Count)
+	}
+	if page1.Total != 3 {
+		t.Errorf("page1 total = %d, want 3", page1.Total)
+	}
+
+	// Offset=1, Limit=2: skips the newest, returns next two.
+	result = callQuery(t, cs, queryInput{
+		Resource: "flows",
+		Filter:   &queryFilter{Origin: "resend"},
+		Limit:    2,
+		Offset:   1,
+	})
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+	var page2 queryFlowsResult
+	unmarshalQueryResult(t, result, &page2)
+	if page2.Count != 2 {
+		t.Errorf("page2 count = %d, want 2", page2.Count)
+	}
+	if page2.Total != 3 {
+		t.Errorf("page2 total = %d, want 3", page2.Total)
+	}
+	if len(page2.Flows) > 0 && len(page1.Flows) > 0 && page2.Flows[0].ID == page1.Flows[0].ID {
+		t.Errorf("page2[0] = %s must differ from page1[0] (offset must skip)", page1.Flows[0].ID)
+	}
+}
+
+// TestBuildFlowListOptions_Origin verifies that queryFilter.Origin is mapped
+// onto flow.StreamListOptions.Origin via flow.Origin conversion in
+// buildFlowListOptions. Empty string must produce an empty Origin (no filter).
+func TestBuildFlowListOptions_Origin(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   queryInput
+		wantOpt flow.Origin
+	}{
+		{"no filter", queryInput{Resource: "flows"}, ""},
+		{"empty origin", queryInput{Resource: "flows", Filter: &queryFilter{}}, ""},
+		{"proxy", queryInput{Resource: "flows", Filter: &queryFilter{Origin: "proxy"}}, flow.OriginProxy},
+		{"resend", queryInput{Resource: "flows", Filter: &queryFilter{Origin: "resend"}}, flow.OriginResend},
+		{"fuzz", queryInput{Resource: "flows", Filter: &queryFilter{Origin: "fuzz"}}, flow.OriginFuzz},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			opts := buildFlowListOptions(tt.input)
+			if opts.Origin != tt.wantOpt {
+				t.Errorf("opts.Origin = %q, want %q", opts.Origin, tt.wantOpt)
+			}
+		})
+	}
+}
+
 // --- Test: state filter ---
 
 // seedSessionWithState creates a session with a specific state and messages.

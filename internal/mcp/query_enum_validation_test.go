@@ -107,6 +107,24 @@ func TestValidateFlowFilters(t *testing.T) {
 			errSub:  `invalid blocked_by "firewall"`,
 		},
 		{
+			name:  "valid origin proxy",
+			input: queryInput{Resource: "flows", Filter: &queryFilter{Origin: "proxy"}},
+		},
+		{
+			name:  "valid origin resend",
+			input: queryInput{Resource: "flows", Filter: &queryFilter{Origin: "resend"}},
+		},
+		{
+			name:  "valid origin fuzz",
+			input: queryInput{Resource: "flows", Filter: &queryFilter{Origin: "fuzz"}},
+		},
+		{
+			name:    "invalid origin",
+			input:   queryInput{Resource: "flows", Filter: &queryFilter{Origin: "unknown"}},
+			wantErr: true,
+			errSub:  `invalid origin "unknown"`,
+		},
+		{
 			name:  "valid sort_by",
 			input: queryInput{Resource: "flows", SortBy: "timestamp"},
 		},
@@ -304,5 +322,29 @@ func TestQuery_Flows_ValidFiltersStillWork(t *testing.T) {
 	})
 	if result.IsError {
 		t.Fatalf("expected success for valid filters, got error: %v", result.Content)
+	}
+}
+
+// TestQuery_Flows_InvalidOrigin verifies that an unknown origin value is
+// rejected with a validation error mentioning the parameter name. The schema
+// JSON also enforces the same enum, but the Go-side validateEnum produces the
+// canonical user-facing error message regardless of transport.
+func TestQuery_Flows_InvalidOrigin(t *testing.T) {
+	store := newTestStore(t)
+	cs := setupQueryTestSession(t, store)
+
+	result := callQuery(t, cs, queryInput{
+		Resource: "flows",
+		Filter:   &queryFilter{Origin: "unknown"},
+	})
+	if !result.IsError {
+		t.Fatal("expected IsError=true for invalid origin")
+	}
+	text := result.Content[0].(*gomcp.TextContent)
+	if !strings.Contains(text.Text, "invalid origin") {
+		t.Errorf("error should mention invalid origin, got: %s", text.Text)
+	}
+	if !strings.Contains(text.Text, "resend") {
+		t.Errorf("error should list valid values including resend, got: %s", text.Text)
 	}
 }

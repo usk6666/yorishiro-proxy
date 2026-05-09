@@ -21,6 +21,7 @@ Filter options for the `flows`, `messages`, `fuzz_jobs`, and `fuzz_results` reso
 - **url_pattern** (string): URL substring match for flows (e.g. `"/api/"`).
 - **status_code** (integer): HTTP status code filter for flows and fuzz_results (e.g. `200`, `404`).
 - **blocked_by** (string): Filter for blocked flows (e.g. `"target_scope"`, `"intercept_drop"`, `"rate_limit"`, `"safety_filter"`).
+- **origin** (string): Stream origin classification filter (`"proxy"` for live MITM traffic, `"resend"` for resend_* MCP tool streams, `"fuzz"` reserved for fuzz campaigns).
 - **state** (string): Flow lifecycle state filter (`"active"`, `"complete"`, `"error"`).
 - **technology** (string): Technology name filter for flows (case-insensitive substring match, e.g. `"nginx"`, `"wordpress"`).
 - **conn_id** (string): Connection ID filter for flows (exact match). Use to find all flows from the same connection.

@@ -83,6 +83,10 @@ type queryFilter struct {
 	StatusCode int `json:"status_code,omitempty" jsonschema:"HTTP response status code filter"`
 	// BlockedBy filters flows by blocked_by value (e.g. "target_scope", "intercept_drop", "rate_limit").
 	BlockedBy string `json:"blocked_by,omitempty" jsonschema:"blocked_by filter (e.g. target_scope, intercept_drop, rate_limit)"`
+	// Origin filters streams by how they came into existence (USK-786):
+	// "proxy" for live MITM-recorded traffic, "resend" for streams created by the
+	// resend_* MCP tools, "fuzz" reserved for fuzz campaigns. Empty disables the filter.
+	Origin string `json:"origin,omitempty" jsonschema:"stream origin filter (proxy, resend, fuzz)"`
 	// State filters flows by lifecycle state ("active", "complete", or "error").
 	State string `json:"state,omitempty" jsonschema:"flow lifecycle state filter (active, complete, error)"`
 	// Direction filters messages by direction ("send" or "receive").
@@ -124,6 +128,10 @@ var validFilterStates = []string{"active", "complete", "error"}
 // validFilterBlockedBy lists valid values for filter.blocked_by.
 var validFilterBlockedBy = []string{"target_scope", "intercept_drop", "rate_limit", "safety_filter", "enabled_protocols"}
 
+// validFilterOrigins lists valid values for filter.origin (USK-786).
+// Mirrors flow.Origin constants; "fuzz" is reserved for forward compatibility.
+var validFilterOrigins = []string{"proxy", "resend", "fuzz"}
+
 // validFilterFuzzJobStatuses lists valid values for filter.status (fuzz_jobs).
 var validFilterFuzzJobStatuses = []string{"running", "paused", "completed", "cancelled", "error"}
 
@@ -159,6 +167,9 @@ func validateFlowFilters(input queryInput) error {
 			return err
 		}
 		if err := validateEnum("blocked_by", input.Filter.BlockedBy, validFilterBlockedBy); err != nil {
+			return err
+		}
+		if err := validateEnum("origin", input.Filter.Origin, validFilterOrigins); err != nil {
 			return err
 		}
 	}
@@ -378,6 +389,7 @@ func buildFlowListOptions(input queryInput) flow.StreamListOptions {
 		opts.StatusCode = input.Filter.StatusCode
 		opts.BlockedBy = input.Filter.BlockedBy
 		opts.State = input.Filter.State
+		opts.Origin = flow.Origin(input.Filter.Origin)
 		opts.Technology = input.Filter.Technology
 		opts.ConnID = input.Filter.ConnID
 		opts.Host = input.Filter.Host

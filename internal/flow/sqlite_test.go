@@ -410,6 +410,165 @@ func TestSQLiteStore_ListSessions_StateFilter(t *testing.T) {
 	}
 }
 
+// TestSQLiteStore_ListStreams_OriginFilter verifies the StreamListOptions.Origin
+// WHERE-clause branch added in USK-786. Origins are persisted via the schemaV12
+// `origin` column with default 'proxy', so streams saved without an explicit
+// Origin are matched by Origin="proxy".
+func TestSQLiteStore_ListStreams_OriginFilter(t *testing.T) {
+	t.Parallel()
+	store := newTestStore(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	// One stream with the default origin (proxy) — saved via the helper.
+	proxyStream := saveTestSession(t, store, "HTTPS", now, "GET", "https://example.com/a", 200, nil, []byte("ok"))
+
+	// Two streams explicitly stamped OriginResend.
+	resend1 := &Stream{
+		Protocol:  "HTTPS",
+		State:     "complete",
+		Timestamp: now,
+		Origin:    OriginResend,
+	}
+	if err := store.SaveStream(ctx, resend1); err != nil {
+		t.Fatalf("SaveStream(resend1): %v", err)
+	}
+	resend2 := &Stream{
+		Protocol:  "HTTPS",
+		State:     "complete",
+		Timestamp: now,
+		Origin:    OriginResend,
+	}
+	if err := store.SaveStream(ctx, resend2); err != nil {
+		t.Fatalf("SaveStream(resend2): %v", err)
+	}
+
+	// One stream stamped OriginFuzz.
+	fuzzStream := &Stream{
+		Protocol:  "HTTPS",
+		State:     "complete",
+		Timestamp: now,
+		Origin:    OriginFuzz,
+	}
+	if err := store.SaveStream(ctx, fuzzStream); err != nil {
+		t.Fatalf("SaveStream(fuzz): %v", err)
+	}
+
+	tests := []struct {
+		name string
+		opts StreamListOptions
+		want int
+	}{
+		{"no filter returns all", StreamListOptions{}, 4},
+		{"empty origin returns all", StreamListOptions{Origin: ""}, 4},
+		{"origin proxy", StreamListOptions{Origin: OriginProxy}, 1},
+		{"origin resend", StreamListOptions{Origin: OriginResend}, 2},
+		{"origin fuzz", StreamListOptions{Origin: OriginFuzz}, 1},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			streams, err := store.ListStreams(ctx, tt.opts)
+			if err != nil {
+				t.Fatalf("ListStreams: %v", err)
+			}
+			if len(streams) != tt.want {
+				t.Errorf("got %d streams, want %d", len(streams), tt.want)
+			}
+			// CountStreams must mirror ListStreams length under the same filter.
+			count, err := store.CountStreams(ctx, tt.opts)
+			if err != nil {
+				t.Fatalf("CountStreams: %v", err)
+			}
+			if count != tt.want {
+				t.Errorf("count = %d, want %d", count, tt.want)
+			}
+		})
+	}
+
+	// Origin=proxy must include the row written without an explicit Origin
+	// (the schemaV12 column default 'proxy' covers the implicit case).
+	proxyRows, err := store.ListStreams(ctx, StreamListOptions{Origin: OriginProxy})
+	if err != nil {
+		t.Fatalf("ListStreams(proxy): %v", err)
+	}
+	if len(proxyRows) != 1 || proxyRows[0].ID != proxyStream.ID {
+		t.Errorf("origin=proxy result = %+v, want exactly stream %s", proxyRows, proxyStream.ID)
+	}
+	if proxyRows[0].Origin != OriginProxy {
+		t.Errorf("origin column = %q, want %q", proxyRows[0].Origin, OriginProxy)
+	}
+}
+
+// TestSQLiteStore_ListStreams_OriginFilter_LimitOffset verifies that pagination
+// (Limit/Offset) composes correctly with the Origin filter — a precondition for
+// the WebUI Resend History server-backed paging (USK-787).
+func TestSQLiteStore_ListStreams_OriginFilter_LimitOffset(t *testing.T) {
+	t.Parallel()
+	store := newTestStore(t)
+	ctx := context.Background()
+	base := time.Now().UTC()
+
+	// Three resend streams with strictly increasing timestamps so ORDER BY
+	// timestamp DESC produces a deterministic order.
+	for i := 0; i < 3; i++ {
+		st := &Stream{
+			Protocol:  "HTTPS",
+			State:     "complete",
+			Timestamp: base.Add(time.Duration(i) * time.Second),
+			Origin:    OriginResend,
+		}
+		if err := store.SaveStream(ctx, st); err != nil {
+			t.Fatalf("SaveStream(resend %d): %v", i, err)
+		}
+	}
+	// One unrelated proxy stream that must not appear in resend listings.
+	proxy := &Stream{
+		Protocol:  "HTTPS",
+		State:     "complete",
+		Timestamp: base.Add(10 * time.Second),
+		Origin:    OriginProxy,
+	}
+	if err := store.SaveStream(ctx, proxy); err != nil {
+		t.Fatalf("SaveStream(proxy): %v", err)
+	}
+
+	// Limit=1: only the newest resend stream comes back, but Total via
+	// CountStreams still reflects the full match set.
+	page1, err := store.ListStreams(ctx, StreamListOptions{Origin: OriginResend, Limit: 1})
+	if err != nil {
+		t.Fatalf("ListStreams page1: %v", err)
+	}
+	if len(page1) != 1 {
+		t.Fatalf("page1 len = %d, want 1", len(page1))
+	}
+	total, err := store.CountStreams(ctx, StreamListOptions{Origin: OriginResend})
+	if err != nil {
+		t.Fatalf("CountStreams: %v", err)
+	}
+	if total != 3 {
+		t.Errorf("total = %d, want 3", total)
+	}
+
+	// Limit=2 Offset=1: skip the newest, return the next two.
+	page2, err := store.ListStreams(ctx, StreamListOptions{Origin: OriginResend, Limit: 2, Offset: 1})
+	if err != nil {
+		t.Fatalf("ListStreams page2: %v", err)
+	}
+	if len(page2) != 2 {
+		t.Fatalf("page2 len = %d, want 2", len(page2))
+	}
+	// The first row of page2 must not be the same as page1[0] (offset moved past it).
+	if page2[0].ID == page1[0].ID {
+		t.Errorf("page2[0] = %s, must differ from page1[0]", page2[0].ID)
+	}
+	for _, s := range page2 {
+		if s.Origin != OriginResend {
+			t.Errorf("page2 stream %s origin = %q, want resend", s.ID, s.Origin)
+		}
+	}
+}
+
 func TestSQLiteStore_CountSessions(t *testing.T) {
 	t.Parallel()
 	store := newTestStore(t)

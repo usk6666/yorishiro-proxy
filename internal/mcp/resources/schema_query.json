@@ -62,6 +62,11 @@
           "description": "Filter sessions by blocked_by value (e.g. target_scope, intercept_drop).",
           "enum": ["target_scope", "intercept_drop", "rate_limit", "safety_filter"]
         },
+        "origin": {
+          "type": "string",
+          "description": "Filter streams by origin classification: proxy (live MITM traffic), resend (resend_* MCP tools), or fuzz (reserved for fuzz campaigns).",
+          "enum": ["proxy", "resend", "fuzz"]
+        },
         "state": {
           "type": "string",
           "description": "Session lifecycle state filter (active, complete, error).",

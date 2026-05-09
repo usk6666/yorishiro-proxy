@@ -153,6 +153,13 @@ type StreamListOptions struct {
 	// State filters streams by their lifecycle state
 	// ("active", "complete", or "error").
 	State string
+	// Origin filters streams by their Origin classification (USK-786):
+	// OriginProxy ("proxy"), OriginResend ("resend"), or OriginFuzz ("fuzz").
+	// Empty string disables the filter and returns rows for all origins.
+	// The filter is applied as an exact match on the streams.origin column;
+	// the schemaV12 column default ('proxy') ensures pre-existing rows match
+	// the OriginProxy filter without explicit backfill.
+	Origin Origin
 	// Technology filters streams whose tags contain a technology detection
 	// matching this name (case-insensitive substring match on the
 	// JSON-encoded "technologies" tag value).

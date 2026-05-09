@@ -381,6 +381,10 @@ func buildStreamWhereClause(opts StreamListOptions) (string, []interface{}) {
 		conditions = append(conditions, "s.state = ?")
 		args = append(args, opts.State)
 	}
+	if opts.Origin != "" {
+		conditions = append(conditions, "s.origin = ?")
+		args = append(args, string(opts.Origin))
+	}
 	if opts.Technology != "" {
 		// Match technology name inside the JSON-encoded "technologies" tag value.
 		// Tags column stores JSON-marshaled map[string]string. The technologies
