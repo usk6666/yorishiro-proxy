@@ -256,6 +256,11 @@ func TestResendHTTP_FromScratch_RoundTrip(t *testing.T) {
 	if stream.Protocol != "http" {
 		t.Errorf("Stream.Protocol = %q, want http", stream.Protocol)
 	}
+	// USK-785: resend_http must stamp Origin=resend so the query tool
+	// (USK-786) can filter resend-recorded streams from live captures.
+	if stream.Origin != flow.OriginResend {
+		t.Errorf("Stream.Origin = %q, want %q (resend pipeline must stamp Origin)", stream.Origin, flow.OriginResend)
+	}
 
 	flows, err := store.GetFlows(ctx, out.StreamID, flow.FlowListOptions{})
 	if err != nil {

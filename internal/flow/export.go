@@ -54,9 +54,14 @@ type ExportStream struct {
 	Tags       map[string]string `json:"tags,omitempty"`
 	ConnInfo   *ExportConnInfo   `json:"conn_info,omitempty"`
 	BlockedBy  string            `json:"blocked_by,omitempty"`
-	SendMs     *int64            `json:"send_ms,omitempty"`
-	WaitMs     *int64            `json:"wait_ms,omitempty"`
-	ReceiveMs  *int64            `json:"receive_ms,omitempty"`
+	// Origin classifies how the source Stream came into existence
+	// ('proxy' | 'resend' | 'fuzz'). Omitted from the JSONL line when
+	// empty so older exports continue to round-trip unchanged; on import
+	// a missing origin falls back to 'proxy' (USK-785).
+	Origin    string `json:"origin,omitempty"`
+	SendMs    *int64 `json:"send_ms,omitempty"`
+	WaitMs    *int64 `json:"wait_ms,omitempty"`
+	ReceiveMs *int64 `json:"receive_ms,omitempty"`
 }
 
 // ExportConnInfo is the JSON-serializable representation of ConnectionInfo.
@@ -155,6 +160,7 @@ func streamToExport(s *Stream) *ExportStream {
 		DurationMs: s.Duration.Milliseconds(),
 		Tags:       s.Tags,
 		BlockedBy:  s.BlockedBy,
+		Origin:     string(s.Origin),
 		SendMs:     s.SendMs,
 		WaitMs:     s.WaitMs,
 		ReceiveMs:  s.ReceiveMs,

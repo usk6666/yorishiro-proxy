@@ -5,6 +5,33 @@ import (
 	"time"
 )
 
+// Origin classifies how a Stream came into existence so consumers can
+// distinguish proxy-recorded traffic from operator-initiated resends or
+// fuzzing campaigns. The set is closed: only the three constants below are
+// canonical. Import is treated as a path attribute (the imported value is
+// inherited as-is); it is not its own Origin value.
+//
+// Storage shape: the value is persisted as a TEXT column on the streams
+// table (schemaV12) with DEFAULT 'proxy'. Existing rows from earlier
+// schema versions migrate to OriginProxy via that default.
+type Origin string
+
+const (
+	// OriginProxy marks streams recorded from live MITM proxy traffic.
+	// This is the default value applied by RecordStep and the schemaV12
+	// column default for backfilled rows.
+	OriginProxy Origin = "proxy"
+	// OriginResend marks streams created by the resend_* MCP tools
+	// (resend_http / resend_ws / resend_grpc / resend_raw).
+	OriginResend Origin = "resend"
+	// OriginFuzz is reserved for streams created by fuzz campaigns. It
+	// is enumerated for forward compatibility but no production write
+	// path stamps this value yet — that wiring lives in a follow-up
+	// Issue. Existing fuzz streams continue to record as OriginProxy
+	// until the fuzz path is updated.
+	OriginFuzz Origin = "fuzz"
+)
+
 // Stream represents a recorded proxy stream (connection/RPC-level grouping).
 // A stream contains one or more flows: for HTTP unary, there is exactly
 // one send + one receive flow. For streaming protocols, there may be many.
@@ -48,6 +75,13 @@ type Stream struct {
 	// Empty string means the request was not blocked.
 	// "target_scope" means it was blocked by the target scope rules.
 	BlockedBy string
+	// Origin classifies how the Stream came into existence (USK-785).
+	// OriginProxy for live MITM-recorded traffic, OriginResend for streams
+	// created by the resend_* MCP tools, OriginFuzz reserved for fuzz
+	// campaigns (not yet written from any production path). Empty string
+	// is treated as OriginProxy by readers that want backward compatibility
+	// with pre-schemaV12 rows; the SQLite column itself defaults to 'proxy'.
+	Origin Origin
 	// SendMs is the time in milliseconds to send the request (headers + body).
 	// Nil when not measured (e.g., Raw TCP, or legacy streams before this feature).
 	SendMs *int64 `json:"send_ms,omitempty"`

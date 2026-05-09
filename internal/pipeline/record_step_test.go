@@ -2378,3 +2378,88 @@ func TestRecordStep_CaptureScope_RuntimeUpdate(t *testing.T) {
 		t.Errorf("in-scope stream after retightening should record; got %d flows", len(w.flows))
 	}
 }
+
+// TestRecordStep_DefaultOrigin_Proxy pins the USK-785 contract: a
+// RecordStep constructed without WithOrigin stamps Stream.Origin =
+// OriginProxy on the Stream it creates at first-Send. This is the
+// behaviour the live proxy data path relies on.
+func TestRecordStep_DefaultOrigin_Proxy(t *testing.T) {
+	w := &mockWriter{}
+	step := NewRecordStep(w, nil)
+
+	env := &envelope.Envelope{
+		StreamID:  "stream-proxy",
+		FlowID:    "flow-1",
+		Direction: envelope.Send,
+		Sequence:  0,
+		Protocol:  envelope.ProtocolRaw,
+		Raw:       []byte("data"),
+		Message:   &envelope.RawMessage{Bytes: []byte("data")},
+		Context:   envelope.EnvelopeContext{ConnID: "conn-1"},
+	}
+	step.Process(context.Background(), env)
+
+	if len(w.streams) != 1 {
+		t.Fatalf("expected 1 stream, got %d", len(w.streams))
+	}
+	if got, want := w.streams[0].Origin, flow.OriginProxy; got != want {
+		t.Errorf("default Stream.Origin = %q, want %q", got, want)
+	}
+}
+
+// TestRecordStep_WithOriginResend pins the USK-785 contract for the
+// resend code path: the 4 resend MCP tools construct a RecordStep with
+// WithOrigin(OriginResend) so resend-originated streams can be filtered
+// from live captures by the query tool (USK-786).
+func TestRecordStep_WithOriginResend(t *testing.T) {
+	w := &mockWriter{}
+	step := NewRecordStep(w, nil, WithOrigin(flow.OriginResend))
+
+	env := &envelope.Envelope{
+		StreamID:  "stream-resend",
+		FlowID:    "flow-1",
+		Direction: envelope.Send,
+		Sequence:  0,
+		Protocol:  envelope.ProtocolHTTP,
+		Raw:       []byte("GET / HTTP/1.1\r\n\r\n"),
+		Message:   &envelope.HTTPMessage{Method: "GET", Path: "/"},
+		Context:   envelope.EnvelopeContext{ConnID: "conn-resend"},
+	}
+	step.Process(context.Background(), env)
+
+	if len(w.streams) != 1 {
+		t.Fatalf("expected 1 stream, got %d", len(w.streams))
+	}
+	if got, want := w.streams[0].Origin, flow.OriginResend; got != want {
+		t.Errorf("WithOrigin(Resend) → Stream.Origin = %q, want %q", got, want)
+	}
+}
+
+// TestRecordStep_WithOrigin_EmptyFallsBackToProxy pins the
+// "no-explicit-nil" contract on WithOrigin: an empty Origin argument is
+// treated as "use default", which is OriginProxy. Callers can therefore
+// thread a config-provided value through WithOrigin without explicit
+// guards on the call site.
+func TestRecordStep_WithOrigin_EmptyFallsBackToProxy(t *testing.T) {
+	w := &mockWriter{}
+	step := NewRecordStep(w, nil, WithOrigin(""))
+
+	env := &envelope.Envelope{
+		StreamID:  "stream-empty-origin",
+		FlowID:    "flow-1",
+		Direction: envelope.Send,
+		Sequence:  0,
+		Protocol:  envelope.ProtocolRaw,
+		Raw:       []byte("data"),
+		Message:   &envelope.RawMessage{Bytes: []byte("data")},
+		Context:   envelope.EnvelopeContext{ConnID: "conn-empty"},
+	}
+	step.Process(context.Background(), env)
+
+	if len(w.streams) != 1 {
+		t.Fatalf("expected 1 stream, got %d", len(w.streams))
+	}
+	if got, want := w.streams[0].Origin, flow.OriginProxy; got != want {
+		t.Errorf("WithOrigin('') → Stream.Origin = %q, want %q", got, want)
+	}
+}

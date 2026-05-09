@@ -155,9 +155,18 @@ func (s *SQLiteStore) saveStreamSync(ctx context.Context, st *Stream) error {
 		state = "complete"
 	}
 
+	// Default unset Origin to OriginProxy so the column never holds the
+	// empty string. The schemaV12 default 'proxy' would also cover this
+	// at the storage layer, but stamping it here keeps in-memory Stream
+	// values consistent with what readers see after a roundtrip.
+	origin := st.Origin
+	if origin == "" {
+		origin = OriginProxy
+	}
+
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO streams (id, conn_id, protocol, scheme, state, timestamp, duration_ms, tags, client_addr, server_addr, tls_version, tls_cipher, tls_alpn, tls_server_cert_subject, blocked_by, send_ms, wait_ms, receive_ms, failure_reason)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO streams (id, conn_id, protocol, scheme, state, timestamp, duration_ms, tags, client_addr, server_addr, tls_version, tls_cipher, tls_alpn, tls_server_cert_subject, blocked_by, send_ms, wait_ms, receive_ms, failure_reason, origin)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		st.ID,
 		st.ConnID,
 		st.Protocol,
@@ -177,6 +186,7 @@ func (s *SQLiteStore) saveStreamSync(ctx context.Context, st *Stream) error {
 		st.WaitMs,
 		st.ReceiveMs,
 		st.FailureReason,
+		string(origin),
 	)
 	if err != nil {
 		return fmt.Errorf("insert stream: %w", err)
@@ -326,7 +336,7 @@ func ValidateStreamID(id string) error {
 }
 
 // streamColumns is the list of columns selected in stream queries.
-const streamColumns = `id, conn_id, protocol, scheme, state, timestamp, duration_ms, tags, client_addr, server_addr, tls_version, tls_cipher, tls_alpn, tls_server_cert_subject, blocked_by, send_ms, wait_ms, receive_ms, failure_reason`
+const streamColumns = `id, conn_id, protocol, scheme, state, timestamp, duration_ms, tags, client_addr, server_addr, tls_version, tls_cipher, tls_alpn, tls_server_cert_subject, blocked_by, send_ms, wait_ms, receive_ms, failure_reason, origin`
 
 // buildStreamWhereClause constructs a SQL WHERE clause from StreamListOptions.
 // Method, URLPattern, and StatusCode are matched via EXISTS subqueries on flows.
@@ -789,6 +799,7 @@ func scanStream(row scannable) (*Stream, error) {
 		waitMs         sql.NullInt64
 		receiveMs      sql.NullInt64
 		failureReason  string
+		origin         string
 	)
 
 	err := row.Scan(
@@ -811,6 +822,7 @@ func scanStream(row scannable) (*Stream, error) {
 		&waitMs,
 		&receiveMs,
 		&failureReason,
+		&origin,
 	)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -846,6 +858,15 @@ func scanStream(row scannable) (*Stream, error) {
 
 	st.BlockedBy = blockedBy
 	st.FailureReason = failureReason
+	// Materialize the origin column. The schemaV12 NOT NULL DEFAULT 'proxy'
+	// ensures rows from any migration baseline produce a non-empty value;
+	// fall back defensively to OriginProxy if a future migration leaves the
+	// column blank (e.g. ALTER TABLE backfill divergence).
+	if origin == "" {
+		st.Origin = OriginProxy
+	} else {
+		st.Origin = Origin(origin)
+	}
 	st.SendMs = nullInt64ToPtr(sendMs)
 	st.WaitMs = nullInt64ToPtr(waitMs)
 	st.ReceiveMs = nullInt64ToPtr(receiveMs)

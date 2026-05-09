@@ -241,10 +241,24 @@ func cleanupStream(ctx context.Context, store Store, streamID string) {
 }
 
 // exportToStream converts an ExportStream back to a Stream.
+//
+// USK-785: Origin is inherited from the source as-is, including unknown
+// enum values (forward-compat with future origin variants written by
+// newer producers). Missing/empty origin falls back to OriginProxy so
+// pre-USK-785 JSONL exports — and the no-origin HAR import path — land
+// on the canonical default. The fallback intentionally does NOT validate
+// against the current enum: imports that already encode an origin keep
+// it verbatim, which mirrors how this importer treats other open-set
+// fields like Protocol or State.
 func exportToStream(es *ExportStream) (*Stream, error) {
 	ts, err := time.Parse(time.RFC3339Nano, es.Timestamp)
 	if err != nil {
 		return nil, fmt.Errorf("parse stream timestamp: %w", err)
+	}
+
+	origin := Origin(es.Origin)
+	if origin == "" {
+		origin = OriginProxy
 	}
 
 	st := &Stream{
@@ -256,6 +270,7 @@ func exportToStream(es *ExportStream) (*Stream, error) {
 		Duration:  time.Duration(es.DurationMs) * time.Millisecond,
 		Tags:      es.Tags,
 		BlockedBy: es.BlockedBy,
+		Origin:    origin,
 	}
 
 	if es.ConnInfo != nil {

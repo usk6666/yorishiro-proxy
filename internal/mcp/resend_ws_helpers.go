@@ -497,7 +497,14 @@ func (s *Server) buildResendWSEnvelope(plan *resendWSPlan) (*pipeline.WireEncode
 func (s *Server) buildResendWSPipeline(encoders *pipeline.WireEncoderRegistry) *pipeline.Pipeline {
 	steps := []pipeline.Step{
 		pipeline.NewPluginStepPost(pluginEngineForResend(s), encoders, slog.Default()),
-		pipeline.NewRecordStep(s.flowStore.store, slog.Default(), pipeline.WithWireEncoderRegistry(encoders)),
+		pipeline.NewRecordStep(
+			s.flowStore.store,
+			slog.Default(),
+			pipeline.WithWireEncoderRegistry(encoders),
+			// USK-785: stamp resend-originated streams so query (USK-786)
+			// can filter them from live capture views.
+			pipeline.WithOrigin(flow.OriginResend),
+		),
 	}
 	return pipeline.New(steps...)
 }

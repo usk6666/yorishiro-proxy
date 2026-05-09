@@ -331,6 +331,18 @@ CREATE INDEX IF NOT EXISTS idx_flows_url ON flows(url);
 CREATE INDEX IF NOT EXISTS idx_flows_status_code ON flows(status_code);
 `
 
+// schemaV12 adds the origin column to streams (USK-785). Origin classifies
+// how the stream came into existence: 'proxy' for live MITM-recorded
+// traffic (default), 'resend' for streams created by the resend_* MCP
+// tools, and 'fuzz' reserved for future fuzz-history work. Existing rows
+// backfill to 'proxy' via the column default. The companion idx_streams_origin
+// index mirrors the failure_reason (V9) and blocked_by (V3) treatment so
+// USK-786's `query` filter on origin runs as a predicate scan.
+const schemaV12 = `
+ALTER TABLE streams ADD COLUMN origin TEXT NOT NULL DEFAULT 'proxy';
+CREATE INDEX IF NOT EXISTS idx_streams_origin ON streams(origin);
+`
+
 var migrations = map[int]string{
 	1:  schemaV1,
 	2:  schemaV2,
@@ -343,6 +355,7 @@ var migrations = map[int]string{
 	9:  schemaV9,
 	10: schemaV10,
 	11: schemaV11,
+	12: schemaV12,
 }
 
 func migrate(ctx context.Context, db *sql.DB) error {

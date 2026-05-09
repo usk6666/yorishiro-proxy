@@ -1127,3 +1127,97 @@ func TestExportDeleteAllImportRoundTrip(t *testing.T) {
 		t.Errorf("expected 2 imported, got %d", result.Imported)
 	}
 }
+
+// TestExportImportOriginRoundTrip pins the USK-785 export-import contract:
+// Origin is preserved across JSONL roundtrip for every enum value and
+// missing/empty origin on import falls back to OriginProxy. The fallback
+// case represents pre-USK-785 JSONL files (no `origin` field) — they
+// must still import cleanly under the V12 schema.
+func TestExportImportOriginRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name   string
+		origin Origin
+		want   Origin
+	}{
+		{name: "proxy", origin: OriginProxy, want: OriginProxy},
+		{name: "resend", origin: OriginResend, want: OriginResend},
+		{name: "fuzz reserved", origin: OriginFuzz, want: OriginFuzz},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			src := newTestStore(t)
+			ctx := context.Background()
+			ts := time.Date(2026, 5, 9, 12, 0, 0, 0, time.UTC)
+
+			st := &Stream{
+				ID:        "stream-" + tc.name,
+				Protocol:  "HTTP/1.x",
+				State:     "complete",
+				Timestamp: ts,
+				Duration:  10 * time.Millisecond,
+				Origin:    tc.origin,
+			}
+			if err := src.SaveStream(ctx, st); err != nil {
+				t.Fatalf("SaveStream: %v", err)
+			}
+
+			var buf bytes.Buffer
+			if _, err := ExportStreams(ctx, src, &buf, ExportOptions{IncludeBodies: true}); err != nil {
+				t.Fatalf("ExportStreams: %v", err)
+			}
+
+			dst := newTestStore(t)
+			res, err := ImportStreams(ctx, dst, &buf, ImportOptions{OnConflict: ConflictSkip})
+			if err != nil {
+				t.Fatalf("ImportStreams: %v", err)
+			}
+			if res.Imported != 1 {
+				t.Fatalf("Imported = %d, want 1 (errors=%d, details=%+v)", res.Imported, res.Errors, res.ErrorDetails)
+			}
+
+			got, err := dst.GetStream(ctx, st.ID)
+			if err != nil {
+				t.Fatalf("GetStream: %v", err)
+			}
+			if got.Origin != tc.want {
+				t.Errorf("imported Origin = %q, want %q", got.Origin, tc.want)
+			}
+		})
+	}
+}
+
+// TestImport_MissingOriginFallsBackToProxy pins the HAR-import / pre-V12
+// JSONL fallback: a record without an `origin` field imports as
+// OriginProxy. This is the same behaviour relied upon by HAR import
+// (which never encodes origin) and by pre-USK-785 JSONL files.
+func TestImport_MissingOriginFallsBackToProxy(t *testing.T) {
+	t.Parallel()
+	dst := newTestStore(t)
+	ctx := context.Background()
+	ts := time.Date(2026, 5, 9, 12, 0, 0, 0, time.UTC).Format(time.RFC3339Nano)
+
+	// Hand-craft a JSONL line that omits the `origin` field, mirroring
+	// what a pre-USK-785 export (or a HAR-derived synthesizer) would
+	// emit.
+	jsonl := fmt.Sprintf(`{"stream":{"id":"no-origin","conn_id":"c","protocol":"HTTP/1.x","state":"complete","timestamp":%q,"duration_ms":1},"flows":[],"version":%q}`+"\n",
+		ts, ExportFormatVersion)
+
+	res, err := ImportStreams(ctx, dst, strings.NewReader(jsonl), ImportOptions{OnConflict: ConflictSkip})
+	if err != nil {
+		t.Fatalf("ImportStreams: %v", err)
+	}
+	if res.Imported != 1 || res.Errors != 0 {
+		t.Fatalf("Imported=%d Errors=%d details=%+v", res.Imported, res.Errors, res.ErrorDetails)
+	}
+	got, err := dst.GetStream(ctx, "no-origin")
+	if err != nil {
+		t.Fatalf("GetStream: %v", err)
+	}
+	if got.Origin != OriginProxy {
+		t.Errorf("missing-origin import → Origin = %q, want %q", got.Origin, OriginProxy)
+	}
+}

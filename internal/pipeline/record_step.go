@@ -98,6 +98,14 @@ type RecordStep struct {
 	// stream's first Send (where method/path were observable).
 	scope         *flow.RecordScope
 	decisionCache *recordDecisionCache
+
+	// origin stamps Stream.Origin on every Stream created by this Step
+	// (USK-785). Defaults to OriginProxy for the live MITM data path; the
+	// resend MCP tools opt into OriginResend via WithOrigin so resend-
+	// originated Streams can be filtered out of "live capture" views.
+	// OriginFuzz is reserved as an enum value but is not yet stamped from
+	// any production code path.
+	origin flow.Origin
 }
 
 // Option configures a RecordStep.
@@ -173,6 +181,21 @@ func WithMaxBodySize(n int64) Option {
 	}
 }
 
+// WithOrigin sets the Stream.Origin value stamped onto every Stream the
+// RecordStep creates (USK-785). The default (no option, or empty value)
+// is flow.OriginProxy, which matches the live MITM data path. The resend
+// MCP tools pass flow.OriginResend so resend-recorded streams can be
+// filtered apart from live captures by the query tool.
+//
+// An empty Origin argument is treated as "use default" (OriginProxy) so
+// callers can pass through a config-provided value without an explicit
+// nil-check.
+func WithOrigin(origin flow.Origin) Option {
+	return func(s *RecordStep) {
+		s.origin = origin
+	}
+}
+
 // NewRecordStep creates a RecordStep with the given flow.Writer.
 // If store is nil, Process returns immediately with no side effects.
 //
@@ -188,6 +211,12 @@ func NewRecordStep(store flow.Writer, logger *slog.Logger, opts ...Option) *Reco
 	}
 	if s.maxBodySize <= 0 {
 		s.maxBodySize = config.MaxBodySize
+	}
+	// USK-785: live data path defaults to OriginProxy so callers do not
+	// have to thread the value explicitly. Resend pipelines override via
+	// WithOrigin(flow.OriginResend).
+	if s.origin == "" {
+		s.origin = flow.OriginProxy
 	}
 	return s
 }
@@ -323,6 +352,7 @@ func (s *RecordStep) createStream(ctx context.Context, env *envelope.Envelope) {
 		Protocol:  string(env.Protocol),
 		State:     "active",
 		Timestamp: time.Now(),
+		Origin:    s.origin,
 	}
 
 	// Derive scheme from Message type when available.
