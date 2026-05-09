@@ -178,8 +178,9 @@ type Stack struct {
 	Listener *Listener
 
 	// Pipeline is the canonical 8-step Pipeline (HostScope → HTTPScope →
-	// Safety → PluginPre → Intercept → Transform → PluginPost → Record)
-	// applied to non-h2 routes (OnStack callback). HTTP wire encoder is
+	// Safety → PluginPre → Intercept → Transform → PluginPost → Record),
+	// followed by UpgradeStep for the WS/SSE layer-swap path, applied to
+	// non-h2 routes (OnStack callback). HTTP wire encoder is
 	// http1.EncodeWireBytes. Steps with nil engines act as no-ops.
 	Pipeline *pipeline.Pipeline
 
@@ -389,9 +390,10 @@ func defaultHTTP2WireEncoderRegistry() *pipeline.WireEncoderRegistry {
 	return r
 }
 
-// buildPipeline assembles the canonical 8-step RFC-001 Pipeline. Steps
-// tolerate nil engines and degrade to no-ops; no conditional skipping is
-// required at assembly time.
+// buildPipeline assembles the canonical 8-step RFC-001 Pipeline followed
+// by UpgradeStep for the WS/SSE layer-swap path. Steps tolerate nil
+// engines and degrade to no-ops; no conditional skipping is required at
+// assembly time.
 func buildPipeline(deps Deps, encoders *pipeline.WireEncoderRegistry, logger *slog.Logger) *pipeline.Pipeline {
 	recordOpts := []pipeline.Option{
 		pipeline.WithWireEncoderRegistry(encoders),

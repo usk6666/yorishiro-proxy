@@ -6,8 +6,9 @@
 // type-assert on Message) or Message-typed (type-switch on env.Message and
 // dispatch to per-protocol engines). See RFC-001 section 3.5.
 //
-// Steps execute in a fixed order (HostScope → RateLimit → Safety →
-// Plugin(recv) → Intercept → Transform → Plugin(send) → Record).
+// Steps execute in a fixed order (HostScope → HTTPScope → Safety →
+// PluginPre → Intercept → Transform → PluginPost → Record). proxybuild
+// appends UpgradeStep after Record for the WS/SSE layer-swap path.
 // Each Step checks Envelope.Direction to decide behavior.
 package pipeline
 

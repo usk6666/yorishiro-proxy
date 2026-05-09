@@ -22,7 +22,7 @@ TCP Listener (Layer 4)
   → Protocol Detection (peek bytes / ALPN)
     → Connection Stack (TCP → TLS → HTTP/1 | HTTP/2 → WS | gRPC | gRPC-Web | SSE | Raw)
       → Pipeline Steps
-          (HostScope → HTTPScope → Safety → PluginPre → Intercept → Transform → Macro → PluginPost → Record)
+          (HostScope → HTTPScope → Safety → PluginPre → Intercept → Transform → PluginPost → Record [→ UpgradeStep])
         → Flow Recording (L7 Message + L4 Envelope.Raw)
           → MCP Tool (Intercept / Replay / Search / Plugin Introspect)
 ```
@@ -90,7 +90,8 @@ internal/
                            #   httpaggregator/ (folds H2 events into HTTPMessage),
                            #   grpc/, grpcweb/, ws/, sse/
   pipeline/                # Pipeline Step chain (HostScope → HTTPScope → Safety → PluginPre →
-                           #   Intercept → Transform → Macro → PluginPost → Record).
+                           #   Intercept → Transform → PluginPost → Record). UpgradeStep is
+                           #   appended after Record by proxybuild for the WS/SSE layer-swap.
                            #   Steps dispatch via type-switch on env.Message.
                            #   WireEncoderRegistry (per-protocol on-Send re-encode).
   connector/               # TCP listener, ConnectionStack builder, per-connection plumbing

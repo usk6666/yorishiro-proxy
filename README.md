@@ -184,9 +184,9 @@ For the full list of server flags, client options, and environment variables, ru
 Layer 4 TCP Listener
   -> Protocol Detection (peek bytes / ALPN)
     -> Connection Stack (TCP -> TLS -> HTTP/1 | HTTP/2 -> WS | gRPC | gRPC-Web | SSE | Raw)
-      -> Pipeline (HostScope -> Safety -> PluginPre -> Intercept -> Transform -> Macro -> PluginPost -> Record)
+      -> Pipeline (HostScope -> HTTPScope -> Safety -> PluginPre -> Intercept -> Transform -> PluginPost -> Record [-> UpgradeStep])
         -> Flow Recording (L7 Message + L4 Envelope.Raw)
-          -> MCP Tool (Intercept / Replay / Search)
+          -> MCP Tool (Intercept / Replay / Search / Plugin Introspect)
 ```
 
 - Accepts connections at Layer 4 (TCP) and builds a per-connection `Layer` stack

@@ -182,16 +182,19 @@ yorishiro-proxy client query resource=flows limit=10
 
 ```
 Layer 4 TCP リスナ
-  → プロトコル検出 (peek bytes)
-    → プロトコルハンドラ (HTTP/S, HTTP/2, gRPC, WebSocket, Raw TCP)
-      → フロー記録 (Request/Response)
-        → MCP ツール (傍受 / リプレイ / 検索)
+  → プロトコル検出 (peek bytes / ALPN)
+    → コネクションスタック (TCP → TLS → HTTP/1 | HTTP/2 → WS | gRPC | gRPC-Web | SSE | Raw)
+      → Pipeline (HostScope → HTTPScope → Safety → PluginPre → Intercept → Transform → PluginPost → Record [→ UpgradeStep])
+        → フロー記録 (L7 Message + L4 Envelope.Raw)
+          → MCP ツール (傍受 / リプレイ / 検索 / Plugin Introspect)
 ```
 
-- Layer 4 (TCP) でコネクションを受け取り、モジュラー化されたプロトコルハンドラにルーティング
+- Layer 4 (TCP) でコネクションを受け取り、コネクションごとに `Layer` スタックを構築
 - 外部プロキシライブラリ不使用 — Go 標準ライブラリベースで構築
 - MCP-first: すべての操作は MCP ツールとして排他的に公開
 - React/Vite で構築された組み込み Web UI を Streamable HTTP 経由で提供
+
+設計の根拠とデータモデルは [RFC-001 Envelope + Layered Connection Model](docs/rfc/envelope.md) を参照してください。
 
 ## ドキュメント
 

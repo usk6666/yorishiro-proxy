@@ -31,7 +31,7 @@ This release contains breaking changes for plugin authors and MCP clients. There
 ### Changed
 
 - **Architecture**: `Codec` interface → `Layer` + `Channel` interfaces; `Exchange` struct → `Envelope` + typed `Message` interface; unified Pipeline Steps → typed Steps that dispatch per protocol.
-- **Pipeline canonical 8-step chain**: `HostScope → HTTPScope → Safety → PluginPre → Intercept → Transform → Macro → PluginPost → Record`. Resend / Macro fan-out / synthesized Send paths bypass `PluginStepPre` and `InterceptStep` and traverse only `Transform → Macro → PluginPost → Record → Layer encode`.
+- **Pipeline canonical 8-step chain**: `HostScope → HTTPScope → Safety → PluginPre → Intercept → Transform → PluginPost → Record` (proxybuild appends `UpgradeStep` after `Record` for the WS/SSE layer-swap path). Resend / Macro fan-out / synthesized Send paths bypass `PluginStepPre` and `InterceptStep` and traverse only `Transform → PluginPost → Record → Layer encode`.
 - **Connector `FullListener` is the sole listener API**. `Listener`, `MinimalListener`, `Connector` (multi-listener orchestrator), `Detector`, `CodecFactory`, `TunnelHandler`, `DialUpstream` — removed. Multi-listener orchestration lives in `proxybuild.Manager`.
 - **Job `EnvelopeSource`** replaces the previous `ExchangeSource` interface. Per-protocol resend sources (`http_source.go`, `ws_source.go`, `grpc_source.go`, `raw_source.go`) and per-protocol fuzz sources (`fuzz_http_source.go`, `fuzz_raw_source.go`).
 - **`SafetyFilter`** is envelope-native and operates on `[]envelope.KeyValue` rather than the deleted `[]exchange.KeyValue`. Re-checked at `HoldQueue` release on user-modified envelopes (USK-702).

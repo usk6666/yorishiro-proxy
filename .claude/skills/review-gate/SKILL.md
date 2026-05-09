@@ -52,7 +52,7 @@ and fetch details with `mcp__linear-server__get_issue`.
 yorishiro-proxy is a network proxy (MCP server) for AI agents.
 Provides traffic interception, recording, and replay capabilities for vulnerability assessment.
 Architecture: TCP Listener → Protocol Detection → Layer Stack (TCP→TLS→HTTP/1|HTTP/2→WS|gRPC|gRPC-Web|SSE|Raw)
-              → Pipeline Steps (HostScope→HTTPScope→Safety→PluginPre→Intercept→Transform→Macro→PluginPost→Record)
+              → Pipeline Steps (HostScope→HTTPScope→Safety→PluginPre→Intercept→Transform→PluginPost→Record [→ UpgradeStep])
               → Flow Recording (L7 Message + L4 Envelope.Raw) → MCP Tool
 
 Data path packages (MITM triage targets):
