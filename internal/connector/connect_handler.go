@@ -43,6 +43,21 @@ type OnStackFunc func(
 	target string,
 )
 
+// OnUpstreamTLSErrorFunc is the callback signature invoked when the proxy
+// has accepted a CONNECT/SOCKS5 tunnel and successfully negotiated client
+// TLS MITM context, but the subsequent upstream stack build fails — most
+// commonly because the upstream TLS handshake rejected the certificate
+// (expired, self-signed, untrusted CA, hostname mismatch, etc.).
+//
+// The callback is the bridge from the connector layer to the flow recorder
+// in proxybuild: it is fired with the CONNECT authority preserved verbatim
+// (per CLAUDE.md MITM Principle #1 — do not normalize) and the underlying
+// build error so the recorder can persist a state="error" Stream that
+// surfaces the upstream-side failure to MITM diagnostic users.
+//
+// USK-784 brings the HTTP/1.x HTTPS path to parity with USK-188 (WebSocket).
+type OnUpstreamTLSErrorFunc func(ctx context.Context, target string, err error)
+
 // CONNECTHandlerConfig holds dependencies for the CONNECT handler factory.
 type CONNECTHandlerConfig struct {
 	// Negotiator parses the CONNECT request and sends 200 OK.
@@ -72,6 +87,14 @@ type CONNECTHandlerConfig struct {
 	// See OnHTTP2StackFunc for the callback contract. When nil, h2 stacks are
 	// closed immediately after Pool.Put.
 	OnHTTP2Stack OnHTTP2StackFunc
+
+	// OnUpstreamTLSError is invoked when BuildConnectionStack fails after
+	// CONNECT was already accepted with a 200 response. The most common
+	// trigger is upstream TLS handshake rejection (expired / self-signed /
+	// untrusted CA cert). Nil disables — the failure is logged and dropped
+	// silently, matching pre-USK-784 behaviour for stacks that opt out of
+	// recording. See OnUpstreamTLSErrorFunc for the callback contract.
+	OnUpstreamTLSError OnUpstreamTLSErrorFunc
 
 	// InnerPeekTimeout bounds how long the handler waits for the first
 	// inner byte after CONNECT 200 (USK-762). Zero means
@@ -143,7 +166,7 @@ func NewCONNECTHandler(cfg CONNECTHandlerConfig) HandlerFunc {
 		}
 
 		// Step 6: TLS MITM path (existing behaviour).
-		runTLSMITM(ctx, cfg.BuildCfg, pc, target, cfg.OnStack, cfg.OnHTTP2Stack, connLogger)
+		runTLSMITM(ctx, cfg.BuildCfg, pc, target, cfg.OnStack, cfg.OnHTTP2Stack, cfg.OnUpstreamTLSError, connLogger)
 		return nil
 	}
 }
@@ -217,6 +240,13 @@ func connectShouldRunTLSMITM(ctx context.Context, cfg CONNECTHandlerConfig, pc *
 // runTLSMITM drives the existing BuildConnectionStack TLS path and dispatches
 // the resulting stack to OnStack / OnHTTP2Stack. Shared by CONNECT and SOCKS5
 // handlers so the TLS branch behaves identically across tunnel entry points.
+//
+// On stack-build failure, onUpstreamTLSError (when non-nil) is invoked with
+// the CONNECT/SOCKS5 authority and the underlying error so callers
+// (proxybuild) can persist a state="error" flow.Stream — the USK-784 parity
+// fix for HTTP/1.x HTTPS upstream-TLS-handshake errors. Nil disables the
+// callback path; the failure is then logged and dropped silently, matching
+// pre-USK-784 behaviour for stacks that opt out of recording.
 func runTLSMITM(
 	ctx context.Context,
 	buildCfg *BuildConfig,
@@ -224,11 +254,20 @@ func runTLSMITM(
 	target string,
 	onStack OnStackFunc,
 	onHTTP2Stack OnHTTP2StackFunc,
+	onUpstreamTLSError OnUpstreamTLSErrorFunc,
 	logger *slog.Logger,
 ) {
 	stack, clientSnap, upstreamSnap, err := BuildConnectionStack(ctx, pc, target, buildCfg)
 	if err != nil {
+		// Upstream-side / stack-build failures land here. Clients see a
+		// closed tunnel; without a recorded Stream the failure is invisible
+		// to MITM diagnostic users. Surface it through the callback so the
+		// flow store gets a state="error" entry tagged with the authority
+		// and the error reason (USK-784 parity with USK-188).
 		logger.Warn("stack build failed", "error", err)
+		if onUpstreamTLSError != nil {
+			onUpstreamTLSError(ctx, target, err)
+		}
 		return
 	}
 	logger.Debug("connection stack built")

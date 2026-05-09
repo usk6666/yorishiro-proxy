@@ -263,16 +263,25 @@ func BuildLiveStack(_ context.Context, deps Deps) (*Stack, error) {
 	p := buildPipeline(deps, encodersH1, logger)
 	pH2 := buildPipeline(deps, encodersH2, logger)
 
+	// USK-784: shared upstream-TLS-error recorder for the CONNECT and
+	// SOCKS5 handlers so HTTPS-path stack-build failures (most commonly
+	// upstream cert reject) land in the flow store as state="error" rather
+	// than disappearing silently. Nil store yields a nil callback so the
+	// connector's drop path engages — matches the pre-USK-784 behaviour
+	// for tests that omit a flow store.
+	upstreamTLSErrorRecorder := buildUpstreamTLSErrorRecorder(deps.FlowStore, listenerName, logger)
+
 	// Construct the per-protocol HandlerFunc closures.
 	connectHandler := connector.NewCONNECTHandler(connector.CONNECTHandlerConfig{
-		Negotiator:      connector.NewCONNECTNegotiator(logger),
-		BuildCfg:        deps.BuildConfig,
-		Scope:           deps.Scope,
-		RateLimiter:     deps.RateLimiter,
-		PassthroughList: deps.PassthroughList,
-		OnStack:         buildOnStack(p, deps, logger),
-		OnHTTP2Stack:    buildOnHTTP2Stack(pH2, deps, logger),
-		Logger:          logger,
+		Negotiator:         connector.NewCONNECTNegotiator(logger),
+		BuildCfg:           deps.BuildConfig,
+		Scope:              deps.Scope,
+		RateLimiter:        deps.RateLimiter,
+		PassthroughList:    deps.PassthroughList,
+		OnStack:            buildOnStack(p, deps, logger),
+		OnHTTP2Stack:       buildOnHTTP2Stack(pH2, deps, logger),
+		OnUpstreamTLSError: upstreamTLSErrorRecorder,
+		Logger:             logger,
 	})
 	// USK-770: prefer the process-singleton SOCKS5Negotiator supplied via
 	// Deps (owned by mcpserver) so MCP control-plane Set*Auth calls reach
@@ -285,13 +294,14 @@ func BuildLiveStack(_ context.Context, deps Deps) (*Stack, error) {
 	socks5Negotiator.Scope = deps.Scope
 	socks5Negotiator.RateLimiter = deps.RateLimiter
 	socks5Handler := connector.NewSOCKS5Handler(connector.SOCKS5HandlerConfig{
-		Negotiator:      socks5Negotiator,
-		BuildCfg:        deps.BuildConfig,
-		PassthroughList: deps.PassthroughList,
-		OnStack:         buildOnStack(p, deps, logger),
-		OnHTTP2Stack:    buildOnHTTP2Stack(pH2, deps, logger),
-		Logger:          logger,
-		PluginV2Engine:  deps.PluginV2Engine,
+		Negotiator:         socks5Negotiator,
+		BuildCfg:           deps.BuildConfig,
+		PassthroughList:    deps.PassthroughList,
+		OnStack:            buildOnStack(p, deps, logger),
+		OnHTTP2Stack:       buildOnHTTP2Stack(pH2, deps, logger),
+		OnUpstreamTLSError: upstreamTLSErrorRecorder,
+		Logger:             logger,
+		PluginV2Engine:     deps.PluginV2Engine,
 	})
 	// USK-710: plain-HTTP forward proxy. Plain HTTP cannot route to h2 (no
 	// ALPN, no TLS), so OnHTTP2Stack is intentionally omitted — the handler
@@ -912,6 +922,90 @@ func buildProtocolRejectedRecorder(store flow.Writer, listenerName string, logge
 					"listener", listenerName,
 					"conn_id", connID,
 					"protocol", protoLabel,
+					"error", err,
+				)
+			}
+		}
+	}
+}
+
+// buildUpstreamTLSErrorRecorder returns a connector.OnUpstreamTLSErrorFunc
+// that persists a state="error" Stream when BuildConnectionStack fails
+// inside the CONNECT/SOCKS5 TLS MITM path (USK-784). The most common
+// trigger is upstream TLS handshake rejection (expired / self-signed /
+// untrusted CA cert). nil store yields a nil callback so the connector's
+// silent-drop path engages — preserving behaviour for stacks that opt
+// out of recording.
+//
+// The recorded Stream is intentionally minimal: there is no L7 message
+// for this path (the inner TLS handshake never completed, so no HTTP
+// request reached the proxy), and the L4 raw bytes principle does not
+// apply to bytes that never flowed. The Stream alone is enough for MCP
+// query("flows", filter:{state:"error"}) to surface the event, which
+// satisfies the USK-784 acceptance criterion.
+//
+// Protocol is set to envelope.ProtocolHTTP and Scheme to "https" because
+// CONNECT/SOCKS5 + TLS MITM is the HTTPS data path; no inner-protocol
+// negotiation finished, so HTTP/1.x vs HTTP/2 is undecidable here.
+//
+// FailureReason is set to "upstream_tls_error" — a new taxonomy entry
+// because the existing layer.ErrorCode classes (refused, canceled,
+// aborted, internal_error, protocol_error) all describe wire-observed
+// signals on a successfully established channel; an upstream TLS
+// handshake reject never produced one. The error string is preserved
+// verbatim in Tags["error"] so MCP users can distinguish cert-expired
+// from self-signed from CA-untrusted without parsing FailureReason.
+func buildUpstreamTLSErrorRecorder(store flow.Writer, listenerName string, logger *slog.Logger) connector.OnUpstreamTLSErrorFunc {
+	if store == nil {
+		return nil
+	}
+	if listenerName == "" {
+		listenerName = DefaultListenerName
+	}
+	return func(ctx context.Context, target string, buildErr error) {
+		if buildErr == nil {
+			return
+		}
+		// Resolve the connection identity. ConnIDFromContext is populated
+		// by FullListener.handleConn before it dispatches to the handler,
+		// so this is non-empty in the production path.
+		connID := connector.ConnIDFromContext(ctx)
+		if connID == "" {
+			connID = uuid.New().String()
+		}
+		clientAddr := connector.ClientAddrFromContext(ctx)
+
+		errMsg := buildErr.Error()
+
+		st := &flow.Stream{
+			ID:            uuid.New().String(),
+			ConnID:        connID,
+			Protocol:      string(envelope.ProtocolHTTP),
+			Scheme:        "https",
+			State:         "error",
+			FailureReason: "upstream_tls_error",
+			Timestamp:     time.Now(),
+			Tags: map[string]string{
+				"error":  errMsg,
+				"target": target,
+			},
+			ConnInfo: &flow.ConnectionInfo{
+				ClientAddr: clientAddr,
+				ServerAddr: target,
+			},
+		}
+
+		// Use a background-derived context so a cancelled handler ctx
+		// does not abort the audit record — matches
+		// buildProtocolRejectedRecorder.
+		recordCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := store.SaveStream(recordCtx, st); err != nil {
+			if logger != nil {
+				logger.Error("proxybuild: upstream-tls-error stream save failed",
+					"listener", listenerName,
+					"conn_id", connID,
+					"target", target,
 					"error", err,
 				)
 			}

@@ -219,6 +219,110 @@ func TestNewCONNECTHandler_NilScope_NilRateLimiter(t *testing.T) {
 	}
 }
 
+// TestNewCONNECTHandler_UpstreamTLSError_FiresCallback proves the USK-784
+// wiring: when CONNECT was accepted but BuildConnectionStack fails, the
+// OnUpstreamTLSError callback is invoked with the original CONNECT
+// authority and the underlying error so the recorder in proxybuild can
+// persist a state="error" Stream.
+//
+// We trigger the failure via BuildCfg=nil (BuildConnectionStack rejects
+// nil cfg with a synthetic "nil config" error). The exact error class
+// does not matter for this contract test — we only assert that the
+// callback fires AND receives the authority verbatim.
+func TestNewCONNECTHandler_UpstreamTLSError_FiresCallback(t *testing.T) {
+	var (
+		callbackFired atomic.Bool
+		gotTarget     atomic.Value // string
+		gotErrText    atomic.Value // string
+	)
+
+	handler := NewCONNECTHandler(CONNECTHandlerConfig{
+		Negotiator:       NewCONNECTNegotiator(nil),
+		BuildCfg:         nil, // forces BuildConnectionStack failure
+		InnerPeekTimeout: 50 * time.Millisecond,
+		OnUpstreamTLSError: func(_ context.Context, target string, err error) {
+			callbackFired.Store(true)
+			gotTarget.Store(target)
+			if err != nil {
+				gotErrText.Store(err.Error())
+			}
+		},
+	})
+
+	clientConn, serverConn := net.Pipe()
+	defer clientConn.Close()
+
+	go func() {
+		// Send CONNECT and the TLS Handshake first byte (0x16) so the
+		// inner-byte peek classifies the tunnel as InnerTLS and the
+		// handler invokes runTLSMITM (the path that invokes
+		// OnUpstreamTLSError on failure). Without this byte the peek
+		// would classify the connection as InnerUnknown / fall back to
+		// bytechunk and the recorder path is skipped.
+		_, _ = clientConn.Write([]byte("CONNECT badssl.example.test:443 HTTP/1.1\r\nHost: badssl.example.test:443\r\n\r\n"))
+		buf := make([]byte, 256)
+		_, _ = clientConn.Read(buf)
+		// Send a TLS ClientHello first byte to trigger the TLS path.
+		_, _ = clientConn.Write([]byte{0x16, 0x03, 0x01})
+	}()
+
+	pc := NewPeekConn(serverConn)
+	ctx := ContextWithConnID(context.Background(), "usk-784-conn")
+	ctx = ContextWithClientAddr(ctx, "127.0.0.1:54321")
+
+	if err := handler(ctx, pc); err != nil {
+		t.Errorf("handler returned error: %v", err)
+	}
+
+	// Allow the synchronous OnUpstreamTLSError callback to land.
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) && !callbackFired.Load() {
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if !callbackFired.Load() {
+		t.Fatal("OnUpstreamTLSError was not invoked")
+	}
+	if got, _ := gotTarget.Load().(string); got != "badssl.example.test:443" {
+		t.Errorf("OnUpstreamTLSError target = %q, want %q",
+			got, "badssl.example.test:443")
+	}
+	if got, _ := gotErrText.Load().(string); got == "" {
+		t.Error("OnUpstreamTLSError error message is empty")
+	}
+}
+
+// TestNewCONNECTHandler_UpstreamTLSError_NilCallback verifies the legacy
+// silent-drop behaviour holds when no callback is wired — proxy
+// configurations that opt out of recording must continue to work.
+func TestNewCONNECTHandler_UpstreamTLSError_NilCallback(t *testing.T) {
+	handler := NewCONNECTHandler(CONNECTHandlerConfig{
+		Negotiator:         NewCONNECTNegotiator(nil),
+		BuildCfg:           nil, // forces BuildConnectionStack failure
+		InnerPeekTimeout:   50 * time.Millisecond,
+		OnUpstreamTLSError: nil, // explicit
+	})
+
+	clientConn, serverConn := net.Pipe()
+	defer clientConn.Close()
+
+	go func() {
+		_, _ = clientConn.Write([]byte("CONNECT badssl.example.test:443 HTTP/1.1\r\nHost: badssl.example.test:443\r\n\r\n"))
+		buf := make([]byte, 256)
+		_, _ = clientConn.Read(buf)
+		_, _ = clientConn.Write([]byte{0x16, 0x03, 0x01})
+	}()
+
+	pc := NewPeekConn(serverConn)
+	ctx := ContextWithConnID(context.Background(), "usk-784-conn-nil")
+
+	// Must not panic and must return nil — silent drop is the legacy
+	// behaviour.
+	if err := handler(ctx, pc); err != nil {
+		t.Errorf("handler returned error with nil callback: %v", err)
+	}
+}
+
 func TestNewCONNECTHandler_NegotiationError(t *testing.T) {
 	handler := NewCONNECTHandler(CONNECTHandlerConfig{
 		Negotiator: NewCONNECTNegotiator(nil),

@@ -33,6 +33,11 @@ type SOCKS5HandlerConfig struct {
 	// closed immediately after Pool.Put.
 	OnHTTP2Stack OnHTTP2StackFunc
 
+	// OnUpstreamTLSError is invoked when BuildConnectionStack fails after
+	// SOCKS5 negotiated the tunnel. See CONNECTHandlerConfig.OnUpstreamTLSError
+	// (USK-784) for the contract. Nil disables.
+	OnUpstreamTLSError OnUpstreamTLSErrorFunc
+
 	// InnerPeekTimeout bounds how long the handler waits for the first
 	// inner byte after the SOCKS5 200 reply (USK-762). Zero means
 	// DefaultInnerPeekTimeout. Misbehaving clients that complete SOCKS5
@@ -94,7 +99,7 @@ func NewSOCKS5Handler(cfg SOCKS5HandlerConfig) HandlerFunc {
 		}
 
 		// Step 4-5: TLS MITM path (existing behaviour).
-		runTLSMITM(ctx, cfg.BuildCfg, pc, target, cfg.OnStack, cfg.OnHTTP2Stack, connLogger)
+		runTLSMITM(ctx, cfg.BuildCfg, pc, target, cfg.OnStack, cfg.OnHTTP2Stack, cfg.OnUpstreamTLSError, connLogger)
 		return nil
 	}
 }
