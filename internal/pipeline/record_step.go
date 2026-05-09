@@ -575,9 +575,41 @@ func (s *RecordStep) envelopeToFlow(ctx context.Context, env *envelope.Envelope)
 		projectGRPCEnd(m, fl)
 	case *envelope.SSEMessage:
 		projectSSE(m, fl)
+	case *envelope.TLSHandshakeMessage:
+		projectTLSHandshake(m, fl)
 	}
 
 	return fl
+}
+
+// projectTLSHandshake projects a TLSHandshakeMessage (USK-790 passthrough
+// audit-trail meta flow) into Flow.Metadata. Snake_case keys per the
+// CLAUDE.md naming convention. Empty fields are intentionally omitted so
+// MCP consumers can distinguish "the proxy did not observe this" (key
+// absent) from "the proxy observed an empty value" — though for this
+// message family every populated field carries non-empty data by
+// construction.
+func projectTLSHandshake(m *envelope.TLSHandshakeMessage, fl *flow.Flow) {
+	if m.SNI != "" {
+		fl.Metadata["sni"] = m.SNI
+	}
+	if m.LocalAddr != "" {
+		fl.Metadata["local_addr"] = m.LocalAddr
+	}
+	if m.RemoteAddr != "" {
+		fl.Metadata["remote_addr"] = m.RemoteAddr
+	}
+	if m.UpstreamAddr != "" {
+		fl.Metadata["upstream_addr"] = m.UpstreamAddr
+	}
+	fl.Metadata["bytes_client_to_upstream"] = strconv.FormatInt(m.BytesClientToUpstream, 10)
+	fl.Metadata["bytes_upstream_to_client"] = strconv.FormatInt(m.BytesUpstreamToClient, 10)
+	if m.Outcome != "" {
+		fl.Metadata["outcome"] = m.Outcome
+	}
+	if m.ErrorReason != "" {
+		fl.Metadata["error"] = m.ErrorReason
+	}
 }
 
 // projectRawBytes returns the wire bytes for the Flow.RawBytes BLOB

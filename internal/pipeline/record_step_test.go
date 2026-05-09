@@ -2508,3 +2508,62 @@ func TestRecordStep_WithOrigin_EmptyFallsBackToProxy(t *testing.T) {
 		t.Errorf("WithOrigin('') → Stream.Origin = %q, want %q", got, want)
 	}
 }
+
+// TestRecordStep_FlowFieldsTLSHandshake exercises the USK-790 projection
+// of TLSHandshakeMessage onto a flow.Flow. The single-shot meta envelope
+// contributes only Metadata entries (no headers / body / URL); every
+// non-empty field on the message must surface in the recorded Metadata.
+func TestRecordStep_FlowFieldsTLSHandshake(t *testing.T) {
+	w := &mockWriter{}
+	step := NewRecordStep(w, nil)
+
+	env := &envelope.Envelope{
+		StreamID:  "s-tls",
+		FlowID:    "f-tls",
+		Direction: envelope.Send,
+		Sequence:  0,
+		Protocol:  envelope.ProtocolTLSHandshake,
+		Message: &envelope.TLSHandshakeMessage{
+			SNI:                   "example.com",
+			LocalAddr:             "127.0.0.1:8080",
+			RemoteAddr:            "192.0.2.1:55555",
+			UpstreamAddr:          "93.184.216.34:443",
+			BytesClientToUpstream: 4096,
+			BytesUpstreamToClient: 8192,
+			Outcome:               envelope.TLSHandshakeOutcomeTunneled,
+		},
+	}
+	step.Process(context.Background(), env)
+
+	if len(w.flows) != 1 {
+		t.Fatalf("expected 1 flow, got %d", len(w.flows))
+	}
+	fl := w.flows[0]
+	if fl.Metadata["protocol"] != string(envelope.ProtocolTLSHandshake) {
+		t.Errorf("protocol = %q, want %q", fl.Metadata["protocol"], envelope.ProtocolTLSHandshake)
+	}
+	if fl.Metadata["sni"] != "example.com" {
+		t.Errorf("sni = %q", fl.Metadata["sni"])
+	}
+	if fl.Metadata["local_addr"] != "127.0.0.1:8080" {
+		t.Errorf("local_addr = %q", fl.Metadata["local_addr"])
+	}
+	if fl.Metadata["remote_addr"] != "192.0.2.1:55555" {
+		t.Errorf("remote_addr = %q", fl.Metadata["remote_addr"])
+	}
+	if fl.Metadata["upstream_addr"] != "93.184.216.34:443" {
+		t.Errorf("upstream_addr = %q", fl.Metadata["upstream_addr"])
+	}
+	if fl.Metadata["bytes_client_to_upstream"] != "4096" {
+		t.Errorf("bytes_client_to_upstream = %q", fl.Metadata["bytes_client_to_upstream"])
+	}
+	if fl.Metadata["bytes_upstream_to_client"] != "8192" {
+		t.Errorf("bytes_upstream_to_client = %q", fl.Metadata["bytes_upstream_to_client"])
+	}
+	if fl.Metadata["outcome"] != envelope.TLSHandshakeOutcomeTunneled {
+		t.Errorf("outcome = %q", fl.Metadata["outcome"])
+	}
+	if _, ok := fl.Metadata["error"]; ok {
+		t.Errorf("error metadata should be absent for tunneled outcome, got %q", fl.Metadata["error"])
+	}
+}

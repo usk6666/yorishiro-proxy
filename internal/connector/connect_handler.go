@@ -77,6 +77,14 @@ type CONNECTHandlerConfig struct {
 	// entirely and use bidirectional io.Copy relay.
 	PassthroughList *PassthroughList
 
+	// PassthroughObserver, if non-nil, receives PassthroughObservation
+	// callbacks around the relay so a meta-flow recorder can persist a
+	// TLSHandshakeMessage audit flow per passthrough connection (USK-790).
+	// Nil disables the observer hooks; the relay then runs as a plain
+	// io.Copy without byte counters or SNI peek (matches the pre-USK-790
+	// hot path).
+	PassthroughObserver PassthroughObserver
+
 	// OnStack is called when a non-h2 ConnectionStack is ready. The callback
 	// owns the session lifecycle (RunSession wiring). This avoids an import
 	// cycle between connector and pipeline/session. h2-routed stacks are
@@ -210,10 +218,22 @@ func connectPassthrough(ctx context.Context, cfg CONNECTHandlerConfig, pc *PeekC
 		return false
 	}
 	logger.Debug("TLS passthrough relay", "target", target)
-	if err := RelayTLSPassthrough(ctx, pc, target, passDialOpts(cfg.BuildCfg)); err != nil {
-		logger.Debug("TLS passthrough ended", "error", err)
+	relayErr := runPassthroughRelay(ctx, pc, target, passDialOpts(cfg.BuildCfg), cfg.PassthroughObserver)
+	if relayErr != nil {
+		logger.Warn("TLS passthrough ended", "target", target, "sni_peek_target", host, "error", relayErr)
 	}
 	return true
+}
+
+// runPassthroughRelay dispatches to the observer-aware relay when an
+// observer is configured and to the plain relay otherwise. Centralised so
+// CONNECT and SOCKS5 paths share the same dispatch and the no-observer
+// path stays close to a plain io.Copy.
+func runPassthroughRelay(ctx context.Context, pc *PeekConn, target string, opts DialRawOpts, observer PassthroughObserver) error {
+	if observer != nil {
+		return RelayTLSPassthroughObserved(ctx, pc, target, opts, observer)
+	}
+	return RelayTLSPassthrough(ctx, pc, target, opts)
 }
 
 // connectShouldRunTLSMITM peeks the inner byte stream and returns true when

@@ -23,6 +23,12 @@ type SOCKS5HandlerConfig struct {
 	// be relayed without MITM. Matching hosts bypass the ConnectionStack.
 	PassthroughList *PassthroughList
 
+	// PassthroughObserver, if non-nil, receives PassthroughObservation
+	// callbacks around the relay so a meta-flow recorder can persist a
+	// TLSHandshakeMessage audit flow per passthrough connection (USK-790).
+	// Nil disables the observer hooks.
+	PassthroughObserver PassthroughObserver
+
 	// OnStack is called when a non-h2 ConnectionStack is ready. The callback
 	// owns the session lifecycle (RunSession wiring). h2-routed stacks are
 	// dispatched via OnHTTP2Stack instead.
@@ -138,8 +144,9 @@ func socks5Passthrough(ctx context.Context, cfg SOCKS5HandlerConfig, pc *PeekCon
 		return false
 	}
 	logger.Debug("TLS passthrough relay", "target", target)
-	if err := RelayTLSPassthrough(ctx, pc, target, passDialOpts(cfg.BuildCfg)); err != nil {
-		logger.Debug("TLS passthrough ended", "error", err)
+	relayErr := runPassthroughRelay(ctx, pc, target, passDialOpts(cfg.BuildCfg), cfg.PassthroughObserver)
+	if relayErr != nil {
+		logger.Warn("TLS passthrough ended", "target", target, "sni_peek_target", host, "error", relayErr)
 	}
 	return true
 }

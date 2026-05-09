@@ -339,60 +339,17 @@ func ValidateStreamID(id string) error {
 const streamColumns = `id, conn_id, protocol, scheme, state, timestamp, duration_ms, tags, client_addr, server_addr, tls_version, tls_cipher, tls_alpn, tls_server_cert_subject, blocked_by, send_ms, wait_ms, receive_ms, failure_reason, origin`
 
 // buildStreamWhereClause constructs a SQL WHERE clause from StreamListOptions.
-// Method, URLPattern, and StatusCode are matched via EXISTS subqueries on flows.
+// Method, URLPattern, StatusCode, and HTTPVersion are matched via EXISTS
+// subqueries on flows. The simple-equality predicates (Scheme, BlockedBy,
+// State, Origin) are factored into appendStreamSimplePredicates to keep this
+// function under the gocyclo threshold.
 func buildStreamWhereClause(opts StreamListOptions) (string, []interface{}) {
 	var conditions []string
 	var args []interface{}
 
-	switch {
-	case len(opts.Protocols) > 0:
-		placeholders := strings.Repeat("?,", len(opts.Protocols))
-		placeholders = placeholders[:len(placeholders)-1]
-		conditions = append(conditions, "s.protocol IN ("+placeholders+")")
-		for _, p := range opts.Protocols {
-			args = append(args, p)
-		}
-	case opts.Protocol != "":
-		conditions = append(conditions, "s.protocol = ?")
-		args = append(args, opts.Protocol)
-	}
-	if opts.Scheme != "" {
-		conditions = append(conditions, "s.scheme = ?")
-		args = append(args, opts.Scheme)
-	}
-	if opts.HTTPVersion != nil {
-		// EXISTS subquery: any flow on the stream matching the
-		// http_version value selects the stream. Empty string matches
-		// pre-USK-788 rows (schemaV13's DEFAULT ''). The
-		// idx_flows_http_version index makes the subquery cheap.
-		conditions = append(conditions, "EXISTS (SELECT 1 FROM flows m WHERE m.stream_id = s.id AND m.http_version = ?)")
-		args = append(args, *opts.HTTPVersion)
-	}
-	if opts.Method != "" {
-		conditions = append(conditions, "EXISTS (SELECT 1 FROM flows m WHERE m.stream_id = s.id AND m.direction = 'send' AND m.method = ?)")
-		args = append(args, opts.Method)
-	}
-	if opts.URLPattern != "" {
-		escaped := strings.NewReplacer("%", "\\%", "_", "\\_").Replace(opts.URLPattern)
-		conditions = append(conditions, "EXISTS (SELECT 1 FROM flows m WHERE m.stream_id = s.id AND m.direction = 'send' AND m.url LIKE ? ESCAPE '\\')")
-		args = append(args, "%"+escaped+"%")
-	}
-	if opts.StatusCode != 0 {
-		conditions = append(conditions, "EXISTS (SELECT 1 FROM flows m WHERE m.stream_id = s.id AND m.direction = 'receive' AND m.status_code = ?)")
-		args = append(args, opts.StatusCode)
-	}
-	if opts.BlockedBy != "" {
-		conditions = append(conditions, "s.blocked_by = ?")
-		args = append(args, opts.BlockedBy)
-	}
-	if opts.State != "" {
-		conditions = append(conditions, "s.state = ?")
-		args = append(args, opts.State)
-	}
-	if opts.Origin != "" {
-		conditions = append(conditions, "s.origin = ?")
-		args = append(args, string(opts.Origin))
-	}
+	conditions, args = appendStreamProtocolPredicate(conditions, args, opts)
+	conditions, args = appendStreamSimplePredicates(conditions, args, opts)
+	conditions, args = appendStreamFlowExistsPredicates(conditions, args, opts)
 	if opts.Technology != "" {
 		// Match technology name inside the JSON-encoded "technologies" tag value.
 		// Tags column stores JSON-marshaled map[string]string. The technologies
@@ -427,6 +384,77 @@ func buildStreamWhereClause(opts StreamListOptions) (string, []interface{}) {
 		clause = " WHERE " + strings.Join(conditions, " AND ")
 	}
 	return clause, args
+}
+
+// appendStreamProtocolPredicate adds the Protocols-list / single-Protocol
+// predicate. Protocols (multi) takes precedence over Protocol (single) when
+// both are set.
+func appendStreamProtocolPredicate(conds []string, args []interface{}, opts StreamListOptions) ([]string, []interface{}) {
+	switch {
+	case len(opts.Protocols) > 0:
+		placeholders := strings.Repeat("?,", len(opts.Protocols))
+		placeholders = placeholders[:len(placeholders)-1]
+		conds = append(conds, "s.protocol IN ("+placeholders+")")
+		for _, p := range opts.Protocols {
+			args = append(args, p)
+		}
+	case opts.Protocol != "":
+		conds = append(conds, "s.protocol = ?")
+		args = append(args, opts.Protocol)
+	}
+	return conds, args
+}
+
+// appendStreamSimplePredicates adds equality predicates that map a single
+// option field to a single column on streams. Extracted to keep
+// buildStreamWhereClause under the gocyclo threshold.
+func appendStreamSimplePredicates(conds []string, args []interface{}, opts StreamListOptions) ([]string, []interface{}) {
+	if opts.Scheme != "" {
+		conds = append(conds, "s.scheme = ?")
+		args = append(args, opts.Scheme)
+	}
+	if opts.BlockedBy != "" {
+		conds = append(conds, "s.blocked_by = ?")
+		args = append(args, opts.BlockedBy)
+	}
+	if opts.State != "" {
+		conds = append(conds, "s.state = ?")
+		args = append(args, opts.State)
+	}
+	if opts.Origin != "" {
+		conds = append(conds, "s.origin = ?")
+		args = append(args, string(opts.Origin))
+	}
+	return conds, args
+}
+
+// appendStreamFlowExistsPredicates adds HTTPVersion / Method / URLPattern /
+// StatusCode predicates, all of which match via an EXISTS subquery on flows.
+// HTTPVersion (USK-792, schemaV13) treats nil as "no filter" and an explicit
+// empty string as "match pre-USK-788 rows".
+func appendStreamFlowExistsPredicates(conds []string, args []interface{}, opts StreamListOptions) ([]string, []interface{}) {
+	if opts.HTTPVersion != nil {
+		// EXISTS subquery: any flow on the stream matching the
+		// http_version value selects the stream. Empty string matches
+		// pre-USK-788 rows (schemaV13's DEFAULT ''). The
+		// idx_flows_http_version index makes the subquery cheap.
+		conds = append(conds, "EXISTS (SELECT 1 FROM flows m WHERE m.stream_id = s.id AND m.http_version = ?)")
+		args = append(args, *opts.HTTPVersion)
+	}
+	if opts.Method != "" {
+		conds = append(conds, "EXISTS (SELECT 1 FROM flows m WHERE m.stream_id = s.id AND m.direction = 'send' AND m.method = ?)")
+		args = append(args, opts.Method)
+	}
+	if opts.URLPattern != "" {
+		escaped := strings.NewReplacer("%", "\\%", "_", "\\_").Replace(opts.URLPattern)
+		conds = append(conds, "EXISTS (SELECT 1 FROM flows m WHERE m.stream_id = s.id AND m.direction = 'send' AND m.url LIKE ? ESCAPE '\\')")
+		args = append(args, "%"+escaped+"%")
+	}
+	if opts.StatusCode != 0 {
+		conds = append(conds, "EXISTS (SELECT 1 FROM flows m WHERE m.stream_id = s.id AND m.direction = 'receive' AND m.status_code = ?)")
+		args = append(args, opts.StatusCode)
+	}
+	return conds, args
 }
 
 // validStreamSortColumns maps allowed SortBy values to SQL column expressions.

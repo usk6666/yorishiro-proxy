@@ -277,17 +277,25 @@ func BuildLiveStack(_ context.Context, deps Deps) (*Stack, error) {
 	// reached the proxy.
 	upstreamTLSErrorRecorder := buildUpstreamTLSErrorRecorder(deps.FlowStore, deps.RecordScope, listenerName, logger)
 
+	// USK-790: passthrough audit-flow observer. Persists a Stream + Flow
+	// per TLS passthrough connection with SNI / 4-tuple / byte counters
+	// so the audit trail surfaces pinned-host contacts even when MITM is
+	// disabled. Nil store yields a nil observer; the connector then uses
+	// the no-observer io.Copy hot path.
+	passthroughObserver := newPassthroughRecorder(deps.FlowStore, listenerName, logger, deps.RecordScope)
+
 	// Construct the per-protocol HandlerFunc closures.
 	connectHandler := connector.NewCONNECTHandler(connector.CONNECTHandlerConfig{
-		Negotiator:         connector.NewCONNECTNegotiator(logger),
-		BuildCfg:           deps.BuildConfig,
-		Scope:              deps.Scope,
-		RateLimiter:        deps.RateLimiter,
-		PassthroughList:    deps.PassthroughList,
-		OnStack:            buildOnStack(p, deps, logger),
-		OnHTTP2Stack:       buildOnHTTP2Stack(pH2, deps, logger),
-		OnUpstreamTLSError: upstreamTLSErrorRecorder,
-		Logger:             logger,
+		Negotiator:          connector.NewCONNECTNegotiator(logger),
+		BuildCfg:            deps.BuildConfig,
+		Scope:               deps.Scope,
+		RateLimiter:         deps.RateLimiter,
+		PassthroughList:     deps.PassthroughList,
+		PassthroughObserver: passthroughObserver,
+		OnStack:             buildOnStack(p, deps, logger),
+		OnHTTP2Stack:        buildOnHTTP2Stack(pH2, deps, logger),
+		OnUpstreamTLSError:  upstreamTLSErrorRecorder,
+		Logger:              logger,
 	})
 	// USK-770: prefer the process-singleton SOCKS5Negotiator supplied via
 	// Deps (owned by mcpserver) so MCP control-plane Set*Auth calls reach
@@ -300,14 +308,15 @@ func BuildLiveStack(_ context.Context, deps Deps) (*Stack, error) {
 	socks5Negotiator.Scope = deps.Scope
 	socks5Negotiator.RateLimiter = deps.RateLimiter
 	socks5Handler := connector.NewSOCKS5Handler(connector.SOCKS5HandlerConfig{
-		Negotiator:         socks5Negotiator,
-		BuildCfg:           deps.BuildConfig,
-		PassthroughList:    deps.PassthroughList,
-		OnStack:            buildOnStack(p, deps, logger),
-		OnHTTP2Stack:       buildOnHTTP2Stack(pH2, deps, logger),
-		OnUpstreamTLSError: upstreamTLSErrorRecorder,
-		Logger:             logger,
-		PluginV2Engine:     deps.PluginV2Engine,
+		Negotiator:          socks5Negotiator,
+		BuildCfg:            deps.BuildConfig,
+		PassthroughList:     deps.PassthroughList,
+		PassthroughObserver: passthroughObserver,
+		OnStack:             buildOnStack(p, deps, logger),
+		OnHTTP2Stack:        buildOnHTTP2Stack(pH2, deps, logger),
+		OnUpstreamTLSError:  upstreamTLSErrorRecorder,
+		Logger:              logger,
+		PluginV2Engine:      deps.PluginV2Engine,
 	})
 	// USK-710: plain-HTTP forward proxy. Plain HTTP cannot route to h2 (no
 	// ALPN, no TLS), so OnHTTP2Stack is intentionally omitted — the handler
