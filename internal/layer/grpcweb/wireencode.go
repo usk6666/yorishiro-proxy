@@ -82,6 +82,15 @@ func EncodeWireBytes(env *envelope.Envelope) ([]byte, error) {
 		if opaque == nil {
 			return nil, nil
 		}
+		// Send-direction End is the USK-780 Layer-internal flush sentinel:
+		// gRPC-Web request bodies do not carry an embedded trailer LPM, so
+		// there are no wire bytes to re-render for a modified variant. nil
+		// signals "unavailable" to RecordStep — same contract as the Start
+		// case above. The Receive-direction End encodes the actual response
+		// trailer LPM.
+		if env.Direction == envelope.Send {
+			return nil, nil
+		}
 		trailerPayload := encodeTrailerPayload(m)
 		frame := EncodeFrame(true, false, trailerPayload)
 		if opaque.wireBase64 {

@@ -37,6 +37,15 @@
 // trailer frame. Receiving this sentinel triggers HTTPMessage assembly and
 // inner.Send of the assembled HTTP request.
 //
+// RoleServer.Next emits the sentinel itself (USK-780): when an inbound
+// request HTTPMessage has been split into Start + Data*, the Layer appends
+// a synthetic Send-direction GRPCEndMessage{Status: 0, Raw: nil} so the
+// session loop forwards it to the upstream-side RoleClient.Send via the
+// Pipeline. Without this synthesis the upstream Send buffer never flushes
+// and well-formed unary RPCs hang at the upstream wire. The lifecycle
+// (grpc-web, on_end) hook is suppressed on this path — request-side Ends
+// have no grpc-status to observe.
+//
 // On the Receive-side response path (RoleServer responding), the caller's
 // final Send is a *envelope.GRPCEndMessage with Direction=Receive; this
 // Layer encodes an embedded gRPC-Web trailer LPM frame (flags MSB=1) into

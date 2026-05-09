@@ -150,9 +150,13 @@ func TestEncodeWireBytes_GRPCData_GzipCompressed(t *testing.T) {
 
 // TestEncodeWireBytes_GRPCEnd_BinaryTrailers: an End message with
 // status/message/trailers re-encodes to a trailer LPM frame (flags MSB).
+// Direction=Receive because the trailer frame is the response wire form;
+// USK-780 made the encoder return nil for Send-direction Ends (those are
+// Layer-internal flush sentinels with no wire bytes).
 func TestEncodeWireBytes_GRPCEnd_BinaryTrailers(t *testing.T) {
 	env := &envelope.Envelope{
-		Protocol: envelope.ProtocolGRPCWeb,
+		Protocol:  envelope.ProtocolGRPCWeb,
+		Direction: envelope.Receive,
 		Message: &envelope.GRPCEndMessage{
 			Status:  0,
 			Message: "OK",
@@ -181,10 +185,12 @@ func TestEncodeWireBytes_GRPCEnd_BinaryTrailers(t *testing.T) {
 }
 
 // TestEncodeWireBytes_GRPCEnd_Base64Trailers: base64 wire wraps the entire
-// trailer LPM frame once.
+// trailer LPM frame once. Direction=Receive per the USK-780 split between
+// response trailer encoding and Send-direction sentinel suppression.
 func TestEncodeWireBytes_GRPCEnd_Base64Trailers(t *testing.T) {
 	env := &envelope.Envelope{
-		Protocol: envelope.ProtocolGRPCWeb,
+		Protocol:  envelope.ProtocolGRPCWeb,
+		Direction: envelope.Receive,
 		Message: &envelope.GRPCEndMessage{
 			Status: 0,
 		},
@@ -237,5 +243,28 @@ func TestEncodeWireBytes_OpaqueMissing_GRPCEndFailSoft(t *testing.T) {
 	}
 	if out != nil {
 		t.Errorf("got %d bytes, want nil for fail-soft path", len(out))
+	}
+}
+
+// TestEncodeWireBytes_GRPCEnd_SendDirectionUnavailable: the USK-780
+// Send-direction End is a Layer-internal flush sentinel with no wire
+// bytes. The encoder must return (nil, nil) so RecordStep tags the
+// modified variant as wire_bytes="unavailable" instead of writing a
+// fabricated trailer LPM frame to the recording.
+func TestEncodeWireBytes_GRPCEnd_SendDirectionUnavailable(t *testing.T) {
+	env := &envelope.Envelope{
+		Protocol:  envelope.ProtocolGRPCWeb,
+		Direction: envelope.Send,
+		Message: &envelope.GRPCEndMessage{
+			Status: 0,
+		},
+		Opaque: &opaqueGRPCWeb{wireBase64: false, encoding: ""},
+	}
+	out, err := EncodeWireBytes(env)
+	if err != nil {
+		t.Fatalf("EncodeWireBytes: %v", err)
+	}
+	if out != nil {
+		t.Errorf("got %d bytes, want nil for Send-direction End sentinel", len(out))
 	}
 }

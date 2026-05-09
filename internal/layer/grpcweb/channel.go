@@ -342,7 +342,12 @@ func (c *channel) refillFromHTTPMessage(ctx context.Context, env *envelope.Envel
 	// Send direction: gRPC-Web request bodies must NOT carry an embedded
 	// trailer. If one is observed, emit the End anyway (so the analyst
 	// can inspect what was sent) and stamp
-	// AnomalyUnexpectedGRPCWebRequestTrailer.
+	// AnomalyUnexpectedGRPCWebRequestTrailer. If absent (the spec-conformant
+	// case), synthesize a Status=0 End with Raw=nil so the upstream-side
+	// RoleClient.Send observes the D6 flush sentinel via Pipeline → upstream
+	// dispatch and the assembled HTTPMessage actually reaches the upstream
+	// wire. Without this synthesis, well-formed gRPC-Web requests hang at
+	// the upstream Send buffer (USK-780).
 	var firedEndEnv *envelope.Envelope
 	var firedEndMsg *envelope.GRPCEndMessage
 	if parsed.TrailerFrame != nil {
@@ -368,11 +373,24 @@ func (c *channel) refillFromHTTPMessage(ctx context.Context, env *envelope.Envel
 		c.emitQueue = append(c.emitQueue, endEnv)
 		firedEndEnv = endEnv
 		firedEndMsg = end
+	} else if dir == envelope.Send {
+		// Spec-conformant gRPC-Web request: no embedded trailer LPM. Emit
+		// a clean Status=0 End so it flows through the Pipeline and reaches
+		// the upstream-side RoleClient.Send as the D6 flush sentinel.
+		end := &envelope.GRPCEndMessage{}
+		endEnv := c.buildEnvelope(env, dir, end, nil, opaque)
+		c.emitQueue = append(c.emitQueue, endEnv)
+		// Intentionally do not fire (grpc-web, on_end) for the request side:
+		// the lifecycle hook represents an RPC's terminal status (grpc-status),
+		// which has no analog on the request half. Leaving firedEndEnv nil
+		// preserves observe-only semantics for response terminations.
 	}
 	c.mu.Unlock()
 
 	// Fire (grpc-web, on_end) outside the mutex so a slow plugin does not
-	// block the consumer's Next path. fireOnEnd is sync.Once-gated.
+	// block the consumer's Next path. fireOnEnd is sync.Once-gated. Only
+	// Receive-direction terminations populate firedEndEnv; Send-direction
+	// synthetic Ends deliberately leave it nil.
 	if firedEndEnv != nil {
 		c.fireOnEnd(firedEndEnv, firedEndMsg)
 	}

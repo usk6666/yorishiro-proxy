@@ -82,9 +82,12 @@ const (
 // reuses google.golang.org/grpc's server — gRPC-Web has no canonical
 // server library in std, so we drive http2.Server directly with an
 // http.Handler that decodes the inbound LPM frames and writes back a
-// single data frame plus a trailer frame (binary wire format,
-// application/grpc-web+proto; base64/text-mode is a follow-up issue per
-// USK-777 scope).
+// single data frame plus a trailer frame.
+//
+// Both binary (`application/grpc-web[+proto]`) and base64/text
+// (`application/grpc-web-text[+proto]`) request wire formats are
+// accepted; the response is encoded in the same wire form the request
+// arrived in (USK-780 acceptance: smoke must exercise both variants).
 //
 // The returned *httptest.Server is shaped exactly like the one
 // buildGRPCUpstream returns (URL, Listener, TLS, no-op Config) so the
@@ -104,15 +107,15 @@ func buildGRPCWebUpstream() (*httptest.Server, *FingerprintObserver, *GRPCWebHit
 
 	hits := NewGRPCWebHitCounter()
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Only application/grpc-web[+proto] (binary wire) is recognised
-		// here — text-mode is intentionally out of scope (USK-777). For
-		// any other content-type respond with a 415 to surface the
-		// classification error in tests.
+		// Accept both binary (application/grpc-web[+proto]) and
+		// base64/text (application/grpc-web-text[+proto]) wire formats.
+		// USK-780 acceptance criterion #4: smoke must exercise both.
 		ct := r.Header.Get("Content-Type")
-		if !grpcweb.IsGRPCWebContentType(ct) || grpcweb.IsBase64Encoded(ct) {
-			http.Error(w, "mcptest grpc-web upstream: only application/grpc-web (binary) is supported", http.StatusUnsupportedMediaType)
+		if !grpcweb.IsGRPCWebContentType(ct) {
+			http.Error(w, "mcptest grpc-web upstream: only application/grpc-web[-text] is supported", http.StatusUnsupportedMediaType)
 			return
 		}
+		base64Wire := grpcweb.IsBase64Encoded(ct)
 
 		// Read the request body to completion; the gRPC-Web layer always
 		// presents a fully buffered body to the upstream Send (the
@@ -125,7 +128,7 @@ func buildGRPCWebUpstream() (*httptest.Server, *FingerprintObserver, *GRPCWebHit
 			return
 		}
 
-		parsed, perr := grpcweb.DecodeBody(body, false)
+		parsed, perr := grpcweb.DecodeBody(body, base64Wire)
 		if perr != nil {
 			http.Error(w, fmt.Sprintf("mcptest grpc-web upstream: decode LPM: %v", perr), http.StatusBadRequest)
 			return
@@ -142,13 +145,20 @@ func buildGRPCWebUpstream() (*httptest.Server, *FingerprintObserver, *GRPCWebHit
 
 		// Build response: one data frame carrying the echo payload,
 		// followed by one trailer frame with grpc-status: 0. Casing of
-		// the trailer key is lowercase per RFC 9113 / gRPC spec.
+		// the trailer key is lowercase per RFC 9113 / gRPC spec. The
+		// response wire form mirrors the request — base64 in / base64
+		// out, binary in / binary out.
 		dataFrame := grpcweb.EncodeFrame(false, false, reqPayload)
 		trailerText := "grpc-status: 0\r\ngrpc-message: \r\n"
 		trailerFrame := grpcweb.EncodeFrame(true, false, []byte(trailerText))
 		respBody := append(append([]byte{}, dataFrame...), trailerFrame...)
+		respCT := "application/grpc-web+proto"
+		if base64Wire {
+			respBody = grpcweb.EncodeBase64Body(respBody)
+			respCT = "application/grpc-web-text+proto"
+		}
 
-		w.Header().Set("Content-Type", "application/grpc-web+proto")
+		w.Header().Set("Content-Type", respCT)
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(respBody)
 	})

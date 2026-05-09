@@ -131,3 +131,53 @@ func TestGRPCWeb_OnEnd_NoEngine_NoOp(t *testing.T) {
 		t.Fatalf("got %d envelopes, want 3", len(envs))
 	}
 }
+
+// TestGRPCWeb_OnEnd_DoesNotFireForSyntheticSendEnd verifies that the
+// USK-780 Send-direction End sentinel — which the Layer synthesizes from
+// the request HTTPMessage boundary so the upstream RoleClient.Send sees a
+// flush signal — does NOT fire (grpc-web, on_end). The lifecycle hook
+// represents an RPC's terminal status (grpc-status) and request-side Ends
+// have no analog status; firing on_end here would change observe-only
+// semantics for downstream plugins.
+func TestGRPCWeb_OnEnd_DoesNotFireForSyntheticSendEnd(t *testing.T) {
+	t.Parallel()
+
+	engine := pluginv2.NewEngine(nil)
+	var fires atomic.Int32
+	engine.Registry().Register(pluginv2.Hook{
+		Protocol:   pluginv2.ProtoGRPCWeb,
+		Event:      pluginv2.EventOnEnd,
+		Phase:      pluginv2.PhaseNone,
+		PluginName: "test",
+		Fn: builtinHook("end", func(_ starlark.Value, _ starlark.Value) {
+			fires.Add(1)
+		}),
+	})
+
+	// A spec-conformant gRPC-Web request: one data frame, no embedded
+	// trailer LPM. The Layer synthesizes the Send-direction End sentinel.
+	payload := []byte("synthetic-send-end-test")
+	body := EncodeFrame(false, false, payload)
+	headers := []envelope.KeyValue{
+		{Name: "content-type", Value: "application/grpc-web+proto"},
+	}
+	in := mustHTTPRequestEnv("s-send", headers, body, "/pkg.Echo/Say")
+
+	mock := newMockChannel("s-send", in)
+	ch := Wrap(mock, RoleServer, WithLifecycleEngine(engine))
+	defer ch.Close()
+
+	envs := drainEnvelopes(t, ch, 5)
+	if len(envs) != 3 {
+		t.Fatalf("got %d envelopes, want 3 (Start+Data+End); envs=%v", len(envs), envs)
+	}
+	if _, ok := envs[2].Message.(*envelope.GRPCEndMessage); !ok {
+		t.Fatalf("envs[2].Message = %T, want *GRPCEndMessage", envs[2].Message)
+	}
+	if envs[2].Direction != envelope.Send {
+		t.Errorf("envs[2].Direction = %v, want Send", envs[2].Direction)
+	}
+	if got := fires.Load(); got != 0 {
+		t.Errorf("on_end fired %d times for Send-direction synthetic End, want 0", got)
+	}
+}

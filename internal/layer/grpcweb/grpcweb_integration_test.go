@@ -26,7 +26,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
 	"golang.org/x/net/http2"
 
 	"github.com/usk6666/yorishiro-proxy/internal/cert"
@@ -208,8 +207,9 @@ func buildGRPCWebResponseHTTP(payload []byte, status uint32, message string, bas
 // request and replies with a hand-crafted gRPC-Web response. The response
 // content is determined at call time by the responseBuilder. The upstream
 // always reads the request to completion before responding so the proxy's
-// upstream Send buffer is fully flushed (which requires the test's
-// sendEndInjector to push a synthetic GRPCEndMessage on Send-side EOF).
+// upstream Send buffer is fully flushed (USK-780: the grpcweb Layer
+// synthesizes the Send-direction End sentinel from the request HTTPMessage
+// boundary, so no additional injection is needed at this layer).
 func startGRPCWebHTTP1Upstream(
 	t *testing.T,
 	responseBuilder func(reqBytes []byte) []byte,
@@ -351,76 +351,6 @@ func connectThroughProxy(t *testing.T, proxyAddr, target string, nextProtos []st
 }
 
 // ---------------------------------------------------------------------------
-// sendEndInjector: bridges grpcweb.RoleServer.Next EOF into a synthetic
-// GRPCEndMessage(Direction=Send) that the upstream-side grpcweb.RoleClient
-// uses as its D6 flush sentinel. Without this injector the Send-side
-// assembly buffer would never flush and the upstream would never receive
-// the request — so the proactive-response upstream pattern alone is
-// insufficient for h2 (the handler runs only after HEADERS arrive).
-// ---------------------------------------------------------------------------
-
-type sendEndInjector struct {
-	inner    layer.Channel
-	streamID string
-	mu       sync.Mutex
-	emitted  bool
-	lastSeq  int
-}
-
-func newSendEndInjector(inner layer.Channel) *sendEndInjector {
-	return &sendEndInjector{inner: inner, streamID: inner.StreamID()}
-}
-
-func (s *sendEndInjector) StreamID() string        { return s.inner.StreamID() }
-func (s *sendEndInjector) Closed() <-chan struct{} { return s.inner.Closed() }
-func (s *sendEndInjector) Err() error              { return s.inner.Err() }
-func (s *sendEndInjector) Close() error            { return s.inner.Close() }
-func (s *sendEndInjector) Send(ctx context.Context, env *envelope.Envelope) error {
-	return s.inner.Send(ctx, env)
-}
-
-func (s *sendEndInjector) Next(ctx context.Context) (*envelope.Envelope, error) {
-	env, err := s.inner.Next(ctx)
-	if err != nil {
-		// Only mark `emitted` and synthesize a sentinel on EOF — non-EOF
-		// errors must propagate without consuming the one-shot guard so
-		// that a subsequent EOF (if any) still injects the GRPCEndMessage.
-		if !errors.Is(err, io.EOF) {
-			return nil, err
-		}
-		s.mu.Lock()
-		alreadyEmitted := s.emitted
-		s.emitted = true
-		seq := s.lastSeq + 1
-		s.mu.Unlock()
-		if alreadyEmitted {
-			return nil, err
-		}
-		return &envelope.Envelope{
-			StreamID:  s.streamID,
-			FlowID:    uuid.New().String(),
-			Sequence:  seq,
-			Direction: envelope.Send,
-			Protocol:  envelope.ProtocolGRPCWeb,
-			Message:   &envelope.GRPCEndMessage{Status: 0},
-		}, nil
-	}
-	s.mu.Lock()
-	s.lastSeq = env.Sequence
-	// If the inner Channel itself emits a real Send-direction End (e.g. the
-	// USK-660 unexpected-request-trailer path), mark emitted so we don't
-	// double up with a synthetic End on subsequent inner-EOF — sendEndLocked
-	// rejects a second End once sendStart has been consumed.
-	if env.Direction == envelope.Send {
-		if _, isEnd := env.Message.(*envelope.GRPCEndMessage); isEnd {
-			s.emitted = true
-		}
-	}
-	s.mu.Unlock()
-	return env, nil
-}
-
-// ---------------------------------------------------------------------------
 // Pipeline assembly (shared between h1 and h2 paths)
 // ---------------------------------------------------------------------------
 
@@ -471,9 +401,9 @@ func (r *sessionResult) get() error {
 
 // startGRPCWebHTTP1Proxy starts a FullListener configured for HTTP MITM.
 // Inside OnStack, both client and upstream HTTP/1 channels are wrapped with
-// grpcweb (Server / Client roles). The client side is additionally wrapped
-// with sendEndInjector so the upstream's grpcweb.RoleClient buffer flushes
-// once the client EOFs.
+// grpcweb (Server / Client roles). USK-780 made the Layer itself synthesize
+// the Send-direction End sentinel from the request HTTPMessage boundary,
+// so no Channel-wrapper workaround is needed on the client side.
 func startGRPCWebHTTP1Proxy(
 	t *testing.T,
 	ctx context.Context,
@@ -502,7 +432,7 @@ func startGRPCWebHTTP1Proxy(
 		defer stack.Close()
 
 		rawClientCh := <-stack.ClientTopmost().Channels()
-		clientCh := newSendEndInjector(grpcweb.Wrap(rawClientCh, grpcweb.RoleServer))
+		clientCh := grpcweb.Wrap(rawClientCh, grpcweb.RoleServer)
 
 		p := buildPipeline(store, opts)
 
@@ -612,18 +542,17 @@ func startGRPCWebHTTP2Proxy(
 
 					// connector.DispatchH2Stream peeks the first H2HeadersEvent,
 					// classifies the content-type, and (post-USK-658) routes
-					// application/grpc-web* to httpaggregator + grpcweb. The
-					// returned Channel is wrapped with sendEndInjector to bridge
-					// client-side EOF into a synthetic GRPCEndMessage(Send) that
-					// the upstream-side grpcweb.RoleClient uses as its flush
-					// sentinel.
+					// application/grpc-web* to httpaggregator + grpcweb.
+					// USK-780 made the grpcweb Layer synthesize the
+					// Send-direction End sentinel from the request HTTPMessage
+					// boundary, so no Channel-wrapper workaround is needed.
 					dispatched, derr := connector.DispatchH2Stream(
 						cbCtx, ch, httpaggregator.RoleServer, clientLOpts, slog.Default())
 					if derr != nil {
 						_ = ch.Close()
 						return
 					}
-					clientCh := newSendEndInjector(dispatched)
+					clientCh := dispatched
 
 					p := buildPipeline(store, opts)
 					session.RunSession(cbCtx, clientCh, func(dctx context.Context, _ *envelope.Envelope) (layer.Channel, error) {
@@ -1171,9 +1100,10 @@ func runMalformedAnomalyTest(t *testing.T, body []byte, contentType, anomalyMeta
 	}
 
 	// Among the recorded flows there must be exactly one Send "start" flow
-	// carrying the Anomaly metadata. The harness's sendEndInjector also
-	// synthesizes a GRPCEndMessage on inner-EOF so a "end" Send flow is
-	// expected too — but the load-bearing assertion is the anomaly Start.
+	// carrying the Anomaly metadata. USK-780 makes the grpcweb Layer also
+	// emit a Send-direction End at the request HTTPMessage boundary, so a
+	// "end" Send flow is expected too — but the load-bearing assertion is
+	// the anomaly Start.
 	flows := store.allFlows()
 	var startFlow *flow.Flow
 	for _, f := range flows {
@@ -1600,8 +1530,11 @@ func TestGRPCWeb_UnexpectedRequestTrailerProducesAnomaly(t *testing.T) {
 	}
 
 	// Locate the Send End flow stamped with the unexpected-trailer anomaly.
-	// The harness's sendEndInjector also synthesizes a Send End on inner-EOF,
-	// so multiple Send End flows may be recorded — we filter by anomaly key.
+	// In this test the embedded trailer LPM is present so the Layer emits the
+	// anomaly-carrying End from the trailer-frame branch (USK-780 added a
+	// separate clean-End branch for the spec-conformant no-trailer case),
+	// keeping recording behavior here unchanged. We filter by anomaly key
+	// for resilience against future emission additions.
 	flows := flowsForFirstStream(store)
 	var endFlow *flow.Flow
 	for _, f := range flows {

@@ -137,7 +137,12 @@ func drainEnvelopes(t *testing.T, ch layer.Channel, max int) []*envelope.Envelop
 
 func TestRoundTrip_BinaryHTTP1Style(t *testing.T) {
 	// Server-side: inner emits one Send-direction HTTPMessage (the request)
-	// and then EOF. We verify Start + Data + (no End for request) emission.
+	// and then EOF. We verify Start + Data + End emission. The terminating
+	// End is the synthesized D6 flush sentinel (USK-780): Status=0,
+	// Trailers=nil, Raw=nil — gRPC-Web request bodies carry no trailer on
+	// the wire, so the Layer manufactures the sentinel from the HTTPMessage
+	// boundary so that the upstream-side RoleClient.Send receives the
+	// flush signal.
 	payload := []byte("hello-grpcweb")
 	body := EncodeFrame(false, false, payload)
 
@@ -154,9 +159,9 @@ func TestRoundTrip_BinaryHTTP1Style(t *testing.T) {
 	mock := newMockChannel("s1", in)
 	ch := Wrap(mock, RoleServer)
 
-	envs := drainEnvelopes(t, ch, 4)
-	if len(envs) != 2 {
-		t.Fatalf("got %d envelopes, want 2 (Start + 1 Data)", len(envs))
+	envs := drainEnvelopes(t, ch, 5)
+	if len(envs) != 3 {
+		t.Fatalf("got %d envelopes, want 3 (Start + 1 Data + Send-direction End)", len(envs))
 	}
 
 	start, ok := envs[0].Message.(*envelope.GRPCStartMessage)
@@ -235,6 +240,32 @@ func TestRoundTrip_BinaryHTTP1Style(t *testing.T) {
 	// Start envelope has no Raw (belongs to inner HTTPMessage).
 	if len(envs[0].Raw) != 0 {
 		t.Errorf("Start envelope Raw should be nil/empty, got %d bytes", len(envs[0].Raw))
+	}
+
+	// USK-780: synthesized Send-direction End sentinel. No wire trailer
+	// existed for this request, so the End must carry no anomaly and
+	// no Raw bytes — it is a Layer-internal flush marker.
+	end, ok := envs[2].Message.(*envelope.GRPCEndMessage)
+	if !ok {
+		t.Fatalf("envs[2].Message = %T, want *GRPCEndMessage", envs[2].Message)
+	}
+	if envs[2].Direction != envelope.Send {
+		t.Errorf("End envelope Direction = %v, want Send", envs[2].Direction)
+	}
+	if len(envs[2].Raw) != 0 {
+		t.Errorf("End envelope Raw should be nil/empty, got %d bytes", len(envs[2].Raw))
+	}
+	if end.Status != 0 {
+		t.Errorf("end.Status = %d, want 0", end.Status)
+	}
+	if len(end.Anomalies) != 0 {
+		t.Errorf("end.Anomalies = %v, want empty (spec-conformant request)", end.Anomalies)
+	}
+	if len(end.Trailers) != 0 {
+		t.Errorf("end.Trailers = %v, want empty", end.Trailers)
+	}
+	if envs[2].Sequence != 2 {
+		t.Errorf("End envelope Sequence = %d, want 2", envs[2].Sequence)
 	}
 }
 
@@ -342,7 +373,7 @@ func TestRoundTrip_Base64Response(t *testing.T) {
 
 // --- Empty-body request → Start only ---
 
-func TestEmptyRequestBody_StartOnly(t *testing.T) {
+func TestEmptyRequestBody_StartAndEnd(t *testing.T) {
 	headers := []envelope.KeyValue{
 		{Name: "content-type", Value: "application/grpc-web+proto"},
 	}
@@ -350,12 +381,27 @@ func TestEmptyRequestBody_StartOnly(t *testing.T) {
 	mock := newMockChannel("s4", in)
 	ch := Wrap(mock, RoleServer)
 
+	// USK-780: even with no body bytes the Layer still synthesizes the
+	// Send-direction End sentinel from the HTTPMessage boundary so the
+	// upstream-side RoleClient.Send observes a complete (Start, End) pair
+	// and flushes the assembled (empty-body) HTTP request to the wire.
 	envs := drainEnvelopes(t, ch, 5)
-	if len(envs) != 1 {
-		t.Fatalf("got %d envelopes, want 1 (Start only)", len(envs))
+	if len(envs) != 2 {
+		t.Fatalf("got %d envelopes, want 2 (Start + Send-direction End)", len(envs))
 	}
 	if _, ok := envs[0].Message.(*envelope.GRPCStartMessage); !ok {
 		t.Fatalf("envs[0] = %T", envs[0].Message)
+	}
+	end, ok := envs[1].Message.(*envelope.GRPCEndMessage)
+	if !ok {
+		t.Fatalf("envs[1] = %T, want *GRPCEndMessage", envs[1].Message)
+	}
+	if envs[1].Direction != envelope.Send {
+		t.Errorf("End Direction = %v, want Send", envs[1].Direction)
+	}
+	if end.Status != 0 || len(end.Anomalies) != 0 || len(end.Trailers) != 0 {
+		t.Errorf("End not clean: status=%d anomalies=%v trailers=%v",
+			end.Status, end.Anomalies, end.Trailers)
 	}
 }
 
@@ -752,9 +798,10 @@ func TestMalformedPath_EmitsEmptyServiceMethod(t *testing.T) {
 	in := mustHTTPRequestEnv("s13", headers, nil, "/onlyone-no-slash")
 	mock := newMockChannel("s13", in)
 	ch := Wrap(mock, RoleServer)
+	// USK-780: Start + Send-direction End sentinel even with empty body.
 	envs := drainEnvelopes(t, ch, 5)
-	if len(envs) != 1 {
-		t.Fatalf("got %d envs", len(envs))
+	if len(envs) != 2 {
+		t.Fatalf("got %d envs, want 2 (Start + Send-direction End)", len(envs))
 	}
 	start := envs[0].Message.(*envelope.GRPCStartMessage)
 	if start.Service != "" || start.Method != "" {
