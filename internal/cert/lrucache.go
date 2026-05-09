@@ -2,6 +2,7 @@ package cert
 
 import (
 	"container/list"
+	"crypto/tls"
 	"sync"
 	"time"
 )
@@ -130,4 +131,84 @@ func (c *lruCache) evictOldestLocked() {
 		return
 	}
 	c.removeLocked(oldest)
+}
+
+// configLRUCache is a thread-safe LRU cache for *tls.Config values keyed by
+// (hostname, alpnOffer). It mirrors lruCache but specialises the value type
+// because *tls.Config has no expiration concept — entries live until evicted
+// by capacity or by Clear (called from Issuer.ClearCache after a CA regen,
+// which makes any session-ticket-encryption keys held inside the cached
+// Config stale).
+type configLRUCache struct {
+	mu       sync.Mutex
+	maxSize  int
+	items    map[serverCfgKey]*list.Element
+	eviction *list.List // front = MRU, back = LRU
+}
+
+// configLRUEntry is a single entry in the *tls.Config LRU cache.
+type configLRUEntry struct {
+	key   serverCfgKey
+	value *tls.Config
+}
+
+// newConfigLRUCache constructs a *tls.Config LRU cache.
+// If maxSize is <= 0, defaultMaxCacheSize is used.
+func newConfigLRUCache(maxSize int) *configLRUCache {
+	if maxSize <= 0 {
+		maxSize = defaultMaxCacheSize
+	}
+	return &configLRUCache{
+		maxSize:  maxSize,
+		items:    make(map[serverCfgKey]*list.Element),
+		eviction: list.New(),
+	}
+}
+
+// LoadOrStore returns the existing *tls.Config for key, or stores and returns
+// cfg if no entry exists. The boolean reports whether an existing entry was
+// found. A successful load promotes the entry to MRU; a successful store
+// inserts at MRU and evicts the LRU entry if the cache is at capacity.
+func (c *configLRUCache) LoadOrStore(key serverCfgKey, cfg *tls.Config) (*tls.Config, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if elem, ok := c.items[key]; ok {
+		c.eviction.MoveToFront(elem)
+		return elem.Value.(*configLRUEntry).value, true
+	}
+
+	for c.eviction.Len() >= c.maxSize {
+		c.evictOldestLocked()
+	}
+
+	entry := &configLRUEntry{key: key, value: cfg}
+	elem := c.eviction.PushFront(entry)
+	c.items[key] = elem
+	return cfg, false
+}
+
+// Len returns the number of entries currently in the cache.
+func (c *configLRUCache) Len() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.eviction.Len()
+}
+
+// Clear removes all entries from the cache.
+func (c *configLRUCache) Clear() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.items = make(map[serverCfgKey]*list.Element)
+	c.eviction.Init()
+}
+
+// evictOldestLocked removes the least recently used entry. Caller must hold c.mu.
+func (c *configLRUCache) evictOldestLocked() {
+	oldest := c.eviction.Back()
+	if oldest == nil {
+		return
+	}
+	entry := c.eviction.Remove(oldest).(*configLRUEntry)
+	delete(c.items, entry.key)
 }

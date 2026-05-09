@@ -810,18 +810,19 @@ func performClientMITM(
 	alpnOffers []string,
 	cfg *BuildConfig,
 ) (net.Conn, *envelope.TLSSnapshot, error) {
-	mitmCert, err := cfg.Issuer.GetCertificate(host)
-	if err != nil {
+	// Pre-warm the cert cache so a missing/invalid CA surfaces as a clear
+	// "MITM cert for <host>" error rather than failing later inside the
+	// handshake's GetCertificate callback (USK-795).
+	if _, err := cfg.Issuer.GetCertificate(host); err != nil {
 		return nil, nil, fmt.Errorf("connector: MITM cert for %s: %w", host, err)
 	}
 
-	serverTLSCfg := &tls.Config{
-		Certificates: []tls.Certificate{*mitmCert},
-	}
-	if len(alpnOffers) > 0 {
-		// Defensive copy: tls.Config retains a reference to the slice.
-		serverTLSCfg.NextProtos = append([]string(nil), alpnOffers...)
-	}
+	// Reuse a shared *tls.Config keyed by (host, alpnOffers) so crypto/tls's
+	// lazy session ticket encryption key persists across connections; a
+	// fresh Config per call would generate a new random key each time and
+	// invalidate every browser-held ticket (USK-795). MITMServerConfig
+	// makes a defensive copy of alpnOffers internally.
+	serverTLSCfg := cfg.Issuer.MITMServerConfig(host, alpnOffers)
 
 	tlsConn, clientSnap, err := tlslayer.Server(ctx, clientConn, serverTLSCfg)
 	if err != nil {
@@ -1099,14 +1100,16 @@ func buildRawPassthroughStack(
 
 	// --- Client-side TLS MITM ---
 
-	mitmCert, err := cfg.Issuer.GetCertificate(host)
-	if err != nil {
+	// Pre-warm the cert cache so CA-side issues surface as a recognizable
+	// "MITM cert for <host>" error (USK-795).
+	if _, err := cfg.Issuer.GetCertificate(host); err != nil {
 		return nil, nil, nil, fmt.Errorf("connector: MITM cert for %s: %w", host, err)
 	}
 
-	serverTLSCfg := &tls.Config{
-		Certificates: []tls.Certificate{*mitmCert},
-	}
+	// Raw passthrough offers no ALPN — the tunnel is opaque after the
+	// MITM handshake. Reuse a shared *tls.Config so crypto/tls's session
+	// ticket key is stable across connections to the same host (USK-795).
+	serverTLSCfg := cfg.Issuer.MITMServerConfig(host, nil)
 
 	clientTLSConn, clientSnap, err := tlslayer.Server(ctx, clientConn, serverTLSCfg)
 	if err != nil {
