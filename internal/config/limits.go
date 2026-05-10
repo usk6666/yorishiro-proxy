@@ -5,21 +5,27 @@ package config
 // These constants were previously scattered across individual protocol handlers.
 // They are centralized here to ensure consistency and simplify future adjustments.
 //
-// The primary limit (MaxBodySize) is set to 254 MB, which is one-quarter of
-// SQLite's default BLOB maximum (1 GB). This allows recording full response
-// bodies while staying well within the database engine's capabilities.
+// MaxBodySize (254 MB) is the disk-persistence cap: it bounds the largest
+// single body that may be written as one SQLite BLOB row, set to one-quarter
+// of SQLite's default BLOB maximum (1 GB) to stay well within the database
+// engine's capabilities. It is NOT the per-connection RAM cap. Bodies larger
+// than DefaultBodySpillThreshold (10 MiB, see internal/config/body_spill.go)
+// spill to disk via the bodybuf memory-then-spill BodyBuffer introduced in
+// USK-630, so the in-memory footprint of a single body is bounded by
+// BodySpillThreshold rather than by MaxBodySize.
 //
 // CWE-770 note: these limits serve as a defense against resource exhaustion.
-// Each concurrent connection may buffer up to MaxBodySize for both the request
-// and response body, so the worst-case memory usage is:
+// The per-connection RAM worst case (request + response in flight) is bounded
+// by:
 //
-//	MaxBodySize × 2 (req + resp) × MaxConnections
-//	= 254 MB × 2 × 128 = ~63.5 GB
+//	BodySpillThreshold × 2 (req + resp) × MaxConnections
+//	= 10 MiB × 2 × 128 ≈ 2.5 GiB
 //
-// The default MaxConnections (128, internal/connector/listener_common.go) is
-// chosen to keep this theoretical maximum manageable. Operators should
-// consider total memory capacity and adjust MaxConnections via the
-// proxy_start MCP tool or configure_limits when running under heavy load.
+// The default MaxConnections (DefaultMaxConnections = 128 in
+// internal/connector/listener_common.go) is chosen with this RAM ceiling in
+// mind. Operators should consider total memory capacity and adjust
+// MaxConnections via the proxy_start MCP tool or configure_limits when
+// running under heavy load.
 
 const (
 	// MaxBodySize is the unified maximum size for both reading upstream
@@ -38,11 +44,6 @@ const (
 	// fragmented WebSocket message. This prevents unbounded memory growth
 	// from continuation frame accumulation (CWE-400).
 	MaxWebSocketMessageSize int64 = 254 << 20 // 254 MB
-
-	// MaxWebSocketRecordPayloadSize limits the payload size recorded per
-	// WebSocket message. Payloads exceeding this size are truncated in the
-	// flow store.
-	MaxWebSocketRecordPayloadSize = 254 << 20 // 254 MB
 
 	// MaxReplayResponseSize limits the response body size for MCP replay
 	// (resend / resend_raw / tcp_replay) operations.
@@ -67,10 +68,6 @@ const (
 	// no longer recorded to the flow store. This prevents unbounded DB growth
 	// from very long-lived SSE streams.
 	MaxSSEEventsPerStream = 10000
-
-	// MaxSSERecordPayloadSize limits the body size recorded per SSE event
-	// message. Events exceeding this size are truncated in the flow store.
-	MaxSSERecordPayloadSize = 254 << 20 // 254 MB
 
 	// MaxGRPCMessagesPerStream limits the number of gRPC messages recorded
 	// per stream. Once exceeded, messages are still forwarded to the client
