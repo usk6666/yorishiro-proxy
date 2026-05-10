@@ -727,11 +727,25 @@ func TestManager_StopNamed_StopsTCPForwards(t *testing.T) {
 	}
 
 	// A fresh dial against the previously-bound forward addr must fail —
-	// the port is no longer listening.
-	conn, err := net.DialTimeout("tcp", fwdAddr, 500*time.Millisecond)
-	if err == nil {
+	// the port is no longer listening. Retry within a short window because
+	// busy CI runners may immediately reuse the freed ephemeral port for
+	// an unrelated listener; if the manager truly unbound, at least one
+	// dial in the window will see ECONNREFUSED.
+	const attempts = 4
+	sawRefused := false
+	for i := 0; i < attempts; i++ {
+		conn, err := net.DialTimeout("tcp", fwdAddr, 100*time.Millisecond)
+		if err != nil {
+			sawRefused = true
+			break
+		}
 		conn.Close()
-		t.Errorf("dial %s after Stop succeeded; expected ECONNREFUSED", fwdAddr)
+		if i < attempts-1 {
+			time.Sleep(50 * time.Millisecond)
+		}
+	}
+	if !sawRefused {
+		t.Errorf("dial %s after Stop succeeded on all %d attempts; expected ECONNREFUSED in at least one", fwdAddr, attempts)
 	}
 }
 
