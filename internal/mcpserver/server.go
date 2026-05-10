@@ -281,6 +281,13 @@ func assembleAndRunMCPServer(
 ) error {
 	targetScope := InitTargetScope(targetScopePolicy)
 	rateLimiter := InitRateLimiter(targetScopePolicy, logger)
+	// USK-818: process-singleton BudgetManager owned here so the live
+	// data path's BudgetStep, the resend/fuzz dispatch helpers, and the
+	// MCP `security` tool all observe the same counters and the same
+	// MaxTotalRequests / MaxDuration policy. Start() arms the duration
+	// timer and shutdown callback after assembleLiveManager returns
+	// (the manager is required for the StopAll closure).
+	budgetManager := connector.NewBudgetManager()
 	safetyEngine, err := InitSafetyFilter(cfg, proxyCfg, logger)
 	if err != nil {
 		return err
@@ -321,7 +328,7 @@ func assembleAndRunMCPServer(
 
 	manager, err := assembleLiveManager(ctx, cfg, proxyCfg, store, issuer, pluginv2Engine,
 		holdQueue, httpInterceptEngine, wsInterceptEngine, grpcInterceptEngine,
-		httpTransformEngine, passthrough, targetScope, rateLimiter, safetyEngine, perProtoSafety, hostTLSRegistry,
+		httpTransformEngine, passthrough, targetScope, rateLimiter, budgetManager, safetyEngine, perProtoSafety, hostTLSRegistry,
 		socks5Negotiator, recordScope, logger)
 	if err != nil {
 		return err
@@ -337,10 +344,27 @@ func assembleAndRunMCPServer(
 		_ = manager.StopAll(sctx)
 	}()
 
+	// USK-818: arm the BudgetManager AFTER assembleLiveManager so the
+	// onShutdown callback can capture the live manager. When the budget
+	// is exhausted (request count exceeded or MaxDuration timer fires)
+	// the callback stops every listener — symmetric with how
+	// `proxy_stop` halts the proxy on operator action. budgetManager.Stop()
+	// is deferred so the duration timer goroutine cleans up before the
+	// process exits.
+	budgetManager.Start(func(reason string) {
+		logger.Info("budget exhausted; stopping proxy", "reason", reason)
+		sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if stopErr := manager.StopAll(sctx); stopErr != nil {
+			logger.Error("budget shutdown: StopAll failed", "error", stopErr)
+		}
+	})
+	defer budgetManager.Stop()
+
 	socks5AuthSetter := newSOCKS5AuthAdapter(socks5Negotiator, logger)
 	mcpComps, webUIToken, opts, err := buildMCPComponents(ctx, cfg, proxyCfg, ca, issuer, store, manager,
 		passthrough, holdQueue, httpInterceptEngine, wsInterceptEngine, grpcInterceptEngine,
-		pluginv2Engine, httpTransformEngine, hostTLSRegistry, tlsTransport, targetScope, rateLimiter, safetyEngine,
+		pluginv2Engine, httpTransformEngine, hostTLSRegistry, tlsTransport, targetScope, rateLimiter, budgetManager, safetyEngine,
 		socks5AuthSetter, recordScope, targetScopePolicySource, version, logger)
 	if err != nil {
 		return err
@@ -501,6 +525,7 @@ func buildMCPComponents(
 	tlsTransport transport.TLSTransport,
 	targetScope *connector.TargetScope,
 	rateLimiter *connector.RateLimiter,
+	budgetManager *connector.BudgetManager,
 	safetyEngine *safety.Engine,
 	socks5AuthSetter *socks5AuthAdapter,
 	recordScope *flow.RecordScope,
@@ -515,7 +540,7 @@ func buildMCPComponents(
 			issuer,
 			cfg.DBPath,
 			rateLimiter,
-			nil, // budget manager — defaulted inside NewServer.
+			budgetManager,
 		),
 		pipeline: mcp.NewPipeline(
 			httpInterceptEngine,

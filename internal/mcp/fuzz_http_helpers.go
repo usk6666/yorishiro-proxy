@@ -44,6 +44,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
+	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/http1"
 	"github.com/usk6666/yorishiro-proxy/internal/pipeline"
 	"github.com/usk6666/yorishiro-proxy/internal/session"
@@ -298,6 +299,11 @@ func buildFuzzHTTPEncoderRegistry() *pipeline.WireEncoderRegistry {
 // resend_http per RFC §9.3 D1.
 func (s *Server) buildFuzzHTTPPipeline(encoders *pipeline.WireEncoderRegistry) *pipeline.Pipeline {
 	steps := []pipeline.Step{
+		// USK-818: BudgetStep at position #1 — each fuzz variant Send
+		// counts toward the budget; over-budget variants short-circuit
+		// before dial. The inline drop recorder in
+		// runFuzzHTTPSingleExchange writes the audit Stream.
+		pipeline.NewBudgetStep(s.misc.budgetManager),
 		pipeline.NewPluginStepPost(pluginEngineForResend(s), encoders, slog.Default()),
 		pipeline.NewRecordStep(s.flowStore.store, slog.Default(), pipeline.WithWireEncoderRegistry(encoders)),
 	}
@@ -349,7 +355,7 @@ func (s *Server) runFuzzHTTPSingleVariant(ctx context.Context, plan *fuzzHTTPPla
 	rtCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	respEnv, err := runFuzzHTTPSingleExchange(rtCtx, variantEnv, dial, p)
+	respEnv, err := s.runFuzzHTTPSingleExchange(rtCtx, variantEnv, dial, p)
 	if err != nil {
 		return row, 0, err
 	}
@@ -369,10 +375,14 @@ func (s *Server) runFuzzHTTPSingleVariant(ctx context.Context, plan *fuzzHTTPPla
 // runFuzzHTTPSingleExchange runs one variant's send/receive cycle and
 // returns the response envelope. Mirrors runResendHTTP but takes the
 // already-cloned send envelope and uses the per-variant pipeline.
-func runFuzzHTTPSingleExchange(ctx context.Context, sendEnv *envelope.Envelope, dial session.DialFunc, p *pipeline.Pipeline) (*envelope.Envelope, error) {
-	postSend, action, custom := p.Run(ctx, sendEnv)
+func (s *Server) runFuzzHTTPSingleExchange(ctx context.Context, sendEnv *envelope.Envelope, dial session.DialFunc, p *pipeline.Pipeline) (*envelope.Envelope, error) {
+	postSend, action, custom, blockedBy := p.RunWithBlockedBy(ctx, sendEnv)
 	switch action {
 	case pipeline.Drop:
+		if blockedBy == pipeline.BlockedByBudget {
+			recordBudgetBlockedStream(ctx, s.flowStore.store, postSend, sendEnv.StreamID, flow.OriginFuzz)
+			return nil, errBudgetExhausted
+		}
 		return nil, errors.New("send envelope dropped by pipeline")
 	case pipeline.Respond:
 		if custom == nil {

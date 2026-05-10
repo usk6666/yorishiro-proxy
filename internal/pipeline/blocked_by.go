@@ -36,4 +36,12 @@ const (
 	// Pipeline Step emits it today. The session-side recorder accepts
 	// the label so future Issues only need to add the Step.
 	BlockedByRateLimit = "rate_limit"
+
+	// BlockedByBudget attributes a Drop to a BudgetManager exhaustion
+	// (MaxTotalRequests or MaxDuration). Emitted by BudgetStep on
+	// Send-direction envelopes when the underlying
+	// connector.BudgetManager.RecordRequest reports the request as
+	// over-budget. The audit Stream lets operators see exactly which
+	// request tripped the limit (USK-818).
+	BlockedByBudget = "budget"
 )

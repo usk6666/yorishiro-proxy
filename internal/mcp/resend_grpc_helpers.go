@@ -539,6 +539,11 @@ func buildResendGRPCEncoderRegistry() *pipeline.WireEncoderRegistry {
 // before the envelope reaches the pipeline.
 func (s *Server) buildResendGRPCPipeline(encoders *pipeline.WireEncoderRegistry) *pipeline.Pipeline {
 	steps := []pipeline.Step{
+		// USK-818: BudgetStep at position #1 — only the GRPCStartMessage
+		// Send counts (BudgetStep filters mid-stream Data/End). On Drop
+		// runResendGRPC writes a state="error" + blocked_by="budget"
+		// audit Stream.
+		pipeline.NewBudgetStep(s.misc.budgetManager),
 		pipeline.NewPluginStepPost(pluginEngineForResend(s), encoders, slog.Default()),
 		pipeline.NewRecordStep(
 			s.flowStore.store,
@@ -569,9 +574,17 @@ func (s *Server) runResendGRPC(ctx context.Context, plan *resendGRPCPlan, p *pip
 	}
 
 	startEnv := buildResendGRPCStartEnvelope(plan)
-	postStart, action, custom := p.Run(ctx, startEnv)
+	// USK-818: pin StreamID before pipe.Run so the budget audit Stream
+	// (recorded inside recordBudgetBlockedStream on Drop) lines up with
+	// the streamID the rest of the resend run would have used.
+	startEnv.StreamID = plan.streamID
+	postStart, action, custom, blockedBy := p.RunWithBlockedBy(ctx, startEnv)
 	switch action {
 	case pipeline.Drop:
+		if blockedBy == pipeline.BlockedByBudget {
+			recordBudgetBlockedStream(ctx, s.flowStore.store, postStart, plan.streamID, flow.OriginResend)
+			return nil, nil, nil, errBudgetExhausted
+		}
 		return nil, nil, nil, errors.New("send envelope dropped by pipeline")
 	case pipeline.Respond:
 		if custom == nil {

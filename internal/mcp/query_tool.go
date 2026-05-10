@@ -141,7 +141,7 @@ var validFilterHTTPVersions = []string{"http/1.0", "http/1.1", "h2", "h2c"}
 var validFilterStates = []string{"active", "complete", "error"}
 
 // validFilterBlockedBy lists valid values for filter.blocked_by.
-var validFilterBlockedBy = []string{"target_scope", "intercept_drop", "rate_limit", "safety_filter", "enabled_protocols"}
+var validFilterBlockedBy = []string{"target_scope", "intercept_drop", "rate_limit", "safety_filter", "enabled_protocols", "budget"}
 
 // validFilterOrigins lists valid values for filter.origin (USK-786).
 // Mirrors flow.Origin constants; "fuzz" is reserved for forward compatibility.

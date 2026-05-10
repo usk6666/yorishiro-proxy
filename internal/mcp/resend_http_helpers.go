@@ -366,6 +366,13 @@ func (s *Server) buildResendHTTPPipeline() *pipeline.Pipeline {
 	encoders.Register(envelope.ProtocolHTTP, http1.EncodeWireBytes)
 
 	steps := []pipeline.Step{
+		// USK-818: BudgetStep at position #1 so resend dispatches are
+		// counted toward and gated by the same MaxTotalRequests /
+		// MaxDuration policy as the live data path. Drop short-circuits
+		// the rest of the pipeline; the inline drop recorder in
+		// runResendHTTP writes a state="error" + blocked_by="budget"
+		// audit Stream.
+		pipeline.NewBudgetStep(s.misc.budgetManager),
 		pipeline.NewPluginStepPost(pluginEngineForResend(s), encoders, slog.Default()),
 		pipeline.NewRecordStep(
 			s.flowStore.store,
@@ -454,14 +461,25 @@ func upgradeResendTLS(ctx context.Context, transport httputilpkg.TLSTransport, c
 // If the pipeline drops or responds short-circuits the send, runResendHTTP
 // returns the produced response envelope (or nil for Drop) without
 // performing the network round-trip.
-func runResendHTTP(ctx context.Context, env *envelope.Envelope, dial session.DialFunc, p *pipeline.Pipeline) (*envelope.Envelope, error) {
+//
+// USK-818: send-direction Drops with BlockedBy="budget" trigger a
+// minimal state="error" + blocked_by="budget" audit Stream via the
+// supplied store. Other Drop attributions (or Drop with empty BlockedBy)
+// fall through to the legacy "dropped by pipeline" error without
+// recording an audit row — matches the live data path's selective
+// recording policy.
+func (s *Server) runResendHTTP(ctx context.Context, env *envelope.Envelope, dial session.DialFunc, p *pipeline.Pipeline) (*envelope.Envelope, error) {
 	if p == nil {
 		return nil, errors.New("resend pipeline is nil")
 	}
 
-	sendEnv, action, custom := p.Run(ctx, env)
+	sendEnv, action, custom, blockedBy := p.RunWithBlockedBy(ctx, env)
 	switch action {
 	case pipeline.Drop:
+		if blockedBy == pipeline.BlockedByBudget {
+			recordBudgetBlockedStream(ctx, s.flowStore.store, sendEnv, sendEnv.StreamID, flow.OriginResend)
+			return nil, errBudgetExhausted
+		}
 		return nil, errors.New("send envelope dropped by pipeline")
 	case pipeline.Respond:
 		// Custom response short-circuit. Tie the response to the send's

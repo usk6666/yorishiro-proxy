@@ -95,6 +95,16 @@ type Deps struct {
 	// and SOCKS5 negotiations. nil = unlimited.
 	RateLimiter *connector.RateLimiter
 
+	// BudgetManager enforces the diagnostic-session budget
+	// (MaxTotalRequests / MaxDuration) on every Send envelope flowing
+	// through the live data path's Pipeline. nil = no budget enforcement
+	// (BudgetStep no-ops). Wired by the MCP control plane (mcpserver)
+	// so the same instance is shared with the security-tool reads and
+	// the resend/fuzz dispatch helpers; runtime mutations via
+	// `security set_budget` therefore reach the live Pipeline without
+	// rebuilding the Stack (USK-818).
+	BudgetManager *connector.BudgetManager
+
 	// PassthroughList lists hosts whose TLS traffic is relayed without
 	// MITM (bidirectional io.Copy). nil = no passthrough.
 	PassthroughList *connector.PassthroughList
@@ -456,6 +466,13 @@ func buildPipeline(deps Deps, encoders *pipeline.WireEncoderRegistry, logger *sl
 	return pipeline.New(
 		pipeline.NewHostScopeStep(deps.Scope),
 		pipeline.NewHTTPScopeStep(deps.Scope),
+		// USK-818: BudgetStep at position #3 — after the scope checks
+		// (those are operator-policy denials, not chargeable) and
+		// before SafetyStep / Intercept / Transform / PluginPost / Record
+		// (so over-budget envelopes short-circuit the expensive Steps
+		// and the audit Stream is recorded by the session
+		// OnPipelineDrop callback).
+		pipeline.NewBudgetStep(deps.BudgetManager),
 		safetyStep,
 		pipeline.NewPluginStepPre(deps.PluginV2Engine, encoders, logger),
 		// safetyStep is shared with InterceptStep so a modify_and_forward

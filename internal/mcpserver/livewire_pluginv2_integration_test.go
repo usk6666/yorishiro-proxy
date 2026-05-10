@@ -136,6 +136,7 @@ func setupLiveProxy(t *testing.T, pluginName, pluginScript string) *liveProxy {
 		(*connector.PassthroughList)(nil),
 		(*connector.TargetScope)(nil),
 		(*connector.RateLimiter)(nil),
+		(*connector.BudgetManager)(nil),
 		(*safety.Engine)(nil),
 		PerProtocolSafetyEngines{},
 		buildCfg, (*connector.SOCKS5Negotiator)(nil),

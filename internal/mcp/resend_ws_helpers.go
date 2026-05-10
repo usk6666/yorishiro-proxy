@@ -496,6 +496,15 @@ func (s *Server) buildResendWSEnvelope(plan *resendWSPlan) (*pipeline.WireEncode
 // before the envelope reaches the pipeline.
 func (s *Server) buildResendWSPipeline(encoders *pipeline.WireEncoderRegistry) *pipeline.Pipeline {
 	steps := []pipeline.Step{
+		// USK-818: BudgetStep at position #1. The resend_ws synthetic
+		// Send envelope is a WSMessage, which BudgetStep filters out as
+		// "post-Upgrade" — so the budget counter ONLY increments for
+		// the implicit Upgrade Send recorded by performResendWSUpgrade
+		// via the dedicated http1 Channel. Calling RunWithBlockedBy
+		// here is still the right shape for symmetry with the other
+		// dispatch paths and to make a future "WS open Upgrade through
+		// the resend pipeline" change side-effect-free.
+		pipeline.NewBudgetStep(s.misc.budgetManager),
 		pipeline.NewPluginStepPost(pluginEngineForResend(s), encoders, slog.Default()),
 		pipeline.NewRecordStep(
 			s.flowStore.store,
@@ -651,6 +660,15 @@ func lookupKVHeader(headers []envelope.KeyValue, name string) string {
 func (s *Server) runResendWS(ctx context.Context, plan *resendWSPlan, sendEnv *envelope.Envelope, p *pipeline.Pipeline) (*envelope.Envelope, error) {
 	if p == nil {
 		return nil, errors.New("resend pipeline is nil")
+	}
+
+	// USK-818: explicit budget check. The synthetic WSMessage envelope
+	// passed through the pipeline is filtered by BudgetStep (treated as
+	// post-Upgrade), but the user-facing resend_ws invocation should
+	// count as one request. Check before the upstream dial so an
+	// over-budget call short-circuits without performing the Upgrade.
+	if err := s.budgetCheckResendUpgrade(ctx, sendEnv, sendEnv.StreamID, flow.OriginResend); err != nil {
+		return nil, err
 	}
 
 	postSendEnv, short, err := runResendWSPreSend(ctx, sendEnv, p)

@@ -423,6 +423,7 @@ func assembleLiveManager(
 	passthrough *connector.PassthroughList,
 	targetScope *connector.TargetScope,
 	rateLimiter *connector.RateLimiter,
+	budgetManager *connector.BudgetManager,
 	safetyEngine *safety.Engine,
 	perProtoSafety PerProtocolSafetyEngines,
 	hostTLSRegistry *transport.HostTLSRegistry,
@@ -433,7 +434,7 @@ func assembleLiveManager(
 	buildCfg := NewLiveBuildConfig(appCtx, cfg, proxyCfg, issuer, pluginv2Engine, store, hostTLSRegistry, logger)
 	return NewLiveManager(cfg, proxyCfg, store, issuer, pluginv2Engine,
 		holdQueue, httpInterceptEngine, wsInterceptEngine, grpcInterceptEngine,
-		httpTransformEngine, passthrough, targetScope, rateLimiter, safetyEngine, perProtoSafety, buildCfg,
+		httpTransformEngine, passthrough, targetScope, rateLimiter, budgetManager, safetyEngine, perProtoSafety, buildCfg,
 		socks5Negotiator, recordScope, logger)
 }
 
@@ -525,6 +526,7 @@ func NewLiveManager(
 	passthrough *connector.PassthroughList,
 	targetScope *connector.TargetScope,
 	rateLimiter *connector.RateLimiter,
+	budgetManager *connector.BudgetManager,
 	safetyEngine *safety.Engine,
 	perProtoSafety PerProtocolSafetyEngines,
 	buildCfg *connector.BuildConfig,
@@ -560,6 +562,7 @@ func NewLiveManager(
 			PassthroughList:     passthrough,
 			Scope:               targetScope,
 			RateLimiter:         rateLimiter,
+			BudgetManager:       budgetManager,
 			SOCKS5Negotiator:    socks5Negotiator,
 			RecordScope:         recordScope,
 			// USK-802: per-Stream record caps surface via BuildConfig so a

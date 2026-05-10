@@ -265,6 +265,11 @@ func buildResendRawEncoderRegistry() *pipeline.WireEncoderRegistry {
 // before the envelope reaches the pipeline.
 func (s *Server) buildResendRawPipeline(encoders *pipeline.WireEncoderRegistry) *pipeline.Pipeline {
 	steps := []pipeline.Step{
+		// USK-818: BudgetStep at position #1. RawMessage Sends count
+		// (no skip in BudgetStep's request-boundary filter). On Drop
+		// runResendRaw writes a state="error" + blocked_by="budget"
+		// audit Stream.
+		pipeline.NewBudgetStep(s.misc.budgetManager),
 		pipeline.NewPluginStepPost(pluginEngineForResend(s), encoders, slog.Default()),
 		pipeline.NewRecordStep(
 			s.flowStore.store,
@@ -341,9 +346,13 @@ func (s *Server) runResendRaw(ctx context.Context, plan *resendRawPlan, p *pipel
 	}
 
 	sendEnv := buildResendRawSendEnvelope(plan)
-	postSend, action, custom := p.Run(ctx, sendEnv)
+	postSend, action, custom, blockedBy := p.RunWithBlockedBy(ctx, sendEnv)
 	switch action {
 	case pipeline.Drop:
+		if blockedBy == pipeline.BlockedByBudget {
+			recordBudgetBlockedStream(ctx, s.flowStore.store, postSend, sendEnv.StreamID, flow.OriginResend)
+			return nil, 0, false, errBudgetExhausted
+		}
 		return nil, 0, false, errors.New("send envelope dropped by pipeline")
 	case pipeline.Respond:
 		if custom == nil {
