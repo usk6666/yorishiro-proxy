@@ -112,6 +112,13 @@ func TestALPNFilter_RespectsEnabledProtocols(t *testing.T) {
 // advertise only http/1.1, even though a previous h2 connection may
 // have warmed a pool entry. Covers buildPoolHitFastPath's interaction
 // with the runtime ALPN filter.
+//
+// USK-813: also asserts that the per-CONNECT client MITM handshake
+// count is exactly 1 after the flip — the short-circuit in
+// buildPoolHitFastPath must release the pool reservation BEFORE doing
+// the handshake. The pre-USK-813 shape of the code completed the
+// handshake just to fall back via the post-handshake clientALPN check,
+// yielding a count of 2 per CONNECT.
 func TestALPNFilter_RuntimeFlipDowngrades(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -136,8 +143,11 @@ func TestALPNFilter_RuntimeFlipDowngrades(t *testing.T) {
 	}
 	t1.Close()
 
-	// Phase 2: flip the filter to exclude h2.
+	// Phase 2: flip the filter to exclude h2 and snapshot the handshake
+	// counter so we can assert exactly one MITM handshake happens for the
+	// next CONNECT.
 	buildCfg.SetEnabledProtocols([]string{"HTTP/1.x", "HTTPS"})
+	buildCfg.ResetClientMITMHandshakeCount()
 
 	// New connection must downgrade.
 	wg.Add(1)
@@ -146,6 +156,17 @@ func TestALPNFilter_RuntimeFlipDowngrades(t *testing.T) {
 	if got := t2.ConnectionState().NegotiatedProtocol; got != "http/1.1" {
 		t.Errorf("phase 2 NegotiatedProtocol = %q, want %q (runtime filter flip did not propagate)",
 			got, "http/1.1")
+	}
+
+	// USK-813: the post-flip CONNECT must perform exactly one client MITM
+	// handshake. The pool fast path (if it was warmed in phase 1) must
+	// short-circuit BEFORE performClientMITM rather than after. A count
+	// of 2 here indicates the regression has returned. A count of 1
+	// covers both the "no pool entry" case (cache-miss path runs the
+	// handshake once) and the "pool entry declined" case (short-circuit
+	// fires, then cache-miss path runs the handshake once).
+	if got := buildCfg.ClientMITMHandshakeCount(); got != 1 {
+		t.Errorf("phase 2 ClientMITMHandshakeCount = %d, want 1 (USK-813: fast path should short-circuit before the wasted handshake)", got)
 	}
 }
 

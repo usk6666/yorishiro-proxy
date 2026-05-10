@@ -3,10 +3,12 @@ package connector
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
 	"net/url"
+	"slices"
 	"sync/atomic"
 
 	"github.com/google/uuid"
@@ -22,6 +24,20 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/layer/tlslayer"
 	"github.com/usk6666/yorishiro-proxy/internal/pluginv2"
 )
+
+// errPoolFastPathDeclined is the sentinel returned by buildPoolHitFastPath
+// when it declines to use the cached h2 Layer before performing the client
+// MITM handshake (USK-813). The pool reservation has already been released
+// (via Pool.Put) by the time this error surfaces, and the caller is
+// expected to fall through to the standard ALPN-cache / dial flow which
+// applies the EnabledProtocols filter on its own.
+//
+// The fast path declines when the operator's enabled-protocols allow-list
+// excludes h2 — completing the MITM handshake just to fall back via the
+// post-handshake clientALPN check (lines 795-808) wastes a full TLS
+// handshake every time a pool entry warmed during an h2-enabled phase
+// survives an operator flip to "h2 disabled".
+var errPoolFastPathDeclined = errors.New("connector: pool fast-path declined")
 
 // BuildConfig holds configuration for BuildConnectionStack.
 type BuildConfig struct {
@@ -248,6 +264,13 @@ type BuildConfig struct {
 	// (upstream / ClientRole) Layer continues to honour the peer's
 	// advertised limit.
 	MaxConcurrentStreams uint32
+
+	// clientMITMHandshakes counts entries to performClientMITM (USK-813).
+	// Used by e2e tests to verify that the pool fast-path short-circuits
+	// before the wasted client TLS handshake when h2 is disabled at
+	// runtime; production paths do not branch on this value. Read via
+	// ClientMITMHandshakeCount; reset via ResetClientMITMHandshakeCount.
+	clientMITMHandshakes atomic.Uint64
 }
 
 // EffectiveUpstreamProxy returns the upstream proxy URL the live data path
@@ -361,6 +384,29 @@ func (c *BuildConfig) EffectiveEnabledProtocols() []string {
 	out := make([]string, len(*p))
 	copy(out, *p)
 	return out
+}
+
+// ClientMITMHandshakeCount returns the cumulative number of times the
+// client-side MITM TLS handshake (performClientMITM) has been entered for
+// this BuildConfig. It is a test-only observability hook (USK-813) used
+// by e2e tests to verify that the pool fast-path short-circuit avoids a
+// wasted handshake when h2 is disabled at runtime; production code paths
+// do not branch on this value.
+func (c *BuildConfig) ClientMITMHandshakeCount() uint64 {
+	if c == nil {
+		return 0
+	}
+	return c.clientMITMHandshakes.Load()
+}
+
+// ResetClientMITMHandshakeCount resets the test-only client MITM
+// handshake counter to zero (USK-813). Tests use this to snapshot a
+// baseline between phases of a multi-phase scenario.
+func (c *BuildConfig) ResetClientMITMHandshakeCount() {
+	if c == nil {
+		return
+	}
+	c.clientMITMHandshakes.Store(0)
 }
 
 // BuildConnectionStack constructs a ConnectionStack for the given CONNECT
@@ -556,7 +602,18 @@ func buildALPNRoutedStack(
 	if cfg.HTTP2Pool != nil {
 		poolKey := poolKeyForH2(target, cfg, hostTLS)
 		if pooled, perr := cfg.HTTP2Pool.Get(poolKey); perr == nil && pooled != nil {
-			return buildPoolHitFastPath(ctx, clientConn, target, host, connID, pooled, poolKey, cfg)
+			stack, cs, us, ferr := buildPoolHitFastPath(ctx, clientConn, target, host, connID, pooled, poolKey, cfg)
+			if ferr == nil {
+				return stack, cs, us, nil
+			}
+			// USK-813: errPoolFastPathDeclined means the fast path released
+			// its reservation before the client handshake (e.g. h2 is
+			// disabled at runtime). Fall through to the standard ALPN-cache
+			// / dial flow below so the offers go through the EnabledProtocols
+			// filter without paying for a wasted handshake first.
+			if !errors.Is(ferr, errPoolFastPathDeclined) {
+				return nil, nil, nil, ferr
+			}
 		}
 	}
 
@@ -830,6 +887,26 @@ func buildPoolHitFastPath(
 	// fallbackPoolHitToFreshDial, and the pool entry is released for the
 	// next h2-capable caller (or for after the operator re-enables h2).
 	clientOffers := clientALPNOffersForUpstream(ALPNProtocolH2, cfg.EffectiveEnabledProtocols())
+
+	// USK-813: short-circuit before the wasted client TLS handshake when
+	// the operator's enabled-protocols filter excludes h2. Completing the
+	// handshake here only to fall back via the post-handshake
+	// clientALPN != ALPNProtocolH2 check below pays a full TLS round-trip
+	// for nothing — every request that lands on a stale pool entry while
+	// h2 is disabled would otherwise re-incur that cost. Release the pool
+	// reservation (Put, not Evict — the cached Layer is still healthy and
+	// may serve a future h2-capable peer or post-re-enable client) and
+	// return a sentinel so the caller falls through to the standard
+	// ALPN-cache flow, which already filters offers correctly via
+	// clientALPNOffersForUpstream at lines 593, 701.
+	if !slices.Contains(clientOffers, ALPNProtocolH2) {
+		cfg.HTTP2Pool.Put(poolKey, pooled)
+		slog.Debug("connector: h2 disabled at runtime; declining pool fast-path",
+			"target", target, "conn_id", connID,
+		)
+		return nil, nil, nil, errPoolFastPathDeclined
+	}
+
 	clientTLSConn, clientSnap, err := performClientMITM(ctx, clientConn, host, clientOffers, cfg)
 	if err != nil {
 		// Release the pool reservation — Layer is healthy, we just didn't
@@ -969,6 +1046,13 @@ func performClientMITM(
 	alpnOffers []string,
 	cfg *BuildConfig,
 ) (net.Conn, *envelope.TLSSnapshot, error) {
+	// USK-813: count entries for the test-only ClientMITMHandshakeCount
+	// observability hook. Counter increments on every entry — even on
+	// failure paths — so tests can verify the call path was actually
+	// reached.
+	if cfg != nil {
+		cfg.clientMITMHandshakes.Add(1)
+	}
 	// Pre-warm the cert cache so a missing/invalid CA surfaces as a clear
 	// "MITM cert for <host>" error rather than failing later inside the
 	// handshake's GetCertificate callback (USK-795).
