@@ -87,16 +87,56 @@ func TestResolveSSEMaxEventSize(t *testing.T) {
 	}
 }
 
+func TestResolveGRPCMaxMessagesPerStream(t *testing.T) {
+	tests := []struct {
+		name string
+		in   *GRPCLimits
+		want int
+	}{
+		{name: "nil substruct → default", in: nil, want: MaxGRPCMessagesPerStream},
+		{name: "zero → default", in: &GRPCLimits{MaxMessagesPerStream: 0}, want: MaxGRPCMessagesPerStream},
+		{name: "positive → input", in: &GRPCLimits{MaxMessagesPerStream: 7}, want: 7},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ResolveGRPCMaxMessagesPerStream(tt.in); got != tt.want {
+				t.Errorf("ResolveGRPCMaxMessagesPerStream(%+v) = %d, want %d", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestResolveSSEMaxEventsPerStream(t *testing.T) {
+	tests := []struct {
+		name string
+		in   *SSELimits
+		want int
+	}{
+		{name: "nil substruct → default", in: nil, want: MaxSSEEventsPerStream},
+		{name: "zero → default", in: &SSELimits{MaxEventsPerStream: 0}, want: MaxSSEEventsPerStream},
+		{name: "positive → input", in: &SSELimits{MaxEventsPerStream: 11}, want: 11},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ResolveSSEMaxEventsPerStream(tt.in); got != tt.want {
+				t.Errorf("ResolveSSEMaxEventsPerStream(%+v) = %d, want %d", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestValidateProtocolLimits(t *testing.T) {
 	zero := int64(0)
 	posWS := &WebSocketLimits{MaxFrameSize: 1024}
 	zeroWS := &WebSocketLimits{MaxFrameSize: zero}
 	negWS := &WebSocketLimits{MaxFrameSize: -1}
-	posGRPC := &GRPCLimits{MaxMessageSize: 4096}
+	posGRPC := &GRPCLimits{MaxMessageSize: 4096, MaxMessagesPerStream: 50}
 	zeroGRPC := &GRPCLimits{}
-	posSSE := &SSELimits{MaxEventSize: 2048}
+	negCountGRPC := &GRPCLimits{MaxMessagesPerStream: -1}
+	posSSE := &SSELimits{MaxEventSize: 2048, MaxEventsPerStream: 50}
 	zeroSSE := &SSELimits{}
 	negSSE := &SSELimits{MaxEventSize: -1}
+	negCountSSE := &SSELimits{MaxEventsPerStream: -1}
 
 	tests := []struct {
 		name    string
@@ -110,6 +150,8 @@ func TestValidateProtocolLimits(t *testing.T) {
 		{name: "all positive OK", ws: posWS, grpc: posGRPC, sse: posSSE},
 		{name: "negative ws frame size rejected", ws: negWS, wantErr: "web_socket.max_frame_size"},
 		{name: "negative sse event size rejected", sse: negSSE, wantErr: "sse.max_event_size"},
+		{name: "negative grpc max_messages_per_stream rejected", grpc: negCountGRPC, wantErr: "grpc.max_messages_per_stream"},
+		{name: "negative sse max_events_per_stream rejected", sse: negCountSSE, wantErr: "sse.max_events_per_stream"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -142,8 +184,8 @@ func TestLoadFile_NewProtocolLimitsFields(t *testing.T) {
 	body := `{
   "listen_addr": "127.0.0.1:9999",
   "web_socket": {"max_frame_size": 8192, "deflate_enabled": true},
-  "grpc": {"max_message_size": 1048576},
-  "sse": {"max_event_size": 16384}
+  "grpc": {"max_message_size": 1048576, "max_messages_per_stream": 25},
+  "sse": {"max_event_size": 16384, "max_events_per_stream": 30}
 }`
 	if err := os.WriteFile(path, []byte(body), 0600); err != nil {
 		t.Fatal(err)
@@ -164,8 +206,14 @@ func TestLoadFile_NewProtocolLimitsFields(t *testing.T) {
 	if cfg.GRPC == nil || cfg.GRPC.MaxMessageSize != 1048576 {
 		t.Errorf("GRPC.MaxMessageSize = %v, want 1048576", cfg.GRPC)
 	}
+	if cfg.GRPC == nil || cfg.GRPC.MaxMessagesPerStream != 25 {
+		t.Errorf("GRPC.MaxMessagesPerStream = %v, want 25", cfg.GRPC)
+	}
 	if cfg.SSE == nil || cfg.SSE.MaxEventSize != 16384 {
 		t.Errorf("SSE.MaxEventSize = %v, want 16384", cfg.SSE)
+	}
+	if cfg.SSE == nil || cfg.SSE.MaxEventsPerStream != 30 {
+		t.Errorf("SSE.MaxEventsPerStream = %v, want 30", cfg.SSE)
 	}
 }
 
@@ -204,6 +252,12 @@ func TestLoadFile_NoNewFields_BackwardCompat(t *testing.T) {
 	}
 	if got := ResolveSSEMaxEventSize(cfg.SSE); got != MaxSSEEventSize {
 		t.Errorf("ResolveSSEMaxEventSize = %d, want default %d", got, MaxSSEEventSize)
+	}
+	if got := ResolveGRPCMaxMessagesPerStream(cfg.GRPC); got != MaxGRPCMessagesPerStream {
+		t.Errorf("ResolveGRPCMaxMessagesPerStream = %d, want default %d", got, MaxGRPCMessagesPerStream)
+	}
+	if got := ResolveSSEMaxEventsPerStream(cfg.SSE); got != MaxSSEEventsPerStream {
+		t.Errorf("ResolveSSEMaxEventsPerStream = %d, want default %d", got, MaxSSEEventsPerStream)
 	}
 }
 

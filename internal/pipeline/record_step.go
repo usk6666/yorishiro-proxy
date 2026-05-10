@@ -26,6 +26,21 @@ import (
 // any realistic concurrent-stream load. See WithRecordScope.
 const defaultRecordCacheCapacity = 10000
 
+// defaultCountCacheCapacity bounds RecordStep's per-Stream record-count
+// cache used for the gRPC / SSE per-stream record caps (USK-802). It mirrors
+// defaultRecordCacheCapacity for symmetry — both caches are LRU-bounded to
+// the same magnitude so memory is bounded under realistic concurrent-stream
+// load. On eviction, a subsequent envelope on the evicted Stream restarts
+// the count from zero (acknowledged trade-off; see countCache.put).
+const defaultCountCacheCapacity = 10000
+
+// recordsTruncatedReason is the canonical AppendTags value the RecordStep
+// stamps on a Stream the first time its per-protocol record cap is reached.
+// MCP query consumers (and the WebUI) read this tag to surface a "records
+// truncated" badge on streams whose Flow row count is bounded by the cap
+// rather than by the actual envelope count on the wire.
+const recordsTruncatedReason = "per_stream_cap_reached"
+
 // WireEncoder re-encodes an Envelope's post-mutation Message into wire-form
 // bytes. It is used by RecordStep when recording the "modified" variant of
 // an intercepted envelope: env.Raw captures the ingress wire bytes and must
@@ -106,6 +121,23 @@ type RecordStep struct {
 	// OriginFuzz is reserved as an enum value but is not yet stamped from
 	// any production code path.
 	origin flow.Origin
+
+	// USK-802 per-Stream record caps. grpcMaxPerStream gates
+	// *envelope.GRPCDataMessage envelopes; sseMaxPerStream gates
+	// *envelope.SSEMessage envelopes. Zero (the zero value of the field
+	// when no Option is applied) means "unlimited" — RecordStep records
+	// every envelope. The proxy_start MCP path resolves to the package
+	// default (config.MaxGRPCMessagesPerStream / config.MaxSSEEventsPerStream)
+	// before reaching this Step, so production traffic always observes a
+	// positive cap; the zero meaning is reserved for synthetic test stacks
+	// that explicitly opt out.
+	grpcMaxPerStream int
+	sseMaxPerStream  int
+	// countCache is the per-StreamID record-count LRU. Allocated lazily on
+	// first per-stream gating need (i.e. when either cap Option resolves to
+	// a positive value). Concurrent access is bound by countCache.mu — see
+	// recordCountCache for the contract.
+	countCache *recordCountCache
 }
 
 // Option configures a RecordStep.
@@ -196,6 +228,54 @@ func WithOrigin(origin flow.Origin) Option {
 	}
 }
 
+// WithGRPCMaxMessagesPerStream caps the number of *envelope.GRPCDataMessage
+// envelopes RecordStep persists per Stream (USK-802). Once the cap is
+// reached, further GRPCDataMessage envelopes pass through the Pipeline
+// untouched (the wire-forwarding path runs in
+// session.dispatchClientAction → upstream.Send unaffected) but are not
+// written to the flow store. GRPCStartMessage and GRPCEndMessage envelopes
+// are bounded ≤2 per Stream and always recorded.
+//
+// On the first cap-hit per Stream, RecordStep stamps
+// AppendTags["records_truncated"]=recordsTruncatedReason and emits a
+// single slog.Debug ("flow record dropped: per-stream cap reached") so the
+// truncation is operator-visible via the query MCP tool without flooding
+// the log on every subsequent over-cap envelope.
+//
+// Zero (or negative) means "unlimited" — the cap gate is bypassed entirely
+// for gRPC envelopes. This matches the zero-means-default convention used
+// by other RecordStep Options (e.g. WithMaxBodySize). The production wiring
+// in mcpserver/init.go always resolves to a positive default through
+// config.ResolveGRPCMaxMessagesPerStream, so the zero meaning only applies
+// to synthetic test constructions.
+func WithGRPCMaxMessagesPerStream(n int) Option {
+	return func(s *RecordStep) {
+		if n > 0 {
+			s.grpcMaxPerStream = n
+		}
+	}
+}
+
+// WithSSEMaxEventsPerStream caps the number of *envelope.SSEMessage
+// envelopes RecordStep persists per Stream (USK-802). Same wire-passthrough
+// contract as WithGRPCMaxMessagesPerStream — the SSE Channel TeeReader
+// continues to relay every event byte to the client; only the persisted
+// flow rows are bounded.
+//
+// The pre-event firstEnv (HTTP response shell, *envelope.HTTPMessage) does
+// NOT count toward the cap; only per-event SSEMessage envelopes are gated.
+// This keeps the operator's mental model "the cap counts events" intact.
+//
+// Zero (or negative) means "unlimited"; see WithGRPCMaxMessagesPerStream
+// for the rationale.
+func WithSSEMaxEventsPerStream(n int) Option {
+	return func(s *RecordStep) {
+		if n > 0 {
+			s.sseMaxPerStream = n
+		}
+	}
+}
+
 // NewRecordStep creates a RecordStep with the given flow.Writer.
 // If store is nil, Process returns immediately with no side effects.
 //
@@ -217,6 +297,12 @@ func NewRecordStep(store flow.Writer, logger *slog.Logger, opts ...Option) *Reco
 	// WithOrigin(flow.OriginResend).
 	if s.origin == "" {
 		s.origin = flow.OriginProxy
+	}
+	// USK-802: lazily allocate the per-Stream record-count LRU when at
+	// least one cap Option resolved to a positive value. Synthetic test
+	// stacks that omit both Options skip the allocation entirely.
+	if (s.grpcMaxPerStream > 0 || s.sseMaxPerStream > 0) && s.countCache == nil {
+		s.countCache = newRecordCountCache(defaultCountCacheCapacity)
 	}
 	return s
 }
@@ -269,6 +355,18 @@ func (s *RecordStep) Process(ctx context.Context, env *envelope.Envelope) Result
 		s.updateStreamTLS(ctx, env)
 	}
 
+	// USK-802: per-Stream record cap gate for streaming protocols
+	// (gRPC GRPCDataMessage / SSE SSEMessage). Wire forwarding has
+	// already happened by the time this Step runs in the Pipeline; the
+	// gate only suppresses the SaveFlow / variant-record persistence
+	// path. Other protocols and bounded gRPC Start/End envelopes pass
+	// through unchanged. Stream-level UpdateStream calls (TLS, retag)
+	// above are intentionally outside the gate so the Stream metadata
+	// stays consistent with the wire.
+	if !s.allowFlowRecord(ctx, env) {
+		return Result{}
+	}
+
 	// Record Flow for every Envelope (Send or Receive).
 	snap := SnapshotFromContext(ctx)
 	if snap != nil && envelopeModified(snap, env) {
@@ -278,6 +376,91 @@ func (s *RecordStep) Process(ctx context.Context, env *envelope.Envelope) Result
 	}
 
 	return Result{}
+}
+
+// allowFlowRecord reports whether env passes the per-Stream record cap
+// gate (USK-802). It returns true for any envelope outside the gated
+// protocols (gRPC data / SSE) and for envelopes whose StreamID is empty
+// (synthetic test stacks). For gated envelopes it consults the
+// per-StreamID record-count cache; the first envelope to push the count
+// past the cap stamps the Stream's tags via AppendTags["records_truncated"]
+// = recordsTruncatedReason and emits a single slog.Debug.
+//
+// Counting policy: the counter is incremented on every gated envelope
+// observation including those that get dropped, so the cap is a
+// "records persisted" budget — once N envelopes have been written, the
+// (N+1)th drops. This produces the cleaner invariant
+// "len(SaveFlow calls for protocol P, stream S) ≤ cap" than incrementing
+// only on persist (where a parallel reader could observe a partial state
+// where the count exceeds cap). The drop / latch decision derives from
+// the post-increment count, not the pre-increment count.
+func (s *RecordStep) allowFlowRecord(ctx context.Context, env *envelope.Envelope) bool {
+	cap := s.recordCapForEnvelope(env)
+	if cap <= 0 {
+		return true
+	}
+	streamID := env.StreamID
+	if streamID == "" {
+		// No stable cache key. Synthetic test stacks omit StreamID; do not
+		// gate (matches the shouldRecord fallback for the same case).
+		return true
+	}
+	if s.countCache == nil {
+		// Defensive: a positive cap implies countCache was allocated in
+		// NewRecordStep, but if a caller assembled a RecordStep through
+		// some other path we degrade to "do not gate" rather than crash.
+		return true
+	}
+	count, firstHit := s.countCache.bumpAndCheck(streamID, cap)
+	if count <= cap {
+		return true
+	}
+	if firstHit {
+		s.markStreamTruncated(ctx, env)
+	}
+	return false
+}
+
+// recordCapForEnvelope returns the active per-Stream record cap for env's
+// protocol/message combination, or 0 (= "do not gate") for envelopes that
+// fall outside the gated protocols. The decision is intentionally split on
+// the Message type rather than the Protocol alone so gRPC Start/End
+// envelopes (which are bounded ≤2 per Stream and always recorded) bypass
+// the gate cleanly.
+func (s *RecordStep) recordCapForEnvelope(env *envelope.Envelope) int {
+	if env == nil || env.Message == nil {
+		return 0
+	}
+	switch env.Message.(type) {
+	case *envelope.GRPCDataMessage:
+		return s.grpcMaxPerStream
+	case *envelope.SSEMessage:
+		return s.sseMaxPerStream
+	default:
+		return 0
+	}
+}
+
+// markStreamTruncated stamps the Stream's tags with the truncation reason
+// (operator visibility via the query MCP tool) and emits the one-shot
+// debug log. Both side-effects are gated upstream by countCache.firstHit
+// so a cap-saturated stream produces exactly one tag write and one log
+// line per process lifetime regardless of how many over-cap envelopes
+// arrive afterward.
+func (s *RecordStep) markStreamTruncated(ctx context.Context, env *envelope.Envelope) {
+	s.logger.DebugContext(ctx, "flow record dropped: per-stream cap reached",
+		"stream_id", env.StreamID,
+		"protocol", string(env.Protocol),
+		"cap", s.recordCapForEnvelope(env),
+	)
+	if err := s.store.UpdateStream(ctx, env.StreamID, flow.StreamUpdate{
+		AppendTags: map[string]string{"records_truncated": recordsTruncatedReason},
+	}); err != nil {
+		s.logger.Error("record step: truncated tag update failed",
+			"stream_id", env.StreamID,
+			"error", err,
+		)
+	}
 }
 
 // updateStreamTLS projects env.Context.TLS into Stream.ConnInfo via
@@ -1176,6 +1359,116 @@ func (c *recordDecisionCache) put(streamID string, record bool) {
 
 // len reports the current number of cached entries. Test-only helper.
 func (c *recordDecisionCache) len() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.lru.Len()
+}
+
+// recordCountCache is the per-StreamID record-count LRU used by RecordStep
+// to enforce the gRPC / SSE per-stream record caps (USK-802). It mirrors
+// recordDecisionCache's shape — bounded LRU keyed by StreamID, single mutex
+// per cache — so the two caches share an internal-quality bar even though
+// they store different value types.
+//
+// The "truncated" latch on each entry is a one-shot bool: the first
+// over-cap observation flips it true and the caller knows to perform the
+// AppendTags + slog.Debug side-effects exactly once per Stream. Subsequent
+// over-cap observations on the same Stream see truncated=true and skip
+// the side-effect path. Cache eviction resets the latch alongside the
+// counter (both are part of the discarded entry); a Stream that gets
+// re-discovered after eviction will re-stamp its tag, which is the
+// acknowledged trade-off for bounding cache memory.
+type recordCountCache struct {
+	mu       sync.Mutex
+	capacity int
+	items    map[string]*list.Element
+	lru      *list.List
+}
+
+// recordCountEntry is the value type stored in recordCountCache. count
+// tracks total observed gated envelopes for the Stream; truncated is the
+// one-shot latch that flips on the first over-cap observation.
+type recordCountEntry struct {
+	streamID  string
+	count     int
+	truncated bool
+}
+
+// newRecordCountCache returns a cache with the given fixed capacity.
+// Capacity zero or negative degenerates to defaultCountCacheCapacity so
+// the cache always has a sensible bound — RecordStep never exposes the
+// raw constructor.
+func newRecordCountCache(capacity int) *recordCountCache {
+	if capacity <= 0 {
+		capacity = defaultCountCacheCapacity
+	}
+	return &recordCountCache{
+		capacity: capacity,
+		items:    make(map[string]*list.Element, capacity),
+		lru:      list.New(),
+	}
+}
+
+// bumpAndCheck records one observed envelope for streamID and returns the
+// post-increment count plus a one-shot firstHit flag that is true exactly
+// when this call is the first to push the count past cap.
+//
+// The cap argument is taken per-call rather than stored on the entry
+// because the cache holds entries for both gRPC and SSE streams in the
+// same map and the two protocols may carry different caps. Caller is
+// responsible for routing the right cap.
+//
+// On first insertion at capacity the LRU evicts the least-recently-used
+// entry, which discards both its counter and its truncated latch. A
+// re-discovered Stream past eviction restarts at count=1; if it again
+// exceeds the cap the firstHit flag fires again. This produces a
+// duplicate AppendTags / slog.Debug pair under sustained churn above
+// defaultCountCacheCapacity concurrent gated streams. The trade-off is
+// preferred over an unbounded cache because the operator-observable
+// surface (AppendTags = "per_stream_cap_reached") is idempotent — the
+// second tag write rewrites the same value.
+func (c *recordCountCache) bumpAndCheck(streamID string, cap int) (count int, firstHit bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if e, ok := c.items[streamID]; ok {
+		entry := e.Value.(*recordCountEntry)
+		entry.count++
+		c.lru.MoveToFront(e)
+		// firstHit fires only on the transition from "within cap" to
+		// "over cap" — i.e. when count crosses cap+1 for the first time.
+		// Subsequent over-cap envelopes set the truncated latch and
+		// return firstHit=false so the caller's stamp/log fires once.
+		if !entry.truncated && entry.count > cap {
+			entry.truncated = true
+			return entry.count, true
+		}
+		return entry.count, false
+	}
+	entry := &recordCountEntry{streamID: streamID, count: 1}
+	if cap < 1 {
+		// Defensive: a 0/negative cap should be filtered upstream by
+		// recordCapForEnvelope, but if we somehow land here the entry
+		// records the observation and triggers firstHit immediately so
+		// the truncation tag still surfaces.
+		entry.truncated = true
+	}
+	e := c.lru.PushFront(entry)
+	c.items[streamID] = e
+	if c.lru.Len() > c.capacity {
+		oldest := c.lru.Back()
+		if oldest != nil {
+			c.lru.Remove(oldest)
+			delete(c.items, oldest.Value.(*recordCountEntry).streamID)
+		}
+	}
+	if entry.truncated {
+		return entry.count, true
+	}
+	return entry.count, false
+}
+
+// len reports the current number of cached entries. Test-only helper.
+func (c *recordCountCache) len() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.lru.Len()

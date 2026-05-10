@@ -66,13 +66,30 @@ const (
 	// MaxSSEEventsPerStream limits the number of SSE events recorded per
 	// stream. Once exceeded, events are still forwarded to the client but
 	// no longer recorded to the flow store. This prevents unbounded DB growth
-	// from very long-lived SSE streams.
-	MaxSSEEventsPerStream = 10000
+	// from very long-lived SSE streams (CWE-400 against the SQLite flow
+	// store).
+	//
+	// The default is intentionally larger than MaxGRPCMessagesPerStream
+	// because AI streaming token-event endpoints (e.g. OpenAI / Anthropic
+	// completion streams) routinely exceed 10000 events per stream while
+	// remaining a single logical interaction worth fully recording.
+	//
+	// Wired via internal/pipeline/RecordStep.WithSSEMaxEventsPerStream and
+	// connector.BuildConfig.SSEMaxEventsPerStream (USK-802).
+	MaxSSEEventsPerStream = 100000
 
-	// MaxGRPCMessagesPerStream limits the number of gRPC messages recorded
-	// per stream. Once exceeded, messages are still forwarded to the client
-	// but no longer recorded to the flow store. This prevents unbounded DB
-	// growth from very long-lived gRPC streams.
+	// MaxGRPCMessagesPerStream limits the number of gRPC GRPCDataMessage
+	// envelopes recorded per stream. Once exceeded, messages are still
+	// forwarded upstream / to the client but no longer recorded to the flow
+	// store. This prevents unbounded DB growth from very long-lived gRPC
+	// streams (CWE-400 against the SQLite flow store).
+	//
+	// GRPCStartMessage and GRPCEndMessage envelopes are bounded (≤2 per
+	// stream) and always recorded; only the per-data envelopes are gated by
+	// this cap.
+	//
+	// Wired via internal/pipeline/RecordStep.WithGRPCMaxMessagesPerStream and
+	// connector.BuildConfig.GRPCMaxMessagesPerStream (USK-802).
 	MaxGRPCMessagesPerStream = 10000
 
 	// MaxWebSocketFrameSize limits the maximum payload size of a single

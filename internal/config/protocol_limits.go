@@ -31,6 +31,15 @@ type GRPCLimits struct {
 	// trigger *layer.StreamError{Code: ErrorInternalError} and an
 	// RST_STREAM. Zero (or omitted) selects MaxGRPCMessageSize (254 MiB).
 	MaxMessageSize uint32 `json:"max_message_size,omitempty"`
+
+	// MaxMessagesPerStream caps the number of gRPC GRPCDataMessage envelopes
+	// recorded per stream. Once exceeded, messages are still forwarded
+	// upstream / to the client but no longer persisted to the flow store
+	// (CWE-400 against the SQLite flow store). Start/End envelopes are
+	// always recorded. Zero (or omitted) selects MaxGRPCMessagesPerStream
+	// (10000). The cap is enforced inside internal/pipeline/RecordStep
+	// (USK-802) — Channels are untouched so wire forwarding is preserved.
+	MaxMessagesPerStream int `json:"max_messages_per_stream,omitempty"`
 }
 
 // SSELimits holds runtime limits for the SSE Layer (internal/layer/sse).
@@ -40,6 +49,15 @@ type SSELimits struct {
 	// over the cap trigger *layer.StreamError. Zero (or omitted) selects
 	// MaxSSEEventSize (1 MiB).
 	MaxEventSize int `json:"max_event_size,omitempty"`
+
+	// MaxEventsPerStream caps the number of SSEMessage envelopes recorded
+	// per stream. Once exceeded, events are still forwarded to the client
+	// but no longer persisted to the flow store (CWE-400 against the SQLite
+	// flow store). Zero (or omitted) selects MaxSSEEventsPerStream
+	// (100000 — raised for AI streaming token-event use cases). The cap is
+	// enforced inside internal/pipeline/RecordStep (USK-802); Channels are
+	// untouched so the SSE TeeReader continues to relay every event byte.
+	MaxEventsPerStream int `json:"max_events_per_stream,omitempty"`
 }
 
 // ResolveWSMaxFrameSize returns ws.MaxFrameSize when positive, else the
@@ -79,6 +97,28 @@ func ResolveSSEMaxEventSize(s *SSELimits) int {
 	return MaxSSEEventSize
 }
 
+// ResolveGRPCMaxMessagesPerStream returns g.MaxMessagesPerStream when
+// positive, else the default MaxGRPCMessagesPerStream. The pipeline
+// RecordStep treats the resolved value as "0 = unlimited" only via the
+// explicit Option escape hatch; the proxy_start MCP tool path always
+// resolves to a positive default through this helper.
+func ResolveGRPCMaxMessagesPerStream(g *GRPCLimits) int {
+	if g != nil && g.MaxMessagesPerStream > 0 {
+		return g.MaxMessagesPerStream
+	}
+	return MaxGRPCMessagesPerStream
+}
+
+// ResolveSSEMaxEventsPerStream returns s.MaxEventsPerStream when positive,
+// else the default MaxSSEEventsPerStream. See
+// ResolveGRPCMaxMessagesPerStream for the "0 = default" convention.
+func ResolveSSEMaxEventsPerStream(s *SSELimits) int {
+	if s != nil && s.MaxEventsPerStream > 0 {
+		return s.MaxEventsPerStream
+	}
+	return MaxSSEEventsPerStream
+}
+
 // ValidateProtocolLimits validates the per-protocol limit substructs. It
 // rejects only negative values; zero means "use default" per project
 // convention (see DefaultBodySpillThreshold's resolver). Nil substructs
@@ -93,12 +133,20 @@ func ValidateProtocolLimits(ws *WebSocketLimits, grpc *GRPCLimits, sse *SSELimit
 		// also int64 (WithMaxFrameSize). No upper-bound check here — the
 		// CWE-400 cap is the operator's responsibility.
 	}
-	// grpc.MaxMessageSize is uint32 so it cannot be negative; nothing to
-	// reject syntactically. Resolve* applies the default for zero.
-	_ = grpc
+	// grpc.MaxMessageSize is uint32 so it cannot be negative; only the new
+	// MaxMessagesPerStream (int) needs a syntactic check. Resolve* applies
+	// the default for zero.
+	if grpc != nil {
+		if grpc.MaxMessagesPerStream < 0 {
+			return fmt.Errorf("grpc.max_messages_per_stream must be >= 0, got %d", grpc.MaxMessagesPerStream)
+		}
+	}
 	if sse != nil {
 		if sse.MaxEventSize < 0 {
 			return fmt.Errorf("sse.max_event_size must be >= 0, got %d", sse.MaxEventSize)
+		}
+		if sse.MaxEventsPerStream < 0 {
+			return fmt.Errorf("sse.max_events_per_stream must be >= 0, got %d", sse.MaxEventsPerStream)
 		}
 	}
 	return nil

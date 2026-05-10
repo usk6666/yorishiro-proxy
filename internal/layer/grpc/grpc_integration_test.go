@@ -430,6 +430,10 @@ type pipelineOpts struct {
 	transform *grpcrules.TransformEngine
 	safety    *grpcrules.SafetyEngine
 	queue     *common.HoldQueue
+	// recordOpts is the optional set of RecordStep Options layered on top
+	// of the e2e-suite defaults (USK-802 cap test wiring). Empty (nil) =
+	// no extra Options.
+	recordOpts []pipeline.Option
 }
 
 func buildPipeline(store flow.Writer, opts pipelineOpts) *pipeline.Pipeline {
@@ -439,7 +443,7 @@ func buildPipeline(store flow.Writer, opts pipelineOpts) *pipeline.Pipeline {
 		pipeline.NewSafetyStep(nil, nil, opts.safety, slog.Default()),
 		pipeline.NewTransformStep(nil, nil, opts.transform),
 		pipeline.NewInterceptStep(nil, nil, opts.intercept, opts.queue, nil, slog.Default()),
-		pipeline.NewRecordStep(store, slog.Default()),
+		pipeline.NewRecordStep(store, slog.Default(), opts.recordOpts...),
 	}
 	return pipeline.New(steps...)
 }

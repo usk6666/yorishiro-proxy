@@ -155,6 +155,17 @@ type Deps struct {
 	// uses the RecordStep default.
 	RecordMaxBodySize int64
 
+	// RecordGRPCMaxMessagesPerStream caps the number of GRPCDataMessage
+	// envelopes RecordStep persists per stream (USK-802). Zero uses the
+	// RecordStep default (config.MaxGRPCMessagesPerStream). Wire forwarding
+	// is unaffected — the Channel layer is untouched.
+	RecordGRPCMaxMessagesPerStream int
+
+	// RecordSSEMaxEventsPerStream caps the number of SSEMessage envelopes
+	// RecordStep persists per stream (USK-802). Zero uses the RecordStep
+	// default (config.MaxSSEEventsPerStream). Wire forwarding is unaffected.
+	RecordSSEMaxEventsPerStream int
+
 	// --- Optional manager-level state (consumed by Manager wiring) ---
 
 	// UpstreamProxy is the initial upstream proxy URL. Stored on the
@@ -428,6 +439,17 @@ func buildPipeline(deps Deps, encoders *pipeline.WireEncoderRegistry, logger *sl
 	}
 	if deps.RecordScope != nil {
 		recordOpts = append(recordOpts, pipeline.WithRecordScope(deps.RecordScope))
+	}
+	// USK-802: per-Stream record caps for streaming protocols. The Options
+	// silently no-op on zero / negative input, so passing the unresolved
+	// Deps fields directly is safe — the production wiring in
+	// mcpserver/init.go always resolves to a positive default through
+	// config.Resolve*PerStream helpers.
+	if deps.RecordGRPCMaxMessagesPerStream > 0 {
+		recordOpts = append(recordOpts, pipeline.WithGRPCMaxMessagesPerStream(deps.RecordGRPCMaxMessagesPerStream))
+	}
+	if deps.RecordSSEMaxEventsPerStream > 0 {
+		recordOpts = append(recordOpts, pipeline.WithSSEMaxEventsPerStream(deps.RecordSSEMaxEventsPerStream))
 	}
 
 	safetyStep := pipeline.NewSafetyStep(deps.HTTPSafetyEngine, deps.WSSafetyEngine, deps.GRPCSafetyEngine, logger)

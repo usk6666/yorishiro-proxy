@@ -2567,3 +2567,272 @@ func TestRecordStep_FlowFieldsTLSHandshake(t *testing.T) {
 		t.Errorf("error metadata should be absent for tunneled outcome, got %q", fl.Metadata["error"])
 	}
 }
+
+// ---------------------------------------------------------------------------
+// USK-802 — per-Stream record caps for streaming protocols (gRPC / SSE).
+// The cap is enforced inside RecordStep against persistence only; wire
+// forwarding is unaffected because the Pipeline is invoked downstream of
+// the Channel send path (gRPC) / TeeReader (SSE).
+// ---------------------------------------------------------------------------
+
+// grpcDataEnvelope returns a synthetic *envelope.Envelope carrying a
+// GRPCDataMessage suitable for gating tests. seq drives both Sequence
+// and FlowID so every envelope is uniquely identifiable in mockWriter.flows.
+func grpcDataEnvelope(streamID string, seq int) *envelope.Envelope {
+	return &envelope.Envelope{
+		StreamID:  streamID,
+		FlowID:    streamID + "-d-" + strconv.Itoa(seq),
+		Direction: envelope.Receive,
+		Sequence:  seq,
+		Protocol:  envelope.ProtocolGRPC,
+		Raw:       []byte{0x00, 0x00, 0x00, 0x00, 0x01, 0xaa},
+		Message: &envelope.GRPCDataMessage{
+			Service:    "svc",
+			Method:     "Echo",
+			Payload:    []byte{0xaa},
+			WireLength: 1,
+		},
+	}
+}
+
+// sseEventEnvelope returns a synthetic SSE per-event Envelope for gating
+// tests. The Direction is Receive (SSE is server-push only).
+func sseEventEnvelope(streamID string, seq int) *envelope.Envelope {
+	data := "evt-" + strconv.Itoa(seq)
+	return &envelope.Envelope{
+		StreamID:  streamID,
+		FlowID:    streamID + "-e-" + strconv.Itoa(seq),
+		Direction: envelope.Receive,
+		Sequence:  seq,
+		Protocol:  envelope.ProtocolSSE,
+		Raw:       []byte("data: " + data + "\n\n"),
+		Message:   &envelope.SSEMessage{Data: data},
+	}
+}
+
+// TestRecordStep_GRPCPerStreamCap verifies that a positive
+// WithGRPCMaxMessagesPerStream gates SaveFlow on GRPCDataMessage envelopes
+// once the cap is reached. The first over-cap envelope must trigger an
+// UpdateStream(AppendTags["records_truncated"]) and subsequent over-cap
+// envelopes must drop silently without further UpdateStream calls.
+func TestRecordStep_GRPCPerStreamCap(t *testing.T) {
+	w := &mockWriter{}
+	step := NewRecordStep(w, nil, WithGRPCMaxMessagesPerStream(3))
+	ctx := context.Background()
+	for i := 0; i < 5; i++ {
+		step.Process(ctx, grpcDataEnvelope("s1", i))
+	}
+	if len(w.flows) != 3 {
+		t.Errorf("flows recorded = %d, want 3 (cap)", len(w.flows))
+	}
+	// Truncated tag must be stamped exactly once (on the 4th envelope —
+	// the first over-cap). The 5th envelope drops silently.
+	tagUpdates := 0
+	for _, u := range w.updates {
+		if u.streamID == "s1" && u.update.AppendTags["records_truncated"] == "per_stream_cap_reached" {
+			tagUpdates++
+		}
+	}
+	if tagUpdates != 1 {
+		t.Errorf("AppendTags[records_truncated] updates = %d, want 1", tagUpdates)
+	}
+}
+
+// TestRecordStep_SSEPerStreamCap mirrors the gRPC cap test for SSE.
+// SSEMessage envelopes are gated; the per-event cap must drop excess
+// events while leaving the wire-side TeeReader untouched (the test only
+// observes the Pipeline-level persistence side effect).
+func TestRecordStep_SSEPerStreamCap(t *testing.T) {
+	w := &mockWriter{}
+	step := NewRecordStep(w, nil, WithSSEMaxEventsPerStream(2))
+	ctx := context.Background()
+	for i := 0; i < 4; i++ {
+		step.Process(ctx, sseEventEnvelope("s1", i))
+	}
+	if len(w.flows) != 2 {
+		t.Errorf("flows recorded = %d, want 2 (cap)", len(w.flows))
+	}
+	tagUpdates := 0
+	for _, u := range w.updates {
+		if u.streamID == "s1" && u.update.AppendTags["records_truncated"] == "per_stream_cap_reached" {
+			tagUpdates++
+		}
+	}
+	if tagUpdates != 1 {
+		t.Errorf("AppendTags[records_truncated] updates = %d, want 1", tagUpdates)
+	}
+}
+
+// TestRecordStep_GRPCStartEndNotCounted verifies the design decision that
+// only GRPCDataMessage envelopes count toward the cap. GRPCStartMessage
+// and GRPCEndMessage are bounded ≤2 per Stream and must always record.
+//
+// Layout: cap=2, send Start + 3 Data + End. Expected SaveFlow calls = 4
+// (Start + Data×2 + End). The 3rd Data is dropped; Start and End survive.
+func TestRecordStep_GRPCStartEndNotCounted(t *testing.T) {
+	w := &mockWriter{}
+	step := NewRecordStep(w, nil, WithGRPCMaxMessagesPerStream(2))
+	ctx := context.Background()
+
+	startEnv := &envelope.Envelope{
+		StreamID:  "s1",
+		FlowID:    "s1-start",
+		Direction: envelope.Send,
+		Sequence:  0,
+		Protocol:  envelope.ProtocolGRPC,
+		Message:   &envelope.GRPCStartMessage{Service: "svc", Method: "Echo"},
+	}
+	endEnv := &envelope.Envelope{
+		StreamID:  "s1",
+		FlowID:    "s1-end",
+		Direction: envelope.Receive,
+		Sequence:  4,
+		Protocol:  envelope.ProtocolGRPC,
+		Message:   &envelope.GRPCEndMessage{Status: 0},
+	}
+	step.Process(ctx, startEnv)
+	for i := 0; i < 3; i++ {
+		step.Process(ctx, grpcDataEnvelope("s1", i+1))
+	}
+	step.Process(ctx, endEnv)
+
+	if len(w.flows) != 4 {
+		t.Errorf("flows recorded = %d, want 4 (Start + 2 Data + End)", len(w.flows))
+	}
+	// Verify Start and End survived the gate.
+	var sawStart, sawEnd bool
+	for _, fl := range w.flows {
+		if fl.ID == "s1-start" {
+			sawStart = true
+		}
+		if fl.ID == "s1-end" {
+			sawEnd = true
+		}
+	}
+	if !sawStart {
+		t.Error("Start envelope was not recorded; the gate must not affect it")
+	}
+	if !sawEnd {
+		t.Error("End envelope was not recorded; the gate must not affect it")
+	}
+}
+
+// TestRecordStep_OtherProtocolsUnaffected verifies that envelopes outside
+// the gated protocols (HTTP, Raw, WS, ...) are recorded unconditionally
+// regardless of the configured caps.
+func TestRecordStep_OtherProtocolsUnaffected(t *testing.T) {
+	w := &mockWriter{}
+	step := NewRecordStep(w, nil,
+		WithGRPCMaxMessagesPerStream(1),
+		WithSSEMaxEventsPerStream(1),
+	)
+	ctx := context.Background()
+	for i := 0; i < 5; i++ {
+		env := &envelope.Envelope{
+			StreamID:  "s-http",
+			FlowID:    "f" + strconv.Itoa(i),
+			Direction: envelope.Send,
+			Sequence:  i,
+			Protocol:  envelope.ProtocolHTTP,
+			Raw:       []byte("GET / HTTP/1.1\r\n\r\n"),
+			Message: &envelope.HTTPMessage{
+				Method: "GET",
+				Path:   "/",
+			},
+		}
+		step.Process(ctx, env)
+	}
+	if len(w.flows) != 5 {
+		t.Errorf("HTTP envelopes recorded = %d, want 5 (gating must not apply)", len(w.flows))
+	}
+}
+
+// TestRecordStep_EmptyStreamID verifies that an envelope with an empty
+// StreamID falls through the gate (no cache key is derivable). Synthetic
+// test stacks routinely omit StreamID; the gate must not break them.
+func TestRecordStep_EmptyStreamID(t *testing.T) {
+	w := &mockWriter{}
+	step := NewRecordStep(w, nil, WithGRPCMaxMessagesPerStream(1))
+	ctx := context.Background()
+	for i := 0; i < 3; i++ {
+		env := &envelope.Envelope{
+			FlowID:    "f" + strconv.Itoa(i),
+			Direction: envelope.Receive,
+			Sequence:  i,
+			Protocol:  envelope.ProtocolGRPC,
+			Message:   &envelope.GRPCDataMessage{Payload: []byte{0xaa}},
+		}
+		step.Process(ctx, env)
+	}
+	if len(w.flows) != 3 {
+		t.Errorf("envelopes recorded = %d, want 3 (empty StreamID bypasses gate)", len(w.flows))
+	}
+}
+
+// TestRecordStep_CountCacheLRU verifies that the per-Stream count cache
+// is bounded by an LRU and that an evicted Stream restarts its counter
+// on next observation. Capacity is too small to expose internally, so
+// the test exercises the documented trade-off via direct cache access.
+func TestRecordStep_CountCacheLRU(t *testing.T) {
+	cache := newRecordCountCache(2)
+	// stream A and stream B fill the cache.
+	if c, _ := cache.bumpAndCheck("A", 100); c != 1 {
+		t.Errorf("A first bump count = %d, want 1", c)
+	}
+	if c, _ := cache.bumpAndCheck("B", 100); c != 1 {
+		t.Errorf("B first bump count = %d, want 1", c)
+	}
+	if got := cache.len(); got != 2 {
+		t.Fatalf("cache len = %d, want 2", got)
+	}
+	// Stream C exceeds capacity; A is the LRU and should be evicted.
+	if c, _ := cache.bumpAndCheck("C", 100); c != 1 {
+		t.Errorf("C first bump count = %d, want 1", c)
+	}
+	if got := cache.len(); got != 2 {
+		t.Errorf("cache len = %d, want 2 after eviction", got)
+	}
+	// A reappears with a reset counter (acknowledged trade-off).
+	if c, _ := cache.bumpAndCheck("A", 100); c != 1 {
+		t.Errorf("A re-discover count = %d, want 1 (counter reset on eviction)", c)
+	}
+}
+
+// TestRecordStep_TruncatedMetadataOnce verifies the one-shot latch: even
+// after many subsequent overflowing envelopes the AppendTags update fires
+// exactly once per Stream.
+func TestRecordStep_TruncatedMetadataOnce(t *testing.T) {
+	w := &mockWriter{}
+	step := NewRecordStep(w, nil, WithGRPCMaxMessagesPerStream(1))
+	ctx := context.Background()
+	for i := 0; i < 10; i++ {
+		step.Process(ctx, grpcDataEnvelope("s1", i))
+	}
+	tagUpdates := 0
+	for _, u := range w.updates {
+		if u.update.AppendTags["records_truncated"] == "per_stream_cap_reached" {
+			tagUpdates++
+		}
+	}
+	if tagUpdates != 1 {
+		t.Errorf("AppendTags[records_truncated] updates = %d after 10 envelopes, want 1 (one-shot latch)", tagUpdates)
+	}
+}
+
+// TestRecordStep_NoCapsNoCache verifies the lazy-allocation contract: when
+// neither cap Option is supplied, the count cache is never allocated and
+// the gate is a no-op. This protects the unit-test stack zero-allocation
+// invariant — non-streaming-protocol tests must not pay any cost for the
+// new gating machinery.
+func TestRecordStep_NoCapsNoCache(t *testing.T) {
+	w := &mockWriter{}
+	step := NewRecordStep(w, nil)
+	if step.countCache != nil {
+		t.Error("countCache allocated without any per-Stream cap Option")
+	}
+	// Sanity: gating yields true unconditionally without a cache.
+	env := grpcDataEnvelope("s1", 0)
+	if !step.allowFlowRecord(context.Background(), env) {
+		t.Error("allowFlowRecord = false with no caps; want true (degrades to no-op)")
+	}
+}

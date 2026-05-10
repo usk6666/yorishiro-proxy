@@ -479,6 +479,11 @@ func NewLiveBuildConfig(
 	bc.WSDeflateEnabled = config.ResolveWSDeflateEnabled(proxyCfg.WebSocket)
 	bc.GRPCMaxMessageSize = uint32(config.ResolveGRPCMaxMessageSize(proxyCfg.GRPC))
 	bc.SSEMaxEventSize = config.ResolveSSEMaxEventSize(proxyCfg.SSE)
+	// USK-802: per-Stream record caps for streaming protocols. Resolved into
+	// BuildConfig so proxybuild's RecordStep construction picks up the
+	// operator-configured value (or the package default when unset).
+	bc.GRPCMaxMessagesPerStream = config.ResolveGRPCMaxMessagesPerStream(proxyCfg.GRPC)
+	bc.SSEMaxEventsPerStream = config.ResolveSSEMaxEventsPerStream(proxyCfg.SSE)
 	if proxyCfg.TLSFingerprint != "" {
 		bc.TLSFingerprint = proxyCfg.TLSFingerprint
 	}
@@ -555,6 +560,11 @@ func NewLiveManager(
 			RateLimiter:         rateLimiter,
 			SOCKS5Negotiator:    socks5Negotiator,
 			RecordScope:         recordScope,
+			// USK-802: per-Stream record caps surface via BuildConfig so a
+			// single resolved value drives RecordStep construction across
+			// every listener built by this factory.
+			RecordGRPCMaxMessagesPerStream: buildCfg.GRPCMaxMessagesPerStream,
+			RecordSSEMaxEventsPerStream:    buildCfg.SSEMaxEventsPerStream,
 		})
 	}
 	mgr, err := proxybuild.NewManager(proxybuild.ManagerConfig{

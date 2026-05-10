@@ -163,6 +163,26 @@ type BuildConfig struct {
 	// future sse.WithMaxEventSize Option call.
 	SSEMaxEventSize int
 
+	// GRPCMaxMessagesPerStream caps the number of GRPCDataMessage envelopes
+	// recorded by RecordStep per stream (USK-802). Once exceeded, further
+	// gRPC data envelopes are still forwarded on the wire (Channels are
+	// untouched) but no longer persisted to the flow store. Start/End
+	// envelopes are always recorded regardless of this cap. Resolved at
+	// BuildConfig construction time from ProxyConfig.GRPC via
+	// config.ResolveGRPCMaxMessagesPerStream. Zero falls back to the
+	// RecordStep default (config.MaxGRPCMessagesPerStream, 10000). Read by
+	// proxybuild/builder.go when constructing RecordStep.
+	GRPCMaxMessagesPerStream int
+
+	// SSEMaxEventsPerStream caps the number of SSEMessage envelopes
+	// recorded by RecordStep per stream (USK-802). Same wire-passthrough
+	// guarantee as GRPCMaxMessagesPerStream — events still flow through
+	// the SSE Layer's TeeReader, only the persisted flow rows are bounded.
+	// Resolved at BuildConfig construction time from ProxyConfig.SSE via
+	// config.ResolveSSEMaxEventsPerStream. Zero falls back to the
+	// RecordStep default (config.MaxSSEEventsPerStream, 100000).
+	SSEMaxEventsPerStream int
+
 	// PluginV2Engine is the optional pluginv2 Engine consulted for
 	// (tls, on_handshake) lifecycle hooks (USK-683 / RFC §9.3). The
 	// hook fires once per successful tlslayer.Server (server-side) and
