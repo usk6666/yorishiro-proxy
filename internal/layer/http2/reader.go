@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"time"
 
 	"github.com/google/uuid"
@@ -97,14 +98,43 @@ func (l *Layer) handlePingFrame(f *frame.Frame) error {
 }
 
 func (l *Layer) handleGoAwayFrame(f *frame.Frame) error {
-	lastStreamID, _, _, err := l.conn.HandleGoAway(f)
+	lastStreamID, errCode, debugData, err := l.conn.HandleGoAway(f)
 	if err != nil {
 		return err
 	}
+	// USK-820: surface the upstream-provided error code and debug data so
+	// SETTINGS-class incompatibilities (e.g. a client emitting ENABLE_PUSH=1)
+	// are diagnosable from logs. The synthesized StreamError.Reason below
+	// retains the literal "GOAWAY" for callers that pattern-match on it,
+	// but enriched with the RFC 9113 §7 error-code name.
+	codeName := ErrCodeString(errCode)
+	attrs := []any{
+		slog.String("role", l.role.String()),
+		slog.String("conn_stream_id", l.streamID),
+		slog.Uint64("last_stream_id", uint64(lastStreamID)),
+		slog.Uint64("err_code", uint64(errCode)),
+		slog.String("err_code_name", codeName),
+	}
+	if len(debugData) > 0 {
+		// Truncate aggressively: GOAWAY debugData is opaque ASCII per
+		// RFC 9113 §6.8, but a hostile peer could blow up logs. Cap to
+		// the same 256-byte ceiling other diagnostic surfaces use.
+		const maxDebugDataLog = 256
+		if len(debugData) > maxDebugDataLog {
+			attrs = append(attrs,
+				slog.String("debug_data", string(debugData[:maxDebugDataLog])),
+				slog.Int("debug_data_truncated_bytes", len(debugData)-maxDebugDataLog),
+			)
+		} else {
+			attrs = append(attrs, slog.String("debug_data", string(debugData)))
+		}
+	}
+	slog.Warn("http2: peer sent GOAWAY", attrs...)
+
 	// Notify all open streams with id > lastStreamID.
 	l.failStreamsAfterGoAway(lastStreamID, &layer.StreamError{
 		Code:   layer.ErrorRefused,
-		Reason: "GOAWAY",
+		Reason: fmt.Sprintf("GOAWAY (%s)", codeName),
 	})
 	return nil
 }

@@ -177,8 +177,13 @@ func TestReader_RSTStreamTranslated(t *testing.T) {
 	}
 }
 
+// USK-820: opts in to ENABLE_PUSH=1 via WithEnablePush(true). The role
+// default for ClientRole is now 0 (RFC 9113 §6.5.2), so without the
+// override reader.go:367 rejects incoming PUSH_PROMISE as PROTOCOL_ERROR.
+// Production code never enables push from the client side; this test
+// exists to validate the receive-path machinery against a permissive peer.
 func TestReader_PushPromise_EmitsChannelAndSyntheticEnvelope(t *testing.T) {
-	l, peer, cleanup := startClientLayer(t)
+	l, peer, cleanup := startClientLayer(t, WithEnablePush(true))
 	defer cleanup()
 	peer.consumePeerSettings(t)
 	peer.sendInitialSettings(t)

@@ -1888,6 +1888,21 @@ func TestVariantRecording_InterceptModifyHeader(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestServerPush_PushStreamRecordedSeparately(t *testing.T) {
+	// USK-820: this test relied on the proxy upstream advertising
+	// SETTINGS_ENABLE_PUSH=1 — a violation of RFC 9113 §6.5.2 ("a client
+	// MUST send a value of 0"). The Phase 5 pentest retest confirmed
+	// strict upstreams (Google Frontend, nghttp2-server) reply with
+	// GOAWAY(PROTOCOL_ERROR) when the proxy emitted 1, refusing every
+	// first stream. The fix downshifts ClientRole to 0 by default.
+	//
+	// Consequence: live upstreams no longer push (per spec), so this
+	// recording path stays dormant in production. Exposing a new opt-in
+	// `BuildConfig.UpstreamEnablePush` (or equivalent) to revive the
+	// permissive recording is out of scope for USK-820 — re-open under
+	// a new Issue if production push-recording becomes a requirement
+	// against permissive upstreams.
+	t.Skip("not yet implemented: USK-823 (pushrecorder live wiring after USK-820)")
+
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 

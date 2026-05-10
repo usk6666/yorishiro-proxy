@@ -152,8 +152,14 @@ func TestChannel_Close_Idempotent(t *testing.T) {
 
 // TestChannel_PushChannel_RejectsSend verifies that push channels reject
 // Send calls.
+//
+// USK-820: opts in to ENABLE_PUSH=1 via WithEnablePush(true). The role
+// default for ClientRole is now 0 (RFC 9113 §6.5.2), which makes the
+// reader.go:367 guard reject incoming PUSH_PROMISE as PROTOCOL_ERROR.
+// To exercise the receive-path machinery this test must explicitly
+// enable push receipt — production code never does this, by design.
 func TestChannel_PushChannel_RejectsSend(t *testing.T) {
-	l, peer, cleanup := startClientLayer(t)
+	l, peer, cleanup := startClientLayer(t, WithEnablePush(true))
 	defer cleanup()
 	peer.consumePeerSettings(t)
 	peer.sendInitialSettings(t)
