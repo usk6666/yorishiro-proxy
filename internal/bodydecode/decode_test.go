@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"compress/flate"
 	"compress/gzip"
-	"strings"
+	"compress/zlib"
 	"testing"
 
 	"github.com/andybalholm/brotli"
@@ -26,7 +26,26 @@ func gzipBytes(t *testing.T, data []byte) []byte {
 	return buf.Bytes()
 }
 
+// deflateBytes produces the spec-compliant HTTP deflate form: zlib-wrapped
+// (RFC 1950) DEFLATE. This is what nginx/Apache/IIS/Cloudflare etc. emit
+// under Content-Encoding: deflate.
 func deflateBytes(t *testing.T, data []byte) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	w := zlib.NewWriter(&buf)
+	if _, err := w.Write(data); err != nil {
+		t.Fatalf("zlib write: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("zlib close: %v", err)
+	}
+	return buf.Bytes()
+}
+
+// rawDeflateBytes produces non-spec-compliant raw DEFLATE (RFC 1951) without
+// the zlib header. A small population of legacy senders (notably old IIS)
+// emit this under Content-Encoding: deflate, so the decoder must fall back.
+func rawDeflateBytes(t *testing.T, data []byte) []byte {
 	t.Helper()
 	var buf bytes.Buffer
 	w, err := flate.NewWriter(&buf, flate.DefaultCompression)
@@ -73,28 +92,31 @@ func zstdBytes(t *testing.T, data []byte) []byte {
 
 func TestDecode_RoundTripCodecs(t *testing.T) {
 	plain := []byte(samplePlaintext)
+	// header is the Content-Encoding string passed to Decode; wantApplied is
+	// the codec name Decode should report. They differ for x-gzip (normalized
+	// to "gzip") and for the deflate raw-fallback case (still reported as
+	// "deflate" because that is the wire-observed codec name).
 	cases := []struct {
-		encoding string
-		body     []byte
+		name        string
+		header      string
+		body        []byte
+		wantApplied string
 	}{
-		{"gzip", gzipBytes(t, plain)},
-		{"x-gzip", gzipBytes(t, plain)},
-		{"deflate", deflateBytes(t, plain)},
-		{"br", brotliBytes(t, plain)},
-		{"zstd", zstdBytes(t, plain)},
+		{"gzip", "gzip", gzipBytes(t, plain), "gzip"},
+		{"x-gzip", "x-gzip", gzipBytes(t, plain), "gzip"},
+		{"deflate-zlib", "deflate", deflateBytes(t, plain), "deflate"},
+		{"deflate-raw-fallback", "deflate", rawDeflateBytes(t, plain), "deflate"},
+		{"br", "br", brotliBytes(t, plain), "br"},
+		{"zstd", "zstd", zstdBytes(t, plain), "zstd"},
 	}
 	for _, tc := range cases {
-		t.Run(tc.encoding, func(t *testing.T) {
-			out, applied, anom := Decode(tc.body, tc.encoding, DefaultMaxDecodedSize)
+		t.Run(tc.name, func(t *testing.T) {
+			out, applied, anom := Decode(tc.body, tc.header, DefaultMaxDecodedSize)
 			if anom != nil {
 				t.Fatalf("unexpected anomaly: %+v", anom)
 			}
-			expectedApplied := strings.ToLower(tc.encoding)
-			if expectedApplied == "x-gzip" {
-				expectedApplied = "gzip"
-			}
-			if applied != expectedApplied {
-				t.Fatalf("applied = %q, want %q", applied, expectedApplied)
+			if applied != tc.wantApplied {
+				t.Fatalf("applied = %q, want %q", applied, tc.wantApplied)
 			}
 			if !bytes.Equal(out, plain) {
 				t.Fatalf("decoded mismatch: got %q want %q", out, plain)
@@ -188,6 +210,31 @@ func TestDecode_SizeExceeded(t *testing.T) {
 	body := gzipBytes(t, plain)
 
 	out, applied, anom := Decode(body, "gzip", cap)
+	if anom == nil {
+		t.Fatalf("expected anomaly, got nil")
+	}
+	if anom.Type != AnomalySizeExceeded {
+		t.Fatalf("anomaly type = %q, want %q", anom.Type, AnomalySizeExceeded)
+	}
+	if applied != "" {
+		t.Fatalf("applied = %q, want empty", applied)
+	}
+	if !bytes.Equal(out, body) {
+		t.Fatalf("expected original body unchanged on anomaly")
+	}
+}
+
+// TestDecode_SizeExceededDeflateRawFallback locks in the size cap on the
+// raw-DEFLATE fallback branch of decodeDeflate. The shared readCapped helper
+// makes this structurally guaranteed alongside the zlib path, but covering
+// the fallback explicitly prevents future refactors from quietly losing the
+// cap on legacy non-zlib senders.
+func TestDecode_SizeExceededDeflateRawFallback(t *testing.T) {
+	const cap = 1024
+	plain := bytes.Repeat([]byte("A"), cap*4)
+	body := rawDeflateBytes(t, plain)
+
+	out, applied, anom := Decode(body, "deflate", cap)
 	if anom == nil {
 		t.Fatalf("expected anomaly, got nil")
 	}

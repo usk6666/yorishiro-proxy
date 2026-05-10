@@ -17,6 +17,7 @@ import (
 	"bytes"
 	"compress/flate"
 	"compress/gzip"
+	"compress/zlib"
 	"fmt"
 	"io"
 	"strings"
@@ -92,7 +93,7 @@ func Decode(body []byte, contentEncoding string, maxSize int64) (out []byte, app
 	case "gzip", "x-gzip":
 		return decodeWith(body, "gzip", maxSize, openGzip)
 	case "deflate":
-		return decodeWith(body, "deflate", maxSize, openDeflate)
+		return decodeDeflate(body, maxSize)
 	case "br":
 		return decodeWith(body, "br", maxSize, openBrotli)
 	case "zstd":
@@ -113,8 +114,16 @@ func decodeWith(body []byte, applied string, maxSize int64, opener codecOpener) 
 	if err != nil {
 		return body, "", &Anomaly{Type: AnomalyMalformed, Detail: applied + ": " + err.Error()}
 	}
-	defer rc.Close()
+	return readCapped(rc, body, applied, maxSize)
+}
 
+// readCapped reads from rc into a buffer bounded by maxSize+1 bytes (the
+// extra byte distinguishes "exact fit" from "would have produced more"),
+// classifies the outcome into the same (out, applied, anomaly) tuple shape
+// used by Decode, and always closes rc. body is returned unchanged when an
+// anomaly fires so the caller can preserve wire bytes.
+func readCapped(rc io.ReadCloser, body []byte, applied string, maxSize int64) ([]byte, string, *Anomaly) {
+	defer rc.Close()
 	var reader io.Reader = rc
 	if maxSize > 0 {
 		reader = &io.LimitedReader{R: rc, N: maxSize + 1}
@@ -137,8 +146,23 @@ func openGzip(r io.Reader) (io.ReadCloser, error) {
 	return zr, nil
 }
 
-func openDeflate(r io.Reader) (io.ReadCloser, error) {
-	return flate.NewReader(r), nil
+// decodeDeflate decodes "Content-Encoding: deflate". HTTP per RFC 7230 §4.2.2
+// specifies deflate as zlib-wrapped (RFC 1950), and the vast majority of
+// real-world servers (nginx, Apache, IIS, Cloudflare, ...) emit zlib-wrapped
+// streams. Historically a small population of non-compliant senders (notably
+// pre-IIS-7 and a handful of CDN edges) emit raw DEFLATE (RFC 1951) under the
+// same Content-Encoding label.
+//
+// Match Firefox / Chrome behavior: try zlib first, fall back to raw DEFLATE
+// only when the zlib header itself is rejected. If zlib accepts the header
+// but the stream fails mid-decode, do NOT fall back — that error reflects a
+// genuinely corrupt zlib stream and re-trying as raw deflate would either
+// fail with a less informative error or, worse, decode garbage.
+func decodeDeflate(body []byte, maxSize int64) ([]byte, string, *Anomaly) {
+	if rc, err := zlib.NewReader(bytes.NewReader(body)); err == nil {
+		return readCapped(rc, body, "deflate", maxSize)
+	}
+	return readCapped(flate.NewReader(bytes.NewReader(body)), body, "deflate", maxSize)
 }
 
 func openBrotli(r io.Reader) (io.ReadCloser, error) {
