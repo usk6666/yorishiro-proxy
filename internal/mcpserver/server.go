@@ -287,7 +287,9 @@ func assembleAndRunMCPServer(
 	// MaxTotalRequests / MaxDuration policy. Start() arms the duration
 	// timer and shutdown callback after assembleLiveManager returns
 	// (the manager is required for the StopAll closure).
-	budgetManager := connector.NewBudgetManager()
+	// USK-819: feed the policy-layer ceiling from
+	// TargetScopePolicy.Budget so set_budget rejects values exceeding it.
+	budgetManager := InitBudgetManager(targetScopePolicy, logger)
 	safetyEngine, err := InitSafetyFilter(cfg, proxyCfg, logger)
 	if err != nil {
 		return err

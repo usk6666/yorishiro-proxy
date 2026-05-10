@@ -7,8 +7,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/config"
+	"github.com/usk6666/yorishiro-proxy/internal/connector"
 	"github.com/usk6666/yorishiro-proxy/internal/logging"
 	"github.com/usk6666/yorishiro-proxy/internal/pluginv2"
 )
@@ -395,6 +397,97 @@ func TestInitRateLimiter_FromConfigFile(t *testing.T) {
 	}
 	if limits.MaxRequestsPerHostPerSecond != 5.0 {
 		t.Errorf("MaxRequestsPerHostPerSecond = %f, want 5.0", limits.MaxRequestsPerHostPerSecond)
+	}
+}
+
+// --- InitBudgetManager tests ---
+
+func TestInitBudgetManager_NilPolicy(t *testing.T) {
+	logger := testLogger(t)
+	bm := InitBudgetManager(nil, logger)
+	if bm == nil {
+		t.Fatal("expected non-nil budget manager")
+	}
+	policy := bm.PolicyBudget()
+	if !policy.IsZero() {
+		t.Errorf("expected zero policy budget, got %+v", policy)
+	}
+}
+
+func TestInitBudgetManager_WithBudget(t *testing.T) {
+	logger := testLogger(t)
+	policy := &config.TargetScopePolicyConfig{
+		Budget: &config.BudgetPolicyConfig{
+			MaxTotalRequests: 1000,
+			MaxDuration:      config.Duration(30 * time.Minute),
+		},
+	}
+
+	bm := InitBudgetManager(policy, logger)
+	got := bm.PolicyBudget()
+	if got.MaxTotalRequests != 1000 {
+		t.Errorf("MaxTotalRequests = %d, want 1000", got.MaxTotalRequests)
+	}
+	if got.MaxDuration != 30*time.Minute {
+		t.Errorf("MaxDuration = %v, want 30m", got.MaxDuration)
+	}
+
+	// Behavioral check: agent budgets exceeding the policy ceiling must
+	// be rejected (validateAgentBudgetLocked already implements this).
+	err := bm.SetAgentBudget(connector.BudgetConfig{MaxTotalRequests: 2000})
+	if err == nil {
+		t.Error("expected error when agent MaxTotalRequests exceeds policy")
+	}
+	err = bm.SetAgentBudget(connector.BudgetConfig{MaxDuration: time.Hour})
+	if err == nil {
+		t.Error("expected error when agent MaxDuration exceeds policy")
+	}
+}
+
+func TestInitBudgetManager_NoBudgetInPolicy(t *testing.T) {
+	logger := testLogger(t)
+	policy := &config.TargetScopePolicyConfig{
+		Allows: []config.TargetRuleConfig{{Hostname: "*.example.com"}},
+	}
+
+	bm := InitBudgetManager(policy, logger)
+	got := bm.PolicyBudget()
+	if !got.IsZero() {
+		t.Errorf("expected zero policy budget when policy.Budget is nil, got %+v", got)
+	}
+}
+
+func TestInitBudgetManager_FromConfigFile(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.json")
+	writeTestFile(t, cfgPath, `{
+		"target_scope_policy": {
+			"budget": {
+				"max_total_requests": 3,
+				"max_duration": "30m"
+			}
+		}
+	}`)
+
+	result, err := LoadConfigs(cfgPath, "")
+	if err != nil {
+		t.Fatalf("LoadConfigs: %v", err)
+	}
+
+	logger := testLogger(t)
+	bm := InitBudgetManager(result.TargetScopePolicy, logger)
+	got := bm.PolicyBudget()
+	if got.MaxTotalRequests != 3 {
+		t.Errorf("MaxTotalRequests = %d, want 3", got.MaxTotalRequests)
+	}
+	if got.MaxDuration != 30*time.Minute {
+		t.Errorf("MaxDuration = %v, want 30m", got.MaxDuration)
+	}
+
+	// Boot path should reject an Agent-layer set_budget request that
+	// exceeds the JSON-config policy ceiling.
+	if err := bm.SetAgentBudget(connector.BudgetConfig{MaxTotalRequests: 100}); err == nil {
+		t.Error("expected error when agent MaxTotalRequests=100 exceeds policy=3")
 	}
 }
 

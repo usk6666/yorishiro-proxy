@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/cert"
 	"github.com/usk6666/yorishiro-proxy/internal/config"
@@ -202,6 +203,27 @@ func InitRateLimiter(policy *config.TargetScopePolicyConfig, logger *slog.Logger
 			"max_rps_per_host", policy.RateLimits.MaxRequestsPerHostPerSecond)
 	}
 	return rl
+}
+
+// InitBudgetManager creates a BudgetManager and applies the policy-layer
+// diagnostic session budget from the config (USK-819). The Agent layer
+// (MCP `security set_budget`) cannot exceed these limits — enforcement is
+// already implemented inside BudgetManager.validateAgentBudgetLocked, this
+// helper just feeds the operator-supplied ceiling at boot time so the
+// JSON-config field stops being inert.
+func InitBudgetManager(policy *config.TargetScopePolicyConfig, logger *slog.Logger) *connector.BudgetManager {
+	bm := connector.NewBudgetManager()
+	if policy != nil && policy.Budget != nil {
+		maxDuration := time.Duration(policy.Budget.MaxDuration)
+		bm.SetPolicyBudget(connector.BudgetConfig{
+			MaxTotalRequests: policy.Budget.MaxTotalRequests,
+			MaxDuration:      maxDuration,
+		})
+		logger.Info("budget policy loaded",
+			"max_total_requests", policy.Budget.MaxTotalRequests,
+			"max_duration", maxDuration)
+	}
+	return bm
 }
 
 // InitPassthroughList creates and populates the TLS passthrough list from
