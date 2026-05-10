@@ -474,7 +474,21 @@ func (l *Layer) Close() error {
 }
 
 // enqueueWrite places a write request on the writer queue.
+//
+// USK-812: Go's select is pseudo-random when multiple cases are ready, so a
+// concurrent close(shutdown) racing a queue-send with available buffer
+// capacity could pseudo-randomly reject the request even though the
+// writer's drain loop would have processed it. Try the buffered send first
+// in a non-blocking probe; only fall back to the cancellation branch when
+// the queue is genuinely full. The writerLoop's `case <-l.shutdown:` branch
+// drains queued requests best-effort, so a request enqueued just before
+// shutdown still reaches the wire.
 func (l *Layer) enqueueWrite(req writeRequest) {
+	select {
+	case l.writerQueue <- req:
+		return
+	default:
+	}
 	select {
 	case l.writerQueue <- req:
 	case <-l.shutdown:

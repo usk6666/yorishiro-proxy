@@ -415,6 +415,19 @@ func (c *channel) allocateAndEnqueueFirstHeaders(ctx context.Context, fields []h
 		endStream: endStream,
 		done:      done,
 	}}
+	// USK-812: try the buffered send in a non-blocking probe so a concurrent
+	// close(shutdown) or ctx cancellation does not pseudo-randomly reject a
+	// request the queue had room for. The writerLoop's drain branch processes
+	// queued requests after shutdown, so a request enqueued just before
+	// shutdown still reaches the wire. Mirrors the prefer-queue fix in
+	// Layer.enqueueWrite. l.mu must be held across the probe — see the
+	// allocateAndEnqueueFirstHeaders docstring.
+	select {
+	case l.writerQueue <- req:
+		l.mu.Unlock()
+		return nil
+	default:
+	}
 	select {
 	case l.writerQueue <- req:
 		l.mu.Unlock()
@@ -622,13 +635,69 @@ func itoa3(n int) string {
 }
 
 // waitDone blocks until the writer signals done, or ctx/shutdown fires.
+//
+// USK-812: when shutdown fires before the writer has called deliverDone, we
+// must NOT immediately surface errWriterClosed because the writerLoop's
+// drain branch (`case <-l.shutdown:` inside writerLoop) processes any
+// already-queued requests on its way out. The write can still complete
+// successfully on the wire after shutdown closes; the consumer side just
+// needs to wait for the writer's authoritative result.
+//
+// Concrete failure mode this fixes — the
+// TestE2E_LiveGRPCWeb_DispatchDeliversEnvelope/binary_proto flake:
+//
+//  1. client.Send(response HEADERS) — enqueued + processed; deliverDone(nil).
+//  2. client.Send(response DATA, END_STREAM) — enqueued; writer goroutine
+//     hasn't picked it up yet OR is mid-write.
+//  3. The test client receives HEADERS via the writer's earlier flush,
+//     eventually closes — kernel TCP RST/FIN propagates to the proxy's
+//     frameReader → handleReadError(io.EOF) → close(l.shutdown).
+//  4. Original code: waitDone for step 2's done picks `<-shutdown`,
+//     returns errWriterClosed. But the writer's drain branch was about to
+//     (or did) process the queued DATA write successfully — the bytes
+//     reached the test client (cli.Do returned matching bytes) yet the
+//     session recorded the Stream as state=error.
+//
+// The fix: after `<-shutdown` fires, block on `<-done` so the writer's
+// eventual deliverDone — whether success or a real wire error — is the
+// authoritative result. The drain branch in writerLoop guarantees done
+// WILL fire for any already-queued request; if the request was never
+// queued (lost in the enqueueWrite race), failWriteRequest already wrote
+// errWriterClosed onto done before close(shutdown), so the unconditional
+// receive returns immediately with that value. Either way the writer is
+// the sole producer to done, so no goroutine leak is possible.
+//
+// ctx.Done branch keeps the original "return ctx.Err() promptly" semantics
+// — caller-driven cancellation should not block waiting for the writer.
+// We do peek at done first so a write that completed concurrently with ctx
+// cancel still reports its actual result instead of being shadowed by the
+// pseudo-random select.
+//
+// This is the H2 close-vs-write twin of the HTTP/1.x USK-798 fix
+// (responseReadyMu mutex+atomic+sync.Once), simpler because the writer
+// goroutine itself owns the done channel and is the sole writer to it.
 func waitDone(ctx context.Context, done chan error, shutdown chan struct{}) error {
 	select {
 	case err := <-done:
 		return err
 	case <-ctx.Done():
+		// The write may have completed concurrently with ctx cancellation.
+		// Prefer the writer's authoritative result over the cancellation
+		// signal so a successful wire write is not reported as ctx.Err().
+		select {
+		case err := <-done:
+			return err
+		default:
+		}
 		return ctx.Err()
 	case <-shutdown:
-		return errWriterClosed
+		// close(shutdown) racing a pending write must not surface as
+		// errWriterClosed when the writer's drain loop will still process
+		// the request. Block on done — failWriteRequest writes
+		// errWriterClosed to done in the "request was never queued" path,
+		// and the writer's drain loop writes the wire result in the
+		// "request was queued" path. Either way done will fire, returning
+		// the authoritative result.
+		return <-done
 	}
 }
