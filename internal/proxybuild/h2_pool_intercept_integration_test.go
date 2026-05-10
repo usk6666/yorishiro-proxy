@@ -877,6 +877,124 @@ func TestUSK816_H1Client_H2CapableUpstream_InterceptRelease_ResponseRelays(t *te
 	}
 }
 
+// TestUSK821_HTTP1_InterceptResponseDirection_HoldsResponse is the headline
+// regression test for USK-821: a direction:"response" rule with a
+// path_pattern must fire on the response side. Before the fix, matchesRule
+// evaluated PathPattern unconditionally, so the empty Path on response
+// envelopes (per HTTPMessage field-validity contract) silently rejected
+// every direction:"response" rule that included path_pattern.
+//
+// The test asserts:
+//   - request side does NOT hold (Direction == response excludes Send)
+//   - response side DOES hold with the rule id
+//   - after release, the response body is delivered to the client unchanged
+func TestUSK821_HTTP1_InterceptResponseDirection_HoldsResponse(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	upAddr, upShutdown := startHTTP1TLSUpstreamForPoolTest(t, "usk821-resp", gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
+		_, _ = w.Write([]byte("usk821-body-" + r.URL.Path))
+	}))
+	defer upShutdown()
+
+	intercept := httprules.NewInterceptEngine()
+	// USK-821 repro shape: direction:"response" + path_pattern + host_pattern.
+	// Pre-fix this rule never fired (PathPattern.MatchString("") on response
+	// short-circuits to false). Post-fix the response side matches by host
+	// (path skipped on Receive), and the request side is excluded by
+	// direction filter alone. HostPattern matches the connector-stamped
+	// EnvelopeContext.TargetHost (the upstream loopback address — the CN
+	// is not the dial target).
+	intercept.AddRule(httprules.InterceptRule{
+		ID:          "usk821-response-hold",
+		Enabled:     true,
+		Direction:   httprules.DirectionResponse,
+		HostPattern: regexp.MustCompile(`^127\.0\.0\.1$`),
+		PathPattern: regexp.MustCompile(`^/get$`),
+	})
+	holdQueue := common.NewHoldQueue()
+	holdQueue.SetTimeout(10 * time.Second)
+
+	pool := h2pool.New(h2pool.PoolOptions{})
+	defer pool.Close()
+
+	store := &flowStoreForH2Pool{}
+	proxyAddr := startProxyForH2PoolInterceptTest(t, ctx, store, intercept, holdQueue, pool)
+
+	type result struct {
+		status int
+		body   string
+		err    error
+	}
+	resCh := make(chan result, 1)
+	go func() {
+		tr := &gohttp.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec
+			DialTLS: func(network, addr string) (net.Conn, error) {
+				raw, err := connectTunnelDialerForPoolTest(proxyAddr, upAddr)
+				if err != nil {
+					return nil, err
+				}
+				tlsConn := tls.Client(raw, &tls.Config{
+					InsecureSkipVerify: true, //nolint:gosec
+					NextProtos:         []string{"http/1.1"},
+				})
+				if err := tlsConn.Handshake(); err != nil {
+					raw.Close()
+					return nil, err
+				}
+				return tlsConn, nil
+			},
+			DisableKeepAlives: true,
+		}
+		cli := &gohttp.Client{Transport: tr, Timeout: 30 * time.Second}
+		req, _ := gohttp.NewRequestWithContext(ctx, "GET", "https://"+upAddr+"/get", nil)
+		resp, err := cli.Do(req)
+		if err != nil {
+			resCh <- result{err: err}
+			return
+		}
+		b, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		resCh <- result{status: resp.StatusCode, body: string(b)}
+	}()
+
+	// Wait for a held entry. With direction:"response" + path on a request
+	// path that DOES match (/get), a pre-fix proxy would never enter the
+	// held state at all (request side is filtered by direction; response
+	// side's matchesRule short-circuits on empty Path) — so the held queue
+	// would stay empty for the full timeout.
+	held := releaseFirstHeldEntry(t, holdQueue, 5*time.Second, func(_ *common.HeldEntry) *common.HoldAction {
+		return &common.HoldAction{Type: common.ActionRelease}
+	})
+
+	// Confirm the held envelope is the response side.
+	if held.Envelope == nil {
+		t.Fatal("held entry has no envelope")
+	}
+	if held.Envelope.Direction != envelope.Receive {
+		t.Errorf("held envelope direction = %v, want %v (USK-821: rule should hold on the response side)", held.Envelope.Direction, envelope.Receive)
+	}
+	if len(held.MatchedRules) != 1 || held.MatchedRules[0] != "usk821-response-hold" {
+		t.Errorf("held entry matched_rules = %v, want [usk821-response-hold]", held.MatchedRules)
+	}
+
+	select {
+	case r := <-resCh:
+		if r.err != nil {
+			t.Fatalf("client error: %v", r.err)
+		}
+		if r.status != 200 {
+			t.Errorf("client status = %d, want 200 (post-release response should still relay)", r.status)
+		}
+		if r.body != "usk821-body-/get" {
+			t.Errorf("client body = %q, want %q (post-release response body should match upstream verbatim)", r.body, "usk821-body-/get")
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("USK-821: client never received upstream response after response-side release")
+	}
+}
+
 // TestUSK816_HTTP1_InterceptRelease_ResponseRelays is the negative control
 // that exercises the same intercept path against an HTTP/1.x-only upstream
 // so the h2 pool fast-path is bypassed. If this also passes (it does), the

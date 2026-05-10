@@ -109,7 +109,7 @@ func (e *InterceptEngine) MatchRequest(env *envelope.Envelope, msg *envelope.HTT
 		if rule.Direction != DirectionRequest && rule.Direction != DirectionBoth {
 			continue
 		}
-		if e.matchesRule(&rule, env, msg) {
+		if e.matchesRule(&rule, env, msg, envelope.Send) {
 			matched = append(matched, rule.ID)
 		}
 	}
@@ -129,15 +129,25 @@ func (e *InterceptEngine) MatchResponse(env *envelope.Envelope, msg *envelope.HT
 		if rule.Direction != DirectionResponse && rule.Direction != DirectionBoth {
 			continue
 		}
-		if e.matchesRule(&rule, env, msg) {
+		if e.matchesRule(&rule, env, msg, envelope.Receive) {
 			matched = append(matched, rule.ID)
 		}
 	}
 	return matched
 }
 
-func (e *InterceptEngine) matchesRule(rule *InterceptRule, env *envelope.Envelope, msg *envelope.HTTPMessage) bool {
-	// Host pattern check.
+// matchesRule evaluates a rule against an envelope. The dir parameter is the
+// envelope direction (Send for requests, Receive for responses) — request-only
+// fields are skipped on Receive because HTTPMessage spec leaves Method/Path
+// empty on response envelopes (see internal/envelope/http.go field-validity
+// contract). USK-821: omitting this skip caused direction:"response" and
+// direction:"both" rules with a path_pattern or methods condition to silently
+// never match the response side, since rule.PathPattern.MatchString("") is
+// almost always false.
+func (e *InterceptEngine) matchesRule(rule *InterceptRule, env *envelope.Envelope, msg *envelope.HTTPMessage, dir envelope.Direction) bool {
+	// Host pattern check. Valid for both directions: TargetHost is set on
+	// the EnvelopeContext at Pipeline entry and survives across the
+	// request/response pair.
 	if rule.HostPattern != nil {
 		host := extractHostname(env.Context.TargetHost)
 		if !rule.HostPattern.MatchString(host) {
@@ -145,15 +155,18 @@ func (e *InterceptEngine) matchesRule(rule *InterceptRule, env *envelope.Envelop
 		}
 	}
 
-	// Path pattern check.
-	if rule.PathPattern != nil {
+	// Path pattern check. Request-only — skip on Receive (response) so a
+	// direction:"response"/"both" rule does not short-circuit on the
+	// empty Path field (see HTTPMessage field-validity contract).
+	if rule.PathPattern != nil && dir == envelope.Send {
 		if !rule.PathPattern.MatchString(msg.Path) {
 			return false
 		}
 	}
 
-	// Method whitelist check.
-	if len(rule.Methods) > 0 {
+	// Method whitelist check. Request-only — skip on Receive for the same
+	// reason as PathPattern (Method is empty on response envelopes).
+	if len(rule.Methods) > 0 && dir == envelope.Send {
 		found := false
 		for _, m := range rule.Methods {
 			if strings.EqualFold(m, msg.Method) {
@@ -166,7 +179,9 @@ func (e *InterceptEngine) matchesRule(rule *InterceptRule, env *envelope.Envelop
 		}
 	}
 
-	// Header match check (case-insensitive name lookup).
+	// Header match check (case-insensitive name lookup). Valid for both
+	// directions: HTTPMessage.Headers is populated on request and response
+	// envelopes alike.
 	if len(rule.HeaderMatch) > 0 {
 		for name, pattern := range rule.HeaderMatch {
 			value := headerGet(msg.Headers, name)
