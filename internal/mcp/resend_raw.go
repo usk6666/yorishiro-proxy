@@ -29,6 +29,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net"
 	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -163,6 +164,12 @@ func (s *Server) handleResendRaw(ctx context.Context, _ *gomcp.CallToolRequest, 
 
 	encoders := buildResendRawEncoderRegistry()
 	pipe := s.buildResendRawPipeline(encoders)
+
+	// TODO(USK-817 sibling: budget counter, P5-19)
+	rateLimitHost, _, _ := net.SplitHostPort(plan.dialAddr)
+	if err := s.waitRateLimit(rtCtx, rateLimitHost); err != nil {
+		return nil, nil, fmt.Errorf("resend_raw: %w", err)
+	}
 
 	respBytes, chunks, truncated, err := s.runResendRaw(rtCtx, plan, pipe)
 	// USK-789: resend bypasses session.RunSession so the proxy path's

@@ -704,6 +704,18 @@ func (s *Server) handleGetRateLimits() (*gomcp.CallToolResult, any, error) {
 	}, nil
 }
 
+// waitRateLimit blocks until the agent rate limiter allows a request to host,
+// or until ctx is cancelled. Returns nil immediately when the rate limiter
+// is not initialised (test harnesses) or has no limits configured. Used by
+// the typed resend / fuzz dispatch loops (USK-817) so AI agents cannot
+// bypass security.set_rate_limits by issuing fuzz variants.
+func (s *Server) waitRateLimit(ctx context.Context, host string) error {
+	if s.misc.rateLimiter == nil {
+		return nil
+	}
+	return s.misc.rateLimiter.Wait(ctx, host)
+}
+
 // --- Budget actions ---
 
 // budgetResult is the structured output for set_budget.

@@ -40,6 +40,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net"
 	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -197,6 +198,18 @@ func (s *Server) handleResendGRPC(ctx context.Context, _ *gomcp.CallToolRequest,
 
 	encoders := buildResendGRPCEncoderRegistry()
 	pipe := s.buildResendGRPCPipeline(encoders)
+
+	// TODO(USK-817 sibling: budget counter, P5-19)
+	// Strip the port to align rate-limit bucket keys with the live data
+	// path (connector/connect_handler.go, http1_forward_handler.go,
+	// socks5.go) and target_scope matching, both of which key on host only.
+	rateLimitHost, _, splitErr := net.SplitHostPort(plan.authority)
+	if splitErr != nil {
+		rateLimitHost = plan.authority
+	}
+	if err := s.waitRateLimit(rtCtx, rateLimitHost); err != nil {
+		return nil, nil, fmt.Errorf("resend_grpc: %w", err)
+	}
 
 	endEnv, recvData, recvStartMeta, err := s.runResendGRPC(rtCtx, plan, pipe)
 	// USK-789: resend bypasses session.RunSession so the proxy path's

@@ -26,6 +26,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net"
 	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -156,6 +157,18 @@ func (s *Server) handleResendWS(ctx context.Context, _ *gomcp.CallToolRequest, i
 	}
 	sendEnv.Raw = rawBytes
 	pipe := s.buildResendWSPipeline(encoders)
+
+	// TODO(USK-817 sibling: budget counter, P5-19)
+	// Strip the port to align rate-limit bucket keys with the live data
+	// path (connector/connect_handler.go, http1_forward_handler.go,
+	// socks5.go) and target_scope matching, both of which key on host only.
+	rateLimitHost, _, splitErr := net.SplitHostPort(plan.upgradeURL.Host)
+	if splitErr != nil {
+		rateLimitHost = plan.upgradeURL.Host
+	}
+	if err := s.waitRateLimit(rtCtx, rateLimitHost); err != nil {
+		return nil, nil, fmt.Errorf("resend_ws: %w", err)
+	}
 
 	respEnv, err := s.runResendWS(rtCtx, plan, sendEnv, pipe)
 	// USK-789: resend bypasses session.RunSession so the proxy path's

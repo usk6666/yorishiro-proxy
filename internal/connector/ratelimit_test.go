@@ -1,9 +1,13 @@
 package connector
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 func TestRateLimiter_NoLimits(t *testing.T) {
@@ -390,6 +394,136 @@ func TestRateLimitDenial_Tags(t *testing.T) {
 			t.Errorf("rate_limit_effective_rps = %q, want %q", tags["rate_limit_effective_rps"], "5.5")
 		}
 	})
+}
+
+func TestRateLimiter_Wait_NoLimitsFastPath(t *testing.T) {
+	rl := NewRateLimiter()
+	// No limits configured — Wait should return nil immediately even with
+	// an already-cancelled ctx (no rate.Limiter.Wait is called).
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := rl.Wait(ctx, "example.com"); err != nil {
+		t.Errorf("Wait with no limits returned error: %v", err)
+	}
+}
+
+func TestRateLimiter_Wait_PacesAtConfiguredRate(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping pacing assertion under -short")
+	}
+	rl := NewRateLimiter()
+	rl.SetPolicyLimits(RateLimitConfig{
+		MaxRequestsPerSecond: 5,
+	})
+
+	// 4 calls at 5 RPS with a burst of (rate+1)=6 should drain the burst
+	// quickly. To observe pacing we need calls > burst. Use 8 calls: the
+	// first ~6 are immediate (burst), the next 2 are paced — elapsed
+	// should be at least (8-6)*200ms = ~400ms (loose lower bound to
+	// stay flake-free).
+	const calls = 8
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	for i := 0; i < calls; i++ {
+		if err := rl.Wait(ctx, "example.com"); err != nil {
+			t.Fatalf("Wait[%d] error: %v", i, err)
+		}
+	}
+	elapsed := time.Since(start)
+	const minElapsed = 200 * time.Millisecond
+	if elapsed < minElapsed {
+		t.Errorf("Wait pacing too fast: elapsed=%v, want >=%v (rate=5/s, %d calls)", elapsed, minElapsed, calls)
+	}
+}
+
+func TestRateLimiter_Wait_CtxCancellation(t *testing.T) {
+	rl := NewRateLimiter()
+	rl.SetPolicyLimits(RateLimitConfig{
+		MaxRequestsPerSecond: 1,
+	})
+
+	// Drain the burst (rate=1, burst=2) so the next Wait call must block.
+	bg := context.Background()
+	if err := rl.Wait(bg, "example.com"); err != nil {
+		t.Fatalf("Wait[0]: %v", err)
+	}
+	if err := rl.Wait(bg, "example.com"); err != nil {
+		t.Fatalf("Wait[1]: %v", err)
+	}
+
+	// Now Wait would block ~1s; supply a short deadline. rate.Limiter.Wait
+	// surfaces this as either a wrapped ctx error or its own
+	// "would exceed context deadline" sentinel — our wrapper preserves
+	// the underlying error via %w. Either form is acceptable; what we
+	// must verify is that Wait does not silently allow the request.
+	ctx, cancel := context.WithTimeout(bg, 50*time.Millisecond)
+	defer cancel()
+	err := rl.Wait(ctx, "example.com")
+	if err == nil {
+		t.Fatal("expected error from short-deadline Wait, got nil")
+	}
+	if !strings.Contains(err.Error(), "rate limit wait") {
+		t.Errorf("error missing wrapper prefix: %v", err)
+	}
+	// Sanity: the underlying error should mention either context cancellation
+	// or rate-limit budget exhaustion. (Both indicate Wait did not succeed.)
+	if !errors.Is(err, context.DeadlineExceeded) &&
+		!errors.Is(err, context.Canceled) &&
+		!strings.Contains(err.Error(), "would exceed context deadline") {
+		t.Errorf("error = %v, want ctx cancellation or budget-exhaustion message", err)
+	}
+}
+
+func TestRateLimiter_Wait_NoDeadlockUnderConcurrentSetAgentLimits(t *testing.T) {
+	rl := NewRateLimiter()
+	rl.SetPolicyLimits(RateLimitConfig{
+		MaxRequestsPerSecond: 1000, // high enough to make Wait near-instant
+	})
+
+	// Spawn N concurrent Wait callers, then mid-flight call SetAgentLimits.
+	// The lock-window invariant says SetAgentLimits should not block on
+	// in-flight Wait calls, and Wait callers should not deadlock on the
+	// SetAgentLimits update.
+	const callers = 8
+	const perCaller = 25
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	var wg sync.WaitGroup
+	wg.Add(callers)
+	for i := 0; i < callers; i++ {
+		go func(id int) {
+			defer wg.Done()
+			for j := 0; j < perCaller; j++ {
+				host := fmt.Sprintf("host-%d.example.com", id)
+				if err := rl.Wait(ctx, host); err != nil {
+					t.Errorf("caller %d Wait[%d]: %v", id, j, err)
+					return
+				}
+			}
+		}(i)
+	}
+
+	// Update agent limits a few times mid-flight; each call must complete
+	// without blocking on the in-flight Wait callers.
+	updateDone := make(chan struct{})
+	go func() {
+		defer close(updateDone)
+		for k := 0; k < 5; k++ {
+			if err := rl.SetAgentLimits(RateLimitConfig{
+				MaxRequestsPerSecond: 500,
+			}); err != nil {
+				t.Errorf("SetAgentLimits %d: %v", k, err)
+				return
+			}
+			time.Sleep(2 * time.Millisecond)
+		}
+	}()
+
+	wg.Wait()
+	<-updateDone
 }
 
 func TestRateLimitConfig_IsZero(t *testing.T) {

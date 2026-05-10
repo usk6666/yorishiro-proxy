@@ -1,6 +1,7 @@
 package connector
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"sync"
@@ -186,6 +187,65 @@ func (rl *RateLimiter) Check(hostname string) *RateLimitDenial {
 // if the request is allowed, false if rate limited.
 func (rl *RateLimiter) Allow(hostname string) bool {
 	return rl.Check(hostname) == nil
+}
+
+// Wait blocks until the rate limiter allows a request to hostname, or until
+// ctx is cancelled. Both the global and per-host limiters (whichever are
+// configured) must grant a token before Wait returns nil. When no limits are
+// configured Wait returns nil immediately.
+//
+// Wait is the pacing equivalent of Check: callers that prefer to deny on
+// overflow should use Check, callers that prefer to throttle (e.g. agent-side
+// resend / fuzz dispatch loops where a denial would just become an error
+// response) should use Wait.
+//
+// Concurrency: rl.mu is released before the underlying rate.Limiter.Wait
+// calls so that concurrent Check / SetAgentLimits / Wait callers are not
+// blocked across what may be a multi-second sleep. This is the same
+// invariant the connector rate-limit listeners rely on for fairness across
+// per-listener goroutines.
+func (rl *RateLimiter) Wait(ctx context.Context, hostname string) error {
+	if !rl.HasLimits() {
+		return nil
+	}
+
+	// Snapshot the limiter pointers under the mutex; the underlying
+	// rate.Limiter.Wait calls are safe to invoke without our mutex held
+	// because rate.Limiter is itself goroutine-safe.
+	rl.mu.Lock()
+	globalLim := rl.globalLimiter
+	var hostLim *rate.Limiter
+	if rl.effectiveHostRPS > 0 {
+		key := strings.ToLower(hostname)
+		limiter, ok := rl.hostLimiters[key]
+		if !ok {
+			// Mirror Check's eviction policy to bound memory under
+			// adversarial unique-host flooding (CWE-400).
+			if len(rl.hostLimiters) >= maxHostLimiters {
+				rl.hostLimiters = make(map[string]*rate.Limiter)
+			}
+			burst := int(rl.effectiveHostRPS) + 1
+			if burst < 1 {
+				burst = 1
+			}
+			limiter = rate.NewLimiter(rate.Limit(rl.effectiveHostRPS), burst)
+			rl.hostLimiters[key] = limiter
+		}
+		hostLim = limiter
+	}
+	rl.mu.Unlock()
+
+	if globalLim != nil {
+		if err := globalLim.Wait(ctx); err != nil {
+			return fmt.Errorf("rate limit wait: %w", err)
+		}
+	}
+	if hostLim != nil {
+		if err := hostLim.Wait(ctx); err != nil {
+			return fmt.Errorf("rate limit wait: %w", err)
+		}
+	}
+	return nil
 }
 
 // HasLimits reports whether any rate limits are configured (either policy or agent).

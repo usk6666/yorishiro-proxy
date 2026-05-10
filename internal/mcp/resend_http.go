@@ -21,6 +21,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net"
 	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -140,6 +141,18 @@ func (s *Server) handleResendHTTP(ctx context.Context, _ *gomcp.CallToolRequest,
 
 	pipe := s.buildResendHTTPPipeline()
 	dial := buildResendHTTPDialFunc(s.connector.tlsTransport, addr, useTLS, sni)
+
+	// TODO(USK-817 sibling: budget counter, P5-19)
+	// Strip the port to align rate-limit bucket keys with the live data
+	// path (connector/connect_handler.go, http1_forward_handler.go,
+	// socks5.go) and target_scope matching, both of which key on host only.
+	rateLimitHost, _, splitErr := net.SplitHostPort(msg.Authority)
+	if splitErr != nil {
+		rateLimitHost = msg.Authority
+	}
+	if err := s.waitRateLimit(rtCtx, rateLimitHost); err != nil {
+		return nil, nil, fmt.Errorf("resend_http: %w", err)
+	}
 
 	respEnv, err := runResendHTTP(rtCtx, env, dial, pipe)
 	// USK-789: resend bypasses session.RunSession so the proxy path's

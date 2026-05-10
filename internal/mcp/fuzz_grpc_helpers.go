@@ -33,6 +33,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"regexp"
 	"strconv"
 	"time"
@@ -252,11 +253,26 @@ func (s *Server) runFuzzGRPCVariants(ctx context.Context, plan *fuzzGRPCPlan, ti
 	indices := make([]int, len(plan.positions))
 	completed := 0
 
+	// Strip the port to align rate-limit bucket keys with the live data path
+	// (connector/connect_handler.go, http1_forward_handler.go, socks5.go) and
+	// with target_scope matching, both of which key on host only. Falling
+	// back to the raw authority on SplitHostPort error mirrors the
+	// connector's behaviour for entries without an explicit port.
+	rateLimitHost, _, err := net.SplitHostPort(plan.basePlan.authority)
+	if err != nil {
+		rateLimitHost = plan.basePlan.authority
+	}
+
 	for variantIdx := 0; variantIdx < plan.totalVariants; variantIdx++ {
 		select {
 		case <-ctx.Done():
 			return rows, completed, fmt.Sprintf("ctx cancelled: %v", ctx.Err()), nil
 		default:
+		}
+
+		// TODO(USK-817 sibling: budget counter, P5-19)
+		if err := s.waitRateLimit(ctx, rateLimitHost); err != nil {
+			return rows, completed, fmt.Sprintf("rate limit: %v", err), nil
 		}
 
 		payloads, err := decodeFuzzGRPCPayloads(plan.positions, indices)

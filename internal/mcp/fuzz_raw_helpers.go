@@ -390,11 +390,18 @@ func (s *Server) runFuzzRawVariants(ctx context.Context, plan *fuzzRawPlan, time
 	indices := make([]int, len(plan.positions))
 	completed := 0
 
+	rateLimitHost, _, _ := net.SplitHostPort(plan.dialAddr)
+
 	for variantIdx := 0; variantIdx < plan.totalVariants; variantIdx++ {
 		select {
 		case <-ctx.Done():
 			return rows, completed, fmt.Sprintf("ctx cancelled: %v", ctx.Err()), nil
 		default:
+		}
+
+		// TODO(USK-817 sibling: budget counter, P5-19)
+		if err := s.waitRateLimit(ctx, rateLimitHost); err != nil {
+			return rows, completed, fmt.Sprintf("rate limit: %v", err), nil
 		}
 
 		payloads, err := decodeFuzzRawPayloads(plan.positions, indices)
