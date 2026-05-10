@@ -129,6 +129,15 @@ type proxyManager interface {
 	PeekTimeout() time.Duration
 	SetUpstreamProxy(proxyURL string)
 	UpstreamProxy() string
+	// MaxRawCaptureSize surfaces the per-message HTTP/1.x raw-bytes
+	// capture cap (USK-800). On the production Live wiring path the
+	// returned value is the resolved cap (config.ResolveMaxRawCaptureSize
+	// substitutes config.DefaultMaxRawCaptureSize when the operator
+	// leaves the knob zero), so MCP read sites do not need to apply
+	// additional zero-fallback. Zero may still be observed if the
+	// underlying Manager was constructed via a non-Live BuildConfig
+	// path that did not run the resolver. Boot-time only; no setter.
+	MaxRawCaptureSize() int64
 	// SetEnabledProtocols forwards the user-facing protocol allow-list
 	// down to the underlying connector.FullListener so detection-time
 	// rejection enforces it on inbound traffic (USK-732). Empty/nil

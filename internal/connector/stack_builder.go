@@ -136,6 +136,15 @@ type BuildConfig struct {
 	// layer's internal default (config.MaxBodySize, 254 MiB).
 	MaxBodySize int64
 
+	// MaxRawCaptureSize caps per-message HTTP/1.x raw-bytes capture in
+	// memory mode (header section + RawBody when body spill is not active).
+	// Zero means the layer's internal default
+	// (config.DefaultMaxRawCaptureSize, 2 MiB). Threaded into both http1
+	// Layer constructions (client-facing and upstream-facing) via
+	// http1.WithMaxRawCaptureSize. HTTP/2 and other protocols are
+	// unaffected — this is an HTTP/1.x-only knob.
+	MaxRawCaptureSize int64
+
 	// WSMaxFrameSize is the per-frame WebSocket payload cap applied when
 	// the connector constructs a *ws.Layer. Resolved at BuildConfig
 	// construction time from ProxyConfig.WebSocket via
@@ -947,6 +956,7 @@ func buildStackFromRoute(
 			http1.WithBodySpillDir(cfg.BodySpillDir),
 			http1.WithBodySpillThreshold(cfg.BodySpillThreshold),
 			http1.WithMaxBodySize(cfg.MaxBodySize),
+			http1.WithMaxRawCaptureSize(cfg.MaxRawCaptureSize),
 			http1.WithStateReleaser(cfg.PluginV2Engine),
 		)
 		stack.PushClient(clientLayer)
@@ -957,6 +967,7 @@ func buildStackFromRoute(
 			http1.WithBodySpillDir(cfg.BodySpillDir),
 			http1.WithBodySpillThreshold(cfg.BodySpillThreshold),
 			http1.WithMaxBodySize(cfg.MaxBodySize),
+			http1.WithMaxRawCaptureSize(cfg.MaxRawCaptureSize),
 			http1.WithStateReleaser(cfg.PluginV2Engine),
 			// USK-655: bypass body draining for SSE responses so the swap
 			// orchestrator (session.runUpgradeSSE) can hand the still-open

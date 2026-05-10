@@ -94,6 +94,16 @@ func TestValidate_InvalidFields(t *testing.T) {
 			modify: func(c *Config) { c.DialTimeout = -time.Second },
 			errSub: "dial_timeout must be >= 0",
 		},
+		{
+			name:   "max_raw_capture_size negative",
+			modify: func(c *Config) { c.MaxRawCaptureSize = -1 },
+			errSub: "max_raw_capture_size must be >= 0",
+		},
+		{
+			name:   "max_raw_capture_size above MaxBodySize",
+			modify: func(c *Config) { c.MaxRawCaptureSize = MaxBodySize + 1 },
+			errSub: "must be <= MaxBodySize",
+		},
 	}
 
 	for _, tt := range tests {
@@ -208,6 +218,18 @@ func TestValidate_ValidFields(t *testing.T) {
 		{
 			name:   "dial_timeout positive",
 			modify: func(c *Config) { c.DialTimeout = 10 * time.Second },
+		},
+		{
+			name:   "max_raw_capture_size zero (use default)",
+			modify: func(c *Config) { c.MaxRawCaptureSize = 0 },
+		},
+		{
+			name:   "max_raw_capture_size positive small",
+			modify: func(c *Config) { c.MaxRawCaptureSize = 512 << 10 },
+		},
+		{
+			name:   "max_raw_capture_size equals MaxBodySize",
+			modify: func(c *Config) { c.MaxRawCaptureSize = MaxBodySize },
 		},
 	}
 

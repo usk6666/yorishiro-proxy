@@ -13,10 +13,16 @@ import (
 
 // Limits to prevent resource exhaustion.
 const (
-	// MaxRawCaptureSize is the maximum number of bytes captured in RawBytes.
-	// Matches the existing captureReader limit in the HTTP handler.
-	// Exported so that sibling packages (e.g., codec/http1) can reuse the
-	// same constant without duplication.
+	// MaxRawCaptureSize is the package-default cap on bytes captured in
+	// RawBytes (header section) and memory-mode RawBody (USK-769). Callers
+	// that wire ParseOptions.MaxRawCapture override this value per-parse;
+	// when ParseOptions.MaxRawCapture is zero, this default applies. The
+	// constant remains exported so sibling packages (legacy callers, tests)
+	// can reference the default directly.
+	//
+	// USK-800: kept as a const to preserve the public surface; the runtime
+	// override knob is config.MaxRawCaptureSize → http1.WithMaxRawCaptureSize
+	// → ParseOptions.MaxRawCapture.
 	MaxRawCaptureSize = 2 << 20 // 2 MiB
 
 	// maxRequestLineSize limits the request/status line length.
@@ -30,6 +36,19 @@ const (
 	// maxHeaderCount limits the number of individual header lines.
 	maxHeaderCount = 10000
 )
+
+// ParseOptions carries per-parse knobs that the channel layer threads through
+// to bound header / body raw-bytes capture in memory mode. The zero value
+// means "use the package defaults" — equivalent to calling ParseRequest /
+// ParseResponse without options.
+type ParseOptions struct {
+	// MaxRawCapture caps RawBytes (header section) and the memory-mode
+	// RawBody (USK-769) at this byte count. Zero means use the
+	// MaxRawCaptureSize package default. Spill-enabled body capture
+	// (USK-772) honors the spill MaxSize instead — this knob does not
+	// reach it.
+	MaxRawCapture int64
+}
 
 // rawSink is the minimal write/truncation interface used by readLine and
 // parseHeaderLines. Two implementations satisfy it:
@@ -46,17 +65,28 @@ type rawSink interface {
 	write(p []byte)
 }
 
-// captureWriter records bytes written to it up to MaxRawCaptureSize.
+// captureWriter records bytes written to it up to cap. cap is the per-parse
+// cap injected via ParseOptions.MaxRawCapture; zero means use MaxRawCaptureSize.
 type captureWriter struct {
 	buf       bytes.Buffer
 	truncated bool
+	cap       int
+}
+
+// effectiveCap returns the active byte cap, falling back to the package
+// default when cw.cap is zero.
+func (cw *captureWriter) effectiveCap() int {
+	if cw.cap > 0 {
+		return cw.cap
+	}
+	return MaxRawCaptureSize
 }
 
 func (cw *captureWriter) write(p []byte) {
 	if cw == nil || cw.truncated {
 		return
 	}
-	remaining := MaxRawCaptureSize - cw.buf.Len()
+	remaining := cw.effectiveCap() - cw.buf.Len()
 	if remaining <= 0 {
 		cw.truncated = true
 		return
@@ -78,15 +108,24 @@ func (cw *captureWriter) bytes() []byte {
 	return out
 }
 
-// ParseRequest reads and parses an HTTP/1.x request from r.
-// It returns the parsed request including anomaly information.
-// Invalid or malformed requests are parsed on a best-effort basis
-// with anomalies recorded rather than returning errors.
-//
-// Errors are returned only for unrecoverable I/O failures or when
-// no meaningful request can be extracted at all (e.g., connection closed).
+// ParseRequest reads and parses an HTTP/1.x request from r using the
+// package-default capture cap (MaxRawCaptureSize). Equivalent to
+// ParseRequestWithOptions(r, ParseOptions{}).
 func ParseRequest(r *bufio.Reader) (*RawRequest, error) {
-	cw := &captureWriter{}
+	return ParseRequestWithOptions(r, ParseOptions{})
+}
+
+// ParseRequestWithOptions reads and parses an HTTP/1.x request from r with
+// per-parse knobs. opts.MaxRawCapture caps RawBytes (header) and the
+// memory-mode RawBody; zero falls back to MaxRawCaptureSize.
+//
+// Returns the parsed request including anomaly information. Invalid or
+// malformed requests are parsed on a best-effort basis with anomalies
+// recorded rather than returning errors. Errors are returned only for
+// unrecoverable I/O failures or when no meaningful request can be extracted
+// at all (e.g., connection closed).
+func ParseRequestWithOptions(r *bufio.Reader, opts ParseOptions) (*RawRequest, error) {
+	cw := &captureWriter{cap: capInt(opts.MaxRawCapture)}
 
 	// Parse request line.
 	method, requestURI, proto, err := parseRequestLine(r, cw)
@@ -111,8 +150,9 @@ func ParseRequest(r *bufio.Reader) (*RawRequest, error) {
 	// Detect smuggling anomalies from headers.
 	detectSmugglingAnomalies(req.Headers, &req.Anomalies)
 
-	// Determine body reader.
-	req.Body = resolveRequestBody(r, req.Headers, req.Proto)
+	// Determine body reader. The body sink inherits the same memory cap so
+	// header and body capture share the operator-tunable budget.
+	req.Body = resolveRequestBody(r, req.Headers, req.Proto, opts.MaxRawCapture)
 
 	// Set connection close semantics.
 	req.Close = shouldClose(req.Headers, req.Proto)
@@ -124,11 +164,19 @@ func ParseRequest(r *bufio.Reader) (*RawRequest, error) {
 	return req, nil
 }
 
-// ParseResponse reads and parses an HTTP/1.x response from r.
+// ParseResponse reads and parses an HTTP/1.x response from r using the
+// package-default capture cap. Equivalent to
+// ParseResponseWithOptions(r, ParseOptions{}).
+func ParseResponse(r *bufio.Reader) (*RawResponse, error) {
+	return ParseResponseWithOptions(r, ParseOptions{})
+}
+
+// ParseResponseWithOptions reads and parses an HTTP/1.x response from r with
+// per-parse knobs. See ParseRequestWithOptions for the option semantics.
 // Like ParseRequest, malformed responses are parsed on a best-effort basis
 // with anomalies recorded.
-func ParseResponse(r *bufio.Reader) (*RawResponse, error) {
-	cw := &captureWriter{}
+func ParseResponseWithOptions(r *bufio.Reader, opts ParseOptions) (*RawResponse, error) {
+	cw := &captureWriter{cap: capInt(opts.MaxRawCapture)}
 
 	// Parse status line.
 	proto, statusCode, status, err := parseStatusLine(r, cw)
@@ -154,13 +202,29 @@ func ParseResponse(r *bufio.Reader) (*RawResponse, error) {
 	detectSmugglingAnomalies(resp.Headers, &resp.Anomalies)
 
 	// Determine body reader.
-	resp.Body = resolveResponseBody(r, resp.Headers, resp.Proto, resp.StatusCode)
+	resp.Body = resolveResponseBody(r, resp.Headers, resp.Proto, resp.StatusCode, opts.MaxRawCapture)
 
 	// Finalize raw bytes capture.
 	resp.RawBytes = cw.bytes()
 	resp.Truncated = cw.truncated
 
 	return resp, nil
+}
+
+// capInt narrows an int64 cap into the int field used by captureWriter.
+// Negative or zero values become zero (treated as "use MaxRawCaptureSize"
+// downstream); values above MaxInt clamp to MaxInt to avoid overflow on
+// 32-bit hosts. The latter never occurs at our deployment scale but the
+// guard keeps the conversion total.
+func capInt(n int64) int {
+	if n <= 0 {
+		return 0
+	}
+	const maxInt = int64(int(^uint(0) >> 1))
+	if n > maxInt {
+		return int(maxInt)
+	}
+	return int(n)
 }
 
 // parseRequestLine reads the request line (e.g., "GET /path HTTP/1.1\r\n").
@@ -490,14 +554,18 @@ func shouldClose(headers RawHeaders, proto string) bool {
 // Chunked encoding is decoded (chunk markers stripped) so the caller receives
 // plain body data ready for forwarding. Raw bytes for recording are captured
 // separately via the captureWriter in ParseRequest.
-func resolveRequestBody(r *bufio.Reader, headers RawHeaders, proto string) io.Reader {
+//
+// memoryCap caps the memory-mode RawBody capture. Zero means use the package
+// default (MaxRawCaptureSize); spill-mode capture honors the spill MaxSize
+// instead (USK-769 / USK-772).
+func resolveRequestBody(r *bufio.Reader, headers RawHeaders, proto string, memoryCap int64) io.Reader {
 	// chunked Transfer-Encoding: decode the chunked body to plain data.
 	// HTTP/1.0 does not use chunked TE.
 	// Check ALL TE header values to avoid smuggling via multiple TE headers.
 	if proto != "HTTP/1.0" {
 		for _, te := range headers.Values("Transfer-Encoding") {
 			if hasChunkedTE(te) {
-				return newDechunkedReader(r)
+				return newDechunkedReaderWithCap(r, memoryCap)
 			}
 		}
 	}
@@ -507,23 +575,25 @@ func resolveRequestBody(r *bufio.Reader, headers RawHeaders, proto string) io.Re
 		n, err := strconv.ParseInt(strings.TrimSpace(cl), 10, 64)
 		if err != nil || n < 0 {
 			// Invalid Content-Length: return empty body.
-			return newIdentityBodyReader(io.LimitReader(r, 0))
+			return newIdentityBodyReaderWithCap(io.LimitReader(r, 0), memoryCap)
 		}
-		return newIdentityBodyReader(io.LimitReader(r, n))
+		return newIdentityBodyReaderWithCap(io.LimitReader(r, n), memoryCap)
 	}
 
 	// No Content-Length, no chunked TE.
 	// For requests, no body is assumed (unlike responses which use EOF).
-	return newIdentityBodyReader(io.LimitReader(r, 0))
+	return newIdentityBodyReaderWithCap(io.LimitReader(r, 0), memoryCap)
 }
 
 // resolveResponseBody creates an appropriate body reader for a response.
 // Chunked encoding is decoded (chunk markers stripped) so the caller receives
 // plain body data ready for forwarding.
-func resolveResponseBody(r *bufio.Reader, headers RawHeaders, proto string, statusCode int) io.Reader {
+//
+// memoryCap mirrors resolveRequestBody.
+func resolveResponseBody(r *bufio.Reader, headers RawHeaders, proto string, statusCode int, memoryCap int64) io.Reader {
 	// 1xx, 204, 304 responses have no body.
 	if (statusCode >= 100 && statusCode < 200) || statusCode == 204 || statusCode == 304 {
-		return newIdentityBodyReader(io.LimitReader(r, 0))
+		return newIdentityBodyReaderWithCap(io.LimitReader(r, 0), memoryCap)
 	}
 
 	// chunked Transfer-Encoding: decode to plain data.
@@ -531,7 +601,7 @@ func resolveResponseBody(r *bufio.Reader, headers RawHeaders, proto string, stat
 	if proto != "HTTP/1.0" {
 		for _, te := range headers.Values("Transfer-Encoding") {
 			if hasChunkedTE(te) {
-				return newDechunkedReader(r)
+				return newDechunkedReaderWithCap(r, memoryCap)
 			}
 		}
 	}
@@ -540,18 +610,18 @@ func resolveResponseBody(r *bufio.Reader, headers RawHeaders, proto string, stat
 	if cl := headers.Get("Content-Length"); cl != "" {
 		n, err := strconv.ParseInt(strings.TrimSpace(cl), 10, 64)
 		if err != nil || n < 0 {
-			return newIdentityBodyReader(io.LimitReader(r, 0))
+			return newIdentityBodyReaderWithCap(io.LimitReader(r, 0), memoryCap)
 		}
-		return newIdentityBodyReader(io.LimitReader(r, n))
+		return newIdentityBodyReaderWithCap(io.LimitReader(r, n), memoryCap)
 	}
 
 	// HTTP/1.0 or Connection: close: body ends at EOF.
 	if proto == "HTTP/1.0" || shouldClose(headers, proto) {
-		return newIdentityBodyReader(r)
+		return newIdentityBodyReaderWithCap(r, memoryCap)
 	}
 
 	// HTTP/1.1 with no Content-Length and no chunked TE: no body.
-	return newIdentityBodyReader(io.LimitReader(r, 0))
+	return newIdentityBodyReaderWithCap(io.LimitReader(r, 0), memoryCap)
 }
 
 // identityBodyReader wraps a body io.Reader and tees the bytes it produces
@@ -572,8 +642,11 @@ type identityBodyReader struct {
 	rawCapture *bodyCaptureSink
 }
 
-func newIdentityBodyReader(r io.Reader) *identityBodyReader {
-	return &identityBodyReader{r: r, rawCapture: newBodyCaptureSink()}
+// newIdentityBodyReaderWithCap constructs an identityBodyReader whose body
+// capture sink is bounded by memoryCap. Zero memoryCap falls back to
+// MaxRawCaptureSize at write time.
+func newIdentityBodyReaderWithCap(r io.Reader, memoryCap int64) *identityBodyReader {
+	return &identityBodyReader{r: r, rawCapture: newBodyCaptureSinkWithCap(memoryCap)}
 }
 
 // EnableRawBodySpill installs the disk-spill knobs on the body capture sink.

@@ -222,3 +222,27 @@ func TestResolveBodySpillThreshold(t *testing.T) {
 		})
 	}
 }
+
+// USK-800: zero/negative MaxRawCaptureSize falls back to DefaultMaxRawCaptureSize;
+// any positive value is returned as-is.
+func TestResolveMaxRawCaptureSize(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  *Config
+		want int64
+	}{
+		{"nil config returns default", nil, DefaultMaxRawCaptureSize},
+		{"zero size returns default", &Config{}, DefaultMaxRawCaptureSize},
+		{"negative size returns default", &Config{MaxRawCaptureSize: -1}, DefaultMaxRawCaptureSize},
+		{"explicit small size returned as-is", &Config{MaxRawCaptureSize: 512 << 10}, 512 << 10},
+		{"explicit MaxBodySize returned as-is", &Config{MaxRawCaptureSize: MaxBodySize}, MaxBodySize},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ResolveMaxRawCaptureSize(tt.cfg)
+			if got != tt.want {
+				t.Errorf("ResolveMaxRawCaptureSize() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}

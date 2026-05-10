@@ -42,6 +42,17 @@ func ResolveBodySpillThreshold(c *Config) int64 {
 	return DefaultBodySpillThreshold
 }
 
+// ResolveMaxRawCaptureSize returns c.MaxRawCaptureSize if positive, else
+// DefaultMaxRawCaptureSize (2 MiB). The cap applies to memory-mode HTTP/1.x
+// raw-bytes capture (header + body); spill-mode body capture switches to the
+// MaxBodySize cap (USK-769 / USK-772).
+func ResolveMaxRawCaptureSize(c *Config) int64 {
+	if c != nil && c.MaxRawCaptureSize > 0 {
+		return c.MaxRawCaptureSize
+	}
+	return DefaultMaxRawCaptureSize
+}
+
 // SweepOrphanBodyFiles removes stale yorishiro-body-* temp files from dir.
 // Files older than orphanSweepAge are deleted. Errors are logged but never
 // returned; startup must not be blocked by cleanup failures.

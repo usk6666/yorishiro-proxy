@@ -157,8 +157,18 @@ type dechunkedReader struct {
 	rawCapture *bodyCaptureSink
 }
 
+// newDechunkedReader returns a dechunkedReader bounded by the package-default
+// MaxRawCaptureSize. Used by tests/fuzz harnesses; production callers thread
+// their per-channel cap via newDechunkedReaderWithCap.
 func newDechunkedReader(r *bufio.Reader) *dechunkedReader {
-	return &dechunkedReader{r: r, rawCapture: newBodyCaptureSink()}
+	return newDechunkedReaderWithCap(r, 0)
+}
+
+// newDechunkedReaderWithCap mirrors newDechunkedReader but seeds the body
+// capture sink with memoryCap. Zero memoryCap falls back to
+// MaxRawCaptureSize at write time.
+func newDechunkedReaderWithCap(r *bufio.Reader, memoryCap int64) *dechunkedReader {
+	return &dechunkedReader{r: r, rawCapture: newBodyCaptureSinkWithCap(memoryCap)}
 }
 
 // EnableRawBodySpill installs the disk-spill knobs on the body capture sink.

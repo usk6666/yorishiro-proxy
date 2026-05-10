@@ -98,6 +98,7 @@ type options struct {
 	bodySpillDir       string
 	bodySpillThreshold int64
 	maxBody            int64
+	maxRawCapture      int64
 	streamingDetect    StreamingResponsePredicate
 
 	// stateReleaser is the optional pluginv2 hook invoked when a Channel
@@ -143,6 +144,19 @@ func WithBodySpillThreshold(n int64) Option {
 // Code=layer.ErrorInternalError.
 func WithMaxBodySize(n int64) Option {
 	return func(o *options) { o.maxBody = n }
+}
+
+// WithMaxRawCaptureSize sets the per-message HTTP/1.x raw-bytes capture cap
+// (header section + memory-mode RawBody). Defaults to
+// config.DefaultMaxRawCaptureSize (2 MiB) when n is zero. Negative values
+// are treated as zero.
+//
+// Spill-mode interaction (USK-769 / USK-772): when body spill is configured
+// and the body capture sink promotes to a disk-backed BodyBuffer, the body
+// cap moves to MaxBodySize and this knob no longer bounds body bytes. Header
+// capture remains bounded by this knob in both modes.
+func WithMaxRawCaptureSize(n int64) Option {
+	return func(o *options) { o.maxRawCapture = n }
 }
 
 // WithStateReleaser injects a pluginv2.StateReleaser invoked when each
@@ -218,6 +232,7 @@ func New(conn net.Conn, streamID string, direction envelope.Direction, opts ...O
 		bodySpillDir:       "",
 		bodySpillThreshold: config.DefaultBodySpillThreshold,
 		maxBody:            config.MaxBodySize,
+		maxRawCapture:      config.DefaultMaxRawCaptureSize,
 	}
 	for _, opt := range opts {
 		opt(&o)
@@ -368,7 +383,7 @@ func (l *Layer) newChannelLocked() *channel {
 		direction:       l.direction,
 		scheme:          l.opts.scheme,
 		ctxTmpl:         l.envCtx,
-		bodyOpts:        bodyOpts{spillDir: l.opts.bodySpillDir, spillThreshold: l.opts.bodySpillThreshold, maxBody: l.opts.maxBody},
+		bodyOpts:        bodyOpts{spillDir: l.opts.bodySpillDir, spillThreshold: l.opts.bodySpillThreshold, maxBody: l.opts.maxBody, maxRawCapture: l.opts.maxRawCapture},
 		streamingDetect: l.opts.streamingDetect,
 		stateReleaser:   l.opts.stateReleaser,
 		termDone:        make(chan struct{}),

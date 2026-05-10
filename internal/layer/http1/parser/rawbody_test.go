@@ -279,6 +279,121 @@ func TestParseResponse_RawBody_ChunkedTruncation(t *testing.T) {
 	}
 }
 
+// USK-800: ParseOptions.MaxRawCapture overrides the package-default cap
+// for both header capture (RawBytes) and memory-mode body capture (RawBody).
+// Zero falls back to MaxRawCaptureSize.
+func TestParseResponseWithOptions_MaxRawCapture_TruncatesBody(t *testing.T) {
+	tests := []struct {
+		name      string
+		cap       int64
+		bodyLen   int
+		wantBody  int  // expected RawBody length
+		wantTrunc bool // expected RawBodyTruncated
+	}{
+		{name: "explicit cap below body length truncates", cap: 1024, bodyLen: 4096, wantBody: 1024, wantTrunc: true},
+		{name: "explicit cap above body length keeps full body", cap: 8192, bodyLen: 4096, wantBody: 4096, wantTrunc: false},
+		{name: "zero cap falls back to default (no truncation under 2 MiB)", cap: 0, bodyLen: 4096, wantBody: 4096, wantTrunc: false},
+		{name: "negative cap treated as zero (default)", cap: -1, bodyLen: 4096, wantBody: 4096, wantTrunc: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			header := "HTTP/1.1 200 OK\r\nContent-Length: " + formatInt(tt.bodyLen) + "\r\n\r\n"
+			body := strings.Repeat("Z", tt.bodyLen)
+			resp, err := ParseResponseWithOptions(newReader(header+body), ParseOptions{MaxRawCapture: tt.cap})
+			if err != nil {
+				t.Fatalf("ParseResponseWithOptions() error: %v", err)
+			}
+			gotRaw, truncated := rawBodyOf(t, resp.Body)
+			if truncated != tt.wantTrunc {
+				t.Errorf("RawBodyTruncated = %v, want %v", truncated, tt.wantTrunc)
+			}
+			if len(gotRaw) != tt.wantBody {
+				t.Errorf("RawBody len = %d, want %d", len(gotRaw), tt.wantBody)
+			}
+		})
+	}
+}
+
+// USK-800: ParseOptions.MaxRawCapture also caps header-section capture
+// (RawBytes). A response whose header section exceeds the configured cap
+// surfaces Truncated=true and RawBytes is a prefix of the configured cap.
+func TestParseResponseWithOptions_MaxRawCapture_TruncatesHeaderSection(t *testing.T) {
+	// Build a response whose header section alone exceeds 256 B. Each
+	// "X-Pad-NN: ........\r\n" line is around 60 B; 8 lines + status line
+	// + Content-Length + CRLF terminator easily clears 256 B.
+	var b strings.Builder
+	b.WriteString("HTTP/1.1 200 OK\r\n")
+	b.WriteString("Content-Length: 0\r\n")
+	for i := 0; i < 8; i++ {
+		b.WriteString("X-Pad-")
+		b.WriteString(formatInt(i))
+		b.WriteString(": ")
+		b.WriteString(strings.Repeat(".", 40))
+		b.WriteString("\r\n")
+	}
+	b.WriteString("\r\n")
+	raw := b.String()
+	if len(raw) <= 256 {
+		t.Fatalf("test fixture insufficient: header section len=%d, want >256", len(raw))
+	}
+
+	resp, err := ParseResponseWithOptions(newReader(raw), ParseOptions{MaxRawCapture: 256})
+	if err != nil {
+		t.Fatalf("ParseResponseWithOptions() error: %v", err)
+	}
+	if !resp.Truncated {
+		t.Errorf("Truncated = false, want true (header section exceeds cap)")
+	}
+	if len(resp.RawBytes) != 256 {
+		t.Errorf("RawBytes len = %d, want 256", len(resp.RawBytes))
+	}
+}
+
+// USK-800: ParseRequestWithOptions mirrors the ParseResponseWithOptions
+// behavior — confirm the cap also applies to request bodies.
+func TestParseRequestWithOptions_MaxRawCapture_TruncatesBody(t *testing.T) {
+	const cap = 512
+	const bodyLen = 2048
+	raw := "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: " +
+		formatInt(bodyLen) + "\r\n\r\n" + strings.Repeat("A", bodyLen)
+	req, err := ParseRequestWithOptions(newReader(raw), ParseOptions{MaxRawCapture: cap})
+	if err != nil {
+		t.Fatalf("ParseRequestWithOptions() error: %v", err)
+	}
+	gotRaw, truncated := rawBodyOf(t, req.Body)
+	if !truncated {
+		t.Fatal("expected RawBodyTruncated=true")
+	}
+	if len(gotRaw) != cap {
+		t.Errorf("RawBody len = %d, want %d", len(gotRaw), cap)
+	}
+}
+
+// USK-800: ParseRequest / ParseResponse zero-option wrappers must keep
+// observable behavior identical to ParseRequestWithOptions(opts{}).
+func TestParseRequest_ZeroOptionWrapper_MatchesWithOptions(t *testing.T) {
+	const bodyLen = 2048
+	raw := "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: " +
+		formatInt(bodyLen) + "\r\n\r\n" + strings.Repeat("A", bodyLen)
+
+	a, err := ParseRequest(newReader(raw))
+	if err != nil {
+		t.Fatalf("ParseRequest() error: %v", err)
+	}
+	b, err := ParseRequestWithOptions(newReader(raw), ParseOptions{})
+	if err != nil {
+		t.Fatalf("ParseRequestWithOptions() error: %v", err)
+	}
+	if !bytes.Equal(a.RawBytes, b.RawBytes) {
+		t.Errorf("RawBytes mismatch between ParseRequest and ParseRequestWithOptions(zero)")
+	}
+	rawA, _ := rawBodyOf(t, a.Body)
+	rawB, _ := rawBodyOf(t, b.Body)
+	if !bytes.Equal(rawA, rawB) {
+		t.Errorf("RawBody mismatch between ParseRequest and ParseRequestWithOptions(zero)")
+	}
+}
+
 // formatInt is a minimal strconv.Itoa replacement to avoid touching
 // imports in this file (the rest of parser_test.go already covers strconv
 // indirectly).

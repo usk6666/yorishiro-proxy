@@ -467,6 +467,7 @@ func NewLiveBuildConfig(
 		HTTP2Pool:          h2pool.New(h2pool.PoolOptions{}),
 		BodySpillDir:       config.ResolveBodySpillDir(cfg),
 		BodySpillThreshold: config.ResolveBodySpillThreshold(cfg),
+		MaxRawCaptureSize:  config.ResolveMaxRawCaptureSize(cfg),
 		// USK-733: thread the runtime-mutable HostTLSRegistry into the live
 		// dial path so `proxy_start(client_cert=..., client_key=...)`
 		// updates reach the next outbound TLS handshake. The startup-time

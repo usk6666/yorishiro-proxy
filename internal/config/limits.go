@@ -99,4 +99,17 @@ const (
 	// WSLayer.WithMaxFrameSize Option and the wire-side validation cap
 	// applied by the WebSocket frame parser.
 	MaxWebSocketFrameSize int64 = 16 << 20 // 16 MiB
+
+	// DefaultMaxRawCaptureSize is the default cap on per-message HTTP/1.x
+	// raw-bytes capture (header section + memory-mode body capture) when
+	// Config.MaxRawCaptureSize is zero. It mirrors the
+	// internal/layer/http1/parser.MaxRawCaptureSize package constant; the
+	// values are kept in sync via TestLimits_MaxRawCaptureSize_MirrorsParser
+	// so that ResolveMaxRawCaptureSize need not import the parser package
+	// (config does not depend on internal/layer/...).
+	//
+	// Memory-mode only: when body spill is configured (see USK-769 /
+	// USK-772), the body sink switches to a disk-backed BodyBuffer bounded
+	// by MaxBodySize and this cap no longer applies to body bytes.
+	DefaultMaxRawCaptureSize int64 = 2 << 20 // 2 MiB
 )

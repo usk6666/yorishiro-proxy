@@ -1,6 +1,10 @@
 package config
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/usk6666/yorishiro-proxy/internal/layer/http1/parser"
+)
 
 func TestLimits_Consistency(t *testing.T) {
 	// MaxImportScannerBuffer must be larger than base64-encoded MaxBodySize.
@@ -15,5 +19,15 @@ func TestLimits_Consistency(t *testing.T) {
 	const sqliteBlobLimit int64 = 1 << 30
 	if MaxBodySize > sqliteBlobLimit {
 		t.Errorf("MaxBodySize (%d) exceeds SQLite BLOB limit (%d)", MaxBodySize, sqliteBlobLimit)
+	}
+}
+
+// USK-800: DefaultMaxRawCaptureSize lives in this package (config does not
+// import parser to avoid a cross-package import cycle). The value must
+// remain in sync with parser.MaxRawCaptureSize so that operators see one
+// consistent default regardless of which side they inspect.
+func TestLimits_MaxRawCaptureSize_MirrorsParser(t *testing.T) {
+	if got, want := DefaultMaxRawCaptureSize, int64(parser.MaxRawCaptureSize); got != want {
+		t.Errorf("DefaultMaxRawCaptureSize = %d, want parser.MaxRawCaptureSize = %d", got, want)
 	}
 }

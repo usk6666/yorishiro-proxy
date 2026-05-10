@@ -527,6 +527,30 @@ func (m *Manager) UpstreamProxy() string {
 	return m.upstreamProxy
 }
 
+// MaxRawCaptureSize returns the per-message HTTP/1.x raw-bytes capture cap
+// from the bound BuildConfig (USK-800).
+//
+// On the production wiring path (NewLiveBuildConfig) the field is always
+// set via config.ResolveMaxRawCaptureSize, which substitutes
+// config.DefaultMaxRawCaptureSize (2 MiB) when the operator left the knob
+// unset. Callers therefore do NOT need to apply their own zero-fallback —
+// the value returned here is the resolved cap.
+//
+// Zero is still possible from two paths and must be handled by callers
+// only if they construct the Manager outside the Live wiring:
+//   - No BuildConfig was bound to the Manager (returned as 0 below).
+//   - A non-Live BuildConfig was assembled directly without running the
+//     resolver (e.g., tests).
+func (m *Manager) MaxRawCaptureSize() int64 {
+	m.mu.Lock()
+	bc := m.buildCfg
+	m.mu.Unlock()
+	if bc == nil {
+		return 0
+	}
+	return bc.MaxRawCaptureSize
+}
+
 // Listener returns the Stack's Listener wrapper for the named listener,
 // or nil if no such listener is running. Useful for tests and for callers
 // that need to reach the bound pluginv2.Engine via Listener.PluginV2Engine().

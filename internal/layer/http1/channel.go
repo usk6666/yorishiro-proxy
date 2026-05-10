@@ -38,6 +38,10 @@ type bodyOpts struct {
 	spillDir       string
 	spillThreshold int64
 	maxBody        int64
+	// maxRawCapture caps memory-mode raw-bytes capture (header + body).
+	// Zero means use parser.MaxRawCaptureSize / config.DefaultMaxRawCaptureSize.
+	// Spill-mode body capture honors maxBody instead.
+	maxRawCapture int64
 }
 
 // channel implements layer.Channel for one HTTP/1.x request-response exchange.
@@ -530,7 +534,9 @@ func (c *channel) releaseTransactionStates() {
 // and returns the envelope. Sets c.connClosed if the request had
 // Connection: close.
 func (c *channel) parseRequest() (*envelope.Envelope, error) {
-	rawReq, err := parser.ParseRequest(c.layer.reader)
+	rawReq, err := parser.ParseRequestWithOptions(c.layer.reader, parser.ParseOptions{
+		MaxRawCapture: c.bodyOpts.maxRawCapture,
+	})
 	if err != nil {
 		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 			return nil, io.EOF
@@ -643,7 +649,9 @@ func (c *channel) parseRequest() (*envelope.Envelope, error) {
 // is a 1xx informational (the parent Layer must keep parsing on the same
 // channel for the final response).
 func (c *channel) parseResponse() (*envelope.Envelope, bool, error) {
-	rawResp, err := parser.ParseResponse(c.layer.reader)
+	rawResp, err := parser.ParseResponseWithOptions(c.layer.reader, parser.ParseOptions{
+		MaxRawCapture: c.bodyOpts.maxRawCapture,
+	})
 	if err != nil {
 		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 			return nil, false, io.EOF
@@ -1400,9 +1408,15 @@ func concatRawWireBytes(headerBytes, bodyBytes []byte, rawBodyBuffer *bodybuf.Bo
 
 // capForTruncationDetail returns the byte cap that a truncation anomaly
 // detail string should reference. The value depends on whether the capture
-// path was memory-only (MaxRawCaptureSize) or disk-spill (MaxBodySize).
+// path was memory-only (the per-Layer maxRawCapture, falling back to
+// parser.MaxRawCaptureSize) or disk-spill (MaxBodySize). Reading from the
+// per-Layer cap keeps the anomaly Detail accurate when the operator has
+// reconfigured the knob via WithMaxRawCaptureSize / Config.MaxRawCaptureSize.
 func capForTruncationDetail(opts bodyOpts, spilled bool) int64 {
 	if !spilled {
+		if opts.maxRawCapture > 0 {
+			return opts.maxRawCapture
+		}
 		return int64(parser.MaxRawCaptureSize)
 	}
 	if opts.maxBody > 0 {

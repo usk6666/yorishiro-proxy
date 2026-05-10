@@ -53,6 +53,22 @@ func (c *Config) Validate() error {
 	if err := c.validateBodySpill(); err != nil {
 		return err
 	}
+	if err := c.validateMaxRawCaptureSize(); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validateMaxRawCaptureSize enforces the same shape as validateBodySpill's
+// numeric bound: zero means "use default", negative is rejected, and the
+// value must not exceed MaxBodySize (the absolute body cap).
+func (c *Config) validateMaxRawCaptureSize() error {
+	if c.MaxRawCaptureSize < 0 {
+		return fmt.Errorf("max_raw_capture_size must be >= 0, got %d", c.MaxRawCaptureSize)
+	}
+	if c.MaxRawCaptureSize > MaxBodySize {
+		return fmt.Errorf("max_raw_capture_size (%d) must be <= MaxBodySize (%d)", c.MaxRawCaptureSize, MaxBodySize)
+	}
 	return nil
 }
 
@@ -211,6 +227,17 @@ type Config struct {
 	// BodySpillThreshold is the size threshold above which bodies spill to disk.
 	// Zero means 10<<20 (10 MiB). Must be <= MaxBodySize.
 	BodySpillThreshold int64 `json:"body_spill_threshold,omitempty"`
+
+	// MaxRawCaptureSize caps the per-message HTTP/1.x raw-bytes capture in
+	// memory mode (header section + body capture when body spill is not
+	// active). Zero means DefaultMaxRawCaptureSize (2 MiB). Must be
+	// <= MaxBodySize.
+	//
+	// Spill-mode interaction (USK-769 / USK-772): when body spill promotes
+	// the capture sink to a disk-backed BodyBuffer, the cap moves to the
+	// spill MaxSize (= MaxBodySize) and this knob no longer bounds body
+	// bytes. Header capture remains bounded by this knob in both modes.
+	MaxRawCaptureSize int64 `json:"max_raw_capture_size,omitempty"`
 }
 
 // Default returns a Config with sensible defaults.

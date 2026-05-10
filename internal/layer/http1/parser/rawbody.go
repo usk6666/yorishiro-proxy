@@ -61,15 +61,20 @@ type bodyCaptureSink struct {
 	bb        *bodybuf.BodyBuffer // non-nil after promote
 	// failedToPromote, when true, indicates a previous write attempt to
 	// promote-to-file failed and we have permanently fallen back to the
-	// memory-only path. Subsequent writes therefore obey the
-	// MaxRawCaptureSize cap.
+	// memory-only path. Subsequent writes therefore obey memoryCap.
 	failedToPromote bool
+	// memoryCap caps memory-mode writes. Zero means use the package
+	// default (MaxRawCaptureSize). Threaded from ParseOptions.MaxRawCapture
+	// via newBodyCaptureSinkWithCap; spill mode honors spill.maxSize
+	// instead, so this knob does not reach disk-backed bodies.
+	memoryCap int64
 }
 
-// newBodyCaptureSink returns a sink in memory-only mode. enableSpill must be
-// called separately to switch to disk-backed mode.
-func newBodyCaptureSink() *bodyCaptureSink {
-	return &bodyCaptureSink{}
+// newBodyCaptureSinkWithCap returns a sink in memory-only mode bounded by
+// memoryCap. Zero memoryCap falls back to MaxRawCaptureSize at write time.
+// enableSpill must be called separately to switch to disk-backed mode.
+func newBodyCaptureSinkWithCap(memoryCap int64) *bodyCaptureSink {
+	return &bodyCaptureSink{memoryCap: memoryCap}
 }
 
 // enableSpill installs the disk-spill knobs. Call before the first write.
@@ -124,8 +129,9 @@ func (s *bodyCaptureSink) write(p []byte) {
 		return
 	}
 
-	// No spill configured: memory-only with MaxRawCaptureSize cap.
-	s.writeMemoryWithCap(p, MaxRawCaptureSize)
+	// No spill configured: memory-only bounded by the per-instance memoryCap
+	// (falls back to MaxRawCaptureSize when zero — see writeMemoryWithCap).
+	s.writeMemoryWithCap(p, s.memoryCap)
 }
 
 // canSpill reports whether disk-spill mode is active and a file has not yet

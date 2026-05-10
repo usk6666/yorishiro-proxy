@@ -1297,6 +1297,14 @@ type queryConfigResult struct {
 	PeekTimeoutMs    int64                            `json:"peek_timeout_ms"`
 	RequestTimeoutMs int64                            `json:"request_timeout_ms"`
 	TLSFingerprint   string                           `json:"tls_fingerprint"`
+	// MaxRawCaptureSize echoes the per-message HTTP/1.x raw-bytes capture
+	// cap configured via Config.MaxRawCaptureSize (USK-800). Zero / omitted
+	// means the layer default (config.DefaultMaxRawCaptureSize, 2 MiB) is
+	// in effect. First protocol-layer cap exposed via this resource;
+	// existing surface omits body_spill_threshold / max_body_size /
+	// ws_max_frame_size and friends — see PR description for the rationale
+	// to defer expanding the surface uniformly.
+	MaxRawCaptureSize int64 `json:"max_raw_capture_size,omitempty"`
 	// CaptureScope echoes the current recording-only observability
 	// filter (USK-776). Always present (an empty struct means
 	// "capture every flow"). target_scope is intentionally NOT
@@ -1392,6 +1400,7 @@ func (s *Server) handleQueryConfig() (*gomcp.CallToolResult, *queryConfigResult,
 	if !managerIsNil(s.connector.manager) {
 		result.MaxConnections = s.connector.manager.MaxConnections()
 		result.PeekTimeoutMs = s.connector.manager.PeekTimeout().Milliseconds()
+		result.MaxRawCaptureSize = s.connector.manager.MaxRawCaptureSize()
 	}
 
 	if rt := s.currentRequestTimeout(); rt > 0 {
