@@ -178,6 +178,12 @@ func (d *pluginDispatcher) dispatch(ctx context.Context, env *envelope.Envelope,
 	for _, hook := range hooks {
 		outcome, err := d.engine.Dispatch(ctx, hook, current)
 		if err != nil {
+			// ErrChunkTooLarge is a CWE-400 cap-hit on the (raw, on_chunk)
+			// path: the plugin returned bytes too large for the TCP relay
+			// budget. Logged at the same Warn level as ErrDisallowedAction
+			// because both are "plugin produced an output we refuse to
+			// honour" — fail-soft: continue with the previous envelope so
+			// the original chunk passes through to the wire untouched.
 			d.logger.WarnContext(ctx, "plugin: hook outcome rejected; treating as continue",
 				slog.String("plugin", hook.PluginName),
 				slog.String("hook", hook.Protocol+"."+hook.Event),

@@ -1,6 +1,7 @@
 package pluginv2
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -352,6 +353,288 @@ func TestDispatch_ContextCancel_AbortsHook(t *testing.T) {
 	}
 	if out.Action != ActionContinue {
 		t.Errorf("Action = %v", out.Action)
+	}
+}
+
+// rawEnv builds a minimal raw-protocol envelope suitable for (raw, on_chunk)
+// hook dispatch. The bytes payload is small so that test mutations alone
+// determine whether the cap fires.
+func rawEnv(t *testing.T) *envelope.Envelope {
+	t.Helper()
+	chunk := []byte("hello")
+	return &envelope.Envelope{
+		StreamID:  "stream-raw",
+		FlowID:    "flow-raw",
+		Direction: envelope.Send,
+		Protocol:  envelope.ProtocolRaw,
+		Raw:       chunk,
+		Message:   &envelope.RawMessage{Bytes: chunk},
+	}
+}
+
+// TestDispatch_RawOnChunk_NewRawTooLarge confirms that the (raw, on_chunk)
+// path enforces maxTCPPluginChunkSize on the msg["raw"] egress channel.
+// The plugin returns oversized bytes via msg["raw"]; Dispatch must surface
+// ErrChunkTooLarge so the Pipeline dispatcher can fail-soft.
+func TestDispatch_RawOnChunk_NewRawTooLarge(t *testing.T) {
+	e := NewEngine(nil)
+	oversized := bytes.Repeat([]byte("A"), maxTCPPluginChunkSize+1)
+	hook := Hook{
+		Protocol: ProtoRaw, Event: EventOnChunk, Phase: PhasePrePipeline,
+		PluginName: "p1",
+		Fn: builtinHook("raw-too-large", func(msg *MessageDict, c *Ctx) (starlark.Value, error) {
+			if err := msg.SetKey(starlark.String("raw"), starlark.Bytes(oversized)); err != nil {
+				return nil, err
+			}
+			return starlark.None, nil
+		}),
+	}
+	out, err := e.Dispatch(context.Background(), hook, rawEnv(t))
+	if err == nil {
+		t.Fatalf("expected ErrChunkTooLarge, got outcome=%+v", out)
+	}
+	if !errors.Is(err, ErrChunkTooLarge) {
+		t.Fatalf("err not ErrChunkTooLarge: %v", err)
+	}
+	if out != nil {
+		t.Errorf("outcome must be nil on cap-hit, got %+v", out)
+	}
+}
+
+// TestDispatch_RawOnChunk_MessageBytesTooLarge confirms that the
+// (raw, on_chunk) path enforces maxTCPPluginChunkSize on the msg["bytes"]
+// egress channel — the *RawMessage.Bytes field that bytechunk.Channel.Send
+// writes to the wire. This is the path the Issue identified as previously
+// uncapped (msg["raw"] was already capped at 16 MiB by raw_field.go SetKey).
+func TestDispatch_RawOnChunk_MessageBytesTooLarge(t *testing.T) {
+	e := NewEngine(nil)
+	oversized := bytes.Repeat([]byte("B"), maxTCPPluginChunkSize+1)
+	hook := Hook{
+		Protocol: ProtoRaw, Event: EventOnChunk, Phase: PhasePrePipeline,
+		PluginName: "p1",
+		Fn: builtinHook("bytes-too-large", func(msg *MessageDict, c *Ctx) (starlark.Value, error) {
+			if err := msg.SetKey(starlark.String("bytes"), starlark.Bytes(oversized)); err != nil {
+				return nil, err
+			}
+			return starlark.None, nil
+		}),
+	}
+	out, err := e.Dispatch(context.Background(), hook, rawEnv(t))
+	if err == nil {
+		t.Fatalf("expected ErrChunkTooLarge, got outcome=%+v", out)
+	}
+	if !errors.Is(err, ErrChunkTooLarge) {
+		t.Fatalf("err not ErrChunkTooLarge: %v", err)
+	}
+	if out != nil {
+		t.Errorf("outcome must be nil on cap-hit, got %+v", out)
+	}
+}
+
+// TestDispatch_RawOnChunk_BothLargeButNewRawCapped confirms that when a
+// hook returns BOTH oversized NewRaw and oversized Message.Bytes, the cap
+// still fires (NewRaw is checked first, so the error references that path,
+// but either branch is sufficient).
+func TestDispatch_RawOnChunk_BothLargeButNewRawCapped(t *testing.T) {
+	e := NewEngine(nil)
+	oversized := bytes.Repeat([]byte("C"), maxTCPPluginChunkSize+1)
+	hook := Hook{
+		Protocol: ProtoRaw, Event: EventOnChunk, Phase: PhasePrePipeline,
+		PluginName: "p1",
+		Fn: builtinHook("both-too-large", func(msg *MessageDict, c *Ctx) (starlark.Value, error) {
+			if err := msg.SetKey(starlark.String("bytes"), starlark.Bytes(oversized)); err != nil {
+				return nil, err
+			}
+			if err := msg.SetKey(starlark.String("raw"), starlark.Bytes(oversized)); err != nil {
+				return nil, err
+			}
+			return starlark.None, nil
+		}),
+	}
+	_, err := e.Dispatch(context.Background(), hook, rawEnv(t))
+	if !errors.Is(err, ErrChunkTooLarge) {
+		t.Fatalf("err not ErrChunkTooLarge: %v", err)
+	}
+}
+
+// TestDispatch_RawOnChunk_AtLimit confirms the cap is `>` (strict greater-
+// than) — exactly maxTCPPluginChunkSize bytes are accepted. The Issue
+// specifies this hard-cap intent; the operator is `>` not `>=`.
+func TestDispatch_RawOnChunk_AtLimit(t *testing.T) {
+	e := NewEngine(nil)
+	atLimit := bytes.Repeat([]byte("D"), maxTCPPluginChunkSize)
+	hook := Hook{
+		Protocol: ProtoRaw, Event: EventOnChunk, Phase: PhasePrePipeline,
+		PluginName: "p1",
+		Fn: builtinHook("at-limit", func(msg *MessageDict, c *Ctx) (starlark.Value, error) {
+			if err := msg.SetKey(starlark.String("bytes"), starlark.Bytes(atLimit)); err != nil {
+				return nil, err
+			}
+			return starlark.None, nil
+		}),
+	}
+	out, err := e.Dispatch(context.Background(), hook, rawEnv(t))
+	if err != nil {
+		t.Fatalf("at-limit chunk must pass, got err=%v", err)
+	}
+	if out.Action != ActionContinue {
+		t.Errorf("Action = %v, want ActionContinue", out.Action)
+	}
+	rm, ok := out.NewMessage.(*envelope.RawMessage)
+	if !ok {
+		t.Fatalf("NewMessage type %T, want *envelope.RawMessage", out.NewMessage)
+	}
+	if len(rm.Bytes) != maxTCPPluginChunkSize {
+		t.Errorf("Bytes len = %d, want %d", len(rm.Bytes), maxTCPPluginChunkSize)
+	}
+}
+
+// TestDispatch_HTTPHook_NotGated is the critical regression-prevention
+// test. HTTP plugins legitimately produce bodies up to MaxBodySize
+// (254 MiB) via msg["raw"] — for example a fully reframed HTTP request.
+// The 1 MiB TCP cap MUST NOT clip these because the relay buffer × fan-out
+// argument that motivates the cap only applies to the bytechunk Layer's
+// raw TCP path. Per design review (agentId a03c3c7f8acb2cc1f), gating by
+// hook identity instead of message type is what enables this distinction.
+func TestDispatch_HTTPHook_NotGated(t *testing.T) {
+	e := NewEngine(nil)
+	// 2 MiB raw bytes — would trip the TCP cap if the gate were missing,
+	// but stays under maxPluginRawSize (16 MiB) so the SetKey ceiling
+	// permits the assignment.
+	bigRaw := bytes.Repeat([]byte("E"), 2<<20)
+	hook := Hook{
+		Protocol: ProtoHTTP, Event: EventOnRequest, Phase: PhasePrePipeline,
+		PluginName: "p1",
+		Fn: builtinHook("http-big-raw", func(msg *MessageDict, c *Ctx) (starlark.Value, error) {
+			if err := msg.SetKey(starlark.String("raw"), starlark.Bytes(bigRaw)); err != nil {
+				return nil, err
+			}
+			return starlark.None, nil
+		}),
+	}
+	out, err := e.Dispatch(context.Background(), hook, httpEnv(t))
+	if err != nil {
+		t.Fatalf("HTTP hook must NOT be gated by TCP chunk cap, got err=%v", err)
+	}
+	if out.Action != ActionContinue {
+		t.Errorf("Action = %v, want ActionContinue", out.Action)
+	}
+	if len(out.NewRaw) != len(bigRaw) {
+		t.Errorf("NewRaw len = %d, want %d (HTTP raw must pass the cap untouched)", len(out.NewRaw), len(bigRaw))
+	}
+}
+
+// TestDispatch_RawHookSmallChunk_Passes is the positive control: a
+// (raw, on_chunk) hook returning a small (≤ cap) chunk passes through
+// normally.
+func TestDispatch_RawHookSmallChunk_Passes(t *testing.T) {
+	e := NewEngine(nil)
+	small := []byte("modified chunk")
+	hook := Hook{
+		Protocol: ProtoRaw, Event: EventOnChunk, Phase: PhasePrePipeline,
+		PluginName: "p1",
+		Fn: builtinHook("raw-small", func(msg *MessageDict, c *Ctx) (starlark.Value, error) {
+			if err := msg.SetKey(starlark.String("bytes"), starlark.Bytes(small)); err != nil {
+				return nil, err
+			}
+			return starlark.None, nil
+		}),
+	}
+	out, err := e.Dispatch(context.Background(), hook, rawEnv(t))
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if out.Action != ActionContinue {
+		t.Errorf("Action = %v, want ActionContinue", out.Action)
+	}
+	rm := out.NewMessage.(*envelope.RawMessage)
+	if string(rm.Bytes) != string(small) {
+		t.Errorf("Bytes = %q, want %q", string(rm.Bytes), string(small))
+	}
+}
+
+// TestEnforceTCPChunkCap_TableDriven exercises the helper directly to lock
+// in the gating logic across the matrix of (hook identity, mutation kind,
+// raw-size, message-bytes-size) combinations.
+func TestEnforceTCPChunkCap_TableDriven(t *testing.T) {
+	tests := []struct {
+		name         string
+		hook         Hook
+		kind         MutationKind
+		rawLen       int
+		bytesLen     int
+		wantErr      bool
+		wantSentinel error
+	}{
+		{
+			name:     "raw_on_chunk: small both: ok",
+			hook:     Hook{Protocol: ProtoRaw, Event: EventOnChunk},
+			kind:     MutationBoth,
+			rawLen:   100,
+			bytesLen: 100,
+			wantErr:  false,
+		},
+		{
+			name:         "raw_on_chunk: oversized NewRaw: err",
+			hook:         Hook{Protocol: ProtoRaw, Event: EventOnChunk},
+			kind:         MutationRawOnly,
+			rawLen:       maxTCPPluginChunkSize + 1,
+			bytesLen:     100,
+			wantErr:      true,
+			wantSentinel: ErrChunkTooLarge,
+		},
+		{
+			name:         "raw_on_chunk: oversized Message.Bytes: err",
+			hook:         Hook{Protocol: ProtoRaw, Event: EventOnChunk},
+			kind:         MutationMessageOnly,
+			rawLen:       0,
+			bytesLen:     maxTCPPluginChunkSize + 1,
+			wantErr:      true,
+			wantSentinel: ErrChunkTooLarge,
+		},
+		{
+			name:     "raw_on_chunk: at-limit Message.Bytes: ok",
+			hook:     Hook{Protocol: ProtoRaw, Event: EventOnChunk},
+			kind:     MutationMessageOnly,
+			rawLen:   0,
+			bytesLen: maxTCPPluginChunkSize,
+			wantErr:  false,
+		},
+		{
+			name:     "http_on_request: oversized NewRaw: not gated",
+			hook:     Hook{Protocol: ProtoHTTP, Event: EventOnRequest},
+			kind:     MutationRawOnly,
+			rawLen:   maxTCPPluginChunkSize + 1,
+			bytesLen: 0,
+			wantErr:  false,
+		},
+		{
+			name:     "raw_on_chunk: NewRaw oversized but MutationUnchanged: skipped",
+			hook:     Hook{Protocol: ProtoRaw, Event: EventOnChunk},
+			kind:     MutationUnchanged,
+			rawLen:   maxTCPPluginChunkSize + 1,
+			bytesLen: 100,
+			wantErr:  false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := bytes.Repeat([]byte("X"), tc.rawLen)
+			msg := &envelope.RawMessage{Bytes: bytes.Repeat([]byte("Y"), tc.bytesLen)}
+			err := enforceTCPChunkCap(tc.hook, tc.kind, raw, msg)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got nil")
+				}
+				if tc.wantSentinel != nil && !errors.Is(err, tc.wantSentinel) {
+					t.Errorf("err = %v, want sentinel %v", err, tc.wantSentinel)
+				}
+				return
+			}
+			if err != nil {
+				t.Errorf("unexpected err = %v", err)
+			}
+		})
 	}
 }
 

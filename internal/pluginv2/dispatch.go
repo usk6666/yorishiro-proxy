@@ -11,6 +11,15 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 )
 
+// maxTCPPluginChunkSize bounds the bytes a (raw, on_chunk) hook can emit
+// to the wire on the TCP/raw path. Mirrors config.MaxTCPPluginChunkSize
+// (1 MiB = bytechunk relay buffer 32 KiB × 32 expansion factor; CWE-400
+// mitigation). Defined locally because internal/config already imports
+// internal/pluginv2 (see config.PluginConfig in config.go), so a direct
+// import here would form a cycle. A package-level test in config_test.go
+// keeps the two constants in lockstep.
+const maxTCPPluginChunkSize = 1 << 20
+
 // HookOutcome carries the typed result of dispatching a single Hook.
 //
 // For Action == ActionContinue, NewMessage / NewRaw / Mutation describe how
@@ -135,12 +144,52 @@ func (e *Engine) Dispatch(ctx context.Context, hook Hook, env *envelope.Envelope
 		)
 		return &HookOutcome{Action: ActionContinue, Mutation: MutationUnchanged, NewMessage: env.Message, NewRaw: env.Raw}, nil
 	}
+	if err := enforceTCPChunkCap(hook, kind, raw, msg); err != nil {
+		// Sentinel ErrChunkTooLarge: the Pipeline dispatcher catches
+		// this, logs Warn, and continues with the previous (un-mutated)
+		// envelope so the original chunk reaches the wire untouched.
+		// Mirrors the ErrDisallowedAction fail-soft contract.
+		return nil, err
+	}
 	return &HookOutcome{
 		Action:     ActionContinue,
 		Mutation:   kind,
 		NewMessage: msg,
 		NewRaw:     raw,
 	}, nil
+}
+
+// enforceTCPChunkCap returns ErrChunkTooLarge when a (raw, on_chunk) hook
+// produced bytes that would exceed maxTCPPluginChunkSize on the wire.
+// Both raw-egress paths are checked:
+//
+//   - outcome.NewRaw (set when the plugin assigned msg["raw"] — Mutation
+//     RawOnly or Both)
+//   - outcome.NewMessage as *envelope.RawMessage (set when the plugin
+//     assigned msg["bytes"] — MessageOnly or Both; bytechunk.Channel.Send
+//     writes msg.Bytes directly to the wire)
+//
+// Gated by hook identity so HTTP / WS / gRPC plugins (which legitimately
+// produce up to MaxBodySize = 254 MiB) are not affected — only the TCP
+// raw path multiplies a 32 KiB relay buffer by per-conn × per-direction
+// fan-out and therefore needs the tighter cap.
+func enforceTCPChunkCap(hook Hook, kind MutationKind, raw []byte, msg envelope.Message) error {
+	if hook.Protocol != ProtoRaw || hook.Event != EventOnChunk {
+		return nil
+	}
+	if kind == MutationRawOnly || kind == MutationBoth {
+		if int64(len(raw)) > maxTCPPluginChunkSize {
+			return fmt.Errorf("%w: NewRaw size %d > limit %d",
+				ErrChunkTooLarge, len(raw), maxTCPPluginChunkSize)
+		}
+	}
+	if rm, ok := msg.(*envelope.RawMessage); ok {
+		if int64(len(rm.Bytes)) > maxTCPPluginChunkSize {
+			return fmt.Errorf("%w: Message.Bytes size %d > limit %d",
+				ErrChunkTooLarge, len(rm.Bytes), maxTCPPluginChunkSize)
+		}
+	}
+	return nil
 }
 
 // interpretReturnValue maps a Starlark return value to (Action, *RespondAction).

@@ -1,6 +1,32 @@
 package pluginv2
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+)
+
+// ErrChunkTooLarge is returned by Engine.Dispatch when a (raw, on_chunk)
+// hook returns chunk bytes whose size exceeds maxTCPPluginChunkSize
+// (1 MiB — mirrors config.MaxTCPPluginChunkSize; the bytechunk Layer's
+// 32 KiB relay buffer × 32 expansion budget, CWE-400 mitigation). The
+// cap fires for either path the plugin can use to inject raw TCP bytes:
+//
+//   - msg["raw"] = b"..." → outcome.NewRaw (MutationRawOnly / MutationBoth)
+//   - msg["bytes"] = b"..." → (*envelope.RawMessage).Bytes via outcome.NewMessage
+//
+// Mirrors the ErrDisallowedAction fail-soft contract: the Pipeline
+// dispatcher in internal/pipeline/plugin_dispatch.go catches this
+// sentinel, logs slog.Warn, and continues with the previous (un-mutated)
+// envelope so the original chunk reaches the wire untouched. The cap is
+// gated by hook identity so HTTP / WS / gRPC plugins (which legitimately
+// produce up to MaxBodySize) are not affected.
+//
+// The cap is layered on top of maxPluginRawSize (raw_field.go = 16 MiB)
+// — the SetKey-time ceiling applies to msg["raw"] for ALL protocols; this
+// dispatch-time cap is more restrictive and only applies to the raw TCP
+// egress path because that path multiplies a small relay buffer by the
+// per-connection × per-direction factor.
+var ErrChunkTooLarge = errors.New("pluginv2: (raw, on_chunk) hook chunk exceeds size cap")
 
 // LoadErrorKind classifies a plugin load failure for callers that want to
 // react programmatically. Use errors.As to extract a *LoadError, then
