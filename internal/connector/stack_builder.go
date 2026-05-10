@@ -57,6 +57,26 @@ type BuildConfig struct {
 	// pointer. A nil load means "fall back to UpstreamProxy".
 	upstreamProxyDynamic atomic.Pointer[url.URL]
 
+	// enabledProtocolsDynamic stores the runtime-mutable enabled-protocols
+	// allow-list installed by proxy_start / configure (USK-808). The data
+	// path consults this snapshot at MITM-handshake time to filter the
+	// ALPN list advertised to the client so e.g. proxy_start with
+	// protocols=["HTTP/1.x","HTTPS"] does not advertise "h2" — thus
+	// keeping browsers on HTTP/1.1 as the operator requested. atomic
+	// .Pointer is used so dial-path readers (per-connection goroutines)
+	// and the MCP-tool writer (proxy_start handler goroutine) do not
+	// race on the slice header. A nil load (or zero-length slice) means
+	// "no filter" — legacy "all-allowed" semantics.
+	//
+	// Note: this filter applies ONLY to the client-facing MITM ALPN
+	// offer; upstream-facing dial offers are intentionally not filtered
+	// because wire fidelity to upstream is a strict MITM principle and
+	// h2-only origins must remain reachable. The post-MITM redial via
+	// canonicalRedialALPNOffer (USK-793) collapses upstream to http/1.1
+	// when the client picked http/1.1, so the inner stack is already
+	// single-protocol end-to-end.
+	enabledProtocolsDynamic atomic.Pointer[[]string]
+
 	// HostTLSResolver resolves per-host TLS overrides (InsecureSkipVerify,
 	// ClientCert, RootCAs). Nil means use global settings for all hosts.
 	HostTLSResolver *HostTLSResolver
@@ -245,6 +265,51 @@ func (c *BuildConfig) SetUpstreamProxy(u *url.URL) {
 		return
 	}
 	c.upstreamProxyDynamic.Store(u)
+}
+
+// SetEnabledProtocols installs a runtime override for the enabled-protocols
+// allow-list. Subsequent calls to EffectiveEnabledProtocols return a copy
+// of protocols, or nil when protocols is nil/empty (legacy "all-allowed"
+// semantic). The runtime override is the wire-up consumed by proxy_start /
+// configure (USK-808) to make the allow-list reach the client-facing MITM
+// ALPN filter so e.g. omitting "HTTP/2" from protocols actually keeps "h2"
+// out of the advertised ALPN list.
+//
+// A defensive copy is taken so later mutation of the caller's slice
+// cannot perturb the stored snapshot. Writes are atomic with respect to
+// concurrent dial-path reads.
+func (c *BuildConfig) SetEnabledProtocols(protocols []string) {
+	if c == nil {
+		return
+	}
+	if len(protocols) == 0 {
+		c.enabledProtocolsDynamic.Store(nil)
+		return
+	}
+	cp := make([]string, len(protocols))
+	copy(cp, protocols)
+	c.enabledProtocolsDynamic.Store(&cp)
+}
+
+// EffectiveEnabledProtocols returns a defensive copy of the runtime
+// enabled-protocols allow-list installed by SetEnabledProtocols, or nil
+// when no filter is active. This is the canonical accessor for live
+// data-path code that needs to apply the operator's protocol allow-list
+// at MITM handshake time (USK-808).
+//
+// nil / empty means "all allowed" — callers must treat that as the
+// identity (no filtering) per USK-808 design decision #5.
+func (c *BuildConfig) EffectiveEnabledProtocols() []string {
+	if c == nil {
+		return nil
+	}
+	p := c.enabledProtocolsDynamic.Load()
+	if p == nil || len(*p) == 0 {
+		return nil
+	}
+	out := make([]string, len(*p))
+	copy(out, *p)
+	return out
 }
 
 // BuildConnectionStack constructs a ConnectionStack for the given CONNECT
@@ -525,7 +590,7 @@ func buildCacheHitPath(
 	hostTLS *resolvedTLS,
 	cfg *BuildConfig,
 ) (clientTLSConn net.Conn, upstreamConn net.Conn, clientSnap, upstreamSnap *envelope.TLSSnapshot, err error) {
-	clientOffers := clientALPNOffersForUpstream(cachedALPN)
+	clientOffers := clientALPNOffersForUpstream(cachedALPN, cfg.EffectiveEnabledProtocols())
 	clientTLSConn, clientSnap, err = performClientMITM(ctx, clientConn, host, clientOffers, cfg)
 	if err != nil {
 		return nil, nil, nil, nil, err
@@ -630,8 +695,10 @@ func buildCacheMissPath(
 	// Offer the client every ALPN we believe upstream supports plus the
 	// fallback http/1.1, so a client that cannot speak h2 still negotiates
 	// a non-empty protocol the proxy can dispatch on. See function comment
-	// for the rationale (USK-793).
-	clientOffers := clientALPNOffersForUpstream(upstreamALPN)
+	// for the rationale (USK-793). The offers are then filtered through
+	// the operator's enabled_protocols allow-list (USK-808) so disabled
+	// protocols are never advertised.
+	clientOffers := clientALPNOffersForUpstream(upstreamALPN, cfg.EffectiveEnabledProtocols())
 	clientTLSConn, clientSnap, err = performClientMITM(ctx, clientConn, host, clientOffers, cfg)
 	if err != nil {
 		upstreamConn.Close()
@@ -704,7 +771,14 @@ func buildPoolHitFastPath(
 	poolKey pool.PoolKey,
 	cfg *BuildConfig,
 ) (*ConnectionStack, *envelope.TLSSnapshot, *envelope.TLSSnapshot, error) {
-	clientOffers := clientALPNOffersForUpstream(ALPNProtocolH2)
+	// USK-808: filter through enabled_protocols so a pool entry warmed
+	// while h2 was permitted does not advertise h2 once the operator
+	// disabled it via proxy_start. When the filter excludes h2 entirely,
+	// the helper returns ["http/1.1"]; the client then cannot pick h2,
+	// the post-handshake clientALPN check below falls through to
+	// fallbackPoolHitToFreshDial, and the pool entry is released for the
+	// next h2-capable caller (or for after the operator re-enables h2).
+	clientOffers := clientALPNOffersForUpstream(ALPNProtocolH2, cfg.EffectiveEnabledProtocols())
 	clientTLSConn, clientSnap, err := performClientMITM(ctx, clientConn, host, clientOffers, cfg)
 	if err != nil {
 		// Release the pool reservation — Layer is healthy, we just didn't

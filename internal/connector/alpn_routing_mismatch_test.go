@@ -37,7 +37,12 @@ func TestClientALPNOffersForUpstream(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := clientALPNOffersForUpstream(tt.upstreamALPN)
+			// Pass nil for the enabled-protocols filter to exercise the
+			// legacy USK-793 behaviour (the new USK-808 filter is
+			// covered by TestClientALPNOffersForUpstream_LegacyBehavior
+			// and TestClientALPNOffersForUpstream_FilteredByEnabledProtocols
+			// in alpn_routing_test.go).
+			got := clientALPNOffersForUpstream(tt.upstreamALPN, nil)
 			if len(got) != len(tt.want) {
 				t.Fatalf("len(offers) = %d, want %d (got %v)", len(got), len(tt.want), got)
 			}

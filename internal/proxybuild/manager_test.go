@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/config"
+	"github.com/usk6666/yorishiro-proxy/internal/connector"
 )
 
 // newTestManager constructs a Manager whose StackFactory builds a real
@@ -246,6 +247,64 @@ func TestManager_UpstreamProxy_RoundTrip(t *testing.T) {
 	mgr.SetUpstreamProxy("")
 	if got := mgr.UpstreamProxy(); got != "" {
 		t.Errorf("UpstreamProxy after clear = %q, want empty", got)
+	}
+}
+
+// TestManager_SetEnabledProtocols_PropagatesToBuildConfig verifies the
+// USK-808 fan-out: Manager.SetEnabledProtocols pushes the snapshot into
+// the bound BuildConfig so the live MITM ALPN filter observes it. Mirrors
+// the SetUpstreamProxy → BuildConfig propagation locked in by USK-734.
+func TestManager_SetEnabledProtocols_PropagatesToBuildConfig(t *testing.T) {
+	depsTpl := newTestDeps(t)
+	bc := &connector.BuildConfig{}
+	mgr, err := NewManager(ManagerConfig{
+		Logger: depsTpl.Logger,
+		StackFactory: func(_ context.Context, name, addr string) (*Stack, error) {
+			d := newTestDeps(t)
+			d.ListenerName = name
+			d.ListenAddr = addr
+			return BuildLiveStack(context.Background(), d)
+		},
+		BuildConfig: bc,
+	})
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	// Initial snapshot is nil.
+	if got := bc.EffectiveEnabledProtocols(); got != nil {
+		t.Errorf("initial BuildConfig.EffectiveEnabledProtocols = %v, want nil", got)
+	}
+
+	// Setting protocols propagates to BuildConfig.
+	mgr.SetEnabledProtocols([]string{"HTTP/1.x", "HTTPS"})
+	got := bc.EffectiveEnabledProtocols()
+	want := []string{"HTTP/1.x", "HTTPS"}
+	if len(got) != len(want) {
+		t.Fatalf("BuildConfig.EffectiveEnabledProtocols = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("BuildConfig.EffectiveEnabledProtocols[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+
+	// Clearing propagates too.
+	mgr.SetEnabledProtocols(nil)
+	if got := bc.EffectiveEnabledProtocols(); got != nil {
+		t.Errorf("after clear: BuildConfig.EffectiveEnabledProtocols = %v, want nil", got)
+	}
+}
+
+// TestManager_SetEnabledProtocols_NoBuildConfig_NoCrash verifies the
+// fan-out tolerates a Manager constructed without a BuildConfig (the
+// historical pre-USK-808 path retained for tests/adapters).
+func TestManager_SetEnabledProtocols_NoBuildConfig_NoCrash(t *testing.T) {
+	mgr := newTestManager(t) // newTestManager omits BuildConfig
+	// Must not panic.
+	mgr.SetEnabledProtocols([]string{"HTTP/1.x"})
+	if got := mgr.EnabledProtocols(); len(got) != 1 || got[0] != "HTTP/1.x" {
+		t.Errorf("Manager.EnabledProtocols = %v, want [HTTP/1.x]", got)
 	}
 }
 

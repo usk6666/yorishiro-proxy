@@ -453,6 +453,15 @@ func (m *Manager) PeekTimeout() time.Duration {
 // all detected kinds". The change applies immediately to all running
 // listeners and is remembered so listeners started later inherit it.
 // USK-732 wiring: pairs with proxybuild.Listener.SetEnabledProtocols.
+//
+// USK-808: the snapshot is also propagated to the bound BuildConfig so
+// the per-connection MITM TLS handshake filters its advertised ALPN
+// list to only the protocols the operator enabled. Without this fan-out
+// the listener-level peek filter would let a CONNECT through and the
+// MITM handshake would still advertise h2 even if "HTTP/2" is not in
+// protocols. Mirrors the SetUpstreamProxy → BuildConfig propagation
+// added in USK-734. nil BuildConfig (Managers constructed without one,
+// e.g. tests/adapters) is tolerated as a no-op for that fan-out leg.
 func (m *Manager) SetEnabledProtocols(protocols []string) {
 	var stored []string
 	if len(protocols) > 0 {
@@ -461,6 +470,7 @@ func (m *Manager) SetEnabledProtocols(protocols []string) {
 	}
 	m.mu.Lock()
 	m.enabledProtocols = stored
+	bc := m.buildCfg
 	listeners := make([]*Listener, 0, len(m.listeners))
 	for _, entry := range m.listeners {
 		listeners = append(listeners, entry.stack.Listener)
@@ -468,6 +478,9 @@ func (m *Manager) SetEnabledProtocols(protocols []string) {
 	m.mu.Unlock()
 	for _, l := range listeners {
 		l.SetEnabledProtocols(stored)
+	}
+	if bc != nil {
+		bc.SetEnabledProtocols(stored)
 	}
 }
 
