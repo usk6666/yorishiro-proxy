@@ -265,6 +265,7 @@ func exportToStream(es *ExportStream) (*Stream, error) {
 		ID:        es.ID,
 		ConnID:    es.ConnID,
 		Protocol:  es.Protocol,
+		Scheme:    es.Scheme,
 		State:     es.State,
 		Timestamp: ts,
 		Duration:  time.Duration(es.DurationMs) * time.Millisecond,

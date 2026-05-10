@@ -13,14 +13,24 @@ import (
 )
 
 // makeTestSession creates a test flow with messages in the store.
+//
+// Scheme is derived from the urlStr argument (e.g. "https://..." → "https")
+// so existing call sites get a non-empty Scheme without further plumbing.
+// This pins the USK-810 export-import contract on the standard fixture.
 func makeTestSession(t *testing.T, store *SQLiteStore, id, protocol, urlStr string, ts time.Time, body []byte) {
 	t.Helper()
 	ctx := context.Background()
+
+	scheme := ""
+	if u, err := url.Parse(urlStr); err == nil {
+		scheme = u.Scheme
+	}
 
 	fl := &Stream{
 		ID:        id,
 		ConnID:    "conn-" + id,
 		Protocol:  protocol,
+		Scheme:    scheme,
 		State:     "complete",
 		Timestamp: ts,
 		Duration:  150 * time.Millisecond,
@@ -120,6 +130,9 @@ func TestExportImportRoundTrip(t *testing.T) {
 
 		if origSess.Protocol != importedSess.Protocol {
 			t.Errorf("session %s protocol: got %s, want %s", id, importedSess.Protocol, origSess.Protocol)
+		}
+		if origSess.Scheme != importedSess.Scheme {
+			t.Errorf("session %s scheme: got %q, want %q", id, importedSess.Scheme, origSess.Scheme)
 		}
 		if origSess.State != importedSess.State {
 			t.Errorf("session %s state: got %s, want %s", id, importedSess.State, origSess.State)
@@ -1219,5 +1232,80 @@ func TestImport_MissingOriginFallsBackToProxy(t *testing.T) {
 	}
 	if got.Origin != OriginProxy {
 		t.Errorf("missing-origin import → Origin = %q, want %q", got.Origin, OriginProxy)
+	}
+}
+
+// TestExportImportSchemeRoundTrip pins the USK-810 export-import contract:
+// Stream.Scheme is preserved across JSONL roundtrip for every canonical
+// scheme value, and the empty case round-trips as empty (no URL-scheme
+// backfill on import). Pre-fix the JSONL line dropped the field because
+// ExportStream did not declare it; this test guards the regression so a
+// future hand-written DTO change cannot silently re-drop it.
+func TestExportImportSchemeRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name   string
+		scheme string
+	}{
+		{name: "https", scheme: "https"},
+		{name: "http", scheme: "http"},
+		{name: "wss", scheme: "wss"},
+		{name: "ws", scheme: "ws"},
+		{name: "tcp", scheme: "tcp"},
+		{name: "empty", scheme: ""},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			src := newTestStore(t)
+			ctx := context.Background()
+			ts := time.Date(2026, 5, 9, 12, 0, 0, 0, time.UTC)
+
+			st := &Stream{
+				ID:        "stream-" + tc.name,
+				Protocol:  "HTTP/1.x",
+				Scheme:    tc.scheme,
+				State:     "complete",
+				Timestamp: ts,
+				Duration:  10 * time.Millisecond,
+			}
+			if err := src.SaveStream(ctx, st); err != nil {
+				t.Fatalf("SaveStream: %v", err)
+			}
+
+			var buf bytes.Buffer
+			if _, err := ExportStreams(ctx, src, &buf, ExportOptions{IncludeBodies: true}); err != nil {
+				t.Fatalf("ExportStreams: %v", err)
+			}
+
+			// Verify the JSONL line itself carries the scheme (or omits
+			// it via omitempty when the source value is empty).
+			var rec ExportRecord
+			if err := json.Unmarshal(buf.Bytes(), &rec); err != nil {
+				t.Fatalf("unmarshal export record: %v", err)
+			}
+			if rec.Stream.Scheme != tc.scheme {
+				t.Errorf("export record scheme = %q, want %q", rec.Stream.Scheme, tc.scheme)
+			}
+
+			dst := newTestStore(t)
+			res, err := ImportStreams(ctx, dst, bytes.NewReader(buf.Bytes()), ImportOptions{OnConflict: ConflictSkip})
+			if err != nil {
+				t.Fatalf("ImportStreams: %v", err)
+			}
+			if res.Imported != 1 {
+				t.Fatalf("Imported = %d, want 1 (errors=%d, details=%+v)", res.Imported, res.Errors, res.ErrorDetails)
+			}
+
+			got, err := dst.GetStream(ctx, st.ID)
+			if err != nil {
+				t.Fatalf("GetStream: %v", err)
+			}
+			if got.Scheme != tc.scheme {
+				t.Errorf("imported Scheme = %q, want %q", got.Scheme, tc.scheme)
+			}
+		})
 	}
 }

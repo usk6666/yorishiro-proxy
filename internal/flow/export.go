@@ -59,9 +59,15 @@ type ExportRecord struct {
 
 // ExportStream is the JSON-serializable representation of a Stream.
 type ExportStream struct {
-	ID         string            `json:"id"`
-	ConnID     string            `json:"conn_id"`
-	Protocol   string            `json:"protocol"`
+	ID       string `json:"id"`
+	ConnID   string `json:"conn_id"`
+	Protocol string `json:"protocol"`
+	// Scheme is the URL scheme / transport indicator ("https", "http",
+	// "wss", "ws", "tcp"). Omitted from the JSONL line when empty so
+	// pre-USK-810 exports continue to round-trip unchanged. Empty on
+	// import is preserved as empty (no URL-scheme backfill) — wire-
+	// recorded value can legitimately be empty (e.g., raw TCP).
+	Scheme     string            `json:"scheme,omitempty"`
 	State      string            `json:"state"`
 	Timestamp  string            `json:"timestamp"`
 	DurationMs int64             `json:"duration_ms"`
@@ -175,6 +181,7 @@ func streamToExport(s *Stream) *ExportStream {
 		ID:         s.ID,
 		ConnID:     s.ConnID,
 		Protocol:   s.Protocol,
+		Scheme:     s.Scheme,
 		State:      s.State,
 		Timestamp:  s.Timestamp.UTC().Format(time.RFC3339Nano),
 		DurationMs: s.Duration.Milliseconds(),

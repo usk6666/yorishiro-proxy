@@ -541,6 +541,79 @@ func TestExportImportRoundTrip_MCP(t *testing.T) {
 	}
 }
 
+// TestExportFlowsAction_SchemePreserved pins the USK-810 regression at the
+// MCP boundary: the `manage export_flows` JSONL output must carry
+// stream.scheme set to the live value (e.g. "https"). This is the exact
+// path the user traversed in the bug report — a focused assertion at
+// this layer guards the hand-written DTO copy in internal/flow against
+// future drops.
+func TestExportFlowsAction_SchemePreserved(t *testing.T) {
+	t.Parallel()
+	store := newTestStore(t)
+	ca := newTestCA(t)
+	cs := setupTestSession(t, ca, store)
+
+	ctx := context.Background()
+	ts := time.Date(2026, 5, 9, 12, 0, 0, 0, time.UTC)
+
+	st := &flow.Stream{
+		ID:        "sess-scheme-1",
+		ConnID:    "conn-scheme-1",
+		Protocol:  "HTTPS",
+		Scheme:    "https",
+		State:     "complete",
+		Timestamp: ts,
+		Duration:  100 * time.Millisecond,
+	}
+	if err := store.SaveStream(ctx, st); err != nil {
+		t.Fatalf("SaveStream: %v", err)
+	}
+	msg := &flow.Flow{
+		ID:        "msg-scheme-1",
+		StreamID:  st.ID,
+		Sequence:  0,
+		Direction: "send",
+		Timestamp: ts,
+		Method:    "GET",
+	}
+	if err := store.SaveFlow(ctx, msg); err != nil {
+		t.Fatalf("SaveFlow: %v", err)
+	}
+
+	dir := t.TempDir()
+	outputPath := filepath.Join(dir, "export.jsonl")
+
+	result := manageCallTool(t, cs, map[string]any{
+		"action": "export_flows",
+		"params": map[string]any{
+			"output_path": outputPath,
+		},
+	})
+	if result.IsError {
+		t.Fatalf("export returned error: %v", result.Content)
+	}
+
+	data, err := os.ReadFile(outputPath)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	line := strings.TrimSpace(string(data))
+	if line == "" {
+		t.Fatal("exported file is empty")
+	}
+
+	var rec flow.ExportRecord
+	if err := json.Unmarshal([]byte(line), &rec); err != nil {
+		t.Fatalf("unmarshal JSONL line: %v (line=%q)", err, line)
+	}
+	if rec.Stream == nil {
+		t.Fatal("exported record has nil stream")
+	}
+	if rec.Stream.Scheme != "https" {
+		t.Errorf("exported stream.scheme = %q, want %q", rec.Stream.Scheme, "https")
+	}
+}
+
 func TestExportFlowsAction_PathTraversalCleaned(t *testing.T) {
 	t.Parallel()
 	store := newTestStore(t)
