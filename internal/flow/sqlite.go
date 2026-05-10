@@ -635,11 +635,15 @@ func (s *SQLiteStore) DeleteStreamsByProtocol(ctx context.Context, protocol stri
 // interpolated into the SQL string. The http_version predicate is an
 // EXISTS subquery on the flows table because http_version lives there
 // (schemaV13). The idx_flows_http_version index makes the subquery
-// cheap. Cascade deletion of associated flows is handled by the
+// cheap. The url_pattern predicate is an EXISTS subquery on the flows
+// table mirroring the SELECT-side URL-pattern predicate
+// (appendStreamFlowExistsPredicates). Time bounds use the same
+// RFC3339Nano lex-comparable string format DeleteStreamsOlderThan uses
+// (USK-822). Cascade deletion of associated flows is handled by the
 // foreign key (ON DELETE CASCADE), the same way DeleteStream does it.
 func (s *SQLiteStore) DeleteStreamsByFilter(ctx context.Context, filter StreamDeleteFilter) (int64, error) {
 	if filter.IsZero() {
-		return 0, fmt.Errorf("delete streams by filter: filter must specify at least one of protocol, scheme, http_version")
+		return 0, fmt.Errorf("delete streams by filter: filter must specify at least one of protocol, scheme, http_version, url_pattern, time_after, time_before")
 	}
 
 	var conditions []string
@@ -659,6 +663,27 @@ func (s *SQLiteStore) DeleteStreamsByFilter(ctx context.Context, filter StreamDe
 		// buildStreamWhereClause (which aliases as s.id under SELECT).
 		conditions = append(conditions, "EXISTS (SELECT 1 FROM flows m WHERE m.stream_id = streams.id AND m.http_version = ?)")
 		args = append(args, *filter.HTTPVersion)
+	}
+	if filter.URLPattern != "" {
+		// Mirror appendStreamFlowExistsPredicates: substring match on
+		// send-direction flows.url with `\\` as the LIKE escape so
+		// callers' literal '%' / '_' / '\\' characters do not become
+		// wildcards. Substring boundaries (% on each side) match the
+		// SELECT-path semantics analysts already exercise via
+		// query / export.
+		escaped := strings.NewReplacer("%", "\\%", "_", "\\_").Replace(filter.URLPattern)
+		conditions = append(conditions, "EXISTS (SELECT 1 FROM flows m WHERE m.stream_id = streams.id AND m.direction = 'send' AND m.url LIKE ? ESCAPE '\\')")
+		args = append(args, "%"+escaped+"%")
+	}
+	if filter.TimeAfter != nil {
+		// streams.timestamp is an RFC3339Nano string; lex compare ==
+		// chronological compare. Same shape as DeleteStreamsOlderThan.
+		conditions = append(conditions, "timestamp >= ?")
+		args = append(args, filter.TimeAfter.UTC().Format(time.RFC3339Nano))
+	}
+	if filter.TimeBefore != nil {
+		conditions = append(conditions, "timestamp <= ?")
+		args = append(args, filter.TimeBefore.UTC().Format(time.RFC3339Nano))
 	}
 
 	query := "DELETE FROM streams WHERE " + strings.Join(conditions, " AND ")

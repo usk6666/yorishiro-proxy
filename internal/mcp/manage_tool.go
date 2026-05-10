@@ -90,12 +90,14 @@ func (s *Server) registerManage() {
 	gomcp.AddTool(s.server, &gomcp.Tool{
 		Name: "manage",
 		Description: "Manage flow data and CA certificates. Actions: " +
-			"'delete_flows' (by ID, age, or filter — protocol / scheme / http_version with confirm — or all); " +
+			"'delete_flows' (by ID, age, top-level protocol/scheme/http_version, or params.filter " +
+			"url_pattern / time_after / time_before — all with confirm — or all); " +
 			"'export_flows' (JSONL or HAR 1.2, optionally filtered by protocol / scheme / http_version / url_pattern / time, with/without bodies); " +
 			"'import_flows' (JSONL with skip/replace on ID conflict); " +
 			"'regenerate_ca_cert' (depends on CA persistence mode). " +
-			"Filter axes (protocol / scheme / http_version) mirror the query tool's filter so analysts can " +
+			"Filter axes (protocol / scheme / http_version / url_pattern / time) mirror the query tool's filter so analysts can " +
 			"export / delete the same set of flows they were inspecting. " +
+			"For delete_flows, top-level protocol/scheme/http_version and params.filter cannot be combined in a single call; supply one form. " +
 			"See yorishiro://help/manage.",
 	}, s.handleManage)
 }
@@ -184,10 +186,12 @@ func (s *Server) handleManageDeleteFlows(ctx context.Context, params manageParam
 	}
 
 	// Bulk filter-based deletion: any combination of protocol / scheme /
-	// http_version. All non-zero filter fields combine with AND. A
-	// confirm guard is required because the filter can match many
-	// streams. Empty filter falls through to the unconditional
-	// delete-all branch below.
+	// http_version (top-level) OR url_pattern / time_after / time_before
+	// inside params.filter (USK-822). Mixing the two forms is rejected
+	// for unambiguous semantics. All non-zero filter fields within the
+	// chosen form combine with AND. A confirm guard is required because
+	// the filter can match many streams. Empty filter falls through to
+	// the unconditional delete-all branch below.
 	deleteFilter, err := buildDeleteFilter(params)
 	if err != nil {
 		return nil, nil, err
@@ -200,6 +204,9 @@ func (s *Server) handleManageDeleteFlows(ctx context.Context, params manageParam
 			"protocol", deleteFilter.Protocol,
 			"scheme", deleteFilter.Scheme,
 			"http_version", debugHTTPVersionPtr(deleteFilter.HTTPVersion),
+			"url_pattern", deleteFilter.URLPattern,
+			"time_after", debugTimePtr(deleteFilter.TimeAfter),
+			"time_before", debugTimePtr(deleteFilter.TimeBefore),
 		)
 		n, err := s.flowStore.store.DeleteStreamsByFilter(ctx, deleteFilter)
 		if err != nil {
@@ -213,19 +220,43 @@ func (s *Server) handleManageDeleteFlows(ctx context.Context, params manageParam
 		if err != nil {
 			return nil, nil, fmt.Errorf("delete all flows: %w", err)
 		}
+		// Mass delete is the most destructive control-plane action; log
+		// at Info so operators see "what happened" without enabling
+		// debug. Mirrors CLAUDE.md log-level guidance for a security
+		// event that warrants attention. The filter-applied branch
+		// above stays at Debug because the count is bounded by the
+		// supplied predicates.
+		slog.InfoContext(ctx, "delete_flows: deleted all streams",
+			"deleted_count", n,
+		)
 		return nil, &executeDeleteFlowsResult{DeletedCount: n}, nil
 	}
 
-	return nil, nil, fmt.Errorf("delete_flows requires one of: flow_id, older_than_days, filter (protocol/scheme/http_version with confirm), or confirm=true for all deletion")
+	return nil, nil, fmt.Errorf("delete_flows requires one of: flow_id, older_than_days, filter (protocol/scheme/http_version OR params.filter url_pattern/time_after/time_before with confirm), or confirm=true for all deletion")
 }
 
 // buildDeleteFilter assembles a flow.StreamDeleteFilter from the manage
 // params, validating that supplied values match the canonical
 // MCP-tool enums (mirror of the query tool). An empty filter (no
-// protocol / scheme / http_version) returns a zero filter so the
+// top-level axes and no params.filter) returns a zero filter so the
 // caller can treat that as "delete all" rather than a degenerate
 // single-axis predicate.
+//
+// USK-822: delete_flows now accepts the same params.filter shape as
+// export_flows (url_pattern / time_after / time_before). Mixing the
+// top-level axes (protocol / scheme / http_version) with params.filter
+// is rejected to keep semantics unambiguous — analysts pick one form.
 func buildDeleteFilter(params manageParams) (flow.StreamDeleteFilter, error) {
+	hasTopLevel := params.Protocol != "" || params.Scheme != "" || params.HTTPVersion != nil
+	hasFilter := params.Filter != nil && !exportFilterIsZero(params.Filter)
+	if hasTopLevel && hasFilter {
+		return flow.StreamDeleteFilter{}, fmt.Errorf("delete_flows: cannot mix params.filter with top-level protocol/scheme/http_version filters; supply only one form")
+	}
+
+	if hasFilter {
+		return buildDeleteFilterFromExportFilter(params.Filter)
+	}
+
 	if err := validateManageDeleteFilter(params); err != nil {
 		return flow.StreamDeleteFilter{}, err
 	}
@@ -234,6 +265,56 @@ func buildDeleteFilter(params manageParams) (flow.StreamDeleteFilter, error) {
 		Scheme:      params.Scheme,
 		HTTPVersion: params.HTTPVersion,
 	}, nil
+}
+
+// buildDeleteFilterFromExportFilter validates and converts the
+// params.filter (export-style) shape into a flow.StreamDeleteFilter.
+// It mirrors buildExportOptions's time parsing exactly — same RFC3339
+// format, same wrapped-error shape — so callers see identical errors
+// across the export and delete surfaces (USK-822).
+func buildDeleteFilterFromExportFilter(filter *exportFilter) (flow.StreamDeleteFilter, error) {
+	if err := validateManageExportFilter(filter); err != nil {
+		return flow.StreamDeleteFilter{}, err
+	}
+	out := flow.StreamDeleteFilter{
+		Protocol:    filter.Protocol,
+		Scheme:      filter.Scheme,
+		HTTPVersion: filter.HTTPVersion,
+		URLPattern:  filter.URLPattern,
+	}
+	if filter.TimeAfter != "" {
+		t, err := time.Parse(time.RFC3339, filter.TimeAfter)
+		if err != nil {
+			return flow.StreamDeleteFilter{}, fmt.Errorf("invalid time_after format (expected RFC3339): %w", err)
+		}
+		out.TimeAfter = &t
+	}
+	if filter.TimeBefore != "" {
+		t, err := time.Parse(time.RFC3339, filter.TimeBefore)
+		if err != nil {
+			return flow.StreamDeleteFilter{}, fmt.Errorf("invalid time_before format (expected RFC3339): %w", err)
+		}
+		out.TimeBefore = &t
+	}
+	return out, nil
+}
+
+// exportFilterIsZero reports whether the export-style filter struct has
+// every field at its zero value. Used by delete_flows to distinguish
+// "no filter supplied" from "empty filter object explicitly set" — the
+// latter would otherwise silently fall through to the delete-all
+// branch the bug in USK-822 was about. The check mirrors the axes the
+// jsonschema tags expose on exportFilter.
+func exportFilterIsZero(f *exportFilter) bool {
+	if f == nil {
+		return true
+	}
+	return f.Protocol == "" &&
+		f.Scheme == "" &&
+		f.HTTPVersion == nil &&
+		f.URLPattern == "" &&
+		f.TimeAfter == "" &&
+		f.TimeBefore == ""
 }
 
 // validateManageDeleteFilter validates the delete_flows filter values
@@ -283,6 +364,16 @@ func debugHTTPVersionPtr(p *string) string {
 		return "<unset>"
 	}
 	return *p
+}
+
+// debugTimePtr formats a *time.Time bound for slog without panicking
+// on nil. Nil renders as "<unset>" so debug readers can distinguish
+// "predicate omitted" from "match a specific instant".
+func debugTimePtr(p *time.Time) string {
+	if p == nil {
+		return "<unset>"
+	}
+	return p.UTC().Format(time.RFC3339Nano)
 }
 
 // --- Regenerate CA cert ---

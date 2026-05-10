@@ -94,13 +94,34 @@ type StreamDeleteFilter struct {
 	// source-of-truth marker for unknown / pre-migration data per
 	// schemaV13's `DEFAULT ''`.
 	HTTPVersion *string
+	// URLPattern matches streams whose send-direction flow URL contains
+	// this substring. Implemented as `EXISTS (SELECT 1 FROM flows m
+	// WHERE m.stream_id = streams.id AND m.direction = 'send' AND
+	// m.url LIKE ? ESCAPE '\\')`, mirroring the StreamListOptions
+	// URL-pattern predicate used by export and the query tool. Empty
+	// string means the predicate is omitted (USK-822).
+	URLPattern string
+	// TimeAfter matches streams with timestamps at or after this
+	// instant (`streams.timestamp >= ?`). Nil disables the predicate.
+	// The wire-comparable lex form is RFC3339Nano, identical to
+	// DeleteStreamsOlderThan's bound semantics (USK-822).
+	TimeAfter *time.Time
+	// TimeBefore matches streams with timestamps at or before this
+	// instant (`streams.timestamp <= ?`). Nil disables the predicate
+	// (USK-822).
+	TimeBefore *time.Time
 }
 
 // IsZero reports whether the filter selects no streams (every field is
 // at its zero value). Callers reject zero filters to prevent accidental
 // mass deletion via an empty filter object.
 func (f StreamDeleteFilter) IsZero() bool {
-	return f.Protocol == "" && f.Scheme == "" && f.HTTPVersion == nil
+	return f.Protocol == "" &&
+		f.Scheme == "" &&
+		f.HTTPVersion == nil &&
+		f.URLPattern == "" &&
+		f.TimeAfter == nil &&
+		f.TimeBefore == nil
 }
 
 // StreamDeleter provides deletion operations for streams.
