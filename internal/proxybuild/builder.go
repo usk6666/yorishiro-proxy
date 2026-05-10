@@ -709,6 +709,18 @@ func buildSessionOptions(deps Deps, listenerName string) session.SessionOptions 
 		opts.LifecycleEngine = deps.PluginV2Engine
 		opts.StateReleaser = deps.PluginV2Engine
 	}
+	// USK-806: bridge the post-Upgrade ws.Layer / sse Channel wire caps
+	// from BuildConfig (resolved at boot from ProxyConfig.WebSocket /
+	// ProxyConfig.SSE) into SessionOptions, so runUpgradeWS,
+	// runUpgradeWSOverH2, and runUpgradeSSE apply the operator setting
+	// to the new Layer/Channel they construct. nil-guarded because
+	// buildSessionOptions is also called from test stacks that may not
+	// populate BuildConfig (BuildLiveStack rejects deps.BuildConfig==nil
+	// in production).
+	if deps.BuildConfig != nil {
+		opts.WSMaxFrameSize = deps.BuildConfig.WSMaxFrameSize
+		opts.SSEMaxEventSize = deps.BuildConfig.SSEMaxEventSize
+	}
 	if deps.FlowStore != nil {
 		store := deps.FlowStore
 		// USK-782: shared state between OnPipelineDrop and OnComplete so

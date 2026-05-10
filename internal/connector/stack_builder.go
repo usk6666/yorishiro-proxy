@@ -145,13 +145,15 @@ type BuildConfig struct {
 	// unaffected — this is an HTTP/1.x-only knob.
 	MaxRawCaptureSize int64
 
-	// WSMaxFrameSize is the per-frame WebSocket payload cap applied when
-	// the connector constructs a *ws.Layer. Resolved at BuildConfig
-	// construction time from ProxyConfig.WebSocket via
-	// config.ResolveWSMaxFrameSize. Zero falls back to the Layer default
-	// (config.MaxWebSocketFrameSize, 16 MiB). Read by the N7 Upgrade swap
-	// orchestrator (USK-643); BuildConfig holds the resolved value here so
-	// the swap site does not need to re-resolve.
+	// WSMaxFrameSize is the per-frame WebSocket payload cap applied to
+	// the post-Upgrade *ws.Layer pair on both client- and upstream-facing
+	// sides. Resolved at BuildConfig construction time from
+	// ProxyConfig.WebSocket via config.ResolveWSMaxFrameSize. Zero falls
+	// back to the Layer default (config.MaxWebSocketFrameSize, 16 MiB).
+	// Read by proxybuild.buildSessionOptions, threaded through
+	// session.SessionOptions.WSMaxFrameSize, and applied by runUpgradeWS
+	// / runUpgradeWSOverH2 to both ws.New constructions via
+	// ws.WithMaxFrameSize (USK-806).
 	WSMaxFrameSize int64
 
 	// WSDeflateEnabled toggles permessage-deflate (RFC 7692) on the
@@ -166,10 +168,13 @@ type BuildConfig struct {
 	// default (config.MaxGRPCMessageSize, 254 MiB).
 	GRPCMaxMessageSize uint32
 
-	// SSEMaxEventSize caps the per-event raw byte size on the SSE Layer.
-	// Currently consumed only by USK-643's Upgrade swap orchestrator; this
-	// field is the resolved bridge between ProxyConfig.SSE and the
-	// future sse.WithMaxEventSize Option call.
+	// SSEMaxEventSize caps the per-event raw byte size on the post-Upgrade
+	// SSE Channel built by sse.Wrap. Resolved at BuildConfig construction
+	// time from ProxyConfig.SSE via config.ResolveSSEMaxEventSize. Zero
+	// falls back to the Layer default (config.MaxSSEEventSize, 1 MiB).
+	// Read by proxybuild.buildSessionOptions, threaded through
+	// session.SessionOptions.SSEMaxEventSize, and applied by
+	// runUpgradeSSE via sse.WithMaxEventSize (USK-806).
 	SSEMaxEventSize int
 
 	// GRPCMaxMessagesPerStream caps the number of GRPCDataMessage envelopes

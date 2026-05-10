@@ -76,6 +76,21 @@ type SessionOptions struct {
 	// may share BodyBuffer references with the snapshot held by the
 	// bodyBufRegistry.
 	OnPipelineDrop func(ctx context.Context, env *envelope.Envelope, blockedBy string)
+
+	// WSMaxFrameSize, when positive, is the per-frame WebSocket payload cap
+	// applied to the post-Upgrade *ws.Layer pair on both client- and
+	// upstream-facing sides. Zero falls back to the layer default
+	// (config.MaxWebSocketFrameSize, 16 MiB). Bridged from
+	// connector.BuildConfig.WSMaxFrameSize by proxybuild.buildSessionOptions.
+	// USK-806.
+	WSMaxFrameSize int64
+
+	// SSEMaxEventSize, when positive, caps the per-event raw byte size on the
+	// post-Upgrade SSE Channel built by sse.Wrap. Zero falls back to the
+	// layer default (config.MaxSSEEventSize, 1 MiB). Bridged from
+	// connector.BuildConfig.SSEMaxEventSize by proxybuild.buildSessionOptions.
+	// USK-806.
+	SSEMaxEventSize int
 }
 
 // streamCapture captures the StreamID from the first Envelope in a
@@ -588,8 +603,10 @@ func runUpgradeWS(
 }
 
 // wsLifecycleOptions translates SessionOptions plumbing into the
-// pluginv2-shaped Options on the post-Upgrade WebSocket Layer. Returns
-// nil when no engine/releaser is wired, so callers splat into
+// post-Upgrade WebSocket Layer's Option slice. Despite the name, it
+// carries both pluginv2 lifecycle wiring (LifecycleEngine /
+// StateReleaser) and per-Layer wire-cap knobs (WSMaxFrameSize, USK-806).
+// Returns nil when no fields are wired, so callers splat into
 // ws.New(... opts...) without conditional branching.
 func wsLifecycleOptions(userOpt SessionOptions) []ws.Option {
 	var out []ws.Option
@@ -598,6 +615,13 @@ func wsLifecycleOptions(userOpt SessionOptions) []ws.Option {
 	}
 	if userOpt.StateReleaser != nil {
 		out = append(out, ws.WithStateReleaser(userOpt.StateReleaser))
+	}
+	// USK-806: thread the operator-configured per-frame payload cap into
+	// both client- and upstream-facing ws.Layer constructions. The Option
+	// is no-op on n <= 0 so the > 0 guard is defensive (avoids appending
+	// a noise Option) but not strictly required for correctness.
+	if userOpt.WSMaxFrameSize > 0 {
+		out = append(out, ws.WithMaxFrameSize(userOpt.WSMaxFrameSize))
 	}
 	return out
 }
@@ -1075,6 +1099,12 @@ func runUpgradeSSE(
 		// suppress the duplicate emit so the analyst sees one Receive
 		// flow per HTTP response, not two.
 		wrapOpts = append(wrapOpts, sse.WithSkipFirstEmit())
+	}
+	// USK-806: thread the operator-configured per-event byte cap into the
+	// SSE Channel. Option is no-op on n <= 0 so the > 0 guard is purely
+	// defensive (avoids a noise Option append).
+	if userOpt.SSEMaxEventSize > 0 {
+		wrapOpts = append(wrapOpts, sse.WithMaxEventSize(userOpt.SSEMaxEventSize))
 	}
 
 	// io.TeeReader: every byte that sse.Wrap reads for parsing is also
