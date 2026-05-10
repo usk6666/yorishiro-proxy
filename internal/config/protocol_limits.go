@@ -129,6 +129,32 @@ func ResolveMaxBodySize(c *ProxyConfig) int64 {
 	return MaxBodySize
 }
 
+// maxImportLineHeadroom reserves additional bytes beyond the base64-expanded
+// body for JSONL line metadata (stream/flow IDs, timestamps, header maps).
+// 16 MiB is a generous bound; exporters write one stream per line and the
+// largest realistic header section is well under this.
+const maxImportLineHeadroom int64 = 16 << 20
+
+// ResolveMaxReplayResponseSize returns the maximum response body size that
+// MCP replay tools (resend / resend_raw / tcp_replay) read into memory.
+// Currently equals ResolveMaxBodySize(c) — replay reads the full upstream
+// response so the ceiling tracks the disk-persistence cap. Kept as a
+// distinct function so the call sites stay grep-able and a separate
+// raw-replay cap can be introduced later without touching consumers.
+func ResolveMaxReplayResponseSize(c *ProxyConfig) int64 {
+	return ResolveMaxBodySize(c)
+}
+
+// ResolveMaxImportScannerBuffer returns the maximum per-line buffer size
+// for the JSONL import scanner. A body of size B base64-encodes to ~B*4/3
+// bytes; maxImportLineHeadroom (16 MiB) covers per-line metadata. Returns
+// int because bufio.Scanner.Buffer and flow.ImportOptions.MaxScannerBuffer
+// both take int. With the MaxBodySizeUpperBound = 1 GiB clamp, the result
+// is ~1.35 GiB worst case, which fits both 32-bit and 64-bit int.
+func ResolveMaxImportScannerBuffer(c *ProxyConfig) int {
+	return int(ResolveMaxBodySize(c)*4/3 + maxImportLineHeadroom)
+}
+
 // MaxBodySizeUpperBound is the inclusive upper bound on a configured
 // max_body_size value. It matches SQLite's default BLOB length cap (1 GiB),
 // since MaxBodySize is the disk-persistence cap on a single SQLite row.

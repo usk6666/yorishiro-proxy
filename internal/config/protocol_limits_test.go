@@ -145,6 +145,55 @@ func TestResolveMaxBodySize(t *testing.T) {
 	}
 }
 
+func TestResolveMaxReplayResponseSize(t *testing.T) {
+	tests := []struct {
+		name string
+		in   *ProxyConfig
+		want int64
+	}{
+		{name: "nil config → default", in: nil, want: MaxBodySize},
+		{name: "zero → default", in: &ProxyConfig{MaxBodySize: 0}, want: MaxBodySize},
+		{name: "positive → input", in: &ProxyConfig{MaxBodySize: 5 << 20}, want: 5 << 20},
+		{name: "negative → default", in: &ProxyConfig{MaxBodySize: -1}, want: MaxBodySize},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ResolveMaxReplayResponseSize(tt.in); got != tt.want {
+				t.Errorf("ResolveMaxReplayResponseSize(%+v) = %d, want %d", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestResolveMaxImportScannerBuffer(t *testing.T) {
+	defaultWant := int(MaxBodySize*4/3 + maxImportLineHeadroom)
+	tests := []struct {
+		name string
+		in   *ProxyConfig
+		want int
+	}{
+		{name: "nil config → default", in: nil, want: defaultWant},
+		{name: "zero → default", in: &ProxyConfig{MaxBodySize: 0}, want: defaultWant},
+		{name: "positive → derived", in: &ProxyConfig{MaxBodySize: 5 << 20}, want: int((5<<20)*4/3 + maxImportLineHeadroom)},
+		{name: "negative → default", in: &ProxyConfig{MaxBodySize: -1}, want: defaultWant},
+		// Propagation case: pin the formula so any future change to either
+		// the multiplier or maxImportLineHeadroom forces a deliberate test
+		// update rather than a silent drift.
+		{
+			name: "propagation MaxBodySize=512MiB",
+			in:   &ProxyConfig{MaxBodySize: 512 << 20},
+			want: int((512<<20)*4/3 + (16 << 20)),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ResolveMaxImportScannerBuffer(tt.in); got != tt.want {
+				t.Errorf("ResolveMaxImportScannerBuffer(%+v) = %d, want %d", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestValidateProtocolLimits(t *testing.T) {
 	zero := int64(0)
 	posWS := &WebSocketLimits{MaxFrameSize: 1024}

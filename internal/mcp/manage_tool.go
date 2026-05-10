@@ -606,7 +606,7 @@ func (s *Server) handleManageImportFlows(ctx context.Context, params manageParam
 
 	result, err := flow.ImportStreams(ctx, s.flowStore.store, f, flow.ImportOptions{
 		OnConflict:       conflict,
-		MaxScannerBuffer: config.MaxImportScannerBuffer,
+		MaxScannerBuffer: config.ResolveMaxImportScannerBuffer(s.connector.proxyDefaults),
 		ValidateIDs:      true,
 	})
 	if err != nil {

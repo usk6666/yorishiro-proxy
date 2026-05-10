@@ -528,7 +528,7 @@ func (s *Server) macroSendFunc(macroName string) macro.SendFunc {
 		}
 		defer resp.Body.Close()
 
-		respBody, err := io.ReadAll(io.LimitReader(resp.Body, config.MaxReplayResponseSize))
+		respBody, err := io.ReadAll(io.LimitReader(resp.Body, config.ResolveMaxReplayResponseSize(s.connector.proxyDefaults)))
 		if err != nil {
 			return nil, fmt.Errorf("read response body: %w", err)
 		}
