@@ -346,12 +346,120 @@ func (s *Server) handleConfigure(ctx context.Context, _ *gomcp.CallToolRequest, 
 
 	switch op {
 	case "merge":
+		if err := validateConfigureFieldsForOperation(input, "merge"); err != nil {
+			return nil, nil, err
+		}
 		return s.handleConfigureMerge(input)
 	case "replace":
+		if err := validateConfigureFieldsForOperation(input, "replace"); err != nil {
+			return nil, nil, err
+		}
 		return s.handleConfigureReplace(input)
 	default:
 		return nil, nil, fmt.Errorf("invalid operation %q: available operations are \"merge\" and \"replace\"", op)
 	}
+}
+
+// validateConfigureFieldsForOperation rejects field/operation mismatches
+// across the three sections that share the merge-vs-replace shape
+// (tls_passthrough, intercept_rules, auto_transform). For each section,
+// merge mode rejects replace-only fields (Patterns / Rules); replace
+// mode rejects merge-only fields (Add / Remove / Enable / Disable).
+//
+// Validation runs before any state mutation so multi-section configure
+// calls reject as a unit (no partial-mutation on error). Distinguishing
+// "field omitted" from "field set to empty list" relies on Go
+// encoding/json's nil-vs-empty-slice handling: a JSON `null`/omitted
+// field unmarshals to a nil slice, while `[]` unmarshals to a non-nil
+// empty slice. The `!= nil` check therefore catches the explicit
+// `patterns: []` / `rules: []` payload that previously silently no-op'd
+// in merge mode (USK-794).
+func validateConfigureFieldsForOperation(input configureInput, op string) error {
+	if input.TLSPassthrough != nil {
+		if err := validateTLSPassthroughForOperation(input.TLSPassthrough, op); err != nil {
+			return err
+		}
+	}
+	if input.InterceptRules != nil {
+		if err := validateInterceptRulesForOperation(input.InterceptRules, op); err != nil {
+			return err
+		}
+	}
+	if input.AutoTransform != nil {
+		if err := validateAutoTransformForOperation(input.AutoTransform, op); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateTLSPassthroughForOperation enforces field/operation alignment
+// for the tls_passthrough section.
+func validateTLSPassthroughForOperation(cfg *configureTLSPassthrough, op string) error {
+	switch op {
+	case "merge":
+		if cfg.Patterns != nil {
+			return fmt.Errorf(`tls_passthrough: "patterns" is a replace-only field; pass {"operation":"replace", "tls_passthrough":{"patterns":[…]}} to replace the entire list, or use "add"/"remove" to apply deltas`)
+		}
+	case "replace":
+		if cfg.Add != nil {
+			return fmt.Errorf(`tls_passthrough: "add" is a merge-only field; pass {"operation":"merge", "tls_passthrough":{"add":[…]}} to apply deltas, or use "patterns" to replace the entire list`)
+		}
+		if cfg.Remove != nil {
+			return fmt.Errorf(`tls_passthrough: "remove" is a merge-only field; pass {"operation":"merge", "tls_passthrough":{"remove":[…]}} to apply deltas, or use "patterns" to replace the entire list`)
+		}
+	}
+	return nil
+}
+
+// validateInterceptRulesForOperation enforces field/operation alignment
+// for the intercept_rules section.
+func validateInterceptRulesForOperation(cfg *configureInterceptRules, op string) error {
+	switch op {
+	case "merge":
+		if cfg.Rules != nil {
+			return fmt.Errorf(`intercept_rules: "rules" is a replace-only field; pass {"operation":"replace", "intercept_rules":{"rules":[…]}} to replace the entire list, or use "add"/"remove"/"enable"/"disable" to apply deltas`)
+		}
+	case "replace":
+		if cfg.Add != nil {
+			return fmt.Errorf(`intercept_rules: "add" is a merge-only field; pass {"operation":"merge", "intercept_rules":{"add":[…]}} to apply deltas, or use "rules" to replace the entire list`)
+		}
+		if cfg.Remove != nil {
+			return fmt.Errorf(`intercept_rules: "remove" is a merge-only field; pass {"operation":"merge", "intercept_rules":{"remove":[…]}} to apply deltas, or use "rules" to replace the entire list`)
+		}
+		if cfg.Enable != nil {
+			return fmt.Errorf(`intercept_rules: "enable" is a merge-only field; pass {"operation":"merge", "intercept_rules":{"enable":[…]}} to apply deltas, or use "rules" to replace the entire list`)
+		}
+		if cfg.Disable != nil {
+			return fmt.Errorf(`intercept_rules: "disable" is a merge-only field; pass {"operation":"merge", "intercept_rules":{"disable":[…]}} to apply deltas, or use "rules" to replace the entire list`)
+		}
+	}
+	return nil
+}
+
+// validateAutoTransformForOperation enforces field/operation alignment
+// for the auto_transform section.
+func validateAutoTransformForOperation(cfg *configureAutoTransform, op string) error {
+	switch op {
+	case "merge":
+		if cfg.Rules != nil {
+			return fmt.Errorf(`auto_transform: "rules" is a replace-only field; pass {"operation":"replace", "auto_transform":{"rules":[…]}} to replace the entire list, or use "add"/"remove"/"enable"/"disable" to apply deltas`)
+		}
+	case "replace":
+		if cfg.Add != nil {
+			return fmt.Errorf(`auto_transform: "add" is a merge-only field; pass {"operation":"merge", "auto_transform":{"add":[…]}} to apply deltas, or use "rules" to replace the entire list`)
+		}
+		if cfg.Remove != nil {
+			return fmt.Errorf(`auto_transform: "remove" is a merge-only field; pass {"operation":"merge", "auto_transform":{"remove":[…]}} to apply deltas, or use "rules" to replace the entire list`)
+		}
+		if cfg.Enable != nil {
+			return fmt.Errorf(`auto_transform: "enable" is a merge-only field; pass {"operation":"merge", "auto_transform":{"enable":[…]}} to apply deltas, or use "rules" to replace the entire list`)
+		}
+		if cfg.Disable != nil {
+			return fmt.Errorf(`auto_transform: "disable" is a merge-only field; pass {"operation":"merge", "auto_transform":{"disable":[…]}} to apply deltas, or use "rules" to replace the entire list`)
+		}
+	}
+	return nil
 }
 
 // handleConfigureMerge applies delta changes (add/remove) to existing configuration.

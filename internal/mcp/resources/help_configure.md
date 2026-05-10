@@ -22,7 +22,13 @@ Controls which domains bypass TLS interception.
 - **remove** (array of strings): Patterns to remove.
 
 **Replace operation fields:**
-- **patterns** (array of strings): Full replacement of all passthrough patterns.
+- **patterns** (array of strings): Full replacement of all passthrough patterns. Pass `[]` (with `operation: "replace"`) to clear all patterns.
+
+**Field/operation alignment is enforced.** Supplying `patterns` while
+`operation` is `merge` (default), or supplying `add` / `remove` while
+`operation` is `replace`, returns a structured error and applies no
+mutation. To clear all passthrough patterns, use
+`{"operation":"replace","tls_passthrough":{"patterns":[]}}`.
 
 ## Usage Examples
 
@@ -55,7 +61,13 @@ Configures intercept rules for matching requests/responses.
 - **disable** (array of strings): Rule IDs to disable.
 
 **Replace operation fields:**
-- **rules** (array of intercept rules): Full replacement of all intercept rules.
+- **rules** (array of intercept rules): Full replacement of all intercept rules. Pass `[]` (with `operation: "replace"`) to clear all rules.
+
+**Field/operation alignment is enforced.** Supplying `rules` while
+`operation` is `merge` (default), or supplying `add` / `remove` /
+`enable` / `disable` while `operation` is `replace`, returns a
+structured error and applies no mutation. To clear all intercept
+rules, use `{"operation":"replace","intercept_rules":{"rules":[]}}`.
 
 Each intercept rule has:
 - **id** (string): Unique rule identifier.
@@ -195,7 +207,13 @@ Configures auto-transform rules for automatic request/response modification.
 - **disable** (array of strings): Rule IDs to disable.
 
 **Replace operation fields:**
-- **rules** (array of transform rules): Full replacement of all auto-transform rules.
+- **rules** (array of transform rules): Full replacement of all auto-transform rules. Pass `[]` (with `operation: "replace"`) to clear all rules.
+
+**Field/operation alignment is enforced.** Supplying `rules` while
+`operation` is `merge` (default), or supplying `add` / `remove` /
+`enable` / `disable` while `operation` is `replace`, returns a
+structured error and applies no mutation. To clear all auto-transform
+rules, use `{"operation":"replace","auto_transform":{"rules":[]}}`.
 
 Each auto-transform rule has:
 - **id** (string): Unique rule identifier.
