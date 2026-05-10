@@ -1294,6 +1294,7 @@ type queryConfigResult struct {
 	ClientCert       *queryClientCertResult           `json:"client_cert,omitempty"`
 	SafetyFilter     *querySafetyFilterResult         `json:"safety_filter,omitempty"`
 	MaxConnections   int                              `json:"max_connections"`
+	MaxBodySize      int64                            `json:"max_body_size"`
 	PeekTimeoutMs    int64                            `json:"peek_timeout_ms"`
 	RequestTimeoutMs int64                            `json:"request_timeout_ms"`
 	TLSFingerprint   string                           `json:"tls_fingerprint"`
@@ -1412,6 +1413,7 @@ func (s *Server) handleQueryConfig() (*gomcp.CallToolResult, *queryConfigResult,
 
 	result.TLSFingerprint = s.currentTLSFingerprint()
 	result.CaptureScope = s.currentCaptureScope()
+	result.MaxBodySize = config.ResolveMaxBodySize(s.connector.proxyDefaults)
 
 	return nil, result, nil
 }

@@ -125,6 +125,26 @@ func TestResolveSSEMaxEventsPerStream(t *testing.T) {
 	}
 }
 
+func TestResolveMaxBodySize(t *testing.T) {
+	tests := []struct {
+		name string
+		in   *ProxyConfig
+		want int64
+	}{
+		{name: "nil config → default", in: nil, want: MaxBodySize},
+		{name: "zero → default", in: &ProxyConfig{MaxBodySize: 0}, want: MaxBodySize},
+		{name: "positive → input", in: &ProxyConfig{MaxBodySize: 5 << 20}, want: 5 << 20},
+		{name: "negative → default", in: &ProxyConfig{MaxBodySize: -1}, want: MaxBodySize},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ResolveMaxBodySize(tt.in); got != tt.want {
+				t.Errorf("ResolveMaxBodySize(%+v) = %d, want %d", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestValidateProtocolLimits(t *testing.T) {
 	zero := int64(0)
 	posWS := &WebSocketLimits{MaxFrameSize: 1024}
@@ -140,22 +160,24 @@ func TestValidateProtocolLimits(t *testing.T) {
 
 	tests := []struct {
 		name    string
-		ws      *WebSocketLimits
-		grpc    *GRPCLimits
-		sse     *SSELimits
+		cfg     *ProxyConfig
 		wantErr string
 	}{
-		{name: "all nil OK"},
-		{name: "all zero OK", ws: zeroWS, grpc: zeroGRPC, sse: zeroSSE},
-		{name: "all positive OK", ws: posWS, grpc: posGRPC, sse: posSSE},
-		{name: "negative ws frame size rejected", ws: negWS, wantErr: "web_socket.max_frame_size"},
-		{name: "negative sse event size rejected", sse: negSSE, wantErr: "sse.max_event_size"},
-		{name: "negative grpc max_messages_per_stream rejected", grpc: negCountGRPC, wantErr: "grpc.max_messages_per_stream"},
-		{name: "negative sse max_events_per_stream rejected", sse: negCountSSE, wantErr: "sse.max_events_per_stream"},
+		{name: "nil config OK", cfg: nil},
+		{name: "all nil OK", cfg: &ProxyConfig{}},
+		{name: "all zero OK", cfg: &ProxyConfig{WebSocket: zeroWS, GRPC: zeroGRPC, SSE: zeroSSE, MaxBodySize: 0}},
+		{name: "all positive OK", cfg: &ProxyConfig{WebSocket: posWS, GRPC: posGRPC, SSE: posSSE, MaxBodySize: 5 << 20}},
+		{name: "negative ws frame size rejected", cfg: &ProxyConfig{WebSocket: negWS}, wantErr: "web_socket.max_frame_size"},
+		{name: "negative sse event size rejected", cfg: &ProxyConfig{SSE: negSSE}, wantErr: "sse.max_event_size"},
+		{name: "negative grpc max_messages_per_stream rejected", cfg: &ProxyConfig{GRPC: negCountGRPC}, wantErr: "grpc.max_messages_per_stream"},
+		{name: "negative sse max_events_per_stream rejected", cfg: &ProxyConfig{SSE: negCountSSE}, wantErr: "sse.max_events_per_stream"},
+		{name: "negative max_body_size rejected", cfg: &ProxyConfig{MaxBodySize: -1}, wantErr: "max_body_size must be >= 0"},
+		{name: "max_body_size at upper bound OK", cfg: &ProxyConfig{MaxBodySize: MaxBodySizeUpperBound}},
+		{name: "max_body_size above upper bound rejected", cfg: &ProxyConfig{MaxBodySize: MaxBodySizeUpperBound + 1}, wantErr: "max_body_size must be <="},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := ValidateProtocolLimits(tt.ws, tt.grpc, tt.sse)
+			err := ValidateProtocolLimits(tt.cfg)
 			if tt.wantErr == "" {
 				if err != nil {
 					t.Fatalf("unexpected error: %v", err)

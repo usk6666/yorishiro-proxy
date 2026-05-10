@@ -119,35 +119,59 @@ func ResolveSSEMaxEventsPerStream(s *SSELimits) int {
 	return MaxSSEEventsPerStream
 }
 
-// ValidateProtocolLimits validates the per-protocol limit substructs. It
-// rejects only negative values; zero means "use default" per project
-// convention (see DefaultBodySpillThreshold's resolver). Nil substructs
-// are treated as fully-default and cause no error. The function is the
-// per-protocol-limits sibling of ValidateSafetyFilterConfig.
-func ValidateProtocolLimits(ws *WebSocketLimits, grpc *GRPCLimits, sse *SSELimits) error {
-	if ws != nil {
-		if ws.MaxFrameSize < 0 {
-			return fmt.Errorf("web_socket.max_frame_size must be >= 0, got %d", ws.MaxFrameSize)
+// ResolveMaxBodySize returns c.MaxBodySize when positive, else the package
+// default MaxBodySize constant. Nil c is treated as "use default", matching
+// the WS / gRPC / SSE resolver convention.
+func ResolveMaxBodySize(c *ProxyConfig) int64 {
+	if c != nil && c.MaxBodySize > 0 {
+		return c.MaxBodySize
+	}
+	return MaxBodySize
+}
+
+// MaxBodySizeUpperBound is the inclusive upper bound on a configured
+// max_body_size value. It matches SQLite's default BLOB length cap (1 GiB),
+// since MaxBodySize is the disk-persistence cap on a single SQLite row.
+const MaxBodySizeUpperBound int64 = 1 << 30
+
+// ValidateProtocolLimits validates the per-protocol limit substructs on
+// ProxyConfig. It rejects negative values and (for max_body_size) values
+// above MaxBodySizeUpperBound; zero means "use default" per project
+// convention (see DefaultBodySpillThreshold's resolver). A nil c is
+// treated as fully-default and causes no error.
+func ValidateProtocolLimits(c *ProxyConfig) error {
+	if c == nil {
+		return nil
+	}
+	if c.WebSocket != nil {
+		if c.WebSocket.MaxFrameSize < 0 {
+			return fmt.Errorf("web_socket.max_frame_size must be >= 0, got %d", c.WebSocket.MaxFrameSize)
 		}
 		// MaxFrameSize is int64; the WebSocket Layer Option signature is
 		// also int64 (WithMaxFrameSize). No upper-bound check here — the
 		// CWE-400 cap is the operator's responsibility.
 	}
-	// grpc.MaxMessageSize is uint32 so it cannot be negative; only the new
+	// grpc.MaxMessageSize is uint32 so it cannot be negative; only the
 	// MaxMessagesPerStream (int) needs a syntactic check. Resolve* applies
 	// the default for zero.
-	if grpc != nil {
-		if grpc.MaxMessagesPerStream < 0 {
-			return fmt.Errorf("grpc.max_messages_per_stream must be >= 0, got %d", grpc.MaxMessagesPerStream)
+	if c.GRPC != nil {
+		if c.GRPC.MaxMessagesPerStream < 0 {
+			return fmt.Errorf("grpc.max_messages_per_stream must be >= 0, got %d", c.GRPC.MaxMessagesPerStream)
 		}
 	}
-	if sse != nil {
-		if sse.MaxEventSize < 0 {
-			return fmt.Errorf("sse.max_event_size must be >= 0, got %d", sse.MaxEventSize)
+	if c.SSE != nil {
+		if c.SSE.MaxEventSize < 0 {
+			return fmt.Errorf("sse.max_event_size must be >= 0, got %d", c.SSE.MaxEventSize)
 		}
-		if sse.MaxEventsPerStream < 0 {
-			return fmt.Errorf("sse.max_events_per_stream must be >= 0, got %d", sse.MaxEventsPerStream)
+		if c.SSE.MaxEventsPerStream < 0 {
+			return fmt.Errorf("sse.max_events_per_stream must be >= 0, got %d", c.SSE.MaxEventsPerStream)
 		}
+	}
+	if c.MaxBodySize < 0 {
+		return fmt.Errorf("max_body_size must be >= 0, got %d", c.MaxBodySize)
+	}
+	if c.MaxBodySize > MaxBodySizeUpperBound {
+		return fmt.Errorf("max_body_size must be <= %d (SQLite BLOB limit), got %d", MaxBodySizeUpperBound, c.MaxBodySize)
 	}
 	return nil
 }

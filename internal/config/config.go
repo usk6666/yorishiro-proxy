@@ -615,6 +615,16 @@ type ProxyConfig struct {
 	// SSE configures the SSE Layer runtime limits (max event size).
 	SSE *SSELimits `json:"sse,omitempty"`
 
+	// MaxBodySize is the per-message body wire cap enforced at parse time
+	// by the HTTP/1, HTTP/2 and gRPC channels — same category as
+	// WebSocket.MaxFrameSize / GRPC.MaxMessageSize / SSE.MaxEventSize.
+	// Zero (or omitted) selects MaxBodySize (254 MiB), the disk-persistence
+	// cap on a single SQLite row. Validation rejects values above
+	// MaxBodySizeUpperBound (1 GiB, SQLite BLOB cap). This is NOT a RAM
+	// cap; the in-memory footprint is bounded by BodySpillThreshold via
+	// the bodybuf memory-then-spill BodyBuffer.
+	MaxBodySize int64 `json:"max_body_size,omitempty"`
+
 	// RawPassthroughHosts is a list of "host:port" targets that bypass L7
 	// parsing. Traffic to these hosts is relayed as raw bytes through the
 	// ByteChunk layer, enabling HTTP request-smuggling diagnosis.

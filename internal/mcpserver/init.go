@@ -485,6 +485,7 @@ func NewLiveBuildConfig(
 	// operator-configured value (or the package default when unset).
 	bc.GRPCMaxMessagesPerStream = config.ResolveGRPCMaxMessagesPerStream(proxyCfg.GRPC)
 	bc.SSEMaxEventsPerStream = config.ResolveSSEMaxEventsPerStream(proxyCfg.SSE)
+	bc.MaxBodySize = config.ResolveMaxBodySize(proxyCfg)
 	if proxyCfg.TLSFingerprint != "" {
 		bc.TLSFingerprint = proxyCfg.TLSFingerprint
 	}

@@ -187,6 +187,18 @@ func Run(ctx context.Context, fs *flag.FlagSet, args []string, opts RunOptions) 
 		return err
 	}
 
+	// Cross-struct invariant: the resolved BodySpillThreshold (RAM cap on
+	// Config) must not exceed the resolved MaxBodySize (wire cap on
+	// ProxyConfig). Config.Validate enforces the raw BodySpillThreshold
+	// against the package constant; this re-check uses the resolved values
+	// so the default-spill-threshold case (zero → 10 MiB) is also caught
+	// when the operator overrides max_body_size to a smaller value.
+	resolvedThreshold := config.ResolveBodySpillThreshold(cfg)
+	resolvedMaxBody := config.ResolveMaxBodySize(proxyCfg)
+	if resolvedThreshold > resolvedMaxBody {
+		return fmt.Errorf("invalid configuration: body_spill_threshold (%d) must be <= max_body_size (%d)", resolvedThreshold, resolvedMaxBody)
+	}
+
 	infra, err := InitInfra(ctx, cfg)
 	if err != nil {
 		return err
@@ -413,7 +425,7 @@ func LoadConfigs(configFile, targetPolicyFile string) (*ConfigsResult, error) {
 		if err != nil {
 			return nil, fmt.Errorf("load config file: %w", err)
 		}
-		if err := config.ValidateProtocolLimits(proxyCfg.WebSocket, proxyCfg.GRPC, proxyCfg.SSE); err != nil {
+		if err := config.ValidateProtocolLimits(proxyCfg); err != nil {
 			return nil, fmt.Errorf("invalid protocol limits: %w", err)
 		}
 		if err := proxyCfg.Validate(); err != nil {

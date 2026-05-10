@@ -12,6 +12,7 @@ import (
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/usk6666/yorishiro-proxy/internal/cert"
+	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/connector"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 )
@@ -979,6 +980,47 @@ func TestQuery_Config_DefaultManagerValues(t *testing.T) {
 	}
 	if out.TLSFingerprint != "chrome" {
 		t.Errorf("tls_fingerprint = %q, want %q", out.TLSFingerprint, "chrome")
+	}
+}
+
+func TestQuery_Config_MaxBodySize_Default(t *testing.T) {
+	t.Parallel()
+	store := newTestStore(t)
+	cs := setupQueryTestSession(t, store)
+
+	result := callQuery(t, cs, queryInput{Resource: "config"})
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	var out queryConfigResult
+	unmarshalQueryResult(t, result, &out)
+
+	// USK-799: with no proxyDefaults set, the resolver returns the package
+	// default constant (config.MaxBodySize, 254 MiB).
+	if out.MaxBodySize != config.MaxBodySize {
+		t.Errorf("max_body_size = %d, want %d (config.MaxBodySize default)", out.MaxBodySize, config.MaxBodySize)
+	}
+}
+
+func TestQuery_Config_MaxBodySize_Configured(t *testing.T) {
+	t.Parallel()
+	store := newTestStore(t)
+	const want = int64(5 << 20) // 5 MiB
+	cs := setupQueryTestSession(t, store,
+		WithProxyDefaults(&config.ProxyConfig{MaxBodySize: want}),
+	)
+
+	result := callQuery(t, cs, queryInput{Resource: "config"})
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	var out queryConfigResult
+	unmarshalQueryResult(t, result, &out)
+
+	if out.MaxBodySize != want {
+		t.Errorf("max_body_size = %d, want %d", out.MaxBodySize, want)
 	}
 }
 
