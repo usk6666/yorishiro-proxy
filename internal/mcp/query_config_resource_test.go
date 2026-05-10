@@ -238,3 +238,126 @@ func TestQuery_Config_ProtocolCaps_OmittedWhenZero(t *testing.T) {
 		}
 	}
 }
+
+// TestQuery_Config_TLSFingerprint_BootValue is the USK-809 regression for
+// the "query config always returns chrome" display bug: when the bound
+// BuildConfig has a non-default TLSFingerprint set at boot, query config
+// must surface that value rather than the literal "chrome" fallback the
+// pre-fix currentTLSFingerprint() emitted whenever no test-only setter
+// was injected (the production wiring path).
+func TestQuery_Config_TLSFingerprint_BootValue(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		want string
+	}{
+		{"firefox", "firefox"},
+		{"safari", "safari"},
+		{"none", "none"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			buildCfg := &connector.BuildConfig{TLSFingerprint: tc.want}
+			manager := newTestProxybuildManagerWithBuildConfig(t, buildCfg)
+
+			ctx := context.Background()
+			ca := newTestCA(t)
+			store := newTestStore(t)
+			s := newServer(ctx, ca, store, manager)
+
+			ct, st := gomcp.NewInMemoryTransports()
+			ss, err := s.server.Connect(ctx, st, nil)
+			if err != nil {
+				t.Fatalf("server connect: %v", err)
+			}
+			t.Cleanup(func() { ss.Close() })
+
+			client := gomcp.NewClient(&gomcp.Implementation{Name: "test", Version: "v0.0.1"}, nil)
+			cs, err := client.Connect(ctx, ct, nil)
+			if err != nil {
+				t.Fatalf("client connect: %v", err)
+			}
+			t.Cleanup(func() { cs.Close() })
+
+			result := callQuery(t, cs, queryInput{Resource: "config"})
+			if result.IsError {
+				t.Fatalf("expected success, got error: %v", result.Content)
+			}
+
+			var out queryConfigResult
+			unmarshalQueryResult(t, result, &out)
+			if out.TLSFingerprint != tc.want {
+				t.Errorf("tls_fingerprint = %q, want %q (display path must read from BuildConfig, not literal chrome fallback)",
+					out.TLSFingerprint, tc.want)
+			}
+		})
+	}
+}
+
+// TestQuery_Config_TLSFingerprint_RuntimeOverride_ViaBuildConfig is the
+// USK-809 regression for the live-wire mutation gap: a runtime
+// SetTLSFingerprint call (the wiring proxy_start / configure relies on)
+// must be reflected in subsequent query config reads.
+func TestQuery_Config_TLSFingerprint_RuntimeOverride_ViaBuildConfig(t *testing.T) {
+	t.Parallel()
+
+	// Boot-time fingerprint is "chrome" — the pre-fix default. After
+	// BuildConfig.SetTLSFingerprint("firefox") (the runtime wiring used
+	// by Manager.SetTLSFingerprint), query config must surface "firefox",
+	// not the boot value.
+	buildCfg := &connector.BuildConfig{TLSFingerprint: "chrome"}
+	manager := newTestProxybuildManagerWithBuildConfig(t, buildCfg)
+
+	// Install the runtime override the same way applyTLSFingerprint
+	// would in production (Manager.SetTLSFingerprint -> BuildConfig).
+	manager.SetTLSFingerprint("firefox")
+
+	ctx := context.Background()
+	ca := newTestCA(t)
+	store := newTestStore(t)
+	s := newServer(ctx, ca, store, manager)
+
+	ct, st := gomcp.NewInMemoryTransports()
+	ss, err := s.server.Connect(ctx, st, nil)
+	if err != nil {
+		t.Fatalf("server connect: %v", err)
+	}
+	t.Cleanup(func() { ss.Close() })
+
+	client := gomcp.NewClient(&gomcp.Implementation{Name: "test", Version: "v0.0.1"}, nil)
+	cs, err := client.Connect(ctx, ct, nil)
+	if err != nil {
+		t.Fatalf("client connect: %v", err)
+	}
+	t.Cleanup(func() { cs.Close() })
+
+	result := callQuery(t, cs, queryInput{Resource: "config"})
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	var out queryConfigResult
+	unmarshalQueryResult(t, result, &out)
+	if out.TLSFingerprint != "firefox" {
+		t.Errorf("tls_fingerprint = %q, want firefox (runtime override must be visible to display path)",
+			out.TLSFingerprint)
+	}
+
+	// Clear the override and confirm the boot value re-emerges — the
+	// override is layered on top, not destructive.
+	manager.SetTLSFingerprint("")
+
+	result = callQuery(t, cs, queryInput{Resource: "config"})
+	if result.IsError {
+		t.Fatalf("expected success on second query, got error: %v", result.Content)
+	}
+	unmarshalQueryResult(t, result, &out)
+	if out.TLSFingerprint != "chrome" {
+		t.Errorf("after clear, tls_fingerprint = %q, want chrome (boot fallback)",
+			out.TLSFingerprint)
+	}
+}

@@ -63,9 +63,13 @@ func poolKeyForH2(target string, cfg *BuildConfig, hostTLS *resolvedTLS) pool.Po
 
 	writeField(&buf, "ca", caHash)
 
+	// Use EffectiveTLSFingerprint so a runtime proxy_start / configure
+	// fingerprint switch produces a distinct pool key — pooled h2 Layers
+	// established under the previous fingerprint must not be reused for
+	// dials that should now use a different uTLS profile (USK-809).
 	profile := ""
 	if cfg != nil {
-		profile = cfg.TLSFingerprint
+		profile = cfg.EffectiveTLSFingerprint()
 	}
 	writeField(&buf, "utls", profile)
 

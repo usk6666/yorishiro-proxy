@@ -952,6 +952,61 @@ func TestClientH2MaxConcurrentStreamsOption_NonZeroProducesOption(t *testing.T) 
 	}
 }
 
+// TestBuildConfig_TLSFingerprint_DynamicOverride verifies the USK-809
+// runtime-mutation surface: SetTLSFingerprint installs an override that
+// EffectiveTLSFingerprint returns in preference to the static
+// TLSFingerprint field, and an empty profile clears the override so
+// the static field re-emerges. The dial-time read sites
+// (DialUpstreamRaw call sites in stack_builder.go) consult
+// EffectiveTLSFingerprint, so this test gates that runtime
+// proxy_start / configure changes reach the live wire path rather
+// than being frozen at boot like the pre-fix behaviour.
+func TestBuildConfig_TLSFingerprint_DynamicOverride(t *testing.T) {
+	cfg := &BuildConfig{TLSFingerprint: "chrome"}
+
+	// Boot-time value is observable via EffectiveTLSFingerprint when no
+	// runtime override is in place.
+	if got := cfg.EffectiveTLSFingerprint(); got != "chrome" {
+		t.Errorf("initial EffectiveTLSFingerprint = %q, want chrome (boot fallback)", got)
+	}
+
+	// Runtime override takes precedence.
+	cfg.SetTLSFingerprint("firefox")
+	if got := cfg.EffectiveTLSFingerprint(); got != "firefox" {
+		t.Errorf("after SetTLSFingerprint(firefox), EffectiveTLSFingerprint = %q, want firefox", got)
+	}
+	// Static field unchanged — override is layered on top, not destructive.
+	if cfg.TLSFingerprint != "chrome" {
+		t.Errorf("static TLSFingerprint mutated to %q, want chrome (override must not destroy boot value)", cfg.TLSFingerprint)
+	}
+
+	// Override another profile to confirm replacement (not append) semantics.
+	cfg.SetTLSFingerprint("safari")
+	if got := cfg.EffectiveTLSFingerprint(); got != "safari" {
+		t.Errorf("after SetTLSFingerprint(safari), EffectiveTLSFingerprint = %q, want safari", got)
+	}
+
+	// Empty clears the override; the static field surfaces again.
+	cfg.SetTLSFingerprint("")
+	if got := cfg.EffectiveTLSFingerprint(); got != "chrome" {
+		t.Errorf("after SetTLSFingerprint(\"\"), EffectiveTLSFingerprint = %q, want chrome (cleared override)", got)
+	}
+}
+
+// TestBuildConfig_TLSFingerprint_NilSafe ensures the accessor + setter
+// short-circuit on a nil receiver — defensive guard mirroring the
+// SetUpstreamProxy precedent. A nil BuildConfig occurs in test
+// constructions and on early-failure paths; the runtime mutation must
+// not panic.
+func TestBuildConfig_TLSFingerprint_NilSafe(t *testing.T) {
+	var cfg *BuildConfig
+	if got := cfg.EffectiveTLSFingerprint(); got != "" {
+		t.Errorf("nil-receiver EffectiveTLSFingerprint = %q, want empty string", got)
+	}
+	// Must not panic.
+	cfg.SetTLSFingerprint("chrome")
+}
+
 // TestBuildConfig_MaxConcurrentStreamsRoundTrip verifies the new field
 // is a simple value carrier on BuildConfig (USK-713).
 func TestBuildConfig_MaxConcurrentStreamsRoundTrip(t *testing.T) {

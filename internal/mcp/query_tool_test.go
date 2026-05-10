@@ -948,8 +948,12 @@ func TestQuery_Config_WithManagerFields(t *testing.T) {
 	if out.RequestTimeoutMs != 60000 {
 		t.Errorf("request_timeout_ms = %d, want 60000", out.RequestTimeoutMs)
 	}
-	if out.TLSFingerprint != "chrome" {
-		t.Errorf("tls_fingerprint = %q, want %q", out.TLSFingerprint, "chrome")
+	// USK-809: with no fingerprint configured (test manager has no
+	// BuildConfig bound, no setter injected), tls_fingerprint surfaces
+	// as the empty string sentinel rather than the pre-fix literal
+	// "chrome" fallback that masked all runtime/boot configuration.
+	if out.TLSFingerprint != "" {
+		t.Errorf("tls_fingerprint = %q, want empty (no fingerprint configured)", out.TLSFingerprint)
 	}
 }
 
@@ -977,8 +981,12 @@ func TestQuery_Config_DefaultManagerValues(t *testing.T) {
 	if out.RequestTimeoutMs != 60000 {
 		t.Errorf("request_timeout_ms = %d, want 60000", out.RequestTimeoutMs)
 	}
-	if out.TLSFingerprint != "chrome" {
-		t.Errorf("tls_fingerprint = %q, want %q", out.TLSFingerprint, "chrome")
+	// USK-809: with no manager bound and no setter injected, the
+	// fingerprint is reported as empty rather than the pre-fix "chrome"
+	// fallback. Empty is the canonical "no fingerprint configured"
+	// sentinel; it does not mean "chrome by default".
+	if out.TLSFingerprint != "" {
+		t.Errorf("tls_fingerprint = %q, want empty (no fingerprint configured)", out.TLSFingerprint)
 	}
 }
 

@@ -540,6 +540,45 @@ func (m *Manager) UpstreamProxy() string {
 	return m.upstreamProxy
 }
 
+// SetTLSFingerprint installs a runtime override for the uTLS browser
+// fingerprint profile on the bound BuildConfig so the next live
+// data-path upstream dial uses the new profile (USK-809). Mirrors the
+// SetUpstreamProxy precedent: parsing / validation is the MCP layer's
+// responsibility (proxy_start_tool / configure_tool validate the
+// profile name before reaching here), so this method is a thin
+// passthrough. An empty profile clears the override and falls back to
+// the boot-time BuildConfig.TLSFingerprint value. No-op when no
+// BuildConfig is bound (test-only Manager constructions).
+func (m *Manager) SetTLSFingerprint(profile string) {
+	m.mu.Lock()
+	bc := m.buildCfg
+	m.mu.Unlock()
+
+	if bc == nil {
+		return
+	}
+	bc.SetTLSFingerprint(profile)
+}
+
+// TLSFingerprint returns the effective uTLS browser fingerprint profile
+// from the bound BuildConfig (USK-809). The returned value reflects any
+// runtime override installed via SetTLSFingerprint and falls back to
+// the boot-time BuildConfig.TLSFingerprint when no override is in
+// effect. Returns the empty string when no BuildConfig is bound — the
+// caller is responsible for translating empty into a user-facing
+// representation if desired (this accessor does NOT substitute a
+// "chrome" default).
+func (m *Manager) TLSFingerprint() string {
+	m.mu.Lock()
+	bc := m.buildCfg
+	m.mu.Unlock()
+
+	if bc == nil {
+		return ""
+	}
+	return bc.EffectiveTLSFingerprint()
+}
+
 // MaxRawCaptureSize returns the per-message HTTP/1.x raw-bytes capture cap
 // from the bound BuildConfig (USK-800).
 //

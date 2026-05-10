@@ -36,7 +36,20 @@ type BuildConfig struct {
 	InsecureSkipVerify bool
 
 	// TLSFingerprint selects the uTLS browser fingerprint profile for upstream.
+	// This is the static (init-time) value; runtime updates from
+	// proxy_start / configure flow through SetTLSFingerprint and
+	// EffectiveTLSFingerprint. Live data-path readers MUST call
+	// EffectiveTLSFingerprint() — direct field reads observe only the
+	// boot-time value (USK-809).
 	TLSFingerprint string
+
+	// tlsFingerprintDynamic stores the runtime-mutable TLS fingerprint
+	// profile installed by proxy_start / configure (USK-809). It overrides
+	// the static TLSFingerprint field when non-nil. atomic.Pointer is used
+	// so dial-path readers (per-connection goroutines) and the MCP-tool
+	// writer (proxy_start / configure handler goroutine) do not race on
+	// the *string pointer. A nil load means "fall back to TLSFingerprint".
+	tlsFingerprintDynamic atomic.Pointer[string]
 
 	// ClientCert is the global mTLS client certificate for upstream, if any.
 	ClientCert *tls.Certificate
@@ -265,6 +278,44 @@ func (c *BuildConfig) SetUpstreamProxy(u *url.URL) {
 		return
 	}
 	c.upstreamProxyDynamic.Store(u)
+}
+
+// EffectiveTLSFingerprint returns the uTLS browser fingerprint profile
+// the live data path should use for the next upstream dial. Runtime
+// updates installed via SetTLSFingerprint take precedence over the
+// static TLSFingerprint field set at boot. Returns the empty string when
+// neither is configured (the dial path then falls back to standard TLS).
+// This is the canonical accessor for live dial-path code (USK-809);
+// callers MUST NOT read the TLSFingerprint field directly because it
+// observes only the boot-time value.
+func (c *BuildConfig) EffectiveTLSFingerprint() string {
+	if c == nil {
+		return ""
+	}
+	if dyn := c.tlsFingerprintDynamic.Load(); dyn != nil {
+		return *dyn
+	}
+	return c.TLSFingerprint
+}
+
+// SetTLSFingerprint installs a runtime override for the uTLS browser
+// fingerprint profile. Subsequent calls to EffectiveTLSFingerprint
+// return profile (or fall back to the static TLSFingerprint field when
+// profile is empty). The runtime override is the wire-up consumed by
+// proxy_start / configure to make the fingerprint change reach the
+// live dial path (USK-809); writes are atomic with respect to
+// concurrent dial-path reads. Passing the empty string clears the
+// override.
+func (c *BuildConfig) SetTLSFingerprint(profile string) {
+	if c == nil {
+		return
+	}
+	if profile == "" {
+		c.tlsFingerprintDynamic.Store(nil)
+		return
+	}
+	p := profile
+	c.tlsFingerprintDynamic.Store(&p)
 }
 
 // SetEnabledProtocols installs a runtime override for the enabled-protocols
@@ -963,7 +1014,7 @@ func dialUpstreamWithALPN(
 	conn, snap, err := DialUpstreamRaw(ctx, target, DialRawOpts{
 		TLSConfig:          upstreamTLSCfg,
 		InsecureSkipVerify: insecureSkip,
-		UTLSProfile:        cfg.TLSFingerprint,
+		UTLSProfile:        cfg.EffectiveTLSFingerprint(),
 		ClientCert:         clientCert,
 		OfferALPN:          offerALPN,
 		UpstreamProxy:      cfg.EffectiveUpstreamProxy(),
@@ -1254,7 +1305,7 @@ func buildRawPassthroughStack(
 	upstreamConn, upstreamSnap, err := DialUpstreamRaw(ctx, target, DialRawOpts{
 		TLSConfig:          upstreamTLSCfg,
 		InsecureSkipVerify: insecureSkip,
-		UTLSProfile:        cfg.TLSFingerprint,
+		UTLSProfile:        cfg.EffectiveTLSFingerprint(),
 		ClientCert:         clientCert,
 		OfferALPN:          []string{"http/1.1"},
 		UpstreamProxy:      cfg.EffectiveUpstreamProxy(),

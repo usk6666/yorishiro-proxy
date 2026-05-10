@@ -856,6 +856,13 @@ var validTLSFingerprints = map[string]bool{
 // TLSTransport, and applies both the profile name and transport to all
 // registered handlers and connector.tlsTransport (used by resend).
 // The profile name is normalized to lowercase before validation.
+//
+// The validated profile is also installed as a runtime override on the
+// proxybuild.Manager's bound BuildConfig (USK-809), so the next live
+// MITM data-path upstream dial uses the new uTLS profile. Without this
+// step, the live wire path would silently keep dialing with the
+// boot-time fingerprint regardless of runtime proxy_start / configure
+// changes (the prior behaviour observed only by resend transport).
 func (s *Server) applyTLSFingerprint(profile string) error {
 	profile = strings.ToLower(profile)
 	if !validTLSFingerprints[profile] {
@@ -871,6 +878,14 @@ func (s *Server) applyTLSFingerprint(profile string) error {
 
 	// Update resend transport so that resend/resend_raw also use the new profile.
 	s.connector.tlsTransport = transport
+
+	// Install the runtime override on the live data-path BuildConfig so
+	// the MITM dial picks up the new fingerprint (USK-809). The setter
+	// loop above only fans out to resend handlers; the live wire path
+	// reads through the manager's bound BuildConfig.
+	if !managerIsNil(s.connector.manager) {
+		s.connector.manager.SetTLSFingerprint(profile)
+	}
 
 	return nil
 }
@@ -917,16 +932,38 @@ func (s *Server) currentInsecureSkipVerify() bool {
 	}
 }
 
-// currentTLSFingerprint returns the current TLS fingerprint profile from the first
-// registered handler, or "chrome" (the default) if none is registered.
+// currentTLSFingerprint returns the current TLS fingerprint profile that
+// the live MITM data path will use for its next upstream dial.
+//
+// Resolution order (USK-809):
+//
+//  1. proxybuild.Manager.TLSFingerprint() — reflects the runtime
+//     override installed by applyTLSFingerprint plus the boot-time
+//     BuildConfig.TLSFingerprint. This is the canonical source for the
+//     live data path; production deployments always populate it.
+//  2. tlsFingerprintSetters[0].TLSFingerprint() — fallback for tests
+//     that exercise applyTLSFingerprint via the legacy
+//     WithTLSFingerprintSetter helper without binding a BuildConfig to
+//     the manager.
+//  3. empty string — neither source has a value; the live path uses
+//     the standard TLS transport (no uTLS spoofing).
+//
+// This function intentionally does NOT substitute a "chrome" literal
+// for an empty value. The previous "chrome" fallback was the live bug
+// fixed by USK-809 (it masked all runtime fingerprint changes by
+// always reporting "chrome" in production).
 func (s *Server) currentTLSFingerprint() string {
-	if len(s.connector.tlsFingerprintSetters) > 0 {
-		p := s.connector.tlsFingerprintSetters[0].TLSFingerprint()
-		if p != "" {
+	if !managerIsNil(s.connector.manager) {
+		if p := s.connector.manager.TLSFingerprint(); p != "" {
 			return p
 		}
 	}
-	return "chrome"
+	if len(s.connector.tlsFingerprintSetters) > 0 {
+		if p := s.connector.tlsFingerprintSetters[0].TLSFingerprint(); p != "" {
+			return p
+		}
+	}
+	return ""
 }
 
 // applyRequestTimeout updates the request timeout on all registered protocol handlers.

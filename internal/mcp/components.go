@@ -129,6 +129,21 @@ type proxyManager interface {
 	PeekTimeout() time.Duration
 	SetUpstreamProxy(proxyURL string)
 	UpstreamProxy() string
+	// SetTLSFingerprint installs a runtime uTLS browser fingerprint
+	// profile override on the bound BuildConfig so the live MITM
+	// data-path's next upstream dial picks up the new profile
+	// (USK-809). The MCP layer (proxy_start_tool / configure_tool)
+	// validates the profile name before calling this, so the manager
+	// treats the input as already-validated. Empty clears the
+	// override.
+	SetTLSFingerprint(profile string)
+	// TLSFingerprint returns the effective uTLS browser fingerprint
+	// profile reflecting any runtime SetTLSFingerprint override on top
+	// of the boot-time BuildConfig.TLSFingerprint (USK-809). Returns
+	// the empty string when no BuildConfig is bound. Callers must NOT
+	// substitute a "chrome" default — empty is the canonical "no
+	// fingerprint configured" sentinel.
+	TLSFingerprint() string
 	// MaxRawCaptureSize surfaces the per-message HTTP/1.x raw-bytes
 	// capture cap (USK-800). On the production Live wiring path the
 	// returned value is the resolved cap (config.ResolveMaxRawCaptureSize

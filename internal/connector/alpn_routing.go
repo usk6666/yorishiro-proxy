@@ -170,11 +170,15 @@ func canonicalRedialALPNOffer(clientALPN string) []string {
 }
 
 // ALPNCacheKeyFromConfig constructs an ALPNCacheKey for the given target
-// using the TLS configuration from BuildConfig.
+// using the TLS configuration from BuildConfig. The fingerprint
+// component reads via EffectiveTLSFingerprint so a runtime
+// proxy_start / configure fingerprint switch produces a distinct cache
+// key — ALPN learned under the previous fingerprint is not reused for
+// dials that should now use a different uTLS profile (USK-809).
 func ALPNCacheKeyFromConfig(target string, cfg *BuildConfig) ALPNCacheKey {
 	key := ALPNCacheKey{
 		HostPort:    target,
-		Fingerprint: cfg.TLSFingerprint,
+		Fingerprint: cfg.EffectiveTLSFingerprint(),
 	}
 	if cfg.ClientCert != nil {
 		key.ClientCertHash = hashCert(cfg.ClientCert)

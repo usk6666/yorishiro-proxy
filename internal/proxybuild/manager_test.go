@@ -250,6 +250,70 @@ func TestManager_UpstreamProxy_RoundTrip(t *testing.T) {
 	}
 }
 
+// TestManager_TLSFingerprint_BoundBuildConfig verifies the USK-809
+// wiring: SetTLSFingerprint mutates the bound BuildConfig's dynamic
+// override slot so the next live-stack dial picks up the new profile,
+// and TLSFingerprint() reflects that override. This is the wire-up
+// that closes the live-wire regression where proxy_start / configure
+// changes were silently dropped from the live MITM dial path.
+func TestManager_TLSFingerprint_BoundBuildConfig(t *testing.T) {
+	bc := &connector.BuildConfig{TLSFingerprint: "chrome"}
+	mgr, err := NewManager(ManagerConfig{
+		Logger:       silentLogger(),
+		StackFactory: func(_ context.Context, _, _ string) (*Stack, error) { return nil, errors.New("unused") },
+		BuildConfig:  bc,
+	})
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	// Boot-time value surfaces when no runtime override is set.
+	if got := mgr.TLSFingerprint(); got != "chrome" {
+		t.Errorf("initial TLSFingerprint = %q, want chrome", got)
+	}
+
+	// Runtime override mutates BuildConfig.
+	mgr.SetTLSFingerprint("firefox")
+	if got := mgr.TLSFingerprint(); got != "firefox" {
+		t.Errorf("after SetTLSFingerprint(firefox), TLSFingerprint = %q, want firefox", got)
+	}
+	if got := bc.EffectiveTLSFingerprint(); got != "firefox" {
+		t.Errorf("BuildConfig.EffectiveTLSFingerprint not propagated: got %q, want firefox", got)
+	}
+
+	// Replacement (not append) semantics.
+	mgr.SetTLSFingerprint("safari")
+	if got := mgr.TLSFingerprint(); got != "safari" {
+		t.Errorf("after SetTLSFingerprint(safari), TLSFingerprint = %q, want safari", got)
+	}
+
+	// Empty clears the override; boot value re-emerges.
+	mgr.SetTLSFingerprint("")
+	if got := mgr.TLSFingerprint(); got != "chrome" {
+		t.Errorf("after clear, TLSFingerprint = %q, want chrome (boot fallback)", got)
+	}
+}
+
+// TestManager_TLSFingerprint_NoBoundBuildConfig verifies the safe-no-op
+// behaviour when the Manager was constructed without a BuildConfig
+// (test-only path that does not bind one). The mutation must not
+// panic and the accessor must return the empty string sentinel.
+func TestManager_TLSFingerprint_NoBoundBuildConfig(t *testing.T) {
+	mgr, err := NewManager(ManagerConfig{
+		Logger:       silentLogger(),
+		StackFactory: func(_ context.Context, _, _ string) (*Stack, error) { return nil, errors.New("unused") },
+		// BuildConfig intentionally nil.
+	})
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	// Must not panic.
+	mgr.SetTLSFingerprint("firefox")
+	if got := mgr.TLSFingerprint(); got != "" {
+		t.Errorf("TLSFingerprint with no BuildConfig = %q, want empty string sentinel", got)
+	}
+}
+
 // TestManager_SetEnabledProtocols_PropagatesToBuildConfig verifies the
 // USK-808 fan-out: Manager.SetEnabledProtocols pushes the snapshot into
 // the bound BuildConfig so the live MITM ALPN filter observes it. Mirrors
