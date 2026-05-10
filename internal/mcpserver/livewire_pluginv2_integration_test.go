@@ -133,10 +133,14 @@ func setupLiveProxy(t *testing.T, pluginName, pluginScript string) *liveProxy {
 	mgr, err := NewLiveManager(cfg, proxyCfg, store, issuer, engine, holdQueue,
 		httpInterceptEngine, wsInterceptEngine, grpcInterceptEngine,
 		httpTransformEngine,
-		(*connector.PassthroughList)(nil), (*connector.RateLimiter)(nil),
+		(*connector.PassthroughList)(nil),
+		(*connector.TargetScope)(nil),
+		(*connector.RateLimiter)(nil),
 		(*safety.Engine)(nil),
 		PerProtocolSafetyEngines{},
-		buildCfg, (*connector.SOCKS5Negotiator)(nil), logger)
+		buildCfg, (*connector.SOCKS5Negotiator)(nil),
+		(*flow.RecordScope)(nil),
+		logger)
 	if err != nil {
 		engine.Close()
 		store.Close()
