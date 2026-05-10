@@ -12,7 +12,6 @@ import (
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/usk6666/yorishiro-proxy/internal/cert"
-	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/connector"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 )
@@ -983,7 +982,14 @@ func TestQuery_Config_DefaultManagerValues(t *testing.T) {
 	}
 }
 
-func TestQuery_Config_MaxBodySize_Default(t *testing.T) {
+// TestQuery_Config_MaxBodySize_NoManager confirms that without a connector
+// manager bound, max_body_size is omitted (USK-807 switched the populator
+// to the manager BuildConfig accessor; proxyDefaults is no longer consulted
+// by handleQueryConfig). For positive-cap and zero-cap behaviour with a
+// real Manager, see TestQuery_Config_ProtocolCaps_Populated /
+// TestQuery_Config_ProtocolCaps_OmittedWhenZero in
+// query_config_resource_test.go.
+func TestQuery_Config_MaxBodySize_NoManager(t *testing.T) {
 	t.Parallel()
 	store := newTestStore(t)
 	cs := setupQueryTestSession(t, store)
@@ -996,31 +1002,8 @@ func TestQuery_Config_MaxBodySize_Default(t *testing.T) {
 	var out queryConfigResult
 	unmarshalQueryResult(t, result, &out)
 
-	// USK-799: with no proxyDefaults set, the resolver returns the package
-	// default constant (config.MaxBodySize, 254 MiB).
-	if out.MaxBodySize != config.MaxBodySize {
-		t.Errorf("max_body_size = %d, want %d (config.MaxBodySize default)", out.MaxBodySize, config.MaxBodySize)
-	}
-}
-
-func TestQuery_Config_MaxBodySize_Configured(t *testing.T) {
-	t.Parallel()
-	store := newTestStore(t)
-	const want = int64(5 << 20) // 5 MiB
-	cs := setupQueryTestSession(t, store,
-		WithProxyDefaults(&config.ProxyConfig{MaxBodySize: want}),
-	)
-
-	result := callQuery(t, cs, queryInput{Resource: "config"})
-	if result.IsError {
-		t.Fatalf("expected success, got error: %v", result.Content)
-	}
-
-	var out queryConfigResult
-	unmarshalQueryResult(t, result, &out)
-
-	if out.MaxBodySize != want {
-		t.Errorf("max_body_size = %d, want %d", out.MaxBodySize, want)
+	if out.MaxBodySize != 0 {
+		t.Errorf("max_body_size = %d, want 0 (no manager bound; field omitted)", out.MaxBodySize)
 	}
 }
 

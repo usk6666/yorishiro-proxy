@@ -1294,7 +1294,6 @@ type queryConfigResult struct {
 	ClientCert       *queryClientCertResult           `json:"client_cert,omitempty"`
 	SafetyFilter     *querySafetyFilterResult         `json:"safety_filter,omitempty"`
 	MaxConnections   int                              `json:"max_connections"`
-	MaxBodySize      int64                            `json:"max_body_size"`
 	PeekTimeoutMs    int64                            `json:"peek_timeout_ms"`
 	RequestTimeoutMs int64                            `json:"request_timeout_ms"`
 	TLSFingerprint   string                           `json:"tls_fingerprint"`
@@ -1302,10 +1301,48 @@ type queryConfigResult struct {
 	// cap configured via Config.MaxRawCaptureSize (USK-800). Zero / omitted
 	// means the layer default (config.DefaultMaxRawCaptureSize, 2 MiB) is
 	// in effect. First protocol-layer cap exposed via this resource;
-	// existing surface omits body_spill_threshold / max_body_size /
-	// ws_max_frame_size and friends — see PR description for the rationale
-	// to defer expanding the surface uniformly.
+	// USK-807 added the remaining seven caps (max_body_size,
+	// body_spill_threshold, body_spill_dir, ws_max_frame_size,
+	// grpc_max_message_size, sse_max_event_size,
+	// grpc_max_messages_per_stream, sse_max_events_per_stream) so the
+	// introspection surface is now uniform.
 	MaxRawCaptureSize int64 `json:"max_raw_capture_size,omitempty"`
+	// MaxBodySize echoes the absolute body-size cap configured via
+	// Config.MaxBodySize (USK-799 / USK-807). Zero / omitted means the
+	// layer default (config.MaxBodySize, 254 MiB) is in effect.
+	MaxBodySize int64 `json:"max_body_size,omitempty"`
+	// BodySpillThreshold echoes the body memory→disk spill threshold
+	// configured via Config.BodySpillThreshold (USK-807). Zero / omitted
+	// means the layer default (config.DefaultBodySpillThreshold, 10 MiB)
+	// is in effect.
+	BodySpillThreshold int64 `json:"body_spill_threshold,omitempty"`
+	// BodySpillDir echoes the directory used for body-spill temp files,
+	// configured via Config.BodySpillDir (USK-807). Empty / omitted means
+	// the bodybuf package falls back to os.TempDir() — that is the
+	// resolver default and a normal operating mode, not a missing value.
+	BodySpillDir string `json:"body_spill_dir,omitempty"`
+	// WSMaxFrameSize echoes the per-frame WebSocket payload cap
+	// configured via Config.WebSocket (USK-807). Zero / omitted means the
+	// layer default (config.MaxWebSocketFrameSize, 16 MiB) is in effect.
+	WSMaxFrameSize int64 `json:"ws_max_frame_size,omitempty"`
+	// GRPCMaxMessageSize echoes the per-LPM gRPC / gRPC-Web payload cap
+	// configured via Config.GRPC (USK-807). Zero / omitted means the
+	// layer default (config.MaxGRPCMessageSize, 254 MiB) is in effect.
+	GRPCMaxMessageSize uint32 `json:"grpc_max_message_size,omitempty"`
+	// SSEMaxEventSize echoes the per-event SSE raw-byte cap configured
+	// via Config.SSE (USK-807). Zero / omitted means the layer default is
+	// in effect.
+	SSEMaxEventSize int `json:"sse_max_event_size,omitempty"`
+	// GRPCMaxMessagesPerStream echoes the per-stream RecordStep cap on
+	// GRPCDataMessage envelopes configured via Config.GRPC (USK-802 /
+	// USK-807). Zero / omitted means the RecordStep default
+	// (config.MaxGRPCMessagesPerStream, 10000) is in effect.
+	GRPCMaxMessagesPerStream int `json:"grpc_max_messages_per_stream,omitempty"`
+	// SSEMaxEventsPerStream echoes the per-stream RecordStep cap on
+	// SSEMessage envelopes configured via Config.SSE (USK-802 / USK-807).
+	// Zero / omitted means the RecordStep default
+	// (config.MaxSSEEventsPerStream, 100000) is in effect.
+	SSEMaxEventsPerStream int `json:"sse_max_events_per_stream,omitempty"`
 	// CaptureScope echoes the current recording-only observability
 	// filter (USK-776). Always present (an empty struct means
 	// "capture every flow"). target_scope is intentionally NOT
@@ -1402,6 +1439,14 @@ func (s *Server) handleQueryConfig() (*gomcp.CallToolResult, *queryConfigResult,
 		result.MaxConnections = s.connector.manager.MaxConnections()
 		result.PeekTimeoutMs = s.connector.manager.PeekTimeout().Milliseconds()
 		result.MaxRawCaptureSize = s.connector.manager.MaxRawCaptureSize()
+		result.MaxBodySize = s.connector.manager.MaxBodySize()
+		result.BodySpillThreshold = s.connector.manager.BodySpillThreshold()
+		result.BodySpillDir = s.connector.manager.BodySpillDir()
+		result.WSMaxFrameSize = s.connector.manager.WSMaxFrameSize()
+		result.GRPCMaxMessageSize = s.connector.manager.GRPCMaxMessageSize()
+		result.SSEMaxEventSize = s.connector.manager.SSEMaxEventSize()
+		result.GRPCMaxMessagesPerStream = s.connector.manager.GRPCMaxMessagesPerStream()
+		result.SSEMaxEventsPerStream = s.connector.manager.SSEMaxEventsPerStream()
 	}
 
 	if rt := s.currentRequestTimeout(); rt > 0 {
@@ -1413,7 +1458,6 @@ func (s *Server) handleQueryConfig() (*gomcp.CallToolResult, *queryConfigResult,
 
 	result.TLSFingerprint = s.currentTLSFingerprint()
 	result.CaptureScope = s.currentCaptureScope()
-	result.MaxBodySize = config.ResolveMaxBodySize(s.connector.proxyDefaults)
 
 	return nil, result, nil
 }

@@ -551,6 +551,195 @@ func (m *Manager) MaxRawCaptureSize() int64 {
 	return bc.MaxRawCaptureSize
 }
 
+// MaxBodySize returns the absolute body-size cap from the bound BuildConfig
+// (USK-807).
+//
+// On the production Live wiring path the field is always set via
+// config.ResolveMaxBodySize, which substitutes the package default
+// (config.MaxBodySize, 254 MiB) when the operator left the knob unset.
+// Callers therefore do NOT need to apply their own zero-fallback — the value
+// returned here is the resolved cap.
+//
+// Zero is still possible from two paths and must be handled by callers
+// only if they construct the Manager outside the Live wiring:
+//   - No BuildConfig was bound to the Manager (returned as 0 below).
+//   - A non-Live BuildConfig was assembled directly without running the
+//     resolver (e.g., tests).
+func (m *Manager) MaxBodySize() int64 {
+	m.mu.Lock()
+	bc := m.buildCfg
+	m.mu.Unlock()
+	if bc == nil {
+		return 0
+	}
+	return bc.MaxBodySize
+}
+
+// BodySpillThreshold returns the body memory→disk spill threshold from the
+// bound BuildConfig (USK-807).
+//
+// On the production Live wiring path the field is always set via
+// config.ResolveBodySpillThreshold, which substitutes
+// config.DefaultBodySpillThreshold (10 MiB) when the operator left the knob
+// unset. Callers therefore do NOT need to apply their own zero-fallback —
+// the value returned here is the resolved threshold.
+//
+// Zero is still possible from two paths and must be handled by callers
+// only if they construct the Manager outside the Live wiring:
+//   - No BuildConfig was bound to the Manager (returned as 0 below).
+//   - A non-Live BuildConfig was assembled directly without running the
+//     resolver (e.g., tests).
+func (m *Manager) BodySpillThreshold() int64 {
+	m.mu.Lock()
+	bc := m.buildCfg
+	m.mu.Unlock()
+	if bc == nil {
+		return 0
+	}
+	return bc.BodySpillThreshold
+}
+
+// BodySpillDir returns the directory used for body-spill temp files from the
+// bound BuildConfig (USK-807).
+//
+// On the production Live wiring path the field is set via
+// config.ResolveBodySpillDir. The empty-string sentinel means the bodybuf
+// package falls back to os.TempDir() at spill time — that is the resolver
+// default and a normal operating mode, not a missing value.
+//
+// Empty is also returned when no BuildConfig was bound to the Manager. Both
+// cases serialise to "default = os.TempDir()"; callers that need to
+// distinguish "operator unset" from "no manager" must inspect the Manager
+// state out-of-band.
+func (m *Manager) BodySpillDir() string {
+	m.mu.Lock()
+	bc := m.buildCfg
+	m.mu.Unlock()
+	if bc == nil {
+		return ""
+	}
+	return bc.BodySpillDir
+}
+
+// WSMaxFrameSize returns the per-frame WebSocket payload cap from the bound
+// BuildConfig (USK-807).
+//
+// On the production Live wiring path the field is always set via
+// config.ResolveWSMaxFrameSize, which substitutes the Layer default
+// (config.MaxWebSocketFrameSize, 16 MiB) when the operator left the knob
+// unset. Callers therefore do NOT need to apply their own zero-fallback —
+// the value returned here is the resolved cap.
+//
+// Zero is still possible from two paths and must be handled by callers
+// only if they construct the Manager outside the Live wiring:
+//   - No BuildConfig was bound to the Manager (returned as 0 below).
+//   - A non-Live BuildConfig was assembled directly without running the
+//     resolver (e.g., tests).
+func (m *Manager) WSMaxFrameSize() int64 {
+	m.mu.Lock()
+	bc := m.buildCfg
+	m.mu.Unlock()
+	if bc == nil {
+		return 0
+	}
+	return bc.WSMaxFrameSize
+}
+
+// GRPCMaxMessageSize returns the per-LPM gRPC / gRPC-Web payload cap from
+// the bound BuildConfig (USK-807).
+//
+// On the production Live wiring path the field is always set via
+// config.ResolveGRPCMaxMessageSize, which substitutes the Layer default
+// (config.MaxGRPCMessageSize, 254 MiB) when the operator left the knob
+// unset. Callers therefore do NOT need to apply their own zero-fallback —
+// the value returned here is the resolved cap.
+//
+// Zero is still possible from two paths and must be handled by callers
+// only if they construct the Manager outside the Live wiring:
+//   - No BuildConfig was bound to the Manager (returned as 0 below).
+//   - A non-Live BuildConfig was assembled directly without running the
+//     resolver (e.g., tests).
+func (m *Manager) GRPCMaxMessageSize() uint32 {
+	m.mu.Lock()
+	bc := m.buildCfg
+	m.mu.Unlock()
+	if bc == nil {
+		return 0
+	}
+	return bc.GRPCMaxMessageSize
+}
+
+// SSEMaxEventSize returns the per-event SSE raw-byte cap from the bound
+// BuildConfig (USK-807).
+//
+// On the production Live wiring path the field is always set via
+// config.ResolveSSEMaxEventSize, which substitutes the Layer default when
+// the operator left the knob unset. Callers therefore do NOT need to apply
+// their own zero-fallback — the value returned here is the resolved cap.
+//
+// Zero is still possible from two paths and must be handled by callers
+// only if they construct the Manager outside the Live wiring:
+//   - No BuildConfig was bound to the Manager (returned as 0 below).
+//   - A non-Live BuildConfig was assembled directly without running the
+//     resolver (e.g., tests).
+func (m *Manager) SSEMaxEventSize() int {
+	m.mu.Lock()
+	bc := m.buildCfg
+	m.mu.Unlock()
+	if bc == nil {
+		return 0
+	}
+	return bc.SSEMaxEventSize
+}
+
+// GRPCMaxMessagesPerStream returns the per-stream RecordStep cap on
+// GRPCDataMessage envelopes from the bound BuildConfig (USK-807).
+//
+// On the production Live wiring path the field is always set via
+// config.ResolveGRPCMaxMessagesPerStream, which substitutes the RecordStep
+// default (config.MaxGRPCMessagesPerStream, 10000) when the operator left
+// the knob unset. Callers therefore do NOT need to apply their own
+// zero-fallback — the value returned here is the resolved cap.
+//
+// Zero is still possible from two paths and must be handled by callers
+// only if they construct the Manager outside the Live wiring:
+//   - No BuildConfig was bound to the Manager (returned as 0 below).
+//   - A non-Live BuildConfig was assembled directly without running the
+//     resolver (e.g., tests).
+func (m *Manager) GRPCMaxMessagesPerStream() int {
+	m.mu.Lock()
+	bc := m.buildCfg
+	m.mu.Unlock()
+	if bc == nil {
+		return 0
+	}
+	return bc.GRPCMaxMessagesPerStream
+}
+
+// SSEMaxEventsPerStream returns the per-stream RecordStep cap on SSEMessage
+// envelopes from the bound BuildConfig (USK-807).
+//
+// On the production Live wiring path the field is always set via
+// config.ResolveSSEMaxEventsPerStream, which substitutes the RecordStep
+// default (config.MaxSSEEventsPerStream, 100000) when the operator left the
+// knob unset. Callers therefore do NOT need to apply their own
+// zero-fallback — the value returned here is the resolved cap.
+//
+// Zero is still possible from two paths and must be handled by callers
+// only if they construct the Manager outside the Live wiring:
+//   - No BuildConfig was bound to the Manager (returned as 0 below).
+//   - A non-Live BuildConfig was assembled directly without running the
+//     resolver (e.g., tests).
+func (m *Manager) SSEMaxEventsPerStream() int {
+	m.mu.Lock()
+	bc := m.buildCfg
+	m.mu.Unlock()
+	if bc == nil {
+		return 0
+	}
+	return bc.SSEMaxEventsPerStream
+}
+
 // Listener returns the Stack's Listener wrapper for the named listener,
 // or nil if no such listener is running. Useful for tests and for callers
 // that need to reach the bound pluginv2.Engine via Listener.PluginV2Engine().

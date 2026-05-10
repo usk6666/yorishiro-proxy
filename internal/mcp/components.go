@@ -138,6 +138,65 @@ type proxyManager interface {
 	// underlying Manager was constructed via a non-Live BuildConfig
 	// path that did not run the resolver. Boot-time only; no setter.
 	MaxRawCaptureSize() int64
+	// MaxBodySize surfaces the absolute body-size cap (USK-807). On the
+	// Live wiring path the returned value is resolver-normalised via
+	// config.ResolveMaxBodySize (substitutes config.MaxBodySize, 254 MiB,
+	// when the operator left the knob zero); zero may still be observed
+	// from non-Live BuildConfig paths that did not run the resolver.
+	// Boot-time only; no setter.
+	MaxBodySize() int64
+	// BodySpillThreshold surfaces the body memory→disk spill threshold
+	// (USK-807). On the Live wiring path the returned value is
+	// resolver-normalised via config.ResolveBodySpillThreshold
+	// (substitutes config.DefaultBodySpillThreshold, 10 MiB, when the
+	// operator left the knob zero); zero may still be observed from
+	// non-Live BuildConfig paths that did not run the resolver.
+	// Boot-time only; no setter.
+	BodySpillThreshold() int64
+	// BodySpillDir surfaces the directory used for body-spill temp files
+	// (USK-807). On the Live wiring path the returned value is
+	// resolver-normalised via config.ResolveBodySpillDir; the empty-string
+	// sentinel means the bodybuf package falls back to os.TempDir() — a
+	// normal operating mode, not a missing value. Boot-time only; no
+	// setter.
+	BodySpillDir() string
+	// WSMaxFrameSize surfaces the per-frame WebSocket payload cap
+	// (USK-807). On the Live wiring path the returned value is
+	// resolver-normalised via config.ResolveWSMaxFrameSize (substitutes
+	// config.MaxWebSocketFrameSize, 16 MiB, when the operator left the
+	// knob zero); zero may still be observed from non-Live BuildConfig
+	// paths that did not run the resolver. Boot-time only; no setter.
+	WSMaxFrameSize() int64
+	// GRPCMaxMessageSize surfaces the per-LPM gRPC / gRPC-Web payload cap
+	// (USK-807). On the Live wiring path the returned value is
+	// resolver-normalised via config.ResolveGRPCMaxMessageSize
+	// (substitutes config.MaxGRPCMessageSize, 254 MiB, when the operator
+	// left the knob zero); zero may still be observed from non-Live
+	// BuildConfig paths that did not run the resolver. Boot-time only;
+	// no setter.
+	GRPCMaxMessageSize() uint32
+	// SSEMaxEventSize surfaces the per-event SSE raw-byte cap (USK-807).
+	// On the Live wiring path the returned value is resolver-normalised
+	// via config.ResolveSSEMaxEventSize; zero may still be observed from
+	// non-Live BuildConfig paths that did not run the resolver.
+	// Boot-time only; no setter.
+	SSEMaxEventSize() int
+	// GRPCMaxMessagesPerStream surfaces the per-stream RecordStep cap on
+	// GRPCDataMessage envelopes (USK-807). On the Live wiring path the
+	// returned value is resolver-normalised via
+	// config.ResolveGRPCMaxMessagesPerStream (substitutes
+	// config.MaxGRPCMessagesPerStream, 10000, when the operator left the
+	// knob zero); zero may still be observed from non-Live BuildConfig
+	// paths that did not run the resolver. Boot-time only; no setter.
+	GRPCMaxMessagesPerStream() int
+	// SSEMaxEventsPerStream surfaces the per-stream RecordStep cap on
+	// SSEMessage envelopes (USK-807). On the Live wiring path the returned
+	// value is resolver-normalised via config.ResolveSSEMaxEventsPerStream
+	// (substitutes config.MaxSSEEventsPerStream, 100000, when the
+	// operator left the knob zero); zero may still be observed from
+	// non-Live BuildConfig paths that did not run the resolver.
+	// Boot-time only; no setter.
+	SSEMaxEventsPerStream() int
 	// SetEnabledProtocols forwards the user-facing protocol allow-list
 	// down to the underlying connector.FullListener so detection-time
 	// rejection enforces it on inbound traffic (USK-732). Empty/nil
