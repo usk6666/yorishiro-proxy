@@ -33,6 +33,7 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -229,7 +230,13 @@ func (s *Server) buildFuzzHTTPPlan(ctx context.Context, input *fuzzHTTPInput) (*
 // running each variant through the resend_http pipeline + dial path.
 // Returns the per-variant rows, the count of completed variants, and
 // an optional stop reason ("" when all variants ran to completion).
-func (s *Server) runFuzzHTTPVariants(ctx context.Context, plan *fuzzHTTPPlan, timeout time.Duration, stopOn5xx bool, tag string) ([]fuzzHTTPVariantRow, int, string, error) {
+//
+// USK-827: persists one fuzz_results row per variant via
+// FuzzStore.SaveFuzzResult so `query fuzz_results { fuzz_id }` is
+// populated for both successful and error variants. Store-write
+// failures are non-fatal (slog.Warn + continue) — the wire data is on
+// disk via RecordStep and remains the source of truth.
+func (s *Server) runFuzzHTTPVariants(ctx context.Context, plan *fuzzHTTPPlan, timeout time.Duration, stopOn5xx bool, tag, fuzzID string) ([]fuzzHTTPVariantRow, int, string, error) {
 	encoders := buildFuzzHTTPEncoderRegistry()
 	pipe := s.buildFuzzHTTPPipeline(encoders)
 	dial := buildResendHTTPDialFunc(s.connector.tlsTransport, plan.dialAddr, plan.useTLS, plan.sni)
@@ -275,6 +282,12 @@ func (s *Server) runFuzzHTTPVariants(ctx context.Context, plan *fuzzHTTPPlan, ti
 		rows = append(rows, row)
 		completed++
 
+		// USK-827: persist per-variant fuzz_results row so the aggregation
+		// view (`query fuzz_results { fuzz_id }` + USK-278 outliers_only)
+		// is populated. Save failures are non-fatal — wire data on disk via
+		// RecordStep is the source of truth.
+		s.saveFuzzHTTPResult(ctx, fuzzID, variantIdx, row, payloads)
+
 		nextIndices(indices, plan.positions)
 
 		if stopOn5xx && statusCode >= 500 && statusCode < 600 {
@@ -282,6 +295,170 @@ func (s *Server) runFuzzHTTPVariants(ctx context.Context, plan *fuzzHTTPPlan, ti
 		}
 	}
 	return rows, completed, "", nil
+}
+
+// fuzzHTTPJobConfig is the JSON payload persisted to fuzz_jobs.config.
+// Intentionally records only structural metadata: position paths,
+// payload counts, encoding labels, and the stop_on_5xx flag. Raw
+// payload values are deliberately excluded — they can be re-derived
+// from each Stream's recorded Flow, and including them here would
+// inflate the row by O(positions × payloads × payload-size) and
+// surface potentially-sensitive payloads (auth tokens, PII used in
+// fuzzing) in the aggregation table.
+type fuzzHTTPJobConfig struct {
+	Positions     []fuzzHTTPJobPosition `json:"positions"`
+	StopOn5xx     bool                  `json:"stop_on_5xx"`
+	TotalVariants int                   `json:"total_variants"`
+}
+
+// fuzzHTTPJobPosition is one position entry inside fuzz_jobs.config.
+// Only structural metadata is recorded — see fuzzHTTPJobConfig for the
+// payload-omission rationale.
+type fuzzHTTPJobPosition struct {
+	Path         string `json:"path"`
+	PayloadCount int    `json:"payload_count"`
+	Encoding     string `json:"encoding,omitempty"`
+}
+
+// saveFuzzHTTPJob persists the initial fuzz_jobs row at status="running".
+// Called once before the variant loop starts. Store-write failures are
+// logged at slog.Warn and ignored — the fuzz run itself is not blocked
+// because aggregation persistence is best-effort.
+//
+// fuzz_jobs.stream_id is set from input.FlowID when the caller seeded
+// the run from a recorded flow; otherwise it is left empty.
+func (s *Server) saveFuzzHTTPJob(ctx context.Context, fuzzID string, input *fuzzHTTPInput, plan *fuzzHTTPPlan) {
+	if s.jobRunner == nil || s.jobRunner.fuzzStore == nil {
+		return
+	}
+
+	cfg := fuzzHTTPJobConfig{
+		Positions:     make([]fuzzHTTPJobPosition, 0, len(input.Positions)),
+		StopOn5xx:     input.StopOn5xx,
+		TotalVariants: plan.totalVariants,
+	}
+	for _, p := range input.Positions {
+		cfg.Positions = append(cfg.Positions, fuzzHTTPJobPosition{
+			Path:         p.Path,
+			PayloadCount: len(p.Payloads),
+			Encoding:     p.Encoding,
+		})
+	}
+	cfgJSON, err := json.Marshal(cfg)
+	if err != nil {
+		// Should never fail for this structure; degrade to a minimal payload
+		// so the row still inserts rather than blocking the run.
+		cfgJSON = []byte("{}")
+	}
+
+	job := &flow.FuzzJob{
+		ID:             fuzzID,
+		StreamID:       input.FlowID, // seed stream when replaying a recorded flow
+		Config:         string(cfgJSON),
+		Status:         "running",
+		Tag:            input.Tag,
+		CreatedAt:      time.Now().UTC(),
+		Total:          plan.totalVariants,
+		CompletedCount: 0,
+		ErrorCount:     0,
+	}
+	if err := s.jobRunner.fuzzStore.SaveFuzzJob(ctx, job); err != nil {
+		slog.WarnContext(ctx, "fuzz_http: save fuzz_jobs row failed",
+			"fuzz_id", fuzzID,
+			"error", err,
+		)
+	}
+}
+
+// finalizeFuzzHTTPJob updates the fuzz_jobs row at end of run with the
+// final status / completed_at / counts. Called with a fresh background
+// context so caller-side ctx cancel does not prevent the closing
+// UPDATE from landing.
+//
+// Status rule (USK-827): "completed" when the variant loop ran to
+// natural exhaustion OR when stop_on_5xx triggered (a documented
+// exit, not a failure). "error" only when the run aborted before
+// completion due to a non-stop_on_5xx runErr.
+//
+// error_count counts per-variant errors observed in the rows
+// (row.Error != ""); store-write failures intentionally do NOT bump
+// this counter — they are observability gaps, not request failures.
+func (s *Server) finalizeFuzzHTTPJob(ctx context.Context, fuzzID string, rows []fuzzHTTPVariantRow, completed int, stopReason string, runErr error) {
+	if s.jobRunner == nil || s.jobRunner.fuzzStore == nil {
+		return
+	}
+
+	now := time.Now().UTC()
+	errorCount := 0
+	for _, r := range rows {
+		if r.Error != "" {
+			errorCount++
+		}
+	}
+
+	status := "completed"
+	if runErr != nil {
+		status = "error"
+	}
+
+	// UpdateFuzzJob's SQL overwrites total / completed_count / error_count
+	// (config / created_at / tag / stream_id are preserved by WHERE id = ?).
+	// Fetch the existing row first so we preserve the planned Total when
+	// stop_on_5xx aborts early (completed < total).
+	existing, err := s.jobRunner.fuzzStore.GetFuzzJob(ctx, fuzzID)
+	if err != nil {
+		slog.WarnContext(ctx, "fuzz_http: load fuzz_jobs row for finalize failed",
+			"fuzz_id", fuzzID,
+			"error", err,
+		)
+		return
+	}
+	existing.Status = status
+	existing.CompletedAt = &now
+	existing.CompletedCount = completed
+	existing.ErrorCount = errorCount
+	if err := s.jobRunner.fuzzStore.UpdateFuzzJob(ctx, existing); err != nil {
+		slog.WarnContext(ctx, "fuzz_http: update fuzz_jobs row failed",
+			"fuzz_id", fuzzID,
+			"status", status,
+			"error", err,
+		)
+	}
+	_ = stopReason // stop_reason is recorded in the response payload; no fuzz_jobs column today
+}
+
+// saveFuzzHTTPResult persists a single per-variant fuzz_results row.
+// Called from the variant loop after each variant completes (success
+// or error). Save failures are logged at slog.Warn and ignored — the
+// per-variant Flow rows persisted via RecordStep are the source of
+// truth for forensic drill-down.
+//
+// Error variants are recorded with status_code=0 + error=<msg>; this
+// matches the in-memory variants[] list which already surfaces error
+// variants to the caller. Without this, the aggregation table would
+// under-count by exactly the error-variant population.
+func (s *Server) saveFuzzHTTPResult(ctx context.Context, fuzzID string, index int, row fuzzHTTPVariantRow, payloads map[string]string) {
+	if s.jobRunner == nil || s.jobRunner.fuzzStore == nil {
+		return
+	}
+	result := &flow.FuzzResult{
+		FuzzID:         fuzzID,
+		IndexNum:       index,
+		StreamID:       row.StreamID,
+		Payloads:       flow.PayloadsToJSON(payloads),
+		StatusCode:     row.StatusCode,
+		ResponseLength: row.BodySize,
+		DurationMs:     int(row.DurationMs),
+		Error:          row.Error,
+	}
+	if err := s.jobRunner.fuzzStore.SaveFuzzResult(ctx, result); err != nil {
+		slog.WarnContext(ctx, "fuzz_http: save fuzz_results row failed",
+			"fuzz_id", fuzzID,
+			"index", index,
+			"stream_id", row.StreamID,
+			"error", err,
+		)
+	}
 }
 
 // buildFuzzHTTPEncoderRegistry constructs the wire encoder registry
@@ -297,6 +474,11 @@ func buildFuzzHTTPEncoderRegistry() *pipeline.WireEncoderRegistry {
 // buildFuzzHTTPPipeline constructs the per-variant pipeline shared
 // across the fuzz run. PluginStepPost + RecordStep — same as
 // resend_http per RFC §9.3 D1.
+//
+// USK-827: variant Streams are stamped with flow.OriginFuzz so
+// `query flows { filter.origin: "fuzz" }` filters fuzz-originated
+// traffic away from live capture views (parity with resend_http's
+// OriginResend stamping).
 func (s *Server) buildFuzzHTTPPipeline(encoders *pipeline.WireEncoderRegistry) *pipeline.Pipeline {
 	steps := []pipeline.Step{
 		// USK-818: BudgetStep at position #1 — each fuzz variant Send
@@ -305,7 +487,12 @@ func (s *Server) buildFuzzHTTPPipeline(encoders *pipeline.WireEncoderRegistry) *
 		// runFuzzHTTPSingleExchange writes the audit Stream.
 		pipeline.NewBudgetStep(s.misc.budgetManager),
 		pipeline.NewPluginStepPost(pluginEngineForResend(s), encoders, slog.Default()),
-		pipeline.NewRecordStep(s.flowStore.store, slog.Default(), pipeline.WithWireEncoderRegistry(encoders)),
+		pipeline.NewRecordStep(
+			s.flowStore.store,
+			slog.Default(),
+			pipeline.WithWireEncoderRegistry(encoders),
+			pipeline.WithOrigin(flow.OriginFuzz),
+		),
 	}
 	return pipeline.New(steps...)
 }

@@ -39,6 +39,8 @@ import (
 	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/google/uuid"
 )
 
 // fuzzHTTPInput is the typed input for the fuzz_http tool.
@@ -105,7 +107,13 @@ type fuzzHTTPPosition struct {
 // product index), the response status code, the body byte length, and
 // the new Stream.ID under which RecordStep persisted the variant's
 // Flows.
+//
+// fuzz_id is the UUID PK of the corresponding fuzz_jobs row (USK-827).
+// AI agents chain this with `query { resource: "fuzz_results", filter:
+// { fuzz_id: ..., outliers_only: true } }` to surface per-run outlier
+// variants without re-running the fuzz job.
 type fuzzHTTPResult struct {
+	FuzzID            string               `json:"fuzz_id"`
 	TotalVariants     int                  `json:"total_variants"`
 	CompletedVariants int                  `json:"completed_variants"`
 	StoppedReason     string               `json:"stopped_reason,omitempty"`
@@ -144,14 +152,17 @@ func (s *Server) registerFuzzHTTP() {
 // aggregation.
 func (s *Server) handleFuzzHTTP(ctx context.Context, _ *gomcp.CallToolRequest, input fuzzHTTPInput) (*gomcp.CallToolResult, *fuzzHTTPResult, error) {
 	start := time.Now()
+	fuzzID := uuid.NewString()
 	slog.DebugContext(ctx, "MCP tool invoked",
 		"tool", "fuzz_http",
 		"flow_id", input.FlowID,
+		"fuzz_id", fuzzID,
 		"positions", len(input.Positions),
 	)
 	defer func() {
 		slog.DebugContext(ctx, "MCP tool completed",
 			"tool", "fuzz_http",
+			"fuzz_id", fuzzID,
 			"duration_ms", time.Since(start).Milliseconds(),
 		)
 	}()
@@ -170,13 +181,31 @@ func (s *Server) handleFuzzHTTP(ctx context.Context, _ *gomcp.CallToolRequest, i
 		timeout = time.Duration(*input.TimeoutMs) * time.Millisecond
 	}
 
-	rows, completed, stopReason, err := s.runFuzzHTTPVariants(ctx, plan, timeout, input.StopOn5xx, input.Tag)
-	if err != nil {
-		return nil, nil, fmt.Errorf("fuzz_http: %w", err)
+	// Insert the fuzz_jobs row at status="running" BEFORE the variant
+	// loop so any concurrent `query fuzz_jobs` observes the run.
+	//
+	// Use a fresh background context so a caller-side cancel landing
+	// AFTER plan-build but BEFORE the first variant cannot prevent the
+	// row from being created — the finalize UPDATE below relies on this
+	// row existing. Mirrors applyResendHTTPTag's precedent for store
+	// writes that must not be cancelled by the request context.
+	s.saveFuzzHTTPJob(context.Background(), fuzzID, &input, plan)
+
+	rows, completed, stopReason, runErr := s.runFuzzHTTPVariants(ctx, plan, timeout, input.StopOn5xx, input.Tag, fuzzID)
+
+	// Use a fresh background ctx so the closing UPDATE always lands,
+	// even on caller-side ctx cancel. The store-write is best-effort:
+	// the per-variant Flow rows persisted via RecordStep are the source
+	// of truth; fuzz_jobs is the aggregation layer.
+	s.finalizeFuzzHTTPJob(context.Background(), fuzzID, rows, completed, stopReason, runErr)
+
+	if runErr != nil {
+		return nil, nil, fmt.Errorf("fuzz_http: %w", runErr)
 	}
 
 	duration := time.Since(start)
 	return nil, &fuzzHTTPResult{
+		FuzzID:            fuzzID,
 		TotalVariants:     plan.totalVariants,
 		CompletedVariants: completed,
 		StoppedReason:     stopReason,
