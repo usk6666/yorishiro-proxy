@@ -54,6 +54,8 @@ import (
 	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/google/uuid"
 )
 
 // fuzzRawInput is the typed input for the fuzz_raw tool.
@@ -106,7 +108,14 @@ type fuzzRawPosition struct {
 // caller can correlate results without re-deriving the cartesian
 // product index), the response body byte length, and the new Stream.ID
 // under which RecordStep persisted the variant's Flows.
+//
+// fuzz_id is the UUID PK of the corresponding fuzz_jobs row (USK-837,
+// parity with USK-827 for fuzz_http). AI agents chain this with
+// `query { resource: "fuzz_results", filter: { fuzz_id: ...,
+// outliers_only: true } }` to surface per-run outlier variants without
+// re-running the fuzz job.
 type fuzzRawResult struct {
+	FuzzID            string              `json:"fuzz_id"`
 	TotalVariants     int                 `json:"total_variants"`
 	CompletedVariants int                 `json:"completed_variants"`
 	StoppedReason     string              `json:"stopped_reason,omitempty"`
@@ -149,16 +158,19 @@ func (s *Server) registerFuzzRaw() {
 // result aggregation.
 func (s *Server) handleFuzzRaw(ctx context.Context, _ *gomcp.CallToolRequest, input fuzzRawInput) (*gomcp.CallToolResult, *fuzzRawResult, error) {
 	start := time.Now()
+	fuzzID := uuid.NewString()
 	slog.DebugContext(ctx, "MCP tool invoked",
 		"tool", "fuzz_raw",
 		"flow_id", input.FlowID,
 		"target_addr", input.TargetAddr,
 		"use_tls", input.UseTLS,
+		"fuzz_id", fuzzID,
 		"positions", len(input.Positions),
 	)
 	defer func() {
 		slog.DebugContext(ctx, "MCP tool completed",
 			"tool", "fuzz_raw",
+			"fuzz_id", fuzzID,
 			"duration_ms", time.Since(start).Milliseconds(),
 		)
 	}()
@@ -177,13 +189,30 @@ func (s *Server) handleFuzzRaw(ctx context.Context, _ *gomcp.CallToolRequest, in
 		timeout = time.Duration(*input.TimeoutMs) * time.Millisecond
 	}
 
-	rows, completed, stopReason, err := s.runFuzzRawVariants(ctx, plan, timeout, input.StopOnError, input.Tag)
-	if err != nil {
-		return nil, nil, fmt.Errorf("fuzz_raw: %w", err)
+	// Insert the fuzz_jobs row at status="running" BEFORE the variant
+	// loop so any concurrent `query fuzz_jobs` observes the run.
+	//
+	// Use a fresh background context so a caller-side cancel landing
+	// AFTER plan-build but BEFORE the first variant cannot prevent the
+	// row from being created — the finalize UPDATE below relies on this
+	// row existing. Mirrors fuzz_http (USK-827) precedent.
+	s.saveFuzzRawJob(context.Background(), fuzzID, &input, plan)
+
+	rows, completed, stopReason, runErr := s.runFuzzRawVariants(ctx, plan, timeout, input.StopOnError, input.Tag, fuzzID)
+
+	// Use a fresh background ctx so the closing UPDATE always lands,
+	// even on caller-side ctx cancel. The store-write is best-effort:
+	// the per-variant Flow rows persisted via RecordStep are the source
+	// of truth; fuzz_jobs is the aggregation layer.
+	s.finalizeFuzzRawJob(context.Background(), fuzzID, rows, completed, stopReason, runErr)
+
+	if runErr != nil {
+		return nil, nil, fmt.Errorf("fuzz_raw: %w", runErr)
 	}
 
 	duration := time.Since(start)
 	return nil, &fuzzRawResult{
+		FuzzID:            fuzzID,
 		TotalVariants:     plan.totalVariants,
 		CompletedVariants: completed,
 		StoppedReason:     stopReason,

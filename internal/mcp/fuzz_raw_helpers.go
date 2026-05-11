@@ -32,6 +32,7 @@ package mcp
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -46,6 +47,7 @@ import (
 
 	"github.com/usk6666/yorishiro-proxy/internal/connector"
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
+	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/job"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/bytechunk"
 	"github.com/usk6666/yorishiro-proxy/internal/pipeline"
@@ -379,12 +381,18 @@ func decodeFuzzRawBasePatches(in []resendRawBP) ([]job.BytePatch, error) {
 }
 
 // runFuzzRawVariants iterates the cartesian product of all positions,
-// running each variant through the resend_raw pipeline + dial path.
+// running each variant through the fuzz_raw pipeline + dial path.
 // Returns the per-variant rows, the count of completed variants, and
 // an optional stop reason ("" when all variants ran to completion).
-func (s *Server) runFuzzRawVariants(ctx context.Context, plan *fuzzRawPlan, timeout time.Duration, stopOnError bool, tag string) ([]fuzzRawVariantRow, int, string, error) {
+//
+// USK-837: persists one fuzz_results row per variant via
+// FuzzStore.SaveFuzzResult so `query fuzz_results { fuzz_id }` is
+// populated for both successful and error variants. Store-write
+// failures are non-fatal (slog.Warn + continue) — the wire data is on
+// disk via RecordStep and remains the source of truth.
+func (s *Server) runFuzzRawVariants(ctx context.Context, plan *fuzzRawPlan, timeout time.Duration, stopOnError bool, tag, fuzzID string) ([]fuzzRawVariantRow, int, string, error) {
 	encoders := buildResendRawEncoderRegistry()
-	pipe := s.buildResendRawPipeline(encoders)
+	pipe := s.buildFuzzRawPipeline(encoders)
 
 	rows := make([]fuzzRawVariantRow, 0, plan.totalVariants)
 	indices := make([]int, len(plan.positions))
@@ -418,6 +426,12 @@ func (s *Server) runFuzzRawVariants(ctx context.Context, plan *fuzzRawPlan, time
 		}
 		rows = append(rows, row)
 		completed++
+
+		// USK-837: persist per-variant fuzz_results row so the aggregation
+		// view (`query fuzz_results { fuzz_id }` + USK-278 outliers_only)
+		// is populated. Save failures are non-fatal — wire data on disk via
+		// RecordStep is the source of truth.
+		s.saveFuzzRawResult(ctx, fuzzID, variantIdx, row, payloads)
 
 		nextFuzzRawIndices(indices, plan.positions)
 
@@ -725,4 +739,206 @@ func decodeFuzzRawPayloads(positions []fuzzRawPosition, indices []int) (map[stri
 		out[pos.Path] = string(decoded)
 	}
 	return out, nil
+}
+
+// fuzzRawJobConfig is the JSON payload persisted to fuzz_jobs.config.
+// Intentionally records only structural metadata: position paths,
+// payload counts, encoding labels, and the stop_on_error flag. Raw
+// payload values are deliberately excluded — they can be re-derived
+// from each Stream's recorded Flow, and including them here would
+// inflate the row by O(positions × payloads × payload-size) and
+// surface potentially-sensitive payloads (smuggling templates, auth
+// tokens) in the aggregation table. Mirrors fuzz_http (USK-827).
+type fuzzRawJobConfig struct {
+	Positions     []fuzzRawJobPosition `json:"positions"`
+	StopOnError   bool                 `json:"stop_on_error"`
+	TotalVariants int                  `json:"total_variants"`
+}
+
+// fuzzRawJobPosition is one position entry inside fuzz_jobs.config.
+// Only structural metadata is recorded — see fuzzRawJobConfig for the
+// payload-omission rationale.
+type fuzzRawJobPosition struct {
+	Path         string `json:"path"`
+	PayloadCount int    `json:"payload_count"`
+	Encoding     string `json:"encoding,omitempty"`
+}
+
+// saveFuzzRawJob persists the initial fuzz_jobs row at status="running".
+// Called once before the variant loop starts. Store-write failures are
+// logged at slog.Warn and ignored — the fuzz run itself is not blocked
+// because aggregation persistence is best-effort.
+//
+// fuzz_jobs.stream_id is set from input.FlowID when the caller seeded
+// the run from a recorded flow; otherwise it is left empty (fuzz_raw
+// supports from-scratch runs where flow_id is unset — see fuzz_raw.go
+// "Three operating modes").
+func (s *Server) saveFuzzRawJob(ctx context.Context, fuzzID string, input *fuzzRawInput, plan *fuzzRawPlan) {
+	if s.jobRunner == nil || s.jobRunner.fuzzStore == nil {
+		return
+	}
+
+	cfg := fuzzRawJobConfig{
+		Positions:     make([]fuzzRawJobPosition, 0, len(input.Positions)),
+		StopOnError:   input.StopOnError,
+		TotalVariants: plan.totalVariants,
+	}
+	for _, p := range input.Positions {
+		cfg.Positions = append(cfg.Positions, fuzzRawJobPosition{
+			Path:         p.Path,
+			PayloadCount: len(p.Payloads),
+			Encoding:     p.Encoding,
+		})
+	}
+	cfgJSON, err := json.Marshal(cfg)
+	if err != nil {
+		// Should never fail for this structure; degrade to a minimal payload
+		// so the row still inserts rather than blocking the run.
+		cfgJSON = []byte("{}")
+	}
+
+	job := &flow.FuzzJob{
+		ID:             fuzzID,
+		StreamID:       input.FlowID, // seed stream when replaying a recorded flow; empty for from-scratch
+		Config:         string(cfgJSON),
+		Status:         "running",
+		Tag:            input.Tag,
+		CreatedAt:      time.Now().UTC(),
+		Total:          plan.totalVariants,
+		CompletedCount: 0,
+		ErrorCount:     0,
+	}
+	if err := s.jobRunner.fuzzStore.SaveFuzzJob(ctx, job); err != nil {
+		slog.WarnContext(ctx, "fuzz_raw: save fuzz_jobs row failed",
+			"fuzz_id", fuzzID,
+			"error", err,
+		)
+	}
+}
+
+// finalizeFuzzRawJob updates the fuzz_jobs row at end of run with the
+// final status / completed_at / counts. Called with a fresh background
+// context so caller-side ctx cancel does not prevent the closing
+// UPDATE from landing.
+//
+// Status rule (USK-837 parity with USK-827): "completed" when the
+// variant loop ran to natural exhaustion OR when stop_on_error
+// triggered (a documented exit, not a failure). "error" only when the
+// run aborted before completion due to a non-stop_on_error runErr.
+//
+// error_count counts per-variant errors observed in the rows
+// (row.Error != ""); store-write failures intentionally do NOT bump
+// this counter — they are observability gaps, not request failures.
+func (s *Server) finalizeFuzzRawJob(ctx context.Context, fuzzID string, rows []fuzzRawVariantRow, completed int, stopReason string, runErr error) {
+	if s.jobRunner == nil || s.jobRunner.fuzzStore == nil {
+		return
+	}
+
+	now := time.Now().UTC()
+	errorCount := 0
+	for _, r := range rows {
+		if r.Error != "" {
+			errorCount++
+		}
+	}
+
+	status := "completed"
+	if runErr != nil {
+		status = "error"
+	}
+
+	// UpdateFuzzJob's SQL overwrites total / completed_count / error_count
+	// (config / created_at / tag / stream_id are preserved by WHERE id = ?).
+	// Fetch the existing row first so we preserve the planned Total when
+	// stop_on_error aborts early (completed < total).
+	existing, err := s.jobRunner.fuzzStore.GetFuzzJob(ctx, fuzzID)
+	if err != nil {
+		slog.WarnContext(ctx, "fuzz_raw: load fuzz_jobs row for finalize failed",
+			"fuzz_id", fuzzID,
+			"error", err,
+		)
+		return
+	}
+	existing.Status = status
+	existing.CompletedAt = &now
+	existing.CompletedCount = completed
+	existing.ErrorCount = errorCount
+	if err := s.jobRunner.fuzzStore.UpdateFuzzJob(ctx, existing); err != nil {
+		slog.WarnContext(ctx, "fuzz_raw: update fuzz_jobs row failed",
+			"fuzz_id", fuzzID,
+			"status", status,
+			"error", err,
+		)
+	}
+	_ = stopReason // stop_reason is recorded in the response payload; no fuzz_jobs column today
+}
+
+// saveFuzzRawResult persists a single per-variant fuzz_results row.
+// Called from the variant loop after each variant completes (success
+// or error). Save failures are logged at slog.Warn and ignored — the
+// per-variant Flow rows persisted via RecordStep are the source of
+// truth for forensic drill-down.
+//
+// StatusCode is always 0 for Raw: the protocol has no L7 status
+// concept — Raw is a byte-stream view, not a request/response
+// transaction. Outlier triage on fuzz_raw runs therefore relies on
+// response_length / duration / error distributions (status_code is a
+// flat 0 baseline across the run).
+//
+// ResponseLength = row.ResponseSize (total bytes received before
+// truncation cap). Error variants are recorded with response_length=0
+// + error=<msg>; this matches the in-memory variants[] list which
+// already surfaces error variants to the caller. Without this, the
+// aggregation table would under-count by exactly the error-variant
+// population.
+func (s *Server) saveFuzzRawResult(ctx context.Context, fuzzID string, index int, row fuzzRawVariantRow, payloads map[string]string) {
+	if s.jobRunner == nil || s.jobRunner.fuzzStore == nil {
+		return
+	}
+	result := &flow.FuzzResult{
+		FuzzID:         fuzzID,
+		IndexNum:       index,
+		StreamID:       row.StreamID,
+		Payloads:       flow.PayloadsToJSON(payloads),
+		StatusCode:     0, // Raw has no L7 status — see function-level comment
+		ResponseLength: row.ResponseSize,
+		DurationMs:     int(row.DurationMs),
+		Error:          row.Error,
+	}
+	if err := s.jobRunner.fuzzStore.SaveFuzzResult(ctx, result); err != nil {
+		slog.WarnContext(ctx, "fuzz_raw: save fuzz_results row failed",
+			"fuzz_id", fuzzID,
+			"index", index,
+			"stream_id", row.StreamID,
+			"error", err,
+		)
+	}
+}
+
+// buildFuzzRawPipeline constructs the per-variant pipeline shared
+// across the fuzz run. Mirrors buildResendRawPipeline (PluginStepPost
+// + RecordStep per RFC §9.3 D1) but stamps the RecordStep Origin with
+// flow.OriginFuzz so `query flows { filter.origin: "fuzz" }` filters
+// fuzz-originated traffic away from live capture and resend views.
+//
+// USK-837: a dedicated pipeline (rather than mutating
+// buildResendRawPipeline) keeps the resend-vs-fuzz origin attribution
+// honest — a recorded flow that was actually replayed via resend_raw
+// must continue to carry OriginResend, while a fuzz_raw variant must
+// carry OriginFuzz.
+func (s *Server) buildFuzzRawPipeline(encoders *pipeline.WireEncoderRegistry) *pipeline.Pipeline {
+	steps := []pipeline.Step{
+		// USK-818: BudgetStep at position #1 — each fuzz variant Send
+		// counts toward the budget; over-budget variants short-circuit
+		// before dial. Mirrors buildResendRawPipeline ordering.
+		pipeline.NewBudgetStep(s.misc.budgetManager),
+		pipeline.NewPluginStepPost(pluginEngineForResend(s), encoders, slog.Default()),
+		pipeline.NewRecordStep(
+			s.flowStore.store,
+			slog.Default(),
+			pipeline.WithWireEncoderRegistry(encoders),
+			pipeline.WithOrigin(flow.OriginFuzz),
+		),
+	}
+	return pipeline.New(steps...)
 }

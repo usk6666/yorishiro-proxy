@@ -47,6 +47,7 @@ Per-VARIANT timeout in milliseconds. Default `30000`.
 
 ## Result fields
 
+- `fuzz_id` (string, UUID) — primary key of the `fuzz_jobs` row created for this run. Chain with `query { resource: "fuzz_results", filter: { fuzz_id: "...", outliers_only: true } }` to surface outlier variants without re-running the fuzz job (USK-837 + USK-278, parity with USK-827 for `fuzz_http`).
 - `total_variants`, `completed_variants`, `stopped_reason`
 - `variants[]` — per-variant compact rows:
   - `index`, `stream_id`
@@ -56,6 +57,17 @@ Per-VARIANT timeout in milliseconds. Default `30000`.
   - `payloads` (object): position path -> chosen payload
   - `error` / `duration_ms`
 - `duration_ms` / `tag`
+
+## Aggregation: outlier-driven triage (recommended workflow)
+
+`fuzz_raw` populates the `fuzz_jobs` / `fuzz_results` tables for every sync run, so AI agents can issue many variants then triage statistically:
+
+1. `fuzz_raw { positions: [...], stop_on_error: false }` -> capture `fuzz_id` from the response.
+2. `query { resource: "fuzz_results", fuzz_id: "<id>" }` -> summary statistics (response length distribution, median/stddev for response_length + timing) live under `summary.statistics`. Note: `status_code` is always `0` for Raw (no L7 status concept), so outlier detection on `fuzz_raw` runs is driven by `response_length` / `duration_ms` / `error` rather than status divergence.
+3. `query { resource: "fuzz_results", fuzz_id: "<id>", filter: { outliers_only: true } }` -> just the variants that deviate from the baseline (response length/timing outside median +/- 2*stddev, or non-empty error).
+4. Drill down on any outlier with `query { resource: "flow", id: <variant.stream_id> }` to see the full request + response wire bytes.
+
+Variant Streams are stamped `origin = "fuzz"`, so `query { resource: "flows", filter: { origin: "fuzz" } }` cleanly separates fuzz-originated streams from live MITM capture and `resend_*`-originated streams.
 
 ## Examples
 
