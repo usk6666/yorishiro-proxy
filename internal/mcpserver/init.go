@@ -13,13 +13,11 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/connector"
 	"github.com/usk6666/yorishiro-proxy/internal/connector/transport"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
-	"github.com/usk6666/yorishiro-proxy/internal/layer/http2"
 	h2pool "github.com/usk6666/yorishiro-proxy/internal/layer/http2/pool"
 	"github.com/usk6666/yorishiro-proxy/internal/logging"
 	"github.com/usk6666/yorishiro-proxy/internal/mcp"
 	"github.com/usk6666/yorishiro-proxy/internal/pluginv2"
 	"github.com/usk6666/yorishiro-proxy/internal/proxybuild"
-	"github.com/usk6666/yorishiro-proxy/internal/pushrecorder"
 	rulescommon "github.com/usk6666/yorishiro-proxy/internal/rules/common"
 	grpcrules "github.com/usk6666/yorishiro-proxy/internal/rules/grpc"
 	httprules "github.com/usk6666/yorishiro-proxy/internal/rules/http"
@@ -425,13 +423,7 @@ func InitPluginV2Engine(ctx context.Context, store *flow.SQLiteStore, proxyCfg *
 // assembleLiveManager assembles the connector.BuildConfig and constructs
 // the live RFC-001 proxybuild.Manager in one step. Extracted so the caller
 // stays under the gocyclo budget.
-//
-// appCtx is the application lifecycle context — propagated into goroutines
-// (currently only the upstream push recorder) so a SIGINT-triggered
-// cancellation reaches them without waiting for the upstream Layer's
-// channel-close drain path.
 func assembleLiveManager(
-	appCtx context.Context,
 	cfg *config.Config,
 	proxyCfg *config.ProxyConfig,
 	store *flow.SQLiteStore,
@@ -453,7 +445,7 @@ func assembleLiveManager(
 	recordScope *flow.RecordScope,
 	logger *slog.Logger,
 ) (*proxybuild.Manager, error) {
-	buildCfg := NewLiveBuildConfig(appCtx, cfg, proxyCfg, issuer, pluginv2Engine, store, hostTLSRegistry, logger)
+	buildCfg := NewLiveBuildConfig(cfg, proxyCfg, issuer, pluginv2Engine, hostTLSRegistry)
 	return NewLiveManager(cfg, proxyCfg, store, issuer, pluginv2Engine,
 		holdQueue, httpInterceptEngine, wsInterceptEngine, grpcInterceptEngine,
 		httpTransformEngine, passthrough, targetScope, rateLimiter, budgetManager, safetyEngine, perProtoSafety, buildCfg,
@@ -462,24 +454,14 @@ func assembleLiveManager(
 
 // NewLiveBuildConfig assembles the connector.BuildConfig consumed by every
 // per-listener stack. PluginV2Engine reaches every Layer construction site
-// + the tls.on_handshake hook. OnHTTP2UpstreamDialed installs the upstream
-// push recorder so pushed streams are recorded (USK-623). Per-protocol
-// caps (body spill, gRPC LPM, WS frame, SSE event) are resolved from
-// proxyCfg via the config-package helpers.
-//
-// appCtx is the application lifecycle context — passed to
-// pushrecorder.RunUpstream so a SIGINT-triggered cancellation reaches the
-// per-Layer drainer goroutines without waiting for the upstream Layer's
-// own channel-close path.
+// + the tls.on_handshake hook. Per-protocol caps (body spill, gRPC LPM, WS
+// frame, SSE event) are resolved from proxyCfg via the config-package helpers.
 func NewLiveBuildConfig(
-	appCtx context.Context,
 	cfg *config.Config,
 	proxyCfg *config.ProxyConfig,
 	issuer *cert.Issuer,
 	pluginv2Engine *pluginv2.Engine,
-	store *flow.SQLiteStore,
 	hostTLSRegistry *transport.HostTLSRegistry,
-	logger *slog.Logger,
 ) *connector.BuildConfig {
 	bc := &connector.BuildConfig{
 		ProxyConfig:        proxyCfg,
@@ -511,15 +493,6 @@ func NewLiveBuildConfig(
 	bc.MaxBodySize = config.ResolveMaxBodySize(proxyCfg)
 	if proxyCfg.TLSFingerprint != "" {
 		bc.TLSFingerprint = proxyCfg.TLSFingerprint
-	}
-
-	// Install the upstream push recorder (USK-623). The callback fires
-	// once per freshly-dialed *http2.Layer; pool hits skip it (the
-	// drainer is already running for the cached Layer's lifetime).
-	// appCtx is captured so SIGINT-triggered cancellation propagates to
-	// every push drainer in addition to the Layer.Channels-close path.
-	bc.OnHTTP2UpstreamDialed = func(l *http2.Layer) {
-		go pushrecorder.RunUpstream(appCtx, l, store, logger)
 	}
 
 	return bc

@@ -1332,15 +1332,14 @@ func upstreamToClient(
 			continue
 		}
 
-		// USK-623: synthetic PUSH_PROMISE envelopes are delivered by the
-		// HTTP/2 upstream Layer onto the origin stream for observability
-		// (so the origin stream's recording shows that a push was
-		// promised). They carry request-shaped HTTPMessage fields
-		// (Method/Path/Authority) but no :status, so forwarding to the
-		// client Layer would emit a malformed response. The MITM default
-		// posture is to terminate push at the proxy: the pushed stream
-		// itself is recorded independently via the upstream push recorder
-		// (see internal/pushrecorder/push_recorder.go).
+		// USK-823: defense in depth. The HTTP/2 upstream Layer no longer
+		// surfaces PUSH_PROMISE as synthetic envelopes — server-push
+		// recording was retired; anomalous PUSH_PROMISE is rejected at
+		// the reader as PROTOCOL_ERROR before any envelope is built. A
+		// plugin could still synthesize a Message carrying the
+		// H2PushPromise anomaly, and forwarding such a request-shaped
+		// envelope to the client Layer would emit a malformed response.
+		// Continue past it rather than relay.
 		if m, ok := env.Message.(*envelope.HTTPMessage); ok && envelope.HasPushPromiseAnomaly(m) {
 			continue
 		}

@@ -328,7 +328,7 @@ func assembleAndRunMCPServer(
 	// live RecordStep reads.
 	recordScope := flow.NewRecordScope()
 
-	manager, err := assembleLiveManager(ctx, cfg, proxyCfg, store, issuer, pluginv2Engine,
+	manager, err := assembleLiveManager(cfg, proxyCfg, store, issuer, pluginv2Engine,
 		holdQueue, httpInterceptEngine, wsInterceptEngine, grpcInterceptEngine,
 		httpTransformEngine, passthrough, targetScope, rateLimiter, budgetManager, safetyEngine, perProtoSafety, hostTLSRegistry,
 		socks5Negotiator, recordScope, logger)

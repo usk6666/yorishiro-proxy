@@ -43,7 +43,6 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/layer/http2/pool"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/httpaggregator"
 	"github.com/usk6666/yorishiro-proxy/internal/pipeline"
-	"github.com/usk6666/yorishiro-proxy/internal/pushrecorder"
 	"github.com/usk6666/yorishiro-proxy/internal/rules/common"
 	httprules "github.com/usk6666/yorishiro-proxy/internal/rules/http"
 	"github.com/usk6666/yorishiro-proxy/internal/session"
@@ -404,18 +403,6 @@ func startH2CProxy(t *testing.T, ctx context.Context, upstreamAddr string, opts 
 func startH2MITMProxy(t *testing.T, ctx context.Context, buildCfg *connector.BuildConfig, opts pipelineOpts) (proxyAddr string, store *testStore) {
 	t.Helper()
 	store = &testStore{}
-
-	// USK-623: install an OnHTTP2UpstreamDialed hook that spawns the
-	// upstream push recorder for every freshly-dialed upstream h2 Layer.
-	// The recorder goroutine's lifetime matches the Layer's (runs until
-	// Layer.Channels() closes on shutdown). On pool hit the hook does
-	// NOT fire, so the original recorder keeps draining — no double
-	// attach.
-	if buildCfg != nil {
-		buildCfg.OnHTTP2UpstreamDialed = func(l *intHTTP2.Layer) {
-			go pushrecorder.RunUpstream(ctx, l, store, slog.Default())
-		}
-	}
 
 	onHTTP2Stack := func(cbCtx context.Context, stack *connector.ConnectionStack, upstreamH2 *intHTTP2.Layer, clientSnap, upstreamSnap *envelope.TLSSnapshot, target string) {
 		_ = clientSnap
@@ -1883,91 +1870,7 @@ func TestVariantRecording_InterceptModifyHeader(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Scenario 13: Server push recorded separately
-// ---------------------------------------------------------------------------
-
-func TestServerPush_PushStreamRecordedSeparately(t *testing.T) {
-	// USK-820: this test relied on the proxy upstream advertising
-	// SETTINGS_ENABLE_PUSH=1 — a violation of RFC 9113 §6.5.2 ("a client
-	// MUST send a value of 0"). The Phase 5 pentest retest confirmed
-	// strict upstreams (Google Frontend, nghttp2-server) reply with
-	// GOAWAY(PROTOCOL_ERROR) when the proxy emitted 1, refusing every
-	// first stream. The fix downshifts ClientRole to 0 by default.
-	//
-	// Consequence: live upstreams no longer push (per spec), so this
-	// recording path stays dormant in production. Exposing a new opt-in
-	// `BuildConfig.UpstreamEnablePush` (or equivalent) to revive the
-	// permissive recording is out of scope for USK-820 — re-open under
-	// a new Issue if production push-recording becomes a requirement
-	// against permissive upstreams.
-	t.Skip("not yet implemented: USK-823 (pushrecorder live wiring after USK-820)")
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	upAddr, _, _, upShutdown := startH2TLSUpstream(t, "push-marker", nethttp.HandlerFunc(func(w nethttp.ResponseWriter, r *nethttp.Request) {
-		if r.URL.Path == "/index.html" {
-			if pusher, ok := w.(nethttp.Pusher); ok {
-				_ = pusher.Push("/pushed.css", nil)
-			}
-			_, _ = w.Write([]byte("<html></html>"))
-			return
-		}
-		if r.URL.Path == "/pushed.css" {
-			w.Header().Set("Content-Type", "text/css")
-			_, _ = w.Write([]byte("body{}"))
-			return
-		}
-		nethttp.NotFound(w, r)
-	}))
-	defer upShutdown()
-
-	bcfg := makeBuildCfg(t, nil)
-	proxyAddr, store := startH2MITMProxy(t, ctx, bcfg, pipelineOpts{})
-
-	cli := newMITMH2Client(proxyAddr, upAddr)
-	req, _ := nethttp.NewRequestWithContext(ctx, "GET", "https://"+upAddr+"/index.html", nil)
-	resp, err := cli.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, _ = io.ReadAll(resp.Body)
-	resp.Body.Close()
-
-	// Let push stream propagate.
-	time.Sleep(200 * time.Millisecond)
-
-	streams := store.getStreams()
-	var pushFound bool
-	for _, st := range streams {
-		for _, f := range store.flowsForStream(st.ID) {
-			if f.URL != nil && f.URL.Path == "/pushed.css" {
-				pushFound = true
-			}
-		}
-	}
-	if !pushFound {
-		t.Fatalf("push stream recording missing: no flow with URL.Path=/pushed.css across %d streams", len(streams))
-	}
-
-	// USK-623 acceptance: the push stream must be recorded as an INDEPENDENT
-	// Stream tagged with the push's origin identifier. The tag value is the
-	// origin channel's streamID on the UPSTREAM Layer — it does NOT match
-	// the store's client-side Stream.ID (session.upstreamToClient rewrites
-	// every upstream envelope's StreamID to the captured client stream id
-	// before RecordStep fires, so origin Stream rows are keyed by the
-	// client-side id). Analysts correlate push↔origin via the origin
-	// Stream's flow carrying H2PushPromise + URL.Path rather than by ID
-	// equality.
-	var pushStreamFound bool
-	for _, st := range streams {
-		if st.Tags != nil && st.Tags[pushrecorder.OriginStreamTag] != "" {
-			pushStreamFound = true
-			break
-		}
-	}
-	if !pushStreamFound {
-		t.Errorf("no Stream with Tags[%q] recorded for the pushed resource", pushrecorder.OriginStreamTag)
-	}
-}
+// Server-push recording was retired in USK-823. Anomalous PUSH_PROMISE is
+// still rejected as a connection PROTOCOL_ERROR (see TestReader_
+// PushPromise_RejectedWhenEnablePushZero in reader_test.go), but the proxy
+// no longer surfaces pushed streams as recordable flows.

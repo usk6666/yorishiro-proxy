@@ -53,41 +53,37 @@ func waitForLog(t *testing.T, buf *syncBuffer, substr string) {
 // §6.5.2 ("A client MUST send a value of 0"). DefaultSettings() seeds 1
 // for the server-friendly path; applyEnablePushDefault must downshift
 // that to 0 for ClientRole and leave it untouched for ServerRole.
+//
+// USK-823: HTTP/2 server-push recording is retired, so the previous
+// tests-only override pointer has been removed. ClientRole is now
+// unconditionally forced to 0.
 func TestApplyEnablePushDefault(t *testing.T) {
-	boolPtr := func(b bool) *bool { return &b }
 	tests := []struct {
-		name     string
-		role     Role
-		override *bool
+		name string
+		role Role
 		// in is the EnablePush value loaded into Settings before the helper
-		// runs. The helper unconditionally rewrites for ClientRole when
-		// override is nil; for ServerRole it is a no-op so explicit caller
-		// intent (e.g. WithInitialSettings{EnablePush: 0}) survives.
+		// runs. The helper unconditionally rewrites for ClientRole; for
+		// ServerRole it is a no-op so explicit caller intent (e.g.
+		// WithInitialSettings{EnablePush: 0}) survives.
 		in   uint32
 		want uint32
 	}{
-		// ServerRole, no override: helper is a no-op — both 0 and 1 must survive.
-		{"server_role_no_override_keeps_1", ServerRole, nil, 1, 1},
-		{"server_role_no_override_keeps_0", ServerRole, nil, 0, 0},
-		// ClientRole, no override: forced to 0 regardless of input. RFC 9113
-		// §6.5.2 requires this; strict upstreams (httpbin GFE, nghttp2-server)
+		// ServerRole: helper is a no-op — both 0 and 1 must survive.
+		{"server_role_keeps_1", ServerRole, 1, 1},
+		{"server_role_keeps_0", ServerRole, 0, 0},
+		// ClientRole: forced to 0 regardless of input. RFC 9113 §6.5.2
+		// requires this; strict upstreams (httpbin GFE, nghttp2-server)
 		// reply with GOAWAY(PROTOCOL_ERROR) otherwise.
-		{"client_role_no_override_forces_1_to_0", ClientRole, nil, 1, 0},
-		{"client_role_no_override_keeps_0", ClientRole, nil, 0, 0},
-		// Explicit override wins on either role, regardless of starting value.
-		// (Tests-only escape hatch for the PUSH_PROMISE receive path.)
-		{"client_role_override_true", ClientRole, boolPtr(true), 0, 1},
-		{"client_role_override_false_keeps_0", ClientRole, boolPtr(false), 1, 0},
-		{"server_role_override_true", ServerRole, boolPtr(true), 0, 1},
-		{"server_role_override_false", ServerRole, boolPtr(false), 1, 0},
+		{"client_role_forces_1_to_0", ClientRole, 1, 0},
+		{"client_role_keeps_0", ClientRole, 0, 0},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			s := Settings{EnablePush: tt.in}
-			applyEnablePushDefault(&s, tt.role, tt.override)
+			applyEnablePushDefault(&s, tt.role)
 			if s.EnablePush != tt.want {
-				t.Errorf("applyEnablePushDefault(role=%s, override=%v, in=%d): EnablePush = %d, want %d",
-					tt.role, tt.override, tt.in, s.EnablePush, tt.want)
+				t.Errorf("applyEnablePushDefault(role=%s, in=%d): EnablePush = %d, want %d",
+					tt.role, tt.in, s.EnablePush, tt.want)
 			}
 		})
 	}

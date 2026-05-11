@@ -91,12 +91,5 @@ func RedialUpstreamH2(
 		return nil, fmt.Errorf("connector: redial h2 layer: %w", err)
 	}
 
-	// USK-623: notify push-channel observers so the upstream push recorder
-	// attaches before any PUSH_PROMISE arrives. The prior Layer's recorder
-	// goroutine is bound to the prior Layer; the fresh one needs its own.
-	if cfg.OnHTTP2UpstreamDialed != nil {
-		cfg.OnHTTP2UpstreamDialed(fresh)
-	}
-
 	return fresh, nil
 }

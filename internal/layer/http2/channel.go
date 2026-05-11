@@ -42,18 +42,13 @@ type channel struct {
 	// guard h2Stream == 0 to avoid emitting RST_STREAM on a stream the
 	// peer has never seen (RFC 9113 §5.4.2 forbids RST on idle streams).
 	//
-	// For peer-initiated channels (server-role: client HEADERS arrives;
-	// push: PUSH_PROMISE) the id is set at construction time from the
-	// frame and never mutates.
+	// For peer-initiated channels (server-role: client HEADERS arrives)
+	// the id is set at construction time from the frame and never
+	// mutates.
 	//
 	// Stored as atomic.Uint32 so the id-allocating Send path and any
 	// concurrent reader (tests, aggregator inspection paths) cannot race.
 	h2Stream atomic.Uint32
-	isPush   bool
-
-	// originStreamID is set on push channels (isPush=true) to the UUID
-	// StreamID of the channel that carried the PUSH_PROMISE.
-	originStreamID string
 
 	recv chan *envelope.Envelope
 	// recvMu serializes close(recv) against sends from the reader goroutine.
@@ -120,11 +115,10 @@ type channel struct {
 // Pass h2Stream=0 for client-initiated channels (the id is allocated
 // lazily on the first sendHeadersEvent — see h2Stream's docstring).
 // For peer-initiated channels, pass the wire id from the inbound frame.
-func newChannel(l *Layer, h2Stream uint32, isPush bool) *channel {
+func newChannel(l *Layer, h2Stream uint32) *channel {
 	c := &channel{
 		layer:    l,
 		streamID: uuid.New().String(),
-		isPush:   isPush,
 		recv:     make(chan *envelope.Envelope, perStreamEventChanCap),
 		errCh:    make(chan *layer.StreamError, 1),
 		termDone: make(chan struct{}),
@@ -296,10 +290,6 @@ func (c *channel) Next(ctx context.Context) (*envelope.Envelope, error) {
 // Send writes the given event envelope onto this stream. The Message must
 // be one of *H2HeadersEvent / *H2DataEvent / *H2TrailersEvent; other Message
 // types yield an error.
-//
-// For push channels, only RST_STREAM is permitted (the channel models a
-// server-initiated stream we did not request); Send always returns an error
-// on push channels.
 func (c *channel) Send(ctx context.Context, env *envelope.Envelope) error {
 	c.mu.Lock()
 	if c.closed {
@@ -307,10 +297,6 @@ func (c *channel) Send(ctx context.Context, env *envelope.Envelope) error {
 		return errors.New("http2: send on closed channel")
 	}
 	c.mu.Unlock()
-
-	if c.isPush {
-		return errors.New("http2: send on push channel rejected — only RST_STREAM is valid")
-	}
 
 	switch m := env.Message.(type) {
 	case *H2HeadersEvent:
@@ -330,13 +316,13 @@ func (c *channel) Send(ctx context.Context, env *envelope.Envelope) error {
 //
 // For client-initiated channels (h2Stream == 0 on entry), the first call
 // allocates the wire-level stream id under l.mu atomically with the
-// state-machine Transition, registerChannel, and writer-queue enqueue —
-// this guarantees id order matches enqueue order on the writer queue
-// (RFC 9113 §5.1.1 wire-order), without the chained HEADERS-order gate
-// that USK-739 introduced. Subsequent HEADERS frames (trailer HEADERS,
-// retry on the same channel) reuse the already-allocated id. Server-role
-// and push channels arrive here with h2Stream pre-populated from the
-// inbound frame and skip allocation.
+// state-machine Transition, the channels-map registration, and the
+// writer-queue enqueue — this guarantees id order matches enqueue order
+// on the writer queue (RFC 9113 §5.1.1 wire-order), without the chained
+// HEADERS-order gate that USK-739 introduced. Subsequent HEADERS frames
+// (trailer HEADERS, retry on the same channel) reuse the already-allocated
+// id. Server-role channels arrive here with h2Stream pre-populated from
+// the inbound frame and skip allocation.
 func (c *channel) sendHeadersEvent(ctx context.Context, env *envelope.Envelope, evt *H2HeadersEvent) error {
 	fields := BuildHeaderFieldsFromEvent(env, evt)
 	done := make(chan error, 1)
@@ -358,10 +344,10 @@ func (c *channel) sendHeadersEvent(ctx context.Context, env *envelope.Envelope, 
 }
 
 // allocateAndEnqueueFirstHeaders performs the lazy id-allocation +
-// state-machine Transition + registerChannel + writer-queue enqueue
-// sequence atomically under l.mu when this is the first HEADERS frame on
-// a client-initiated channel. For subsequent HEADERS or for channels
-// constructed with a pre-assigned id (server-role / push), it just
+// state-machine Transition + channels-map registration + writer-queue
+// enqueue sequence atomically under l.mu when this is the first HEADERS
+// frame on a client-initiated channel. For subsequent HEADERS or for
+// channels constructed with a pre-assigned id (server-role), it just
 // enqueues using the already-stored id.
 //
 // Holding l.mu across the four steps is what makes the refactor work:
@@ -536,11 +522,11 @@ func (c *channel) Close() error {
 		c.mu.Unlock()
 
 		// Only emit RST_STREAM if the peer has been told this stream
-		// exists (h2Stream != 0) AND the close is abnormal (push, or one
-		// side still open). The h2Stream guard makes the close-before-
-		// send path spec-compliant; the abnormal-close guard preserves
-		// the USK-618 bilateral-close contract.
-		if id := c.h2Stream.Load(); id != 0 && (c.isPush || !sentEnd || !recvEnd) {
+		// exists (h2Stream != 0) AND the close is abnormal (one side
+		// still open). The h2Stream guard makes the close-before-send
+		// path spec-compliant; the abnormal-close guard preserves the
+		// USK-618 bilateral-close contract.
+		if id := c.h2Stream.Load(); id != 0 && (!sentEnd || !recvEnd) {
 			c.layer.enqueueWrite(writeRequest{rst: &writeRST{
 				streamID: id,
 				code:     ErrCodeCancel,

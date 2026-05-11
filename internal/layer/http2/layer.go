@@ -63,17 +63,6 @@ type options struct {
 	// "explicitly disabled". nil = use role default (ServerRole = 1,
 	// ClientRole = 0); non-nil = use the supplied bool.
 	enableConnectProtocol *bool
-	// enablePush overrides the role-conditional default for
-	// SETTINGS_ENABLE_PUSH. Tracked as a pointer so the zero value can
-	// be distinguished from "explicitly disabled". nil = use role
-	// default (ClientRole forced to 0 per RFC 9113 §6.5.2; ServerRole
-	// keeps the existing default of 1); non-nil = use the supplied
-	// bool. ClientRole callers must NOT override to true in production
-	// — strict upstreams (GFE, nghttp2-server) reject any value other
-	// than 0 from a client (USK-820). The override exists solely for
-	// internal tests that exercise the proxy's PUSH_PROMISE receive
-	// path against permissive in-process peers.
-	enablePush *bool
 }
 
 // Option configures a Layer.
@@ -129,24 +118,6 @@ func WithBodySpillThreshold(n int64) Option {
 // WithMaxBodySize records the absolute body size cap for aggregator use.
 func WithMaxBodySize(n int64) Option {
 	return func(o *options) { o.maxBody = n }
-}
-
-// WithEnablePush overrides whether SETTINGS_ENABLE_PUSH advertises 1 (push
-// permitted) or 0 (push refused). RFC 9113 §6.5.2 mandates clients send 0
-// and servers MUST reject any other value with PROTOCOL_ERROR; the role
-// default (set by applyEnablePushDefault) honors that constraint.
-//
-// USK-820: This override exists solely so internal tests can exercise the
-// proxy's PUSH_PROMISE receive path against permissive in-process peers.
-// The live data path (proxybuild / connector) MUST NOT use this option for
-// ClientRole — strict upstreams (Google Frontend, nghttp2-server) reply
-// with GOAWAY(PROTOCOL_ERROR) when a client advertises ENABLE_PUSH=1, and
-// every first stream is refused.
-func WithEnablePush(enable bool) Option {
-	return func(o *options) {
-		v := enable
-		o.enablePush = &v
-	}
 }
 
 // WithEnableConnectProtocol overrides whether SETTINGS_ENABLE_CONNECT_PROTOCOL
@@ -344,7 +315,7 @@ func New(conn net.Conn, streamID string, role Role, opts ...Option) (*Layer, err
 	httpConn := NewConn()
 	if o.initialSettings != nil {
 		settings := *o.initialSettings
-		applyEnablePushDefault(&settings, role, o.enablePush)
+		applyEnablePushDefault(&settings, role)
 		applyEnableConnectProtocolDefault(&settings, role, o.enableConnectProtocol)
 		if err := httpConn.SetLocalSettings(settings); err != nil {
 			return nil, err
@@ -358,7 +329,7 @@ func New(conn net.Conn, streamID string, role Role, opts ...Option) (*Layer, err
 		if o.maxConcurrentStreams != 0 {
 			def.MaxConcurrentStreams = o.maxConcurrentStreams
 		}
-		applyEnablePushDefault(&def, role, o.enablePush)
+		applyEnablePushDefault(&def, role)
 		applyEnableConnectProtocolDefault(&def, role, o.enableConnectProtocol)
 		if err := httpConn.SetLocalSettings(def); err != nil {
 			return nil, err
@@ -470,7 +441,7 @@ func (l *Layer) OpenStream(ctx context.Context) (layer.Channel, error) {
 
 	// Pure constructor: bind to layer, leave h2Stream==0 so the first
 	// sendHeadersEvent can allocate the id under l.mu.
-	return newChannel(l, 0, false), nil
+	return newChannel(l, 0), nil
 }
 
 // Close tears down the Layer: sends GOAWAY, drains the writer, closes
@@ -622,25 +593,13 @@ func settingsToFrame(s Settings) []frame.Setting {
 // a client with GOAWAY(PROTOCOL_ERROR, last_stream_id=0), causing
 // every first stream to be refused (USK-820).
 //
-// This helper mirrors applyEnableConnectProtocolDefault:
-//
-//   - When override is non-nil, use its bool (true → 1, false → 0).
-//     This covers WithEnablePush(true|false) on either role; callers
-//     using the override on ClientRole=true accept the strict-upstream
-//     incompatibility (used only by tests of the PUSH_PROMISE receive
-//     path against permissive in-process peers).
-//   - Otherwise, ClientRole is forced to 0 (RFC 9113 §6.5.2 MUST).
-//     ServerRole is left untouched so explicit caller intent (e.g.
-//     WithInitialSettings{EnablePush: 0}) survives.
-func applyEnablePushDefault(s *Settings, role Role, override *bool) {
-	if override != nil {
-		if *override {
-			s.EnablePush = 1
-		} else {
-			s.EnablePush = 0
-		}
-		return
-	}
+// ClientRole is unconditionally forced to 0 (RFC 9113 §6.5.2 MUST).
+// ServerRole is left untouched so explicit caller intent (e.g.
+// WithInitialSettings{EnablePush: 0}) survives. USK-823 removed the
+// previous tests-only override: HTTP/2 server-push recording is
+// retired, so no caller now legitimately advertises ENABLE_PUSH=1 from
+// a ClientRole Layer.
+func applyEnablePushDefault(s *Settings, role Role) {
 	if role == ClientRole {
 		s.EnablePush = 0
 	}

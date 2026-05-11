@@ -177,24 +177,28 @@ func TestReader_RSTStreamTranslated(t *testing.T) {
 	}
 }
 
-// USK-820: opts in to ENABLE_PUSH=1 via WithEnablePush(true). The role
-// default for ClientRole is now 0 (RFC 9113 §6.5.2), so without the
-// override reader.go:367 rejects incoming PUSH_PROMISE as PROTOCOL_ERROR.
-// Production code never enables push from the client side; this test
-// exists to validate the receive-path machinery against a permissive peer.
-func TestReader_PushPromise_EmitsChannelAndSyntheticEnvelope(t *testing.T) {
-	l, peer, cleanup := startClientLayer(t, WithEnablePush(true))
+// TestReader_PushPromise_RejectedWhenEnablePushZero verifies the residual
+// RFC-compliance behavior left in place after USK-823 retired HTTP/2
+// server-push recording. A ClientRole layer defaults SETTINGS_ENABLE_PUSH=0
+// (RFC 9113 §6.5.2, USK-820). A peer that nonetheless sends PUSH_PROMISE
+// is a protocol violation; the reader must treat it as a connection-level
+// PROTOCOL_ERROR and the resulting GOAWAY must surface on subsequent reads.
+//
+// No push channel must appear on Channels() — the production wiring no
+// longer drains them.
+func TestReader_PushPromise_RejectedWhenEnablePushZero(t *testing.T) {
+	l, peer, cleanup := startClientLayer(t)
 	defer cleanup()
 	peer.consumePeerSettings(t)
 	peer.sendInitialSettings(t)
 
-	// Open a client stream.
+	// Anchor the stream by opening a client request stream and driving
+	// its first HEADERS frame onto the wire. The peer needs a known
+	// origin stream id to put on the PUSH_PROMISE frame.
 	ch, err := l.OpenStream(context.Background())
 	if err != nil {
 		t.Fatalf("OpenStream: %v", err)
 	}
-
-	// Send a request to anchor the stream.
 	go func() {
 		_ = ch.Send(context.Background(), &envelope.Envelope{
 			Direction: envelope.Send,
@@ -204,19 +208,19 @@ func TestReader_PushPromise_EmitsChannelAndSyntheticEnvelope(t *testing.T) {
 			},
 		})
 	}()
-
-	// Drain frames until we see HEADERS.
 	for i := 0; i < 5; i++ {
-		f, err := peer.rd.ReadFrame()
-		if err != nil {
-			t.Fatalf("read: %v", err)
+		f, ferr := peer.rd.ReadFrame()
+		if ferr != nil {
+			t.Fatalf("read: %v", ferr)
 		}
 		if f.Header.Type == frame.TypeHeaders {
 			break
 		}
 	}
 
-	// Send a PUSH_PROMISE on stream 1 promising stream 2.
+	// Peer sends an unsolicited PUSH_PROMISE. Per RFC 9113 §6.5.2, a
+	// client that advertised SETTINGS_ENABLE_PUSH=0 (our default) must
+	// treat any received PUSH_PROMISE as a connection PROTOCOL_ERROR.
 	pushHeaders := []hpack.HeaderField{
 		{Name: ":method", Value: "GET"},
 		{Name: ":scheme", Value: "https"},
@@ -228,95 +232,40 @@ func TestReader_PushPromise_EmitsChannelAndSyntheticEnvelope(t *testing.T) {
 		t.Fatalf("WritePushPromise: %v", err)
 	}
 
-	// Expect a synthetic envelope on the original channel.
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	env, err := ch.Next(ctx)
-	if err != nil {
-		t.Fatalf("Next: %v", err)
-	}
-	evt := env.Message.(*H2HeadersEvent)
-	hasPushAnomaly := false
-	for _, a := range evt.Anomalies {
-		if a.Type == envelope.H2PushPromise {
-			hasPushAnomaly = true
+	// The reader detects the protocol error and tears down the layer.
+	// LastReaderError reports the *ConnError; shutdown drains channels
+	// without producing a push channel surface.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if l.LastReaderError() != nil {
+			break
 		}
+		time.Sleep(10 * time.Millisecond)
 	}
-	if !hasPushAnomaly {
-		t.Errorf("synthetic push envelope missing H2PushPromise anomaly: %+v", evt.Anomalies)
+	rerr := l.LastReaderError()
+	if rerr == nil {
+		t.Fatal("LastReaderError = nil; expected ConnError(PROTOCOL_ERROR)")
 	}
-	if evt.Path != "/pushed.css" {
-		t.Errorf("synthetic push path = %q, want /pushed.css", evt.Path)
+	var ce *ConnError
+	if !errors.As(rerr, &ce) {
+		t.Fatalf("LastReaderError = %T (%v); want *ConnError", rerr, rerr)
+	}
+	if ce.Code != ErrCodeProtocol {
+		t.Errorf("ConnError.Code = %s, want PROTOCOL_ERROR", ErrCodeString(ce.Code))
 	}
 
-	// Expect a new push channel on Channels().
-	var pushCh layer.Channel
-	deadline2 := time.Now().Add(time.Second)
-	for time.Now().Before(deadline2) && pushCh == nil {
-		select {
-		case c := <-l.Channels():
-			if c != nil {
-				pushCh = c
-			}
-		case <-time.After(20 * time.Millisecond):
+	// Channels() must not surface a push channel: server-push recording
+	// is retired (USK-823); the reader rejects PUSH_PROMISE before any
+	// channel allocation happens.
+	select {
+	case extra, ok := <-l.Channels():
+		if !ok {
+			// Channels closed by broadcastShutdown — expected.
+			return
 		}
-	}
-	if pushCh == nil {
-		t.Fatal("no push channel emitted")
-	}
-	c := pushCh.(*channel)
-	if !c.isPush {
-		t.Errorf("push channel isPush = false, want true")
-	}
-	if got := c.H2StreamID(); got != 2 {
-		t.Errorf("push channel h2Stream = %d, want 2", got)
-	}
-
-	// USK-623: originStreamID must point back to the originating channel's
-	// UUID so the upstream push recorder can tag pushed flows with the
-	// origin's identifier.
-	origID, ok := PushOriginChannelStreamID(pushCh)
-	if !ok {
-		t.Fatal("PushOriginChannelStreamID returned ok=false for push channel")
-	}
-	if origID != ch.StreamID() {
-		t.Errorf("push originStreamID = %q, want %q", origID, ch.StreamID())
-	}
-
-	// USK-623: a clone of the synthetic PUSH_PROMISE envelope must also
-	// arrive on the push channel as its FIRST envelope so the push Stream
-	// has URL-bearing content (envelopeToFlow populates fl.URL only when
-	// Path/Authority is non-empty, which only the synthetic envelope
-	// carries for push — the response HEADERS on the push channel have
-	// only :status). Without this duplicate delivery the push Stream's
-	// recording has no URL to surface for analysts.
-	pushCtx, pushCancel := context.WithTimeout(context.Background(), time.Second)
-	defer pushCancel()
-	pushEnv, err := pushCh.Next(pushCtx)
-	if err != nil {
-		t.Fatalf("pushCh.Next: %v", err)
-	}
-	pushEvt, ok := pushEnv.Message.(*H2HeadersEvent)
-	if !ok {
-		t.Fatalf("push first envelope Message = %T, want *H2HeadersEvent", pushEnv.Message)
-	}
-	if pushEvt.Path != "/pushed.css" {
-		t.Errorf("push channel first envelope Path = %q, want /pushed.css", pushEvt.Path)
-	}
-	hasAnomaly := false
-	for _, a := range pushEvt.Anomalies {
-		if a.Type == envelope.H2PushPromise {
-			hasAnomaly = true
-		}
-	}
-	if !hasAnomaly {
-		t.Errorf("push channel first envelope missing H2PushPromise anomaly: %+v", pushEvt.Anomalies)
-	}
-	if pushEnv.Direction != envelope.Receive {
-		t.Errorf("push channel first envelope Direction = %v, want Receive", pushEnv.Direction)
-	}
-	if pushEnv.StreamID != pushCh.StreamID() {
-		t.Errorf("push channel first envelope StreamID = %q, want push channel id %q", pushEnv.StreamID, pushCh.StreamID())
+		t.Fatalf("unexpected channel %T emitted after PUSH_PROMISE rejection", extra)
+	case <-time.After(100 * time.Millisecond):
+		// No push channel surfaced — the desired post-retire behavior.
 	}
 }
 

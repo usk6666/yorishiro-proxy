@@ -9,7 +9,6 @@ import (
 
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/http2/frame"
-	"github.com/usk6666/yorishiro-proxy/internal/layer/http2/hpack"
 )
 
 // TestChannel_StreamID_IsUUID verifies the Channel's StreamID is a
@@ -147,72 +146,6 @@ func TestChannel_Close_Idempotent(t *testing.T) {
 	}
 	if err := ch.Close(); err != nil {
 		t.Errorf("second Close: %v", err)
-	}
-}
-
-// TestChannel_PushChannel_RejectsSend verifies that push channels reject
-// Send calls.
-//
-// USK-820: opts in to ENABLE_PUSH=1 via WithEnablePush(true). The role
-// default for ClientRole is now 0 (RFC 9113 §6.5.2), which makes the
-// reader.go:367 guard reject incoming PUSH_PROMISE as PROTOCOL_ERROR.
-// To exercise the receive-path machinery this test must explicitly
-// enable push receipt — production code never does this, by design.
-func TestChannel_PushChannel_RejectsSend(t *testing.T) {
-	l, peer, cleanup := startClientLayer(t, WithEnablePush(true))
-	defer cleanup()
-	peer.consumePeerSettings(t)
-	peer.sendInitialSettings(t)
-
-	ch, err := l.OpenStream(context.Background())
-	if err != nil {
-		t.Fatalf("OpenStream: %v", err)
-	}
-	go func() {
-		_ = ch.Send(context.Background(), &envelope.Envelope{
-			Direction: envelope.Send,
-			Message: &H2HeadersEvent{
-				Method: "GET", Scheme: "https", Authority: "x", Path: "/",
-				EndStream: true,
-			},
-		})
-	}()
-	drainUntil(t, peer, frame.TypeHeaders)
-
-	pushHeaders := []hpack.HeaderField{
-		{Name: ":method", Value: "GET"},
-		{Name: ":scheme", Value: "https"},
-		{Name: ":authority", Value: "x"},
-		{Name: ":path", Value: "/pushed"},
-	}
-	encoded := peer.encoder.Encode(pushHeaders)
-	if err := peer.wr.WritePushPromise(1, 2, true, encoded); err != nil {
-		t.Fatalf("WritePushPromise: %v", err)
-	}
-
-	var pushCh *channel
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) && pushCh == nil {
-		select {
-		case c, ok := <-l.Channels():
-			if !ok {
-				t.Fatal("Channels closed")
-			}
-			if pc, ok := c.(*channel); ok && pc.isPush {
-				pushCh = pc
-			}
-		case <-time.After(50 * time.Millisecond):
-		}
-	}
-	if pushCh == nil {
-		t.Fatal("no push channel emitted")
-	}
-	err = pushCh.Send(context.Background(), &envelope.Envelope{
-		Direction: envelope.Receive,
-		Message:   &H2HeadersEvent{Status: 200},
-	})
-	if err == nil {
-		t.Error("Send on push channel returned nil error; expected rejection")
 	}
 }
 

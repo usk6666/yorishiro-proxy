@@ -1,8 +1,8 @@
 // Package http2 implements the HTTP/2 Layer for RFC-001.
 //
 // One Layer corresponds to one TCP connection (or one TLS session over one
-// TCP connection). One Channel corresponds to one HTTP/2 stream — including
-// server-pushed streams.
+// TCP connection). One Channel corresponds to one HTTP/2 stream initiated
+// by either endpoint.
 //
 // # Architecture
 //
@@ -20,19 +20,19 @@
 //
 // A Channel does NOT assume request/response pairing. Sequence is event-order,
 // numbered from 0. For client-initiated streams the typical event order is
-// (Send request, Receive response). For server-pushed streams the first event
-// is a Receive (no client-side request — the synthetic request that triggered
-// the push is delivered as a separate envelope on the original stream's
-// Channel, carrying the H2PushPromise anomaly).
+// (Send request, Receive response).
 //
 // # Endpoints model
 //
 // The Layer treats each side as an independent endpoint. Settings sent by
 // the peer are applied locally but never forwarded; settings we send to the
-// peer reflect our local configuration only. PING/PRIORITY/PUSH_PROMISE are
-// handled locally — no upper layer sees these as control envelopes
-// (PUSH_PROMISE is exposed as new Channels and a synthetic envelope, but the
-// raw PUSH_PROMISE frame is not propagated as an envelope on its own).
+// peer reflect our local configuration only. PING/PRIORITY are handled
+// locally — no upper layer sees these as control envelopes.
+// PUSH_PROMISE is rejected at the reader as a connection-level
+// PROTOCOL_ERROR per RFC 9113 §6.5.2: ClientRole layers advertise
+// SETTINGS_ENABLE_PUSH=0 (USK-820), so any peer-sent PUSH_PROMISE
+// violates the negotiated setting. HTTP/2 server-push recording was
+// retired in USK-823.
 //
 // # Wire fidelity
 //
@@ -66,10 +66,4 @@
 // InitialWindowSize, or when the connection-level recv window has been
 // consumed by ≥50% of the initial 65535. This keeps backpressure in lock-
 // step with consumer drain rate without holding excessive bytes in memory.
-//
-// # Server push send-side
-//
-// Channels representing server-pushed streams accept only RST_STREAM (with
-// CANCEL or REFUSED_STREAM) on Send. We are never the pusher; we can only
-// accept or refuse incoming pushes.
 package http2

@@ -121,7 +121,6 @@ internal/
                            #   macro_adapter.go (Macro adapter)
   macro/                   # Macro engine: template / guard / extract / encoder
   flow/                    # Stream/Flow Store (sqlite); HAR / JSONL / cURL export, import
-  pushrecorder/            # Drains upstream HTTP/2 pushed streams via OnHTTP2UpstreamDialed
   cert/                    # Root CA + dynamic server cert issuance
   config/                  # Configuration loading + validation (incl. Plugins, body-spill, limits)
   fingerprint/             # TLS fingerprint detection (JA3 / JA4)

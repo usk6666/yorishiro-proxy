@@ -381,113 +381,47 @@ func (l *Layer) gracefulCloseStream(streamID uint32) {
 	l.closeChannelRecv(ch)
 }
 
+// handleStreamPushPromise enforces RFC 9113 §§5.1.1/6.5.2/6.6 rejection of
+// anomalous PUSH_PROMISE frames. HTTP/2 server-push RECORDING was retired in
+// USK-823 (Chrome dropped push in 2022; Firefox/Safari followed; CDN majors
+// don't push), so the proxy no longer surfaces pushed streams as recordable
+// flows. What remains is the wire-protocol obligation:
+//
+//   - ServerRole MUST treat a peer-sent PUSH_PROMISE as PROTOCOL_ERROR
+//     (only servers push; clients sending PUSH_PROMISE is a spec violation).
+//   - ClientRole that advertised SETTINGS_ENABLE_PUSH=0 (the new default per
+//     RFC 9113 §6.5.2, USK-820) MUST treat any received PUSH_PROMISE as
+//     PROTOCOL_ERROR. With the previous WithEnablePush override gone, this
+//     branch covers every ClientRole Layer the proxy now constructs.
+//
+// Both branches return *ConnError so the reader loop emits GOAWAY with the
+// matching error code and tears down the connection. We deliberately do not
+// allocate channels, decode the header block, or run state-machine
+// transitions for the promised stream — the connection is fatal at this
+// point.
 func (l *Layer) handleStreamPushPromise(f *frame.Frame) error {
-	promisedID, fragment, err := f.PushPromiseFields()
-	if err != nil {
-		return err
-	}
 	if l.role == ServerRole {
 		return &ConnError{
 			Code:   ErrCodeProtocol,
 			Reason: "server received PUSH_PROMISE",
 		}
 	}
-
-	// S-4: enforce ENABLE_PUSH=0 against non-conforming peers (RFC 9113 §6.6).
 	if l.conn.LocalSettings().EnablePush == 0 {
 		return &ConnError{
 			Code:   ErrCodeProtocol,
 			Reason: "PUSH_PROMISE with local SETTINGS_ENABLE_PUSH=0",
 		}
 	}
-
-	endHeaders := f.Header.Flags.Has(frame.FlagEndHeaders)
-
-	if !endHeaders {
-		// Fragmented PUSH_PROMISE not supported in this minimum implementation.
-		return &ConnError{
-			Code:   ErrCodeInternal,
-			Reason: "PUSH_PROMISE without END_HEADERS not supported",
-		}
+	// Defensive: prior to USK-823 a ClientRole layer could explicitly
+	// opt back into push reception via WithEnablePush(true). That escape
+	// hatch is gone, so EnablePush should be 0 on every ClientRole layer
+	// the proxy now constructs. If a future caller resurrects the option
+	// without restoring the recording path, treat any incoming
+	// PUSH_PROMISE as a protocol error rather than silently drop frames.
+	return &ConnError{
+		Code:   ErrCodeProtocol,
+		Reason: "PUSH_PROMISE rejected: server-push recording retired (USK-823)",
 	}
-
-	// S-1 guard: bound the PUSH_PROMISE fragment size as well.
-	if len(fragment) > maxHeaderFragmentBytes {
-		return &ConnError{
-			Code:   ErrCodeCompression,
-			Reason: fmt.Sprintf("PUSH_PROMISE header block exceeds %d bytes", maxHeaderFragmentBytes),
-		}
-	}
-
-	// S-3 guard: cap concurrent peer-driven streams.
-	if l.peerStreamLimitExceeded() {
-		l.enqueueWrite(writeRequest{rst: &writeRST{streamID: promisedID, code: ErrCodeRefusedStream}})
-		return nil
-	}
-
-	decoded, dErr := l.decoder.Decode(fragment)
-	if dErr != nil {
-		return fmt.Errorf("http2: decode PUSH_PROMISE header block: %w", dErr)
-	}
-
-	// Build a synthetic H2HeadersEvent on the original stream's channel. The
-	// pushed request pseudo-headers (:method/:scheme/:authority/:path) come
-	// from the PUSH_PROMISE frame; we mark this as EndStream=true (no body
-	// will follow on the origin stream for this synthetic event) and tag the
-	// H2PushPromise anomaly so aggregator-level HTTPMessage surfacing can
-	// flag it for downstream classification.
-	originAsm, originCh, _ := l.assemblerFor(f.Header.StreamID, false)
-	if originAsm == nil {
-		l.enqueueWrite(writeRequest{rst: &writeRST{streamID: promisedID, code: ErrCodeRefusedStream}})
-		return nil
-	}
-
-	syntheticEvt := buildHeadersEvent(decoded, envelope.Send, true)
-	syntheticEvt.Anomalies = append(syntheticEvt.Anomalies, envelope.Anomaly{
-		Type:   envelope.H2PushPromise,
-		Detail: fmt.Sprintf("promised_stream_id=%d", promisedID),
-	})
-
-	envSyn := &envelope.Envelope{
-		StreamID:  originCh.streamID,
-		FlowID:    uuid.New().String(),
-		Sequence:  originCh.nextSequence(),
-		Direction: envelope.Receive, // pushed onto our connection by the server
-		Protocol:  envelope.ProtocolHTTP,
-		Raw:       cloneBytes(fragment),
-		Message:   syntheticEvt,
-		Context:   l.envelopeContextWithTime(),
-	}
-	l.deliverEnvelope(originCh, envSyn, nil)
-
-	// Create a new push channel for the promised stream. originStreamID
-	// points back to the origin channel's UUID so the push recorder can tag
-	// the pushed stream's flows with the originating request's identifier
-	// for analyst correlation.
-	pushCh := newChannel(l, promisedID, true)
-	pushCh.originStreamID = originCh.streamID
-	l.registerChannel(promisedID, pushCh)
-	l.emitChannel(pushCh)
-
-	// Also deliver a clone of the synthetic event on the push channel as its
-	// first envelope. Tests and the push recorder expect the PUSH_PROMISE
-	// pseudo-headers to appear on the push channel so analysts can identify
-	// the pushed resource without cross-referencing the origin.
-	pushSynClone := syntheticEvt.CloneMessage()
-	pushEnvSyn := &envelope.Envelope{
-		StreamID:  pushCh.streamID,
-		FlowID:    uuid.New().String(),
-		Sequence:  pushCh.nextSequence(),
-		Direction: envelope.Receive,
-		Protocol:  envelope.ProtocolHTTP,
-		Raw:       cloneBytes(fragment),
-		Message:   pushSynClone,
-		Context:   envSyn.Context,
-	}
-	l.deliverEnvelope(pushCh, pushEnvSyn, nil)
-
-	_ = l.conn.Streams().Transition(promisedID, EventRecvPushPromise)
-	return nil
 }
 
 // assemblerFor returns (assembler, channel) for streamID, optionally creating
@@ -508,21 +442,12 @@ func (l *Layer) assemblerFor(streamID uint32, createIfMissing bool) (*eventAssem
 		return nil, nil, false
 	}
 
-	ch := newChannel(l, streamID, false)
+	ch := newChannel(l, streamID)
 	l.channels[streamID] = ch
 	asm := newEventAssembler(streamID, ch)
 	l.assemblers[streamID] = asm
 	l.conn.Streams().SetLastPeerStreamID(streamID)
 	return asm, ch, true
-}
-
-// registerChannel stores ch under streamID and creates an assembler for it.
-// Used for client-initiated streams (OpenStream) and for promised streams.
-func (l *Layer) registerChannel(streamID uint32, ch *channel) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.channels[streamID] = ch
-	l.assemblers[streamID] = newEventAssembler(streamID, ch)
 }
 
 // emitChannel sends ch on the Channels() output channel. Non-blocking on
@@ -741,16 +666,6 @@ func (l *Layer) envelopeContextWithTime() envelope.EnvelopeContext {
 	c := l.opts.ctx
 	c.ReceivedAt = time.Now()
 	return c
-}
-
-// cloneBytes returns a copy of b, or nil if b is nil.
-func cloneBytes(b []byte) []byte {
-	if b == nil {
-		return nil
-	}
-	out := make([]byte, len(b))
-	copy(out, b)
-	return out
 }
 
 // isNewPeerStream reports whether streamID corresponds to a peer-initiated
