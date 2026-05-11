@@ -374,7 +374,7 @@ func New(conn net.Conn, streamID string, role Role, opts ...Option) (*Layer, err
 	go l.readerLoop()
 
 	l.enqueueWrite(writeRequest{settings: &writeSettings{
-		params: settingsToFrame(local),
+		params: settingsToFrame(local, role),
 	}})
 
 	bump := uint32(defaultLargeConnWindow - defaultConnectionWindowSize)
@@ -537,6 +537,17 @@ func (l *Layer) runPreface() error {
 // settingsToFrame converts a Settings struct into a list of frame.Setting
 // suitable for sending in a SETTINGS frame.
 //
+// SETTINGS_ENABLE_PUSH (0x02) is included only when role == ClientRole. RFC
+// 9113 §7.2.2 forbids servers from explicitly setting the value: "Servers
+// MUST NOT explicitly set this value. Clients MUST treat receipt of a
+// SETTINGS frame with SETTINGS_ENABLE_PUSH set to a value other than 0 as
+// a connection error of type PROTOCOL_ERROR." Strict h2 clients (curl,
+// Chrome, golang.org/x/net/http2) enforce that MUST and respond to any
+// emitted value — including 1 — with GOAWAY(PROTOCOL_ERROR), so ServerRole
+// must omit the setting entirely (USK-825). ClientRole continues to emit
+// value 0 per RFC 9113 §6.5.2 ("A client MUST send a value of 0"), set by
+// applyEnablePushDefault before this function runs.
+//
 // SETTINGS_MAX_HEADER_LIST_SIZE (0x06) is included only when the field is
 // non-zero. RFC 9113 §6.5.2 specifies the default as "unlimited", which on
 // the wire means omitting the setting entirely. Emitting the setting with
@@ -554,14 +565,25 @@ func (l *Layer) runPreface() error {
 // initial SETTINGS frame entirely. This keeps the wire output identical
 // to the pre-USK-764 behaviour for endpoints that do not support extended
 // CONNECT.
-func settingsToFrame(s Settings) []frame.Setting {
+func settingsToFrame(s Settings, role Role) []frame.Setting {
 	out := []frame.Setting{
 		{ID: frame.SettingHeaderTableSize, Value: s.HeaderTableSize},
-		{ID: frame.SettingEnablePush, Value: s.EnablePush},
-		{ID: frame.SettingMaxConcurrentStreams, Value: s.MaxConcurrentStreams},
-		{ID: frame.SettingInitialWindowSize, Value: s.InitialWindowSize},
-		{ID: frame.SettingMaxFrameSize, Value: s.MaxFrameSize},
 	}
+	if role == ClientRole {
+		// RFC 9113 §6.5.2: clients MUST send ENABLE_PUSH=0.
+		// applyEnablePushDefault has already forced s.EnablePush to 0.
+		out = append(out, frame.Setting{ID: frame.SettingEnablePush, Value: s.EnablePush})
+	}
+	// RFC 9113 §7.2.2: "Servers MUST NOT explicitly set this value." ServerRole
+	// omits SETTINGS_ENABLE_PUSH from the initial SETTINGS frame entirely
+	// (USK-825). Strict h2 clients reject any emitted value with
+	// GOAWAY(PROTOCOL_ERROR), including value 1 (the prior default seeded by
+	// defaultEnablePush).
+	out = append(out,
+		frame.Setting{ID: frame.SettingMaxConcurrentStreams, Value: s.MaxConcurrentStreams},
+		frame.Setting{ID: frame.SettingInitialWindowSize, Value: s.InitialWindowSize},
+		frame.Setting{ID: frame.SettingMaxFrameSize, Value: s.MaxFrameSize},
+	)
 	if s.MaxHeaderListSize != 0 {
 		out = append(out, frame.Setting{
 			ID:    frame.SettingMaxHeaderListSize,
@@ -578,29 +600,41 @@ func settingsToFrame(s Settings) []frame.Setting {
 }
 
 // applyEnablePushDefault forces SETTINGS_ENABLE_PUSH to comply with
-// RFC 9113 §6.5.2 based on the local Role.
+// RFC 9113 based on the local Role.
 //
-// RFC 9113 §6.5.2 requires:
+// RFC 9113 §6.5.2 requires of clients:
 //
 //   - "A client MUST send a value of 0 [for SETTINGS_ENABLE_PUSH]; a
 //     server MUST treat any other value from a client as a connection
 //     error of type PROTOCOL_ERROR."
 //
-// DefaultSettings() seeds value 1 (the server-friendly default;
-// servers may legally announce push availability either way). For
-// ClientRole that default is non-conformant: strict upstreams (Google
+// RFC 9113 §7.2.2 requires of servers:
+//
+//   - "Servers MUST NOT explicitly set this value. Clients MUST treat
+//     receipt of a SETTINGS frame with SETTINGS_ENABLE_PUSH set to a
+//     value other than 0 as a connection error of type PROTOCOL_ERROR."
+//
+// DefaultSettings() seeds value 1 (the legacy non-zero default). For
+// ClientRole that default violates §6.5.2: strict upstreams (Google
 // Frontend, nghttp2-server) reply to a `SETTINGS{ENABLE_PUSH=1}` from
 // a client with GOAWAY(PROTOCOL_ERROR, last_stream_id=0), causing
 // every first stream to be refused (USK-820).
 //
-// ClientRole is unconditionally forced to 0 (RFC 9113 §6.5.2 MUST).
-// ServerRole is left untouched so explicit caller intent (e.g.
-// WithInitialSettings{EnablePush: 0}) survives. USK-823 removed the
-// previous tests-only override: HTTP/2 server-push recording is
-// retired, so no caller now legitimately advertises ENABLE_PUSH=1 from
-// a ClientRole Layer.
+// For ServerRole the wire-level fix is to omit SETTINGS_ENABLE_PUSH
+// entirely (settingsToFrame handles the wire-side omission), but we
+// still zero the in-memory value here for state hygiene — LocalSettings()
+// must report the same shape the wire actually carries. Strict h2
+// clients (curl, Chrome, golang.org/x/net/http2) treat any non-zero
+// emitted value as a PROTOCOL_ERROR, and after USK-823 retired HTTP/2
+// server-push recording end-to-end no caller has a legitimate reason
+// to advertise push availability from a ServerRole Layer (USK-825).
+//
+// Both roles are unconditionally normalized to 0; the previous "leave
+// ServerRole untouched so caller intent survives" carve-out has no
+// remaining legitimate caller and is incompatible with §7.2.2 MUST.
 func applyEnablePushDefault(s *Settings, role Role) {
-	if role == ClientRole {
+	switch role {
+	case ClientRole, ServerRole:
 		s.EnablePush = 0
 	}
 }

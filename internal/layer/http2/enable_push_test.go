@@ -51,29 +51,33 @@ func waitForLog(t *testing.T, buf *syncBuffer, substr string) {
 //
 // USK-820: A client that sends SETTINGS_ENABLE_PUSH=1 violates RFC 9113
 // §6.5.2 ("A client MUST send a value of 0"). DefaultSettings() seeds 1
-// for the server-friendly path; applyEnablePushDefault must downshift
-// that to 0 for ClientRole and leave it untouched for ServerRole.
+// for the legacy non-zero default; applyEnablePushDefault must downshift
+// that to 0 for ClientRole.
 //
-// USK-823: HTTP/2 server-push recording is retired, so the previous
-// tests-only override pointer has been removed. ClientRole is now
-// unconditionally forced to 0.
+// USK-825: RFC 9113 §7.2.2 forbids servers from explicitly setting the
+// value ("Servers MUST NOT explicitly set this value"). The wire-level
+// fix is in settingsToFrame, which omits SETTINGS_ENABLE_PUSH from the
+// initial SETTINGS for ServerRole; this helper additionally zeros the
+// in-memory value for state hygiene so LocalSettings() matches the wire.
+// Post-USK-823 (server-push recording retired) no caller legitimately
+// advertises ENABLE_PUSH=1 from either role.
 func TestApplyEnablePushDefault(t *testing.T) {
 	tests := []struct {
 		name string
 		role Role
 		// in is the EnablePush value loaded into Settings before the helper
-		// runs. The helper unconditionally rewrites for ClientRole; for
-		// ServerRole it is a no-op so explicit caller intent (e.g.
-		// WithInitialSettings{EnablePush: 0}) survives.
+		// runs. The helper unconditionally normalizes to 0 for both roles
+		// — there is no legitimate way to bypass RFC 9113 §6.5.2 / §7.2.2.
 		in   uint32
 		want uint32
 	}{
-		// ServerRole: helper is a no-op — both 0 and 1 must survive.
-		{"server_role_keeps_1", ServerRole, 1, 1},
+		// ServerRole: USK-825 forces 0 for state hygiene; the wire-side
+		// omission is enforced by settingsToFrame.
+		{"server_role_forces_1_to_0", ServerRole, 1, 0},
 		{"server_role_keeps_0", ServerRole, 0, 0},
 		// ClientRole: forced to 0 regardless of input. RFC 9113 §6.5.2
 		// requires this; strict upstreams (httpbin GFE, nghttp2-server)
-		// reply with GOAWAY(PROTOCOL_ERROR) otherwise.
+		// reply with GOAWAY(PROTOCOL_ERROR) otherwise (USK-820).
 		{"client_role_forces_1_to_0", ClientRole, 1, 0},
 		{"client_role_keeps_0", ClientRole, 0, 0},
 	}
@@ -90,30 +94,43 @@ func TestApplyEnablePushDefault(t *testing.T) {
 }
 
 // TestSettingsToFrame_EnablePush_PerRole drives the full New() boot through a
-// pipe-backed peer and asserts the wire SETTINGS frame's ENABLE_PUSH value
-// is correct for each role. This is the integration-level guard for USK-820:
-// the bug was that ClientRole emitted ENABLE_PUSH=1 to the upstream, which
-// strict h2 servers (Google Frontend, nghttp2) reject with GOAWAY(PROTOCOL_ERROR).
+// pipe-backed peer and asserts the wire SETTINGS frame's ENABLE_PUSH presence
+// and value are correct for each role.
+//
+// USK-820: ClientRole used to emit ENABLE_PUSH=1, which strict h2 servers
+// (Google Frontend, nghttp2-server) reject with GOAWAY(PROTOCOL_ERROR) per
+// RFC 9113 §6.5.2. ClientRole now emits ENABLE_PUSH=0.
+//
+// USK-825: ServerRole used to emit ENABLE_PUSH=1 (the legacy seeded default),
+// which strict h2 clients (curl, Chrome, golang.org/x/net/http2) reject with
+// GOAWAY(PROTOCOL_ERROR) per RFC 9113 §7.2.2 ("Servers MUST NOT explicitly
+// set this value"). ServerRole now omits SETTINGS_ENABLE_PUSH from the
+// initial SETTINGS frame entirely.
 func TestSettingsToFrame_EnablePush_PerRole(t *testing.T) {
 	tests := []struct {
 		name string
 		// start launches the layer in the desired role and returns the wire-
 		// observed initial SETTINGS params from the peer. Mirrors the helper
 		// pattern used by TestLayer_*_AdvertisesEnableConnectProtocol.
-		start    func(*testing.T) []frame.Setting
-		wantPush uint32
+		start func(*testing.T) []frame.Setting
+		// wantPresent is true when SETTINGS_ENABLE_PUSH must appear on the
+		// wire. ServerRole omits the setting entirely per RFC 9113 §7.2.2.
+		wantPresent bool
+		// wantValue is the expected emitted value when wantPresent is true.
+		wantValue uint32
 	}{
 		{
-			name: "server_role_advertises_push_1",
+			name: "server_role_omits_enable_push",
 			start: func(t *testing.T) []frame.Setting {
 				_, peer, cleanup := startServerLayer(t)
 				t.Cleanup(cleanup)
 				return readInitialSettings(t, peer)
 			},
-			// ServerRole keeps the legacy default — RFC 9113 §6.5.2 lets a
-			// server announce 0 or 1; we keep 1 to preserve PUSH_PROMISE
-			// test paths and the existing wire output.
-			wantPush: 1,
+			// RFC 9113 §7.2.2: "Servers MUST NOT explicitly set this value."
+			// Strict h2 clients treat any emitted value (including 1, the
+			// pre-USK-825 default) as PROTOCOL_ERROR. ServerRole omits the
+			// setting entirely.
+			wantPresent: false,
 		},
 		{
 			name: "client_role_advertises_push_0",
@@ -122,19 +139,28 @@ func TestSettingsToFrame_EnablePush_PerRole(t *testing.T) {
 				t.Cleanup(cleanup)
 				return readInitialSettings(t, peer)
 			},
-			// ClientRole MUST advertise 0 per RFC 9113 §6.5.2.
-			wantPush: 0,
+			// ClientRole MUST advertise 0 per RFC 9113 §6.5.2 (USK-820).
+			wantPresent: true,
+			wantValue:   0,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			params := tt.start(t)
 			v, ok := findSetting(params, frame.SettingEnablePush)
-			if !ok {
-				t.Fatalf("initial SETTINGS missing ENABLE_PUSH; got %+v", params)
+			if tt.wantPresent {
+				if !ok {
+					t.Fatalf("initial SETTINGS missing ENABLE_PUSH; got %+v", params)
+				}
+				if v != tt.wantValue {
+					t.Errorf("ENABLE_PUSH = %d, want %d (role default mismatch)", v, tt.wantValue)
+				}
+				return
 			}
-			if v != tt.wantPush {
-				t.Errorf("ENABLE_PUSH = %d, want %d (role default mismatch)", v, tt.wantPush)
+			// wantPresent == false: ServerRole must omit the setting.
+			if ok {
+				t.Errorf("initial SETTINGS contains ENABLE_PUSH=%d, want absent (RFC 9113 §7.2.2, USK-825); got %+v",
+					v, params)
 			}
 		})
 	}
@@ -159,6 +185,28 @@ func TestClientRole_WithInitialSettings_EnablePushOverride_DowngradedToZero(t *t
 	}
 	if v != 0 {
 		t.Errorf("ClientRole ENABLE_PUSH = %d, want 0 (WithInitialSettings must not bypass role default)", v)
+	}
+}
+
+// TestServerRole_WithInitialSettings_EnablePushOverride_Omitted is the
+// USK-825 ServerRole companion to the ClientRole override test above.
+// Even if a caller passes WithInitialSettings{EnablePush: 1} (the
+// pre-USK-825 default seeded by DefaultSettings()), the ServerRole boot
+// path must omit SETTINGS_ENABLE_PUSH from the initial SETTINGS frame
+// entirely per RFC 9113 §7.2.2 ("Servers MUST NOT explicitly set this
+// value"). Strict h2 clients reject any emitted value with
+// GOAWAY(PROTOCOL_ERROR); there is no legitimate caller-driven escape
+// hatch.
+func TestServerRole_WithInitialSettings_EnablePushOverride_Omitted(t *testing.T) {
+	custom := DefaultSettings()
+	custom.EnablePush = 1 // attempt to bypass the role default
+	_, peer, cleanup := startServerLayer(t, WithInitialSettings(custom))
+	defer cleanup()
+
+	params := readInitialSettings(t, peer)
+	if v, ok := findSetting(params, frame.SettingEnablePush); ok {
+		t.Errorf("ServerRole initial SETTINGS contains ENABLE_PUSH=%d, want absent (RFC 9113 §7.2.2, USK-825); got %+v",
+			v, params)
 	}
 }
 

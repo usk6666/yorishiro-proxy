@@ -31,8 +31,11 @@
 // PUSH_PROMISE is rejected at the reader as a connection-level
 // PROTOCOL_ERROR per RFC 9113 §6.5.2: ClientRole layers advertise
 // SETTINGS_ENABLE_PUSH=0 (USK-820), so any peer-sent PUSH_PROMISE
-// violates the negotiated setting. HTTP/2 server-push recording was
-// retired in USK-823.
+// violates the negotiated setting. ServerRole layers omit
+// SETTINGS_ENABLE_PUSH from the initial SETTINGS frame entirely per
+// RFC 9113 §7.2.2 ("Servers MUST NOT explicitly set this value"),
+// which strict h2 clients otherwise reject with GOAWAY(PROTOCOL_ERROR)
+// (USK-825). HTTP/2 server-push recording was retired in USK-823.
 //
 // # Wire fidelity
 //
