@@ -69,7 +69,7 @@ type fuzzHTTPInput struct {
 	Authority      string      `json:"authority,omitempty" jsonschema:"Host / :authority; required when flow_id is empty"`
 	Path           string      `json:"path,omitempty" jsonschema:"request path; required when flow_id is empty"`
 	RawQuery       string      `json:"raw_query,omitempty" jsonschema:"raw query string without leading '?'"`
-	Headers        []headerKV  `json:"headers,omitempty" jsonschema:"ordered base header list; positions can target headers[N].value / .name"`
+	Headers        []headerKV  `json:"headers,omitempty" jsonschema:"ordered base header list; positions can target headers[N].value / .name (headers[N] indexes the input array; Host auto-injected from authority is not addressable here — use the authority path to fuzz Host)"`
 	Body           string      `json:"body,omitempty" jsonschema:"base body interpreted per body_encoding"`
 	BodyEncoding   string      `json:"body_encoding,omitempty" jsonschema:"text|base64; default text"`
 	BodySet        bool        `json:"body_set,omitempty" jsonschema:"set true to override body to empty; otherwise omitting body inherits the original"`

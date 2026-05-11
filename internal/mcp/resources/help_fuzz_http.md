@@ -19,7 +19,7 @@ Larger fuzz jobs that need concurrency, rate limiting, or overload monitoring sh
 | `headers[N].name` | `HTTPMessage.Headers[N].Name` |
 | `headers[N].value` | `HTTPMessage.Headers[N].Value` |
 
-`headers[N]` indexes into the inherited or user-supplied base header list — the index must exist in the base list for the substitution to apply.
+`headers[N]` indexes into the inherited or user-supplied base header list — the index must exist in the base list for the substitution to apply. The `Host:` header that is auto-injected from `authority` when the input headers list omits it is NOT addressable via `headers[N]`; use the `authority` path to fuzz Host (USK-830).
 
 ## Two operating modes
 

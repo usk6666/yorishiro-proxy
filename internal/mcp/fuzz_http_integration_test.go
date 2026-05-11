@@ -100,7 +100,10 @@ func setupFuzzHTTPSession(t *testing.T) (*gomcp.ClientSession, flow.Store, *int3
 // request method + path + query + body in JSON. Captured request data
 // is exposed via the returned getter. The X-Marker request header (if
 // present) is also captured into entry["x_marker"] so header-mutation
-// tests can assert the substituted value reached the wire.
+// tests can assert the substituted value reached the wire. The Host
+// header is captured into entry["host"] so USK-830 regression tests
+// can assert the synthetic Host stays at the authority value when
+// fuzzing user headers without supplying Host explicitly.
 func startFuzzHTTPEcho(t *testing.T) (*httptest.Server, func() []map[string]any) {
 	t.Helper()
 	var captured atomic.Pointer[[]map[string]any]
@@ -112,6 +115,7 @@ func startFuzzHTTPEcho(t *testing.T) (*httptest.Server, func() []map[string]any)
 			"query":    r.URL.RawQuery,
 			"body":     string(body),
 			"x_marker": r.Header.Get("X-Marker"),
+			"host":     r.Host,
 		}
 		// Append-by-CAS so concurrent variants (none today, but defensive)
 		// don't lose entries.
@@ -302,6 +306,143 @@ func TestFuzzHTTP_HeaderIndexPosition(t *testing.T) {
 	// through — every variant should have been mutated.
 	if seenMarkers["ORIGINAL"] {
 		t.Error("upstream saw X-Marker=ORIGINAL — base header leaked into a variant")
+	}
+}
+
+// TestFuzzHTTP_HeaderIndexExcludesInjectedHost locks the USK-830
+// semantics: `headers[N]` resolves against the user-supplied input
+// array, NOT the post-injection envelope wire order. When the input
+// headers list omits Host, ensureResendHTTPHostHeader prepends a
+// synthetic `Host:` at envelope index 0; previously fuzzing
+// `headers[0].value` would mutate that synthetic Host, leaving the
+// user's first header untouched. The fix aligns the index with the
+// input array so `headers[0].value` mutates the user's first header
+// and Host stays at the authority value.
+//
+// This complements TestFuzzHTTP_HeaderIndexPosition, which already
+// locks the Host-supplied branch (Host at user index 0).
+func TestFuzzHTTP_HeaderIndexExcludesInjectedHost(t *testing.T) {
+	cs, _, _, _ := setupFuzzHTTPSession(t)
+	echo, getCaptured := startFuzzHTTPEcho(t)
+	authority := strings.TrimPrefix(echo.URL, "http://")
+
+	headerValues := []string{"FUZZED-1", "FUZZED-2", "FUZZED-3"}
+	result := callFuzzHTTP(t, cs, map[string]any{
+		"method":    "GET",
+		"scheme":    "http",
+		"authority": authority,
+		"path":      "/probe",
+		// Deliberately omit Host from the input headers list so the
+		// synthetic-Host-injection branch fires inside
+		// ensureResendHTTPHostHeader.
+		"headers": []map[string]any{
+			{"name": "X-Marker", "value": "ORIGINAL"},
+		},
+		"positions": []map[string]any{
+			// headers[0] must address the user's first input header
+			// (X-Marker), not the synthetic Host that lands at envelope
+			// index 0 after injection.
+			{"path": "headers[0].value", "payloads": headerValues},
+		},
+		"timeout_ms": 5000,
+	})
+	if result.CompletedVariants != len(headerValues) {
+		t.Fatalf("CompletedVariants = %d, want %d", result.CompletedVariants, len(headerValues))
+	}
+
+	probes := 0
+	seenMarkers := map[string]bool{}
+	seenHosts := map[string]bool{}
+	for _, entry := range getCaptured() {
+		if entry["path"] != "/probe" {
+			continue
+		}
+		probes++
+		if v, ok := entry["x_marker"].(string); ok {
+			seenMarkers[v] = true
+		}
+		if v, ok := entry["host"].(string); ok {
+			seenHosts[v] = true
+		}
+	}
+	if probes != len(headerValues) {
+		t.Errorf("probes hit /probe = %d, want %d", probes, len(headerValues))
+	}
+	// X-Marker MUST be mutated by every variant — the regression locks
+	// the user-input-array semantics.
+	for _, want := range headerValues {
+		if !seenMarkers[want] {
+			t.Errorf("upstream did not see X-Marker=%q (saw %v)", want, seenMarkers)
+		}
+	}
+	if seenMarkers["ORIGINAL"] {
+		t.Error("upstream saw X-Marker=ORIGINAL — fuzz mutated wrong header (regression: USK-830)")
+	}
+	// Host MUST stay at the authority value across all variants — the
+	// fuzz payloads MUST NOT leak into Host.
+	for _, p := range headerValues {
+		if seenHosts[p] {
+			t.Errorf("upstream saw Host=%q — fuzz payload leaked into synthetic Host (regression: USK-830). Hosts observed: %v", p, seenHosts)
+		}
+	}
+	if !seenHosts[authority] {
+		t.Errorf("upstream did not see Host=%q — synthetic Host not preserved. Hosts observed: %v", authority, seenHosts)
+	}
+}
+
+// TestFuzzHTTP_HeaderIndexBoundsRejectsInputArrayLength confirms the
+// USK-830 bounds check error references the user-input array length
+// (not the post-injection envelope length). Operator submits a
+// 1-element headers list and targets headers[1] — the error must
+// surface "out of range [0, 1)" not "out of range [0, 2)".
+func TestFuzzHTTP_HeaderIndexBoundsRejectsInputArrayLength(t *testing.T) {
+	cs, _, _, _ := setupFuzzHTTPSession(t)
+	echo, _ := startFuzzHTTPEcho(t)
+	authority := strings.TrimPrefix(echo.URL, "http://")
+
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "fuzz_http",
+		Arguments: map[string]any{
+			"method":    "GET",
+			"scheme":    "http",
+			"authority": authority,
+			"path":      "/probe",
+			// 1-element input → headers[1] must be rejected.
+			"headers": []map[string]any{
+				{"name": "X-Marker", "value": "ORIGINAL"},
+			},
+			"positions": []map[string]any{
+				{"path": "headers[1].value", "payloads": []string{"x"}},
+			},
+			"timeout_ms": 5000,
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool fuzz_http: %v", err)
+	}
+	// The bounds check fires inside applyFuzzHTTPPosition during the
+	// variant loop, so the tool returns CompletedVariants=0 with an
+	// IsError tool response. Either an IsError response or an error
+	// in the per-variant row is acceptable; both must mention the
+	// input-array length.
+	var msg strings.Builder
+	if result.IsError {
+		for _, c := range result.Content {
+			if tc, ok := c.(*gomcp.TextContent); ok {
+				msg.WriteString(tc.Text)
+			}
+		}
+	} else if result.StructuredContent != nil {
+		raw, _ := json.Marshal(result.StructuredContent)
+		var out fuzzHTTPResult
+		_ = json.Unmarshal(raw, &out)
+		for _, v := range out.Variants {
+			msg.WriteString(v.Error)
+		}
+	}
+	combined := msg.String()
+	if !strings.Contains(combined, "out of range [0, 1)") {
+		t.Errorf("expected bounds error referencing input-array length 1, got: %q", combined)
 	}
 }
 

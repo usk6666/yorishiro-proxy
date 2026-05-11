@@ -32,7 +32,7 @@
     },
     "headers": {
       "type": "array",
-      "description": "Ordered base header list; positions can target headers[N].value / .name.",
+      "description": "Ordered base header list; positions can target headers[N].value / .name. headers[N] indexes the input array — the Host header auto-injected from `authority` when this list omits it is NOT addressable via headers[N]; fuzz Host via the `authority` path.",
       "items": {
         "type": "object",
         "required": ["name", "value"],

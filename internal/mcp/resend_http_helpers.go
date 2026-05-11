@@ -125,6 +125,28 @@ func validateResendHTTPFromScratch(input *resendHTTPInput) error {
 // Opaque (synthetic-send path inside http1.Channel.Send) and no Raw
 // (Layer.Send re-encodes from Message at write time).
 func (s *Server) buildResendHTTPEnvelope(ctx context.Context, input *resendHTTPInput) (*envelope.Envelope, error) {
+	env, _, err := s.buildResendHTTPEnvelopeWithMeta(ctx, input)
+	return env, err
+}
+
+// resendHTTPEnvelopeMeta carries auxiliary information produced while
+// building the base envelope that the basic builder return value does
+// not surface. Today this captures only the synthetic-Host-injection
+// flag — fuzz_http needs it to align `headers[N]` position indexes
+// against the user-supplied input headers array rather than the
+// post-injection envelope wire order (USK-830). UserHeaderCount is the
+// length of the pre-injection user/flow header list, i.e. the operator-
+// visible upper bound for valid `headers[N]` indexes.
+type resendHTTPEnvelopeMeta struct {
+	HostInjected    bool
+	UserHeaderCount int
+}
+
+// buildResendHTTPEnvelopeWithMeta is the metadata-bearing variant of
+// buildResendHTTPEnvelope. The two functions share the same core logic;
+// callers that need the metadata (fuzz_http) use this one, while resend
+// keeps the simpler signature.
+func (s *Server) buildResendHTTPEnvelopeWithMeta(ctx context.Context, input *resendHTTPInput) (*envelope.Envelope, resendHTTPEnvelopeMeta, error) {
 	method := input.Method
 	scheme := input.Scheme
 	authority := input.Authority
@@ -136,10 +158,10 @@ func (s *Server) buildResendHTTPEnvelope(ctx context.Context, input *resendHTTPI
 	if input.FlowID != "" {
 		stream, sendFlow, err := s.loadResendHTTPSendFlow(ctx, input.FlowID)
 		if err != nil {
-			return nil, err
+			return nil, resendHTTPEnvelopeMeta{}, err
 		}
 		if !resendHTTPSupportedProtocols[stream.Protocol] {
-			return nil, fmt.Errorf("resend_http: protocol %q not supported by this tool — use resend_ws / resend_grpc / resend_raw for non-HTTP flows", stream.Protocol)
+			return nil, resendHTTPEnvelopeMeta{}, fmt.Errorf("resend_http: protocol %q not supported by this tool — use resend_ws / resend_grpc / resend_raw for non-HTTP flows", stream.Protocol)
 		}
 		if method == "" {
 			method = sendFlow.Method
@@ -169,11 +191,15 @@ func (s *Server) buildResendHTTPEnvelope(ctx context.Context, input *resendHTTPI
 	if input.Headers != nil {
 		headers = headerKVsToKeyValues(input.Headers)
 	}
-	headers = ensureResendHTTPHostHeader(headers, authority)
+	// preInjectionCount is the operator-visible length of the headers
+	// array — what `headers[N]` should resolve against in fuzz positions.
+	preInjectionCount := len(headers)
+	var injected bool
+	headers, injected = ensureResendHTTPHostHeader(headers, authority)
 
 	body, err := resolveResendHTTPBody(input, origBody)
 	if err != nil {
-		return nil, err
+		return nil, resendHTTPEnvelopeMeta{}, err
 	}
 
 	env := http1.BuildSendEnvelope(method, scheme, authority, path, rawQuery, headers, body)
@@ -181,7 +207,10 @@ func (s *Server) buildResendHTTPEnvelope(ctx context.Context, input *resendHTTPI
 	// open the new Stream row, so generate it here. RFC-001 streams are
 	// per-resend (each invocation creates a fresh Stream + Flow pair).
 	env.StreamID = uuid.NewString()
-	return env, nil
+	return env, resendHTTPEnvelopeMeta{
+		HostInjected:    injected,
+		UserHeaderCount: preInjectionCount,
+	}, nil
 }
 
 // loadResendHTTPSendFlow fetches the Stream and its first send Flow for a
@@ -237,19 +266,23 @@ func resolveResendHTTPBody(input *resendHTTPInput, original []byte) ([]byte, err
 // common shape in MITM Flow.Headers map projection) would otherwise produce
 // a 400 from the upstream. Smuggling tests that need a missing or differing
 // Host must override the headers list explicitly.
-func ensureResendHTTPHostHeader(headers []envelope.KeyValue, authority string) []envelope.KeyValue {
+//
+// Returns (headers, injected) so callers (notably fuzz_http) can align
+// `headers[N]` position indexes against the user-input array — see
+// USK-830. injected is true iff a synthetic Host was prepended at index 0.
+func ensureResendHTTPHostHeader(headers []envelope.KeyValue, authority string) ([]envelope.KeyValue, bool) {
 	if authority == "" {
-		return headers
+		return headers, false
 	}
 	for _, kv := range headers {
 		if strings.EqualFold(kv.Name, "Host") {
-			return headers
+			return headers, false
 		}
 	}
 	out := make([]envelope.KeyValue, 0, len(headers)+1)
 	out = append(out, envelope.KeyValue{Name: "Host", Value: authority})
 	out = append(out, headers...)
-	return out
+	return out, true
 }
 
 // flowMapToKeyValues projects a flow.Flow.Headers multimap into an ordered

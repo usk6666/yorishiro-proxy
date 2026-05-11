@@ -176,23 +176,38 @@ func fuzzHTTPInputToResendHTTP(input *fuzzHTTPInput) resendHTTPInput {
 }
 
 // fuzzHTTPPlan is the resolved base envelope + variant enumeration.
+//
+// hostInjected and userHeaderCount carry the metadata produced by
+// buildResendHTTPEnvelopeWithMeta so applyFuzzHTTPPosition can resolve
+// `headers[N]` against the user-supplied input array rather than the
+// post-injection envelope wire order (USK-830). When hostInjected is
+// true, position index N maps to envelope index N+1 (skipping the
+// synthetic `Host:` that ensureResendHTTPHostHeader prepends when the
+// input array omits Host). userHeaderCount is the upper bound for
+// valid `headers[N]` indexes — used to surface operator-visible bounds
+// errors that match the input schema rather than the wire reality.
 type fuzzHTTPPlan struct {
-	baseEnv       *envelope.Envelope
-	baseMsg       *envelope.HTTPMessage
-	dialAddr      string
-	useTLS        bool
-	sni           string
-	overrideHost  string
-	positions     []fuzzHTTPPosition
-	totalVariants int
+	baseEnv         *envelope.Envelope
+	baseMsg         *envelope.HTTPMessage
+	dialAddr        string
+	useTLS          bool
+	sni             string
+	overrideHost    string
+	positions       []fuzzHTTPPosition
+	totalVariants   int
+	hostInjected    bool
+	userHeaderCount int
 }
 
 // buildFuzzHTTPPlan resolves the base envelope (delegating to
-// resend_http's buildResendHTTPEnvelope) and computes the dial target
-// + total variant count.
+// resend_http's buildResendHTTPEnvelopeWithMeta) and computes the dial
+// target + total variant count. The metadata captures whether
+// ensureResendHTTPHostHeader prepended a synthetic Host header, which
+// applyFuzzHTTPPosition uses to align `headers[N]` indexes against the
+// user-input array (USK-830).
 func (s *Server) buildFuzzHTTPPlan(ctx context.Context, input *fuzzHTTPInput) (*fuzzHTTPPlan, error) {
 	rh := fuzzHTTPInputToResendHTTP(input)
-	baseEnv, err := s.buildResendHTTPEnvelope(ctx, &rh)
+	baseEnv, meta, err := s.buildResendHTTPEnvelopeWithMeta(ctx, &rh)
 	if err != nil {
 		return nil, err
 	}
@@ -215,14 +230,16 @@ func (s *Server) buildFuzzHTTPPlan(ctx context.Context, input *fuzzHTTPInput) (*
 	}
 
 	return &fuzzHTTPPlan{
-		baseEnv:       baseEnv,
-		baseMsg:       baseMsg,
-		dialAddr:      addr,
-		useTLS:        useTLS,
-		sni:           sni,
-		overrideHost:  input.OverrideHost,
-		positions:     input.Positions,
-		totalVariants: totalVariants,
+		baseEnv:         baseEnv,
+		baseMsg:         baseMsg,
+		dialAddr:        addr,
+		useTLS:          useTLS,
+		sni:             sni,
+		overrideHost:    input.OverrideHost,
+		positions:       input.Positions,
+		totalVariants:   totalVariants,
+		hostInjected:    meta.HostInjected,
+		userHeaderCount: meta.UserHeaderCount,
 	}, nil
 }
 
@@ -523,7 +540,7 @@ func (s *Server) runFuzzHTTPSingleVariant(ctx context.Context, plan *fuzzHTTPPla
 		if !ok {
 			continue
 		}
-		if err := applyFuzzHTTPPosition(variantMsg, pos.Path, payload); err != nil {
+		if err := applyFuzzHTTPPosition(variantMsg, pos.Path, payload, plan.hostInjected, plan.userHeaderCount); err != nil {
 			return row, 0, fmt.Errorf("apply position %q: %w", pos.Path, err)
 		}
 	}
@@ -641,24 +658,44 @@ func decodeFuzzHTTPPayloads(positions []fuzzHTTPPosition, indices []int) (map[st
 // applyFuzzHTTPPosition writes payload at the given typed path on
 // msg. Unknown paths are rejected (validation runs upfront, so this
 // is a defensive catch — should never fire in practice).
-func applyFuzzHTTPPosition(msg *envelope.HTTPMessage, path, payload string) error {
+//
+// USK-830: `headers[N]` resolves against the user-supplied input array,
+// not the post-injection envelope. When hostInjected is true (i.e.,
+// ensureResendHTTPHostHeader prepended a synthetic `Host:` because the
+// input array omitted Host), the user-visible index N maps to envelope
+// index N+1 — Host from `authority` is intentionally not addressable
+// via `headers[N]`; callers must fuzz Host via the `authority` path.
+// userHeaderCount is the operator-visible upper bound for valid `N`,
+// surfaced in bounds-check errors so the message references the input
+// array length, not the wire envelope length.
+func applyFuzzHTTPPosition(msg *envelope.HTTPMessage, path, payload string, hostInjected bool, userHeaderCount int) error {
 	if validFuzzHTTPRoots[path] {
 		applyFuzzHTTPRoot(msg, path, payload)
 		return nil
 	}
 	if matches := fuzzHTTPHeadersPathRE.FindStringSubmatch(path); matches != nil {
-		idx, err := strconv.Atoi(matches[1])
+		userIdx, err := strconv.Atoi(matches[1])
 		if err != nil {
 			return fmt.Errorf("invalid header index %q", matches[1])
 		}
-		if idx < 0 || idx >= len(msg.Headers) {
-			return fmt.Errorf("headers index %d out of range [0, %d)", idx, len(msg.Headers))
+		if userIdx < 0 || userIdx >= userHeaderCount {
+			return fmt.Errorf("headers index %d out of range [0, %d)", userIdx, userHeaderCount)
+		}
+		envIdx := userIdx
+		if hostInjected {
+			envIdx = userIdx + 1
+		}
+		// Defensive: envIdx must address into msg.Headers. If this fails
+		// the plan is inconsistent with the envelope (programmer error,
+		// not user input).
+		if envIdx < 0 || envIdx >= len(msg.Headers) {
+			return fmt.Errorf("internal: resolved envelope index %d out of range [0, %d) for headers[%d]", envIdx, len(msg.Headers), userIdx)
 		}
 		switch matches[2] {
 		case "name":
-			msg.Headers[idx].Name = payload
+			msg.Headers[envIdx].Name = payload
 		case "value":
-			msg.Headers[idx].Value = payload
+			msg.Headers[envIdx].Value = payload
 		}
 		return nil
 	}
