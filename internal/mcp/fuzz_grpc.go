@@ -47,6 +47,8 @@ import (
 	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/google/uuid"
 )
 
 // fuzzGRPCInput is the typed input for the fuzz_grpc tool.
@@ -101,7 +103,14 @@ type fuzzGRPCPosition struct {
 }
 
 // fuzzGRPCResult is the structured response of the fuzz_grpc tool.
+//
+// fuzz_id is the UUID PK of the corresponding fuzz_jobs row (USK-831,
+// mirrors USK-827). AI agents chain this with
+// `query { resource: "fuzz_results", filter: { fuzz_id: ..., outliers_only:
+// true } }` to surface per-run outlier variants without re-running the
+// fuzz job.
 type fuzzGRPCResult struct {
+	FuzzID            string               `json:"fuzz_id"`
 	TotalVariants     int                  `json:"total_variants"`
 	CompletedVariants int                  `json:"completed_variants"`
 	StoppedReason     string               `json:"stopped_reason,omitempty"`
@@ -146,9 +155,11 @@ func (s *Server) registerFuzzGRPC() {
 // pipeline execution with per-variant fresh stream → result aggregation.
 func (s *Server) handleFuzzGRPC(ctx context.Context, _ *gomcp.CallToolRequest, input fuzzGRPCInput) (*gomcp.CallToolResult, *fuzzGRPCResult, error) {
 	start := time.Now()
+	fuzzID := uuid.NewString()
 	slog.DebugContext(ctx, "MCP tool invoked",
 		"tool", "fuzz_grpc",
 		"flow_id", input.FlowID,
+		"fuzz_id", fuzzID,
 		"target_addr", input.TargetAddr,
 		"service", input.Service,
 		"method", input.Method,
@@ -158,6 +169,7 @@ func (s *Server) handleFuzzGRPC(ctx context.Context, _ *gomcp.CallToolRequest, i
 	defer func() {
 		slog.DebugContext(ctx, "MCP tool completed",
 			"tool", "fuzz_grpc",
+			"fuzz_id", fuzzID,
 			"duration_ms", time.Since(start).Milliseconds(),
 		)
 	}()
@@ -186,13 +198,30 @@ func (s *Server) handleFuzzGRPC(ctx context.Context, _ *gomcp.CallToolRequest, i
 		timeout = time.Duration(*input.TimeoutMs) * time.Millisecond
 	}
 
-	rows, completed, stopReason, err := s.runFuzzGRPCVariants(ctx, plan, timeout, input.StopOnNonOK, input.Tag)
-	if err != nil {
-		return nil, nil, fmt.Errorf("fuzz_grpc: %w", err)
+	// Insert the fuzz_jobs row at status="running" BEFORE the variant
+	// loop so any concurrent `query fuzz_jobs` observes the run.
+	//
+	// Use a fresh background context so a caller-side cancel landing
+	// AFTER plan-build but BEFORE the first variant cannot prevent the
+	// row from being created — the finalize UPDATE below relies on this
+	// row existing. Mirrors USK-827 / fuzz_http precedent.
+	s.saveFuzzGRPCJob(context.Background(), fuzzID, &input, plan)
+
+	rows, completed, stopReason, runErr := s.runFuzzGRPCVariants(ctx, plan, timeout, input.StopOnNonOK, input.Tag, fuzzID)
+
+	// Use a fresh background ctx so the closing UPDATE always lands,
+	// even on caller-side ctx cancel. The store-write is best-effort:
+	// the per-variant Flow rows persisted via RecordStep are the source
+	// of truth; fuzz_jobs is the aggregation layer.
+	s.finalizeFuzzGRPCJob(context.Background(), fuzzID, rows, completed, stopReason, runErr)
+
+	if runErr != nil {
+		return nil, nil, fmt.Errorf("fuzz_grpc: %w", runErr)
 	}
 
 	duration := time.Since(start)
 	return nil, &fuzzGRPCResult{
+		FuzzID:            fuzzID,
 		TotalVariants:     plan.totalVariants,
 		CompletedVariants: completed,
 		StoppedReason:     stopReason,

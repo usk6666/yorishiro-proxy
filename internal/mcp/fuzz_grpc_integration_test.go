@@ -279,10 +279,18 @@ func setupFuzzGRPCSession(t *testing.T) (*gomcp.ClientSession, flow.Store, *fuzz
 	}
 
 	ctx := context.Background()
-	srv := newServer(ctx, nil, store, nil,
+	// USK-835: the underlying SQLiteStore implements both flow.Store and
+	// flow.FuzzStore. Wire it through WithFuzzStore so handleFuzzGRPC can
+	// persist fuzz_jobs / fuzz_results rows and the query tool can read
+	// them back via the same session (mirrors USK-827 fuzz_http precedent).
+	opts := []ServerOption{
 		WithPluginv2Engine(engine),
 		WithTLSTransport(&transport.StandardTransport{InsecureSkipVerify: true}),
-	)
+	}
+	if fs, ok := store.(flow.FuzzStore); ok {
+		opts = append(opts, WithFuzzStore(fs))
+	}
+	srv := newServer(ctx, nil, store, nil, opts...)
 	ct, st := gomcp.NewInMemoryTransports()
 	ss, err := srv.server.Connect(ctx, st, nil)
 	if err != nil {
@@ -890,3 +898,369 @@ func TestFuzzGRPC_RejectsCRLFInBaseFields(t *testing.T) {
 // status import keeps the linter happy on platforms where codes is
 // referenced only inside conditionals.
 var _ = status.Code
+
+// ---------------------------------------------------------------------------
+// USK-835 — sync fuzz_grpc persists fuzz_jobs + fuzz_results rows so the
+// AI agent's "issue many variants → query aggregate → triage outliers"
+// workflow is reachable end-to-end. Mirrors USK-827 (fuzz_http).
+//
+// Package-level helpers reused: queryFuzzResults, decodeQueryFuzzResults,
+// queryFuzzJobsResult (declared in fuzz_http_integration_test.go).
+// ---------------------------------------------------------------------------
+
+// TestFuzzGRPC_PersistsFuzzJobAndResults is the canonical four-step repro:
+// run a sync fuzz, capture fuzz_id from the response, then exercise
+// query fuzz_jobs + query fuzz_results + outliers_only filter end-to-end.
+// Without USK-835 the fuzz_jobs row would not exist and outliers_only
+// would fail with "fuzz_id is required".
+func TestFuzzGRPC_PersistsFuzzJobAndResults(t *testing.T) {
+	cs, _, _ := setupFuzzGRPCSession(t)
+	upstream := &fuzzGRPCEchoServer{}
+	addr, shutdown := startFuzzGRPCUpstream(t, upstream)
+	defer shutdown()
+
+	payloads := []string{"alpha", "beta", "gamma", "delta"}
+	result := callFuzzGRPC(t, cs, map[string]any{
+		"target_addr": addr,
+		"scheme":      "https",
+		"service":     fuzzGRPCServiceName,
+		"method":      fuzzGRPCMethodUnary,
+		"messages": []map[string]any{
+			{"payload": "seed"},
+		},
+		"positions": []map[string]any{
+			{"path": "messages[0].payload", "payloads": payloads},
+		},
+		"tag":        "usk-835-canonical",
+		"timeout_ms": 10000,
+	})
+
+	// 1. Response carries fuzz_id (UUID).
+	if result.FuzzID == "" {
+		t.Fatal("fuzz_grpc response missing fuzz_id")
+	}
+	if result.CompletedVariants != len(payloads) {
+		t.Fatalf("CompletedVariants = %d, want %d", result.CompletedVariants, len(payloads))
+	}
+
+	// 2. query fuzz_jobs returns exactly one row matching fuzz_id + tag.
+	jobsRes, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "query",
+		Arguments: map[string]any{
+			"resource": "fuzz_jobs",
+			"filter":   map[string]any{"tag": "usk-835-canonical"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("query fuzz_jobs: %v", err)
+	}
+	if jobsRes.IsError {
+		t.Fatalf("query fuzz_jobs returned error: %+v", jobsRes.Content)
+	}
+	var jobsOut queryFuzzJobsResult
+	jobsText, ok := jobsRes.Content[0].(*gomcp.TextContent)
+	if !ok {
+		t.Fatalf("jobs content[0] type = %T", jobsRes.Content[0])
+	}
+	if err := json.Unmarshal([]byte(jobsText.Text), &jobsOut); err != nil {
+		t.Fatalf("unmarshal jobs: %v", err)
+	}
+	if jobsOut.Total != 1 {
+		t.Fatalf("query fuzz_jobs total = %d, want 1 (jobs=%+v)", jobsOut.Total, jobsOut.Jobs)
+	}
+	if jobsOut.Jobs[0].ID != result.FuzzID {
+		t.Errorf("fuzz_jobs row id = %q, want %q", jobsOut.Jobs[0].ID, result.FuzzID)
+	}
+	if jobsOut.Jobs[0].Status != "completed" {
+		t.Errorf("fuzz_jobs status = %q, want completed", jobsOut.Jobs[0].Status)
+	}
+	if jobsOut.Jobs[0].CompletedAt == nil {
+		t.Error("fuzz_jobs completed_at = nil, want non-nil")
+	}
+	if jobsOut.Jobs[0].Total != len(payloads) {
+		t.Errorf("fuzz_jobs total = %d, want %d", jobsOut.Jobs[0].Total, len(payloads))
+	}
+	if jobsOut.Jobs[0].CompletedCount != len(payloads) {
+		t.Errorf("fuzz_jobs completed_count = %d, want %d", jobsOut.Jobs[0].CompletedCount, len(payloads))
+	}
+
+	// 3. query fuzz_results returns one row per variant.
+	resultsRes := queryFuzzResults(t, cs, result.FuzzID, nil)
+	resultsOut := decodeQueryFuzzResults(t, resultsRes)
+	if resultsOut.Total != len(payloads) {
+		t.Errorf("fuzz_results total = %d, want %d", resultsOut.Total, len(payloads))
+	}
+	if resultsOut.Count != len(payloads) {
+		t.Errorf("fuzz_results count = %d, want %d", resultsOut.Count, len(payloads))
+	}
+	if resultsOut.Summary == nil {
+		t.Fatal("fuzz_results summary = nil, want non-nil")
+	}
+
+	// Per-row sanity: each row references a variant Stream + the right
+	// fuzz_id, with per-protocol StatusCode (gRPC status, here 0=OK) and
+	// ResponseLength (sum of receive Data payload bytes).
+	streamIDsByVariant := map[string]string{}
+	wantResponseLen := map[string]int{}
+	for _, v := range result.Variants {
+		streamIDsByVariant[v.StreamID] = v.Payloads["messages[0].payload"]
+		wantResponseLen[v.StreamID] = v.ResponseTotalBytes
+	}
+	for _, r := range resultsOut.Results {
+		if r.FuzzID != result.FuzzID {
+			t.Errorf("fuzz_results row fuzz_id = %q, want %q", r.FuzzID, result.FuzzID)
+		}
+		if r.StreamID == "" {
+			t.Errorf("fuzz_results row %d stream_id is empty", r.IndexNum)
+		}
+		if _, ok := streamIDsByVariant[r.StreamID]; !ok {
+			t.Errorf("fuzz_results stream_id %q not found in response variants", r.StreamID)
+		}
+		if r.StatusCode != 0 {
+			t.Errorf("fuzz_results row %d status_code = %d, want 0 (gRPC OK)", r.IndexNum, r.StatusCode)
+		}
+		if want := wantResponseLen[r.StreamID]; r.ResponseLength != want {
+			t.Errorf("fuzz_results row %d response_length = %d, want %d (sum of Data payload bytes)", r.IndexNum, r.ResponseLength, want)
+		}
+	}
+
+	// 4. outliers_only filter no longer fails with the "fuzz_id required"
+	// error — it now reaches the aggregation path.
+	outliersRes := queryFuzzResults(t, cs, result.FuzzID, map[string]any{"outliers_only": true})
+	if outliersRes.IsError {
+		t.Fatalf("query fuzz_results { outliers_only:true } returned error: %+v", outliersRes.Content)
+	}
+}
+
+// TestFuzzGRPC_ErrorVariantRecordedAsFuzzResult covers the error path:
+// a variant whose upstream connection fails still produces a fuzz_results
+// row with a non-empty error column. Without this, the aggregation
+// under-counts by the error-variant population.
+//
+// The "upstream" is a TCP listener that accepts then immediately closes
+// without completing a TLS handshake — every variant fails with a dial
+// or handshake error.
+func TestFuzzGRPC_ErrorVariantRecordedAsFuzzResult(t *testing.T) {
+	cs, _, _ := setupFuzzGRPCSession(t)
+
+	// Listener that accepts then immediately closes — emulates a dead
+	// upstream that breaks during the TLS handshake / HTTP/2 preface.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			_ = c.Close()
+		}
+	}()
+	addr := ln.Addr().String()
+
+	// Call without t.Fatal on tool-level error: per-variant errors are
+	// surfaced in row.Error, not as IsError responses.
+	res, callErr := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "fuzz_grpc",
+		Arguments: map[string]any{
+			"target_addr": addr,
+			"scheme":      "https",
+			"service":     fuzzGRPCServiceName,
+			"method":      fuzzGRPCMethodUnary,
+			"messages": []map[string]any{
+				{"payload": "seed"},
+			},
+			"positions": []map[string]any{
+				{"path": "messages[0].payload", "payloads": []string{"v1", "v2"}},
+			},
+			"tag":        "usk-835-error-path",
+			"timeout_ms": 2000,
+		},
+	})
+	if callErr != nil {
+		t.Fatalf("CallTool fuzz_grpc: %v", callErr)
+	}
+	// The tool wraps a non-zero per-variant runErr as a top-level error
+	// only when the whole run aborts; under our setup each variant fails
+	// independently and is recorded. We tolerate both shapes — what
+	// matters is the persistence assertions below.
+	_ = res
+
+	// fuzz_jobs row reflects error_count == 2 (both variants errored).
+	// Status: when the run aborts on a runErr the finalize sets "error";
+	// otherwise it stays "completed". Either way the fuzz_jobs row MUST
+	// exist with completed_at != nil.
+	jobsRes, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "query",
+		Arguments: map[string]any{
+			"resource": "fuzz_jobs",
+			"filter":   map[string]any{"tag": "usk-835-error-path"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("query fuzz_jobs: %v", err)
+	}
+	if jobsRes.IsError {
+		t.Fatalf("query fuzz_jobs returned error: %+v", jobsRes.Content)
+	}
+	var jobsOut queryFuzzJobsResult
+	if err := json.Unmarshal([]byte(jobsRes.Content[0].(*gomcp.TextContent).Text), &jobsOut); err != nil {
+		t.Fatalf("unmarshal jobs: %v", err)
+	}
+	if jobsOut.Total != 1 {
+		t.Fatalf("jobs total = %d, want 1", jobsOut.Total)
+	}
+	if jobsOut.Jobs[0].ErrorCount == 0 {
+		t.Errorf("fuzz_jobs error_count = %d, want > 0 (dead upstream)", jobsOut.Jobs[0].ErrorCount)
+	}
+	if jobsOut.Jobs[0].CompletedAt == nil {
+		t.Errorf("fuzz_jobs completed_at = nil; finalize did not land")
+	}
+
+	// fuzz_results rows surface row.Error for every failed variant.
+	resultsRes := queryFuzzResults(t, cs, jobsOut.Jobs[0].ID, nil)
+	resultsOut := decodeQueryFuzzResults(t, resultsRes)
+	if resultsOut.Total == 0 {
+		t.Fatal("fuzz_results total = 0, want > 0 (error variants must be persisted)")
+	}
+	foundErr := false
+	for _, r := range resultsOut.Results {
+		if r.Error != "" {
+			foundErr = true
+			break
+		}
+	}
+	if !foundErr {
+		t.Errorf("no fuzz_results row carried a non-empty error (rows=%+v)", resultsOut.Results)
+	}
+}
+
+// TestFuzzGRPC_VariantStreamStampedOriginFuzz verifies the
+// pipeline.WithOrigin(flow.OriginFuzz) wiring on buildFuzzGRPCPipeline.
+// Each variant Stream must carry Origin = "fuzz" so the query tool can
+// separate fuzz-originated streams from live capture.
+func TestFuzzGRPC_VariantStreamStampedOriginFuzz(t *testing.T) {
+	cs, store, _ := setupFuzzGRPCSession(t)
+	upstream := &fuzzGRPCEchoServer{}
+	addr, shutdown := startFuzzGRPCUpstream(t, upstream)
+	defer shutdown()
+
+	result := callFuzzGRPC(t, cs, map[string]any{
+		"target_addr": addr,
+		"scheme":      "https",
+		"service":     fuzzGRPCServiceName,
+		"method":      fuzzGRPCMethodUnary,
+		"messages": []map[string]any{
+			{"payload": "seed"},
+		},
+		"positions": []map[string]any{
+			{"path": "messages[0].payload", "payloads": []string{"v1", "v2"}},
+		},
+		"timeout_ms": 10000,
+	})
+
+	if result.CompletedVariants != 2 {
+		t.Fatalf("CompletedVariants = %d, want 2", result.CompletedVariants)
+	}
+
+	for i, row := range result.Variants {
+		s, err := store.GetStream(context.Background(), row.StreamID)
+		if err != nil || s == nil {
+			t.Fatalf("variants[%d]: GetStream(%s) err=%v", i, row.StreamID, err)
+		}
+		if s.Origin != flow.OriginFuzz {
+			t.Errorf("variants[%d].Origin = %q, want %q", i, s.Origin, flow.OriginFuzz)
+		}
+	}
+}
+
+// TestFuzzGRPC_FinalizesUnderCallerCancel pins the design decision: even
+// when the caller cancels their context mid-run, the fuzz_jobs row must
+// still get its closing UPDATE (status / completed_at) because
+// finalizeFuzzGRPCJob is dispatched with a fresh background context.
+//
+// Repro: a slow upstream + many variants so the variant loop is still
+// running when we cancel. After the cancel returns, the fuzz_jobs row
+// must still have completed_at != nil.
+func TestFuzzGRPC_FinalizesUnderCallerCancel(t *testing.T) {
+	cs, _, _ := setupFuzzGRPCSession(t)
+
+	// Slow upstream: introduces enough per-RPC latency that the variant
+	// loop is still running when we cancel.
+	var hits int32
+	upstream := &fuzzGRPCEchoServer{}
+	upstream.respond = func(req []byte) ([]byte, *status.Status) {
+		atomic.AddInt32(&hits, 1)
+		time.Sleep(80 * time.Millisecond)
+		resp := append([]byte(nil), req...)
+		return resp, nil
+	}
+	addr, shutdown := startFuzzGRPCUpstream(t, upstream)
+	defer shutdown()
+
+	callCtx, cancel := context.WithCancel(context.Background())
+	// Cancel after the first variant has been observed by the upstream so
+	// the fuzz_jobs row is guaranteed inserted before we exercise the
+	// finalize path.
+	go func() {
+		for atomic.LoadInt32(&hits) < 1 {
+			time.Sleep(10 * time.Millisecond)
+		}
+		// Give the variant loop one more tick to come back to the
+		// select{} so the ctx.Done() branch is what stops it.
+		time.Sleep(30 * time.Millisecond)
+		cancel()
+	}()
+
+	payloads := make([]string, 0, 25)
+	for i := 0; i < 25; i++ {
+		payloads = append(payloads, fmt.Sprintf("v%d", i))
+	}
+	res, _ := cs.CallTool(callCtx, &gomcp.CallToolParams{
+		Name: "fuzz_grpc",
+		Arguments: map[string]any{
+			"target_addr": addr,
+			"scheme":      "https",
+			"service":     fuzzGRPCServiceName,
+			"method":      fuzzGRPCMethodUnary,
+			"messages": []map[string]any{
+				{"payload": "seed"},
+			},
+			"positions": []map[string]any{
+				{"path": "messages[0].payload", "payloads": payloads},
+			},
+			"tag":        "usk-835-cancel",
+			"timeout_ms": 10000,
+		},
+	})
+	_ = res // either an in-band stopped_reason or a transport-level cancel error is OK
+
+	// Query fuzz_jobs through a fresh context (the caller cancel does not
+	// affect this query).
+	jobsRes, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "query",
+		Arguments: map[string]any{
+			"resource": "fuzz_jobs",
+			"filter":   map[string]any{"tag": "usk-835-cancel"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("query fuzz_jobs: %v", err)
+	}
+	if jobsRes.IsError {
+		t.Fatalf("query fuzz_jobs returned error: %+v", jobsRes.Content)
+	}
+	var jobsOut queryFuzzJobsResult
+	if err := json.Unmarshal([]byte(jobsRes.Content[0].(*gomcp.TextContent).Text), &jobsOut); err != nil {
+		t.Fatalf("unmarshal jobs: %v", err)
+	}
+	if jobsOut.Total != 1 {
+		t.Fatalf("jobs total = %d, want 1 (start INSERT must land via background ctx)", jobsOut.Total)
+	}
+	if jobsOut.Jobs[0].CompletedAt == nil {
+		t.Errorf("fuzz_jobs.completed_at = nil after caller cancel; finalize did not land")
+	}
+}

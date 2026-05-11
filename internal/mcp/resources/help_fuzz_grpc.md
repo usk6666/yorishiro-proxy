@@ -52,6 +52,7 @@ Per-VARIANT timeout in milliseconds. Default `30000`.
 
 ## Result fields
 
+- `fuzz_id` (string, UUID) — primary key of the `fuzz_jobs` row created for this run. Chain with `query { resource: "fuzz_results", filter: { fuzz_id: "...", outliers_only: true } }` to surface outlier variants without re-running the fuzz job (USK-835 + USK-278; parity with `fuzz_http` USK-827).
 - `total_variants`, `completed_variants`, `stopped_reason`
 - `variants[]` — per-variant compact rows:
   - `index`, `stream_id`
@@ -62,6 +63,19 @@ Per-VARIANT timeout in milliseconds. Default `30000`.
   - `payloads` (object): position path -> chosen payload, for correlation
   - `error` / `duration_ms`
 - `duration_ms` / `tag`
+
+## Aggregation: outlier-driven triage (recommended workflow)
+
+`fuzz_grpc` populates the `fuzz_jobs` / `fuzz_results` tables for every sync run, so AI agents can issue many variants then triage statistically:
+
+1. `fuzz_grpc { positions: [...], stop_on_non_ok: false }` -> capture `fuzz_id` from the response.
+2. `query { resource: "fuzz_results", fuzz_id: "<id>" }` -> summary statistics (status code distribution, median/stddev for response byte length + timing) live under `summary.statistics`.
+3. `query { resource: "fuzz_results", fuzz_id: "<id>", filter: { outliers_only: true } }` -> just the variants that deviate from the baseline (different status code OR response length/timing outside median +/- 2*stddev).
+4. Drill down on any outlier with `query { resource: "flow", id: <variant.stream_id> }` to see the full gRPC envelope sequence (Start + Data + End) and wire bytes.
+
+The aggregation maps per-protocol fields uniformly: `status_code` in `fuzz_results` receives `int(row.status)` (gRPC status code), and `response_length` receives `row.response_total_bytes` (sum of receive-side Data payload bytes).
+
+Variant Streams are stamped `origin = "fuzz"`, so `query { resource: "flows", filter: { origin: "fuzz" } }` cleanly separates fuzz-originated streams from live MITM capture.
 
 ## Examples
 

@@ -31,8 +31,10 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"regexp"
 	"strconv"
@@ -41,6 +43,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
+	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/pipeline"
 )
 
@@ -245,9 +248,15 @@ func validateFuzzGRPCPositionAgainstPlan(idx int, pos fuzzGRPCPosition, plan *re
 //
 // Returns the per-variant rows, the count of completed variants, and
 // an optional stop reason ("" when all variants ran to completion).
-func (s *Server) runFuzzGRPCVariants(ctx context.Context, plan *fuzzGRPCPlan, timeout time.Duration, stopOnNonOK bool, tag string) ([]fuzzGRPCVariantRow, int, string, error) {
+//
+// USK-831: persists one fuzz_results row per variant via
+// FuzzStore.SaveFuzzResult so `query fuzz_results { fuzz_id }` is
+// populated for both successful and error variants. Store-write
+// failures are non-fatal (slog.Warn + continue) — the wire data is on
+// disk via RecordStep and remains the source of truth.
+func (s *Server) runFuzzGRPCVariants(ctx context.Context, plan *fuzzGRPCPlan, timeout time.Duration, stopOnNonOK bool, tag, fuzzID string) ([]fuzzGRPCVariantRow, int, string, error) {
 	encoders := buildResendGRPCEncoderRegistry()
-	pipe := s.buildResendGRPCPipeline(encoders)
+	pipe := s.buildFuzzGRPCPipeline(encoders)
 
 	rows := make([]fuzzGRPCVariantRow, 0, plan.totalVariants)
 	indices := make([]int, len(plan.positions))
@@ -290,6 +299,12 @@ func (s *Server) runFuzzGRPCVariants(ctx context.Context, plan *fuzzGRPCPlan, ti
 		rows = append(rows, row)
 		completed++
 
+		// USK-831: persist per-variant fuzz_results row so the aggregation
+		// view (`query fuzz_results { fuzz_id }` + USK-278 outliers_only)
+		// is populated. Save failures are non-fatal — wire data on disk via
+		// RecordStep is the source of truth.
+		s.saveFuzzGRPCResult(ctx, fuzzID, variantIdx, row, payloads)
+
 		nextFuzzGRPCIndices(indices, plan.positions)
 
 		if stopOnNonOK && (runErr != nil || statusCode != 0) {
@@ -297,6 +312,195 @@ func (s *Server) runFuzzGRPCVariants(ctx context.Context, plan *fuzzGRPCPlan, ti
 		}
 	}
 	return rows, completed, "", nil
+}
+
+// fuzzGRPCJobConfig is the JSON payload persisted to fuzz_jobs.config.
+// Intentionally records only structural metadata: position paths,
+// payload counts, encoding labels, and the stop_on_non_ok flag. Raw
+// payload values are deliberately excluded — they can be re-derived
+// from each Stream's recorded Flow, and including them here would
+// inflate the row and surface potentially-sensitive payloads (auth
+// tokens, PII used in fuzzing) in the aggregation table.
+type fuzzGRPCJobConfig struct {
+	Positions     []fuzzGRPCJobPosition `json:"positions"`
+	StopOnNonOK   bool                  `json:"stop_on_non_ok"`
+	TotalVariants int                   `json:"total_variants"`
+}
+
+// fuzzGRPCJobPosition is one position entry inside fuzz_jobs.config.
+// Only structural metadata is recorded — see fuzzGRPCJobConfig for the
+// payload-omission rationale.
+type fuzzGRPCJobPosition struct {
+	Path         string `json:"path"`
+	PayloadCount int    `json:"payload_count"`
+	Encoding     string `json:"encoding,omitempty"`
+}
+
+// saveFuzzGRPCJob persists the initial fuzz_jobs row at status="running".
+// Called once before the variant loop starts. Store-write failures are
+// logged at slog.Warn and ignored — the fuzz run itself is not blocked
+// because aggregation persistence is best-effort.
+//
+// fuzz_jobs.stream_id is set from input.FlowID when the caller seeded
+// the run from a recorded flow; otherwise it is left empty.
+func (s *Server) saveFuzzGRPCJob(ctx context.Context, fuzzID string, input *fuzzGRPCInput, plan *fuzzGRPCPlan) {
+	if s.jobRunner == nil || s.jobRunner.fuzzStore == nil {
+		return
+	}
+
+	cfg := fuzzGRPCJobConfig{
+		Positions:     make([]fuzzGRPCJobPosition, 0, len(input.Positions)),
+		StopOnNonOK:   input.StopOnNonOK,
+		TotalVariants: plan.totalVariants,
+	}
+	for _, p := range input.Positions {
+		cfg.Positions = append(cfg.Positions, fuzzGRPCJobPosition{
+			Path:         p.Path,
+			PayloadCount: len(p.Payloads),
+			Encoding:     p.Encoding,
+		})
+	}
+	cfgJSON, err := json.Marshal(cfg)
+	if err != nil {
+		// Should never fail for this structure; degrade to a minimal payload
+		// so the row still inserts rather than blocking the run.
+		cfgJSON = []byte("{}")
+	}
+
+	job := &flow.FuzzJob{
+		ID:             fuzzID,
+		StreamID:       input.FlowID, // seed stream when replaying a recorded flow
+		Config:         string(cfgJSON),
+		Status:         "running",
+		Tag:            input.Tag,
+		CreatedAt:      time.Now().UTC(),
+		Total:          plan.totalVariants,
+		CompletedCount: 0,
+		ErrorCount:     0,
+	}
+	if err := s.jobRunner.fuzzStore.SaveFuzzJob(ctx, job); err != nil {
+		slog.WarnContext(ctx, "fuzz_grpc: save fuzz_jobs row failed",
+			"fuzz_id", fuzzID,
+			"error", err,
+		)
+	}
+}
+
+// finalizeFuzzGRPCJob updates the fuzz_jobs row at end of run with the
+// final status / completed_at / counts. Called with a fresh background
+// context so caller-side ctx cancel does not prevent the closing
+// UPDATE from landing.
+//
+// Status rule (mirrors USK-827): "completed" when the variant loop ran
+// to natural exhaustion OR when stop_on_non_ok triggered (a documented
+// exit, not a failure). "error" only when the run aborted before
+// completion due to a non-stop_on_non_ok runErr.
+//
+// error_count counts per-variant errors observed in the rows
+// (row.Error != ""); store-write failures intentionally do NOT bump
+// this counter — they are observability gaps, not request failures.
+func (s *Server) finalizeFuzzGRPCJob(ctx context.Context, fuzzID string, rows []fuzzGRPCVariantRow, completed int, stopReason string, runErr error) {
+	if s.jobRunner == nil || s.jobRunner.fuzzStore == nil {
+		return
+	}
+
+	now := time.Now().UTC()
+	errorCount := 0
+	for _, r := range rows {
+		if r.Error != "" {
+			errorCount++
+		}
+	}
+
+	status := "completed"
+	if runErr != nil {
+		status = "error"
+	}
+
+	// UpdateFuzzJob's SQL overwrites total / completed_count / error_count
+	// (config / created_at / tag / stream_id are preserved by WHERE id = ?).
+	// Fetch the existing row first so we preserve the planned Total when
+	// stop_on_non_ok aborts early (completed < total).
+	existing, err := s.jobRunner.fuzzStore.GetFuzzJob(ctx, fuzzID)
+	if err != nil {
+		slog.WarnContext(ctx, "fuzz_grpc: load fuzz_jobs row for finalize failed",
+			"fuzz_id", fuzzID,
+			"error", err,
+		)
+		return
+	}
+	existing.Status = status
+	existing.CompletedAt = &now
+	existing.CompletedCount = completed
+	existing.ErrorCount = errorCount
+	if err := s.jobRunner.fuzzStore.UpdateFuzzJob(ctx, existing); err != nil {
+		slog.WarnContext(ctx, "fuzz_grpc: update fuzz_jobs row failed",
+			"fuzz_id", fuzzID,
+			"status", status,
+			"error", err,
+		)
+	}
+	_ = stopReason // stop_reason is recorded in the response payload; no fuzz_jobs column today
+}
+
+// saveFuzzGRPCResult persists a single per-variant fuzz_results row.
+// Called from the variant loop after each variant completes (success
+// or error). Save failures are logged at slog.Warn and ignored — the
+// per-variant Flow rows persisted via RecordStep are the source of
+// truth for forensic drill-down.
+//
+// Per-protocol StatusCode mapping (USK-831): gRPC variant rows expose
+// the gRPC status code via row.Status (uint32) and the summed response
+// data byte length via row.ResponseTotalBytes. Mapped into
+// FuzzResult.StatusCode (int) + ResponseLength so the aggregation query
+// (`query fuzz_results`) has a uniform shape across protocols.
+func (s *Server) saveFuzzGRPCResult(ctx context.Context, fuzzID string, index int, row fuzzGRPCVariantRow, payloads map[string]string) {
+	if s.jobRunner == nil || s.jobRunner.fuzzStore == nil {
+		return
+	}
+	result := &flow.FuzzResult{
+		FuzzID:         fuzzID,
+		IndexNum:       index,
+		StreamID:       row.StreamID,
+		Payloads:       flow.PayloadsToJSON(payloads),
+		StatusCode:     int(row.Status),
+		ResponseLength: row.ResponseTotalBytes,
+		DurationMs:     int(row.DurationMs),
+		Error:          row.Error,
+	}
+	if err := s.jobRunner.fuzzStore.SaveFuzzResult(ctx, result); err != nil {
+		slog.WarnContext(ctx, "fuzz_grpc: save fuzz_results row failed",
+			"fuzz_id", fuzzID,
+			"index", index,
+			"stream_id", row.StreamID,
+			"error", err,
+		)
+	}
+}
+
+// buildFuzzGRPCPipeline constructs the per-variant pipeline for fuzz_grpc.
+// Mirrors buildResendGRPCPipeline but stamps variant Streams with
+// flow.OriginFuzz so `query flows { filter.origin: "fuzz" }` filters
+// fuzz-originated traffic away from live capture views (parity with
+// fuzz_http's OriginFuzz stamping).
+//
+// PluginStepPre and InterceptStep are intentionally absent (RFC §9.3 D1
+// resend bypass). HostScope and Safety are handled at the handler level
+// before the envelope reaches the pipeline.
+func (s *Server) buildFuzzGRPCPipeline(encoders *pipeline.WireEncoderRegistry) *pipeline.Pipeline {
+	steps := []pipeline.Step{
+		// USK-818: BudgetStep at position #1 — only the GRPCStartMessage
+		// Send counts (BudgetStep filters mid-stream Data/End).
+		pipeline.NewBudgetStep(s.misc.budgetManager),
+		pipeline.NewPluginStepPost(pluginEngineForResend(s), encoders, slog.Default()),
+		pipeline.NewRecordStep(
+			s.flowStore.store,
+			slog.Default(),
+			pipeline.WithWireEncoderRegistry(encoders),
+			pipeline.WithOrigin(flow.OriginFuzz),
+		),
+	}
+	return pipeline.New(steps...)
 }
 
 // errString returns err.Error() or "" if err is nil. Tiny helper for
