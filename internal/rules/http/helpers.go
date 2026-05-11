@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 
+	"github.com/usk6666/yorishiro-proxy/internal/bodydecode"
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 )
 
@@ -25,6 +26,47 @@ func materializeBody(ctx context.Context, msg *envelope.HTTPMessage) ([]byte, er
 		return msg.BodyBuffer.Bytes(ctx)
 	}
 	return nil, nil
+}
+
+// materializeBodyDecoded returns body bytes ready for Transform's regex
+// replacement, decoding any Content-Encoding (gzip / x-gzip / deflate / br /
+// zstd) first so user patterns match the plaintext rather than the compressed
+// wire bytes (USK-834).
+//
+// Return contract:
+//   - applied == "" && anomaly == nil — identity or empty CE or empty body.
+//     `target` is the materialized bytes as-is (no decode performed); the
+//     caller MUST NOT rewrite Content-Encoding / Content-Length / Transfer-
+//     Encoding headers.
+//   - applied != "" && anomaly == nil — decode succeeded. `target` is the
+//     plaintext; the caller MUST strip Content-Encoding (and Transfer-
+//     Encoding) and re-stamp Content-Length on commit.
+//   - anomaly != nil — decode rejected (unknown codec, multi-codec chain,
+//     malformed body, decoded size exceeds cap). `target` is nil; the
+//     caller MUST fail-soft (no mutation, no header rewrite) and emit a
+//     single slog.Warn so operators see the failure mode.
+//
+// err is reserved for BodyBuffer.Bytes(ctx) failures (e.g., context cancel
+// or disk read error). Decode-side anomalies are NOT errors.
+//
+// Scope: HTTP only. gRPC-Web payloads pass through this helper but never
+// carry HTTP Content-Encoding in practice; bodydecode.Decode's identity
+// fast-path turns the call into a no-op for those. The gRPC framing-level
+// `grpc-encoding` is a separate concern handled by GRPCDataMessage.Compressed.
+func materializeBodyDecoded(ctx context.Context, msg *envelope.HTTPMessage) (target []byte, applied string, anomaly *bodydecode.Anomaly, err error) {
+	raw, err := materializeBody(ctx, msg)
+	if err != nil {
+		return nil, "", nil, err
+	}
+	if raw == nil {
+		return nil, "", nil, nil
+	}
+	ce := headerGet(msg.Headers, "Content-Encoding")
+	out, applied, anomaly := bodydecode.Decode(raw, ce, bodydecode.DefaultMaxDecodedSize)
+	if anomaly != nil {
+		return nil, "", anomaly, nil
+	}
+	return out, applied, nil, nil
 }
 
 // headerGet returns the value of the first header matching name (case-insensitive).

@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -240,39 +241,80 @@ func (e *TransformEngine) applyAction(ctx context.Context, rule *TransformRule, 
 		return len(msg.Headers) != before
 
 	case TransformReplaceBody:
-		if rule.BodyPattern == nil {
-			return false
-		}
-		// Materialize the body from Body []byte or BodyBuffer (disk-backed).
-		// Note: when sourced from BodyBuffer.Bytes, target is a defensive
-		// copy owned by this invocation — safe to use as regex input.
-		target, err := materializeBody(ctx, msg)
-		if err != nil {
-			slog.DebugContext(ctx, "transform: materialize body failed", "err", err)
-			return false
-		}
-		if target == nil {
-			return false // passthrough mode: skip body transform
-		}
-		replaced := rule.BodyPattern.ReplaceAll(target, []byte(rule.BodyReplace))
-		if bytes.Equal(replaced, target) {
-			return false
-		}
-		// Commit: move authoritative body into msg.Body and release the
-		// BodyBuffer reference held by this HTTPMessage. The pipeline
-		// snapshot holds its own Retain (via CloneMessage), so the buffer
-		// survives for variant recording. See USK-631 isBodyChanged
-		// pointer-identity precedent.
-		msg.Body = replaced
-		if msg.BodyBuffer != nil {
-			_ = msg.BodyBuffer.Release()
-			msg.BodyBuffer = nil
-		}
-		return true
+		return e.applyReplaceBody(ctx, rule, msg)
 
 	default:
 		return false
 	}
+}
+
+// applyReplaceBody implements the TransformReplaceBody action. Split out of
+// applyAction to keep cyclomatic complexity manageable while documenting the
+// USK-834 decode-then-replace semantics inline.
+//
+// Semantics:
+//  1. Materialize the body bytes (Body []byte or disk-backed BodyBuffer).
+//  2. If Content-Encoding names a supported codec, decode to plaintext;
+//     otherwise the materialized bytes are used as-is (identity / no CE).
+//  3. Apply the regex on the resulting target bytes.
+//  4. On a successful decode, ALWAYS rewrite the wire-side body to plaintext
+//     and strip Content-Encoding/Transfer-Encoding + re-stamp Content-Length
+//     (even if the regex made no change): leaving CE on plaintext would
+//     corrupt the response, the client tries to gunzip plaintext and fails.
+//  5. On the identity path, only commit when the regex actually changed bytes.
+//
+// Fail-soft on decode anomalies (unknown codec, chained CE, malformed body,
+// decoded-size cap exceeded): emit a single slog.Warn and return false, leaving
+// the original compressed wire bytes intact (CLAUDE.md MITM principle #1).
+func (e *TransformEngine) applyReplaceBody(ctx context.Context, rule *TransformRule, msg *envelope.HTTPMessage) bool {
+	if rule.BodyPattern == nil {
+		return false
+	}
+	// USK-834: materialize the body AND decode Content-Encoding so the
+	// user's regex matches the plaintext rather than compressed wire bytes.
+	target, applied, anomaly, err := materializeBodyDecoded(ctx, msg)
+	if err != nil {
+		slog.DebugContext(ctx, "transform: materialize body failed", "err", err)
+		return false
+	}
+	if anomaly != nil {
+		slog.WarnContext(ctx, "transform: replace_body skipped due to content-encoding decode anomaly",
+			"rule_id", rule.ID,
+			"content_encoding", headerGet(msg.Headers, "Content-Encoding"),
+			"anomaly_type", anomaly.Type,
+			"anomaly_detail", anomaly.Detail,
+		)
+		return false
+	}
+	if target == nil {
+		return false // passthrough mode: skip body transform
+	}
+	replaced := rule.BodyPattern.ReplaceAll(target, []byte(rule.BodyReplace))
+	decoded := applied != ""
+	if !decoded && bytes.Equal(replaced, target) {
+		return false // identity path, no regex match → nothing to do
+	}
+	// Commit: move authoritative body into msg.Body and release the
+	// BodyBuffer reference. The pipeline snapshot holds its own Retain (via
+	// CloneMessage), so the buffer survives for variant recording. See
+	// USK-631 isBodyChanged pointer-identity precedent.
+	msg.Body = replaced
+	if msg.BodyBuffer != nil {
+		_ = msg.BodyBuffer.Release()
+		msg.BodyBuffer = nil
+	}
+	if decoded {
+		// After a successful decode, msg.Body is now plaintext. Strip
+		// Content-Encoding and Transfer-Encoding and re-stamp Content-Length
+		// so HTTP/2 (httpaggregator forwards msg.Headers verbatim) and
+		// HTTP/1.x (applyTEToCLRewrite re-stamps from len(msg.Body)) both
+		// observe the consistent post-decode shape. USK-834.
+		msg.Headers = headerDel(msg.Headers, "Content-Encoding")
+		msg.Headers = headerDel(msg.Headers, "Transfer-Encoding")
+		msg.Headers = headerDel(msg.Headers, "Content-Length")
+		msg.Headers = headerAdd(msg.Headers, "Content-Length", strconv.Itoa(len(replaced)))
+	}
+	return true
 }
 
 // CompileTransformRule compiles a transform rule from config values.

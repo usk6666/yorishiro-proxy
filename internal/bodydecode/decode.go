@@ -1,11 +1,23 @@
 // Package bodydecode decodes HTTP Content-Encoding (gzip / deflate / br /
-// zstd) bodies for the MCP query observation interface.
+// zstd) bodies.
 //
-// This is a control-plane helper used only by internal/mcp/ when serializing
-// stored flow bodies to AI agents. The data path (internal/layer/, parser,
-// recorder, resend) MUST NOT use this package: storage and resend keep wire
-// fidelity by preserving the original compressed bytes (CLAUDE.md MITM
-// principle #1: "do not normalize what the wire did not normalize").
+// Authorized callers:
+//
+//   - internal/mcp/ — control-plane body inspection. Decoded bodies are
+//     serialized alongside the original compressed bytes for AI agent
+//     consumption.
+//   - internal/rules/http/ — Transform-step body modification (modified
+//     variant only). The Transform Pipeline step decodes the wire body
+//     before applying the user's replace_body regex, then forwards the
+//     plaintext result to the client with Content-Encoding stripped and
+//     Content-Length recomputed. The ORIGINAL variant's wire bytes are
+//     never touched: they are recorded verbatim via Envelope.Raw and the
+//     "-original" Flow row, preserving CLAUDE.md MITM principle #1 ("do
+//     not normalize what the wire did not normalize"). USK-834.
+//
+// Other data-path code (internal/layer/, parser, recorder, resend) MUST NOT
+// use this package: storage and resend keep wire fidelity by preserving the
+// original compressed bytes.
 //
 // Failures (unknown codec, malformed input, size cap exceeded, multi-codec
 // chain) never panic and never fabricate data — they return the original

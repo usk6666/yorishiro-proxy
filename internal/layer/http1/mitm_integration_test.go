@@ -5,6 +5,7 @@ package http1_test
 import (
 	"bufio"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -25,6 +26,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/klauspost/compress/zstd"
 	"github.com/usk6666/yorishiro-proxy/internal/cert"
 	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/connector"
@@ -1007,6 +1009,256 @@ func TestHTTPSMITM_TransformResponseWithPathPattern(t *testing.T) {
 	}
 	if strings.Contains(resp, "the secret data") {
 		t.Error("response body still contains 'secret' — transform did not apply (USK-824 regression)")
+	}
+}
+
+// TestHTTPSMITM_TransformDecodesContentEncoding is the USK-834 end-to-end
+// guard: an auto_transform replace_body rule applied to a response that
+// arrives with Content-Encoding: gzip must rewrite the plaintext body and
+// forward it to the client with Content-Encoding stripped and Content-Length
+// re-stamped. Before USK-834, the regex was applied against compressed wire
+// bytes and silently never matched.
+func TestHTTPSMITM_TransformDecodesContentEncoding(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	plaintext := []byte(`{"args": {"k":"v"}, "url": "https://example.com"}`)
+	var gzipBuf bytes.Buffer
+	zw := gzip.NewWriter(&gzipBuf)
+	if _, err := zw.Write(plaintext); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	compressed := gzipBuf.Bytes()
+
+	upstreamLn, _ := startUpstreamHTTPS(t, func(_ []byte) []byte {
+		var b bytes.Buffer
+		fmt.Fprintf(&b, "HTTP/1.1 200 OK\r\n")
+		fmt.Fprintf(&b, "Content-Type: application/json\r\n")
+		fmt.Fprintf(&b, "Content-Encoding: gzip\r\n")
+		fmt.Fprintf(&b, "Content-Length: %d\r\n", len(compressed))
+		fmt.Fprintf(&b, "Connection: close\r\n\r\n")
+		b.Write(compressed)
+		return b.Bytes()
+	})
+	defer upstreamLn.Close()
+	target := upstreamLn.Addr().String()
+
+	transformEngine := httprules.NewTransformEngine()
+	transformEngine.SetRules([]httprules.TransformRule{
+		{
+			ID:          "redact-args",
+			Enabled:     true,
+			Priority:    1,
+			Direction:   httprules.DirectionResponse,
+			ActionType:  httprules.TransformReplaceBody,
+			BodyPattern: regexp.MustCompile(`"args":`),
+			BodyReplace: `"REPLACED":`,
+		},
+	})
+
+	proxyAddr, store, sessionDone := startHTTPMITMProxy(t, ctx, target, proxyOpts{
+		transformEngine: transformEngine,
+	})
+
+	rawReq := fmt.Sprintf("GET /args HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n", target)
+	resp := connectAndSendHTTP(t, proxyAddr, target, rawReq)
+
+	select {
+	case <-sessionDone:
+	case <-time.After(15 * time.Second):
+		t.Fatal("timeout waiting for session to complete")
+	}
+
+	// --- The fix surfaces here: the client must receive plaintext with the
+	// pattern replaced. Pre-USK-834 this stayed as opaque compressed bytes.
+	headerEnd := strings.Index(resp, "\r\n\r\n")
+	if headerEnd < 0 {
+		t.Fatalf("client response has no header terminator: %q", resp)
+	}
+	clientHeaders := resp[:headerEnd]
+	clientBody := resp[headerEnd+4:]
+
+	if !strings.Contains(clientBody, `"REPLACED":`) {
+		t.Errorf("client body missing REPLACED token: %q", clientBody)
+	}
+	if strings.Contains(clientBody, `"args":`) {
+		t.Errorf("client body still contains the original args key (decode + replace failed): %q", clientBody)
+	}
+	if strings.Contains(strings.ToLower(clientHeaders), "content-encoding:") {
+		t.Errorf("Content-Encoding must be stripped after decode: %q", clientHeaders)
+	}
+	// Content-Length must reflect the plaintext post-regex length.
+	wantBody := bytes.ReplaceAll(plaintext, []byte(`"args":`), []byte(`"REPLACED":`))
+	wantCL := fmt.Sprintf("Content-Length: %d", len(wantBody))
+	if !strings.Contains(clientHeaders, wantCL) {
+		t.Errorf("Content-Length not restamped to %d in headers: %q", len(wantBody), clientHeaders)
+	}
+
+	// --- Variant recording check: original Flow keeps compressed wire bytes
+	// (Principle #1) and modified Flow stores the plaintext.
+	allFlows := store.allFlows()
+	var foundOriginal, foundModified bool
+	for _, f := range allFlows {
+		if f.Direction != "receive" || f.Metadata == nil {
+			continue
+		}
+		switch f.Metadata["variant"] {
+		case "original":
+			foundOriginal = true
+			if !bytes.Equal(f.Body, compressed) {
+				t.Errorf("original variant body should be the compressed wire bytes; got %d bytes, want %d", len(f.Body), len(compressed))
+			}
+		case "modified":
+			foundModified = true
+			if !bytes.Equal(f.Body, wantBody) {
+				t.Errorf("modified variant body should be plaintext post-regex; got %q want %q", f.Body, wantBody)
+			}
+		}
+	}
+	if !foundOriginal {
+		t.Error("response original variant Flow missing")
+	}
+	if !foundModified {
+		t.Error("response modified variant Flow missing")
+	}
+}
+
+// TestHTTPSMITM_TransformDecodesZstd verifies the same fix on zstd — the
+// codec from the original USK-834 repro (Fly.io edge → go-httpbin).
+func TestHTTPSMITM_TransformDecodesZstd(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	plaintext := []byte(`{"args": {"a":"1"}}`)
+	zw, err := zstd.NewWriter(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	compressed := zw.EncodeAll(plaintext, nil)
+	_ = zw.Close()
+
+	upstreamLn, _ := startUpstreamHTTPS(t, func(_ []byte) []byte {
+		var b bytes.Buffer
+		fmt.Fprintf(&b, "HTTP/1.1 200 OK\r\n")
+		fmt.Fprintf(&b, "Content-Type: application/json\r\n")
+		fmt.Fprintf(&b, "Content-Encoding: zstd\r\n")
+		fmt.Fprintf(&b, "Content-Length: %d\r\n", len(compressed))
+		fmt.Fprintf(&b, "Connection: close\r\n\r\n")
+		b.Write(compressed)
+		return b.Bytes()
+	})
+	defer upstreamLn.Close()
+	target := upstreamLn.Addr().String()
+
+	transformEngine := httprules.NewTransformEngine()
+	transformEngine.SetRules([]httprules.TransformRule{
+		{
+			ID:          "redact-args",
+			Enabled:     true,
+			Priority:    1,
+			Direction:   httprules.DirectionResponse,
+			ActionType:  httprules.TransformReplaceBody,
+			BodyPattern: regexp.MustCompile(`"args":`),
+			BodyReplace: `"REPLACED":`,
+		},
+	})
+
+	proxyAddr, _, sessionDone := startHTTPMITMProxy(t, ctx, target, proxyOpts{
+		transformEngine: transformEngine,
+	})
+
+	rawReq := fmt.Sprintf("GET /args HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n", target)
+	resp := connectAndSendHTTP(t, proxyAddr, target, rawReq)
+
+	select {
+	case <-sessionDone:
+	case <-time.After(15 * time.Second):
+		t.Fatal("timeout waiting for session to complete")
+	}
+
+	headerEnd := strings.Index(resp, "\r\n\r\n")
+	if headerEnd < 0 {
+		t.Fatalf("client response has no header terminator: %q", resp)
+	}
+	clientHeaders := resp[:headerEnd]
+	clientBody := resp[headerEnd+4:]
+	if !strings.Contains(clientBody, `"REPLACED":`) {
+		t.Errorf("client body missing REPLACED token: %q", clientBody)
+	}
+	if strings.Contains(strings.ToLower(clientHeaders), "content-encoding:") {
+		t.Errorf("Content-Encoding must be stripped after zstd decode: %q", clientHeaders)
+	}
+}
+
+// TestHTTPSMITM_TransformDecodeFailSoftUnknownCodec verifies the fail-soft
+// path under the live data plane. With an unknown codec ("snappy"), the
+// transform must NOT mutate the response — the client sees the original
+// wire bytes with Content-Encoding preserved. No modified variant Flow is
+// produced.
+func TestHTTPSMITM_TransformDecodeFailSoftUnknownCodec(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	body := []byte(`secret-bytes-secret`)
+	upstreamLn, _ := startUpstreamHTTPS(t, func(_ []byte) []byte {
+		var b bytes.Buffer
+		fmt.Fprintf(&b, "HTTP/1.1 200 OK\r\n")
+		fmt.Fprintf(&b, "Content-Type: application/octet-stream\r\n")
+		fmt.Fprintf(&b, "Content-Encoding: snappy\r\n")
+		fmt.Fprintf(&b, "Content-Length: %d\r\n", len(body))
+		fmt.Fprintf(&b, "Connection: close\r\n\r\n")
+		b.Write(body)
+		return b.Bytes()
+	})
+	defer upstreamLn.Close()
+	target := upstreamLn.Addr().String()
+
+	transformEngine := httprules.NewTransformEngine()
+	transformEngine.SetRules([]httprules.TransformRule{
+		{
+			ID:          "redact-secret",
+			Enabled:     true,
+			Priority:    1,
+			Direction:   httprules.DirectionResponse,
+			ActionType:  httprules.TransformReplaceBody,
+			BodyPattern: regexp.MustCompile(`secret`),
+			BodyReplace: "REDACTED",
+		},
+	})
+
+	proxyAddr, store, sessionDone := startHTTPMITMProxy(t, ctx, target, proxyOpts{
+		transformEngine: transformEngine,
+	})
+
+	rawReq := fmt.Sprintf("GET /data HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n", target)
+	resp := connectAndSendHTTP(t, proxyAddr, target, rawReq)
+
+	select {
+	case <-sessionDone:
+	case <-time.After(15 * time.Second):
+		t.Fatal("timeout waiting for session to complete")
+	}
+
+	// Client sees wire bytes untouched (Content-Encoding preserved, body
+	// still contains "secret").
+	if !strings.Contains(strings.ToLower(resp), "content-encoding: snappy") {
+		t.Errorf("expected Content-Encoding: snappy preserved on fail-soft, got: %q", resp)
+	}
+	if !strings.Contains(resp, "secret") {
+		t.Errorf("expected body 'secret' untouched on fail-soft, got: %q", resp)
+	}
+	if strings.Contains(resp, "REDACTED") {
+		t.Errorf("transform should NOT have applied on unknown codec, got: %q", resp)
+	}
+
+	// No modified variant Flow on the response side.
+	for _, f := range store.allFlows() {
+		if f.Direction == "receive" && f.Metadata != nil && f.Metadata["variant"] == "modified" {
+			t.Error("unexpected modified variant Flow on fail-soft response")
+		}
 	}
 }
 

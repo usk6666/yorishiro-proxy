@@ -2,9 +2,13 @@ package http
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
+	"strconv"
 	"testing"
 
+	"github.com/andybalholm/brotli"
+	"github.com/klauspost/compress/zstd"
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/envelope/bodybuf"
 	"github.com/usk6666/yorishiro-proxy/internal/rules/common"
@@ -651,5 +655,358 @@ func TestTransformMatchResponse_BodyReplaceFires(t *testing.T) {
 	}
 	if string(msg.Body) != `{"data": "[REDACTED]"}` {
 		t.Errorf("msg.Body = %q, want redacted", string(msg.Body))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// USK-834: Content-Encoding auto-decode for replace_body.
+// ---------------------------------------------------------------------------
+
+// gzipEncode returns gzip-compressed bytes for body.
+func gzipEncode(t *testing.T, body []byte) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	if _, err := zw.Write(body); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+// brotliEncode returns brotli-compressed bytes for body.
+func brotliEncode(t *testing.T, body []byte) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := brotli.NewWriter(&buf)
+	if _, err := zw.Write(body); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+// zstdEncode returns zstd-compressed bytes for body.
+func zstdEncode(t *testing.T, body []byte) []byte {
+	t.Helper()
+	zw, err := zstd.NewWriter(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := zw.EncodeAll(body, nil)
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+// findHeader returns the value of the first matching header, or "" if missing.
+func findHeader(headers []envelope.KeyValue, name string) string {
+	return headerGet(headers, name)
+}
+
+// TestTransformEngine_ReplaceBody_DecodesCE_Gzip is the USK-834 happy-path:
+// a response with Content-Encoding: gzip is decoded, the regex matches the
+// plaintext, and the wire-side msg.Body is the modified plaintext with
+// Content-Encoding stripped and Content-Length re-stamped.
+func TestTransformEngine_ReplaceBody_DecodesCE_Gzip(t *testing.T) {
+	e := NewTransformEngine()
+	rule, err := CompileTransformRule("r1", 0, DirectionResponse, "", "", nil,
+		TransformReplaceBody, "", "", `"args":`, `"REPLACED":`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.SetRules([]TransformRule{*rule})
+
+	plaintext := []byte(`{"args": {"k":"v"}, "url": "https://example.com"}`)
+	compressed := gzipEncode(t, plaintext)
+	headers := []envelope.KeyValue{
+		{Name: "Content-Type", Value: "application/json"},
+		{Name: "Content-Encoding", Value: "gzip"},
+		{Name: "Content-Length", Value: strconv.Itoa(len(compressed))},
+	}
+	env, msg := testTransformResponseEnv(200, "example.com", headers, compressed)
+
+	modified := e.TransformResponse(context.Background(), env, msg)
+	if !modified {
+		t.Fatal("expected gzip-decoded body to be modified")
+	}
+
+	wantBody := []byte(`{"REPLACED": {"k":"v"}, "url": "https://example.com"}`)
+	if !bytes.Equal(msg.Body, wantBody) {
+		t.Errorf("body = %q, want %q", msg.Body, wantBody)
+	}
+	if got := findHeader(msg.Headers, "Content-Encoding"); got != "" {
+		t.Errorf("Content-Encoding should be stripped after decode, got %q", got)
+	}
+	if got := findHeader(msg.Headers, "Content-Length"); got != strconv.Itoa(len(wantBody)) {
+		t.Errorf("Content-Length = %q, want %d", got, len(wantBody))
+	}
+}
+
+// TestTransformEngine_ReplaceBody_DecodesCE_Brotli verifies br codec coverage.
+func TestTransformEngine_ReplaceBody_DecodesCE_Brotli(t *testing.T) {
+	e := NewTransformEngine()
+	rule, err := CompileTransformRule("r1", 0, DirectionResponse, "", "", nil,
+		TransformReplaceBody, "", "", `secret\d+`, "[REDACTED]")
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.SetRules([]TransformRule{*rule})
+
+	plaintext := []byte(`{"pw": "secret123"}`)
+	compressed := brotliEncode(t, plaintext)
+	headers := []envelope.KeyValue{
+		{Name: "Content-Encoding", Value: "br"},
+		{Name: "Content-Length", Value: strconv.Itoa(len(compressed))},
+	}
+	env, msg := testTransformResponseEnv(200, "example.com", headers, compressed)
+
+	modified := e.TransformResponse(context.Background(), env, msg)
+	if !modified {
+		t.Fatal("expected brotli-decoded body to be modified")
+	}
+	if string(msg.Body) != `{"pw": "[REDACTED]"}` {
+		t.Errorf("body = %q", msg.Body)
+	}
+	if got := findHeader(msg.Headers, "Content-Encoding"); got != "" {
+		t.Errorf("Content-Encoding should be stripped, got %q", got)
+	}
+	if got := findHeader(msg.Headers, "Content-Length"); got != strconv.Itoa(len(msg.Body)) {
+		t.Errorf("Content-Length = %q, want %d", got, len(msg.Body))
+	}
+}
+
+// TestTransformEngine_ReplaceBody_DecodesCE_Zstd verifies zstd codec
+// coverage — the Fly.io edge codec from the USK-834 repro.
+func TestTransformEngine_ReplaceBody_DecodesCE_Zstd(t *testing.T) {
+	e := NewTransformEngine()
+	rule, err := CompileTransformRule("r1", 0, DirectionResponse, "", "", nil,
+		TransformReplaceBody, "", "", `"args":`, `"REPLACED":`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.SetRules([]TransformRule{*rule})
+
+	plaintext := []byte(`{"args": {"k":"v"}}`)
+	compressed := zstdEncode(t, plaintext)
+	headers := []envelope.KeyValue{
+		{Name: "Content-Encoding", Value: "zstd"},
+		{Name: "Content-Length", Value: strconv.Itoa(len(compressed))},
+	}
+	env, msg := testTransformResponseEnv(200, "example.com", headers, compressed)
+
+	modified := e.TransformResponse(context.Background(), env, msg)
+	if !modified {
+		t.Fatal("expected zstd-decoded body to be modified")
+	}
+	if string(msg.Body) != `{"REPLACED": {"k":"v"}}` {
+		t.Errorf("body = %q", msg.Body)
+	}
+	if got := findHeader(msg.Headers, "Content-Encoding"); got != "" {
+		t.Errorf("Content-Encoding should be stripped, got %q", got)
+	}
+	if got := findHeader(msg.Headers, "Content-Length"); got != strconv.Itoa(len(msg.Body)) {
+		t.Errorf("Content-Length = %q, want %d", got, len(msg.Body))
+	}
+}
+
+// TestTransformEngine_ReplaceBody_DecodesCE_GzipRequest exercises request-side
+// gzip decode (the rare but legitimate gzipped-POST upload case).
+func TestTransformEngine_ReplaceBody_DecodesCE_GzipRequest(t *testing.T) {
+	e := NewTransformEngine()
+	rule, err := CompileTransformRule("r1", 0, DirectionRequest, "", "", nil,
+		TransformReplaceBody, "", "", `secret\d+`, "[REDACTED]")
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.SetRules([]TransformRule{*rule})
+
+	plaintext := []byte(`{"pw":"secret123"}`)
+	compressed := gzipEncode(t, plaintext)
+	headers := []envelope.KeyValue{
+		{Name: "Content-Encoding", Value: "gzip"},
+		{Name: "Content-Length", Value: strconv.Itoa(len(compressed))},
+	}
+	env, msg := testTransformEnv("POST", "/upload", "example.com", headers, compressed)
+
+	modified := e.TransformRequest(context.Background(), env, msg)
+	if !modified {
+		t.Fatal("expected request gzip body to be decoded + modified")
+	}
+	if string(msg.Body) != `{"pw":"[REDACTED]"}` {
+		t.Errorf("body = %q", msg.Body)
+	}
+	if got := findHeader(msg.Headers, "Content-Encoding"); got != "" {
+		t.Errorf("Content-Encoding should be stripped on request side too, got %q", got)
+	}
+	if got := findHeader(msg.Headers, "Content-Length"); got != strconv.Itoa(len(msg.Body)) {
+		t.Errorf("Content-Length = %q, want %d", got, len(msg.Body))
+	}
+}
+
+// TestTransformEngine_ReplaceBody_Identity_NoHeaderRewrite confirms that the
+// identity / no-CE fast path leaves Content-Encoding/Content-Length untouched
+// even after a successful regex replace. Pre-USK-834 behavior must be
+// preserved for the common uncompressed path.
+func TestTransformEngine_ReplaceBody_Identity_NoHeaderRewrite(t *testing.T) {
+	e := NewTransformEngine()
+	rule, err := CompileTransformRule("r1", 0, DirectionResponse, "", "", nil,
+		TransformReplaceBody, "", "", `secret\d+`, "[REDACTED]")
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.SetRules([]TransformRule{*rule})
+
+	body := []byte(`{"pw":"secret123"}`)
+	headers := []envelope.KeyValue{
+		{Name: "Content-Type", Value: "application/json"},
+		// No Content-Encoding header — common uncompressed case.
+		{Name: "Content-Length", Value: strconv.Itoa(len(body))},
+	}
+	env, msg := testTransformResponseEnv(200, "example.com", headers, body)
+
+	modified := e.TransformResponse(context.Background(), env, msg)
+	if !modified {
+		t.Fatal("expected regex to modify uncompressed body")
+	}
+	if string(msg.Body) != `{"pw":"[REDACTED]"}` {
+		t.Errorf("body = %q", msg.Body)
+	}
+	// On the identity path, Transform must not rewrite CL — the downstream
+	// HTTP/1.x channel handles CL via applyTEToCLRewrite, and rewriting
+	// here on the uncompressed path would change observable header order.
+	clCount := 0
+	for _, h := range msg.Headers {
+		if h.Name == "Content-Length" {
+			clCount++
+		}
+	}
+	if clCount != 1 {
+		t.Errorf("Content-Length count = %d, want 1 (no rewrite on identity path)", clCount)
+	}
+	if got := findHeader(msg.Headers, "Content-Length"); got != strconv.Itoa(len(body)) {
+		// Original CL preserved; Transform did not touch it.
+		t.Errorf("Content-Length = %q, want %d (original, untouched)", got, len(body))
+	}
+}
+
+// TestTransformEngine_ReplaceBody_DecodeFailSoft_UnknownCodec verifies fail-
+// soft semantics on an unrecognized Content-Encoding (e.g., "snappy"). The
+// transform must NOT mutate msg, the original compressed bytes must continue
+// along the wire untouched, and the rule reports false.
+func TestTransformEngine_ReplaceBody_DecodeFailSoft_UnknownCodec(t *testing.T) {
+	e := NewTransformEngine()
+	rule, err := CompileTransformRule("r1", 0, DirectionResponse, "", "", nil,
+		TransformReplaceBody, "", "", `secret`, "REDACTED")
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.SetRules([]TransformRule{*rule})
+
+	body := []byte(`whatever-bytes-secret`)
+	headers := []envelope.KeyValue{
+		{Name: "Content-Encoding", Value: "snappy"},
+	}
+	env, msg := testTransformResponseEnv(200, "example.com", headers, body)
+
+	modified := e.TransformResponse(context.Background(), env, msg)
+	if modified {
+		t.Error("unknown codec must trigger fail-soft (no mutation)")
+	}
+	if !bytes.Equal(msg.Body, body) {
+		t.Errorf("body changed under fail-soft: %q vs original %q", msg.Body, body)
+	}
+	if got := findHeader(msg.Headers, "Content-Encoding"); got != "snappy" {
+		t.Errorf("Content-Encoding should be preserved under fail-soft, got %q", got)
+	}
+}
+
+// TestTransformEngine_ReplaceBody_DecodeFailSoft_ChainedCE verifies fail-soft
+// on a multi-codec Content-Encoding chain like "gzip, br". bodydecode rejects
+// chains; transform must surface that as a no-op.
+func TestTransformEngine_ReplaceBody_DecodeFailSoft_ChainedCE(t *testing.T) {
+	e := NewTransformEngine()
+	rule, err := CompileTransformRule("r1", 0, DirectionResponse, "", "", nil,
+		TransformReplaceBody, "", "", `secret`, "REDACTED")
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.SetRules([]TransformRule{*rule})
+
+	// Note: body bytes are arbitrary — chain rejection happens before any
+	// decode attempt.
+	body := []byte(`opaque-chained-payload-secret`)
+	headers := []envelope.KeyValue{
+		{Name: "Content-Encoding", Value: "gzip, br"},
+	}
+	env, msg := testTransformResponseEnv(200, "example.com", headers, body)
+
+	modified := e.TransformResponse(context.Background(), env, msg)
+	if modified {
+		t.Error("chained CE must trigger fail-soft (no mutation)")
+	}
+	if !bytes.Equal(msg.Body, body) {
+		t.Errorf("body changed under fail-soft: %q vs original %q", msg.Body, body)
+	}
+	if got := findHeader(msg.Headers, "Content-Encoding"); got != "gzip, br" {
+		t.Errorf("Content-Encoding should be preserved under fail-soft, got %q", got)
+	}
+}
+
+// TestTransformEngine_ReplaceBody_DecodeFailSoft_MalformedGzip verifies that
+// a Content-Encoding: gzip header on non-gzip bytes triggers fail-soft via
+// the malformed anomaly type, leaving the wire bytes intact.
+func TestTransformEngine_ReplaceBody_DecodeFailSoft_MalformedGzip(t *testing.T) {
+	e := NewTransformEngine()
+	rule, err := CompileTransformRule("r1", 0, DirectionResponse, "", "", nil,
+		TransformReplaceBody, "", "", `secret`, "REDACTED")
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.SetRules([]TransformRule{*rule})
+
+	body := []byte(`not-actually-gzip-secret`)
+	headers := []envelope.KeyValue{
+		{Name: "Content-Encoding", Value: "gzip"},
+	}
+	env, msg := testTransformResponseEnv(200, "example.com", headers, body)
+
+	modified := e.TransformResponse(context.Background(), env, msg)
+	if modified {
+		t.Error("malformed gzip must trigger fail-soft (no mutation)")
+	}
+	if !bytes.Equal(msg.Body, body) {
+		t.Errorf("body changed under fail-soft: %q", msg.Body)
+	}
+}
+
+// TestTransformEngine_ReplaceBody_DecodeEmptyBody_NoOp verifies that a
+// response with Content-Encoding: gzip but zero-byte body is a no-op and
+// does not strip the (legitimately compressed-but-empty) headers.
+func TestTransformEngine_ReplaceBody_DecodeEmptyBody_NoOp(t *testing.T) {
+	e := NewTransformEngine()
+	rule, err := CompileTransformRule("r1", 0, DirectionResponse, "", "", nil,
+		TransformReplaceBody, "", "", `anything`, "X")
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.SetRules([]TransformRule{*rule})
+
+	headers := []envelope.KeyValue{
+		{Name: "Content-Encoding", Value: "gzip"},
+	}
+	env, msg := testTransformResponseEnv(200, "example.com", headers, nil)
+
+	modified := e.TransformResponse(context.Background(), env, msg)
+	if modified {
+		t.Error("empty body should not produce modification")
+	}
+	if got := findHeader(msg.Headers, "Content-Encoding"); got != "gzip" {
+		t.Errorf("Content-Encoding should be preserved when body is empty, got %q", got)
 	}
 }
