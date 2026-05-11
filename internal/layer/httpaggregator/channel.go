@@ -80,6 +80,16 @@ type aggregatorChannel struct {
 	// the stream from the connection-level h2 Layer; subsequent events
 	// belong to the post-swap wrapper. USK-775.
 	tunnelExchangeDone bool
+
+	// USK-833: pairedRequestPath/Method/RawQuery capture the wire-observed
+	// request line fields from the Send-direction HEADERS so the matching
+	// Receive-direction response envelope can carry them on
+	// EnvelopeContext.RequestPath/RequestMethod/RequestRawQuery for
+	// direction:"both" rule matching. One aggregator wraps one HTTP/2
+	// stream, which is one HTTP transaction by spec — single-writer.
+	pairedRequestPath     string
+	pairedRequestMethod   string
+	pairedRequestRawQuery string
 }
 
 // StreamID delegates to the underlying Channel.
@@ -322,6 +332,26 @@ func (a *aggregatorChannel) absorbHeaders(env *envelope.Envelope, evt *http2.H2H
 		Anomalies:    cloneAnomalies(evt.Anomalies),
 	}
 
+	outCtx := env.Context
+	// USK-833: stamp the paired request's path/method/query onto Receive
+	// envelopes for direction:"both" rule matching. On Send, capture the
+	// wire-observed fields onto the aggregator so the matching Receive
+	// envelope can carry them forward. Order matters: Send-direction
+	// envelopes carry their own Path/Method already in HTTPMessage, so we
+	// only need to mirror them onto Context for symmetry with HTTP/1.x.
+	if env.Direction == envelope.Send {
+		a.pairedRequestPath = msg.Path
+		a.pairedRequestMethod = msg.Method
+		a.pairedRequestRawQuery = msg.RawQuery
+		outCtx.RequestPath = msg.Path
+		outCtx.RequestMethod = msg.Method
+		outCtx.RequestRawQuery = msg.RawQuery
+	} else if env.Direction == envelope.Receive {
+		outCtx.RequestPath = a.pairedRequestPath
+		outCtx.RequestMethod = a.pairedRequestMethod
+		outCtx.RequestRawQuery = a.pairedRequestRawQuery
+	}
+
 	outEnv := &envelope.Envelope{
 		StreamID:  env.StreamID,
 		FlowID:    flowIDOr(env.FlowID),
@@ -330,7 +360,7 @@ func (a *aggregatorChannel) absorbHeaders(env *envelope.Envelope, evt *http2.H2H
 		Protocol:  envelope.ProtocolHTTP,
 		Raw:       cloneBytes(env.Raw),
 		Message:   msg,
-		Context:   env.Context,
+		Context:   outCtx,
 	}
 
 	// 1xx informational: emit as complete bodyless message and stay in

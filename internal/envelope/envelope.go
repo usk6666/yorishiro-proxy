@@ -263,6 +263,23 @@ type EnvelopeContext struct {
 	// UpgradeQuery is the URL query string observed on the HTTP Upgrade
 	// request. Same semantics as UpgradePath. Empty for non-upgraded protocols.
 	UpgradeQuery string
+
+	// RequestPath, RequestMethod, RequestRawQuery carry the wire-observed
+	// request line fields onto subsequent envelopes for the same HTTP
+	// transaction so response-phase rule matching (direction:"both" with
+	// path_pattern or methods conditions) can evaluate against the paired
+	// request. Populated by HTTP-producing Layers (HTTP/1.x channel via
+	// ctxTmpl; HTTP/2 aggregator via per-stream inflight state). Empty when
+	// the envelope is not HTTP, or when no paired request is available (the
+	// legitimate direction:"response" no-data case).
+	//
+	// USK-833: prior to this Issue, response-phase matching for
+	// direction:"both" silently permitted any path because the request-side
+	// fields were not threaded forward; rules with host_pattern + path_pattern
+	// held every paired response regardless of path.
+	RequestPath     string
+	RequestMethod   string
+	RequestRawQuery string
 }
 
 // TLSSnapshot captures TLS connection metadata observed during handshake.

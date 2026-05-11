@@ -168,13 +168,22 @@ func (e *TransformEngine) TransformResponse(ctx context.Context, env *envelope.E
 
 // matchesConditions evaluates a transform rule against an envelope. The dir
 // parameter is the envelope direction (Send for requests, Receive for
-// responses) — request-only fields are skipped on Receive because HTTPMessage
-// spec leaves Method/Path empty on response envelopes (see
-// internal/envelope/http.go field-validity contract). USK-824: omitting this
-// skip caused direction:"response" and direction:"both" transforms with a
-// path_pattern or methods condition to silently never fire on the response
-// side, since rule.PathPattern.MatchString("") is almost always false. This
-// is the symmetric fix to USK-821 in intercept.go::matchesRule.
+// responses).
+//
+// PathPattern / Methods are evaluated against effectivePathAndMethod:
+//   - Send: msg.Path / msg.Method (the wire-observed request line).
+//   - Receive: env.Context.RequestPath / RequestMethod, populated by the
+//     producing HTTP Layer (HTTP/1.x channel via ctxTmpl; HTTP/2 aggregator
+//     via per-stream inflight state) with the paired request's fields. When
+//     these are empty (legitimate direction:"response" no-paired-request
+//     path, or a non-HTTP-Layer producer), the helper signals knowable=false
+//     and the request-only checks are skipped — preserving the USK-824 fix
+//     for direction:"response" + path_pattern.
+//
+// USK-833: previously these checks were guarded with `dir == envelope.Send`
+// unconditionally, which silently allowed any path/method through on the
+// Receive side of a direction:"both" rule. Symmetric to the intercept fix in
+// intercept.go::matchesRule. Regression chain: USK-821 → USK-824 → USK-833.
 func (e *TransformEngine) matchesConditions(rule *TransformRule, env *envelope.Envelope, msg *envelope.HTTPMessage, dir envelope.Direction) bool {
 	// Host pattern check. Valid for both directions: TargetHost is set on
 	// the EnvelopeContext at Pipeline entry and survives across the
@@ -185,20 +194,18 @@ func (e *TransformEngine) matchesConditions(rule *TransformRule, env *envelope.E
 			return false
 		}
 	}
-	// Path pattern check. Request-only — skip on Receive (response) so a
-	// direction:"response"/"both" rule does not short-circuit on the empty
-	// Path field (see HTTPMessage field-validity contract).
-	if rule.PathPattern != nil && dir == envelope.Send {
-		if !rule.PathPattern.MatchString(msg.Path) {
+	// USK-833: resolve the effective path/method for this direction; see
+	// matchesRule in intercept.go for the rationale.
+	path, method, knowable := effectivePathAndMethod(env, msg, dir)
+	if rule.PathPattern != nil && knowable {
+		if !rule.PathPattern.MatchString(path) {
 			return false
 		}
 	}
-	// Method whitelist check. Request-only — skip on Receive for the same
-	// reason as PathPattern (Method is empty on response envelopes).
-	if len(rule.Methods) > 0 && dir == envelope.Send {
+	if len(rule.Methods) > 0 && knowable {
 		found := false
 		for _, m := range rule.Methods {
-			if strings.EqualFold(m, msg.Method) {
+			if strings.EqualFold(m, method) {
 				found = true
 				break
 			}

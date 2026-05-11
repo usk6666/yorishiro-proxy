@@ -358,6 +358,9 @@ var _ = common.MaxPatternLength // use import
 // by USK-824 regression tests to verify that direction:"response" and
 // direction:"both" transform rules with request-only conditions
 // (path_pattern, methods) do not silently fail to match.
+// Context.RequestPath / RequestMethod are also empty, simulating the
+// "no paired request data" case that preserves the USK-824 fix
+// (knowable=false → request-only checks skipped).
 func testTransformResponseEnv(status int, host string, headers []envelope.KeyValue, body []byte) (*envelope.Envelope, *envelope.HTTPMessage) {
 	msg := &envelope.HTTPMessage{
 		Status:  status,
@@ -371,6 +374,31 @@ func testTransformResponseEnv(status int, host string, headers []envelope.KeyVal
 		Protocol:  envelope.ProtocolHTTP,
 		Message:   msg,
 		Context:   envelope.EnvelopeContext{TargetHost: host + ":443"},
+	}
+	return env, msg
+}
+
+// testTransformResponseEnvPaired builds a response envelope as the HTTP/1.x
+// channel / httpaggregator does post-USK-833: the producing Layer has
+// threaded the paired request's path/method/query forward onto
+// EnvelopeContext.RequestPath/Method/RawQuery so response-phase rule
+// matching can gate on the paired request's identity.
+func testTransformResponseEnvPaired(status int, host string, headers []envelope.KeyValue, body []byte, method, path, rawQuery string) (*envelope.Envelope, *envelope.HTTPMessage) {
+	msg := &envelope.HTTPMessage{
+		Status:  status,
+		Headers: headers,
+		Body:    body,
+	}
+	env := &envelope.Envelope{
+		Direction: envelope.Receive,
+		Protocol:  envelope.ProtocolHTTP,
+		Message:   msg,
+		Context: envelope.EnvelopeContext{
+			TargetHost:      host + ":443",
+			RequestMethod:   method,
+			RequestPath:     path,
+			RequestRawQuery: rawQuery,
+		},
 	}
 	return env, msg
 }
@@ -497,12 +525,15 @@ func TestTransformMatchRequest_MethodsStillEnforced(t *testing.T) {
 	}
 }
 
-// TestTransformMatchBoth_RequestPath_ResponseHost covers the canonical
-// direction:"both" use case from USK-821 / USK-824: a rule that scopes
-// requests by path while still firing on the response side via host alone.
-// With the USK-824 fix, the request side matches by path+host and the
-// response side matches by host alone (path skipped).
-func TestTransformMatchBoth_RequestPath_ResponseHost(t *testing.T) {
+// TestTransformMatchBoth_PathMatch_ResponseFires is the canonical happy
+// path for direction:"both" with a path_pattern: the producing HTTP Layer
+// threads the request's path forward via EnvelopeContext.RequestPath, so
+// the response side fires when the paired request's path matched.
+//
+// USK-833: replaces the prior TestTransformMatchBoth_RequestPath_ResponseHost
+// which codified the regression — response side fired on host alone
+// regardless of the paired request's path.
+func TestTransformMatchBoth_PathMatch_ResponseFires(t *testing.T) {
 	e := NewTransformEngine()
 	rule, err := CompileTransformRule("r1", 0, DirectionBoth,
 		`^httpbin\.org$`, `^/headers$`, nil,
@@ -521,25 +552,80 @@ func TestTransformMatchBoth_RequestPath_ResponseHost(t *testing.T) {
 		t.Errorf("X-Tag = %q on request, want tagged", headerGet(reqMsg.Headers, "X-Tag"))
 	}
 
-	// Response side: only host left to evaluate (path skipped). Should match.
-	respEnv, respMsg := testTransformResponseEnv(200, "httpbin.org", nil, nil)
+	// Response side paired with /headers: USK-833 reads paired path from
+	// Context.RequestPath and matches.
+	respEnv, respMsg := testTransformResponseEnvPaired(200, "httpbin.org", nil, nil, "GET", "/headers", "")
 	if !e.TransformResponse(context.Background(), respEnv, respMsg) {
-		t.Error("USK-824: response side with direction:both should match by host alone")
+		t.Error("USK-833: response paired with /headers under path_pattern ^/headers$ should fire")
 	}
 	if headerGet(respMsg.Headers, "X-Tag") != "tagged" {
 		t.Errorf("X-Tag = %q on response, want tagged", headerGet(respMsg.Headers, "X-Tag"))
 	}
+}
 
-	// Response side, host mismatch: still rejects.
-	respEnv2, respMsg2 := testTransformResponseEnv(200, "example.com", nil, nil)
-	if e.TransformResponse(context.Background(), respEnv2, respMsg2) {
-		t.Error("response side: host mismatch should still reject")
+// TestTransformMatchBoth_PathMismatch_ResponseNotFires is the verbatim
+// Pattern ① repro from USK-833 against the transform engine: a
+// direction:"both" transform with path_pattern:"^/headers$" applied to a
+// request to "/" must NOT modify the paired response.
+func TestTransformMatchBoth_PathMismatch_ResponseNotFires(t *testing.T) {
+	e := NewTransformEngine()
+	rule, err := CompileTransformRule("r1", 0, DirectionBoth,
+		`^httpbin\.org$`, `^/headers$`, nil,
+		TransformAddHeader, "X-Tag", "tagged", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.SetRules([]TransformRule{*rule})
+
+	// Request side, path mismatch.
+	reqEnv, reqMsg := testTransformEnv("GET", "/", "httpbin.org", nil, nil)
+	if e.TransformRequest(context.Background(), reqEnv, reqMsg) {
+		t.Error("request /: path mismatch should reject")
 	}
 
-	// Request side, path mismatch: rejects (path still applies on Send).
-	reqEnv2, reqMsg2 := testTransformEnv("GET", "/other", "httpbin.org", nil, nil)
-	if e.TransformRequest(context.Background(), reqEnv2, reqMsg2) {
-		t.Error("request side: path mismatch should reject")
+	// Response side paired with /: USK-833 reads paired path and rejects.
+	respEnv, respMsg := testTransformResponseEnvPaired(200, "httpbin.org", nil, nil, "GET", "/", "")
+	if e.TransformResponse(context.Background(), respEnv, respMsg) {
+		t.Error("USK-833 Pattern ①: response paired with / under path_pattern ^/headers$ must NOT fire")
+	}
+	if headerGet(respMsg.Headers, "X-Tag") != "" {
+		t.Errorf("X-Tag = %q, want empty (transform must not fire on path-mismatched response)", headerGet(respMsg.Headers, "X-Tag"))
+	}
+}
+
+// TestTransformMatchBoth_DifferentPath_ResponseNotFires is Pattern ② for
+// the transform engine.
+func TestTransformMatchBoth_DifferentPath_ResponseNotFires(t *testing.T) {
+	e := NewTransformEngine()
+	rule, err := CompileTransformRule("r1", 0, DirectionBoth,
+		`^httpbin\.org$`, `^/headers$`, nil,
+		TransformAddHeader, "X-Tag", "tagged", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.SetRules([]TransformRule{*rule})
+
+	respEnv, respMsg := testTransformResponseEnvPaired(200, "httpbin.org", nil, nil, "GET", "/uuid", "")
+	if e.TransformResponse(context.Background(), respEnv, respMsg) {
+		t.Error("USK-833 Pattern ②: response paired with /uuid under path_pattern ^/headers$ must NOT fire")
+	}
+}
+
+// TestTransformMatchBoth_MethodMismatch_ResponseNotFires confirms the
+// methods condition gates the response side too with USK-833.
+func TestTransformMatchBoth_MethodMismatch_ResponseNotFires(t *testing.T) {
+	e := NewTransformEngine()
+	rule, err := CompileTransformRule("r1", 0, DirectionBoth,
+		`^httpbin\.org$`, "", []string{"POST"},
+		TransformAddHeader, "X-Tag", "tagged", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.SetRules([]TransformRule{*rule})
+
+	respEnv, respMsg := testTransformResponseEnvPaired(200, "httpbin.org", nil, nil, "GET", "/", "")
+	if e.TransformResponse(context.Background(), respEnv, respMsg) {
+		t.Error("USK-833: response paired with GET under methods:[POST] must NOT fire")
 	}
 }
 

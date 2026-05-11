@@ -38,6 +38,22 @@ func (a *aggregatorChannel) Send(ctx context.Context, env *envelope.Envelope) er
 		return fmt.Errorf("httpaggregator: Send requires *HTTPMessage, got %T", env.Message)
 	}
 
+	// USK-833: capture the paired request line on the upstream-side
+	// aggregator (RoleClient.Send transports the Send-direction request
+	// envelope) so the matching Receive-direction response Next() emits with
+	// EnvelopeContext.RequestPath populated. Without this, the upstream-side
+	// aggregator's pairedRequestPath would remain empty (it never sees the
+	// Send envelope via Next()), and direction:"both" rules would skip
+	// path/method checks on the response side via the knowable=false path
+	// in effectivePathAndMethod.
+	if env.Direction == envelope.Send {
+		a.mu.Lock()
+		a.pairedRequestPath = msg.Path
+		a.pairedRequestMethod = msg.Method
+		a.pairedRequestRawQuery = msg.RawQuery
+		a.mu.Unlock()
+	}
+
 	hasBody := len(msg.Body) > 0 || msg.BodyBuffer != nil || msg.BodyStream != nil
 	hasTrailers := len(msg.Trailers) > 0
 	isInformational := isInformationalStatus(msg.Status)

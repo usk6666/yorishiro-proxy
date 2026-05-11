@@ -213,7 +213,9 @@ func TestCompileInterceptRule(t *testing.T) {
 // HTTPMessage field-validity contract (see internal/envelope/http.go).
 // Used by USK-821 regression tests to verify that direction:"response" and
 // direction:"both" rules with request-only conditions (path_pattern,
-// methods) do not silently fail to match.
+// methods) do not silently fail to match. Context.RequestPath / RequestMethod
+// are also empty here, simulating the "no paired request data" case that
+// preserves the USK-821 fix (knowable=false → request-only checks skipped).
 func testHTTPResponse(status int, host string, headers []envelope.KeyValue) (*envelope.Envelope, *envelope.HTTPMessage) {
 	msg := &envelope.HTTPMessage{
 		Status:  status,
@@ -226,6 +228,32 @@ func testHTTPResponse(status int, host string, headers []envelope.KeyValue) (*en
 		Protocol:  envelope.ProtocolHTTP,
 		Message:   msg,
 		Context:   envelope.EnvelopeContext{TargetHost: host + ":443"},
+	}
+	return env, msg
+}
+
+// testHTTPResponseWithPairedRequest builds a response envelope as the
+// HTTP/1.x channel / httpaggregator does post-USK-833: the producing Layer
+// has threaded the paired request's path/method/query forward onto
+// EnvelopeContext.RequestPath / RequestMethod / RequestRawQuery so
+// response-phase rule matching can gate on the paired request's identity.
+// Used by USK-833 regression tests for direction:"both" + path_pattern /
+// methods.
+func testHTTPResponseWithPairedRequest(status int, host string, headers []envelope.KeyValue, method, path, rawQuery string) (*envelope.Envelope, *envelope.HTTPMessage) {
+	msg := &envelope.HTTPMessage{
+		Status:  status,
+		Headers: headers,
+	}
+	env := &envelope.Envelope{
+		Direction: envelope.Receive,
+		Protocol:  envelope.ProtocolHTTP,
+		Message:   msg,
+		Context: envelope.EnvelopeContext{
+			TargetHost:      host + ":443",
+			RequestMethod:   method,
+			RequestPath:     path,
+			RequestRawQuery: rawQuery,
+		},
 	}
 	return env, msg
 }
@@ -367,12 +395,17 @@ func TestMatchRequest_MethodsStillEnforced(t *testing.T) {
 	}
 }
 
-// TestMatchBoth_RequestPath_ResponseHost covers the canonical
-// direction:"both" use case from the design review: a rule that scopes
-// requests by path while still firing on the response side via host
-// alone. With the USK-821 fix, the request side matches by path+host
-// and the response side matches by host alone (path skipped).
-func TestMatchBoth_RequestPath_ResponseHost(t *testing.T) {
+// TestMatchBoth_PathMatch_ResponseHeld is the canonical happy path for
+// direction:"both" with a path_pattern: the producing HTTP Layer threads
+// the request's path forward via EnvelopeContext.RequestPath, so the
+// response side matches when the paired request's path matched. Both
+// request and response phases should fire.
+//
+// USK-833: this replaces the prior TestMatchBoth_RequestPath_ResponseHost,
+// which codified the regression — host-only-passes on the response side
+// regardless of path. The new semantics gate the response phase on the
+// paired request's identity.
+func TestMatchBoth_PathMatch_ResponseHeld(t *testing.T) {
 	e := NewInterceptEngine()
 	e.SetRules([]InterceptRule{{
 		ID:          "r1",
@@ -388,31 +421,116 @@ func TestMatchBoth_RequestPath_ResponseHost(t *testing.T) {
 		t.Errorf("matched = %v, want 1 (request side: path+host should match)", matched)
 	}
 
-	// Response side: only host left to evaluate (path skipped). Should match.
-	respEnv, respMsg := testHTTPResponse(200, "httpbin.org", nil)
+	// Response side: HTTP Layer has threaded the paired request's path
+	// onto Context.RequestPath. Path matches, so the rule fires.
+	respEnv, respMsg := testHTTPResponseWithPairedRequest(200, "httpbin.org", nil, "GET", "/headers", "")
 	if matched := e.MatchResponse(respEnv, respMsg); len(matched) != 1 {
-		t.Errorf("matched = %v, want 1 (USK-821: response side with direction:both should match by host alone)", matched)
-	}
-
-	// Response side, host mismatch: still rejects.
-	respEnv2, respMsg2 := testHTTPResponse(200, "example.com", nil)
-	if matched := e.MatchResponse(respEnv2, respMsg2); len(matched) != 0 {
-		t.Errorf("matched = %v, want empty (response side: host mismatch should still reject)", matched)
-	}
-
-	// Request side, path mismatch: rejects (path still applies on Send).
-	reqEnv2, reqMsg2 := testHTTPRequest("GET", "/other", "httpbin.org", nil)
-	if matched := e.MatchRequest(reqEnv2, reqMsg2); len(matched) != 0 {
-		t.Errorf("matched = %v, want empty (request side: path mismatch should reject)", matched)
+		t.Errorf("matched = %v, want 1 (USK-833: response with paired path match should be held)", matched)
 	}
 }
 
-// TestMatchResponse_BothDirection_AllRequestOnlyConditions is the
-// reproducer for the issue's ケース B: a direction:"both" rule with
-// path_pattern AND methods. The response side should still match (both
-// request-only fields skipped on Receive, only host/header drive the
-// response match).
-func TestMatchResponse_BothDirection_AllRequestOnlyConditions(t *testing.T) {
+// TestMatchBoth_PathMismatch_ResponseNotHeld is the verbatim Pattern ① repro
+// from USK-833: a direction:"both" rule with path_pattern:"^/headers$"
+// applied to a request to "/" must NOT hold the paired response. The bug
+// codified by the prior test was that the response side held regardless of
+// the request's path.
+func TestMatchBoth_PathMismatch_ResponseNotHeld(t *testing.T) {
+	e := NewInterceptEngine()
+	e.SetRules([]InterceptRule{{
+		ID:          "r1",
+		Enabled:     true,
+		Direction:   DirectionBoth,
+		HostPattern: regexp.MustCompile(`^httpbin\.org$`),
+		PathPattern: regexp.MustCompile(`^/headers$`),
+	}})
+
+	// Request side, path mismatch: rejects.
+	reqEnv, reqMsg := testHTTPRequest("GET", "/", "httpbin.org", nil)
+	if matched := e.MatchRequest(reqEnv, reqMsg); len(matched) != 0 {
+		t.Errorf("matched = %v, want empty (request side: path mismatch should reject)", matched)
+	}
+
+	// Response side with paired request path "/" - rule's path_pattern
+	// requires "/headers". With USK-833 the response side now reads the
+	// paired path from Context and must reject.
+	respEnv, respMsg := testHTTPResponseWithPairedRequest(200, "httpbin.org", nil, "GET", "/", "")
+	if matched := e.MatchResponse(respEnv, respMsg); len(matched) != 0 {
+		t.Errorf("matched = %v, want empty (USK-833 Pattern ①: response of / under path_pattern ^/headers$ must NOT be held)", matched)
+	}
+}
+
+// TestMatchBoth_PathPattern_DifferentPath_ResponseNotHeld is the verbatim
+// Pattern ② repro from USK-833: a direction:"both" rule with
+// path_pattern:"^/headers$" applied to /uuid must NOT hold the paired
+// response either.
+func TestMatchBoth_PathPattern_DifferentPath_ResponseNotHeld(t *testing.T) {
+	e := NewInterceptEngine()
+	e.SetRules([]InterceptRule{{
+		ID:          "r1",
+		Enabled:     true,
+		Direction:   DirectionBoth,
+		HostPattern: regexp.MustCompile(`^httpbin\.org$`),
+		PathPattern: regexp.MustCompile(`^/headers$`),
+	}})
+
+	reqEnv, reqMsg := testHTTPRequest("GET", "/uuid", "httpbin.org", nil)
+	if matched := e.MatchRequest(reqEnv, reqMsg); len(matched) != 0 {
+		t.Errorf("matched = %v, want empty (request /uuid must not match ^/headers$)", matched)
+	}
+
+	respEnv, respMsg := testHTTPResponseWithPairedRequest(200, "httpbin.org", nil, "GET", "/uuid", "")
+	if matched := e.MatchResponse(respEnv, respMsg); len(matched) != 0 {
+		t.Errorf("matched = %v, want empty (USK-833 Pattern ②: response of /uuid under path_pattern ^/headers$ must NOT be held)", matched)
+	}
+}
+
+// TestMatchBoth_HostMismatch_ResponseNotHeld confirms host gating still
+// works on the response side after the USK-833 change.
+func TestMatchBoth_HostMismatch_ResponseNotHeld(t *testing.T) {
+	e := NewInterceptEngine()
+	e.SetRules([]InterceptRule{{
+		ID:          "r1",
+		Enabled:     true,
+		Direction:   DirectionBoth,
+		HostPattern: regexp.MustCompile(`^httpbin\.org$`),
+		PathPattern: regexp.MustCompile(`^/headers$`),
+	}})
+
+	respEnv, respMsg := testHTTPResponseWithPairedRequest(200, "example.com", nil, "GET", "/headers", "")
+	if matched := e.MatchResponse(respEnv, respMsg); len(matched) != 0 {
+		t.Errorf("matched = %v, want empty (response side: host mismatch must reject)", matched)
+	}
+}
+
+// TestMatchBoth_MethodMismatch_ResponseNotHeld confirms the methods
+// condition gates the response side too with USK-833.
+func TestMatchBoth_MethodMismatch_ResponseNotHeld(t *testing.T) {
+	e := NewInterceptEngine()
+	e.SetRules([]InterceptRule{{
+		ID:          "r1",
+		Enabled:     true,
+		Direction:   DirectionBoth,
+		HostPattern: regexp.MustCompile(`^httpbin\.org$`),
+		Methods:     []string{"POST"},
+	}})
+
+	// Request: GET — does not match POST whitelist.
+	reqEnv, reqMsg := testHTTPRequest("GET", "/", "httpbin.org", nil)
+	if matched := e.MatchRequest(reqEnv, reqMsg); len(matched) != 0 {
+		t.Errorf("matched = %v, want empty (GET against POST whitelist)", matched)
+	}
+
+	// Response paired with GET — USK-833 reads paired method from Context.
+	respEnv, respMsg := testHTTPResponseWithPairedRequest(200, "httpbin.org", nil, "GET", "/", "")
+	if matched := e.MatchResponse(respEnv, respMsg); len(matched) != 0 {
+		t.Errorf("matched = %v, want empty (USK-833: response paired with GET under methods:[POST] must NOT be held)", matched)
+	}
+}
+
+// TestMatchBoth_BothConditions_ResponseHeld covers the positive case: a
+// direction:"both" rule with both path_pattern AND methods, where the
+// paired request matches both, so the response side fires.
+func TestMatchBoth_BothConditions_ResponseHeld(t *testing.T) {
 	e := NewInterceptEngine()
 	e.SetRules([]InterceptRule{{
 		ID:          "r2",
@@ -423,10 +541,10 @@ func TestMatchResponse_BothDirection_AllRequestOnlyConditions(t *testing.T) {
 		Methods:     []string{"GET"},
 	}})
 
-	respEnv, respMsg := testHTTPResponse(200, "httpbin.org", nil)
+	respEnv, respMsg := testHTTPResponseWithPairedRequest(200, "httpbin.org", nil, "GET", "/headers", "")
 	matched := e.MatchResponse(respEnv, respMsg)
 	if len(matched) != 1 || matched[0] != "r2" {
-		t.Errorf("matched = %v, want [r2] (USK-821 ケース B: direction:both + path + methods should match response by host alone)", matched)
+		t.Errorf("matched = %v, want [r2] (USK-833: response paired with GET /headers under matching path+methods should be held)", matched)
 	}
 }
 

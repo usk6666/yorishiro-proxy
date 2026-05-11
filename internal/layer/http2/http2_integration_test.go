@@ -1874,3 +1874,147 @@ func TestVariantRecording_InterceptModifyHeader(t *testing.T) {
 // still rejected as a connection PROTOCOL_ERROR (see TestReader_
 // PushPromise_RejectedWhenEnablePushZero in reader_test.go), but the proxy
 // no longer surfaces pushed streams as recordable flows.
+
+// ---------------------------------------------------------------------------
+// Scenario 13: USK-833 direction:"both" + path_pattern gates response phase
+// ---------------------------------------------------------------------------
+
+// TestInterceptBothDirection_PathPattern_GatesResponse is the regression
+// guard for USK-833. A direction:"both" intercept rule with
+// path_pattern:"^/headers$" must:
+//
+//   - Hold BOTH the request and the response when the request path is
+//     "/headers" (the path matches).
+//   - NOT hold either the request or the response when the request path
+//     is "/uuid" (the path mismatches — repro Pattern ② from the Issue).
+//
+// Before USK-833 the response side was unconditionally held on host alone
+// because `dir == envelope.Send` skipped path/method checks on Receive.
+// The fix threads the paired request's path forward via the httpaggregator's
+// per-stream pairedRequestPath onto EnvelopeContext.RequestPath so the
+// matchesRule helper can gate the response phase on the paired request's
+// identity.
+func TestInterceptBothDirection_PathPattern_GatesResponse(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	upAddr, _, _, upShutdown := startH2TLSUpstream(t, "usk833-marker", nethttp.HandlerFunc(func(w nethttp.ResponseWriter, r *nethttp.Request) {
+		_, _ = w.Write([]byte("path=" + r.URL.Path))
+	}))
+	defer upShutdown()
+
+	interceptEngine := httprules.NewInterceptEngine()
+	interceptEngine.AddRule(httprules.InterceptRule{
+		ID:          "both-headers-only",
+		Enabled:     true,
+		Direction:   httprules.DirectionBoth,
+		PathPattern: regexp.MustCompile(`^/headers$`),
+	})
+	holdQueue := common.NewHoldQueue()
+	holdQueue.SetTimeout(10 * time.Second)
+
+	bcfg := makeBuildCfg(t, nil)
+	proxyAddr, _ := startH2MITMProxy(t, ctx, bcfg, pipelineOpts{
+		interceptEngine: interceptEngine,
+		holdQueue:       holdQueue,
+	})
+
+	cli := newMITMH2Client(proxyAddr, upAddr)
+
+	// Pattern ②: /uuid must NOT be held (request path mismatches
+	// ^/headers$, so neither request nor response should be held).
+	uuidDone := make(chan error, 1)
+	go func() {
+		req, _ := nethttp.NewRequestWithContext(ctx, "GET", "https://"+upAddr+"/uuid", nil)
+		resp, err := cli.Do(req)
+		if err != nil {
+			uuidDone <- err
+			return
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if string(body) != "path=/uuid" {
+			uuidDone <- fmt.Errorf("body=%q", body)
+			return
+		}
+		uuidDone <- nil
+	}()
+
+	select {
+	case err := <-uuidDone:
+		if err != nil {
+			t.Fatalf("USK-833 Pattern ②: /uuid request failed: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		entries := holdQueue.List()
+		t.Fatalf("USK-833 Pattern ②: /uuid request did not complete in 5s; intercept queue has %d entries (must be 0)", len(entries))
+	}
+
+	if n := holdQueue.Len(); n != 0 {
+		t.Errorf("USK-833 Pattern ②: holdQueue.Len() = %d after /uuid, want 0 (response was held under path_pattern ^/headers$)", n)
+	}
+
+	// Positive case: /headers SHOULD be held on both phases.
+	headersDone := make(chan error, 1)
+	go func() {
+		req, _ := nethttp.NewRequestWithContext(ctx, "GET", "https://"+upAddr+"/headers", nil)
+		resp, err := cli.Do(req)
+		if err != nil {
+			headersDone <- err
+			return
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if string(body) != "path=/headers" {
+			headersDone <- fmt.Errorf("body=%q", body)
+			return
+		}
+		headersDone <- nil
+	}()
+
+	// Wait for the request phase to be held.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if holdQueue.Len() > 0 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if holdQueue.Len() == 0 {
+		t.Fatal("USK-833: /headers request was not held (regression: direction:both + path_pattern should hold request phase)")
+	}
+	reqEntries := holdQueue.List()
+	if err := holdQueue.Release(reqEntries[0].ID, &common.HoldAction{Type: common.ActionRelease}); err != nil {
+		t.Fatalf("release request: %v", err)
+	}
+
+	// Now wait for the response phase to be held.
+	deadline = time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if holdQueue.Len() > 0 {
+			break
+		}
+		select {
+		case <-headersDone:
+			t.Fatal("USK-833: /headers response completed without being held (regression: direction:both + matching path should hold response phase)")
+		default:
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if holdQueue.Len() == 0 {
+		t.Fatal("USK-833: /headers response was not held (regression: response phase should be held when paired request path matched)")
+	}
+	respEntries := holdQueue.List()
+	if err := holdQueue.Release(respEntries[0].ID, &common.HoldAction{Type: common.ActionRelease}); err != nil {
+		t.Fatalf("release response: %v", err)
+	}
+
+	select {
+	case err := <-headersDone:
+		if err != nil {
+			t.Fatalf("/headers request did not complete cleanly: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("/headers request did not complete after release")
+	}
+}

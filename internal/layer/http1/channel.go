@@ -550,6 +550,15 @@ func (c *channel) parseRequest() (*envelope.Envelope, error) {
 
 	path, rawQuery, authority := parseRequestURI(rawReq.RequestURI, rawReq.Headers)
 
+	// USK-833: stash the wire-observed request line on the per-Channel ctxTmpl
+	// so the response envelope built by parseResponse can carry forward the
+	// paired request's path/method/query for direction:"both" rule matching.
+	// One HTTP/1.x Channel handles exactly one exchange, so this is safe to
+	// overwrite without coordination.
+	c.ctxTmpl.RequestPath = path
+	c.ctxTmpl.RequestMethod = rawReq.Method
+	c.ctxTmpl.RequestRawQuery = rawQuery
+
 	// USK-772: configure raw-body disk-spill on the parser body reader before
 	// drain so chunked / identity bodies above BodySpillThreshold are captured
 	// to a temp file rather than truncated at MaxRawCaptureSize.
@@ -793,6 +802,17 @@ func (c *channel) sendRequest(msg *envelope.HTTPMessage, env *envelope.Envelope)
 	if c.currentStreamID == "" && env.StreamID != "" {
 		c.currentStreamID = env.StreamID
 	}
+
+	// USK-833: capture the paired request line on this upstream-facing
+	// Channel so the matching response we later parse stamps Context with
+	// the paired request's path/method/query (parseResponse copies ctxTmpl).
+	// Mirror of the parseRequest stamping on the client-facing channel,
+	// applied here because the upstream-facing Channel's ctxTmpl is not
+	// populated by parseRequest (this Channel never parses a request — it
+	// forwards one).
+	c.ctxTmpl.RequestPath = msg.Path
+	c.ctxTmpl.RequestMethod = msg.Method
+	c.ctxTmpl.RequestRawQuery = msg.RawQuery
 
 	// USK-730: register this Channel in the parent Layer's pendingQ
 	// atomically with the wire write so the response FIFO matches the

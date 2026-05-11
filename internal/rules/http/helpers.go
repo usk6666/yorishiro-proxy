@@ -92,3 +92,29 @@ func allHeadersString(headers []envelope.KeyValue) string {
 func containsCRLF(s string) bool {
 	return strings.ContainsAny(s, "\r\n")
 }
+
+// effectivePathAndMethod returns the path and method to evaluate against
+// rule conditions for the given envelope direction. For Send (request),
+// it returns the wire-observed fields from msg. For Receive (response),
+// it returns the paired request's fields recorded on env.Context by the
+// producing Layer (HTTP/1.x channel or HTTP/2 aggregator) — if those
+// fields are empty (no paired request data available, e.g. for a
+// direction:"response" rule fired on an unpaired response or when the
+// producing Layer pre-dates USK-833), knowable is false and the caller
+// must skip request-only condition checks.
+//
+// USK-833: this helper replaces the per-call `dir == envelope.Send` skip
+// in intercept/transform engines so direction:"both" rules with
+// path_pattern or methods conditions correctly gate on the paired
+// request's identity at response phase, matching user expectations
+// documented in help_configure.md.
+func effectivePathAndMethod(env *envelope.Envelope, msg *envelope.HTTPMessage, dir envelope.Direction) (path, method string, knowable bool) {
+	if dir == envelope.Send {
+		return msg.Path, msg.Method, true
+	}
+	// dir == envelope.Receive: read from EnvelopeContext.
+	if env.Context.RequestPath == "" && env.Context.RequestMethod == "" {
+		return "", "", false
+	}
+	return env.Context.RequestPath, env.Context.RequestMethod, true
+}
