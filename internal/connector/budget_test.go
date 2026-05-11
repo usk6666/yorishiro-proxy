@@ -265,6 +265,200 @@ func TestBudgetManager_ConcurrentAccess(t *testing.T) {
 	}
 }
 
+// TestBudgetManager_SetAgentBudget_ResetsState verifies USK-828: every
+// SetAgentBudget call clears request_count, shutdown_reason, re-arms the
+// shutdownOnce, and advances startTime so the new budget begins a fresh
+// diagnostic session.
+func TestBudgetManager_SetAgentBudget_ResetsState(t *testing.T) {
+	bm := NewBudgetManager()
+	bm.SetPolicyBudget(BudgetConfig{MaxTotalRequests: 1000})
+	if err := bm.SetAgentBudget(BudgetConfig{MaxTotalRequests: 3}); err != nil {
+		t.Fatalf("initial SetAgentBudget: %v", err)
+	}
+
+	var shutdownCount atomic.Int32
+	var lastReason atomic.Value // string
+	lastReason.Store("")
+	bm.Start(func(r string) {
+		shutdownCount.Add(1)
+		lastReason.Store(r)
+	})
+	defer bm.Stop()
+
+	startBefore := func() time.Time {
+		bm.mu.Lock()
+		defer bm.mu.Unlock()
+		return bm.startTime
+	}()
+
+	// Exhaust the budget by overflowing it.
+	for i := 0; i < 4; i++ {
+		bm.RecordRequest()
+	}
+	if bm.RequestCount() == 0 {
+		t.Fatal("RequestCount is 0 after exhaustion loop; expected >0")
+	}
+	if bm.ShutdownReason() == "" {
+		t.Fatal("ShutdownReason is empty after exhaustion; expected non-empty")
+	}
+	if shutdownCount.Load() != 1 {
+		t.Fatalf("shutdown callback fired %d times before reset, want 1", shutdownCount.Load())
+	}
+
+	// Ensure clock can advance so startTime change is observable.
+	time.Sleep(2 * time.Millisecond)
+
+	// Set a new budget — this must reset counters and clear stop_reason.
+	if err := bm.SetAgentBudget(BudgetConfig{MaxTotalRequests: 5}); err != nil {
+		t.Fatalf("SetAgentBudget (reset): %v", err)
+	}
+
+	if got := bm.RequestCount(); got != 0 {
+		t.Errorf("RequestCount after reset = %d, want 0", got)
+	}
+	if got := bm.ShutdownReason(); got != "" {
+		t.Errorf("ShutdownReason after reset = %q, want empty", got)
+	}
+
+	startAfter := func() time.Time {
+		bm.mu.Lock()
+		defer bm.mu.Unlock()
+		return bm.startTime
+	}()
+	if !startAfter.After(startBefore) {
+		t.Errorf("startTime did not advance: before=%v after=%v", startBefore, startAfter)
+	}
+
+	// shutdownOnce must be re-armed: TriggerShutdown after reset should fire
+	// the callback again (count goes from 1 → 2) and ShutdownReason updates.
+	bm.TriggerShutdown("post-reset trigger")
+	if shutdownCount.Load() != 2 {
+		t.Errorf("shutdown callback fired %d times after reset, want 2 (was 1 before reset)", shutdownCount.Load())
+	}
+	if got, _ := lastReason.Load().(string); got != "post-reset trigger" {
+		t.Errorf("last shutdown reason = %q, want %q", got, "post-reset trigger")
+	}
+	if got := bm.ShutdownReason(); got != "post-reset trigger" {
+		t.Errorf("ShutdownReason after re-trigger = %q, want %q", got, "post-reset trigger")
+	}
+}
+
+// TestBudgetManager_SetAgentBudget_ResetsAfterDurationExhaustion verifies that
+// SetAgentBudget restores a working session after the duration timer fired,
+// not only after request-count exhaustion.
+func TestBudgetManager_SetAgentBudget_ResetsAfterDurationExhaustion(t *testing.T) {
+	bm := NewBudgetManager()
+	bm.SetPolicyBudget(BudgetConfig{MaxDuration: time.Hour})
+	if err := bm.SetAgentBudget(BudgetConfig{MaxDuration: 30 * time.Millisecond}); err != nil {
+		t.Fatalf("initial SetAgentBudget: %v", err)
+	}
+
+	var shutdownCount atomic.Int32
+	bm.Start(func(_ string) { shutdownCount.Add(1) })
+	defer bm.Stop()
+
+	// Wait for the duration timer to fire.
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if bm.ShutdownReason() != "" {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if bm.ShutdownReason() == "" {
+		t.Fatal("duration timer did not fire within deadline")
+	}
+	if shutdownCount.Load() != 1 {
+		t.Fatalf("shutdown callback fired %d times, want 1", shutdownCount.Load())
+	}
+
+	// New budget should reset state.
+	if err := bm.SetAgentBudget(BudgetConfig{MaxDuration: time.Minute}); err != nil {
+		t.Fatalf("SetAgentBudget (reset): %v", err)
+	}
+	if got := bm.ShutdownReason(); got != "" {
+		t.Errorf("ShutdownReason after reset = %q, want empty", got)
+	}
+	if got := bm.RequestCount(); got != 0 {
+		t.Errorf("RequestCount after reset = %d, want 0", got)
+	}
+
+	// Sanity: shutdownOnce re-armed.
+	bm.TriggerShutdown("manual after duration reset")
+	if shutdownCount.Load() != 2 {
+		t.Errorf("shutdown callback fired %d times after reset+trigger, want 2", shutdownCount.Load())
+	}
+}
+
+// TestBudgetManager_StaleTimerFire_AfterReset reproduces the captured-pointer
+// race that motivated the *sync.Once + identity-check pattern (USK-828
+// review F-1). Scenario: a duration timer was armed for the prior session,
+// the user calls SetAgentBudget which resets state, and only *then* the
+// stale timer fires its triggerShutdown.
+//
+// Before the fix, the stale fire would acquire bm.mu after the reset, see
+// the NEW once pointer, pass the identity check against itself, and clobber
+// the freshly cleared shutdownReason plus invoke the new session's
+// onShutdown callback. After the fix, resetDurationTimerLocked captures
+// the OLD once at arm time and triggerShutdownOnce's identity check
+// detects bm.shutdownOnce != oldOnce, dropping the stale fire entirely.
+//
+// We simulate the race deterministically by manually invoking
+// triggerShutdownOnce with the captured-at-arm-time pointer, exactly as
+// the timer goroutine would do post-reset.
+func TestBudgetManager_StaleTimerFire_AfterReset(t *testing.T) {
+	bm := NewBudgetManager()
+	bm.SetPolicyBudget(BudgetConfig{MaxDuration: time.Hour})
+	if err := bm.SetAgentBudget(BudgetConfig{MaxDuration: 10 * time.Second}); err != nil {
+		t.Fatalf("initial SetAgentBudget: %v", err)
+	}
+
+	var shutdownCount atomic.Int32
+	bm.Start(func(_ string) { shutdownCount.Add(1) })
+	defer bm.Stop()
+
+	// Capture the session-1 once pointer (what a freshly armed duration
+	// timer would have closed over inside resetDurationTimerLocked).
+	bm.mu.Lock()
+	session1Once := bm.shutdownOnce
+	bm.mu.Unlock()
+	if session1Once == nil {
+		t.Fatal("session 1 once is nil; Start should have armed it")
+	}
+
+	// SetAgentBudget swaps in a new once for session 2.
+	if err := bm.SetAgentBudget(BudgetConfig{MaxDuration: time.Minute}); err != nil {
+		t.Fatalf("SetAgentBudget (reset): %v", err)
+	}
+
+	bm.mu.Lock()
+	session2Once := bm.shutdownOnce
+	bm.mu.Unlock()
+	if session2Once == session1Once {
+		t.Fatal("shutdownOnce was not swapped on SetAgentBudget; reset is broken")
+	}
+
+	// Now simulate the stale timer fire: a goroutine that was armed for
+	// session 1 finally calls triggerShutdownOnce post-reset.
+	bm.triggerShutdownOnce(session1Once, "duration budget exhausted: limit 10s reached")
+
+	if got := bm.ShutdownReason(); got != "" {
+		t.Errorf("ShutdownReason after stale fire = %q, want empty (stale reason leaked)", got)
+	}
+	if got := shutdownCount.Load(); got != 0 {
+		t.Errorf("shutdown callback fired %d time(s) on stale once, want 0", got)
+	}
+
+	// Sanity: a session-2 trigger still works.
+	bm.TriggerShutdown("session 2 explicit")
+	if got := bm.ShutdownReason(); got != "session 2 explicit" {
+		t.Errorf("ShutdownReason after session-2 trigger = %q, want %q", got, "session 2 explicit")
+	}
+	if got := shutdownCount.Load(); got != 1 {
+		t.Errorf("shutdown callback fired %d time(s) after session-2 trigger, want 1", got)
+	}
+}
+
 func TestBudgetConfig_IsZero(t *testing.T) {
 	if !(BudgetConfig{}).IsZero() {
 		t.Error("zero config should be IsZero")

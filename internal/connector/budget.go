@@ -3,6 +3,7 @@ package connector
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -109,8 +110,11 @@ type BudgetManager struct {
 	// shutdownReason records why the proxy was stopped.
 	shutdownReason string
 
-	// shutdownOnce ensures the shutdown callback is called at most once.
-	shutdownOnce sync.Once
+	// shutdownOnce ensures the shutdown callback is called at most once
+	// per session. It is a pointer so resetCountersLocked can replace it
+	// atomically; an in-flight Do on the old *sync.Once continues to run
+	// safely while a new session uses a fresh one. (USK-828)
+	shutdownOnce *sync.Once
 
 	// onShutdown is called when a budget is exhausted or plugin triggers shutdown.
 	onShutdown func(reason string)
@@ -142,6 +146,14 @@ func (bm *BudgetManager) PolicyBudget() BudgetConfig {
 // SetAgentBudget sets the agent layer budget. Agent limits must be
 // equal to or stricter than (less than or equal to) the policy limits.
 // Returns an error if the agent limits exceed the policy limits.
+//
+// Every successful call resets the per-session counters and shutdown state
+// (request_count, shutdown_reason, shutdownOnce, startTime) so that the
+// new budget begins a fresh diagnostic session. The prior values are
+// emitted at slog.Info before being cleared to preserve the audit trail.
+// This matches USK-828: get_budget previously returned stale state after
+// set_budget because enforcement worked but observable state was not
+// cleared.
 func (bm *BudgetManager) SetAgentBudget(cfg BudgetConfig) error {
 	bm.mu.Lock()
 	defer bm.mu.Unlock()
@@ -151,6 +163,22 @@ func (bm *BudgetManager) SetAgentBudget(cfg BudgetConfig) error {
 	}
 
 	bm.agentConfig = cfg
+
+	effective := BudgetConfig{
+		MaxTotalRequests: effectiveBudgetInt64(bm.policyConfig.MaxTotalRequests, bm.agentConfig.MaxTotalRequests),
+		MaxDuration:      effectiveBudgetDuration(bm.policyConfig.MaxDuration, bm.agentConfig.MaxDuration),
+	}
+
+	priorCount := bm.requestCount.Load()
+	priorReason := bm.shutdownReason
+	slog.Info("budget state reset on SetAgentBudget",
+		"prior_request_count", priorCount,
+		"prior_shutdown_reason", priorReason,
+		"effective_max_total_requests", effective.MaxTotalRequests,
+		"effective_max_duration", effective.MaxDuration.String(),
+	)
+
+	bm.resetCountersLocked()
 	bm.resetDurationTimerLocked()
 	return nil
 }
@@ -185,13 +213,25 @@ func (bm *BudgetManager) Start(onShutdown func(reason string)) {
 	bm.mu.Lock()
 	defer bm.mu.Unlock()
 
-	bm.startTime = time.Now()
 	bm.onShutdown = onShutdown
-	bm.shutdownOnce = sync.Once{}
+	bm.resetCountersLocked()
+	bm.resetDurationTimerLocked()
+}
+
+// resetCountersLocked clears the per-session counters and shutdown state so
+// the budget manager behaves as if a fresh session is starting. Caller must
+// hold bm.mu.
+//
+// This is shared between Start() (initial boot) and SetAgentBudget()
+// (runtime budget change) so both follow the same "fresh session" semantics.
+// USK-828: previously only Start() reset these, leaving SetAgentBudget with
+// stale request_count and shutdown_reason despite the new effective budget
+// being applied.
+func (bm *BudgetManager) resetCountersLocked() {
+	bm.startTime = time.Now()
+	bm.shutdownOnce = &sync.Once{}
 	bm.shutdownReason = ""
 	bm.requestCount.Store(0)
-
-	bm.resetDurationTimerLocked()
 }
 
 // RecordRequest increments the request counter and checks the budget.
@@ -236,10 +276,44 @@ func (bm *BudgetManager) Stop() {
 	}
 }
 
-// triggerShutdown records the reason and calls the shutdown callback once.
+// triggerShutdown records the reason and calls the shutdown callback once
+// for the current session. The current *sync.Once is captured under bm.mu
+// at call time, then passed to triggerShutdownOnce.
+//
+// Use this on code paths that observe the current session (RecordRequest
+// exhaustion, plugin-initiated shutdown). For asynchronous code paths
+// (duration timer fire) that were *armed* against a particular session,
+// use triggerShutdownOnce with the once pointer captured at arm time.
 func (bm *BudgetManager) triggerShutdown(reason string) {
-	bm.shutdownOnce.Do(func() {
+	bm.mu.Lock()
+	once := bm.shutdownOnce
+	bm.mu.Unlock()
+	bm.triggerShutdownOnce(once, reason)
+}
+
+// triggerShutdownOnce fires the shutdown callback on the supplied
+// *sync.Once, recording the reason only if that once still belongs to the
+// current session.
+//
+// The caller passes in the once pointer that was current when the action
+// was initiated (e.g. when a duration timer was armed). If a concurrent
+// SetAgentBudget has since swapped in a new once via resetCountersLocked,
+// the identity check inside Do detects the stale invocation and skips
+// both the shutdownReason write and the onShutdown callback so that
+// pre-reset state cannot leak into the freshly started session. (USK-828)
+func (bm *BudgetManager) triggerShutdownOnce(once *sync.Once, reason string) {
+	if once == nil {
+		return
+	}
+	once.Do(func() {
 		bm.mu.Lock()
+		if bm.shutdownOnce != once {
+			// Stale: this once was armed for a session that has since
+			// been reset by SetAgentBudget. Drop the reason and the
+			// callback entirely so the new session is not perturbed.
+			bm.mu.Unlock()
+			return
+		}
 		bm.shutdownReason = reason
 		cb := bm.onShutdown
 		bm.mu.Unlock()
@@ -274,6 +348,13 @@ func (bm *BudgetManager) validateAgentBudgetLocked(cfg BudgetConfig) error {
 
 // resetDurationTimerLocked resets the duration timer based on the current effective budget.
 // Must be called with bm.mu held.
+//
+// The current *sync.Once is captured here so the timer (or the immediate
+// "already expired" goroutine) targets the exact session it was armed for.
+// If a later SetAgentBudget swaps in a new once, triggerShutdownOnce's
+// identity check will detect the stale fire and drop it — preventing a
+// pre-reset duration message from clobbering the freshly cleared reason
+// or triggering the new session's onShutdown callback. (USK-828)
 func (bm *BudgetManager) resetDurationTimerLocked() {
 	if bm.durationTimer != nil {
 		bm.durationTimer.Stop()
@@ -286,14 +367,19 @@ func (bm *BudgetManager) resetDurationTimerLocked() {
 	}
 
 	if eff.MaxDuration > 0 && !bm.startTime.IsZero() {
+		// Capture the session's once at arm time; both async paths below
+		// pass it through triggerShutdownOnce so stale fires are dropped.
+		sessionOnce := bm.shutdownOnce
 		elapsed := time.Since(bm.startTime)
 		remaining := eff.MaxDuration - elapsed
 		if remaining <= 0 {
 			// Already expired.
-			go bm.triggerShutdown(fmt.Sprintf("duration budget exhausted: %s elapsed, limit %s", elapsed.Round(time.Second), eff.MaxDuration))
+			msg := fmt.Sprintf("duration budget exhausted: %s elapsed, limit %s", elapsed.Round(time.Second), eff.MaxDuration)
+			go bm.triggerShutdownOnce(sessionOnce, msg)
 		} else {
+			msg := fmt.Sprintf("duration budget exhausted: limit %s reached", eff.MaxDuration)
 			bm.durationTimer = time.AfterFunc(remaining, func() {
-				bm.triggerShutdown(fmt.Sprintf("duration budget exhausted: limit %s reached", eff.MaxDuration))
+				bm.triggerShutdownOnce(sessionOnce, msg)
 			})
 		}
 	}

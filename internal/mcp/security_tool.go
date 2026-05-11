@@ -739,6 +739,11 @@ type getBudgetResult struct {
 // This matches the set_rate_limits pattern. Omitted fields reset to zero (no limit).
 // For merge semantics (only update provided fields, keep others unchanged),
 // use the configure tool's budget section instead.
+//
+// USK-828: every successful call also clears the per-session counters
+// (request_count, stop_reason) and re-arms the duration clock so the new
+// budget begins a fresh diagnostic session. This is implemented inside
+// BudgetManager.SetAgentBudget so the configure-tool path benefits as well.
 func (s *Server) handleSetBudget(params securityParams) (*gomcp.CallToolResult, any, error) {
 	if s.misc.budgetManager == nil {
 		return nil, nil, fmt.Errorf("budget manager is not initialized")

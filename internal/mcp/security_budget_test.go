@@ -203,6 +203,78 @@ func TestSecurity_SetBudget_InvalidDuration(t *testing.T) {
 	}
 }
 
+// TestSecurity_SetBudget_ResetsObservableState verifies USK-828: after
+// security.set_budget, security.get_budget must report request_count=0 and
+// stop_reason="" because SetAgentBudget now resets per-session state.
+// Previously the new budget was applied for enforcement, but request_count
+// and stop_reason still reflected the prior exhausted session.
+func TestSecurity_SetBudget_ResetsObservableState(t *testing.T) {
+	bm := connector.NewBudgetManager()
+	bm.SetPolicyBudget(connector.BudgetConfig{MaxTotalRequests: 1000})
+	if err := bm.SetAgentBudget(connector.BudgetConfig{MaxTotalRequests: 5}); err != nil {
+		t.Fatalf("initial SetAgentBudget: %v", err)
+	}
+	bm.Start(func(_ string) {})
+	t.Cleanup(bm.Stop)
+
+	// Exhaust the budget.
+	for i := 0; i < 10; i++ {
+		bm.RecordRequest()
+	}
+	if bm.RequestCount() == 0 {
+		t.Fatal("expected RequestCount > 0 after exhaustion loop")
+	}
+	if bm.ShutdownReason() == "" {
+		t.Fatal("expected non-empty ShutdownReason after exhaustion")
+	}
+
+	cs := setupSecurityBudgetTestSession(t, bm)
+
+	// Call set_budget with new limits.
+	maxReqs := int64(200)
+	maxDur := "30m"
+	_, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "security",
+		Arguments: securityMarshal(t, securityInput{
+			Action: "set_budget",
+			Params: securityParams{
+				MaxTotalRequests: &maxReqs,
+				MaxDuration:      &maxDur,
+			},
+		}),
+	})
+	if err != nil {
+		t.Fatalf("set_budget: %v", err)
+	}
+
+	// get_budget should now report fresh state.
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "security",
+		Arguments: securityMarshal(t, securityInput{
+			Action: "get_budget",
+		}),
+	})
+	if err != nil {
+		t.Fatalf("get_budget: %v", err)
+	}
+
+	var out getBudgetResult
+	securityUnmarshalResult(t, result, &out)
+
+	if out.RequestCount != 0 {
+		t.Errorf("get_budget request_count = %d, want 0 (stale state not cleared)", out.RequestCount)
+	}
+	if out.StopReason != "" {
+		t.Errorf("get_budget stop_reason = %q, want empty (stale reason not cleared)", out.StopReason)
+	}
+	if out.Effective.MaxTotalRequests != 200 {
+		t.Errorf("get_budget effective.max_total_requests = %d, want 200", out.Effective.MaxTotalRequests)
+	}
+	if out.Effective.MaxDuration != 30*time.Minute {
+		t.Errorf("get_budget effective.max_duration = %v, want 30m", out.Effective.MaxDuration)
+	}
+}
+
 func TestSecurity_SetBudget_ClearBudget(t *testing.T) {
 	bm := connector.NewBudgetManager()
 	cs := setupSecurityBudgetTestSession(t, bm)
