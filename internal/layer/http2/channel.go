@@ -551,57 +551,119 @@ func (c *channel) Close() error {
 // MITM-fidelity caveat: this normalizes case on the Send path. A preserve-
 // case hook would require extending KeyValue with a marker; for now the
 // Receive path flags uppercase-name anomalies on the observation side.
+//
+// USK-840: RFC 7540 §8.1.2.2 / RFC 9113 §8.2.2 connection-specific headers
+// (`connection`, `keep-alive`, `proxy-connection`, `transfer-encoding`,
+// `upgrade`) and non-"trailers" `te` values are stripped before encoding.
+// Stripping is required, not optional — peers reject HEADERS frames that
+// carry these names with a PROTOCOL_ERROR. The list of stripped names is
+// available via BuildHeaderFieldsFromEventWithDiag for callers that need to
+// surface the diagnostic on the HTTPMessage envelope.
 func BuildHeaderFieldsFromEvent(env *envelope.Envelope, evt *H2HeadersEvent) []hpack.HeaderField {
+	fields, _ := BuildHeaderFieldsFromEventWithDiag(env, evt)
+	return fields
+}
+
+// BuildHeaderFieldsFromEventWithDiag is the diagnostic-aware variant of
+// BuildHeaderFieldsFromEvent. It returns the HPACK field list and the
+// verbatim wire-name(s) of any RFC 7540 §8.1.2.2 / RFC 9113 §8.2.2
+// connection-specific headers (or invalid `te` values) that were stripped
+// during encoding. Callers that own an HTTPMessage envelope (e.g.
+// httpaggregator.Send) attach an
+// envelope.H2ConnectionSpecificHeaderStrippedOnSend anomaly when the
+// returned stripped slice is non-empty, mirroring the receive-side
+// H2ConnectionSpecificHeader anomaly. The diagnostic is purely
+// informational — the strip itself is unconditional because the alternative
+// is an unframeable HEADERS block.
+//
+// `te` values other than "trailers" are reported as `"te: <value>"` to
+// mirror the receive-side anomaly Detail shape (assembler.go
+// regularHeaderAnomalies).
+func BuildHeaderFieldsFromEventWithDiag(env *envelope.Envelope, evt *H2HeadersEvent) ([]hpack.HeaderField, []string) {
 	out := make([]hpack.HeaderField, 0, len(evt.Headers)+5)
 
-	isResponse := env != nil && env.Direction == envelope.Receive
-	if !isResponse {
-		// If no Direction on env, heuristic fallback: Status != 0 ⇒ response.
-		isResponse = env == nil && evt.Status != 0
-	}
-
-	if isResponse {
-		status := itoa3(evt.Status)
-		if evt.Status == 0 {
-			status = "200"
-		}
-		out = append(out, hpack.HeaderField{Name: ":status", Value: status})
+	if isResponseHeadersEvent(env, evt) {
+		out = appendResponsePseudoHeaders(out, evt)
 	} else {
-		method := evt.Method
-		if method == "" {
-			method = "GET"
-		}
-		out = append(out, hpack.HeaderField{Name: ":method", Value: method})
-		scheme := evt.Scheme
-		if scheme == "" {
-			scheme = "https"
-		}
-		out = append(out, hpack.HeaderField{Name: ":scheme", Value: scheme})
-		if evt.Authority != "" {
-			out = append(out, hpack.HeaderField{Name: ":authority", Value: evt.Authority})
-		}
-		path := evt.Path
-		if path == "" {
-			path = "/"
-		}
-		if evt.RawQuery != "" {
-			path = path + "?" + evt.RawQuery
-		}
-		out = append(out, hpack.HeaderField{Name: ":path", Value: path})
-		// RFC 8441 §4: extended CONNECT carries :protocol on the request.
-		// Emit it only when the event actually populates the field — this
-		// keeps classic CONNECT (Method=CONNECT, ConnectProtocol="")
-		// wire-compatible with HTTP/2 Layer's pre-USK-764 output.
-		if evt.Method == "CONNECT" && evt.ConnectProtocol != "" {
-			out = append(out, hpack.HeaderField{Name: ":protocol", Value: evt.ConnectProtocol})
-		}
+		out = appendRequestPseudoHeaders(out, evt)
 	}
 
+	var stripped []string
 	for _, kv := range evt.Headers {
+		// USK-840: RFC 7540 §8.1.2.2 / RFC 9113 §8.2.2 — drop the
+		// connection-specific names entirely. Drop `te` values that are
+		// not exactly "trailers" (the only RFC-permitted value).
+		if IsConnectionSpecificHeader(kv.Name) {
+			stripped = append(stripped, kv.Name)
+			continue
+		}
+		if strings.EqualFold(kv.Name, "te") && !TEAllowedValue(kv.Value) {
+			stripped = append(stripped, "te: "+kv.Value)
+			continue
+		}
 		out = append(out, hpack.HeaderField{
 			Name:  strings.ToLower(kv.Name),
 			Value: kv.Value,
 		})
+	}
+	return out, stripped
+}
+
+// isResponseHeadersEvent returns true when the headers event should be
+// emitted with response-side pseudo-headers (:status). The envelope's
+// Direction is the primary signal; when nil the encoder falls back to
+// inspecting evt.Status so the test-shaped "no envelope" path still
+// routes correctly.
+func isResponseHeadersEvent(env *envelope.Envelope, evt *H2HeadersEvent) bool {
+	if env != nil {
+		return env.Direction == envelope.Receive
+	}
+	return evt.Status != 0
+}
+
+// appendResponsePseudoHeaders adds the :status pseudo-header for a
+// response HEADERS event. evt.Status == 0 is normalised to "200" so
+// callers that omit Status still produce a wire-valid frame.
+func appendResponsePseudoHeaders(out []hpack.HeaderField, evt *H2HeadersEvent) []hpack.HeaderField {
+	status := itoa3(evt.Status)
+	if evt.Status == 0 {
+		status = "200"
+	}
+	return append(out, hpack.HeaderField{Name: ":status", Value: status})
+}
+
+// appendRequestPseudoHeaders adds the :method / :scheme / :authority /
+// :path / :protocol pseudo-headers for a request HEADERS event in
+// canonical wire order. Defaults mirror the previous inline logic in
+// BuildHeaderFieldsFromEvent for backward compatibility.
+func appendRequestPseudoHeaders(out []hpack.HeaderField, evt *H2HeadersEvent) []hpack.HeaderField {
+	method := evt.Method
+	if method == "" {
+		method = "GET"
+	}
+	out = append(out, hpack.HeaderField{Name: ":method", Value: method})
+	scheme := evt.Scheme
+	if scheme == "" {
+		scheme = "https"
+	}
+	out = append(out, hpack.HeaderField{Name: ":scheme", Value: scheme})
+	if evt.Authority != "" {
+		out = append(out, hpack.HeaderField{Name: ":authority", Value: evt.Authority})
+	}
+	path := evt.Path
+	if path == "" {
+		path = "/"
+	}
+	if evt.RawQuery != "" {
+		path = path + "?" + evt.RawQuery
+	}
+	out = append(out, hpack.HeaderField{Name: ":path", Value: path})
+	// RFC 8441 §4: extended CONNECT carries :protocol on the request.
+	// Emit it only when the event actually populates the field — this
+	// keeps classic CONNECT (Method=CONNECT, ConnectProtocol="")
+	// wire-compatible with HTTP/2 Layer's pre-USK-764 output.
+	if evt.Method == "CONNECT" && evt.ConnectProtocol != "" {
+		out = append(out, hpack.HeaderField{Name: ":protocol", Value: evt.ConnectProtocol})
 	}
 	return out
 }

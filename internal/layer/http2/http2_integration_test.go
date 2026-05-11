@@ -296,6 +296,14 @@ type pipelineOpts struct {
 	transformEngine *httprules.TransformEngine
 	safetyEngine    *httprules.SafetyEngine
 	holdQueue       *common.HoldQueue
+	// hostScope, if non-nil, populates HostScopeStep; otherwise the Step is
+	// instantiated with nil (no-op gate). USK-840 needs to drive a real
+	// scope through the policy-drop terminator path.
+	hostScope *connector.TargetScope
+	// httpScope, if non-nil, populates HTTPScopeStep (request-level target
+	// gate). USK-840 uses this to exercise the http_scope branch of the
+	// policy-drop terminator.
+	httpScope *connector.TargetScope
 	// recordMaxBodySize caps flow.Flow.Body when RecordStep materializes a
 	// BodyBuffer. Zero means "use config.MaxBodySize".
 	recordMaxBodySize int64
@@ -314,8 +322,8 @@ func buildPipeline(store flow.Writer, opts pipelineOpts) *pipeline.Pipeline {
 	}
 
 	steps := []pipeline.Step{
-		pipeline.NewHostScopeStep(nil),
-		pipeline.NewHTTPScopeStep(nil),
+		pipeline.NewHostScopeStep(opts.hostScope),
+		pipeline.NewHTTPScopeStep(opts.httpScope),
 		pipeline.NewSafetyStep(opts.safetyEngine, nil, nil, slog.Default()),
 		pipeline.NewTransformStep(opts.transformEngine, nil, nil),
 		pipeline.NewInterceptStep(opts.interceptEngine, nil, nil, opts.holdQueue, nil, slog.Default()),

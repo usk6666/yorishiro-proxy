@@ -69,8 +69,22 @@ const (
 	H2InvalidPseudoHeader      AnomalyType = "H2InvalidPseudoHeader"
 	H2UppercaseHeaderName      AnomalyType = "H2UppercaseHeaderName"
 	H2ConnectionSpecificHeader AnomalyType = "H2ConnectionSpecificHeader"
-	H2TrailersAfterPassthrough AnomalyType = "H2TrailersAfterPassthrough"
-	H2PushPromise              AnomalyType = "H2PushPromise"
+	// H2ConnectionSpecificHeaderStrippedOnSend is the send-side mirror of
+	// H2ConnectionSpecificHeader. The HTTP/2 wire encoder
+	// (internal/layer/http2.BuildHeaderFieldsFromEvent) strips the RFC 7540
+	// §8.1.2.2 / RFC 9113 §8.2.2 set of connection-specific headers
+	// (`connection`, `keep-alive`, `proxy-connection`, `transfer-encoding`,
+	// `upgrade`) before HPACK-encoding because emitting them produces an
+	// invalid HEADERS frame (peers will reject with PROTOCOL_ERROR). When a
+	// strip occurs the encoder attaches this anomaly to the Send-direction
+	// HTTPMessage so the diagnostic asymmetry stays small — the receive
+	// side already records H2ConnectionSpecificHeader for forwarded-traffic
+	// non-conformance and the send side now mirrors it (USK-840). Anomaly
+	// Detail carries the verbatim wire header name(s) that were stripped,
+	// comma-separated when multiple names match.
+	H2ConnectionSpecificHeaderStrippedOnSend AnomalyType = "H2ConnectionSpecificHeaderStrippedOnSend"
+	H2TrailersAfterPassthrough               AnomalyType = "H2TrailersAfterPassthrough"
+	H2PushPromise                            AnomalyType = "H2PushPromise"
 	// H2UnsupportedConnectProtocol marks an extended CONNECT request
 	// (RFC 8441 §4) that carries a :protocol value other than "websocket".
 	// The proxy currently only swaps WebSocket streams (USK-765); other

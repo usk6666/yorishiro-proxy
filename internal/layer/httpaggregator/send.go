@@ -4,10 +4,30 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/http2"
 )
+
+// connectionSpecificHeadersInSend returns the verbatim wire-names of any
+// RFC 7540 §8.1.2.2 / RFC 9113 §8.2.2 connection-specific headers in
+// headers, plus any non-"trailers" `te` values. The result mirrors the
+// list produced by the h2 wire encoder's strip path so the anomaly Detail
+// reflects exactly what the encoder dropped. Order is preserved.
+func connectionSpecificHeadersInSend(headers []envelope.KeyValue) []string {
+	var out []string
+	for _, kv := range headers {
+		if http2.IsConnectionSpecificHeader(kv.Name) {
+			out = append(out, kv.Name)
+			continue
+		}
+		if strings.EqualFold(kv.Name, "te") && !http2.TEAllowedValue(kv.Value) {
+			out = append(out, "te: "+kv.Value)
+		}
+	}
+	return out
+}
 
 // sendChunkSize bounds the in-memory chunk size when emitting a large
 // BodyBuffer body as DATA events. The Layer's writer further splits these
@@ -60,6 +80,24 @@ func (a *aggregatorChannel) Send(ctx context.Context, env *envelope.Envelope) er
 
 	endStream := !isInformational && !hasBody && !hasTrailers
 	endStream = a.applyTunnelExchangeOnSend(env, msg, endStream)
+
+	// USK-840: RFC 7540 §8.1.2.2 / RFC 9113 §8.2.2 connection-specific
+	// headers (and non-"trailers" `te` values) are stripped by the wire
+	// encoder before HPACK-encoding because peers reject HEADERS frames
+	// that carry these names with a PROTOCOL_ERROR. The strip itself is
+	// unconditional. Surface the diagnostic on the HTTPMessage so analysts
+	// can see which headers the producer attempted to emit — mirrors the
+	// receive-side H2ConnectionSpecificHeader anomaly attached by the
+	// assembler. Anomalies live on HTTPMessage (RFC-001 §3.1), so the
+	// aggregator (which owns the HTTPMessage envelope on Send) is the
+	// natural attachment point — the inner h2 channel only sees event
+	// envelopes.
+	if stripped := connectionSpecificHeadersInSend(msg.Headers); len(stripped) > 0 {
+		msg.Anomalies = append(msg.Anomalies, envelope.Anomaly{
+			Type:   envelope.H2ConnectionSpecificHeaderStrippedOnSend,
+			Detail: strings.Join(stripped, ", "),
+		})
+	}
 
 	// 1. HEADERS event.
 	hdrEvt := &http2.H2HeadersEvent{

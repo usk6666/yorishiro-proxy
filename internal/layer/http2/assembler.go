@@ -25,20 +25,13 @@ const maxHeaderFragmentBytes = 1 << 20
 // handful. 32 is a generous upper bound that still bounds the worst case.
 const maxContinuationFrames = 32
 
-// h1OnlyHeaders is the set of HTTP/1-specific connection-management headers
-// that MUST NOT appear over HTTP/2 per RFC 9113 §8.2.2. We do not strip them
-// — wire fidelity rules — but we attach an H2ConnectionSpecificHeader anomaly
-// to the message.
-//
-// "TE: trailers" is the documented exception (allowed); any other "te:" value
-// is flagged.
-var h1OnlyHeaders = map[string]struct{}{
-	"connection":        {},
-	"keep-alive":        {},
-	"proxy-connection":  {},
-	"transfer-encoding": {},
-	"upgrade":           {},
-}
+// The RFC 7540 §8.1.2.2 / RFC 9113 §8.2.2 set of HTTP/1-specific
+// connection-management headers that MUST NOT appear over HTTP/2 is owned
+// by connection_specific.go (IsConnectionSpecificHeader / TEAllowedValue).
+// On receive we attach an H2ConnectionSpecificHeader anomaly without
+// stripping — wire fidelity rules. The send-side mirror lives in
+// channel.go BuildHeaderFieldsFromEvent and strips before HPACK encoding
+// because peers reject HEADERS frames that carry these names.
 
 // streamEventPhase tracks which header block the stream is currently
 // accumulating. The HTTP/2 reader produces H2HeadersEvent / H2DataEvent /
@@ -250,14 +243,13 @@ func regularHeaderAnomalies(hf hpack.HeaderField) []envelope.Anomaly {
 			Detail: hf.Name,
 		})
 	}
-	lower := strings.ToLower(hf.Name)
-	if _, ok := h1OnlyHeaders[lower]; ok {
+	if IsConnectionSpecificHeader(hf.Name) {
 		out = append(out, envelope.Anomaly{
 			Type:   envelope.H2ConnectionSpecificHeader,
 			Detail: hf.Name,
 		})
 	}
-	if lower == "te" && hf.Value != "trailers" {
+	if strings.EqualFold(hf.Name, "te") && !TEAllowedValue(hf.Value) {
 		out = append(out, envelope.Anomaly{
 			Type:   envelope.H2ConnectionSpecificHeader,
 			Detail: "te: " + hf.Value,
