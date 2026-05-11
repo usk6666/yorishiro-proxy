@@ -129,6 +129,20 @@ type proxyManager interface {
 	PeekTimeout() time.Duration
 	SetUpstreamProxy(proxyURL string)
 	UpstreamProxy() string
+	// SetUpstreamProxyForListener installs the named listener's
+	// per-listener upstream-proxy URL on the bound BuildConfig
+	// (USK-826). Empty proxyURL clears the entry so the global /
+	// boot-time fallback re-emerges for that listener. An empty name
+	// is treated as DefaultListenerName.
+	SetUpstreamProxyForListener(name, proxyURL string)
+	// UpstreamProxyForListener returns the named listener's stored
+	// upstream-proxy URL (USK-826), or empty string when none is set.
+	// An empty name is treated as DefaultListenerName.
+	UpstreamProxyForListener(name string) string
+	// ClearUpstreamProxyForListener removes the named listener's
+	// per-listener upstream-proxy entry (USK-826). Equivalent to
+	// SetUpstreamProxyForListener(name, "").
+	ClearUpstreamProxyForListener(name string)
 	// SetTLSFingerprint installs a runtime uTLS browser fingerprint
 	// profile override on the bound BuildConfig so the live MITM
 	// data-path's next upstream dial picks up the new profile
@@ -222,13 +236,18 @@ type proxyManager interface {
 
 // ListenerStatus is the mcp-package shape of per-listener status used by
 // query_tool / proxy_start_tool / proxy_stop_tool. Mirrors
-// proxybuild.ListenerStatus (4-field shape); the listenerStatuses helper
-// converts from the manager's concrete type.
+// proxybuild.ListenerStatus; the listenerStatuses helper converts from
+// the manager's concrete type.
+//
+// UpstreamProxy (USK-826) carries the per-listener upstream-proxy URL.
+// query_tool redacts the URL before publishing it on the status resource;
+// the raw form is preserved here for in-process inspection.
 type ListenerStatus struct {
 	Name              string `json:"name"`
 	ListenAddr        string `json:"listen_addr"`
 	ActiveConnections int    `json:"active_connections"`
 	UptimeSeconds     int64  `json:"uptime_seconds"`
+	UpstreamProxy     string `json:"upstream_proxy,omitempty"`
 }
 
 // managerIsNil reports whether m is either a nil interface or wraps a
@@ -269,6 +288,7 @@ func listenerStatuses(m proxyManager) []ListenerStatus {
 				ListenAddr:        s.ListenAddr,
 				ActiveConnections: s.ActiveConnections,
 				UptimeSeconds:     s.UptimeSeconds,
+				UpstreamProxy:     s.UpstreamProxy,
 			}
 		}
 		return out

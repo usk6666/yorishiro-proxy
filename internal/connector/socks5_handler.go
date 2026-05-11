@@ -144,7 +144,7 @@ func socks5Passthrough(ctx context.Context, cfg SOCKS5HandlerConfig, pc *PeekCon
 		return false
 	}
 	logger.Debug("TLS passthrough relay", "target", target)
-	relayErr := runPassthroughRelay(ctx, pc, target, passDialOpts(cfg.BuildCfg), cfg.PassthroughObserver)
+	relayErr := runPassthroughRelay(ctx, pc, target, passDialOpts(ctx, cfg.BuildCfg), cfg.PassthroughObserver)
 	if relayErr != nil {
 		logger.Warn("TLS passthrough ended", "target", target, "sni_peek_target", host, "error", relayErr)
 	}

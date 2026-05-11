@@ -9,6 +9,7 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/connector/transport"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
+	"github.com/usk6666/yorishiro-proxy/internal/proxybuild"
 )
 
 // mockTLSFingerprintSetter implements tlsFingerprintSetter for testing.
@@ -487,7 +488,7 @@ func TestResetSettingsToDefaults_RebuildsTLSTransport(t *testing.T) {
 	)
 
 	// Reset to defaults.
-	s.resetSettingsToDefaults()
+	s.resetSettingsToDefaults(proxybuild.DefaultListenerName)
 
 	// Profile should be reset to "chrome".
 	if setter.profile != "chrome" {

@@ -63,6 +63,7 @@ func newTestProxybuildManagerWithStore(t *testing.T, store flow.Writer) *proxybu
 	mgr, err := proxybuild.NewManager(proxybuild.ManagerConfig{
 		Logger:       logger,
 		StackFactory: factory,
+		BuildConfig:  buildCfg,
 	})
 	if err != nil {
 		t.Fatalf("proxybuild.NewManager: %v", err)

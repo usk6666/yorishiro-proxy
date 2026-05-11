@@ -253,7 +253,11 @@ func (s *Server) handleProxyStart(ctx context.Context, _ *gomcp.CallToolRequest,
 	// This is done after StartNamed succeeds to be atomic with listener start.
 	// If settings application fails, stop the listener to avoid leaving a
 	// running proxy with invalid/default-only configuration.
-	s.resetSettingsToDefaults()
+	//
+	// USK-826: the reset is scoped to the (re)starting listener for the
+	// fields that are per-listener (upstream_proxy). Restarting listener A
+	// must not wipe listener B's upstream_proxy override.
+	s.resetSettingsToDefaults(listenerName)
 
 	// Parse raw TCP forwards into structured ForwardConfig.
 	parsedForwards, err := parseTCPForwardsAny(input.TCPForwards)
@@ -286,7 +290,21 @@ func (s *Server) handleProxyStart(ctx context.Context, _ *gomcp.CallToolRequest,
 // resetSettingsToDefaults resets all proxy configuration to default values.
 // This is called in handleProxyStart after StartNamed succeeds, ensuring a
 // clean state without risk of clearing active configuration on start failure.
-func (s *Server) resetSettingsToDefaults() {
+//
+// listenerName scopes per-listener fields (USK-826: upstream_proxy) so a
+// proxy_start of listener A does not clobber listener B's overrides. The
+// remaining sections (TLS passthrough, intercept rules, transform rules,
+// connection limits, peek timeout, TLS fingerprint, client cert, capture
+// scope) still reset globally pending follow-up per-listener scoping;
+// they are documented as process-global in the configure tool description.
+//
+// An empty listenerName falls back to the default listener name so
+// internal callers that do not yet propagate names hit the same slot
+// as the implicit default.
+func (s *Server) resetSettingsToDefaults(listenerName string) {
+	if listenerName == "" {
+		listenerName = proxybuild.DefaultListenerName
+	}
 	// Reset TLS passthrough to empty (intercept all).
 	if s.connector.passthrough != nil {
 		s.connector.passthrough.Clear()
@@ -331,9 +349,12 @@ func (s *Server) resetSettingsToDefaults() {
 	// Reset request timeout to default.
 	s.applyRequestTimeout(defaultRequestTimeout)
 
-	// Reset upstream proxy to direct (no upstream).
+	// Reset upstream proxy to direct (no upstream) — scoped to the
+	// (re)starting listener (USK-826). Restarting listener A must not
+	// clear listener B's override; the per-listener clear matches the
+	// SOCKS5 per-listener reset pattern in applySOCKS5Auth.
 	if !managerIsNil(s.connector.manager) {
-		s.connector.manager.SetUpstreamProxy("")
+		s.connector.manager.ClearUpstreamProxyForListener(listenerName)
 	}
 	for _, setter := range s.connector.upstreamProxySetters {
 		setter.SetUpstreamProxy(nil)
@@ -391,7 +412,11 @@ func (s *Server) applyProxyStartPipeline(input *proxyStartInput) error {
 		}
 	}
 	if input.UpstreamProxy != "" {
-		if err := s.applyUpstreamProxy(input.UpstreamProxy); err != nil {
+		listenerName := input.Name
+		if listenerName == "" {
+			listenerName = proxybuild.DefaultListenerName
+		}
+		if err := s.applyUpstreamProxy(input.UpstreamProxy, listenerName); err != nil {
 			return fmt.Errorf("upstream_proxy: %w", err)
 		}
 	}
@@ -801,19 +826,37 @@ func (s *Server) applySOCKS5Auth(authMethod, username, password, listenerName st
 }
 
 // applyUpstreamProxy validates the upstream proxy URL and configures it on
-// the manager and all registered protocol handlers.
-func (s *Server) applyUpstreamProxy(rawURL string) error {
+// the manager for the named listener and all registered protocol handlers.
+//
+// USK-826: the URL is scoped to the named listener so a multi-listener
+// chained MITM (listener B sending its traffic through listener A) does
+// not propagate the override to every listener and cause listener A to
+// recurse through itself. An empty listenerName falls back to the
+// default listener ("default").
+//
+// The legacy upstreamProxySetters list (HTTP/1.x and HTTP/2 handler
+// surfaces from the pre-RFC-001 era) is kept for legacy_options_test.go
+// scaffolding; live mcpserver wiring passes a nil slice (USK-826) so the
+// per-listener semantics is the only path mutated.
+func (s *Server) applyUpstreamProxy(rawURL, listenerName string) error {
 	proxyURL, err := connector.ParseUpstreamProxy(rawURL)
 	if err != nil {
 		return err
 	}
 
-	// Store in manager for status reporting.
-	if !managerIsNil(s.connector.manager) {
-		s.connector.manager.SetUpstreamProxy(rawURL)
+	if listenerName == "" {
+		listenerName = proxybuild.DefaultListenerName
 	}
 
-	// Apply to all registered protocol handlers.
+	// Store in manager (per-listener) for status reporting + dial-path
+	// propagation to the bound BuildConfig.
+	if !managerIsNil(s.connector.manager) {
+		s.connector.manager.SetUpstreamProxyForListener(listenerName, rawURL)
+	}
+
+	// Apply to all registered protocol handlers. Legacy/test-only path;
+	// the live data path's per-listener scoping flows through the
+	// manager → BuildConfig wiring above.
 	for _, setter := range s.connector.upstreamProxySetters {
 		setter.SetUpstreamProxy(proxyURL)
 	}

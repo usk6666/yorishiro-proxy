@@ -459,7 +459,7 @@ func TestBuildConnectionStack_H2MITMStack(t *testing.T) {
 		if hostTLSErr != nil {
 			t.Fatalf("resolvePerHostTLS: %v", hostTLSErr)
 		}
-		wantKey := poolKeyForH2(target, buildCfg, wantHostTLS)
+		wantKey := poolKeyForH2(context.Background(), target, buildCfg, wantHostTLS)
 		if gotKey := stack.PoolKey(); gotKey != wantKey {
 			t.Errorf("PoolKey = %+v, want %+v", gotKey, wantKey)
 		}
@@ -608,7 +608,7 @@ func TestBuildConnectionStack_H2PoolFastPath_ClientMITMFailReleasesReservation(t
 	if err != nil {
 		t.Fatalf("resolvePerHostTLS: %v", err)
 	}
-	poolKey := poolKeyForH2(target, buildCfg, hostTLSForKey)
+	poolKey := poolKeyForH2(context.Background(), target, buildCfg, hostTLSForKey)
 	h2Pool.Put(poolKey, cached)
 
 	// Sanity: pool returns the cached Layer on first Get (and increments
@@ -728,7 +728,7 @@ func TestBuildPoolHitFastPath_ShortCircuitsWhenH2Disabled(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolvePerHostTLS: %v", err)
 	}
-	poolKey := poolKeyForH2(target, buildCfg, hostTLSForKey)
+	poolKey := poolKeyForH2(context.Background(), target, buildCfg, hostTLSForKey)
 	h2Pool.Put(poolKey, cached)
 
 	// Take the entry out of the pool the same way buildALPNRoutedStack
@@ -815,7 +815,7 @@ func TestBuildPoolHitFastPath_TakesFastPathWhenH2Enabled(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolvePerHostTLS: %v", err)
 	}
-	poolKey := poolKeyForH2(target, buildCfg, hostTLSForKey)
+	poolKey := poolKeyForH2(context.Background(), target, buildCfg, hostTLSForKey)
 	h2Pool.Put(poolKey, cached)
 
 	pooled, err := h2Pool.Get(poolKey)
@@ -862,8 +862,8 @@ func TestPoolKeyForH2_StableAndDistinct(t *testing.T) {
 	}
 	target := "example.com:443"
 
-	k1 := poolKeyForH2(target, baseCfg, nil)
-	k2 := poolKeyForH2(target, baseCfg, nil)
+	k1 := poolKeyForH2(context.Background(), target, baseCfg, nil)
+	k2 := poolKeyForH2(context.Background(), target, baseCfg, nil)
 	if k1 != k2 {
 		t.Errorf("stable: k1=%+v k2=%+v", k1, k2)
 	}
@@ -881,7 +881,7 @@ func TestPoolKeyForH2_StableAndDistinct(t *testing.T) {
 		InsecureSkipVerify: true,
 		TLSFingerprint:     "chrome",
 	}
-	kAlt := poolKeyForH2(target, altCfg, nil)
+	kAlt := poolKeyForH2(context.Background(), target, altCfg, nil)
 	if kAlt.TLSConfigHash == k1.TLSConfigHash {
 		t.Error("InsecureSkipVerify change did not affect hash")
 	}
@@ -891,14 +891,14 @@ func TestPoolKeyForH2_StableAndDistinct(t *testing.T) {
 		InsecureSkipVerify: false,
 		TLSFingerprint:     "firefox",
 	}
-	kAlt2 := poolKeyForH2(target, altCfg2, nil)
+	kAlt2 := poolKeyForH2(context.Background(), target, altCfg2, nil)
 	if kAlt2.TLSConfigHash == k1.TLSConfigHash {
 		t.Error("TLSFingerprint change did not affect hash")
 	}
 
 	// Different target -> different HostPort (hash may collide if canonical
 	// bytes happen to match, but HostPort differs which is part of the key).
-	kOther := poolKeyForH2("other.example.com:443", baseCfg, nil)
+	kOther := poolKeyForH2(context.Background(), "other.example.com:443", baseCfg, nil)
 	if kOther == k1 {
 		t.Error("different target produced identical PoolKey")
 	}
@@ -907,7 +907,7 @@ func TestPoolKeyForH2_StableAndDistinct(t *testing.T) {
 // TestPoolKeyForH2_NilCfg ensures the helper survives a nil BuildConfig
 // (used by some tunnel paths that only carry an UpstreamProxy).
 func TestPoolKeyForH2_NilCfg(t *testing.T) {
-	k := poolKeyForH2("example.com:443", nil, nil)
+	k := poolKeyForH2(context.Background(), "example.com:443", nil, nil)
 	if k.HostPort != "example.com:443" {
 		t.Errorf("HostPort = %q, want %q", k.HostPort, "example.com:443")
 	}
@@ -942,7 +942,7 @@ func TestPoolKeyForH2_RegistryClientCertReplacement(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolvePerHostTLS A: %v", err)
 	}
-	keyUnderA := poolKeyForH2(target, cfg, hostTLSA)
+	keyUnderA := poolKeyForH2(context.Background(), target, cfg, hostTLSA)
 
 	// Step 2: replace with cert B. Resolve and mint the pool key under B.
 	reg.SetGlobal(&transport.HostTLSConfig{
@@ -953,7 +953,7 @@ func TestPoolKeyForH2_RegistryClientCertReplacement(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolvePerHostTLS B: %v", err)
 	}
-	keyUnderB := poolKeyForH2(target, cfg, hostTLSB)
+	keyUnderB := poolKeyForH2(context.Background(), target, cfg, hostTLSB)
 
 	if keyUnderA == keyUnderB {
 		t.Fatalf("pool key did not change after registry cert replacement: %+v", keyUnderA)
@@ -966,7 +966,7 @@ func TestPoolKeyForH2_RegistryClientCertReplacement(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolvePerHostTLS none: %v", err)
 	}
-	keyNoCert := poolKeyForH2(target, cfg, hostTLSNone)
+	keyNoCert := poolKeyForH2(context.Background(), target, cfg, hostTLSNone)
 	if keyNoCert == keyUnderA || keyNoCert == keyUnderB {
 		t.Fatalf("clearing registry did not change pool key: noCert=%+v A=%+v B=%+v", keyNoCert, keyUnderA, keyUnderB)
 	}
@@ -990,14 +990,14 @@ func TestPoolKeyForH2_RegistryInsecureSkipVerifyToggle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolvePerHostTLS verify=true: %v", err)
 	}
-	keyVerify := poolKeyForH2(target, cfg, hostTLSVerify)
+	keyVerify := poolKeyForH2(context.Background(), target, cfg, hostTLSVerify)
 
 	reg.SetGlobal(&transport.HostTLSConfig{TLSVerify: &verifyFalse})
 	hostTLSInsecure, err := resolvePerHostTLS(target, cfg)
 	if err != nil {
 		t.Fatalf("resolvePerHostTLS verify=false: %v", err)
 	}
-	keyInsecure := poolKeyForH2(target, cfg, hostTLSInsecure)
+	keyInsecure := poolKeyForH2(context.Background(), target, cfg, hostTLSInsecure)
 
 	if keyVerify == keyInsecure {
 		t.Fatalf("pool key did not change after TLSVerify toggle: %+v", keyVerify)
@@ -1033,7 +1033,7 @@ func TestPoolKeyForH2_RegistryCABundleReplacement(t *testing.T) {
 	if hostTLSA.caBundleHash == "" {
 		t.Fatal("caBundleHash empty after CA bundle install (USK-737)")
 	}
-	keyUnderA := poolKeyForH2(target, cfg, hostTLSA)
+	keyUnderA := poolKeyForH2(context.Background(), target, cfg, hostTLSA)
 
 	// Bundle B.
 	reg.SetGlobal(&transport.HostTLSConfig{CABundlePath: caB})
@@ -1044,7 +1044,7 @@ func TestPoolKeyForH2_RegistryCABundleReplacement(t *testing.T) {
 	if hostTLSB.caBundleHash == hostTLSA.caBundleHash {
 		t.Fatal("caBundleHash did not change after CA bundle replacement")
 	}
-	keyUnderB := poolKeyForH2(target, cfg, hostTLSB)
+	keyUnderB := poolKeyForH2(context.Background(), target, cfg, hostTLSB)
 
 	if keyUnderA == keyUnderB {
 		t.Fatalf("pool key did not change after CA bundle replacement: %+v", keyUnderA)

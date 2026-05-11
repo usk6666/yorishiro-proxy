@@ -116,13 +116,14 @@ type CONNECTHandlerConfig struct {
 
 // passDialOpts builds DialRawOpts for TLS passthrough relay. It safely
 // handles a nil BuildCfg (only UpstreamProxy is needed for passthrough).
-// EffectiveUpstreamProxy is consulted (rather than the static field) so a
-// runtime proxy_start / configure switch reaches the next passthrough
-// dial (USK-734).
-func passDialOpts(buildCfg *BuildConfig) DialRawOpts {
+// EffectiveUpstreamProxyForCtx is consulted so a runtime proxy_start /
+// configure switch reaches the next passthrough dial (USK-734) AND a
+// per-listener override (USK-826) takes effect when the ctx carries the
+// listener name.
+func passDialOpts(ctx context.Context, buildCfg *BuildConfig) DialRawOpts {
 	var opts DialRawOpts
 	if buildCfg != nil {
-		opts.UpstreamProxy = buildCfg.EffectiveUpstreamProxy()
+		opts.UpstreamProxy = buildCfg.EffectiveUpstreamProxyForCtx(ctx)
 	}
 	return opts
 }
@@ -218,7 +219,7 @@ func connectPassthrough(ctx context.Context, cfg CONNECTHandlerConfig, pc *PeekC
 		return false
 	}
 	logger.Debug("TLS passthrough relay", "target", target)
-	relayErr := runPassthroughRelay(ctx, pc, target, passDialOpts(cfg.BuildCfg), cfg.PassthroughObserver)
+	relayErr := runPassthroughRelay(ctx, pc, target, passDialOpts(ctx, cfg.BuildCfg), cfg.PassthroughObserver)
 	if relayErr != nil {
 		logger.Warn("TLS passthrough ended", "target", target, "sni_peek_target", host, "error", relayErr)
 	}

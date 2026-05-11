@@ -255,14 +255,16 @@ func (m *Manager) handleTCPForwardConn(
 		return
 	}
 
-	// Dial upstream with a bounded timeout. EffectiveUpstreamProxy is
-	// consulted (rather than the static UpstreamProxy field) so a runtime
-	// proxy_start / configure switch reaches the next forward dial (USK-734).
+	// Dial upstream with a bounded timeout. EffectiveUpstreamProxyForCtx
+	// is consulted so a runtime proxy_start / configure switch reaches the
+	// next forward dial (USK-734) AND the parent listener's per-listener
+	// upstream-proxy override (USK-826) participates — connCtx carries the
+	// parent listener name via ContextWithListenerName above.
 	dialOpts := connector.DialRawOpts{
 		DialTimeout: tcpForwardDialTimeout,
 	}
 	if parentStack.BuildConfig != nil {
-		dialOpts.UpstreamProxy = parentStack.BuildConfig.EffectiveUpstreamProxy()
+		dialOpts.UpstreamProxy = parentStack.BuildConfig.EffectiveUpstreamProxyForCtx(connCtx)
 	}
 
 	upstreamConn, _, derr := connector.DialUpstreamRaw(connCtx, entry.target, dialOpts)

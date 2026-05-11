@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/url"
 	"slices"
+	"sync"
 	"sync/atomic"
 
 	"github.com/google/uuid"
@@ -84,7 +85,30 @@ type BuildConfig struct {
 	// dial-path readers (per-connection goroutines) and the MCP-tool
 	// writer (proxy_start handler goroutine) do not race on the *url.URL
 	// pointer. A nil load means "fall back to UpstreamProxy".
+	//
+	// USK-826: this slot is the legacy process-global override and is now
+	// only consulted as a fallback when no per-listener override is set
+	// for the current connection's listener. Multi-listener setups should
+	// write per-listener URLs via SetUpstreamProxyForListener so chained
+	// MITM (listener A → listener B) does not self-recurse.
 	upstreamProxyDynamic atomic.Pointer[url.URL]
+
+	// upstreamProxyPerListener stores runtime-mutable upstream proxy URLs
+	// keyed by listener name (USK-826). The dial path consults this map
+	// first via EffectiveUpstreamProxyForCtx, falling back to
+	// upstreamProxyDynamic / UpstreamProxy when the current connection's
+	// listener has no per-listener override. Writers are MCP-tool
+	// goroutines (proxy_start / configure handlers); readers are
+	// per-connection dial-path goroutines. RWMutex is used to allow
+	// concurrent reads on the hot dial path while serialising the rarer
+	// writes from the MCP layer.
+	//
+	// Entries are deleted (not stored as nil) via
+	// SetUpstreamProxyForListener(name, nil) so the global / boot-time
+	// fallback re-emerges for that listener — this matches the SOCKS5
+	// per-listener auth registry shape (presence vs absence).
+	upstreamProxyPerListenerMu sync.RWMutex
+	upstreamProxyPerListener   map[string]*url.URL
 
 	// enabledProtocolsDynamic stores the runtime-mutable enabled-protocols
 	// allow-list installed by proxy_start / configure (USK-808). The data
@@ -271,11 +295,104 @@ func (c *BuildConfig) EffectiveUpstreamProxy() *url.URL {
 // wire-up consumed by proxy_start / configure to make the URL change
 // reach the live dial path (USK-734); writes are atomic with respect to
 // concurrent dial-path reads. Passing nil clears the override.
+//
+// USK-826: this is the process-global slot, kept for backwards compatibility
+// (boot-time config-file UpstreamProxy promotion + tests that do not need
+// per-listener scoping). Live MCP wiring should prefer
+// SetUpstreamProxyForListener so multi-listener chains do not all share a
+// single URL.
 func (c *BuildConfig) SetUpstreamProxy(u *url.URL) {
 	if c == nil {
 		return
 	}
 	c.upstreamProxyDynamic.Store(u)
+}
+
+// SetUpstreamProxyForListener installs a runtime upstream-proxy override
+// scoped to the named listener (USK-826). The dial path consults the
+// per-listener entry first via EffectiveUpstreamProxyForCtx, falling back
+// to the process-global slot only when the listener has no per-listener
+// entry. Passing nil for u removes the listener's entry so the
+// process-global / boot-time fallback re-emerges for that listener.
+//
+// This is the canonical setter for the multi-listener case: a chained
+// MITM (listener A on :8080, listener B on :8090 → A) must scope the
+// "send my traffic through A" decision to listener B so listener A is
+// not also forced to recurse through itself. The mirror of the SOCKS5
+// per-listener auth registry (internal/connector/socks5.go).
+//
+// An empty name is treated as DefaultListenerName so callers that have
+// not yet adopted explicit naming hit the same slot as the implicit
+// default listener.
+func (c *BuildConfig) SetUpstreamProxyForListener(name string, u *url.URL) {
+	if c == nil {
+		return
+	}
+	if name == "" {
+		name = DefaultListenerName
+	}
+	c.upstreamProxyPerListenerMu.Lock()
+	defer c.upstreamProxyPerListenerMu.Unlock()
+	if u == nil {
+		// Remove the entry so the global / boot-time fallback re-emerges
+		// for this listener. Distinct from "store nil" — a present-but-nil
+		// entry would override the global slot with "direct".
+		delete(c.upstreamProxyPerListener, name)
+		return
+	}
+	if c.upstreamProxyPerListener == nil {
+		c.upstreamProxyPerListener = make(map[string]*url.URL)
+	}
+	c.upstreamProxyPerListener[name] = u
+}
+
+// UpstreamProxyForListener returns the per-listener upstream proxy URL
+// installed via SetUpstreamProxyForListener for the named listener
+// (USK-826). Returns nil when no per-listener entry is set; callers
+// that want the effective URL (with fallback to global / boot-time)
+// should use EffectiveUpstreamProxyForCtx instead.
+//
+// An empty name is treated as DefaultListenerName.
+func (c *BuildConfig) UpstreamProxyForListener(name string) *url.URL {
+	if c == nil {
+		return nil
+	}
+	if name == "" {
+		name = DefaultListenerName
+	}
+	c.upstreamProxyPerListenerMu.RLock()
+	defer c.upstreamProxyPerListenerMu.RUnlock()
+	return c.upstreamProxyPerListener[name]
+}
+
+// EffectiveUpstreamProxyForCtx returns the upstream proxy URL the live
+// dial path should use for a connection whose ctx carries a listener name
+// (set by FullListener via ContextWithListenerName) (USK-826).
+//
+// Resolution order:
+//  1. Per-listener override installed via SetUpstreamProxyForListener for
+//     the ctx's listener name.
+//  2. Process-global override installed via SetUpstreamProxy.
+//  3. Boot-time UpstreamProxy field.
+//
+// Falls back to EffectiveUpstreamProxy() when the ctx does not carry a
+// listener name (e.g. control-plane resend paths that do not flow through
+// FullListener). This is the canonical accessor for live data-path code
+// once USK-826 is wired in; callers must NOT read the UpstreamProxy field
+// directly because it observes only the boot-time value.
+func (c *BuildConfig) EffectiveUpstreamProxyForCtx(ctx context.Context) *url.URL {
+	if c == nil {
+		return nil
+	}
+	if name := ListenerNameFromContext(ctx); name != "" {
+		c.upstreamProxyPerListenerMu.RLock()
+		u, ok := c.upstreamProxyPerListener[name]
+		c.upstreamProxyPerListenerMu.RUnlock()
+		if ok {
+			return u
+		}
+	}
+	return c.EffectiveUpstreamProxy()
 }
 
 // EffectiveTLSFingerprint returns the uTLS browser fingerprint profile
@@ -575,7 +692,7 @@ func buildALPNRoutedStack(
 	// ErrClosed, a dead Layer, or a capacity-capped Layer) fall through
 	// to the existing ALPN-cache / upstream-dial flow.
 	if cfg.HTTP2Pool != nil {
-		poolKey := poolKeyForH2(target, cfg, hostTLS)
+		poolKey := poolKeyForH2(ctx, target, cfg, hostTLS)
 		if pooled, perr := cfg.HTTP2Pool.Get(poolKey); perr == nil && pooled != nil {
 			stack, cs, us, ferr := buildPoolHitFastPath(ctx, clientConn, target, host, connID, pooled, poolKey, cfg)
 			if ferr == nil {
@@ -1076,7 +1193,7 @@ func dialUpstreamWithALPN(
 		UTLSProfile:        cfg.EffectiveTLSFingerprint(),
 		ClientCert:         clientCert,
 		OfferALPN:          offerALPN,
-		UpstreamProxy:      cfg.EffectiveUpstreamProxy(),
+		UpstreamProxy:      cfg.EffectiveUpstreamProxyForCtx(ctx),
 	})
 	if err != nil {
 		return nil, nil, fmt.Errorf("connector: upstream dial for %s: %w", target, err)
@@ -1234,7 +1351,7 @@ func buildH2Stack(
 	}
 	stack.PushClient(clientLayer)
 
-	poolKey := poolKeyForH2(target, cfg, hostTLS)
+	poolKey := poolKeyForH2(ctx, target, cfg, hostTLS)
 
 	// consumed tracks whether dialFn ran (true = upstreamConn is owned by
 	// http2.New and must not be closed by the caller). On pool hit, remains
@@ -1358,7 +1475,7 @@ func buildRawPassthroughStack(
 		UTLSProfile:        cfg.EffectiveTLSFingerprint(),
 		ClientCert:         clientCert,
 		OfferALPN:          []string{"http/1.1"},
-		UpstreamProxy:      cfg.EffectiveUpstreamProxy(),
+		UpstreamProxy:      cfg.EffectiveUpstreamProxyForCtx(ctx),
 	})
 	if err != nil {
 		clientTLSConn.Close()

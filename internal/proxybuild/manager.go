@@ -94,6 +94,13 @@ type Manager struct {
 	upstreamProxy    string
 	enabledProtocols []string
 
+	// upstreamProxyPerListener tracks the upstream-proxy URL string for
+	// each listener (USK-826). The string form is preserved alongside the
+	// BuildConfig per-listener entry so status surfaces (query_tool) can
+	// report the original URL (after redaction) without re-stringifying a
+	// parsed *url.URL. Mutations guarded by m.mu.
+	upstreamProxyPerListener map[string]string
+
 	mu        sync.Mutex
 	listeners map[string]*listenerEntry
 }
@@ -302,11 +309,17 @@ func (m *Manager) Status() (running bool, listenAddr string) {
 
 // ListenerStatus describes a single running listener. Mirrors
 // proxy.ListenerStatus.
+//
+// UpstreamProxy (USK-826) carries the per-listener upstream-proxy URL
+// string as stored via SetUpstreamProxyForListener, empty when no
+// per-listener override is set. The MCP status surface is responsible
+// for redaction via connector.RedactProxyURL before serialising.
 type ListenerStatus struct {
 	Name              string `json:"name"`
 	ListenAddr        string `json:"listen_addr"`
 	ActiveConnections int    `json:"active_connections"`
 	UptimeSeconds     int64  `json:"uptime_seconds"`
+	UpstreamProxy     string `json:"upstream_proxy,omitempty"`
 }
 
 // ListenerStatuses returns a snapshot of every running listener. Returns
@@ -330,6 +343,7 @@ func (m *Manager) ListenerStatuses() []ListenerStatus {
 			ListenAddr:        entry.listenAddr,
 			ActiveConnections: entry.stack.Listener.ActiveConnections(),
 			UptimeSeconds:     uptime,
+			UpstreamProxy:     m.upstreamProxyPerListener[name],
 		})
 	}
 	return out
@@ -499,11 +513,20 @@ func (m *Manager) EnabledProtocols() []string {
 }
 
 // SetUpstreamProxy stores an upstream proxy URL and, when ManagerConfig
-// supplied a BuildConfig, mutates that BuildConfig's dynamic
-// upstream-proxy slot so the next live data-path dial transits the
-// configured proxy (USK-734). The string form is reflected back via
-// UpstreamProxy() for status reporting; an empty string clears both the
-// status state and the dynamic dial-path override.
+// supplied a BuildConfig, applies it to the default listener's per-listener
+// slot so the next live data-path dial under that listener transits the
+// configured proxy (USK-826).
+//
+// Historical behaviour: pre-USK-826 this method mutated the process-global
+// dynamic slot, which propagated to ALL listeners in a multi-listener setup
+// and caused listener B chained through listener A to silently recurse
+// through itself. The method now defaults to scoping the URL to the
+// "default" listener; callers wiring multi-listener configurations should
+// use SetUpstreamProxyForListener with an explicit name.
+//
+// The string form is reflected back via UpstreamProxy() for status
+// reporting; an empty string clears both the status state and the
+// default-listener's per-listener dial-path override.
 //
 // Parsing failures fall back to the historical "store-only" behaviour
 // (status surfaces the raw string but the dial path stays direct). The
@@ -512,8 +535,43 @@ func (m *Manager) EnabledProtocols() []string {
 // at this layer means an internal mis-call rather than a malformed
 // user input — logging at Warn matches that severity.
 func (m *Manager) SetUpstreamProxy(proxyURL string) {
+	m.SetUpstreamProxyForListener(DefaultListenerName, proxyURL)
+}
+
+// SetUpstreamProxyForListener stores an upstream proxy URL scoped to the
+// named listener and, when ManagerConfig supplied a BuildConfig, mutates
+// the BuildConfig's per-listener upstream-proxy entry for `name` so the
+// next live data-path dial for connections accepted on that listener
+// transits the configured proxy (USK-826).
+//
+// This is the canonical setter for the multi-listener case: a chained
+// MITM where listener B sends its traffic through listener A must scope
+// the "send through A" decision to listener B — otherwise listener A
+// would itself recurse through its own upstream URL.
+//
+// Empty proxyURL clears both the manager status state for the listener
+// and the BuildConfig per-listener entry, so the global / boot-time
+// fallback re-emerges for that listener. An empty name is treated as
+// DefaultListenerName.
+func (m *Manager) SetUpstreamProxyForListener(name, proxyURL string) {
+	if name == "" {
+		name = DefaultListenerName
+	}
 	m.mu.Lock()
-	m.upstreamProxy = proxyURL
+	if proxyURL == "" {
+		delete(m.upstreamProxyPerListener, name)
+	} else {
+		if m.upstreamProxyPerListener == nil {
+			m.upstreamProxyPerListener = make(map[string]string)
+		}
+		m.upstreamProxyPerListener[name] = proxyURL
+	}
+	// Maintain the legacy default-listener mirror on m.upstreamProxy so
+	// UpstreamProxy() / status surfaces keep working for callers that have
+	// not adopted the per-listener API.
+	if name == DefaultListenerName {
+		m.upstreamProxy = proxyURL
+	}
 	bc := m.buildCfg
 	m.mu.Unlock()
 
@@ -521,23 +579,46 @@ func (m *Manager) SetUpstreamProxy(proxyURL string) {
 		return
 	}
 	if proxyURL == "" {
-		bc.SetUpstreamProxy(nil)
+		bc.SetUpstreamProxyForListener(name, nil)
 		return
 	}
 	parsed, err := connector.ParseUpstreamProxy(proxyURL)
 	if err != nil {
 		m.logger.Warn("upstream proxy URL not applied to live dial path",
-			"url", connector.RedactProxyURL(proxyURL), "error", err)
+			"listener", name, "url", connector.RedactProxyURL(proxyURL), "error", err)
 		return
 	}
-	bc.SetUpstreamProxy(parsed)
+	bc.SetUpstreamProxyForListener(name, parsed)
 }
 
-// UpstreamProxy returns the stored upstream proxy URL, or empty string.
+// ClearUpstreamProxyForListener removes the named listener's per-listener
+// upstream-proxy entry (USK-826). Equivalent to
+// SetUpstreamProxyForListener(name, ""). Provided as a named accessor so
+// the proxy_start reset path expresses intent clearly.
+func (m *Manager) ClearUpstreamProxyForListener(name string) {
+	m.SetUpstreamProxyForListener(name, "")
+}
+
+// UpstreamProxy returns the stored upstream proxy URL for the default
+// listener, or empty string when none is set. This mirrors the
+// pre-USK-826 status accessor; per-listener inspection is available via
+// UpstreamProxyForListener.
 func (m *Manager) UpstreamProxy() string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.upstreamProxy
+}
+
+// UpstreamProxyForListener returns the stored upstream proxy URL for the
+// named listener (USK-826), or empty string when none is set. An empty
+// name is treated as DefaultListenerName.
+func (m *Manager) UpstreamProxyForListener(name string) string {
+	if name == "" {
+		name = DefaultListenerName
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.upstreamProxyPerListener[name]
 }
 
 // SetTLSFingerprint installs a runtime override for the uTLS browser

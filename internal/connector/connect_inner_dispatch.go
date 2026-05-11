@@ -297,7 +297,7 @@ func BuildBytechunkStack(
 func dialPlainUpstream(ctx context.Context, target string, cfg *BuildConfig) (net.Conn, error) {
 	var dialOpts DialRawOpts
 	if cfg != nil {
-		dialOpts.UpstreamProxy = cfg.EffectiveUpstreamProxy()
+		dialOpts.UpstreamProxy = cfg.EffectiveUpstreamProxyForCtx(ctx)
 	}
 	conn, _, err := DialUpstreamRaw(ctx, target, dialOpts)
 	if err != nil {

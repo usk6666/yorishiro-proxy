@@ -869,3 +869,145 @@ func TestManager_ConcurrentStartStop(t *testing.T) {
 		t.Errorf("after concurrent start/stop: ListenerCount = %d, want 0", got)
 	}
 }
+
+// TestManager_UpstreamProxyForListener_Roundtrip verifies the USK-826
+// per-listener upstream-proxy storage on the Manager: writes propagate
+// to the bound BuildConfig per-listener slot, and the manager-level
+// status accessor (UpstreamProxyForListener) returns the raw string.
+// Clearing one listener does not affect another.
+func TestManager_UpstreamProxyForListener_Roundtrip(t *testing.T) {
+	bc := &connector.BuildConfig{}
+	mgr, err := NewManager(ManagerConfig{
+		Logger:       silentLogger(),
+		StackFactory: func(_ context.Context, _, _ string) (*Stack, error) { return nil, errors.New("unused") },
+		BuildConfig:  bc,
+	})
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	mgr.SetUpstreamProxyForListener("alpha", "http://10.0.0.1:8080")
+	mgr.SetUpstreamProxyForListener("beta", "http://10.0.0.2:9090")
+
+	if got := mgr.UpstreamProxyForListener("alpha"); got != "http://10.0.0.1:8080" {
+		t.Errorf("alpha = %q, want round-trip", got)
+	}
+	if got := mgr.UpstreamProxyForListener("beta"); got != "http://10.0.0.2:9090" {
+		t.Errorf("beta = %q, want round-trip", got)
+	}
+	if got := mgr.UpstreamProxyForListener("gamma"); got != "" {
+		t.Errorf("gamma (unset) = %q, want empty", got)
+	}
+
+	// BuildConfig per-listener entries are populated.
+	if got := bc.UpstreamProxyForListener("alpha"); got == nil || got.String() != "http://10.0.0.1:8080" {
+		t.Errorf("BuildConfig alpha = %v, want propagation", got)
+	}
+	if got := bc.UpstreamProxyForListener("beta"); got == nil || got.String() != "http://10.0.0.2:9090" {
+		t.Errorf("BuildConfig beta = %v, want propagation", got)
+	}
+
+	// Clear alpha; beta unaffected.
+	mgr.ClearUpstreamProxyForListener("alpha")
+	if got := mgr.UpstreamProxyForListener("alpha"); got != "" {
+		t.Errorf("after clear, alpha = %q, want empty", got)
+	}
+	if got := bc.UpstreamProxyForListener("alpha"); got != nil {
+		t.Errorf("after clear, BuildConfig alpha = %v, want nil", got)
+	}
+	if got := mgr.UpstreamProxyForListener("beta"); got != "http://10.0.0.2:9090" {
+		t.Errorf("clearing alpha perturbed beta: beta = %q", got)
+	}
+	if got := bc.UpstreamProxyForListener("beta"); got == nil {
+		t.Errorf("clearing alpha cleared BuildConfig beta entry")
+	}
+}
+
+// TestManager_SetUpstreamProxy_LegacyAliasesDefault verifies that the
+// legacy SetUpstreamProxy entry point now writes to the default-listener
+// per-listener slot (USK-826) so the historical "single URL" status
+// accessor keeps working without enabling the multi-listener footgun.
+func TestManager_SetUpstreamProxy_LegacyAliasesDefault(t *testing.T) {
+	bc := &connector.BuildConfig{}
+	mgr, err := NewManager(ManagerConfig{
+		Logger:       silentLogger(),
+		StackFactory: func(_ context.Context, _, _ string) (*Stack, error) { return nil, errors.New("unused") },
+		BuildConfig:  bc,
+	})
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	mgr.SetUpstreamProxy("http://127.0.0.1:1234")
+
+	// Manager-level status accessor (legacy single-URL API).
+	if got := mgr.UpstreamProxy(); got != "http://127.0.0.1:1234" {
+		t.Errorf("UpstreamProxy = %q, want round-trip", got)
+	}
+	// Per-listener accessor mirrors it (under DefaultListenerName).
+	if got := mgr.UpstreamProxyForListener(DefaultListenerName); got != "http://127.0.0.1:1234" {
+		t.Errorf("UpstreamProxyForListener(default) = %q, want round-trip", got)
+	}
+	// BuildConfig default-listener entry populated; per-listener accessor
+	// for OTHER names returns nil (USK-826: no fan-out to all listeners).
+	if got := bc.UpstreamProxyForListener(DefaultListenerName); got == nil {
+		t.Errorf("BuildConfig default missing")
+	}
+	if got := bc.UpstreamProxyForListener("beta"); got != nil {
+		t.Errorf("legacy SetUpstreamProxy leaked to listener beta: %v", got)
+	}
+}
+
+// TestManager_ListenerStatuses_IncludesUpstreamProxy verifies that the
+// per-listener status snapshot surfaces the upstream_proxy URL set via
+// SetUpstreamProxyForListener (USK-826). The MCP query_tool consumes
+// this to populate per-listener upstream_proxy in status reports.
+func TestManager_ListenerStatuses_IncludesUpstreamProxy(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	mgr := newTestManager(t)
+	if err := mgr.StartNamed(ctx, "alpha", "127.0.0.1:0"); err != nil {
+		t.Fatalf("StartNamed(alpha): %v", err)
+	}
+	if err := mgr.StartNamed(ctx, "beta", "127.0.0.1:0"); err != nil {
+		t.Fatalf("StartNamed(beta): %v", err)
+	}
+	defer mgr.StopAll(context.Background())
+
+	mgr.SetUpstreamProxyForListener("alpha", "http://upstream-a.example.com:8080")
+	mgr.SetUpstreamProxyForListener("beta", "http://upstream-b.example.com:9090")
+
+	statuses := mgr.ListenerStatuses()
+	if len(statuses) != 2 {
+		t.Fatalf("got %d statuses, want 2", len(statuses))
+	}
+	got := map[string]string{}
+	for _, s := range statuses {
+		got[s.Name] = s.UpstreamProxy
+	}
+	if got["alpha"] != "http://upstream-a.example.com:8080" {
+		t.Errorf("alpha.UpstreamProxy = %q", got["alpha"])
+	}
+	if got["beta"] != "http://upstream-b.example.com:9090" {
+		t.Errorf("beta.UpstreamProxy = %q", got["beta"])
+	}
+}
+
+// TestManager_UpstreamProxyForListener_NilBuildConfig tolerates a Manager
+// constructed without a BuildConfig (test-only paths). Status mutations
+// must not panic and the accessor must round-trip the string form.
+func TestManager_UpstreamProxyForListener_NilBuildConfig(t *testing.T) {
+	mgr, err := NewManager(ManagerConfig{
+		Logger:       silentLogger(),
+		StackFactory: func(_ context.Context, _, _ string) (*Stack, error) { return nil, errors.New("unused") },
+		// BuildConfig intentionally nil.
+	})
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	mgr.SetUpstreamProxyForListener("alpha", "http://10.0.0.1:8080")
+	if got := mgr.UpstreamProxyForListener("alpha"); got != "http://10.0.0.1:8080" {
+		t.Errorf("alpha = %q, want round-trip", got)
+	}
+}

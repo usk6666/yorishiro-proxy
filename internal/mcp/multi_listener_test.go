@@ -437,3 +437,272 @@ func TestQueryStatus_OnlyNamedListeners_RunningTrue(t *testing.T) {
 		t.Errorf("listener_count = %d, want 1", out.ListenerCount)
 	}
 }
+
+// TestConfigure_UpstreamProxy_PerListenerScope verifies the USK-826 fix:
+// configure { name: "B", upstream_proxy: "..." } applies ONLY to listener
+// B; listener A's upstream-proxy slot stays clear. The canonical
+// repro of the original self-recursion bug — pre-USK-826, setting
+// upstream_proxy on B propagated to A and any traffic through A would
+// recurse through B's upstream URL.
+func TestConfigure_UpstreamProxy_PerListenerScope(t *testing.T) {
+	manager := newTestProxybuildManager(t)
+	cs := setupMultiListenerTestSession(t, manager)
+	defer manager.StopAll(context.Background())
+
+	// Start two listeners.
+	for _, name := range []string{"alpha", "beta"} {
+		result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+			Name: "proxy_start",
+			Arguments: map[string]any{
+				"name":        name,
+				"listen_addr": "127.0.0.1:0",
+			},
+		})
+		if err != nil {
+			t.Fatalf("proxy_start(%s): %v", name, err)
+		}
+		if result.IsError {
+			t.Fatalf("proxy_start(%s) failed: %v", name, result.Content)
+		}
+	}
+
+	// Configure upstream_proxy on listener beta only.
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "configure",
+		Arguments: map[string]any{
+			"name":           "beta",
+			"upstream_proxy": "http://127.0.0.1:65432",
+		},
+	})
+	if err != nil {
+		t.Fatalf("configure(beta): %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("configure(beta) failed: %v", result.Content)
+	}
+
+	// Verify manager-level state: beta has it, alpha does not.
+	if got := manager.UpstreamProxyForListener("alpha"); got != "" {
+		t.Errorf("alpha leaked: %q (USK-826: per-listener scoping broken)", got)
+	}
+	if got := manager.UpstreamProxyForListener("beta"); got != "http://127.0.0.1:65432" {
+		t.Errorf("beta = %q, want round-trip", got)
+	}
+
+	// Verify the query/status surface reflects per-listener upstream proxy.
+	statusResult, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name:      "query",
+		Arguments: map[string]any{"resource": "status"},
+	})
+	if err != nil {
+		t.Fatalf("query/status: %v", err)
+	}
+	var status queryStatusResult
+	tc := statusResult.Content[0].(*gomcp.TextContent)
+	if err := json.Unmarshal([]byte(tc.Text), &status); err != nil {
+		t.Fatalf("unmarshal status: %v", err)
+	}
+	got := map[string]string{}
+	for _, l := range status.Listeners {
+		got[l.Name] = l.UpstreamProxy
+	}
+	if got["alpha"] != "" {
+		t.Errorf("alpha listener entry has upstream_proxy=%q, want empty", got["alpha"])
+	}
+	if got["beta"] != "http://127.0.0.1:65432" {
+		t.Errorf("beta listener entry upstream_proxy = %q, want http://127.0.0.1:65432", got["beta"])
+	}
+}
+
+// TestConfigure_UpstreamProxy_DefaultListenerWhenNameOmitted verifies that
+// configure { upstream_proxy: "..." } without a name field targets ONLY
+// the default listener — not a fan-out to every running listener
+// (USK-826). The pre-fix behaviour treated this as a global override.
+func TestConfigure_UpstreamProxy_DefaultListenerWhenNameOmitted(t *testing.T) {
+	manager := newTestProxybuildManager(t)
+	cs := setupMultiListenerTestSession(t, manager)
+	defer manager.StopAll(context.Background())
+
+	// Start default + one named listener.
+	for _, name := range []string{connector.DefaultListenerName, "beta"} {
+		result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+			Name: "proxy_start",
+			Arguments: map[string]any{
+				"name":        name,
+				"listen_addr": "127.0.0.1:0",
+			},
+		})
+		if err != nil || result.IsError {
+			t.Fatalf("proxy_start(%s): err=%v result=%v", name, err, result)
+		}
+	}
+
+	// Omit "name" — should target the default listener.
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "configure",
+		Arguments: map[string]any{
+			"upstream_proxy": "http://default.example.com:8080",
+		},
+	})
+	if err != nil {
+		t.Fatalf("configure: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("configure failed: %v", result.Content)
+	}
+
+	if got := manager.UpstreamProxyForListener(connector.DefaultListenerName); got != "http://default.example.com:8080" {
+		t.Errorf("default listener missing override: %q", got)
+	}
+	if got := manager.UpstreamProxyForListener("beta"); got != "" {
+		t.Errorf("beta leaked: %q (USK-826)", got)
+	}
+}
+
+// TestConfigure_UpstreamProxy_RejectsMissingListener verifies that
+// configure { name: "missing", upstream_proxy: "..." } returns an error
+// (rather than silently dropping the directive) when no listener of that
+// name is running (USK-826 design decision U1).
+func TestConfigure_UpstreamProxy_RejectsMissingListener(t *testing.T) {
+	manager := newTestProxybuildManager(t)
+	cs := setupMultiListenerTestSession(t, manager)
+	defer manager.StopAll(context.Background())
+
+	// Start only one listener.
+	cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "proxy_start",
+		Arguments: map[string]any{
+			"name":        "alpha",
+			"listen_addr": "127.0.0.1:0",
+		},
+	})
+
+	// Target a non-existent listener.
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "configure",
+		Arguments: map[string]any{
+			"name":           "missing",
+			"upstream_proxy": "http://127.0.0.1:65432",
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if !result.IsError {
+		t.Fatalf("expected IsError=true for missing listener; got success: %v", result.Content)
+	}
+}
+
+// TestConfigure_UpstreamProxy_RejectsWhenDefaultNotRunning verifies the
+// USK-826 design decision U1: configure { upstream_proxy } with no
+// running default listener returns an error rather than silently
+// installing an override that no traffic will consult.
+func TestConfigure_UpstreamProxy_RejectsWhenDefaultNotRunning(t *testing.T) {
+	manager := newTestProxybuildManager(t)
+	cs := setupMultiListenerTestSession(t, manager)
+	defer manager.StopAll(context.Background())
+
+	// Start ONLY a named listener — no default.
+	cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "proxy_start",
+		Arguments: map[string]any{
+			"name":        "alpha",
+			"listen_addr": "127.0.0.1:0",
+		},
+	})
+
+	// Omit "name" — implies "default", which is not running.
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "configure",
+		Arguments: map[string]any{
+			"upstream_proxy": "http://127.0.0.1:65432",
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if !result.IsError {
+		t.Fatalf("expected IsError=true; default listener not running but configure succeeded: %v", result.Content)
+	}
+}
+
+// TestProxyStart_UpstreamProxy_PerListenerScope verifies that
+// proxy_start { upstream_proxy } targets the listener being started
+// (USK-826). Pre-USK-826, the URL was installed globally and a second
+// proxy_start without upstream_proxy would inherit it via the global
+// slot.
+func TestProxyStart_UpstreamProxy_PerListenerScope(t *testing.T) {
+	manager := newTestProxybuildManager(t)
+	cs := setupMultiListenerTestSession(t, manager)
+	defer manager.StopAll(context.Background())
+
+	// Start alpha with no upstream_proxy.
+	if r, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "proxy_start",
+		Arguments: map[string]any{
+			"name":        "alpha",
+			"listen_addr": "127.0.0.1:0",
+		},
+	}); err != nil || r.IsError {
+		t.Fatalf("proxy_start(alpha): err=%v result=%v", err, r)
+	}
+
+	// Start beta with an explicit upstream_proxy URL.
+	if r, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "proxy_start",
+		Arguments: map[string]any{
+			"name":           "beta",
+			"listen_addr":    "127.0.0.1:0",
+			"upstream_proxy": "http://beta-upstream.example.com:8888",
+		},
+	}); err != nil || r.IsError {
+		t.Fatalf("proxy_start(beta): err=%v result=%v", err, r)
+	}
+
+	if got := manager.UpstreamProxyForListener("alpha"); got != "" {
+		t.Errorf("alpha inherited beta's upstream_proxy: %q (USK-826)", got)
+	}
+	if got := manager.UpstreamProxyForListener("beta"); got != "http://beta-upstream.example.com:8888" {
+		t.Errorf("beta = %q, want round-trip", got)
+	}
+}
+
+// TestProxyStart_Reset_PreservesOtherListenerOverride verifies that
+// proxy_start of listener A does NOT clear listener B's upstream_proxy
+// override (USK-826 design decision U4). Pre-USK-826 reset cleared the
+// process-global slot, which wiped every listener's URL.
+func TestProxyStart_Reset_PreservesOtherListenerOverride(t *testing.T) {
+	manager := newTestProxybuildManager(t)
+	cs := setupMultiListenerTestSession(t, manager)
+	defer manager.StopAll(context.Background())
+
+	// Start beta first with an upstream_proxy.
+	if r, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "proxy_start",
+		Arguments: map[string]any{
+			"name":           "beta",
+			"listen_addr":    "127.0.0.1:0",
+			"upstream_proxy": "http://beta-upstream.example.com:8888",
+		},
+	}); err != nil || r.IsError {
+		t.Fatalf("proxy_start(beta): err=%v result=%v", err, r)
+	}
+
+	// Now start alpha — its reset path must scope to alpha only.
+	if r, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "proxy_start",
+		Arguments: map[string]any{
+			"name":        "alpha",
+			"listen_addr": "127.0.0.1:0",
+		},
+	}); err != nil || r.IsError {
+		t.Fatalf("proxy_start(alpha): err=%v result=%v", err, r)
+	}
+
+	if got := manager.UpstreamProxyForListener("beta"); got != "http://beta-upstream.example.com:8888" {
+		t.Errorf("beta upstream_proxy wiped by alpha start: %q (USK-826)", got)
+	}
+	if got := manager.UpstreamProxyForListener("alpha"); got != "" {
+		t.Errorf("alpha = %q, want empty", got)
+	}
+}

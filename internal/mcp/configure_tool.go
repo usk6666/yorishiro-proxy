@@ -10,6 +10,7 @@ import (
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/usk6666/yorishiro-proxy/internal/connector"
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
+	"github.com/usk6666/yorishiro-proxy/internal/proxybuild"
 	"github.com/usk6666/yorishiro-proxy/internal/rules/common"
 	grpcrules "github.com/usk6666/yorishiro-proxy/internal/rules/grpc"
 	httprules "github.com/usk6666/yorishiro-proxy/internal/rules/http"
@@ -23,11 +24,28 @@ type configureInput struct {
 	// "replace" replaces the specified fields entirely.
 	Operation string `json:"operation,omitempty" jsonschema:"operation type: merge (default) or replace"`
 
+	// Name scopes per-listener configuration sections to a specific
+	// listener (USK-826). Currently scopes upstream_proxy only — all
+	// other sections (capture_scope, tls_passthrough, intercept_rules,
+	// auto_transform, ...) remain process-global regardless of this
+	// field. Empty defaults to the "default" listener.
+	//
+	// Returns an error when the named listener is not running, to
+	// surface chained-MITM misconfiguration loudly rather than
+	// silently dropping the per-listener directive.
+	Name string `json:"name,omitempty" jsonschema:"listener name; currently scopes upstream_proxy only, other sections remain process-global (default: 'default')"`
+
 	// UpstreamProxy configures the upstream proxy URL.
 	// Set to a proxy URL (e.g. "http://proxy:3128" or "socks5://proxy:1080") to route traffic through it.
 	// Set to empty string "" to disable (direct connection).
 	// If omitted (nil pointer), the setting is not changed.
-	UpstreamProxy *string `json:"upstream_proxy,omitempty" jsonschema:"upstream proxy URL (empty string to disable, omit to keep current)"`
+	//
+	// USK-826: scoped to the listener identified by the top-level "name"
+	// field (default: "default"). Multi-listener chained MITM (listener
+	// B routes its traffic through listener A) requires per-listener
+	// scoping; setting upstream_proxy without "name" applies to the
+	// default listener only.
+	UpstreamProxy *string `json:"upstream_proxy,omitempty" jsonschema:"upstream proxy URL scoped to the listener named by 'name' (empty string to disable, omit to keep current)"`
 
 	// TLSPassthrough configures TLS passthrough patterns.
 	// For merge: use add/remove arrays.
@@ -322,7 +340,10 @@ func (s *Server) registerConfigure() {
 			"intercept rules + queue, auto-transform, SOCKS5 auth, TLS fingerprint, connection/timeout limits). " +
 			"operation='merge' (default) applies incremental add/remove changes; 'replace' replaces entire sections. " +
 			"Only specified sections are modified. Settings are session-only — to persist them use the config file. " +
-			"See yorishiro://help/configure.",
+			"The optional top-level 'name' field scopes upstream_proxy to a single listener (default: 'default'); " +
+			"other sections (capture_scope, tls_passthrough, intercept_rules, auto_transform, ...) currently remain " +
+			"process-global regardless of 'name'. Multi-listener chained MITM requires per-listener upstream_proxy " +
+			"scoping (USK-826). See yorishiro://help/configure.",
 	}, s.handleConfigure)
 }
 
@@ -566,19 +587,56 @@ func (s *Server) configureCaptureScope(operation string, in *configureCaptureSco
 }
 
 // configureUpstreamProxy applies upstream proxy configuration if provided.
+//
+// USK-826: the URL is scoped to the listener named by input.Name; empty
+// defaults to the "default" listener. The named listener MUST be running
+// — otherwise the call returns an error so chained-MITM misconfiguration
+// surfaces loudly rather than silently dropping the directive (this is
+// consistent with the proxy_stop / proxy_start error semantics).
 func (s *Server) configureUpstreamProxy(input configureInput, result *configureResult) error {
 	if input.UpstreamProxy == nil {
 		return nil
 	}
-	if err := s.applyUpstreamProxy(*input.UpstreamProxy); err != nil {
+	listenerName := input.Name
+	if listenerName == "" {
+		listenerName = proxybuild.DefaultListenerName
+	}
+
+	// Verify the listener is running before mutating its slot. Use the
+	// status surface (listenerStatuses) instead of a dedicated probe so
+	// the check sees the live manager state, not a stale config.
+	if !listenerRunning(s.connector.manager, listenerName) {
+		if listenerName == proxybuild.DefaultListenerName {
+			return fmt.Errorf("upstream_proxy: %w", proxybuild.ErrNotRunning)
+		}
+		return fmt.Errorf("upstream_proxy: listener %q: %w", listenerName, proxybuild.ErrListenerNotFound)
+	}
+
+	if err := s.applyUpstreamProxy(*input.UpstreamProxy, listenerName); err != nil {
 		return fmt.Errorf("upstream_proxy: %w", err)
 	}
 	current := ""
 	if !managerIsNil(s.connector.manager) {
-		current = connector.RedactProxyURL(s.connector.manager.UpstreamProxy())
+		current = connector.RedactProxyURL(s.connector.manager.UpstreamProxyForListener(listenerName))
 	}
 	result.UpstreamProxy = &current
 	return nil
+}
+
+// listenerRunning reports whether the named listener appears in the
+// manager's current listener set. Returns false when m is nil or wraps a
+// typed-nil. Used by configure to error out when the caller targets a
+// listener that is not running.
+func listenerRunning(m proxyManager, name string) bool {
+	if managerIsNil(m) {
+		return false
+	}
+	for _, st := range listenerStatuses(m) {
+		if st.Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 // configureMergePassthrough applies merge (delta) TLS passthrough changes if provided.

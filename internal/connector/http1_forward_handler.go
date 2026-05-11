@@ -146,11 +146,12 @@ func NewHTTP1ForwardHandler(cfg HTTP1ForwardHandlerConfig) HandlerFunc {
 
 		// Step 4: Dial upstream plain TCP. TLSConfig=nil → DialUpstreamRaw
 		// returns a plain net.Conn with no TLS handshake. UpstreamProxy is
-		// honored when configured. EffectiveUpstreamProxy is consulted so
-		// runtime proxy_start updates reach this dial (USK-734).
+		// honored when configured. EffectiveUpstreamProxyForCtx is
+		// consulted so runtime proxy_start / configure updates reach this
+		// dial AND per-listener overrides apply (USK-734 + USK-826).
 		var dialOpts DialRawOpts
 		if cfg.BuildCfg != nil {
-			dialOpts.UpstreamProxy = cfg.BuildCfg.EffectiveUpstreamProxy()
+			dialOpts.UpstreamProxy = cfg.BuildCfg.EffectiveUpstreamProxyForCtx(ctx)
 		}
 		dialOpts.DialTimeout = dialTimeoutPlainHTTP
 

@@ -1139,11 +1139,16 @@ func (s *Server) handleQueryMessages(ctx context.Context, input queryInput) (*go
 // --- status resource ---
 
 // queryListenerStatusEntry is a single listener entry in the status response.
+//
+// UpstreamProxy (USK-826) carries the redacted per-listener upstream-proxy
+// URL; an empty string means "direct dial" or "inherits the global / boot-time
+// fallback". Multi-listener chained MITM is the canonical multi-value case.
 type queryListenerStatusEntry struct {
 	Name              string `json:"name"`
 	ListenAddr        string `json:"listen_addr"`
 	ActiveConnections int    `json:"active_connections"`
 	UptimeSeconds     int64  `json:"uptime_seconds"`
+	UpstreamProxy     string `json:"upstream_proxy,omitempty"`
 }
 
 // queryStatusResult is the response for the status resource.
@@ -1202,7 +1207,16 @@ func (s *Server) populateManagerStatus(result *queryStatusResult) {
 	if len(statuses) > 0 {
 		result.Listeners = make([]queryListenerStatusEntry, 0, len(statuses))
 		for _, st := range statuses {
-			result.Listeners = append(result.Listeners, queryListenerStatusEntry(st))
+			// USK-826: redact per-listener upstream_proxy at publish time
+			// (the manager keeps the raw form for in-process inspection).
+			entry := queryListenerStatusEntry{
+				Name:              st.Name,
+				ListenAddr:        st.ListenAddr,
+				ActiveConnections: st.ActiveConnections,
+				UptimeSeconds:     st.UptimeSeconds,
+				UpstreamProxy:     connector.RedactProxyURL(st.UpstreamProxy),
+			}
+			result.Listeners = append(result.Listeners, entry)
 		}
 		// Update Running to true if any listener is running (not just default).
 		if !result.Running && len(statuses) > 0 {

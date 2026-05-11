@@ -2,6 +2,7 @@ package connector
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"strconv"
 
@@ -17,7 +18,7 @@ import (
 //   - ClientCert hash (first DER bytes via hashCert; resolved per-host)
 //   - CA bundle hash (when a per-host CA bundle is in effect)
 //   - UTLSProfile (TLSFingerprint)
-//   - UpstreamProxy URL string
+//   - UpstreamProxy URL string (resolved per-listener via ctx; USK-826)
 //
 // Two connections with identical values above produce identical keys and
 // therefore share a pooled upstream Layer. Callers MUST pass the
@@ -29,7 +30,14 @@ import (
 // USK-737: hostTLS folds the runtime-mutable HostTLSRegistry overlay into
 // the key so a `proxy_start(client_cert=...)` (or CA / TLS-verify swap)
 // invalidates pooled H2 connections established under the prior overlay.
-func poolKeyForH2(target string, cfg *BuildConfig, hostTLS *resolvedTLS) pool.PoolKey {
+//
+// USK-826: ctx is consulted via cfg.EffectiveUpstreamProxyForCtx so the
+// per-listener upstream-proxy override participates in the pool key. Two
+// listeners (A and B) with distinct upstream_proxy must NOT share pooled
+// H2 connections — otherwise listener B's "send my traffic through A"
+// dial would silently reuse a pool entry minted under listener A's own
+// (no-proxy / different-proxy) dial state, defeating the per-listener fix.
+func poolKeyForH2(ctx context.Context, target string, cfg *BuildConfig, hostTLS *resolvedTLS) pool.PoolKey {
 	var buf bytes.Buffer
 
 	// ServerName. Kept under a length prefix so "a"+"b" never collides with
@@ -73,13 +81,16 @@ func poolKeyForH2(target string, cfg *BuildConfig, hostTLS *resolvedTLS) pool.Po
 	}
 	writeField(&buf, "utls", profile)
 
-	// Use EffectiveUpstreamProxy so a runtime proxy_start / configure URL
-	// switch produces a distinct pool key — pooled h2 Layers established
-	// via the previous proxy must not be reused for dials that should now
-	// transit a different upstream proxy (USK-734).
+	// Use EffectiveUpstreamProxyForCtx so a runtime proxy_start / configure
+	// URL switch produces a distinct pool key AND per-listener overrides
+	// (USK-826) participate in keying. Pooled h2 Layers established under
+	// the previous proxy must not be reused for dials that should now
+	// transit a different upstream proxy (USK-734); pooled entries
+	// established for listener A must not be reused for listener B
+	// (USK-826).
 	proxyURL := ""
 	if cfg != nil {
-		if u := cfg.EffectiveUpstreamProxy(); u != nil {
+		if u := cfg.EffectiveUpstreamProxyForCtx(ctx); u != nil {
 			proxyURL = u.String()
 		}
 	}
