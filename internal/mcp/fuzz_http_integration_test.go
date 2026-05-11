@@ -237,6 +237,15 @@ func TestFuzzHTTP_PathPositionGeneratesVariants(t *testing.T) {
 		s, err := store.GetStream(context.Background(), row.StreamID)
 		if err != nil || s == nil {
 			t.Errorf("variants[%d]: GetStream(%s) err=%v", i, row.StreamID, err)
+			continue
+		}
+		// USK-832: every variant Stream must transition out of
+		// State="active" once the exchange returns. Without the
+		// finalizeResendStream call in runFuzzHTTPSingleVariant, fuzz
+		// bypasses session.RunSession's OnComplete hook so the rows
+		// would stay pinned at "active".
+		if s.State != "complete" {
+			t.Errorf("variants[%d].State = %q, want %q (USK-832: fuzz_http must finalise variant stream lifecycle)", i, s.State, "complete")
 		}
 	}
 
@@ -885,7 +894,7 @@ func TestFuzzHTTP_PersistsFuzzJobAndResults(t *testing.T) {
 // it without writing a response — this produces an "upstream receive"
 // error per variant regardless of which payload was substituted.
 func TestFuzzHTTP_ErrorVariantRecordedAsFuzzResult(t *testing.T) {
-	cs, _, _, _ := setupFuzzHTTPSession(t)
+	cs, store, _, _ := setupFuzzHTTPSession(t)
 
 	// Listener that accepts then immediately closes — emulates a
 	// dead-on-arrival upstream.
@@ -931,6 +940,26 @@ func TestFuzzHTTP_ErrorVariantRecordedAsFuzzResult(t *testing.T) {
 		}
 		if v.StatusCode != 0 {
 			t.Errorf("variants[%d]: StatusCode = %d, want 0 on upstream-receive error", i, v.StatusCode)
+		}
+	}
+
+	// USK-832: every variant Stream must transition to State="error"
+	// when the exchange failed. Without finalizeResendStream in
+	// runFuzzHTTPSingleVariant, the rows stay pinned at "active" and
+	// stream-state filtering (`query { resource: "flows", filter:
+	// { state: "active" } }`) would surface completed-but-failed fuzz
+	// variants as still-running.
+	for i, row := range result.Variants {
+		if row.StreamID == "" {
+			continue
+		}
+		s, err := store.GetStream(context.Background(), row.StreamID)
+		if err != nil || s == nil {
+			t.Errorf("variants[%d]: GetStream(%s) err=%v", i, row.StreamID, err)
+			continue
+		}
+		if s.State != "error" {
+			t.Errorf("variants[%d].State = %q, want %q (USK-832: fuzz_http must finalise failed variants as error)", i, s.State, "error")
 		}
 	}
 

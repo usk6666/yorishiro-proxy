@@ -560,6 +560,14 @@ func (s *Server) runFuzzHTTPSingleVariant(ctx context.Context, plan *fuzzHTTPPla
 	defer cancel()
 
 	respEnv, err := s.runFuzzHTTPSingleExchange(rtCtx, variantEnv, dial, p)
+	// USK-832 (parity with USK-789 for resend_http): fuzz_http bypasses
+	// session.RunSession so the proxy-path's OnComplete-driven Stream
+	// finalisation never fires. Without this, the per-variant Stream
+	// created by RecordStep stays pinned at State="active" forever.
+	// Use the parent ctx (not rtCtx) so the terminal UPDATE lands even
+	// when the per-variant request timeout expired — matches the
+	// applyResendHTTPTag precedent below.
+	finalizeResendStream(ctx, s.flowStore.store, variantEnv.StreamID, err)
 	if err != nil {
 		return row, 0, err
 	}
