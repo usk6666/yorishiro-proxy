@@ -39,6 +39,8 @@ import (
 	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/google/uuid"
 )
 
 // fuzzWSInput is the typed input for the fuzz_ws tool.
@@ -96,7 +98,14 @@ type fuzzWSPosition struct {
 }
 
 // fuzzWSResult is the structured response of the fuzz_ws tool.
+//
+// fuzz_id is the UUID PK of the corresponding fuzz_jobs row (USK-831,
+// mirrors USK-827). AI agents chain this with
+// `query { resource: "fuzz_results", filter: { fuzz_id: ..., outliers_only:
+// true } }` to surface per-run outlier variants without re-running the
+// fuzz job.
 type fuzzWSResult struct {
+	FuzzID            string             `json:"fuzz_id"`
 	TotalVariants     int                `json:"total_variants"`
 	CompletedVariants int                `json:"completed_variants"`
 	StoppedReason     string             `json:"stopped_reason,omitempty"`
@@ -146,15 +155,18 @@ func (s *Server) registerFuzzWS() {
 // upgrade + pipeline execution → result aggregation.
 func (s *Server) handleFuzzWS(ctx context.Context, _ *gomcp.CallToolRequest, input fuzzWSInput) (*gomcp.CallToolResult, *fuzzWSResult, error) {
 	start := time.Now()
+	fuzzID := uuid.NewString()
 	slog.DebugContext(ctx, "MCP tool invoked",
 		"tool", "fuzz_ws",
 		"flow_id", input.FlowID,
+		"fuzz_id", fuzzID,
 		"opcode", input.Opcode,
 		"positions", len(input.Positions),
 	)
 	defer func() {
 		slog.DebugContext(ctx, "MCP tool completed",
 			"tool", "fuzz_ws",
+			"fuzz_id", fuzzID,
 			"duration_ms", time.Since(start).Milliseconds(),
 		)
 	}()
@@ -173,13 +185,25 @@ func (s *Server) handleFuzzWS(ctx context.Context, _ *gomcp.CallToolRequest, inp
 		timeout = time.Duration(*input.TimeoutMs) * time.Millisecond
 	}
 
-	rows, completed, stopReason, err := s.runFuzzWSVariants(ctx, plan, timeout, input.StopOnClose, input.Tag)
-	if err != nil {
-		return nil, nil, fmt.Errorf("fuzz_ws: %w", err)
+	// USK-831: insert fuzz_jobs row before the variant loop so any
+	// concurrent `query fuzz_jobs` observes the run. Use a fresh
+	// background ctx so caller-side cancel cannot prevent the row from
+	// being created — the finalize UPDATE below relies on this row.
+	s.saveFuzzWSJob(context.Background(), fuzzID, &input, plan)
+
+	rows, completed, stopReason, runErr := s.runFuzzWSVariants(ctx, plan, timeout, input.StopOnClose, input.Tag, fuzzID)
+
+	// Use a fresh background ctx so the closing UPDATE always lands,
+	// even on caller-side ctx cancel.
+	s.finalizeFuzzWSJob(context.Background(), fuzzID, rows, completed, stopReason, runErr)
+
+	if runErr != nil {
+		return nil, nil, fmt.Errorf("fuzz_ws: %w", runErr)
 	}
 
 	duration := time.Since(start)
 	return nil, &fuzzWSResult{
+		FuzzID:            fuzzID,
 		TotalVariants:     plan.totalVariants,
 		CompletedVariants: completed,
 		StoppedReason:     stopReason,

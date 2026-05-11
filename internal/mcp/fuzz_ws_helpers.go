@@ -24,8 +24,10 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/url"
 	"time"
@@ -33,6 +35,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
+	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/ws"
 	"github.com/usk6666/yorishiro-proxy/internal/pipeline"
 )
@@ -191,8 +194,14 @@ func (s *Server) buildFuzzWSPlan(ctx context.Context, input *fuzzWSInput) (*fuzz
 // shared resend_ws pipeline. Returns the per-variant rows, the count
 // of completed variants, and an optional stop reason ("" when all
 // variants ran to completion).
-func (s *Server) runFuzzWSVariants(ctx context.Context, plan *fuzzWSPlan, timeout time.Duration, stopOnClose bool, tag string) ([]fuzzWSVariantRow, int, string, error) {
-	pipe := s.buildResendWSPipeline(plan.encoders)
+//
+// USK-831: persists one fuzz_results row per variant via
+// FuzzStore.SaveFuzzResult so `query fuzz_results { fuzz_id }` is
+// populated for both successful and error variants. Store-write
+// failures are non-fatal (slog.Warn + continue) — the wire data is on
+// disk via RecordStep and remains the source of truth.
+func (s *Server) runFuzzWSVariants(ctx context.Context, plan *fuzzWSPlan, timeout time.Duration, stopOnClose bool, tag, fuzzID string) ([]fuzzWSVariantRow, int, string, error) {
+	pipe := s.buildFuzzWSPipeline(plan.encoders)
 
 	rows := make([]fuzzWSVariantRow, 0, plan.totalVariants)
 	indices := make([]int, len(plan.positions))
@@ -234,6 +243,12 @@ func (s *Server) runFuzzWSVariants(ctx context.Context, plan *fuzzWSPlan, timeou
 		rows = append(rows, row)
 		completed++
 
+		// USK-831: persist per-variant fuzz_results row so the aggregation
+		// view (`query fuzz_results { fuzz_id }` + USK-278 outliers_only)
+		// is populated. Save failures are non-fatal — wire data on disk via
+		// RecordStep is the source of truth.
+		s.saveFuzzWSResult(ctx, fuzzID, variantIdx, row, payloads)
+
 		nextIndicesWS(indices, plan.positions)
 
 		if stopOnClose && gotClose {
@@ -241,6 +256,185 @@ func (s *Server) runFuzzWSVariants(ctx context.Context, plan *fuzzWSPlan, timeou
 		}
 	}
 	return rows, completed, "", nil
+}
+
+// fuzzWSJobConfig is the JSON payload persisted to fuzz_jobs.config.
+// Intentionally records only structural metadata: position paths,
+// payload counts, encoding labels, and the stop_on_close flag. Raw
+// payload values are deliberately excluded — they can be re-derived
+// from each Stream's recorded Flow, and including them here would
+// inflate the row and surface potentially-sensitive payloads in the
+// aggregation table.
+type fuzzWSJobConfig struct {
+	Positions     []fuzzWSJobPosition `json:"positions"`
+	StopOnClose   bool                `json:"stop_on_close"`
+	TotalVariants int                 `json:"total_variants"`
+}
+
+// fuzzWSJobPosition is one position entry inside fuzz_jobs.config.
+// Only structural metadata is recorded — see fuzzWSJobConfig for the
+// payload-omission rationale.
+type fuzzWSJobPosition struct {
+	Path         string `json:"path"`
+	PayloadCount int    `json:"payload_count"`
+	Encoding     string `json:"encoding,omitempty"`
+}
+
+// saveFuzzWSJob persists the initial fuzz_jobs row at status="running".
+// Called once before the variant loop starts. Store-write failures are
+// logged at slog.Warn and ignored — the fuzz run itself is not blocked
+// because aggregation persistence is best-effort.
+//
+// fuzz_jobs.stream_id is set from input.FlowID when the caller seeded
+// the run from a recorded flow; otherwise it is left empty.
+func (s *Server) saveFuzzWSJob(ctx context.Context, fuzzID string, input *fuzzWSInput, plan *fuzzWSPlan) {
+	if s.jobRunner == nil || s.jobRunner.fuzzStore == nil {
+		return
+	}
+
+	cfg := fuzzWSJobConfig{
+		Positions:     make([]fuzzWSJobPosition, 0, len(input.Positions)),
+		StopOnClose:   input.StopOnClose,
+		TotalVariants: plan.totalVariants,
+	}
+	for _, p := range input.Positions {
+		cfg.Positions = append(cfg.Positions, fuzzWSJobPosition{
+			Path:         p.Path,
+			PayloadCount: len(p.Payloads),
+			Encoding:     p.Encoding,
+		})
+	}
+	cfgJSON, err := json.Marshal(cfg)
+	if err != nil {
+		cfgJSON = []byte("{}")
+	}
+
+	job := &flow.FuzzJob{
+		ID:             fuzzID,
+		StreamID:       input.FlowID, // seed stream when replaying a recorded flow
+		Config:         string(cfgJSON),
+		Status:         "running",
+		Tag:            input.Tag,
+		CreatedAt:      time.Now().UTC(),
+		Total:          plan.totalVariants,
+		CompletedCount: 0,
+		ErrorCount:     0,
+	}
+	if err := s.jobRunner.fuzzStore.SaveFuzzJob(ctx, job); err != nil {
+		slog.WarnContext(ctx, "fuzz_ws: save fuzz_jobs row failed",
+			"fuzz_id", fuzzID,
+			"error", err,
+		)
+	}
+}
+
+// finalizeFuzzWSJob updates the fuzz_jobs row at end of run with the
+// final status / completed_at / counts. Called with a fresh background
+// context so caller-side ctx cancel does not prevent the closing
+// UPDATE from landing.
+//
+// Status rule (mirrors USK-827): "completed" when the variant loop ran
+// to natural exhaustion OR when stop_on_close triggered (a documented
+// exit, not a failure). "error" only when the run aborted before
+// completion due to a non-stop_on_close runErr.
+func (s *Server) finalizeFuzzWSJob(ctx context.Context, fuzzID string, rows []fuzzWSVariantRow, completed int, stopReason string, runErr error) {
+	if s.jobRunner == nil || s.jobRunner.fuzzStore == nil {
+		return
+	}
+
+	now := time.Now().UTC()
+	errorCount := 0
+	for _, r := range rows {
+		if r.Error != "" {
+			errorCount++
+		}
+	}
+
+	status := "completed"
+	if runErr != nil {
+		status = "error"
+	}
+
+	existing, err := s.jobRunner.fuzzStore.GetFuzzJob(ctx, fuzzID)
+	if err != nil {
+		slog.WarnContext(ctx, "fuzz_ws: load fuzz_jobs row for finalize failed",
+			"fuzz_id", fuzzID,
+			"error", err,
+		)
+		return
+	}
+	existing.Status = status
+	existing.CompletedAt = &now
+	existing.CompletedCount = completed
+	existing.ErrorCount = errorCount
+	if err := s.jobRunner.fuzzStore.UpdateFuzzJob(ctx, existing); err != nil {
+		slog.WarnContext(ctx, "fuzz_ws: update fuzz_jobs row failed",
+			"fuzz_id", fuzzID,
+			"status", status,
+			"error", err,
+		)
+	}
+	_ = stopReason // stop_reason is recorded in the response payload; no fuzz_jobs column today
+}
+
+// saveFuzzWSResult persists a single per-variant fuzz_results row.
+// Called from the variant loop after each variant completes (success
+// or error). Save failures are logged at slog.Warn and ignored — the
+// per-variant Flow rows persisted via RecordStep are the source of
+// truth for forensic drill-down.
+//
+// Per-protocol StatusCode mapping (USK-831): WebSocket variant rows
+// have no HTTP-style status code; the closest analogue is the Close
+// frame's status code (RFC 6455 §7.4). Map row.CloseCode (uint16, 0 when
+// the terminating frame is not a Close) into FuzzResult.StatusCode (int).
+// ResponseLength gets row.PayloadSize (terminating frame payload byte
+// length).
+func (s *Server) saveFuzzWSResult(ctx context.Context, fuzzID string, index int, row fuzzWSVariantRow, payloads map[string]string) {
+	if s.jobRunner == nil || s.jobRunner.fuzzStore == nil {
+		return
+	}
+	result := &flow.FuzzResult{
+		FuzzID:         fuzzID,
+		IndexNum:       index,
+		StreamID:       row.StreamID,
+		Payloads:       flow.PayloadsToJSON(payloads),
+		StatusCode:     int(row.CloseCode),
+		ResponseLength: row.PayloadSize,
+		DurationMs:     int(row.DurationMs),
+		Error:          row.Error,
+	}
+	if err := s.jobRunner.fuzzStore.SaveFuzzResult(ctx, result); err != nil {
+		slog.WarnContext(ctx, "fuzz_ws: save fuzz_results row failed",
+			"fuzz_id", fuzzID,
+			"index", index,
+			"stream_id", row.StreamID,
+			"error", err,
+		)
+	}
+}
+
+// buildFuzzWSPipeline constructs the per-variant pipeline for fuzz_ws.
+// Mirrors buildResendWSPipeline but stamps variant Streams with
+// flow.OriginFuzz so `query flows { filter.origin: "fuzz" }` filters
+// fuzz-originated traffic away from live capture views (parity with
+// fuzz_http's OriginFuzz stamping).
+//
+// PluginStepPre and InterceptStep are intentionally absent (RFC §9.3 D1
+// resend bypass).
+func (s *Server) buildFuzzWSPipeline(encoders *pipeline.WireEncoderRegistry) *pipeline.Pipeline {
+	steps := []pipeline.Step{
+		// USK-818: BudgetStep at position #1. The synthetic Send envelope
+		// is a WSMessage, which BudgetStep filters out as "post-Upgrade".
+		pipeline.NewBudgetStep(s.misc.budgetManager),
+		pipeline.NewPluginStepPost(pluginEngineForResend(s), encoders, slog.Default()),
+		pipeline.NewRecordStep(
+			s.flowStore.store,
+			slog.Default(),
+			pipeline.WithWireEncoderRegistry(encoders),
+			pipeline.WithOrigin(flow.OriginFuzz),
+		),
+	}
+	return pipeline.New(steps...)
 }
 
 // runFuzzWSSingleVariant executes one variant: clones the base plan,
