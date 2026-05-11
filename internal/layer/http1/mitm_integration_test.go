@@ -942,6 +942,64 @@ func TestHTTPSMITM_Transform(t *testing.T) {
 	}
 }
 
+// TestHTTPSMITM_TransformResponseWithPathPattern is the USK-824 regression
+// guard. A transform rule scoped to direction:"response" + path_pattern +
+// ReplaceBody must rewrite the response body, even though response envelopes
+// carry Path=="" by the HTTPMessage field-validity contract
+// (internal/envelope/http.go). Before USK-824, matchesConditions short-circuited
+// on the empty Path and the response-side transform never fired.
+func TestHTTPSMITM_TransformResponseWithPathPattern(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	upstreamLn, _ := startUpstreamHTTPS(t, func(_ []byte) []byte {
+		body := "the secret data"
+		return []byte(fmt.Sprintf("HTTP/1.1 200 OK\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s", len(body), body))
+	})
+	defer upstreamLn.Close()
+	target := upstreamLn.Addr().String()
+
+	transformEngine := httprules.NewTransformEngine()
+	// Response transform with BOTH a path_pattern AND a body_pattern: the
+	// path_pattern must be ignored on the response side (USK-824) so that
+	// ReplaceBody actually fires.
+	transformEngine.SetRules([]httprules.TransformRule{
+		{
+			ID:          "redact-secret-on-path",
+			Enabled:     true,
+			Priority:    1,
+			Direction:   httprules.DirectionResponse,
+			PathPattern: regexp.MustCompile(`^/secret$`),
+			ActionType:  httprules.TransformReplaceBody,
+			BodyPattern: regexp.MustCompile(`secret`),
+			BodyReplace: "REDACTED",
+		},
+	})
+
+	proxyAddr, _, sessionDone := startHTTPMITMProxy(t, ctx, target, proxyOpts{
+		transformEngine: transformEngine,
+	})
+
+	rawReq := fmt.Sprintf("GET /secret HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n", target)
+	resp := connectAndSendHTTP(t, proxyAddr, target, rawReq)
+
+	select {
+	case <-sessionDone:
+	case <-time.After(15 * time.Second):
+		t.Fatal("timeout waiting for session to complete")
+	}
+
+	// --- The fix surfaces here: response body must be redacted. Without the
+	// USK-824 fix, the rule short-circuits on empty Path on the Receive side
+	// and the body stays "the secret data".
+	if !strings.Contains(resp, "the REDACTED data") {
+		t.Errorf("response body not redacted (USK-824 regression): %q", resp)
+	}
+	if strings.Contains(resp, "the secret data") {
+		t.Error("response body still contains 'secret' — transform did not apply (USK-824 regression)")
+	}
+}
+
 // TestHTTPSMITM_SafetyBlock verifies that the safety filter blocks dangerous
 // requests (destructive-sql preset).
 func TestHTTPSMITM_SafetyBlock(t *testing.T) {
