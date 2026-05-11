@@ -163,6 +163,21 @@ func (s *InterceptStep) holdAndDispatch(ctx context.Context, env *envelope.Envel
 	case common.ActionRelease:
 		return Result{}
 	case common.ActionDrop:
+		// USK-829: when the held envelope is an HTTPMessage (Send or
+		// Receive direction), synthesize a 403 response so the client
+		// sees a clean close instead of hanging until its own read
+		// timeout. The session loop dispatches Respond via client.Send
+		// (dispatchClientAction / wsRelayDirection). Mid-stream WS / gRPC
+		// data drops keep Action=Drop — protocol-correct terminators
+		// (Close frame, trailers) are deferred to follow-up Issues
+		// (D2 / D3).
+		if _, ok := env.Message.(*envelope.HTTPMessage); ok {
+			return Result{
+				Action:    Respond,
+				Response:  buildPolicyDropResponse(env, BlockedByInterceptDrop, matchedRules),
+				BlockedBy: BlockedByInterceptDrop,
+			}
+		}
 		return Result{Action: Drop, BlockedBy: BlockedByInterceptDrop}
 	case common.ActionModifyAndForward:
 		// Defense-in-depth: re-check the user-supplied modified envelope
@@ -173,19 +188,30 @@ func (s *InterceptStep) holdAndDispatch(ctx context.Context, env *envelope.Envel
 		// only / per-protocol coverage as the inline check (USK-702).
 		if s.safety != nil {
 			recheck := s.safety.Process(ctx, action.Modified)
-			if recheck.Action == Drop {
+			// USK-829: SafetyStep now returns Respond (with a synthetic
+			// 403 envelope) for HTTPMessage blocks instead of Drop. The
+			// recheck must forward both Action shapes — Drop for mid-
+			// stream WS / gRPC paths, Respond for HTTPMessage paths —
+			// so the modify_and_forward bypass is rejected with the same
+			// wire behaviour as a direct SafetyStep block.
+			if recheck.Action == Drop || recheck.Action == Respond {
 				if s.logger != nil {
-					s.logger.DebugContext(ctx, "intercept: modify_and_forward dropped by safety re-check",
+					s.logger.DebugContext(ctx, "intercept: modify_and_forward blocked by safety re-check",
 						slog.String("flow_id", env.FlowID),
 						slog.String("direction", env.Direction.String()),
 						slog.String("protocol", string(env.Protocol)),
+						slog.String("action", recheck.Action.String()),
 					)
 				}
-				// Attribute to the underlying Drop reason emitted by the
-				// re-checked SafetyStep (BlockedBySafetyFilter) so the
-				// recorded Stream surfaces the same audit trail as a
-				// direct safety block.
-				return Result{Action: Drop, BlockedBy: recheck.BlockedBy}
+				// Forward the recheck Result verbatim. The Response (if
+				// any) was constructed by SafetyStep against the modified
+				// envelope, which is the appropriate target for wire
+				// attribution — the original held envelope was safe.
+				return Result{
+					Action:    recheck.Action,
+					Response:  recheck.Response,
+					BlockedBy: recheck.BlockedBy,
+				}
 			}
 		}
 		return Result{Envelope: action.Modified}

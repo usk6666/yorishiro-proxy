@@ -131,10 +131,11 @@ func TestRunWithBlockedBy_ContinuePathReturnsEmpty(t *testing.T) {
 	}
 }
 
-// TestRunWithBlockedBy_RespondPathIgnoresBlockedBy verifies that even if a
-// Step erroneously sets BlockedBy on a Respond Result, the function does not
-// surface it — only Drop is a valid attribution carrier.
-func TestRunWithBlockedBy_RespondPathIgnoresBlockedBy(t *testing.T) {
+// TestRunWithBlockedBy_RespondPathForwardsBlockedBy verifies that a Step
+// returning Respond + BlockedBy (USK-829 policy-drop terminator path)
+// surfaces the attribution to the caller so the session loop can record
+// the audit Stream symmetrically with the Drop path.
+func TestRunWithBlockedBy_RespondPathForwardsBlockedBy(t *testing.T) {
 	respEnv := &envelope.Envelope{StreamID: "resp"}
 	s1 := &mockStep{result: Result{Action: Respond, Response: respEnv, BlockedBy: BlockedByTargetScope}}
 	p := New(s1)
@@ -146,8 +147,28 @@ func TestRunWithBlockedBy_RespondPathIgnoresBlockedBy(t *testing.T) {
 	if resp != respEnv {
 		t.Fatal("expected response envelope")
 	}
+	if blockedBy != BlockedByTargetScope {
+		t.Errorf("BlockedBy = %q, want %q (policy-Step Respond carries attribution per USK-829)", blockedBy, BlockedByTargetScope)
+	}
+}
+
+// TestRunWithBlockedBy_RespondWithoutAttribution verifies that a plugin-
+// style Respond (no BlockedBy set) leaves the attribution empty — only
+// policy Steps tag their Respond with a BlockedBy reason.
+func TestRunWithBlockedBy_RespondWithoutAttribution(t *testing.T) {
+	respEnv := &envelope.Envelope{StreamID: "resp"}
+	s1 := &mockStep{result: Result{Action: Respond, Response: respEnv}}
+	p := New(s1)
+	env := &envelope.Envelope{StreamID: "s1", Message: &envelope.RawMessage{Bytes: []byte("data")}}
+	_, action, resp, blockedBy := p.RunWithBlockedBy(context.Background(), env)
+	if action != Respond {
+		t.Fatalf("expected Respond, got %v", action)
+	}
+	if resp != respEnv {
+		t.Fatal("expected response envelope")
+	}
 	if blockedBy != "" {
-		t.Errorf("BlockedBy = %q, want empty for Respond Action", blockedBy)
+		t.Errorf("BlockedBy = %q, want empty for non-policy Respond", blockedBy)
 	}
 }
 

@@ -859,6 +859,13 @@ func wsRelayDirection(
 			}
 			continue
 		case pipeline.Respond:
+			// USK-829: a policy-Step Respond carries blockedBy so the
+			// audit Stream is attributed symmetrically with the Drop
+			// path. Plugin Respond leaves blockedBy="" and is recorded
+			// only via RecordStep's variant trail.
+			if blockedBy != "" && onDrop != nil {
+				onDrop(ctx, env, blockedBy)
+			}
 			if resp == nil {
 				continue
 			}
@@ -1208,12 +1215,17 @@ func clientToUpstream(
 		sc.set(env.StreamID)
 
 		env, action, resp, blockedBy := runPipelineTracked(ctx, p, env, reg)
-		// USK-782: surface the BlockedBy attribution to the session-side
-		// recorder before continuing the loop. Wire forwarding still
-		// short-circuits on Drop (dispatchClientAction returns nil); the
-		// recorder fires synchronously so the audit Stream is persisted
-		// while the goroutine is still scheduled.
-		if action == pipeline.Drop && blockedBy != "" && onDrop != nil {
+		// USK-782 / USK-829: surface the BlockedBy attribution to the
+		// session-side recorder before continuing the loop. Wire
+		// forwarding still short-circuits on Drop (dispatchClientAction
+		// returns nil); on Respond the synthetic 403 is delivered via
+		// client.Send below. The recorder fires synchronously so the
+		// audit Stream is persisted while the goroutine is still
+		// scheduled. Respond carries blockedBy only when emitted by a
+		// policy Step (Intercept / HostScope / HTTPScope / Safety);
+		// plugin-driven Respond passes blockedBy="" through unchanged.
+		if blockedBy != "" && onDrop != nil &&
+			(action == pipeline.Drop || action == pipeline.Respond) {
 			onDrop(ctx, env, blockedBy)
 		}
 		if perr := dispatchClientAction(ctx, client, uh, dial, env, resp, action); perr != nil {

@@ -35,13 +35,13 @@ func (s *HTTPScopeStep) Process(_ context.Context, env *envelope.Envelope) Resul
 
 	switch msg := env.Message.(type) {
 	case *envelope.HTTPMessage:
-		return s.processHTTP(msg)
+		return s.processHTTP(env, msg)
 	default:
 		return Result{}
 	}
 }
 
-func (s *HTTPScopeStep) processHTTP(msg *envelope.HTTPMessage) Result {
+func (s *HTTPScopeStep) processHTTP(env *envelope.Envelope, msg *envelope.HTTPMessage) Result {
 	if s.scope == nil || !s.scope.HasRules() {
 		return Result{}
 	}
@@ -67,7 +67,14 @@ func (s *HTTPScopeStep) processHTTP(msg *envelope.HTTPMessage) Result {
 
 	allowed, _ := s.scope.CheckTarget(scheme, host, port, path)
 	if !allowed {
-		return Result{Action: Drop, BlockedBy: BlockedByTargetScope}
+		// USK-829: emit a 403 terminator on the wire. HTTPScopeStep is
+		// HTTPMessage-typed by construction so the synthetic Respond
+		// envelope is always appropriate here.
+		return Result{
+			Action:    Respond,
+			Response:  buildPolicyDropResponse(env, BlockedByTargetScope, nil),
+			BlockedBy: BlockedByTargetScope,
+		}
 	}
 	return Result{}
 }

@@ -53,7 +53,7 @@ func (s *SafetyStep) Process(ctx context.Context, env *envelope.Envelope) Result
 
 	switch msg := env.Message.(type) {
 	case *envelope.HTTPMessage:
-		return s.processHTTP(ctx, msg)
+		return s.processHTTP(ctx, env, msg)
 	case *envelope.WSMessage:
 		return s.processWS(ctx, msg)
 	case *envelope.GRPCStartMessage:
@@ -75,7 +75,7 @@ func (s *SafetyStep) Process(ctx context.Context, env *envelope.Envelope) Result
 	}
 }
 
-func (s *SafetyStep) processHTTP(ctx context.Context, msg *envelope.HTTPMessage) Result {
+func (s *SafetyStep) processHTTP(ctx context.Context, env *envelope.Envelope, msg *envelope.HTTPMessage) Result {
 	if s.http == nil {
 		return Result{}
 	}
@@ -90,7 +90,16 @@ func (s *SafetyStep) processHTTP(ctx context.Context, msg *envelope.HTTPMessage)
 				slog.String("match", violation.Match),
 			)
 		}
-		return Result{Action: Drop, BlockedBy: BlockedBySafetyFilter}
+		// USK-829: emit a 403 terminator on the wire for HTTP requests
+		// so the client closes cleanly. Surface the matched safety rule
+		// ID via matched_rules so the body is consistent with the
+		// intercept drop body shape.
+		matched := []string{violation.RuleID}
+		return Result{
+			Action:    Respond,
+			Response:  buildPolicyDropResponse(env, BlockedBySafetyFilter, matched),
+			BlockedBy: BlockedBySafetyFilter,
+		}
 	}
 
 	return Result{}
@@ -113,6 +122,10 @@ func (s *SafetyStep) processWS(ctx context.Context, msg *envelope.WSMessage) Res
 				slog.String("match", violation.Match),
 			)
 		}
+		// USK-829: mid-stream WS frame Drop. The protocol-correct
+		// terminator is a Close control frame, which HTTPMessage cannot
+		// express through the WS Send dispatch. Deferred to follow-up
+		// Issue D2; keep Drop until that lands.
 		return Result{Action: Drop, BlockedBy: BlockedBySafetyFilter}
 	}
 
@@ -138,6 +151,11 @@ func (s *SafetyStep) processGRPC(ctx context.Context, env *envelope.Envelope, ms
 				slog.String("match", violation.Match),
 			)
 		}
+		// USK-829: mid-stream gRPC Drop. The protocol-correct terminator
+		// is a gRPC trailers frame (Status: 7 / PERMISSION_DENIED, or
+		// similar), which HTTPMessage cannot express through the gRPC
+		// Send dispatch. Deferred to follow-up Issue D3; keep Drop
+		// until that lands.
 		return Result{Action: Drop, BlockedBy: BlockedBySafetyFilter}
 	}
 

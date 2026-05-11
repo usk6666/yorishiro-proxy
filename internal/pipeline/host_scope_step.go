@@ -50,6 +50,18 @@ func (s *HostScopeStep) Process(_ context.Context, env *envelope.Envelope) Resul
 	// check that only validates hostname and port.
 	allowed, _ := s.scope.CheckTarget("", host, port, "")
 	if !allowed {
+		// USK-829: when the connection's first envelope is an HTTP
+		// request, synthesize a 403 terminator so the client sees a
+		// clean close instead of hanging on its read timeout. Non-HTTP
+		// envelopes keep the legacy silent Drop — protocol-correct
+		// terminators for raw/ws/gRPC are deferred (D2-D5).
+		if _, ok := env.Message.(*envelope.HTTPMessage); ok {
+			return Result{
+				Action:    Respond,
+				Response:  buildPolicyDropResponse(env, BlockedByTargetScope, nil),
+				BlockedBy: BlockedByTargetScope,
+			}
+		}
 		return Result{Action: Drop, BlockedBy: BlockedByTargetScope}
 	}
 	return Result{}

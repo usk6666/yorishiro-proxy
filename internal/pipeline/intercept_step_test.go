@@ -102,11 +102,26 @@ func TestInterceptStep_Drop(t *testing.T) {
 	}()
 
 	result := step.Process(context.Background(), env)
-	if result.Action != Drop {
-		t.Errorf("Drop: got action %v, want Drop", result.Action)
+	// USK-829: HTTPMessage Drop is now converted to Respond + synthetic
+	// 403 so the client receives a clean terminator instead of hanging.
+	if result.Action != Respond {
+		t.Errorf("Drop: got action %v, want Respond (USK-829 terminator)", result.Action)
 	}
 	if result.BlockedBy != BlockedByInterceptDrop {
 		t.Errorf("Drop: BlockedBy = %q, want %q", result.BlockedBy, BlockedByInterceptDrop)
+	}
+	if result.Response == nil {
+		t.Fatal("Drop: Response is nil; expected synthetic 403 envelope")
+	}
+	respMsg, ok := result.Response.Message.(*envelope.HTTPMessage)
+	if !ok {
+		t.Fatalf("Drop: Response.Message type = %T, want *HTTPMessage", result.Response.Message)
+	}
+	if respMsg.Status != 403 {
+		t.Errorf("Drop: Response status = %d, want 403", respMsg.Status)
+	}
+	if result.Response.Direction != envelope.Receive {
+		t.Errorf("Drop: Response.Direction = %v, want Receive", result.Response.Direction)
 	}
 }
 
@@ -704,11 +719,25 @@ func TestInterceptStep_ModifyAndForward_SafetyRecheck_BlocksDestructiveBody(t *t
 	})
 
 	result := step.Process(context.Background(), env)
-	if result.Action != Drop {
-		t.Errorf("SafetyRecheck_Destructive: got action %v, want Drop", result.Action)
+	// USK-829: SafetyStep recheck on a modify_and_forward HTTPMessage now
+	// emits a Respond + synthetic 403 terminator (same conversion as a
+	// direct SafetyStep block on a Send-direction HTTPMessage).
+	if result.Action != Respond {
+		t.Errorf("SafetyRecheck_Destructive: got action %v, want Respond (USK-829)", result.Action)
+	}
+	if result.BlockedBy != BlockedBySafetyFilter {
+		t.Errorf("SafetyRecheck_Destructive: BlockedBy = %q, want %q", result.BlockedBy, BlockedBySafetyFilter)
+	}
+	if result.Response == nil {
+		t.Fatal("SafetyRecheck_Destructive: Response is nil; expected synthetic 403 envelope")
+	}
+	if respMsg, ok := result.Response.Message.(*envelope.HTTPMessage); !ok {
+		t.Fatalf("SafetyRecheck_Destructive: Response.Message type = %T, want *HTTPMessage", result.Response.Message)
+	} else if respMsg.Status != 403 {
+		t.Errorf("SafetyRecheck_Destructive: Response status = %d, want 403", respMsg.Status)
 	}
 	if result.Envelope != nil {
-		t.Errorf("SafetyRecheck_Destructive: expected nil Envelope on Drop, got non-nil")
+		t.Errorf("SafetyRecheck_Destructive: expected nil Envelope, got non-nil")
 	}
 }
 

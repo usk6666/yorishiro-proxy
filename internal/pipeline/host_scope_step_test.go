@@ -193,3 +193,86 @@ func TestHostScopeStep_NoRules_AllAllowed(t *testing.T) {
 		t.Errorf("no rules: got action %v, want Continue", r.Action)
 	}
 }
+
+// TestHostScopeStep_BlockedHost_HTTPMessage_Respond verifies the USK-829
+// branch: when the held envelope carries an *envelope.HTTPMessage payload,
+// HostScopeStep block emits Respond + synthetic 403 instead of a silent
+// Drop, so the client sees a clean wire terminator. Non-HTTPMessage blocks
+// (covered by the legacy TestHostScopeStep_BlockedHost / _DeniedHost above)
+// keep the Drop shape — protocol-correct terminators for raw/ws/gRPC are
+// deferred (D2-D5).
+func TestHostScopeStep_BlockedHost_HTTPMessage_Respond(t *testing.T) {
+	scope := connector.NewTargetScope()
+	scope.SetPolicyRules([]connector.TargetRule{
+		{Hostname: "allowed.com"},
+	}, nil)
+	step := NewHostScopeStep(scope)
+
+	env := &envelope.Envelope{
+		Context: envelope.EnvelopeContext{
+			TargetHost: "blocked.com:443",
+		},
+		Message: &envelope.HTTPMessage{
+			Method: "GET",
+			Path:   "/",
+		},
+	}
+	r := step.Process(context.Background(), env)
+	if r.Action != Respond {
+		t.Fatalf("blocked HTTP host: got action %v, want Respond (USK-829)", r.Action)
+	}
+	if r.BlockedBy != BlockedByTargetScope {
+		t.Errorf("blocked HTTP host: BlockedBy = %q, want %q", r.BlockedBy, BlockedByTargetScope)
+	}
+	if r.Response == nil {
+		t.Fatal("blocked HTTP host: Response is nil; expected synthetic 403 envelope")
+	}
+	respMsg, ok := r.Response.Message.(*envelope.HTTPMessage)
+	if !ok {
+		t.Fatalf("blocked HTTP host: Response.Message type = %T, want *HTTPMessage", r.Response.Message)
+	}
+	if respMsg.Status != 403 {
+		t.Errorf("blocked HTTP host: Response status = %d, want 403", respMsg.Status)
+	}
+	if r.Response.Direction != envelope.Receive {
+		t.Errorf("blocked HTTP host: Response.Direction = %v, want Receive", r.Response.Direction)
+	}
+}
+
+// TestHostScopeStep_DeniedHost_HTTPMessage_Respond mirrors the above but
+// exercises the deny-list path (SetPolicyRules denies arg) — both allow-
+// list miss and deny-list hit must route through the same Respond branch.
+func TestHostScopeStep_DeniedHost_HTTPMessage_Respond(t *testing.T) {
+	scope := connector.NewTargetScope()
+	scope.SetPolicyRules(nil, []connector.TargetRule{
+		{Hostname: "evil.com"},
+	})
+	step := NewHostScopeStep(scope)
+
+	env := &envelope.Envelope{
+		Context: envelope.EnvelopeContext{
+			TargetHost: "evil.com:80",
+		},
+		Message: &envelope.HTTPMessage{
+			Method: "POST",
+			Path:   "/api",
+		},
+	}
+	r := step.Process(context.Background(), env)
+	if r.Action != Respond {
+		t.Fatalf("denied HTTP host: got action %v, want Respond (USK-829)", r.Action)
+	}
+	if r.BlockedBy != BlockedByTargetScope {
+		t.Errorf("denied HTTP host: BlockedBy = %q, want %q", r.BlockedBy, BlockedByTargetScope)
+	}
+	if r.Response == nil {
+		t.Fatal("denied HTTP host: Response is nil; expected synthetic 403 envelope")
+	}
+	respMsg, ok := r.Response.Message.(*envelope.HTTPMessage)
+	if !ok {
+		t.Fatalf("denied HTTP host: Response.Message type = %T, want *HTTPMessage", r.Response.Message)
+	}
+	if respMsg.Status != 403 {
+		t.Errorf("denied HTTP host: Response status = %d, want 403", respMsg.Status)
+	}
+}

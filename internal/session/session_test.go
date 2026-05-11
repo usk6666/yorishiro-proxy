@@ -205,6 +205,22 @@ func (s respondStep) Process(_ context.Context, env *envelope.Envelope) pipeline
 	return pipeline.Result{Action: pipeline.Continue}
 }
 
+// attributedRespondStep emits Respond with a fixed BlockedBy attribution
+// (USK-829 policy-drop terminator path). Mirrors attributedDropStep but
+// in the Respond shape so session-side recorder hooks for the Respond
+// path can be exercised independently of the wire-level Send dispatch.
+type attributedRespondStep struct {
+	resp      *envelope.Envelope
+	blockedBy string
+}
+
+func (s attributedRespondStep) Process(_ context.Context, env *envelope.Envelope) pipeline.Result {
+	if env.Direction == envelope.Send {
+		return pipeline.Result{Action: pipeline.Respond, Response: s.resp, BlockedBy: s.blockedBy}
+	}
+	return pipeline.Result{Action: pipeline.Continue}
+}
+
 // capturedEnv is a snapshot of the fields a captureStep observed on one
 // envelope, used to assert what the Pipeline saw without holding a reference
 // to a mutating live envelope.
@@ -422,6 +438,97 @@ func TestRunSession_OnPipelineDrop_AttributedDrop(t *testing.T) {
 	}
 	if calls[0].streamID != "stream-blocked" {
 		t.Errorf("OnPipelineDrop env.StreamID = %q, want %q", calls[0].streamID, "stream-blocked")
+	}
+}
+
+// TestRunSession_OnPipelineDrop_AttributedRespond verifies the OnPipelineDrop
+// callback also fires on a policy-Step Respond (USK-829). Under the
+// policy-drop terminator design the Pipeline emits Respond + BlockedBy
+// when an HTTPMessage is blocked so the wire sees a clean 403; the audit
+// recorder must continue to receive the attribution.
+func TestRunSession_OnPipelineDrop_AttributedRespond(t *testing.T) {
+	req := makeEnvelopeWithStreamID(envelope.Send, 0, "stream-blocked-respond")
+	custom := &envelope.Envelope{
+		Direction: envelope.Receive,
+		Protocol:  envelope.ProtocolHTTP,
+		Raw:       []byte("HTTP/1.1 403 Forbidden\r\n\r\n"),
+		Message:   &envelope.RawMessage{Bytes: []byte("blocked")},
+	}
+
+	clientCh := &mockChannel{
+		streamID:      "stream-blocked-respond",
+		nextEnvelopes: []*envelope.Envelope{req},
+	}
+	dial := func(_ context.Context, _ *envelope.Envelope) (layer.Channel, error) {
+		return &mockChannel{}, nil
+	}
+	p := pipeline.New(attributedRespondStep{resp: custom, blockedBy: "intercept_drop"})
+
+	type call struct {
+		blockedBy string
+		streamID  string
+	}
+	var calls []call
+	opts := SessionOptions{
+		OnPipelineDrop: func(_ context.Context, env *envelope.Envelope, blockedBy string) {
+			calls = append(calls, call{blockedBy: blockedBy, streamID: env.StreamID})
+		},
+	}
+
+	if err := RunSession(context.Background(), clientCh, dial, p, opts); err != nil {
+		t.Fatalf("RunSession: %v", err)
+	}
+
+	if len(calls) != 1 {
+		t.Fatalf("OnPipelineDrop calls = %d, want 1 (Respond+blockedBy must fire the recorder)", len(calls))
+	}
+	if calls[0].blockedBy != "intercept_drop" {
+		t.Errorf("OnPipelineDrop blockedBy = %q, want %q", calls[0].blockedBy, "intercept_drop")
+	}
+	if calls[0].streamID != "stream-blocked-respond" {
+		t.Errorf("OnPipelineDrop env.StreamID = %q, want %q", calls[0].streamID, "stream-blocked-respond")
+	}
+
+	// The synthetic response must have been written to the client.
+	if len(clientCh.sent) != 1 || clientCh.sent[0] != custom {
+		t.Errorf("client.Send not invoked with the synthetic Respond envelope")
+	}
+}
+
+// TestRunSession_OnPipelineDrop_UnattributedRespondSkipped verifies that a
+// plugin-style Respond with no BlockedBy attribution does NOT fire the
+// recorder callback. Plugin Respond is a normal control-flow choice — only
+// policy-Step Respond carries the audit signal.
+func TestRunSession_OnPipelineDrop_UnattributedRespondSkipped(t *testing.T) {
+	req := makeEnvelope(envelope.Send, 0)
+	custom := &envelope.Envelope{
+		Direction: envelope.Receive,
+		Protocol:  envelope.ProtocolRaw,
+		Raw:       []byte("plugin-custom"),
+		Message:   &envelope.RawMessage{Bytes: []byte("plugin-custom")},
+	}
+
+	clientCh := &mockChannel{
+		streamID:      "stream",
+		nextEnvelopes: []*envelope.Envelope{req},
+	}
+	dial := func(_ context.Context, _ *envelope.Envelope) (layer.Channel, error) {
+		return &mockChannel{}, nil
+	}
+	p := pipeline.New(respondStep{resp: custom}) // no BlockedBy
+
+	called := false
+	opts := SessionOptions{
+		OnPipelineDrop: func(_ context.Context, _ *envelope.Envelope, _ string) {
+			called = true
+		},
+	}
+
+	if err := RunSession(context.Background(), clientCh, dial, p, opts); err != nil {
+		t.Fatalf("RunSession: %v", err)
+	}
+	if called {
+		t.Error("OnPipelineDrop should not fire for a Respond with no BlockedBy attribution")
 	}
 }
 

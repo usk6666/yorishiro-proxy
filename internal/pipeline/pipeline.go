@@ -59,11 +59,13 @@ type Result struct {
 	// It is ignored for other Action values.
 	Response *envelope.Envelope
 
-	// BlockedBy carries the reason a Drop Action was emitted so the session
-	// loop can record an audit Stream for the blocked envelope (USK-782).
-	// It is ignored for non-Drop Actions and may be empty when a Step Drops
-	// without an attribution (e.g. plugin ActionDrop, intercept user-action
-	// drop on receive — explicitly out of scope per USK-782 design).
+	// BlockedBy carries the reason a Drop or Respond Action was emitted so
+	// the session loop can record an audit Stream for the blocked envelope
+	// (USK-782 / USK-829). It is surfaced by RunWithBlockedBy for both Drop
+	// and Respond and may be empty when a Step short-circuits without an
+	// attribution (e.g. plugin ActionDrop / RESPOND, intercept user-action
+	// drop on receive — explicitly out of scope per USK-782 design). It is
+	// ignored for Continue.
 	//
 	// Canonical values are the same set accepted by the MCP query tool's
 	// blocked_by filter: "target_scope", "intercept_drop", "rate_limit",
@@ -109,10 +111,19 @@ func (p *Pipeline) Run(ctx context.Context, env *envelope.Envelope) (*envelope.E
 }
 
 // RunWithBlockedBy is identical to Run but additionally surfaces the
-// Result.BlockedBy attribution emitted by the Drop-causing Step. The
-// session loop forwards this label to a recorder callback so blocked
-// envelopes are persisted as audit Streams (USK-782). For non-Drop
-// Actions the returned BlockedBy is the empty string.
+// Result.BlockedBy attribution emitted by the policy-Step that aborted
+// the chain. The session loop forwards this label to a recorder
+// callback so blocked envelopes are persisted as audit Streams (USK-782).
+//
+// USK-829: BlockedBy is now also forwarded for Action=Respond, not only
+// Action=Drop. This is required because the Pipeline policy Steps
+// (Intercept / HostScope / HTTPScope / Safety) emit Respond with a
+// synthetic 403 when the held envelope is an HTTPMessage so the client
+// receives a clean terminator rather than hanging until its read
+// timeout. Audit Stream attribution must travel with that Respond so
+// the recorder still sees the block reason. Continue actions return
+// the empty string; plugin-driven Respond (no BlockedBy set) returns
+// the empty string verbatim.
 func (p *Pipeline) RunWithBlockedBy(ctx context.Context, env *envelope.Envelope) (*envelope.Envelope, Action, *envelope.Envelope, string) {
 	snapshot := env.Clone()
 	ctx = withSnapshot(ctx, snapshot)
@@ -122,7 +133,8 @@ func (p *Pipeline) RunWithBlockedBy(ctx context.Context, env *envelope.Envelope)
 		r := step.Process(ctx, env)
 		if r.Action != Continue {
 			blockedBy := ""
-			if r.Action == Drop {
+			switch r.Action {
+			case Drop, Respond:
 				blockedBy = r.BlockedBy
 			}
 			return env, r.Action, r.Response, blockedBy

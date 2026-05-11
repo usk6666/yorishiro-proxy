@@ -38,11 +38,22 @@ func TestSafetyStep_DangerousSQL_Drop(t *testing.T) {
 	}
 
 	result := step.Process(context.Background(), env)
-	if result.Action != Drop {
-		t.Errorf("DangerousSQL: got action %v, want Drop", result.Action)
+	// USK-829: SafetyStep block on HTTPMessage now emits Respond +
+	// synthetic 403 so the client receives a clean terminator instead
+	// of hanging on a read timeout.
+	if result.Action != Respond {
+		t.Errorf("DangerousSQL: got action %v, want Respond (USK-829)", result.Action)
 	}
 	if result.BlockedBy != BlockedBySafetyFilter {
 		t.Errorf("DangerousSQL: BlockedBy = %q, want %q", result.BlockedBy, BlockedBySafetyFilter)
+	}
+	if result.Response == nil {
+		t.Fatal("DangerousSQL: Response is nil; expected synthetic 403 envelope")
+	}
+	if respMsg, ok := result.Response.Message.(*envelope.HTTPMessage); !ok {
+		t.Fatalf("DangerousSQL: Response.Message type = %T, want *HTTPMessage", result.Response.Message)
+	} else if respMsg.Status != 403 {
+		t.Errorf("DangerousSQL: Response status = %d, want 403", respMsg.Status)
 	}
 }
 
@@ -370,25 +381,30 @@ func TestSafetyStep_HTTP_WireFidelity_OnDrop(t *testing.T) {
 	rawSnap := append([]byte(nil), rawOriginal...)
 	headerSnap := append([]envelope.KeyValue(nil), headers...)
 
-	if result := step.Process(context.Background(), env); result.Action != Drop {
-		t.Fatalf("expected Drop action; got %v (rule precondition failed)", result.Action)
+	// USK-829: HTTPMessage block now emits Respond + synthetic 403. The
+	// wire-fidelity contract (RFC-001 Principle 1) still holds: the
+	// original held envelope's Raw / Body / Headers must not be mutated.
+	// The Response is a NEW envelope and is unrelated to the held env's
+	// underlying bytes.
+	if result := step.Process(context.Background(), env); result.Action != Respond {
+		t.Fatalf("expected Respond action; got %v (rule precondition failed)", result.Action)
 	}
 
 	if !bytes.Equal(msg.Body, bodySnap) {
-		t.Errorf("HTTPMessage.Body mutated after Drop: got %q, want %q", string(msg.Body), string(bodySnap))
+		t.Errorf("HTTPMessage.Body mutated after Respond: got %q, want %q", string(msg.Body), string(bodySnap))
 	}
 	if !bytes.Equal(bodyOriginal, bodySnap) {
-		t.Errorf("underlying body slice mutated after Drop: got %q, want %q", string(bodyOriginal), string(bodySnap))
+		t.Errorf("underlying body slice mutated after Respond: got %q, want %q", string(bodyOriginal), string(bodySnap))
 	}
 	if !bytes.Equal(env.Raw, rawSnap) {
-		t.Errorf("env.Raw mutated after Drop: got %q, want %q", string(env.Raw), string(rawSnap))
+		t.Errorf("env.Raw mutated after Respond: got %q, want %q", string(env.Raw), string(rawSnap))
 	}
 	if !bytes.Equal(rawOriginal, rawSnap) {
-		t.Errorf("underlying env.Raw slice mutated after Drop: got %q, want %q", string(rawOriginal), string(rawSnap))
+		t.Errorf("underlying env.Raw slice mutated after Respond: got %q, want %q", string(rawOriginal), string(rawSnap))
 	}
 	for i := range msg.Headers {
 		if msg.Headers[i] != headerSnap[i] {
-			t.Errorf("Headers[%d] mutated after Drop: got %+v, want %+v", i, msg.Headers[i], headerSnap[i])
+			t.Errorf("Headers[%d] mutated after Respond: got %+v, want %+v", i, msg.Headers[i], headerSnap[i])
 		}
 	}
 }

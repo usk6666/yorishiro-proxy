@@ -53,11 +53,21 @@ func TestHTTPScopeStep_OutsideScope(t *testing.T) {
 	}
 
 	result := step.Process(context.Background(), env)
-	if result.Action != Drop {
-		t.Errorf("OutsideScope: got action %v, want Drop", result.Action)
+	// USK-829: HTTPScopeStep block now emits Respond + synthetic 403 so
+	// the client gets a clean terminator on the wire.
+	if result.Action != Respond {
+		t.Errorf("OutsideScope: got action %v, want Respond (USK-829)", result.Action)
 	}
 	if result.BlockedBy != BlockedByTargetScope {
 		t.Errorf("OutsideScope: BlockedBy = %q, want %q", result.BlockedBy, BlockedByTargetScope)
+	}
+	if result.Response == nil {
+		t.Fatal("OutsideScope: Response is nil; expected synthetic 403 envelope")
+	}
+	if respMsg, ok := result.Response.Message.(*envelope.HTTPMessage); !ok {
+		t.Fatalf("OutsideScope: Response.Message type = %T, want *HTTPMessage", result.Response.Message)
+	} else if respMsg.Status != 403 {
+		t.Errorf("OutsideScope: Response status = %d, want 403", respMsg.Status)
 	}
 }
 
@@ -159,7 +169,8 @@ func TestHTTPScopeStep_AuthorityWithPort(t *testing.T) {
 		want      Action
 	}{
 		{"allowed port", "example.com:8080", Continue},
-		{"blocked port", "example.com:9090", Drop},
+		// USK-829: blocked HTTPMessage now emits Respond + synthetic 403.
+		{"blocked port", "example.com:9090", Respond},
 	}
 
 	for _, tt := range tests {
@@ -198,7 +209,8 @@ func TestHTTPScopeStep_AuthorityWithoutPort_DefaultPort(t *testing.T) {
 		want      Action
 	}{
 		{"https default 443 allowed", "https", "example.com", Continue},
-		{"http default 80 blocked", "http", "example.com", Drop},
+		// USK-829: blocked HTTPMessage now emits Respond + synthetic 403.
+		{"http default 80 blocked", "http", "example.com", Respond},
 	}
 
 	for _, tt := range tests {
@@ -236,7 +248,8 @@ func TestHTTPScopeStep_PathBasedScope(t *testing.T) {
 		want Action
 	}{
 		{"allowed path", "/api/users", Continue},
-		{"blocked path", "/admin/settings", Drop},
+		// USK-829: blocked HTTPMessage now emits Respond + synthetic 403.
+		{"blocked path", "/admin/settings", Respond},
 	}
 
 	for _, tt := range tests {

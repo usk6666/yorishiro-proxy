@@ -339,6 +339,16 @@ func startHTTPMITMProxy(
 		}
 
 		// Build pipeline: HostScope → HTTPScope → Safety → Transform → Intercept → Record.
+		// USK-829 review-gate F-3 note: HostScopeStep is intentionally
+		// instantiated with nil scope here. The HTTPSMITM_HostScopeReject
+		// e2e test routes its deny rule through HTTPScopeStep (both Steps
+		// emit BlockedByTargetScope so the wire-level assertion is the
+		// same). HostScopeStep's USK-829 Respond branch is covered at the
+		// unit level in pipeline/host_scope_step_test.go (the
+		// _HTTPMessage_Respond tests). Mixing both Steps with a single
+		// scope value would alter ordering semantics of pre-existing tests
+		// (HostScope short-circuits before HTTPScope's path check), so the
+		// e2e split is preserved.
 		steps := make([]pipeline.Step, 0, 6+len(opts.prependCustomSteps))
 		steps = append(steps, opts.prependCustomSteps...)
 		steps = append(steps,
@@ -1030,31 +1040,31 @@ func TestHTTPSMITM_SafetyBlock(t *testing.T) {
 		target, len(body), body,
 	)
 
-	// Connect and try to send. The request should be dropped by safety filter.
-	tlsConn := connectThroughProxy(t, proxyAddr, target)
-	defer tlsConn.Close()
-
-	if _, err := tlsConn.Write([]byte(rawReq)); err != nil {
-		t.Fatalf("write request: %v", err)
-	}
-
-	// The safety filter drops the envelope, so the session may end without
-	// sending the request upstream. The client connection should eventually
-	// be closed (read returns error/EOF).
-	tlsConn.SetReadDeadline(time.Now().Add(5 * time.Second))
-	readBuf := make([]byte, 4096)
-	_, readErr := tlsConn.Read(readBuf)
-
-	// We expect either EOF, connection reset, or timeout (all valid safety outcomes).
-	if readErr == nil {
-		t.Error("expected read error/EOF after safety block, got successful read")
-	}
+	// Connect and try to send. The request should be blocked by safety
+	// filter — USK-829: the proxy now emits a synthetic 403 response and
+	// closes cleanly instead of silently dropping the wire (the old
+	// behaviour left the client hanging on its own read timeout).
+	resp := connectAndSendHTTP(t, proxyAddr, target, rawReq)
 
 	// Wait for session to complete.
 	select {
 	case <-sessionDone:
 	case <-time.After(15 * time.Second):
 		t.Fatal("timeout waiting for session to complete")
+	}
+
+	// --- USK-829: client receives 403 JSON terminator within bounded time. ---
+	if !strings.Contains(resp, "HTTP/1.1 403") {
+		t.Errorf("expected 403 response from safety block (USK-829), got %q", resp)
+	}
+	if !strings.Contains(resp, "application/json") {
+		t.Errorf("expected Content-Type application/json, got %q", resp)
+	}
+	if !strings.Contains(resp, "Connection: close") {
+		t.Errorf("expected Connection: close, got %q", resp)
+	}
+	if !strings.Contains(resp, `"blocked_by":"safety_filter"`) {
+		t.Errorf("expected blocked_by safety_filter in body, got %q", resp)
 	}
 
 	// --- Verify upstream received NO data ---
