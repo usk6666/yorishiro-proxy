@@ -658,6 +658,142 @@ func TestUpgradeStep_ExtendedCONNECT_2xxWithoutSendH2_NoMatch(t *testing.T) {
 	}
 }
 
+// TestUpgradeNotice_AttachWSExtensionHeader_LatchOnce verifies that the
+// Sec-WebSocket-Extensions cache is latch-once: subsequent non-empty
+// calls do not overwrite the first observation, and empty values are
+// no-ops at any time. USK-847.
+func TestUpgradeNotice_AttachWSExtensionHeader_LatchOnce(t *testing.T) {
+	n := &UpgradeNotice{}
+	if got := n.WSExtensionHeader(); got != "" {
+		t.Errorf("zero-value WSExtensionHeader = %q, want empty", got)
+	}
+
+	n.attachWSExtensionHeader("permessage-deflate")
+	if got := n.WSExtensionHeader(); got != "permessage-deflate" {
+		t.Errorf("after first attach: WSExtensionHeader = %q, want permessage-deflate", got)
+	}
+
+	// Second non-empty call must not overwrite the latched value.
+	n.attachWSExtensionHeader("permessage-deflate; server_no_context_takeover")
+	if got := n.WSExtensionHeader(); got != "permessage-deflate" {
+		t.Errorf("after second attach: WSExtensionHeader = %q, want permessage-deflate (latch-once)", got)
+	}
+
+	// Empty calls are no-ops regardless of state.
+	n.attachWSExtensionHeader("")
+	if got := n.WSExtensionHeader(); got != "permessage-deflate" {
+		t.Errorf("after empty attach: WSExtensionHeader = %q, want permessage-deflate", got)
+	}
+}
+
+// TestUpgradeNotice_AttachWSExtensionHeader_NilSafe verifies the nil-
+// receiver guard so callers do not need to check before invocation.
+func TestUpgradeNotice_AttachWSExtensionHeader_NilSafe(t *testing.T) {
+	var n *UpgradeNotice
+	n.attachWSExtensionHeader("permessage-deflate") // must not panic
+	if got := n.WSExtensionHeader(); got != "" {
+		t.Errorf("nil notice WSExtensionHeader = %q, want empty", got)
+	}
+}
+
+// TestUpgradeStep_WS101_CapturesExtensionHeader verifies the
+// canonical h1 capture path: when UpgradeStep latches Pending=UpgradeWS
+// the wire-observed Sec-WebSocket-Extensions header is stashed on the
+// notice so runUpgradeWS can propagate it onto the post-swap ws.Layer.
+// USK-847.
+func TestUpgradeStep_WS101_CapturesExtensionHeader(t *testing.T) {
+	notice := &UpgradeNotice{}
+	ctx := WithUpgradeNotice(context.Background(), notice)
+	step := NewUpgradeStep()
+
+	step.Process(ctx, &envelope.Envelope{
+		Direction: envelope.Send, Protocol: envelope.ProtocolHTTP,
+		Message: &envelope.HTTPMessage{Headers: []envelope.KeyValue{
+			{Name: "Upgrade", Value: "websocket"},
+			{Name: "Connection", Value: "Upgrade"},
+		}},
+	})
+	step.Process(ctx, &envelope.Envelope{
+		Direction: envelope.Receive, Protocol: envelope.ProtocolHTTP,
+		Message: &envelope.HTTPMessage{Status: 101, Headers: []envelope.KeyValue{
+			{Name: "Upgrade", Value: "websocket"},
+			{Name: "Connection", Value: "Upgrade"},
+			{Name: "Sec-WebSocket-Extensions", Value: "permessage-deflate"},
+		}},
+	})
+
+	if got := notice.Pending(); got != UpgradeWS {
+		t.Fatalf("notice.Pending = %q, want %q", got, UpgradeWS)
+	}
+	if got := notice.WSExtensionHeader(); got != "permessage-deflate" {
+		t.Errorf("notice.WSExtensionHeader = %q, want permessage-deflate", got)
+	}
+}
+
+// TestUpgradeStep_WS101_NoExtensionHeader verifies that absence of
+// Sec-WebSocket-Extensions on the 101 response leaves
+// WSExtensionHeader empty — downstream the Option is a no-op so deflate
+// stays disabled, which is the only correct behaviour when the server
+// declined to negotiate the extension. USK-847.
+func TestUpgradeStep_WS101_NoExtensionHeader(t *testing.T) {
+	notice := &UpgradeNotice{}
+	ctx := WithUpgradeNotice(context.Background(), notice)
+	step := NewUpgradeStep()
+
+	step.Process(ctx, &envelope.Envelope{
+		Direction: envelope.Send, Protocol: envelope.ProtocolHTTP,
+		Message: &envelope.HTTPMessage{Headers: []envelope.KeyValue{
+			{Name: "Upgrade", Value: "websocket"},
+			{Name: "Connection", Value: "Upgrade"},
+		}},
+	})
+	step.Process(ctx, &envelope.Envelope{
+		Direction: envelope.Receive, Protocol: envelope.ProtocolHTTP,
+		Message: &envelope.HTTPMessage{Status: 101, Headers: []envelope.KeyValue{
+			{Name: "Upgrade", Value: "websocket"},
+			{Name: "Connection", Value: "Upgrade"},
+		}},
+	})
+
+	if got := notice.WSExtensionHeader(); got != "" {
+		t.Errorf("notice.WSExtensionHeader = %q, want empty (no extension header)", got)
+	}
+}
+
+// TestUpgradeStep_ExtendedCONNECT_2xx_CapturesExtensionHeader verifies
+// the h2 capture path: the same Sec-WebSocket-Extensions header read
+// from an extended-CONNECT 2xx response is stashed for
+// runUpgradeWSOverH2 to propagate onto the post-swap ws.Layer pair.
+// RFC 8441 §5 keeps the negotiation surface on response headers; the
+// proxy reads the header verbatim without inspecting :protocol-specific
+// shape. USK-847.
+func TestUpgradeStep_ExtendedCONNECT_2xx_CapturesExtensionHeader(t *testing.T) {
+	notice := &UpgradeNotice{}
+	ctx := WithUpgradeNotice(context.Background(), notice)
+	step := NewUpgradeStep()
+
+	step.Process(ctx, &envelope.Envelope{
+		Direction: envelope.Send, Protocol: envelope.ProtocolHTTP,
+		Message: &envelope.HTTPMessage{Method: "CONNECT", ConnectProtocol: "websocket"},
+	})
+	step.Process(ctx, &envelope.Envelope{
+		Direction: envelope.Receive, Protocol: envelope.ProtocolHTTP,
+		Message: &envelope.HTTPMessage{
+			Status: 200,
+			Headers: []envelope.KeyValue{
+				{Name: "Sec-WebSocket-Extensions", Value: "permessage-deflate; client_no_context_takeover"},
+			},
+		},
+	})
+
+	if got := notice.Pending(); got != UpgradeWSOverH2 {
+		t.Fatalf("notice.Pending = %q, want %q", got, UpgradeWSOverH2)
+	}
+	if got := notice.WSExtensionHeader(); got != "permessage-deflate; client_no_context_takeover" {
+		t.Errorf("notice.WSExtensionHeader = %q, want %q", got, "permessage-deflate; client_no_context_takeover")
+	}
+}
+
 // TestUpgradeStep_H1AndH2_NotEntangled verifies that latching the h2
 // flag does not satisfy the h1 trigger and vice versa: a CONNECT +
 // :protocol=websocket request followed by a 101 response (h1 trigger)

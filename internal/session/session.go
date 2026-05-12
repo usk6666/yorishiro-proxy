@@ -614,9 +614,9 @@ func RunStackSessionExchange(
 
 	switch notice.Pending() {
 	case UpgradeWS:
-		return runUpgradeWS(ctx, stack, dial, p, userOpt, upstreamCh, notice.WSUpgradeRequest())
+		return runUpgradeWS(ctx, stack, dial, p, userOpt, upstreamCh, notice.WSUpgradeRequest(), notice.WSExtensionHeader())
 	case UpgradeWSOverH2:
-		return runUpgradeWSOverH2(ctx, stack, p, userOpt, clientCh, upstreamCh, notice.WSUpgradeRequest())
+		return runUpgradeWSOverH2(ctx, stack, p, userOpt, clientCh, upstreamCh, notice.WSUpgradeRequest(), notice.WSExtensionHeader())
 	case UpgradeSSE:
 		return runUpgradeSSE(ctx, stack, dial, p, userOpt, upstreamCh, notice.SSEFirstResponse())
 	default:
@@ -642,6 +642,13 @@ func RunStackSessionExchange(
 // out-of-scope (USK-841). nil is tolerated for the test paths that
 // construct runUpgradeWS directly without going through
 // RunStackSessionExchange.
+//
+// extensionHeader is the verbatim wire-observed value of the
+// Sec-WebSocket-Extensions response header (101 Switching Protocols).
+// Propagated via ws.WithDeflateFromExtensionHeader so the post-swap
+// ws.Layer honors the negotiated permessage-deflate (RFC 7692)
+// parameters; empty means "no extension negotiated" and the Option is a
+// no-op (USK-847).
 func runUpgradeWS(
 	ctx context.Context,
 	stack *connector.ConnectionStack,
@@ -650,6 +657,7 @@ func runUpgradeWS(
 	userOpt SessionOptions,
 	upstreamCh layer.Channel,
 	upgradeReq *envelope.Envelope,
+	extensionHeader string,
 ) error {
 	clientTop := stack.ClientTopmost()
 	upstreamTop := stack.UpstreamTopmost()
@@ -770,6 +778,13 @@ func runUpgradeWS(
 	if wsHandshakeStreamID(upgradeReq) != "" {
 		wsOpts = append(wsOpts, ws.WithInitialSequence(2))
 	}
+	// USK-847: propagate the wire-observed Sec-WebSocket-Extensions
+	// response header onto the post-swap WS Layer pair so the negotiated
+	// permessage-deflate (RFC 7692) parameters are honored on both
+	// directions. WithDeflateFromExtensionHeader is a no-op on an empty
+	// string, so an unconditional append keeps the wiring simple while
+	// remaining harmless when no extension was negotiated.
+	wsOpts = append(wsOpts, ws.WithDeflateFromExtensionHeader(extensionHeader))
 	clientWS := ws.New(clientReader, clientWriter, clientCloser, clientStreamID, ws.RoleServer, wsOpts...)
 	upstreamWS := ws.New(upReader, upWriter, upCloser, clientStreamID, ws.RoleClient, wsOpts...)
 
@@ -946,6 +961,7 @@ func runUpgradeWSOverH2(
 	userOpt SessionOptions,
 	clientCh, upstreamCh layer.Channel,
 	upgradeReq *envelope.Envelope,
+	extensionHeader string,
 ) (retErr error) {
 	clientH2, upstreamH2, err := h2LayersFromStack(stack)
 	if err != nil {
@@ -981,6 +997,12 @@ func runUpgradeWSOverH2(
 	if envCtx, ok := wsEnvelopeContextFromUpgradeReq(upgradeReq); ok {
 		wsOpts = append(wsOpts, ws.WithEnvelopeContext(envCtx))
 	}
+	// USK-847: propagate the wire-observed Sec-WebSocket-Extensions
+	// response header from the extended-CONNECT 2xx accept onto the
+	// post-swap WS Layer pair. RFC 8441 §5 does not redefine the
+	// negotiation surface, so RFC 7692 parameters ride on the same
+	// header. WithDeflateFromExtensionHeader is a no-op on empty input.
+	wsOpts = append(wsOpts, ws.WithDeflateFromExtensionHeader(extensionHeader))
 	clientWS := ws.New(cR, cW, &detachCloserAdapter{f: cClose}, sessionStreamID, ws.RoleServer, wsOpts...)
 	upstreamWS := ws.New(uR, uW, &detachCloserAdapter{f: uClose}, sessionStreamID, ws.RoleClient, wsOpts...)
 

@@ -90,6 +90,25 @@ type UpgradeNotice struct {
 	// capture_scope evaluator in RecordStep rejects them as out-of-scope
 	// because the hostname is unknown (USK-841).
 	wsUpgradeReq *envelope.Envelope
+
+	// wsExtensionHeader caches the raw wire-observed value of the
+	// Sec-WebSocket-Extensions header from the upgrade response (the
+	// HTTP/1.1 101 Switching Protocols response OR the HTTP/2 RFC 8441
+	// extended-CONNECT 2xx response). runUpgradeWS / runUpgradeWSOverH2
+	// pass this verbatim into ws.WithDeflateFromExtensionHeader so the
+	// post-swap ws.Layer pair is wired with the negotiated permessage-
+	// deflate (RFC 7692) parameters. Without this propagation, every
+	// compressed frame observed on the wire is treated as an opaque
+	// payload, leaving plugins / intercept / record with un-decoded data
+	// (USK-847).
+	//
+	// The header value is stored as the raw string per MITM Principle #3
+	// (lossless representation) — parsing into structured params happens
+	// inside ws.WithDeflateFromExtensionHeader, where the canonical
+	// per-protocol form already lives. Empty string means "no extension
+	// header observed on the response"; downstream the Option is a no-op
+	// on empty input.
+	wsExtensionHeader string
 }
 
 // markSendUpgrade is called by UpgradeStep when it observes a Send envelope
@@ -231,6 +250,41 @@ func (n *UpgradeNotice) WSUpgradeRequest() *envelope.Envelope {
 	return n.wsUpgradeReq
 }
 
+// attachWSExtensionHeader caches the wire-observed Sec-WebSocket-Extensions
+// response header value so runUpgradeWS / runUpgradeWSOverH2 can propagate
+// it (verbatim) into ws.WithDeflateFromExtensionHeader. Called by
+// processUpgradeReceive immediately after each successful
+// trySetPending(UpgradeWS|UpgradeWSOverH2) call.
+//
+// Latch-once semantics: subsequent non-empty calls are ignored so a
+// re-entry under racing observation cannot overwrite the originally-
+// negotiated value. An empty value is a no-op.
+func (n *UpgradeNotice) attachWSExtensionHeader(value string) {
+	if n == nil || value == "" {
+		return
+	}
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.wsExtensionHeader != "" {
+		return
+	}
+	n.wsExtensionHeader = value
+}
+
+// WSExtensionHeader returns the cached Sec-WebSocket-Extensions response
+// header value, or the empty string if the upgrade response did not carry
+// one (or attachWSExtensionHeader was never called). The value is the raw
+// wire string; callers pass it through ws.WithDeflateFromExtensionHeader
+// which performs the RFC 7692 parameter parsing.
+func (n *UpgradeNotice) WSExtensionHeader() string {
+	if n == nil {
+		return ""
+	}
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.wsExtensionHeader
+}
+
 // SSEFirstResponse returns the cached first SSE response envelope, or
 // nil if attachSSEFirstResponse was never called.
 func (n *UpgradeNotice) SSEFirstResponse() *envelope.Envelope {
@@ -364,13 +418,22 @@ func processUpgradeSend(notice *UpgradeNotice, env *envelope.Envelope, msg *enve
 // trigger. The h2-extended-CONNECT branch is checked before the h1 101
 // branch because UpgradeStep cannot distinguish the two from the response
 // shape alone — the corresponding Send-side flag is the discriminator.
+//
+// On WS / WS-over-h2 latch, the wire-observed Sec-WebSocket-Extensions
+// response header value is stashed on notice so the upgrade orchestrator
+// can propagate the negotiated permessage-deflate (RFC 7692) parameters
+// onto the post-swap ws.Layer pair (USK-847).
 func processUpgradeReceive(notice *UpgradeNotice, env *envelope.Envelope, msg *envelope.HTTPMessage) {
 	if notice.hasSendUpgradeH2() && isExtendedConnectAccept(msg) {
-		notice.trySetPending(UpgradeWSOverH2)
+		if notice.trySetPending(UpgradeWSOverH2) {
+			notice.attachWSExtensionHeader(lookupHeader(msg.Headers, "Sec-WebSocket-Extensions"))
+		}
 		return
 	}
 	if notice.hasSendUpgrade() && isWS101Response(msg) {
-		notice.trySetPending(UpgradeWS)
+		if notice.trySetPending(UpgradeWS) {
+			notice.attachWSExtensionHeader(lookupHeader(msg.Headers, "Sec-WebSocket-Extensions"))
+		}
 		return
 	}
 	if isSSEResponse(msg) {
