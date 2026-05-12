@@ -21,6 +21,27 @@ Target scope uses a **Policy Layer** and an **Agent Layer**:
 
 When neither layer has rules, all targets are permitted (open mode).
 
+### Applicability
+
+Both Policy Layer and Agent Layer `target_scope` rules apply to **all** proxy traffic. There is a single shared `target_scope` evaluator (Policy + Agent rules merged via the order above); every code path that opens or forwards a connection consults it.
+
+| Traffic source | Policy Layer | Agent Layer |
+|---|---|---|
+| Transparent MITM (HTTP CONNECT tunnel, plain HTTP forward proxy, SOCKS5 tunnel) | Applied | Applied |
+| MCP tool-initiated requests (`resend_http`, `resend_ws`, `resend_grpc`, `resend_raw`, `fuzz_http`, `fuzz_ws`, `fuzz_grpc`, `fuzz_raw`, `macro`, `intercept modify_and_forward`) | Applied | Applied |
+
+This means `set_target_scope` and `update_target_scope` take effect immediately for both AI-agent-driven MCP calls and any client traffic flowing through the proxy (curl, browser, etc.). The same evaluator drives both the live pipeline's `HostScopeStep` / `HTTPScopeStep` and the MCP-tool pre-flight check.
+
+#### Deny manifestation by path
+
+A `target_scope` deny surfaces differently depending on how the request entered the proxy. Operators should read the symptom in context:
+
+| Path | Deny symptom |
+|---|---|
+| Transparent HTTPS via CONNECT tunnel | Proxy returns `HTTP/1.1 200 Connection Established` (the tunnel acknowledgement is sent before the scope check), then closes the connection. The client's inner TLS handshake fails with EOF. Note that the `200` line refers to the CONNECT tunnel, **not** to the backend -- no backend bytes are exchanged. |
+| Transparent plain-HTTP forward proxy | Proxy returns `HTTP/1.1 403 Forbidden` with body `yorishiro-proxy: target blocked by scope`. |
+| MCP tool-initiated request (`resend_*`, `fuzz_*`, `macro`, `intercept modify_and_forward`) | MCP error response with the violation reason. |
+
 ## Actions
 
 ### `set_target_scope`
@@ -135,6 +156,8 @@ Rate limits use the same two-layer architecture as target scope. The Policy Laye
 
 Requests that exceed rate limits receive a `429 Too Many Requests` response with an `X-Blocked-By: rate_limit` header.
 
+**Applicability**: Both Policy Layer and Agent Layer rate limits apply to **all** proxy traffic -- transparent MITM traffic (HTTP CONNECT tunnel, plain HTTP forward proxy, SOCKS5 tunnel) and MCP tool-initiated requests (the same list as for `target_scope`). The effective rate (the stricter of policy and agent) is shared across both paths.
+
 ### `set_rate_limits`
 
 Set Agent Layer rate limits. Omitted fields reset to 0 (no limit). This is full-replace semantics.
@@ -187,6 +210,8 @@ Response:
 ## Diagnostic Budget
 
 Diagnostic budgets limit the total number of requests and/or the session duration. When a budget is exhausted, the proxy automatically stops accepting new requests. Like rate limits, budgets use the two-layer architecture.
+
+**Applicability**: Both Policy Layer and Agent Layer budgets apply to **all** proxy traffic -- transparent MITM traffic and MCP tool-initiated requests share the same request counter and duration timer. When the effective budget is exhausted, the proxy stops every listener regardless of how the next request would have arrived.
 
 ### `set_budget`
 
@@ -247,6 +272,8 @@ Response:
 SafetyFilter is a **Policy Layer** mechanism that prevents destructive payloads from being sent to target systems. It inspects outgoing HTTP requests (body, URL, query string, headers) against a set of regex rules and blocks or logs matches before the request reaches the target.
 
 SafetyFilter rules are **immutable at runtime** — they are defined in the configuration file and cannot be modified by AI agents. This ensures that safety boundaries remain enforced regardless of agent behavior.
+
+**Applicability**: As a Policy Layer mechanism, the Input Filter applies to **all** proxy traffic -- transparent MITM traffic and MCP tool-initiated requests (see the [Applicability](#applicability) table under "Two-Layer Architecture").
 
 ### `get_safety_filter`
 
@@ -343,6 +370,8 @@ The Output Filter is a **Policy Layer** mechanism that prevents sensitive inform
 Raw data is always preserved in the Flow Store -- masking is applied only when data is returned to AI agents (via MCP tools or proxy responses).
 
 Output Filter rules are **immutable at runtime** -- they are defined in the configuration file and cannot be modified by AI agents.
+
+**Applicability**: As a Policy Layer mechanism, the Output Filter applies to **all** proxy traffic returning data to AI agents -- masking is performed both in the live pipeline (responses returned to the proxied client) and in MCP tool responses (query results, resend responses, fuzz results, intercept queue entries, compare diffs, export data).
 
 ### How It Works
 
