@@ -12,6 +12,7 @@ import (
 	"io"
 	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/connector"
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
@@ -23,6 +24,7 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/layer/ws"
 	"github.com/usk6666/yorishiro-proxy/internal/pipeline"
 	"github.com/usk6666/yorishiro-proxy/internal/pluginv2"
+	"github.com/usk6666/yorishiro-proxy/internal/rules/common"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -92,6 +94,72 @@ type SessionOptions struct {
 	// connector.BuildConfig.SSEMaxEventSize by proxybuild.buildSessionOptions.
 	// USK-806.
 	SSEMaxEventSize int
+
+	// InterceptReleaseTracker, when non-nil, records the timestamps the MCP
+	// intercept tool's Release path stamps each time a held envelope is
+	// unblocked. The session relay loops query the tracker on EOF and, when
+	// a recent release on the opposite Direction is found within
+	// InterceptReleaseEOFWindow, invoke OnInterceptReleaseEOF so the
+	// operator-facing Stream tag can be appended.
+	//
+	// Plumbing is fire-and-forget: a missing tracker (nil) disables the
+	// USK-851 detection without affecting wire behaviour.
+	InterceptReleaseTracker *common.ReleaseTracker
+
+	// InterceptReleaseEOFWindow is the correlation window applied to
+	// InterceptReleaseTracker lookups. Zero falls back to a 2-second
+	// hard-coded default — see USK-851 design review decision U3. The
+	// window is intentionally NOT exposed as configuration in this Issue;
+	// changing it is a follow-up (approach B) tracked under the same Issue
+	// thread.
+	InterceptReleaseEOFWindow time.Duration
+
+	// OnInterceptReleaseEOF, when non-nil, is invoked once per Stream when
+	// a relay goroutine observes EOF on src.Next within
+	// InterceptReleaseEOFWindow of a recent release on the OPPOSITE
+	// Direction. Production wiring (proxybuild) appends the Stream tag
+	// "intercept_hold_outcome=upstream_closed_after_intercept_release"
+	// via flow.Store.UpdateStream so operators querying
+	// `resource=stream id=<…>` see the diagnostic without trawling logs.
+	//
+	// The callback fires AT MOST ONCE per Stream — the relay loop uses
+	// ReleaseTracker.LookupAndForgetOpposite, which atomically performs
+	// the lookup and entry-clear under the tracker's mutex, so even when
+	// both relay goroutines observe EOF concurrently only one observation
+	// finds the opposite-direction release. Empty streamID is filtered by
+	// the relay before invocation.
+	//
+	// Implementations must not block the relay goroutine; the production
+	// recorder writes asynchronously via the store's single-writer queue.
+	OnInterceptReleaseEOF func(ctx context.Context, streamID string)
+}
+
+// interceptReleaseEOFDefaultWindow is the canonical correlation window for
+// the USK-851 detection rule. Exported so tests can mirror the production
+// constant without redefining it.
+const interceptReleaseEOFDefaultWindow = 2 * time.Second
+
+// checkInterceptReleaseEOF inspects InterceptReleaseTracker for a recent
+// release on the OPPOSITE direction of dir and, on a hit within the
+// configured window, invokes OnInterceptReleaseEOF. The lookup-and-clear
+// is performed atomically via LookupAndForgetOpposite, so even when both
+// relay goroutines observe EOF concurrently the callback fires at most
+// once per Stream.
+//
+// streamID == "" or InterceptReleaseTracker == nil short-circuits to a
+// no-op — keeps callers free of nil checks at each EOF site.
+func checkInterceptReleaseEOF(ctx context.Context, opt SessionOptions, streamID string, dir envelope.Direction) {
+	if streamID == "" || opt.InterceptReleaseTracker == nil || opt.OnInterceptReleaseEOF == nil {
+		return
+	}
+	window := opt.InterceptReleaseEOFWindow
+	if window <= 0 {
+		window = interceptReleaseEOFDefaultWindow
+	}
+	if _, ok := opt.InterceptReleaseTracker.LookupAndForgetOpposite(streamID, dir, time.Now(), window); !ok {
+		return
+	}
+	opt.OnInterceptReleaseEOF(ctx, streamID)
 }
 
 // streamCapture captures the StreamID from the first Envelope in a
@@ -381,12 +449,12 @@ func RunSession(ctx context.Context, client layer.Channel, dial DialFunc, p *pip
 
 	g.Go(func() error {
 		defer close(uh.done)
-		return clientToUpstream(ctx, client, dial, p, uh, sc, reg, opt.OnPipelineDrop)
+		return clientToUpstream(ctx, client, dial, p, uh, sc, reg, opt)
 	})
 
 	g.Go(func() error {
 		defer close(upstreamDone)
-		return upstreamToClient(ctx, client, p, uh, sc, reg, opt.OnPipelineDrop)
+		return upstreamToClient(ctx, client, p, uh, sc, reg, opt)
 	})
 
 	g.Go(func() error {
@@ -995,7 +1063,7 @@ func runWSOverH2Relay(
 	// forward to upstream. On graceful EOF, half-close the upstream write
 	// side so the upstream HTTP handler observes EOF on its request body.
 	g.Go(func() error {
-		err := wsRelayDirection(ctx, p, reg, clientWSCh, upstreamWSCh, userOpt.OnPipelineDrop)
+		err := wsRelayDirection(ctx, p, reg, clientWSCh, upstreamWSCh, userOpt, envelope.Send)
 		if err == nil {
 			// Graceful EOF on client side: half-close the upstream wire.
 			// detachWriter.Close emits empty DATA(END_STREAM) on the
@@ -1013,7 +1081,7 @@ func runWSOverH2Relay(
 	// side so the test client observes EOF on the response body (and the
 	// h2 stream cleanly transitions to closed).
 	g.Go(func() error {
-		err := wsRelayDirection(ctx, p, reg, upstreamWSCh, clientWSCh, userOpt.OnPipelineDrop)
+		err := wsRelayDirection(ctx, p, reg, upstreamWSCh, clientWSCh, userOpt, envelope.Receive)
 		if err == nil {
 			_ = clientDetachW.Close()
 		}
@@ -1039,44 +1107,41 @@ func runWSOverH2Relay(
 // graceful EOF and a wrapped error otherwise. Drop / Respond actions are
 // honoured (Respond writes back to src for symmetry with RunSession,
 // matching plugin / intercept semantics).
+//
+// srcDir labels the direction of the envelopes flowing in from src, used
+// only by the USK-851 EOF correlation. The other side (Send-side
+// envelopes flowing client→upstream OR Receive-side envelopes flowing
+// upstream→client) maps directly: a client-side ws.Layer emits Send
+// envelopes; an upstream-side ws.Layer emits Receive envelopes. The
+// correlation key uses the OPPOSITE direction on the same StreamID — see
+// ReleaseTracker.LookupAndForgetOpposite.
 func wsRelayDirection(
 	ctx context.Context,
 	p *pipeline.Pipeline,
 	reg *bodyBufRegistry,
 	src, dst layer.Channel,
-	onDrop func(context.Context, *envelope.Envelope, string),
+	userOpt SessionOptions,
+	srcDir envelope.Direction,
 ) error {
+	// streamID is captured from the first envelope so the EOF-correlation
+	// path knows which Stream to attribute on graceful close. The src
+	// Channel exposes StreamID() before the first Next on most Channel
+	// implementations, but treating the first envelope as the source of
+	// truth matches what the rest of the session does (streamCapture
+	// pattern in RunSession).
+	streamID := src.StreamID()
 	for {
 		env, err := src.Next(ctx)
 		if err != nil {
-			if errors.Is(err, io.EOF) {
-				return nil
-			}
-			if errors.Is(err, context.Canceled) {
-				return ctx.Err()
-			}
-			return fmt.Errorf("ws/h2 relay: src.Next: %w", err)
+			return wsRelayNextErr(ctx, err, userOpt, streamID, srcDir)
+		}
+		if streamID == "" {
+			streamID = env.StreamID
 		}
 		env, action, resp, blockedBy := runPipelineTracked(ctx, p, env, reg)
-		switch action {
-		case pipeline.Drop:
-			if blockedBy != "" && onDrop != nil {
-				onDrop(ctx, env, blockedBy)
-			}
-			continue
-		case pipeline.Respond:
-			// USK-829: a policy-Step Respond carries blockedBy so the
-			// audit Stream is attributed symmetrically with the Drop
-			// path. Plugin Respond leaves blockedBy="" and is recorded
-			// only via RecordStep's variant trail.
-			if blockedBy != "" && onDrop != nil {
-				onDrop(ctx, env, blockedBy)
-			}
-			if resp == nil {
-				continue
-			}
-			if serr := src.Send(ctx, resp); serr != nil {
-				return fmt.Errorf("ws/h2 relay: src.Send (respond): %w", serr)
+		if action == pipeline.Drop || action == pipeline.Respond {
+			if serr := wsRelayHandlePolicy(ctx, src, action, env, resp, blockedBy, userOpt.OnPipelineDrop); serr != nil {
+				return serr
 			}
 			continue
 		}
@@ -1087,6 +1152,52 @@ func wsRelayDirection(
 			return fmt.Errorf("ws/h2 relay: dst.Send: %w", serr)
 		}
 	}
+}
+
+// wsRelayNextErr maps an src.Next error into the wsRelayDirection return
+// contract. Extracted to keep wsRelayDirection under the gocyclo budget.
+func wsRelayNextErr(ctx context.Context, err error, userOpt SessionOptions, streamID string, srcDir envelope.Direction) error {
+	// USK-851: on either graceful EOF OR a stream-level error (the WS
+	// Layer maps a peer-closed TCP into layer.StreamError{Protocol|
+	// Aborted}), check the OPPOSITE-direction release tracker. A hit
+	// means the upstream stopped talking shortly after we forwarded a
+	// long-held frame — surface that via the operator-facing Stream tag.
+	// context.Canceled is excluded: it is a normal teardown from the
+	// errgroup peer, not a wire-observed event worth attributing.
+	if !errors.Is(err, context.Canceled) {
+		checkInterceptReleaseEOF(ctx, userOpt, streamID, srcDir)
+	}
+	if errors.Is(err, io.EOF) {
+		return nil
+	}
+	if errors.Is(err, context.Canceled) {
+		return ctx.Err()
+	}
+	return fmt.Errorf("ws/h2 relay: src.Next: %w", err)
+}
+
+// wsRelayHandlePolicy applies a Drop / Respond pipeline action. Returns a
+// non-nil error only when src.Send fails on the Respond path. Drop and
+// nil-resp Respond both return nil so the caller's loop continues. The
+// onDrop attribution mirrors RunSession's dispatchClientAction.
+func wsRelayHandlePolicy(
+	ctx context.Context,
+	src layer.Channel,
+	action pipeline.Action,
+	env, resp *envelope.Envelope,
+	blockedBy string,
+	onDrop func(context.Context, *envelope.Envelope, string),
+) error {
+	if blockedBy != "" && onDrop != nil {
+		onDrop(ctx, env, blockedBy)
+	}
+	if action == pipeline.Drop || resp == nil {
+		return nil
+	}
+	if serr := src.Send(ctx, resp); serr != nil {
+		return fmt.Errorf("ws/h2 relay: src.Send (respond): %w", serr)
+	}
+	return nil
 }
 
 // h2LayersFromStack returns the client and upstream connection-level
@@ -1384,8 +1495,9 @@ func clientToUpstream(
 	uh *upstreamHolder,
 	sc *streamCapture,
 	reg *bodyBufRegistry,
-	onDrop func(context.Context, *envelope.Envelope, string),
+	opt SessionOptions,
 ) (err error) {
+	onDrop := opt.OnPipelineDrop
 	// Cascade-close discipline (feedback_session_cascade_pattern.md):
 	//   * Genuine err → close upstream so peer goroutine unblocks promptly.
 	//   * Normal EOF (err == nil) → leave open; the response may still arrive.
@@ -1413,6 +1525,12 @@ func clientToUpstream(
 			if upgradePending(notice) {
 				return ErrUpgradePending
 			}
+			// USK-851: on client teardown (graceful EOF or stream-level
+			// error), surface the "upstream-closed-after-intercept-release"
+			// tag when a recent release on the Receive side correlates.
+			// Symmetric with the upstreamToClient path so either side
+			// observing the teardown attributes it to the long-hold cause.
+			checkInterceptReleaseEOF(ctx, opt, sc.get(), envelope.Send)
 			if errors.Is(nerr, io.EOF) {
 				return nil
 			}
@@ -1499,8 +1617,9 @@ func upstreamToClient(
 	uh *upstreamHolder,
 	sc *streamCapture,
 	reg *bodyBufRegistry,
-	onDrop func(context.Context, *envelope.Envelope, string),
+	opt SessionOptions,
 ) error {
+	onDrop := opt.OnPipelineDrop
 	if !waitUpstreamReady(ctx, uh) {
 		return nil
 	}
@@ -1523,12 +1642,8 @@ func upstreamToClient(
 
 	for {
 		env, err := upstreamNext(ctx, uh.ch, notice)
-		if err != nil {
-			return err
-		}
-		if env == nil {
-			// Normal EOF.
-			return nil
+		if err != nil || env == nil {
+			return upstreamToClientFinish(ctx, opt, clientID, err)
 		}
 
 		if clientID != "" {
@@ -1613,6 +1728,28 @@ func upstreamToClient(
 			return ErrUpgradePending
 		}
 	}
+}
+
+// upstreamToClientFinish is the EOF / terminal-error tail of
+// upstreamToClient. Extracted so the main loop stays under the gocyclo
+// budget and so the USK-851 detection runs on every path the read loop
+// returns through.
+//
+// Contract:
+//   - err == nil (env was nil): graceful EOF; check release tracker and
+//     return nil so the caller's errgroup sees a clean exit.
+//   - err == ErrUpgradePending: control-flow signal from upstreamNext;
+//     surface verbatim WITHOUT touching the tracker (it is not a wire
+//     teardown).
+//   - any other err: stream-level error (e.g. WS Layer's mapped
+//     StreamError on peer-reset); check the tracker (same reasoning as
+//     EOF — the upstream stopped talking) and return the original err.
+func upstreamToClientFinish(ctx context.Context, opt SessionOptions, clientID string, err error) error {
+	if errors.Is(err, ErrUpgradePending) {
+		return err
+	}
+	checkInterceptReleaseEOF(ctx, opt, clientID, envelope.Receive)
+	return err
 }
 
 // channelInterrupter is satisfied by Channels (currently only http1) that

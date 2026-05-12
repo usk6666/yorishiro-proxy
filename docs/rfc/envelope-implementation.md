@@ -343,6 +343,26 @@ RFC を accepted にした以上、実装時の誘惑に抗うために明示化
 
 **状態:** N7 (wslayer 実装) 時の注意事項。この文書に明記しておく。
 
+### Friction 2-D: Long intercept hold (> upstream WS idle) silently breaks conversation
+
+**問題:** An operator legitimately holds a WS frame in the intercept queue past the upstream's WS idle timeout (~10s for Fly.io edge; varies by provider). When the operator releases the frame the proxy-to-upstream forward write succeeds but the upstream-to-proxy read returns `EOF` immediately afterward — the upstream has already half-closed the WS due to inactivity. Today the release MCP tool returns success and the operator only discovers the broken conversation by observing subsequent traffic fail.
+
+**解決 (approach D, USK-851):** observability only. The proxy:
+
+1. Stamps the release timestamp on a process-singleton `common.ReleaseTracker` keyed by `(StreamID, Direction)` when the MCP intercept tool's Release path unblocks the holding goroutine.
+2. On graceful EOF inside `session.wsRelayDirection`, `session.clientToUpstream`, or `session.upstreamToClient`, looks up the OPPOSITE direction on the same Stream within a 2-second correlation window. A hit means "the upstream half-closed shortly after we forwarded a long-held frame".
+3. Appends the Stream tag `intercept_hold_outcome=upstream_closed_after_intercept_release` via `flow.StreamUpdate.AppendTags`. Operators querying `resource=stream id=<…>` see the diagnostic without trawling logs.
+4. The synchronous release-tool response carries `forwarded_at_unix_ms` so the operator can correlate the unblock instant with the later async Stream tag.
+
+**Wire-fidelity:** no probes injected, no raw bytes mutated, no Layer changes. The detection is purely an overlay on existing Send/Next outcomes.
+
+**Out of scope (deferred follow-ups):**
+- Approach A (WS Ping/Pong keepalive injection during holds) — would mutate the wire; needs a separate design pass for plugin opt-out and protocol-rule re-evaluation.
+- Approach B (per-protocol hold-timeout config so the proxy auto-releases before upstream idle) — config surface design deferred.
+- Approach C (pre-release upstream liveness probe) — rejected; the probe itself can fail spuriously and would change wire timing.
+
+**状態:** **RESOLVED** (USK-851, 2026-05-12). Implementation in `internal/rules/common/release_tracker.go`, `internal/session/session.go` (`checkInterceptReleaseEOF`), and `internal/proxybuild/builder.go::buildSessionOptions`. Smoke-tier e2e test: `internal/layer/ws/intercept_hold_eof_integration_test.go`.
+
 ### Friction 3-A: HTTP/2 upstream connection pool
 
 **問題:** HTTP/2 は 1 接続上で多数の stream を多重化する。client の 1 接続上で複数 host 宛の stream が来る可能性もある (coalesced connection)。upstream connection pool が必要。

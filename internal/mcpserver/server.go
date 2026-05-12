@@ -221,6 +221,12 @@ func Run(ctx context.Context, fs *flag.FlagSet, args []string, opts RunOptions) 
 	// shared between pipeline.InterceptStep (live data path via
 	// proxybuild) and the MCP intercept / configure tools.
 	holdQueue := rulescommon.NewHoldQueue()
+	// USK-851: process-singleton ReleaseTracker shared between the MCP
+	// intercept tool (Release stamps it) and the live data path (relay
+	// goroutines query it on EOF). Threading the same pointer through
+	// both halves ensures the operator-facing Stream tag fires regardless
+	// of which listener the affected Stream belongs to.
+	releaseTracker := rulescommon.NewReleaseTracker()
 	httpInterceptEngine := httprules.NewInterceptEngine()
 	wsInterceptEngine := wsrules.NewInterceptEngine()
 	grpcInterceptEngine := grpcrules.NewInterceptEngine()
@@ -249,7 +255,7 @@ func Run(ctx context.Context, fs *flag.FlagSet, args []string, opts RunOptions) 
 	}
 
 	return assembleAndRunMCPServer(ctx, cfg, proxyCfg, ca, issuer, store, pluginv2Engine,
-		holdQueue, httpInterceptEngine, wsInterceptEngine, grpcInterceptEngine,
+		holdQueue, releaseTracker, httpInterceptEngine, wsInterceptEngine, grpcInterceptEngine,
 		httpTransformEngine, passthrough,
 		targetScopePolicy, targetScopePolicySource, openBrowser, stdioMCP, versionStr, opts.OnHTTPListening, logger)
 }
@@ -267,6 +273,7 @@ func assembleAndRunMCPServer(
 	store *flow.SQLiteStore,
 	pluginv2Engine *pluginv2.Engine,
 	holdQueue *rulescommon.HoldQueue,
+	releaseTracker *rulescommon.ReleaseTracker,
 	httpInterceptEngine *httprules.InterceptEngine,
 	wsInterceptEngine *wsrules.InterceptEngine,
 	grpcInterceptEngine *grpcrules.InterceptEngine,
@@ -329,7 +336,7 @@ func assembleAndRunMCPServer(
 	recordScope := flow.NewRecordScope()
 
 	manager, err := assembleLiveManager(cfg, proxyCfg, store, issuer, pluginv2Engine,
-		holdQueue, httpInterceptEngine, wsInterceptEngine, grpcInterceptEngine,
+		holdQueue, releaseTracker, httpInterceptEngine, wsInterceptEngine, grpcInterceptEngine,
 		httpTransformEngine, passthrough, targetScope, rateLimiter, budgetManager, safetyEngine, perProtoSafety, hostTLSRegistry,
 		socks5Negotiator, recordScope, logger)
 	if err != nil {
@@ -365,7 +372,7 @@ func assembleAndRunMCPServer(
 
 	socks5AuthSetter := newSOCKS5AuthAdapter(socks5Negotiator, logger)
 	mcpComps, webUIToken, opts, err := buildMCPComponents(ctx, cfg, proxyCfg, ca, issuer, store, manager,
-		passthrough, holdQueue, httpInterceptEngine, wsInterceptEngine, grpcInterceptEngine,
+		passthrough, holdQueue, releaseTracker, httpInterceptEngine, wsInterceptEngine, grpcInterceptEngine,
 		pluginv2Engine, httpTransformEngine, hostTLSRegistry, tlsTransport, targetScope, rateLimiter, budgetManager, safetyEngine,
 		socks5AuthSetter, recordScope, targetScopePolicySource, version, logger)
 	if err != nil {
@@ -518,6 +525,7 @@ func buildMCPComponents(
 	manager *proxybuild.Manager,
 	passthrough *connector.PassthroughList,
 	holdQueue *rulescommon.HoldQueue,
+	releaseTracker *rulescommon.ReleaseTracker,
 	httpInterceptEngine *httprules.InterceptEngine,
 	wsInterceptEngine *wsrules.InterceptEngine,
 	grpcInterceptEngine *grpcrules.InterceptEngine,
@@ -552,7 +560,7 @@ func buildMCPComponents(
 			httpTransformEngine,
 			safetyEngine,
 			nil, // safetyEngineSetters — legacy per-handler propagation gone with USK-706.
-		),
+		).WithReleaseTracker(releaseTracker),
 		connector: mcp.NewConnector(
 			manager,
 			passthrough,

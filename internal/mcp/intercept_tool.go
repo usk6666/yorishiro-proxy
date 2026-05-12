@@ -71,7 +71,11 @@ func (s *Server) registerIntercept() {
 			"(http | ws | grpc_start | grpc_data | raw — matching the envelope's Message type), " +
 			"or with mode=\"raw\" + raw_override_base64 forwards a synthetic RawMessage; " +
 			"'drop' discards the envelope. Headers in modify payloads MUST be order-preserved " +
-			"[{name, value}] arrays (wire fidelity). See yorishiro://help/intercept.",
+			"[{name, value}] arrays (wire fidelity). The release/modify_and_forward response " +
+			"includes forwarded_at_unix_ms; if the upstream half-closed during a long hold, " +
+			"the affected Stream is tagged " +
+			"intercept_hold_outcome=upstream_closed_after_intercept_release " +
+			"(query resource=stream id=<…> to inspect). See yorishiro://help/intercept.",
 	}, s.handleInterceptTool)
 }
 
@@ -128,6 +132,16 @@ func (s *Server) handleInterceptTool(ctx context.Context, _ *gomcp.CallToolReque
 // common.HoldQueue. Resolves the action via resolveHoldQueueAction (which
 // performs stage-2 validation against the held envelope's type), releases
 // the entry, and returns a structured summary.
+//
+// USK-851: when the resolved action forwards the envelope downstream
+// (release / modify_and_forward), the response carries ForwardedAtUnixMs —
+// the wall-clock millisecond timestamp the Release call unblocked the
+// holding goroutine. Operators correlate this with the affected Stream's
+// tags via `query resource=stream id=<…>`: a tag value of
+// "upstream_closed_after_intercept_release" indicates the upstream half-
+// closed shortly after the release (typical when the hold exceeded the
+// upstream's WS idle timeout). The pipeline.releaseTracker is also
+// stamped so the live session relay loops can append that tag on EOF.
 func (s *Server) handleInterceptHoldQueue(_ context.Context, input interceptInput, entry *common.HeldEntry) (*gomcp.CallToolResult, *holdQueueInterceptResult, error) {
 	action, err := resolveHoldQueueAction(entry, input, input.Action)
 	if err != nil {
@@ -138,7 +152,7 @@ func (s *Server) handleInterceptHoldQueue(_ context.Context, input interceptInpu
 		return nil, nil, fmt.Errorf("%s: %w", input.Action, err)
 	}
 
-	return nil, &holdQueueInterceptResult{
+	result := &holdQueueInterceptResult{
 		InterceptID:  entry.ID,
 		Action:       input.Action,
 		Status:       holdQueueStatusForAction(input.Action),
@@ -147,7 +161,23 @@ func (s *Server) handleInterceptHoldQueue(_ context.Context, input interceptInpu
 		MatchedRules: entry.MatchedRules,
 		FlowID:       entry.Envelope.FlowID,
 		StreamID:     entry.Envelope.StreamID,
-	}, nil
+	}
+
+	// USK-851: stamp ForwardedAtUnixMs + the per-Stream release tracker on
+	// forwarding actions. The synchronous timestamp documents WHEN we
+	// unblocked the holding goroutine; the actual wire write happens
+	// shortly afterward inside the session relay. The tracker entry lets
+	// the session goroutines correlate a subsequent EOF on the opposite
+	// direction with this release and surface the operator-facing tag.
+	// Drop is excluded — the envelope never reaches the wire so there is
+	// nothing to correlate.
+	if action.Type == common.ActionRelease || action.Type == common.ActionModifyAndForward {
+		now := time.Now()
+		result.ForwardedAtUnixMs = now.UnixMilli()
+		s.pipeline.releaseTracker.MarkRelease(entry.Envelope.StreamID, entry.Envelope.Direction, now)
+	}
+
+	return nil, result, nil
 }
 
 // holdQueueInterceptResult is the structured response for actions on the
@@ -155,15 +185,22 @@ func (s *Server) handleInterceptHoldQueue(_ context.Context, input interceptInpu
 // echoed back — the typed modify payload already round-trips through the
 // dispatch arms, and the same envelope is observable via the query tool's
 // intercept_queue resource.
+//
+// ForwardedAtUnixMs (USK-851) is set only when the action forwards the
+// envelope (release / modify_and_forward). It records the moment the
+// Release call unblocked the holding session goroutine. Operators use it
+// to correlate the synchronous response with the asynchronous Stream
+// tags appended by the session relay on a subsequent upstream EOF.
 type holdQueueInterceptResult struct {
-	InterceptID  string   `json:"intercept_id"`
-	Action       string   `json:"action"`
-	Status       string   `json:"status"`
-	Protocol     string   `json:"protocol"`
-	Direction    string   `json:"direction"`
-	MatchedRules []string `json:"matched_rules,omitempty"`
-	FlowID       string   `json:"flow_id,omitempty"`
-	StreamID     string   `json:"stream_id,omitempty"`
+	InterceptID       string   `json:"intercept_id"`
+	Action            string   `json:"action"`
+	Status            string   `json:"status"`
+	Protocol          string   `json:"protocol"`
+	Direction         string   `json:"direction"`
+	MatchedRules      []string `json:"matched_rules,omitempty"`
+	FlowID            string   `json:"flow_id,omitempty"`
+	StreamID          string   `json:"stream_id,omitempty"`
+	ForwardedAtUnixMs int64    `json:"forwarded_at_unix_ms,omitempty"`
 }
 
 // holdQueueStatusForAction maps the action name to the per-action status

@@ -153,6 +153,14 @@ type Deps struct {
 	// resolution from MCP intercept tools).
 	HoldQueue *common.HoldQueue
 
+	// InterceptReleaseTracker records the timestamps the MCP intercept
+	// tool's Release path stamps each time a held envelope is unblocked.
+	// The same pointer is shared with mcp.Pipeline (so the MCP tool can
+	// MarkRelease) and threaded into session.SessionOptions (so the relay
+	// goroutines can detect upstream EOF shortly after a long hold). nil
+	// disables the USK-851 detection without affecting wire behaviour.
+	InterceptReleaseTracker *common.ReleaseTracker
+
 	// --- Optional wire encoder registries ---
 
 	// WireEncoderRegistry is shared between PluginStepPost and RecordStep
@@ -860,6 +868,30 @@ func buildSessionOptions(deps Deps, listenerName string) session.SessionOptions 
 	if deps.PluginV2Engine != nil {
 		opts.LifecycleEngine = deps.PluginV2Engine
 		opts.StateReleaser = deps.PluginV2Engine
+	}
+	// USK-851: thread the intercept-release tracker + a Stream-tag-append
+	// callback into every session built by this listener. The tracker is
+	// stamped by the MCP intercept tool's Release path; the callback fires
+	// inside the relay goroutine when src.Next returns EOF within the
+	// detection window of a recent release on the OPPOSITE direction. The
+	// tag value is appended via flow.Store.UpdateStream.AppendTags so any
+	// tags previously written (TLS metadata, RecordStep cap markers) are
+	// preserved. nil store or nil tracker disables detection silently.
+	if deps.InterceptReleaseTracker != nil {
+		opts.InterceptReleaseTracker = deps.InterceptReleaseTracker
+		if deps.FlowStore != nil {
+			store := deps.FlowStore
+			opts.OnInterceptReleaseEOF = func(ctx context.Context, streamID string) {
+				if streamID == "" {
+					return
+				}
+				_ = store.UpdateStream(ctx, streamID, flow.StreamUpdate{
+					AppendTags: map[string]string{
+						"intercept_hold_outcome": "upstream_closed_after_intercept_release",
+					},
+				})
+			}
+		}
 	}
 	// USK-806: bridge the post-Upgrade ws.Layer / sse Channel wire caps
 	// from BuildConfig (resolved at boot from ProxyConfig.WebSocket /

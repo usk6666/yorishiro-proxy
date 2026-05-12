@@ -464,7 +464,7 @@ func TestWSRelayDirection(t *testing.T) {
 		p := pipeline.New(passStep{})
 		reg := &bodyBufRegistry{}
 
-		err := wsRelayDirection(context.Background(), p, reg, src, dst, nil)
+		err := wsRelayDirection(context.Background(), p, reg, src, dst, SessionOptions{}, envelope.Send)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -488,7 +488,7 @@ func TestWSRelayDirection(t *testing.T) {
 		p := pipeline.New(passStep{})
 		reg := &bodyBufRegistry{}
 
-		err := wsRelayDirection(context.Background(), p, reg, src, dst, nil)
+		err := wsRelayDirection(context.Background(), p, reg, src, dst, SessionOptions{}, envelope.Send)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -504,7 +504,7 @@ func TestWSRelayDirection(t *testing.T) {
 		p := pipeline.New(passStep{})
 		reg := &bodyBufRegistry{}
 
-		err := wsRelayDirection(context.Background(), p, reg, src, dst, nil)
+		err := wsRelayDirection(context.Background(), p, reg, src, dst, SessionOptions{}, envelope.Send)
 		if err != nil {
 			t.Errorf("EOF must surface as nil error, got %v", err)
 		}
@@ -520,7 +520,7 @@ func TestWSRelayDirection(t *testing.T) {
 		p := pipeline.New(passStep{})
 		reg := &bodyBufRegistry{}
 
-		err := wsRelayDirection(context.Background(), p, reg, src, dst, nil)
+		err := wsRelayDirection(context.Background(), p, reg, src, dst, SessionOptions{}, envelope.Send)
 		if err == nil {
 			t.Fatal("expected error, got nil")
 		}
@@ -548,7 +548,7 @@ func TestWSRelayDirection(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		drainAfter(t, 50*time.Millisecond, cancel)
 
-		err := wsRelayDirection(ctx, p, reg, src, dst, nil)
+		err := wsRelayDirection(ctx, p, reg, src, dst, SessionOptions{}, envelope.Send)
 		if !errors.Is(err, context.Canceled) {
 			t.Errorf("expected context.Canceled, got %v", err)
 		}
@@ -563,7 +563,7 @@ func TestWSRelayDirection(t *testing.T) {
 		p := pipeline.New(passStep{})
 		reg := &bodyBufRegistry{}
 
-		err := wsRelayDirection(context.Background(), p, reg, src, dst, nil)
+		err := wsRelayDirection(context.Background(), p, reg, src, dst, SessionOptions{}, envelope.Send)
 		if err == nil {
 			t.Fatal("expected dst.Send failure to surface")
 		}
@@ -583,7 +583,7 @@ func TestWSRelayDirection(t *testing.T) {
 		p := pipeline.New(dropStep{})
 		reg := &bodyBufRegistry{}
 
-		err := wsRelayDirection(context.Background(), p, reg, src, dst, nil)
+		err := wsRelayDirection(context.Background(), p, reg, src, dst, SessionOptions{}, envelope.Send)
 		if err != nil {
 			t.Fatalf("unexpected error after Drop: %v", err)
 		}
@@ -601,7 +601,7 @@ func TestWSRelayDirection(t *testing.T) {
 		p := pipeline.New(respondStep{resp: resp})
 		reg := &bodyBufRegistry{}
 
-		err := wsRelayDirection(context.Background(), p, reg, src, dst, nil)
+		err := wsRelayDirection(context.Background(), p, reg, src, dst, SessionOptions{}, envelope.Send)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -630,7 +630,7 @@ func TestWSRelayDirection(t *testing.T) {
 		p := pipeline.New(passStep{})
 		reg := &bodyBufRegistry{}
 
-		err := wsRelayDirection(context.Background(), p, reg, src, dst, nil)
+		err := wsRelayDirection(context.Background(), p, reg, src, dst, SessionOptions{}, envelope.Send)
 		if err != nil {
 			t.Errorf("wrapped io.EOF must surface as nil, got %v", err)
 		}

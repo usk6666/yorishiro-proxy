@@ -124,6 +124,7 @@ func setupLiveProxy(t *testing.T, pluginName, pluginScript string) *liveProxy {
 	issuer := cert.NewIssuer(ca)
 
 	holdQueue := rulescommon.NewHoldQueue()
+	releaseTracker := rulescommon.NewReleaseTracker()
 	httpInterceptEngine := httprules.NewInterceptEngine()
 	wsInterceptEngine := wsrules.NewInterceptEngine()
 	grpcInterceptEngine := grpcrules.NewInterceptEngine()
@@ -131,6 +132,7 @@ func setupLiveProxy(t *testing.T, pluginName, pluginScript string) *liveProxy {
 	buildCfg := NewLiveBuildConfig(cfg, proxyCfg, issuer, engine, nil)
 
 	mgr, err := NewLiveManager(cfg, proxyCfg, store, issuer, engine, holdQueue,
+		releaseTracker,
 		httpInterceptEngine, wsInterceptEngine, grpcInterceptEngine,
 		httpTransformEngine,
 		(*connector.PassthroughList)(nil),

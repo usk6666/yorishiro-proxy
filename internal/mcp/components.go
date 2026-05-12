@@ -70,6 +70,7 @@ type Pipeline struct {
 	wsInterceptEngine   *wsrules.InterceptEngine
 	grpcInterceptEngine *grpcrules.InterceptEngine
 	holdQueue           *common.HoldQueue
+	releaseTracker      *common.ReleaseTracker
 	transformHTTPEngine *httprules.TransformEngine
 	safetyEngine        *safety.Engine
 	safetyEngineSetters []safetyEngineSetter
@@ -95,6 +96,18 @@ func NewPipeline(
 		safetyEngine:        safetyEngine,
 		safetyEngineSetters: safetyEngineSetters,
 	}
+}
+
+// WithReleaseTracker installs the USK-851 intercept-release timestamp
+// tracker. The MCP intercept tool's Release path stamps this tracker after
+// HoldQueue.Release succeeds; the live session relay loops query it on EOF
+// (via session.SessionOptions.InterceptReleaseTracker) and append a Stream
+// tag when the OPPOSITE direction observed a recent release. Optional —
+// callers that do not wire the tracker leave the field nil and the MCP
+// stamp is a no-op (the tracker exposes a nil-receiver MarkRelease).
+func (p *Pipeline) WithReleaseTracker(tr *common.ReleaseTracker) *Pipeline {
+	p.releaseTracker = tr
+	return p
 }
 
 // proxyManager is the connector-manager interface satisfied by the
