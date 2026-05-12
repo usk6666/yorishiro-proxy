@@ -4,6 +4,8 @@
 .claude/skills/playwright-cli/
 .claude/skills/yorishiro/
 .claude/settings.local.json
+.claude/scheduled_tasks.lock
+.claude/worktrees/
 .mcp.json
 
 # SQLite database files
