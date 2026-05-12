@@ -590,22 +590,48 @@ func driveWSEchoThroughProxyH1(ctx context.Context, proxyAddr, upstreamAddr, pay
 	}
 	_ = tlsConn.SetWriteDeadline(time.Time{})
 
-	// 5. Read echo.
+	// 5. Read frames until the echo is observed. The driver tolerates
+	//    server-initiated frames that precede the echo on the wire —
+	//    USK-841 surfaced this via the flyedge harness, where the upstream
+	//    legitimately pushes an empty unmasked text frame immediately
+	//    after the 101 (Fly.io-edge liveness pattern). Such frames are
+	//    wire-faithfully forwarded by the proxy (MITM principle #1) and
+	//    must not break the wire-shape assertion. The deadline covers the
+	//    entire loop; non-text and non-matching frames are silently
+	//    skipped. We bail with an error if the loop ever observes a
+	//    Close-frame (peer terminated before delivering the echo).
 	if err := tlsConn.SetReadDeadline(time.Now().Add(10 * time.Second)); err != nil {
 		return fmt.Errorf("set read deadline: %w", err)
 	}
-	echo, err := ws.ReadFrame(br)
-	if err != nil {
-		return fmt.Errorf("read echo frame: %w", err)
+	defer func() { _ = tlsConn.SetReadDeadline(time.Time{}) }()
+	for {
+		echo, err := ws.ReadFrame(br)
+		if err != nil {
+			return fmt.Errorf("read echo frame: %w", err)
+		}
+		if echo.Opcode == ws.OpcodeClose {
+			return fmt.Errorf("peer closed WS conn before echo (code=%d)", closeCodeFromFrame(echo))
+		}
+		if echo.Opcode != ws.OpcodeText {
+			continue
+		}
+		if string(echo.Payload) == payload {
+			return nil
+		}
+		// A text frame that doesn't match the expected payload is
+		// treated as a server-pushed/liveness frame (e.g. the
+		// USK-841 flyedge empty-text-frame variant). Skip and keep
+		// reading; the actual echo should still arrive.
 	}
-	_ = tlsConn.SetReadDeadline(time.Time{})
-	if echo.Opcode != ws.OpcodeText {
-		return fmt.Errorf("echo opcode = %#x, want %#x", echo.Opcode, ws.OpcodeText)
+}
+
+// closeCodeFromFrame returns the RFC 6455 close code from a Close-opcode
+// frame's payload, or 0 if the payload is shorter than 2 bytes.
+func closeCodeFromFrame(f *ws.Frame) uint16 {
+	if f == nil || len(f.Payload) < 2 {
+		return 0
 	}
-	if string(echo.Payload) != payload {
-		return fmt.Errorf("echo payload = %q, want %q", string(echo.Payload), payload)
-	}
-	return nil
+	return uint16(f.Payload[0])<<8 | uint16(f.Payload[1])
 }
 
 // dialCONNECTH1 dials the proxy at proxyAddr and issues a CONNECT request

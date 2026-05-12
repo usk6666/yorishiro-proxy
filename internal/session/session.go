@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"sync"
 
 	"github.com/usk6666/yorishiro-proxy/internal/connector"
@@ -526,11 +527,28 @@ func RunStackSessionExchange(
 		return errors.New("session: upgrade pending but upstream Channel was never established")
 	}
 
+	// USK-841 Phase A milestone (a): upgrade detected by UpgradeStep + the
+	// pre-swap session has fully drained. Operators correlate this trace
+	// with the symptom ("frames not recorded") by phase+streamID matching.
+	// At this point notice.markSendUpgrade was seen, the 101 was observed,
+	// and the first session returned ErrUpgradePending.
+	clientChStreamID := ""
+	if clientCh != nil {
+		clientChStreamID = clientCh.StreamID()
+	}
+	upstreamChStreamID := upstreamCh.StreamID()
+	slog.Debug("session: upgrade-pending observed by RunStackSessionExchange",
+		"phase", "upgrade-detected",
+		"kind", string(notice.Pending()),
+		"clientStreamID", clientChStreamID,
+		"upstreamStreamID", upstreamChStreamID,
+	)
+
 	switch notice.Pending() {
 	case UpgradeWS:
-		return runUpgradeWS(ctx, stack, dial, p, userOpt, upstreamCh)
+		return runUpgradeWS(ctx, stack, dial, p, userOpt, upstreamCh, notice.WSUpgradeRequest())
 	case UpgradeWSOverH2:
-		return runUpgradeWSOverH2(ctx, stack, p, userOpt, clientCh, upstreamCh)
+		return runUpgradeWSOverH2(ctx, stack, p, userOpt, clientCh, upstreamCh, notice.WSUpgradeRequest())
 	case UpgradeSSE:
 		return runUpgradeSSE(ctx, stack, dial, p, userOpt, upstreamCh, notice.SSEFirstResponse())
 	default:
@@ -545,6 +563,17 @@ func RunStackSessionExchange(
 // RoleClient upstream side), install them via ReplaceClient/UpstreamTop,
 // then recursively call RunStackSession with a trivial DialFunc that
 // returns the pre-acquired upstream WS Channel.
+//
+// upgradeReq is the WS upgrade request envelope captured by UpgradeStep
+// at observation time. Its Context (ConnID / ClientAddr / TargetHost /
+// TLS) and HTTPMessage (Path / RawQuery) are propagated onto the post-
+// swap ws.Layer's envelope template via ws.WithEnvelopeContext so per-
+// frame envelopes carry the connection-scoped metadata that
+// capture_scope / capture filters key on. Without this propagation every
+// WS frame envelope emerges with an empty Context and is rejected as
+// out-of-scope (USK-841). nil is tolerated for the test paths that
+// construct runUpgradeWS directly without going through
+// RunStackSessionExchange.
 func runUpgradeWS(
 	ctx context.Context,
 	stack *connector.ConnectionStack,
@@ -552,14 +581,29 @@ func runUpgradeWS(
 	p *pipeline.Pipeline,
 	userOpt SessionOptions,
 	upstreamCh layer.Channel,
+	upgradeReq *envelope.Envelope,
 ) error {
 	clientTop := stack.ClientTopmost()
+	upstreamTop := stack.UpstreamTopmost()
+
+	// USK-841 Phase A milestone (b): runUpgradeWS was invoked. The trace
+	// fires BEFORE any DetachStream call so a partial-orchestration failure
+	// (wrong Layer type, missing topmost) is identifiable as "runUpgradeWS
+	// reached but blocked on Layer-type assert" vs "runUpgradeWS never
+	// reached". upstreamCh.StreamID() is the value that ws.New later stamps
+	// onto both Channel pair members (Q3 in the design review).
+	slog.Debug("session: runUpgradeWS entered",
+		"phase", "runUpgradeWS-entry",
+		"streamID", upstreamCh.StreamID(),
+		"clientTopType", fmt.Sprintf("%T", clientTop),
+		"upstreamTopType", fmt.Sprintf("%T", upstreamTop),
+	)
+
 	clientHTTP, ok := clientTop.(*http1.Layer)
 	if !ok {
 		return fmt.Errorf("session: ws upgrade requires *http1.Layer client topmost, got %T", clientTop)
 	}
 
-	upstreamTop := stack.UpstreamTopmost()
 	upstreamHTTP, ok := upstreamTop.(*http1.Layer)
 	if !ok {
 		return fmt.Errorf("session: ws upgrade requires *http1.Layer upstream topmost, got %T", upstreamTop)
@@ -582,7 +626,37 @@ func runUpgradeWS(
 
 	clientStreamID := upstreamCh.StreamID()
 
+	// USK-841 Phase A milestone (c): DetachStream returned on both sides.
+	// The clientReader type discriminates whether the http1 capture path
+	// fired (io.MultiReader = some post-Interrupt bytes were drained and
+	// prepended; bare *bufio.Reader = nothing to replay). The upstreamReader
+	// type is always the upstream's bufio.Reader since UpgradeStep never
+	// calls PrepareSwap on the upstream side (one of the H4 hypotheses).
+	// If upstreamReaderType is *bufio.Reader and the upstream had pushed
+	// bytes right after 101, those bytes are sitting in bufio's buffered
+	// remainder — readable by the new ws.Layer — so the only way they get
+	// lost is if the buffered slice between PrepareSwap-window and
+	// DetachStream is non-empty AND the http1 reader was the source. The
+	// trace shows the raw type so Phase B can correlate.
+	slog.Debug("session: runUpgradeWS DetachStream complete",
+		"phase", "runUpgradeWS-detached",
+		"streamID", clientStreamID,
+		"clientReaderType", fmt.Sprintf("%T", clientReader),
+		"upstreamReaderType", fmt.Sprintf("%T", upReader),
+	)
+
 	wsOpts := wsLifecycleOptions(userOpt)
+	// USK-841: propagate the wire-observed EnvelopeContext from the pre-
+	// swap WS Upgrade request onto the post-swap WS Layer pair. Without
+	// this, every WS frame envelope emerges with empty ConnID /
+	// TargetHost / TLS, and capture_scope (which keys on hostname for
+	// non-HTTP envelopes via Context.TargetHost / Context.TLS.SNI) drops
+	// every frame as out-of-scope. The Option is prepended so callers
+	// that pass extra Options downstream of wsLifecycleOptions still take
+	// precedence — wsLifecycleOptions does not carry an EnvelopeContext.
+	if envCtx, ok := wsEnvelopeContextFromUpgradeReq(upgradeReq); ok {
+		wsOpts = append([]ws.Option{ws.WithEnvelopeContext(envCtx)}, wsOpts...)
+	}
 	clientWS := ws.New(clientReader, clientWriter, clientCloser, clientStreamID, ws.RoleServer, wsOpts...)
 	upstreamWS := ws.New(upReader, upWriter, upCloser, clientStreamID, ws.RoleClient, wsOpts...)
 
@@ -599,7 +673,68 @@ func runUpgradeWS(
 		return upstreamWSCh, nil
 	})
 
+	// USK-841 Phase A milestone (d): the post-swap recursive session is
+	// about to start. Both ws.Layers are installed on the ConnectionStack
+	// via ReplaceClient/UpstreamTop; the upstream Channel was successfully
+	// pulled out of upstreamWS.Channels(). If the recursive session never
+	// records any WS frame, the failure is downstream of this point: most
+	// likely inside the new ws.Layer's wsChannel.Next path (milestone (e))
+	// or the upstream bufio reader's positioning relative to the wire.
+	slog.Debug("session: runUpgradeWS recursive RunStackSession entry",
+		"phase", "recursive-session-entry",
+		"streamID", clientStreamID,
+	)
+
 	return RunStackSession(ctx, stack, upgradeDial, p, userOpt)
+}
+
+// wsEnvelopeContextFromUpgradeReq derives the EnvelopeContext template
+// stamped on every post-swap WS frame envelope from the pre-swap upgrade
+// request envelope captured by UpgradeStep. The connection-scoped fields
+// (ConnID, ClientAddr, TargetHost, TLS) are copied verbatim; the request-
+// line URL is reshaped into UpgradePath / UpgradeQuery so it surfaces as
+// "the URL the WS conversation was bootstrapped against" rather than
+// being mistaken for an HTTP request line (the WS envelopes are not HTTP
+// transactions — leaving RequestPath / RequestMethod / RequestRawQuery
+// zero is intentional). Returns ok=false when upgradeReq is nil (test
+// path that bypassed UpgradeStep) or carries no usable connection
+// metadata; the caller then constructs the WS Layer without an envelope
+// context template (legacy behaviour pre-USK-841).
+//
+// MITM principle 1 (do not normalize the wire): the Path and RawQuery
+// are taken verbatim from the wire-observed HTTPMessage, not from any
+// derived URL parser, so case / percent-encoding / empty-query distinction
+// survives onto the WS envelope.
+func wsEnvelopeContextFromUpgradeReq(upgradeReq *envelope.Envelope) (envelope.EnvelopeContext, bool) {
+	if upgradeReq == nil {
+		return envelope.EnvelopeContext{}, false
+	}
+	src := upgradeReq.Context
+	out := envelope.EnvelopeContext{
+		ConnID:     src.ConnID,
+		ClientAddr: src.ClientAddr,
+		TargetHost: src.TargetHost,
+		TLS:        src.TLS,
+		// ReceivedAt is intentionally zero — the per-envelope path stamps
+		// the actual frame arrival time on every Envelope it emits.
+		// RequestPath / RequestMethod / RequestRawQuery are intentionally
+		// zero: those carry HTTP-transaction metadata and a WS frame is
+		// not an HTTP transaction. The wire-observed request URL is
+		// surfaced via UpgradePath / UpgradeQuery instead.
+	}
+	if msg, ok := upgradeReq.Message.(*envelope.HTTPMessage); ok && msg != nil {
+		out.UpgradePath = msg.Path
+		out.UpgradeQuery = msg.RawQuery
+	}
+	// If none of the carry-forward fields are populated, surface ok=false
+	// so the caller can skip appending a no-op Option. Conservative:
+	// presence of any one of these fields is enough to be useful to
+	// downstream capture_scope / intercept rules.
+	if out.ConnID == "" && out.TargetHost == "" && out.TLS == nil &&
+		out.UpgradePath == "" && out.UpgradeQuery == "" && out.ClientAddr == nil {
+		return envelope.EnvelopeContext{}, false
+	}
+	return out, true
 }
 
 // wsLifecycleOptions translates SessionOptions plumbing into the
@@ -679,6 +814,7 @@ func runUpgradeWSOverH2(
 	p *pipeline.Pipeline,
 	userOpt SessionOptions,
 	clientCh, upstreamCh layer.Channel,
+	upgradeReq *envelope.Envelope,
 ) (retErr error) {
 	clientH2, upstreamH2, err := h2LayersFromStack(stack)
 	if err != nil {
@@ -707,6 +843,13 @@ func runUpgradeWSOverH2(
 		ws.WithH2Mode(true),
 		ws.WithInitialSequence(1),
 	}, wsLifecycleOptions(userOpt)...)
+	// USK-841: propagate the wire-observed EnvelopeContext from the pre-
+	// swap extended-CONNECT request onto the post-swap WS Layer pair.
+	// Same rationale as runUpgradeWS — without this, per-frame envelopes
+	// carry empty Context and capture_scope rejects them as out-of-scope.
+	if envCtx, ok := wsEnvelopeContextFromUpgradeReq(upgradeReq); ok {
+		wsOpts = append(wsOpts, ws.WithEnvelopeContext(envCtx))
+	}
 	clientWS := ws.New(cR, cW, &detachCloserAdapter{f: cClose}, sessionStreamID, ws.RoleServer, wsOpts...)
 	upstreamWS := ws.New(uR, uW, &detachCloserAdapter{f: uClose}, sessionStreamID, ws.RoleClient, wsOpts...)
 
@@ -1366,8 +1509,23 @@ func upstreamToClient(
 		// any post-101 byte arrival is recorded for replay by
 		// http1.Layer.DetachStream regardless of which goroutine wins
 		// the netpoll-vs-deadline race.
+		//
+		// USK-841 Phase B: also prime the upstream-side capture
+		// symmetrically. When the upstream pushes WS frame bytes
+		// immediately after flushing its 101 (Fly.io edge behavior),
+		// those bytes can land in the kernel TCP buffer for the upstream
+		// conn before runUpgradeWS detaches. Without an active capture
+		// the upstream-side detachStream returns the bare bufio.Reader;
+		// any post-101 bytes the parser had already pulled past the
+		// 101's CRLFCRLF into bufio's buffered remainder are recoverable
+		// (bufio.Reader serves them on its next Read), but the explicit
+		// capture mirrors the client side so the operator-visible
+		// upstreamReaderType trace transitions from *bufio.Reader to
+		// io.MultiReader and any future bufio-bypass change cannot
+		// silently strand bytes.
 		if upgradePending(notice) {
 			prepareChannelSwap(client)
+			prepareChannelSwap(uh.ch)
 		}
 
 		if err := client.Send(ctx, env); err != nil {

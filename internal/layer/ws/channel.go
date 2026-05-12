@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"sync"
 
 	"github.com/google/uuid"
@@ -64,6 +65,14 @@ type wsChannel struct {
 	// frame; markTerminated then synthesizes a 1006 (abnormal closure)
 	// WSMessage.
 	lastClose *envelope.WSMessage
+
+	// firstNextLogged fires the USK-841 Phase A milestone (e) trace exactly
+	// once per Channel. The trace records that wsChannel.Next observed its
+	// first wire-read attempt — distinguishing "post-Upgrade session never
+	// started reading WS frames" from "ws.Layer started reading but every
+	// read errored". Operator-relevant because WS swap orchestration is
+	// rare; not a noisy hot-path log.
+	firstNextLogged sync.Once
 }
 
 // newChannel constructs a wsChannel under the given Layer. The Layer
@@ -242,6 +251,14 @@ func (c *wsChannel) Next(ctx context.Context) (*envelope.Envelope, error) {
 	c.mu.Unlock()
 
 	frame, raw, err := ReadFrameRaw(c.layer.reader)
+	// USK-841 Phase A milestone (e): emit ONE Debug log on the first
+	// wire-read attempt per Channel. Captures whether the read returned a
+	// frame (opcode + length) or an error (typed reason). Operators tracing
+	// "WS frames not recorded" filter by phase=wsChannel-Next-first and
+	// match streamID against the runUpgradeWS milestones to localize the
+	// blocking site. Fail-soft: log path is fully inside a sync.Once so the
+	// hot path is unaffected after the first frame.
+	c.logFirstNext(frame, raw, err)
 	if err != nil {
 		return nil, c.mapReadError(err, raw)
 	}
@@ -267,6 +284,62 @@ func (c *wsChannel) Next(ctx context.Context) (*envelope.Envelope, error) {
 		return nil, buildErr
 	}
 	return env, nil
+}
+
+// logFirstNext fires the USK-841 Phase A milestone (e) trace exactly once
+// per Channel. The trace records the first wire-read outcome:
+//
+//   - On success: opcode (text/binary/close/...) + payload length + raw
+//     wire-byte count.
+//   - On error: typed error string (io.EOF / io.ErrUnexpectedEOF /
+//     malformed-frame text).
+//
+// The "side" field is derived from Role: RoleServer reads client→server
+// frames so side=client; RoleClient reads server→client frames so
+// side=upstream. This matches the operator's mental model — "client side
+// of the proxy is the side facing the client" — even though Role names it
+// from the WS handshake's perspective. The trace runs at Debug level (rare,
+// operator-relevant) per CLAUDE.md Log Level Guidelines.
+func (c *wsChannel) logFirstNext(frame *Frame, raw []byte, err error) {
+	c.firstNextLogged.Do(func() {
+		side := "upstream"
+		role := "client" // RoleClient is the upstream-facing side
+		if c.role == RoleServer {
+			side = "client"
+			role = "server"
+		}
+		connID := ""
+		if c.opts != nil {
+			connID = c.opts.ctxTmpl.ConnID
+		}
+		attrs := []any{
+			"phase", "wsChannel-Next-first",
+			"streamID", c.streamID,
+			"side", side,
+			"role", role,
+			"connID", connID,
+		}
+		if err != nil {
+			attrs = append(attrs, "err", err.Error(), "rawBytes", len(raw))
+			slog.Debug("ws: first Next() read error", attrs...)
+			return
+		}
+		opcode := byte(0)
+		payloadLen := 0
+		fin := false
+		if frame != nil {
+			opcode = frame.Opcode
+			payloadLen = len(frame.Payload)
+			fin = frame.Fin
+		}
+		attrs = append(attrs,
+			"opcode", OpcodeString(opcode),
+			"payloadLen", payloadLen,
+			"fin", fin,
+			"rawBytes", len(raw),
+		)
+		slog.Debug("ws: first Next() read frame", attrs...)
+	})
 }
 
 // mapReadError maps a frame.go error into the contract specified in

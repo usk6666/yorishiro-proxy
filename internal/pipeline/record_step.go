@@ -315,6 +315,26 @@ func (s *RecordStep) Process(ctx context.Context, env *envelope.Envelope) Result
 		return Result{}
 	}
 
+	// USK-841 milestone (f): every envelope as it enters RecordStep.Process.
+	// Live SQLite ground truth on 2026-05-12 showed no post-101 ws Stream
+	// in the user's flow.db while in-process trace shows wsChannel.Next
+	// fires successfully — the gap is downstream of the WS Layer. This
+	// trace reveals whether ws envelopes reach RecordStep at all (H6 vs
+	// downstream of Process entry).
+	rawLen := 0
+	if env != nil {
+		rawLen = len(env.Raw)
+	}
+	s.logger.DebugContext(ctx, "record: step entry",
+		"phase", "recordstep-entry",
+		"streamID", env.StreamID,
+		"connID", env.Context.ConnID,
+		"protocol", string(env.Protocol),
+		"direction", env.Direction.String(),
+		"sequence", env.Sequence,
+		"bytes", rawLen,
+	)
+
 	// USK-776: capture-scope filter gate. When the scope filters out this
 	// envelope (or its parent stream), skip both Stream creation and Flow
 	// recording. Wire transmission is unaffected — the Pipeline returns
@@ -327,12 +347,35 @@ func (s *RecordStep) Process(ctx context.Context, env *envelope.Envelope) Result
 			"sequence", env.Sequence,
 			"protocol", string(env.Protocol),
 		)
+		s.logger.DebugContext(ctx, "record: savestream skipped",
+			"phase", "recordstep-savestream-skip",
+			"streamID", env.StreamID,
+			"connID", env.Context.ConnID,
+			"protocol", string(env.Protocol),
+			"reason", "out-of-scope",
+		)
 		return Result{}
 	}
 
 	// Create Stream on first Send (Sequence==0).
 	if env.Direction == envelope.Send && env.Sequence == 0 {
 		s.createStream(ctx, env)
+	} else {
+		// USK-841 milestone (g, skip path): SaveStream was not invoked
+		// because the envelope is not a first-Send. Reveals whether the
+		// post-swap ws Stream is missing because the first ws envelope
+		// arrived with Sequence != 0 or Direction != Send (H7 / driver
+		// artifact) versus because Process never observed it at all
+		// (H6: chain broken).
+		s.logger.DebugContext(ctx, "record: savestream skipped",
+			"phase", "recordstep-savestream-skip",
+			"streamID", env.StreamID,
+			"connID", env.Context.ConnID,
+			"protocol", string(env.Protocol),
+			"direction", env.Direction.String(),
+			"sequence", env.Sequence,
+			"reason", "not-first-send",
+		)
 	}
 
 	// USK-781: retag the Stream's Protocol when an envelope on a non-
@@ -543,7 +586,36 @@ func (s *RecordStep) createStream(ctx context.Context, env *envelope.Envelope) {
 		st.Scheme = msg.Scheme
 	}
 
-	if err := s.store.SaveStream(ctx, st); err != nil {
+	// USK-841 milestone (g): SaveStream call decision. Reveals which Stream
+	// fields are about to land in SQLite — particularly streamID + connID +
+	// protocol — so a live trace with no ws-Stream row can be correlated to
+	// either H7 (empty streamID) or H8 (empty connID from missing
+	// WithEnvelopeContext) at the call site.
+	s.logger.DebugContext(ctx, "record: savestream invoking",
+		"phase", "recordstep-savestream",
+		"streamID", st.ID,
+		"connID", st.ConnID,
+		"protocol", st.Protocol,
+		"origin", string(st.Origin),
+	)
+
+	err := s.store.SaveStream(ctx, st)
+
+	// USK-841 milestone (g, result): SaveStream return. Distinguishes "the
+	// call fired and wrote (or silently no-oped on FK)" from "the call
+	// returned an error the operator never sees because the original log
+	// is Error-only on a path the user's debug-level capture may filter".
+	errStr := ""
+	if err != nil {
+		errStr = err.Error()
+	}
+	s.logger.DebugContext(ctx, "record: savestream returned",
+		"phase", "recordstep-savestream-result",
+		"streamID", st.ID,
+		"err", errStr,
+	)
+
+	if err != nil {
 		s.logger.Error("record step: stream save failed",
 			"stream_id", env.StreamID,
 			"error", err,

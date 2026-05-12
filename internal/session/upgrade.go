@@ -78,6 +78,18 @@ type UpgradeNotice struct {
 	// production swap path uses real headers and Context (not a synthesized
 	// placeholder) without re-recording the response post-swap.
 	sseFirstResp *envelope.Envelope
+
+	// wsUpgradeReq caches the WebSocket upgrade request envelope captured
+	// when UpgradeStep observed a Send envelope shaped like an RFC 6455
+	// HTTP/1.1 Upgrade request OR an RFC 8441 extended CONNECT request.
+	// runUpgradeWS / runUpgradeWSOverH2 read this back to propagate the
+	// connection-scoped EnvelopeContext (ConnID, ClientAddr, TargetHost,
+	// TLS) and the request-line URL (UpgradePath, UpgradeQuery) onto the
+	// post-swap WS Layer's per-frame envelope template. Without this, every
+	// WS frame envelope emerges with an empty Context, and the
+	// capture_scope evaluator in RecordStep rejects them as out-of-scope
+	// because the hostname is unknown (USK-841).
+	wsUpgradeReq *envelope.Envelope
 }
 
 // markSendUpgrade is called by UpgradeStep when it observes a Send envelope
@@ -178,6 +190,47 @@ func (n *UpgradeNotice) attachSSEFirstResponse(env *envelope.Envelope) {
 	n.sseFirstResp = cloneEnvelope(env)
 }
 
+// attachWSUpgradeRequest caches a defensive deep-clone of the WS upgrade
+// request envelope (HTTP/1.1 RFC 6455 Upgrade or HTTP/2 RFC 8441 extended
+// CONNECT) so runUpgradeWS / runUpgradeWSOverH2 can propagate the
+// connection-scoped EnvelopeContext (ConnID, ClientAddr, TargetHost, TLS)
+// and the request-line URL (UpgradePath, UpgradeQuery) onto the post-swap
+// WS Layer's per-frame envelope template.
+//
+// Called by UpgradeStep when it observes a WS-shaped Send envelope. Latch-
+// once semantics: subsequent calls are ignored so a malformed re-send (or a
+// chained upgrade — not supported) does not overwrite the original wire-
+// observed context.
+//
+// We deep-clone because the Pipeline may mutate env.Message downstream
+// (Transform Step header swap, etc.); the cache must remain stable for the
+// post-swap consumer.
+func (n *UpgradeNotice) attachWSUpgradeRequest(env *envelope.Envelope) {
+	if n == nil || env == nil {
+		return
+	}
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.wsUpgradeReq != nil {
+		return
+	}
+	n.wsUpgradeReq = cloneEnvelope(env)
+}
+
+// WSUpgradeRequest returns the cached WS upgrade request envelope set by
+// attachWSUpgradeRequest, or nil if no WS upgrade was observed. The
+// envelope's Context carries ConnID / TargetHost / TLS for the originating
+// connection; the embedded *HTTPMessage carries Path / RawQuery from the
+// wire-observed request line.
+func (n *UpgradeNotice) WSUpgradeRequest() *envelope.Envelope {
+	if n == nil {
+		return nil
+	}
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.wsUpgradeReq
+}
+
 // SSEFirstResponse returns the cached first SSE response envelope, or
 // nil if attachSSEFirstResponse was never called.
 func (n *UpgradeNotice) SSEFirstResponse() *envelope.Envelope {
@@ -273,7 +326,7 @@ func (s *UpgradeStep) Process(ctx context.Context, env *envelope.Envelope) pipel
 	}
 	switch env.Direction {
 	case envelope.Send:
-		processUpgradeSend(notice, msg)
+		processUpgradeSend(notice, env, msg)
 	case envelope.Receive:
 		processUpgradeReceive(notice, env, msg)
 	}
@@ -283,10 +336,16 @@ func (s *UpgradeStep) Process(ctx context.Context, env *envelope.Envelope) pipel
 // processUpgradeSend latches the appropriate Send-side flag on notice
 // when msg matches an h1 RFC 6455 upgrade request OR an h2 RFC 8441
 // extended CONNECT request. No-op for any other Send envelope.
-func processUpgradeSend(notice *UpgradeNotice, msg *envelope.HTTPMessage) {
+//
+// On match the envelope is also stashed via attachWSUpgradeRequest so the
+// post-swap WS Layer can recover the connection-scoped Context (ConnID /
+// TargetHost / TLS) and the wire-observed request-line URL when it is
+// constructed in runUpgradeWS / runUpgradeWSOverH2. USK-841.
+func processUpgradeSend(notice *UpgradeNotice, env *envelope.Envelope, msg *envelope.HTTPMessage) {
 	// HTTP/1.1 RFC 6455 Upgrade.
 	if isWSUpgradeRequest(msg) {
 		notice.markSendUpgrade()
+		notice.attachWSUpgradeRequest(env)
 		return
 	}
 	// RFC 8441 §4 extended CONNECT (HTTP/2): :method=CONNECT +
@@ -296,6 +355,7 @@ func processUpgradeSend(notice *UpgradeNotice, msg *envelope.HTTPMessage) {
 	// to UpgradeWSOverH2 rather than UpgradeWS.
 	if isExtendedConnectWSRequest(msg) {
 		notice.markSendUpgradeH2()
+		notice.attachWSUpgradeRequest(env)
 	}
 }
 
