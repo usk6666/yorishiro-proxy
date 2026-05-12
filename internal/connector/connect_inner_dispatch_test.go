@@ -205,6 +205,90 @@ func TestDispatchInnerProtocol_PeekTimeoutClosesQuietly(t *testing.T) {
 	}
 }
 
+// TestResolveInnerPeekTimeout exercises the precedence rules
+// (provider > static > package default) used to plumb USK-844 through
+// the CONNECT and SOCKS5 inner-byte dispatch path.
+func TestResolveInnerPeekTimeout(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  innerDispatchConfig
+		want time.Duration
+	}{
+		{
+			name: "zero static, no provider → package default",
+			cfg:  innerDispatchConfig{},
+			want: DefaultInnerPeekTimeout,
+		},
+		{
+			name: "static value applied when no provider",
+			cfg:  innerDispatchConfig{PeekTimeout: 200 * time.Millisecond},
+			want: 200 * time.Millisecond,
+		},
+		{
+			name: "provider wins over static",
+			cfg: innerDispatchConfig{
+				PeekTimeout:         200 * time.Millisecond,
+				PeekTimeoutProvider: func() time.Duration { return 50 * time.Millisecond },
+			},
+			want: 50 * time.Millisecond,
+		},
+		{
+			name: "provider zero falls through to static",
+			cfg: innerDispatchConfig{
+				PeekTimeout:         200 * time.Millisecond,
+				PeekTimeoutProvider: func() time.Duration { return 0 },
+			},
+			want: 200 * time.Millisecond,
+		},
+		{
+			name: "provider zero, static zero → package default",
+			cfg: innerDispatchConfig{
+				PeekTimeoutProvider: func() time.Duration { return 0 },
+			},
+			want: DefaultInnerPeekTimeout,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := resolveInnerPeekTimeout(tc.cfg); got != tc.want {
+				t.Errorf("resolveInnerPeekTimeout = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestDispatchInnerProtocol_RequestTimeoutProviderHotReload verifies that
+// a runtime change to the provider's atomic slot (the wiring USK-844
+// uses for `configure { request_timeout_ms }`) actually shortens the
+// next dispatchInnerProtocol invocation. This is the inner-byte sibling
+// of TestNewHTTP1ForwardHandler_RequestTimeoutProvider.
+func TestDispatchInnerProtocol_RequestTimeoutProviderHotReload(t *testing.T) {
+	var current atomic.Int64
+	current.Store(int64(50 * time.Millisecond))
+
+	clientConn, serverConn := net.Pipe()
+	defer clientConn.Close()
+	defer serverConn.Close()
+
+	pc := NewPeekConn(serverConn)
+	start := time.Now()
+	handleAsTLS := dispatchInnerProtocol(context.Background(), pc, "example.com:443", innerDispatchConfig{
+		// Static value left at the package default (5s) so we can prove
+		// the provider tier is the one that shortened the wait.
+		PeekTimeoutProvider: func() time.Duration {
+			return time.Duration(current.Load())
+		},
+	})
+	elapsed := time.Since(start)
+
+	if handleAsTLS {
+		t.Errorf("handleAsTLS=true on peek timeout, want false")
+	}
+	if elapsed > 2*time.Second {
+		t.Errorf("dispatchInnerProtocol took %v; provider-driven 50ms deadline did not engage", elapsed)
+	}
+}
+
 // TestBuildBytechunkStack verifies the helper produces a stack with one
 // bytechunk Layer per side and TargetHost is informational (no panic on
 // empty target).

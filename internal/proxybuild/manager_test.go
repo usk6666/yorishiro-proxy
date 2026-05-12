@@ -238,6 +238,69 @@ func TestManager_SetPeekTimeout_FanOut(t *testing.T) {
 	}
 }
 
+// TestManager_SetRequestTimeout_FanOut verifies the USK-844 wiring: a
+// runtime SetRequestTimeout on the Manager propagates to every running
+// listener's atomic-Int64 slot so MCP `configure { request_timeout_ms }`
+// reaches the data-path read deadlines.
+func TestManager_SetRequestTimeout_FanOut(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	mgr := newTestManager(t)
+	if err := mgr.StartNamed(ctx, "a", "127.0.0.1:0"); err != nil {
+		t.Fatalf("StartNamed a: %v", err)
+	}
+	if err := mgr.StartNamed(ctx, "b", "127.0.0.1:0"); err != nil {
+		t.Fatalf("StartNamed b: %v", err)
+	}
+	defer mgr.StopAll(context.Background())
+
+	mgr.SetRequestTimeout(200 * time.Millisecond)
+	for _, name := range []string{"a", "b"} {
+		l := mgr.Listener(name)
+		if l == nil {
+			t.Fatalf("Listener(%q) is nil", name)
+		}
+		if got := l.RequestTimeout(); got != 200*time.Millisecond {
+			t.Errorf("listener %s RequestTimeout = %v, want 200ms", name, got)
+		}
+	}
+	if got := mgr.RequestTimeout(); got != 200*time.Millisecond {
+		t.Errorf("Manager.RequestTimeout = %v, want 200ms", got)
+	}
+}
+
+// TestManager_SetRequestTimeout_BeforeStart_AppliesToNewListener verifies
+// the stored value is replayed onto listeners started later, mirroring
+// the SetMaxConnections / SetPeekTimeout seed semantics (USK-844).
+func TestManager_SetRequestTimeout_BeforeStart_AppliesToNewListener(t *testing.T) {
+	mgr := newTestManager(t)
+	mgr.SetRequestTimeout(150 * time.Millisecond)
+
+	if err := mgr.Start(context.Background(), "127.0.0.1:0"); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer mgr.StopAll(context.Background())
+
+	if got := mgr.Listener(DefaultListenerName).RequestTimeout(); got != 150*time.Millisecond {
+		t.Errorf("listener RequestTimeout = %v, want 150ms", got)
+	}
+}
+
+// TestManager_RequestTimeout_NoListeners verifies the accessor returns the
+// stored Manager-level value when no listener is running yet, matching the
+// PeekTimeout / MaxConnections semantics (USK-844).
+func TestManager_RequestTimeout_NoListeners(t *testing.T) {
+	mgr := newTestManager(t)
+	if got := mgr.RequestTimeout(); got != 0 {
+		t.Errorf("initial RequestTimeout = %v, want 0", got)
+	}
+	mgr.SetRequestTimeout(75 * time.Millisecond)
+	if got := mgr.RequestTimeout(); got != 75*time.Millisecond {
+		t.Errorf("after SetRequestTimeout, RequestTimeout = %v, want 75ms", got)
+	}
+}
+
 func TestManager_UpstreamProxy_RoundTrip(t *testing.T) {
 	mgr := newTestManager(t)
 	mgr.SetUpstreamProxy("http://127.0.0.1:9999")

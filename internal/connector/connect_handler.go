@@ -110,6 +110,13 @@ type CONNECTHandlerConfig struct {
 	// then send nothing release the goroutine after this deadline.
 	InnerPeekTimeout time.Duration
 
+	// InnerPeekTimeoutProvider, when non-nil, is consulted on every
+	// inner-byte peek so a runtime SetRequestTimeout on the owning
+	// FullListener (USK-844) takes effect on the next accepted CONNECT
+	// without rebuilding the handler. Returning <=0 falls back to the
+	// static InnerPeekTimeout / DefaultInnerPeekTimeout.
+	InnerPeekTimeoutProvider func() time.Duration
+
 	// Logger for handler-level logging. Nil uses slog.Default().
 	Logger *slog.Logger
 }
@@ -250,11 +257,12 @@ func connectShouldRunTLSMITM(ctx context.Context, cfg CONNECTHandlerConfig, pc *
 		return true
 	}
 	return dispatchInnerProtocol(ctx, pc, target, innerDispatchConfig{
-		PeekTimeout:  cfg.InnerPeekTimeout,
-		BuildCfg:     cfg.BuildCfg,
-		OnStack:      cfg.OnStack,
-		OnHTTP2Stack: cfg.OnHTTP2Stack,
-		Logger:       logger,
+		PeekTimeout:         cfg.InnerPeekTimeout,
+		PeekTimeoutProvider: cfg.InnerPeekTimeoutProvider,
+		BuildCfg:            cfg.BuildCfg,
+		OnStack:             cfg.OnStack,
+		OnHTTP2Stack:        cfg.OnHTTP2Stack,
+		Logger:              logger,
 	})
 }
 

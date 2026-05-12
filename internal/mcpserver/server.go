@@ -566,7 +566,12 @@ func buildMCPComponents(
 			nil, // targetScopeSetters — propagation handled by connector wiring.
 			nil, // tlsFingerprintSetters — proxybuild rebuilds Stacks on configure.
 			nil, // upstreamProxySetters — proxybuild Manager.SetUpstreamProxy is canonical.
-			nil, // requestTimeoutSetters — none registered today.
+			// USK-844: proxybuild.Manager implements requestTimeoutSetter
+			// (SetRequestTimeout / RequestTimeout). Registering it here
+			// connects MCP `configure { request_timeout_ms }` and
+			// `proxy_start { request_timeout_ms }` to the live data path's
+			// plain-HTTP and CONNECT/SOCKS5 inner read deadlines.
+			mcp.RequestTimeoutSetters(manager),
 			nil, // rateLimiterSetters — connector.SOCKS5Negotiator.RateLimiter is canonical.
 		),
 		jobRunner: mcp.NewJobRunner(

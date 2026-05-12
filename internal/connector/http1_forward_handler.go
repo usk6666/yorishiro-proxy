@@ -38,6 +38,20 @@ type HTTP1ForwardHandlerConfig struct {
 	// connector.OnStackFunc for the contract.
 	OnStack OnStackFunc
 
+	// RequestTimeout overrides the default forward-peek deadline used to
+	// bound how long this handler waits for the first request's header
+	// section. Zero uses the package default (forwardPeekTimeout, 30s).
+	// Plumbed via proxybuild.Deps.RequestTimeout → FullListener →
+	// HTTPForwardRequestTimeoutProvider for runtime hot-reload (USK-844).
+	RequestTimeout time.Duration
+
+	// RequestTimeoutProvider, when non-nil, is consulted on every
+	// invocation of the handler so a runtime SetRequestTimeout on the
+	// owning FullListener takes effect on the next accepted connection
+	// without rebuilding the handler. Returning <=0 falls back to the
+	// static RequestTimeout / package default. (USK-844)
+	RequestTimeoutProvider func() time.Duration
+
 	// Logger for handler-level logging. Nil uses slog.Default().
 	Logger *slog.Logger
 }
@@ -54,7 +68,33 @@ const dialTimeoutPlainHTTP = 30 * time.Second
 // target. Slowloris clients that stop after the request line still produce
 // a parseable target (the http1 Layer parses what's available), so the
 // timeout is generous.
+//
+// This is the zero-config default; operators can tighten it via MCP
+// `configure { request_timeout_ms }` (USK-844), which is plumbed through
+// proxybuild.Deps.RequestTimeout → FullListener → the per-handler
+// RequestTimeoutProvider closure.
 const forwardPeekTimeout = 30 * time.Second
+
+// resolveForwardPeekTimeout returns the effective read-deadline for the
+// header-section peek on each invocation of the forward handler. Precedence
+// (USK-844):
+//  1. cfg.RequestTimeoutProvider (runtime hot-reload via Manager).
+//  2. cfg.RequestTimeout (boot-time value threaded via proxybuild.Deps).
+//  3. forwardPeekTimeout package default (30s zero-config).
+//
+// Non-positive values from the provider or the static field collapse to the
+// next tier so a "0 = default" wire shape is preserved end-to-end.
+func resolveForwardPeekTimeout(cfg HTTP1ForwardHandlerConfig) time.Duration {
+	if cfg.RequestTimeoutProvider != nil {
+		if d := cfg.RequestTimeoutProvider(); d > 0 {
+			return d
+		}
+	}
+	if cfg.RequestTimeout > 0 {
+		return cfg.RequestTimeout
+	}
+	return forwardPeekTimeout
+}
 
 // peekHeaderSize bounds how many bytes the handler peeks to extract the
 // request line and Host header. The PeekConn's bufio.Reader is constructed
@@ -96,8 +136,11 @@ func NewHTTP1ForwardHandler(cfg HTTP1ForwardHandlerConfig) HandlerFunc {
 		// or the Host header so we know where to dial upstream. Bound the
 		// wait so a slow client cannot stall the goroutine forever — once
 		// FullListener cleared its detection deadline, this handler owns
-		// per-exchange timeouts.
-		_ = pc.SetReadDeadline(time.Now().Add(forwardPeekTimeout))
+		// per-exchange timeouts. Operator overrides flow through
+		// resolveForwardPeekTimeout so a runtime configure { request_timeout_ms }
+		// reaches this read deadline (USK-844).
+		deadline := resolveForwardPeekTimeout(cfg)
+		_ = pc.SetReadDeadline(time.Now().Add(deadline))
 		target, perr := peekForwardTarget(pc)
 		_ = pc.SetReadDeadline(time.Time{})
 		if perr != nil {

@@ -315,6 +315,13 @@ type innerDispatchConfig struct {
 	// DefaultInnerPeekTimeout.
 	PeekTimeout time.Duration
 
+	// PeekTimeoutProvider, when non-nil, is consulted on every dispatch
+	// so a runtime SetRequestTimeout on the owning Listener (USK-844)
+	// takes effect on the next accepted tunnel without rebuilding the
+	// handler. Returning <=0 falls back to the static PeekTimeout /
+	// DefaultInnerPeekTimeout.
+	PeekTimeoutProvider func() time.Duration
+
 	// BuildCfg supplies stack construction options (issuer, body spill, etc).
 	BuildCfg *BuildConfig
 
@@ -328,6 +335,26 @@ type innerDispatchConfig struct {
 
 	// Logger receives diagnostic output. Nil uses slog.Default().
 	Logger *slog.Logger
+}
+
+// resolveInnerPeekTimeout returns the effective inner-byte peek deadline.
+// Precedence (USK-844):
+//  1. cfg.PeekTimeoutProvider (runtime hot-reload via Manager).
+//  2. cfg.PeekTimeout (boot-time / static value).
+//  3. DefaultInnerPeekTimeout package default.
+//
+// Non-positive values from the provider or the static field collapse to the
+// next tier so the "0 = default" wire shape is preserved end-to-end.
+func resolveInnerPeekTimeout(cfg innerDispatchConfig) time.Duration {
+	if cfg.PeekTimeoutProvider != nil {
+		if d := cfg.PeekTimeoutProvider(); d > 0 {
+			return d
+		}
+	}
+	if cfg.PeekTimeout > 0 {
+		return cfg.PeekTimeout
+	}
+	return DefaultInnerPeekTimeout
 }
 
 // dispatchInnerProtocol peeks the inner byte stream of an already-negotiated
@@ -357,10 +384,7 @@ func dispatchInnerProtocol(
 	if logger == nil {
 		logger = slog.Default()
 	}
-	timeout := cfg.PeekTimeout
-	if timeout == 0 {
-		timeout = DefaultInnerPeekTimeout
-	}
+	timeout := resolveInnerPeekTimeout(cfg)
 
 	kind, peek := peekInnerProtocol(pc, timeout)
 	if kind == InnerUnknown {

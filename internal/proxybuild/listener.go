@@ -3,6 +3,7 @@ package proxybuild
 import (
 	"context"
 	"log/slog"
+	"sync/atomic"
 	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/connector"
@@ -31,6 +32,15 @@ type Listener struct {
 	engine *pluginv2.Engine
 	name   string
 	logger *slog.Logger
+
+	// requestTimeoutNs is the operator-configured HTTP request header read
+	// timeout in nanoseconds (USK-844). Reads happen on every handler
+	// invocation via RequestTimeout(); writes happen from MCP
+	// configure / proxy_start through Manager.SetRequestTimeout. Zero
+	// means "use the handler-side default" — that's the meaning every
+	// downstream consumer (plain-HTTP forward, CONNECT/SOCKS5 inner
+	// peek) implements when its provider returns zero.
+	requestTimeoutNs atomic.Int64
 }
 
 // PluginV2Engine returns the pluginv2 Engine bound to this listener, or
@@ -98,6 +108,35 @@ func (l *Listener) PeekTimeout() time.Duration {
 // SetPeekTimeout updates the protocol detection timeout.
 func (l *Listener) SetPeekTimeout(d time.Duration) {
 	l.full.SetPeekTimeout(d)
+}
+
+// RequestTimeout returns the operator-configured HTTP request header read
+// timeout (USK-844). Zero means handlers fall back to their package
+// defaults (connector.forwardPeekTimeout for plain HTTP,
+// connector.DefaultInnerPeekTimeout for CONNECT/SOCKS5 inner peek).
+func (l *Listener) RequestTimeout() time.Duration {
+	if l == nil {
+		return 0
+	}
+	return time.Duration(l.requestTimeoutNs.Load())
+}
+
+// SetRequestTimeout updates the operator-configured HTTP request header
+// read timeout. The new value is observed atomically by the next handler
+// invocation, so a runtime configure { request_timeout_ms } reaches the
+// data path without rebuilding the stack (USK-844). Non-positive values
+// are stored verbatim — a stored zero means "fall back to handler
+// defaults", a stored negative value is treated as zero by every
+// downstream consumer (defensive: callers never write negatives, but the
+// asymmetric behaviour would be surprising).
+func (l *Listener) SetRequestTimeout(d time.Duration) {
+	if l == nil {
+		return
+	}
+	if d < 0 {
+		d = 0
+	}
+	l.requestTimeoutNs.Store(int64(d))
 }
 
 // SetEnabledProtocols updates the runtime protocol allow-list applied

@@ -90,6 +90,7 @@ type Manager struct {
 	factory          func(ctx context.Context, name, addr string) (*Stack, error)
 	buildCfg         *connector.BuildConfig
 	peekTimeout      time.Duration
+	requestTimeout   time.Duration
 	maxConns         int
 	upstreamProxy    string
 	enabledProtocols []string
@@ -163,13 +164,17 @@ func (m *Manager) StartNamed(ctx context.Context, name string, listenAddr string
 	}
 
 	// Apply manager-level tunables to the new Listener so a runtime
-	// SetMaxConnections / SetPeekTimeout / SetEnabledProtocols call
-	// before any listener existed is honored when the listener comes up.
+	// SetMaxConnections / SetPeekTimeout / SetRequestTimeout /
+	// SetEnabledProtocols call before any listener existed is honored when
+	// the listener comes up.
 	if m.maxConns > 0 {
 		stack.Listener.SetMaxConnections(m.maxConns)
 	}
 	if m.peekTimeout > 0 {
 		stack.Listener.SetPeekTimeout(m.peekTimeout)
+	}
+	if m.requestTimeout > 0 {
+		stack.Listener.SetRequestTimeout(m.requestTimeout)
 	}
 	if len(m.enabledProtocols) > 0 {
 		stack.Listener.SetEnabledProtocols(m.enabledProtocols)
@@ -458,6 +463,50 @@ func (m *Manager) PeekTimeout() time.Duration {
 	m.mu.Unlock()
 	if first != nil {
 		return first.PeekTimeout()
+	}
+	return stored
+}
+
+// SetRequestTimeout updates the HTTP request header read timeout enforced
+// by the plain-HTTP forward handler and the CONNECT / SOCKS5 inner-byte
+// peek (USK-844). Applies immediately to every running listener via the
+// per-listener atomic-Int64 slot wired in BuildLiveStack; the value is
+// also remembered so listeners started later inherit it. Non-positive
+// values are stored verbatim — Listener.SetRequestTimeout normalises any
+// negative to zero, and zero means "fall back to handler defaults"
+// downstream.
+//
+// Mirrors SetPeekTimeout to keep the operator surface symmetric.
+func (m *Manager) SetRequestTimeout(d time.Duration) {
+	m.mu.Lock()
+	m.requestTimeout = d
+	listeners := make([]*Listener, 0, len(m.listeners))
+	for _, entry := range m.listeners {
+		listeners = append(listeners, entry.stack.Listener)
+	}
+	m.mu.Unlock()
+	for _, l := range listeners {
+		l.SetRequestTimeout(d)
+	}
+}
+
+// RequestTimeout returns the configured HTTP request header read timeout
+// (USK-844). When any listener is running, returns the first listener's
+// current value — matching the "first-running-wins" detail of
+// MaxConnections / PeekTimeout. Zero means handlers will fall back to
+// their per-package defaults (connector.forwardPeekTimeout for plain HTTP,
+// connector.DefaultInnerPeekTimeout for CONNECT/SOCKS5 inner peek).
+func (m *Manager) RequestTimeout() time.Duration {
+	m.mu.Lock()
+	stored := m.requestTimeout
+	var first *Listener
+	for _, entry := range m.listeners {
+		first = entry.stack.Listener
+		break
+	}
+	m.mu.Unlock()
+	if first != nil {
+		return first.RequestTimeout()
 	}
 	return stored
 }

@@ -74,6 +74,21 @@ type Deps struct {
 	// PeekTimeout overrides connector.DefaultPeekTimeout. Zero = default.
 	PeekTimeout time.Duration
 
+	// RequestTimeout bounds the HTTP request header read deadline once
+	// protocol detection completes (USK-844). It is the configurable
+	// override for the hardcoded forward-handler defaults
+	// (connector.forwardPeekTimeout, connector.DefaultInnerPeekTimeout)
+	// used by:
+	//   - the plain-HTTP forward handler waiting for the first request's
+	//     header section, and
+	//   - the CONNECT / SOCKS5 inner-byte peek that waits for the first
+	//     client byte after the tunnel reply.
+	// Zero means the handler-side defaults remain in effect. Mirrors the
+	// PeekTimeout fan-out: a runtime SetRequestTimeout on the Manager
+	// reaches every wrapped listener via the same atomic-Int64 plumbing
+	// (see Manager.SetRequestTimeout / FullListener.SetRequestTimeout).
+	RequestTimeout time.Duration
+
 	// MaxConnections overrides connector.DefaultMaxConnections. Zero =
 	// default. Negative = unlimited.
 	MaxConnections int
@@ -306,6 +321,23 @@ func BuildLiveStack(_ context.Context, deps Deps) (*Stack, error) {
 	// the no-observer io.Copy hot path.
 	passthroughObserver := newPassthroughRecorder(deps.FlowStore, listenerName, logger, deps.RecordScope)
 
+	// proxybuild.Listener wraps the FullListener so it can interpose
+	// connection.on_connect / on_disconnect lifecycle hooks AND host the
+	// runtime request_timeout_ms slot (USK-844). The wrapper is
+	// constructed BEFORE the per-protocol handlers so each handler's
+	// timeout-provider closure can capture the same atomic Int64 state.
+	wrapper := &Listener{
+		engine: deps.PluginV2Engine,
+		name:   listenerName,
+		logger: logger,
+	}
+	// Seed the runtime request-timeout slot from Deps so the config-file /
+	// boot-time value reaches handler invocations until a runtime
+	// SetRequestTimeout overrides it.
+	if deps.RequestTimeout > 0 {
+		wrapper.SetRequestTimeout(deps.RequestTimeout)
+	}
+
 	// Construct the per-protocol HandlerFunc closures.
 	connectHandler := connector.NewCONNECTHandler(connector.CONNECTHandlerConfig{
 		Negotiator:          connector.NewCONNECTNegotiator(logger),
@@ -317,7 +349,20 @@ func BuildLiveStack(_ context.Context, deps Deps) (*Stack, error) {
 		OnStack:             buildOnStack(p, deps, logger),
 		OnHTTP2Stack:        buildOnHTTP2Stack(pH2, deps, logger),
 		OnUpstreamTLSError:  upstreamTLSErrorRecorder,
-		Logger:              logger,
+		// USK-844: thread the configured request timeout into the inner-byte
+		// peek deadline. The provider closure reads the wrapper's atomic
+		// slot so a runtime configure { request_timeout_ms } reaches the
+		// next CONNECT without rebuilding the handler. Zero from the
+		// provider falls back to InnerPeekTimeout → DefaultInnerPeekTimeout
+		// inside resolveInnerPeekTimeout. Setting both InnerPeekTimeout
+		// and InnerPeekTimeoutProvider is intentional belt-and-suspenders:
+		// the wrapper atomic is also seeded with deps.RequestTimeout so
+		// the provider tier normally wins, but the static field preserves
+		// the boot-time value as a fallback if the atomic is ever cleared
+		// to zero by a future caller.
+		InnerPeekTimeout:         deps.RequestTimeout,
+		InnerPeekTimeoutProvider: wrapper.RequestTimeout,
+		Logger:                   logger,
 	})
 	// USK-770: prefer the process-singleton SOCKS5Negotiator supplied via
 	// Deps (owned by mcpserver) so MCP control-plane Set*Auth calls reach
@@ -337,28 +382,28 @@ func BuildLiveStack(_ context.Context, deps Deps) (*Stack, error) {
 		OnStack:             buildOnStack(p, deps, logger),
 		OnHTTP2Stack:        buildOnHTTP2Stack(pH2, deps, logger),
 		OnUpstreamTLSError:  upstreamTLSErrorRecorder,
-		Logger:              logger,
-		PluginV2Engine:      deps.PluginV2Engine,
+		// USK-844: thread the configured request timeout into the inner-byte
+		// peek deadline (SOCKS5 mirrors CONNECT). See the comment above
+		// CONNECTHandlerConfig.InnerPeekTimeoutProvider for the precedence.
+		InnerPeekTimeout:         deps.RequestTimeout,
+		InnerPeekTimeoutProvider: wrapper.RequestTimeout,
+		Logger:                   logger,
+		PluginV2Engine:           deps.PluginV2Engine,
 	})
 	// USK-710: plain-HTTP forward proxy. Plain HTTP cannot route to h2 (no
 	// ALPN, no TLS), so OnHTTP2Stack is intentionally omitted — the handler
 	// always invokes OnStack.
+	// USK-844: thread the configured request timeout via the same
+	// wrapper-slot provider used for CONNECT/SOCKS5 inner peek.
 	http1ForwardHandler := connector.NewHTTP1ForwardHandler(connector.HTTP1ForwardHandlerConfig{
-		BuildCfg:    deps.BuildConfig,
-		Scope:       deps.Scope,
-		RateLimiter: deps.RateLimiter,
-		OnStack:     buildOnStack(p, deps, logger),
-		Logger:      logger,
+		BuildCfg:               deps.BuildConfig,
+		Scope:                  deps.Scope,
+		RateLimiter:            deps.RateLimiter,
+		OnStack:                buildOnStack(p, deps, logger),
+		RequestTimeout:         deps.RequestTimeout,
+		RequestTimeoutProvider: wrapper.RequestTimeout,
+		Logger:                 logger,
 	})
-
-	// proxybuild.Listener wraps the FullListener so it can interpose
-	// connection.on_connect / on_disconnect lifecycle hooks. The wrapper
-	// is constructed first so wrapHandler can capture it.
-	wrapper := &Listener{
-		engine: deps.PluginV2Engine,
-		name:   listenerName,
-		logger: logger,
-	}
 
 	flCfg := connector.FullListenerConfig{
 		Name:               listenerName,

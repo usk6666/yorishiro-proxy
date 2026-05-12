@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/connector"
 	"github.com/usk6666/yorishiro-proxy/internal/pluginv2"
@@ -82,6 +83,45 @@ func TestListener_WrapHandler_EngineWithoutHooks_CallsInner(t *testing.T) {
 	}
 	if got := calls.Load(); got != 1 {
 		t.Errorf("inner handler call count = %d, want 1", got)
+	}
+}
+
+// TestListener_RequestTimeout_RoundTrip exercises the USK-844 atomic
+// slot: Set / read must round-trip, the nil-receiver guard must not
+// panic, and negative inputs must collapse to zero (defensive — callers
+// never write negatives, but the asymmetric "negative <→ default"
+// shape would be confusing).
+func TestListener_RequestTimeout_RoundTrip(t *testing.T) {
+	l := &Listener{}
+
+	// Initial value is zero.
+	if got := l.RequestTimeout(); got != 0 {
+		t.Errorf("initial RequestTimeout = %v, want 0", got)
+	}
+
+	// Positive value round-trips.
+	l.SetRequestTimeout(200 * time.Millisecond)
+	if got := l.RequestTimeout(); got != 200*time.Millisecond {
+		t.Errorf("after Set(200ms), RequestTimeout = %v, want 200ms", got)
+	}
+
+	// Zero clears.
+	l.SetRequestTimeout(0)
+	if got := l.RequestTimeout(); got != 0 {
+		t.Errorf("after Set(0), RequestTimeout = %v, want 0", got)
+	}
+
+	// Negative is normalised to zero.
+	l.SetRequestTimeout(-1 * time.Second)
+	if got := l.RequestTimeout(); got != 0 {
+		t.Errorf("after Set(-1s), RequestTimeout = %v, want 0 (negative normalised)", got)
+	}
+
+	// Nil receiver does not panic.
+	var nilL *Listener
+	nilL.SetRequestTimeout(123 * time.Millisecond)
+	if got := nilL.RequestTimeout(); got != 0 {
+		t.Errorf("RequestTimeout on nil Listener = %v, want 0", got)
 	}
 }
 

@@ -553,6 +553,7 @@ func NewLiveManager(
 			WSSafetyEngine:      perProtoSafety.WS,
 			GRPCSafetyEngine:    perProtoSafety.GRPC,
 			PeekTimeout:         cfg.PeekTimeout,
+			RequestTimeout:      cfg.RequestTimeout,
 			MaxConnections:      cfg.MaxConnections,
 			PassthroughList:     passthrough,
 			Scope:               targetScope,
@@ -580,6 +581,11 @@ func NewLiveManager(
 		return nil, fmt.Errorf("init proxybuild manager: %w", err)
 	}
 	mgr.SetPeekTimeout(cfg.PeekTimeout)
+	// USK-844: seed the Manager-level RequestTimeout slot so MCP
+	// configure / proxy_start reads currentRequestTimeout from a populated
+	// state instead of 0, and so listeners started later inherit the
+	// config-file value via StartNamed's tunable-fan-out.
+	mgr.SetRequestTimeout(cfg.RequestTimeout)
 	mgr.SetMaxConnections(cfg.MaxConnections)
 
 	// proxyCfg + issuer are reachable via buildCfg; kept on the parameter

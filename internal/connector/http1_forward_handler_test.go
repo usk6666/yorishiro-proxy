@@ -205,6 +205,169 @@ func TestPeekUntilHeadersEnd_DeadlineExceeded(t *testing.T) {
 	}
 }
 
+// TestNewHTTP1ForwardHandler_RequestTimeoutFires verifies the USK-844 wire:
+// the configured RequestTimeout overrides the package default
+// forwardPeekTimeout, so a slow-loris client whose headers do not arrive
+// before the operator-tightened deadline is rejected with a 400 instead
+// of dragging the handler goroutine for the full 30 s.
+//
+// The test pairs with TestPeekUntilHeadersEnd_DeadlineExceeded but
+// asserts the end-to-end handler behaviour (response status code,
+// connection closed, OnStack NOT invoked) rather than the deadline
+// propagation alone.
+func TestNewHTTP1ForwardHandler_RequestTimeoutFires(t *testing.T) {
+	var stackCalled atomic.Bool
+	handler := NewHTTP1ForwardHandler(HTTP1ForwardHandlerConfig{
+		OnStack: func(ctx context.Context, stack *ConnectionStack, _, _ *envelope.TLSSnapshot, _ string) {
+			stackCalled.Store(true)
+		},
+		// 50ms is below any realistic slow-loris gap and well above the
+		// scheduler jitter floor — the deadline fires deterministically.
+		RequestTimeout: 50 * time.Millisecond,
+	})
+
+	clientA, clientB := net.Pipe()
+	defer clientA.Close()
+	defer clientB.Close()
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		// Write a partial header prefix and then stall — emulates the
+		// Track F §F-6-c slow-loris client that sends headers over ~3 s.
+		_, _ = clientA.Write([]byte("GET / HT"))
+		buf := drainAndCapture(t, clientA)
+		if !bytes.Contains(buf, []byte("400")) {
+			t.Errorf("expected 400 response, got %q", buf)
+		}
+		if !bytes.Contains(buf, []byte("Server: yorishiro-proxy")) {
+			t.Errorf("expected Server: yorishiro-proxy in response, got %q", buf)
+		}
+	}()
+
+	pc := NewPeekConn(clientB)
+	ctx := ContextWithConnID(context.Background(), "test-conn")
+	start := time.Now()
+	if err := handler(ctx, pc); err != nil {
+		t.Errorf("handler returned error: %v", err)
+	}
+	elapsed := time.Since(start)
+	// Be generous on the upper bound to absorb scheduler noise on busy CI
+	// runners, but the handler must NOT take anything close to the 30s
+	// default — that's the regression we're guarding against.
+	if elapsed > 5*time.Second {
+		t.Errorf("handler took %v; expected to honour RequestTimeout=50ms (regression: default 30s applied)", elapsed)
+	}
+	clientB.Close()
+	wg.Wait()
+
+	if stackCalled.Load() {
+		t.Error("OnStack should not be called when the request-timeout fires")
+	}
+}
+
+// TestNewHTTP1ForwardHandler_RequestTimeoutProvider verifies the provider
+// closure path: a runtime mutation to the captured atomic slot reaches
+// the next invocation of the handler without rebuilding it (USK-844).
+func TestNewHTTP1ForwardHandler_RequestTimeoutProvider(t *testing.T) {
+	var current atomic.Int64
+	handler := NewHTTP1ForwardHandler(HTTP1ForwardHandlerConfig{
+		OnStack: func(ctx context.Context, stack *ConnectionStack, _, _ *envelope.TLSSnapshot, _ string) {
+		},
+		// Static value left at zero so resolveForwardPeekTimeout falls
+		// through to the provider tier on every call.
+		RequestTimeoutProvider: func() time.Duration {
+			return time.Duration(current.Load())
+		},
+	})
+
+	// Tighten the runtime slot to 50ms BEFORE the first request hits.
+	current.Store(int64(50 * time.Millisecond))
+
+	clientA, clientB := net.Pipe()
+	defer clientA.Close()
+	defer clientB.Close()
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		_, _ = clientA.Write([]byte("GET / HT"))
+		buf := drainAndCapture(t, clientA)
+		if !bytes.Contains(buf, []byte("400")) {
+			t.Errorf("expected 400 response after provider-driven deadline, got %q", buf)
+		}
+	}()
+
+	pc := NewPeekConn(clientB)
+	ctx := ContextWithConnID(context.Background(), "test-conn")
+	start := time.Now()
+	if err := handler(ctx, pc); err != nil {
+		t.Errorf("handler returned error: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Errorf("handler took %v; provider-driven RequestTimeout did not engage", elapsed)
+	}
+	clientB.Close()
+	wg.Wait()
+}
+
+// TestResolveForwardPeekTimeout exercises the precedence rules
+// (provider > static > package default) used to plumb USK-844.
+func TestResolveForwardPeekTimeout(t *testing.T) {
+	tests := []struct {
+		name     string
+		cfg      HTTP1ForwardHandlerConfig
+		want     time.Duration
+		wantNote string
+	}{
+		{
+			name:     "zero static, no provider → package default",
+			cfg:      HTTP1ForwardHandlerConfig{},
+			want:     forwardPeekTimeout,
+			wantNote: "should fall through to 30s package default",
+		},
+		{
+			name: "static value applied when no provider",
+			cfg: HTTP1ForwardHandlerConfig{
+				RequestTimeout: 200 * time.Millisecond,
+			},
+			want: 200 * time.Millisecond,
+		},
+		{
+			name: "provider wins over static",
+			cfg: HTTP1ForwardHandlerConfig{
+				RequestTimeout:         200 * time.Millisecond,
+				RequestTimeoutProvider: func() time.Duration { return 50 * time.Millisecond },
+			},
+			want: 50 * time.Millisecond,
+		},
+		{
+			name: "provider zero falls through to static",
+			cfg: HTTP1ForwardHandlerConfig{
+				RequestTimeout:         200 * time.Millisecond,
+				RequestTimeoutProvider: func() time.Duration { return 0 },
+			},
+			want: 200 * time.Millisecond,
+		},
+		{
+			name: "provider zero, static zero → package default",
+			cfg: HTTP1ForwardHandlerConfig{
+				RequestTimeoutProvider: func() time.Duration { return 0 },
+			},
+			want: forwardPeekTimeout,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := resolveForwardPeekTimeout(tc.cfg); got != tc.want {
+				t.Errorf("resolveForwardPeekTimeout = %v, want %v (%s)", got, tc.want, tc.wantNote)
+			}
+		})
+	}
+}
+
 func TestEnsurePort(t *testing.T) {
 	cases := []struct {
 		in   string
