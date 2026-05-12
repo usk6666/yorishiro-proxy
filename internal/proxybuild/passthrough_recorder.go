@@ -3,7 +3,6 @@ package proxybuild
 import (
 	"context"
 	"log/slog"
-	"net"
 	"strconv"
 	"sync"
 	"time"
@@ -272,14 +271,12 @@ func (r *passthroughRecorder) recordDialFailure(ctx context.Context, obs connect
 // flow.RecordScope evaluation. The scope filter reads HTTPMessage fields
 // when present and falls back to Context.TargetHost / TLS.SNI for non-HTTP
 // envelopes — TLSHandshakeMessage is in the latter category, so we
-// populate Context.TargetHost from the observation's UpstreamAddr (host
-// portion only, matching the TargetScope semantic) and Context.TLS.SNI
+// populate Context.TargetHost from the observation's TargetHost (the
+// CONNECT / SOCKS5 target hostname the client requested, plumbed by
+// USK-845 — using obs.UpstreamAddr here would seed the matcher with a
+// resolved IP and short-circuit the SNI fallback) and Context.TLS.SNI
 // when the SNI was peeked.
 func (r *passthroughRecorder) envelopeForScope(streamID string, obs connector.PassthroughObservation) *envelope.Envelope {
-	host := obs.UpstreamAddr
-	if h, _, splitErr := net.SplitHostPort(host); splitErr == nil {
-		host = h
-	}
 	env := &envelope.Envelope{
 		StreamID:  streamID,
 		Sequence:  0,
@@ -292,7 +289,7 @@ func (r *passthroughRecorder) envelopeForScope(streamID string, obs connector.Pa
 			UpstreamAddr: obs.UpstreamAddr,
 		},
 		Context: envelope.EnvelopeContext{
-			TargetHost: host,
+			TargetHost: obs.TargetHost,
 		},
 	}
 	if obs.SNI != "" {

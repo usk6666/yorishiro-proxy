@@ -417,3 +417,124 @@ func TestProxybuild_TLSPassthrough_OutOfScope_NotRecorded(t *testing.T) {
 		t.Errorf("RecordScope should suppress out-of-scope passthrough; got %d flows", len(flows))
 	}
 }
+
+// TestProxybuild_TLSPassthrough_InScope_HostnameMatch is the USK-845
+// regression guard: with capture_scope.includes:[{hostname:"<upstream>"}]
+// configured alongside tls_passthrough:["<upstream>"], the passthrough
+// audit Stream / Flow MUST be persisted. The pre-fix bug seeded the
+// scope envelope's Context.TargetHost from the dialed upstream IP, which
+// short-circuited the matcher's SNI fallback. The fix plumbs the
+// CONNECT target hostname onto PassthroughObservation.TargetHost so the
+// matcher resolves the host correctly. Track F §F-1 (2026-05-13).
+func TestProxybuild_TLSPassthrough_InScope_HostnameMatch(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	upstreamAddr, upstreamCert, cleanup := startTLSEchoServer(t)
+	defer cleanup()
+	upstreamHost, _, _ := net.SplitHostPort(upstreamAddr)
+
+	pl := connector.NewPassthroughList()
+	pl.Add(upstreamHost)
+
+	// Include rule matches the target hostname — the CONNECT authority the
+	// client sends is "127.0.0.1:<port>", so include "127.0.0.1" here.
+	// What matters is that pre-fix this also failed (the matcher saw the
+	// dialed IP without port handling baked in); post-fix the CONNECT
+	// authority is plumbed cleanly.
+	scope := flow.NewRecordScope()
+	scope.SetRules([]flow.ScopeRule{{Hostname: upstreamHost}}, nil)
+
+	store := newPassthroughAuditStore()
+	ca := &cert.CA{}
+	if err := ca.Generate(); err != nil {
+		t.Fatalf("CA.Generate: %v", err)
+	}
+	deps := proxybuild.Deps{
+		Logger:          testutil.DiscardLogger(),
+		ListenerName:    "usk-845-in-scope",
+		ListenAddr:      "127.0.0.1:0",
+		FlowStore:       store,
+		PassthroughList: pl,
+		RecordScope:     scope,
+		BuildConfig: &connector.BuildConfig{
+			ProxyConfig: &config.ProxyConfig{},
+			Issuer:      cert.NewIssuer(ca),
+		},
+	}
+	stack, err := proxybuild.BuildLiveStack(ctx, deps)
+	if err != nil {
+		t.Fatalf("BuildLiveStack: %v", err)
+	}
+	go func() { _ = stack.Listener.Start(ctx) }()
+	select {
+	case <-stack.Listener.Ready():
+	case <-time.After(5 * time.Second):
+		t.Fatal("listener never reported ready")
+	}
+	proxyAddr := stack.Listener.Addr()
+
+	conn, err := net.DialTimeout("tcp", proxyAddr, 5*time.Second)
+	if err != nil {
+		t.Fatalf("dial proxy: %v", err)
+	}
+	defer conn.Close()
+
+	connectReq := fmt.Sprintf("CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", upstreamAddr, upstreamAddr)
+	if _, werr := conn.Write([]byte(connectReq)); werr != nil {
+		t.Fatalf("write CONNECT: %v", werr)
+	}
+	buf := make([]byte, 256)
+	if _, rerr := conn.Read(buf); rerr != nil {
+		t.Fatalf("read CONNECT: %v", rerr)
+	}
+
+	rootPool := x509.NewCertPool()
+	rootPool.AddCert(upstreamCert)
+	tlsConn := tls.Client(conn, &tls.Config{
+		RootCAs:    rootPool,
+		ServerName: "passthrough-meta-upstream",
+	})
+	if err := tlsConn.Handshake(); err != nil {
+		t.Fatalf("client TLS handshake through passthrough: %v", err)
+	}
+	payload := []byte("usk-845 in-scope hostname match")
+	if _, werr := tlsConn.Write(payload); werr != nil {
+		t.Fatalf("tlsConn.Write: %v", werr)
+	}
+	rb := make([]byte, len(payload))
+	if _, rerr := io.ReadFull(tlsConn, rb); rerr != nil {
+		t.Fatalf("tlsConn.Read: %v", rerr)
+	}
+	_ = tlsConn.Close()
+	_ = conn.Close()
+
+	// Wait for OnComplete to flush the audit records.
+	deadline := time.Now().Add(3 * time.Second)
+	var streams []*flow.Stream
+	var flows []*flow.Flow
+	for time.Now().Before(deadline) {
+		streams, flows = store.snapshot()
+		if len(streams) > 0 && len(flows) > 0 && streams[0].State == "complete" {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	if len(streams) != 1 {
+		t.Fatalf("in-scope passthrough should record 1 Stream, got %d (%+v)", len(streams), streams)
+	}
+	st := streams[0]
+	if st.Protocol != string(envelope.ProtocolTLSHandshake) {
+		t.Errorf("Stream.Protocol = %q, want %q", st.Protocol, envelope.ProtocolTLSHandshake)
+	}
+	if st.State != "complete" {
+		t.Errorf("Stream.State = %q, want complete", st.State)
+	}
+	if len(flows) != 1 {
+		t.Fatalf("in-scope passthrough should record 1 Flow, got %d", len(flows))
+	}
+	if flows[0].Metadata["sni"] != "passthrough-meta-upstream" {
+		t.Errorf("Flow.Metadata[sni] = %q, want passthrough-meta-upstream", flows[0].Metadata["sni"])
+	}
+}

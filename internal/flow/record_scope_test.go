@@ -163,6 +163,62 @@ func TestRecordScope_NonHTTPHostname_FromSNI(t *testing.T) {
 	}
 }
 
+// TestRecordScope_TLSHandshakeHostname_FromContext exercises the
+// TargetHost → SNI fallback chain that the USK-845 footgun fix relies on
+// for protocol="tls-handshake" audit envelopes. The matcher must remain
+// protocol-agnostic: it consults Context.TargetHost (preferred) then
+// Context.TLS.SNI (fallback) — no type-switch on TLSHandshakeMessage.
+func TestRecordScope_TLSHandshakeHostname_FromContext(t *testing.T) {
+	rs := NewRecordScope()
+	rs.SetRules([]ScopeRule{{Hostname: "httpbin.org"}}, nil)
+
+	// USK-845 happy path: TargetHost set from CONNECT authority — matcher
+	// must use it and ignore the absent SNI.
+	envTargetHost := &envelope.Envelope{
+		Protocol: envelope.ProtocolTLSHandshake,
+		Message: &envelope.TLSHandshakeMessage{
+			SNI:          "",
+			UpstreamAddr: "1.2.3.4:443",
+		},
+		Context: envelope.EnvelopeContext{TargetHost: "httpbin.org"},
+	}
+	if !rs.ShouldRecord(envTargetHost) {
+		t.Error("tls-handshake with TargetHost=httpbin.org: hostname must match via TargetHost")
+	}
+
+	// USK-845 defence-in-depth path: TargetHost empty — matcher must fall
+	// back to Context.TLS.SNI.
+	envSNIFallback := &envelope.Envelope{
+		Protocol: envelope.ProtocolTLSHandshake,
+		Message: &envelope.TLSHandshakeMessage{
+			SNI:          "httpbin.org",
+			UpstreamAddr: "1.2.3.4:443",
+		},
+		Context: envelope.EnvelopeContext{
+			TargetHost: "",
+			TLS:        &envelope.TLSSnapshot{SNI: "httpbin.org"},
+		},
+	}
+	if !rs.ShouldRecord(envSNIFallback) {
+		t.Error("tls-handshake without TargetHost: hostname must fall back to TLS.SNI")
+	}
+
+	// Regression guard: if TargetHost is the resolved IP (the pre-fix bug)
+	// and SNI is empty, no rule should match — the matcher must NOT
+	// accidentally interpret the IP as the include rule's hostname.
+	envIPOnly := &envelope.Envelope{
+		Protocol: envelope.ProtocolTLSHandshake,
+		Message: &envelope.TLSHandshakeMessage{
+			SNI:          "",
+			UpstreamAddr: "1.2.3.4:443",
+		},
+		Context: envelope.EnvelopeContext{TargetHost: "1.2.3.4"},
+	}
+	if rs.ShouldRecord(envIPOnly) {
+		t.Error("tls-handshake with only an IP TargetHost must not match a hostname include rule")
+	}
+}
+
 func TestRecordScope_NonHTTP_URLPrefixRule_DoesNotMatch(t *testing.T) {
 	// Per the design, rules that require url_prefix or method do not match
 	// non-HTTP envelopes (they have no path / method). The recording

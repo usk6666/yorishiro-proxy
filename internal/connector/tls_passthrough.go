@@ -48,6 +48,17 @@ type PassthroughObservation struct {
 	// invoked with Outcome="failed" and OnStart never fired).
 	UpstreamAddr string
 
+	// TargetHost is the hostname portion of the CONNECT / SOCKS5 target
+	// authority the client requested (without ":port"). Unlike
+	// UpstreamAddr (a resolved IP literal), this preserves the hostname
+	// the client actually addressed, which is required for
+	// capture_scope.hostname matching on the synthetic audit envelope
+	// (USK-845). Always populated when set by the connector — both the
+	// post-dial OnStart obs and the pre-OnStart dial-failure obs carry it.
+	// May be empty only when callers construct an observation by hand in
+	// tests; in that case capture_scope falls back to SNI.
+	TargetHost string
+
 	// BytesClientToUpstream is the total bytes io.Copy relayed from the
 	// client side to the upstream side over the lifetime of the relay.
 	// Always zero on OnStart.
@@ -172,6 +183,7 @@ func relayTLSPassthroughWithObserver(
 			obs := PassthroughObservation{
 				LocalAddr:   netAddrString(clientConn.LocalAddr()),
 				RemoteAddr:  netAddrString(clientConn.RemoteAddr()),
+				TargetHost:  hostOnly(target),
 				Outcome:     "failed",
 				ErrorReason: dialErr.Error(),
 			}
@@ -195,6 +207,7 @@ func relayTLSPassthroughWithObserver(
 		LocalAddr:    netAddrString(clientConn.LocalAddr()),
 		RemoteAddr:   netAddrString(clientConn.RemoteAddr()),
 		UpstreamAddr: netAddrString(upstreamConn.RemoteAddr()),
+		TargetHost:   hostOnly(target),
 	}
 	if observer != nil {
 		observer.OnStart(ctx, obs)
@@ -281,6 +294,23 @@ func netAddrString(a net.Addr) string {
 		return ""
 	}
 	return a.String()
+}
+
+// hostOnly returns the host portion of a "host:port" authority, falling
+// back to the raw value when no port is present (covers IP-literal-no-port
+// and bare-hostname edge cases). USK-845 plumbs the CONNECT / SOCKS5
+// target authority onto PassthroughObservation.TargetHost so the audit
+// envelope's Context.TargetHost is the hostname the client requested
+// rather than the proxy-side resolved IP — restoring the matcher's
+// TargetHost → SNI fallback chain for capture_scope.hostname.
+func hostOnly(authority string) string {
+	if authority == "" {
+		return ""
+	}
+	if h, _, err := net.SplitHostPort(authority); err == nil {
+		return h
+	}
+	return authority
 }
 
 // isTunneledOutcome classifies relay return errors for the audit

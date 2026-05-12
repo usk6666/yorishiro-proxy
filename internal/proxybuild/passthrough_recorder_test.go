@@ -275,6 +275,7 @@ func TestPassthroughRecorder_RecordScopeFiltersOutOfScope(t *testing.T) {
 		LocalAddr:    "127.0.0.1:8080",
 		RemoteAddr:   "192.0.2.1:55555",
 		UpstreamAddr: "out-of-scope.example:443",
+		TargetHost:   "out-of-scope.example",
 	}
 	r.OnStart(ctx, obs)
 	final := obs
@@ -293,6 +294,7 @@ func TestPassthroughRecorder_RecordScopeFiltersOutOfScope(t *testing.T) {
 		LocalAddr:    "127.0.0.1:8080",
 		RemoteAddr:   "192.0.2.1:55556",
 		UpstreamAddr: "in-scope.example:443",
+		TargetHost:   "in-scope.example",
 	}
 	r.OnStart(ctx, in)
 	finalIn := in
@@ -305,5 +307,85 @@ func TestPassthroughRecorder_RecordScopeFiltersOutOfScope(t *testing.T) {
 	}
 	if len(flows) != 1 {
 		t.Errorf("in-scope passthrough should record 1 Flow, got %d", len(flows))
+	}
+}
+
+// TestPassthroughRecorder_RecordScopeMatchesHostnameWhenUpstreamIsIP is the
+// USK-845 regression test: pre-fix, the recorder seeded the scope envelope's
+// Context.TargetHost from obs.UpstreamAddr (a resolved IP literal), which
+// short-circuited scopeHostnameFromContext's TargetHost → SNI fallback in
+// flow/record_scope.go. With the fix, obs.TargetHost carries the CONNECT /
+// SOCKS5 target hostname and the include rule matches even when the dialed
+// upstream is reachable only by IP. Track F §F-1 footgun (2026-05-13).
+func TestPassthroughRecorder_RecordScopeMatchesHostnameWhenUpstreamIsIP(t *testing.T) {
+	store := &passthroughRecordingStore{}
+	scope := flow.NewRecordScope()
+	scope.SetRules([]flow.ScopeRule{{Hostname: "httpbin.org"}}, nil)
+	r := newPassthroughRecorder(store, "live", silentLogger(), scope)
+	ctx := context.Background()
+
+	// Mirror Track F §F-1 wire reality: client sent CONNECT httpbin.org:443,
+	// the proxy resolved it to a public IP, and the SNI peek confirmed the
+	// hostname. UpstreamAddr is the IP-shaped 4-tuple half — pre-fix this
+	// alone reached the matcher and the include rule never fired.
+	obs := connector.PassthroughObservation{
+		SNI:          "httpbin.org",
+		LocalAddr:    "127.0.0.1:8080",
+		RemoteAddr:   "192.0.2.1:55557",
+		UpstreamAddr: "1.2.3.4:443",
+		TargetHost:   "httpbin.org",
+	}
+	r.OnStart(ctx, obs)
+	final := obs
+	final.BytesClientToUpstream = 512
+	final.BytesUpstreamToClient = 2048
+	final.Outcome = envelope.TLSHandshakeOutcomeTunneled
+	r.OnComplete(ctx, final)
+
+	streams, updates, flows := store.snapshot()
+	if len(streams) != 1 {
+		t.Fatalf("expected 1 Stream for IP-shaped UpstreamAddr + hostname TargetHost; got %d", len(streams))
+	}
+	if len(updates) != 1 {
+		t.Errorf("expected 1 UpdateStream finalisation, got %d", len(updates))
+	}
+	if len(flows) != 1 {
+		t.Errorf("expected 1 audit Flow, got %d", len(flows))
+	}
+	if streams[0].ConnInfo == nil || streams[0].ConnInfo.ServerAddr != "1.2.3.4:443" {
+		t.Errorf("Stream.ConnInfo.ServerAddr = %+v, want 1.2.3.4:443 (raw upstream preserved)", streams[0].ConnInfo)
+	}
+}
+
+// TestPassthroughRecorder_RecordScopeFallsBackToSNI guards the
+// defence-in-depth path: even when obs.TargetHost is empty (e.g., an
+// observation built by hand or a future peek-before-dial code path), the
+// matcher should still match through Context.TLS.SNI populated from
+// obs.SNI. This locks in the USK-845 design Q3 decision.
+func TestPassthroughRecorder_RecordScopeFallsBackToSNI(t *testing.T) {
+	store := &passthroughRecordingStore{}
+	scope := flow.NewRecordScope()
+	scope.SetRules([]flow.ScopeRule{{Hostname: "httpbin.org"}}, nil)
+	r := newPassthroughRecorder(store, "live", silentLogger(), scope)
+	ctx := context.Background()
+
+	obs := connector.PassthroughObservation{
+		SNI:          "httpbin.org",
+		LocalAddr:    "127.0.0.1:8080",
+		RemoteAddr:   "192.0.2.1:55558",
+		UpstreamAddr: "1.2.3.4:443",
+		// TargetHost intentionally empty.
+	}
+	r.OnStart(ctx, obs)
+	final := obs
+	final.Outcome = envelope.TLSHandshakeOutcomeTunneled
+	r.OnComplete(ctx, final)
+
+	streams, _, flows := store.snapshot()
+	if len(streams) != 1 {
+		t.Errorf("SNI fallback should record 1 Stream; got %d", len(streams))
+	}
+	if len(flows) != 1 {
+		t.Errorf("SNI fallback should record 1 Flow; got %d", len(flows))
 	}
 }
