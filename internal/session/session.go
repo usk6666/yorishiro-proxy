@@ -590,11 +590,19 @@ func runUpgradeWS(
 	// fires BEFORE any DetachStream call so a partial-orchestration failure
 	// (wrong Layer type, missing topmost) is identifiable as "runUpgradeWS
 	// reached but blocked on Layer-type assert" vs "runUpgradeWS never
-	// reached". upstreamCh.StreamID() is the value that ws.New later stamps
-	// onto both Channel pair members (Q3 in the design review).
+	// reached".
+	//
+	// USK-848: upstreamStreamID is the legacy connection-level id
+	// ("<connID>/upstream"); handshakeStreamID is the wire-observed per-
+	// exchange UUID minted by http1.parseRequest and propagated through
+	// attachWSUpgradeRequest. Both are logged so the trace makes the
+	// identity unambiguous; the chosen post-swap clientStreamID is
+	// resolved (and logged again) once the upgradeReq nil-fallback is
+	// applied below.
 	slog.Debug("session: runUpgradeWS entered",
 		"phase", "runUpgradeWS-entry",
-		"streamID", upstreamCh.StreamID(),
+		"upstreamStreamID", upstreamCh.StreamID(),
+		"handshakeStreamID", wsHandshakeStreamID(upgradeReq),
 		"clientTopType", fmt.Sprintf("%T", clientTop),
 		"upstreamTopType", fmt.Sprintf("%T", upstreamTop),
 	)
@@ -624,7 +632,22 @@ func runUpgradeWS(
 	_ = clientHTTP.Close()
 	_ = upstreamHTTP.Close()
 
+	// USK-848: prefer the handshake's per-exchange UUID (minted in
+	// http1.parseRequest, propagated through UpgradeStep ->
+	// attachWSUpgradeRequest -> notice.WSUpgradeRequest()) so the post-
+	// swap WS Stream is the SAME row as the pre-swap HTTP handshake
+	// Stream. RecordStep.maybeRetagProtocol then flips Stream.Protocol
+	// from "http" -> "ws" exactly once (USK-781 precedent), and the
+	// session's OnComplete on close finalises the unified Stream
+	// (implicitly closing USK-850's "parent HTTP Stream stuck at
+	// state=active"). When upgradeReq is nil (test paths that call
+	// runUpgradeWS directly, bypassing UpgradeStep) we fall back to the
+	// legacy connection-level id "<connID>/upstream" — preserving prior
+	// behaviour for callers documented in the function comment above.
 	clientStreamID := upstreamCh.StreamID()
+	if id := wsHandshakeStreamID(upgradeReq); id != "" {
+		clientStreamID = id
+	}
 
 	// USK-841 Phase A milestone (c): DetachStream returned on both sides.
 	// The clientReader type discriminates whether the http1 capture path
@@ -638,9 +661,15 @@ func runUpgradeWS(
 	// lost is if the buffered slice between PrepareSwap-window and
 	// DetachStream is non-empty AND the http1 reader was the source. The
 	// trace shows the raw type so Phase B can correlate.
+	//
+	// USK-848: streamID is the chosen post-swap clientStreamID (handshake
+	// UUID when available, otherwise the legacy "<connID>/upstream"); the
+	// raw upstreamStreamID is logged separately so a future operator can
+	// still see which fallback path fired.
 	slog.Debug("session: runUpgradeWS DetachStream complete",
 		"phase", "runUpgradeWS-detached",
 		"streamID", clientStreamID,
+		"upstreamStreamID", upstreamCh.StreamID(),
 		"clientReaderType", fmt.Sprintf("%T", clientReader),
 		"upstreamReaderType", fmt.Sprintf("%T", upReader),
 	)
@@ -656,6 +685,22 @@ func runUpgradeWS(
 	// precedence — wsLifecycleOptions does not carry an EnvelopeContext.
 	if envCtx, ok := wsEnvelopeContextFromUpgradeReq(upgradeReq); ok {
 		wsOpts = append([]ws.Option{ws.WithEnvelopeContext(envCtx)}, wsOpts...)
+	}
+	// USK-848: when we reuse the handshake StreamID (USK-781 precedent),
+	// Sequence 0 (Send) is already occupied by the HTTP upgrade request
+	// and Sequence 1 (Receive) by the 101 Switching Protocols response
+	// flow records under the same StreamID. The post-swap WS Channels
+	// must seed their per-direction counters past those slots so the
+	// flow store's (stream_id, sequence, direction, variant) UNIQUE
+	// constraint does not reject the first WS frame in either direction.
+	// Same wss-over-h2 pattern at session.go:842-845 (seeded at 1 there
+	// because the h2 swap has only the CONNECT request at Send/Seq=0 +
+	// the 2xx response at Receive/Seq=0; h1.1 has the additional 101
+	// hop). The seed is gated on the upgradeReq-fallback branch firing —
+	// when we keep the legacy connection-scoped StreamID the WS Stream
+	// is fresh and Sequence=0 is safe.
+	if wsHandshakeStreamID(upgradeReq) != "" {
+		wsOpts = append(wsOpts, ws.WithInitialSequence(2))
 	}
 	clientWS := ws.New(clientReader, clientWriter, clientCloser, clientStreamID, ws.RoleServer, wsOpts...)
 	upstreamWS := ws.New(upReader, upWriter, upCloser, clientStreamID, ws.RoleClient, wsOpts...)
@@ -683,9 +728,27 @@ func runUpgradeWS(
 	slog.Debug("session: runUpgradeWS recursive RunStackSession entry",
 		"phase", "recursive-session-entry",
 		"streamID", clientStreamID,
+		"upstreamStreamID", upstreamCh.StreamID(),
 	)
 
 	return RunStackSession(ctx, stack, upgradeDial, p, userOpt)
+}
+
+// wsHandshakeStreamID returns the per-exchange UUID minted by
+// http1.parseRequest (or the per-stream UUID from the h2 aggregator) on
+// the wire-observed WS upgrade request, propagated through
+// attachWSUpgradeRequest's defensive deep-clone (USK-841). Returns the
+// empty string when upgradeReq is nil (test paths that bypass UpgradeStep)
+// or when its StreamID is empty (defensive — should not happen with the
+// production wiring). USK-848: runUpgradeWS adopts this id as the post-
+// swap WS clientStreamID so the post-swap WS Stream is the SAME row as
+// the pre-swap HTTP handshake Stream (USK-781 retag flips Protocol to
+// "ws"; OnComplete on close finalises the unified Stream).
+func wsHandshakeStreamID(upgradeReq *envelope.Envelope) string {
+	if upgradeReq == nil {
+		return ""
+	}
+	return upgradeReq.StreamID
 }
 
 // wsEnvelopeContextFromUpgradeReq derives the EnvelopeContext template

@@ -77,6 +77,15 @@ func (s *testStore) UpdateStream(_ context.Context, id string, update flow.Strea
 		if st.ID != id {
 			continue
 		}
+		// USK-848: honour the Protocol retag emitted by
+		// RecordStep.maybeRetagProtocol (USK-781). With the unified
+		// post-swap StreamID, the WS Stream is the SAME row as the
+		// handshake Stream — created with Protocol="http" by the first
+		// HTTP envelope and retagged to "ws" when the first WS frame
+		// envelope arrives.
+		if update.Protocol != "" {
+			st.Protocol = update.Protocol
+		}
 		if update.State != "" {
 			st.State = update.State
 		}
@@ -492,12 +501,21 @@ func TestWSUpgrade_TextFrameRoundTrip(t *testing.T) {
 			}())
 	}
 
-	// Stream.Scheme is empty for WS today (record_step gates on
-	// HTTPMessage.Scheme). Per the resolved decision, assert == "" exactly
-	// rather than weakening to "any non-empty".
+	// USK-848: the post-swap WS Stream is the SAME row as the pre-swap
+	// HTTP handshake Stream. Stream.Scheme is set by record_step's
+	// createStream from the first envelope's HTTPMessage.Scheme — i.e.
+	// the handshake request's "http" — and persists across the Protocol
+	// retag. Pre-USK-848 the WS row was a fresh row (no HTTPMessage at
+	// createStream time, so Scheme stayed empty), which is why the
+	// historic assertion was Scheme=="". The unification regime
+	// preserves the wire-observed handshake Scheme, which is the
+	// correct lossless representation per RFC-001 §3 ("Stream is a
+	// connection/RPC-level grouping construct"). Assert Scheme=="http"
+	// to lock in the post-USK-848 invariant.
 	for _, st := range streams {
-		if st.Protocol == "ws" && st.Scheme != "" {
-			t.Errorf("WS stream Scheme=%q, want %q", st.Scheme, "")
+		if st.Protocol == "ws" && st.Scheme != "http" {
+			t.Errorf("WS stream Scheme=%q, want %q (USK-848 unification preserves handshake Scheme)",
+				st.Scheme, "http")
 		}
 	}
 

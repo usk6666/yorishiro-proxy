@@ -759,3 +759,190 @@ func hostFromHostPort(hostPort string) string {
 	}
 	return host
 }
+
+// ---------------------------------------------------------------------------
+// USK-848: post-swap WS Stream unification with handshake Stream.
+//
+// Before USK-848, runUpgradeWS stamped the post-swap ws.Layer pair with
+// upstreamCh.StreamID() (the connection-level "<connID>/upstream" id), so
+// "the WS conversation" surfaced as TWO Stream rows: the pre-swap HTTP
+// handshake row (per-exchange UUID, Protocol="http", State stuck at
+// "active" — USK-850) and the post-swap WS frame row (the
+// connection-level id, Protocol="ws").
+//
+// USK-848 sources the post-swap StreamID from upgradeReq.StreamID (the
+// handshake's per-exchange UUID, plumbed through UpgradeStep ->
+// attachWSUpgradeRequest), so RecordStep.maybeRetagProtocol (USK-781)
+// flips the SAME Stream row's Protocol from "http" -> "ws", and the
+// post-swap session's OnComplete on close finalises the unified Stream
+// (implicitly fixing USK-850).
+//
+// This test asserts the unification end-to-end against the production
+// proxy wiring; it intentionally reuses the same proxy / upstream /
+// driver helpers as the USK-839 test above.
+// ---------------------------------------------------------------------------
+
+// TestFullListener_CONNECT_WS_H1_StreamIDUnifiedWithHandshake_USK848 drives a
+// WS round-trip and asserts:
+//
+//	(a) Exactly one Stream row carries the WS conversation; its
+//	    Protocol is "ws" (retagged from the pre-swap "http").
+//	(b) The unified Stream's ID is the per-exchange UUID minted by
+//	    http1.parseRequest — NOT the connection-level "<connID>/upstream"
+//	    id (the legacy pre-USK-848 value).
+//	(c) Send-direction flow Sequences include the HTTP handshake's
+//	    Seq=0 (request) and at least one WS-protocol flow at Seq >= 2;
+//	    no two flows share (Sequence, Direction) — the UNIQUE constraint
+//	    invariant in flow/schema.go.
+//	(d) Receive-direction flow Sequences include the handshake's Seq=1
+//	    (the 101 response) and at least one WS-protocol receive flow at
+//	    Seq >= 2.
+//
+// Indirectly verifies USK-850's implicit fix is in place: only one
+// Stream row is observed for the WS conversation, so the "parent HTTP
+// Stream stuck at state=active" symptom cannot reproduce — there is no
+// orphan handshake row to leave stranded. Final State observation is
+// best-effort because session OnComplete races test teardown; the
+// Stream count is the load-bearing assertion.
+func TestFullListener_CONNECT_WS_H1_StreamIDUnifiedWithHandshake_USK848(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	hits := newWSEchoHits()
+	upstreamAddr, upstreamShutdown := startWSEchoUpstreamH1AdvertisingH2(t, hits)
+	defer upstreamShutdown()
+
+	proxyAddr, store, shutdown := startWSH1H2AdvertProxy(t, ctx)
+	defer shutdown()
+
+	const payload = "usk-848-stream-unify"
+	if err := driveWSEchoThroughProxyH1(ctx, proxyAddr, upstreamAddr, payload); err != nil {
+		t.Fatalf("WS echo through proxy: %v", err)
+	}
+	if got := hits.totalText(); got < 1 {
+		t.Fatalf("upstream WS echo handler text-frame hits = %d, want >= 1", got)
+	}
+
+	// Drain: wait until both ws-protocol Send and Receive flows are
+	// observed in the store. Mirrors the settle pattern in the sibling
+	// test above.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if hasWSStreamWithFlows(store) {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	streams := store.getStreams()
+
+	// (a) Exactly one ws Stream — the unification invariant. If the
+	//     post-swap path adopted a different StreamID we would see two
+	//     rows (one "http" handshake + one "ws" frame), which is the
+	//     pre-USK-848 shape.
+	wsStreams := make([]*flow.Stream, 0, 1)
+	for _, st := range streams {
+		if st != nil && st.Protocol == "ws" {
+			wsStreams = append(wsStreams, st)
+		}
+	}
+	if len(wsStreams) != 1 {
+		t.Fatalf("want exactly 1 ws Stream (USK-848 unification), got %d; streams=%+v",
+			len(wsStreams), summarizeStreams(streams))
+	}
+	wsStream := wsStreams[0]
+
+	// (b) The unified Stream's ID must not be the legacy connection-
+	//     level "<connID>/upstream" shape. UpgradeStep ->
+	//     attachWSUpgradeRequest carries the per-exchange UUID; a UUID
+	//     contains no "/upstream" suffix.
+	if strings.HasSuffix(wsStream.ID, "/upstream") {
+		t.Fatalf("ws Stream.ID = %q has legacy connection-level shape; USK-848 wants the per-exchange handshake UUID", wsStream.ID)
+	}
+	if wsStream.ID == "" {
+		t.Fatalf("ws Stream.ID is empty; want the handshake UUID")
+	}
+
+	// (c)/(d) Sequence collision check: under the unified-StreamID
+	// regime, the HTTP handshake's Send/Seq=0 + Receive/Seq=1 share the
+	// row with WS Send/Seq>=2 and WS Receive/Seq>=2. Assert no
+	// duplicates within (Direction, Sequence) — that is exactly the
+	// UNIQUE(stream_id, sequence, direction, variant) constraint we
+	// avoid by seeding ws.WithInitialSequence(2). Variant is "original"
+	// for all production-path flows (no intercept/transform here).
+	allFlows := store.allFlows()
+	type seqKey struct {
+		dir string
+		seq int
+	}
+	seen := make(map[seqKey]string) // value: a short flow descriptor for the error message
+	var (
+		sawHandshakeSendSeq0 bool
+		sawHandshakeRecvSeq1 bool
+		sawWSSendSeqAtLeast2 bool
+		sawWSRecvSeqAtLeast2 bool
+	)
+	for _, f := range allFlows {
+		if f == nil {
+			continue
+		}
+		if f.StreamID != wsStream.ID {
+			continue
+		}
+		k := seqKey{dir: f.Direction, seq: f.Sequence}
+		desc := fmt.Sprintf("proto=%q seq=%d dir=%q", f.Metadata["protocol"], f.Sequence, f.Direction)
+		if prev, dup := seen[k]; dup {
+			t.Errorf("duplicate (direction=%q, sequence=%d) on unified ws Stream %s: prev=%s, now=%s — UNIQUE collision (USK-848 must seed WithInitialSequence past handshake)",
+				f.Direction, f.Sequence, wsStream.ID, prev, desc)
+		}
+		seen[k] = desc
+		proto := ""
+		if f.Metadata != nil {
+			proto = f.Metadata["protocol"]
+		}
+		switch {
+		case proto == "http" && f.Direction == "send" && f.Sequence == 0:
+			sawHandshakeSendSeq0 = true
+		case proto == "http" && f.Direction == "receive" && f.Sequence == 1:
+			sawHandshakeRecvSeq1 = true
+		case proto == "ws" && f.Direction == "send" && f.Sequence >= 2:
+			sawWSSendSeqAtLeast2 = true
+		case proto == "ws" && f.Direction == "receive" && f.Sequence >= 2:
+			sawWSRecvSeqAtLeast2 = true
+		}
+	}
+	if !sawHandshakeSendSeq0 {
+		t.Errorf("no handshake send flow at sequence=0 on the unified Stream %s; flows=%v",
+			wsStream.ID, summarizeFlowsUSK848(allFlows, wsStream.ID))
+	}
+	if !sawHandshakeRecvSeq1 {
+		t.Errorf("no handshake 101 response flow at sequence=1 on the unified Stream %s; flows=%v",
+			wsStream.ID, summarizeFlowsUSK848(allFlows, wsStream.ID))
+	}
+	if !sawWSSendSeqAtLeast2 {
+		t.Errorf("no ws send flow at sequence>=2 on the unified Stream %s (handshake collision dodge missing?); flows=%v",
+			wsStream.ID, summarizeFlowsUSK848(allFlows, wsStream.ID))
+	}
+	if !sawWSRecvSeqAtLeast2 {
+		t.Errorf("no ws receive flow at sequence>=2 on the unified Stream %s; flows=%v",
+			wsStream.ID, summarizeFlowsUSK848(allFlows, wsStream.ID))
+	}
+}
+
+// summarizeFlowsUSK848 renders a compact view of flows recorded under the
+// given streamID, so a sequence-collision or missing-flow failure carries
+// the context needed to triage without printing every byte.
+func summarizeFlowsUSK848(flows []*flow.Flow, streamID string) []string {
+	out := make([]string, 0)
+	for _, f := range flows {
+		if f == nil || f.StreamID != streamID {
+			continue
+		}
+		proto := ""
+		if f.Metadata != nil {
+			proto = f.Metadata["protocol"]
+		}
+		out = append(out, fmt.Sprintf("{proto=%q dir=%q seq=%d}", proto, f.Direction, f.Sequence))
+	}
+	return out
+}
