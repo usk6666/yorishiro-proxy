@@ -8,7 +8,7 @@
     "resource": {
       "type": "string",
       "description": "The resource to query.",
-      "enum": ["flows", "flow", "messages", "status", "config", "ca_cert", "intercept_queue", "macros", "macro", "fuzz_jobs", "fuzz_results", "technologies"]
+      "enum": ["flows", "flow", "messages", "status", "config", "ca_cert", "intercept_queue", "macros", "macro", "fuzz_jobs", "fuzz_results"]
     },
     "id": {
       "type": "string",
@@ -76,10 +76,6 @@
           "type": "string",
           "description": "Session lifecycle state filter (active, complete, error).",
           "enum": ["active", "complete", "error"]
-        },
-        "technology": {
-          "type": "string",
-          "description": "Technology name filter for flows (case-insensitive substring match, e.g. nginx, wordpress)."
         },
         "outliers_only": {
           "type": "boolean",

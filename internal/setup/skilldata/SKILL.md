@@ -27,7 +27,7 @@ yorishiro-proxy provides 11 MCP tools:
 | `proxy_start` | Start proxy. Supports multi-listener and SOCKS5 |
 | `proxy_stop` | Stop proxy. Stop by name for individual listeners, or omit to stop all |
 | `configure` | Change running proxy settings (TLS passthrough, intercept rules, auto-transform, upstream proxy, connection limits, SOCKS5 auth, etc.) |
-| `query` | Unified information retrieval (resource: flows, flow, messages, status, config, ca_cert, intercept_queue, macros, macro, fuzz_jobs, fuzz_results, technologies) |
+| `query` | Unified information retrieval (resource: flows, flow, messages, status, config, ca_cert, intercept_queue, macros, macro, fuzz_jobs, fuzz_results) |
 | `resend` | Request resend/replay/compare (action: resend, resend_raw, tcp_replay, compare) |
 | `manage` | Flow data management and CA certificate (action: delete_flows, export_flows, import_flows, regenerate_ca_cert) |
 | `fuzz` | Fuzzing (action: fuzz, fuzz_pause, fuzz_resume, fuzz_cancel) |
@@ -156,9 +156,6 @@ Blocked flows (target_scope deny / rate_limit / safety_filter) are recorded by t
 
 // Search flows by host
 {"resource": "flows", "filter": {"host": "example.com"}}
-
-// Technology stack detection results
-{"resource": "technologies"}
 ```
 
 #### query Filter Parameters
@@ -174,7 +171,6 @@ Blocked flows (target_scope deny / rate_limit / safety_filter) are recorded by t
 | `blocked_by` | flows | Block reason ("target_scope", "intercept_drop", "rate_limit", "safety_filter") |
 | `conn_id` | flows | Connection ID exact match. Search flows from the same connection |
 | `host` | flows | Hostname filter. Matches server_addr or host portion of URL |
-| `technology` | flows | Technology stack name (case-insensitive substring match, e.g., "nginx") |
 | `tag` | fuzz_jobs | Tag exact match |
 | `direction` | messages | Message direction ("send", "receive") |
 | `status` | fuzz_jobs | Job state ("running", "paused", "completed", "cancelled", "error") |

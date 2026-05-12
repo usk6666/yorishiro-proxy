@@ -28,8 +28,8 @@ const defaultRequestTimeoutMs = 60000
 
 // queryInput is the typed input for the query tool.
 type queryInput struct {
-	// Resource specifies what to query: flows, flow, messages, status, config, ca_cert, intercept_queue, macros, macro, fuzz_jobs, fuzz_results, technologies.
-	Resource string `json:"resource" jsonschema:"resource to query: flows, flow, messages, status, config, ca_cert, intercept_queue, macros, macro, fuzz_jobs, fuzz_results, technologies"`
+	// Resource specifies what to query: flows, flow, messages, status, config, ca_cert, intercept_queue, macros, macro, fuzz_jobs, fuzz_results.
+	Resource string `json:"resource" jsonschema:"resource to query: flows, flow, messages, status, config, ca_cert, intercept_queue, macros, macro, fuzz_jobs, fuzz_results"`
 
 	// ID is required for flow and messages resources.
 	// For flow: the flow ID. For messages: the flow_id.
@@ -98,8 +98,6 @@ type queryFilter struct {
 	State string `json:"state,omitempty" jsonschema:"flow lifecycle state filter (active, complete, error)"`
 	// Direction filters messages by direction ("send" or "receive").
 	Direction string `json:"direction,omitempty" jsonschema:"message direction filter (send or receive)"`
-	// Technology filters flows by detected technology name (case-insensitive substring match).
-	Technology string `json:"technology,omitempty" jsonschema:"technology name filter for flows (e.g. nginx, wordpress)"`
 	// ConnID filters flows by connection ID (exact match).
 	ConnID string `json:"conn_id,omitempty" jsonschema:"connection ID filter for flows (exact match)"`
 	// Host filters flows by host (matches server_addr or URL host).
@@ -115,7 +113,7 @@ type queryFilter struct {
 }
 
 // availableResources lists all valid resource names for error messages.
-var availableResources = []string{"flows", "flow", "messages", "status", "config", "ca_cert", "intercept_queue", "macros", "macro", "fuzz_jobs", "fuzz_results", "technologies"}
+var availableResources = []string{"flows", "flow", "messages", "status", "config", "ca_cert", "intercept_queue", "macros", "macro", "fuzz_jobs", "fuzz_results"}
 
 // validFilterProtocols lists accepted values for filter.protocol. The
 // query tool accepts canonical Envelope.Protocol values only; the legacy
@@ -225,7 +223,7 @@ func (s *Server) registerQuery() {
 	gomcp.AddTool(s.server, &gomcp.Tool{
 		Name: "query",
 		Description: "Unified read-only query: flows, flow detail, messages, status, config, ca_cert, " +
-			"intercept_queue, macros, macro, fuzz_jobs, fuzz_results, technologies. " +
+			"intercept_queue, macros, macro, fuzz_jobs, fuzz_results. " +
 			"Set 'resource' to one of those values; 'id' supplies the flow/macro/messages ID and 'fuzz_id' " +
 			"supplies the fuzz job ID. 'filter' / 'fields' / 'sort_by' / 'limit' / 'offset' shape result sets. " +
 			"Protocol filter accepts canonical Message-type families (http, ws, grpc, grpc-web, sse, raw, tls-handshake) " +
@@ -292,8 +290,6 @@ func (s *Server) handleQuery(ctx context.Context, req *gomcp.CallToolRequest, in
 		return s.handleQueryFuzzJobs(ctx, input)
 	case "fuzz_results":
 		return s.handleQueryFuzzResults(ctx, input)
-	case "technologies":
-		return s.handleQueryTechnologies(ctx, input)
 	case "":
 		return nil, nil, fmt.Errorf("resource is required: available resources are %s", strings.Join(availableResources, ", "))
 	default:
@@ -421,7 +417,6 @@ func buildFlowListOptions(input queryInput) flow.StreamListOptions {
 		opts.BlockedBy = input.Filter.BlockedBy
 		opts.State = input.Filter.State
 		opts.Origin = flow.Origin(input.Filter.Origin)
-		opts.Technology = input.Filter.Technology
 		opts.ConnID = input.Filter.ConnID
 		opts.Host = input.Filter.Host
 	}

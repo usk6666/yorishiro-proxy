@@ -232,10 +232,6 @@ type StreamListOptions struct {
 	// the schemaV12 column default ('proxy') ensures pre-existing rows match
 	// the OriginProxy filter without explicit backfill.
 	Origin Origin
-	// Technology filters streams whose tags contain a technology detection
-	// matching this name (case-insensitive substring match on the
-	// JSON-encoded "technologies" tag value).
-	Technology string
 	// ConnID filters streams by connection ID (exact match).
 	ConnID string
 	// Host filters streams by host. Matches against the server_addr column

@@ -258,8 +258,7 @@ export type QueryResource =
   | "macros"
   | "macro"
   | "fuzz_jobs"
-  | "fuzz_results"
-  | "technologies";
+  | "fuzz_results";
 
 /** Filter options for the query tool. */
 export interface QueryFilter {
@@ -271,7 +270,6 @@ export interface QueryFilter {
   blocked_by?: string;
   state?: string;
   direction?: "send" | "receive";
-  technology?: string;
   conn_id?: string;
   host?: string;
   body_contains?: string;
@@ -772,26 +770,6 @@ export interface FuzzResultsResult {
   summary: FuzzResultsSummary;
 }
 
-/** A single technology detection entry. */
-export interface TechnologyEntry {
-  name: string;
-  version?: string;
-  category: string;
-  confidence: string;
-}
-
-/** Technologies grouped by host. */
-export interface HostTechnologies {
-  host: string;
-  technologies: TechnologyEntry[];
-}
-
-/** Response for query resource="technologies". */
-export interface TechnologiesResult {
-  hosts: HostTechnologies[];
-  count: number;
-}
-
 /** Map of query resource to its result type. */
 export interface QueryResultMap {
   flows: FlowsResult;
@@ -805,7 +783,6 @@ export interface QueryResultMap {
   macro: MacroDetailResult;
   fuzz_jobs: FuzzJobsResult;
   fuzz_results: FuzzResultsResult;
-  technologies: TechnologiesResult;
 }
 
 // ---------------------------------------------------------------------------

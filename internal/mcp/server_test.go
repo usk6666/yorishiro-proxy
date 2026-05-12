@@ -95,7 +95,6 @@ func TestServer_NewServer_NilComponentsTolerated(t *testing.T) {
 //	proxy_start_tool.go           misc, pipeline, connector, pluginEngine            4 (exception: assembly handler)
 //	proxy_stop_tool.go            connector                                          1
 //	query_fuzz.go                 jobRunner                                          1
-//	query_technologies.go         flowStore                                          1
 //	query_tool.go                 misc, pipeline, connector, flowStore               4 (exception: dispatch handler)
 //	safety_helper.go              pipeline                                           1
 //	security_tool.go              pipeline, connector, misc                          3

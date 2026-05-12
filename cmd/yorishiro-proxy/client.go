@@ -35,7 +35,6 @@ Parameters (key=value):
     macro                 Get a single macro (requires id=<name>)
     fuzz_jobs             List fuzz jobs
     fuzz_results          Get fuzz results (requires fuzz_id=<id>)
-    technologies          Get technology stack detections
   id=<id>                 Flow ID or macro name (required for flow/messages/macro)
   fuzz_id=<id>            Fuzz job ID (required for fuzz_results)
   limit=<n>               Maximum number of results (default: 50, max: 1000)

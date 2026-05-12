@@ -123,7 +123,6 @@ internal/
   flow/                    # Stream/Flow Store (sqlite); HAR / JSONL / cURL export, import
   cert/                    # Root CA + dynamic server cert issuance
   config/                  # Configuration loading + validation (incl. Plugins, body-spill, limits)
-  fingerprint/             # TLS fingerprint detection (JA3 / JA4)
   encoding/                # Protobuf framing helper
   fuzzer/                  # Iterator / Position / RequestData primitives for typed-fuzz path
   mcp/                     # MCP server, tools, handlers
