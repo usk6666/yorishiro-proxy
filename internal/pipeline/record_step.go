@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/url"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -818,6 +819,21 @@ func (s *RecordStep) envelopeToFlow(ctx context.Context, env *envelope.Envelope)
 		if trlrs := keyValuesToMap(m.Trailers); trlrs != nil {
 			fl.Trailers = trlrs
 		}
+		// USK-849: project HTTPMessage.Anomalies into per-type Metadata
+		// keys so MCP `query flow` analysts can see typed protocol
+		// anomalies (HTTP/1.x parser anomalies, HTTP/2 receive-side
+		// non-conformance, HTTP/2 send-side strips from USK-840).
+		// Mirrors the gRPC/SSE projection (USK-659 / USK-656). The
+		// helper returns "" for an unknown AnomalyType so callers know
+		// to fall back to a stable namespaced default — never silently
+		// drop, since future producers must still be observable.
+		for _, a := range m.Anomalies {
+			key := httpAnomalyMetadataKey(a.Type)
+			if key == "" {
+				continue
+			}
+			fl.Metadata[key] = a.Detail
+		}
 	case *envelope.RawMessage:
 		fl.Body = m.Bytes
 	case *envelope.WSMessage:
@@ -1074,6 +1090,57 @@ func sseAnomalyMetadataKey(t envelope.AnomalyType) string {
 	default:
 		return ""
 	}
+}
+
+// httpAnomalyKeys is the closed AnomalyType → stable Metadata key map
+// for HTTP/1.x and HTTP/2 anomalies (USK-849). Each entry yields a
+// snake_case column name so reviewers can grep for a stable schema
+// across SQLite rows. Mirrors the gRPC/SSE precedent (USK-659 /
+// USK-656). A map (vs switch) keeps gocyclo under threshold while
+// preserving a single-source-of-truth table — adding a new AnomalyType
+// is a one-line append.
+var httpAnomalyKeys = map[envelope.AnomalyType]string{
+	// HTTP/1.x parser-detected anomalies (parser.Anomaly*).
+	envelope.AnomalyCLTE:                  "http_anomaly_cl_te",
+	envelope.AnomalyDuplicateCL:           "http_anomaly_duplicate_cl",
+	envelope.AnomalyInvalidTE:             "http_anomaly_invalid_te",
+	envelope.AnomalyHeaderInjection:       "http_anomaly_header_injection",
+	envelope.AnomalyAmbiguousTE:           "http_anomaly_ambiguous_te",
+	envelope.AnomalyObsFold:               "http_anomaly_obs_fold",
+	envelope.AnomalyTrailerPseudoHeader:   "http_anomaly_trailer_pseudo_header",
+	envelope.AnomalyTrailerForbidden:      "http_anomaly_trailer_forbidden",
+	envelope.AnomalyTrailersInPassthrough: "http_anomaly_trailers_in_passthrough",
+	envelope.AnomalyRawBodyTruncated:      "http_anomaly_raw_body_truncated",
+	// HTTP/2 receive-side anomalies emitted by the aggregator on parse.
+	envelope.H2DuplicatePseudoHeader:    "http_anomaly_h2_duplicate_pseudo_header",
+	envelope.H2PseudoHeaderAfterRegular: "http_anomaly_h2_pseudo_header_after_regular",
+	envelope.H2InvalidPseudoHeader:      "http_anomaly_h2_invalid_pseudo_header",
+	envelope.H2UppercaseHeaderName:      "http_anomaly_h2_uppercase_header_name",
+	envelope.H2ConnectionSpecificHeader: "http_anomaly_h2_connection_specific_header",
+	// HTTP/2 send-side strip mirror (USK-840).
+	envelope.H2ConnectionSpecificHeaderStrippedOnSend: "http_anomaly_h2_connection_specific_header_stripped_on_send",
+	envelope.H2TrailersAfterPassthrough:               "http_anomaly_h2_trailers_after_passthrough",
+	envelope.H2PushPromise:                            "http_anomaly_h2_push_promise",
+	envelope.H2UnsupportedConnectProtocol:             "http_anomaly_h2_unsupported_connect_protocol",
+}
+
+// httpAnomalyMetadataKey returns the stable Metadata key under which an
+// HTTP anomaly's Detail is recorded (USK-849). Unknown types are
+// surfaced under a stable `http_anomaly_unknown_<lowercased-type>`
+// prefix so future producers that add a new AnomalyType become visible
+// without requiring a synchronous patch (Principle #5 — surface, don't
+// drop). The per-protocol helper mirrors grpcAnomalyMetadataKey /
+// sseAnomalyMetadataKey; CLAUDE.md DRY policy explicitly allows the
+// duplication because each protocol owns its anomaly vocabulary
+// (Principle #2 — do not unify across protocols).
+func httpAnomalyMetadataKey(t envelope.AnomalyType) string {
+	if k, ok := httpAnomalyKeys[t]; ok {
+		return k
+	}
+	// Stable namespaced fallback. Lowercased for grep-friendliness; the
+	// raw AnomalyType value (already snake-style for H2*) is appended
+	// verbatim minus case-folding.
+	return "http_anomaly_unknown_" + strings.ToLower(string(t))
 }
 
 // projectHTTPBody populates fl.Body (and BodyTruncated) from m.Body or

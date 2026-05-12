@@ -319,8 +319,61 @@ var smugglingTagToAnomalyType = map[string]string{
 	"smuggling:obs_fold":         "ObsFold",
 }
 
+// flowMetadataAnomalyKeyToType maps per-flow Metadata anomaly keys (set by
+// pipeline.RecordStep projections — USK-656 SSE, USK-659 gRPC-Web,
+// USK-849 HTTP) back to their canonical envelope.AnomalyType string. The
+// map is closed for known producers; unknown `*_anomaly_*` keys still
+// surface via a stable namespaced fallback in extractAnomaliesFromFlows
+// so future producers do not require a synchronous patch here.
+var flowMetadataAnomalyKeyToType = map[string]string{
+	// HTTP/1.x parser anomalies (USK-849).
+	"http_anomaly_cl_te":                   string(envelope.AnomalyCLTE),
+	"http_anomaly_duplicate_cl":            string(envelope.AnomalyDuplicateCL),
+	"http_anomaly_invalid_te":              string(envelope.AnomalyInvalidTE),
+	"http_anomaly_header_injection":        string(envelope.AnomalyHeaderInjection),
+	"http_anomaly_ambiguous_te":            string(envelope.AnomalyAmbiguousTE),
+	"http_anomaly_obs_fold":                string(envelope.AnomalyObsFold),
+	"http_anomaly_trailer_pseudo_header":   string(envelope.AnomalyTrailerPseudoHeader),
+	"http_anomaly_trailer_forbidden":       string(envelope.AnomalyTrailerForbidden),
+	"http_anomaly_trailers_in_passthrough": string(envelope.AnomalyTrailersInPassthrough),
+	"http_anomaly_raw_body_truncated":      string(envelope.AnomalyRawBodyTruncated),
+	// HTTP/2 receive-side anomalies.
+	"http_anomaly_h2_duplicate_pseudo_header":      string(envelope.H2DuplicatePseudoHeader),
+	"http_anomaly_h2_pseudo_header_after_regular":  string(envelope.H2PseudoHeaderAfterRegular),
+	"http_anomaly_h2_invalid_pseudo_header":        string(envelope.H2InvalidPseudoHeader),
+	"http_anomaly_h2_uppercase_header_name":        string(envelope.H2UppercaseHeaderName),
+	"http_anomaly_h2_connection_specific_header":   string(envelope.H2ConnectionSpecificHeader),
+	"http_anomaly_h2_trailers_after_passthrough":   string(envelope.H2TrailersAfterPassthrough),
+	"http_anomaly_h2_push_promise":                 string(envelope.H2PushPromise),
+	"http_anomaly_h2_unsupported_connect_protocol": string(envelope.H2UnsupportedConnectProtocol),
+	// HTTP/2 send-side strip mirror (USK-840).
+	"http_anomaly_h2_connection_specific_header_stripped_on_send": string(envelope.H2ConnectionSpecificHeaderStrippedOnSend),
+	// gRPC-Web anomalies (USK-659).
+	"grpc_anomaly_malformed_base64":           string(envelope.AnomalyMalformedGRPCWebBase64),
+	"grpc_anomaly_malformed_lpm":              string(envelope.AnomalyMalformedGRPCWebLPM),
+	"grpc_anomaly_malformed_trailer":          string(envelope.AnomalyMalformedGRPCWebTrailer),
+	"grpc_anomaly_missing_trailer":            string(envelope.AnomalyMissingGRPCWebTrailer),
+	"grpc_anomaly_unexpected_request_trailer": string(envelope.AnomalyUnexpectedGRPCWebRequestTrailer),
+	// SSE anomalies (USK-656).
+	"sse_anomaly_missing_data": string(envelope.AnomalySSEMissingData),
+	"sse_anomaly_truncated":    string(envelope.AnomalySSETruncated),
+	"sse_anomaly_duplicate_id": string(envelope.AnomalySSEDuplicateID),
+}
+
+// anomalyMetadataPrefixes lists the per-flow Metadata key prefixes that
+// extractAnomaliesFromFlows scans. New protocols (or new producers) that
+// adopt the `<proto>_anomaly_<type>` projection only need to append a
+// prefix here — the existing fallback path surfaces the entry verbatim
+// even if flowMetadataAnomalyKeyToType has not been updated.
+var anomalyMetadataPrefixes = []string{"http_anomaly_", "grpc_anomaly_", "sse_anomaly_"}
+
 // extractAnomalies converts smuggling:* tags into a structured anomaly list.
 // Returns nil if no anomalies are present, avoiding unnecessary JSON array allocation.
+//
+// This path is the legacy stream-tag rollup; it is kept for backward
+// compatibility with pre-USK-849 captures that may carry smuggling:* tags
+// on the Stream row. The current production projection writes per-flow
+// Metadata keys consumed by extractAnomaliesFromFlows.
 func extractAnomalies(tags map[string]string) []queryAnomaly {
 	if len(tags) == 0 {
 		return nil
@@ -351,6 +404,103 @@ func extractAnomalies(tags map[string]string) []queryAnomaly {
 		return anomalies[i].Type < anomalies[j].Type
 	})
 	return anomalies
+}
+
+// extractAnomaliesFromFlows rolls up per-flow Metadata keys with the
+// known anomaly prefixes (`http_anomaly_*` / `grpc_anomaly_*` /
+// `sse_anomaly_*`) into structured queryAnomaly entries (USK-849).
+//
+// Each matching key is mapped to its canonical envelope.AnomalyType
+// string via flowMetadataAnomalyKeyToType. Unknown keys (added by a
+// future producer) surface under a stable namespaced Type derived from
+// the key suffix — better to show an unknown anomaly than to silently
+// drop it (MITM Principle #5).
+//
+// Output is sorted by Type for deterministic JSON across runs. Returns
+// nil when no per-flow anomaly keys are present so the caller can leave
+// `anomalies,omitempty` absent.
+func extractAnomaliesFromFlows(flows []*flow.Flow) []queryAnomaly {
+	if len(flows) == 0 {
+		return nil
+	}
+
+	// Use a map keyed on Type to dedupe identical anomalies projected
+	// onto multiple flows (e.g. an HTTP/1.x request anomaly is
+	// associated with the request flow only — but a future producer
+	// could record the same anomaly on both Send and Receive). Last
+	// non-empty Detail wins; map iteration is sorted on the way out.
+	dedup := make(map[string]string)
+	for _, fl := range flows {
+		if fl == nil || len(fl.Metadata) == 0 {
+			continue
+		}
+		for key, detail := range fl.Metadata {
+			if !hasAnomalyPrefix(key) {
+				continue
+			}
+			typeName, ok := flowMetadataAnomalyKeyToType[key]
+			if !ok {
+				// Unknown but recognised-prefix key: surface as the
+				// raw key string so the analyst can still find it.
+				typeName = key
+			}
+			if existing, present := dedup[typeName]; present && detail == "" {
+				// Don't overwrite a meaningful Detail with empty.
+				_ = existing
+				continue
+			}
+			dedup[typeName] = detail
+		}
+	}
+
+	if len(dedup) == 0 {
+		return nil
+	}
+
+	out := make([]queryAnomaly, 0, len(dedup))
+	for typeName, detail := range dedup {
+		out = append(out, queryAnomaly{Type: typeName, Detail: detail})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Type < out[j].Type })
+	return out
+}
+
+// hasAnomalyPrefix reports whether key carries one of the known anomaly
+// Metadata prefixes.
+func hasAnomalyPrefix(key string) bool {
+	for _, p := range anomalyMetadataPrefixes {
+		if strings.HasPrefix(key, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// mergeAnomalies concatenates two queryAnomaly slices, deduping on Type
+// (later entries win on Detail), and returns the merged slice sorted by
+// Type. Returns nil when both inputs are empty so the JSON `omitempty`
+// path holds.
+func mergeAnomalies(a, b []queryAnomaly) []queryAnomaly {
+	if len(a) == 0 && len(b) == 0 {
+		return nil
+	}
+	dedup := make(map[string]string, len(a)+len(b))
+	for _, e := range a {
+		dedup[e.Type] = e.Detail
+	}
+	for _, e := range b {
+		if existing, present := dedup[e.Type]; present && e.Detail == "" {
+			_ = existing
+			continue
+		}
+		dedup[e.Type] = e.Detail
+	}
+	out := make([]queryAnomaly, 0, len(dedup))
+	for typeName, detail := range dedup {
+		out = append(out, queryAnomaly{Type: typeName, Detail: detail})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Type < out[j].Type })
+	return out
 }
 
 // --- flows resource ---
@@ -492,12 +642,17 @@ func (s *Server) handleQueryFlows(ctx context.Context, input queryInput) (*gomcp
 			BlockedBy:       fl.BlockedBy,
 			ProtocolSummary: summary,
 			Tags:            fl.Tags,
-			Anomalies:       extractAnomalies(fl.Tags),
-			Timestamp:       fl.Timestamp.UTC().Format("2006-01-02T15:04:05Z"),
-			DurationMs:      fl.Duration.Milliseconds(),
-			SendMs:          fl.SendMs,
-			WaitMs:          fl.WaitMs,
-			ReceiveMs:       fl.ReceiveMs,
+			// USK-849: merge the legacy stream-tag rollup with the
+			// per-flow Metadata projection so HTTP / gRPC-Web / SSE
+			// typed anomalies surface alongside the older smuggling:*
+			// stream-tag path. Both inputs are deterministic-sorted; the
+			// merge dedupes on Type.
+			Anomalies:  mergeAnomalies(extractAnomalies(fl.Tags), extractAnomaliesFromFlows(msgs)),
+			Timestamp:  fl.Timestamp.UTC().Format("2006-01-02T15:04:05Z"),
+			DurationMs: fl.Duration.Milliseconds(),
+			SendMs:     fl.SendMs,
+			WaitMs:     fl.WaitMs,
+			ReceiveMs:  fl.ReceiveMs,
 		})
 	}
 
@@ -945,15 +1100,16 @@ func (s *Server) handleQueryFlow(ctx context.Context, input queryInput) (*gomcp.
 		WaitMs:                      fl.WaitMs,
 		ReceiveMs:                   fl.ReceiveMs,
 		Tags:                        fl.Tags,
-		Anomalies:                   extractAnomalies(fl.Tags),
-		BlockedBy:                   fl.BlockedBy,
-		RawRequest:                  rawReqStr,
-		RawResponse:                 rawRespStr,
-		ConnInfo:                    connInfo,
-		MessageCount:                len(msgs),
-		ProtocolSummary:             summary,
-		OriginalRequest:             s.buildOriginalRequest(cat.originalSendMsg, decodeEnabled),
-		OriginalResponse:            s.buildOriginalResponse(cat.originalRecvMsg, decodeEnabled),
+		// USK-849: see handleQueryFlows comment — same rollup policy.
+		Anomalies:        mergeAnomalies(extractAnomalies(fl.Tags), extractAnomaliesFromFlows(msgs)),
+		BlockedBy:        fl.BlockedBy,
+		RawRequest:       rawReqStr,
+		RawResponse:      rawRespStr,
+		ConnInfo:         connInfo,
+		MessageCount:     len(msgs),
+		ProtocolSummary:  summary,
+		OriginalRequest:  s.buildOriginalRequest(cat.originalSendMsg, decodeEnabled),
+		OriginalResponse: s.buildOriginalResponse(cat.originalRecvMsg, decodeEnabled),
 	}
 
 	// Apply output filter to original request/response variants.

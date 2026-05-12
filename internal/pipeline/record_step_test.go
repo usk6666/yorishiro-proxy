@@ -2836,3 +2836,298 @@ func TestRecordStep_NoCapsNoCache(t *testing.T) {
 		t.Error("allowFlowRecord = false with no caps; want true (degrades to no-op)")
 	}
 }
+
+// TestRecordStep_HTTPAnomaliesProjectedToMetadata pins that every
+// envelope.AnomalyType defined on HTTPMessage (HTTP/1.x parser anomalies +
+// HTTP/2 receive-side anomalies + HTTP/2 send-side strip from USK-840)
+// projects onto Flow.Metadata via a stable per-type key under the
+// `http_anomaly_` prefix. Mirrors the gRPC/SSE precedent (USK-659 /
+// USK-656). Critical for MITM Principle #5 — typed anomalies that the
+// parsers/encoders surface must reach the analyst-facing MCP path
+// (USK-849).
+func TestRecordStep_HTTPAnomaliesProjectedToMetadata(t *testing.T) {
+	cases := []struct {
+		name    string
+		typ     envelope.AnomalyType
+		detail  string
+		wantKey string
+	}{
+		// HTTP/1.x parser anomalies.
+		{name: "CLTE", typ: envelope.AnomalyCLTE, detail: "TE wins; CL=10 TE=chunked", wantKey: "http_anomaly_cl_te"},
+		{name: "DuplicateCL", typ: envelope.AnomalyDuplicateCL, detail: "CL: 10, 10", wantKey: "http_anomaly_duplicate_cl"},
+		{name: "InvalidTE", typ: envelope.AnomalyInvalidTE, detail: "te=identity", wantKey: "http_anomaly_invalid_te"},
+		{name: "HeaderInjection", typ: envelope.AnomalyHeaderInjection, detail: "X-Foo: \\r\\nbar", wantKey: "http_anomaly_header_injection"},
+		{name: "AmbiguousTE", typ: envelope.AnomalyAmbiguousTE, detail: "te=chunked; chunked", wantKey: "http_anomaly_ambiguous_te"},
+		{name: "ObsFold", typ: envelope.AnomalyObsFold, detail: "folded header", wantKey: "http_anomaly_obs_fold"},
+		{name: "TrailerPseudoHeader", typ: envelope.AnomalyTrailerPseudoHeader, detail: ":status", wantKey: "http_anomaly_trailer_pseudo_header"},
+		{name: "TrailerForbidden", typ: envelope.AnomalyTrailerForbidden, detail: "Content-Length", wantKey: "http_anomaly_trailer_forbidden"},
+		{name: "TrailersInPassthrough", typ: envelope.AnomalyTrailersInPassthrough, detail: "", wantKey: "http_anomaly_trailers_in_passthrough"},
+		{name: "RawBodyTruncated", typ: envelope.AnomalyRawBodyTruncated, detail: "1048576", wantKey: "http_anomaly_raw_body_truncated"},
+		// HTTP/2 receive-side anomalies.
+		{name: "H2DuplicatePseudoHeader", typ: envelope.H2DuplicatePseudoHeader, detail: ":authority", wantKey: "http_anomaly_h2_duplicate_pseudo_header"},
+		{name: "H2PseudoHeaderAfterRegular", typ: envelope.H2PseudoHeaderAfterRegular, detail: ":method", wantKey: "http_anomaly_h2_pseudo_header_after_regular"},
+		{name: "H2InvalidPseudoHeader", typ: envelope.H2InvalidPseudoHeader, detail: ":foo", wantKey: "http_anomaly_h2_invalid_pseudo_header"},
+		{name: "H2UppercaseHeaderName", typ: envelope.H2UppercaseHeaderName, detail: "X-Foo", wantKey: "http_anomaly_h2_uppercase_header_name"},
+		{name: "H2ConnectionSpecificHeader", typ: envelope.H2ConnectionSpecificHeader, detail: "connection, transfer-encoding", wantKey: "http_anomaly_h2_connection_specific_header"},
+		// HTTP/2 send-side strip mirror (USK-840).
+		{name: "H2ConnectionSpecificHeaderStrippedOnSend", typ: envelope.H2ConnectionSpecificHeaderStrippedOnSend, detail: "connection", wantKey: "http_anomaly_h2_connection_specific_header_stripped_on_send"},
+		{name: "H2TrailersAfterPassthrough", typ: envelope.H2TrailersAfterPassthrough, detail: "", wantKey: "http_anomaly_h2_trailers_after_passthrough"},
+		{name: "H2PushPromise", typ: envelope.H2PushPromise, detail: "promised stream 4", wantKey: "http_anomaly_h2_push_promise"},
+		{name: "H2UnsupportedConnectProtocol", typ: envelope.H2UnsupportedConnectProtocol, detail: "webtransport", wantKey: "http_anomaly_h2_unsupported_connect_protocol"},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			w := &mockWriter{}
+			step := NewRecordStep(w, nil)
+			env := &envelope.Envelope{
+				StreamID:  "s1",
+				FlowID:    "f1",
+				Direction: envelope.Send,
+				Sequence:  0,
+				Protocol:  envelope.ProtocolHTTP,
+				Raw:       []byte("GET / HTTP/1.1\r\n\r\n"),
+				Message: &envelope.HTTPMessage{
+					Method: "GET",
+					Path:   "/",
+					Anomalies: []envelope.Anomaly{
+						{Type: tc.typ, Detail: tc.detail},
+					},
+				},
+			}
+			step.Process(context.Background(), env)
+
+			if len(w.flows) != 1 {
+				t.Fatalf("expected 1 flow, got %d", len(w.flows))
+			}
+			fl := w.flows[0]
+			detail, ok := fl.Metadata[tc.wantKey]
+			if !ok {
+				t.Fatalf("Metadata[%q] missing; keys=%v", tc.wantKey, metadataKeysSorted(fl.Metadata))
+			}
+			if detail != tc.detail {
+				t.Errorf("Metadata[%q] = %q, want %q (Detail must round-trip verbatim — Principle #3)", tc.wantKey, detail, tc.detail)
+			}
+		})
+	}
+}
+
+// TestRecordStep_HTTPAnomalyUnknownTypeUsesFallbackKey verifies the
+// `http_anomaly_unknown_<lowercase-type>` fallback path. A future producer
+// that adds a new AnomalyType without patching httpAnomalyMetadataKey
+// must still surface in MCP rollup (Principle #5 — surface, don't drop).
+func TestRecordStep_HTTPAnomalyUnknownTypeUsesFallbackKey(t *testing.T) {
+	w := &mockWriter{}
+	step := NewRecordStep(w, nil)
+	env := &envelope.Envelope{
+		StreamID:  "s1",
+		FlowID:    "f1",
+		Direction: envelope.Send,
+		Sequence:  0,
+		Protocol:  envelope.ProtocolHTTP,
+		Raw:       []byte("GET / HTTP/1.1\r\n\r\n"),
+		Message: &envelope.HTTPMessage{
+			Method: "GET",
+			Path:   "/",
+			Anomalies: []envelope.Anomaly{
+				{Type: envelope.AnomalyType("FutureProducerAnomaly"), Detail: "hypothetical"},
+			},
+		},
+	}
+	step.Process(context.Background(), env)
+	if len(w.flows) != 1 {
+		t.Fatalf("expected 1 flow, got %d", len(w.flows))
+	}
+	fl := w.flows[0]
+	detail, ok := fl.Metadata["http_anomaly_unknown_futureproduceranomaly"]
+	if !ok {
+		t.Fatalf("fallback metadata key missing; keys=%v", metadataKeysSorted(fl.Metadata))
+	}
+	if detail != "hypothetical" {
+		t.Errorf("fallback Detail = %q, want %q", detail, "hypothetical")
+	}
+}
+
+// TestRecordStep_HTTPAnomaliesEmptySliceProducesNoKeys verifies the
+// happy-path baseline — when a HTTPMessage carries no Anomalies, no
+// `http_anomaly_*` metadata keys are emitted.
+func TestRecordStep_HTTPAnomaliesEmptySliceProducesNoKeys(t *testing.T) {
+	w := &mockWriter{}
+	step := NewRecordStep(w, nil)
+	env := &envelope.Envelope{
+		StreamID:  "s1",
+		FlowID:    "f1",
+		Direction: envelope.Send,
+		Sequence:  0,
+		Protocol:  envelope.ProtocolHTTP,
+		Raw:       []byte("GET / HTTP/1.1\r\n\r\n"),
+		Message: &envelope.HTTPMessage{
+			Method:    "GET",
+			Path:      "/",
+			Anomalies: nil,
+		},
+	}
+	step.Process(context.Background(), env)
+	if len(w.flows) != 1 {
+		t.Fatalf("expected 1 flow, got %d", len(w.flows))
+	}
+	fl := w.flows[0]
+	for key := range fl.Metadata {
+		if strings.HasPrefix(key, "http_anomaly_") {
+			t.Errorf("unexpected http_anomaly_* key %q on flow with no anomalies", key)
+		}
+	}
+}
+
+// TestRecordStep_HTTPAnomaliesMultipleProjectIndependently verifies that
+// multiple distinct AnomalyTypes on one HTTPMessage produce multiple
+// per-type Metadata keys (no clobbering). Mirrors the gRPC/SSE pattern
+// where each AnomalyType gets its own column.
+func TestRecordStep_HTTPAnomaliesMultipleProjectIndependently(t *testing.T) {
+	w := &mockWriter{}
+	step := NewRecordStep(w, nil)
+	env := &envelope.Envelope{
+		StreamID:  "s1",
+		FlowID:    "f1",
+		Direction: envelope.Send,
+		Sequence:  0,
+		Protocol:  envelope.ProtocolHTTP,
+		Raw:       []byte("GET / HTTP/1.1\r\n\r\n"),
+		Message: &envelope.HTTPMessage{
+			Method: "GET",
+			Path:   "/",
+			Anomalies: []envelope.Anomaly{
+				{Type: envelope.AnomalyCLTE, Detail: "TE wins"},
+				{Type: envelope.AnomalyObsFold, Detail: "fold-1"},
+				{Type: envelope.H2ConnectionSpecificHeaderStrippedOnSend, Detail: "connection"},
+			},
+		},
+	}
+	step.Process(context.Background(), env)
+	if len(w.flows) != 1 {
+		t.Fatalf("expected 1 flow, got %d", len(w.flows))
+	}
+	fl := w.flows[0]
+	wants := map[string]string{
+		"http_anomaly_cl_te":    "TE wins",
+		"http_anomaly_obs_fold": "fold-1",
+		"http_anomaly_h2_connection_specific_header_stripped_on_send": "connection",
+	}
+	for key, want := range wants {
+		got, ok := fl.Metadata[key]
+		if !ok {
+			t.Errorf("Metadata[%q] missing; keys=%v", key, metadataKeysSorted(fl.Metadata))
+			continue
+		}
+		if got != want {
+			t.Errorf("Metadata[%q] = %q, want %q", key, got, want)
+		}
+	}
+}
+
+// TestRecordStep_HTTPAnomalyVariantLifecycle locks the variant lifecycle
+// invariant for HTTP/2 send-side strip anomalies (USK-840 / USK-849):
+// the aggregator attaches H2ConnectionSpecificHeaderStrippedOnSend to the
+// modified-variant envelope only (the strip happens on the wire-encode
+// path, which runs AFTER Intercept/Transform). Therefore the modified
+// flow row must carry the http_anomaly_h2_connection_specific_header_stripped_on_send
+// metadata key, while the original-variant row (the pre-modification
+// snapshot, captured before the strip) carries no anomaly metadata.
+//
+// This nails Q6 from the design review and matches the existing variant
+// recording pattern in TestRecordStep_VariantRecording.
+func TestRecordStep_HTTPAnomalyVariantLifecycle(t *testing.T) {
+	w := &mockWriter{}
+	step := NewRecordStep(w, nil)
+
+	// Snapshot: pre-aggregator HTTPMessage — the strip hasn't happened
+	// yet, so no anomaly is attached.
+	original := &envelope.Envelope{
+		StreamID:  "s1",
+		FlowID:    "f1",
+		Direction: envelope.Send,
+		Sequence:  1,
+		Protocol:  envelope.ProtocolHTTP,
+		Raw:       []byte("[h2 hpack bytes orig]"),
+		Message: &envelope.HTTPMessage{
+			Method:    "GET",
+			Scheme:    "https",
+			Authority: "example.com",
+			Path:      "/",
+			Headers: []envelope.KeyValue{
+				{Name: "Connection", Value: "keep-alive"},
+			},
+		},
+	}
+	// Modified envelope: simulates the post-aggregator state where the
+	// wire encoder stripped the connection-specific header and the
+	// aggregator attached the diagnostic anomaly to the modified
+	// HTTPMessage. We also tweak Raw so envelopeModified() returns true.
+	modified := &envelope.Envelope{
+		StreamID:  "s1",
+		FlowID:    "f1",
+		Direction: envelope.Send,
+		Sequence:  1,
+		Protocol:  envelope.ProtocolHTTP,
+		Raw:       []byte("[h2 hpack bytes mod]"),
+		Message: &envelope.HTTPMessage{
+			Method:    "GET",
+			Scheme:    "https",
+			Authority: "example.com",
+			Path:      "/",
+			Headers: []envelope.KeyValue{
+				{Name: "Connection", Value: "keep-alive"},
+			},
+			Anomalies: []envelope.Anomaly{
+				{Type: envelope.H2ConnectionSpecificHeaderStrippedOnSend, Detail: "connection"},
+			},
+		},
+	}
+
+	ctx := withSnapshot(context.Background(), original)
+	step.Process(ctx, modified)
+
+	if len(w.flows) != 2 {
+		t.Fatalf("expected 2 flows (variant pair), got %d", len(w.flows))
+	}
+	origFlow := w.flows[0]
+	modFlow := w.flows[1]
+	if origFlow.Metadata["variant"] != "original" || modFlow.Metadata["variant"] != "modified" {
+		t.Fatalf("variant order wrong: orig=%q mod=%q", origFlow.Metadata["variant"], modFlow.Metadata["variant"])
+	}
+
+	// The original variant must carry NO http_anomaly_* metadata —
+	// the strip hadn't happened on the snapshot envelope.
+	for key := range origFlow.Metadata {
+		if strings.HasPrefix(key, "http_anomaly_") {
+			t.Errorf("original variant should carry no http_anomaly_* metadata; got %q", key)
+		}
+	}
+
+	// The modified variant must carry the strip anomaly verbatim.
+	const wantKey = "http_anomaly_h2_connection_specific_header_stripped_on_send"
+	detail, ok := modFlow.Metadata[wantKey]
+	if !ok {
+		t.Fatalf("modified variant missing Metadata[%q]; keys=%v", wantKey, metadataKeysSorted(modFlow.Metadata))
+	}
+	if detail != "connection" {
+		t.Errorf("Metadata[%q] = %q, want %q (verbatim wire header name)", wantKey, detail, "connection")
+	}
+}
+
+// metadataKeysSorted returns a stable-ordered key list for failure messages.
+func metadataKeysSorted(m map[string]string) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	// strings.Sort lives behind sort.Strings; record_step_test.go does not
+	// import sort, so use a simple insertion-sort proxy via map iteration —
+	// tests only use this in failure messages so determinism beats speed.
+	for i := 1; i < len(keys); i++ {
+		for j := i; j > 0 && keys[j-1] > keys[j]; j-- {
+			keys[j-1], keys[j] = keys[j], keys[j-1]
+		}
+	}
+	return keys
+}

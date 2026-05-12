@@ -2730,3 +2730,364 @@ func TestQuery_FlowDetail_NoAnomalies(t *testing.T) {
 		t.Errorf("expected nil anomalies for normal flow, got %v", detail.Anomalies)
 	}
 }
+
+// --- USK-849: per-flow Metadata anomaly rollup ---
+
+// TestExtractAnomaliesFromFlows verifies the per-flow Metadata rollup
+// helper: keys with the http_anomaly_ / grpc_anomaly_ / sse_anomaly_
+// prefixes are mapped back to their canonical envelope.AnomalyType
+// string and deduped/sorted for stable JSON output.
+func TestExtractAnomaliesFromFlows(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		flows      []*flow.Flow
+		wantNil    bool
+		wantTypes  []string // sorted-by-Type order
+		wantDetail map[string]string
+	}{
+		{
+			name:    "nil flows",
+			flows:   nil,
+			wantNil: true,
+		},
+		{
+			name:    "empty flow with no metadata",
+			flows:   []*flow.Flow{{Metadata: nil}},
+			wantNil: true,
+		},
+		{
+			name: "single HTTP anomaly from send flow",
+			flows: []*flow.Flow{
+				{Direction: "send", Metadata: map[string]string{
+					"http_anomaly_h2_connection_specific_header_stripped_on_send": "connection",
+				}},
+			},
+			wantTypes:  []string{"H2ConnectionSpecificHeaderStrippedOnSend"},
+			wantDetail: map[string]string{"H2ConnectionSpecificHeaderStrippedOnSend": "connection"},
+		},
+		{
+			name: "multiple known anomalies sorted by canonical type",
+			flows: []*flow.Flow{
+				{Direction: "send", Metadata: map[string]string{
+					"http_anomaly_cl_te":            "TE wins",
+					"http_anomaly_obs_fold":         "fold",
+					"grpc_anomaly_malformed_base64": "bad b64",
+				}},
+			},
+			// Sorted alphabetically on canonical Type name.
+			wantTypes: []string{"CLTE", "MalformedGRPCWebBase64", "ObsFold"},
+		},
+		{
+			name: "unknown anomaly key surfaces verbatim",
+			flows: []*flow.Flow{
+				{Direction: "send", Metadata: map[string]string{
+					"http_anomaly_future_producer": "hypothetical",
+				}},
+			},
+			wantTypes:  []string{"http_anomaly_future_producer"},
+			wantDetail: map[string]string{"http_anomaly_future_producer": "hypothetical"},
+		},
+		{
+			name: "non-anomaly metadata keys are ignored",
+			flows: []*flow.Flow{
+				{Direction: "send", Metadata: map[string]string{
+					"variant":    "modified",
+					"protocol":   "http",
+					"grpc_event": "start",
+					"ws_opcode":  "1",
+					"sni":        "example.com",
+				}},
+			},
+			wantNil: true,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			result := extractAnomaliesFromFlows(tt.flows)
+			if tt.wantNil {
+				if result != nil {
+					t.Errorf("expected nil, got %v", result)
+				}
+				return
+			}
+			if len(result) != len(tt.wantTypes) {
+				t.Fatalf("len = %d, want %d (got=%v)", len(result), len(tt.wantTypes), result)
+			}
+			for i, want := range tt.wantTypes {
+				if result[i].Type != want {
+					t.Errorf("result[%d].Type = %q, want %q", i, result[i].Type, want)
+				}
+			}
+			for typeName, wantDetail := range tt.wantDetail {
+				var found bool
+				for _, e := range result {
+					if e.Type == typeName {
+						found = true
+						if e.Detail != wantDetail {
+							t.Errorf("Detail for %q = %q, want %q", typeName, e.Detail, wantDetail)
+						}
+					}
+				}
+				if !found {
+					t.Errorf("expected Type %q in result", typeName)
+				}
+			}
+		})
+	}
+}
+
+// TestMergeAnomalies verifies the stream-tag + per-flow rollup merge:
+// both inputs feed into one slice, deduped on Type with later (non-empty)
+// Detail winning, sorted by Type.
+func TestMergeAnomalies(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		a, b      []queryAnomaly
+		wantTypes []string
+	}{
+		{name: "both nil", a: nil, b: nil},
+		{
+			name:      "only a",
+			a:         []queryAnomaly{{Type: "CLTE", Detail: "tag"}},
+			wantTypes: []string{"CLTE"},
+		},
+		{
+			name:      "only b",
+			b:         []queryAnomaly{{Type: "ObsFold", Detail: "from-flow"}},
+			wantTypes: []string{"ObsFold"},
+		},
+		{
+			name:      "merge with overlap on Type",
+			a:         []queryAnomaly{{Type: "CLTE", Detail: "from-tag"}},
+			b:         []queryAnomaly{{Type: "CLTE", Detail: "from-flow"}, {Type: "ObsFold", Detail: "fold"}},
+			wantTypes: []string{"CLTE", "ObsFold"},
+		},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := mergeAnomalies(tt.a, tt.b)
+			if len(tt.wantTypes) == 0 {
+				if got != nil {
+					t.Errorf("expected nil, got %v", got)
+				}
+				return
+			}
+			if len(got) != len(tt.wantTypes) {
+				t.Fatalf("len = %d, want %d (got=%v)", len(got), len(tt.wantTypes), got)
+			}
+			for i, want := range tt.wantTypes {
+				if got[i].Type != want {
+					t.Errorf("got[%d].Type = %q, want %q", i, got[i].Type, want)
+				}
+			}
+		})
+	}
+}
+
+// TestQuery_FlowDetail_PerFlowAnomalyMetadata exercises the end-to-end MCP
+// surface (USK-849): a flow with HTTP/2 send-side strip anomaly written to
+// its Flow.Metadata bubbles up into queryFlowResult.Anomalies via the new
+// extractAnomaliesFromFlows rollup. The legacy stream-tag `smuggling:*`
+// path is also asserted to merge, demonstrating both sources coexist.
+func TestQuery_FlowDetail_PerFlowAnomalyMetadata(t *testing.T) {
+	t.Parallel()
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	st := &flow.Stream{
+		ID:        "flow-usk849-detail",
+		ConnID:    "conn-usk849-detail",
+		Protocol:  "http",
+		State:     "complete",
+		Timestamp: time.Now().UTC(),
+		Duration:  100 * time.Millisecond,
+		// Stream-tag legacy anomaly (back-compat).
+		Tags: map[string]string{
+			"smuggling:cl_te_conflict": "true",
+			"smuggling:warnings":       "CL/TE",
+		},
+	}
+	if err := store.SaveStream(ctx, st); err != nil {
+		t.Fatalf("SaveStream: %v", err)
+	}
+	parsedURL, _ := url.Parse("http://example.com/test")
+	// Modified-variant Send flow carries the H2 send-side strip anomaly
+	// (USK-840 attach site → USK-849 projection).
+	sendMsg := &flow.Flow{
+		StreamID:  "flow-usk849-detail",
+		Sequence:  0,
+		Direction: "send",
+		Timestamp: time.Now().UTC(),
+		Method:    "GET",
+		URL:       parsedURL,
+		Headers:   map[string][]string{"Host": {"example.com"}},
+		Metadata: map[string]string{
+			"http_anomaly_h2_connection_specific_header_stripped_on_send": "connection",
+			"variant": "modified",
+		},
+	}
+	if err := store.SaveFlow(ctx, sendMsg); err != nil {
+		t.Fatalf("SaveFlow: %v", err)
+	}
+
+	cs := setupQueryTestSession(t, store)
+
+	result := callQuery(t, cs, queryInput{Resource: "flow", ID: "flow-usk849-detail"})
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+	var detail queryFlowResult
+	unmarshalQueryResult(t, result, &detail)
+
+	// Both the stream-tag CLTE and the per-flow
+	// H2ConnectionSpecificHeaderStrippedOnSend must surface.
+	wantTypes := map[string]string{
+		"CLTE": "CL/TE",
+		"H2ConnectionSpecificHeaderStrippedOnSend": "connection",
+	}
+	if len(detail.Anomalies) != len(wantTypes) {
+		t.Fatalf("expected %d anomalies, got %d: %v", len(wantTypes), len(detail.Anomalies), detail.Anomalies)
+	}
+	for _, a := range detail.Anomalies {
+		want, ok := wantTypes[a.Type]
+		if !ok {
+			t.Errorf("unexpected anomaly Type=%q", a.Type)
+			continue
+		}
+		if a.Detail != want {
+			t.Errorf("anomaly[%q].Detail = %q, want %q", a.Type, a.Detail, want)
+		}
+	}
+}
+
+// TestQuery_FlowsList_PerFlowAnomalyMetadata mirrors the detail-view test
+// for the list view: queryFlowsEntry.Anomalies must include the per-flow
+// Metadata anomaly rollup so triage from the list page works without a
+// follow-up detail roundtrip.
+func TestQuery_FlowsList_PerFlowAnomalyMetadata(t *testing.T) {
+	t.Parallel()
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	st := &flow.Stream{
+		ID:        "flow-usk849-list",
+		ConnID:    "conn-usk849-list",
+		Protocol:  "http",
+		State:     "complete",
+		Timestamp: time.Now().UTC(),
+		Duration:  50 * time.Millisecond,
+	}
+	if err := store.SaveStream(ctx, st); err != nil {
+		t.Fatalf("SaveStream: %v", err)
+	}
+	parsedURL, _ := url.Parse("http://example.com/list")
+	sendMsg := &flow.Flow{
+		StreamID:  "flow-usk849-list",
+		Sequence:  0,
+		Direction: "send",
+		Timestamp: time.Now().UTC(),
+		Method:    "GET",
+		URL:       parsedURL,
+		Headers:   map[string][]string{"Host": {"example.com"}},
+		Metadata: map[string]string{
+			"http_anomaly_cl_te": "TE wins",
+		},
+	}
+	if err := store.SaveFlow(ctx, sendMsg); err != nil {
+		t.Fatalf("SaveFlow: %v", err)
+	}
+
+	cs := setupQueryTestSession(t, store)
+
+	result := callQuery(t, cs, queryInput{Resource: "flows"})
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+	var out queryFlowsResult
+	unmarshalQueryResult(t, result, &out)
+
+	var entry *queryFlowsEntry
+	for i := range out.Flows {
+		if out.Flows[i].ID == "flow-usk849-list" {
+			entry = &out.Flows[i]
+			break
+		}
+	}
+	if entry == nil {
+		t.Fatalf("flow not found in list response")
+	}
+	if len(entry.Anomalies) != 1 {
+		t.Fatalf("expected 1 anomaly, got %d: %v", len(entry.Anomalies), entry.Anomalies)
+	}
+	if entry.Anomalies[0].Type != "CLTE" {
+		t.Errorf("anomaly Type = %q, want CLTE", entry.Anomalies[0].Type)
+	}
+	if entry.Anomalies[0].Detail != "TE wins" {
+		t.Errorf("anomaly Detail = %q, want %q", entry.Anomalies[0].Detail, "TE wins")
+	}
+}
+
+// TestQuery_FlowDetail_OnlyPerFlowAnomalyMetadata locks in that a flow
+// without any legacy smuggling:* stream-tag still surfaces per-flow
+// metadata anomalies — the primary regression class USK-849 fixes (USK-840
+// attached the H2 strip anomaly but no stream-tag exists for it).
+func TestQuery_FlowDetail_OnlyPerFlowAnomalyMetadata(t *testing.T) {
+	t.Parallel()
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	st := &flow.Stream{
+		ID:        "flow-usk849-only-meta",
+		ConnID:    "conn-usk849-only-meta",
+		Protocol:  "http",
+		State:     "complete",
+		Timestamp: time.Now().UTC(),
+		Duration:  10 * time.Millisecond,
+	}
+	if err := store.SaveStream(ctx, st); err != nil {
+		t.Fatalf("SaveStream: %v", err)
+	}
+	parsedURL, _ := url.Parse("http://example.com/meta")
+	sendMsg := &flow.Flow{
+		StreamID:  "flow-usk849-only-meta",
+		Sequence:  0,
+		Direction: "send",
+		Timestamp: time.Now().UTC(),
+		Method:    "POST",
+		URL:       parsedURL,
+		Headers:   map[string][]string{"Host": {"example.com"}},
+		Metadata: map[string]string{
+			"http_anomaly_h2_connection_specific_header_stripped_on_send": "connection, keep-alive",
+		},
+	}
+	if err := store.SaveFlow(ctx, sendMsg); err != nil {
+		t.Fatalf("SaveFlow: %v", err)
+	}
+
+	cs := setupQueryTestSession(t, store)
+	result := callQuery(t, cs, queryInput{Resource: "flow", ID: "flow-usk849-only-meta"})
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+	var detail queryFlowResult
+	unmarshalQueryResult(t, result, &detail)
+
+	if len(detail.Anomalies) != 1 {
+		t.Fatalf("expected 1 anomaly, got %d: %v", len(detail.Anomalies), detail.Anomalies)
+	}
+	if detail.Anomalies[0].Type != "H2ConnectionSpecificHeaderStrippedOnSend" {
+		t.Errorf("Type = %q, want H2ConnectionSpecificHeaderStrippedOnSend", detail.Anomalies[0].Type)
+	}
+	if detail.Anomalies[0].Detail != "connection, keep-alive" {
+		t.Errorf("Detail = %q, want verbatim wire header names", detail.Anomalies[0].Detail)
+	}
+}
