@@ -1428,3 +1428,127 @@ func TestCopyHeaders_Nil(t *testing.T) {
 		t.Errorf("copyHeaders(nil) returned non-empty map: %v", cp)
 	}
 }
+
+// TestEngine_Run_UnresolvedTemplateWarning asserts that a step shipping a
+// foreign-syntax template token (here: {{leaked}} in a header value, where
+// the operator likely intended §leaked§) completes the wire exchange but
+// surfaces as Status="warning" with Warnings populated. Regression guard
+// for USK-846.
+func TestEngine_Run_UnresolvedTemplateWarning(t *testing.T) {
+	fetcher := &mockFlowFetcher{
+		flows: map[string]*SendRequest{
+			"sess1": {
+				Method:  "POST",
+				URL:     "https://example.com/api",
+				Headers: map[string][]string{},
+				Body:    []byte("hello"),
+			},
+		},
+	}
+
+	var sentHeader string
+	sendFunc := func(_ context.Context, req *SendRequest) (*SendResponse, error) {
+		if v, ok := req.Headers["X-Session-UUID"]; ok && len(v) > 0 {
+			sentHeader = v[0]
+		}
+		return &SendResponse{StatusCode: 200}, nil
+	}
+
+	engine, err := NewEngine(sendFunc, fetcher)
+	if err != nil {
+		t.Fatalf("NewEngine() error = %v", err)
+	}
+
+	m := &Macro{
+		Name: "leak-test",
+		Steps: []Step{
+			{
+				ID:       "step1",
+				StreamID: "sess1",
+				OverrideHeaders: map[string]string{
+					// Operator typo: should be §leaked§ but used {{leaked}}.
+					"X-Session-UUID": "{{leaked}}",
+				},
+			},
+		},
+		InitialVars: map[string]string{"leaked": "real-uuid"},
+	}
+
+	result, err := engine.Run(context.Background(), m, nil)
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	if result.Status != "completed" {
+		t.Errorf("macro result.Status = %q, want %q", result.Status, "completed")
+	}
+	if result.StepsExecuted != 1 {
+		t.Errorf("StepsExecuted = %d, want 1", result.StepsExecuted)
+	}
+	if len(result.StepResults) != 1 {
+		t.Fatalf("len(StepResults) = %d, want 1", len(result.StepResults))
+	}
+	sr := result.StepResults[0]
+	if sr.Status != "warning" {
+		t.Errorf("step Status = %q, want %q", sr.Status, "warning")
+	}
+	if len(sr.Warnings) == 0 {
+		t.Fatalf("Warnings is empty, want at least one entry")
+	}
+	if !strings.Contains(sr.Warnings[0], "header:X-Session-UUID") {
+		t.Errorf("Warnings[0] = %q, expected header:X-Session-UUID location", sr.Warnings[0])
+	}
+	if !strings.Contains(sr.Warnings[0], "{{leaked}}") {
+		t.Errorf("Warnings[0] = %q, expected to mention {{leaked}}", sr.Warnings[0])
+	}
+	// The wire actually carries the literal — the detector is observational only.
+	if sentHeader != "{{leaked}}" {
+		t.Errorf("sent header value = %q, want literal %q (detector must not mutate the wire)", sentHeader, "{{leaked}}")
+	}
+}
+
+// TestEngine_Run_UnresolvedTemplate_DoesNotOverrideError verifies the
+// detector never promotes an "error" step to "warning". A step that fails
+// to send keeps Status="error" regardless of any residual templates.
+func TestEngine_Run_UnresolvedTemplate_DoesNotOverrideError(t *testing.T) {
+	fetcher := &mockFlowFetcher{
+		flows: map[string]*SendRequest{
+			"sess1": {
+				Method:  "GET",
+				URL:     "https://example.com/{{leaked}}",
+				Headers: map[string][]string{},
+			},
+		},
+	}
+	sendFunc := func(_ context.Context, _ *SendRequest) (*SendResponse, error) {
+		return nil, fmt.Errorf("network down")
+	}
+
+	engine, err := NewEngine(sendFunc, fetcher)
+	if err != nil {
+		t.Fatalf("NewEngine() error = %v", err)
+	}
+
+	m := &Macro{
+		Name: "leak-error-test",
+		Steps: []Step{
+			{
+				ID:       "step1",
+				StreamID: "sess1",
+				OnError:  OnErrorSkip, // do not abort the macro
+			},
+		},
+	}
+
+	result, err := engine.Run(context.Background(), m, nil)
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if len(result.StepResults) != 1 {
+		t.Fatalf("len(StepResults) = %d, want 1", len(result.StepResults))
+	}
+	if result.StepResults[0].Status != "skipped" {
+		t.Errorf("step Status = %q, want %q (error → skipped via OnErrorSkip, not warning)",
+			result.StepResults[0].Status, "skipped")
+	}
+}

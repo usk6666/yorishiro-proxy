@@ -3,6 +3,7 @@ package macro
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
 	"time"
@@ -75,7 +76,7 @@ func (e *Engine) Run(ctx context.Context, macro *Macro, vars map[string]string) 
 			return result, nil
 		}
 
-		stepResult, state, err := e.executeStep(macroCtx, step, kvStore, stepStates)
+		stepResult, state, err := e.executeStep(macroCtx, macro.Name, step, kvStore, stepStates)
 		if err != nil {
 			// Check if this is a macro-level timeout.
 			if macroCtx.Err() != nil {
@@ -117,7 +118,7 @@ func (e *Engine) Run(ctx context.Context, macro *Macro, vars map[string]string) 
 // executeStep runs a single step, handling guards, template expansion, sending,
 // extraction, and error policies. Returns a step result, the step state (for guard
 // evaluation in subsequent steps), and an error only if the macro should abort.
-func (e *Engine) executeStep(ctx context.Context, step *Step, kvStore map[string]string, stepStates map[string]*stepState) (*StepResult, *stepState, error) {
+func (e *Engine) executeStep(ctx context.Context, macroName string, step *Step, kvStore map[string]string, stepStates map[string]*stepState) (*StepResult, *stepState, error) {
 	// Evaluate guard condition.
 	shouldExecute, err := EvaluateGuard(step.When, stepStates, kvStore)
 	if err != nil {
@@ -137,7 +138,7 @@ func (e *Engine) executeStep(ctx context.Context, step *Step, kvStore map[string
 	}
 
 	params := resolveStepParams(step)
-	return e.executeWithRetry(ctx, step, kvStore, params)
+	return e.executeWithRetry(ctx, macroName, step, kvStore, params)
 }
 
 // stepParams holds resolved step execution parameters with defaults applied.
@@ -172,7 +173,7 @@ func resolveStepParams(step *Step) stepParams {
 }
 
 // executeWithRetry runs step execution with retry logic based on the error policy.
-func (e *Engine) executeWithRetry(ctx context.Context, step *Step, kvStore map[string]string, params stepParams) (*StepResult, *stepState, error) {
+func (e *Engine) executeWithRetry(ctx context.Context, macroName string, step *Step, kvStore map[string]string, params stepParams) (*StepResult, *stepState, error) {
 	var maxAttempts int = 1
 	if params.onError == OnErrorRetry {
 		maxAttempts = params.retryCount + 1
@@ -193,7 +194,7 @@ func (e *Engine) executeWithRetry(ctx context.Context, step *Step, kvStore map[s
 			}
 		}
 
-		stepResult, state, err := e.doStepExecution(ctx, step, kvStore, params.timeoutMs)
+		stepResult, state, err := e.doStepExecution(ctx, macroName, step, kvStore, params.timeoutMs)
 		if err == nil {
 			return stepResult, state, nil
 		}
@@ -243,7 +244,7 @@ func handleStepFailure(step *Step, params stepParams, lastErr error) (*StepResul
 
 // doStepExecution performs the actual step execution: fetch flow, expand templates,
 // send request, extract values.
-func (e *Engine) doStepExecution(ctx context.Context, step *Step, kvStore map[string]string, stepTimeoutMs int) (*StepResult, *stepState, error) {
+func (e *Engine) doStepExecution(ctx context.Context, macroName string, step *Step, kvStore map[string]string, stepTimeoutMs int) (*StepResult, *stepState, error) {
 	// Create step-level timeout context.
 	stepCtx, stepCancel := context.WithTimeout(ctx, time.Duration(stepTimeoutMs)*time.Millisecond)
 	defer stepCancel()
@@ -264,6 +265,22 @@ func (e *Engine) doStepExecution(ctx context.Context, step *Step, kvStore map[st
 
 	// Set the step ID so the SendFunc can use it for logging/recording.
 	req.StepID = step.ID
+
+	// Scan the post-substitution request for residual foreign-template
+	// tokens ({{var}}, ${var}, %var%) and emit a non-fatal warning per
+	// scan location. Done before send so that the operator is notified
+	// even if the upstream returns 200 OK on the literal token. See
+	// detector.go for the FP / scope tradeoffs.
+	warnings := DetectUnresolvedTemplates(req)
+	if len(warnings) > 0 {
+		for _, w := range warnings {
+			slog.WarnContext(ctx, "macro: possible unresolved variable templates",
+				"macro", macroName,
+				"step", step.ID,
+				"detail", w,
+			)
+		}
+	}
 
 	// Send the request.
 	resp, err := e.sendFunc(stepCtx, req)
@@ -293,11 +310,21 @@ func (e *Engine) doStepExecution(ctx context.Context, step *Step, kvStore map[st
 		Body:       stateBody,
 	}
 
+	// Status is "warning" when residual templates were detected and the
+	// step would otherwise be "completed". Never overrides "error" or
+	// "skipped" (those exit earlier; this branch only reaches a clean
+	// send + extract path).
+	status := "completed"
+	if len(warnings) > 0 {
+		status = "warning"
+	}
+
 	return &StepResult{
 		ID:         step.ID,
-		Status:     "completed",
+		Status:     status,
 		StatusCode: resp.StatusCode,
 		DurationMs: duration.Milliseconds(),
+		Warnings:   warnings,
 	}, state, nil
 }
 

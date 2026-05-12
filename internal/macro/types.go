@@ -167,7 +167,10 @@ type Guard struct {
 type StepResult struct {
 	// ID is the step identifier.
 	ID string
-	// Status indicates the step outcome: "completed", "skipped", "error".
+	// Status indicates the step outcome: "completed", "warning", "skipped",
+	// or "error". "warning" is set when the step otherwise completed but
+	// the unresolved-template detector found residual {{var}}/${var}/%var%
+	// tokens on the wire (see detector.go).
 	Status string
 	// StatusCode is the HTTP response status code (zero if not available).
 	StatusCode int
@@ -175,6 +178,11 @@ type StepResult struct {
 	DurationMs int64
 	// Error holds the error message if the step failed.
 	Error string
+	// Warnings contains non-fatal diagnostic messages produced during the
+	// step. Currently populated by the unresolved-template detector when a
+	// substituted request still contains foreign-templating tokens such as
+	// {{var}}, ${var}, or %var%. Empty for clean steps.
+	Warnings []string
 }
 
 // Result holds the outcome of a complete macro execution.

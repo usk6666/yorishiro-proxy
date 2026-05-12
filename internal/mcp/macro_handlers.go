@@ -100,11 +100,12 @@ type macroRunMacroResult struct {
 
 // macroStepResultEntry is a single step result in the run_macro response.
 type macroStepResultEntry struct {
-	ID         string `json:"id"`
-	Status     string `json:"status"`
-	StatusCode int    `json:"status_code,omitempty"`
-	DurationMs int64  `json:"duration_ms,omitempty"`
-	Error      string `json:"error,omitempty"`
+	ID         string   `json:"id"`
+	Status     string   `json:"status"`
+	StatusCode int      `json:"status_code,omitempty"`
+	DurationMs int64    `json:"duration_ms,omitempty"`
+	Error      string   `json:"error,omitempty"`
+	Warnings   []string `json:"warnings,omitempty"`
 }
 
 // macroDeleteMacroResult is the structured output of the delete_macro action.
@@ -272,6 +273,7 @@ func buildRunMacroResult(result *macro.Result) *macroRunMacroResult {
 			StatusCode: sr.StatusCode,
 			DurationMs: sr.DurationMs,
 			Error:      sr.Error,
+			Warnings:   sr.Warnings,
 		}
 	}
 

@@ -22,9 +22,9 @@ Save a macro definition (upsert) with steps, extraction rules, and guards. If a 
   - **id** (string, required): Unique step identifier within the macro.
   - **flow_id** (string, required): Recorded flow to use as a template.
   - **override_method** (string, optional): Override HTTP method.
-  - **override_url** (string, optional): Override request URL. Supports `§variable§` templates.
-  - **override_headers** (object, optional): Header overrides as key-value pairs. Supports templates.
-  - **override_body** (string, optional): Override request body. Supports templates.
+  - **override_url** (string, optional): Override request URL. Supports `§variable§` templates (see "Variable substitution syntax" below).
+  - **override_headers** (object, optional): Header overrides as key-value pairs. Supports `§variable§` templates in values.
+  - **override_body** (string, optional): Override request body. Supports `§variable§` templates.
   - **on_error** (string, optional): Error handling: `"abort"` (default), `"skip"`, or `"retry"`.
   - **retry_count** (integer, optional): Retry count when on_error is "retry" (default: 3).
   - **retry_delay_ms** (integer, optional): Delay between retries in ms (default: 1000).
@@ -43,7 +43,7 @@ Execute a stored macro for testing. The macro is loaded from DB and run with the
 - **name** (string, required): Name of the macro to run.
 - **vars** (object, optional): Runtime variable overrides for the KV Store.
 
-Returns: macro_name, status ("completed"/"error"/"timeout"), steps_executed, kv_store, step_results[], error.
+Returns: macro_name, status ("completed"/"error"/"timeout"), steps_executed, kv_store, step_results[], error. Each step_results entry includes `id`, `status` ("completed"/"warning"/"skipped"/"error"), `status_code`, `duration_ms`, `error`, and `warnings[]` (populated when the unresolved-template detector matches — see "Variable substitution syntax" below).
 
 ### delete_macro
 Remove a stored macro definition.
@@ -116,3 +116,53 @@ Returns: name, deleted.
   "params": {"name": "auth-flow"}
 }
 ```
+
+## Variable substitution syntax
+
+The **only** supported template syntax is `§name§` (U+00A7 section sign on both
+sides). Variable references using the supported syntax are replaced from the KV
+Store before the request is sent. Unknown variables are left literally as
+`§name§` on the wire.
+
+```text
+override_headers: {"Cookie": "PHPSESSID=§session_cookie§"}
+override_body:    "user=admin&token=§csrf_token§"
+override_url:     "https://api.example.com/users/§user_id§"
+```
+
+### Foreign syntaxes are NOT substituted
+
+Common templating syntaxes from other ecosystems are **not** recognised:
+
+- `{{name}}` (Handlebars / Mustache / Vue / Angular)
+- `${name}` (JSP / shell / JavaScript template literals)
+- `%name%` (Windows batch / older config files)
+
+If you write `override_headers: {"X-Session": "{{session_uuid}}"}`, the literal
+string `{{session_uuid}}` is sent on the wire — the substitution engine treats
+those characters as ordinary content. To avoid silent footguns, every step
+result is scanned after substitution and any residual `{{name}}` / `${name}` /
+`%name%` token with an identifier-shaped interior produces a non-fatal
+warning:
+
+- `StepResult.Status` is set to `"warning"` (instead of `"completed"`).
+- `StepResult.Warnings` lists the locations and matched patterns
+  (`url: ...`, `header:X-Session: ...`, `body: ...`).
+- A structured `slog.Warn` entry is emitted with `macro`, `step`, and detail.
+
+The macro continues to run; the warning is observational only. To suppress the
+warning, switch to the supported `§name§` syntax.
+
+### False positives
+
+The detector requires the interior to look like a valid identifier
+(`[A-Za-z_][A-Za-z0-9_]{0,63}`) so URL percent-encoding (`%20`), CSS
+interpolations such as `{{ foo.bar }}`, and arithmetic-style expressions
+(`${1+2}`) do **not** trigger the warning. However, payloads that legitimately
+ship literal `{{name}}` / `${name}` / `%name%` content (e.g. Liquid template
+uploads, Postgres `pg_format` strings, shell heredocs containing `${VAR}`) WILL
+trigger a warning. This is the documented tradeoff — surfacing a spurious
+warning is preferred over silently shipping an unresolved variable on the wire.
+
+Body content is scanned only within the first 64 KiB to bound CPU cost. URL
+and header values are scanned in full.
