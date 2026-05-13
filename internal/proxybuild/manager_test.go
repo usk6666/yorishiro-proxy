@@ -377,6 +377,71 @@ func TestManager_TLSFingerprint_NoBoundBuildConfig(t *testing.T) {
 	}
 }
 
+// TestManager_MaxConcurrentStreams_BoundBuildConfig verifies the USK-862
+// wiring: SetMaxConcurrentStreams mutates the bound BuildConfig's
+// dynamic override slot so the next stack assembly picks up the new
+// cap, and MaxConcurrentStreams() reflects that override. This is the
+// wire-up that lets proxy_start / configure changes reach the next H2
+// listener-stack assembly.
+func TestManager_MaxConcurrentStreams_BoundBuildConfig(t *testing.T) {
+	bc := &connector.BuildConfig{MaxConcurrentStreams: 100}
+	mgr, err := NewManager(ManagerConfig{
+		Logger:       silentLogger(),
+		StackFactory: func(_ context.Context, _, _ string) (*Stack, error) { return nil, errors.New("unused") },
+		BuildConfig:  bc,
+	})
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	// Boot-time value surfaces when no runtime override is set.
+	if got := mgr.MaxConcurrentStreams(); got != 100 {
+		t.Errorf("initial MaxConcurrentStreams = %d, want 100", got)
+	}
+
+	// Runtime override mutates BuildConfig.
+	mgr.SetMaxConcurrentStreams(500)
+	if got := mgr.MaxConcurrentStreams(); got != 500 {
+		t.Errorf("after SetMaxConcurrentStreams(500), MaxConcurrentStreams = %d, want 500", got)
+	}
+	if got := bc.EffectiveMaxConcurrentStreams(); got != 500 {
+		t.Errorf("BuildConfig.EffectiveMaxConcurrentStreams not propagated: got %d, want 500", got)
+	}
+
+	// Replacement (not append) semantics.
+	mgr.SetMaxConcurrentStreams(2000)
+	if got := mgr.MaxConcurrentStreams(); got != 2000 {
+		t.Errorf("after SetMaxConcurrentStreams(2000), MaxConcurrentStreams = %d, want 2000", got)
+	}
+
+	// Zero clears the override; boot value re-emerges.
+	mgr.SetMaxConcurrentStreams(0)
+	if got := mgr.MaxConcurrentStreams(); got != 100 {
+		t.Errorf("after clear, MaxConcurrentStreams = %d, want 100 (boot fallback)", got)
+	}
+}
+
+// TestManager_MaxConcurrentStreams_NoBoundBuildConfig verifies the
+// safe-no-op behaviour when the Manager was constructed without a
+// BuildConfig (test-only path that does not bind one). The mutation
+// must not panic and the accessor must return the 0 sentinel
+// (caller treats 0 as "use H2 Layer default").
+func TestManager_MaxConcurrentStreams_NoBoundBuildConfig(t *testing.T) {
+	mgr, err := NewManager(ManagerConfig{
+		Logger:       silentLogger(),
+		StackFactory: func(_ context.Context, _, _ string) (*Stack, error) { return nil, errors.New("unused") },
+		// BuildConfig intentionally nil.
+	})
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	// Must not panic.
+	mgr.SetMaxConcurrentStreams(500)
+	if got := mgr.MaxConcurrentStreams(); got != 0 {
+		t.Errorf("MaxConcurrentStreams with no BuildConfig = %d, want 0 sentinel", got)
+	}
+}
+
 // TestManager_SetEnabledProtocols_PropagatesToBuildConfig verifies the
 // USK-808 fan-out: Manager.SetEnabledProtocols pushes the snapshot into
 // the bound BuildConfig so the live MITM ALPN filter observes it. Mirrors

@@ -285,12 +285,33 @@ type BuildConfig struct {
 	// on the client-facing (ServerRole) Layer. Streams beyond this cap are
 	// rejected with REFUSED_STREAM per RFC 9113 §5.1.2, bounding the
 	// per-connection goroutine fan-out under load. Zero means use the H2
-	// layer's compile-time default (currently 100); see
-	// internal/layer/http2/connstate.go defaultMaxConcurrentStreams.
-	// Applied only to the inbound (client-facing) Layer; the outbound
-	// (upstream / ClientRole) Layer continues to honour the peer's
-	// advertised limit.
+	// layer's compile-time default (currently 500, USK-862 bumped 100 →
+	// 500); see internal/layer/http2/connstate.go
+	// defaultMaxConcurrentStreams. Applied only to the inbound (client-
+	// facing) Layer; the outbound (upstream / ClientRole) Layer continues
+	// to honour the peer's advertised limit.
+	//
+	// Per-connection stream worst-case under the default fan-out:
+	// MaxConcurrentStreams × MaxConnections = 500 × 128 = 64,000 streams.
+	// See internal/config/limits.go for the RAM-side worst-case math.
+	//
+	// This is the static (boot-time) value; runtime updates from
+	// proxy_start / configure flow through SetMaxConcurrentStreams and
+	// EffectiveMaxConcurrentStreams. Live data-path readers MUST call
+	// EffectiveMaxConcurrentStreams() — direct field reads observe only
+	// the boot-time value (USK-862).
 	MaxConcurrentStreams uint32
+
+	// maxConcurrentStreamsDynamic stores the runtime-mutable value
+	// installed by proxy_start / configure (USK-862). It overrides the
+	// static MaxConcurrentStreams field when non-zero. atomic.Uint32 is
+	// used so dial-path readers (per-connection goroutines) and the
+	// MCP-tool writer (proxy_start / configure handler goroutine) do not
+	// race on the value. A zero load means "fall back to
+	// MaxConcurrentStreams". Next-connection semantics: in-flight H2
+	// connections retain the cap captured at their stack-assembly time;
+	// the new value takes effect at the next stack assembly.
+	maxConcurrentStreamsDynamic atomic.Uint32
 
 	// clientMITMHandshakes counts entries to performClientMITM (USK-813).
 	// Used by e2e tests to verify that the pool fast-path short-circuits
@@ -595,16 +616,61 @@ type resolvedTLS struct {
 }
 
 // clientH2MaxConcurrentStreamsOption returns an http2.Option threading the
-// configured SETTINGS_MAX_CONCURRENT_STREAMS into the client-facing
-// (ServerRole) Layer's preface. Returns nil when cfg.MaxConcurrentStreams
-// is zero so the Layer keeps its compile-time default
+// effective SETTINGS_MAX_CONCURRENT_STREAMS into the client-facing
+// (ServerRole) Layer's preface. Returns nil when the effective value is
+// zero so the Layer keeps its compile-time default
 // (defaultMaxConcurrentStreams in internal/layer/http2/connstate.go).
 // Callers must guard against nil before appending.
+//
+// The effective value is the runtime-mutable dynamic slot when set, else
+// the boot-time MaxConcurrentStreams field (USK-862). Read here at
+// stack-assembly time so each new H2 stack picks up the latest operator
+// override without recycling already-accepted connections.
 func clientH2MaxConcurrentStreamsOption(cfg *BuildConfig) http2.Option {
-	if cfg == nil || cfg.MaxConcurrentStreams == 0 {
+	if cfg == nil {
 		return nil
 	}
-	return http2.WithMaxConcurrentStreams(cfg.MaxConcurrentStreams)
+	v := cfg.EffectiveMaxConcurrentStreams()
+	if v == 0 {
+		return nil
+	}
+	return http2.WithMaxConcurrentStreams(v)
+}
+
+// EffectiveMaxConcurrentStreams returns the wire-effective
+// SETTINGS_MAX_CONCURRENT_STREAMS value. Runtime updates installed via
+// SetMaxConcurrentStreams take precedence over the static
+// MaxConcurrentStreams field set at boot. A zero return means "no
+// override" — the H2 Layer keeps its compile-time default
+// (defaultMaxConcurrentStreams in internal/layer/http2/connstate.go).
+// This is the canonical accessor for live stack-assembly code (USK-862);
+// callers MUST NOT read the MaxConcurrentStreams field directly because
+// it observes only the boot-time value.
+func (c *BuildConfig) EffectiveMaxConcurrentStreams() uint32 {
+	if c == nil {
+		return 0
+	}
+	if dyn := c.maxConcurrentStreamsDynamic.Load(); dyn != 0 {
+		return dyn
+	}
+	return c.MaxConcurrentStreams
+}
+
+// SetMaxConcurrentStreams installs a runtime override for the HTTP/2
+// SETTINGS_MAX_CONCURRENT_STREAMS advertised to clients. Subsequent stack
+// assemblies (next H2 connection) read the new value via
+// EffectiveMaxConcurrentStreams; in-flight H2 connections retain the cap
+// captured at their assembly time (next-connection semantics — RFC 9113
+// §6.5.3 reserves live mid-stream SETTINGS reissue for the wire surface,
+// not the operator override surface). Passing 0 clears the override so
+// subsequent reads fall back to the boot-time MaxConcurrentStreams field
+// (and ultimately the Layer default). Writes are atomic with respect to
+// concurrent stack-assembly reads (USK-862).
+func (c *BuildConfig) SetMaxConcurrentStreams(v uint32) {
+	if c == nil {
+		return
+	}
+	c.maxConcurrentStreamsDynamic.Store(v)
 }
 
 // resolvePerHostTLS resolves per-host TLS overrides from the BuildConfig.

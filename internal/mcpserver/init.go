@@ -475,6 +475,11 @@ func NewLiveBuildConfig(
 		BodySpillDir:       config.ResolveBodySpillDir(cfg),
 		BodySpillThreshold: config.ResolveBodySpillThreshold(cfg),
 		MaxRawCaptureSize:  config.ResolveMaxRawCaptureSize(cfg),
+		// USK-862: HTTP/2 SETTINGS_MAX_CONCURRENT_STREAMS advertised to
+		// clients on the inbound (ServerRole) Layer. Zero falls through to
+		// the H2 layer default (defaultMaxConcurrentStreams = 500); see
+		// internal/layer/http2/connstate.go.
+		MaxConcurrentStreams: cfg.MaxConcurrentStreams,
 		// USK-733: thread the runtime-mutable HostTLSRegistry into the live
 		// dial path so `proxy_start(client_cert=..., client_key=...)`
 		// updates reach the next outbound TLS handshake. The startup-time

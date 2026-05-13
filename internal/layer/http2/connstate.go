@@ -9,9 +9,20 @@ import (
 
 // Default HTTP/2 settings values per RFC 9113 Section 6.5.2.
 const (
-	defaultHeaderTableSize      = 4096
-	defaultEnablePush           = 1
-	defaultMaxConcurrentStreams = 100 // RFC says unlimited, but we use a reasonable default.
+	defaultHeaderTableSize = 4096
+	defaultEnablePush      = 1
+	// defaultMaxConcurrentStreams seeds Settings.MaxConcurrentStreams when
+	// no explicit override is supplied. RFC 9113 §6.5.2 documents the
+	// default as "unlimited" but a finite cap is required to bound the
+	// per-connection goroutine fan-out under load. The historical value of
+	// 100 caused net::ERR_HTTP2_SERVER_REFUSED_STREAM on high-multiplexing
+	// pages (e.g. http2demo.io's 200 parallel image tiles); USK-862 raised
+	// it to 500 to cover those workloads. Operators can re-tighten via
+	// Config.MaxConcurrentStreams (CLI -max-concurrent-streams /
+	// YP_MAX_CONCURRENT_STREAMS) which threads through
+	// connector.BuildConfig.MaxConcurrentStreams and Layer
+	// WithMaxConcurrentStreams.
+	defaultMaxConcurrentStreams = 500
 	defaultInitialWindowSize    = 65535
 	defaultMaxFrameSize         = frame.DefaultMaxFrameSize
 	defaultMaxHeaderListSize    = 0 // 0 means unlimited.
@@ -199,9 +210,10 @@ func (c *Conn) PeerSettings() Settings {
 
 // PeerSettingsReceived reports whether the peer has sent at least one
 // SETTINGS frame. Before the first peer SETTINGS arrives, PeerSettings
-// still returns RFC 9113 §6.5.2 defaults (e.g. MaxConcurrentStreams=100),
-// so callers that need to distinguish "peer advertised value X" from
-// "peer has not advertised yet" must consult this flag.
+// still returns RFC 9113 §6.5.2 defaults (e.g. MaxConcurrentStreams=500
+// per defaultMaxConcurrentStreams), so callers that need to distinguish
+// "peer advertised value X" from "peer has not advertised yet" must
+// consult this flag.
 func (c *Conn) PeerSettingsReceived() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()

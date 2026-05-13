@@ -593,10 +593,11 @@ func TestLayer_WithMaxConcurrentStreams_AdvertisesValue(t *testing.T) {
 }
 
 // TestLayer_WithMaxConcurrentStreams_ZeroIsNoOp verifies that passing 0 to
-// WithMaxConcurrentStreams keeps the layer's compile-time default (100).
-// Zero is the documented "use default" sentinel — without this contract
-// the BuildConfig zero-value would advertise 0 and effectively disable
-// the limit.
+// WithMaxConcurrentStreams keeps the layer's compile-time default
+// (defaultMaxConcurrentStreams, currently 500 since USK-862). Zero is the
+// documented "use default" sentinel — without this contract the
+// BuildConfig zero-value would advertise 0 and effectively disable the
+// limit.
 func TestLayer_WithMaxConcurrentStreams_ZeroIsNoOp(t *testing.T) {
 	l, peer, cleanup := startServerLayer(t, WithMaxConcurrentStreams(0))
 	defer cleanup()

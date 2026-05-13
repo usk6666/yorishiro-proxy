@@ -6,8 +6,12 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"fmt"
 	"io"
 	nethttp "net/http"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -223,4 +227,181 @@ func waitForRSTStream(t *testing.T, conn deadlineReader, rd *h2frame.Reader, str
 // helper above; both *tls.Conn and net.Conn satisfy it.
 type deadlineReader interface {
 	SetReadDeadline(time.Time) error
+}
+
+// TestMaxConcurrentStreams_DefaultAdvertised500 verifies the USK-862
+// default bump: when BuildConfig.MaxConcurrentStreams is zero, the
+// client-facing Layer must advertise SETTINGS_MAX_CONCURRENT_STREAMS=500
+// (the new defaultMaxConcurrentStreams value, raised from the historical
+// 100 to cover high-multiplexing pages such as http2demo.io's 200
+// parallel image tiles).
+//
+// This is the regression guard for the live bug: a default of 100
+// caused Chromium net::ERR_HTTP2_SERVER_REFUSED_STREAM on pages that
+// open 100+ parallel asset fetches over one H2 connection.
+func TestMaxConcurrentStreams_DefaultAdvertised500(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	upAddr, _, _, upShutdown := startH2TLSUpstream(t, "mcs-default-marker", nethttp.HandlerFunc(func(w nethttp.ResponseWriter, _ *nethttp.Request) {
+		w.WriteHeader(nethttp.StatusOK)
+	}))
+	defer upShutdown()
+
+	// Leave MaxConcurrentStreams=0 → the helper falls through to the H2
+	// Layer's compile-time default.
+	bcfg := makeBuildCfg(t, nil)
+	proxyAddr, _ := startH2MITMProxy(t, ctx, bcfg, pipelineOpts{})
+
+	rawConn, err := connectTunnelDialer(proxyAddr, upAddr)
+	if err != nil {
+		t.Fatalf("CONNECT: %v", err)
+	}
+	defer rawConn.Close()
+
+	tlsConn := tls.Client(rawConn, &tls.Config{
+		InsecureSkipVerify: true, //nolint:gosec // test
+		NextProtos:         []string{"h2"},
+	})
+	if err := tlsConn.HandshakeContext(ctx); err != nil {
+		t.Fatalf("TLS handshake: %v", err)
+	}
+	defer tlsConn.Close()
+
+	if _, err := tlsConn.Write([]byte(intHTTP2.ClientPreface)); err != nil {
+		t.Fatalf("write preface: %v", err)
+	}
+	rd := h2frame.NewReader(tlsConn)
+	wr := h2frame.NewWriter(tlsConn)
+	if err := wr.WriteSettings(nil); err != nil {
+		t.Fatalf("write client SETTINGS: %v", err)
+	}
+
+	advertisedMCS := readAdvertisedMaxConcurrentStreams(t, rd, 4*time.Second)
+	if advertisedMCS != 500 {
+		t.Fatalf("default advertised SETTINGS_MAX_CONCURRENT_STREAMS = %d, want 500 (USK-862 default bump)", advertisedMCS)
+	}
+}
+
+// TestMaxConcurrentStreams_200ParallelNoRefused exercises the live-bug
+// repro: open 200 concurrent GETs over a single H2 connection through
+// the MITM proxy at the default cap (500). With the historical default
+// of 100, Chromium observed ERR_HTTP2_SERVER_REFUSED_STREAM for the
+// surplus streams. After the USK-862 bump the proxy advertises 500 and
+// must accept all 200 in flight without emitting any
+// RST_STREAM(REFUSED_STREAM) frames.
+//
+// The upstream is an h2 TLS server with a fast handler so streams
+// complete and the test asserts on the aggregate outcome: at least 200
+// successful 200 OK responses, zero observed REFUSED_STREAM rejections
+// on the wire.
+func TestMaxConcurrentStreams_200ParallelNoRefused(t *testing.T) {
+	const parallelGETs = 200
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	// Fast upstream so 200 streams finish quickly; the test stresses the
+	// proxy's stream-counter, not the upstream throughput.
+	var upstreamServed atomic.Int64
+	upAddr, _, _, upShutdown := startH2TLSUpstream(t, "mcs-200par-marker", nethttp.HandlerFunc(func(w nethttp.ResponseWriter, _ *nethttp.Request) {
+		upstreamServed.Add(1)
+		w.Header().Set("Content-Type", "text/plain")
+		w.WriteHeader(nethttp.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer upShutdown()
+
+	bcfg := makeBuildCfg(t, nil)
+	// MaxConcurrentStreams=0 → fall through to the H2 Layer's compile-
+	// time default (500). The pre-USK-862 default of 100 would have
+	// produced REFUSED_STREAM on ~100 of the 200 in-flight streams.
+	proxyAddr, _ := startH2MITMProxy(t, ctx, bcfg, pipelineOpts{})
+
+	// One H2 client tunneled through CONNECT. Use the standard library's
+	// h2 transport with no per-conn stream cap so we can issue 200
+	// concurrent requests over the single connection.
+	client := newMITMH2Client(proxyAddr, upAddr)
+	defer client.CloseIdleConnections()
+
+	var (
+		successes atomic.Int64
+		failures  atomic.Int64
+		refused   atomic.Int64
+		errs      sync.Map // index -> error string for diagnostics
+	)
+	var wg sync.WaitGroup
+	wg.Add(parallelGETs)
+
+	// Stagger goroutines by a tiny amount to avoid burst contention on
+	// the connection's mutex but still keep ~all in flight at once.
+	for i := 0; i < parallelGETs; i++ {
+		go func(idx int) {
+			defer wg.Done()
+			url := fmt.Sprintf("https://%s/tile-%d", upAddr, idx)
+			req, err := nethttp.NewRequestWithContext(ctx, nethttp.MethodGet, url, nil)
+			if err != nil {
+				failures.Add(1)
+				errs.Store(idx, err.Error())
+				return
+			}
+			resp, err := client.Do(req)
+			if err != nil {
+				failures.Add(1)
+				errs.Store(idx, err.Error())
+				// The Go http2 client surfaces REFUSED_STREAM as a
+				// http2.StreamError with Code REFUSED_STREAM. The
+				// string form contains "REFUSED_STREAM" — that is the
+				// observable signal we want to count.
+				if containsRefusedStream(err.Error()) {
+					refused.Add(1)
+				}
+				return
+			}
+			_, _ = io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+			if resp.StatusCode != nethttp.StatusOK {
+				failures.Add(1)
+				errs.Store(idx, fmt.Sprintf("status %d", resp.StatusCode))
+				return
+			}
+			successes.Add(1)
+		}(i)
+	}
+	wg.Wait()
+
+	if refused.Load() > 0 {
+		t.Fatalf("observed %d REFUSED_STREAM rejections; expected 0 at the default cap of 500 (USK-862)", refused.Load())
+	}
+	if got := successes.Load(); got != parallelGETs {
+		// Surface the first error string to make debugging tractable.
+		var firstErr string
+		errs.Range(func(_, v any) bool {
+			firstErr = v.(string)
+			return false
+		})
+		t.Fatalf("successes = %d, want %d (failures=%d, first error: %s)",
+			got, parallelGETs, failures.Load(), firstErr)
+	}
+	// Sanity check: every successful client-side response must correspond
+	// to an upstream handler invocation. A divergence here would indicate
+	// the proxy is short-circuiting (e.g. cached / replayed) rather than
+	// actually forwarding to upstream — which would invalidate the
+	// stream-fan-out claim of this test.
+	if got := upstreamServed.Load(); got != int64(parallelGETs) {
+		t.Fatalf("upstream handler invocations = %d, want %d (proxy may be short-circuiting)",
+			got, parallelGETs)
+	}
+}
+
+// containsRefusedStream reports whether the error string contains the
+// canonical "REFUSED_STREAM" marker emitted by the Go http2 client when
+// it surfaces a server-sent RST_STREAM(REFUSED_STREAM). Using string
+// match rather than errors.As because the wrapping path varies across
+// Go versions and the standard library does not export a stable
+// sentinel for this code. REFUSED_STREAM is the canonical RFC 9113
+// error code name; the Go http2 client formats it verbatim in
+// StreamError.Error().
+func containsRefusedStream(s string) bool {
+	return strings.Contains(s, "REFUSED_STREAM")
 }

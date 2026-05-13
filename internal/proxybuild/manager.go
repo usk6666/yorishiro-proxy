@@ -690,6 +690,51 @@ func (m *Manager) SetTLSFingerprint(profile string) {
 	bc.SetTLSFingerprint(profile)
 }
 
+// SetMaxConcurrentStreams installs a runtime override for the HTTP/2
+// SETTINGS_MAX_CONCURRENT_STREAMS value advertised to clients on the
+// inbound (ServerRole) Layer (USK-862). Mirrors the SetTLSFingerprint
+// precedent: validation is the MCP layer's responsibility, so this is a
+// thin passthrough to BuildConfig.SetMaxConcurrentStreams.
+//
+// Next-connection semantics: already-accepted H2 connections retain the
+// cap captured at their stack-assembly time; the new value takes effect
+// at the next listener-stack assembly. No-op when no BuildConfig is
+// bound (test-only Manager constructions).
+//
+// Passing 0 clears the override so subsequent stack assemblies fall back
+// to the boot-time BuildConfig.MaxConcurrentStreams field (and ultimately
+// the H2 Layer default).
+func (m *Manager) SetMaxConcurrentStreams(v uint32) {
+	m.mu.Lock()
+	bc := m.buildCfg
+	m.mu.Unlock()
+
+	if bc == nil {
+		return
+	}
+	bc.SetMaxConcurrentStreams(v)
+}
+
+// MaxConcurrentStreams returns the effective HTTP/2
+// SETTINGS_MAX_CONCURRENT_STREAMS value from the bound BuildConfig
+// (USK-862). Reflects any runtime override installed via
+// SetMaxConcurrentStreams and falls back to the boot-time
+// BuildConfig.MaxConcurrentStreams when no override is in effect.
+// Returns 0 (the "use H2 default" sentinel) when no BuildConfig is
+// bound — callers MUST treat 0 as "fall through to the H2 Layer
+// default" (defaultMaxConcurrentStreams in
+// internal/layer/http2/connstate.go).
+func (m *Manager) MaxConcurrentStreams() uint32 {
+	m.mu.Lock()
+	bc := m.buildCfg
+	m.mu.Unlock()
+
+	if bc == nil {
+		return 0
+	}
+	return bc.EffectiveMaxConcurrentStreams()
+}
+
 // TLSFingerprint returns the effective uTLS browser fingerprint profile
 // from the bound BuildConfig (USK-809). The returned value reflects any
 // runtime override installed via SetTLSFingerprint and falls back to

@@ -106,6 +106,14 @@ Maximum number of concurrent proxy connections.
 - Default: `128`
 - Range: 1-100000
 
+### max_concurrent_streams (integer, optional)
+HTTP/2 `SETTINGS_MAX_CONCURRENT_STREAMS` advertised to clients on the inbound (proxy-acting-as-server) Layer.
+- Default: `500` (USK-862 bumped 100 → 500 to cover high-multiplexing pages such as 200-parallel image fetches)
+- Range: 1-65535
+- Omit to inherit the boot-time value set via the `-max-concurrent-streams` CLI flag or `YP_MAX_CONCURRENT_STREAMS` env var; the H2 Layer default of 500 applies when none is set.
+- Streams beyond this cap are rejected with `RST_STREAM(REFUSED_STREAM)` per RFC 9113 §5.1.2.
+- Applies only to the inbound (client-facing) Layer; the outbound (upstream) Layer continues to honour the peer's advertised limit.
+
 ### peek_timeout_ms (integer, optional)
 Timeout in milliseconds for protocol detection on new connections.
 - Default: `30000` (30 seconds)

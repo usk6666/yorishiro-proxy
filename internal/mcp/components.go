@@ -171,6 +171,21 @@ type proxyManager interface {
 	// substitute a "chrome" default — empty is the canonical "no
 	// fingerprint configured" sentinel.
 	TLSFingerprint() string
+	// SetMaxConcurrentStreams installs a runtime override for the
+	// HTTP/2 SETTINGS_MAX_CONCURRENT_STREAMS advertised to clients on
+	// the inbound (ServerRole) Layer (USK-862). Next-connection
+	// semantics: already-accepted H2 connections retain the cap
+	// captured at their stack-assembly time. Passing 0 clears the
+	// override; the MCP layer (proxy_start_tool / configure_tool)
+	// validates the range before calling this.
+	SetMaxConcurrentStreams(v uint32)
+	// MaxConcurrentStreams returns the effective HTTP/2
+	// SETTINGS_MAX_CONCURRENT_STREAMS value reflecting any runtime
+	// SetMaxConcurrentStreams override on top of the boot-time
+	// BuildConfig.MaxConcurrentStreams (USK-862). Returns 0 ("use H2
+	// default") when no BuildConfig is bound or no override is set
+	// and the boot-time field is zero.
+	MaxConcurrentStreams() uint32
 	// MaxRawCaptureSize surfaces the per-message HTTP/1.x raw-bytes
 	// capture cap (USK-800). On the production Live wiring path the
 	// returned value is the resolved cap (config.ResolveMaxRawCaptureSize

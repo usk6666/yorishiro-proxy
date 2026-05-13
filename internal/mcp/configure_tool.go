@@ -78,6 +78,14 @@ type configureInput struct {
 	// Existing connections exceeding the new limit are not interrupted.
 	MaxConnections *int `json:"max_connections,omitempty" jsonschema:"maximum concurrent connections (1-100000)"`
 
+	// MaxConcurrentStreams dynamically changes the HTTP/2
+	// SETTINGS_MAX_CONCURRENT_STREAMS advertised to clients on the
+	// inbound (ServerRole) Layer (USK-862). Next-connection semantics:
+	// already-accepted H2 connections retain the cap captured at their
+	// stack-assembly time; the new value takes effect at the next
+	// listener-stack assembly. Range: 1-65535.
+	MaxConcurrentStreams *int `json:"max_concurrent_streams,omitempty" jsonschema:"HTTP/2 SETTINGS_MAX_CONCURRENT_STREAMS advertised to clients (1-65535); affects only newly accepted connections"`
+
 	// PeekTimeoutMs dynamically changes the protocol detection timeout in milliseconds.
 	// Takes effect for the next incoming connection.
 	PeekTimeoutMs *int `json:"peek_timeout_ms,omitempty" jsonschema:"protocol detection timeout in milliseconds (100-600000)"`
@@ -303,6 +311,11 @@ type configureResult struct {
 
 	// MaxConnections is the current max connections value (set when changed).
 	MaxConnections *int `json:"max_connections,omitempty"`
+
+	// MaxConcurrentStreams is the current HTTP/2
+	// SETTINGS_MAX_CONCURRENT_STREAMS value (set when changed).
+	// Next-connection semantics — see input field doc (USK-862).
+	MaxConcurrentStreams *int `json:"max_concurrent_streams,omitempty"`
 
 	// PeekTimeoutMs is the current peek timeout in milliseconds (set when changed).
 	PeekTimeoutMs *int64 `json:"peek_timeout_ms,omitempty"`
@@ -857,6 +870,28 @@ func (s *Server) applyConnectionLimits(input configureInput, result *configureRe
 		msVal := int64(ms)
 		result.RequestTimeoutMs = &msVal
 	}
+	return s.applyConfigureMaxConcurrentStreams(input, result)
+}
+
+// applyConfigureMaxConcurrentStreams handles the max_concurrent_streams
+// branch of applyConnectionLimits (USK-862). Extracted to keep
+// applyConnectionLimits below the gocyclo budget. Validation mirrors the
+// proxy_start surface (proxy_start_tool.go). Next-connection semantics —
+// live H2 connections retain their captured cap; the new value takes
+// effect at the next listener-stack assembly.
+func (s *Server) applyConfigureMaxConcurrentStreams(input configureInput, result *configureResult) error {
+	if input.MaxConcurrentStreams == nil {
+		return nil
+	}
+	if managerIsNil(s.connector.manager) {
+		return fmt.Errorf("proxy manager is not initialized: proxy may not be running")
+	}
+	n := *input.MaxConcurrentStreams
+	if n < minMaxConcurrentStreams || n > maxMaxConcurrentStreams {
+		return fmt.Errorf("max_concurrent_streams must be between %d and %d, got %d", minMaxConcurrentStreams, maxMaxConcurrentStreams, n)
+	}
+	s.connector.manager.SetMaxConcurrentStreams(uint32(n))
+	result.MaxConcurrentStreams = &n
 	return nil
 }
 

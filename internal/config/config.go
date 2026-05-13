@@ -155,6 +155,20 @@ type Config struct {
 	// MaxConnections is the maximum number of concurrent proxy connections.
 	MaxConnections int `json:"max_connections"`
 
+	// MaxConcurrentStreams caps the per-connection HTTP/2 stream
+	// concurrency advertised to clients via SETTINGS_MAX_CONCURRENT_STREAMS
+	// (USK-862). Zero means "use the H2 layer's compile-time default"
+	// (currently 500; see internal/layer/http2/connstate.go
+	// defaultMaxConcurrentStreams) — defining the default in a single
+	// place avoids drift between the config layer and the Layer. Positive
+	// values are threaded to connector.BuildConfig.MaxConcurrentStreams
+	// and applied via http2.WithMaxConcurrentStreams on the client-facing
+	// (ServerRole) Layer; the outbound (upstream / ClientRole) Layer
+	// continues to honour the peer's advertised limit. Validation rejects
+	// negatives; there is no explicit upper bound at the config layer
+	// (mirrors MaxConnections).
+	MaxConcurrentStreams uint32 `json:"max_concurrent_streams,omitempty"`
+
 	// InsecureSkipVerify disables TLS certificate verification for upstream
 	// connections. This is useful when the target uses self-signed or expired
 	// certificates, such as during vulnerability assessments.

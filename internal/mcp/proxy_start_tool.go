@@ -27,6 +27,15 @@ const (
 	// maxTimeoutMs is the maximum allowed timeout in milliseconds (10 minutes).
 	maxTimeoutMs = 600000
 
+	// minMaxConcurrentStreams / maxMaxConcurrentStreams bound the MCP-
+	// surfaced HTTP/2 SETTINGS_MAX_CONCURRENT_STREAMS knob (USK-862). The
+	// upper bound mirrors the SETTINGS wire field max sanity for an
+	// operator-set value: u32 max is RFC-legal but unrealistic to
+	// configure intentionally; 65535 is well above the highest concurrency
+	// any production workload observed to date.
+	minMaxConcurrentStreams = 1
+	maxMaxConcurrentStreams = 65535
+
 	// defaultMaxConnections is the default concurrent connection limit.
 	// Must match connector.DefaultMaxConnections (128).
 	defaultMaxConnections = 128
@@ -111,6 +120,12 @@ type proxyStartInput struct {
 	// MaxConnections is the maximum number of concurrent proxy connections.
 	// Defaults to 128 if omitted or zero.
 	MaxConnections *int `json:"max_connections,omitempty" jsonschema:"maximum concurrent connections (default: 128)"`
+
+	// MaxConcurrentStreams caps the per-connection HTTP/2 stream
+	// concurrency advertised to clients via SETTINGS_MAX_CONCURRENT_STREAMS
+	// (USK-862). Omitted / nil falls back to the config-file value (or the
+	// H2 layer default of 500 when the config file also omits it).
+	MaxConcurrentStreams *int `json:"max_concurrent_streams,omitempty" jsonschema:"HTTP/2 SETTINGS_MAX_CONCURRENT_STREAMS advertised to clients (1-65535; default: 500)"`
 
 	// PeekTimeoutMs is the timeout in milliseconds for protocol detection on new connections.
 	// Defaults to 30000 (30s) if omitted or zero.
@@ -361,6 +376,12 @@ func (s *Server) resetSettingsToDefaults(listenerName string) {
 	if !managerIsNil(s.connector.manager) {
 		s.connector.manager.SetMaxConnections(defaultMaxConnections)
 		s.connector.manager.SetPeekTimeout(defaultPeekTimeout)
+		// USK-862: clear the runtime override so the next stack assembly
+		// falls back to the boot-time BuildConfig.MaxConcurrentStreams
+		// (and ultimately the H2 Layer default). proxy_start observes a
+		// clean slate; applyProxyStartLimits below reinstalls the
+		// caller-supplied value if any.
+		s.connector.manager.SetMaxConcurrentStreams(0)
 	}
 
 	// Reset request timeout to default.
@@ -585,6 +606,17 @@ func (s *Server) applyProxyStartLimits(input *proxyStartInput) error {
 			return fmt.Errorf("request_timeout_ms must be between %d and %d, got %d", minTimeoutMs, maxTimeoutMs, ms)
 		}
 		s.applyRequestTimeout(time.Duration(ms) * time.Millisecond)
+	}
+	// USK-862: thread max_concurrent_streams into the process-singleton
+	// BuildConfig. Next-connection semantics — already-accepted H2
+	// connections retain the value captured at their stack-assembly time,
+	// the new value takes effect at the next listener-stack assembly.
+	if input.MaxConcurrentStreams != nil {
+		n := *input.MaxConcurrentStreams
+		if n < minMaxConcurrentStreams || n > maxMaxConcurrentStreams {
+			return fmt.Errorf("max_concurrent_streams must be between %d and %d, got %d", minMaxConcurrentStreams, maxMaxConcurrentStreams, n)
+		}
+		s.applyMaxConcurrentStreams(uint32(n))
 	}
 	return nil
 }
@@ -1105,6 +1137,21 @@ func (s *Server) applyRequestTimeout(d time.Duration) {
 	for _, setter := range s.connector.requestTimeoutSetters {
 		setter.SetRequestTimeout(d)
 	}
+}
+
+// applyMaxConcurrentStreams threads the HTTP/2
+// SETTINGS_MAX_CONCURRENT_STREAMS override down to the live
+// proxybuild.Manager's bound BuildConfig (USK-862). Next-connection
+// semantics: in-flight H2 connections retain the cap captured at their
+// stack-assembly time. Passing 0 clears the override so the next stack
+// assembly falls back to the boot-time BuildConfig.MaxConcurrentStreams
+// (and ultimately the H2 Layer default of 500). No-op when the manager
+// is not initialized (test-only paths).
+func (s *Server) applyMaxConcurrentStreams(v uint32) {
+	if managerIsNil(s.connector.manager) {
+		return
+	}
+	s.connector.manager.SetMaxConcurrentStreams(v)
 }
 
 // currentRequestTimeout returns the effective request timeout from the first

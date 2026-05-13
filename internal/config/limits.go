@@ -26,6 +26,23 @@ package config
 // mind. Operators should consider total memory capacity and adjust
 // MaxConnections via the proxy_start MCP tool or configure_limits when
 // running under heavy load.
+//
+// HTTP/2 stream fan-out (USK-862): the per-connection stream worst case is
+// bounded by the advertised SETTINGS_MAX_CONCURRENT_STREAMS. The H2 Layer
+// default (internal/layer/http2/connstate.go defaultMaxConcurrentStreams)
+// was raised from 100 to 500 to support high-multiplexing pages, so the
+// proxy-wide worst-case stream count is:
+//
+//	defaultMaxConcurrentStreams × MaxConnections
+//	= 500 × 128 = 64,000 streams
+//
+// Stream-level RAM is still bounded by the same per-body budget (each H2
+// stream's BodyBuffer obeys BodySpillThreshold), so the RAM ceiling above
+// is unchanged — only the per-connection goroutine fan-out increases.
+// Operators concerned about goroutine pressure can re-tighten this cap via
+// Config.MaxConcurrentStreams (CLI -max-concurrent-streams /
+// YP_MAX_CONCURRENT_STREAMS) which threads through
+// connector.BuildConfig.MaxConcurrentStreams to the client-facing Layer.
 
 const (
 	// MaxBodySize is the unified maximum size for both reading upstream

@@ -384,6 +384,13 @@ Configures the intercept queue behavior.
 ### max_connections (integer, optional)
 Dynamically changes the maximum number of concurrent proxy connections. Range: 1-100000.
 
+### max_concurrent_streams (integer, optional)
+Dynamically changes the HTTP/2 `SETTINGS_MAX_CONCURRENT_STREAMS` advertised to clients on the inbound (proxy-acting-as-server) Layer. Range: 1-65535. Default (when neither `configure` nor the config file sets it): `500` (USK-862).
+
+**Next-connection semantics**: the new value affects only newly accepted H2 connections. Already-established H2 connections retain the cap captured at their stack-assembly time — the proxy does NOT reissue a mid-stream SETTINGS frame on existing connections (RFC 9113 §6.5.3 allows it but a runtime override surface that broadcasts to live conns is out of scope; restart listeners via `proxy_stop` + `proxy_start` if you need every connection to observe the change immediately).
+
+Streams beyond this cap are rejected with `RST_STREAM(REFUSED_STREAM)` per RFC 9113 §5.1.2 — so re-tightening to a low value (e.g. 50) is the explicit way to reproduce the legacy 100-stream cap behaviour for testing.
+
 ### peek_timeout_ms (integer, optional)
 Dynamically changes the protocol detection timeout in milliseconds. Range: 100-600000.
 

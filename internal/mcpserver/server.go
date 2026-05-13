@@ -61,6 +61,9 @@ var EnvVarMap = map[string]string{
 	"safety-filter":      "YP_SAFETY_FILTER_ENABLED",
 	"stdio-mcp":          "YP_STDIO_MCP",
 	"no-http-mcp":        "YP_NO_HTTP_MCP",
+	// USK-862: HTTP/2 SETTINGS_MAX_CONCURRENT_STREAMS override; 0 = H2
+	// layer default.
+	"max-concurrent-streams": "YP_MAX_CONCURRENT_STREAMS",
 }
 
 // RunOptions controls the runtime behavior of Run. The zero value is valid
@@ -149,6 +152,14 @@ func Run(ctx context.Context, fs *flag.FlagSet, args []string, opts RunOptions) 
 	var safetyFilterEnabled bool
 	fs.BoolVar(&safetyFilterEnabled, "safety-filter", false, "enable SafetyFilter engine (env: YP_SAFETY_FILTER_ENABLED)")
 
+	// USK-862: HTTP/2 SETTINGS_MAX_CONCURRENT_STREAMS advertised to clients
+	// on the inbound (client-facing) Layer. Zero means "use the H2 layer's
+	// compile-time default" (currently 500). Stored as uint via flag.UintVar
+	// because flag has no UintVar32, then narrowed to uint32 below.
+	var maxConcurrentStreams uint
+	fs.UintVar(&maxConcurrentStreams, "max-concurrent-streams", 0,
+		"HTTP/2 SETTINGS_MAX_CONCURRENT_STREAMS advertised to clients; 0 = use H2 default (500) (env: YP_MAX_CONCURRENT_STREAMS)")
+
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -166,6 +177,15 @@ func Run(ctx context.Context, fs *flag.FlagSet, args []string, opts RunOptions) 
 	if safetyFilterExplicit {
 		cfg.SafetyFilterEnabled = &safetyFilterEnabled
 	}
+
+	// USK-862: thread the parsed -max-concurrent-streams value into the
+	// Config struct. Reject values that exceed uint32 (the H2 SETTINGS wire
+	// type is u32; SETTINGS_MAX_CONCURRENT_STREAMS is unsigned 32-bit per
+	// RFC 9113 §6.5.2). Zero is the documented "use H2 default" sentinel.
+	if maxConcurrentStreams > 0xFFFFFFFF {
+		return fmt.Errorf("invalid configuration: max_concurrent_streams %d exceeds uint32 max (4294967295)", maxConcurrentStreams)
+	}
+	cfg.MaxConcurrentStreams = uint32(maxConcurrentStreams)
 
 	// Validate configuration values before proceeding with initialization.
 	if err := cfg.Validate(); err != nil {

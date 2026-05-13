@@ -1194,6 +1194,82 @@ func TestBuildConfig_MaxConcurrentStreamsRoundTrip(t *testing.T) {
 	}
 }
 
+// TestBuildConfig_MaxConcurrentStreams_DynamicOverride verifies the
+// USK-862 runtime-mutation surface: SetMaxConcurrentStreams installs an
+// override that EffectiveMaxConcurrentStreams returns in preference to
+// the static MaxConcurrentStreams field, and a zero clears the override
+// so the static field re-emerges. The stack-assembly read site
+// (clientH2MaxConcurrentStreamsOption) consults
+// EffectiveMaxConcurrentStreams, so this test gates that runtime
+// proxy_start / configure changes reach the next H2 connection rather
+// than being frozen at boot.
+func TestBuildConfig_MaxConcurrentStreams_DynamicOverride(t *testing.T) {
+	cfg := &BuildConfig{MaxConcurrentStreams: 100}
+
+	// Boot-time value is observable via EffectiveMaxConcurrentStreams when
+	// no runtime override is in place.
+	if got := cfg.EffectiveMaxConcurrentStreams(); got != 100 {
+		t.Errorf("initial EffectiveMaxConcurrentStreams = %d, want 100 (boot fallback)", got)
+	}
+
+	// Runtime override takes precedence.
+	cfg.SetMaxConcurrentStreams(500)
+	if got := cfg.EffectiveMaxConcurrentStreams(); got != 500 {
+		t.Errorf("after SetMaxConcurrentStreams(500), EffectiveMaxConcurrentStreams = %d, want 500", got)
+	}
+	// Static field unchanged — override is layered on top, not destructive.
+	if cfg.MaxConcurrentStreams != 100 {
+		t.Errorf("static MaxConcurrentStreams mutated to %d, want 100 (override must not destroy boot value)", cfg.MaxConcurrentStreams)
+	}
+
+	// Replace (not append) semantics.
+	cfg.SetMaxConcurrentStreams(2000)
+	if got := cfg.EffectiveMaxConcurrentStreams(); got != 2000 {
+		t.Errorf("after SetMaxConcurrentStreams(2000), EffectiveMaxConcurrentStreams = %d, want 2000", got)
+	}
+
+	// Zero clears the override; the static field surfaces again.
+	cfg.SetMaxConcurrentStreams(0)
+	if got := cfg.EffectiveMaxConcurrentStreams(); got != 100 {
+		t.Errorf("after SetMaxConcurrentStreams(0), EffectiveMaxConcurrentStreams = %d, want 100 (cleared override)", got)
+	}
+}
+
+// TestBuildConfig_MaxConcurrentStreams_NilSafe ensures the accessor +
+// setter short-circuit on a nil receiver — defensive guard mirroring
+// the SetTLSFingerprint precedent. A nil BuildConfig occurs in test
+// constructions and on early-failure paths; the runtime mutation must
+// not panic.
+func TestBuildConfig_MaxConcurrentStreams_NilSafe(t *testing.T) {
+	var cfg *BuildConfig
+	if got := cfg.EffectiveMaxConcurrentStreams(); got != 0 {
+		t.Errorf("nil-receiver EffectiveMaxConcurrentStreams = %d, want 0", got)
+	}
+	// Must not panic.
+	cfg.SetMaxConcurrentStreams(123)
+}
+
+// TestBuildConfig_MaxConcurrentStreams_ZeroBootFallbackOverride verifies
+// the layered fallback: when the static MaxConcurrentStreams field is
+// also zero (no boot-time value), EffectiveMaxConcurrentStreams returns
+// the override exactly, including the round-trip back to 0. This is the
+// documented "use H2 layer default" sentinel path (USK-862).
+func TestBuildConfig_MaxConcurrentStreams_ZeroBootFallbackOverride(t *testing.T) {
+	cfg := &BuildConfig{} // both static and dynamic == 0
+
+	if got := cfg.EffectiveMaxConcurrentStreams(); got != 0 {
+		t.Errorf("zero-cfg EffectiveMaxConcurrentStreams = %d, want 0 (H2 default sentinel)", got)
+	}
+	cfg.SetMaxConcurrentStreams(64)
+	if got := cfg.EffectiveMaxConcurrentStreams(); got != 64 {
+		t.Errorf("after SetMaxConcurrentStreams(64), EffectiveMaxConcurrentStreams = %d, want 64", got)
+	}
+	cfg.SetMaxConcurrentStreams(0)
+	if got := cfg.EffectiveMaxConcurrentStreams(); got != 0 {
+		t.Errorf("after SetMaxConcurrentStreams(0), EffectiveMaxConcurrentStreams = %d, want 0", got)
+	}
+}
+
 // TestGRPCOptionsFromBuildConfig verifies the helper that translates
 // BuildConfig.GRPCMaxMessageSize into the [grpclayer.Option] slice
 // consumed by DispatchH2Stream.

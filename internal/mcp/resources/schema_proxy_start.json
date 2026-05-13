@@ -109,6 +109,12 @@
       "minimum": 1,
       "maximum": 100000
     },
+    "max_concurrent_streams": {
+      "type": "integer",
+      "description": "HTTP/2 SETTINGS_MAX_CONCURRENT_STREAMS advertised to clients on the inbound (ServerRole) Layer. Default: 500 (USK-862). Streams beyond this cap are rejected with RST_STREAM(REFUSED_STREAM) per RFC 9113 §5.1.2.",
+      "minimum": 1,
+      "maximum": 65535
+    },
     "peek_timeout_ms": {
       "type": "integer",
       "description": "Protocol detection timeout in milliseconds. Default: 30000.",

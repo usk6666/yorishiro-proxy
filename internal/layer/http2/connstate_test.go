@@ -15,8 +15,11 @@ func TestDefaultSettings(t *testing.T) {
 	if s.EnablePush != 1 {
 		t.Errorf("EnablePush = %d, want 1", s.EnablePush)
 	}
-	if s.MaxConcurrentStreams != 100 {
-		t.Errorf("MaxConcurrentStreams = %d, want 100", s.MaxConcurrentStreams)
+	// USK-862: defaultMaxConcurrentStreams bumped 100 → 500 to cover
+	// high-multiplexing pages (200+ parallel asset fetches) that previously
+	// surfaced net::ERR_HTTP2_SERVER_REFUSED_STREAM through the proxy.
+	if s.MaxConcurrentStreams != 500 {
+		t.Errorf("MaxConcurrentStreams = %d, want 500", s.MaxConcurrentStreams)
 	}
 	if s.InitialWindowSize != 65535 {
 		t.Errorf("InitialWindowSize = %d, want 65535", s.InitialWindowSize)
