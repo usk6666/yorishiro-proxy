@@ -3,6 +3,7 @@ package pipeline
 import (
 	"context"
 	"log/slog"
+	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/rules/common"
@@ -23,12 +24,13 @@ import (
 // for the case where SafetyStep already gated the original held envelope but
 // the modify_and_forward payload re-introduces a destructive pattern (USK-702).
 type InterceptStep struct {
-	http   *httprules.InterceptEngine
-	ws     *wsrules.InterceptEngine
-	grpc   *grpcrules.InterceptEngine
-	queue  *common.HoldQueue
-	safety *SafetyStep
-	logger *slog.Logger
+	http        *httprules.InterceptEngine
+	ws          *wsrules.InterceptEngine
+	grpc        *grpcrules.InterceptEngine
+	queue       *common.HoldQueue
+	safety      *SafetyStep
+	holdTracker *common.HoldTracker
+	logger      *slog.Logger
 }
 
 // NewInterceptStep creates an InterceptStep. Any nil engine causes the
@@ -38,6 +40,11 @@ type InterceptStep struct {
 // SafetyStep — e.g. tests not exercising safety — pass nil).
 //
 // Engine arguments are positional in protocol order: http, ws, grpc.
+//
+// The optional HoldTracker is wired via WithHoldTracker. When non-nil,
+// InterceptStep stamps the (StreamID, Direction) tuple on hold-enter and
+// un-stamps it on hold-exit so the session keepalive goroutine (USK-854)
+// can observe in-flight holds. A nil tracker is a graceful no-op.
 func NewInterceptStep(httpEngine *httprules.InterceptEngine, wsEngine *wsrules.InterceptEngine, grpcEngine *grpcrules.InterceptEngine, queue *common.HoldQueue, safety *SafetyStep, logger *slog.Logger) *InterceptStep {
 	return &InterceptStep{
 		http:   httpEngine,
@@ -49,9 +56,26 @@ func NewInterceptStep(httpEngine *httprules.InterceptEngine, wsEngine *wsrules.I
 	}
 }
 
+// WithHoldTracker wires the optional HoldTracker. A nil tracker is a
+// graceful no-op so test stacks that do not construct one continue to
+// work unchanged. Returns the receiver for fluent construction.
+func (s *InterceptStep) WithHoldTracker(t *common.HoldTracker) *InterceptStep {
+	s.holdTracker = t
+	return s
+}
+
 // Process type-switches on env.Message and dispatches to the per-protocol
 // InterceptEngine arm. Unknown Message types pass through.
+//
+// USK-854: proxy-synthesized envelopes (Context.Synthetic=true) bypass
+// intercept matching entirely. A synthetic WS Ping injected during a hold
+// must not itself trigger another hold (infinite-loop guard); and it
+// carries no operator-supplied data worth matching against intercept
+// rules.
 func (s *InterceptStep) Process(ctx context.Context, env *envelope.Envelope) Result {
+	if env != nil && env.Context.Synthetic {
+		return Result{}
+	}
 	switch msg := env.Message.(type) {
 	case *envelope.HTTPMessage:
 		return s.processHTTP(ctx, env, msg)
@@ -148,6 +172,19 @@ func (s *InterceptStep) holdAndDispatch(ctx context.Context, env *envelope.Envel
 			slog.String("protocol", string(env.Protocol)),
 			slog.Any("matched_rules", matchedRules),
 		)
+	}
+
+	// USK-854: stamp the (StreamID, Direction) tuple on the shared
+	// HoldTracker before HoldQueue.Hold blocks so the session keepalive
+	// goroutine can observe the in-flight hold and inject WS Pings if
+	// (and only if) the operator opted in via the web_socket.hold_keepalive_*
+	// config knob. ForgetHold runs unconditionally after Hold returns so a
+	// release / drop / modify all clear the entry — the keepalive goroutine
+	// observes IsHeld=false on its next tick and terminates cleanly.
+	// nil tracker is a no-op (test stacks).
+	if s.holdTracker != nil {
+		s.holdTracker.MarkHold(env.StreamID, env.Direction, time.Now())
+		defer s.holdTracker.ForgetHold(env.StreamID, env.Direction)
 	}
 
 	action, err := s.queue.Hold(ctx, env, matchedRules)

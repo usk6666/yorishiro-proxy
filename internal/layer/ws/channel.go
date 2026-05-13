@@ -101,6 +101,20 @@ func newChannel(l *Layer, streamID string, role Role, opts *options) *wsChannel 
 // StreamID returns the caller-supplied stream identifier.
 func (c *wsChannel) StreamID() string { return c.streamID }
 
+// EnvelopeConnID returns the EnvelopeContext.ConnID stamped on every
+// Envelope this Channel emits. The session-level keepalive goroutine
+// (USK-854) reads this so the plugin opt-out lookup
+// (ctx.stream_state["ws_hold_keepalive"]) sees the same ConnID a
+// (ws, on_upgrade, pre) plugin hook used when writing the value.
+// Returns the empty string when no EnvelopeContext template was
+// configured (test paths that bypass ws.WithEnvelopeContext).
+func (c *wsChannel) EnvelopeConnID() string {
+	if c == nil || c.opts == nil {
+		return ""
+	}
+	return c.opts.ctxTmpl.ConnID
+}
+
 // Closed returns a channel that fires when the wsChannel has reached its
 // terminal state. termErr is populated before this fires.
 func (c *wsChannel) Closed() <-chan struct{} { return c.recvDone }

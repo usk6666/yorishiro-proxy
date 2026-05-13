@@ -11,6 +11,7 @@ import (
 	"slices"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -208,6 +209,22 @@ type BuildConfig struct {
 	// WebSocket Layer. Defaults to true (config-resolved by
 	// ResolveWSDeflateEnabled). Read by USK-643's Upgrade swap orchestrator.
 	WSDeflateEnabled bool
+
+	// WSHoldKeepaliveEnabled toggles the USK-854 synthetic WS Ping
+	// injection during intercept holds. Resolved at BuildConfig
+	// construction time from ProxyConfig.WebSocket via
+	// config.ResolveWSHoldKeepaliveEnabled. Default false: opt-in because
+	// Ping injection is wire-observable. Bridged to
+	// session.SessionOptions.WSHoldKeepaliveEnabled by
+	// proxybuild.buildSessionOptions.
+	WSHoldKeepaliveEnabled bool
+
+	// WSHoldKeepaliveInterval is the cadence at which the keepalive
+	// goroutine emits synthetic Ping frames while a hold is in flight.
+	// Resolved at BuildConfig construction time from
+	// ProxyConfig.WebSocket via config.ResolveWSHoldKeepaliveInterval.
+	// Zero falls back to config.DefaultWSHoldKeepaliveInterval (5s).
+	WSHoldKeepaliveInterval time.Duration
 
 	// GRPCMaxMessageSize caps the per-LPM payload size on both the gRPC
 	// (internal/layer/grpc) and gRPC-Web (internal/layer/grpcweb) Layers.

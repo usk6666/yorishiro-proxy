@@ -218,6 +218,42 @@ func (s *scopeStore) size() int {
 	return len(s.scopes)
 }
 
+// LookupStreamStateBool returns the stream_state[key] entry for the
+// supplied (ConnID, StreamID) tuple when it is a Starlark bool, and a
+// boolean "found" flag. Missing key / wrong type / nil receiver / empty
+// arguments all return (false, false).
+//
+// This is the Go-facing read API used by the USK-854 session keepalive
+// goroutine to honour a plugin opt-out: a plugin can set
+// `ctx.stream_state["ws_hold_keepalive"] = False` inside a (ws,
+// on_upgrade, pre) hook, and the session goroutine queries this entry on
+// each tick. If a plugin author sets a non-bool value the call returns
+// (false, false) — the keepalive defaults to "enabled" in that case,
+// matching the design rule that wrong-typed plugin state must not silently
+// flip a wire-affecting feature in an unexpected direction.
+//
+// The lookup is non-mutating (does not create the scope if absent) and
+// takes a short-lived read lock on the scope store + the per-scope
+// state, so it is safe to call from a tight tick loop.
+func (e *Engine) LookupStreamStateBool(connID, streamID, key string) (value, found bool) {
+	if e == nil || connID == "" || streamID == "" || key == "" {
+		return false, false
+	}
+	k := scopeKey{connID: connID, id: streamID}
+	e.streamStore.mu.Lock()
+	st, ok := e.streamStore.scopes[k]
+	e.streamStore.mu.Unlock()
+	if !ok || st == nil {
+		return false, false
+	}
+	v := st.get(key)
+	b, ok := v.(starlark.Bool)
+	if !ok {
+		return false, false
+	}
+	return bool(b), true
+}
+
 // purge zeros every scope and clears the map. Engine.Close calls this at
 // shutdown so no per-connection state lingers after the proxy stops.
 func (s *scopeStore) purge() {

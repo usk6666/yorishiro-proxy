@@ -280,6 +280,32 @@ type EnvelopeContext struct {
 	RequestPath     string
 	RequestMethod   string
 	RequestRawQuery string
+
+	// Synthetic is true when this Envelope was synthesized by the proxy
+	// (not observed on the wire). The first and currently only producer is
+	// the USK-854 WS hold-window keepalive injection path in
+	// internal/session/session.go, which synthesizes WS Ping frames toward
+	// the upstream while a frame is held in the intercept queue so the
+	// upstream's idle timer does not expire.
+	//
+	// Pipeline Steps that mutate wire observation MUST NOT re-trigger on a
+	// Synthetic Envelope:
+	//   - InterceptStep early-returns Result{} (a synthetic Ping must not
+	//     trigger another hold).
+	//   - SafetyStep early-returns Result{} (Synthetic Pings carry no
+	//     attacker-influenced payload).
+	//
+	// PluginPre / PluginPost / RecordStep / wire-forwarding Steps pass
+	// through unchanged so the operator-visible observation surface still
+	// records the synthetic frame as part of the wire conversation. The
+	// flag itself is provenance metadata; the wire bytes the analyst sees
+	// on `Envelope.Raw` and `query` MCP tool exposures are the actual frame
+	// bytes the proxy wrote.
+	//
+	// Defaults to false (zero value). Synthetic is propagated by the
+	// shallow Context-copy inside Envelope.Clone, matching every other
+	// EnvelopeContext field.
+	Synthetic bool
 }
 
 // TLSSnapshot captures TLS connection metadata observed during handshake.

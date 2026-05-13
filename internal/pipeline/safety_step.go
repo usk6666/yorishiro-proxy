@@ -46,8 +46,16 @@ func NewSafetyStep(httpEngine *httprules.SafetyEngine, wsEngine *wsrules.SafetyE
 
 // Process checks Send-direction envelopes against safety rules. Receive
 // direction always passes through.
+//
+// USK-854: proxy-synthesized envelopes (Context.Synthetic=true) bypass
+// safety matching. Synthetic frames carry no attacker-influenced payload
+// — they are proxy-originated keepalive Pings with empty payload (RFC
+// 6455 §5.5.2 permits zero-byte Ping).
 func (s *SafetyStep) Process(ctx context.Context, env *envelope.Envelope) Result {
 	if env.Direction != envelope.Send {
+		return Result{}
+	}
+	if env.Context.Synthetic {
 		return Result{}
 	}
 

@@ -132,6 +132,36 @@ type SessionOptions struct {
 	// Implementations must not block the relay goroutine; the production
 	// recorder writes asynchronously via the store's single-writer queue.
 	OnInterceptReleaseEOF func(ctx context.Context, streamID string)
+
+	// InterceptHoldTracker, when non-nil, is the shared HoldTracker that
+	// InterceptStep stamps on hold-enter / hold-exit. The session relay
+	// goroutines query it on each USK-854 keepalive tick to learn whether
+	// a hold is still in flight. A nil tracker disables the keepalive
+	// injection entirely (the only effect is that WSHoldKeepaliveEnabled
+	// has no observable behaviour).
+	InterceptHoldTracker *common.HoldTracker
+
+	// WSHoldKeepaliveEnabled toggles the USK-854 synthetic WS Ping
+	// injection during a hold. Default false: keepalive is opt-in because
+	// Ping injection is wire-observable. Resolved from
+	// ProxyConfig.WebSocket.HoldKeepaliveEnabled (USK-799 precedent: wire
+	// caps on ProxyConfig per-protocol section, not in a top-level
+	// intercept namespace).
+	WSHoldKeepaliveEnabled bool
+
+	// WSHoldKeepaliveInterval is the cadence at which the keepalive
+	// goroutine emits synthetic Ping frames while a hold is in flight.
+	// Zero falls back to config.DefaultWSHoldKeepaliveInterval (5s).
+	WSHoldKeepaliveInterval time.Duration
+
+	// PluginEngine, when non-nil, is the pluginv2 Engine consulted by the
+	// USK-854 keepalive goroutine for the per-Stream opt-out. A plugin
+	// sets ctx.stream_state["ws_hold_keepalive"] = False from a
+	// (ws, on_upgrade, pre) hook to suppress injection on a specific
+	// Stream without disabling the global config knob. Distinct from
+	// LifecycleEngine semantically — both fields typically point at the
+	// same *pluginv2.Engine in production.
+	PluginEngine *pluginv2.Engine
 }
 
 // interceptReleaseEOFDefaultWindow is the canonical correlation window for
@@ -797,8 +827,20 @@ func runUpgradeWS(
 	if !ok || upstreamWSCh == nil {
 		return errors.New("session: upstream ws layer produced no Channel")
 	}
+
+	// USK-854: arm the WS hold-window keepalive against the upstream WS
+	// Channel. The wrapped Channel routes Send through a shared mutex so
+	// the keepalive goroutine and dispatchClientAction observe single-
+	// flight Sends. wrapWSChannelForKeepalive returns the bare Channel
+	// + nil sender when keepalive is disabled, so non-WS sessions and
+	// opt-in misses incur no overhead.
+	wrappedUpstreamCh, keepaliveSender := wrapWSChannelForKeepalive(upstreamWSCh, userOpt)
+	keepaliveConnID := wsChannelConnID(upstreamWSCh)
+	keepaliveStop := startWSHoldKeepalive(ctx, userOpt, keepaliveSender, clientStreamID, envelope.Send, keepaliveConnID)
+	defer keepaliveStop()
+
 	upgradeDial := DialFunc(func(_ context.Context, _ *envelope.Envelope) (layer.Channel, error) {
-		return upstreamWSCh, nil
+		return wrappedUpstreamCh, nil
 	})
 
 	// USK-841 Phase A milestone (d): the post-swap recursive session is
@@ -1152,6 +1194,25 @@ func wsRelayDirection(
 	// truth matches what the rest of the session does (streamCapture
 	// pattern in RunSession).
 	streamID := src.StreamID()
+
+	// USK-854: wrap the dst Send call site with a per-relay-direction
+	// serialiser so the keepalive goroutine can co-Send synthetic Ping
+	// frames without violating wsChannel.Send's "caller-serialised"
+	// contract. dstDir is the direction the keepalive goroutine stamps on
+	// its synthetic envelopes (the WS Layer composes wire frames from
+	// env.Message, not env.Direction, so the value is informational).
+	//
+	// dst-side direction mapping: when the main relay reads from a client
+	// ws.Layer (RoleServer) and writes to an upstream ws.Layer (RoleClient),
+	// the synthetic Ping leaves the proxy heading toward the upstream —
+	// envelope.Send. The keepalive watches the HoldTracker on the same
+	// (streamID, srcDir) pair the InterceptStep stamps (because the held
+	// envelope was the one we received from src on its way to dst).
+	sender := newWSSendSerializer(dst)
+	connID := wsRelayConnID(src, dst)
+	stop := startWSHoldKeepalive(ctx, userOpt, sender, streamID, srcDir, connID)
+	defer stop()
+
 	for {
 		env, err := src.Next(ctx)
 		if err != nil {
@@ -1170,10 +1231,48 @@ func wsRelayDirection(
 		if env == nil {
 			continue
 		}
-		if serr := dst.Send(ctx, env); serr != nil {
+		if serr := sender.Send(ctx, env); serr != nil {
 			return fmt.Errorf("ws/h2 relay: dst.Send: %w", serr)
 		}
 	}
+}
+
+// wsRelayConnID derives the EnvelopeContext.ConnID from whichever Channel
+// exposes a non-empty value via a ContextSnapshot-like accessor. Today the
+// WS Channel does not expose its ctxTmpl directly; we fall back to the
+// emitted first-envelope's ConnID if needed (read at relay-loop time).
+// The plugin opt-out only requires ConnID to be non-empty when a plugin
+// has set stream_state via a (ws, on_upgrade, pre) hook — that hook fires
+// with the canonical envelope context populated by the http1 / http2
+// upgrade path, so the stream_state lookup at runtime sees the SAME
+// ConnID regardless of how the keepalive obtains it.
+//
+// Returns the empty string when neither Channel exposes a ConnID; the
+// keepalive then skips the plugin opt-out lookup (and defaults to "no
+// opt-out", which is the conservative behaviour for the opt-in feature).
+func wsRelayConnID(src, dst layer.Channel) string {
+	if c := wsChannelConnID(src); c != "" {
+		return c
+	}
+	return wsChannelConnID(dst)
+}
+
+// wsChannelConnIDSnapshot is the narrow interface a Channel can implement
+// to expose its EnvelopeContext.ConnID. Currently only *ws.wsChannel
+// implements it via a tiny accessor (see internal/layer/ws/channel.go).
+// Test stacks that pass other Channel types fall back to the empty string.
+type wsChannelConnIDSnapshot interface {
+	EnvelopeConnID() string
+}
+
+func wsChannelConnID(ch layer.Channel) string {
+	if ch == nil {
+		return ""
+	}
+	if s, ok := ch.(wsChannelConnIDSnapshot); ok {
+		return s.EnvelopeConnID()
+	}
+	return ""
 }
 
 // wsRelayNextErr maps an src.Next error into the wsRelayDirection return
@@ -1622,6 +1721,11 @@ func dispatchClientAction(
 		close(uh.ready)
 	}
 
+	// USK-854: when uh.ch is the serializedSendChannel wrapper installed
+	// by runUpgradeWS, .Send routes through the shared sync.Mutex so the
+	// keepalive goroutine and this main path co-Send without violating
+	// wsChannel.Send's "caller-serialised" contract. Non-WS sessions
+	// see the bare Channel and incur no overhead.
 	if serr := uh.ch.Send(ctx, env); serr != nil {
 		return fmt.Errorf("upstream.Send: %w", serr)
 	}

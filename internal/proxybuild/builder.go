@@ -161,6 +161,14 @@ type Deps struct {
 	// disables the USK-851 detection without affecting wire behaviour.
 	InterceptReleaseTracker *common.ReleaseTracker
 
+	// InterceptHoldTracker is the shared HoldTracker stamped by
+	// InterceptStep on hold-enter and consulted by the session's USK-854
+	// WS hold-window keepalive goroutine on each tick. Wired via
+	// pipeline.InterceptStep.WithHoldTracker during Pipeline construction
+	// (the same pointer flows into SessionOptions for the keepalive). nil
+	// disables the USK-854 feature without affecting wire behaviour.
+	InterceptHoldTracker *common.HoldTracker
+
 	// --- Optional wire encoder registries ---
 
 	// WireEncoderRegistry is shared between PluginStepPost and RecordStep
@@ -531,7 +539,8 @@ func buildPipeline(deps Deps, encoders *pipeline.WireEncoderRegistry, logger *sl
 		pipeline.NewPluginStepPre(deps.PluginV2Engine, encoders, logger),
 		// safetyStep is shared with InterceptStep so a modify_and_forward
 		// release re-runs the same per-protocol input checks (USK-702).
-		pipeline.NewInterceptStep(deps.HTTPInterceptEngine, deps.WSInterceptEngine, deps.GRPCInterceptEngine, deps.HoldQueue, safetyStep, logger),
+		pipeline.NewInterceptStep(deps.HTTPInterceptEngine, deps.WSInterceptEngine, deps.GRPCInterceptEngine, deps.HoldQueue, safetyStep, logger).
+			WithHoldTracker(deps.InterceptHoldTracker),
 		pipeline.NewTransformStep(deps.HTTPTransformEngine, deps.WSTransformEngine, deps.GRPCTransformEngine),
 		pipeline.NewPluginStepPost(deps.PluginV2Engine, encoders, logger),
 		pipeline.NewRecordStep(deps.FlowStore, logger, recordOpts...),
@@ -904,6 +913,28 @@ func buildSessionOptions(deps Deps, listenerName string) session.SessionOptions 
 	if deps.BuildConfig != nil {
 		opts.WSMaxFrameSize = deps.BuildConfig.WSMaxFrameSize
 		opts.SSEMaxEventSize = deps.BuildConfig.SSEMaxEventSize
+		// USK-854: thread the WS hold-window keepalive config into
+		// SessionOptions. The serialiser + per-Stream goroutine spawn at
+		// the relay site (internal/session/session.go) is gated on these
+		// fields; nil pluginv2 engine and nil hold tracker disable the
+		// feature implicitly.
+		opts.WSHoldKeepaliveEnabled = deps.BuildConfig.WSHoldKeepaliveEnabled
+		opts.WSHoldKeepaliveInterval = deps.BuildConfig.WSHoldKeepaliveInterval
+	}
+	// USK-854: thread the InterceptHoldTracker (shared with InterceptStep)
+	// so the keepalive goroutine can poll for in-flight holds. A nil
+	// tracker disables the feature regardless of WSHoldKeepaliveEnabled.
+	if deps.InterceptHoldTracker != nil {
+		opts.InterceptHoldTracker = deps.InterceptHoldTracker
+	}
+	// USK-854: expose the pluginv2 Engine on SessionOptions.PluginEngine
+	// so the keepalive goroutine's per-Stream opt-out lookup (the canonical
+	// stream_state["ws_hold_keepalive"] key) finds the same Engine used by
+	// PluginPre/Post. The LifecycleEngine field cannot be reused for this
+	// purpose because it has a narrower contractual surface (StateReleaser
+	// only). The pointers typically refer to the same *pluginv2.Engine.
+	if deps.PluginV2Engine != nil {
+		opts.PluginEngine = deps.PluginV2Engine
 	}
 	if deps.FlowStore != nil {
 		store := deps.FlowStore

@@ -431,6 +431,7 @@ func assembleLiveManager(
 	pluginv2Engine *pluginv2.Engine,
 	holdQueue *rulescommon.HoldQueue,
 	releaseTracker *rulescommon.ReleaseTracker,
+	holdTracker *rulescommon.HoldTracker,
 	httpInterceptEngine *httprules.InterceptEngine,
 	wsInterceptEngine *wsrules.InterceptEngine,
 	grpcInterceptEngine *grpcrules.InterceptEngine,
@@ -448,7 +449,7 @@ func assembleLiveManager(
 ) (*proxybuild.Manager, error) {
 	buildCfg := NewLiveBuildConfig(cfg, proxyCfg, issuer, pluginv2Engine, hostTLSRegistry)
 	return NewLiveManager(cfg, proxyCfg, store, issuer, pluginv2Engine,
-		holdQueue, releaseTracker, httpInterceptEngine, wsInterceptEngine, grpcInterceptEngine,
+		holdQueue, releaseTracker, holdTracker, httpInterceptEngine, wsInterceptEngine, grpcInterceptEngine,
 		httpTransformEngine, passthrough, targetScope, rateLimiter, budgetManager, safetyEngine, perProtoSafety, buildCfg,
 		socks5Negotiator, recordScope, logger)
 }
@@ -484,6 +485,10 @@ func NewLiveBuildConfig(
 	bc.HostTLSResolver = connector.NewHostTLSResolver(proxyCfg.HostTLS)
 	bc.WSMaxFrameSize = config.ResolveWSMaxFrameSize(proxyCfg.WebSocket)
 	bc.WSDeflateEnabled = config.ResolveWSDeflateEnabled(proxyCfg.WebSocket)
+	// USK-854: WS hold-window keepalive injection. Opt-in by design (the
+	// resolver returns false unless the operator set the config field).
+	bc.WSHoldKeepaliveEnabled = config.ResolveWSHoldKeepaliveEnabled(proxyCfg.WebSocket)
+	bc.WSHoldKeepaliveInterval = config.ResolveWSHoldKeepaliveInterval(proxyCfg.WebSocket)
 	bc.GRPCMaxMessageSize = uint32(config.ResolveGRPCMaxMessageSize(proxyCfg.GRPC))
 	bc.SSEMaxEventSize = config.ResolveSSEMaxEventSize(proxyCfg.SSE)
 	// USK-802: per-Stream record caps for streaming protocols. Resolved into
@@ -516,6 +521,7 @@ func NewLiveManager(
 	pluginv2Engine *pluginv2.Engine,
 	holdQueue *rulescommon.HoldQueue,
 	releaseTracker *rulescommon.ReleaseTracker,
+	holdTracker *rulescommon.HoldTracker,
 	httpInterceptEngine *httprules.InterceptEngine,
 	wsInterceptEngine *wsrules.InterceptEngine,
 	grpcInterceptEngine *grpcrules.InterceptEngine,
@@ -548,6 +554,7 @@ func NewLiveManager(
 			BuildConfig:             buildCfg,
 			HoldQueue:               holdQueue,
 			InterceptReleaseTracker: releaseTracker,
+			InterceptHoldTracker:    holdTracker,
 			HTTPInterceptEngine:     httpInterceptEngine,
 			WSInterceptEngine:       wsInterceptEngine,
 			GRPCInterceptEngine:     grpcInterceptEngine,

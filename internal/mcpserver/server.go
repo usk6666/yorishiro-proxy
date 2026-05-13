@@ -232,6 +232,11 @@ func Run(ctx context.Context, fs *flag.FlagSet, args []string, opts RunOptions) 
 	// both halves ensures the operator-facing Stream tag fires regardless
 	// of which listener the affected Stream belongs to.
 	releaseTracker := rulescommon.NewReleaseTracker()
+	// USK-854: process-singleton HoldTracker stamped by every live
+	// InterceptStep on hold-enter and queried by the session keepalive
+	// goroutine on each tick. Sibling of ReleaseTracker — independent
+	// state (in-flight hold vs. recently released).
+	holdTracker := rulescommon.NewHoldTracker()
 	httpInterceptEngine := httprules.NewInterceptEngine()
 	wsInterceptEngine := wsrules.NewInterceptEngine()
 	grpcInterceptEngine := grpcrules.NewInterceptEngine()
@@ -260,7 +265,7 @@ func Run(ctx context.Context, fs *flag.FlagSet, args []string, opts RunOptions) 
 	}
 
 	return assembleAndRunMCPServer(ctx, cfg, proxyCfg, ca, issuer, store, pluginv2Engine,
-		holdQueue, releaseTracker, httpInterceptEngine, wsInterceptEngine, grpcInterceptEngine,
+		holdQueue, releaseTracker, holdTracker, httpInterceptEngine, wsInterceptEngine, grpcInterceptEngine,
 		httpTransformEngine, passthrough,
 		targetScopePolicy, targetScopePolicySource, openBrowser, stdioMCP, versionStr, opts.OnHTTPListening, logger)
 }
@@ -279,6 +284,7 @@ func assembleAndRunMCPServer(
 	pluginv2Engine *pluginv2.Engine,
 	holdQueue *rulescommon.HoldQueue,
 	releaseTracker *rulescommon.ReleaseTracker,
+	holdTracker *rulescommon.HoldTracker,
 	httpInterceptEngine *httprules.InterceptEngine,
 	wsInterceptEngine *wsrules.InterceptEngine,
 	grpcInterceptEngine *grpcrules.InterceptEngine,
@@ -341,7 +347,7 @@ func assembleAndRunMCPServer(
 	recordScope := flow.NewRecordScope()
 
 	manager, err := assembleLiveManager(cfg, proxyCfg, store, issuer, pluginv2Engine,
-		holdQueue, releaseTracker, httpInterceptEngine, wsInterceptEngine, grpcInterceptEngine,
+		holdQueue, releaseTracker, holdTracker, httpInterceptEngine, wsInterceptEngine, grpcInterceptEngine,
 		httpTransformEngine, passthrough, targetScope, rateLimiter, budgetManager, safetyEngine, perProtoSafety, hostTLSRegistry,
 		socks5Negotiator, recordScope, logger)
 	if err != nil {

@@ -1,6 +1,9 @@
 package config
 
-import "fmt"
+import (
+	"fmt"
+	"time"
+)
 
 // WebSocketLimits holds runtime limits for the WebSocket Layer
 // (internal/layer/ws). Fields are pointers/values designed for "nil = use
@@ -19,7 +22,40 @@ type WebSocketLimits struct {
 	// true: a plain bool would silently disable deflate on any config that
 	// omits the field. Nil = use default (true).
 	DeflateEnabled *bool `json:"deflate_enabled,omitempty"`
+
+	// HoldKeepaliveEnabled toggles the USK-854 WS hold-window keepalive
+	// injection. When the proxy holds a WS frame in the intercept queue
+	// (operator pauses an analyst review past the upstream's WS idle
+	// timeout), the per-Stream keepalive goroutine emits synthetic Ping
+	// frames (RFC 6455 §5.5.2) so the upstream's idle timer does not
+	// expire and the released frame lands on a still-live connection.
+	//
+	// Default false: keepalive is opt-in because Ping injection is wire-
+	// observable. Pentesters who want to test "what happens when frame X
+	// is delayed 30s?" need the unmodified observation surface; enabling
+	// keepalive would change that surface. Operators who care more about
+	// conversation survival than wire-level fidelity flip this to true.
+	//
+	// Plugin opt-out is also available: a plugin can set
+	// ctx.stream_state["ws_hold_keepalive"] = False inside a (ws,
+	// on_upgrade, pre) hook to suppress injection per-Stream regardless
+	// of the global config.
+	HoldKeepaliveEnabled *bool `json:"hold_keepalive_enabled,omitempty"`
+
+	// HoldKeepaliveInterval is the cadence at which the keepalive
+	// goroutine emits synthetic Ping frames while a hold is in flight.
+	// Zero (or omitted) selects DefaultWSHoldKeepaliveInterval (5s),
+	// chosen to sit comfortably below the lowest known upstream WS idle
+	// timeout the project cares about (~10s Fly.io edge). Negative values
+	// are rejected by ValidateProtocolLimits.
+	HoldKeepaliveInterval Duration `json:"hold_keepalive_interval,omitempty"`
 }
+
+// DefaultWSHoldKeepaliveInterval is the default tick interval for the
+// USK-854 keepalive goroutine. 5s comfortably stays under the lowest
+// upstream idle timeout the project has empirically observed (~10s
+// Fly.io edge). Operators can override via WebSocketLimits.HoldKeepaliveInterval.
+const DefaultWSHoldKeepaliveInterval = 5 * time.Second
 
 // GRPCLimits holds runtime limits shared by the gRPC and gRPC-Web Layers
 // (internal/layer/grpc, internal/layer/grpcweb). Both packages enforce the
@@ -77,6 +113,33 @@ func ResolveWSDeflateEnabled(ws *WebSocketLimits) bool {
 		return true
 	}
 	return *ws.DeflateEnabled
+}
+
+// ResolveWSHoldKeepaliveEnabled returns the configured HoldKeepaliveEnabled
+// value, or the default false when ws is nil or the field is unset. The
+// USK-854 keepalive is opt-in (default false) to preserve wire-level
+// observation for pentesters who need to time-shift held frames without
+// proxy-injected Pings.
+func ResolveWSHoldKeepaliveEnabled(ws *WebSocketLimits) bool {
+	if ws == nil || ws.HoldKeepaliveEnabled == nil {
+		return false
+	}
+	return *ws.HoldKeepaliveEnabled
+}
+
+// ResolveWSHoldKeepaliveInterval returns the configured tick interval, or
+// DefaultWSHoldKeepaliveInterval when ws is nil or the field is zero.
+// Negative values are clamped at the default — ValidateProtocolLimits
+// rejects them at config load, so this is a defensive belt-and-braces.
+func ResolveWSHoldKeepaliveInterval(ws *WebSocketLimits) time.Duration {
+	if ws == nil {
+		return DefaultWSHoldKeepaliveInterval
+	}
+	d := time.Duration(ws.HoldKeepaliveInterval)
+	if d <= 0 {
+		return DefaultWSHoldKeepaliveInterval
+	}
+	return d
 }
 
 // ResolveGRPCMaxMessageSize returns g.MaxMessageSize when positive, else
@@ -176,6 +239,9 @@ func ValidateProtocolLimits(c *ProxyConfig) error {
 		// MaxFrameSize is int64; the WebSocket Layer Option signature is
 		// also int64 (WithMaxFrameSize). No upper-bound check here — the
 		// CWE-400 cap is the operator's responsibility.
+		if d := time.Duration(c.WebSocket.HoldKeepaliveInterval); d < 0 {
+			return fmt.Errorf("web_socket.hold_keepalive_interval must be >= 0, got %s", d)
+		}
 	}
 	// grpc.MaxMessageSize is uint32 so it cannot be negative; only the
 	// MaxMessagesPerStream (int) needs a syntactic check. Resolve* applies
