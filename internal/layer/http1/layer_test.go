@@ -1519,15 +1519,17 @@ func TestChannel_RoundTrip_ZeroCopy(t *testing.T) {
 	}
 }
 
-// --- pluginv2 StateReleaser wiring (USK-682) ---
+// --- pluginv2 StateReleaser wiring (USK-682, USK-853) ---
 
-// recordingReleaser captures every ReleaseTransaction call so a test can
-// assert which terminal path released which FlowID. ReleaseStream is a
-// no-op for HTTP/1 — Q26 maps the HTTP transaction scope to (ConnID,
-// FlowID) only.
+// recordingReleaser captures every ReleaseTransaction and ReleaseStream
+// call so a test can assert which terminal path released which key.
+// USK-682 introduced ReleaseTransaction recording; USK-853 promoted
+// ReleaseStream from a no-op to a recording method now that http1.Layer
+// fires per-Channel stream-scope releases at terminal state.
 type recordingReleaser struct {
-	mu  sync.Mutex
-	txs []releaseEvent
+	mu      sync.Mutex
+	txs     []releaseEvent
+	streams []releaseEvent
 }
 
 type releaseEvent struct {
@@ -1535,7 +1537,11 @@ type releaseEvent struct {
 	id     string
 }
 
-func (r *recordingReleaser) ReleaseStream(_, _ string) {}
+func (r *recordingReleaser) ReleaseStream(connID, id string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.streams = append(r.streams, releaseEvent{connID: connID, id: id})
+}
 
 func (r *recordingReleaser) ReleaseTransaction(connID, id string) {
 	r.mu.Lock()
@@ -1555,6 +1561,20 @@ func (r *recordingReleaser) count() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return len(r.txs)
+}
+
+func (r *recordingReleaser) streamSnapshot() []releaseEvent {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]releaseEvent, len(r.streams))
+	copy(out, r.streams)
+	return out
+}
+
+func (r *recordingReleaser) streamCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.streams)
 }
 
 func TestHTTP1Layer_StateReleaserFiresPerTransaction(t *testing.T) {
@@ -1766,6 +1786,219 @@ func TestHTTP1Layer_StateReleaserOnConnectionClose(t *testing.T) {
 			t.Fatalf("releases with empty ConnID = %d, want 0", got)
 		}
 	})
+}
+
+// --- USK-853: ReleaseStream wiring on terminal ---
+
+// TestHTTP1Layer_ReleaseStream_FiresOnConnectionClose verifies that each
+// Send-direction Channel terminating fires exactly one ReleaseStream call
+// keyed by (ConnID, currentStreamID). N keep-alive exchanges → N
+// ReleaseStream events; the captured ids are the per-exchange StreamIDs
+// minted by parseRequest, NOT the connection-level Layer.streamID.
+func TestHTTP1Layer_ReleaseStream_FiresOnConnectionClose(t *testing.T) {
+	client, server := testConn(t)
+	defer client.Close()
+	defer server.Close()
+
+	rec := &recordingReleaser{}
+	l := New(server, "conn-1", envelope.Send,
+		WithEnvelopeContext(envelope.EnvelopeContext{ConnID: "test-conn"}),
+		WithStateReleaser(rec),
+	)
+
+	reqs := "GET /first HTTP/1.1\r\nHost: example.com\r\nContent-Length: 0\r\n\r\n" +
+		"GET /second HTTP/1.1\r\nHost: example.com\r\nContent-Length: 0\r\n\r\n" +
+		"GET /third HTTP/1.1\r\nHost: example.com\r\nContent-Length: 0\r\n\r\n"
+	go func() {
+		_, _ = client.Write([]byte(reqs))
+		_ = client.Close()
+	}()
+
+	streamIDs := make([]string, 0, 3)
+	for i := 0; i < 3; i++ {
+		ch := <-l.Channels()
+		if ch == nil {
+			t.Fatalf("Channels() yielded nil at i=%d", i)
+		}
+		env, err := ch.Next(context.Background())
+		if err != nil {
+			t.Fatalf("Next #%d: %v", i+1, err)
+		}
+		streamIDs = append(streamIDs, env.StreamID)
+		if env.StreamID == "" {
+			t.Fatalf("Next #%d: empty StreamID", i+1)
+		}
+		_ = ch.Close()
+	}
+
+	_ = l.Close()
+
+	snap := rec.streamSnapshot()
+	if len(snap) != 3 {
+		t.Fatalf("ReleaseStream count = %d, want 3 — snapshot=%+v", len(snap), snap)
+	}
+	wantIDs := map[string]bool{}
+	for _, id := range streamIDs {
+		wantIDs[id] = true
+	}
+	for i, ev := range snap {
+		if ev.connID != "test-conn" {
+			t.Errorf("[%d] connID = %q, want test-conn", i, ev.connID)
+		}
+		if !wantIDs[ev.id] {
+			t.Errorf("[%d] StreamID %q not among emitted StreamIDs %v", i, ev.id, streamIDs)
+		}
+	}
+}
+
+// TestHTTP1Layer_ReleaseStream_TransfersOwnershipOnUpgrade verifies that
+// when the http1 Channel hands the wire off to a successor Layer (via
+// detachStream — the production Upgrade path), the http1.Layer suppresses
+// its own ReleaseStream. Ownership of the StreamID has transferred to the
+// post-swap Layer per USK-848 / Option (a).
+//
+// ReleaseTransaction still fires for any envelope the Channel emitted,
+// because the transaction scope is per-Flow and ends here regardless.
+func TestHTTP1Layer_ReleaseStream_TransfersOwnershipOnUpgrade(t *testing.T) {
+	client, server := testConn(t)
+	defer client.Close()
+	defer server.Close()
+
+	rec := &recordingReleaser{}
+	l := New(server, "conn-1", envelope.Send,
+		WithEnvelopeContext(envelope.EnvelopeContext{ConnID: "test-conn"}),
+		WithStateReleaser(rec),
+	)
+
+	req := "GET /ws HTTP/1.1\r\nHost: example.com\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nContent-Length: 0\r\n\r\n"
+	go func() {
+		_, _ = client.Write([]byte(req))
+	}()
+
+	ch := <-l.Channels()
+	if _, err := ch.Next(context.Background()); err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+
+	// Drive the Upgrade detach path: this is what the session orchestrator
+	// does after Send(101) and before constructing the ws.Layer. detachStream
+	// calls markDetached BEFORE markTerminated, so the isDetached() guard
+	// inside releaseStreamState fires.
+	if _, _, _, err := l.DetachStream(); err != nil {
+		t.Fatalf("DetachStream: %v", err)
+	}
+
+	// Layer.Close on a detached Layer is a conn-close no-op; the markTerminated
+	// call inside detachStream already fired with isDetached() == true.
+	_ = l.Close()
+
+	if got := rec.streamCount(); got != 0 {
+		t.Fatalf("ReleaseStream fired %d times after detach, want 0 (ownership transferred): %+v", got, rec.streamSnapshot())
+	}
+	// Transaction-scope release still fires for the request envelope.
+	if got := rec.count(); got != 1 {
+		t.Fatalf("ReleaseTransaction count = %d, want 1", got)
+	}
+}
+
+// TestHTTP1Layer_ReleaseStream_DirectionGate verifies that a
+// Receive-direction Layer does NOT fire ReleaseStream — the StreamID the
+// Receive Channel inherits is owned by the peer's Send-side, and firing
+// here would double-release across the proxy round-trip.
+//
+// Uses the legacy single-shot consumer pattern (the same one
+// TestChannel_NextResponse uses): pre-set currentStreamID on the
+// Channel before Next(), drive the response from the wire's other end,
+// then close. Next()'s built-in appendPending wires the Channel into the
+// pendingQ; no concurrent Send() is needed.
+func TestHTTP1Layer_ReleaseStream_DirectionGate(t *testing.T) {
+	client, server := testConn(t)
+	defer client.Close()
+	defer server.Close()
+
+	rec := &recordingReleaser{}
+	l := New(server, "conn-1", envelope.Receive,
+		WithEnvelopeContext(envelope.EnvelopeContext{ConnID: "test-conn"}),
+		WithStateReleaser(rec),
+	)
+
+	resp := "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello"
+	go func() {
+		_, _ = client.Write([]byte(resp))
+		_ = client.Close()
+	}()
+
+	ch := <-l.Channels()
+	// Seed currentStreamID the way session.RunSession would after a paired
+	// Send-side request: the Receive Channel inherits the peer's StreamID.
+	ch.(*channel).currentStreamID = "stream-from-peer"
+
+	if _, err := ch.Next(context.Background()); err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+	_ = ch.Close()
+	_ = l.Close()
+
+	if got := rec.streamCount(); got != 0 {
+		t.Fatalf("ReleaseStream fired %d times on Receive direction, want 0: %+v", got, rec.streamSnapshot())
+	}
+}
+
+// TestHTTP1Layer_ReleaseStream_EmptyStreamIDGuard verifies that a Channel
+// that terminates before parsing any request (currentStreamID == "")
+// does not issue a spurious ReleaseStream call. scopeStore.release is
+// idempotent on empty ids, but the Layer must not fire spuriously.
+func TestHTTP1Layer_ReleaseStream_EmptyStreamIDGuard(t *testing.T) {
+	client, server := testConn(t)
+	defer client.Close()
+	defer server.Close()
+
+	rec := &recordingReleaser{}
+	l := New(server, "conn-1", envelope.Send,
+		WithEnvelopeContext(envelope.EnvelopeContext{ConnID: "test-conn"}),
+		WithStateReleaser(rec),
+	)
+
+	// Close the client side immediately so the Send-direction Layer's
+	// parseRequest sees EOF before it ever mints a currentStreamID.
+	_ = client.Close()
+	_ = l.Close()
+
+	if got := rec.streamCount(); got != 0 {
+		t.Fatalf("ReleaseStream fired %d times with empty currentStreamID, want 0: %+v", got, rec.streamSnapshot())
+	}
+}
+
+// TestHTTP1Layer_ReleaseStream_EmptyConnIDGuard verifies the symmetric
+// guard: a Send-direction Layer whose EnvelopeContext has no ConnID does
+// not fire ReleaseStream.
+func TestHTTP1Layer_ReleaseStream_EmptyConnIDGuard(t *testing.T) {
+	client, server := testConn(t)
+	defer client.Close()
+	defer server.Close()
+
+	rec := &recordingReleaser{}
+	l := New(server, "conn-1", envelope.Send,
+		// No WithEnvelopeContext → ConnID is "".
+		WithStateReleaser(rec),
+	)
+
+	req := "GET / HTTP/1.1\r\nHost: example.com\r\nContent-Length: 0\r\n\r\n"
+	go func() {
+		_, _ = client.Write([]byte(req))
+		_ = client.Close()
+	}()
+
+	ch := <-l.Channels()
+	if _, err := ch.Next(context.Background()); err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+	_ = ch.Close()
+	_ = l.Close()
+
+	if got := rec.streamCount(); got != 0 {
+		t.Fatalf("ReleaseStream fired %d times with empty ConnID, want 0: %+v", got, rec.streamSnapshot())
+	}
 }
 
 // --- USK-701: Layer.Interrupt + DetachStream deadline reset tests ---

@@ -131,11 +131,15 @@ func (c *wsChannel) Close() error { return nil }
 //  2. fireOnClose — (ws, on_close) hooks run with transaction_state
 //     still live so plugin code can read whatever earlier on_message
 //     hooks stashed.
-//  3. releaseTransactionState — backing ScopedState is cleared after
-//     the hook returns.
+//  3. releaseTransactionState — backing ScopedState (transaction scope)
+//     is cleared after the hook returns.
+//  4. releaseStreamState — per-Stream ScopedState is cleared (USK-853).
+//     After USK-848 the handshake StreamID survived the protocol flip
+//     and is shared with this Channel; this Layer is the canonical
+//     owner that fires ReleaseStream.
 //
-// USK-670 reserved this exact ordering (channel.go documentation); USK-683
-// realises it.
+// USK-670 reserved the lifecycle ordering (channel.go documentation);
+// USK-683 realised on_close; USK-853 wires the Stream-scope release.
 func (c *wsChannel) markTerminated(err error) {
 	c.termOnce.Do(func() {
 		c.termMu.Lock()
@@ -146,6 +150,7 @@ func (c *wsChannel) markTerminated(err error) {
 		close(c.recvDone)
 		c.fireOnClose()
 		c.releaseTransactionState()
+		c.releaseStreamState()
 	})
 }
 
@@ -201,6 +206,19 @@ func (c *wsChannel) releaseTransactionState() {
 		return
 	}
 	c.opts.stateReleaser.ReleaseTransaction(c.opts.ctxTmpl.ConnID, c.streamID)
+}
+
+// releaseStreamState fires the configured pluginv2.StateReleaser for the
+// Channel's StreamID — the per-Stream scope cleanup added in USK-853 to
+// close the gap left by USK-848 (where the http1 handshake StreamID
+// survives the protocol flip and is shared with this Channel). No-op
+// when no releaser was configured, when ConnID is unset, or when
+// streamID is empty.
+func (c *wsChannel) releaseStreamState() {
+	if c.layer == nil {
+		return
+	}
+	c.layer.releaseStreamState(c.streamID)
 }
 
 // readDirection returns the Direction stamped on envelopes produced by

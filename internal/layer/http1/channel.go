@@ -481,6 +481,14 @@ func (c *channel) Err() error {
 
 // markTerminated stores err (first-writer-wins) and closes termDone exactly
 // once. Callers must guarantee err is non-nil.
+//
+// On the first call we also fire pluginv2 state release in two waves:
+// per-transaction first (via releaseTransactionStates — one fire per
+// emitted FlowID), then per-stream (via releaseStreamState — one fire
+// for the Channel's minted StreamID). The stream release is gated to
+// the Send-direction owner and suppressed when the Layer has been
+// detached so ownership of the StreamID transfers to the post-swap
+// Layer (USK-853 / RFC §9.3 D6).
 func (c *channel) markTerminated(err error) {
 	c.termMu.Lock()
 	if c.termErr == nil {
@@ -490,6 +498,7 @@ func (c *channel) markTerminated(err error) {
 	c.termOnce.Do(func() {
 		close(c.termDone)
 		c.releaseTransactionStates()
+		c.releaseStreamState()
 	})
 }
 
@@ -526,6 +535,39 @@ func (c *channel) releaseTransactionStates() {
 	for _, flowID := range snapshot {
 		c.stateReleaser.ReleaseTransaction(connID, flowID)
 	}
+}
+
+// releaseStreamState fires the configured pluginv2.StateReleaser for the
+// Channel's minted per-exchange StreamID exactly once at terminal state
+// (USK-853). The HTTP/1.x Channel is the canonical owner of
+// currentStreamID, so the release here mirrors the http2 Channel pattern
+// at internal/layer/http2/channel.go:157.
+//
+// Gates (USK-853 design D3/D4/D5):
+//   - Send-direction only: avoids a double-fire across the proxy
+//     round-trip; the Receive-direction Channel inherits a peer's
+//     StreamID rather than minting its own.
+//   - Suppress when the Layer is detached: post-Upgrade ownership of
+//     the StreamID transferred to the successor (ws / sse) Layer, which
+//     fires its own release at terminal — Option (a) per Issue
+//     acceptance #3.
+//   - Empty ConnID / empty StreamID short-circuit (scopeStore.release is
+//     idempotent on these, but the Layer should not issue spurious
+//     calls).
+func (c *channel) releaseStreamState() {
+	if c.stateReleaser == nil {
+		return
+	}
+	if c.direction != envelope.Send {
+		return
+	}
+	if c.layer != nil && c.layer.isDetached() {
+		return
+	}
+	if c.currentStreamID == "" || c.ctxTmpl.ConnID == "" {
+		return
+	}
+	c.stateReleaser.ReleaseStream(c.ctxTmpl.ConnID, c.currentStreamID)
 }
 
 // --- Parse implementations (called by Layer.spawnLoop) ---

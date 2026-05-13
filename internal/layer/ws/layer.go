@@ -274,6 +274,31 @@ func New(reader io.Reader, writer io.Writer, closer io.Closer, streamID string, 
 // receives return the zero value and ok=false (one-shot semantics).
 func (l *Layer) Channels() <-chan layer.Channel { return l.ch }
 
+// releaseStreamState fires the configured pluginv2.StateReleaser for the
+// Channel's StreamID — the per-Stream scope cleanup mandated by RFC §9.3
+// D6 (USK-853). Mirrors http2.Layer.releaseStreamState. No-op when no
+// releaser was configured, when ConnID is unset, or when streamID is
+// empty.
+//
+// After USK-848 (PR #843) the http1 handshake StreamID survives the
+// protocol flip and is shared with this WS Channel; firing here is what
+// makes Option (a) ownership-transfer work — the http1 Channel suppresses
+// its own release when detached, and the post-swap ws Channel issues the
+// canonical fire.
+func (l *Layer) releaseStreamState(streamID string) {
+	if l.channel == nil || l.channel.opts == nil {
+		return
+	}
+	o := l.channel.opts
+	if o.stateReleaser == nil {
+		return
+	}
+	if o.ctxTmpl.ConnID == "" || streamID == "" {
+		return
+	}
+	o.stateReleaser.ReleaseStream(o.ctxTmpl.ConnID, streamID)
+}
+
 // Close cascades closer.Close() to the underlying transport and marks the
 // inner Channel terminated. Idempotent via sync.Once: a second Close
 // returns the cached error from the first call (typically nil).
