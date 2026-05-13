@@ -19,19 +19,24 @@ const DefaultHoldTimeout = 5 * time.Minute
 const DefaultMaxQueueItems = 100
 
 // DefaultHoldTimeoutWS is the default per-protocol hold-timeout for the
-// WebSocket Protocol. Chosen below the commonly-observed ~10s upstream
-// edge-idle threshold (e.g. Fly.io edge) so a held WS frame is auto-
-// released before the upstream half-closes the conversation. See USK-855
-// (USK-851 follow-up B).
-const DefaultHoldTimeoutWS = 8 * time.Second
+// WebSocket Protocol. Matches DefaultHoldTimeoutGRPC at 60s, providing a
+// human-review window for AI-agent intercept loops (query intercept_queue
+// → reason → intercept modify_and_forward typically takes 4–10s). The
+// earlier 8s edge-idle safety margin (USK-855) is no longer required
+// because USK-854's hold-window keepalive injection now keeps the
+// upstream alive during a hold, so the ~10s upstream edge-idle window
+// (e.g. Fly.io edge) no longer races the human-review latency. See
+// USK-863.
+const DefaultHoldTimeoutWS = 60 * time.Second
 
 // DefaultHoldTimeoutSSE is the default per-protocol hold-timeout for the
-// SSE Protocol. Mirrors DefaultHoldTimeoutWS for the same edge-idle
-// rationale. Note: SSE currently passes through InterceptStep unchanged
-// (no per-protocol intercept engine yet — see internal/pipeline/
-// intercept_step.go's SSE arm), so this default is forward-compat. It
-// activates only when an SSE intercept engine starts enqueuing frames.
-const DefaultHoldTimeoutSSE = 8 * time.Second
+// SSE Protocol. Mirrors DefaultHoldTimeoutWS at 60s for the same
+// human-review rationale. Note: SSE currently passes through
+// InterceptStep unchanged (no per-protocol intercept engine yet — see
+// internal/pipeline/intercept_step.go's SSE arm), so this default is
+// forward-compat. It activates only when an SSE intercept engine starts
+// enqueuing frames. See USK-863.
+const DefaultHoldTimeoutSSE = 60 * time.Second
 
 // DefaultHoldTimeoutGRPC is the default per-protocol hold-timeout for the
 // gRPC Protocol. 60s leaves room for human review of held RPCs while
