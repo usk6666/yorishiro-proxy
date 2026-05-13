@@ -140,6 +140,36 @@ type configureInterceptQueue struct {
 	// TimeoutBehavior specifies what happens when a blocked request times out.
 	// Valid values: "auto_release" (default) or "auto_drop".
 	TimeoutBehavior string `json:"timeout_behavior,omitempty" jsonschema:"timeout behavior: auto_release (default) or auto_drop"`
+
+	// ProtocolOverrides maps canonical envelope.Protocol keys to a
+	// per-protocol hold-timeout / timeout-behavior override (USK-855).
+	//
+	// Merge semantics: each map entry overwrites the keyed override;
+	//   a JSON null value removes that key from the override map.
+	// Replace semantics: the entire map atomically replaces the
+	//   existing per-protocol override set; missing keys clear any
+	//   prior override for that protocol.
+	//
+	// Valid keys: "http", "ws", "grpc", "grpc-web", "sse", "raw",
+	// "tls-handshake". The literal "http2" is NOT a valid key — both
+	// HTTP/1 and HTTP/2 envelope as "http".
+	ProtocolOverrides map[string]*configureInterceptQueueProtocolOverride `json:"protocol_overrides,omitempty" jsonschema:"per-protocol hold-timeout overrides (canonical envelope.Protocol keys; null value clears the entry on merge)"`
+}
+
+// configureInterceptQueueProtocolOverride holds a per-protocol
+// hold-timeout / timeout-behavior override for the configure tool's
+// intercept_queue.protocol_overrides field. Pointer fields are optional;
+// a nil sub-field inherits the global per-field.
+type configureInterceptQueueProtocolOverride struct {
+	// TimeoutMs is the per-protocol hold timeout in milliseconds.
+	// Nil leaves the existing per-protocol override (or global) in
+	// place. Validation rejects positive values below 1000.
+	TimeoutMs *int `json:"timeout_ms,omitempty" jsonschema:"per-protocol hold timeout in milliseconds (>= 1000)"`
+
+	// TimeoutBehavior is the per-protocol timeout-expiry behavior.
+	// Empty leaves the existing per-protocol override (or global) in
+	// place. Valid values: "auto_release", "auto_drop".
+	TimeoutBehavior string `json:"timeout_behavior,omitempty" jsonschema:"per-protocol timeout behavior: auto_release or auto_drop"`
 }
 
 // configureTLSPassthrough holds TLS passthrough configuration for both merge and replace operations.
@@ -310,9 +340,19 @@ type configureClientCertResult struct {
 
 // configureInterceptQueueResult summarizes intercept queue state in the configure response.
 type configureInterceptQueueResult struct {
+	TimeoutMs         int64                                                 `json:"timeout_ms"`
+	TimeoutBehavior   string                                                `json:"timeout_behavior"`
+	QueuedItems       int                                                   `json:"queued_items"`
+	ProtocolOverrides map[string]configureInterceptQueueProtocolOverrideRes `json:"protocol_overrides,omitempty"`
+}
+
+// configureInterceptQueueProtocolOverrideRes reflects the effective
+// (timeout, behavior) for a per-protocol entry. Values are resolved
+// (not raw input): the response always reports the wire-effective
+// numbers so callers can confirm a merge / replace landed.
+type configureInterceptQueueProtocolOverrideRes struct {
 	TimeoutMs       int64  `json:"timeout_ms"`
 	TimeoutBehavior string `json:"timeout_behavior"`
-	QueuedItems     int    `json:"queued_items"`
 }
 
 // configurePassthroughResult summarizes TLS passthrough state in the configure response.
@@ -496,7 +536,7 @@ func (s *Server) handleConfigureMerge(input configureInput) (*gomcp.CallToolResu
 	if err := s.configureMergeInterceptRules(input, result); err != nil {
 		return nil, nil, err
 	}
-	if err := s.configureInterceptQueue(input, result); err != nil {
+	if err := s.configureInterceptQueue("merge", input, result); err != nil {
 		return nil, nil, err
 	}
 	if err := s.configureMergeAutoTransform(input, result); err != nil {
@@ -537,7 +577,7 @@ func (s *Server) handleConfigureReplace(input configureInput) (*gomcp.CallToolRe
 	if err := s.configureReplaceInterceptRules(input, result); err != nil {
 		return nil, nil, err
 	}
-	if err := s.configureInterceptQueue(input, result); err != nil {
+	if err := s.configureInterceptQueue("replace", input, result); err != nil {
 		return nil, nil, err
 	}
 	if err := s.configureReplaceAutoTransform(input, result); err != nil {
@@ -699,15 +739,26 @@ func (s *Server) configureReplaceInterceptRules(input configureInput, result *co
 	return nil
 }
 
-// configureInterceptQueue applies intercept queue configuration if provided.
-func (s *Server) configureInterceptQueue(input configureInput, result *configureResult) error {
+// configureInterceptQueue applies intercept queue configuration if
+// provided. The operation argument selects merge vs replace semantics
+// for the per-protocol overrides map (USK-855):
+//   - "merge": each map entry overwrites the keyed override; a JSON
+//     null value removes that key.
+//   - "replace": the entire map atomically replaces existing per-
+//     protocol overrides; missing keys clear any prior override.
+//
+// Scalar fields (TimeoutMs / TimeoutBehavior) always merge: nil leaves
+// the current value, non-nil/non-empty overwrites it. This matches the
+// pre-USK-855 behaviour and avoids a regression for callers who only
+// touch the global timeout.
+func (s *Server) configureInterceptQueue(operation string, input configureInput, result *configureResult) error {
 	if input.InterceptQueue == nil {
 		return nil
 	}
 	if s.pipeline.holdQueue == nil {
 		return fmt.Errorf("intercept queue is not initialized: proxy may not be running")
 	}
-	if err := s.applyInterceptQueueConfig(input.InterceptQueue); err != nil {
+	if err := s.applyInterceptQueueConfig(operation, input.InterceptQueue); err != nil {
 		return fmt.Errorf("intercept_queue: %w", err)
 	}
 	result.InterceptQueue = s.interceptQueueResult()
@@ -879,9 +930,11 @@ func (s *Server) interceptRulesResult() *configureInterceptResult {
 	}
 }
 
-// applyInterceptQueueConfig applies HoldQueue timeout and timeout-
-// behavior settings.
-func (s *Server) applyInterceptQueueConfig(cfg *configureInterceptQueue) error {
+// applyInterceptQueueConfig applies HoldQueue timeout, timeout-behavior,
+// and per-protocol overrides (USK-855). The operation argument selects
+// merge vs replace semantics for the protocol_overrides map only;
+// scalar fields always merge (nil leaves the current value).
+func (s *Server) applyInterceptQueueConfig(operation string, cfg *configureInterceptQueue) error {
 	if cfg.TimeoutMs != nil {
 		ms := *cfg.TimeoutMs
 		if ms < 1000 {
@@ -898,16 +951,118 @@ func (s *Server) applyInterceptQueueConfig(cfg *configureInterceptQueue) error {
 				cfg.TimeoutBehavior, common.TimeoutAutoRelease, common.TimeoutAutoDrop)
 		}
 	}
+	if cfg.ProtocolOverrides != nil {
+		if err := s.applyInterceptQueueProtocolOverrides(operation, cfg.ProtocolOverrides); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+// applyInterceptQueueProtocolOverrides applies a per-protocol override
+// map. For "replace" mode it first clears every existing per-protocol
+// override before applying the supplied map atomically; for "merge"
+// mode each entry overwrites the keyed override, and a JSON null value
+// removes that key. Validation rejects unknown protocol keys and
+// sub-floor timeouts.
+func (s *Server) applyInterceptQueueProtocolOverrides(operation string, overrides map[string]*configureInterceptQueueProtocolOverride) error {
+	// Pre-validate every entry before mutating state so an invalid
+	// payload rejects without leaving the queue half-applied.
+	for key, ov := range overrides {
+		proto := envelope.Protocol(key)
+		if !isCanonicalInterceptQueueProtocol(proto) {
+			return fmt.Errorf("protocol_overrides[%q]: unknown protocol key (valid keys: %s)",
+				key, canonicalInterceptQueueProtocolList())
+		}
+		if ov == nil {
+			continue
+		}
+		if ov.TimeoutMs != nil {
+			if *ov.TimeoutMs < 1000 {
+				return fmt.Errorf("protocol_overrides[%q].timeout_ms must be >= 1000, got %d",
+					key, *ov.TimeoutMs)
+			}
+		}
+		if ov.TimeoutBehavior != "" {
+			switch common.TimeoutBehavior(ov.TimeoutBehavior) {
+			case common.TimeoutAutoRelease, common.TimeoutAutoDrop:
+			default:
+				return fmt.Errorf("protocol_overrides[%q].timeout_behavior %q: must be %q or %q",
+					key, ov.TimeoutBehavior, common.TimeoutAutoRelease, common.TimeoutAutoDrop)
+			}
+		}
+	}
+
+	if operation == "replace" {
+		// Clear every existing per-protocol override so the supplied
+		// map is the new authoritative set.
+		for proto := range s.pipeline.holdQueue.ProtocolOverrides() {
+			s.pipeline.holdQueue.ClearProtocolOverride(proto)
+		}
+	}
+
+	for key, ov := range overrides {
+		proto := envelope.Protocol(key)
+		if ov == nil {
+			// Merge semantics: null clears the keyed override.
+			// Replace semantics: the entry is already cleared by the
+			// pass above; an explicit null is a no-op here.
+			s.pipeline.holdQueue.ClearProtocolOverride(proto)
+			continue
+		}
+		if ov.TimeoutMs != nil {
+			s.pipeline.holdQueue.SetProtocolTimeout(proto, time.Duration(*ov.TimeoutMs)*time.Millisecond)
+		}
+		if ov.TimeoutBehavior != "" {
+			s.pipeline.holdQueue.SetProtocolBehavior(proto, common.TimeoutBehavior(ov.TimeoutBehavior))
+		}
+	}
+	return nil
+}
+
+// isCanonicalInterceptQueueProtocol mirrors the config package's
+// canonical-key check. Duplicated here so the MCP tool rejects the
+// same key set as the file-config validator without a cross-package
+// dependency on an unexported identifier.
+func isCanonicalInterceptQueueProtocol(p envelope.Protocol) bool {
+	switch p {
+	case envelope.ProtocolHTTP,
+		envelope.ProtocolWebSocket,
+		envelope.ProtocolGRPC,
+		envelope.ProtocolGRPCWeb,
+		envelope.ProtocolSSE,
+		envelope.ProtocolRaw,
+		envelope.ProtocolTLSHandshake:
+		return true
+	}
+	return false
+}
+
+// canonicalInterceptQueueProtocolList returns the canonical Protocol
+// keys as a stable comma-separated string for error messages.
+func canonicalInterceptQueueProtocolList() string {
+	return "grpc, grpc-web, http, raw, sse, tls-handshake, ws"
 }
 
 // interceptQueueResult returns the current HoldQueue configuration state.
 func (s *Server) interceptQueueResult() *configureInterceptQueueResult {
-	return &configureInterceptQueueResult{
+	out := &configureInterceptQueueResult{
 		TimeoutMs:       s.pipeline.holdQueue.Timeout().Milliseconds(),
 		TimeoutBehavior: string(s.pipeline.holdQueue.TimeoutBehavior()),
 		QueuedItems:     s.pipeline.holdQueue.Len(),
 	}
+	overrides := s.pipeline.holdQueue.ProtocolOverrides()
+	if len(overrides) > 0 {
+		out.ProtocolOverrides = make(map[string]configureInterceptQueueProtocolOverrideRes, len(overrides))
+		for proto := range overrides {
+			t, b := s.pipeline.holdQueue.ProtocolOverrideResolved(proto)
+			out.ProtocolOverrides[string(proto)] = configureInterceptQueueProtocolOverrideRes{
+				TimeoutMs:       t.Milliseconds(),
+				TimeoutBehavior: string(b),
+			}
+		}
+	}
+	return out
 }
 
 // applyInterceptRules partitions input rules by Protocol and SetRules

@@ -630,6 +630,14 @@ type ProxyConfig struct {
 	// ByteChunk layer, enabling HTTP request-smuggling diagnosis.
 	// Matching is case-insensitive exact match (wildcard deferred to N4).
 	RawPassthroughHosts []string `json:"raw_passthrough_hosts,omitempty"`
+
+	// InterceptQueue configures the intercept-queue hold timeout, timeout-
+	// expiry behavior, and per-protocol overrides. A nil pointer (or an
+	// omitted "intercept_queue" key in JSON) leaves the built-in defaults
+	// in place (HoldQueue's NewHoldQueue seed values: global 5min /
+	// auto_release; WS=8s, SSE=8s, gRPC=60s per-protocol). USK-855
+	// (USK-851 follow-up B).
+	InterceptQueue *InterceptQueueConfig `json:"intercept_queue,omitempty"`
 }
 
 // SafetyFilterConfig holds the SafetyFilter engine configuration.
@@ -709,6 +717,9 @@ func (c *ProxyConfig) Validate() error {
 		if err := c.Plugins[i].Validate(); err != nil {
 			return fmt.Errorf("plugins[%d]: %w", i, err)
 		}
+	}
+	if err := c.validateInterceptQueue(); err != nil {
+		return err
 	}
 	return nil
 }

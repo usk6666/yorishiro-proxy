@@ -374,3 +374,241 @@ func TestHoldQueue_List_ReturnsClones(t *testing.T) {
 		t.Errorf("MatchedRules = %v, want [r1]", entries[0].MatchedRules)
 	}
 }
+
+// wsEnvelope returns a minimal Envelope tagged with ProtocolWebSocket so
+// the HoldQueue's per-protocol override resolution path is exercised.
+func wsEnvelope() *envelope.Envelope {
+	return &envelope.Envelope{
+		StreamID:  "s-ws",
+		FlowID:    "f-ws",
+		Direction: envelope.Send,
+		Protocol:  envelope.ProtocolWebSocket,
+		Message:   &envelope.WSMessage{},
+	}
+}
+
+// TestHoldQueue_DefaultProtocolOverrides asserts that NewHoldQueue seeds
+// the WS / SSE / gRPC entries with the documented defaults so the
+// pre-config built-in behaviour matches the spec without any operator
+// action.
+func TestHoldQueue_DefaultProtocolOverrides(t *testing.T) {
+	q := NewHoldQueue()
+	got := q.ProtocolOverrides()
+	cases := []struct {
+		name  string
+		proto envelope.Protocol
+		want  time.Duration
+	}{
+		{"ws", envelope.ProtocolWebSocket, DefaultHoldTimeoutWS},
+		{"sse", envelope.ProtocolSSE, DefaultHoldTimeoutSSE},
+		{"grpc", envelope.ProtocolGRPC, DefaultHoldTimeoutGRPC},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			entry, ok := got[tc.proto]
+			if !ok {
+				t.Fatalf("ProtocolOverrides missing %s", tc.proto)
+			}
+			if entry.Timeout == nil || *entry.Timeout != tc.want {
+				t.Errorf("ProtocolOverrides[%s].Timeout = %v, want %v", tc.proto, entry.Timeout, tc.want)
+			}
+			if entry.Behavior != nil {
+				t.Errorf("ProtocolOverrides[%s].Behavior = %v, want nil (inherit global)", tc.proto, *entry.Behavior)
+			}
+		})
+	}
+	if _, ok := got[envelope.ProtocolHTTP]; ok {
+		t.Errorf("ProtocolOverrides unexpectedly contains http")
+	}
+}
+
+// TestHoldQueue_Timeout_PerProtocol_Override pins the WS-specific timeout
+// to a value distinct from the global and confirms the resolution path
+// picks it up at Hold time. The global timeout is set high so the
+// override is the only short-circuit.
+func TestHoldQueue_Timeout_PerProtocol_Override(t *testing.T) {
+	q := NewHoldQueue()
+	q.SetTimeout(time.Hour) // global; long, so override must win
+	q.SetProtocolTimeout(envelope.ProtocolWebSocket, 40*time.Millisecond)
+
+	env := wsEnvelope()
+	start := time.Now()
+	action, err := q.Hold(context.Background(), env, nil)
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("Hold: %v", err)
+	}
+	if action.Type != ActionRelease {
+		t.Errorf("timeout action = %v, want Release", action.Type)
+	}
+	if elapsed > 500*time.Millisecond {
+		t.Errorf("Hold elapsed %s; per-protocol override should have fired before global", elapsed)
+	}
+}
+
+// TestHoldQueue_Timeout_PerProtocol_InheritGlobal asserts that an
+// Envelope tagged with a Protocol that has NO override falls back to the
+// global timeout. We use a short global and a long ws-only override and
+// pass an HTTP envelope so the global fires first.
+func TestHoldQueue_Timeout_PerProtocol_InheritGlobal(t *testing.T) {
+	q := NewHoldQueue()
+	q.SetTimeout(40 * time.Millisecond)
+	q.SetProtocolTimeout(envelope.ProtocolWebSocket, time.Hour)
+
+	env := testEnvelope() // HTTP
+	start := time.Now()
+	action, err := q.Hold(context.Background(), env, nil)
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("Hold: %v", err)
+	}
+	if action.Type != ActionRelease {
+		t.Errorf("timeout action = %v, want Release (global default)", action.Type)
+	}
+	if elapsed > 500*time.Millisecond {
+		t.Errorf("Hold elapsed %s; HTTP envelope should use the short global timeout", elapsed)
+	}
+}
+
+// TestHoldQueue_Behavior_PerProtocol_Override pins the WS-specific
+// timeout-behavior to AutoDrop while the global stays at AutoRelease.
+// An expired WS hold must surface ActionDrop.
+func TestHoldQueue_Behavior_PerProtocol_Override(t *testing.T) {
+	q := NewHoldQueue()
+	q.SetTimeout(time.Hour)
+	q.SetTimeoutBehavior(TimeoutAutoRelease)
+	q.SetProtocolTimeout(envelope.ProtocolWebSocket, 40*time.Millisecond)
+	q.SetProtocolBehavior(envelope.ProtocolWebSocket, TimeoutAutoDrop)
+
+	env := wsEnvelope()
+	action, err := q.Hold(context.Background(), env, nil)
+	if err != nil {
+		t.Fatalf("Hold: %v", err)
+	}
+	if action.Type != ActionDrop {
+		t.Errorf("timeout action = %v, want Drop (per-protocol behavior override)", action.Type)
+	}
+}
+
+// TestHoldQueue_PerProtocol_PartialOverride_TimeoutOnly confirms that a
+// protocol entry with only Timeout set still inherits the global
+// Behavior. This is the "inherit per-field" guarantee from the design.
+func TestHoldQueue_PerProtocol_PartialOverride_TimeoutOnly(t *testing.T) {
+	q := NewHoldQueue()
+	q.SetTimeout(time.Hour)
+	q.SetTimeoutBehavior(TimeoutAutoDrop) // global behavior = drop
+	q.SetProtocolTimeout(envelope.ProtocolWebSocket, 40*time.Millisecond)
+
+	env := wsEnvelope()
+	action, err := q.Hold(context.Background(), env, nil)
+	if err != nil {
+		t.Fatalf("Hold: %v", err)
+	}
+	if action.Type != ActionDrop {
+		t.Errorf("timeout action = %v, want Drop (inherits global behavior)", action.Type)
+	}
+}
+
+// TestHoldQueue_PerProtocol_SetAndClear verifies that ClearProtocolOverride
+// fully removes the per-protocol entry and the Envelope falls back to the
+// global timeout afterwards.
+func TestHoldQueue_PerProtocol_SetAndClear(t *testing.T) {
+	q := NewHoldQueue()
+	q.SetTimeout(40 * time.Millisecond)
+	q.SetProtocolTimeout(envelope.ProtocolWebSocket, time.Hour)
+
+	// Confirm override is in place.
+	got := q.ProtocolOverrides()
+	if entry, ok := got[envelope.ProtocolWebSocket]; !ok || entry.Timeout == nil || *entry.Timeout != time.Hour {
+		t.Fatalf("ProtocolOverrides[ws] = %+v, want Timeout=1h", entry)
+	}
+
+	q.ClearProtocolOverride(envelope.ProtocolWebSocket)
+
+	got = q.ProtocolOverrides()
+	if _, ok := got[envelope.ProtocolWebSocket]; ok {
+		t.Errorf("ProtocolOverrides[ws] should be cleared, got %+v", got[envelope.ProtocolWebSocket])
+	}
+
+	// After clear, a WS hold should pick up the short global timeout.
+	env := wsEnvelope()
+	start := time.Now()
+	action, err := q.Hold(context.Background(), env, nil)
+	if err != nil {
+		t.Fatalf("Hold: %v", err)
+	}
+	if action.Type != ActionRelease {
+		t.Errorf("timeout action = %v, want Release", action.Type)
+	}
+	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+		t.Errorf("Hold elapsed %s; cleared WS override should fall back to short global", elapsed)
+	}
+}
+
+// TestHoldQueue_PerProtocol_Concurrent stresses the per-protocol path
+// under -race. Workers Hold and another goroutine concurrently mutates
+// the override; the test must finish cleanly with the queue empty.
+func TestHoldQueue_PerProtocol_Concurrent(t *testing.T) {
+	q := NewHoldQueue()
+	q.SetMaxItems(50)
+	q.SetTimeout(time.Hour)
+	q.SetProtocolTimeout(envelope.ProtocolWebSocket, 60*time.Millisecond)
+
+	const workers = 20
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for i := 0; i < workers; i++ {
+		go func() {
+			defer wg.Done()
+			env := wsEnvelope()
+			ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+			defer cancel()
+			q.Hold(ctx, env, nil) //nolint:errcheck
+		}()
+	}
+
+	// Concurrent reconfigure.
+	var rcfg sync.WaitGroup
+	rcfg.Add(1)
+	go func() {
+		defer rcfg.Done()
+		for i := 0; i < 50; i++ {
+			q.SetProtocolTimeout(envelope.ProtocolWebSocket, 30*time.Millisecond+time.Duration(i)*time.Millisecond)
+			time.Sleep(time.Millisecond)
+		}
+	}()
+
+	wg.Wait()
+	rcfg.Wait()
+	if q.Len() != 0 {
+		t.Errorf("queue not empty after all workers done: %d items", q.Len())
+	}
+}
+
+// TestHoldQueue_ProtocolOverrideResolved verifies the read-side helper
+// that resolves the effective (timeout, behavior) per Protocol with
+// global fallback per-field.
+func TestHoldQueue_ProtocolOverrideResolved(t *testing.T) {
+	q := NewHoldQueue()
+	q.SetTimeout(7 * time.Second)
+	q.SetTimeoutBehavior(TimeoutAutoDrop)
+	q.SetProtocolTimeout(envelope.ProtocolWebSocket, 3*time.Second)
+	// WS inherits global behavior (auto_drop).
+
+	timeout, behavior := q.ProtocolOverrideResolved(envelope.ProtocolWebSocket)
+	if timeout != 3*time.Second {
+		t.Errorf("WS timeout = %v, want 3s", timeout)
+	}
+	if behavior != TimeoutAutoDrop {
+		t.Errorf("WS behavior = %v, want auto_drop (inherited)", behavior)
+	}
+
+	// HTTP has no override → both global.
+	timeout, behavior = q.ProtocolOverrideResolved(envelope.ProtocolHTTP)
+	if timeout != 7*time.Second {
+		t.Errorf("HTTP timeout = %v, want 7s (global)", timeout)
+	}
+	if behavior != TimeoutAutoDrop {
+		t.Errorf("HTTP behavior = %v, want auto_drop (global)", behavior)
+	}
+}

@@ -120,6 +120,31 @@
           "type": "string",
           "description": "Action when timeout is reached: auto_release (default) or auto_drop.",
           "enum": ["auto_release", "auto_drop"]
+        },
+        "protocol_overrides": {
+          "type": "object",
+          "description": "Per-protocol hold-timeout / timeout-behavior overrides (USK-855). Valid keys are canonical envelope.Protocol strings: http, ws, grpc, grpc-web, sse, raw, tls-handshake. Note: \"http2\" is NOT a valid key — both HTTP/1 and HTTP/2 envelope as \"http\". On merge, each entry overwrites the keyed override; a JSON null value removes that key. On replace, the entire map atomically replaces the existing per-protocol override set; missing keys clear any prior override.",
+          "additionalProperties": {
+            "oneOf": [
+              {"type": "null"},
+              {
+                "type": "object",
+                "properties": {
+                  "timeout_ms": {
+                    "type": "integer",
+                    "description": "Per-protocol hold timeout in milliseconds (minimum 1000 ms).",
+                    "minimum": 1000
+                  },
+                  "timeout_behavior": {
+                    "type": "string",
+                    "description": "Per-protocol timeout behavior: auto_release or auto_drop. Empty inherits the global value.",
+                    "enum": ["auto_release", "auto_drop"]
+                  }
+                },
+                "additionalProperties": false
+              }
+            ]
+          }
         }
       },
       "additionalProperties": false

@@ -221,6 +221,11 @@ func Run(ctx context.Context, fs *flag.FlagSet, args []string, opts RunOptions) 
 	// shared between pipeline.InterceptStep (live data path via
 	// proxybuild) and the MCP intercept / configure tools.
 	holdQueue := rulescommon.NewHoldQueue()
+	// USK-855: apply per-protocol intercept-queue overrides from the
+	// loaded file-config (proxyCfg.InterceptQueue). A nil substruct is a
+	// no-op; the built-in NewHoldQueue defaults (WS=8s, SSE=8s, gRPC=60s,
+	// global 5min/auto_release) stay in place.
+	applyInterceptQueueConfig(holdQueue, proxyCfg.InterceptQueue, logger)
 	// USK-851: process-singleton ReleaseTracker shared between the MCP
 	// intercept tool (Release stamps it) and the live data path (relay
 	// goroutines query it on EOF). Threading the same pointer through

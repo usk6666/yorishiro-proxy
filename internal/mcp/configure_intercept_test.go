@@ -559,6 +559,180 @@ func TestConfigure_InterceptQueue_RejectsBadBehavior(t *testing.T) {
 	}
 }
 
+// TestConfigure_InterceptQueue_ProtocolOverrides_MergeAdd covers the
+// merge add path for per-protocol overrides (USK-855).
+func TestConfigure_InterceptQueue_ProtocolOverrides_MergeAdd(t *testing.T) {
+	cs := configureSessionWithEngines(t, httprules.NewInterceptEngine(), nil, nil)
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "configure",
+		Arguments: configureMarshal(t, configureInput{
+			Operation: "merge",
+			InterceptQueue: &configureInterceptQueue{
+				ProtocolOverrides: map[string]*configureInterceptQueueProtocolOverride{
+					"ws": {TimeoutMs: intPtr(2500)},
+				},
+			},
+		}),
+	})
+	if err != nil || result.IsError {
+		t.Fatalf("CallTool: err=%v isError=%v content=%v", err, result.IsError, result.Content)
+	}
+	var out configureResult
+	configureUnmarshalResult(t, result, &out)
+	if out.InterceptQueue == nil {
+		t.Fatal("intercept_queue is nil")
+	}
+	ws, ok := out.InterceptQueue.ProtocolOverrides["ws"]
+	if !ok {
+		t.Fatalf("ProtocolOverrides[ws] missing; got %+v", out.InterceptQueue.ProtocolOverrides)
+	}
+	if ws.TimeoutMs != 2500 {
+		t.Errorf("ProtocolOverrides[ws].timeout_ms = %d, want 2500", ws.TimeoutMs)
+	}
+}
+
+// TestConfigure_InterceptQueue_ProtocolOverrides_MergeNullClears verifies
+// that a JSON null value under protocol_overrides on merge clears any
+// existing per-protocol override for that key.
+func TestConfigure_InterceptQueue_ProtocolOverrides_MergeNullClears(t *testing.T) {
+	cs := configureSessionWithEngines(t, httprules.NewInterceptEngine(), nil, nil)
+
+	// Seed an override first.
+	if _, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "configure",
+		Arguments: configureMarshal(t, configureInput{
+			Operation: "merge",
+			InterceptQueue: &configureInterceptQueue{
+				ProtocolOverrides: map[string]*configureInterceptQueueProtocolOverride{
+					"ws": {TimeoutMs: intPtr(2500)},
+				},
+			},
+		}),
+	}); err != nil {
+		t.Fatalf("seed CallTool: %v", err)
+	}
+
+	// Use the raw JSON shape to pass an explicit null. Marshal builds
+	// an explicit null entry — the Go map type would otherwise drop nil
+	// during marshalling depending on encoder behaviour; the struct
+	// pointer is encoded as `null` when nil.
+	raw := json.RawMessage(`{"operation":"merge","intercept_queue":{"protocol_overrides":{"ws":null}}}`)
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name:      "configure",
+		Arguments: raw,
+	})
+	if err != nil || result.IsError {
+		t.Fatalf("CallTool: err=%v isError=%v content=%v", err, result.IsError, result.Content)
+	}
+	var out configureResult
+	configureUnmarshalResult(t, result, &out)
+	if _, ok := out.InterceptQueue.ProtocolOverrides["ws"]; ok {
+		t.Errorf("ws override should be cleared after null merge, got %+v", out.InterceptQueue.ProtocolOverrides["ws"])
+	}
+}
+
+// TestConfigure_InterceptQueue_ProtocolOverrides_Replace verifies the
+// full-replace semantics: the supplied map becomes the new authoritative
+// set; previously-seeded protocols are cleared.
+func TestConfigure_InterceptQueue_ProtocolOverrides_Replace(t *testing.T) {
+	cs := configureSessionWithEngines(t, httprules.NewInterceptEngine(), nil, nil)
+
+	// Seed two overrides via merge.
+	if _, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "configure",
+		Arguments: configureMarshal(t, configureInput{
+			Operation: "merge",
+			InterceptQueue: &configureInterceptQueue{
+				ProtocolOverrides: map[string]*configureInterceptQueueProtocolOverride{
+					"ws":   {TimeoutMs: intPtr(2500)},
+					"grpc": {TimeoutMs: intPtr(30000)},
+				},
+			},
+		}),
+	}); err != nil {
+		t.Fatalf("seed CallTool: %v", err)
+	}
+
+	// Replace with just {"ws": ...}; grpc must drop out.
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "configure",
+		Arguments: configureMarshal(t, configureInput{
+			Operation: "replace",
+			InterceptQueue: &configureInterceptQueue{
+				ProtocolOverrides: map[string]*configureInterceptQueueProtocolOverride{
+					"ws": {TimeoutMs: intPtr(1500)},
+				},
+			},
+		}),
+	})
+	if err != nil || result.IsError {
+		t.Fatalf("CallTool: err=%v isError=%v content=%v", err, result.IsError, result.Content)
+	}
+	var out configureResult
+	configureUnmarshalResult(t, result, &out)
+	if _, ok := out.InterceptQueue.ProtocolOverrides["grpc"]; ok {
+		t.Errorf("grpc override should be dropped after replace, got %+v", out.InterceptQueue.ProtocolOverrides["grpc"])
+	}
+	ws, ok := out.InterceptQueue.ProtocolOverrides["ws"]
+	if !ok || ws.TimeoutMs != 1500 {
+		t.Errorf("ProtocolOverrides[ws] = %+v, want TimeoutMs=1500", ws)
+	}
+}
+
+// TestConfigure_InterceptQueue_ProtocolOverrides_UnknownKeyRejected
+// guards the Issue body's explicit "http2 is not valid" decision.
+func TestConfigure_InterceptQueue_ProtocolOverrides_UnknownKeyRejected(t *testing.T) {
+	cs := configureSessionWithEngines(t, httprules.NewInterceptEngine(), nil, nil)
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "configure",
+		Arguments: configureMarshal(t, configureInput{
+			Operation: "merge",
+			InterceptQueue: &configureInterceptQueue{
+				ProtocolOverrides: map[string]*configureInterceptQueueProtocolOverride{
+					"http2": {TimeoutMs: intPtr(2500)},
+				},
+			},
+		}),
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("expected error for unknown protocol key")
+	}
+	body := flattenContent(result.Content)
+	if !strings.Contains(body, "http2") || !strings.Contains(body, "valid keys") {
+		t.Errorf("error text should mention bad key and valid set, got %q", body)
+	}
+}
+
+// TestConfigure_InterceptQueue_ProtocolOverrides_SubFloorRejected
+// guards the lower-bound floor on per-protocol timeouts.
+func TestConfigure_InterceptQueue_ProtocolOverrides_SubFloorRejected(t *testing.T) {
+	cs := configureSessionWithEngines(t, httprules.NewInterceptEngine(), nil, nil)
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "configure",
+		Arguments: configureMarshal(t, configureInput{
+			Operation: "merge",
+			InterceptQueue: &configureInterceptQueue{
+				ProtocolOverrides: map[string]*configureInterceptQueueProtocolOverride{
+					"ws": {TimeoutMs: intPtr(500)},
+				},
+			},
+		}),
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("expected error for sub-floor timeout_ms")
+	}
+	body := flattenContent(result.Content)
+	if !strings.Contains(body, ">= 1000") {
+		t.Errorf("error text should mention the floor, got %q", body)
+	}
+}
+
 func TestProxyStart_InterceptRulesInputSerialization(t *testing.T) {
 	in := []interceptRuleInput{
 		{

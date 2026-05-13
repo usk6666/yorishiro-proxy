@@ -356,12 +356,13 @@ RFC を accepted にした以上、実装時の誘惑に抗うために明示化
 
 **Wire-fidelity:** no probes injected, no raw bytes mutated, no Layer changes. The detection is purely an overlay on existing Send/Next outcomes.
 
+**解決 (approach B, USK-855):** per-protocol hold-timeout overrides under the existing `intercept_queue` config block. `HoldQueue` resolves `(timeout, behavior)` per-call from the held `Envelope.Protocol`, falling back per-field to the global. Built-in defaults seed `ws=8s`, `sse=8s`, `grpc=60s` so a held WS frame auto-releases before a typical ~10s upstream edge-idle window half-closes the conversation. File-config block: `intercept_queue.protocol_overrides`; MCP tool: `configure intercept_queue.protocol_overrides` (merge: per-key delta with null-clear; replace: full-overwrite). Friction-list update site for canonical key set: `internal/config/intercept_queue.go` (godoc). Smoke-tier e2e: `internal/layer/ws/intercept_hold_timeout_protocol_override_integration_test.go`.
+
 **Out of scope (deferred follow-ups):**
 - Approach A (WS Ping/Pong keepalive injection during holds) — would mutate the wire; needs a separate design pass for plugin opt-out and protocol-rule re-evaluation.
-- Approach B (per-protocol hold-timeout config so the proxy auto-releases before upstream idle) — config surface design deferred.
 - Approach C (pre-release upstream liveness probe) — rejected; the probe itself can fail spuriously and would change wire timing.
 
-**状態:** **RESOLVED** (USK-851, 2026-05-12). Implementation in `internal/rules/common/release_tracker.go`, `internal/session/session.go` (`checkInterceptReleaseEOF`), and `internal/proxybuild/builder.go::buildSessionOptions`. Smoke-tier e2e test: `internal/layer/ws/intercept_hold_eof_integration_test.go`.
+**状態:** **RESOLVED** (USK-851 + USK-855, 2026-05-13). Approach D implementation in `internal/rules/common/release_tracker.go`, `internal/session/session.go` (`checkInterceptReleaseEOF`), and `internal/proxybuild/builder.go::buildSessionOptions`. Approach B implementation in `internal/rules/common/queue.go` (per-protocol resolution), `internal/config/intercept_queue.go` (file-config), `internal/mcp/configure_tool.go` (`protocol_overrides`), and `internal/mcpserver/intercept_queue_init.go` (file-config → HoldQueue plumbing). Smoke-tier e2e tests: `internal/layer/ws/intercept_hold_eof_integration_test.go` (D), `internal/layer/ws/intercept_hold_timeout_protocol_override_integration_test.go` (B).
 
 ### Friction 3-A: HTTP/2 upstream connection pool
 

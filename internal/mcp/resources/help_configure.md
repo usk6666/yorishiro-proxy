@@ -377,8 +377,9 @@ For full-replace semantics, use the `security` tool's `set_budget` action instea
 ### intercept_queue (object, optional)
 Configures the intercept queue behavior.
 
-- **timeout_ms** (integer): Timeout in milliseconds for blocked requests.
+- **timeout_ms** (integer): Timeout in milliseconds for blocked requests (minimum 1000).
 - **timeout_behavior** (string): Action when timeout is reached: `"auto_release"` (forward as-is, default) or `"auto_drop"` (discard).
+- **protocol_overrides** (object, optional): Per-protocol hold-timeout / timeout-behavior overrides (USK-855). Valid keys are canonical envelope.Protocol strings: `http`, `ws`, `grpc`, `grpc-web`, `sse`, `raw`, `tls-handshake`. The literal `"http2"` is NOT valid — HTTP/1 and HTTP/2 both envelope as `"http"`. Each value is `{timeout_ms?, timeout_behavior?}`; pointer-optional sub-fields inherit the global per-field. On `"merge"`, each entry overwrites the keyed override; a JSON `null` value removes the key. On `"replace"`, the entire map atomically replaces the existing per-protocol override set; missing keys clear any prior override. Built-in defaults seed `ws=8000ms`, `sse=8000ms`, `grpc=60000ms` so a held WS frame auto-releases before a typical ~10s upstream edge-idle window (e.g. Fly.io edge) half-closes the conversation.
 
 ### max_connections (integer, optional)
 Dynamically changes the maximum number of concurrent proxy connections. Range: 1-100000.
@@ -500,6 +501,29 @@ Each rule is AND-evaluated across `hostname` / `url_prefix` / `method`; at least
   "intercept_queue": {
     "timeout_ms": 60000,
     "timeout_behavior": "auto_release"
+  }
+}
+```
+
+### Per-protocol hold-timeout overrides (USK-855)
+```json
+{
+  "operation": "merge",
+  "intercept_queue": {
+    "protocol_overrides": {
+      "ws":   {"timeout_ms": 2500},
+      "grpc": {"timeout_ms": 30000, "timeout_behavior": "auto_drop"}
+    }
+  }
+}
+```
+
+### Clear a per-protocol override (merge null)
+```json
+{
+  "operation": "merge",
+  "intercept_queue": {
+    "protocol_overrides": {"ws": null}
   }
 }
 ```
