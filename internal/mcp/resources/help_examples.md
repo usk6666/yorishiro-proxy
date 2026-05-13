@@ -48,25 +48,24 @@ Confirm the fingerprint has changed and `persisted` is true.
 
 ### Resend with different auth tokens
 ```json
-// resend
+// resend_http
 {
-  "action": "resend",
-  "params": {
-    "flow_id": "<original-flow-id>",
-    "override_headers": {"Authorization": "Bearer <other-user-token>"}
-  }
+  "flow_id": "<original-flow-id>",
+  "headers": [
+    {"name": "Host", "value": "api.target.com"},
+    {"name": "Authorization", "value": "Bearer <other-user-token>"}
+  ]
 }
 ```
 
 ### Test without authentication (remove auth header)
 ```json
-// resend
+// resend_http
 {
-  "action": "resend",
-  "params": {
-    "flow_id": "<original-flow-id>",
-    "override_headers": {"Authorization": ""}
-  }
+  "flow_id": "<original-flow-id>",
+  "headers": [
+    {"name": "Host", "value": "api.target.com"}
+  ]
 }
 ```
 
@@ -97,25 +96,22 @@ Confirm the fingerprint has changed and `persisted` is true.
 
 ### Resend with modified URL
 ```json
-// resend
+// resend_http
 {
-  "action": "resend",
-  "params": {
-    "flow_id": "<flow-id>",
-    "override_url": "https://target.example.com/api/admin/users"
-  }
+  "flow_id": "<flow-id>",
+  "scheme": "https",
+  "authority": "target.example.com",
+  "path": "/api/admin/users"
 }
 ```
 
 ### Resend with modified body
 ```json
-// resend
+// resend_http
 {
-  "action": "resend",
-  "params": {
-    "flow_id": "<flow-id>",
-    "override_body": "{\"role\": \"admin\", \"user_id\": 1}"
-  }
+  "flow_id": "<flow-id>",
+  "body": "{\"role\": \"admin\", \"user_id\": 1}",
+  "body_encoding": "text"
 }
 ```
 

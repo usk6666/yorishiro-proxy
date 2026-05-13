@@ -51,7 +51,7 @@ Export flows to JSONL or HAR (HTTP Archive 1.2) format with optional filtering.
   - **time_after** (string, optional): Include flows after this time (RFC3339 format).
   - **time_before** (string, optional): Include flows before this time (RFC3339 format).
 - **include_bodies** (boolean, optional): Include message body and raw_bytes in export (default: `true`). Set to `false` for metadata-only export.
-- **output_path** (string, optional for JSONL, **required for HAR**): File path to write the export data. JSONL supports inline output when omitted; HAR always requires a file path.
+- **output_path** (string, optional for JSONL, **required for HAR**): File path to write the export data. Resolved relative to the proxy server process's working directory, NOT the MCP caller's cwd — pass an absolute path when the server cwd is unknown to the caller (e.g. HTTP remote MCP). JSONL supports inline output when omitted; HAR always requires a file path.
 
 **Format details:**
 - **JSONL**: Each line is a complete JSON object containing a flow and its messages. Supports inline and file output.
@@ -63,7 +63,7 @@ Returns: exported_count, format, output_path (if file output), data (if inline o
 Import flows from a JSONL file. Each line must be a valid export record with version "1".
 
 **Parameters:**
-- **input_path** (string, required): File path to read the JSONL import data.
+- **input_path** (string, required): File path to read the JSONL import data. Resolved relative to the proxy server process's working directory, NOT the MCP caller's cwd — pass an absolute path when the server cwd is unknown to the caller (e.g. HTTP remote MCP).
 - **on_conflict** (string, optional): Conflict resolution policy for duplicate flow IDs. `"skip"` (default) skips existing flows; `"replace"` deletes and re-imports.
 
 Returns: imported, skipped, errors, source.
