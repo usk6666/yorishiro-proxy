@@ -125,6 +125,7 @@ func setupLiveProxy(t *testing.T, pluginName, pluginScript string) *liveProxy {
 
 	holdQueue := rulescommon.NewHoldQueue()
 	releaseTracker := rulescommon.NewReleaseTracker()
+	holdTracker := rulescommon.NewHoldTracker()
 	httpInterceptEngine := httprules.NewInterceptEngine()
 	wsInterceptEngine := wsrules.NewInterceptEngine()
 	grpcInterceptEngine := grpcrules.NewInterceptEngine()
@@ -133,6 +134,7 @@ func setupLiveProxy(t *testing.T, pluginName, pluginScript string) *liveProxy {
 
 	mgr, err := NewLiveManager(cfg, proxyCfg, store, issuer, engine, holdQueue,
 		releaseTracker,
+		holdTracker,
 		httpInterceptEngine, wsInterceptEngine, grpcInterceptEngine,
 		httpTransformEngine,
 		(*connector.PassthroughList)(nil),
