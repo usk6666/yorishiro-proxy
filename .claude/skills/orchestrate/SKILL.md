@@ -270,10 +270,10 @@ If there are dependencies:
 This Issue depends on the outputs of the following completed Issues:
 
 ### USK-XX: <title>
-- Package: internal/proxy/
+- Package: internal/connector/
 - Provided type: `PeekConn` (net.Conn wrapper with Peek method)
 - Usage: Create PeekConn in Listener.handleConn and pass to Detector
-- Key files: internal/proxy/peek_conn.go
+- Key files: internal/connector/detect.go
 
 ### USK-YY: <title>
 - Package: internal/session/
@@ -594,7 +594,7 @@ and determine dependency satisfaction from milestone progress.
 ### Criteria for Parallel Execution
 
 **Can run in parallel:**
-- Primarily modify different packages (e.g., `internal/proxy/` and `internal/session/`)
+- Primarily modify different packages (e.g., `internal/connector/` and `internal/layer/`)
 - Implement a common interface but do not call each other
 - Tests do not depend on each other's implementations
 

@@ -16,7 +16,7 @@ make test
 ## Argument Patterns
 
 - `/test` — Run tests for all packages (`make test`)
-- `/test ./internal/proxy/...` — Run specified packages only (`make ensure-ui && go test -race -v ./internal/proxy/...`)
+- `/test ./internal/connector/...` — Run specified packages only (`make ensure-ui && go test -race -v ./internal/connector/...`)
 - `/test -cover` — Run with coverage (`make test-cover`)
 - `/test -run TestName` — Run only a specific test (`make ensure-ui && go test -race -v -run TestName ./...`)
 
