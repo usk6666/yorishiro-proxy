@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 )
 
 // HARVersion is the HAR specification version produced by this exporter.
@@ -191,8 +193,9 @@ func buildHAREntries(ctx context.Context, store Store, streams []*Stream, opts E
 
 // harStreamIncluded returns true if the stream passes HAR-specific filters.
 func harStreamIncluded(st *Stream, filter ExportFilter) bool {
-	// Skip Raw TCP and gRPC binary frames per spec.
-	if st.Protocol == "TCP" || st.Protocol == "gRPC" {
+	// Skip Raw TCP and gRPC binary frames per spec. Predicates use canonical
+	// Envelope Protocol values stamped by RecordStep.
+	if st.Protocol == string(envelope.ProtocolRaw) || st.Protocol == string(envelope.ProtocolGRPC) {
 		return false
 	}
 	if filter.TimeAfter != nil && st.Timestamp.Before(*filter.TimeAfter) {
@@ -205,8 +208,10 @@ func harStreamIncluded(st *Stream, filter ExportFilter) bool {
 }
 
 // convertStreamToHAREntry dispatches stream-to-HAR conversion based on protocol.
+// The predicate compares against the canonical Envelope Protocol value stamped
+// by RecordStep (envelope.ProtocolWebSocket = "ws").
 func convertStreamToHAREntry(st *Stream, flows []*Flow, includeBodies bool) *HAREntry {
-	if st.Protocol == "WebSocket" {
+	if st.Protocol == string(envelope.ProtocolWebSocket) {
 		return streamToHARWebSocket(st, flows)
 	}
 	return streamToHAREntry(st, flows, includeBodies)
@@ -511,21 +516,21 @@ func harHTTPVersion(flowVersion, protocol string) string {
 	}
 }
 
-// protocolToHTTPVersion maps proxy protocol names to HAR httpVersion strings.
+// protocolToHTTPVersion maps canonical Envelope Protocol values to HAR
+// httpVersion strings. This is the fallback used by harHTTPVersion when a
+// flow has no recorded HTTPVersion; the wire HTTP version is recovered
+// from flow.HTTPVersion in preference to this mapping.
 func protocolToHTTPVersion(protocol string) string {
 	switch protocol {
-	case "HTTP/1.x":
+	case string(envelope.ProtocolHTTP):
 		return "HTTP/1.1"
-	case "HTTPS":
-		return "HTTP/1.1"
-	case "HTTP/2":
-		return "h2"
-	case "WebSocket":
+	case string(envelope.ProtocolWebSocket):
+		// RFC 6455 mandates HTTP/1.1 for the WebSocket handshake.
 		return "HTTP/1.1"
 	default:
-		if strings.HasPrefix(protocol, "SOCKS5+") {
-			return protocolToHTTPVersion(strings.TrimPrefix(protocol, "SOCKS5+"))
-		}
+		// grpc-web and sse fall through here; harHTTPVersion prefers
+		// f.HTTPVersion (populated since USK-788) so this fallback only
+		// fires for legacy rows where the flow's wire version is empty.
 		return "HTTP/1.1"
 	}
 }

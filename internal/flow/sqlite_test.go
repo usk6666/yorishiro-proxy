@@ -1393,7 +1393,7 @@ func TestSQLiteStore_V7Migration_TableRename(t *testing.T) {
 	if _, err := db.ExecContext(ctx,
 		`INSERT INTO flows (id, conn_id, protocol, scheme, flow_type, state, timestamp, duration_ms, tags, client_addr, server_addr, tls_version, tls_cipher, tls_alpn, tls_server_cert_subject, blocked_by, send_ms, wait_ms, receive_ms)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		"stream-1", "conn-1", "HTTPS", "https", "unary", "complete", ts, 100, "{}", "", "93.184.216.34:443", "", "", "", "", "", nil, nil, nil,
+		"stream-1", "conn-1", "http", "https", "unary", "complete", ts, 100, "{}", "", "93.184.216.34:443", "", "", "", "", "", nil, nil, nil,
 	); err != nil {
 		t.Fatalf("insert old flow: %v", err)
 	}
@@ -1425,8 +1425,8 @@ func TestSQLiteStore_V7Migration_TableRename(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetStream: %v", err)
 	}
-	if st.Protocol != "HTTPS" {
-		t.Errorf("stream protocol = %q, want %q", st.Protocol, "HTTPS")
+	if st.Protocol != "http" {
+		t.Errorf("stream protocol = %q, want %q", st.Protocol, "http")
 	}
 	if st.Scheme != "https" {
 		t.Errorf("stream scheme = %q, want %q", st.Scheme, "https")

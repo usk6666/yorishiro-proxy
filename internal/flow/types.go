@@ -40,9 +40,16 @@ type Stream struct {
 	ID string
 	// ConnID is the connection ID for log correlation.
 	ConnID string
-	// Protocol is the protocol label assigned to the stream
-	// (e.g., "HTTP/1.x", "HTTPS", "HTTP/2", "gRPC", "WebSocket", "TCP",
-	// "SOCKS5+HTTPS", "SOCKS5+HTTP").
+	// Protocol is the canonical Envelope Protocol value assigned to the
+	// stream — one of the lowercase constants defined in
+	// internal/envelope/envelope.go: "http", "ws", "grpc", "grpc-web",
+	// "sse", "raw", "tls-handshake". Stamped by RecordStep.createStream
+	// / maybeRetagProtocol via string(env.Protocol).
+	//
+	// Legacy rows recorded before the SOCKS5 path was canonicalized may
+	// still carry composite spellings like "SOCKS5+HTTPS"; readers that
+	// need to handle both should compare via envelope.Protocol(st.Protocol)
+	// against the canonical constants.
 	Protocol string
 	// Scheme is the URL scheme or transport indicator
 	// (e.g., "https", "http", "wss", "ws", "tcp").

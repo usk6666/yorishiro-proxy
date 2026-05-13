@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"testing"
 	"time"
+
+	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 )
 
 // mockHARStore is a test double for Store used in HAR export tests.
@@ -75,7 +77,7 @@ func TestExportHAR_BasicHTTP(t *testing.T) {
 			{
 				ID:        "flow-1",
 				ConnID:    "conn-1",
-				Protocol:  "HTTPS",
+				Protocol:  "http",
 				State:     "complete",
 				Timestamp: now,
 				Duration:  125 * time.Millisecond,
@@ -204,7 +206,7 @@ func TestExportHAR_BinaryBody(t *testing.T) {
 		streams: []*Stream{
 			{
 				ID:        "flow-bin",
-				Protocol:  "HTTPS",
+				Protocol:  "http",
 				State:     "complete",
 				Timestamp: now,
 				Duration:  50 * time.Millisecond,
@@ -270,7 +272,7 @@ func TestExportHAR_WebSocket(t *testing.T) {
 		streams: []*Stream{
 			{
 				ID:        "flow-ws",
-				Protocol:  "WebSocket",
+				Protocol:  "ws",
 				State:     "complete",
 				Timestamp: now,
 				Duration:  5 * time.Second,
@@ -378,14 +380,132 @@ func TestExportHAR_WebSocket(t *testing.T) {
 	}
 }
 
+// TestExportHAR_WebSocket_CanonicalProtocol is the explicit regression test
+// for USK-852: it pins that a Stream with the canonical lowercase Protocol
+// stamp ("ws", as written by RecordStep via envelope.ProtocolWebSocket)
+// dispatches to streamToHARWebSocket and produces the WS-specialized HAR
+// entry with _webSocketMessages populated. Before USK-852 the HAR exporter
+// compared against the legacy literal "WebSocket", which never matched the
+// canonical stamp, so every WS Stream silently fell through to generic
+// HTTP HAR conversion. If this test regresses (the WebSocketMessages slice
+// becomes empty), the predicate at convertStreamToHAREntry is wrong again.
+func TestExportHAR_WebSocket_CanonicalProtocol(t *testing.T) {
+	t.Parallel()
+	now := time.Now().UTC()
+
+	store := &mockHARStore{
+		streams: []*Stream{
+			{
+				ID:        "flow-ws-canonical",
+				Protocol:  string(envelope.ProtocolWebSocket),
+				State:     "complete",
+				Timestamp: now,
+				Duration:  2 * time.Second,
+			},
+		},
+		flows: map[string][]*Flow{
+			"flow-ws-canonical": {
+				// Upgrade request.
+				{
+					ID:        "msg-upgrade-req",
+					StreamID:  "flow-ws-canonical",
+					Sequence:  0,
+					Direction: "send",
+					Timestamp: now,
+					Method:    "GET",
+					URL:       mustParseURL("wss://example.com/echo"),
+					Headers: map[string][]string{
+						"Upgrade":    {"websocket"},
+						"Connection": {"Upgrade"},
+					},
+				},
+				// Upgrade response (101 Switching Protocols).
+				{
+					ID:         "msg-upgrade-resp",
+					StreamID:   "flow-ws-canonical",
+					Sequence:   1,
+					Direction:  "receive",
+					Timestamp:  now.Add(20 * time.Millisecond),
+					StatusCode: 101,
+					Headers: map[string][]string{
+						"Upgrade":    {"websocket"},
+						"Connection": {"Upgrade"},
+					},
+				},
+				// WS text frame: client → server.
+				{
+					ID:        "msg-ws-send",
+					StreamID:  "flow-ws-canonical",
+					Sequence:  2,
+					Direction: "send",
+					Timestamp: now.Add(50 * time.Millisecond),
+					Body:      []byte("ping"),
+					Metadata:  map[string]string{"opcode": "1"},
+				},
+				// WS text frame: server → client.
+				{
+					ID:        "msg-ws-recv",
+					StreamID:  "flow-ws-canonical",
+					Sequence:  3,
+					Direction: "receive",
+					Timestamp: now.Add(100 * time.Millisecond),
+					Body:      []byte("pong"),
+					Metadata:  map[string]string{"opcode": "1"},
+				},
+			},
+		},
+	}
+
+	var buf bytes.Buffer
+	n, err := ExportHAR(context.Background(), store, &buf, ExportOptions{IncludeBodies: true}, "1.0.0")
+	if err != nil {
+		t.Fatalf("ExportHAR: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("exported = %d, want 1", n)
+	}
+
+	var har HAR
+	if err := json.Unmarshal(buf.Bytes(), &har); err != nil {
+		t.Fatalf("unmarshal HAR: %v", err)
+	}
+	if len(har.Log.Entries) != 1 {
+		t.Fatalf("entries = %d, want 1", len(har.Log.Entries))
+	}
+
+	entry := har.Log.Entries[0]
+
+	// The decisive assertion: WebSocketMessages must be populated. This
+	// fails if convertStreamToHAREntry falls through to streamToHAREntry
+	// (the generic HTTP path) because the WS-frame Flows are then dropped.
+	if len(entry.WebSocketMessages) != 2 {
+		t.Fatalf("_webSocketMessages = %d, want 2 (WS predicate regressed; check convertStreamToHAREntry)", len(entry.WebSocketMessages))
+	}
+
+	if entry.WebSocketMessages[0].Type != "send" || entry.WebSocketMessages[0].Data != "ping" {
+		t.Errorf("ws[0] = %+v, want type=send data=ping", entry.WebSocketMessages[0])
+	}
+	if entry.WebSocketMessages[1].Type != "receive" || entry.WebSocketMessages[1].Data != "pong" {
+		t.Errorf("ws[1] = %+v, want type=receive data=pong", entry.WebSocketMessages[1])
+	}
+
+	// Upgrade request/response are still present on the entry.
+	if entry.Request == nil || entry.Request.Method != "GET" {
+		t.Errorf("request.method = %v, want GET", entry.Request)
+	}
+	if entry.Response == nil || entry.Response.Status != 101 {
+		t.Errorf("response.status = %v, want 101", entry.Response)
+	}
+}
+
 func TestExportHAR_SkipsTCPAndGRPC(t *testing.T) {
 	t.Parallel()
 	now := time.Now().UTC()
 	store := &mockHARStore{
 		streams: []*Stream{
-			{ID: "flow-tcp", Protocol: "TCP", State: "complete", Timestamp: now, Duration: time.Second},
-			{ID: "flow-grpc", Protocol: "gRPC", State: "complete", Timestamp: now, Duration: time.Second},
-			{ID: "flow-http", Protocol: "HTTP/1.x", State: "complete", Timestamp: now, Duration: time.Second},
+			{ID: "flow-tcp", Protocol: "raw", State: "complete", Timestamp: now, Duration: time.Second},
+			{ID: "flow-grpc", Protocol: "grpc", State: "complete", Timestamp: now, Duration: time.Second},
+			{ID: "flow-http", Protocol: "http", State: "complete", Timestamp: now, Duration: time.Second},
 		},
 		flows: map[string][]*Flow{
 			"flow-tcp":  {},
@@ -403,7 +523,7 @@ func TestExportHAR_SkipsTCPAndGRPC(t *testing.T) {
 		t.Fatalf("ExportHAR: %v", err)
 	}
 	if n != 1 {
-		t.Errorf("exported = %d, want 1 (TCP and gRPC should be skipped)", n)
+		t.Errorf("exported = %d, want 1 (raw and grpc should be skipped)", n)
 	}
 }
 
@@ -414,7 +534,7 @@ func TestExportHAR_NilTimings(t *testing.T) {
 		streams: []*Stream{
 			{
 				ID:        "flow-no-timing",
-				Protocol:  "HTTPS",
+				Protocol:  "http",
 				State:     "complete",
 				Timestamp: now,
 				Duration:  50 * time.Millisecond,
@@ -460,9 +580,9 @@ func TestExportHAR_TimeFilter(t *testing.T) {
 
 	store := &mockHARStore{
 		streams: []*Stream{
-			{ID: "f1", Protocol: "HTTPS", State: "complete", Timestamp: base, Duration: time.Millisecond},
-			{ID: "f2", Protocol: "HTTPS", State: "complete", Timestamp: base.Add(time.Hour), Duration: time.Millisecond},
-			{ID: "f3", Protocol: "HTTPS", State: "complete", Timestamp: base.Add(2 * time.Hour), Duration: time.Millisecond},
+			{ID: "f1", Protocol: "http", State: "complete", Timestamp: base, Duration: time.Millisecond},
+			{ID: "f2", Protocol: "http", State: "complete", Timestamp: base.Add(time.Hour), Duration: time.Millisecond},
+			{ID: "f3", Protocol: "http", State: "complete", Timestamp: base.Add(2 * time.Hour), Duration: time.Millisecond},
 		},
 		flows: map[string][]*Flow{
 			"f1": {{ID: "m1", StreamID: "f1", Sequence: 0, Direction: "send", Timestamp: base, Method: "GET", URL: mustParseURL("https://a.com/")}},
@@ -494,7 +614,7 @@ func TestExportHAR_MaxFlows(t *testing.T) {
 	for i := 0; i < 10; i++ {
 		id := "flow-" + string(rune('a'+i))
 		flows = append(flows, &Stream{
-			ID: id, Protocol: "HTTPS", State: "complete",
+			ID: id, Protocol: "http", State: "complete",
 			Timestamp: now.Add(time.Duration(i) * time.Minute), Duration: time.Millisecond,
 		})
 		msgs[id] = []*Flow{
@@ -523,7 +643,7 @@ func TestExportHAR_LargeFlowCount(t *testing.T) {
 	for i := 0; i < count; i++ {
 		id := "flow-" + time.Now().Format("20060102") + "-" + string(rune(i))
 		flows = append(flows, &Stream{
-			ID: id, Protocol: "HTTPS", State: "complete",
+			ID: id, Protocol: "http", State: "complete",
 			Timestamp: now.Add(time.Duration(i) * time.Millisecond), Duration: time.Millisecond,
 		})
 		msgs[id] = []*Flow{
@@ -558,7 +678,7 @@ func TestExportHAR_ContextCancellation(t *testing.T) {
 	now := time.Now().UTC()
 	store := &mockHARStore{
 		streams: []*Stream{
-			{ID: "f1", Protocol: "HTTPS", State: "complete", Timestamp: now, Duration: time.Millisecond},
+			{ID: "f1", Protocol: "http", State: "complete", Timestamp: now, Duration: time.Millisecond},
 		},
 		flows: map[string][]*Flow{
 			"f1": {{ID: "m1", StreamID: "f1", Sequence: 0, Direction: "send", Timestamp: now, Method: "GET", URL: mustParseURL("https://example.com/")}},
@@ -605,7 +725,7 @@ func TestExportHAR_NoBodiesOption(t *testing.T) {
 	now := time.Now().UTC()
 	store := &mockHARStore{
 		streams: []*Stream{
-			{ID: "f1", Protocol: "HTTPS", State: "complete", Timestamp: now, Duration: time.Millisecond},
+			{ID: "f1", Protocol: "http", State: "complete", Timestamp: now, Duration: time.Millisecond},
 		},
 		flows: map[string][]*Flow{
 			"f1": {
@@ -691,23 +811,26 @@ func TestExtractIP(t *testing.T) {
 	}
 }
 
+// TestProtocolToHTTPVersion exercises the canonical Envelope Protocol →
+// HAR httpVersion fallback used when a flow has no recorded HTTPVersion.
+// All inputs are canonical lowercase Protocol values stamped by RecordStep;
+// legacy capitalized names ("HTTPS", "HTTP/2", "WebSocket", "SOCKS5+...")
+// were dead code prior to USK-852 and are no longer mapped.
 func TestProtocolToHTTPVersion(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
+		name     string
 		protocol string
 		want     string
 	}{
-		{"HTTP/1.x", "HTTP/1.1"},
-		{"HTTPS", "HTTP/1.1"},
-		{"HTTP/2", "h2"},
-		{"WebSocket", "HTTP/1.1"},
-		{"SOCKS5+HTTPS", "HTTP/1.1"},
-		{"SOCKS5+HTTP", "HTTP/1.1"},
-		{"unknown", "HTTP/1.1"},
+		{name: "http canonical", protocol: "http", want: "HTTP/1.1"},
+		{name: "ws canonical (RFC 6455 handshake)", protocol: "ws", want: "HTTP/1.1"},
+		{name: "empty falls back to HTTP/1.1", protocol: "", want: "HTTP/1.1"},
+		{name: "unknown falls back to HTTP/1.1", protocol: "unknown", want: "HTTP/1.1"},
 	}
 
 	for _, tc := range tests {
-		t.Run(tc.protocol, func(t *testing.T) {
+		t.Run(tc.name, func(t *testing.T) {
 			got := protocolToHTTPVersion(tc.protocol)
 			if got != tc.want {
 				t.Errorf("protocolToHTTPVersion(%q) = %q, want %q", tc.protocol, got, tc.want)
@@ -724,7 +847,8 @@ func TestProtocolToHTTPVersion(t *testing.T) {
 // mapping for backward compatibility with pre-USK-788 rows. Unknown
 // non-empty values are passed through unchanged so a future canonical
 // value surfaces verbatim instead of being silently masked to the
-// protocol-name fallback.
+// protocol-name fallback. After USK-852 the protocol fallback is keyed
+// on canonical Envelope Protocol values (e.g. "http", "ws").
 func TestHarHTTPVersion(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -733,13 +857,13 @@ func TestHarHTTPVersion(t *testing.T) {
 		protocol    string
 		want        string
 	}{
-		{name: "http/1.0 → HTTP/1.0", flowVersion: "http/1.0", protocol: "HTTP/1.x", want: "HTTP/1.0"},
-		{name: "http/1.1 → HTTP/1.1", flowVersion: "http/1.1", protocol: "HTTP/1.x", want: "HTTP/1.1"},
-		{name: "h2 verbatim", flowVersion: "h2", protocol: "HTTP/2", want: "h2"},
-		{name: "h2c verbatim", flowVersion: "h2c", protocol: "HTTP/2", want: "h2c"},
-		{name: "empty falls back to protocol HTTP/1.x", flowVersion: "", protocol: "HTTP/1.x", want: "HTTP/1.1"},
-		{name: "empty falls back to protocol HTTP/2", flowVersion: "", protocol: "HTTP/2", want: "h2"},
-		{name: "unknown passes through verbatim", flowVersion: "http/0.9", protocol: "HTTP/1.x", want: "http/0.9"},
+		{name: "http/1.0 → HTTP/1.0", flowVersion: "http/1.0", protocol: "http", want: "HTTP/1.0"},
+		{name: "http/1.1 → HTTP/1.1", flowVersion: "http/1.1", protocol: "http", want: "HTTP/1.1"},
+		{name: "h2 verbatim", flowVersion: "h2", protocol: "http", want: "h2"},
+		{name: "h2c verbatim", flowVersion: "h2c", protocol: "http", want: "h2c"},
+		{name: "empty falls back to canonical http", flowVersion: "", protocol: "http", want: "HTTP/1.1"},
+		{name: "empty falls back to canonical ws", flowVersion: "", protocol: "ws", want: "HTTP/1.1"},
+		{name: "unknown passes through verbatim", flowVersion: "http/0.9", protocol: "http", want: "http/0.9"},
 	}
 
 	for _, tc := range tests {
@@ -786,7 +910,7 @@ func TestHARSchemaValidation(t *testing.T) {
 	now := time.Now().UTC()
 	store := &mockHARStore{
 		streams: []*Stream{
-			{ID: "f1", Protocol: "HTTPS", State: "complete", Timestamp: now, Duration: 100 * time.Millisecond},
+			{ID: "f1", Protocol: "http", State: "complete", Timestamp: now, Duration: 100 * time.Millisecond},
 		},
 		flows: map[string][]*Flow{
 			"f1": {
