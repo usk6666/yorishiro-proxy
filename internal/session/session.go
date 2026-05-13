@@ -178,7 +178,20 @@ const interceptReleaseEOFDefaultWindow = 2 * time.Second
 //
 // streamID == "" or InterceptReleaseTracker == nil short-circuits to a
 // no-op — keeps callers free of nil checks at each EOF site.
-func checkInterceptReleaseEOF(ctx context.Context, opt SessionOptions, streamID string, dir envelope.Direction) {
+//
+// USK-860: the oppositeRelayed argument tells the helper whether the
+// relay loop in the OPPOSITE direction successfully forwarded at least
+// one envelope between the matching release and this EOF. When true, the
+// callback is suppressed because the post-release wire conversation
+// completed normally (e.g. a request was modify_and_forwarded, the
+// upstream answered with a 200 OK that the proxy fully relayed back, and
+// the upstream then closed cleanly with Connection: close). The
+// LookupAndForgetOpposite call is still issued so the tracker entry is
+// cleared — only the callback firing is gated. The cleared tracker entry
+// preserves "at most once" semantics for any subsequent EOF on the
+// peer relay goroutine (which would otherwise observe the same release
+// timestamp).
+func checkInterceptReleaseEOF(ctx context.Context, opt SessionOptions, streamID string, dir envelope.Direction, oppositeRelayed bool) {
 	if streamID == "" || opt.InterceptReleaseTracker == nil || opt.OnInterceptReleaseEOF == nil {
 		return
 	}
@@ -187,6 +200,14 @@ func checkInterceptReleaseEOF(ctx context.Context, opt SessionOptions, streamID 
 		window = interceptReleaseEOFDefaultWindow
 	}
 	if _, ok := opt.InterceptReleaseTracker.LookupAndForgetOpposite(streamID, dir, time.Now(), window); !ok {
+		return
+	}
+	if oppositeRelayed {
+		// The matching release was followed by a successful opposite-
+		// direction relay; the EOF here is the normal end of conversation,
+		// not the "long-held frame caused upstream half-close" symptom the
+		// tag describes. Suppress the callback while still letting the
+		// lookup-and-forget above clear the tracker entry.
 		return
 	}
 	opt.OnInterceptReleaseEOF(ctx, streamID)
@@ -1213,10 +1234,19 @@ func wsRelayDirection(
 	stop := startWSHoldKeepalive(ctx, userOpt, sender, streamID, srcDir, connID)
 	defer stop()
 
+	// USK-860: per-relay-direction "did we forward an envelope?" gate. Set
+	// to true after the first successful sender.Send below. Read by
+	// wsRelayNextErr inside checkInterceptReleaseEOF to suppress the
+	// upstream_closed_after_intercept_release tag when the wire
+	// conversation actually completed end-to-end. Single-goroutine read
+	// and write (this loop owns the variable) — a plain bool is
+	// sufficient; no atomics needed.
+	var relayed bool
+
 	for {
 		env, err := src.Next(ctx)
 		if err != nil {
-			return wsRelayNextErr(ctx, err, userOpt, streamID, srcDir)
+			return wsRelayNextErr(ctx, err, userOpt, streamID, srcDir, relayed)
 		}
 		if streamID == "" {
 			streamID = env.StreamID
@@ -1234,6 +1264,7 @@ func wsRelayDirection(
 		if serr := sender.Send(ctx, env); serr != nil {
 			return fmt.Errorf("ws/h2 relay: dst.Send: %w", serr)
 		}
+		relayed = true
 	}
 }
 
@@ -1277,7 +1308,12 @@ func wsChannelConnID(ch layer.Channel) string {
 
 // wsRelayNextErr maps an src.Next error into the wsRelayDirection return
 // contract. Extracted to keep wsRelayDirection under the gocyclo budget.
-func wsRelayNextErr(ctx context.Context, err error, userOpt SessionOptions, streamID string, srcDir envelope.Direction) error {
+//
+// relayed is the per-relay-direction "did we forward an envelope?" gate
+// owned by wsRelayDirection (USK-860). Forwarded as-is to
+// checkInterceptReleaseEOF so the diagnostic tag is suppressed when the
+// peer relay completed normally before the EOF observed here.
+func wsRelayNextErr(ctx context.Context, err error, userOpt SessionOptions, streamID string, srcDir envelope.Direction, relayed bool) error {
 	// USK-851: on either graceful EOF OR a stream-level error (the WS
 	// Layer maps a peer-closed TCP into layer.StreamError{Protocol|
 	// Aborted}), check the OPPOSITE-direction release tracker. A hit
@@ -1286,7 +1322,7 @@ func wsRelayNextErr(ctx context.Context, err error, userOpt SessionOptions, stre
 	// context.Canceled is excluded: it is a normal teardown from the
 	// errgroup peer, not a wire-observed event worth attributing.
 	if !errors.Is(err, context.Canceled) {
-		checkInterceptReleaseEOF(ctx, userOpt, streamID, srcDir)
+		checkInterceptReleaseEOF(ctx, userOpt, streamID, srcDir, relayed)
 	}
 	if errors.Is(err, io.EOF) {
 		return nil
@@ -1632,6 +1668,15 @@ func clientToUpstream(
 
 	notice := UpgradeNoticeFromContext(ctx)
 
+	// USK-860: per-relay-direction "did we forward an envelope upstream?"
+	// gate. Set to true after dispatchClientAction reports a successful
+	// upstream.Send. Read inside checkInterceptReleaseEOF below to
+	// suppress the upstream_closed_after_intercept_release tag when the
+	// proxy actually relayed the post-release client envelope (e.g.
+	// modify_and_forward of an HTTP request) before the EOF here.
+	// Single-goroutine read and write — plain bool is sufficient.
+	var relayed bool
+
 	for {
 		env, nerr := client.Next(ctx)
 		if nerr != nil {
@@ -1651,7 +1696,9 @@ func clientToUpstream(
 			// tag when a recent release on the Receive side correlates.
 			// Symmetric with the upstreamToClient path so either side
 			// observing the teardown attributes it to the long-hold cause.
-			checkInterceptReleaseEOF(ctx, opt, sc.get(), envelope.Send)
+			// USK-860: the relayed gate suppresses the callback when this
+			// loop already forwarded the released envelope upstream.
+			checkInterceptReleaseEOF(ctx, opt, sc.get(), envelope.Send, relayed)
 			if errors.Is(nerr, io.EOF) {
 				return nil
 			}
@@ -1673,8 +1720,12 @@ func clientToUpstream(
 			(action == pipeline.Drop || action == pipeline.Respond) {
 			onDrop(ctx, env, blockedBy)
 		}
-		if perr := dispatchClientAction(ctx, client, uh, dial, env, resp, action); perr != nil {
+		forwarded, perr := dispatchClientAction(ctx, client, uh, dial, env, resp, action)
+		if perr != nil {
 			return perr
+		}
+		if forwarded {
+			relayed = true
 		}
 		// UpgradeStep may have flipped the notice during Pipeline.Run or
 		// the receive-side goroutine may have flipped it concurrently.
@@ -1693,6 +1744,14 @@ func clientToUpstream(
 // stays in the caller because it must run AFTER this returns nil so the
 // final envelope (the WS upgrade request) reaches upstream first
 // (Friction 2-C).
+//
+// USK-860: forwarded reports whether the envelope was actually sent
+// upstream (action == Continue and uh.ch.Send succeeded). The caller
+// uses this to update the per-relay-direction "did we relay?" gate that
+// suppresses the upstream_closed_after_intercept_release diagnostic
+// tag when the post-release wire conversation completed normally. Drop
+// and Respond return forwarded=false because neither produces a
+// proxy-to-upstream envelope on the relay's natural direction.
 func dispatchClientAction(
 	ctx context.Context,
 	client layer.Channel,
@@ -1701,21 +1760,21 @@ func dispatchClientAction(
 	env *envelope.Envelope,
 	resp *envelope.Envelope,
 	action pipeline.Action,
-) error {
+) (forwarded bool, err error) {
 	switch action {
 	case pipeline.Drop:
-		return nil
+		return false, nil
 	case pipeline.Respond:
 		if serr := client.Send(ctx, resp); serr != nil {
-			return fmt.Errorf("client.Send (respond): %w", serr)
+			return false, fmt.Errorf("client.Send (respond): %w", serr)
 		}
-		return nil
+		return false, nil
 	}
 
 	if uh.ch == nil {
 		u, derr := dial(ctx, env)
 		if derr != nil {
-			return fmt.Errorf("dial: %w", derr)
+			return false, fmt.Errorf("dial: %w", derr)
 		}
 		uh.ch = u
 		close(uh.ready)
@@ -1727,9 +1786,9 @@ func dispatchClientAction(
 	// wsChannel.Send's "caller-serialised" contract. Non-WS sessions
 	// see the bare Channel and incur no overhead.
 	if serr := uh.ch.Send(ctx, env); serr != nil {
-		return fmt.Errorf("upstream.Send: %w", serr)
+		return false, fmt.Errorf("upstream.Send: %w", serr)
 	}
-	return nil
+	return true, nil
 }
 
 // upstreamToClient waits for the upstream Channel to be established, then reads
@@ -1766,10 +1825,20 @@ func upstreamToClient(
 
 	notice := UpgradeNoticeFromContext(ctx)
 
+	// USK-860: per-relay-direction "did we forward an envelope downstream?"
+	// gate. Set to true after the first successful client.Send below.
+	// Read inside upstreamToClientFinish to suppress the
+	// upstream_closed_after_intercept_release tag when the wire response
+	// completed end-to-end (the canonical user-reported bug:
+	// modify_and_forward request → 200 OK relayed back → upstream closes
+	// with Connection: close). Single-goroutine read and write — plain
+	// bool is sufficient.
+	var relayed bool
+
 	for {
 		env, err := upstreamNext(ctx, uh.ch, notice)
 		if err != nil || env == nil {
-			return upstreamToClientFinish(ctx, opt, clientID, err)
+			return upstreamToClientFinish(ctx, opt, clientID, err, relayed)
 		}
 
 		if clientID != "" {
@@ -1835,6 +1904,7 @@ func upstreamToClient(
 		if err := client.Send(ctx, env); err != nil {
 			return fmt.Errorf("client.Send: %w", err)
 		}
+		relayed = true
 
 		// Friction 2-C strict ordering: the 101 response (or first SSE
 		// event-stream response) MUST be delivered to the client BEFORE
@@ -1870,11 +1940,18 @@ func upstreamToClient(
 //   - any other err: stream-level error (e.g. WS Layer's mapped
 //     StreamError on peer-reset); check the tracker (same reasoning as
 //     EOF — the upstream stopped talking) and return the original err.
-func upstreamToClientFinish(ctx context.Context, opt SessionOptions, clientID string, err error) error {
+//
+// USK-860: relayed reflects whether the upstream→client relay loop
+// successfully forwarded at least one envelope before this terminal
+// outcome. Forwarded as-is to checkInterceptReleaseEOF so the
+// diagnostic tag is suppressed on the canonical false-positive path
+// (modify_and_forward request → 200 OK relayed end-to-end → normal
+// upstream close).
+func upstreamToClientFinish(ctx context.Context, opt SessionOptions, clientID string, err error, relayed bool) error {
 	if errors.Is(err, ErrUpgradePending) {
 		return err
 	}
-	checkInterceptReleaseEOF(ctx, opt, clientID, envelope.Receive)
+	checkInterceptReleaseEOF(ctx, opt, clientID, envelope.Receive, relayed)
 	return err
 }
 

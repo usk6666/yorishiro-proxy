@@ -46,9 +46,10 @@ import (
 
 // testStore implements flow.Writer for capturing recorded streams and flows.
 type testStore struct {
-	mu      sync.Mutex
-	streams []*flow.Stream
-	flows   []*flow.Flow
+	mu             sync.Mutex
+	streams        []*flow.Stream
+	flows          []*flow.Flow
+	appendTagBatch []map[string]string
 }
 
 func (s *testStore) SaveStream(_ context.Context, st *flow.Stream) error {
@@ -61,6 +62,14 @@ func (s *testStore) SaveStream(_ context.Context, st *flow.Stream) error {
 func (s *testStore) UpdateStream(_ context.Context, id string, update flow.StreamUpdate) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if update.AppendTags != nil {
+		// Clone so caller mutations after the call do not race assertions.
+		cloned := make(map[string]string, len(update.AppendTags))
+		for k, v := range update.AppendTags {
+			cloned[k] = v
+		}
+		s.appendTagBatch = append(s.appendTagBatch, cloned)
+	}
 	for _, st := range s.streams {
 		if st.ID == id {
 			if update.State != "" {
@@ -94,9 +103,31 @@ func (s *testStore) UpdateStream(_ context.Context, id string, update flow.Strea
 					st.ConnInfo.TLSServerCertSubject = update.TLSServerCertSubject
 				}
 			}
+			if update.AppendTags != nil {
+				if st.Tags == nil {
+					st.Tags = make(map[string]string)
+				}
+				for k, v := range update.AppendTags {
+					if _, present := st.Tags[k]; !present {
+						st.Tags[k] = v
+					}
+				}
+			}
 		}
 	}
 	return nil
+}
+
+// hasTag reports whether any AppendTags batch carried key=want.
+func (s *testStore) hasTag(key, want string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, batch := range s.appendTagBatch {
+		if got, ok := batch[key]; ok && got == want {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *testStore) SaveFlow(_ context.Context, f *flow.Flow) error {
@@ -292,6 +323,12 @@ type proxyOpts struct {
 	// (before HostScope). Useful for mid-flight inspection of envelope state
 	// without introducing extra BodyBuffer Retains via HoldQueue Clone.
 	prependCustomSteps []pipeline.Step
+	// USK-851 / USK-860: release-tracker plumbing exposed for the
+	// intercept-release EOF detection tests. When releaseTracker is non-nil
+	// the harness wires it into session.SessionOptions and registers an
+	// OnInterceptReleaseEOF callback that mirrors proxybuild's production
+	// wiring (AppendTags via testStore.UpdateStream).
+	releaseTracker *common.ReleaseTracker
 }
 
 // startHTTPMITMProxy starts a FullListener configured for HTTP MITM (not
@@ -379,6 +416,20 @@ func startHTTPMITMProxy(
 					})
 				}
 			},
+		}
+		// USK-851 / USK-860: thread the optional intercept-release tracker +
+		// EOF callback when the test wires one. Mirrors
+		// proxybuild.buildSessionOptions production wiring so the harness
+		// exercises the same code path the live data plane runs.
+		if opts.releaseTracker != nil {
+			sessOpts.InterceptReleaseTracker = opts.releaseTracker
+			sessOpts.OnInterceptReleaseEOF = func(cbCtx context.Context, streamID string) {
+				_ = store.UpdateStream(cbCtx, streamID, flow.StreamUpdate{
+					AppendTags: map[string]string{
+						"intercept_hold_outcome": "upstream_closed_after_intercept_release",
+					},
+				})
+			}
 		}
 
 		// USK-730: per-exchange Channel granularity. The HTTP/1.x client
