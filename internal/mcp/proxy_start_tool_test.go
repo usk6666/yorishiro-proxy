@@ -1570,3 +1570,334 @@ func TestProxyStart_ResetsProtocolsOnRestart(t *testing.T) {
 		t.Errorf("enabled protocols after restart = %v, want nil (all protocols)", s.connector.enabledProtocols)
 	}
 }
+
+// --- USK-861: tcp_forwards / listen_addr port collision ---
+
+// TestValidateTCPForwardsAgainstListenAddr is a unit test for the
+// cross-field collision check helper. It exercises the boundary cases
+// directly — the MCP-level integration tests below cover the wired path.
+func TestValidateTCPForwardsAgainstListenAddr(t *testing.T) {
+	tests := []struct {
+		name       string
+		listenAddr string
+		forwards   map[string]any
+		wantErr    bool
+		errSubstr  string
+	}{
+		{
+			name:       "self-collision rejected",
+			listenAddr: "127.0.0.1:9999",
+			forwards:   map[string]any{"9999": "httpbin.org:80"},
+			wantErr:    true,
+			errSubstr:  "9999",
+		},
+		{
+			name:       "self-collision error mentions listen_addr",
+			listenAddr: "127.0.0.1:8080",
+			forwards:   map[string]any{"8080": "upstream:443"},
+			wantErr:    true,
+			errSubstr:  "127.0.0.1:8080",
+		},
+		{
+			name:       "non-colliding ports accepted",
+			listenAddr: "127.0.0.1:8080",
+			forwards:   map[string]any{"9999": "upstream:443"},
+			wantErr:    false,
+		},
+		{
+			name:       "multiple forwards one collides",
+			listenAddr: "127.0.0.1:8080",
+			forwards:   map[string]any{"9999": "a:1", "8080": "b:2"},
+			wantErr:    true,
+			errSubstr:  "8080",
+		},
+		{
+			name:       "empty listen_addr short-circuits",
+			listenAddr: "",
+			forwards:   map[string]any{"8080": "upstream:443"},
+			wantErr:    false,
+		},
+		{
+			name:       "empty forwards short-circuits",
+			listenAddr: "127.0.0.1:8080",
+			forwards:   nil,
+			wantErr:    false,
+		},
+		{
+			name:       "ipv6 loopback collision",
+			listenAddr: "[::1]:9999",
+			forwards:   map[string]any{"9999": "upstream:80"},
+			wantErr:    true,
+			errSubstr:  "9999",
+		},
+		{
+			name:       "malformed listen_addr defers to validateLoopbackAddr",
+			listenAddr: "not-a-host-port",
+			forwards:   map[string]any{"8080": "upstream:443"},
+			wantErr:    false, // helper short-circuits; validateLoopbackAddr already rejected
+		},
+		{
+			name:       "ephemeral listen_addr and ephemeral forward do not collide",
+			listenAddr: "127.0.0.1:0",
+			forwards:   map[string]any{"0": "upstream:443"},
+			wantErr:    false, // kernel assigns distinct ephemeral ports
+		},
+		{
+			name:       "ephemeral listen_addr with fixed forward port",
+			listenAddr: "127.0.0.1:0",
+			forwards:   map[string]any{"9999": "upstream:443"},
+			wantErr:    false,
+		},
+		{
+			name:       "fixed listen_addr with ephemeral forward port",
+			listenAddr: "127.0.0.1:8080",
+			forwards:   map[string]any{"0": "upstream:443"},
+			wantErr:    false,
+		},
+		{
+			// USK-861 F-1: non-canonical port literal with leading
+			// zero must NOT bypass the collision check via string
+			// inequality against the canonical "8080".
+			name:       "leading-zero forward port still collides",
+			listenAddr: "127.0.0.1:8080",
+			forwards:   map[string]any{"08080": "upstream:443"},
+			wantErr:    true,
+			errSubstr:  "8080",
+		},
+		{
+			// USK-861 F-1: explicit "+" sign on a forward port must
+			// not bypass the check (strconv.Atoi parses "+8080" as
+			// 8080).
+			name:       "leading-plus forward port still collides",
+			listenAddr: "127.0.0.1:8080",
+			forwards:   map[string]any{"+8080": "upstream:443"},
+			wantErr:    true,
+			errSubstr:  "8080",
+		},
+		{
+			// Non-integer port keys are deferred to
+			// validateTCPForwardsConfig (via validatePortNumber);
+			// the collision helper must NOT fabricate its own error
+			// for malformed input.
+			name:       "non-integer forward port deferred to format check",
+			listenAddr: "127.0.0.1:8080",
+			forwards:   map[string]any{"abc": "upstream:443"},
+			wantErr:    false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateTCPForwardsAgainstListenAddr(tt.listenAddr, tt.forwards)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("validateTCPForwardsAgainstListenAddr(%q, %v) error = %v, wantErr %v",
+					tt.listenAddr, tt.forwards, err, tt.wantErr)
+			}
+			if tt.wantErr && tt.errSubstr != "" && err != nil {
+				if !contains(err.Error(), tt.errSubstr) {
+					t.Errorf("error %q does not contain expected substring %q", err.Error(), tt.errSubstr)
+				}
+			}
+		})
+	}
+}
+
+// TestProxyStart_TCPForwardSelfCollision_FailsFast verifies that proxy_start
+// rejects an invocation whose tcp_forwards port equals the listen_addr port,
+// before the listener is registered. The original footgun (USK-861) was that
+// the listener got registered before the forward bind failure was surfaced,
+// leaving a phantom entry that blocked recreating the listener under the
+// same name.
+func TestProxyStart_TCPForwardSelfCollision_FailsFast(t *testing.T) {
+	// Pick a free port to use as both listen_addr and tcp_forwards key,
+	// so the test does not race other tests on a fixed port.
+	port := pickFreePortForTest(t)
+	addr := net.JoinHostPort("127.0.0.1", port)
+
+	manager := newTestProxybuildManager(t)
+	cs := setupProxyStartTestSession(t, manager, nil)
+
+	result, err := callProxyStart(t, cs, map[string]any{
+		"listen_addr": addr,
+		"tcp_forwards": map[string]any{
+			port: "127.0.0.1:1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("expected IsError=true for self-colliding tcp_forwards/listen_addr")
+	}
+
+	// The error message must surface both the colliding port and the
+	// listen_addr so an AI agent caller can self-diagnose.
+	body := combineCallToolText(result)
+	if !contains(body, port) {
+		t.Errorf("error %q does not mention colliding port %q", body, port)
+	}
+	if !contains(body, addr) {
+		t.Errorf("error %q does not mention listen_addr %q", body, addr)
+	}
+
+	// Critically: no listener must remain registered. The original
+	// footgun was a phantom entry blocking recreate-by-same-name.
+	if got := manager.ListenerCount(); got != 0 {
+		t.Errorf("ListenerCount after rejected proxy_start = %d, want 0 (no phantom listener)", got)
+	}
+}
+
+// TestProxyStart_TCPForwardExternalBindConflict_RollsBack verifies that when
+// a tcp_forwards bind fails because an EXTERNAL holder owns the port, the
+// listener is rolled back so the user can recreate under the same name.
+// This covers the second arm of USK-861: the missing StopNamed call after
+// startTCPForwards failure.
+func TestProxyStart_TCPForwardExternalBindConflict_RollsBack(t *testing.T) {
+	// Reserve a port from outside to provoke "address in use" inside
+	// the proxy's StartTCPForwardsNamed call.
+	occupied, release := reserveExternalPort(t)
+	defer release()
+
+	manager := newTestProxybuildManager(t)
+	cs := setupProxyStartTestSession(t, manager, nil)
+
+	result, err := callProxyStart(t, cs, map[string]any{
+		"listen_addr": "127.0.0.1:0",
+		"tcp_forwards": map[string]any{
+			occupied: "127.0.0.1:1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("expected IsError=true for tcp_forwards bind conflict")
+	}
+
+	// The fix: parent listener must NOT remain registered after the
+	// forward bind failure. Without StopNamed in the rollback path,
+	// ListenerCount stays at 1 and the user cannot recreate the
+	// listener under the same name.
+	if got := manager.ListenerCount(); got != 0 {
+		t.Errorf("ListenerCount after rolled-back proxy_start = %d, want 0", got)
+	}
+}
+
+// TestProxyStart_RecreateAfterTCPForwardFailure_Succeeds verifies that
+// after a tcp_forwards bind failure, the same listener name is reusable.
+// This is the user-visible symptom of the rollback fix: prior to the fix,
+// a second proxy_start with the same name returned "listener with this
+// name already exists".
+func TestProxyStart_RecreateAfterTCPForwardFailure_Succeeds(t *testing.T) {
+	occupied, release := reserveExternalPort(t)
+	defer release()
+
+	const name = "raw"
+
+	manager := newTestProxybuildManager(t)
+	cs := setupProxyStartTestSession(t, manager, nil)
+
+	// First call: forward bind conflict triggers rollback.
+	result, err := callProxyStart(t, cs, map[string]any{
+		"name":        name,
+		"listen_addr": "127.0.0.1:0",
+		"tcp_forwards": map[string]any{
+			occupied: "127.0.0.1:1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("first CallTool: %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("expected first proxy_start to fail with bind conflict")
+	}
+
+	// Sanity: rollback already cleared the listener.
+	if got := manager.ListenerCount(); got != 0 {
+		t.Fatalf("ListenerCount after first (failed) proxy_start = %d, want 0", got)
+	}
+
+	// Release the externally-held port, then retry with a non-colliding
+	// forward port under the same listener name. Without the rollback
+	// fix, this returned "listener with this name already exists".
+	release()
+
+	result, err = callProxyStart(t, cs, map[string]any{
+		"name":        name,
+		"listen_addr": "127.0.0.1:0",
+		"tcp_forwards": map[string]any{
+			"0": "127.0.0.1:1", // ephemeral port; no collision possible
+		},
+	})
+	if err != nil {
+		t.Fatalf("second CallTool: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("expected second proxy_start to succeed after rollback: %s", combineCallToolText(result))
+	}
+	if got := manager.ListenerCount(); got != 1 {
+		t.Errorf("ListenerCount after successful recreate = %d, want 1", got)
+	}
+}
+
+// pickFreePortForTest acquires an ephemeral loopback port, releases it,
+// and returns the port string. The brief window between Close and any
+// subsequent bind is the same the OS provides to any caller; the test
+// uses the freed port as both listen_addr and tcp_forwards key to
+// trigger the self-collision check.
+func pickFreePortForTest(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("acquire ephemeral port: %v", err)
+	}
+	_, port, err := net.SplitHostPort(ln.Addr().String())
+	ln.Close()
+	if err != nil {
+		t.Fatalf("split host port: %v", err)
+	}
+	return port
+}
+
+// reserveExternalPort listens on an ephemeral loopback port and returns
+// the port string + a closer. The listener stays bound until the closer
+// runs, so any in-test bind on that port observes "address already in use".
+func reserveExternalPort(t *testing.T) (port string, release func()) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserve external port: %v", err)
+	}
+	_, p, err := net.SplitHostPort(ln.Addr().String())
+	if err != nil {
+		ln.Close()
+		t.Fatalf("split host port: %v", err)
+	}
+	closed := false
+	return p, func() {
+		if closed {
+			return
+		}
+		closed = true
+		ln.Close()
+	}
+}
+
+// combineCallToolText extracts all text content from a CallToolResult.
+// IsError responses surface their error string as the first TextContent;
+// joining all entries is robust to multi-content responses.
+func combineCallToolText(result *gomcp.CallToolResult) string {
+	if result == nil {
+		return ""
+	}
+	out := ""
+	for _, c := range result.Content {
+		if tc, ok := c.(*gomcp.TextContent); ok {
+			if out != "" {
+				out += "\n"
+			}
+			out += tc.Text
+		}
+	}
+	return out
+}

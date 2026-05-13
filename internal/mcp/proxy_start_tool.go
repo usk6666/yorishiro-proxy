@@ -242,6 +242,16 @@ func (s *Server) handleProxyStart(ctx context.Context, _ *gomcp.CallToolRequest,
 		}
 	}
 
+	// USK-861: cross-field validation — reject the case where a
+	// tcp_forwards port key collides with the primary listen_addr port.
+	// Run BEFORE StartNamed so a self-collision is rejected without
+	// registering a half-broken listener (the original footgun: the
+	// parent bind succeeded, the forward bind failed, but the listener
+	// remained registered, blocking re-creation under the same name).
+	if err := validateTCPForwardsAgainstListenAddr(input.ListenAddr, input.TCPForwards); err != nil {
+		return nil, nil, err
+	}
+
 	// Start the listener BEFORE resetting/applying settings.
 	// This ensures a failed start (already running, bind error) does not
 	// clear the active configuration (USK-407).
@@ -272,6 +282,13 @@ func (s *Server) handleProxyStart(ctx context.Context, _ *gomcp.CallToolRequest,
 	}
 
 	if err := s.startTCPForwards(ctx, listenerName, parsedForwards); err != nil {
+		// USK-861: a tcp_forwards bind failure (e.g. another process
+		// holds the port) leaves the parent listener registered but the
+		// forward unbound — the user observes a half-broken listener
+		// they cannot recreate under the same name. Roll back the
+		// listener registration here, mirroring the sibling rollback
+		// pattern at lines 265 and 270 above.
+		s.connector.manager.StopNamed(ctx, listenerName)
 		return nil, nil, err
 	}
 
@@ -633,6 +650,80 @@ var validProtocols = map[string]bool{
 	"gRPC":      true,
 	"SOCKS5":    true,
 	"TCP":       true,
+}
+
+// validateTCPForwardsAgainstListenAddr rejects tcp_forwards entries whose
+// port key collides with the primary listen_addr port (USK-861).
+//
+// The forward listener and the parent listener both bind a 127.0.0.1
+// socket; if their ports match, only one bind can succeed. Without this
+// check, the parent bind wins, the forward bind fails with "address
+// already in use", and the user is left with a registered-but-broken
+// listener they cannot recreate under the same name. The check runs
+// BEFORE StartNamed so a self-collision is rejected fail-fast with no
+// side effects on the proxybuild registry.
+//
+// Forward listeners hardcode 127.0.0.1 (see proxybuild.startTCPForwardListener)
+// and listen_addr is enforced loopback by validateLoopbackAddr, so a port
+// match is sufficient for collision; host comparison is unnecessary.
+//
+// Port 0 on EITHER side is treated as a non-collision: it means
+// "kernel-assigned ephemeral", and the kernel never hands out the same
+// ephemeral port to two concurrent listeners. Skipping the 0 case
+// preserves the established e2e idiom of binding both the parent and
+// forward listeners to ephemeral ports for test isolation.
+//
+// Comparison is performed on parsed integer values so that
+// non-canonical literals (e.g. "08080" with leading zero, "+8080" with
+// explicit sign) cannot bypass the check by failing string equality
+// against the canonical form. validateTCPForwardsConfig (run later
+// from applyTCPForwardsConfig) is responsible for rejecting malformed
+// or out-of-range port keys via validatePortNumber; this helper only
+// addresses cross-field collision and silently defers to that check
+// for any port literal it cannot parse, to avoid duplicating the
+// format-validation error message.
+//
+// listenAddr "" (default 127.0.0.1:8080 applied later by proxybuild) and
+// empty forwards short-circuit to nil to keep the happy path zero-cost.
+func validateTCPForwardsAgainstListenAddr(listenAddr string, forwards map[string]any) error {
+	if listenAddr == "" || len(forwards) == 0 {
+		return nil
+	}
+	_, listenPortStr, err := net.SplitHostPort(listenAddr)
+	if err != nil {
+		// listen_addr is malformed; defer to validateLoopbackAddr's
+		// dedicated error message rather than producing a confusing
+		// "tcp_forwards: ..." error here. validateLoopbackAddr runs
+		// immediately before this helper, so a bad listenAddr will
+		// already have been rejected.
+		return nil
+	}
+	listenPort, err := strconv.Atoi(listenPortStr)
+	if err != nil {
+		// listen_addr port is non-numeric; defer to validateLoopbackAddr.
+		return nil
+	}
+	// Two ephemeral ports never collide: the kernel assigns distinct
+	// values to each net.Listen("tcp", "127.0.0.1:0"). Skip the check
+	// when listen_addr asks for an ephemeral assignment.
+	if listenPort == 0 {
+		return nil
+	}
+	for portKey := range forwards {
+		fwdPort, err := strconv.Atoi(portKey)
+		if err != nil {
+			// Non-integer port key; validateTCPForwardsConfig will
+			// surface a precise error later via validatePortNumber.
+			continue
+		}
+		if fwdPort == 0 {
+			continue
+		}
+		if fwdPort == listenPort {
+			return fmt.Errorf("tcp_forwards: port %d conflicts with listen_addr %q — pick a different port", listenPort, listenAddr)
+		}
+	}
+	return nil
 }
 
 // validateTCPForwardsConfig validates tcp_forwards entries with ForwardConfig values.
