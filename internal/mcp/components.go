@@ -254,11 +254,6 @@ type proxyManager interface {
 	// non-Live BuildConfig paths that did not run the resolver.
 	// Boot-time only; no setter.
 	SSEMaxEventsPerStream() int
-	// SetEnabledProtocols forwards the user-facing protocol allow-list
-	// down to the underlying connector.FullListener so detection-time
-	// rejection enforces it on inbound traffic (USK-732). Empty/nil
-	// resets the listener to "accept all detected kinds".
-	SetEnabledProtocols(protocols []string)
 	StartTCPForwardsNamedAny(ctx context.Context, name string, params any) error
 }
 
@@ -350,7 +345,6 @@ type Connector struct {
 	tcpForwards           map[string]*config.ForwardConfig
 	tcpHandler            tcpForwardHandler
 	detector              any
-	enabledProtocols      []string
 	proxyDefaults         *config.ProxyConfig
 	upstreamProxySetters  []upstreamProxySetter
 	requestTimeoutSetters []requestTimeoutSetter

@@ -12,8 +12,7 @@ import (
 
 // TestBuildUpstreamTLSErrorRecorder_NilStore verifies the recorder returns
 // nil when no flow.Writer is configured, preserving the silent-drop
-// fallback path consistent with buildProtocolRejectedRecorder /
-// buildPipelineDropRecorder.
+// fallback path consistent with buildPipelineDropRecorder.
 func TestBuildUpstreamTLSErrorRecorder_NilStore(t *testing.T) {
 	rec := buildTLSStackBuildErrorRecorder(nil, nil, "test", silentLogger())
 	if rec != nil {
@@ -105,8 +104,7 @@ func TestBuildUpstreamTLSErrorRecorder_NilError_NoOp(t *testing.T) {
 // TestBuildUpstreamTLSErrorRecorder_NoConnID_GeneratesFallback verifies
 // that when the context does not carry a ConnID (test or non-listener
 // path), the recorder falls back to a freshly-generated UUID rather than
-// writing an empty ConnID. Mirrors the same defence in
-// buildProtocolRejectedRecorder.
+// writing an empty ConnID.
 func TestBuildUpstreamTLSErrorRecorder_NoConnID_GeneratesFallback(t *testing.T) {
 	store := &recordingFlowStore{}
 	rec := buildTLSStackBuildErrorRecorder(store, nil, "live", silentLogger())

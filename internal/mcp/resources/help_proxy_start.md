@@ -56,14 +56,6 @@ Each entry maps a local port number (string key) to either:
 - If omitted, TCP forwarding is not configured
 - Both legacy string format and structured ForwardConfig can be mixed in the same object
 
-### protocols (array of strings, optional)
-Specifies which protocols are enabled for detection.
-- Valid values: `"HTTP/1.x"`, `"HTTPS"`, `"WebSocket"`, `"HTTP/2"`, `"gRPC"`, `"SOCKS5"`, `"TCP"`
-- If omitted, all protocols are enabled (default behavior)
-- Restricting protocols can improve performance and reduce noise
-- The filter applies to BOTH peek-time protocol detection AND the MITM TLS ALPN list advertised to clients (USK-808). For example, omitting `"HTTP/2"` causes the proxy to advertise only `http/1.1` in the MITM TLS handshake, so clients (including browsers) negotiate HTTP/1.1 even when the upstream supports h2. Conversely, omitting `"HTTP/1.x"` and `"WebSocket"` while keeping `"HTTP/2"` keeps the advertised ALPN list to `["h2"]` only. When the filter would empty the offer list (e.g. only `"HTTPS"` is enabled), the proxy advertises `["http/1.1"]` as the conservative HTTPS-with-HTTP/1.1 fallback.
-- Upstream-facing ALPN dial offers are intentionally NOT filtered: wire fidelity to upstream is a strict MITM principle, and h2-only origins must remain reachable. Only the proxy's own server-side MITM ALPN extension is constrained by this filter.
-
 ### tls_fingerprint (string, optional)
 TLS ClientHello fingerprint profile for upstream connections.
 - `"chrome"` (default): Mimic Chrome browser TLS fingerprint.
@@ -207,14 +199,6 @@ Example:
 }
 ```
 
-### Start with specific protocols
-```json
-{
-  "listen_addr": "127.0.0.1:8080",
-  "protocols": ["HTTP/1.x", "HTTPS", "gRPC"]
-}
-```
-
 ### Start with SOCKS5 password authentication
 ```json
 {
@@ -228,8 +212,7 @@ Example:
 ### Start with SOCKS5 via proxychains
 ```json
 {
-  "listen_addr": "127.0.0.1:1080",
-  "protocols": ["SOCKS5"]
+  "listen_addr": "127.0.0.1:1080"
 }
 ```
 Then configure proxychains (`/etc/proxychains.conf`):

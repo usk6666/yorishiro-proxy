@@ -58,90 +58,13 @@ var defaultALPNOffer = []string{ALPNProtocolH2, ALPNProtocolHTTP11}
 //   - anything else (unrecognised): offer ["http/1.1"] — alpnRoute would
 //     fall through to bytechunk anyway, and we don't want to mislead the
 //     client into thinking we speak the unknown protocol.
-//
-// USK-808: the result is then filtered through the operator's
-// enabled-protocols allow-list (when non-empty) so the proxy never
-// advertises a protocol the operator disabled via proxy_start `protocols`.
-// Pass nil/empty enabled to keep the legacy unfiltered behaviour.
-func clientALPNOffersForUpstream(upstreamALPN string, enabled []string) []string {
-	var base []string
+func clientALPNOffersForUpstream(upstreamALPN string) []string {
 	switch upstreamALPN {
 	case ALPNProtocolH2:
-		base = []string{ALPNProtocolH2, ALPNProtocolHTTP11}
+		return []string{ALPNProtocolH2, ALPNProtocolHTTP11}
 	default:
-		base = []string{ALPNProtocolHTTP11}
-	}
-	return alpnOffersAllowedByEnabledProtocols(base, enabled)
-}
-
-// alpnOffersAllowedByEnabledProtocols filters the supplied client-facing
-// ALPN offer list to the protocols permitted by the operator's
-// enabled_protocols allow-list (USK-808).
-//
-// Mapping rule:
-//   - "h2" is allowed iff any of {"HTTP/2", "gRPC"} appears in enabled.
-//     (gRPC requires HTTP/2 framing; advertising h2 is therefore implied
-//     when gRPC is enabled.)
-//   - "http/1.1" is allowed iff any of {"HTTP/1.x", "WebSocket"} appears
-//     in enabled. (RFC 6455 WebSocket runs on HTTP/1.1 at this layer.)
-//
-// Order is preserved from `base`. crypto/tls picks the first NextProtos
-// entry the client also offered, so the upstream-preferred ordering
-// established by clientALPNOffersForUpstream survives the filter.
-//
-// Special cases:
-//   - enabled is nil or empty → return base unchanged (legacy
-//     "all-allowed" semantic per USK-808 design decision #5).
-//   - filter strips every entry — e.g. operator enabled only "HTTPS"
-//     with no inner protocol — return ["http/1.1"]. Leaving NextProtos
-//     unset would cause `no_application_protocol` alerts on strict TLS
-//     1.3 clients; HTTPS-with-HTTP/1.1 is the safe conservative default
-//     when the operator did not name an inner protocol (USK-808 design
-//     decision #7).
-//
-// "HTTPS", "SOCKS5", "TCP" are listener-level pre-conditions only
-// (matched at peek time by kindMatchesEnabledNames); they have no
-// effect on the ALPN filter beyond the fallback rule above.
-func alpnOffersAllowedByEnabledProtocols(base, enabled []string) []string {
-	if len(enabled) == 0 {
-		return base
-	}
-	allowH2 := false
-	allowH1 := false
-	for _, name := range enabled {
-		switch name {
-		case "HTTP/2", "gRPC":
-			allowH2 = true
-		case "HTTP/1.x", "WebSocket":
-			allowH1 = true
-		}
-	}
-
-	out := make([]string, 0, len(base))
-	for _, proto := range base {
-		switch proto {
-		case ALPNProtocolH2:
-			if allowH2 {
-				out = append(out, proto)
-			}
-		case ALPNProtocolHTTP11:
-			if allowH1 {
-				out = append(out, proto)
-			}
-		default:
-			// Unknown ids in `base` are passed through — the filter only
-			// constrains protocols it knows how to gate. Keeps the helper
-			// future-proof if a new ALPN id is added to the offer list.
-			out = append(out, proto)
-		}
-	}
-	if len(out) == 0 {
-		// Filter excluded everything. HTTPS-only (operator named
-		// "HTTPS" but no inner protocol) lands here; fall back to
-		// http/1.1 rather than leaving NextProtos unset.
 		return []string{ALPNProtocolHTTP11}
 	}
-	return out
 }
 
 // clientALPNMatchesUpstream reports whether a client-negotiated ALPN

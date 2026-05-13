@@ -263,175 +263,43 @@ func stripURLScheme(t *testing.T, raw string) string {
 	return host
 }
 
-// TestE2E_ProxyStart_ProtocolSubset_Filters covers proxy_start's
-// "protocols" parameter wiring. Both sides of the contract are
-// asserted: (a) proxy_start returns the requested subset and the
-// connector stores it; (b) the runtime data path rejects connections
-// whose detected protocol is not in the subset (USK-732), surfacing the
-// rejection as a flow Stream with state="error" and
-// blocked_by="enabled_protocols" rather than a silent close.
-func TestE2E_ProxyStart_ProtocolSubset_Filters(t *testing.T) {
-	t.Run("http1_only_accepted_by_proxy_start", func(t *testing.T) {
-		h := mcptest.StartHarness(t, mcptest.HarnessOptions{})
-
-		res := h.MustOK(t, "proxy_start", map[string]any{
-			"listen_addr": "127.0.0.1:0",
-			"protocols":   []any{"HTTP/1.x"},
-		})
-
-		gotProtocols := protocolsFromStartResult(t, res)
-		if len(gotProtocols) != 1 || gotProtocols[0] != "HTTP/1.x" {
-			t.Errorf("proxy_start result.protocols = %v, want [HTTP/1.x]", gotProtocols)
-		}
-
-		// Confirm the same value is reachable via query("config") —
-		// the canonical wire-level wiring check.
-		cfgRes := h.MustOK(t, "query", map[string]any{"resource": "config"})
-		var cfg struct {
-			EnabledProtocols []string `json:"enabled_protocols"`
-		}
-		if err := json.Unmarshal([]byte(cfgRes.Text), &cfg); err != nil {
-			t.Fatalf("decode config: %v", err)
-		}
-		if len(cfg.EnabledProtocols) != 1 || cfg.EnabledProtocols[0] != "HTTP/1.x" {
-			t.Errorf("query config.enabled_protocols = %v, want [HTTP/1.x]", cfg.EnabledProtocols)
-		}
-	})
-
-	t.Run("https_only_accepted_by_proxy_start", func(t *testing.T) {
-		h := mcptest.StartHarness(t, mcptest.HarnessOptions{})
-
-		res := h.MustOK(t, "proxy_start", map[string]any{
-			"listen_addr": "127.0.0.1:0",
-			"protocols":   []any{"HTTPS"},
-		})
-
-		gotProtocols := protocolsFromStartResult(t, res)
-		if len(gotProtocols) != 1 || gotProtocols[0] != "HTTPS" {
-			t.Errorf("proxy_start result.protocols = %v, want [HTTPS]", gotProtocols)
-		}
-	})
-
-	t.Run("invalid_protocol_rejected", func(t *testing.T) {
-		h := mcptest.StartHarness(t, mcptest.HarnessOptions{})
-		// validateProtocols rejects anything not in validProtocols.
-		// Match the stable "unknown protocol" prefix.
-		h.ExpectError(t, "proxy_start", map[string]any{
-			"listen_addr": "127.0.0.1:0",
-			"protocols":   []any{"NotAProtocol"},
-		}, "unknown protocol")
-	})
-
-	t.Run("http2_traffic_rejected_when_only_http1_enabled", func(t *testing.T) {
-		// USK-732: with protocols=["HTTP/1.x"], an HTTP/2 client (h2c
-		// preface) MUST be rejected at peek-based detection before any
-		// stack is built. The rejection MUST be visible in flow
-		// recording (Stream with state="error" and
-		// blocked_by="enabled_protocols") so MITM observability is
-		// preserved.
-		h := mcptest.StartHarness(t, mcptest.HarnessOptions{})
-
-		startRes := h.MustOK(t, "proxy_start", map[string]any{
-			"listen_addr": "127.0.0.1:0",
-			"protocols":   []any{"HTTP/1.x"},
-		})
-		proxyAddr := proxyListenAddrFromStartResult(t, startRes)
-		if proxyAddr == "" {
-			t.Fatalf("proxy_start did not return listen_addr; full result: %s", startRes.Text)
-		}
-
-		// Send the HTTP/2 cleartext (h2c) connection preface — 24 bytes
-		// per RFC 9113 §3.4. Detection only inspects 16 of these
-		// before classifying the connection as ProtocolHTTP2; we send
-		// the full preface for realism.
-		const h2Preface = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
-		conn, err := net.DialTimeout("tcp", proxyAddr, 5*time.Second)
-		if err != nil {
-			t.Fatalf("dial proxy %s: %v", proxyAddr, err)
-		}
-		_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
-		if _, err := conn.Write([]byte(h2Preface)); err != nil {
-			// EPIPE here is acceptable — proxy may have closed before
-			// our write completes — what matters is the recorded flow.
-			t.Logf("write preface: %v (acceptable if proxy closed early)", err)
-		}
-		// Read until EOF / error. The proxy MUST close the connection
-		// silently — no HTTP-style response, just the rejection record.
-		buf := make([]byte, 64)
-		_, _ = conn.Read(buf)
-		_ = conn.Close()
-
-		// Poll for the rejection Stream to appear in flow recording.
-		// SaveStream runs on a background-derived context inside the
-		// rejection callback so the listener's accept loop is not
-		// blocked; a bounded poll handles that lag.
-		streamID, blockedBy, gotProto := waitForRejectedStream(t, h, 3*time.Second)
-		if streamID == "" {
-			t.Fatalf("no rejected Stream observed after HTTP/2 client connection")
-		}
-		if blockedBy != "enabled_protocols" {
-			t.Errorf("rejected Stream blocked_by = %q, want %q", blockedBy, "enabled_protocols")
-		}
-		if gotProto != "HTTP/2" {
-			t.Errorf("rejected Stream protocol = %q, want %q", gotProto, "HTTP/2")
-		}
-	})
-}
-
-// proxyListenAddrFromStartResult extracts the listen_addr field from a
-// proxy_start ToolResult; returns "" if absent. Defined here because
-// the USK-725 helpers above are scoped to the protocols field only.
-func proxyListenAddrFromStartResult(t *testing.T, res mcptest.ToolResult) string {
-	t.Helper()
-	if res.Decoded != nil {
-		if addr, ok := res.Decoded["listen_addr"].(string); ok {
-			return addr
-		}
+// TestE2E_ProxyStart_RejectsUnknownProtocolsField is the USK-870
+// regression guard for the removal of the `protocols` field
+// (USK-865 Option A). After the deletion, any client that still sends
+// `protocols` to proxy_start must be rejected with an unknown-field
+// schema error rather than silently ignored — this prevents a stale
+// caller from believing it has enforced a protocol allow-list when in
+// fact every protocol is now always enabled.
+//
+// The MCP go-sdk generates `additionalProperties: false` for struct
+// inputs (github.com/google/jsonschema-go infer.go: "Structs have
+// schema type 'object', and disallow additionalProperties"), so the
+// rejection comes from JSON-schema validation before the handler is
+// ever invoked.
+func TestE2E_ProxyStart_RejectsUnknownProtocolsField(t *testing.T) {
+	cases := []struct {
+		name      string
+		protocols any
+	}{
+		{"single_protocol", []any{"HTTP/1.x"}},
+		{"multiple_protocols", []any{"HTTP/1.x", "HTTPS"}},
+		{"empty_slice", []any{}},
+		{"null", nil},
 	}
-	var parsed struct {
-		ListenAddr string `json:"listen_addr"`
-	}
-	if err := json.Unmarshal([]byte(res.Text), &parsed); err != nil {
-		t.Fatalf("decode proxy_start listen_addr: %v (text=%q)", err, res.Text)
-	}
-	return parsed.ListenAddr
-}
-
-// waitForRejectedStream polls query("flows", state="error") until a
-// rejected Stream appears or the timeout expires. Returns the first
-// matching Stream's id, blocked_by, and protocol. Empty id means no
-// match before deadline.
-func waitForRejectedStream(t *testing.T, h *mcptest.Harness, timeout time.Duration) (id, blockedBy, protocol string) {
-	t.Helper()
-	deadline := time.Now().Add(timeout)
-	const pollInterval = 50 * time.Millisecond
-	for {
-		res := h.MustOK(t, "query", map[string]any{
-			"resource": "flows",
-			"filter": map[string]any{
-				"state": "error",
-			},
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			h := mcptest.StartHarness(t, mcptest.HarnessOptions{})
+			// The schema validator emits a message that mentions the
+			// offending property name. "protocols" is the stable
+			// substring; the exact wording ("additional properties not
+			// allowed", "unknown field", etc.) is SDK-version-specific
+			// so we anchor on the field name only.
+			h.ExpectError(t, "proxy_start", map[string]any{
+				"listen_addr": "127.0.0.1:0",
+				"protocols":   tc.protocols,
+			}, "protocols")
 		})
-		var parsed struct {
-			Flows []struct {
-				ID        string `json:"id"`
-				Protocol  string `json:"protocol"`
-				State     string `json:"state"`
-				BlockedBy string `json:"blocked_by"`
-			} `json:"flows"`
-		}
-		if err := json.Unmarshal([]byte(res.Text), &parsed); err != nil {
-			t.Fatalf("decode query(flows) response: %v (text=%q)", err, res.Text)
-		}
-		for _, f := range parsed.Flows {
-			if f.State == "error" && f.BlockedBy == "enabled_protocols" {
-				return f.ID, f.BlockedBy, f.Protocol
-			}
-		}
-		if time.Now().After(deadline) {
-			return "", "", ""
-		}
-		time.Sleep(pollInterval)
 	}
 }
 
@@ -550,30 +418,6 @@ func TestE2E_ProxyStart_MTLSClientCert(t *testing.T) {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-// protocolsFromStartResult extracts the protocols field from a
-// proxy_start ToolResult, returning an empty slice when absent.
-func protocolsFromStartResult(t *testing.T, res mcptest.ToolResult) []string {
-	t.Helper()
-	if res.Decoded != nil {
-		if raw, ok := res.Decoded["protocols"].([]any); ok {
-			out := make([]string, 0, len(raw))
-			for _, v := range raw {
-				if s, ok := v.(string); ok {
-					out = append(out, s)
-				}
-			}
-			return out
-		}
-	}
-	var parsed struct {
-		Protocols []string `json:"protocols"`
-	}
-	if err := json.Unmarshal([]byte(res.Text), &parsed); err != nil {
-		t.Fatalf("decode proxy_start result: %v (text=%q)", err, res.Text)
-	}
-	return parsed.Protocols
-}
 
 // proxyListenAddrFromResult extracts the listen_addr field from a
 // proxy_start ToolResult. The harness gives us a 127.0.0.1:0 placeholder

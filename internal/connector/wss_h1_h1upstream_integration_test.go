@@ -41,12 +41,11 @@ import (
 //
 //   1. Full production wiring via proxybuild.BuildLiveStack +
 //      connector.FullListener (NOT an in-process hand-rolled stack).
-//   2. EnabledProtocols filter excluding HTTP/2 — set on both the listener
-//      (peek-time gate) and BuildConfig (MITM ALPN advertise filter via
-//      alpnOffersAllowedByEnabledProtocols, internal/connector/alpn_routing.go).
-//   3. Upstream advertising NextProtos=["h2","http/1.1"] (Fly.io edge shape) so
-//      the proxy's strip-h2 → upstream redial path is exercised.
-//   4. flow.Store assertion: Protocol="ws" Stream with >= 2 Flows (Send +
+//   2. Upstream advertising NextProtos=["h2","http/1.1"] (Fly.io edge shape)
+//      so the proxy's strip-h2 → upstream redial path is exercised. The
+//      client offers NextProtos=["http/1.1"] to the proxy, and the proxy
+//      then collapses its upstream offer to http/1.1 (USK-793 redial).
+//   3. flow.Store assertion: Protocol="ws" Stream with >= 2 Flows (Send +
 //      Receive frame pair) and non-empty Raw bytes (L4-capable principle).
 //
 // USK-838 itself was closed as a pattern-match false positive; this test is
@@ -64,11 +63,6 @@ import (
 // drives a WS round-trip through a proxy built with proxybuild.BuildLiveStack
 // where:
 //
-//   - The listener has EnabledProtocols=["HTTP/1.x","HTTPS","WebSocket","TCP"]
-//     (HTTP/2 excluded). BuildConfig also receives SetEnabledProtocols(...)
-//     so the MITM ALPN extension never advertises "h2" even when upstream
-//     does — this is the strip-h2 → redial path covered by
-//     alpnOffersAllowedByEnabledProtocols.
 //   - The upstream test server advertises NextProtos=["h2","http/1.1"] and
 //     speaks plain HTTP/1.1 on top of TLS, hijacking the connection to run
 //     a minimal WS echo loop.
@@ -92,16 +86,14 @@ func TestFullListener_CONNECT_WS_H1Listener_H2AdvertisingUpstream_FlowPersistenc
 
 	// 1. Upstream: TLS server advertising ["h2","http/1.1"] (Fly.io edge
 	//    shape) that ultimately serves http/1.1 after ALPN negotiation. The
-	//    proxy must strip "h2" from the offer it sends upstream because its
-	//    EnabledProtocols filter excludes HTTP/2 — if that strip is broken,
-	//    the upstream will pick h2 first and the proxy's http/1.1-only stack
-	//    will mis-route, surfacing as a missing or wrong-protocol Stream.
+	//    proxy advertises both h2 and http/1.1 to the client and, since the
+	//    client offers only http/1.1, the USK-793 redial path collapses the
+	//    upstream offer to http/1.1 too.
 	hits := newWSEchoHits()
 	upstreamAddr, upstreamShutdown := startWSEchoUpstreamH1AdvertisingH2(t, hits)
 	defer upstreamShutdown()
 
-	// 2. Proxy: production wiring via proxybuild.BuildLiveStack, with the
-	//    EnabledProtocols filter applied to both the listener and BuildConfig.
+	// 2. Proxy: production wiring via proxybuild.BuildLiveStack.
 	proxyAddr, store, shutdown := startWSH1H2AdvertProxy(t, ctx)
 	defer shutdown()
 
@@ -354,8 +346,8 @@ func newWSEchoUpstreamTLSConfig(t *testing.T) *tls.Config {
 	}
 	return &tls.Config{
 		Certificates: []tls.Certificate{{Certificate: [][]byte{certDER}, PrivateKey: key}},
-		// Advertise h2 AND http/1.1: triggers the proxy's strip-h2 path
-		// when EnabledProtocols excludes HTTP/2.
+		// Advertise h2 AND http/1.1: triggers the proxy's strip-h2 redial
+		// path (USK-793) when the client picks http/1.1.
 		NextProtos: []string{"h2", "http/1.1"},
 		MinVersion: tls.VersionTLS12,
 	}
@@ -455,20 +447,16 @@ func computeWSAcceptUSK839(key string) string {
 }
 
 // ---------------------------------------------------------------------------
-// Proxy: production wiring via proxybuild.BuildLiveStack with
-// EnabledProtocols filter excluding HTTP/2.
+// Proxy: production wiring via proxybuild.BuildLiveStack.
 // ---------------------------------------------------------------------------
 
 // startWSH1H2AdvertProxy builds the proxy via the production
-// proxybuild.BuildLiveStack entry point, configures the EnabledProtocols
-// filter on both the listener and BuildConfig, and starts the listener.
+// proxybuild.BuildLiveStack entry point and starts the listener.
 // Returns the proxy address, the recorder store, and a shutdown closure.
 //
-// EnabledProtocols=["HTTP/1.x","HTTPS","WebSocket","TCP"] excludes both
-// "HTTP/2" and "gRPC", so alpnOffersAllowedByEnabledProtocols strips h2
-// from the proxy's outgoing upstream ALPN offer regardless of what the
-// upstream advertises. This is the strip-h2 → upstream redial gate the
-// Issue calls out (USK-839 design context).
+// The proxy's MITM TLS handshake advertises both h2 and http/1.1 (the
+// USK-793 default offer) so a client that cannot speak h2 still
+// negotiates http/1.1 against an h2-advertising upstream.
 func startWSH1H2AdvertProxy(t *testing.T, ctx context.Context) (string, *testStore, func()) {
 	t.Helper()
 
@@ -477,17 +465,11 @@ func startWSH1H2AdvertProxy(t *testing.T, ctx context.Context) (string, *testSto
 		t.Fatalf("CA.Generate: %v", err)
 	}
 
-	enabledProtocols := []string{"HTTP/1.x", "HTTPS", "WebSocket", "TCP"}
-
 	buildCfg := &connector.BuildConfig{
 		ProxyConfig:        &config.ProxyConfig{},
 		Issuer:             cert.NewIssuer(ca),
 		InsecureSkipVerify: true,
 	}
-	// USK-808 wiring: SetEnabledProtocols on BuildConfig drives
-	// alpnOffersAllowedByEnabledProtocols at MITM TLS handshake time so
-	// "h2" never reaches the client- or upstream-facing ALPN extension.
-	buildCfg.SetEnabledProtocols(enabledProtocols)
 
 	store := &testStore{}
 
@@ -503,10 +485,6 @@ func startWSH1H2AdvertProxy(t *testing.T, ctx context.Context) (string, *testSto
 	if err != nil {
 		t.Fatalf("BuildLiveStack: %v", err)
 	}
-	// USK-732 wiring: peek-time gate applied at the listener so a h2c
-	// preface (PRI * HTTP/2.0) — not used by this test but a defense-in-depth
-	// guard — is rejected before any handler runs.
-	stack.Listener.SetEnabledProtocols(enabledProtocols)
 
 	go func() { _ = stack.Listener.Start(ctx) }()
 	select {

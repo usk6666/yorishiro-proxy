@@ -69,8 +69,7 @@ type Result struct {
 	//
 	// Canonical values are the same set accepted by the MCP query tool's
 	// blocked_by filter: "target_scope", "intercept_drop", "rate_limit",
-	// "safety_filter". "enabled_protocols" is reserved for the peek-time
-	// connector path and never set by a Pipeline Step.
+	// "safety_filter", "budget".
 	BlockedBy string
 }
 

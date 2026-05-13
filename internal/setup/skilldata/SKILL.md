@@ -69,7 +69,6 @@ If you are unsure of the exact parameter structure, always consult the help reso
 {
   "name": "socks-listener",
   "listen_addr": "127.0.0.1:1080",
-  "protocols": ["SOCKS5", "HTTPS", "HTTP/1.x"],
   "upstream_proxy": "http://corporate-proxy:3128",
   "max_connections": 256,
   "peek_timeout_ms": 5000,
@@ -88,7 +87,6 @@ If you are unsure of the exact parameter structure, always consult the help reso
 | `intercept_rules` | object[] | Intercept rules (id, enabled, direction, conditions) |
 | `auto_transform` | object[] | Auto-transform rules (id, enabled, priority, direction, conditions, action) |
 | `tcp_forwards` | map | TCP port forwarding (port -> upstream_host:port) |
-| `protocols` | string[] | Enabled protocols (HTTP/1.x, HTTPS, WebSocket, HTTP/2, gRPC, SOCKS5, TCP) |
 | `socks5_auth` | string | SOCKS5 authentication method ("none" or "password") |
 | `socks5_username` | string | SOCKS5 username |
 | `socks5_password` | string | SOCKS5 password |
@@ -721,7 +719,7 @@ Received instruction
   |
   +-- Protocol-specific operations?
         |
-        +-- SOCKS5 traffic monitoring --> proxy_start with "SOCKS5" in protocols
+        +-- SOCKS5 traffic monitoring --> proxy_start on a SOCKS5-capable listen address (clients send SOCKS5 to it)
         +-- Raw TCP data --> TCP port forwarding via tcp_forwards
 ```
 

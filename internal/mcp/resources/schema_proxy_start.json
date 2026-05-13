@@ -68,14 +68,6 @@
         ]
       }
     },
-    "protocols": {
-      "type": "array",
-      "description": "Protocols to enable for detection. If omitted, all protocols are enabled.",
-      "items": {
-        "type": "string",
-        "enum": ["HTTP/1.x", "HTTPS", "WebSocket", "HTTP/2", "gRPC", "SOCKS5", "TCP"]
-      }
-    },
     "tls_fingerprint": {
       "type": "string",
       "description": "TLS ClientHello fingerprint profile for upstream connections.",

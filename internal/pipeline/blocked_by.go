@@ -6,10 +6,6 @@ package pipeline
 // so audit Streams written from session-side recording line up with what
 // the operator can filter on.
 //
-// "enabled_protocols" is intentionally not exported here — it is owned by
-// the connector peek-time rejection path (proxybuild.buildProtocolRejectedRecorder)
-// and is never the result of a Pipeline Step.
-//
 // "rate_limit" is reserved for a future RateLimitStep. The session-side
 // recorder already accepts it; adding a Step that emits
 // `Result{Action: Drop, BlockedBy: BlockedByRateLimit}` is sufficient to

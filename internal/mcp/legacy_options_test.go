@@ -68,7 +68,6 @@ type legacyDeps struct {
 	rawReplayDialer       rawDialer
 	tcpForwards           map[string]*config.ForwardConfig
 	tcpHandler            tcpForwardHandler
-	enabledProtocols      []string
 	proxyDefaults         *config.ProxyConfig
 	upstreamProxySetters  []upstreamProxySetter
 	requestTimeoutSetters []requestTimeoutSetter
@@ -124,7 +123,6 @@ func mkServerFromLegacyDeps(d legacyDeps) *Server {
 			socks5AuthSetter:      d.socks5AuthSetter,
 			tcpForwards:           d.tcpForwards,
 			tcpHandler:            d.tcpHandler,
-			enabledProtocols:      d.enabledProtocols,
 			proxyDefaults:         d.proxyDefaults,
 			upstreamProxySetters:  d.upstreamProxySetters,
 			requestTimeoutSetters: d.requestTimeoutSetters,

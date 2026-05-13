@@ -81,8 +81,7 @@ func TestWSS_H1Listener_RecordScope_HostFilter_FramesRecorded(t *testing.T) {
 	upstreamAddr, upstreamShutdown := startWSEchoUpstreamH1AdvertisingH2(t, hits)
 	defer upstreamShutdown()
 
-	// 2. Proxy: production wiring (proxybuild.BuildLiveStack +
-	//    SetEnabledProtocols=[HTTP/1.x,HTTPS,WebSocket,TCP]) PLUS a
+	// 2. Proxy: production wiring (proxybuild.BuildLiveStack) PLUS a
 	//    hostname-keyed RecordScope rule. The hostname is derived from
 	//    the upstream listener — net.SplitHostPort splits 127.0.0.1:PORT
 	//    so the scope hostname is "127.0.0.1" (matches
@@ -175,14 +174,11 @@ func startWSH1RecordScopeProxy(t *testing.T, ctx context.Context, upstreamAddr s
 		t.Fatalf("CA.Generate: %v", err)
 	}
 
-	enabledProtocols := []string{"HTTP/1.x", "HTTPS", "WebSocket", "TCP"}
-
 	buildCfg := &connector.BuildConfig{
 		ProxyConfig:        &config.ProxyConfig{},
 		Issuer:             cert.NewIssuer(ca),
 		InsecureSkipVerify: true,
 	}
-	buildCfg.SetEnabledProtocols(enabledProtocols)
 
 	store := &testStore{}
 
@@ -206,7 +202,6 @@ func startWSH1RecordScopeProxy(t *testing.T, ctx context.Context, upstreamAddr s
 	if err != nil {
 		t.Fatalf("BuildLiveStack: %v", err)
 	}
-	stack.Listener.SetEnabledProtocols(enabledProtocols)
 
 	go func() { _ = stack.Listener.Start(ctx) }()
 	select {

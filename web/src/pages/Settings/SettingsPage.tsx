@@ -7,7 +7,6 @@ import { CaptureScope } from "./CaptureScope.js";
 import { ClientCertificate } from "./ClientCertificate.js";
 import { ConnectionSettings } from "./ConnectionSettings.js";
 import { InterceptRules } from "./InterceptRules.js";
-import { ProtocolFilter } from "./ProtocolFilter.js";
 import { ProxyControl } from "./ProxyControl.js";
 import "./SettingsPage.css";
 import { Socks5Auth } from "./Socks5Auth.js";
@@ -90,7 +89,6 @@ export function SettingsPage() {
         return (
           <div className="settings-section">
             <ProxyControl />
-            {configData && <ProtocolFilter config={configData} />}
             {configData?.safety_filter && (
               <div className="settings-card">
                 <div className="settings-card-header">

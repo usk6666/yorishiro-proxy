@@ -98,7 +98,6 @@ export interface ProxyStartParams {
   intercept_rules?: InterceptRule[];
   auto_transform?: TransformRule[];
   tcp_forwards?: Record<string, string | ForwardConfig>;
-  protocols?: string[];
   max_connections?: number | null;
   peek_timeout_ms?: number | null;
   request_timeout_ms?: number | null;
@@ -110,7 +109,6 @@ export interface ProxyStartResult {
   listen_addr: string;
   status: string;
   tcp_forwards?: Record<string, ForwardConfig>;
-  protocols?: string[];
 }
 
 // ---------------------------------------------------------------------------
@@ -537,7 +535,6 @@ export interface ConfigResult {
     count: number;
   };
   tcp_forwards?: Record<string, ForwardConfig>;
-  enabled_protocols?: string[];
   socks5_enabled?: boolean;
   socks5_auth?: {
     method: string;

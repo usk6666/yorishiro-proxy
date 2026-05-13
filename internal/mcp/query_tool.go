@@ -204,7 +204,7 @@ var validFilterHTTPVersions = []string{"http/1.0", "http/1.1", "h2", "h2c"}
 var validFilterStates = []string{"active", "complete", "error"}
 
 // validFilterBlockedBy lists valid values for filter.blocked_by.
-var validFilterBlockedBy = []string{"target_scope", "intercept_drop", "rate_limit", "safety_filter", "enabled_protocols", "budget"}
+var validFilterBlockedBy = []string{"target_scope", "intercept_drop", "rate_limit", "safety_filter", "budget"}
 
 // validFilterOrigins lists valid values for filter.origin (USK-786).
 // Mirrors flow.Origin constants; "fuzz" is reserved for forward compatibility.
@@ -1754,7 +1754,6 @@ type queryConfigResult struct {
 	UpstreamProxy    string                           `json:"upstream_proxy"`
 	TLSPassthrough   *queryPassthroughResult          `json:"tls_passthrough"`
 	TCPForwards      map[string]*config.ForwardConfig `json:"tcp_forwards,omitempty"`
-	EnabledProtocols []string                         `json:"enabled_protocols,omitempty"`
 	SOCKS5Enabled    bool                             `json:"socks5_enabled"`
 	ClientCert       *queryClientCertResult           `json:"client_cert,omitempty"`
 	SafetyFilter     *querySafetyFilterResult         `json:"safety_filter,omitempty"`
@@ -1867,9 +1866,6 @@ func (s *Server) handleQueryConfig() (*gomcp.CallToolResult, *queryConfigResult,
 
 	if len(s.connector.tcpForwards) > 0 {
 		result.TCPForwards = s.connector.tcpForwards
-	}
-	if len(s.connector.enabledProtocols) > 0 {
-		result.EnabledProtocols = s.connector.enabledProtocols
 	}
 
 	if s.connector.socks5AuthSetter != nil {

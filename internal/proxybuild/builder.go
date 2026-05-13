@@ -422,15 +422,14 @@ func BuildLiveStack(_ context.Context, deps Deps) (*Stack, error) {
 	})
 
 	flCfg := connector.FullListenerConfig{
-		Name:               listenerName,
-		Addr:               deps.ListenAddr,
-		Logger:             logger,
-		PeekTimeout:        deps.PeekTimeout,
-		MaxConnections:     deps.MaxConnections,
-		OnCONNECT:          wrapper.wrapHandler(connectHandler),
-		OnSOCKS5:           wrapper.wrapHandler(socks5Handler),
-		OnHTTP1:            wrapper.wrapHandler(http1ForwardHandler),
-		OnProtocolRejected: buildProtocolRejectedRecorder(deps.FlowStore, listenerName, logger),
+		Name:           listenerName,
+		Addr:           deps.ListenAddr,
+		Logger:         logger,
+		PeekTimeout:    deps.PeekTimeout,
+		MaxConnections: deps.MaxConnections,
+		OnCONNECT:      wrapper.wrapHandler(connectHandler),
+		OnSOCKS5:       wrapper.wrapHandler(socks5Handler),
+		OnHTTP1:        wrapper.wrapHandler(http1ForwardHandler),
 		// USK-710: OnHTTP1 wired for plain-HTTP forward proxy. OnHTTP2
 		// (h2c) and OnTCP (raw TCP forward) remain scaffold-deferred —
 		// the h2c entry point has no Linear issue today and TCP forward
@@ -1067,8 +1066,7 @@ func (b *blockedStreamSet) remove(id string) {
 }
 
 // buildPipelineDropRecorder returns a callback that persists a Pipeline-Drop
-// envelope as a flow.Stream with State="error" and BlockedBy=<reason>. It
-// mirrors buildProtocolRejectedRecorder for the Pipeline-Drop path: the
+// envelope as a flow.Stream with State="error" and BlockedBy=<reason>. The
 // Stream is intentionally minimal (no Flow rows) for envelopes whose
 // Drop happened before any L7 message could be projected — but when an
 // HTTPMessage is available (the common case for HostScope/HTTPScope/Safety
@@ -1132,7 +1130,7 @@ func buildPipelineDropRecorder(store flow.Writer, listenerName string, logger *s
 		}
 
 		// Use a background-derived context so a cancelled handler ctx does
-		// not abort the audit record — matches buildProtocolRejectedRecorder.
+		// not abort the audit record.
 		recordCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		// Try SaveStream first. The common path (first Send dropped by
@@ -1162,77 +1160,6 @@ func buildPipelineDropRecorder(store flow.Writer, listenerName string, logger *s
 					"blocked_by", blockedBy,
 					"protocol", string(env.Protocol),
 					"error", uerr,
-				)
-			}
-		}
-	}
-}
-
-// buildProtocolRejectedRecorder returns a connector.ProtocolRejectedFunc
-// that persists a rejected connection as a Stream with State="error" and
-// BlockedBy="enabled_protocols" so the rejection is observable via the
-// MCP query("flows") tool. nil store yields a nil callback so the
-// listener's silent-close fallback path engages — keeping behaviour
-// unchanged for tests/builds that omit a FlowStore.
-//
-// The recorded Stream is intentionally minimal: there is no L7 message
-// to attach (the connection was refused before any handler ran), so no
-// Flow rows are saved. The Stream alone is enough to surface the event
-// in query results, satisfying the USK-732 acceptance criterion that
-// rejection must not be a silent close.
-func buildProtocolRejectedRecorder(store flow.Writer, listenerName string, logger *slog.Logger) connector.ProtocolRejectedFunc {
-	if store == nil {
-		return nil
-	}
-	if listenerName == "" {
-		listenerName = DefaultListenerName
-	}
-	return func(ctx context.Context, pc *connector.PeekConn, kind connector.ProtocolKind, name string) {
-		if pc == nil {
-			return
-		}
-		// Resolve the connection identity. ConnIDFromContext is populated
-		// by FullListener.handleConn before it dispatches to the handler
-		// or invokes the rejection callback, so this is non-empty in the
-		// production path.
-		connID := connector.ConnIDFromContext(ctx)
-		if connID == "" {
-			connID = uuid.New().String()
-		}
-		clientAddr := connector.ClientAddrFromContext(ctx)
-		if clientAddr == "" {
-			if remote := pc.RemoteAddr(); remote != nil {
-				clientAddr = remote.String()
-			}
-		}
-		protoLabel := name
-		if protoLabel == "" {
-			protoLabel = kind.String()
-		}
-		st := &flow.Stream{
-			ID:            uuid.New().String(),
-			ConnID:        connID,
-			Protocol:      protoLabel,
-			State:         "error",
-			BlockedBy:     "enabled_protocols",
-			FailureReason: "protocol_not_enabled",
-			Timestamp:     time.Now(),
-			ConnInfo: &flow.ConnectionInfo{
-				ClientAddr: clientAddr,
-			},
-		}
-		// Use a background-derived context so a cancelled handler ctx
-		// does not abort the rejection record. Bound by a short timeout
-		// so a slow / hung store does not stall the accept loop.
-		recordCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if err := store.SaveStream(recordCtx, st); err != nil {
-			if logger != nil {
-				logger.Error("proxybuild: rejected-protocol stream save failed",
-					"listener", listenerName,
-					"conn_id", connID,
-					"protocol", protoLabel,
-					"error", err,
 				)
 			}
 		}
@@ -1362,8 +1289,7 @@ func buildTLSStackBuildErrorRecorder(store flow.Writer, scope *flow.RecordScope,
 		}
 
 		// Use a background-derived context so a cancelled handler ctx
-		// does not abort the audit record — matches
-		// buildProtocolRejectedRecorder.
+		// does not abort the audit record.
 		recordCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if err := store.SaveStream(recordCtx, st); err != nil {

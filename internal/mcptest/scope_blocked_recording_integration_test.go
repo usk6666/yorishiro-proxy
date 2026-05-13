@@ -59,8 +59,7 @@ const scopeDenyConfig = `{
 //  2. query("flows", filter={blocked_by: "target_scope"}) returns the
 //     audit Stream.
 //  3. The Stream's State is "error" — matches the audit-Stream shape used
-//     by the existing enabled_protocols precedent
-//     (proxybuild.buildProtocolRejectedRecorder).
+//     by other Pipeline-Drop paths (buildPipelineDropRecorder).
 func TestE2E_ScopeBlocked_RecordedAsAuditStream(t *testing.T) {
 	h := mcptest.StartHarness(t, mcptest.HarnessOptions{
 		ConfigJSON:    scopeDenyConfig,

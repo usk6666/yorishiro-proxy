@@ -36,8 +36,8 @@ import (
 //   - message_count = 2 (handshake + 101 only; zero WS frames)
 //
 // PR #834 (USK-839) added an in-process e2e test that drives the same
-// production wiring (proxybuild.BuildLiveStack + connector.FullListener
-// with SetEnabledProtocols) but passes against an upstream that completes
+// production wiring (proxybuild.BuildLiveStack + connector.FullListener)
+// but passes against an upstream that completes
 // the 101 in a SINGLE TCP write and never pushes bytes before the client
 // sends the first frame. The live failure differs only in:
 //
@@ -146,8 +146,7 @@ func runFlyEdgeCase(t *testing.T, opts flyedgeOpts) {
 	upstreamAddr, upstreamShutdown := startFlyedgeWSUpstream(t, opts, hits)
 	defer upstreamShutdown()
 
-	// 2. Proxy: same production wiring as USK-839 (proxybuild.BuildLiveStack
-	//    + SetEnabledProtocols filter excluding HTTP/2).
+	// 2. Proxy: same production wiring as USK-839 (proxybuild.BuildLiveStack).
 	proxyAddr, store, shutdown := startWSH1H2AdvertProxy(t, ctx)
 	defer shutdown()
 
@@ -228,9 +227,9 @@ func runFlyEdgeCase(t *testing.T, opts flyedgeOpts) {
 
 // startFlyedgeWSUpstream binds a TLS listener that emulates a Fly.io edge:
 //
-//   - Advertises NextProtos=["h2","http/1.1"]. The proxy strips "h2" from
-//     its upstream-facing ALPN offer per the SetEnabledProtocols filter,
-//     so the negotiated protocol observed by the upstream is "http/1.1".
+//   - Advertises NextProtos=["h2","http/1.1"]. The client offers
+//     NextProtos=["http/1.1"], so the USK-793 redial path collapses the
+//     proxy's upstream-facing ALPN offer to "http/1.1".
 //   - Reads the RFC 6455 client handshake via a bare bufio.Reader (no
 //     net/http server — wire-fidelity convention).
 //   - Writes the 101 Switching Protocols response as either:

@@ -17,20 +17,6 @@ import (
 // The handler owns the connection lifetime: it must close pc when done.
 type HandlerFunc func(ctx context.Context, pc *PeekConn) error
 
-// ProtocolRejectedFunc is invoked when an inbound connection is rejected
-// because its detected ProtocolKind is not in the listener's
-// EnabledProtocols allow-list. The callback runs after detection but
-// before any per-protocol handler is dispatched. Implementations are
-// expected to record the rejection (e.g. as a Stream with State="error")
-// and may inspect the peeked bytes via pc — they MUST NOT close pc; the
-// caller (FullListener.handleConn) closes the underlying connection.
-//
-// The callback is allowed to be nil, in which case the rejection is
-// observed only through the debug log emitted by FullListener. The
-// proxybuild layer wires a flow-recording implementation so MITM
-// observability of the rejection is preserved (USK-732).
-type ProtocolRejectedFunc func(ctx context.Context, pc *PeekConn, kind ProtocolKind, name string)
-
 // FullListenerConfig holds parameters for constructing a FullListener.
 type FullListenerConfig struct {
 	// Name is used for logging and context propagation. Defaults to "default".
@@ -49,19 +35,6 @@ type FullListenerConfig struct {
 	// MaxConnections limits concurrent in-flight connections. Zero means
 	// DefaultMaxConnections. Negative values disable the limit.
 	MaxConnections int
-
-	// EnabledProtocols, when non-empty, restricts which detected protocol
-	// kinds are accepted. Members are user-facing protocol names accepted
-	// by the proxy_start MCP tool ("HTTP/1.x", "HTTPS", "HTTP/2",
-	// "SOCKS5", "TCP", and protocol names that are subsets of HTTPS such
-	// as "WebSocket", "gRPC"). When empty (the zero value), all detected
-	// kinds are accepted (backward-compatible default).
-	EnabledProtocols []string
-
-	// OnProtocolRejected is invoked when EnabledProtocols is non-empty and
-	// the detected ProtocolKind does not map to any allowed name. nil is
-	// permitted; the rejection is then observable only via debug logs.
-	OnProtocolRejected ProtocolRejectedFunc
 
 	// Handler callbacks per ProtocolKind. Each handler receives a PeekConn
 	// with detection bytes still buffered and an enriched context.
@@ -92,17 +65,6 @@ type FullListener struct {
 	onHTTP1   HandlerFunc
 	onHTTP2   HandlerFunc
 	onTCP     HandlerFunc
-
-	// enabledProtocols points at an immutable user-facing protocol-name
-	// slice. Nil or empty means "all protocols allowed" (default).
-	// Stored as an atomic pointer so SetEnabledProtocols can update the
-	// allow-list without synchronising with the accept loop.
-	enabledProtocols atomic.Pointer[[]string]
-
-	// onProtocolRejected is the rejection callback configured at
-	// construction. Treated as immutable for the lifetime of the listener;
-	// runtime reconfiguration of EnabledProtocols does NOT swap callbacks.
-	onProtocolRejected ProtocolRejectedFunc
 
 	mu       sync.Mutex
 	listener net.Listener
@@ -135,26 +97,18 @@ func NewFullListener(cfg FullListenerConfig) *FullListener {
 	}
 
 	fl := &FullListener{
-		name:               name,
-		addr:               cfg.Addr,
-		logger:             logger,
-		maxConnections:     maxConns,
-		onCONNECT:          cfg.OnCONNECT,
-		onSOCKS5:           cfg.OnSOCKS5,
-		onHTTP1:            cfg.OnHTTP1,
-		onHTTP2:            cfg.OnHTTP2,
-		onTCP:              cfg.OnTCP,
-		onProtocolRejected: cfg.OnProtocolRejected,
-		ready:              make(chan struct{}),
+		name:           name,
+		addr:           cfg.Addr,
+		logger:         logger,
+		maxConnections: maxConns,
+		onCONNECT:      cfg.OnCONNECT,
+		onSOCKS5:       cfg.OnSOCKS5,
+		onHTTP1:        cfg.OnHTTP1,
+		onHTTP2:        cfg.OnHTTP2,
+		onTCP:          cfg.OnTCP,
+		ready:          make(chan struct{}),
 	}
 	fl.peekTimeoutNs.Store(int64(peekTimeout))
-	if len(cfg.EnabledProtocols) > 0 {
-		// Defensive copy so callers cannot mutate the slice after passing
-		// it in.
-		cp := make([]string, len(cfg.EnabledProtocols))
-		copy(cp, cfg.EnabledProtocols)
-		fl.enabledProtocols.Store(&cp)
-	}
 	return fl
 }
 
@@ -275,30 +229,6 @@ func (fl *FullListener) handleConn(ctx context.Context, conn net.Conn) {
 	connLogger.Debug("protocol detected",
 		"protocol", kind.String(),
 		"peek_len", len(peek))
-
-	// Enforce the runtime EnabledProtocols allow-list (USK-732). When the
-	// allow-list is non-empty and the detected kind does not map to any
-	// allowed user-facing name, reject before stack construction. The
-	// rejection is recorded via the OnProtocolRejected callback so MITM
-	// observability is preserved (Issue acceptance: not a silent close).
-	if !fl.protocolAllowed(kind) {
-		allowed := fl.snapshotEnabledProtocols()
-		// Debug, not Info: a connection arriving with a protocol outside
-		// the configured subset is a client-side fact (akin to "client
-		// sends invalid request"), not a proxy anomaly. Logging at Info
-		// would flood the log under a port scan. The rejection is still
-		// fully observable via the OnProtocolRejected callback (which
-		// records a Stream with state="error" and
-		// blocked_by="enabled_protocols").
-		connLogger.Debug("protocol rejected by enabled_protocols filter",
-			"detected", kind.String(),
-			"enabled_protocols", allowed,
-		)
-		if fl.onProtocolRejected != nil {
-			fl.onProtocolRejected(ctx, pc, kind, kind.UserName())
-		}
-		return
-	}
 
 	handler := fl.handlerFor(kind)
 	if handler == nil {
@@ -435,49 +365,4 @@ func (fl *FullListener) SetPeekTimeout(d time.Duration) {
 		return
 	}
 	fl.peekTimeoutNs.Store(int64(d))
-}
-
-// SetEnabledProtocols updates the runtime protocol allow-list. nil or
-// empty restores the default ("all detected kinds accepted"). Mutations
-// are atomic; in-flight detection on the accept loop sees the new
-// allow-list on the next handleConn iteration.
-func (fl *FullListener) SetEnabledProtocols(protocols []string) {
-	if len(protocols) == 0 {
-		fl.enabledProtocols.Store(nil)
-		return
-	}
-	cp := make([]string, len(protocols))
-	copy(cp, protocols)
-	fl.enabledProtocols.Store(&cp)
-}
-
-// EnabledProtocols returns a snapshot of the currently-configured
-// runtime allow-list, or nil when no filter is active.
-func (fl *FullListener) EnabledProtocols() []string {
-	return fl.snapshotEnabledProtocols()
-}
-
-// snapshotEnabledProtocols returns a copy of the current allow-list, or
-// nil when none is configured. Internal helper used by both the accept
-// loop and EnabledProtocols.
-func (fl *FullListener) snapshotEnabledProtocols() []string {
-	p := fl.enabledProtocols.Load()
-	if p == nil || len(*p) == 0 {
-		return nil
-	}
-	out := make([]string, len(*p))
-	copy(out, *p)
-	return out
-}
-
-// protocolAllowed reports whether the detected ProtocolKind is permitted
-// under the current allow-list. Returns true when no filter is
-// configured (nil or empty enabledProtocols), matching the legacy
-// "accept all" behavior.
-func (fl *FullListener) protocolAllowed(kind ProtocolKind) bool {
-	p := fl.enabledProtocols.Load()
-	if p == nil || len(*p) == 0 {
-		return true
-	}
-	return kindMatchesEnabledNames(kind, *p)
 }

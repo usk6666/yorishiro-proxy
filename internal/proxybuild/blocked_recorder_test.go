@@ -51,7 +51,7 @@ func (r *recordingFlowStore) SaveFlow(_ context.Context, _ *flow.Flow) error { r
 
 // TestBuildPipelineDropRecorder_NilStore verifies the recorder returns nil
 // when no flow.Writer is configured, preserving the silent-close fallback
-// path consistent with buildProtocolRejectedRecorder.
+// path.
 func TestBuildPipelineDropRecorder_NilStore(t *testing.T) {
 	rec := buildPipelineDropRecorder(nil, "test", silentLogger(), newBlockedStreamSet())
 	if rec != nil {
@@ -118,7 +118,7 @@ func TestBuildPipelineDropRecorder_TargetScope_HTTPMessage(t *testing.T) {
 // TestBuildPipelineDropRecorder_NoMessage_MinimalStream verifies that the
 // recorder writes a minimal Stream when no L7 message is available
 // (RawMessage envelope, e.g. raw TCP forward path Drop). The Stream is
-// Stream-only with no Flow rows — mirroring the enabled_protocols precedent.
+// Stream-only with no Flow rows.
 func TestBuildPipelineDropRecorder_NoMessage_MinimalStream(t *testing.T) {
 	store := &recordingFlowStore{}
 	rec := buildPipelineDropRecorder(store, "live", silentLogger(), newBlockedStreamSet())

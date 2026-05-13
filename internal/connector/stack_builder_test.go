@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
-	"errors"
 	"io"
 	"net"
 	"testing"
@@ -677,115 +676,12 @@ func TestBuildConnectionStack_H2PoolFastPath_ClientMITMFailReleasesReservation(t
 	}
 }
 
-// TestBuildPoolHitFastPath_ShortCircuitsWhenH2Disabled is the USK-813
-// regression guard: when EffectiveEnabledProtocols() excludes h2 and a
-// warm pool entry exists for the target, buildPoolHitFastPath must
-// release the reservation and return errPoolFastPathDeclined BEFORE
-// performing the wasted client TLS MITM handshake. The earlier shape
-// of this code path completed the handshake just to fall back via the
-// post-handshake clientALPN check at the bottom of the function — every
-// such CONNECT paid for a full TLS handshake for nothing.
-//
-// Verified invariants:
-//   - The function returns errPoolFastPathDeclined.
-//   - The pool reservation is released (Pool.Get succeeds again).
-//   - The cached Layer is unchanged (Put, not Evict).
-//   - performClientMITM is NOT entered (ClientMITMHandshakeCount stays 0).
-//
-// Default (no filter) behaviour is exercised by the sibling test
-// TestBuildConnectionStack_H2PoolFastPath_ClientMITMFailReleasesReservation
-// which explicitly enters performClientMITM.
-func TestBuildPoolHitFastPath_ShortCircuitsWhenH2Disabled(t *testing.T) {
-	target := "127.0.0.1:1" // unreachable; the short-circuit must kick in first
-
-	ca := &cert.CA{}
-	if err := ca.Generate(); err != nil {
-		t.Fatal(err)
-	}
-	issuer := cert.NewIssuer(ca)
-
-	h2Pool := pool.New(pool.PoolOptions{MaxStreamsPerConn: 1})
-	defer h2Pool.Close()
-
-	buildCfg := &BuildConfig{
-		ProxyConfig:        &config.ProxyConfig{},
-		Issuer:             issuer,
-		InsecureSkipVerify: true,
-		HTTP2Pool:          h2Pool,
-	}
-	// Operator-installed allow-list excludes HTTP/2 — clientALPNOffersForUpstream
-	// returns ["http/1.1"], the short-circuit path triggers.
-	buildCfg.SetEnabledProtocols([]string{"HTTP/1.x", "HTTPS"})
-
-	// Pre-populate the pool with a live cached Layer.
-	cached, teardown := startCachedH2Layer(t, envelope.EnvelopeContext{
-		ConnID:     "cached-conn",
-		TargetHost: target,
-		TLS:        &envelope.TLSSnapshot{ALPN: "h2", SNI: "cached-marker"},
-	})
-	defer teardown()
-	hostTLSForKey, err := resolvePerHostTLS(target, buildCfg)
-	if err != nil {
-		t.Fatalf("resolvePerHostTLS: %v", err)
-	}
-	poolKey := poolKeyForH2(context.Background(), target, buildCfg, hostTLSForKey)
-	h2Pool.Put(poolKey, cached)
-
-	// Take the entry out of the pool the same way buildALPNRoutedStack
-	// does at lines 553. buildPoolHitFastPath expects to own the
-	// reservation; on decline it will release it via Put.
-	pooled, err := h2Pool.Get(poolKey)
-	if err != nil || pooled != cached {
-		t.Fatalf("Pool.Get pre-condition: pooled=%v err=%v", pooled, err)
-	}
-
-	// Bring up a stub clientConn — buildPoolHitFastPath must NOT touch it
-	// in the short-circuit path; we use net.Pipe so any accidental I/O
-	// would block the test rather than silently succeed via raw bytes.
-	_, clientConn := net.Pipe()
-	defer clientConn.Close()
-
-	buildCfg.ResetClientMITMHandshakeCount()
-
-	stack, cs, us, ferr := buildPoolHitFastPath(
-		context.Background(), clientConn, target, "127.0.0.1", "test-conn",
-		pooled, poolKey, buildCfg,
-	)
-
-	if !errors.Is(ferr, errPoolFastPathDeclined) {
-		t.Fatalf("err = %v, want errPoolFastPathDeclined", ferr)
-	}
-	if stack != nil || cs != nil || us != nil {
-		t.Errorf("decline path returned non-nil values: stack=%v cs=%v us=%v", stack, cs, us)
-	}
-
-	if got := buildCfg.ClientMITMHandshakeCount(); got != 0 {
-		t.Errorf("ClientMITMHandshakeCount = %d, want 0 (handshake was not skipped)", got)
-	}
-
-	// Reservation must have been released (Put, not Evict) — Pool.Get
-	// returns the same cached Layer again.
-	got, gerr := h2Pool.Get(poolKey)
-	if gerr != nil {
-		t.Fatalf("Pool.Get after decline: err=%v (reservation appears leaked)", gerr)
-	}
-	if got != cached {
-		t.Errorf("Pool.Get after decline: got=%v, want cached=%v (Layer was evicted, not Put)", got, cached)
-	}
-	h2Pool.Put(poolKey, cached) // tidy
-}
-
-// TestBuildPoolHitFastPath_TakesFastPathWhenH2Enabled is the positive
-// control for USK-813: when h2 is allowed by the enabled-protocols filter
-// (or no filter is installed at all), buildPoolHitFastPath proceeds into
-// performClientMITM as before. This guards against an over-eager
-// short-circuit that would skip the fast path even in the common case.
-//
-// We cannot complete the MITM handshake against an unreachable target
-// without a real TLS client, so the test asserts on the observable
-// counter: ClientMITMHandshakeCount goes from 0 to 1, proving the
-// short-circuit was NOT taken.
-func TestBuildPoolHitFastPath_TakesFastPathWhenH2Enabled(t *testing.T) {
+// TestBuildPoolHitFastPath_TakesFastPath verifies that
+// buildPoolHitFastPath proceeds into performClientMITM whenever a pool
+// hit occurs. We cannot complete the MITM handshake against an
+// unreachable target without a real TLS client, so the test asserts on
+// the observable counter: ClientMITMHandshakeCount goes from 0 to 1.
+func TestBuildPoolHitFastPath_TakesFastPath(t *testing.T) {
 	target := "127.0.0.1:1"
 
 	ca := &cert.CA{}
@@ -803,8 +699,6 @@ func TestBuildPoolHitFastPath_TakesFastPathWhenH2Enabled(t *testing.T) {
 		InsecureSkipVerify: true,
 		HTTP2Pool:          h2Pool,
 	}
-	// No SetEnabledProtocols — default (all-allowed) keeps h2 in offers.
-
 	cached, teardown := startCachedH2Layer(t, envelope.EnvelopeContext{
 		ConnID:     "cached-conn",
 		TargetHost: target,
@@ -836,9 +730,6 @@ func TestBuildPoolHitFastPath_TakesFastPathWhenH2Enabled(t *testing.T) {
 		pooled, poolKey, buildCfg,
 	)
 
-	if errors.Is(ferr, errPoolFastPathDeclined) {
-		t.Fatalf("unexpected errPoolFastPathDeclined: short-circuit fired with default (h2 allowed) filter")
-	}
 	// We expect a non-nil error from performClientMITM (the closed pipe);
 	// the exact wrap is not the point of the test.
 	if ferr == nil {

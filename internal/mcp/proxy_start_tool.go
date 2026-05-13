@@ -86,11 +86,6 @@ type proxyStartInput struct {
 	// in the MCP JSON schema; parsed into *config.ForwardConfig by parseTCPForwardsAny.
 	TCPForwards map[string]any `json:"tcp_forwards,omitempty" jsonschema:"TCP forwarding map: local port -> upstream host:port string or {target, protocol, tls} object"`
 
-	// Protocols specifies which protocols are enabled for detection.
-	// Valid values: "HTTP/1.x", "HTTPS", "WebSocket", "HTTP/2", "gRPC", "SOCKS5", "TCP".
-	// If omitted, all protocols are enabled (default behavior).
-	Protocols []string `json:"protocols,omitempty" jsonschema:"enabled protocol list (default: all protocols enabled)"`
-
 	// SOCKS5Auth specifies the SOCKS5 authentication method.
 	// Valid values: "none" (default), "password".
 	// If omitted or "none", SOCKS5 clients connect without authentication.
@@ -203,9 +198,6 @@ type proxyStartResult struct {
 	Status string `json:"status"`
 	// TCPForwards is the configured TCP forwarding map (if any).
 	TCPForwards map[string]*config.ForwardConfig `json:"tcp_forwards,omitempty"`
-
-	// Protocols lists the enabled protocols (if explicitly configured).
-	Protocols []string `json:"protocols,omitempty"`
 }
 
 // registerProxyStart registers the proxy_start MCP tool.
@@ -215,7 +207,7 @@ func (s *Server) registerProxyStart() {
 		Description: "Start a proxy listener on a loopback address with HTTP/HTTPS/SOCKS5 MITM. " +
 			"Multiple named listeners are supported via 'name' (default: 'default'). " +
 			"All configuration sections (upstream proxy, TLS passthrough, intercept/transform rules, " +
-			"SOCKS5 auth, TLS fingerprint, connection/timeout limits, tcp_forwards, protocols) are session-only " +
+			"SOCKS5 auth, TLS fingerprint, connection/timeout limits, tcp_forwards) are session-only " +
 			"and are reset to defaults on each invocation; persistent settings belong in the config file. " +
 			"See yorishiro://help/proxy_start for parameter details.",
 	}, s.handleProxyStart)
@@ -314,7 +306,6 @@ func (s *Server) handleProxyStart(ctx context.Context, _ *gomcp.CallToolRequest,
 		ListenAddr:  addr,
 		Status:      "running",
 		TCPForwards: parsedForwards,
-		Protocols:   input.Protocols,
 	}
 	return nil, result, nil
 }
@@ -340,12 +331,6 @@ func (s *Server) resetSettingsToDefaults(listenerName string) {
 	// Reset TLS passthrough to empty (intercept all).
 	if s.connector.passthrough != nil {
 		s.connector.passthrough.Clear()
-	}
-
-	// Reset enabled protocols to nil (all protocols).
-	s.connector.enabledProtocols = nil
-	if !managerIsNil(s.connector.manager) {
-		s.connector.manager.SetEnabledProtocols(nil)
 	}
 
 	// Reset TCP forwards to nil (no forwards).
@@ -418,7 +403,7 @@ func (s *Server) resetSettingsToDefaults(listenerName string) {
 // applyProxyStartSettings validates and applies all proxy configuration sections
 // from the proxy_start input. It handles listen address, upstream proxy,
 // TLS passthrough, intercept rules, auto-transform, TCP forwards,
-// protocols, SOCKS5 auth, and connection limits/timeouts.
+// SOCKS5 auth, and connection limits/timeouts.
 //
 // NOTE: resetSettingsToDefaults() is intentionally NOT called here. The caller
 // (handleProxyStart) is responsible for calling it after StartNamed() succeeds,
@@ -429,9 +414,6 @@ func (s *Server) applyProxyStartSettings(input *proxyStartInput, parsedForwards 
 		return err
 	}
 	if err := s.applyTCPForwardsConfig(parsedForwards); err != nil {
-		return err
-	}
-	if err := s.applyProtocolsConfig(input.Protocols); err != nil {
 		return err
 	}
 	if err := s.applySOCKS5AuthFromInput(input); err != nil {
@@ -547,23 +529,6 @@ func (s *Server) applyTCPForwardsConfig(forwards map[string]*config.ForwardConfi
 	return nil
 }
 
-// applyProtocolsConfig validates and stores enabled protocols. The
-// allow-list is forwarded to the proxybuild manager so the running
-// listener's data path enforces it at peek-based detection (USK-732).
-func (s *Server) applyProtocolsConfig(protocols []string) error {
-	if len(protocols) == 0 {
-		return nil
-	}
-	if err := validateProtocols(protocols); err != nil {
-		return fmt.Errorf("protocols: %w", err)
-	}
-	s.connector.enabledProtocols = protocols
-	if !managerIsNil(s.connector.manager) {
-		s.connector.manager.SetEnabledProtocols(protocols)
-	}
-	return nil
-}
-
 // applySOCKS5AuthFromInput applies SOCKS5 authentication configuration from proxy_start input.
 // When SOCKS5Auth is empty (omitted), it defaults to "none" to reset any previous auth
 // configuration. This ensures that proxy_start always initializes auth to a known state,
@@ -671,17 +636,6 @@ func validateLoopbackAddr(addr string) error {
 		}
 	}
 	return nil
-}
-
-// validProtocols is the set of protocol names accepted by the protocols parameter.
-var validProtocols = map[string]bool{
-	"HTTP/1.x":  true,
-	"HTTPS":     true,
-	"WebSocket": true,
-	"HTTP/2":    true,
-	"gRPC":      true,
-	"SOCKS5":    true,
-	"TCP":       true,
 }
 
 // validateTCPForwardsAgainstListenAddr rejects tcp_forwards entries whose
@@ -807,20 +761,6 @@ func validatePortNumber(s string, allowZero bool) error {
 	}
 	if n < minPort || n > 65535 {
 		return fmt.Errorf("port must be between %d and 65535, got %d", minPort, n)
-	}
-	return nil
-}
-
-// validateProtocols validates that all protocol names are recognized.
-func validateProtocols(protocols []string) error {
-	for _, p := range protocols {
-		if !validProtocols[p] {
-			valid := make([]string, 0, len(validProtocols))
-			for k := range validProtocols {
-				valid = append(valid, k)
-			}
-			return fmt.Errorf("unknown protocol %q: valid protocols are %v", p, valid)
-		}
 	}
 	return nil
 }

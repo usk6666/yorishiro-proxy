@@ -588,7 +588,7 @@ func TestQuery_Messages_GRPC_Metadata(t *testing.T) {
 	}
 }
 
-// --- Test: config with TCP forwards and enabled protocols ---
+// --- Test: config with TCP forwards ---
 
 func TestQuery_Config_WithTCPForwards(t *testing.T) {
 	t.Parallel()
@@ -598,7 +598,6 @@ func TestQuery_Config_WithTCPForwards(t *testing.T) {
 	ca := newTestCA(t)
 	s := newServer(ctx, ca, store, nil)
 	s.connector.tcpForwards = map[string]*config.ForwardConfig{"3306": {Target: "db.example.com:3306", Protocol: "raw"}}
-	s.connector.enabledProtocols = []string{"HTTP/1.x", "HTTPS", "gRPC"}
 
 	ct, st := gomcp.NewInMemoryTransports()
 	ss, err := s.server.Connect(ctx, st, nil)
@@ -631,8 +630,5 @@ func TestQuery_Config_WithTCPForwards(t *testing.T) {
 			got = fc.Target
 		}
 		t.Errorf("tcp_forwards[3306].Target = %q, want db.example.com:3306", got)
-	}
-	if len(out.EnabledProtocols) != 3 {
-		t.Errorf("enabled_protocols len = %d, want 3", len(out.EnabledProtocols))
 	}
 }

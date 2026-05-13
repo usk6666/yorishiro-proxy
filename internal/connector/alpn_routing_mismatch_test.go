@@ -2,59 +2,6 @@ package connector
 
 import "testing"
 
-// TestClientALPNOffersForUpstream verifies the proxy's MITM ALPN offer set is
-// chosen so that a client which cannot speak the upstream's preferred
-// protocol still negotiates a non-empty ALPN. Regression guard for USK-793,
-// where a client offering only http/1.1 against a proxy that advertised only
-// h2 negotiated empty ALPN and the proxy then routed the connection through
-// the HTTP/2 stack ("invalid client preface" → 0-byte timeout).
-func TestClientALPNOffersForUpstream(t *testing.T) {
-	tests := []struct {
-		name         string
-		upstreamALPN string
-		want         []string
-	}{
-		{
-			name:         "upstream h2 → offer both h2 and http/1.1",
-			upstreamALPN: "h2",
-			want:         []string{"h2", "http/1.1"},
-		},
-		{
-			name:         "upstream http/1.1 → offer http/1.1",
-			upstreamALPN: "http/1.1",
-			want:         []string{"http/1.1"},
-		},
-		{
-			name:         "upstream empty (no ALPN) → offer http/1.1",
-			upstreamALPN: "",
-			want:         []string{"http/1.1"},
-		},
-		{
-			name:         "upstream unknown → offer http/1.1 only",
-			upstreamALPN: "spdy/3.1",
-			want:         []string{"http/1.1"},
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			// Pass nil for the enabled-protocols filter to exercise the
-			// legacy USK-793 behaviour (the new USK-808 filter is
-			// covered by TestClientALPNOffersForUpstream_LegacyBehavior
-			// and TestClientALPNOffersForUpstream_FilteredByEnabledProtocols
-			// in alpn_routing_test.go).
-			got := clientALPNOffersForUpstream(tt.upstreamALPN, nil)
-			if len(got) != len(tt.want) {
-				t.Fatalf("len(offers) = %d, want %d (got %v)", len(got), len(tt.want), got)
-			}
-			for i := range got {
-				if got[i] != tt.want[i] {
-					t.Errorf("offers[%d] = %q, want %q (got %v)", i, got[i], tt.want[i], got)
-				}
-			}
-		})
-	}
-}
-
 // TestClientALPNMatchesUpstream verifies the matcher used to decide whether
 // to re-dial upstream after a client/upstream ALPN mismatch. Empty client
 // ALPN (no offer / no overlap) folds to the http/1.1 route, matching empty

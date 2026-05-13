@@ -120,9 +120,9 @@ Get current proxy status and health metrics. No additional parameters.
 Returns: running, listen_addr, active_connections, total_flows, db_size_bytes, uptime_seconds, ca_initialized, tls_fingerprint.
 
 ### config
-Get current configuration including upstream proxy, TLS passthrough, TCP forwards, enabled protocols, and runtime knobs. No additional parameters.
+Get current configuration including upstream proxy, TLS passthrough, TCP forwards, and runtime knobs. No additional parameters.
 
-Returns: upstream_proxy, tls_passthrough (patterns, count), tcp_forwards (port->target map), enabled_protocols (list), socks5_enabled, client_cert, safety_filter (enabled, input_rules, output_rules), max_connections, peek_timeout_ms, request_timeout_ms, tls_fingerprint, capture_scope (includes, excludes).
+Returns: upstream_proxy, tls_passthrough (patterns, count), tcp_forwards (port->target map), socks5_enabled, client_cert, safety_filter (enabled, input_rules, output_rules), max_connections, peek_timeout_ms, request_timeout_ms, tls_fingerprint, capture_scope (includes, excludes).
 
 > Note: `target_scope` (transmission gate) is intentionally NOT echoed here — it is owned by the `security` MCP tool and queried via `security` with `action: "get_target_scope"`. `capture_scope` (recording-only filter, USK-776) IS echoed here.
 

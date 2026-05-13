@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"net"
 	"net/url"
-	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -26,20 +25,6 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/layer/tlslayer"
 	"github.com/usk6666/yorishiro-proxy/internal/pluginv2"
 )
-
-// errPoolFastPathDeclined is the sentinel returned by buildPoolHitFastPath
-// when it declines to use the cached h2 Layer before performing the client
-// MITM handshake (USK-813). The pool reservation has already been released
-// (via Pool.Put) by the time this error surfaces, and the caller is
-// expected to fall through to the standard ALPN-cache / dial flow which
-// applies the EnabledProtocols filter on its own.
-//
-// The fast path declines when the operator's enabled-protocols allow-list
-// excludes h2 — completing the MITM handshake just to fall back via the
-// post-handshake clientALPN check (lines 795-808) wastes a full TLS
-// handshake every time a pool entry warmed during an h2-enabled phase
-// survives an operator flip to "h2 disabled".
-var errPoolFastPathDeclined = errors.New("connector: pool fast-path declined")
 
 // ErrClientTLSMITMHandshake wraps client-side TLS MITM handshake failures
 // returned by BuildConnectionStack. The wire-observed direction is
@@ -121,26 +106,6 @@ type BuildConfig struct {
 	// per-listener auth registry shape (presence vs absence).
 	upstreamProxyPerListenerMu sync.RWMutex
 	upstreamProxyPerListener   map[string]*url.URL
-
-	// enabledProtocolsDynamic stores the runtime-mutable enabled-protocols
-	// allow-list installed by proxy_start / configure (USK-808). The data
-	// path consults this snapshot at MITM-handshake time to filter the
-	// ALPN list advertised to the client so e.g. proxy_start with
-	// protocols=["HTTP/1.x","HTTPS"] does not advertise "h2" — thus
-	// keeping browsers on HTTP/1.1 as the operator requested. atomic
-	// .Pointer is used so dial-path readers (per-connection goroutines)
-	// and the MCP-tool writer (proxy_start handler goroutine) do not
-	// race on the slice header. A nil load (or zero-length slice) means
-	// "no filter" — legacy "all-allowed" semantics.
-	//
-	// Note: this filter applies ONLY to the client-facing MITM ALPN
-	// offer; upstream-facing dial offers are intentionally not filtered
-	// because wire fidelity to upstream is a strict MITM principle and
-	// h2-only origins must remain reachable. The post-MITM redial via
-	// canonicalRedialALPNOffer (USK-793) collapses upstream to http/1.1
-	// when the client picked http/1.1, so the inner stack is already
-	// single-protocol end-to-end.
-	enabledProtocolsDynamic atomic.Pointer[[]string]
 
 	// HostTLSResolver resolves per-host TLS overrides (InsecureSkipVerify,
 	// ClientCert, RootCAs). Nil means use global settings for all hosts.
@@ -482,51 +447,6 @@ func (c *BuildConfig) SetTLSFingerprint(profile string) {
 	c.tlsFingerprintDynamic.Store(&p)
 }
 
-// SetEnabledProtocols installs a runtime override for the enabled-protocols
-// allow-list. Subsequent calls to EffectiveEnabledProtocols return a copy
-// of protocols, or nil when protocols is nil/empty (legacy "all-allowed"
-// semantic). The runtime override is the wire-up consumed by proxy_start /
-// configure (USK-808) to make the allow-list reach the client-facing MITM
-// ALPN filter so e.g. omitting "HTTP/2" from protocols actually keeps "h2"
-// out of the advertised ALPN list.
-//
-// A defensive copy is taken so later mutation of the caller's slice
-// cannot perturb the stored snapshot. Writes are atomic with respect to
-// concurrent dial-path reads.
-func (c *BuildConfig) SetEnabledProtocols(protocols []string) {
-	if c == nil {
-		return
-	}
-	if len(protocols) == 0 {
-		c.enabledProtocolsDynamic.Store(nil)
-		return
-	}
-	cp := make([]string, len(protocols))
-	copy(cp, protocols)
-	c.enabledProtocolsDynamic.Store(&cp)
-}
-
-// EffectiveEnabledProtocols returns a defensive copy of the runtime
-// enabled-protocols allow-list installed by SetEnabledProtocols, or nil
-// when no filter is active. This is the canonical accessor for live
-// data-path code that needs to apply the operator's protocol allow-list
-// at MITM handshake time (USK-808).
-//
-// nil / empty means "all allowed" — callers must treat that as the
-// identity (no filtering) per USK-808 design decision #5.
-func (c *BuildConfig) EffectiveEnabledProtocols() []string {
-	if c == nil {
-		return nil
-	}
-	p := c.enabledProtocolsDynamic.Load()
-	if p == nil || len(*p) == 0 {
-		return nil
-	}
-	out := make([]string, len(*p))
-	copy(out, *p)
-	return out
-}
-
 // ClientMITMHandshakeCount returns the cumulative number of times the
 // client-side MITM TLS handshake (performClientMITM) has been entered for
 // this BuildConfig. It is a test-only observability hook (USK-813) used
@@ -792,14 +712,7 @@ func buildALPNRoutedStack(
 			if ferr == nil {
 				return stack, cs, us, nil
 			}
-			// USK-813: errPoolFastPathDeclined means the fast path released
-			// its reservation before the client handshake (e.g. h2 is
-			// disabled at runtime). Fall through to the standard ALPN-cache
-			// / dial flow below so the offers go through the EnabledProtocols
-			// filter without paying for a wasted handshake first.
-			if !errors.Is(ferr, errPoolFastPathDeclined) {
-				return nil, nil, nil, ferr
-			}
+			return nil, nil, nil, ferr
 		}
 	}
 
@@ -884,7 +797,7 @@ func buildCacheHitPath(
 	hostTLS *resolvedTLS,
 	cfg *BuildConfig,
 ) (clientTLSConn net.Conn, upstreamConn net.Conn, clientSnap, upstreamSnap *envelope.TLSSnapshot, err error) {
-	clientOffers := clientALPNOffersForUpstream(cachedALPN, cfg.EffectiveEnabledProtocols())
+	clientOffers := clientALPNOffersForUpstream(cachedALPN)
 	clientTLSConn, clientSnap, err = performClientMITM(ctx, clientConn, host, clientOffers, cfg)
 	if err != nil {
 		return nil, nil, nil, nil, err
@@ -989,10 +902,8 @@ func buildCacheMissPath(
 	// Offer the client every ALPN we believe upstream supports plus the
 	// fallback http/1.1, so a client that cannot speak h2 still negotiates
 	// a non-empty protocol the proxy can dispatch on. See function comment
-	// for the rationale (USK-793). The offers are then filtered through
-	// the operator's enabled_protocols allow-list (USK-808) so disabled
-	// protocols are never advertised.
-	clientOffers := clientALPNOffersForUpstream(upstreamALPN, cfg.EffectiveEnabledProtocols())
+	// for the rationale (USK-793).
+	clientOffers := clientALPNOffersForUpstream(upstreamALPN)
 	clientTLSConn, clientSnap, err = performClientMITM(ctx, clientConn, host, clientOffers, cfg)
 	if err != nil {
 		upstreamConn.Close()
@@ -1065,33 +976,7 @@ func buildPoolHitFastPath(
 	poolKey pool.PoolKey,
 	cfg *BuildConfig,
 ) (*ConnectionStack, *envelope.TLSSnapshot, *envelope.TLSSnapshot, error) {
-	// USK-808: filter through enabled_protocols so a pool entry warmed
-	// while h2 was permitted does not advertise h2 once the operator
-	// disabled it via proxy_start. When the filter excludes h2 entirely,
-	// the helper returns ["http/1.1"]; the client then cannot pick h2,
-	// the post-handshake clientALPN check below falls through to
-	// fallbackPoolHitToFreshDial, and the pool entry is released for the
-	// next h2-capable caller (or for after the operator re-enables h2).
-	clientOffers := clientALPNOffersForUpstream(ALPNProtocolH2, cfg.EffectiveEnabledProtocols())
-
-	// USK-813: short-circuit before the wasted client TLS handshake when
-	// the operator's enabled-protocols filter excludes h2. Completing the
-	// handshake here only to fall back via the post-handshake
-	// clientALPN != ALPNProtocolH2 check below pays a full TLS round-trip
-	// for nothing — every request that lands on a stale pool entry while
-	// h2 is disabled would otherwise re-incur that cost. Release the pool
-	// reservation (Put, not Evict — the cached Layer is still healthy and
-	// may serve a future h2-capable peer or post-re-enable client) and
-	// return a sentinel so the caller falls through to the standard
-	// ALPN-cache flow, which already filters offers correctly via
-	// clientALPNOffersForUpstream at lines 593, 701.
-	if !slices.Contains(clientOffers, ALPNProtocolH2) {
-		cfg.HTTP2Pool.Put(poolKey, pooled)
-		slog.Debug("connector: h2 disabled at runtime; declining pool fast-path",
-			"target", target, "conn_id", connID,
-		)
-		return nil, nil, nil, errPoolFastPathDeclined
-	}
+	clientOffers := clientALPNOffersForUpstream(ALPNProtocolH2)
 
 	clientTLSConn, clientSnap, err := performClientMITM(ctx, clientConn, host, clientOffers, cfg)
 	if err != nil {

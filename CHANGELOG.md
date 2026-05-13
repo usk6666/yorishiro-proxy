@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ## [Unreleased]
 
+### Removed
+
+- **Breaking change**: the `proxy_start.protocols` MCP input parameter and the `query("config").enabled_protocols` output field are deleted (USK-865, USK-870). The half-implemented protocol allow-list never had a use case not already covered by `target_scope` (host), `intercept_rules` (request pattern), `tls_passthrough` (MITM target), and `capture_scope` (recording target), and the WS/SSE/gRPC overlay enforcement built in USK-732 (listener peek-time gate) and USK-808 (MITM ALPN filter) is reverted in the same PR. Clients submitting `proxy_start { protocols: [...] }` now receive a schema unknown-field error from the MCP go-sdk — the field is not silently ignored. The WebUI Settings → Proxy panel no longer shows a protocol-selection toggle. Migration: drop the field from MCP calls and rely on the scope/passthrough/capture knobs for the same effect.
+
 ### Fixed
 
 - Client-side MITM handshake rejection (e.g. Chromium pinning a proxy CA so the proxy's MITM cert is refused with an `unknown_certificate` / `bad_certificate` TLS alert) is now recorded with `failure_reason="client_tls_error"` instead of being misclassified as `upstream_tls_error`. Existing `upstream_tls_error` records for genuine upstream-side TLS failures are unaffected. MCP query consumers can therefore distinguish browser→proxy failures (CA install / pinning issues) from proxy→upstream failures (cert expiry / chain trust) without parsing `tags["error"]`. (USK-858)
