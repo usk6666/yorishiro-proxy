@@ -194,6 +194,7 @@ var errInnerPeekFailed = errors.New("connector: inner-byte peek returned no byte
 // via setUpstreamH2 — both layers are in the standard sideStacks so
 // stack.Close() closes them both.
 func BuildPlainH2CStack(
+	ctx context.Context,
 	clientConn net.Conn,
 	upstreamConn net.Conn,
 	target string,
@@ -221,23 +222,9 @@ func BuildPlainH2CStack(
 
 	stack := NewConnectionStack(connID)
 
-	clientH2Opts := []http2.Option{
-		http2.WithScheme("http"),
-		http2.WithEnvelopeContext(clientEnvCtx),
-		http2.WithBodySpillDir(cfg.BodySpillDir),
-		http2.WithBodySpillThreshold(cfg.BodySpillThreshold),
-		http2.WithMaxBodySize(cfg.MaxBodySize),
-		http2.WithStateReleaser(cfg.PluginV2Engine),
-	}
-	if mcsOpt := clientH2MaxConcurrentStreamsOption(cfg); mcsOpt != nil {
-		clientH2Opts = append(clientH2Opts, mcsOpt)
-	}
-	clientLayer, err := http2.New(clientConn, connID+"/client", http2.ServerRole, clientH2Opts...)
-	if err != nil {
-		return nil, fmt.Errorf("connector: BuildPlainH2CStack: client h2 layer: %w", err)
-	}
-	stack.PushClient(clientLayer)
-
+	// USK-871: construct upstream first so we can sniff its
+	// SETTINGS_ENABLE_CONNECT_PROTOCOL value before building the
+	// client-facing ServerRole, mirroring it into our advertise.
 	upstreamLayer, err := http2.New(upstreamConn, connID+"/upstream", http2.ClientRole,
 		http2.WithScheme("http"),
 		http2.WithEnvelopeContext(upstreamEnvCtx),
@@ -248,10 +235,32 @@ func BuildPlainH2CStack(
 	)
 	if err != nil {
 		// http2.New already closed upstreamConn on failure; close the
-		// client layer to avoid leaking its goroutines.
-		_ = clientLayer.Close()
+		// client conn to release resources.
+		_ = clientConn.Close()
 		return nil, fmt.Errorf("connector: BuildPlainH2CStack: upstream h2 layer: %w", err)
 	}
+
+	enableConnectProtocol := resolveEnableConnectProtocol(ctx, upstreamLayer, false, connID, target)
+
+	clientH2Opts := []http2.Option{
+		http2.WithScheme("http"),
+		http2.WithEnvelopeContext(clientEnvCtx),
+		http2.WithBodySpillDir(cfg.BodySpillDir),
+		http2.WithBodySpillThreshold(cfg.BodySpillThreshold),
+		http2.WithMaxBodySize(cfg.MaxBodySize),
+		http2.WithStateReleaser(cfg.PluginV2Engine),
+		http2.WithEnableConnectProtocol(enableConnectProtocol),
+	}
+	if mcsOpt := clientH2MaxConcurrentStreamsOption(cfg); mcsOpt != nil {
+		clientH2Opts = append(clientH2Opts, mcsOpt)
+	}
+	clientLayer, err := http2.New(clientConn, connID+"/client", http2.ServerRole, clientH2Opts...)
+	if err != nil {
+		_ = upstreamLayer.Close()
+		_ = clientConn.Close()
+		return nil, fmt.Errorf("connector: BuildPlainH2CStack: client h2 layer: %w", err)
+	}
+	stack.PushClient(clientLayer)
 	stack.PushUpstream(upstreamLayer)
 
 	return stack, nil
@@ -495,7 +504,7 @@ func dispatchInnerH2C(
 	cfg innerDispatchConfig,
 	logger *slog.Logger,
 ) {
-	stack, err := BuildPlainH2CStack(pc, upstreamConn, target, cfg.BuildCfg)
+	stack, err := BuildPlainH2CStack(ctx, pc, upstreamConn, target, cfg.BuildCfg)
 	if err != nil {
 		_ = upstreamConn.Close()
 		logger.Warn("inner h2c stack build failed",

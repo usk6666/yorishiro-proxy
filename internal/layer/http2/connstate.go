@@ -154,6 +154,16 @@ type Conn struct {
 	// unadvertised rather than as advertised values.
 	peerSettingsReceived bool
 
+	// peerSettingsReady is closed exactly once via peerSettingsReadyOnce
+	// when the first non-ACK SETTINGS frame from the peer is applied. It
+	// lets callers wait until the peer's initial SETTINGS values are
+	// observable on PeerSettings(). USK-871: the proxy ServerRole needs
+	// to mirror the upstream's SETTINGS_ENABLE_CONNECT_PROTOCOL value, so
+	// stack assembly waits on this signal between dialing upstream and
+	// constructing the client-facing Layer.
+	peerSettingsReady     chan struct{}
+	peerSettingsReadyOnce sync.Once
+
 	// localSettingsAcked indicates whether our initial SETTINGS has been acknowledged.
 	localSettingsAcked bool
 
@@ -186,11 +196,12 @@ func NewConn() *Conn {
 	local := DefaultSettings()
 	peer := DefaultSettings()
 	return &Conn{
-		localSettings: local,
-		peerSettings:  peer,
-		sendWindow:    defaultConnectionWindowSize,
-		recvWindow:    defaultConnectionWindowSize,
-		streams:       NewStreamMap(int32(peer.InitialWindowSize), int32(local.InitialWindowSize)),
+		localSettings:     local,
+		peerSettings:      peer,
+		sendWindow:        defaultConnectionWindowSize,
+		recvWindow:        defaultConnectionWindowSize,
+		streams:           NewStreamMap(int32(peer.InitialWindowSize), int32(local.InitialWindowSize)),
+		peerSettingsReady: make(chan struct{}),
 	}
 }
 
@@ -248,6 +259,10 @@ func (c *Conn) SetLocalSettings(settings Settings) error {
 // ApplyPeerSettings applies settings received from the peer in a SETTINGS frame.
 // This updates the peer settings and adjusts existing streams' send windows
 // per RFC 9113 Section 6.9.2.
+//
+// Side effects: on the first successful application, closes peerSettingsReady
+// (idempotent via peerSettingsReadyOnce) so callers of WaitPeerSettings can
+// observe the peer's initial SETTINGS values.
 func (c *Conn) ApplyPeerSettings(params []frame.Setting) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -257,6 +272,10 @@ func (c *Conn) ApplyPeerSettings(params []frame.Setting) error {
 		return err
 	}
 	c.peerSettingsReceived = true
+	// Signal waiters that peerSettings now reflects the wire. sync.Once
+	// guards against being driven by additional SETTINGS frames (RFC 9113
+	// allows the peer to update settings multiple times during a connection).
+	c.peerSettingsReadyOnce.Do(func() { close(c.peerSettingsReady) })
 
 	// If INITIAL_WINDOW_SIZE changed, adjust all active streams' send windows.
 	if c.peerSettings.InitialWindowSize != oldInitialWindowSize {
@@ -266,6 +285,14 @@ func (c *Conn) ApplyPeerSettings(params []frame.Setting) error {
 	}
 
 	return nil
+}
+
+// PeerSettingsReady returns a channel that is closed when the peer's first
+// non-ACK SETTINGS frame has been applied. Callers can select on it to wait
+// for the peer's initial SETTINGS values to become observable. The channel
+// stays closed for the lifetime of the Conn after the first SETTINGS frame.
+func (c *Conn) PeerSettingsReady() <-chan struct{} {
+	return c.peerSettingsReady
 }
 
 // AckLocalSettings marks the local settings as acknowledged by the peer.

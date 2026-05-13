@@ -303,6 +303,60 @@ func (l *Layer) PeerMaxConcurrentStreams() uint32 {
 	return l.conn.PeerSettings().MaxConcurrentStreams
 }
 
+// PeerSettings returns the peer-advertised initial SETTINGS, or the
+// RFC 9113 §6.5.2 defaults if no peer SETTINGS frame has been received
+// yet. Callers that need to distinguish "received default" from "not yet
+// received" should call PeerSettingsReceived first, or wait on
+// WaitPeerSettings.
+func (l *Layer) PeerSettings() Settings {
+	return l.conn.PeerSettings()
+}
+
+// PeerSettingsReceived reports whether the peer has sent at least one
+// SETTINGS frame.
+func (l *Layer) PeerSettingsReceived() bool {
+	return l.conn.PeerSettingsReceived()
+}
+
+// ErrShutdownBeforePeerSettings is returned by WaitPeerSettings when the
+// Layer is torn down before the peer's first SETTINGS frame arrives.
+var ErrShutdownBeforePeerSettings = errors.New("http2: layer shutdown before peer SETTINGS received")
+
+// WaitPeerSettings blocks until the peer's first non-ACK SETTINGS frame is
+// applied, the supplied context is canceled, or the Layer is shut down. On
+// success returns nil and PeerSettings() / PeerSettingsReceived() reflect
+// the peer's advertised values.
+//
+// Errors:
+//   - ctx.Err() when ctx is canceled or its deadline expires before peer
+//     SETTINGS arrive
+//   - ErrShutdownBeforePeerSettings when l.shutdown closes (Close() called,
+//     reader observed EOF, etc.) before peer SETTINGS arrive
+//
+// USK-871: the proxy ServerRole needs to mirror the upstream's
+// SETTINGS_ENABLE_CONNECT_PROTOCOL value, so stack assembly waits on this
+// signal between dialing upstream and constructing the client-facing Layer.
+// Fast-path: if the peer SETTINGS frame has already been observed, returns
+// immediately with nil.
+func (l *Layer) WaitPeerSettings(ctx context.Context) error {
+	ready := l.conn.PeerSettingsReady()
+	// Fast path: already received. The channel close on a closed channel is
+	// monotonic so this is race-free.
+	select {
+	case <-ready:
+		return nil
+	default:
+	}
+	select {
+	case <-ready:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-l.shutdown:
+		return ErrShutdownBeforePeerSettings
+	}
+}
+
 // New creates an HTTP/2 Layer wrapping conn.
 func New(conn net.Conn, streamID string, role Role, opts ...Option) (*Layer, error) {
 	o := options{

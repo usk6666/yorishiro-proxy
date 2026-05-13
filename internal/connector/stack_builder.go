@@ -1014,6 +1014,16 @@ func buildPoolHitFastPath(
 		TLS:        clientSnap,
 	}
 
+	// USK-871: mirror upstream's SETTINGS_ENABLE_CONNECT_PROTOCOL into the
+	// client-facing ServerRole's advertise. The pooled upstream Layer is
+	// only returned from the pool after a previous CONNECT to the same
+	// target finished its WaitPeerSettings wait (success or timeout-
+	// fallback) and called Put, so by the time we pool-hit here the
+	// upstream's reader goroutine has had ample wall-clock time to apply
+	// the peer SETTINGS asynchronously. Reading PeerSettings() directly
+	// is therefore sound without a fresh wait.
+	enableConnectProtocol := resolveEnableConnectProtocol(ctx, pooled, true, connID, target)
+
 	clientH2Opts := []http2.Option{
 		http2.WithScheme("https"),
 		http2.WithEnvelopeContext(clientEnvCtx),
@@ -1021,6 +1031,7 @@ func buildPoolHitFastPath(
 		http2.WithBodySpillThreshold(cfg.BodySpillThreshold),
 		http2.WithMaxBodySize(cfg.MaxBodySize),
 		http2.WithStateReleaser(cfg.PluginV2Engine),
+		http2.WithEnableConnectProtocol(enableConnectProtocol),
 	}
 	if mcsOpt := clientH2MaxConcurrentStreamsOption(cfg); mcsOpt != nil {
 		clientH2Opts = append(clientH2Opts, mcsOpt)
@@ -1310,26 +1321,12 @@ func buildH2Stack(
 	hostTLS *resolvedTLS,
 	cfg *BuildConfig,
 ) (*ConnectionStack, *envelope.TLSSnapshot, *envelope.TLSSnapshot, error) {
-	// Client-side Layer (ServerRole = local acts as HTTP/2 server).
-	clientH2Opts := []http2.Option{
-		http2.WithScheme("https"),
-		http2.WithEnvelopeContext(clientEnvCtx),
-		http2.WithBodySpillDir(cfg.BodySpillDir),
-		http2.WithBodySpillThreshold(cfg.BodySpillThreshold),
-		http2.WithMaxBodySize(cfg.MaxBodySize),
-		http2.WithStateReleaser(cfg.PluginV2Engine),
-	}
-	if mcsOpt := clientH2MaxConcurrentStreamsOption(cfg); mcsOpt != nil {
-		clientH2Opts = append(clientH2Opts, mcsOpt)
-	}
-	clientLayer, err := http2.New(clientConn, connID+"/client", http2.ServerRole, clientH2Opts...)
-	if err != nil {
-		upstreamConn.Close()
-		clientConn.Close()
-		return nil, nil, nil, fmt.Errorf("connector: h2 client layer: %w", err)
-	}
-	stack.PushClient(clientLayer)
-
+	// USK-871: Construct upstream ClientRole first so we can observe the
+	// peer's initial SETTINGS frame (notably SETTINGS_ENABLE_CONNECT_PROTOCOL)
+	// before deciding what to advertise to the client. The prior order
+	// (ServerRole-then-ClientRole) emitted ENABLE_CONNECT_PROTOCOL=1
+	// unconditionally, which misled browsers into using Extended CONNECT
+	// (RFC 8441) for WS on h1.1-only upstreams.
 	poolKey := poolKeyForH2(ctx, target, cfg, hostTLS)
 
 	// consumed tracks whether dialFn ran (true = upstreamConn is owned by
@@ -1361,14 +1358,14 @@ func buildH2Stack(
 			if !consumed {
 				upstreamConn.Close()
 			}
-			clientLayer.Close()
+			clientConn.Close()
 			return nil, nil, nil, fmt.Errorf("connector: h2 pool get-or-dial: %w", getErr)
 		}
 		upstreamH2 = l
 	} else {
 		l, dErr := dialFn()
 		if dErr != nil {
-			clientLayer.Close()
+			clientConn.Close()
 			return nil, nil, nil, fmt.Errorf("connector: h2 upstream layer: %w", dErr)
 		}
 		upstreamH2 = l
@@ -1381,8 +1378,128 @@ func buildH2Stack(
 		upstreamConn.Close()
 	}
 
+	// USK-871: mirror upstream's SETTINGS_ENABLE_CONNECT_PROTOCOL into the
+	// client-facing ServerRole's advertise. On the pool-hit branch
+	// (!consumed) the pooled upstream Layer was already drained through a
+	// previous caller's WaitPeerSettings (success or timeout-fallback)
+	// before being returned to the pool via Put, so the reader goroutine
+	// has had ample wall-clock time to apply the peer SETTINGS
+	// asynchronously and we do not wait again here. On the fresh-dial
+	// branch (consumed) we wait via WaitPeerSettings below.
+	enableConnectProtocol := resolveEnableConnectProtocol(ctx, upstreamH2, !consumed, connID, target)
+
+	// Client-side Layer (ServerRole = local acts as HTTP/2 server).
+	clientH2Opts := []http2.Option{
+		http2.WithScheme("https"),
+		http2.WithEnvelopeContext(clientEnvCtx),
+		http2.WithBodySpillDir(cfg.BodySpillDir),
+		http2.WithBodySpillThreshold(cfg.BodySpillThreshold),
+		http2.WithMaxBodySize(cfg.MaxBodySize),
+		http2.WithStateReleaser(cfg.PluginV2Engine),
+		http2.WithEnableConnectProtocol(enableConnectProtocol),
+	}
+	if mcsOpt := clientH2MaxConcurrentStreamsOption(cfg); mcsOpt != nil {
+		clientH2Opts = append(clientH2Opts, mcsOpt)
+	}
+	clientLayer, err := http2.New(clientConn, connID+"/client", http2.ServerRole, clientH2Opts...)
+	if err != nil {
+		// Upstream Layer is healthy — only the client-side handshake failed.
+		// Return it to the pool if pooling is enabled so the next CONNECT to
+		// the same target can reuse it; otherwise close it to free the fd.
+		if cfg != nil && cfg.HTTP2Pool != nil {
+			cfg.HTTP2Pool.Put(poolKey, upstreamH2)
+		} else {
+			upstreamH2.Close()
+		}
+		clientConn.Close()
+		return nil, nil, nil, fmt.Errorf("connector: h2 client layer: %w", err)
+	}
+	stack.PushClient(clientLayer)
+
 	stack.setUpstreamH2(upstreamH2, poolKey)
 	return stack, clientSnap, upstreamSnap, nil
+}
+
+// upstreamPeerSettingsWaitTimeout bounds how long buildH2Stack will wait for
+// the upstream's first SETTINGS frame before falling back to advertising
+// ENABLE_CONNECT_PROTOCOL=1 (the pre-USK-871 default). One RTT is typical;
+// 5s comfortably covers slow upstreams. Not exposed as a config knob —
+// operators have not asked for configurability and a hard ceiling keeps
+// the failure mode bounded.
+const upstreamPeerSettingsWaitTimeout = 5 * time.Second
+
+// resolveEnableConnectProtocol returns the ENABLE_CONNECT_PROTOCOL value to
+// advertise on the client-facing ServerRole, mirroring the upstream peer's
+// advertisement per RFC 8441 §3.
+//
+// Semantics:
+//   - pool-hit (poolHit == true): the pooled upstream Layer was returned
+//     from the pool only after a previous CONNECT finished its own
+//     WaitPeerSettings (success or timeout-fallback). The reader goroutine
+//     has had wall-clock time to apply the peer SETTINGS asynchronously by
+//     now, so we read PeerSettings() directly without a fresh wait. There
+//     is no formal happens-before between pool-insertion and peer SETTINGS
+//     apply, but the previous caller's wait makes the field-read sound in
+//     practice for the EnableConnectProtocol use case.
+//   - pool-miss / no-pool: wait up to upstreamPeerSettingsWaitTimeout for
+//     the upstream's first SETTINGS frame. On success, return whether the
+//     peer advertised value 1. On context timeout or layer shutdown, log
+//     a Warn and fall back to true (advertising 1 preserves USK-764's
+//     prior unconditional default).
+//
+// USK-871 fix invariant: the returned bool is passed verbatim to
+// http2.WithEnableConnectProtocol — true → advertise 1, false → omit the
+// setting from the initial SETTINGS frame (per RFC 8441 §3, the default).
+func resolveEnableConnectProtocol(ctx context.Context, upstream *http2.Layer, poolHit bool, connID, target string) bool {
+	if upstream == nil {
+		// Defensive: the caller should have already returned on dial failure.
+		// Fall back to the pre-USK-871 default.
+		return true
+	}
+	if poolHit {
+		// Pool entry was inserted after preface + first peer SETTINGS, so
+		// PeerSettingsReceived must be true. Read the value directly.
+		peerVal := upstream.PeerSettings().EnableConnectProtocol == 1
+		slog.Debug("connector: h2 ENABLE_CONNECT_PROTOCOL mirrored from upstream (pool-hit)",
+			"target", target,
+			"conn_id", connID,
+			"peer_advertised", peerVal,
+			"enable_connect_protocol_advertised", peerVal,
+			"wait_outcome", "pool-hit",
+		)
+		return peerVal
+	}
+
+	waitCtx, cancel := context.WithTimeout(ctx, upstreamPeerSettingsWaitTimeout)
+	defer cancel()
+	err := upstream.WaitPeerSettings(waitCtx)
+	if err == nil {
+		peerVal := upstream.PeerSettings().EnableConnectProtocol == 1
+		slog.Debug("connector: h2 ENABLE_CONNECT_PROTOCOL mirrored from upstream",
+			"target", target,
+			"conn_id", connID,
+			"peer_advertised", peerVal,
+			"enable_connect_protocol_advertised", peerVal,
+			"wait_outcome", "received",
+		)
+		return peerVal
+	}
+
+	// Fail-open: advertise 1 (the pre-USK-871 default) so existing clients
+	// that depend on Extended CONNECT keep working. Operator can see the
+	// fallback firing via slog.Warn.
+	outcome := "timeout"
+	if errors.Is(err, http2.ErrShutdownBeforePeerSettings) {
+		outcome = "shutdown"
+	}
+	slog.Warn("connector: h2 ENABLE_CONNECT_PROTOCOL upstream sniff fell back to default",
+		"target", target,
+		"conn_id", connID,
+		"wait_outcome", outcome,
+		"enable_connect_protocol_advertised", true,
+		"err", err.Error(),
+	)
+	return true
 }
 
 // buildRawPassthroughStack builds a [TLS → ByteChunk] stack on both sides.

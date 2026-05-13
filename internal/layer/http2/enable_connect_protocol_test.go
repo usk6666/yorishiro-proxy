@@ -107,3 +107,39 @@ func TestLayer_ClientRole_WithEnableConnectProtocolTrue_Advertises(t *testing.T)
 		t.Errorf("ENABLE_CONNECT_PROTOCOL = %d, want 1", v)
 	}
 }
+
+// TestLayer_ServerRole_MirrorsPeerEnableConnectProtocol_Zero verifies the
+// USK-871 invariant at the Layer surface: when buildH2Stack mirrors an
+// upstream peer that does NOT advertise SETTINGS_ENABLE_CONNECT_PROTOCOL
+// (i.e. value defaults to 0), the proxy ServerRole must omit the setting
+// from its initial SETTINGS frame. WithEnableConnectProtocol(false) is
+// the option the connector threads through after sniffing the upstream.
+func TestLayer_ServerRole_MirrorsPeerEnableConnectProtocol_Zero(t *testing.T) {
+	_, peer, cleanup := startServerLayer(t, WithEnableConnectProtocol(false))
+	defer cleanup()
+
+	params := readInitialSettings(t, peer)
+	if v, ok := findSetting(params, frame.SettingEnableConnectProtocol); ok {
+		t.Fatalf("ServerRole mirrored upstream-0 but advertised ENABLE_CONNECT_PROTOCOL=%d; params=%+v", v, params)
+	}
+}
+
+// TestLayer_ServerRole_MirrorsPeerEnableConnectProtocol_One verifies the
+// USK-871 invariant at the Layer surface: when buildH2Stack mirrors an
+// upstream peer that DOES advertise SETTINGS_ENABLE_CONNECT_PROTOCOL=1,
+// the proxy ServerRole must advertise value 1 too. This preserves the
+// USK-764 behaviour for upstreams that legitimately support extended
+// CONNECT.
+func TestLayer_ServerRole_MirrorsPeerEnableConnectProtocol_One(t *testing.T) {
+	_, peer, cleanup := startServerLayer(t, WithEnableConnectProtocol(true))
+	defer cleanup()
+
+	params := readInitialSettings(t, peer)
+	v, ok := findSetting(params, frame.SettingEnableConnectProtocol)
+	if !ok {
+		t.Fatalf("ServerRole mirrored upstream-1 but did not advertise ENABLE_CONNECT_PROTOCOL; params=%+v", params)
+	}
+	if v != 1 {
+		t.Errorf("ENABLE_CONNECT_PROTOCOL = %d, want 1", v)
+	}
+}

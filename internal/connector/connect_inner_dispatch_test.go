@@ -336,7 +336,7 @@ func TestBuildPlainH2CStack_NilCfg(t *testing.T) {
 	defer c.Close()
 	defer d.Close()
 
-	_, err := BuildPlainH2CStack(a, c, "example.com:80", nil)
+	_, err := BuildPlainH2CStack(context.Background(), a, c, "example.com:80", nil)
 	if err == nil {
 		t.Fatal("expected error on nil config, got nil")
 	}
