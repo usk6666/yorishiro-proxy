@@ -513,10 +513,10 @@ type queryFlowsEntry struct {
 	State    string `json:"state"`
 	// FailureReason carries the canonical layer.ErrorCode label
 	// (refused / canceled / aborted / internal_error / protocol_error)
-	// or one of the recorder-specific labels (e.g. "upstream_tls_error")
-	// when state == "error". Empty for state != "error" or for errored
-	// streams that did not surface a classifiable signal (USK-797 makes
-	// this column visible to MCP clients).
+	// or one of the recorder-specific labels (e.g. "upstream_tls_error",
+	// "client_tls_error") when state == "error". Empty for state != "error"
+	// or for errored streams that did not surface a classifiable signal
+	// (USK-797 makes this column visible to MCP clients).
 	FailureReason   string            `json:"failure_reason,omitempty"`
 	Method          string            `json:"method"`
 	URL             string            `json:"url"`
@@ -683,10 +683,10 @@ type queryFlowResult struct {
 	State       string `json:"state"`
 	// FailureReason carries the canonical layer.ErrorCode label
 	// (refused / canceled / aborted / internal_error / protocol_error)
-	// or one of the recorder-specific labels (e.g. "upstream_tls_error")
-	// when state == "error". Empty otherwise. The full err.Error()
-	// string for the same event is available under tags["error"]
-	// (USK-797).
+	// or one of the recorder-specific labels (e.g. "upstream_tls_error",
+	// "client_tls_error") when state == "error". Empty otherwise. The
+	// full err.Error() string for the same event is available under
+	// tags["error"] (USK-797).
 	FailureReason         string              `json:"failure_reason,omitempty"`
 	Method                string              `json:"method"`
 	URL                   string              `json:"url"`

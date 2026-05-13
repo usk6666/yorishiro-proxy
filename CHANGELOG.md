@@ -4,6 +4,12 @@ All notable changes to yorishiro-proxy are documented in this file.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- Client-side MITM handshake rejection (e.g. Chromium pinning a proxy CA so the proxy's MITM cert is refused with an `unknown_certificate` / `bad_certificate` TLS alert) is now recorded with `failure_reason="client_tls_error"` instead of being misclassified as `upstream_tls_error`. Existing `upstream_tls_error` records for genuine upstream-side TLS failures are unaffected. MCP query consumers can therefore distinguish browser→proxy failures (CA install / pinning issues) from proxy→upstream failures (cert expiry / chain trust) without parsing `tags["error"]`. (USK-858)
+
 ## [0.15.0] - 2026-05-05
 
 This release ships the [RFC-001 Envelope + Layered Connection Model](docs/rfc/envelope.md) rewrite (milestones N1–N9). The data path is rebuilt around an `Envelope` + typed `Message` + `Layer` + `Channel` model that fixes the HTTP bias of the previous `Exchange`/`Codec` abstractions and unlocks structurally-honest support for HTTP/2 multiplexing, gRPC, gRPC-Web, WebSocket, SSE, and raw-byte smuggling diagnostics.

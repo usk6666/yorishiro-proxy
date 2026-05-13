@@ -44,18 +44,32 @@ type OnStackFunc func(
 )
 
 // OnUpstreamTLSErrorFunc is the callback signature invoked when the proxy
-// has accepted a CONNECT/SOCKS5 tunnel and successfully negotiated client
-// TLS MITM context, but the subsequent upstream stack build fails — most
-// commonly because the upstream TLS handshake rejected the certificate
-// (expired, self-signed, untrusted CA, hostname mismatch, etc.).
+// has accepted a CONNECT/SOCKS5 tunnel but the subsequent
+// BuildConnectionStack call fails inside the TLS MITM data path. Two wire
+// directions can produce this callback (USK-858):
 //
-// The callback is the bridge from the connector layer to the flow recorder
-// in proxybuild: it is fired with the CONNECT authority preserved verbatim
-// (per CLAUDE.md MITM Principle #1 — do not normalize) and the underlying
-// build error so the recorder can persist a state="error" Stream that
-// surfaces the upstream-side failure to MITM diagnostic users.
+//   - upstream TLS handshake rejection (proxy → upstream) — most commonly
+//     an expired / self-signed / untrusted-CA / hostname-mismatch cert
+//     presented by the upstream server.
+//   - client-side TLS MITM handshake rejection (browser → proxy) — the
+//     client refused the proxy's MITM cert (Chromium pinning, missing CA
+//     install, unknown_certificate / bad_certificate / unknown_ca TLS
+//     alert). The connector wraps these with
+//     ErrClientTLSMITMHandshake so proxybuild's recorder can branch
+//     FailureReason between "client_tls_error" and "upstream_tls_error"
+//     via errors.Is.
+//
+// The callback name is retained for backward compatibility with USK-784
+// — despite the broadened scope, the wire shape (callback signature,
+// firing site, recorded Stream shape) is unchanged. The CONNECT authority
+// is preserved verbatim (CLAUDE.md MITM Principle #1 — do not normalize)
+// and the underlying build error is passed through so the recorder can
+// surface both diagnostic strings (Tags["error"]) and the canonical
+// FailureReason taxonomy value to MCP query consumers.
 //
 // USK-784 brings the HTTP/1.x HTTPS path to parity with USK-188 (WebSocket).
+// USK-858 extends the taxonomy to distinguish client-side from
+// upstream-side TLS handshake failures.
 type OnUpstreamTLSErrorFunc func(ctx context.Context, target string, err error)
 
 // CONNECTHandlerConfig holds dependencies for the CONNECT handler factory.

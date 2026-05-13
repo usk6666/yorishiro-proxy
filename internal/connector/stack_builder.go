@@ -41,6 +41,17 @@ import (
 // survives an operator flip to "h2 disabled".
 var errPoolFastPathDeclined = errors.New("connector: pool fast-path declined")
 
+// ErrClientTLSMITMHandshake wraps client-side TLS MITM handshake failures
+// returned by BuildConnectionStack. The wire-observed direction is
+// browser→proxy (the client refused the proxy's MITM certificate — e.g.
+// Chromium pinning, a bad / missing CA install, or an unknown_certificate
+// TLS alert), not proxy→upstream. proxybuild uses errors.Is to distinguish
+// these from upstream-side TLS failures when classifying FailureReason
+// (USK-858). The wrapped underlying error from tlslayer.Server remains
+// accessible via errors.Unwrap, so the existing diagnostic surface
+// (Tags["error"] = err.Error()) is unchanged.
+var ErrClientTLSMITMHandshake = errors.New("connector: client TLS MITM handshake")
+
 // BuildConfig holds configuration for BuildConnectionStack.
 type BuildConfig struct {
 	// ProxyConfig is the loaded proxy configuration containing
@@ -1178,7 +1189,7 @@ func performClientMITM(
 
 	tlsConn, clientSnap, err := tlslayer.Server(ctx, clientConn, serverTLSCfg)
 	if err != nil {
-		return nil, nil, fmt.Errorf("connector: client TLS MITM handshake: %w", err)
+		return nil, nil, fmt.Errorf("%w: %w", ErrClientTLSMITMHandshake, err)
 	}
 	fireTLSHandshakeHook(ctx, cfg, "server", clientSnap)
 	return tlsConn, clientSnap, nil
@@ -1458,7 +1469,7 @@ func buildRawPassthroughStack(
 
 	clientTLSConn, clientSnap, err := tlslayer.Server(ctx, clientConn, serverTLSCfg)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("connector: client TLS MITM handshake for %s: %w", target, err)
+		return nil, nil, nil, fmt.Errorf("%w for %s: %w", ErrClientTLSMITMHandshake, target, err)
 	}
 	fireTLSHandshakeHook(ctx, cfg, "server", clientSnap)
 
