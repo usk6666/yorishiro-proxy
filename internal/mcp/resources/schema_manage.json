@@ -34,8 +34,8 @@
         },
         "scheme": {
           "type": "string",
-          "description": "Scheme filter for delete_flows; matches Stream.Scheme exactly. Mirrors query.filter.scheme.",
-          "enum": ["http", "https", "ws", "wss", "tcp"]
+          "description": "Scheme filter for delete_flows — wire-observed handshake transport (http, https, tcp). For WebSocket flows use protocol=\"ws\"; combine with scheme=\"https\" for WS-over-TLS only. Values ws/wss are rejected as of USK-864 (per USK-848, Stream.Scheme records the handshake transport, not the application protocol). Mirrors query.filter.scheme.",
+          "enum": ["http", "https", "tcp"]
         },
         "http_version": {
           "type": "string",
@@ -58,8 +58,8 @@
             },
             "scheme": {
               "type": "string",
-              "description": "Filter by Stream.Scheme. Mirrors query.filter.scheme.",
-              "enum": ["http", "https", "ws", "wss", "tcp"]
+              "description": "Filter by Stream.Scheme — wire-observed handshake transport (http, https, tcp). For WebSocket flows use protocol=\"ws\"; combine with scheme=\"https\" for WS-over-TLS only. Values ws/wss are rejected as of USK-864 (per USK-848, Stream.Scheme records the handshake transport, not the application protocol). Mirrors query.filter.scheme.",
+              "enum": ["http", "https", "tcp"]
             },
             "http_version": {
               "type": "string",

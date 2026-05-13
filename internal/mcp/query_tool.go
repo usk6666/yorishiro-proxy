@@ -103,10 +103,12 @@ type queryFilter struct {
 	// HTTP/1.x, HTTPS, HTTP/2 and their SOCKS5+ variants). To find all TLS flows
 	// regardless of HTTP version, use scheme=https instead.
 	Protocol string `json:"protocol,omitempty" jsonschema:"protocol filter — canonical Message-type family: http, ws, grpc, grpc-web, sse, raw, tls-handshake. Each family expands across all wire spellings. Use scheme=https to find all TLS flows regardless of HTTP version."`
-	// Scheme filters flows by URL scheme / transport (e.g. "https", "http", "wss", "ws", "tcp").
-	// Use scheme to find TLS flows: filter={scheme: "https"} returns HTTP/1.x, HTTP/2, gRPC flows over TLS.
-	// WebSocket over TLS uses scheme="wss", not "https".
-	Scheme string `json:"scheme,omitempty" jsonschema:"URL scheme / transport filter (https, http, wss, ws, tcp)"`
+	// Scheme filters flows by Stream.Scheme — the wire-observed handshake
+	// transport ("http", "https", "tcp"). Per USK-848, WebSocket Streams keep
+	// the handshake transport (http or https); they do NOT record "ws"/"wss".
+	// To isolate WebSocket flows: use filter.protocol="ws" (any transport) or
+	// combine protocol="ws" with scheme="https" for WS-over-TLS only.
+	Scheme string `json:"scheme,omitempty" jsonschema:"Stream.Scheme filter — wire-observed handshake transport (http, https, tcp). For WebSocket flows use protocol=\"ws\"; combine with scheme=\"https\" for WS-over-TLS only."`
 	// HTTPVersion filters flows that have at least one Flow row with
 	// the matching http_version value (USK-788/USK-792). Canonical
 	// lowercased values: "http/1.0", "http/1.1", "h2", "h2c". Mirrors
@@ -156,8 +158,39 @@ var validFilterProtocols = []string{
 	"http", "ws", "grpc", "grpc-web", "sse", "raw", "tls-handshake",
 }
 
-// validFilterSchemes lists valid values for filter.scheme.
-var validFilterSchemes = []string{"https", "http", "wss", "ws", "tcp"}
+// validFilterSchemes lists valid values for filter.scheme. Per USK-848 +
+// RFC-001 §3, Stream.Scheme records the wire-observed handshake transport
+// only: "http", "https", or "tcp". Application-level URL schemes such as
+// "ws"/"wss" are NOT valid Stream.Scheme values — WebSocket Streams retain
+// the handshake transport ("http" / "https") across the WS Protocol retag.
+// USK-864 hard-rejects "ws"/"wss" filter values via validateSchemeFilter,
+// which surfaces the remediation hint from rejectedSchemeHints pointing
+// callers at the correct combined filter.
+var validFilterSchemes = []string{"https", "http", "tcp"}
+
+// rejectedSchemeHints lists scheme values that USK-864 hard-rejects with
+// a remediation hint. Keys are the rejected value as supplied by the
+// caller; values are the trailing remediation clause appended to the
+// validateEnum error so the caller knows which combined filter to use
+// instead.
+var rejectedSchemeHints = map[string]string{
+	"ws":  `use protocol="ws" for WebSocket flows (Stream.Scheme records the handshake transport, not the application protocol)`,
+	"wss": `use protocol="ws" combined with scheme="https" for WS-over-TLS flows (Stream.Scheme records the handshake transport, not the application protocol)`,
+}
+
+// validateSchemeFilter wraps validateEnum to surface the USK-864
+// remediation hint for the application-protocol values that callers
+// commonly mistake for valid Stream.Scheme values. For non-rejected
+// invalid values it falls through to the standard validateEnum error.
+func validateSchemeFilter(value string) error {
+	if value == "" {
+		return nil
+	}
+	if hint, ok := rejectedSchemeHints[value]; ok {
+		return fmt.Errorf("invalid scheme %q: %s", value, hint)
+	}
+	return validateEnum("scheme", value, validFilterSchemes)
+}
 
 // validFilterHTTPVersions lists valid values for filter.http_version.
 // Mirrors the canonical lowercased values stamped on Flow.HTTPVersion
@@ -205,7 +238,7 @@ func validateFlowFilters(input queryInput) error {
 		if err := validateEnum("protocol", input.Filter.Protocol, validFilterProtocols); err != nil {
 			return err
 		}
-		if err := validateEnum("scheme", input.Filter.Scheme, validFilterSchemes); err != nil {
+		if err := validateSchemeFilter(input.Filter.Scheme); err != nil {
 			return err
 		}
 		if err := validateEnum("state", input.Filter.State, validFilterStates); err != nil {

@@ -2034,6 +2034,13 @@ func TestSQLiteStore_SchemeField(t *testing.T) {
 	ctx := context.Background()
 
 	// Save flows with different schemes.
+	//
+	// NOTE: Scheme="ws" / Scheme="wss" below are synthetic values used to
+	// exercise the SQL scheme filter mechanics at the store layer. Live
+	// recording never produces "ws"/"wss" in Stream.Scheme — per USK-848,
+	// Stream.Scheme records the wire-observed handshake transport
+	// (http/https/tcp). The MCP query/manage filter surfaces hard-reject
+	// these values at the enum boundary (USK-864).
 	flows := []*Stream{
 		{Protocol: "HTTPS", Scheme: "https", Timestamp: time.Now()},
 		{Protocol: "HTTP/2", Scheme: "https", Timestamp: time.Now()},

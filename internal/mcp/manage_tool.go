@@ -36,10 +36,13 @@ type manageParams struct {
 	OlderThanDays *int   `json:"older_than_days,omitempty" jsonschema:"delete flows older than this many days"`
 	Confirm       bool   `json:"confirm,omitempty" jsonschema:"confirm bulk deletion"`
 	Protocol      string `json:"protocol,omitempty" jsonschema:"protocol filter for delete_flows; matches Stream.Protocol exactly (canonical values: http, ws, grpc, grpc-web, sse, raw, tls-handshake). Mirrors query tool filter.protocol semantics."`
-	// Scheme filters delete_flows by Stream.Scheme. Canonical lowercased
-	// values: http, https, ws, wss, tcp. Mirrors the query tool's
-	// filter.scheme axis (USK-792).
-	Scheme string `json:"scheme,omitempty" jsonschema:"scheme filter for delete_flows; matches Stream.Scheme exactly (canonical values: http, https, ws, wss, tcp). Mirrors query tool filter.scheme semantics."`
+	// Scheme filters delete_flows by Stream.Scheme — the wire-observed
+	// handshake transport ("http", "https", "tcp"). Per USK-848,
+	// WebSocket Streams keep the handshake transport across the WS
+	// Protocol retag; they do NOT record "ws"/"wss". To target WebSocket
+	// flows, use protocol="ws"; combine with scheme="https" for
+	// WS-over-TLS only. Mirrors the query tool's filter.scheme axis.
+	Scheme string `json:"scheme,omitempty" jsonschema:"scheme filter for delete_flows — wire-observed handshake transport (http, https, tcp). For WebSocket flows use protocol=\"ws\"; combine with scheme=\"https\" for WS-over-TLS only. Mirrors query tool filter.scheme semantics."`
 	// HTTPVersion filters delete_flows by an associated Flow's
 	// http_version. Canonical lowercased values: http/1.0, http/1.1,
 	// h2, h2c. Use a pointer so callers can request a literal
@@ -66,11 +69,14 @@ type exportFilter struct {
 	// Protocol matches Stream.Protocol exactly. Canonical lowercased
 	// values: http, ws, grpc, grpc-web, sse, raw, tls-handshake.
 	Protocol string `json:"protocol,omitempty" jsonschema:"protocol filter; matches Stream.Protocol exactly (canonical values: http, ws, grpc, grpc-web, sse, raw, tls-handshake). Mirrors query tool filter.protocol semantics."`
-	// Scheme matches Stream.Scheme exactly. Canonical lowercased
-	// values: http, https, ws, wss, tcp. Mirrors the query tool's
-	// filter.scheme axis. Use scheme=https to export HTTPS flows
-	// regardless of HTTP version.
-	Scheme string `json:"scheme,omitempty" jsonschema:"scheme filter; matches Stream.Scheme exactly (canonical values: http, https, ws, wss, tcp). Mirrors query tool filter.scheme semantics."`
+	// Scheme matches Stream.Scheme exactly — the wire-observed
+	// handshake transport ("http", "https", "tcp"). Per USK-848,
+	// WebSocket Streams keep the handshake transport across the WS
+	// Protocol retag; they do NOT record "ws"/"wss". To target WebSocket
+	// flows, use protocol="ws"; combine with scheme="https" for
+	// WS-over-TLS only. Mirrors the query tool's filter.scheme axis.
+	// Use scheme=https to export HTTPS flows regardless of HTTP version.
+	Scheme string `json:"scheme,omitempty" jsonschema:"scheme filter — wire-observed handshake transport (http, https, tcp). For WebSocket flows use protocol=\"ws\"; combine with scheme=\"https\" for WS-over-TLS only. Mirrors query tool filter.scheme semantics."`
 	// HTTPVersion matches Flow.http_version via an EXISTS subquery on
 	// the flows table. Canonical lowercased values: http/1.0,
 	// http/1.1, h2, h2c. Pointer so an explicit empty string can
@@ -326,7 +332,7 @@ func validateManageDeleteFilter(params manageParams) error {
 	if err := validateEnum("protocol", params.Protocol, validFilterProtocols); err != nil {
 		return err
 	}
-	if err := validateEnum("scheme", params.Scheme, validFilterSchemes); err != nil {
+	if err := validateSchemeFilter(params.Scheme); err != nil {
 		return err
 	}
 	if v := params.HTTPVersion; v != nil && *v != "" {
@@ -344,7 +350,7 @@ func validateManageExportFilter(filter *exportFilter) error {
 	if err := validateEnum("protocol", filter.Protocol, validFilterProtocols); err != nil {
 		return err
 	}
-	if err := validateEnum("scheme", filter.Scheme, validFilterSchemes); err != nil {
+	if err := validateSchemeFilter(filter.Scheme); err != nil {
 		return err
 	}
 	if v := filter.HTTPVersion; v != nil && *v != "" {

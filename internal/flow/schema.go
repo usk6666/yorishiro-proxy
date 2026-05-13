@@ -125,8 +125,11 @@ ALTER TABLE flows ADD COLUMN wait_ms INTEGER;
 ALTER TABLE flows ADD COLUMN receive_ms INTEGER;
 `
 
-// schemaV6 adds the scheme column to flows to separate transport/TLS
-// information (https, http, wss, ws, tcp) from the application protocol.
+// schemaV6 adds the scheme column to flows to separate wire-observed
+// handshake transport (canonical live values: https, http, tcp) from the
+// application protocol. Per USK-848 the live path records the handshake
+// transport only; the column itself is a free-form TEXT so legacy or
+// imported rows may carry other values (e.g. "ws"/"wss").
 const schemaV6 = `
 ALTER TABLE flows ADD COLUMN scheme TEXT NOT NULL DEFAULT '';
 CREATE INDEX IF NOT EXISTS idx_flows_scheme ON flows(scheme);

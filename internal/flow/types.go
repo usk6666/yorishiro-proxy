@@ -51,11 +51,17 @@ type Stream struct {
 	// need to handle both should compare via envelope.Protocol(st.Protocol)
 	// against the canonical constants.
 	Protocol string
-	// Scheme is the URL scheme or transport indicator
-	// (e.g., "https", "http", "wss", "ws", "tcp").
-	// It separates TLS/transport information from Protocol, so that
-	// filter={scheme: "https"} returns HTTP/1.x, HTTP/2, gRPC streams over TLS.
-	// WebSocket over TLS uses scheme="wss", not "https".
+	// Scheme is the wire-observed handshake transport indicator
+	// (canonical live values: "https", "http", "tcp"). Per USK-848,
+	// Stream.Scheme records the handshake transport only — application-
+	// level URL schemes such as "ws"/"wss" are NOT recorded on the live
+	// path. WebSocket Streams retain the handshake transport ("http" or
+	// "https") across the WS Protocol retag, so WS-over-TLS flows carry
+	// Scheme="https". The MCP query/manage filter surfaces hard-reject
+	// "ws"/"wss" filter values at the enum boundary (USK-864). Note: the
+	// Store layer is protocol-neutral and accepts any string for
+	// round-trip / import compatibility; validation is enforced at the
+	// MCP boundary, not here.
 	Scheme string
 	// State indicates the stream lifecycle state:
 	// "active" (in progress), "complete" (finished), or "error" (failed).

@@ -325,6 +325,133 @@ func TestQuery_Flows_ValidFiltersStillWork(t *testing.T) {
 	}
 }
 
+// TestValidateSchemeFilter_USK864 pins the USK-864 hard-reject for
+// "ws"/"wss" filter values. Per USK-848, Stream.Scheme records the
+// wire-observed handshake transport (http/https/tcp) and never the
+// application protocol. The query/manage filter surfaces advertised
+// ws/wss as valid before USK-864, which silently returned 0 results
+// for live WebSocket flows. Rejecting them at the enum boundary with a
+// remediation hint pointing at protocol="ws" makes the spec match the
+// USK-848 invariant.
+func TestValidateSchemeFilter_USK864(t *testing.T) {
+	tests := []struct {
+		name        string
+		value       string
+		wantErr     bool
+		errContains []string
+	}{
+		{"empty is valid (filter unset)", "", false, nil},
+		{"http is valid", "http", false, nil},
+		{"https is valid", "https", false, nil},
+		{"tcp is valid", "tcp", false, nil},
+		{
+			name:        "ws is rejected with remediation hint",
+			value:       "ws",
+			wantErr:     true,
+			errContains: []string{`invalid scheme "ws"`, `protocol="ws"`},
+		},
+		{
+			name:        "wss is rejected with remediation hint",
+			value:       "wss",
+			wantErr:     true,
+			errContains: []string{`invalid scheme "wss"`, `protocol="ws"`, `scheme="https"`},
+		},
+		{
+			name:        "unknown value falls through to standard enum error",
+			value:       "ftp",
+			wantErr:     true,
+			errContains: []string{`invalid scheme "ftp"`, "valid values are"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateSchemeFilter(tt.value)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				for _, sub := range tt.errContains {
+					if !strings.Contains(err.Error(), sub) {
+						t.Errorf("error = %q, want substring %q", err.Error(), sub)
+					}
+				}
+			} else if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
+// TestValidFilterSchemes_USK864 pins that ws/wss are absent from the
+// enum and only the wire-observed handshake transports remain.
+func TestValidFilterSchemes_USK864(t *testing.T) {
+	want := map[string]bool{"http": true, "https": true, "tcp": true}
+	if len(validFilterSchemes) != len(want) {
+		t.Errorf("validFilterSchemes = %v, want exactly %v", validFilterSchemes, want)
+	}
+	for _, v := range validFilterSchemes {
+		if !want[v] {
+			t.Errorf("validFilterSchemes contains unexpected value %q (USK-864: only http/https/tcp permitted)", v)
+		}
+	}
+	for _, rejected := range []string{"ws", "wss"} {
+		for _, v := range validFilterSchemes {
+			if v == rejected {
+				t.Errorf("validFilterSchemes must not contain %q (USK-864 hard-reject)", rejected)
+			}
+		}
+	}
+}
+
+// TestQuery_Flows_SchemeWS_Rejected verifies the MCP-tool surface
+// rejects scheme="ws" with the USK-864 remediation hint.
+func TestQuery_Flows_SchemeWS_Rejected(t *testing.T) {
+	store := newTestStore(t)
+	cs := setupQueryTestSession(t, store)
+
+	result := callQuery(t, cs, queryInput{
+		Resource: "flows",
+		Filter:   &queryFilter{Scheme: "ws"},
+	})
+	if !result.IsError {
+		t.Fatal("expected IsError=true for scheme=ws (USK-864)")
+	}
+	text := result.Content[0].(*gomcp.TextContent)
+	if !strings.Contains(text.Text, `invalid scheme "ws"`) {
+		t.Errorf("error should mention invalid scheme \"ws\", got: %s", text.Text)
+	}
+	if !strings.Contains(text.Text, `protocol="ws"`) {
+		t.Errorf("error should point at protocol=\"ws\" remediation, got: %s", text.Text)
+	}
+}
+
+// TestQuery_Flows_SchemeWSS_Rejected verifies the MCP-tool surface
+// rejects scheme="wss" with a remediation hint pointing at the combined
+// filter for WS-over-TLS.
+func TestQuery_Flows_SchemeWSS_Rejected(t *testing.T) {
+	store := newTestStore(t)
+	cs := setupQueryTestSession(t, store)
+
+	result := callQuery(t, cs, queryInput{
+		Resource: "flows",
+		Filter:   &queryFilter{Scheme: "wss"},
+	})
+	if !result.IsError {
+		t.Fatal("expected IsError=true for scheme=wss (USK-864)")
+	}
+	text := result.Content[0].(*gomcp.TextContent)
+	if !strings.Contains(text.Text, `invalid scheme "wss"`) {
+		t.Errorf("error should mention invalid scheme \"wss\", got: %s", text.Text)
+	}
+	if !strings.Contains(text.Text, `protocol="ws"`) {
+		t.Errorf("error should point at protocol=\"ws\", got: %s", text.Text)
+	}
+	if !strings.Contains(text.Text, `scheme="https"`) {
+		t.Errorf("error should mention scheme=\"https\" for WS-over-TLS, got: %s", text.Text)
+	}
+}
+
 // TestQuery_Flows_InvalidOrigin verifies that an unknown origin value is
 // rejected with a validation error mentioning the parameter name. The schema
 // JSON also enforces the same enum, but the Go-side validateEnum produces the

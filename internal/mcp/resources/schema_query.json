@@ -29,8 +29,8 @@
         },
         "scheme": {
           "type": "string",
-          "description": "URL scheme / transport filter for flows (e.g. https, http, wss, ws, tcp).",
-          "enum": ["https", "http", "wss", "ws", "tcp"]
+          "description": "Stream.Scheme filter — wire-observed handshake transport (http, https, tcp). For WebSocket flows use protocol=\"ws\"; combine with scheme=\"https\" for WS-over-TLS only. Values ws/wss are rejected as of USK-864 (per USK-848, Stream.Scheme records the handshake transport, not the application protocol).",
+          "enum": ["https", "http", "tcp"]
         },
         "http_version": {
           "type": "string",

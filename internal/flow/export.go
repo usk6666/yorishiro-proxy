@@ -18,11 +18,13 @@ type ExportFilter struct {
 	// "ws", "grpc", "tls-handshake"). Matched as an exact equality
 	// against the streams.protocol column.
 	Protocol string
-	// Scheme filters by Stream.Scheme — the URL scheme / transport
-	// indicator ("https", "http", "wss", "ws", "tcp"). Matched as an
-	// exact equality against the streams.scheme column. Mirrors the
-	// query MCP tool's filter.scheme axis (USK-792) so analysts can
-	// pick HTTPS-only flows for archival.
+	// Scheme filters by Stream.Scheme — the wire-observed handshake
+	// transport (canonical live values: "https", "http", "tcp"). Matched
+	// as an exact equality against the streams.scheme column. Per USK-848
+	// the live path never records "ws"/"wss"; the MCP query/manage
+	// boundary hard-rejects those values as filter inputs (USK-864).
+	// Mirrors the query MCP tool's filter.scheme axis (USK-792) so
+	// analysts can pick HTTPS-only flows for archival.
 	Scheme string
 	// HTTPVersion filters streams whose flows include at least one row
 	// with this http_version value (USK-788/USK-792). Canonical
@@ -62,11 +64,14 @@ type ExportStream struct {
 	ID       string `json:"id"`
 	ConnID   string `json:"conn_id"`
 	Protocol string `json:"protocol"`
-	// Scheme is the URL scheme / transport indicator ("https", "http",
-	// "wss", "ws", "tcp"). Omitted from the JSONL line when empty so
-	// pre-USK-810 exports continue to round-trip unchanged. Empty on
-	// import is preserved as empty (no URL-scheme backfill) — wire-
-	// recorded value can legitimately be empty (e.g., raw TCP).
+	// Scheme is the wire-observed handshake transport indicator
+	// (canonical live values: "https", "http", "tcp"). Per USK-848 the
+	// live path never records "ws"/"wss"; legacy or third-party imports
+	// may still carry other values and are preserved verbatim. Omitted
+	// from the JSONL line when empty so pre-USK-810 exports continue to
+	// round-trip unchanged. Empty on import is preserved as empty (no
+	// URL-scheme backfill) — wire-recorded value can legitimately be
+	// empty (e.g., raw TCP).
 	Scheme     string            `json:"scheme,omitempty"`
 	State      string            `json:"state"`
 	Timestamp  string            `json:"timestamp"`

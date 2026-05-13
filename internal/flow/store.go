@@ -199,8 +199,14 @@ type StreamListOptions struct {
 	// parallel-coexistence window. The Store performs no normalization on
 	// the values; callers pass the literal strings to match.
 	Protocols []string
-	// Scheme filters streams by URL scheme / transport indicator
-	// (e.g. "https", "http", "wss", "ws", "tcp").
+	// Scheme filters streams by Stream.Scheme — the wire-observed
+	// handshake transport (canonical live values: "https", "http",
+	// "tcp"). Per USK-848, "ws"/"wss" are NOT recorded on the live path;
+	// the MCP query/manage boundary hard-rejects them as filter values
+	// (USK-864). The Store layer itself performs no validation — it
+	// matches whatever literal string the caller passes against the
+	// recorded value, so synthetic / imported rows with "ws"/"wss" still
+	// round-trip.
 	Scheme string
 	// HTTPVersion filters streams whose flows have at least one row
 	// matching this http_version value (USK-792). Canonical lowercased

@@ -10,6 +10,13 @@ import (
 // protocol/scheme plus a single send flow whose http_version mirrors
 // the stream-level version, exercising both the streams.scheme column
 // and the flows.http_version column the USK-792 filter touches.
+//
+// NOTE: Callers in this file pass Scheme="ws" / Scheme="wss" as synthetic
+// store-layer values to exercise SQL filter mechanics. Live recording
+// never produces "ws"/"wss" in Stream.Scheme — per USK-848, Stream.Scheme
+// records the wire-observed handshake transport (http/https/tcp). The
+// MCP query/manage filter surfaces hard-reject these values at the enum
+// boundary (USK-864).
 func saveTestStreamWithSchemeAndVersion(t *testing.T, store *SQLiteStore, id, protocol, scheme, httpVersion string) {
 	t.Helper()
 	ctx := context.Background()

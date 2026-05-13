@@ -19,7 +19,7 @@ Delete flows by ID, by age, by filter (protocol / scheme / http_version), or all
 - **flow_id** (string, optional): Delete a specific flow by ID.
 - **older_than_days** (integer, optional): Delete flows older than this many days. Must be >= 1. Requires `confirm: true`.
 - **protocol** (string, optional): Filter axis — matches `Stream.Protocol` exactly. Canonical values: `"http"`, `"ws"`, `"grpc"`, `"grpc-web"`, `"sse"`, `"raw"`, `"tls-handshake"`. Mirrors `query.filter.protocol`. Requires `confirm: true`.
-- **scheme** (string, optional): Filter axis — matches `Stream.Scheme` exactly. Canonical values: `"http"`, `"https"`, `"ws"`, `"wss"`, `"tcp"`. Use `"https"` to delete only TLS flows (cleartext untouched). Mirrors `query.filter.scheme`. Requires `confirm: true`.
+- **scheme** (string, optional): Filter axis — matches `Stream.Scheme` (wire-observed handshake transport) exactly. Canonical values: `"http"`, `"https"`, `"tcp"`. Use `"https"` to delete only TLS flows (cleartext untouched). To target WebSocket flows, combine `protocol="ws"` with `scheme="https"` for WS-over-TLS only. Values `"ws"` / `"wss"` are rejected as of USK-864 (per USK-848, Stream.Scheme records the handshake transport, not the application protocol). Mirrors `query.filter.scheme`. Requires `confirm: true`.
 - **http_version** (string, optional): Filter axis — matches an associated flow's `http_version`. Canonical values: `"http/1.0"`, `"http/1.1"`, `"h2"`, `"h2c"`. The explicit empty string `""` matches pre-USK-788 rows that lack a recorded version. Mirrors `query.filter.http_version`. Requires `confirm: true`.
 - **confirm** (boolean): Required for any bulk deletion (older_than_days, filter axes, or delete-all). Set to `true` to proceed.
 
@@ -45,7 +45,7 @@ Export flows to JSONL or HAR (HTTP Archive 1.2) format with optional filtering.
 - **format** (string, optional): Export format. `"jsonl"` (default) for JSONL or `"har"` for HAR 1.2.
 - **filter** (object, optional): Flow filter criteria. Filter axes mirror the `query` tool so analysts can export the same set of flows they were inspecting.
   - **protocol** (string, optional): Filter by `Stream.Protocol`. Canonical values: `"http"`, `"ws"`, `"grpc"`, `"grpc-web"`, `"sse"`, `"raw"`, `"tls-handshake"`.
-  - **scheme** (string, optional): Filter by `Stream.Scheme`. Canonical values: `"http"`, `"https"`, `"ws"`, `"wss"`, `"tcp"`. Use `"https"` to export only TLS flows.
+  - **scheme** (string, optional): Filter by `Stream.Scheme` (wire-observed handshake transport). Canonical values: `"http"`, `"https"`, `"tcp"`. Use `"https"` to export only TLS flows. To target WebSocket flows, combine `protocol="ws"` with `scheme="https"` for WS-over-TLS only. Values `"ws"` / `"wss"` are rejected as of USK-864.
   - **http_version** (string, optional): Filter by associated flow `http_version`. Canonical values: `"http/1.0"`, `"http/1.1"`, `"h2"`, `"h2c"`. The explicit empty string `""` matches pre-USK-788 rows.
   - **url_pattern** (string, optional): Filter by URL substring.
   - **time_after** (string, optional): Include flows after this time (RFC3339 format).
