@@ -113,10 +113,15 @@ func (s *Server) filterOutputMessages(entries []queryMessageEntry) {
 		return
 	}
 	for i := range entries {
-		// Mask body: decode from text/base64, filter, re-encode.
-		bodyData := decodeEntryBody(entries[i].Body, entries[i].BodyEncoding)
-		maskedBody := s.filterOutputBody(bodyData)
-		entries[i].Body, entries[i].BodyEncoding = encodeBody(maskedBody)
+		// Skip body re-encoding when the body was suppressed by the
+		// include_bodies=false query-time param — otherwise the re-encode
+		// would stamp "text" onto an intentionally empty BodyEncoding.
+		if entries[i].Body != "" || entries[i].BodyEncoding != "" {
+			// Mask body: decode from text/base64, filter, re-encode.
+			bodyData := decodeEntryBody(entries[i].Body, entries[i].BodyEncoding)
+			maskedBody := s.filterOutputBody(bodyData)
+			entries[i].Body, entries[i].BodyEncoding = encodeBody(maskedBody)
+		}
 
 		// Mask headers.
 		if len(entries[i].Headers) > 0 {
@@ -133,9 +138,12 @@ func (s *Server) filterOutputVariantRequest(v *queryVariantRequest) {
 	if v == nil {
 		return
 	}
-	bodyData := decodeEntryBody(v.Body, v.BodyEncoding)
-	maskedBody := s.filterOutputBody(bodyData)
-	v.Body, v.BodyEncoding = encodeBody(maskedBody)
+	// Skip body re-encoding when bodies were suppressed by include_bodies=false.
+	if v.Body != "" || v.BodyEncoding != "" {
+		bodyData := decodeEntryBody(v.Body, v.BodyEncoding)
+		maskedBody := s.filterOutputBody(bodyData)
+		v.Body, v.BodyEncoding = encodeBody(maskedBody)
+	}
 	if len(v.Headers) > 0 {
 		v.Headers = map[string][]string(
 			s.filterOutputHeaders(http.Header(v.Headers)),
@@ -149,9 +157,11 @@ func (s *Server) filterOutputVariantResponse(v *queryVariantResponse) {
 	if v == nil {
 		return
 	}
-	bodyData := decodeEntryBody(v.Body, v.BodyEncoding)
-	maskedBody := s.filterOutputBody(bodyData)
-	v.Body, v.BodyEncoding = encodeBody(maskedBody)
+	if v.Body != "" || v.BodyEncoding != "" {
+		bodyData := decodeEntryBody(v.Body, v.BodyEncoding)
+		maskedBody := s.filterOutputBody(bodyData)
+		v.Body, v.BodyEncoding = encodeBody(maskedBody)
+	}
 	if len(v.Headers) > 0 {
 		v.Headers = map[string][]string(
 			s.filterOutputHeaders(http.Header(v.Headers)),

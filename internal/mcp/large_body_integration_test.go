@@ -320,6 +320,36 @@ func callQueryFlow(t *testing.T, cs *gomcp.ClientSession, id string) queryFlowRe
 	return out
 }
 
+// callQueryMessagesRaw invokes query resource=messages with extra options and
+// returns the raw JSON text length plus the parsed result. The length lets the
+// regression test assert a hard byte budget under the MCP token cap.
+func callQueryMessagesRaw(t *testing.T, cs *gomcp.ClientSession, id string, bodyMaxBytes int) (string, queryMessagesResult) {
+	t.Helper()
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "query",
+		Arguments: queryInput{
+			Resource:     "messages",
+			ID:           id,
+			BodyMaxBytes: bodyMaxBytes,
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool(query): %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("CallTool(query) returned error: %v", result.Content)
+	}
+	text, ok := result.Content[0].(*gomcp.TextContent)
+	if !ok {
+		t.Fatalf("expected TextContent, got %T", result.Content[0])
+	}
+	var out queryMessagesResult
+	if err := json.Unmarshal([]byte(text.Text), &out); err != nil {
+		t.Fatalf("unmarshal queryMessagesResult: %v", err)
+	}
+	return text.Text, out
+}
+
 // ---------------------------------------------------------------------------
 // Test
 // ---------------------------------------------------------------------------
@@ -443,5 +473,87 @@ func TestLargeBody_MCPQueryReturnsFullBody(t *testing.T) {
 				t.Errorf("Scheme = %q, want https", fq.Scheme)
 			}
 		})
+	}
+}
+
+// USK-869 regression: a ~1 MiB recorded body fetched with body_max_bytes=4096
+// produces a `messages` JSON response well under the MCP per-tool token cap
+// (observed at ~2.8 MB at the surface). The default unbounded call would
+// stringify the full body to base64, blowing past the cap.
+//
+// Asserts the marshalled response text is < 64 KiB total — about 16x the
+// requested cap, giving room for the metadata envelope without flake.
+func TestLargeBody_QueryMessagesUnderTokenCap(t *testing.T) {
+	const wireBodySize = 1 << 20 // 1 MiB
+	const queryCap = 4096
+	const responseBudget = 64 * 1024
+
+	makeBody := func(size int) []byte {
+		b := make([]byte, size)
+		for i := range b {
+			b[i] = byte(i % 251)
+		}
+		return b
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
+	defer cancel()
+
+	respBody := makeBody(wireBodySize)
+
+	dbPath := filepath.Join(t.TempDir(), "msg-cap.db")
+	store, err := flow.NewSQLiteStore(ctx, dbPath, testutil.DiscardLogger())
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+
+	upstreamLn, target := startMCPLargeUpstream(t, respBody)
+	defer upstreamLn.Close()
+
+	proxyAddr, sessionDone := startMCPLargeProxy(t, ctx, store, 0)
+	got := drainResponseThroughProxy(t, proxyAddr, target)
+	if len(got) != wireBodySize {
+		t.Fatalf("client body length = %d, want %d", len(got), wireBodySize)
+	}
+
+	select {
+	case <-sessionDone:
+	case <-time.After(60 * time.Second):
+		t.Fatal("timeout waiting for session to complete")
+	}
+
+	streams, err := store.ListStreams(ctx, flow.StreamListOptions{})
+	if err != nil {
+		t.Fatalf("ListStreams: %v", err)
+	}
+	if len(streams) != 1 {
+		t.Fatalf("got %d streams, want 1", len(streams))
+	}
+	streamID := streams[0].ID
+
+	ca := &cert.CA{}
+	if err := ca.Generate(); err != nil {
+		t.Fatal(err)
+	}
+	cs := buildMCPClient(t, ctx, ca, store)
+
+	rawJSON, msgs := callQueryMessagesRaw(t, cs, streamID, queryCap)
+	if len(rawJSON) >= responseBudget {
+		t.Fatalf("messages JSON response = %d bytes, want < %d (token-cap regression)", len(rawJSON), responseBudget)
+	}
+	// One of the messages should have surfaced the truncation flag.
+	var sawTruncated bool
+	for _, m := range msgs.Messages {
+		if m.BodyTruncatedByQuery {
+			sawTruncated = true
+			if m.BodyOriginalSize == 0 {
+				t.Errorf("message %s truncated but BodyOriginalSize == 0", m.ID)
+			}
+			break
+		}
+	}
+	if !sawTruncated {
+		t.Errorf("expected BodyTruncatedByQuery on at least one message; got none")
 	}
 }

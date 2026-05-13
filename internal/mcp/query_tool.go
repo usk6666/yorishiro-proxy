@@ -26,6 +26,20 @@ import (
 // used when no protocol handler is registered.
 const defaultRequestTimeoutMs = 60000
 
+// oversizeAdvisoryThreshold is the per-message body byte length at which
+// the flow / messages handlers attach an Advisory hint suggesting that the
+// caller pass include_bodies=false or body_max_bytes=N to stay under the
+// MCP per-tool token cap. 256 KiB is conservative — observed MCP rejection
+// is around 2.8 MB and a single message body that large would risk pushing
+// any multi-message response over the cap.
+const oversizeAdvisoryThreshold = 256 * 1024
+
+// oversizeAdvisoryMessage is the one-line hint string emitted in result.Advisory
+// when an unbounded response carries at least one body above
+// oversizeAdvisoryThreshold. The caller can suppress the advisory by passing
+// either size-bounding param explicitly.
+const oversizeAdvisoryMessage = "response contains a body larger than 256 KiB; pass include_bodies=false or body_max_bytes=N to stay under the MCP token limit"
+
 // queryInput is the typed input for the query tool.
 type queryInput struct {
 	// Resource specifies what to query: flows, flow, messages, status, config, ca_cert, intercept_queue, macros, macro, fuzz_jobs, fuzz_results.
@@ -61,6 +75,24 @@ type queryInput struct {
 	// The original wire-form body is always returned in `*_body` regardless
 	// of this flag (CLAUDE.md MITM principle #1).
 	DecodeBodies *bool `json:"decode_bodies,omitempty" jsonschema:"decode HTTP Content-Encoding bodies (gzip/deflate/br/zstd) into *_body_decoded fields (default true)"`
+
+	// IncludeBodies suppresses body fields on the flow / messages responses
+	// when set to false. Defaults to true. Mirrors manage.export_flows.include_bodies.
+	// When false, all *_body / *_body_encoding / *_body_decoded* fields and the
+	// raw_request / raw_response base64 dumps are cleared on the response; the
+	// per-message body_truncated_by_query flag (and the side companions on
+	// queryFlowResult) is set so callers can tell metadata-only responses apart
+	// from genuinely empty bodies. Headers, metadata, status, method, URL, and
+	// the record-time body_truncated flag are preserved.
+	IncludeBodies *bool `json:"include_bodies,omitempty" jsonschema:"include message bodies in flow/messages responses (default true). When false, body fields are suppressed; metadata, headers, and body_truncated remain. Mirrors manage.export_flows.include_bodies."`
+
+	// BodyMaxBytes caps each message body (and decoded body, independently)
+	// to at most this many bytes. 0 disables the cap (default). Truncation is
+	// applied to the body byte slice before base64 encoding so the response
+	// never base64-mid-quadruple-splits. When applied, body_truncated_by_query
+	// is set on the entry and body_original_size / body_decoded_original_size
+	// report the pre-truncation byte length on the side that was truncated.
+	BodyMaxBytes int `json:"body_max_bytes,omitempty" jsonschema:"truncate per-message body and body_decoded to at most this many bytes (0 = no cap, default). When applied, body_truncated_by_query is set and body_original_size / body_decoded_original_size report the pre-truncation lengths."`
 }
 
 // queryFilter contains filter options for the flows and fuzz resources.
@@ -229,6 +261,8 @@ func (s *Server) registerQuery() {
 			"Protocol filter accepts canonical Message-type families (http, ws, grpc, grpc-web, sse, raw, tls-handshake) " +
 			"each expanding across all wire spellings; use scheme=https to find all TLS flows regardless of HTTP version. " +
 			"Modified flows surface both original and modified variants (variant=original|modified). " +
+			"For large bodies that would exceed the MCP token cap on flow / messages, pass " +
+			"include_bodies=false (metadata only) or body_max_bytes=N (per-side byte cap). " +
 			"See yorishiro://help/query for the full filter / field / sort reference.",
 	}, s.handleQuery)
 }
@@ -742,6 +776,29 @@ type queryFlowResult struct {
 	// when a variant exists (intercept modified the response).
 	// Only populated when the flow contains variant receive messages.
 	OriginalResponse *queryVariantResponse `json:"original_response,omitempty"`
+
+	// RequestBodyTruncatedByQuery / ResponseBodyTruncatedByQuery are set when
+	// the response-time include_bodies / body_max_bytes params suppressed or
+	// capped the bytes returned in request_body / response_body (or their
+	// *_body_decoded siblings). This is distinct from the record-time
+	// request_body_truncated / response_body_truncated flags above.
+	RequestBodyTruncatedByQuery  bool `json:"request_body_truncated_by_query,omitempty"`
+	ResponseBodyTruncatedByQuery bool `json:"response_body_truncated_by_query,omitempty"`
+	// RequestBodyOriginalSize / ResponseBodyOriginalSize record the pre-truncation
+	// byte length of the stored wire-form Body when the query-time cap fired.
+	// Only emitted when the corresponding *_truncated_by_query is true.
+	RequestBodyOriginalSize  int `json:"request_body_original_size,omitempty"`
+	ResponseBodyOriginalSize int `json:"response_body_original_size,omitempty"`
+	// RequestBodyDecodedOriginalSize / ResponseBodyDecodedOriginalSize record
+	// the pre-truncation byte length of the decoded (post-Content-Encoding)
+	// body. body_max_bytes is applied to body and body_decoded independently;
+	// gzip / br can expand the decoded form well beyond the wire size.
+	RequestBodyDecodedOriginalSize  int `json:"request_body_decoded_original_size,omitempty"`
+	ResponseBodyDecodedOriginalSize int `json:"response_body_decoded_original_size,omitempty"`
+	// Advisory carries a one-line hint when the caller did not pass either
+	// include_bodies or body_max_bytes and the unbounded response contains a
+	// body above oversizeAdvisoryThreshold. Empty otherwise.
+	Advisory string `json:"advisory,omitempty"`
 }
 
 // queryDecodeAnomaly is a structured anomaly entry surfaced when
@@ -878,44 +935,56 @@ func findContentEncoding(headers map[string][]string) string {
 	return ""
 }
 
-// computeDecodedBody attempts to decode rawBody using the Content-Encoding
+// computeDecodedBodyWithLimit attempts to decode rawBody using the Content-Encoding
 // header value, then applies SafetyFilter output masking on the plaintext —
 // closing the bug where the masking step previously ran on compressed bytes
-// that no PII regex could ever match. Returns the zero value when decode is
+// that no PII regex could ever match. Returns the zero view when decode is
 // disabled, the body has no Content-Encoding (or `identity`), rawBody is
 // empty, or the decoded form would simply duplicate rawBody.
-func (s *Server) computeDecodedBody(rawBody []byte, headers map[string][]string, decodeEnabled, truncated bool) decodedBodyView {
+//
+// When max > 0 and the decoded plaintext exceeds max bytes, the byte slice is
+// truncated to max BEFORE base64 encoding so we never split mid-quadruple;
+// originalSize reports the pre-truncation byte length. originalSize is zero
+// when no truncation fired (caller treats zero as "not capped"). Decode
+// anomalies behave identically to the unsized variant.
+func (s *Server) computeDecodedBodyWithLimit(rawBody []byte, headers map[string][]string, decodeEnabled, truncated bool, max int) (view decodedBodyView, originalSize int) {
 	if !decodeEnabled || len(rawBody) == 0 {
-		return decodedBodyView{}
+		return decodedBodyView{}, 0
 	}
 	contentEncoding := findContentEncoding(headers)
 	decoded, applied, anomaly := bodydecode.Decode(rawBody, contentEncoding, bodydecode.DefaultMaxDecodedSize)
 	if anomaly == nil && applied == "" {
 		// identity / no CE: decoded form equals rawBody, so do not duplicate.
-		return decodedBodyView{}
+		return decodedBodyView{}, 0
 	}
 	if anomaly != nil {
 		// Mid-stream truncation often manifests as a malformed gzip/zstd
 		// tail. Reclassify so callers can distinguish a corrupted upstream
 		// body from a truncated-at-storage condition.
-		view := decodedBodyView{}
+		out := decodedBodyView{}
 		if anomaly.Type == bodydecode.AnomalyMalformed && truncated {
-			view.Anomaly = &queryDecodeAnomaly{
+			out.Anomaly = &queryDecodeAnomaly{
 				Type:   "truncated_decode",
 				Detail: "decode failed because body was truncated at storage time",
 			}
 		} else {
-			view.Anomaly = &queryDecodeAnomaly{Type: anomaly.Type, Detail: anomaly.Detail}
+			out.Anomaly = &queryDecodeAnomaly{Type: anomaly.Type, Detail: anomaly.Detail}
 		}
-		return view
+		return out, 0
 	}
 	masked := s.filterOutputBody(decoded)
-	bodyStr, bodyEnc := encodeBody(masked)
-	return decodedBodyView{
+	preSize := len(masked)
+	capped, fired := limitBodyBytes(masked, max)
+	bodyStr, bodyEnc := encodeBody(capped)
+	out := decodedBodyView{
 		Body:         bodyStr,
 		BodyEncoding: bodyEnc,
 		Applied:      applied,
 	}
+	if fired {
+		return out, preSize
+	}
+	return out, 0
 }
 
 // resolveDecodeBodies returns the effective value of the decode_bodies query
@@ -927,25 +996,79 @@ func resolveDecodeBodies(input queryInput) bool {
 	return *input.DecodeBodies
 }
 
+// resolveIncludeBodies returns the effective value of the include_bodies query
+// input flag, applying its default of true when omitted. Mirrors
+// manage.export_flows.include_bodies semantics.
+func resolveIncludeBodies(input queryInput) bool {
+	if input.IncludeBodies == nil {
+		return true
+	}
+	return *input.IncludeBodies
+}
+
+// bodyLimitOptions carries the resolved include_bodies / body_max_bytes
+// parameters threaded through the convert / handle paths.
+type bodyLimitOptions struct {
+	// includeBodies, when false, suppresses all body output fields and leaves
+	// only metadata + headers + record-time truncation flags. Set the
+	// per-entry body_truncated_by_query flag in that case.
+	includeBodies bool
+	// bodyMaxBytes, when > 0, caps the per-side body byte length. Applied to
+	// the byte slice before base64 encoding (Q3) and to the decoded byte
+	// slice independently (Q6). 0 means no cap.
+	bodyMaxBytes int
+	// explicitlyBounded reports whether the caller passed either size param
+	// explicitly. Used to gate the Advisory hint.
+	explicitlyBounded bool
+}
+
+// resolveBodyLimitOptions resolves include_bodies / body_max_bytes from the
+// raw queryInput. explicitlyBounded tracks whether the caller explicitly
+// passed either param so the Advisory hint can be suppressed.
+func resolveBodyLimitOptions(input queryInput) bodyLimitOptions {
+	return bodyLimitOptions{
+		includeBodies:     resolveIncludeBodies(input),
+		bodyMaxBytes:      input.BodyMaxBytes,
+		explicitlyBounded: input.IncludeBodies != nil || input.BodyMaxBytes > 0,
+	}
+}
+
+// limitBodyBytes returns the (possibly truncated) slice and a flag indicating
+// whether the cap fired. When max <= 0 it is a no-op. The caller owns the
+// pre-truncation length (len(b)) and is responsible for recording it on the
+// response entry.
+func limitBodyBytes(b []byte, max int) (out []byte, truncated bool) {
+	if max <= 0 || len(b) <= max {
+		return b, false
+	}
+	return b[:max], true
+}
+
 // buildOriginalRequest builds a queryVariantRequest from the original send message.
-// Returns nil if originalMsg is nil.
-func (s *Server) buildOriginalRequest(originalMsg *flow.Flow, decodeEnabled bool) *queryVariantRequest {
+// Returns nil if originalMsg is nil. limit applies the same include_bodies /
+// body_max_bytes semantics as the main flow body path.
+func (s *Server) buildOriginalRequest(originalMsg *flow.Flow, decodeEnabled bool, limit bodyLimitOptions) *queryVariantRequest {
 	if originalMsg == nil {
 		return nil
 	}
-	origBodyStr, origBodyEnc := encodeBody(originalMsg.Body)
 	var origURLStr string
 	if originalMsg.URL != nil {
 		origURLStr = originalMsg.URL.String()
 	}
 	v := &queryVariantRequest{
-		Method:       originalMsg.Method,
-		URL:          origURLStr,
-		Headers:      originalMsg.Headers,
-		Body:         origBodyStr,
-		BodyEncoding: origBodyEnc,
+		Method:  originalMsg.Method,
+		URL:     origURLStr,
+		Headers: originalMsg.Headers,
 	}
-	dec := s.computeDecodedBody(originalMsg.Body, originalMsg.Headers, decodeEnabled, originalMsg.BodyTruncated)
+	if !limit.includeBodies {
+		// Bodies suppressed; leave Body / BodyEncoding / Body*Decoded zero.
+		return v
+	}
+	capped, _ := limitBodyBytes(originalMsg.Body, limit.bodyMaxBytes)
+	origBodyStr, origBodyEnc := encodeBody(capped)
+	v.Body = origBodyStr
+	v.BodyEncoding = origBodyEnc
+	dec, _ := s.computeDecodedBodyWithLimit(originalMsg.Body, originalMsg.Headers, decodeEnabled, originalMsg.BodyTruncated, limit.bodyMaxBytes)
 	v.BodyDecoded = dec.Body
 	v.BodyDecodedEncoding = dec.BodyEncoding
 	v.BodyEncodingApplied = dec.Applied
@@ -954,20 +1077,26 @@ func (s *Server) buildOriginalRequest(originalMsg *flow.Flow, decodeEnabled bool
 }
 
 // buildOriginalResponse builds a queryVariantResponse from the original receive message.
-// Returns nil if originalMsg is nil.
-func (s *Server) buildOriginalResponse(originalMsg *flow.Flow, decodeEnabled bool) *queryVariantResponse {
+// Returns nil if originalMsg is nil. limit applies the same include_bodies /
+// body_max_bytes semantics as the main flow body path.
+func (s *Server) buildOriginalResponse(originalMsg *flow.Flow, decodeEnabled bool, limit bodyLimitOptions) *queryVariantResponse {
 	if originalMsg == nil {
 		return nil
 	}
-	origBodyStr, origBodyEnc := encodeBody(originalMsg.Body)
 	v := &queryVariantResponse{
 		StatusCode:    originalMsg.StatusCode,
 		Headers:       originalMsg.Headers,
-		Body:          origBodyStr,
-		BodyEncoding:  origBodyEnc,
 		BodyTruncated: originalMsg.BodyTruncated,
 	}
-	dec := s.computeDecodedBody(originalMsg.Body, originalMsg.Headers, decodeEnabled, originalMsg.BodyTruncated)
+	if !limit.includeBodies {
+		// Bodies suppressed; leave Body / BodyEncoding / Body*Decoded zero.
+		return v
+	}
+	capped, _ := limitBodyBytes(originalMsg.Body, limit.bodyMaxBytes)
+	origBodyStr, origBodyEnc := encodeBody(capped)
+	v.Body = origBodyStr
+	v.BodyEncoding = origBodyEnc
+	dec, _ := s.computeDecodedBodyWithLimit(originalMsg.Body, originalMsg.Headers, decodeEnabled, originalMsg.BodyTruncated, limit.bodyMaxBytes)
 	v.BodyDecoded = dec.Body
 	v.BodyDecodedEncoding = dec.BodyEncoding
 	v.BodyEncodingApplied = dec.Applied
@@ -976,12 +1105,12 @@ func (s *Server) buildOriginalResponse(originalMsg *flow.Flow, decodeEnabled boo
 }
 
 // buildMessagePreview creates a preview of messages for streaming flows, limited to streamPreviewLimit.
-func (s *Server) buildMessagePreview(msgs []*flow.Flow, decodeEnabled bool) []queryMessageEntry {
+func (s *Server) buildMessagePreview(msgs []*flow.Flow, decodeEnabled bool, limit bodyLimitOptions) []queryMessageEntry {
 	previewLimit := streamPreviewLimit
 	if previewLimit > len(msgs) {
 		previewLimit = len(msgs)
 	}
-	return s.convertMessagesToEntries(msgs[:previewLimit], decodeEnabled)
+	return s.convertMessagesToEntries(msgs[:previewLimit], decodeEnabled, limit)
 }
 
 // handleQueryFlow returns detailed information about a single flow.
@@ -989,16 +1118,17 @@ func (s *Server) handleQueryFlow(ctx context.Context, input queryInput) (*gomcp.
 	if s.flowStore.store == nil {
 		return nil, nil, fmt.Errorf("flow store is not initialized")
 	}
-
 	if input.ID == "" {
 		return nil, nil, fmt.Errorf("id is required for flow resource")
+	}
+	if input.BodyMaxBytes < 0 {
+		return nil, nil, fmt.Errorf("body_max_bytes must be >= 0, got %d", input.BodyMaxBytes)
 	}
 
 	fl, err := s.flowStore.store.GetStream(ctx, input.ID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("get flow: %w", err)
 	}
-
 	msgs, err := s.flowStore.store.GetFlows(ctx, fl.ID, flow.FlowListOptions{})
 	if err != nil {
 		return nil, nil, fmt.Errorf("get messages: %w", err)
@@ -1006,110 +1136,63 @@ func (s *Server) handleQueryFlow(ctx context.Context, input queryInput) (*gomcp.
 
 	cat := categorizeMessages(msgs)
 	decodeEnabled := resolveDecodeBodies(input)
+	limit := resolveBodyLimitOptions(input)
 
-	var urlStr, method string
-	var reqHeaders, respHeaders map[string][]string
-	var reqBody, respBody []byte
-	var reqTruncated, respTruncated bool
-	var statusCode int
-	var rawReqStr, rawRespStr string
-	var reqDecoded, respDecoded decodedBodyView
+	reqSide := s.projectFlowSide(cat.sendMsg, decodeEnabled, limit)
+	respSide := s.projectFlowSide(cat.recvMsg, decodeEnabled, limit)
 
-	if cat.sendMsg != nil {
-		method = cat.sendMsg.Method
-		if cat.sendMsg.URL != nil {
-			urlStr = cat.sendMsg.URL.String()
-		}
-		reqHeaders = map[string][]string(s.filterOutputHeaders(http.Header(cat.sendMsg.Headers)))
-		reqBody = s.filterOutputBody(cat.sendMsg.Body)
-		reqTruncated = cat.sendMsg.BodyTruncated
-		if len(cat.sendMsg.RawBytes) > 0 {
-			rawReqStr = base64.StdEncoding.EncodeToString(s.filterOutputBody(cat.sendMsg.RawBytes))
-		}
-		// Decode against the original (pre-mask) body so the codec sees the
-		// real wire bytes — the SafetyFilter on compressed bytes is a no-op
-		// today, but if a future filter mutates them the decoder would fail.
-		reqDecoded = s.computeDecodedBody(cat.sendMsg.Body, cat.sendMsg.Headers, decodeEnabled, cat.sendMsg.BodyTruncated)
-	}
-	if cat.recvMsg != nil {
-		statusCode = cat.recvMsg.StatusCode
-		respHeaders = map[string][]string(s.filterOutputHeaders(http.Header(cat.recvMsg.Headers)))
-		respBody = s.filterOutputBody(cat.recvMsg.Body)
-		respTruncated = cat.recvMsg.BodyTruncated
-		if len(cat.recvMsg.RawBytes) > 0 {
-			rawRespStr = base64.StdEncoding.EncodeToString(s.filterOutputBody(cat.recvMsg.RawBytes))
-		}
-		respDecoded = s.computeDecodedBody(cat.recvMsg.Body, cat.recvMsg.Headers, decodeEnabled, cat.recvMsg.BodyTruncated)
-	}
-
-	// Ensure headers are never nil to avoid null in JSON serialization.
-	if reqHeaders == nil {
-		reqHeaders = map[string][]string{}
-	}
-	if respHeaders == nil {
-		respHeaders = map[string][]string{}
-	}
-
-	reqBodyStr, reqEncoding := encodeBody(reqBody)
-	respBodyStr, respEncoding := encodeBody(respBody)
-
-	var connInfo *connInfoResult
-	if fl.ConnInfo != nil {
-		connInfo = &connInfoResult{
-			ClientAddr:           fl.ConnInfo.ClientAddr,
-			ServerAddr:           fl.ConnInfo.ServerAddr,
-			TLSVersion:           fl.ConnInfo.TLSVersion,
-			TLSCipher:            fl.ConnInfo.TLSCipher,
-			TLSALPN:              fl.ConnInfo.TLSALPN,
-			TLSServerCertSubject: fl.ConnInfo.TLSServerCertSubject,
-		}
-	}
-
+	connInfo := buildConnInfoResult(fl.ConnInfo)
 	summary := buildProtocolSummary(fl.Protocol, msgs)
 
 	result := &queryFlowResult{
-		ID:                          fl.ID,
-		ConnID:                      fl.ConnID,
-		Protocol:                    fl.Protocol,
-		Scheme:                      fl.Scheme,
-		HTTPVersion:                 resolveHTTPVersion(cat),
-		State:                       fl.State,
-		FailureReason:               fl.FailureReason,
-		Method:                      method,
-		URL:                         urlStr,
-		RequestHeaders:              reqHeaders,
-		RequestBody:                 reqBodyStr,
-		RequestBodyEncoding:         reqEncoding,
-		RequestBodyDecoded:          reqDecoded.Body,
-		RequestBodyDecodedEncoding:  reqDecoded.BodyEncoding,
-		RequestBodyEncodingApplied:  reqDecoded.Applied,
-		RequestBodyDecodeAnomaly:    reqDecoded.Anomaly,
-		ResponseStatusCode:          statusCode,
-		ResponseHeaders:             respHeaders,
-		ResponseBody:                respBodyStr,
-		ResponseBodyEncoding:        respEncoding,
-		ResponseBodyDecoded:         respDecoded.Body,
-		ResponseBodyDecodedEncoding: respDecoded.BodyEncoding,
-		ResponseBodyEncodingApplied: respDecoded.Applied,
-		ResponseBodyDecodeAnomaly:   respDecoded.Anomaly,
-		RequestBodyTruncated:        reqTruncated,
-		ResponseBodyTruncated:       respTruncated,
-		Timestamp:                   fl.Timestamp.UTC().Format("2006-01-02T15:04:05Z"),
-		DurationMs:                  fl.Duration.Milliseconds(),
-		SendMs:                      fl.SendMs,
-		WaitMs:                      fl.WaitMs,
-		ReceiveMs:                   fl.ReceiveMs,
-		Tags:                        fl.Tags,
+		ID:                              fl.ID,
+		ConnID:                          fl.ConnID,
+		Protocol:                        fl.Protocol,
+		Scheme:                          fl.Scheme,
+		HTTPVersion:                     resolveHTTPVersion(cat),
+		State:                           fl.State,
+		FailureReason:                   fl.FailureReason,
+		Method:                          reqSide.method,
+		URL:                             reqSide.url,
+		RequestHeaders:                  reqSide.headers,
+		RequestBody:                     reqSide.bodyStr,
+		RequestBodyEncoding:             reqSide.bodyEnc,
+		RequestBodyDecoded:              reqSide.decoded.Body,
+		RequestBodyDecodedEncoding:      reqSide.decoded.BodyEncoding,
+		RequestBodyEncodingApplied:      reqSide.decoded.Applied,
+		RequestBodyDecodeAnomaly:        reqSide.decoded.Anomaly,
+		ResponseStatusCode:              respSide.statusCode,
+		ResponseHeaders:                 respSide.headers,
+		ResponseBody:                    respSide.bodyStr,
+		ResponseBodyEncoding:            respSide.bodyEnc,
+		ResponseBodyDecoded:             respSide.decoded.Body,
+		ResponseBodyDecodedEncoding:     respSide.decoded.BodyEncoding,
+		ResponseBodyEncodingApplied:     respSide.decoded.Applied,
+		ResponseBodyDecodeAnomaly:       respSide.decoded.Anomaly,
+		RequestBodyTruncated:            reqSide.recordTruncated,
+		ResponseBodyTruncated:           respSide.recordTruncated,
+		RequestBodyTruncatedByQuery:     reqSide.queryTruncated,
+		ResponseBodyTruncatedByQuery:    respSide.queryTruncated,
+		RequestBodyOriginalSize:         reqSide.originalSize,
+		ResponseBodyOriginalSize:        respSide.originalSize,
+		RequestBodyDecodedOriginalSize:  reqSide.decodedOriginalSize,
+		ResponseBodyDecodedOriginalSize: respSide.decodedOriginalSize,
+		Timestamp:                       fl.Timestamp.UTC().Format("2006-01-02T15:04:05Z"),
+		DurationMs:                      fl.Duration.Milliseconds(),
+		SendMs:                          fl.SendMs,
+		WaitMs:                          fl.WaitMs,
+		ReceiveMs:                       fl.ReceiveMs,
+		Tags:                            fl.Tags,
 		// USK-849: see handleQueryFlows comment — same rollup policy.
 		Anomalies:        mergeAnomalies(extractAnomalies(fl.Tags), extractAnomaliesFromFlows(msgs)),
 		BlockedBy:        fl.BlockedBy,
-		RawRequest:       rawReqStr,
-		RawResponse:      rawRespStr,
+		RawRequest:       reqSide.rawStr,
+		RawResponse:      respSide.rawStr,
 		ConnInfo:         connInfo,
 		MessageCount:     len(msgs),
 		ProtocolSummary:  summary,
-		OriginalRequest:  s.buildOriginalRequest(cat.originalSendMsg, decodeEnabled),
-		OriginalResponse: s.buildOriginalResponse(cat.originalRecvMsg, decodeEnabled),
+		OriginalRequest:  s.buildOriginalRequest(cat.originalSendMsg, decodeEnabled, limit),
+		OriginalResponse: s.buildOriginalResponse(cat.originalRecvMsg, decodeEnabled, limit),
 	}
 
 	// Apply output filter to original request/response variants.
@@ -1119,11 +1202,124 @@ func (s *Server) handleQueryFlow(ctx context.Context, input queryInput) (*gomcp.
 	// For streaming protocols, include a message preview instead of full request/response.
 	// Streams with more than 2 flows are streaming (unary has exactly 1 send + 1 receive).
 	if len(msgs) > 2 {
-		result.MessagePreview = s.buildMessagePreview(msgs, decodeEnabled)
+		result.MessagePreview = s.buildMessagePreview(msgs, decodeEnabled, limit)
 		s.filterOutputMessages(result.MessagePreview)
 	}
 
+	// Advisory: emit only when the caller did not explicitly bound the
+	// response and at least one stored body is above the heuristic threshold.
+	if !limit.explicitlyBounded && flowHasOversizedBody(cat, msgs) {
+		result.Advisory = oversizeAdvisoryMessage
+	}
+
 	return nil, result, nil
+}
+
+// flowSideProjection captures the per-side (send / receive) projection that
+// handleQueryFlow needs after applying the include_bodies / body_max_bytes
+// limits and the SafetyFilter masking. Extracted so handleQueryFlow stays
+// under the gocyclo threshold.
+type flowSideProjection struct {
+	method, url         string
+	statusCode          int
+	headers             map[string][]string
+	bodyStr, bodyEnc    string
+	rawStr              string
+	decoded             decodedBodyView
+	recordTruncated     bool
+	queryTruncated      bool
+	originalSize        int
+	decodedOriginalSize int
+}
+
+// projectFlowSide builds a flowSideProjection from a single send / receive
+// message (nil-safe). It runs header / body / raw-bytes filtering, applies
+// the response-time body limits, and decodes Content-Encoding into the
+// additive decoded view. The returned headers map is never nil so the JSON
+// projection serializes {} rather than null.
+func (s *Server) projectFlowSide(msg *flow.Flow, decodeEnabled bool, limit bodyLimitOptions) flowSideProjection {
+	out := flowSideProjection{headers: map[string][]string{}}
+	if msg == nil {
+		return out
+	}
+	out.method = msg.Method
+	if msg.URL != nil {
+		out.url = msg.URL.String()
+	}
+	out.statusCode = msg.StatusCode
+	out.headers = map[string][]string(s.filterOutputHeaders(http.Header(msg.Headers)))
+	if out.headers == nil {
+		out.headers = map[string][]string{}
+	}
+	out.recordTruncated = msg.BodyTruncated
+
+	if !limit.includeBodies {
+		out.queryTruncated = true
+		if n := len(msg.Body); n > 0 {
+			out.originalSize = n
+		}
+		out.bodyStr, out.bodyEnc = "", ""
+		return out
+	}
+
+	body := s.filterOutputBody(msg.Body)
+	capped, fired := limitBodyBytes(body, limit.bodyMaxBytes)
+	if fired {
+		out.queryTruncated = true
+		out.originalSize = len(body)
+	}
+	out.bodyStr, out.bodyEnc = encodeBody(capped)
+	if len(msg.RawBytes) > 0 {
+		out.rawStr = base64.StdEncoding.EncodeToString(s.filterOutputBody(msg.RawBytes))
+	}
+	// Decode against the original (pre-mask) body so the codec sees the real
+	// wire bytes — the SafetyFilter on compressed bytes is a no-op today, but
+	// if a future filter mutates them the decoder would fail.
+	dec, decOrig := s.computeDecodedBodyWithLimit(msg.Body, msg.Headers, decodeEnabled, msg.BodyTruncated, limit.bodyMaxBytes)
+	out.decoded = dec
+	if decOrig > 0 {
+		out.queryTruncated = true
+		out.decodedOriginalSize = decOrig
+	}
+	return out
+}
+
+// buildConnInfoResult is the nil-safe ConnectionInfo → connInfoResult mapping
+// shared by handleQueryFlow.
+func buildConnInfoResult(ci *flow.ConnectionInfo) *connInfoResult {
+	if ci == nil {
+		return nil
+	}
+	return &connInfoResult{
+		ClientAddr:           ci.ClientAddr,
+		ServerAddr:           ci.ServerAddr,
+		TLSVersion:           ci.TLSVersion,
+		TLSCipher:            ci.TLSCipher,
+		TLSALPN:              ci.TLSALPN,
+		TLSServerCertSubject: ci.TLSServerCertSubject,
+	}
+}
+
+// flowHasOversizedBody reports whether the categorized send/recv messages
+// (request/response) or any per-message body in the streaming preview window
+// carries a stored body larger than oversizeAdvisoryThreshold. Used to gate
+// the Advisory hint on the flow resource.
+func flowHasOversizedBody(cat categorizedMessages, msgs []*flow.Flow) bool {
+	if cat.sendMsg != nil && len(cat.sendMsg.Body) > oversizeAdvisoryThreshold {
+		return true
+	}
+	if cat.recvMsg != nil && len(cat.recvMsg.Body) > oversizeAdvisoryThreshold {
+		return true
+	}
+	for _, m := range msgs {
+		if m == nil {
+			continue
+		}
+		if len(m.Body) > oversizeAdvisoryThreshold || len(m.RawBytes) > oversizeAdvisoryThreshold {
+			return true
+		}
+	}
+	return false
 }
 
 // --- messages resource ---
@@ -1143,8 +1339,18 @@ type queryMessageEntry struct {
 	BodyDecodedEncoding string              `json:"body_decoded_encoding,omitempty"`
 	BodyEncodingApplied string              `json:"body_encoding_applied,omitempty"`
 	BodyDecodeAnomaly   *queryDecodeAnomaly `json:"body_decode_anomaly,omitempty"`
-	Metadata            map[string]string   `json:"metadata,omitempty"`
-	Timestamp           string              `json:"timestamp"`
+	// BodyTruncated mirrors Flow.BodyTruncated — set at record time when the
+	// pipeline RecordStep cap fired. Distinct from BodyTruncatedByQuery.
+	BodyTruncated bool `json:"body_truncated,omitempty"`
+	// BodyTruncatedByQuery is set when the response-time include_bodies /
+	// body_max_bytes params suppressed or capped Body / BodyDecoded.
+	BodyTruncatedByQuery bool `json:"body_truncated_by_query,omitempty"`
+	// BodyOriginalSize / BodyDecodedOriginalSize record the pre-truncation
+	// byte lengths when the query-time cap fired on each side independently.
+	BodyOriginalSize        int               `json:"body_original_size,omitempty"`
+	BodyDecodedOriginalSize int               `json:"body_decoded_original_size,omitempty"`
+	Metadata                map[string]string `json:"metadata,omitempty"`
+	Timestamp               string            `json:"timestamp"`
 }
 
 // queryMessagesResult is the response for the messages resource.
@@ -1152,6 +1358,10 @@ type queryMessagesResult struct {
 	Messages []queryMessageEntry `json:"messages"`
 	Count    int                 `json:"count"`
 	Total    int                 `json:"total"`
+	// Advisory carries a one-line hint when the caller did not pass either
+	// include_bodies or body_max_bytes and the unbounded response contains a
+	// message body above oversizeAdvisoryThreshold. Empty otherwise.
+	Advisory string `json:"advisory,omitempty"`
 }
 
 // convertMessagesToEntries converts flow messages to queryMessageEntry slice.
@@ -1159,7 +1369,13 @@ type queryMessagesResult struct {
 // When decodeEnabled is true, HTTP Content-Encoding (gzip/br/deflate/zstd) is
 // decoded into the additive *_decoded fields; the wire-form body in `body`
 // is preserved unchanged.
-func (s *Server) convertMessagesToEntries(msgs []*flow.Flow, decodeEnabled bool) []queryMessageEntry {
+//
+// limit gates response-time body suppression / truncation: include_bodies=false
+// drops all body fields and sets body_truncated_by_query=true with the original
+// byte length; body_max_bytes=N caps the byte slice before base64 encoding so
+// the response never splits mid-quadruple. Decoded body is capped independently
+// (gzip / br plaintext can far exceed wire size).
+func (s *Server) convertMessagesToEntries(msgs []*flow.Flow, decodeEnabled bool, limit bodyLimitOptions) []queryMessageEntry {
 	entries := make([]queryMessageEntry, 0, len(msgs))
 	for _, msg := range msgs {
 		bodyData := msg.Body
@@ -1168,7 +1384,6 @@ func (s *Server) convertMessagesToEntries(msgs []*flow.Flow, decodeEnabled bool)
 			bodyData = msg.RawBytes
 			usedRawBytes = true
 		}
-		bodyStr, bodyEnc := encodeBody(bodyData)
 
 		var urlStr string
 		if msg.URL != nil {
@@ -1176,27 +1391,52 @@ func (s *Server) convertMessagesToEntries(msgs []*flow.Flow, decodeEnabled bool)
 		}
 
 		entry := queryMessageEntry{
-			ID:           msg.ID,
-			Sequence:     msg.Sequence,
-			Direction:    msg.Direction,
-			Method:       msg.Method,
-			URL:          urlStr,
-			StatusCode:   msg.StatusCode,
-			Headers:      msg.Headers,
-			Body:         bodyStr,
-			BodyEncoding: bodyEnc,
-			Metadata:     msg.Metadata,
-			Timestamp:    msg.Timestamp.UTC().Format("2006-01-02T15:04:05Z"),
+			ID:         msg.ID,
+			Sequence:   msg.Sequence,
+			Direction:  msg.Direction,
+			Method:     msg.Method,
+			URL:        urlStr,
+			StatusCode: msg.StatusCode,
+			Headers:    msg.Headers,
+			// body_truncated mirrors record-time Flow.BodyTruncated and is
+			// always populated independently of the response-time limit
+			// params so callers can tell the two truncation classes apart.
+			BodyTruncated: msg.BodyTruncated,
+			Metadata:      msg.Metadata,
+			Timestamp:     msg.Timestamp.UTC().Format("2006-01-02T15:04:05Z"),
 		}
-		// Only decode the L7-parsed Body. RawBytes are wire bytes and must not
-		// be reinterpreted (Content-Encoding decoding presumes the parser has
-		// already extracted the L7 payload).
-		if !usedRawBytes {
-			dec := s.computeDecodedBody(bodyData, msg.Headers, decodeEnabled, msg.BodyTruncated)
-			entry.BodyDecoded = dec.Body
-			entry.BodyDecodedEncoding = dec.BodyEncoding
-			entry.BodyEncodingApplied = dec.Applied
-			entry.BodyDecodeAnomaly = dec.Anomaly
+
+		switch {
+		case !limit.includeBodies:
+			// include_bodies=false: drop every body field but record the
+			// original byte length so the caller knows what was suppressed.
+			entry.BodyTruncatedByQuery = true
+			if len(bodyData) > 0 {
+				entry.BodyOriginalSize = len(bodyData)
+			}
+		default:
+			capped, fired := limitBodyBytes(bodyData, limit.bodyMaxBytes)
+			if fired {
+				entry.BodyTruncatedByQuery = true
+				entry.BodyOriginalSize = len(bodyData)
+			}
+			bodyStr, bodyEnc := encodeBody(capped)
+			entry.Body = bodyStr
+			entry.BodyEncoding = bodyEnc
+			// Only decode the L7-parsed Body. RawBytes are wire bytes and must
+			// not be reinterpreted (Content-Encoding decoding presumes the
+			// parser has already extracted the L7 payload).
+			if !usedRawBytes {
+				dec, decOriginal := s.computeDecodedBodyWithLimit(msg.Body, msg.Headers, decodeEnabled, msg.BodyTruncated, limit.bodyMaxBytes)
+				entry.BodyDecoded = dec.Body
+				entry.BodyDecodedEncoding = dec.BodyEncoding
+				entry.BodyEncodingApplied = dec.Applied
+				entry.BodyDecodeAnomaly = dec.Anomaly
+				if decOriginal > 0 {
+					entry.BodyTruncatedByQuery = true
+					entry.BodyDecodedOriginalSize = decOriginal
+				}
+			}
 		}
 		entries = append(entries, entry)
 	}
@@ -1244,6 +1484,9 @@ func (s *Server) handleQueryMessages(ctx context.Context, input queryInput) (*go
 	if input.Offset < 0 {
 		return nil, nil, fmt.Errorf("offset must be >= 0, got %d", input.Offset)
 	}
+	if input.BodyMaxBytes < 0 {
+		return nil, nil, fmt.Errorf("body_max_bytes must be >= 0, got %d", input.BodyMaxBytes)
+	}
 
 	// Verify the flow exists and resolve prefix IDs.
 	fl, err := s.flowStore.store.GetStream(ctx, input.ID)
@@ -1274,7 +1517,8 @@ func (s *Server) handleQueryMessages(ctx context.Context, input queryInput) (*go
 	}
 
 	pageMsgs := paginateMessages(allMsgs, input.Offset, input.Limit)
-	entries := s.convertMessagesToEntries(pageMsgs, resolveDecodeBodies(input))
+	limit := resolveBodyLimitOptions(input)
+	entries := s.convertMessagesToEntries(pageMsgs, resolveDecodeBodies(input), limit)
 
 	// Apply SafetyFilter output masking to message bodies and headers.
 	s.filterOutputMessages(entries)
@@ -1284,7 +1528,30 @@ func (s *Server) handleQueryMessages(ctx context.Context, input queryInput) (*go
 		Count:    len(entries),
 		Total:    filteredTotal,
 	}
+
+	// Advisory: emit only when the caller did not explicitly bound the
+	// response and at least one body in the page exceeded the threshold.
+	if !limit.explicitlyBounded && messagesHaveOversizedBody(pageMsgs) {
+		result.Advisory = oversizeAdvisoryMessage
+	}
+
 	return nil, result, nil
+}
+
+// messagesHaveOversizedBody reports whether any message in the page carries a
+// stored Body (or RawBytes fallback for binary protocols) above
+// oversizeAdvisoryThreshold. Used to gate the Advisory hint on the messages
+// resource.
+func messagesHaveOversizedBody(msgs []*flow.Flow) bool {
+	for _, m := range msgs {
+		if m == nil {
+			continue
+		}
+		if len(m.Body) > oversizeAdvisoryThreshold || len(m.RawBytes) > oversizeAdvisoryThreshold {
+			return true
+		}
+	}
+	return false
 }
 
 // --- status resource ---

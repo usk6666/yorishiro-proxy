@@ -52,6 +52,20 @@ Decode HTTP `Content-Encoding` (`gzip`, `deflate`, `br`, `zstd`) bodies in `flow
 
 The original (compressed) body is always returned in `*_body` regardless of this flag, preserving wire fidelity for downstream tools and `resend_*`. Decode failures (unknown codec, malformed input, decoded size > 16 MiB cap, multi-codec chain) surface a `*_body_decode_anomaly` field; the wire-form body is left intact.
 
+### include_bodies (boolean, optional, default `true`)
+Include message body fields in the `flow` and `messages` responses. Set to `false` to suppress every body field (`*_body`, `*_body_encoding`, `*_body_decoded*`, `raw_request`, `raw_response`) and return metadata only. Headers, status, method, URL, timestamps, and the record-time `*_body_truncated` flag are preserved.
+
+Mirrors `manage.export_flows.include_bodies`. Useful when a single flow's body is large enough to push the MCP tool response over the per-tool token limit; the response then advertises that suppression occurred via `*_body_truncated_by_query=true` and `*_body_original_size` for each side, so the caller knows what was elided.
+
+### body_max_bytes (integer, optional, default `0`)
+Cap each per-side body — and each per-side decoded body, independently — to at most this many bytes. `0` disables the cap. Truncation is applied to the body **byte slice before base64 encoding** so the response never base64-mid-quadruple-splits.
+
+When the cap fires, the response sets `*_body_truncated_by_query=true` and reports the pre-truncation byte length under `*_body_original_size` (wire-form side) and / or `*_body_decoded_original_size` (decoded side). Headers / metadata are unaffected. Distinct from the record-time `*_body_truncated` flag, which reflects the storage-time `MaxBodySize` cap from the pipeline `RecordStep`.
+
+The `messages` resource also exposes the same fields (`body_truncated`, `body_truncated_by_query`, `body_original_size`, `body_decoded_original_size`) per message entry. The `body_truncated` field carries the record-time `Flow.BodyTruncated` value regardless of the query-time params.
+
+When the caller does not pass either `include_bodies` or `body_max_bytes` and the response contains a body above 256 KiB, the result includes a one-line `advisory` field suggesting the params.
+
 ## Resource Details
 
 ### flows
@@ -93,10 +107,12 @@ Get paginated messages within a flow. Supports direction filtering for streaming
 
 Requires: `id` (flow ID). Supports `limit`, `offset`, and `filter.direction`.
 
-Returns: `messages[]` (id, sequence, direction, method, url, status_code, headers, body, body_encoding, metadata, timestamp), `count`, `total`.
+Returns: `messages[]` (id, sequence, direction, method, url, status_code, headers, body, body_encoding, metadata, timestamp, body_truncated, optionally body_truncated_by_query / body_original_size / body_decoded_original_size when `include_bodies` / `body_max_bytes` apply), `count`, `total`, optional `advisory`.
 
 - **body_encoding**: `"text"` for UTF-8 safe bodies, `"base64"` for binary content.
 - **metadata**: Protocol-specific fields (e.g. WebSocket `opcode`, gRPC `service`/`method`/`grpc_status`).
+- **body_truncated**: Record-time truncation flag mirrored from `Flow.BodyTruncated` — set when the storage-time `MaxBodySize` cap fired.
+- **body_truncated_by_query**: Response-time truncation flag set when `include_bodies=false` or `body_max_bytes=N` capped the bytes returned to the caller. Distinct from `body_truncated`.
 
 ### status
 Get current proxy status and health metrics. No additional parameters.
