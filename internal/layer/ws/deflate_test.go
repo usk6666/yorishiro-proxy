@@ -5,6 +5,7 @@ import (
 	"compress/flate"
 	"fmt"
 	"math"
+	"sync"
 	"testing"
 )
 
@@ -700,4 +701,168 @@ func TestDeflateState_Compress_DefaultMaxSize(t *testing.T) {
 	if _, err := enc.compress([]byte("default-cap"), 0); err != nil {
 		t.Fatalf("compress with maxSize=0: %v", err)
 	}
+}
+
+// TestDeflateState_Compress_BFINAL_ZeroForContextTakeover is the USK-867
+// root-cause regression. RFC 7692 §7.2.1 requires the compressed output
+// (after trailer stripping) to end with an empty stored block carrying
+// BFINAL=0 so a peer holding a single persistent inflater (e.g. Node ws
+// + zlib) can continue decoding subsequent frames. Go's flate.Writer
+// emits BFINAL=0 on Flush and BFINAL=1 on Close — calling Close here was
+// the bug that prior PRs missed.
+//
+// We bit-decode the trailing byte of the stripped output and assert the
+// BFINAL bit at position 2 (the LSB of the 3-bit empty-stored-block
+// header packed into the post-payload byte) is 0. Concretely: a Flush-
+// terminated empty stored block writes the 3 bits "0 0 0" starting at
+// bit offset 2 of the trailing byte, so bit-2 of that byte must be 0.
+// With the buggy Close path that bit is 1.
+func TestDeflateState_Compress_BFINAL_ZeroForContextTakeover(t *testing.T) {
+	params := deflateParams{enabled: true, contextTakeover: true, windowBits: 15}
+	enc := newDeflateState(params)
+	defer enc.close()
+
+	out, err := enc.compress([]byte("first"), maxFramePayloadSize)
+	if err != nil {
+		t.Fatalf("compress: %v", err)
+	}
+	if len(out) == 0 {
+		t.Fatal("compress produced empty output for non-empty input")
+	}
+	last := out[len(out)-1]
+	if last&0x04 != 0 {
+		t.Errorf("trailing byte = 0x%02x, BFINAL bit (mask 0x04) is SET — "+
+			"this would terminate a persistent-inflater peer (USK-867). "+
+			"Expected BFINAL=0 from Z_SYNC_FLUSH.", last)
+	}
+}
+
+// TestDeflateState_Compress_ContinuousInflater_USK867 is the wire-level
+// regression for USK-867. It mirrors the production scenario in which
+// the proxy's compress() output is consumed by a peer (Node ws@8.20.1)
+// that holds a single persistent flate.Reader across all frames in the
+// permessage-deflate stream, rather than creating a fresh reader per
+// message as the proxy itself does.
+//
+// Concretely the test:
+//
+//   - Drives enc.compress() three times (context-takeover ON) producing
+//     three RFC-7692-stripped frames.
+//   - Re-attaches the 4-byte 00 00 ff ff sync trailer to each frame and
+//     concatenates them into one byte stream.
+//   - Decodes the stream with a single flate.NewReader (no dict needed
+//     because the dict is implicit in the continuous LZ77 state).
+//   - Asserts the inflater yields "firstsecondthird" in order.
+//
+// This test FAILS on the pre-fix code where compress() calls Close():
+// the persistent inflater hits BFINAL=1 inside the first frame's trailer
+// and reports io.EOF after returning just "first", so the second/third
+// frames are unrecoverable. After switching compress() to Flush() it
+// passes because BFINAL=0 keeps the stream open for the entire sequence.
+//
+// The earlier PR-#864 integration tests did not catch this because both
+// the encoder AND decoder were proxy code, which creates a fresh
+// flate.NewReaderDict per message and is therefore BFINAL-tolerant.
+func TestDeflateState_Compress_ContinuousInflater_USK867(t *testing.T) {
+	params := deflateParams{enabled: true, contextTakeover: true, windowBits: 15}
+	enc := newDeflateState(params)
+	defer enc.close()
+
+	msgs := [][]byte{[]byte("first"), []byte("second"), []byte("third")}
+	var stream bytes.Buffer
+	for i, m := range msgs {
+		out, err := enc.compress(m, maxFramePayloadSize)
+		if err != nil {
+			t.Fatalf("msg %d compress: %v", i, err)
+		}
+		stream.Write(out)
+		stream.Write(flateTrailer) // re-attach per-frame sync trailer
+	}
+
+	reader := flate.NewReader(&stream)
+	defer reader.Close()
+
+	var got bytes.Buffer
+	buf := make([]byte, 16)
+	for {
+		n, err := reader.Read(buf)
+		if n > 0 {
+			got.Write(buf[:n])
+		}
+		if err != nil {
+			// The stream legitimately ends in unexpected EOF: the last
+			// frame's tail is an empty BFINAL=0 stored block, so the
+			// inflater is still expecting another block when input runs
+			// out. EOF and io.ErrUnexpectedEOF are both acceptable.
+			break
+		}
+	}
+
+	want := []byte("firstsecondthird")
+	if !bytes.Equal(got.Bytes(), want) {
+		t.Errorf("continuous-inflater decode = %q, want %q\n"+
+			"this asserts BFINAL=0 across frames; a BFINAL=1 terminator "+
+			"in any frame would cut decoding short here (USK-867 symptom)",
+			got.String(), want)
+	}
+}
+
+// TestDeflateState_ConcurrentCompressDecompress_RaceFree is the Phase C
+// race-detector probe for USK-867's defense-in-depth mutex. It exercises
+// compress + decompress on the SAME *deflateState from multiple
+// goroutines and asserts no race-detector hit fires.
+//
+// Production paths today are externally serialised — clientWS.clientDS
+// is only touched by clientWS.Next; upstreamWS.clientDS is only touched
+// by upstreamWS.Send (via the wsSendSerializer). This test simulates a
+// hypothetical future caller that violates that invariant (e.g., a new
+// pipeline step that calls Channel.Send from a goroutine separate from
+// the session relay). With the internal mu added in deflate.go the
+// race-detector run stays clean; without it, the dict mutations would
+// trigger a WARNING: DATA RACE on go test -race.
+func TestDeflateState_ConcurrentCompressDecompress_RaceFree(t *testing.T) {
+	params := deflateParams{enabled: true, contextTakeover: true, windowBits: 15}
+	ds := newDeflateState(params)
+	defer ds.close()
+
+	// Prime the dictionary with one round-trip so subsequent operations
+	// touch the populated dict path inside both compress and decompress.
+	plain := []byte("priming payload for the LZ77 sliding window")
+	primed, err := ds.compress(plain, maxFramePayloadSize)
+	if err != nil {
+		t.Fatalf("prime compress: %v", err)
+	}
+	if _, err := ds.decompress(primed, maxFramePayloadSize); err != nil {
+		t.Fatalf("prime decompress: %v", err)
+	}
+
+	// This is a race-detector probe. Per-call return values from
+	// compress/decompress are intentionally NOT asserted: interleaved
+	// goroutines will sometimes produce LZ77-desync errors because the
+	// dict each call captures is no longer the dict in effect when its
+	// peer call runs. The signal we care about is (a) no race-detector
+	// hit and (b) no panic propagating out of the goroutines — both are
+	// surfaced by `go test -race` alone (a race aborts; a panic crashes
+	// the test). We therefore discard both errors and the channel.
+	const goroutines = 4
+	const iters = 25
+	var wg sync.WaitGroup
+	for g := 0; g < goroutines; g++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			for i := 0; i < iters; i++ {
+				if id%2 == 0 {
+					_, _ = ds.compress(plain, maxFramePayloadSize)
+					continue
+				}
+				out, cerr := ds.compress(plain, maxFramePayloadSize)
+				if cerr != nil {
+					continue
+				}
+				_, _ = ds.decompress(out, maxFramePayloadSize)
+			}
+		}(g)
+	}
+	wg.Wait()
 }

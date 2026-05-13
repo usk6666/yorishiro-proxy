@@ -332,13 +332,20 @@ func TestWSUpgrade_PermessageDeflate_WithParameters(t *testing.T) {
 // §7.2.2 algorithm: re-append the 4-byte sync trailer, then inflate.
 // Used to verify the post-swap proxy produced canonical deflate frames
 // on the upstream wire.
+//
+// RFC 7692-compliant compress output ends with an empty BFINAL=0 stored
+// block (Z_SYNC_FLUSH). A continuous flate.Reader fed exactly that one
+// frame will return io.ErrUnexpectedEOF after delivering all payload
+// bytes because it is still expecting a subsequent block. Treat
+// io.ErrUnexpectedEOF / io.EOF as terminal-but-successful here, matching
+// the proxy's own readDecompressed logic in deflate.go.
 func mustInflate(t *testing.T, src []byte) []byte {
 	t.Helper()
 	with := append(append([]byte{}, src...), 0x00, 0x00, 0xff, 0xff)
 	fr := flate.NewReader(bytes.NewReader(with))
 	defer fr.Close()
 	out, err := io.ReadAll(fr)
-	if err != nil {
+	if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) && !errors.Is(err, io.EOF) {
 		t.Fatalf("flate.NewReader read: %v", err)
 	}
 	return out

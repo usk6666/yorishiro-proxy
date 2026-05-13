@@ -9,6 +9,7 @@ import (
 	"math"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 // deflateParams holds the negotiated permessage-deflate parameters for one
@@ -49,7 +50,24 @@ const maxCompressedPayloadSize = maxFramePayloadSize
 // with flate.NewReaderDict using the accumulated decompressed output (last 32 KB)
 // as the dictionary. This provides the LZ77 sliding window context that the
 // compressor references in subsequent messages.
+//
+// Concurrency: each public method (compress, decompress, close) acquires
+// the embedded mu for the duration of the call. The mutex is defense-in-
+// depth (USK-867): the session-level wsSendSerializer already serialises
+// Send-direction calls into Channel.Send for the upstream-facing Channel,
+// and Next/Send on a single Channel reference disjoint *deflateState
+// instances (clientDS vs serverDS). Adding the internal lock removes the
+// reliance on those external invariants — a future caller path that
+// bypasses the session serialiser, or a test/diagnostic harness that
+// calls compress + decompress from goroutines, can no longer corrupt the
+// LZ77 dictionary mid-operation.
 type deflateState struct {
+	// mu guards params and dict against concurrent compress/decompress/close
+	// calls. Held for the full duration of each public method to keep the
+	// flate.Reader / flate.Writer construction and the post-decode dict
+	// update inside one critical section.
+	mu sync.Mutex
+
 	params deflateParams
 
 	// dict holds the accumulated decompressed output (last maxDictSize bytes)
@@ -80,7 +98,13 @@ func checkAllocationOverflow(payloadLen, trailerLen int) error {
 // appended before decompression.
 //
 // maxSize limits the decompressed output size to prevent decompression bombs.
+//
+// Concurrency: acquires ds.mu for the full duration of the call so the
+// internal dict update is atomic with respect to any concurrent compress
+// / decompress / close on the same *deflateState (USK-867 defense-in-depth).
 func (ds *deflateState) decompress(payload []byte, maxSize int64) ([]byte, error) {
+	ds.mu.Lock()
+	defer ds.mu.Unlock()
 	if len(payload) == 0 {
 		return payload, nil
 	}
@@ -182,9 +206,19 @@ func (ds *deflateState) readDecompressed(reader io.Reader, maxSize int64) (decod
 }
 
 // compress compresses a permessage-deflate payload for the Send direction.
-// Per RFC 7692 Section 7.2.1, the 4-byte trailer (0x00 0x00 0xFF 0xFF) MUST
-// be stripped from the compressed output before transmission. The trailer is
-// the empty deflate block that flate.Writer emits on Close.
+// Per RFC 7692 Section 7.2.1, the compressed output must end with an empty
+// DEFLATE block whose BTYPE=00 and BFINAL=0 ("00 00 FF FF" after byte
+// alignment), and those 4 trailer octets MUST be stripped before
+// transmission. BFINAL=0 is critical for context-takeover peers (e.g. Node
+// ws / zlib) that hold a single persistent inflater across frames: a
+// BFINAL=1 terminator would mark the stream as finished and prevent any
+// subsequent frame from being decoded (root cause of USK-867 prior to this
+// fix).
+//
+// We achieve this by calling flate.Writer.Flush (Z_SYNC_FLUSH) rather than
+// Close: Flush emits a stored empty block with BFINAL=0, whereas Close
+// emits one with BFINAL=1. The trailing 4 bytes are verified and stripped
+// per the RFC.
 //
 // When ds.params.contextTakeover is true and a non-empty dictionary has been
 // accumulated from prior messages, the writer is initialized with
@@ -194,7 +228,13 @@ func (ds *deflateState) readDecompressed(reader io.Reader, maxSize int64) (decod
 //
 // maxSize bounds the allowed compressed output size. A non-positive maxSize
 // falls back to maxFramePayloadSize (16 MiB).
+//
+// Concurrency: acquires ds.mu for the full duration of the call so the
+// internal dict update is atomic with respect to any concurrent compress
+// / decompress / close on the same *deflateState (USK-867 defense-in-depth).
 func (ds *deflateState) compress(payload []byte, maxSize int64) ([]byte, error) {
+	ds.mu.Lock()
+	defer ds.mu.Unlock()
 	if maxSize <= 0 {
 		maxSize = maxFramePayloadSize
 	}
@@ -214,17 +254,21 @@ func (ds *deflateState) compress(payload []byte, maxSize int64) ([]byte, error) 
 		return nil, fmt.Errorf("deflate compress: new writer: %w", err)
 	}
 	if _, err := w.Write(payload); err != nil {
-		_ = w.Close()
 		return nil, fmt.Errorf("deflate compress: write: %w", err)
 	}
-	if err := w.Close(); err != nil {
-		return nil, fmt.Errorf("deflate compress: close: %w", err)
+	// Flush (Z_SYNC_FLUSH) emits an empty stored block with BFINAL=0 followed
+	// by the 4-byte trailer, leaving the stream open for the peer's
+	// persistent inflater. Do NOT call Close here: that would emit BFINAL=1
+	// and terminate the peer's inflater after the first frame.
+	if err := w.Flush(); err != nil {
+		return nil, fmt.Errorf("deflate compress: flush: %w", err)
 	}
 
 	out := buf.Bytes()
-	// Strip the RFC 7692 §7.2.1 trailer (the empty BFINAL=0 deflate block
-	// that flate.Writer emits at Close). Verify before stripping so we do
-	// not silently corrupt malformed output from a future flate.Writer.
+	// Strip the RFC 7692 §7.2.1 trailer (the 4-byte sync-flush tail of the
+	// empty BFINAL=0 stored block that flate.Writer emits on Flush). Verify
+	// before stripping so we do not silently corrupt malformed output from a
+	// future flate.Writer.
 	if len(out) < len(flateTrailer) || !bytes.Equal(out[len(out)-len(flateTrailer):], flateTrailer) {
 		return nil, fmt.Errorf("deflate compress: missing RFC 7692 trailer")
 	}
@@ -251,7 +295,12 @@ func (ds *deflateState) compress(payload []byte, maxSize int64) ([]byte, error) 
 
 // close releases the decompression resources. Each message creates and closes
 // its own flate reader, so this only needs to clear the accumulated dictionary.
+//
+// Concurrency: acquires ds.mu so the dict clear is atomic with respect to
+// any in-flight compress / decompress (USK-867 defense-in-depth).
 func (ds *deflateState) close() {
+	ds.mu.Lock()
+	defer ds.mu.Unlock()
 	ds.dict = nil
 }
 
