@@ -1132,3 +1132,68 @@ func TestFuzzHTTP_FinalizesUnderCallerCancel(t *testing.T) {
 		t.Errorf("fuzz_jobs.completed_at = nil after caller cancel; finalize did not land")
 	}
 }
+
+// TestFuzzHTTP_PathWithQueryAutoSplit covers the USK-859 parity case for
+// fuzz_http: the base envelope is built via the shared
+// buildResendHTTPEnvelopeWithMeta helper, so the '?' auto-split applies
+// to fuzz_http too. Each per-variant Stream's send Flow.URL must record
+// a clean '?' rather than the corrupted '%3F'. (Position payloads
+// substitute into HTTPMessage AFTER the split, so the position-write path
+// is unaffected.)
+func TestFuzzHTTP_PathWithQueryAutoSplit(t *testing.T) {
+	cs, store, _, _ := setupFuzzHTTPSession(t)
+	echo, _ := startFuzzHTTPEcho(t)
+	authority := strings.TrimPrefix(echo.URL, "http://")
+
+	result := callFuzzHTTP(t, cs, map[string]any{
+		"method":    "GET",
+		"scheme":    "http",
+		"authority": authority,
+		// Repro: base path with literal '?' carrying the query string.
+		"path": "/anything?phase=3&case=02&m=GET",
+		"headers": []map[string]any{
+			{"name": "Host", "value": authority},
+		},
+		"positions": []map[string]any{
+			{
+				// Mutate an unrelated field so the cartesian product runs
+				// without re-touching path/raw_query.
+				"path":     "headers[0].value",
+				"payloads": []string{authority, authority},
+			},
+		},
+		"timeout_ms": 5000,
+	})
+	if result.TotalVariants != 2 || result.CompletedVariants != 2 {
+		t.Fatalf("variant counts = (total=%d, completed=%d), want (2, 2)", result.TotalVariants, result.CompletedVariants)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	for _, v := range result.Variants {
+		if v.StreamID == "" {
+			t.Errorf("variant %d has empty stream_id", v.Index)
+			continue
+		}
+		flows, err := store.GetFlows(ctx, v.StreamID, flow.FlowListOptions{Direction: "send"})
+		if err != nil {
+			t.Fatalf("GetFlows %s: %v", v.StreamID, err)
+		}
+		if len(flows) == 0 {
+			t.Fatalf("variant %d: no send flow recorded", v.Index)
+		}
+		sendFlow := flows[0]
+		if sendFlow.URL == nil {
+			t.Fatalf("variant %d: send Flow.URL is nil", v.Index)
+		}
+		if sendFlow.URL.Path != "/anything" {
+			t.Errorf("variant %d: send Flow.URL.Path = %q, want %q", v.Index, sendFlow.URL.Path, "/anything")
+		}
+		if sendFlow.URL.RawQuery != "phase=3&case=02&m=GET" {
+			t.Errorf("variant %d: send Flow.URL.RawQuery = %q, want %q", v.Index, sendFlow.URL.RawQuery, "phase=3&case=02&m=GET")
+		}
+		if strings.Contains(sendFlow.URL.String(), "%3F") {
+			t.Errorf("variant %d: send Flow.URL.String() = %q contains %%3F (USK-859 regressed)", v.Index, sendFlow.URL.String())
+		}
+	}
+}

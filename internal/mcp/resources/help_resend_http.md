@@ -35,8 +35,12 @@ Host / `:authority` value (e.g. `"example.com:8443"`). Required when `flow_id` i
 ### path (string, conditional)
 Request path including the leading slash. Required when `flow_id` is empty.
 
+A literal `?` embedded in `path` is auto-split into `path` + `raw_query`: the prefix before the first `?` becomes the new `path` and the suffix (without the `?`) routes to `raw_query`. This lets callers paste a full path-with-query in one field (`curl --url` style). Supplying **both** `raw_query` AND a `?` in `path` is rejected with an explicit error — drop one and resubmit.
+
+> Why auto-split? Without it, `path: "/x?a=1"` recorded `Flow.URL` as `/x%3Fa=1` (the `?` percent-encoded to `%3F`) because the URL projection at record time treats `Path` as a path segment. The wire was always correct — only the recorded URL drifted (USK-859).
+
 ### raw_query (string, optional)
-Raw query string WITHOUT the leading `?`.
+Raw query string WITHOUT the leading `?`. Mutually exclusive with embedding a query in `path`.
 
 ### headers (array of `{name, value}`, optional)
 Ordered header list. Preserves wire case, order, and duplicates per RFC-001 §3.1 wire-fidelity. Headers are NOT a map — duplicates with different casing are two distinct headers. When supplied, replaces the inherited header list wholesale.

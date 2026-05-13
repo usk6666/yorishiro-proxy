@@ -67,8 +67,8 @@ type fuzzHTTPInput struct {
 	Method         string      `json:"method,omitempty" jsonschema:"HTTP method base; required when flow_id is empty"`
 	Scheme         string      `json:"scheme,omitempty" jsonschema:"http or https; required when flow_id is empty"`
 	Authority      string      `json:"authority,omitempty" jsonschema:"Host / :authority; required when flow_id is empty"`
-	Path           string      `json:"path,omitempty" jsonschema:"request path; required when flow_id is empty"`
-	RawQuery       string      `json:"raw_query,omitempty" jsonschema:"raw query string without leading '?'"`
+	Path           string      `json:"path,omitempty" jsonschema:"request path; required when flow_id is empty. A literal '?' splits this into path + raw_query automatically; supplying both raw_query AND a '?' in path returns an error"`
+	RawQuery       string      `json:"raw_query,omitempty" jsonschema:"raw query string without leading '?'. Mutually exclusive with embedding a query in path"`
 	Headers        []headerKV  `json:"headers,omitempty" jsonschema:"ordered base header list; positions can target headers[N].value / .name (headers[N] indexes the input array; Host auto-injected from authority is not addressable here — use the authority path to fuzz Host)"`
 	Body           string      `json:"body,omitempty" jsonschema:"base body interpreted per body_encoding"`
 	BodyEncoding   string      `json:"body_encoding,omitempty" jsonschema:"text|base64; default text"`
@@ -141,6 +141,8 @@ func (s *Server) registerFuzzHTTP() {
 			"each position is a typed path (method | scheme | authority | path | raw_query | body | " +
 			"headers[N].name | headers[N].value) with payloads[]. The cartesian product of positions yields " +
 			"the variant sequence (capped at 1000 per call). Variants run sequentially with a fresh dial each. " +
+			"Base path may carry a literal '?' (auto-split into path + raw_query); supplying both raw_query " +
+			"AND a '?' in path is rejected. " +
 			"stop_on_5xx aborts on the first 5xx response. See yorishiro://help/fuzz_http.",
 	}, s.handleFuzzHTTP)
 }

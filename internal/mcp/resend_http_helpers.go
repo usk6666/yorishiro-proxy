@@ -150,8 +150,10 @@ func (s *Server) buildResendHTTPEnvelopeWithMeta(ctx context.Context, input *res
 	method := input.Method
 	scheme := input.Scheme
 	authority := input.Authority
-	path := input.Path
-	rawQuery := input.RawQuery
+	path, rawQuery, err := splitResendHTTPPathQuery(input.Path, input.RawQuery)
+	if err != nil {
+		return nil, resendHTTPEnvelopeMeta{}, err
+	}
 	var origHeaders []envelope.KeyValue
 	var origBody []byte
 
@@ -211,6 +213,42 @@ func (s *Server) buildResendHTTPEnvelopeWithMeta(ctx context.Context, input *res
 		HostInjected:    injected,
 		UserHeaderCount: preInjectionCount,
 	}, nil
+}
+
+// splitResendHTTPPathQuery normalises the user-supplied (path, raw_query)
+// pair so a `?` embedded in `path` is auto-routed to `raw_query` instead of
+// being percent-encoded to `%3F` at record time (USK-859).
+//
+// The wire-send path already concatenates `Path + "?" + RawQuery` verbatim
+// — so a literal `?` in `Path` did emit correctly on the wire. The
+// corruption was downstream: `envelopeToFlow` (`internal/pipeline/record_step.go`)
+// projects `{Path, RawQuery}` into a `&url.URL{}` whose `String()` then
+// percent-encodes the literal `?` inside `Path` to `%3F`. Splitting at the
+// MCP control-plane edge keeps wire-observed raw bytes untouched and only
+// fixes the L7 projection (CLAUDE.md MITM Principle 1).
+//
+// Behaviour:
+//   - No `?` in path → returns inputs unchanged (also covers the empty-path
+//     case, which the from-scratch validator catches separately).
+//   - `?` in path AND raw_query is empty → split on the first literal `?`:
+//     prefix becomes the new path, suffix becomes raw_query.
+//   - `?` in path AND raw_query is non-empty → return an explicit error.
+//     Silently picking a precedence or merging would surprise the operator;
+//     the caller should drop one or the other and resubmit. Matches
+//     MITM Principle 5 (handle ambiguous input gracefully and explicitly).
+//
+// Note: split is on the first literal `?` byte only. A literal `%3F` in
+// `path` (already percent-encoded) is not a delimiter and is left alone —
+// callers that want a verbatim `?` in the path segment can escape it.
+func splitResendHTTPPathQuery(path, rawQuery string) (string, string, error) {
+	idx := strings.IndexByte(path, '?')
+	if idx < 0 {
+		return path, rawQuery, nil
+	}
+	if rawQuery != "" {
+		return "", "", fmt.Errorf("resend_http: path contains '?'; pass the query in raw_query or remove raw_query (got path=%q, raw_query=%q)", path, rawQuery)
+	}
+	return path[:idx], path[idx+1:], nil
 }
 
 // loadResendHTTPSendFlow fetches the Stream and its first send Flow for a

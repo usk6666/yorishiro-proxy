@@ -39,6 +39,8 @@ When `flow_id` is set, the recorded send seeds the per-variant base envelope; us
 
 See [help_resend_http](yorishiro://help/resend_http) for the inherited fields. Documentation here is on fuzz-specific fields only.
 
+> `path` accepts a literal `?` and auto-splits into `path` + `raw_query` at the MCP boundary (USK-859). Supplying both `raw_query` AND a `?` in `path` is rejected. The split applies once to the base envelope; per-position payloads written into `path` or `raw_query` via the `positions[]` mechanism are passed through verbatim (the package-level "Payload passthrough" rule in `fuzz_http_helpers.go`).
+
 ### positions (array, REQUIRED)
 Ordered position list; at least one entry. Each position has:
 - **path** (string, REQUIRED): typed path into HTTPMessage. One of: `method | scheme | authority | path | raw_query | body | headers[N].name | headers[N].value`.

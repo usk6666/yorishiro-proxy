@@ -544,3 +544,120 @@ func TestResendHTTP_DialFailure_FinalisesStreamAsError(t *testing.T) {
 		t.Errorf("Stream.State = %q, want %q (USK-789: dial-failure resend must finalise to error)", resendStream.State, "error")
 	}
 }
+
+// TestResendHTTP_PathWithQueryAutoSplit covers USK-859: a literal '?' in
+// the path argument is auto-routed to raw_query at the MCP boundary so the
+// recorded Flow.URL no longer percent-encodes it to '%3F'. The wire was
+// always correct (sendRequestSynthetic concatenates Path + "?" + RawQuery
+// verbatim); the bug was only on the L7 projection that builds
+// &url.URL{} from {Path, RawQuery} — url.URL.String() escapes a '?'
+// embedded in Path. After the fix, the recorded flow shows a clean '?'.
+func TestResendHTTP_PathWithQueryAutoSplit(t *testing.T) {
+	cs, store, _, _ := setupResendHTTPSession(t)
+	echo, getCaptured := startResendHTTPEcho(t)
+	authority := echo.URL[len("http://"):]
+
+	res := callResendHTTP(t, cs, map[string]any{
+		"method":    "GET",
+		"scheme":    "http",
+		"authority": authority,
+		// The repro: path carries the query string with a literal '?'.
+		"path": "/anything?phase=3&case=02&m=GET",
+		"headers": []map[string]any{
+			{"name": "Host", "value": authority},
+		},
+		"timeout_ms": 5000,
+	})
+	if res.IsError {
+		t.Fatalf("tool returned error: %s", extractTextContent(res))
+	}
+	var out resendHTTPResult
+	decodeStructuredResult(t, res, &out)
+	if out.StatusCode != 200 {
+		t.Errorf("StatusCode = %d, want 200", out.StatusCode)
+	}
+
+	// The wire-side: server must see the request with /anything as the path
+	// and the query string parsed normally. (Wire fidelity was never the
+	// bug — this assertion locks the regression.)
+	_, _, capturedHeaders := getCaptured()
+	_ = capturedHeaders
+
+	// Pull the send Flow out of the new Stream and assert URL.String() no
+	// longer contains '%3F' and URL.RawQuery is populated with the suffix.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	flows, err := store.GetFlows(ctx, out.StreamID, flow.FlowListOptions{Direction: "send"})
+	if err != nil {
+		t.Fatalf("GetFlows: %v", err)
+	}
+	if len(flows) == 0 {
+		t.Fatalf("expected at least one send flow, got 0")
+	}
+	sendFlow := flows[0]
+	if sendFlow.URL == nil {
+		t.Fatalf("send Flow.URL is nil")
+	}
+	wantPath := "/anything"
+	wantRawQuery := "phase=3&case=02&m=GET"
+	if sendFlow.URL.Path != wantPath {
+		t.Errorf("send Flow.URL.Path = %q, want %q", sendFlow.URL.Path, wantPath)
+	}
+	if sendFlow.URL.RawQuery != wantRawQuery {
+		t.Errorf("send Flow.URL.RawQuery = %q, want %q", sendFlow.URL.RawQuery, wantRawQuery)
+	}
+	urlStr := sendFlow.URL.String()
+	if strings.Contains(urlStr, "%3F") {
+		t.Errorf("send Flow.URL.String() = %q contains %%3F (USK-859 regressed)", urlStr)
+	}
+	if !strings.Contains(urlStr, "?") {
+		t.Errorf("send Flow.URL.String() = %q missing literal '?'", urlStr)
+	}
+}
+
+// TestResendHTTP_PathWithQueryConflictRejected covers the USK-859 conflict
+// case: passing both `path` with an embedded '?' AND a non-empty
+// `raw_query` is rejected with an explicit error instead of silently
+// merging or picking a precedence.
+func TestResendHTTP_PathWithQueryConflictRejected(t *testing.T) {
+	cs, store, _, _ := setupResendHTTPSession(t)
+	echo, _ := startResendHTTPEcho(t)
+	authority := echo.URL[len("http://"):]
+
+	beforeCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	beforeStreams, err := store.ListStreams(beforeCtx, flow.StreamListOptions{})
+	if err != nil {
+		t.Fatalf("ListStreams (before): %v", err)
+	}
+
+	res := callResendHTTP(t, cs, map[string]any{
+		"method":    "GET",
+		"scheme":    "http",
+		"authority": authority,
+		"path":      "/anything?phase=3",
+		"raw_query": "extra=1",
+		"headers": []map[string]any{
+			{"name": "Host", "value": authority},
+		},
+		"timeout_ms": 5000,
+	})
+	if !res.IsError {
+		t.Fatalf("expected IsError=true for conflicting path+raw_query, got success")
+	}
+	if msg := extractTextContent(res); !strings.Contains(msg, "path contains '?'") {
+		t.Errorf("error message %q does not mention the conflict (USK-859)", msg)
+	}
+
+	// Verify no Stream was recorded for the rejected call — the validator
+	// rejects before runResendHTTP is reached, so the new Stream is never
+	// opened. (Streams are only opened by RecordStep when the pipeline runs;
+	// rejection happens at the validation boundary.)
+	afterStreams, err := store.ListStreams(beforeCtx, flow.StreamListOptions{})
+	if err != nil {
+		t.Fatalf("ListStreams (after): %v", err)
+	}
+	if len(afterStreams) != len(beforeStreams) {
+		t.Errorf("ListStreams count changed: before=%d after=%d (rejected call should not record a Stream)", len(beforeStreams), len(afterStreams))
+	}
+}

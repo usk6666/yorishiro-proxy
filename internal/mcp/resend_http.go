@@ -41,8 +41,8 @@ type resendHTTPInput struct {
 	Method          string      `json:"method,omitempty" jsonschema:"HTTP method (GET, POST, ...); required when flow_id is empty"`
 	Scheme          string      `json:"scheme,omitempty" jsonschema:"http or https; required when flow_id is empty"`
 	Authority       string      `json:"authority,omitempty" jsonschema:"Host header / :authority value; required when flow_id is empty"`
-	Path            string      `json:"path,omitempty" jsonschema:"request path including leading slash; required when flow_id is empty"`
-	RawQuery        string      `json:"raw_query,omitempty" jsonschema:"raw query string without the leading '?'"`
+	Path            string      `json:"path,omitempty" jsonschema:"request path including leading slash; required when flow_id is empty. A literal '?' splits this into path + raw_query automatically (the suffix routes to raw_query); supplying both raw_query AND a '?' in path returns an error"`
+	RawQuery        string      `json:"raw_query,omitempty" jsonschema:"raw query string without the leading '?'. Mutually exclusive with embedding a query in path"`
 	Headers         []headerKV  `json:"headers,omitempty" jsonschema:"ordered header list; preserves wire case, order and duplicates"`
 	Body            string      `json:"body,omitempty" jsonschema:"request body interpreted per body_encoding"`
 	BodyEncoding    string      `json:"body_encoding,omitempty" jsonschema:"text|base64; default text"`
@@ -79,6 +79,8 @@ func (s *Server) registerResendHTTP() {
 			"With flow_id, omitted fields inherit from the recorded send; otherwise " +
 			"method/scheme/authority/path are required. headers is an ordered [{name, value}] list " +
 			"preserving wire case/order/duplicates; body is text or base64 per body_encoding. " +
+			"path may carry a literal '?' (auto-split into path + raw_query); supplying " +
+			"both raw_query AND a '?' in path is rejected. " +
 			"override_host redirects the dial target while preserving the request's :authority. " +
 			"For non-HTTP flows use resend_ws / resend_grpc / resend_raw. See yorishiro://help/resend_http.",
 	}, s.handleResendHTTP)
