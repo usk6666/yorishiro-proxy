@@ -230,14 +230,20 @@ Parameters (key=value):
   params.protocol=<proto>           Protocol filter for delete_flows
   params.confirm=true               Confirm bulk deletion (required for bulk ops)
   params.format=jsonl|har           Export format (default: jsonl)
-  params.output_path=<path>         File path for export output
-  params.input_path=<path>          File path for import input
+  params.output_path=<path>         File path for export output (resolved against server cwd)
+  params.input_path=<path>          File path for import input (resolved against server cwd)
   params.on_conflict=skip|replace   Import conflict policy (default: skip)
+
+Note: output_path / input_path are resolved relative to the proxy server
+      process's working directory — NOT the MCP caller's cwd. The MCP
+      protocol does not carry the caller's working directory. Pass absolute
+      paths when the server cwd is unknown to the caller (e.g. when
+      connecting to a remote MCP server over HTTP).
 
 Examples:
   yorishiro-proxy client manage action=delete_flows params.flow_id=abc123
   yorishiro-proxy client manage action=delete_flows params.older_than_days=7 params.confirm=true
-  yorishiro-proxy client manage action=export_flows params.format=har params.output_path=export.har
+  yorishiro-proxy client manage action=export_flows params.format=har params.output_path=/tmp/export.har
   yorishiro-proxy client manage action=regenerate_ca_cert`,
 
 	"security": `security: Configure runtime security settings.

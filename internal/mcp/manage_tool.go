@@ -55,10 +55,10 @@ type manageParams struct {
 	Format        string        `json:"format,omitempty" jsonschema:"export format: jsonl (default) or har (HTTP Archive 1.2)"`
 	Filter        *exportFilter `json:"filter,omitempty" jsonschema:"flow filter for export"`
 	IncludeBodies *bool         `json:"include_bodies,omitempty" jsonschema:"include message bodies in export (default: true)"`
-	OutputPath    string        `json:"output_path,omitempty" jsonschema:"file path to write export data"`
+	OutputPath    string        `json:"output_path,omitempty" jsonschema:"file path to write export data; resolved relative to the proxy server process's working directory — pass an absolute path when the server cwd is unknown to the caller (e.g. HTTP remote MCP)"`
 
 	// import_flows parameters
-	InputPath  string `json:"input_path,omitempty" jsonschema:"file path to read import data"`
+	InputPath  string `json:"input_path,omitempty" jsonschema:"file path to read import data; resolved relative to the proxy server process's working directory — pass an absolute path when the server cwd is unknown to the caller (e.g. HTTP remote MCP)"`
 	OnConflict string `json:"on_conflict,omitempty" jsonschema:"conflict policy: skip or replace (default: skip)"`
 }
 
@@ -104,6 +104,7 @@ func (s *Server) registerManage() {
 			"Filter axes (protocol / scheme / http_version / url_pattern / time) mirror the query tool's filter so analysts can " +
 			"export / delete the same set of flows they were inspecting. " +
 			"For delete_flows, top-level protocol/scheme/http_version and params.filter cannot be combined in a single call; supply one form. " +
+			"File paths (output_path / input_path) are resolved relative to the proxy server process's working directory, NOT the MCP caller's cwd — pass absolute paths when the server cwd is unknown to the caller (e.g. HTTP remote MCP). " +
 			"See yorishiro://help/manage.",
 	}, s.handleManage)
 }
