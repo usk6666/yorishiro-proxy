@@ -6,13 +6,49 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ## [Unreleased]
 
+### Added
+
+- **`max_concurrent_streams` is now configurable end-to-end** (#858, USK-862). The HTTP/2 `SETTINGS_MAX_CONCURRENT_STREAMS` value is exposed via the MCP `proxy_start` / `configure` tools, the CLI flag `-max-concurrent-streams`, and the env var `YP_MAX_CONCURRENT_STREAMS`, so operators can tune the per-connection stream budget without recompiling.
+- **`query` body inclusion controls** (#862). The `messages` and `flow` resources now accept `include_bodies` and `body_max_bytes` parameters, letting callers opt in to body payloads with an explicit per-call size cap.
+- **Per-protocol intercept hold/timeout overrides** (#850, USK-855). `intercept_queue.protocol_overrides` lets operators set distinct `hold_timeout` and `timeout_behavior` values per protocol, which is necessary because WS/SSE long-lived flows tolerate longer holds than short HTTP requests.
+- **WS hold-window keepalive injection** (#852, USK-854). While a WebSocket flow is held in the intercept queue, the proxy now injects keepalive frames toward the client to prevent edge proxies from tearing down the connection during the hold.
+- **Linux NSSDB CA registration** (#854, USK-857). `setup` now installs the proxy CA into the per-user NSSDB so Chromium and Firefox on Linux trust the MITM cert without manual intervention.
+- **`proxy_start` listen-address collision detection + bind-failure rollback** (#856). `listen_addr` and `tcp_forwards` ports are checked for collisions before bind, and any partial bind is rolled back on failure so the listener set never lingers in a half-started state.
+- **HTTP/2 extended CONNECT support in ServerRole** (#866). The H2 ServerRole now mirrors the upstream's `SETTINGS_ENABLE_CONNECT_PROTOCOL` value, enabling extended CONNECT (RFC 8441) for downstream clients when the upstream advertises it.
+- **HTTPMessage anomalies persisted on Flow rows** (#846). Parser-detected anomalies are now stored on the Flow record and surfaced through the MCP `query` tool so diagnostic anomalies remain inspectable after the fact.
+
+### Changed
+
+- **HTTP/2 `SETTINGS_MAX_CONCURRENT_STREAMS` default raised 100 → 500** (#858, USK-862). The previous 100-stream cap throttled modern clients (browsers, gRPC clients) that routinely open large request fan-outs; 500 better matches real-world load while still bounding per-connection memory.
+- **WS / SSE intercept hold-timeout default raised 8s → 60s** (#860). The 8-second default fired before operators could review held messages and caused premature disconnects on edges with short idle limits (e.g. Fly.io); 60s is a more realistic review window for long-lived flows.
+- **HTTP/1 and WS layers now wire `StateReleaser.ReleaseStream` on terminal events** (#849). Per-stream plugin state is released deterministically when the stream ends, removing a slow leak in long-running proxies with many short flows.
+
 ### Removed
 
-- **Breaking change**: the `proxy_start.protocols` MCP input parameter and the `query("config").enabled_protocols` output field are deleted (USK-865, USK-870). The half-implemented protocol allow-list never had a use case not already covered by `target_scope` (host), `intercept_rules` (request pattern), `tls_passthrough` (MITM target), and `capture_scope` (recording target), and the WS/SSE/gRPC overlay enforcement built in USK-732 (listener peek-time gate) and USK-808 (MITM ALPN filter) is reverted in the same PR. Clients submitting `proxy_start { protocols: [...] }` now receive a schema unknown-field error from the MCP go-sdk — the field is not silently ignored. The WebUI Settings → Proxy panel no longer shows a protocol-selection toggle. Migration: drop the field from MCP calls and rely on the scope/passthrough/capture knobs for the same effect.
+- **Breaking change**: the broken technology-detection feature is deleted (#841, USK-843). The `query` tool's `technologies` resource and `technology` filter, plus the entire `internal/fingerprint/` package, are removed. The feature shipped without a working detection backend and had no clear use case beyond what the existing `query` filters already cover; idiomatic alternatives (response-header matching via `query` filters, or a Starlark plugin) are sufficient. Migration: clients invoking `query { resource: "technologies" }` or passing `filter: { technology: ... }` will receive a schema error and should drop those parameters.
+- **Breaking change**: the `proxy_start.protocols` MCP input parameter and the `query("config").enabled_protocols` output field are deleted (#865, USK-870). The half-implemented protocol allow-list never had a use case not already covered by `target_scope` (host), `intercept_rules` (request pattern), `tls_passthrough` (MITM target), and `capture_scope` (recording target), and the WS/SSE/gRPC overlay enforcement built in USK-732 (listener peek-time gate) and USK-808 (MITM ALPN filter) is reverted in the same PR. Clients submitting `proxy_start { protocols: [...] }` now receive a schema unknown-field error from the MCP go-sdk — the field is not silently ignored. The WebUI Settings → Proxy panel no longer shows a protocol-selection toggle. Migration: drop the field from MCP calls and rely on the scope/passthrough/capture knobs for the same effect.
 
 ### Fixed
 
-- Client-side MITM handshake rejection (e.g. Chromium pinning a proxy CA so the proxy's MITM cert is refused with an `unknown_certificate` / `bad_certificate` TLS alert) is now recorded with `failure_reason="client_tls_error"` instead of being misclassified as `upstream_tls_error`. Existing `upstream_tls_error` records for genuine upstream-side TLS failures are unaffected. MCP query consumers can therefore distinguish browser→proxy failures (CA install / pinning issues) from proxy→upstream failures (cert expiry / chain trust) without parsing `tags["error"]`. (USK-858)
+- Client-side MITM handshake rejection (e.g. Chromium pinning a proxy CA so the proxy's MITM cert is refused with an `unknown_certificate` / `bad_certificate` TLS alert) is now recorded with `failure_reason="client_tls_error"` instead of being misclassified as `upstream_tls_error` (#853, USK-858). Existing `upstream_tls_error` records for genuine upstream-side TLS failures are unaffected. MCP query consumers can therefore distinguish browser→proxy failures (CA install / pinning issues) from proxy→upstream failures (cert expiry / chain trust) without parsing `tags["error"]`.
+- Macro template variables that remain unresolved after substitution are now detected and surfaced as a warning (#838) instead of being silently sent to the upstream as the literal `{{var}}` string.
+- `request_timeout_ms` now applies to plain HTTP read deadlines and to the inner read deadline of CONNECT tunnels (#840), so the timeout is honored on the paths it was previously ignored on.
+- CONNECT and SOCKS5 target hostnames are now propagated onto the passthrough audit envelope (#839), preserving the original target hostname for audit trails when the proxy is operating in pure tunnel mode.
+- HAR export protocol predicates are now aligned with the canonical `Envelope.Protocol` values (#848), fixing exports that previously dropped or mislabeled flows due to the predicate using stale protocol names.
+- `resend_http` now auto-splits a `?` inside the `path` parameter into `path` + `raw_query` (#855), and rejects the call with a clear error when both `path` carries `?` and `raw_query` is also supplied — preventing the previous silent ambiguity.
+- The intercept-release EOF tag is now only attached on successful downstream relay (#857), so retries and partial failures are no longer misclassified as clean stream termination.
+- HTTP/2 connection-specific headers (RFC 7540 §8.1.2.2: `Connection`, `Keep-Alive`, `Proxy-Connection`, `Transfer-Encoding`, `Upgrade`) are stripped on the H2 send path (#836), preventing wire-spec violations when an HTTP/1 → HTTP/2 hop forwards messages that originally carried hop-by-hop headers.
+- Upstream EOF that arrives after a long intercept hold is now surfaced as a Stream tag (#844, USK-851), making the cause of post-hold connection loss visible instead of opaque.
+- WebSocket per-message-deflate with context-takeover now correctly handles multi-frame messages and serializes the `deflateState` between frames (#864, USK-867). Previously, re-emitting `Close()` on the flate writer set BFINAL=1 and desynchronised the peer's persistent inflater on message 2+.
+- The negotiated `Sec-WebSocket-Extensions` value from the WS handshake is now propagated to the post-Upgrade `ws.Layer` (#845), so per-message-deflate parameters agreed during handshake actually take effect on subsequent frames.
+- Post-swap WebSocket frames now reuse the handshake StreamID (#843), keeping the upgrade and the data-frame phase under the same Stream identity for recording and intercept purposes.
+- `query` filter `scheme=ws` / `scheme=wss` is now hard-rejected (#861, USK-848). `scheme` describes the handshake transport (`http`/`https`), so the `ws`/`wss` values were structurally meaningless; rejecting them prevents silently-empty result sets.
+- The `livewire_pluginv2` integration test now correctly threads the `holdTracker` (#859), removing a flaky-test source rather than a runtime bug.
+- The `manage` export/import path resolution is now documented as relative to the server's CWD (#863, USK-868) in the tool description, jsonschema, and CLI help — clarifying behavior that previously confused remote MCP clients.
+
+### Docs
+
+- The applicability scopes (Agent vs Policy Layer) of `target_scope`, `rate_limit`, and `budget` in the `security` MCP tool are now spelled out in the help text and security documentation (#837, USK-842), removing prior ambiguity about which knob applies at which layer.
 
 ## [0.15.0] - 2026-05-05
 
