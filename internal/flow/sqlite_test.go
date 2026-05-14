@@ -14,6 +14,8 @@ import (
 
 	_ "modernc.org/sqlite"
 
+	"github.com/google/uuid"
+
 	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
 
@@ -2488,8 +2490,16 @@ func TestSQLiteStore_VariantPairCoexists(t *testing.T) {
 	}
 
 	now := time.Now().UTC()
+	// USK-878: variant rows must have distinct id values (PRIMARY KEY) but
+	// nothing about the schema constrains the string shape — the variant
+	// pair is disambiguated at the SQL UNIQUE layer by the `variant`
+	// column. Two unrelated IDs exercise the constraint surface honestly;
+	// matching the production wire by minting a fresh UUID for the
+	// modified row is documented in record_step.go recordVariantFlows.
+	origID := uuid.NewString()
+	modID := uuid.NewString()
 	orig := &Flow{
-		ID:        "f1-original",
+		ID:        origID,
 		StreamID:  st.ID,
 		Sequence:  0,
 		Direction: "send",
@@ -2498,13 +2508,13 @@ func TestSQLiteStore_VariantPairCoexists(t *testing.T) {
 		Metadata:  map[string]string{"variant": "original"},
 	}
 	mod := &Flow{
-		ID:        "f1-modified",
+		ID:        modID,
 		StreamID:  st.ID,
 		Sequence:  0,
 		Direction: "send",
 		Timestamp: now,
 		Method:    "POST",
-		Metadata:  map[string]string{"variant": "modified"},
+		Metadata:  map[string]string{"variant": "modified", "base_flow_id": origID},
 	}
 
 	if err := store.SaveFlow(ctx, orig); err != nil {

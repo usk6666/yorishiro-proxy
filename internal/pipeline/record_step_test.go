@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/envelope/bodybuf"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
@@ -557,8 +559,13 @@ func TestRecordStep_VariantRecording(t *testing.T) {
 	origFlow := w.flows[0]
 	modFlow := w.flows[1]
 
-	if origFlow.ID != "f1-original" {
-		t.Errorf("original flow ID = %q, want %q", origFlow.ID, "f1-original")
+	// USK-878: variant identity is recorded in Metadata, not in the FlowID
+	// string. The original-variant row carries the wire-observed FlowID
+	// verbatim; the modified-variant row gets a fresh UUID so the import
+	// path's strict UUID validation accepts the round-trip. The pair stays
+	// linkable via Metadata["base_flow_id"] on the modified row.
+	if origFlow.ID != "f1" {
+		t.Errorf("original flow ID = %q, want %q", origFlow.ID, "f1")
 	}
 	if origFlow.Metadata["variant"] != "original" {
 		t.Errorf("original variant = %q, want %q", origFlow.Metadata["variant"], "original")
@@ -567,19 +574,26 @@ func TestRecordStep_VariantRecording(t *testing.T) {
 		t.Errorf("original RawBytes = %q, want %q", origFlow.RawBytes, "original-data")
 	}
 
-	if modFlow.ID != "f1-modified" {
-		t.Errorf("modified flow ID = %q, want %q", modFlow.ID, "f1-modified")
+	if modFlow.ID == "" {
+		t.Error("modified flow ID is empty; expected a fresh UUID")
+	}
+	if _, err := uuid.Parse(modFlow.ID); err != nil {
+		t.Errorf("modified flow ID = %q, want a valid UUID (parse err: %v)", modFlow.ID, err)
 	}
 	if modFlow.Metadata["variant"] != "modified" {
 		t.Errorf("modified variant = %q, want %q", modFlow.Metadata["variant"], "modified")
 	}
+	if modFlow.Metadata["base_flow_id"] != "f1" {
+		t.Errorf("modified base_flow_id = %q, want %q", modFlow.Metadata["base_flow_id"], "f1")
+	}
 	if string(modFlow.RawBytes) != "modified-data" {
 		t.Errorf("modified RawBytes = %q, want %q", modFlow.RawBytes, "modified-data")
 	}
-	// USK-735: the original and modified variant FlowIDs must differ so the
-	// SQLite UNIQUE(stream_id, sequence, direction) constraint does not
-	// drop the modified record. (StreamID/Sequence/Direction are identical
-	// across the variant pair by design — only the FlowID disambiguates.)
+	// USK-735 / USK-878: the original and modified variant FlowIDs must
+	// differ so the SQLite PRIMARY KEY accepts both rows. StreamID,
+	// Sequence, Direction are identical across the variant pair by design
+	// — the schemaV11 `variant` column disambiguates them on the SQL UNIQUE
+	// constraint, and the FlowID stays distinct only to satisfy the PK.
 	if origFlow.ID == modFlow.ID {
 		t.Errorf("variant FlowIDs collide: orig=%q mod=%q", origFlow.ID, modFlow.ID)
 	}
@@ -2102,11 +2116,22 @@ func TestRecordStep_VariantRecordingGRPCData(t *testing.T) {
 	if len(w.flows) != 2 {
 		t.Fatalf("expected 2 flows (variant pair), got %d", len(w.flows))
 	}
-	if w.flows[0].ID != "rpc-1-data-0-original" || w.flows[0].Metadata["variant"] != "original" {
-		t.Errorf("flow[0] = %+v, want original variant", w.flows[0])
+	// USK-878: original-variant keeps the wire-observed FlowID verbatim;
+	// modified-variant gets a fresh UUID. Pairing is via Metadata.
+	if w.flows[0].ID != "rpc-1-data-0" || w.flows[0].Metadata["variant"] != "original" {
+		t.Errorf("flow[0] = %+v, want original variant with ID=%q", w.flows[0], "rpc-1-data-0")
 	}
-	if w.flows[1].ID != "rpc-1-data-0-modified" || w.flows[1].Metadata["variant"] != "modified" {
-		t.Errorf("flow[1] = %+v, want modified variant", w.flows[1])
+	if _, err := uuid.Parse(w.flows[1].ID); err != nil {
+		t.Errorf("modified flow ID = %q, want a valid UUID (parse err: %v)", w.flows[1].ID, err)
+	}
+	if w.flows[1].Metadata["variant"] != "modified" {
+		t.Errorf("flow[1] variant = %q, want %q", w.flows[1].Metadata["variant"], "modified")
+	}
+	if w.flows[1].Metadata["base_flow_id"] != "rpc-1-data-0" {
+		t.Errorf("flow[1] base_flow_id = %q, want %q", w.flows[1].Metadata["base_flow_id"], "rpc-1-data-0")
+	}
+	if w.flows[0].ID == w.flows[1].ID {
+		t.Errorf("variant FlowIDs collide: orig=%q mod=%q", w.flows[0].ID, w.flows[1].ID)
 	}
 	if string(w.flows[0].Body) != "abc" || string(w.flows[1].Body) != "xyz" {
 		t.Errorf("variant Body mismatch: original=%q modified=%q",

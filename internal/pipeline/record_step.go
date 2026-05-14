@@ -13,6 +13,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
@@ -652,7 +654,11 @@ func (s *RecordStep) recordVariantFlows(ctx context.Context, snap, current *enve
 	// envelopeToFlow always initializes Metadata with {"protocol": ...}, so
 	// no nil-check is needed before assigning the "variant" entry.
 	origFlow := s.envelopeToFlow(ctx, snap)
-	origFlow.ID = current.FlowID + "-original"
+	// origFlow.ID keeps the wire-observed FlowID (a UUID produced by the
+	// Layer). The variant pair is disambiguated at the SQL layer by the
+	// schemaV11 `variant` column (projected from Metadata["variant"]) and
+	// at the MCP query layer by resolveVariantPair, neither of which
+	// depend on the FlowID string shape.
 	origFlow.Metadata["variant"] = "original"
 	if err := s.store.SaveFlow(ctx, origFlow); err != nil {
 		s.logger.Error("record step: original variant save failed",
@@ -663,14 +669,19 @@ func (s *RecordStep) recordVariantFlows(ctx context.Context, snap, current *enve
 	}
 
 	modFlow := s.envelopeToFlow(ctx, current)
-	// Suffix the modified-variant FlowID symmetric to "-original" above so
-	// the two records do not collide on the flow table's
-	// UNIQUE(stream_id, sequence, direction) constraint. The base FlowID
-	// alone matches the snapshot's identity, so without this suffix the
-	// SaveFlow below would silently fail with "constraint failed" on every
-	// intercept(modify_and_forward), losing the modified record entirely.
-	modFlow.ID = current.FlowID + "-modified"
+	// USK-878: the modified-variant row needs an `id` distinct from the
+	// original-variant row so the flows table's PRIMARY KEY accepts both.
+	// We mint a fresh UUID rather than reusing the suffix scheme
+	// ("<base-uuid>-modified") that was used pre-USK-878, because
+	// `manage import_flows` strict-validates flow UUIDs and the suffix
+	// caused the importer to reject the entire ExportRecord — silently
+	// dropping every intercept-touched stream on round-trip. The variant
+	// pair stays linkable via Metadata["base_flow_id"] (pointing back at
+	// the snapshot's FlowID); SQL UNIQUE(stream_id, sequence, direction,
+	// variant) already keeps the rows from colliding on identity.
+	modFlow.ID = uuid.NewString()
 	modFlow.Metadata["variant"] = "modified"
+	modFlow.Metadata["base_flow_id"] = current.FlowID
 	s.applyWireEncode(ctx, current, modFlow)
 	if err := s.store.SaveFlow(ctx, modFlow); err != nil {
 		s.logger.Error("record step: modified variant save failed",

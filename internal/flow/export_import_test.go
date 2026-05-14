@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // makeTestSession creates a test flow with messages in the store.
@@ -1307,5 +1309,173 @@ func TestExportImportSchemeRoundTrip(t *testing.T) {
 				t.Errorf("imported Scheme = %q, want %q", got.Scheme, tc.scheme)
 			}
 		})
+	}
+}
+
+// TestExportImportRoundTrip_VariantPair_WithValidateIDs pins USK-878: the
+// JSONL round-trip with ValidateIDs=true (matching the production MCP path
+// at internal/mcp/manage_tool.go) must accept the original/modified variant
+// pair recorded by RecordStep on intercept(modify_and_forward).
+//
+// Pre-USK-878 the modified-variant row carried Flow.ID = "<base-uuid>-modified",
+// and isValidUUID rejected it. Because findInvalidFlowUUID surfaces the first
+// invalid flow UUID and the ImportStreams loop drops the entire ExportRecord
+// on validation failure, every stream that contained any intercept-modified
+// flow was silently lost on round-trip — not just the variant row. This
+// regression test pins both halves: the variant pair survives, and a sibling
+// non-variant flow on the same stream is not collateral-damaged.
+func TestExportImportRoundTrip_VariantPair_WithValidateIDs(t *testing.T) {
+	t.Parallel()
+	store := newTestStore(t)
+	ctx := context.Background()
+	ts := time.Date(2026, 5, 14, 10, 0, 0, 0, time.UTC)
+
+	// Real UUIDs everywhere — mirror the production wire shape.
+	streamID := uuid.NewString()
+	origID := uuid.NewString()    // original variant: same as wire FlowID
+	modID := uuid.NewString()     // modified variant: fresh UUID (USK-878)
+	siblingID := uuid.NewString() // a non-variant Flow on the same Stream
+
+	st := &Stream{
+		ID:        streamID,
+		ConnID:    "conn-" + streamID,
+		Protocol:  "HTTPS",
+		Scheme:    "https",
+		State:     "complete",
+		Timestamp: ts,
+		Duration:  150 * time.Millisecond,
+		Tags:      map[string]string{"env": "test"},
+	}
+	if err := store.SaveStream(ctx, st); err != nil {
+		t.Fatalf("SaveStream: %v", err)
+	}
+
+	// Original variant: wire-observed bytes, marked variant=original.
+	origFlow := &Flow{
+		ID:        origID,
+		StreamID:  streamID,
+		Sequence:  0,
+		Direction: "send",
+		Timestamp: ts,
+		Method:    "GET",
+		URL:       mustParseURL("https://example.com/api"),
+		Headers:   map[string][]string{"Host": {"example.com"}},
+		Body:      []byte(`{"user":"admin"}`),
+		RawBytes:  []byte("GET /api HTTP/1.1\r\n\r\n"),
+		Metadata:  map[string]string{"variant": "original"},
+	}
+	if err := store.SaveFlow(ctx, origFlow); err != nil {
+		t.Fatalf("SaveFlow original: %v", err)
+	}
+
+	// Modified variant: same (stream_id, sequence, direction); distinct
+	// fresh UUID; variant=modified; base_flow_id back-pointer.
+	modFlow := &Flow{
+		ID:        modID,
+		StreamID:  streamID,
+		Sequence:  0,
+		Direction: "send",
+		Timestamp: ts,
+		Method:    "POST",
+		URL:       mustParseURL("https://example.com/api"),
+		Headers:   map[string][]string{"Host": {"example.com"}},
+		Body:      []byte(`{"user":"attacker"}`),
+		RawBytes:  []byte("POST /api HTTP/1.1\r\n\r\n"),
+		Metadata: map[string]string{
+			"variant":      "modified",
+			"base_flow_id": origID,
+		},
+	}
+	if err := store.SaveFlow(ctx, modFlow); err != nil {
+		t.Fatalf("SaveFlow modified: %v", err)
+	}
+
+	// Sibling non-variant Flow on the same Stream: this proves the
+	// import-rejection regression (a single bad flow ID dropped the whole
+	// stream, including unrelated rows like this one).
+	siblingFlow := &Flow{
+		ID:         siblingID,
+		StreamID:   streamID,
+		Sequence:   1,
+		Direction:  "receive",
+		Timestamp:  ts.Add(100 * time.Millisecond),
+		StatusCode: 200,
+		Headers:    map[string][]string{"Content-Type": {"text/html"}},
+		Body:       []byte("<html>OK</html>"),
+	}
+	if err := store.SaveFlow(ctx, siblingFlow); err != nil {
+		t.Fatalf("SaveFlow sibling: %v", err)
+	}
+
+	// Export to JSONL.
+	var buf bytes.Buffer
+	n, err := ExportStreams(ctx, store, &buf, ExportOptions{IncludeBodies: true})
+	if err != nil {
+		t.Fatalf("ExportStreams: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("expected 1 stream exported, got %d", n)
+	}
+
+	// Re-import into a fresh store with ValidateIDs=true — matches the
+	// production MCP manage_tool.go import path.
+	store2 := newTestStore(t)
+	result, err := ImportStreams(ctx, store2, &buf, ImportOptions{
+		OnConflict:  ConflictSkip,
+		ValidateIDs: true,
+	})
+	if err != nil {
+		t.Fatalf("ImportStreams: %v", err)
+	}
+	if result.Errors != 0 {
+		t.Errorf("expected 0 errors, got %d (details=%+v)", result.Errors, result.ErrorDetails)
+	}
+	if result.Imported != 1 {
+		t.Errorf("expected 1 imported, got %d (details=%+v)", result.Imported, result.ErrorDetails)
+	}
+
+	// Verify all three flows survived. Before USK-878 the entire stream
+	// would be dropped here because findInvalidFlowUUID returned the
+	// "<uuid>-modified" suffix and the importer rejected the ExportRecord.
+	flows, err := store2.GetFlows(ctx, streamID, FlowListOptions{})
+	if err != nil {
+		t.Fatalf("GetFlows: %v", err)
+	}
+	if len(flows) != 3 {
+		t.Fatalf("imported flow count = %d, want 3 (original + modified + sibling)", len(flows))
+	}
+
+	// Variant identities round-trip through Metadata, not through the
+	// FlowID string shape. Match by (id, variant) to pin both axes.
+	var gotOrig, gotMod, gotSibling *Flow
+	for _, f := range flows {
+		switch {
+		case f.ID == origID && f.Metadata["variant"] == "original":
+			gotOrig = f
+		case f.ID == modID && f.Metadata["variant"] == "modified":
+			gotMod = f
+		case f.ID == siblingID:
+			gotSibling = f
+		}
+	}
+	if gotOrig == nil {
+		t.Error("original variant flow not found after import (id+variant mismatch)")
+	}
+	if gotMod == nil {
+		t.Error("modified variant flow not found after import (id+variant mismatch)")
+	}
+	if gotSibling == nil {
+		t.Error("sibling non-variant flow not found after import (entire-stream-dropped regression)")
+	}
+	if gotMod != nil && gotMod.Metadata["base_flow_id"] != origID {
+		t.Errorf("modified variant base_flow_id = %q, want %q", gotMod.Metadata["base_flow_id"], origID)
+	}
+	if gotOrig != nil && gotMod != nil {
+		if !bytes.Equal(gotOrig.Body, []byte(`{"user":"admin"}`)) {
+			t.Errorf("original body roundtrip mismatch: got %q", gotOrig.Body)
+		}
+		if !bytes.Equal(gotMod.Body, []byte(`{"user":"attacker"}`)) {
+			t.Errorf("modified body roundtrip mismatch: got %q", gotMod.Body)
+		}
 	}
 }
