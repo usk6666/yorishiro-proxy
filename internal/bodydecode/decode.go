@@ -12,8 +12,9 @@
 //     plaintext result to the client with Content-Encoding stripped and
 //     Content-Length recomputed. The ORIGINAL variant's wire bytes are
 //     never touched: they are recorded verbatim via Envelope.Raw and the
-//     "-original" Flow row, preserving CLAUDE.md MITM principle #1 ("do
-//     not normalize what the wire did not normalize"). USK-834.
+//     original-variant Flow row (Metadata["variant"]="original"),
+//     preserving CLAUDE.md MITM principle #1 ("do not normalize what the
+//     wire did not normalize"). USK-834.
 //
 // Other data-path code (internal/layer/, parser, recorder, resend) MUST NOT
 // use this package: storage and resend keep wire fidelity by preserving the
