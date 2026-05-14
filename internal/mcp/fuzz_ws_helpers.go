@@ -505,6 +505,14 @@ func (s *Server) runFuzzWSSingleVariant(ctx context.Context, plan *fuzzWSPlan, p
 	defer cancel()
 
 	respEnv, err := s.runResendWS(rtCtx, variantPlan, sendEnv, p)
+	// USK-882 (parity with USK-789 for resend_ws + USK-832 for fuzz_http):
+	// fuzz_ws bypasses session.RunSession so the proxy-path's OnComplete-
+	// driven Stream finalisation never fires. Without this, the per-variant
+	// Stream created by RecordStep stays pinned at State="active" forever.
+	// Use the parent ctx (not rtCtx) so the terminal UPDATE lands even when
+	// the per-variant request timeout expired — matches the
+	// applyResendWSTag precedent below.
+	finalizeResendStream(ctx, s.flowStore.store, variantPlan.streamID, err)
 	if err != nil {
 		return row, false, err
 	}

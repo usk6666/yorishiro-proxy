@@ -13,10 +13,12 @@ package mcp
 //   AC#4: Legacy `fuzz` tool unaffected (parallel coexistence)
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
 	"net"
+	"net/http"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -26,6 +28,7 @@ import (
 	"go.starlark.net/starlark"
 
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
+	"github.com/usk6666/yorishiro-proxy/internal/layer/ws"
 	"github.com/usk6666/yorishiro-proxy/internal/pluginv2"
 )
 
@@ -605,7 +608,7 @@ func TestFuzzWS_PersistsFuzzJobAndResults(t *testing.T) {
 // "upgrade" error per variant regardless of which payload was
 // substituted.
 func TestFuzzWS_ErrorVariantRecordedAsFuzzResult(t *testing.T) {
-	cs, _, _, _ := setupFuzzWSSession(t)
+	cs, store, _, _ := setupFuzzWSSession(t)
 
 	// Listener that accepts then immediately closes — emulates a
 	// dead-on-arrival upstream that fails the upgrade handshake.
@@ -646,6 +649,25 @@ func TestFuzzWS_ErrorVariantRecordedAsFuzzResult(t *testing.T) {
 	for i, v := range result.Variants {
 		if v.Error == "" {
 			t.Errorf("variants[%d]: Error is empty, want non-empty (upstream closes before upgrade)", i)
+		}
+	}
+
+	// USK-882: every variant Stream must transition to State="error"
+	// when the exchange failed. Without finalizeResendStream in
+	// runFuzzWSSingleVariant the rows stay pinned at "active" and
+	// stream-state filtering would surface completed-but-failed fuzz
+	// variants as still-running.
+	for i, row := range result.Variants {
+		if row.StreamID == "" {
+			continue
+		}
+		s, err := store.GetStream(context.Background(), row.StreamID)
+		if err != nil || s == nil {
+			t.Errorf("variants[%d]: GetStream(%s) err=%v", i, row.StreamID, err)
+			continue
+		}
+		if s.State != "error" {
+			t.Errorf("variants[%d].State = %q, want %q (USK-882: fuzz_ws must finalise failed variants as error)", i, s.State, "error")
 		}
 	}
 
@@ -822,11 +844,9 @@ func TestFuzzWS_FinalizesUnderCallerCancel(t *testing.T) {
 // complete (not hang on the old absorb-pong continue) and surface no
 // error.
 //
-// Note: fuzz_ws does NOT yet call finalizeResendStream per variant (the
-// fuzz_http sibling adopted that pattern in USK-832 but fuzz_ws is
-// untracked). Variant Streams therefore stay at State="active" and we
-// do not assert on State here — out of scope for USK-880; flagged in
-// PR follow-ups.
+// USK-882: fuzz_ws now calls finalizeResendStream per variant (mirror of
+// USK-832 for fuzz_http). The per-variant Stream therefore transitions
+// out of State="active" and we assert State="complete" below.
 func TestFuzzWS_PingAllVariantsComplete(t *testing.T) {
 	cs, store, _, _ := setupFuzzWSSession(t)
 	addr, cleanup := newWSPongOnPingEchoServer(t)
@@ -875,8 +895,219 @@ func TestFuzzWS_PingAllVariantsComplete(t *testing.T) {
 		if row.Opcode != "pong" {
 			t.Errorf("variants[%d].Opcode = %q, want pong", i, row.Opcode)
 		}
-		if _, err := store.GetStream(context.Background(), row.StreamID); err != nil {
+		s, err := store.GetStream(context.Background(), row.StreamID)
+		if err != nil || s == nil {
 			t.Errorf("variants[%d]: GetStream(%s) err=%v", i, row.StreamID, err)
+			continue
+		}
+		// USK-882: every variant Stream must transition out of
+		// State="active" once the exchange returns. Without the
+		// finalizeResendStream call in runFuzzWSSingleVariant, fuzz_ws
+		// bypasses session.RunSession's OnComplete hook so the rows
+		// would stay pinned at "active".
+		if s.State != "complete" {
+			t.Errorf("variants[%d].State = %q, want %q (USK-882: fuzz_ws must finalise variant stream lifecycle)", i, s.State, "complete")
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// USK-882 opcode-coverage tests for the per-variant finalize fix. Each
+// opcode that terminates on an echoed reply (text / binary / close) must
+// leave its variant Stream at State="complete". Pong is exercised
+// separately because the existing echo server has no semantics that lets
+// the receive-loop return naturally on an inbound Pong (it would absorb
+// per RFC 6455 §5.5.3 and re-block).
+// ---------------------------------------------------------------------------
+
+// TestFuzzWS_OpcodeAllVariantsComplete drives text / binary / close
+// opcodes against the shared echo server (newWebSocketEchoServer). Each
+// case verifies every variant's Stream lands at State="complete" after
+// the per-variant finalizeResendStream call in runFuzzWSSingleVariant.
+func TestFuzzWS_OpcodeAllVariantsComplete(t *testing.T) {
+	cases := []struct {
+		name             string
+		opcode           string
+		positionPath     string
+		positionEncoding string
+		payloads         []string
+		extra            map[string]any
+	}{
+		{
+			name:         "text",
+			opcode:       "text",
+			positionPath: "payload",
+			payloads:     []string{"t1", "t2", "t3"},
+		},
+		{
+			name:             "binary",
+			opcode:           "binary",
+			positionPath:     "payload",
+			positionEncoding: "base64",
+			payloads:         []string{"YjE=", "YjI=", "YjM="}, // base64("b1","b2","b3")
+		},
+		{
+			name:         "close",
+			opcode:       "close",
+			positionPath: "close_reason",
+			payloads:     []string{"bye-1", "bye-2", "bye-3"},
+			extra: map[string]any{
+				"close_code": 1000,
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cs, store, _, _ := setupFuzzWSSession(t)
+			addr, cleanup := newWebSocketEchoServer(t)
+			defer cleanup()
+
+			position := map[string]any{
+				"path":     tc.positionPath,
+				"payloads": tc.payloads,
+			}
+			if tc.positionEncoding != "" {
+				position["encoding"] = tc.positionEncoding
+			}
+
+			args := map[string]any{
+				"target_addr": addr,
+				"scheme":      "ws",
+				"path":        "/echo",
+				"opcode":      tc.opcode,
+				"positions":   []map[string]any{position},
+				"timeout_ms":  5000,
+			}
+			for k, v := range tc.extra {
+				args[k] = v
+			}
+
+			result := callFuzzWS(t, cs, args)
+
+			if result.CompletedVariants != len(tc.payloads) {
+				t.Fatalf("CompletedVariants = %d, want %d", result.CompletedVariants, len(tc.payloads))
+			}
+
+			for i, row := range result.Variants {
+				if row.Error != "" {
+					t.Errorf("variants[%d].Error = %q, want empty", i, row.Error)
+				}
+				if row.StreamID == "" {
+					t.Errorf("variants[%d].StreamID is empty", i)
+					continue
+				}
+				s, err := store.GetStream(context.Background(), row.StreamID)
+				if err != nil || s == nil {
+					t.Errorf("variants[%d]: GetStream(%s) err=%v", i, row.StreamID, err)
+					continue
+				}
+				// USK-882: per-variant Stream must transition out of
+				// State="active" — the finalizeResendStream call in
+				// runFuzzWSSingleVariant is what makes this hold.
+				if s.State != "complete" {
+					t.Errorf("variants[%d].State = %q, want %q (USK-882: fuzz_ws must finalise variant stream lifecycle for opcode=%s)", i, s.State, "complete", tc.opcode)
+				}
+			}
+		})
+	}
+}
+
+// newWSReplyOnPongServer accepts the WebSocket upgrade, reads one inbound
+// Pong frame, and writes back a Text frame with payload "ack". The
+// purpose is exclusively to let runResendWS's receive loop return on a
+// non-control frame after the variant sends an unsolicited Pong — the
+// real-world receive-loop semantics absorb an inbound Pong via
+// `continue`, so without a follow-up frame the loop would block until
+// timeout. The reply frame is independent of the variant payload (the
+// test does not assert on it).
+func newWSReplyOnPongServer(t *testing.T) (string, func()) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go handleWSReplyOnPongConn(conn)
+		}
+	}()
+	return ln.Addr().String(), func() { ln.Close() }
+}
+
+func handleWSReplyOnPongConn(conn net.Conn) {
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(5 * time.Second))
+
+	r := bufio.NewReader(conn)
+	if _, err := http.ReadRequest(r); err != nil {
+		return
+	}
+	resp := "HTTP/1.1 101 Switching Protocols\r\n" +
+		"Upgrade: websocket\r\n" +
+		"Connection: Upgrade\r\n" +
+		"Sec-WebSocket-Accept: dummy\r\n" +
+		"\r\n"
+	if _, err := conn.Write([]byte(resp)); err != nil {
+		return
+	}
+	// Read the inbound frame (expected: Pong) then reply with a Text
+	// frame so the runResendWS receive loop terminates on a non-control
+	// frame rather than absorbing the Pong and re-blocking.
+	if _, err := ws.ReadFrame(r); err != nil {
+		return
+	}
+	reply := &ws.Frame{Fin: true, Opcode: ws.OpcodeText, Payload: []byte("ack")}
+	_ = ws.WriteFrame(conn, reply)
+}
+
+// TestFuzzWS_PongAllVariantsComplete exercises the Pong opcode path: the
+// variant sends an unsolicited Pong (RFC 6455 §5.5.4), and the upstream
+// replies with a Text frame so runResendWS's receive loop can terminate
+// on a non-control frame. Without USK-882 each variant's Stream would
+// stay pinned at State="active"; with the finalize call it transitions
+// to State="complete".
+func TestFuzzWS_PongAllVariantsComplete(t *testing.T) {
+	cs, store, _, _ := setupFuzzWSSession(t)
+	addr, cleanup := newWSReplyOnPongServer(t)
+	defer cleanup()
+
+	payloads := []string{"p1", "p2", "p3"}
+	result := callFuzzWS(t, cs, map[string]any{
+		"target_addr": addr,
+		"scheme":      "ws",
+		"path":        "/echo",
+		"opcode":      "pong",
+		"positions": []map[string]any{
+			{"path": "payload", "payloads": payloads},
+		},
+		"timeout_ms": 5000,
+	})
+
+	if result.CompletedVariants != len(payloads) {
+		t.Fatalf("CompletedVariants = %d, want %d", result.CompletedVariants, len(payloads))
+	}
+	for i, row := range result.Variants {
+		if row.Error != "" {
+			t.Errorf("variants[%d].Error = %q, want empty", i, row.Error)
+		}
+		if row.StreamID == "" {
+			t.Errorf("variants[%d].StreamID is empty", i)
+			continue
+		}
+		s, err := store.GetStream(context.Background(), row.StreamID)
+		if err != nil || s == nil {
+			t.Errorf("variants[%d]: GetStream(%s) err=%v", i, row.StreamID, err)
+			continue
+		}
+		// USK-882: per-variant Stream must transition out of State="active"
+		// even when the send opcode is a control frame (Pong).
+		if s.State != "complete" {
+			t.Errorf("variants[%d].State = %q, want %q (USK-882: fuzz_ws pong variants must finalise)", i, s.State, "complete")
 		}
 	}
 }
