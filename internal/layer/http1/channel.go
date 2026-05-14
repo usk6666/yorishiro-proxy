@@ -869,7 +869,13 @@ func pickStreamingBody(rawResp *parser.RawResponse, rawReader io.Reader) io.Read
 	if rawResp == nil {
 		return rawReader
 	}
-	if responseUsesChunkedTE(rawResp) {
+	// Chunked TE: per RFC 7230 §3.3.1 chunked is only valid on HTTP/1.1
+	// and above. parser.IsChunked is a pure header check (does not
+	// consider Proto); the HTTP/1.0 short-circuit below routes
+	// HTTP/1.0 responses to rawResp.Body regardless of any
+	// Transfer-Encoding header — that matches parser.resolveResponseBody
+	// which skips chunked decode on HTTP/1.0.
+	if rawResp.Proto != "HTTP/1.0" && parser.IsChunked(rawResp.Headers) {
 		return rawResp.Body
 	}
 	if rawResp.Proto == "HTTP/1.0" || responseConnectionClose(rawResp) {
@@ -883,24 +889,6 @@ func pickStreamingBody(rawResp *parser.RawResponse, rawReader io.Reader) io.Read
 	// stream continues indefinitely. (The parser would hand us a
 	// zero-length identity reader here.)
 	return rawReader
-}
-
-// responseUsesChunkedTE mirrors the parser's chunked-TE detection (see
-// parser.hasChunkedTE, kept package-private) so we can decide framing
-// at the channel layer without exposing internals.
-func responseUsesChunkedTE(rawResp *parser.RawResponse) bool {
-	if rawResp.Proto == "HTTP/1.0" {
-		return false
-	}
-	for _, te := range rawResp.Headers.Values("Transfer-Encoding") {
-		// Trim and compare each comma-separated token case-insensitively.
-		for _, tok := range strings.Split(te, ",") {
-			if strings.EqualFold(strings.TrimSpace(tok), "chunked") {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 // responseConnectionClose reports whether the response carries a
