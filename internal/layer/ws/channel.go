@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -266,6 +267,22 @@ func (c *wsChannel) Next(ctx context.Context) (*envelope.Envelope, error) {
 		return nil, err
 	}
 
+	// USK-880: propagate ctx.Deadline() to the underlying conn so callers
+	// that wrap ctx with WithTimeout (e.g. handleResendWS at rtCtx) see
+	// the wire read fail at deadline instead of blocking until peer EOF.
+	// Mirrors internal/layer/bytechunk/channel.go:43-50. The closer is a
+	// net.Conn in all production paths (resend_ws, proxybuild); test paths
+	// that wire io.Pipe-style synthetic readers degrade to no-op via the
+	// type-assertion miss, which is the intended fail-soft behavior.
+	if deadline, ok := ctx.Deadline(); ok {
+		if setter, ok := c.layer.closer.(interface {
+			SetReadDeadline(time.Time) error
+		}); ok {
+			_ = setter.SetReadDeadline(deadline)
+			defer setter.SetReadDeadline(time.Time{}) //nolint:errcheck
+		}
+	}
+
 	// Cached terminal state from a previous Next or a prior Send error:
 	// surface immediately. Checked BEFORE the closeSeen short-circuit so a
 	// prior StreamError is never masked by io.EOF if a future refactor
@@ -292,6 +309,13 @@ func (c *wsChannel) Next(ctx context.Context) (*envelope.Envelope, error) {
 	// hot path is unaffected after the first frame.
 	c.logFirstNext(frame, raw, err)
 	if err != nil {
+		// USK-880: deadline-fired reads must surface as canonical
+		// context.DeadlineExceeded so callers (resend_ws) can wrap the
+		// error consistently with other timeout paths. mapReadError would
+		// otherwise classify the net.OpError as ErrorProtocol.
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
 		return nil, c.mapReadError(err, raw)
 	}
 

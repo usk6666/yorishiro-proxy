@@ -745,8 +745,12 @@ func buildResendWSLayerOpts(plan *resendWSPlan, extensionHeader string) []ws.Opt
 
 // runResendWSReceiveLoop reads frames from ch, runs each through the
 // resend Pipeline, auto-Pongs any incoming Pings (control-frame bypass),
-// continues on incoming Pongs, and returns the first non-control frame
-// (or Close) as the terminating envelope.
+// and returns a terminating envelope. Pong handling is plan-aware
+// (USK-880): when the local plan opcode is Ping, the first inbound Pong
+// terminates the loop (RFC 6455 §5.5.3 — a Pong is the canonical reply
+// to a Ping). For any other plan opcode the inbound Pong is treated as
+// an upstream-initiated keepalive reply and absorbed via continue, so a
+// text/binary/close plan still completes on the first non-control frame.
 func runResendWSReceiveLoop(ctx context.Context, plan *resendWSPlan, ch interface {
 	Next(context.Context) (*envelope.Envelope, error)
 	Send(context.Context, *envelope.Envelope) error
@@ -783,6 +787,15 @@ func runResendWSReceiveLoop(ctx context.Context, plan *resendWSPlan, ch interfac
 			}
 			continue
 		case envelope.WSPong:
+			// Plan-aware completion (USK-880): a local Ping plan
+			// terminates on the first inbound Pong regardless of
+			// payload match (both frames are already recorded by the
+			// Pipeline, so an operator inspecting the flow sees any
+			// payload mismatch). For non-Ping plans, an inbound Pong is
+			// an upstream-initiated keepalive reply we absorb.
+			if plan.opcode == envelope.WSPing {
+				return respEnv, nil
+			}
 			continue
 		default:
 			return respEnv, nil

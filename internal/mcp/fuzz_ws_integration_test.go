@@ -814,3 +814,69 @@ func TestFuzzWS_FinalizesUnderCallerCancel(t *testing.T) {
 		t.Errorf("fuzz_jobs.completed_at = nil after caller cancel; finalize did not land")
 	}
 }
+
+// TestFuzzWS_PingAllVariantsComplete is the USK-880 regression gate on
+// the fuzz_ws side: fuzz_ws reuses runResendWS per variant, so the
+// shared receive-loop fix must propagate. Each variant sends a Ping
+// against an upstream that replies with a Pong; every variant must
+// complete (not hang on the old absorb-pong continue) and surface no
+// error.
+//
+// Note: fuzz_ws does NOT yet call finalizeResendStream per variant (the
+// fuzz_http sibling adopted that pattern in USK-832 but fuzz_ws is
+// untracked). Variant Streams therefore stay at State="active" and we
+// do not assert on State here — out of scope for USK-880; flagged in
+// PR follow-ups.
+func TestFuzzWS_PingAllVariantsComplete(t *testing.T) {
+	cs, store, _, _ := setupFuzzWSSession(t)
+	addr, cleanup := newWSPongOnPingEchoServer(t)
+	defer cleanup()
+
+	payloads := []string{"p1", "p2", "p3"}
+
+	done := make(chan struct{})
+	var result *fuzzWSResult
+	go func() {
+		result = callFuzzWS(t, cs, map[string]any{
+			"target_addr": addr,
+			"scheme":      "ws",
+			"path":        "/echo",
+			"opcode":      "ping",
+			"positions": []map[string]any{
+				{"path": "payload", "payloads": payloads},
+			},
+			"timeout_ms": 5000,
+		})
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("fuzz_ws ping did not complete within 5s; USK-880 regression (ping variants hang)")
+	}
+
+	if result.TotalVariants != len(payloads) {
+		t.Errorf("TotalVariants = %d, want %d", result.TotalVariants, len(payloads))
+	}
+	if result.CompletedVariants != len(payloads) {
+		t.Errorf("CompletedVariants = %d, want %d", result.CompletedVariants, len(payloads))
+	}
+	for i, row := range result.Variants {
+		if row.Error != "" {
+			t.Errorf("variants[%d].Error = %q, want empty", i, row.Error)
+		}
+		if row.StreamID == "" {
+			t.Errorf("variants[%d].StreamID is empty", i)
+			continue
+		}
+		// Each variant terminated on a Pong frame: opcode must be "pong"
+		// (proves the ping plan returned on the matching reply rather
+		// than absorbing it and hanging until a later frame).
+		if row.Opcode != "pong" {
+			t.Errorf("variants[%d].Opcode = %q, want pong", i, row.Opcode)
+		}
+		if _, err := store.GetStream(context.Background(), row.StreamID); err != nil {
+			t.Errorf("variants[%d]: GetStream(%s) err=%v", i, row.StreamID, err)
+		}
+	}
+}

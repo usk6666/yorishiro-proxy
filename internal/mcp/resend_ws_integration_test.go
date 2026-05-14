@@ -475,3 +475,228 @@ func truncate(s string, n int) string {
 
 // extractTextContent extracts the first text content block from a tool result.
 var _ = json.Marshal // keep encoding/json import live for future result-shape helpers
+
+// newWSPongOnPingEchoServer accepts an HTTP Upgrade, reads one inbound
+// Ping frame, and writes back a Pong frame with the same payload (RFC
+// 6455 §5.5.3). Used by TestResendWS_PingFrame_RoundTrip to verify the
+// USK-880 fix: a local Ping plan must complete on the upstream's Pong
+// rather than continuing to block (the old behaviour absorbed the Pong
+// via the unconditional `continue` in runResendWSReceiveLoop).
+func newWSPongOnPingEchoServer(t *testing.T) (string, func()) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go handleWSPongOnPingConn(conn)
+		}
+	}()
+	return ln.Addr().String(), func() { ln.Close() }
+}
+
+func handleWSPongOnPingConn(conn net.Conn) {
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(5 * time.Second))
+
+	r := bufio.NewReader(conn)
+	if _, err := http.ReadRequest(r); err != nil {
+		return
+	}
+	resp := "HTTP/1.1 101 Switching Protocols\r\n" +
+		"Upgrade: websocket\r\n" +
+		"Connection: Upgrade\r\n" +
+		"Sec-WebSocket-Accept: dummy\r\n" +
+		"\r\n"
+	if _, err := conn.Write([]byte(resp)); err != nil {
+		return
+	}
+	frame, err := ws.ReadFrame(r)
+	if err != nil {
+		return
+	}
+	// Reply with Pong (opcode=0xA) carrying the same payload regardless
+	// of inbound opcode. Real upstreams only Pong-reply to Pings, but the
+	// helper is single-purpose for the ping test so we keep it simple.
+	pong := &ws.Frame{Fin: true, Opcode: ws.OpcodePong, Payload: frame.Payload}
+	_ = ws.WriteFrame(conn, pong)
+}
+
+// newWSSinkServer accepts an HTTP Upgrade and completes the WebSocket
+// handshake, but then blocks reading on the connection without ever
+// sending a frame. Used by TestResendWS_PingFrame_TimeoutOnSinkUpstream
+// to verify the USK-880 deadline plumbing: a `timeout_ms` request must
+// fire the read-deadline before the ~60s MCP RPC layer timeout.
+func newWSSinkServer(t *testing.T) (string, func()) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go handleWSSinkConn(conn)
+		}
+	}()
+	return ln.Addr().String(), func() { ln.Close() }
+}
+
+func handleWSSinkConn(conn net.Conn) {
+	defer conn.Close()
+	// Long-enough deadline that the per-test timeout fires first.
+	conn.SetDeadline(time.Now().Add(30 * time.Second))
+
+	r := bufio.NewReader(conn)
+	if _, err := http.ReadRequest(r); err != nil {
+		return
+	}
+	resp := "HTTP/1.1 101 Switching Protocols\r\n" +
+		"Upgrade: websocket\r\n" +
+		"Connection: Upgrade\r\n" +
+		"Sec-WebSocket-Accept: dummy\r\n" +
+		"\r\n"
+	if _, err := conn.Write([]byte(resp)); err != nil {
+		return
+	}
+	// Drain inbound bytes silently until the client closes. Never write
+	// a frame back, never respond to Pings — that is the failure mode
+	// USK-880 protects against.
+	io.Copy(io.Discard, r)
+}
+
+// TestResendWS_PingFrame_RoundTrip verifies the USK-880 happy path: a
+// resend_ws call with opcode=ping completes when the upstream sends a
+// Pong, the Stream's terminal state is "complete" (not "active"), and
+// the call returns well within the configured timeout_ms.
+func TestResendWS_PingFrame_RoundTrip(t *testing.T) {
+	cs, store, _, _ := setupResendWSSession(t)
+	addr, cleanup := newWSPongOnPingEchoServer(t)
+	defer cleanup()
+	streamID := seedResendWSFlow(t, store, addr, false)
+
+	pingPayload := "ping-payload"
+	done := make(chan struct{})
+	var res *gomcp.CallToolResult
+	go func() {
+		res = callResendWS(t, cs, map[string]any{
+			"flow_id":    streamID,
+			"opcode":     "ping",
+			"payload":    pingPayload,
+			"timeout_ms": 5000,
+		})
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("resend_ws ping did not complete within 3s; USK-880 regression (loop should return on first Pong)")
+	}
+
+	if res.IsError {
+		t.Fatalf("tool returned error: %s", extractTextContent(res))
+	}
+	var out resendWSResult
+	decodeStructuredResult(t, res, &out)
+	if out.Opcode != "pong" {
+		t.Errorf("Opcode = %q, want pong", out.Opcode)
+	}
+	// Pong payloads are encoded as base64 (encodeResendWSPayload only
+	// treats Text/Close as text). Decode and compare.
+	gotPayload, err := base64.StdEncoding.DecodeString(out.Payload)
+	if err != nil {
+		t.Fatalf("decode base64 pong payload: %v", err)
+	}
+	if string(gotPayload) != pingPayload {
+		t.Errorf("Payload = %q, want %q", string(gotPayload), pingPayload)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	stream, err := store.GetStream(ctx, out.StreamID)
+	if err != nil {
+		t.Fatalf("GetStream(%s): %v", out.StreamID, err)
+	}
+	if stream.State != "complete" {
+		t.Errorf("Stream.State = %q, want %q (USK-789: ping plan must finalise lifecycle)", stream.State, "complete")
+	}
+}
+
+// TestResendWS_PingFrame_TimeoutOnSinkUpstream verifies the USK-880
+// deadline plumbing in internal/layer/ws/channel.go: against an upstream
+// that completes the WS handshake but never writes a frame, a
+// timeout_ms=500 must surface a timeout error well below the ~60s MCP
+// RPC layer timeout, and the Stream must transition to state=error
+// (not stay at active).
+func TestResendWS_PingFrame_TimeoutOnSinkUpstream(t *testing.T) {
+	cs, store, _, _ := setupResendWSSession(t)
+	addr, cleanup := newWSSinkServer(t)
+	defer cleanup()
+	streamID := seedResendWSFlow(t, store, addr, false)
+
+	done := make(chan struct{})
+	var res *gomcp.CallToolResult
+	start := time.Now()
+	go func() {
+		res, _ = cs.CallTool(context.Background(), &gomcp.CallToolParams{
+			Name: "resend_ws",
+			Arguments: map[string]any{
+				"flow_id":    streamID,
+				"opcode":     "ping",
+				"payload":    "p",
+				"timeout_ms": 500,
+			},
+		})
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("resend_ws ping did not surface a timeout within 2s; USK-880 regression (SetReadDeadline not plumbed)")
+	}
+	elapsed := time.Since(start)
+	if elapsed > 1500*time.Millisecond {
+		t.Errorf("resend_ws ping took %s; want < 1.5s (timeout_ms=500 must fire)", elapsed)
+	}
+
+	if res == nil || !res.IsError {
+		t.Fatalf("expected IsError=true for sink upstream; got %+v", res)
+	}
+	body := strings.ToLower(extractTextContent(res))
+	if !strings.Contains(body, "deadline") && !strings.Contains(body, "context") && !strings.Contains(body, "timeout") {
+		t.Errorf("error %q does not mention deadline/context/timeout", body)
+	}
+
+	// Locate the new Stream the resend created. seedResendWSFlow's stream
+	// is the "recovered" upgrade record; resend_ws creates its own
+	// resend-time Stream and the synthetic send envelope's StreamID is
+	// what finalizeResendStream marks. Walk the store to find the most
+	// recent Stream with the resend marker.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	streams, err := store.ListStreams(ctx, flow.StreamListOptions{Limit: 10})
+	if err != nil {
+		t.Fatalf("ListStreams: %v", err)
+	}
+	foundErr := false
+	for _, s := range streams {
+		if s.ID == streamID {
+			continue // recovered upgrade Stream, not the resend Stream
+		}
+		if s.State == "error" {
+			foundErr = true
+			break
+		}
+	}
+	if !foundErr {
+		t.Errorf("no Stream in state=error after timeout; USK-789 finalisation should mark resend Stream as error")
+	}
+}
