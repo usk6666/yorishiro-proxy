@@ -4,38 +4,21 @@ package connector_test
 
 import (
 	"context"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
 	"crypto/tls"
-	"crypto/x509"
-	"crypto/x509/pkix"
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
-	"math/big"
 	"net"
 	gohttp "net/http"
 	"os"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
 	xhttp2 "golang.org/x/net/http2"
 
-	"github.com/usk6666/yorishiro-proxy/internal/cert"
-	"github.com/usk6666/yorishiro-proxy/internal/config"
-	"github.com/usk6666/yorishiro-proxy/internal/connector"
-	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
-	"github.com/usk6666/yorishiro-proxy/internal/layer"
-	"github.com/usk6666/yorishiro-proxy/internal/layer/http2"
-	"github.com/usk6666/yorishiro-proxy/internal/layer/httpaggregator"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/ws"
-	"github.com/usk6666/yorishiro-proxy/internal/pipeline"
-	"github.com/usk6666/yorishiro-proxy/internal/session"
 )
 
 // ---------------------------------------------------------------------------
@@ -217,36 +200,6 @@ func startWSSOverH2Upstream(t *testing.T) (string, func()) {
 	}
 }
 
-// newWSSOverH2TestTLSConfig builds a TLS config with a fresh self-signed
-// leaf cert and ALPN=[h2]. Used by the upstream test fixture and by the
-// MITM-issued cert when the proxy MITMs the inner TLS handshake.
-func newWSSOverH2TestTLSConfig(t *testing.T) *tls.Config {
-	t.Helper()
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatalf("generate ECDSA key: %v", err)
-	}
-	tmpl := &x509.Certificate{
-		SerialNumber: big.NewInt(1),
-		Subject:      pkix.Name{CommonName: "test-wss-over-h2"},
-		NotBefore:    time.Now(),
-		NotAfter:     time.Now().Add(time.Hour),
-		KeyUsage:     x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-		DNSNames:     []string{"test-wss-over-h2"},
-		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1")},
-	}
-	certDER, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
-	if err != nil {
-		t.Fatalf("create cert: %v", err)
-	}
-	return &tls.Config{
-		Certificates: []tls.Certificate{{Certificate: [][]byte{certDER}, PrivateKey: key}},
-		NextProtos:   []string{"h2"},
-		MinVersion:   tls.VersionTLS12,
-	}
-}
-
 // driveWSSOverH2EchoThroughProxy opens a CONNECT tunnel to upstreamAddr
 // via proxyAddr, TLS-handshakes with ALPN=[h2] inside the tunnel, opens
 // an extended CONNECT request on the resulting h2 transport, sends one
@@ -347,142 +300,7 @@ func driveWSSOverH2EchoThroughProxy(proxyAddr, upstreamAddr, payload string) err
 	return nil
 }
 
-// startFullListenerProxyWithH2 starts a FullListener + CONNECT handler
-// wired with both an OnStack callback (HTTP/1.x - copy of the helper in
-// startFullListenerProxy) and an OnHTTP2Stack callback that mirrors
-// proxybuild.buildOnHTTP2Stack: per-stream DispatchH2StreamWithOpts +
-// session.RunStackSessionExchange so the upgrade-aware swap path
-// (runUpgradeWSOverH2) is reachable. Returns (proxyAddr, store, wg).
-func startFullListenerProxyWithH2(
-	t *testing.T,
-	ctx context.Context,
-) (string, *testStore, *sync.WaitGroup) {
-	t.Helper()
-
-	ca := &cert.CA{}
-	if err := ca.Generate(); err != nil {
-		t.Fatal(err)
-	}
-	issuer := cert.NewIssuer(ca)
-
-	store := &testStore{}
-	wg := &sync.WaitGroup{}
-
-	buildCfg := &connector.BuildConfig{
-		ProxyConfig:        &config.ProxyConfig{},
-		Issuer:             issuer,
-		InsecureSkipVerify: true,
-	}
-	connectNeg := connector.NewCONNECTNegotiator(slog.Default())
-
-	// Same minimal Pipeline used by the existing tests: HostScope (no
-	// scope == allow all) + RecordStep so the test can introspect the
-	// recorded streams/flows. No Safety/Intercept/Transform - those
-	// would need engine plumbing.
-	steps := []pipeline.Step{
-		pipeline.NewHostScopeStep(nil),
-		pipeline.NewRecordStep(store, slog.Default()),
-		session.NewUpgradeStep(),
-	}
-	p := pipeline.New(steps...)
-
-	// OnComplete writes back Stream state so the recorder reflects
-	// terminal state - required for the protocol retag assertion to be
-	// observable post-test.
-	sessOpts := session.SessionOptions{
-		OnComplete: func(cbCtx context.Context, streamID string, err error) {
-			if streamID == "" {
-				return
-			}
-			state := "complete"
-			if err != nil && !errors.Is(err, io.EOF) {
-				state = "error"
-			}
-			_ = store.UpdateStream(cbCtx, streamID, flow.StreamUpdate{
-				State:         state,
-				FailureReason: session.ClassifyError(err),
-			})
-		},
-	}
-
-	onStack := func(ctx context.Context, stack *connector.ConnectionStack, _, _ *envelope.TLSSnapshot, _ string) {
-		defer wg.Done()
-		defer stack.Close()
-		clientCh := <-stack.ClientTopmost().Channels()
-		_ = session.RunSession(ctx, clientCh, func(_ context.Context, _ *envelope.Envelope) (layer.Channel, error) {
-			return <-stack.UpstreamTopmost().Channels(), nil
-		}, p, sessOpts)
-	}
-
-	// OnHTTP2Stack: same recipe as proxybuild.buildOnHTTP2Stack but
-	// inlined here so the test does not depend on proxybuild
-	// internals. Each stream is dispatched via
-	// connector.DispatchH2Stream + session.RunStackSessionExchange so
-	// the wss-over-h2 swap orchestrator (runUpgradeWSOverH2) reaches
-	// the live data path.
-	onHTTP2Stack := func(ctx context.Context, stack *connector.ConnectionStack, upstreamH2 *http2.Layer, _, _ *envelope.TLSSnapshot, _ string) {
-		defer wg.Done()
-		clientL, ok := stack.ClientTopmost().(*http2.Layer)
-		if !ok {
-			return
-		}
-		clientLOpts := httpaggregator.OptionsFromLayer(clientL)
-		upstreamLOpts := httpaggregator.OptionsFromLayer(upstreamH2)
-
-		var streamWG sync.WaitGroup
-		for {
-			select {
-			case <-ctx.Done():
-				streamWG.Wait()
-				return
-			case clientCh, ok := <-clientL.Channels():
-				if !ok {
-					streamWG.Wait()
-					return
-				}
-				streamWG.Add(1)
-				go func(ch layer.Channel) {
-					defer streamWG.Done()
-					aggCh, derr := connector.DispatchH2Stream(ctx, ch, httpaggregator.RoleServer, clientLOpts, slog.Default())
-					if derr != nil {
-						_ = ch.Close()
-						return
-					}
-					dial := func(dctx context.Context, env *envelope.Envelope) (layer.Channel, error) {
-						upCh, oerr := upstreamH2.OpenStream(dctx)
-						if oerr != nil {
-							return nil, oerr
-						}
-						var reqProto envelope.Protocol
-						if env != nil {
-							reqProto = env.Protocol
-						}
-						return connector.WrapH2UpstreamForDispatch(upCh, reqProto, upstreamLOpts, nil, nil), nil
-					}
-					_ = session.RunStackSessionExchange(ctx, stack, aggCh, dial, p, sessOpts)
-				}(clientCh)
-			}
-		}
-	}
-
-	flCfg := connector.FullListenerConfig{
-		Name: "test-wss-h2",
-		Addr: "127.0.0.1:0",
-		OnCONNECT: connector.NewCONNECTHandler(connector.CONNECTHandlerConfig{
-			Negotiator:   connectNeg,
-			BuildCfg:     buildCfg,
-			OnStack:      onStack,
-			OnHTTP2Stack: onHTTP2Stack,
-		}),
-	}
-
-	fl := connector.NewFullListener(flCfg)
-	go fl.Start(ctx)
-
-	select {
-	case <-fl.Ready():
-	case <-time.After(5 * time.Second):
-		t.Fatal("timeout waiting for FullListener to be ready")
-	}
-	return fl.Addr(), store, wg
-}
+// startFullListenerProxyWithH2 and newWSSOverH2TestTLSConfig were moved to
+// h2_test_helpers_test.go (build tag e2e) so the SSE-over-h2 smoke-tier
+// test (USK-888) can consume them without duplicating ~150 LOC. The
+// behavior is unchanged.

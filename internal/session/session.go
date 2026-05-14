@@ -677,6 +677,8 @@ func RunStackSessionExchange(
 		return runUpgradeWSOverH2(ctx, stack, p, userOpt, clientCh, upstreamCh, notice.WSUpgradeRequest(), notice.WSExtensionHeader())
 	case UpgradeSSE:
 		return runUpgradeSSE(ctx, stack, dial, p, userOpt, upstreamCh, notice.SSEFirstResponse())
+	case UpgradeSSEOverH2:
+		return runUpgradeSSEOverH2(ctx, stack, p, userOpt, clientCh, upstreamCh, notice.SSEFirstResponse())
 	default:
 		// ErrUpgradePending without a kind set is a logic bug; surface it
 		// rather than silently looping.
@@ -1757,6 +1759,229 @@ type eofReader struct{}
 
 // Read implements io.Reader; it always returns (0, io.EOF).
 func (eofReader) Read(_ []byte) (int, error) { return 0, io.EOF }
+
+// runUpgradeSSEOverH2 performs the per-stream SSE-over-h2 swap (RFC-001
+// §3.4.1 per-stream sub-stack overlay). The connection-level Layers
+// stay *http2.Layer for sibling streams (RFC-001 §3.4.1 multiplex-
+// isolation MUST); only the affected stream's DATA byte stream is
+// routed to the C-event boundary reader via
+// http2.Layer.DetachStream on both sides.
+//
+// ## Relationship to runUpgradeSSE (h1)
+//
+// This orchestrator mirrors the post-USK-890 h1 path:
+//
+//   - sse.NewEventBoundaryReader chunks the upstream byte stream at
+//     SSE event boundaries.
+//   - Each raw event chunk is parsed to an *envelope.Envelope and run
+//     through the Pipeline.
+//   - Modification detection is snapshot-based (sseMessageMutated)
+//     against the pre-Pipeline *envelope.SSEMessage value, NOT
+//     bytes.Equal against sse.EncodeWireBytes output (that would
+//     mis-flag every event whose upstream wire order differs from the
+//     encoder's canonical order and rewrite unmutated traffic).
+//   - Unchanged events emit raw bytes verbatim; modified events
+//     re-encode via sse.EncodeWireBytes; Drop events skip the write.
+//
+// The h2 path consumes the same driveSSEEventLoop helper as h1 with
+// chunkedTE=false: HTTP/2 forbids Transfer-Encoding: chunked
+// (RFC 9113 §8.2.2) and DATA frames carry their own framing, so the
+// per-event chunked rewrap and the "0\r\n\r\n" terminator that h1
+// emits do not apply here.
+//
+// ## Asymmetric sub-stack registration (RFC 8895 §6)
+//
+// SSE is half-duplex server→client. The client-side h2 stream still
+// needs a writer so DATA frames can be forwarded to the browser, but
+// the proxy never reads SSE-content from the client side. We therefore:
+//
+//   - call upstreamH2.DetachStream to peel framing on the upstream
+//     side; the returned io.ReadCloser feeds the EventBoundaryReader,
+//   - call clientH2.DetachStream solely to obtain the writer for
+//     forwarding event bytes; the client reader is closed immediately,
+//   - register only the upstream sse.Channel adapter on the sub-stack
+//     map via RegisterUpstreamOnlySubStack. ClientTopmostForStream
+//     falls through to the connection-level h2 Layer (correct — no
+//     traffic to route in the read direction).
+//
+// This contrasts with runUpgradeWSOverH2 (full-duplex; registers both
+// sides) and is the rationale-bearing documentation point a future
+// reader should consult before "symmetrising" this code.
+//
+// ## Wire forwarding
+//
+// Unlike the prior USK-888 io.TeeReader implementation (deleted along
+// with clientWriteEOFSink in USK-890), the C-event base writes one
+// complete event at a time via writeEventToClient. The h2 detach
+// writer re-frames the bytes as one or more DATA frames on the
+// matching client stream id; END_STREAM is propagated on the deferred
+// cW.Close so the browser observes graceful end-of-stream rather than
+// RST_STREAM(CANCEL).
+//
+// ## Lifetime
+//
+// On terminal state (graceful EOF, error, or context cancel), the
+// sub-stack is released so the per-stream sse.Channel is closed and
+// the connection-level h2 Layer is the sole reference to the stream
+// id again (RFC-001 §3.4.1 lifetime MUST). The detach closers
+// (client + upstream) fire from defers; the client-side cW.Close
+// runs BEFORE cClose so the empty END_STREAM DATA frame is sent
+// before the underlying conn-level close cascade.
+//
+// firstResp must be the cached SSE response envelope captured by
+// UpgradeStep at observation time (notice.SSEFirstResponse()). When
+// non-nil it provides real Context (TLS / ConnID / Authority) and
+// the wire-observed headers to sse.Wrap; the wrapper is constructed
+// with WithSkipFirstEmit so the response envelope already projected
+// by the pre-swap Pipeline is not re-emitted. A nil firstResp is
+// tolerated for the test paths that drive runUpgradeSSEOverH2
+// directly.
+//
+// USK-888 / USK-890.
+func runUpgradeSSEOverH2(
+	ctx context.Context,
+	stack *connector.ConnectionStack,
+	p *pipeline.Pipeline,
+	userOpt SessionOptions,
+	clientCh, upstreamCh layer.Channel,
+	firstResp *envelope.Envelope,
+) (retErr error) {
+	clientH2, upstreamH2, err := h2LayersFromStack(stack)
+	if err != nil {
+		return err
+	}
+
+	clientStreamID, upstreamStreamID, err := h2StreamIDsForUpgrade(clientCh, upstreamCh)
+	if err != nil {
+		return err
+	}
+
+	// Detach the upstream-side per-stream byte reader. END_STREAM →
+	// io.EOF on the reader; RST_STREAM → wrapped *layer.StreamError.
+	// The writer side is unused (SSE is server→client) but the closer
+	// must run on terminal state.
+	uR, _, uClose, err := upstreamH2.DetachStream(upstreamStreamID)
+	if err != nil {
+		return fmt.Errorf("session: detach upstream h2 stream %d (sse): %w", upstreamStreamID, err)
+	}
+	defer func() { _ = uClose() }()
+
+	// Detach the client-side writer so SSE event bytes round-trip to
+	// the browser. The reader is closed immediately — SSE is server→
+	// client only, and the proxy must not read SSE-content from the
+	// client side. The multiplex isolation rule lives in
+	// http2.Layer.DetachStream itself, so sibling streams are
+	// unaffected. USK-888.
+	cR, cW, cClose, err := clientH2.DetachStream(clientStreamID)
+	if err != nil {
+		return fmt.Errorf("session: detach client h2 stream %d (sse): %w", clientStreamID, err)
+	}
+	_ = cR.Close()
+	defer func() {
+		// USK-888: cW.Close emits an empty END_STREAM DATA frame on
+		// the client stream so the test client / browser observes
+		// graceful end-of-stream rather than a RST_STREAM(CANCEL)
+		// projected by cClose / inner h2 channel.Close on a stream
+		// the proxy has not END_STREAM'd locally. detachWriter.Close
+		// is idempotent (sync.Mutex + closed flag) so calling it
+		// from this defer is safe even if a future failure path
+		// closes the writer earlier. Sequencing matters: half-close
+		// before connection close.
+		_ = cW.Close()
+		_ = cClose()
+	}()
+
+	// firstResp placeholder for direct-test paths; production always
+	// reaches here via UpgradeStep with a real Receive envelope.
+	wrapOpts := []sse.Option{}
+	if firstResp == nil {
+		firstResp = &envelope.Envelope{
+			StreamID:  upstreamCh.StreamID(),
+			Direction: envelope.Receive,
+			Protocol:  envelope.ProtocolHTTP,
+			Message: &envelope.HTTPMessage{
+				Status:      200,
+				HTTPVersion: envelope.HTTPVersionH2,
+				Headers:     []envelope.KeyValue{{Name: "content-type", Value: "text/event-stream"}},
+			},
+		}
+	} else {
+		// Production path: the response was already recorded
+		// pre-swap; suppress the duplicate emit so the analyst
+		// sees one Receive flow per HTTP response, not two.
+		wrapOpts = append(wrapOpts, sse.WithSkipFirstEmit())
+	}
+	if userOpt.SSEMaxEventSize > 0 {
+		wrapOpts = append(wrapOpts, sse.WithMaxEventSize(userOpt.SSEMaxEventSize))
+	}
+
+	// Install the SSE Channel as the upstream topmost via the
+	// per-stream sub-stack. We pass eofReader{} as the body source
+	// because the real body bytes are consumed by the C-event
+	// boundary reader below — NOT by sseCh.Next. The Channel is
+	// still installed for stack-introspection symmetry with the
+	// runUpgradeWSOverH2 swap path; downstream consumers
+	// (UpgradeStep introspection, tests asserting "swap installed")
+	// observe a non-http2 top for this stream.
+	sseCh := sse.Wrap(upstreamCh, firstResp, eofReader{}, wrapOpts...)
+	adapter := newSSELayerAdapter(sseCh)
+
+	// Stable session-scope identifier — the firstResp.StreamID was
+	// minted when the pre-swap aggregator emitted the response
+	// HEADERS, so the post-swap SSE event envelopes line up under
+	// the same flow.Stream as the GET request and the 2xx response.
+	sessionStreamID := firstResp.StreamID
+	nextSeq := firstResp.Sequence + 1
+	flowCtx := firstResp.Context
+
+	// USK-888 asymmetric sub-stack registration (see function-level
+	// doc comment for the RFC 8895 §6 rationale).
+	if regErr := stack.RegisterUpstreamOnlySubStack(sessionStreamID, adapter); regErr != nil {
+		_ = adapter.Close()
+		return fmt.Errorf("session: register upstream-only sub-stack for stream %d (%s): %w", upstreamStreamID, sessionStreamID, regErr)
+	}
+	defer func() {
+		if relErr := stack.ReleaseStreamSubStack(sessionStreamID); relErr != nil && retErr == nil {
+			retErr = relErr
+		}
+	}()
+
+	// Sanity-check that lookups resolve correctly. Defends against a
+	// silent registration failure that would otherwise let the
+	// post-swap session hand the connection-level h2 Layer back to a
+	// consumer — a multiplex-isolation violation invisible at the
+	// call site.
+	if got := stack.UpstreamTopmostForStream(sessionStreamID); got != adapter {
+		return fmt.Errorf("session: UpstreamTopmostForStream(%s) returned %T, expected registered sse adapter", sessionStreamID, got)
+	}
+
+	maxEvent := sse.DefaultMaxEventSize
+	if userOpt.SSEMaxEventSize > 0 {
+		maxEvent = userOpt.SSEMaxEventSize
+	}
+
+	defer func() {
+		if errors.Is(retErr, ErrUpgradePending) {
+			// Defensive: SSE has no nested upgrade. If we ever
+			// propagate ErrUpgradePending it would be a logic bug
+			// and should not surface to userOpt.OnComplete, which
+			// expects a terminal session result.
+			return
+		}
+		if userOpt.OnComplete != nil {
+			userOpt.OnComplete(context.WithoutCancel(ctx), sessionStreamID, retErr)
+		}
+	}()
+
+	// HTTP/2 forbids Transfer-Encoding: chunked (RFC 9113 §8.2.2),
+	// so chunkedTE is always false on the h2 path. driveSSEEventLoop
+	// uses the same per-event write strategy (raw verbatim for
+	// unchanged, sse.EncodeWireBytes for modified, skip on Drop)
+	// regardless; the only difference is the absence of the chunked
+	// hex-length framing prefix and the terminating "0\r\n\r\n".
+	br := sse.NewEventBoundaryReader(uR, maxEvent)
+	return driveSSEEventLoop(ctx, p, br, cW, false, sessionStreamID, flowCtx, &nextSeq)
+}
 
 // relaySSEEvent runs one event's raw bytes through the SSE parser, the
 // Pipeline, and (when Action != Drop) the client write path. Caller

@@ -170,6 +170,39 @@ func (s *ConnectionStack) RegisterStreamSubStack(streamID string, client, upstre
 	return nil
 }
 
+// RegisterUpstreamOnlySubStack is the asymmetric form of
+// RegisterStreamSubStack used by half-duplex per-stream overlays (today:
+// SSE-over-h2, USK-888). Only the upstream Layer is recorded; the
+// client side is left nil, so ClientTopmostForStream falls back to the
+// connection-level h2 Layer.
+//
+// SSE-over-h2 is half-duplex server→client (RFC 8895 §6): the proxy never
+// reads SSE-content from the client side, so installing a client-side
+// per-stream Layer would be a no-op at best and an opportunity for the
+// release path to over-close the connection-level Layer at worst.
+// RegisterUpstreamOnlySubStack keeps the asymmetry explicit at the
+// registration site so the rationale is visible at every call site.
+//
+// All the same single-writer invariants as RegisterStreamSubStack apply.
+func (s *ConnectionStack) RegisterUpstreamOnlySubStack(streamID string, upstream layer.Layer) error {
+	if streamID == "" {
+		return fmt.Errorf("connection stack: RegisterUpstreamOnlySubStack requires non-empty streamID")
+	}
+	if upstream == nil {
+		return fmt.Errorf("connection stack: RegisterUpstreamOnlySubStack requires non-nil upstream layer (streamID=%q)", streamID)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.streamSubStacks == nil {
+		s.streamSubStacks = make(map[string]*sideSubStack)
+	}
+	if _, exists := s.streamSubStacks[streamID]; exists {
+		return fmt.Errorf("connection stack: sub-stack already registered for streamID=%q", streamID)
+	}
+	s.streamSubStacks[streamID] = &sideSubStack{Client: nil, Upstream: upstream}
+	return nil
+}
+
 // ReleaseStreamSubStack removes the per-stream Layer pair for streamID and
 // closes both Layers. Subsequent *ForStream lookups fall back to the
 // connection-level Topmost (RFC-001 §3.4.1 lifetime MUST).

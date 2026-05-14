@@ -342,6 +342,77 @@ func TestConnectionStack_RegisterStreamSubStack_GuardArgs(t *testing.T) {
 	}
 }
 
+// TestConnectionStack_RegisterUpstreamOnlySubStack_HappyPath verifies the
+// USK-888 asymmetric registration path: the upstream Layer is recorded
+// on the per-stream sub-stack while the client side falls through to the
+// connection-level h2 Layer (SSE is half-duplex server→client per
+// RFC 8895 §6).
+func TestConnectionStack_RegisterUpstreamOnlySubStack_HappyPath(t *testing.T) {
+	stack := NewConnectionStack("conn-sse-h2")
+
+	connClient := newMockLayer("conn-client")
+	connUpstream := newMockLayer("conn-upstream")
+	stack.PushClient(connClient)
+	stack.PushUpstream(connUpstream)
+
+	swapUpstream := newMockLayer("swap-upstream")
+	if err := stack.RegisterUpstreamOnlySubStack("stream-S", swapUpstream); err != nil {
+		t.Fatalf("RegisterUpstreamOnlySubStack: %v", err)
+	}
+	if !stack.HasStreamSubStack("stream-S") {
+		t.Error("HasStreamSubStack should report true after registration")
+	}
+
+	// Upstream-side resolves to the swap.
+	if got := stack.UpstreamTopmostForStream("stream-S"); got != swapUpstream {
+		t.Errorf("UpstreamTopmostForStream(stream-S) = %v, want swap", got)
+	}
+	// Client-side falls back to the connection-level layer because the
+	// sub-stack's Client field is nil (RFC 8895 §6 half-duplex).
+	if got := stack.ClientTopmostForStream("stream-S"); got != connClient {
+		t.Errorf("ClientTopmostForStream(stream-S) = %v, want connection-level layer (half-duplex fallback)", got)
+	}
+}
+
+// TestConnectionStack_RegisterUpstreamOnlySubStack_GuardArgs covers the
+// argument-validation surface symmetrically with RegisterStreamSubStack.
+func TestConnectionStack_RegisterUpstreamOnlySubStack_GuardArgs(t *testing.T) {
+	stack := NewConnectionStack("conn-guard-up")
+
+	if err := stack.RegisterUpstreamOnlySubStack("", newMockLayer("u")); err == nil {
+		t.Error("empty streamID should error")
+	}
+	if err := stack.RegisterUpstreamOnlySubStack("s", nil); err == nil {
+		t.Error("nil upstream should error")
+	}
+	if stack.HasStreamSubStack("s") {
+		t.Error("guard failures should not register the sub-stack")
+	}
+}
+
+// TestConnectionStack_RegisterUpstreamOnlySubStack_Release closes only
+// the upstream Layer (the client field is nil and must be skipped).
+func TestConnectionStack_RegisterUpstreamOnlySubStack_Release(t *testing.T) {
+	stack := NewConnectionStack("conn-sse-rel")
+
+	connUpstream := newMockLayer("conn-upstream")
+	stack.PushUpstream(connUpstream)
+
+	swapUpstream := newMockLayer("swap-upstream")
+	if err := stack.RegisterUpstreamOnlySubStack("stream-S", swapUpstream); err != nil {
+		t.Fatalf("RegisterUpstreamOnlySubStack: %v", err)
+	}
+	if err := stack.ReleaseStreamSubStack("stream-S"); err != nil {
+		t.Fatalf("ReleaseStreamSubStack: %v", err)
+	}
+	if !swapUpstream.isClosed() {
+		t.Error("Release should close the per-stream upstream Layer")
+	}
+	if connUpstream.isClosed() {
+		t.Error("Release must NOT close the connection-level upstream Layer")
+	}
+}
+
 // TestConnectionStack_ReleaseStreamSubStack_IdempotentAndUnknownNoop
 // verifies that releasing an unknown id is a no-op (returns nil) and
 // that releasing the same id twice is also safe.

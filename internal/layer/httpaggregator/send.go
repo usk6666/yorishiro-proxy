@@ -247,24 +247,78 @@ func (a *aggregatorChannel) streamBodyFromReader(ctx context.Context, env *envel
 //     latch tunnelExchangeDone so subsequent Next() calls park rather
 //     than try to absorb the post-swap DATA frames.
 //
+// USK-888 extends this for SSE-over-h2: a Send of a Receive-direction 2xx
+// HTTPMessage whose Content-Type media type is text/event-stream MUST
+// emit HEADERS without END_STREAM because the server-to-client DATA frames
+// (the SSE event bytes) follow on the same stream. The post-swap
+// runUpgradeSSEOverH2 orchestrator writes the event bytes via
+// http2.Layer.DetachStream's writer.
+//
 // In either tunnelled-bootstrap case the returned END_STREAM is forced
 // false so the stream stays open for the negotiated protocol's frames.
 func (a *aggregatorChannel) applyTunnelExchangeOnSend(env *envelope.Envelope, msg *envelope.HTTPMessage, endStream bool) bool {
-	isExtCONNECT := msg.Method == "CONNECT" && msg.ConnectProtocol != "" && env.Direction == envelope.Send
-	isTunnelAccept := env.Direction == envelope.Receive && msg.Status >= 200 && msg.Status < 300
-
+	classification := classifyTunnelExchangeOnSend(env, msg)
 	a.mu.Lock()
-	if !a.tunnelled && isExtCONNECT {
+	if !a.tunnelled && classification.isExtCONNECT {
 		a.tunnelled = true
 	}
 	tunnelled := a.tunnelled
-	if tunnelled && isTunnelAccept {
+	if (tunnelled && classification.isTunnelAccept) || classification.isSSEAccept {
 		a.tunnelExchangeDone = true
 	}
 	a.mu.Unlock()
 
-	if endStream && tunnelled && (isExtCONNECT || isTunnelAccept) {
+	if !endStream {
+		return endStream
+	}
+	if classification.isSSEAccept {
+		return false
+	}
+	if tunnelled && (classification.isExtCONNECT || classification.isTunnelAccept) {
 		return false
 	}
 	return endStream
+}
+
+// sendClassification captures the trigger predicates evaluated against the
+// outgoing envelope for the tunnel/SSE Send-side state machine. Computed
+// before lock acquisition to keep the critical section small.
+type sendClassification struct {
+	isExtCONNECT   bool
+	isTunnelAccept bool
+	isSSEAccept    bool
+}
+
+// classifyTunnelExchangeOnSend evaluates the Send-side predicates that
+// drive applyTunnelExchangeOnSend without touching aggregator state.
+// USK-888 introduces isSSEAccept; the existing isExtCONNECT /
+// isTunnelAccept rules are unchanged.
+func classifyTunnelExchangeOnSend(env *envelope.Envelope, msg *envelope.HTTPMessage) sendClassification {
+	isReceive2xx := env.Direction == envelope.Receive && msg.Status >= 200 && msg.Status < 300
+	return sendClassification{
+		isExtCONNECT:   msg.Method == "CONNECT" && msg.ConnectProtocol != "" && env.Direction == envelope.Send,
+		isTunnelAccept: isReceive2xx,
+		isSSEAccept:    isReceive2xx && hasSSEContentType(msg.Headers),
+	}
+}
+
+// hasSSEContentType reports whether the supplied headers slice carries a
+// Content-Type media type of text/event-stream (case-insensitive token
+// match; parameters are ignored). Helper for applyTunnelExchangeOnSend
+// USK-888. Lossless wrt header order/casing — read-only.
+func hasSSEContentType(headers []envelope.KeyValue) bool {
+	for _, kv := range headers {
+		if !strings.EqualFold(kv.Name, "content-type") {
+			continue
+		}
+		ct := kv.Value
+		if i := strings.IndexByte(ct, ';'); i >= 0 {
+			ct = ct[:i]
+		}
+		ct = strings.TrimSpace(ct)
+		if strings.EqualFold(ct, "text/event-stream") {
+			return true
+		}
+	}
+	return false
 }

@@ -37,6 +37,22 @@ const (
 	// because the response body is server-to-client only (RFC 8895, RFC-001
 	// N7 D-U3).
 	UpgradeSSE UpgradeKind = "sse"
+	// UpgradeSSEOverH2 marks a Server-Sent-Events response carried over an
+	// HTTP/2 stream (Content-Type: text/event-stream, status 2xx, on a
+	// stream whose pseudo-header :scheme is "https" or "http"; the
+	// orchestrator inspects HTTPMessage.HTTPVersion at trySetPending time
+	// to discriminate this from h1 SSE — USK-888).
+	//
+	// Only the affected stream swaps (per-stream sub-stack overlay,
+	// RFC-001 §3.4.1); sibling streams on the same h2 connection continue
+	// with standard HTTP/2 framing. The connection-level Layers remain
+	// *http2.Layer; the swap installs an sse.Channel adapter on the
+	// upstream side of the per-stream sub-stack only (SSE is half-duplex
+	// server→client per RFC 8895 §6, so the client side has no upstream-
+	// direction byte stream that needs framing). Distinct from UpgradeSSE
+	// so the orchestrator can dispatch to runUpgradeSSEOverH2 instead of
+	// runUpgradeSSE (which detaches an entire HTTP/1.x connection).
+	UpgradeSSEOverH2 UpgradeKind = "sse-h2"
 )
 
 // ErrUpgradePending is the sentinel returned by clientToUpstream /
@@ -437,9 +453,31 @@ func processUpgradeReceive(notice *UpgradeNotice, env *envelope.Envelope, msg *e
 		return
 	}
 	if isSSEResponse(msg) {
-		if notice.trySetPending(UpgradeSSE) {
+		kind := sseUpgradeKindFor(msg)
+		if notice.trySetPending(kind) {
 			notice.attachSSEFirstResponse(env)
 		}
+	}
+}
+
+// sseUpgradeKindFor selects UpgradeSSE (HTTP/1.x) or UpgradeSSEOverH2
+// (HTTP/2 / HTTP/2 cleartext) based on the recorded wire HTTPVersion of
+// msg. The httpaggregator stamps msg.HTTPVersion from the :scheme pseudo-
+// header at the moment HEADERS are absorbed; HTTP/1.x parsers stamp
+// "http/1.1" or "http/1.0". Any unknown / empty value falls through to
+// UpgradeSSE so legacy tests (which construct HTTPMessage without
+// setting HTTPVersion) continue to exercise the h1 path.
+//
+// USK-888.
+func sseUpgradeKindFor(msg *envelope.HTTPMessage) UpgradeKind {
+	if msg == nil {
+		return UpgradeSSE
+	}
+	switch msg.HTTPVersion {
+	case envelope.HTTPVersionH2, envelope.HTTPVersionH2C:
+		return UpgradeSSEOverH2
+	default:
+		return UpgradeSSE
 	}
 }
 

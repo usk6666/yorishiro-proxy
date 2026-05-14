@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"strings"
 	"sync"
 
 	"github.com/google/uuid"
@@ -407,6 +408,29 @@ func (a *aggregatorChannel) absorbHeaders(env *envelope.Envelope, evt *http2.H2H
 		a.resetLocked()
 		return outEnv, true, nil
 	}
+	// USK-888: SSE-over-h2 detection. A Receive-side 2xx HEADERS whose
+	// Content-Type media type is text/event-stream opens a long-lived
+	// server→client byte stream (RFC 8895). If we left the aggregator
+	// in phaseCollectingBody waiting for END_STREAM the wire would
+	// either park indefinitely or trip MaxBodySize after enough event
+	// payload accumulated — and no SSE Envelope would ever surface to
+	// the Pipeline because aggregator commits one HTTPMessage per
+	// exchange. Emit the HEADERS as a complete HTTPMessage immediately
+	// and mark the aggregator as tunnel-done so subsequent DATA frames
+	// on this stream are NOT consumed here. The post-emit
+	// runUpgradeSSEOverH2 orchestrator calls http2.Layer.DetachStream
+	// against the same stream id and the DATA payloads are surfaced as
+	// an opaque byte stream to sse.Wrap.
+	//
+	// Same shape as the extended-CONNECT short-circuit (line 398-409):
+	// emit + resetLocked + tunnelExchangeDone so Next() parks on
+	// ctx.Done after this single envelope flows.
+	if isSSEResponseHeaders(env, evt) {
+		a.tunnelExchangeDone = true
+		a.recordEmittedLocked(outEnv)
+		a.resetLocked()
+		return outEnv, true, nil
+	}
 
 	if evt.EndStream {
 		// Complete bodyless message. Reset phase so subsequent events
@@ -449,6 +473,46 @@ func isExtendedConnectRequest(env *envelope.Envelope, evt *http2.H2HeadersEvent)
 		return false
 	}
 	return evt.Method == "CONNECT" && evt.ConnectProtocol != ""
+}
+
+// isSSEResponseHeaders reports whether the supplied HEADERS event is a
+// Receive-side 2xx response whose Content-Type media type is
+// text/event-stream. USK-888 uses this to short-circuit the response
+// HEADERS so the aggregator emits the HTTPMessage immediately and does
+// NOT enter phaseCollectingBody. The post-HEADERS DATA frames on this
+// stream are routed to the SSE Layer by session.runUpgradeSSEOverH2 via
+// http2.Layer.DetachStream.
+//
+// Status is constrained to 2xx because servers occasionally use 200, 201,
+// 206 etc. for streamed responses and the wire-fidelity principle
+// (CLAUDE.md MITM Principle #1) says the proxy reports what the server
+// sent. The Content-Type token compare is case-insensitive and strips
+// parameters (`;charset=utf-8`) before comparison.
+func isSSEResponseHeaders(env *envelope.Envelope, evt *http2.H2HeadersEvent) bool {
+	if env == nil || evt == nil {
+		return false
+	}
+	if env.Direction != envelope.Receive {
+		return false
+	}
+	if evt.Status < 200 || evt.Status >= 300 {
+		return false
+	}
+	ct := ""
+	for _, kv := range evt.Headers {
+		if strings.EqualFold(kv.Name, "content-type") {
+			ct = kv.Value
+			break
+		}
+	}
+	if ct == "" {
+		return false
+	}
+	if i := strings.IndexByte(ct, ';'); i >= 0 {
+		ct = ct[:i]
+	}
+	ct = strings.TrimSpace(ct)
+	return strings.EqualFold(ct, "text/event-stream")
 }
 
 // absorbData consumes an H2DataEvent. Payload is appended to the in-flight

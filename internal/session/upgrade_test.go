@@ -342,6 +342,125 @@ func TestUpgradeStep_SSEResponse_PendingSSE(t *testing.T) {
 	}
 }
 
+// USK-888: HTTP/2-tagged SSE response latches UpgradeSSEOverH2 instead of
+// UpgradeSSE so the orchestrator dispatches the per-stream sub-stack
+// overlay (RFC-001 §3.4.1) instead of the legacy connection-level
+// detach path.
+func TestUpgradeStep_SSEResponse_HTTPVersionH2_PendingSSEOverH2(t *testing.T) {
+	notice := &UpgradeNotice{}
+	ctx := WithUpgradeNotice(context.Background(), notice)
+	step := NewUpgradeStep()
+
+	resp := &envelope.Envelope{
+		Direction: envelope.Receive, Protocol: envelope.ProtocolHTTP,
+		Message: &envelope.HTTPMessage{
+			Status:      200,
+			HTTPVersion: envelope.HTTPVersionH2,
+			Headers: []envelope.KeyValue{
+				{Name: "Content-Type", Value: "text/event-stream"},
+			},
+		},
+	}
+	step.Process(ctx, resp)
+	if got := notice.Pending(); got != UpgradeSSEOverH2 {
+		t.Errorf("notice.Pending = %q, want %q", got, UpgradeSSEOverH2)
+	}
+}
+
+// h2c (cleartext h2) cases land on the same h2 sub-stack path.
+func TestUpgradeStep_SSEResponse_HTTPVersionH2C_PendingSSEOverH2(t *testing.T) {
+	notice := &UpgradeNotice{}
+	ctx := WithUpgradeNotice(context.Background(), notice)
+	step := NewUpgradeStep()
+
+	resp := &envelope.Envelope{
+		Direction: envelope.Receive, Protocol: envelope.ProtocolHTTP,
+		Message: &envelope.HTTPMessage{
+			Status:      200,
+			HTTPVersion: envelope.HTTPVersionH2C,
+			Headers: []envelope.KeyValue{
+				{Name: "Content-Type", Value: "text/event-stream"},
+			},
+		},
+	}
+	step.Process(ctx, resp)
+	if got := notice.Pending(); got != UpgradeSSEOverH2 {
+		t.Errorf("notice.Pending = %q, want %q (h2c routes through the h2 SSE sub-stack)", got, UpgradeSSEOverH2)
+	}
+}
+
+// HTTP/1.1 SSE response keeps the legacy UpgradeSSE — the h2 discrimination
+// must not regress the h1 path.
+func TestUpgradeStep_SSEResponse_HTTPVersion11_PendingSSE(t *testing.T) {
+	notice := &UpgradeNotice{}
+	ctx := WithUpgradeNotice(context.Background(), notice)
+	step := NewUpgradeStep()
+
+	resp := &envelope.Envelope{
+		Direction: envelope.Receive, Protocol: envelope.ProtocolHTTP,
+		Message: &envelope.HTTPMessage{
+			Status:      200,
+			HTTPVersion: envelope.HTTPVersion11,
+			Headers: []envelope.KeyValue{
+				{Name: "Content-Type", Value: "text/event-stream"},
+			},
+		},
+	}
+	step.Process(ctx, resp)
+	if got := notice.Pending(); got != UpgradeSSE {
+		t.Errorf("notice.Pending = %q, want %q", got, UpgradeSSE)
+	}
+}
+
+// Empty/unset HTTPVersion falls through to UpgradeSSE for backwards
+// compatibility with legacy tests that construct HTTPMessage without
+// setting the field.
+func TestUpgradeStep_SSEResponse_EmptyHTTPVersion_PendingSSE(t *testing.T) {
+	notice := &UpgradeNotice{}
+	ctx := WithUpgradeNotice(context.Background(), notice)
+	step := NewUpgradeStep()
+
+	resp := &envelope.Envelope{
+		Direction: envelope.Receive, Protocol: envelope.ProtocolHTTP,
+		Message: &envelope.HTTPMessage{
+			Status: 200,
+			Headers: []envelope.KeyValue{
+				{Name: "Content-Type", Value: "text/event-stream"},
+			},
+		},
+	}
+	step.Process(ctx, resp)
+	if got := notice.Pending(); got != UpgradeSSE {
+		t.Errorf("notice.Pending = %q, want %q (empty HTTPVersion falls back to UpgradeSSE)", got, UpgradeSSE)
+	}
+}
+
+func TestSseUpgradeKindFor_Cases(t *testing.T) {
+	cases := []struct {
+		name string
+		ver  string
+		want UpgradeKind
+	}{
+		{"empty", "", UpgradeSSE},
+		{"http/1.0", envelope.HTTPVersion10, UpgradeSSE},
+		{"http/1.1", envelope.HTTPVersion11, UpgradeSSE},
+		{"h2", envelope.HTTPVersionH2, UpgradeSSEOverH2},
+		{"h2c", envelope.HTTPVersionH2C, UpgradeSSEOverH2},
+		{"unknown", "h3", UpgradeSSE},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := sseUpgradeKindFor(&envelope.HTTPMessage{HTTPVersion: tc.ver})
+			if got != tc.want {
+				t.Errorf("sseUpgradeKindFor(%q) = %q, want %q", tc.ver, got, tc.want)
+			}
+		})
+	}
+	if got := sseUpgradeKindFor(nil); got != UpgradeSSE {
+		t.Errorf("sseUpgradeKindFor(nil) = %q, want %q", got, UpgradeSSE)
+	}
+}
+
 func TestUpgradeStep_NonHTTPEnvelopeIgnored(t *testing.T) {
 	notice := &UpgradeNotice{}
 	ctx := WithUpgradeNotice(context.Background(), notice)
