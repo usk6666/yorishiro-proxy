@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -353,6 +354,107 @@ func TestLayer_StreamingBody_Close_ClosesConn(t *testing.T) {
 	// the client side returns EOF (or a connection-closed error).
 	if _, err := server.Write([]byte("post-close")); err == nil {
 		t.Error("expected error writing to closed conn after body.Close")
+	}
+}
+
+// TestLayer_StreamingResponseDetect_ChunkedTE_BodyIsDechunked verifies the
+// USK-883 fix: when the upstream uses Transfer-Encoding: chunked, the body
+// reader handed to the streaming consumer via DetachStreamingBody must be
+// the chunked-decoded reader (rawResp.Body), not the raw bufio.Reader over
+// the wire. Otherwise chunk-size lines (e.g. "D\r\n", "F\r\n", "9A\r\n")
+// leak into the consumer as if they were body bytes — surfacing as a
+// hex-length prefix on small SSE events.
+func TestLayer_StreamingResponseDetect_ChunkedTE_BodyIsDechunked(t *testing.T) {
+	client, server := testConn(t)
+	defer client.Close()
+
+	l := New(server, "stream-chunked-sse", envelope.Receive,
+		WithStreamingResponseDetect(IsSSEResponse))
+
+	// Build a chunked SSE response. Each SSE event is sent as a single
+	// HTTP/1.1 chunk: <hex-size>\r\n<event-bytes>\r\n. The decoded body
+	// must contain only the event payloads, with no chunk-size lines.
+	events := []string{
+		"retry: 5000\n\n",      // 13 bytes → "D"
+		": keepalive\n\n",      // 13 bytes → "D"
+		":ok\n\n",              // 5  bytes → "5"
+		"event: message\n\n",   // 15 bytes → "F"
+		"id: abc\ndata: x\n\n", // 16 bytes → "10"
+	}
+
+	var chunked bytes.Buffer
+	for _, e := range events {
+		chunked.WriteString(fmt.Sprintf("%X\r\n%s\r\n", len(e), e))
+	}
+	// terminating zero-size chunk
+	chunked.WriteString("0\r\n\r\n")
+
+	resp := "HTTP/1.1 200 OK\r\n" +
+		"Content-Type: text/event-stream\r\n" +
+		"Transfer-Encoding: chunked\r\n" +
+		"\r\n" +
+		chunked.String()
+
+	go func() {
+		_, _ = client.Write([]byte(resp))
+		_ = client.Close()
+	}()
+
+	ch := <-l.Channels()
+	env, err := ch.Next(context.Background())
+	if err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+	msg := env.Message.(*envelope.HTTPMessage)
+	if msg.Status != 200 {
+		t.Errorf("Status = %d, want 200", msg.Status)
+	}
+	if len(msg.Body) != 0 || msg.BodyBuffer != nil {
+		t.Errorf("streaming response body should not be drained; got Body=%q BodyBuffer=%v",
+			msg.Body, msg.BodyBuffer)
+	}
+
+	body, err := l.DetachStreamingBody()
+	if err != nil {
+		t.Fatalf("DetachStreamingBody: %v", err)
+	}
+	defer body.Close()
+
+	got, err := io.ReadAll(body)
+	if err != nil && !errors.Is(err, io.EOF) {
+		t.Fatalf("ReadAll: %v", err)
+	}
+
+	// Expected: concatenated events with no chunk framing in between.
+	var want bytes.Buffer
+	for _, e := range events {
+		want.WriteString(e)
+	}
+	if !bytes.Equal(got, want.Bytes()) {
+		t.Errorf("streaming body mismatch:\n got=%q\nwant=%q", got, want.Bytes())
+	}
+
+	// Direct regression check: the literal hex-size strings must NOT
+	// appear at the start of any decoded line.
+	for _, hex := range []string{"D\n", "5\n", "F\n", "10\n", "0\n"} {
+		// They MAY appear inside data payloads in some general scenario,
+		// but for our specific event set above they must not appear at
+		// the start of the decoded body or immediately after a "\n\n"
+		// boundary.
+		idx := 0
+		for {
+			i := bytes.Index(got[idx:], []byte(hex))
+			if i < 0 {
+				break
+			}
+			abs := idx + i
+			if abs == 0 || (abs >= 2 && got[abs-2] == '\n' && got[abs-1] == '\n') {
+				t.Errorf("hex chunk-size prefix %q leaked into decoded body at offset %d (got=%q)",
+					hex, abs, got)
+				break
+			}
+			idx = abs + 1
+		}
 	}
 }
 

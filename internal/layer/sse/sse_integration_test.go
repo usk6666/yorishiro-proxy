@@ -1003,3 +1003,322 @@ func TestSSE_MalformedEventAnomaly(t *testing.T) {
 		t.Errorf("flow[2] Body = %q, want %q", string(sseFlows[2].Body), "partial")
 	}
 }
+
+// TestSSE_ChunkedTransferEncoding_NoHexPrefix is the USK-883 regression
+// guard. The upstream serves text/event-stream over HTTP/1.1 with
+// Transfer-Encoding: chunked. Each event below is sent as a single
+// chunk (chunk-1 == event-1) — the configuration that originally
+// surfaced literal hex-size prefixes ("D\n", "F\n", "9A\n", …) at the
+// start of recorded SSE event bodies.
+//
+// Asserts:
+//   - Recorded SSEEvent.RawBytes (Envelope.Raw) does NOT start with a
+//     hex digit + '\n' (no chunk framing leaks into the SSE parser).
+//   - Flow.Body (from SSEMessage.Data) matches the per-spec content
+//     for events with a data: field.
+//   - sse_retry_ms, sse_event, sse_id metadata are correctly extracted.
+//   - sse_anomaly_missing_data fires only for the events that legitimately
+//     lack a data: field (retry-only, event-only) and NOT as a side
+//     effect of the parser tripping on a hex prefix line.
+//   - The multi-data event correctly joins both data: lines.
+//
+// Comment-only events ("\n: keepalive\n\n", ":ok\n\n") are NOT emitted
+// as Envelope flows by the SSE parser — comment lines are spec-defined
+// as ignored (HTML Living Spec 8.5.3). They are exercised on the wire
+// (the chunked stream carries them) so the regression test still
+// covers the "D\n" / "5\n" hex-prefix leak vector for those events;
+// the assertion that no leak happened is the absence of a parser
+// anomaly + RawBytes preservation on the surrounding events.
+func TestSSE_ChunkedTransferEncoding_NoHexPrefix(t *testing.T) {
+	clientA, clientB := pipePair()
+	defer clientA.Close()
+	upstreamA, upstreamB := pipePair()
+	defer upstreamB.Close()
+
+	store := &testStore{}
+
+	stack := connector.NewConnectionStack("sse-chunked-conn")
+	clientLayer := http1.New(clientB, "client-stream", envelope.Send,
+		http1.WithScheme("https"))
+	upstreamLayer := http1.New(upstreamA, "upstream-stream", envelope.Receive,
+		http1.WithScheme("https"),
+		http1.WithStreamingResponseDetect(http1.IsSSEResponse))
+	stack.PushClient(clientLayer)
+	stack.PushUpstream(upstreamLayer)
+
+	// Event set covers each row in the USK-883 Issue table.
+	// All events are sent as separate chunks on the wire (so the proxy
+	// observes chunk-size lines "D", "5", "F", … that would have leaked
+	// pre-fix). Comment events are emitted on the wire but the SSE
+	// parser ignores them per the spec (HTML Living Spec 8.5.3) — they
+	// don't produce flow records, so wireEvents tracks the on-wire
+	// chunked stream and flowEvents tracks the expected Envelope flows.
+	//
+	//   "retry: 5000\n\n"       — 13 bytes → "D"  chunk-size line
+	//   ": keepalive\n\n"       — 13 bytes → "D"  chunk-size line   (comment; no flow)
+	//   ":ok\n\n"               —  5 bytes → "5"  chunk-size line   (comment; no flow)
+	//   "event: ping\n\n"       — 13 bytes → "D"  chunk-size line
+	//   "id: abc123\ndata: hello\n\n" — 24 bytes → "18" two-digit hex
+	//   "data: line1\ndata: line2\n\n" — 26 bytes → "1A" two-digit hex
+	wireEvents := []string{
+		"retry: 5000\n\n",
+		": keepalive\n\n",
+		":ok\n\n",
+		"event: ping\n\n",
+		"id: abc123\ndata: hello\n\n",
+		"data: line1\ndata: line2\n\n",
+	}
+	// Events the SSE parser emits as Envelope flows (comment-only events
+	// are filtered by the parser per spec).
+	flowEvents := []string{
+		"retry: 5000\n\n",
+		"event: ping\n\n",
+		"id: abc123\ndata: hello\n\n",
+		"data: line1\ndata: line2\n\n",
+	}
+
+	clientReadDone := make(chan struct{})
+	clientReceived := make(chan []byte, 1)
+	go func() {
+		defer close(clientReadDone)
+		_, _ = clientA.Write([]byte("GET /events HTTP/1.1\r\n" +
+			"Host: example.com\r\n" +
+			"Accept: text/event-stream\r\n" +
+			"\r\n"))
+
+		all := make([]byte, 0, 4096)
+		buf := make([]byte, 1024)
+
+		// Phase 1: wait for the 200 OK header block.
+		headerDeadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(headerDeadline) {
+			_ = clientA.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+			n, _ := clientA.Read(buf)
+			if n > 0 {
+				all = append(all, buf[:n]...)
+			}
+			if bytes.Contains(all, []byte("\r\n\r\n")) {
+				break
+			}
+		}
+
+		// Phase 2: half-close to convert the parked client-read into
+		// ErrUpgradePending so the SSE swap proceeds.
+		if cw, ok := clientA.(interface{ CloseWrite() error }); ok {
+			_ = cw.CloseWrite()
+		}
+
+		// Phase 3: drain events. The browser-side receives a chunked
+		// stream — exactly len(wireEvents) blank-line terminators
+		// inside the body in addition to the headers' terminator.
+		eventDeadline := time.Now().Add(3 * time.Second)
+		for time.Now().Before(eventDeadline) {
+			_ = clientA.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+			n, _ := clientA.Read(buf)
+			if n > 0 {
+				all = append(all, buf[:n]...)
+			}
+			if bytes.Count(all, []byte("\n\n")) >= 1+len(wireEvents) {
+				break
+			}
+		}
+		_ = clientA.SetReadDeadline(time.Time{})
+		clientReceived <- all
+	}()
+
+	// Server-side: write a chunked text/event-stream response with one
+	// chunk per event (chunk-1 == event-1 is the exact configuration
+	// that surfaced USK-883).
+	go func() {
+		buf := make([]byte, 4096)
+		_, _ = upstreamB.Read(buf)
+
+		_, _ = upstreamB.Write([]byte("HTTP/1.1 200 OK\r\n" +
+			"Content-Type: text/event-stream\r\n" +
+			"Transfer-Encoding: chunked\r\n" +
+			"\r\n"))
+		for _, e := range wireEvents {
+			_, _ = fmt.Fprintf(upstreamB, "%X\r\n%s\r\n", len(e), e)
+		}
+		// Terminating zero-size chunk.
+		_, _ = upstreamB.Write([]byte("0\r\n\r\n"))
+		// Hold the conn briefly so the proxy goroutine has time to
+		// parse all events before teardown.
+		time.Sleep(200 * time.Millisecond)
+		_ = upstreamB.Close()
+	}()
+
+	dial := func(_ context.Context, _ *envelope.Envelope) (layer.Channel, error) {
+		ch, ok := <-upstreamLayer.Channels()
+		if !ok {
+			return nil, errors.New("upstream Channels closed before yielding")
+		}
+		return ch, nil
+	}
+
+	p := pipeline.New(
+		pipeline.NewRecordStep(store, slog.Default()),
+		session.NewUpgradeStep(),
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- session.RunStackSession(ctx, stack, dial, p, session.SessionOptions{
+			OnComplete: func(cctx context.Context, sid string, err error) {
+				state := "complete"
+				if err != nil && !errors.Is(err, io.EOF) {
+					state = "error"
+				}
+				if sid != "" {
+					_ = store.UpdateStream(cctx, sid, flow.StreamUpdate{
+						State:         state,
+						FailureReason: session.ClassifyError(err),
+					})
+				}
+			},
+		})
+	}()
+
+	// Wait for swap to install the SSE adapter on the upstream side.
+	swapDeadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(swapDeadline) {
+		top := stack.UpstreamTopmost()
+		if top != upstreamLayer {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if top := stack.UpstreamTopmost(); top == upstreamLayer {
+		t.Errorf("upstream topmost still original http1.Layer; swap did not install SSE adapter")
+	}
+
+	// Tear down: close pipes so the recursive RunSession returns.
+	_ = clientA.Close()
+	_ = upstreamB.Close()
+	<-clientReadDone
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Error("RunStackSession did not return after teardown")
+	}
+
+	// --- Recording shape ---
+	streams := store.getStreams()
+	if len(streams) != 1 {
+		t.Fatalf("got %d streams, want 1", len(streams))
+	}
+	streamID := streams[0].ID
+
+	recvFlows := store.flowsByDirection("receive")
+	var sseFlows []*flow.Flow
+	for _, f := range recvFlows {
+		if f.StreamID != streamID {
+			continue
+		}
+		// SSE event flows are those whose Metadata carries
+		// protocol=sse (RecordStep sets this for SSEMessage envelopes).
+		// The pre-swap HTTP 200 carries protocol=http and is excluded.
+		if f.Metadata != nil && f.Metadata["protocol"] == "sse" {
+			sseFlows = append(sseFlows, f)
+		}
+	}
+	if len(sseFlows) != len(flowEvents) {
+		for i, f := range recvFlows {
+			t.Logf("recv flow[%d]: streamID=%q raw=%q body=%q meta=%v",
+				i, f.StreamID, string(f.RawBytes), string(f.Body), f.Metadata)
+		}
+		t.Fatalf("got %d SSE event flows, want %d (comments are filtered by spec)",
+			len(sseFlows), len(flowEvents))
+	}
+
+	// Per-event regression assertions for the flow-producing events.
+	type expected struct {
+		raw         string
+		body        string
+		event       string
+		id          string
+		retryMs     string
+		missingData bool // sse_anomaly_missing_data expected
+	}
+	expectations := []expected{
+		{raw: flowEvents[0], body: "", retryMs: "5000", missingData: true},
+		{raw: flowEvents[1], body: "", event: "ping", missingData: true},
+		{raw: flowEvents[2], body: "hello", id: "abc123"},
+		{raw: flowEvents[3], body: "line1\nline2"},
+	}
+
+	for i, f := range sseFlows {
+		exp := expectations[i]
+
+		// USK-883 primary assertion: no hex-prefix leakage. RawBytes
+		// must start with the SSE event content, never a hex digit
+		// followed by '\n'.
+		if len(f.RawBytes) >= 2 && isASCIIHex(f.RawBytes[0]) && f.RawBytes[1] == '\n' {
+			t.Errorf("flow[%d] RawBytes leaked chunk-size prefix: %q", i, f.RawBytes)
+		}
+		// Also reject the more specific known-bad strings to make
+		// failures actionable.
+		for _, badPrefix := range []string{"D\n", "5\n", "F\n", "10\n", "1A\n"} {
+			if bytes.HasPrefix(f.RawBytes, []byte(badPrefix)) {
+				t.Errorf("flow[%d] RawBytes starts with hex chunk prefix %q: %q",
+					i, badPrefix, f.RawBytes)
+			}
+		}
+
+		if string(f.RawBytes) != exp.raw {
+			t.Errorf("flow[%d] RawBytes = %q, want %q", i, f.RawBytes, exp.raw)
+		}
+		if string(f.Body) != exp.body {
+			t.Errorf("flow[%d] Body = %q, want %q", i, f.Body, exp.body)
+		}
+		if got := f.Metadata["sse_event"]; got != exp.event {
+			t.Errorf("flow[%d] sse_event = %q, want %q", i, got, exp.event)
+		}
+		if got := f.Metadata["sse_id"]; got != exp.id {
+			t.Errorf("flow[%d] sse_id = %q, want %q", i, got, exp.id)
+		}
+		if got := f.Metadata["sse_retry_ms"]; got != exp.retryMs {
+			t.Errorf("flow[%d] sse_retry_ms = %q, want %q", i, got, exp.retryMs)
+		}
+		gotMissing := f.Metadata["sse_anomaly_missing_data"] != ""
+		if gotMissing != exp.missingData {
+			t.Errorf("flow[%d] sse_anomaly_missing_data presence = %v, want %v (Metadata=%v)",
+				i, gotMissing, exp.missingData, f.Metadata)
+		}
+	}
+
+	// --- Browser-side wire receipt ---
+	// The proxy forwards the upstream's body to the browser via
+	// io.TeeReader; we receive a chunked response. Confirm each event
+	// payload appears in the body section.
+	wire := <-clientReceived
+	headerEnd := bytes.Index(wire, []byte("\r\n\r\n"))
+	if headerEnd < 0 {
+		t.Fatalf("no headers terminator in client wire: %q", wire)
+	}
+	bodyPart := wire[headerEnd+4:]
+	for _, e := range wireEvents {
+		if !bytes.Contains(bodyPart, []byte(e)) {
+			t.Errorf("client wire body missing event %q; bodyPart=%q", e, bodyPart)
+		}
+	}
+}
+
+// isASCIIHex reports whether b is one of '0'-'9' or 'A'-'F' or 'a'-'f'.
+// Used by the USK-883 regression test to detect a leaked chunked
+// hex-size line at the start of recorded SSE RawBytes.
+func isASCIIHex(b byte) bool {
+	switch {
+	case b >= '0' && b <= '9':
+		return true
+	case b >= 'A' && b <= 'F':
+		return true
+	case b >= 'a' && b <= 'f':
+		return true
+	}
+	return false
+}

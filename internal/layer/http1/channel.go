@@ -786,7 +786,24 @@ func (c *channel) parseResponse() (*envelope.Envelope, bool, error) {
 
 // buildStreamingResponseEnvelope assembles the response Envelope for the
 // streaming-body bypass path. The body is NOT drained; the post-headers
-// byte stream on the parent Layer's reader is stashed on c.streamingBody.
+// byte stream is stashed on c.streamingBody for the swap orchestrator
+// to claim via detachStreamingBody.
+//
+// USK-883: when the response uses Transfer-Encoding: chunked, the body
+// source must be the parser's already-constructed dechunked reader
+// (rawResp.Body), not the parent Layer's raw bufio.Reader. Earlier code
+// stashed the raw reader unconditionally, so chunked framing
+// (e.g. "D\r\n", "F\r\n", "9A\r\n") leaked into the streaming consumer
+// (e.g. the SSE parser) as if it were body data — surfacing a literal
+// hex-length prefix at the start of small events.
+//
+// For the open-ended HTTP/1.1 SSE case (no Content-Length, no chunked
+// TE, no Connection: close), the parser returns a zero-length identity
+// reader (the spec-strict reading is "no body"). In practice servers
+// stream events on such a connection indefinitely, so we keep using the
+// raw bufio.Reader there — same behaviour as before the fix for that
+// specific shape. For Content-Length / Connection: close streamed
+// responses, rawResp.Body is also the correct reader.
 func (c *channel) buildStreamingResponseEnvelope(rawResp *parser.RawResponse) *envelope.Envelope {
 	statusReason := extractStatusReason(rawResp.Status)
 	anomalies := convertAnomalies(rawResp.Anomalies)
@@ -802,7 +819,7 @@ func (c *channel) buildStreamingResponseEnvelope(rawResp *parser.RawResponse) *e
 	envCtx := c.ctxTmpl
 	envCtx.ReceivedAt = time.Now()
 
-	c.streamingBody = c.layer.reader
+	c.streamingBody = pickStreamingBody(rawResp, c.layer.reader)
 
 	if c.priorRespWasInformational {
 		c.sequence++
@@ -830,6 +847,73 @@ func (c *channel) buildStreamingResponseEnvelope(rawResp *parser.RawResponse) *e
 	}
 	c.recordEmittedFlowID(env.FlowID)
 	return env
+}
+
+// pickStreamingBody returns the appropriate body reader for a streaming
+// (body-drain-bypassed) response. See [buildStreamingResponseEnvelope]
+// for the USK-883 rationale.
+//
+//   - Transfer-Encoding: chunked → rawResp.Body (the parser's dechunked
+//     reader). Using the raw bufio.Reader would feed chunk-size lines
+//     into the consumer as body bytes.
+//   - HTTP/1.0 / Connection: close → rawResp.Body (the parser's
+//     EOF-delimited identity reader is correct).
+//   - Content-Length → rawResp.Body (LimitReader-wrapped). In practice
+//     streaming responses do not use Content-Length, but if a peer does,
+//     we honor the framing.
+//   - HTTP/1.1 with no length indicators (the legacy open-ended SSE
+//     case) → fallback raw bufio.Reader, because the parser returns a
+//     zero-length identity reader there (RFC-strict "no body") and we
+//     need to keep consuming the open stream.
+func pickStreamingBody(rawResp *parser.RawResponse, rawReader io.Reader) io.Reader {
+	if rawResp == nil {
+		return rawReader
+	}
+	if responseUsesChunkedTE(rawResp) {
+		return rawResp.Body
+	}
+	if rawResp.Proto == "HTTP/1.0" || responseConnectionClose(rawResp) {
+		return rawResp.Body
+	}
+	if rawResp.Headers.Get("Content-Length") != "" {
+		return rawResp.Body
+	}
+	// HTTP/1.1, no chunked TE, no Content-Length, no Connection: close.
+	// Legacy open-ended SSE: keep using the raw bufio.Reader so the
+	// stream continues indefinitely. (The parser would hand us a
+	// zero-length identity reader here.)
+	return rawReader
+}
+
+// responseUsesChunkedTE mirrors the parser's chunked-TE detection (see
+// parser.hasChunkedTE, kept package-private) so we can decide framing
+// at the channel layer without exposing internals.
+func responseUsesChunkedTE(rawResp *parser.RawResponse) bool {
+	if rawResp.Proto == "HTTP/1.0" {
+		return false
+	}
+	for _, te := range rawResp.Headers.Values("Transfer-Encoding") {
+		// Trim and compare each comma-separated token case-insensitively.
+		for _, tok := range strings.Split(te, ",") {
+			if strings.EqualFold(strings.TrimSpace(tok), "chunked") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// responseConnectionClose reports whether the response carries a
+// Connection: close token (case-insensitive, any comma-separated value).
+func responseConnectionClose(rawResp *parser.RawResponse) bool {
+	for _, v := range rawResp.Headers.Values("Connection") {
+		for _, tok := range strings.Split(v, ",") {
+			if strings.EqualFold(strings.TrimSpace(tok), "close") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // --- Send() implementation: write helpers (write under c.layer.writeMu) ---
