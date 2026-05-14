@@ -169,14 +169,14 @@ func TestSSE_ForcedAbort_StateError(t *testing.T) {
 	}
 }
 
-// Note on protocol-violation classification: USK-885's implementation
-// approach is the clientWriteEOFSink in session.go, which converts any
-// client-side write failure into io.EOF on the io.TeeReader read side
-// driving the SSE parser. This is sufficient for the Issue acceptance
-// gate ("client/upstream どちらが close しても state=complete") because
-// SSE is half-duplex post-upgrade — the proxy's only observable signal
-// for client disposition is the write path, and any failure there means
-// the client is gone (graceful or otherwise). A dedicated client-bytes-
+// Note on protocol-violation classification: USK-885's acceptance gate
+// ("client/upstream どちらが close しても state=complete") is satisfied
+// by USK-890's runUpgradeSSE rewrite, which classifies client-side
+// write failures inline (isClientGoneErr) instead of via the legacy
+// io.TeeReader + clientWriteEOFSink path. SSE is half-duplex
+// post-upgrade — the proxy's only observable signal for client
+// disposition is the write path, and any failure there means the
+// client is gone (graceful or otherwise). A dedicated client-bytes-
 // post-upgrade test was considered but is unreachable in realistic TCP
 // usage: the swap requires CloseWrite from the client (so the OS
 // prevents subsequent writes), and a custom non-conforming transport

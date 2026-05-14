@@ -6,13 +6,20 @@
 package session
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
+	"strconv"
+	"strings"
 	"sync"
+	"syscall"
 	"time"
+
+	"github.com/google/uuid"
 
 	"github.com/usk6666/yorishiro-proxy/internal/connector"
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
@@ -1510,14 +1517,29 @@ func (c *detachCloserAdapter) Close() error {
 // The upstream HTTP/1.x Layer must have been built with
 // http1.WithStreamingResponseDetect(http1.IsSSEResponse) (USK-655) so the
 // streaming response body did not get drained at parse time. The body
-// reader is then claimed via Layer.DetachStreamingBody.
+// reader is then claimed via Layer.DetachStreamingBody. After USK-883 the
+// returned reader is the parser's dechunkedReader for chunked TE
+// responses, so the bytes flowing through this loop are already
+// dechunked.
 //
-// Wire-forwarding is performed via io.TeeReader: as sse.Wrap reads the
-// upstream body bytes for parsing, the same bytes are written to the
-// client wire (the underlying writer of the client http1 Layer, claimed
-// via DetachStream). This is what activates the full chain for SSE
-// (USK-657 deliverable) — without it the recursive session would record
-// events but the browser would never see them.
+// USK-890 (C-event redesign): the prior implementation forwarded
+// dechunked bytes to the client via io.TeeReader while the pre-swap
+// response headers still advertised Transfer-Encoding: chunked. The
+// client then attempted to chunked-decode plain SSE bytes, consuming the
+// first event's "data: payload-1\n" prefix as a bogus chunk-size line.
+// We now drive an explicit per-event loop:
+//
+//  1. eventBoundaryReader splits the (already-dechunked) upstream body
+//     into one raw chunk per SSE event.
+//  2. Each raw chunk is parsed to an SSEMessage envelope (the parser may
+//     return nil for comment-only blocks per WHATWG HTML §9.2 / USK-886).
+//  3. Pipeline.Run dispatches the envelope. Action=Drop blocks the event
+//     from reaching the client; otherwise we either write the raw bytes
+//     verbatim (unchanged) or sse.EncodeWireBytes output (modified).
+//  4. If the pre-swap upstream response declared Transfer-Encoding:
+//     chunked, the per-event payload is re-wrapped in chunked framing
+//     ("<hex>\r\n<payload>\r\n") before hitting the client wire, and a
+//     terminating "0\r\n\r\n" is emitted on graceful exit.
 func runUpgradeSSE(
 	ctx context.Context,
 	stack *connector.ConnectionStack,
@@ -1562,21 +1584,6 @@ func runUpgradeSSE(
 	_ = clientHTTP.Close()
 	defer func() { _ = clientCloser.Close() }()
 
-	// USK-885: wrap clientWriter so write failures are surfaced as
-	// io.EOF on the TeeReader read side instead of a transport error.
-	// SSE is half-duplex (server→client per RFC 8895 / W3C EventSource),
-	// so the only signal we have for "client closed the connection
-	// gracefully" is a write failure on the next event push (the
-	// client cannot signal half-duplex end-of-stream in-band). Without
-	// this conversion, every client-side close projected as
-	// state=error / reason=internal_error — which contradicts the
-	// Issue acceptance gate "client/upstream どちらが close しても
-	// complete". The upstream-graceful-close path (USK-883 chunked
-	// terminator → io.EOF) is unaffected — that error path never
-	// touches clientWriter.
-	clientWriteSink := &clientWriteEOFSink{w: clientWriter}
-
-	wrapOpts := []sse.Option{}
 	if firstResp == nil {
 		// Test path: synthesize a minimal placeholder. Production reaches
 		// here via UpgradeStep so firstResp is always non-nil there.
@@ -1589,28 +1596,29 @@ func runUpgradeSSE(
 				Headers: []envelope.KeyValue{{Name: "Content-Type", Value: "text/event-stream"}},
 			},
 		}
-	} else {
-		// Production path: the response was already recorded pre-swap;
-		// suppress the duplicate emit so the analyst sees one Receive
-		// flow per HTTP response, not two.
-		wrapOpts = append(wrapOpts, sse.WithSkipFirstEmit())
 	}
-	// USK-806: thread the operator-configured per-event byte cap into the
-	// SSE Channel. Option is no-op on n <= 0 so the > 0 guard is purely
-	// defensive (avoids a noise Option append).
+	// Detect chunked TE from the pre-swap response headers so the
+	// event-relay loop knows whether to re-wrap each event in chunked
+	// framing for the client wire.
+	chunkedTE := sse.IsHTTPMessageChunked(firstResp)
+
+	// Install the SSE Channel as the upstream topmost. We construct the
+	// Channel so the recorded Stream/Flow lineage still flows through
+	// the sse.Channel projection path, but the body bytes themselves are
+	// consumed by the C-event loop below — NOT by sseCh.Next. The
+	// adapter is registered for stack-introspection symmetry with the
+	// WS swap path; downstream consumers (UpgradeStep introspection,
+	// tests asserting "swap installed") observe a non-http1 top.
+	wrapOpts := []sse.Option{sse.WithSkipFirstEmit()}
 	if userOpt.SSEMaxEventSize > 0 {
 		wrapOpts = append(wrapOpts, sse.WithMaxEventSize(userOpt.SSEMaxEventSize))
 	}
-
-	// io.TeeReader: every byte that sse.Wrap reads for parsing is also
-	// written to the client wire. The browser sees a continuous SSE
-	// stream (200 OK headers from pre-swap + event bytes from here).
-	// USK-885: clientWriteSink converts a closed-client write failure
-	// into io.EOF on the TeeReader read side so the parser exits
-	// cleanly (retErr=nil → state=complete).
-	teedBody := io.TeeReader(upBody, clientWriteSink)
-
-	sseCh := sse.Wrap(upstreamCh, firstResp, teedBody, wrapOpts...)
+	// sse.Wrap takes a body reader; we pass an empty reader because the
+	// real body is consumed by the C-event loop and runs the Pipeline
+	// directly. The Channel is still installed on the stack so
+	// introspection observes a non-http1 top after the swap (parity with
+	// the prior implementation).
+	sseCh := sse.Wrap(upstreamCh, firstResp, eofReader{}, wrapOpts...)
 	adapter := newSSELayerAdapter(sseCh)
 	stack.ReplaceUpstreamTop(adapter)
 
@@ -1618,6 +1626,13 @@ func runUpgradeSSE(
 	// SSE event flows recorded by Pipeline all line up under the same
 	// flow.Stream the GET created.
 	streamID := firstResp.StreamID
+	nextSeq := firstResp.Sequence + 1
+	flowCtx := firstResp.Context
+
+	maxEvent := sse.DefaultMaxEventSize
+	if userOpt.SSEMaxEventSize > 0 {
+		maxEvent = userOpt.SSEMaxEventSize
+	}
 
 	defer func() {
 		if errors.Is(retErr, ErrUpgradePending) {
@@ -1632,102 +1647,310 @@ func runUpgradeSSE(
 		}
 	}()
 
-	// Manual session loop. SSE is server→client only, so there is no
-	// clientToUpstream goroutine; we drive sseCh.Next directly and the
-	// Pipeline records each event. Wire forwarding is handled by the
-	// io.TeeReader above.
-	//
-	// USK-885: the loop exits on io.EOF for both end-of-stream paths:
-	//   - upstream graceful close (after USK-883: chunked terminator
-	//     → io.EOF on body.Read),
-	//   - client graceful close (clientWriteSink converts a closed-
-	//     client write failure into io.EOF on the TeeReader read side).
-	// Either yields retErr=nil → state=complete via OnComplete.
-	// Forced abort (ctx cancel, RST, parse error) still surfaces as a
-	// non-nil error → state=error.
+	br := sse.NewEventBoundaryReader(upBody, maxEvent)
+	return driveSSEEventLoop(ctx, p, br, clientWriter, chunkedTE, streamID, flowCtx, &nextSeq)
+}
+
+// driveSSEEventLoop is runUpgradeSSE's per-event relay loop, extracted
+// so the parent stays under gocyclo's threshold. SSE is server→client
+// only, so this is single-goroutine: every termination signal (io.EOF
+// from the boundary reader, ctx cancel, client write error) exits the
+// loop directly.
+//
+// Graceful exits (boundary reader io.EOF, client-gone EPIPE/ECONNRESET)
+// return nil so OnComplete projects state=complete — preserving the
+// USK-885 acceptance gate without the clientWriteEOFSink indirection.
+// Other errors (parse failure, MaxEventSize overflow, ctx cancel) surface
+// as a non-nil error so the recorder projects state=error.
+func driveSSEEventLoop(
+	ctx context.Context,
+	p *pipeline.Pipeline,
+	br *sse.EventBoundaryReader,
+	clientWriter io.Writer,
+	chunkedTE bool,
+	streamID string,
+	flowCtx envelope.EnvelopeContext,
+	nextSeq *int,
+) error {
 	for {
-		env, nerr := sseCh.Next(ctx)
-		if nerr != nil {
-			if errors.Is(nerr, io.EOF) {
-				return nil
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		raw, rerr := br.Next()
+		if rerr != nil && !errors.Is(rerr, io.EOF) {
+			return rerr
+		}
+		if len(raw) > 0 {
+			if err := deliverOneSSEEvent(ctx, p, clientWriter, raw, chunkedTE, streamID, flowCtx, nextSeq); err != nil {
+				if errors.Is(err, errClientGoneAcked) {
+					return nil
+				}
+				return err
 			}
-			return nerr
 		}
-		if env == nil {
-			continue
+		if errors.Is(rerr, io.EOF) {
+			return finalizeSSEEventLoop(clientWriter, chunkedTE)
 		}
-		_, _, _ = p.Run(ctx, env)
 	}
 }
 
-// clientWriteEOFSink is an io.Writer that wraps the post-upgrade SSE
-// client conn writer (claimed via http1.Layer.DetachStream). It converts
-// any write failure into io.EOF so the io.TeeReader feeding the SSE
-// parser surfaces "client closed the conn" as a graceful end-of-stream
-// (retErr=nil → state=complete) instead of a transport error
-// (state=error / reason=internal_error).
+// deliverOneSSEEvent routes one raw event chunk through relaySSEEvent,
+// translating client-gone errors to a sentinel nil-error path. The
+// caller-level "return nil" on client-gone is encoded as a special
+// errClientGoneAcked sentinel so the loop control flow stays linear.
 //
-// Rationale: SSE is server→client only after the upgrade (RFC 8895 /
-// W3C EventSource); the client cannot signal end-of-stream in-band, so
-// the proxy's only observable signal is a write failure on the next
-// event push. Treating that as a graceful close satisfies the USK-885
-// acceptance gate "client/upstream どちらが close しても state=complete"
-// without conflating it with the upstream-side error paths (parser
-// anomaly, MaxEventSize, ctx cancel) that still legitimately project
-// to state=error.
-//
-// A nil writer is treated as already-closed: Write returns io.EOF and
-// n=0 immediately. This is defensive — the production path always
-// supplies a non-nil writer from DetachStream — but keeps the type
-// safe to use under future refactors.
-type clientWriteEOFSink struct {
-	w io.Writer
-}
-
-// Write returns io.EOF on any underlying write failure (including a
-// short write — TCP write should never short-write under normal
-// conditions, so a short write is itself a signal the peer is gone).
-// On success returns (n, nil) unchanged.
-func (s *clientWriteEOFSink) Write(p []byte) (int, error) {
-	if s == nil || s.w == nil {
-		return 0, io.EOF
+// Returns errClientGoneAcked when the client has gone away and the
+// session should terminate gracefully (state=complete).
+func deliverOneSSEEvent(
+	ctx context.Context,
+	p *pipeline.Pipeline,
+	clientWriter io.Writer,
+	raw []byte,
+	chunkedTE bool,
+	streamID string,
+	flowCtx envelope.EnvelopeContext,
+	nextSeq *int,
+) error {
+	deliverErr := relaySSEEvent(ctx, p, clientWriter, raw, chunkedTE, streamID, flowCtx, nextSeq)
+	if deliverErr == nil {
+		return nil
 	}
-	n, err := s.w.Write(p)
-	if err != nil {
-		// Per CLAUDE.md MITM principle "Pre-implementation reality
-		// check": we deliberately discard the original error from the
-		// returned tuple here because the parser's only options are
-		// io.EOF (graceful) and *layer.StreamError (abnormal). A
-		// wrapped error from the client-write side would project as
-		// state=error via the sse.Channel terminate path, which is
-		// exactly the behaviour we want to avoid for USK-885. The
-		// wire-observed reality is "the proxy could not deliver the
-		// next event because the client is gone" — i.e. the client's
-		// observable lifecycle ended — and that is a graceful session
-		// terminator on this protocol.
-		//
-		// Preserve the original error in slog.Debug so operators
-		// post-mortem can distinguish graceful FIN ("connection reset
-		// by peer", "use of closed network connection") from TLS
-		// write fault or transport bug — the state-classification
-		// outcome is identical (state=complete) but the original
-		// reason is recoverable from -log-level debug.
+	if isClientGoneErr(deliverErr) {
 		slog.Debug("session: SSE client write failed, projecting EOF for state=complete",
-			slog.String("err", err.Error()),
-			slog.Int("written", n),
-			slog.Int("requested", len(p)))
-		return n, io.EOF
+			slog.String("err", deliverErr.Error()))
+		return errClientGoneAcked
 	}
-	if n < len(p) {
-		// Short write under non-error conditions is unusual for
-		// net.Conn.Write (it always returns either full success
-		// or an error). Defensive: treat as EOF.
-		slog.Debug("session: SSE client short write, projecting EOF for state=complete",
-			slog.Int("written", n),
-			slog.Int("requested", len(p)))
-		return n, io.EOF
+	return deliverErr
+}
+
+// finalizeSSEEventLoop emits the chunked-TE terminator (if applicable)
+// and returns the terminal error for the loop. EPIPE on the terminator
+// is downgraded to graceful exit — at this point all real events have
+// been forwarded successfully and the only thing left is the framing
+// terminator.
+func finalizeSSEEventLoop(clientWriter io.Writer, chunkedTE bool) error {
+	if !chunkedTE {
+		return nil
 	}
-	return n, nil
+	if _, werr := clientWriter.Write([]byte("0\r\n\r\n")); werr != nil {
+		if isClientGoneErr(werr) {
+			slog.Debug("session: SSE chunked terminator write failed, projecting EOF for state=complete",
+				slog.String("err", werr.Error()))
+			return nil
+		}
+		return fmt.Errorf("session: SSE chunked terminator write: %w", werr)
+	}
+	return nil
+}
+
+// errClientGoneAcked is the internal sentinel signalling that the
+// client TCP socket is closed and the SSE session should terminate
+// gracefully. driveSSEEventLoop translates it back to a nil return so
+// OnComplete projects state=complete.
+var errClientGoneAcked = errors.New("session: SSE client gone (acked)")
+
+// eofReader is an io.Reader that immediately returns io.EOF. Used by the
+// USK-890 C-event loop to construct sse.Wrap with a placeholder body —
+// the real body bytes are consumed by the boundary reader directly, so
+// the Channel's parser path must NOT pull from the same source.
+type eofReader struct{}
+
+// Read implements io.Reader; it always returns (0, io.EOF).
+func (eofReader) Read(_ []byte) (int, error) { return 0, io.EOF }
+
+// relaySSEEvent runs one event's raw bytes through the SSE parser, the
+// Pipeline, and (when Action != Drop) the client write path. Caller
+// passes the upstream chunked-TE flag and a pointer to the running
+// per-stream sequence counter; relaySSEEvent stamps the next Sequence on
+// the envelope before the Pipeline run.
+//
+// Comment-only blocks (parser returns (nil, nil) per WHATWG HTML §9.2 /
+// USK-886) bypass the Pipeline and pass through to the client verbatim
+// so keepalives keep the EventSource connection warm.
+//
+// Wire-fidelity invariant: unchanged events emit raw bytes verbatim;
+// modified events re-encode via sse.EncodeWireBytes. We snapshot the
+// pre-Pipeline SSEMessage and compare field-by-field after the run to
+// decide modification — comparing the encoder output to raw bytes would
+// flag every event whose upstream wire order differs from the encoder's
+// canonical order (event → id → retry → data), and a MITM must not
+// rewrite unmutated traffic.
+func relaySSEEvent(
+	ctx context.Context,
+	p *pipeline.Pipeline,
+	clientWriter io.Writer,
+	raw []byte,
+	chunkedTE bool,
+	streamID string,
+	flowCtx envelope.EnvelopeContext,
+	nextSeq *int,
+) error {
+	parser := sse.NewSSEParser(bytes.NewReader(raw), len(raw)+1)
+	ev, perr := parser.Next()
+	// Comment-only blocks / parser-only-EOF: pass raw bytes through
+	// without Pipeline involvement. Pipeline records nothing for these
+	// per the SSE projection contract (they are not events).
+	if perr != nil && !errors.Is(perr, io.EOF) {
+		// Parse failure on a single event is recorded by the parser's
+		// own anomaly path when the envelope is built. For a hard
+		// parser error (no envelope produced) we still forward the
+		// raw bytes — the wire-observed reality is the upstream sent
+		// them, and a MITM proxy should not silently drop traffic.
+		return writeEventToClient(clientWriter, raw, chunkedTE)
+	}
+	if ev == nil {
+		return writeEventToClient(clientWriter, raw, chunkedTE)
+	}
+
+	// Build envelope from the parsed event so the Pipeline sees a
+	// proper SSEMessage. Sequence is stamped from the running counter.
+	msg := &envelope.SSEMessage{
+		Event:     ev.EventType,
+		Data:      ev.Data,
+		ID:        ev.ID,
+		Retry:     sseRetryDuration(ev.Retry),
+		Anomalies: ev.Anomalies,
+	}
+	env := &envelope.Envelope{
+		StreamID:  streamID,
+		FlowID:    uuid.NewString(),
+		Sequence:  *nextSeq,
+		Direction: envelope.Receive,
+		Protocol:  envelope.ProtocolSSE,
+		Raw:       raw,
+		Message:   msg,
+		Context:   flowCtx,
+	}
+	*nextSeq++
+
+	// Pre-Pipeline snapshot — value copy of the SSEMessage fields the
+	// Pipeline can mutate. Anomalies and Raw are excluded: Anomalies is
+	// record-only metadata, and Raw is intentionally re-stamped by
+	// per-protocol engines when they invalidate the wire-encoded form
+	// (the SSE engine is N7-scoped-out today, so Raw stays intact for
+	// unchanged events).
+	snap := *msg
+
+	outEnv, action, _ := p.Run(ctx, env)
+	if action == pipeline.Drop {
+		return nil
+	}
+	if outEnv == nil {
+		outEnv = env
+	}
+
+	// Decide raw-vs-re-encoded payload. If the Pipeline did not touch
+	// the message fields, forward the raw bytes verbatim — preserving
+	// wire fidelity for unchanged events (field order, comments,
+	// unknown fields, "data:value" no-space round-trip).
+	if !sseMessageMutated(&snap, outEnv) {
+		return writeEventToClient(clientWriter, raw, chunkedTE)
+	}
+	encoded, eerr := sse.EncodeWireBytes(outEnv)
+	if eerr != nil {
+		// Encoder failure on a mutated envelope is a programmer
+		// error: the Pipeline produced an SSEMessage that
+		// EncodeWireBytes cannot serialise. Forward raw bytes so the
+		// stream does not stall, and surface the error via slog.Warn
+		// (the recorder already saved the modified variant).
+		slog.Warn("session: SSE re-encode failed; forwarding raw bytes",
+			slog.String("err", eerr.Error()),
+			slog.String("stream_id", streamID))
+		return writeEventToClient(clientWriter, raw, chunkedTE)
+	}
+	return writeEventToClient(clientWriter, encoded, chunkedTE)
+}
+
+// sseMessageMutated reports whether the Pipeline's output envelope
+// carries different SSE field values from the pre-Pipeline snapshot.
+// Mirrors pipeline.sseMessageModified (Event / Data / ID / Retry).
+// Returns true if outEnv carries a non-*SSEMessage payload — defensive
+// against future plugins that might replace the Message type.
+func sseMessageMutated(snap *envelope.SSEMessage, outEnv *envelope.Envelope) bool {
+	if snap == nil || outEnv == nil {
+		return false
+	}
+	cur, ok := outEnv.Message.(*envelope.SSEMessage)
+	if !ok {
+		return true
+	}
+	return snap.Event != cur.Event ||
+		snap.Data != cur.Data ||
+		snap.ID != cur.ID ||
+		snap.Retry != cur.Retry
+}
+
+// writeEventToClient writes one event's wire bytes to the client,
+// applying chunked-TE framing when the upstream advertised it. The
+// framing uses RFC 9112 §7.1 form ("<hex-size>\r\n<payload>\r\n"); the
+// terminating "0\r\n\r\n" is emitted by the caller on graceful exit.
+func writeEventToClient(w io.Writer, payload []byte, chunkedTE bool) error {
+	if len(payload) == 0 {
+		return nil
+	}
+	if !chunkedTE {
+		if _, err := w.Write(payload); err != nil {
+			return fmt.Errorf("session: SSE client write: %w", err)
+		}
+		return nil
+	}
+	// Chunked framing: "<hex-size>\r\n<payload>\r\n". A single Write
+	// call avoids interleaving with concurrent writers — there are
+	// none on the SSE post-swap path, but the larger buffer matters
+	// for write-throughput on slow links.
+	var buf bytes.Buffer
+	fmt.Fprintf(&buf, "%X\r\n", len(payload))
+	buf.Write(payload)
+	buf.WriteString("\r\n")
+	if _, err := w.Write(buf.Bytes()); err != nil {
+		return fmt.Errorf("session: SSE client chunked write: %w", err)
+	}
+	return nil
+}
+
+// isClientGoneErr reports whether err signals that the client TCP socket
+// is closed (EPIPE, ECONNRESET, use of closed network connection) so the
+// SSE relay should project state=complete rather than state=error. SSE
+// is half-duplex; the client cannot signal end-of-stream in-band, so the
+// only observable signal that the browser navigated away is a write
+// failure on the next event push.
+//
+// Classification prefers typed-error matching (errors.Is against
+// net.ErrClosed / syscall.EPIPE / syscall.ECONNRESET) so locale-
+// dependent error strings do not break the projection. A substring
+// fallback covers wrapped/string-form errors from non-syscall paths
+// (e.g. TLS net.OpError) where the typed sentinel is not preserved
+// through the wrap chain. State classification is the same either way;
+// the original error is preserved for slog.Debug.
+func isClientGoneErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, net.ErrClosed) ||
+		errors.Is(err, syscall.EPIPE) ||
+		errors.Is(err, syscall.ECONNRESET) ||
+		errors.Is(err, io.ErrClosedPipe) {
+		return true
+	}
+	s := err.Error()
+	return strings.Contains(s, "broken pipe") ||
+		strings.Contains(s, "connection reset by peer") ||
+		strings.Contains(s, "use of closed network connection") ||
+		strings.Contains(s, "connection reset")
+}
+
+// sseRetryDuration converts the SSE "retry:" field value to a
+// time.Duration. Mirrors sse.parseRetry but is inlined here so the
+// session package does not need to import an unexported helper.
+func sseRetryDuration(raw string) time.Duration {
+	if raw == "" {
+		return 0
+	}
+	ms, err := strconv.Atoi(raw)
+	if err != nil || ms < 0 {
+		return 0
+	}
+	return time.Duration(ms) * time.Millisecond
 }
 
 // upgradePending returns true when notice has latched a pending UpgradeKind.

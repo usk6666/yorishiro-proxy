@@ -1111,9 +1111,13 @@ func TestSSE_ChunkedTransferEncoding_NoHexPrefix(t *testing.T) {
 			_ = cw.CloseWrite()
 		}
 
-		// Phase 3: drain events. The browser-side receives a chunked
-		// stream — exactly len(wireEvents) blank-line terminators
-		// inside the body in addition to the headers' terminator.
+		// Phase 3: drain events. The proxy re-wraps each event in
+		// chunked framing per USK-890, so we terminate the read loop
+		// on the chunked terminator "0\r\n\r\n" rather than on a
+		// blank-line count — counting blank lines was fragile under
+		// CI load (the loop could time out before the final event
+		// reached the client and the test then asserted byte equality
+		// on a partial wire).
 		eventDeadline := time.Now().Add(3 * time.Second)
 		for time.Now().Before(eventDeadline) {
 			_ = clientA.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
@@ -1121,7 +1125,7 @@ func TestSSE_ChunkedTransferEncoding_NoHexPrefix(t *testing.T) {
 			if n > 0 {
 				all = append(all, buf[:n]...)
 			}
-			if bytes.Count(all, []byte("\n\n")) >= 1+len(wireEvents) {
+			if bytes.HasSuffix(all, []byte("0\r\n\r\n")) {
 				break
 			}
 		}
@@ -1198,10 +1202,13 @@ func TestSSE_ChunkedTransferEncoding_NoHexPrefix(t *testing.T) {
 		t.Errorf("upstream topmost still original http1.Layer; swap did not install SSE adapter")
 	}
 
-	// Tear down: close pipes so the recursive RunSession returns.
+	// Tear down: wait for the client read goroutine to finish
+	// (it exits on the chunked terminator or its own 3s deadline)
+	// then close the local sides. The upstream writer goroutine
+	// has already closed upstreamB after writing the terminator.
+	<-clientReadDone
 	_ = clientA.Close()
 	_ = upstreamB.Close()
-	<-clientReadDone
 
 	select {
 	case <-done:
@@ -1298,21 +1305,88 @@ func TestSSE_ChunkedTransferEncoding_NoHexPrefix(t *testing.T) {
 		}
 	}
 
-	// --- Browser-side wire receipt ---
-	// The proxy forwards the upstream's body to the browser via
-	// io.TeeReader; we receive a chunked response. Confirm each event
-	// payload appears in the body section.
+	// --- Browser-side wire receipt (USK-890) ---
+	// The proxy forwards the upstream's body to the browser as a chunked
+	// stream — runUpgradeSSE wraps each event in chunked framing
+	// (<hex>\r\n…\r\n) because the pre-swap response advertised
+	// Transfer-Encoding: chunked. Chunked-decode and compare to the
+	// concatenation of wireEvents byte-for-byte. Substring matching on
+	// the raw wire (the pre-USK-890 assertion) failed to catch the
+	// "first event consumed as bogus chunk-size line" regression
+	// because the dropped bytes happened to spell a valid hex prefix.
 	wire := <-clientReceived
 	headerEnd := bytes.Index(wire, []byte("\r\n\r\n"))
 	if headerEnd < 0 {
 		t.Fatalf("no headers terminator in client wire: %q", wire)
 	}
 	bodyPart := wire[headerEnd+4:]
-	for _, e := range wireEvents {
-		if !bytes.Contains(bodyPart, []byte(e)) {
-			t.Errorf("client wire body missing event %q; bodyPart=%q", e, bodyPart)
-		}
+	decoded, derr := decodeChunkedBody(bodyPart)
+	if derr != nil {
+		t.Fatalf("chunked-decode client body: %v; bodyPart=%q", derr, bodyPart)
 	}
+	want := strings.Join(wireEvents, "")
+	if !bytes.Equal(decoded, []byte(want)) {
+		t.Errorf("client wire (chunked-decoded) != concatenated upstream events\n  got  = %q\n  want = %q",
+			decoded, want)
+	}
+}
+
+// decodeChunkedBody decodes a Transfer-Encoding: chunked body without
+// going through net/http (CLAUDE.md data-path policy: tests in the
+// internal/layer/sse package must not import net/http). The decoder is
+// strict on hex parsing and the per-chunk CRLF terminator, but tolerant
+// on the missing trailing CRLF after the zero-chunk so partial captures
+// from the integration harness still decode.
+func decodeChunkedBody(b []byte) ([]byte, error) {
+	var out bytes.Buffer
+	i := 0
+	for i < len(b) {
+		// Find end of size line.
+		j := bytes.Index(b[i:], []byte("\r\n"))
+		if j < 0 {
+			return nil, fmt.Errorf("chunked decode: no CRLF after chunk-size at offset %d", i)
+		}
+		sizeLine := string(b[i : i+j])
+		i += j + 2
+		// Strip chunk-extension.
+		if k := strings.IndexByte(sizeLine, ';'); k >= 0 {
+			sizeLine = sizeLine[:k]
+		}
+		sizeLine = strings.TrimSpace(sizeLine)
+		if sizeLine == "" {
+			return nil, fmt.Errorf("chunked decode: empty chunk-size at offset %d", i)
+		}
+		var size int
+		for _, c := range sizeLine {
+			var d int
+			switch {
+			case c >= '0' && c <= '9':
+				d = int(c - '0')
+			case c >= 'a' && c <= 'f':
+				d = int(c-'a') + 10
+			case c >= 'A' && c <= 'F':
+				d = int(c-'A') + 10
+			default:
+				return nil, fmt.Errorf("chunked decode: invalid hex %q in chunk-size", c)
+			}
+			size = size*16 + d
+		}
+		if size == 0 {
+			// Terminal chunk; optional trailers then CRLF. Stop here.
+			return out.Bytes(), nil
+		}
+		if i+size > len(b) {
+			return nil, fmt.Errorf("chunked decode: chunk size %d exceeds remaining %d", size, len(b)-i)
+		}
+		out.Write(b[i : i+size])
+		i += size
+		// Trailing CRLF after chunk data.
+		if i+2 > len(b) || b[i] != '\r' || b[i+1] != '\n' {
+			return nil, fmt.Errorf("chunked decode: missing CRLF after chunk at offset %d", i)
+		}
+		i += 2
+	}
+	return out.Bytes(), nil
 }
 
 // isASCIIHex reports whether b is one of '0'-'9' or 'A'-'F' or 'a'-'f'.
