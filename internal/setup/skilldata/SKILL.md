@@ -20,21 +20,27 @@ Apply this skill when you receive instructions such as:
 
 ## MCP Tools Overview
 
-yorishiro-proxy provides 11 MCP tools:
+yorishiro-proxy provides 17 MCP tools. Resend and fuzz are split into protocol-typed tools (HTTP / WebSocket / gRPC / Raw) — each tool's schema mirrors its protocol's envelope shape, so there is no unified `action` discriminator.
 
 | Tool | Purpose |
 |------|---------|
 | `proxy_start` | Start proxy. Supports multi-listener and SOCKS5 |
 | `proxy_stop` | Stop proxy. Stop by name for individual listeners, or omit to stop all |
-| `configure` | Change running proxy settings (TLS passthrough, intercept rules, auto-transform, upstream proxy, connection limits, SOCKS5 auth, etc.) |
-| `query` | Unified information retrieval (resource: flows, flow, messages, status, config, ca_cert, intercept_queue, macros, macro, fuzz_jobs, fuzz_results) |
-| `resend` | Request resend/replay/compare (action: resend, resend_raw, tcp_replay, compare) |
-| `manage` | Flow data management and CA certificate (action: delete_flows, export_flows, import_flows, regenerate_ca_cert) |
-| `fuzz` | Fuzzing (action: fuzz, fuzz_pause, fuzz_resume, fuzz_cancel) |
-| `macro` | Macro workflow (action: define_macro, run_macro, delete_macro) |
+| `configure` | Change running proxy settings (TLS passthrough, intercept rules, intercept queue + per-protocol overrides, auto-transform, upstream proxy, connection limits, capture scope, SOCKS5 auth, etc.) |
+| `query` | Unified information retrieval (resource: flows, flow, messages, status, config, ca_cert, intercept_queue, macros, macro, fuzz_jobs, fuzz_results). Supports `include_bodies` / `body_max_bytes` for body-size control |
+| `resend_http` | Resend / construct an HTTP request. Typed fields mirror HTTPMessage (method/scheme/authority/path/raw_query/headers/body) |
+| `resend_ws` | Resend a single WebSocket frame on a freshly dialled+upgraded upstream connection |
+| `resend_grpc` | Resend a gRPC unary RPC. `messages[]` is the request-side LPM list |
+| `resend_raw` | Resend a recorded raw byte payload (smuggling / anomaly tests). flow_id is REQUIRED — use `fuzz_raw` for ad-hoc byte injection |
+| `fuzz_http` | Synchronously fuzz an HTTP request. `positions[]` describes typed paths into HTTPMessage with payload lists; cartesian product capped at 1000 variants |
+| `fuzz_ws` | Synchronously fuzz a WebSocket frame. `positions[]` targets `payload` / `close_reason` |
+| `fuzz_grpc` | Synchronously fuzz a gRPC unary RPC. `positions[]` targets `service` / `method` / `metadata[N].name` / `metadata[N].value` / `messages[N].payload` |
+| `fuzz_raw` | Synchronously fuzz a raw byte payload — the central HTTP smuggling fuzzing surface. flow_id is OPTIONAL |
+| `manage` | Flow data management and CA certificate (action: delete_flows, export_flows, import_flows, regenerate_ca_cert). `output_path` / `input_path` are resolved relative to the proxy server process's working directory |
 | `intercept` | Intercept operations. Supports both request/response phases (action: release, modify_and_forward, drop) |
 | `security` | Target scope, rate limits, diagnostic budget, SafetyFilter control. Policy/Agent 2-layer structure (action: set_target_scope, update_target_scope, get_target_scope, test_target, set_rate_limits, get_rate_limits, set_budget, get_budget, get_safety_filter) |
-| `plugin` | Starlark plugin management (action: list, reload, enable, disable) |
+| `macro` | Macro workflow (action: define_macro, run_macro, delete_macro) |
+| `plugin_introspect` | Read-only list of loaded pluginv2 plugins with their (protocol, event, phase) hook registrations and redacted Vars |
 
 ### MCP Resources
 
@@ -43,16 +49,21 @@ To check tool parameters and usage examples, retrieve the resource at the follow
 
 **Help (usage, parameter descriptions, examples)**:
 - `yorishiro://help/proxy_start`, `yorishiro://help/proxy_stop`
-- `yorishiro://help/query`, `yorishiro://help/resend`, `yorishiro://help/manage`
-- `yorishiro://help/fuzz`, `yorishiro://help/macro`, `yorishiro://help/intercept`
+- `yorishiro://help/query`, `yorishiro://help/manage`
+- `yorishiro://help/resend_http`, `yorishiro://help/resend_ws`, `yorishiro://help/resend_grpc`, `yorishiro://help/resend_raw`
+- `yorishiro://help/fuzz_http`, `yorishiro://help/fuzz_ws`, `yorishiro://help/fuzz_grpc`, `yorishiro://help/fuzz_raw`
+- `yorishiro://help/macro`, `yorishiro://help/intercept`
 - `yorishiro://help/configure`, `yorishiro://help/security`
+- `yorishiro://help/plugin_introspect`
 - `yorishiro://help/examples` (collection of usage examples by workflow)
 
 **Schemas (JSON Schema)**:
 - `yorishiro://schema/proxy_start`, `yorishiro://schema/query`
-- `yorishiro://schema/resend`, `yorishiro://schema/manage`
-- `yorishiro://schema/fuzz`, `yorishiro://schema/macro`
+- `yorishiro://schema/manage`, `yorishiro://schema/macro`
+- `yorishiro://schema/resend_http`, `yorishiro://schema/resend_ws`, `yorishiro://schema/resend_grpc`, `yorishiro://schema/resend_raw`
+- `yorishiro://schema/fuzz_http`, `yorishiro://schema/fuzz_ws`, `yorishiro://schema/fuzz_grpc`, `yorishiro://schema/fuzz_raw`
 - `yorishiro://schema/intercept`, `yorishiro://schema/configure`
+- `yorishiro://schema/security`, `yorishiro://schema/plugin_introspect`
 
 If you are unsure of the exact parameter structure, always consult the help resource first.
 
@@ -72,7 +83,8 @@ If you are unsure of the exact parameter structure, always consult the help reso
   "upstream_proxy": "http://corporate-proxy:3128",
   "max_connections": 256,
   "peek_timeout_ms": 5000,
-  "request_timeout_ms": 30000
+  "request_timeout_ms": 30000,
+  "max_concurrent_streams": 500
 }
 ```
 
@@ -91,6 +103,7 @@ If you are unsure of the exact parameter structure, always consult the help reso
 | `socks5_username` | string | SOCKS5 username |
 | `socks5_password` | string | SOCKS5 password |
 | `max_connections` | int | Maximum concurrent connections (default: 128, range: 1-100000) |
+| `max_concurrent_streams` | int | HTTP/2 SETTINGS_MAX_CONCURRENT_STREAMS advertised to clients (1-65535; default: 500) |
 | `peek_timeout_ms` | int | Protocol detection timeout (default: 30000) |
 | `request_timeout_ms` | int | HTTP request header read timeout (default: 60000) |
 | `tls_fingerprint` | string | TLS fingerprint profile ("chrome", "firefox", "safari", "edge", "random", "none". default: "chrome") |
@@ -131,8 +144,14 @@ Blocked flows (target_scope deny / rate_limit / safety_filter) are recorded by t
 // State filter (active/complete/error)
 {"resource": "flows", "filter": {"state": "complete", "tag": "idor-test"}}
 
-// Protocol filter (canonical values only: http, ws, grpc, grpc-web, sse, raw, tls-handshake)
+// Protocol filter (canonical Message-type family: http, ws, grpc, grpc-web, sse, raw, tls-handshake)
 {"resource": "flows", "filter": {"protocol": "http"}}
+
+// WebSocket flow filter (WS Streams' Scheme stays "http"/"https" — the handshake transport)
+{"resource": "flows", "filter": {"protocol": "ws"}}
+
+// Combine protocol=ws with scheme=https to get WS-over-TLS only
+{"resource": "flows", "filter": {"protocol": "ws", "scheme": "https"}}
 
 // Blocked flows
 {"resource": "flows", "filter": {"blocked_by": "target_scope"}}
@@ -154,14 +173,20 @@ Blocked flows (target_scope deny / rate_limit / safety_filter) are recorded by t
 
 // Search flows by host
 {"resource": "flows", "filter": {"host": "example.com"}}
+
+// Body size control — suppress bodies entirely (metadata only)
+{"resource": "flow", "id": "<flow-id>", "include_bodies": false}
+
+// Body size control — cap each side at 4 KiB
+{"resource": "flow", "id": "<flow-id>", "body_max_bytes": 4096}
 ```
 
 #### query Filter Parameters
 
 | Parameter | Target Resource | Description |
 |-----------|----------------|-------------|
-| `protocol` | flows | Protocol name. Canonical values only: http, ws, grpc, grpc-web, sse, raw, tls-handshake (legacy spellings rejected as of USK-705) |
-| `scheme` | flows | URL scheme / transport filter ("https", "http", "wss", "ws", "tcp"). Used to search TLS flows |
+| `protocol` | flows | Protocol name (canonical Message-type family): http, ws, grpc, grpc-web, sse, raw, tls-handshake (legacy spellings rejected as of USK-705) |
+| `scheme` | flows | Stream.Scheme filter — wire-observed handshake transport. Accepted values: `"http"`, `"https"`, `"tcp"`. WebSocket Streams retain `"http"` / `"https"` (handshake transport, not application protocol) — use `protocol="ws"` to filter WS flows, optionally combined with `scheme="https"` for WS-over-TLS only. Passing `"ws"` / `"wss"` is hard-rejected (USK-864) |
 | `method` | flows | HTTP method |
 | `url_pattern` | flows | URL substring search |
 | `status_code` | flows, fuzz_results | HTTP response code |
@@ -175,126 +200,241 @@ Blocked flows (target_scope deny / rate_limit / safety_filter) are recorded by t
 | `body_contains` | fuzz_results | Response body substring |
 | `outliers_only` | fuzz_results | Return only outliers (detected by deviation in status code, body length, and timing) |
 
+#### query Body-Size Control (USK-862)
+
+| Parameter | Description |
+|-----------|-------------|
+| `include_bodies` | Include message bodies in flow/messages responses (default: true). When false, body fields are suppressed; metadata, headers, and `body_truncated` remain |
+| `body_max_bytes` | Truncate per-message body and `body_decoded` to at most this many bytes (0 = no cap, default). When applied, `body_truncated_by_query` is set and `body_original_size` / `body_decoded_original_size` report the pre-truncation lengths |
+
 fuzz_results includes aggregate statistics (`summary.statistics`: status_code_distribution, body_length, timing_ms min/max/median/stddev) and outlier detection (`summary.outliers`: by_status_code, by_body_length, by_timing).
 
 Flow details include `protocol_summary` (protocol-specific info), and streaming flows include `message_preview` (first 10 messages). Flows generated by resend have `variant: "modified"`.
 
-### resend -- Request Resend & Compare
+### resend_http -- Resend / Construct an HTTP Request
 
 ```json
-// HTTP request resend (add/remove headers)
+// Resend an existing HTTP flow with header/body overrides
 {
-  "action": "resend",
-  "params": {
-    "flow_id": "<flow-id>",
-    "override_headers": {"Authorization": "Bearer <token>"},
-    "add_headers": {"X-Forwarded-For": "127.0.0.1"},
-    "remove_headers": ["Cookie"],
-    "body_patches": [{"json_path": "$.user_id", "value": 999}],
-    "follow_redirects": false,
-    "tag": "idor-test"
-  }
+  "flow_id": "<flow-id>",
+  "headers": [
+    {"name": "Authorization", "value": "Bearer <token>"},
+    {"name": "X-Forwarded-For", "value": "127.0.0.1"}
+  ],
+  "body_patches": [{"json_path": "$.user_id", "value": 999}],
+  "tag": "idor-test"
 }
 
-// Raw request resend (bypass HTTP parsing)
+// Override target dial host while keeping the recorded :authority
 {
-  "action": "resend_raw",
-  "params": {
-    "flow_id": "<flow-id>",
-    "override_raw_base64": "<base64-encoded-raw-request>",
-    "target_addr": "api.target.com:443",
-    "use_tls": true,
-    "tag": "smuggling-test"
-  }
+  "flow_id": "<flow-id>",
+  "override_host": "staging.target.com:443",
+  "tag": "staging-replay"
 }
 
-// TCP replay (resend messages from WebSocket/TCP flow)
+// Construct an HTTP request from scratch (no flow_id)
 {
-  "action": "tcp_replay",
-  "params": {
-    "flow_id": "<websocket-flow-id>",
-    "message_sequence": 3,
-    "timeout_ms": 10000,
-    "tag": "ws-replay"
-  }
-}
-
-// Structured comparison of 2 flows
-{
-  "action": "compare",
-  "params": {
-    "flow_id_a": "<original-flow-id>",
-    "flow_id_b": "<modified-flow-id>"
-  }
+  "method": "GET",
+  "scheme": "https",
+  "authority": "api.target.com",
+  "path": "/v1/users/999",
+  "headers": [{"name": "Authorization", "value": "Bearer <token>"}],
+  "tag": "idor-from-scratch"
 }
 ```
 
-#### resend Additional Parameters
-
-| Parameter | Action | Description |
-|-----------|--------|-------------|
-| `override_method` | resend | Override HTTP method |
-| `override_url` | resend | Override URL |
-| `add_headers` | resend | Add headers |
-| `remove_headers` | resend | Remove headers |
-| `override_host` | resend | Override host (host:port format) |
-| `follow_redirects` | resend | Follow redirects (default: false) |
-| `message_sequence` | resend | WebSocket message sequence number (required for WebSocket flows) |
-| `timeout_ms` | resend, resend_raw, tcp_replay | Timeout (milliseconds) |
-| `override_raw_base64` | resend_raw | Base64-encoded raw request data |
-| `target_addr` | resend_raw, tcp_replay | Target address (host:port, defaults to flow's connection target) |
-| `use_tls` | resend_raw, tcp_replay | Use TLS flag |
-| `patches` | resend_raw | Byte-level patches |
-| `dry_run` | resend, resend_raw | Preview modifications without sending |
-| `tag` | resend, resend_raw, tcp_replay | Tag applied to resulting flow |
-
-### fuzz -- Fuzzing
-
-```json
-{
-  "action": "fuzz",
-  "params": {
-    "flow_id": "<flow-id>",
-    "attack_type": "sequential",
-    "positions": [
-      {
-        "id": "pos-0",
-        "location": "body_json",
-        "json_path": "$.user_id",
-        "payload_set": "user-ids"
-      }
-    ],
-    "payload_sets": {
-      "user-ids": {"type": "range", "start": 1, "end": 20, "step": 2}
-    },
-    "rate_limit_rps": 10,
-    "delay_ms": 100,
-    "timeout_ms": 15000,
-    "max_retries": 2,
-    "concurrency": 1,
-    "tag": "idor-fuzz"
-  }
-}
-```
-
-#### fuzz Additional Parameters
+#### resend_http Parameters
 
 | Parameter | Description |
 |-----------|-------------|
-| `rate_limit_rps` | RPS limit (0 = unlimited) |
-| `delay_ms` | Fixed delay between requests (milliseconds) |
-| `timeout_ms` | Request timeout (default: 30000) |
-| `max_retries` | Retry count |
-| `stop_on` | Automatic stop conditions |
+| `flow_id` | Recorded stream id; when set, omitted fields are inherited from the original send |
+| `method` | HTTP method (required when flow_id is empty) |
+| `scheme` | http or https (required when flow_id is empty) |
+| `authority` | Host / :authority value (required when flow_id is empty) |
+| `path` | Request path (required when flow_id is empty). A literal `?` auto-splits into path + raw_query |
+| `raw_query` | Raw query string without leading `?` |
+| `headers` | Ordered `[{name, value}]` list preserving wire case/order/duplicates |
+| `body` | Request body interpreted per body_encoding |
+| `body_encoding` | text or base64 (default: text) |
+| `body_set` | true to override body to empty (omitting body inherits the original when flow_id is set) |
+| `body_patches` | Patches applied on top of any body replacement |
+| `override_host` | Redirect the dial target while preserving the request's Host / :authority (host:port) |
+| `timeout_ms` | Per-request timeout in ms (default: 30000) |
+| `tag` | Tag stored on the new flow's Tags map |
 
-#### PayloadSet types
+### resend_ws -- Resend a WebSocket Frame
 
-| type | Fields | Description |
-|------|--------|-------------|
-| `wordlist` | `values` | List of strings |
-| `file` | `path` | File path (one payload per line) |
-| `range` | `start`, `end`, `step` | Integer range (step default: 1) |
-| `sequence` | `start`, `end`, `format` | Formatted sequential numbers (e.g., "user%04d") |
+```json
+// Resend a single WS frame on a fresh upgrade derived from the recorded flow
+{
+  "flow_id": "<websocket-flow-id>",
+  "opcode": "text",
+  "payload": "ping",
+  "tag": "ws-replay"
+}
+
+// From-scratch WS frame (target_addr + path required)
+{
+  "target_addr": "ws.target.com:443",
+  "scheme": "wss",
+  "path": "/ws/notifications",
+  "opcode": "binary",
+  "payload": "AAECAw==",
+  "body_encoding": "base64",
+  "tag": "ws-from-scratch"
+}
+```
+
+`opcode` is one of `text | binary | close | ping | pong`. For Close frames, set `close_code` and optionally `close_reason`. `compressed: true` (per-message-deflate) requires the recorded flow to have negotiated deflate via flow_id.
+
+### resend_grpc -- Resend a gRPC Unary RPC
+
+```json
+{
+  "flow_id": "<grpc-flow-id>",
+  "metadata": [
+    {"name": "authorization", "value": "Bearer <token>"}
+  ],
+  "messages": [
+    {"payload": "CgVoZWxsbw==", "body_encoding": "base64"}
+  ],
+  "tag": "grpc-authz-test"
+}
+```
+
+`messages[]` is the request-side LPM (length-prefixed message) list; at least one entry is required. When `flow_id` is set, `service` / `method` / `metadata` / `encoding` inherit from the recorded send; otherwise `target_addr + service + method` are required.
+
+### resend_raw -- Resend Raw Bytes (Smuggling / Anomaly Tests)
+
+```json
+// Resend the recorded raw payload as-is
+{
+  "flow_id": "<raw-flow-id>",
+  "target_addr": "api.target.com:443",
+  "use_tls": true,
+  "tag": "raw-replay"
+}
+
+// Replace the entire payload
+{
+  "flow_id": "<raw-flow-id>",
+  "target_addr": "api.target.com:443",
+  "use_tls": true,
+  "override_bytes": "<base64-encoded-raw-request>",
+  "override_bytes_encoding": "base64",
+  "tag": "smuggling-test"
+}
+
+// Apply offset-based byte patches (mutually exclusive with override_bytes)
+{
+  "flow_id": "<raw-flow-id>",
+  "target_addr": "api.target.com:443",
+  "patches": [
+    {"offset": 14, "data": "Content-Length: 9999", "data_encoding": "text"}
+  ],
+  "tag": "te-cl-smuggling"
+}
+```
+
+`flow_id` is REQUIRED — for ad-hoc byte injection without a recorded flow, use `fuzz_raw`. Wire bytes are NEVER normalised — they reach the wire verbatim.
+
+### fuzz_http -- Synchronously Fuzz an HTTP Request
+
+```json
+{
+  "flow_id": "<flow-id>",
+  "positions": [
+    {
+      "path": "body",
+      "payloads": ["normalvalue", "' OR SLEEP(3)-- "],
+      "encoding": "text"
+    }
+  ],
+  "stop_on_5xx": false,
+  "tag": "sqli-time-based"
+}
+```
+
+`positions[]` is REQUIRED. Each position has a typed `path` into HTTPMessage:
+`method | scheme | authority | path | raw_query | body | headers[N].name | headers[N].value`.
+The cartesian product across positions yields the variant sequence (capped at 1000 per call).
+
+### fuzz_ws -- Synchronously Fuzz a WebSocket Frame
+
+```json
+{
+  "flow_id": "<websocket-flow-id>",
+  "opcode": "text",
+  "positions": [
+    {
+      "path": "payload",
+      "payloads": ["", "AAAA", "<svg/onload=alert(1)>"]
+    }
+  ],
+  "stop_on_close": false,
+  "tag": "ws-fuzz"
+}
+```
+
+`positions[]` typed paths: `payload | close_reason`. Cartesian product capped at 1000 variants. Each variant runs on its own fresh dial + upgrade.
+
+### fuzz_grpc -- Synchronously Fuzz a gRPC Unary RPC
+
+```json
+{
+  "flow_id": "<grpc-flow-id>",
+  "messages": [{"payload": "CgVoZWxsbw==", "body_encoding": "base64"}],
+  "positions": [
+    {
+      "path": "messages[0].payload",
+      "payloads": ["CgA=", "CgVoZWxsbw==", "CgRoZWxw"],
+      "encoding": "base64"
+    }
+  ],
+  "stop_on_non_ok": false,
+  "tag": "grpc-fuzz"
+}
+```
+
+`positions[]` typed paths: `service | method | metadata[N].name | metadata[N].value | messages[N].payload`. Cartesian product capped at 1000 variants. Each variant runs on an independent gRPC stream.
+
+### fuzz_raw -- Synchronously Fuzz a Raw Byte Payload
+
+```json
+// Use a captured raw flow as the base, vary one section
+{
+  "flow_id": "<raw-flow-id>",
+  "target_addr": "api.target.com:443",
+  "use_tls": true,
+  "positions": [
+    {
+      "path": "payload",
+      "payloads": [
+        "R0VUIC8gSFRUUC8xLjENCkhvc3Q6IGV4YW1wbGUuY29tDQoNCg==",
+        "UE9TVCAvIEhUVFAvMS4xDQpIb3N0OiBleGFtcGxlLmNvbQ0KDQo="
+      ],
+      "encoding": "base64"
+    }
+  ],
+  "tag": "smuggling-fuzz"
+}
+
+// From scratch (no flow_id) — positions supply each variant's bytes
+{
+  "target_addr": "api.target.com:443",
+  "use_tls": true,
+  "positions": [
+    {
+      "path": "payload",
+      "payloads": ["<base64-template-1>", "<base64-template-2>"],
+      "encoding": "base64"
+    }
+  ],
+  "tag": "smuggling-from-scratch"
+}
+```
+
+`positions[]` typed paths: `payload | patches[N].data`. `flow_id` is OPTIONAL — when empty, `override_bytes` or a `payload` position must supply the variant bytes. Wire bytes are NEVER normalised.
 
 ### macro -- Macro Definition & Execution
 
@@ -372,6 +512,8 @@ Flow details include `protocol_summary` (protocol-specific info), and streaming 
 | `negate` | Invert condition |
 
 ### manage -- Flow Data Management
+
+`output_path` and `input_path` are resolved relative to the proxy server process's working directory — pass absolute paths when the server cwd is unknown to the caller (e.g. HTTP remote MCP).
 
 ```json
 // Delete flows (with protocol filter; matches Stream.Protocol exactly)
@@ -471,6 +613,25 @@ Flow details include `protocol_summary` (protocol-specific info), and streaming 
 | `override_body` | websocket_frame | Override WebSocket frame payload |
 | `mode` | all | Forwarding mode ("structured" or "raw". default: "structured") |
 | `raw_override_base64` | all (raw mode) | Base64-encoded raw bytes (for modify_and_forward in raw mode) |
+
+#### Per-Protocol Hold-Timeout Overrides
+
+The intercept queue's hold-timeout / timeout-behavior can be overridden per protocol via `configure.intercept_queue.protocol_overrides`. Valid keys are the canonical envelope.Protocol values: `http`, `ws`, `grpc`, `grpc-web`, `sse`, `raw`, `tls-handshake`. Useful when WebSocket / SSE streams need a longer hold than HTTP requests:
+
+```json
+// configure
+{
+  "operation": "merge",
+  "intercept_queue": {
+    "timeout_ms": 60000,
+    "timeout_behavior": "auto_release",
+    "protocol_overrides": {
+      "ws":  {"timeout_ms": 600000, "timeout_behavior": "auto_release"},
+      "sse": {"timeout_ms": 300000}
+    }
+  }
+}
+```
 
 ### security -- Target Scope Control
 
@@ -619,11 +780,15 @@ Dynamically change running proxy settings.
   "peek_timeout_ms": 5000
 }
 
-// Configure intercept queue settings
+// Configure intercept queue settings (with per-protocol overrides)
 {
   "intercept_queue": {
     "timeout_ms": 120000,
-    "timeout_behavior": "auto_release"
+    "timeout_behavior": "auto_release",
+    "protocol_overrides": {
+      "ws":  {"timeout_ms": 600000},
+      "sse": {"timeout_ms": 300000}
+    }
   }
 }
 
@@ -645,7 +810,7 @@ Dynamically change running proxy settings.
 | `upstream_proxy` | Upstream proxy URL |
 | `tls_passthrough` | TLS passthrough settings |
 | `intercept_rules` | Intercept rules |
-| `intercept_queue` | Intercept queue (timeout_ms, timeout_behavior) |
+| `intercept_queue` | Intercept queue (timeout_ms, timeout_behavior, protocol_overrides per envelope.Protocol) |
 | `auto_transform` | Auto-transform rules |
 | `socks5_auth` | SOCKS5 authentication (method, username, password) |
 | `max_connections` | Maximum concurrent connections (1-100000) |
@@ -656,24 +821,16 @@ Dynamically change running proxy settings.
 | `client_cert` | mTLS client certificate settings (cert_path, key_path) |
 | `capture_scope` | Recording-only observability filter (USK-776). Use `add_includes` / `remove_includes` / `add_excludes` / `remove_excludes` for `operation: merge`; `includes` / `excludes` for `operation: replace`. See the recording-vs-transmission table above. |
 
-### plugin -- Plugin Management
+### plugin_introspect -- Plugin Introspection
+
+`plugin_introspect` is read-only and takes no parameters. It returns the full list of loaded pluginv2 plugins together with each plugin's `(protocol, event, phase)` hook registrations and the redacted `PluginConfig.Vars` map.
 
 ```json
-// List plugins
-{"action": "list"}
-
-// Reload a specific plugin
-{"action": "reload", "params": {"name": "<plugin-name>"}}
-
-// Reload all plugins
-{"action": "reload"}
-
-// Disable a plugin
-{"action": "disable", "params": {"name": "<plugin-name>"}}
-
-// Enable a plugin
-{"action": "enable", "params": {"name": "<plugin-name>"}}
+// List loaded plugins (no parameters)
+{}
 ```
+
+Use this when you need to confirm which plugins are active and which envelope events they observe. There is no MCP-level reload / enable / disable — plugin lifecycle is managed by the config file and the proxy boot sequence.
 
 ## Workflow Selection Decision Tree
 
@@ -688,7 +845,7 @@ Received instruction
   +-- Is the target operation stateful? (login required, CSRF token, DELETE API, etc.)
   |     |
   |     +-- YES --> See references/self-contained-iteration.md for Macro design
-  |     +-- NO --> Execute directly with resend / fuzz
+  |     +-- NO --> Execute directly with the matching resend_* / fuzz_* tool
   |
   +-- Need to select attack payloads?
   |     |
@@ -697,14 +854,17 @@ Received instruction
   |
   +-- Single test or comprehensive test?
   |     |
-  |     +-- Single verification --> resend tool
-  |     +-- Comprehensive test --> fuzz tool (outlier detection: outliers_only filter)
-  |     +-- Want to bypass HTTP parsing --> resend_raw (HTTP Request Smuggling, etc.)
-  |     +-- WebSocket/TCP message resend --> tcp_replay
+  |     +-- Single HTTP verification --> resend_http
+  |     +-- Single WebSocket frame --> resend_ws
+  |     +-- Single gRPC unary RPC --> resend_grpc
+  |     +-- Raw byte replay (smuggling) --> resend_raw
+  |     +-- Comprehensive HTTP test --> fuzz_http (outlier detection: outliers_only filter)
+  |     +-- Comprehensive WS / gRPC / Raw fuzz --> fuzz_ws / fuzz_grpc / fuzz_raw
+  |     +-- Want to bypass HTTP parsing / fuzz arbitrary bytes --> fuzz_raw (HTTP Request Smuggling, etc.)
   |
   +-- Need response diff analysis?
   |     |
-  |     +-- YES --> resend compare for structured comparison of 2 flows
+  |     +-- YES --> Issue two resend_http calls and diff the recorded flows via the query tool
   |     +-- NO --> Next
   |
   +-- Need rate limit / budget configuration?

