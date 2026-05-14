@@ -775,17 +775,22 @@ func buildALPNRoutedStack(
 }
 
 // buildCacheHitPath handles the ALPN cache hit: client MITM first offering
-// both the cached ALPN and http/1.1 fallback (USK-793), then upstream dial
-// using whatever the client actually negotiated. Verify upstream agrees.
+// the HTTP-family superset (USK-793, USK-884), then upstream dial using
+// whatever the client actually negotiated. Verify upstream agrees.
 //
-// Why offer both protocols even on a cache hit (USK-793): the cache reflects
-// what _previous_ clients negotiated with upstream, not what the current
-// client speaks. If the proxy advertised only the cached "h2" and the
-// current client offered only "http/1.1", Go's crypto/tls would complete
-// the handshake with empty NegotiatedProtocol, and the client would speak
-// HTTP/1.x on a stack the proxy then dispatched as HTTP/2. By advertising
-// both we let the client pick a protocol it can actually speak, and the
-// upstream re-dial below honours that choice.
+// Why offer the HTTP-family superset even on a cache hit (USK-793, USK-884):
+// the cache reflects what _previous_ clients negotiated with upstream, not
+// what the current client speaks. If the proxy advertised only the cached
+// "h2" and the current client offered only "http/1.1", Go's crypto/tls would
+// complete the handshake with empty NegotiatedProtocol, and the client would
+// speak HTTP/1.x on a stack the proxy then dispatched as HTTP/2 (USK-793).
+// Symmetrically, if the cache was seeded with "http/1.1" by an h1-only
+// client and a later h2-capable client connected, advertising only
+// "http/1.1" pinned every subsequent client to HTTP/1.1 for the cache TTL
+// window (USK-884 one-way ratchet). clientALPNOffersForUpstream now returns
+// [h2, http/1.1] for any HTTP-family cached value, so the client picks a
+// protocol it can actually speak; the refresh-on-mismatch block below
+// rewrites the cache entry when the chosen ALPN differs from the seed.
 //
 // Returns the TLS-wrapped client connection (not the original plain conn)
 // plus both TLS snapshots.

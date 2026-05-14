@@ -463,6 +463,9 @@ func startFullListenerProxy(
 	if opts.bodyMaxSize > 0 {
 		buildCfg.MaxBodySize = opts.bodyMaxSize
 	}
+	if opts.alpnCache != nil {
+		buildCfg.ALPNCache = opts.alpnCache
+	}
 
 	connectNeg := connector.NewCONNECTNegotiator(slog.Default())
 	socks5Neg := connector.NewSOCKS5Negotiator(slog.Default())
@@ -551,6 +554,12 @@ type fullListenerOpts struct {
 	bodySpillDir       string
 	bodySpillThreshold int64
 	bodyMaxSize        int64
+
+	// USK-884: optional ALPNCache pre-installed on BuildConfig so a test
+	// can pre-seed entries (verifying the cache-hit path) before the
+	// listener handles its first CONNECT. Nil disables ALPN caching for
+	// this listener instance.
+	alpnCache *connector.ALPNCache
 }
 
 // waitSessionDone waits for the WaitGroup with a timeout.

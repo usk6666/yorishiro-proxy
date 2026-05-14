@@ -48,21 +48,39 @@ var defaultALPNOffer = []string{ALPNProtocolH2, ALPNProtocolHTTP11}
 // would otherwise route through the HTTP/2 stack — yielding "invalid client
 // preface" errors and 0-byte timeouts.
 //
-// Order matters: the proxy advertises the upstream-preferred protocol
-// first, so a client that supports both still ends up on h2.
+// USK-884: the cache value is a hint about upstream preference, not a
+// contract about client capability. When the cached ALPN is "http/1.1",
+// previously the proxy advertised ["http/1.1"] only — a one-way ratchet
+// that pinned every subsequent h2-capable client to HTTP/1.1 for the cache
+// TTL window. The proxy now advertises the full HTTP-family superset
+// ["h2", "http/1.1"] whenever cached ALPN is HTTP-family (h2, http/1.1, or
+// empty). If the client picks an ALPN that differs from the cached value,
+// the existing refresh-on-mismatch logic in buildCacheHitPath /
+// buildCacheMissPath redials upstream with the client's choice and rewrites
+// the cache entry.
+//
+// Order matters: the proxy advertises h2 first so a client that supports
+// both still ends up on h2 (preserving upstream's likely preference for
+// HTTP/2 capable hosts).
 //
 // upstreamALPN values:
 //   - "h2": offer ["h2", "http/1.1"]
-//   - "http/1.1": offer ["http/1.1"]
-//   - "" (no upstream ALPN): offer ["http/1.1"]
+//   - "http/1.1": offer ["h2", "http/1.1"] (USK-884: was ["http/1.1"] only)
+//   - "" (no upstream ALPN known): offer ["h2", "http/1.1"]
 //   - anything else (unrecognised): offer ["http/1.1"] — alpnRoute would
 //     fall through to bytechunk anyway, and we don't want to mislead the
 //     client into thinking we speak the unknown protocol.
 func clientALPNOffersForUpstream(upstreamALPN string) []string {
 	switch upstreamALPN {
-	case ALPNProtocolH2:
+	case ALPNProtocolH2, ALPNProtocolHTTP11, "":
+		// HTTP-family cached value (or no cache yet): advertise the full
+		// superset so the client can pick the protocol it actually speaks.
+		// The cache refresh-on-mismatch logic rewrites the cached entry
+		// when the chosen ALPN differs from the seed.
 		return []string{ALPNProtocolH2, ALPNProtocolHTTP11}
 	default:
+		// Unrecognised cached value — fall back to http/1.1 only so we
+		// don't advertise a protocol the proxy can't actually dispatch.
 		return []string{ALPNProtocolHTTP11}
 	}
 }

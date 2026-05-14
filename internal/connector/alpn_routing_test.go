@@ -104,10 +104,13 @@ func TestHashCert_EmptyCertList(t *testing.T) {
 }
 
 // TestClientALPNOffersForUpstream covers the ALPN-list construction:
-// the proxy always advertises a superset that includes the
-// upstream-preferred protocol first plus the http/1.1 fallback so a
-// client that cannot speak h2 still negotiates a protocol the proxy can
-// dispatch on (USK-793).
+// the proxy advertises the HTTP-family superset [h2, http/1.1] whenever
+// the cached upstream ALPN is HTTP-family or unknown, so a client that
+// wants h2 is not pinned to http/1.1 by a stale cache entry (USK-884),
+// and a client that cannot speak h2 still negotiates a protocol the
+// proxy can dispatch on (USK-793). Unrecognised cached values collapse
+// to http/1.1 only to avoid advertising a protocol the proxy cannot
+// actually dispatch.
 func TestClientALPNOffersForUpstream(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -120,14 +123,18 @@ func TestClientALPNOffersForUpstream(t *testing.T) {
 			wantOffers: []string{ALPNProtocolH2, ALPNProtocolHTTP11},
 		},
 		{
-			name:       "http/1.1 upstream offers http/1.1",
+			// USK-884: previously returned ["http/1.1"] only, which formed
+			// a one-way ratchet pinning every subsequent h2-capable client
+			// to HTTP/1.1 until the cache TTL expired. Must now advertise
+			// the full HTTP-family superset.
+			name:       "http/1.1 upstream offers h2 + http/1.1 (USK-884)",
 			upstream:   ALPNProtocolHTTP11,
-			wantOffers: []string{ALPNProtocolHTTP11},
+			wantOffers: []string{ALPNProtocolH2, ALPNProtocolHTTP11},
 		},
 		{
-			name:       "empty upstream ALPN falls back to http/1.1",
+			name:       "empty upstream ALPN offers h2 + http/1.1",
 			upstream:   "",
-			wantOffers: []string{ALPNProtocolHTTP11},
+			wantOffers: []string{ALPNProtocolH2, ALPNProtocolHTTP11},
 		},
 		{
 			name:       "unknown upstream ALPN falls back to http/1.1",
