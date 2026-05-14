@@ -117,8 +117,7 @@ internal/
                            #   japan-my-number, email, japan-phone)
   job/                     # Job runner with EnvelopeSource interface
                            #   http_source.go, ws_source.go, grpc_source.go, raw_source.go,
-                           #   fuzz_http_source.go, fuzz_raw_source.go,
-                           #   macro_adapter.go (Macro adapter)
+                           #   fuzz_http_source.go, fuzz_raw_source.go
   macro/                   # Macro engine: template / guard / extract / encoder
   flow/                    # Stream/Flow Store (sqlite); HAR / JSONL / cURL export, import
   cert/                    # Root CA + dynamic server cert issuance

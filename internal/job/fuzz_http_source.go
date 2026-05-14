@@ -169,3 +169,17 @@ func requestDataToEnvelope(data *fuzzer.RequestData) *envelope.Envelope {
 
 	return http1.BuildSendEnvelope(data.Method, scheme, authority, path, rawQuery, headers, data.Body)
 }
+
+// mapHeadersToKeyValues converts map[string][]string to []envelope.KeyValue.
+func mapHeadersToKeyValues(headers map[string][]string) []envelope.KeyValue {
+	if headers == nil {
+		return nil
+	}
+	var kvs []envelope.KeyValue
+	for name, values := range headers {
+		for _, v := range values {
+			kvs = append(kvs, envelope.KeyValue{Name: name, Value: v})
+		}
+	}
+	return kvs
+}

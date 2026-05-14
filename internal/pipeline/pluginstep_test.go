@@ -58,8 +58,7 @@ func TestPluginIntegration_LiveWire_BothPhasesFire(t *testing.T) {
 // HTTPMessage envelope で http.on_request の post のみ fire (pre は fire しない).
 //
 // The resend Pipeline is constructed via Pipeline.Without(&PluginStepPre{})
-// — the orchestrator pattern from the issue text. This is what the
-// MacroSendFuncAdapter precedent uses for InterceptStep exclusion.
+// — the orchestrator pattern from the issue text.
 func TestPluginIntegration_ResendBypass_OnlyPostFires(t *testing.T) {
 	eng := pluginv2.NewEngine(nil)
 	var preCount, postCount int32
