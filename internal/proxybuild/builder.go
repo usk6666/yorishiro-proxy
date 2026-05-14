@@ -943,49 +943,100 @@ func buildSessionOptions(deps Deps, listenerName string) session.SessionOptions 
 		// err=nil on a clean client disconnect after a Drop, which would
 		// otherwise rewrite State="error"+BlockedBy=* to State="complete".
 		blocked := newBlockedStreamSet()
-		opts.OnComplete = func(ctx context.Context, streamID string, err error) {
-			if streamID == "" {
-				return
-			}
-			if blocked.contains(streamID) {
-				// The stream was already finalised by the audit recorder;
-				// skip the normal completion update. Evict the marker now
-				// that we've consumed it so the per-listener set does not
-				// accumulate entries for the proxy's lifetime (USK-782
-				// review fix; CWE-400). OnComplete fires after RunSession's
-				// errgroup.Wait, so no further references to streamID exist
-				// past this point.
-				blocked.remove(streamID)
-				return
-			}
-			state := "complete"
-			if err != nil && !errors.Is(err, io.EOF) {
-				state = "error"
-			}
-			update := flow.StreamUpdate{
-				State:         state,
-				FailureReason: session.ClassifyError(err),
-			}
-			// USK-797: persist the raw err string under tags["error"] so
-			// operators can distinguish e.g. "dial: stream error refused:
-			// layer shutdown" from "client.Next: read tcp ...: use of
-			// closed network connection" without re-deriving it from the
-			// log stream. ClassifyError only returns the canonical
-			// taxonomy label (refused / canceled / aborted / ...); the
-			// full message is what makes the row actionable. AppendTags
-			// preserves any tags previously written by RecordStep / TLS
-			// metadata projections (CLAUDE.md MITM principle: do not
-			// clobber what the wire / earlier steps already recorded).
-			if state == "error" && err != nil {
-				update.AppendTags = map[string]string{
-					"error": truncateErrorTag(err.Error()),
-				}
-			}
-			_ = store.UpdateStream(ctx, streamID, update)
-		}
+		opts.OnComplete = buildOnCompleteFunc(store, blocked)
 		opts.OnPipelineDrop = buildPipelineDropRecorder(store, listenerName, deps.Logger, blocked)
 	}
 	return opts
+}
+
+// buildOnCompleteFunc returns the live data path's terminal session
+// finaliser. Extracted from buildSessionOptions to keep both functions
+// under the gocyclo threshold (15) — the closure body grew past the
+// limit when USK-885 added the StreamReader-driven Duration projection.
+//
+// Behaviour:
+//   - empty streamID → no-op (RunSession exited before any envelope
+//     produced a StreamID; nothing to update).
+//   - streamID present in `blocked` → audit recorder already finalised
+//     the Stream; skip and evict the marker (CWE-400 leak guard).
+//   - non-EOF non-nil err → State="error" + FailureReason from
+//     session.ClassifyError + Tags["error"]=truncated err string.
+//   - everything else → State="complete".
+//   - USK-885: Duration = time.Since(Stream.Timestamp) when the Store
+//     implements flow.StreamReader and the Stream row exists. Cross-
+//     protocol fix; HTTP/1.x, WS, gRPC, SSE all benefit. A nil reader
+//     or GetStream miss silently leaves Duration zero so the
+//     "non-zero fields only" StreamUpdate semantics still hold.
+func buildOnCompleteFunc(store flow.Writer, blocked *blockedStreamSet) func(context.Context, string, error) {
+	// USK-885: optional StreamReader so OnComplete can read the Stream's
+	// recorded Timestamp. The live production FlowStore is *flow.SQLiteStore
+	// (satisfies flow.Store, which embeds StreamReader); test stacks that
+	// only implement flow.Writer fall through the type assertion and
+	// Duration stays zero. The assertion runs once at build time, not
+	// per-Stream.
+	streamReader, _ := store.(flow.StreamReader)
+	return func(ctx context.Context, streamID string, err error) {
+		if streamID == "" {
+			return
+		}
+		if blocked.contains(streamID) {
+			// The stream was already finalised by the audit recorder;
+			// skip the normal completion update. Evict the marker now
+			// that we've consumed it so the per-listener set does not
+			// accumulate entries for the proxy's lifetime (USK-782
+			// review fix; CWE-400). OnComplete fires after RunSession's
+			// errgroup.Wait, so no further references to streamID exist
+			// past this point.
+			blocked.remove(streamID)
+			return
+		}
+		state := "complete"
+		if err != nil && !errors.Is(err, io.EOF) {
+			state = "error"
+		}
+		update := flow.StreamUpdate{
+			State:         state,
+			FailureReason: session.ClassifyError(err),
+			Duration:      computeStreamDuration(ctx, streamReader, streamID),
+		}
+		// USK-797: persist the raw err string under tags["error"] so
+		// operators can distinguish e.g. "dial: stream error refused:
+		// layer shutdown" from "client.Next: read tcp ...: use of
+		// closed network connection" without re-deriving it from the
+		// log stream. ClassifyError only returns the canonical
+		// taxonomy label (refused / canceled / aborted / ...); the
+		// full message is what makes the row actionable. AppendTags
+		// preserves any tags previously written by RecordStep / TLS
+		// metadata projections (CLAUDE.md MITM principle: do not
+		// clobber what the wire / earlier steps already recorded).
+		if state == "error" && err != nil {
+			update.AppendTags = map[string]string{
+				"error": truncateErrorTag(err.Error()),
+			}
+		}
+		_ = store.UpdateStream(ctx, streamID, update)
+	}
+}
+
+// computeStreamDuration returns time.Since(Stream.Timestamp) for the
+// stream identified by streamID, or zero on any lookup failure /
+// nil reader / zero Timestamp. The zero return is the documented
+// "only non-zero fields are applied" sentinel for StreamUpdate.Duration
+// so a miss leaves the Stream's existing Duration untouched. Single
+// purpose so the call site in OnComplete stays readable (USK-885).
+func computeStreamDuration(ctx context.Context, reader flow.StreamReader, streamID string) time.Duration {
+	if reader == nil {
+		return 0
+	}
+	st, err := reader.GetStream(ctx, streamID)
+	if err != nil || st == nil || st.Timestamp.IsZero() {
+		return 0
+	}
+	d := time.Since(st.Timestamp)
+	if d <= 0 {
+		return 0
+	}
+	return d
 }
 
 // errorTagMaxLen caps the size of the err.Error() string persisted under

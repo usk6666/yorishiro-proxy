@@ -6,7 +6,9 @@ import (
 	"io"
 	"log/slog"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/cert"
 	"github.com/usk6666/yorishiro-proxy/internal/config"
@@ -265,3 +267,244 @@ func TestBuildLiveStack_MaxConcurrentStreamsZeroDefault(t *testing.T) {
 }
 
 var _ = errors.Is // sentinel for future errors.Is assertions on package errors
+
+// fakeStreamStore is a flow.Writer + flow.StreamReader test double used by
+// the buildOnCompleteFunc / computeStreamDuration unit tests (USK-885).
+// It is sync-safe so subtests can run in parallel without an externally
+// observable race.
+type fakeStreamStore struct {
+	mu      sync.Mutex
+	streams map[string]*flow.Stream
+	updates map[string][]flow.StreamUpdate
+	getErr  error
+}
+
+func newFakeStreamStore() *fakeStreamStore {
+	return &fakeStreamStore{
+		streams: make(map[string]*flow.Stream),
+		updates: make(map[string][]flow.StreamUpdate),
+	}
+}
+
+func (f *fakeStreamStore) SaveStream(_ context.Context, s *flow.Stream) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.streams[s.ID] = s
+	return nil
+}
+
+func (f *fakeStreamStore) UpdateStream(_ context.Context, id string, update flow.StreamUpdate) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.updates[id] = append(f.updates[id], update)
+	return nil
+}
+
+func (f *fakeStreamStore) SaveFlow(_ context.Context, _ *flow.Flow) error { return nil }
+
+func (f *fakeStreamStore) GetStream(_ context.Context, id string) (*flow.Stream, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.getErr != nil {
+		return nil, f.getErr
+	}
+	st, ok := f.streams[id]
+	if !ok {
+		return nil, nil
+	}
+	return st, nil
+}
+
+func (f *fakeStreamStore) ListStreams(_ context.Context, _ flow.StreamListOptions) ([]*flow.Stream, error) {
+	return nil, nil
+}
+
+func (f *fakeStreamStore) CountStreams(_ context.Context, _ flow.StreamListOptions) (int, error) {
+	return 0, nil
+}
+
+// TestComputeStreamDuration_NilReader verifies the nil-reader guard returns
+// zero so a downstream store.UpdateStream call leaves duration_ms untouched.
+func TestComputeStreamDuration_NilReader(t *testing.T) {
+	if got := computeStreamDuration(context.Background(), nil, "stream-1"); got != 0 {
+		t.Errorf("computeStreamDuration(nil) = %v, want 0", got)
+	}
+}
+
+// TestComputeStreamDuration_GetStreamError verifies a Store error projects
+// to zero so partial-failure state does not produce a bogus duration_ms.
+func TestComputeStreamDuration_GetStreamError(t *testing.T) {
+	store := newFakeStreamStore()
+	store.getErr = errors.New("simulated store error")
+	if got := computeStreamDuration(context.Background(), store, "stream-1"); got != 0 {
+		t.Errorf("computeStreamDuration(error) = %v, want 0", got)
+	}
+}
+
+// TestComputeStreamDuration_StreamNotFound verifies a missing Stream row
+// projects to zero (no UpdateStream-time clobber of an existing duration).
+func TestComputeStreamDuration_StreamNotFound(t *testing.T) {
+	store := newFakeStreamStore()
+	if got := computeStreamDuration(context.Background(), store, "missing"); got != 0 {
+		t.Errorf("computeStreamDuration(missing) = %v, want 0", got)
+	}
+}
+
+// TestComputeStreamDuration_ZeroTimestamp verifies a Stream with a zero
+// Timestamp projects to zero rather than a non-deterministic value.
+func TestComputeStreamDuration_ZeroTimestamp(t *testing.T) {
+	store := newFakeStreamStore()
+	store.streams["s1"] = &flow.Stream{ID: "s1"} // Timestamp left zero.
+	if got := computeStreamDuration(context.Background(), store, "s1"); got != 0 {
+		t.Errorf("computeStreamDuration(zero ts) = %v, want 0", got)
+	}
+}
+
+// TestComputeStreamDuration_FutureTimestamp verifies the defensive d <= 0
+// guard catches clock skew / future timestamps and returns zero so the
+// caller does not record a negative duration.
+func TestComputeStreamDuration_FutureTimestamp(t *testing.T) {
+	store := newFakeStreamStore()
+	store.streams["s1"] = &flow.Stream{ID: "s1", Timestamp: time.Now().Add(1 * time.Hour)}
+	if got := computeStreamDuration(context.Background(), store, "s1"); got != 0 {
+		t.Errorf("computeStreamDuration(future ts) = %v, want 0", got)
+	}
+}
+
+// TestComputeStreamDuration_HappyPath verifies the production case: a
+// Stream with a past Timestamp yields a strictly positive Duration.
+func TestComputeStreamDuration_HappyPath(t *testing.T) {
+	store := newFakeStreamStore()
+	store.streams["s1"] = &flow.Stream{ID: "s1", Timestamp: time.Now().Add(-50 * time.Millisecond)}
+	got := computeStreamDuration(context.Background(), store, "s1")
+	if got <= 0 {
+		t.Errorf("computeStreamDuration(past ts) = %v, want > 0", got)
+	}
+	if got > time.Second {
+		t.Errorf("computeStreamDuration(past 50ms) = %v, want roughly 50ms (sanity ceiling 1s)", got)
+	}
+}
+
+// TestBuildOnCompleteFunc_EmptyStreamID verifies the no-op guard for an
+// empty StreamID. RunSession can return without producing any envelope
+// (e.g. dial failure before any read); the OnComplete must not produce a
+// spurious UpdateStream call.
+func TestBuildOnCompleteFunc_EmptyStreamID(t *testing.T) {
+	store := newFakeStreamStore()
+	blocked := newBlockedStreamSet()
+	fn := buildOnCompleteFunc(store, blocked)
+	fn(context.Background(), "", nil)
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if len(store.updates) != 0 {
+		t.Errorf("UpdateStream called for empty streamID; updates=%v, want none", store.updates)
+	}
+}
+
+// TestBuildOnCompleteFunc_BlockedStreamSkippedAndEvicted verifies the
+// USK-782 audit-recorder coordination: a Stream that the audit path
+// already finalised is not re-finalised by OnComplete, and the marker is
+// evicted from the per-listener set (CWE-400 leak guard).
+func TestBuildOnCompleteFunc_BlockedStreamSkippedAndEvicted(t *testing.T) {
+	store := newFakeStreamStore()
+	blocked := newBlockedStreamSet()
+	blocked.add("s1")
+	fn := buildOnCompleteFunc(store, blocked)
+	fn(context.Background(), "s1", nil)
+	store.mu.Lock()
+	if len(store.updates["s1"]) != 0 {
+		t.Errorf("UpdateStream called on blocked stream; updates=%v, want none", store.updates["s1"])
+	}
+	store.mu.Unlock()
+	if blocked.contains("s1") {
+		t.Error("blockedStreamSet still contains s1; OnComplete must evict after consumption")
+	}
+}
+
+// TestBuildOnCompleteFunc_HappyPathComplete verifies the canonical
+// USK-885 success projection: nil err → state=complete, Duration
+// populated from the Stream's Timestamp.
+func TestBuildOnCompleteFunc_HappyPathComplete(t *testing.T) {
+	store := newFakeStreamStore()
+	store.streams["s1"] = &flow.Stream{ID: "s1", Timestamp: time.Now().Add(-100 * time.Millisecond)}
+	blocked := newBlockedStreamSet()
+	fn := buildOnCompleteFunc(store, blocked)
+	fn(context.Background(), "s1", nil)
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if len(store.updates["s1"]) != 1 {
+		t.Fatalf("UpdateStream call count = %d, want 1", len(store.updates["s1"]))
+	}
+	up := store.updates["s1"][0]
+	if up.State != "complete" {
+		t.Errorf("State = %q, want %q", up.State, "complete")
+	}
+	if up.Duration <= 0 {
+		t.Errorf("Duration = %v, want > 0", up.Duration)
+	}
+	if up.AppendTags != nil {
+		t.Errorf("AppendTags = %v, want nil on success", up.AppendTags)
+	}
+}
+
+// TestBuildOnCompleteFunc_EOFTreatedAsComplete verifies io.EOF is
+// classified as a graceful terminator (state=complete), not an error.
+// The Issue acceptance gate "client/upstream どちらが close しても
+// state=complete" depends on this projection.
+func TestBuildOnCompleteFunc_EOFTreatedAsComplete(t *testing.T) {
+	store := newFakeStreamStore()
+	store.streams["s1"] = &flow.Stream{ID: "s1", Timestamp: time.Now().Add(-10 * time.Millisecond)}
+	blocked := newBlockedStreamSet()
+	fn := buildOnCompleteFunc(store, blocked)
+	fn(context.Background(), "s1", io.EOF)
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	up := store.updates["s1"][0]
+	if up.State != "complete" {
+		t.Errorf("State = %q on io.EOF, want %q", up.State, "complete")
+	}
+	if up.AppendTags != nil {
+		t.Errorf("AppendTags = %v on io.EOF, want nil (no error tag for EOF)", up.AppendTags)
+	}
+}
+
+// TestBuildOnCompleteFunc_NonEOFErrorProjectsToError verifies non-EOF
+// errors classify as state=error with the AppendTags["error"] entry from
+// USK-797. The Duration must still be populated so analysts can see the
+// stream's lifespan even when it terminated abnormally.
+func TestBuildOnCompleteFunc_NonEOFErrorProjectsToError(t *testing.T) {
+	store := newFakeStreamStore()
+	store.streams["s1"] = &flow.Stream{ID: "s1", Timestamp: time.Now().Add(-10 * time.Millisecond)}
+	blocked := newBlockedStreamSet()
+	fn := buildOnCompleteFunc(store, blocked)
+	fn(context.Background(), "s1", errors.New("simulated transport error"))
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	up := store.updates["s1"][0]
+	if up.State != "error" {
+		t.Errorf("State = %q on non-EOF err, want %q", up.State, "error")
+	}
+	if up.Duration <= 0 {
+		t.Errorf("Duration = %v on error path, want > 0 (analysts need lifespan even for errors)", up.Duration)
+	}
+	if up.AppendTags == nil || up.AppendTags["error"] == "" {
+		t.Errorf("AppendTags[error] = %v, want non-empty err string", up.AppendTags)
+	}
+}
+
+// TestBuildOnCompleteFunc_WriterOnlyStoreNoDuration verifies that a Store
+// that only implements flow.Writer (no StreamReader) falls through to
+// Duration=0 silently. This keeps the test-double contract intact for
+// existing flow.Writer-only test stores in the repository.
+func TestBuildOnCompleteFunc_WriterOnlyStoreNoDuration(t *testing.T) {
+	// noopFlowStore (defined earlier in this file) implements only
+	// flow.Writer, not flow.StreamReader.
+	store := noopFlowStore{}
+	blocked := newBlockedStreamSet()
+	fn := buildOnCompleteFunc(store, blocked)
+	// No assertions on the StreamUpdate fields since noopFlowStore
+	// drops everything; the goal here is purely to verify that the
+	// closure does not panic and does not type-assert into a nil
+	// reader incorrectly.
+	fn(context.Background(), "s1", nil)
+}

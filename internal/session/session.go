@@ -1562,6 +1562,20 @@ func runUpgradeSSE(
 	_ = clientHTTP.Close()
 	defer func() { _ = clientCloser.Close() }()
 
+	// USK-885: wrap clientWriter so write failures are surfaced as
+	// io.EOF on the TeeReader read side instead of a transport error.
+	// SSE is half-duplex (server→client per RFC 8895 / W3C EventSource),
+	// so the only signal we have for "client closed the connection
+	// gracefully" is a write failure on the next event push (the
+	// client cannot signal half-duplex end-of-stream in-band). Without
+	// this conversion, every client-side close projected as
+	// state=error / reason=internal_error — which contradicts the
+	// Issue acceptance gate "client/upstream どちらが close しても
+	// complete". The upstream-graceful-close path (USK-883 chunked
+	// terminator → io.EOF) is unaffected — that error path never
+	// touches clientWriter.
+	clientWriteSink := &clientWriteEOFSink{w: clientWriter}
+
 	wrapOpts := []sse.Option{}
 	if firstResp == nil {
 		// Test path: synthesize a minimal placeholder. Production reaches
@@ -1591,7 +1605,10 @@ func runUpgradeSSE(
 	// io.TeeReader: every byte that sse.Wrap reads for parsing is also
 	// written to the client wire. The browser sees a continuous SSE
 	// stream (200 OK headers from pre-swap + event bytes from here).
-	teedBody := io.TeeReader(upBody, clientWriter)
+	// USK-885: clientWriteSink converts a closed-client write failure
+	// into io.EOF on the TeeReader read side so the parser exits
+	// cleanly (retErr=nil → state=complete).
+	teedBody := io.TeeReader(upBody, clientWriteSink)
 
 	sseCh := sse.Wrap(upstreamCh, firstResp, teedBody, wrapOpts...)
 	adapter := newSSELayerAdapter(sseCh)
@@ -1619,6 +1636,15 @@ func runUpgradeSSE(
 	// clientToUpstream goroutine; we drive sseCh.Next directly and the
 	// Pipeline records each event. Wire forwarding is handled by the
 	// io.TeeReader above.
+	//
+	// USK-885: the loop exits on io.EOF for both end-of-stream paths:
+	//   - upstream graceful close (after USK-883: chunked terminator
+	//     → io.EOF on body.Read),
+	//   - client graceful close (clientWriteSink converts a closed-
+	//     client write failure into io.EOF on the TeeReader read side).
+	// Either yields retErr=nil → state=complete via OnComplete.
+	// Forced abort (ctx cancel, RST, parse error) still surfaces as a
+	// non-nil error → state=error.
 	for {
 		env, nerr := sseCh.Next(ctx)
 		if nerr != nil {
@@ -1632,6 +1658,76 @@ func runUpgradeSSE(
 		}
 		_, _, _ = p.Run(ctx, env)
 	}
+}
+
+// clientWriteEOFSink is an io.Writer that wraps the post-upgrade SSE
+// client conn writer (claimed via http1.Layer.DetachStream). It converts
+// any write failure into io.EOF so the io.TeeReader feeding the SSE
+// parser surfaces "client closed the conn" as a graceful end-of-stream
+// (retErr=nil → state=complete) instead of a transport error
+// (state=error / reason=internal_error).
+//
+// Rationale: SSE is server→client only after the upgrade (RFC 8895 /
+// W3C EventSource); the client cannot signal end-of-stream in-band, so
+// the proxy's only observable signal is a write failure on the next
+// event push. Treating that as a graceful close satisfies the USK-885
+// acceptance gate "client/upstream どちらが close しても state=complete"
+// without conflating it with the upstream-side error paths (parser
+// anomaly, MaxEventSize, ctx cancel) that still legitimately project
+// to state=error.
+//
+// A nil writer is treated as already-closed: Write returns io.EOF and
+// n=0 immediately. This is defensive — the production path always
+// supplies a non-nil writer from DetachStream — but keeps the type
+// safe to use under future refactors.
+type clientWriteEOFSink struct {
+	w io.Writer
+}
+
+// Write returns io.EOF on any underlying write failure (including a
+// short write — TCP write should never short-write under normal
+// conditions, so a short write is itself a signal the peer is gone).
+// On success returns (n, nil) unchanged.
+func (s *clientWriteEOFSink) Write(p []byte) (int, error) {
+	if s == nil || s.w == nil {
+		return 0, io.EOF
+	}
+	n, err := s.w.Write(p)
+	if err != nil {
+		// Per CLAUDE.md MITM principle "Pre-implementation reality
+		// check": we deliberately discard the original error from the
+		// returned tuple here because the parser's only options are
+		// io.EOF (graceful) and *layer.StreamError (abnormal). A
+		// wrapped error from the client-write side would project as
+		// state=error via the sse.Channel terminate path, which is
+		// exactly the behaviour we want to avoid for USK-885. The
+		// wire-observed reality is "the proxy could not deliver the
+		// next event because the client is gone" — i.e. the client's
+		// observable lifecycle ended — and that is a graceful session
+		// terminator on this protocol.
+		//
+		// Preserve the original error in slog.Debug so operators
+		// post-mortem can distinguish graceful FIN ("connection reset
+		// by peer", "use of closed network connection") from TLS
+		// write fault or transport bug — the state-classification
+		// outcome is identical (state=complete) but the original
+		// reason is recoverable from -log-level debug.
+		slog.Debug("session: SSE client write failed, projecting EOF for state=complete",
+			slog.String("err", err.Error()),
+			slog.Int("written", n),
+			slog.Int("requested", len(p)))
+		return n, io.EOF
+	}
+	if n < len(p) {
+		// Short write under non-error conditions is unusual for
+		// net.Conn.Write (it always returns either full success
+		// or an error). Defensive: treat as EOF.
+		slog.Debug("session: SSE client short write, projecting EOF for state=complete",
+			slog.Int("written", n),
+			slog.Int("requested", len(p)))
+		return n, io.EOF
+	}
+	return n, nil
 }
 
 // upgradePending returns true when notice has latched a pending UpgradeKind.
