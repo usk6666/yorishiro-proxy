@@ -139,6 +139,12 @@ func keyValuesToHTTPHeader(kvs []envelope.KeyValue) http.Header {
 }
 
 // FlowFetcherAdapter adapts flow.Reader to the macro.FlowFetcher interface.
+//
+// TODO(USK-877): when this adapter is wired into a production code path
+// that runs macros end-to-end, replicate the macro-step protocol gate
+// (see internal/mcp/macro_handlers.go checkMacroStepsProtocolWithStore)
+// at that path's MCP-boundary equivalent so WS / gRPC / gRPC-Web / SSE /
+// raw / tls-handshake flows cannot reach the macro engine.
 type FlowFetcherAdapter struct {
 	reader flow.Reader
 }

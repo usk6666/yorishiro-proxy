@@ -328,6 +328,14 @@ func (he *hookExecutor) runMacro(ctx context.Context, macroName string, vars map
 		return nil, err
 	}
 
+	// Protocol gate: reject non-HTTP flow_ids before running. Mirrors
+	// the same check in handleDefineMacro / handleRunMacro so hook-
+	// invoked macros cannot bypass the gate via a stored macro that
+	// was defined before the gate landed. See USK-877.
+	if err := checkMacroStepsProtocolWithStore(ctx, s.flowStore.store, cfg.Steps); err != nil {
+		return nil, err
+	}
+
 	// Target scope enforcement: check each step's target URL before running.
 	// This mirrors the same check in handleRunMacro to prevent hooks
 	// from bypassing target scope restrictions via macro execution.

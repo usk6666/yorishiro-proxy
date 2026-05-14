@@ -1226,3 +1226,182 @@ func TestExecute_RunMacro_SkippedStepNotRecorded(t *testing.T) {
 		t.Errorf("macro_step = %q, want login", macroFlows[0].Tags["macro_step"])
 	}
 }
+
+// TestExecute_DefineMacro_RejectsNonHTTPProtocol verifies that define_macro
+// rejects steps that reference non-HTTP flows. The macro engine's SendFunc
+// is HTTP-unary; passing a WS / gRPC / gRPC-Web / SSE / raw / tls-handshake
+// flow would hang the engine because io.ReadAll on a hijacked WS body
+// never returns. See USK-877.
+func TestExecute_DefineMacro_RejectsNonHTTPProtocol(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name     string
+		protocol string
+	}{
+		{"ws", "ws"},
+		{"grpc", "grpc"},
+		{"grpc-web", "grpc-web"},
+		{"sse", "sse"},
+		{"raw", "raw"},
+		{"tls-handshake", "tls-handshake"},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			store := newTestStore(t)
+			ctx := context.Background()
+
+			fl := &flow.Stream{
+				Protocol:  tc.protocol,
+				State:     "complete",
+				Timestamp: time.Now().UTC(),
+			}
+			if err := store.SaveStream(ctx, fl); err != nil {
+				t.Fatalf("SaveStream: %v", err)
+			}
+
+			cs := setupMacroTestSession(t, store)
+
+			result := callMacro(t, cs, map[string]any{
+				"action": "define_macro",
+				"params": map[string]any{
+					"name": "non-http-macro",
+					"steps": []any{
+						map[string]any{
+							"id":      "s1",
+							"flow_id": fl.ID,
+						},
+					},
+				},
+			})
+
+			if !result.IsError {
+				t.Fatalf("expected error for protocol %q, got success", tc.protocol)
+			}
+			errText := extractTextContent(result)
+			if !strings.Contains(errText, "macro supports http only") {
+				t.Errorf("error should mention 'macro supports http only', got: %s", errText)
+			}
+			if !strings.Contains(errText, tc.protocol) {
+				t.Errorf("error should mention protocol %q, got: %s", tc.protocol, errText)
+			}
+		})
+	}
+}
+
+// TestExecute_DefineMacro_AcceptsHTTPProtocol verifies the protocol gate
+// does not reject canonical HTTP-family flows. See USK-877.
+func TestExecute_DefineMacro_AcceptsHTTPProtocol(t *testing.T) {
+	t.Parallel()
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	fl := &flow.Stream{
+		Protocol:  "http",
+		State:     "complete",
+		Timestamp: time.Now().UTC(),
+	}
+	if err := store.SaveStream(ctx, fl); err != nil {
+		t.Fatalf("SaveStream: %v", err)
+	}
+
+	cs := setupMacroTestSession(t, store)
+
+	result := callMacro(t, cs, map[string]any{
+		"action": "define_macro",
+		"params": map[string]any{
+			"name": "http-macro",
+			"steps": []any{
+				map[string]any{
+					"id":      "s1",
+					"flow_id": fl.ID,
+				},
+			},
+		},
+	})
+	if result.IsError {
+		t.Fatalf("expected success for protocol \"http\", got error: %s", extractTextContent(result))
+	}
+
+	var out macroDefineMacroResult
+	unmarshalExecuteResult(t, result, &out)
+	if out.Name != "http-macro" {
+		t.Errorf("Name = %q, want %q", out.Name, "http-macro")
+	}
+}
+
+// TestExecute_RunMacro_RejectsNonHTTPProtocol verifies the TOCTOU re-check:
+// even when define_macro accepted the macro (HTTP flow), if the referenced
+// stream's protocol is mutated before run_macro fires, run_macro must
+// reject the call rather than hanging. See USK-877.
+func TestExecute_RunMacro_RejectsNonHTTPProtocol(t *testing.T) {
+	t.Parallel()
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	u, _ := url.Parse("http://example.invalid/api")
+	fl := &flow.Stream{
+		Protocol:  "http",
+		State:     "complete",
+		Timestamp: time.Now().UTC(),
+	}
+	if err := store.SaveStream(ctx, fl); err != nil {
+		t.Fatalf("SaveStream: %v", err)
+	}
+	sendMsg := &flow.Flow{
+		StreamID:  fl.ID,
+		Sequence:  0,
+		Direction: "send",
+		Timestamp: time.Now().UTC(),
+		Method:    "GET",
+		URL:       u,
+	}
+	if err := store.SaveFlow(ctx, sendMsg); err != nil {
+		t.Fatalf("SaveFlow: %v", err)
+	}
+
+	cs := setupMacroTestSession(t, store)
+
+	defineResult := callMacro(t, cs, map[string]any{
+		"action": "define_macro",
+		"params": map[string]any{
+			"name": "toctou-macro",
+			"steps": []any{
+				map[string]any{
+					"id":      "s1",
+					"flow_id": fl.ID,
+				},
+			},
+		},
+	})
+	if defineResult.IsError {
+		t.Fatalf("define_macro should succeed for http protocol: %s", extractTextContent(defineResult))
+	}
+
+	// Flip the stream's protocol to ws to simulate a TOCTOU window between
+	// define and run (in production this could be a row replacement or a
+	// stored macro that was defined before the gate landed).
+	if err := store.UpdateStream(ctx, fl.ID, flow.StreamUpdate{Protocol: "ws"}); err != nil {
+		t.Fatalf("UpdateStream: %v", err)
+	}
+
+	runResult := callMacro(t, cs, map[string]any{
+		"action": "run_macro",
+		"params": map[string]any{
+			"name": "toctou-macro",
+		},
+	})
+	if !runResult.IsError {
+		t.Fatal("expected run_macro to reject ws protocol")
+	}
+	errText := extractTextContent(runResult)
+	if !strings.Contains(errText, "macro supports http only") {
+		t.Errorf("error should mention 'macro supports http only', got: %s", errText)
+	}
+	if !strings.Contains(errText, "ws") {
+		t.Errorf("error should mention protocol 'ws', got: %s", errText)
+	}
+}

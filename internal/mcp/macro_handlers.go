@@ -138,6 +138,14 @@ func (s *Server) handleDefineMacro(ctx context.Context, params macroParams) (*ma
 		return nil, fmt.Errorf("invalid macro definition: %w", err)
 	}
 
+	// Reject non-HTTP flow_ids at define time so operators see the
+	// problem immediately. Mirrors the run_macro re-check below to
+	// close the TOCTOU gap when a flow's protocol changes between
+	// define and run. See USK-877.
+	if err := s.checkMacroStepsProtocol(ctx, params.Steps); err != nil {
+		return nil, fmt.Errorf("invalid macro definition: %w", err)
+	}
+
 	// Check if macro already exists (to determine created vs updated).
 	// Distinguish "not found" (macro is new) from real DB errors.
 	_, getErr := s.flowStore.store.GetMacro(ctx, params.Name)
@@ -192,6 +200,14 @@ func (s *Server) handleRunMacro(ctx context.Context, params macroParams) (*macro
 	// Allow run_macro to override the macro-level timeout.
 	if params.TimeoutMs > 0 {
 		m.TimeoutMs = params.TimeoutMs
+	}
+
+	// Re-check protocol gate before running. Closes the TOCTOU gap
+	// between define_macro and run_macro: a stored macro may reference
+	// a flow whose protocol changed (e.g. the row was replaced) or
+	// which originated from a pre-gate define call. See USK-877.
+	if err := s.checkMacroStepsProtocol(ctx, cfg.Steps); err != nil {
+		return nil, err
 	}
 
 	// Target scope enforcement: check each step's target URL before running.
@@ -258,6 +274,66 @@ func (s *Server) checkMacroStepsTargetScope(ctx context.Context, steps []macroSt
 					return fmt.Errorf("macro step %q: %w", step.ID, scopeErr)
 				}
 			}
+		}
+	}
+	return nil
+}
+
+// macroSupportedProtocols enumerates the flow.Stream.Protocol values that
+// the macro engine accepts via steps[].flow_id. The set mirrors
+// resendHTTPSupportedProtocols (resend_http_helpers.go) verbatim: the
+// macro engine's SendFunc has HTTP-unary vocabulary only, so WS / gRPC /
+// gRPC-Web / SSE / raw / tls-handshake flows must be rejected at the
+// MCP boundary. See USK-877.
+var macroSupportedProtocols = map[string]bool{
+	"HTTP":          true,
+	"HTTPS":         true,
+	"HTTP/1.x":      true,
+	"HTTP/1.1":      true,
+	"HTTP/2":        true,
+	"SOCKS5+HTTP":   true,
+	"SOCKS5+HTTPS":  true,
+	"SOCKS5+HTTP/2": true,
+	// envelope.Protocol projection ("http") for streams created on the
+	// new Layer stack.
+	"http": true,
+}
+
+// checkMacroStepsProtocol rejects steps that reference non-HTTP flows.
+// Runs at both define_macro and run_macro time so operators see the
+// problem immediately, and so a flow whose protocol changes between
+// define and run still fails fast rather than hanging the macro
+// engine. See USK-877.
+func (s *Server) checkMacroStepsProtocol(ctx context.Context, steps []macroStepInput) error {
+	return checkMacroStepsProtocolWithStore(ctx, s.flowStore.store, steps)
+}
+
+// checkMacroStepsProtocolWithStore is the shared protocol-gate worker
+// used by both *Server.checkMacroStepsProtocol and the plugin-hook
+// executor path in hooks.go. Keeping the logic in one place ensures
+// the supported-protocol set and error wording stay in lockstep.
+//
+// When the referenced stream cannot be looked up (not found, or any
+// other store error), the step is left alone — the existing macro
+// flow surfaces those as a runtime error from the engine. We only
+// fire when we can positively observe a non-HTTP Stream.Protocol.
+// This mirrors the tolerant semantics of checkMacroStepsTargetScope.
+func checkMacroStepsProtocolWithStore(ctx context.Context, store flow.Reader, steps []macroStepInput) error {
+	if store == nil {
+		return nil
+	}
+	for _, step := range steps {
+		if step.StreamID == "" {
+			continue
+		}
+		stream, err := store.GetStream(ctx, step.StreamID)
+		if err != nil {
+			// Missing / inaccessible streams are not the gate's
+			// concern — let the macro engine surface them later.
+			continue
+		}
+		if !macroSupportedProtocols[stream.Protocol] {
+			return fmt.Errorf("macro: step %q references flow %s with protocol %q; macro supports http only (use resend_ws / resend_grpc / resend_raw for non-HTTP flows)", step.ID, step.StreamID, stream.Protocol)
 		}
 	}
 	return nil
