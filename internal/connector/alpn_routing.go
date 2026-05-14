@@ -48,21 +48,60 @@ var defaultALPNOffer = []string{ALPNProtocolH2, ALPNProtocolHTTP11}
 // would otherwise route through the HTTP/2 stack — yielding "invalid client
 // preface" errors and 0-byte timeouts.
 //
-// Order matters: the proxy advertises the upstream-preferred protocol
-// first, so a client that supports both still ends up on h2.
+// USK-884: the cache value is a hint about upstream preference, not a
+// contract about client capability. When the cached ALPN is "http/1.1",
+// previously the proxy advertised ["http/1.1"] only — a one-way ratchet
+// that pinned every subsequent h2-capable client to HTTP/1.1 for the cache
+// TTL window. The proxy now advertises the full HTTP-family superset
+// ["h2", "http/1.1"] whenever the cached upstream-negotiated ALPN is
+// explicitly HTTP-family (h2 or http/1.1). The cache refresh-on-mismatch
+// logic in buildCacheHitPath / buildCacheMissPath redials upstream with
+// the client's choice and rewrites the cache entry if the negotiated
+// values diverge.
+//
+// USK-884 follow-up: the empty-cache case ("") must NOT be widened.
+// Go's crypto/tls completes a handshake with NegotiatedProtocol="" when
+// the peer advertises no ALPN at all (e.g., the chained-MITM test rig
+// upstream, plain HTTP/1.1 servers that omit ALPN, or proxies that
+// strip the ALPN extension). Advertising ["h2", "http/1.1"] to a client
+// whose upstream authoritatively negotiated empty ALPN forces an
+// unnecessary refresh cycle on every subsequent connection — the client
+// picks h2, the refresh-on-mismatch logic redials, learns "" again, and
+// re-emits the same offer next time. This regressed
+// TestPerListener_UpstreamProxy_ChainedMITM_NoSelfRecursion by
+// canceling the inner TLS handshake mid-flight on rapid CONNECT cycles.
+// When we know nothing about upstream (truly empty cache), the default
+// flow goes through buildCacheMissPath which offers defaultALPNOffer
+// upstream first; the value stored in the cache after that is the
+// upstream's actual choice, not the proxy's offer.
+//
+// Order matters: the proxy advertises h2 first so a client that supports
+// both still ends up on h2 (preserving upstream's likely preference for
+// HTTP/2 capable hosts).
 //
 // upstreamALPN values:
 //   - "h2": offer ["h2", "http/1.1"]
-//   - "http/1.1": offer ["http/1.1"]
-//   - "" (no upstream ALPN): offer ["http/1.1"]
+//   - "http/1.1": offer ["h2", "http/1.1"] (USK-884: was ["http/1.1"] only)
+//   - "" (upstream negotiated no ALPN): offer ["http/1.1"] only — the
+//     observed peer does not speak ALPN; offering h2 would force a
+//     spurious refresh on every reuse.
 //   - anything else (unrecognised): offer ["http/1.1"] — alpnRoute would
 //     fall through to bytechunk anyway, and we don't want to mislead the
 //     client into thinking we speak the unknown protocol.
 func clientALPNOffersForUpstream(upstreamALPN string) []string {
 	switch upstreamALPN {
-	case ALPNProtocolH2:
+	case ALPNProtocolH2, ALPNProtocolHTTP11:
+		// HTTP-family upstream ALPN observed: advertise the full
+		// superset so the client can pick the protocol it actually
+		// speaks. Refresh-on-mismatch rewrites the cache when the
+		// chosen ALPN differs from the seed.
 		return []string{ALPNProtocolH2, ALPNProtocolHTTP11}
 	default:
+		// Empty (upstream negotiated no ALPN) or unrecognised — fall
+		// back to http/1.1 only. We don't advertise a protocol the
+		// observed upstream didn't agree to; doing so would force a
+		// spurious refresh cycle on every subsequent connection (see
+		// TestPerListener_UpstreamProxy_ChainedMITM_NoSelfRecursion).
 		return []string{ALPNProtocolHTTP11}
 	}
 }

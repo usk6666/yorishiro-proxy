@@ -104,10 +104,13 @@ func TestHashCert_EmptyCertList(t *testing.T) {
 }
 
 // TestClientALPNOffersForUpstream covers the ALPN-list construction:
-// the proxy always advertises a superset that includes the
-// upstream-preferred protocol first plus the http/1.1 fallback so a
-// client that cannot speak h2 still negotiates a protocol the proxy can
-// dispatch on (USK-793).
+// the proxy advertises the HTTP-family superset [h2, http/1.1] whenever
+// the cached upstream ALPN is explicitly HTTP-family (h2 or http/1.1),
+// so a client that wants h2 is not pinned to http/1.1 by a stale cache
+// entry (USK-884). When the cached upstream ALPN is empty (upstream
+// negotiated no ALPN) or an unrecognised value, the offer collapses to
+// http/1.1 only — the proxy must not advertise a protocol the observed
+// upstream did not agree to (USK-884 follow-up).
 func TestClientALPNOffersForUpstream(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -120,12 +123,23 @@ func TestClientALPNOffersForUpstream(t *testing.T) {
 			wantOffers: []string{ALPNProtocolH2, ALPNProtocolHTTP11},
 		},
 		{
-			name:       "http/1.1 upstream offers http/1.1",
+			// USK-884: previously returned ["http/1.1"] only, which formed
+			// a one-way ratchet pinning every subsequent h2-capable client
+			// to HTTP/1.1 until the cache TTL expired. Must now advertise
+			// the full HTTP-family superset.
+			name:       "http/1.1 upstream offers h2 + http/1.1 (USK-884)",
 			upstream:   ALPNProtocolHTTP11,
-			wantOffers: []string{ALPNProtocolHTTP11},
+			wantOffers: []string{ALPNProtocolH2, ALPNProtocolHTTP11},
 		},
 		{
-			name:       "empty upstream ALPN falls back to http/1.1",
+			// USK-884 follow-up: empty upstream ALPN must collapse to
+			// http/1.1 only. Widening this case to [h2, http/1.1]
+			// regressed TestPerListener_UpstreamProxy_ChainedMITM_NoSelfRecursion
+			// because Go's crypto/tls completes a handshake with
+			// NegotiatedProtocol="" when the peer advertises no ALPN,
+			// and the existing refresh-on-mismatch logic then redials
+			// on every connection.
+			name:       "empty upstream ALPN collapses to http/1.1",
 			upstream:   "",
 			wantOffers: []string{ALPNProtocolHTTP11},
 		},
