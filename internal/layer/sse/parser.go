@@ -90,8 +90,16 @@ func NewSSEParser(r io.Reader, maxEventSize int) *SSEParser {
 
 // Next reads and returns the next SSE event from the stream.
 // It returns io.EOF when the stream is exhausted. Comment-only blocks
-// (lines starting with ":") are silently consumed; Next advances past them
-// and returns the next real event.
+// (lines starting with ":") and blocks containing only unknown fields are
+// silently consumed; Next advances past them and returns the next real
+// event.
+//
+// Per WHATWG HTML §9.2, a block that ends without observing a data: field
+// is a valid client-state update (lastEventId / retry / event-type) — it
+// is NOT dispatched as an event. We still emit such a block when at least
+// one recognized directive (event:/id:/retry:) was seen, so downstream
+// recording surfaces the state change. Unknown fields alone do not
+// trigger emission (USK-886).
 //
 // Anomaly contract: parser-detected deviations that do NOT terminate the
 // stream surface on the returned event's Anomalies field; the call still
@@ -101,37 +109,29 @@ func (p *SSEParser) Next() (*SSEEvent, error) {
 	if p.truncated {
 		return nil, io.EOF
 	}
-	var (
-		eventType   string
-		dataParts   []string
-		id          string
-		retry       string
-		rawBuf      bytes.Buffer
-		hasFields   bool
-		hasData     bool
-		idSeenCount int
-	)
+	var st eventState
 
 	for p.scanner.Scan() {
 		line := p.scanner.Text()
-		rawBuf.WriteString(line)
-		rawBuf.WriteByte('\n')
+		st.rawBuf.WriteString(line)
+		st.rawBuf.WriteByte('\n')
 
 		// Check for accumulated size limit.
-		if rawBuf.Len() > p.maxSize {
+		if st.rawBuf.Len() > p.maxSize {
 			return nil, fmt.Errorf("SSE event exceeds maximum size (%d bytes)", p.maxSize)
 		}
 
 		// Blank line terminates the event.
 		if line == "" {
-			if !hasFields {
-				// Empty line without preceding fields: skip (inter-event gap
-				// or comment-only block terminator).
-				rawBuf.Reset()
+			if !st.hasData && !st.hasDirective {
+				// Empty line without preceding data or directive: skip
+				// (inter-event gap, comment-only block, unknown-field-only
+				// block, or stray chunked-TE terminator that leaked into
+				// the SSE parser before USK-886 routed dechunking upstream).
+				st.rawBuf.Reset()
 				continue
 			}
-			return buildEvent(eventType, dataParts, id, retry,
-				rawBuf.Bytes(), hasData, idSeenCount, nil), nil
+			return st.build(nil), nil
 		}
 
 		// Comment line (starts with ":").
@@ -139,45 +139,23 @@ func (p *SSEParser) Next() (*SSEEvent, error) {
 			continue
 		}
 
-		// Parse field name and value.
+		// Parse field name and value, then dispatch.
 		fieldName, fieldValue := parseSSEField(line)
-
-		switch fieldName {
-		case "event":
-			eventType = fieldValue
-			hasFields = true
-		case "data":
-			dataParts = append(dataParts, fieldValue)
-			hasFields = true
-			hasData = true
-		case "id":
-			// Per spec: if the field value does not contain U+0000 NULL,
-			// set the last event ID buffer. We ignore NULL check for simplicity.
-			id = fieldValue
-			hasFields = true
-			idSeenCount++
-		case "retry":
-			retry = fieldValue
-			hasFields = true
-		default:
-			// Unknown field: ignored per spec, but we mark as having fields
-			// so the event is emitted if followed by a blank line.
-			hasFields = true
-		}
+		st.applyField(fieldName, fieldValue)
 	}
 
 	scanErr := p.scanner.Err()
 
-	// Stream ended. If we have accumulated fields, emit a final event.
-	// A non-EOF read error mid-event is flagged as AnomalySSETruncated and
-	// the partial event is still returned so the analyst can see what was
-	// captured before the read failed; subsequent Next() returns io.EOF.
-	if hasFields {
+	// Stream ended. If we have accumulated data or a directive, emit a
+	// final event. A non-EOF read error mid-event is flagged as
+	// AnomalySSETruncated and the partial event is still returned so the
+	// analyst can see what was captured before the read failed; subsequent
+	// Next() returns io.EOF.
+	if st.hasData || st.hasDirective {
 		if scanErr != nil {
 			p.truncated = true
 		}
-		return buildEvent(eventType, dataParts, id, retry,
-			rawBuf.Bytes(), hasData, idSeenCount, scanErr), nil
+		return st.build(scanErr), nil
 	}
 
 	if scanErr != nil {
@@ -186,25 +164,70 @@ func (p *SSEParser) Next() (*SSEEvent, error) {
 	return nil, io.EOF
 }
 
+// eventState carries the in-flight accumulators for a single SSE event
+// being parsed. Extracted from SSEParser.Next so the per-field dispatch
+// logic does not contribute to that function's cyclomatic complexity.
+type eventState struct {
+	eventType    string
+	dataParts    []string
+	id           string
+	retry        string
+	rawBuf       bytes.Buffer
+	hasData      bool
+	hasDirective bool // event/id/retry seen
+	idSeenCount  int
+}
+
+// applyField dispatches one parsed SSE field into the in-flight event
+// state. Unknown fields are silently ignored per WHATWG HTML §9.2; they
+// do NOT flip an emission flag, so unknown-field-only blocks are
+// consumed without dispatching (USK-886).
+func (s *eventState) applyField(name, value string) {
+	switch name {
+	case "event":
+		s.eventType = value
+		s.hasDirective = true
+	case "data":
+		s.dataParts = append(s.dataParts, value)
+		s.hasData = true
+	case "id":
+		// Per spec: if the field value does not contain U+0000 NULL,
+		// set the last event ID buffer. We ignore NULL check for simplicity.
+		s.id = value
+		s.hasDirective = true
+		s.idSeenCount++
+	case "retry":
+		s.retry = value
+		s.hasDirective = true
+	}
+}
+
+// build hands the accumulated state off to buildEvent. scanErr is non-nil
+// when the underlying read failed mid-event; buildEvent attaches the
+// truncation anomaly in that case.
+func (s *eventState) build(scanErr error) *SSEEvent {
+	return buildEvent(s.eventType, s.dataParts, s.id, s.retry,
+		s.rawBuf.Bytes(), s.idSeenCount, scanErr)
+}
+
 // buildEvent assembles an SSEEvent from accumulated parser state and
 // attaches anomalies for recoverable deviations. scanErr, when non-nil,
 // is treated as a mid-event truncation marker.
+//
+// AnomalySSEMissingData is intentionally NOT emitted here. Per WHATWG HTML
+// §9.2, a block that observes only directive fields (event:/id:/retry:)
+// without data: is a valid client-state update and not an error. The
+// AnomalySSEMissingData constant remains defined in envelope/sse.go for
+// backward compatibility with previously-captured flows. See USK-886.
 func buildEvent(
 	eventType string,
 	dataParts []string,
 	id, retry string,
 	raw []byte,
-	hasData bool,
 	idSeenCount int,
 	scanErr error,
 ) *SSEEvent {
 	var anomalies []envelope.Anomaly
-	if !hasData {
-		anomalies = append(anomalies, envelope.Anomaly{
-			Type:   envelope.AnomalySSEMissingData,
-			Detail: "event terminated without a data: line",
-		})
-	}
 	if idSeenCount > 1 {
 		anomalies = append(anomalies, envelope.Anomaly{
 			Type:   envelope.AnomalySSEDuplicateID,

@@ -867,25 +867,29 @@ func (e *errReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
-// TestSSE_MalformedEventAnomaly drives three malformed events through the
+// TestSSE_MalformedEventAnomaly drives two malformed events through the
 // SSE Channel + Pipeline integration and asserts that recoverable parser
 // anomalies project to flow.Flow.Metadata under stable per-type keys
-// (sse_anomaly_missing_data, sse_anomaly_duplicate_id,
-// sse_anomaly_truncated). Stream-terminating problems (oversize event)
-// are out of scope for this test — they remain *layer.StreamError per the
-// USK-656 non-goals.
+// (sse_anomaly_duplicate_id, sse_anomaly_truncated). Stream-terminating
+// problems (oversize event) are out of scope for this test — they remain
+// *layer.StreamError per the USK-656 non-goals.
+//
+// USK-886: AnomalySSEMissingData is no longer emitted by the parser
+// (directive-only blocks are valid per WHATWG HTML §9.2), so the metadata
+// projection sse_anomaly_missing_data must never appear on a freshly
+// recorded flow. The constant is retained for backward compatibility but
+// the emission path is removed.
 func TestSSE_MalformedEventAnomaly(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	const streamID = "sse-stream-anomaly"
-	const evMissingData = "event: ping\nid: m\n\n"   // no data: line
 	const evDupID = "id: 1\nid: 2\ndata: dup\n\n"    // duplicate id:
 	const evTruncated = "event: tail\ndata: partial" // no trailing blank line; reader returns non-EOF error
 
 	wantConnReset := errors.New("connection reset by peer")
 	body := &errReader{
-		r:   strings.NewReader(evMissingData + evDupID + evTruncated),
+		r:   strings.NewReader(evDupID + evTruncated),
 		err: wantConnReset,
 	}
 
@@ -925,8 +929,8 @@ func TestSSE_MalformedEventAnomaly(t *testing.T) {
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		recv := store.flowsByDirection("receive")
-		// 1 first-response + 3 SSE event flows = 4
-		if len(recv) >= 4 {
+		// 1 first-response + 2 SSE event flows = 3
+		if len(recv) >= 3 {
 			break
 		}
 		time.Sleep(20 * time.Millisecond)
@@ -959,48 +963,46 @@ func TestSSE_MalformedEventAnomaly(t *testing.T) {
 			continue
 		}
 		if f.Metadata["sse_event"] != "" || f.Metadata["sse_id"] != "" ||
-			f.Metadata["sse_anomaly_missing_data"] != "" ||
 			f.Metadata["sse_anomaly_duplicate_id"] != "" ||
 			f.Metadata["sse_anomaly_truncated"] != "" {
 			sseFlows = append(sseFlows, f)
 		}
 	}
-	if len(sseFlows) != 3 {
-		t.Fatalf("got %d SSE event flows, want 3", len(sseFlows))
+	if len(sseFlows) != 2 {
+		t.Fatalf("got %d SSE event flows, want 2", len(sseFlows))
 	}
 
-	// flow[0] — missing-data event.
-	if got := sseFlows[0].Metadata["sse_anomaly_missing_data"]; got == "" {
-		t.Errorf("flow[0] missing sse_anomaly_missing_data, got Metadata=%v", sseFlows[0].Metadata)
-	}
-	if got := sseFlows[0].Metadata["sse_anomaly_duplicate_id"]; got != "" {
-		t.Errorf("flow[0] should not have sse_anomaly_duplicate_id, got %q", got)
-	}
-	if got := sseFlows[0].Metadata["sse_event"]; got != "ping" {
-		t.Errorf("flow[0] sse_event = %q, want %q", got, "ping")
-	}
-
-	// flow[1] — duplicate-id event.
-	if got := sseFlows[1].Metadata["sse_anomaly_duplicate_id"]; got == "" {
-		t.Errorf("flow[1] missing sse_anomaly_duplicate_id, got Metadata=%v", sseFlows[1].Metadata)
-	}
-	if got := sseFlows[1].Metadata["sse_id"]; got != "2" {
-		t.Errorf("flow[1] sse_id = %q, want %q (last value wins)", got, "2")
-	}
-	if string(sseFlows[1].Body) != "dup" {
-		t.Errorf("flow[1] Body = %q, want %q", string(sseFlows[1].Body), "dup")
+	// USK-886: AnomalySSEMissingData no longer emitted. Pin the absence
+	// across all observed flows so a regression in the parser cannot
+	// resurface the false-positive class without breaking this test.
+	for i, f := range sseFlows {
+		if got := f.Metadata["sse_anomaly_missing_data"]; got != "" {
+			t.Errorf("flow[%d] should not carry sse_anomaly_missing_data (USK-886); got %q",
+				i, got)
+		}
 	}
 
-	// flow[2] — truncated event (non-EOF read error mid-event).
-	trunc := sseFlows[2].Metadata["sse_anomaly_truncated"]
+	// flow[0] — duplicate-id event.
+	if got := sseFlows[0].Metadata["sse_anomaly_duplicate_id"]; got == "" {
+		t.Errorf("flow[0] missing sse_anomaly_duplicate_id, got Metadata=%v", sseFlows[0].Metadata)
+	}
+	if got := sseFlows[0].Metadata["sse_id"]; got != "2" {
+		t.Errorf("flow[0] sse_id = %q, want %q (last value wins)", got, "2")
+	}
+	if string(sseFlows[0].Body) != "dup" {
+		t.Errorf("flow[0] Body = %q, want %q", string(sseFlows[0].Body), "dup")
+	}
+
+	// flow[1] — truncated event (non-EOF read error mid-event).
+	trunc := sseFlows[1].Metadata["sse_anomaly_truncated"]
 	if trunc == "" {
-		t.Errorf("flow[2] missing sse_anomaly_truncated, got Metadata=%v", sseFlows[2].Metadata)
+		t.Errorf("flow[1] missing sse_anomaly_truncated, got Metadata=%v", sseFlows[1].Metadata)
 	}
 	if !strings.Contains(trunc, wantConnReset.Error()) {
-		t.Errorf("flow[2] sse_anomaly_truncated = %q, want substring %q", trunc, wantConnReset.Error())
+		t.Errorf("flow[1] sse_anomaly_truncated = %q, want substring %q", trunc, wantConnReset.Error())
 	}
-	if string(sseFlows[2].Body) != "partial" {
-		t.Errorf("flow[2] Body = %q, want %q", string(sseFlows[2].Body), "partial")
+	if string(sseFlows[1].Body) != "partial" {
+		t.Errorf("flow[1] Body = %q, want %q", string(sseFlows[1].Body), "partial")
 	}
 }
 
@@ -1017,9 +1019,10 @@ func TestSSE_MalformedEventAnomaly(t *testing.T) {
 //   - Flow.Body (from SSEMessage.Data) matches the per-spec content
 //     for events with a data: field.
 //   - sse_retry_ms, sse_event, sse_id metadata are correctly extracted.
-//   - sse_anomaly_missing_data fires only for the events that legitimately
-//     lack a data: field (retry-only, event-only) and NOT as a side
-//     effect of the parser tripping on a hex prefix line.
+//   - sse_anomaly_missing_data does NOT fire as a side effect of the
+//     parser tripping on a hex prefix line. Per USK-886, directive-only
+//     events (retry/event/id without data) are spec-valid (WHATWG HTML
+//     §9.2) and must not surface the anomaly.
 //   - The multi-data event correctly joins both data: lines.
 //
 // Comment-only events ("\n: keepalive\n\n", ":ok\n\n") are NOT emitted
@@ -1244,9 +1247,13 @@ func TestSSE_ChunkedTransferEncoding_NoHexPrefix(t *testing.T) {
 		retryMs     string
 		missingData bool // sse_anomaly_missing_data expected
 	}
+	// USK-886: directive-only events (retry-only, event-only) are
+	// spec-valid (WHATWG HTML §9.2) and do not emit
+	// AnomalySSEMissingData. The anomaly remains reserved for events
+	// that genuinely violate the spec (none in this set).
 	expectations := []expected{
-		{raw: flowEvents[0], body: "", retryMs: "5000", missingData: true},
-		{raw: flowEvents[1], body: "", event: "ping", missingData: true},
+		{raw: flowEvents[0], body: "", retryMs: "5000"},
+		{raw: flowEvents[1], body: "", event: "ping"},
 		{raw: flowEvents[2], body: "hello", id: "abc123"},
 		{raw: flowEvents[3], body: "line1\nline2"},
 	}

@@ -131,6 +131,33 @@ func TestSSEParser_Next_BasicEvents(t *testing.T) {
 				{Data: "test"},
 			},
 		},
+		{
+			// USK-886: directive-only block with retry: is a valid client-
+			// state update per WHATWG HTML §9.2 and must be emitted (so the
+			// recording surfaces it) but without an anomaly.
+			name:      "retry only block emits event",
+			input:     "retry: 5000\n\n",
+			wantCount: 1,
+			want: []SSEEvent{
+				{Retry: "5000"},
+			},
+		},
+		{
+			name:      "id only block emits event",
+			input:     "id: abc\n\n",
+			wantCount: 1,
+			want: []SSEEvent{
+				{ID: "abc"},
+			},
+		},
+		{
+			name:      "event only block emits event",
+			input:     "event: ping\n\n",
+			wantCount: 1,
+			want: []SSEEvent{
+				{EventType: "ping"},
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -337,8 +364,11 @@ func containsAnomaly(as []envelope.Anomaly, t envelope.AnomalyType) bool {
 	return false
 }
 
-func TestSSEParser_Anomaly_MissingData(t *testing.T) {
-	// Event terminator hit with event:/id:/retry: but no data: line.
+func TestSSEParser_DirectiveOnlyEventNoAnomaly(t *testing.T) {
+	// USK-886: Event terminator hit with event:/id:/retry: but no data:
+	// line is a spec-valid client-state update per WHATWG HTML §9.2.
+	// AnomalySSEMissingData must NOT be emitted (it was a 100% false-
+	// positive class on real-world SSE wire).
 	input := "event: ping\nid: 1\nretry: 3000\n\n"
 	parser := NewSSEParser(strings.NewReader(input), 0)
 
@@ -349,12 +379,47 @@ func TestSSEParser_Anomaly_MissingData(t *testing.T) {
 	if ev.EventType != "ping" || ev.ID != "1" || ev.Retry != "3000" {
 		t.Errorf("event fields = (%q,%q,%q), want (ping,1,3000)", ev.EventType, ev.ID, ev.Retry)
 	}
-	if !containsAnomaly(ev.Anomalies, envelope.AnomalySSEMissingData) {
-		t.Errorf("expected AnomalySSEMissingData, got %v", anomalyTypes(ev.Anomalies))
+	if containsAnomaly(ev.Anomalies, envelope.AnomalySSEMissingData) {
+		t.Errorf("AnomalySSEMissingData should not be emitted for directive-only events (USK-886); got %v",
+			anomalyTypes(ev.Anomalies))
+	}
+	if len(ev.Anomalies) != 0 {
+		t.Errorf("expected no anomalies for directive-only event, got %v", anomalyTypes(ev.Anomalies))
 	}
 	// Next call must return io.EOF without re-emitting.
 	if _, err := parser.Next(); err != io.EOF {
 		t.Errorf("trailing Next() = %v, want io.EOF", err)
+	}
+}
+
+func TestSSEParser_UnknownFieldOnlyBlockSkipped(t *testing.T) {
+	// USK-886: a block containing only unknown field(s) must NOT be
+	// emitted per WHATWG HTML §9.2 "Otherwise: The field is ignored."
+	// Before USK-886 the parser flipped hasFields=true on unknown-field
+	// branches, which caused the block to be dispatched with
+	// AnomalySSEMissingData. The fix consumes such blocks silently.
+	input := "foo: bar\n\n"
+	parser := NewSSEParser(strings.NewReader(input), 0)
+
+	if _, err := parser.Next(); err != io.EOF {
+		t.Errorf("unknown-field-only block should be skipped; Next() = %v, want io.EOF", err)
+	}
+}
+
+func TestSSEParser_ChunkedTerminatorLikeBytesSkipped(t *testing.T) {
+	// USK-886: the chunked Transfer-Encoding terminator "0\r\n\r\n" used
+	// to leak from the http1 streaming-body handoff into the SSE parser
+	// and emit a phantom event with AnomalySSEMissingData. With the fix
+	// (a) the dechunker upstream of the parser strips this in
+	// runUpgradeSSE, and (b) even if it ever reaches the parser the "0"
+	// token now hits the unknown-field path which no longer triggers
+	// emission. This test pins the parser-side behavior so a regression
+	// at the http1 boundary still cannot resurface the false positive.
+	input := "0\r\n\r\n"
+	parser := NewSSEParser(strings.NewReader(input), 0)
+
+	if _, err := parser.Next(); err != io.EOF {
+		t.Errorf("chunked terminator-like input should be skipped at the parser; Next() = %v, want io.EOF", err)
 	}
 }
 
@@ -437,8 +502,11 @@ func TestSSEParser_Anomaly_NoTruncationOnCleanEOF(t *testing.T) {
 	}
 }
 
-func TestSSEParser_Anomaly_MultipleOnSameEvent(t *testing.T) {
-	// Missing data + duplicate id together.
+func TestSSEParser_Anomaly_DuplicateIDOnDirectiveOnlyEvent(t *testing.T) {
+	// USK-886: duplicate-id detection still fires on directive-only
+	// events (a real diagnostic signal — the client only keeps the last
+	// id). AnomalySSEMissingData is intentionally not emitted because
+	// directive-only blocks are valid per WHATWG HTML §9.2.
 	input := "event: ping\nid: 1\nid: 2\n\n"
 	parser := NewSSEParser(strings.NewReader(input), 0)
 
@@ -446,8 +514,9 @@ func TestSSEParser_Anomaly_MultipleOnSameEvent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Next() error: %v", err)
 	}
-	if !containsAnomaly(ev.Anomalies, envelope.AnomalySSEMissingData) {
-		t.Errorf("expected AnomalySSEMissingData in %v", anomalyTypes(ev.Anomalies))
+	if containsAnomaly(ev.Anomalies, envelope.AnomalySSEMissingData) {
+		t.Errorf("AnomalySSEMissingData should not be emitted (USK-886); got %v",
+			anomalyTypes(ev.Anomalies))
 	}
 	if !containsAnomaly(ev.Anomalies, envelope.AnomalySSEDuplicateID) {
 		t.Errorf("expected AnomalySSEDuplicateID in %v", anomalyTypes(ev.Anomalies))

@@ -6,10 +6,18 @@ import "time"
 // emits with a recoverable protocol-level deviation (i.e. one that does
 // NOT terminate the stream — see [SSEMessage.Anomalies]).
 const (
-	// AnomalySSEMissingData marks an event that reached its blank-line
-	// terminator with at least one of event:/id:/retry: set but no data:
-	// line. Per WHATWG HTML SSE such events are normally discarded by the
-	// user agent, but recording them is useful for MITM diagnostics.
+	// AnomalySSEMissingData was historically attached to events that
+	// reached the blank-line terminator with event:/id:/retry: set but no
+	// data: line. The constant is retained for backward compatibility with
+	// flows captured before USK-886 (the metadata projection in
+	// internal/pipeline/record_step.go still routes it through
+	// sse_anomaly_missing_data), but the parser no longer emits it.
+	//
+	// Rationale: per WHATWG HTML §9.2 a block without data: is a valid
+	// client-state update (lastEventId / retry / event-type) and is not
+	// dispatched as an event — flagging that pattern as an anomaly was a
+	// 100% false-positive class of signal on real-world SSE wire (keep-
+	// alive directive events, chunked-TE terminator leakage).
 	AnomalySSEMissingData AnomalyType = "SSEMissingData"
 
 	// AnomalySSETruncated marks the final event emitted when the underlying
