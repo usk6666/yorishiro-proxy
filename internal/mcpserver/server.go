@@ -624,7 +624,12 @@ func buildMCPComponents(
 	}
 
 	logger.Info("loaded proxy config file defaults")
-	if targetScope != nil {
+	if targetScope != nil && targetScope.HasPolicyRules() {
+		// USK-879: InitTargetScope now always returns a non-nil scope so the
+		// MCP-side and data-path share one pointer. Only log "policy loaded"
+		// when an actual policy file (or config-embedded policy) populated
+		// rules; an empty boot-default scope is not a policy decision worth
+		// logging.
 		allows, denies := targetScope.PolicyRules()
 		logger.Info("target scope policy loaded",
 			"allows", len(allows),

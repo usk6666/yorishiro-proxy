@@ -203,9 +203,24 @@ func TestApplyTLSFingerprintFlag_FromConfigFile(t *testing.T) {
 // --- InitTLSTransport / initStandardTransport tests ---
 
 func TestInitTargetScope_NilPolicy(t *testing.T) {
+	// USK-879: InitTargetScope must always return a non-nil scope so the
+	// same pointer flows into both the MCP control plane and the live data
+	// path. Returning nil decoupled the two and let proxy-relayed traffic
+	// bypass `security set_target_scope` mutations (security contract
+	// violation).
 	scope := InitTargetScope(nil)
-	if scope != nil {
-		t.Error("expected nil scope for nil policy")
+	if scope == nil {
+		t.Fatal("expected non-nil scope for nil policy (USK-879)")
+	}
+	allows, denies := scope.PolicyRules()
+	if len(allows) != 0 {
+		t.Errorf("expected 0 policy allow rules, got %d", len(allows))
+	}
+	if len(denies) != 0 {
+		t.Errorf("expected 0 policy deny rules, got %d", len(denies))
+	}
+	if scope.HasRules() {
+		t.Error("expected fresh scope to have no rules")
 	}
 }
 

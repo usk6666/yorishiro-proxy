@@ -239,17 +239,34 @@ func InitPassthroughList(cfg *config.Config, logger *slog.Logger) *connector.Pas
 	return passthrough
 }
 
-// InitTargetScope builds a TargetScope from the policy config. Returns nil
-// if no policy is configured. The SOCKS5 negotiator picks up the scope
-// via connector wiring (USK-690), not via a per-handler setter.
+// InitTargetScope builds a TargetScope. It always returns a non-nil instance
+// so a single shared pointer flows into BOTH the MCP control plane
+// (mcp.NewConnector → s.connector.targetScope, mutated by
+// `security set_target_scope`) AND the live data path (proxybuild.Deps.Scope
+// → connector handler gates + pipeline HostScopeStep/HTTPScopeStep). When
+// policy is nil the scope is empty (no policy rules, no agent rules) and
+// CheckTarget allows everything — until an MCP `set_target_scope` adds agent
+// rules, after which the same pointer is observed by every handler gate.
+//
+// USK-879: returning nil here decoupled the MCP-side scope from the data-path
+// scope. The mcp.Server's finalizeDefaults synthesised a *separate* empty
+// TargetScope when the supplied pointer was nil, so SetAgentRules mutated the
+// MCP-only instance while the live CONNECT / plain-HTTP / SOCKS5 handler
+// gates and the HostScope/HTTPScope steps continued to hold nil. AI agents
+// scoping themselves via set_target_scope then routed denied traffic through
+// the proxy as a transport with zero enforcement — a security contract
+// violation. Always returning a fresh non-nil scope guarantees both layers
+// observe the same mutations.
+//
+// The SOCKS5 negotiator picks up the scope via connector wiring (USK-690),
+// not via a per-handler setter.
 func InitTargetScope(policy *config.TargetScopePolicyConfig) *connector.TargetScope {
-	if policy == nil {
-		return nil
-	}
 	targetScope := connector.NewTargetScope()
-	allows := ConvertTargetRules(policy.Allows)
-	denies := ConvertTargetRules(policy.Denies)
-	targetScope.SetPolicyRules(allows, denies)
+	if policy != nil {
+		allows := ConvertTargetRules(policy.Allows)
+		denies := ConvertTargetRules(policy.Denies)
+		targetScope.SetPolicyRules(allows, denies)
+	}
 	return targetScope
 }
 
