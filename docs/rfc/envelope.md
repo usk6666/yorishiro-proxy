@@ -723,6 +723,53 @@ internal/rules/
 
 Each `internal/rules/<proto>/` exposes `InterceptEngine`, `TransformEngine`, `SafetyEngine` — protocol-typed. The Pipeline Step (e.g., `InterceptStep`) owns one engine per protocol and dispatches.
 
+### 3.7 Safety Architecture: Input vs Output
+
+SafetyFilter has **two filters with completely different purposes, layers, and protected targets**. Conflating them is the most common design mis-step, so the distinction is captured here as the authoritative source.
+
+#### Input Filter (Send direction, live wire)
+
+- **Purpose**: prevent AI agents from sending destructive vulnerability-assessment payloads (SQL injection, OS command injection, upstream data destruction) to the upstream server.
+- **Layer**: live data path — `internal/pipeline/safety_step.go` dispatches to per-protocol `internal/rules/{http,ws,grpc}/safety.go` engines. Send-only by design (`safety_step.go` early-returns `Result{}` on `env.Direction != envelope.Send`).
+- **Behaviour**: blocks at wire time. HTTPMessage violations emit `Action=Respond` with a synthetic 403; mid-stream WS/gRPC frames emit `Action=Drop`. `BlockedBy=safety_filter` is stamped on the recorded flow.
+- **Protected target**: the **upstream server**.
+- **Modify-and-forward recheck (USK-702)**: the Send-side modify_and_forward path in `InterceptStep.holdAndDispatch` re-runs the same `SafetyStep.Process` against the operator-supplied modified envelope, closing the bypass where an AI agent first issues a benign request and then rewrites the body to a destructive payload at hold time.
+
+#### Output Filter (MCP control plane, on AI return)
+
+- **Purpose**: prevent AI agents from receiving sensitive information as **input**. Two driving concerns:
+  1. **LLM training-data leakage** — sensitive bytes that flow into an AI agent's context window may be retained by upstream LLM operators.
+  2. **Enterprise LLM Input Security Policy compliance** — many organizations regulate which categories of data their AI tooling is permitted to ingest.
+- **Layer**: MCP control plane — `internal/safety.Engine` exposes `FilterOutput` / `FilterOutputHeaders`, invoked by `internal/mcp/safety_helper.go` at the moment a query / resend / fuzz / replay tool serializes its response to the AI client.
+- **Behaviour**: masks (redacts) matched bytes in the response payload. Block / log_only actions are also supported. The original wire-recorded bytes in flow.Store are never mutated — Output Filter operates on a copy at the MCP transport boundary.
+- **Protected target**: the **AI agent**.
+
+#### Key consequence: wire ≠ MCP plane
+
+- The DB / browser / next-hop client receives the **raw wire bytes** as observed, including sensitive content. Output Filter does not touch the wire.
+- Output Filter masks **only when the AI agent fetches the recorded flow via an MCP tool**.
+- This separation is a deliberate role split, not an implementation accident:
+
+| Question | Input Filter | Output Filter |
+|----------|--------------|---------------|
+| Where does it fire? | Live wire (Send only) | MCP transport boundary (on AI return) |
+| What does it produce? | block / drop on the wire | mask / redact in the MCP response |
+| Whom does it protect? | upstream server | AI agent |
+| Default presets | `destructive-sql`, `destructive-os-command` | PII presets (credit-card, my-number, email, phone) |
+
+#### Anti-patterns (do not propose)
+
+The following ideas have come up repeatedly and are deliberately rejected:
+
+- **"Apply Output Safety on the wire" / "block upstream-originated Receive payloads at SafetyStep"** — violates the wire-fidelity intent: recording is faithful, and the wire copy delivered to the next hop must reflect what was observed. Sensitive content reaching the DB or a browser is not in scope; SafetyFilter's protected target is the AI agent reading recorded flows, not arbitrary downstream consumers.
+- **"Receive-direction SafetyStep" / "direction-aware Input filter"** — Receive-direction modify_and_forward (HTTP response, WS server frame, SSE event) only affects browser-side rendering or AI consumption; it cannot harm the upstream server. Browser-side XSS / prompt injection / token swap is out of SafetyFilter's threat model; if such protections are ever needed, they belong in a separate layer (for example, an MCP-side confirmation prompt), not in SafetyStep. The `Direction != Send` early return in `safety_step.go` is an intentional scope boundary.
+- **"Unify `internal/safety` and `internal/rules/*/safety.go` into one engine"** — they sit at different layers (MCP plane vs live wire) and serve different threat models. Preset *definitions* can be shared (`internal/rules/common/preset.go`), but the engines and their invocation surfaces must remain separate. `internal/safety/doc.go` explicitly forbids importing `internal/safety` from data-path packages for this reason.
+
+#### Acceptance record
+
+- USK-702 (Done, 2026-05-04) — Input Filter modify_and_forward recheck wired into `InterceptStep.holdAndDispatch`. Send-only by design.
+- USK-894 (Canceled, 2026-05-15) — Investigation concluded that Receive-direction modify_and_forward does not need a SafetyEngine recheck because it cannot harm the upstream server; browser-side effects are out of scope for SafetyFilter. This subsection codifies the rationale so the question does not need to be re-litigated.
+
 ---
 
 ## 4. Canonical Scenarios

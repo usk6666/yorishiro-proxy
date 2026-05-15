@@ -31,4 +31,18 @@
 // As a Policy Layer, configuration is immutable at runtime — changes
 // require a proxy restart so that AI agents cannot disable filters
 // in-flight.
+//
+// # Relation to the live-wire Input Filter
+//
+// This package is the Output Filter half of SafetyFilter — it protects
+// the AI agent from receiving sensitive bytes (LLM training-data leakage
+// prevention, enterprise LLM Input Security Policy compliance). The
+// Input Filter half lives in internal/rules/{http,ws,grpc}/safety.go and
+// is orchestrated by internal/pipeline/safety_step.go — Send-direction
+// only, blocks destructive payloads bound for the upstream server. The
+// two engines share preset definitions (internal/rules/common/preset.go)
+// but operate at different layers (MCP plane vs live wire) and serve
+// different threat models. See RFC-001 §3.7 (docs/rfc/envelope.md) for
+// the full role split and the design decisions behind it (USK-702 /
+// USK-894).
 package safety

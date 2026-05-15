@@ -25,6 +25,14 @@ import (
 // NOT mutate env, env.Message, env.Raw, or any field reachable from them.
 // Result is restricted to {} (pass) or {Action: Drop} (block). PII / body
 // masking belongs to internal/safety on the MCP response path, never here.
+//
+// SafetyStep is the live-wire Input Filter half of SafetyFilter — it
+// protects the upstream server from destructive AI-agent payloads. The
+// Output Filter half (sensitive-bytes masking on AI return) lives in
+// internal/safety and is invoked from internal/mcp/safety_helper.go at
+// the MCP transport boundary. The two filters serve different threat
+// models and must not be conflated. See RFC-001 §3.7
+// (docs/rfc/envelope.md) for the full role split (USK-702 / USK-894).
 type SafetyStep struct {
 	http   *httprules.SafetyEngine
 	ws     *wsrules.SafetyEngine

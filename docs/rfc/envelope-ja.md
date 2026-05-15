@@ -569,6 +569,53 @@ internal/rules/
 
 各 `internal/rules/<proto>/` は `InterceptEngine`、`TransformEngine`、`SafetyEngine` を protocol-typed に公開する。Pipeline Step (例: `InterceptStep`) はプロトコルごとに 1 つのエンジンを保持し、dispatch する。
 
+### 3.7 Safety Architecture: Input vs Output
+
+SafetyFilter は **目的・層・保護対象が完全に異なる 2 つのフィルター** を持つ。両者を混同することが最も多い設計ミスなので、ここに正典として整理する。
+
+#### Input Filter (Send 方向、ライブ wire)
+
+- **目的**: AI Agent が破壊的な脆弱性診断ペイロード (SQL injection / OS command injection / 上流データ破壊) を upstream server に送信するのを防ぐ。
+- **層**: ライブデータパス — `internal/pipeline/safety_step.go` がプロトコル別の `internal/rules/{http,ws,grpc}/safety.go` エンジンに dispatch する。Send 方向のみ評価 (`safety_step.go` で `env.Direction != envelope.Send` のとき早期 `Result{}`)。
+- **挙動**: wire 上で block。HTTPMessage 違反は synthetic 403 (`Action=Respond`)、mid-stream WS/gRPC フレームは `Action=Drop`。記録された flow には `BlockedBy=safety_filter` がスタンプされる。
+- **保護対象**: **upstream server**。
+- **modify_and_forward 再チェック (USK-702)**: `InterceptStep.holdAndDispatch` の Send 方向 modify_and_forward 経路は、operator が書き換えた envelope に対して同じ `SafetyStep.Process` を再実行する。これにより「AI Agent が SafetyFilter を通る無害なリクエストを送らせ → hold 中に destructive payload に書き換えて release」という迂回経路を塞ぐ。
+
+#### Output Filter (MCP control plane、AI 返却時)
+
+- **目的**: AI Agent が機微情報を **入力** として受け取るのを防ぐ。動機は 2 つ:
+  1. **LLM 学習データ流出防止** — AI Agent の context window に流れ込んだ機微情報は、上流 LLM 事業者側で保持される可能性がある。
+  2. **企業の LLM Input Security Policy コンプライアンス** — 多くの組織で「AI ツールに取り込んでよい情報カテゴリ」が規定されている。
+- **層**: MCP control plane — `internal/safety.Engine` が `FilterOutput` / `FilterOutputHeaders` を公開し、`internal/mcp/safety_helper.go` から query / resend / fuzz / replay 等の MCP tool が AI クライアントへレスポンスを serialize する瞬間に呼ばれる。
+- **挙動**: 一致したバイトをマスク (redact)。block / log_only アクションもサポート。wire 上で記録された元バイト (`flow.Store` 内) は **mutate しない** — Output Filter は MCP transport 境界で コピーに対してのみ作用する。
+- **保護対象**: **AI Agent 自身**。
+
+#### 重要な帰結: wire ≠ MCP plane
+
+- DB / ブラウザ / 次ホップ client は **生の wire バイト** を観測通り受け取る (機微情報を含む)。Output Filter は wire に触らない。
+- マスクは **AI Agent が MCP tool 経由で記録 flow を取得した瞬間にだけ** 適用される。
+- この分離は実装上の事故ではなく、意図的な役割分担:
+
+| 質問 | Input Filter | Output Filter |
+|------|--------------|---------------|
+| どこで発火するか? | ライブ wire (Send のみ) | MCP transport 境界 (AI 返却時) |
+| 何を生むか? | wire 上で block / drop | MCP レスポンス内で mask / redact |
+| 誰を守るか? | upstream server | AI Agent |
+| デフォルト preset | `destructive-sql`, `destructive-os-command` | PII preset (credit-card, my-number, email, phone) |
+
+#### Anti-patterns (採用しない設計)
+
+以下の発想は繰り返し出てくるが、意図的に却下している:
+
+- **「Output Safety を wire 上で適用」「upstream 由来 Receive payload を SafetyStep で block」** — wire fidelity の意図に反する。記録は faithful、次ホップに届ける wire コピーは観測通りであるべき。DB やブラウザに機微情報が届くこと自体はスコープ外で、SafetyFilter の保護対象は「記録 flow を読む AI Agent」であり、任意の下流コンシューマではない。
+- **「Receive 方向 SafetyStep」「direction-aware Input filter」** — Receive 方向の modify_and_forward (HTTP response / WS server frame / SSE event) は browser-side レンダリングや AI 消費に影響するだけで、upstream server を破壊することはできない。browser-side の XSS / prompt injection / token 差し替えは SafetyFilter の脅威モデル外。必要なら別 layer (例: MCP-side confirmation prompt) で扱う。`safety_step.go` の `Direction != Send` 早期 return は **意図的なスコープ境界**。
+- **「`internal/safety` と `internal/rules/*/safety.go` を 1 つのエンジンに統合」** — 両者は層 (MCP plane vs ライブ wire) も脅威モデルも異なる。Preset *定義* は共有可能 (`internal/rules/common/preset.go`) だが、エンジン本体と呼び出し面は別のまま保つ。`internal/safety/doc.go` がデータパスパッケージからの `internal/safety` import を明示的に禁止しているのはこのため。
+
+#### 承認記録
+
+- USK-702 (Done, 2026-05-04) — Input Filter の modify_and_forward 再チェックを `InterceptStep.holdAndDispatch` に配線。Send 方向のみ。
+- USK-894 (Canceled, 2026-05-15) — Receive 方向 modify_and_forward は upstream server を破壊しないため SafetyEngine 再チェックは不要、browser-side 影響は SafetyFilter のスコープ外、という結論。本サブセクションがその根拠を残し、将来同じ議論が再浮上したときに辿れるようにする。
+
 ---
 
 ## 4. 典型シナリオ
