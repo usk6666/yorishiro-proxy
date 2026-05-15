@@ -4,9 +4,11 @@ import (
 	"encoding/base64"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/rules/common"
+	sserules "github.com/usk6666/yorishiro-proxy/internal/rules/sse"
 )
 
 // intercept_typed.go implements the intercept tool path that dispatches
@@ -103,6 +105,21 @@ type rawMessageModify struct {
 	Patches       []RawPatch `json:"patches,omitempty" jsonschema:"byte-level patches applied to the held envelope's RawMessage.Bytes; mutually exclusive with bytes_override"`
 }
 
+// sseMessageModify carries the structured override fields for an SSE
+// event envelope held by the HoldQueue. Pointer types distinguish "field
+// omitted" from "field set to zero value"; pointer-nil leaves the held
+// envelope's field untouched.
+//
+// RetryMs is the reconnection interval in milliseconds (uint32). The
+// canonical SSE encoder omits the `retry:` line when Retry == 0, so
+// setting RetryMs to 0 clears the field.
+type sseMessageModify struct {
+	Event   *string `json:"event,omitempty" jsonschema:"SSE event name override (event: line)"`
+	ID      *string `json:"id,omitempty" jsonschema:"SSE last event id override (id: line)"`
+	Data    *string `json:"data,omitempty" jsonschema:"SSE data body override (joined; multi-line splits on '\\n')"`
+	RetryMs *uint32 `json:"retry_ms,omitempty" jsonschema:"SSE retry interval ms; 0 clears the retry line"`
+}
+
 // dispatchTypedModify type-switches on the held envelope's Message and
 // dispatches to the corresponding apply* helper. The supplied
 // interceptInput carries a discriminated union (HTTP / WS / GRPCStart /
@@ -139,6 +156,11 @@ func dispatchTypedModify(env *envelope.Envelope, input interceptInput, rawMode b
 			return nil, fmt.Errorf("modify_and_forward: held envelope is Raw; expected raw payload")
 		}
 		return applyRawModify(env, m, input.Raw, rawMode)
+	case *envelope.SSEMessage:
+		if input.SSE == nil {
+			return nil, fmt.Errorf("modify_and_forward: held envelope is SSE; expected sse payload")
+		}
+		return applySSEModify(env, m, input.SSE)
 	default:
 		return nil, fmt.Errorf("modify_and_forward: unsupported held message type %T", env.Message)
 	}
@@ -159,6 +181,8 @@ func holdQueueProtocolKind(env *envelope.Envelope) string {
 		return "grpc_data"
 	case *envelope.GRPCEndMessage:
 		return "grpc_end"
+	case *envelope.SSEMessage:
+		return "sse"
 	case *envelope.RawMessage:
 		return "raw"
 	case nil:
@@ -438,6 +462,51 @@ func applyGRPCDataModify(env *envelope.Envelope, _ *envelope.GRPCDataMessage, pa
 		gm.EndStream = *params.EndStream
 	}
 	clone.Raw = nil
+	return clone, nil
+}
+
+// applySSEModify clones the envelope and applies the SSE event override
+// fields. Envelope.Raw is NOT cleared (USK-892 wire-fidelity invariant):
+// the session-side `sseMessageMutated` field-diff in relaySSEEvent is
+// the authoritative re-encode signal. Clearing Raw here would force a
+// re-encode for every modify_and_forward release, including no-op
+// "release-with-empty-payload" cases that should round-trip the
+// upstream's bytes verbatim.
+//
+// CRLF guards: event / id reject CR or LF; data accepts `\n` (multi-line
+// is legal RFC 8895 wire form) but rejects `\r`. RetryMs is interpreted
+// as integer ms; 0 clears the retry line (the encoder omits the line
+// when Retry == 0).
+func applySSEModify(env *envelope.Envelope, _ *envelope.SSEMessage, params *sseMessageModify) (*envelope.Envelope, error) {
+	if params == nil {
+		return env.Clone(), nil
+	}
+	// Delegate the CR/LF guard to the engine's shared predicate so this
+	// path and the auto-transform compile-time validator stay in lock-
+	// step. A future tightening (e.g. additional control-byte rejection)
+	// lands in `sserules.ValidateModifyFields` and propagates to both
+	// surfaces automatically.
+	if err := sserules.ValidateModifyFields(params.Event, params.ID, params.Data); err != nil {
+		return nil, err
+	}
+	clone := env.Clone()
+	sm, ok := clone.Message.(*envelope.SSEMessage)
+	if !ok {
+		return nil, fmt.Errorf("internal: clone produced non-SSE message")
+	}
+	if params.Event != nil {
+		sm.Event = *params.Event
+	}
+	if params.ID != nil {
+		sm.ID = *params.ID
+	}
+	if params.Data != nil {
+		sm.Data = *params.Data
+	}
+	if params.RetryMs != nil {
+		sm.Retry = time.Duration(*params.RetryMs) * time.Millisecond
+	}
+	// Deliberately do NOT clear clone.Raw — see func doc.
 	return clone, nil
 }
 

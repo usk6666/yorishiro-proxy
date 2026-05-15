@@ -38,7 +38,7 @@ func newCatchAllResponseRule() httprules.InterceptRule {
 func TestInterceptStep_Release(t *testing.T) {
 	engine := newTestInterceptEngine(newCatchAllRequestRule())
 	queue := common.NewHoldQueue()
-	step := NewInterceptStep(engine, nil, nil, queue, nil, nil)
+	step := NewInterceptStep(engine, nil, nil, nil, queue, nil, nil)
 
 	env := &envelope.Envelope{
 		Direction: envelope.Send,
@@ -76,7 +76,7 @@ func TestInterceptStep_Release(t *testing.T) {
 func TestInterceptStep_Drop(t *testing.T) {
 	engine := newTestInterceptEngine(newCatchAllRequestRule())
 	queue := common.NewHoldQueue()
-	step := NewInterceptStep(engine, nil, nil, queue, nil, nil)
+	step := NewInterceptStep(engine, nil, nil, nil, queue, nil, nil)
 
 	env := &envelope.Envelope{
 		Direction: envelope.Send,
@@ -128,7 +128,7 @@ func TestInterceptStep_Drop(t *testing.T) {
 func TestInterceptStep_ModifyAndForward(t *testing.T) {
 	engine := newTestInterceptEngine(newCatchAllRequestRule())
 	queue := common.NewHoldQueue()
-	step := NewInterceptStep(engine, nil, nil, queue, nil, nil)
+	step := NewInterceptStep(engine, nil, nil, nil, queue, nil, nil)
 
 	env := &envelope.Envelope{
 		Direction: envelope.Send,
@@ -191,7 +191,7 @@ func TestInterceptStep_NoMatch(t *testing.T) {
 		PathPattern: regexp.MustCompile(`^/api/`),
 	})
 	queue := common.NewHoldQueue()
-	step := NewInterceptStep(engine, nil, nil, queue, nil, nil)
+	step := NewInterceptStep(engine, nil, nil, nil, queue, nil, nil)
 
 	env := &envelope.Envelope{
 		Direction: envelope.Send,
@@ -214,7 +214,7 @@ func TestInterceptStep_NoMatch(t *testing.T) {
 func TestInterceptStep_RawMessage_PassThrough(t *testing.T) {
 	engine := newTestInterceptEngine(newCatchAllRequestRule())
 	queue := common.NewHoldQueue()
-	step := NewInterceptStep(engine, nil, nil, queue, nil, nil)
+	step := NewInterceptStep(engine, nil, nil, nil, queue, nil, nil)
 
 	env := &envelope.Envelope{
 		Direction: envelope.Send,
@@ -230,7 +230,7 @@ func TestInterceptStep_RawMessage_PassThrough(t *testing.T) {
 
 func TestInterceptStep_NilEngine(t *testing.T) {
 	queue := common.NewHoldQueue()
-	step := NewInterceptStep(nil, nil, nil, queue, nil, nil)
+	step := NewInterceptStep(nil, nil, nil, nil, queue, nil, nil)
 
 	env := &envelope.Envelope{
 		Direction: envelope.Send,
@@ -249,7 +249,7 @@ func TestInterceptStep_NilEngine(t *testing.T) {
 
 func TestInterceptStep_NilQueue(t *testing.T) {
 	engine := newTestInterceptEngine(newCatchAllRequestRule())
-	step := NewInterceptStep(engine, nil, nil, nil, nil, nil)
+	step := NewInterceptStep(engine, nil, nil, nil, nil, nil, nil)
 
 	env := &envelope.Envelope{
 		Direction: envelope.Send,
@@ -269,7 +269,7 @@ func TestInterceptStep_NilQueue(t *testing.T) {
 func TestInterceptStep_ContextCancellation(t *testing.T) {
 	engine := newTestInterceptEngine(newCatchAllRequestRule())
 	queue := common.NewHoldQueue()
-	step := NewInterceptStep(engine, nil, nil, queue, nil, nil)
+	step := NewInterceptStep(engine, nil, nil, nil, queue, nil, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -308,7 +308,7 @@ func TestInterceptStep_ContextCancellation(t *testing.T) {
 func TestInterceptStep_ResponseMatch(t *testing.T) {
 	engine := newTestInterceptEngine(newCatchAllResponseRule())
 	queue := common.NewHoldQueue()
-	step := NewInterceptStep(engine, nil, nil, queue, nil, nil)
+	step := NewInterceptStep(engine, nil, nil, nil, queue, nil, nil)
 
 	env := &envelope.Envelope{
 		Direction: envelope.Receive,
@@ -393,7 +393,7 @@ func releaseFirst(t *testing.T, queue *common.HoldQueue, action *common.HoldActi
 func TestInterceptStep_WS_Release(t *testing.T) {
 	wsEngine := newTestWSInterceptEngine(newCatchAllWSRule())
 	queue := common.NewHoldQueue()
-	step := NewInterceptStep(nil, wsEngine, nil, queue, nil, nil)
+	step := NewInterceptStep(nil, wsEngine, nil, nil, queue, nil, nil)
 
 	env := &envelope.Envelope{
 		Direction: envelope.Send,
@@ -416,7 +416,7 @@ func TestInterceptStep_WS_Release(t *testing.T) {
 func TestInterceptStep_WS_Drop(t *testing.T) {
 	wsEngine := newTestWSInterceptEngine(newCatchAllWSRule())
 	queue := common.NewHoldQueue()
-	step := NewInterceptStep(nil, wsEngine, nil, queue, nil, nil)
+	step := NewInterceptStep(nil, wsEngine, nil, nil, queue, nil, nil)
 
 	env := &envelope.Envelope{
 		Direction: envelope.Send,
@@ -438,7 +438,7 @@ func TestInterceptStep_WS_Drop(t *testing.T) {
 func TestInterceptStep_WS_ModifyAndForward(t *testing.T) {
 	wsEngine := newTestWSInterceptEngine(newCatchAllWSRule())
 	queue := common.NewHoldQueue()
-	step := NewInterceptStep(nil, wsEngine, nil, queue, nil, nil)
+	step := NewInterceptStep(nil, wsEngine, nil, nil, queue, nil, nil)
 
 	env := &envelope.Envelope{
 		Direction: envelope.Send,
@@ -480,7 +480,7 @@ func TestInterceptStep_WS_ModifyAndForward(t *testing.T) {
 
 func TestInterceptStep_WS_NilEngine(t *testing.T) {
 	queue := common.NewHoldQueue()
-	step := NewInterceptStep(nil, nil, nil, queue, nil, nil)
+	step := NewInterceptStep(nil, nil, nil, nil, queue, nil, nil)
 
 	env := &envelope.Envelope{
 		Direction: envelope.Send,
@@ -503,7 +503,7 @@ func TestInterceptStep_WS_NilEngine(t *testing.T) {
 func TestInterceptStep_GRPCStart_Release(t *testing.T) {
 	grpcEngine := newTestGRPCInterceptEngine(newCatchAllGRPCRule())
 	queue := common.NewHoldQueue()
-	step := NewInterceptStep(nil, nil, grpcEngine, queue, nil, nil)
+	step := NewInterceptStep(nil, nil, grpcEngine, nil, queue, nil, nil)
 
 	env := &envelope.Envelope{
 		Direction: envelope.Send,
@@ -525,7 +525,7 @@ func TestInterceptStep_GRPCStart_Release(t *testing.T) {
 func TestInterceptStep_GRPCData_Drop(t *testing.T) {
 	grpcEngine := newTestGRPCInterceptEngine(newCatchAllGRPCRule())
 	queue := common.NewHoldQueue()
-	step := NewInterceptStep(nil, nil, grpcEngine, queue, nil, nil)
+	step := NewInterceptStep(nil, nil, grpcEngine, nil, queue, nil, nil)
 
 	env := &envelope.Envelope{
 		Direction: envelope.Send,
@@ -551,7 +551,7 @@ func TestInterceptStep_GRPCData_Drop(t *testing.T) {
 func TestInterceptStep_GRPCEnd_Receive_Hold(t *testing.T) {
 	grpcEngine := newTestGRPCInterceptEngine(newCatchAllGRPCRule())
 	queue := common.NewHoldQueue()
-	step := NewInterceptStep(nil, nil, grpcEngine, queue, nil, nil)
+	step := NewInterceptStep(nil, nil, grpcEngine, nil, queue, nil, nil)
 
 	env := &envelope.Envelope{
 		Direction: envelope.Receive,
@@ -575,7 +575,7 @@ func TestInterceptStep_GRPCEnd_Receive_Hold(t *testing.T) {
 func TestInterceptStep_GRPCEnd_Send_PassThrough(t *testing.T) {
 	grpcEngine := newTestGRPCInterceptEngine(newCatchAllGRPCRule())
 	queue := common.NewHoldQueue()
-	step := NewInterceptStep(nil, nil, grpcEngine, queue, nil, nil)
+	step := NewInterceptStep(nil, nil, grpcEngine, nil, queue, nil, nil)
 
 	env := &envelope.Envelope{
 		Direction: envelope.Send,
@@ -596,7 +596,7 @@ func TestInterceptStep_GRPCEnd_Send_PassThrough(t *testing.T) {
 
 func TestInterceptStep_GRPC_NilEngine(t *testing.T) {
 	queue := common.NewHoldQueue()
-	step := NewInterceptStep(nil, nil, nil, queue, nil, nil)
+	step := NewInterceptStep(nil, nil, nil, nil, queue, nil, nil)
 
 	env := &envelope.Envelope{
 		Direction: envelope.Send,
@@ -623,7 +623,7 @@ func TestInterceptStep_SSE_PassThrough(t *testing.T) {
 	wsEngine := newTestWSInterceptEngine(newCatchAllWSRule())
 	grpcEngine := newTestGRPCInterceptEngine(newCatchAllGRPCRule())
 	queue := common.NewHoldQueue()
-	step := NewInterceptStep(httpEngine, wsEngine, grpcEngine, queue, nil, nil)
+	step := NewInterceptStep(httpEngine, wsEngine, grpcEngine, nil, queue, nil, nil)
 
 	env := &envelope.Envelope{
 		Direction: envelope.Receive,
@@ -688,7 +688,7 @@ func TestInterceptStep_ModifyAndForward_SafetyRecheck_BlocksDestructiveBody(t *t
 	engine := newTestInterceptEngine(newCatchAllRequestRule())
 	queue := common.NewHoldQueue()
 	safety := newDestructiveSQLSafetyStep(t)
-	step := NewInterceptStep(engine, nil, nil, queue, safety, nil)
+	step := NewInterceptStep(engine, nil, nil, nil, queue, safety, nil)
 
 	// Original held envelope is safe — passes SafetyStep at hold time.
 	env := &envelope.Envelope{
@@ -748,7 +748,7 @@ func TestInterceptStep_ModifyAndForward_SafetyRecheck_AllowsSafeBody(t *testing.
 	engine := newTestInterceptEngine(newCatchAllRequestRule())
 	queue := common.NewHoldQueue()
 	safety := newDestructiveSQLSafetyStep(t)
-	step := NewInterceptStep(engine, nil, nil, queue, safety, nil)
+	step := NewInterceptStep(engine, nil, nil, nil, queue, safety, nil)
 
 	env := &envelope.Envelope{
 		Direction: envelope.Send,
@@ -796,7 +796,7 @@ func TestInterceptStep_ModifyAndForward_SafetyRecheck_AllowsSafeBody(t *testing.
 func TestInterceptStep_ModifyAndForward_SafetyRecheck_NilSafety_PassThrough(t *testing.T) {
 	engine := newTestInterceptEngine(newCatchAllRequestRule())
 	queue := common.NewHoldQueue()
-	step := NewInterceptStep(engine, nil, nil, queue, nil, nil)
+	step := NewInterceptStep(engine, nil, nil, nil, queue, nil, nil)
 
 	env := &envelope.Envelope{
 		Direction: envelope.Send,
@@ -840,7 +840,7 @@ func TestInterceptStep_ModifyAndForward_SafetyRecheck_WS(t *testing.T) {
 	wsEngine := newTestWSInterceptEngine(newCatchAllWSRule())
 	queue := common.NewHoldQueue()
 	safety := newDestructiveSQLSafetyStep(t)
-	step := NewInterceptStep(nil, wsEngine, nil, queue, safety, nil)
+	step := NewInterceptStep(nil, wsEngine, nil, nil, queue, safety, nil)
 
 	env := &envelope.Envelope{
 		Direction: envelope.Send,
@@ -877,7 +877,7 @@ func TestInterceptStep_ModifyAndForward_SafetyRecheck_GRPCData(t *testing.T) {
 	grpcEngine := newTestGRPCInterceptEngine(newCatchAllGRPCRule())
 	queue := common.NewHoldQueue()
 	safety := newDestructiveSQLSafetyStep(t)
-	step := NewInterceptStep(nil, nil, grpcEngine, queue, safety, nil)
+	step := NewInterceptStep(nil, nil, grpcEngine, nil, queue, safety, nil)
 
 	env := &envelope.Envelope{
 		Direction: envelope.Send,
@@ -918,7 +918,7 @@ func TestInterceptStep_ModifyAndForward_SafetyRecheck_ReceiveDirection_Skip(t *t
 	engine := newTestInterceptEngine(newCatchAllResponseRule())
 	queue := common.NewHoldQueue()
 	safety := newDestructiveSQLSafetyStep(t)
-	step := NewInterceptStep(engine, nil, nil, queue, safety, nil)
+	step := NewInterceptStep(engine, nil, nil, nil, queue, safety, nil)
 
 	env := &envelope.Envelope{
 		Direction: envelope.Receive,

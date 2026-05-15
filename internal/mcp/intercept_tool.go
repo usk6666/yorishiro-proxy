@@ -38,6 +38,8 @@ type interceptInput struct {
 	GRPCData *grpcDataMessageModify `json:"grpc_data,omitempty" jsonschema:"typed modify payload for GRPCDataMessage envelopes"`
 	// Raw carries the typed modify payload for a RawMessage envelope.
 	Raw *rawMessageModify `json:"raw,omitempty" jsonschema:"typed modify payload for RawMessage envelopes"`
+	// SSE carries the typed modify payload for a SSEMessage envelope.
+	SSE *sseMessageModify `json:"sse,omitempty" jsonschema:"typed modify payload for SSEMessage envelopes"`
 }
 
 // interceptParams holds the per-call parameters that route the intercept
@@ -68,7 +70,7 @@ func (s *Server) registerIntercept() {
 		Name: "intercept",
 		Description: "Act on a held envelope (intercept_id required). " +
 			"Actions: 'release' forwards as-is; 'modify_and_forward' applies a typed payload " +
-			"(http | ws | grpc_start | grpc_data | raw — matching the envelope's Message type), " +
+			"(http | ws | grpc_start | grpc_data | sse | raw — matching the envelope's Message type), " +
 			"or with mode=\"raw\" + raw_override_base64 forwards a synthetic RawMessage; " +
 			"'drop' discards the envelope. Headers in modify payloads MUST be order-preserved " +
 			"[{name, value}] arrays (wire fidelity). The release/modify_and_forward response " +

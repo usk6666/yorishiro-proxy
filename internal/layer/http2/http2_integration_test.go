@@ -325,8 +325,8 @@ func buildPipeline(store flow.Writer, opts pipelineOpts) *pipeline.Pipeline {
 		pipeline.NewHostScopeStep(opts.hostScope),
 		pipeline.NewHTTPScopeStep(opts.httpScope),
 		pipeline.NewSafetyStep(opts.safetyEngine, nil, nil, slog.Default()),
-		pipeline.NewTransformStep(opts.transformEngine, nil, nil),
-		pipeline.NewInterceptStep(opts.interceptEngine, nil, nil, opts.holdQueue, nil, slog.Default()),
+		pipeline.NewTransformStep(opts.transformEngine, nil, nil, nil),
+		pipeline.NewInterceptStep(opts.interceptEngine, nil, nil, nil, opts.holdQueue, nil, slog.Default()),
 		pipeline.NewRecordStep(store, slog.Default(), recordOpts...),
 	}
 	return pipeline.New(steps...)

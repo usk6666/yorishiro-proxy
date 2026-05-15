@@ -220,8 +220,8 @@ func newWSHarness(t *testing.T, ctx context.Context, opts harnessOpts) *wsHarnes
 		pipeline.NewHostScopeStep(nil),
 		pipeline.NewHTTPScopeStep(nil),
 		pipeline.NewSafetyStep(nil, opts.safetyEngine, nil, logger),
-		pipeline.NewTransformStep(nil, opts.transformEngine, nil),
-		pipeline.NewInterceptStep(nil, opts.interceptEngine, nil, opts.holdQueue, nil, logger),
+		pipeline.NewTransformStep(nil, opts.transformEngine, nil, nil),
+		pipeline.NewInterceptStep(nil, opts.interceptEngine, nil, nil, opts.holdQueue, nil, logger),
 		pipeline.NewRecordStep(h.store, logger),
 		// UpgradeStep MUST run AFTER RecordStep so the 101 is recorded
 		// as a normal HTTP envelope before the swap (RFC-001 §3.5).

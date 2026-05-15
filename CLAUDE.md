@@ -41,7 +41,7 @@ Each connection is an explicit stack of `Layer`s (RFC-001 §3.3); each Layer yie
 | gRPC | YES | YES (via HTTP/2) | Native LPM reassembly; GRPCStart/Data/End envelope events |
 | gRPC-Web | YES | YES (via HTTP/1.x or HTTP/2) | Binary + base64 wire formats |
 | WebSocket | YES | YES (per frame) | Per-message-deflate (RFC 7692) supported |
-| SSE | YES | YES | Per-event envelopes; streaming-aware Pipeline |
+| SSE | YES | YES | Per-event envelopes; streaming-aware Pipeline; per-event Transform / Intercept (rules/sse) — USK-892. Engines mutate SSEMessage fields directly; session-side sseMessageMutated field-diff is the authoritative re-encode signal (env.Raw is NOT cleared). |
 | Raw TCP | N/A | YES (byte stream) | Smuggling-safe pass-through (`bytechunk` Layer) |
 | SOCKS5 | N/A | N/A (excluded as transport layer itself) | Apply raw bytes/L7 to the protocol delegated after handshake/tunnel |
 | TLS handshake | YES (observation) | N/A | `TLSHandshakeMessage` envelope; SNI / ALPN / JA3 / JA4 visible to plugins |
@@ -111,7 +111,7 @@ internal/
                            #   ctx.transaction_state / ctx.stream_state, plugin_introspect
   rules/                   # Per-protocol rule engines (Intercept, Transform, Safety)
                            #   common/ (HoldQueue, pattern compiler, presets)
-                           #   http/, ws/, grpc/, sse/, raw/
+                           #   http/, ws/, grpc/, sse/ (USK-892: Intercept + Transform), raw/
   safety/                  # SafetyFilter Engine (envelope-native; Input Filter + Output Filter)
                            #   engine.go, rule.go, preset.go (destructive-sql,
                            #   destructive-os-command), preset_pii.go (credit-card,

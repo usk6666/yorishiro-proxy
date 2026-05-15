@@ -8,6 +8,7 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	grpcrules "github.com/usk6666/yorishiro-proxy/internal/rules/grpc"
 	httprules "github.com/usk6666/yorishiro-proxy/internal/rules/http"
+	sserules "github.com/usk6666/yorishiro-proxy/internal/rules/sse"
 	wsrules "github.com/usk6666/yorishiro-proxy/internal/rules/ws"
 )
 
@@ -21,7 +22,7 @@ func TestTransformStep_Request_AddHeader(t *testing.T) {
 		HeaderName:  "X-Proxy",
 		HeaderValue: "yorishiro",
 	}})
-	step := NewTransformStep(engine, nil, nil)
+	step := NewTransformStep(engine, nil, nil, nil)
 
 	msg := &envelope.HTTPMessage{
 		Method: "GET",
@@ -67,7 +68,7 @@ func TestTransformStep_Response_AddHeader(t *testing.T) {
 		HeaderName:  "X-Inspected",
 		HeaderValue: "true",
 	}})
-	step := NewTransformStep(engine, nil, nil)
+	step := NewTransformStep(engine, nil, nil, nil)
 
 	msg := &envelope.HTTPMessage{
 		Status:       200,
@@ -109,7 +110,7 @@ func TestTransformStep_NoMatchingRule(t *testing.T) {
 		HeaderName:  "X-Resp",
 		HeaderValue: "yes",
 	}})
-	step := NewTransformStep(engine, nil, nil)
+	step := NewTransformStep(engine, nil, nil, nil)
 
 	msg := &envelope.HTTPMessage{
 		Method: "GET",
@@ -145,7 +146,7 @@ func TestTransformStep_RawMessage_PassThrough(t *testing.T) {
 		HeaderName:  "X-Test",
 		HeaderValue: "yes",
 	}})
-	step := NewTransformStep(engine, nil, nil)
+	step := NewTransformStep(engine, nil, nil, nil)
 
 	env := &envelope.Envelope{
 		Direction: envelope.Send,
@@ -160,7 +161,7 @@ func TestTransformStep_RawMessage_PassThrough(t *testing.T) {
 }
 
 func TestTransformStep_NilEngine(t *testing.T) {
-	step := NewTransformStep(nil, nil, nil)
+	step := NewTransformStep(nil, nil, nil, nil)
 
 	msg := &envelope.HTTPMessage{
 		Method: "GET",
@@ -192,7 +193,7 @@ func TestTransformStep_WS_ReplacePayload(t *testing.T) {
 		PayloadPattern: regexp.MustCompile(`alice`),
 		PayloadReplace: []byte("bob"),
 	}})
-	step := NewTransformStep(nil, wsEngine, nil)
+	step := NewTransformStep(nil, wsEngine, nil, nil)
 
 	msg := &envelope.WSMessage{
 		Opcode:  envelope.WSText,
@@ -214,7 +215,7 @@ func TestTransformStep_WS_ReplacePayload(t *testing.T) {
 }
 
 func TestTransformStep_WS_NilEngine(t *testing.T) {
-	step := NewTransformStep(nil, nil, nil)
+	step := NewTransformStep(nil, nil, nil, nil)
 
 	msg := &envelope.WSMessage{
 		Opcode:  envelope.WSText,
@@ -245,7 +246,7 @@ func TestTransformStep_GRPCStart_AddMetadata(t *testing.T) {
 		MetadataName:  "x-injected",
 		MetadataValue: "yes",
 	}})
-	step := NewTransformStep(nil, nil, grpcEngine)
+	step := NewTransformStep(nil, nil, grpcEngine, nil)
 
 	msg := &envelope.GRPCStartMessage{
 		Service: "Greeter",
@@ -288,7 +289,7 @@ func TestTransformStep_GRPCData_ReplacePayload(t *testing.T) {
 		PayloadPattern: regexp.MustCompile(`secret`),
 		PayloadReplace: "redacted",
 	}})
-	step := NewTransformStep(nil, nil, grpcEngine)
+	step := NewTransformStep(nil, nil, grpcEngine, nil)
 
 	msg := &envelope.GRPCDataMessage{
 		Service: "Greeter",
@@ -319,7 +320,7 @@ func TestTransformStep_GRPCEnd_Receive_SetStatus(t *testing.T) {
 		ActionType:  grpcrules.TransformSetStatus,
 		StatusValue: 13, // INTERNAL
 	}})
-	step := NewTransformStep(nil, nil, grpcEngine)
+	step := NewTransformStep(nil, nil, grpcEngine, nil)
 
 	msg := &envelope.GRPCEndMessage{Status: 0}
 	env := &envelope.Envelope{
@@ -348,7 +349,7 @@ func TestTransformStep_GRPCEnd_Send_PassThrough(t *testing.T) {
 		ActionType:  grpcrules.TransformSetStatus,
 		StatusValue: 13,
 	}})
-	step := NewTransformStep(nil, nil, grpcEngine)
+	step := NewTransformStep(nil, nil, grpcEngine, nil)
 
 	msg := &envelope.GRPCEndMessage{Status: 0}
 	env := &envelope.Envelope{
@@ -367,7 +368,7 @@ func TestTransformStep_GRPCEnd_Send_PassThrough(t *testing.T) {
 }
 
 func TestTransformStep_GRPC_NilEngine(t *testing.T) {
-	step := NewTransformStep(nil, nil, nil)
+	step := NewTransformStep(nil, nil, nil, nil)
 
 	msg := &envelope.GRPCDataMessage{
 		Service: "Greeter",
@@ -389,8 +390,62 @@ func TestTransformStep_GRPC_NilEngine(t *testing.T) {
 	}
 }
 
+// TestTransformStep_SSE_SetData verifies the wired SSE TransformEngine
+// mutates the SSEMessage in-place.
+func TestTransformStep_SSE_SetData(t *testing.T) {
+	sseEngine := sserules.NewTransformEngine()
+	r, err := sserules.CompileTransformRule("r1", 0, "", "", "", "", nil, nil, nil,
+		sserules.TransformSetData, "", "", "modified", "", "", "", "", 0)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	sseEngine.AddRule(*r)
+	step := NewTransformStep(nil, nil, nil, sseEngine)
+
+	msg := &envelope.SSEMessage{Event: "msg", Data: "original"}
+	env := &envelope.Envelope{
+		Direction: envelope.Receive,
+		Protocol:  envelope.ProtocolSSE,
+		Message:   msg,
+	}
+	result := step.Process(context.Background(), env)
+	if result.Action != Continue {
+		t.Errorf("got action %v, want Continue", result.Action)
+	}
+	if msg.Data != "modified" {
+		t.Errorf("data = %q, want modified", msg.Data)
+	}
+}
+
+// TestTransformStep_SSE_Drop verifies a matching TransformDrop rule
+// surfaces a Drop action with the canonical attribution string.
+func TestTransformStep_SSE_Drop(t *testing.T) {
+	sseEngine := sserules.NewTransformEngine()
+	r, err := sserules.CompileTransformRule("r1", 0, "", "", "", "", nil, nil, nil,
+		sserules.TransformDrop, "", "", "", "", "", "", "", 0)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	sseEngine.AddRule(*r)
+	step := NewTransformStep(nil, nil, nil, sseEngine)
+
+	msg := &envelope.SSEMessage{Data: "x"}
+	env := &envelope.Envelope{
+		Direction: envelope.Receive,
+		Protocol:  envelope.ProtocolSSE,
+		Message:   msg,
+	}
+	result := step.Process(context.Background(), env)
+	if result.Action != Drop {
+		t.Errorf("got %v, want Drop", result.Action)
+	}
+	if result.BlockedBy != BlockedByInterceptDrop {
+		t.Errorf("blocked_by = %q, want %q", result.BlockedBy, BlockedByInterceptDrop)
+	}
+}
+
 // TestTransformStep_SSE_PassThrough verifies SSEMessage envelopes pass through
-// silently even when other engines are wired (N7 scope-out).
+// silently when the SSE engine is nil.
 func TestTransformStep_SSE_PassThrough(t *testing.T) {
 	httpEngine := httprules.NewTransformEngine()
 	httpEngine.SetRules([]httprules.TransformRule{{
@@ -403,7 +458,7 @@ func TestTransformStep_SSE_PassThrough(t *testing.T) {
 	}})
 	wsEngine := wsrules.NewTransformEngine()
 	grpcEngine := grpcrules.NewTransformEngine()
-	step := NewTransformStep(httpEngine, wsEngine, grpcEngine)
+	step := NewTransformStep(httpEngine, wsEngine, grpcEngine, nil)
 
 	msg := &envelope.SSEMessage{Event: "msg", Data: "hello"}
 	env := &envelope.Envelope{

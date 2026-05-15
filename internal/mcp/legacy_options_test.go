@@ -37,7 +37,7 @@ import (
 // the production NewServer to apply ServerOption mutators.
 func newServer(ctx context.Context, ca *cert.CA, store flow.Store, manager proxyManager, opts ...ServerOption) *Server {
 	misc := NewMisc(ctx, ca, nil, "", nil, nil)
-	pipe := NewPipeline(nil, nil, nil, nil, nil, nil, nil)
+	pipe := NewPipeline(nil, nil, nil, nil, nil, nil, nil, nil, nil)
 	conn := NewConnector(manager, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 	jr := NewJobRunner(nil, nil, nil)
 	fs := NewFlowStore(store, nil)

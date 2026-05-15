@@ -29,6 +29,7 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/rules/common"
 	grpcrules "github.com/usk6666/yorishiro-proxy/internal/rules/grpc"
 	httprules "github.com/usk6666/yorishiro-proxy/internal/rules/http"
+	sserules "github.com/usk6666/yorishiro-proxy/internal/rules/sse"
 	wsrules "github.com/usk6666/yorishiro-proxy/internal/rules/ws"
 	"github.com/usk6666/yorishiro-proxy/internal/session"
 )
@@ -148,6 +149,8 @@ type Deps struct {
 	GRPCSafetyEngine    *grpcrules.SafetyEngine
 	GRPCInterceptEngine *grpcrules.InterceptEngine
 	GRPCTransformEngine *grpcrules.TransformEngine
+	SSEInterceptEngine  *sserules.InterceptEngine
+	SSETransformEngine  *sserules.TransformEngine
 
 	// HoldQueue receives held envelopes from InterceptStep. nil disables
 	// hold-and-dispatch (matched envelopes still drop, but no async
@@ -558,9 +561,9 @@ func buildPipeline(deps Deps, encoders *pipeline.WireEncoderRegistry, logger *sl
 		pipeline.NewPluginStepPre(deps.PluginV2Engine, encoders, logger),
 		// safetyStep is shared with InterceptStep so a modify_and_forward
 		// release re-runs the same per-protocol input checks (USK-702).
-		pipeline.NewInterceptStep(deps.HTTPInterceptEngine, deps.WSInterceptEngine, deps.GRPCInterceptEngine, deps.HoldQueue, safetyStep, logger).
+		pipeline.NewInterceptStep(deps.HTTPInterceptEngine, deps.WSInterceptEngine, deps.GRPCInterceptEngine, deps.SSEInterceptEngine, deps.HoldQueue, safetyStep, logger).
 			WithHoldTracker(deps.InterceptHoldTracker),
-		pipeline.NewTransformStep(deps.HTTPTransformEngine, deps.WSTransformEngine, deps.GRPCTransformEngine),
+		pipeline.NewTransformStep(deps.HTTPTransformEngine, deps.WSTransformEngine, deps.GRPCTransformEngine, deps.SSETransformEngine),
 		pipeline.NewPluginStepPost(deps.PluginV2Engine, encoders, logger),
 		pipeline.NewRecordStep(deps.FlowStore, logger, recordOpts...),
 		// UpgradeStep MUST run AFTER RecordStep so the 101 response is

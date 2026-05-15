@@ -85,8 +85,8 @@ func TestWSIntercept_HoldTimeout_PerProtocolOverride_AutoRelease(t *testing.T) {
 		pipeline.NewHostScopeStep(nil),
 		pipeline.NewHTTPScopeStep(nil),
 		pipeline.NewSafetyStep(nil, nil, nil, logger),
-		pipeline.NewTransformStep(nil, nil, nil),
-		pipeline.NewInterceptStep(nil, wsEngine, nil, holdQueue, nil, logger),
+		pipeline.NewTransformStep(nil, nil, nil, nil),
+		pipeline.NewInterceptStep(nil, wsEngine, nil, nil, holdQueue, nil, logger),
 		pipeline.NewRecordStep(store, logger),
 		session.NewUpgradeStep(),
 	}

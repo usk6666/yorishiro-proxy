@@ -9,15 +9,14 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/rules/common"
 	grpcrules "github.com/usk6666/yorishiro-proxy/internal/rules/grpc"
 	httprules "github.com/usk6666/yorishiro-proxy/internal/rules/http"
+	sserules "github.com/usk6666/yorishiro-proxy/internal/rules/sse"
 	wsrules "github.com/usk6666/yorishiro-proxy/internal/rules/ws"
 )
 
 // InterceptStep is a Message-typed Pipeline Step that holds envelopes matching
 // intercept rules and waits for an external action (release, drop, or modify).
-// HTTP / WebSocket / gRPC messages are dispatched to their respective per-
-// protocol InterceptEngines (rules/http, rules/ws, rules/grpc). SSE has no
-// per-protocol engine (N7 scope-out: half-duplex Receive-only) and passes
-// through unchanged. Unknown Message types pass through.
+// HTTP / WebSocket / gRPC / SSE messages are dispatched to their respective
+// per-protocol InterceptEngines. Unknown Message types pass through.
 //
 // On ActionModifyAndForward, the user-supplied modified envelope is re-checked
 // against the SafetyStep before being released downstream — defense-in-depth
@@ -27,6 +26,7 @@ type InterceptStep struct {
 	http        *httprules.InterceptEngine
 	ws          *wsrules.InterceptEngine
 	grpc        *grpcrules.InterceptEngine
+	sse         *sserules.InterceptEngine
 	queue       *common.HoldQueue
 	safety      *SafetyStep
 	holdTracker *common.HoldTracker
@@ -39,17 +39,26 @@ type InterceptStep struct {
 // A nil safety disables the modify_and_forward re-check (callers without a
 // SafetyStep — e.g. tests not exercising safety — pass nil).
 //
-// Engine arguments are positional in protocol order: http, ws, grpc.
+// Engine arguments are positional in protocol order: http, ws, grpc, sse.
 //
 // The optional HoldTracker is wired via WithHoldTracker. When non-nil,
 // InterceptStep stamps the (StreamID, Direction) tuple on hold-enter and
 // un-stamps it on hold-exit so the session keepalive goroutine (USK-854)
 // can observe in-flight holds. A nil tracker is a graceful no-op.
-func NewInterceptStep(httpEngine *httprules.InterceptEngine, wsEngine *wsrules.InterceptEngine, grpcEngine *grpcrules.InterceptEngine, queue *common.HoldQueue, safety *SafetyStep, logger *slog.Logger) *InterceptStep {
+func NewInterceptStep(
+	httpEngine *httprules.InterceptEngine,
+	wsEngine *wsrules.InterceptEngine,
+	grpcEngine *grpcrules.InterceptEngine,
+	sseEngine *sserules.InterceptEngine,
+	queue *common.HoldQueue,
+	safety *SafetyStep,
+	logger *slog.Logger,
+) *InterceptStep {
 	return &InterceptStep{
 		http:   httpEngine,
 		ws:     wsEngine,
 		grpc:   grpcEngine,
+		sse:    sseEngine,
 		queue:  queue,
 		safety: safety,
 		logger: logger,
@@ -88,10 +97,7 @@ func (s *InterceptStep) Process(ctx context.Context, env *envelope.Envelope) Res
 	case *envelope.GRPCEndMessage:
 		return s.processGRPCEnd(ctx, env, msg)
 	case *envelope.SSEMessage:
-		// N7 scope-out: SSE has no per-protocol intercept engine; pass
-		// through. Half-duplex Receive-only — no Send-side rules to apply.
-		_ = msg
-		return Result{}
+		return s.processSSE(ctx, env, msg)
 	default:
 		return Result{}
 	}
@@ -121,6 +127,17 @@ func (s *InterceptStep) processWS(ctx context.Context, env *envelope.Envelope, m
 	// single Match call covers both directions; the rule's Direction field
 	// gates evaluation inside the engine.
 	matchedRules := s.ws.Match(env, msg)
+	return s.holdAndDispatch(ctx, env, matchedRules)
+}
+
+// processSSE dispatches an SSE event envelope to the per-protocol
+// InterceptEngine. SSE on the live wire is Receive-only (single
+// direction), so a single Match call suffices.
+func (s *InterceptStep) processSSE(ctx context.Context, env *envelope.Envelope, msg *envelope.SSEMessage) Result {
+	if s.sse == nil || s.queue == nil {
+		return Result{}
+	}
+	matchedRules := s.sse.Match(env, msg)
 	return s.holdAndDispatch(ctx, env, matchedRules)
 }
 

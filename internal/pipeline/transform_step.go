@@ -6,28 +6,35 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	grpcrules "github.com/usk6666/yorishiro-proxy/internal/rules/grpc"
 	httprules "github.com/usk6666/yorishiro-proxy/internal/rules/http"
+	sserules "github.com/usk6666/yorishiro-proxy/internal/rules/sse"
 	wsrules "github.com/usk6666/yorishiro-proxy/internal/rules/ws"
 )
 
 // TransformStep is a Message-typed Pipeline Step that applies transformation
-// rules to messages in-place. HTTP / WebSocket / gRPC messages are dispatched
-// to their respective per-protocol TransformEngines. SSE has no per-protocol
-// engine (N7 scope-out: half-duplex Receive-only); SSEMessage passes through
-// unchanged. Unknown Message types pass through.
+// rules to messages in-place. HTTP / WebSocket / gRPC / SSE messages are
+// dispatched to their respective per-protocol TransformEngines. Unknown
+// Message types pass through.
 type TransformStep struct {
 	http *httprules.TransformEngine
 	ws   *wsrules.TransformEngine
 	grpc *grpcrules.TransformEngine
+	sse  *sserules.TransformEngine
 }
 
 // NewTransformStep creates a TransformStep. Any nil engine causes the
 // corresponding protocol arm to pass through unchanged. Engine arguments are
-// positional in protocol order: http, ws, grpc.
-func NewTransformStep(httpEngine *httprules.TransformEngine, wsEngine *wsrules.TransformEngine, grpcEngine *grpcrules.TransformEngine) *TransformStep {
+// positional in protocol order: http, ws, grpc, sse.
+func NewTransformStep(
+	httpEngine *httprules.TransformEngine,
+	wsEngine *wsrules.TransformEngine,
+	grpcEngine *grpcrules.TransformEngine,
+	sseEngine *sserules.TransformEngine,
+) *TransformStep {
 	return &TransformStep{
 		http: httpEngine,
 		ws:   wsEngine,
 		grpc: grpcEngine,
+		sse:  sseEngine,
 	}
 }
 
@@ -55,10 +62,7 @@ func (s *TransformStep) Process(ctx context.Context, env *envelope.Envelope) Res
 	case *envelope.GRPCEndMessage:
 		return s.processGRPCEnd(ctx, env, msg)
 	case *envelope.SSEMessage:
-		// N7 scope-out: SSE has no per-protocol transform engine; pass
-		// through. Half-duplex Receive-only.
-		_ = msg
-		return Result{}
+		return s.processSSE(ctx, env, msg)
 	default:
 		return Result{}
 	}
@@ -117,5 +121,22 @@ func (s *TransformStep) processGRPCEnd(ctx context.Context, env *envelope.Envelo
 		return Result{}
 	}
 	s.grpc.TransformEnd(ctx, env, msg)
+	return Result{}
+}
+
+// processSSE dispatches an SSE event envelope to the per-protocol
+// TransformEngine. A matching Drop rule converts to
+// Result{Action: Drop, BlockedBy: BlockedByInterceptDrop} — same pattern
+// as WS / gRPC mid-stream drops. Engines do NOT clear env.Raw; the
+// session-side `sseMessageMutated` field-diff is the authoritative
+// re-encode signal (USK-892 wire-fidelity invariant).
+func (s *TransformStep) processSSE(ctx context.Context, env *envelope.Envelope, msg *envelope.SSEMessage) Result {
+	if s.sse == nil {
+		return Result{}
+	}
+	res := s.sse.Transform(ctx, env, msg)
+	if res.Drop {
+		return Result{Action: Drop, BlockedBy: BlockedByInterceptDrop}
+	}
 	return Result{}
 }

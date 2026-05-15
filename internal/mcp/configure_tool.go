@@ -14,6 +14,7 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/rules/common"
 	grpcrules "github.com/usk6666/yorishiro-proxy/internal/rules/grpc"
 	httprules "github.com/usk6666/yorishiro-proxy/internal/rules/http"
+	sserules "github.com/usk6666/yorishiro-proxy/internal/rules/sse"
 	wsrules "github.com/usk6666/yorishiro-proxy/internal/rules/ws"
 )
 
@@ -226,13 +227,14 @@ type interceptRuleInput struct {
 	// Enabled indicates whether this rule is active.
 	Enabled bool `json:"enabled" jsonschema:"whether the rule is active"`
 
-	// Protocol selects the rule engine: "http" (default), "ws", or "grpc".
-	Protocol string `json:"protocol,omitempty" jsonschema:"rule engine: http (default), ws, or grpc"`
+	// Protocol selects the rule engine: "http" (default), "ws", "grpc", or "sse".
+	Protocol string `json:"protocol,omitempty" jsonschema:"rule engine: http (default), ws, grpc, or sse"`
 
 	// Direction filters by envelope direction. Allowed values depend on
 	// Protocol: HTTP accepts request|response|both; WS/gRPC accept
-	// send|receive|both.
-	Direction string `json:"direction" jsonschema:"direction filter; HTTP: request|response|both; WS/gRPC: send|receive|both"`
+	// send|receive|both; SSE accepts receive|both (send is rejected at
+	// compile time — SSE is Receive-only on the wire).
+	Direction string `json:"direction" jsonschema:"direction filter; HTTP: request|response|both; WS/gRPC: send|receive|both; SSE: receive|both"`
 
 	// HTTP carries the HTTP-only conditions when Protocol is "http".
 	HTTP *interceptHTTPConditions `json:"http,omitempty" jsonschema:"conditions for HTTP rules"`
@@ -242,6 +244,9 @@ type interceptRuleInput struct {
 
 	// GRPC carries the gRPC-only conditions when Protocol is "grpc".
 	GRPC *interceptGRPCConditions `json:"grpc,omitempty" jsonschema:"conditions for gRPC rules"`
+
+	// SSE carries the SSE-only conditions when Protocol is "sse".
+	SSE *interceptSSEConditions `json:"sse,omitempty" jsonschema:"conditions for SSE rules"`
 }
 
 // interceptHTTPConditions holds HTTP rule conditions. All non-empty
@@ -267,6 +272,27 @@ type interceptGRPCConditions struct {
 	MethodPattern  string            `json:"method_pattern,omitempty" jsonschema:"regex matched against the gRPC method name"`
 	HeaderMatch    map[string]string `json:"header_match,omitempty" jsonschema:"metadata name → regex pattern (case-insensitive)"`
 	PayloadPattern string            `json:"payload_pattern,omitempty" jsonschema:"regex matched against the decompressed LPM payload"`
+}
+
+// interceptSSEConditions holds SSE rule conditions. All non-empty fields
+// are AND-combined.
+//
+// EventPattern / IDPattern / DataPattern compile via common.CompilePattern
+// (1 KiB regex cap = ReDoS guard). Operators wanting per-line matching
+// on Data need to include `(?m)` in their regex (the engine joins
+// multi-line data with `\n`).
+//
+// RetryMinMs / RetryMaxMs match SSEMessage.Retry as integer milliseconds.
+// Events with Retry == 0 (unset on the wire) are skipped whenever either
+// bound is set. Anomalies is OR / any-of against the envelope's
+// Anomalies[].Type list.
+type interceptSSEConditions struct {
+	EventPattern string   `json:"event_pattern,omitempty" jsonschema:"regex matched against the SSE event name"`
+	IDPattern    string   `json:"id_pattern,omitempty" jsonschema:"regex matched against the SSE last event id"`
+	DataPattern  string   `json:"data_pattern,omitempty" jsonschema:"regex matched against the joined SSE data body (use (?m) for per-line)"`
+	RetryMinMs   *int64   `json:"retry_min_ms,omitempty" jsonschema:"minimum SSE retry interval ms (inclusive); skips events with no retry"`
+	RetryMaxMs   *int64   `json:"retry_max_ms,omitempty" jsonschema:"maximum SSE retry interval ms (inclusive); skips events with no retry"`
+	Anomalies    []string `json:"anomalies,omitempty" jsonschema:"OR-list of SSE anomaly types to match (e.g. SSETruncated, SSEDuplicateID)"`
 }
 
 // configureBudget holds budget configuration for the configure tool.
@@ -1105,7 +1131,7 @@ func (s *Server) interceptQueueResult() *configureInterceptQueueResult {
 // clears that engine; the helper validates that the corresponding
 // engine pointer is non-nil before writing.
 func (s *Server) applyInterceptRules(inputs []interceptRuleInput) error {
-	httpRules, wsRules, grpcRules, err := compileInterceptRules(inputs)
+	httpRules, wsRules, grpcRules, sseRules, err := compileInterceptRules(inputs)
 	if err != nil {
 		return err
 	}
@@ -1124,6 +1150,11 @@ func (s *Server) applyInterceptRules(inputs []interceptRuleInput) error {
 	} else if len(grpcRules) > 0 {
 		return fmt.Errorf("grpc intercept engine is not initialized")
 	}
+	if s.pipeline.sseInterceptEngine != nil {
+		s.pipeline.sseInterceptEngine.SetRules(sseRules)
+	} else if len(sseRules) > 0 {
+		return fmt.Errorf("sse intercept engine is not initialized")
+	}
 	return nil
 }
 
@@ -1133,37 +1164,45 @@ func compileInterceptRules(inputs []interceptRuleInput) (
 	[]httprules.InterceptRule,
 	[]wsrules.InterceptRule,
 	[]grpcrules.InterceptRule,
+	[]sserules.InterceptRule,
 	error,
 ) {
 	var httpRules []httprules.InterceptRule
 	var wsRules []wsrules.InterceptRule
 	var grpcRules []grpcrules.InterceptRule
+	var sseRules []sserules.InterceptRule
 	for i, input := range inputs {
 		proto := protocolOrDefault(input.Protocol)
 		switch proto {
 		case "http":
 			r, err := compileHTTPInterceptRule(input)
 			if err != nil {
-				return nil, nil, nil, fmt.Errorf("rules[%d]: %w", i, err)
+				return nil, nil, nil, nil, fmt.Errorf("rules[%d]: %w", i, err)
 			}
 			httpRules = append(httpRules, *r)
 		case "ws":
 			r, err := compileWSInterceptRule(input)
 			if err != nil {
-				return nil, nil, nil, fmt.Errorf("rules[%d]: %w", i, err)
+				return nil, nil, nil, nil, fmt.Errorf("rules[%d]: %w", i, err)
 			}
 			wsRules = append(wsRules, *r)
 		case "grpc":
 			r, err := compileGRPCInterceptRule(input)
 			if err != nil {
-				return nil, nil, nil, fmt.Errorf("rules[%d]: %w", i, err)
+				return nil, nil, nil, nil, fmt.Errorf("rules[%d]: %w", i, err)
 			}
 			grpcRules = append(grpcRules, *r)
+		case "sse":
+			r, err := compileSSEInterceptRule(input)
+			if err != nil {
+				return nil, nil, nil, nil, fmt.Errorf("rules[%d]: %w", i, err)
+			}
+			sseRules = append(sseRules, *r)
 		default:
-			return nil, nil, nil, fmt.Errorf("rules[%d]: unknown protocol %q (expected http|ws|grpc)", i, input.Protocol)
+			return nil, nil, nil, nil, fmt.Errorf("rules[%d]: unknown protocol %q (expected http|ws|grpc|sse)", i, input.Protocol)
 		}
 	}
-	return httpRules, wsRules, grpcRules, nil
+	return httpRules, wsRules, grpcRules, sseRules, nil
 }
 
 // addInterceptRule compiles a single input and appends it to the
@@ -1208,8 +1247,17 @@ func addInterceptRule(p *Pipeline, input interceptRuleInput) error {
 			return err
 		}
 		p.grpcInterceptEngine.AddRule(*r)
+	case "sse":
+		if p.sseInterceptEngine == nil {
+			return fmt.Errorf("sse intercept engine is not initialized")
+		}
+		r, err := compileSSEInterceptRule(input)
+		if err != nil {
+			return err
+		}
+		p.sseInterceptEngine.AddRule(*r)
 	default:
-		return fmt.Errorf("unknown protocol %q (expected http|ws|grpc)", input.Protocol)
+		return fmt.Errorf("unknown protocol %q (expected http|ws|grpc|sse)", input.Protocol)
 	}
 	return nil
 }
@@ -1240,6 +1288,13 @@ func interceptRuleIDExists(p *Pipeline, id string) bool {
 			}
 		}
 	}
+	if p.sseInterceptEngine != nil {
+		for _, r := range p.sseInterceptEngine.Rules() {
+			if r.ID == id {
+				return true
+			}
+		}
+	}
 	return false
 }
 
@@ -1262,6 +1317,9 @@ func removeInterceptRuleAcrossEngines(p *Pipeline, id string) error {
 	if p.grpcInterceptEngine != nil {
 		p.grpcInterceptEngine.RemoveRule(id)
 	}
+	if p.sseInterceptEngine != nil {
+		p.sseInterceptEngine.RemoveRule(id)
+	}
 	return nil
 }
 
@@ -1283,6 +1341,11 @@ func enableInterceptRuleAcrossEngines(p *Pipeline, id string, enabled bool) erro
 	}
 	if p.grpcInterceptEngine != nil {
 		if p.grpcInterceptEngine.EnableRule(id, enabled) {
+			hit = true
+		}
+	}
+	if p.sseInterceptEngine != nil {
+		if p.sseInterceptEngine.EnableRule(id, enabled) {
 			hit = true
 		}
 	}
@@ -1319,6 +1382,14 @@ func countInterceptRules(p *Pipeline) (total, enabled int) {
 			}
 		}
 	}
+	if p.sseInterceptEngine != nil {
+		for _, r := range p.sseInterceptEngine.Rules() {
+			total++
+			if r.Enabled {
+				enabled++
+			}
+		}
+	}
 	return total, enabled
 }
 
@@ -1326,7 +1397,7 @@ func countInterceptRules(p *Pipeline) (total, enabled int) {
 // intercept engine is non-nil. The configure_tool's intercept_rules
 // path requires at least one ready engine to make progress.
 func anyInterceptEngineReady(p *Pipeline) bool {
-	return p.httpInterceptEngine != nil || p.wsInterceptEngine != nil || p.grpcInterceptEngine != nil
+	return p.httpInterceptEngine != nil || p.wsInterceptEngine != nil || p.grpcInterceptEngine != nil || p.sseInterceptEngine != nil
 }
 
 // protocolOrDefault returns the canonical protocol discriminator value.
@@ -1340,6 +1411,8 @@ func protocolOrDefault(p string) string {
 		return "ws"
 	case "grpc":
 		return "grpc"
+	case "sse":
+		return "sse"
 	default:
 		return p
 	}
@@ -1420,6 +1493,52 @@ func compileGRPCInterceptRule(input interceptRuleInput) (*grpcrules.InterceptRul
 	}
 	rule.Enabled = input.Enabled
 	return rule, nil
+}
+
+// compileSSEInterceptRule compiles an SSE interceptRuleInput.
+//
+// Direction is validated against SSE's Receive-only wire reality: "send"
+// is rejected at compile time so a misconfigured rule surfaces at
+// configure-tool time. Empty / "receive" / "both" are accepted.
+func compileSSEInterceptRule(input interceptRuleInput) (*sserules.InterceptRule, error) {
+	if input.SSE == nil {
+		return nil, fmt.Errorf("sse: conditions are required")
+	}
+	dir, err := normalizeSSEDirection(input.Direction)
+	if err != nil {
+		return nil, err
+	}
+	rule, err := sserules.CompileInterceptRule(
+		input.ID,
+		dir,
+		input.SSE.EventPattern,
+		input.SSE.IDPattern,
+		input.SSE.DataPattern,
+		input.SSE.RetryMinMs,
+		input.SSE.RetryMaxMs,
+		input.SSE.Anomalies,
+	)
+	if err != nil {
+		return nil, err
+	}
+	rule.Enabled = input.Enabled
+	return rule, nil
+}
+
+// normalizeSSEDirection canonicalises the direction string for SSE
+// rules. SSE on the wire is Receive-only; "send" is rejected. Empty
+// defaults to "both" for parity with the other protocols' helpers.
+func normalizeSSEDirection(d string) (sserules.RuleDirection, error) {
+	switch strings.ToLower(strings.TrimSpace(d)) {
+	case "", "both":
+		return sserules.DirectionBoth, nil
+	case "receive":
+		return sserules.DirectionReceive, nil
+	case "send":
+		return "", fmt.Errorf("direction: SSE rules do not support \"send\" (SSE is Receive-only on the wire)")
+	default:
+		return "", fmt.Errorf("direction: unknown value %q (expected receive|both)", d)
+	}
 }
 
 // normalizeHTTPDirection canonicalises the direction string for HTTP

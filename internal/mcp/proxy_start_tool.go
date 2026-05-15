@@ -324,6 +324,34 @@ func (s *Server) handleProxyStart(ctx context.Context, _ *gomcp.CallToolRequest,
 // An empty listenerName falls back to the default listener name so
 // internal callers that do not yet propagate names hit the same slot
 // as the implicit default.
+// resetRuleEngines clears every per-protocol intercept and transform
+// rule engine the server holds, drains the hold queue, and leaves nil
+// engines untouched. Split out of resetSettingsToDefaults so the parent
+// stays under the gocyclo budget as new per-protocol engines land.
+func (s *Server) resetRuleEngines() {
+	if s.pipeline.httpInterceptEngine != nil {
+		s.pipeline.httpInterceptEngine.SetRules(nil)
+	}
+	if s.pipeline.wsInterceptEngine != nil {
+		s.pipeline.wsInterceptEngine.SetRules(nil)
+	}
+	if s.pipeline.grpcInterceptEngine != nil {
+		s.pipeline.grpcInterceptEngine.SetRules(nil)
+	}
+	if s.pipeline.sseInterceptEngine != nil {
+		s.pipeline.sseInterceptEngine.SetRules(nil)
+	}
+	if s.pipeline.holdQueue != nil {
+		s.pipeline.holdQueue.Clear()
+	}
+	if s.pipeline.transformHTTPEngine != nil {
+		s.pipeline.transformHTTPEngine.SetRules(nil)
+	}
+	if s.pipeline.transformSSEEngine != nil {
+		s.pipeline.transformSSEEngine.SetRules(nil)
+	}
+}
+
 func (s *Server) resetSettingsToDefaults(listenerName string) {
 	if listenerName == "" {
 		listenerName = proxybuild.DefaultListenerName
@@ -336,26 +364,9 @@ func (s *Server) resetSettingsToDefaults(listenerName string) {
 	// Reset TCP forwards to nil (no forwards).
 	s.connector.tcpForwards = nil
 
-	// Reset per-protocol intercept rules to empty and drain any
-	// in-flight held envelopes so a fresh proxy start observes a clean
-	// slate.
-	if s.pipeline.httpInterceptEngine != nil {
-		s.pipeline.httpInterceptEngine.SetRules(nil)
-	}
-	if s.pipeline.wsInterceptEngine != nil {
-		s.pipeline.wsInterceptEngine.SetRules(nil)
-	}
-	if s.pipeline.grpcInterceptEngine != nil {
-		s.pipeline.grpcInterceptEngine.SetRules(nil)
-	}
-	if s.pipeline.holdQueue != nil {
-		s.pipeline.holdQueue.Clear()
-	}
-
-	// Reset auto-transform rules to empty (no transforms).
-	if s.pipeline.transformHTTPEngine != nil {
-		s.pipeline.transformHTTPEngine.SetRules(nil)
-	}
+	// Reset per-protocol intercept/transform rule engines to a clean
+	// slate so a fresh proxy_start observes no leftover state.
+	s.resetRuleEngines()
 
 	// Reset connection limits and timeouts to defaults.
 	if !managerIsNil(s.connector.manager) {

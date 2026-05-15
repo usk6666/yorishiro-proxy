@@ -21,6 +21,7 @@ import (
 	rulescommon "github.com/usk6666/yorishiro-proxy/internal/rules/common"
 	grpcrules "github.com/usk6666/yorishiro-proxy/internal/rules/grpc"
 	httprules "github.com/usk6666/yorishiro-proxy/internal/rules/http"
+	sserules "github.com/usk6666/yorishiro-proxy/internal/rules/sse"
 	wsrules "github.com/usk6666/yorishiro-proxy/internal/rules/ws"
 	"github.com/usk6666/yorishiro-proxy/internal/safety"
 )
@@ -452,7 +453,9 @@ func assembleLiveManager(
 	httpInterceptEngine *httprules.InterceptEngine,
 	wsInterceptEngine *wsrules.InterceptEngine,
 	grpcInterceptEngine *grpcrules.InterceptEngine,
+	sseInterceptEngine *sserules.InterceptEngine,
 	httpTransformEngine *httprules.TransformEngine,
+	sseTransformEngine *sserules.TransformEngine,
 	passthrough *connector.PassthroughList,
 	targetScope *connector.TargetScope,
 	rateLimiter *connector.RateLimiter,
@@ -466,8 +469,8 @@ func assembleLiveManager(
 ) (*proxybuild.Manager, error) {
 	buildCfg := NewLiveBuildConfig(cfg, proxyCfg, issuer, pluginv2Engine, hostTLSRegistry)
 	return NewLiveManager(cfg, proxyCfg, store, issuer, pluginv2Engine,
-		holdQueue, releaseTracker, holdTracker, httpInterceptEngine, wsInterceptEngine, grpcInterceptEngine,
-		httpTransformEngine, passthrough, targetScope, rateLimiter, budgetManager, safetyEngine, perProtoSafety, buildCfg,
+		holdQueue, releaseTracker, holdTracker, httpInterceptEngine, wsInterceptEngine, grpcInterceptEngine, sseInterceptEngine,
+		httpTransformEngine, sseTransformEngine, passthrough, targetScope, rateLimiter, budgetManager, safetyEngine, perProtoSafety, buildCfg,
 		socks5Negotiator, recordScope, logger)
 }
 
@@ -547,7 +550,9 @@ func NewLiveManager(
 	httpInterceptEngine *httprules.InterceptEngine,
 	wsInterceptEngine *wsrules.InterceptEngine,
 	grpcInterceptEngine *grpcrules.InterceptEngine,
+	sseInterceptEngine *sserules.InterceptEngine,
 	httpTransformEngine *httprules.TransformEngine,
+	sseTransformEngine *sserules.TransformEngine,
 	passthrough *connector.PassthroughList,
 	targetScope *connector.TargetScope,
 	rateLimiter *connector.RateLimiter,
@@ -580,7 +585,9 @@ func NewLiveManager(
 			HTTPInterceptEngine:     httpInterceptEngine,
 			WSInterceptEngine:       wsInterceptEngine,
 			GRPCInterceptEngine:     grpcInterceptEngine,
+			SSEInterceptEngine:      sseInterceptEngine,
 			HTTPTransformEngine:     httpTransformEngine,
+			SSETransformEngine:      sseTransformEngine,
 			HTTPSafetyEngine:        perProtoSafety.HTTP,
 			WSSafetyEngine:          perProtoSafety.WS,
 			GRPCSafetyEngine:        perProtoSafety.GRPC,

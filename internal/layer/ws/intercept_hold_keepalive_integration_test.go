@@ -139,8 +139,8 @@ func runWSHoldKeepaliveCase(t *testing.T, tc keepaliveCase) {
 		pipeline.NewHostScopeStep(nil),
 		pipeline.NewHTTPScopeStep(nil),
 		pipeline.NewSafetyStep(nil, nil, nil, logger),
-		pipeline.NewTransformStep(nil, nil, nil),
-		pipeline.NewInterceptStep(nil, wsEngine, nil, holdQueue, nil, logger).
+		pipeline.NewTransformStep(nil, nil, nil, nil),
+		pipeline.NewInterceptStep(nil, wsEngine, nil, nil, holdQueue, nil, logger).
 			WithHoldTracker(holdTracker),
 		pipeline.NewRecordStep(store, logger),
 		session.NewUpgradeStep(),

@@ -1048,8 +1048,13 @@ N7: Application Layers
     wslayer (from HTTP/1 Upgrade; HTTP/2 CONNECT+:protocol for RFC 8441
              deferred from N7 — design landed in §3.4.1 / §4.5,
              implementation in USK-765)
-    ssehlayer (from HTTP/1 response)
-    Corresponding rule engines in internal/rules/{ws,grpc}/
+    ssehlayer (from HTTP/1 response; HTTP/2 sub-stack overlay via USK-886)
+    Corresponding rule engines in internal/rules/{ws,grpc,sse}/
+    SSE per-event TransformEngine + InterceptEngine landed in USK-892;
+    the original N7 scope-out (D-U3: SSE half-duplex pass-through) is
+    closed. Engines mutate SSEMessage fields directly; the session-side
+    sseMessageMutated field-diff (relaySSEEvent) is the authoritative
+    re-encode signal — engines do NOT clear env.Raw.
     Deliverable: WS/gRPC/SSE flows recordable and intercept-able
 
 N8: MCP + WebUI Reconnection

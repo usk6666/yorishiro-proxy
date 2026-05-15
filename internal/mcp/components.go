@@ -45,6 +45,7 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/rules/common"
 	grpcrules "github.com/usk6666/yorishiro-proxy/internal/rules/grpc"
 	httprules "github.com/usk6666/yorishiro-proxy/internal/rules/http"
+	sserules "github.com/usk6666/yorishiro-proxy/internal/rules/sse"
 	wsrules "github.com/usk6666/yorishiro-proxy/internal/rules/ws"
 	"github.com/usk6666/yorishiro-proxy/internal/safety"
 )
@@ -69,9 +70,11 @@ type Pipeline struct {
 	httpInterceptEngine *httprules.InterceptEngine
 	wsInterceptEngine   *wsrules.InterceptEngine
 	grpcInterceptEngine *grpcrules.InterceptEngine
+	sseInterceptEngine  *sserules.InterceptEngine
 	holdQueue           *common.HoldQueue
 	releaseTracker      *common.ReleaseTracker
 	transformHTTPEngine *httprules.TransformEngine
+	transformSSEEngine  *sserules.TransformEngine
 	safetyEngine        *safety.Engine
 	safetyEngineSetters []safetyEngineSetter
 }
@@ -82,8 +85,10 @@ func NewPipeline(
 	httpInterceptEngine *httprules.InterceptEngine,
 	wsInterceptEngine *wsrules.InterceptEngine,
 	grpcInterceptEngine *grpcrules.InterceptEngine,
+	sseInterceptEngine *sserules.InterceptEngine,
 	holdQueue *common.HoldQueue,
 	transformHTTPEngine *httprules.TransformEngine,
+	transformSSEEngine *sserules.TransformEngine,
 	safetyEngine *safety.Engine,
 	safetyEngineSetters []safetyEngineSetter,
 ) *Pipeline {
@@ -91,8 +96,10 @@ func NewPipeline(
 		httpInterceptEngine: httpInterceptEngine,
 		wsInterceptEngine:   wsInterceptEngine,
 		grpcInterceptEngine: grpcInterceptEngine,
+		sseInterceptEngine:  sseInterceptEngine,
 		holdQueue:           holdQueue,
 		transformHTTPEngine: transformHTTPEngine,
+		transformSSEEngine:  transformSSEEngine,
 		safetyEngine:        safetyEngine,
 		safetyEngineSetters: safetyEngineSetters,
 	}

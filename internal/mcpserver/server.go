@@ -34,6 +34,7 @@ import (
 	rulescommon "github.com/usk6666/yorishiro-proxy/internal/rules/common"
 	grpcrules "github.com/usk6666/yorishiro-proxy/internal/rules/grpc"
 	httprules "github.com/usk6666/yorishiro-proxy/internal/rules/http"
+	sserules "github.com/usk6666/yorishiro-proxy/internal/rules/sse"
 	wsrules "github.com/usk6666/yorishiro-proxy/internal/rules/ws"
 	"github.com/usk6666/yorishiro-proxy/internal/safety"
 	"golang.org/x/sync/errgroup"
@@ -260,6 +261,13 @@ func Run(ctx context.Context, fs *flag.FlagSet, args []string, opts RunOptions) 
 	httpInterceptEngine := httprules.NewInterceptEngine()
 	wsInterceptEngine := wsrules.NewInterceptEngine()
 	grpcInterceptEngine := grpcrules.NewInterceptEngine()
+	// USK-892: SSE InterceptEngine + TransformEngine for per-event
+	// hold/release and per-event Transform (set_data / replace_data /
+	// drop / ...). Threaded through proxybuild.Deps below so the same
+	// instance backs both the h1 SSE relay and the h2 sub-stack overlay
+	// (USK-886).
+	sseInterceptEngine := sserules.NewInterceptEngine()
+	sseTransformEngine := sserules.NewTransformEngine()
 
 	pluginv2Engine, err := InitPluginV2Engine(ctx, store, proxyCfg, logger)
 	if err != nil {
@@ -286,7 +294,7 @@ func Run(ctx context.Context, fs *flag.FlagSet, args []string, opts RunOptions) 
 
 	return assembleAndRunMCPServer(ctx, cfg, proxyCfg, ca, issuer, store, pluginv2Engine,
 		holdQueue, releaseTracker, holdTracker, httpInterceptEngine, wsInterceptEngine, grpcInterceptEngine,
-		httpTransformEngine, passthrough,
+		sseInterceptEngine, httpTransformEngine, sseTransformEngine, passthrough,
 		targetScopePolicy, targetScopePolicySource, openBrowser, stdioMCP, versionStr, opts.OnHTTPListening, logger)
 }
 
@@ -308,7 +316,9 @@ func assembleAndRunMCPServer(
 	httpInterceptEngine *httprules.InterceptEngine,
 	wsInterceptEngine *wsrules.InterceptEngine,
 	grpcInterceptEngine *grpcrules.InterceptEngine,
+	sseInterceptEngine *sserules.InterceptEngine,
 	httpTransformEngine *httprules.TransformEngine,
+	sseTransformEngine *sserules.TransformEngine,
 	passthrough *connector.PassthroughList,
 	targetScopePolicy *config.TargetScopePolicyConfig,
 	targetScopePolicySource string,
@@ -367,8 +377,8 @@ func assembleAndRunMCPServer(
 	recordScope := flow.NewRecordScope()
 
 	manager, err := assembleLiveManager(cfg, proxyCfg, store, issuer, pluginv2Engine,
-		holdQueue, releaseTracker, holdTracker, httpInterceptEngine, wsInterceptEngine, grpcInterceptEngine,
-		httpTransformEngine, passthrough, targetScope, rateLimiter, budgetManager, safetyEngine, perProtoSafety, hostTLSRegistry,
+		holdQueue, releaseTracker, holdTracker, httpInterceptEngine, wsInterceptEngine, grpcInterceptEngine, sseInterceptEngine,
+		httpTransformEngine, sseTransformEngine, passthrough, targetScope, rateLimiter, budgetManager, safetyEngine, perProtoSafety, hostTLSRegistry,
 		socks5Negotiator, recordScope, logger)
 	if err != nil {
 		return err
@@ -403,8 +413,8 @@ func assembleAndRunMCPServer(
 
 	socks5AuthSetter := newSOCKS5AuthAdapter(socks5Negotiator, logger)
 	mcpComps, webUIToken, opts, err := buildMCPComponents(ctx, cfg, proxyCfg, ca, issuer, store, manager,
-		passthrough, holdQueue, releaseTracker, httpInterceptEngine, wsInterceptEngine, grpcInterceptEngine,
-		pluginv2Engine, httpTransformEngine, hostTLSRegistry, tlsTransport, targetScope, rateLimiter, budgetManager, safetyEngine,
+		passthrough, holdQueue, releaseTracker, httpInterceptEngine, wsInterceptEngine, grpcInterceptEngine, sseInterceptEngine,
+		pluginv2Engine, httpTransformEngine, sseTransformEngine, hostTLSRegistry, tlsTransport, targetScope, rateLimiter, budgetManager, safetyEngine,
 		socks5AuthSetter, recordScope, targetScopePolicySource, version, logger)
 	if err != nil {
 		return err
@@ -560,8 +570,10 @@ func buildMCPComponents(
 	httpInterceptEngine *httprules.InterceptEngine,
 	wsInterceptEngine *wsrules.InterceptEngine,
 	grpcInterceptEngine *grpcrules.InterceptEngine,
+	sseInterceptEngine *sserules.InterceptEngine,
 	pluginv2Engine *pluginv2.Engine,
 	httpTransformEngine *httprules.TransformEngine,
+	sseTransformEngine *sserules.TransformEngine,
 	hostTLSRegistry *transport.HostTLSRegistry,
 	tlsTransport transport.TLSTransport,
 	targetScope *connector.TargetScope,
@@ -587,8 +599,10 @@ func buildMCPComponents(
 			httpInterceptEngine,
 			wsInterceptEngine,
 			grpcInterceptEngine,
+			sseInterceptEngine,
 			holdQueue,
 			httpTransformEngine,
+			sseTransformEngine,
 			safetyEngine,
 			nil, // safetyEngineSetters — legacy per-handler propagation gone with USK-706.
 		).WithReleaseTracker(releaseTracker),

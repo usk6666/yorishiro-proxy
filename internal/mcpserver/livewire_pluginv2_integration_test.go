@@ -52,6 +52,7 @@ import (
 	rulescommon "github.com/usk6666/yorishiro-proxy/internal/rules/common"
 	grpcrules "github.com/usk6666/yorishiro-proxy/internal/rules/grpc"
 	httprules "github.com/usk6666/yorishiro-proxy/internal/rules/http"
+	sserules "github.com/usk6666/yorishiro-proxy/internal/rules/sse"
 	wsrules "github.com/usk6666/yorishiro-proxy/internal/rules/ws"
 	"github.com/usk6666/yorishiro-proxy/internal/safety"
 	"github.com/usk6666/yorishiro-proxy/internal/testutil"
@@ -129,14 +130,16 @@ func setupLiveProxy(t *testing.T, pluginName, pluginScript string) *liveProxy {
 	httpInterceptEngine := httprules.NewInterceptEngine()
 	wsInterceptEngine := wsrules.NewInterceptEngine()
 	grpcInterceptEngine := grpcrules.NewInterceptEngine()
+	sseInterceptEngine := sserules.NewInterceptEngine()
 	httpTransformEngine := httprules.NewTransformEngine()
+	sseTransformEngine := sserules.NewTransformEngine()
 	buildCfg := NewLiveBuildConfig(cfg, proxyCfg, issuer, engine, nil)
 
 	mgr, err := NewLiveManager(cfg, proxyCfg, store, issuer, engine, holdQueue,
 		releaseTracker,
 		holdTracker,
-		httpInterceptEngine, wsInterceptEngine, grpcInterceptEngine,
-		httpTransformEngine,
+		httpInterceptEngine, wsInterceptEngine, grpcInterceptEngine, sseInterceptEngine,
+		httpTransformEngine, sseTransformEngine,
 		(*connector.PassthroughList)(nil),
 		(*connector.TargetScope)(nil),
 		(*connector.RateLimiter)(nil),
