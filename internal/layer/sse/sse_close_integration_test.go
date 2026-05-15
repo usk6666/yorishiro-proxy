@@ -69,6 +69,19 @@ func (s *durationTestStore) UpdateStream(_ context.Context, id string, update fl
 			if update.Duration > 0 {
 				st.Duration = update.Duration
 			}
+			// USK-903: merge AppendTags so the OnComplete projection
+			// (terminated_by="client") surfaces on the recorded
+			// Stream. Without this the test would observe an empty
+			// Tags map even when OnComplete called UpdateStream with
+			// the attribution tag.
+			if len(update.AppendTags) > 0 {
+				if st.Tags == nil {
+					st.Tags = make(map[string]string, len(update.AppendTags))
+				}
+				for k, v := range update.AppendTags {
+					st.Tags[k] = v
+				}
+			}
 		}
 	}
 	return nil
@@ -156,8 +169,15 @@ func (h *sseCloseHarness) run(t *testing.T, timeout time.Duration) {
 	go func() {
 		h.done <- session.RunStackSession(ctx, h.stack, dial, p, session.SessionOptions{
 			OnComplete: func(cctx context.Context, sid string, err error) {
+				// USK-903: ErrClientGoneAcked is a graceful terminal
+				// (client cancelled mid-stream). Mirror the production
+				// buildOnCompleteFunc contract: state=complete +
+				// AppendTags["terminated_by"]="client". Without this
+				// branch the test would observe state=error after the
+				// driveSSEEventLoop contract change in USK-903.
+				clientGone := err != nil && errors.Is(err, session.ErrClientGoneAcked)
 				state := "complete"
-				if err != nil && !errors.Is(err, io.EOF) {
+				if err != nil && !errors.Is(err, io.EOF) && !clientGone {
 					state = "error"
 				}
 				if sid == "" {
@@ -166,6 +186,11 @@ func (h *sseCloseHarness) run(t *testing.T, timeout time.Duration) {
 				upd := flow.StreamUpdate{
 					State:         state,
 					FailureReason: session.ClassifyError(err),
+				}
+				if clientGone {
+					upd.AppendTags = map[string]string{
+						"terminated_by": "client",
+					}
 				}
 				// Mirror the builder.go fix: compute Duration from
 				// the Stream's recorded Timestamp so the test can

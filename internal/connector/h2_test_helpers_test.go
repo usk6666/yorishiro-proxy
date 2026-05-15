@@ -119,14 +119,28 @@ func startFullListenerProxyWithH2(
 			if streamID == "" {
 				return
 			}
+			// USK-903: ErrClientGoneAcked is a graceful terminal —
+			// project state=complete + AppendTags["terminated_by"]
+			// ="client" so SSE-over-h2 client-cancel records as
+			// state=complete (matching H/1.1 symmetry) while
+			// preserving the wire-observed cancellation as a
+			// queryable attribution tag. Mirrors the production
+			// proxybuild.buildOnCompleteFunc contract.
+			clientGone := err != nil && errors.Is(err, session.ErrClientGoneAcked)
 			state := "complete"
-			if err != nil && !errors.Is(err, io.EOF) {
+			if err != nil && !errors.Is(err, io.EOF) && !clientGone {
 				state = "error"
 			}
-			_ = store.UpdateStream(cbCtx, streamID, flow.StreamUpdate{
+			upd := flow.StreamUpdate{
 				State:         state,
 				FailureReason: session.ClassifyError(err),
-			})
+			}
+			if clientGone {
+				upd.AppendTags = map[string]string{
+					"terminated_by": "client",
+				}
+			}
+			_ = store.UpdateStream(cbCtx, streamID, upd)
 		},
 	}
 

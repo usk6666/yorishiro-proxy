@@ -11,6 +11,7 @@ import (
 
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/layer"
+	"github.com/usk6666/yorishiro-proxy/internal/session"
 	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
 
@@ -202,6 +203,83 @@ func TestBuildSessionOptions_OnComplete_UnclassifiedErrStillPopulatesTag(t *test
 	}
 	if got.Tags["error"] != "something else" {
 		t.Errorf("Tags[\"error\"] = %q, want %q (raw err string must be preserved)", got.Tags["error"], "something else")
+	}
+}
+
+// TestBuildSessionOptions_OnComplete_ClientGoneAckedStampsTerminatedByTag
+// (USK-903) verifies the SSE client-mid-stream-close projection: when
+// the SSE driver returns session.ErrClientGoneAcked, OnComplete must
+// project state="complete" (matching H/1.1 EPIPE symmetry) AND stamp
+// tags["terminated_by"]="client" so the wire-observed cancellation is
+// preserved as queryable attribution. Critically, no tags["error"] is
+// set — that would re-introduce the false-positive the fix removes.
+func TestBuildSessionOptions_OnComplete_ClientGoneAckedStampsTerminatedByTag(t *testing.T) {
+	store := newSQLiteStoreForTest(t)
+	const streamID = "stream-903-client-gone"
+	seedActiveStreamWithTags(t, store, streamID, map[string]string{"prior": "kept"})
+
+	deps := Deps{
+		ListenerName: "live",
+		FlowStore:    store,
+	}
+	opts := buildSessionOptions(deps, deps.ListenerName)
+
+	// Wrap to mirror the production driveSSEEventLoop return — the
+	// sentinel can reach OnComplete unwrapped (driveSSEEventLoop
+	// returns it directly) or wrapped through a future fmt.Errorf,
+	// so test the wrapped variant to exercise errors.Is matching.
+	clientGone := fmt.Errorf("driveSSEEventLoop: %w", session.ErrClientGoneAcked)
+	opts.OnComplete(context.Background(), streamID, clientGone)
+
+	got, err := store.GetStream(context.Background(), streamID)
+	if err != nil {
+		t.Fatalf("GetStream: %v", err)
+	}
+	if got.State != "complete" {
+		t.Errorf("Stream.State = %q, want %q (client-gone is graceful, like H/1.1 EPIPE)", got.State, "complete")
+	}
+	if got.Tags["terminated_by"] != "client" {
+		t.Errorf("Tags[\"terminated_by\"] = %q, want %q (USK-903 attribution tag)", got.Tags["terminated_by"], "client")
+	}
+	if _, present := got.Tags["error"]; present {
+		t.Errorf("Tags[\"error\"] present (= %q); want absent (client-gone must not surface as error)", got.Tags["error"])
+	}
+	if got.Tags["prior"] != "kept" {
+		t.Errorf("Tags[\"prior\"] = %q, want %q (must not clobber pre-existing tags)", got.Tags["prior"], "kept")
+	}
+}
+
+// TestBuildSessionOptions_OnComplete_RealErrorStillRecordsErrorState
+// (USK-903 regression guard) verifies that genuine SSE errors (upstream
+// RST_STREAM, parse failure, etc.) still project state="error" with
+// tags["error"] populated — confirming the fix does NOT over-match and
+// silently mask real failures. The Issue's third completion criterion.
+func TestBuildSessionOptions_OnComplete_RealErrorStillRecordsErrorState(t *testing.T) {
+	store := newSQLiteStoreForTest(t)
+	const streamID = "stream-903-real-error"
+	seedActiveStreamWithTags(t, store, streamID, nil)
+
+	deps := Deps{
+		ListenerName: "live",
+		FlowStore:    store,
+	}
+	opts := buildSessionOptions(deps, deps.ListenerName)
+
+	realErr := errors.New("upstream RST_STREAM(INTERNAL_ERROR)")
+	opts.OnComplete(context.Background(), streamID, realErr)
+
+	got, err := store.GetStream(context.Background(), streamID)
+	if err != nil {
+		t.Fatalf("GetStream: %v", err)
+	}
+	if got.State != "error" {
+		t.Errorf("Stream.State = %q, want %q (real error must NOT be reclassified as client-gone)", got.State, "error")
+	}
+	if got.Tags["error"] != realErr.Error() {
+		t.Errorf("Tags[\"error\"] = %q, want %q (real error string preserved)", got.Tags["error"], realErr.Error())
+	}
+	if _, present := got.Tags["terminated_by"]; present {
+		t.Errorf("Tags[\"terminated_by\"] present (= %q); want absent on real error", got.Tags["terminated_by"])
 	}
 }
 

@@ -150,7 +150,7 @@ func runOneCloseRace(t *testing.T, iter, enqueuers int) {
 // individual enqueueWrite call's select may nondeterministically take
 // either the queue-send branch (request silently orphaned — no done
 // signal, since no writer is consuming) or the shutdown branch (done
-// signaled with errWriterClosed). Real callers use waitDone() which also
+// signaled with ErrWriterClosed). Real callers use waitDone() which also
 // selects on <-shutdown, so either outcome is safe for them. This test
 // just asserts the no-panic / no-block contract.
 func TestLayer_Close_EnqueueAfterShutdownNoPanic(t *testing.T) {

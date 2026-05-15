@@ -69,6 +69,17 @@ func (s *testStore) UpdateStream(_ context.Context, id string, update flow.Strea
 		if update.FailureReason != "" {
 			st.FailureReason = update.FailureReason
 		}
+		// USK-903: merge AppendTags so OnComplete-stamped attribution
+		// (e.g. terminated_by="client") surfaces on the recorded
+		// Stream. Mirrors the production SQLiteStore semantic.
+		if len(update.AppendTags) > 0 {
+			if st.Tags == nil {
+				st.Tags = make(map[string]string, len(update.AppendTags))
+			}
+			for k, v := range update.AppendTags {
+				st.Tags[k] = v
+			}
+		}
 	}
 	return nil
 }

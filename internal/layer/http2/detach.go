@@ -269,6 +269,15 @@ type detachWriter struct {
 	closed bool
 }
 
+// ErrDetachWriterClosed is returned by detachWriter.Write when the
+// per-stream detach writer has already been closed (typically by the
+// SSE-over-h2 / WS-over-h2 teardown defer running before a late event
+// write). Exported (USK-903) so cross-package classifiers can recognise
+// the post-teardown race via errors.Is rather than a fragile substring
+// match. Pairs with ErrWriterClosed (connection-level) for full typed
+// coverage of the http2 detach writer's terminal error surface.
+var ErrDetachWriterClosed = errors.New("http2: detachWriter: write after close")
+
 // Write enqueues one DATA frame request with payload p on the stream id
 // captured at DetachStream time. Multi-frame fragmentation per peer
 // MAX_FRAME_SIZE is performed by the writer goroutine.
@@ -282,7 +291,7 @@ func (w *detachWriter) Write(p []byte) (int, error) {
 	w.mu.Lock()
 	if w.closed {
 		w.mu.Unlock()
-		return 0, errors.New("http2: detachWriter: write after close")
+		return 0, ErrDetachWriterClosed
 	}
 	w.mu.Unlock()
 

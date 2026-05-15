@@ -1708,6 +1708,15 @@ func runUpgradeSSE(
 		if userOpt.OnComplete != nil {
 			userOpt.OnComplete(context.WithoutCancel(ctx), streamID, retErr)
 		}
+		// USK-903: ErrClientGoneAcked is an OnComplete-only attribution
+		// signal — it must reach the projection layer (so the
+		// "terminated_by=client" tag can be stamped) but must NOT
+		// surface to RunSession callers as a session-level error. The
+		// public RunSession contract is unchanged: a graceful
+		// client-mid-stream cancel still returns nil.
+		if errors.Is(retErr, ErrClientGoneAcked) {
+			retErr = nil
+		}
 	}()
 
 	br := sse.NewEventBoundaryReader(upBody, maxEvent)
@@ -1745,9 +1754,12 @@ func driveSSEEventLoop(
 		}
 		if len(raw) > 0 {
 			if err := deliverOneSSEEvent(ctx, p, clientWriter, raw, chunkedTE, streamID, flowCtx, nextSeq); err != nil {
-				if errors.Is(err, errClientGoneAcked) {
-					return nil
-				}
+				// USK-903: propagate ErrClientGoneAcked to OnComplete
+				// so the projection layer can stamp the
+				// "terminated_by=client" attribution tag instead of
+				// observing an indistinguishable nil. State remains
+				// state=complete (buildOnCompleteFunc treats
+				// ErrClientGoneAcked as a graceful terminal like nil/EOF).
 				return err
 			}
 		}
@@ -1758,12 +1770,12 @@ func driveSSEEventLoop(
 }
 
 // deliverOneSSEEvent routes one raw event chunk through relaySSEEvent,
-// translating client-gone errors to a sentinel nil-error path. The
-// caller-level "return nil" on client-gone is encoded as a special
-// errClientGoneAcked sentinel so the loop control flow stays linear.
+// translating client-gone errors to the ErrClientGoneAcked sentinel so
+// the loop control flow stays linear AND the projection layer can
+// distinguish client-mid-stream-cancel from natural completion.
 //
-// Returns errClientGoneAcked when the client has gone away and the
-// session should terminate gracefully (state=complete).
+// Returns ErrClientGoneAcked when the client has gone away and the
+// session should terminate gracefully (state=complete + tag).
 func deliverOneSSEEvent(
 	ctx context.Context,
 	p *pipeline.Pipeline,
@@ -1779,38 +1791,52 @@ func deliverOneSSEEvent(
 		return nil
 	}
 	if isClientGoneErr(deliverErr) {
-		slog.Debug("session: SSE client write failed, projecting EOF for state=complete",
+		slog.Debug("session: SSE client write failed, projecting graceful client-gone",
 			slog.String("err", deliverErr.Error()))
-		return errClientGoneAcked
+		return ErrClientGoneAcked
 	}
 	return deliverErr
 }
 
 // finalizeSSEEventLoop emits the chunked-TE terminator (if applicable)
 // and returns the terminal error for the loop. EPIPE on the terminator
-// is downgraded to graceful exit — at this point all real events have
-// been forwarded successfully and the only thing left is the framing
-// terminator.
+// is mapped to ErrClientGoneAcked — at this point all real events have
+// been forwarded successfully; the only thing left is the framing
+// terminator, but the client cancelling before observing it still
+// counts as a client-mid-stream close for projection purposes.
 func finalizeSSEEventLoop(clientWriter io.Writer, chunkedTE bool) error {
 	if !chunkedTE {
 		return nil
 	}
 	if _, werr := clientWriter.Write([]byte("0\r\n\r\n")); werr != nil {
 		if isClientGoneErr(werr) {
-			slog.Debug("session: SSE chunked terminator write failed, projecting EOF for state=complete",
+			slog.Debug("session: SSE chunked terminator write failed, projecting graceful client-gone",
 				slog.String("err", werr.Error()))
-			return nil
+			return ErrClientGoneAcked
 		}
 		return fmt.Errorf("session: SSE chunked terminator write: %w", werr)
 	}
 	return nil
 }
 
-// errClientGoneAcked is the internal sentinel signalling that the
-// client TCP socket is closed and the SSE session should terminate
-// gracefully. driveSSEEventLoop translates it back to a nil return so
-// OnComplete projects state=complete.
-var errClientGoneAcked = errors.New("session: SSE client gone (acked)")
+// ErrClientGoneAcked is an OnComplete-only sentinel signalling that
+// the client TCP socket closed mid-stream and the SSE session
+// terminated gracefully.
+//
+// Exported (USK-903) so the projection layer (proxybuild
+// buildOnCompleteFunc) can distinguish "client cancelled mid-stream"
+// from "stream completed naturally" and stamp tags["terminated_by"]="client"
+// without losing the wire-observed cancellation signal.
+// driveSSEEventLoop / the SSE chunked-terminator path return this
+// sentinel on client-gone; the runUpgradeSSE / runUpgradeSSEOverH2
+// orchestrators forward it to userOpt.OnComplete via their deferred
+// closure THEN filter it out of their function return so RunSession
+// callers continue to observe a graceful nil. The public RunSession
+// contract is unchanged.
+//
+// Mirrors the ErrUpgradePending precedent (also a session-scope
+// sentinel exported for an OnComplete-style contract).
+var ErrClientGoneAcked = errors.New("session: SSE client gone (acked)")
 
 // eofReader is an io.Reader that immediately returns io.EOF. Used by the
 // USK-890 C-event loop to construct sse.Wrap with a placeholder body —
@@ -2045,6 +2071,12 @@ func runUpgradeSSEOverH2(
 		if userOpt.OnComplete != nil {
 			userOpt.OnComplete(context.WithoutCancel(ctx), sessionStreamID, retErr)
 		}
+		// USK-903: see runUpgradeSSE's twin defer for the rationale —
+		// the ErrClientGoneAcked sentinel is an OnComplete-only signal
+		// and must not propagate to RunSession callers.
+		if errors.Is(retErr, ErrClientGoneAcked) {
+			retErr = nil
+		}
 	}()
 
 	// HTTP/2 forbids Transfer-Encoding: chunked (RFC 9113 §8.2.2),
@@ -2215,12 +2247,24 @@ func writeEventToClient(w io.Writer, payload []byte, chunkedTE bool) error {
 // failure on the next event push.
 //
 // Classification prefers typed-error matching (errors.Is against
-// net.ErrClosed / syscall.EPIPE / syscall.ECONNRESET) so locale-
-// dependent error strings do not break the projection. A substring
-// fallback covers wrapped/string-form errors from non-syscall paths
-// (e.g. TLS net.OpError) where the typed sentinel is not preserved
-// through the wrap chain. State classification is the same either way;
-// the original error is preserved for slog.Debug.
+// net.ErrClosed / syscall.EPIPE / syscall.ECONNRESET / http2.ErrWriterClosed
+// / http2.ErrDetachWriterClosed) so locale-dependent error strings do
+// not break the projection. A substring fallback covers wrapped/string-
+// form errors from non-syscall paths (e.g. TLS net.OpError) where the
+// typed sentinel is not preserved through the wrap chain. State
+// classification is the same either way; the original error is preserved
+// for slog.Debug.
+//
+// USK-903: both http2 sentinels must be recognised as client-gone for
+// SSE-over-HTTP/2. The per-stream detach writer enqueues writes onto
+// the connection-level writer queue, and when the client's TCP closes
+// either (a) the writerLoop shuts down → ErrWriterClosed, or (b) the
+// detach writer was Closed by a teardown defer → ErrDetachWriterClosed
+// surfaces from a late event write race. Both surface as
+// fmt.Errorf("session: SSE client write: %w", ...) which preserves the
+// errors.Is chain. Without these entries the h2 path recorded
+// state=error + tags["error"]="...http2: writer closed" for every curl
+// --max-time-style cancellation, asymmetric with H/1.1.
 func isClientGoneErr(err error) bool {
 	if err == nil {
 		return false
@@ -2228,7 +2272,9 @@ func isClientGoneErr(err error) bool {
 	if errors.Is(err, net.ErrClosed) ||
 		errors.Is(err, syscall.EPIPE) ||
 		errors.Is(err, syscall.ECONNRESET) ||
-		errors.Is(err, io.ErrClosedPipe) {
+		errors.Is(err, io.ErrClosedPipe) ||
+		errors.Is(err, http2.ErrWriterClosed) ||
+		errors.Is(err, http2.ErrDetachWriterClosed) {
 		return true
 	}
 	s := err.Error()

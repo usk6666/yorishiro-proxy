@@ -8,9 +8,16 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/layer/http2/hpack"
 )
 
-// errWriterClosed is returned to pending Send calls when the writer goroutine
+// ErrWriterClosed is returned to pending Send calls when the writer goroutine
 // is shutting down before their write request was processed.
-var errWriterClosed = errors.New("http2: writer closed")
+//
+// Exported (USK-903) so cross-package classifiers can distinguish a
+// connection-level writer shutdown from genuine wire errors. The session
+// layer uses errors.Is(err, http2.ErrWriterClosed) to recognise client-side
+// HTTP/2 teardown as a graceful client-gone signal in SSE-over-h2 — without
+// this, curl --max-time-style client cancellation surfaced as state=error
+// instead of state=complete (asymmetric with HTTP/1.1).
+var ErrWriterClosed = errors.New("http2: writer closed")
 
 // writeRequest is the union type sent on the writer queue. Exactly one of
 // the typed pointer fields is non-nil for any request. Event-granular
@@ -129,7 +136,7 @@ func (l *Layer) writerLoop() {
 }
 
 // failDrainQueuedWrites empties any remaining writeRequests on the queue
-// and signals errWriterClosed on each one's done channel. Runs as a defer
+// and signals ErrWriterClosed on each one's done channel. Runs as a defer
 // in writerLoop after the shutdown-drain branch returns, catching requests
 // enqueued between the drain's `default` sample and writerLoop's actual
 // exit. The race window without this drain is small but real and produces
@@ -138,7 +145,7 @@ func (l *Layer) failDrainQueuedWrites() {
 	for {
 		select {
 		case req := <-l.writerQueue:
-			failWriteRequest(req, errWriterClosed)
+			failWriteRequest(req, ErrWriterClosed)
 		default:
 			return
 		}
@@ -317,7 +324,7 @@ func (l *Layer) waitForWindow(streamID uint32, requested, maxFrameSize int) (int
 	for {
 		select {
 		case <-l.shutdown:
-			return 0, errWriterClosed
+			return 0, ErrWriterClosed
 		default:
 		}
 
@@ -351,7 +358,7 @@ func (l *Layer) waitForWindow(streamID uint32, requested, maxFrameSize int) (int
 		select {
 		case <-l.windowUpdated:
 		case <-l.shutdown:
-			return 0, errWriterClosed
+			return 0, ErrWriterClosed
 		}
 	}
 }

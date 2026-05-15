@@ -14,7 +14,7 @@ import (
 // Before the fix, waitDone selected on done / ctx.Done / shutdown with no
 // preference. When shutdown closed concurrently with a write that was
 // queued (or already completed by the writer), Go's pseudo-random select
-// could pick the shutdown branch and return errWriterClosed even though
+// could pick the shutdown branch and return ErrWriterClosed even though
 // the writer's drain branch (writerLoop's `case <-l.shutdown:`) would
 // still process the queued request and call deliverDone(nil).
 //
@@ -22,7 +22,7 @@ import (
 // TestE2E_LiveGRPCWeb_DispatchDeliversEnvelope/binary_proto flake on the
 // CI smoke gate: the response HEADERS+DATA frames hit the wire (cli.Do
 // returned matching bytes) but the proxy recorded the Stream as
-// state=error because waitDone returned errWriterClosed for a write that
+// state=error because waitDone returned ErrWriterClosed for a write that
 // had completed successfully.
 //
 // The fix: when shutdown fires, block on `<-done` so the writer's
@@ -36,11 +36,11 @@ import (
 //
 //   - shutdown closes BEFORE done has a value but writer eventually
 //     delivers (the production flake pattern). waitDone must return the
-//     delivered value, not errWriterClosed.
+//     delivered value, not ErrWriterClosed.
 //   - shutdown closes AFTER done already has a value (the buffered
 //     value sits waiting). waitDone must return the delivered value.
 //   - both fire concurrently many times. waitDone must never return
-//     errWriterClosed when done eventually has a value.
+//     ErrWriterClosed when done eventually has a value.
 //
 // Timing-sensitive; requires -race for the strongest signal but the test
 // also asserts return values directly.
@@ -62,7 +62,7 @@ func TestWaitDone_ShutdownVsDoneRace(t *testing.T) {
 
 		err := waitDone(context.Background(), done, shutdown)
 		if err != nil {
-			t.Fatalf("waitDone returned err=%v after writer-delivered nil; want nil (the bug returned errWriterClosed)", err)
+			t.Fatalf("waitDone returned err=%v after writer-delivered nil; want nil (the bug returned ErrWriterClosed)", err)
 		}
 	})
 
@@ -97,16 +97,16 @@ func TestWaitDone_ShutdownVsDoneRace(t *testing.T) {
 
 	t.Run("never_queued_then_shutdown", func(t *testing.T) {
 		// Mirrors the enqueueWrite path where failWriteRequest writes
-		// errWriterClosed onto done before close(shutdown).
+		// ErrWriterClosed onto done before close(shutdown).
 		done := make(chan error, 1)
 		shutdown := make(chan struct{})
 
-		done <- errWriterClosed
+		done <- ErrWriterClosed
 		close(shutdown)
 
 		err := waitDone(context.Background(), done, shutdown)
-		if !errors.Is(err, errWriterClosed) {
-			t.Fatalf("waitDone returned err=%v; want errWriterClosed", err)
+		if !errors.Is(err, ErrWriterClosed) {
+			t.Fatalf("waitDone returned err=%v; want ErrWriterClosed", err)
 		}
 	})
 
@@ -146,7 +146,7 @@ func TestWaitDone_ShutdownVsDoneRace(t *testing.T) {
 // iterations). For each iteration: spawn N goroutines each running
 // waitDone with its own done/shutdown pair, race the writer goroutine
 // closing shutdown against delivering done. None of the waitDone returns
-// may surface errWriterClosed when the writer DID call deliverDone(nil).
+// may surface ErrWriterClosed when the writer DID call deliverDone(nil).
 func TestWaitDone_ShutdownVsDoneRace_Hammer(t *testing.T) {
 	const iterations = 50
 	const concurrency = 32
@@ -181,7 +181,7 @@ func runOneWaitDoneRace(t *testing.T, iter, concurrency int) {
 			}()
 
 			err := waitDone(context.Background(), done, shutdown)
-			if errors.Is(err, errWriterClosed) {
+			if errors.Is(err, ErrWriterClosed) {
 				atomic.AddInt64(&falsePositives, 1)
 			}
 		}()
@@ -200,6 +200,6 @@ func runOneWaitDoneRace(t *testing.T, iter, concurrency int) {
 	}
 
 	if n := atomic.LoadInt64(&falsePositives); n > 0 {
-		t.Fatalf("iter %d: %d/%d waitDone returns surfaced errWriterClosed despite writer delivering nil", iter, n, concurrency)
+		t.Fatalf("iter %d: %d/%d waitDone returns surfaced ErrWriterClosed despite writer delivering nil", iter, n, concurrency)
 	}
 }

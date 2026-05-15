@@ -87,6 +87,14 @@ func TestSSE_ClientCloseBeforeUpstream_StateComplete(t *testing.T) {
 	if elapsed >= 4*time.Second {
 		t.Errorf("RunStackSession took %v; client-watcher cascade is too slow or not firing", elapsed)
 	}
+	// USK-903: assert the client-cancel attribution tag is stamped so
+	// the wire-observed cancellation is preserved as queryable
+	// attribution alongside state=complete. Without this tag, observers
+	// cannot distinguish "client cancelled" from "natural completion"
+	// — the same observability gap H/2 SSE had before USK-903.
+	if got := st.Tags["terminated_by"]; got != "client" {
+		t.Errorf("Stream.Tags[\"terminated_by\"] = %q, want %q (USK-903 attribution)", got, "client")
+	}
 
 	// Allow the upstream writer goroutine to terminate.
 	select {

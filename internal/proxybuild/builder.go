@@ -1139,8 +1139,15 @@ func buildOnCompleteFunc(store flow.Writer, blocked *blockedStreamSet) func(cont
 			blocked.remove(streamID)
 			return
 		}
+		// USK-903: ErrClientGoneAcked is a graceful terminal — the SSE
+		// driver detected client TCP close mid-stream (curl --max-time
+		// pattern). Project state=complete (matching the H/1.1 EPIPE
+		// path symmetry) and stamp tags["terminated_by"]="client" so
+		// the wire-observed cancellation is preserved as queryable
+		// attribution without inflating the error count.
+		clientClosed := err != nil && errors.Is(err, session.ErrClientGoneAcked)
 		state := "complete"
-		if err != nil && !errors.Is(err, io.EOF) {
+		if err != nil && !errors.Is(err, io.EOF) && !clientClosed {
 			state = "error"
 		}
 		update := flow.StreamUpdate{
@@ -1161,6 +1168,14 @@ func buildOnCompleteFunc(store flow.Writer, blocked *blockedStreamSet) func(cont
 		if state == "error" && err != nil {
 			update.AppendTags = map[string]string{
 				"error": truncateErrorTag(err.Error()),
+			}
+		}
+		// USK-903: stamp the client-cancel attribution tag. Mutually
+		// exclusive with tags["error"] above (clientClosed forces
+		// state="complete"), so the two cannot collide on the same Stream.
+		if clientClosed {
+			update.AppendTags = map[string]string{
+				"terminated_by": "client",
 			}
 		}
 		_ = store.UpdateStream(ctx, streamID, update)

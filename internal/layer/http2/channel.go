@@ -396,7 +396,7 @@ func (c *channel) allocateAndEnqueueFirstHeaders(ctx context.Context, fields []h
 	l.mu.Lock()
 	if l.closed {
 		l.mu.Unlock()
-		return errWriterClosed
+		return ErrWriterClosed
 	}
 
 	id := l.nextClientStreamID
@@ -409,7 +409,7 @@ func (c *channel) allocateAndEnqueueFirstHeaders(ctx context.Context, fields []h
 
 	// Inline the writer-queue enqueue rather than calling enqueueWrite so
 	// the send happens under l.mu. The shutdown branch returns
-	// errWriterClosed to the caller; we already checked l.closed above,
+	// ErrWriterClosed to the caller; we already checked l.closed above,
 	// but a concurrent Close may close shutdown between the check and the
 	// send — handle that case explicitly.
 	req := writeRequest{headers: &writeHeaders{
@@ -437,8 +437,8 @@ func (c *channel) allocateAndEnqueueFirstHeaders(ctx context.Context, fields []h
 		return nil
 	case <-l.shutdown:
 		l.mu.Unlock()
-		failWriteRequest(req, errWriterClosed)
-		return errWriterClosed
+		failWriteRequest(req, ErrWriterClosed)
+		return ErrWriterClosed
 	case <-ctx.Done():
 		l.mu.Unlock()
 		failWriteRequest(req, ctx.Err())
@@ -702,7 +702,7 @@ func itoa3(n int) string {
 // waitDone blocks until the writer signals done, or ctx/shutdown fires.
 //
 // USK-812: when shutdown fires before the writer has called deliverDone, we
-// must NOT immediately surface errWriterClosed because the writerLoop's
+// must NOT immediately surface ErrWriterClosed because the writerLoop's
 // drain branch (`case <-l.shutdown:` inside writerLoop) processes any
 // already-queued requests on its way out. The write can still complete
 // successfully on the wire after shutdown closes; the consumer side just
@@ -718,7 +718,7 @@ func itoa3(n int) string {
 //     eventually closes — kernel TCP RST/FIN propagates to the proxy's
 //     frameReader → handleReadError(io.EOF) → close(l.shutdown).
 //  4. Original code: waitDone for step 2's done picks `<-shutdown`,
-//     returns errWriterClosed. But the writer's drain branch was about to
+//     returns ErrWriterClosed. But the writer's drain branch was about to
 //     (or did) process the queued DATA write successfully — the bytes
 //     reached the test client (cli.Do returned matching bytes) yet the
 //     session recorded the Stream as state=error.
@@ -728,7 +728,7 @@ func itoa3(n int) string {
 // authoritative result. The drain branch in writerLoop guarantees done
 // WILL fire for any already-queued request; if the request was never
 // queued (lost in the enqueueWrite race), failWriteRequest already wrote
-// errWriterClosed onto done before close(shutdown), so the unconditional
+// ErrWriterClosed onto done before close(shutdown), so the unconditional
 // receive returns immediately with that value. Either way the writer is
 // the sole producer to done, so no goroutine leak is possible.
 //
@@ -757,9 +757,9 @@ func waitDone(ctx context.Context, done chan error, shutdown chan struct{}) erro
 		return ctx.Err()
 	case <-shutdown:
 		// close(shutdown) racing a pending write must not surface as
-		// errWriterClosed when the writer's drain loop will still process
+		// ErrWriterClosed when the writer's drain loop will still process
 		// the request. Block on done — failWriteRequest writes
-		// errWriterClosed to done in the "request was never queued" path,
+		// ErrWriterClosed to done in the "request was never queued" path,
 		// and the writer's drain loop writes the wire result in the
 		// "request was queued" path. Either way done will fire, returning
 		// the authoritative result.
