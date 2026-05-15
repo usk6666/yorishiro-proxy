@@ -17,6 +17,36 @@ import (
 // The handler owns the connection lifetime: it must close pc when done.
 type HandlerFunc func(ctx context.Context, pc *PeekConn) error
 
+// Capacity-rejection deadlines bound the lifetime of a reject goroutine so
+// a stalled or slowloris-style client cannot indefinitely tie up the
+// rejection path. Worst-case lifetime is rejectPeekTimeout +
+// rejectWriteDeadline (~6s).
+const (
+	// rejectPeekTimeout bounds the read used to discriminate the protocol
+	// kind of an over-cap connection. Intentionally shorter than the regular
+	// PeekTimeout: a rejected client must not be allowed to slowloris the
+	// rejection path.
+	rejectPeekTimeout = 1 * time.Second
+
+	// rejectWriteDeadline bounds the 503 response write. Mirrors the
+	// best-effort 5s used by writeForwardErrorResponse.
+	rejectWriteDeadline = 5 * time.Second
+)
+
+// capacityRejection503Response is the HTTP/1.1 503 response written to
+// HTTP/1.x and HTTP CONNECT clients that arrive while max_connections is
+// already saturated. Retry-After: 5 is a literal per the v1 contract
+// (configurability deferred). Connection: close because the proxy is
+// closing the socket immediately after the write. Content-Length: 0 so
+// no body bytes are read from client input — eliminating any chance of
+// allocation from attacker-controlled data.
+const capacityRejection503Response = "HTTP/1.1 503 Service Unavailable\r\n" +
+	"Server: yorishiro-proxy\r\n" +
+	"Content-Length: 0\r\n" +
+	"Retry-After: 5\r\n" +
+	"Connection: close\r\n" +
+	"\r\n"
+
 // FullListenerConfig holds parameters for constructing a FullListener.
 type FullListenerConfig struct {
 	// Name is used for logging and context propagation. Defaults to "default".
@@ -166,10 +196,17 @@ func (fl *FullListener) Start(ctx context.Context) error {
 		fl.semMu.RUnlock()
 
 		if rejected {
-			fl.logger.Warn("connection rejected: at capacity",
-				"remote_addr", conn.RemoteAddr().String(),
-				"max_connections", maxConns)
-			conn.Close()
+			// Hand the over-cap conn to a reject goroutine. It performs a
+			// short peek to decide whether to write a 503 (HTTP/1.x or
+			// CONNECT) before closing. The reject goroutine is tracked by
+			// fl.wg so graceful shutdown drains it, but it is intentionally
+			// NOT charged to activeConns — over-cap conns must not occupy
+			// the very budget that already saturated.
+			rejectMax := maxConns
+			rejectConn := conn
+			fl.wg.Go(func() {
+				fl.handleRejection(rejectConn, rejectMax)
+			})
 			continue
 		}
 
@@ -255,6 +292,60 @@ func (fl *FullListener) handleConn(ctx context.Context, conn net.Conn) {
 			"duration_ms", time.Since(connStart).Milliseconds(),
 		)
 	}
+}
+
+// handleRejection peeks the over-cap connection's first bytes to discriminate
+// the protocol kind, writes an HTTP/1.1 503 Service Unavailable response if
+// the client speaks HTTP/1.x or HTTP CONNECT, then closes the connection.
+//
+// Other kinds (HTTP/2 / SOCKS5 / TCP / Unknown / peek timeout / EOF) close
+// without a structured response: there is no portable in-band rejection
+// signal for raw TCP, and h2c 503 over HTTP/2 SETTINGS/HEADERS frames is a
+// follow-up (out of scope per USK-906).
+//
+// Bounded lifetime: rejectPeekTimeout (1s) + rejectWriteDeadline (5s).
+// Slowloris-safe — the peek deadline is short enough that even a sustained
+// stall does not allow reject goroutines to accumulate faster than they
+// drain. The reject goroutine is tracked by fl.wg so graceful shutdown
+// drains it; the goroutine itself relies on conn read/write deadlines for
+// cancellation rather than the accept-loop context.
+func (fl *FullListener) handleRejection(conn net.Conn, maxConns int) {
+	defer conn.Close()
+
+	pc := NewPeekConn(conn)
+	remoteAddr := conn.RemoteAddr().String()
+
+	// Short peek deadline so a stalled client cannot tie up the rejection
+	// path. Reset before the Write so the subsequent rejectWriteDeadline
+	// applies cleanly (separated read/write deadlines).
+	_ = conn.SetReadDeadline(time.Now().Add(rejectPeekTimeout))
+
+	kind, _, ok := fl.detectProtocol(pc, fl.logger)
+	_ = conn.SetReadDeadline(time.Time{})
+
+	wrote503 := false
+	if ok && (kind == ProtocolHTTP1 || kind == ProtocolHTTPConnect) {
+		_ = conn.SetWriteDeadline(time.Now().Add(rejectWriteDeadline))
+		if _, err := conn.Write([]byte(capacityRejection503Response)); err == nil {
+			wrote503 = true
+		}
+		_ = conn.SetWriteDeadline(time.Time{})
+	}
+
+	// Use the detected kind when peek succeeded; surface the unknown bucket
+	// when the peek timed out or failed so the operator can distinguish a
+	// well-formed-but-rejected client from a stalled one.
+	detected := ProtocolUnknown
+	if ok {
+		detected = kind
+	}
+
+	fl.logger.Warn("connection rejected: at capacity",
+		"remote_addr", remoteAddr,
+		"max_connections", maxConns,
+		"detected_kind", detected.String(),
+		"wrote_503", wrote503,
+	)
 }
 
 // handlerFor returns the registered handler callback for the given protocol

@@ -1,9 +1,12 @@
 package connector
 
 import (
+	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -313,6 +316,316 @@ func TestFullListener_MaxConnections(t *testing.T) {
 		default:
 			time.Sleep(10 * time.Millisecond)
 		}
+	}
+}
+
+// capacityRejectionHarness fills the listener to capacity with blocked
+// connections so the next dial exercises the rejection path. The caller
+// receives the listener's address and a release func that unblocks the
+// blocked handlers and drains them.
+//
+// The harness routes saturation traffic through OnTCP (raw \xff bytes) so
+// per-test handlers for HTTP/1, CONNECT, SOCKS5, etc. stay nil — confirming
+// that the rejection path does not invoke any registered handler.
+type capacityRejectionHarness struct {
+	t        *testing.T
+	fl       *FullListener
+	cancel   context.CancelFunc
+	conns    []net.Conn
+	barrier  chan struct{}
+	maxConns int
+}
+
+func newCapacityRejectionHarness(t *testing.T, maxConns int) *capacityRejectionHarness {
+	t.Helper()
+	h := &capacityRejectionHarness{
+		t:        t,
+		barrier:  make(chan struct{}),
+		maxConns: maxConns,
+	}
+	var (
+		mu       sync.Mutex
+		handling int
+	)
+	h.fl = newTestFullListener(t, FullListenerConfig{
+		MaxConnections: maxConns,
+		OnTCP: func(ctx context.Context, pc *PeekConn) error {
+			mu.Lock()
+			handling++
+			mu.Unlock()
+			<-h.barrier
+			mu.Lock()
+			handling--
+			mu.Unlock()
+			return nil
+		},
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	h.cancel = cancel
+	startFullListener(t, ctx, h.fl)
+
+	h.conns = make([]net.Conn, maxConns)
+	for i := range h.conns {
+		c, err := net.Dial("tcp", h.fl.Addr())
+		if err != nil {
+			t.Fatalf("dial saturation conn %d: %v", i, err)
+		}
+		_, _ = c.Write([]byte{0xFF}) // raw TCP — routed to OnTCP
+		h.conns[i] = c
+	}
+
+	deadline := time.After(3 * time.Second)
+	for {
+		mu.Lock()
+		ready := handling >= maxConns
+		mu.Unlock()
+		if ready {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("only some handlers reached the barrier")
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	return h
+}
+
+func (h *capacityRejectionHarness) Addr() string { return h.fl.Addr() }
+
+func (h *capacityRejectionHarness) Listener() *FullListener { return h.fl }
+
+func (h *capacityRejectionHarness) Release() {
+	close(h.barrier)
+	for _, c := range h.conns {
+		c.Close()
+	}
+	deadline := time.After(3 * time.Second)
+	for h.fl.ActiveConnections() > 0 {
+		select {
+		case <-deadline:
+			h.t.Fatalf("blocked handlers did not drain, active=%d", h.fl.ActiveConnections())
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	h.cancel()
+}
+
+// readWith2sDeadline pulls bytes from conn under a 2s read deadline,
+// returning whatever was buffered plus the terminal error (typically EOF or
+// the deadline). Returning err allows tests to assert on closed-conn vs
+// timeout explicitly.
+func readWith2sDeadline(t *testing.T, conn net.Conn) ([]byte, error) {
+	t.Helper()
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	defer func() { _ = conn.SetReadDeadline(time.Time{}) }()
+	return io.ReadAll(conn)
+}
+
+// expect503StatusLine asserts the response begins with HTTP/1.1 503 and
+// surfaces the headers required by USK-906: Retry-After: 5 and
+// Connection: close. Returns the parsed response bytes for follow-up
+// assertions.
+func expect503StatusLine(t *testing.T, raw []byte) {
+	t.Helper()
+	br := bufio.NewReader(strings.NewReader(string(raw)))
+	statusLine, err := br.ReadString('\n')
+	if err != nil {
+		t.Fatalf("read status line: %v (raw=%q)", err, raw)
+	}
+	statusLine = strings.TrimRight(statusLine, "\r\n")
+	if !strings.HasPrefix(statusLine, "HTTP/1.1 503") {
+		t.Fatalf("status line = %q, want HTTP/1.1 503 prefix", statusLine)
+	}
+	headers := map[string]string{}
+	for {
+		line, err := br.ReadString('\n')
+		if err != nil {
+			break
+		}
+		line = strings.TrimRight(line, "\r\n")
+		if line == "" {
+			break
+		}
+		if idx := strings.IndexByte(line, ':'); idx > 0 {
+			headers[strings.ToLower(strings.TrimSpace(line[:idx]))] = strings.TrimSpace(line[idx+1:])
+		}
+	}
+	if got := headers["retry-after"]; got != "5" {
+		t.Errorf("Retry-After = %q, want %q", got, "5")
+	}
+	if got := strings.ToLower(headers["connection"]); got != "close" {
+		t.Errorf("Connection = %q, want %q", headers["connection"], "close")
+	}
+	if got := headers["content-length"]; got != "0" {
+		t.Errorf("Content-Length = %q, want %q", got, "0")
+	}
+}
+
+func TestFullListener_MaxConnections_HTTP1_Writes503(t *testing.T) {
+	h := newCapacityRejectionHarness(t, 2)
+	t.Cleanup(h.Release)
+
+	conn, err := net.Dial("tcp", h.Addr())
+	if err != nil {
+		t.Fatalf("dial rejected: %v", err)
+	}
+	defer conn.Close()
+	if _, err := conn.Write([]byte("GET / HTTP/1.1\r\nHost: example.com\r\n\r\n")); err != nil {
+		t.Fatalf("write request: %v", err)
+	}
+
+	raw, _ := readWith2sDeadline(t, conn)
+	if len(raw) == 0 {
+		t.Fatal("expected 503 response bytes, got none")
+	}
+	expect503StatusLine(t, raw)
+}
+
+// TestFullListener_MaxConnections_HTTPCONNECT_Writes503 reproduces the
+// SSE-P5-08 scenario: `curl -x http://...` sends CONNECT and previously
+// saw a bare TCP close (rc=000). With USK-906 the client now receives a
+// structured 503.
+func TestFullListener_MaxConnections_HTTPCONNECT_Writes503(t *testing.T) {
+	h := newCapacityRejectionHarness(t, 2)
+	t.Cleanup(h.Release)
+
+	conn, err := net.Dial("tcp", h.Addr())
+	if err != nil {
+		t.Fatalf("dial rejected: %v", err)
+	}
+	defer conn.Close()
+	if _, err := conn.Write([]byte("CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n")); err != nil {
+		t.Fatalf("write CONNECT: %v", err)
+	}
+
+	raw, _ := readWith2sDeadline(t, conn)
+	if len(raw) == 0 {
+		t.Fatal("expected 503 response bytes, got none")
+	}
+	expect503StatusLine(t, raw)
+}
+
+// TestFullListener_MaxConnections_SOCKS5_StillCloses confirms that the
+// 503 path is HTTP-only: SOCKS5 clients still receive the pre-USK-906
+// bare-close behaviour because there is no in-band SOCKS5 rejection
+// message defined for this case (and adding one is out of scope).
+func TestFullListener_MaxConnections_SOCKS5_StillCloses(t *testing.T) {
+	h := newCapacityRejectionHarness(t, 2)
+	t.Cleanup(h.Release)
+
+	conn, err := net.Dial("tcp", h.Addr())
+	if err != nil {
+		t.Fatalf("dial rejected: %v", err)
+	}
+	defer conn.Close()
+	// SOCKS5 greeting: version + 1 auth method + NO_AUTH
+	if _, err := conn.Write([]byte{0x05, 0x01, 0x00}); err != nil {
+		t.Fatalf("write socks5 greeting: %v", err)
+	}
+
+	raw, _ := readWith2sDeadline(t, conn)
+	if len(raw) != 0 {
+		t.Errorf("expected no bytes from server, got %d bytes: %q", len(raw), raw)
+	}
+}
+
+// TestFullListener_MaxConnections_NoBytes_DrainsViaPeekTimeout confirms
+// the reject goroutine's lifetime is bounded by rejectPeekTimeout even if
+// the client never sends a byte (slowloris-rejection variant).
+func TestFullListener_MaxConnections_NoBytes_DrainsViaPeekTimeout(t *testing.T) {
+	h := newCapacityRejectionHarness(t, 2)
+	t.Cleanup(h.Release)
+
+	conn, err := net.Dial("tcp", h.Addr())
+	if err != nil {
+		t.Fatalf("dial rejected: %v", err)
+	}
+	defer conn.Close()
+	// Do not write — force the reject goroutine to exit via its peek
+	// deadline (rejectPeekTimeout = 1s). Allow a small safety margin.
+	start := time.Now()
+	raw, _ := readWith2sDeadline(t, conn)
+	elapsed := time.Since(start)
+	if len(raw) != 0 {
+		t.Errorf("expected no bytes from server, got %d bytes: %q", len(raw), raw)
+	}
+	if elapsed > 1500*time.Millisecond {
+		t.Errorf("reject goroutine took %v to close, want <= ~1s + slack", elapsed)
+	}
+}
+
+// TestFullListener_MaxConnections_GracefulShutdownDrainsRejectGoroutine
+// verifies acceptance criterion 3: cancelling the listener context while
+// reject goroutines are mid-peek drains them via fl.wg.Wait() in Start.
+func TestFullListener_MaxConnections_GracefulShutdownDrainsRejectGoroutine(t *testing.T) {
+	const maxConns = 1
+	barrier := make(chan struct{})
+	fl := newTestFullListener(t, FullListenerConfig{
+		MaxConnections: maxConns,
+		OnTCP: func(ctx context.Context, pc *PeekConn) error {
+			<-barrier
+			return nil
+		},
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	startCh := make(chan error, 1)
+	go func() {
+		startCh <- fl.Start(ctx)
+	}()
+	select {
+	case <-fl.Ready():
+	case err := <-startCh:
+		t.Fatalf("Start failed: %v", err)
+	}
+
+	// Saturate.
+	sat, err := net.Dial("tcp", fl.Addr())
+	if err != nil {
+		t.Fatalf("dial saturator: %v", err)
+	}
+	_, _ = sat.Write([]byte{0xFF})
+	deadline := time.After(3 * time.Second)
+	for fl.ActiveConnections() < maxConns {
+		select {
+		case <-deadline:
+			t.Fatal("saturator did not enter handler")
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	// Trigger a reject goroutine that is mid-peek (no bytes sent).
+	rejConn, err := net.Dial("tcp", fl.Addr())
+	if err != nil {
+		t.Fatalf("dial rejected: %v", err)
+	}
+	defer rejConn.Close()
+
+	// Give the accept loop a moment to enqueue the reject goroutine —
+	// the reject path is fl.wg-tracked but not charged to activeConns,
+	// so there is no synchronous signal we can observe. 100ms is a
+	// generous upper bound for an in-process Dial → Accept hop.
+	time.Sleep(100 * time.Millisecond)
+
+	// Shutdown; the reject goroutine should be mid-peek (no bytes sent),
+	// so fl.wg.Wait() should unblock within rejectPeekTimeout (~1s).
+	cancel()
+	close(barrier)
+	sat.Close()
+
+	// Start should return without error within a window that comfortably
+	// exceeds rejectPeekTimeout. If the reject goroutine leaked, Start
+	// will never return.
+	select {
+	case err := <-startCh:
+		if err != nil {
+			t.Fatalf("Start returned error on graceful shutdown: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Start did not return — reject goroutine likely leaked")
 	}
 }
 
