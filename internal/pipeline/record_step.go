@@ -136,8 +136,16 @@ type RecordStep struct {
 	// that explicitly opt out.
 	grpcMaxPerStream int
 	sseMaxPerStream  int
+	// USK-889 per-Stream frame-level record cap. Gates envelopes whose
+	// EnvelopeContext.WireLevel is flow.WireLevelH2Frame (frame envelopes
+	// produced by the per-stream sub-stack overlay on the WS-over-h2 /
+	// SSE-over-h2 detach paths). Zero means "unlimited" with the same
+	// rationale as the USK-802 cap fields: the production wiring resolves
+	// to config.MaxHTTP2FrameRecordsPerStream so the zero meaning is
+	// reserved for synthetic test stacks.
+	h2FrameMaxPerStream int
 	// countCache is the per-StreamID record-count LRU. Allocated lazily on
-	// first per-stream gating need (i.e. when either cap Option resolves to
+	// first per-stream gating need (i.e. when any cap Option resolves to
 	// a positive value). Concurrent access is bound by countCache.mu — see
 	// recordCountCache for the contract.
 	countCache *recordCountCache
@@ -279,6 +287,50 @@ func WithSSEMaxEventsPerStream(n int) Option {
 	}
 }
 
+// WithHTTP2FrameMaxPerStream caps the number of frame-level envelopes
+// (EnvelopeContext.WireLevel = flow.WireLevelH2Frame) RecordStep persists
+// per Stream (USK-889). Once the cap is reached, further frame envelopes
+// pass through the record-only Pipeline untouched but are not written to
+// the flow store.
+//
+// Wire forwarding is unaffected because the frame-record callback that
+// the http2.Layer.DetachStream orchestrators install runs BEFORE
+// pipe.Write inside runDetachDrain; this cap only suppresses the
+// downstream RecordStep dispatch, never the io.Pipe relay carrying the
+// payload to the WS / SSE Layer.
+//
+// The cap is keyed on the same per-Stream LRU as the USK-802 gRPC / SSE
+// caps; the cache entry's count is bumped for every gated envelope so
+// the invariant "len(SaveFlow calls for frame envelopes, stream S) ≤
+// cap" holds even under parallel observation. On the first cap-hit per
+// Stream RecordStep stamps AppendTags["records_truncated"] =
+// recordsTruncatedReason exactly as it does for gRPC / SSE.
+//
+// Shared-counter caveat (SSE-over-h2 only): recordCountCache.bumpAndCheck
+// keys on streamID alone, so semantic SSEMessage envelopes (gated by
+// WithSSEMaxEventsPerStream) and h2-frame envelopes on the same Stream
+// share one counter. A single SSE-over-h2 Stream that records N SSE
+// events and M frames hits its first cap-hit when N+M crosses the
+// smaller of the two caps, NOT when either kind individually exceeds
+// its own cap. WS-over-h2 is unaffected (semantic WSMessage envelopes
+// fall through recordCapForEnvelope with cap=0 and never bump the
+// counter). With both production defaults at 10000 the practical
+// threshold is N+M > 10000 per Stream, which only matters for very
+// long-lived SSE-over-h2 streams; the operator-visible
+// records_truncated tag surfaces the truncation either way. Splitting
+// the counter axis (per-kind keying) is deferred to a follow-up Issue
+// if production data shows premature truncation.
+//
+// Zero (or negative) means "unlimited"; see WithGRPCMaxMessagesPerStream
+// for the rationale.
+func WithHTTP2FrameMaxPerStream(n int) Option {
+	return func(s *RecordStep) {
+		if n > 0 {
+			s.h2FrameMaxPerStream = n
+		}
+	}
+}
+
 // NewRecordStep creates a RecordStep with the given flow.Writer.
 // If store is nil, Process returns immediately with no side effects.
 //
@@ -301,10 +353,10 @@ func NewRecordStep(store flow.Writer, logger *slog.Logger, opts ...Option) *Reco
 	if s.origin == "" {
 		s.origin = flow.OriginProxy
 	}
-	// USK-802: lazily allocate the per-Stream record-count LRU when at
-	// least one cap Option resolved to a positive value. Synthetic test
-	// stacks that omit both Options skip the allocation entirely.
-	if (s.grpcMaxPerStream > 0 || s.sseMaxPerStream > 0) && s.countCache == nil {
+	// USK-802 / USK-889: lazily allocate the per-Stream record-count LRU
+	// when at least one cap Option resolved to a positive value. Synthetic
+	// test stacks that omit every Option skip the allocation entirely.
+	if (s.grpcMaxPerStream > 0 || s.sseMaxPerStream > 0 || s.h2FrameMaxPerStream > 0) && s.countCache == nil {
 		s.countCache = newRecordCountCache(defaultCountCacheCapacity)
 	}
 	return s
@@ -473,8 +525,21 @@ func (s *RecordStep) allowFlowRecord(ctx context.Context, env *envelope.Envelope
 // the Message type rather than the Protocol alone so gRPC Start/End
 // envelopes (which are bounded ≤2 per Stream and always recorded) bypass
 // the gate cleanly.
+//
+// USK-889: frame-level envelopes (EnvelopeContext.WireLevel ==
+// flow.WireLevelH2Frame) are gated by h2FrameMaxPerStream. The check runs
+// BEFORE the Message-type switch so frame envelopes are always treated as
+// frame envelopes regardless of the (unrelated) typed Message they carry
+// (today *H2DataEvent; future ws-frame / sse-chunk values may carry their
+// own typed payload).
 func (s *RecordStep) recordCapForEnvelope(env *envelope.Envelope) int {
-	if env == nil || env.Message == nil {
+	if env == nil {
+		return 0
+	}
+	if env.Context.WireLevel != "" && env.Context.WireLevel != flow.WireLevelSemantic {
+		return s.h2FrameMaxPerStream
+	}
+	if env.Message == nil {
 		return 0
 	}
 	switch env.Message.(type) {
@@ -801,6 +866,14 @@ func (s *RecordStep) envelopeToFlow(ctx context.Context, env *envelope.Envelope)
 		Timestamp: time.Now(),
 		RawBytes:  s.projectRawBytes(ctx, env),
 		Metadata:  map[string]string{"protocol": string(env.Protocol)},
+		// USK-889: project EnvelopeContext.WireLevel onto the persisted
+		// Flow so the schemaV14 wire_level column distinguishes the
+		// frame-level overlay envelopes (h2-frame) from the canonical
+		// semantic envelopes. An empty context value reads back as
+		// WireLevelSemantic via SQLiteStore.saveFlowSync's empty-string
+		// backstop, so existing semantic-only producers do not need to
+		// thread the constant explicitly.
+		WireLevel: env.Context.WireLevel,
 	}
 
 	switch m := env.Message.(type) {

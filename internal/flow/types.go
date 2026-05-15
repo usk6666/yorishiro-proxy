@@ -174,6 +174,15 @@ type Flow struct {
 	// based on the Layer scheme). Downstream filters (USK-792 manage
 	// export_flows / delete_flows) read this column directly.
 	HTTPVersion string
+	// WireLevel discriminates the envelope's recording layer (USK-889):
+	// WireLevelSemantic for canonical L7 message envelopes recorded by
+	// RecordStep on the main Pipeline; WireLevelH2Frame for H2 DATA frame
+	// envelopes recorded as a per-stream sub-stack overlay (RFC-001
+	// §3.4.1) under the WS-over-h2 / SSE-over-h2 detach paths. Empty
+	// string is treated as WireLevelSemantic by readers for backward
+	// compatibility with pre-schemaV14 rows; the SQLite column default
+	// is 'semantic' so backfilled rows always read as semantic.
+	WireLevel string
 	// Metadata holds protocol-specific key-value metadata for this flow.
 	Metadata map[string]string
 }

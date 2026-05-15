@@ -59,9 +59,20 @@ import (
 // Used by session.runUpgradeWSOverH2 in conjunction with ws.New(...,
 // ws.WithH2Mode(true)) to swap a single stream into WebSocket framing
 // under RFC 8441 extended CONNECT.
-func (l *Layer) DetachStream(streamID uint32) (io.ReadCloser, io.WriteCloser, func() error, error) {
+//
+// Variadic DetachOption values configure optional behavior; today the
+// only supported option is WithFrameRecordCallback (USK-889). Passing no
+// options preserves the pre-USK-889 contract verbatim.
+func (l *Layer) DetachStream(streamID uint32, opts ...DetachOption) (io.ReadCloser, io.WriteCloser, func() error, error) {
 	if streamID == 0 {
 		return nil, nil, nil, fmt.Errorf("http2: DetachStream requires non-zero streamID")
+	}
+
+	cfg := &detachConfig{}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(cfg)
+		}
 	}
 
 	l.mu.Lock()
@@ -81,6 +92,7 @@ func (l *Layer) DetachStream(streamID uint32) (io.ReadCloser, io.WriteCloser, fu
 	pr, pw := io.Pipe()
 	ch.detachWriter = pw
 	ch.detachPipeReader = pr
+	ch.detachFrameRecordCB = cfg.frameRecordCB
 	ch.detached.Store(true)
 	l.mu.Unlock()
 
@@ -165,6 +177,15 @@ func (c *channel) closeDetachPipeForTerminal(pw *io.PipeWriter) {
 // forwardDetachEnvelope writes the DATA payload (if any) from env to pw
 // and returns false when the drain loop should exit (terminal envelope
 // or pipe-writer error). Returns true to continue draining.
+//
+// USK-889: when detachFrameRecordCB is non-nil, the callback fires
+// synchronously BEFORE pipe.Write. The wire observation precedes the
+// delivery of the bytes to the consumer Layer (RFC-001 §3.1 / CLAUDE.md
+// MITM Principle #3 — raw bytes recording reflects on-wire reality, not
+// post-delivery state). The callback contract documented on the channel
+// field requires non-blocking behavior; runDetachDrain is single-
+// consumer for ch.recv and any block here stalls the per-stream byte
+// stream for sibling-frame delivery.
 func (c *channel) forwardDetachEnvelope(pw *io.PipeWriter, env *envelope.Envelope) bool {
 	if env == nil {
 		return true
@@ -176,6 +197,15 @@ func (c *channel) forwardDetachEnvelope(pw *io.PipeWriter, env *envelope.Envelop
 	data, isData := env.Message.(*H2DataEvent)
 	if !isData {
 		return true
+	}
+	// USK-889: invoke the frame-record callback (if installed) before
+	// the pipe.Write delivery so the recorder snapshot reflects the
+	// wire observation, not the post-delivery state. Defensive panic
+	// guard is intentionally omitted — the callback is set by trusted
+	// orchestrator code in the same process, and we want any panic to
+	// surface to the operator rather than be silently swallowed.
+	if cb := c.detachFrameRecordCB; cb != nil {
+		cb(env)
 	}
 	if len(data.Payload) > 0 {
 		if _, werr := pw.Write(data.Payload); werr != nil {
@@ -314,4 +344,63 @@ func (c *channel) detachActive() bool {
 // pipe-reader EOF). nil when the channel is not detached.
 func (c *channel) drainDoneChan() <-chan struct{} {
 	return c.detachDrainDone
+}
+
+// detachConfig collects values supplied to DetachStream via the variadic
+// DetachOption mechanism. Defined as a struct (not a parameter struct
+// passed by value) so future fields can be added without breaking
+// existing callers, mirroring the precedent set by USK-802's RecordStep
+// Option pattern.
+type detachConfig struct {
+	// frameRecordCB is the optional synchronous callback that fires
+	// inside runDetachDrain for every H2DataEvent envelope produced on
+	// the detached stream. nil when no caller installed the option.
+	frameRecordCB func(*envelope.Envelope)
+}
+
+// DetachOption configures DetachStream. The variadic-option shape lets
+// future per-call configuration land without breaking existing callers
+// (USK-781 callers pass no options; USK-889 introduces
+// WithFrameRecordCallback as the first option). Mirrors the USK-802
+// pipeline.Option precedent so the API style stays uniform across the
+// codebase.
+type DetachOption func(*detachConfig)
+
+// WithFrameRecordCallback installs a synchronous frame-record callback
+// invoked inside runDetachDrain for every H2DataEvent envelope drained
+// from the detached stream's channel (USK-889).
+//
+// Timing: the callback fires BEFORE the payload is written to the
+// detach pipe. This ordering reflects the MITM contract — the
+// recorder's snapshot must mirror on-wire observation, not the
+// post-delivery state the consumer Layer sees. Without this ordering a
+// late consumer error could cause runDetachDrain to exit before the
+// recorder ever sees the frame.
+//
+// Contract:
+//   - cb MUST NOT block. runDetachDrain is single-consumer for the
+//     channel's recv queue; any block here stalls subsequent DATA
+//     frames on the same stream. If the orchestrator's recording path
+//     needs to perform IO that may block (DB write under contention,
+//     network call), it must dispatch its own goroutine inside cb.
+//   - cb receives the envelope in its drained form (Envelope.Raw
+//     contains the DATA frame payload; Message is *H2DataEvent;
+//     Protocol is envelope.ProtocolHTTP — NOT a new ProtocolHTTP2
+//     value, by design). The callback may read but must not mutate
+//     the envelope; mutating fields is undefined.
+//   - The envelope's identity (StreamID / FlowID / Sequence /
+//     Direction) is the connection-level h2 channel's view of the
+//     stream. The session.runUpgrade* orchestrators that install this
+//     callback typically rewrite these fields to the post-swap
+//     session-scope StreamID + a separate per-direction sequence
+//     counter scoped to (sessionStreamID, WireLevel=h2-frame) before
+//     dispatching to the record-only Pipeline.
+//
+// Passing a nil cb is equivalent to not supplying the option at all:
+// the Option is a no-op on the underlying config and the detached
+// stream behaves identically to the pre-USK-889 contract.
+func WithFrameRecordCallback(cb func(*envelope.Envelope)) DetachOption {
+	return func(c *detachConfig) {
+		c.frameRecordCB = cb
+	}
 }

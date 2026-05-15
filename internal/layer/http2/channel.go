@@ -108,6 +108,23 @@ type channel struct {
 	detachDrainDone chan struct{}
 	// detachCloseOnce guards closeDetached against re-entry.
 	detachCloseOnce sync.Once
+	// detachFrameRecordCB is invoked synchronously inside runDetachDrain
+	// for every H2DataEvent envelope drained from ch.recv BEFORE the
+	// payload is written to the detach pipe. Set at most once by the
+	// DetachStream variadic Option WithFrameRecordCallback (USK-889).
+	//
+	// Contract: the callback must NOT block — it runs on the
+	// runDetachDrain goroutine which owns delivery of the detach byte
+	// stream. The orchestrator that installs the callback typically
+	// closes over a record-only Pipeline whose RecordStep performs a
+	// local SQLite write; if that becomes too slow the orchestrator
+	// should dispatch its own goroutine inside the callback rather
+	// than block runDetachDrain.
+	//
+	// nil when DetachStream was called without the option (the existing
+	// USK-781 callers do exactly this; the callback wiring is opt-in
+	// and never alters the existing pipe.Write path).
+	detachFrameRecordCB func(*envelope.Envelope)
 }
 
 // newChannel constructs a channel bound to layer for h2 stream id.

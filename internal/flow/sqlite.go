@@ -781,14 +781,26 @@ func (s *SQLiteStore) saveFlowSync(ctx context.Context, f *Flow) error {
 		variant = f.Metadata["variant"]
 	}
 
+	// USK-889: schemaV14 wire_level column. Default to WireLevelSemantic
+	// for any Flow that arrives without an explicit value so all existing
+	// call sites (RecordStep main Pipeline + import path + tests) keep
+	// recording under the canonical semantic discriminator without code
+	// changes. Frame-record callers (session.runUpgrade* h2 detach
+	// callbacks) stamp WireLevelH2Frame explicitly.
+	wireLevel := f.WireLevel
+	if wireLevel == "" {
+		wireLevel = WireLevelSemantic
+	}
+
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO flows (id, stream_id, sequence, direction, variant, timestamp, headers, body, raw_bytes, body_truncated, method, url, status_code, metadata, trailers, http_version)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO flows (id, stream_id, sequence, direction, variant, wire_level, timestamp, headers, body, raw_bytes, body_truncated, method, url, status_code, metadata, trailers, http_version)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		f.ID,
 		f.StreamID,
 		f.Sequence,
 		f.Direction,
 		variant,
+		wireLevel,
 		f.Timestamp.UTC().Format(time.RFC3339Nano),
 		headers,
 		f.Body,
@@ -808,9 +820,10 @@ func (s *SQLiteStore) saveFlowSync(ctx context.Context, f *Flow) error {
 }
 
 // flowColumns is the list of columns selected in flow queries. http_version
-// (USK-788) is appended at the tail so any future flow column added by
-// migrations stays grouped with this scan/projection list.
-const flowColumns = `id, stream_id, sequence, direction, timestamp, headers, body, raw_bytes, body_truncated, method, url, status_code, metadata, trailers, http_version`
+// (USK-788) and wire_level (USK-889) are appended at the tail so any future
+// flow column added by migrations stays grouped with this scan/projection
+// list.
+const flowColumns = `id, stream_id, sequence, direction, timestamp, headers, body, raw_bytes, body_truncated, method, url, status_code, metadata, trailers, http_version, wire_level`
 
 // GetFlow retrieves a flow by ID.
 func (s *SQLiteStore) GetFlow(ctx context.Context, id string) (*Flow, error) {
@@ -819,7 +832,8 @@ func (s *SQLiteStore) GetFlow(ctx context.Context, id string) (*Flow, error) {
 	return scanFlow(row)
 }
 
-// GetFlows retrieves flows for a stream, optionally filtered by direction.
+// GetFlows retrieves flows for a stream, optionally filtered by direction
+// or wire_level (USK-889).
 func (s *SQLiteStore) GetFlows(ctx context.Context, streamID string, opts FlowListOptions) ([]*Flow, error) {
 	query := "SELECT " + flowColumns + " FROM flows WHERE stream_id = ?"
 	args := []interface{}{streamID}
@@ -827,6 +841,12 @@ func (s *SQLiteStore) GetFlows(ctx context.Context, streamID string, opts FlowLi
 	if opts.Direction != "" {
 		query += " AND direction = ?"
 		args = append(args, opts.Direction)
+	}
+	if opts.WireLevel != "" {
+		// USK-889: wire_level discriminator. Empty value disables the
+		// predicate (caller wants every layer of recording for the stream).
+		query += " AND wire_level = ?"
+		args = append(args, opts.WireLevel)
 	}
 
 	query += " ORDER BY sequence ASC"
@@ -1063,6 +1083,7 @@ func scanFlow(row scannable) (*Flow, error) {
 		metadataStr   string
 		trailersStr   string
 		httpVersion   string
+		wireLevel     string
 	)
 
 	err := row.Scan(
@@ -1081,6 +1102,7 @@ func scanFlow(row scannable) (*Flow, error) {
 		&metadataStr,
 		&trailersStr,
 		&httpVersion,
+		&wireLevel,
 	)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -1117,6 +1139,15 @@ func scanFlow(row scannable) (*Flow, error) {
 	f.Timestamp = ts
 	f.BodyTruncated = bodyTruncated != 0
 	f.HTTPVersion = httpVersion
+	// USK-889: backstop empty wire_level reads to the semantic default.
+	// schemaV14 stamps DEFAULT 'semantic' on the column so backfilled rows
+	// always read as 'semantic'; this guard handles a future migration that
+	// might leave the column blank without going through the column default.
+	if wireLevel == "" {
+		f.WireLevel = WireLevelSemantic
+	} else {
+		f.WireLevel = wireLevel
+	}
 
 	return &f, nil
 }

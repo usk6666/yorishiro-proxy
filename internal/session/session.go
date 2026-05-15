@@ -1043,15 +1043,32 @@ func runUpgradeWSOverH2(
 	if err != nil {
 		return err
 	}
-	cR, cW, cClose, uR, uW, uClose, err := detachBothSides(clientH2, upstreamH2, clientStreamID, upstreamStreamID)
-	if err != nil {
-		return err
-	}
 
 	// Stable session-scope identifier — reuse the client channel's
 	// envelope StreamID (a UUID) so post-swap flows correlate with the
 	// pre-swap CONNECT request and 2xx response in flow records.
 	sessionStreamID := clientCh.StreamID()
+
+	// USK-889: build per-direction frame-record callbacks for the
+	// WS-over-h2 detach. The record-only Pipeline is derived from p by
+	// stripping every policy / transform / plugin Step so only the scope
+	// gates + RecordStep survive (design review Q14). WSOverH2 is
+	// symmetric (RFC 8441 full-duplex) so both client- and upstream-side
+	// detach calls install a callback; the direction is stamped on each
+	// envelope at the callback site so the recorder differentiates send
+	// vs receive frame rows.
+	recPipeline := h2FrameRecordPipeline(p)
+	frameFlowCtx := h2FrameFlowContext(upgradeReq, clientCh)
+	clientFrameCB := h2FrameRecordCallback(ctx, recPipeline, sessionStreamID, envelope.Send, frameFlowCtx)
+	upstreamFrameCB := h2FrameRecordCallback(ctx, recPipeline, sessionStreamID, envelope.Receive, frameFlowCtx)
+
+	cR, cW, cClose, uR, uW, uClose, err := detachBothSides(
+		clientH2, upstreamH2, clientStreamID, upstreamStreamID,
+		clientFrameCB, upstreamFrameCB,
+	)
+	if err != nil {
+		return err
+	}
 
 	// Sequence 0 on the post-swap StreamID is already occupied by the
 	// pre-swap CONNECT request (Send) and 2xx response (Receive) flow
@@ -1438,16 +1455,33 @@ func h2StreamIDsForUpgrade(clientCh, upstreamCh layer.Channel) (uint32, uint32, 
 // detachBothSides peels per-stream framing on both Layers; rolls back
 // the client-side detach if the upstream-side fails, so the wire is not
 // left in an inconsistent state.
-func detachBothSides(clientH2, upstreamH2 *http2.Layer, clientStreamID, upstreamStreamID uint32) (
+//
+// USK-889: clientFrameCB and upstreamFrameCB are optional frame-record
+// callbacks installed via http2.WithFrameRecordCallback. Pass nil for
+// either side to suppress frame recording on that direction (today both
+// callers pass non-nil for WS-over-h2 symmetric recording).
+func detachBothSides(
+	clientH2, upstreamH2 *http2.Layer,
+	clientStreamID, upstreamStreamID uint32,
+	clientFrameCB, upstreamFrameCB func(*envelope.Envelope),
+) (
 	io.ReadCloser, io.WriteCloser, func() error,
 	io.ReadCloser, io.WriteCloser, func() error,
 	error,
 ) {
-	cR, cW, cClose, err := clientH2.DetachStream(clientStreamID)
+	var clientOpts []http2.DetachOption
+	if clientFrameCB != nil {
+		clientOpts = append(clientOpts, http2.WithFrameRecordCallback(clientFrameCB))
+	}
+	cR, cW, cClose, err := clientH2.DetachStream(clientStreamID, clientOpts...)
 	if err != nil {
 		return nil, nil, nil, nil, nil, nil, fmt.Errorf("session: detach client h2 stream %d: %w", clientStreamID, err)
 	}
-	uR, uW, uClose, err := upstreamH2.DetachStream(upstreamStreamID)
+	var upstreamOpts []http2.DetachOption
+	if upstreamFrameCB != nil {
+		upstreamOpts = append(upstreamOpts, http2.WithFrameRecordCallback(upstreamFrameCB))
+	}
+	uR, uW, uClose, err := upstreamH2.DetachStream(upstreamStreamID, upstreamOpts...)
 	if err != nil {
 		_ = cClose()
 		return nil, nil, nil, nil, nil, nil, fmt.Errorf("session: detach upstream h2 stream %d: %w", upstreamStreamID, err)
@@ -1856,11 +1890,18 @@ func runUpgradeSSEOverH2(
 		return err
 	}
 
+	// USK-889: build the upstream-only frame-record callback before the
+	// detach call so the H2 channel can install it via the
+	// WithFrameRecordCallback option. SSE is half-duplex (RFC 8895 §6),
+	// so we only install on the upstream side; the client-side detach
+	// below is for the writer only and installs no callback.
+	upstreamFrameCB := sseOverH2UpstreamFrameRecordCB(ctx, p, firstResp, upstreamCh)
+
 	// Detach the upstream-side per-stream byte reader. END_STREAM →
 	// io.EOF on the reader; RST_STREAM → wrapped *layer.StreamError.
 	// The writer side is unused (SSE is server→client) but the closer
 	// must run on terminal state.
-	uR, _, uClose, err := upstreamH2.DetachStream(upstreamStreamID)
+	uR, _, uClose, err := upstreamH2.DetachStream(upstreamStreamID, sseDetachOptions(upstreamFrameCB)...)
 	if err != nil {
 		return fmt.Errorf("session: detach upstream h2 stream %d (sse): %w", upstreamStreamID, err)
 	}
@@ -1872,6 +1913,12 @@ func runUpgradeSSEOverH2(
 	// client side. The multiplex isolation rule lives in
 	// http2.Layer.DetachStream itself, so sibling streams are
 	// unaffected. USK-888.
+	//
+	// USK-889 note: no frame-record callback is installed on the
+	// client side; SSE is half-duplex (server→client). The proxy never
+	// observes client→server DATA frames here, so a callback would
+	// never fire even if installed. The asymmetry is documented inline
+	// for any future reader contemplating "symmetrising" the path.
 	cR, cW, cClose, err := clientH2.DetachStream(clientStreamID)
 	if err != nil {
 		return fmt.Errorf("session: detach client h2 stream %d (sse): %w", clientStreamID, err)

@@ -306,6 +306,7 @@ func exportToFlow(ef *ExportFlow) (*Flow, error) {
 		Method:        ef.Method,
 		StatusCode:    ef.StatusCode,
 		HTTPVersion:   ef.HTTPVersion,
+		WireLevel:     ef.WireLevel,
 		Metadata:      ef.Metadata,
 	}
 

@@ -358,6 +358,69 @@ ALTER TABLE flows ADD COLUMN http_version TEXT NOT NULL DEFAULT '';
 CREATE INDEX IF NOT EXISTS idx_flows_http_version ON flows(http_version);
 `
 
+// schemaV14 adds the wire_level column to flows (USK-889). Discriminates
+// between semantic-event envelopes (the canonical L7 view: HTTPMessage,
+// WSMessage, SSEMessage, GRPCStartMessage, ...) and frame-level envelopes
+// recorded as a per-stream sub-stack overlay (currently H2 DATA frames on
+// the WS-over-h2 / SSE-over-h2 detach paths). Frame-level rows share the
+// parent semantic StreamID but carry their own per-direction Sequence
+// scoped to (StreamID, wire_level=h2-frame).
+//
+// The UNIQUE constraint is widened from (stream_id, sequence, direction,
+// variant) to (stream_id, sequence, direction, variant, wire_level) so a
+// frame envelope can coexist with the semantic envelope it overlays
+// without colliding on the sequence space.
+//
+// Canonical values: 'semantic' (default; existing rows backfill via the
+// column default) and 'h2-frame'. The v1 set is intentionally a two-value
+// closed enumeration; future wire_level values (ws-frame, sse-chunk,
+// grpc-lpm-frame, ...) are scoped to follow-up Issues.
+//
+// SQLite < 3.35.0 has no DROP COLUMN, so we follow the V11 recreate-and-
+// swap pattern: copy rows from flows → flows_new with `wire_level =
+// 'semantic'` for backfilled rows, then drop the old table and rename.
+// All flows indexes are recreated on the new table.
+const schemaV14 = `
+-- Recreate flows table with the wire_level column added to UNIQUE.
+CREATE TABLE flows_new (
+	id              TEXT PRIMARY KEY,
+	stream_id       TEXT NOT NULL REFERENCES streams(id) ON DELETE CASCADE,
+	sequence        INTEGER NOT NULL,
+	direction       TEXT NOT NULL,
+	variant         TEXT NOT NULL DEFAULT '',
+	wire_level      TEXT NOT NULL DEFAULT 'semantic',
+	timestamp       DATETIME NOT NULL,
+	headers         TEXT NOT NULL DEFAULT '{}',
+	body            BLOB,
+	raw_bytes       BLOB,
+	body_truncated  INTEGER NOT NULL DEFAULT 0,
+	method          TEXT NOT NULL DEFAULT '',
+	url             TEXT NOT NULL DEFAULT '',
+	status_code     INTEGER NOT NULL DEFAULT 0,
+	metadata        TEXT NOT NULL DEFAULT '{}',
+	trailers        TEXT NOT NULL DEFAULT '{}',
+	http_version    TEXT NOT NULL DEFAULT '',
+	UNIQUE(stream_id, sequence, direction, variant, wire_level)
+);
+
+-- Backfill: every pre-V14 row is a semantic envelope by definition (the
+-- only wire_level value that existed before V14 introduced the column).
+INSERT INTO flows_new (id, stream_id, sequence, direction, variant, wire_level, timestamp, headers, body, raw_bytes, body_truncated, method, url, status_code, metadata, trailers, http_version)
+SELECT id, stream_id, sequence, direction, variant, 'semantic', timestamp, headers, body, raw_bytes, body_truncated, method, url, status_code, metadata, trailers, http_version
+FROM flows;
+
+DROP TABLE flows;
+ALTER TABLE flows_new RENAME TO flows;
+
+CREATE INDEX IF NOT EXISTS idx_flows_stream_id ON flows(stream_id);
+CREATE INDEX IF NOT EXISTS idx_flows_direction ON flows(direction);
+CREATE INDEX IF NOT EXISTS idx_flows_method ON flows(method);
+CREATE INDEX IF NOT EXISTS idx_flows_url ON flows(url);
+CREATE INDEX IF NOT EXISTS idx_flows_status_code ON flows(status_code);
+CREATE INDEX IF NOT EXISTS idx_flows_http_version ON flows(http_version);
+CREATE INDEX IF NOT EXISTS idx_flows_wire_level ON flows(wire_level);
+`
+
 var migrations = map[int]string{
 	1:  schemaV1,
 	2:  schemaV2,
@@ -372,6 +435,7 @@ var migrations = map[int]string{
 	11: schemaV11,
 	12: schemaV12,
 	13: schemaV13,
+	14: schemaV14,
 }
 
 func migrate(ctx context.Context, db *sql.DB) error {
@@ -404,7 +468,10 @@ func migrate(ctx context.Context, db *sql.DB) error {
 		// V11 also works without the toggle because no other table has an FK
 		// pointing to flows; we keep the toggle anyway to remain symmetric
 		// with V8 and to be safe if future schema gains such a reference.)
-		needsFKOff := v == 7 || v == 8 || v == 11
+		// V14 also recreates the flows table to widen the UNIQUE constraint
+		// for the new wire_level column (USK-889), following the same recreate
+		// -and-swap pattern as V11.
+		needsFKOff := v == 7 || v == 8 || v == 11 || v == 14
 		if needsFKOff {
 			if _, err := db.ExecContext(ctx, "PRAGMA foreign_keys = OFF"); err != nil {
 				return fmt.Errorf("disable foreign keys for migration v%d: %w", v, err)

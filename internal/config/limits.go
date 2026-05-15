@@ -100,6 +100,23 @@ const (
 	// connector.BuildConfig.GRPCMaxMessagesPerStream (USK-802).
 	MaxGRPCMessagesPerStream = 10000
 
+	// MaxHTTP2FrameRecordsPerStream limits the number of frame-level
+	// envelopes (wire_level="h2-frame", typed *envelope.H2DataEvent)
+	// recorded per stream on the WS-over-h2 / SSE-over-h2 detach paths
+	// (USK-889). Once exceeded, the frame-record callback is suppressed
+	// for further DATA frames on the affected (stream_id, direction);
+	// wire forwarding is unaffected because the callback runs inside
+	// runDetachDrain BEFORE pipe.Write and the suppression skips only the
+	// RecordStep dispatch, not the io.Pipe relay.
+	//
+	// Default matches MaxGRPCMessagesPerStream so the operator's mental
+	// model "long-running streaming protocols cap at ~10k events" stays
+	// uniform across gRPC, SSE, and frame-level recording.
+	//
+	// Wired via internal/pipeline/RecordStep.WithHTTP2FrameMaxPerStream
+	// (USK-889).
+	MaxHTTP2FrameRecordsPerStream = 10000
+
 	// MaxWebSocketFrameSize limits the maximum payload size of a single
 	// WebSocket frame. WebSocket frames can theoretically be up to 2^63
 	// bytes per RFC 6455; this constant caps them at 16 MiB to prevent

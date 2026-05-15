@@ -306,6 +306,27 @@ type EnvelopeContext struct {
 	// shallow Context-copy inside Envelope.Clone, matching every other
 	// EnvelopeContext field.
 	Synthetic bool
+
+	// WireLevel discriminates the envelope's recording layer (USK-889).
+	// Empty string means the canonical L7 "semantic" view (RecordStep
+	// projects this as flow.WireLevelSemantic when persisting). A
+	// non-empty value marks a frame-level overlay envelope produced by
+	// a per-stream sub-stack (RFC-001 §3.4.1); the v1 implementation
+	// only emits "h2-frame" (flow.WireLevelH2Frame) for H2 DATA frames
+	// recorded under the WS-over-h2 / SSE-over-h2 detach paths.
+	//
+	// RecordStep reads this field to (a) project it into Flow.WireLevel
+	// before persisting and (b) gate the frame-only per-stream record
+	// cap (WithHTTP2FrameMaxPerStream). Plugin / Intercept / Transform
+	// Steps do NOT inspect this field — the record-only Pipeline that
+	// the orchestrator constructs via p.Without(...) excludes those
+	// Steps entirely, so the gating happens at the chain composition
+	// layer, not via runtime branching.
+	//
+	// Propagated by the shallow Context-copy inside Envelope.Clone like
+	// every other EnvelopeContext field; defaults to the empty string
+	// (zero value).
+	WireLevel string
 }
 
 // TLSSnapshot captures TLS connection metadata observed during handshake.

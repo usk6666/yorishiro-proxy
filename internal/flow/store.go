@@ -257,4 +257,12 @@ type StreamListOptions struct {
 type FlowListOptions struct {
 	// Direction filters flows by direction ("send" or "receive").
 	Direction string
+	// WireLevel filters flows by the schemaV14 wire_level column
+	// (USK-889). Canonical values: WireLevelSemantic, WireLevelH2Frame.
+	// Empty string disables the predicate and returns rows of every
+	// wire_level (preserving backward compatibility with pre-USK-889
+	// callers). The match runs as an exact equality on the column; the
+	// schemaV14 column default ('semantic') ensures pre-V14 rows match
+	// the WireLevelSemantic filter without explicit backfill.
+	WireLevel string
 }

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/connector"
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
@@ -207,6 +208,16 @@ type Deps struct {
 	// RecordStep persists per stream (USK-802). Zero uses the RecordStep
 	// default (config.MaxSSEEventsPerStream). Wire forwarding is unaffected.
 	RecordSSEMaxEventsPerStream int
+
+	// RecordHTTP2FrameMaxPerStream caps the number of frame-level
+	// envelopes (WireLevel=h2-frame, H2 DATA frames recorded as a
+	// per-stream sub-stack overlay under WS-over-h2 / SSE-over-h2)
+	// RecordStep persists per stream (USK-889). Zero uses
+	// config.MaxHTTP2FrameRecordsPerStream. Wire forwarding is
+	// unaffected — the frame-record callback fires BEFORE pipe.Write
+	// inside http2.runDetachDrain, and the cap suppresses only the
+	// downstream RecordStep dispatch.
+	RecordHTTP2FrameMaxPerStream int
 
 	// --- Optional manager-level state (consumed by Manager wiring) ---
 
@@ -522,6 +533,15 @@ func buildPipeline(deps Deps, encoders *pipeline.WireEncoderRegistry, logger *sl
 	if deps.RecordSSEMaxEventsPerStream > 0 {
 		recordOpts = append(recordOpts, pipeline.WithSSEMaxEventsPerStream(deps.RecordSSEMaxEventsPerStream))
 	}
+	// USK-889: per-stream cap for h2 frame envelopes (WS-over-h2 /
+	// SSE-over-h2 detach paths). Zero falls back to the package default
+	// so synthetic test stacks that omit the field still observe a
+	// positive cap consistent with the gRPC / SSE pattern.
+	h2FrameCap := deps.RecordHTTP2FrameMaxPerStream
+	if h2FrameCap <= 0 {
+		h2FrameCap = config.MaxHTTP2FrameRecordsPerStream
+	}
+	recordOpts = append(recordOpts, pipeline.WithHTTP2FrameMaxPerStream(h2FrameCap))
 
 	safetyStep := pipeline.NewSafetyStep(deps.HTTPSafetyEngine, deps.WSSafetyEngine, deps.GRPCSafetyEngine, logger)
 	return pipeline.New(
