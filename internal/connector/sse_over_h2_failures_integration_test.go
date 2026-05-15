@@ -11,6 +11,7 @@ import (
 	"net"
 	gohttp "net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -43,8 +44,8 @@ func TestFullListener_CONNECT_SSE_OverH2_BinaryBody(t *testing.T) {
 	proxyAddr, store, wg := startFullListenerProxyWithH2(t, ctx)
 	wg.Add(1)
 
-	tr := newTestSSEh2Transport(proxyAddr)
-	defer tr.CloseIdleConnections()
+	tr, closeAll := newTestSSEh2Transport(proxyAddr, upstreamAddr)
+	defer closeAll()
 
 	url := fmt.Sprintf("https://%s/binary", upstreamAddr)
 	req, _ := gohttp.NewRequest("GET", url, nil)
@@ -59,6 +60,10 @@ func TestFullListener_CONNECT_SSE_OverH2_BinaryBody(t *testing.T) {
 		_, _ = io.Copy(io.Discard, resp.Body)
 		_ = resp.Body.Close()
 	}
+	// Force-close the underlying h2 conn so the proxy's onHTTP2Stack
+	// observes a deterministic remote close and fires wg.Done() before
+	// waitSessionDone's 15 s deadline.
+	closeAll()
 	waitSessionDone(t, wg)
 
 	// At least one Stream survived. (Protocol may be sse OR http
@@ -82,8 +87,8 @@ func TestFullListener_CONNECT_SSE_OverH2_UpstreamGOAWAY(t *testing.T) {
 	proxyAddr, store, wg := startFullListenerProxyWithH2(t, ctx)
 	wg.Add(1)
 
-	tr := newTestSSEh2Transport(proxyAddr)
-	defer tr.CloseIdleConnections()
+	tr, closeAll := newTestSSEh2Transport(proxyAddr, upstreamAddr)
+	defer closeAll()
 
 	url := fmt.Sprintf("https://%s/events", upstreamAddr)
 	req, _ := gohttp.NewRequest("GET", url, nil)
@@ -94,6 +99,10 @@ func TestFullListener_CONNECT_SSE_OverH2_UpstreamGOAWAY(t *testing.T) {
 		_, _ = io.Copy(io.Discard, resp.Body)
 		_ = resp.Body.Close()
 	}
+	// Force-close the underlying h2 conn so the proxy's onHTTP2Stack
+	// observes a deterministic remote close and fires wg.Done() before
+	// waitSessionDone's 15 s deadline.
+	closeAll()
 	waitSessionDone(t, wg)
 
 	streams := store.getStreams()
@@ -174,9 +183,23 @@ func startSSEOverH2GOAWAYUpstream(t *testing.T) (string, func()) {
 }
 
 // newTestSSEh2Transport creates an h2 Transport that tunnels through the
-// proxy via CONNECT. Shared with the smoke-tier file's driver.
-func newTestSSEh2Transport(proxyAddr string) *xhttp2.Transport {
-	return &xhttp2.Transport{
+// proxy via CONNECT. Returns the Transport and a closeAll func that
+// force-closes every underlying conn DialTLS handed to the h2 pool.
+//
+// Force-close is required (not just tr.CloseIdleConnections) because the
+// xhttp2 Transport's "is this conn idle?" bookkeeping races with the
+// per-stream response readers under CI load: the conn may not be back in
+// the pool by the time CloseIdleConnections runs, so the proxy's
+// clientL.Channels() never observes the remote close and the
+// onHTTP2Stack callback hangs until ctx timeout. Closing the underlying
+// conn directly is deterministic and mirrors the established pattern in
+// sse_over_h2_sibling_integration_test.go.
+func newTestSSEh2Transport(proxyAddr, upstreamAddr string) (*xhttp2.Transport, func()) {
+	var (
+		mu    sync.Mutex
+		conns []net.Conn
+	)
+	tr := &xhttp2.Transport{
 		TLSClientConfig: &tls.Config{
 			InsecureSkipVerify: true, //nolint:gosec // test
 			NextProtos:         []string{"h2"},
@@ -188,7 +211,7 @@ func newTestSSEh2Transport(proxyAddr string) *xhttp2.Transport {
 			}
 			// Best-effort CONNECT; the failure-mode tests are
 			// tolerant of upstream addr lookup.
-			req := fmt.Sprintf("CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", proxyAddr, proxyAddr)
+			req := fmt.Sprintf("CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", upstreamAddr, upstreamAddr)
 			if _, err := raw.Write([]byte(req)); err != nil {
 				_ = raw.Close()
 				return nil, err
@@ -208,9 +231,21 @@ func newTestSSEh2Transport(proxyAddr string) *xhttp2.Transport {
 				_ = raw.Close()
 				return nil, err
 			}
+			mu.Lock()
+			conns = append(conns, tlsConn)
+			mu.Unlock()
 			return tlsConn, nil
 		},
 	}
+	closeAll := func() {
+		tr.CloseIdleConnections()
+		mu.Lock()
+		for _, c := range conns {
+			_ = c.Close()
+		}
+		mu.Unlock()
+	}
+	return tr, closeAll
 }
 
 // Suppress unused-import warning when only one failure-mode test in the
