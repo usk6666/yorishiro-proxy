@@ -141,3 +141,156 @@ func TestRecordStep_H2FrameCapLazyCache(t *testing.T) {
 		}
 	})
 }
+
+// USK-895 unit tests for the h1-chunk wire_level and the switch-on-
+// WireLevel refactor of recordCapForEnvelope.
+
+// h1ChunkEnvelope builds a minimal h1-chunk envelope shaped like the
+// envelopes produced by session.h1ChunkRecordCallback on the
+// SSE-over-h1-chunked detach path. Message is intentionally nil — chunk
+// envelopes have no L7 structured view by design.
+func h1ChunkEnvelope(streamID string, seq int) *envelope.Envelope {
+	return &envelope.Envelope{
+		StreamID:  streamID,
+		FlowID:    "chunk-" + strconv.Itoa(seq),
+		Direction: envelope.Receive,
+		Sequence:  seq,
+		Protocol:  envelope.ProtocolHTTP,
+		Raw:       []byte("5\r\nhello\r\n"),
+		Context:   envelope.EnvelopeContext{WireLevel: flow.WireLevelHTTP1Chunk},
+	}
+}
+
+// TestRecordStep_H1ChunkWireLevelProjected mirrors the USK-889 H2 frame
+// projection test for USK-895: h1-chunk envelopes must surface their
+// WireLevel onto Flow.WireLevel so the schemaV14 column distinguishes
+// them from semantic and h2-frame rows.
+func TestRecordStep_H1ChunkWireLevelProjected(t *testing.T) {
+	w := &mockWriter{}
+	step := NewRecordStep(w, nil)
+	ctx := context.Background()
+	step.Process(ctx, h1ChunkEnvelope("s1", 1))
+	if len(w.flows) != 1 {
+		t.Fatalf("flows recorded = %d, want 1", len(w.flows))
+	}
+	if got := w.flows[0].WireLevel; got != flow.WireLevelHTTP1Chunk {
+		t.Errorf("Flow.WireLevel = %q, want %q", got, flow.WireLevelHTTP1Chunk)
+	}
+}
+
+// TestRecordStep_H1ChunkPerStreamCap verifies the USK-895 cap: when
+// WithHTTP1ChunkMaxPerStream(n) is supplied, chunk envelopes past the
+// nth on a single (stream_id) tuple are dropped and AppendTags
+// ["records_truncated"] is stamped exactly once.
+func TestRecordStep_H1ChunkPerStreamCap(t *testing.T) {
+	w := &mockWriter{}
+	step := NewRecordStep(w, nil, WithHTTP1ChunkMaxPerStream(2))
+	ctx := context.Background()
+	for i := 0; i < 5; i++ {
+		step.Process(ctx, h1ChunkEnvelope("s1", i))
+	}
+	if len(w.flows) != 2 {
+		t.Errorf("flows recorded = %d, want 2 (cap)", len(w.flows))
+	}
+	tagUpdates := 0
+	for _, u := range w.updates {
+		if u.streamID == "s1" && u.update.AppendTags["records_truncated"] == "per_stream_cap_reached" {
+			tagUpdates++
+		}
+	}
+	if tagUpdates != 1 {
+		t.Errorf("AppendTags[records_truncated] updates = %d, want 1", tagUpdates)
+	}
+}
+
+// TestRecordStep_H1ChunkCapIsolation verifies the per-WireLevel cap
+// separation: WithHTTP1ChunkMaxPerStream gates only h1-chunk envelopes,
+// not h2-frame or semantic. Cross-pollution would silently break either
+// the SSE-over-h1-chunked path (under-recording) or the SSE-over-h2
+// path (over-recording).
+func TestRecordStep_H1ChunkCapIsolation(t *testing.T) {
+	w := &mockWriter{}
+	// h1-chunk capped at 1; h2-frame uncapped (zero → unlimited);
+	// semantic uncapped (no SSE/gRPC envelopes in this test).
+	step := NewRecordStep(w, nil,
+		WithHTTP1ChunkMaxPerStream(1),
+	)
+	ctx := context.Background()
+	for i := 0; i < 3; i++ {
+		step.Process(ctx, h1ChunkEnvelope("s1", i))
+	}
+	for i := 10; i < 13; i++ {
+		step.Process(ctx, h2FrameEnvelope("s1", i))
+	}
+	chunkCount, frameCount := 0, 0
+	for _, fl := range w.flows {
+		switch fl.WireLevel {
+		case flow.WireLevelHTTP1Chunk:
+			chunkCount++
+		case flow.WireLevelH2Frame:
+			frameCount++
+		}
+	}
+	if chunkCount != 1 {
+		t.Errorf("h1-chunk flows = %d, want 1 (cap)", chunkCount)
+	}
+	// h2-frame is uncapped here (its cap field is zero), so all 3 pass through.
+	if frameCount != 3 {
+		t.Errorf("h2-frame flows = %d, want 3 (uncapped)", frameCount)
+	}
+}
+
+// TestRecordStep_UnknownWireLevelNotGated verifies the switch refactor's
+// default arm: an unknown / future non-semantic wire_level value falls
+// through to cap=0 (do not gate). This protects against a future
+// addition silently inheriting one of the existing caps when it should
+// not.
+func TestRecordStep_UnknownWireLevelNotGated(t *testing.T) {
+	w := &mockWriter{}
+	// Caps set on h2-frame and h1-chunk; an envelope with a different
+	// non-semantic WireLevel must NOT inherit either cap.
+	step := NewRecordStep(w, nil,
+		WithHTTP2FrameMaxPerStream(1),
+		WithHTTP1ChunkMaxPerStream(1),
+	)
+	ctx := context.Background()
+	for i := 0; i < 5; i++ {
+		step.Process(ctx, &envelope.Envelope{
+			StreamID:  "s1",
+			FlowID:    "future-" + strconv.Itoa(i),
+			Direction: envelope.Receive,
+			Sequence:  i,
+			Protocol:  envelope.ProtocolHTTP,
+			Raw:       []byte("future"),
+			Context:   envelope.EnvelopeContext{WireLevel: "future-unknown-discriminator"},
+		})
+	}
+	// All 5 must survive — the unknown WireLevel is not gated.
+	count := 0
+	for _, fl := range w.flows {
+		if fl.WireLevel == "future-unknown-discriminator" {
+			count++
+		}
+	}
+	if count != 5 {
+		t.Errorf("future-unknown-discriminator flows = %d, want 5 (not gated)", count)
+	}
+}
+
+// TestRecordStep_H1ChunkCapLazyCache verifies the lazy-allocation
+// contract analogous to the USK-889 frame test: a positive
+// WithHTTP1ChunkMaxPerStream allocates countCache.
+func TestRecordStep_H1ChunkCapLazyCache(t *testing.T) {
+	t.Run("h1_chunk_option_allocates_cache", func(t *testing.T) {
+		s := NewRecordStep(&mockWriter{}, nil, WithHTTP1ChunkMaxPerStream(10))
+		if s.countCache == nil {
+			t.Error("countCache nil after WithHTTP1ChunkMaxPerStream(>0)")
+		}
+	})
+	t.Run("zero_value_skips_allocation", func(t *testing.T) {
+		s := NewRecordStep(&mockWriter{}, nil, WithHTTP1ChunkMaxPerStream(0))
+		if s.countCache != nil {
+			t.Error("countCache allocated when WithHTTP1ChunkMaxPerStream(0)")
+		}
+	})
+}

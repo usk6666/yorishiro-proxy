@@ -1597,10 +1597,55 @@ func runUpgradeSSE(
 		return fmt.Errorf("session: sse upgrade requires *http1.Layer client topmost, got %T", clientTop)
 	}
 
+	if firstResp == nil {
+		// Test path: synthesize a minimal placeholder. Production reaches
+		// here via UpgradeStep so firstResp is always non-nil there.
+		firstResp = &envelope.Envelope{
+			StreamID:  upstreamCh.StreamID(),
+			Direction: envelope.Receive,
+			Protocol:  envelope.ProtocolHTTP,
+			Message: &envelope.HTTPMessage{
+				Status:  200,
+				Headers: []envelope.KeyValue{{Name: "Content-Type", Value: "text/event-stream"}},
+			},
+		}
+	}
+	// Detect chunked TE from the pre-swap response headers so the
+	// event-relay loop knows whether to re-wrap each event in chunked
+	// framing for the client wire AND so we know whether to install the
+	// USK-895 chunk-record callback (non-chunked SSE has no chunks to
+	// record; the callback would be a no-op).
+	chunkedTE := sse.IsHTTPMessageChunked(firstResp)
+
+	// USK-895 chunk-record callback: when the upstream SSE response uses
+	// Transfer-Encoding: chunked, install a per-chunk record callback on
+	// the streaming-body detach so the chunk-size line, chunk-extension,
+	// and trailing CRLF surface as independent wire_level=h1-chunk
+	// envelopes. Closes the live diagnostic gap that hid USK-883.
+	var detachOpts []http1.StreamingBodyOption
+	if chunkedTE {
+		recPipeline := h2FrameRecordPipeline(p)
+		// firstResp.Context carries the connection-scope identity (ConnID,
+		// TLS snapshot, ClientAddr) the chunk envelopes need so scope
+		// gates evaluate against the same Context as the semantic
+		// envelopes recorded on the main Pipeline.
+		chunkFlowCtx := firstResp.Context
+		// Defensive clear: the WireLevel discriminator must start at zero
+		// so the callback's stamp is the source of truth. The pre-swap
+		// firstResp is a semantic envelope; any leakage here is upstream
+		// state we want to discard.
+		chunkFlowCtx.WireLevel = ""
+		if cb := h1ChunkRecordCallback(ctx, recPipeline, firstResp.StreamID, chunkFlowCtx); cb != nil {
+			// MaxRawCaptureSize is honored by the parser; passing 0
+			// selects the package default.
+			detachOpts = append(detachOpts, http1.WithChunkRecordCallback(cb, 0))
+		}
+	}
+
 	// Streaming-body detach: the http1 channel suppressed body draining
 	// for the SSE response (predicate matched), so the body is still
 	// pending on the wire. Hand it to sse.Wrap.
-	upBody, err := upstreamHTTP.DetachStreamingBody()
+	upBody, err := upstreamHTTP.DetachStreamingBody(detachOpts...)
 	if err != nil {
 		return fmt.Errorf("session: detach upstream http1 streaming body (sse): %w", err)
 	}
@@ -1619,24 +1664,6 @@ func runUpgradeSSE(
 	}
 	_ = clientHTTP.Close()
 	defer func() { _ = clientCloser.Close() }()
-
-	if firstResp == nil {
-		// Test path: synthesize a minimal placeholder. Production reaches
-		// here via UpgradeStep so firstResp is always non-nil there.
-		firstResp = &envelope.Envelope{
-			StreamID:  upstreamCh.StreamID(),
-			Direction: envelope.Receive,
-			Protocol:  envelope.ProtocolHTTP,
-			Message: &envelope.HTTPMessage{
-				Status:  200,
-				Headers: []envelope.KeyValue{{Name: "Content-Type", Value: "text/event-stream"}},
-			},
-		}
-	}
-	// Detect chunked TE from the pre-swap response headers so the
-	// event-relay loop knows whether to re-wrap each event in chunked
-	// framing for the client wire.
-	chunkedTE := sse.IsHTTPMessageChunked(firstResp)
 
 	// Install the SSE Channel as the upstream topmost. We construct the
 	// Channel so the recorded Stream/Flow lineage still flows through

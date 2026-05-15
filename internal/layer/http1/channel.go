@@ -211,7 +211,14 @@ func (c *channel) detachStream() (io.Reader, io.Writer, io.Closer, error) {
 // the swap orchestrator. Pre-condition: the most recent Channel.Next()
 // emitted a response Envelope whose body draining was suppressed by the
 // configured [WithStreamingResponseDetect] predicate.
-func (c *channel) detachStreamingBody() (io.ReadCloser, error) {
+//
+// opts carries per-detach configuration (USK-895). When opts.chunkRecordCB
+// is non-nil AND the streaming body reader satisfies parser.ChunkRecordSetter
+// (i.e. the response used Transfer-Encoding: chunked), the callback is
+// installed on the reader so the consumer's reads emit per-chunk callbacks.
+// Non-chunked responses (Content-Length / HTTP/1.0 / Connection: close)
+// silently bypass the option — there are no chunks to record.
+func (c *channel) detachStreamingBody(opts *streamingBodyOptions) (io.ReadCloser, error) {
 	if c.layer == nil {
 		return nil, errors.New("http1: channel has no parent layer")
 	}
@@ -219,6 +226,11 @@ func (c *channel) detachStreamingBody() (io.ReadCloser, error) {
 		return nil, errors.New("http1: no streaming body pending (predicate did not match or channel never read)")
 	}
 	body := c.streamingBody
+	if opts != nil && opts.chunkRecordCB != nil {
+		if setter, ok := body.(parser.ChunkRecordSetter); ok {
+			setter.SetChunkRecordCallback(opts.chunkRecordCB, opts.chunkRecordMaxBytes)
+		}
+	}
 	c.streamingBody = nil
 	c.layer.markDetached()
 	_ = c.layer.conn.SetReadDeadline(time.Time{})

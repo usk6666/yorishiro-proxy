@@ -143,6 +143,16 @@ func IsChunked(headers RawHeaders) bool {
 // disk-spill is configured via EnableRawBodySpill. Truncation flips
 // rawBodyTruncated. The dechunkedReader satisfies RawBodyProvider once the
 // body has been fully drained.
+//
+// USK-895: when a per-chunk record callback is installed (via
+// SetChunkRecordCallback), the reader emits one callback per chunk
+// boundary on the SSE-over-h1-chunked streaming detach path. The callback
+// receives the full chunk wire bytes — chunk-size line (including any
+// chunk-extension and terminating CRLF) + chunk-data + trailing CRLF —
+// captured into chunkBuf during decode. The terminal "0\r\n…\r\n"
+// chunk (with any trailer section) is emitted as its own callback. The
+// callback fires AFTER the chunk has been fully read from the wire so
+// the recorder snapshot reflects the bytes the proxy actually observed.
 type dechunkedReader struct {
 	r                *bufio.Reader
 	remaining        int64 // bytes remaining in the current chunk
@@ -155,6 +165,26 @@ type dechunkedReader struct {
 	// trailers). Read from RawBody() (memory) or RawBodyBuffer() (spilled)
 	// after drain.
 	rawCapture *bodyCaptureSink
+
+	// USK-895 per-chunk record callback.
+	// chunkCallback fires once per chunk boundary with the full chunk wire
+	// bytes accumulated in chunkBuf. nil disables the per-chunk path.
+	chunkCallback func(chunkRaw []byte)
+	// chunkBuf accumulates the current chunk's wire bytes (size-line +
+	// payload + trailing CRLF). Reset between chunks. Only allocated when
+	// chunkCallback is non-nil to keep the no-callback hot path zero-cost.
+	chunkBuf []byte
+	// chunkOverCap, when true, indicates the current chunk's wire size has
+	// exceeded chunkMaxBytes and the callback for THIS chunk will be
+	// suppressed (defensive against a malicious upstream sending a 4 GiB
+	// single chunk — see USK-893 fitness check Principle #5). Reset at the
+	// next chunk boundary.
+	chunkOverCap bool
+	// chunkMaxBytes caps the wire bytes captured for a single chunk-record
+	// callback. Zero means MaxRawCaptureSize at write time. Threaded via
+	// SetChunkRecordCallback; under-cap chunks accumulate verbatim into
+	// chunkBuf; over-cap chunks are dropped with chunkOverCap=true.
+	chunkMaxBytes int64
 }
 
 // newDechunkedReader returns a dechunkedReader bounded by the package-default
@@ -169,6 +199,87 @@ func newDechunkedReader(r *bufio.Reader) *dechunkedReader {
 // MaxRawCaptureSize at write time.
 func newDechunkedReaderWithCap(r *bufio.Reader, memoryCap int64) *dechunkedReader {
 	return &dechunkedReader{r: r, rawCapture: newBodyCaptureSinkWithCap(memoryCap)}
+}
+
+// SetChunkRecordCallback installs the per-chunk record callback (USK-895).
+// The callback fires once per chunk boundary (including the terminal zero-
+// size chunk + trailer section, emitted as its own callback) with the full
+// chunk wire bytes: chunk-size line + chunk-extension + chunk-data +
+// trailing CRLF.
+//
+// maxBytes caps the wire bytes captured for a single chunk-record callback
+// (defensive against a malicious upstream sending an oversized single
+// chunk — Principle #5 / USK-893 fitness check). Zero means the package
+// default (MaxRawCaptureSize). If a chunk's wire bytes exceed maxBytes the
+// callback is skipped for THAT chunk; subsequent under-cap chunks still
+// fire normally.
+//
+// Call before the first Read so the chunkBuf accumulator is populated for
+// every chunk. Calling on a reader that already drained chunks is permitted
+// but only chunks read after the call are observed.
+//
+// Passing a nil cb is equivalent to never having installed the option:
+// the reader behaves identically to the pre-USK-895 contract and the hot
+// path stays zero-cost (chunkBuf is not allocated).
+func (dr *dechunkedReader) SetChunkRecordCallback(cb func(chunkRaw []byte), maxBytes int64) {
+	if dr == nil {
+		return
+	}
+	dr.chunkCallback = cb
+	dr.chunkMaxBytes = maxBytes
+	if cb != nil && dr.chunkBuf == nil {
+		// Reserve a modest initial capacity. Typical SSE chunks are well
+		// under 1 KiB; the grow loop handles the rest. Keeping this small
+		// avoids burning memory for non-callback paths.
+		dr.chunkBuf = make([]byte, 0, 256)
+	}
+}
+
+// captureChunkBytes appends p to chunkBuf observing chunkMaxBytes. When
+// the buffer would exceed the cap the buffer is reset to nil and
+// chunkOverCap is latched so the deferred callback at the chunk boundary
+// is suppressed. Called from readChunkSizeLine, readChunkData, and
+// consumeTrailers under chunkCallback != nil only.
+func (dr *dechunkedReader) captureChunkBytes(p []byte) {
+	if dr.chunkCallback == nil || dr.chunkOverCap || len(p) == 0 {
+		return
+	}
+	cap := dr.chunkMaxBytes
+	if cap <= 0 {
+		cap = MaxRawCaptureSize
+	}
+	if int64(len(dr.chunkBuf))+int64(len(p)) > cap {
+		dr.chunkOverCap = true
+		// Drop the partial buffer — a partial chunk record would mislead
+		// an analyst (they'd see a truncated wire view without explicit
+		// truncation metadata). Skip the chunk record entirely. The full
+		// chunked body still surfaces via the broader rawCapture path
+		// when MaxRawCaptureSize permits.
+		dr.chunkBuf = dr.chunkBuf[:0]
+		return
+	}
+	dr.chunkBuf = append(dr.chunkBuf, p...)
+}
+
+// emitChunkRecord fires the per-chunk record callback (USK-895) with the
+// accumulated chunk wire bytes and resets the buffer for the next chunk.
+// Called at the trailing-CRLF boundary of each chunk (and once after the
+// terminal "0" chunk + trailer section).
+func (dr *dechunkedReader) emitChunkRecord() {
+	if dr.chunkCallback == nil {
+		return
+	}
+	if !dr.chunkOverCap && len(dr.chunkBuf) > 0 {
+		// Defensive copy: the callback runs synchronously but the
+		// recorder may stash the slice on an envelope that outlives this
+		// goroutine's chunkBuf reuse.
+		out := make([]byte, len(dr.chunkBuf))
+		copy(out, dr.chunkBuf)
+		dr.chunkCallback(out)
+	}
+	// Reset for the next chunk regardless of cap-hit / empty.
+	dr.chunkBuf = dr.chunkBuf[:0]
+	dr.chunkOverCap = false
 }
 
 // EnableRawBodySpill installs the disk-spill knobs on the body capture sink.
@@ -258,6 +369,7 @@ func (dr *dechunkedReader) readChunkData(p []byte) (int, error) {
 	dr.remaining -= int64(n)
 	if n > 0 {
 		dr.rawCapture.write(p[:n])
+		dr.captureChunkBytes(p[:n])
 	}
 	if err != nil {
 		dr.err = err
@@ -271,6 +383,13 @@ func (dr *dechunkedReader) readChunkData(p []byte) (int, error) {
 			return n, crlfErr
 		}
 		dr.rawCapture.write(crlf[:])
+		dr.captureChunkBytes(crlf[:])
+		// USK-895: emit the per-chunk record callback at the trailing
+		// CRLF boundary, AFTER the chunk has been fully observed on the
+		// wire. The callback fires synchronously on the consumer's read
+		// goroutine — the contract documented on SetChunkRecordCallback
+		// requires non-blocking.
+		dr.emitChunkRecord()
 	}
 	return n, nil
 }
@@ -288,6 +407,11 @@ func (dr *dechunkedReader) nextChunk() error {
 	if sizeStr == "0" {
 		dr.consumeTrailers()
 		dr.done = true
+		// USK-895: emit the per-chunk record callback for the terminal
+		// "0\r\n…\r\n" chunk (including any trailer section). This is the
+		// boundary an analyst needs to see "the stream closed gracefully"
+		// vs. "the stream was cut off mid-chunk".
+		dr.emitChunkRecord()
 		// Propagate trailer-parse failures (e.g., oversize, malformed section)
 		// to the body reader consumer instead of silently masking them with EOF.
 		if dr.err != nil {
@@ -322,12 +446,14 @@ func (dr *dechunkedReader) readChunkSizeLine() (string, error) {
 		// purposes — analysts see the partial wire bytes via RawBody.
 		if len(line) > 0 {
 			dr.rawCapture.write(line)
+			dr.captureChunkBytes(line)
 		}
 		return "", lineErr
 	}
 	for lineErr == bufio.ErrBufferFull {
 		if len(line) > maxChunkSizeLineLen {
 			dr.rawCapture.write(line[:maxChunkSizeLineLen])
+			dr.captureChunkBytes(line[:maxChunkSizeLineLen])
 			return "", fmt.Errorf("chunk-size line exceeds maximum length %d", maxChunkSizeLineLen)
 		}
 		var extra []byte
@@ -336,10 +462,12 @@ func (dr *dechunkedReader) readChunkSizeLine() (string, error) {
 	}
 	if len(line) > maxChunkSizeLineLen {
 		dr.rawCapture.write(line[:maxChunkSizeLineLen])
+		dr.captureChunkBytes(line[:maxChunkSizeLineLen])
 		return "", fmt.Errorf("chunk-size line exceeds maximum length %d", maxChunkSizeLineLen)
 	}
 
 	dr.rawCapture.write(line)
+	dr.captureChunkBytes(line)
 
 	lineNoEOL := stripLineTerminator(line)
 	sizeStr := string(lineNoEOL)
@@ -363,9 +491,12 @@ func (dr *dechunkedReader) readChunkSizeLine() (string, error) {
 //
 // The trailer section bytes (each line + terminating blank line) are also
 // captured into dr.rawCapture so opaque pass-through send paths re-emit them
-// verbatim alongside the chunk framing.
+// verbatim alongside the chunk framing. USK-895: when a per-chunk record
+// callback is installed, the trailer section also feeds the terminal
+// "0\r\n…\r\n" chunk-record buffer via a tee sink.
 func (dr *dechunkedReader) consumeTrailers() {
-	trailers, anomalies, err := parseHeaderLines(dr.r, dr.rawCapture, maxHeaderSize)
+	sink := dr.trailerCaptureSink()
+	trailers, anomalies, err := parseHeaderLines(dr.r, sink, maxHeaderSize)
 	if err != nil {
 		// Preserve whatever was successfully parsed for diagnostics even when
 		// the section overflows or a read fails.
@@ -377,6 +508,40 @@ func (dr *dechunkedReader) consumeTrailers() {
 	anomalies = append(anomalies, scanTrailerAnomalies(trailers)...)
 	dr.trailers = trailers
 	dr.trailerAnomalies = anomalies
+}
+
+// trailerCaptureSink returns the rawSink passed to parseHeaderLines when
+// reading the chunked trailer section. When a chunk-record callback is
+// installed (USK-895) the sink is a tee that writes to both rawCapture
+// (full-body wire bytes) and chunkBuf (terminal chunk-record). Otherwise
+// it is rawCapture directly so the no-callback hot path matches the
+// pre-USK-895 contract exactly.
+func (dr *dechunkedReader) trailerCaptureSink() rawSink {
+	if dr.chunkCallback == nil {
+		return dr.rawCapture
+	}
+	return &teeRawSink{
+		primary:    dr.rawCapture,
+		chunkWrite: dr.captureChunkBytes,
+	}
+}
+
+// teeRawSink is a rawSink that forwards every write to primary and also
+// to chunkWrite. Used by dechunkedReader.trailerCaptureSink so the chunk-
+// record buffer accumulates the trailer section bytes alongside the
+// full-body capture sink.
+type teeRawSink struct {
+	primary    *bodyCaptureSink
+	chunkWrite func([]byte)
+}
+
+func (t *teeRawSink) write(p []byte) {
+	if t.primary != nil {
+		t.primary.write(p)
+	}
+	if t.chunkWrite != nil {
+		t.chunkWrite(p)
+	}
 }
 
 // forbiddenTrailerHeaders enumerates the RFC 7230 §4.1.2 framing/routing

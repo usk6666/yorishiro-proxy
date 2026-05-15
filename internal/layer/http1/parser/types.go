@@ -108,6 +108,32 @@ type RawBodyProvider interface {
 	RawBodyTruncated() bool
 }
 
+// ChunkRecordSetter is implemented by body readers that decode chunked
+// Transfer-Encoding and support per-chunk record callbacks (USK-895).
+// Today only *dechunkedReader satisfies this — non-chunked readers
+// (identity / EOF-delimited) have no chunk concept and the type assertion
+// fails. Callers wire the callback via SetChunkRecordCallback before
+// reading; passing a nil cb is a no-op.
+//
+// Contract:
+//   - cb MUST NOT block. The callback fires synchronously on the consumer's
+//     read goroutine inside dechunkedReader.readChunkData /
+//     dechunkedReader.nextChunk. Any block here stalls the streaming body
+//     relay.
+//   - cb receives the full on-wire chunk bytes (chunk-size line +
+//     chunk-extension + chunk-data + trailing CRLF). For the terminal
+//     "0\r\n…\r\n" chunk the bytes include any trailer section. The slice
+//     is a fresh defensive copy; the callback may stash it on an envelope
+//     without coordinating with the parser.
+//   - maxBytes caps the wire bytes captured for a single chunk. Zero
+//     means the package default (MaxRawCaptureSize). Over-cap chunks are
+//     skipped (no callback) — Principle #5 / USK-893 fitness check
+//     defence against malicious oversized chunks. Subsequent under-cap
+//     chunks still fire normally.
+type ChunkRecordSetter interface {
+	SetChunkRecordCallback(cb func(chunkRaw []byte), maxBytes int64)
+}
+
 // Anomaly records a single protocol-level anomaly found during parsing.
 type Anomaly struct {
 	Type   AnomalyType

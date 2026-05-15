@@ -181,6 +181,13 @@ func buildHAREntries(ctx context.Context, store Store, streams []*Stream, opts E
 			return entries, exported, fmt.Errorf("get flows for stream %s: %w", st.ID, err)
 		}
 
+		// USK-895: HAR has no concept of frame- or chunk-level recording
+		// (its data model is request/response pairs). Filter out
+		// non-semantic envelopes so they do not pollute the HAR view.
+		// Pre-USK-889 stores have empty WireLevel which reads as
+		// "semantic" so the filter is backward-compatible.
+		flows = filterSemanticFlows(flows)
+
 		entry := convertStreamToHAREntry(st, flows, opts.IncludeBodies)
 		if entry != nil {
 			entries = append(entries, entry)
@@ -189,6 +196,28 @@ func buildHAREntries(ctx context.Context, store Store, streams []*Stream, opts E
 	}
 
 	return entries, exported, nil
+}
+
+// filterSemanticFlows returns only the flows whose WireLevel is the
+// canonical L7 semantic view (USK-895). Non-semantic wire_level rows
+// (h2-frame, h1-chunk, future frame/chunk-level discriminators) have no
+// representation in the HAR data model (request/response pairs) and are
+// filtered out at HAR-export time. Pre-schemaV14 rows have an empty
+// WireLevel which reads as semantic — backward compatible.
+func filterSemanticFlows(flows []*Flow) []*Flow {
+	if len(flows) == 0 {
+		return flows
+	}
+	out := flows[:0]
+	for _, f := range flows {
+		if f == nil {
+			continue
+		}
+		if f.WireLevel == "" || f.WireLevel == WireLevelSemantic {
+			out = append(out, f)
+		}
+	}
+	return out
 }
 
 // harStreamIncluded returns true if the stream passes HAR-specific filters.

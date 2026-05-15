@@ -1,11 +1,15 @@
-// Package flow wire_level constants (USK-889).
+// Package flow wire_level constants (USK-889, USK-895).
 //
 // wire_level discriminates between the canonical L7 "semantic" envelope view
 // (HTTPMessage / WSMessage / SSEMessage / GRPCStartMessage / ...) and a
 // frame-level envelope produced by a per-stream sub-stack overlay (RFC-001
 // §3.4.1). The v1 set covers the immediate need from USK-889: H2 DATA
-// frames recorded under the WS-over-h2 / SSE-over-h2 detach paths. Future
-// wire_level values (ws-frame, sse-chunk, grpc-lpm-frame, ...) are scoped
+// frames recorded under the WS-over-h2 / SSE-over-h2 detach paths. USK-895
+// extends the discriminator to HTTP/1.x Transfer-Encoding chunk boundaries
+// (h1-chunk) on the SSE-over-h1-chunked path so the chunk-size line,
+// chunk-extension, and trailing CRLF are observable as independent
+// envelopes — closing the live diagnostic gap that hid USK-883's hex-prefix
+// bug. Future wire_level values (ws-frame, grpc-lpm-frame, ...) are scoped
 // to follow-up Issues; the schema-level column is open enough to admit them
 // without another migration.
 //
@@ -19,9 +23,9 @@
 package flow
 
 // Canonical wire_level values stamped on Flow.WireLevel and persisted in
-// the flows.wire_level column (USK-889). Producers must use these constants
-// rather than string literals so a future renaming surfaces at compile time
-// across every call site.
+// the flows.wire_level column (USK-889 / USK-895). Producers must use these
+// constants rather than string literals so a future renaming surfaces at
+// compile time across every call site.
 const (
 	// WireLevelSemantic marks the canonical L7 envelope view recorded by
 	// RecordStep on the main Pipeline: HTTPMessage, WSMessage, SSEMessage,
@@ -39,4 +43,15 @@ const (
 	// the typed *H2DataEvent EndStream field + payload length, and is
 	// omitted to match the existing assembler.go semantics.
 	WireLevelH2Frame = "h2-frame"
+
+	// WireLevelHTTP1Chunk marks an HTTP/1.x Transfer-Encoding chunk-boundary
+	// envelope recorded on the SSE-over-h1-chunked streaming detach path
+	// (USK-895). The Envelope.Raw on these rows is the full on-wire chunk
+	// syntax — chunk-size line (including any chunk-extension) + chunk-data
+	// + trailing CRLF — exactly as it appeared on the wire. The terminal
+	// zero-size chunk + trailer section is recorded as its own envelope.
+	// Naming follows the agreed `<protocol>-<unit>` flat scheme (USK-893):
+	// the chunk mechanism is HTTP/1.x's, not SSE's, so the discriminator is
+	// per-protocol rather than per-payload (no `sse-chunk`).
+	WireLevelHTTP1Chunk = "h1-chunk"
 )

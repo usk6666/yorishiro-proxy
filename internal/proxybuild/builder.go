@@ -222,6 +222,17 @@ type Deps struct {
 	// downstream RecordStep dispatch.
 	RecordHTTP2FrameMaxPerStream int
 
+	// RecordHTTP1ChunkMaxPerStream caps the number of chunk-level
+	// envelopes (WireLevel=h1-chunk, HTTP/1.x Transfer-Encoding chunk
+	// boundaries recorded on the SSE-over-h1-chunked streaming detach
+	// path) RecordStep persists per stream (USK-895). Zero uses
+	// config.MaxHTTP1ChunkRecordsPerStream. Wire forwarding is
+	// unaffected — the chunk-record callback fires inside the parser's
+	// dechunked-read loop BEFORE the dechunked payload is forwarded to
+	// the SSE event-boundary reader, and the cap suppresses only the
+	// downstream RecordStep dispatch.
+	RecordHTTP1ChunkMaxPerStream int
+
 	// --- Optional manager-level state (consumed by Manager wiring) ---
 
 	// UpstreamProxy is the initial upstream proxy URL. Stored on the
@@ -545,6 +556,15 @@ func buildPipeline(deps Deps, encoders *pipeline.WireEncoderRegistry, logger *sl
 		h2FrameCap = config.MaxHTTP2FrameRecordsPerStream
 	}
 	recordOpts = append(recordOpts, pipeline.WithHTTP2FrameMaxPerStream(h2FrameCap))
+	// USK-895: per-stream cap for h1 chunk envelopes (SSE-over-h1-chunked
+	// streaming detach path). Zero falls back to the package default so
+	// synthetic test stacks that omit the field still observe a positive
+	// cap consistent with the USK-889 pattern.
+	h1ChunkCap := deps.RecordHTTP1ChunkMaxPerStream
+	if h1ChunkCap <= 0 {
+		h1ChunkCap = config.MaxHTTP1ChunkRecordsPerStream
+	}
+	recordOpts = append(recordOpts, pipeline.WithHTTP1ChunkMaxPerStream(h1ChunkCap))
 
 	safetyStep := pipeline.NewSafetyStep(deps.HTTPSafetyEngine, deps.WSSafetyEngine, deps.GRPCSafetyEngine, logger)
 	return pipeline.New(

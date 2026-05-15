@@ -47,10 +47,26 @@ import (
 )
 
 // h2FrameRecordCallback constructs the synchronous callback installed via
-// http2.Layer.DetachStream(WithFrameRecordCallback(...)). The returned
-// function is bound to (recPipeline, sessionStreamID, direction, ctx,
-// flowCtx) — the orchestrator must produce one callback per detach side
-// since direction and the per-direction sequence counter differ.
+// http2.Layer.DetachStream(WithFrameRecordCallback(...)). Delegates to the
+// generic wireLevelRecordCallback helper after binding the WireLevel
+// discriminator to flow.WireLevelH2Frame. Retained as a thin wrapper for
+// the call sites that already exist on the h2 detach paths.
+func h2FrameRecordCallback(
+	ctx context.Context,
+	recPipeline *pipeline.Pipeline,
+	sessionStreamID string,
+	direction envelope.Direction,
+	flowCtx envelope.EnvelopeContext,
+) func(*envelope.Envelope) {
+	return wireLevelRecordCallback(ctx, recPipeline, sessionStreamID, direction, flowCtx, flow.WireLevelH2Frame)
+}
+
+// wireLevelRecordCallback is the wire-level-agnostic record-callback
+// helper shared by every non-semantic envelope producer (USK-889
+// h2-frame, USK-895 h1-chunk). The returned function is bound to
+// (recPipeline, sessionStreamID, direction, ctx, flowCtx, wireLevel) —
+// the orchestrator must produce one callback per detach side since
+// direction and the per-direction sequence counter differ.
 //
 // Sequence semantics: the counter is local to the closure so two callbacks
 // installed on the same sessionStreamID (the WS-over-h2 symmetric case)
@@ -58,26 +74,25 @@ import (
 // tuples produce a unique sequence space — exactly what the schemaV14
 // UNIQUE constraint requires.
 //
-// FlowID: a fresh UUID per envelope (per Q28). Frame envelopes do not
-// participate in the variant pair so they need no stable FlowID across
-// observations.
+// FlowID: a fresh UUID per envelope (per Q28). Frame / chunk envelopes do
+// not participate in the variant pair so they need no stable FlowID
+// across observations.
 //
-// Defensive copy of payload: the H2DataEvent.Payload byte slice is owned
-// by the h2 aggregator. We do NOT copy it here — the record-only Pipeline
-// runs synchronously on this goroutine, and RecordStep persists the bytes
-// before returning. If a future change makes RecordStep enqueue the
-// payload past the callback's return, this is the spot to insert
-// envelope.cloneBytes (or similar).
+// Defensive copy of payload: the caller is responsible for arranging that
+// env.Raw outlives the callback return. The h2 path relies on the
+// H2DataEvent payload buffer ownership; the h1-chunk path constructs a
+// fresh copy in the parser before invoking the callback.
 //
-// Termination: there is no separate termination signal. The h2 channel's
-// runDetachDrain owns the lifetime; when it exits (graceful EOF / pipe
-// error / termDone) the callback simply stops being invoked.
-func h2FrameRecordCallback(
+// Termination: there is no separate termination signal. The caller's
+// outer goroutine owns lifetime; when it exits the callback simply
+// stops being invoked.
+func wireLevelRecordCallback(
 	ctx context.Context,
 	recPipeline *pipeline.Pipeline,
 	sessionStreamID string,
 	direction envelope.Direction,
 	flowCtx envelope.EnvelopeContext,
+	wireLevel string,
 ) func(*envelope.Envelope) {
 	if recPipeline == nil {
 		// Defensive: nil Pipeline disables recording. This branch should
@@ -90,28 +105,29 @@ func h2FrameRecordCallback(
 	var seq int64
 
 	// Pre-build the envelope template so the hot path only stamps the
-	// per-frame fields. The Context carries the WireLevel discriminator
+	// per-event fields. The Context carries the WireLevel discriminator
 	// that RecordStep reads in recordCapForEnvelope + envelopeToFlow.
 	ctxTmpl := flowCtx
-	ctxTmpl.WireLevel = flow.WireLevelH2Frame
+	ctxTmpl.WireLevel = wireLevel
 
 	return func(env *envelope.Envelope) {
 		if env == nil {
 			return
 		}
 		// Rewrite the envelope identity to the post-swap session-scope
-		// values. The h2 channel emits the connection-level view; we
+		// values. The detach producer emits the lower-layer view; we
 		// project onto the analyst-facing post-swap stream identity so
-		// the AC literal "同一 StreamID で紐付き" is satisfied.
+		// frame / chunk envelopes share the same StreamID as the
+		// semantic envelopes recorded by the main Pipeline.
 		env.StreamID = sessionStreamID
 		env.FlowID = uuid.NewString()
 		env.Direction = direction
-		// Sequence is per (sessionStreamID, direction, wire_level=h2-frame).
-		// We use an atomic counter so a future change that fires the
-		// callback from multiple goroutines does not corrupt the counter;
-		// today the callback is single-goroutine (runDetachDrain) and a
-		// plain int would suffice. The atomic cost is negligible against
-		// the SQLite write.
+		// Sequence is per (sessionStreamID, direction, wire_level).
+		// Atomic so a future change that fires the callback from
+		// multiple goroutines does not corrupt the counter; today the
+		// callback is single-goroutine (the producer's read goroutine)
+		// and a plain int would suffice. The atomic cost is negligible
+		// against the SQLite write.
 		env.Sequence = int(atomic.AddInt64(&seq, 1) - 1)
 		// Stamp the Context (WireLevel + connection-scope ConnID / TLS /
 		// ClientAddr) onto the envelope. We use a fresh Context value so

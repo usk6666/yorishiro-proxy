@@ -117,6 +117,23 @@ const (
 	// (USK-889).
 	MaxHTTP2FrameRecordsPerStream = 10000
 
+	// MaxHTTP1ChunkRecordsPerStream limits the number of HTTP/1.x chunk-
+	// boundary envelopes (wire_level="h1-chunk") recorded per stream on the
+	// SSE-over-h1-chunked streaming detach path (USK-895). Once exceeded,
+	// the per-chunk record callback is suppressed for further chunks on the
+	// affected stream; wire forwarding is unaffected because the suppression
+	// skips only the RecordStep dispatch, not the streaming body relay to
+	// the SSE event-boundary reader.
+	//
+	// Default matches MaxGRPCMessagesPerStream / MaxHTTP2FrameRecordsPerStream
+	// so the operator's mental model "long-running streaming protocols cap
+	// at ~10k events" stays uniform across gRPC, SSE, and frame-level /
+	// chunk-level recording.
+	//
+	// Wired via internal/pipeline/RecordStep.WithHTTP1ChunkMaxPerStream
+	// (USK-895).
+	MaxHTTP1ChunkRecordsPerStream = 10000
+
 	// MaxWebSocketFrameSize limits the maximum payload size of a single
 	// WebSocket frame. WebSocket frames can theoretically be up to 2^63
 	// bytes per RFC 6455; this constant caps them at 16 MiB to prevent

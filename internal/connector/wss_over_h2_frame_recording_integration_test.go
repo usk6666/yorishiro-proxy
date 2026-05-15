@@ -81,73 +81,7 @@ func TestFullListener_CONNECT_WSS_OverH2_FrameRecording(t *testing.T) {
 	}
 }
 
-// anyNonEmptyRaw reports whether any flow in flows carries non-empty
-// RawBytes.
-func anyNonEmptyRaw(flows []*flow.Flow) bool {
-	for _, f := range flows {
-		if f == nil {
-			continue
-		}
-		if len(f.RawBytes) > 0 {
-			return true
-		}
-	}
-	return false
-}
-
-// flowsByWireLevel filters flows by wire_level + direction.
-func flowsByWireLevel(flows []*flow.Flow, wireLevel, direction string) []*flow.Flow {
-	var out []*flow.Flow
-	for _, f := range flows {
-		if f == nil {
-			continue
-		}
-		// Empty WireLevel reads as the semantic default for backward
-		// compatibility with pre-schemaV14 stores.
-		fl := f.WireLevel
-		if fl == "" {
-			fl = flow.WireLevelSemantic
-		}
-		if fl != wireLevel {
-			continue
-		}
-		if direction != "" && f.Direction != direction {
-			continue
-		}
-		out = append(out, f)
-	}
-	return out
-}
-
-// sharesStreamID reports whether at least one row from a and one row
-// from b share the same StreamID.
-func sharesStreamID(a, b []*flow.Flow) bool {
-	seen := make(map[string]struct{}, len(a))
-	for _, f := range a {
-		if f == nil {
-			continue
-		}
-		seen[f.StreamID] = struct{}{}
-	}
-	for _, f := range b {
-		if f == nil {
-			continue
-		}
-		if _, ok := seen[f.StreamID]; ok {
-			return true
-		}
-	}
-	return false
-}
-
-// streamIDs collects the StreamID values from flows for diagnostic logs.
-func streamIDs(flows []*flow.Flow) []string {
-	out := make([]string, 0, len(flows))
-	for _, f := range flows {
-		if f == nil {
-			continue
-		}
-		out = append(out, f.StreamID)
-	}
-	return out
-}
+// Wire-level helpers (anyNonEmptyRaw / flowsByWireLevel / sharesStreamID /
+// streamIDs) moved to wire_level_test_helpers_test.go under plain
+// `//go:build e2e` so the USK-895 smoke-tier test (h1-chunk) can share
+// them without forcing the exhaustive-tier h2-frame tests into smoke.

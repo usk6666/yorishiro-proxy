@@ -144,6 +144,14 @@ type RecordStep struct {
 	// to config.MaxHTTP2FrameRecordsPerStream so the zero meaning is
 	// reserved for synthetic test stacks.
 	h2FrameMaxPerStream int
+	// USK-895 per-Stream chunk-level record cap. Gates envelopes whose
+	// EnvelopeContext.WireLevel is flow.WireLevelHTTP1Chunk (chunk-boundary
+	// envelopes produced on the SSE-over-h1-chunked streaming detach path).
+	// Zero means "unlimited" with the same rationale as the USK-802 and
+	// USK-889 cap fields: the production wiring resolves to
+	// config.MaxHTTP1ChunkRecordsPerStream so the zero meaning is reserved
+	// for synthetic test stacks.
+	h1ChunkMaxPerStream int
 	// countCache is the per-StreamID record-count LRU. Allocated lazily on
 	// first per-stream gating need (i.e. when any cap Option resolves to
 	// a positive value). Concurrent access is bound by countCache.mu — see
@@ -331,6 +339,38 @@ func WithHTTP2FrameMaxPerStream(n int) Option {
 	}
 }
 
+// WithHTTP1ChunkMaxPerStream caps the number of chunk-boundary envelopes
+// (EnvelopeContext.WireLevel = flow.WireLevelHTTP1Chunk) RecordStep
+// persists per Stream (USK-895). Once the cap is reached, further chunk
+// envelopes pass through the record-only Pipeline untouched but are not
+// written to the flow store.
+//
+// Wire forwarding is unaffected because the chunk-record callback runs
+// inside the parser's chunked-decode loop BEFORE the dechunked payload is
+// forwarded to the consumer; this cap only suppresses the downstream
+// RecordStep dispatch, never the streaming body relay carrying the
+// payload to the SSE event-boundary reader.
+//
+// The cap is keyed on the same per-Stream LRU as the USK-802 gRPC / SSE
+// and USK-889 h2-frame caps. The shared-counter caveat documented on
+// WithHTTP2FrameMaxPerStream applies analogously to h1-chunk on
+// SSE-over-h1-chunked: semantic SSEMessage envelopes and h1-chunk
+// envelopes on the same Stream share one counter. With both production
+// defaults at 10000 the practical threshold is N+M > 10000 per Stream;
+// the operator-visible records_truncated tag surfaces the truncation
+// either way. Splitting the counter axis (per-kind keying) is deferred to
+// a follow-up Issue if production data shows premature truncation.
+//
+// Zero (or negative) means "unlimited"; see WithGRPCMaxMessagesPerStream
+// for the rationale.
+func WithHTTP1ChunkMaxPerStream(n int) Option {
+	return func(s *RecordStep) {
+		if n > 0 {
+			s.h1ChunkMaxPerStream = n
+		}
+	}
+}
+
 // NewRecordStep creates a RecordStep with the given flow.Writer.
 // If store is nil, Process returns immediately with no side effects.
 //
@@ -353,10 +393,11 @@ func NewRecordStep(store flow.Writer, logger *slog.Logger, opts ...Option) *Reco
 	if s.origin == "" {
 		s.origin = flow.OriginProxy
 	}
-	// USK-802 / USK-889: lazily allocate the per-Stream record-count LRU
-	// when at least one cap Option resolved to a positive value. Synthetic
-	// test stacks that omit every Option skip the allocation entirely.
-	if (s.grpcMaxPerStream > 0 || s.sseMaxPerStream > 0 || s.h2FrameMaxPerStream > 0) && s.countCache == nil {
+	// USK-802 / USK-889 / USK-895: lazily allocate the per-Stream
+	// record-count LRU when at least one cap Option resolved to a positive
+	// value. Synthetic test stacks that omit every Option skip the
+	// allocation entirely.
+	if (s.grpcMaxPerStream > 0 || s.sseMaxPerStream > 0 || s.h2FrameMaxPerStream > 0 || s.h1ChunkMaxPerStream > 0) && s.countCache == nil {
 		s.countCache = newRecordCountCache(defaultCountCacheCapacity)
 	}
 	return s
@@ -526,18 +567,32 @@ func (s *RecordStep) allowFlowRecord(ctx context.Context, env *envelope.Envelope
 // envelopes (which are bounded ≤2 per Stream and always recorded) bypass
 // the gate cleanly.
 //
-// USK-889: frame-level envelopes (EnvelopeContext.WireLevel ==
-// flow.WireLevelH2Frame) are gated by h2FrameMaxPerStream. The check runs
-// BEFORE the Message-type switch so frame envelopes are always treated as
-// frame envelopes regardless of the (unrelated) typed Message they carry
-// (today *H2DataEvent; future ws-frame / sse-chunk values may carry their
-// own typed payload).
+// USK-889 / USK-895: non-semantic wire_level envelopes are gated by a
+// per-wire_level cap. The switch dispatches on env.Context.WireLevel
+// BEFORE the Message-type switch so non-semantic envelopes are always
+// treated as their wire_level rather than as the (unrelated) typed Message
+// they happen to carry. Unknown non-semantic wire_level values fall
+// through to cap=0 (do not gate) — the value-set is closed at compile
+// time today (h2-frame / h1-chunk) and a future addition that should be
+// gated must wire its own arm and Option.
 func (s *RecordStep) recordCapForEnvelope(env *envelope.Envelope) int {
 	if env == nil {
 		return 0
 	}
-	if env.Context.WireLevel != "" && env.Context.WireLevel != flow.WireLevelSemantic {
+	switch env.Context.WireLevel {
+	case "", flow.WireLevelSemantic:
+		// Fall through to the per-Message-type switch below.
+	case flow.WireLevelH2Frame:
 		return s.h2FrameMaxPerStream
+	case flow.WireLevelHTTP1Chunk:
+		return s.h1ChunkMaxPerStream
+	default:
+		// Unknown non-semantic wire_level: do not gate (defensive — keeps
+		// new wire_level values recording until they get their own gate
+		// Option). Unit tests cover this branch so a regression that
+		// accidentally folds an unknown value into one of the existing
+		// caps surfaces immediately.
+		return 0
 	}
 	if env.Message == nil {
 		return 0

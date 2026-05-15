@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -958,3 +959,93 @@ func TestHARSchemaValidation(t *testing.T) {
 }
 
 // mustParseURL is defined in sqlite_test.go.
+
+// TestExportHAR_FiltersNonSemanticWireLevel is the USK-895 regression
+// guard: HAR export must exclude wire_level="h1-chunk" and wire_level=
+// "h2-frame" rows because the HAR data model has no representation for
+// chunk-level / frame-level recording (one HAR entry == one request-
+// response pair). Pre-USK-895 stores (empty WireLevel) read as semantic
+// for backward compatibility.
+func TestExportHAR_FiltersNonSemanticWireLevel(t *testing.T) {
+	t.Parallel()
+	now := time.Now().UTC()
+	store := &mockHARStore{
+		streams: []*Stream{
+			{
+				ID:        "stream-1",
+				Protocol:  "http",
+				State:     "complete",
+				Timestamp: now,
+				Duration:  100 * time.Millisecond,
+			},
+		},
+		flows: map[string][]*Flow{
+			"stream-1": {
+				// Pre-USK-889 row (empty WireLevel reads as semantic).
+				{ID: "msg-1", StreamID: "stream-1", Sequence: 0, Direction: "send", Timestamp: now, Method: "GET", URL: mustParseURL("http://example.com/sse")},
+				{ID: "msg-2", StreamID: "stream-1", Sequence: 1, Direction: "receive", Timestamp: now, StatusCode: 200, WireLevel: WireLevelSemantic},
+				// USK-889 h2-frame row — must be filtered out of HAR.
+				{ID: "msg-3", StreamID: "stream-1", Sequence: 2, Direction: "receive", Timestamp: now, WireLevel: WireLevelH2Frame, RawBytes: []byte("h2-frame-data")},
+				// USK-895 h1-chunk row — must be filtered out of HAR.
+				{ID: "msg-4", StreamID: "stream-1", Sequence: 3, Direction: "receive", Timestamp: now, WireLevel: WireLevelHTTP1Chunk, RawBytes: []byte("5\r\nhello\r\n")},
+			},
+		},
+	}
+
+	var buf bytes.Buffer
+	n, err := ExportHAR(context.Background(), store, &buf, ExportOptions{IncludeBodies: true}, "1.0.0")
+	if err != nil {
+		t.Fatalf("ExportHAR: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("exported = %d, want 1 (one stream)", n)
+	}
+
+	// The HAR output MUST NOT contain the non-semantic RawBytes payloads.
+	out := buf.String()
+	for _, leaked := range []string{"h2-frame-data", "5\\r\\nhello\\r\\n", "5\r\nhello\r\n"} {
+		if strings.Contains(out, leaked) {
+			t.Errorf("HAR output unexpectedly contains non-semantic chunk/frame data %q\n  HAR: %s", leaked, out)
+		}
+	}
+
+	// The semantic request/response must be present.
+	var har HAR
+	if err := json.Unmarshal(buf.Bytes(), &har); err != nil {
+		t.Fatalf("unmarshal HAR: %v", err)
+	}
+	if len(har.Log.Entries) != 1 {
+		t.Fatalf("entries = %d, want 1", len(har.Log.Entries))
+	}
+	entry := har.Log.Entries[0]
+	if entry.Request.Method != "GET" {
+		t.Errorf("entry.Request.Method = %q, want GET", entry.Request.Method)
+	}
+	if entry.Response.Status != 200 {
+		t.Errorf("entry.Response.Status = %d, want 200", entry.Response.Status)
+	}
+}
+
+// TestFilterSemanticFlows is the unit-level check for the HAR-export
+// filter (USK-895). Verifies that empty WireLevel reads as semantic
+// (backward compatibility) and that h2-frame / h1-chunk values are
+// dropped.
+func TestFilterSemanticFlows(t *testing.T) {
+	t.Parallel()
+	flows := []*Flow{
+		{ID: "a", WireLevel: ""},
+		{ID: "b", WireLevel: WireLevelSemantic},
+		{ID: "c", WireLevel: WireLevelH2Frame},
+		{ID: "d", WireLevel: WireLevelHTTP1Chunk},
+		nil,
+		{ID: "e", WireLevel: "future-unknown-value"},
+	}
+	got := filterSemanticFlows(flows)
+	// Expect ids a, b kept (semantic-equivalent); c, d, e dropped; nil dropped.
+	if len(got) != 2 {
+		t.Fatalf("kept = %d, want 2; got=%v", len(got), got)
+	}
+	if got[0].ID != "a" || got[1].ID != "b" {
+		t.Errorf("kept IDs = %v %v, want a b", got[0].ID, got[1].ID)
+	}
+}

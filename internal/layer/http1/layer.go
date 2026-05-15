@@ -686,7 +686,12 @@ func (l *Layer) PrepareSwap() {
 // DetachStreamingBody forwards to the active Channel's DetachStreamingBody.
 // Pre-condition: the most recent Channel.Next() must have emitted a response
 // Envelope whose body draining was suppressed by [WithStreamingResponseDetect].
-func (l *Layer) DetachStreamingBody() (io.ReadCloser, error) {
+//
+// Variadic StreamingBodyOption values configure optional per-detach
+// behaviour; today the only supported option is WithChunkRecordCallback
+// (USK-895). Passing no options preserves the pre-USK-895 contract
+// verbatim.
+func (l *Layer) DetachStreamingBody(opts ...StreamingBodyOption) (io.ReadCloser, error) {
 	if l.isDetached() {
 		return nil, errors.New("http1: stream already detached")
 	}
@@ -694,7 +699,73 @@ func (l *Layer) DetachStreamingBody() (io.ReadCloser, error) {
 	if active == nil {
 		return nil, errors.New("http1: no active channel for streaming body")
 	}
-	return active.detachStreamingBody()
+	cfg := &streamingBodyOptions{}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(cfg)
+		}
+	}
+	return active.detachStreamingBody(cfg)
+}
+
+// streamingBodyOptions collects values supplied to DetachStreamingBody via
+// the variadic StreamingBodyOption mechanism. Defined as a struct so future
+// fields can be added without breaking existing callers, mirroring the
+// USK-889 detachConfig precedent in internal/layer/http2.
+type streamingBodyOptions struct {
+	// chunkRecordCB is the optional synchronous callback that fires for
+	// every chunk boundary on the SSE-over-h1-chunked detach path. nil
+	// when no caller installed the option. See WithChunkRecordCallback
+	// for the contract.
+	chunkRecordCB func(chunkRaw []byte)
+	// chunkRecordMaxBytes is the per-chunk wire-bytes cap threaded into
+	// the parser. Zero means MaxRawCaptureSize at parse time.
+	chunkRecordMaxBytes int64
+}
+
+// StreamingBodyOption configures DetachStreamingBody. The variadic-option
+// shape lets future per-call configuration land without breaking existing
+// callers, mirroring the USK-802 / USK-889 Option precedents elsewhere in
+// the codebase.
+type StreamingBodyOption func(*streamingBodyOptions)
+
+// WithChunkRecordCallback installs a synchronous per-chunk record
+// callback invoked from the parser's dechunked-read loop for every chunk
+// boundary on the SSE-over-h1-chunked detach path (USK-895). The callback
+// receives the full on-wire chunk bytes: chunk-size line (including any
+// chunk-extension) + chunk-data + trailing CRLF. The terminal "0\r\n…\r\n"
+// chunk (with any trailer section) is emitted as its own callback.
+//
+// Timing: the callback fires AFTER the chunk has been fully consumed from
+// the wire — the recorder snapshot reflects the wire observation, not the
+// post-delivery state the SSE event-boundary reader will see. This matches
+// the USK-889 pattern (h2 frame callback fires BEFORE pipe.Write) in
+// spirit: the recorder learns about the chunk as soon as the wire view is
+// complete and irreversible.
+//
+// Contract:
+//   - cb MUST NOT block. The chunk-record callback fires synchronously on
+//     the consumer's read goroutine inside the parser's dechunkedReader.
+//     Any block here stalls the streaming body relay carrying the
+//     dechunked payload to the SSE event-boundary reader. If the
+//     orchestrator's recording path needs to perform IO that may block,
+//     it must dispatch its own goroutine inside cb.
+//   - cb receives a fresh defensive copy of the chunk bytes. The slice may
+//     be stashed on an envelope without coordinating with the parser.
+//   - maxBytes caps the wire bytes captured for a single chunk. Zero means
+//     the parser default (MaxRawCaptureSize). Over-cap chunks are skipped
+//     (no callback fired) — Principle #5 / USK-893 fitness check defence
+//     against a malicious upstream sending a 4 GiB single chunk.
+//
+// On the non-chunked SSE path (HTTP/1.0 / Connection: close / Content-
+// Length) the option is a no-op: there are no chunks to record.
+//
+// Passing a nil cb is equivalent to not supplying the option at all.
+func WithChunkRecordCallback(cb func(chunkRaw []byte), maxBytes int64) StreamingBodyOption {
+	return func(o *streamingBodyOptions) {
+		o.chunkRecordCB = cb
+		o.chunkRecordMaxBytes = maxBytes
+	}
 }
 
 // streamingBodyCloser pairs the parser's body reader with the conn so the
