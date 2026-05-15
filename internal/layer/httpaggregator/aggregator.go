@@ -48,6 +48,89 @@ type WrapOptions struct {
 	StateReleaser pluginv2.StateReleaser
 }
 
+// WrapOption is a functional option applied on top of WrapOptions. The
+// variadic-option shape lets callers configure per-Channel behaviour without
+// expanding the WrapOptions struct surface (USK-897). Today the only Option
+// is WithH2FrameRecordCallback; the type stays open for forward-compat.
+//
+// Naming and shape mirrors sibling Layers (http2.DetachOption /
+// grpclayer.Option / http1 streaming-body Options) — see
+// internal/layer/grpc/layer.go WithLPMFrameRecordCallback for the Rule of
+// Three reference. A common WireLevelTap interface is intentionally
+// deferred to a follow-up Issue (see USK-897 PR description for the
+// proposed shape).
+type WrapOption func(*wrapState)
+
+// wrapState is the resolved per-Channel configuration produced by applying
+// the variadic WrapOption slice. Kept private so the Option surface stays
+// the only way to set fields.
+type wrapState struct {
+	// h2FrameCB is the optional synchronous per-H2DataEvent callback
+	// installed by WithH2FrameRecordCallback. nil = no-op (the aggregator
+	// behaves identically to the pre-USK-897 contract).
+	h2FrameCB func(*envelope.Envelope)
+}
+
+// WithH2FrameRecordCallback installs a synchronous per-H2DataEvent
+// wire-record callback on the aggregator Channel (USK-897 v2 wave #3 —
+// aggregator-path symmetry fix for the USK-889 detach-path coverage).
+//
+// The callback fires once per H2DataEvent absorbed by the aggregator,
+// BEFORE the DATA payload is appended to the in-flight body buffer. This
+// ordering reflects the CLAUDE.md MITM Principle 3 contract — the
+// recorder's snapshot must mirror on-wire observation, not the post-body
+// state. The envelope passed to the callback is a fresh struct allocated
+// inside the aggregator; its Raw field is a defensive copy of the
+// H2DataEvent payload bytes (callable consumers may retain the slice
+// across return).
+//
+// Envelope contract:
+//
+//   - Protocol  = envelope.ProtocolHTTP (per the H2DataEvent provenance —
+//     NOT a new ProtocolHTTP2 value)
+//   - StreamID  = the inner channel's StreamID (the lower-layer view; the
+//     session orchestrator rewrites this to the session-scope
+//     identity before dispatching to the record-only Pipeline)
+//   - Direction = the H2DataEvent's Direction (preserved from the inner
+//     envelope so Send / Receive symmetry is observable)
+//   - Sequence  = the H2DataEvent's Sequence (the orchestrator rewrites
+//     this to a per-direction counter scoped to
+//     (sessionStreamID, WireLevel=h2-frame))
+//   - Raw       = the DATA frame payload bytes (no 9-byte frame header;
+//     the header is reconstructable from EndStream + payload
+//     length, matching the USK-889 detach-path envelope shape)
+//   - Message   = nil (DATA frame wire envelopes have no L7 structured
+//     view — the matching HTTPMessage envelope queued AFTER
+//     absorption already provides that)
+//   - Context   = the H2DataEvent envelope's Context (carries ConnID /
+//     TargetHost / TLS / ClientAddr unchanged; the callback
+//     expects to stamp flow.WireLevelH2Frame before
+//     dispatching to the record-only Pipeline)
+//
+// Contract:
+//   - Non-blocking: runs synchronously on the aggregator's Next goroutine.
+//     A slow callback delays the HTTPMessage finalisation for the current
+//     exchange. If the caller's recording path needs to perform IO that
+//     may block (DB write under contention, network call), it must
+//     dispatch its own goroutine inside cb.
+//   - Single-goroutine fire: invoked from absorbData under the
+//     aggregator's mutex, so the callback MUST NOT call back into the
+//     aggregator. The mutex hold is brief — the callback fires inline
+//     before the DATA payload is appended to the body buffer.
+//   - nil = no-op (no wire-record envelope is produced; aggregator behaves
+//     identically to the pre-USK-897 contract).
+//
+// Mirrors the per-Layer Option shape used by
+// http2.WithFrameRecordCallback (USK-889),
+// http1.WithChunkRecordCallback (USK-895), and
+// grpclayer.WithLPMFrameRecordCallback (USK-896). A common WireLevelTap
+// interface is intentionally deferred to a follow-up Issue (USK-897 hits
+// the Rule of Three; the refactor is scoped separately for PR size
+// control).
+func WithH2FrameRecordCallback(cb func(*envelope.Envelope)) WrapOption {
+	return func(s *wrapState) { s.h2FrameCB = cb }
+}
+
 // OptionsFromLayer returns a WrapOptions populated from the given HTTP/2
 // Layer's BodyOpts. Callers that built the Layer with WithBodySpillDir /
 // WithBodySpillThreshold / WithMaxBodySize can thread those values here
@@ -77,13 +160,26 @@ func OptionsFromLayer(l *http2.Layer) WrapOptions {
 //
 // Close on the returned Channel closes only the aggregator wrapper; the
 // caller still owns the lifecycle of the underlying stream Channel.
-func Wrap(stream layer.Channel, role Role, firstHeaders *envelope.Envelope, opts WrapOptions) layer.Channel {
+//
+// Optional WrapOption values tune per-Channel behaviour layered on top of
+// the WrapOptions struct (e.g. WithH2FrameRecordCallback for the USK-897
+// h2-frame wire-record callback). The variadic shape keeps existing
+// call sites source-compatible — pre-USK-897 callers pass no Options and
+// the aggregator behaves identically to the prior contract.
+func Wrap(stream layer.Channel, role Role, firstHeaders *envelope.Envelope, opts WrapOptions, wopts ...WrapOption) layer.Channel {
+	st := wrapState{}
+	for _, o := range wopts {
+		if o != nil {
+			o(&st)
+		}
+	}
 	ac := &aggregatorChannel{
-		inner:    stream,
-		role:     role,
-		opts:     opts,
-		peeked:   firstHeaders,
-		recvDone: make(chan struct{}),
+		inner:     stream,
+		role:      role,
+		opts:      opts,
+		peeked:    firstHeaders,
+		recvDone:  make(chan struct{}),
+		h2FrameCB: st.h2FrameCB,
 	}
 	return ac
 }

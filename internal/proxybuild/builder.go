@@ -820,9 +820,24 @@ func buildOnHTTP2Stack(p *pipeline.Pipeline, deps Deps, logger *slog.Logger) con
 					streamGRPCOpts = append(streamGRPCOpts, grpcOpts...)
 					streamGRPCOpts = append(streamGRPCOpts, lpmOpt)
 
-					aggCh, derr := connector.DispatchH2StreamWithOpts(
+					// USK-897: per-stream aggregator-path h2 DATA frame
+					// wire-record Option. Same wiring shape as the gRPC
+					// LPM Option above (single closure shared across
+					// client-side + upstream-side wraps; the closure's
+					// per-direction counters keep Send / Receive in
+					// independent sequence spaces; the closure rewrites
+					// upstream-side env.StreamID to the client-side
+					// session-scope StreamID for unification). Covers the
+					// gRPC-Web and default (plain HTTP/2 + httpaggregator)
+					// branches of DispatchH2StreamFull; the native-gRPC
+					// branch ignores aggregatorOpts and records LPM
+					// envelopes instead via streamGRPCOpts above.
+					aggH2FrameOpt := session.AggregatorH2FrameRecordOption(ctx, p, ch.StreamID(), streamFlowCtx)
+					streamAggOpts := []httpaggregator.WrapOption{aggH2FrameOpt}
+
+					aggCh, derr := connector.DispatchH2StreamFull(
 						ctx, ch, httpaggregator.RoleServer,
-						clientLOpts, logger, streamGRPCOpts, grpcwebOpts,
+						clientLOpts, logger, streamGRPCOpts, grpcwebOpts, streamAggOpts,
 					)
 					if derr != nil {
 						logger.Debug("proxybuild: h2 dispatch failed",
@@ -855,8 +870,8 @@ func buildOnHTTP2Stack(p *pipeline.Pipeline, deps Deps, logger *slog.Logger) con
 						if env != nil {
 							reqProto = env.Protocol
 						}
-						return connector.WrapH2UpstreamForDispatch(
-							upCh, reqProto, lopts, streamGRPCOpts, grpcwebOpts,
+						return connector.WrapH2UpstreamForDispatchFull(
+							upCh, reqProto, lopts, streamGRPCOpts, grpcwebOpts, streamAggOpts,
 						), nil
 					}
 					if err := session.RunStackSessionExchange(ctx, stack, aggCh, dial, p, sessOpts); err != nil && !errors.Is(err, context.Canceled) {

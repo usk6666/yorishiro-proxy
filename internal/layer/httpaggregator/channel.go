@@ -91,6 +91,13 @@ type aggregatorChannel struct {
 	pairedRequestPath     string
 	pairedRequestMethod   string
 	pairedRequestRawQuery string
+
+	// h2FrameCB is the optional synchronous per-H2DataEvent wire-record
+	// callback installed via WithH2FrameRecordCallback (USK-897). When
+	// non-nil, the aggregator fires it from absorbData BEFORE the DATA
+	// payload is appended to the body buffer. See
+	// WithH2FrameRecordCallback for the contract.
+	h2FrameCB func(*envelope.Envelope)
 }
 
 // StreamID delegates to the underlying Channel.
@@ -520,6 +527,17 @@ func isSSEResponseHeaders(env *envelope.Envelope, evt *http2.H2HeadersEvent) boo
 // MaxBodySize enforcement happens here; exceeding the cap terminates the
 // aggregator with a *layer.StreamError and RST_STREAMs the underlying
 // stream.
+//
+// USK-897: when WithH2FrameRecordCallback is installed, fire the callback
+// BEFORE the DATA payload reaches the body buffer. The callback observes
+// the raw DATA frame envelope (one per H2DataEvent) so per-frame
+// boundaries survive aggregator folding — closing the wire-fidelity gap
+// on the aggregator path symmetrically with the USK-889 detach-path
+// coverage. Ordering matters: CLAUDE.md MITM Principle 3 — wire-record
+// fires first, body-buffer mutation second. The callback fires for every
+// H2DataEvent (including empty END_STREAM frames) regardless of whether
+// the payload length triggers the MaxBodySize gate; the wire envelope is
+// always recorded.
 func (a *aggregatorChannel) absorbData(env *envelope.Envelope, evt *http2.H2DataEvent) (*envelope.Envelope, bool, error) {
 	if a.phase != phaseCollectingBody || a.inflight == nil {
 		if len(evt.Payload) == 0 && evt.EndStream {
@@ -529,6 +547,15 @@ func (a *aggregatorChannel) absorbData(env *envelope.Envelope, evt *http2.H2Data
 			return nil, false, fmt.Errorf("httpaggregator: DATA without HEADERS (stream %s)", env.StreamID)
 		}
 		return nil, false, fmt.Errorf("httpaggregator: DATA in phase %d (stream %s)", a.phase, env.StreamID)
+	}
+
+	// USK-897: fire the per-H2DataEvent wire-record callback BEFORE any
+	// body-buffer mutation. The envelope passed to the callback is a
+	// fresh struct with a defensive copy of the DATA payload so the
+	// callback may retain the slice across return without interfering
+	// with the aggregator's own raw-bytes accumulation on inflight.Raw.
+	if a.h2FrameCB != nil {
+		a.h2FrameCB(buildH2FrameWireEnvelope(env, evt))
 	}
 
 	maxBody := a.effectiveMaxBody()
@@ -742,4 +769,49 @@ func cloneBytes(b []byte) []byte {
 	out := make([]byte, len(b))
 	copy(out, b)
 	return out
+}
+
+// buildH2FrameWireEnvelope constructs the per-H2DataEvent wire-record
+// envelope dispatched to the WithH2FrameRecordCallback consumer (USK-897).
+//
+// The returned envelope mirrors the USK-889 detach-path frame envelope
+// shape so the same record-only Pipeline + WireLevel discriminator
+// (flow.WireLevelH2Frame) apply to both producers:
+//
+//   - Protocol  = envelope.ProtocolHTTP (per the H2DataEvent provenance)
+//   - StreamID  = the inner envelope's StreamID (the lower-layer view)
+//   - Direction = the inner envelope's Direction (Send / Receive)
+//   - Sequence  = the inner envelope's Sequence (the orchestrator
+//     rewrites this to a per-direction counter scoped to
+//     (sessionStreamID, WireLevel=h2-frame) before
+//     dispatching to the record-only Pipeline)
+//   - Raw       = a defensive copy of the DATA payload bytes (no 9-byte
+//     frame header — same fidelity as the H2DataEvent
+//     envelope Raw and the USK-889 detach-path envelope)
+//   - Message   = nil (DATA frame wire envelopes have no L7 structured
+//     view by design — the matching HTTPMessage envelope
+//     queued AFTER full aggregation already provides one)
+//   - Context   = the inner envelope's Context (carries ConnID /
+//     TargetHost / TLS / ClientAddr; the callback expects to
+//     stamp WireLevel before forwarding)
+//
+// The defensive copy keeps the callback contract simple — consumers may
+// retain the Raw slice without coordinating with the aggregator's
+// inflight.Raw accumulation (which appends to the same backing array as
+// env.Raw). The cost is one allocation per DATA frame; for gRPC over
+// h2 this matches USK-896's grpc LPM wire-record allocation profile.
+func buildH2FrameWireEnvelope(env *envelope.Envelope, evt *http2.H2DataEvent) *envelope.Envelope {
+	return &envelope.Envelope{
+		StreamID:  env.StreamID,
+		Sequence:  env.Sequence,
+		Direction: env.Direction,
+		Protocol:  envelope.ProtocolHTTP,
+		Raw:       cloneBytes(evt.Payload),
+		// Message intentionally nil — DATA frame wire envelopes have no
+		// L7 structured view; the matching HTTPMessage envelope queued
+		// AFTER full aggregation provides one. The session helper
+		// stamping flow.WireLevelH2Frame on Context.WireLevel is the
+		// authoritative discriminator the record path keys on.
+		Context: env.Context,
+	}
 }

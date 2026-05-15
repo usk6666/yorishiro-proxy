@@ -43,6 +43,7 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/layer"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/http2"
+	"github.com/usk6666/yorishiro-proxy/internal/layer/httpaggregator"
 	"github.com/usk6666/yorishiro-proxy/internal/pipeline"
 )
 
@@ -263,4 +264,99 @@ func sseDetachOptions(frameCB func(*envelope.Envelope)) []http2.DetachOption {
 		return nil
 	}
 	return []http2.DetachOption{http2.WithFrameRecordCallback(frameCB)}
+}
+
+// AggregatorH2FrameRecordOption assembles the
+// httpaggregator.WithH2FrameRecordCallback Option the orchestrator layers
+// onto every httpaggregator.Wrap call on the aggregator path (USK-897 v2
+// wave #3). It mirrors GRPCLPMRecordOption's shape so the same orchestrator
+// per-stream wiring pattern applies to both helpers:
+//
+//   - Build a record-only Pipeline by stripping every policy / transform /
+//     plugin Step from p (via the wire-level-agnostic h2FrameRecordPipeline
+//     helper shared with USK-889 / USK-895 / USK-896).
+//   - Dispatch the H2DataEvent wire envelope through it with WireLevel =
+//     flow.WireLevelH2Frame stamped on EnvelopeContext.
+//   - Run independent per-direction sequence counters (Send vs Receive) so
+//     bidi exchanges produce a unique (StreamID, Direction, sequence,
+//     WireLevel) tuple per the schemaV14 UNIQUE constraint when the SAME
+//     Option is installed on both client-side and upstream-side wraps.
+//
+// sessionStreamID is the per-stream session-scope identity (the
+// client-side aggregator's StreamID for the live data path). When
+// non-empty, the callback rewrites env.StreamID to this value before
+// running the record-only Pipeline. This mirrors
+// session.upstreamToClient's StreamID-unification so h2-frame rows from
+// the upstream-side wrap land under the same Stream as h2-frame rows
+// from the client-side wrap and the semantic envelopes recorded by the
+// main Pipeline.
+//
+// flowCtx supplies the connection-scope ConnID / TargetHost / TLS /
+// ClientAddr stamped onto every H2DataEvent wire envelope so the
+// record-only Pipeline's HostScope / HTTPScope gates evaluate
+// consistently with the semantic envelopes recorded on the main Pipeline.
+// The caller may leave flowCtx.WireLevel at any value —
+// AggregatorH2FrameRecordOption defensively clears it before stamping
+// flow.WireLevelH2Frame.
+//
+// Returns a httpaggregator.WrapOption that installs a nil callback (no-op)
+// when p is nil so callers can unconditionally splat the result into
+// their wopts slice without branching on Pipeline availability.
+func AggregatorH2FrameRecordOption(ctx context.Context, p *pipeline.Pipeline, sessionStreamID string, flowCtx envelope.EnvelopeContext) httpaggregator.WrapOption {
+	recPipeline := h2FrameRecordPipeline(p)
+	if recPipeline == nil {
+		// No Pipeline → no-op Option (matches the
+		// WithH2FrameRecordCallback contract: nil callback disables
+		// wire-record).
+		return httpaggregator.WithH2FrameRecordCallback(nil)
+	}
+	// Pre-build the per-envelope EnvelopeContext template. WireLevel is
+	// always stamped from this helper, so any caller-supplied value is
+	// defensively cleared (matches the h2FrameFlowContext /
+	// GRPCLPMRecordOption pattern).
+	ctxTmpl := flowCtx
+	ctxTmpl.WireLevel = flow.WireLevelH2Frame
+
+	// Per-direction sequence counters. The same Option installed on both
+	// client-side (Send) and upstream-side (Receive) aggregator wraps
+	// runs independent counters; the schemaV14 UNIQUE constraint on
+	// (stream_id, sequence, direction, variant, wire_level) requires
+	// per-direction independence.
+	var sendSeq, recvSeq int64
+
+	return httpaggregator.WithH2FrameRecordCallback(func(env *envelope.Envelope) {
+		if env == nil {
+			return
+		}
+		// Stamp wire-record envelope identity.
+		env.FlowID = uuid.NewString()
+		// StreamID unification: rewrite to the session-scope identity
+		// when supplied so client-side and upstream-side h2-frame
+		// envelopes share the Stream row created by the main Pipeline's
+		// first Send envelope.
+		if sessionStreamID != "" {
+			env.StreamID = sessionStreamID
+		}
+		switch env.Direction {
+		case envelope.Send:
+			env.Sequence = int(atomic.AddInt64(&sendSeq, 1) - 1)
+		case envelope.Receive:
+			env.Sequence = int(atomic.AddInt64(&recvSeq, 1) - 1)
+		default:
+			// Defensive: the aggregator never emits H2DataEvent
+			// envelopes with a zero / unknown direction, but if it ever
+			// did we drop the envelope rather than risk a sequence-space
+			// collision against the per-direction counters.
+			return
+		}
+		// Apply the EnvelopeContext template. Per-envelope assignment by
+		// value so subsequent envelopes are not aliased to the same
+		// underlying context object.
+		env.Context = ctxTmpl
+
+		// Run through the record-only Pipeline. Drop / Respond cannot
+		// fire here because h2FrameRecordPipeline stripped every Step
+		// that could produce them.
+		_, _, _ = recPipeline.Run(ctx, env)
+	})
 }

@@ -420,6 +420,12 @@ func TestUSK816_H2Pool_InterceptRelease_ResponseRelays(t *testing.T) {
 	flows := store.Flows()
 	var sendF, recvF *flow.Flow
 	for _, f := range flows {
+		// USK-897: filter on semantic envelopes — the aggregator-path
+		// h2 DATA frame record callback (wire_level=h2-frame) now lands
+		// here too, and those envelopes carry no StatusCode/Body.
+		if f.WireLevel != "" && f.WireLevel != flow.WireLevelSemantic {
+			continue
+		}
 		switch f.Direction {
 		case "send":
 			if sendF == nil {

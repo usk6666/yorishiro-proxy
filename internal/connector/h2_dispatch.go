@@ -77,6 +77,32 @@ func DispatchH2StreamWithOpts(
 	grpcOpts []grpclayer.Option,
 	grpcwebOpts []grpcweb.Option,
 ) (layer.Channel, error) {
+	return DispatchH2StreamFull(ctx, ch, role, lopts, logger, grpcOpts, grpcwebOpts, nil)
+}
+
+// DispatchH2StreamFull is the most-explicit form of DispatchH2Stream,
+// adding aggregatorOpts (passed verbatim to every httpaggregator.Wrap
+// call this dispatcher makes — the gRPC-Web branch and the default
+// branch). USK-897 introduces this entry point so the live data path
+// can install httpaggregator.WithH2FrameRecordCallback per stream
+// without forcing every existing DispatchH2StreamWithOpts caller to
+// add a parameter. Tests and call sites that do not need wire-frame
+// recording continue to use DispatchH2Stream / DispatchH2StreamWithOpts.
+//
+// The native-gRPC branch ignores aggregatorOpts because that branch
+// wraps with grpclayer (no httpaggregator); the orchestrator installs
+// grpclayer.WithLPMFrameRecordCallback via grpcOpts to cover the gRPC
+// LPM wire-frame recording on that path (USK-896).
+func DispatchH2StreamFull(
+	ctx context.Context,
+	ch layer.Channel,
+	role httpaggregator.Role,
+	lopts httpaggregator.WrapOptions,
+	logger *slog.Logger,
+	grpcOpts []grpclayer.Option,
+	grpcwebOpts []grpcweb.Option,
+	aggregatorOpts []httpaggregator.WrapOption,
+) (layer.Channel, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -108,7 +134,7 @@ func DispatchH2StreamWithOpts(
 			"path", evt.Path,
 			"content_type", ct,
 		)
-		aggCh := httpaggregator.Wrap(ch, role, firstEnv, lopts)
+		aggCh := httpaggregator.Wrap(ch, role, firstEnv, lopts, aggregatorOpts...)
 		return grpcweb.Wrap(aggCh, translateRoleForGRPCWeb(role), grpcwebOpts...), nil
 	}
 
@@ -124,7 +150,7 @@ func DispatchH2StreamWithOpts(
 		return grpclayer.Wrap(ch, firstEnv, translateRoleForGRPC(role), grpcOpts...), nil
 	}
 
-	return httpaggregator.Wrap(ch, role, firstEnv, lopts), nil
+	return httpaggregator.Wrap(ch, role, firstEnv, lopts, aggregatorOpts...), nil
 }
 
 // WrapH2UpstreamForDispatch wraps a freshly opened upstream HTTP/2 stream
@@ -163,14 +189,34 @@ func WrapH2UpstreamForDispatch(
 	grpcOpts []grpclayer.Option,
 	grpcwebOpts []grpcweb.Option,
 ) layer.Channel {
+	return WrapH2UpstreamForDispatchFull(upCh, reqProto, upstreamLOpts, grpcOpts, grpcwebOpts, nil)
+}
+
+// WrapH2UpstreamForDispatchFull is the most-explicit form of
+// WrapH2UpstreamForDispatch, adding aggregatorOpts (passed verbatim to
+// every httpaggregator.Wrap call on the upstream-side wrap — the
+// gRPC-Web branch and the default branch). USK-897 introduces this entry
+// point so the live data path can install
+// httpaggregator.WithH2FrameRecordCallback symmetrically on the
+// upstream-side wrap to capture Receive-direction H2DataEvent wire
+// envelopes, mirroring how grpcOpts on the native-gRPC branch carry the
+// gRPC LPM record callback (USK-896).
+func WrapH2UpstreamForDispatchFull(
+	upCh layer.Channel,
+	reqProto envelope.Protocol,
+	upstreamLOpts httpaggregator.WrapOptions,
+	grpcOpts []grpclayer.Option,
+	grpcwebOpts []grpcweb.Option,
+	aggregatorOpts []httpaggregator.WrapOption,
+) layer.Channel {
 	switch reqProto {
 	case envelope.ProtocolGRPC:
 		return grpclayer.Wrap(upCh, nil, grpclayer.RoleClient, grpcOpts...)
 	case envelope.ProtocolGRPCWeb:
-		aggCh := httpaggregator.Wrap(upCh, httpaggregator.RoleClient, nil, upstreamLOpts)
+		aggCh := httpaggregator.Wrap(upCh, httpaggregator.RoleClient, nil, upstreamLOpts, aggregatorOpts...)
 		return grpcweb.Wrap(aggCh, grpcweb.RoleClient, grpcwebOpts...)
 	default:
-		return httpaggregator.Wrap(upCh, httpaggregator.RoleClient, nil, upstreamLOpts)
+		return httpaggregator.Wrap(upCh, httpaggregator.RoleClient, nil, upstreamLOpts, aggregatorOpts...)
 	}
 }
 
