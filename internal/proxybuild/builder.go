@@ -837,9 +837,25 @@ func buildOnHTTP2Stack(p *pipeline.Pipeline, deps Deps, logger *slog.Logger) con
 					// and the same Stream row.
 					streamFlowCtx := envelope.EnvelopeContext{TargetHost: target}
 					lpmOpt := session.GRPCLPMRecordOption(ctx, p, ch.StreamID(), streamFlowCtx)
-					streamGRPCOpts := make([]grpclayer.Option, 0, len(grpcOpts)+1)
+					// USK-899: per-stream native-gRPC h2 DATA frame
+					// wire-record Option. Closes the wire_level=h2-frame
+					// producer gap left by USK-897 — native gRPC over
+					// h2 bypasses httpaggregator.Wrap, so the
+					// aggregator's h2-frame callback never fires here.
+					// Wiring shape mirrors the LPM Option above (single
+					// closure shared across client-side + upstream-side
+					// grpc.Wrap calls; per-direction atomic counters in
+					// the closure keep Send / Receive in independent
+					// sequence spaces; StreamID unification mirrors
+					// session.upstreamToClient). With this Option,
+					// native-gRPC streams record three wire_level rows
+					// per direction: semantic + grpc-lpm-frame +
+					// h2-frame.
+					grpcH2FrameOpt := session.GRPCH2DataFrameRecordOption(ctx, p, ch.StreamID(), streamFlowCtx)
+					streamGRPCOpts := make([]grpclayer.Option, 0, len(grpcOpts)+2)
 					streamGRPCOpts = append(streamGRPCOpts, grpcOpts...)
 					streamGRPCOpts = append(streamGRPCOpts, lpmOpt)
+					streamGRPCOpts = append(streamGRPCOpts, grpcH2FrameOpt)
 
 					// USK-897: per-stream aggregator-path h2 DATA frame
 					// wire-record Option. Same wiring shape as the gRPC

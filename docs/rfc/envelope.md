@@ -299,6 +299,13 @@ type GRPCEndMessage struct {
 
 HTTP/2 frame-level bytes (frame headers, SETTINGS, WINDOW_UPDATE, etc.) are owned by the HTTP/2 Layer and are not exposed on gRPC envelopes. To observe them, attach to the HTTP/2 Layer's event stream directly (see §3.3.2).
 
+**Wire-level recording overlays.** In addition to the semantic gRPC envelopes above, the data path records two wire-level views per RPC (controlled by `internal/session/grpc_lpm_record.go` and `internal/session/grpc_h2_data_frame_record.go`):
+
+- `wire_level=grpc-lpm-frame` — one envelope per fully reassembled LPM (5-byte prefix + payload, BEFORE decompression). Captures LPM length-prefix smuggling, compressed-flag anomalies, and multi-LPM-in-one-DATA-frame packing.
+- `wire_level=h2-frame` — one envelope per H2 DATA event consumed by the gRPC Layer, BEFORE LPM reassembly. Captures per-DATA-frame boundaries that LPM reassembly hides (tiny-DATA-frame covert channels, zero-payload DATA frames between LPMs, `SETTINGS_MAX_FRAME_SIZE` boundary anomalies). Native gRPC is the third producer of this wire_level value alongside `httpaggregator` (USK-897) and the WS/SSE-over-h2 detach paths (USK-889).
+
+The two overlays produce independent per-direction sequence counters; the schemaV14 UNIQUE constraint on `(stream_id, sequence, direction, variant, wire_level)` keeps the three views (semantic + LPM + h2-frame) from colliding under the same StreamID.
+
 #### 3.2.4 RawMessage
 
 For TCP, raw-mode TLS passthrough, and any byte-chunk channel.

@@ -302,13 +302,48 @@ func sseDetachOptions(frameCB func(*envelope.Envelope)) []http2.DetachOption {
 // Returns a httpaggregator.WrapOption that installs a nil callback (no-op)
 // when p is nil so callers can unconditionally splat the result into
 // their wopts slice without branching on Pipeline availability.
+//
+// USK-899 refactor: the actual closure construction is shared with
+// GRPCH2DataFrameRecordOption via buildH2FrameRecordClosure. Both Options
+// produce wire_level=h2-frame envelopes; they differ only in the Layer
+// Option they wrap (httpaggregator.WrapOption vs grpclayer.Option), so
+// extracting the closure builder keeps the two helpers symmetric.
 func AggregatorH2FrameRecordOption(ctx context.Context, p *pipeline.Pipeline, sessionStreamID string, flowCtx envelope.EnvelopeContext) httpaggregator.WrapOption {
+	cb := buildH2FrameRecordClosure(ctx, p, sessionStreamID, flowCtx)
+	return httpaggregator.WithH2FrameRecordCallback(cb)
+}
+
+// buildH2FrameRecordClosure constructs the wire_level=h2-frame record
+// callback closure shared by AggregatorH2FrameRecordOption (USK-897) and
+// GRPCH2DataFrameRecordOption (USK-899). The closure is producer-agnostic:
+// both Layer Options call this builder and wrap the returned function in
+// their own Option type.
+//
+// Returns nil when p is nil so callers can pass the result directly to
+// httpaggregator.WithH2FrameRecordCallback / grpclayer.WithH2DataFrameRecordCallback
+// without branching on Pipeline availability.
+//
+// Closure contract (matches the documented per-Option callback contracts):
+//   - Stamps WireLevel = flow.WireLevelH2Frame on env.Context.
+//   - Rewrites env.StreamID to sessionStreamID when sessionStreamID != "".
+//   - Assigns a fresh uuid.NewString() to env.FlowID.
+//   - Assigns env.Sequence from one of two per-direction atomic counters
+//     so the schemaV14 UNIQUE constraint on
+//     (stream_id, sequence, direction, variant, wire_level) holds when
+//     the same closure is installed on both client-side and upstream-side
+//     wraps of one stream.
+//   - Drops envelopes with a zero / unknown direction defensively.
+//   - Runs the envelope through a record-only Pipeline built by
+//     h2FrameRecordPipeline (HostScope + HTTPScope + Budget + Record;
+//     no policy / transform / plugin Steps).
+func buildH2FrameRecordClosure(ctx context.Context, p *pipeline.Pipeline, sessionStreamID string, flowCtx envelope.EnvelopeContext) func(*envelope.Envelope) {
 	recPipeline := h2FrameRecordPipeline(p)
 	if recPipeline == nil {
-		// No Pipeline → no-op Option (matches the
-		// WithH2FrameRecordCallback contract: nil callback disables
-		// wire-record).
-		return httpaggregator.WithH2FrameRecordCallback(nil)
+		// No Pipeline → no-op closure. Callers wrap nil into their
+		// Option type (httpaggregator.WithH2FrameRecordCallback(nil) /
+		// grpclayer.WithH2DataFrameRecordCallback(nil)) which is the
+		// documented disable-recording contract on both Options.
+		return nil
 	}
 	// Pre-build the per-envelope EnvelopeContext template. WireLevel is
 	// always stamped from this helper, so any caller-supplied value is
@@ -317,14 +352,14 @@ func AggregatorH2FrameRecordOption(ctx context.Context, p *pipeline.Pipeline, se
 	ctxTmpl := flowCtx
 	ctxTmpl.WireLevel = flow.WireLevelH2Frame
 
-	// Per-direction sequence counters. The same Option installed on both
-	// client-side (Send) and upstream-side (Receive) aggregator wraps
+	// Per-direction sequence counters. The same closure installed on
+	// both client-side (Send) and upstream-side (Receive) Layer wraps
 	// runs independent counters; the schemaV14 UNIQUE constraint on
 	// (stream_id, sequence, direction, variant, wire_level) requires
 	// per-direction independence.
 	var sendSeq, recvSeq int64
 
-	return httpaggregator.WithH2FrameRecordCallback(func(env *envelope.Envelope) {
+	return func(env *envelope.Envelope) {
 		if env == nil {
 			return
 		}
@@ -343,10 +378,11 @@ func AggregatorH2FrameRecordOption(ctx context.Context, p *pipeline.Pipeline, se
 		case envelope.Receive:
 			env.Sequence = int(atomic.AddInt64(&recvSeq, 1) - 1)
 		default:
-			// Defensive: the aggregator never emits H2DataEvent
-			// envelopes with a zero / unknown direction, but if it ever
-			// did we drop the envelope rather than risk a sequence-space
-			// collision against the per-direction counters.
+			// Defensive: producers (aggregator + grpc layers) never
+			// emit H2DataEvent envelopes with a zero / unknown
+			// direction, but if they ever did we drop the envelope
+			// rather than risk a sequence-space collision against the
+			// per-direction counters.
 			return
 		}
 		// Apply the EnvelopeContext template. Per-envelope assignment by
@@ -358,5 +394,5 @@ func AggregatorH2FrameRecordOption(ctx context.Context, p *pipeline.Pipeline, se
 		// fire here because h2FrameRecordPipeline stripped every Step
 		// that could produce them.
 		_, _, _ = recPipeline.Run(ctx, env)
-	})
+	}
 }

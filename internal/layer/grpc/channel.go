@@ -202,6 +202,20 @@ type grpcChannel struct {
 	// wire envelope BEFORE the matching GRPCDataMessage envelope is
 	// queued. See WithLPMFrameRecordCallback for the contract.
 	lpmFrameRecordCallback func(*envelope.Envelope)
+
+	// h2DataFrameRecordCallback is the optional per-H2-DATA-frame
+	// wire-record hook installed via WithH2DataFrameRecordCallback
+	// (USK-899). When non-nil, absorbData invokes it BEFORE acquiring
+	// c.mu and BEFORE LPM reassembly with a pre-built wire envelope
+	// carrying the DATA frame payload bytes (a defensive copy of
+	// evt.Payload) and Protocol=ProtocolHTTP. The callback fires for
+	// EVERY absorbed H2DataEvent — including empty END_STREAM frames
+	// AND the error paths that return *layer.StreamError without
+	// queuing any semantic envelope (LPM cap trip, mid-LPM EOS, gzip
+	// decode failure). Analysts observe per-frame boundaries on the
+	// native-gRPC path symmetrically with the USK-897 aggregator-path
+	// coverage. See WithH2DataFrameRecordCallback for the contract.
+	h2DataFrameRecordCallback func(*envelope.Envelope)
 }
 
 // StreamID returns the inner Channel's stream identifier (one RPC = one
@@ -517,6 +531,29 @@ func (c *grpcChannel) absorbHeaders(ev *envelope.Envelope, evt *http2.H2HeadersE
 //     gRPC envelope representation; surface as
 //     *layer.StreamError{ErrorProtocol}.
 func (c *grpcChannel) absorbData(ev *envelope.Envelope, evt *http2.H2DataEvent) error {
+	// USK-899 (F-1 fix): fire the per-H2-DATA-frame wire-record callback
+	// BEFORE LPM reassembly and BEFORE acquiring c.mu. The h2-frame
+	// envelope captures the DATA frame payload as observed on the wire,
+	// so it must fire UNCONDITIONALLY — including on the LPM-cap-trip
+	// path (errMessageTooLarge below), the mid-LPM END_STREAM path, and
+	// the buildDataEnvelopeLocked error path. Those error paths are
+	// precisely the smuggling / attack-signature scenarios the
+	// wire_level=h2-frame view was designed to make observable, mirroring
+	// USK-897's aggregator-path behavior (the aggregator fires the
+	// callback BEFORE the MaxBodySize gate).
+	//
+	// The envelope construction is independent of any locked channel
+	// state (it only reads ev and evt, both per-event values not shared
+	// with other goroutines), so building and firing the callback outside
+	// c.mu is correct and contention-free. The callback contract
+	// (WithH2DataFrameRecordCallback godoc) guarantees the closure must
+	// not call back into the channel, so single-goroutine fire ordering
+	// holds: h2-frame → grpc-lpm-frame → semantic, per CLAUDE.md MITM
+	// Principle 3 (wire-record top-down by framing layer).
+	if c.h2DataFrameRecordCallback != nil {
+		c.h2DataFrameRecordCallback(buildH2DataFrameWireEnvelope(ev, evt))
+	}
+
 	c.mu.Lock()
 	dir := c.dirStateLocked(ev.Direction)
 	queuedBefore := len(c.queued)
@@ -602,6 +639,61 @@ func (c *grpcChannel) absorbData(ev *envelope.Envelope, evt *http2.H2DataEvent) 
 		c.lpmFrameRecordCallback(env)
 	}
 	return nil
+}
+
+// buildH2DataFrameWireEnvelope constructs the per-H2-DATA-frame wire-record
+// envelope dispatched to the WithH2DataFrameRecordCallback consumer
+// (USK-899). The envelope is independent of any locked channel state — it
+// only reads ev (StreamID / Direction / Context) and evt (Payload), so it
+// is safe to construct outside c.mu.
+//
+// The returned envelope mirrors the USK-889 detach-path / USK-897
+// aggregator-path h2-frame envelope shape so the same record-only
+// Pipeline + WireLevel discriminator (flow.WireLevelH2Frame) apply across
+// all three producers:
+//
+//   - Protocol  = envelope.ProtocolHTTP (the wire bytes are an HTTP/2
+//     DATA frame payload, not a gRPC LPM — the producer is gRPC, but the
+//     wire unit is HTTP/2's)
+//   - StreamID  = the inner channel's StreamID (the lower-layer view;
+//     the session orchestrator rewrites this to the session-scope
+//     identity before dispatching to the record-only Pipeline)
+//   - Direction = the inner envelope's Direction (preserved so Send /
+//     Receive symmetry is observable)
+//   - Sequence  = the inner envelope's Sequence (the orchestrator
+//     rewrites this to a per-direction counter scoped to
+//     (sessionStreamID, WireLevel=h2-frame))
+//   - Raw       = a defensive copy of the DATA frame payload bytes (no
+//     9-byte frame header — matches the USK-889 / USK-897 envelope
+//     shape; the header is reconstructable from EndStream + payload
+//     length)
+//   - Message   = nil (DATA frame wire envelopes have no L7 structured
+//     view; the per-LPM wire envelope and the GRPCDataMessage envelope
+//     queued AFTER reassembly provide the gRPC-side views)
+//   - Context   = the inner envelope's Context (carries ConnID /
+//     TargetHost / TLS / ClientAddr; the callback expects to stamp
+//     flow.WireLevelH2Frame before dispatching to the record-only
+//     Pipeline)
+//
+// The defensive copy keeps the callback contract simple — consumers may
+// retain the Raw slice without coordinating with the LPM reassembler's
+// payload buffer (which appends to its own backing array but in the
+// general case the underlying h2 frame engine may reuse evt.Payload once
+// the event is consumed). The cost is one allocation per H2 DATA event;
+// the allocation profile matches USK-897's aggregator-path callback.
+func buildH2DataFrameWireEnvelope(ev *envelope.Envelope, evt *http2.H2DataEvent) *envelope.Envelope {
+	return &envelope.Envelope{
+		StreamID:  ev.StreamID,
+		Sequence:  ev.Sequence,
+		Direction: ev.Direction,
+		Protocol:  envelope.ProtocolHTTP,
+		Raw:       cloneBytes(evt.Payload),
+		// Message intentionally nil — DATA frame wire envelopes have no
+		// L7 structured view. The session helper stamping
+		// flow.WireLevelH2Frame on Context.WireLevel is the
+		// authoritative discriminator the record path keys on.
+		Context: ev.Context,
+	}
 }
 
 // buildLPMWireEnvelopeLocked constructs the wire-record envelope for a

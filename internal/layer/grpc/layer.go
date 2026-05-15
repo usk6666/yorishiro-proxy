@@ -47,6 +47,58 @@ type options struct {
 	//
 	// nil = no-op (the channel skips the wire-record step entirely).
 	lpmFrameRecordCallback func(*envelope.Envelope)
+
+	// h2DataFrameRecordCallback is the optional per-H2-DATA-frame
+	// wire-record callback installed by the session orchestrator (USK-899).
+	// When non-nil, the channel invokes it synchronously from absorbData
+	// BEFORE LPM reassembly with a pre-built envelope carrying:
+	//
+	//   - Protocol  = envelope.ProtocolHTTP (per the H2DataEvent
+	//                 provenance — the wire bytes are an HTTP/2 DATA frame
+	//                 payload, NOT a gRPC LPM)
+	//   - StreamID  = the inner channel's StreamID
+	//   - Direction = the H2DataEvent's Direction (Send or Receive)
+	//   - Raw       = the DATA frame payload bytes (defensive copy of
+	//                 evt.Payload; no 9-byte frame header — matches the
+	//                 USK-889 detach-path / USK-897 aggregator-path
+	//                 envelope shape)
+	//   - Message   = nil (DATA frame wire envelopes have no L7
+	//                 structured view; the LPM wire envelope and the
+	//                 GRPCDataMessage envelope queued AFTER reassembly
+	//                 provide the gRPC-side views)
+	//   - Context   = the inner event's Context with WireLevel left at
+	//                 the zero value (the callback is expected to stamp
+	//                 flow.WireLevelH2Frame before forwarding to the
+	//                 record-only Pipeline)
+	//
+	// Order: callback fires BEFORE acquiring c.mu, so BEFORE the LPM
+	// reassembler consumes any of the payload bytes, and BEFORE the
+	// lpmFrameRecordCallback (which in turn fires before the
+	// GRPCDataMessage envelope is queued). The progression is h2-frame
+	// → grpc-lpm-frame → semantic, matching CLAUDE.md MITM Principle 3
+	// (wire-record first, semantic-record second) at every framing
+	// layer.
+	//
+	// Unconditional fire: the callback fires for EVERY absorbed
+	// H2DataEvent regardless of whether downstream LPM reassembly /
+	// gzip-decode / mid-LPM-EOS detection succeeds. The smuggling /
+	// attack-signature scenarios the wire_level=h2-frame view exists
+	// to surface (LPM length-prefix smuggling, decompression bombs,
+	// mid-LPM truncation) are precisely the error paths — recording
+	// those wire frames is the whole point. Mirrors USK-897's
+	// aggregator-path behavior (the aggregator fires its h2-frame
+	// callback BEFORE the MaxBodySize gate).
+	//
+	// Closes the wire_level=h2-frame producer gap left by USK-897: the
+	// native-gRPC path bypasses httpaggregator.Wrap, so the aggregator's
+	// h2-frame callback never fires here. With this callback installed,
+	// native gRPC streams produce three wire_level rows per direction
+	// (semantic + grpc-lpm-frame + h2-frame) matching gRPC-Web-over-h2
+	// and aggregator-path coverage.
+	//
+	// nil = no-op (the channel skips the h2-frame wire-record step
+	// entirely).
+	h2DataFrameRecordCallback func(*envelope.Envelope)
 }
 
 // Option tunes a Channel produced by Wrap. The Option type intentionally
@@ -117,6 +169,62 @@ func WithLPMFrameRecordCallback(cb func(*envelope.Envelope)) Option {
 	return func(o *options) { o.lpmFrameRecordCallback = cb }
 }
 
+// WithH2DataFrameRecordCallback installs a synchronous per-H2-DATA-frame
+// wire-record callback on the Channel (USK-899 v2 wave #5 — native-gRPC
+// h2-frame coverage gap close).
+//
+// Native gRPC over h2 is wrapped by grpc.Wrap directly and bypasses
+// httpaggregator.Wrap, so USK-897's aggregator-path h2-frame callback
+// never fires on this path. With this Option installed, the channel
+// invokes cb once per absorbed H2DataEvent BEFORE LPM reassembly and
+// BEFORE the per-LPM callback installed by WithLPMFrameRecordCallback.
+// The result is symmetric wire_level=h2-frame coverage across all three
+// HTTP/2 consumers — http2 detach (USK-889), httpaggregator (USK-897),
+// and native gRPC (this Option).
+//
+// See the documentation on options.h2DataFrameRecordCallback for the
+// envelope contract.
+//
+// Mirrors the per-Layer Option shape used by
+// http2.WithFrameRecordCallback (USK-889),
+// http1.WithChunkRecordCallback (USK-895),
+// grpc.WithLPMFrameRecordCallback (USK-896), and
+// httpaggregator.WithH2FrameRecordCallback (USK-897).
+// A common WireLevelTap interface is intentionally deferred to a
+// follow-up Issue (after USK-899 this is the fifth sibling — the
+// Rule-of-Three trigger fired at USK-896; refactor is scoped
+// separately for PR size control).
+//
+// The callback contract:
+//
+//   - Non-blocking: runs synchronously on the grpc channel's Next
+//     goroutine (the LPM-absorb path). A slow callback delays LPM
+//     reassembly and downstream semantic envelope emission.
+//   - Single-goroutine fire: the callback is invoked from absorbData
+//     only, BEFORE c.mu is acquired (the h2-frame wire envelope reads
+//     only the per-event ev/evt args, not any locked channel state).
+//     The callback MUST NOT call back into the grpc channel.
+//   - Unconditional fire: invoked for every absorbed H2DataEvent —
+//     including the LPM-cap-trip / gzip-decode-fail / mid-LPM-EOS
+//     error paths that return *layer.StreamError without queuing any
+//     semantic envelope. The wire DATA frame was observed; recording
+//     it is the point of wire_level=h2-frame.
+//   - Defensive copy: env.Raw is a fresh slice independent of
+//     evt.Payload. The HTTP/2 frame engine may reuse the underlying
+//     buffer once the event is consumed; the copy decouples the
+//     callback's lifetime from that ownership boundary.
+//   - Lifetime: the callback may retain env across return — the channel
+//     does not mutate it after invocation.
+//   - nil = no-op (no h2-frame wire-record envelope is produced).
+//
+// The Option is layered onto the standard grpcOpts chain assembled by
+// connector.GRPCOptionsFromBuildConfig. See
+// internal/session/grpc_h2_data_frame_record.go for the production
+// builder that constructs the callback closure + record-only Pipeline.
+func WithH2DataFrameRecordCallback(cb func(*envelope.Envelope)) Option {
+	return func(o *options) { o.h2DataFrameRecordCallback = cb }
+}
+
 // Role identifies whether the wrapped Channel is server-side (the local
 // endpoint behaves as the gRPC server) or client-side (the local endpoint
 // behaves as the gRPC client). Mirrors the convention used by
@@ -173,13 +281,14 @@ func Wrap(stream layer.Channel, firstHeaders *envelope.Envelope, role Role, opts
 	}
 
 	gc := &grpcChannel{
-		inner:                  stream,
-		role:                   role,
-		streamID:               stream.StreamID(),
-		recvDone:               make(chan struct{}),
-		maxMessageSize:         o.maxMessageSize,
-		lifecycleEngine:        o.lifecycleEngine,
-		lpmFrameRecordCallback: o.lpmFrameRecordCallback,
+		inner:                     stream,
+		role:                      role,
+		streamID:                  stream.StreamID(),
+		recvDone:                  make(chan struct{}),
+		maxMessageSize:            o.maxMessageSize,
+		lifecycleEngine:           o.lifecycleEngine,
+		lpmFrameRecordCallback:    o.lpmFrameRecordCallback,
+		h2DataFrameRecordCallback: o.h2DataFrameRecordCallback,
 	}
 	// Apply D5: only replay firstHeaders when it carries real wire bytes.
 	if firstHeaders != nil && len(firstHeaders.Raw) > 0 {
