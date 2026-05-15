@@ -13,9 +13,14 @@
 // Message) frames so the per-message wire bytes (5-byte prefix +
 // payload, before decompression) are observable as independent envelopes
 // — closing the diagnostic gap that hid LPM length-prefix smuggling and
-// compressed-flag anomalies. Future wire_level values (ws-frame, ...) are
-// scoped to follow-up Issues; the schema-level column is open enough to
-// admit them without another migration.
+// compressed-flag anomalies. USK-898 extends the discriminator to
+// gRPC-Web text variants (application/grpc-web-text[+proto]) so the
+// pre-decode base64 wire bytes are observable as independent envelopes —
+// closing the diagnostic gap that base64 padding anomalies / illegal
+// characters / encoding bombs would otherwise hide behind the in-place
+// decode performed by the grpcweb Layer. Future wire_level values
+// (ws-frame, ...) are scoped to follow-up Issues; the schema-level column
+// is open enough to admit them without another migration.
 //
 // Storage: persisted in the flows.wire_level column added by schemaV14, with
 // DEFAULT 'semantic'. The flows UNIQUE constraint is widened to
@@ -75,4 +80,26 @@ const (
 	// into a single h2 DATA payload), so the discriminator is per-protocol
 	// rather than reusing `h2-frame`.
 	WireLevelGRPCLPMFrame = "grpc-lpm-frame"
+
+	// WireLevelGRPCWebBase64 marks a gRPC-Web text-variant body envelope
+	// recorded on the gRPC-Web data path (USK-898). The Envelope.Raw on
+	// these rows is the on-the-wire base64-encoded body bytes — captured
+	// BEFORE base64-decode and BEFORE LPM frame parsing. The semantic
+	// GRPCStartMessage / GRPCDataMessage / GRPCEndMessage envelopes
+	// already expose the decoded LPM payload; the base64 wire envelope is
+	// the canonical record for base64 padding anomalies, illegal
+	// characters, and encoding-side smuggling that the in-place decode
+	// would otherwise destroy.
+	//
+	// Naming follows the agreed `<protocol>-<unit>` flat scheme (USK-893
+	// Q12): "grpcweb-base64" identifies both the protocol (gRPC-Web) and
+	// the wire unit (the base64 text body). The choice is forward-
+	// compatible: a future gRPC-Web text encoding other than base64 would
+	// land on its own discriminator rather than overloading this one.
+	//
+	// Fired only on text variants (application/grpc-web-text[+proto] —
+	// IsBase64Encoded matches both). Binary variants
+	// (application/grpc-web[+proto]) do NOT fire because they never pass
+	// through the base64 decode branch.
+	WireLevelGRPCWebBase64 = "grpcweb-base64"
 )

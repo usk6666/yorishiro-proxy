@@ -153,6 +153,25 @@ const (
 	// (USK-896).
 	MaxGRPCLPMFrameRecordsPerStream = 10000
 
+	// MaxGRPCWebBase64RecordsPerStream limits the number of gRPC-Web
+	// text-variant body envelopes (wire_level="grpcweb-base64") recorded
+	// per stream on the gRPC-Web data path (USK-898). Once exceeded, the
+	// per-body record callback is suppressed for further inbound text
+	// bodies on the affected stream; wire forwarding is unaffected
+	// because the suppression skips only the RecordStep dispatch, not
+	// the base64 decode + LPM parse that produces the semantic envelopes
+	// the consumer observes.
+	//
+	// Default matches MaxGRPCMessagesPerStream so a single RPC that
+	// exhausts the per-stream gRPC semantic budget also exhausts the
+	// per-stream base64 wire budget at the same threshold — operator
+	// mental model "long-running gRPC streams cap at ~10k messages"
+	// applies uniformly across semantic and wire views.
+	//
+	// Wired via internal/pipeline/RecordStep.WithGRPCWebBase64MaxPerStream
+	// (USK-898).
+	MaxGRPCWebBase64RecordsPerStream = 10000
+
 	// MaxWebSocketFrameSize limits the maximum payload size of a single
 	// WebSocket frame. WebSocket frames can theoretically be up to 2^63
 	// bytes per RFC 6455; this constant caps them at 16 MiB to prevent

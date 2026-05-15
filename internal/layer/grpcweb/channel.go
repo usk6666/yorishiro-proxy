@@ -83,17 +83,80 @@ type channel struct {
 	// paths both produce End envelopes.
 	lifecycleEngine *pluginv2.Engine
 	onEndOnce       sync.Once
+
+	// encodedFormRecordCallback is the optional per-body wire-record
+	// hook installed via WithEncodedFormRecordCallback (USK-898). When
+	// non-nil, refillFromHTTPMessage invokes it on the text-variant
+	// (isBase64=true) branch with the on-wire base64 body bytes BEFORE
+	// the layer base64-decodes + parses LPM frames. See
+	// WithEncodedFormRecordCallback for the contract.
+	encodedFormRecordCallback func(*envelope.Envelope)
 }
 
 // newChannel constructs the wrapper.
 func newChannel(inner layer.Channel, role Role, o options) *channel {
 	return &channel{
-		inner:           inner,
-		role:            role,
-		recvDone:        make(chan struct{}),
-		maxMessageSize:  o.maxMessageSize,
-		lifecycleEngine: o.lifecycleEngine,
+		inner:                     inner,
+		role:                      role,
+		recvDone:                  make(chan struct{}),
+		maxMessageSize:            o.maxMessageSize,
+		lifecycleEngine:           o.lifecycleEngine,
+		encodedFormRecordCallback: o.encodedFormRecordCallback,
 	}
+}
+
+// maybeFireEncodedFormRecord is the entrypoint to fireEncodedFormRecord
+// that hides the isBase64 + nil-callback + empty-body gating from
+// refillFromHTTPMessage so that function stays under the gocyclo
+// threshold. The negative-test contract (binary variants do NOT fire
+// the callback) remains enforced by code structure — the isBase64
+// check lives here, inside the channel method, not in the caller.
+func (c *channel) maybeFireEncodedFormRecord(src *envelope.Envelope, dir envelope.Direction, body []byte, isBase64 bool) {
+	if !isBase64 || c.encodedFormRecordCallback == nil || len(body) == 0 {
+		return
+	}
+	c.fireEncodedFormRecord(src, dir, body)
+}
+
+// fireEncodedFormRecord dispatches the per-body wire-record envelope
+// for a text-variant (base64-encoded) gRPC-Web body. Builds the envelope
+// from the inbound src envelope's identity and a defensive copy of the
+// on-wire base64 body bytes, then invokes the callback synchronously.
+//
+// The callback contract (WithEncodedFormRecordCallback) requires that
+// the wire bytes are observable BEFORE the in-place base64-decode runs.
+// Callers (refillFromHTTPMessage) must invoke this method before
+// DecodeBodyWithMaxMessageSize.
+//
+// Defensive copy: the body slice passed in is owned by the channel's
+// materializeBody path. The callback may retain the wire envelope
+// across goroutines (a record-only Pipeline may write to SQLite
+// asynchronously), so we hand it an independent copy. This mirrors the
+// USK-896 grpc LPM record callback's defensive-copy contract.
+//
+// Message intentionally nil — base64 wire envelopes have no L7
+// structured view by design (the GRPCStart / GRPCData / GRPCEnd
+// envelopes queued by refillFromHTTPMessage carry the decoded view).
+// The session helper (GRPCWebBase64RecordOption) dispatches through a
+// record-only Pipeline that tolerates nil Message (matching the
+// USK-895 h1-chunk and USK-896 grpc-lpm-frame paths).
+//
+// The envelope intentionally leaves Sequence at the zero value; the
+// session orchestrator's record-only callback (built in
+// session.GRPCWebBase64RecordOption) rewrites it from a per-Direction
+// counter before dispatching the envelope to the record-only Pipeline.
+func (c *channel) fireEncodedFormRecord(src *envelope.Envelope, dir envelope.Direction, body []byte) {
+	rawCopy := make([]byte, len(body))
+	copy(rawCopy, body)
+	wireEnv := &envelope.Envelope{
+		StreamID:  src.StreamID,
+		Direction: dir,
+		Protocol:  envelope.ProtocolGRPCWeb,
+		Raw:       rawCopy,
+		// Message intentionally nil — see godoc.
+		Context: src.Context,
+	}
+	c.encodedFormRecordCallback(wireEnv)
 }
 
 // fireOnEnd dispatches (grpc-web, on_end) hooks for the first emitted
@@ -226,6 +289,13 @@ func (c *channel) refillFromHTTPMessage(ctx context.Context, env *envelope.Envel
 	// (when this Layer is RoleServer reading a request, msg is the request).
 	contentType := headerGet(msg.Headers, "content-type")
 	isBase64 := IsBase64Encoded(contentType)
+
+	// USK-898: per-body wire-record callback. Fired BEFORE the in-place
+	// base64 decode + LPM parse so the wire snapshot is preserved even
+	// when the decode fails (ErrMalformedBase64). Fired ONLY on the
+	// text-variant branch — binary variants (application/grpc-web[+proto])
+	// skip this entire block by design.
+	c.maybeFireEncodedFormRecord(env, dir, bodyBytes, isBase64)
 
 	// Extract gRPC-specific metadata fields.
 	encoding := strings.TrimSpace(headerGet(msg.Headers, "grpc-encoding"))

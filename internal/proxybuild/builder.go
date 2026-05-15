@@ -244,6 +244,17 @@ type Deps struct {
 	// dispatch.
 	RecordGRPCLPMFrameMaxPerStream int
 
+	// RecordGRPCWebBase64MaxPerStream caps the number of gRPC-Web
+	// text-variant body wire envelopes (WireLevel=grpcweb-base64,
+	// pre-decode base64 body bytes captured by the grpcweb Layer's
+	// per-body record callback) RecordStep persists per stream (USK-898).
+	// Zero uses config.MaxGRPCWebBase64RecordsPerStream. Wire forwarding
+	// is unaffected — the base64-record callback fires inside
+	// grpcweb.channel.refillFromHTTPMessage BEFORE the in-place base64
+	// decode + LPM parse, and the cap suppresses only the downstream
+	// RecordStep dispatch.
+	RecordGRPCWebBase64MaxPerStream int
+
 	// --- Optional manager-level state (consumed by Manager wiring) ---
 
 	// UpstreamProxy is the initial upstream proxy URL. Stored on the
@@ -585,6 +596,16 @@ func buildPipeline(deps Deps, encoders *pipeline.WireEncoderRegistry, logger *sl
 		grpcLPMCap = config.MaxGRPCLPMFrameRecordsPerStream
 	}
 	recordOpts = append(recordOpts, pipeline.WithGRPCLPMFrameMaxPerStream(grpcLPMCap))
+	// USK-898: per-stream cap for gRPC-Web base64 body wire envelopes
+	// (grpc-web text-variant data path). Zero falls back to the package
+	// default so synthetic test stacks that omit the field still observe
+	// a positive cap consistent with the USK-889 / USK-895 / USK-896 /
+	// USK-897 pattern.
+	grpcWebBase64Cap := deps.RecordGRPCWebBase64MaxPerStream
+	if grpcWebBase64Cap <= 0 {
+		grpcWebBase64Cap = config.MaxGRPCWebBase64RecordsPerStream
+	}
+	recordOpts = append(recordOpts, pipeline.WithGRPCWebBase64MaxPerStream(grpcWebBase64Cap))
 
 	safetyStep := pipeline.NewSafetyStep(deps.HTTPSafetyEngine, deps.WSSafetyEngine, deps.GRPCSafetyEngine, logger)
 	return pipeline.New(
@@ -835,9 +856,26 @@ func buildOnHTTP2Stack(p *pipeline.Pipeline, deps Deps, logger *slog.Logger) con
 					aggH2FrameOpt := session.AggregatorH2FrameRecordOption(ctx, p, ch.StreamID(), streamFlowCtx)
 					streamAggOpts := []httpaggregator.WrapOption{aggH2FrameOpt}
 
+					// USK-898: per-stream gRPC-Web base64 body wire-
+					// record Option. Same wiring shape as the gRPC LPM
+					// Option above — single closure shared across
+					// client-side + upstream-side grpcweb wraps; the
+					// closure's per-direction counters keep Send / Receive
+					// in independent sequence spaces; the closure rewrites
+					// upstream-side env.StreamID to the client-side
+					// session-scope StreamID for unification. Fires only
+					// on text variants (application/grpc-web-text[+proto])
+					// — binary variants do not pass through the layer's
+					// base64 decode branch and the channel does not fire
+					// the callback by construction.
+					grpcWebBase64Opt := session.GRPCWebBase64RecordOption(ctx, p, ch.StreamID(), streamFlowCtx)
+					streamGRPCWebOpts := make([]grpcweb.Option, 0, len(grpcwebOpts)+1)
+					streamGRPCWebOpts = append(streamGRPCWebOpts, grpcwebOpts...)
+					streamGRPCWebOpts = append(streamGRPCWebOpts, grpcWebBase64Opt)
+
 					aggCh, derr := connector.DispatchH2StreamFull(
 						ctx, ch, httpaggregator.RoleServer,
-						clientLOpts, logger, streamGRPCOpts, grpcwebOpts, streamAggOpts,
+						clientLOpts, logger, streamGRPCOpts, streamGRPCWebOpts, streamAggOpts,
 					)
 					if derr != nil {
 						logger.Debug("proxybuild: h2 dispatch failed",
@@ -871,7 +909,7 @@ func buildOnHTTP2Stack(p *pipeline.Pipeline, deps Deps, logger *slog.Logger) con
 							reqProto = env.Protocol
 						}
 						return connector.WrapH2UpstreamForDispatchFull(
-							upCh, reqProto, lopts, streamGRPCOpts, grpcwebOpts, streamAggOpts,
+							upCh, reqProto, lopts, streamGRPCOpts, streamGRPCWebOpts, streamAggOpts,
 						), nil
 					}
 					if err := session.RunStackSessionExchange(ctx, stack, aggCh, dial, p, sessOpts); err != nil && !errors.Is(err, context.Canceled) {
