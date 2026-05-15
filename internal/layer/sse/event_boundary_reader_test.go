@@ -261,6 +261,133 @@ func TestEventBoundaryReader_LineLongerThanBufioBuffer(t *testing.T) {
 	}
 }
 
+// USK-907: WHATWG HTML §9.2.2 ABNF treats CR / LF / CRLF as equivalent
+// line terminators. The pre-fix EventBoundaryReader scanned with
+// br.ReadSlice('\n'), so a CR-only stream advanced only at EOF — the
+// boundary table's "\r\r" entry was unreachable mid-stream because no LF
+// was ever read. The fix swaps the line-segment reader for a CR-or-LF
+// helper while keeping the boundary table architecture intact.
+
+// TestEventBoundaryReader_CROnlyEventSeparator pins the CR-only mid-stream
+// boundary advance. Two events separated by "\r\r" must be returned as
+// two distinct Next() calls without buffering until EOF.
+func TestEventBoundaryReader_CROnlyEventSeparator(t *testing.T) {
+	wire := "data: a\r\rdata: b\r\r"
+	r := NewEventBoundaryReader(strings.NewReader(wire), 1024)
+
+	got, err := r.Next()
+	if err != nil {
+		t.Fatalf("first Next: %v", err)
+	}
+	if string(got) != "data: a\r\r" {
+		t.Fatalf("first Next = %q, want %q", got, "data: a\r\r")
+	}
+
+	got, err = r.Next()
+	if err != nil {
+		t.Fatalf("second Next: %v", err)
+	}
+	if string(got) != "data: b\r\r" {
+		t.Fatalf("second Next = %q, want %q", got, "data: b\r\r")
+	}
+
+	got2, err := r.Next()
+	if !errors.Is(err, io.EOF) {
+		t.Fatalf("third Next err = %v, want io.EOF", err)
+	}
+	if got2 != nil {
+		t.Fatalf("third Next bytes = %q, want nil", got2)
+	}
+}
+
+// chunkedReader yields one byte per Read() call to exercise the CRLF-spans-
+// chunks safety contract: when CR and LF arrive in separate Read() calls
+// the readLineSegment helper must reassemble them into one atomic CRLF
+// segment so the boundary reader does not interpret CRLF as
+// `CR + empty-line + LF`.
+type chunkedReader struct {
+	data []byte
+	pos  int
+}
+
+func (c *chunkedReader) Read(p []byte) (int, error) {
+	if c.pos >= len(c.data) {
+		return 0, io.EOF
+	}
+	if len(p) == 0 {
+		return 0, nil
+	}
+	p[0] = c.data[c.pos]
+	c.pos++
+	return 1, nil
+}
+
+// TestEventBoundaryReader_CROnlyChunkedReader feeds the CR-only event
+// stream one byte at a time. The boundary reader must still emit two
+// distinct events.
+func TestEventBoundaryReader_CROnlyChunkedReader(t *testing.T) {
+	wire := "data: a\r\rdata: b\r\r"
+	r := NewEventBoundaryReader(&chunkedReader{data: []byte(wire)}, 1024)
+
+	got, err := r.Next()
+	if err != nil {
+		t.Fatalf("first Next: %v", err)
+	}
+	if string(got) != "data: a\r\r" {
+		t.Fatalf("first Next = %q, want %q", got, "data: a\r\r")
+	}
+
+	got, err = r.Next()
+	if err != nil {
+		t.Fatalf("second Next: %v", err)
+	}
+	if string(got) != "data: b\r\r" {
+		t.Fatalf("second Next = %q, want %q", got, "data: b\r\r")
+	}
+}
+
+// TestEventBoundaryReader_CRLFChunkedReader proves CRLF stays atomic when
+// the CR and LF bytes arrive in separate Read() calls.
+func TestEventBoundaryReader_CRLFChunkedReader(t *testing.T) {
+	wire := "event: ping\r\ndata: 1\r\n\r\n"
+	r := NewEventBoundaryReader(&chunkedReader{data: []byte(wire)}, 1024)
+
+	got, err := r.Next()
+	if err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+	if string(got) != wire {
+		t.Fatalf("Next = %q, want %q (CRLF must round-trip byte-identical)", got, wire)
+	}
+}
+
+// TestEventBoundaryReader_MixedCRLFAndCROnly alternates CRLF-CRLF and
+// CR-CR boundaries in one stream — exercises the boundary table's "\r\n\r\n"
+// + "\r\r" coverage with the new line-segment driver.
+func TestEventBoundaryReader_MixedCRLFAndCROnly(t *testing.T) {
+	wire := "data: a\r\n\r\ndata: b\r\rdata: c\r\n\r\n"
+	r := NewEventBoundaryReader(strings.NewReader(wire), 1024)
+
+	want := []string{
+		"data: a\r\n\r\n",
+		"data: b\r\r",
+		"data: c\r\n\r\n",
+	}
+	for i, exp := range want {
+		got, err := r.Next()
+		if err != nil {
+			t.Fatalf("Next[%d]: %v", i, err)
+		}
+		if string(got) != exp {
+			t.Fatalf("Next[%d] = %q, want %q", i, got, exp)
+		}
+	}
+	_, err := r.Next()
+	if !errors.Is(err, io.EOF) {
+		t.Fatalf("final Next err = %v, want io.EOF", err)
+	}
+}
+
 // TestFindEventBoundary exercises the boundary-detection helper directly
 // for each terminator shape.
 func TestFindEventBoundary(t *testing.T) {

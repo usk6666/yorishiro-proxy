@@ -82,10 +82,75 @@ func NewSSEParser(r io.Reader, maxEventSize int) *SSEParser {
 	}
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 4096), maxEventSize)
+	scanner.Split(splitSSELine)
 	return &SSEParser{
 		scanner: scanner,
 		maxSize: maxEventSize,
 	}
+}
+
+// splitSSELine is a bufio.SplitFunc that recognises CR / LF / CRLF as
+// equivalent line terminators per WHATWG HTML §9.2.2 (Server-sent events —
+// Parsing an event stream):
+//
+//	end-of-line = ( cr lf / cr / lf )
+//
+// Behavior:
+//   - If data contains LF: split at LF; returned token excludes the LF and
+//     the immediately preceding CR (CRLF is consumed as one terminator).
+//   - If data contains CR followed by a non-LF byte: split at CR; returned
+//     token excludes the CR (CR-only terminator).
+//   - If data ends in a bare CR and atEOF is false: request more data
+//     (the CR may be the start of a CRLF that spans two reads).
+//   - At atEOF with non-empty trailing bytes: return them as the final token
+//     (with any single trailing CR stripped — CR alone at EOF is its own
+//     terminator).
+//   - At atEOF with empty data: return (0, nil, nil) signalling EOF.
+//
+// This contract mirrors bufio.ScanLines' partial-buffer discipline so the
+// scanner safely handles CRLF-spans-chunks.
+func splitSSELine(data []byte, atEOF bool) (advance int, token []byte, err error) {
+	if atEOF && len(data) == 0 {
+		return 0, nil, nil
+	}
+	for i := 0; i < len(data); i++ {
+		switch data[i] {
+		case '\n':
+			// LF terminator. If the immediately preceding byte is CR,
+			// the pair is a single CRLF terminator and the token must
+			// exclude both bytes.
+			if i > 0 && data[i-1] == '\r' {
+				return i + 1, data[:i-1], nil
+			}
+			return i + 1, data[:i], nil
+		case '\r':
+			// CR terminator candidate. If the next byte is LF, this is
+			// a CRLF terminator — let the LF branch on the next loop
+			// iteration consume both bytes atomically.
+			if i+1 < len(data) {
+				if data[i+1] == '\n' {
+					continue
+				}
+				// Next byte is some non-LF byte; CR is its own
+				// terminator.
+				return i + 1, data[:i], nil
+			}
+			// CR is the last buffered byte. If atEOF, this CR is the
+			// final terminator; emit the preceding bytes as the token.
+			// Otherwise request more data — the next read may yield
+			// the LF half of a CRLF.
+			if atEOF {
+				return i + 1, data[:i], nil
+			}
+			return 0, nil, nil
+		}
+	}
+	// No terminator found. At EOF, return the entire remainder as the
+	// final token. Otherwise request more data.
+	if atEOF {
+		return len(data), data, nil
+	}
+	return 0, nil, nil
 }
 
 // Next reads and returns the next SSE event from the stream.

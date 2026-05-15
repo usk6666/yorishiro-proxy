@@ -523,6 +523,139 @@ func TestSSEParser_Anomaly_DuplicateIDOnDirectiveOnlyEvent(t *testing.T) {
 	}
 }
 
+// USK-907: WHATWG HTML §9.2.2 ABNF treats CR / LF / CRLF as equivalent
+// line terminators. The pre-fix parser used bufio.Scanner's default
+// ScanLines split function, which only recognises LF (with trailing CR
+// stripped) — a CR-only stream collapsed into one giant data: field. The
+// fix wires a custom splitSSELine that honours all three terminators.
+
+// TestSSEParser_Next_CROnlyTerminators feeds the SSE-P5-04 reproduction
+// recipe: three "data:" fields separated by bare CR with no terminating
+// blank line. Per WHATWG §9.2.2 the three data: fields collect into a
+// single event whose Data joins the values with '\n' on EOS dispatch.
+func TestSSEParser_Next_CROnlyTerminators(t *testing.T) {
+	input := "data: a\rdata: b\rdata: c\r"
+	parser := NewSSEParser(strings.NewReader(input), 0)
+
+	ev, err := parser.Next()
+	if err != nil {
+		t.Fatalf("Next() error: %v", err)
+	}
+	if ev.Data != "a\nb\nc" {
+		t.Errorf("Data = %q, want %q", ev.Data, "a\nb\nc")
+	}
+	if _, err := parser.Next(); err != io.EOF {
+		t.Errorf("trailing Next() = %v, want io.EOF", err)
+	}
+}
+
+// TestSSEParser_Next_CRLFTerminators is a regression-pin: pre-USK-907 the
+// parser had zero CRLF tests. The fix introduces a custom splitter — pin
+// the CRLF behaviour explicitly so a future regression in splitSSELine
+// surfaces immediately.
+func TestSSEParser_Next_CRLFTerminators(t *testing.T) {
+	input := "data: a\r\ndata: b\r\n\r\n"
+	parser := NewSSEParser(strings.NewReader(input), 0)
+
+	ev, err := parser.Next()
+	if err != nil {
+		t.Fatalf("Next() error: %v", err)
+	}
+	if ev.Data != "a\nb" {
+		t.Errorf("Data = %q, want %q (no CR retained in field value)", ev.Data, "a\nb")
+	}
+	if strings.ContainsRune(ev.Data, '\r') {
+		t.Errorf("Data = %q must not contain CR; CRLF is one terminator per WHATWG §9.2", ev.Data)
+	}
+}
+
+// TestSSEParser_Next_MixedTerminators exercises a single event that mixes
+// CR, LF, and CRLF terminators. WHATWG §9.2.2 treats them as equivalent so
+// the resulting payload is identical to an LF-only event.
+func TestSSEParser_Next_MixedTerminators(t *testing.T) {
+	input := "data: a\rdata: b\ndata: c\r\n\r\n"
+	parser := NewSSEParser(strings.NewReader(input), 0)
+
+	ev, err := parser.Next()
+	if err != nil {
+		t.Fatalf("Next() error: %v", err)
+	}
+	if ev.Data != "a\nb\nc" {
+		t.Errorf("Data = %q, want %q", ev.Data, "a\nb\nc")
+	}
+}
+
+// TestSSEParser_Next_CROnlyEventSeparator covers a CR-only blank-line
+// boundary between events: "\r\r" (two CR back-to-back) acts as the
+// equivalent of "\n\n".
+func TestSSEParser_Next_CROnlyEventSeparator(t *testing.T) {
+	input := "data: a\r\rdata: b\r\r"
+	parser := NewSSEParser(strings.NewReader(input), 0)
+
+	ev1, err := parser.Next()
+	if err != nil {
+		t.Fatalf("first Next() error: %v", err)
+	}
+	if ev1.Data != "a" {
+		t.Errorf("event1.Data = %q, want %q", ev1.Data, "a")
+	}
+
+	ev2, err := parser.Next()
+	if err != nil {
+		t.Fatalf("second Next() error: %v", err)
+	}
+	if ev2.Data != "b" {
+		t.Errorf("event2.Data = %q, want %q", ev2.Data, "b")
+	}
+
+	if _, err := parser.Next(); err != io.EOF {
+		t.Errorf("trailing Next() = %v, want io.EOF", err)
+	}
+}
+
+// TestSSEParser_Next_TrailingBareCRAtEOF asserts that a stream ending in a
+// bare CR does not panic and does not retain the CR in the field value.
+// The bare CR at EOF is treated as a complete line terminator per WHATWG
+// §9.2.2.
+func TestSSEParser_Next_TrailingBareCRAtEOF(t *testing.T) {
+	input := "data: tail\r"
+	parser := NewSSEParser(strings.NewReader(input), 0)
+
+	ev, err := parser.Next()
+	if err != nil {
+		t.Fatalf("Next() error: %v", err)
+	}
+	if ev.Data != "tail" {
+		t.Errorf("Data = %q, want %q (bare-CR at EOF must not leak into value)", ev.Data, "tail")
+	}
+	if strings.ContainsRune(ev.Data, '\r') {
+		t.Errorf("Data = %q must not contain CR", ev.Data)
+	}
+}
+
+// TestSSEParser_Next_CROnlyOversize is the Principle #5 (graceful
+// attacker-input handling) regression pin. A CR-only stream that exceeds
+// the configured maxEventSize must surface the same "exceeds maximum size"
+// error as an LF-only oversize stream. The fix preserves
+// scanner.Buffer(..., maxEventSize); this test locks that contract against
+// a future refactor that drops the cap.
+func TestSSEParser_Next_CROnlyOversize(t *testing.T) {
+	// Build a CR-only stream with one giant data: field that exceeds the
+	// 100-byte cap. Pre-fix this looked like one 200+ byte "line" to
+	// the parser's LF-only Scanner anyway; the test pins that behaviour
+	// is preserved with the new CR-or-LF splitter.
+	data := "data: " + strings.Repeat("x", 200) + "\r"
+	parser := NewSSEParser(strings.NewReader(data), 100)
+
+	_, err := parser.Next()
+	if err == nil {
+		t.Fatal("Next() should return error for oversized CR-only event")
+	}
+	if !strings.Contains(err.Error(), "exceeds maximum size") {
+		t.Errorf("error message = %q, want containing 'exceeds maximum size'", err.Error())
+	}
+}
+
 func TestParseSSEField(t *testing.T) {
 	tests := []struct {
 		line      string

@@ -83,7 +83,7 @@ func (e *EventBoundaryReader) Next() ([]byte, error) {
 			return cloneBytesSnapshot(out), nil
 		}
 
-		line, err := e.br.ReadSlice('\n')
+		line, err := readLineSegment(e.br)
 		if len(line) > 0 {
 			if len(e.buf)+len(line) > e.max {
 				// Append what we can (up to the cap) so the partial
@@ -195,4 +195,57 @@ func cloneBytesSnapshot(b []byte) []byte {
 	out := make([]byte, len(b))
 	copy(out, b)
 	return out
+}
+
+// readLineSegment returns bytes up to and including the first '\r' or '\n'
+// encountered in br. It mirrors bufio.ReadSlice('\n') semantics but recognises
+// CR as an equally valid line terminator per WHATWG HTML §9.2 (Server-sent
+// events).
+//
+// Returns:
+//   - (line, nil) on a complete segment terminated by '\n', '\r' (followed
+//     by a non-LF byte), or '\r\n'.
+//   - (line, io.EOF) when underlying reader returns EOF before a terminator
+//     is found; line holds the trailing bytes (may be empty). A line that
+//     ends in a bare '\r' at EOF returns the '\r' as part of the segment
+//     (CR alone at EOF is its own complete terminator).
+//   - (line, otherErr) for other read errors; line holds bytes accumulated
+//     before the error.
+//
+// CRLF-spans-buffer safety: ReadByte sees the underlying byte stream one
+// byte at a time, so a CRLF split across two reads is naturally
+// reassembled — when '\r' is read and the next ReadByte yields '\n', both
+// are appended to the same returned segment so CRLF stays atomic. This
+// prevents a downstream consumer from interpreting a CRLF as
+// `CR + empty-line + LF`.
+//
+// Note: this helper performs byte-at-a-time reads. The caller
+// (EventBoundaryReader) wraps the upstream reader in a bufio.Reader so
+// each ReadByte hits the bufio buffer, not a syscall.
+func readLineSegment(br *bufio.Reader) ([]byte, error) {
+	var line []byte
+	for {
+		c, err := br.ReadByte()
+		if err != nil {
+			return line, err
+		}
+		line = append(line, c)
+		if c == '\n' {
+			return line, nil
+		}
+		if c == '\r' {
+			// CR terminator candidate. If the next byte is LF, treat
+			// CRLF as one atomic terminator segment. Peek (not ReadByte)
+			// so we don't consume the next byte if it isn't LF.
+			next, perr := br.Peek(1)
+			if perr == nil && len(next) == 1 && next[0] == '\n' {
+				if _, dErr := br.ReadByte(); dErr == nil {
+					line = append(line, '\n')
+				}
+			}
+			// Whether or not LF followed, the CR (or CRLF) closes the
+			// segment.
+			return line, nil
+		}
+	}
 }
