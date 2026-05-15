@@ -22,6 +22,31 @@ type options struct {
 	// with absorb), so the hook runs before the inner HTTP/2 channel
 	// terminates and clears stream_state.
 	lifecycleEngine *pluginv2.Engine
+
+	// lpmFrameRecordCallback is the optional per-LPM wire-record callback
+	// installed by the session orchestrator (USK-896). When non-nil, the
+	// channel invokes it synchronously from absorbData with a pre-built
+	// envelope carrying:
+	//
+	//   - Protocol  = envelope.ProtocolGRPC
+	//   - StreamID  = the inner channel's StreamID
+	//   - Direction = the LPM's Direction (Send or Receive)
+	//   - Raw       = LPM wire bytes (5-byte prefix + payload, BEFORE
+	//                 decompression)
+	//   - Message   = nil (LPM wire envelopes have no L7 structured view
+	//                 by design — the GRPCDataMessage envelope queued
+	//                 immediately AFTER provides the decompressed view)
+	//   - Context   = the inner event's Context with WireLevel left at
+	//                 the zero value (the callback is expected to stamp
+	//                 flow.WireLevelGRPCLPMFrame before forwarding to
+	//                 the record-only Pipeline)
+	//
+	// Order: callback fires BEFORE the GRPCDataMessage envelope is queued
+	// for emission (per CLAUDE.md MITM Principle 3 — wire-record first,
+	// semantic-record second).
+	//
+	// nil = no-op (the channel skips the wire-record step entirely).
+	lpmFrameRecordCallback func(*envelope.Envelope)
 }
 
 // Option tunes a Channel produced by Wrap. The Option type intentionally
@@ -50,6 +75,46 @@ func WithMaxMessageSize(n uint32) Option {
 // live stream_state from earlier on_data hooks. nil = no-op.
 func WithLifecycleEngine(e *pluginv2.Engine) Option {
 	return func(o *options) { o.lifecycleEngine = e }
+}
+
+// WithLPMFrameRecordCallback installs a synchronous per-LPM wire-record
+// callback on the Channel (USK-896 v2 wave #2 — defense-in-depth gRPC
+// LPM smuggling visibility). The callback fires once per fully reassembled
+// LPM, from grpcChannel.absorbData, BEFORE the corresponding semantic
+// GRPCDataMessage envelope is queued for emission. See the documentation
+// on options.lpmFrameRecordCallback for the envelope contract.
+//
+// Mirrors the per-Layer Option shape used by
+// http2.WithFrameRecordCallback (USK-889) and
+// http1.WithChunkRecordCallback (USK-895). A common WireLevelTap
+// interface is intentionally deferred to a follow-up Issue (USK-896 hits
+// the Rule of Three; the refactor is scoped separately).
+//
+// The callback contract:
+//
+//   - Non-blocking: runs synchronously on the grpc channel's Next
+//     goroutine (the LPM reassembly path). A slow callback delays semantic
+//     envelope emission.
+//   - Single-goroutine fire: the callback is invoked from absorbData only,
+//     AFTER c.mu has been released (the LPM wire envelopes are collected
+//     while the mutex is held, then dispatched outside the critical
+//     section so a record-only Pipeline that writes to SQLite does not
+//     block the channel mutex). The callback MUST NOT call back into the
+//     grpc channel — taking c.mu from the callback would race with the
+//     channel's own Next goroutine rather than deadlocking, but either
+//     way the channel is treated as an opaque resource by callback
+//     consumers.
+//   - Lifetime: the LPM Raw bytes are a fresh slice owned by the channel.
+//     The callback may retain the slice across return — the channel does
+//     not mutate it after invocation.
+//   - nil = no-op (no wire-record envelope is produced).
+//
+// The Option is layered onto the standard grpcOpts chain assembled by
+// connector.GRPCOptionsFromBuildConfig. See
+// internal/session/grpc_lpm_record.go for the production builder that
+// constructs the callback closure + record-only Pipeline.
+func WithLPMFrameRecordCallback(cb func(*envelope.Envelope)) Option {
+	return func(o *options) { o.lpmFrameRecordCallback = cb }
 }
 
 // Role identifies whether the wrapped Channel is server-side (the local
@@ -108,12 +173,13 @@ func Wrap(stream layer.Channel, firstHeaders *envelope.Envelope, role Role, opts
 	}
 
 	gc := &grpcChannel{
-		inner:           stream,
-		role:            role,
-		streamID:        stream.StreamID(),
-		recvDone:        make(chan struct{}),
-		maxMessageSize:  o.maxMessageSize,
-		lifecycleEngine: o.lifecycleEngine,
+		inner:                  stream,
+		role:                   role,
+		streamID:               stream.StreamID(),
+		recvDone:               make(chan struct{}),
+		maxMessageSize:         o.maxMessageSize,
+		lifecycleEngine:        o.lifecycleEngine,
+		lpmFrameRecordCallback: o.lpmFrameRecordCallback,
 	}
 	// Apply D5: only replay firstHeaders when it carries real wire bytes.
 	if firstHeaders != nil && len(firstHeaders.Raw) > 0 {

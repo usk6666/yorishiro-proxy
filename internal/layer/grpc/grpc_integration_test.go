@@ -434,6 +434,13 @@ type pipelineOpts struct {
 	// of the e2e-suite defaults (USK-802 cap test wiring). Empty (nil) =
 	// no extra Options.
 	recordOpts []pipeline.Option
+	// extraGRPCOptionsFn is the optional builder for additional
+	// grpclayer.Option values passed to every grpclayer.Wrap call in
+	// handleProxyConn. Called once per (pipeline, client-side stream)
+	// pair so the closure can capture the per-stream session-scope
+	// StreamID (USK-896 LPM record callback wiring with StreamID
+	// unification). Empty (nil) = no extra Options.
+	extraGRPCOptionsFn func(p *pipeline.Pipeline, sessionStreamID string) []grpclayer.Option
 }
 
 func buildPipeline(store flow.Writer, opts pipelineOpts) *pipeline.Pipeline {
@@ -588,7 +595,25 @@ func handleProxyConn(ctx context.Context, t *testing.T, clientConn net.Conn, iss
 			go func(ch layer.Channel) {
 				defer wg.Done()
 				t.Logf("proxy: client stream open")
-				aggCh, derr := connector.DispatchH2Stream(ctx, ch, httpaggregator.RoleServer, clientLOpts, slog.Default())
+				pipe := buildPipeline(store, opts)
+
+				// USK-896: per-stream extra gRPC Options (e.g. the LPM
+				// record callback) are built once per (pipeline, client-
+				// side stream) pair and applied to both the client-side
+				// DispatchH2Stream wrap and the upstream dial-time
+				// grpclayer.Wrap. The closure captures the client-side
+				// StreamID so the LPM record callback can rewrite the
+				// upstream-side env.StreamID (which differs because
+				// upH2.OpenStream allocates a new UUID per upstream
+				// stream) to the client-side identity, mirroring how
+				// session.upstreamToClient unifies the semantic
+				// envelopes.
+				var extraGRPCOpts []grpclayer.Option
+				if opts.extraGRPCOptionsFn != nil {
+					extraGRPCOpts = opts.extraGRPCOptionsFn(pipe, ch.StreamID())
+				}
+
+				aggCh, derr := connector.DispatchH2Stream(ctx, ch, httpaggregator.RoleServer, clientLOpts, slog.Default(), extraGRPCOpts...)
 				if derr != nil {
 					t.Logf("proxy: dispatch error: %v", derr)
 					_ = ch.Close()
@@ -604,12 +629,11 @@ func handleProxyConn(ctx context.Context, t *testing.T, clientConn net.Conn, iss
 					t.Logf("proxy: upstream stream opened streamID=%s", upCh.StreamID())
 					if env != nil && env.Protocol == envelope.ProtocolGRPC {
 						upCh = &debugChannel{inner: upCh, t: t, label: "up-h2"}
-						gw := grpclayer.Wrap(upCh, nil, grpclayer.RoleClient)
+						gw := grpclayer.Wrap(upCh, nil, grpclayer.RoleClient, extraGRPCOpts...)
 						return &debugChannel{inner: gw, t: t, label: "upstream"}, nil
 					}
 					return httpaggregator.Wrap(upCh, httpaggregator.RoleClient, nil, httpaggregator.OptionsFromLayer(upH2)), nil
 				}
-				pipe := buildPipeline(store, opts)
 				err := session.RunSession(ctx, aggCh, dial, pipe, session.SessionOptions{
 					OnComplete: func(cctx context.Context, streamID string, err error) {
 						state := "complete"

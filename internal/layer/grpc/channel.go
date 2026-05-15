@@ -195,6 +195,13 @@ type grpcChannel struct {
 	// (D4) and the absorbTrailers paths produce End envelopes.
 	lifecycleEngine *pluginv2.Engine
 	onEndOnce       sync.Once
+
+	// lpmFrameRecordCallback is the optional per-LPM wire-record hook
+	// installed via WithLPMFrameRecordCallback (USK-896). When non-nil,
+	// fireLPMFrameRecord invokes it from absorbData with a pre-built
+	// wire envelope BEFORE the matching GRPCDataMessage envelope is
+	// queued. See WithLPMFrameRecordCallback for the contract.
+	lpmFrameRecordCallback func(*envelope.Envelope)
 }
 
 // StreamID returns the inner Channel's stream identifier (one RPC = one
@@ -528,6 +535,14 @@ func (c *grpcChannel) absorbData(ev *envelope.Envelope, evt *http2.H2DataEvent) 
 		return fmt.Errorf("grpc: reassemble: %w", err)
 	}
 
+	// USK-896: collect per-LPM wire envelopes for the WithLPMFrameRecord
+	// Callback hook. We build them inside the locked section (so the
+	// channel's StreamID / direction state are observed atomically with
+	// the LPM emission) but defer firing them until AFTER c.mu is
+	// released — the callback eventually runs through a record-only
+	// Pipeline that may write to SQLite, and we must not hold c.mu
+	// across an I/O-blocking call.
+	var lpmWireEnvs []*envelope.Envelope
 	for i := range frames {
 		f := frames[i]
 		dataEnv, derr := c.buildDataEnvelopeLocked(ev, dir, f)
@@ -535,6 +550,14 @@ func (c *grpcChannel) absorbData(ev *envelope.Envelope, evt *http2.H2DataEvent) 
 			c.mu.Unlock()
 			c.rstInner(derr)
 			return derr
+		}
+		// Build the wire-record envelope from the same LPM bytes the
+		// semantic dataEnv carries on its Raw field. Building it here
+		// (vs. inside the callback) means the LPM wire view is
+		// guaranteed identical to the semantic view's Raw — they
+		// reference distinct slices but the byte content matches.
+		if c.lpmFrameRecordCallback != nil {
+			lpmWireEnvs = append(lpmWireEnvs, c.buildLPMWireEnvelopeLocked(ev, dataEnv.Raw))
 		}
 		c.queued = append(c.queued, pendingEnvelope{env: dataEnv})
 	}
@@ -565,7 +588,52 @@ func (c *grpcChannel) absorbData(ev *envelope.Envelope, evt *http2.H2DataEvent) 
 	}
 
 	c.mu.Unlock()
+
+	// Fire the per-LPM wire-record callback outside the mutex. The
+	// callback contract (WithLPMFrameRecordCallback godoc) guarantees
+	// the contract holds: the closure must not call back into the
+	// channel and must own its own concurrency. CLAUDE.md MITM
+	// Principle 3 — wire-record envelope fires BEFORE the semantic
+	// envelope is observed by the consumer's Next, which is satisfied
+	// here because Next is the same goroutine that called absorbData
+	// (so the consumer cannot observe the semantic envelopes queued
+	// above until absorbData returns).
+	for _, env := range lpmWireEnvs {
+		c.lpmFrameRecordCallback(env)
+	}
 	return nil
+}
+
+// buildLPMWireEnvelopeLocked constructs the wire-record envelope for a
+// single LPM. Called from absorbData under c.mu but the returned envelope
+// is consumed AFTER c.mu is released (the callback dispatch). raw is the
+// LPM wire bytes (5-byte prefix + payload, BEFORE decompression) — the
+// same slice content as the matching GRPCDataMessage envelope's Raw,
+// allocated independently so the callback may retain it without
+// interfering with the semantic envelope.
+//
+// The envelope intentionally leaves Sequence at the zero value; the
+// session orchestrator's record-only callback (built in
+// session.GRPCLPMRecordOption) rewrites it from a per-Direction
+// counter before dispatching the envelope to the record-only Pipeline.
+func (c *grpcChannel) buildLPMWireEnvelopeLocked(ev *envelope.Envelope, raw []byte) *envelope.Envelope {
+	// Defensive copy: the dataEnv's Raw slice is owned by the channel's
+	// emission path. The callback may stash the wire envelope across
+	// goroutines (e.g., on a record-only Pipeline that writes
+	// asynchronously). A copy here decouples the lifetimes.
+	rawCopy := make([]byte, len(raw))
+	copy(rawCopy, raw)
+	return &envelope.Envelope{
+		StreamID:  ev.StreamID,
+		Direction: ev.Direction,
+		Protocol:  envelope.ProtocolGRPC,
+		Raw:       rawCopy,
+		// Message intentionally nil — LPM wire envelopes have no L7
+		// structured view. The session helper (GRPCLPMRecordOption)
+		// dispatches through a record-only Pipeline that tolerates nil
+		// Message (matching the USK-895 h1-chunk path).
+		Context: ev.Context,
+	}
 }
 
 // buildEndMarkerEnvelopeLocked synthesizes a GRPCDataMessage envelope

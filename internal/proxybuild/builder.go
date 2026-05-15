@@ -17,7 +17,7 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/layer"
-	"github.com/usk6666/yorishiro-proxy/internal/layer/grpc"
+	grpclayer "github.com/usk6666/yorishiro-proxy/internal/layer/grpc"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/grpcweb"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/http1"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/http2"
@@ -232,6 +232,17 @@ type Deps struct {
 	// the SSE event-boundary reader, and the cap suppresses only the
 	// downstream RecordStep dispatch.
 	RecordHTTP1ChunkMaxPerStream int
+
+	// RecordGRPCLPMFrameMaxPerStream caps the number of gRPC LPM
+	// (Length-Prefixed Message) wire envelopes
+	// (WireLevel=grpc-lpm-frame, per-LPM wire bytes captured by the grpc
+	// Layer's per-LPM record callback) RecordStep persists per stream
+	// (USK-896). Zero uses config.MaxGRPCLPMFrameRecordsPerStream. Wire
+	// forwarding is unaffected — the LPM-record callback fires inside
+	// grpcChannel.absorbData BEFORE the semantic GRPCDataMessage envelope
+	// is queued, and the cap suppresses only the downstream RecordStep
+	// dispatch.
+	RecordGRPCLPMFrameMaxPerStream int
 
 	// --- Optional manager-level state (consumed by Manager wiring) ---
 
@@ -497,7 +508,7 @@ func validateDeps(deps Deps) error {
 // unset; route-specific helpers add it.
 func defaultSharedEncoders(r *pipeline.WireEncoderRegistry) {
 	r.Register(envelope.ProtocolWebSocket, ws.EncodeWireBytes)
-	r.Register(envelope.ProtocolGRPC, grpc.EncodeWireBytes)
+	r.Register(envelope.ProtocolGRPC, grpclayer.EncodeWireBytes)
 	r.Register(envelope.ProtocolGRPCWeb, grpcweb.EncodeWireBytes)
 	r.Register(envelope.ProtocolSSE, sse.EncodeWireBytes)
 }
@@ -565,6 +576,15 @@ func buildPipeline(deps Deps, encoders *pipeline.WireEncoderRegistry, logger *sl
 		h1ChunkCap = config.MaxHTTP1ChunkRecordsPerStream
 	}
 	recordOpts = append(recordOpts, pipeline.WithHTTP1ChunkMaxPerStream(h1ChunkCap))
+	// USK-896: per-stream cap for gRPC LPM wire envelopes (grpc data
+	// path). Zero falls back to the package default so synthetic test
+	// stacks that omit the field still observe a positive cap consistent
+	// with the USK-889 / USK-895 pattern.
+	grpcLPMCap := deps.RecordGRPCLPMFrameMaxPerStream
+	if grpcLPMCap <= 0 {
+		grpcLPMCap = config.MaxGRPCLPMFrameRecordsPerStream
+	}
+	recordOpts = append(recordOpts, pipeline.WithGRPCLPMFrameMaxPerStream(grpcLPMCap))
 
 	safetyStep := pipeline.NewSafetyStep(deps.HTTPSafetyEngine, deps.WSSafetyEngine, deps.GRPCSafetyEngine, logger)
 	return pipeline.New(
@@ -783,9 +803,26 @@ func buildOnHTTP2Stack(p *pipeline.Pipeline, deps Deps, logger *slog.Logger) con
 				wg.Add(1)
 				go func(ch layer.Channel) {
 					defer wg.Done()
+					// USK-896: per-stream gRPC LPM wire-record Option. Built
+					// inside the per-stream goroutine because the LPM
+					// record-only Pipeline closure captures per-stream
+					// scope (target → flowCtx.TargetHost; client-side
+					// StreamID → session-scope identity used for the
+					// upstream-side StreamID rewrite mirroring
+					// session.upstreamToClient). The Option is a no-op
+					// when p is nil; client-side and upstream-side share
+					// the same closure so both directions of a bidi RPC's
+					// LPMs are recorded under the same sequence counters
+					// and the same Stream row.
+					streamFlowCtx := envelope.EnvelopeContext{TargetHost: target}
+					lpmOpt := session.GRPCLPMRecordOption(ctx, p, ch.StreamID(), streamFlowCtx)
+					streamGRPCOpts := make([]grpclayer.Option, 0, len(grpcOpts)+1)
+					streamGRPCOpts = append(streamGRPCOpts, grpcOpts...)
+					streamGRPCOpts = append(streamGRPCOpts, lpmOpt)
+
 					aggCh, derr := connector.DispatchH2StreamWithOpts(
 						ctx, ch, httpaggregator.RoleServer,
-						clientLOpts, logger, grpcOpts, grpcwebOpts,
+						clientLOpts, logger, streamGRPCOpts, grpcwebOpts,
 					)
 					if derr != nil {
 						logger.Debug("proxybuild: h2 dispatch failed",
@@ -819,7 +856,7 @@ func buildOnHTTP2Stack(p *pipeline.Pipeline, deps Deps, logger *slog.Logger) con
 							reqProto = env.Protocol
 						}
 						return connector.WrapH2UpstreamForDispatch(
-							upCh, reqProto, lopts, grpcOpts, grpcwebOpts,
+							upCh, reqProto, lopts, streamGRPCOpts, grpcwebOpts,
 						), nil
 					}
 					if err := session.RunStackSessionExchange(ctx, stack, aggCh, dial, p, sessOpts); err != nil && !errors.Is(err, context.Canceled) {

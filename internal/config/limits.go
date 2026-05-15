@@ -134,6 +134,25 @@ const (
 	// (USK-895).
 	MaxHTTP1ChunkRecordsPerStream = 10000
 
+	// MaxGRPCLPMFrameRecordsPerStream limits the number of gRPC LPM
+	// (Length-Prefixed Message) envelopes (wire_level="grpc-lpm-frame")
+	// recorded per stream on the gRPC data path (USK-896). Once exceeded,
+	// the per-LPM record callback is suppressed for further LPMs on the
+	// affected stream; wire forwarding is unaffected because the
+	// suppression skips only the RecordStep dispatch, not the LPM
+	// reassembly + semantic envelope emission carrying the decoded payload
+	// to consumers.
+	//
+	// Default matches MaxGRPCMessagesPerStream so a single RPC that
+	// exhausts the per-stream gRPC semantic budget also exhausts the
+	// per-stream LPM wire budget at the same threshold — operator mental
+	// model "long-running gRPC streams cap at ~10k messages" applies
+	// uniformly to both views.
+	//
+	// Wired via internal/pipeline/RecordStep.WithGRPCLPMFrameMaxPerStream
+	// (USK-896).
+	MaxGRPCLPMFrameRecordsPerStream = 10000
+
 	// MaxWebSocketFrameSize limits the maximum payload size of a single
 	// WebSocket frame. WebSocket frames can theoretically be up to 2^63
 	// bytes per RFC 6455; this constant caps them at 16 MiB to prevent

@@ -1027,9 +1027,9 @@ func TestExportHAR_FiltersNonSemanticWireLevel(t *testing.T) {
 }
 
 // TestFilterSemanticFlows is the unit-level check for the HAR-export
-// filter (USK-895). Verifies that empty WireLevel reads as semantic
-// (backward compatibility) and that h2-frame / h1-chunk values are
-// dropped.
+// filter (USK-895 / USK-896). Verifies that empty WireLevel reads as
+// semantic (backward compatibility) and that h2-frame / h1-chunk /
+// grpc-lpm-frame values are dropped.
 func TestFilterSemanticFlows(t *testing.T) {
 	t.Parallel()
 	flows := []*Flow{
@@ -1037,11 +1037,12 @@ func TestFilterSemanticFlows(t *testing.T) {
 		{ID: "b", WireLevel: WireLevelSemantic},
 		{ID: "c", WireLevel: WireLevelH2Frame},
 		{ID: "d", WireLevel: WireLevelHTTP1Chunk},
+		{ID: "f", WireLevel: WireLevelGRPCLPMFrame},
 		nil,
 		{ID: "e", WireLevel: "future-unknown-value"},
 	}
 	got := filterSemanticFlows(flows)
-	// Expect ids a, b kept (semantic-equivalent); c, d, e dropped; nil dropped.
+	// Expect ids a, b kept (semantic-equivalent); c, d, e, f dropped; nil dropped.
 	if len(got) != 2 {
 		t.Fatalf("kept = %d, want 2; got=%v", len(got), got)
 	}

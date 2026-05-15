@@ -9,9 +9,13 @@
 // (h1-chunk) on the SSE-over-h1-chunked path so the chunk-size line,
 // chunk-extension, and trailing CRLF are observable as independent
 // envelopes — closing the live diagnostic gap that hid USK-883's hex-prefix
-// bug. Future wire_level values (ws-frame, grpc-lpm-frame, ...) are scoped
-// to follow-up Issues; the schema-level column is open enough to admit them
-// without another migration.
+// bug. USK-896 extends the discriminator to gRPC LPM (Length-Prefixed
+// Message) frames so the per-message wire bytes (5-byte prefix +
+// payload, before decompression) are observable as independent envelopes
+// — closing the diagnostic gap that hid LPM length-prefix smuggling and
+// compressed-flag anomalies. Future wire_level values (ws-frame, ...) are
+// scoped to follow-up Issues; the schema-level column is open enough to
+// admit them without another migration.
 //
 // Storage: persisted in the flows.wire_level column added by schemaV14, with
 // DEFAULT 'semantic'. The flows UNIQUE constraint is widened to
@@ -54,4 +58,21 @@ const (
 	// the chunk mechanism is HTTP/1.x's, not SSE's, so the discriminator is
 	// per-protocol rather than per-payload (no `sse-chunk`).
 	WireLevelHTTP1Chunk = "h1-chunk"
+
+	// WireLevelGRPCLPMFrame marks a gRPC LPM (Length-Prefixed Message)
+	// envelope recorded on the gRPC data path (USK-896). The Envelope.Raw
+	// on these rows is the full on-wire LPM bytes:
+	//
+	//   [compressed_flag (1 byte)] [length (4 bytes BE)] [payload (length bytes)]
+	//
+	// Captured BEFORE decompression — the semantic GRPCDataMessage envelope
+	// already exposes the decompressed payload; the LPM wire envelope is
+	// the canonical record for length-prefix / compressed-flag / payload
+	// boundary anomalies (LPM smuggling, compressed-flag ≠ 0/1, multi-LPM
+	// packing inside one h2 DATA frame). Naming follows the agreed
+	// `<protocol>-<unit>` flat scheme (USK-893): the LPM unit is gRPC's
+	// own framing (distinct from h2 DATA — multiple LPMs can be packed
+	// into a single h2 DATA payload), so the discriminator is per-protocol
+	// rather than reusing `h2-frame`.
+	WireLevelGRPCLPMFrame = "grpc-lpm-frame"
 )

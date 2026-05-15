@@ -294,3 +294,129 @@ func TestRecordStep_H1ChunkCapLazyCache(t *testing.T) {
 		}
 	})
 }
+
+// USK-896 unit tests for the grpc-lpm-frame wire_level. Mirrors the
+// USK-889 h2-frame / USK-895 h1-chunk patterns.
+
+// grpcLPMFrameEnvelope builds a minimal grpc-lpm-frame envelope shaped
+// like the envelopes produced by GRPCLPMRecordOption's callback on the
+// gRPC data path. Message is intentionally nil — LPM wire envelopes
+// have no L7 structured view by design (the GRPCDataMessage envelope
+// queued immediately after the LPM-record callback provides the
+// decompressed view).
+func grpcLPMFrameEnvelope(streamID string, seq int) *envelope.Envelope {
+	return &envelope.Envelope{
+		StreamID:  streamID,
+		FlowID:    "lpm-" + strconv.Itoa(seq),
+		Direction: envelope.Receive,
+		Sequence:  seq,
+		Protocol:  envelope.ProtocolGRPC,
+		// 5-byte LPM prefix (compressed=0, length=4) + 4-byte payload.
+		Raw:     []byte{0x00, 0x00, 0x00, 0x00, 0x04, 0xde, 0xad, 0xbe, 0xef},
+		Context: envelope.EnvelopeContext{WireLevel: flow.WireLevelGRPCLPMFrame},
+	}
+}
+
+// TestRecordStep_GRPCLPMFrameWireLevelProjected verifies that envelopes
+// carrying EnvelopeContext.WireLevel = flow.WireLevelGRPCLPMFrame
+// project the value onto Flow.WireLevel so the schemaV14 column
+// distinguishes LPM wire rows from semantic GRPCDataMessage rows.
+func TestRecordStep_GRPCLPMFrameWireLevelProjected(t *testing.T) {
+	w := &mockWriter{}
+	step := NewRecordStep(w, nil)
+	ctx := context.Background()
+	step.Process(ctx, grpcLPMFrameEnvelope("s1", 1))
+	if len(w.flows) != 1 {
+		t.Fatalf("flows recorded = %d, want 1", len(w.flows))
+	}
+	if got := w.flows[0].WireLevel; got != flow.WireLevelGRPCLPMFrame {
+		t.Errorf("Flow.WireLevel = %q, want %q", got, flow.WireLevelGRPCLPMFrame)
+	}
+}
+
+// TestRecordStep_GRPCLPMFramePerStreamCap verifies the USK-896 cap:
+// when WithGRPCLPMFrameMaxPerStream(n) is supplied, LPM wire envelopes
+// past the nth on a single (stream_id) tuple are dropped, the first
+// over-cap envelope stamps AppendTags["records_truncated"], and
+// subsequent over-cap envelopes drop silently.
+func TestRecordStep_GRPCLPMFramePerStreamCap(t *testing.T) {
+	w := &mockWriter{}
+	step := NewRecordStep(w, nil, WithGRPCLPMFrameMaxPerStream(3))
+	ctx := context.Background()
+	for i := 0; i < 5; i++ {
+		step.Process(ctx, grpcLPMFrameEnvelope("s1", i))
+	}
+	if len(w.flows) != 3 {
+		t.Errorf("flows recorded = %d, want 3 (cap)", len(w.flows))
+	}
+	tagUpdates := 0
+	for _, u := range w.updates {
+		if u.streamID == "s1" && u.update.AppendTags["records_truncated"] == "per_stream_cap_reached" {
+			tagUpdates++
+		}
+	}
+	if tagUpdates != 1 {
+		t.Errorf("AppendTags[records_truncated] updates = %d, want 1", tagUpdates)
+	}
+}
+
+// TestRecordStep_GRPCLPMFrameCapIsolation verifies the per-WireLevel cap
+// separation: WithGRPCLPMFrameMaxPerStream gates only grpc-lpm-frame
+// envelopes, not h2-frame, h1-chunk, or semantic. Cross-pollution would
+// silently break either the gRPC LPM recording path (under-recording)
+// or one of the other paths (over-recording).
+func TestRecordStep_GRPCLPMFrameCapIsolation(t *testing.T) {
+	w := &mockWriter{}
+	step := NewRecordStep(w, nil,
+		WithGRPCLPMFrameMaxPerStream(1),
+	)
+	ctx := context.Background()
+	for i := 0; i < 3; i++ {
+		step.Process(ctx, grpcLPMFrameEnvelope("s1", i))
+	}
+	for i := 10; i < 13; i++ {
+		step.Process(ctx, h2FrameEnvelope("s1", i))
+	}
+	for i := 20; i < 23; i++ {
+		step.Process(ctx, h1ChunkEnvelope("s1", i))
+	}
+	lpmCount, frameCount, chunkCount := 0, 0, 0
+	for _, fl := range w.flows {
+		switch fl.WireLevel {
+		case flow.WireLevelGRPCLPMFrame:
+			lpmCount++
+		case flow.WireLevelH2Frame:
+			frameCount++
+		case flow.WireLevelHTTP1Chunk:
+			chunkCount++
+		}
+	}
+	if lpmCount != 1 {
+		t.Errorf("grpc-lpm-frame flows = %d, want 1 (cap)", lpmCount)
+	}
+	// h2-frame and h1-chunk are uncapped here; all 3 each pass through.
+	if frameCount != 3 {
+		t.Errorf("h2-frame flows = %d, want 3 (uncapped)", frameCount)
+	}
+	if chunkCount != 3 {
+		t.Errorf("h1-chunk flows = %d, want 3 (uncapped)", chunkCount)
+	}
+}
+
+// TestRecordStep_GRPCLPMFrameCapLazyCache verifies the lazy-allocation
+// contract analogous to the USK-889 / USK-895 frame/chunk tests: a
+// positive WithGRPCLPMFrameMaxPerStream allocates countCache.
+func TestRecordStep_GRPCLPMFrameCapLazyCache(t *testing.T) {
+	t.Run("grpc_lpm_option_allocates_cache", func(t *testing.T) {
+		s := NewRecordStep(&mockWriter{}, nil, WithGRPCLPMFrameMaxPerStream(10))
+		if s.countCache == nil {
+			t.Error("countCache nil after WithGRPCLPMFrameMaxPerStream(>0)")
+		}
+	})
+	t.Run("zero_value_skips_allocation", func(t *testing.T) {
+		s := NewRecordStep(&mockWriter{}, nil, WithGRPCLPMFrameMaxPerStream(0))
+		if s.countCache != nil {
+			t.Error("countCache allocated when WithGRPCLPMFrameMaxPerStream(0)")
+		}
+	})
+}
