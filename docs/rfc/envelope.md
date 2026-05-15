@@ -1383,6 +1383,9 @@ This RFC is **accepted** as of 2026-04-12. Implementation proceeds on N1.
 - [x] N8 (Plugin v2 — Starlark; MCP + WebUI Reconnection) — DONE
 - [x] N9 (Legacy Removal + Documentation) — DONE (closed 2026-05-05)
 
+**Post-N9 deferred design decisions:**
+- [ ] `WireLevelTap` interface unification — **deferred 2026-05-15 (USK-900)**. The five frame-level record callback sibling Options (`http2.WithFrameRecordCallback`, `http1.WithChunkRecordCallback`, `grpc.WithLPMFrameRecordCallback`, `httpaggregator.WithH2FrameRecordCallback`, `grpc.WithH2DataFrameRecordCallback`) already share their session-side closure builder (`session/h2_frame_record.go` `wireLevelRecordCallback()`), so the main boilerplate cost is already absorbed. Layer-side Option contracts remain per-Layer ad-hoc by design: `http1.WithChunkRecordCallback` is constrained to `func([]byte)` by the parser-level `ChunkRecordSetter` hook (parser owns chunk-boundary detection, not the Layer), so a naive `WireLevelTap` seam would degenerate into "four uniform + one adaptor". Re-evaluate when a 6th sibling appears (e.g. a WebSocket per-frame record producer) or when the http1 parser hook is revisited for an unrelated reason — at that point the seam will be either fully uniform or clearly fragmented, and the decision becomes unambiguous.
+
 ---
 
 ## Appendix A: Naming Decisions
