@@ -1311,6 +1311,8 @@ func sseAnomalyMetadataKey(t envelope.AnomalyType) string {
 		return "sse_anomaly_truncated"
 	case envelope.AnomalySSEDuplicateID:
 		return "sse_anomaly_duplicate_id"
+	case envelope.AnomalySSEProxyEventTooLarge:
+		return "sse_anomaly_proxy_event_too_large"
 	default:
 		return ""
 	}

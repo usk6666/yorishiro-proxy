@@ -8,6 +8,7 @@ package session
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -1720,7 +1721,7 @@ func runUpgradeSSE(
 	}()
 
 	br := sse.NewEventBoundaryReader(upBody, maxEvent)
-	return driveSSEEventLoop(ctx, p, br, clientWriter, chunkedTE, streamID, flowCtx, &nextSeq)
+	return driveSSEEventLoop(ctx, p, br, clientWriter, chunkedTE, streamID, flowCtx, &nextSeq, maxEvent)
 }
 
 // driveSSEEventLoop is runUpgradeSSE's per-event relay loop, extracted
@@ -1734,6 +1735,16 @@ func runUpgradeSSE(
 // USK-885 acceptance gate without the clientWriteEOFSink indirection.
 // Other errors (parse failure, MaxEventSize overflow, ctx cancel) surface
 // as a non-nil error so the recorder projects state=error.
+//
+// USK-905: when br.Next reports sse.ErrEventTooLarge, the loop
+// synthesises an "event: error" envelope with a JSON payload describing
+// the cap and observed size, runs it through the Pipeline (so plugins
+// observe and recording captures it), writes it to the client, and then
+// emits the framing terminator (h1 chunked / h2 END_STREAM) so the
+// client observes a clean shutdown rather than an abrupt TCP close
+// after the 200 response headers. The function returns a wrapping
+// *layer.StreamError so OnComplete projects state=error +
+// FailureReason="internal_error".
 func driveSSEEventLoop(
 	ctx context.Context,
 	p *pipeline.Pipeline,
@@ -1743,12 +1754,16 @@ func driveSSEEventLoop(
 	streamID string,
 	flowCtx envelope.EnvelopeContext,
 	nextSeq *int,
+	maxEventSize int,
 ) error {
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 		raw, rerr := br.Next()
+		if rerr != nil && errors.Is(rerr, sse.ErrEventTooLarge) {
+			return handleSSEEventTooLarge(ctx, p, clientWriter, chunkedTE, streamID, flowCtx, nextSeq, maxEventSize, len(raw), rerr)
+		}
 		if rerr != nil && !errors.Is(rerr, io.EOF) {
 			return rerr
 		}
@@ -1767,6 +1782,182 @@ func driveSSEEventLoop(
 			return finalizeSSEEventLoop(clientWriter, chunkedTE)
 		}
 	}
+}
+
+// handleSSEEventTooLarge implements the USK-905 client-visible failure-
+// notification path. When the boundary reader rejects a single event for
+// exceeding the configured cap, the upstream byte stream is already
+// poisoned (subsequent reads return io.EOF) and the response headers have
+// already been forwarded to the client (the SSE upgrade swap happens
+// AFTER the 200/text/event-stream response was projected by the pre-swap
+// Pipeline). The proxy therefore cannot forward the upstream's too-large
+// event verbatim — but a silent close after the headers is
+// indistinguishable from an upstream abort, and the EventSource spec
+// requires a structured signal for failures the client can act on.
+//
+// The synthetic envelope shape:
+//
+//   - Event = "error"
+//   - Data  = JSON {"reason":"event-too-large","cap":N,"observed":M}
+//   - Anomalies = [{Type: AnomalySSEProxyEventTooLarge, Detail: <human>}]
+//     so RecordStep projects sse_anomaly_proxy_event_too_large into
+//     the flow row's Metadata, distinguishing it from a genuine
+//     upstream-emitted event:error.
+//
+// The envelope is run through the Pipeline (so plugins observe it and
+// RecordStep captures it as a normal Flow row). On Action=Drop the wire
+// write is suppressed but the framing terminator is still emitted —
+// a Drop choice by a plugin should not leave the connection half-open.
+//
+// The function returns a *layer.StreamError so the OnComplete projection
+// surfaces FailureReason="internal_error", matching the gRPC sibling
+// precedent in internal/layer/grpc/channel.go for "message too large".
+func handleSSEEventTooLarge(
+	ctx context.Context,
+	p *pipeline.Pipeline,
+	clientWriter io.Writer,
+	chunkedTE bool,
+	streamID string,
+	flowCtx envelope.EnvelopeContext,
+	nextSeq *int,
+	cap int,
+	observed int,
+	originalErr error,
+) error {
+	slog.Warn("session: SSE event exceeded cap, emitting synthetic event:error to client",
+		slog.String("stream_id", streamID),
+		slog.Int("cap", cap),
+		slog.Int("observed", observed))
+
+	if emitErr := emitSSESyntheticEventTooLarge(ctx, p, clientWriter, chunkedTE, streamID, flowCtx, nextSeq, cap, observed); emitErr != nil {
+		// Client write failed (or pipeline error) during the synthetic
+		// emit. We still want to surface the original "event too large"
+		// signal as the terminal error rather than the client-gone
+		// surrogate — the stream-terminating cause was the cap exceed.
+		if isClientGoneErr(emitErr) {
+			slog.Debug("session: SSE synthetic event:error write failed (client gone); still projecting cap-exceed",
+				slog.String("err", emitErr.Error()))
+		} else {
+			slog.Warn("session: SSE synthetic event:error emit failed; falling through to terminator + StreamError",
+				slog.String("err", emitErr.Error()))
+		}
+	}
+	// Best-effort: emit framing terminator so the client sees a clean
+	// shutdown even if it observes only the headers or a partial
+	// synthetic event. We deliberately ignore the terminator error
+	// (including isClientGoneErr) — the wire-observed cause we want to
+	// surface in OnComplete is the cap-exceed, not the downstream
+	// close-on-write.
+	_ = finalizeSSEEventLoop(clientWriter, chunkedTE)
+
+	return &layer.StreamError{
+		Code:   layer.ErrorInternalError,
+		Reason: fmt.Sprintf("sse: event exceeds maximum size (cap=%d, observed=%d): %v", cap, observed, originalErr),
+	}
+}
+
+// sseEventTooLargePayload is the JSON shape of the synthetic event:error
+// data field. Fields are tagged so encoding/json emits a stable
+// snake_case shape (deterministic order matches the struct field
+// declaration order in Go's encoder).
+type sseEventTooLargePayload struct {
+	Reason   string `json:"reason"`
+	Cap      int    `json:"cap"`
+	Observed int    `json:"observed"`
+}
+
+// emitSSESyntheticEventTooLarge builds the proxy-originated envelope,
+// runs it through the Pipeline (so plugins and RecordStep observe it
+// identically to upstream events), and writes its encoded wire bytes to
+// the client. Returns the underlying client-write or encoder error if
+// any; the caller is responsible for the framing terminator and the
+// terminal StreamError return.
+func emitSSESyntheticEventTooLarge(
+	ctx context.Context,
+	p *pipeline.Pipeline,
+	clientWriter io.Writer,
+	chunkedTE bool,
+	streamID string,
+	flowCtx envelope.EnvelopeContext,
+	nextSeq *int,
+	cap int,
+	observed int,
+) error {
+	payload, jerr := json.Marshal(sseEventTooLargePayload{
+		Reason:   "event-too-large",
+		Cap:      cap,
+		Observed: observed,
+	})
+	if jerr != nil {
+		// json.Marshal on a fixed-shape struct cannot fail in practice;
+		// surface defensively for the static-analysis path.
+		return fmt.Errorf("session: SSE synthetic event:error marshal: %w", jerr)
+	}
+
+	msg := &envelope.SSEMessage{
+		Event: "error",
+		Data:  string(payload),
+		Anomalies: []envelope.Anomaly{{
+			Type:   envelope.AnomalySSEProxyEventTooLarge,
+			Detail: fmt.Sprintf("cap=%d observed=%d", cap, observed),
+		}},
+	}
+	env := &envelope.Envelope{
+		StreamID:  streamID,
+		FlowID:    uuid.NewString(),
+		Sequence:  *nextSeq,
+		Direction: envelope.Receive,
+		Protocol:  envelope.ProtocolSSE,
+		Message:   msg,
+		Context:   flowCtx,
+	}
+	*nextSeq++
+
+	encoded, eerr := sse.EncodeWireBytes(env)
+	if eerr != nil {
+		return fmt.Errorf("session: SSE synthetic event:error encode: %w", eerr)
+	}
+	env.Raw = encoded
+
+	outEnv, action, _ := p.Run(ctx, env)
+	if action == pipeline.Drop {
+		// A plugin (or any Step upstream of RecordStep) chose to
+		// suppress the synthetic event from the wire. In the production
+		// chain (see internal/proxybuild/builder.go: HostScope →
+		// HTTPScope → Budget → Safety → PluginPre → Intercept →
+		// Transform → PluginPost → Record → UpgradeStep) a Drop emitted
+		// by Intercept / PluginPre / PluginPost short-circuits
+		// pipeline.RunWithBlockedBy BEFORE RecordStep runs, so the
+		// synthetic-event Flow row will be omitted on Drop. That is
+		// acceptable: the synthetic envelope is an emergency operator
+		// signal — its primary contract is the client-visible wire
+		// notification and the StreamError return, both of which still
+		// fire on Drop because the caller emits the framing terminator
+		// unconditionally and returns *layer.StreamError regardless of
+		// pipeline action. Plugins are partially trusted and may
+		// intentionally suppress the wire write; the operator-visible
+		// recording is best-effort in that case.
+		return nil
+	}
+	if outEnv == nil {
+		outEnv = env
+	}
+
+	// If the Pipeline mutated the envelope (plugin appended fields,
+	// edited the JSON payload, etc.), re-encode so the wire reflects
+	// the post-mutation state. Otherwise use the encoded bytes we
+	// already produced — sse.EncodeWireBytes is pure, so they match.
+	wireBytes := encoded
+	if cur, ok := outEnv.Message.(*envelope.SSEMessage); ok {
+		if cur != msg || cur.Event != "error" || cur.Data != string(payload) {
+			reEncoded, reErr := sse.EncodeWireBytes(outEnv)
+			if reErr == nil {
+				wireBytes = reEncoded
+			}
+		}
+	}
+
+	return writeEventToClient(clientWriter, wireBytes, chunkedTE)
 }
 
 // deliverOneSSEEvent routes one raw event chunk through relaySSEEvent,
@@ -2086,7 +2277,7 @@ func runUpgradeSSEOverH2(
 	// regardless; the only difference is the absence of the chunked
 	// hex-length framing prefix and the terminating "0\r\n\r\n".
 	br := sse.NewEventBoundaryReader(uR, maxEvent)
-	return driveSSEEventLoop(ctx, p, br, cW, false, sessionStreamID, flowCtx, &nextSeq)
+	return driveSSEEventLoop(ctx, p, br, cW, false, sessionStreamID, flowCtx, &nextSeq, maxEvent)
 }
 
 // relaySSEEvent runs one event's raw bytes through the SSE parser, the

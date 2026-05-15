@@ -30,6 +30,20 @@ const (
 	// lines. Per RFC 8895 the last value wins, but the duplicate is
 	// flagged for analyst visibility.
 	AnomalySSEDuplicateID AnomalyType = "SSEDuplicateID"
+
+	// AnomalySSEProxyEventTooLarge marks the proxy-synthesised "event:
+	// error" payload emitted to the client when an upstream SSE event
+	// exceeded the configured per-event byte cap (sse_max_event_size).
+	// See USK-905: the upstream's too-large event physically cannot be
+	// forwarded once the response headers have already been flushed, so
+	// the proxy synthesises an explicit failure-notification event with
+	// {"reason":"event-too-large","cap":N,"observed":M} and then closes
+	// the stream gracefully (chunked terminator on h1, END_STREAM on h2).
+	//
+	// This anomaly distinguishes the synthetic event from a genuine
+	// upstream-emitted "event: error" so analysts can tell proxy-
+	// originated failure signals apart from real server events.
+	AnomalySSEProxyEventTooLarge AnomalyType = "SSEProxyEventTooLarge"
 )
 
 // SSEMessage represents one Server-Sent Event (RFC 8895). See RFC-001
