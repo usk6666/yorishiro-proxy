@@ -134,10 +134,17 @@ func TestFullListener_CONNECT_SSE_OverH2_SiblingNonInterference(t *testing.T) {
 			return
 		}
 		defer resp.Body.Close()
+		// Accumulate the full body before counting "\n\n" boundaries.
+		// A per-read strings.Count miscounts when an event terminator
+		// straddles two Read returns ("...\n" then "\n..."). Reading
+		// until EOF also lets the upstream END_STREAM propagate
+		// naturally, so the proxy's SSE goroutine exits via a clean
+		// uR EOF rather than via client-initiated RST_STREAM(CANCEL)
+		// from defer body.Close on a partially-read stream.
+		var collected strings.Builder
 		buf := make([]byte, 4096)
 		deadline := time.After(10 * time.Second)
-		events := 0
-		for events < 3 {
+		for {
 			select {
 			case <-deadline:
 				sseErr = errors.New("/events read timeout")
@@ -146,7 +153,7 @@ func TestFullListener_CONNECT_SSE_OverH2_SiblingNonInterference(t *testing.T) {
 			}
 			n, rerr := resp.Body.Read(buf)
 			if n > 0 {
-				events += strings.Count(string(buf[:n]), "\n\n")
+				collected.Write(buf[:n])
 			}
 			if rerr != nil {
 				if !errors.Is(rerr, io.EOF) {
@@ -156,8 +163,9 @@ func TestFullListener_CONNECT_SSE_OverH2_SiblingNonInterference(t *testing.T) {
 				break
 			}
 		}
+		events := strings.Count(collected.String(), "\n\n")
 		if events < 3 {
-			sseErr = fmt.Errorf("/events: read %d events, want 3", events)
+			sseErr = fmt.Errorf("/events: read %d events, want 3 (body=%q)", events, collected.String())
 		}
 	}()
 

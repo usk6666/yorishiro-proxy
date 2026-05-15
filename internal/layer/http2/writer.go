@@ -94,8 +94,21 @@ type writeGoAway struct {
 
 // writerLoop is the body of the single writer goroutine. It serializes all
 // frame writes for the connection.
+//
+// Exit invariant: every queued writeRequest's done chan is signaled exactly
+// once before close(l.writerDone) fires. The shutdown drain branch handles
+// requests queued before shutdown; the deferred fail-drain catches requests
+// enqueued in the brief race window between the drain branch sampling
+// `default` and writerLoop returning. The companion check in enqueueWrite
+// (`<-l.writerDone` short-circuit) covers requests that arrive after
+// writerDone closes. Together these prevent the orphaned-request hang
+// observed in the SSE-over-h2 sibling teardown path: detachWriter.Close
+// enqueues an empty END_STREAM DATA from a deferred call AFTER the client
+// h2 layer's reader saw EOF and broadcastShutdown ran, and waitDone's
+// `<-shutdown` fall-through (`return <-done`) requires done to fire.
 func (l *Layer) writerLoop() {
 	defer close(l.writerDone)
+	defer l.failDrainQueuedWrites()
 
 	for {
 		select {
@@ -111,6 +124,23 @@ func (l *Layer) writerLoop() {
 			}
 		case req := <-l.writerQueue:
 			l.dispatchWrite(req)
+		}
+	}
+}
+
+// failDrainQueuedWrites empties any remaining writeRequests on the queue
+// and signals errWriterClosed on each one's done channel. Runs as a defer
+// in writerLoop after the shutdown-drain branch returns, catching requests
+// enqueued between the drain's `default` sample and writerLoop's actual
+// exit. The race window without this drain is small but real and produces
+// the deterministic "waitDone hang" failure mode.
+func (l *Layer) failDrainQueuedWrites() {
+	for {
+		select {
+		case req := <-l.writerQueue:
+			failWriteRequest(req, errWriterClosed)
+		default:
+			return
 		}
 	}
 }

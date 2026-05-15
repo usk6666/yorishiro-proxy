@@ -539,7 +539,20 @@ func (l *Layer) Close() error {
 // the queue is genuinely full. The writerLoop's `case <-l.shutdown:` branch
 // drains queued requests best-effort, so a request enqueued just before
 // shutdown still reaches the wire.
+//
+// Post-exit safety: if writerLoop has already returned (writerDone closed),
+// any send to writerQueue would be orphaned — there is no consumer, and
+// waitDone's `<-shutdown` fall-through (`return <-done`) would block
+// forever. Short-circuit such sends to failWriteRequest(errWriterClosed)
+// so done fires and the caller unwinds. The slow-path select also adds
+// `<-l.writerDone` for the queue-full case.
 func (l *Layer) enqueueWrite(req writeRequest) {
+	select {
+	case <-l.writerDone:
+		failWriteRequest(req, errWriterClosed)
+		return
+	default:
+	}
 	select {
 	case l.writerQueue <- req:
 		return
@@ -547,6 +560,8 @@ func (l *Layer) enqueueWrite(req writeRequest) {
 	}
 	select {
 	case l.writerQueue <- req:
+	case <-l.writerDone:
+		failWriteRequest(req, errWriterClosed)
 	case <-l.shutdown:
 		failWriteRequest(req, errWriterClosed)
 	}
