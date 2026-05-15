@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"testing"
 	"time"
 
+	"github.com/usk6666/yorishiro-proxy/internal/envelope"
+	"github.com/usk6666/yorishiro-proxy/internal/layer"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/http2/frame"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/http2/hpack"
 )
@@ -508,6 +511,279 @@ func TestLayer_DetachStream_TerminalErrorSurfacesOnReader(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("reader did not surface terminal error within 2s")
 	}
+}
+
+// TestRunDetachDrain_DrainsRecvBeforeTermDone_Graceful is the USK-902
+// regression test. It deterministically reproduces the recv-vs-termDone
+// race that flaked TestFullListener_CONNECT_SSE_OverH2_SiblingNonInterference
+// at ~2% in -race builds.
+//
+// Setup: pre-populate ch.recv with N H2DataEvent envelopes, then close
+// termDone via markTerminated(io.EOF) WITHOUT closing ch.recv. This
+// mirrors the gracefulCloseStream producer ordering (reader.go:368-382):
+// markRecvEnded → markTerminated → closeChannelRecv. The race window is
+// between markTerminated (which closes termDone) and closeChannelRecv
+// (which closes recv) — runDetachDrain observing termDone closed while
+// recv still holds buffered events would, with the pre-USK-902 plain
+// select, drop trailing events at pseudo-random pace.
+//
+// With the USK-902 fix (Phase 1 non-blocking drain + final drain on
+// termDone), every buffered envelope must surface on the detach reader
+// before EOF — RFC-001 §3.3.2 BodyBuffer drain MUST + CLAUDE.md MITM
+// Principle 3 (lossless representations).
+func TestRunDetachDrain_DrainsRecvBeforeTermDone_Graceful(t *testing.T) {
+	const numEvents = 3
+	ch, pw, pr := newDetachDrainTestChannel(t)
+
+	// Pre-fill recv with N data events.
+	payloads := make([][]byte, numEvents)
+	for i := 0; i < numEvents; i++ {
+		payload := []byte("event-" + string(rune('0'+i)))
+		payloads[i] = payload
+		env := newDetachDataEnvelope(payload, false)
+		// recv is cap-32 buffered; sends do not block.
+		ch.recv <- env
+	}
+
+	// Producer ordering from gracefulCloseStream: markTerminated closes
+	// termDone WITHOUT closing recv (recv is closed later by
+	// closeChannelRecv). We model the race by closing termDone here and
+	// deferring the recv close until after the drainer has finished its
+	// initial work.
+	ch.markTerminated(io.EOF)
+
+	// Start the drainer. Both recv (with 3 buffered events) and termDone
+	// (closed) are ready when runDetachDrain enters its select — exactly
+	// the race condition. With the fix, Phase 1 drains recv first.
+	done := make(chan struct{})
+	go ch.runDetachDrain(done)
+
+	// Read all payloads from the pipe. The producer side must surface
+	// all N events before EOF; the drainer then closes the pipe with EOF
+	// (no error because the channel's terminal error is io.EOF).
+	collected := readAllPayloadsExpectingEOF(t, pr, payloads)
+
+	// Verify drainer terminates promptly.
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("runDetachDrain did not exit within 2s")
+	}
+
+	if len(collected) != len(payloads) {
+		t.Fatalf("got %d payloads, want %d", len(collected), len(payloads))
+	}
+	for i := range payloads {
+		if !bytes.Equal(collected[i], payloads[i]) {
+			t.Errorf("payload[%d] = %q, want %q (USK-902 drain ordering violated)", i, collected[i], payloads[i])
+		}
+	}
+
+	// Avoid unused-write warnings: pw is the producer side of pr.
+	_ = pw
+}
+
+// TestRunDetachDrain_DrainsRecvBeforeTermDone_FailStream verifies the
+// USK-902 fix on the failStream / failStreamsAfterGoAway producer path:
+// the channel terminates with a non-EOF *layer.StreamError, but any
+// buffered events on recv MUST still surface on the detach reader before
+// the terminal error is propagated via pipe.CloseWithError.
+func TestRunDetachDrain_DrainsRecvBeforeTermDone_FailStream(t *testing.T) {
+	const numEvents = 3
+	ch, pw, pr := newDetachDrainTestChannel(t)
+
+	payloads := make([][]byte, numEvents)
+	for i := 0; i < numEvents; i++ {
+		payload := []byte("fail-event-" + string(rune('0'+i)))
+		payloads[i] = payload
+		env := newDetachDataEnvelope(payload, false)
+		ch.recv <- env
+	}
+
+	// Producer ordering from failStream: markTerminated(*layer.StreamError)
+	// then closeChannelRecv. Model the race by closing termDone here with
+	// a non-EOF terminal; the buffered envelopes must still drain before
+	// the error surfaces on the reader.
+	se := &layer.StreamError{Code: layer.ErrorCanceled, Reason: "test: synthetic RST"}
+	ch.markTerminated(se)
+
+	done := make(chan struct{})
+	go ch.runDetachDrain(done)
+
+	// Read everything from the pipe. We expect all N payloads followed
+	// by a non-EOF error matching the wrapped terminal.
+	collected, readErr := readAllPayloadsExpectingErr(t, pr, payloads)
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("runDetachDrain did not exit within 2s")
+	}
+
+	if len(collected) != len(payloads) {
+		t.Fatalf("got %d payloads before terminal error, want %d", len(collected), len(payloads))
+	}
+	for i := range payloads {
+		if !bytes.Equal(collected[i], payloads[i]) {
+			t.Errorf("payload[%d] = %q, want %q (USK-902 drain ordering violated)", i, collected[i], payloads[i])
+		}
+	}
+	if readErr == nil || errors.Is(readErr, io.EOF) {
+		t.Errorf("read err = %v, want non-EOF wrapping the StreamError", readErr)
+	}
+
+	_ = pw
+}
+
+// TestRunDetachDrain_DrainsRecvOnMarkTerminatedWithRST verifies the
+// USK-902 fix covers the MarkTerminatedWithRST path. By design (see
+// channel.go:222-234) MarkTerminatedWithRST closes termDone but does
+// NOT close ch.recv — the recv close is deferred to the caller's
+// channel.Close. Even on this path, every buffered envelope must
+// surface before the drainer exits.
+func TestRunDetachDrain_DrainsRecvOnMarkTerminatedWithRST(t *testing.T) {
+	const numEvents = 3
+	ch, pw, pr := newDetachDrainTestChannel(t)
+
+	payloads := make([][]byte, numEvents)
+	for i := 0; i < numEvents; i++ {
+		payload := []byte("rst-event-" + string(rune('0'+i)))
+		payloads[i] = payload
+		env := newDetachDataEnvelope(payload, false)
+		ch.recv <- env
+	}
+
+	// Simulate MarkTerminatedWithRST's effect: termDone closed, recv
+	// left open. We use markTerminated directly with a *layer.StreamError
+	// to skip the wire-emit half of MarkTerminatedWithRST (which would
+	// require a fully-wired Layer with writerLoop running).
+	se := &layer.StreamError{Code: layer.ErrorAborted, Reason: "test: synthetic RST without recv-close"}
+	ch.markTerminated(se)
+
+	done := make(chan struct{})
+	go ch.runDetachDrain(done)
+
+	collected, readErr := readAllPayloadsExpectingErr(t, pr, payloads)
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("runDetachDrain did not exit within 2s")
+	}
+
+	if len(collected) != len(payloads) {
+		t.Fatalf("got %d payloads, want %d (MarkTerminatedWithRST path)", len(collected), len(payloads))
+	}
+	for i := range payloads {
+		if !bytes.Equal(collected[i], payloads[i]) {
+			t.Errorf("payload[%d] = %q, want %q", i, collected[i], payloads[i])
+		}
+	}
+	if readErr == nil || errors.Is(readErr, io.EOF) {
+		t.Errorf("read err = %v, want non-EOF wrapping the StreamError", readErr)
+	}
+
+	_ = pw
+}
+
+// newDetachDrainTestChannel constructs a minimal *channel + io.Pipe
+// pairing suitable for unit-testing runDetachDrain in isolation. The
+// channel is bound to a real but no-op Layer so markTerminated's
+// releaseStreamState hook is a safe no-op. Returns the channel along
+// with the pipe writer (test-installed as ch.detachWriter) and the
+// pipe reader (for assertions).
+func newDetachDrainTestChannel(t *testing.T) (*channel, *io.PipeWriter, *io.PipeReader) {
+	t.Helper()
+	l, _, cleanup := startServerLayer(t)
+	t.Cleanup(cleanup)
+	ch := newChannel(l, 1)
+	pr, pw := io.Pipe()
+	ch.detachWriter = pw
+	ch.detachPipeReader = pr
+	ch.detached.Store(true)
+	return ch, pw, pr
+}
+
+// newDetachDataEnvelope wraps a payload in an *envelope.Envelope with
+// an *H2DataEvent Message — the only shape runDetachDrain forwards.
+func newDetachDataEnvelope(payload []byte, endStream bool) *envelope.Envelope {
+	return &envelope.Envelope{
+		Protocol:  envelope.ProtocolHTTP,
+		Direction: envelope.Receive,
+		Message: &H2DataEvent{
+			Payload:   payload,
+			EndStream: endStream,
+		},
+	}
+}
+
+// readAllPayloadsExpectingEOF reads from pr until io.EOF, splitting the
+// stream into per-payload chunks of the expected sizes. Fails the test
+// if a non-EOF error appears.
+func readAllPayloadsExpectingEOF(t *testing.T, pr *io.PipeReader, want [][]byte) [][]byte {
+	t.Helper()
+	collected, err := readPayloadChunks(t, pr, want)
+	if err != nil && !errors.Is(err, io.EOF) {
+		t.Fatalf("readPayloadChunks: %v", err)
+	}
+	return collected
+}
+
+// readAllPayloadsExpectingErr reads from pr until a non-EOF error
+// appears, splitting the stream into per-payload chunks of the expected
+// sizes. Returns the chunks and the terminal error for the caller to
+// assert against.
+func readAllPayloadsExpectingErr(t *testing.T, pr *io.PipeReader, want [][]byte) ([][]byte, error) {
+	t.Helper()
+	collected, err := readPayloadChunks(t, pr, want)
+	return collected, err
+}
+
+// readPayloadChunks reads len(want) chunks from pr, each of the
+// corresponding want[i] length. Returns the chunks plus the error
+// observed after the final chunk (typically io.EOF or a wrapped
+// *layer.StreamError).
+func readPayloadChunks(t *testing.T, pr *io.PipeReader, want [][]byte) ([][]byte, error) {
+	t.Helper()
+	out := make([][]byte, 0, len(want))
+	type readResult struct {
+		buf []byte
+		err error
+	}
+	for i := range want {
+		buf := make([]byte, len(want[i]))
+		resCh := make(chan readResult, 1)
+		go func() {
+			_, rerr := io.ReadFull(pr, buf)
+			resCh <- readResult{buf: buf, err: rerr}
+		}()
+		select {
+		case res := <-resCh:
+			if res.err != nil {
+				return out, res.err
+			}
+			out = append(out, res.buf)
+		case <-time.After(2 * time.Second):
+			t.Fatalf("read chunk %d/%d timed out after 2s (got %d bytes so far)", i+1, len(want), len(out))
+		}
+	}
+	// Drain any trailing terminal error.
+	tail := make([]byte, 1)
+	resCh := make(chan readResult, 1)
+	go func() {
+		n, rerr := pr.Read(tail)
+		resCh <- readResult{buf: tail[:n], err: rerr}
+	}()
+	select {
+	case res := <-resCh:
+		if len(res.buf) > 0 {
+			return out, fmt.Errorf("unexpected trailing bytes after %d payloads: %q", len(want), res.buf)
+		}
+		return out, res.err
+	case <-time.After(2 * time.Second):
+		t.Fatalf("trailing-error read timed out after 2s")
+	}
+	return out, nil
 }
 
 // TestLayer_DetachStream_DrainDoneFiresOnTerminate verifies that the

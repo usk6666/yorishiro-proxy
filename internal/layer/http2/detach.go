@@ -129,12 +129,29 @@ func (l *Layer) DetachStream(streamID uint32, opts ...DetachOption) (io.ReadClos
 // runDetachDrain forwards inbound DATA event payloads from ch.recv into
 // ch.detachWriter, and forwards any non-EOF terminal error via
 // CloseWithError. Returns when ch.recv closes (reader-side EOF), termDone
-// fires (terminal state), or the pipe writer is closed by the consumer
-// (CloseWithError surfaces back on the next Write attempt).
+// fires AND recv is empty (terminal with no buffered events left), or the
+// pipe writer is closed by the consumer (CloseWithError surfaces back on
+// the next Write attempt).
 //
-// Drain order is the same as the assembler emit order, so any DATA bytes
-// that the channel already buffered between the 2xx and the DetachStream
-// call (RFC-001 §3.3.2 BodyBuffer drain MUST) are preserved verbatim.
+// Drain ordering (USK-902): the loop drains every buffered envelope on
+// recv BEFORE honoring termDone. A plain `select { case <-recv: ...;
+// case <-termDone: ... }` would let Go's pseudo-random select pick the
+// termDone arm even with events still queued on recv — and the producer-
+// side teardown paths (reader.gracefulCloseStream / failStream /
+// failStreamsAfterGoAway / broadcastShutdown, plus channel.
+// MarkTerminatedWithRST which intentionally never closes recv) close
+// termDone BEFORE (or without) closing recv. Dropping those trailing
+// events violates RFC-001 §3.3.2 BodyBuffer drain MUST and CLAUDE.md
+// MITM Principle 3 (lossless representations) — the wire delivered the
+// bytes, so the detach reader must surface them.
+//
+// The drain shape (non-blocking Phase 1 → blocking Phase 2 → final
+// drain on termDone) mirrors USK-901's writerLoop sibling fix: drain
+// queued work to empty, then honor shutdown. The producer-side ordering
+// is left unchanged because markTerminated must run before
+// closeChannelRecv so Err() observers see a stable error before EOF; the
+// drain-prefix is the more general consumer-side fix and also covers
+// MarkTerminatedWithRST, where recv is left open by design.
 func (c *channel) runDetachDrain(done chan struct{}) {
 	defer close(done)
 	pw := c.detachWriter
@@ -142,10 +159,24 @@ func (c *channel) runDetachDrain(done chan struct{}) {
 		return
 	}
 	for {
-		// Prefer recv (data) over termDone (terminal). The reader goroutine
-		// closes recv on graceful end-of-stream and on protocol-violation
-		// teardown; the multi-way select below then observes the closed
-		// recv and exits via the "ok=false" branch.
+		// Phase 1: non-blocking drain of any buffered envelopes. Forwards
+		// recv events ahead of termDone so a producer that closed
+		// termDone before (or without) closing recv cannot strand the
+		// queued bytes.
+		select {
+		case env, ok := <-c.recv:
+			if !ok {
+				c.closeDetachPipeForTerminal(pw)
+				return
+			}
+			if !c.forwardDetachEnvelope(pw, env) {
+				return
+			}
+			continue
+		default:
+		}
+		// Phase 2: recv empty — block until a new event arrives, the
+		// channel terminates, or the consumer closes the pipe.
 		select {
 		case env, ok := <-c.recv:
 			if !ok {
@@ -156,8 +187,27 @@ func (c *channel) runDetachDrain(done chan struct{}) {
 				return
 			}
 		case <-c.termDone:
-			c.closeDetachPipeForTerminal(pw)
-			return
+			// Final drain pass — covers envelopes that arrived in the
+			// narrow race window between Phase 1's `default` sample and
+			// termDone firing. Without this pass the gracefulCloseStream
+			// path (markRecvEnded → markTerminated → closeChannelRecv)
+			// can still drop trailing events when termDone wins the
+			// select before recv-close serialises with this goroutine.
+			for {
+				select {
+				case env, ok := <-c.recv:
+					if !ok {
+						c.closeDetachPipeForTerminal(pw)
+						return
+					}
+					if !c.forwardDetachEnvelope(pw, env) {
+						return
+					}
+				default:
+					c.closeDetachPipeForTerminal(pw)
+					return
+				}
+			}
 		}
 	}
 }
