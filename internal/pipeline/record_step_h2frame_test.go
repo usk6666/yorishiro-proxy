@@ -420,3 +420,219 @@ func TestRecordStep_GRPCLPMFrameCapLazyCache(t *testing.T) {
 		}
 	})
 }
+
+// USK-908 unit tests for the streamCreated one-shot guard.
+//
+// Native gRPC streams emit three wire_level envelopes per direction
+// (semantic + grpc-lpm-frame + h2-frame, USK-899) sharing the same
+// StreamID; aggregator-path h2 streams emit two (h2-frame + semantic
+// HTTPMessage, USK-897). All such envelopes arrive at RecordStep with
+// Direction=Send, Sequence=0 and previously each triggered SaveStream,
+// producing UNIQUE constraint failures on streams.id. The guard
+// short-circuits the duplicate createStream calls; SaveFlow continues
+// to fire for every wire_level envelope.
+
+// semanticGRPCStartSendEnvelope builds a Direction=Send Sequence=0
+// envelope shaped like the semantic GRPCStartMessage envelope native
+// gRPC channels queue first (internal/layer/grpc/channel.go:450).
+// Context.WireLevel is intentionally empty — semantic envelopes leave
+// it unset and sqlite projects empty→"semantic" only at persist time.
+func semanticGRPCStartSendEnvelope(streamID string) *envelope.Envelope {
+	return &envelope.Envelope{
+		StreamID:  streamID,
+		FlowID:    "semantic-" + streamID,
+		Direction: envelope.Send,
+		Sequence:  0,
+		Protocol:  envelope.ProtocolGRPC,
+		Raw:       []byte("HEADERS"),
+		Message: &envelope.GRPCStartMessage{
+			Service: "svc",
+			Method:  "Method",
+		},
+		Context: envelope.EnvelopeContext{ConnID: "c1"},
+	}
+}
+
+// h2FrameSendEnvelope builds a Direction=Send Sequence=0 wire-level
+// envelope. The existing h2FrameEnvelope helper only covers Receive;
+// USK-908 reproduces the duplicate-SaveStream race specifically on the
+// Send/Seq=0 first-frame.
+func h2FrameSendEnvelope(streamID string) *envelope.Envelope {
+	return &envelope.Envelope{
+		StreamID:  streamID,
+		FlowID:    "h2frame-send-" + streamID,
+		Direction: envelope.Send,
+		Sequence:  0,
+		Protocol:  envelope.ProtocolHTTP,
+		Raw:       []byte("h2-frame-payload"),
+		Message:   &envelope.RawMessage{Bytes: []byte("h2-frame-payload")},
+		Context:   envelope.EnvelopeContext{ConnID: "c1", WireLevel: flow.WireLevelH2Frame},
+	}
+}
+
+// grpcLPMFrameSendEnvelope builds a Direction=Send Sequence=0
+// wire-level envelope. Matches the shape produced by
+// internal/layer/grpc/channel.go:638-640 (per-LPM record callback).
+func grpcLPMFrameSendEnvelope(streamID string) *envelope.Envelope {
+	return &envelope.Envelope{
+		StreamID:  streamID,
+		FlowID:    "lpm-send-" + streamID,
+		Direction: envelope.Send,
+		Sequence:  0,
+		Protocol:  envelope.ProtocolGRPC,
+		Raw:       []byte{0x00, 0x00, 0x00, 0x00, 0x04, 0xde, 0xad, 0xbe, 0xef},
+		Context:   envelope.EnvelopeContext{ConnID: "c1", WireLevel: flow.WireLevelGRPCLPMFrame},
+	}
+}
+
+// TestRecordStep_CreateStream_FiresOnceAcrossWireLevels_NativeGRPCOrder
+// reproduces the native gRPC arrival ordering: semantic GRPCStartMessage
+// first (queued before LPM dispatch in absorbHeaders), then the
+// h2-frame and grpc-lpm-frame wire-record callbacks fire during
+// absorbData on the first DATA. All three arrive at RecordStep with
+// Direction=Send, Sequence=0 and the same StreamID. Without the
+// streamCreated guard, SaveStream fires three times — two UNIQUE
+// constraint failures.
+func TestRecordStep_CreateStream_FiresOnceAcrossWireLevels_NativeGRPCOrder(t *testing.T) {
+	w := &mockWriter{}
+	step := NewRecordStep(w, nil)
+	ctx := context.Background()
+
+	step.Process(ctx, semanticGRPCStartSendEnvelope("s1"))
+	step.Process(ctx, h2FrameSendEnvelope("s1"))
+	step.Process(ctx, grpcLPMFrameSendEnvelope("s1"))
+
+	if len(w.streams) != 1 {
+		t.Errorf("SaveStream calls = %d, want 1 (one-shot guard)", len(w.streams))
+	}
+	if len(w.flows) != 3 {
+		t.Errorf("SaveFlow calls = %d, want 3 (every wire_level recorded)", len(w.flows))
+	}
+	// First-write wins: the semantic envelope arrived first, so the
+	// Stream row carries Protocol=grpc derived from semanticGRPCStart-
+	// SendEnvelope's Protocol.
+	if got := w.streams[0].Protocol; got != "grpc" {
+		t.Errorf("Stream.Protocol = %q, want %q (first-write wins)", got, "grpc")
+	}
+}
+
+// TestRecordStep_CreateStream_FiresOnceAcrossWireLevels_AggregatorOrder
+// reproduces the aggregator-path arrival ordering: wire-level h2-frame
+// first (fired in httpaggregator.absorbData BEFORE the body-buffer
+// mutation), then the semantic HTTPMessage envelope on END_STREAM.
+// Both arrive at RecordStep with Direction=Send, Sequence=0 and the
+// same StreamID. The wire-level envelope wins createStream; the
+// semantic envelope is short-circuited. SaveFlow fires twice — once
+// per wire_level envelope so wire-record persistence is preserved.
+//
+// Note: in production the aggregator-path Stream row would carry
+// Protocol=http on the wire-level envelope (the wire bytes are an h2
+// DATA frame, not a gRPC LPM); the subsequent semantic envelope's
+// HTTPMessage carries Protocol=http too, so maybeRetagProtocol is a
+// no-op and Stream.Protocol stays "http". This test exercises the
+// same path with Protocol=http on both envelopes to match production.
+func TestRecordStep_CreateStream_FiresOnceAcrossWireLevels_AggregatorOrder(t *testing.T) {
+	w := &mockWriter{}
+	step := NewRecordStep(w, nil)
+	ctx := context.Background()
+
+	step.Process(ctx, h2FrameSendEnvelope("s1"))
+	step.Process(ctx, &envelope.Envelope{
+		StreamID:  "s1",
+		FlowID:    "semantic-s1",
+		Direction: envelope.Send,
+		Sequence:  0,
+		Protocol:  envelope.ProtocolHTTP,
+		Raw:       []byte("GET / HTTP/2"),
+		Message: &envelope.HTTPMessage{
+			Method:    "POST",
+			Scheme:    "https",
+			Authority: "example.test",
+			Path:      "/",
+			Headers:   []envelope.KeyValue{{Name: ":method", Value: "POST"}},
+		},
+		Context: envelope.EnvelopeContext{ConnID: "c1"},
+	})
+
+	if len(w.streams) != 1 {
+		t.Errorf("SaveStream calls = %d, want 1 (one-shot guard)", len(w.streams))
+	}
+	if len(w.flows) != 2 {
+		t.Errorf("SaveFlow calls = %d, want 2 (every wire_level recorded)", len(w.flows))
+	}
+	// First-write wins: the h2-frame envelope arrived first, so the
+	// Stream row carries Protocol=http (h2-frame's Protocol).
+	if got := w.streams[0].Protocol; got != "http" {
+		t.Errorf("Stream.Protocol = %q, want %q (first-write wins)", got, "http")
+	}
+}
+
+// TestRecordStep_CreateStream_StreamCreatedDoesNotShortCircuitProtocolRetag
+// guards the streamCreated/protocolRetagged decoupling. The retag path
+// is independent: when a non-HTTP envelope arrives on a stream that was
+// created by a wire-level envelope (Protocol=http on the aggregator
+// path), the retag path must still fire on the first non-HTTP envelope.
+//
+// Scenario: wire-level h2-frame with Protocol=http arrives first and
+// creates the Stream. The subsequent semantic envelope with
+// Protocol=grpc on the same StreamID must trigger
+// UpdateStream(Protocol=grpc) via maybeRetagProtocol.
+func TestRecordStep_CreateStream_StreamCreatedDoesNotShortCircuitProtocolRetag(t *testing.T) {
+	w := &mockWriter{}
+	step := NewRecordStep(w, nil)
+	ctx := context.Background()
+
+	// First: wire-level h2-frame with Protocol=http creates the Stream.
+	step.Process(ctx, h2FrameSendEnvelope("s1"))
+	// Second: semantic envelope with Protocol=grpc must trigger retag.
+	step.Process(ctx, semanticGRPCStartSendEnvelope("s1"))
+
+	if len(w.streams) != 1 {
+		t.Fatalf("SaveStream calls = %d, want 1 (one-shot guard)", len(w.streams))
+	}
+	if w.streams[0].Protocol != "http" {
+		t.Errorf("Stream.Protocol on createStream = %q, want %q (h2-frame first)", w.streams[0].Protocol, "http")
+	}
+
+	// Find the protocol-retag UpdateStream call.
+	retagCount := 0
+	for _, u := range w.updates {
+		if u.streamID == "s1" && u.update.Protocol == "grpc" {
+			retagCount++
+		}
+	}
+	if retagCount != 1 {
+		t.Errorf("UpdateStream(Protocol=grpc) calls = %d, want 1 (retag must fire)", retagCount)
+	}
+}
+
+// TestRecordStep_CreateStream_UnknownWireLevelStillCreatesStream is the
+// permissive-default counterpart to TestRecordStep_UnknownWireLevelNotGated:
+// an envelope with an unknown WireLevel value must still trip
+// createStream on the first Send/Seq=0. The streamCreated guard does
+// NOT discriminate on WireLevel — whichever envelope arrives first
+// wins, regardless of value. This matches the cap-path precedent: the
+// gate is permissive for unknown wire_levels.
+func TestRecordStep_CreateStream_UnknownWireLevelStillCreatesStream(t *testing.T) {
+	w := &mockWriter{}
+	step := NewRecordStep(w, nil)
+	ctx := context.Background()
+
+	step.Process(ctx, &envelope.Envelope{
+		StreamID:  "s1",
+		FlowID:    "future-1",
+		Direction: envelope.Send,
+		Sequence:  0,
+		Protocol:  envelope.ProtocolHTTP,
+		Raw:       []byte("future"),
+		Message:   &envelope.RawMessage{Bytes: []byte("future")},
+		Context:   envelope.EnvelopeContext{WireLevel: "future-unknown-discriminator"},
+	})
+
+	if len(w.streams) != 1 {
+		t.Errorf("SaveStream calls = %d, want 1 (permissive: unknown WireLevel still creates stream)", len(w.streams))
+	}
+	if len(w.flows) != 1 {
+		t.Errorf("SaveFlow calls = %d, want 1", len(w.flows))
+	}
+}
