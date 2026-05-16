@@ -19,6 +19,25 @@ func httpEnv(method, authority, path string) *envelope.Envelope {
 	}
 }
 
+// grpcStartEnv builds a Direction=Send GRPCStartMessage envelope shaped
+// like what the gRPC / gRPC-Web Layers emit. The proto argument selects
+// envelope.ProtocolGRPC or envelope.ProtocolGRPCWeb — both layers produce
+// the same Message type, so a single capture_scope arm must cover both.
+func grpcStartEnv(t *testing.T, proto envelope.Protocol, authority, service, method string) *envelope.Envelope {
+	t.Helper()
+	return &envelope.Envelope{
+		Protocol:  proto,
+		Direction: envelope.Send,
+		Message: &envelope.GRPCStartMessage{
+			Service: service,
+			Method:  method,
+		},
+		Context: envelope.EnvelopeContext{
+			TargetHost: authority,
+		},
+	}
+}
+
 func nonHTTPEnvWithCtx(targetHost string, sni string) *envelope.Envelope {
 	env := &envelope.Envelope{
 		Protocol: envelope.ProtocolWebSocket,
@@ -142,6 +161,69 @@ func TestRecordScope_Method(t *testing.T) {
 	}
 	if rs.ShouldRecord(httpEnv("GET", "api.target.com", "/x")) {
 		t.Error("non-matching method must filter")
+	}
+}
+
+// TestRecordScope_URLPrefix_GRPC verifies that capture_scope url_prefix
+// rules apply to native gRPC envelopes (USK-909). The matcher synthesizes
+// the wire-equivalent `:path = /<Service>/<Method>` from
+// *envelope.GRPCStartMessage so rules like `/hello.HelloService/` work as
+// operators expect.
+func TestRecordScope_URLPrefix_GRPC(t *testing.T) {
+	rs := NewRecordScope()
+	rs.SetRules([]ScopeRule{{Hostname: "grpcb.in", URLPrefix: "/hello.HelloService/"}}, nil)
+	if !rs.ShouldRecord(grpcStartEnv(t, envelope.ProtocolGRPC, "grpcb.in:443", "hello.HelloService", "SayHello")) {
+		t.Error("matching service prefix must record")
+	}
+	if rs.ShouldRecord(grpcStartEnv(t, envelope.ProtocolGRPC, "grpcb.in:443", "other.Service", "X")) {
+		t.Error("non-matching service must filter")
+	}
+	// Guard: empty Service or empty Method must suppress synthesis so a
+	// partial path like "/Service/" cannot spuriously prefix-match.
+	if rs.ShouldRecord(grpcStartEnv(t, envelope.ProtocolGRPC, "grpcb.in:443", "", "SayHello")) {
+		t.Error("empty Service must suppress path synthesis (no spurious match)")
+	}
+	if rs.ShouldRecord(grpcStartEnv(t, envelope.ProtocolGRPC, "grpcb.in:443", "hello.HelloService", "")) {
+		t.Error("empty Method must suppress path synthesis (no spurious match)")
+	}
+}
+
+// TestRecordScope_Method_GRPC verifies that capture_scope method rules
+// apply to gRPC envelopes by treating them as wire-literal POST (USK-909).
+func TestRecordScope_Method_GRPC(t *testing.T) {
+	rsPost := NewRecordScope()
+	rsPost.SetRules([]ScopeRule{{Hostname: "grpcb.in", Method: "POST"}}, nil)
+	if !rsPost.ShouldRecord(grpcStartEnv(t, envelope.ProtocolGRPC, "grpcb.in:443", "hello.HelloService", "SayHello")) {
+		t.Error("method=POST rule must match gRPC envelope (wire-literal POST)")
+	}
+
+	rsGet := NewRecordScope()
+	rsGet.SetRules([]ScopeRule{{Hostname: "grpcb.in", Method: "GET"}}, nil)
+	if rsGet.ShouldRecord(grpcStartEnv(t, envelope.ProtocolGRPC, "grpcb.in:443", "hello.HelloService", "SayHello")) {
+		t.Error("method=GET rule must not match gRPC envelope")
+	}
+
+	// Guard: when synthesis is suppressed (empty Service/Method), the
+	// method field is also empty so a method rule cannot match.
+	if rsPost.ShouldRecord(grpcStartEnv(t, envelope.ProtocolGRPC, "grpcb.in:443", "", "SayHello")) {
+		t.Error("empty Service must suppress method projection")
+	}
+	if rsPost.ShouldRecord(grpcStartEnv(t, envelope.ProtocolGRPC, "grpcb.in:443", "hello.HelloService", "")) {
+		t.Error("empty Method must suppress method projection")
+	}
+}
+
+// TestRecordScope_URLPrefix_GRPCWeb verifies that gRPC-Web envelopes —
+// which share the *envelope.GRPCStartMessage type with native gRPC — are
+// covered by the same arm (USK-909).
+func TestRecordScope_URLPrefix_GRPCWeb(t *testing.T) {
+	rs := NewRecordScope()
+	rs.SetRules([]ScopeRule{{Hostname: "grpcb.in", URLPrefix: "/hello.HelloService/"}}, nil)
+	if !rs.ShouldRecord(grpcStartEnv(t, envelope.ProtocolGRPCWeb, "grpcb.in:443", "hello.HelloService", "SayHello")) {
+		t.Error("matching service prefix must record for gRPC-Web")
+	}
+	if rs.ShouldRecord(grpcStartEnv(t, envelope.ProtocolGRPCWeb, "grpcb.in:443", "other.Service", "X")) {
+		t.Error("non-matching service must filter for gRPC-Web")
 	}
 }
 
