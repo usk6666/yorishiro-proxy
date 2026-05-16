@@ -186,6 +186,18 @@ func extractScopeFields(env *envelope.Envelope) (method, hostname, path string) 
 				hostname = h
 			}
 		}
+	case *envelope.GRPCStartMessage:
+		// gRPC over HTTP/2 wire-literally carries `:method = POST` and
+		// `:path = /<Service>/<Method>`. Exposing these to capture_scope
+		// is wire-faithful, not normalization (MITM Principle 1). Both
+		// native gRPC and gRPC-Web emit *envelope.GRPCStartMessage. The
+		// 3-field guard suppresses synthesis when a malformed `:path`
+		// envelope left Service or Method empty, so a partial path like
+		// "/Service/" cannot spuriously prefix-match a rule.
+		if m != nil && m.Service != "" && m.Method != "" {
+			path = "/" + m.Service + "/" + m.Method
+			method = "POST"
+		}
 	}
 	return method, hostname, path
 }
