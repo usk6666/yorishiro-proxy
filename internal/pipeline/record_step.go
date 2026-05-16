@@ -109,6 +109,28 @@ type RecordStep struct {
 	// bound the rest of the recorder already accepts (no eviction).
 	protocolRetagged sync.Map
 
+	// streamCreated tracks streamIDs whose Stream row has already been
+	// created by RecordStep. Used to short-circuit duplicate createStream
+	// calls when multiple wire_level envelopes share the same StreamID
+	// (USK-908). Native gRPC streams emit three wire_level envelopes per
+	// direction (semantic + grpc-lpm-frame + h2-frame, USK-899) sharing
+	// the same StreamID; aggregator-path h2 streams emit two (h2-frame +
+	// semantic HTTPMessage from httpaggregator, USK-897). All such
+	// envelopes arrive at RecordStep with Direction=Send, Sequence=0 and
+	// would each trigger SaveStream without this guard, causing UNIQUE
+	// constraint failures on streams.id.
+	//
+	// Whichever envelope arrives first wins createStream; subsequent
+	// envelopes on the same StreamID are short-circuited. SaveFlow
+	// continues to fire for every wire_level envelope so wire-record
+	// persistence (MITM Principle 3) is preserved — only the duplicate
+	// SaveStream call is suppressed.
+	//
+	// sync.Map suits the keys-set-once pattern (LoadOrStore is the
+	// hot-path operation); same bounded-by-per-process-stream-count
+	// rationale as protocolRetagged above (no eviction).
+	streamCreated sync.Map
+
 	// scope filters which envelopes are recorded. nil = capture all
 	// (current behaviour). When non-nil, ShouldRecord is consulted for
 	// every envelope and the result is cached per StreamID in
@@ -533,9 +555,27 @@ func (s *RecordStep) Process(ctx context.Context, env *envelope.Envelope) Result
 		return Result{}
 	}
 
-	// Create Stream on first Send (Sequence==0).
+	// Create Stream on first Send (Sequence==0). Whichever wire_level
+	// envelope arrives first wins (USK-908). Native gRPC emits semantic
+	// first; aggregator-path h2 emits wire-level h2-frame first.
+	// Subsequent first-Send envelopes on the same StreamID are
+	// short-circuited by streamCreated to avoid duplicate SaveStream
+	// calls (and the resulting UNIQUE constraint failures on
+	// streams.id). SaveFlow at the bottom of Process still fires for
+	// every wire_level envelope so wire-record persistence is preserved.
 	if env.Direction == envelope.Send && env.Sequence == 0 {
-		s.createStream(ctx, env)
+		if _, loaded := s.streamCreated.LoadOrStore(env.StreamID, struct{}{}); !loaded {
+			s.createStream(ctx, env)
+		} else {
+			s.logger.DebugContext(ctx, "record: savestream skipped",
+				"phase", "recordstep-savestream-skip",
+				"streamID", env.StreamID,
+				"connID", env.Context.ConnID,
+				"protocol", string(env.Protocol),
+				"wireLevel", env.Context.WireLevel,
+				"reason", "stream-already-created",
+			)
+		}
 	} else {
 		// USK-841 milestone (g, skip path): SaveStream was not invoked
 		// because the envelope is not a first-Send. Reveals whether the
