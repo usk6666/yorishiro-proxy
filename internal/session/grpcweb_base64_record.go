@@ -104,12 +104,16 @@ func GRPCWebBase64RecordOption(ctx context.Context, p *pipeline.Pipeline, sessio
 		// wire-record).
 		return grpcweb.WithEncodedFormRecordCallback(nil)
 	}
-	// Pre-build the per-envelope EnvelopeContext template. WireLevel is
-	// always stamped from this helper, so any caller-supplied value is
-	// defensively cleared (matches the h2FrameFlowContext /
-	// GRPCLPMRecordOption / AggregatorH2FrameRecordOption pattern).
-	ctxTmpl := flowCtx
-	ctxTmpl.WireLevel = flow.WireLevelGRPCWebBase64
+	// flowCtx is intentionally not used to overwrite env.Context here
+	// (USK-910): the inner envelope's Context arrives populated by the
+	// producing grpcweb Layer's wire builders and clobbering it with a
+	// sparse builder-derived template breaks the USK-908 first-write-wins
+	// createStream guard — the streams row would be stamped with an empty
+	// conn_id when the base64 wire envelope races ahead of the semantic
+	// envelope. The parameter is preserved for signature stability; only
+	// WireLevel is stamped in-place on the inner envelope per MITM
+	// Principle #1 (do not normalize what the wire did not normalize).
+	_ = flowCtx
 
 	// Per-direction sequence counters. The same Option installed on both
 	// client-side (Send) and upstream-side (Receive) grpcweb wraps runs
@@ -145,10 +149,12 @@ func GRPCWebBase64RecordOption(ctx context.Context, p *pipeline.Pipeline, sessio
 			// collision against the per-direction counters.
 			return
 		}
-		// Apply the EnvelopeContext template. Per-envelope assignment by
-		// value so subsequent envelopes are not aliased to the same
-		// underlying context object.
-		env.Context = ctxTmpl
+		// Stamp WireLevel in place. The inner envelope's Context fields
+		// (ConnID / TLS / ClientAddr / TargetHost) are populated by the
+		// producing Layer's WithEnvelopeContext template and propagated
+		// verbatim by the wire-envelope builders; preserving them keeps
+		// the streams row consistent with the connections row (USK-910).
+		env.Context.WireLevel = flow.WireLevelGRPCWebBase64
 
 		// Run through the record-only Pipeline. The Pipeline.Run return
 		// values are intentionally discarded — record-only means the

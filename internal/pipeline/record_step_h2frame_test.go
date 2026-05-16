@@ -567,6 +567,136 @@ func TestRecordStep_CreateStream_FiresOnceAcrossWireLevels_AggregatorOrder(t *te
 	}
 }
 
+// TestRecordStep_CreateStream_PreservesInnerEnvelopeConnID_USK910 is
+// the USK-910 regression test: when a wire-level envelope wins the
+// USK-908 first-write-wins createStream race, the streams row must
+// carry the inner envelope's ConnID — NOT the empty value previously
+// stamped from the builder-side sparse `streamFlowCtx{TargetHost:
+// target}` template by the wire-record closures in session/
+// {h2_frame_record, grpc_lpm_record, grpcweb_base64_record}.go.
+//
+// Before USK-910 those closures assigned a builder-derived ctxTmpl
+// onto env.Context, clobbering the ConnID populated by the producing
+// Layer's WithEnvelopeContext. Combined with USK-908's first-write-
+// wins streamCreated guard, aggregator-path / native-gRPC h2 streams
+// created streams rows with empty conn_id when the wire-level envelope
+// arrived before the semantic envelope. This test fails without the
+// USK-910 fix and passes with it.
+//
+// Covers all three USK-908 arrival orders:
+//   - native-gRPC: semantic first (semantic carries ConnID; wire-level
+//     followers re-trigger UpdateStream but the streams row ConnID is
+//     set on createStream from the first writer)
+//   - aggregator: h2-frame first (the wire-level envelope itself
+//     creates the streams row; its ConnID must survive)
+//   - degenerate: a single LPM arrival creates the streams row alone
+func TestRecordStep_CreateStream_PreservesInnerEnvelopeConnID_USK910(t *testing.T) {
+	cases := []struct {
+		name        string
+		envelopes   []*envelope.Envelope
+		wantConnID  string
+		wantStreams int
+		wantFlows   int
+	}{
+		{
+			name: "native_grpc_order_semantic_first",
+			envelopes: []*envelope.Envelope{
+				semanticGRPCStartSendEnvelope("s1"),
+				h2FrameSendEnvelopeWithConnID("s1", "c1"),
+				grpcLPMFrameSendEnvelopeWithConnID("s1", "c1"),
+			},
+			wantConnID:  "c1",
+			wantStreams: 1,
+			wantFlows:   3,
+		},
+		{
+			name: "aggregator_order_h2frame_first",
+			envelopes: []*envelope.Envelope{
+				h2FrameSendEnvelopeWithConnID("s1", "c1"),
+				&envelope.Envelope{
+					StreamID:  "s1",
+					FlowID:    "semantic-s1",
+					Direction: envelope.Send,
+					Sequence:  0,
+					Protocol:  envelope.ProtocolHTTP,
+					Raw:       []byte("GET / HTTP/2"),
+					Message: &envelope.HTTPMessage{
+						Method:    "POST",
+						Scheme:    "https",
+						Authority: "example.test",
+						Path:      "/",
+					},
+					Context: envelope.EnvelopeContext{ConnID: "c1"},
+				},
+			},
+			wantConnID:  "c1",
+			wantStreams: 1,
+			wantFlows:   2,
+		},
+		{
+			name: "lpm_only_arrival_first_writes_streams_row",
+			envelopes: []*envelope.Envelope{
+				grpcLPMFrameSendEnvelopeWithConnID("s1", "c1"),
+			},
+			wantConnID:  "c1",
+			wantStreams: 1,
+			wantFlows:   1,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			w := &mockWriter{}
+			step := NewRecordStep(w, nil)
+			ctx := context.Background()
+			for _, env := range tc.envelopes {
+				step.Process(ctx, env)
+			}
+			if len(w.streams) != tc.wantStreams {
+				t.Fatalf("SaveStream calls = %d, want %d", len(w.streams), tc.wantStreams)
+			}
+			if got := w.streams[0].ConnID; got != tc.wantConnID {
+				t.Errorf("streams[0].ConnID = %q, want %q (USK-910: inner envelope ConnID must win on createStream)", got, tc.wantConnID)
+			}
+			if len(w.flows) != tc.wantFlows {
+				t.Errorf("SaveFlow calls = %d, want %d", len(w.flows), tc.wantFlows)
+			}
+		})
+	}
+}
+
+// h2FrameSendEnvelopeWithConnID is the USK-910 variant of
+// h2FrameSendEnvelope that lets the test populate an explicit ConnID
+// on the inner envelope's Context, mirroring the production shape where
+// the http2 Layer's WithEnvelopeContext template stamps ConnID onto
+// envelopes delivered through the wire builders.
+func h2FrameSendEnvelopeWithConnID(streamID, connID string) *envelope.Envelope {
+	return &envelope.Envelope{
+		StreamID:  streamID,
+		FlowID:    "h2frame-send-" + streamID,
+		Direction: envelope.Send,
+		Sequence:  0,
+		Protocol:  envelope.ProtocolHTTP,
+		Raw:       []byte("h2-frame-payload"),
+		Message:   &envelope.RawMessage{Bytes: []byte("h2-frame-payload")},
+		Context:   envelope.EnvelopeContext{ConnID: connID, WireLevel: flow.WireLevelH2Frame},
+	}
+}
+
+// grpcLPMFrameSendEnvelopeWithConnID is the USK-910 variant of
+// grpcLPMFrameSendEnvelope that lets the test populate an explicit
+// ConnID on the inner envelope's Context.
+func grpcLPMFrameSendEnvelopeWithConnID(streamID, connID string) *envelope.Envelope {
+	return &envelope.Envelope{
+		StreamID:  streamID,
+		FlowID:    "lpm-send-" + streamID,
+		Direction: envelope.Send,
+		Sequence:  0,
+		Protocol:  envelope.ProtocolGRPC,
+		Raw:       []byte{0x00, 0x00, 0x00, 0x00, 0x04, 0xde, 0xad, 0xbe, 0xef},
+		Context:   envelope.EnvelopeContext{ConnID: connID, WireLevel: flow.WireLevelGRPCLPMFrame},
+	}
+}
+
 // TestRecordStep_CreateStream_StreamCreatedDoesNotShortCircuitProtocolRetag
 // guards the streamCreated/protocolRetagged decoupling. The retag path
 // is independent: when a non-HTTP envelope arrives on a stream that was
