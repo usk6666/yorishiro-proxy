@@ -65,9 +65,19 @@ func h2FrameRecordCallback(
 // wireLevelRecordCallback is the wire-level-agnostic record-callback
 // helper shared by every non-semantic envelope producer (USK-889
 // h2-frame, USK-895 h1-chunk). The returned function is bound to
-// (recPipeline, sessionStreamID, direction, ctx, flowCtx, wireLevel) —
-// the orchestrator must produce one callback per detach side since
+// (recPipeline, sessionStreamID, direction, ctx, wireLevel); the
+// orchestrator must produce one callback per detach side since
 // direction and the per-direction sequence counter differ.
+//
+// USK-910: flowCtx is intentionally not used to overwrite env.Context.
+// The inner envelope's Context is populated by the producing Layer's
+// WithEnvelopeContext template (ConnID, TLS, ClientAddr, TargetHost)
+// and clobbering it with a sparse builder-derived template breaks the
+// USK-908 first-write-wins createStream guard. Only WireLevel is stamped
+// in place per MITM Principle #1. The flowCtx parameter is preserved
+// for signature stability (deferred D1 cleanup); for the h1-chunk path
+// the caller pre-populates Context from flowCtx in the locally-built
+// envelope literal (h1ChunkRecordCallback) before the callback fires.
 //
 // Sequence semantics: the counter is local to the closure so two callbacks
 // installed on the same sessionStreamID (the WS-over-h2 symmetric case)
@@ -296,13 +306,17 @@ func sseDetachOptions(frameCB func(*envelope.Envelope)) []http2.DetachOption {
 // from the client-side wrap and the semantic envelopes recorded by the
 // main Pipeline.
 //
-// flowCtx supplies the connection-scope ConnID / TargetHost / TLS /
-// ClientAddr stamped onto every H2DataEvent wire envelope so the
-// record-only Pipeline's HostScope / HTTPScope gates evaluate
-// consistently with the semantic envelopes recorded on the main Pipeline.
-// The caller may leave flowCtx.WireLevel at any value —
-// AggregatorH2FrameRecordOption defensively clears it before stamping
-// flow.WireLevelH2Frame.
+// USK-910: flowCtx is intentionally NOT used to overwrite env.Context.
+// The inner H2DataEvent wire envelope arrives with Context populated
+// by the producing aggregator's wire builder
+// (httpaggregator.buildH2FrameWireEnvelope propagates Context: env.Context),
+// and the callback only stamps WireLevel = flow.WireLevelH2Frame in
+// place per MITM Principle #1. The flowCtx parameter is preserved for
+// signature stability (deferred D1 cleanup); the connection-scope
+// ConnID / TargetHost / TLS / ClientAddr the record-only Pipeline's
+// HostScope / HTTPScope gates rely on is sourced from the producing
+// Layer's WithEnvelopeContext template upstream of the callback, NOT
+// from flowCtx.
 //
 // Returns a httpaggregator.WrapOption that installs a nil callback (no-op)
 // when p is nil so callers can unconditionally splat the result into

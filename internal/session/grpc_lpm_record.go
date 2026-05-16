@@ -93,12 +93,16 @@ import (
 // is required (e.g., synthetic test paths that exercise only one
 // wrap).
 //
-// flowCtx supplies the connection-scope ConnID / TargetHost / TLS /
-// ClientAddr stamped onto every LPM wire envelope so the record-only
-// Pipeline's HostScope / HTTPScope gates evaluate consistently with the
-// semantic envelopes recorded on the main Pipeline. The caller may leave
-// flowCtx.WireLevel at any value — GRPCLPMRecordOption defensively clears
-// it before stamping flow.WireLevelGRPCLPMFrame.
+// USK-910: flowCtx is intentionally NOT used to overwrite env.Context.
+// The inner LPM wire envelope arrives with Context populated by the
+// producing grpc Layer's wire builder (buildLPMWireEnvelopeLocked
+// propagates Context: ev.Context), and the callback only stamps
+// WireLevel = flow.WireLevelGRPCLPMFrame in place per MITM Principle #1.
+// The flowCtx parameter is preserved for signature stability (deferred
+// D1 cleanup); the connection-scope ConnID / TargetHost / TLS /
+// ClientAddr the record-only Pipeline's HostScope / HTTPScope gates
+// rely on is sourced from the producing Layer's WithEnvelopeContext
+// template upstream of the callback, NOT from flowCtx.
 //
 // Returns a grpclayer.Option that installs a nil callback (no-op) when
 // p is nil so callers can unconditionally splat the result into their

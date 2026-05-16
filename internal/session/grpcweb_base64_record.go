@@ -86,12 +86,17 @@ import (
 // unification is required (e.g., synthetic test paths that exercise only
 // one wrap).
 //
-// flowCtx supplies the connection-scope ConnID / TargetHost / TLS /
-// ClientAddr stamped onto every base64 wire envelope so the record-only
-// Pipeline's HostScope / HTTPScope gates evaluate consistently with the
-// semantic envelopes recorded on the main Pipeline. The caller may leave
-// flowCtx.WireLevel at any value — GRPCWebBase64RecordOption defensively
-// clears it before stamping flow.WireLevelGRPCWebBase64.
+// USK-910: flowCtx is intentionally NOT used to overwrite env.Context.
+// The inner base64 wire envelope arrives with Context populated by the
+// producing grpcweb Layer's wire builder
+// (channel.fireEncodedFormRecord propagates Context: src.Context), and
+// the callback only stamps WireLevel = flow.WireLevelGRPCWebBase64 in
+// place per MITM Principle #1. The flowCtx parameter is preserved for
+// signature stability (deferred D1 cleanup); the connection-scope
+// ConnID / TargetHost / TLS / ClientAddr the record-only Pipeline's
+// HostScope / HTTPScope gates rely on is sourced from the producing
+// Layer's WithEnvelopeContext template upstream of the callback, NOT
+// from flowCtx.
 //
 // Returns a grpcweb.Option that installs a nil callback (no-op) when p
 // is nil so callers can unconditionally splat the result into their
