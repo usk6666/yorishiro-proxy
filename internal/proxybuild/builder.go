@@ -835,7 +835,13 @@ func buildOnHTTP2Stack(p *pipeline.Pipeline, deps Deps, logger *slog.Logger) con
 					// the same closure so both directions of a bidi RPC's
 					// LPMs are recorded under the same sequence counters
 					// and the same Stream row.
-					streamFlowCtx := envelope.EnvelopeContext{TargetHost: target}
+					// USK-910 defense-in-depth: pre-populate ConnID alongside
+					// TargetHost. The wire-record callbacks no longer use this
+					// template to overwrite env.Context (the inner envelope's
+					// Context populated by the producing Layer wins), but
+					// keeping ConnID here preserves the parameter's documented
+					// semantics for any future caller that does consult it.
+					streamFlowCtx := envelope.EnvelopeContext{ConnID: stack.ConnID, TargetHost: target}
 					lpmOpt := session.GRPCLPMRecordOption(ctx, p, ch.StreamID(), streamFlowCtx)
 					// USK-899: per-stream native-gRPC h2 DATA frame
 					// wire-record Option. Closes the wire_level=h2-frame

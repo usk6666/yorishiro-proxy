@@ -65,9 +65,19 @@ func h2FrameRecordCallback(
 // wireLevelRecordCallback is the wire-level-agnostic record-callback
 // helper shared by every non-semantic envelope producer (USK-889
 // h2-frame, USK-895 h1-chunk). The returned function is bound to
-// (recPipeline, sessionStreamID, direction, ctx, flowCtx, wireLevel) —
-// the orchestrator must produce one callback per detach side since
+// (recPipeline, sessionStreamID, direction, ctx, wireLevel); the
+// orchestrator must produce one callback per detach side since
 // direction and the per-direction sequence counter differ.
+//
+// USK-910: flowCtx is intentionally not used to overwrite env.Context.
+// The inner envelope's Context is populated by the producing Layer's
+// WithEnvelopeContext template (ConnID, TLS, ClientAddr, TargetHost)
+// and clobbering it with a sparse builder-derived template breaks the
+// USK-908 first-write-wins createStream guard. Only WireLevel is stamped
+// in place per MITM Principle #1. The flowCtx parameter is preserved
+// for signature stability (deferred D1 cleanup); for the h1-chunk path
+// the caller pre-populates Context from flowCtx in the locally-built
+// envelope literal (h1ChunkRecordCallback) before the callback fires.
 //
 // Sequence semantics: the counter is local to the closure so two callbacks
 // installed on the same sessionStreamID (the WS-over-h2 symmetric case)
@@ -103,13 +113,19 @@ func wireLevelRecordCallback(
 		return nil
 	}
 
-	var seq int64
+	// flowCtx is intentionally not used to overwrite env.Context here
+	// (USK-910): the inner envelope's Context arrives populated by the
+	// producing Layer's WithEnvelopeContext template (ConnID, TLS,
+	// ClientAddr, TargetHost) and clobbering it with a sparse builder-
+	// derived template breaks the USK-908 first-write-wins createStream
+	// guard — the streams row would be stamped with an empty conn_id when
+	// the wire-level envelope races ahead of the semantic envelope. The
+	// parameter is preserved for signature stability; only WireLevel is
+	// stamped in-place on the inner envelope per MITM Principle #1 (do
+	// not normalize what the wire did not normalize).
+	_ = flowCtx
 
-	// Pre-build the envelope template so the hot path only stamps the
-	// per-event fields. The Context carries the WireLevel discriminator
-	// that RecordStep reads in recordCapForEnvelope + envelopeToFlow.
-	ctxTmpl := flowCtx
-	ctxTmpl.WireLevel = wireLevel
+	var seq int64
 
 	return func(env *envelope.Envelope) {
 		if env == nil {
@@ -130,12 +146,11 @@ func wireLevelRecordCallback(
 		// and a plain int would suffice. The atomic cost is negligible
 		// against the SQLite write.
 		env.Sequence = int(atomic.AddInt64(&seq, 1) - 1)
-		// Stamp the Context (WireLevel + connection-scope ConnID / TLS /
-		// ClientAddr) onto the envelope. We use a fresh Context value so
-		// the orchestrator-side template does not get aliased by
-		// subsequent envelopes (each invocation gets its own copy via
-		// the struct-value assignment).
-		env.Context = ctxTmpl
+		// Stamp WireLevel in place. The inner envelope's Context fields
+		// (ConnID / TLS / ClientAddr / TargetHost) are populated by the
+		// producing Layer's WithEnvelopeContext and must be preserved
+		// verbatim per MITM Principle #1 (USK-910).
+		env.Context.WireLevel = wireLevel
 
 		// Run through the record-only Pipeline. The Pipeline.Run return
 		// values are intentionally discarded — record-only means the
@@ -291,13 +306,17 @@ func sseDetachOptions(frameCB func(*envelope.Envelope)) []http2.DetachOption {
 // from the client-side wrap and the semantic envelopes recorded by the
 // main Pipeline.
 //
-// flowCtx supplies the connection-scope ConnID / TargetHost / TLS /
-// ClientAddr stamped onto every H2DataEvent wire envelope so the
-// record-only Pipeline's HostScope / HTTPScope gates evaluate
-// consistently with the semantic envelopes recorded on the main Pipeline.
-// The caller may leave flowCtx.WireLevel at any value —
-// AggregatorH2FrameRecordOption defensively clears it before stamping
-// flow.WireLevelH2Frame.
+// USK-910: flowCtx is intentionally NOT used to overwrite env.Context.
+// The inner H2DataEvent wire envelope arrives with Context populated
+// by the producing aggregator's wire builder
+// (httpaggregator.buildH2FrameWireEnvelope propagates Context: env.Context),
+// and the callback only stamps WireLevel = flow.WireLevelH2Frame in
+// place per MITM Principle #1. The flowCtx parameter is preserved for
+// signature stability (deferred D1 cleanup); the connection-scope
+// ConnID / TargetHost / TLS / ClientAddr the record-only Pipeline's
+// HostScope / HTTPScope gates rely on is sourced from the producing
+// Layer's WithEnvelopeContext template upstream of the callback, NOT
+// from flowCtx.
 //
 // Returns a httpaggregator.WrapOption that installs a nil callback (no-op)
 // when p is nil so callers can unconditionally splat the result into
@@ -345,12 +364,18 @@ func buildH2FrameRecordClosure(ctx context.Context, p *pipeline.Pipeline, sessio
 		// documented disable-recording contract on both Options.
 		return nil
 	}
-	// Pre-build the per-envelope EnvelopeContext template. WireLevel is
-	// always stamped from this helper, so any caller-supplied value is
-	// defensively cleared (matches the h2FrameFlowContext /
-	// GRPCLPMRecordOption pattern).
-	ctxTmpl := flowCtx
-	ctxTmpl.WireLevel = flow.WireLevelH2Frame
+	// flowCtx is intentionally not used to overwrite env.Context here
+	// (USK-910): the inner envelope's Context arrives populated by the
+	// producing Layer (httpaggregator wire-envelope builders /
+	// grpc.channel h2-frame wire builders propagate Context: env.Context)
+	// and clobbering it with a sparse builder-derived template breaks the
+	// USK-908 first-write-wins createStream guard — the streams row would
+	// be stamped with an empty conn_id when the wire-level envelope
+	// races ahead of the semantic envelope. The parameter is preserved
+	// for signature stability; only WireLevel is stamped in-place on the
+	// inner envelope per MITM Principle #1 (do not normalize what the
+	// wire did not normalize).
+	_ = flowCtx
 
 	// Per-direction sequence counters. The same closure installed on
 	// both client-side (Send) and upstream-side (Receive) Layer wraps
@@ -385,10 +410,13 @@ func buildH2FrameRecordClosure(ctx context.Context, p *pipeline.Pipeline, sessio
 			// per-direction counters.
 			return
 		}
-		// Apply the EnvelopeContext template. Per-envelope assignment by
-		// value so subsequent envelopes are not aliased to the same
-		// underlying context object.
-		env.Context = ctxTmpl
+		// Stamp WireLevel in place. The inner envelope's Context fields
+		// (ConnID / TLS / ClientAddr / TargetHost) are populated by the
+		// producing Layer's WithEnvelopeContext template and propagated
+		// verbatim by the wire-envelope builders; preserving them keeps
+		// the streams row consistent with the connections row and the
+		// other wire_level rows on the same Stream (USK-910).
+		env.Context.WireLevel = flow.WireLevelH2Frame
 
 		// Run through the record-only Pipeline. Drop / Respond cannot
 		// fire here because h2FrameRecordPipeline stripped every Step

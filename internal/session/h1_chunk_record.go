@@ -110,13 +110,21 @@ func h1ChunkRecordCallback(
 		// SQLite synchronously (today) or, in a hypothetical future
 		// async path, owns its own copy by the time it returns.
 		env := &envelope.Envelope{
-			// StreamID / FlowID / Sequence / Direction / Context are
-			// rewritten by wireLevelRecordCallback below; we leave them
-			// at the zero value so any leakage of pre-rewrite state is
-			// visible in a stack trace.
+			// StreamID / FlowID / Sequence / Direction are rewritten by
+			// wireLevelRecordCallback below; we leave them at the zero
+			// value so any leakage of pre-rewrite state is visible in a
+			// stack trace.
 			FlowID:   uuid.NewString(),
 			Protocol: envelope.ProtocolHTTP,
 			Raw:      chunkRaw,
+			// Pre-populate Context from the caller-supplied flowCtx
+			// (USK-910): wireLevelRecordCallback now only stamps
+			// WireLevel in place on env.Context, so the connection-scope
+			// fields (ConnID, TLS snapshot, ClientAddr) must already be
+			// on the envelope at delegate time. For the h1-chunk path
+			// flowCtx is sourced from firstResp.Context (session.go), so
+			// it carries the populated connection-scope identity.
+			Context: flowCtx,
 			// Message intentionally nil — see godoc.
 		}
 		envelopeCB(env)
