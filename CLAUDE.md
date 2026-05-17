@@ -36,15 +36,17 @@ Each connection is an explicit stack of `Layer`s (RFC-001 §3.3); each Layer yie
 
 | Protocol | L7 Structured View | L4 raw bytes | Notes |
 |----------|-------------------|--------------|-------|
-| HTTP/1.x | YES | YES | Custom parser; `net/http` not used in data path |
-| HTTP/2 | YES | YES | Custom frame engine; event-granular Channel + per-stream BodyBuffer |
-| gRPC | YES | YES (via HTTP/2) | Native LPM reassembly; GRPCStart/Data/End envelope events |
+| HTTP/1.x | YES | YES | Custom parser; `net/http` not used in data path. Forward: supported (USK-911~917). |
+| HTTP/2 | YES | YES | Custom frame engine; event-granular Channel + per-stream BodyBuffer. Forward: supported (USK-911~917). |
+| gRPC | YES | YES (via HTTP/2) | Native LPM reassembly; GRPCStart/Data/End envelope events. Forward: supported (USK-911~917). |
 | gRPC-Web | YES | YES (via HTTP/1.x or HTTP/2) | Binary + base64 wire formats |
-| WebSocket | YES | YES (per frame) | Per-message-deflate (RFC 7692) supported |
-| SSE | YES | YES | Per-event envelopes; streaming-aware Pipeline; per-event Transform / Intercept (rules/sse) — USK-892. Engines mutate SSEMessage fields directly; session-side sseMessageMutated field-diff is the authoritative re-encode signal (env.Raw is NOT cleared). |
-| Raw TCP | N/A | YES (byte stream) | Smuggling-safe pass-through (`bytechunk` Layer) |
+| WebSocket | YES | YES (per frame) | Per-message-deflate (RFC 7692) supported. Forward: supported (USK-911~917). |
+| SSE | YES | YES | Per-event envelopes; streaming-aware Pipeline; per-event Transform / Intercept (rules/sse) — USK-892. Engines mutate SSEMessage fields directly; session-side sseMessageMutated field-diff is the authoritative re-encode signal (env.Raw is NOT cleared). Forward: supported (USK-911~917). |
+| Raw TCP | N/A | YES (byte stream) | Smuggling-safe pass-through (`bytechunk` Layer). Forward: supported (USK-911~917). |
 | SOCKS5 | N/A | N/A (excluded as transport layer itself) | Apply raw bytes/L7 to the protocol delegated after handshake/tunnel |
 | TLS handshake | YES (observation) | N/A | `TLSHandshakeMessage` envelope; SNI / ALPN / JA3 / JA4 visible to plugins |
+
+> **TCP forward L7 dispatch (USK-911~917)**: All L7-supported protocols above are also usable through TCP forward mode (`tcp_forwards`) with independent client-side (`tls`) and upstream-side (`upstream_tls`) TLS axes. See `internal/proxybuild/tcp_forward.go` for the dispatch matrix and [RFC-001 §3.4.2](docs/rfc/envelope.md#342-tcp-forward-l7-dispatch).
 
 ### Design Principles
 

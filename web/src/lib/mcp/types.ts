@@ -59,13 +59,16 @@ export interface TransformRule {
 }
 
 /** Allowed protocols for TCP forwarding. */
-export type ForwardProtocol = "auto" | "raw" | "http" | "http2" | "grpc" | "websocket";
+export type ForwardProtocol = "auto" | "raw" | "http" | "http2" | "grpc" | "websocket" | "sse";
 
 /** TCP forward configuration for a single port. */
 export interface ForwardConfig {
   target: string;
   protocol?: ForwardProtocol;
+  /** Client-side TLS MITM termination on the forwarded listen port. */
   tls?: boolean;
+  /** Upstream-dial TLS encryption to target (independent of `tls`). */
+  upstream_tls?: boolean;
 }
 
 /** Connection info for a flow. */
