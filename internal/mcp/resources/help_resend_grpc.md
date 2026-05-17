@@ -56,7 +56,7 @@ Ordered metadata list. Preserves wire case, order, and duplicates per RFC-001 §
 ### messages (array, optional)
 Request-side LPM (length-prefixed message) list. At least one element required. Each element has:
 - **payload** (string, REQUIRED): LPM payload interpreted per `body_encoding`.
-- **body_encoding** (string, optional): `"text"` (default), `"base64"`, or `"proto-schemaless-json"`.
+- **body_encoding** (string, optional): `"text"` (default), `"base64"`, `"proto-schemaless-json"`, or `"proto-json"`.
 - **compressed** (boolean, optional): Set the LPM compression flag. Requires `encoding` to be set (recovered from flow or user-supplied).
 
 An RPC with zero DATA frames is not well-formed and is rejected.
@@ -66,8 +66,9 @@ An RPC with zero DATA frames is not well-formed and is rejected.
 - `"text"` (default): the payload is the raw proto bytes as UTF-8 (may contain control characters and is rarely human-readable).
 - `"base64"`: the payload is base64-encoded raw proto bytes. Useful when copying `body` from `query messages` for a gRPC flow that came back as `body_encoding="base64"`.
 - `"proto-schemaless-json"` (USK-922): the payload is a JSON object produced by `query.decode_bodies=true` (or hand-written following the same key format). The proxy re-encodes it to proto wire bytes via `internal/encoding/protobuf.Encode` before LPM-framing. JSON keys follow the format `"<fieldNumber hex>:<ordinal hex>:<wireType>"` — for example `"0001:0000:String"`, `"0002:0001:Varint"`, `"0003:0002:embedded message"`, `"0004:0003:repeated"`, `"0005:0004:bytes"`, `"0006:0005:64-bit"`, `"0007:0006:32-bit"`. Embedded messages are nested JSON objects; repeated is a JSON array of integers; bytes is a colon-separated hex string. The size cap (16 MiB) is enforced AFTER encoding, not on the JSON input.
+- `"proto-json"` (USK-923): the payload is a JSON object with the original `.proto` field names. Requires a schema previously registered for this `(service, method)` via the `grpc_schema` tool — see `yorishiro://help/grpc_schema`. Re-encoded via `protoreflect.DynamicMessage` + `protojson.UnmarshalOptions{DiscardUnknown:true}`; JSON keys not in the schema are silently dropped, type mismatches still hard-error. **Lossy:** wire fields not in the schema are dropped on encode — when the resend includes a `flow_id` and the source flow's wire bytes carried unknowns, the response surfaces a non-fatal `warnings[]` entry suggesting `proto-schemaless-json` / `base64` for lossless round-trip.
 
-> **Heuristic ambiguity caveat**: the schemaless decoder picks `String` / `embedded message` / `repeated` / `bytes` by inspection of the wire bytes — there is no `.proto` schema. The same wire payload may decode as `embedded message` in one envelope and `bytes` in another (visually similar wire encodings). For predictable round-tripping, keep the `body_encoding="base64"` form of the bytes that came out of `query` and only switch to `proto-schemaless-json` when you intend to mutate the JSON. Schema-aware decoding via a `.proto` registry is tracked in USK-923.
+> **Heuristic ambiguity caveat (schemaless)**: the schemaless decoder picks `String` / `embedded message` / `repeated` / `bytes` by inspection of the wire bytes — there is no `.proto` schema. The same wire payload may decode as `embedded message` in one envelope and `bytes` in another (visually similar wire encodings). For predictable round-tripping, keep the `body_encoding="base64"` form of the bytes that came out of `query` and only switch to `proto-schemaless-json` when you intend to mutate the JSON. Or register a `.proto` schema via the `grpc_schema` tool and use `proto-json` for unambiguous, real-field-name JSON.
 
 ### trailer_metadata (array of `{name, value}`, optional)
 Optional Send-direction trailer HEADERS. When supplied, the request terminates via a trailer frame instead of `END_STREAM` on the last DATA.

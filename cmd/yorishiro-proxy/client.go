@@ -400,6 +400,36 @@ the redacted PluginConfig.Vars map (RedactKeys substitute "<redacted>"; large va
 
 Examples:
   yorishiro-proxy client plugin_introspect`,
+
+	"grpc_schema": `grpc_schema: Manage .proto schemas for schema-aware gRPC decode/encode.
+
+Parameters (key=value):
+  action=<action>                   Action to execute (required):
+    register                        Upsert a service from a precompiled FileDescriptorSet
+    list                            List registered schemas
+    unregister                      Remove a service from the registry
+    clear                           Remove every registered schema
+
+  Register parameters (key=value with params. prefix):
+    params.source=descriptor_set    Input shape (only "descriptor_set" is supported)
+    params.descriptor_set_b64=<b64> Base64-encoded FileDescriptorSet payload (max 16 MiB decoded).
+                                    Generate via:
+                                      protoc --include_imports --descriptor_set_out=<file> <protos>
+                                    then base64-encode the result.
+    params.service_filter=<svc>     Restrict registration to a fully-qualified service name
+                                    (repeatable). Empty means register every service.
+    params.source_label=<label>     Free-form label preserved in list output.
+
+  Unregister parameter:
+    params.service=<service>        Fully-qualified service name to remove.
+
+Examples:
+  yorishiro-proxy client grpc_schema action=list
+  yorishiro-proxy client grpc_schema action=register params.source=descriptor_set params.descriptor_set_b64=<base64>
+  yorishiro-proxy client grpc_schema action=unregister params.service=pkg.Greeter
+  yorishiro-proxy client grpc_schema action=clear
+
+See yorishiro://help/grpc_schema for full documentation.`,
 }
 
 // clientToolList is the ordered list of available MCP tools for help display.
@@ -426,6 +456,7 @@ var clientToolList = []string{
 	"fuzz_grpc",
 	"fuzz_raw",
 	"plugin_introspect",
+	"grpc_schema",
 }
 
 // clientToolDescriptions maps tool names to their short descriptions for list display.
@@ -447,6 +478,7 @@ var clientToolDescriptions = map[string]string{
 	"fuzz_grpc":         "Synchronously fuzz a gRPC unary RPC",
 	"fuzz_raw":          "Synchronously fuzz a raw byte payload",
 	"plugin_introspect": "List loaded Starlark plugins and hook registrations",
+	"grpc_schema":       "Register and manage .proto schemas for schema-aware gRPC decode/encode",
 }
 
 // runClient is the entry point for the "client" subcommand.

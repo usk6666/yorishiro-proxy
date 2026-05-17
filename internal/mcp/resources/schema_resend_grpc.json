@@ -58,8 +58,8 @@
           "payload": { "type": "string", "description": "LPM payload interpreted per body_encoding." },
           "body_encoding": {
             "type": "string",
-            "description": "text (default) | base64 | proto-schemaless-json. proto-schemaless-json re-encodes via internal/encoding/protobuf (USK-922).",
-            "enum": ["text", "base64", "proto-schemaless-json"]
+            "description": "text (default) | base64 | proto-schemaless-json | proto-json. proto-schemaless-json re-encodes via internal/encoding/protobuf (USK-922). proto-json re-encodes via protoreflect+protojson using a schema registered through the grpc_schema tool (USK-923).",
+            "enum": ["text", "base64", "proto-schemaless-json", "proto-json"]
           },
           "compressed": { "type": "boolean", "description": "Set the LPM compression flag; requires encoding to be set." }
         },

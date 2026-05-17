@@ -970,6 +970,122 @@ func (s *SQLiteStore) DeleteMacro(ctx context.Context, name string) error {
 	})
 }
 
+// SaveGRPCSchema persists a gRPC schema entry using upsert semantics
+// (USK-923). If a row with the same service exists, descriptor_set,
+// source_label, and updated_at are overwritten while registered_at is
+// preserved.
+func (s *SQLiteStore) SaveGRPCSchema(ctx context.Context, service string, descriptorSet []byte, sourceLabel string) error {
+	return s.enqueueWrite(ctx, func(ctx context.Context) error {
+		now := time.Now().UTC().Format(time.RFC3339Nano)
+		_, err := s.db.ExecContext(ctx,
+			`INSERT INTO grpc_schemas (service, descriptor_set, source_label, registered_at, updated_at)
+			 VALUES (?, ?, ?, ?, ?)
+			 ON CONFLICT(service) DO UPDATE SET descriptor_set = excluded.descriptor_set, source_label = excluded.source_label, updated_at = excluded.updated_at`,
+			service, descriptorSet, sourceLabel, now, now,
+		)
+		if err != nil {
+			return fmt.Errorf("upsert grpc_schema %q: %w", service, err)
+		}
+		return nil
+	})
+}
+
+// GetGRPCSchema retrieves a stored schema entry by service name.
+func (s *SQLiteStore) GetGRPCSchema(ctx context.Context, service string) (*GRPCSchemaRecord, error) {
+	row := s.db.QueryRowContext(ctx,
+		`SELECT service, descriptor_set, source_label, registered_at, updated_at FROM grpc_schemas WHERE service = ?`, service)
+
+	var rec GRPCSchemaRecord
+	var registeredStr, updatedStr string
+	err := row.Scan(&rec.Service, &rec.DescriptorSet, &rec.SourceLabel, &registeredStr, &updatedStr)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, fmt.Errorf("grpc_schema %q not found", service)
+		}
+		return nil, fmt.Errorf("scan grpc_schema: %w", err)
+	}
+	var parseErr error
+	rec.RegisteredAt, parseErr = time.Parse(time.RFC3339Nano, registeredStr)
+	if parseErr != nil {
+		slog.Warn("failed to parse grpc_schema registered_at timestamp", "service", rec.Service, "value", registeredStr, "error", parseErr)
+	}
+	rec.UpdatedAt, parseErr = time.Parse(time.RFC3339Nano, updatedStr)
+	if parseErr != nil {
+		slog.Warn("failed to parse grpc_schema updated_at timestamp", "service", rec.Service, "value", updatedStr, "error", parseErr)
+	}
+	return &rec, nil
+}
+
+// ListGRPCSchemas returns all stored schema entries ordered by service name.
+func (s *SQLiteStore) ListGRPCSchemas(ctx context.Context) ([]*GRPCSchemaRecord, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT service, descriptor_set, source_label, registered_at, updated_at FROM grpc_schemas ORDER BY service ASC`)
+	if err != nil {
+		return nil, fmt.Errorf("list grpc_schemas: %w", err)
+	}
+	defer rows.Close()
+
+	var records []*GRPCSchemaRecord
+	for rows.Next() {
+		var rec GRPCSchemaRecord
+		var registeredStr, updatedStr string
+		if err := rows.Scan(&rec.Service, &rec.DescriptorSet, &rec.SourceLabel, &registeredStr, &updatedStr); err != nil {
+			return nil, fmt.Errorf("scan grpc_schema row: %w", err)
+		}
+		var parseErr error
+		rec.RegisteredAt, parseErr = time.Parse(time.RFC3339Nano, registeredStr)
+		if parseErr != nil {
+			slog.Warn("failed to parse grpc_schema registered_at timestamp", "service", rec.Service, "value", registeredStr, "error", parseErr)
+		}
+		rec.UpdatedAt, parseErr = time.Parse(time.RFC3339Nano, updatedStr)
+		if parseErr != nil {
+			slog.Warn("failed to parse grpc_schema updated_at timestamp", "service", rec.Service, "value", updatedStr, "error", parseErr)
+		}
+		records = append(records, &rec)
+	}
+	return records, rows.Err()
+}
+
+// DeleteGRPCSchema removes a schema entry by service name.
+func (s *SQLiteStore) DeleteGRPCSchema(ctx context.Context, service string) error {
+	return s.enqueueWrite(ctx, func(ctx context.Context) error {
+		result, err := s.db.ExecContext(ctx, "DELETE FROM grpc_schemas WHERE service = ?", service)
+		if err != nil {
+			return fmt.Errorf("delete grpc_schema %q: %w", service, err)
+		}
+		n, err := result.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("rows affected: %w", err)
+		}
+		if n == 0 {
+			return fmt.Errorf("grpc_schema %q not found", service)
+		}
+		return nil
+	})
+}
+
+// ClearGRPCSchemas deletes every schema entry; returns the number of
+// rows removed.
+func (s *SQLiteStore) ClearGRPCSchemas(ctx context.Context) (int64, error) {
+	var deleted int64
+	err := s.enqueueWrite(ctx, func(ctx context.Context) error {
+		result, err := s.db.ExecContext(ctx, "DELETE FROM grpc_schemas")
+		if err != nil {
+			return fmt.Errorf("clear grpc_schemas: %w", err)
+		}
+		n, rerr := result.RowsAffected()
+		if rerr != nil {
+			return fmt.Errorf("rows affected: %w", rerr)
+		}
+		deleted = n
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	return deleted, nil
+}
+
 // Close shuts down the writer goroutine and closes the database.
 func (s *SQLiteStore) Close() error {
 	close(s.done)

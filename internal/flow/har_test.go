@@ -65,6 +65,17 @@ func (m *mockHARStore) SaveMacro(_ context.Context, _, _, _ string) error       
 func (m *mockHARStore) GetMacro(_ context.Context, _ string) (*MacroRecord, error)  { return nil, nil }
 func (m *mockHARStore) ListMacros(_ context.Context) ([]*MacroRecord, error)        { return nil, nil }
 func (m *mockHARStore) DeleteMacro(_ context.Context, _ string) error               { return nil }
+func (m *mockHARStore) SaveGRPCSchema(_ context.Context, _ string, _ []byte, _ string) error {
+	return nil
+}
+func (m *mockHARStore) GetGRPCSchema(_ context.Context, _ string) (*GRPCSchemaRecord, error) {
+	return nil, nil
+}
+func (m *mockHARStore) ListGRPCSchemas(_ context.Context) ([]*GRPCSchemaRecord, error) {
+	return nil, nil
+}
+func (m *mockHARStore) DeleteGRPCSchema(_ context.Context, _ string) error { return nil }
+func (m *mockHARStore) ClearGRPCSchemas(_ context.Context) (int64, error)  { return 0, nil }
 
 func TestExportHAR_BasicHTTP(t *testing.T) {
 	t.Parallel()

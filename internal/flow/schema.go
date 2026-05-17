@@ -421,6 +421,23 @@ CREATE INDEX IF NOT EXISTS idx_flows_http_version ON flows(http_version);
 CREATE INDEX IF NOT EXISTS idx_flows_wire_level ON flows(wire_level);
 `
 
+// schemaV15 adds the grpc_schemas table for the schema-aware gRPC
+// decode/encode feature (USK-923). One row per fully-qualified service;
+// the descriptor_set BLOB carries the raw FileDescriptorSet bytes so the
+// registry can rehydrate protoreflect descriptors on process restart
+// without re-fetching the user's input. source_label is a free-form
+// diagnostic hint (filename, version tag) shown by the grpc_schema list
+// action; empty when not supplied.
+const schemaV15 = `
+CREATE TABLE IF NOT EXISTS grpc_schemas (
+	service          TEXT PRIMARY KEY,
+	descriptor_set   BLOB NOT NULL,
+	source_label     TEXT NOT NULL DEFAULT '',
+	registered_at    DATETIME NOT NULL,
+	updated_at       DATETIME NOT NULL
+);
+`
+
 var migrations = map[int]string{
 	1:  schemaV1,
 	2:  schemaV2,
@@ -436,6 +453,7 @@ var migrations = map[int]string{
 	12: schemaV12,
 	13: schemaV13,
 	14: schemaV14,
+	15: schemaV15,
 }
 
 func migrate(ctx context.Context, db *sql.DB) error {

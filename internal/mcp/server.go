@@ -7,12 +7,14 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"sync"
 	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/connector"
 	"github.com/usk6666/yorishiro-proxy/internal/connector/transport"
+	"github.com/usk6666/yorishiro-proxy/internal/encoding/protoschema"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/mcp/webui"
 	"github.com/usk6666/yorishiro-proxy/internal/safety"
@@ -21,7 +23,7 @@ import (
 // schemaCache is a process-wide cache of resolved JSON schemas, shared by
 // every MCP Server instance built in this process.
 //
-// The 17 tool input/output struct types registered by registerTools are
+// The 18 tool input/output struct types registered by registerTools are
 // fixed at compile time, so caching by reflect.Type is unconditionally
 // correct. The cache is concurrent-safe (gomcp.SchemaCache uses sync.Map
 // internally) and cheaply amortises a 1+ second per-server reflection cost
@@ -51,6 +53,17 @@ type Server struct {
 	httpMiddleware func(http.Handler) http.Handler
 	uiDir          string
 	version        string
+
+	// grpcSchemas is the process-global gRPC .proto schema registry
+	// (USK-923). Populated lazily on first use by grpcSchemaRegistry(); the
+	// grpc_schema MCP tool's register/unregister/clear actions also call
+	// rehydrateGRPCSchemas() at startup to repopulate from the SchemaStore.
+	// nil-receiver-safe so tests that never touch the schema path leave it
+	// untouched. grpcSchemasOnce serialises the lazy initialisation so two
+	// concurrent MCP tool handlers (e.g. grpc_schema register + query) cannot
+	// race on the publication of the Registry pointer.
+	grpcSchemas     *protoschema.Registry
+	grpcSchemasOnce sync.Once
 }
 
 // tcpForwardHandler is the legacy TCP-forward dispatcher interface, kept
@@ -418,4 +431,17 @@ func (s *Server) registerTools() {
 	s.registerIntercept()
 	s.registerSecurity()
 	s.registerPluginIntrospect()
+	s.registerGRPCSchema()
+}
+
+// grpcSchemaRegistry returns the process-global gRPC schema registry,
+// lazily initialising it on first use. sync.Once serialises the
+// publication of the pointer so concurrent MCP tool handlers cannot race
+// on the assignment; the underlying Registry itself uses atomic.Pointer
+// for the lock-free hot path.
+func (s *Server) grpcSchemaRegistry() *protoschema.Registry {
+	s.grpcSchemasOnce.Do(func() {
+		s.grpcSchemas = protoschema.NewRegistry()
+	})
+	return s.grpcSchemas
 }

@@ -72,6 +72,7 @@ func TestListResources_AllRegistered(t *testing.T) {
 		"yorishiro://help/fuzz_grpc",
 		"yorishiro://help/fuzz_raw",
 		"yorishiro://help/plugin_introspect",
+		"yorishiro://help/grpc_schema",
 	}
 	for _, uri := range expectedHelpURIs {
 		if !gotURIs[uri] {
@@ -97,6 +98,7 @@ func TestListResources_AllRegistered(t *testing.T) {
 		"yorishiro://schema/fuzz_grpc",
 		"yorishiro://schema/fuzz_raw",
 		"yorishiro://schema/plugin_introspect",
+		"yorishiro://schema/grpc_schema",
 	}
 	for _, uri := range expectedSchemaURIs {
 		if !gotURIs[uri] {
@@ -104,7 +106,7 @@ func TestListResources_AllRegistered(t *testing.T) {
 		}
 	}
 
-	// Total expected count = 18 help + 16 schema = 34.
+	// Total expected count = 19 help + 17 schema = 36.
 	expectedCount := len(expectedHelpURIs) + len(expectedSchemaURIs)
 	if len(result.Resources) != expectedCount {
 		t.Errorf("resource count = %d, want %d", len(result.Resources), expectedCount)

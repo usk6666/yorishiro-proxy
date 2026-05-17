@@ -80,14 +80,22 @@ type resendGRPCInput struct {
 }
 
 // resendGRPCData is one LPM input. Payload is interpreted per
-// body_encoding (text → UTF-8 passthrough, base64 → decoded). Compressed
-// flips the LPM compression byte; the underlying gRPC Layer applies the
-// negotiated grpc-encoding (gzip) when sending. Setting compressed=true
-// without an Encoding (recovered or user-supplied) is rejected at the
-// schema boundary.
+// body_encoding. Compressed flips the LPM compression byte; the
+// underlying gRPC Layer applies the negotiated grpc-encoding (gzip) when
+// sending. Setting compressed=true without an Encoding (recovered or
+// user-supplied) is rejected at the schema boundary.
+//
+// body_encoding values:
+//   - "text" (default) / "" — UTF-8 passthrough
+//   - "base64" — base64-decoded bytes
+//   - "proto-schemaless-json" (USK-922) — synthetic-key JSON re-encoded
+//     to proto wire bytes via internal/encoding/protobuf
+//   - "proto-json" (USK-923) — real-field-name JSON re-encoded via the
+//     registered schema for the resend's (service, method); requires a
+//     prior grpc_schema register call
 type resendGRPCData struct {
 	Payload      string `json:"payload" jsonschema:"LPM payload interpreted per body_encoding"`
-	BodyEncoding string `json:"body_encoding,omitempty" jsonschema:"text|base64; defaults to text"`
+	BodyEncoding string `json:"body_encoding,omitempty" jsonschema:"text|base64|proto-schemaless-json|proto-json; defaults to text. proto-json requires a registered schema via grpc_schema"`
 	Compressed   bool   `json:"compressed,omitempty" jsonschema:"set the LPM compression flag; requires Encoding to be set"`
 }
 
@@ -105,6 +113,12 @@ type resendGRPCResult struct {
 	End           *resendGRPCEndResult   `json:"end,omitempty"`
 	DurationMs    int64                  `json:"duration_ms"`
 	Tag           string                 `json:"tag,omitempty"`
+	// Warnings carries non-fatal hints surfaced to the caller. USK-923
+	// emits a "proto-json round-trip drops N unknown field bytes" warning
+	// when the source flow's bytes (looked up via input.FlowID) contained
+	// fields not in the registered schema; the lossy edge is documented
+	// in help_grpc_schema.md.
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 // resendGRPCDataResult is one decoded response-side LPM in the result.
@@ -211,6 +225,14 @@ func (s *Server) handleResendGRPC(ctx context.Context, _ *gomcp.CallToolRequest,
 		return nil, nil, fmt.Errorf("resend_grpc: %w", err)
 	}
 
+	// USK-923 pre-flight: when any message uses body_encoding="proto-json"
+	// AND a source flow_id is supplied, inspect the original send-side
+	// data bytes against the registered schema. Non-empty UnknownFields()
+	// means a decode → user edit → encode round-trip dropped N bytes;
+	// surface a non-fatal warning so the AI agent can opt into a lossless
+	// alternative (proto-schemaless-json / base64).
+	warnings := s.collectResendGRPCUnknownFieldWarnings(ctx, &input, plan)
+
 	endEnv, recvData, recvStartMeta, err := s.runResendGRPC(rtCtx, plan, pipe)
 	// USK-789: resend bypasses session.RunSession so the proxy path's
 	// OnComplete-driven Stream finalisation never fires. Mirror the
@@ -226,5 +248,7 @@ func (s *Server) handleResendGRPC(ctx context.Context, _ *gomcp.CallToolRequest,
 	}
 
 	duration := time.Since(start)
-	return nil, s.formatResendGRPCResult(plan.streamID, recvStartMeta, recvData, endEnv, input.Tag, duration), nil
+	result := s.formatResendGRPCResult(plan.streamID, recvStartMeta, recvData, endEnv, input.Tag, duration)
+	result.Warnings = warnings
+	return nil, result, nil
 }
