@@ -5,11 +5,13 @@ import (
 	"crypto/tls"
 	"fmt"
 	"net"
+	"time"
 
 	"github.com/google/uuid"
 
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/bytechunk"
+	"github.com/usk6666/yorishiro-proxy/internal/layer/http2"
 )
 
 // ForwardProtocol selects the L7 wire shape a caller of
@@ -43,12 +45,19 @@ const (
 	// USK-913 (L7 dispatch); currently returns a "not yet wired" error.
 	ForwardProtocolHTTP ForwardProtocol = "http"
 
-	// ForwardProtocolHTTP2 requests an h2c stack. Reserved for USK-913;
-	// currently returns a "not yet wired" error.
+	// ForwardProtocolHTTP2 requests an h2c stack. Wired by USK-914 —
+	// builds [http2 ServerRole client → http2 ClientRole upstream] with
+	// scheme="http" and SETTINGS_ENABLE_CONNECT_PROTOCOL mirrored from
+	// upstream. Both gRPC and gRPC-Web auto-route via DispatchH2Stream at
+	// the per-stream proxybuild dispatch layer (no filter).
 	ForwardProtocolHTTP2 ForwardProtocol = "http2"
 
-	// ForwardProtocolGRPC requests an h2c + gRPC stack. Reserved for
-	// USK-914; currently returns a "not yet wired" error.
+	// ForwardProtocolGRPC requests an h2c + gRPC content-type filter
+	// stack. Wired by USK-914 — assembles the same h2c stack as
+	// ForwardProtocolHTTP2; the per-stream dispatch layer additionally
+	// validates each stream's content-type against application/grpc[+...]
+	// and rejects non-gRPC traffic (including gRPC-Web) with
+	// RST_STREAM(REFUSED_STREAM).
 	ForwardProtocolGRPC ForwardProtocol = "grpc"
 
 	// ForwardProtocolWebSocket requests an HTTP/1.x stack that may
@@ -237,12 +246,18 @@ func BuildConnectionStackWithTarget(
 	switch protocol {
 	case ForwardProtocolRaw:
 		return buildTargetOverrideRawStack(ctx, clientConn, upstreamConn, params.Target, cfg)
+	case ForwardProtocolHTTP2, ForwardProtocolGRPC:
+		// USK-914: h2c forward stack. The GRPC selector reuses the same
+		// h2c stack assembly; the gRPC content-type filter is applied at
+		// the per-stream proxybuild dispatch layer (see
+		// internal/proxybuild/tcp_forward_h2.go).
+		return buildTargetOverrideH2CStack(ctx, clientConn, upstreamConn, params.Target, cfg)
 	case ForwardProtocolAuto:
 		return nil, fmt.Errorf("connector: BuildConnectionStackWithTarget: protocol %q not yet wired (auto-detection deferred to USK-913)", protocol)
-	case ForwardProtocolHTTP, ForwardProtocolHTTP2:
-		return nil, fmt.Errorf("connector: BuildConnectionStackWithTarget: protocol %q not yet wired (L7 dispatch deferred to USK-913/USK-914)", protocol)
-	case ForwardProtocolGRPC, ForwardProtocolWebSocket, ForwardProtocolSSE:
-		return nil, fmt.Errorf("connector: BuildConnectionStackWithTarget: protocol %q not yet wired (protocol-specific dispatch deferred to USK-914/USK-915)", protocol)
+	case ForwardProtocolHTTP:
+		return nil, fmt.Errorf("connector: BuildConnectionStackWithTarget: protocol %q not yet wired (L7 dispatch deferred to USK-913)", protocol)
+	case ForwardProtocolWebSocket, ForwardProtocolSSE:
+		return nil, fmt.Errorf("connector: BuildConnectionStackWithTarget: protocol %q not yet wired (protocol-specific dispatch deferred to USK-913)", protocol)
 	default:
 		// Unreachable: params.validate already rejects unknown values.
 		return nil, fmt.Errorf("connector: BuildConnectionStackWithTarget: unhandled protocol %q", protocol)
@@ -276,6 +291,110 @@ func buildTargetOverrideRawStack(
 	stack.PushUpstream(upstreamLayer)
 
 	_ = target // bytechunk does not stamp target into envelopes; field is informational
+	return stack, nil
+}
+
+// targetOverrideH2CPrefaceReadDeadline bounds how long the ServerRole HTTP/2
+// Layer's preface validation waits for the 24-byte client preface
+// ("PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n", RFC 9113 §3.4). Forward callers
+// accept arbitrary TCP and pass it straight to http2.New(ServerRole) when
+// Protocol="http2" or "grpc"; without a read deadline a slow or never-
+// sending client could pin the per-conn goroutine indefinitely. Defensive
+// default; future Issues may surface this as a config knob.
+const targetOverrideH2CPrefaceReadDeadline = 30 * time.Second
+
+// buildTargetOverrideH2CStack assembles the [http2 ServerRole client →
+// http2 ClientRole upstream] h2c stack used by ForwardProtocolHTTP2 and
+// ForwardProtocolGRPC. Modelled on BuildPlainH2CStack (the
+// CONNECT-inner-h2c sibling) with two operational adjustments for the
+// forward path:
+//
+//  1. clientConn carries a 30 s read deadline across the ServerRole
+//     preface validation (slow-handshake DoS defence — the CONNECT-inner
+//     path is already protected by the inner-byte peek timeout).
+//  2. SETTINGS_ENABLE_CONNECT_PROTOCOL mirror runs the same way; advertising
+//     1 to the client is harmless when extended-CONNECT is unused.
+//
+// The gRPC content-type filter that distinguishes ForwardProtocolHTTP2
+// from ForwardProtocolGRPC is applied at the per-stream proxybuild
+// dispatch layer (proxybuild.runTCPForwardH2Loop). This builder is
+// protocol-agnostic between the two.
+//
+// Ownership: the returned stack owns both conns; callers must defer
+// stack.Close(). On any constructor failure both conns are closed.
+func buildTargetOverrideH2CStack(
+	ctx context.Context,
+	clientConn, upstreamConn net.Conn,
+	target string,
+	cfg *BuildConfig,
+) (*ConnectionStack, error) {
+	connID := uuid.New().String()
+
+	clientEnvCtx := envelope.EnvelopeContext{
+		ConnID:     connID,
+		TargetHost: target,
+		// TLS intentionally nil: h2c — no handshake on either side.
+	}
+	upstreamEnvCtx := envelope.EnvelopeContext{
+		ConnID:     connID,
+		TargetHost: target,
+	}
+
+	stack := NewConnectionStack(connID)
+
+	// Upstream first so we can sniff its SETTINGS_ENABLE_CONNECT_PROTOCOL
+	// value (mirrors BuildPlainH2CStack USK-871 commentary).
+	upstreamLayer, err := http2.New(upstreamConn, connID+"/upstream", http2.ClientRole,
+		http2.WithScheme("http"),
+		http2.WithEnvelopeContext(upstreamEnvCtx),
+		http2.WithBodySpillDir(cfg.BodySpillDir),
+		http2.WithBodySpillThreshold(cfg.BodySpillThreshold),
+		http2.WithMaxBodySize(cfg.MaxBodySize),
+		http2.WithStateReleaser(cfg.PluginV2Engine),
+	)
+	if err != nil {
+		// http2.New already closed upstreamConn on failure; close the
+		// client conn to release resources.
+		_ = clientConn.Close()
+		return nil, fmt.Errorf("connector: buildTargetOverrideH2CStack: upstream h2 layer: %w", err)
+	}
+
+	enableConnectProtocol := resolveEnableConnectProtocol(ctx, upstreamLayer, false, connID, target)
+
+	// Apply a bounded read deadline across the ServerRole preface
+	// validation. Cleared before the function returns so the Layer's
+	// own reads behave normally afterwards. This is the forward-path
+	// equivalent of the CONNECT inner-byte peek timeout (which already
+	// protects the CONNECT-inner h2c path before BuildPlainH2CStack
+	// runs).
+	if conn, ok := clientConn.(interface {
+		SetReadDeadline(time.Time) error
+	}); ok {
+		_ = conn.SetReadDeadline(time.Now().Add(targetOverrideH2CPrefaceReadDeadline))
+		defer func() { _ = conn.SetReadDeadline(time.Time{}) }()
+	}
+
+	clientH2Opts := []http2.Option{
+		http2.WithScheme("http"),
+		http2.WithEnvelopeContext(clientEnvCtx),
+		http2.WithBodySpillDir(cfg.BodySpillDir),
+		http2.WithBodySpillThreshold(cfg.BodySpillThreshold),
+		http2.WithMaxBodySize(cfg.MaxBodySize),
+		http2.WithStateReleaser(cfg.PluginV2Engine),
+		http2.WithEnableConnectProtocol(enableConnectProtocol),
+	}
+	if mcsOpt := clientH2MaxConcurrentStreamsOption(cfg); mcsOpt != nil {
+		clientH2Opts = append(clientH2Opts, mcsOpt)
+	}
+	clientLayer, err := http2.New(clientConn, connID+"/client", http2.ServerRole, clientH2Opts...)
+	if err != nil {
+		_ = upstreamLayer.Close()
+		_ = clientConn.Close()
+		return nil, fmt.Errorf("connector: buildTargetOverrideH2CStack: client h2 layer: %w", err)
+	}
+	stack.PushClient(clientLayer)
+	stack.PushUpstream(upstreamLayer)
+
 	return stack, nil
 }
 

@@ -294,6 +294,27 @@ func extractContentType(evt *http2.H2HeadersEvent) string {
 	return ""
 }
 
+// IsGRPCContentType is the exported wrapper for isGRPCContentType. It
+// reports whether the given Content-Type value is a native-gRPC media
+// type (application/grpc[+suffix]; does NOT match application/grpc-web*).
+// Used by forward callers (USK-914 proxybuild.runTCPForwardH2Loop) that
+// must apply a Protocol="grpc" content-type filter on the first envelope
+// of each accepted stream — the filter has to fire BEFORE
+// DispatchH2StreamFull (which consumes the peek), so an exported helper
+// is needed rather than re-using the dispatcher's inline check.
+func IsGRPCContentType(ct string) bool {
+	return isGRPCContentType(ct)
+}
+
+// ExtractH2ContentType is the exported wrapper for extractContentType.
+// Returns the first content-type header value found on evt (case-
+// insensitive name match), or "" if none is present. Used by forward
+// callers that peek the first envelope of an h2 stream before
+// dispatching — see IsGRPCContentType for the use case.
+func ExtractH2ContentType(evt *http2.H2HeadersEvent) string {
+	return extractContentType(evt)
+}
+
 // isGRPCContentType reports whether ct is a native-gRPC media type:
 // exactly application/grpc, or application/grpc with a structured-syntax
 // suffix (application/grpc+proto, application/grpc+json, ...). Parameters

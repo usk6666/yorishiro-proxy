@@ -55,6 +55,12 @@ type tcpForwardEntry struct {
 	netLn   net.Listener
 	wgConns sync.WaitGroup // tracks per-connection handler goroutines
 
+	// fc retains the originating ForwardConfig so per-conn dispatch can
+	// route on Protocol / TLS / UpstreamTLS. Kept as a pointer to the
+	// caller's value — TCPForwardParams.Forwards lifetime exceeds the
+	// listener's, and the per-conn handler treats this as read-only.
+	fc *config.ForwardConfig
+
 	// activeConns and maxConns implement an atomic per-forward connection
 	// cap. activeConns is incremented on accept and decremented when the
 	// handler returns; if activeConns would exceed maxConns the new conn is
@@ -87,16 +93,23 @@ func (m *Manager) startTCPForwardListener(
 	}
 
 	// First iteration: only "raw", "auto" (with no detector → raw fallback),
-	// and "" are wired. Other modes return an explicit error so callers know
-	// they have to wait for the L7-mode follow-up.
+	// and "" are wired. USK-914 adds "http2" and "grpc" (h2c forward).
+	// Other modes return an explicit error so callers know they have to
+	// wait for the L7-mode follow-up (USK-913 owns http/websocket/sse/auto
+	// dispatch arms).
 	switch fc.Protocol {
 	case "", "raw", "auto":
-		// supported
+		// supported (USK-711)
+	case "http2", "grpc":
+		// supported (USK-914 — h2c forward dispatch in tcp_forward_h2.go)
 	default:
-		return nil, fmt.Errorf("tcp forward port %s: protocol %q not yet supported (USK-711 implements raw/auto; L7 modes deferred)", port, fc.Protocol)
+		return nil, fmt.Errorf("tcp forward port %s: protocol %q not yet supported (USK-711 implements raw/auto; USK-914 implements http2/grpc; remaining L7 modes deferred)", port, fc.Protocol)
 	}
 	if fc.TLS {
-		return nil, fmt.Errorf("tcp forward port %s: tls=true not yet supported (USK-711 implements raw forwarding only)", port)
+		return nil, fmt.Errorf("tcp forward port %s: tls=true not yet supported (USK-915 owns client-side TLS terminate)", port)
+	}
+	if fc.UpstreamTLS {
+		return nil, fmt.Errorf("tcp forward port %s: upstream_tls=true not yet supported (USK-916 owns upstream-dial TLS)", port)
 	}
 
 	bindAddr := fmt.Sprintf("127.0.0.1:%s", port)
@@ -115,6 +128,7 @@ func (m *Manager) startTCPForwardListener(
 		cancel: cancel,
 		done:   make(chan struct{}),
 		netLn:  ln,
+		fc:     fc,
 	}
 	// Seed the per-forward connection cap from the manager-level setting so
 	// SetMaxConnections fan-out reaches forward listeners. 0 = unlimited.
@@ -205,6 +219,18 @@ func (m *Manager) runTCPForwardAcceptLoop(
 			defer entry.wgConns.Done()
 			if counted {
 				defer entry.activeConns.Add(-1)
+			}
+			// USK-914: route http2 / grpc to the h2-aware handler. All
+			// other supported values (raw / auto / "") stay on the raw
+			// bytechunk path. The protocol gating happens at
+			// startTCPForwardListener so the switch here is just a
+			// dispatch — invalid values cannot reach this code.
+			if entry.fc != nil {
+				switch entry.fc.Protocol {
+				case "http2", "grpc":
+					m.handleTCPForwardH2Conn(ctx, parentListenerName, entry, entry.fc, c)
+					return
+				}
 			}
 			m.handleTCPForwardConn(ctx, parentListenerName, entry, c)
 		}(conn, counted)
