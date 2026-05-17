@@ -657,6 +657,27 @@ func (s *ConnectionStack) UpstreamTopmostForStream(streamID string) layer.Layer
 - HTTP/3 / QUIC extended CONNECT is a separate milestone; the overlay is described against the HTTP/2 framing surface only.
 - gRPC / SSE behavior under extended CONNECT is unchanged: those layers do not participate in extended-CONNECT-driven swaps.
 
+#### 3.4.2 TCP Forward L7 Dispatch
+
+In addition to the CONNECT / SOCKS5 / transparent paths, `yorishiro-proxy` accepts pre-configured **TCP forward** listeners (`tcp_forwards` in `proxy_start`). Each entry maps a local port to an upstream `host:port` and selects the connection-stack assembly explicitly rather than via peek-based detection.
+
+Implementation: `internal/proxybuild/tcp_forward.go`. Configuration: `internal/config.ForwardConfig` with three independent axes —
+
+- **`Protocol`** — one of `auto` (peek), `raw`, `http`, `http2`, `grpc`, `websocket`, `sse`. Selects which Layer stack the forward dispatches into; `auto` peeks the first bytes and falls back to `raw` when no L7 signature is detected. Inner L7 dispatch (WebSocket Upgrade, SSE response sniff, gRPC content-type) is derived from the chosen protocol Layer and reuses the same Pipeline.
+- **`TLS`** — when `true`, the proxy terminates client TLS on the forward listener (the per-entry `tls.Config` honors SNI and dispatches by negotiated ALPN), then applies L7 parsing on the cleartext stream. Recorded Stream `Scheme="https"`.
+- **`UpstreamTLS`** — when `true`, the proxy dials the upstream over TLS (global TLS fingerprint, SNI derived from `Target`, configured verification / mTLS material). Wire-level ALPN propagation follows the rule in `dialForwardUpstream`: explicit `Protocol="http2"` → offer `[h2]`; `Protocol="http"` → `[http/1.1]`; `Protocol="auto"` → propagate the client-negotiated ALPN if any, else `[http/1.1]`.
+
+`TLS` and `UpstreamTLS` are independent (4 combinations) and are never inferred from `Target`'s scheme or port. The TLS × UpstreamTLS matrix:
+
+| TLS   | UpstreamTLS | Client wire | Upstream wire | Use case                                      |
+|-------|-------------|-------------|---------------|-----------------------------------------------|
+| false | false       | plaintext   | plaintext     | Raw L4/L7 forwarding (default)                |
+| true  | false       | TLS         | plaintext     | TLS termination only                          |
+| false | true        | plaintext   | TLS           | Plaintext client → TLS-only upstream          |
+| true  | true        | TLS         | TLS           | Full MITM: terminate then re-encrypt upstream |
+
+All forwarded streams reuse the same `Pipeline` and `RecordStep`, so Flow / Stream recording (`flow.Stream.Scheme` reflects the client-side wire; per-Flow `Envelope.Raw` preserves wire bytes), plugin hooks, intercept / transform rules, and Safety Input Filter apply identically to forward traffic.
+
 ### 3.5 Pipeline Step Categorization
 
 Pipeline interface is unchanged:

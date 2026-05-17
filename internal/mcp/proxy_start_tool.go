@@ -86,7 +86,7 @@ type proxyStartInput struct {
 	// both formats in the MCP JSON schema; parsed into *config.ForwardConfig
 	// by parseTCPForwardsAny. See yorishiro://help/proxy_start for the full
 	// TLS × upstream_tls matrix.
-	TCPForwards map[string]any `json:"tcp_forwards,omitempty" jsonschema:"TCP forwarding map: local port -> upstream host:port string or {target, protocol, tls, upstream_tls} object; tls=client-side termination, upstream_tls=upstream-dial encryption (independent)"`
+	TCPForwards map[string]any `json:"tcp_forwards,omitempty" jsonschema:"TCP forwarding map: local port -> upstream host:port string (legacy) or {target, protocol, tls, upstream_tls} object. protocol: auto|raw|http|http2|grpc|websocket|sse (empty=auto). tls=client-side TLS MITM termination on the forwarded port; upstream_tls=upstream-dial TLS encryption to target. Both default false and are independent (4 combinations: plaintext/plaintext, TLS-terminate/plaintext, plaintext/TLS, TLS-terminate/TLS). See yorishiro://help/proxy_start for the full matrix."`
 
 	// SOCKS5Auth specifies the SOCKS5 authentication method.
 	// Valid values: "none" (default), "password".

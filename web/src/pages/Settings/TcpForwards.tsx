@@ -9,7 +9,7 @@ interface TcpForwardsProps {
 }
 
 /** Valid protocol values for ForwardConfig. */
-const PROTOCOL_OPTIONS = ["auto", "raw", "http", "http2", "grpc", "websocket"] as const;
+const PROTOCOL_OPTIONS = ["auto", "raw", "http", "http2", "grpc", "websocket", "sse"] as const;
 
 /**
  * TcpForwards — manage TCP forward mappings (local port -> ForwardConfig).
@@ -29,6 +29,7 @@ export function TcpForwards({ config, onRefresh }: TcpForwardsProps) {
   const [upstreamPort, setUpstreamPort] = useState("");
   const [protocol, setProtocol] = useState<ForwardProtocol>("auto");
   const [tlsEnabled, setTlsEnabled] = useState(false);
+  const [upstreamTlsEnabled, setUpstreamTlsEnabled] = useState(false);
   const [showForm, setShowForm] = useState(false);
 
   const forwards = config.tcp_forwards ?? {};
@@ -75,6 +76,9 @@ export function TcpForwards({ config, onRefresh }: TcpForwardsProps) {
     if (tlsEnabled) {
       newEntry.tls = true;
     }
+    if (upstreamTlsEnabled) {
+      newEntry.upstream_tls = true;
+    }
 
     // Build new forwards map: existing + new entry
     const newForwards: Record<string, ForwardConfig> = { ...forwards, [port]: newEntry };
@@ -85,13 +89,14 @@ export function TcpForwards({ config, onRefresh }: TcpForwardsProps) {
       });
       addToast({
         type: "success",
-        message: `TCP forward added: port ${port} -> ${upstream}${protocol !== "auto" ? ` (${protocol})` : ""}${tlsEnabled ? " [TLS]" : ""}`,
+        message: `TCP forward added: port ${port} -> ${upstream}${protocol !== "auto" ? ` (${protocol})` : ""}${tlsEnabled ? " [TLS]" : ""}${upstreamTlsEnabled ? " [Upstream TLS]" : ""}`,
       });
       setLocalPort("");
       setUpstreamHost("");
       setUpstreamPort("");
       setProtocol("auto");
       setTlsEnabled(false);
+      setUpstreamTlsEnabled(false);
       setShowForm(false);
       onRefresh();
     } catch (err) {
@@ -100,7 +105,7 @@ export function TcpForwards({ config, onRefresh }: TcpForwardsProps) {
         message: `Failed to add TCP forward: ${err instanceof Error ? err.message : String(err)}`,
       });
     }
-  }, [localPort, upstreamHost, upstreamPort, protocol, tlsEnabled, forwards, start, addToast, onRefresh]);
+  }, [localPort, upstreamHost, upstreamPort, protocol, tlsEnabled, upstreamTlsEnabled, forwards, start, addToast, onRefresh]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
@@ -208,6 +213,17 @@ export function TcpForwards({ config, onRefresh }: TcpForwardsProps) {
                     <span>Enable TLS MITM</span>
                   </label>
                 </div>
+                <div className="input-wrapper">
+                  <label className="input-label">Upstream TLS</label>
+                  <label style={{ display: "flex", alignItems: "center", gap: "var(--space-xs)", cursor: "pointer", padding: "var(--space-xs) 0" }}>
+                    <input
+                      type="checkbox"
+                      checked={upstreamTlsEnabled}
+                      onChange={(e) => setUpstreamTlsEnabled(e.target.checked)}
+                    />
+                    <span>Dial upstream over TLS</span>
+                  </label>
+                </div>
               </div>
               <div className="settings-add-form-actions">
                 <Button
@@ -254,6 +270,13 @@ export function TcpForwards({ config, onRefresh }: TcpForwardsProps) {
                         <span style={{ marginLeft: "var(--space-xs)" }}>
                           <Badge variant="warning">
                             TLS
+                          </Badge>
+                        </span>
+                      )}
+                      {fc.upstream_tls && (
+                        <span style={{ marginLeft: "var(--space-xs)" }}>
+                          <Badge variant="warning">
+                            Upstream TLS
                           </Badge>
                         </span>
                       )}

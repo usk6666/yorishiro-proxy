@@ -49,7 +49,7 @@ Each entry maps a local port number (string key) to either:
 - A **ForwardConfig object** with the following fields:
   - **target** (string, required): Upstream address in `"host:port"` format (e.g. `"api.example.com:50051"`)
   - **protocol** (string, optional): Expected protocol for L7 parsing. Default: `"auto"` (peek-based detection).
-    Valid values: `"auto"`, `"raw"`, `"http"`, `"http2"`, `"grpc"`, `"websocket"`
+    Valid values: `"auto"`, `"raw"`, `"http"`, `"http2"`, `"grpc"`, `"websocket"`, `"sse"`
   - **tls** (boolean, optional): Enable client-side TLS MITM termination on the forwarded listen port. Default: `false`.
     When true, the proxy presents a dynamically-issued certificate to the local client and terminates TLS before applying L7 parsing.
   - **upstream_tls** (boolean, optional): Enable upstream-dial TLS encryption to `target`. Default: `false`.
@@ -206,6 +206,35 @@ Example:
       "tls": true
     },
     "3306": "db.example.com:3306"
+  }
+}
+```
+
+### Start with TCP forward to TLS-only upstream (HTTP → HTTPS bridge)
+```json
+{
+  "listen_addr": "127.0.0.1:8080",
+  "tcp_forwards": {
+    "8081": {
+      "target": "api.example.com:443",
+      "protocol": "http",
+      "upstream_tls": true
+    }
+  }
+}
+```
+
+### Start with TCP forward — full MITM (TLS terminate + re-encrypt upstream)
+```json
+{
+  "listen_addr": "127.0.0.1:8080",
+  "tcp_forwards": {
+    "8443": {
+      "target": "api.example.com:443",
+      "protocol": "http",
+      "tls": true,
+      "upstream_tls": true
+    }
   }
 }
 ```
