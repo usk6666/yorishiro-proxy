@@ -48,9 +48,16 @@ Maximum number of items to return. Default: 50, max: 1000. Applies to `flows`, `
 Number of items to skip for pagination. Must be >= 0. Applies to `flows`, `messages`, `fuzz_jobs`, and `fuzz_results`.
 
 ### decode_bodies (boolean, optional, default `true`)
-Decode HTTP `Content-Encoding` (`gzip`, `deflate`, `br`, `zstd`) bodies in `flow` and `messages` responses. When `true`, additive `*_body_decoded` / `*_body_encoding_applied` fields are populated alongside the original wire-form `*_body` fields. Set to `false` to skip decompression.
+Decode protocol-specific bodies in `flow` and `messages` responses. When `true`, additive `*_body_decoded` / `*_body_encoding_applied` fields are populated alongside the original wire-form `*_body` fields. Set to `false` to skip all decoding.
 
-The original (compressed) body is always returned in `*_body` regardless of this flag, preserving wire fidelity for downstream tools and `resend_*`. Decode failures (unknown codec, malformed input, decoded size > 16 MiB cap, multi-codec chain) surface a `*_body_decode_anomaly` field; the wire-form body is left intact.
+Two decode paths are supported:
+
+- **HTTP `Content-Encoding`** (`gzip`, `deflate`, `br`, `zstd`): the wire-form body is decompressed into `*_body_decoded` with `*_body_decoded_encoding` set to `text` or `base64`, and `*_body_encoding_applied` set to the codec name (e.g. `gzip`).
+- **gRPC schemaless proto** (USK-922): gRPC Data envelopes (`metadata.grpc_event="data"`) — including gRPC and gRPC-Web — get a schemaless JSON projection of the proto wire payload via `internal/encoding/protobuf.Decode`. `*_body_decoded` contains JSON with sorted keys formatted as `"<fieldNumber hex>:<ordinal hex>:<wireType>"` (e.g. `"0001:0000:String"`, `"0002:0001:Varint"`, `"0003:0002:embedded message"`). `*_body_decoded_encoding="proto-schemaless-json"`. `*_body_encoding_applied="proto-schemaless"`. The same JSON shape is accepted back by `resend_grpc` (`body_encoding="proto-schemaless-json"`) for round-trip mutation without hand-computing wire bytes.
+
+The original wire-form body is always returned in `*_body` regardless of this flag, preserving wire fidelity for downstream tools and `resend_*`. Decode failures surface a `*_body_decode_anomaly` field; the wire-form body is left intact. Anomaly types include `unknown_encoding`, `malformed`, `size_exceeded`, `chain_rejected`, `truncated_decode` (HTTP path) and `proto_malformed` (gRPC path).
+
+> **Schemaless gRPC heuristic ambiguity**: the proto wire format encodes embedded messages, packed-repeated varints, and raw bytes with the same wire type (length-delimited). The decoder picks one interpretation heuristically (printable UTF-8 → `String`; otherwise embedded → repeated → bytes); ambiguous payloads may surface as the wrong type. Schema-aware decoding via a `.proto` registry is tracked in USK-923. Use the raw wire bytes (`body` with `body_encoding="base64"`) when the schemaless projection is ambiguous.
 
 ### include_bodies (boolean, optional, default `true`)
 Include message body fields in the `flow` and `messages` responses. Set to `false` to suppress every body field (`*_body`, `*_body_encoding`, `*_body_decoded*`, `raw_request`, `raw_response`) and return metadata only. Headers, status, method, URL, timestamps, and the record-time `*_body_truncated` flag are preserved.
@@ -100,7 +107,7 @@ Requires: `id` (flow ID).
 
 Returns: id, conn_id, protocol, state, method, url, request/response headers and bodies, raw bytes (base64), connection info, protocol_summary, message_preview (for streaming), original_request (for variant flows), timestamps.
 
-When `decode_bodies` is `true` (the default) and the body has a recognised `Content-Encoding`, the response also includes `request_body_decoded` / `response_body_decoded` (plaintext after Output Filter masking), `request_body_decoded_encoding` / `response_body_decoded_encoding` (`text` or `base64`), `request_body_encoding_applied` / `response_body_encoding_applied` (codec name, e.g. `gzip`). On decode failure, `request_body_decode_anomaly` / `response_body_decode_anomaly` carry `{type, detail}` (`unknown_encoding`, `malformed`, `size_exceeded`, `chain_rejected`, `truncated_decode`).
+When `decode_bodies` is `true` (the default) and the body is decodable, the response also includes `request_body_decoded` / `response_body_decoded` (plaintext / proto-schemaless JSON after Output Filter masking), `request_body_decoded_encoding` / `response_body_decoded_encoding` (`text`, `base64`, or `proto-schemaless-json`), and `request_body_encoding_applied` / `response_body_encoding_applied` (codec name — `gzip` / `br` / `deflate` / `zstd` for HTTP `Content-Encoding`, or `proto-schemaless` for gRPC Data envelopes). On decode failure, `request_body_decode_anomaly` / `response_body_decode_anomaly` carry `{type, detail}`: HTTP path uses `unknown_encoding`, `malformed`, `size_exceeded`, `chain_rejected`, `truncated_decode`; gRPC path uses `proto_malformed`.
 
 ### messages
 Get paginated messages within a flow. Supports direction filtering for streaming protocols.
