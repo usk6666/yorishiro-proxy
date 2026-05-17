@@ -82,9 +82,11 @@ type proxyStartInput struct {
 
 	// TCPForwards maps local listen ports to forwarding configurations.
 	// Values can be strings (legacy: "host:port") or ForwardConfig objects
-	// ({target, protocol, tls}). Uses map[string]any to accept both formats
-	// in the MCP JSON schema; parsed into *config.ForwardConfig by parseTCPForwardsAny.
-	TCPForwards map[string]any `json:"tcp_forwards,omitempty" jsonschema:"TCP forwarding map: local port -> upstream host:port string or {target, protocol, tls} object"`
+	// ({target, protocol, tls, upstream_tls}). Uses map[string]any to accept
+	// both formats in the MCP JSON schema; parsed into *config.ForwardConfig
+	// by parseTCPForwardsAny. See yorishiro://help/proxy_start for the full
+	// TLS × upstream_tls matrix.
+	TCPForwards map[string]any `json:"tcp_forwards,omitempty" jsonschema:"TCP forwarding map: local port -> upstream host:port string or {target, protocol, tls, upstream_tls} object; tls=client-side termination, upstream_tls=upstream-dial encryption (independent)"`
 
 	// SOCKS5Auth specifies the SOCKS5 authentication method.
 	// Valid values: "none" (default), "password".
@@ -138,8 +140,9 @@ type proxyStartInput struct {
 }
 
 // parseTCPForwardsAny parses TCP forward values from the MCP input into structured ForwardConfig.
-// Each value can be a string (legacy: "host:port") or an object with {target, protocol, tls}.
-// Legacy string values are converted to ForwardConfig{Target: value, Protocol: "raw"}.
+// Each value can be a string (legacy: "host:port") or an object with
+// {target, protocol, tls, upstream_tls}. Legacy string values are converted
+// to ForwardConfig{Target: value, Protocol: "raw"}.
 func parseTCPForwardsAny(raw map[string]any) (map[string]*config.ForwardConfig, error) {
 	if len(raw) == 0 {
 		return nil, nil
@@ -162,6 +165,9 @@ func parseTCPForwardsAny(raw map[string]any) (map[string]*config.ForwardConfig, 
 			}
 			if tls, ok := v["tls"].(bool); ok {
 				fc.TLS = tls
+			}
+			if utls, ok := v["upstream_tls"].(bool); ok {
+				fc.UpstreamTLS = utls
 			}
 			result[port] = fc
 		default:
@@ -739,6 +745,22 @@ func validateTCPForwardsConfig(forwards map[string]*config.ForwardConfig) error 
 		if fc.TLS && fc.Protocol == "raw" {
 			slog.Warn("TCP forward: tls=true with protocol=raw means TLS termination without L7 parsing",
 				"port", port, "target", fc.Target)
+		}
+		// Warn about unusual but valid combination: upstream TLS encryption
+		// wrapping an opaque byte stream (USK-911). Permitted, but typically
+		// the operator wants L7 parsing in front of upstream TLS too.
+		if fc.UpstreamTLS && fc.Protocol == "raw" {
+			slog.Warn("TCP forward: upstream_tls=true with protocol=raw means upstream TLS encryption without L7 parsing",
+				"port", port, "target", fc.Target)
+		}
+		// Inform operators that the TLS field's semantics are now strictly
+		// scoped to client-side termination (USK-911). Users who previously
+		// set tls=true expecting upstream encryption must now also set
+		// upstream_tls=true. Emitted per-entry whenever TLS=true so the
+		// notice reliably reaches operators of any matching config.
+		if fc.TLS {
+			slog.Info("TCP forward: tls now means client-side termination only; for upstream TLS use upstream_tls=true",
+				"port", port, "target", fc.Target, "upstream_tls", fc.UpstreamTLS)
 		}
 		// Validate target is host:port format.
 		host, p, err := net.SplitHostPort(fc.Target)

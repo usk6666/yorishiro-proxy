@@ -50,8 +50,19 @@ Each entry maps a local port number (string key) to either:
   - **target** (string, required): Upstream address in `"host:port"` format (e.g. `"api.example.com:50051"`)
   - **protocol** (string, optional): Expected protocol for L7 parsing. Default: `"auto"` (peek-based detection).
     Valid values: `"auto"`, `"raw"`, `"http"`, `"http2"`, `"grpc"`, `"websocket"`
-  - **tls** (boolean, optional): Enable TLS MITM termination on the forwarded port. Default: `false`.
-    When true, the proxy terminates TLS using the target hostname for certificate generation, then applies L7 parsing.
+  - **tls** (boolean, optional): Enable client-side TLS MITM termination on the forwarded listen port. Default: `false`.
+    When true, the proxy presents a dynamically-issued certificate to the local client and terminates TLS before applying L7 parsing.
+  - **upstream_tls** (boolean, optional): Enable upstream-dial TLS encryption to `target`. Default: `false`.
+    When true, the proxy wraps the upstream-direction connection in TLS (using the global TLS fingerprint, SNI derived from `target`, and the configured verification / client-cert settings).
+
+`tls` and `upstream_tls` are **independent** and are never inferred from `target`'s scheme or port:
+
+| tls   | upstream_tls | Client wire | Upstream wire | Typical use case                              |
+|-------|--------------|-------------|---------------|-----------------------------------------------|
+| false | false        | plaintext   | plaintext     | Raw L4/L7 forwarding (default)                |
+| true  | false        | TLS         | plaintext     | TLS termination only (downstream offload)     |
+| false | true         | plaintext   | TLS           | Plaintext client → TLS-only upstream          |
+| true  | true         | TLS         | TLS           | Full MITM: terminate then re-encrypt upstream |
 
 - If omitted, TCP forwarding is not configured
 - Both legacy string format and structured ForwardConfig can be mixed in the same object
