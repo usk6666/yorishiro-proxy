@@ -37,7 +37,7 @@
     },
     "tcp_forwards": {
       "type": "object",
-      "description": "Maps local listen ports to upstream forwarding configurations. Values can be strings (legacy: host:port) or ForwardConfig objects ({target, protocol, tls}).",
+      "description": "Maps local listen ports to upstream forwarding configurations. Values can be strings (legacy: host:port) or ForwardConfig objects ({target, protocol, tls, upstream_tls}). tls=client-side termination, upstream_tls=upstream-dial encryption (independent fields).",
       "additionalProperties": {
         "oneOf": [
           {
@@ -46,7 +46,7 @@
           },
           {
             "type": "object",
-            "description": "ForwardConfig with target, protocol, and TLS options.",
+            "description": "ForwardConfig with target, protocol, client-side TLS, and upstream TLS options.",
             "required": ["target"],
             "properties": {
               "target": {
@@ -60,7 +60,11 @@
               },
               "tls": {
                 "type": "boolean",
-                "description": "Enable TLS MITM termination on the forwarded port. Default: false."
+                "description": "Enable client-side TLS MITM termination on the forwarded listen port. Default: false."
+              },
+              "upstream_tls": {
+                "type": "boolean",
+                "description": "Enable upstream-dial TLS encryption to target. Independent of tls; not inferred from target scheme. Default: false."
               }
             },
             "additionalProperties": false

@@ -374,6 +374,32 @@ func isValidProjectNameRune(r rune) bool {
 // ForwardConfig holds the configuration for a single TCP forward entry.
 // It specifies the upstream target address and optional protocol/TLS hints
 // for L7 parsing on forwarded connections.
+//
+// # TLS vs UpstreamTLS semantics
+//
+// TLS and UpstreamTLS are independent boolean fields that control two
+// separate concerns and are never inferred from Target's scheme or port:
+//
+//   - TLS: client-side TLS MITM termination on the forwarded listen port.
+//     When true, the proxy presents a dynamically-issued certificate to the
+//     local client and terminates TLS before applying L7 parsing.
+//   - UpstreamTLS: upstream-dial TLS encryption to Target.
+//     When true, the proxy wraps the upstream-direction connection in TLS
+//     (with TLS fingerprint / SNI / verify settings from the global config)
+//     before forwarding bytes / L7 messages.
+//
+// The four combinations and their typical scenarios:
+//
+//	| TLS   | UpstreamTLS | Client wire | Upstream wire | Typical use case                              |
+//	|-------|-------------|-------------|---------------|-----------------------------------------------|
+//	| false | false       | plaintext   | plaintext     | Raw L4/L7 forwarding (default; USK-711)       |
+//	| true  | false       | TLS         | plaintext     | TLS termination only (downstream offload)     |
+//	| false | true        | plaintext   | TLS           | Plaintext client → TLS-only upstream          |
+//	| true  | true        | TLS         | TLS           | Full MITM: terminate then re-encrypt upstream |
+//
+// Both fields default to false, which preserves the existing raw-forward
+// behavior. Target's scheme/port are advisory only; they do not change the
+// effective TLS / UpstreamTLS values.
 type ForwardConfig struct {
 	// Target is the upstream address (e.g. "api.example.com:50051").
 	Target string `json:"target"`
@@ -384,10 +410,23 @@ type ForwardConfig struct {
 	// Empty is treated as "auto".
 	Protocol string `json:"protocol,omitempty"`
 
-	// TLS enables TLS MITM termination on the forwarded port.
+	// TLS enables TLS MITM termination on the forwarded port (client-side).
 	// When true, the proxy terminates TLS using the target hostname
 	// for certificate generation, then applies L7 parsing.
+	//
+	// This field controls ONLY the client-direction (listen-port) TLS state.
+	// For upstream-dial TLS encryption, see UpstreamTLS.
 	TLS bool `json:"tls,omitempty"`
+
+	// UpstreamTLS enables TLS encryption on the upstream-dial connection.
+	// When true, the proxy connects to Target over TLS (using the global
+	// TLS fingerprint, SNI derived from Target, and the configured
+	// verification / client-cert settings).
+	//
+	// This field controls ONLY the upstream-direction TLS state. It is
+	// independent of TLS and is not inferred from Target's scheme/port.
+	// See the type-level godoc for the full TLS × UpstreamTLS matrix.
+	UpstreamTLS bool `json:"upstream_tls,omitempty"`
 }
 
 // validForwardProtocols is the set of valid protocol values for ForwardConfig.

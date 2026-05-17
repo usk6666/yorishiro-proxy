@@ -1038,6 +1038,77 @@ func TestApplyProxyDefaults_TCPForwards(t *testing.T) {
 	})
 }
 
+// TestParseTCPForwardsAny_UpstreamTLS verifies the MCP input parser
+// extracts the upstream_tls boolean field independently of the existing
+// tls field, covering all four (tls, upstream_tls) combinations. USK-911.
+func TestParseTCPForwardsAny_UpstreamTLS(t *testing.T) {
+	cases := []struct {
+		name     string
+		input    map[string]any
+		wantTLS  bool
+		wantUTLS bool
+	}{
+		{
+			name: "neither flag set",
+			input: map[string]any{
+				"9000": map[string]any{"target": "h:9000", "protocol": "raw"},
+			},
+			wantTLS:  false,
+			wantUTLS: false,
+		},
+		{
+			name: "tls only",
+			input: map[string]any{
+				"9000": map[string]any{"target": "h:9000", "protocol": "http", "tls": true},
+			},
+			wantTLS:  true,
+			wantUTLS: false,
+		},
+		{
+			name: "upstream_tls only",
+			input: map[string]any{
+				"9000": map[string]any{"target": "h:9000", "protocol": "http", "upstream_tls": true},
+			},
+			wantTLS:  false,
+			wantUTLS: true,
+		},
+		{
+			name: "both flags",
+			input: map[string]any{
+				"9000": map[string]any{"target": "h:9000", "protocol": "http", "tls": true, "upstream_tls": true},
+			},
+			wantTLS:  true,
+			wantUTLS: true,
+		},
+		{
+			name: "upstream_tls non-bool is ignored (defensive: field stays false)",
+			input: map[string]any{
+				"9000": map[string]any{"target": "h:9000", "protocol": "http", "upstream_tls": "yes"},
+			},
+			wantTLS:  false,
+			wantUTLS: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			parsed, err := parseTCPForwardsAny(tc.input)
+			if err != nil {
+				t.Fatalf("parseTCPForwardsAny: %v", err)
+			}
+			fc := parsed["9000"]
+			if fc == nil {
+				t.Fatal("parsed[9000] is nil")
+			}
+			if fc.TLS != tc.wantTLS {
+				t.Errorf("TLS = %v, want %v", fc.TLS, tc.wantTLS)
+			}
+			if fc.UpstreamTLS != tc.wantUTLS {
+				t.Errorf("UpstreamTLS = %v, want %v", fc.UpstreamTLS, tc.wantUTLS)
+			}
+		})
+	}
+}
+
 func TestApplyProxyDefaults_InterceptRules(t *testing.T) {
 	rulesJSON := json.RawMessage(`[{
 		"id": "default-rule",

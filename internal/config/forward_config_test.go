@@ -50,6 +50,126 @@ func TestProxyConfig_UnmarshalJSON_StructuredFormat(t *testing.T) {
 	if !fc.TLS {
 		t.Error("TLS should be true")
 	}
+	if fc.UpstreamTLS {
+		t.Error("UpstreamTLS should default to false when omitted")
+	}
+}
+
+// TestForwardConfig_UnmarshalJSON_TLSUpstreamTLSMatrix exercises every
+// combination of (tls, upstream_tls) across the JSON unmarshal path so
+// the four scenarios described in the ForwardConfig godoc are
+// independently verified. USK-911.
+func TestForwardConfig_UnmarshalJSON_TLSUpstreamTLSMatrix(t *testing.T) {
+	cases := []struct {
+		name     string
+		json     string
+		wantTLS  bool
+		wantUTLS bool
+	}{
+		{
+			name:     "both false (default raw forwarding)",
+			json:     `{"tcp_forwards": {"9000": {"target": "h:9000", "protocol": "raw"}}}`,
+			wantTLS:  false,
+			wantUTLS: false,
+		},
+		{
+			name:     "tls only (client-side termination)",
+			json:     `{"tcp_forwards": {"9000": {"target": "h:9000", "protocol": "http", "tls": true}}}`,
+			wantTLS:  true,
+			wantUTLS: false,
+		},
+		{
+			name:     "upstream_tls only (plaintext client to TLS upstream)",
+			json:     `{"tcp_forwards": {"9000": {"target": "h:9000", "protocol": "http", "upstream_tls": true}}}`,
+			wantTLS:  false,
+			wantUTLS: true,
+		},
+		{
+			name:     "both true (full MITM with re-encryption)",
+			json:     `{"tcp_forwards": {"9000": {"target": "h:9000", "protocol": "http", "tls": true, "upstream_tls": true}}}`,
+			wantTLS:  true,
+			wantUTLS: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var cfg ProxyConfig
+			if err := json.Unmarshal([]byte(tc.json), &cfg); err != nil {
+				t.Fatalf("Unmarshal: %v", err)
+			}
+			fc := cfg.TCPForwards["9000"]
+			if fc == nil {
+				t.Fatal("TCPForwards[9000] is nil")
+			}
+			if fc.TLS != tc.wantTLS {
+				t.Errorf("TLS = %v, want %v", fc.TLS, tc.wantTLS)
+			}
+			if fc.UpstreamTLS != tc.wantUTLS {
+				t.Errorf("UpstreamTLS = %v, want %v", fc.UpstreamTLS, tc.wantUTLS)
+			}
+		})
+	}
+}
+
+// TestForwardConfig_MarshalJSON_OmitEmptyDefaults verifies that the
+// omitempty tag on UpstreamTLS prevents the field from leaking false
+// defaults into the serialized output, matching the existing TLS
+// behavior. USK-911.
+func TestForwardConfig_MarshalJSON_OmitEmptyDefaults(t *testing.T) {
+	fc := &ForwardConfig{Target: "h:9000", Protocol: "raw"}
+	data, err := json.Marshal(fc)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	s := string(data)
+	if strings.Contains(s, "upstream_tls") {
+		t.Errorf("Marshal output should omit upstream_tls when false, got %s", s)
+	}
+	if strings.Contains(s, `"tls"`) {
+		t.Errorf("Marshal output should omit tls when false, got %s", s)
+	}
+
+	fc2 := &ForwardConfig{Target: "h:9000", Protocol: "raw", UpstreamTLS: true}
+	data2, err := json.Marshal(fc2)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if !strings.Contains(string(data2), `"upstream_tls":true`) {
+		t.Errorf("Marshal output should include upstream_tls=true, got %s", string(data2))
+	}
+}
+
+// TestForwardConfig_MarshalJSON_RoundTrip_AllCombinations confirms the
+// (tls, upstream_tls) bits survive a Marshal → Unmarshal cycle in every
+// combination. USK-911.
+func TestForwardConfig_MarshalJSON_RoundTrip_AllCombinations(t *testing.T) {
+	cases := []struct {
+		name string
+		fc   ForwardConfig
+	}{
+		{"both false", ForwardConfig{Target: "h:9000", Protocol: "raw"}},
+		{"tls only", ForwardConfig{Target: "h:9000", Protocol: "http", TLS: true}},
+		{"upstream_tls only", ForwardConfig{Target: "h:9000", Protocol: "http", UpstreamTLS: true}},
+		{"both true", ForwardConfig{Target: "h:9000", Protocol: "http", TLS: true, UpstreamTLS: true}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			data, err := json.Marshal(tc.fc)
+			if err != nil {
+				t.Fatalf("Marshal: %v", err)
+			}
+			var got ForwardConfig
+			if err := json.Unmarshal(data, &got); err != nil {
+				t.Fatalf("Unmarshal: %v", err)
+			}
+			if got.TLS != tc.fc.TLS {
+				t.Errorf("TLS round-trip = %v, want %v (json=%s)", got.TLS, tc.fc.TLS, string(data))
+			}
+			if got.UpstreamTLS != tc.fc.UpstreamTLS {
+				t.Errorf("UpstreamTLS round-trip = %v, want %v (json=%s)", got.UpstreamTLS, tc.fc.UpstreamTLS, string(data))
+			}
+		})
+	}
 }
 
 func TestProxyConfig_UnmarshalJSON_MixedFormat(t *testing.T) {
@@ -215,6 +335,16 @@ func TestValidateForwardConfig(t *testing.T) {
 			name: "tls with raw emits warning but no error",
 			port: "3306",
 			fc:   &ForwardConfig{Target: "db:3306", Protocol: "raw", TLS: true},
+		},
+		{
+			name: "upstream_tls with raw is accepted (warn happens at MCP layer)",
+			port: "3306",
+			fc:   &ForwardConfig{Target: "db:3306", Protocol: "raw", UpstreamTLS: true},
+		},
+		{
+			name: "tls and upstream_tls both true is valid (full MITM re-encrypt)",
+			port: "443",
+			fc:   &ForwardConfig{Target: "h:443", Protocol: "http", TLS: true, UpstreamTLS: true},
 		},
 		{
 			name: "valid http",
