@@ -363,6 +363,47 @@ func TestGRPCSchema_InvalidAction(t *testing.T) {
 	}
 }
 
+// TestGRPCSchema_Rehydrate_MultiServiceFromSameDescriptorSet is the
+// regression test for USK-923 review F-1: ensureGRPCSchemaRehydrated
+// previously cached parsed specs by descriptor_set bytes, which lost
+// sibling services because the per-service filter ([rec.Service]) only
+// returned one spec per cache entry. After fix, every service persisted
+// under the same descriptor_set rehydrates independently.
+func TestGRPCSchema_Rehydrate_MultiServiceFromSameDescriptorSet(t *testing.T) {
+	t.Parallel()
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	// Seed two rows directly into the SchemaStore, both sharing the same
+	// descriptor_set bytes (the realistic shape: handleGRPCSchemaRegister
+	// writes the same `raw` once per service in the set).
+	if err := store.SaveGRPCSchema(ctx, "usk.test.Greeter", embeddedTestDescBytes, "v1"); err != nil {
+		t.Fatalf("SaveGRPCSchema Greeter: %v", err)
+	}
+	if err := store.SaveGRPCSchema(ctx, "usk.test.Reflective", embeddedTestDescBytes, "v1"); err != nil {
+		t.Fatalf("SaveGRPCSchema Reflective: %v", err)
+	}
+
+	// Fresh in-memory Server (simulates process restart — no in-memory
+	// Registry entries until rehydrate runs).
+	s := newServer(ctx, nil, store, nil)
+	if err := s.ensureGRPCSchemaRehydrated(ctx); err != nil {
+		t.Fatalf("ensureGRPCSchemaRehydrated: %v", err)
+	}
+
+	svcs := s.grpcSchemaRegistry().ListServices()
+	if len(svcs) != 2 {
+		t.Fatalf("rehydrated services count = %d, want 2 (Greeter + Reflective)", len(svcs))
+	}
+	names := map[string]bool{}
+	for _, sp := range svcs {
+		names[sp.Service] = true
+	}
+	if !names["usk.test.Greeter"] || !names["usk.test.Reflective"] {
+		t.Errorf("rehydrated services = %v, want both Greeter and Reflective", names)
+	}
+}
+
 func TestGRPCSchema_EmptyAction(t *testing.T) {
 	t.Parallel()
 	store := newTestStore(t)

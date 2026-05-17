@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"sync"
 	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -58,8 +59,11 @@ type Server struct {
 	// grpc_schema MCP tool's register/unregister/clear actions also call
 	// rehydrateGRPCSchemas() at startup to repopulate from the SchemaStore.
 	// nil-receiver-safe so tests that never touch the schema path leave it
-	// untouched.
-	grpcSchemas *protoschema.Registry
+	// untouched. grpcSchemasOnce serialises the lazy initialisation so two
+	// concurrent MCP tool handlers (e.g. grpc_schema register + query) cannot
+	// race on the publication of the Registry pointer.
+	grpcSchemas     *protoschema.Registry
+	grpcSchemasOnce sync.Once
 }
 
 // tcpForwardHandler is the legacy TCP-forward dispatcher interface, kept
@@ -431,12 +435,13 @@ func (s *Server) registerTools() {
 }
 
 // grpcSchemaRegistry returns the process-global gRPC schema registry,
-// lazily initialising it on first use. Safe to call concurrently — the
-// initialisation is idempotent and the underlying Registry uses
-// atomic.Pointer for reads.
+// lazily initialising it on first use. sync.Once serialises the
+// publication of the pointer so concurrent MCP tool handlers cannot race
+// on the assignment; the underlying Registry itself uses atomic.Pointer
+// for the lock-free hot path.
 func (s *Server) grpcSchemaRegistry() *protoschema.Registry {
-	if s.grpcSchemas == nil {
+	s.grpcSchemasOnce.Do(func() {
 		s.grpcSchemas = protoschema.NewRegistry()
-	}
+	})
 	return s.grpcSchemas
 }

@@ -1151,12 +1151,14 @@ func grpcMethodFromMetadata(metadata map[string]string) (service, method string)
 }
 
 // lookupGRPCSchema returns the MethodSpec for (service, method) or nil
-// when no schema is registered. nil-receiver-safe.
+// when no schema is registered. nil-receiver-safe. Reads through
+// grpcSchemaRegistry() so the pointer publication is synchronised with
+// the Registry's lazy initialisation (USK-923 review F-2).
 func (s *Server) lookupGRPCSchema(service, method string) *protoschema.MethodSpec {
-	if s == nil || s.grpcSchemas == nil {
+	if s == nil {
 		return nil
 	}
-	return s.grpcSchemas.LookupMethod(service, method)
+	return s.grpcSchemaRegistry().LookupMethod(service, method)
 }
 
 // computeDecodedBodyForMessage dispatches between the HTTP Content-Encoding

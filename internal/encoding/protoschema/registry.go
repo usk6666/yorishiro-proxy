@@ -381,15 +381,18 @@ func verifyServiceFilterUsed(filter map[string]struct{}, specs []*ServiceSpec) e
 // protodesc.NewFiles's "missing dependency" failure. protodesc uses
 // "could not resolve import" wording across versions; we match on
 // substrings rather than the concrete error type so a minor protoc
-// upgrade doesn't silently swallow this branch.
+// upgrade doesn't silently swallow this branch. The bare "not found"
+// substring is intentionally NOT matched — that wording appears on many
+// unrelated protoreflect/protoregistry errors (e.g. a future
+// "enum value X not found in type Y") and would mis-route them to the
+// protoc --include_imports hint.
 func isMissingDependencyErr(err error) bool {
 	if err == nil {
 		return false
 	}
 	s := err.Error()
 	return strings.Contains(s, "could not resolve import") ||
-		strings.Contains(s, "missing dependency") ||
-		strings.Contains(s, "not found")
+		strings.Contains(s, "missing dependency")
 }
 
 // Stats reports the current size of the registry.

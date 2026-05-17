@@ -176,6 +176,16 @@ func (s *Server) handleGRPCSchemaRegister(ctx context.Context, params grpcSchema
 		return nil, err
 	}
 
+	// Pre-decode size cap on the base64 input itself (USK-923 review S-1,
+	// CWE-770). Base64 encodes 3 bytes into 4 chars; cap the encoded
+	// length at the equivalent of MaxDescriptorSetBytes + a small slack
+	// (padding, newlines) so a pathological input cannot allocate
+	// gigabytes during DecodeString before the post-decode cap fires.
+	maxEncodedLen := protoschema.MaxDescriptorSetBytes*4/3 + 64
+	if len(params.DescriptorSetB64) > maxEncodedLen {
+		return nil, fmt.Errorf("descriptor_set_b64 length %d exceeds maximum encoded size %d (decoded cap is %d bytes)", len(params.DescriptorSetB64), maxEncodedLen, protoschema.MaxDescriptorSetBytes)
+	}
+
 	raw, err := base64.StdEncoding.DecodeString(params.DescriptorSetB64)
 	if err != nil {
 		return nil, fmt.Errorf("decode descriptor_set_b64: %w", err)
@@ -313,17 +323,15 @@ func (s *Server) ensureGRPCSchemaRehydrated(ctx context.Context) error {
 		// only ADDS entries observed in DB.
 		return nil
 	}
-	// Group records by descriptor_set bytes to avoid re-parsing the
-	// same payload for sibling services. In the common single-file
-	// case every service shares a single payload.
-	parsedByBytes := make(map[string][]*protoschema.ServiceSpec)
-	groupErr := error(nil)
+	// Load each record independently. handleGRPCSchemaRegister persists
+	// the SAME descriptor_set bytes once per service inside the set, so
+	// the earlier byte-keyed cache (one-payload→one-service) lost every
+	// sibling service after restart. Each rec carries its own service
+	// filter; the per-record cost is one protodesc.NewFiles call on
+	// rehydrate (operator-side, infrequent).
+	all := make([]*protoschema.ServiceSpec, 0, len(records))
+	var groupErr error
 	for _, rec := range records {
-		key := string(rec.DescriptorSet)
-		if cached, ok := parsedByBytes[key]; ok {
-			parsedByBytes[key] = applyRehydrateLabel(cached, rec)
-			continue
-		}
 		specs, perr := protoschema.LoadFileDescriptorSet(rec.DescriptorSet, []string{rec.Service})
 		if perr != nil {
 			// One malformed entry must not poison the rest — surface
@@ -334,11 +342,8 @@ func (s *Server) ensureGRPCSchemaRehydrated(ctx context.Context) error {
 			}
 			continue
 		}
-		parsedByBytes[key] = applyRehydrateLabel(specs, rec)
-	}
-	all := make([]*protoschema.ServiceSpec, 0)
-	for _, group := range parsedByBytes {
-		all = append(all, group...)
+		applyRehydrateLabel(specs, rec)
+		all = append(all, specs...)
 	}
 	if len(all) > 0 {
 		s.grpcSchemaRegistry().Register(all)
@@ -347,11 +352,11 @@ func (s *Server) ensureGRPCSchemaRehydrated(ctx context.Context) error {
 }
 
 // applyRehydrateLabel copies SourceLabel + RegisteredAt from the record
-// onto the matching ServiceSpec. The Registry was built with a fresh
-// RegisteredAt timestamp inside LoadFileDescriptorSet; we overwrite it
-// with the original DB value so list output reflects the wall-clock at
-// the first register call rather than the rehydrate call.
-func applyRehydrateLabel(specs []*protoschema.ServiceSpec, rec *flow.GRPCSchemaRecord) []*protoschema.ServiceSpec {
+// onto the matching ServiceSpec in specs (in place). The Registry was
+// built with a fresh RegisteredAt timestamp inside LoadFileDescriptorSet;
+// we overwrite it with the original DB value so list output reflects the
+// wall-clock at the first register call rather than the rehydrate call.
+func applyRehydrateLabel(specs []*protoschema.ServiceSpec, rec *flow.GRPCSchemaRecord) {
 	for _, sp := range specs {
 		if sp.Service == rec.Service {
 			sp.SourceLabel = rec.SourceLabel
@@ -360,7 +365,6 @@ func applyRehydrateLabel(specs []*protoschema.ServiceSpec, rec *flow.GRPCSchemaR
 			}
 		}
 	}
-	return specs
 }
 
 // serviceSpecToEntry projects a protoschema.ServiceSpec onto the MCP
