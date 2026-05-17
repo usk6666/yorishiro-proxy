@@ -47,10 +47,16 @@ const tcpForwardDialTimeout = 30 * time.Second
 //     502s the first exchange when the upstream response is not
 //     text/event-stream (USK-913).
 //
-// Deferred (returns an error at start time):
-//   - "http2" / "grpc" — h2c / gRPC dispatch (USK-914).
-//   - TLS=true (client-side terminate) — (USK-915).
-//   - UpstreamTLS=true (upstream-side dial encrypt) — (USK-916).
+// TLS support:
+//   - TLS=true (client-side terminate) — USK-915. Requires a configured CA
+//     Issuer; listener start rejects fc.TLS=true without one.
+//   - UpstreamTLS=true (upstream-side TLS dial) — USK-916. ALPN propagation:
+//     explicit Protocol derives from declaration; "auto"+client-TLS
+//     propagates the client-negotiated ALPN; "auto"+plaintext-client
+//     advertises only http/1.1 (h2 upstream requires explicit
+//     Protocol="http2"). Upstream cert verification uses the global
+//     BuildConfig.InsecureSkipVerify flag — per-host / mTLS / uTLS is
+//     deferred to a follow-up Issue.
 type TCPForwardParams struct {
 	// Forwards maps local port -> ForwardConfig (target, protocol, tls).
 	Forwards map[string]*config.ForwardConfig
@@ -169,9 +175,11 @@ func (m *Manager) startTCPForwardListener(
 			return nil, fmt.Errorf("tcp forward port %s: tls=true requires a configured CA Issuer", port)
 		}
 	}
-	if fc.UpstreamTLS {
-		return nil, fmt.Errorf("tcp forward port %s: upstream_tls=true not yet supported (upstream TLS dial deferred to USK-916)", port)
-	}
+	// USK-916: fc.UpstreamTLS=true is wired via proxybuild.dialForwardUpstream
+	// (in tcp_forward_tls.go). No listener-start validation needed beyond
+	// the existing Target / Protocol checks — the upstream cert verification
+	// policy uses BuildConfig.InsecureSkipVerify (global) and tolerates a
+	// missing Issuer (upstream TLS does not need the proxy's CA).
 
 	bindAddr := fmt.Sprintf("127.0.0.1:%s", port)
 	ln, err := net.Listen("tcp", bindAddr)
@@ -396,16 +404,23 @@ func (m *Manager) handleTCPForwardConnWithOverride(
 	// next forward dial (USK-734) AND the parent listener's per-listener
 	// upstream-proxy override (USK-826) participates — connCtx carries the
 	// parent listener name via ContextWithListenerName above.
-	dialOpts := connector.DialRawOpts{
-		DialTimeout: tcpForwardDialTimeout,
-	}
-	if parentStack.BuildConfig != nil {
-		dialOpts.UpstreamProxy = parentStack.BuildConfig.EffectiveUpstreamProxyForCtx(connCtx)
-	}
-
-	upstreamConn, _, derr := connector.DialUpstreamRaw(connCtx, entry.target, dialOpts)
+	//
+	// USK-916: dialForwardUpstream additionally performs an upstream TLS
+	// handshake when entry.fc.UpstreamTLS=true, returning the TLS snapshot
+	// for envelope stamping below.
+	upstreamConn, upstreamSnap, derr := dialForwardUpstream(connCtx, entry, override, parentStack, connLogger)
 	if derr != nil {
 		connLogger.Debug("tcp forward upstream dial failed", "error", derr)
+		// USK-916: TLS-dial failures (cert verify, handshake timeout, etc)
+		// should produce a state="error" Stream so MCP query("flows",
+		// filter:{state:"error"}) surfaces them. Plain TCP dial failures
+		// stay silent (matches the pre-USK-916 raw forward behaviour where
+		// the connection drops before any Layer is constructed).
+		if entry.fc != nil && entry.fc.UpstreamTLS {
+			if rec := buildTLSStackBuildErrorRecorder(parentStack.FlowStore, nil, parentListenerName, connLogger); rec != nil {
+				rec(connCtx, entry.target, derr)
+			}
+		}
 		return
 	}
 
@@ -432,7 +447,10 @@ func (m *Manager) handleTCPForwardConnWithOverride(
 	// L7 dispatch via connector.BuildConnectionStackWithTarget. The builder
 	// owns the Layer assembly; this handler owns the per-exchange dispatch,
 	// the ctx-cancel watcher, and the websocket/sse expectation filter.
-	m.handleTCPForwardConnL7(connCtx, parentStack, connID, connLogger, entry, override, protocol, clientConn, upstreamConn)
+	// upstreamSnap is non-nil when fc.UpstreamTLS=true (USK-916) and threads
+	// through to the upstream Layer's EnvelopeContext.TLS via
+	// TargetOverrideParams.UpstreamTLSSnapshot.
+	m.handleTCPForwardConnL7(connCtx, parentStack, connID, connLogger, entry, override, protocol, clientConn, upstreamConn, upstreamSnap)
 }
 
 // handleTCPForwardConnRaw runs the USK-711 [bytechunk → bytechunk] path.
@@ -510,6 +528,7 @@ func (m *Manager) handleTCPForwardConnL7(
 	override *forwardConnOverride,
 	protocol string,
 	clientConn, upstreamConn net.Conn,
+	upstreamSnap *envelope.TLSSnapshot,
 ) {
 	// Build the stack via the connector dispatcher. Protocol is a
 	// non-h2 / non-grpc / non-TLS combination per the startTCPForwardListener
@@ -525,6 +544,12 @@ func (m *Manager) handleTCPForwardConnL7(
 	if override != nil && override.tlsTerminated {
 		params.Scheme = "https"
 		params.ClientTLSSnapshot = override.clientTLSSnapshot
+	}
+	// USK-916: when an upstream TLS handshake completed, thread the snapshot
+	// into the upstream Layer's EnvelopeContext.TLS via the builder.
+	if entry.fc != nil && entry.fc.UpstreamTLS && upstreamSnap != nil {
+		params.UpstreamTLS = true
+		params.UpstreamTLSSnapshot = upstreamSnap
 	}
 	stack, err := connector.BuildConnectionStackWithTarget(connCtx, clientConn, upstreamConn, params, parentStack.BuildConfig)
 	if err != nil {

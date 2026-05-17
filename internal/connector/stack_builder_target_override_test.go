@@ -336,9 +336,13 @@ func TestBuildConnectionStackWithTarget_TLSTerminateDeferred(t *testing.T) {
 	}
 }
 
-// TestBuildConnectionStackWithTarget_UpstreamTLSDeferred confirms
-// UpstreamTLS=true short-circuits with a USK-916 reference.
-func TestBuildConnectionStackWithTarget_UpstreamTLSDeferred(t *testing.T) {
+// TestBuildConnectionStackWithTarget_UpstreamTLSInformational confirms
+// USK-916 changed UpstreamTLS=true from a hard reject into an
+// informational flag — the builder no longer dials upstream TLS itself
+// (caller-side dial via proxybuild.dialForwardUpstream), so the field
+// only signals intent. The builder accepts the value and assembles the
+// stack as if the caller had already dialed TLS upstream of this call.
+func TestBuildConnectionStackWithTarget_UpstreamTLSInformational(t *testing.T) {
 	_, clientPeer := pipePair(t)
 	_, upstreamPeer := pipePair(t)
 	cfg := newTestBuildConfig(t)
@@ -347,13 +351,14 @@ func TestBuildConnectionStackWithTarget_UpstreamTLSDeferred(t *testing.T) {
 		Protocol:    ForwardProtocolRaw,
 		UpstreamTLS: true,
 	}
-	_, err := BuildConnectionStackWithTarget(context.Background(), clientPeer, upstreamPeer, params, cfg)
-	if err == nil {
-		t.Fatal("expected non-nil error for UpstreamTLS=true, got nil")
+	stack, err := BuildConnectionStackWithTarget(context.Background(), clientPeer, upstreamPeer, params, cfg)
+	if err != nil {
+		t.Fatalf("expected UpstreamTLS=true to be accepted (USK-916 informational flag), got error: %v", err)
 	}
-	if !strings.Contains(err.Error(), "USK-916") {
-		t.Errorf("expected error to cite USK-916, got %q", err.Error())
+	if stack == nil {
+		t.Fatal("expected non-nil stack, got nil")
 	}
+	_ = stack.Close()
 }
 
 // TestBuildConnectionStackWithTarget_ALPNOffersAccepted verifies that

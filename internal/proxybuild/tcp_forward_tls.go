@@ -366,6 +366,179 @@ func fireForwardTLSHandshakeHook(ctx context.Context, engine *pluginv2.Engine, s
 	}
 }
 
+// upstreamALPNOffersForForward returns the ALPN advertise list the proxy
+// presents on the upstream-side TLS handshake when fc.UpstreamTLS=true
+// (USK-916). The selection follows the ALPN propagation policy resolved
+// at design review:
+//
+//  1. Operator-declared explicit protocol — derive from the declared
+//     protocol via alpnOffersForForwardProtocol. Operators that declared
+//     "http2" / "grpc" want h2 upstream; declared "http" / "websocket" /
+//     "sse" want http/1.1 upstream; declared "raw" wants no ALPN
+//     extension at all.
+//
+//  2. Protocol="auto" + client TLS terminated + client negotiated a
+//     non-empty ALPN — propagate the client-negotiated ALPN as a
+//     single-element list. This preserves the operator's "auto"
+//     declaration intent (let the client pick) and gives the upstream
+//     the same protocol the client chose.
+//
+//  3. Protocol="auto" + plaintext client (or client did not negotiate
+//     an ALPN) — offer only ["http/1.1"]. The Auto peek path on a
+//     plaintext client routes to H1 or Raw only (h2c opportunistic
+//     upgrade is intentionally disabled in
+//     buildTargetOverrideAutoStack). Advertising h2 upstream would risk
+//     an h1↔h2 bridge the data path does not support
+//     (single-protocol-per-stack invariant). Operators that want h2
+//     upstream MUST declare Protocol="http2" explicitly.
+//
+// Explicit-declaration-wins edge case (Decision #5): when the operator
+// declares Protocol="http2" or Protocol="grpc" but the client-side TLS
+// negotiates "http/1.1" (e.g. the operator mis-configured the listener
+// ALPN by including http/1.1 in alpnOffersForForwardProtocol for an h2
+// declaration, or a client refused h2), the H1 dispatch arm is selected
+// by dispatchForwardTLSByALPN / chooseH1ForwardProtocol while this
+// helper still returns ["h2"] for the upstream offer. The resulting
+// H1↔H2 protocol mismatch will surface as an upstream handshake/dispatch
+// error — that is the intended loud-failure behaviour for a misconfigured
+// listener (explicit operator declaration wins over the runtime-negotiated
+// client ALPN, so the operator sees the misconfiguration rather than the
+// proxy silently bridging mismatched protocols).
+//
+// Returns nil for the raw / explicit-no-ALPN case, matching the
+// "no ALPN extension on the wire" semantic in DialUpstreamRaw / tlslayer.
+func upstreamALPNOffersForForward(protocol string, override *forwardConnOverride) []string {
+	if protocol == "auto" || protocol == "" {
+		if override != nil && override.tlsTerminated && override.clientTLSSnapshot != nil && override.clientTLSSnapshot.ALPN != "" {
+			// Propagate the client-negotiated ALPN as a single-element
+			// list — defensive copy semantics handled by tlslayer/crypto/tls.
+			return []string{override.clientTLSSnapshot.ALPN}
+		}
+		// Plaintext client (or TLS client that did not negotiate ALPN):
+		// safe default is http/1.1 only — see godoc above.
+		return []string{"http/1.1"}
+	}
+	// Explicit Protocol declaration — derive from the operator's choice.
+	return alpnOffersForForwardProtocol(protocol)
+}
+
+// dialForwardUpstream dials the upstream for a TCP forward entry, optionally
+// performing a TLS handshake when entry.fc.UpstreamTLS=true (USK-916).
+// Single dial site shared by handleTCPForwardConnWithOverride (H1 / raw / L7
+// arm) and handleTCPForwardH2ConnWithOverride (H2 arm) so the upstream-TLS
+// policy lives in one place.
+//
+// Behaviour:
+//
+//   - fc.UpstreamTLS=false → plain TCP dial via DialUpstreamRaw with
+//     UpstreamProxy resolved from BuildConfig (USK-734/826 reach the same
+//     hot path as the live MITM dial). Snapshot is nil. No plugin hook.
+//
+//   - fc.UpstreamTLS=true → builds *tls.Config{ServerName, MinVersion=TLS12,
+//     NextProtos} where ServerName=targetHostOnly(entry.target) (USK-916
+//     deferral: no per-host SNI override; MITM-isolated SNI), NextProtos=
+//     upstreamALPNOffersForForward(...). DialUpstreamRaw performs the TCP
+//     dial AND the TLS handshake under one timeout. On success the
+//     returned snapshot is non-nil and (tls, on_handshake, side="client")
+//     plugin hook fires (parity with live MITM dialUpstreamWithALPN).
+//
+// USK-916 deferral surface (documented in helper godoc per Decision #18):
+//
+//   - No per-host TLS material lookup (HostTLSRegistry / HostTLSResolver
+//     deferred — only BuildConfig.InsecureSkipVerify global flag is
+//     honoured).
+//   - No mTLS client cert (ClientCert=nil).
+//   - No uTLS browser fingerprint (UTLSProfile="").
+//
+// Returns (conn, snapshot, error). On any error neither conn nor snapshot
+// is populated; caller treats the failure as "upstream dial failed" and
+// records via buildTLSStackBuildErrorRecorder when applicable (the
+// recorder classifies non-ErrClientTLSMITMHandshake errors as
+// FailureReason="upstream_tls_error" — exactly what we want).
+func dialForwardUpstream(
+	ctx context.Context,
+	entry *tcpForwardEntry,
+	override *forwardConnOverride,
+	parentStack *Stack,
+	connLogger *slog.Logger,
+) (net.Conn, *envelope.TLSSnapshot, error) {
+	dialOpts := connector.DialRawOpts{
+		DialTimeout: tcpForwardDialTimeout,
+	}
+	if parentStack != nil && parentStack.BuildConfig != nil {
+		dialOpts.UpstreamProxy = parentStack.BuildConfig.EffectiveUpstreamProxyForCtx(ctx)
+	}
+
+	// entry is non-nil by construction — both callers
+	// (handleTCPForwardConnWithOverride, handleTCPForwardH2ConnWithOverride)
+	// hold the per-conn forward entry. entry.fc is guarded explicitly so a
+	// future refactor that detaches fc surfaces here rather than at the
+	// UpstreamTLS read below.
+	if entry.fc == nil || !entry.fc.UpstreamTLS {
+		// Plain dial path — no TLS, no snapshot, no hook.
+		conn, _, err := connector.DialUpstreamRaw(ctx, entry.target, dialOpts)
+		if err != nil {
+			return nil, nil, err
+		}
+		return conn, nil, nil
+	}
+
+	// fc.UpstreamTLS=true: build a *tls.Config for upstream TLS.
+	declared := entry.fc.Protocol
+	alpnOffers := upstreamALPNOffersForForward(declared, override)
+	upstreamHost := targetHostOnly(entry.target)
+	tlsCfg := &tls.Config{
+		ServerName: upstreamHost,
+		// MinVersion floors at TLS 1.2 to match the rest of the proxy's
+		// TLS surface (CWE-757).
+		MinVersion: tls.VersionTLS12,
+	}
+	if len(alpnOffers) > 0 {
+		// Defensive copy: crypto/tls retains the slice.
+		tlsCfg.NextProtos = append([]string(nil), alpnOffers...)
+	}
+
+	dialOpts.TLSConfig = tlsCfg
+	dialOpts.OfferALPN = tlsCfg.NextProtos
+	// USK-916 scope: only the global InsecureSkipVerify flag is honoured;
+	// per-host TLS material (mTLS / uTLS / HostTLSRegistry) is deferred.
+	if parentStack != nil && parentStack.BuildConfig != nil {
+		dialOpts.InsecureSkipVerify = parentStack.BuildConfig.InsecureSkipVerify
+	}
+
+	conn, snap, err := connector.DialUpstreamRaw(ctx, entry.target, dialOpts)
+	if err != nil {
+		if connLogger != nil {
+			connLogger.Debug("tcp forward upstream tls dial failed",
+				"target", entry.target,
+				"alpn_offers", alpnOffers,
+				"error", err,
+			)
+		}
+		return nil, nil, err
+	}
+
+	// Parity with live MITM dialUpstreamWithALPN: fire the (tls,
+	// on_handshake, side="client") plugin hook on the proxy-dialing-upstream
+	// handshake. No-op when the engine or snapshot is nil.
+	if parentStack != nil {
+		fireForwardTLSHandshakeHook(ctx, parentStack.PluginV2Engine, "client", snap)
+	}
+
+	if connLogger != nil {
+		negotiatedALPN := ""
+		if snap != nil {
+			negotiatedALPN = snap.ALPN
+		}
+		connLogger.Debug("tcp forward upstream tls dial complete",
+			"target", entry.target,
+			"alpn", negotiatedALPN,
+		)
+	}
+
+	return conn, snap, nil
+}
+
 // configureForwardTLS prepares the per-entry MITM tls.Config cache.
 // Called at listener start when fc.TLS=true and the parent Issuer is known
 // to be non-nil; the cached *tls.Config is reused for every accepted

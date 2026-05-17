@@ -89,46 +89,34 @@ func (m *Manager) handleTCPForwardH2ConnWithOverride(
 		return
 	}
 
-	// Dial upstream plain TCP. USK-915/USK-916 will introduce TLS dialing;
-	// for now the h2 forward stack is h2c (cleartext on both sides).
-	dialOpts := connector.DialRawOpts{
-		DialTimeout: tcpForwardDialTimeout,
-	}
-	if parentStack.BuildConfig != nil {
-		dialOpts.UpstreamProxy = parentStack.BuildConfig.EffectiveUpstreamProxyForCtx(connCtx)
-	}
-	upstreamConn, _, derr := connector.DialUpstreamRaw(connCtx, entry.target, dialOpts)
+	// Dial upstream. USK-916: dialForwardUpstream additionally performs
+	// an upstream TLS handshake when entry.fc.UpstreamTLS=true. When
+	// fc.UpstreamTLS=false the dial is plain TCP (h2c). When true the
+	// upstream Layer reads h2 over TLS — equivalent to the "https+h2c
+	// upstream" combination on the live MITM path (the proxy speaks h2
+	// over TLS on the wire; the http2.Layer is protocol-agnostic and
+	// reads frames identically regardless of the underlying transport).
+	upstreamConn, upstreamSnap, derr := dialForwardUpstream(connCtx, entry, override, parentStack, connLogger)
 	if derr != nil {
 		connLogger.Debug("tcp forward h2 upstream dial failed", "error", derr)
+		// USK-916: TLS-dial failures should produce a state="error" Stream
+		// so MCP query("flows", filter:{state:"error"}) surfaces them.
+		if entry.fc != nil && entry.fc.UpstreamTLS {
+			if rec := buildTLSStackBuildErrorRecorder(parentStack.FlowStore, nil, parentListenerName, connLogger); rec != nil {
+				rec(connCtx, entry.target, derr)
+			}
+		}
 		return
 	}
 
-	// Map ForwardConfig.Protocol → connector.ForwardProtocol.
-	var fwdProto connector.ForwardProtocol
-	switch fc.Protocol {
-	case "http2":
-		fwdProto = connector.ForwardProtocolHTTP2
-	case "grpc":
-		fwdProto = connector.ForwardProtocolGRPC
-	default:
-		// Caller (startTCPForwardListener) routes only http2 / grpc here;
-		// defensive guard.
+	fwdProto, ok := mapH2ForwardProtocol(fc.Protocol)
+	if !ok {
 		_ = upstreamConn.Close()
 		connLogger.Warn("tcp forward h2 dispatched with unexpected protocol", "protocol", fc.Protocol)
 		return
 	}
 
-	// USK-915: when TLS was terminated upstream of this handler, stamp the
-	// envelope Scheme as "https" and forward the client TLS snapshot so
-	// recordings and plugin payloads reflect wire reality.
-	targetParams := connector.TargetOverrideParams{
-		Target:   entry.target,
-		Protocol: fwdProto,
-	}
-	if override != nil && override.tlsTerminated {
-		targetParams.Scheme = "https"
-		targetParams.ClientTLSSnapshot = override.clientTLSSnapshot
-	}
+	targetParams := buildH2TargetParams(entry, override, fwdProto, upstreamSnap)
 	stack, berr := connector.BuildConnectionStackWithTarget(connCtx, clientConn, upstreamConn, targetParams, parentStack.BuildConfig)
 	if berr != nil {
 		connLogger.Debug("tcp forward h2 stack build failed", "error", berr)
@@ -157,6 +145,53 @@ func (m *Manager) handleTCPForwardH2ConnWithOverride(
 
 	isGRPCFilter := fwdProto == connector.ForwardProtocolGRPC
 	runTCPForwardH2Loop(connCtx, parentStack, stack, entry.target, connLogger, isGRPCFilter)
+}
+
+// mapH2ForwardProtocol translates a ForwardConfig.Protocol value into a
+// connector.ForwardProtocol selector for the h2 dispatch arm. Returns
+// (selector, true) for "http2" / "grpc" and (_, false) otherwise; the
+// caller is expected to log and bail on false (defensive guard — the
+// listener-start switch already rejects other values before reaching
+// this dispatcher).
+func mapH2ForwardProtocol(protocol string) (connector.ForwardProtocol, bool) {
+	switch protocol {
+	case "http2":
+		return connector.ForwardProtocolHTTP2, true
+	case "grpc":
+		return connector.ForwardProtocolGRPC, true
+	default:
+		return "", false
+	}
+}
+
+// buildH2TargetParams assembles the TargetOverrideParams for the h2
+// forward stack assembly. Stamps Scheme="https" + ClientTLSSnapshot from
+// the USK-915 client-side TLS terminate override, and UpstreamTLSSnapshot
+// from the USK-916 upstream TLS dial result, when present.
+func buildH2TargetParams(
+	entry *tcpForwardEntry,
+	override *forwardConnOverride,
+	fwdProto connector.ForwardProtocol,
+	upstreamSnap *envelope.TLSSnapshot,
+) connector.TargetOverrideParams {
+	params := connector.TargetOverrideParams{
+		Target:   entry.target,
+		Protocol: fwdProto,
+	}
+	// USK-915: when TLS was terminated upstream of this handler, stamp the
+	// envelope Scheme as "https" and forward the client TLS snapshot so
+	// recordings and plugin payloads reflect wire reality.
+	if override != nil && override.tlsTerminated {
+		params.Scheme = "https"
+		params.ClientTLSSnapshot = override.clientTLSSnapshot
+	}
+	// USK-916: when an upstream TLS handshake completed, thread the snapshot
+	// into the upstream Layer's EnvelopeContext.TLS via the builder.
+	if entry.fc != nil && entry.fc.UpstreamTLS && upstreamSnap != nil {
+		params.UpstreamTLS = true
+		params.UpstreamTLSSnapshot = upstreamSnap
+	}
+	return params
 }
 
 // runTCPForwardH2Loop iterates the client HTTP/2 Layer's Channels()
