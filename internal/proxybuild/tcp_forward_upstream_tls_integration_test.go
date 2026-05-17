@@ -27,7 +27,6 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/cert"
 	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/connector"
-	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/pluginv2"
 	"github.com/usk6666/yorishiro-proxy/internal/proxybuild"
 	"github.com/usk6666/yorishiro-proxy/internal/testutil"
@@ -762,7 +761,3 @@ func assertStreamScheme(_ *testing.T, store *flowStoreCapture, scheme string) bo
 	}
 	return false
 }
-
-// _ assert unused-package-import compile guard for flow.Stream usage
-// elsewhere in the file.
-var _ = (*flow.Stream)(nil)

@@ -392,6 +392,19 @@ func fireForwardTLSHandshakeHook(ctx context.Context, engine *pluginv2.Engine, s
 //     (single-protocol-per-stack invariant). Operators that want h2
 //     upstream MUST declare Protocol="http2" explicitly.
 //
+// Explicit-declaration-wins edge case (Decision #5): when the operator
+// declares Protocol="http2" or Protocol="grpc" but the client-side TLS
+// negotiates "http/1.1" (e.g. the operator mis-configured the listener
+// ALPN by including http/1.1 in alpnOffersForForwardProtocol for an h2
+// declaration, or a client refused h2), the H1 dispatch arm is selected
+// by dispatchForwardTLSByALPN / chooseH1ForwardProtocol while this
+// helper still returns ["h2"] for the upstream offer. The resulting
+// H1↔H2 protocol mismatch will surface as an upstream handshake/dispatch
+// error — that is the intended loud-failure behaviour for a misconfigured
+// listener (explicit operator declaration wins over the runtime-negotiated
+// client ALPN, so the operator sees the misconfiguration rather than the
+// proxy silently bridging mismatched protocols).
+//
 // Returns nil for the raw / explicit-no-ALPN case, matching the
 // "no ALPN extension on the wire" semantic in DialUpstreamRaw / tlslayer.
 func upstreamALPNOffersForForward(protocol string, override *forwardConnOverride) []string {
@@ -456,7 +469,12 @@ func dialForwardUpstream(
 		dialOpts.UpstreamProxy = parentStack.BuildConfig.EffectiveUpstreamProxyForCtx(ctx)
 	}
 
-	if entry == nil || entry.fc == nil || !entry.fc.UpstreamTLS {
+	// entry is non-nil by construction — both callers
+	// (handleTCPForwardConnWithOverride, handleTCPForwardH2ConnWithOverride)
+	// hold the per-conn forward entry. entry.fc is guarded explicitly so a
+	// future refactor that detaches fc surfaces here rather than at the
+	// UpstreamTLS read below.
+	if entry.fc == nil || !entry.fc.UpstreamTLS {
 		// Plain dial path — no TLS, no snapshot, no hook.
 		conn, _, err := connector.DialUpstreamRaw(ctx, entry.target, dialOpts)
 		if err != nil {
