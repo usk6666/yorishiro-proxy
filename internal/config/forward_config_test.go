@@ -361,6 +361,15 @@ func TestValidateForwardConfig(t *testing.T) {
 			port: "8080",
 			fc:   &ForwardConfig{Target: "web:8080", Protocol: "websocket"},
 		},
+		{
+			// USK-913: "sse" is the operator-declared expectation that the
+			// upstream returns a streaming text/event-stream response; the
+			// proxybuild forward dispatch refuses the connection when the
+			// expectation is unmet (symmetric with "websocket").
+			name: "valid sse",
+			port: "8080",
+			fc:   &ForwardConfig{Target: "web:8080", Protocol: "sse"},
+		},
 	}
 
 	for _, tt := range tests {
@@ -383,7 +392,7 @@ func TestValidateForwardConfig(t *testing.T) {
 }
 
 func TestValidForwardProtocols(t *testing.T) {
-	validProtocols := []string{"", "auto", "raw", "http", "http2", "grpc", "websocket"}
+	validProtocols := []string{"", "auto", "raw", "http", "http2", "grpc", "websocket", "sse"}
 	for _, p := range validProtocols {
 		fc := &ForwardConfig{Target: "host:1234", Protocol: p}
 		if err := ValidateForwardConfig("9999", fc); err != nil {

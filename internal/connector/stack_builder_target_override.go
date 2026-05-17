@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"log/slog"
 	"net"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/bytechunk"
+	"github.com/usk6666/yorishiro-proxy/internal/layer/http1"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/http2"
 )
 
@@ -30,9 +32,11 @@ type ForwardProtocol string
 
 const (
 	// ForwardProtocolAuto requests peek-based inner-protocol detection on
-	// the accepted connection. The auto-detection wire-up is owned by
-	// USK-913 and is NOT implemented by USK-912; passing this value
-	// currently returns a "not yet wired" error.
+	// the accepted connection. Wired by USK-913: a short bounded peek on
+	// clientConn picks HTTP/1.x → HTTP arm, h2c preface → reject with
+	// USK-914 citation, TLS first byte → warn + Raw fallback,
+	// everything else → Raw fallback. Callers that need true H2C should
+	// declare Protocol="http2" explicitly (USK-914).
 	ForwardProtocolAuto ForwardProtocol = "auto"
 
 	// ForwardProtocolRaw builds a [bytechunk → bytechunk] stack — the
@@ -41,8 +45,11 @@ const (
 	// by the caller (no CONNECT/SNI derivation).
 	ForwardProtocolRaw ForwardProtocol = "raw"
 
-	// ForwardProtocolHTTP requests a plain HTTP/1.x stack. Reserved for
-	// USK-913 (L7 dispatch); currently returns a "not yet wired" error.
+	// ForwardProtocolHTTP requests a plain HTTP/1.x stack. Wired by
+	// USK-913: assembles [http1 client → http1 upstream] with scheme="http"
+	// matching the BuildPlainHTTPStack shape. Per-exchange dispatch and
+	// the WS/SSE Upgrade swap are driven by the caller via
+	// session.RunStackSessionExchange + the Pipeline-mounted UpgradeStep.
 	ForwardProtocolHTTP ForwardProtocol = "http"
 
 	// ForwardProtocolHTTP2 requests an h2c stack. Wired by USK-914 —
@@ -60,14 +67,18 @@ const (
 	// RST_STREAM(REFUSED_STREAM).
 	ForwardProtocolGRPC ForwardProtocol = "grpc"
 
-	// ForwardProtocolWebSocket requests an HTTP/1.x stack that may
-	// Upgrade to WebSocket. Reserved for USK-914; currently returns a
-	// "not yet wired" error.
+	// ForwardProtocolWebSocket requests an HTTP/1.x stack whose first
+	// exchange is expected to initiate an RFC 6455 Upgrade. Wired by
+	// USK-913: the stack assembly is identical to ForwardProtocolHTTP;
+	// the filter ("first request must be a WS upgrade or 502") is applied
+	// at the proxybuild handler layer, not inside this builder.
 	ForwardProtocolWebSocket ForwardProtocol = "websocket"
 
-	// ForwardProtocolSSE requests an HTTP/1.x stack that may switch to
-	// SSE on response. Reserved for USK-914; currently returns a "not
-	// yet wired" error.
+	// ForwardProtocolSSE requests an HTTP/1.x stack whose first response
+	// is expected to carry text/event-stream. Wired by USK-913: stack
+	// assembly is identical to ForwardProtocolHTTP; the filter ("first
+	// response must be SSE or 502") is applied at the proxybuild handler
+	// layer.
 	ForwardProtocolSSE ForwardProtocol = "sse"
 )
 
@@ -246,18 +257,24 @@ func BuildConnectionStackWithTarget(
 	switch protocol {
 	case ForwardProtocolRaw:
 		return buildTargetOverrideRawStack(ctx, clientConn, upstreamConn, params.Target, cfg)
+	case ForwardProtocolHTTP, ForwardProtocolWebSocket, ForwardProtocolSSE:
+		// USK-913: HTTP/1.x stack assembly is identical across the three
+		// arms. The "websocket"/"sse" expectation filter is applied at the
+		// proxybuild handler layer (it must observe the first request /
+		// first response, which is per-exchange Pipeline territory rather
+		// than per-stack-builder territory).
+		return buildTargetOverrideHTTPStack(ctx, clientConn, upstreamConn, params.Target, cfg)
+	case ForwardProtocolAuto:
+		// USK-913: peek the first inner byte on clientConn to disambiguate
+		// HTTP/1.x → http arm, h2c → reject with USK-914 citation, TLS →
+		// warn + raw fallback, everything else → raw fallback.
+		return buildTargetOverrideAutoStack(ctx, clientConn, upstreamConn, params.Target, cfg)
 	case ForwardProtocolHTTP2, ForwardProtocolGRPC:
 		// USK-914: h2c forward stack. The GRPC selector reuses the same
 		// h2c stack assembly; the gRPC content-type filter is applied at
 		// the per-stream proxybuild dispatch layer (see
 		// internal/proxybuild/tcp_forward_h2.go).
 		return buildTargetOverrideH2CStack(ctx, clientConn, upstreamConn, params.Target, cfg)
-	case ForwardProtocolAuto:
-		return nil, fmt.Errorf("connector: BuildConnectionStackWithTarget: protocol %q not yet wired (auto-detection deferred to USK-913)", protocol)
-	case ForwardProtocolHTTP:
-		return nil, fmt.Errorf("connector: BuildConnectionStackWithTarget: protocol %q not yet wired (L7 dispatch deferred to USK-913)", protocol)
-	case ForwardProtocolWebSocket, ForwardProtocolSSE:
-		return nil, fmt.Errorf("connector: BuildConnectionStackWithTarget: protocol %q not yet wired (protocol-specific dispatch deferred to USK-913)", protocol)
 	default:
 		// Unreachable: params.validate already rejects unknown values.
 		return nil, fmt.Errorf("connector: BuildConnectionStackWithTarget: unhandled protocol %q", protocol)
@@ -396,6 +413,159 @@ func buildTargetOverrideH2CStack(
 	stack.PushUpstream(upstreamLayer)
 
 	return stack, nil
+}
+
+// buildTargetOverrideHTTPStack is the target-override sibling of
+// BuildPlainHTTPStack: it assembles [http1 client → http1 upstream] with
+// scheme="http", the canonical Send/Receive direction wiring, and the
+// SSE streaming-response detect predicate so the Upgrade swap orchestrator
+// can take over the body without the http1 Layer draining it first.
+//
+// USK-913: this is the shared assembly used by ForwardProtocolHTTP /
+// ForwardProtocolWebSocket / ForwardProtocolSSE. The three differ only in
+// the operator's declared expectation; the wire shape is identical
+// (HTTP/1.x request → upstream HTTP/1.x response, optionally followed by
+// a 101 + WS / 200 + SSE swap). The expectation filter lives at the
+// proxybuild handler layer (the per-exchange Pipeline + envelope inspection
+// territory).
+//
+// Body buffering and StateReleaser wiring mirror BuildPlainHTTPStack so
+// plugin hooks (http1.on_request / http1.on_response, ws.on_message after
+// swap, sse.on_event after swap) fire identically to the MITM-routed
+// plain-HTTP path.
+//
+// Ownership: the returned stack owns clientConn and upstreamConn via its
+// Layers; the caller MUST defer stack.Close().
+//
+// _ ctx is currently unused (assembly is synchronous) but retained on the
+// signature so downstream Issues (USK-916 upstream TLS) can wire ctx-aware
+// behaviour without churning the callsite.
+func buildTargetOverrideHTTPStack(
+	_ context.Context,
+	clientConn, upstreamConn net.Conn,
+	target string,
+	cfg *BuildConfig,
+) (*ConnectionStack, error) {
+	connID := uuid.New().String()
+
+	clientEnvCtx := envelope.EnvelopeContext{
+		ConnID:     connID,
+		TargetHost: target,
+		// TLS intentionally nil: no handshake happened on the client side.
+	}
+	upstreamEnvCtx := envelope.EnvelopeContext{
+		ConnID:     connID,
+		TargetHost: target,
+		// TLS intentionally nil: no handshake happened on the upstream side.
+	}
+
+	stack := NewConnectionStack(connID)
+
+	clientLayer := http1.New(clientConn, connID+"/client", envelope.Send,
+		http1.WithScheme("http"),
+		http1.WithEnvelopeContext(clientEnvCtx),
+		http1.WithBodySpillDir(cfg.BodySpillDir),
+		http1.WithBodySpillThreshold(cfg.BodySpillThreshold),
+		http1.WithMaxBodySize(cfg.MaxBodySize),
+		http1.WithStateReleaser(cfg.PluginV2Engine),
+	)
+	stack.PushClient(clientLayer)
+
+	upstreamLayer := http1.New(upstreamConn, connID+"/upstream", envelope.Receive,
+		http1.WithScheme("http"),
+		http1.WithEnvelopeContext(upstreamEnvCtx),
+		http1.WithBodySpillDir(cfg.BodySpillDir),
+		http1.WithBodySpillThreshold(cfg.BodySpillThreshold),
+		http1.WithMaxBodySize(cfg.MaxBodySize),
+		http1.WithStateReleaser(cfg.PluginV2Engine),
+		// USK-655 / mirror BuildPlainHTTPStack: bypass body draining for SSE
+		// responses so the swap orchestrator (session.runUpgradeSSE) can hand
+		// the still-open body to sse.Wrap without blocking on a never-ending
+		// drain. Required for both Protocol="http" (upstream may opt into SSE)
+		// and Protocol="sse" (upstream is expected to produce SSE).
+		http1.WithStreamingResponseDetect(http1.IsSSEResponse),
+	)
+	stack.PushUpstream(upstreamLayer)
+
+	return stack, nil
+}
+
+// targetOverrideAutoPeekTimeout bounds the inner-byte peek used by the
+// Auto arm. Mirrors connector.DefaultInnerPeekTimeout so behaviour is
+// consistent with the CONNECT-inner peek; kept as a package-private const
+// so it can be tuned without touching the public surface.
+const targetOverrideAutoPeekTimeout = 5 * time.Second
+
+// buildTargetOverrideAutoStack peeks the first inner byte on clientConn and
+// dispatches to the HTTP or Raw arm. The peek mirrors connector.peekInnerProtocol
+// (CONNECT/SOCKS5 inner classification), with the differences that:
+//
+//   - The peek happens on clientConn directly (it has not been negotiated
+//     through a CONNECT tunnel) — we wrap it in a PeekConn ourselves so the
+//     bytes flow through to the inner http1 Layer's parser exactly like
+//     the inner-byte fallthrough in connect_inner_dispatch.dispatchInnerHTTP1.
+//
+//   - InnerH2C is rejected with a USK-914 citation (Auto does NOT
+//     opportunistically negotiate h2c — operators that want h2c must
+//     declare Protocol="http2" explicitly).
+//
+//   - InnerTLS triggers a Warn log + Raw fallback. The operator did not
+//     declare TLS termination (TLSTerminate=true is the only path that
+//     terminates client-side TLS — deferred to USK-915), so the most we
+//     can offer is byte-faithful recording via bytechunk.
+//
+//   - InnerUnknown / InnerBytechunk falls through to Raw.
+//
+// On HTTP routing the wrapped PeekConn replaces clientConn in the assembled
+// stack so the peeked bytes are still available to the http1 parser. The
+// caller's handler does NOT have to know about the PeekConn — it sees the
+// returned ConnectionStack identically to a direct HTTP arm invocation.
+func buildTargetOverrideAutoStack(
+	ctx context.Context,
+	clientConn, upstreamConn net.Conn,
+	target string,
+	cfg *BuildConfig,
+) (*ConnectionStack, error) {
+	pc, ok := clientConn.(*PeekConn)
+	if !ok {
+		pc = NewPeekConn(clientConn)
+	}
+
+	kind, _ := peekInnerProtocol(pc, targetOverrideAutoPeekTimeout)
+
+	// BuildConfig has no logger slot today; pick up the per-connection logger
+	// from ctx (proxybuild.handleTCPForwardConn calls ContextWithLogger before
+	// dispatching) and fall back to slog.Default() otherwise.
+	logger := LoggerFromContext(ctx, slog.Default())
+
+	switch kind {
+	case InnerHTTP1:
+		logger.Debug("connector: target-override Auto resolved to HTTP/1.x",
+			"target", target)
+		return buildTargetOverrideHTTPStack(ctx, pc, upstreamConn, target, cfg)
+	case InnerH2C:
+		// Don't opportunistically negotiate h2c — operators must declare
+		// Protocol="http2" explicitly. USK-914 wired the h2c arm; we still
+		// require an explicit declaration here so Auto stays predictable
+		// (operators that want h2c forwarding declare it; Auto never
+		// silently upgrades to h2c on the basis of a connection preface).
+		return nil, fmt.Errorf("connector: BuildConnectionStackWithTarget: Auto peek observed h2c connection preface; explicit Protocol=\"http2\" required")
+	case InnerTLS:
+		// Auto saw TLS without TLSTerminate=true. Most we can offer is
+		// byte-faithful recording — fall through to Raw. Log at Warn since
+		// this is an unexpected-but-recoverable shape per CLAUDE.md
+		// log-level guidance.
+		logger.Warn("connector: target-override Auto observed TLS first byte without TLSTerminate; falling back to Raw (declare TLSTerminate=true for MITM — deferred to USK-915)",
+			"target", target)
+		return buildTargetOverrideRawStack(ctx, pc, upstreamConn, target, cfg)
+	default:
+		// InnerUnknown / InnerBytechunk — fall through to Raw. Log at
+		// Debug because this is the design-intended graceful fallback;
+		// raw recording is still useful (L4-capable principle).
+		logger.Debug("connector: target-override Auto fell back to Raw",
+			"target", target, "peek_kind", kind.String())
+		return buildTargetOverrideRawStack(ctx, pc, upstreamConn, target, cfg)
+	}
 }
 
 // PerformClientMITM is the exported wrapper for the package-private

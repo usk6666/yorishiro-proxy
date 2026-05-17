@@ -18,6 +18,7 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/layer"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/bytechunk"
+	"github.com/usk6666/yorishiro-proxy/internal/layer/http1"
 	"github.com/usk6666/yorishiro-proxy/internal/session"
 )
 
@@ -29,16 +30,26 @@ const tcpForwardDialTimeout = 30 * time.Second
 // entry is a per-port forward: the key is the local port (e.g. "9999")
 // and the value carries the upstream target host:port.
 //
-// First-iteration scope (USK-711):
-//   - Protocol "raw" (or empty / "auto") is supported and routes the
-//     accepted connection through the bytechunk Layer so raw-bytes flow
-//     recording works end-to-end via the existing Pipeline.
-//   - Protocol "auto" without a peek-detector falls back to raw.
-//   - TLS=true and protocol values "http"/"http2"/"grpc"/"websocket" are
-//     accepted by config validation but NOT yet implemented at the live
-//     data path; calls with those values return an error at start time.
-//     Follow-up work (separate Linear issue) layers full L7 dispatch on
-//     top of this base.
+// Supported protocols (live data path):
+//   - "" / "auto" — Peek the first inner byte; HTTP/1.x → http arm,
+//     other bytes → raw fallback, h2c preface → rejected with USK-914
+//     citation, TLS first byte → warn + raw fallback.
+//   - "raw" — [bytechunk → bytechunk] stack; recorded as RawMessage
+//     envelopes (USK-711).
+//   - "http" — [http1 → http1] stack; per-exchange dispatch; supports
+//     keep-alive AND the WS/SSE Upgrade swap via the Pipeline's
+//     UpgradeStep (USK-913).
+//   - "websocket" — same stack as "http", with an in-handler filter
+//     that 502s the first exchange when it is not an RFC 6455 Upgrade
+//     request (USK-913).
+//   - "sse" — same stack as "http", with an in-handler filter that
+//     502s the first exchange when the upstream response is not
+//     text/event-stream (USK-913).
+//
+// Deferred (returns an error at start time):
+//   - "http2" / "grpc" — h2c / gRPC dispatch (USK-914).
+//   - TLS=true (client-side terminate) — (USK-915).
+//   - UpstreamTLS=true (upstream-side dial encrypt) — (USK-916).
 type TCPForwardParams struct {
 	// Forwards maps local port -> ForwardConfig (target, protocol, tls).
 	Forwards map[string]*config.ForwardConfig
@@ -47,13 +58,14 @@ type TCPForwardParams struct {
 // tcpForwardEntry tracks a single per-port net.Listener and its lifecycle
 // channels. Owned by listenerEntry.tcpForwards (one entry per parent listener).
 type tcpForwardEntry struct {
-	port    string
-	target  string
-	addr    string
-	cancel  context.CancelFunc
-	done    chan struct{}
-	netLn   net.Listener
-	wgConns sync.WaitGroup // tracks per-connection handler goroutines
+	port     string
+	target   string
+	protocol string // USK-913: live-dispatch arm selector (raw/auto/http/websocket/sse)
+	addr     string
+	cancel   context.CancelFunc
+	done     chan struct{}
+	netLn    net.Listener
+	wgConns  sync.WaitGroup // tracks per-connection handler goroutines
 
 	// fc retains the originating ForwardConfig so per-conn dispatch can
 	// route on Protocol / TLS / UpstreamTLS. Kept as a pointer to the
@@ -92,24 +104,23 @@ func (m *Manager) startTCPForwardListener(
 		return nil, fmt.Errorf("tcp forward port %s: empty Target", port)
 	}
 
-	// First iteration: only "raw", "auto" (with no detector → raw fallback),
-	// and "" are wired. USK-914 adds "http2" and "grpc" (h2c forward).
-	// Other modes return an explicit error so callers know they have to
-	// wait for the L7-mode follow-up (USK-913 owns http/websocket/sse/auto
-	// dispatch arms).
+	// After the rebase of USK-913 onto main (USK-914 already landed), all
+	// six L7 / raw selectors are wired: raw/auto via the bytechunk inline
+	// path (USK-711), http/websocket/sse via the http1 arm of
+	// connector.BuildConnectionStackWithTarget (USK-913), http2/grpc via
+	// the h2c arm + per-stream proxybuild dispatch (USK-914,
+	// tcp_forward_h2.go). Unknown values surface as a validation error.
 	switch fc.Protocol {
-	case "", "raw", "auto":
-		// supported (USK-711)
-	case "http2", "grpc":
-		// supported (USK-914 — h2c forward dispatch in tcp_forward_h2.go)
+	case "", "raw", "auto", "http", "websocket", "sse", "http2", "grpc":
+		// supported
 	default:
-		return nil, fmt.Errorf("tcp forward port %s: protocol %q not yet supported (USK-711 implements raw/auto; USK-914 implements http2/grpc; remaining L7 modes deferred)", port, fc.Protocol)
+		return nil, fmt.Errorf("tcp forward port %s: protocol %q is not a valid forward protocol", port, fc.Protocol)
 	}
 	if fc.TLS {
-		return nil, fmt.Errorf("tcp forward port %s: tls=true not yet supported (USK-915 owns client-side TLS terminate)", port)
+		return nil, fmt.Errorf("tcp forward port %s: tls=true not yet supported (client-side TLS terminate deferred to USK-915)", port)
 	}
 	if fc.UpstreamTLS {
-		return nil, fmt.Errorf("tcp forward port %s: upstream_tls=true not yet supported (USK-916 owns upstream-dial TLS)", port)
+		return nil, fmt.Errorf("tcp forward port %s: upstream_tls=true not yet supported (upstream TLS dial deferred to USK-916)", port)
 	}
 
 	bindAddr := fmt.Sprintf("127.0.0.1:%s", port)
@@ -122,13 +133,14 @@ func (m *Manager) startTCPForwardListener(
 	// independently of the parent listener.
 	listenerCtx, cancel := context.WithCancel(ctx)
 	entry := &tcpForwardEntry{
-		port:   port,
-		target: fc.Target,
-		addr:   ln.Addr().String(),
-		cancel: cancel,
-		done:   make(chan struct{}),
-		netLn:  ln,
-		fc:     fc,
+		port:     port,
+		target:   fc.Target,
+		protocol: fc.Protocol,
+		addr:     ln.Addr().String(),
+		cancel:   cancel,
+		done:     make(chan struct{}),
+		netLn:    ln,
+		fc:       fc,
 	}
 	// Seed the per-forward connection cap from the manager-level setting so
 	// SetMaxConnections fan-out reaches forward listeners. 0 = unlimited.
@@ -237,15 +249,24 @@ func (m *Manager) runTCPForwardAcceptLoop(
 	}
 }
 
-// handleTCPForwardConn runs a single accepted connection through the raw
-// TCP forward path: dial upstream → build [bytechunk → bytechunk] stack →
-// run the parent listener's session loop → close on exit.
+// handleTCPForwardConn runs a single accepted connection through the
+// configured forward dispatch. The protocol arm decides which Layer stack
+// is built:
 //
-// Recording integrates with the parent Stack's existing Pipeline (RecordStep
-// receives RawMessage envelopes from the bytechunk Layer). The forward
-// target is also injected into the context so plugins reading
+//   - "raw" — inline [bytechunk → bytechunk]; raw bytes recorded via
+//     RawMessage envelopes (USK-711 happy path).
+//   - "http" / "websocket" / "sse" — connector.BuildConnectionStackWithTarget
+//     builds [http1 → http1]; per-exchange dispatch with the
+//     Pipeline-mounted UpgradeStep handling WS / SSE Layer swap.
+//   - "" / "auto" — Peek the inner byte stream; HTTP/1.x → http arm,
+//     everything else → raw fallback (h2c rejected with USK-914 citation).
+//
+// Recording integrates with the parent Stack's existing Pipeline. The
+// forward target is injected into the context so plugins reading
 // connector.ForwardTargetFromContext can disambiguate forward-listener
-// traffic from other paths.
+// traffic from other paths. PluginV2Engine + StateReleaser wiring comes
+// from tcpForwardSessionOpts (already in place for the raw path; reused
+// verbatim by the http arm).
 func (m *Manager) handleTCPForwardConn(
 	ctx context.Context,
 	parentListenerName string,
@@ -263,6 +284,7 @@ func (m *Manager) handleTCPForwardConn(
 		"port", entry.port,
 		"target", entry.target,
 		"via", "tcp-forward",
+		"protocol", entry.protocol,
 	)
 
 	connCtx := connector.ContextWithConnID(ctx, connID)
@@ -299,10 +321,42 @@ func (m *Manager) handleTCPForwardConn(
 		return
 	}
 
-	// Build a [bytechunk client → bytechunk upstream] ConnectionStack. The
-	// bytechunk Layer records RawMessage envelopes via the parent's
-	// Pipeline; raw bytes flow recording is the L4-capable principle in
-	// action (CLAUDE.md MITM principles).
+	// Branch on the operator-declared protocol. raw / auto-resolved-to-raw
+	// stays on the bytechunk inline path (USK-711); http / websocket / sse /
+	// auto-resolved-to-http flow through the connector L7 dispatch.
+	switch entry.protocol {
+	case "", "raw", "auto", "http", "websocket", "sse":
+		// supported below
+	default:
+		// startTCPForwardListener already rejected unsupported values;
+		// defensive guard for the goroutine spawn path.
+		connLogger.Debug("tcp forward unsupported protocol at dispatch", "protocol", entry.protocol)
+		_ = upstreamConn.Close()
+		return
+	}
+
+	if entry.protocol == "raw" {
+		m.handleTCPForwardConnRaw(connCtx, parentStack, connID, connLogger, clientConn, upstreamConn)
+		return
+	}
+
+	// L7 dispatch via connector.BuildConnectionStackWithTarget. The builder
+	// owns the Layer assembly; this handler owns the per-exchange dispatch,
+	// the ctx-cancel watcher, and the websocket/sse expectation filter.
+	m.handleTCPForwardConnL7(connCtx, parentStack, connID, connLogger, entry, clientConn, upstreamConn)
+}
+
+// handleTCPForwardConnRaw runs the USK-711 [bytechunk → bytechunk] path.
+// Factored out of handleTCPForwardConn so the L7 arm reads against an
+// equal-sibling structure — both call into the same session options
+// wiring and the same ctx-cancel watcher idiom.
+func (m *Manager) handleTCPForwardConnRaw(
+	connCtx context.Context,
+	parentStack *Stack,
+	connID string,
+	connLogger *slog.Logger,
+	clientConn, upstreamConn net.Conn,
+) {
 	stack := connector.NewConnectionStack(connID)
 	clientLayer := bytechunk.New(clientConn, connID+"/client", envelope.Send)
 	stack.PushClient(clientLayer)
@@ -346,6 +400,104 @@ func (m *Manager) handleTCPForwardConn(
 	if err := session.RunStackSession(connCtx, stack, dial, parentStack.Pipeline, m.tcpForwardSessionOpts(parentStack, connCtx)); err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, io.EOF) {
 		connLogger.Debug("tcp forward session ended with error", "error", err)
 	}
+}
+
+// handleTCPForwardConnL7 runs the http / websocket / sse / auto arms.
+//
+// Stack assembly is delegated to connector.BuildConnectionStackWithTarget;
+// per-exchange dispatch goes through runHTTP1ExchangeLoop (the same helper
+// the MITM live data path uses for http1 keep-alive). The protocol-mismatch
+// filter is applied per-exchange via wrapExchangeForFilter so a websocket
+// listener that sees a non-Upgrade request — or an sse listener that sees
+// a non-SSE response — synthesises a 502 to the client and records the
+// rejection as a Pipeline-Drop audit Stream.
+func (m *Manager) handleTCPForwardConnL7(
+	connCtx context.Context,
+	parentStack *Stack,
+	connID string,
+	connLogger *slog.Logger,
+	entry *tcpForwardEntry,
+	clientConn, upstreamConn net.Conn,
+) {
+	// Build the stack via the connector dispatcher. Protocol is a
+	// non-h2 / non-grpc / non-TLS combination per the startTCPForwardListener
+	// switch, so the only failure modes here are bad params (defensive) or
+	// the Auto-h2c reject path (already cited USK-914).
+	params := connector.TargetOverrideParams{
+		Target:   entry.target,
+		Protocol: connector.ForwardProtocol(entry.protocol),
+	}
+	stack, err := connector.BuildConnectionStackWithTarget(connCtx, clientConn, upstreamConn, params, parentStack.BuildConfig)
+	if err != nil {
+		connLogger.Debug("tcp forward L7 stack build failed", "error", err)
+		_ = upstreamConn.Close()
+		return
+	}
+
+	// Note: the connector builder mints its own ConnID for the assembled
+	// stack; the handler's local connID is reserved for log correlation
+	// only (connLogger already carries it). The Layer-level streamIDs
+	// downstream are seeded from the builder's ConnID. Future Issues that
+	// need a single ConnID across handler logs + stack identity can wire
+	// the override through TargetOverrideParams (deferred — no current
+	// consumer).
+	_ = connID
+
+	defer stack.Close()
+
+	// ctx-cancellation watcher: close the stack when ctx is cancelled so
+	// goroutines parked inside http1.Channel.Next (conn.Read) are unblocked.
+	// Mirrors the proven recipe in buildOnStack.
+	doneCh := make(chan struct{})
+	var watcherWG sync.WaitGroup
+	watcherWG.Add(1)
+	go func() {
+		defer watcherWG.Done()
+		select {
+		case <-connCtx.Done():
+			_ = stack.Close()
+		case <-doneCh:
+		}
+	}()
+	defer func() {
+		close(doneCh)
+		watcherWG.Wait()
+	}()
+
+	// Verify the assembly produced http1 Layers on both sides. Auto may
+	// have fallen through to Raw if peek did not see HTTP/1.x bytes — in
+	// that case we hand off to the raw session loop and let the bytechunk
+	// recording cover the connection (graceful degradation per CLAUDE.md
+	// graceful-malformed-input principle).
+	clientH1, clientOK := stack.ClientTopmost().(*http1.Layer)
+	upstreamH1, upstreamOK := stack.UpstreamTopmost().(*http1.Layer)
+	if !clientOK || !upstreamOK {
+		// Raw fallback path — run the bytechunk session loop on the
+		// assembled stack. Same shape as handleTCPForwardConnRaw but
+		// without re-constructing the stack.
+		connLogger.Debug("tcp forward L7 fell back to non-http1 stack",
+			"client_topmost", fmt.Sprintf("%T", stack.ClientTopmost()),
+			"upstream_topmost", fmt.Sprintf("%T", stack.UpstreamTopmost()))
+		dial := func(_ context.Context, _ *envelope.Envelope) (layer.Channel, error) {
+			ch, ok := <-stack.UpstreamTopmost().Channels()
+			if !ok {
+				return nil, fmt.Errorf("proxybuild: tcp forward L7-fallback upstream channel closed before yielding")
+			}
+			return ch, nil
+		}
+		if err := session.RunStackSession(connCtx, stack, dial, parentStack.Pipeline, m.tcpForwardSessionOpts(parentStack, connCtx)); err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, io.EOF) {
+			connLogger.Debug("tcp forward L7-fallback session ended with error", "error", err)
+		}
+		return
+	}
+
+	// Per-exchange dispatch. The expectation filter (Protocol="websocket" /
+	// Protocol="sse") wraps each clientCh so a mismatched first envelope
+	// short-circuits the exchange with a synthetic 502 — recorded as a
+	// state="error" Stream via the Pipeline-Drop audit hook.
+	sessOpts := m.tcpForwardSessionOpts(parentStack, connCtx)
+	filter := exchangeFilterFor(entry.protocol, connLogger)
+	runTCPForwardHTTP1ExchangeLoop(connCtx, stack, clientH1, upstreamH1, parentStack.Pipeline, sessOpts, entry.target, connLogger, filter)
 }
 
 // tcpForwardSessionOpts builds session.SessionOptions for a TCP forward
