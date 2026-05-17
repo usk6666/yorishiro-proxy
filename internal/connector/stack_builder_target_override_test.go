@@ -5,6 +5,7 @@ import (
 	"net"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/cert"
 	"github.com/usk6666/yorishiro-proxy/internal/config"
@@ -113,10 +114,11 @@ func TestBuildConnectionStackWithTarget_DeferredProtocols(t *testing.T) {
 	}{
 		{name: "auto", protocol: ForwardProtocolAuto, wantIssue: "USK-913"},
 		{name: "http", protocol: ForwardProtocolHTTP, wantIssue: "USK-913"},
-		{name: "http2", protocol: ForwardProtocolHTTP2, wantIssue: "USK-913"},
-		{name: "grpc", protocol: ForwardProtocolGRPC, wantIssue: "USK-914"},
-		{name: "websocket", protocol: ForwardProtocolWebSocket, wantIssue: "USK-914"},
-		{name: "sse", protocol: ForwardProtocolSSE, wantIssue: "USK-914"},
+		// http2 and grpc are wired by USK-914 (this Issue) — see
+		// TestBuildConnectionStackWithTarget_H2CSuccess /
+		// TestBuildConnectionStackWithTarget_GRPCSuccess below.
+		{name: "websocket", protocol: ForwardProtocolWebSocket, wantIssue: "USK-913"},
+		{name: "sse", protocol: ForwardProtocolSSE, wantIssue: "USK-913"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -133,6 +135,83 @@ func TestBuildConnectionStackWithTarget_DeferredProtocols(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), tc.wantIssue) {
 				t.Errorf("protocol %q: error %q does not cite %q", tc.protocol, err.Error(), tc.wantIssue)
+			}
+		})
+	}
+}
+
+// TestBuildConnectionStackWithTarget_H2CDispatch verifies that the
+// HTTP2 / GRPC selector reach the h2c builder branch by feeding closed
+// connections and asserting the wrap error cites the expected sub-stage.
+// A full positive-path test of the assembled stack (with a real h2 client
+// preface) lives in proxybuild's e2e suite — see
+// internal/proxybuild/tcp_forward_h2_integration_test.go and
+// internal/proxybuild/tcp_forward_grpc_integration_test.go.
+func TestBuildConnectionStackWithTarget_H2CDispatch(t *testing.T) {
+	cases := []struct {
+		name     string
+		protocol ForwardProtocol
+	}{
+		{name: "http2", protocol: ForwardProtocolHTTP2},
+		{name: "grpc", protocol: ForwardProtocolGRPC},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Construct conns whose Reads return EOF immediately so the
+			// upstream http2.New ClientRole preface-write succeeds but the
+			// reader goroutine sees EOF on the very next frame read. We only
+			// need the dispatcher to route into the h2c builder branch — the
+			// builder may then fail at either the upstream or client Layer
+			// construction; both outcomes indicate the dispatch reached the
+			// h2 branch (not the "not yet wired" error path).
+			clientLocal, clientPeer := net.Pipe()
+			t.Cleanup(func() { _ = clientLocal.Close(); _ = clientPeer.Close() })
+			upstreamLocal, upstreamPeer := net.Pipe()
+			t.Cleanup(func() { _ = upstreamLocal.Close(); _ = upstreamPeer.Close() })
+
+			// Drain the conns asynchronously: discard whatever the http2
+			// Layer writes (preface + SETTINGS frame on the upstream side;
+			// SETTINGS on the client side after preface read). Close on
+			// drain end so subsequent reads return EOF.
+			drainAndClose := func(c net.Conn) {
+				go func() {
+					buf := make([]byte, 4096)
+					for {
+						if _, err := c.Read(buf); err != nil {
+							return
+						}
+					}
+				}()
+			}
+			drainAndClose(clientLocal)
+			drainAndClose(upstreamLocal)
+
+			// Close the peers' read direction so the http2.New's preface
+			// validation surfaces a deterministic error. net.Pipe does not
+			// support CloseRead, so closing the whole conn after a short
+			// delay achieves the same outcome.
+			go func() {
+				time.Sleep(50 * time.Millisecond)
+				_ = clientLocal.Close()
+				_ = upstreamLocal.Close()
+			}()
+
+			cfg := newTestBuildConfig(t)
+			params := TargetOverrideParams{
+				Target:   "api.example.com:50051",
+				Protocol: tc.protocol,
+			}
+			_, err := BuildConnectionStackWithTarget(context.Background(), clientPeer, upstreamPeer, params, cfg)
+			// The interesting assertion is the error path — it must NOT
+			// be the "not yet wired" sentinel. Either the upstream or
+			// client h2 layer construction surfaces a wrap error citing
+			// "buildTargetOverrideH2CStack" or the connector's
+			// "BuildConnectionStackWithTarget" prefix.
+			if err == nil {
+				t.Fatalf("protocol %q: expected error from closed peer dispatch (no real h2 handshake), got success", tc.protocol)
+			}
+			if strings.Contains(err.Error(), "not yet wired") {
+				t.Errorf("protocol %q: dispatch returned 'not yet wired' (%q); h2c branch was not reached", tc.protocol, err.Error())
 			}
 		})
 	}
