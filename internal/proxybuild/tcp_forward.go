@@ -2,6 +2,7 @@ package proxybuild
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -81,6 +82,49 @@ type tcpForwardEntry struct {
 	// taking m.mu in the accept loop. maxConns == 0 disables the cap.
 	activeConns atomic.Int64
 	maxConns    atomic.Int64
+
+	// tlsServerCfg is the per-entry MITM *tls.Config used to terminate
+	// client-side TLS when fc.TLS=true (USK-915). Built once at listener
+	// start so crypto/tls's lazy session-ticket key persists across every
+	// accepted conn on this forward entry; nil when fc.TLS=false.
+	tlsServerCfg *tls.Config
+}
+
+// forwardConnOverride carries per-connection overrides that the TLS
+// terminate handler (handleTCPForwardTLSConn) passes to the downstream H1
+// / H2 dispatch arms (USK-915). It is intentionally a value type — the
+// per-conn handler builds one on the stack so the listener-owned
+// *tcpForwardEntry is never copied (which would copy its embedded
+// sync.WaitGroup + atomic counters and trip go vet).
+//
+// Fields:
+//
+//   - protocol overrides entry.protocol so the downstream dispatch routes
+//     by the negotiated ALPN rather than the declared TLS protocol.
+//   - fc overrides entry.fc so the gRPC content-type filter sees the
+//     correct Protocol declaration after a TLS-terminate fan-out.
+//   - tlsTerminated marks that the clientConn handed to the downstream
+//     handler is already wrapped in *tls.Conn — the connector builder
+//     stamps envelope Scheme="https" and ClientTLSSnapshot accordingly.
+//   - clientTLSSnapshot is the negotiated client-side TLS snapshot.
+//
+// nil overrideForwardConn means "no override; honor entry's configured
+// values" — the cleartext forward path.
+type forwardConnOverride struct {
+	protocol          string
+	fc                *config.ForwardConfig
+	tlsTerminated     bool
+	clientTLSSnapshot *envelope.TLSSnapshot
+}
+
+// resolveProtocol returns the protocol the downstream dispatch should use
+// for this connection: the override's protocol when non-empty, otherwise
+// the entry's listener-configured protocol.
+func (o *forwardConnOverride) resolveProtocol(entry *tcpForwardEntry) string {
+	if o != nil && o.protocol != "" {
+		return o.protocol
+	}
+	return entry.protocol
 }
 
 // startTCPForwardListener constructs and starts a per-port forward listener.
@@ -109,15 +153,24 @@ func (m *Manager) startTCPForwardListener(
 	// path (USK-711), http/websocket/sse via the http1 arm of
 	// connector.BuildConnectionStackWithTarget (USK-913), http2/grpc via
 	// the h2c arm + per-stream proxybuild dispatch (USK-914,
-	// tcp_forward_h2.go). Unknown values surface as a validation error.
+	// tcp_forward_h2.go). USK-915 wires client-side TLS terminate before
+	// the protocol dispatch in handleTCPForwardTLSConn. Unknown values
+	// surface as a validation error.
 	switch fc.Protocol {
 	case "", "raw", "auto", "http", "websocket", "sse", "http2", "grpc":
 		// supported
 	default:
 		return nil, fmt.Errorf("tcp forward port %s: protocol %q is not a valid forward protocol", port, fc.Protocol)
 	}
+	// USK-915: client-side TLS terminate requires a configured CA Issuer.
+	// Reject at listener start with a clear error so an operator that
+	// forgot to wire the CA gets immediate feedback instead of silent
+	// per-conn handshake failures. The per-conn handler additionally
+	// fails-soft for CA regen races.
 	if fc.TLS {
-		return nil, fmt.Errorf("tcp forward port %s: tls=true not yet supported (client-side TLS terminate deferred to USK-915)", port)
+		if m.buildCfg == nil || m.buildCfg.Issuer == nil {
+			return nil, fmt.Errorf("tcp forward port %s: tls=true requires a configured CA Issuer", port)
+		}
 	}
 	if fc.UpstreamTLS {
 		return nil, fmt.Errorf("tcp forward port %s: upstream_tls=true not yet supported (upstream TLS dial deferred to USK-916)", port)
@@ -146,6 +199,18 @@ func (m *Manager) startTCPForwardListener(
 	// SetMaxConnections fan-out reaches forward listeners. 0 = unlimited.
 	if mc := m.MaxConnections(); mc > 0 {
 		entry.maxConns.Store(int64(mc))
+	}
+
+	// USK-915: build the per-entry MITM tls.Config once so crypto/tls's
+	// lazy session-ticket key persists across every accepted conn on this
+	// forward entry. The cert LRU inside the Issuer is shared across all
+	// listeners; only the *tls.Config wrapper is per-entry.
+	if fc.TLS {
+		if err := configureForwardTLS(entry, fc, m.buildCfg.Issuer); err != nil {
+			_ = ln.Close()
+			cancel()
+			return nil, fmt.Errorf("tcp forward port %s: %w", port, err)
+		}
 	}
 
 	go m.runTCPForwardAcceptLoop(listenerCtx, parentListenerName, entry)
@@ -232,6 +297,15 @@ func (m *Manager) runTCPForwardAcceptLoop(
 			if counted {
 				defer entry.activeConns.Add(-1)
 			}
+			// USK-915: when fc.TLS=true, terminate client-side TLS first
+			// then dispatch by negotiated ALPN. handleTCPForwardTLSConn
+			// owns the post-handshake routing — it picks the H2 or H1
+			// arm based on what the client negotiated, not on
+			// fc.Protocol alone.
+			if entry.fc != nil && entry.fc.TLS {
+				m.handleTCPForwardTLSConn(ctx, parentListenerName, entry, c)
+				return
+			}
 			// USK-914: route http2 / grpc to the h2-aware handler. All
 			// other supported values (raw / auto / "") stay on the raw
 			// bytechunk path. The protocol gating happens at
@@ -273,7 +347,24 @@ func (m *Manager) handleTCPForwardConn(
 	entry *tcpForwardEntry,
 	clientConn net.Conn,
 ) {
+	m.handleTCPForwardConnWithOverride(ctx, parentListenerName, entry, nil, clientConn)
+}
+
+// handleTCPForwardConnWithOverride is the override-aware extension of
+// handleTCPForwardConn (USK-915). The TLS terminate handler calls this
+// with a non-nil override carrying the negotiated protocol + TLS snapshot;
+// every other caller passes nil and gets the listener-configured
+// (entry.protocol, entry.fc) values verbatim.
+func (m *Manager) handleTCPForwardConnWithOverride(
+	ctx context.Context,
+	parentListenerName string,
+	entry *tcpForwardEntry,
+	override *forwardConnOverride,
+	clientConn net.Conn,
+) {
 	defer clientConn.Close()
+
+	protocol := override.resolveProtocol(entry)
 
 	connID := connector.GenerateConnID()
 	clientAddr := clientConn.RemoteAddr().String()
@@ -284,7 +375,7 @@ func (m *Manager) handleTCPForwardConn(
 		"port", entry.port,
 		"target", entry.target,
 		"via", "tcp-forward",
-		"protocol", entry.protocol,
+		"protocol", protocol,
 	)
 
 	connCtx := connector.ContextWithConnID(ctx, connID)
@@ -321,21 +412,22 @@ func (m *Manager) handleTCPForwardConn(
 		return
 	}
 
-	// Branch on the operator-declared protocol. raw / auto-resolved-to-raw
-	// stays on the bytechunk inline path (USK-711); http / websocket / sse /
-	// auto-resolved-to-http flow through the connector L7 dispatch.
-	switch entry.protocol {
+	// Branch on the operator-declared (or override-rewritten) protocol.
+	// raw / auto-resolved-to-raw stays on the bytechunk inline path
+	// (USK-711); http / websocket / sse / auto-resolved-to-http flow
+	// through the connector L7 dispatch.
+	switch protocol {
 	case "", "raw", "auto", "http", "websocket", "sse":
 		// supported below
 	default:
 		// startTCPForwardListener already rejected unsupported values;
 		// defensive guard for the goroutine spawn path.
-		connLogger.Debug("tcp forward unsupported protocol at dispatch", "protocol", entry.protocol)
+		connLogger.Debug("tcp forward unsupported protocol at dispatch", "protocol", protocol)
 		_ = upstreamConn.Close()
 		return
 	}
 
-	if entry.protocol == "raw" {
+	if protocol == "raw" {
 		m.handleTCPForwardConnRaw(connCtx, parentStack, connID, connLogger, clientConn, upstreamConn)
 		return
 	}
@@ -343,7 +435,7 @@ func (m *Manager) handleTCPForwardConn(
 	// L7 dispatch via connector.BuildConnectionStackWithTarget. The builder
 	// owns the Layer assembly; this handler owns the per-exchange dispatch,
 	// the ctx-cancel watcher, and the websocket/sse expectation filter.
-	m.handleTCPForwardConnL7(connCtx, parentStack, connID, connLogger, entry, clientConn, upstreamConn)
+	m.handleTCPForwardConnL7(connCtx, parentStack, connID, connLogger, entry, override, protocol, clientConn, upstreamConn)
 }
 
 // handleTCPForwardConnRaw runs the USK-711 [bytechunk → bytechunk] path.
@@ -418,6 +510,8 @@ func (m *Manager) handleTCPForwardConnL7(
 	connID string,
 	connLogger *slog.Logger,
 	entry *tcpForwardEntry,
+	override *forwardConnOverride,
+	protocol string,
 	clientConn, upstreamConn net.Conn,
 ) {
 	// Build the stack via the connector dispatcher. Protocol is a
@@ -426,7 +520,14 @@ func (m *Manager) handleTCPForwardConnL7(
 	// the Auto-h2c reject path (already cited USK-914).
 	params := connector.TargetOverrideParams{
 		Target:   entry.target,
-		Protocol: connector.ForwardProtocol(entry.protocol),
+		Protocol: connector.ForwardProtocol(protocol),
+	}
+	// USK-915: when TLS was terminated upstream of this handler, stamp the
+	// envelope Scheme as "https" and forward the client TLS snapshot so
+	// recordings and plugin payloads reflect wire reality.
+	if override != nil && override.tlsTerminated {
+		params.Scheme = "https"
+		params.ClientTLSSnapshot = override.clientTLSSnapshot
 	}
 	stack, err := connector.BuildConnectionStackWithTarget(connCtx, clientConn, upstreamConn, params, parentStack.BuildConfig)
 	if err != nil {
@@ -497,7 +598,7 @@ func (m *Manager) handleTCPForwardConnL7(
 	// short-circuits the exchange with a synthetic 502 — recorded as a
 	// state="error" Stream via the Pipeline-Drop audit hook.
 	sessOpts := m.tcpForwardSessionOpts(parentStack, connCtx)
-	filter := exchangeFilterFor(entry.protocol, connLogger)
+	filter := exchangeFilterFor(protocol, connLogger)
 	runTCPForwardHTTP1ExchangeLoop(connCtx, stack, clientH1, upstreamH1, parentStack.Pipeline, sessOpts, entry.target, connLogger, filter)
 }
 

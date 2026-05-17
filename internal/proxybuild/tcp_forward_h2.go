@@ -48,6 +48,21 @@ func (m *Manager) handleTCPForwardH2Conn(
 	fc *config.ForwardConfig,
 	clientConn net.Conn,
 ) {
+	m.handleTCPForwardH2ConnWithOverride(ctx, parentListenerName, entry, fc, nil, clientConn)
+}
+
+// handleTCPForwardH2ConnWithOverride is the override-aware extension of
+// handleTCPForwardH2Conn (USK-915). The TLS terminate handler calls this
+// with a non-nil override carrying the negotiated TLS snapshot; every
+// other caller passes nil.
+func (m *Manager) handleTCPForwardH2ConnWithOverride(
+	ctx context.Context,
+	parentListenerName string,
+	entry *tcpForwardEntry,
+	fc *config.ForwardConfig,
+	override *forwardConnOverride,
+	clientConn net.Conn,
+) {
 	defer clientConn.Close()
 
 	connID := connector.GenerateConnID()
@@ -103,10 +118,18 @@ func (m *Manager) handleTCPForwardH2Conn(
 		return
 	}
 
-	stack, berr := connector.BuildConnectionStackWithTarget(connCtx, clientConn, upstreamConn, connector.TargetOverrideParams{
+	// USK-915: when TLS was terminated upstream of this handler, stamp the
+	// envelope Scheme as "https" and forward the client TLS snapshot so
+	// recordings and plugin payloads reflect wire reality.
+	targetParams := connector.TargetOverrideParams{
 		Target:   entry.target,
 		Protocol: fwdProto,
-	}, parentStack.BuildConfig)
+	}
+	if override != nil && override.tlsTerminated {
+		targetParams.Scheme = "https"
+		targetParams.ClientTLSSnapshot = override.clientTLSSnapshot
+	}
+	stack, berr := connector.BuildConnectionStackWithTarget(connCtx, clientConn, upstreamConn, targetParams, parentStack.BuildConfig)
 	if berr != nil {
 		connLogger.Debug("tcp forward h2 stack build failed", "error", berr)
 		// BuildConnectionStackWithTarget closes both conns on construction
