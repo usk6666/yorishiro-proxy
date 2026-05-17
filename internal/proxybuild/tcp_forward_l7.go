@@ -239,9 +239,18 @@ func runForwardHTTP1Exchange(
 // tcpForwardRequestPeekTimeout bounds the first-envelope peek used by the
 // websocket/sse expectation filter. A client that opens the conn but
 // never sends a request should not hold up the goroutine indefinitely.
-// Kept generous (10s) because legitimate clients may pause briefly
+// Aligned with targetOverrideAutoPeekTimeout (5s) — small enough to limit
+// slow-loris goroutine occupation on filtered arms (review finding S-1
+// from review-gate), generous enough to absorb legitimate brief pauses
 // between conn open and request write.
-const tcpForwardRequestPeekTimeout = 10 * time.Second
+const tcpForwardRequestPeekTimeout = 5 * time.Second
+
+// tcpForwardSynth502WriteTimeout bounds the synthetic 502 write to a
+// rejected client. The Send is best-effort (the conn is about to close
+// anyway), so a short ctx is sufficient — without it a wedged client TCP
+// write buffer can park filterUpstreamChannel.Next indefinitely (review
+// finding S-2 from review-gate).
+const tcpForwardSynth502WriteTimeout = 3 * time.Second
 
 // writeForwardSynth502 writes a minimal synthetic 502 response back to
 // the client via the supplied Channel. The response identifies the proxy
@@ -274,7 +283,12 @@ func writeForwardSynth502(ch layer.Channel, blockedBy string) {
 		Direction: envelope.Receive,
 		Message:   resp,
 	}
-	_ = ch.Send(context.Background(), env)
+	// Bound the write so a wedged client TCP buffer cannot park the
+	// caller (filterUpstreamChannel.Next) indefinitely. Best-effort
+	// only — the conn is about to close after this Send returns.
+	sendCtx, cancel := context.WithTimeout(context.Background(), tcpForwardSynth502WriteTimeout)
+	defer cancel()
+	_ = ch.Send(sendCtx, env)
 }
 
 // replayChannel wraps a Channel so the first Next call returns a

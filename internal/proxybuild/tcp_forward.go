@@ -405,12 +405,13 @@ func (m *Manager) handleTCPForwardConnRaw(
 // handleTCPForwardConnL7 runs the http / websocket / sse / auto arms.
 //
 // Stack assembly is delegated to connector.BuildConnectionStackWithTarget;
-// per-exchange dispatch goes through runHTTP1ExchangeLoop (the same helper
-// the MITM live data path uses for http1 keep-alive). The protocol-mismatch
-// filter is applied per-exchange via wrapExchangeForFilter so a websocket
-// listener that sees a non-Upgrade request — or an sse listener that sees
-// a non-SSE response — synthesises a 502 to the client and records the
-// rejection as a Pipeline-Drop audit Stream.
+// per-exchange dispatch goes through runTCPForwardHTTP1ExchangeLoop (the
+// forward-side sibling of the MITM live data path's runHTTP1ExchangeLoop —
+// identical loop shape, plus an optional per-exchange filter for the
+// websocket/sse arms). The filter is selected by exchangeFilterFor so a
+// websocket listener that sees a non-Upgrade request — or an sse listener
+// that sees a non-SSE response — synthesises a 502 to the client and
+// records the rejection as a Pipeline-Drop audit Stream.
 func (m *Manager) handleTCPForwardConnL7(
 	connCtx context.Context,
 	parentStack *Stack,
