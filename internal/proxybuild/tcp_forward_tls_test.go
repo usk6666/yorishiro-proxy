@@ -11,6 +11,7 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/cert"
 	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/connector"
+	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 )
 
 // parseLeafCert parses the leaf x509 certificate from a *tls.Certificate.
@@ -331,5 +332,78 @@ func TestConfigureForwardTLS_Happy(t *testing.T) {
 	}
 	if got, want := entry.tlsServerCfg.NextProtos, []string{"h2"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("NextProtos = %v, want %v (http2 → h2 only)", got, want)
+	}
+}
+
+// TestUpstreamALPNOffersForForward pins the USK-916 ALPN propagation
+// policy. Three branches:
+//
+//  1. Explicit Protocol → derive from declaration (delegates to
+//     alpnOffersForForwardProtocol).
+//  2. "auto" + client TLS terminated + client negotiated ALPN →
+//     propagate the client's choice as a single-element list.
+//  3. "auto" + plaintext client (or no client ALPN) → safe default
+//     ["http/1.1"] only (NOT ["h2","http/1.1"] — see helper godoc /
+//     Decision #5).
+func TestUpstreamALPNOffersForForward(t *testing.T) {
+	clientH2 := &forwardConnOverride{
+		tlsTerminated:     true,
+		clientTLSSnapshot: &envelope.TLSSnapshot{ALPN: "h2"},
+	}
+	clientH1 := &forwardConnOverride{
+		tlsTerminated:     true,
+		clientTLSSnapshot: &envelope.TLSSnapshot{ALPN: "http/1.1"},
+	}
+	clientTLSNoALPN := &forwardConnOverride{
+		tlsTerminated:     true,
+		clientTLSSnapshot: &envelope.TLSSnapshot{ALPN: ""},
+	}
+	plainClient := (*forwardConnOverride)(nil)
+
+	cases := []struct {
+		name     string
+		protocol string
+		override *forwardConnOverride
+		want     []string
+	}{
+		// Branch 1: explicit protocol → delegated to
+		// alpnOffersForForwardProtocol, independent of override.
+		{"http_explicit_plain", "http", plainClient, []string{"http/1.1"}},
+		{"http_explicit_clientH2", "http", clientH2, []string{"http/1.1"}},
+		{"http2_explicit_plain", "http2", plainClient, []string{"h2"}},
+		{"http2_explicit_clientH1", "http2", clientH1, []string{"h2"}},
+		{"grpc_explicit", "grpc", plainClient, []string{"h2"}},
+		{"websocket_explicit", "websocket", plainClient, []string{"http/1.1"}},
+		{"sse_explicit", "sse", plainClient, []string{"http/1.1"}},
+		{"raw_explicit", "raw", plainClient, nil},
+		// Branch 2: auto + client TLS terminated + client ALPN known →
+		// propagate single-element list.
+		{"auto_clientH2", "auto", clientH2, []string{"h2"}},
+		{"auto_clientH1", "auto", clientH1, []string{"http/1.1"}},
+		{"empty_clientH2", "", clientH2, []string{"h2"}},
+		// Branch 3: auto + plaintext client (or TLS client with no
+		// negotiated ALPN) → safe default http/1.1.
+		{"auto_plaintext", "auto", plainClient, []string{"http/1.1"}},
+		{"empty_plaintext", "", plainClient, []string{"http/1.1"}},
+		{"auto_clientTLSNoALPN", "auto", clientTLSNoALPN, []string{"http/1.1"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := upstreamALPNOffersForForward(tc.protocol, tc.override)
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("upstreamALPNOffersForForward(%q, %v) = %v, want %v",
+					tc.protocol, tc.override, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestUpstreamALPNOffersForForward_AutoOverrideNilSnapshot covers the
+// override-non-nil-but-snapshot-nil edge case so the helper does not panic
+// when a malformed override reaches it.
+func TestUpstreamALPNOffersForForward_AutoOverrideNilSnapshot(t *testing.T) {
+	override := &forwardConnOverride{tlsTerminated: true, clientTLSSnapshot: nil}
+	if got, want := upstreamALPNOffersForForward("auto", override), []string{"http/1.1"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("upstreamALPNOffersForForward(auto, nil-snapshot) = %v, want %v", got, want)
 	}
 }

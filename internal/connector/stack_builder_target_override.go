@@ -148,11 +148,34 @@ type TargetOverrideParams struct {
 	// CLAUDE.md MITM Principle 2.
 	TLSTerminate bool
 
-	// UpstreamTLS, when true, indicates the caller wants the upstream
-	// dial to perform a TLS handshake. The upstream-TLS dial wire-up is
-	// owned by USK-916 and is NOT implemented by USK-912; setting
-	// UpstreamTLS=true currently returns a "not yet wired" error.
+	// UpstreamTLS, when true, indicates the caller dialed the upstream
+	// connection over TLS before invoking this builder. USK-916 changed
+	// the field semantics from "request TLS dial" to "TLS has happened
+	// upstream of this builder": the caller (proxybuild.dialForwardUpstream)
+	// owns the dial primitive (DialUpstreamRaw with a populated TLSConfig)
+	// and passes the negotiated *envelope.TLSSnapshot via
+	// UpstreamTLSSnapshot. Mirrors the seam discipline used by USK-915
+	// for client-side TLS terminate (TLS happens in the per-conn handler;
+	// the builder consumes the resulting snapshot).
+	//
+	// Setting UpstreamTLS=true without populating UpstreamTLSSnapshot is
+	// permitted (used by callers that elect to stamp the upstream Layer's
+	// EnvelopeContext.TLS later via a different mechanism) but yields the
+	// same lossy state as the cleartext path — the recorded envelopes
+	// will not reflect upstream TLS reality. The proxybuild forward
+	// handlers always populate the snapshot.
 	UpstreamTLS bool
+
+	// UpstreamTLSSnapshot, when non-nil, is plumbed into the upstream-side
+	// EnvelopeContext.TLS field of the assembled L7 Layers so plugin hooks
+	// and recordings observe the negotiated SNI / ALPN / cipher for the
+	// upstream TLS handshake. USK-916: forward callers that performed the
+	// upstream TLS dial themselves (proxybuild.dialForwardUpstream) own
+	// this field; callers that left UpstreamTLS=false leave it nil. Mirrors
+	// the per-Layer upstream TLS wiring in stack_builder.go::buildStackFromRoute
+	// (live MITM CONNECT path), preserving CLAUDE.md MITM Principle 3
+	// (lossless representations).
+	UpstreamTLSSnapshot *envelope.TLSSnapshot
 
 	// Scheme overrides the envelope Scheme stamped by the assembled L7
 	// Layers. Defaults to "http" when unset, matching the cleartext
@@ -294,9 +317,11 @@ func BuildConnectionStackWithTarget(
 	if params.TLSTerminate {
 		return nil, fmt.Errorf("connector: BuildConnectionStackWithTarget: TLSTerminate=true not yet wired (deferred to USK-915)")
 	}
-	if params.UpstreamTLS {
-		return nil, fmt.Errorf("connector: BuildConnectionStackWithTarget: UpstreamTLS=true not yet wired (deferred to USK-916)")
-	}
+	// USK-916: params.UpstreamTLS is now informational only — TLS is
+	// performed caller-side via proxybuild.dialForwardUpstream (which
+	// invokes connector.DialUpstreamRaw with a populated TLSConfig). The
+	// builder consumes UpstreamTLSSnapshot to stamp upstream Layer's
+	// EnvelopeContext.TLS. No reject gate.
 
 	protocol := params.Protocol
 	if protocol == "" {
@@ -312,18 +337,18 @@ func BuildConnectionStackWithTarget(
 		// proxybuild handler layer (it must observe the first request /
 		// first response, which is per-exchange Pipeline territory rather
 		// than per-stack-builder territory).
-		return buildTargetOverrideHTTPStack(ctx, clientConn, upstreamConn, params.Target, params.effectiveScheme(), params.ClientTLSSnapshot, cfg)
+		return buildTargetOverrideHTTPStack(ctx, clientConn, upstreamConn, params.Target, params.effectiveScheme(), params.ClientTLSSnapshot, params.UpstreamTLSSnapshot, cfg)
 	case ForwardProtocolAuto:
 		// USK-913: peek the first inner byte on clientConn to disambiguate
 		// HTTP/1.x → http arm, h2c → reject with USK-914 citation, TLS →
 		// warn + raw fallback, everything else → raw fallback.
-		return buildTargetOverrideAutoStack(ctx, clientConn, upstreamConn, params.Target, params.effectiveScheme(), params.ClientTLSSnapshot, cfg)
+		return buildTargetOverrideAutoStack(ctx, clientConn, upstreamConn, params.Target, params.effectiveScheme(), params.ClientTLSSnapshot, params.UpstreamTLSSnapshot, cfg)
 	case ForwardProtocolHTTP2, ForwardProtocolGRPC:
 		// USK-914: h2c forward stack. The GRPC selector reuses the same
 		// h2c stack assembly; the gRPC content-type filter is applied at
 		// the per-stream proxybuild dispatch layer (see
 		// internal/proxybuild/tcp_forward_h2.go).
-		return buildTargetOverrideH2CStack(ctx, clientConn, upstreamConn, params.Target, params.effectiveScheme(), params.ClientTLSSnapshot, cfg)
+		return buildTargetOverrideH2CStack(ctx, clientConn, upstreamConn, params.Target, params.effectiveScheme(), params.ClientTLSSnapshot, params.UpstreamTLSSnapshot, cfg)
 	default:
 		// Unreachable: params.validate already rejects unknown values.
 		return nil, fmt.Errorf("connector: BuildConnectionStackWithTarget: unhandled protocol %q", protocol)
@@ -394,6 +419,7 @@ func buildTargetOverrideH2CStack(
 	target string,
 	scheme string,
 	clientTLS *envelope.TLSSnapshot,
+	upstreamTLS *envelope.TLSSnapshot,
 	cfg *BuildConfig,
 ) (*ConnectionStack, error) {
 	if scheme == "" {
@@ -405,13 +431,17 @@ func buildTargetOverrideH2CStack(
 		ConnID:     connID,
 		TargetHost: target,
 		// USK-915: client-side TLS snapshot is stamped here when the forward
-		// path terminated TLS before calling this builder. Upstream stays
-		// cleartext (h2c) — upstream-TLS dial is owned by USK-916.
+		// path terminated TLS before calling this builder.
 		TLS: clientTLS,
 	}
 	upstreamEnvCtx := envelope.EnvelopeContext{
 		ConnID:     connID,
 		TargetHost: target,
+		// USK-916: upstream TLS snapshot is stamped here when the forward
+		// path performed an upstream TLS dial before calling this builder
+		// (proxybuild.dialForwardUpstream). Nil leaves the upstream Layer
+		// envelopes recording a cleartext upstream — the h2c case.
+		TLS: upstreamTLS,
 	}
 
 	stack := NewConnectionStack(connID)
@@ -503,6 +533,7 @@ func buildTargetOverrideHTTPStack(
 	target string,
 	scheme string,
 	clientTLS *envelope.TLSSnapshot,
+	upstreamTLS *envelope.TLSSnapshot,
 	cfg *BuildConfig,
 ) (*ConnectionStack, error) {
 	if scheme == "" {
@@ -514,14 +545,18 @@ func buildTargetOverrideHTTPStack(
 		ConnID:     connID,
 		TargetHost: target,
 		// USK-915: client-side TLS snapshot is stamped here when the forward
-		// path terminated TLS before calling this builder. Upstream stays
-		// cleartext — upstream-TLS dial is owned by USK-916.
+		// path terminated TLS before calling this builder.
 		TLS: clientTLS,
 	}
 	upstreamEnvCtx := envelope.EnvelopeContext{
 		ConnID:     connID,
 		TargetHost: target,
-		// TLS intentionally nil: no handshake happened on the upstream side.
+		// USK-916: upstream TLS snapshot is stamped here when the forward
+		// path performed an upstream TLS dial before calling this builder
+		// (proxybuild.dialForwardUpstream). Nil leaves the upstream Layer
+		// envelopes recording a cleartext upstream — the original USK-913
+		// HTTP→HTTP path.
+		TLS: upstreamTLS,
 	}
 
 	stack := NewConnectionStack(connID)
@@ -591,6 +626,7 @@ func buildTargetOverrideAutoStack(
 	target string,
 	scheme string,
 	clientTLS *envelope.TLSSnapshot,
+	upstreamTLS *envelope.TLSSnapshot,
 	cfg *BuildConfig,
 ) (*ConnectionStack, error) {
 	pc, ok := clientConn.(*PeekConn)
@@ -609,7 +645,7 @@ func buildTargetOverrideAutoStack(
 	case InnerHTTP1:
 		logger.Debug("connector: target-override Auto resolved to HTTP/1.x",
 			"target", target)
-		return buildTargetOverrideHTTPStack(ctx, pc, upstreamConn, target, scheme, clientTLS, cfg)
+		return buildTargetOverrideHTTPStack(ctx, pc, upstreamConn, target, scheme, clientTLS, upstreamTLS, cfg)
 	case InnerH2C:
 		// Don't opportunistically negotiate h2c — operators must declare
 		// Protocol="http2" explicitly. USK-914 wired the h2c arm; we still
