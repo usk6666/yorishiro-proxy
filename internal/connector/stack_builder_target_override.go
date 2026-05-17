@@ -138,6 +138,14 @@ type TargetOverrideParams struct {
 	// (with a MITM cert issued via cfg.Issuer). The TLS terminate wire-up
 	// is owned by USK-915 and is NOT implemented by USK-912; setting
 	// TLSTerminate=true currently returns a "not yet wired" error.
+	//
+	// USK-915: in-builder TLS termination remains deferred. The forward
+	// path performs TLS termination BEFORE calling this builder (using
+	// connector.PerformClientMITM or an SNI-honoring sibling), then passes
+	// the wrapped *tls.Conn as clientConn together with Scheme="https"
+	// and (optionally) ClientTLSSnapshot. This keeps the builder a single-
+	// purpose stack assembler and matches the seam discipline in
+	// CLAUDE.md MITM Principle 2.
 	TLSTerminate bool
 
 	// UpstreamTLS, when true, indicates the caller wants the upstream
@@ -145,6 +153,30 @@ type TargetOverrideParams struct {
 	// owned by USK-916 and is NOT implemented by USK-912; setting
 	// UpstreamTLS=true currently returns a "not yet wired" error.
 	UpstreamTLS bool
+
+	// Scheme overrides the envelope Scheme stamped by the assembled L7
+	// Layers. Defaults to "http" when unset, matching the cleartext
+	// forward path (USK-913 / USK-914). The forward TCP path sets this to
+	// "https" once it has terminated TLS on the client conn (USK-915);
+	// downstream Issues that wire upstream-TLS-only forwards may keep
+	// "http" here when the client conn is cleartext but the upstream is
+	// encrypted (the recorded Scheme reflects the client-facing wire,
+	// matching the rest of the proxy's per-Layer Scheme convention).
+	//
+	// Validation: must be empty (treated as "http"), "http", or "https".
+	// Unknown values are rejected at validate() with a clear error so
+	// typos surface at the API boundary rather than at envelope-stamping
+	// time deep inside the Layer.
+	Scheme string
+
+	// ClientTLSSnapshot, when non-nil, is plumbed into the client-side
+	// EnvelopeContext.TLS field of the assembled L7 Layers so plugin hooks
+	// and recordings see the negotiated SNI / ALPN / cipher for the
+	// terminated client TLS handshake. Forward callers that terminate TLS
+	// themselves (USK-915) own this field; cleartext forward callers leave
+	// it nil and Scheme="" (or "http"). Mirrors the per-Layer TLS wiring
+	// in stack_builder.go::buildStackFromRoute (live MITM CONNECT path).
+	ClientTLSSnapshot *envelope.TLSSnapshot
 }
 
 // validate sanity-checks the params before any I/O. Returns a wrapped error
@@ -167,7 +199,24 @@ func (p *TargetOverrideParams) validate() error {
 	if !validForwardProtocols[protocol] {
 		return fmt.Errorf("connector: BuildConnectionStackWithTarget: invalid protocol %q (valid: auto, raw, http, http2, grpc, websocket, sse)", p.Protocol)
 	}
+	switch p.Scheme {
+	case "", "http", "https":
+		// valid
+	default:
+		return fmt.Errorf("connector: BuildConnectionStackWithTarget: invalid Scheme %q (valid: \"\", http, https)", p.Scheme)
+	}
 	return nil
+}
+
+// effectiveScheme resolves the Scheme override declared by the caller into
+// the concrete "http" / "https" value the L7 Layers stamp onto envelopes.
+// Empty is treated as "http" — the cleartext default that matches USK-913
+// and USK-914 callers.
+func (p *TargetOverrideParams) effectiveScheme() string {
+	if p == nil || p.Scheme == "" {
+		return "http"
+	}
+	return p.Scheme
 }
 
 // BuildConnectionStackWithTarget assembles a per-connection ConnectionStack
@@ -263,18 +312,18 @@ func BuildConnectionStackWithTarget(
 		// proxybuild handler layer (it must observe the first request /
 		// first response, which is per-exchange Pipeline territory rather
 		// than per-stack-builder territory).
-		return buildTargetOverrideHTTPStack(ctx, clientConn, upstreamConn, params.Target, cfg)
+		return buildTargetOverrideHTTPStack(ctx, clientConn, upstreamConn, params.Target, params.effectiveScheme(), params.ClientTLSSnapshot, cfg)
 	case ForwardProtocolAuto:
 		// USK-913: peek the first inner byte on clientConn to disambiguate
 		// HTTP/1.x → http arm, h2c → reject with USK-914 citation, TLS →
 		// warn + raw fallback, everything else → raw fallback.
-		return buildTargetOverrideAutoStack(ctx, clientConn, upstreamConn, params.Target, cfg)
+		return buildTargetOverrideAutoStack(ctx, clientConn, upstreamConn, params.Target, params.effectiveScheme(), params.ClientTLSSnapshot, cfg)
 	case ForwardProtocolHTTP2, ForwardProtocolGRPC:
 		// USK-914: h2c forward stack. The GRPC selector reuses the same
 		// h2c stack assembly; the gRPC content-type filter is applied at
 		// the per-stream proxybuild dispatch layer (see
 		// internal/proxybuild/tcp_forward_h2.go).
-		return buildTargetOverrideH2CStack(ctx, clientConn, upstreamConn, params.Target, cfg)
+		return buildTargetOverrideH2CStack(ctx, clientConn, upstreamConn, params.Target, params.effectiveScheme(), params.ClientTLSSnapshot, cfg)
 	default:
 		// Unreachable: params.validate already rejects unknown values.
 		return nil, fmt.Errorf("connector: BuildConnectionStackWithTarget: unhandled protocol %q", protocol)
@@ -343,14 +392,22 @@ func buildTargetOverrideH2CStack(
 	ctx context.Context,
 	clientConn, upstreamConn net.Conn,
 	target string,
+	scheme string,
+	clientTLS *envelope.TLSSnapshot,
 	cfg *BuildConfig,
 ) (*ConnectionStack, error) {
+	if scheme == "" {
+		scheme = "http"
+	}
 	connID := uuid.New().String()
 
 	clientEnvCtx := envelope.EnvelopeContext{
 		ConnID:     connID,
 		TargetHost: target,
-		// TLS intentionally nil: h2c — no handshake on either side.
+		// USK-915: client-side TLS snapshot is stamped here when the forward
+		// path terminated TLS before calling this builder. Upstream stays
+		// cleartext (h2c) — upstream-TLS dial is owned by USK-916.
+		TLS: clientTLS,
 	}
 	upstreamEnvCtx := envelope.EnvelopeContext{
 		ConnID:     connID,
@@ -362,7 +419,7 @@ func buildTargetOverrideH2CStack(
 	// Upstream first so we can sniff its SETTINGS_ENABLE_CONNECT_PROTOCOL
 	// value (mirrors BuildPlainH2CStack USK-871 commentary).
 	upstreamLayer, err := http2.New(upstreamConn, connID+"/upstream", http2.ClientRole,
-		http2.WithScheme("http"),
+		http2.WithScheme(scheme),
 		http2.WithEnvelopeContext(upstreamEnvCtx),
 		http2.WithBodySpillDir(cfg.BodySpillDir),
 		http2.WithBodySpillThreshold(cfg.BodySpillThreshold),
@@ -392,7 +449,7 @@ func buildTargetOverrideH2CStack(
 	}
 
 	clientH2Opts := []http2.Option{
-		http2.WithScheme("http"),
+		http2.WithScheme(scheme),
 		http2.WithEnvelopeContext(clientEnvCtx),
 		http2.WithBodySpillDir(cfg.BodySpillDir),
 		http2.WithBodySpillThreshold(cfg.BodySpillThreshold),
@@ -444,14 +501,22 @@ func buildTargetOverrideHTTPStack(
 	_ context.Context,
 	clientConn, upstreamConn net.Conn,
 	target string,
+	scheme string,
+	clientTLS *envelope.TLSSnapshot,
 	cfg *BuildConfig,
 ) (*ConnectionStack, error) {
+	if scheme == "" {
+		scheme = "http"
+	}
 	connID := uuid.New().String()
 
 	clientEnvCtx := envelope.EnvelopeContext{
 		ConnID:     connID,
 		TargetHost: target,
-		// TLS intentionally nil: no handshake happened on the client side.
+		// USK-915: client-side TLS snapshot is stamped here when the forward
+		// path terminated TLS before calling this builder. Upstream stays
+		// cleartext — upstream-TLS dial is owned by USK-916.
+		TLS: clientTLS,
 	}
 	upstreamEnvCtx := envelope.EnvelopeContext{
 		ConnID:     connID,
@@ -462,7 +527,7 @@ func buildTargetOverrideHTTPStack(
 	stack := NewConnectionStack(connID)
 
 	clientLayer := http1.New(clientConn, connID+"/client", envelope.Send,
-		http1.WithScheme("http"),
+		http1.WithScheme(scheme),
 		http1.WithEnvelopeContext(clientEnvCtx),
 		http1.WithBodySpillDir(cfg.BodySpillDir),
 		http1.WithBodySpillThreshold(cfg.BodySpillThreshold),
@@ -472,7 +537,7 @@ func buildTargetOverrideHTTPStack(
 	stack.PushClient(clientLayer)
 
 	upstreamLayer := http1.New(upstreamConn, connID+"/upstream", envelope.Receive,
-		http1.WithScheme("http"),
+		http1.WithScheme(scheme),
 		http1.WithEnvelopeContext(upstreamEnvCtx),
 		http1.WithBodySpillDir(cfg.BodySpillDir),
 		http1.WithBodySpillThreshold(cfg.BodySpillThreshold),
@@ -524,6 +589,8 @@ func buildTargetOverrideAutoStack(
 	ctx context.Context,
 	clientConn, upstreamConn net.Conn,
 	target string,
+	scheme string,
+	clientTLS *envelope.TLSSnapshot,
 	cfg *BuildConfig,
 ) (*ConnectionStack, error) {
 	pc, ok := clientConn.(*PeekConn)
@@ -542,7 +609,7 @@ func buildTargetOverrideAutoStack(
 	case InnerHTTP1:
 		logger.Debug("connector: target-override Auto resolved to HTTP/1.x",
 			"target", target)
-		return buildTargetOverrideHTTPStack(ctx, pc, upstreamConn, target, cfg)
+		return buildTargetOverrideHTTPStack(ctx, pc, upstreamConn, target, scheme, clientTLS, cfg)
 	case InnerH2C:
 		// Don't opportunistically negotiate h2c — operators must declare
 		// Protocol="http2" explicitly. USK-914 wired the h2c arm; we still
