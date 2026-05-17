@@ -205,7 +205,7 @@ func runForwardHTTP1Exchange(
 	// Request passed the filter: build a replay-channel that yields `first`
 	// once then delegates to the underlying Channel. RunStackSessionExchange
 	// is otherwise oblivious to the peek.
-	replayCh := &replayChannel{
+	replayCh := &http1ReplayChannel{
 		underlying: clientCh,
 		queued:     []*envelope.Envelope{first},
 	}
@@ -291,22 +291,22 @@ func writeForwardSynth502(ch layer.Channel, blockedBy string) {
 	_ = ch.Send(sendCtx, env)
 }
 
-// replayChannel wraps a Channel so the first Next call returns a
+// http1ReplayChannel wraps a Channel so the first Next call returns a
 // previously-peeked envelope before delegating to the underlying Channel.
 // All other operations (Send, Close, Closed, Err, StreamID) pass through.
 //
 // Used by the L7 forward path to peek the first request envelope for the
 // websocket/sse expectation filter without disturbing the session loop's
 // view of the Channel.
-type replayChannel struct {
+type http1ReplayChannel struct {
 	underlying layer.Channel
 	mu         sync.Mutex
 	queued     []*envelope.Envelope
 }
 
-func (c *replayChannel) StreamID() string { return c.underlying.StreamID() }
+func (c *http1ReplayChannel) StreamID() string { return c.underlying.StreamID() }
 
-func (c *replayChannel) Next(ctx context.Context) (*envelope.Envelope, error) {
+func (c *http1ReplayChannel) Next(ctx context.Context) (*envelope.Envelope, error) {
 	c.mu.Lock()
 	if len(c.queued) > 0 {
 		env := c.queued[0]
@@ -318,15 +318,15 @@ func (c *replayChannel) Next(ctx context.Context) (*envelope.Envelope, error) {
 	return c.underlying.Next(ctx)
 }
 
-func (c *replayChannel) Send(ctx context.Context, env *envelope.Envelope) error {
+func (c *http1ReplayChannel) Send(ctx context.Context, env *envelope.Envelope) error {
 	return c.underlying.Send(ctx, env)
 }
 
-func (c *replayChannel) Close() error { return c.underlying.Close() }
+func (c *http1ReplayChannel) Close() error { return c.underlying.Close() }
 
-func (c *replayChannel) Closed() <-chan struct{} { return c.underlying.Closed() }
+func (c *http1ReplayChannel) Closed() <-chan struct{} { return c.underlying.Closed() }
 
-func (c *replayChannel) Err() error { return c.underlying.Err() }
+func (c *http1ReplayChannel) Err() error { return c.underlying.Err() }
 
 // filterUpstreamChannel wraps an upstream Channel so the first Receive
 // envelope is checked against the operator-declared expectation. When the

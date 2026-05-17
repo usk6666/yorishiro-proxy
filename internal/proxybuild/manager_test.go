@@ -737,9 +737,13 @@ func TestManager_StartTCPForwardsNamed_BindError(t *testing.T) {
 }
 
 // TestManager_StartTCPForwardsNamed_RejectsUnsupportedProtocol verifies the
-// scope guard for the still-deferred L7 modes. USK-913 wired the http /
-// websocket / sse / auto arms; http2 and grpc remain deferred for USK-914,
-// so the start-time rejection must still cite the responsible follow-up.
+// start-time validation guard for unknown protocol selectors. After
+// USK-913 (http/ws/sse/auto) and USK-914 (http2/grpc) both landed, every
+// previously-deferred L7 mode is now wired — the only protocol values
+// the listener still rejects at start are values outside the
+// {raw,auto,http,websocket,sse,http2,grpc} set. Kept under the same
+// test name so future deferrals (new ForwardConfig.Protocol selectors)
+// can re-use the fixture by adding a case.
 func TestManager_StartTCPForwardsNamed_RejectsUnsupportedProtocol(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -750,7 +754,7 @@ func TestManager_StartTCPForwardsNamed_RejectsUnsupportedProtocol(t *testing.T) 
 	}
 	defer mgr.StopAll(context.Background())
 
-	for _, protocol := range []string{"http2", "grpc"} {
+	for _, protocol := range []string{"ftp", "tls-only", "unknown"} {
 		err := mgr.StartTCPForwards(ctx, TCPForwardParams{
 			Forwards: map[string]*config.ForwardConfig{
 				"0": {Target: "127.0.0.1:1", Protocol: protocol},
@@ -760,11 +764,8 @@ func TestManager_StartTCPForwardsNamed_RejectsUnsupportedProtocol(t *testing.T) 
 			t.Errorf("expected error for protocol=%s, got nil", protocol)
 			continue
 		}
-		if !strings.Contains(err.Error(), "not yet supported") {
-			t.Errorf("protocol=%s: error %q should mention 'not yet supported'", protocol, err.Error())
-		}
-		if !strings.Contains(err.Error(), "USK-914") {
-			t.Errorf("protocol=%s: error %q should cite USK-914", protocol, err.Error())
+		if !strings.Contains(err.Error(), "not a valid forward protocol") {
+			t.Errorf("protocol=%s: error %q should mention 'not a valid forward protocol'", protocol, err.Error())
 		}
 	}
 }
