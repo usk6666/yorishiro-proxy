@@ -26,6 +26,7 @@ import (
 	"github.com/google/uuid"
 
 	httputilpkg "github.com/usk6666/yorishiro-proxy/internal/connector/transport"
+	"github.com/usk6666/yorishiro-proxy/internal/encoding/protobuf"
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/layer"
@@ -113,14 +114,20 @@ func validateResendGRPCMetadataAndEncoding(input *resendGRPCInput) error {
 }
 
 // validateResendGRPCMessagesShape rejects an empty messages list and any
-// message with an unsupported body_encoding.
+// message with an unsupported body_encoding. The "proto-schemaless-json"
+// value (USK-922) is accepted in addition to "text" and "base64"; the
+// payload is then re-encoded to proto wire bytes via
+// internal/encoding/protobuf in populateResendGRPCMessages.
 func validateResendGRPCMessagesShape(input *resendGRPCInput) error {
 	if len(input.Messages) == 0 {
 		return errors.New("messages must contain at least one element (a gRPC RPC requires at least one DATA frame)")
 	}
 	for i, m := range input.Messages {
-		if m.BodyEncoding != "" && m.BodyEncoding != "text" && m.BodyEncoding != "base64" {
-			return fmt.Errorf("messages[%d]: unsupported body_encoding %q: must be text or base64", i, m.BodyEncoding)
+		switch m.BodyEncoding {
+		case "", "text", "base64", "proto-schemaless-json":
+			// supported
+		default:
+			return fmt.Errorf("messages[%d]: unsupported body_encoding %q: must be text, base64, or proto-schemaless-json", i, m.BodyEncoding)
 		}
 	}
 	return nil
@@ -457,10 +464,16 @@ func resendGRPCCanonicalURL(scheme, authority, service, method string) *url.URL 
 // compressed=true on any message when the resolved Encoding is empty
 // (the Layer's Send path treats Compressed=true with no encoding as
 // passthrough — useful for fuzzing but a footgun for diagnostic resend).
+//
+// USK-922: body_encoding="proto-schemaless-json" routes the payload
+// through internal/encoding/protobuf.Encode to produce the proto wire bytes
+// the gRPC Layer will LPM-frame. The size cap is enforced AFTER encoding so
+// a small JSON input that expands to a huge proto payload still trips the
+// cap (JSON-amplification guard).
 func populateResendGRPCMessages(input *resendGRPCInput, plan *resendGRPCPlan) error {
 	plan.messages = make([]resendGRPCDataPlan, 0, len(input.Messages))
 	for i, m := range input.Messages {
-		decoded, err := decodeBodyEncoded(m.Payload, m.BodyEncoding, fmt.Sprintf("messages[%d].payload", i))
+		decoded, err := decodeResendGRPCPayload(m.Payload, m.BodyEncoding, i)
 		if err != nil {
 			return err
 		}
@@ -476,6 +489,22 @@ func populateResendGRPCMessages(input *resendGRPCInput, plan *resendGRPCPlan) er
 		})
 	}
 	return nil
+}
+
+// decodeResendGRPCPayload converts the per-message payload string to the
+// raw proto bytes the gRPC Layer will LPM-frame. body_encoding "text" and
+// "base64" pass through decodeBodyEncoded; "proto-schemaless-json" re-encodes
+// via internal/encoding/protobuf.Encode so AI agents can mutate proto bodies
+// without hand-computing wire bytes (USK-922).
+func decodeResendGRPCPayload(payload, bodyEncoding string, index int) ([]byte, error) {
+	if bodyEncoding == "proto-schemaless-json" {
+		encoded, err := protobuf.Encode(payload)
+		if err != nil {
+			return nil, fmt.Errorf("messages[%d]: invalid proto-schemaless-json: %w", index, err)
+		}
+		return encoded, nil
+	}
+	return decodeBodyEncoded(payload, bodyEncoding, fmt.Sprintf("messages[%d].payload", index))
 }
 
 // concatResendGRPCPayloads returns the concatenation of every plan

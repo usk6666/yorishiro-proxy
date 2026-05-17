@@ -56,10 +56,18 @@ Ordered metadata list. Preserves wire case, order, and duplicates per RFC-001 §
 ### messages (array, optional)
 Request-side LPM (length-prefixed message) list. At least one element required. Each element has:
 - **payload** (string, REQUIRED): LPM payload interpreted per `body_encoding`.
-- **body_encoding** (string, optional): `"text"` (default) or `"base64"`.
+- **body_encoding** (string, optional): `"text"` (default), `"base64"`, or `"proto-schemaless-json"`.
 - **compressed** (boolean, optional): Set the LPM compression flag. Requires `encoding` to be set (recovered from flow or user-supplied).
 
 An RPC with zero DATA frames is not well-formed and is rejected.
+
+#### body_encoding values
+
+- `"text"` (default): the payload is the raw proto bytes as UTF-8 (may contain control characters and is rarely human-readable).
+- `"base64"`: the payload is base64-encoded raw proto bytes. Useful when copying `body` from `query messages` for a gRPC flow that came back as `body_encoding="base64"`.
+- `"proto-schemaless-json"` (USK-922): the payload is a JSON object produced by `query.decode_bodies=true` (or hand-written following the same key format). The proxy re-encodes it to proto wire bytes via `internal/encoding/protobuf.Encode` before LPM-framing. JSON keys follow the format `"<fieldNumber hex>:<ordinal hex>:<wireType>"` — for example `"0001:0000:String"`, `"0002:0001:Varint"`, `"0003:0002:embedded message"`, `"0004:0003:repeated"`, `"0005:0004:bytes"`, `"0006:0005:64-bit"`, `"0007:0006:32-bit"`. Embedded messages are nested JSON objects; repeated is a JSON array of integers; bytes is a colon-separated hex string. The size cap (16 MiB) is enforced AFTER encoding, not on the JSON input.
+
+> **Heuristic ambiguity caveat**: the schemaless decoder picks `String` / `embedded message` / `repeated` / `bytes` by inspection of the wire bytes — there is no `.proto` schema. The same wire payload may decode as `embedded message` in one envelope and `bytes` in another (visually similar wire encodings). For predictable round-tripping, keep the `body_encoding="base64"` form of the bytes that came out of `query` and only switch to `proto-schemaless-json` when you intend to mutate the JSON. Schema-aware decoding via a `.proto` registry is tracked in USK-923.
 
 ### trailer_metadata (array of `{name, value}`, optional)
 Optional Send-direction trailer HEADERS. When supplied, the request terminates via a trailer frame instead of `END_STREAM` on the last DATA.
@@ -134,6 +142,20 @@ Tag stored on the new flow's `Tags` map.
   "accept_encoding": ["gzip", "identity"],
   "messages": [
     {"payload": "H4sI...", "body_encoding": "base64", "compressed": true}
+  ]
+}
+```
+
+### Replay with a schemaless-proto JSON payload (USK-922)
+Feeding the same JSON shape that `query.decode_bodies=true` returns under `*_body_decoded`. The proxy re-encodes via `internal/encoding/protobuf.Encode` before LPM-framing.
+```json
+{
+  "flow_id": "grpc-abc-123",
+  "messages": [
+    {
+      "payload": "{\"0001:0000:String\":\"hi from resend\"}",
+      "body_encoding": "proto-schemaless-json"
+    }
   ]
 }
 ```

@@ -21,6 +21,7 @@ package mcp
 //         internal/pluginv2/surface.go: ("grpc","on_end") = PhaseSupportNone)
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/json"
@@ -667,6 +668,78 @@ func TestResendGRPC_RejectsEmptyMessages(t *testing.T) {
 
 // (Skipped: requires synthesising a non-gRPC Stream row; covered by the
 // equivalent test in resend_http / resend_ws integration suites.)
+
+// ---------------------------------------------------------------------------
+// USK-922 — proto-schemaless-json body_encoding round-trip.
+//
+// The AI agent path:
+//   1. recorded gRPC flow → query messages returns body_decoded as JSON
+//   2. AI mutates the JSON → feeds it back as resend_grpc.messages[]
+//      with body_encoding="proto-schemaless-json"
+//   3. proxy re-encodes via internal/encoding/protobuf.Encode and sends
+//      the resulting proto wire bytes upstream
+// ---------------------------------------------------------------------------
+
+func TestResendGRPC_ProtoSchemalessJSON_RoundTrip(t *testing.T) {
+	cs, _, _, _ := setupResendGRPCSession(t)
+	upstream := &resendGRPCEchoServer{}
+	addr, shutdown := startResendGRPCUpstream(t, upstream)
+	defer shutdown()
+
+	// "hi from resend" is sent via the JSON projection of a single
+	// String field. The Echo server captures the raw payload bytes, so
+	// we verify the upstream received the same proto wire bytes the
+	// standalone Encode would produce.
+	jsonPayload := `{"0001:0000:String":"hi from resend"}`
+
+	callResendGRPC(t, cs, map[string]any{
+		"target_addr": addr,
+		"scheme":      "https",
+		"service":     resendGRPCServiceName,
+		"method":      resendGRPCMethodUnary,
+		"messages": []map[string]any{
+			{"payload": jsonPayload, "body_encoding": "proto-schemaless-json"},
+		},
+		"timeout_ms": 10000,
+	})
+
+	req, _, _, _ := upstream.snapshot()
+	// Verify the upstream observed the exact proto wire bytes — a
+	// single String field with the embedded text.
+	wantBytes := []byte{0x0a, 0x0e, 'h', 'i', ' ', 'f', 'r', 'o', 'm', ' ', 'r', 'e', 's', 'e', 'n', 'd'}
+	if !bytes.Equal(req, wantBytes) {
+		t.Errorf("upstream received wire bytes\n got: %x\nwant: %x", req, wantBytes)
+	}
+}
+
+func TestResendGRPC_ProtoSchemalessJSON_InvalidJSON_SurfacesError(t *testing.T) {
+	cs, _, _, _ := setupResendGRPCSession(t)
+
+	res, _ := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "resend_grpc",
+		Arguments: map[string]any{
+			"target_addr": "127.0.0.1:9999",
+			"scheme":      "https",
+			"service":     "Svc",
+			"method":      "M",
+			"messages": []map[string]any{
+				{"payload": "not-json", "body_encoding": "proto-schemaless-json"},
+			},
+		},
+	})
+	if res == nil || !res.IsError {
+		t.Fatalf("expected error for invalid proto-schemaless-json, got %+v", res)
+	}
+	var msg strings.Builder
+	for _, c := range res.Content {
+		if tc, ok := c.(*gomcp.TextContent); ok {
+			msg.WriteString(tc.Text)
+		}
+	}
+	if !strings.Contains(msg.String(), "proto-schemaless-json") {
+		t.Errorf("error message must mention proto-schemaless-json, got %q", msg.String())
+	}
+}
 
 // status import keeps the linter happy; used implicitly via codes only in
 // this file. The blank assignment defends against the linter dropping it

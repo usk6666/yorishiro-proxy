@@ -17,6 +17,7 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/bodydecode"
 	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/connector"
+	"github.com/usk6666/yorishiro-proxy/internal/encoding/protobuf"
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/rules/common"
@@ -1020,6 +1021,75 @@ func (s *Server) computeDecodedBodyWithLimit(rawBody []byte, headers map[string]
 	return out, 0
 }
 
+// isGRPCDataMessage reports whether the flow's metadata identifies it as a
+// gRPC DATA envelope. Detection mirrors projectGRPCData in
+// internal/pipeline/record_step.go which stamps grpc_event=data on every
+// GRPCDataMessage flow. GRPCStart (headers) and GRPCEnd (trailers) carry
+// different grpc_event values and are intentionally excluded — only Data
+// envelopes hold proto wire bytes worth decoding into a schemaless JSON
+// projection (USK-922).
+func isGRPCDataMessage(metadata map[string]string) bool {
+	if metadata == nil {
+		return false
+	}
+	return metadata["grpc_event"] == "data"
+}
+
+// computeDecodedGRPCBodyWithLimit decodes a gRPC Data envelope's stored
+// payload as schemaless proto JSON (PacketProxy-style; see
+// internal/encoding/protobuf for the codec). rawBody is the L7 payload —
+// already decompressed and LPM-stripped at record time by
+// projectGRPCData (record_step.go writes fl.Body = m.Payload). Do NOT pass
+// Envelope.Raw / Flow.RawBytes here; those hold the wire-form LPM frame.
+//
+// On success, the decoded JSON is masked via Output Filter (RFC-001 §3.7),
+// independently capped against body_max_bytes (Q15 — gzip-style amplification
+// is impossible here but the cap still applies for token budgeting), and
+// returned with BodyEncoding="proto-schemaless-json" (the decoded JSON axis
+// surfaced as body_decoded_encoding) and Applied="proto-schemaless" (the
+// codec-name axis surfaced as body_encoding_applied; mirrors HTTP
+// "gzip"/"br").
+//
+// On decode failure, the wire-form body is preserved (callers populate Body
+// from rawBody separately) and the view surfaces
+// queryDecodeAnomaly{Type:"proto_malformed"}.
+func (s *Server) computeDecodedGRPCBodyWithLimit(rawBody []byte, decodeEnabled bool, max int) (view decodedBodyView, originalSize int) {
+	if !decodeEnabled || len(rawBody) == 0 {
+		return decodedBodyView{}, 0
+	}
+	jsonStr, err := protobuf.Decode(rawBody)
+	if err != nil {
+		return decodedBodyView{
+			Anomaly: &queryDecodeAnomaly{Type: "proto_malformed", Detail: err.Error()},
+		}, 0
+	}
+	masked := s.filterOutputBody([]byte(jsonStr))
+	preSize := len(masked)
+	capped, fired := limitBodyBytes(masked, max)
+	out := decodedBodyView{
+		Body:         string(capped),
+		BodyEncoding: "proto-schemaless-json",
+		Applied:      "proto-schemaless",
+	}
+	if fired {
+		return out, preSize
+	}
+	return out, 0
+}
+
+// computeDecodedBodyForMessage dispatches between the HTTP Content-Encoding
+// path (computeDecodedBodyWithLimit) and the gRPC schemaless-proto path
+// (computeDecodedGRPCBodyWithLimit) based on per-flow metadata. The gRPC
+// branch fires for flows tagged grpc_event=data — i.e. native gRPC Data
+// envelopes AND gRPC-Web Data envelopes (RFC-001 §3.2.3: gRPC-Web emits
+// GRPCDataMessage via the same record_step path).
+func (s *Server) computeDecodedBodyForMessage(rawBody []byte, headers map[string][]string, metadata map[string]string, decodeEnabled, truncated bool, max int) (view decodedBodyView, originalSize int) {
+	if isGRPCDataMessage(metadata) {
+		return s.computeDecodedGRPCBodyWithLimit(rawBody, decodeEnabled, max)
+	}
+	return s.computeDecodedBodyWithLimit(rawBody, headers, decodeEnabled, truncated, max)
+}
+
 // resolveDecodeBodies returns the effective value of the decode_bodies query
 // input flag, applying its default of true when omitted.
 func resolveDecodeBodies(input queryInput) bool {
@@ -1101,7 +1171,7 @@ func (s *Server) buildOriginalRequest(originalMsg *flow.Flow, decodeEnabled bool
 	origBodyStr, origBodyEnc := encodeBody(capped)
 	v.Body = origBodyStr
 	v.BodyEncoding = origBodyEnc
-	dec, _ := s.computeDecodedBodyWithLimit(originalMsg.Body, originalMsg.Headers, decodeEnabled, originalMsg.BodyTruncated, limit.bodyMaxBytes)
+	dec, _ := s.computeDecodedBodyForMessage(originalMsg.Body, originalMsg.Headers, originalMsg.Metadata, decodeEnabled, originalMsg.BodyTruncated, limit.bodyMaxBytes)
 	v.BodyDecoded = dec.Body
 	v.BodyDecodedEncoding = dec.BodyEncoding
 	v.BodyEncodingApplied = dec.Applied
@@ -1129,7 +1199,7 @@ func (s *Server) buildOriginalResponse(originalMsg *flow.Flow, decodeEnabled boo
 	origBodyStr, origBodyEnc := encodeBody(capped)
 	v.Body = origBodyStr
 	v.BodyEncoding = origBodyEnc
-	dec, _ := s.computeDecodedBodyWithLimit(originalMsg.Body, originalMsg.Headers, decodeEnabled, originalMsg.BodyTruncated, limit.bodyMaxBytes)
+	dec, _ := s.computeDecodedBodyForMessage(originalMsg.Body, originalMsg.Headers, originalMsg.Metadata, decodeEnabled, originalMsg.BodyTruncated, limit.bodyMaxBytes)
 	v.BodyDecoded = dec.Body
 	v.BodyDecodedEncoding = dec.BodyEncoding
 	v.BodyEncodingApplied = dec.Applied
@@ -1307,8 +1377,11 @@ func (s *Server) projectFlowSide(msg *flow.Flow, decodeEnabled bool, limit bodyL
 	}
 	// Decode against the original (pre-mask) body so the codec sees the real
 	// wire bytes — the SafetyFilter on compressed bytes is a no-op today, but
-	// if a future filter mutates them the decoder would fail.
-	dec, decOrig := s.computeDecodedBodyWithLimit(msg.Body, msg.Headers, decodeEnabled, msg.BodyTruncated, limit.bodyMaxBytes)
+	// if a future filter mutates them the decoder would fail. The dispatcher
+	// routes gRPC Data envelopes (msg.Metadata["grpc_event"]=="data") through
+	// the schemaless-proto path (USK-922) and everything else through the
+	// Content-Encoding path.
+	dec, decOrig := s.computeDecodedBodyForMessage(msg.Body, msg.Headers, msg.Metadata, decodeEnabled, msg.BodyTruncated, limit.bodyMaxBytes)
 	out.decoded = dec
 	if decOrig > 0 {
 		out.queryTruncated = true
@@ -1458,9 +1531,11 @@ func (s *Server) convertMessagesToEntries(msgs []*flow.Flow, decodeEnabled bool,
 			entry.BodyEncoding = bodyEnc
 			// Only decode the L7-parsed Body. RawBytes are wire bytes and must
 			// not be reinterpreted (Content-Encoding decoding presumes the
-			// parser has already extracted the L7 payload).
+			// parser has already extracted the L7 payload). gRPC Data envelopes
+			// route through computeDecodedBodyForMessage to surface the proto
+			// wire bytes as schemaless JSON (USK-922).
 			if !usedRawBytes {
-				dec, decOriginal := s.computeDecodedBodyWithLimit(msg.Body, msg.Headers, decodeEnabled, msg.BodyTruncated, limit.bodyMaxBytes)
+				dec, decOriginal := s.computeDecodedBodyForMessage(msg.Body, msg.Headers, msg.Metadata, decodeEnabled, msg.BodyTruncated, limit.bodyMaxBytes)
 				entry.BodyDecoded = dec.Body
 				entry.BodyDecodedEncoding = dec.BodyEncoding
 				entry.BodyEncodingApplied = dec.Applied
