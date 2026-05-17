@@ -101,8 +101,6 @@ type tcpForwardEntry struct {
 //
 //   - protocol overrides entry.protocol so the downstream dispatch routes
 //     by the negotiated ALPN rather than the declared TLS protocol.
-//   - fc overrides entry.fc so the gRPC content-type filter sees the
-//     correct Protocol declaration after a TLS-terminate fan-out.
 //   - tlsTerminated marks that the clientConn handed to the downstream
 //     handler is already wrapped in *tls.Conn — the connector builder
 //     stamps envelope Scheme="https" and ClientTLSSnapshot accordingly.
@@ -112,7 +110,6 @@ type tcpForwardEntry struct {
 // values" — the cleartext forward path.
 type forwardConnOverride struct {
 	protocol          string
-	fc                *config.ForwardConfig
 	tlsTerminated     bool
 	clientTLSSnapshot *envelope.TLSSnapshot
 }
