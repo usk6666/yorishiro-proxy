@@ -13,6 +13,7 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/connector"
 	"github.com/usk6666/yorishiro-proxy/internal/connector/transport"
+	"github.com/usk6666/yorishiro-proxy/internal/encoding/protoschema"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/mcp/webui"
 	"github.com/usk6666/yorishiro-proxy/internal/safety"
@@ -21,7 +22,7 @@ import (
 // schemaCache is a process-wide cache of resolved JSON schemas, shared by
 // every MCP Server instance built in this process.
 //
-// The 17 tool input/output struct types registered by registerTools are
+// The 18 tool input/output struct types registered by registerTools are
 // fixed at compile time, so caching by reflect.Type is unconditionally
 // correct. The cache is concurrent-safe (gomcp.SchemaCache uses sync.Map
 // internally) and cheaply amortises a 1+ second per-server reflection cost
@@ -51,6 +52,14 @@ type Server struct {
 	httpMiddleware func(http.Handler) http.Handler
 	uiDir          string
 	version        string
+
+	// grpcSchemas is the process-global gRPC .proto schema registry
+	// (USK-923). Populated lazily on first use by grpcSchemaRegistry(); the
+	// grpc_schema MCP tool's register/unregister/clear actions also call
+	// rehydrateGRPCSchemas() at startup to repopulate from the SchemaStore.
+	// nil-receiver-safe so tests that never touch the schema path leave it
+	// untouched.
+	grpcSchemas *protoschema.Registry
 }
 
 // tcpForwardHandler is the legacy TCP-forward dispatcher interface, kept
@@ -418,4 +427,16 @@ func (s *Server) registerTools() {
 	s.registerIntercept()
 	s.registerSecurity()
 	s.registerPluginIntrospect()
+	s.registerGRPCSchema()
+}
+
+// grpcSchemaRegistry returns the process-global gRPC schema registry,
+// lazily initialising it on first use. Safe to call concurrently — the
+// initialisation is idempotent and the underlying Registry uses
+// atomic.Pointer for reads.
+func (s *Server) grpcSchemaRegistry() *protoschema.Registry {
+	if s.grpcSchemas == nil {
+		s.grpcSchemas = protoschema.NewRegistry()
+	}
+	return s.grpcSchemas
 }

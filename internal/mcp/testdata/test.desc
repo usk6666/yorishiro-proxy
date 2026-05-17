@@ -1,0 +1,26 @@
+
+™
+
+test.protousk.test"a
+HelloRequest
+f_string (	RfString
+f_int32 (RfInt32
+
+f_repeated (	R	fRepeated"A
+HelloResponse
+
+f_greeting (	R	fGreeting
+f_ok (RfOk"?
+EchoMessage
+body (	Rbody
+	timestamp (R	timestamp"!
+LookupRequest
+key (	Rkey"&
+LookupResponse
+value (	Rvalue2|
+Greeter;
+SayHello.usk.test.HelloRequest.usk.test.HelloResponse4
+Echo.usk.test.EchoMessage.usk.test.EchoMessage2I
+
+Reflective;
+Lookup.usk.test.LookupRequest.usk.test.LookupResponsebproto3

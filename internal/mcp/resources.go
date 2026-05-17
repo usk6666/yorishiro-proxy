@@ -148,6 +148,13 @@ var helpResources = []resourceDef{
 		mimeType:    "text/markdown",
 		filename:    "resources/help_plugin_introspect.md",
 	},
+	{
+		uri:         "yorishiro://help/grpc_schema",
+		name:        "help_grpc_schema",
+		description: "Action list, parameter syntax, descriptor-set requirements, and usage examples for the grpc_schema tool (register, list, unregister, clear).",
+		mimeType:    "text/markdown",
+		filename:    "resources/help_grpc_schema.md",
+	},
 }
 
 // schemaResources lists all JSON Schema resources.
@@ -263,6 +270,13 @@ var schemaResources = []resourceDef{
 		description: "JSON Schema for the plugin_introspect tool input.",
 		mimeType:    "application/json",
 		filename:    "resources/schema_plugin_introspect.json",
+	},
+	{
+		uri:         "yorishiro://schema/grpc_schema",
+		name:        "schema_grpc_schema",
+		description: "JSON Schema for the grpc_schema tool input.",
+		mimeType:    "application/json",
+		filename:    "resources/schema_grpc_schema.json",
 	},
 }
 

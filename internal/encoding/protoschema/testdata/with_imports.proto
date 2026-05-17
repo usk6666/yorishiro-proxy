@@ -1,0 +1,21 @@
+// Test proto that imports another file. Used to verify the
+// --include_imports requirement on register: when generated WITHOUT
+// --include_imports, protodesc.NewFiles fails with "missing dependency"
+// and our LoadFileDescriptorSet surfaces an explicit error citing the flag.
+//
+// Compiled to two .desc files for two different test scenarios:
+//   protoc --descriptor_set_out=with_imports_missing.desc with_imports.proto
+//   protoc --include_imports --descriptor_set_out=with_imports_ok.desc with_imports.proto
+//
+// Only with_imports_missing.desc is needed (negative test); the positive
+// test runs against test.desc (self-contained).
+syntax = "proto3";
+
+package usk.test.imp;
+
+import "test.proto";
+
+message ImportedRequest {
+  usk.test.HelloRequest inner = 1;
+  string label = 2;
+}

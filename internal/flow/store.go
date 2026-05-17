@@ -175,6 +175,48 @@ type MacroStore interface {
 	DeleteMacro(ctx context.Context, name string) error
 }
 
+// GRPCSchemaRecord represents a stored gRPC schema entry (USK-923). One row
+// per fully-qualified service. DescriptorSet holds the raw bytes of the
+// service's filtered FileDescriptorSet so the registry can rehydrate the
+// protoreflect.MessageDescriptor on process restart without re-fetching
+// the user's input.
+type GRPCSchemaRecord struct {
+	// Service is the fully-qualified service name (primary key).
+	Service string
+	// DescriptorSet is the raw bytes of the FileDescriptorSet to which the
+	// service belongs. We persist the full set rather than just the
+	// FileDescriptorProto for the file containing the service so transitive
+	// imports remain resolvable on rehydrate.
+	DescriptorSet []byte
+	// SourceLabel is the caller-supplied label (filename hint, version
+	// tag, free-form note) shown by the list action. Empty when not set.
+	SourceLabel string
+	// RegisteredAt is the wall-clock time the entry was first written.
+	RegisteredAt time.Time
+	// UpdatedAt is the wall-clock time of the most recent Save (upsert).
+	UpdatedAt time.Time
+}
+
+// SchemaStore provides CRUD operations for gRPC schema definitions
+// (USK-923). Sibling pattern of MacroStore.
+type SchemaStore interface {
+	// SaveGRPCSchema persists a gRPC schema entry (upsert by service).
+	SaveGRPCSchema(ctx context.Context, service string, descriptorSet []byte, sourceLabel string) error
+
+	// GetGRPCSchema retrieves a schema entry by service name.
+	GetGRPCSchema(ctx context.Context, service string) (*GRPCSchemaRecord, error)
+
+	// ListGRPCSchemas returns all stored schemas ordered by service name.
+	ListGRPCSchemas(ctx context.Context) ([]*GRPCSchemaRecord, error)
+
+	// DeleteGRPCSchema removes a schema entry by service name.
+	DeleteGRPCSchema(ctx context.Context, service string) error
+
+	// ClearGRPCSchemas removes every schema entry. Returns the number of
+	// rows deleted.
+	ClearGRPCSchemas(ctx context.Context) (int64, error)
+}
+
 // Store defines the composite interface for stream, flow, and macro persistence.
 // It combines all sub-interfaces for backward compatibility. Callers that only
 // need a subset of operations should accept the narrower interface instead.
@@ -185,6 +227,7 @@ type Store interface {
 	FlowWriter
 	StreamDeleter
 	MacroStore
+	SchemaStore
 }
 
 // StreamListOptions configures stream listing behavior.

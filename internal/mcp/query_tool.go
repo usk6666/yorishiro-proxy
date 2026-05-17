@@ -18,9 +18,11 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/connector"
 	"github.com/usk6666/yorishiro-proxy/internal/encoding/protobuf"
+	"github.com/usk6666/yorishiro-proxy/internal/encoding/protoschema"
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/rules/common"
+	"google.golang.org/protobuf/reflect/protoreflect"
 )
 
 // defaultRequestTimeoutMs is the default request timeout in milliseconds
@@ -1036,40 +1038,102 @@ func isGRPCDataMessage(metadata map[string]string) bool {
 }
 
 // computeDecodedGRPCBodyWithLimit decodes a gRPC Data envelope's stored
-// payload as schemaless proto JSON (PacketProxy-style; see
-// internal/encoding/protobuf for the codec). rawBody is the L7 payload —
-// already decompressed and LPM-stripped at record time by
-// projectGRPCData (record_step.go writes fl.Body = m.Payload). Do NOT pass
-// Envelope.Raw / Flow.RawBytes here; those hold the wire-form LPM frame.
+// payload. rawBody is the L7 payload — already decompressed and
+// LPM-stripped at record time by projectGRPCData (record_step.go writes
+// fl.Body = m.Payload). Do NOT pass Envelope.Raw / Flow.RawBytes here;
+// those hold the wire-form LPM frame.
 //
-// On success, the decoded JSON is masked via Output Filter (RFC-001 §3.7),
-// independently capped against body_max_bytes (Q15 — gzip-style amplification
-// is impossible here but the cap still applies for token budgeting), and
-// returned with BodyEncoding="proto-schemaless-json" (the decoded JSON axis
-// surfaced as body_decoded_encoding) and Applied="proto-schemaless" (the
-// codec-name axis surfaced as body_encoding_applied; mirrors HTTP
-// "gzip"/"br").
+// direction is the recorded Flow.Direction ("send" or "receive") and
+// selects which descriptor in the registered schema matches the wire
+// bytes: send → input descriptor, receive → output descriptor. When
+// direction is empty (legacy callers / synthetic envelopes), the input
+// descriptor is tried first, then the output descriptor.
 //
-// On decode failure, the wire-form body is preserved (callers populate Body
-// from rawBody separately) and the view surfaces
-// queryDecodeAnomaly{Type:"proto_malformed"}.
-func (s *Server) computeDecodedGRPCBodyWithLimit(rawBody []byte, decodeEnabled bool, max int) (view decodedBodyView, originalSize int) {
+// USK-923 schema-aware path: when metadata carries grpc_service and
+// grpc_method AND a matching schema is registered, the body is decoded
+// via protoreflect.DynamicMessage + protojson with real field names
+// (BodyEncoding="proto-json", Applied="proto-json"). On a schema-hit
+// parse failure, the schemaless fallback still runs and a
+// queryDecodeAnomaly{Type:"proto_schema_mismatch"} anomaly is attached.
+//
+// USK-922 schemaless path: when no schema matches OR the schema hit
+// parse-failed, the body is decoded via internal/encoding/protobuf with
+// the synthetic key shape "FFFF:OOOO:type"
+// (BodyEncoding="proto-schemaless-json", Applied="proto-schemaless").
+//
+// In both cases the decoded JSON is masked via Output Filter
+// (RFC-001 §3.7) and independently capped against body_max_bytes.
+// Anomaly behaviour is preserved: malformed wire bytes (no schema or
+// schemaless fallback fails too) surface queryDecodeAnomaly{Type:"proto_malformed"}.
+func (s *Server) computeDecodedGRPCBodyWithLimit(rawBody []byte, metadata map[string]string, direction string, decodeEnabled bool, max int) (view decodedBodyView, originalSize int) {
 	if !decodeEnabled || len(rawBody) == 0 {
 		return decodedBodyView{}, 0
 	}
+
+	// Schema lookup by (service, method) from Flow.Metadata. Empty
+	// strings fall through to the schemaless path immediately.
+	service, method := grpcMethodFromMetadata(metadata)
+	var schemaAnomaly *queryDecodeAnomaly
+	if service != "" && method != "" {
+		spec := s.lookupGRPCSchema(service, method)
+		if spec != nil {
+			primary, secondary := pickGRPCDescriptors(spec, direction)
+			jsonStr, err := protoschema.Decode(rawBody, primary)
+			if err != nil && secondary != nil {
+				if alt, altErr := protoschema.Decode(rawBody, secondary); altErr == nil {
+					jsonStr, err = alt, nil
+				}
+			}
+			if err == nil {
+				return s.finalizeDecodedGRPC([]byte(jsonStr), "proto-json", "proto-json", max)
+			}
+			schemaAnomaly = &queryDecodeAnomaly{Type: "proto_schema_mismatch", Detail: err.Error()}
+		}
+	}
+
+	// Schemaless fallback. Either no schema is registered or the
+	// schema-aware path failed; in the latter case we attach the
+	// schema_mismatch anomaly so the caller sees both signals.
 	jsonStr, err := protobuf.Decode(rawBody)
 	if err != nil {
-		return decodedBodyView{
+		v := decodedBodyView{
 			Anomaly: &queryDecodeAnomaly{Type: "proto_malformed", Detail: err.Error()},
-		}, 0
+		}
+		// Schema-hit-AND-schemaless-fail is rare in practice; surface
+		// the schemaless error as the primary anomaly (callers care
+		// about "can I see anything at all" first).
+		return v, 0
 	}
-	masked := s.filterOutputBody([]byte(jsonStr))
+	out, preSize := s.finalizeDecodedGRPC([]byte(jsonStr), "proto-schemaless-json", "proto-schemaless", max)
+	if schemaAnomaly != nil {
+		out.Anomaly = schemaAnomaly
+	}
+	return out, preSize
+}
+
+// pickGRPCDescriptors selects the (primary, secondary) descriptor pair
+// for a given recorded Flow.Direction. Send-direction data envelopes
+// carry the RPC request, decoded against the method's input descriptor;
+// receive-direction data envelopes carry the response, decoded against
+// the output descriptor. Empty direction falls back to input-first.
+func pickGRPCDescriptors(spec *protoschema.MethodSpec, direction string) (primary, secondary protoreflect.MessageDescriptor) {
+	if direction == "receive" {
+		return spec.OutputDesc, spec.InputDesc
+	}
+	return spec.InputDesc, spec.OutputDesc
+}
+
+// finalizeDecodedGRPC applies Output Filter masking, the body-max-bytes
+// cap, and assembles the decodedBodyView. Shared by the schema-aware and
+// schemaless gRPC decode paths.
+func (s *Server) finalizeDecodedGRPC(plain []byte, bodyEncoding, applied string, max int) (decodedBodyView, int) {
+	masked := s.filterOutputBody(plain)
 	preSize := len(masked)
 	capped, fired := limitBodyBytes(masked, max)
 	out := decodedBodyView{
 		Body:         string(capped),
-		BodyEncoding: "proto-schemaless-json",
-		Applied:      "proto-schemaless",
+		BodyEncoding: bodyEncoding,
+		Applied:      applied,
 	}
 	if fired {
 		return out, preSize
@@ -1077,15 +1141,37 @@ func (s *Server) computeDecodedGRPCBodyWithLimit(rawBody []byte, decodeEnabled b
 	return out, 0
 }
 
+// grpcMethodFromMetadata extracts grpc_service and grpc_method from a
+// flow's metadata. Returns empty strings when either is absent.
+func grpcMethodFromMetadata(metadata map[string]string) (service, method string) {
+	if metadata == nil {
+		return "", ""
+	}
+	return metadata["grpc_service"], metadata["grpc_method"]
+}
+
+// lookupGRPCSchema returns the MethodSpec for (service, method) or nil
+// when no schema is registered. nil-receiver-safe.
+func (s *Server) lookupGRPCSchema(service, method string) *protoschema.MethodSpec {
+	if s == nil || s.grpcSchemas == nil {
+		return nil
+	}
+	return s.grpcSchemas.LookupMethod(service, method)
+}
+
 // computeDecodedBodyForMessage dispatches between the HTTP Content-Encoding
-// path (computeDecodedBodyWithLimit) and the gRPC schemaless-proto path
+// path (computeDecodedBodyWithLimit) and the gRPC proto path
 // (computeDecodedGRPCBodyWithLimit) based on per-flow metadata. The gRPC
 // branch fires for flows tagged grpc_event=data — i.e. native gRPC Data
 // envelopes AND gRPC-Web Data envelopes (RFC-001 §3.2.3: gRPC-Web emits
 // GRPCDataMessage via the same record_step path).
-func (s *Server) computeDecodedBodyForMessage(rawBody []byte, headers map[string][]string, metadata map[string]string, decodeEnabled, truncated bool, max int) (view decodedBodyView, originalSize int) {
+//
+// direction is the recorded Flow.Direction; it picks the input vs output
+// descriptor on the schema-aware gRPC path (USK-923). Empty for callers
+// that have not threaded the direction through.
+func (s *Server) computeDecodedBodyForMessage(rawBody []byte, headers map[string][]string, metadata map[string]string, direction string, decodeEnabled, truncated bool, max int) (view decodedBodyView, originalSize int) {
 	if isGRPCDataMessage(metadata) {
-		return s.computeDecodedGRPCBodyWithLimit(rawBody, decodeEnabled, max)
+		return s.computeDecodedGRPCBodyWithLimit(rawBody, metadata, direction, decodeEnabled, max)
 	}
 	return s.computeDecodedBodyWithLimit(rawBody, headers, decodeEnabled, truncated, max)
 }
@@ -1171,7 +1257,7 @@ func (s *Server) buildOriginalRequest(originalMsg *flow.Flow, decodeEnabled bool
 	origBodyStr, origBodyEnc := encodeBody(capped)
 	v.Body = origBodyStr
 	v.BodyEncoding = origBodyEnc
-	dec, _ := s.computeDecodedBodyForMessage(originalMsg.Body, originalMsg.Headers, originalMsg.Metadata, decodeEnabled, originalMsg.BodyTruncated, limit.bodyMaxBytes)
+	dec, _ := s.computeDecodedBodyForMessage(originalMsg.Body, originalMsg.Headers, originalMsg.Metadata, originalMsg.Direction, decodeEnabled, originalMsg.BodyTruncated, limit.bodyMaxBytes)
 	v.BodyDecoded = dec.Body
 	v.BodyDecodedEncoding = dec.BodyEncoding
 	v.BodyEncodingApplied = dec.Applied
@@ -1199,7 +1285,7 @@ func (s *Server) buildOriginalResponse(originalMsg *flow.Flow, decodeEnabled boo
 	origBodyStr, origBodyEnc := encodeBody(capped)
 	v.Body = origBodyStr
 	v.BodyEncoding = origBodyEnc
-	dec, _ := s.computeDecodedBodyForMessage(originalMsg.Body, originalMsg.Headers, originalMsg.Metadata, decodeEnabled, originalMsg.BodyTruncated, limit.bodyMaxBytes)
+	dec, _ := s.computeDecodedBodyForMessage(originalMsg.Body, originalMsg.Headers, originalMsg.Metadata, originalMsg.Direction, decodeEnabled, originalMsg.BodyTruncated, limit.bodyMaxBytes)
 	v.BodyDecoded = dec.Body
 	v.BodyDecodedEncoding = dec.BodyEncoding
 	v.BodyEncodingApplied = dec.Applied
@@ -1379,9 +1465,10 @@ func (s *Server) projectFlowSide(msg *flow.Flow, decodeEnabled bool, limit bodyL
 	// wire bytes — the SafetyFilter on compressed bytes is a no-op today, but
 	// if a future filter mutates them the decoder would fail. The dispatcher
 	// routes gRPC Data envelopes (msg.Metadata["grpc_event"]=="data") through
-	// the schemaless-proto path (USK-922) and everything else through the
-	// Content-Encoding path.
-	dec, decOrig := s.computeDecodedBodyForMessage(msg.Body, msg.Headers, msg.Metadata, decodeEnabled, msg.BodyTruncated, limit.bodyMaxBytes)
+	// the schemaless-proto path (USK-922) — or the schema-aware proto-json
+	// path (USK-923) when a matching schema is registered — and everything
+	// else through the Content-Encoding path.
+	dec, decOrig := s.computeDecodedBodyForMessage(msg.Body, msg.Headers, msg.Metadata, msg.Direction, decodeEnabled, msg.BodyTruncated, limit.bodyMaxBytes)
 	out.decoded = dec
 	if decOrig > 0 {
 		out.queryTruncated = true
@@ -1535,7 +1622,7 @@ func (s *Server) convertMessagesToEntries(msgs []*flow.Flow, decodeEnabled bool,
 			// route through computeDecodedBodyForMessage to surface the proto
 			// wire bytes as schemaless JSON (USK-922).
 			if !usedRawBytes {
-				dec, decOriginal := s.computeDecodedBodyForMessage(msg.Body, msg.Headers, msg.Metadata, decodeEnabled, msg.BodyTruncated, limit.bodyMaxBytes)
+				dec, decOriginal := s.computeDecodedBodyForMessage(msg.Body, msg.Headers, msg.Metadata, msg.Direction, decodeEnabled, msg.BodyTruncated, limit.bodyMaxBytes)
 				entry.BodyDecoded = dec.Body
 				entry.BodyDecodedEncoding = dec.BodyEncoding
 				entry.BodyEncodingApplied = dec.Applied

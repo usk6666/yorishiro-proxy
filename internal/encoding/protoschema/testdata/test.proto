@@ -1,0 +1,44 @@
+// Test proto for internal/encoding/protoschema unit tests.
+//
+// Compiled to test.desc with:
+//   protoc --include_imports --descriptor_set_out=test.desc test.proto
+//
+// The .desc binary is checked in; we do NOT require protoc at test runtime.
+// If this .proto needs to change, regenerate test.desc with the command above
+// and commit both files together.
+syntax = "proto3";
+
+package usk.test;
+
+service Greeter {
+  rpc SayHello(HelloRequest) returns (HelloResponse);
+  rpc Echo(EchoMessage) returns (EchoMessage);
+}
+
+service Reflective {
+  rpc Lookup(LookupRequest) returns (LookupResponse);
+}
+
+message HelloRequest {
+  string f_string = 1;
+  int32 f_int32 = 2;
+  repeated string f_repeated = 3;
+}
+
+message HelloResponse {
+  string f_greeting = 1;
+  bool f_ok = 2;
+}
+
+message EchoMessage {
+  string body = 1;
+  int64 timestamp = 2;
+}
+
+message LookupRequest {
+  string key = 1;
+}
+
+message LookupResponse {
+  string value = 1;
+}

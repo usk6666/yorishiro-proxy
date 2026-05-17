@@ -34,6 +34,7 @@ var positionalArgMapping = map[string][]string{
 	"fuzz_grpc":         {},
 	"fuzz_raw":          {},
 	"plugin_introspect": {},
+	"grpc_schema":       {"action"},
 }
 
 // toolSchema holds the parsed properties from a tool's JSON Schema InputSchema.

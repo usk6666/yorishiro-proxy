@@ -77,7 +77,8 @@ func TestPopulateResendGRPCMessages_ProtoSchemalessJSON_Roundtrip(t *testing.T) 
 		},
 	}
 	plan := &resendGRPCPlan{}
-	if err := populateResendGRPCMessages(input, plan); err != nil {
+	srv := &Server{}
+	if err := srv.populateResendGRPCMessages(input, plan); err != nil {
 		t.Fatalf("populateResendGRPCMessages: %v", err)
 	}
 	if len(plan.messages) != 1 {
@@ -100,7 +101,8 @@ func TestPopulateResendGRPCMessages_ProtoSchemalessJSON_InvalidJSON(t *testing.T
 		},
 	}
 	plan := &resendGRPCPlan{}
-	err := populateResendGRPCMessages(input, plan)
+	srv := &Server{}
+	err := srv.populateResendGRPCMessages(input, plan)
 	if err == nil {
 		t.Fatal("expected error for invalid JSON, got nil")
 	}
@@ -134,7 +136,8 @@ func TestPopulateResendGRPCMessages_ProtoSchemalessJSON_SizeCapEnforced(t *testi
 		},
 	}
 	plan := &resendGRPCPlan{}
-	err := populateResendGRPCMessages(input, plan)
+	srv := &Server{}
+	err := srv.populateResendGRPCMessages(input, plan)
 	if err == nil {
 		t.Fatal("expected payload-too-large error, got nil")
 	}
@@ -158,7 +161,8 @@ func TestPopulateResendGRPCMessages_ProtoSchemalessJSON_RequiresEncodingForCompr
 		},
 	}
 	plan := &resendGRPCPlan{}
-	err := populateResendGRPCMessages(input, plan)
+	srv := &Server{}
+	err := srv.populateResendGRPCMessages(input, plan)
 	if err == nil {
 		t.Fatal("expected error for compressed=true without encoding, got nil")
 	}
@@ -177,7 +181,8 @@ func TestPopulateResendGRPCMessages_TextEncoding_StillWorks(t *testing.T) {
 		},
 	}
 	plan := &resendGRPCPlan{}
-	if err := populateResendGRPCMessages(input, plan); err != nil {
+	srv := &Server{}
+	if err := srv.populateResendGRPCMessages(input, plan); err != nil {
 		t.Fatalf("populateResendGRPCMessages: %v", err)
 	}
 	if string(plan.messages[0].payload) != "hello" {

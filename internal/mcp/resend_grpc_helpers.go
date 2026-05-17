@@ -27,6 +27,7 @@ import (
 
 	httputilpkg "github.com/usk6666/yorishiro-proxy/internal/connector/transport"
 	"github.com/usk6666/yorishiro-proxy/internal/encoding/protobuf"
+	"github.com/usk6666/yorishiro-proxy/internal/encoding/protoschema"
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/layer"
@@ -115,19 +116,20 @@ func validateResendGRPCMetadataAndEncoding(input *resendGRPCInput) error {
 
 // validateResendGRPCMessagesShape rejects an empty messages list and any
 // message with an unsupported body_encoding. The "proto-schemaless-json"
-// value (USK-922) is accepted in addition to "text" and "base64"; the
-// payload is then re-encoded to proto wire bytes via
-// internal/encoding/protobuf in populateResendGRPCMessages.
+// value (USK-922) and "proto-json" (USK-923) are accepted in addition to
+// "text" and "base64"; the payload is then re-encoded to proto wire bytes
+// via internal/encoding/protobuf or internal/encoding/protoschema in
+// populateResendGRPCMessages.
 func validateResendGRPCMessagesShape(input *resendGRPCInput) error {
 	if len(input.Messages) == 0 {
 		return errors.New("messages must contain at least one element (a gRPC RPC requires at least one DATA frame)")
 	}
 	for i, m := range input.Messages {
 		switch m.BodyEncoding {
-		case "", "text", "base64", "proto-schemaless-json":
+		case "", "text", "base64", "proto-schemaless-json", "proto-json":
 			// supported
 		default:
-			return fmt.Errorf("messages[%d]: unsupported body_encoding %q: must be text, base64, or proto-schemaless-json", i, m.BodyEncoding)
+			return fmt.Errorf("messages[%d]: unsupported body_encoding %q: must be text, base64, proto-schemaless-json, or proto-json", i, m.BodyEncoding)
 		}
 	}
 	return nil
@@ -256,7 +258,7 @@ func (s *Server) buildResendGRPCPlan(ctx context.Context, input *resendGRPCInput
 		plan.acceptEncoding = recoveredAccept
 	}
 
-	if err := populateResendGRPCMessages(input, plan); err != nil {
+	if err := s.populateResendGRPCMessages(input, plan); err != nil {
 		return nil, err
 	}
 	if len(input.TrailerMetadata) > 0 {
@@ -470,10 +472,20 @@ func resendGRPCCanonicalURL(scheme, authority, service, method string) *url.URL 
 // the gRPC Layer will LPM-frame. The size cap is enforced AFTER encoding so
 // a small JSON input that expands to a huge proto payload still trips the
 // cap (JSON-amplification guard).
-func populateResendGRPCMessages(input *resendGRPCInput, plan *resendGRPCPlan) error {
+//
+// USK-923: body_encoding="proto-json" routes the payload through
+// protoschema.Encode using the registered schema for plan.service /
+// plan.method. The schema lookup is hard-errored when no entry is
+// registered (the AI agent must call grpc_schema register first).
+func (s *Server) populateResendGRPCMessages(input *resendGRPCInput, plan *resendGRPCPlan) error {
+	// Look up the input MessageDescriptor up-front so proto-json messages
+	// resolve against the same descriptor for every entry in the array.
+	// nil-receiver-safe when no proto-json entry is present.
+	var inputDesc = s.resolveResendGRPCInputDesc(plan, input)
+
 	plan.messages = make([]resendGRPCDataPlan, 0, len(input.Messages))
 	for i, m := range input.Messages {
-		decoded, err := decodeResendGRPCPayload(m.Payload, m.BodyEncoding, i)
+		decoded, err := s.decodeResendGRPCPayload(m.Payload, m.BodyEncoding, i, plan, inputDesc)
 		if err != nil {
 			return err
 		}
@@ -491,16 +503,48 @@ func populateResendGRPCMessages(input *resendGRPCInput, plan *resendGRPCPlan) er
 	return nil
 }
 
+// resolveResendGRPCInputDesc returns the input MessageDescriptor for
+// the resend's (plan.service, plan.method). Returns nil when no
+// proto-json message is in the input (so we don't fail an unrelated
+// resend just because no schema is registered).
+func (s *Server) resolveResendGRPCInputDesc(plan *resendGRPCPlan, input *resendGRPCInput) *protoschema.MethodSpec {
+	wantSchema := false
+	for _, m := range input.Messages {
+		if m.BodyEncoding == "proto-json" {
+			wantSchema = true
+			break
+		}
+	}
+	if !wantSchema {
+		return nil
+	}
+	if s == nil {
+		return nil
+	}
+	return s.lookupGRPCSchema(plan.service, plan.method)
+}
+
 // decodeResendGRPCPayload converts the per-message payload string to the
 // raw proto bytes the gRPC Layer will LPM-frame. body_encoding "text" and
-// "base64" pass through decodeBodyEncoded; "proto-schemaless-json" re-encodes
-// via internal/encoding/protobuf.Encode so AI agents can mutate proto bodies
-// without hand-computing wire bytes (USK-922).
-func decodeResendGRPCPayload(payload, bodyEncoding string, index int) ([]byte, error) {
-	if bodyEncoding == "proto-schemaless-json" {
+// "base64" pass through decodeBodyEncoded; "proto-schemaless-json"
+// re-encodes via internal/encoding/protobuf.Encode (USK-922);
+// "proto-json" re-encodes via protoschema.Encode using the registered
+// schema for plan.service / plan.method (USK-923).
+func (s *Server) decodeResendGRPCPayload(payload, bodyEncoding string, index int, plan *resendGRPCPlan, spec *protoschema.MethodSpec) ([]byte, error) {
+	switch bodyEncoding {
+	case "proto-schemaless-json":
 		encoded, err := protobuf.Encode(payload)
 		if err != nil {
 			return nil, fmt.Errorf("messages[%d]: invalid proto-schemaless-json: %w", index, err)
+		}
+		return encoded, nil
+	case "proto-json":
+		if spec == nil || spec.InputDesc == nil {
+			return nil, fmt.Errorf("messages[%d]: body_encoding=proto-json requires a registered schema for service=%q method=%q (register one via the grpc_schema tool)", index, plan.service, plan.method)
+		}
+		encoded, err := protoschema.Encode(payload, spec.InputDesc)
+		if err != nil {
+			return nil, fmt.Errorf("messages[%d]: invalid proto-json: %w", index, err)
 		}
 		return encoded, nil
 	}
@@ -914,6 +958,71 @@ func (s *Server) formatResendGRPCResult(streamID string, startMeta []envelope.Ke
 		}
 	}
 	return result
+}
+
+// collectResendGRPCUnknownFieldWarnings returns the non-fatal warning
+// list when a proto-json body_encoding message in the resend input would
+// drop bytes during round-trip. Inspects the source flow's send-direction
+// data envelopes against the registered schema; non-empty UnknownFields()
+// produces one warning per data flow that has unknowns.
+//
+// Returns nil when the resend is from-scratch (no FlowID supplied), when
+// no proto-json message is present, or when no schema is registered.
+func (s *Server) collectResendGRPCUnknownFieldWarnings(ctx context.Context, input *resendGRPCInput, plan *resendGRPCPlan) []string {
+	if !resendGRPCWantsProtoJSON(input) {
+		return nil
+	}
+	if s == nil || s.flowStore.store == nil {
+		return nil
+	}
+	spec := s.lookupGRPCSchema(plan.service, plan.method)
+	if spec == nil || spec.InputDesc == nil {
+		return nil
+	}
+	sendFlows, err := s.flowStore.store.GetFlows(ctx, input.FlowID, flow.FlowListOptions{Direction: "send"})
+	if err != nil || len(sendFlows) == 0 {
+		return nil
+	}
+	return buildUnknownFieldWarnings(sendFlows, spec)
+}
+
+// resendGRPCWantsProtoJSON reports whether the resend input requires a
+// schema lookup. True when FlowID is non-empty AND at least one message
+// uses body_encoding="proto-json". From-scratch resends and pure
+// schemaless / base64 / text bodies skip the unknown-field probe.
+func resendGRPCWantsProtoJSON(input *resendGRPCInput) bool {
+	if input.FlowID == "" {
+		return false
+	}
+	for _, m := range input.Messages {
+		if m.BodyEncoding == "proto-json" {
+			return true
+		}
+	}
+	return false
+}
+
+// buildUnknownFieldWarnings inspects each data-direction flow in
+// sendFlows for fields outside the registered schema and returns one
+// human-readable warning per offending flow.
+func buildUnknownFieldWarnings(sendFlows []*flow.Flow, spec *protoschema.MethodSpec) []string {
+	var warnings []string
+	for i, fl := range sendFlows {
+		if fl == nil || len(fl.Body) == 0 {
+			continue
+		}
+		// Only inspect data envelopes — Start (headers-only) carries no
+		// proto body. record_step.go stamps grpc_event=data.
+		if fl.Metadata == nil || fl.Metadata["grpc_event"] != "data" {
+			continue
+		}
+		if protoschema.HasUnknownFields(fl.Body, spec.InputDesc) {
+			warnings = append(warnings,
+				fmt.Sprintf("source flow message %d carries fields not in the registered schema; proto-json round-trip will drop those bytes — consider body_encoding=base64 or proto-schemaless-json for lossless preservation",
+					i))
+		}
+	}
+	return warnings
 }
 
 // keyValuesToHeaderKVs projects an ordered envelope.KeyValue slice onto

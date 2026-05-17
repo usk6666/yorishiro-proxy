@@ -1,0 +1,49 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "grpc_schema input",
+  "description": "Input schema for the grpc_schema tool.",
+  "type": "object",
+  "required": ["action"],
+  "properties": {
+    "action": {
+      "type": "string",
+      "description": "The action to execute.",
+      "enum": ["register", "list", "unregister", "clear"]
+    },
+    "params": {
+      "type": "object",
+      "description": "Action-specific parameters.",
+      "properties": {
+        "source": {
+          "type": "string",
+          "description": "Input shape. Only 'descriptor_set' is currently supported; 'file' is rejected with a pointer to protoc --include_imports.",
+          "enum": ["descriptor_set", ""]
+        },
+        "descriptor_set_b64": {
+          "type": "string",
+          "description": "Base64-encoded FileDescriptorSet payload (max 16 MiB after base64 decode). Generate via `protoc --include_imports --descriptor_set_out=<file> <protos>`."
+        },
+        "service_filter": {
+          "type": "array",
+          "description": "Optional fully-qualified service names to register. Empty means register every service.",
+          "items": { "type": "string" }
+        },
+        "source_label": {
+          "type": "string",
+          "description": "Free-form label preserved in list output (filename hint, version tag, etc.)."
+        },
+        "service": {
+          "type": "string",
+          "description": "Fully-qualified service name (required for unregister)."
+        },
+        "proto_paths": {
+          "type": "array",
+          "description": "Reserved for a future Issue (source='file' deferred); the field is rejected when populated.",
+          "items": { "type": "string" }
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}
