@@ -176,7 +176,7 @@ func runTCPForwardH2Loop(
 		return
 	}
 
-	sessOpts := tcpForwardH2SessionOpts(parentStack, ctx)
+	sessOpts := tcpForwardH2SessionOpts(parentStack, ctx, logger)
 	grpcOpts := connector.GRPCOptionsFromBuildConfig(parentStack.BuildConfig)
 	grpcwebOpts := connector.GRPCWebOptionsFromBuildConfig(parentStack.BuildConfig)
 	clientLOpts := httpaggregator.OptionsFromLayer(clientL)
@@ -237,7 +237,7 @@ func dispatchForwardH2Stream(
 	//   - re-feeds gRPC envelopes via a small replay wrapper
 	dispatchCh := ch
 	if isGRPCFilter {
-		filtered, ok := applyGRPCFilter(ctx, ch, parentStack, target, streamFlowCtx, logger)
+		filtered, ok := applyGRPCFilter(ctx, ch, parentStack, target, stack.ConnID, logger)
 		if !ok {
 			return
 		}
@@ -303,14 +303,18 @@ func dispatchForwardH2Stream(
 //   - first envelope is not an H2HeadersEvent (malformed stream)
 //   - content-type is missing
 //   - content-type matches grpc-web (rejected — Protocol="grpc" is a
-//     crisper semantic; gRPC-Web routes via Protocol="http2")
-//   - content-type is not native gRPC (application/grpc[+suffix])
+//     crisper semantic; gRPC-Web routes via Protocol="http2"). The
+//     audit Stream stamps Protocol="grpc-web" so MCP queries by Protocol
+//     can find the rejection without the tag scan.
+//   - content-type is not native gRPC (application/grpc[+suffix]). Audit
+//     Stream stamps Protocol="grpc" (the configured forward protocol —
+//     the actual content-type may not map to any known Protocol).
 func applyGRPCFilter(
 	ctx context.Context,
 	ch layer.Channel,
 	parentStack *Stack,
 	target string,
-	streamFlowCtx envelope.EnvelopeContext,
+	connID string,
 	logger *slog.Logger,
 ) (layer.Channel, bool) {
 	firstEnv, err := ch.Next(ctx)
@@ -324,7 +328,7 @@ func applyGRPCFilter(
 	if !ok {
 		logger.Debug("tcp forward grpc filter: first envelope is not H2HeadersEvent",
 			"target", target, "stream_id", ch.StreamID(), "type", fmt.Sprintf("%T", firstEnv.Message))
-		recordGRPCFilterReject(ctx, parentStack, ch.StreamID(), streamFlowCtx, "non_grpc_under_grpc_filter")
+		recordGRPCFilterReject(ctx, parentStack, ch.StreamID(), connID, "grpc", "non_grpc_under_grpc_filter")
 		rejectGRPCStream(ch)
 		return nil, false
 	}
@@ -332,14 +336,18 @@ func applyGRPCFilter(
 	if grpcweb.IsGRPCWebContentType(ct) {
 		logger.Debug("tcp forward grpc filter: rejected grpc-web under Protocol=grpc",
 			"target", target, "stream_id", ch.StreamID(), "content_type", ct)
-		recordGRPCFilterReject(ctx, parentStack, ch.StreamID(), streamFlowCtx, "non_grpc_under_grpc_filter")
+		// USK-914 review F-2: record the observed wire protocol on the
+		// audit Stream so Protocol-filtered MCP queries surface the
+		// distinction. The forward_protocol_mismatch tag stays identical
+		// so the meta-class is one queryable label.
+		recordGRPCFilterReject(ctx, parentStack, ch.StreamID(), connID, "grpc-web", "non_grpc_under_grpc_filter")
 		rejectGRPCStream(ch)
 		return nil, false
 	}
 	if !connector.IsGRPCContentType(ct) {
 		logger.Debug("tcp forward grpc filter: rejected non-gRPC content-type",
 			"target", target, "stream_id", ch.StreamID(), "content_type", ct)
-		recordGRPCFilterReject(ctx, parentStack, ch.StreamID(), streamFlowCtx, "non_grpc_under_grpc_filter")
+		recordGRPCFilterReject(ctx, parentStack, ch.StreamID(), connID, "grpc", "non_grpc_under_grpc_filter")
 		rejectGRPCStream(ch)
 		return nil, false
 	}
@@ -364,21 +372,28 @@ func rejectGRPCStream(ch layer.Channel) {
 // recordGRPCFilterReject records a state="error" Stream for a stream
 // rejected by the gRPC content-type filter. The Stream is tagged with
 // forward_protocol_mismatch so MCP queries can surface the rejection
-// without grovelling through Flow rows.
+// without grovelling through Flow rows. observedProtocol distinguishes
+// the wire-observed Protocol family (e.g. "grpc-web" when the client
+// sent grpc-web under a Protocol="grpc" forward; "grpc" when the
+// content-type matched none of the gRPC families).
 func recordGRPCFilterReject(
 	ctx context.Context,
 	parentStack *Stack,
 	streamID string,
-	streamFlowCtx envelope.EnvelopeContext,
+	connID string,
+	observedProtocol string,
 	mismatchKind string,
 ) {
 	if parentStack == nil || parentStack.FlowStore == nil || streamID == "" {
 		return
 	}
+	if observedProtocol == "" {
+		observedProtocol = "grpc"
+	}
 	st := &flow.Stream{
 		ID:       streamID,
-		ConnID:   streamFlowCtx.ConnID,
-		Protocol: "grpc",
+		ConnID:   connID,
+		Protocol: observedProtocol,
 		State:    "error",
 	}
 	_ = parentStack.FlowStore.SaveStream(ctx, st)
@@ -399,7 +414,15 @@ func recordGRPCFilterReject(
 // OnComplete behaviour mirrors the raw sibling — listener-shutdown
 // (ctx-cancel) classifies state="complete" so a forward listener stop
 // mid-stream does not flag every active stream as state="error".
-func tcpForwardH2SessionOpts(parent *Stack, connCtx context.Context) session.SessionOptions {
+//
+// OnPipelineDrop wiring mirrors the raw sibling (USK-782): the parent
+// Stack's PipelineH2 includes scope / safety / intercept Steps that may
+// emit a BlockedBy attribution against forwarded h2 traffic. Without
+// this hook, blocked envelopes would never produce an audit Stream and
+// MCP queries could not surface the rejection. The `blocked` set is
+// shared between OnPipelineDrop and OnComplete so the latter does not
+// overwrite a `State="error"+BlockedBy=*` audit row with `State="complete"`.
+func tcpForwardH2SessionOpts(parent *Stack, connCtx context.Context, logger *slog.Logger) session.SessionOptions {
 	opts := session.SessionOptions{}
 	if parent == nil {
 		return opts
@@ -411,8 +434,18 @@ func tcpForwardH2SessionOpts(parent *Stack, connCtx context.Context) session.Ses
 	}
 	if parent.FlowStore != nil {
 		store := parent.FlowStore
+		blocked := newBlockedStreamSet()
 		opts.OnComplete = func(ctx context.Context, streamID string, err error) {
 			if streamID == "" {
+				return
+			}
+			if blocked.contains(streamID) {
+				// USK-782: skip terminal-state finalisation for streams
+				// already finalised by the audit recorder. Without this
+				// the normal-EOF state="complete" overwrite would clobber
+				// the BlockedBy attribution. Evict for consistency with
+				// the raw sibling and the live-path recorder.
+				blocked.remove(streamID)
 				return
 			}
 			state := "complete"
@@ -428,6 +461,13 @@ func tcpForwardH2SessionOpts(parent *Stack, connCtx context.Context) session.Ses
 				FailureReason: session.ClassifyError(err),
 			})
 		}
+		// USK-782 parity: persist Pipeline-Drop audit Streams for the h2
+		// forward session as well. The empty listenerName falls through
+		// to DefaultListenerName inside buildPipelineDropRecorder —
+		// forward listeners do not own a top-level listenerName the way
+		// the live-path Deps do, so DefaultListenerName matches the raw
+		// forward sibling's behaviour.
+		opts.OnPipelineDrop = buildPipelineDropRecorder(store, "", logger, blocked)
 	}
 	return opts
 }
