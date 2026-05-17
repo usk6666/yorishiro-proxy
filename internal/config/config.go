@@ -430,6 +430,10 @@ type ForwardConfig struct {
 }
 
 // validForwardProtocols is the set of valid protocol values for ForwardConfig.
+// USK-913 adds "sse" — the proxybuild.handleTCPForwardConn dispatch path
+// accepts "sse" as the operator-declared expectation that the upstream returns
+// a streaming text/event-stream response, mirroring "websocket" as the
+// declared expectation that the request initiates an RFC 6455 Upgrade.
 var validForwardProtocols = map[string]bool{
 	"":          true, // empty means "auto"
 	"auto":      true,
@@ -438,6 +442,7 @@ var validForwardProtocols = map[string]bool{
 	"http2":     true,
 	"grpc":      true,
 	"websocket": true,
+	"sse":       true,
 }
 
 // ValidateForwardConfig validates a ForwardConfig for a given port key.
@@ -451,7 +456,7 @@ func ValidateForwardConfig(port string, fc *ForwardConfig) error {
 		return fmt.Errorf("forward config for port %q: target cannot be empty", port)
 	}
 	if !validForwardProtocols[fc.Protocol] {
-		return fmt.Errorf("forward config for port %q: invalid protocol %q (valid: auto, raw, http, http2, grpc, websocket)", port, fc.Protocol)
+		return fmt.Errorf("forward config for port %q: invalid protocol %q (valid: auto, raw, http, http2, grpc, websocket, sse)", port, fc.Protocol)
 	}
 	// Note: tls=true with protocol=raw is valid but unusual (TLS termination
 	// without L7 parsing). The caller is responsible for logging a warning.

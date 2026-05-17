@@ -10,6 +10,7 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/cert"
 	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/bytechunk"
+	"github.com/usk6666/yorishiro-proxy/internal/layer/http1"
 )
 
 // newTestBuildConfig constructs a minimal *BuildConfig for the target-override
@@ -75,13 +76,13 @@ func TestBuildConnectionStackWithTarget_RawSuccess(t *testing.T) {
 	}
 }
 
-// TestBuildConnectionStackWithTarget_RawEmptyProtocol verifies that an
-// empty Protocol string is NOT treated as ForwardProtocolRaw at this point
-// — empty collapses to auto, which is the deferred branch. This is a
-// guardrail: forward callers that forget to populate the field should not
-// silently get a bytechunk stack; they should see the explicit
-// "auto not yet wired" error.
-func TestBuildConnectionStackWithTarget_EmptyProtocolDeferred(t *testing.T) {
+// TestBuildConnectionStackWithTarget_EmptyProtocolRoutesViaAuto verifies that
+// an empty Protocol string collapses to Auto and then falls through to the
+// Raw branch when the peek does not see HTTP/1.x bytes. USK-913 wired the
+// Auto arm; prior to that this case rejected with a "not yet wired" error.
+// The peek has a bounded deadline so a net.Pipe peer that never sends bytes
+// resolves to InnerUnknown → Raw fallback within the test timeout.
+func TestBuildConnectionStackWithTarget_EmptyProtocolRoutesViaAuto(t *testing.T) {
 	_, clientPeer := pipePair(t)
 	_, upstreamPeer := pipePair(t)
 
@@ -91,35 +92,32 @@ func TestBuildConnectionStackWithTarget_EmptyProtocolDeferred(t *testing.T) {
 		// Protocol unset — exercises the empty → auto collapse.
 	}
 
-	_, err := BuildConnectionStackWithTarget(context.Background(), clientPeer, upstreamPeer, params, cfg)
-	if err == nil {
-		t.Fatal("expected non-nil error for empty Protocol (deferred to auto), got nil")
+	stack, err := BuildConnectionStackWithTarget(context.Background(), clientPeer, upstreamPeer, params, cfg)
+	if err != nil {
+		t.Fatalf("BuildConnectionStackWithTarget(empty/auto): %v", err)
 	}
-	if !strings.Contains(err.Error(), "USK-913") {
-		t.Errorf("expected error to cite USK-913, got %q", err.Error())
+	t.Cleanup(func() { _ = stack.Close() })
+
+	// Auto with no bytes peeked falls through to Raw — both topmosts are
+	// bytechunk Layers.
+	if _, ok := stack.ClientTopmost().(*bytechunk.Layer); !ok {
+		t.Errorf("client topmost = %T, want *bytechunk.Layer (Auto fallback to Raw)", stack.ClientTopmost())
 	}
 }
 
-// TestBuildConnectionStackWithTarget_DeferredProtocols enumerates every
-// non-raw protocol selector and confirms each returns a "not yet wired"
-// error mentioning the responsible follow-up Issue. This is the
-// signature-locking test: downstream Issues (USK-913+) will replace each
-// case body with the real implementation, but the validation +
-// dispatch surface is already in place today.
+// TestBuildConnectionStackWithTarget_DeferredProtocols was the
+// USK-912-era enumeration of "not yet wired" protocol arms. After
+// USK-913 (http/ws/sse/auto) and USK-914 (http2/grpc) landed the
+// entire BuildConnectionStackWithTarget protocol switch is wired, so
+// this table is intentionally empty. Kept as a structural placeholder
+// so future deferrals (e.g., a new ForwardProtocol value introduced
+// without a wired arm) re-use the same fixture pattern.
 func TestBuildConnectionStackWithTarget_DeferredProtocols(t *testing.T) {
 	cases := []struct {
 		name      string
 		protocol  ForwardProtocol
 		wantIssue string
-	}{
-		{name: "auto", protocol: ForwardProtocolAuto, wantIssue: "USK-913"},
-		{name: "http", protocol: ForwardProtocolHTTP, wantIssue: "USK-913"},
-		// http2 and grpc are wired by USK-914 (this Issue) — see
-		// TestBuildConnectionStackWithTarget_H2CSuccess /
-		// TestBuildConnectionStackWithTarget_GRPCSuccess below.
-		{name: "websocket", protocol: ForwardProtocolWebSocket, wantIssue: "USK-913"},
-		{name: "sse", protocol: ForwardProtocolSSE, wantIssue: "USK-913"},
-	}
+	}{}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			_, clientPeer := pipePair(t)
@@ -135,6 +133,48 @@ func TestBuildConnectionStackWithTarget_DeferredProtocols(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), tc.wantIssue) {
 				t.Errorf("protocol %q: error %q does not cite %q", tc.protocol, err.Error(), tc.wantIssue)
+			}
+		})
+	}
+}
+
+// TestBuildConnectionStackWithTarget_HTTPSuccess verifies that
+// ForwardProtocolHTTP / ForwardProtocolWebSocket / ForwardProtocolSSE all
+// assemble [http1 → http1] with scheme="http". USK-913 wired these arms.
+// The three protocols share an identical stack — the expectation filter
+// (WS upgrade required / SSE Content-Type required) lives at the
+// proxybuild handler layer rather than inside the connector builder.
+func TestBuildConnectionStackWithTarget_HTTPSuccess(t *testing.T) {
+	cases := []struct {
+		name     string
+		protocol ForwardProtocol
+	}{
+		{name: "http", protocol: ForwardProtocolHTTP},
+		{name: "websocket", protocol: ForwardProtocolWebSocket},
+		{name: "sse", protocol: ForwardProtocolSSE},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, clientPeer := pipePair(t)
+			_, upstreamPeer := pipePair(t)
+			cfg := newTestBuildConfig(t)
+			params := TargetOverrideParams{
+				Target:   "api.example.com:80",
+				Protocol: tc.protocol,
+			}
+			stack, err := BuildConnectionStackWithTarget(context.Background(), clientPeer, upstreamPeer, params, cfg)
+			if err != nil {
+				t.Fatalf("protocol %q: %v", tc.protocol, err)
+			}
+			t.Cleanup(func() { _ = stack.Close() })
+			if _, ok := stack.ClientTopmost().(*http1.Layer); !ok {
+				t.Errorf("protocol %q: client topmost = %T, want *http1.Layer", tc.protocol, stack.ClientTopmost())
+			}
+			if _, ok := stack.UpstreamTopmost().(*http1.Layer); !ok {
+				t.Errorf("protocol %q: upstream topmost = %T, want *http1.Layer", tc.protocol, stack.UpstreamTopmost())
+			}
+			if stack.ConnID == "" {
+				t.Error("stack.ConnID is empty")
 			}
 		})
 	}
@@ -214,6 +254,64 @@ func TestBuildConnectionStackWithTarget_H2CDispatch(t *testing.T) {
 				t.Errorf("protocol %q: dispatch returned 'not yet wired' (%q); h2c branch was not reached", tc.protocol, err.Error())
 			}
 		})
+	}
+}
+
+// TestBuildConnectionStackWithTarget_AutoH2CRejected verifies that the
+// Auto arm refuses to opportunistically negotiate h2c — operators must
+// declare Protocol="http2" explicitly. After USK-914 wired the h2c arm
+// the rejection is no longer a "deferred to USK-914" message; Auto stays
+// strict on purpose so that an h2c forward only happens when the
+// operator declared the intent. We force the H2C preface bytes onto the
+// wire so peekInnerProtocol classifies as InnerH2C; the build call then
+// returns the explicit-declaration-required error.
+func TestBuildConnectionStackWithTarget_AutoH2CRejected(t *testing.T) {
+	clientLocal, clientPeer := pipePair(t)
+	_, upstreamPeer := pipePair(t)
+
+	// Push the H2C preface so peekInnerProtocol classifies as InnerH2C.
+	go func() {
+		_, _ = clientLocal.Write([]byte("PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"))
+	}()
+
+	cfg := newTestBuildConfig(t)
+	params := TargetOverrideParams{
+		Target:   "api.example.com:80",
+		Protocol: ForwardProtocolAuto,
+	}
+	_, err := BuildConnectionStackWithTarget(context.Background(), clientPeer, upstreamPeer, params, cfg)
+	if err == nil {
+		t.Fatal("expected non-nil error for Auto + h2c preface, got nil")
+	}
+	if !strings.Contains(err.Error(), "explicit Protocol") {
+		t.Errorf("expected error to cite explicit-Protocol requirement, got %q", err.Error())
+	}
+}
+
+// TestBuildConnectionStackWithTarget_AutoHTTPResolvesToHTTP verifies the
+// happy path of Auto: when the first bytes look like an HTTP/1.x request
+// line, the assembled stack is [http1 → http1].
+func TestBuildConnectionStackWithTarget_AutoHTTPResolvesToHTTP(t *testing.T) {
+	clientLocal, clientPeer := pipePair(t)
+	_, upstreamPeer := pipePair(t)
+
+	go func() {
+		_, _ = clientLocal.Write([]byte("GET / HTTP/1.1\r\nHost: api.example.com\r\n\r\n"))
+	}()
+
+	cfg := newTestBuildConfig(t)
+	params := TargetOverrideParams{
+		Target:   "api.example.com:80",
+		Protocol: ForwardProtocolAuto,
+	}
+	stack, err := BuildConnectionStackWithTarget(context.Background(), clientPeer, upstreamPeer, params, cfg)
+	if err != nil {
+		t.Fatalf("BuildConnectionStackWithTarget(auto+http): %v", err)
+	}
+	t.Cleanup(func() { _ = stack.Close() })
+
+	if _, ok := stack.ClientTopmost().(*http1.Layer); !ok {
+		t.Errorf("client topmost = %T, want *http1.Layer (Auto → HTTP)", stack.ClientTopmost())
 	}
 }
 

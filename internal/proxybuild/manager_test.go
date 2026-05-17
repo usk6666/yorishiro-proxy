@@ -737,9 +737,13 @@ func TestManager_StartTCPForwardsNamed_BindError(t *testing.T) {
 }
 
 // TestManager_StartTCPForwardsNamed_RejectsUnsupportedProtocol verifies the
-// USK-711 scope guard: L7 protocol modes are rejected at start time so
-// callers see a clear "deferred to follow-up" failure rather than silent
-// partial behaviour.
+// start-time validation guard for unknown protocol selectors. After
+// USK-913 (http/ws/sse/auto) and USK-914 (http2/grpc) both landed, every
+// previously-deferred L7 mode is now wired — the only protocol values
+// the listener still rejects at start are values outside the
+// {raw,auto,http,websocket,sse,http2,grpc} set. Kept under the same
+// test name so future deferrals (new ForwardConfig.Protocol selectors)
+// can re-use the fixture by adding a case.
 func TestManager_StartTCPForwardsNamed_RejectsUnsupportedProtocol(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -750,16 +754,19 @@ func TestManager_StartTCPForwardsNamed_RejectsUnsupportedProtocol(t *testing.T) 
 	}
 	defer mgr.StopAll(context.Background())
 
-	err := mgr.StartTCPForwards(ctx, TCPForwardParams{
-		Forwards: map[string]*config.ForwardConfig{
-			"0": {Target: "127.0.0.1:1", Protocol: "http"},
-		},
-	})
-	if err == nil {
-		t.Fatal("expected error for protocol=http, got nil")
-	}
-	if !strings.Contains(err.Error(), "not yet supported") {
-		t.Errorf("error %q should mention 'not yet supported'", err.Error())
+	for _, protocol := range []string{"ftp", "tls-only", "unknown"} {
+		err := mgr.StartTCPForwards(ctx, TCPForwardParams{
+			Forwards: map[string]*config.ForwardConfig{
+				"0": {Target: "127.0.0.1:1", Protocol: protocol},
+			},
+		})
+		if err == nil {
+			t.Errorf("expected error for protocol=%s, got nil", protocol)
+			continue
+		}
+		if !strings.Contains(err.Error(), "not a valid forward protocol") {
+			t.Errorf("protocol=%s: error %q should mention 'not a valid forward protocol'", protocol, err.Error())
+		}
 	}
 }
 
