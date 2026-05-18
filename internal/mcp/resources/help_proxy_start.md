@@ -140,7 +140,12 @@ Use `capture_scope` to suppress noise from third-party CDNs / analytics / fonts 
 
 Each rule is AND-evaluated across `hostname` / `url_prefix` / `method`; at least one field per rule must be non-empty. `excludes` are evaluated before `includes`. Empty `includes` means "all flows are eligible". `*.example.com` wildcard matches subdomains but NOT the apex `example.com`.
 
-Non-HTTP envelopes (WebSocket frames, gRPC frames, SSE events, raw TCP) carry no method/path; rules that require either field never match those envelopes. To capture an entire WebSocket / gRPC stream by hostname, set the rule on the upgrade / first-Send envelope (HTTP) — the recording decision is cached per-stream and applied to subsequent frames.
+Per-protocol matching of `url_prefix` / `method`:
+
+- **HTTP/1.x and HTTP/2 envelopes** — method and path are matched directly against the request line / `:path`.
+- **gRPC envelopes** — the request-side `GRPCStart` envelope carries the HTTP/2 `:path` value (`/Service/Method`) and an implicit `:method = POST`, so `url_prefix` and `method` rules match against gRPC streams. Example: `{"url_prefix": "/hello.HelloService/"}` in `excludes` will skip every RPC under that service while still recording other RPCs on the same connection. A malformed `:path` that leaves Service or Method empty does not synthesize a partial path, so `/Service/` cannot spuriously prefix-match.
+- **WebSocket frame envelopes and SSE event envelopes** — individual frames / events carry no method/path, so `url_prefix` and `method` rules do not match against them. The initial HTTP upgrade envelope IS subject to those rules, and the recording decision is cached per-stream and applied to subsequent frames — set the rule on the upgrade request to capture an entire WS / SSE stream.
+- **Raw TCP envelopes** — no method/path; `url_prefix` and `method` rules never match. Use `hostname` (resolved from the CONNECT/SOCKS5 target or TLS SNI) to scope raw TCP recording.
 
 Blocked flows (target_scope deny / rate_limit / safety_filter blocks) are recorded by their respective recorder paths; capture_scope governs only the normal Pipeline-Record code path.
 
