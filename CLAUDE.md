@@ -181,7 +181,7 @@ but also subsystem integration. Confirm that the following checklist is satisfie
 - [ ] **Error paths**: Flow is recorded with `State="error"` on connection failure or timeout
 - [ ] **Raw bytes recording**: Wire-observed raw bytes (`Envelope.Raw`) are correctly recorded — L4-capable principle
 - [ ] **Variant recording**: On intercept/transform modification, both original and modified variants are recorded
-- [ ] **MCP tool integration**: Flows are correctly retrievable via the `query` tool (with `resource: "flows"` / `resource: "flow"` parameters; Protocol family filter accepts `http`/`ws`/`grpc`/`grpc-web`/`sse`/`raw`/`tls-handshake`)
+- [ ] **MCP tool integration**: Flows are correctly retrievable via the `query` tool (with `resource: "flows"` / `resource: "flow"` parameters; Protocol family filter accepts `http`/`ws`/`grpc`/`grpc-web`/`sse`/`raw`/`tls-handshake`; `filter.wire_level` accepts `semantic`/`h2-frame`/`h1-chunk`/`grpc-lpm-frame`/`grpcweb-base64`/`all` with default `semantic` — overlay rows are excluded from `message_count` / `message_preview` unless explicitly opted in)
 
 > **Applicability**: Not all items are required for every test. Verify relevant items based on protocol characteristics and test purpose.
 > Example: Raw TCP has no L7 structured view, so header validation under "message content" is not required.
