@@ -315,7 +315,13 @@ func applyResendGRPCUserStartFields(input *resendGRPCInput, plan *resendGRPCPlan
 // recoverResendGRPCStartFromFlow loads the original RPC's Send / Receive
 // GRPCStart Flows and returns the recovered (authority, scheme,
 // metadata, encoding, accept-encoding) values. Side-effect: fills empty
-// plan.service / plan.method from the recovered URL.Path.
+// plan.service / plan.method from the recovered URL.Path (or Metadata
+// fallback for legacy flows that pre-date USK-920).
+//
+// USK-920: Stream.Scheme is consulted as a secondary scheme source so
+// listener-captured gRPC flows (where the gRPC Layer's GRPCStartMessage
+// did not carry pseudo-headers until USK-920) still resolve to a valid
+// scheme without forcing the operator to pass one in by hand.
 func (s *Server) recoverResendGRPCStartFromFlow(ctx context.Context, flowID string, plan *resendGRPCPlan) (authority, scheme string, meta []envelope.KeyValue, encoding string, accept []string, err error) {
 	stream, sendStart, recvStart, lerr := s.loadResendGRPCFlows(ctx, flowID)
 	if lerr != nil {
@@ -333,6 +339,15 @@ func (s *Server) recoverResendGRPCStartFromFlow(ctx context.Context, flowID stri
 	}
 	authority = recAuthority
 	scheme = recScheme
+	// USK-920: when the recorded Flow's URL did not carry a scheme (legacy
+	// rows pre-dating the pseudo-header projection), fall back to the
+	// stream-level handshake transport. Stream.Scheme is "https" / "http"
+	// / "tcp" per types.go; only the first two are meaningful to gRPC.
+	if scheme == "" && stream.Scheme != "" {
+		if s := strings.ToLower(stream.Scheme); s == "http" || s == "https" {
+			scheme = s
+		}
+	}
 	meta = flowMapToKeyValues(sendStart.Headers)
 	encoding = firstFlowHeaderValue(sendStart.Headers, "Grpc-Encoding")
 	if recvStart != nil {
@@ -367,23 +382,54 @@ func finalizeResendGRPCAuthorityScheme(input *resendGRPCInput, plan *resendGRPCP
 // authority is URL.Host; scheme is URL.Scheme (mapped from h2 vs h2c).
 // Empty-tolerant — any missing field surfaces as "" and the caller's
 // validation requires the user to supply a non-empty override.
+//
+// USK-920: Flow.URL is the primary source (populated by record_step.go
+// projectGRPCStart now that GRPCStartMessage carries the pseudo-headers).
+// For flows recorded before USK-920 (where Flow.URL is nil but the
+// projection wrote grpc_service / grpc_method into Flow.Metadata), the
+// helper falls back to Metadata so already-recorded flows also recover
+// service / method without a manual override. Authority and scheme remain
+// recoverable only via URL — for true legacy rows the caller still needs
+// target_addr / scheme, which is acceptable because the breaking change
+// (listener-captured flows after USK-911~917) lands together with this
+// fix.
 func extractResendGRPCStartFields(f *flow.Flow) (authority, service, method, scheme string) {
-	if f == nil || f.URL == nil {
+	if f == nil {
 		return "", "", "", ""
 	}
-	authority = f.URL.Host
-	scheme = f.URL.Scheme
-	parts := strings.SplitN(strings.TrimPrefix(f.URL.Path, "/"), "/", 2)
-	if len(parts) == 2 {
-		service = parts[0]
-		method = parts[1]
+	if f.URL != nil {
+		authority = f.URL.Host
+		scheme = f.URL.Scheme
+		parts := strings.SplitN(strings.TrimPrefix(f.URL.Path, "/"), "/", 2)
+		if len(parts) == 2 {
+			service = parts[0]
+			method = parts[1]
+		}
+	}
+	// Metadata fallback for legacy flows: projectGRPCStart writes
+	// grpc_service / grpc_method unconditionally (see record_step.go), so
+	// flows recorded before USK-920 still carry the RPC identity even
+	// when the URL projection was missing.
+	if service == "" {
+		service = f.Metadata["grpc_service"]
+	}
+	if method == "" {
+		method = f.Metadata["grpc_method"]
 	}
 	return authority, service, method, scheme
 }
 
-// loadResendGRPCFlows fetches the Stream and the first send / first
-// receive Flows. The receive Flow is allowed to be missing (a request
+// loadResendGRPCFlows fetches the Stream and the Send-side / Receive-side
+// GRPCStart Flows. The Receive Flow is allowed to be missing (a request
 // that never got a response is still resendable).
+//
+// USK-920: the live data path records additional non-Start Flows on the
+// Send direction (h2-frame wire chunks, LPM wire chunks via
+// session.GRPCH2DataFrameRecordOption / GRPCLPMRecordOption), so the first
+// Send Flow returned by the store is NOT guaranteed to be the GRPCStart
+// envelope. We scan for the first Flow whose Metadata["grpc_event"]=="start"
+// and fall back to sendFlows[0] only when no semantic Start flow exists
+// (e.g. an in-process resend that recorded only synthesized envelopes).
 func (s *Server) loadResendGRPCFlows(ctx context.Context, flowID string) (*flow.Stream, *flow.Flow, *flow.Flow, error) {
 	if s.flowStore.store == nil {
 		return nil, nil, nil, errors.New("resend_grpc: flow store is not initialized")
@@ -403,11 +449,31 @@ func (s *Server) loadResendGRPCFlows(ctx context.Context, flowID string) (*flow.
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("resend_grpc: get receive flows %s: %w", flowID, err)
 	}
-	var recvFlow *flow.Flow
-	if len(recvFlows) > 0 {
-		recvFlow = recvFlows[0]
+	return stream, pickGRPCStartFlow(sendFlows), pickGRPCStartFlow(recvFlows), nil
+}
+
+// pickGRPCStartFlow returns the first Flow in flows that the RecordStep
+// projection tagged as the GRPCStart envelope (Metadata["grpc_event"]
+// == "start"). When no such Flow exists, the first Flow is returned so
+// legacy / synthetic streams (which never carried per-event Metadata)
+// keep working. A nil / empty input yields nil.
+//
+// USK-920: the live data path emits additional Send-direction Flows for
+// per-frame wire-byte snapshots (LPM and H2 DATA recording callbacks),
+// so "the first Send Flow" is not equivalent to "the GRPCStart Flow".
+func pickGRPCStartFlow(flows []*flow.Flow) *flow.Flow {
+	if len(flows) == 0 {
+		return nil
 	}
-	return stream, sendFlows[0], recvFlow, nil
+	for _, fl := range flows {
+		if fl == nil || fl.Metadata == nil {
+			continue
+		}
+		if fl.Metadata["grpc_event"] == "start" {
+			return fl
+		}
+	}
+	return flows[0]
 }
 
 // splitAndTrimComma splits on commas and trims whitespace from each

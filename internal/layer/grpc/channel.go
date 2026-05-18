@@ -1064,7 +1064,16 @@ func buildStartMessage(evt *http2.H2HeadersEvent, dir envelope.Direction) (*enve
 	// Service / Method on the request side derive from :path; on the
 	// response side they are mirrored from the request side by the
 	// channel.absorbHeaders caller (the response carries no :path).
+	//
+	// USK-920: also surface the request-side pseudo-headers (:authority /
+	// :scheme / :path) as derived L7 fields so RecordStep can project
+	// Flow.URL the same way it does for HTTPMessage. Response-side
+	// HEADERS frames only carry :status (no authority/scheme/path), so we
+	// leave the fields zero in that case.
 	if dir == envelope.Send {
+		msg.Authority = evt.Authority
+		msg.Scheme = evt.Scheme
+		msg.Path = evt.Path
 		msg.Service, msg.Method = parseGRPCPath(evt.Path)
 	}
 	return msg, msg.Encoding

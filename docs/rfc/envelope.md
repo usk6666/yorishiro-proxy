@@ -233,6 +233,16 @@ type GRPCStartMessage struct {
     Service string
     Method  string
 
+    // USK-920: the request-side pseudo-headers (:authority, :scheme,
+    // :path) are projected as derived L7 fields so RecordStep can build
+    // Flow.URL the same way it does for HTTPMessage. Empty on the
+    // response side (response HEADERS only carry :status). The pseudo-
+    // header wire bytes remain in Envelope.Raw — these fields are an
+    // overlay, not a replacement.
+    Authority string
+    Scheme    string
+    Path      string
+
     // gRPC metadata — custom and reserved. HTTP/2 pseudo-headers (:method,
     // :path, :status, etc.) are NOT included here; they belong to the
     // transport layer and are observable via Envelope.Context if needed.

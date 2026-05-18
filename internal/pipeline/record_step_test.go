@@ -3156,3 +3156,143 @@ func metadataKeysSorted(m map[string]string) []string {
 	}
 	return keys
 }
+
+// TestRecordStep_GRPCStartProjectsURLAndScheme pins the USK-920 projection
+// contract: a Send-direction GRPCStartMessage carrying request-side
+// pseudo-headers (:authority / :scheme / :path) must produce a Flow with a
+// well-formed URL and a Stream whose Scheme matches :scheme. This is the
+// recovery path that lets resend_grpc replay listener-captured flows from
+// {flow_id} alone (extractResendGRPCStartFields reads Flow.URL first).
+//
+// The table covers every observable shape produced by gRPC channel.go's
+// buildStartMessage:
+//   - Full triple — happy path (https, h2c, response-side empty).
+//   - Path missing but Service+Method present — defensive reconstruction.
+//   - Response-side (Authority+Scheme empty) — no URL projection.
+//
+// Each branch directly mirrors a `if dir == envelope.Send` outcome in
+// internal/layer/grpc/channel.go, so a refactor that drops one field cannot
+// silently regress to the pre-USK-920 behavior.
+func TestRecordStep_GRPCStartProjectsURLAndScheme(t *testing.T) {
+	cases := []struct {
+		name       string
+		msg        *envelope.GRPCStartMessage
+		wantURL    bool
+		wantHost   string
+		wantScheme string
+		wantPath   string
+		wantStream string
+	}{
+		{
+			name: "full_https",
+			msg: &envelope.GRPCStartMessage{
+				Service:   "hello.HelloService",
+				Method:    "SayHello",
+				Authority: "api.example.com:443",
+				Scheme:    "https",
+				Path:      "/hello.HelloService/SayHello",
+			},
+			wantURL:    true,
+			wantHost:   "api.example.com:443",
+			wantScheme: "https",
+			wantPath:   "/hello.HelloService/SayHello",
+			wantStream: "https",
+		},
+		{
+			name: "full_h2c_http",
+			msg: &envelope.GRPCStartMessage{
+				Service:   "hello.HelloService",
+				Method:    "SayHello",
+				Authority: "127.0.0.1:9000",
+				Scheme:    "http",
+				Path:      "/hello.HelloService/SayHello",
+			},
+			wantURL:    true,
+			wantHost:   "127.0.0.1:9000",
+			wantScheme: "http",
+			wantPath:   "/hello.HelloService/SayHello",
+			wantStream: "http",
+		},
+		{
+			name: "path_missing_reconstructed_from_service_method",
+			msg: &envelope.GRPCStartMessage{
+				Service:   "hello.HelloService",
+				Method:    "SayHello",
+				Authority: "api.example.com",
+				Scheme:    "https",
+				// Path intentionally empty — projectGRPCStart must reconstruct.
+			},
+			wantURL:    true,
+			wantHost:   "api.example.com",
+			wantScheme: "https",
+			wantPath:   "/hello.HelloService/SayHello",
+			wantStream: "https",
+		},
+		{
+			name: "response_side_no_url_projection",
+			msg: &envelope.GRPCStartMessage{
+				// Authority / Scheme / Path empty on the response side per
+				// channel.go's `if dir == envelope.Send` gate.
+				Service: "hello.HelloService",
+				Method:  "SayHello",
+			},
+			wantURL:    false,
+			wantStream: "",
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			w := &mockWriter{}
+			step := NewRecordStep(w, nil)
+			env := &envelope.Envelope{
+				StreamID:  "stream-" + tc.name,
+				FlowID:    "flow-" + tc.name,
+				Direction: envelope.Send,
+				Sequence:  0,
+				Protocol:  envelope.ProtocolGRPC,
+				Raw:       []byte("hpack-bytes"),
+				Message:   tc.msg,
+			}
+			step.Process(context.Background(), env)
+
+			if len(w.streams) != 1 {
+				t.Fatalf("expected 1 stream, got %d", len(w.streams))
+			}
+			if got := w.streams[0].Scheme; got != tc.wantStream {
+				t.Errorf("stream Scheme = %q, want %q", got, tc.wantStream)
+			}
+
+			if len(w.flows) != 1 {
+				t.Fatalf("expected 1 flow, got %d", len(w.flows))
+			}
+			fl := w.flows[0]
+			if tc.wantURL {
+				if fl.URL == nil {
+					t.Fatal("flow URL is nil; want populated")
+				}
+				if fl.URL.Host != tc.wantHost {
+					t.Errorf("flow URL.Host = %q, want %q", fl.URL.Host, tc.wantHost)
+				}
+				if fl.URL.Scheme != tc.wantScheme {
+					t.Errorf("flow URL.Scheme = %q, want %q", fl.URL.Scheme, tc.wantScheme)
+				}
+				if fl.URL.Path != tc.wantPath {
+					t.Errorf("flow URL.Path = %q, want %q", fl.URL.Path, tc.wantPath)
+				}
+			} else if fl.URL != nil {
+				t.Errorf("flow URL = %+v, want nil for response-side Start", fl.URL)
+			}
+			// grpc_service / grpc_method must always project regardless of
+			// pseudo-header presence — the Metadata fallback in
+			// extractResendGRPCStartFields depends on it for legacy flows.
+			if got := fl.Metadata["grpc_service"]; got != tc.msg.Service {
+				t.Errorf("flow Metadata[grpc_service] = %q, want %q", got, tc.msg.Service)
+			}
+			if got := fl.Metadata["grpc_method"]; got != tc.msg.Method {
+				t.Errorf("flow Metadata[grpc_method] = %q, want %q", got, tc.msg.Method)
+			}
+		})
+	}
+}
