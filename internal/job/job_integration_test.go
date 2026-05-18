@@ -128,6 +128,24 @@ func (r *mockReader) CountFlows(_ context.Context, streamID string) (int, error)
 	return len(r.flows[streamID]), nil
 }
 
+func (r *mockReader) CountFlowsByWireLevel(_ context.Context, streamID string, opts flow.FlowListOptions) (map[string]int, error) {
+	out := make(map[string]int)
+	for _, f := range r.flows[streamID] {
+		if f == nil {
+			continue
+		}
+		if opts.Direction != "" && f.Direction != opts.Direction {
+			continue
+		}
+		wl := f.WireLevel
+		if wl == "" {
+			wl = flow.WireLevelSemantic
+		}
+		out[wl]++
+	}
+	return out, nil
+}
+
 // newTestTLSConfig creates a self-signed TLS config for a test server.
 func newTestTLSConfig(t *testing.T) *tls.Config {
 	t.Helper()

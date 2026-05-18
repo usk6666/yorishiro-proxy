@@ -74,6 +74,10 @@ func (r *mockFlowReader) CountFlows(_ context.Context, _ string) (int, error) {
 	return 0, nil
 }
 
+func (r *mockFlowReader) CountFlowsByWireLevel(_ context.Context, _ string, _ flow.FlowListOptions) (map[string]int, error) {
+	return map[string]int{}, nil
+}
+
 // --- Test helpers ---
 
 func testURL(rawURL string) *url.URL {

@@ -46,6 +46,24 @@ func (m *mockHARStore) CountFlows(_ context.Context, streamID string) (int, erro
 	return len(m.flows[streamID]), nil
 }
 
+func (m *mockHARStore) CountFlowsByWireLevel(_ context.Context, streamID string, opts FlowListOptions) (map[string]int, error) {
+	out := make(map[string]int)
+	for _, f := range m.flows[streamID] {
+		if f == nil {
+			continue
+		}
+		if opts.Direction != "" && f.Direction != opts.Direction {
+			continue
+		}
+		wl := f.WireLevel
+		if wl == "" {
+			wl = WireLevelSemantic
+		}
+		out[wl]++
+	}
+	return out, nil
+}
+
 func (m *mockHARStore) SaveStream(_ context.Context, _ *Stream) error                  { return nil }
 func (m *mockHARStore) UpdateStream(_ context.Context, _ string, _ StreamUpdate) error { return nil }
 func (m *mockHARStore) SaveFlow(_ context.Context, _ *Flow) error                      { return nil }
