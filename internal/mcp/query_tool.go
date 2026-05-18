@@ -135,6 +135,17 @@ type queryFilter struct {
 	State string `json:"state,omitempty" jsonschema:"flow lifecycle state filter (active, complete, error)"`
 	// Direction filters messages by direction ("send" or "receive").
 	Direction string `json:"direction,omitempty" jsonschema:"message direction filter (send or receive)"`
+	// WireLevel filters messages by wire_level discriminator (USK-921).
+	// The flow store records both canonical L7 "semantic" envelopes and
+	// per-protocol wire-level overlay envelopes (h2-frame, h1-chunk,
+	// grpc-lpm-frame, grpcweb-base64) for diagnostic L4 visibility. To
+	// keep the default L7 view free of overlay clutter the MCP query path
+	// hard-defaults this filter to "semantic" — set "all" to receive
+	// every wire_level, or one of the overlay values to isolate a single
+	// diagnostic view. Empty / unset → "semantic". Applies to the flows,
+	// flow, and messages resources (overlay rows are excluded from
+	// message_count and message_preview by default).
+	WireLevel string `json:"wire_level,omitempty" jsonschema:"wire_level filter (USK-921). semantic (default) returns only canonical L7 envelopes; h2-frame / h1-chunk / grpc-lpm-frame / grpcweb-base64 isolate a single diagnostic overlay; all returns every wire_level. Applies to flows / flow / messages resources."`
 	// ConnID filters flows by connection ID (exact match).
 	ConnID string `json:"conn_id,omitempty" jsonschema:"connection ID filter for flows (exact match)"`
 	// Host filters flows by host (matches server_addr or URL host).
@@ -216,6 +227,62 @@ var validFilterOrigins = []string{"proxy", "resend", "fuzz"}
 // validFilterFuzzJobStatuses lists valid values for filter.status (fuzz_jobs).
 var validFilterFuzzJobStatuses = []string{"running", "paused", "completed", "cancelled", "error"}
 
+// wireLevelFilterAll is the opt-in sentinel disabling the wire_level
+// default; passing "all" surfaces every wire_level (semantic + every
+// overlay) to the caller. Distinct from the empty / unset value which
+// the MCP query path normalises to flow.WireLevelSemantic.
+const wireLevelFilterAll = "all"
+
+// validFilterWireLevels lists accepted values for filter.wire_level (USK-921).
+// The MCP query path (flows / flow / messages) hard-defaults to
+// flow.WireLevelSemantic when the field is empty / unset; "all" disables
+// the predicate. The overlay values are reused verbatim from the
+// flow.WireLevel* canonical set so a new producer surfaces here at the
+// same time it surfaces at the SQL boundary.
+var validFilterWireLevels = []string{
+	flow.WireLevelSemantic,
+	flow.WireLevelH2Frame,
+	flow.WireLevelHTTP1Chunk,
+	flow.WireLevelGRPCLPMFrame,
+	flow.WireLevelGRPCWebBase64,
+	wireLevelFilterAll,
+}
+
+// nonSemanticWireLevel reports the wire_level discriminator suitable for
+// inclusion in the JSON response — i.e. surfacing every value except the
+// default flow.WireLevelSemantic (the latter is implied by the absence of
+// the field on a default-filtered response). The empty string passes
+// through unchanged so pre-schemaV14 rows stay invisible.
+func nonSemanticWireLevel(wl string) string {
+	if wl == flow.WireLevelSemantic {
+		return ""
+	}
+	return wl
+}
+
+// resolveWireLevelFilter validates and translates filter.wire_level into
+// the value passed to flow.FlowListOptions.WireLevel. Empty / unset →
+// flow.WireLevelSemantic so the MCP L7 view never includes overlay rows
+// without explicit opt-in (USK-921). "all" disables the predicate (empty
+// string returned). Any other accepted value passes through verbatim.
+// Unknown values surface a validateEnum error with the canonical list.
+func resolveWireLevelFilter(filter *queryFilter) (string, error) {
+	value := ""
+	if filter != nil {
+		value = filter.WireLevel
+	}
+	if value == "" {
+		return flow.WireLevelSemantic, nil
+	}
+	if err := validateEnum("wire_level", value, validFilterWireLevels); err != nil {
+		return "", err
+	}
+	if value == wireLevelFilterAll {
+		return "", nil
+	}
+	return value, nil
+}
+
 // validFlowSortByValues lists valid values for sort_by (flows).
 var validFlowSortByValues = []string{"timestamp", "duration_ms"}
 
@@ -261,8 +328,30 @@ func validateFlowFilters(input queryInput) error {
 				return err
 			}
 		}
+		// USK-921: validate the wire_level filter at the flows entry
+		// point so callers see the canonical enum error before any
+		// per-flow message lookup. The same resolver runs inside
+		// handleQueryFlows when building the per-flow opts so an
+		// unset value still gets the semantic default.
+		if _, err := resolveWireLevelFilter(input.Filter); err != nil {
+			return err
+		}
 	}
 	if err := validateEnum("sort_by", input.SortBy, validFlowSortByValues); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validateMessageFilters validates enum filter parameters for the messages
+// and flow resources (USK-921). Both handlers consume filter.wire_level to
+// control overlay visibility; the dedicated validator surfaces the canonical
+// enum error before the SQL fetch happens.
+func validateMessageFilters(input queryInput) error {
+	if input.Filter == nil {
+		return nil
+	}
+	if _, err := resolveWireLevelFilter(input.Filter); err != nil {
 		return err
 	}
 	return nil
@@ -308,6 +397,12 @@ func validateQueryInput(input queryInput) error {
 	switch input.Resource {
 	case "flows":
 		return validateFlowFilters(input)
+	case "flow", "messages":
+		// USK-921: the flow / messages handlers also honour
+		// filter.wire_level; surface the enum error at the dispatch
+		// boundary so the per-handler GetFlows call sees a validated
+		// value (or the semantic default).
+		return validateMessageFilters(input)
 	case "fuzz_jobs":
 		return validateFuzzJobFilters(input)
 	case "fuzz_results":
@@ -587,10 +682,15 @@ type queryFlowsEntry struct {
 	// "client_tls_error") when state == "error". Empty for state != "error"
 	// or for errored streams that did not surface a classifiable signal
 	// (USK-797 makes this column visible to MCP clients).
-	FailureReason   string            `json:"failure_reason,omitempty"`
-	Method          string            `json:"method"`
-	URL             string            `json:"url"`
-	StatusCode      int               `json:"status_code"`
+	FailureReason string `json:"failure_reason,omitempty"`
+	Method        string `json:"method"`
+	URL           string `json:"url"`
+	StatusCode    int    `json:"status_code"`
+	// MessageCount is the number of canonical L7 semantic envelopes
+	// recorded for the flow. Wire-level overlay rows (h2-frame,
+	// h1-chunk, grpc-lpm-frame, grpcweb-base64) are excluded by default
+	// — pass filter.wire_level="all" to include them, or one of the
+	// overlay values to count only that overlay (USK-921).
 	MessageCount    int               `json:"message_count"`
 	BlockedBy       string            `json:"blocked_by,omitempty"`
 	ProtocolSummary map[string]string `json:"protocol_summary,omitempty"`
@@ -688,10 +788,21 @@ func (s *Server) handleQueryFlows(ctx context.Context, input queryInput) (*gomcp
 		return nil, nil, fmt.Errorf("count flows: %w", err)
 	}
 
+	// USK-921: default to flow.WireLevelSemantic so per-flow MessageCount /
+	// summary derivations only see canonical L7 envelopes — overlay rows
+	// (h2-frame, h1-chunk, grpc-lpm-frame, grpcweb-base64) would otherwise
+	// inflate message_count by 2-4x for gRPC / WS / SSE / gRPC-Web flows.
+	// Callers opt in via filter.wire_level={overlay value | all}.
+	wireLevel, err := resolveWireLevelFilter(input.Filter)
+	if err != nil {
+		return nil, nil, err
+	}
+	msgListOpts := flow.FlowListOptions{WireLevel: wireLevel}
+
 	entries := make([]queryFlowsEntry, 0, len(flowList))
 	for _, fl := range flowList {
 		// Fetch messages for method/url/status_code/message_count via JOIN data.
-		msgs, err := s.flowStore.store.GetFlows(ctx, fl.ID, flow.FlowListOptions{})
+		msgs, err := s.flowStore.store.GetFlows(ctx, fl.ID, msgListOpts)
 		if err != nil {
 			return nil, nil, fmt.Errorf("get messages for flow %s: %w", fl.ID, err)
 		}
@@ -801,9 +912,15 @@ type queryFlowResult struct {
 	RawRequest                  string              `json:"raw_request,omitempty"`
 	RawResponse                 string              `json:"raw_response,omitempty"`
 	ConnInfo                    *connInfoResult     `json:"conn_info,omitempty"`
-	MessageCount                int                 `json:"message_count"`
-	ProtocolSummary             map[string]string   `json:"protocol_summary,omitempty"`
-	MessagePreview              []queryMessageEntry `json:"message_preview,omitempty"`
+	// MessageCount is the number of canonical L7 semantic envelopes
+	// recorded for the flow. Wire-level overlay rows (h2-frame,
+	// h1-chunk, grpc-lpm-frame, grpcweb-base64) are excluded by default
+	// — pass filter.wire_level="all" to include them, or one of the
+	// overlay values to count only that overlay (USK-921). The same
+	// filter governs which envelopes appear in MessagePreview.
+	MessageCount    int                 `json:"message_count"`
+	ProtocolSummary map[string]string   `json:"protocol_summary,omitempty"`
+	MessagePreview  []queryMessageEntry `json:"message_preview,omitempty"`
 	// OriginalRequest holds the original (pre-modification) request data
 	// when a variant exists (intercept/transform modified the request).
 	// Only populated when the flow contains variant messages.
@@ -1320,7 +1437,17 @@ func (s *Server) handleQueryFlow(ctx context.Context, input queryInput) (*gomcp.
 	if err != nil {
 		return nil, nil, fmt.Errorf("get flow: %w", err)
 	}
-	msgs, err := s.flowStore.store.GetFlows(ctx, fl.ID, flow.FlowListOptions{})
+	// USK-921: default to flow.WireLevelSemantic so MessageCount /
+	// message_preview only see canonical L7 envelopes — overlay rows
+	// (h2-frame, h1-chunk, grpc-lpm-frame, grpcweb-base64) would
+	// otherwise inflate the counts and the preview window for gRPC / WS
+	// / SSE / gRPC-Web flows. Callers opt in via filter.wire_level=
+	// {overlay value | all}.
+	wireLevel, err := resolveWireLevelFilter(input.Filter)
+	if err != nil {
+		return nil, nil, err
+	}
+	msgs, err := s.flowStore.store.GetFlows(ctx, fl.ID, flow.FlowListOptions{WireLevel: wireLevel})
 	if err != nil {
 		return nil, nil, fmt.Errorf("get messages: %w", err)
 	}
@@ -1545,7 +1672,13 @@ type queryMessageEntry struct {
 	BodyOriginalSize        int               `json:"body_original_size,omitempty"`
 	BodyDecodedOriginalSize int               `json:"body_decoded_original_size,omitempty"`
 	Metadata                map[string]string `json:"metadata,omitempty"`
-	Timestamp               string            `json:"timestamp"`
+	// WireLevel mirrors flow.Flow.WireLevel — "semantic" for canonical
+	// L7 envelopes, or one of the overlay discriminators (h2-frame,
+	// h1-chunk, grpc-lpm-frame, grpcweb-base64) when the caller opted
+	// in to overlay rows via filter.wire_level (USK-921). Omitted when
+	// empty so the default semantic-only response stays compact.
+	WireLevel string `json:"wire_level,omitempty"`
+	Timestamp string `json:"timestamp"`
 }
 
 // queryMessagesResult is the response for the messages resource.
@@ -1598,7 +1731,13 @@ func (s *Server) convertMessagesToEntries(msgs []*flow.Flow, decodeEnabled bool,
 			// params so callers can tell the two truncation classes apart.
 			BodyTruncated: msg.BodyTruncated,
 			Metadata:      msg.Metadata,
-			Timestamp:     msg.Timestamp.UTC().Format("2006-01-02T15:04:05Z"),
+			// USK-921: surface the wire_level discriminator so callers
+			// who opted in to overlay rows (filter.wire_level=h2-frame /
+			// grpc-lpm-frame / ...) can tell which framing view each
+			// entry represents. Default-semantic responses get an empty
+			// string here and the field omits from JSON via omitempty.
+			WireLevel: nonSemanticWireLevel(msg.WireLevel),
+			Timestamp: msg.Timestamp.UTC().Format("2006-01-02T15:04:05Z"),
 		}
 
 		switch {
@@ -1641,7 +1780,13 @@ func (s *Server) convertMessagesToEntries(msgs []*flow.Flow, decodeEnabled bool,
 }
 
 // buildMessageListOptions validates and builds message list options from query input.
-// Returns an error if the direction filter value is invalid.
+// Returns an error if the direction or wire_level filter value is invalid.
+//
+// USK-921: when filter.wire_level is empty / unset, the resolver injects
+// flow.WireLevelSemantic so the default messages response hides wire-level
+// overlay rows (h2-frame, h1-chunk, grpc-lpm-frame, grpcweb-base64). Pass
+// filter.wire_level="all" to receive every wire_level, or one of the
+// overlay values to isolate a single diagnostic view.
 func buildMessageListOptions(input queryInput) (flow.FlowListOptions, error) {
 	opts := flow.FlowListOptions{}
 	if input.Filter != nil && input.Filter.Direction != "" {
@@ -1650,6 +1795,11 @@ func buildMessageListOptions(input queryInput) (flow.FlowListOptions, error) {
 		}
 		opts.Direction = input.Filter.Direction
 	}
+	wireLevel, err := resolveWireLevelFilter(input.Filter)
+	if err != nil {
+		return opts, err
+	}
+	opts.WireLevel = wireLevel
 	return opts, nil
 }
 
@@ -1707,9 +1857,13 @@ func (s *Server) handleQueryMessages(ctx context.Context, input queryInput) (*go
 		return nil, nil, fmt.Errorf("get messages: %w", err)
 	}
 
-	// Use filtered count as total for pagination when direction filter is active.
+	// Use filtered count as total for pagination when direction or
+	// wire_level filtering reduced the result set (USK-921: the
+	// flow.CountFlows aggregate returns every wire_level row but the
+	// MCP default filter is "semantic"; without this branch the Total
+	// field would over-report by the overlay-row count).
 	filteredTotal := total
-	if msgOpts.Direction != "" {
+	if msgOpts.Direction != "" || msgOpts.WireLevel != "" {
 		filteredTotal = len(allMsgs)
 	}
 

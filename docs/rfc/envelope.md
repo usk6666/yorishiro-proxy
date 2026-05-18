@@ -316,6 +316,8 @@ HTTP/2 frame-level bytes (frame headers, SETTINGS, WINDOW_UPDATE, etc.) are owne
 
 The two overlays produce independent per-direction sequence counters; the schemaV14 UNIQUE constraint on `(stream_id, sequence, direction, variant, wire_level)` keeps the three views (semantic + LPM + h2-frame) from colliding under the same StreamID.
 
+**MCP default exposure (USK-921).** The MCP `query` tool (`messages` / `flow` / `flows` resources) hard-defaults `filter.wire_level` to `semantic` at the control-plane boundary so the L7 view never returns overlay rows by default — they would otherwise inflate `message_count` and `message_preview` by 2-4x on gRPC / WS / SSE / gRPC-Web flows. AI agents opt in to overlay rows via `filter.wire_level={h2-frame | h1-chunk | grpc-lpm-frame | grpcweb-base64 | all}`. The wire-level data persists losslessly in the flow store regardless of the MCP cosmetic default (L4-capable promise: §3.2 wire-level recording always holds; the default filter is a cosmetic projection at the MCP transport boundary, never a wire-data modification).
+
 #### 3.2.4 RawMessage
 
 For TCP, raw-mode TLS passthrough, and any byte-chunk channel.
