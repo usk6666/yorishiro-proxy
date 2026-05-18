@@ -505,8 +505,13 @@ func dialForwardUpstream(
 	//
 	// USK-918: a per-entry UpstreamInsecureSkipVerify (*bool) overrides
 	// the global flag when non-nil. Tri-state: nil inherits global; true
-	// forces skip; false forces enforce. Mirrors the HostTLSEntry.TLSVerify
-	// pattern at internal/connector/transport/tlstransport.go.
+	// forces skip; false forces enforce. The shape (*bool tri-state, per-entry
+	// overrides global) mirrors the sibling HostTLSEntry.TLSVerify pattern at
+	// internal/connector/transport/tlstransport.go, but the semantic axis is
+	// inverted: TLSVerify is true=enforce / false=skip whereas
+	// UpstreamInsecureSkipVerify is true=skip / false=enforce. The latter
+	// matches the existing global Config.InsecureSkipVerify field that this
+	// per-entry override resolves against.
 	dialOpts.InsecureSkipVerify = resolveUpstreamInsecureSkipVerify(entry.fc, parentStack)
 
 	conn, snap, err := connector.DialUpstreamRaw(ctx, entry.target, dialOpts)
@@ -555,9 +560,12 @@ func dialForwardUpstream(
 //
 // Extracted as a pure helper so the resolution is unit-testable
 // independently of the dial path that builds *tls.Config and performs the
-// TCP/TLS handshake. Mirrors the sibling
-// HostTLSEntry.TLSVerify resolution at
-// internal/connector/transport/tlstransport.go.
+// TCP/TLS handshake. The (*bool, per-entry overrides global) resolution
+// shape mirrors the sibling HostTLSEntry.TLSVerify resolution at
+// internal/connector/transport/tlstransport.go, but the semantic axis is
+// inverted: TLSVerify uses true=enforce / false=skip; this field uses
+// true=skip / false=enforce (consistent with the existing global
+// Config.InsecureSkipVerify field it overrides).
 func resolveUpstreamInsecureSkipVerify(fc *config.ForwardConfig, parentStack *Stack) bool {
 	if fc != nil && fc.UpstreamInsecureSkipVerify != nil {
 		return *fc.UpstreamInsecureSkipVerify
