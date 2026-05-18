@@ -877,6 +877,47 @@ func (s *SQLiteStore) CountFlows(ctx context.Context, streamID string) (int, err
 	return count, nil
 }
 
+// CountFlowsByWireLevel implements the FlowReader contract. SQL is a
+// single GROUP BY on the wire_level column so we never load per-flow
+// payloads just to count them. Empty-string wire_level rows (pre-V14
+// backfill) are folded into the semantic bucket at scan time so the
+// returned map only carries canonical keys.
+func (s *SQLiteStore) CountFlowsByWireLevel(ctx context.Context, streamID string, opts FlowListOptions) (map[string]int, error) {
+	query := "SELECT wire_level, COUNT(*) FROM flows WHERE stream_id = ?"
+	args := []interface{}{streamID}
+	if opts.Direction != "" {
+		query += " AND direction = ?"
+		args = append(args, opts.Direction)
+	}
+	query += " GROUP BY wire_level"
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("count flows by wire_level: %w", err)
+	}
+	defer rows.Close()
+
+	out := make(map[string]int)
+	for rows.Next() {
+		var wl string
+		var n int
+		if err := rows.Scan(&wl, &n); err != nil {
+			return nil, fmt.Errorf("scan wire_level count: %w", err)
+		}
+		// Backward compat: pre-V14 backfilled rows or rows whose
+		// producer never stamped wire_level fold into the semantic
+		// bucket per the column-default contract.
+		if wl == "" {
+			wl = WireLevelSemantic
+		}
+		out[wl] += n
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iter wire_level rows: %w", err)
+	}
+	return out, nil
+}
+
 // SaveMacro persists a macro definition using upsert semantics.
 // If a macro with the same name exists, it is updated; otherwise a new one is created.
 func (s *SQLiteStore) SaveMacro(ctx context.Context, name, description, configJSON string) error {

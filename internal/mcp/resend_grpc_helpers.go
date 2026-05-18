@@ -423,13 +423,14 @@ func extractResendGRPCStartFields(f *flow.Flow) (authority, service, method, sch
 // GRPCStart Flows. The Receive Flow is allowed to be missing (a request
 // that never got a response is still resendable).
 //
-// USK-920: the live data path records additional non-Start Flows on the
-// Send direction (h2-frame wire chunks, LPM wire chunks via
-// session.GRPCH2DataFrameRecordOption / GRPCLPMRecordOption), so the first
-// Send Flow returned by the store is NOT guaranteed to be the GRPCStart
-// envelope. We scan for the first Flow whose Metadata["grpc_event"]=="start"
-// and fall back to sendFlows[0] only when no semantic Start flow exists
-// (e.g. an in-process resend that recorded only synthesized envelopes).
+// USK-930: requests flow.WireLevelSemantic explicitly on every GetFlows
+// call. The MCP query boundary defaults to semantic (USK-921) but the
+// flow.Store layer returns rows of every wire_level when the predicate
+// is empty (intentional backward compatibility), so the resend helpers
+// must opt in for the semantic-only projection to skip overlay rows
+// (h2-frame / grpc-lpm-frame). Under that opt-in, the first Send Flow IS
+// the GRPCStart envelope per the RecordStep projection invariant
+// (projectGRPCStart writes Start first, then Data*, optionally End).
 func (s *Server) loadResendGRPCFlows(ctx context.Context, flowID string) (*flow.Stream, *flow.Flow, *flow.Flow, error) {
 	if s.flowStore.store == nil {
 		return nil, nil, nil, errors.New("resend_grpc: flow store is not initialized")
@@ -438,40 +439,38 @@ func (s *Server) loadResendGRPCFlows(ctx context.Context, flowID string) (*flow.
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("resend_grpc: get stream %s: %w", flowID, err)
 	}
-	sendFlows, err := s.flowStore.store.GetFlows(ctx, flowID, flow.FlowListOptions{Direction: "send"})
+	sendFlows, err := s.flowStore.store.GetFlows(ctx, flowID, flow.FlowListOptions{Direction: "send", WireLevel: flow.WireLevelSemantic})
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("resend_grpc: get send flows %s: %w", flowID, err)
 	}
 	if len(sendFlows) == 0 {
 		return nil, nil, nil, fmt.Errorf("resend_grpc: stream %s has no send-direction flows", flowID)
 	}
-	recvFlows, err := s.flowStore.store.GetFlows(ctx, flowID, flow.FlowListOptions{Direction: "receive"})
+	recvFlows, err := s.flowStore.store.GetFlows(ctx, flowID, flow.FlowListOptions{Direction: "receive", WireLevel: flow.WireLevelSemantic})
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("resend_grpc: get receive flows %s: %w", flowID, err)
 	}
 	return stream, pickGRPCStartFlow(sendFlows), pickGRPCStartFlow(recvFlows), nil
 }
 
-// pickGRPCStartFlow returns the first Flow in flows that the RecordStep
-// projection tagged as the GRPCStart envelope (Metadata["grpc_event"]
-// == "start"). When no such Flow exists, the first Flow is returned so
-// legacy / synthetic streams (which never carried per-event Metadata)
-// keep working. A nil / empty input yields nil.
+// pickGRPCStartFlow returns the first Flow in flows, which the
+// projection-ordered semantic stream guarantees to be the GRPCStart
+// envelope when callers pass FlowListOptions{WireLevel:
+// flow.WireLevelSemantic} (RecordStep.projectGRPCStart writes Start
+// first, then Data*, optionally End — see internal/pipeline/record_step.go).
+// Returns nil when flows is empty.
 //
-// USK-920: the live data path emits additional Send-direction Flows for
-// per-frame wire-byte snapshots (LPM and H2 DATA recording callbacks),
-// so "the first Send Flow" is not equivalent to "the GRPCStart Flow".
+// Historical context: USK-920 introduced a defensive
+// Metadata["grpc_event"]=="start" scan to work around per-frame
+// wire_level overlay rows (h2-frame / grpc-lpm-frame) that were
+// interleaved at the Store layer. USK-921 made semantic the MCP-default
+// filter, and USK-930 lifted explicit semantic to callers below the
+// MCP boundary, so this wrapper became a one-liner. The wrapper is
+// retained (rather than inlined) as the single contract surface so
+// future overlay additions only need a single audit point.
 func pickGRPCStartFlow(flows []*flow.Flow) *flow.Flow {
 	if len(flows) == 0 {
 		return nil
-	}
-	for _, fl := range flows {
-		if fl == nil || fl.Metadata == nil {
-			continue
-		}
-		if fl.Metadata["grpc_event"] == "start" {
-			return fl
-		}
 	}
 	return flows[0]
 }
@@ -1045,7 +1044,10 @@ func (s *Server) collectResendGRPCUnknownFieldWarnings(ctx context.Context, inpu
 	if spec == nil || spec.InputDesc == nil {
 		return nil
 	}
-	sendFlows, err := s.flowStore.store.GetFlows(ctx, input.FlowID, flow.FlowListOptions{Direction: "send"})
+	// USK-930: pass explicit semantic so we only inspect canonical L7 Data
+	// envelopes against the schema, skipping wire-level overlay rows
+	// (h2-frame / grpc-lpm-frame).
+	sendFlows, err := s.flowStore.store.GetFlows(ctx, input.FlowID, flow.FlowListOptions{Direction: "send", WireLevel: flow.WireLevelSemantic})
 	if err != nil || len(sendFlows) == 0 {
 		return nil
 	}

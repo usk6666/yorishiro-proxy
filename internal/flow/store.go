@@ -42,6 +42,26 @@ type FlowReader interface {
 
 	// CountFlows returns the number of flows for a stream.
 	CountFlows(ctx context.Context, streamID string) (int, error)
+
+	// CountFlowsByWireLevel returns the flow count for a stream grouped
+	// by the schemaV14 wire_level column (USK-931). The result map is
+	// keyed by the canonical wire_level value
+	// (semantic / h2-frame / h1-chunk / grpc-lpm-frame / grpcweb-base64);
+	// empty-string wire_level rows (pre-V14 backfill) are folded into
+	// the semantic bucket so callers do not need to handle both keys.
+	// Direction inside opts narrows the count to a single side; an
+	// empty Direction counts both. opts.WireLevel is ignored — the
+	// method is the GROUP-BY counterpart of CountFlows and always
+	// returns the full breakdown across every wire_level. Returns an
+	// empty map (not nil) when the stream has no flows.
+	//
+	// The MCP query tool (handleQueryFlow / handleQueryFlows /
+	// handleQueryMessages) calls this to derive the
+	// wire_level_advisory hint that surfaces the count of overlay
+	// rows suppressed by the default semantic-only filter (USK-921).
+	// DB-side GROUP BY avoids loading per-flow payloads just to count
+	// them.
+	CountFlowsByWireLevel(ctx context.Context, streamID string, opts FlowListOptions) (map[string]int, error)
 }
 
 // StreamWriter provides write access for creating and updating streams.

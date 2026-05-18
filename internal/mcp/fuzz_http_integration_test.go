@@ -1175,7 +1175,7 @@ func TestFuzzHTTP_PathWithQueryAutoSplit(t *testing.T) {
 			t.Errorf("variant %d has empty stream_id", v.Index)
 			continue
 		}
-		flows, err := store.GetFlows(ctx, v.StreamID, flow.FlowListOptions{Direction: "send"})
+		flows, err := store.GetFlows(ctx, v.StreamID, flow.FlowListOptions{Direction: "send", WireLevel: flow.WireLevelSemantic})
 		if err != nil {
 			t.Fatalf("GetFlows %s: %v", v.StreamID, err)
 		}

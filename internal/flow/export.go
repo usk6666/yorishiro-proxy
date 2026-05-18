@@ -50,6 +50,22 @@ type ExportOptions struct {
 	// MaxFlows limits the number of streams exported.
 	// 0 means no limit.
 	MaxFlows int
+	// WireLevel filters per-flow rows by the schemaV14 wire_level column
+	// (USK-932). Canonical values mirror flow.WireLevel* — "semantic",
+	// "h2-frame", "h1-chunk", "grpc-lpm-frame", "grpcweb-base64". Empty
+	// string disables the predicate at the SQL layer, returning rows of
+	// every wire_level — callers that want "all overlays included" pass
+	// the empty string. The MCP boundary (internal/mcp/manage_tool.go)
+	// resolves an unset user-facing field to WireLevelSemantic so JSONL
+	// export defaults align with the MCP query default and HAR export
+	// behaviour (USK-921 follow-up).
+	//
+	// The HAR exporter ignores this field — its data model (HAR 1.2
+	// request/response pairs) has no slot for per-frame overlay rows, and
+	// HAR enforces the semantic-only projection internally via
+	// filterSemanticFlows. Passing semantic to HAR is redundant; passing
+	// any overlay value is silently ignored.
+	WireLevel string
 }
 
 // ExportRecord represents a single JSONL line in the export format.
@@ -167,7 +183,12 @@ func ExportStreams(ctx context.Context, store Store, w io.Writer, opts ExportOpt
 			continue
 		}
 
-		flows, err := store.GetFlows(ctx, st.ID, FlowListOptions{})
+		// USK-932: pass through opts.WireLevel so JSONL export honors the
+		// MCP-boundary default (semantic) without inflating exports with
+		// overlay rows. The empty-string value (forensic "all" opt-in)
+		// disables the SQL predicate at the Store layer and returns rows
+		// of every wire_level.
+		flows, err := store.GetFlows(ctx, st.ID, FlowListOptions{WireLevel: opts.WireLevel})
 		if err != nil {
 			return exported, fmt.Errorf("get flows for stream %s: %w", st.ID, err)
 		}

@@ -43,6 +43,110 @@ const oversizeAdvisoryThreshold = 256 * 1024
 // either size-bounding param explicitly.
 const oversizeAdvisoryMessage = "response contains a body larger than 256 KiB; pass include_bodies=false or body_max_bytes=N to stay under the MCP token limit"
 
+// wireLevelAdvisory carries a structured hint surfaced on query
+// responses when the default semantic wire_level filter (USK-921) hid
+// wire-level overlay rows (h2-frame / grpc-lpm-frame / h1-chunk /
+// grpcweb-base64) from the AI-facing response. Emitted only when the
+// caller did NOT explicitly opt in via filter.wire_level, AND at least
+// one overlay row exists for the queried stream(s). The advisory is
+// purely informational — the wire copy of the overlay rows is
+// unchanged on disk and re-fetchable via filter.wire_level=all (or any
+// specific overlay value).
+//
+// Schema: pointer + omitempty so the field omits from JSON entirely on
+// default-shaped queries (zero overlay rows OR explicit opt-in). When
+// present, Hidden maps wire_level → count for every overlay value that
+// had at least one suppressed row.
+//
+// Sibling of the existing Advisory string — additive change so existing
+// AI-agent consumers parsing the oversize hint are unaffected (USK-931
+// Q1 resolution).
+type wireLevelAdvisory struct {
+	// Filter is the resolved wire_level filter applied to this query.
+	// Always "semantic (default)" today since the advisory is gated on
+	// the caller having NOT opted in — kept as a string field so a
+	// future change (e.g., advisory under a non-default-but-still-
+	// hiding filter) can populate the canonical value.
+	Filter string `json:"wire_level_filter" jsonschema:"the resolved wire_level filter applied to this query (\"semantic (default)\" when the advisory fires)"`
+	// Hidden maps wire_level value → count of suppressed rows.
+	// Zero-count entries are omitted so the map only carries the
+	// overlays that actually contributed to the AI-visible projection
+	// loss (USK-931 Q2 resolution: DB-side GROUP BY via
+	// CountFlowsByWireLevel avoids loading payloads).
+	Hidden map[string]int `json:"hidden_overlay_rows,omitempty" jsonschema:"per-wire_level count of rows suppressed by the semantic-default filter"`
+	// Hint is the operator-facing one-liner describing the opt-in
+	// mechanism. Constant string — the same value for every emit.
+	Hint string `json:"hint" jsonschema:"one-line guidance for opting in to overlay rows"`
+}
+
+// wireLevelAdvisoryHint is the constant operator-facing hint string
+// embedded in wireLevelAdvisory.Hint. Lists every canonical overlay
+// value and the universal "all" sentinel so the AI agent can compose
+// a fully-typed opt-in request from a single response field.
+const wireLevelAdvisoryHint = "Pass filter.wire_level=\"h2-frame\" / \"grpc-lpm-frame\" / \"h1-chunk\" / \"grpcweb-base64\" / \"all\" to inspect raw-frame diagnostics."
+
+// wireLevelAdvisoryDefaultLabel is the value set on
+// wireLevelAdvisory.Filter when the advisory fires. Kept as a constant
+// so the rendered shape is identical across all three query handlers.
+const wireLevelAdvisoryDefaultLabel = "semantic (default)"
+
+// buildWireLevelAdvisory composes a *wireLevelAdvisory from the
+// per-wire_level suppressed-row counts. Returns nil when:
+//
+//   - filter is non-nil AND filter.WireLevel is non-empty (caller opted
+//     in via filter.wire_level={overlay | all}); the advisory only
+//     fires for default-shaped queries.
+//   - hidden is empty (no overlay rows exist for the queried streams).
+//
+// Caller passes the raw map from Store.CountFlowsByWireLevel after
+// subtracting the semantic bucket. Zero entries in the map are dropped.
+func buildWireLevelAdvisory(filter *queryFilter, hidden map[string]int) *wireLevelAdvisory {
+	if filter != nil && filter.WireLevel != "" {
+		return nil
+	}
+	pruned := map[string]int{}
+	for k, v := range hidden {
+		if v > 0 {
+			pruned[k] = v
+		}
+	}
+	if len(pruned) == 0 {
+		return nil
+	}
+	return &wireLevelAdvisory{
+		Filter: wireLevelAdvisoryDefaultLabel,
+		Hidden: pruned,
+		Hint:   wireLevelAdvisoryHint,
+	}
+}
+
+// collectHiddenOverlayCounts queries the wire_level breakdown for a
+// single stream and returns the count of overlay rows (every wire_level
+// other than semantic). Direction inside opts narrows the count to a
+// single side; an empty Direction counts both. The semantic bucket is
+// dropped from the returned map. Returns nil on the underlying SQL
+// error path.
+func (s *Server) collectHiddenOverlayCounts(ctx context.Context, streamID string, opts flow.FlowListOptions) (map[string]int, error) {
+	if s.flowStore.store == nil {
+		return nil, nil
+	}
+	breakdown, err := s.flowStore.store.CountFlowsByWireLevel(ctx, streamID, opts)
+	if err != nil {
+		return nil, fmt.Errorf("count flows by wire_level: %w", err)
+	}
+	if len(breakdown) == 0 {
+		return nil, nil
+	}
+	hidden := make(map[string]int, len(breakdown))
+	for wl, n := range breakdown {
+		if wl == flow.WireLevelSemantic {
+			continue
+		}
+		hidden[wl] = n
+	}
+	return hidden, nil
+}
+
 // queryInput is the typed input for the query tool.
 type queryInput struct {
 	// Resource specifies what to query: flows, flow, messages, status, config, ca_cert, intercept_queue, macros, macro, fuzz_jobs, fuzz_results.
@@ -708,6 +812,13 @@ type queryFlowsResult struct {
 	Flows []queryFlowsEntry `json:"flows"`
 	Count int               `json:"count"`
 	Total int               `json:"total"`
+	// WireLevelAdvisory carries a structured hint when the default
+	// semantic wire_level filter hid overlay rows on the listed streams
+	// AND the caller did NOT opt in via filter.wire_level. Counts are
+	// summed across every Stream in the response so the operator-visible
+	// inflation signal (per-Stream MessageCount) is matched at the
+	// result level rather than per-row (USK-931).
+	WireLevelAdvisory *wireLevelAdvisory `json:"wire_level_advisory,omitempty"`
 }
 
 // buildFlowListOptions constructs flow.StreamListOptions from query input parameters.
@@ -800,6 +911,12 @@ func (s *Server) handleQueryFlows(ctx context.Context, input queryInput) (*gomcp
 	msgListOpts := flow.FlowListOptions{WireLevel: wireLevel}
 
 	entries := make([]queryFlowsEntry, 0, len(flowList))
+	// USK-931: accumulate overlay-row counts across every Stream in the
+	// page so the result-level WireLevelAdvisory reflects the AI-visible
+	// inflation signal (per-Stream MessageCount). Accept the N+1 cost
+	// here per the design review — per-Stream MessageCount IS the
+	// operator-visible signal that motivates the advisory.
+	hiddenAggregate := map[string]int{}
 	for _, fl := range flowList {
 		// Fetch messages for method/url/status_code/message_count via JOIN data.
 		msgs, err := s.flowStore.store.GetFlows(ctx, fl.ID, msgListOpts)
@@ -835,12 +952,29 @@ func (s *Server) handleQueryFlows(ctx context.Context, input queryInput) (*gomcp
 			WaitMs:     fl.WaitMs,
 			ReceiveMs:  fl.ReceiveMs,
 		})
+
+		// USK-931: per-Stream overlay count contributes to the
+		// result-level hidden map. Errors are non-fatal — the advisory
+		// is informational and a failed sub-query should not block the
+		// rest of the response.
+		hidden, advisoryErr := s.collectHiddenOverlayCounts(ctx, fl.ID, flow.FlowListOptions{})
+		if advisoryErr != nil {
+			// Log + continue: do not block the AI agent from seeing
+			// the listing because the advisory could not be computed.
+			slog.DebugContext(ctx, "wire_level_advisory: hidden count failed",
+				"flow_id", fl.ID, "error", advisoryErr)
+			continue
+		}
+		for wl, n := range hidden {
+			hiddenAggregate[wl] += n
+		}
 	}
 
 	result := &queryFlowsResult{
-		Flows: entries,
-		Count: len(entries),
-		Total: total,
+		Flows:             entries,
+		Count:             len(entries),
+		Total:             total,
+		WireLevelAdvisory: buildWireLevelAdvisory(input.Filter, hiddenAggregate),
 	}
 	return nil, result, nil
 }
@@ -952,6 +1086,12 @@ type queryFlowResult struct {
 	// include_bodies or body_max_bytes and the unbounded response contains a
 	// body above oversizeAdvisoryThreshold. Empty otherwise.
 	Advisory string `json:"advisory,omitempty"`
+	// WireLevelAdvisory carries a structured hint when the default
+	// semantic wire_level filter hid overlay rows on this Stream AND the
+	// caller did NOT opt in via filter.wire_level. Sibling of Advisory —
+	// additive, omitempty, does NOT mutate the existing oversize hint
+	// (USK-931).
+	WireLevelAdvisory *wireLevelAdvisory `json:"wire_level_advisory,omitempty"`
 }
 
 // queryDecodeAnomaly is a structured anomaly entry surfaced when
@@ -1530,6 +1670,18 @@ func (s *Server) handleQueryFlow(ctx context.Context, input queryInput) (*gomcp.
 		result.Advisory = oversizeAdvisoryMessage
 	}
 
+	// USK-931: surface the per-Stream overlay breakdown when the
+	// semantic default suppressed any rows. The hidden map is empty
+	// when the caller opted in (filter.wire_level != "") so the
+	// advisory is suppressed by buildWireLevelAdvisory's first gate.
+	hidden, advisoryErr := s.collectHiddenOverlayCounts(ctx, fl.ID, flow.FlowListOptions{})
+	if advisoryErr != nil {
+		slog.DebugContext(ctx, "wire_level_advisory: hidden count failed",
+			"flow_id", fl.ID, "error", advisoryErr)
+	} else {
+		result.WireLevelAdvisory = buildWireLevelAdvisory(input.Filter, hidden)
+	}
+
 	return nil, result, nil
 }
 
@@ -1690,6 +1842,10 @@ type queryMessagesResult struct {
 	// include_bodies or body_max_bytes and the unbounded response contains a
 	// message body above oversizeAdvisoryThreshold. Empty otherwise.
 	Advisory string `json:"advisory,omitempty"`
+	// WireLevelAdvisory carries a structured hint when the default
+	// semantic wire_level filter hid overlay rows on the paged Stream
+	// AND the caller did NOT opt in via filter.wire_level (USK-931).
+	WireLevelAdvisory *wireLevelAdvisory `json:"wire_level_advisory,omitempty"`
 }
 
 // convertMessagesToEntries converts flow messages to queryMessageEntry slice.
@@ -1884,6 +2040,18 @@ func (s *Server) handleQueryMessages(ctx context.Context, input queryInput) (*go
 	// response and at least one body in the page exceeded the threshold.
 	if !limit.explicitlyBounded && messagesHaveOversizedBody(pageMsgs) {
 		result.Advisory = oversizeAdvisoryMessage
+	}
+
+	// USK-931: scope the overlay-count to the same direction filter the
+	// caller applied to the page so the advisory reflects what was
+	// actually suppressed. msgOpts.Direction may be empty (count both
+	// sides), "send", or "receive".
+	hidden, advisoryErr := s.collectHiddenOverlayCounts(ctx, fl.ID, flow.FlowListOptions{Direction: msgOpts.Direction})
+	if advisoryErr != nil {
+		slog.DebugContext(ctx, "wire_level_advisory: hidden count failed",
+			"flow_id", fl.ID, "error", advisoryErr)
+	} else {
+		result.WireLevelAdvisory = buildWireLevelAdvisory(input.Filter, hidden)
 	}
 
 	return nil, result, nil

@@ -86,6 +86,17 @@ type exportFilter struct {
 	URLPattern  string  `json:"url_pattern,omitempty"`
 	TimeAfter   string  `json:"time_after,omitempty"`
 	TimeBefore  string  `json:"time_before,omitempty"`
+	// WireLevel filters exported flows by the schemaV14 wire_level
+	// column (USK-932). Canonical enum values mirror query.filter.wire_level:
+	// "semantic" (canonical L7 envelopes — the default), "h2-frame",
+	// "h1-chunk", "grpc-lpm-frame", "grpcweb-base64" (single-overlay
+	// diagnostic views), or "all" (no predicate; every wire_level).
+	// Empty / unset defaults to "semantic" so JSONL export aligns with the
+	// MCP query default and the HAR exporter — overlay rows are excluded
+	// unless the caller explicitly opts in. Forensic consumers who relied
+	// on overlay rows in JSONL export must pass wire_level="all".
+	// Ignored by HAR export (HAR 1.2 has no slot for per-frame overlays).
+	WireLevel string `json:"wire_level,omitempty" jsonschema:"wire_level filter (default: semantic). Accepted: semantic | h2-frame | h1-chunk | grpc-lpm-frame | grpcweb-base64 | all. Mirrors query.filter.wire_level. HAR export ignores this field."`
 }
 
 // availableManageActions lists the valid action names for the manage tool.
@@ -513,6 +524,12 @@ func (s *Server) handleManageExportFlows(ctx context.Context, params manageParam
 }
 
 // buildExportOptions constructs flow.ExportOptions from the manage params.
+//
+// USK-932: the per-flow wire_level filter defaults to flow.WireLevelSemantic
+// so JSONL export aligns with the MCP query default and the HAR exporter —
+// overlay rows (h2-frame, h1-chunk, grpc-lpm-frame, grpcweb-base64) are
+// excluded unless the caller passes filter.wire_level="all" (forensic
+// opt-in) or a specific overlay value (single-overlay diagnostic view).
 func buildExportOptions(params manageParams) (flow.ExportOptions, error) {
 	includeBodies := true
 	if params.IncludeBodies != nil {
@@ -522,6 +539,14 @@ func buildExportOptions(params manageParams) (flow.ExportOptions, error) {
 	opts := flow.ExportOptions{
 		IncludeBodies: includeBodies,
 	}
+
+	// Resolve wire_level even when filter is nil so JSONL export still
+	// applies the semantic default.
+	wireLevel, err := resolveExportWireLevel(params.Filter)
+	if err != nil {
+		return flow.ExportOptions{}, err
+	}
+	opts.WireLevel = wireLevel
 
 	if params.Filter != nil {
 		if err := validateManageExportFilter(params.Filter); err != nil {
@@ -549,6 +574,38 @@ func buildExportOptions(params manageParams) (flow.ExportOptions, error) {
 	}
 
 	return opts, nil
+}
+
+// resolveExportWireLevel validates and translates the user-facing
+// exportFilter.WireLevel into the value persisted on flow.ExportOptions.
+// Mirrors resolveWireLevelFilter (query tool):
+//
+//   - empty / unset → flow.WireLevelSemantic (default for JSONL export so
+//     overlay rows are excluded unless the caller opts in)
+//   - "all"         → "" (disables the SQL predicate, returning every wire_level)
+//   - any canonical wire_level value (semantic, h2-frame, h1-chunk,
+//     grpc-lpm-frame, grpcweb-base64) → passes through verbatim
+//   - any unknown value → validateEnum error with the canonical list
+//
+// USK-932: the HAR exporter ignores opts.WireLevel — its data model has
+// no slot for per-frame overlays — so the resolver runs even on the HAR
+// path purely for input-validation symmetry. Unknown values fail fast
+// before the wire_level reaches storage code.
+func resolveExportWireLevel(filter *exportFilter) (string, error) {
+	value := ""
+	if filter != nil {
+		value = filter.WireLevel
+	}
+	if value == "" {
+		return flow.WireLevelSemantic, nil
+	}
+	if err := validateEnum("wire_level", value, validFilterWireLevels); err != nil {
+		return "", err
+	}
+	if value == wireLevelFilterAll {
+		return "", nil
+	}
+	return value, nil
 }
 
 // writeToFileAtomic validates the output path and atomically writes content

@@ -122,7 +122,7 @@ internal/
                            #   http_source.go, ws_source.go, grpc_source.go, raw_source.go,
                            #   fuzz_http_source.go, fuzz_raw_source.go
   macro/                   # Macro engine: template / guard / extract / encoder
-  flow/                    # Stream/Flow Store (sqlite); HAR / JSONL / cURL export, import
+  flow/                    # Stream/Flow Store (sqlite); HAR / JSONL export, import
   cert/                    # Root CA + dynamic server cert issuance
   config/                  # Configuration loading + validation (incl. Plugins, body-spill, limits)
   encoding/                # Protobuf framing helper
