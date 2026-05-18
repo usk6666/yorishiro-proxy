@@ -400,6 +400,12 @@ func isValidProjectNameRune(r rune) bool {
 // Both fields default to false, which preserves the existing raw-forward
 // behavior. Target's scheme/port are advisory only; they do not change the
 // effective TLS / UpstreamTLS values.
+//
+// Upstream TLS certificate verification defaults to the global
+// Config.InsecureSkipVerify setting; a per-entry
+// UpstreamInsecureSkipVerify (*bool, nil/true/false) overrides that global
+// when set (USK-918). The override is scoped to the tcp_forwards entry and
+// is independent of the CONNECT-MITM tls_passthrough path.
 type ForwardConfig struct {
 	// Target is the upstream address (e.g. "api.example.com:50051").
 	Target string `json:"target"`
@@ -427,6 +433,19 @@ type ForwardConfig struct {
 	// independent of TLS and is not inferred from Target's scheme/port.
 	// See the type-level godoc for the full TLS × UpstreamTLS matrix.
 	UpstreamTLS bool `json:"upstream_tls,omitempty"`
+
+	// UpstreamInsecureSkipVerify is a per-entry override for upstream TLS
+	// certificate verification when UpstreamTLS=true. Tri-state semantics:
+	//   - nil   = inherit the global Config.InsecureSkipVerify (default)
+	//   - true  = skip verification on this entry (insecure; equivalent of
+	//             grpcurl -insecure / curl -k, but scoped per tcp_forwards
+	//             entry)
+	//   - false = enforce verification on this entry even when the global
+	//             flag is true
+	//
+	// Used for MITM-debugging local upstreams whose self-signed certs lack
+	// SAN entries for the dialled host/IP (e.g. moul/grpcbin). USK-918.
+	UpstreamInsecureSkipVerify *bool `json:"upstream_insecure_skip_verify,omitempty"`
 }
 
 // validForwardProtocols is the set of valid protocol values for ForwardConfig.

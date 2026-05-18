@@ -1109,6 +1109,96 @@ func TestParseTCPForwardsAny_UpstreamTLS(t *testing.T) {
 	}
 }
 
+// TestParseTCPForwardsAny_UpstreamInsecureSkipVerify verifies the
+// MCP input parser extracts the USK-918 tri-state
+// `upstream_insecure_skip_verify` field from the
+// map[string]any branch (the live MCP path), preserving the
+// nil/true/false distinction and defensively ignoring non-bool input.
+// The default-branch JSON round-trip path is already covered by
+// TestForwardConfig_UnmarshalJSON_UpstreamInsecureSkipVerify in
+// internal/config; this test pins the explicit field-extraction branch
+// in parseTCPForwardsAny that the MCP go-sdk currently feeds.
+func TestParseTCPForwardsAny_UpstreamInsecureSkipVerify(t *testing.T) {
+	cases := []struct {
+		name     string
+		input    map[string]any
+		wantNil  bool
+		wantBool bool
+	}{
+		{
+			// Field omitted → nil (inherit global default).
+			name: "omitted -> nil (inherit global)",
+			input: map[string]any{
+				"9000": map[string]any{"target": "h:9000", "protocol": "http", "upstream_tls": true},
+			},
+			wantNil: true,
+		},
+		{
+			// USK-918 motivating shape: explicit true → *true (skip verify).
+			name: "true -> *true (skip verify)",
+			input: map[string]any{
+				"9000": map[string]any{
+					"target": "h:9000", "protocol": "http",
+					"upstream_tls": true, "upstream_insecure_skip_verify": true,
+				},
+			},
+			wantNil:  false,
+			wantBool: true,
+		},
+		{
+			// Explicit false must survive parsing — distinguishes
+			// "explicitly enforce" from "inherit global" (which may itself be true).
+			name: "false -> *false (enforce verify)",
+			input: map[string]any{
+				"9000": map[string]any{
+					"target": "h:9000", "protocol": "http",
+					"upstream_tls": true, "upstream_insecure_skip_verify": false,
+				},
+			},
+			wantNil:  false,
+			wantBool: false,
+		},
+		{
+			// Defensive: non-bool input is silently ignored (field stays nil),
+			// matching the sibling upstream_tls non-bool behavior above.
+			name: "non-bool is ignored -> nil",
+			input: map[string]any{
+				"9000": map[string]any{
+					"target": "h:9000", "protocol": "http",
+					"upstream_tls": true, "upstream_insecure_skip_verify": "yes",
+				},
+			},
+			wantNil: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			parsed, err := parseTCPForwardsAny(tc.input)
+			if err != nil {
+				t.Fatalf("parseTCPForwardsAny: %v", err)
+			}
+			fc := parsed["9000"]
+			if fc == nil {
+				t.Fatal("parsed[9000] is nil")
+			}
+			if tc.wantNil {
+				if fc.UpstreamInsecureSkipVerify != nil {
+					t.Errorf("UpstreamInsecureSkipVerify = %v (non-nil), want nil",
+						*fc.UpstreamInsecureSkipVerify)
+				}
+				return
+			}
+			if fc.UpstreamInsecureSkipVerify == nil {
+				t.Fatal("UpstreamInsecureSkipVerify = nil, want non-nil")
+			}
+			if *fc.UpstreamInsecureSkipVerify != tc.wantBool {
+				t.Errorf("UpstreamInsecureSkipVerify = %v, want %v",
+					*fc.UpstreamInsecureSkipVerify, tc.wantBool)
+			}
+		})
+	}
+}
+
 func TestApplyProxyDefaults_InterceptRules(t *testing.T) {
 	rulesJSON := json.RawMessage(`[{
 		"id": "default-rule",
