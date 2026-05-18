@@ -65,6 +65,10 @@
               "upstream_tls": {
                 "type": "boolean",
                 "description": "Enable upstream-dial TLS encryption to target. Independent of tls; not inferred from target scheme. Default: false."
+              },
+              "upstream_insecure_skip_verify": {
+                "type": "boolean",
+                "description": "Per-entry override: skip upstream TLS certificate verification for this forward. Default: inherits global insecure_skip_verify."
               }
             },
             "additionalProperties": false

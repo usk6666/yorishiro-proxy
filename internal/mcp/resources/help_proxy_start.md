@@ -54,6 +54,8 @@ Each entry maps a local port number (string key) to either:
     When true, the proxy presents a dynamically-issued certificate to the local client and terminates TLS before applying L7 parsing.
   - **upstream_tls** (boolean, optional): Enable upstream-dial TLS encryption to `target`. Default: `false`.
     When true, the proxy wraps the upstream-direction connection in TLS (using the global TLS fingerprint, SNI derived from `target`, and the configured verification / client-cert settings).
+  - **upstream_insecure_skip_verify** (boolean, optional): Per-entry override: skip upstream TLS certificate verification for this forward. Default: inherits global `insecure_skip_verify`.
+    Useful for MITM-debugging local upstreams whose self-signed certs lack SAN entries for the dialled host/IP (e.g. `moul/grpcbin`). Scoped per `tcp_forwards` entry and independent of the CONNECT MITM `tls_passthrough` path.
 
 `tls` and `upstream_tls` are **independent** and are never inferred from `target`'s scheme or port:
 

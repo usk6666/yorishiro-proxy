@@ -86,7 +86,7 @@ type proxyStartInput struct {
 	// both formats in the MCP JSON schema; parsed into *config.ForwardConfig
 	// by parseTCPForwardsAny. See yorishiro://help/proxy_start for the full
 	// TLS × upstream_tls matrix.
-	TCPForwards map[string]any `json:"tcp_forwards,omitempty" jsonschema:"TCP forwarding map: local port -> upstream host:port string (legacy) or {target, protocol, tls, upstream_tls} object. protocol: auto|raw|http|http2|grpc|websocket|sse (empty=auto). tls=client-side TLS MITM termination on the forwarded port; upstream_tls=upstream-dial TLS encryption to target. Both default false and are independent (4 combinations: plaintext/plaintext, TLS-terminate/plaintext, plaintext/TLS, TLS-terminate/TLS). See yorishiro://help/proxy_start for the full matrix."`
+	TCPForwards map[string]any `json:"tcp_forwards,omitempty" jsonschema:"TCP forwarding map: local port -> upstream host:port string (legacy) or {target, protocol, tls, upstream_tls, upstream_insecure_skip_verify} object. protocol: auto|raw|http|http2|grpc|websocket|sse (empty=auto). tls=client-side TLS MITM termination on the forwarded port; upstream_tls=upstream-dial TLS encryption to target. Both default false and are independent (4 combinations: plaintext/plaintext, TLS-terminate/plaintext, plaintext/TLS, TLS-terminate/TLS). upstream_insecure_skip_verify (optional bool) is a per-entry override: skip upstream TLS certificate verification for this forward; default inherits global insecure_skip_verify. See yorishiro://help/proxy_start for the full matrix."`
 
 	// SOCKS5Auth specifies the SOCKS5 authentication method.
 	// Valid values: "none" (default), "password".
@@ -168,6 +168,13 @@ func parseTCPForwardsAny(raw map[string]any) (map[string]*config.ForwardConfig, 
 			}
 			if utls, ok := v["upstream_tls"].(bool); ok {
 				fc.UpstreamTLS = utls
+			}
+			// USK-918: per-entry override for upstream TLS certificate
+			// verification. Tri-state preserves "nil = inherit global"
+			// distinct from "explicitly false = enforce".
+			if uisv, ok := v["upstream_insecure_skip_verify"].(bool); ok {
+				b := uisv
+				fc.UpstreamInsecureSkipVerify = &b
 			}
 			result[port] = fc
 		default:
@@ -741,27 +748,9 @@ func validateTCPForwardsConfig(forwards map[string]*config.ForwardConfig) error 
 		if err := config.ValidateForwardConfig(port, fc); err != nil {
 			return err
 		}
-		// Warn about unusual but valid combination: TLS termination without L7 parsing.
-		if fc.TLS && fc.Protocol == "raw" {
-			slog.Warn("TCP forward: tls=true with protocol=raw means TLS termination without L7 parsing",
-				"port", port, "target", fc.Target)
-		}
-		// Warn about unusual but valid combination: upstream TLS encryption
-		// wrapping an opaque byte stream (USK-911). Permitted, but typically
-		// the operator wants L7 parsing in front of upstream TLS too.
-		if fc.UpstreamTLS && fc.Protocol == "raw" {
-			slog.Warn("TCP forward: upstream_tls=true with protocol=raw means upstream TLS encryption without L7 parsing",
-				"port", port, "target", fc.Target)
-		}
-		// Inform operators that the TLS field's semantics are now strictly
-		// scoped to client-side termination (USK-911). Users who previously
-		// set tls=true expecting upstream encryption must now also set
-		// upstream_tls=true. Emitted per-entry whenever TLS=true so the
-		// notice reliably reaches operators of any matching config.
-		if fc.TLS {
-			slog.Info("TCP forward: tls now means client-side termination only; for upstream TLS use upstream_tls=true",
-				"port", port, "target", fc.Target, "upstream_tls", fc.UpstreamTLS)
-		}
+		// Emit warn/info diagnostics for surprising but valid field
+		// combinations. Pure logging — does not gate the validation.
+		logTCPForwardEntryDiagnostics(port, fc)
 		// Validate target is host:port format.
 		host, p, err := net.SplitHostPort(fc.Target)
 		if err != nil {
@@ -778,6 +767,52 @@ func validateTCPForwardsConfig(forwards map[string]*config.ForwardConfig) error 
 		}
 	}
 	return nil
+}
+
+// logTCPForwardEntryDiagnostics emits the operator-facing warn/info logs
+// for a single tcp_forwards entry. Pure logging path — every code path
+// here is informational and never rejects the config. Extracted from
+// validateTCPForwardsConfig to keep its cyclomatic complexity below the
+// project lint threshold.
+func logTCPForwardEntryDiagnostics(port string, fc *config.ForwardConfig) {
+	// Warn about unusual but valid combination: TLS termination without L7 parsing.
+	if fc.TLS && fc.Protocol == "raw" {
+		slog.Warn("TCP forward: tls=true with protocol=raw means TLS termination without L7 parsing",
+			"port", port, "target", fc.Target)
+	}
+	// Warn about unusual but valid combination: upstream TLS encryption
+	// wrapping an opaque byte stream (USK-911). Permitted, but typically
+	// the operator wants L7 parsing in front of upstream TLS too.
+	if fc.UpstreamTLS && fc.Protocol == "raw" {
+		slog.Warn("TCP forward: upstream_tls=true with protocol=raw means upstream TLS encryption without L7 parsing",
+			"port", port, "target", fc.Target)
+	}
+	// Inform operators that the TLS field's semantics are now strictly
+	// scoped to client-side termination (USK-911). Users who previously
+	// set tls=true expecting upstream encryption must now also set
+	// upstream_tls=true. Emitted per-entry whenever TLS=true so the
+	// notice reliably reaches operators of any matching config.
+	if fc.TLS {
+		slog.Info("TCP forward: tls now means client-side termination only; for upstream TLS use upstream_tls=true",
+			"port", port, "target", fc.Target, "upstream_tls", fc.UpstreamTLS)
+	}
+	// USK-918: warn when the per-entry verify-skip override is set true
+	// without upstream_tls — the override only takes effect on the
+	// upstream-TLS dial path, so this combination is meaningless and
+	// likely a misconfiguration. Accept (do not reject) per the
+	// existing warn-only sibling pattern above.
+	if fc.UpstreamInsecureSkipVerify != nil && *fc.UpstreamInsecureSkipVerify && !fc.UpstreamTLS {
+		slog.Warn("TCP forward: upstream_insecure_skip_verify=true with upstream_tls=false has no effect; the override only applies when dialling upstream over TLS",
+			"port", port, "target", fc.Target)
+	}
+	// USK-918: surface the security event when the per-entry override
+	// resolves to "skip" (insecure) and upstream TLS is in play.
+	// Logged at Info per CLAUDE.md Log Level Guidelines (security
+	// event the operator should see by default).
+	if fc.UpstreamInsecureSkipVerify != nil && *fc.UpstreamInsecureSkipVerify && fc.UpstreamTLS {
+		slog.Info("TCP forward: upstream TLS certificate verification BYPASSED for this entry (insecure)",
+			"port", port, "target", fc.Target)
+	}
 }
 
 // validatePortNumber checks that s is a valid TCP port number.

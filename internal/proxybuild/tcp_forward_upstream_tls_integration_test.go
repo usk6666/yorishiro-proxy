@@ -49,7 +49,11 @@ type upstreamTLSFixtureOpts struct {
 	clientTLS    bool // fc.TLS=true
 	upstreamTLS  bool // fc.UpstreamTLS=true (always true in USK-916 tests)
 	insecureSkip bool // BuildConfig.InsecureSkipVerify
-	pluginEngine *pluginv2.Engine
+	// perEntryInsecureSkipVerify (USK-918) sets
+	// ForwardConfig.UpstreamInsecureSkipVerify when non-nil; tri-state
+	// override of the global insecureSkip above.
+	perEntryInsecureSkipVerify *bool
+	pluginEngine               *pluginv2.Engine
 }
 
 // newUpstreamTLSFixture spins up a Manager with a forward listener whose
@@ -99,10 +103,11 @@ func newUpstreamTLSFixture(t *testing.T, ctx context.Context, upstreamAddr strin
 	if err := mgr.StartTCPForwards(ctx, proxybuild.TCPForwardParams{
 		Forwards: map[string]*config.ForwardConfig{
 			"0": {
-				Target:      upstreamAddr,
-				Protocol:    opts.protocol,
-				TLS:         opts.clientTLS,
-				UpstreamTLS: opts.upstreamTLS,
+				Target:                     upstreamAddr,
+				Protocol:                   opts.protocol,
+				TLS:                        opts.clientTLS,
+				UpstreamTLS:                opts.upstreamTLS,
+				UpstreamInsecureSkipVerify: opts.perEntryInsecureSkipVerify,
 			},
 		},
 	}); err != nil {
@@ -592,6 +597,108 @@ func TestProxybuild_UpstreamTLS_CertVerifyFailure_RecordsError(t *testing.T) {
 	if !waitForUpstreamTLSErrorStream(t, fix.store, 3*time.Second) {
 		t.Errorf("no Stream recorded with FailureReason=upstream_tls_error; got %v",
 			summarizeStreams(fix.store.Streams()))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 3a) Per-entry upstream_insecure_skip_verify override (USK-918).
+// ---------------------------------------------------------------------------
+
+// TestTCPForward_UpstreamTLS_PerEntryInsecureSkipVerify drives the tri-state
+// override matrix introduced by USK-918. Each cell exercises a different
+// (global × per-entry) combination against a self-signed httptest upstream
+// and asserts whether the dial succeeds (recorded as a complete Stream) or
+// fails (recorded as a FailureReason="upstream_tls_error" Stream).
+//
+// The single dial site (dialForwardUpstream) covers both H1 and H2 forward
+// arms; the H1 protocol is exercised here as the cheapest probe. The pure
+// resolution logic is independently covered by
+// TestResolveUpstreamInsecureSkipVerify.
+func TestTCPForward_UpstreamTLS_PerEntryInsecureSkipVerify(t *testing.T) {
+	skip := true
+	enforce := false
+	cases := []struct {
+		name            string
+		globalSkip      bool
+		perEntry        *bool
+		wantHandshakeOK bool
+	}{
+		{
+			// USK-918 motivating case: global enforce, per-entry skip → succeed.
+			name:            "global_false_per_entry_true_succeeds",
+			globalSkip:      false,
+			perEntry:        &skip,
+			wantHandshakeOK: true,
+		},
+		{
+			// Per-entry enforce wins over global skip → fail.
+			name:            "global_true_per_entry_false_fails",
+			globalSkip:      true,
+			perEntry:        &enforce,
+			wantHandshakeOK: false,
+		},
+		{
+			// nil per-entry inherits global skip → succeed.
+			name:            "global_true_per_entry_nil_inherits_succeeds",
+			globalSkip:      true,
+			perEntry:        nil,
+			wantHandshakeOK: true,
+		},
+		{
+			// nil per-entry inherits global enforce → fail.
+			name:            "global_false_per_entry_nil_inherits_fails",
+			globalSkip:      false,
+			perEntry:        nil,
+			wantHandshakeOK: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+
+			upAddr, _, stopUp := startTLSHTTPEchoUpstream(t)
+			defer stopUp()
+
+			fix := newUpstreamTLSFixture(t, ctx, upAddr, upstreamTLSFixtureOpts{
+				protocol:                   "http",
+				clientTLS:                  false,
+				upstreamTLS:                true,
+				insecureSkip:               tc.globalSkip,
+				perEntryInsecureSkipVerify: tc.perEntry,
+			})
+
+			req := "GET /usk918-matrix HTTP/1.1\r\nHost: upstream.example.test\r\nConnection: close\r\n\r\n"
+			conn, err := net.Dial("tcp", fix.fwdAddr)
+			if err != nil {
+				t.Fatalf("net.Dial: %v", err)
+			}
+			defer conn.Close()
+			if _, err := conn.Write([]byte(req)); err != nil {
+				t.Fatalf("conn.Write: %v", err)
+			}
+			buf, _ := io.ReadAll(conn)
+
+			if tc.wantHandshakeOK {
+				// Handshake-succeeds path: assert echo body reached the
+				// client (proof the upstream-TLS dial completed and the
+				// proxy forwarded the response back).
+				if !strings.Contains(string(buf), "tls-echo:/usk918-matrix") {
+					t.Errorf("response missing echo body; got=%q (handshake-succeeds case should succeed)", string(buf))
+				}
+				if !waitForCompleteStream(t, fix.store, 3*time.Second) {
+					t.Errorf("no Stream reached state=complete on handshake-succeeds case; got %v",
+						summarizeStreams(fix.store.Streams()))
+				}
+			} else {
+				// Handshake-fails path: assert the recorder produced a
+				// state="error" Stream with FailureReason="upstream_tls_error".
+				if !waitForUpstreamTLSErrorStream(t, fix.store, 3*time.Second) {
+					t.Errorf("no Stream recorded with FailureReason=upstream_tls_error on handshake-fails case; got %v",
+						summarizeStreams(fix.store.Streams()))
+				}
+			}
+		})
 	}
 }
 

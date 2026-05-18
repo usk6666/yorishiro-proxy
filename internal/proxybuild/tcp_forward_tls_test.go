@@ -407,3 +407,88 @@ func TestUpstreamALPNOffersForForward_AutoOverrideNilSnapshot(t *testing.T) {
 		t.Errorf("upstreamALPNOffersForForward(auto, nil-snapshot) = %v, want %v", got, want)
 	}
 }
+
+// TestResolveUpstreamInsecureSkipVerify pins the USK-918 tri-state
+// precedence: per-entry *bool override > global BuildConfig flag > false.
+// Verifies the eight cross-product cases of (per-entry value × global flag).
+func TestResolveUpstreamInsecureSkipVerify(t *testing.T) {
+	skip := true
+	enforce := false
+	makeStack := func(globalSkip bool) *Stack {
+		return &Stack{BuildConfig: &connector.BuildConfig{
+			ProxyConfig:        &config.ProxyConfig{},
+			InsecureSkipVerify: globalSkip,
+		}}
+	}
+	cases := []struct {
+		name        string
+		fc          *config.ForwardConfig
+		parentStack *Stack
+		want        bool
+	}{
+		{
+			// Per-entry &true overrides global=false (the moul/grpcbin
+			// motivating case for USK-918).
+			name:        "per-entry true overrides global false → true (skip)",
+			fc:          &config.ForwardConfig{UpstreamInsecureSkipVerify: &skip},
+			parentStack: makeStack(false),
+			want:        true,
+		},
+		{
+			// Per-entry &false overrides global=true (operator forces
+			// enforce for one entry while leaving the global insecure).
+			name:        "per-entry false overrides global true → false (enforce)",
+			fc:          &config.ForwardConfig{UpstreamInsecureSkipVerify: &enforce},
+			parentStack: makeStack(true),
+			want:        false,
+		},
+		{
+			// Per-entry &true matches global=true (idempotent).
+			name:        "per-entry true with global true → true",
+			fc:          &config.ForwardConfig{UpstreamInsecureSkipVerify: &skip},
+			parentStack: makeStack(true),
+			want:        true,
+		},
+		{
+			// Per-entry &false matches global=false (idempotent).
+			name:        "per-entry false with global false → false",
+			fc:          &config.ForwardConfig{UpstreamInsecureSkipVerify: &enforce},
+			parentStack: makeStack(false),
+			want:        false,
+		},
+		{
+			// nil per-entry inherits global=true.
+			name:        "nil per-entry inherits global true → true",
+			fc:          &config.ForwardConfig{},
+			parentStack: makeStack(true),
+			want:        true,
+		},
+		{
+			// nil per-entry inherits global=false.
+			name:        "nil per-entry inherits global false → false",
+			fc:          &config.ForwardConfig{},
+			parentStack: makeStack(false),
+			want:        false,
+		},
+		{
+			// nil fc + nil parentStack → defensive default false.
+			name: "nil fc + nil parentStack → false",
+			want: false,
+		},
+		{
+			// non-nil fc with nil ptr + nil parentStack → false.
+			name: "nil per-entry + nil parentStack → false",
+			fc:   &config.ForwardConfig{},
+			want: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := resolveUpstreamInsecureSkipVerify(tc.fc, tc.parentStack)
+			if got != tc.want {
+				t.Errorf("resolveUpstreamInsecureSkipVerify(fc=%+v, parent=%v) = %v, want %v",
+					tc.fc, tc.parentStack != nil, got, tc.want)
+			}
+		})
+	}
+}

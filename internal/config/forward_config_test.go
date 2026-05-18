@@ -115,6 +115,11 @@ func TestForwardConfig_UnmarshalJSON_TLSUpstreamTLSMatrix(t *testing.T) {
 // omitempty tag on UpstreamTLS prevents the field from leaking false
 // defaults into the serialized output, matching the existing TLS
 // behavior. USK-911.
+//
+// USK-918: also asserts that the *bool UpstreamInsecureSkipVerify is
+// omitted when nil but emitted (including the explicit `false`) when
+// non-nil. The tri-state distinguishes "inherit global" from
+// "explicitly enforce" — the explicit false MUST survive Marshal.
 func TestForwardConfig_MarshalJSON_OmitEmptyDefaults(t *testing.T) {
 	fc := &ForwardConfig{Target: "h:9000", Protocol: "raw"}
 	data, err := json.Marshal(fc)
@@ -128,6 +133,9 @@ func TestForwardConfig_MarshalJSON_OmitEmptyDefaults(t *testing.T) {
 	if strings.Contains(s, `"tls"`) {
 		t.Errorf("Marshal output should omit tls when false, got %s", s)
 	}
+	if strings.Contains(s, "upstream_insecure_skip_verify") {
+		t.Errorf("Marshal output should omit upstream_insecure_skip_verify when nil, got %s", s)
+	}
 
 	fc2 := &ForwardConfig{Target: "h:9000", Protocol: "raw", UpstreamTLS: true}
 	data2, err := json.Marshal(fc2)
@@ -137,12 +145,37 @@ func TestForwardConfig_MarshalJSON_OmitEmptyDefaults(t *testing.T) {
 	if !strings.Contains(string(data2), `"upstream_tls":true`) {
 		t.Errorf("Marshal output should include upstream_tls=true, got %s", string(data2))
 	}
+
+	// USK-918: *bool=true must Marshal to "upstream_insecure_skip_verify":true.
+	skip := true
+	fc3 := &ForwardConfig{Target: "h:9000", Protocol: "raw", UpstreamInsecureSkipVerify: &skip}
+	data3, err := json.Marshal(fc3)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if !strings.Contains(string(data3), `"upstream_insecure_skip_verify":true`) {
+		t.Errorf("Marshal output should include upstream_insecure_skip_verify=true, got %s", string(data3))
+	}
+
+	// USK-918: *bool=false MUST also Marshal (NOT be omitted) — it
+	// distinguishes "explicitly enforce" from "inherit global".
+	enforce := false
+	fc4 := &ForwardConfig{Target: "h:9000", Protocol: "raw", UpstreamInsecureSkipVerify: &enforce}
+	data4, err := json.Marshal(fc4)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if !strings.Contains(string(data4), `"upstream_insecure_skip_verify":false`) {
+		t.Errorf("Marshal output should include upstream_insecure_skip_verify=false (tri-state preserves explicit enforce), got %s", string(data4))
+	}
 }
 
 // TestForwardConfig_MarshalJSON_RoundTrip_AllCombinations confirms the
-// (tls, upstream_tls) bits survive a Marshal → Unmarshal cycle in every
-// combination. USK-911.
+// (tls, upstream_tls, upstream_insecure_skip_verify) bits survive a
+// Marshal → Unmarshal cycle in every combination. USK-911 / USK-918.
 func TestForwardConfig_MarshalJSON_RoundTrip_AllCombinations(t *testing.T) {
+	skip := true
+	enforce := false
 	cases := []struct {
 		name string
 		fc   ForwardConfig
@@ -151,6 +184,10 @@ func TestForwardConfig_MarshalJSON_RoundTrip_AllCombinations(t *testing.T) {
 		{"tls only", ForwardConfig{Target: "h:9000", Protocol: "http", TLS: true}},
 		{"upstream_tls only", ForwardConfig{Target: "h:9000", Protocol: "http", UpstreamTLS: true}},
 		{"both true", ForwardConfig{Target: "h:9000", Protocol: "http", TLS: true, UpstreamTLS: true}},
+		// USK-918: tri-state UpstreamInsecureSkipVerify must round-trip.
+		{"upstream_tls + skip true", ForwardConfig{Target: "h:9000", Protocol: "http", UpstreamTLS: true, UpstreamInsecureSkipVerify: &skip}},
+		{"upstream_tls + skip false (enforce)", ForwardConfig{Target: "h:9000", Protocol: "http", UpstreamTLS: true, UpstreamInsecureSkipVerify: &enforce}},
+		{"both true + skip true", ForwardConfig{Target: "h:9000", Protocol: "http", TLS: true, UpstreamTLS: true, UpstreamInsecureSkipVerify: &skip}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -167,6 +204,73 @@ func TestForwardConfig_MarshalJSON_RoundTrip_AllCombinations(t *testing.T) {
 			}
 			if got.UpstreamTLS != tc.fc.UpstreamTLS {
 				t.Errorf("UpstreamTLS round-trip = %v, want %v (json=%s)", got.UpstreamTLS, tc.fc.UpstreamTLS, string(data))
+			}
+			// USK-918: pointer-aware comparison so nil round-trips to nil
+			// (inherit) and explicit true/false survive.
+			switch {
+			case tc.fc.UpstreamInsecureSkipVerify == nil && got.UpstreamInsecureSkipVerify != nil:
+				t.Errorf("UpstreamInsecureSkipVerify round-trip = %v, want nil (json=%s)", *got.UpstreamInsecureSkipVerify, string(data))
+			case tc.fc.UpstreamInsecureSkipVerify != nil && got.UpstreamInsecureSkipVerify == nil:
+				t.Errorf("UpstreamInsecureSkipVerify round-trip = nil, want %v (json=%s)", *tc.fc.UpstreamInsecureSkipVerify, string(data))
+			case tc.fc.UpstreamInsecureSkipVerify != nil && got.UpstreamInsecureSkipVerify != nil:
+				if *got.UpstreamInsecureSkipVerify != *tc.fc.UpstreamInsecureSkipVerify {
+					t.Errorf("UpstreamInsecureSkipVerify round-trip = %v, want %v (json=%s)",
+						*got.UpstreamInsecureSkipVerify, *tc.fc.UpstreamInsecureSkipVerify, string(data))
+				}
+			}
+		})
+	}
+}
+
+// TestForwardConfig_UnmarshalJSON_UpstreamInsecureSkipVerify pins the
+// JSON-unmarshal handling of the USK-918 tri-state field across nil/true/
+// false inputs.
+func TestForwardConfig_UnmarshalJSON_UpstreamInsecureSkipVerify(t *testing.T) {
+	cases := []struct {
+		name     string
+		json     string
+		wantNil  bool
+		wantBool bool
+	}{
+		{
+			name:    "omitted -> nil (inherit global)",
+			json:    `{"tcp_forwards": {"9000": {"target": "h:9000", "protocol": "http", "upstream_tls": true}}}`,
+			wantNil: true,
+		},
+		{
+			name:     "true -> *true (skip verify)",
+			json:     `{"tcp_forwards": {"9000": {"target": "h:9000", "protocol": "http", "upstream_tls": true, "upstream_insecure_skip_verify": true}}}`,
+			wantNil:  false,
+			wantBool: true,
+		},
+		{
+			name:     "false -> *false (enforce verify)",
+			json:     `{"tcp_forwards": {"9000": {"target": "h:9000", "protocol": "http", "upstream_tls": true, "upstream_insecure_skip_verify": false}}}`,
+			wantNil:  false,
+			wantBool: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var cfg ProxyConfig
+			if err := json.Unmarshal([]byte(tc.json), &cfg); err != nil {
+				t.Fatalf("Unmarshal: %v", err)
+			}
+			fc := cfg.TCPForwards["9000"]
+			if fc == nil {
+				t.Fatal("TCPForwards[9000] is nil")
+			}
+			if tc.wantNil {
+				if fc.UpstreamInsecureSkipVerify != nil {
+					t.Errorf("UpstreamInsecureSkipVerify = %v (non-nil), want nil", *fc.UpstreamInsecureSkipVerify)
+				}
+				return
+			}
+			if fc.UpstreamInsecureSkipVerify == nil {
+				t.Fatal("UpstreamInsecureSkipVerify = nil, want non-nil")
+			}
+			if *fc.UpstreamInsecureSkipVerify != tc.wantBool {
+				t.Errorf("UpstreamInsecureSkipVerify = %v, want %v", *fc.UpstreamInsecureSkipVerify, tc.wantBool)
 			}
 		})
 	}
@@ -369,6 +473,27 @@ func TestValidateForwardConfig(t *testing.T) {
 			name: "valid sse",
 			port: "8080",
 			fc:   &ForwardConfig{Target: "web:8080", Protocol: "sse"},
+		},
+		{
+			// USK-918: the per-entry verify-skip override is structurally
+			// validated by JSON schema and does not affect
+			// ValidateForwardConfig. Any *bool value is accepted; the
+			// MCP layer warns on the meaningless combination
+			// (skip=true && upstream_tls=false).
+			name: "valid upstream_tls + skip true",
+			port: "8443",
+			fc: func() *ForwardConfig {
+				b := true
+				return &ForwardConfig{Target: "h:8443", Protocol: "http", UpstreamTLS: true, UpstreamInsecureSkipVerify: &b}
+			}(),
+		},
+		{
+			name: "valid upstream_tls + skip false (enforce)",
+			port: "8443",
+			fc: func() *ForwardConfig {
+				b := false
+				return &ForwardConfig{Target: "h:8443", Protocol: "http", UpstreamTLS: true, UpstreamInsecureSkipVerify: &b}
+			}(),
 		},
 	}
 
