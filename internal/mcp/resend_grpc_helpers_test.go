@@ -129,3 +129,67 @@ func TestExtractResendGRPCStartFields(t *testing.T) {
 		})
 	}
 }
+
+// TestPickGRPCStartFlow_Empty verifies the wrapper returns nil for a nil
+// or empty input slice. USK-930 simplification post-condition: callers
+// already passed FlowListOptions{WireLevel: flow.WireLevelSemantic} when
+// loading these flows, so the wrapper does not need to defend against
+// overlay rows.
+func TestPickGRPCStartFlow_Empty(t *testing.T) {
+	t.Parallel()
+	if got := pickGRPCStartFlow(nil); got != nil {
+		t.Errorf("pickGRPCStartFlow(nil) = %v, want nil", got)
+	}
+	if got := pickGRPCStartFlow([]*flow.Flow{}); got != nil {
+		t.Errorf("pickGRPCStartFlow(empty) = %v, want nil", got)
+	}
+}
+
+// TestPickGRPCStartFlow_FirstFlow verifies the wrapper unconditionally
+// returns the first element regardless of Metadata (USK-930 lifted the
+// defensive Metadata["grpc_event"]=="start" scan now that callers pass
+// the semantic wire_level filter, so the GRPCStart envelope is
+// guaranteed to be flows[0] by the RecordStep projection invariant).
+func TestPickGRPCStartFlow_FirstFlow(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		flows []*flow.Flow
+	}{
+		{
+			name: "single_flow_with_start_metadata",
+			flows: []*flow.Flow{
+				{ID: "first", Metadata: map[string]string{"grpc_event": "start"}},
+			},
+		},
+		{
+			name: "single_flow_no_metadata",
+			flows: []*flow.Flow{
+				{ID: "first"},
+			},
+		},
+		{
+			name: "multi_flow_start_first",
+			flows: []*flow.Flow{
+				{ID: "first", Metadata: map[string]string{"grpc_event": "start"}},
+				{ID: "second", Metadata: map[string]string{"grpc_event": "data"}},
+			},
+		},
+		{
+			name: "multi_flow_no_metadata_at_all",
+			flows: []*flow.Flow{
+				{ID: "first"},
+				{ID: "second"},
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := pickGRPCStartFlow(tc.flows)
+			if got == nil || got.ID != "first" {
+				t.Fatalf("pickGRPCStartFlow returned %v, want flow ID 'first'", got)
+			}
+		})
+	}
+}

@@ -339,14 +339,19 @@ func (s *Server) loadResendWSFlows(ctx context.Context, flowID string) (*flow.St
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("resend_ws: get stream %s: %w", flowID, err)
 	}
-	sendFlows, err := s.flowStore.store.GetFlows(ctx, flowID, flow.FlowListOptions{Direction: "send"})
+	// USK-930: pass explicit semantic so future WS-over-h2 / WS-over-h1
+	// overlay rows do not bleed into the resend helper's [0]-index
+	// assumption (the projection invariant guarantees the GET upgrade is
+	// the first semantic send envelope and the 101 response is the first
+	// semantic receive envelope).
+	sendFlows, err := s.flowStore.store.GetFlows(ctx, flowID, flow.FlowListOptions{Direction: "send", WireLevel: flow.WireLevelSemantic})
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("resend_ws: get send flows %s: %w", flowID, err)
 	}
 	if len(sendFlows) == 0 {
 		return nil, nil, nil, fmt.Errorf("resend_ws: stream %s has no send-direction flows", flowID)
 	}
-	recvFlows, err := s.flowStore.store.GetFlows(ctx, flowID, flow.FlowListOptions{Direction: "receive"})
+	recvFlows, err := s.flowStore.store.GetFlows(ctx, flowID, flow.FlowListOptions{Direction: "receive", WireLevel: flow.WireLevelSemantic})
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("resend_ws: get receive flows %s: %w", flowID, err)
 	}

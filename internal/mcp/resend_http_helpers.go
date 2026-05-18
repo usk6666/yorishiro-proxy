@@ -262,7 +262,11 @@ func (s *Server) loadResendHTTPSendFlow(ctx context.Context, flowID string) (*fl
 	if err != nil {
 		return nil, nil, fmt.Errorf("resend_http: get stream %s: %w", flowID, err)
 	}
-	flows, err := s.flowStore.store.GetFlows(ctx, flowID, flow.FlowListOptions{Direction: "send"})
+	// USK-930: pass explicit semantic so future SSE-over-h1-chunked
+	// / WS-over-h2 overlay rows do not bleed into the resend helper's
+	// [0]-index assumption (the projection invariant guarantees the
+	// canonical HTTP request envelope is the first semantic send Flow).
+	flows, err := s.flowStore.store.GetFlows(ctx, flowID, flow.FlowListOptions{Direction: "send", WireLevel: flow.WireLevelSemantic})
 	if err != nil {
 		return nil, nil, fmt.Errorf("resend_http: get flows %s: %w", flowID, err)
 	}
