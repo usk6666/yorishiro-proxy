@@ -8,6 +8,14 @@ import "time"
 // One GRPCStartMessage envelope is emitted for the request side
 // (Direction=Send, Sequence=0) and one for the response side
 // (Direction=Receive, Sequence=0). Both share the RPC's Envelope.StreamID.
+//
+// USK-920: Authority / Scheme / Path are projected out of the HTTP/2
+// pseudo-headers on the request side so downstream consumers (notably
+// RecordStep → Flow.URL) can reconstruct the RPC's URL without re-parsing
+// the wire HPACK block. The pseudo-header wire bytes remain in
+// Envelope.Raw (untouched); these fields are a derived L7 overlay,
+// matching the existing HTTPMessage.Authority / Scheme / Path pattern.
+// Empty on the response side (response HEADERS only carry :status).
 type GRPCStartMessage struct {
 	// Service is the gRPC service name (derived from :path on the request
 	// side and mirrored on the response side).
@@ -15,6 +23,22 @@ type GRPCStartMessage struct {
 
 	// Method is the gRPC method name.
 	Method string
+
+	// Authority is the :authority pseudo-header from the request-side
+	// HEADERS frame. Empty on the response side. USK-920.
+	Authority string
+
+	// Scheme is the :scheme pseudo-header from the request-side HEADERS
+	// frame ("http" for h2c, "https" for TLS+ALPN h2). Empty on the
+	// response side. USK-920.
+	Scheme string
+
+	// Path is the :path pseudo-header from the request-side HEADERS
+	// frame ("/Service/Method"). Empty on the response side. USK-920.
+	// Service / Method are also parsed out individually; Path is retained
+	// verbatim so a malformed :path (which yields Service="" Method="")
+	// still leaves an inspectable trace.
+	Path string
 
 	// Metadata is the full gRPC metadata list. HTTP/2 pseudo-headers are
 	// NOT included here — they belong to the transport layer and are
@@ -53,6 +77,9 @@ func (m *GRPCStartMessage) CloneMessage() Message {
 	return &GRPCStartMessage{
 		Service:        m.Service,
 		Method:         m.Method,
+		Authority:      m.Authority,
+		Scheme:         m.Scheme,
+		Path:           m.Path,
 		Metadata:       cloneKeyValues(m.Metadata),
 		Timeout:        m.Timeout,
 		ContentType:    m.ContentType,

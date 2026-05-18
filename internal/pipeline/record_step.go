@@ -830,8 +830,19 @@ func (s *RecordStep) createStream(ctx context.Context, env *envelope.Envelope) {
 	}
 
 	// Derive scheme from Message type when available.
-	if msg, ok := env.Message.(*envelope.HTTPMessage); ok && msg.Scheme != "" {
-		st.Scheme = msg.Scheme
+	switch msg := env.Message.(type) {
+	case *envelope.HTTPMessage:
+		if msg.Scheme != "" {
+			st.Scheme = msg.Scheme
+		}
+	case *envelope.GRPCStartMessage:
+		// USK-920: project the request-side :scheme onto Stream.Scheme so
+		// listener-captured gRPC streams record the handshake transport
+		// the same way HTTPMessage does. Response-side Start envelopes
+		// carry Scheme="" and are no-ops here.
+		if msg.Scheme != "" {
+			st.Scheme = msg.Scheme
+		}
 	}
 
 	// USK-841 milestone (g): SaveStream call decision. Reveals which Stream
@@ -1241,6 +1252,26 @@ func projectGRPCStart(m *envelope.GRPCStartMessage, fl *flow.Flow) {
 	}
 	if m.Encoding != "" {
 		fl.Metadata["grpc_encoding"] = m.Encoding
+	}
+	// USK-920: project the request-side pseudo-headers (:authority,
+	// :scheme, :path) into Flow.URL so resend_grpc { flow_id } can
+	// recover the RPC target without manual overrides — mirroring the
+	// HTTPMessage projection in envelopeToFlow. Response-side Start
+	// envelopes (Authority=="" && Scheme=="") leave Flow.URL nil because
+	// fl.URL on the receive direction is not used by recovery.
+	if m.Authority != "" || m.Scheme != "" {
+		path := m.Path
+		if path == "" && (m.Service != "" || m.Method != "") {
+			// Defensive: a missing :path with non-empty Service/Method
+			// would mean buildStartMessage was bypassed; reconstruct so
+			// the URL is still well-formed for downstream consumers.
+			path = "/" + m.Service + "/" + m.Method
+		}
+		fl.URL = &url.URL{
+			Scheme: m.Scheme,
+			Host:   m.Authority,
+			Path:   path,
+		}
 	}
 	if hdrs := keyValuesToMap(m.Metadata); hdrs != nil {
 		fl.Headers = hdrs
