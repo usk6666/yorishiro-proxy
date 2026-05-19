@@ -2,6 +2,7 @@ package protobuf
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -101,6 +102,51 @@ func TestEncode_RepeatedField(t *testing.T) {
 		t.Fatalf("Encode round-trip: %v", err)
 	}
 	assertBytesEqual(t, result, result2)
+}
+
+// TestEncode_RecursionDepthExceeded pins the symmetric depth cap with
+// Decode (USK-924). Maps depth 70 (above the 64-cap) onto a deeply nested
+// embedded-message JSON tree and asserts the encoder rejects it before
+// recurring into Go's call stack.
+func TestEncode_RecursionDepthExceeded(t *testing.T) {
+	const depth = 70
+	var sb strings.Builder
+	for i := 0; i < depth; i++ {
+		sb.WriteString(`{"0001:0000:embedded message":`)
+	}
+	sb.WriteString(`{"0001:0000:Varint":42}`)
+	for i := 0; i < depth; i++ {
+		sb.WriteString(`}`)
+	}
+	_, err := Encode(sb.String())
+	if err == nil {
+		t.Fatal("expected recursion-depth error for deeply nested embedded message, got nil")
+	}
+	if !strings.Contains(err.Error(), "recursion depth") {
+		t.Errorf("error %q must mention recursion depth", err)
+	}
+}
+
+// TestEncode_RecursionDepthBoundary asserts depth 64 still succeeds —
+// the cap rejects strictly greater depths only. Round-trips through
+// Decode so the boundary is anchored symmetrically.
+func TestEncode_RecursionDepthBoundary(t *testing.T) {
+	const depth = 64
+	var sb strings.Builder
+	for i := 0; i < depth; i++ {
+		sb.WriteString(`{"0001:0000:embedded message":`)
+	}
+	sb.WriteString(`{"0001:0000:Varint":7}`)
+	for i := 0; i < depth; i++ {
+		sb.WriteString(`}`)
+	}
+	encoded, err := Encode(sb.String())
+	if err != nil {
+		t.Fatalf("Encode at depth %d should succeed: %v", depth, err)
+	}
+	if _, err := Decode(encoded); err != nil {
+		t.Fatalf("Decode round-trip at depth %d should succeed: %v", depth, err)
+	}
 }
 
 // TestEncode_EmbeddedMessage tests encoding a nested message.

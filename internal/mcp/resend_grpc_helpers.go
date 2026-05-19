@@ -217,9 +217,18 @@ type resendGRPCPlan struct {
 }
 
 // resendGRPCDataPlan is one LPM ready for envelope construction.
+//
+// jsonPayload holds the original proto-schemaless-json source string when
+// body_encoding=="proto-schemaless-json" was used at plan resolution time;
+// empty for any other encoding. Used by fuzz_grpc (USK-925) to drive JSON-
+// path position substitution against the proto field tree without
+// round-tripping through Decode (which heuristic-types raw bytes and could
+// reshape the tree).
 type resendGRPCDataPlan struct {
-	payload    []byte
-	compressed bool
+	payload      []byte
+	compressed   bool
+	jsonPayload  string
+	bodyEncoding string
 }
 
 // buildResendGRPCPlan resolves the input into a fully-specified plan.
@@ -560,10 +569,19 @@ func (s *Server) populateResendGRPCMessages(input *resendGRPCInput, plan *resend
 		if m.Compressed && plan.encoding == "" {
 			return fmt.Errorf("messages[%d]: compressed=true requires encoding to be set (identity or gzip)", i)
 		}
-		plan.messages = append(plan.messages, resendGRPCDataPlan{
-			payload:    decoded,
-			compressed: m.Compressed,
-		})
+		entry := resendGRPCDataPlan{
+			payload:      decoded,
+			compressed:   m.Compressed,
+			bodyEncoding: m.BodyEncoding,
+		}
+		// Preserve the proto-schemaless-json source string so fuzz_grpc can
+		// mutate individual proto fields by JSON path without re-decoding
+		// the raw bytes (USK-925). Stored verbatim — re-encoding is the
+		// caller's responsibility.
+		if m.BodyEncoding == "proto-schemaless-json" {
+			entry.jsonPayload = m.Payload
+		}
+		plan.messages = append(plan.messages, entry)
 	}
 	return nil
 }

@@ -20,16 +20,26 @@
 // Position path syntax (typed reference into the GRPCStart + GRPCData
 // envelope shape):
 //
-//	"service"               → GRPCStartMessage.Service
-//	"method"                → GRPCStartMessage.Method
-//	"metadata[N].name"      → GRPCStartMessage.Metadata[N].Name
-//	"metadata[N].value"     → GRPCStartMessage.Metadata[N].Value
-//	"messages[N].payload"   → GRPCDataMessage.Payload (variant N)
+//	"service"                                → GRPCStartMessage.Service
+//	"method"                                 → GRPCStartMessage.Method
+//	"metadata[N].name"                       → GRPCStartMessage.Metadata[N].Name
+//	"metadata[N].value"                      → GRPCStartMessage.Metadata[N].Value
+//	"messages[N].payload"                    → GRPCDataMessage.Payload (variant N) — raw bytes
+//	"messages[N].payload.<FFFF:OOOO:type>"   → one scalar field inside the proto-schemaless-json
+//	                                           source for messages[N] (USK-925). The targeted
+//	                                           message must have been supplied with
+//	                                           body_encoding="proto-schemaless-json"; supported
+//	                                           wire types are String / Varint / 32-bit / 64-bit / bytes.
 //
 // scheme / target_addr / encoding are intentionally NOT fuzz positions —
 // they affect connection setup and would change the dial target rather
 // than the on-wire envelope content. Callers that need to fuzz across
 // schemes should issue separate fuzz_grpc calls.
+//
+// A bytes-level messages[N].payload position and a JSON-path
+// messages[N].payload.<key> position cannot coexist for the same N —
+// the bytes form would silently overwrite the JSON-mutation result.
+// Pick one.
 //
 // Variant generation: cartesian product across positions (full N-way
 // product). Total variant count is capped at maxFuzzGRPCVariants=1000
@@ -97,7 +107,7 @@ type fuzzGRPCInput struct {
 // Encoding: each payload is interpreted per encoding ("text" or
 // "base64"); defaults to "text".
 type fuzzGRPCPosition struct {
-	Path     string   `json:"path" jsonschema:"typed path: service | method | metadata[N].name | metadata[N].value | messages[N].payload"`
+	Path     string   `json:"path" jsonschema:"typed path: service | method | metadata[N].name | metadata[N].value | messages[N].payload | messages[N].payload.<FFFF:OOOO:type> (JSON-path against a proto-schemaless-json message; supported wire types: String, Varint, 32-bit, 64-bit, bytes)"`
 	Payloads []string `json:"payloads" jsonschema:"REQUIRED list of payload values to substitute at this path; at least one element"`
 	Encoding string   `json:"encoding,omitempty" jsonschema:"text|base64 — applies to every payload; default text"`
 }
@@ -143,9 +153,10 @@ func (s *Server) registerFuzzGRPC() {
 		Name: "fuzz_grpc",
 		Description: "Synchronously fuzz a gRPC unary RPC. Schema mirrors resend_grpc plus a positions[] list — " +
 			"each position is a typed path (service | method | metadata[N].name | metadata[N].value | " +
-			"messages[N].payload) with payloads[]. The cartesian product of positions yields the variant " +
-			"sequence (capped at 1000 per call). Each variant runs on an independent stream. " +
-			"stop_on_non_ok aborts on the first non-OK gRPC status. See yorishiro://help/fuzz_grpc.",
+			"messages[N].payload | messages[N].payload.<FFFF:OOOO:type>) with payloads[]. The JSON-path form " +
+			"mutates one scalar field inside a proto-schemaless-json payload (USK-925). The cartesian product " +
+			"of positions yields the variant sequence (capped at 1000 per call). Each variant runs on an " +
+			"independent stream. stop_on_non_ok aborts on the first non-OK gRPC status. See yorishiro://help/fuzz_grpc.",
 	}, s.handleFuzzGRPC)
 }
 

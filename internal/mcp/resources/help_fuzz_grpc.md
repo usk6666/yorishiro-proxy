@@ -14,9 +14,31 @@ The schema mirrors `resend_grpc` plus a `positions[]` list. The cartesian produc
 | `method` | `GRPCStartMessage.Method` |
 | `metadata[N].name` | `GRPCStartMessage.Metadata[N].Name` |
 | `metadata[N].value` | `GRPCStartMessage.Metadata[N].Value` |
-| `messages[N].payload` | `GRPCDataMessage.Payload` (variant N) |
+| `messages[N].payload` | `GRPCDataMessage.Payload` (variant N) — raw bytes |
+| `messages[N].payload.<FFFF:OOOO:type>` | One scalar proto field inside a `proto-schemaless-json` payload (USK-925) |
 
 `scheme` / `target_addr` / `encoding` are intentionally NOT fuzz positions — they affect connection setup and would change the dial target rather than the on-wire envelope content. Callers that need to fuzz across schemes should issue separate `fuzz_grpc` calls.
+
+### JSON-path positions (`messages[N].payload.<key>`)
+
+When the targeted message uses `body_encoding="proto-schemaless-json"`, individual proto fields can be fuzzed by appending the `FFFF:OOOO:type` key after `.payload.`. The path syntax follows the proto-schemaless surface introduced by USK-922 — `FFFF` is the protobuf field number (4-digit lowercase hex), `OOOO` is the ordinal (4-digit lowercase hex, in input-order), and `type` is the wire-type label (`String`, `Varint`, `32-bit`, `64-bit`, `bytes`). Composite types (`repeated`, `embedded message`) are not supported in v1 — they require a structurally-typed payload but the fuzz iterator supplies one string per position.
+
+Per-position payload interpretation:
+
+| Target wire type | Payload format |
+|-------------------|----------------|
+| `String` | UTF-8 text, used verbatim (JSON-string-quoted internally) |
+| `bytes` | Colon-separated hex (matches Decode emission, e.g. `de:ad:be:ef`) |
+| `Varint`, `64-bit` | Base-10 integer (signed allowed; two's-complement round-trips via uint64) |
+| `32-bit` | Base-10 integer that fits in `uint32` |
+
+Multiple JSON-path positions on the same message share a single re-encode — for variant V, all matched proto fields are mutated in the original JSON tree before `protobuf.Encode` rewrites the LPM payload.
+
+A bytes-level `messages[N].payload` position and a JSON-path `messages[N].payload.<key>` position **cannot coexist** for the same N — the bytes form would silently overwrite the JSON-mutation result. Pick one.
+
+### Re-open trigger note (USK-924)
+
+The proto-schemaless-json fuzz path makes `internal/encoding/protobuf.Encode` consume position-mutated JSON every variant. Encode now caps the embedded-message recursion depth symmetrically with Decode (`maxRecursionDepth = 64`, CWE-674); a deeply-nested JSON-path mutation surfaces the cap as `recursion depth N exceeds maximum 64` on the offending variant rather than the proxy walking the goroutine stack.
 
 ## Two operating modes
 
@@ -131,6 +153,33 @@ Variant Streams are stamped `origin = "fuzz"`, so `query { resource: "flows", fi
   ]
 }
 ```
+
+### JSON-path fuzz on a proto-schemaless-json payload (USK-925)
+```json
+{
+  "target_addr": "grpc.target.com:443",
+  "scheme": "https",
+  "service": "pkg.Greeter",
+  "method": "SayHello",
+  "messages": [
+    {
+      "payload": "{\"0001:0000:String\":\"alice\",\"0002:0001:Varint\":42}",
+      "body_encoding": "proto-schemaless-json"
+    }
+  ],
+  "positions": [
+    {
+      "path": "messages[0].payload.0001:0000:String",
+      "payloads": ["alice", "bob", "../../etc/passwd", "<script>"]
+    },
+    {
+      "path": "messages[0].payload.0002:0001:Varint",
+      "payloads": ["0", "1", "2147483647", "-1"]
+    }
+  ]
+}
+```
+Both positions target the same message — the per-variant re-encode merges both mutations into one proto wire payload.
 
 ### Two-position (method x first message payload)
 ```json
