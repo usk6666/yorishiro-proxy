@@ -6,6 +6,7 @@ import { CACertPanel } from "./CACertPanel.js";
 import { CaptureScope } from "./CaptureScope.js";
 import { ClientCertificate } from "./ClientCertificate.js";
 import { ConnectionSettings } from "./ConnectionSettings.js";
+import { GrpcSchemas } from "./GrpcSchemas.js";
 import { InterceptRules } from "./InterceptRules.js";
 import { ProxyControl } from "./ProxyControl.js";
 import "./SettingsPage.css";
@@ -19,6 +20,7 @@ const TABS = [
   { id: "capture", label: "Capture Scope" },
   { id: "tls", label: "TLS Passthrough" },
   { id: "tcp-forwards", label: "TCP Forwards" },
+  { id: "grpc-schemas", label: "gRPC Schemas" },
   { id: "intercept", label: "Intercept Rules" },
   { id: "transform", label: "Auto-Transform" },
   { id: "socks5-auth", label: "SOCKS5 Auth" },
@@ -137,6 +139,9 @@ export function SettingsPage() {
             {(c) => <TcpForwards config={c} onRefresh={handleRefresh} />}
           </TabContent>
         );
+
+      case "grpc-schemas":
+        return <GrpcSchemas />;
 
       case "intercept":
         return (

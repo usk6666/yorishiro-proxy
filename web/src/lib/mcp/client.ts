@@ -17,6 +17,11 @@ import type {
   ConnectionStatus,
   ExecuteParams,
   FuzzToolParams,
+  GrpcSchemaClearResult,
+  GrpcSchemaListResult,
+  GrpcSchemaParams,
+  GrpcSchemaRegisterResult,
+  GrpcSchemaUnregisterResult,
   InterceptActionParams,
   MacroToolParams,
   ManageParams,
@@ -38,6 +43,18 @@ import type {
   ResendWSResult,
   SecurityParams,
 } from "./types.js";
+
+/**
+ * Union of grpc_schema action results, keyed by the same `action` value
+ * passed in `GrpcSchemaParams`. Callers narrow with `as`-casts or
+ * `switch (params.action)` since the wire response shape depends on the
+ * action discriminator only.
+ */
+export type GrpcSchemaResult =
+  | GrpcSchemaRegisterResult
+  | GrpcSchemaListResult
+  | GrpcSchemaUnregisterResult
+  | GrpcSchemaClearResult;
 
 /** Configuration for the MCP client. */
 export interface McpClientConfig {
@@ -317,6 +334,24 @@ export class McpClient {
   async resendRaw(params: ResendRawParams): Promise<ResendRawTypedResult> {
     return this.callTool<ResendRawTypedResult>(
       "resend_raw",
+      params as unknown as Record<string, unknown>,
+    );
+  }
+
+  /**
+   * Manage gRPC .proto schemas (USK-923 / USK-926).
+   *
+   * Single MCP entry with an `action` discriminator. Returns the
+   * action-specific result shape — callers narrow on `params.action`
+   * (`GrpcSchemaResult` is the typed union). Used by the
+   * `useGrpcSchema` / `useGrpcSchemaList` hooks driving the Settings
+   * `gRPC Schemas` panel.
+   */
+  async grpcSchema<R extends GrpcSchemaResult = GrpcSchemaResult>(
+    params: GrpcSchemaParams,
+  ): Promise<R> {
+    return this.callTool<R>(
+      "grpc_schema",
       params as unknown as Record<string, unknown>,
     );
   }
