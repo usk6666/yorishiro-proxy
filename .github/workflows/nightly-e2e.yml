@@ -37,6 +37,14 @@ jobs:
         with:
           go-version: "1.25.x"
 
+      - name: Install protoc
+        # protoc is required by the USK-926 grpc_schema source="file"
+        # e2e test (internal/mcp/grpc_schema_file_source_integration_test.go).
+        # Tests that need protoc gate on exec.LookPath and t.Skip when
+        # absent, so this step is a soft requirement: without it, the
+        # file-source happy-path tests skip silently.
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
       - name: Build UI
         run: make build-ui
 

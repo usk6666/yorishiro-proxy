@@ -1,5 +1,5 @@
 // Package mcp grpc_schema_tool.go implements the schema-aware gRPC .proto
-// schema management tool (USK-923).
+// schema management tool (USK-923 + USK-926).
 //
 // The tool is a single MCP entry with an `action` discriminator
 // (register / list / unregister / clear), mirroring the macro / manage /
@@ -8,10 +8,20 @@
 // protoschema.Registry on Server.grpcSchemas is rehydrated from the
 // table at first use so registrations survive process restart.
 //
-// register accepts source="descriptor_set" only — a precompiled
-// FileDescriptorSet binary (base64-encoded). source="file" / proto_paths
-// is rejected at the schema boundary with a pointer to protoc
-// --include_imports (D1 deferred to a follow-up Issue).
+// register accepts two source modes:
+//
+//   - source="descriptor_set" (the recommended default, USK-923): a
+//     precompiled FileDescriptorSet binary (base64-encoded). The user
+//     runs `protoc --include_imports --descriptor_set_out=...` on the
+//     operator machine and supplies the result.
+//   - source="file" (USK-926): the proxy invokes a host protoc binary
+//     to compile a list of absolute .proto paths into a
+//     FileDescriptorSet on the operator's behalf. See
+//     internal/encoding/protoschema/protoc_runner.go for the security
+//     posture (allowed-roots validation, 30s timeout, env-minimisation).
+//
+// Both modes feed the same downstream LoadFileDescriptorSet → SaveGRPCSchema
+// → Registry.Register pipeline (Resolved #2, #18).
 package mcp
 
 import (
@@ -19,13 +29,21 @@ import (
 	"encoding/base64"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/encoding/protoschema"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 )
+
+// osGetwd is package-private indirection over os.Getwd so the test
+// harness can pin a known directory without mutating process state.
+// Production callers always hit the real os.Getwd via this var.
+var osGetwd = os.Getwd
 
 // grpcSchemaToolInput is the typed input for the grpc_schema tool.
 type grpcSchemaToolInput struct {
@@ -39,10 +57,10 @@ type grpcSchemaToolInput struct {
 // grpcSchemaToolParams is the union of all grpc_schema action parameters.
 // Only the fields relevant to the specified action are read.
 type grpcSchemaToolParams struct {
-	// Source is the descriptor input shape. USK-923 accepts
-	// "descriptor_set" only; "file" is rejected with a pointer to
-	// protoc --include_imports.
-	Source string `json:"source,omitempty" jsonschema:"input shape; only 'descriptor_set' is currently supported"`
+	// Source is the descriptor input shape. Accepts
+	// "descriptor_set" (USK-923 default; supply DescriptorSetB64) or
+	// "file" (USK-926; supply ProtoPaths and optionally ImportPaths).
+	Source string `json:"source,omitempty" jsonschema:"input shape; one of 'descriptor_set' (default; supply descriptor_set_b64) or 'file' (supply proto_paths)"`
 	// DescriptorSetB64 is the base64-encoded FileDescriptorSet payload.
 	// Required when action=register and source=descriptor_set. Capped at
 	// 16 MiB after base64 decode.
@@ -57,10 +75,16 @@ type grpcSchemaToolParams struct {
 	// Service is the fully-qualified service name. Required for
 	// action=unregister.
 	Service string `json:"service,omitempty" jsonschema:"fully-qualified service name (required for unregister)"`
-	// ProtoPaths is rejected for USK-923; surfaced on the schema so AI
-	// agents see a clear error message instead of a silently ignored
-	// field. Reserved for a follow-up Issue (D1 deferred).
-	ProtoPaths []string `json:"proto_paths,omitempty" jsonschema:"reserved for source='file' (deferred to a follow-up Issue); the field is rejected when populated"`
+	// ProtoPaths is the list of absolute .proto file paths to compile
+	// when source="file". Each path must be absolute, syntactically
+	// clean (no "..", no double-slashes), and fall under the proxy CWD
+	// or one of the supplied ImportPaths (USK-926).
+	ProtoPaths []string `json:"proto_paths,omitempty" jsonschema:"absolute paths to .proto files (required when source='file'); each path must be canonical and fall under proxy CWD or one of import_paths"`
+	// ImportPaths is the list of -I roots passed to protoc. Optional;
+	// when empty, the runner derives a single root per filepath.Dir of
+	// each proto path. Each entry follows the same validation as
+	// ProtoPaths.
+	ImportPaths []string `json:"import_paths,omitempty" jsonschema:"optional absolute -I roots for protoc when source='file'; defaults to the parent directory of each proto path"`
 }
 
 // availableGRPCSchemaActions enumerates valid action names for the
@@ -72,8 +96,10 @@ func (s *Server) registerGRPCSchema() {
 	gomcp.AddTool(s.server, &gomcp.Tool{
 		Name: "grpc_schema",
 		Description: "Manage .proto schemas for schema-aware gRPC decode (query) and encode (resend_grpc). " +
-			"Actions: 'register' (upsert a service from a precompiled FileDescriptorSet base64 payload — " +
-			"generate via `protoc --include_imports --descriptor_set_out=<file> <protos>`, max 16 MiB decoded), " +
+			"Actions: 'register' (upsert a service from either a precompiled FileDescriptorSet via " +
+			"source=\"descriptor_set\" + descriptor_set_b64 — the recommended path, generate via " +
+			"`protoc --include_imports --descriptor_set_out=<file> <protos>`, max 16 MiB decoded — or " +
+			"source=\"file\" + absolute proto_paths which invokes a host protoc binary), " +
 			"'list' (registered services + methods), 'unregister' (remove a service by name), 'clear' (remove all). " +
 			"Once a schema is registered, query messages decodes matching gRPC Data bodies as protojson with real " +
 			"field names (body_decoded_encoding=\"proto-json\") and resend_grpc accepts body_encoding=\"proto-json\". " +
@@ -165,9 +191,11 @@ type grpcSchemaMethodEntry struct {
 	Output string `json:"output"`
 }
 
-// handleGRPCSchemaRegister parses the descriptor_set_b64 payload, filters
-// by service_filter, persists the result via SchemaStore, and updates the
-// in-memory Registry.
+// handleGRPCSchemaRegister parses the requested source mode (base64
+// descriptor_set or host protoc invocation against proto_paths),
+// filters by service_filter, persists the result via SchemaStore, and
+// updates the in-memory Registry. The persist→register tail is
+// identical across modes (Resolved #2, #18).
 func (s *Server) handleGRPCSchemaRegister(ctx context.Context, params grpcSchemaToolParams) (*grpcSchemaRegisterResult, error) {
 	if s.flowStore.store == nil {
 		return nil, fmt.Errorf("flow store is not initialized")
@@ -176,22 +204,9 @@ func (s *Server) handleGRPCSchemaRegister(ctx context.Context, params grpcSchema
 		return nil, err
 	}
 
-	// Pre-decode size cap on the base64 input itself (USK-923 review S-1,
-	// CWE-770). Base64 encodes 3 bytes into 4 chars; cap the encoded
-	// length at the equivalent of MaxDescriptorSetBytes + a small slack
-	// (padding, newlines) so a pathological input cannot allocate
-	// gigabytes during DecodeString before the post-decode cap fires.
-	maxEncodedLen := protoschema.MaxDescriptorSetBytes*4/3 + 64
-	if len(params.DescriptorSetB64) > maxEncodedLen {
-		return nil, fmt.Errorf("descriptor_set_b64 length %d exceeds maximum encoded size %d (decoded cap is %d bytes)", len(params.DescriptorSetB64), maxEncodedLen, protoschema.MaxDescriptorSetBytes)
-	}
-
-	raw, err := base64.StdEncoding.DecodeString(params.DescriptorSetB64)
+	raw, sourceLabel, err := s.loadDescriptorBytes(ctx, params)
 	if err != nil {
-		return nil, fmt.Errorf("decode descriptor_set_b64: %w", err)
-	}
-	if len(raw) > protoschema.MaxDescriptorSetBytes {
-		return nil, fmt.Errorf("descriptor_set size %d exceeds maximum %d bytes after base64 decode", len(raw), protoschema.MaxDescriptorSetBytes)
+		return nil, err
 	}
 
 	specs, err := protoschema.LoadFileDescriptorSet(raw, params.ServiceFilter)
@@ -202,11 +217,11 @@ func (s *Server) handleGRPCSchemaRegister(ctx context.Context, params grpcSchema
 	// Persist before updating the in-memory registry: if the SQLite write
 	// fails partway through, the registry stays consistent with disk.
 	for _, spec := range specs {
-		if perr := s.flowStore.store.SaveGRPCSchema(ctx, spec.Service, raw, params.SourceLabel); perr != nil {
+		if perr := s.flowStore.store.SaveGRPCSchema(ctx, spec.Service, raw, sourceLabel); perr != nil {
 			return nil, fmt.Errorf("save schema for service %q: %w", spec.Service, perr)
 		}
-		if params.SourceLabel != "" {
-			spec.SourceLabel = params.SourceLabel
+		if sourceLabel != "" {
+			spec.SourceLabel = sourceLabel
 		}
 	}
 
@@ -221,23 +236,170 @@ func (s *Server) handleGRPCSchemaRegister(ctx context.Context, params grpcSchema
 	return result, nil
 }
 
-// validateGRPCSchemaRegisterInput enforces the source allowlist and the
-// presence of descriptor_set_b64. The "file" source / proto_paths fields
-// are rejected with a clear pointer to protoc --include_imports.
-func validateGRPCSchemaRegisterInput(params grpcSchemaToolParams) error {
-	if len(params.ProtoPaths) > 0 {
-		return fmt.Errorf("proto_paths is reserved for a deferred follow-up Issue; run `protoc --include_imports --descriptor_set_out=<file> <protos>` and pass the base64-encoded result as descriptor_set_b64 (see help_grpc_schema for details)")
-	}
-	if params.Source != "" && params.Source != "descriptor_set" {
-		if params.Source == "file" {
-			return fmt.Errorf("source=\"file\" is not yet supported; run `protoc --include_imports --descriptor_set_out=<file> <protos>` and pass the base64-encoded result as descriptor_set_b64 (see help_grpc_schema for details)")
+// loadDescriptorBytes is the source-mode adaptor: given a validated
+// params struct, returns the FileDescriptorSet bytes and the effective
+// source label. Per-source-mode branches are kept tight so the
+// persist+Register tail in handleGRPCSchemaRegister stays a single
+// shared block (Resolved #2).
+func (s *Server) loadDescriptorBytes(ctx context.Context, params grpcSchemaToolParams) ([]byte, string, error) {
+	if params.Source == "file" {
+		raw, err := s.loadDescriptorFromFiles(ctx, params)
+		if err != nil {
+			return nil, "", err
 		}
-		return fmt.Errorf("source %q is not supported; use source=\"descriptor_set\"", params.Source)
+		label := params.SourceLabel
+		if label == "" {
+			label = deriveFileSourceLabel(params.ProtoPaths)
+		}
+		return raw, label, nil
 	}
-	if params.DescriptorSetB64 == "" {
-		return fmt.Errorf("descriptor_set_b64 is required for action=register (generate via `protoc --include_imports --descriptor_set_out=<file> <protos>` and base64-encode the result)")
+	raw, err := decodeDescriptorSetB64(params.DescriptorSetB64)
+	if err != nil {
+		return nil, "", err
 	}
-	return nil
+	return raw, params.SourceLabel, nil
+}
+
+// decodeDescriptorSetB64 is the source="descriptor_set" branch of
+// loadDescriptorBytes. Carries the USK-923 pre/post-decode size caps.
+func decodeDescriptorSetB64(b64 string) ([]byte, error) {
+	// Pre-decode size cap on the base64 input itself (USK-923 review S-1,
+	// CWE-770). Base64 encodes 3 bytes into 4 chars; cap the encoded
+	// length at the equivalent of MaxDescriptorSetBytes + a small slack
+	// (padding, newlines) so a pathological input cannot allocate
+	// gigabytes during DecodeString before the post-decode cap fires.
+	maxEncodedLen := protoschema.MaxDescriptorSetBytes*4/3 + 64
+	if len(b64) > maxEncodedLen {
+		return nil, fmt.Errorf("descriptor_set_b64 length %d exceeds maximum encoded size %d (decoded cap is %d bytes)", len(b64), maxEncodedLen, protoschema.MaxDescriptorSetBytes)
+	}
+	raw, err := base64.StdEncoding.DecodeString(b64)
+	if err != nil {
+		return nil, fmt.Errorf("decode descriptor_set_b64: %w", err)
+	}
+	if len(raw) > protoschema.MaxDescriptorSetBytes {
+		return nil, fmt.Errorf("descriptor_set size %d exceeds maximum %d bytes after base64 decode", len(raw), protoschema.MaxDescriptorSetBytes)
+	}
+	return raw, nil
+}
+
+// loadDescriptorFromFiles is the source="file" branch of
+// loadDescriptorBytes. Resolves the protoc binary from config/env,
+// derives the allowed roots (server CWD + caller-supplied
+// import_paths, falling back to the proto path's parent dirs), and
+// invokes the runner.
+func (s *Server) loadDescriptorFromFiles(ctx context.Context, params grpcSchemaToolParams) ([]byte, error) {
+	binary := config.ResolveProtocBinary(s.connector.proxyDefaults)
+	allowedRoots, err := buildAllowedRoots(params)
+	if err != nil {
+		return nil, err
+	}
+	res, err := protoschema.RunProtoc(ctx, protoschema.ProtocRunOptions{
+		Binary:       binary,
+		ProtoPaths:   params.ProtoPaths,
+		ImportPaths:  params.ImportPaths,
+		AllowedRoots: allowedRoots,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return res.DescriptorSet, nil
+}
+
+// buildAllowedRoots assembles the allowed-roots set for a source="file"
+// invocation. Always includes the server's CWD plus every supplied
+// import_path; when import_paths is empty, also includes the parent
+// directory of each proto_path so the implicit `-I<dir-of-proto>`
+// derivation lines up with the path-validation check.
+func buildAllowedRoots(params grpcSchemaToolParams) ([]string, error) {
+	cwd, err := osGetwd()
+	if err != nil {
+		return nil, fmt.Errorf("resolve server cwd for allowed_roots: %w", err)
+	}
+	roots := []string{cwd}
+	seen := map[string]struct{}{cwd: {}}
+	add := func(p string) {
+		if p == "" {
+			return
+		}
+		if _, ok := seen[p]; ok {
+			return
+		}
+		seen[p] = struct{}{}
+		roots = append(roots, p)
+	}
+	for _, p := range params.ImportPaths {
+		add(p)
+	}
+	if len(params.ImportPaths) == 0 {
+		for _, p := range params.ProtoPaths {
+			add(filepath.Dir(p))
+		}
+	}
+	return roots, nil
+}
+
+// validateGRPCSchemaRegisterInput enforces the source × proto_paths ×
+// descriptor_set_b64 mutex (Resolved U3). The behaviour matrix:
+//
+//   - empty source + descriptor_set_b64 set → accepted (USK-923 back-compat)
+//   - empty source + proto_paths set        → error (must declare source=file)
+//   - source="descriptor_set" + proto_paths → error (mode mismatch)
+//   - source="file" + proto_paths empty     → error (file mode needs paths)
+//   - source="file" + proto_paths set       → accepted (USK-926 happy path)
+//   - any other source value                → error
+func validateGRPCSchemaRegisterInput(params grpcSchemaToolParams) error {
+	switch params.Source {
+	case "":
+		// USK-923 back-compat: empty source means descriptor_set mode.
+		// Reject proto_paths in this branch — the caller has to be
+		// explicit about file mode (U3).
+		if len(params.ProtoPaths) > 0 {
+			return fmt.Errorf("source=\"file\" must be set explicitly when proto_paths is provided")
+		}
+		if len(params.ImportPaths) > 0 {
+			return fmt.Errorf("import_paths is only valid with source=\"file\"")
+		}
+		if params.DescriptorSetB64 == "" {
+			return fmt.Errorf("descriptor_set_b64 is required for action=register (generate via `protoc --include_imports --descriptor_set_out=<file> <protos>` and base64-encode the result)")
+		}
+		return nil
+	case "descriptor_set":
+		if len(params.ProtoPaths) > 0 {
+			return fmt.Errorf("proto_paths is only valid with source=\"file\"")
+		}
+		if len(params.ImportPaths) > 0 {
+			return fmt.Errorf("import_paths is only valid with source=\"file\"")
+		}
+		if params.DescriptorSetB64 == "" {
+			return fmt.Errorf("descriptor_set_b64 is required for action=register (generate via `protoc --include_imports --descriptor_set_out=<file> <protos>` and base64-encode the result)")
+		}
+		return nil
+	case "file":
+		if len(params.ProtoPaths) == 0 {
+			return fmt.Errorf("proto_paths is required when source=\"file\"")
+		}
+		if params.DescriptorSetB64 != "" {
+			return fmt.Errorf("descriptor_set_b64 is only valid with source=\"descriptor_set\"")
+		}
+		return nil
+	default:
+		return fmt.Errorf("source %q is not supported; use source=\"descriptor_set\" or source=\"file\"", params.Source)
+	}
+}
+
+// deriveFileSourceLabel produces a comma-joined list of proto-file
+// basenames when source_label is omitted in file mode (Resolved #19).
+// Empty paths slice (which the validator already rejects upstream)
+// returns the empty string defensively.
+func deriveFileSourceLabel(protoPaths []string) string {
+	if len(protoPaths) == 0 {
+		return ""
+	}
+	names := make([]string, 0, len(protoPaths))
+	for _, p := range protoPaths {
+		names = append(names, filepath.Base(p))
+	}
+	return strings.Join(names, ",")
 }
 
 // handleGRPCSchemaList returns every registered service ordered by service

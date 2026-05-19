@@ -91,7 +91,32 @@ func TestGRPCSchema_Register_Happy(t *testing.T) {
 	}
 }
 
-func TestGRPCSchema_Register_RejectsFileSource(t *testing.T) {
+// TestGRPCSchema_Register_FileSource_RequiresExplicitSource — U3:
+// supplying proto_paths without source="file" is rejected; the caller
+// has to be explicit about the mode (no auto-routing).
+func TestGRPCSchema_Register_FileSource_RequiresExplicitSource(t *testing.T) {
+	t.Parallel()
+	store := newTestStore(t)
+	cs := setupGRPCSchemaTestSession(t, store)
+
+	result := callGRPCSchema(t, cs, map[string]any{
+		"action": "register",
+		"params": map[string]any{
+			"proto_paths": []any{"/abs/protos/x.proto"},
+		},
+	})
+	if !result.IsError {
+		t.Fatal("expected error for proto_paths without source=file")
+	}
+	msg := extractTextContent(result)
+	if !strings.Contains(msg, "source=\"file\"") {
+		t.Errorf("error must mention source=\"file\" requirement: %q", msg)
+	}
+}
+
+// TestGRPCSchema_Register_FileSource_RequiresProtoPaths — U3:
+// source="file" with no proto_paths is rejected.
+func TestGRPCSchema_Register_FileSource_RequiresProtoPaths(t *testing.T) {
 	t.Parallel()
 	store := newTestStore(t)
 	cs := setupGRPCSchemaTestSession(t, store)
@@ -103,15 +128,17 @@ func TestGRPCSchema_Register_RejectsFileSource(t *testing.T) {
 		},
 	})
 	if !result.IsError {
-		t.Fatal("expected error for source=file")
+		t.Fatal("expected error for source=file with no proto_paths")
 	}
 	msg := extractTextContent(result)
-	if !strings.Contains(msg, "include_imports") {
-		t.Errorf("error must point at protoc --include_imports: %q", msg)
+	if !strings.Contains(msg, "proto_paths is required") {
+		t.Errorf("error must mention proto_paths required: %q", msg)
 	}
 }
 
-func TestGRPCSchema_Register_RejectsProtoPaths(t *testing.T) {
+// TestGRPCSchema_Register_DescriptorSetSource_RejectsProtoPaths — U3:
+// explicit source="descriptor_set" + proto_paths is a mode mismatch.
+func TestGRPCSchema_Register_DescriptorSetSource_RejectsProtoPaths(t *testing.T) {
 	t.Parallel()
 	store := newTestStore(t)
 	cs := setupGRPCSchemaTestSession(t, store)
@@ -119,15 +146,59 @@ func TestGRPCSchema_Register_RejectsProtoPaths(t *testing.T) {
 	result := callGRPCSchema(t, cs, map[string]any{
 		"action": "register",
 		"params": map[string]any{
-			"proto_paths": []any{"./protos"},
+			"source":             "descriptor_set",
+			"descriptor_set_b64": "Cg==",
+			"proto_paths":        []any{"/abs/protos/x.proto"},
 		},
 	})
 	if !result.IsError {
-		t.Fatal("expected error for proto_paths")
+		t.Fatal("expected error for source=descriptor_set with proto_paths")
 	}
 	msg := extractTextContent(result)
-	if !strings.Contains(msg, "proto_paths") {
-		t.Errorf("error must mention proto_paths: %q", msg)
+	if !strings.Contains(msg, "proto_paths is only valid with source=\"file\"") {
+		t.Errorf("error must explain mode mismatch: %q", msg)
+	}
+}
+
+// TestGRPCSchema_Register_FileSource_RejectsDescriptorSetB64 — U3:
+// source="file" with descriptor_set_b64 set is a mode mismatch.
+func TestGRPCSchema_Register_FileSource_RejectsDescriptorSetB64(t *testing.T) {
+	t.Parallel()
+	store := newTestStore(t)
+	cs := setupGRPCSchemaTestSession(t, store)
+
+	result := callGRPCSchema(t, cs, map[string]any{
+		"action": "register",
+		"params": map[string]any{
+			"source":             "file",
+			"proto_paths":        []any{"/abs/protos/x.proto"},
+			"descriptor_set_b64": "Cg==",
+		},
+	})
+	if !result.IsError {
+		t.Fatal("expected error for source=file with descriptor_set_b64")
+	}
+	msg := extractTextContent(result)
+	if !strings.Contains(msg, "descriptor_set_b64 is only valid with source=\"descriptor_set\"") {
+		t.Errorf("error must explain mode mismatch: %q", msg)
+	}
+}
+
+// TestGRPCSchema_Register_UnknownSource — any source value outside the
+// {empty, descriptor_set, file} allowlist must be rejected.
+func TestGRPCSchema_Register_UnknownSource(t *testing.T) {
+	t.Parallel()
+	store := newTestStore(t)
+	cs := setupGRPCSchemaTestSession(t, store)
+
+	result := callGRPCSchema(t, cs, map[string]any{
+		"action": "register",
+		"params": map[string]any{
+			"source": "reflection",
+		},
+	})
+	if !result.IsError {
+		t.Fatal("expected error for unknown source")
 	}
 }
 

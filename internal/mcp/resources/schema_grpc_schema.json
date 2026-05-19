@@ -16,8 +16,8 @@
       "properties": {
         "source": {
           "type": "string",
-          "description": "Input shape. Only 'descriptor_set' is currently supported; 'file' is rejected with a pointer to protoc --include_imports.",
-          "enum": ["descriptor_set", ""]
+          "description": "Input shape. 'descriptor_set' (default; supply descriptor_set_b64 — the recommended path) or 'file' (supply proto_paths; invokes a host protoc binary).",
+          "enum": ["descriptor_set", "file", ""]
         },
         "descriptor_set_b64": {
           "type": "string",
@@ -38,7 +38,12 @@
         },
         "proto_paths": {
           "type": "array",
-          "description": "Reserved for a future Issue (source='file' deferred); the field is rejected when populated.",
+          "description": "Absolute paths to .proto files (required when source='file'). Each path must be canonical and fall under the proxy CWD or one of import_paths.",
+          "items": { "type": "string" }
+        },
+        "import_paths": {
+          "type": "array",
+          "description": "Optional absolute -I roots for protoc when source='file'. Defaults to the parent directory of each proto path.",
           "items": { "type": "string" }
         }
       },
