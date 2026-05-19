@@ -10,12 +10,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMcpContext } from "./context.js";
 import type { McpClient } from "./client.js";
+import type { GrpcSchemaResult } from "./client.js";
 import type {
   ConfigureParams,
   ConfigureResult,
   ConnectionStatus,
   ExecuteParams,
   FuzzToolParams,
+  GrpcSchemaListResult,
+  GrpcSchemaParams,
   InterceptActionParams,
   MacroToolParams,
   ManageParams,
@@ -689,6 +692,101 @@ export function usePluginIntrospect(): UsePluginIntrospectResult {
     setError(null);
     try {
       const result = await client.pluginIntrospect();
+      setData(result);
+    } catch (err) {
+      setError(err instanceof Error ? err : new Error(String(err)));
+    } finally {
+      setLoading(false);
+    }
+  }, [client, status]);
+
+  useEffect(() => {
+    if (status !== "connected") return;
+    refetch();
+  }, [status, refetch]);
+
+  return { data, loading, error, refetch };
+}
+
+// ---------------------------------------------------------------------------
+// useGrpcSchema — grpc_schema tool (register / unregister / clear actions)
+// ---------------------------------------------------------------------------
+
+/** Return type for useGrpcSchema. */
+export interface UseGrpcSchemaResult {
+  /** Execute a grpc_schema action. Returns the action-specific result. */
+  grpcSchema: <R extends GrpcSchemaResult = GrpcSchemaResult>(
+    params: GrpcSchemaParams,
+  ) => Promise<R>;
+  /** Whether a grpc_schema operation is in progress. */
+  loading: boolean;
+  /** Last grpc_schema error, if any. */
+  error: Error | null;
+}
+
+/**
+ * Hook to call the MCP grpc_schema tool (register / unregister / clear).
+ *
+ * For the `list` action prefer {@link useGrpcSchemaList}, which auto-fetches
+ * on connect and exposes `refetch`. This hook covers the mutating actions
+ * (register, unregister, clear) and matches the action-hook shape used
+ * elsewhere in this module.
+ *
+ * @example
+ * ```tsx
+ * const { grpcSchema, loading } = useGrpcSchema();
+ * await grpcSchema({ action: "unregister", params: { service: "pkg.Svc" } });
+ * ```
+ */
+export function useGrpcSchema(): UseGrpcSchemaResult {
+  const { execute, loading, error } = useMcpAction(
+    (client: McpClient, params: GrpcSchemaParams) => client.grpcSchema(params),
+  );
+  return {
+    grpcSchema: execute as <R extends GrpcSchemaResult = GrpcSchemaResult>(
+      params: GrpcSchemaParams,
+    ) => Promise<R>,
+    loading,
+    error,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// useGrpcSchemaList — grpc_schema action="list" auto-fetch hook
+// ---------------------------------------------------------------------------
+
+/** Return type for useGrpcSchemaList. */
+export interface UseGrpcSchemaListResult {
+  /** Latest list snapshot. Null while the first fetch is in flight. */
+  data: GrpcSchemaListResult | null;
+  /** Whether a fetch is currently in progress. */
+  loading: boolean;
+  /** Last fetch error, if any. */
+  error: Error | null;
+  /** Manually re-fetch the schema list. */
+  refetch: () => Promise<void>;
+}
+
+/**
+ * Hook that auto-fetches the grpc_schema list when the MCP client connects.
+ * Modelled on {@link usePluginIntrospect}: parameterless query-style hook
+ * with `data` / `loading` / `error` / `refetch`. Callers should `refetch()`
+ * after a mutating action (register / unregister / clear).
+ */
+export function useGrpcSchemaList(): UseGrpcSchemaListResult {
+  const { client, status } = useMcpContext();
+  const [data, setData] = useState<GrpcSchemaListResult | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<Error | null>(null);
+
+  const refetch = useCallback(async () => {
+    if (!client || status !== "connected") return;
+    setLoading(true);
+    setError(null);
+    try {
+      const result = await client.grpcSchema<GrpcSchemaListResult>({
+        action: "list",
+      });
       setData(result);
     } catch (err) {
       setError(err instanceof Error ? err : new Error(String(err)));

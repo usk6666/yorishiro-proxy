@@ -1573,6 +1573,80 @@ export interface ResendRawTypedResult {
 }
 
 // ---------------------------------------------------------------------------
+// grpc_schema tool — schema-aware gRPC .proto management (USK-923 / USK-926)
+// ---------------------------------------------------------------------------
+
+/** Available grpc_schema actions. */
+export type GrpcSchemaAction =
+  | "register"
+  | "list"
+  | "unregister"
+  | "clear";
+
+/** Descriptor input shape for action=register. */
+export type GrpcSchemaSource = "descriptor_set" | "file";
+
+/** Action-specific parameters for the grpc_schema tool. */
+export interface GrpcSchemaToolParams {
+  /** Source mode (register only). */
+  source?: GrpcSchemaSource;
+  /** Base64-encoded FileDescriptorSet payload (register, source=descriptor_set). Max 16 MiB decoded. */
+  descriptor_set_b64?: string;
+  /** Optional service-name allowlist applied during register. */
+  service_filter?: string[];
+  /** Free-form diagnostic label preserved in list output. */
+  source_label?: string;
+  /** Fully-qualified service name (unregister only). */
+  service?: string;
+  /** Absolute .proto paths (register, source=file). */
+  proto_paths?: string[];
+  /** Optional -I roots for protoc (register, source=file). */
+  import_paths?: string[];
+}
+
+/** Parameters for the grpc_schema MCP tool. */
+export interface GrpcSchemaParams {
+  action: GrpcSchemaAction;
+  params?: GrpcSchemaToolParams;
+}
+
+/** One method entry inside a registered gRPC service. */
+export interface GrpcSchemaMethodEntry {
+  name: string;
+  input: string;
+  output: string;
+}
+
+/** One service entry returned by register / list. */
+export interface GrpcSchemaServiceEntry {
+  service: string;
+  methods: GrpcSchemaMethodEntry[];
+  source_label?: string;
+  registered_at?: string;
+}
+
+/** Result of grpc_schema action=register. */
+export interface GrpcSchemaRegisterResult {
+  registered: GrpcSchemaServiceEntry[];
+}
+
+/** Result of grpc_schema action=list. */
+export interface GrpcSchemaListResult {
+  schemas: GrpcSchemaServiceEntry[];
+}
+
+/** Result of grpc_schema action=unregister. */
+export interface GrpcSchemaUnregisterResult {
+  service: string;
+  unregistered: boolean;
+}
+
+/** Result of grpc_schema action=clear. */
+export interface GrpcSchemaClearResult {
+  cleared: number;
+}
+
+// ---------------------------------------------------------------------------
 // MCP client connection state
 // ---------------------------------------------------------------------------
 
