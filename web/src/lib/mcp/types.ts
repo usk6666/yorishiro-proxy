@@ -1581,10 +1581,14 @@ export type GrpcSchemaAction =
   | "register"
   | "list"
   | "unregister"
-  | "clear";
+  | "clear"
+  | "discover";
 
 /** Descriptor input shape for action=register. */
 export type GrpcSchemaSource = "descriptor_set" | "file";
+
+/** Transport scheme for action=discover. */
+export type GrpcSchemaDiscoverScheme = "https" | "http";
 
 /** Action-specific parameters for the grpc_schema tool. */
 export interface GrpcSchemaToolParams {
@@ -1592,7 +1596,7 @@ export interface GrpcSchemaToolParams {
   source?: GrpcSchemaSource;
   /** Base64-encoded FileDescriptorSet payload (register, source=descriptor_set). Max 16 MiB decoded. */
   descriptor_set_b64?: string;
-  /** Optional service-name allowlist applied during register. */
+  /** Optional service-name allowlist applied during register / discover. */
   service_filter?: string[];
   /** Free-form diagnostic label preserved in list output. */
   source_label?: string;
@@ -1602,6 +1606,14 @@ export interface GrpcSchemaToolParams {
   proto_paths?: string[];
   /** Optional -I roots for protoc (register, source=file). */
   import_paths?: string[];
+  /** Upstream `host:port` exposing the gRPC reflection endpoint (discover only). */
+  target_addr?: string;
+  /** Transport scheme (discover only). Defaults to `https`. */
+  scheme?: GrpcSchemaDiscoverScheme;
+  /** Optional ordered gRPC metadata forwarded on the reflection stream (discover only). */
+  metadata?: HeaderKV[];
+  /** Per-call timeout in milliseconds (discover only). Default 30000, server caps at 300000. */
+  timeout_ms?: number;
 }
 
 /** Parameters for the grpc_schema MCP tool. */
@@ -1644,6 +1656,13 @@ export interface GrpcSchemaUnregisterResult {
 /** Result of grpc_schema action=clear. */
 export interface GrpcSchemaClearResult {
   cleared: number;
+}
+
+/** Result of grpc_schema action=discover (USK-928). */
+export interface GrpcSchemaDiscoverResult {
+  discovered: GrpcSchemaServiceEntry[];
+  target: string;
+  reflection_version?: string;
 }
 
 // ---------------------------------------------------------------------------
