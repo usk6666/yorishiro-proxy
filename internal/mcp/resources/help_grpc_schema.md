@@ -7,7 +7,7 @@ Once a schema is registered, the `query` tool decodes matching gRPC Data envelop
 ## Parameters
 
 ### action (string, required)
-One of: `register`, `list`, `unregister`, `clear`.
+One of: `register`, `list`, `unregister`, `clear`, `discover`.
 
 ### params (object)
 Action-specific parameters.
@@ -55,6 +55,31 @@ The proxy invokes a host `protoc` binary to compile a list of absolute `.proto` 
 
 Returns: `registered[]` — list of `{ service, methods: [{name, input, output}], source_label, registered_at }`.
 
+### discover
+
+Probe a target gRPC server's reflection endpoint and register every service it exposes. Mirrors `grpcurl -plaintext <addr> list` semantics but runs from inside the proxy so the same TLS / mTLS / upstream-proxy / Target Scope / rate-limit / budget gates that protect resend traffic apply here too.
+
+The proxy opens an outbound bidi gRPC stream to `grpc.reflection.v1.ServerReflection/ServerReflectionInfo`. If the server returns gRPC status `UNIMPLEMENTED` (12), the proxy retries once against the legacy v1alpha service path. Any other failure surfaces verbatim.
+
+**Parameters:**
+- **target_addr** (string, required): Upstream host or `host:port` exposing the reflection endpoint.
+- **scheme** (string, optional): `http` (h2c) or `https` (TLS + ALPN h2). Defaults to `https`.
+- **service_filter** (array of strings, optional): Restrict the fetch to these fully-qualified service names. Each entry must appear in the target's `ListServices` reply — a missing entry produces an error listing the services the target actually exposed.
+- **metadata** (array of `{name, value}`, optional): Ordered gRPC metadata list forwarded on the reflection stream. Useful for reflection endpoints gated by a bearer token.
+- **timeout_ms** (integer, optional): Per-call timeout covering dial+handshake+RPC. Defaults to `30000`; capped at `300000`.
+
+The proxy reuses the same `TLSTransport` as `resend_grpc`, so any configured mTLS or upstream-proxy applies automatically. SourceLabel on the registered entry is `reflection://<target_addr>` so `list` distinguishes reflection-discovered schemas.
+
+The reflection chatter itself is **not** persisted as a Flow — schema management is control-plane and the registered service's `source_label` already records "we discovered from here".
+
+When the target lacks reflection support (both v1 and v1alpha return UNIMPLEMENTED), the call fails with:
+
+```
+target "<addr>" does not implement gRPC reflection (server returned gRPC status UNIMPLEMENTED for both v1 and v1alpha). Enable reflection on the target server: for grpc-go, import google.golang.org/grpc/reflection and call reflection.Register(s); for other runtimes see https://github.com/grpc/grpc/blob/master/doc/server-reflection.md
+```
+
+Returns: `{ discovered[], target, reflection_version }` — same entry shape as `register`'s `registered[]`. `reflection_version` is `"v1"` or `"v1alpha"` (informational).
+
 ### list
 Return every currently registered schema, ordered alphabetically by service name.
 
@@ -96,6 +121,18 @@ Returns: `{ cleared }` — number of rows deleted from persistent storage.
     "source": "file",
     "proto_paths": ["/srv/protos/greeter.proto"],
     "import_paths": ["/srv/protos"],
+    "service_filter": ["pkg.Greeter"]
+  }
+}
+```
+
+### Discover via reflection
+```json
+{
+  "action": "discover",
+  "params": {
+    "target_addr": "127.0.0.1:9000",
+    "scheme": "http",
     "service_filter": ["pkg.Greeter"]
   }
 }
@@ -171,6 +208,6 @@ For lossless round-trips, use `body_encoding="proto-schemaless-json"` (synthetic
 - **Last-write-wins.** Re-registering a service replaces its previous binding. The `list` output shows the most recent registration for each service.
 - **Persistence.** Registrations survive process restart via the `grpc_schemas` SQLite table.
 - **`source="file"` requires a host `protoc`.** The recommended path is still `source="descriptor_set"`: run `protoc --include_imports --descriptor_set_out=…` on the operator machine and pass the base64-encoded bytes. Use the file path only when invoking `protoc` server-side is acceptable in your environment. The proxy resolves the binary from `YP_PROTOC_BINARY` → `ProxyConfig.GRPCSchema.ProtocBinary` → `PATH:protoc`.
-- **Reflection-based discovery is not supported.** Server-reflection auto-discovery is deferred to a follow-up Issue.
+- **`action="discover"` reflection chatter is not recorded as a Flow.** Schema management is control-plane; the registered entry's `source_label` already records `reflection://<target_addr>` for traceability. Use `resend_grpc` if you need to round-trip a recorded reflection RPC for analysis.
 - **Case-sensitive lookup.** Protobuf service/method identifiers are case-sensitive per spec. The lookup against `Flow.Metadata["grpc_service"]` / `["grpc_method"]` is exact-match.
 - **Output Filter still applies.** PII patterns (credit cards, etc.) configured in the safety engine mask the protojson output before it leaves the MCP boundary.

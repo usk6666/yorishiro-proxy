@@ -85,11 +85,24 @@ type grpcSchemaToolParams struct {
 	// each proto path. Each entry follows the same validation as
 	// ProtoPaths.
 	ImportPaths []string `json:"import_paths,omitempty" jsonschema:"optional absolute -I roots for protoc when source='file'; defaults to the parent directory of each proto path"`
+	// TargetAddr is the upstream host or host:port that exposes a gRPC
+	// reflection endpoint. Required for action=discover (USK-928).
+	TargetAddr string `json:"target_addr,omitempty" jsonschema:"required for action=discover: upstream host:port exposing the gRPC reflection endpoint"`
+	// Scheme selects http (h2c) vs https (TLS+ALPN h2) for discover.
+	// Defaults to https. Ignored for non-discover actions.
+	Scheme string `json:"scheme,omitempty" jsonschema:"discover only: http (h2c) or https (TLS); defaults to https"`
+	// Metadata forwards optional gRPC metadata on the reflection stream.
+	// Used for reflection endpoints that gate access behind a bearer
+	// token. Ignored for non-discover actions.
+	Metadata []headerKV `json:"metadata,omitempty" jsonschema:"discover only: ordered gRPC metadata list forwarded on the reflection stream (preserves order, case, duplicates)"`
+	// TimeoutMs caps the discover wall-clock budget. Default 30000;
+	// values above 300000 are clamped. Ignored for non-discover actions.
+	TimeoutMs *int `json:"timeout_ms,omitempty" jsonschema:"discover only: per-call timeout in milliseconds covering dial+handshake+RPC; default 30000, capped at 300000"`
 }
 
 // availableGRPCSchemaActions enumerates valid action names for the
 // grpc_schema tool's error message.
-var availableGRPCSchemaActions = []string{"register", "list", "unregister", "clear"}
+var availableGRPCSchemaActions = []string{"register", "list", "unregister", "clear", "discover"}
 
 // registerGRPCSchema wires the grpc_schema MCP tool.
 func (s *Server) registerGRPCSchema() {
@@ -100,7 +113,10 @@ func (s *Server) registerGRPCSchema() {
 			"source=\"descriptor_set\" + descriptor_set_b64 — the recommended path, generate via " +
 			"`protoc --include_imports --descriptor_set_out=<file> <protos>`, max 16 MiB decoded — or " +
 			"source=\"file\" + absolute proto_paths which invokes a host protoc binary), " +
-			"'list' (registered services + methods), 'unregister' (remove a service by name), 'clear' (remove all). " +
+			"'discover' (probe a target gRPC server's reflection endpoint and register every discovered service " +
+			"automatically; required target_addr; optional scheme/metadata/service_filter/timeout_ms; v1 with " +
+			"v1alpha fallback), 'list' (registered services + methods), 'unregister' (remove a service by name), " +
+			"'clear' (remove all). " +
 			"Once a schema is registered, query messages decodes matching gRPC Data bodies as protojson with real " +
 			"field names (body_decoded_encoding=\"proto-json\") and resend_grpc accepts body_encoding=\"proto-json\". " +
 			"Schemaless fallback always applies when no schema matches. See yorishiro://help/grpc_schema.",
@@ -146,6 +162,12 @@ func (s *Server) handleGRPCSchemaTool(ctx context.Context, _ *gomcp.CallToolRequ
 		return nil, res, nil
 	case "clear":
 		res, err := s.handleGRPCSchemaClear(ctx)
+		if err != nil {
+			return nil, nil, err
+		}
+		return nil, res, nil
+	case "discover":
+		res, err := s.handleGRPCSchemaDiscover(ctx, input.Params)
 		if err != nil {
 			return nil, nil, err
 		}
