@@ -16,7 +16,7 @@ func Encode(jsonStr string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("protobuf encode: %w", err)
 	}
-	return encodeFields(fields)
+	return encodeFieldsWithDepth(fields, 0)
 }
 
 // parseJSON parses the JSON string into field entries preserving order.
@@ -63,14 +63,21 @@ type fieldEntry struct {
 	raw json.RawMessage
 }
 
-// encodeFields serializes field entries to protobuf binary.
+// encodeFieldsWithDepth serializes field entries to protobuf binary with
+// recursion-depth tracking. depth is incremented at each embedded-message
+// boundary; exceeding maxRecursionDepth returns an error symmetric with
+// the Decode-side guard (CWE-674).
+//
 // Fields are sorted by ordinal to ensure deterministic output matching PacketProxy.
-func encodeFields(entries []fieldEntry) ([]byte, error) {
+func encodeFieldsWithDepth(entries []fieldEntry, depth int) ([]byte, error) {
+	if depth > maxRecursionDepth {
+		return nil, fmt.Errorf("recursion depth %d exceeds maximum %d", depth, maxRecursionDepth)
+	}
 	sorted := sortEntries(entries)
 
 	var w writer
 	for _, e := range sorted {
-		if err := encodeField(&w, e); err != nil {
+		if err := encodeField(&w, e, depth); err != nil {
 			return nil, err
 		}
 	}
@@ -78,7 +85,7 @@ func encodeFields(entries []fieldEntry) ([]byte, error) {
 }
 
 // encodeField writes a single field entry to the writer.
-func encodeField(w *writer, e fieldEntry) error {
+func encodeField(w *writer, e fieldEntry, depth int) error {
 	parts := parseKeyParts(e.key)
 	if parts == nil {
 		return fmt.Errorf("invalid key format: %q", e.key)
@@ -100,7 +107,7 @@ func encodeField(w *writer, e fieldEntry) error {
 	case "repeated":
 		return encodeRepeatedField(w, fieldNumber, e)
 	case "embedded message":
-		return encodeEmbeddedField(w, fieldNumber, e)
+		return encodeEmbeddedField(w, fieldNumber, e, depth)
 	case "bytes":
 		return encodeBytesField(w, fieldNumber, e)
 	default:
@@ -172,13 +179,13 @@ func encodeRepeatedField(w *writer, fieldNumber uint64, e fieldEntry) error {
 	return nil
 }
 
-func encodeEmbeddedField(w *writer, fieldNumber uint64, e fieldEntry) error {
+func encodeEmbeddedField(w *writer, fieldNumber uint64, e fieldEntry, depth int) error {
 	w.writeVarint((fieldNumber << 3) | uint64(wireLengthDelimited))
 	subEntries, err := parseJSONObject(e.raw)
 	if err != nil {
 		return fmt.Errorf("field %q: %w", e.key, err)
 	}
-	subBytes, err := encodeFields(subEntries)
+	subBytes, err := encodeFieldsWithDepth(subEntries, depth+1)
 	if err != nil {
 		return fmt.Errorf("field %q: %w", e.key, err)
 	}

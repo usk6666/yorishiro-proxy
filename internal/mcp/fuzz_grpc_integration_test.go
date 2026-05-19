@@ -45,6 +45,7 @@ import (
 
 	"github.com/usk6666/yorishiro-proxy/internal/cert"
 	"github.com/usk6666/yorishiro-proxy/internal/connector/transport"
+	"github.com/usk6666/yorishiro-proxy/internal/encoding/protobuf"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/pluginv2"
 )
@@ -557,6 +558,118 @@ func TestFuzzGRPC_TwoPositionCartesian(t *testing.T) {
 			}
 		}
 	}
+}
+
+// ---------------------------------------------------------------------------
+// JSON-path positions (USK-925) — mutate one proto field per variant.
+// ---------------------------------------------------------------------------
+
+func TestFuzzGRPC_ProtoSchemalessJSONPathGeneratesVariants(t *testing.T) {
+	cs, _, _ := setupFuzzGRPCSession(t)
+	upstream := &fuzzGRPCEchoServer{}
+	addr, shutdown := startFuzzGRPCUpstream(t, upstream)
+	defer shutdown()
+
+	// Each variant mutates field 0001:0000:String inside a
+	// proto-schemaless-json source. The upstream observes one independent
+	// proto wire payload per variant; we verify (a) the byte sequences
+	// differ across variants and (b) each substituted string round-trips
+	// back to the recorded payload via protobuf.Decode.
+	names := []string{"alice", "bob", "carol"}
+	result := callFuzzGRPC(t, cs, map[string]any{
+		"target_addr": addr,
+		"scheme":      "https",
+		"service":     fuzzGRPCServiceName,
+		"method":      fuzzGRPCMethodUnary,
+		"messages": []map[string]any{
+			{
+				"payload":       `{"0001:0000:String":"seed","0002:0001:Varint":1}`,
+				"body_encoding": "proto-schemaless-json",
+			},
+		},
+		"positions": []map[string]any{
+			{
+				"path":     "messages[0].payload.0001:0000:String",
+				"payloads": names,
+			},
+		},
+		"timeout_ms": 10000,
+	})
+
+	if result.CompletedVariants != len(names) {
+		t.Fatalf("CompletedVariants = %d, want %d", result.CompletedVariants, len(names))
+	}
+	observed := upstream.snapshot()
+	if len(observed) != len(names) {
+		t.Fatalf("upstream hits = %d, want %d", len(observed), len(names))
+	}
+
+	seenBytes := map[string]bool{}
+	seenStrings := map[string]bool{}
+	for i, o := range observed {
+		if seenBytes[string(o.Payload)] {
+			t.Errorf("variants[%d]: duplicate wire bytes %x — fuzz did not differentiate", i, o.Payload)
+		}
+		seenBytes[string(o.Payload)] = true
+
+		// Decode the recorded wire bytes via the proto-schemaless decoder
+		// and confirm the mutated field appears with the iterator value.
+		decoded, err := protobufDecodeJSON(o.Payload)
+		if err != nil {
+			t.Fatalf("variants[%d]: Decode upstream payload: %v", i, err)
+		}
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(decoded), &fields); err != nil {
+			t.Fatalf("variants[%d]: unmarshal decoded JSON: %v\nraw=%s", i, err, decoded)
+		}
+		var s string
+		if err := json.Unmarshal(fields["0001:0000:String"], &s); err != nil {
+			t.Fatalf("variants[%d]: unmarshal String field: %v\nraw=%s", i, err, fields["0001:0000:String"])
+		}
+		seenStrings[s] = true
+	}
+	for _, name := range names {
+		if !seenStrings[name] {
+			t.Errorf("upstream did not see mutated String=%q (saw %v)", name, seenStrings)
+		}
+	}
+}
+
+// TestFuzzGRPC_ProtoSchemalessJSONPathRejectsByteAndJSONConflict pins
+// the cross-position guard: same-message bytes-level and JSON-path
+// positions cannot coexist (the bytes form would silently overwrite
+// the JSON commit's re-encoded payload).
+func TestFuzzGRPC_ProtoSchemalessJSONPathRejectsByteAndJSONConflict(t *testing.T) {
+	cs, _, _ := setupFuzzGRPCSession(t)
+	res, _ := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "fuzz_grpc",
+		Arguments: map[string]any{
+			"target_addr": "127.0.0.1:9999",
+			"scheme":      "https",
+			"service":     "Svc",
+			"method":      "M",
+			"messages": []map[string]any{
+				{
+					"payload":       `{"0001:0000:String":"hi"}`,
+					"body_encoding": "proto-schemaless-json",
+				},
+			},
+			"positions": []map[string]any{
+				{"path": "messages[0].payload", "payloads": []string{"raw"}},
+				{"path": "messages[0].payload.0001:0000:String", "payloads": []string{"x"}},
+			},
+		},
+	})
+	if res == nil || !res.IsError {
+		t.Fatalf("expected conflict error for same-message bytes+JSON positions; got %+v", res)
+	}
+}
+
+// protobufDecodeJSON is a small wrapper so the assertion code reads as
+// "decode the upstream wire bytes" rather than reaching directly into
+// the codec package within the test body.
+func protobufDecodeJSON(b []byte) (string, error) {
+	return protobuf.Decode(b)
 }
 
 // ---------------------------------------------------------------------------
