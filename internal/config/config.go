@@ -692,6 +692,12 @@ type ProxyConfig struct {
 	// SSE configures the SSE Layer runtime limits (max event size).
 	SSE *SSELimits `json:"sse,omitempty"`
 
+	// GRPCSchema configures the grpc_schema MCP tool's runtime knobs
+	// (USK-926). Currently only the protoc binary path is exposed; see
+	// GRPCSchemaConfig for details. Nil/omitted = defaults (protoc on
+	// PATH).
+	GRPCSchema *GRPCSchemaConfig `json:"grpc_schema,omitempty"`
+
 	// MaxBodySize is the per-message body wire cap enforced at parse time
 	// by the HTTP/1, HTTP/2 and gRPC channels — same category as
 	// WebSocket.MaxFrameSize / GRPC.MaxMessageSize / SSE.MaxEventSize.
@@ -796,6 +802,9 @@ func (c *ProxyConfig) Validate() error {
 		}
 	}
 	if err := c.validateInterceptQueue(); err != nil {
+		return err
+	}
+	if err := c.GRPCSchema.Validate(); err != nil {
 		return err
 	}
 	return nil

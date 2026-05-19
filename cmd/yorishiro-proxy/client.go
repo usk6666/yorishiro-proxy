@@ -411,11 +411,17 @@ Parameters (key=value):
     clear                           Remove every registered schema
 
   Register parameters (key=value with params. prefix):
-    params.source=descriptor_set    Input shape (only "descriptor_set" is supported)
+    params.source=descriptor_set    Descriptor-set source (recommended). Pair with descriptor_set_b64.
+    params.source=file              File source. Pair with proto_paths; invokes a host protoc binary.
     params.descriptor_set_b64=<b64> Base64-encoded FileDescriptorSet payload (max 16 MiB decoded).
                                     Generate via:
                                       protoc --include_imports --descriptor_set_out=<file> <protos>
                                     then base64-encode the result.
+    params.proto_paths=<abs.proto>  Absolute path to a .proto file (repeatable). Required for source=file.
+                                    Each path must be canonical and fall under the proxy CWD or one of
+                                    import_paths.
+    params.import_paths=<abs-dir>   Absolute -I root for protoc (repeatable). Defaults to the parent
+                                    directory of each proto_paths entry.
     params.service_filter=<svc>     Restrict registration to a fully-qualified service name
                                     (repeatable). Empty means register every service.
     params.source_label=<label>     Free-form label preserved in list output.
@@ -426,6 +432,7 @@ Parameters (key=value):
 Examples:
   yorishiro-proxy client grpc_schema action=list
   yorishiro-proxy client grpc_schema action=register params.source=descriptor_set params.descriptor_set_b64=<base64>
+  yorishiro-proxy client grpc_schema action=register params.source=file params.proto_paths=/srv/protos/hello.proto
   yorishiro-proxy client grpc_schema action=unregister params.service=pkg.Greeter
   yorishiro-proxy client grpc_schema action=clear
 
