@@ -18,6 +18,7 @@ import type {
   ExecuteParams,
   FuzzToolParams,
   GrpcSchemaClearResult,
+  GrpcSchemaDiscoverResult,
   GrpcSchemaListResult,
   GrpcSchemaParams,
   GrpcSchemaRegisterResult,
@@ -54,7 +55,8 @@ export type GrpcSchemaResult =
   | GrpcSchemaRegisterResult
   | GrpcSchemaListResult
   | GrpcSchemaUnregisterResult
-  | GrpcSchemaClearResult;
+  | GrpcSchemaClearResult
+  | GrpcSchemaDiscoverResult;
 
 /** Configuration for the MCP client. */
 export interface McpClientConfig {

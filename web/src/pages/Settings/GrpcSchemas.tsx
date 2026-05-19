@@ -13,9 +13,12 @@ import {
 } from "../../lib/mcp/hooks.js";
 import type {
   GrpcSchemaClearResult,
+  GrpcSchemaDiscoverResult,
+  GrpcSchemaDiscoverScheme,
   GrpcSchemaRegisterResult,
   GrpcSchemaServiceEntry,
   GrpcSchemaUnregisterResult,
+  HeaderKV,
 } from "../../lib/mcp/types.js";
 
 /**
@@ -109,7 +112,7 @@ function MethodsList({ methods }: { methods: GrpcSchemaServiceEntry["methods"] }
 
 /**
  * GrpcSchemas — operator-facing management panel for the `grpc_schema`
- * MCP tool (USK-923 / USK-926 / USK-927).
+ * MCP tool (USK-923 / USK-926 / USK-927 / USK-933).
  *
  * Surfaces:
  *   - List of registered services with method signatures, source label,
@@ -118,9 +121,7 @@ function MethodsList({ methods }: { methods: GrpcSchemaServiceEntry["methods"] }
  *   - Clear-all action (confirm dialog).
  *   - Descriptor_set upload form (.desc → base64, 16 MiB preflight).
  *   - Collapsed disclosure for source="file" (proto_paths + import_paths).
- *
- * Discovery (USK-928 reflection) is intentionally out of scope; tracked
- * by a follow-up Issue per USK-927 design review D1.
+ *   - Discover form for action="discover" (gRPC reflection, USK-933).
  */
 export function GrpcSchemas() {
   const { addToast } = useToast();
@@ -141,6 +142,15 @@ export function GrpcSchemas() {
   const [importPathsText, setImportPathsText] = useState("");
   const [fileModeServiceFilter, setFileModeServiceFilter] = useState("");
   const [fileModeSourceLabel, setFileModeSourceLabel] = useState("");
+
+  // Discover (action="discover", reflection) form state.
+  const [showDiscoverForm, setShowDiscoverForm] = useState(false);
+  const [discoverTarget, setDiscoverTarget] = useState("");
+  const [discoverScheme, setDiscoverScheme] =
+    useState<GrpcSchemaDiscoverScheme>("https");
+  const [discoverServiceFilter, setDiscoverServiceFilter] = useState("");
+  const [discoverMetadata, setDiscoverMetadata] = useState<HeaderKV[]>([]);
+  const [discoverTimeoutMs, setDiscoverTimeoutMs] = useState("");
 
   const schemas = data?.schemas ?? [];
 
@@ -311,6 +321,80 @@ export function GrpcSchemas() {
     [grpcSchema, addToast, refetch, showDialog],
   );
 
+  const resetDiscoverForm = useCallback(() => {
+    setDiscoverTarget("");
+    setDiscoverScheme("https");
+    setDiscoverServiceFilter("");
+    setDiscoverMetadata([]);
+    setDiscoverTimeoutMs("");
+  }, []);
+
+  const handleDiscover = useCallback(async () => {
+    const target = discoverTarget.trim();
+    if (!target) {
+      addToast({
+        type: "warning",
+        message: "Target address is required (host:port)",
+      });
+      return;
+    }
+    const serviceFilter = splitLines(discoverServiceFilter);
+    // Drop blank metadata rows so we never send `{name: "", value: "..."}`.
+    const metadata = discoverMetadata.filter(
+      (kv) => kv.name.trim().length > 0,
+    );
+    let timeoutMs: number | undefined;
+    if (discoverTimeoutMs.trim()) {
+      const parsed = Number.parseInt(discoverTimeoutMs.trim(), 10);
+      if (!Number.isFinite(parsed) || parsed <= 0) {
+        addToast({
+          type: "error",
+          message: "Timeout must be a positive integer (milliseconds)",
+        });
+        return;
+      }
+      timeoutMs = parsed;
+    }
+    try {
+      const result = await grpcSchema<GrpcSchemaDiscoverResult>({
+        action: "discover",
+        params: {
+          target_addr: target,
+          scheme: discoverScheme,
+          ...(serviceFilter.length > 0 ? { service_filter: serviceFilter } : {}),
+          ...(metadata.length > 0 ? { metadata } : {}),
+          ...(timeoutMs !== undefined ? { timeout_ms: timeoutMs } : {}),
+        },
+      });
+      const count = result.discovered?.length ?? 0;
+      const versionTag = result.reflection_version
+        ? ` (reflection ${result.reflection_version})`
+        : "";
+      addToast({
+        type: "success",
+        message: `Discovered ${count} service${count === 1 ? "" : "s"} from ${result.target}${versionTag}`,
+      });
+      resetDiscoverForm();
+      setShowDiscoverForm(false);
+      await refetch();
+    } catch (err) {
+      addToast({
+        type: "error",
+        message: `Discover failed: ${err instanceof Error ? err.message : String(err)}`,
+      });
+    }
+  }, [
+    discoverTarget,
+    discoverScheme,
+    discoverServiceFilter,
+    discoverMetadata,
+    discoverTimeoutMs,
+    grpcSchema,
+    addToast,
+    refetch,
+    resetDiscoverForm,
+  ]);
+
   const handleClearAll = useCallback(async () => {
     const count = schemas.length;
     if (count === 0) return;
@@ -354,6 +438,13 @@ export function GrpcSchemas() {
               onClick={() => setShowUploadForm(!showUploadForm)}
             >
               {showUploadForm ? "Cancel" : "Upload .desc"}
+            </Button>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => setShowDiscoverForm(!showDiscoverForm)}
+            >
+              {showDiscoverForm ? "Cancel" : "Discover"}
             </Button>
             <Button
               variant="danger"
@@ -465,6 +556,232 @@ export function GrpcSchemas() {
                   disabled={!selectedFile || actionLoading}
                 >
                   {actionLoading ? "Uploading..." : "Register"}
+                </Button>
+              </div>
+            </div>
+          )}
+
+          {/* Discover form (action="discover", reflection — USK-933) */}
+          {showDiscoverForm && (
+            <div
+              className="settings-add-form"
+              style={{ marginBottom: "var(--space-md)" }}
+            >
+              <div className="settings-add-form-title">
+                Discover from reflection endpoint
+              </div>
+              <p className="settings-section-desc">
+                Probe the target&apos;s{" "}
+                <code>grpc.reflection.v1.ServerReflection</code> endpoint
+                (with a <code>v1alpha</code> fallback) and register every
+                discovered service. The proxy enforces its standard scope /
+                rate-limit / budget gates and a 30 s default timeout
+                (server-capped at 300 s).
+              </p>
+              <div className="settings-form-row">
+                <Input
+                  label="Target address"
+                  value={discoverTarget}
+                  onChange={(e) => setDiscoverTarget(e.target.value)}
+                  placeholder="grpc.example.com:443"
+                  required
+                />
+              </div>
+              <div className="settings-form-row">
+                <div className="input-wrapper">
+                  <span className="input-label">Scheme</span>
+                  <div
+                    role="radiogroup"
+                    aria-label="Scheme"
+                    style={{
+                      display: "flex",
+                      gap: "var(--space-md)",
+                      alignItems: "center",
+                    }}
+                  >
+                    <label
+                      style={{
+                        display: "flex",
+                        gap: "var(--space-xs)",
+                        alignItems: "center",
+                        cursor: "pointer",
+                      }}
+                    >
+                      <input
+                        type="radio"
+                        name="grpc-discover-scheme"
+                        value="https"
+                        checked={discoverScheme === "https"}
+                        onChange={() => setDiscoverScheme("https")}
+                      />
+                      <span>https (TLS + ALPN h2)</span>
+                    </label>
+                    <label
+                      style={{
+                        display: "flex",
+                        gap: "var(--space-xs)",
+                        alignItems: "center",
+                        cursor: "pointer",
+                      }}
+                    >
+                      <input
+                        type="radio"
+                        name="grpc-discover-scheme"
+                        value="http"
+                        checked={discoverScheme === "http"}
+                        onChange={() => setDiscoverScheme("http")}
+                      />
+                      <span>http (h2c)</span>
+                    </label>
+                  </div>
+                </div>
+              </div>
+              <div className="settings-form-row">
+                <div className="input-wrapper" style={{ flex: 1 }}>
+                  <label
+                    className="input-label"
+                    htmlFor="grpc-discover-service-filter"
+                  >
+                    Service filter (optional, one per line)
+                  </label>
+                  <textarea
+                    id="grpc-discover-service-filter"
+                    className="input"
+                    value={discoverServiceFilter}
+                    onChange={(e) => setDiscoverServiceFilter(e.target.value)}
+                    placeholder={"pkg.Service1\npkg.Service2"}
+                    rows={2}
+                    style={{
+                      fontFamily: "var(--font-mono)",
+                      resize: "vertical",
+                      minHeight: "40px",
+                    }}
+                  />
+                  <span className="settings-rule-detail">
+                    Fully-qualified service names. Leave blank to register every
+                    service the reflection endpoint advertises.
+                  </span>
+                </div>
+              </div>
+              <div className="settings-form-row">
+                <div className="input-wrapper" style={{ flex: 1 }}>
+                  <span className="input-label">
+                    Metadata (optional, forwarded on the reflection stream)
+                  </span>
+                  {discoverMetadata.length === 0 ? (
+                    <span className="settings-rule-detail">
+                      No metadata. Add a row for bearer tokens or other gRPC
+                      metadata required by the reflection endpoint.
+                    </span>
+                  ) : (
+                    <div
+                      style={{
+                        display: "flex",
+                        flexDirection: "column",
+                        gap: "var(--space-xs)",
+                      }}
+                    >
+                      {discoverMetadata.map((kv, idx) => (
+                        <div
+                          // Stable per-row key: insertion-order index is
+                          // sufficient because rows are append-only and
+                          // removal preserves remaining order.
+                          // eslint-disable-next-line react/no-array-index-key
+                          key={`grpc-discover-meta-${idx}`}
+                          style={{
+                            display: "flex",
+                            gap: "var(--space-xs)",
+                            alignItems: "center",
+                          }}
+                        >
+                          <input
+                            className="input"
+                            type="text"
+                            aria-label={`Metadata ${idx + 1} name`}
+                            placeholder="authorization"
+                            value={kv.name}
+                            onChange={(e) => {
+                              const next = [...discoverMetadata];
+                              next[idx] = { ...next[idx], name: e.target.value };
+                              setDiscoverMetadata(next);
+                            }}
+                            style={{ flex: 1, fontFamily: "var(--font-mono)" }}
+                          />
+                          <input
+                            className="input"
+                            type="text"
+                            aria-label={`Metadata ${idx + 1} value`}
+                            placeholder="Bearer ..."
+                            value={kv.value}
+                            onChange={(e) => {
+                              const next = [...discoverMetadata];
+                              next[idx] = { ...next[idx], value: e.target.value };
+                              setDiscoverMetadata(next);
+                            }}
+                            style={{ flex: 2, fontFamily: "var(--font-mono)" }}
+                          />
+                          <Button
+                            variant="secondary"
+                            size="sm"
+                            onClick={() => {
+                              const next = discoverMetadata.filter(
+                                (_, i) => i !== idx,
+                              );
+                              setDiscoverMetadata(next);
+                            }}
+                            aria-label={`Remove metadata row ${idx + 1}`}
+                          >
+                            Remove
+                          </Button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  <div style={{ marginTop: "var(--space-xs)" }}>
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      onClick={() =>
+                        setDiscoverMetadata([
+                          ...discoverMetadata,
+                          { name: "", value: "" },
+                        ])
+                      }
+                    >
+                      + Add metadata
+                    </Button>
+                  </div>
+                </div>
+              </div>
+              <div className="settings-form-row">
+                <Input
+                  label="Timeout (ms, optional)"
+                  type="number"
+                  value={discoverTimeoutMs}
+                  onChange={(e) => setDiscoverTimeoutMs(e.target.value)}
+                  placeholder="30000"
+                  min={1}
+                />
+              </div>
+              <div className="settings-add-form-actions">
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => {
+                    resetDiscoverForm();
+                    setShowDiscoverForm(false);
+                  }}
+                  disabled={actionLoading}
+                >
+                  Cancel
+                </Button>
+                <Button
+                  variant="primary"
+                  size="sm"
+                  onClick={handleDiscover}
+                  disabled={actionLoading || discoverTarget.trim().length === 0}
+                >
+                  {actionLoading ? "Discovering..." : "Discover"}
                 </Button>
               </div>
             </div>
