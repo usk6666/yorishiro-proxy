@@ -1536,6 +1536,12 @@ export interface ResendGRPCResult {
   end?: ResendGRPCEndResult;
   duration_ms: number;
   tag?: string;
+  /**
+   * Non-fatal warnings surfaced by the backend (e.g. proto-json round-trip
+   * dropping unknown fields when a registered schema is applied). Emitted by
+   * `internal/mcp/resend_grpc.go:121`; absent on success without warnings.
+   */
+  warnings?: string[];
 }
 
 /** Offset-based byte patch for resend_raw. */
