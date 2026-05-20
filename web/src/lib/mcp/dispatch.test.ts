@@ -4,6 +4,7 @@
  * Verifies:
  * - protocol -> FlowDetail component kind dispatch (pickFlowDetailKind)
  * - protocol -> resend_* MCP tool dispatch (pickResendTool)
+ * - protocol -> fuzz_* MCP tool dispatch (pickFuzzTool)
  * - null-guard regression: helpers do not throw when fed sparse FlowDetailResult
  * - plugin_introspect sort + redact-key passthrough smoke test
  */
@@ -14,6 +15,7 @@ import {
   hasResponse,
   isStreamingFlow,
   pickFlowDetailKind,
+  pickFuzzTool,
   pickResendTool,
   sortIntrospectedPlugins,
 } from "./dispatch.js";
@@ -131,6 +133,68 @@ describe("pickResendTool", () => {
 
   it("returns legacy 'resend' for undefined protocol", () => {
     expect(pickResendTool(undefined)).toBe("resend");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// pickFuzzTool
+// ---------------------------------------------------------------------------
+
+describe("pickFuzzTool", () => {
+  it("returns 'fuzz_http' for HTTP/1.x", () => {
+    expect(pickFuzzTool("HTTP/1.x")).toBe("fuzz_http");
+  });
+
+  it("returns 'fuzz_http' for HTTPS", () => {
+    expect(pickFuzzTool("HTTPS")).toBe("fuzz_http");
+  });
+
+  it("returns 'fuzz_http' for HTTP/2", () => {
+    expect(pickFuzzTool("HTTP/2")).toBe("fuzz_http");
+  });
+
+  it("returns 'fuzz_http' for lowercase h2", () => {
+    expect(pickFuzzTool("h2")).toBe("fuzz_http");
+  });
+
+  it("returns 'fuzz_ws' for WebSocket", () => {
+    expect(pickFuzzTool("WebSocket")).toBe("fuzz_ws");
+  });
+
+  it("returns 'fuzz_ws' for ws", () => {
+    expect(pickFuzzTool("ws")).toBe("fuzz_ws");
+  });
+
+  it("returns 'fuzz_grpc' for gRPC", () => {
+    expect(pickFuzzTool("gRPC")).toBe("fuzz_grpc");
+  });
+
+  it("returns 'fuzz_grpc' for gRPC-Web", () => {
+    expect(pickFuzzTool("gRPC-Web")).toBe("fuzz_grpc");
+  });
+
+  it("returns 'fuzz_raw' for TCP", () => {
+    expect(pickFuzzTool("TCP")).toBe("fuzz_raw");
+  });
+
+  it("returns 'fuzz_raw' for raw", () => {
+    expect(pickFuzzTool("raw")).toBe("fuzz_raw");
+  });
+
+  it("returns null for unknown protocol (no legacy fallback — backend has no `fuzz` tool)", () => {
+    expect(pickFuzzTool("mystery-protocol")).toBeNull();
+  });
+
+  it("returns null for null protocol", () => {
+    expect(pickFuzzTool(null)).toBeNull();
+  });
+
+  it("returns null for undefined protocol", () => {
+    expect(pickFuzzTool(undefined)).toBeNull();
+  });
+
+  it("returns null for empty string", () => {
+    expect(pickFuzzTool("")).toBeNull();
   });
 });
 

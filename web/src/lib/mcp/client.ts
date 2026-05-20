@@ -4,9 +4,9 @@
  * Uses the official MCP TypeScript SDK's Client and StreamableHTTPClientTransport
  * to connect to yorishiro-proxy's /mcp endpoint via Streamable HTTP.
  *
- * Provides typed access to yorishiro-proxy's 10 MCP tools:
- * proxy_start, proxy_stop, configure, query, resend,
- * manage, fuzz, macro, intercept, security
+ * Provides typed access to yorishiro-proxy's MCP tools, including the
+ * protocol-typed quartets resend_{http,ws,grpc,raw} and
+ * fuzz_{http,ws,grpc,raw} (RFC-001 N8).
  */
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -16,7 +16,14 @@ import type {
   ConfigureResult,
   ConnectionStatus,
   ExecuteParams,
-  FuzzToolParams,
+  FuzzGRPCParams,
+  FuzzGRPCResult,
+  FuzzHTTPParams,
+  FuzzHTTPResult,
+  FuzzRawParams,
+  FuzzRawResult,
+  FuzzWSParams,
+  FuzzWSResult,
   GrpcSchemaClearResult,
   GrpcSchemaDiscoverResult,
   GrpcSchemaListResult,
@@ -271,13 +278,6 @@ export class McpClient {
     return this.callTool<T>("manage", params as unknown as Record<string, unknown>);
   }
 
-  /** Execute fuzz testing campaigns (fuzz, fuzz_pause, fuzz_resume, fuzz_cancel). */
-  async fuzz<T = unknown>(
-    params: FuzzToolParams,
-  ): Promise<T> {
-    return this.callTool<T>("fuzz", params as unknown as Record<string, unknown>);
-  }
-
   /** Define and execute macro workflows (define_macro, run_macro, delete_macro). */
   async macro<T = unknown>(
     params: MacroToolParams,
@@ -336,6 +336,38 @@ export class McpClient {
   async resendRaw(params: ResendRawParams): Promise<ResendRawTypedResult> {
     return this.callTool<ResendRawTypedResult>(
       "resend_raw",
+      params as unknown as Record<string, unknown>,
+    );
+  }
+
+  /** Fuzz an HTTP/1.x or HTTP/2 flow via the protocol-typed fuzz_http tool. */
+  async fuzzHttp(params: FuzzHTTPParams): Promise<FuzzHTTPResult> {
+    return this.callTool<FuzzHTTPResult>(
+      "fuzz_http",
+      params as unknown as Record<string, unknown>,
+    );
+  }
+
+  /** Fuzz a single WebSocket frame via the protocol-typed fuzz_ws tool. */
+  async fuzzWs(params: FuzzWSParams): Promise<FuzzWSResult> {
+    return this.callTool<FuzzWSResult>(
+      "fuzz_ws",
+      params as unknown as Record<string, unknown>,
+    );
+  }
+
+  /** Fuzz a gRPC RPC via the protocol-typed fuzz_grpc tool. */
+  async fuzzGrpc(params: FuzzGRPCParams): Promise<FuzzGRPCResult> {
+    return this.callTool<FuzzGRPCResult>(
+      "fuzz_grpc",
+      params as unknown as Record<string, unknown>,
+    );
+  }
+
+  /** Fuzz a raw byte payload via the protocol-typed fuzz_raw tool. */
+  async fuzzRaw(params: FuzzRawParams): Promise<FuzzRawResult> {
+    return this.callTool<FuzzRawResult>(
+      "fuzz_raw",
       params as unknown as Record<string, unknown>,
     );
   }

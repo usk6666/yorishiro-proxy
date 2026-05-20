@@ -7,17 +7,21 @@ import { Spinner } from "../../components/ui/Spinner.js";
 import { Table } from "../../components/ui/Table.js";
 import { Tabs } from "../../components/ui/Tabs.js";
 import { useToast } from "../../components/ui/Toast.js";
-import { useFuzz, useQuery } from "../../lib/mcp/hooks.js";
+import { useMcpContext } from "../../lib/mcp/context.js";
+import { useQuery } from "../../lib/mcp/hooks.js";
 import type {
+  FuzzGRPCParams,
+  FuzzGRPCPosition,
+  FuzzHTTPParams,
+  FuzzHTTPPosition,
   FuzzJobEntry,
-  FuzzPayloadSet,
-  FuzzPosition,
-  FuzzStopCondition,
-  HooksInput,
-  MacrosEntry,
+  FuzzRawParams,
+  FuzzRawPosition,
+  FuzzWSParams,
+  FuzzWSPosition,
+  HeaderKV,
   QueryFilter,
 } from "../../lib/mcp/types.js";
-import { HookConfigEditor } from "../../components/hooks/HookConfigEditor.js";
 import "./FuzzPage.css";
 
 // ---------------------------------------------------------------------------
@@ -32,6 +36,9 @@ const POLL_INTERVALS = [
   { label: "5s", value: 5000 },
 ] as const;
 
+// "paused" / "cancelled" are valid historical job states even though the
+// lifecycle UI was removed (the typed fuzz_* tools are synchronous). Keep
+// them in the filter dropdown so analysts can find old rows.
 const STATUS_OPTIONS = ["running", "completed", "paused", "cancelled", "error"] as const;
 
 const TABS = [
@@ -39,25 +46,20 @@ const TABS = [
   { id: "create", label: "New Campaign" },
 ];
 
-const ATTACK_TYPES = [
-  { value: "sequential", label: "Sequential" },
-  { value: "parallel", label: "Parallel" },
-];
+/** Protocol selector options for the campaign creator form. */
+const PROTOCOL_OPTIONS = [
+  { value: "http", label: "HTTP / HTTPS / HTTP-2" },
+  { value: "ws", label: "WebSocket" },
+  { value: "grpc", label: "gRPC" },
+  { value: "raw", label: "Raw TCP" },
+] as const;
 
-const PAYLOAD_TYPES = [
-  { value: "wordlist", label: "Wordlist (values)" },
-  { value: "range", label: "Range (numeric)" },
-  { value: "file", label: "File" },
-];
+type FuzzProtocol = (typeof PROTOCOL_OPTIONS)[number]["value"];
 
-const POSITION_LOCATIONS = [
-  { value: "header", label: "Header" },
-  { value: "path", label: "Path" },
-  { value: "query", label: "Query" },
-  { value: "body_regex", label: "Body (Regex)" },
-  { value: "body_json", label: "Body (JSON)" },
-  { value: "cookie", label: "Cookie" },
-];
+const ENCODING_OPTIONS = [
+  { value: "text", label: "text" },
+  { value: "base64", label: "base64" },
+] as const;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -106,14 +108,20 @@ function progressPercent(job: FuzzJobEntry): number {
   return Math.min(100, Math.round((job.completed_count / job.total) * 100));
 }
 
+/** Split a textarea string into a non-empty payload array. */
+function splitPayloads(values: string): string[] {
+  return values
+    .split("\n")
+    .map((v) => v.trim())
+    .filter((v) => v.length > 0);
+}
+
 // ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
 
 export function FuzzPage() {
   const navigate = useNavigate();
-  const { addToast } = useToast();
-  const { fuzz: fuzzAction, loading: executeLoading } = useFuzz();
 
   const [activeTab, setActiveTab] = useState("jobs");
 
@@ -200,31 +208,6 @@ export function FuzzPage() {
       navigate(`/fuzz/${job.id}`);
     },
     [navigate],
-  );
-
-  // --- Job actions (pause/resume/cancel) ---
-  const handleJobAction = useCallback(
-    async (
-      e: React.MouseEvent,
-      action: "fuzz_pause" | "fuzz_resume" | "fuzz_cancel",
-      fuzzId: string,
-    ) => {
-      e.stopPropagation();
-      try {
-        await fuzzAction({ action, params: { fuzz_id: fuzzId } });
-        addToast({
-          type: "success",
-          message: `Job ${action.replace("fuzz_", "")}d`,
-        });
-        refetch();
-      } catch (err) {
-        addToast({
-          type: "error",
-          message: `Action failed: ${err instanceof Error ? err.message : String(err)}`,
-        });
-      }
-    },
-    [fuzzAction, addToast, refetch],
   );
 
   // --- Campaign creation callback ---
@@ -322,7 +305,6 @@ export function FuzzPage() {
                           <th>Errors</th>
                           <th>Tag</th>
                           <th>Created</th>
-                          <th>Actions</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -373,56 +355,6 @@ export function FuzzPage() {
                             </td>
                             <td className="fuzz-cell-time">
                               {formatTimestamp(job.created_at)}
-                            </td>
-                            <td className="fuzz-cell-actions">
-                              {job.status === "running" && (
-                                <>
-                                  <Button
-                                    variant="secondary"
-                                    size="sm"
-                                    onClick={(e) =>
-                                      handleJobAction(e, "fuzz_pause", job.id)
-                                    }
-                                    disabled={executeLoading}
-                                  >
-                                    Pause
-                                  </Button>
-                                  <Button
-                                    variant="danger"
-                                    size="sm"
-                                    onClick={(e) =>
-                                      handleJobAction(e, "fuzz_cancel", job.id)
-                                    }
-                                    disabled={executeLoading}
-                                  >
-                                    Cancel
-                                  </Button>
-                                </>
-                              )}
-                              {job.status === "paused" && (
-                                <>
-                                  <Button
-                                    variant="primary"
-                                    size="sm"
-                                    onClick={(e) =>
-                                      handleJobAction(e, "fuzz_resume", job.id)
-                                    }
-                                    disabled={executeLoading}
-                                  >
-                                    Resume
-                                  </Button>
-                                  <Button
-                                    variant="danger"
-                                    size="sm"
-                                    onClick={(e) =>
-                                      handleJobAction(e, "fuzz_cancel", job.id)
-                                    }
-                                    disabled={executeLoading}
-                                  >
-                                    Cancel
-                                  </Button>
-                                </>
-                              )}
                             </td>
                           </tr>
                         ))}
@@ -483,103 +415,113 @@ export function FuzzPage() {
 }
 
 // ---------------------------------------------------------------------------
-// CampaignCreator — Fuzz campaign creation form
+// CampaignCreator — protocol-typed fuzz_* campaign creation form (USK-937)
+//
+// The form swaps its body by the selected protocol. Each variant of the
+// form builds a typed params object that is sent to the matching
+// client.fuzzHttp / fuzzWs / fuzzGrpc / fuzzRaw method.
 // ---------------------------------------------------------------------------
 
 interface CampaignCreatorProps {
   onCreated: () => void;
 }
 
-/** A single position entry in the form. */
+/** One position entry rendered inside the per-protocol form. */
 interface PositionFormEntry {
   key: string;
-  id: string;
-  location: string;
-  name: string;
-  match: string;
-  mode: string;
-  payloadSet: string;
-  jsonPath: string;
-}
-
-/** A single payload set entry in the form. */
-interface PayloadSetFormEntry {
-  key: string;
-  name: string;
-  type: string;
-  values: string;
   path: string;
-  start: string;
-  end: string;
-  step: string;
+  payloadsText: string;
+  encoding: string;
 }
 
 function createEmptyPosition(): PositionFormEntry {
   return {
     key: crypto.randomUUID(),
-    id: "",
-    location: "header",
-    name: "",
-    match: "",
-    mode: "replace",
-    payloadSet: "",
-    jsonPath: "",
+    path: "",
+    payloadsText: "",
+    encoding: "text",
   };
 }
 
-function createEmptyPayloadSet(): PayloadSetFormEntry {
-  return {
-    key: crypto.randomUUID(),
-    name: "",
-    type: "wordlist",
-    values: "",
-    path: "",
-    start: "0",
-    end: "100",
-    step: "1",
-  };
+/** One header KV entry rendered inside the per-protocol form. */
+interface HeaderFormEntry {
+  key: string;
+  name: string;
+  value: string;
+}
+
+function createEmptyHeader(): HeaderFormEntry {
+  return { key: crypto.randomUUID(), name: "", value: "" };
+}
+
+function headerEntriesToKVs(entries: HeaderFormEntry[]): HeaderKV[] {
+  return entries
+    .filter((h) => h.name.trim().length > 0)
+    .map((h) => ({ name: h.name, value: h.value }));
 }
 
 function CampaignCreator({ onCreated }: CampaignCreatorProps) {
   const { addToast } = useToast();
-  const { fuzz: fuzzAction, loading: executing } = useFuzz();
+  const { client, status: mcpStatus } = useMcpContext();
 
-  // Fetch available macros for hook selection
-  const { data: macrosData } = useQuery("macros");
-  const availableMacros: MacrosEntry[] = macrosData?.macros ?? [];
+  // --- Protocol selector ---
+  const [protocol, setProtocol] = useState<FuzzProtocol>("http");
 
-  // Base flow
+  // --- Shared base fields ---
   const [flowId, setFlowId] = useState("");
-
-  // Attack type
-  const [attackType, setAttackType] = useState("sequential");
-
-  // Tag
   const [tag, setTag] = useState("");
+  const [timeoutMs, setTimeoutMs] = useState("");
 
-  // Positions
+  // --- HTTP-specific fields ---
+  const [httpMethod, setHttpMethod] = useState("");
+  const [httpScheme, setHttpScheme] = useState("");
+  const [httpAuthority, setHttpAuthority] = useState("");
+  const [httpPath, setHttpPath] = useState("");
+  const [httpRawQuery, setHttpRawQuery] = useState("");
+  const [httpHeaders, setHttpHeaders] = useState<HeaderFormEntry[]>([]);
+  const [httpBody, setHttpBody] = useState("");
+  const [httpBodyEncoding, setHttpBodyEncoding] = useState("text");
+  const [httpStopOn5xx, setHttpStopOn5xx] = useState(false);
+
+  // --- WebSocket-specific fields ---
+  const [wsTargetAddr, setWsTargetAddr] = useState("");
+  const [wsScheme, setWsScheme] = useState("");
+  const [wsPath, setWsPath] = useState("");
+  const [wsRawQuery, setWsRawQuery] = useState("");
+  const [wsOpcode, setWsOpcode] = useState("text");
+  const [wsPayload, setWsPayload] = useState("");
+  const [wsPayloadEncoding, setWsPayloadEncoding] = useState("text");
+  const [wsCloseCode, setWsCloseCode] = useState("");
+  const [wsCloseReason, setWsCloseReason] = useState("");
+  const [wsStopOnClose, setWsStopOnClose] = useState(false);
+
+  // --- gRPC-specific fields ---
+  const [grpcTargetAddr, setGrpcTargetAddr] = useState("");
+  const [grpcScheme, setGrpcScheme] = useState("");
+  const [grpcService, setGrpcService] = useState("");
+  const [grpcMethod, setGrpcMethod] = useState("");
+  const [grpcMetadata, setGrpcMetadata] = useState<HeaderFormEntry[]>([]);
+  const [grpcEncoding, setGrpcEncoding] = useState("");
+  const [grpcMessagePayload, setGrpcMessagePayload] = useState("");
+  const [grpcMessageEncoding, setGrpcMessageEncoding] = useState("text");
+  const [grpcStopOnNonOk, setGrpcStopOnNonOk] = useState(false);
+
+  // --- Raw-specific fields ---
+  const [rawTargetAddr, setRawTargetAddr] = useState("");
+  const [rawUseTLS, setRawUseTLS] = useState(false);
+  const [rawSNI, setRawSNI] = useState("");
+  const [rawOverrideBytes, setRawOverrideBytes] = useState("");
+  const [rawOverrideBytesEncoding, setRawOverrideBytesEncoding] =
+    useState("text");
+  const [rawStopOnError, setRawStopOnError] = useState(false);
+
+  // --- Positions list (shared shape across protocols; .path encoding is
+  //     protocol-specific and described inline in the form help text) ---
   const [positions, setPositions] = useState<PositionFormEntry[]>([
     createEmptyPosition(),
   ]);
 
-  // Payload sets
-  const [payloadSets, setPayloadSets] = useState<PayloadSetFormEntry[]>([
-    createEmptyPayloadSet(),
-  ]);
-
-  // Execution params
-  const [concurrency, setConcurrency] = useState("1");
-  const [rateLimit, setRateLimit] = useState("");
-  const [delay, setDelay] = useState("");
-  const [timeout, setTimeout] = useState("30000");
-
-  // Stop conditions
-  const [stopErrorCount, setStopErrorCount] = useState("");
-  const [stopStatusCodes, setStopStatusCodes] = useState("");
-  const [stopLatencyMs, setStopLatencyMs] = useState("");
-
-  // Hooks
-  const [hooksConfig, setHooksConfig] = useState<HooksInput>({});
+  const [submitting, setSubmitting] = useState(false);
 
   // --- Position management ---
   const addPosition = useCallback(() => {
@@ -599,184 +541,312 @@ function CampaignCreator({ onCreated }: CampaignCreatorProps) {
     [],
   );
 
-  // --- Payload set management ---
-  const addPayloadSet = useCallback(() => {
-    setPayloadSets((prev) => [...prev, createEmptyPayloadSet()]);
-  }, []);
-
-  const removePayloadSet = useCallback((key: string) => {
-    setPayloadSets((prev) => prev.filter((p) => p.key !== key));
-  }, []);
-
-  const updatePayloadSet = useCallback(
-    (key: string, field: keyof PayloadSetFormEntry, value: string) => {
-      setPayloadSets((prev) =>
-        prev.map((p) => (p.key === key ? { ...p, [field]: value } : p)),
-      );
-    },
+  // --- Header management (HTTP & gRPC metadata) ---
+  const addHeader = useCallback(
+    (setter: React.Dispatch<React.SetStateAction<HeaderFormEntry[]>>) =>
+      setter((prev) => [...prev, createEmptyHeader()]),
+    [],
+  );
+  const removeHeader = useCallback(
+    (
+      setter: React.Dispatch<React.SetStateAction<HeaderFormEntry[]>>,
+      key: string,
+    ) => setter((prev) => prev.filter((h) => h.key !== key)),
+    [],
+  );
+  const updateHeader = useCallback(
+    (
+      setter: React.Dispatch<React.SetStateAction<HeaderFormEntry[]>>,
+      key: string,
+      field: "name" | "value",
+      value: string,
+    ) =>
+      setter((prev) =>
+        prev.map((h) => (h.key === key ? { ...h, [field]: value } : h)),
+      ),
     [],
   );
 
-  // --- Submit ---
+  // --- Build typed positions array from the form. Returns null on
+  //     validation failure (and surfaces a toast). ---
+  function buildPositions<
+    P extends FuzzHTTPPosition | FuzzWSPosition | FuzzGRPCPosition | FuzzRawPosition,
+  >(): P[] | null {
+    const built: P[] = [];
+    for (const p of positions) {
+      if (!p.path.trim()) continue; // skip empty rows
+      const payloads = splitPayloads(p.payloadsText);
+      if (payloads.length === 0) {
+        addToast({
+          type: "warning",
+          message: `Position '${p.path}' must have at least one payload`,
+        });
+        return null;
+      }
+      const pos = {
+        path: p.path.trim(),
+        payloads,
+      } as P;
+      // Encoding is optional; default "text" matches backend default.
+      if (p.encoding && p.encoding !== "text") {
+        (pos as { encoding?: string }).encoding = p.encoding;
+      }
+      built.push(pos);
+    }
+    if (built.length === 0) {
+      addToast({
+        type: "warning",
+        message: "At least one position with a path and payloads is required",
+      });
+      return null;
+    }
+    return built;
+  }
+
+  // --- Submit handler ---
   const handleSubmit = useCallback(async () => {
-    if (!flowId.trim()) {
-      addToast({ type: "warning", message: "Flow ID is required" });
-      return;
-    }
-
-    // Build positions
-    const builtPositions: FuzzPosition[] = positions
-      .filter((p) => p.id.trim())
-      .map((p) => {
-        const pos: FuzzPosition = {
-          id: p.id.trim(),
-          location: p.location,
-        };
-        if (p.name.trim()) pos.name = p.name.trim();
-        if (p.match.trim()) pos.match = p.match.trim();
-        if (p.mode.trim()) pos.mode = p.mode.trim();
-        if (p.payloadSet.trim()) pos.payload_set = p.payloadSet.trim();
-        if (p.location === "body_json" && p.jsonPath.trim()) {
-          pos.json_path = p.jsonPath.trim();
-        }
-        return pos;
-      });
-
-    if (builtPositions.length === 0) {
+    if (!client || mcpStatus !== "connected") {
       addToast({
-        type: "warning",
-        message: "At least one position with an ID is required",
+        type: "error",
+        message: "MCP client is not connected",
       });
       return;
     }
 
-    // Build payload sets
-    const builtPayloadSets: Record<string, FuzzPayloadSet> = {};
-    for (const ps of payloadSets) {
-      if (!ps.name.trim()) continue;
-      const set: FuzzPayloadSet = { type: ps.type };
-      if (ps.type === "wordlist" && ps.values.trim()) {
-        set.values = ps.values
-          .split("\n")
-          .map((v) => v.trim())
-          .filter((v) => v.length > 0);
-      }
-      if (ps.type === "file" && ps.path.trim()) {
-        set.path = ps.path.trim();
-      }
-      if (ps.type === "range") {
-        const start = parseInt(ps.start, 10);
-        const end = parseInt(ps.end, 10);
-        const step = parseInt(ps.step, 10);
-        if (!isNaN(start)) set.start = start;
-        if (!isNaN(end)) set.end = end;
-        if (!isNaN(step)) set.step = step;
-      }
-      builtPayloadSets[ps.name.trim()] = set;
-    }
+    const timeoutMsNum = timeoutMs.trim() ? parseInt(timeoutMs, 10) : NaN;
 
-    if (Object.keys(builtPayloadSets).length === 0) {
-      addToast({
-        type: "warning",
-        message: "At least one payload set with a name is required",
-      });
-      return;
-    }
-
-    // Build stop conditions
-    let stopOn: FuzzStopCondition | undefined;
-    const errorCount = parseInt(stopErrorCount, 10);
-    const latencyMs = parseInt(stopLatencyMs, 10);
-    const statusCodes = stopStatusCodes
-      .split(",")
-      .map((s) => parseInt(s.trim(), 10))
-      .filter((n) => !isNaN(n));
-
-    if (!isNaN(errorCount) || !isNaN(latencyMs) || statusCodes.length > 0) {
-      stopOn = {};
-      if (!isNaN(errorCount)) stopOn.error_count = errorCount;
-      if (!isNaN(latencyMs)) stopOn.latency_threshold_ms = latencyMs;
-      if (statusCodes.length > 0) stopOn.status_codes = statusCodes;
-    }
-
-    // Build hooks from the hook config editor state.
-    const hooks =
-      hooksConfig.pre_send || hooksConfig.post_receive ? hooksConfig : undefined;
-
+    setSubmitting(true);
     try {
-      await fuzzAction({
-        action: "fuzz",
-        params: {
-          flow_id: flowId.trim(),
-          positions: builtPositions,
-          payload_sets: builtPayloadSets,
-          attack_type: attackType,
-          concurrency: parseInt(concurrency, 10) || 1,
-          rate_limit_rps: rateLimit ? parseFloat(rateLimit) : undefined,
-          delay_ms: delay ? parseInt(delay, 10) : undefined,
-          timeout_ms: timeout ? parseInt(timeout, 10) : undefined,
-          stop_on: stopOn,
-          hooks: hooks,
-          tag: tag.trim() || undefined,
-        },
-      });
+      if (protocol === "http") {
+        const built = buildPositions<FuzzHTTPPosition>();
+        if (!built) return;
+        const params: FuzzHTTPParams = {
+          positions: built,
+        };
+        if (flowId.trim()) params.flow_id = flowId.trim();
+        if (httpMethod.trim()) params.method = httpMethod.trim();
+        if (httpScheme.trim()) params.scheme = httpScheme.trim();
+        if (httpAuthority.trim()) params.authority = httpAuthority.trim();
+        if (httpPath.trim()) params.path = httpPath.trim();
+        if (httpRawQuery.trim()) params.raw_query = httpRawQuery.trim();
+        const headerKVs = headerEntriesToKVs(httpHeaders);
+        if (headerKVs.length > 0) params.headers = headerKVs;
+        if (httpBody.length > 0) {
+          params.body = httpBody;
+          if (httpBodyEncoding && httpBodyEncoding !== "text") {
+            params.body_encoding = httpBodyEncoding;
+          }
+        }
+        if (httpStopOn5xx) params.stop_on_5xx = true;
+        if (tag.trim()) params.tag = tag.trim();
+        if (!isNaN(timeoutMsNum)) params.timeout_ms = timeoutMsNum;
+        const result = await client.fuzzHttp(params);
+        addToast({
+          type: "success",
+          message: `fuzz_http: ${result.completed_variants}/${result.total_variants} variants`,
+        });
+        onCreated();
+        return;
+      }
 
-      addToast({ type: "success", message: "Fuzz campaign started" });
+      if (protocol === "ws") {
+        const built = buildPositions<FuzzWSPosition>();
+        if (!built) return;
+        if (!wsOpcode.trim()) {
+          addToast({ type: "warning", message: "opcode is required" });
+          return;
+        }
+        const params: FuzzWSParams = {
+          opcode: wsOpcode.trim(),
+          positions: built,
+        };
+        if (flowId.trim()) params.flow_id = flowId.trim();
+        if (wsTargetAddr.trim()) params.target_addr = wsTargetAddr.trim();
+        if (wsScheme.trim()) params.scheme = wsScheme.trim();
+        if (wsPath.trim()) params.path = wsPath.trim();
+        if (wsRawQuery.trim()) params.raw_query = wsRawQuery.trim();
+        if (wsPayload.length > 0) {
+          params.payload = wsPayload;
+          if (wsPayloadEncoding && wsPayloadEncoding !== "text") {
+            params.body_encoding = wsPayloadEncoding;
+          }
+        }
+        if (wsCloseCode.trim()) {
+          const code = parseInt(wsCloseCode, 10);
+          if (!isNaN(code)) params.close_code = code;
+        }
+        if (wsCloseReason.trim()) params.close_reason = wsCloseReason.trim();
+        if (wsStopOnClose) params.stop_on_close = true;
+        if (tag.trim()) params.tag = tag.trim();
+        if (!isNaN(timeoutMsNum)) params.timeout_ms = timeoutMsNum;
+        const result = await client.fuzzWs(params);
+        addToast({
+          type: "success",
+          message: `fuzz_ws: ${result.completed_variants}/${result.total_variants} variants`,
+        });
+        onCreated();
+        return;
+      }
+
+      if (protocol === "grpc") {
+        const built = buildPositions<FuzzGRPCPosition>();
+        if (!built) return;
+        const params: FuzzGRPCParams = {
+          positions: built,
+        };
+        if (flowId.trim()) params.flow_id = flowId.trim();
+        if (grpcTargetAddr.trim()) params.target_addr = grpcTargetAddr.trim();
+        if (grpcScheme.trim()) params.scheme = grpcScheme.trim();
+        if (grpcService.trim()) params.service = grpcService.trim();
+        if (grpcMethod.trim()) params.method = grpcMethod.trim();
+        const md = headerEntriesToKVs(grpcMetadata);
+        if (md.length > 0) params.metadata = md;
+        if (grpcEncoding.trim()) params.encoding = grpcEncoding.trim();
+        // A single base message is the common case; multi-message campaigns
+        // can iterate via positions on messages[N].payload after seeding via
+        // flow_id. The form keeps the surface small.
+        if (grpcMessagePayload.length > 0) {
+          params.messages = [
+            {
+              payload: grpcMessagePayload,
+              body_encoding:
+                grpcMessageEncoding && grpcMessageEncoding !== "text"
+                  ? grpcMessageEncoding
+                  : undefined,
+            },
+          ];
+        }
+        if (grpcStopOnNonOk) params.stop_on_non_ok = true;
+        if (tag.trim()) params.tag = tag.trim();
+        if (!isNaN(timeoutMsNum)) params.timeout_ms = timeoutMsNum;
+        const result = await client.fuzzGrpc(params);
+        addToast({
+          type: "success",
+          message: `fuzz_grpc: ${result.completed_variants}/${result.total_variants} variants`,
+        });
+        onCreated();
+        return;
+      }
+
+      // raw
+      const built = buildPositions<FuzzRawPosition>();
+      if (!built) return;
+      if (!rawTargetAddr.trim()) {
+        addToast({
+          type: "warning",
+          message: "target_addr is required for fuzz_raw",
+        });
+        return;
+      }
+      const params: FuzzRawParams = {
+        target_addr: rawTargetAddr.trim(),
+        positions: built,
+      };
+      if (flowId.trim()) params.flow_id = flowId.trim();
+      if (rawUseTLS) params.use_tls = true;
+      if (rawSNI.trim()) params.sni = rawSNI.trim();
+      if (rawOverrideBytes.length > 0) {
+        params.override_bytes = rawOverrideBytes;
+        if (
+          rawOverrideBytesEncoding &&
+          rawOverrideBytesEncoding !== "text"
+        ) {
+          params.override_bytes_encoding = rawOverrideBytesEncoding;
+        }
+      }
+      if (rawStopOnError) params.stop_on_error = true;
+      if (tag.trim()) params.tag = tag.trim();
+      if (!isNaN(timeoutMsNum)) params.timeout_ms = timeoutMsNum;
+      const result = await client.fuzzRaw(params);
+      addToast({
+        type: "success",
+        message: `fuzz_raw: ${result.completed_variants}/${result.total_variants} variants`,
+      });
       onCreated();
     } catch (err) {
       addToast({
         type: "error",
         message: `Failed to start fuzz: ${err instanceof Error ? err.message : String(err)}`,
       });
+    } finally {
+      setSubmitting(false);
     }
   }, [
+    client,
+    mcpStatus,
+    protocol,
     flowId,
-    positions,
-    payloadSets,
-    attackType,
-    concurrency,
-    rateLimit,
-    delay,
-    timeout,
     tag,
-    stopErrorCount,
-    stopStatusCodes,
-    stopLatencyMs,
-    hooksConfig,
-    fuzzAction,
+    timeoutMs,
+    positions,
+    httpMethod,
+    httpScheme,
+    httpAuthority,
+    httpPath,
+    httpRawQuery,
+    httpHeaders,
+    httpBody,
+    httpBodyEncoding,
+    httpStopOn5xx,
+    wsTargetAddr,
+    wsScheme,
+    wsPath,
+    wsRawQuery,
+    wsOpcode,
+    wsPayload,
+    wsPayloadEncoding,
+    wsCloseCode,
+    wsCloseReason,
+    wsStopOnClose,
+    grpcTargetAddr,
+    grpcScheme,
+    grpcService,
+    grpcMethod,
+    grpcMetadata,
+    grpcEncoding,
+    grpcMessagePayload,
+    grpcMessageEncoding,
+    grpcStopOnNonOk,
+    rawTargetAddr,
+    rawUseTLS,
+    rawSNI,
+    rawOverrideBytes,
+    rawOverrideBytesEncoding,
+    rawStopOnError,
     addToast,
     onCreated,
   ]);
 
+  // --- Protocol-specific help text for positions[].path ---
+  const positionPathHelp = useMemo(() => {
+    switch (protocol) {
+      case "http":
+        return "method | scheme | authority | path | raw_query | body | headers[N].name | headers[N].value";
+      case "ws":
+        return "payload | close_reason";
+      case "grpc":
+        return "service | method | metadata[N].name | metadata[N].value | messages[N].payload | messages[N].payload.<FFFF:OOOO:type> (see gRPC Schemas panel for proto-aware paths)";
+      case "raw":
+        return "payload | patches[N].data";
+    }
+  }, [protocol]);
+
   return (
     <div className="fuzz-creator">
-      {/* Base flow */}
+      {/* Protocol selector */}
       <div className="fuzz-creator-section">
-        <h3 className="fuzz-creator-section-title">Base Flow</h3>
-        <div className="fuzz-creator-row">
-          <label className="fuzz-creator-label">Flow ID</label>
-          <Input
-            placeholder="Enter flow ID..."
-            value={flowId}
-            onChange={(e) => setFlowId(e.target.value)}
-          />
-        </div>
-      </div>
-
-      {/* Attack type & Tag */}
-      <div className="fuzz-creator-section">
-        <h3 className="fuzz-creator-section-title">Campaign Settings</h3>
+        <h3 className="fuzz-creator-section-title">Protocol</h3>
         <div className="fuzz-creator-row-inline">
           <div className="fuzz-creator-field">
-            <label className="fuzz-creator-label">Attack Type</label>
+            <label className="fuzz-creator-label">Target Protocol</label>
             <select
               className="fuzz-filter-select"
-              value={attackType}
-              onChange={(e) => setAttackType(e.target.value)}
+              value={protocol}
+              onChange={(e) => setProtocol(e.target.value as FuzzProtocol)}
             >
-              {ATTACK_TYPES.map((t) => (
-                <option key={t.value} value={t.value}>
-                  {t.label}
+              {PROTOCOL_OPTIONS.map((opt) => (
+                <option key={opt.value} value={opt.value}>
+                  {opt.label}
                 </option>
               ))}
             </select>
@@ -789,8 +859,124 @@ function CampaignCreator({ onCreated }: CampaignCreatorProps) {
               onChange={(e) => setTag(e.target.value)}
             />
           </div>
+          <div className="fuzz-creator-field">
+            <label className="fuzz-creator-label">Timeout (ms)</label>
+            <Input
+              type="number"
+              placeholder="30000"
+              value={timeoutMs}
+              onChange={(e) => setTimeoutMs(e.target.value)}
+            />
+          </div>
         </div>
       </div>
+
+      {/* Base flow */}
+      <div className="fuzz-creator-section">
+        <h3 className="fuzz-creator-section-title">Base Flow (optional)</h3>
+        <div className="fuzz-creator-row">
+          <label className="fuzz-creator-label">Flow ID</label>
+          <Input
+            placeholder="Recorded flow ID to seed the base envelope..."
+            value={flowId}
+            onChange={(e) => setFlowId(e.target.value)}
+          />
+        </div>
+      </div>
+
+      {/* Protocol-specific body */}
+      {protocol === "http" && (
+        <HttpCampaignFields
+          method={httpMethod}
+          setMethod={setHttpMethod}
+          scheme={httpScheme}
+          setScheme={setHttpScheme}
+          authority={httpAuthority}
+          setAuthority={setHttpAuthority}
+          path={httpPath}
+          setPath={setHttpPath}
+          rawQuery={httpRawQuery}
+          setRawQuery={setHttpRawQuery}
+          headers={httpHeaders}
+          onAddHeader={() => addHeader(setHttpHeaders)}
+          onRemoveHeader={(key) => removeHeader(setHttpHeaders, key)}
+          onUpdateHeader={(key, field, value) =>
+            updateHeader(setHttpHeaders, key, field, value)
+          }
+          body={httpBody}
+          setBody={setHttpBody}
+          bodyEncoding={httpBodyEncoding}
+          setBodyEncoding={setHttpBodyEncoding}
+          stopOn5xx={httpStopOn5xx}
+          setStopOn5xx={setHttpStopOn5xx}
+        />
+      )}
+      {protocol === "ws" && (
+        <WsCampaignFields
+          targetAddr={wsTargetAddr}
+          setTargetAddr={setWsTargetAddr}
+          scheme={wsScheme}
+          setScheme={setWsScheme}
+          path={wsPath}
+          setPath={setWsPath}
+          rawQuery={wsRawQuery}
+          setRawQuery={setWsRawQuery}
+          opcode={wsOpcode}
+          setOpcode={setWsOpcode}
+          payload={wsPayload}
+          setPayload={setWsPayload}
+          payloadEncoding={wsPayloadEncoding}
+          setPayloadEncoding={setWsPayloadEncoding}
+          closeCode={wsCloseCode}
+          setCloseCode={setWsCloseCode}
+          closeReason={wsCloseReason}
+          setCloseReason={setWsCloseReason}
+          stopOnClose={wsStopOnClose}
+          setStopOnClose={setWsStopOnClose}
+        />
+      )}
+      {protocol === "grpc" && (
+        <GrpcCampaignFields
+          targetAddr={grpcTargetAddr}
+          setTargetAddr={setGrpcTargetAddr}
+          scheme={grpcScheme}
+          setScheme={setGrpcScheme}
+          service={grpcService}
+          setService={setGrpcService}
+          method={grpcMethod}
+          setMethod={setGrpcMethod}
+          metadata={grpcMetadata}
+          onAddMetadata={() => addHeader(setGrpcMetadata)}
+          onRemoveMetadata={(key) => removeHeader(setGrpcMetadata, key)}
+          onUpdateMetadata={(key, field, value) =>
+            updateHeader(setGrpcMetadata, key, field, value)
+          }
+          encoding={grpcEncoding}
+          setEncoding={setGrpcEncoding}
+          messagePayload={grpcMessagePayload}
+          setMessagePayload={setGrpcMessagePayload}
+          messageEncoding={grpcMessageEncoding}
+          setMessageEncoding={setGrpcMessageEncoding}
+          stopOnNonOk={grpcStopOnNonOk}
+          setStopOnNonOk={setGrpcStopOnNonOk}
+        />
+      )}
+      {protocol === "raw" && (
+        <RawCampaignFields
+          targetAddr={rawTargetAddr}
+          setTargetAddr={setRawTargetAddr}
+          useTLS={rawUseTLS}
+          setUseTLS={setRawUseTLS}
+          sni={rawSNI}
+          setSNI={setRawSNI}
+          overrideBytes={rawOverrideBytes}
+          setOverrideBytes={setRawOverrideBytes}
+          overrideBytesEncoding={rawOverrideBytesEncoding}
+          setOverrideBytesEncoding={setRawOverrideBytesEncoding}
+          stopOnError={rawStopOnError}
+          setStopOnError={setRawStopOnError}
+        />
+      )}
 
       {/* Positions */}
       <div className="fuzz-creator-section">
@@ -799,6 +985,9 @@ function CampaignCreator({ onCreated }: CampaignCreatorProps) {
           <Button variant="secondary" size="sm" onClick={addPosition}>
             Add Position
           </Button>
+        </div>
+        <div className="fuzz-creator-help">
+          Path syntax: {positionPathHelp}
         </div>
         {positions.map((pos, idx) => (
           <div key={pos.key} className="fuzz-position-entry">
@@ -816,273 +1005,49 @@ function CampaignCreator({ onCreated }: CampaignCreatorProps) {
             </div>
             <div className="fuzz-position-fields">
               <div className="fuzz-creator-field">
-                <label className="fuzz-creator-label">ID</label>
+                <label className="fuzz-creator-label">Path</label>
                 <Input
-                  placeholder="pos-1"
-                  value={pos.id}
+                  placeholder="e.g. path or headers[0].value"
+                  value={pos.path}
                   onChange={(e) =>
-                    updatePosition(pos.key, "id", e.target.value)
+                    updatePosition(pos.key, "path", e.target.value)
                   }
                 />
               </div>
               <div className="fuzz-creator-field">
-                <label className="fuzz-creator-label">Location</label>
+                <label className="fuzz-creator-label">Encoding</label>
                 <select
                   className="fuzz-filter-select"
-                  value={pos.location}
+                  value={pos.encoding}
                   onChange={(e) =>
-                    updatePosition(pos.key, "location", e.target.value)
+                    updatePosition(pos.key, "encoding", e.target.value)
                   }
                 >
-                  {POSITION_LOCATIONS.map((l) => (
-                    <option key={l.value} value={l.value}>
-                      {l.label}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              <div className="fuzz-creator-field">
-                <label className="fuzz-creator-label">Match Pattern</label>
-                <Input
-                  placeholder="FUZZ"
-                  value={pos.match}
-                  onChange={(e) =>
-                    updatePosition(pos.key, "match", e.target.value)
-                  }
-                />
-              </div>
-              <div className="fuzz-creator-field">
-                <label className="fuzz-creator-label">Payload Set</label>
-                <Input
-                  placeholder="set-1"
-                  value={pos.payloadSet}
-                  onChange={(e) =>
-                    updatePosition(pos.key, "payloadSet", e.target.value)
-                  }
-                />
-              </div>
-              {pos.location === "body_json" && (
-                <div className="fuzz-creator-field">
-                  <label className="fuzz-creator-label">JSON Path</label>
-                  <Input
-                    placeholder="$.key"
-                    value={pos.jsonPath}
-                    onChange={(e) =>
-                      updatePosition(pos.key, "jsonPath", e.target.value)
-                    }
-                  />
-                </div>
-              )}
-            </div>
-          </div>
-        ))}
-      </div>
-
-      {/* Payload Sets */}
-      <div className="fuzz-creator-section">
-        <div className="fuzz-creator-section-header">
-          <h3 className="fuzz-creator-section-title">Payload Sets</h3>
-          <Button variant="secondary" size="sm" onClick={addPayloadSet}>
-            Add Payload Set
-          </Button>
-        </div>
-        {payloadSets.map((ps, idx) => (
-          <div key={ps.key} className="fuzz-payloadset-entry">
-            <div className="fuzz-position-header">
-              <span className="fuzz-position-index">#{idx + 1}</span>
-              {payloadSets.length > 1 && (
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => removePayloadSet(ps.key)}
-                >
-                  Remove
-                </Button>
-              )}
-            </div>
-            <div className="fuzz-position-fields">
-              <div className="fuzz-creator-field">
-                <label className="fuzz-creator-label">Name</label>
-                <Input
-                  placeholder="set-1"
-                  value={ps.name}
-                  onChange={(e) =>
-                    updatePayloadSet(ps.key, "name", e.target.value)
-                  }
-                />
-              </div>
-              <div className="fuzz-creator-field">
-                <label className="fuzz-creator-label">Type</label>
-                <select
-                  className="fuzz-filter-select"
-                  value={ps.type}
-                  onChange={(e) =>
-                    updatePayloadSet(ps.key, "type", e.target.value)
-                  }
-                >
-                  {PAYLOAD_TYPES.map((t) => (
-                    <option key={t.value} value={t.value}>
-                      {t.label}
+                  {ENCODING_OPTIONS.map((opt) => (
+                    <option key={opt.value} value={opt.value}>
+                      {opt.label}
                     </option>
                   ))}
                 </select>
               </div>
             </div>
-            {ps.type === "wordlist" && (
-              <div className="fuzz-creator-field fuzz-creator-field-full">
-                <label className="fuzz-creator-label">
-                  Values (one per line)
-                </label>
-                <textarea
-                  className="fuzz-values-textarea"
-                  value={ps.values}
-                  onChange={(e) =>
-                    updatePayloadSet(ps.key, "values", e.target.value)
-                  }
-                  placeholder={"admin\ntest\n' OR 1=1 --\n<script>alert(1)</script>"}
-                  rows={6}
-                  spellCheck={false}
-                />
-              </div>
-            )}
-            {ps.type === "file" && (
-              <div className="fuzz-creator-field fuzz-creator-field-full">
-                <label className="fuzz-creator-label">File Path</label>
-                <Input
-                  placeholder="/path/to/wordlist.txt"
-                  value={ps.path}
-                  onChange={(e) =>
-                    updatePayloadSet(ps.key, "path", e.target.value)
-                  }
-                />
-              </div>
-            )}
-            {ps.type === "range" && (
-              <div className="fuzz-position-fields">
-                <div className="fuzz-creator-field">
-                  <label className="fuzz-creator-label">Start</label>
-                  <Input
-                    type="number"
-                    value={ps.start}
-                    onChange={(e) =>
-                      updatePayloadSet(ps.key, "start", e.target.value)
-                    }
-                  />
-                </div>
-                <div className="fuzz-creator-field">
-                  <label className="fuzz-creator-label">End</label>
-                  <Input
-                    type="number"
-                    value={ps.end}
-                    onChange={(e) =>
-                      updatePayloadSet(ps.key, "end", e.target.value)
-                    }
-                  />
-                </div>
-                <div className="fuzz-creator-field">
-                  <label className="fuzz-creator-label">Step</label>
-                  <Input
-                    type="number"
-                    value={ps.step}
-                    onChange={(e) =>
-                      updatePayloadSet(ps.key, "step", e.target.value)
-                    }
-                  />
-                </div>
-              </div>
-            )}
+            <div className="fuzz-creator-field fuzz-creator-field-full">
+              <label className="fuzz-creator-label">
+                Payloads (one per line)
+              </label>
+              <textarea
+                className="fuzz-values-textarea"
+                value={pos.payloadsText}
+                onChange={(e) =>
+                  updatePosition(pos.key, "payloadsText", e.target.value)
+                }
+                placeholder={"admin\ntest\n' OR 1=1 --"}
+                rows={6}
+                spellCheck={false}
+              />
+            </div>
           </div>
         ))}
-      </div>
-
-      {/* Execution parameters */}
-      <div className="fuzz-creator-section">
-        <h3 className="fuzz-creator-section-title">Execution Parameters</h3>
-        <div className="fuzz-position-fields">
-          <div className="fuzz-creator-field">
-            <label className="fuzz-creator-label">Concurrency</label>
-            <Input
-              type="number"
-              value={concurrency}
-              onChange={(e) => setConcurrency(e.target.value)}
-              placeholder="1"
-            />
-          </div>
-          <div className="fuzz-creator-field">
-            <label className="fuzz-creator-label">Rate Limit (RPS)</label>
-            <Input
-              type="number"
-              value={rateLimit}
-              onChange={(e) => setRateLimit(e.target.value)}
-              placeholder="Unlimited"
-            />
-          </div>
-          <div className="fuzz-creator-field">
-            <label className="fuzz-creator-label">Delay (ms)</label>
-            <Input
-              type="number"
-              value={delay}
-              onChange={(e) => setDelay(e.target.value)}
-              placeholder="0"
-            />
-          </div>
-          <div className="fuzz-creator-field">
-            <label className="fuzz-creator-label">Timeout (ms)</label>
-            <Input
-              type="number"
-              value={timeout}
-              onChange={(e) => setTimeout(e.target.value)}
-              placeholder="30000"
-            />
-          </div>
-        </div>
-      </div>
-
-      {/* Stop conditions */}
-      <div className="fuzz-creator-section">
-        <h3 className="fuzz-creator-section-title">Stop Conditions</h3>
-        <div className="fuzz-position-fields">
-          <div className="fuzz-creator-field">
-            <label className="fuzz-creator-label">Error Count</label>
-            <Input
-              type="number"
-              value={stopErrorCount}
-              onChange={(e) => setStopErrorCount(e.target.value)}
-              placeholder="No limit"
-            />
-          </div>
-          <div className="fuzz-creator-field">
-            <label className="fuzz-creator-label">
-              Stop Status Codes (comma-separated)
-            </label>
-            <Input
-              value={stopStatusCodes}
-              onChange={(e) => setStopStatusCodes(e.target.value)}
-              placeholder="e.g. 500,503"
-            />
-          </div>
-          <div className="fuzz-creator-field">
-            <label className="fuzz-creator-label">
-              Latency Threshold (ms)
-            </label>
-            <Input
-              type="number"
-              value={stopLatencyMs}
-              onChange={(e) => setStopLatencyMs(e.target.value)}
-              placeholder="No limit"
-            />
-          </div>
-        </div>
-      </div>
-
-      {/* Hooks */}
-      <div className="fuzz-creator-section">
-        <h3 className="fuzz-creator-section-title">Hooks (optional)</h3>
-        <HookConfigEditor
-          macros={availableMacros}
-          hooks={hooksConfig}
-          onChange={setHooksConfig}
-        />
       </div>
 
       {/* Submit */}
@@ -1090,11 +1055,654 @@ function CampaignCreator({ onCreated }: CampaignCreatorProps) {
         <Button
           variant="primary"
           onClick={handleSubmit}
-          disabled={executing}
+          disabled={submitting}
         >
-          {executing ? "Starting..." : "Start Fuzz Campaign"}
+          {submitting ? "Running..." : "Start Fuzz Campaign"}
         </Button>
       </div>
     </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Per-protocol form fragments
+// ---------------------------------------------------------------------------
+
+interface HeaderListProps {
+  title: string;
+  entries: HeaderFormEntry[];
+  onAdd: () => void;
+  onRemove: (key: string) => void;
+  onUpdate: (key: string, field: "name" | "value", value: string) => void;
+}
+
+function HeaderList({
+  title,
+  entries,
+  onAdd,
+  onRemove,
+  onUpdate,
+}: HeaderListProps) {
+  return (
+    <div className="fuzz-creator-section">
+      <div className="fuzz-creator-section-header">
+        <h3 className="fuzz-creator-section-title">{title}</h3>
+        <Button variant="secondary" size="sm" onClick={onAdd}>
+          Add
+        </Button>
+      </div>
+      {entries.map((h) => (
+        <div key={h.key} className="fuzz-position-fields">
+          <div className="fuzz-creator-field">
+            <label className="fuzz-creator-label">Name</label>
+            <Input
+              value={h.name}
+              onChange={(e) => onUpdate(h.key, "name", e.target.value)}
+            />
+          </div>
+          <div className="fuzz-creator-field">
+            <label className="fuzz-creator-label">Value</label>
+            <Input
+              value={h.value}
+              onChange={(e) => onUpdate(h.key, "value", e.target.value)}
+            />
+          </div>
+          <div className="fuzz-creator-field">
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => onRemove(h.key)}
+            >
+              Remove
+            </Button>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+interface HttpCampaignFieldsProps {
+  method: string;
+  setMethod: (v: string) => void;
+  scheme: string;
+  setScheme: (v: string) => void;
+  authority: string;
+  setAuthority: (v: string) => void;
+  path: string;
+  setPath: (v: string) => void;
+  rawQuery: string;
+  setRawQuery: (v: string) => void;
+  headers: HeaderFormEntry[];
+  onAddHeader: () => void;
+  onRemoveHeader: (key: string) => void;
+  onUpdateHeader: (key: string, field: "name" | "value", value: string) => void;
+  body: string;
+  setBody: (v: string) => void;
+  bodyEncoding: string;
+  setBodyEncoding: (v: string) => void;
+  stopOn5xx: boolean;
+  setStopOn5xx: (v: boolean) => void;
+}
+
+function HttpCampaignFields({
+  method,
+  setMethod,
+  scheme,
+  setScheme,
+  authority,
+  setAuthority,
+  path,
+  setPath,
+  rawQuery,
+  setRawQuery,
+  headers,
+  onAddHeader,
+  onRemoveHeader,
+  onUpdateHeader,
+  body,
+  setBody,
+  bodyEncoding,
+  setBodyEncoding,
+  stopOn5xx,
+  setStopOn5xx,
+}: HttpCampaignFieldsProps) {
+  return (
+    <>
+      <div className="fuzz-creator-section">
+        <h3 className="fuzz-creator-section-title">HTTP Base</h3>
+        <div className="fuzz-creator-help">
+          Required when no Flow ID is supplied. With a Flow ID, omitted fields
+          inherit from the recorded request.
+        </div>
+        <div className="fuzz-position-fields">
+          <div className="fuzz-creator-field">
+            <label className="fuzz-creator-label">Method</label>
+            <Input
+              placeholder="GET"
+              value={method}
+              onChange={(e) => setMethod(e.target.value)}
+            />
+          </div>
+          <div className="fuzz-creator-field">
+            <label className="fuzz-creator-label">Scheme</label>
+            <Input
+              placeholder="https"
+              value={scheme}
+              onChange={(e) => setScheme(e.target.value)}
+            />
+          </div>
+          <div className="fuzz-creator-field">
+            <label className="fuzz-creator-label">Authority</label>
+            <Input
+              placeholder="example.com"
+              value={authority}
+              onChange={(e) => setAuthority(e.target.value)}
+            />
+          </div>
+        </div>
+        <div className="fuzz-position-fields">
+          <div className="fuzz-creator-field">
+            <label className="fuzz-creator-label">Path</label>
+            <Input
+              placeholder="/"
+              value={path}
+              onChange={(e) => setPath(e.target.value)}
+            />
+          </div>
+          <div className="fuzz-creator-field">
+            <label className="fuzz-creator-label">Raw Query</label>
+            <Input
+              placeholder="a=1&b=2"
+              value={rawQuery}
+              onChange={(e) => setRawQuery(e.target.value)}
+            />
+          </div>
+        </div>
+      </div>
+      <HeaderList
+        title="Headers"
+        entries={headers}
+        onAdd={onAddHeader}
+        onRemove={onRemoveHeader}
+        onUpdate={onUpdateHeader}
+      />
+      <div className="fuzz-creator-section">
+        <h3 className="fuzz-creator-section-title">Body</h3>
+        <div className="fuzz-creator-row-inline">
+          <div className="fuzz-creator-field">
+            <label className="fuzz-creator-label">Body Encoding</label>
+            <select
+              className="fuzz-filter-select"
+              value={bodyEncoding}
+              onChange={(e) => setBodyEncoding(e.target.value)}
+            >
+              {ENCODING_OPTIONS.map((opt) => (
+                <option key={opt.value} value={opt.value}>
+                  {opt.label}
+                </option>
+              ))}
+            </select>
+          </div>
+        </div>
+        <div className="fuzz-creator-field fuzz-creator-field-full">
+          <textarea
+            className="fuzz-values-textarea"
+            value={body}
+            onChange={(e) => setBody(e.target.value)}
+            placeholder="Request body..."
+            rows={4}
+            spellCheck={false}
+          />
+        </div>
+      </div>
+      <div className="fuzz-creator-section">
+        <h3 className="fuzz-creator-section-title">Stop Condition</h3>
+        <label className="fuzz-results-outliers-toggle">
+          <input
+            type="checkbox"
+            checked={stopOn5xx}
+            onChange={(e) => setStopOn5xx(e.target.checked)}
+          />
+          Stop on first 5xx response
+        </label>
+      </div>
+    </>
+  );
+}
+
+interface WsCampaignFieldsProps {
+  targetAddr: string;
+  setTargetAddr: (v: string) => void;
+  scheme: string;
+  setScheme: (v: string) => void;
+  path: string;
+  setPath: (v: string) => void;
+  rawQuery: string;
+  setRawQuery: (v: string) => void;
+  opcode: string;
+  setOpcode: (v: string) => void;
+  payload: string;
+  setPayload: (v: string) => void;
+  payloadEncoding: string;
+  setPayloadEncoding: (v: string) => void;
+  closeCode: string;
+  setCloseCode: (v: string) => void;
+  closeReason: string;
+  setCloseReason: (v: string) => void;
+  stopOnClose: boolean;
+  setStopOnClose: (v: boolean) => void;
+}
+
+function WsCampaignFields({
+  targetAddr,
+  setTargetAddr,
+  scheme,
+  setScheme,
+  path,
+  setPath,
+  rawQuery,
+  setRawQuery,
+  opcode,
+  setOpcode,
+  payload,
+  setPayload,
+  payloadEncoding,
+  setPayloadEncoding,
+  closeCode,
+  setCloseCode,
+  closeReason,
+  setCloseReason,
+  stopOnClose,
+  setStopOnClose,
+}: WsCampaignFieldsProps) {
+  return (
+    <>
+      <div className="fuzz-creator-section">
+        <h3 className="fuzz-creator-section-title">WebSocket Base</h3>
+        <div className="fuzz-creator-help">
+          target_addr + path are required when no Flow ID is supplied.
+        </div>
+        <div className="fuzz-position-fields">
+          <div className="fuzz-creator-field">
+            <label className="fuzz-creator-label">Target Addr</label>
+            <Input
+              placeholder="example.com:443"
+              value={targetAddr}
+              onChange={(e) => setTargetAddr(e.target.value)}
+            />
+          </div>
+          <div className="fuzz-creator-field">
+            <label className="fuzz-creator-label">Scheme</label>
+            <Input
+              placeholder="ws or wss"
+              value={scheme}
+              onChange={(e) => setScheme(e.target.value)}
+            />
+          </div>
+        </div>
+        <div className="fuzz-position-fields">
+          <div className="fuzz-creator-field">
+            <label className="fuzz-creator-label">Path</label>
+            <Input
+              placeholder="/socket"
+              value={path}
+              onChange={(e) => setPath(e.target.value)}
+            />
+          </div>
+          <div className="fuzz-creator-field">
+            <label className="fuzz-creator-label">Raw Query</label>
+            <Input
+              placeholder="optional"
+              value={rawQuery}
+              onChange={(e) => setRawQuery(e.target.value)}
+            />
+          </div>
+        </div>
+      </div>
+      <div className="fuzz-creator-section">
+        <h3 className="fuzz-creator-section-title">Frame</h3>
+        <div className="fuzz-position-fields">
+          <div className="fuzz-creator-field">
+            <label className="fuzz-creator-label">Opcode</label>
+            <select
+              className="fuzz-filter-select"
+              value={opcode}
+              onChange={(e) => setOpcode(e.target.value)}
+            >
+              <option value="text">text</option>
+              <option value="binary">binary</option>
+              <option value="close">close</option>
+              <option value="ping">ping</option>
+              <option value="pong">pong</option>
+            </select>
+          </div>
+          <div className="fuzz-creator-field">
+            <label className="fuzz-creator-label">Payload Encoding</label>
+            <select
+              className="fuzz-filter-select"
+              value={payloadEncoding}
+              onChange={(e) => setPayloadEncoding(e.target.value)}
+            >
+              {ENCODING_OPTIONS.map((opt) => (
+                <option key={opt.value} value={opt.value}>
+                  {opt.label}
+                </option>
+              ))}
+            </select>
+          </div>
+        </div>
+        <div className="fuzz-creator-field fuzz-creator-field-full">
+          <label className="fuzz-creator-label">Payload</label>
+          <textarea
+            className="fuzz-values-textarea"
+            value={payload}
+            onChange={(e) => setPayload(e.target.value)}
+            placeholder="Frame payload..."
+            rows={4}
+            spellCheck={false}
+          />
+        </div>
+        <div className="fuzz-position-fields">
+          <div className="fuzz-creator-field">
+            <label className="fuzz-creator-label">Close Code</label>
+            <Input
+              type="number"
+              placeholder="optional"
+              value={closeCode}
+              onChange={(e) => setCloseCode(e.target.value)}
+            />
+          </div>
+          <div className="fuzz-creator-field">
+            <label className="fuzz-creator-label">Close Reason</label>
+            <Input
+              placeholder="optional"
+              value={closeReason}
+              onChange={(e) => setCloseReason(e.target.value)}
+            />
+          </div>
+        </div>
+      </div>
+      <div className="fuzz-creator-section">
+        <h3 className="fuzz-creator-section-title">Stop Condition</h3>
+        <label className="fuzz-results-outliers-toggle">
+          <input
+            type="checkbox"
+            checked={stopOnClose}
+            onChange={(e) => setStopOnClose(e.target.checked)}
+          />
+          Stop on first Close frame from upstream
+        </label>
+      </div>
+    </>
+  );
+}
+
+interface GrpcCampaignFieldsProps {
+  targetAddr: string;
+  setTargetAddr: (v: string) => void;
+  scheme: string;
+  setScheme: (v: string) => void;
+  service: string;
+  setService: (v: string) => void;
+  method: string;
+  setMethod: (v: string) => void;
+  metadata: HeaderFormEntry[];
+  onAddMetadata: () => void;
+  onRemoveMetadata: (key: string) => void;
+  onUpdateMetadata: (key: string, field: "name" | "value", value: string) => void;
+  encoding: string;
+  setEncoding: (v: string) => void;
+  messagePayload: string;
+  setMessagePayload: (v: string) => void;
+  messageEncoding: string;
+  setMessageEncoding: (v: string) => void;
+  stopOnNonOk: boolean;
+  setStopOnNonOk: (v: boolean) => void;
+}
+
+function GrpcCampaignFields({
+  targetAddr,
+  setTargetAddr,
+  scheme,
+  setScheme,
+  service,
+  setService,
+  method,
+  setMethod,
+  metadata,
+  onAddMetadata,
+  onRemoveMetadata,
+  onUpdateMetadata,
+  encoding,
+  setEncoding,
+  messagePayload,
+  setMessagePayload,
+  messageEncoding,
+  setMessageEncoding,
+  stopOnNonOk,
+  setStopOnNonOk,
+}: GrpcCampaignFieldsProps) {
+  return (
+    <>
+      <div className="fuzz-creator-section">
+        <h3 className="fuzz-creator-section-title">gRPC Base</h3>
+        <div className="fuzz-creator-help">
+          target_addr + service + method are required when no Flow ID is
+          supplied. scheme defaults to https; http selects h2c.
+        </div>
+        <div className="fuzz-position-fields">
+          <div className="fuzz-creator-field">
+            <label className="fuzz-creator-label">Target Addr</label>
+            <Input
+              placeholder="example.com:443"
+              value={targetAddr}
+              onChange={(e) => setTargetAddr(e.target.value)}
+            />
+          </div>
+          <div className="fuzz-creator-field">
+            <label className="fuzz-creator-label">Scheme</label>
+            <Input
+              placeholder="https"
+              value={scheme}
+              onChange={(e) => setScheme(e.target.value)}
+            />
+          </div>
+        </div>
+        <div className="fuzz-position-fields">
+          <div className="fuzz-creator-field">
+            <label className="fuzz-creator-label">Service</label>
+            <Input
+              placeholder="pkg.Greeter"
+              value={service}
+              onChange={(e) => setService(e.target.value)}
+            />
+          </div>
+          <div className="fuzz-creator-field">
+            <label className="fuzz-creator-label">Method</label>
+            <Input
+              placeholder="SayHello"
+              value={method}
+              onChange={(e) => setMethod(e.target.value)}
+            />
+          </div>
+          <div className="fuzz-creator-field">
+            <label className="fuzz-creator-label">grpc-encoding</label>
+            <Input
+              placeholder="identity"
+              value={encoding}
+              onChange={(e) => setEncoding(e.target.value)}
+            />
+          </div>
+        </div>
+      </div>
+      <HeaderList
+        title="Metadata"
+        entries={metadata}
+        onAdd={onAddMetadata}
+        onRemove={onRemoveMetadata}
+        onUpdate={onUpdateMetadata}
+      />
+      <div className="fuzz-creator-section">
+        <h3 className="fuzz-creator-section-title">
+          Request Message (messages[0])
+        </h3>
+        <div className="fuzz-creator-help">
+          Single base message — additional messages must be seeded via Flow
+          ID. Positions can target `messages[N].payload` to substitute
+          per-variant bytes.
+        </div>
+        <div className="fuzz-creator-row-inline">
+          <div className="fuzz-creator-field">
+            <label className="fuzz-creator-label">Encoding</label>
+            <select
+              className="fuzz-filter-select"
+              value={messageEncoding}
+              onChange={(e) => setMessageEncoding(e.target.value)}
+            >
+              <option value="text">text</option>
+              <option value="base64">base64</option>
+              <option value="proto-schemaless-json">
+                proto-schemaless-json
+              </option>
+              <option value="proto-json">proto-json (requires schema)</option>
+            </select>
+          </div>
+        </div>
+        <div className="fuzz-creator-field fuzz-creator-field-full">
+          <label className="fuzz-creator-label">Payload</label>
+          <textarea
+            className="fuzz-values-textarea"
+            value={messagePayload}
+            onChange={(e) => setMessagePayload(e.target.value)}
+            placeholder="Message payload..."
+            rows={4}
+            spellCheck={false}
+          />
+        </div>
+      </div>
+      <div className="fuzz-creator-section">
+        <h3 className="fuzz-creator-section-title">Stop Condition</h3>
+        <label className="fuzz-results-outliers-toggle">
+          <input
+            type="checkbox"
+            checked={stopOnNonOk}
+            onChange={(e) => setStopOnNonOk(e.target.checked)}
+          />
+          Stop on first non-OK gRPC status
+        </label>
+      </div>
+    </>
+  );
+}
+
+interface RawCampaignFieldsProps {
+  targetAddr: string;
+  setTargetAddr: (v: string) => void;
+  useTLS: boolean;
+  setUseTLS: (v: boolean) => void;
+  sni: string;
+  setSNI: (v: string) => void;
+  overrideBytes: string;
+  setOverrideBytes: (v: string) => void;
+  overrideBytesEncoding: string;
+  setOverrideBytesEncoding: (v: string) => void;
+  stopOnError: boolean;
+  setStopOnError: (v: boolean) => void;
+}
+
+function RawCampaignFields({
+  targetAddr,
+  setTargetAddr,
+  useTLS,
+  setUseTLS,
+  sni,
+  setSNI,
+  overrideBytes,
+  setOverrideBytes,
+  overrideBytesEncoding,
+  setOverrideBytesEncoding,
+  stopOnError,
+  setStopOnError,
+}: RawCampaignFieldsProps) {
+  return (
+    <>
+      <div className="fuzz-creator-section">
+        <h3 className="fuzz-creator-section-title">Raw TCP Base</h3>
+        <div className="fuzz-creator-help">
+          target_addr is required. When no Flow ID is supplied, either
+          override_bytes or a `payload` position must provide the variant
+          bytes.
+        </div>
+        <div className="fuzz-position-fields">
+          <div className="fuzz-creator-field">
+            <label className="fuzz-creator-label">Target Addr</label>
+            <Input
+              placeholder="example.com:80"
+              value={targetAddr}
+              onChange={(e) => setTargetAddr(e.target.value)}
+            />
+          </div>
+          <div className="fuzz-creator-field">
+            <label className="fuzz-creator-label">SNI</label>
+            <Input
+              placeholder="optional"
+              value={sni}
+              onChange={(e) => setSNI(e.target.value)}
+            />
+          </div>
+        </div>
+        <div className="fuzz-creator-row-inline">
+          <label className="fuzz-results-outliers-toggle">
+            <input
+              type="checkbox"
+              checked={useTLS}
+              onChange={(e) => setUseTLS(e.target.checked)}
+            />
+            Use TLS
+          </label>
+        </div>
+      </div>
+      <div className="fuzz-creator-section">
+        <h3 className="fuzz-creator-section-title">Override Bytes</h3>
+        <div className="fuzz-creator-row-inline">
+          <div className="fuzz-creator-field">
+            <label className="fuzz-creator-label">Encoding</label>
+            <select
+              className="fuzz-filter-select"
+              value={overrideBytesEncoding}
+              onChange={(e) => setOverrideBytesEncoding(e.target.value)}
+            >
+              {ENCODING_OPTIONS.map((opt) => (
+                <option key={opt.value} value={opt.value}>
+                  {opt.label}
+                </option>
+              ))}
+            </select>
+          </div>
+        </div>
+        <div className="fuzz-creator-field fuzz-creator-field-full">
+          <textarea
+            className="fuzz-values-textarea"
+            value={overrideBytes}
+            onChange={(e) => setOverrideBytes(e.target.value)}
+            placeholder="Wire bytes (text or base64)..."
+            rows={4}
+            spellCheck={false}
+          />
+        </div>
+      </div>
+      <div className="fuzz-creator-section">
+        <h3 className="fuzz-creator-section-title">Stop Condition</h3>
+        <label className="fuzz-results-outliers-toggle">
+          <input
+            type="checkbox"
+            checked={stopOnError}
+            onChange={(e) => setStopOnError(e.target.checked)}
+          />
+          Stop on first failure (network error, timeout, or pipeline drop)
+        </label>
+      </div>
+    </>
   );
 }
