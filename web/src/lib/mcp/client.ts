@@ -15,7 +15,6 @@ import type {
   ConfigureParams,
   ConfigureResult,
   ConnectionStatus,
-  ExecuteParams,
   FuzzGRPCParams,
   FuzzGRPCResult,
   FuzzHTTPParams,
@@ -83,7 +82,7 @@ export type McpClientEventListener = (event: McpClientEvent) => void;
 
 /**
  * McpClient wraps the MCP SDK Client to provide typed access
- * to yorishiro-proxy's 10 MCP tools.
+ * to yorishiro-proxy's MCP tools.
  */
 export class McpClient {
   private client: Client | null = null;
@@ -262,13 +261,6 @@ export class McpClient {
     params: QueryParams & { resource: R },
   ): Promise<QueryResultMap[R]> {
     return this.callTool<QueryResultMap[R]>("query", params as unknown as Record<string, unknown>);
-  }
-
-  /** Execute a resend action (resend, resend_raw, tcp_replay). */
-  async resend<T = unknown>(
-    params: ExecuteParams,
-  ): Promise<T> {
-    return this.callTool<T>("resend", params as unknown as Record<string, unknown>);
   }
 
   /** Manage flow data and CA certificates (delete_flows, export_flows, import_flows, regenerate_ca_cert). */

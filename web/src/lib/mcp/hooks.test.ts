@@ -223,7 +223,6 @@ const {
   MCP_NOT_CONNECTED_MESSAGE,
   runMcpAction,
   useMcpAction,
-  useResend,
   useManage,
   useMacro,
   useInterceptAction,
@@ -615,12 +614,6 @@ describe("wrapper hook returned-callback identity stability", () => {
   beforeEach(() => {
     ctx.client = {} as McpClient;
     ctx.status = "connected";
-  });
-
-  it("useResend().resend is stable across re-renders", () => {
-    const outs = driveHook(() => useResend(), 3);
-    expect(outs[1]!.resend).toBe(outs[0]!.resend);
-    expect(outs[2]!.resend).toBe(outs[0]!.resend);
   });
 
   it("useManage().manage is stable across re-renders", () => {

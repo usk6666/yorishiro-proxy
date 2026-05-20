@@ -15,7 +15,6 @@ import type {
   ConfigureParams,
   ConfigureResult,
   ConnectionStatus,
-  ExecuteParams,
   GrpcSchemaListResult,
   GrpcSchemaParams,
   InterceptActionParams,
@@ -131,8 +130,8 @@ export async function runMcpAction<P, R>(
  * Generic foundation hook for the MCP action tools.
  *
  * Wraps a `(client, params) => Promise<result>` call in the standard
- * loading/error state machine used by every action hook below. The 8
- * concrete action hooks (`useResend`, `useManage`, ...) are thin
+ * loading/error state machine used by every action hook below. The
+ * concrete action hooks (`useManage`, `useMacro`, ...) are thin
  * re-exports of this hook with the matching `client.<method>` plumbed in.
  *
  * Identity stability: callsites typically pass an inline arrow such as
@@ -337,46 +336,13 @@ export function useQuery<R extends QueryResource>(
 }
 
 // ---------------------------------------------------------------------------
-// useResend — resend tool (resend, resend_raw, tcp_replay)
+// (Resend hooks intentionally removed — the legacy `resend` MCP tool was
+// retired at the backend in favour of the protocol-typed quartet
+// resend_{http,ws,grpc,raw}. Pages mirror FuzzPage's idiom of calling
+// client.resendHttp(...) etc. directly via useMcpContext, with
+// `typedResendToolForProtocol(protocol)` from typedDispatch.ts selecting
+// the right typed method. See USK-938.)
 // ---------------------------------------------------------------------------
-
-/** Return type for useResend. */
-export interface UseResendResult {
-  /** Execute a resend action (resend, resend_raw, tcp_replay). Returns the tool result. */
-  resend: <T = unknown>(params: ExecuteParams) => Promise<T>;
-  /** Whether an execution is in progress. */
-  loading: boolean;
-  /** Last execution error, if any. */
-  error: Error | null;
-}
-
-/**
- * Hook to call the MCP resend tool (resend, resend_raw, tcp_replay).
- *
- * @example
- * ```tsx
- * const { resend, loading, error } = useResend();
- * await resend({
- *   action: "resend",
- *   params: { flow_id: "abc123" },
- * });
- * ```
- */
-export function useResend(): UseResendResult {
-  const { execute, loading, error } = useMcpAction(
-    (client: McpClient, params: ExecuteParams) => client.resend(params),
-  );
-  return {
-    resend: execute as <T = unknown>(params: ExecuteParams) => Promise<T>,
-    loading,
-    error,
-  };
-}
-
-/** @deprecated Use useResend instead. */
-export const useExecute = useResend;
-/** @deprecated Use UseResendResult instead. */
-export type UseExecuteResult = UseResendResult;
 
 // ---------------------------------------------------------------------------
 // useManage — manage tool (delete_flows, export_flows, import_flows, regenerate_ca_cert)
