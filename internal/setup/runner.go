@@ -207,6 +207,11 @@ func (r *Runner) installCA() error {
 // installSkills installs skill files.
 func (r *Runner) installSkills() error {
 	r.printf("--- Skills installation ---\n\n")
+	r.printf("  [DEPRECATED] `install skills` is deprecated as of USK-949.\n")
+	r.printf("  User-facing vulnerability-verification playbooks have moved to MCP Prompts\n")
+	r.printf("  (cross-client, host-portable). Run `prompts/list` against the yorishiro-proxy\n")
+	r.printf("  MCP server to see them — they are equivalent to the playbook content installed\n")
+	r.printf("  here. This subcommand will be removed one minor version after USK-949.\n\n")
 
 	if r.opts.Interactive {
 		answer, err := r.prompter.Prompt("  Install yorishiro skills to .claude/skills/yorishiro/? [Y/n]: ")
