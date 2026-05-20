@@ -771,9 +771,6 @@ function CampaignCreator({ onCreated }: CampaignCreatorProps) {
     } finally {
       setSubmitting(false);
     }
-    // buildPositions captures the latest `positions` / `addToast`; including
-    // them keeps the linter happy without breaking the closure.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     client,
     mcpStatus,

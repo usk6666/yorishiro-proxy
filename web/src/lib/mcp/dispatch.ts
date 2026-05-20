@@ -99,6 +99,15 @@ export type FuzzToolName =
  * Returns `null` for unknown / empty / nullish protocols. Callers should
  * surface a user-visible error in that case (the legacy `fuzz` tool no
  * longer exists at the backend, so there is no fallback to try).
+ *
+ * @remarks
+ * Intended for flow-context launchers that dispatch off a recorded flow's
+ * `protocol` string (e.g., a future "Fuzz this flow" button on FlowDetail).
+ * The FuzzPage campaign form does NOT use this helper — it routes off a
+ * user-selected protocol dropdown rather than a flow protocol, so it calls
+ * `client.fuzzHttp / fuzzWs / fuzzGrpc / fuzzRaw` directly. Kept exported
+ * for parity with `pickResendTool` and so flow-context callers can reuse the
+ * same protocol-string parser.
  */
 export function pickFuzzTool(
   protocol: string | null | undefined,
