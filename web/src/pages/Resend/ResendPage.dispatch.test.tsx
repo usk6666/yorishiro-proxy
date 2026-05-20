@@ -246,6 +246,26 @@ describe("buildResendWsParams", () => {
     expect(params.close_code).toBeUndefined();
   });
 
+  it("ignores invalid close_code (trailing non-digit chars)", () => {
+    // Number.parseInt would silently truncate "1000abc" to 1000; the
+    // strict /^\d+$/ guard rejects the whole string so the user notices.
+    const params = buildResendWsParams(
+      "f",
+      makeWsState({ opcode: "close", closeCode: "1000abc" }),
+      undefined,
+    );
+    expect(params.close_code).toBeUndefined();
+  });
+
+  it("ignores invalid close_code (leading whitespace + non-digit)", () => {
+    const params = buildResendWsParams(
+      "f",
+      makeWsState({ opcode: "close", closeCode: " 1000.5 " }),
+      undefined,
+    );
+    expect(params.close_code).toBeUndefined();
+  });
+
   it("forwards payload on ping / pong but not compressed", () => {
     const params = buildResendWsParams(
       "f",

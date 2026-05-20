@@ -672,6 +672,15 @@ export function ResendPage() {
 
     if (isGrpcFlow(flow)) {
       // gRPC / gRPC-Web flow: populate the typed editor from the source flow.
+      //
+      // NOTE (USK-936 MVP scope): `flow.request_body` may carry a
+      // base64-encoded protobuf payload (when `flow.request_body_encoding ===
+      // "base64"`), but the editor only emits `body_encoding: "text"`. That
+      // means binary-protobuf payloads pre-populate as base64 text and round-
+      // trip incorrectly on send. Proto-schema-aware editing + base64 mode
+      // are deferred to the follow-up Issue (see Issue body "out of scope")
+      // — the current populate path is intentionally text-first so the
+      // editor is at least usable for schemaless / debug RPCs.
       const { service, method } = splitGrpcServiceMethod(flow.url || "");
       const metadataRows = headersRecordToRows(flow.request_headers);
       setGrpcState({

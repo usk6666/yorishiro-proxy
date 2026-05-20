@@ -88,9 +88,17 @@ export function buildResendWsParams(
     state.opcode === "pong";
 
   let closeCode: number | undefined;
-  if (isCloseFrame && state.closeCode.trim() !== "") {
-    const parsed = Number.parseInt(state.closeCode, 10);
-    if (Number.isFinite(parsed)) closeCode = parsed;
+  if (isCloseFrame) {
+    const trimmed = state.closeCode.trim();
+    // Reject inputs that aren't strictly an unsigned integer.
+    // `Number.parseInt("1000abc", 10)` would otherwise silently truncate to
+    // 1000; the backend re-validates the WebSocket close-code range
+    // (1000-4999) but we want client-side hygiene to surface obvious
+    // typos before the round trip.
+    if (trimmed !== "" && /^\d+$/.test(trimmed)) {
+      const parsed = Number.parseInt(trimmed, 10);
+      if (Number.isFinite(parsed)) closeCode = parsed;
+    }
   }
 
   return {
