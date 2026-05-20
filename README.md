@@ -164,7 +164,7 @@ yorishiro-proxy provides the following subcommands:
 |------------|-------------|
 | `server` | Start the proxy server (default when no subcommand given) |
 | `client` | Call MCP tools on a running server via CLI |
-| `install` | Install and configure components (MCP, CA, Skills, Playwright) |
+| `install` | Install and configure components (MCP, CA, Playwright) |
 | `upgrade` | Check for and install updates from GitHub Releases |
 | `version` | Print version information |
 

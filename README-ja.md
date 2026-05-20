@@ -164,7 +164,7 @@ yorishiro-proxy は以下のサブコマンドを提供します:
 |------------|------|
 | `server` | プロキシサーバを起動（サブコマンド省略時のデフォルト） |
 | `client` | 実行中のサーバに対して CLI で MCP ツールを呼び出し |
-| `install` | コンポーネントのインストール・設定（MCP, CA, Skills, Playwright） |
+| `install` | コンポーネントのインストール・設定（MCP, CA, Playwright） |
 | `upgrade` | GitHub Releases からアップデートを確認・インストール |
 | `version` | バージョン情報を表示 |
 
