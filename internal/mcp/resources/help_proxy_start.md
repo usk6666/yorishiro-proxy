@@ -1,6 +1,8 @@
 # proxy_start
 
-Start the proxy server with optional configuration. The proxy listens on the specified address and begins intercepting HTTP/HTTPS/SOCKS5 traffic.
+Start (or initialize) the proxy server with optional configuration. The proxy listens on the specified address and begins intercepting HTTP/HTTPS/SOCKS5 traffic.
+
+**Reset semantics (USK-407)**: each `proxy_start` call fully resets all prior session settings to the values supplied in the request. Fields omitted from the request revert to their defaults — including `capture_scope`, `tls_passthrough`, `intercept_rules`, `auto_transform`, `tcp_forwards`, SOCKS5 auth, TLS fingerprint, and connection/timeout limits. Use `proxy_start` for first-time startup or session initialization. For in-session partial updates to a running listener (adding a single rule, changing one timeout, etc.), use the [`configure`](yorishiro://help/configure) tool instead.
 
 ## Parameters
 
@@ -164,6 +166,54 @@ Example:
   }
 }
 ```
+
+## Common Misuse: proxy_start as a partial-update tool
+
+`proxy_start` is **not** a delta-apply tool. Calling it repeatedly to "add one more intercept rule" wipes every other setting that was previously established for the listener.
+
+### Anti-pattern (do NOT do this)
+
+```json
+// Step 1: set up the session.
+{ "method": "proxy_start", "params": {
+    "listen_addr": "127.0.0.1:8080",
+    "capture_scope": { "includes": [{ "hostname": "api.target.com" }] },
+    "tls_passthrough": ["*.googleapis.com"]
+}}
+
+// Step 2 (WRONG): adding an intercept rule by re-calling proxy_start.
+//   This RESETS capture_scope back to "capture all" and clears tls_passthrough,
+//   because both fields are omitted from this second request.
+{ "method": "proxy_start", "params": {
+    "listen_addr": "127.0.0.1:8080",
+    "intercept_rules": [
+      { "id": "r1", "enabled": true, "direction": "request",
+        "http": { "host_pattern": "api\\.target\\.com" } }
+    ]
+}}
+```
+
+### Recommended pattern: initialize with `proxy_start`, update with `configure`
+
+```json
+// Step 1: one-shot initialization.
+{ "method": "proxy_start", "params": {
+    "listen_addr": "127.0.0.1:8080",
+    "capture_scope": { "includes": [{ "hostname": "api.target.com" }] },
+    "tls_passthrough": ["*.googleapis.com"]
+}}
+
+// Step 2: in-session update — add an intercept rule without touching the rest.
+{ "method": "configure", "params": {
+    "operation": "merge",
+    "intercept_rules": { "add": [
+      { "id": "r1", "enabled": true, "direction": "request",
+        "http": { "host_pattern": "api\\.target\\.com" } }
+    ]}
+}}
+```
+
+See the [`configure`](yorishiro://help/configure) tool for the full merge / replace surface (add, remove, enable, disable per rule ID, or full-section replacement).
 
 ## Usage Examples
 

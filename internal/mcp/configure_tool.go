@@ -418,7 +418,9 @@ func (s *Server) registerConfigure() {
 		Description: "Update runtime proxy settings on a running listener (upstream proxy, TLS passthrough, " +
 			"intercept rules + queue, auto-transform, SOCKS5 auth, TLS fingerprint, connection/timeout limits). " +
 			"operation='merge' (default) applies incremental add/remove changes; 'replace' replaces entire sections. " +
-			"Only specified sections are modified. Settings are session-only — to persist them use the config file. " +
+			"Only specified sections are modified — use this tool for in-session partial updates instead of " +
+			"re-calling `proxy_start` (which fully resets all prior settings on every invocation). " +
+			"Settings are session-only — to persist them use the config file. " +
 			"The optional top-level 'name' field scopes upstream_proxy to a single listener (default: 'default'); " +
 			"other sections (capture_scope, tls_passthrough, intercept_rules, auto_transform, ...) currently remain " +
 			"process-global regardless of 'name'. Multi-listener chained MITM requires per-listener upstream_proxy " +

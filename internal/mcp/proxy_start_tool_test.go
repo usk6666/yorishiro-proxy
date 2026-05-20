@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -1997,4 +1998,99 @@ func combineCallToolText(result *gomcp.CallToolResult) string {
 		}
 	}
 	return out
+}
+
+// TestProxyStartTool_DescriptionGuidesToConfigure asserts that the
+// proxy_start tool description contains the key phrases that steer AI
+// agents away from the documented misuse pattern (USK-950): re-calling
+// proxy_start to add a single rule, which silently resets every other
+// session setting (USK-407 semantics).
+//
+// Each row asserts on a substring rather than the entire description so
+// cosmetic edits do not cascade into test churn. The intent is to fail
+// loudly if the reset-semantics warning or the configure-guidance phrase
+// is removed.
+func TestProxyStartTool_DescriptionGuidesToConfigure(t *testing.T) {
+	desc := lookupToolDescription(t, "proxy_start")
+
+	cases := []struct {
+		name   string
+		phrase string
+	}{
+		{
+			name:   "reset semantics warning",
+			phrase: "resets all prior settings",
+		},
+		{
+			name:   "configure tool recommended for partial updates",
+			phrase: "configure",
+		},
+		{
+			name:   "misuse pattern named",
+			phrase: "Do NOT call proxy_start repeatedly",
+		},
+		{
+			name:   "links to help resource",
+			phrase: "yorishiro://help/proxy_start",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if !strings.Contains(desc, tc.phrase) {
+				t.Errorf("proxy_start Description missing key phrase %q\n--- description ---\n%s\n--- end ---",
+					tc.phrase, desc)
+			}
+		})
+	}
+}
+
+// TestConfigureTool_DescriptionPointsAtProxyStart asserts the reciprocal
+// cross-reference (USK-950): the configure tool description names
+// proxy_start as the tool whose reset semantics configure replaces for
+// in-session partial updates. Substring assertions only — wording may be
+// refined without breaking the test as long as the concept survives.
+func TestConfigureTool_DescriptionPointsAtProxyStart(t *testing.T) {
+	desc := lookupToolDescription(t, "configure")
+
+	cases := []struct {
+		name   string
+		phrase string
+	}{
+		{
+			name:   "names proxy_start as the alternative to NOT re-call",
+			phrase: "proxy_start",
+		},
+		{
+			name:   "describes configure as the partial-update path",
+			phrase: "in-session partial updates",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if !strings.Contains(desc, tc.phrase) {
+				t.Errorf("configure Description missing key phrase %q\n--- description ---\n%s\n--- end ---",
+					tc.phrase, desc)
+			}
+		})
+	}
+}
+
+// lookupToolDescription returns the Description field of the named MCP
+// tool by listing tools through a fully-wired client session. Fails the
+// test fatally when the tool is not registered.
+func lookupToolDescription(t *testing.T, name string) string {
+	t.Helper()
+	manager := newTestProxybuildManager(t)
+	cs := setupProxyStartTestSession(t, manager, nil)
+	res, err := cs.ListTools(context.Background(), &gomcp.ListToolsParams{})
+	if err != nil {
+		t.Fatalf("ListTools: %v", err)
+	}
+	for _, tool := range res.Tools {
+		if tool.Name == name {
+			return tool.Description
+		}
+	}
+	t.Fatalf("tool %q not found in ListTools result", name)
+	return ""
 }

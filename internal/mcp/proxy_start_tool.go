@@ -217,12 +217,18 @@ type proxyStartResult struct {
 func (s *Server) registerProxyStart() {
 	gomcp.AddTool(s.server, &gomcp.Tool{
 		Name: "proxy_start",
-		Description: "Start a proxy listener on a loopback address with HTTP/HTTPS/SOCKS5 MITM. " +
+		Description: "Start (or initialize) a proxy listener on a loopback address with HTTP/HTTPS/SOCKS5 MITM. " +
+			"Intended for first-time startup / session initialization. " +
 			"Multiple named listeners are supported via 'name' (default: 'default'). " +
-			"All configuration sections (upstream proxy, TLS passthrough, intercept/transform rules, " +
-			"SOCKS5 auth, TLS fingerprint, connection/timeout limits, tcp_forwards) are session-only " +
-			"and are reset to defaults on each invocation; persistent settings belong in the config file. " +
-			"See yorishiro://help/proxy_start for parameter details.",
+			"IMPORTANT: each call fully resets all prior settings to the values in this request — " +
+			"omitted fields revert to defaults (capture_scope, tls_passthrough, intercept_rules, " +
+			"auto_transform, tcp_forwards, SOCKS5 auth, TLS fingerprint, connection/timeout limits). " +
+			"Do NOT call proxy_start repeatedly just to add one intercept_rule or transform rule — " +
+			"that wipes other settings such as capture_scope / tls_passthrough / tcp_forwards. " +
+			"For in-session partial updates (add/remove a single rule, change one timeout) use the " +
+			"`configure` tool with operation='merge' or 'replace' instead. " +
+			"Persistent settings belong in the config file. " +
+			"See yorishiro://help/proxy_start for parameter details and misuse patterns.",
 	}, s.handleProxyStart)
 }
 
