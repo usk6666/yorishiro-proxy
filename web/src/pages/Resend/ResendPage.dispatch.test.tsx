@@ -281,10 +281,11 @@ describe("buildResendWsParams", () => {
 // End-to-end: editor state ⇒ client.resendGrpc / client.resendWs invocation
 // ---------------------------------------------------------------------------
 //
-// These tests verify that a fake McpClient receives the typed call (the
-// dispatch entry point that the broken `useTypedTools` gate skipped over).
+// These tests verify that a fake McpClient receives the typed call.
 // Mirrors the structure of `handleGrpcSend` / `handleWsSend` in
-// ResendPage.tsx without rendering the component.
+// ResendPage.tsx without rendering the component. (Pre-USK-938 the page
+// gated the typed dispatch behind a `useTypedTools` toggle; that toggle
+// is gone and the typed call is the only path.)
 
 interface FakeClient {
   resendGrpc: (params: ResendGRPCParams) => Promise<ResendGRPCResult>;

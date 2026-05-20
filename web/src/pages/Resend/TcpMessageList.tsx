@@ -22,8 +22,9 @@ export function TcpMessageList({ messages }: TcpMessageListProps) {
   return (
     <div className="tcp-messages">
       <div className="tcp-messages-description">
-        Messages in this TCP flow. <code>tcp_replay</code> re-sends all
-        client (send) messages in order.
+        Messages in this TCP flow. TCP Replay resends the recorded
+        send-direction bytes verbatim via <code>resend_raw</code>
+        (single-payload).
       </div>
       <div className="tcp-messages-list">
         {messages.map((msg) => {

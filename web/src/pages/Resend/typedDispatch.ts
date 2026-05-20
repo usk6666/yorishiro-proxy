@@ -15,7 +15,13 @@
  */
 
 import { pickResendTool } from "../../lib/mcp/dispatch.js";
-import type { HeaderKV, ResendGRPCData, ResendGRPCParams, ResendWSParams } from "../../lib/mcp/types.js";
+import type {
+  HeaderKV,
+  ResendGRPCData,
+  ResendGRPCParams,
+  ResendRawParams,
+  ResendWSParams,
+} from "../../lib/mcp/types.js";
 import type { GrpcRequestEditorState } from "./GrpcRequestEditor.js";
 import type { WsRequestEditorState } from "./WsRequestEditor.js";
 
@@ -119,5 +125,66 @@ export function buildResendWsParams(
     close_reason:
       isCloseFrame && state.closeReason ? state.closeReason : undefined,
     tag: tag && tag !== "" ? tag : undefined,
+  };
+}
+
+/**
+ * Build a `ResendRawParams` payload for the HTTP-raw editor mode.
+ *
+ * Pre-USK-938 the WebUI dispatched HTTP-raw sends through the legacy
+ * `resend` tool with `override_raw_base64`. The backend retired that
+ * tool in PR #688 (USK-693), and the typed replacement is `resend_raw`
+ * with `override_bytes` + `override_bytes_encoding: "base64"`. This
+ * helper applies the field-name and encoding-hint rename in one place
+ * so callers don't have to reproduce the rename inline.
+ *
+ * Empty `targetAddr` is left as-is (the caller is expected to validate
+ * upstream); empty `rawBase64` falls through to `override_bytes` to
+ * preserve the user's "intentional empty payload" semantic via
+ * `override_bytes_set` rather than dropping the field.
+ */
+export function buildResendHTTPRawParams(args: {
+  flowId: string;
+  targetAddr: string;
+  useTls: boolean;
+  rawBase64: string;
+  tag: string | undefined;
+}): ResendRawParams {
+  return {
+    flow_id: args.flowId,
+    target_addr: args.targetAddr,
+    use_tls: args.useTls || undefined,
+    override_bytes: args.rawBase64,
+    override_bytes_encoding: "base64",
+    tag: args.tag && args.tag !== "" ? args.tag : undefined,
+  };
+}
+
+/**
+ * Build a verbatim-replay `ResendRawParams` payload for the TCP Replay tab.
+ *
+ * Pre-USK-938 the WebUI dispatched TCP Replay through the legacy
+ * `tcp_replay` resend action; the backend retired that path in
+ * PR #688 (USK-693). The typed `resend_raw` tool replays the recorded
+ * send-direction bytes verbatim when neither `override_bytes` nor
+ * `patches` is supplied (see `internal/mcp/resend_raw.go:46-48`), which
+ * is the exact semantic we want here.
+ *
+ * Note (UX narrowing — USK-938 D1): legacy `tcp_replay` re-sent every
+ * client-direction message in sequence. The typed `resend_raw` tool is
+ * single-payload — it sends the recorded bytes verbatim, not a sequence
+ * of frames. ResendPage's TCP Replay description copy reflects this.
+ */
+export function buildTcpReplayResendRawParams(args: {
+  flowId: string;
+  targetAddr: string;
+  useTls: boolean;
+  tag: string | undefined;
+}): ResendRawParams {
+  return {
+    flow_id: args.flowId,
+    target_addr: args.targetAddr,
+    use_tls: args.useTls || undefined,
+    tag: args.tag && args.tag !== "" ? args.tag : undefined,
   };
 }

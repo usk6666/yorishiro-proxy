@@ -6,8 +6,12 @@
  * - proxy_stop: Stop proxy listeners
  * - configure: Configure runtime proxy settings
  * - query: Query flows, status, config, and other resources
- * - resend: Resend and replay recorded requests (legacy resend / resend_raw / tcp_replay)
- *           plus the protocol-typed quartet resend_{http,ws,grpc,raw}
+ * - resend_{http,ws,grpc,raw}: Protocol-typed synchronous resend tools
+ *           (RFC-001 N8). The legacy `resend` MCP tool was removed at the
+ *           backend; pages call client.resendHttp / resendWs / resendGrpc /
+ *           resendRaw directly via useMcpContext. See
+ *           pages/Resend/typedDispatch.ts (typedResendToolForProtocol)
+ *           for routing helpers.
  * - manage: Manage flow data and CA certificates (delete_flows, export_flows, import_flows, regenerate_ca_cert)
  * - fuzz_{http,ws,grpc,raw}: Protocol-typed synchronous fuzz tools (RFC-001 N8).
  *           The legacy `fuzz` MCP tool was removed at the backend; see
@@ -27,11 +31,11 @@ export type { McpContextValue, McpProviderProps } from "./context.js";
 
 // Hooks
 export {
-  useConfigure, useExecute, useInterceptAction, useMacro, useManage, useMcpClient, useProxyControl, useQuery, useResend, useSecurity
+  useConfigure, useInterceptAction, useMacro, useManage, useMcpClient, useProxyControl, useQuery, useSecurity
 } from "./hooks.js";
 export type {
-  UseConfigureResult, UseExecuteResult, UseInterceptActionResult, UseMacroResult, UseManageResult, UseMcpClientResult, UseProxyControlResult, UseQueryOptions,
-  UseQueryResult, UseResendResult, UseSecurityResult
+  UseConfigureResult, UseInterceptActionResult, UseMacroResult, UseManageResult, UseMcpClientResult, UseProxyControlResult, UseQueryOptions,
+  UseQueryResult, UseSecurityResult
 } from "./hooks.js";
 
 // Types
@@ -46,9 +50,11 @@ export type {
   ConfigureResult, ConfigureTLSPassthrough,
   // Connection
   ConnectionStatus, ConnInfo,
-  // resend
-  CompareBodyDiff, CompareBodyLengthDiff, CompareHeaderDiff, CompareJsonDiff, CompareResult, CompareStatusCodeDiff, CompareTimingDiff,
-  ExecuteAction, ExecuteDryRunResult, ExecuteParams, ExecuteRawDryRunResult, ExecuteResendRawResult, ExecuteResendResult, ExportFilter, ExtractionRule, FlowDetailResult, FlowEntry,
+  // resend (typed quartet — legacy ExecuteAction / ExecuteParams /
+  // ExecuteResendResult / ExecuteDryRunResult / ExecuteResendRawResult /
+  // ExecuteRawDryRunResult and the Compare* family were removed alongside
+  // the backend `resend` tool — USK-938).
+  ExportFilter, ExtractionRule, FlowDetailResult, FlowEntry,
   FlowsResult,
   // fuzz (typed quartet — legacy FuzzAction / FuzzToolParams / FuzzStartResult /
   // FuzzControlResult / FuzzPosition / FuzzPayloadSet / FuzzStopCondition
