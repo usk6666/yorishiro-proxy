@@ -518,9 +518,18 @@ export function ResendPage() {
 
   // Shared state.
   const [tag, setTag] = useState("");
+  // `dryRun` / `setDryRun` are intentionally preserved across the USK-938
+  // suspension: the dry-run checkboxes are rendered disabled (the typed
+  // `resend_http` / `resend_raw` MCP tools have no dry-run path), so the
+  // setter is presently unreachable. Kept so the follow-up Issue
+  // (`feat(mcp): resend_http hooks + dry_run support`) can re-enable the
+  // inputs without re-introducing the state shape.
   const [dryRun, setDryRun] = useState(false);
 
-  // Hooks state.
+  // Hooks state. Same suspension rationale as `dryRun` above — the
+  // `HookConfigEditor` is wrapped in a pointer-events:none overlay, so
+  // `setHooks` is presently unreachable. Retained so the follow-up Issue
+  // can re-wire it without re-introducing the state shape.
   const [hooks, setHooks] = useState<HooksInput>({});
 
   // Fetch available macros for hook selection.
@@ -1431,7 +1440,7 @@ export function ResendPage() {
                   )}
                 </Tabs>
 
-                {/* Hooks configuration (suspended \u2014 typed resend_http has no hooks support).
+                {/* Hooks configuration (suspended — typed resend_http has no hooks support).
                   * Inputs visibly inert via pointer-events:none + opacity to keep the
                   * feature discoverable without sending unsupported fields. */}
                 {availableMacros.length > 0 && (
@@ -1442,7 +1451,7 @@ export function ResendPage() {
                         className="resend-suspended-note"
                         title={SUSPENDED_FIELD_TOOLTIP}
                       >
-                        (suspended \u2014 follow-up planned)
+                        (suspended — follow-up planned)
                       </span>
                     </h4>
                     <div
@@ -1532,7 +1541,7 @@ export function ResendPage() {
                   />
                 </div>
 
-                {/* Hooks configuration (suspended \u2014 typed resend_raw has no hooks support). */}
+                {/* Hooks configuration (suspended — typed resend_raw has no hooks support). */}
                 {availableMacros.length > 0 && (
                   <div className="resend-hooks-section">
                     <h4 className="resend-hooks-title">
@@ -1541,7 +1550,7 @@ export function ResendPage() {
                         className="resend-suspended-note"
                         title={SUSPENDED_FIELD_TOOLTIP}
                       >
-                        (suspended \u2014 follow-up planned)
+                        (suspended — follow-up planned)
                       </span>
                     </h4>
                     <div
