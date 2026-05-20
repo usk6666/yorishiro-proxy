@@ -13,6 +13,7 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/connector"
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/layer"
+	"github.com/usk6666/yorishiro-proxy/internal/layer/grpcweb"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/http1"
 	"github.com/usk6666/yorishiro-proxy/internal/pipeline"
 	"github.com/usk6666/yorishiro-proxy/internal/session"
@@ -104,12 +105,23 @@ func runTCPForwardHTTP1ExchangeLoop(
 	ctx context.Context,
 	stack *connector.ConnectionStack,
 	clientH1, upstreamH1 *http1.Layer,
+	parentStack *Stack,
 	p *pipeline.Pipeline,
 	sessOpts session.SessionOptions,
 	target string,
 	logger *slog.Logger,
 	filter exchangeFilter,
 ) {
+	// USK-934: derive base grpc-web Layer Options from the parent Stack's
+	// BuildConfig (matches the live data path's
+	// GRPCWebOptionsFromBuildConfig invocation in builder.go). The
+	// per-exchange goroutine layers the wire-record callback on top via
+	// session.GRPCWebBase64RecordOption — same wiring shape as the
+	// MITM-routed path.
+	var baseGRPCWebOpts []grpcweb.Option
+	if parentStack != nil {
+		baseGRPCWebOpts = connector.GRPCWebOptionsFromBuildConfig(parentStack.BuildConfig)
+	}
 	var wg sync.WaitGroup
 	for {
 		select {
@@ -124,7 +136,7 @@ func runTCPForwardHTTP1ExchangeLoop(
 			wg.Add(1)
 			go func(ch layer.Channel) {
 				defer wg.Done()
-				runForwardHTTP1Exchange(ctx, stack, ch, upstreamH1, p, sessOpts, target, logger, filter)
+				runForwardHTTP1Exchange(ctx, stack, ch, upstreamH1, p, sessOpts, target, logger, filter, baseGRPCWebOpts)
 			}(clientCh)
 		}
 	}
@@ -163,23 +175,88 @@ func runForwardHTTP1Exchange(
 	target string,
 	logger *slog.Logger,
 	filter exchangeFilter,
+	baseGRPCWebOpts []grpcweb.Option,
 ) {
-	// No filter: vanilla per-exchange dispatch — same shape as the
-	// builder.go runHTTP1ExchangeLoop goroutine.
+	// USK-934: per-exchange grpc-web auto-classify Options. The same
+	// closure is installed on both the client-side DispatchH1Channel and
+	// the upstream-side WrapH1UpstreamForDispatch so wire-record envelopes
+	// from both wraps land under the same Stream row.
+	streamFlowCtx := envelope.EnvelopeContext{ConnID: stack.ConnID, TargetHost: target}
+	grpcWebBase64Opt := session.GRPCWebBase64RecordOption(ctx, p, clientCh.StreamID(), streamFlowCtx)
+	streamGRPCWebOpts := make([]grpcweb.Option, 0, len(baseGRPCWebOpts)+1)
+	streamGRPCWebOpts = append(streamGRPCWebOpts, baseGRPCWebOpts...)
+	streamGRPCWebOpts = append(streamGRPCWebOpts, grpcWebBase64Opt)
+
 	if filter == nil {
-		dial := func(_ context.Context, _ *envelope.Envelope) (layer.Channel, error) {
-			upCh := upstreamH1.OpenExchange()
-			if upCh == nil {
-				return nil, fmt.Errorf("proxybuild: upstream http1 layer closed before opening exchange for %s", target)
-			}
-			return upCh, nil
-		}
-		if err := session.RunStackSessionExchange(ctx, stack, clientCh, dial, p, sessOpts); err != nil && !errors.Is(err, context.Canceled) {
-			logger.Debug("proxybuild: tcp forward http1 exchange ended with error", "target", target, "error", err)
+		runForwardHTTP1ExchangeNoFilter(ctx, stack, clientCh, upstreamH1, p, sessOpts, target, logger, streamGRPCWebOpts)
+		return
+	}
+	runForwardHTTP1ExchangeWithFilter(ctx, stack, clientCh, upstreamH1, p, sessOpts, target, logger, filter, streamGRPCWebOpts)
+}
+
+// runForwardHTTP1ExchangeNoFilter is the no-filter arm of
+// runForwardHTTP1Exchange. Dispatches through H1 grpc-web auto-classify
+// (USK-934) and runs the vanilla per-exchange session. Mirrors
+// builder.go runHTTP1Exchange.
+func runForwardHTTP1ExchangeNoFilter(
+	ctx context.Context,
+	stack *connector.ConnectionStack,
+	clientCh layer.Channel,
+	upstreamH1 *http1.Layer,
+	p *pipeline.Pipeline,
+	sessOpts session.SessionOptions,
+	target string,
+	logger *slog.Logger,
+	streamGRPCWebOpts []grpcweb.Option,
+) {
+	dispatchedCh, err := connector.DispatchH1Channel(ctx, clientCh, grpcweb.RoleServer, streamGRPCWebOpts, logger)
+	if err != nil {
+		_ = clientCh.Close()
+		if !errors.Is(err, context.Canceled) {
+			logger.Debug("proxybuild: tcp forward http1 dispatch failed",
+				"target", target, "stream_id", clientCh.StreamID(), "error", err)
 		}
 		return
 	}
+	dial := func(_ context.Context, env *envelope.Envelope) (layer.Channel, error) {
+		upCh := upstreamH1.OpenExchange()
+		if upCh == nil {
+			return nil, fmt.Errorf("proxybuild: upstream http1 layer closed before opening exchange for %s", target)
+		}
+		var reqProto envelope.Protocol
+		if env != nil {
+			reqProto = env.Protocol
+		}
+		return connector.WrapH1UpstreamForDispatch(upCh, reqProto, streamGRPCWebOpts), nil
+	}
+	if err := session.RunStackSessionExchange(ctx, stack, dispatchedCh, dial, p, sessOpts); err != nil && !errors.Is(err, context.Canceled) {
+		logger.Debug("proxybuild: tcp forward http1 exchange ended with error", "target", target, "error", err)
+	}
+}
 
+// runForwardHTTP1ExchangeWithFilter is the filter arm of
+// runForwardHTTP1Exchange. The Protocol="websocket"/"sse" expectation
+// filter is applied first on the first request envelope. If the filter
+// passes, the request is replayed through DispatchH1Channel for
+// grpc-web auto-classify (USK-934); the response-phase filter remains
+// in place via filterUpstreamChannel. A websocket/sse filtered exchange
+// will not be a grpc-web request in practice (Upgrade: websocket header
+// is incompatible with application/grpc-web), so the DispatchH1Channel
+// branch on the replay channel will be the default no-wrap path — but
+// we keep it for symmetry with the no-filter arm and to preserve
+// protocol-detection correctness if the filter ever loosens.
+func runForwardHTTP1ExchangeWithFilter(
+	ctx context.Context,
+	stack *connector.ConnectionStack,
+	clientCh layer.Channel,
+	upstreamH1 *http1.Layer,
+	p *pipeline.Pipeline,
+	sessOpts session.SessionOptions,
+	target string,
+	logger *slog.Logger,
+	filter exchangeFilter,
+	streamGRPCWebOpts []grpcweb.Option,
+) {
 	// Request-phase filter: peek the first envelope. If the filter rejects,
 	// synthesise a 502, fire the Pipeline-Drop audit, and return without
 	// touching upstream.
@@ -203,24 +280,38 @@ func runForwardHTTP1Exchange(
 	}
 
 	// Request passed the filter: build a replay-channel that yields `first`
-	// once then delegates to the underlying Channel. RunStackSessionExchange
-	// is otherwise oblivious to the peek.
+	// once then delegates to the underlying Channel, then run it through
+	// DispatchH1Channel for grpc-web auto-classify (USK-934).
 	replayCh := &http1ReplayChannel{
 		underlying: clientCh,
 		queued:     []*envelope.Envelope{first},
+	}
+	dispatchedCh, err := connector.DispatchH1Channel(ctx, replayCh, grpcweb.RoleServer, streamGRPCWebOpts, logger)
+	if err != nil {
+		_ = clientCh.Close()
+		if !errors.Is(err, context.Canceled) {
+			logger.Debug("proxybuild: tcp forward http1 dispatch failed",
+				"target", target, "stream_id", clientCh.StreamID(), "error", err)
+		}
+		return
 	}
 
 	// Response-phase filter: wrap the upstream dial so the upstream
 	// Channel's first Receive is checked. The wrapper writes a 502 back
 	// to the client when the first response fails the filter and returns
 	// io.EOF on subsequent Next calls so the session loop unwinds.
-	dial := func(_ context.Context, _ *envelope.Envelope) (layer.Channel, error) {
+	dial := func(_ context.Context, env *envelope.Envelope) (layer.Channel, error) {
 		upCh := upstreamH1.OpenExchange()
 		if upCh == nil {
 			return nil, fmt.Errorf("proxybuild: upstream http1 layer closed before opening exchange for %s", target)
 		}
+		var reqProto envelope.Protocol
+		if env != nil {
+			reqProto = env.Protocol
+		}
+		wrappedUp := connector.WrapH1UpstreamForDispatch(upCh, reqProto, streamGRPCWebOpts)
 		return &filterUpstreamChannel{
-			Channel:  upCh,
+			Channel:  wrappedUp,
 			filter:   filter,
 			clientCh: clientCh,
 			onDrop: func(env *envelope.Envelope, blockedBy string) {
@@ -231,7 +322,7 @@ func runForwardHTTP1Exchange(
 		}, nil
 	}
 
-	if err := session.RunStackSessionExchange(ctx, stack, replayCh, dial, p, sessOpts); err != nil && !errors.Is(err, context.Canceled) {
+	if err := session.RunStackSessionExchange(ctx, stack, dispatchedCh, dial, p, sessOpts); err != nil && !errors.Is(err, context.Canceled) {
 		logger.Debug("proxybuild: tcp forward http1 exchange ended with error", "target", target, "error", err)
 	}
 }

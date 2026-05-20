@@ -690,6 +690,8 @@ Implementation: `internal/proxybuild/tcp_forward.go`. Configuration: `internal/c
 
 All forwarded streams reuse the same `Pipeline` and `RecordStep`, so Flow / Stream recording (`flow.Stream.Scheme` reflects the client-side wire; per-Flow `Envelope.Raw` preserves wire bytes), plugin hooks, intercept / transform rules, and Safety Input Filter apply identically to forward traffic.
 
+**gRPC-Web auto-classify (USK-934).** The `http` arm (and `auto` arm when it dispatches to HTTP/1.1) inspects the first request's `Content-Type` header per-exchange. When it matches `application/grpc-web[-text][+proto|…]`, the per-exchange client Channel is wrapped with `grpcweb.Wrap` (downstream) and the upstream Channel is wrapped via `connector.WrapH1UpstreamForDispatch` (upstream symmetry) — Stream `Protocol` is then re-tagged to `grpc-web` by `record_step.maybeRetagProtocol`. This mirrors the H2 sibling pattern (`connector.DispatchH2Stream`) so HTTP/1.1 keep-alive that mixes grpc-web POST and JSON POST on the same connection routes correctly per-exchange. See `internal/connector/h1_dispatch.go`.
+
 ### 3.5 Pipeline Step Categorization
 
 Pipeline interface is unchanged:

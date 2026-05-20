@@ -694,7 +694,7 @@ func buildOnStack(p *pipeline.Pipeline, deps Deps, logger *slog.Logger) connecto
 					"upstream_type", fmt.Sprintf("%T", stack.UpstreamTopmost()))
 				return
 			}
-			runHTTP1ExchangeLoop(ctx, stack, clientH1, upstreamH1, p, sessOpts, target, logger)
+			runHTTP1ExchangeLoop(ctx, stack, clientH1, upstreamH1, p, deps, sessOpts, target, logger)
 			return
 		}
 
@@ -718,6 +718,17 @@ func buildOnStack(p *pipeline.Pipeline, deps Deps, logger *slog.Logger) connecto
 // shared across all exchanges; each goroutine's dial closure calls
 // upstreamH1.OpenExchange() to register its per-exchange response slot.
 //
+// USK-934: each exchange is run through connector.DispatchH1Channel
+// before entering RunStackSessionExchange. When the request's content-
+// type matches application/grpc-web[-text][+proto|...], the client-side
+// per-exchange Channel is wrapped with grpcweb.Wrap (RoleServer) and the
+// upstream-side Channel is wrapped via connector.WrapH1UpstreamForDispatch
+// (RoleClient). Envelopes emitted by these wraps carry
+// Protocol=ProtocolGRPCWeb so the canonical record_step.maybeRetagProtocol
+// re-tags Stream.Protocol from "http" to "grpc-web". For any non-grpc-web
+// content-type the dispatch is a no-op and the exchange flows through
+// unchanged.
+//
 // Upgrade flow (WS / SSE) is owned by RunStackSessionExchange; on detach
 // the http1 Layer's spawn loop closes Channels() and the loop exits.
 func runHTTP1ExchangeLoop(
@@ -725,10 +736,12 @@ func runHTTP1ExchangeLoop(
 	stack *connector.ConnectionStack,
 	clientH1, upstreamH1 *http1.Layer,
 	p *pipeline.Pipeline,
+	deps Deps,
 	sessOpts session.SessionOptions,
 	target string,
 	logger *slog.Logger,
 ) {
+	grpcwebOpts := connector.GRPCWebOptionsFromBuildConfig(deps.BuildConfig)
 	var wg sync.WaitGroup
 	for {
 		select {
@@ -743,18 +756,85 @@ func runHTTP1ExchangeLoop(
 			wg.Add(1)
 			go func(ch layer.Channel) {
 				defer wg.Done()
-				dial := func(_ context.Context, _ *envelope.Envelope) (layer.Channel, error) {
-					upCh := upstreamH1.OpenExchange()
-					if upCh == nil {
-						return nil, fmt.Errorf("proxybuild: upstream http1 layer closed before opening exchange for %s", target)
-					}
-					return upCh, nil
-				}
-				if err := session.RunStackSessionExchange(ctx, stack, ch, dial, p, sessOpts); err != nil && !errors.Is(err, context.Canceled) {
-					logger.Debug("proxybuild: http1 exchange ended with error", "target", target, "error", err)
-				}
+				runHTTP1Exchange(ctx, stack, ch, upstreamH1, p, deps, sessOpts, target, grpcwebOpts, logger)
 			}(clientCh)
 		}
+	}
+}
+
+// runHTTP1Exchange runs one HTTP/1.x per-exchange Channel through the
+// H1 dispatcher (content-type-based grpc-web auto-classify, USK-934) and
+// then into session.RunStackSessionExchange. Extracted from
+// runHTTP1ExchangeLoop for readability — the wrap + dial-closure
+// composition has grown beyond the inline goroutine body it used to be.
+//
+// Per-exchange grpc-web record callback: when the request matches
+// application/grpc-web[-text][+proto|...], the per-exchange
+// session.GRPCWebBase64RecordOption installs the WireLevel=grpcweb-base64
+// overlay producer on BOTH the client-side and upstream-side
+// grpcweb.Wrap calls. Same closure → independent per-direction sequence
+// counters → distinct (StreamID, Direction, sequence, wire_level) tuples
+// per the schemaV14 UNIQUE constraint. Mirrors the H2 pattern in
+// buildOnHTTP2Stack (USK-898).
+func runHTTP1Exchange(
+	ctx context.Context,
+	stack *connector.ConnectionStack,
+	clientCh layer.Channel,
+	upstreamH1 *http1.Layer,
+	p *pipeline.Pipeline,
+	_ Deps,
+	sessOpts session.SessionOptions,
+	target string,
+	baseGRPCWebOpts []grpcweb.Option,
+	logger *slog.Logger,
+) {
+	// Per-exchange wire-record Option for the gRPC-Web text-variant
+	// base64 wire bytes. The same closure is installed on both the
+	// client-side and upstream-side grpcweb wraps; the closure runs
+	// independent per-direction sequence counters and rewrites
+	// env.StreamID to clientCh.StreamID() for unification (mirroring
+	// the H2 wiring in buildOnHTTP2Stack).
+	streamFlowCtx := envelope.EnvelopeContext{ConnID: stack.ConnID, TargetHost: target}
+	grpcWebBase64Opt := session.GRPCWebBase64RecordOption(ctx, p, clientCh.StreamID(), streamFlowCtx)
+	streamGRPCWebOpts := make([]grpcweb.Option, 0, len(baseGRPCWebOpts)+1)
+	streamGRPCWebOpts = append(streamGRPCWebOpts, baseGRPCWebOpts...)
+	streamGRPCWebOpts = append(streamGRPCWebOpts, grpcWebBase64Opt)
+
+	dispatchedCh, err := connector.DispatchH1Channel(ctx, clientCh, grpcweb.RoleServer, streamGRPCWebOpts, logger)
+	if err != nil {
+		// Peer hung up before sending a request, or the client Channel
+		// produced a non-HTTPMessage first envelope (programmer error
+		// elsewhere). Drop the exchange; the session loop normally
+		// surfaces these as state="error" but the dispatcher consumed
+		// the first Next so there's no envelope to drive the record
+		// path. The http1 layer cleans up its own state on Close.
+		_ = clientCh.Close()
+		if !errors.Is(err, context.Canceled) {
+			logger.Debug("proxybuild: http1 dispatch failed",
+				"target", target, "stream_id", clientCh.StreamID(), "error", err)
+		}
+		return
+	}
+
+	dial := func(_ context.Context, env *envelope.Envelope) (layer.Channel, error) {
+		upCh := upstreamH1.OpenExchange()
+		if upCh == nil {
+			return nil, fmt.Errorf("proxybuild: upstream http1 layer closed before opening exchange for %s", target)
+		}
+		// USK-934: wrap the upstream channel with the same per-protocol
+		// layer the client side chose. Without this dispatch the upstream
+		// stays a bare http1 Channel and rejects GRPCStartMessage on the
+		// first Send (the http1 Channel only accepts *envelope.HTTPMessage),
+		// aborting the exchange before any envelope reaches the Pipeline.
+		// Mirrors USK-771's H2 symmetry fix.
+		var reqProto envelope.Protocol
+		if env != nil {
+			reqProto = env.Protocol
+		}
+		return connector.WrapH1UpstreamForDispatch(upCh, reqProto, streamGRPCWebOpts), nil
+	}
+	if err := session.RunStackSessionExchange(ctx, stack, dispatchedCh, dial, p, sessOpts); err != nil && !errors.Is(err, context.Canceled) {
+		logger.Debug("proxybuild: http1 exchange ended with error", "target", target, "error", err)
 	}
 }
 
