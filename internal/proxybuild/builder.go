@@ -756,7 +756,7 @@ func runHTTP1ExchangeLoop(
 			wg.Add(1)
 			go func(ch layer.Channel) {
 				defer wg.Done()
-				runHTTP1Exchange(ctx, stack, ch, upstreamH1, p, deps, sessOpts, target, grpcwebOpts, logger)
+				runHTTP1Exchange(ctx, stack, ch, upstreamH1, p, sessOpts, target, grpcwebOpts, logger)
 			}(clientCh)
 		}
 	}
@@ -782,7 +782,6 @@ func runHTTP1Exchange(
 	clientCh layer.Channel,
 	upstreamH1 *http1.Layer,
 	p *pipeline.Pipeline,
-	_ Deps,
 	sessOpts session.SessionOptions,
 	target string,
 	baseGRPCWebOpts []grpcweb.Option,
