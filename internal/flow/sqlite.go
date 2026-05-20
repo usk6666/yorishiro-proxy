@@ -849,7 +849,26 @@ func (s *SQLiteStore) GetFlows(ctx context.Context, streamID string, opts FlowLi
 		args = append(args, opts.WireLevel)
 	}
 
-	query += " ORDER BY sequence ASC"
+	// USK-935: order by (timestamp, sequence, direction) so the read-time
+	// order matches the wire-observed order. gRPC, gRPC-Web, and WebSocket
+	// Channels use a per-direction sequence counter — sequence values for
+	// SEND and RECV collide (both start at 0), and SQLite's tie-break on
+	// "ORDER BY sequence ASC" alone is non-deterministic. Sorting by
+	// timestamp first reproduces the wire arrival order; the (sequence,
+	// direction) tail keeps the order deterministic when two rows share
+	// the same RFC3339Nano timestamp (e.g. variants written back-to-back).
+	// envelopeToFlow stamps Timestamp via time.Now() for every flow,
+	// including overlay (h2-frame, grpc-lpm-frame) rows; sqlite.go writes
+	// it as RFC3339Nano UTC. Two time.Now() calls on modern Linux
+	// always produce monotonically increasing nanoseconds (clock_gettime
+	// CLOCK_REALTIME ~100ns resolution), and the RFC3339Nano fractional
+	// part is therefore consistently 7-9 digits wide across same-stream
+	// flow inserts, so BINARY collation preserves chronological order in
+	// the live data path. The Sequence + Direction tie-break covers the
+	// edge case where two writes within the same nanosecond share a
+	// rendered timestamp. The per-direction Sequence field values on the
+	// Layer Channel are unchanged; only the read-time ORDER BY moves.
+	query += " ORDER BY timestamp ASC, sequence ASC, direction ASC"
 
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
