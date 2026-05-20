@@ -213,6 +213,7 @@ func NewServer(
 	finalizeDefaults(s)
 	s.registerTools()
 	s.registerResources()
+	s.registerPrompts()
 	return s
 }
 
