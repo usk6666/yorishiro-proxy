@@ -1,14 +1,17 @@
 /**
  * MCP Client SDK for yorishiro-proxy Web UI.
  *
- * Provides typed access to yorishiro-proxy's 10 MCP tools:
+ * Provides typed access to yorishiro-proxy's MCP tools:
  * - proxy_start: Start proxy listeners
  * - proxy_stop: Stop proxy listeners
  * - configure: Configure runtime proxy settings
  * - query: Query flows, status, config, and other resources
- * - resend: Resend and replay recorded requests (resend, resend_raw, tcp_replay)
+ * - resend: Resend and replay recorded requests (legacy resend / resend_raw / tcp_replay)
+ *           plus the protocol-typed quartet resend_{http,ws,grpc,raw}
  * - manage: Manage flow data and CA certificates (delete_flows, export_flows, import_flows, regenerate_ca_cert)
- * - fuzz: Execute fuzz testing campaigns (fuzz, fuzz_pause, fuzz_resume, fuzz_cancel)
+ * - fuzz_{http,ws,grpc,raw}: Protocol-typed synchronous fuzz tools (RFC-001 N8).
+ *           The legacy `fuzz` MCP tool was removed at the backend; see
+ *           dispatch.ts pickFuzzTool() to route by flow.protocol.
  * - macro: Define and run macro workflows (define_macro, run_macro, delete_macro)
  * - intercept: Act on intercepted requests (release, modify_and_forward, drop)
  * - security: Configure target scope and security settings
@@ -24,10 +27,10 @@ export type { McpContextValue, McpProviderProps } from "./context.js";
 
 // Hooks
 export {
-  useConfigure, useExecute, useFuzz, useInterceptAction, useMacro, useManage, useMcpClient, useProxyControl, useQuery, useResend, useSecurity
+  useConfigure, useExecute, useInterceptAction, useMacro, useManage, useMcpClient, useProxyControl, useQuery, useResend, useSecurity
 } from "./hooks.js";
 export type {
-  UseConfigureResult, UseExecuteResult, UseFuzzResult, UseInterceptActionResult, UseMacroResult, UseManageResult, UseMcpClientResult, UseProxyControlResult, UseQueryOptions,
+  UseConfigureResult, UseExecuteResult, UseInterceptActionResult, UseMacroResult, UseManageResult, UseMcpClientResult, UseProxyControlResult, UseQueryOptions,
   UseQueryResult, UseResendResult, UseSecurityResult
 } from "./hooks.js";
 
@@ -47,9 +50,17 @@ export type {
   CompareBodyDiff, CompareBodyLengthDiff, CompareHeaderDiff, CompareJsonDiff, CompareResult, CompareStatusCodeDiff, CompareTimingDiff,
   ExecuteAction, ExecuteDryRunResult, ExecuteParams, ExecuteRawDryRunResult, ExecuteResendRawResult, ExecuteResendResult, ExportFilter, ExtractionRule, FlowDetailResult, FlowEntry,
   FlowsResult,
-  // fuzz
-  FuzzAction, FuzzControlResult, FuzzJobEntry,
-  FuzzJobsResult, FuzzPayloadSet, FuzzPosition, FuzzResultEntry, FuzzResultsResult, FuzzResultsSummary, FuzzStartResult, FuzzStopCondition, FuzzToolParams, GuardCondition, HookConfig,
+  // fuzz (typed quartet — legacy FuzzAction / FuzzToolParams / FuzzStartResult /
+  // FuzzControlResult / FuzzPosition / FuzzPayloadSet / FuzzStopCondition
+  // were removed alongside the backend `fuzz` tool — USK-937).
+  FuzzGRPCParams, FuzzGRPCPosition, FuzzGRPCResult, FuzzGRPCVariantRow,
+  FuzzHTTPParams, FuzzHTTPPosition, FuzzHTTPResult, FuzzHTTPVariantRow,
+  FuzzJobEntry,
+  FuzzJobsResult,
+  FuzzRawParams, FuzzRawPosition, FuzzRawResult, FuzzRawVariantRow,
+  FuzzResultEntry, FuzzResultsResult, FuzzResultsSummary,
+  FuzzWSParams, FuzzWSPosition, FuzzWSResult, FuzzWSVariantRow,
+  GuardCondition, HookConfig,
   HooksInput, ImportErrorDetail,
   // intercept
   InterceptAction,

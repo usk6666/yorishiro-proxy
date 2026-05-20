@@ -80,6 +80,48 @@ export function pickResendTool(
 }
 
 /**
+ * The protocol-typed fuzz tool names.
+ *
+ * Unlike {@link ResendToolName} there is no legacy `"fuzz"` fallback — the
+ * backend removed the untyped `fuzz` MCP tool in favour of the typed quartet,
+ * so {@link pickFuzzTool} returns `null` for unknown protocols rather than a
+ * tool name that would fail at the wire (USK-937).
+ */
+export type FuzzToolName =
+  | "fuzz_http"
+  | "fuzz_ws"
+  | "fuzz_grpc"
+  | "fuzz_raw";
+
+/**
+ * Pick the appropriate fuzz_* MCP tool for a flow's protocol.
+ *
+ * Returns `null` for unknown / empty / nullish protocols. Callers should
+ * surface a user-visible error in that case (the legacy `fuzz` tool no
+ * longer exists at the backend, so there is no fallback to try).
+ */
+export function pickFuzzTool(
+  protocol: string | null | undefined,
+): FuzzToolName | null {
+  const proto = (protocol ?? "").toLowerCase();
+  if (proto === "websocket" || proto === "ws") return "fuzz_ws";
+  if (proto === "grpc" || proto === "grpc-web") return "fuzz_grpc";
+  if (proto === "tcp" || proto === "raw") return "fuzz_raw";
+  if (
+    proto === "http/1.x" ||
+    proto === "http/1.1" ||
+    proto === "http/1.0" ||
+    proto === "http" ||
+    proto === "https" ||
+    proto === "http/2" ||
+    proto === "h2"
+  ) {
+    return "fuzz_http";
+  }
+  return null;
+}
+
+/**
  * Whether a flow uses one of the streaming flow_types that produces a per-message
  * timeline (WebSocket, gRPC server/client/bidi streaming, SSE).
  *

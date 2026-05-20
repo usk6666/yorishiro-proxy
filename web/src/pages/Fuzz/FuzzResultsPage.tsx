@@ -6,8 +6,7 @@ import { CodeViewer } from "../../components/ui/CodeViewer.js";
 import { Input } from "../../components/ui/Input.js";
 import { Spinner } from "../../components/ui/Spinner.js";
 import { Table } from "../../components/ui/Table.js";
-import { useToast } from "../../components/ui/Toast.js";
-import { useFuzz, useQuery } from "../../lib/mcp/hooks.js";
+import { useQuery } from "../../lib/mcp/hooks.js";
 import type {
   FlowDetailResult,
   FuzzJobEntry,
@@ -91,8 +90,6 @@ function progressPercent(job: FuzzJobEntry): number {
 export function FuzzResultsPage() {
   const { fuzzId } = useParams<{ fuzzId: string }>();
   const navigate = useNavigate();
-  const { addToast } = useToast();
-  const { fuzz: fuzzAction, loading: executeLoading } = useFuzz();
 
   // --- Filter state ---
   const [statusCodeFilter, setStatusCodeFilter] = useState<string>("");
@@ -248,25 +245,8 @@ export function FuzzResultsPage() {
     [client, mcpStatus],
   );
 
-  // --- Job control actions ---
-  const handleJobAction = useCallback(
-    async (action: "fuzz_pause" | "fuzz_resume" | "fuzz_cancel") => {
-      if (!fuzzId) return;
-      try {
-        await fuzzAction({ action, params: { fuzz_id: fuzzId } });
-        addToast({
-          type: "success",
-          message: `Job ${action.replace("fuzz_", "")}d`,
-        });
-      } catch (err) {
-        addToast({
-          type: "error",
-          message: `Action failed: ${err instanceof Error ? err.message : String(err)}`,
-        });
-      }
-    },
-    [fuzzId, fuzzAction, addToast],
-  );
+  // (Lifecycle pause/resume/cancel removed — the typed fuzz_* MCP tools are
+  // synchronous and run to completion or until stop_on_* fires. See USK-937.)
 
   if (!fuzzId) {
     return (
@@ -288,50 +268,6 @@ export function FuzzResultsPage() {
           <h1 className="page-title">Fuzz Results</h1>
           <code className="fuzz-results-id">{shortId(fuzzId)}</code>
         </div>
-        {job && (
-          <div className="fuzz-results-header-right">
-            {job.status === "running" && (
-              <>
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  onClick={() => handleJobAction("fuzz_pause")}
-                  disabled={executeLoading}
-                >
-                  Pause
-                </Button>
-                <Button
-                  variant="danger"
-                  size="sm"
-                  onClick={() => handleJobAction("fuzz_cancel")}
-                  disabled={executeLoading}
-                >
-                  Cancel
-                </Button>
-              </>
-            )}
-            {job.status === "paused" && (
-              <>
-                <Button
-                  variant="primary"
-                  size="sm"
-                  onClick={() => handleJobAction("fuzz_resume")}
-                  disabled={executeLoading}
-                >
-                  Resume
-                </Button>
-                <Button
-                  variant="danger"
-                  size="sm"
-                  onClick={() => handleJobAction("fuzz_cancel")}
-                  disabled={executeLoading}
-                >
-                  Cancel
-                </Button>
-              </>
-            )}
-          </div>
-        )}
       </div>
 
       {/* Job stats */}

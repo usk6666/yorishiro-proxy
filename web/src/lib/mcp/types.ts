@@ -807,37 +807,6 @@ export interface RawPatch {
   replace_text?: string;
 }
 
-/** Fuzz payload position. */
-export interface FuzzPosition {
-  id: string;
-  location: string;
-  name?: string;
-  match?: string;
-  mode?: string;
-  payload_set?: string;
-  json_path?: string;
-}
-
-/** Fuzz payload set. */
-export interface FuzzPayloadSet {
-  type: string;
-  values?: string[] | null;
-  path?: string;
-  format?: string;
-  start?: number | null;
-  end?: number | null;
-  step?: number | null;
-}
-
-/** Fuzz stop conditions. */
-export interface FuzzStopCondition {
-  status_codes?: number[] | null;
-  error_count?: number;
-  latency_threshold_ms?: number;
-  latency_baseline_multiplier?: number;
-  latency_window?: number;
-}
-
 /** Hook configuration for resend/fuzz. */
 export interface HookConfig {
   macro: string;
@@ -1085,51 +1054,220 @@ export interface ManageImportFlowsResult {
 }
 
 // ---------------------------------------------------------------------------
-// fuzz tool — fuzz, fuzz_pause, fuzz_resume, fuzz_cancel
+// fuzz tools — protocol-typed fuzz_http / fuzz_ws / fuzz_grpc / fuzz_raw
+// (RFC-001 N8; the legacy `fuzz` MCP tool was removed at the backend in
+// favour of these four — see USK-937)
+//
+// Schemas mirror the Go input/output structs in internal/mcp/fuzz_*.go.
+// Lifecycle controls (pause/resume/cancel) intentionally have no
+// corresponding tool — the typed fuzz_* tools are synchronous and run to
+// completion (or the per-tool stop_on_* flag). See PR USK-937 for the
+// follow-up `feat(mcp): fuzz job lifecycle control` Issue.
 // ---------------------------------------------------------------------------
 
-/** Available fuzz actions. */
-export type FuzzAction = "fuzz" | "fuzz_pause" | "fuzz_resume" | "fuzz_cancel";
-
-/** Parameters for the fuzz tool. */
-export interface FuzzToolParams {
-  action: FuzzAction;
-  params: {
-    // fuzz start
-    flow_id?: string;
-    attack_type?: string;
-    positions?: FuzzPosition[];
-    payload_sets?: Record<string, FuzzPayloadSet>;
-    tag?: string;
-    concurrency?: number | null;
-    rate_limit_rps?: number | null;
-    delay_ms?: number | null;
-    max_retries?: number | null;
-    timeout_ms?: number | null;
-    stop_on?: FuzzStopCondition | null;
-
-    // fuzz control (pause/resume/cancel)
-    fuzz_id?: string;
-
-    // hooks
-    hooks?: HooksInput | null;
-  };
+/** One position into the HTTPMessage envelope for fuzz_http. */
+export interface FuzzHTTPPosition {
+  path: string;
+  payloads: string[];
+  encoding?: string;
 }
 
-/** Result of fuzz start action. */
-export interface FuzzStartResult {
-  fuzz_id: string;
-  flow_id: string;
-  status: string;
-  total: number;
-  tag: string;
+/** Parameters for the fuzz_http MCP tool. */
+export interface FuzzHTTPParams {
+  flow_id?: string;
+  method?: string;
+  scheme?: string;
+  authority?: string;
+  path?: string;
+  raw_query?: string;
+  headers?: HeaderKV[];
+  body?: string;
+  body_encoding?: string;
+  body_set?: boolean;
+  body_patches?: BodyPatch[];
+  override_host?: string;
+  tls_fingerprint?: string;
+  timeout_ms?: number;
+  tag?: string;
+  positions: FuzzHTTPPosition[];
+  stop_on_5xx?: boolean;
 }
 
-/** Result of fuzz control actions (pause/resume/cancel). */
-export interface FuzzControlResult {
+/** One variant result row from fuzz_http. */
+export interface FuzzHTTPVariantRow {
+  index: number;
+  stream_id: string;
+  status_code?: number;
+  body_size?: number;
+  payloads: Record<string, string>;
+  error?: string;
+  duration_ms: number;
+}
+
+/** Result of the fuzz_http MCP tool. */
+export interface FuzzHTTPResult {
   fuzz_id: string;
-  action: string;
-  status: string;
+  total_variants: number;
+  completed_variants: number;
+  stopped_reason?: string;
+  variants: FuzzHTTPVariantRow[];
+  duration_ms: number;
+  tag?: string;
+}
+
+/** One position into the WSMessage envelope for fuzz_ws. */
+export interface FuzzWSPosition {
+  path: string;
+  payloads: string[];
+  encoding?: string;
+}
+
+/** Parameters for the fuzz_ws MCP tool. */
+export interface FuzzWSParams {
+  flow_id?: string;
+  target_addr?: string;
+  scheme?: string;
+  path?: string;
+  raw_query?: string;
+  opcode: string;
+  fin?: boolean;
+  payload?: string;
+  body_encoding?: string;
+  payload_set?: boolean;
+  masked?: boolean;
+  mask?: string;
+  close_code?: number;
+  close_reason?: string;
+  compressed?: boolean;
+  timeout_ms?: number;
+  tls_fingerprint?: string;
+  tag?: string;
+  positions: FuzzWSPosition[];
+  stop_on_close?: boolean;
+}
+
+/** One variant result row from fuzz_ws. */
+export interface FuzzWSVariantRow {
+  index: number;
+  stream_id: string;
+  opcode?: string;
+  fin?: boolean;
+  payload_size?: number;
+  compressed?: boolean;
+  close_code?: number;
+  close_reason?: string;
+  payloads: Record<string, string>;
+  error?: string;
+  duration_ms: number;
+}
+
+/** Result of the fuzz_ws MCP tool. */
+export interface FuzzWSResult {
+  fuzz_id: string;
+  total_variants: number;
+  completed_variants: number;
+  stopped_reason?: string;
+  variants: FuzzWSVariantRow[];
+  duration_ms: number;
+  tag?: string;
+}
+
+/** One position into the GRPCStart/GRPCData envelope for fuzz_grpc. */
+export interface FuzzGRPCPosition {
+  path: string;
+  payloads: string[];
+  encoding?: string;
+}
+
+/** Parameters for the fuzz_grpc MCP tool. */
+export interface FuzzGRPCParams {
+  flow_id?: string;
+  target_addr?: string;
+  scheme?: string;
+  service?: string;
+  method?: string;
+  metadata?: HeaderKV[];
+  encoding?: string;
+  accept_encoding?: string[];
+  messages?: ResendGRPCData[];
+  trailer_metadata?: HeaderKV[];
+  timeout_ms?: number;
+  tls_fingerprint?: string;
+  tag?: string;
+  positions: FuzzGRPCPosition[];
+  stop_on_non_ok?: boolean;
+}
+
+/** One variant result row from fuzz_grpc. */
+export interface FuzzGRPCVariantRow {
+  index: number;
+  stream_id: string;
+  status: number;
+  status_message?: string;
+  response_message_count?: number;
+  response_total_bytes?: number;
+  payloads: Record<string, string>;
+  error?: string;
+  duration_ms: number;
+}
+
+/** Result of the fuzz_grpc MCP tool. */
+export interface FuzzGRPCResult {
+  fuzz_id: string;
+  total_variants: number;
+  completed_variants: number;
+  stopped_reason?: string;
+  variants: FuzzGRPCVariantRow[];
+  duration_ms: number;
+  tag?: string;
+}
+
+/** One position into the RawMessage payload for fuzz_raw. */
+export interface FuzzRawPosition {
+  path: string;
+  payloads: string[];
+  encoding?: string;
+}
+
+/** Parameters for the fuzz_raw MCP tool. */
+export interface FuzzRawParams {
+  flow_id?: string;
+  target_addr: string;
+  use_tls?: boolean;
+  sni?: string;
+  override_bytes?: string;
+  override_bytes_encoding?: string;
+  override_bytes_set?: boolean;
+  patches?: ResendRawBytePatch[];
+  insecure_skip_verify?: boolean;
+  tls_fingerprint?: string;
+  timeout_ms?: number;
+  tag?: string;
+  positions: FuzzRawPosition[];
+  stop_on_error?: boolean;
+}
+
+/** One variant result row from fuzz_raw. */
+export interface FuzzRawVariantRow {
+  index: number;
+  stream_id: string;
+  response_size?: number;
+  response_chunks?: number;
+  truncated?: boolean;
+  payloads: Record<string, string>;
+  error?: string;
+  duration_ms: number;
+}
+
+/** Result of the fuzz_raw MCP tool. */
+export interface FuzzRawResult {
+  fuzz_id: string;
+  total_variants: number;
+  completed_variants: number;
+  stopped_reason?: string;
+  variants: FuzzRawVariantRow[];
+  duration_ms: number;
+  tag?: string;
 }
 
 // ---------------------------------------------------------------------------

@@ -16,7 +16,6 @@ import type {
   ConfigureResult,
   ConnectionStatus,
   ExecuteParams,
-  FuzzToolParams,
   GrpcSchemaListResult,
   GrpcSchemaParams,
   InterceptActionParams,
@@ -417,41 +416,12 @@ export function useManage(): UseManageResult {
 }
 
 // ---------------------------------------------------------------------------
-// useFuzz — fuzz tool (fuzz, fuzz_pause, fuzz_resume, fuzz_cancel)
+// (Fuzz hooks intentionally removed — the legacy `fuzz` MCP tool was deleted
+// at the backend in favour of the protocol-typed quartet fuzz_{http,ws,grpc,
+// raw}. Pages mirror ResendPage's idiom of calling client.fuzzHttp(...) etc.
+// directly via useMcpContext, with `pickFuzzTool(protocol)` from dispatch.ts
+// selecting the right typed method. See USK-937.)
 // ---------------------------------------------------------------------------
-
-/** Return type for useFuzz. */
-export interface UseFuzzResult {
-  /** Execute a fuzz action. Returns the tool result. */
-  fuzz: <T = unknown>(params: FuzzToolParams) => Promise<T>;
-  /** Whether a fuzz operation is in progress. */
-  loading: boolean;
-  /** Last fuzz error, if any. */
-  error: Error | null;
-}
-
-/**
- * Hook to call the MCP fuzz tool (fuzz, fuzz_pause, fuzz_resume, fuzz_cancel).
- *
- * @example
- * ```tsx
- * const { fuzz, loading, error } = useFuzz();
- * await fuzz({
- *   action: "fuzz",
- *   params: { flow_id: "abc123", attack_type: "sequential", positions: [...] },
- * });
- * ```
- */
-export function useFuzz(): UseFuzzResult {
-  const { execute, loading, error } = useMcpAction(
-    (client: McpClient, params: FuzzToolParams) => client.fuzz(params),
-  );
-  return {
-    fuzz: execute as <T = unknown>(params: FuzzToolParams) => Promise<T>,
-    loading,
-    error,
-  };
-}
 
 // ---------------------------------------------------------------------------
 // useMacro — macro tool (define_macro, run_macro, delete_macro)

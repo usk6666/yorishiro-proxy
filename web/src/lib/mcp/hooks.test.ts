@@ -225,7 +225,6 @@ const {
   useMcpAction,
   useResend,
   useManage,
-  useFuzz,
   useMacro,
   useInterceptAction,
   useSecurity,
@@ -627,11 +626,6 @@ describe("wrapper hook returned-callback identity stability", () => {
   it("useManage().manage is stable across re-renders", () => {
     const outs = driveHook(() => useManage(), 2);
     expect(outs[1]!.manage).toBe(outs[0]!.manage);
-  });
-
-  it("useFuzz().fuzz is stable across re-renders", () => {
-    const outs = driveHook(() => useFuzz(), 2);
-    expect(outs[1]!.fuzz).toBe(outs[0]!.fuzz);
   });
 
   it("useMacro().macro is stable across re-renders", () => {
