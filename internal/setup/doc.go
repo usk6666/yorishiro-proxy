@@ -2,8 +2,8 @@
 //
 // It automates configuration of yorishiro-proxy with Claude Code,
 // including MCP server configuration, CA certificate generation and trust store
-// registration, playwright-cli integration, and yorishiro skill installation.
+// registration, and playwright-cli integration.
 //
-// The install command supports per-target execution (mcp, ca, skills, playwright)
+// The install command supports per-target execution (mcp, ca, playwright)
 // and is non-interactive by default for CI compatibility.
 package setup

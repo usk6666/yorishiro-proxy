@@ -68,6 +68,5 @@ func runUpgradeApply(ctx context.Context, updater *selfupdate.Updater) error {
 	}
 
 	fmt.Printf("Successfully updated: %s -> %s\n", result.CurrentVersion, result.LatestVersion)
-	fmt.Println("\nTo update skills, run: yorishiro-proxy install skills")
 	return nil
 }

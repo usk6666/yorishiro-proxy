@@ -10,8 +10,6 @@ const (
 	TargetMCP Target = "mcp"
 	// TargetCA generates CA certificate only.
 	TargetCA Target = "ca"
-	// TargetSkills installs skills only.
-	TargetSkills Target = "skills"
 	// TargetPlaywright configures Playwright integration only.
 	TargetPlaywright Target = "playwright"
 )
@@ -39,9 +37,6 @@ type Options struct {
 
 	// CADir overrides the CA certificate output directory.
 	CADir string
-
-	// SkillsDir overrides the skills installation directory.
-	SkillsDir string
 
 	// BinaryPath overrides the auto-detected binary path for testing.
 	BinaryPath string

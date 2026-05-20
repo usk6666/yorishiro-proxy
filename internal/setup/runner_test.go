@@ -55,7 +55,6 @@ func TestRunner_Install_AllTargets(t *testing.T) {
 		"yorishiro-proxy install",
 		"MCP configuration",
 		"CA certificate",
-		"Skills installation",
 		"Verification",
 		"Install complete!",
 	}
@@ -100,12 +99,9 @@ func TestRunner_Install_MCPOnly(t *testing.T) {
 		t.Errorf("output missing MCP step\nfull output:\n%s", output)
 	}
 
-	// Should NOT contain CA or Skills steps.
+	// Should NOT contain CA steps.
 	if strings.Contains(output, "CA certificate") {
 		t.Error("MCP-only should not run CA step")
-	}
-	if strings.Contains(output, "Skills installation") {
-		t.Error("MCP-only should not run Skills step")
 	}
 
 	if _, err := os.Stat(dir + "/.mcp.json"); err != nil {
@@ -189,75 +185,6 @@ func TestRunner_Install_CAOnly_Idempotent(t *testing.T) {
 	}
 }
 
-func TestRunner_Install_SkillsOnly(t *testing.T) {
-	dir := t.TempDir()
-	origDir := chdir(t, dir)
-	defer chdir(t, origDir)
-
-	var out bytes.Buffer
-	opts := Options{
-		Target:     TargetSkills,
-		BinaryPath: "/usr/bin/yorishiro-proxy",
-	}
-
-	runner := NewRunner(opts, &mockPrompter{}, &out)
-	runner.SetNowFunc(func() time.Time {
-		return time.Date(2026, 3, 1, 14, 30, 45, 0, time.UTC)
-	})
-
-	ctx := context.Background()
-	err := runner.Install(ctx)
-	if err != nil {
-		t.Fatalf("Install(skills) error: %v", err)
-	}
-
-	output := out.String()
-	if !strings.Contains(output, "Skills installation") {
-		t.Errorf("output missing Skills step\nfull output:\n%s", output)
-	}
-
-	// Skills directory should exist.
-	skillsDir := dir + "/.claude/skills/yorishiro"
-	if _, err := os.Stat(skillsDir); err != nil {
-		t.Errorf("skills directory not created: %v", err)
-	}
-}
-
-func TestRunner_Install_SkillsWithCustomDir(t *testing.T) {
-	dir := t.TempDir()
-	origDir := chdir(t, dir)
-	defer chdir(t, origDir)
-
-	customDir := dir + "/custom-project"
-	if err := os.MkdirAll(customDir, 0755); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-
-	var out bytes.Buffer
-	opts := Options{
-		Target:     TargetSkills,
-		SkillsDir:  customDir,
-		BinaryPath: "/usr/bin/yorishiro-proxy",
-	}
-
-	runner := NewRunner(opts, &mockPrompter{}, &out)
-	runner.SetNowFunc(func() time.Time {
-		return time.Date(2026, 3, 1, 14, 30, 45, 0, time.UTC)
-	})
-
-	ctx := context.Background()
-	err := runner.Install(ctx)
-	if err != nil {
-		t.Fatalf("Install(skills --dir) error: %v", err)
-	}
-
-	// Skills should be installed in the custom directory.
-	skillsDir := customDir + "/.claude/skills/yorishiro"
-	if _, err := os.Stat(skillsDir); err != nil {
-		t.Errorf("skills directory not created in custom dir: %v", err)
-	}
-}
-
 func TestRunner_Install_Interactive(t *testing.T) {
 	dir := t.TempDir()
 	origDir := chdir(t, dir)
@@ -267,7 +194,6 @@ func TestRunner_Install_Interactive(t *testing.T) {
 	prompter := &mockPrompter{
 		responses: []string{
 			"1", // scope: project
-			"Y", // install skills
 		},
 	}
 

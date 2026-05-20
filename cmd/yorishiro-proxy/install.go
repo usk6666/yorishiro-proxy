@@ -13,7 +13,6 @@ import (
 var validInstallTargets = map[string]setup.Target{
 	"mcp":        setup.TargetMCP,
 	"ca":         setup.TargetCA,
-	"skills":     setup.TargetSkills,
 	"playwright": setup.TargetPlaywright,
 }
 
@@ -44,17 +43,13 @@ func runInstall(ctx context.Context, args []string) error {
 	fs.BoolVar(&opts.Trust, "trust", false, "register CA in OS trust store (requires sudo)")
 	fs.StringVar(&opts.CADir, "ca-dir", "", "CA certificate output directory")
 
-	// Skills target flags.
-	fs.StringVar(&opts.SkillsDir, "skills-dir", "", "skills installation directory")
-
 	fs.Usage = func() {
 		fmt.Fprintf(fs.Output(), "Usage: yorishiro-proxy install [target] [flags]\n\n")
 		fmt.Fprintf(fs.Output(), "Install and configure yorishiro-proxy components.\n\n")
 		fmt.Fprintf(fs.Output(), "Targets:\n")
-		fmt.Fprintf(fs.Output(), "  (none)       Install all components (MCP + CA + Skills)\n")
+		fmt.Fprintf(fs.Output(), "  (none)       Install all components (MCP + CA)\n")
 		fmt.Fprintf(fs.Output(), "  mcp          Register MCP configuration only\n")
 		fmt.Fprintf(fs.Output(), "  ca           Generate CA certificate only\n")
-		fmt.Fprintf(fs.Output(), "  skills       Install skills only\n")
 		fmt.Fprintf(fs.Output(), "  playwright   Configure Playwright integration only\n\n")
 		fmt.Fprintf(fs.Output(), "Flags:\n")
 		fmt.Fprintf(fs.Output(), "  --interactive     Enable interactive prompts (wizard mode)\n")
@@ -62,7 +57,6 @@ func runInstall(ctx context.Context, args []string) error {
 		fmt.Fprintf(fs.Output(), "  --listen-addr     Proxy listen address (default: 127.0.0.1:8080)\n")
 		fmt.Fprintf(fs.Output(), "  --trust           Register CA in OS trust store (requires sudo)\n")
 		fmt.Fprintf(fs.Output(), "  --ca-dir          CA certificate output directory\n")
-		fmt.Fprintf(fs.Output(), "  --skills-dir      Skills installation directory\n")
 	}
 
 	if err := fs.Parse(flagArgs); err != nil {
@@ -101,7 +95,7 @@ func parseInstallTarget(args []string) (setup.Target, []string, error) {
 
 	target, ok := validInstallTargets[first]
 	if !ok {
-		return "", nil, fmt.Errorf("unknown install target %q: valid targets are mcp, ca, skills, playwright", first)
+		return "", nil, fmt.Errorf("unknown install target %q: valid targets are mcp, ca, playwright", first)
 	}
 
 	return target, args[1:], nil

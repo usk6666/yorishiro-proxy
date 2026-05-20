@@ -84,8 +84,6 @@ func (r *Runner) Install(ctx context.Context) error {
 		return r.installMCP(binaryPath)
 	case TargetCA:
 		return r.installCA()
-	case TargetSkills:
-		return r.installSkills()
 	case TargetPlaywright:
 		return r.installPlaywright(ctx)
 	default:
@@ -103,11 +101,6 @@ func (r *Runner) installAll(ctx context.Context, binaryPath string) error {
 	// CA certificate.
 	if err := r.installCA(); err != nil {
 		return fmt.Errorf("CA cert: %w", err)
-	}
-
-	// Skills installation.
-	if err := r.installSkills(); err != nil {
-		return fmt.Errorf("skills: %w", err)
 	}
 
 	// Verification.
@@ -200,52 +193,6 @@ func (r *Runner) installCA() error {
 	} else {
 		r.printf("%s\n", CAInstallInstructions(caInfo.CertPath))
 	}
-
-	return nil
-}
-
-// installSkills installs skill files.
-func (r *Runner) installSkills() error {
-	r.printf("--- Skills installation ---\n\n")
-	r.printf("  [DEPRECATED] `install skills` is deprecated as of USK-949.\n")
-	r.printf("  User-facing vulnerability-verification playbooks have moved to MCP Prompts\n")
-	r.printf("  (cross-client, host-portable). Run `prompts/list` against the yorishiro-proxy\n")
-	r.printf("  MCP server to see them — they are equivalent to the playbook content installed\n")
-	r.printf("  here. This subcommand will be removed one minor version after USK-949.\n\n")
-
-	if r.opts.Interactive {
-		answer, err := r.prompter.Prompt("  Install yorishiro skills to .claude/skills/yorishiro/? [Y/n]: ")
-		if err != nil {
-			return fmt.Errorf("prompt skills: %w", err)
-		}
-		if strings.ToLower(strings.TrimSpace(answer)) == "n" {
-			r.printf("  Skipping skill installation.\n\n")
-			return nil
-		}
-	}
-
-	projectDir, err := os.Getwd()
-	if err != nil {
-		return fmt.Errorf("get working directory: %w", err)
-	}
-
-	skillsDir := projectDir
-	if r.opts.SkillsDir != "" {
-		skillsDir = r.opts.SkillsDir
-	}
-
-	installed, backupPath, err := InstallSkills(skillsDir, r.now())
-	if err != nil {
-		return err
-	}
-
-	if backupPath != "" {
-		r.printf("  Backed up existing skills to: %s\n", backupPath)
-	}
-	for _, f := range installed {
-		r.printf("  Installed: .claude/skills/yorishiro/%s\n", f)
-	}
-	r.printf("\n")
 
 	return nil
 }

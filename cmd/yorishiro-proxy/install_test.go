@@ -97,30 +97,20 @@ func TestRunInstall_CATarget(t *testing.T) {
 	}
 }
 
-func TestRunInstall_SkillsTarget(t *testing.T) {
-	dir := t.TempDir()
-	origDir, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
+func TestRunInstall_SkillsTarget_NowUnknown(t *testing.T) {
+	// USK-951: the `skills` install target was removed. Calling it must
+	// now produce an "unknown install target" error and must not perform
+	// any filesystem side effect.
+	err := runInstall(context.Background(), []string{"skills"})
+	if err == nil {
+		t.Fatal("expected error for removed 'skills' target")
 	}
-	if err := os.Chdir(dir); err != nil {
-		t.Fatalf("chdir: %v", err)
+	msg := err.Error()
+	if !strings.Contains(msg, "unknown install target") {
+		t.Errorf("error should report unknown install target, got: %v", err)
 	}
-	defer func() {
-		if err := os.Chdir(origDir); err != nil {
-			t.Logf("chdir back: %v", err)
-		}
-	}()
-
-	err = runInstall(context.Background(), []string{"skills"})
-	if err != nil {
-		t.Fatalf("runInstall(skills) error: %v", err)
-	}
-
-	// Check that skills directory was created.
-	skillsDir := filepath.Join(dir, ".claude", "skills", "yorishiro")
-	if _, err := os.Stat(skillsDir); err != nil {
-		t.Errorf("skills directory not created: %v", err)
+	if !strings.Contains(msg, "skills") {
+		t.Errorf("error should mention the rejected target name, got: %v", err)
 	}
 }
 
