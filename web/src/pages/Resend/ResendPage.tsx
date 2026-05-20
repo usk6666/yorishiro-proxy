@@ -20,14 +20,18 @@ import type {
   MessageEntry,
   MessagesResult,
   RawPatch,
+  ResendGRPCResult,
   ResendHTTPParams,
   ResendHTTPResult,
   ResendRawParams,
   ResendRawTypedResult,
+  ResendWSResult,
 } from "../../lib/mcp/types.js";
 import { HookConfigEditor } from "../../components/hooks/HookConfigEditor.js";
 import { BodyPatchEditor } from "./BodyPatchEditor.js";
 import { ComparerView } from "./ComparerView.js";
+import { GrpcRequestEditor, type GrpcRequestEditorState } from "./GrpcRequestEditor.js";
+import { GrpcResponseViewer } from "./GrpcResponseViewer.js";
 import { HeaderEditor } from "./HeaderEditor.js";
 import { RawPatchEditor } from "./RawPatchEditor.js";
 import "./ResendPage.css";
@@ -35,6 +39,9 @@ import { ResponseViewer } from "./ResponseViewer.js";
 import { TcpMessageList } from "./TcpMessageList.js";
 import type { TcpResendResult } from "./TcpResponseViewer.js";
 import { TcpResponseViewer } from "./TcpResponseViewer.js";
+import { buildResendGrpcParams, buildResendWsParams } from "./typedDispatch.js";
+import { WsRequestEditor, type WsRequestEditorState } from "./WsRequestEditor.js";
+import { WsResponseViewer } from "./WsResponseViewer.js";
 
 /** HTTP methods available for resend. */
 const HTTP_METHODS = [
@@ -175,6 +182,82 @@ function isTcpFlow(flow: FlowDetailResult): boolean {
 function isHttp2Flow(flow: FlowDetailResult): boolean {
   const proto = (flow.protocol || "").toLowerCase();
   return proto === "http/2" || proto === "h2" || proto === "grpc" || proto === "grpc-web";
+}
+
+/** Detect whether a flow is gRPC / gRPC-Web (uses resend_grpc dispatch). */
+function isGrpcFlow(flow: FlowDetailResult): boolean {
+  const proto = (flow.protocol || "").toLowerCase();
+  return proto === "grpc" || proto === "grpc-web";
+}
+
+/** Detect whether a flow is a WebSocket flow (uses resend_ws dispatch). */
+function isWsFlow(flow: FlowDetailResult): boolean {
+  const proto = (flow.protocol || "").toLowerCase();
+  return proto === "ws" || proto === "websocket";
+}
+
+/**
+ * Split a fully-qualified gRPC URL path of the form
+ * "/package.Service/Method" into its `(service, method)` components.
+ *
+ * The recorded `flow.url` for gRPC flows uses the standard gRPC HTTP/2
+ * path encoding; we slice it back out so the editor pre-populates with
+ * the source flow's RPC by default. Returns empty strings when the URL
+ * doesn't match the expected shape so the user can fill them manually.
+ */
+function splitGrpcServiceMethod(urlStr: string): {
+  service: string;
+  method: string;
+} {
+  if (!urlStr) return { service: "", method: "" };
+  let pathname: string;
+  try {
+    pathname = new URL(urlStr).pathname;
+  } catch {
+    pathname = urlStr;
+  }
+  const trimmed = pathname.startsWith("/") ? pathname.slice(1) : pathname;
+  const slash = trimmed.indexOf("/");
+  if (slash <= 0 || slash === trimmed.length - 1) {
+    return { service: "", method: "" };
+  }
+  return {
+    service: trimmed.slice(0, slash),
+    method: trimmed.slice(slash + 1),
+  };
+}
+
+/**
+ * Extract the path component of a flow URL, defaulting to "/" when the
+ * URL doesn't parse. Used to pre-populate the WebSocket editor's path
+ * field from the recorded handshake URL.
+ */
+function extractFlowPath(urlStr: string): string {
+  if (!urlStr) return "/";
+  try {
+    const parsed = new URL(urlStr);
+    return (parsed.pathname || "/") + (parsed.search || "");
+  } catch {
+    return urlStr;
+  }
+}
+
+/**
+ * Map a `Record<string, string[]>` headers map (the FlowDetailResult
+ * wire shape) to the ordered `{key,value}` rows the HeaderEditor consumes.
+ * Mirrors the inline conversion in the HTTP populate path.
+ */
+function headersRecordToRows(
+  headers: Record<string, string[]> | null | undefined,
+): Array<{ key: string; value: string }> {
+  if (!headers) return [];
+  const rows: Array<{ key: string; value: string }> = [];
+  for (const [key, values] of Object.entries(headers)) {
+    for (const value of values) {
+      rows.push({ key, value });
+    }
+  }
+  return rows;
 }
 
 /**
@@ -394,6 +477,32 @@ export function ResendPage() {
   const [rawPatches, setRawPatches] = useState<RawPatch[]>([]);
   const [tcpMode, setTcpMode] = useState<"resend_raw" | "tcp_replay">("resend_raw");
 
+  // gRPC editor state — USK-936. Minimum-viable MVP exposes service /
+  // method / target / scheme / ordered metadata / a single text payload.
+  const [grpcState, setGrpcState] = useState<GrpcRequestEditorState>({
+    targetAddr: "",
+    scheme: "https",
+    service: "",
+    method: "",
+    metadata: [],
+    messagePayload: "",
+  });
+
+  // WebSocket editor state — USK-936. resend_ws is single-frame on the
+  // backend; multi-frame replay is out of scope.
+  const [wsState, setWsState] = useState<WsRequestEditorState>({
+    targetAddr: "",
+    scheme: "wss",
+    path: "/",
+    opcode: "text",
+    fin: true,
+    payload: "",
+    bodyEncoding: "text",
+    compressed: false,
+    closeCode: "",
+    closeReason: "",
+  });
+
   // Shared state.
   const [tag, setTag] = useState("");
   const [dryRun, setDryRun] = useState(false);
@@ -414,6 +523,13 @@ export function ResendPage() {
   const [httpResponse, setHttpResponse] = useState<ResendResult | null>(null);
   const [tcpResponse, setTcpResponse] = useState<TcpResendResult | null>(null);
   const [rawResponse, setRawResponse] = useState<TcpResendResult | null>(null);
+  // gRPC / WebSocket typed responses (USK-936).
+  const [grpcResponse, setGrpcResponse] = useState<ResendGRPCResult | null>(null);
+  const [wsResponse, setWsResponse] = useState<ResendWSResult | null>(null);
+  // Local in-flight flags for the typed gRPC / WS paths (the shared
+  // `executing` flag is only flipped by the legacy `useResend` hook).
+  const [grpcSending, setGrpcSending] = useState(false);
+  const [wsSending, setWsSending] = useState(false);
 
   // -------------------------------------------------------------------------
   // Send History (USK-787)
@@ -525,6 +641,8 @@ export function ResendPage() {
   const flow = flowData as FlowDetailResult | null;
   const isTcp = useMemo(() => flow != null && isTcpFlow(flow), [flow]);
   const isH2 = useMemo(() => flow != null && isHttp2Flow(flow), [flow]);
+  const isGrpc = useMemo(() => flow != null && isGrpcFlow(flow), [flow]);
+  const isWs = useMemo(() => flow != null && isWsFlow(flow), [flow]);
 
   // Fetch messages for TCP flows.
   const {
@@ -549,6 +667,37 @@ export function ResendPage() {
     setHttpResponse(null);
     setTcpResponse(null);
     setRawResponse(null);
+    setGrpcResponse(null);
+    setWsResponse(null);
+
+    if (isGrpcFlow(flow)) {
+      // gRPC / gRPC-Web flow: populate the typed editor from the source flow.
+      const { service, method } = splitGrpcServiceMethod(flow.url || "");
+      const metadataRows = headersRecordToRows(flow.request_headers);
+      setGrpcState({
+        targetAddr: flow.conn_info?.server_addr ?? "",
+        scheme: extractUseTls(flow) ? "https" : "http",
+        service,
+        method,
+        metadata: metadataRows,
+        messagePayload: flow.request_body || "",
+      });
+    } else if (isWsFlow(flow)) {
+      // WebSocket flow: populate single-frame editor from the handshake URL.
+      const path = extractFlowPath(flow.url || "");
+      setWsState({
+        targetAddr: flow.conn_info?.server_addr ?? "",
+        scheme: extractUseTls(flow) ? "wss" : "ws",
+        path,
+        opcode: "text",
+        fin: true,
+        payload: "",
+        bodyEncoding: "text",
+        compressed: false,
+        closeCode: "",
+        closeReason: "",
+      });
+    }
 
     if (isTcpFlow(flow)) {
       // TCP flow: populate target address from connection info.
@@ -987,6 +1136,137 @@ export function ResendPage() {
     ],
   );
 
+  /**
+   * Send a gRPC resend via the protocol-typed `resend_grpc` MCP tool.
+   *
+   * Builds a minimum-viable `ResendGRPCParams` from the editor state:
+   * one text-mode request LPM, ordered metadata, and the target/scheme
+   * pair. Proto-schemaless JSON edit, trailer_metadata edit, and
+   * multi-message requests are deferred (see Issue body).
+   */
+  const handleGrpcSend = useCallback(async () => {
+    if (!activeFlowId) {
+      addToast({ type: "warning", message: "No flow selected" });
+      return;
+    }
+    if (client == null) {
+      addToast({
+        type: "error",
+        message: "MCP client is not connected",
+      });
+      return;
+    }
+
+    const params = buildResendGrpcParams(
+      activeFlowId,
+      grpcState,
+      tag || undefined,
+    );
+
+    setGrpcSending(true);
+    try {
+      const result = await client.resendGrpc(params);
+      setGrpcResponse(result);
+      recordResendSuccess({
+        id: result.stream_id,
+        protocol: flow?.protocol ?? "gRPC",
+        method: flow?.method ?? "POST",
+        url: flow?.url ?? `${grpcState.service}/${grpcState.method}`,
+        statusCode: result.end?.status,
+        durationMs: result.duration_ms,
+        tag: tag || undefined,
+        timestamp: new Date().toISOString(),
+      });
+      const warnings = result.warnings ?? [];
+      if (warnings.length > 0) {
+        addToast({
+          type: "warning",
+          message: `Resend completed with ${warnings.length} warning${warnings.length === 1 ? "" : "s"}`,
+        });
+      } else {
+        addToast({
+          type: "success",
+          message: `gRPC resend complete (status ${result.end?.status ?? "?"})`,
+        });
+      }
+    } catch (err) {
+      addToast({
+        type: "error",
+        message: err instanceof Error ? err.message : "gRPC resend failed",
+      });
+    } finally {
+      setGrpcSending(false);
+    }
+  }, [
+    activeFlowId,
+    client,
+    grpcState,
+    tag,
+    flow,
+    addToast,
+    recordResendSuccess,
+  ]);
+
+  /**
+   * Send a WebSocket resend via the protocol-typed `resend_ws` MCP tool.
+   *
+   * `resend_ws` is single-frame by design — opcode + payload + fin (+
+   * close metadata when applicable). Multi-frame replay is deferred.
+   */
+  const handleWsSend = useCallback(async () => {
+    if (!activeFlowId) {
+      addToast({ type: "warning", message: "No flow selected" });
+      return;
+    }
+    if (client == null) {
+      addToast({
+        type: "error",
+        message: "MCP client is not connected",
+      });
+      return;
+    }
+
+    const params = buildResendWsParams(
+      activeFlowId,
+      wsState,
+      tag || undefined,
+    );
+
+    setWsSending(true);
+    try {
+      const result = await client.resendWs(params);
+      setWsResponse(result);
+      recordResendSuccess({
+        id: result.stream_id,
+        protocol: flow?.protocol ?? "WebSocket",
+        method: result.opcode.toUpperCase(),
+        url: flow?.url ?? wsState.path,
+        durationMs: result.duration_ms,
+        tag: tag || undefined,
+        timestamp: new Date().toISOString(),
+      });
+      addToast({
+        type: "success",
+        message: `WebSocket resend complete (${result.opcode})`,
+      });
+    } catch (err) {
+      addToast({
+        type: "error",
+        message: err instanceof Error ? err.message : "WebSocket resend failed",
+      });
+    } finally {
+      setWsSending(false);
+    }
+  }, [
+    activeFlowId,
+    client,
+    wsState,
+    tag,
+    flow,
+    addToast,
+    recordResendSuccess,
+  ]);
+
   /** Send TCP replay request. */
   const handleTcpReplay = useCallback(async () => {
     if (!activeFlowId) {
@@ -1096,7 +1376,7 @@ export function ResendPage() {
         )}
       </div>
 
-      {hasFlow && !isTcp && (
+      {hasFlow && !isTcp && !isGrpc && !isWs && (
         /* ============================================================
          * HTTP Mode
          * ============================================================ */
@@ -1393,6 +1673,146 @@ export function ResendPage() {
             ) : (
               <div className="resend-empty-response">
                 Send a raw request to see the response here.
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {hasFlow && isGrpc && (
+        /* ============================================================
+         * gRPC Mode (USK-936)
+         * ============================================================ */
+        <div className="resend-editor-layout">
+          {/* Left: gRPC Request editor */}
+          <div className="resend-panel resend-request-panel">
+            <div className="resend-panel-header">
+              <span className="resend-panel-title">gRPC Request</span>
+              <Badge variant="info">{activeFlowId.slice(0, 8)}</Badge>
+              <Badge variant="default">{flow?.protocol ?? "gRPC"}</Badge>
+            </div>
+
+            <div className="resend-tag-row">
+              <Input
+                placeholder="Tag (optional)"
+                value={tag}
+                onChange={(e) => setTag(e.target.value)}
+              />
+            </div>
+
+            <GrpcRequestEditor state={grpcState} onChange={setGrpcState} />
+
+            <div className="resend-actions">
+              <Button
+                variant="primary"
+                onClick={handleGrpcSend}
+                disabled={grpcSending}
+              >
+                {grpcSending ? "Sending..." : "Send"}
+              </Button>
+            </div>
+          </div>
+
+          {/* Right: gRPC Response viewer */}
+          <div className="resend-panel resend-response-panel">
+            <div className="resend-panel-header">
+              <span className="resend-panel-title">Response</span>
+              {grpcResponse?.end?.status != null && (
+                <Badge
+                  variant={
+                    grpcResponse.end.status === 0 ? "success" : "danger"
+                  }
+                >
+                  status {grpcResponse.end.status}
+                </Badge>
+              )}
+              {grpcResponse?.warnings && grpcResponse.warnings.length > 0 && (
+                <Badge variant="warning">
+                  {grpcResponse.warnings.length} warning
+                  {grpcResponse.warnings.length === 1 ? "" : "s"}
+                </Badge>
+              )}
+              {grpcResponse?.duration_ms != null && (
+                <span className="resend-duration">
+                  {grpcResponse.duration_ms}ms
+                </span>
+              )}
+            </div>
+
+            {grpcSending ? (
+              <div className="resend-loading">
+                <Spinner size="sm" />
+                <span>Sending request...</span>
+              </div>
+            ) : grpcResponse ? (
+              <GrpcResponseViewer response={grpcResponse} />
+            ) : (
+              <div className="resend-empty-response">
+                Send a request to see the response here.
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {hasFlow && isWs && (
+        /* ============================================================
+         * WebSocket Mode (USK-936)
+         * ============================================================ */
+        <div className="resend-editor-layout">
+          {/* Left: WebSocket Request editor */}
+          <div className="resend-panel resend-request-panel">
+            <div className="resend-panel-header">
+              <span className="resend-panel-title">WebSocket Frame</span>
+              <Badge variant="info">{activeFlowId.slice(0, 8)}</Badge>
+              <Badge variant="default">WebSocket</Badge>
+            </div>
+
+            <div className="resend-tag-row">
+              <Input
+                placeholder="Tag (optional)"
+                value={tag}
+                onChange={(e) => setTag(e.target.value)}
+              />
+            </div>
+
+            <WsRequestEditor state={wsState} onChange={setWsState} />
+
+            <div className="resend-actions">
+              <Button
+                variant="primary"
+                onClick={handleWsSend}
+                disabled={wsSending}
+              >
+                {wsSending ? "Sending..." : "Send"}
+              </Button>
+            </div>
+          </div>
+
+          {/* Right: WebSocket Response viewer */}
+          <div className="resend-panel resend-response-panel">
+            <div className="resend-panel-header">
+              <span className="resend-panel-title">Response</span>
+              {wsResponse?.opcode && (
+                <Badge variant="info">{wsResponse.opcode}</Badge>
+              )}
+              {wsResponse?.duration_ms != null && (
+                <span className="resend-duration">
+                  {wsResponse.duration_ms}ms
+                </span>
+              )}
+            </div>
+
+            {wsSending ? (
+              <div className="resend-loading">
+                <Spinner size="sm" />
+                <span>Sending frame...</span>
+              </div>
+            ) : wsResponse ? (
+              <WsResponseViewer response={wsResponse} />
+            ) : (
+              <div className="resend-empty-response">
+                Send a frame to see the response here.
               </div>
             )}
           </div>
