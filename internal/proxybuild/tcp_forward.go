@@ -621,7 +621,7 @@ func (m *Manager) handleTCPForwardConnL7(
 	// state="error" Stream via the Pipeline-Drop audit hook.
 	sessOpts := m.tcpForwardSessionOpts(parentStack, connCtx)
 	filter := exchangeFilterFor(protocol, connLogger)
-	runTCPForwardHTTP1ExchangeLoop(connCtx, stack, clientH1, upstreamH1, parentStack.Pipeline, sessOpts, entry.target, connLogger, filter)
+	runTCPForwardHTTP1ExchangeLoop(connCtx, stack, clientH1, upstreamH1, parentStack, parentStack.Pipeline, sessOpts, entry.target, connLogger, filter)
 }
 
 // tcpForwardSessionOpts builds session.SessionOptions for a TCP forward
