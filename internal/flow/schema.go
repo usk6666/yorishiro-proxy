@@ -438,6 +438,22 @@ CREATE TABLE IF NOT EXISTS grpc_schemas (
 );
 `
 
+// schemaV16 adds a composite index on (stream_id, timestamp) for the
+// GetFlows wire-order ORDER BY introduced in USK-935. The fix changes
+// GetFlows from `ORDER BY sequence ASC` to
+// `ORDER BY timestamp ASC, sequence ASC, direction ASC` so the read-time
+// order reproduces wire-observed order for gRPC, gRPC-Web, and WebSocket
+// (whose per-direction sequence counters otherwise tie on collide).
+// Without this index, SQLite materializes a per-stream filesort on every
+// read; the index lets the planner stream rows directly in ORDER BY
+// order on the (stream_id, timestamp) prefix.
+//
+// Idempotent additive migration: CREATE INDEX IF NOT EXISTS, no table
+// recreation, no foreign-key toggle needed.
+const schemaV16 = `
+CREATE INDEX IF NOT EXISTS idx_flows_stream_id_timestamp ON flows(stream_id, timestamp);
+`
+
 var migrations = map[int]string{
 	1:  schemaV1,
 	2:  schemaV2,
@@ -454,6 +470,7 @@ var migrations = map[int]string{
 	13: schemaV13,
 	14: schemaV14,
 	15: schemaV15,
+	16: schemaV16,
 }
 
 func migrate(ctx context.Context, db *sql.DB) error {
