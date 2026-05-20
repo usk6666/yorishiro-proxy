@@ -8,6 +8,7 @@ import (
 	"net"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 )
 
@@ -319,17 +320,22 @@ func hostOnly(authority string) string {
 // vs "the proxy aborted mid-relay". Connection-close conditions —
 // io.EOF, "use of closed network connection" once the client or
 // upstream initiated TCP FIN, broken-pipe race after a peer-side close,
-// and io.ErrClosedPipe on net.Pipe-backed test fixtures — are all
-// "tunneled" outcomes from the audit perspective: they describe the
-// terminal close, not a mid-stream failure.
+// io.ErrClosedPipe on net.Pipe-backed test fixtures, and
+// "connection reset by peer" (ECONNRESET) when a peer closes without
+// draining pending bytes (TLS close_notify in flight, abrupt browser /
+// mobile-handover close, etc.) — are all "tunneled" outcomes from the
+// audit perspective: they describe the terminal close, not a mid-stream
+// failure.
 //
 // This classification is deliberately tolerant: under-classifying an
 // outcome as "failed" trains operators to ignore the field, which is
 // worse than the rare false-tunneled on a genuine partial-relay error.
-// When a connection genuinely fails mid-relay the dial path or the
-// io.Copy errors out with a non-close error (e.g. "i/o timeout",
-// "connection reset by peer" while still sending data) and that lands
-// in the "failed" bucket.
+// When a connection genuinely fails the dial path or io.Copy errors
+// out with a non-close error (e.g. "i/o timeout" mid-stream, a
+// deadline-exceeded read, "no route to host") and that lands in the
+// "failed" bucket. ECONNRESET intentionally moved to "tunneled" after
+// USK-952: in MITM passthrough the dominant cause is ungraceful peer
+// close after bytes have flowed, not a genuine partial-relay error.
 func isTunneledOutcome(err error) bool {
 	if err == nil {
 		return true
@@ -341,6 +347,9 @@ func isTunneledOutcome(err error) bool {
 		return true
 	}
 	if errors.Is(err, net.ErrClosed) {
+		return true
+	}
+	if errors.Is(err, syscall.ECONNRESET) {
 		return true
 	}
 	return false

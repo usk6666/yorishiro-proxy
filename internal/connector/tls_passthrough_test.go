@@ -2,7 +2,11 @@ package connector
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"io"
 	"net"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -120,5 +124,35 @@ func TestRelayBidirectional_OneDirectionClose(t *testing.T) {
 	case <-errCh:
 	case <-time.After(3 * time.Second):
 		t.Fatal("relay did not complete")
+	}
+}
+
+func TestIsTunneledOutcome(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, true},
+		{"io.EOF", io.EOF, true},
+		{"wrapped EOF", fmt.Errorf("readfrom: %w", io.EOF), true},
+		{"io.ErrClosedPipe", io.ErrClosedPipe, true},
+		{"net.ErrClosed", net.ErrClosed, true},
+		{"wrapped net.ErrClosed", fmt.Errorf("write tcp: %w", net.ErrClosed), true},
+		// USK-952: ECONNRESET on a passthrough relay is dominated by
+		// ungraceful peer close after bytes have flowed (TLS close_notify
+		// in flight, mobile-handover, browser tab close). Classify as
+		// tunneled per the function's tolerance policy.
+		{"syscall.ECONNRESET", syscall.ECONNRESET, true},
+		{"wrapped ECONNRESET", fmt.Errorf("read tcp: %w", syscall.ECONNRESET), true},
+		{"unrelated error", errors.New("i/o timeout mid-relay"), false},
+		{"DNS error", errors.New("no such host"), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isTunneledOutcome(tc.err); got != tc.want {
+				t.Errorf("isTunneledOutcome(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
 	}
 }
