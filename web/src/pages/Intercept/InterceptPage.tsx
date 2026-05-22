@@ -46,6 +46,12 @@ export function InterceptPage() {
   // Editable raw bytes (raw mode, Base64)
   const [editRawBytes, setEditRawBytes] = useState("");
 
+  // True while a release/drop/modify_and_forward mutation is awaiting its
+  // post-mutation refetchQueue. Drives `disabled` on the action buttons so
+  // a double-tap before the server-side hold queue updates can not fire a
+  // second action against the same (now-released) intercept_id (USK-968).
+  const [isActionInFlight, setIsActionInFlight] = useState(false);
+
   const { addToast } = useToast();
   const { interceptAction, loading: executeLoading } = useInterceptAction();
 
@@ -117,8 +123,9 @@ export function InterceptPage() {
 
   // Release: forward as-is
   const handleRelease = useCallback(async () => {
-    if (!selectedId) return;
+    if (!selectedId || isActionInFlight) return;
     const phase = selectedEntry ? resolvePhase(selectedEntry) : "request";
+    setIsActionInFlight(true);
     try {
       await interceptAction({
         action: "release",
@@ -128,25 +135,31 @@ export function InterceptPage() {
         },
       });
       addToast({ type: "success", message: `${phaseLabel(phase)} released` });
+      // Await the refetch BEFORE clearing selectedId so the detail panel
+      // does not render a stale (already-released) entry between the
+      // mutation completing and the queue polling catching up.
+      await refetchQueue();
       setSelectedId(null);
-      refetchQueue();
     } catch (err) {
       addToast({
         type: "error",
         message: `Release failed: ${err instanceof Error ? err.message : String(err)}`,
       });
+    } finally {
+      setIsActionInFlight(false);
     }
-  }, [selectedId, selectedEntry, detailViewMode, interceptAction, addToast, refetchQueue]);
+  }, [selectedId, isActionInFlight, selectedEntry, detailViewMode, interceptAction, addToast, refetchQueue]);
 
   // Modify & Forward: apply edits and forward (phase-aware)
   const handleModifyAndForward = useCallback(async () => {
-    if (!selectedId || !selectedEntry) return;
+    if (!selectedId || !selectedEntry || isActionInFlight) return;
 
     const phase = resolvePhase(selectedEntry);
 
-    if (detailViewMode === "raw") {
-      // Raw mode: send raw_override_base64 (same for all phases)
-      try {
+    setIsActionInFlight(true);
+    try {
+      if (detailViewMode === "raw") {
+        // Raw mode: send raw_override_base64 (same for all phases)
         await interceptAction({
           action: "modify_and_forward",
           params: {
@@ -156,81 +169,82 @@ export function InterceptPage() {
           },
         });
         addToast({ type: "success", message: `${phaseLabel(phase)} modified (raw) and forwarded` });
-        setSelectedId(null);
-        refetchQueue();
-      } catch (err) {
-        addToast({
-          type: "error",
-          message: `Modify & Forward failed: ${err instanceof Error ? err.message : String(err)}`,
-        });
-      }
-      return;
-    }
-
-    // Structured mode: phase-specific parameters
-    try {
-      if (phase === "websocket_frame") {
-        await interceptAction({
-          action: "modify_and_forward",
-          params: {
-            intercept_id: selectedId,
-            override_body: editBody,
-          },
-        });
-      } else if (phase === "response") {
-        await interceptAction({
-          action: "modify_and_forward",
-          params: {
-            intercept_id: selectedId,
-            override_status: editStatusCode,
-            override_response_headers: mergeHeaders(editHeaders),
-            override_response_body: editBody,
-          },
-        });
       } else {
-        // Request phase
-        await interceptAction({
-          action: "modify_and_forward",
-          params: {
-            intercept_id: selectedId,
-            override_method: editMethod,
-            override_url: editUrl,
-            override_headers: mergeHeaders(editHeaders),
-            override_body: editBody,
-          },
-        });
+        // Structured mode: phase-specific parameters
+        if (phase === "websocket_frame") {
+          await interceptAction({
+            action: "modify_and_forward",
+            params: {
+              intercept_id: selectedId,
+              override_body: editBody,
+            },
+          });
+        } else if (phase === "response") {
+          await interceptAction({
+            action: "modify_and_forward",
+            params: {
+              intercept_id: selectedId,
+              override_status: editStatusCode,
+              override_response_headers: mergeHeaders(editHeaders),
+              override_response_body: editBody,
+            },
+          });
+        } else {
+          // Request phase
+          await interceptAction({
+            action: "modify_and_forward",
+            params: {
+              intercept_id: selectedId,
+              override_method: editMethod,
+              override_url: editUrl,
+              override_headers: mergeHeaders(editHeaders),
+              override_body: editBody,
+            },
+          });
+        }
+        addToast({ type: "success", message: `${phaseLabel(phase)} modified and forwarded` });
       }
 
-      addToast({ type: "success", message: `${phaseLabel(phase)} modified and forwarded` });
+      // Await the refetch BEFORE clearing selectedId so the detail panel
+      // does not render a stale (already-forwarded) entry between the
+      // mutation completing and the queue polling catching up.
+      await refetchQueue();
       setSelectedId(null);
-      refetchQueue();
     } catch (err) {
       addToast({
         type: "error",
         message: `Modify & Forward failed: ${err instanceof Error ? err.message : String(err)}`,
       });
+    } finally {
+      setIsActionInFlight(false);
     }
-  }, [selectedId, selectedEntry, detailViewMode, editMethod, editUrl, editHeaders, editBody, editStatusCode, editRawBytes, interceptAction, addToast, refetchQueue]);
+  }, [selectedId, isActionInFlight, selectedEntry, detailViewMode, editMethod, editUrl, editHeaders, editBody, editStatusCode, editRawBytes, interceptAction, addToast, refetchQueue]);
 
   // Drop: discard entry
   const handleDrop = useCallback(async () => {
-    if (!selectedId) return;
+    if (!selectedId || isActionInFlight) return;
     const phase = selectedEntry ? resolvePhase(selectedEntry) : "request";
+    setIsActionInFlight(true);
     try {
       await interceptAction({
         action: "drop",
         params: { intercept_id: selectedId },
       });
       addToast({ type: "warning", message: `${phaseLabel(phase)} dropped` });
+      // Await the refetch BEFORE clearing selectedId so the detail panel
+      // does not render a stale (already-dropped) entry between the
+      // mutation completing and the queue polling catching up.
+      await refetchQueue();
       setSelectedId(null);
-      refetchQueue();
     } catch (err) {
       addToast({
         type: "error",
         message: `Drop failed: ${err instanceof Error ? err.message : String(err)}`,
       });
+    } finally {
+      setIsActionInFlight(false);
     }
-  }, [selectedId, selectedEntry, interceptAction, addToast, refetchQueue]);
+  }, [selectedId, isActionInFlight, selectedEntry, interceptAction, addToast, refetchQueue]);
 
   const hasRawBytes = selectedEntry?.raw_bytes_available ?? false;
   const selectedPhase = selectedEntry ? resolvePhase(selectedEntry) : "request";
@@ -295,7 +309,7 @@ export function InterceptPage() {
                 variant="primary"
                 size="sm"
                 onClick={handleRelease}
-                disabled={executeLoading}
+                disabled={executeLoading || isActionInFlight}
               >
                 Release
               </Button>
@@ -303,7 +317,7 @@ export function InterceptPage() {
                 variant="secondary"
                 size="sm"
                 onClick={handleModifyAndForward}
-                disabled={executeLoading}
+                disabled={executeLoading || isActionInFlight}
               >
                 Modify & Forward
               </Button>
@@ -311,7 +325,7 @@ export function InterceptPage() {
                 variant="danger"
                 size="sm"
                 onClick={handleDrop}
-                disabled={executeLoading}
+                disabled={executeLoading || isActionInFlight}
               >
                 Drop
               </Button>
