@@ -11,6 +11,8 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"net"
+	"net/url"
 	"strings"
 
 	"github.com/google/uuid"
@@ -165,13 +167,19 @@ func (c *UpstreamProxyConfig) UnmarshalJSON(data []byte) error {
 // the macro engine + scheme whitelist locally to avoid pulling in
 // internal/connector at config-time (which would create an import
 // cycle: connector → config → connector).
+//
+// The KV provided here must match the runtime resolver's KV exactly
+// (`internal/connector/upstream_proxy_rotation.go`), otherwise a
+// template that probes clean here can still fail at first live dial
+// (Stage 2). The live resolver populates only `__nonce`; do not add
+// `__iteration` or any other key — `§__iteration§` is intentionally
+// not exposed on the live data path (USK-959 binding decision #7).
 func probeExpandTemplate(tpl string) error {
 	if tpl == "" {
 		return fmt.Errorf("url_template is empty")
 	}
 	kv := map[string]string{
-		macro.ReservedKeyPrefix + "nonce":     uuid.NewString(),
-		macro.ReservedKeyPrefix + "iteration": "0",
+		macro.ReservedKeyPrefix + "nonce": uuid.NewString(),
 	}
 	expanded, err := macro.ExpandTemplate(tpl, kv)
 	if err != nil {
@@ -183,9 +191,30 @@ func probeExpandTemplate(tpl string) error {
 	// Lightweight scheme + host:port check; the canonical parse lives
 	// in connector.ParseUpstreamProxy which the live dial path calls
 	// per request. We do not depend on that package here to avoid the
-	// import cycle described above.
+	// import cycle described above, but the checks below mirror what
+	// ParseUpstreamProxy does so that any input that probes clean here
+	// will also pass the runtime parse — Stage 1 / Stage 2 parity.
 	if !strings.HasPrefix(expanded, "http://") && !strings.HasPrefix(expanded, "socks5://") {
 		return fmt.Errorf("expanded URL must use scheme http:// or socks5://")
+	}
+	u, err := url.Parse(expanded)
+	if err != nil {
+		// e.g. an unsubstituted §-macro left in the URL — the section
+		// sign is rejected by url.Parse as invalid userinfo. Surfacing
+		// it here means the operator sees the error at config-apply
+		// time rather than at the first live dial (Stage 2 fail-closed
+		// also catches it, but later).
+		return fmt.Errorf("parse expanded URL: %w", err)
+	}
+	if u.Host == "" {
+		return fmt.Errorf("expanded URL has no host")
+	}
+	host, port, err := net.SplitHostPort(u.Host)
+	if err != nil {
+		return fmt.Errorf("expanded URL must include a port (e.g. %s://host:port)", u.Scheme)
+	}
+	if host == "" || port == "" {
+		return fmt.Errorf("expanded URL has empty host or port")
 	}
 	return nil
 }

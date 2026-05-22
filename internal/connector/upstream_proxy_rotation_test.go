@@ -193,6 +193,47 @@ func TestRedactProxyURL_OnTemplate(t *testing.T) {
 	}
 }
 
+// TestRedactProxyURL_NoPasswordMasksWholeUserinfo verifies that
+// RedactProxyURL masks the entire userinfo region when no ":password"
+// colon is present — a bare token in userinfo (e.g. session id, API
+// key) is itself a credential and must not leak to status surfaces
+// (CWE-200). Covers both the url.Parse path (plain URL) and the
+// lexical fallback (§-template URL).
+func TestRedactProxyURL_NoPasswordMasksWholeUserinfo(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "url_parse_path_no_colon",
+			in:   "http://session-token@proxy.example:8080",
+			want: "http://xxxxx@proxy.example:8080",
+		},
+		{
+			name: "lexical_fallback_no_colon",
+			in:   "http://session-§__nonce§@proxy.example:8080",
+			want: "http://xxxxx@proxy.example:8080",
+		},
+		{
+			name: "lexical_fallback_with_colon_preserves_username",
+			in:   "http://user-§__nonce§:secret@proxy.example:8080",
+			want: "http://user-§__nonce§:xxxxx@proxy.example:8080",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := RedactProxyURL(tc.in)
+			if got != tc.want {
+				t.Errorf("RedactProxyURL(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+			if strings.Contains(got, "session-token") || strings.Contains(got, "secret") {
+				t.Errorf("RedactProxyURL leaked credential: %q", got)
+			}
+		})
+	}
+}
+
 // TestRotationResolver_NilReturnsNil confirms the nil-receiver branch
 // returns (nil, nil) so callers can safely Resolve on a missing
 // resolver without nil panics.

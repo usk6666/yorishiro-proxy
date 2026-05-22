@@ -570,15 +570,11 @@ func TestLiveProxy_PerConnectionRotation_DistinctAcrossClients(t *testing.T) {
 		t.Fatalf("CONNECT proxy saw %d tunnels, want %d", len(auths), clientCount)
 	}
 	seen := make(map[string]struct{})
-	for i, a := range auths {
+	for _, a := range auths {
 		user := decodeBasicUser(t, a)
 		seen[user] = struct{}{}
-		_ = i
 	}
 	if len(seen) != clientCount {
 		t.Errorf("per_connection across clients: distinct count = %d, want %d", len(seen), clientCount)
 	}
 }
-
-// To keep go vet happy when this file builds standalone.
-var _ = atomic.AddInt32

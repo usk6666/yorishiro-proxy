@@ -54,21 +54,28 @@ func ParseUpstreamProxy(rawURL string) (*url.URL, error) {
 	return u, nil
 }
 
-// RedactProxyURL returns a copy of the raw proxy URL string with the password
-// portion of userinfo replaced by "xxxxx". If the URL cannot be parsed and
-// contains userinfo characters, the userinfo region (text between "://" and
-// "@") is redacted via lexical substring replacement. If the URL has no
-// userinfo or no password, it is returned unchanged.
+// RedactProxyURL returns a copy of the raw proxy URL string with the
+// credential portion of userinfo replaced by "xxxxx". When a ":password"
+// is present, the username remains visible and only the password is
+// masked. When no ":" is present in userinfo (the entire token is a
+// single secret — e.g. an API key or session token), the WHOLE userinfo
+// region is masked so it does not leak to status surfaces (CWE-200). If
+// the URL cannot be parsed (e.g. contains §macro§ characters that
+// url.Parse rejects), the same rule is applied via lexical substring
+// replacement. If the URL has no userinfo, it is returned unchanged.
 //
-// The lexical fallback exists for USK-959 templates: a §__nonce§ macro in
-// the userinfo position breaks url.Parse (the section sign is not valid
-// userinfo), so without this branch a template like
+// The lexical fallback exists for USK-959 templates: a §__nonce§ macro
+// in the userinfo position breaks url.Parse (the section sign is not
+// valid userinfo), so without this branch a template like
 //
 //	http://session-§__nonce§:secret-pass@proxy.example:8080
 //
-// would leak the literal password to the status surface. The lexical path
-// preserves the URL shape (scheme + ://, host:port) while wiping anything
-// between "://" and the FIRST "@" that precedes the host.
+// would leak the literal password to the status surface. The lexical
+// path preserves the URL shape (scheme + ://, host:port) while wiping
+// the userinfo region — the bounds are "://" .. the FIRST "@" after
+// the scheme delimiter, which is the userinfo / host boundary per
+// RFC 3986. (A literal "@" inside a percent-encoded password would
+// appear as "%40" and not match here.)
 func RedactProxyURL(rawURL string) string {
 	if rawURL == "" {
 		return ""
@@ -78,16 +85,22 @@ func RedactProxyURL(rawURL string) string {
 			return rawURL
 		}
 		if _, hasPassword := u.User.Password(); !hasPassword {
-			return rawURL
+			// Single-token userinfo (no ":password" colon) — mask the
+			// whole thing. A bare username may itself be a session
+			// token / API key, so leaving it visible would leak the
+			// credential (CWE-200). url.User emits "<name>@host" with
+			// no ":", preserving the no-password shape of the input.
+			u.User = url.User("xxxxx")
+			return u.String()
 		}
 		u.User = url.UserPassword(u.User.Username(), "xxxxx")
 		return u.String()
 	}
 	// Fallback: lexical redact of userinfo region. Bounded by the
-	// FIRST '@' after the scheme delimiter so we do not consume past
-	// the host segment if the password contains an '@' (unusual but
-	// possible). The redacted form keeps the same shape so callers
-	// can see scheme + host:port without exposing credentials.
+	// FIRST '@' after the scheme delimiter — that delimiter marks the
+	// userinfo / host boundary per RFC 3986. The redacted form keeps
+	// the same shape so callers can see scheme + host:port without
+	// exposing credentials.
 	schemeIdx := strings.Index(rawURL, "://")
 	if schemeIdx < 0 {
 		return rawURL
@@ -98,12 +111,13 @@ func RedactProxyURL(rawURL string) string {
 		return rawURL
 	}
 	atIdx += userinfoStart
-	// Within userinfo, redact only the password half (after ":") if
-	// present so the username remains visible for diagnostics.
+	// Within userinfo, redact the password half (after ":") if present
+	// so the username remains visible for diagnostics. When no ":" is
+	// present, redact the entire userinfo region — a bare token in
+	// userinfo is itself a credential (CWE-200).
 	colonIdx := strings.Index(rawURL[userinfoStart:atIdx], ":")
 	if colonIdx < 0 {
-		// No password — leave untouched.
-		return rawURL
+		return rawURL[:userinfoStart] + "xxxxx" + rawURL[atIdx:]
 	}
 	colonIdx += userinfoStart
 	return rawURL[:colonIdx+1] + "xxxxx" + rawURL[atIdx:]

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"sync"
 	"time"
 
@@ -584,9 +585,23 @@ func (m *Manager) SetUpstreamProxyForListener(name, proxyURL string) {
 	if name == "" {
 		name = DefaultListenerName
 	}
+	// Parse outside the lock so a malformed URL does not deadlock under
+	// m.mu — the result is consumed inside the critical section below.
+	var parsed *url.URL
+	var parseErr error
+	if proxyURL != "" {
+		parsed, parseErr = connector.ParseUpstreamProxy(proxyURL)
+	}
+
 	m.mu.Lock()
 	if proxyURL == "" {
 		delete(m.upstreamProxyPerListener, name)
+		// USK-959 (F-4): an empty proxyURL means "no upstream proxy of
+		// any flavour for this listener" — clear the rotation slot too
+		// so the setter is symmetric with the non-empty branch (which
+		// already clears rotation). Without this, calling the setter
+		// with "" would leave an orphan resolver active.
+		delete(m.upstreamProxyRotationPerListener, name)
 	} else {
 		if m.upstreamProxyPerListener == nil {
 			m.upstreamProxyPerListener = make(map[string]string)
@@ -604,27 +619,37 @@ func (m *Manager) SetUpstreamProxyForListener(name, proxyURL string) {
 		m.upstreamProxy = proxyURL
 	}
 	bc := m.buildCfg
+	// USK-959 (S-2 / CWE-362): perform BuildConfig writes under m.mu so
+	// the manager-status mutations above and the BuildConfig mutations
+	// below form one atomic critical section. Without this, two
+	// configure_tool calls racing on the same listener could observe
+	// (status says rotation X, bc has rotation Y) for a brief window.
+	// Lock ordering is m.mu → bc.upstreamProxyPerListenerMu /
+	// bc.rotationByListenerMu; no reader of those bc muxes acquires
+	// m.mu, so this is safe.
+	if bc != nil {
+		if proxyURL == "" {
+			bc.SetUpstreamProxyForListener(name, nil)
+			bc.SetRotationForListener(name, nil)
+		} else {
+			// Clear any stale rotation first so the new literal URL is
+			// the only thing the dial path consults.
+			bc.SetRotationForListener(name, nil)
+			if parseErr == nil {
+				bc.SetUpstreamProxyForListener(name, parsed)
+			}
+		}
+	}
 	m.mu.Unlock()
-	if bc != nil && proxyURL != "" {
-		// Also clear the resolver in BuildConfig so the new literal URL
-		// is consulted instead of any stale resolver.
-		bc.SetRotationForListener(name, nil)
-	}
 
-	if bc == nil {
-		return
-	}
-	if proxyURL == "" {
-		bc.SetUpstreamProxyForListener(name, nil)
-		return
-	}
-	parsed, err := connector.ParseUpstreamProxy(proxyURL)
-	if err != nil {
+	// Logging happens after releasing m.mu so a slow log sink cannot
+	// stall other manager callers. parseErr captures the malformed-URL
+	// case where status was still updated but the live dial path stays
+	// on the previous URL (the per-listener slot is not overwritten).
+	if proxyURL != "" && parseErr != nil {
 		m.logger.Warn("upstream proxy URL not applied to live dial path",
-			"listener", name, "url", connector.RedactProxyURL(proxyURL), "error", err)
-		return
+			"listener", name, "url", connector.RedactProxyURL(proxyURL), "error", parseErr)
 	}
-	bc.SetUpstreamProxyForListener(name, parsed)
 }
 
 // ClearUpstreamProxyForListener removes the named listener's per-listener

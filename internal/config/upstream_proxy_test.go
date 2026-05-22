@@ -57,6 +57,26 @@ func TestUpstreamProxyConfig_Validate_RotationProbeRejectsMalformed(t *testing.T
 	}
 }
 
+// TestUpstreamProxyConfig_Validate_RotationProbeRejectsIterationMacro
+// verifies Stage 1 / Stage 2 KV parity: §__iteration§ is NOT exposed on
+// the live data path (the runtime resolver populates only §__nonce§),
+// so a template referencing §__iteration§ must be rejected at
+// config-apply time rather than passing the probe and then failing at
+// the first live dial. Locks in the USK-959 review fix (F-2).
+func TestUpstreamProxyConfig_Validate_RotationProbeRejectsIterationMacro(t *testing.T) {
+	c := &UpstreamProxyConfig{
+		URLTemplate: "http://session-§__iteration§@proxy.example:8080",
+		Rotation:    &UpstreamProxyRotation{Policy: "per_request"},
+	}
+	err := c.Validate()
+	if err == nil {
+		t.Fatalf("expected probe to reject §__iteration§ template at config time")
+	}
+	if !strings.Contains(err.Error(), "url_template") {
+		t.Errorf("error missing user-facing prefix: %v", err)
+	}
+}
+
 // TestUpstreamProxyConfig_Validate_URLAndTemplateMutuallyExclusive
 // verifies the URL ⊕ URLTemplate guard.
 func TestUpstreamProxyConfig_Validate_URLAndTemplateMutuallyExclusive(t *testing.T) {
