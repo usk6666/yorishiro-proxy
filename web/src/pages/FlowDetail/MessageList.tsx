@@ -238,7 +238,10 @@ export function MessageList({
               key={expandedMessage.id}
               body={expandedMessage.body}
               encoding={expandedMessage.body_encoding}
-              truncated={false}
+              truncated={
+                (expandedMessage.body_truncated ?? false) ||
+                (expandedMessage.body_truncated_by_query ?? false)
+              }
               headers={expandedMessage.headers}
               bodyDecoded={expandedMessage.body_decoded}
               bodyDecodedEncoding={expandedMessage.body_decoded_encoding}

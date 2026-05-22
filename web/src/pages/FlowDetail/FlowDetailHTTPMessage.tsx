@@ -150,7 +150,7 @@ export function FlowDetailHTTPMessage({ flow }: FlowDetailHTTPMessageProps) {
                     key={`${flow.id}-original-request`}
                     body={flow.original_request.body}
                     encoding={flow.original_request.body_encoding}
-                    truncated={false}
+                    truncated={flow.original_request.body_truncated ?? false}
                     headers={flow.original_request.headers}
                     bodyDecoded={flow.original_request.body_decoded}
                     bodyDecodedEncoding={flow.original_request.body_decoded_encoding}

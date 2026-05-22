@@ -1104,11 +1104,17 @@ type queryDecodeAnomaly struct {
 
 // queryVariantRequest represents the original request before intercept/transform modification.
 type queryVariantRequest struct {
-	Method              string              `json:"method"`
-	URL                 string              `json:"url"`
-	Headers             map[string][]string `json:"headers"`
-	Body                string              `json:"body"`
-	BodyEncoding        string              `json:"body_encoding"`
+	Method       string              `json:"method"`
+	URL          string              `json:"url"`
+	Headers      map[string][]string `json:"headers"`
+	Body         string              `json:"body"`
+	BodyEncoding string              `json:"body_encoding"`
+	// BodyTruncated mirrors Flow.BodyTruncated for the original send message —
+	// set at record time when the pipeline RecordStep cap fired. Symmetric with
+	// queryVariantResponse.BodyTruncated so the UI can render the modified-vs-
+	// original diff without dropping the request-side truncation signal
+	// (USK-965).
+	BodyTruncated       bool                `json:"body_truncated"`
 	BodyDecoded         string              `json:"body_decoded,omitempty"`
 	BodyDecodedEncoding string              `json:"body_decoded_encoding,omitempty"`
 	BodyEncodingApplied string              `json:"body_encoding_applied,omitempty"`
@@ -1504,9 +1510,10 @@ func (s *Server) buildOriginalRequest(originalMsg *flow.Flow, decodeEnabled bool
 		origURLStr = originalMsg.URL.String()
 	}
 	v := &queryVariantRequest{
-		Method:  originalMsg.Method,
-		URL:     origURLStr,
-		Headers: originalMsg.Headers,
+		Method:        originalMsg.Method,
+		URL:           origURLStr,
+		Headers:       originalMsg.Headers,
+		BodyTruncated: originalMsg.BodyTruncated,
 	}
 	if !limit.includeBodies {
 		// Bodies suppressed; leave Body / BodyEncoding / Body*Decoded zero.
