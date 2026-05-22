@@ -1,5 +1,5 @@
 import { useCallback, useState } from "react";
-import { Badge, Button, Input, useToast } from "../../components/ui/index.js";
+import { Badge, Button, Input, useDialog, useToast } from "../../components/ui/index.js";
 import { useProxyControl } from "../../lib/mcp/hooks.js";
 import type { ConfigResult, ForwardConfig, ForwardProtocol } from "../../lib/mcp/types.js";
 
@@ -21,6 +21,7 @@ const PROTOCOL_OPTIONS = ["auto", "raw", "http", "http2", "grpc", "websocket", "
  */
 export function TcpForwards({ config, onRefresh }: TcpForwardsProps) {
   const { addToast } = useToast();
+  const { showDialog } = useDialog();
   const { start, loading } = useProxyControl();
 
   // Form state for adding a new mapping
@@ -83,6 +84,18 @@ export function TcpForwards({ config, onRefresh }: TcpForwardsProps) {
     // Build new forwards map: existing + new entry
     const newForwards: Record<string, ForwardConfig> = { ...forwards, [port]: newEntry };
 
+    const confirmed = await showDialog({
+      title: "Apply TCP Forward",
+      message:
+        "Applying TCP forward changes calls proxy_start, which resets all " +
+        "in-session settings on the listener (intercept rules, transform rules, " +
+        "capture scope, TLS fingerprint, connection limits) and may interrupt " +
+        "in-flight connections on that listener. Continue?",
+      variant: "confirm",
+      confirmLabel: "Apply",
+    });
+    if (!confirmed) return;
+
     try {
       await start({
         tcp_forwards: newForwards,
@@ -105,7 +118,7 @@ export function TcpForwards({ config, onRefresh }: TcpForwardsProps) {
         message: `Failed to add TCP forward: ${err instanceof Error ? err.message : String(err)}`,
       });
     }
-  }, [localPort, upstreamHost, upstreamPort, protocol, tlsEnabled, upstreamTlsEnabled, forwards, start, addToast, onRefresh]);
+  }, [localPort, upstreamHost, upstreamPort, protocol, tlsEnabled, upstreamTlsEnabled, forwards, start, addToast, onRefresh, showDialog]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
@@ -153,9 +166,12 @@ export function TcpForwards({ config, onRefresh }: TcpForwardsProps) {
             parsing applied based on the configured protocol hint.
           </p>
           <p className="settings-section-desc">
-            TCP forwards are configured when starting a new listener. Adding a forward
-            restarts the proxy with the updated mappings. To remove a forward, restart
-            the proxy with the desired configuration.
+            TCP forwards are listener start-time configuration. Adding a forward calls
+            proxy_start with the updated mapping set, which resets the listener's
+            in-session settings (intercept rules, transform rules, capture scope,
+            TLS fingerprint, connection limits) and may interrupt in-flight connections
+            on that listener. To remove a forward, restart the proxy with the desired
+            configuration.
           </p>
 
           {/* Add mapping form */}
