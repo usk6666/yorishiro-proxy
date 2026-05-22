@@ -837,11 +837,34 @@ export interface MacrosResult {
  */
 export type ExtractionFrom = "request" | "response";
 
+/**
+ * Which part of the message a macro extraction rule reads from.
+ *
+ * Mirrors `ExtractionSource` in `internal/macro/types.go`. Closed set —
+ * extending the backend requires extending this union and the
+ * `EXTRACTION_SOURCE_OPTIONS` array in `MacroDetailPage.tsx`.
+ */
+export type ExtractionSource =
+  | "header"
+  | "body"
+  | "body_json"
+  | "status"
+  | "url";
+
+/**
+ * How the macro engine reacts when a step fails.
+ *
+ * Mirrors `OnError` in `internal/macro/types.go`. Closed set —
+ * extending the backend requires extending this union and the
+ * `ON_ERROR_OPTIONS` array in `MacroDetailPage.tsx`.
+ */
+export type OnError = "abort" | "skip" | "retry";
+
 /** Extraction rule in a macro step. */
 export interface ExtractionRule {
   name: string;
   from: ExtractionFrom;
-  source: string;
+  source: ExtractionSource;
   header_name?: string;
   regex?: string;
   group?: number;
@@ -869,7 +892,7 @@ export interface MacroStep {
   override_url?: string;
   override_headers?: Record<string, string>;
   override_body?: string | null;
-  on_error?: string;
+  on_error?: OnError;
   retry_count?: number;
   retry_delay_ms?: number;
   timeout_ms?: number;

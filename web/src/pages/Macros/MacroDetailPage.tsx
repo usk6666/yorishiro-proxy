@@ -11,11 +11,13 @@ import { useMacro, useQuery } from "../../lib/mcp/hooks.js";
 import type {
   ExtractionFrom,
   ExtractionRule,
+  ExtractionSource,
   GuardCondition,
   MacroDefineResult,
   MacroRunResult,
   MacroStep,
   MacroStepResult,
+  OnError,
 } from "../../lib/mcp/types.js";
 import "./MacroDetailPage.css";
 
@@ -28,7 +30,7 @@ const TABS = [
   { id: "run", label: "Run & Results" },
 ];
 
-const ON_ERROR_OPTIONS = [
+const ON_ERROR_OPTIONS: readonly { value: OnError; label: string }[] = [
   { value: "abort", label: "Abort" },
   { value: "skip", label: "Skip" },
   { value: "retry", label: "Retry" },
@@ -39,7 +41,7 @@ const EXTRACTION_FROM_OPTIONS: readonly { value: ExtractionFrom; label: string }
   { value: "response", label: "Response" },
 ];
 
-const EXTRACTION_SOURCE_OPTIONS = [
+const EXTRACTION_SOURCE_OPTIONS: readonly { value: ExtractionSource; label: string }[] = [
   { value: "header", label: "Header" },
   { value: "body", label: "Body (regex)" },
   { value: "body_json", label: "Body (JSON Path)" },
@@ -67,7 +69,7 @@ interface StepFormEntry {
   overrideUrl: string;
   overrideHeaders: KVEntry[];
   overrideBody: string;
-  onError: string;
+  onError: OnError;
   retryCount: string;
   retryDelayMs: string;
   timeoutMs: string;
@@ -81,7 +83,7 @@ interface ExtractionFormEntry {
   key: string;
   name: string;
   from: ExtractionFrom;
-  source: string;
+  source: ExtractionSource;
   headerName: string;
   regex: string;
   group: string;
@@ -976,7 +978,7 @@ function StepEditor({
                 <select
                   className="macro-select"
                   value={step.onError}
-                  onChange={(e) => onUpdate({ onError: e.target.value })}
+                  onChange={(e) => onUpdate({ onError: e.target.value as OnError })}
                 >
                   {ON_ERROR_OPTIONS.map((o) => (
                     <option key={o.value} value={o.value}>
@@ -1071,7 +1073,7 @@ function StepEditor({
                       className="macro-select"
                       value={ext.source}
                       onChange={(e) =>
-                        updateExtraction(ext.key, { source: e.target.value })
+                        updateExtraction(ext.key, { source: e.target.value as ExtractionSource })
                       }
                     >
                       {EXTRACTION_SOURCE_OPTIONS.map((o) => (
