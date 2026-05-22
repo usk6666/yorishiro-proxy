@@ -129,6 +129,9 @@ export function SafetyFilter() {
           <Badge variant="info">{data.input_rules.length}</Badge>
         </div>
         <div className="security-card-body">
+          <p className="security-section-desc">
+            Blocks Send-direction payloads on the live wire before they reach the upstream server. Recommended presets: <code>destructive-sql</code>, <code>destructive-os-command</code>.
+          </p>
           <SafetyFilterRuleTable rules={data.input_rules} />
         </div>
       </div>
@@ -139,6 +142,9 @@ export function SafetyFilter() {
           <Badge variant="info">{data.output_rules.length}</Badge>
         </div>
         <div className="security-card-body">
+          <p className="security-section-desc">
+            Masks sensitive bytes only when an MCP tool returns a recorded flow to the AI agent. The wire copy delivered to the DB, browser, and next hop is never modified. Recommended presets: <code>credit-card</code>, <code>japan-my-number</code>.
+          </p>
           <SafetyFilterRuleTable rules={data.output_rules} showReplacement />
         </div>
       </div>
