@@ -46,7 +46,6 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/usk6666/yorishiro-proxy/internal/connector"
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/http1"
@@ -123,86 +122,11 @@ func validateFuzzHTTPInput(input *fuzzHTTPInput) error {
 			return fmt.Errorf("positions cartesian product exceeds %d variants (computed at position %d); reduce payload counts or split into multiple calls", maxFuzzHTTPVariants, i)
 		}
 	}
-	if err := validateFuzzHTTPMacroConfig("pre_macro", input.PreMacro, true); err != nil {
+	if err := ValidateMacroConfig("pre_macro", input.PreMacro, true); err != nil {
 		return err
 	}
-	if err := validateFuzzHTTPMacroConfig("post_macro", input.PostMacro, false); err != nil {
+	if err := ValidateMacroConfig("post_macro", input.PostMacro, false); err != nil {
 		return err
-	}
-	return nil
-}
-
-// validateFuzzHTTPMacroConfig validates one pre/post macro hook config.
-// scope="iteration" (default) and scope="job" are both accepted (USK-961).
-//
-// macro-name lookup is intentionally deferred to runtime — checking the
-// stored macros table here would require an extra DB roundtrip for every
-// fuzz_http call. Runtime invocation surfaces the missing-macro error via
-// loadAndBuildMacroDeps and short-circuits the iteration per the OnError
-// policy.
-//
-// USK-981: when RunInterval is non-empty, the pre/post legal set is
-// enforced via validatePreMacroHook / validatePostMacroHook so the
-// directional asymmetry (e.g. on_status is post-only) is surfaced at
-// MCP-tool input parse rather than at hook dispatch. scope="job" +
-// non-empty RunInterval is rejected verbatim per Q10 — scope="job"
-// hooks fire exactly once by construction (the call site, not the
-// RunInterval engine knob, owns the single-fire guarantee).
-func validateFuzzHTTPMacroConfig(label string, cfg *fuzzHTTPMacroConfig, isPre bool) error {
-	if cfg == nil {
-		return nil
-	}
-	if cfg.Name == "" {
-		return fmt.Errorf("%s: name is required", label)
-	}
-	scope := cfg.Scope
-	if scope == "" {
-		scope = "iteration"
-	}
-	switch scope {
-	case "iteration", "job":
-	default:
-		return fmt.Errorf("%s: invalid scope %q (must be iteration or job)", label, scope)
-	}
-	switch cfg.OnError {
-	case "", "skip", "abort", "continue":
-	default:
-		return fmt.Errorf("%s: invalid on_error %q (must be skip, abort, or continue)", label, cfg.OnError)
-	}
-	// USK-981 Q10: scope="job" + non-empty RunInterval is structurally
-	// meaningless — scope="job" hooks fire exactly once via the call
-	// site, not via the RunInterval engine knob. Reject at MCP-tool
-	// input parse with the documented verbatim message.
-	if scope == "job" && cfg.RunInterval != "" {
-		return fmt.Errorf("%s: run_interval is only valid for scope=iteration; for scope=job the hook fires exactly once", label)
-	}
-	// USK-981 Q7 + Q12: when RunInterval is non-empty AND scope is
-	// "iteration", delegate to the polarity-specific hooks.go validator
-	// so the disjoint pre/post legal sets are enforced. We construct a
-	// transient hookConfig because validatePreMacroHook /
-	// validatePostMacroHook already implement the disjoint-set + N /
-	// StatusCodes / MatchPattern cross-field rules.
-	if cfg.RunInterval != "" || cfg.N != 0 || len(cfg.StatusCodes) > 0 || cfg.MatchPattern != "" {
-		h := &hookConfig{
-			Macro:        cfg.Name,
-			RunInterval:  cfg.RunInterval,
-			N:            cfg.N,
-			StatusCodes:  cfg.StatusCodes,
-			MatchPattern: cfg.MatchPattern,
-		}
-		var herr error
-		if isPre {
-			herr = validatePreMacroHook(h)
-		} else {
-			herr = validatePostMacroHook(h)
-		}
-		if herr != nil {
-			return fmt.Errorf("%s: %w", label, herr)
-		}
-		// Carry the compiled regex back so the hook executor reuses it
-		// rather than recompiling on every iteration (matches the
-		// validatePostMacroHook precedent for hooksInput callers).
-		cfg.compiledPattern = h.compiledPattern
 	}
 	return nil
 }
@@ -345,14 +269,14 @@ func (s *Server) buildFuzzHTTPPlan(ctx context.Context, input *fuzzHTTPInput) (*
 // and the for-variant loop; post-job runs after the loop body exits
 // (including the stop_on_5xx terminal path, but NOT on ctx cancel or
 // pre-job abort).
-func (s *Server) runFuzzHTTPVariants(ctx context.Context, plan *fuzzHTTPPlan, timeout time.Duration, stopOn5xx bool, tag, fuzzID string, upstreamProxy *UpstreamProxyConfig, preMacro, postMacro *fuzzHTTPMacroConfig) ([]fuzzHTTPVariantRow, int, string, error) {
+func (s *Server) runFuzzHTTPVariants(ctx context.Context, plan *fuzzHTTPPlan, timeout time.Duration, stopOn5xx bool, tag, fuzzID string, upstreamProxy *UpstreamProxyConfig, preMacro, postMacro *MacroConfig) ([]fuzzHTTPVariantRow, int, string, error) {
 	loop := buildFuzzHTTPVariantLoop(s, plan, timeout, stopOn5xx, tag, fuzzID, upstreamProxy, preMacro, postMacro)
 
 	// USK-961 pre-job: fire once before the variant loop. Abort short-
 	// circuits the whole job; skip returns success with stopped_reason;
 	// continue records the error and proceeds with whatever jobKVStore
 	// captured.
-	if isJobScope(preMacro) {
+	if IsJobScope(preMacro) {
 		jobAction, stopReason, retErr := loop.runPreJobMacro(ctx)
 		if retErr != nil {
 			return loop.rows, loop.completed, "", retErr
@@ -371,7 +295,7 @@ func (s *Server) runFuzzHTTPVariants(ctx context.Context, plan *fuzzHTTPPlan, ti
 	// post-job fires on natural exhaustion or stop_on_5xx exit, but NOT
 	// on ctx cancel. completedNormally captures "we reached the
 	// post-job firing path through a non-cancel exit".
-	if completedNormally && isJobScope(postMacro) {
+	if completedNormally && IsJobScope(postMacro) {
 		loop.runPostJobMacro(ctx)
 	}
 
@@ -382,7 +306,7 @@ func (s *Server) runFuzzHTTPVariants(ctx context.Context, plan *fuzzHTTPPlan, ti
 // by all variants. Split out of runFuzzHTTPVariants to keep that function
 // below the gocyclo threshold; the construction logic is mechanical and
 // has no branch fan-out outside the hook-config assembly.
-func buildFuzzHTTPVariantLoop(s *Server, plan *fuzzHTTPPlan, timeout time.Duration, stopOn5xx bool, tag, fuzzID string, upstreamProxy *UpstreamProxyConfig, preMacro, postMacro *fuzzHTTPMacroConfig) *fuzzHTTPVariantLoop {
+func buildFuzzHTTPVariantLoop(s *Server, plan *fuzzHTTPPlan, timeout time.Duration, stopOn5xx bool, tag, fuzzID string, upstreamProxy *UpstreamProxyConfig, preMacro, postMacro *MacroConfig) *fuzzHTTPVariantLoop {
 	loop := &fuzzHTTPVariantLoop{
 		s:             s,
 		plan:          plan,
@@ -409,120 +333,13 @@ func buildFuzzHTTPVariantLoop(s *Server, plan *fuzzHTTPPlan, timeout time.Durati
 	}
 	loop.rateLimitHost = rateLimitHost
 
-	loop.hookExec = buildIterationHookExecutor(s, preMacro, postMacro)
-	loop.jobHookExec, loop.jobKVStore = buildJobHookExecutor(s, preMacro, postMacro)
+	loop.hookExec = BuildIterationHookExecutor(s, preMacro, postMacro)
+	loop.jobHookExec, loop.jobKVStore = BuildJobHookExecutor(s, preMacro, postMacro)
 
 	loop.rows = make([]fuzzHTTPVariantRow, 0, plan.totalVariants)
 	loop.indices = make([]int, len(plan.positions))
 
 	return loop
-}
-
-// buildIterationHookExecutor returns the hookExecutor used by the
-// per-iteration call sites. It is always non-nil so the gating logic in
-// runOne can dispatch via the executor; when no hook is configured, the
-// executor is a no-op shell.
-//
-// USK-981: iteration-scope hooks thread the user-supplied RunInterval /
-// N / StatusCodes / MatchPattern / compiledPattern into the underlying
-// hookConfig so the engine's shouldRunPreMacro / shouldRunPostMacro
-// gates (always / once / every_n / on_status / on_match) become
-// user-configurable. Empty RunInterval defaults to "always" — the same
-// as the no-knob path. Vars is intentionally NOT mirrored onto the
-// hookConfig.Vars field because fuzz_http's injection contract is
-// "Vars seeds the per-iteration kvStore at iteration start" (see
-// prepareIteration), which fires unconditionally on every iteration —
-// independent of the hook-fire gate. The hookConfig.Vars merge in
-// executePreMacro / executePostMacro is downstream of that gate and
-// would only fire when the hook itself fires.
-func buildIterationHookExecutor(s *Server, preMacro, postMacro *fuzzHTTPMacroConfig) *hookExecutor {
-	if preMacro == nil && postMacro == nil {
-		return newHookExecutor(s, nil, &hookState{})
-	}
-	hooks := &hooksInput{}
-	if preMacro != nil {
-		hooks.PreMacro = &hookConfig{
-			Macro:           preMacro.Name,
-			RunInterval:     resolveRunInterval(preMacro.RunInterval),
-			N:               preMacro.N,
-			StatusCodes:     preMacro.StatusCodes,
-			MatchPattern:    preMacro.MatchPattern,
-			compiledPattern: preMacro.compiledPattern,
-		}
-	}
-	if postMacro != nil {
-		hooks.PostMacro = &hookConfig{
-			Macro:           postMacro.Name,
-			RunInterval:     resolveRunInterval(postMacro.RunInterval),
-			N:               postMacro.N,
-			StatusCodes:     postMacro.StatusCodes,
-			MatchPattern:    postMacro.MatchPattern,
-			compiledPattern: postMacro.compiledPattern,
-			PassResponse:    true,
-		}
-	}
-	return newHookExecutor(s, hooks, &hookState{})
-}
-
-// resolveRunInterval returns the engine-facing RunInterval string,
-// defaulting empty to "always" so the underlying hooks.go gate matches
-// the pre-USK-981 behaviour when the caller does not opt in.
-func resolveRunInterval(s string) string {
-	if s == "" {
-		return "always"
-	}
-	return s
-}
-
-// buildJobHookExecutor returns (jobHookExec, jobKVStore) for the
-// scope="job" call sites, or (nil, nil) when neither hook is job-scoped.
-// Distinct from buildIterationHookExecutor so the hookState.preMacroExecuted
-// state is not flipped by the job-side single-fire call. Post-job leaves
-// PassResponse off (no per-iteration response is available — Q21).
-//
-// USK-981: scope="job" forces RunInterval="always" (the validator
-// already rejected non-empty RunInterval for scope="job", so this is
-// belt-and-braces). Vars from job-scope hooks is injected into the
-// returned jobKVStore with reserved-key silent-drop — matches the
-// internal/job/job.go mergeKVStore precedent.
-func buildJobHookExecutor(s *Server, preMacro, postMacro *fuzzHTTPMacroConfig) (*hookExecutor, map[string]string) {
-	if !isJobScope(preMacro) && !isJobScope(postMacro) {
-		return nil, nil
-	}
-	jobHooks := &hooksInput{}
-	if isJobScope(preMacro) {
-		jobHooks.PreMacro = &hookConfig{Macro: preMacro.Name, RunInterval: "always"}
-	}
-	if isJobScope(postMacro) {
-		jobHooks.PostMacro = &hookConfig{Macro: postMacro.Name, RunInterval: "always"}
-	}
-	jobKV := make(map[string]string)
-	if isJobScope(preMacro) {
-		injectVarsRespectingReserved(jobKV, preMacro.Vars)
-	}
-	if isJobScope(postMacro) {
-		injectVarsRespectingReserved(jobKV, postMacro.Vars)
-	}
-	return newHookExecutor(s, jobHooks, &hookState{}), jobKV
-}
-
-// injectVarsRespectingReserved copies src into dst, silently dropping
-// keys with the reserved prefix ("__") so a user-supplied Vars entry
-// cannot shadow runtime-populated reserved keys (USK-981 Q2). Matches
-// the internal/job/job.go:mergeKVStore precedent.
-//
-// Local replication is preferred over importing internal/job for two
-// reasons: (1) the package boundary is control plane (internal/mcp) →
-// data path (internal/job), which the project conventions discourage;
-// (2) the function is small enough that DRYing it would cost more in
-// indirection than it saves.
-func injectVarsRespectingReserved(dst map[string]string, src map[string]string) {
-	for k, v := range src {
-		if macro.IsReservedKey(k) {
-			continue
-		}
-		dst[k] = v
-	}
 }
 
 // runVariantLoop drives the variant loop body and returns
@@ -562,37 +379,6 @@ func (l *fuzzHTTPVariantLoop) runVariantLoop(ctx context.Context) (bool, string,
 	return true, "", nil
 }
 
-// isJobScope reports whether cfg is configured as scope="job". Nil is
-// always false. Empty scope defaults to "iteration".
-func isJobScope(cfg *fuzzHTTPMacroConfig) bool {
-	return cfg != nil && cfg.Scope == "job"
-}
-
-// bumpHookIterationCount advances the hookState.requestCount by one so
-// the next iteration's shouldRunPreMacro / shouldRunPostMacro engine
-// gates evaluate against the post-iteration counter (USK-981). Pure
-// counter increment — lastStatusCode / lastError remain at zero values
-// because correctly wiring those requires deciding what counts as an
-// "error" for the on_error gate (transport error vs 4xx vs 5xx vs
-// pre-macro skip), which is deferred to USK-982. This makes
-// RunInterval="every_n" and "once" work end-to-end without committing
-// to on_error semantics yet.
-func (l *fuzzHTTPVariantLoop) bumpHookIterationCount() {
-	if l.hookExec == nil || l.hookExec.state == nil {
-		return
-	}
-	l.hookExec.state.requestCount++
-}
-
-// isIterationScope reports whether cfg is configured as scope="iteration"
-// (or empty, which defaults to iteration). Nil is always false.
-func isIterationScope(cfg *fuzzHTTPMacroConfig) bool {
-	if cfg == nil {
-		return false
-	}
-	return cfg.Scope == "" || cfg.Scope == "iteration"
-}
-
 // fuzzHTTPVariantLoop bundles the per-run state shared across iterations
 // so the inner loop body (runOne) is a method on a small struct instead
 // of an 11-argument free function. The split keeps cyclomatic complexity
@@ -612,8 +398,8 @@ type fuzzHTTPVariantLoop struct {
 	tag           string
 	fuzzID        string
 	upstreamProxy *UpstreamProxyConfig
-	preMacro      *fuzzHTTPMacroConfig
-	postMacro     *fuzzHTTPMacroConfig
+	preMacro      *MacroConfig
+	postMacro     *MacroConfig
 	encoders      *pipeline.WireEncoderRegistry
 	pipe          *pipeline.Pipeline
 	dial          session.DialFunc
@@ -670,7 +456,7 @@ func (l *fuzzHTTPVariantLoop) runOne(ctx context.Context, variantIdx int) (strin
 		// see requestCount=0 from the iter-0 skip and re-fire pre_macro
 		// on every subsequent iteration. lastStatusCode / lastError stay
 		// untouched (D1 deferred to USK-982).
-		l.bumpHookIterationCount()
+		BumpHookIterationCount(l.hookExec)
 		nextIndices(l.indices, l.plan.positions)
 		return "", nil
 	}
@@ -688,7 +474,7 @@ func (l *fuzzHTTPVariantLoop) runOne(ctx context.Context, variantIdx int) (strin
 	expandedPayloads, expandErr := expandFuzzHTTPPayloads(payloads, kvStore)
 	if expandErr != nil {
 		l.recordVariantError(ctx, variantIdx, payloads, fmt.Sprintf("template expansion: %v", expandErr))
-		l.bumpHookIterationCount()
+		BumpHookIterationCount(l.hookExec)
 		nextIndices(l.indices, l.plan.positions)
 		return "", nil
 	}
@@ -726,7 +512,7 @@ func (l *fuzzHTTPVariantLoop) runOne(ctx context.Context, variantIdx int) (strin
 	// USK-961: gate post-iteration on scope="iteration" (or empty —
 	// defaults to iteration). scope="job" post runs once after the
 	// variant loop completes.
-	if isIterationScope(l.postMacro) {
+	if IsIterationScope(l.postMacro) {
 		l.runPostMacro(ctx, iterCtx, variantIdx, row, kvStore)
 	}
 
@@ -735,7 +521,7 @@ func (l *fuzzHTTPVariantLoop) runOne(ctx context.Context, variantIdx int) (strin
 	// completed iteration before the next runOne call evaluates
 	// shouldRunPreMacro. lastStatusCode / lastError stay untouched
 	// (D1 deferred to USK-982).
-	l.bumpHookIterationCount()
+	BumpHookIterationCount(l.hookExec)
 
 	nextIndices(l.indices, l.plan.positions)
 
@@ -787,17 +573,10 @@ func (l *fuzzHTTPVariantLoop) prepareIteration(ctx context.Context, variantIdx i
 	// reserved-key silent-drop (USK-981 Q2) so a Vars entry like
 	// {"__iteration":"override"} is dropped at injection rather than
 	// shadowing the value the iteration loop will seed.
-	kvStore := make(map[string]string)
-	for k, v := range l.jobKVStore {
-		kvStore[k] = v
-	}
-	if isIterationScope(l.preMacro) {
-		injectVarsRespectingReserved(kvStore, l.preMacro.Vars)
-	}
-	if isIterationScope(l.postMacro) {
-		injectVarsRespectingReserved(kvStore, l.postMacro.Vars)
-	}
-	connector.SeedIterationKV(kvStore, variantIdx)
+	//
+	// USK-983: the build sequence is shared with fuzz_ws / fuzz_grpc /
+	// fuzz_raw via PrepareIteration in fuzz_macro_common.go.
+	kvStore := PrepareIteration(l.jobKVStore, l.preMacro, l.postMacro, variantIdx)
 
 	iterCtx, ipErr := l.upstreamProxy.ResolveForIterationWithKV(ctx, variantIdx, kvStore)
 	if ipErr != nil {
@@ -808,7 +587,7 @@ func (l *fuzzHTTPVariantLoop) prepareIteration(ctx context.Context, variantIdx i
 	// USK-961: pre-iteration only fires when pre is configured at
 	// scope="iteration" (empty defaults to iteration). When pre is
 	// scope="job", the executor was invoked once outside the loop.
-	if !isIterationScope(l.preMacro) {
+	if !IsIterationScope(l.preMacro) {
 		return fuzzHTTPIterationPrep{kvStore: kvStore, iterCtx: iterCtx}, "", nil
 	}
 	preState, retErr := l.runPreMacro(ctx, iterCtx, variantIdx, payloads, kvStore)
@@ -920,7 +699,7 @@ const (
 // fuzz_macro_results.index_num=-1 is the documented sentinel for
 // job-scope hook rows (see FuzzMacroResult.IndexNum doc comment).
 func (l *fuzzHTTPVariantLoop) runPreJobMacro(ctx context.Context) (fuzzHTTPJobPreOutcome, string, error) {
-	if l.jobHookExec == nil || l.preMacro == nil || !isJobScope(l.preMacro) {
+	if l.jobHookExec == nil || l.preMacro == nil || !IsJobScope(l.preMacro) {
 		return fuzzHTTPPreJobOK, "", nil
 	}
 	_, hookErr := l.jobHookExec.executePreMacro(ctx, l.jobKVStore)
@@ -959,7 +738,7 @@ func (l *fuzzHTTPVariantLoop) runPreJobMacro(ctx context.Context) (fuzzHTTPJobPr
 // fuzz_macro_results row at index_num=-1 and return. Matches
 // per-iteration post precedent (post failures don't escalate to retErr).
 func (l *fuzzHTTPVariantLoop) runPostJobMacro(ctx context.Context) {
-	if l.jobHookExec == nil || l.postMacro == nil || !isJobScope(l.postMacro) {
+	if l.jobHookExec == nil || l.postMacro == nil || !IsJobScope(l.postMacro) {
 		return
 	}
 	// Post-job has no per-iteration response to inject. Pass zero values
