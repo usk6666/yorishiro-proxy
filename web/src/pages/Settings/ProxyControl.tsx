@@ -1,7 +1,12 @@
 import { useCallback, useState } from "react";
 import { Badge, Button, Input, Spinner, useToast } from "../../components/ui/index.js";
 import { useProxyControl, useQuery } from "../../lib/mcp/hooks.js";
-import type { StatusResult } from "../../lib/mcp/types.js";
+import type { ProxyStartParams, StatusResult } from "../../lib/mcp/types.js";
+import {
+  UpstreamProxyEditor,
+  type UpstreamProxyEditorValue,
+  validateUpstreamProxyPayload,
+} from "./UpstreamProxyEditor.js";
 
 /**
  * ProxyControl — manage proxy listeners (start/stop).
@@ -21,17 +26,32 @@ export function ProxyControl() {
   const [showForm, setShowForm] = useState(false);
   const [name, setName] = useState("");
   const [listenAddr, setListenAddr] = useState("127.0.0.1:8080");
-  const [upstreamProxy, setUpstreamProxy] = useState("");
+  const [upstreamProxy, setUpstreamProxy] = useState<UpstreamProxyEditorValue>("");
 
   // Stop confirmation
   const [confirmStop, setConfirmStop] = useState<string | null>(null);
 
   const handleStart = useCallback(async () => {
     try {
-      const params: Record<string, unknown> = {};
+      const params: ProxyStartParams = {};
       if (name.trim()) params.name = name.trim();
       if (listenAddr.trim()) params.listen_addr = listenAddr.trim();
-      if (upstreamProxy.trim()) params.upstream_proxy = upstreamProxy.trim();
+
+      // Only attach upstream_proxy when something was actually entered.
+      // Empty Simple URL is treated as "no upstream proxy" and the field
+      // is omitted (proxy_start defaults to direct upstream).
+      if (typeof upstreamProxy === "string") {
+        const trimmed = upstreamProxy.trim();
+        if (trimmed) params.upstream_proxy = trimmed;
+      } else if ("url_template" in upstreamProxy && upstreamProxy.url_template.trim()) {
+        params.upstream_proxy = upstreamProxy;
+      }
+
+      if (params.upstream_proxy !== undefined && params.upstream_proxy !== null) {
+        for (const warning of validateUpstreamProxyPayload(params.upstream_proxy)) {
+          addToast({ type: "warning", message: warning });
+        }
+      }
 
       await start(params);
       addToast({ type: "success", message: `Listener started on ${listenAddr}` });
@@ -177,14 +197,12 @@ export function ProxyControl() {
               placeholder="127.0.0.1:8080"
             />
           </div>
-          <div className="settings-form-row">
-            <Input
-              label="Upstream Proxy"
-              value={upstreamProxy}
-              onChange={(e) => setUpstreamProxy(e.target.value)}
-              placeholder="http://host:port or socks5://host:port"
-            />
-          </div>
+          <UpstreamProxyEditor
+            value={upstreamProxy}
+            onChange={setUpstreamProxy}
+            disabled={controlLoading}
+            idPrefix="new-listener-upstream-proxy"
+          />
 
           <div className="settings-add-form-actions">
             <Button variant="secondary" size="sm" onClick={() => setShowForm(false)}>

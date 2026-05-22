@@ -75,6 +75,35 @@
   flex: 1;
 }
 
+/* Upstream proxy editor (USK-963) */
+.upstream-proxy-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.upstream-proxy-mode-row {
+  gap: var(--space-md);
+  margin-bottom: var(--space-sm);
+}
+
+.upstream-proxy-mode-option {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+  font-size: var(--font-size-sm);
+  color: var(--text-primary);
+  cursor: pointer;
+}
+
+.upstream-proxy-mode-option input[type="radio"] {
+  cursor: pointer;
+}
+
+.upstream-proxy-mode-option input[type="radio"]:disabled {
+  cursor: not-allowed;
+}
+
 /* Inline form (input + button on one row) */
 .settings-inline-form {
   display: flex;

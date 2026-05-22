@@ -95,7 +95,14 @@ export interface CaptureScope {
 export interface ProxyStartParams {
   name?: string;
   listen_addr?: string;
-  upstream_proxy?: string;
+  /**
+   * Upstream proxy configuration. Accepts the same polymorphic shape as
+   * `ConfigureParams.upstream_proxy` (USK-959). A literal URL string sets
+   * a static upstream; an object with `url_template` + `rotation` enables
+   * per-request / per-connection / per-target-host / sticky rotation.
+   * Empty string disables; omitting the field leaves it unchanged.
+   */
+  upstream_proxy?: string | UpstreamProxyRotationInput | null;
   capture_scope?: CaptureScope;
   tls_passthrough?: string[];
   intercept_rules?: InterceptRule[];
@@ -188,10 +195,94 @@ export interface ConfigureClientCert {
   key_path: string;
 }
 
+/**
+ * Upstream proxy rotation policy (USK-959).
+ *
+ * - `per_request`       — fresh expansion per outbound request (max churn)
+ * - `per_connection`    — fresh expansion per upstream TCP/TLS connection
+ * - `per_target_host`   — sticky per (scheme,host,port) tuple
+ * - `sticky`            — sticky for the entire listener lifetime
+ */
+export type UpstreamProxyPolicy =
+  | "per_request"
+  | "per_connection"
+  | "per_target_host"
+  | "sticky";
+
+/**
+ * Structured upstream-proxy input for `configure` / `proxy_start`
+ * (USK-959). Discriminated by **shape** (presence of `url_template`),
+ * mirroring the `tcp_forwards` precedent — there is no tag field.
+ *
+ * - Literal-in-object form: `{ url: "http://proxy:3128" }`
+ *   Equivalent to passing the URL as a bare string.
+ * - Rotation form: `{ url_template, rotation: { policy } }`
+ *   The template uses `§var§` macros; the live data path reserves
+ *   `§__nonce§` (fresh UUID per resolution event).
+ *
+ * Backend rejects empty `{}` and forbids both `url` and `url_template`
+ * being set at once.
+ */
+export type UpstreamProxyRotationInput =
+  | { url?: string }
+  | {
+      url_template: string;
+      rotation: { policy: UpstreamProxyPolicy };
+    };
+
+const ROTATION_POLICIES: readonly UpstreamProxyPolicy[] = [
+  "per_request",
+  "per_connection",
+  "per_target_host",
+  "sticky",
+] as const;
+
+/**
+ * Type guard for the rotation variant of `UpstreamProxyRotationInput`.
+ * Returns true only when the value is an object carrying a non-empty
+ * `url_template` AND a well-formed `rotation: { policy }` sub-object
+ * whose `policy` is one of the four documented values. Literal-URL
+ * forms (string or `{ url }`) return false.
+ *
+ * The runtime check is intentionally as tight as the return-type
+ * predicate so callers may safely access `value.rotation.policy`
+ * after the guard returns true (CWE-704 / defensive type narrowing).
+ */
+export function isRotationUpstream(
+  v: unknown,
+): v is { url_template: string; rotation: { policy: UpstreamProxyPolicy } } {
+  if (v === null || typeof v !== "object") {
+    return false;
+  }
+  const o = v as { url_template?: unknown; rotation?: unknown };
+  if (typeof o.url_template !== "string" || o.url_template.length === 0) {
+    return false;
+  }
+  if (o.rotation === null || typeof o.rotation !== "object") {
+    return false;
+  }
+  const rot = o.rotation as { policy?: unknown };
+  return (
+    typeof rot.policy === "string" &&
+    (ROTATION_POLICIES as readonly string[]).includes(rot.policy)
+  );
+}
+
 /** Parameters for the configure tool. */
 export interface ConfigureParams {
   operation?: "merge" | "replace";
-  upstream_proxy?: string | null;
+  /**
+   * Listener scope (USK-826). Currently scopes only `upstream_proxy` —
+   * other configure sections remain process-global regardless. Omit for
+   * the `"default"` listener.
+   */
+  name?: string;
+  /**
+   * Upstream proxy. Accepts a literal URL string (legacy), an object
+   * with `url`, or the rotation form (`url_template` + `rotation.policy`)
+   * from USK-959. Empty string disables; omit to leave unchanged.
+   */
+  upstream_proxy?: string | UpstreamProxyRotationInput | null;
   capture_scope?: ConfigureCaptureScope;
   tls_passthrough?: ConfigureTLSPassthrough;
   intercept_rules?: ConfigureInterceptRules;
@@ -209,6 +300,16 @@ export interface ConfigureParams {
 export interface ConfigureResult {
   status: string;
   upstream_proxy?: string;
+  /**
+   * Echoed rotation template (redacted) when the listener is using the
+   * USK-959 rotation form. Empty/absent when using a literal URL.
+   */
+  upstream_proxy_template?: string;
+  /**
+   * Echoed rotation policy when the listener is using the USK-959
+   * rotation form. Empty/absent when using a literal URL.
+   */
+  upstream_proxy_rotation_policy?: UpstreamProxyPolicy;
   capture_scope?: {
     include_count: number;
     exclude_count: number;
