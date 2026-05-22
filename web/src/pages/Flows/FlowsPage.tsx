@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Badge } from "../../components/ui/Badge.js";
 import { Button } from "../../components/ui/Button.js";
@@ -228,18 +228,11 @@ export function FlowsPage() {
   const flows = data?.flows ?? [];
   const total = data?.total ?? 0;
 
-  // Reset offset and selection when debounced text filters change
-  const prevTextFilterKey = useRef("");
-  useEffect(() => {
-    const key = JSON.stringify({ debouncedUrlPattern, debouncedBodyContains, debouncedTagFilter, debouncedHostFilter });
-    if (prevTextFilterKey.current && prevTextFilterKey.current !== key) {
-      setOffset(0);
-      setSelectedIds(new Set());
-    }
-    prevTextFilterKey.current = key;
-  }, [debouncedUrlPattern, debouncedBodyContains, debouncedTagFilter, debouncedHostFilter]);
-
-  // Reset offset when filter changes (used by non-debounced filter controls)
+  // Reset offset and selection on any filter change. Called synchronously
+  // from every filter setter so the next useQuery render sees offset=0
+  // alongside the new filter — avoids the 1-render race where a debounced
+  // filter committed first and offset reset arrived one render later, so
+  // the query briefly fired with new filter + stale offset (USK-964).
   const handleFilterChange = useCallback(() => {
     setOffset(0);
     setSelectedIds(new Set());
@@ -299,36 +292,40 @@ export function FlowsPage() {
     [handleFilterChange],
   );
 
-  // --- Host filter (debounced — offset/selection reset via effect) ---
+  // --- Host filter (debounced query, immediate offset reset) ---
   const handleHostFilterChange = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
       setHostFilter(e.target.value);
+      handleFilterChange();
     },
-    [],
+    [handleFilterChange],
   );
 
-  // --- URL pattern (debounced — offset/selection reset via effect) ---
+  // --- URL pattern (debounced query, immediate offset reset) ---
   const handleUrlChange = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
       setUrlPattern(e.target.value);
+      handleFilterChange();
     },
-    [],
+    [handleFilterChange],
   );
 
-  // --- Body contains (debounced — offset/selection reset via effect) ---
+  // --- Body contains (debounced query, immediate offset reset) ---
   const handleBodyContainsChange = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
       setBodyContains(e.target.value);
+      handleFilterChange();
     },
-    [],
+    [handleFilterChange],
   );
 
-  // --- Tag filter (debounced — offset/selection reset via effect) ---
+  // --- Tag filter (debounced query, immediate offset reset) ---
   const handleTagFilterChange = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
       setTagFilter(e.target.value);
+      handleFilterChange();
     },
-    [],
+    [handleFilterChange],
   );
 
   // --- Row click → navigate to detail ---
