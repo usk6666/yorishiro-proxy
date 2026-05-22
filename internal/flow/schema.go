@@ -454,6 +454,31 @@ const schemaV16 = `
 CREATE INDEX IF NOT EXISTS idx_flows_stream_id_timestamp ON flows(stream_id, timestamp);
 `
 
+// schemaV17 adds the fuzz_macro_results table for the per-iteration
+// pre/post macro hook outcomes recorded by fuzz_http (USK-960). One row
+// per (fuzz_id, index_num, hook_name) — hook_name is "pre" or "post" and
+// keys the iteration's two possible hook invocations. stream_id is
+// populated when the hook macro recorded its own session via
+// recordMacroStepSession; status is one of "ok", "skipped", "error";
+// status_code carries the macro's last HTTP step status when available.
+//
+// idx_fuzz_macro_results_fuzz_id mirrors the fuzz_results companion index
+// so query-by-fuzz_id reads run as predicate scans.
+const schemaV17 = `
+CREATE TABLE IF NOT EXISTS fuzz_macro_results (
+	fuzz_id      TEXT NOT NULL REFERENCES fuzz_jobs(id) ON DELETE CASCADE,
+	index_num    INTEGER NOT NULL,
+	hook_name    TEXT NOT NULL,
+	stream_id    TEXT,
+	status       TEXT NOT NULL,
+	status_code  INTEGER,
+	error        TEXT,
+	PRIMARY KEY (fuzz_id, index_num, hook_name)
+);
+
+CREATE INDEX IF NOT EXISTS idx_fuzz_macro_results_fuzz_id ON fuzz_macro_results(fuzz_id);
+`
+
 var migrations = map[int]string{
 	1:  schemaV1,
 	2:  schemaV2,
@@ -471,6 +496,7 @@ var migrations = map[int]string{
 	14: schemaV14,
 	15: schemaV15,
 	16: schemaV16,
+	17: schemaV17,
 }
 
 func migrate(ctx context.Context, db *sql.DB) error {

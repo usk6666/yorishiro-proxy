@@ -56,6 +56,30 @@ type FuzzResult struct {
 	Error string
 }
 
+// FuzzMacroResult records the outcome of a per-iteration pre/post macro
+// hook fired by fuzz_http (USK-960). One row per (fuzz_id, index_num,
+// hook_name) — hook_name is "pre" or "post". StreamID is populated when
+// the macro engine recorded its own session via recordMacroStepSession.
+// Status is "ok" / "skipped" / "error"; StatusCode carries the hook
+// macro's terminal HTTP step status when available (0 otherwise).
+type FuzzMacroResult struct {
+	// FuzzID is the parent fuzz_jobs row id.
+	FuzzID string
+	// IndexNum is the 0-based variant index within the job.
+	IndexNum int
+	// HookName is "pre" or "post".
+	HookName string
+	// StreamID is the macro's recorded stream id, or empty when the
+	// hook did not record a stream (skipped, error before send).
+	StreamID string
+	// Status is "ok" / "skipped" / "error".
+	Status string
+	// StatusCode is the terminal HTTP step status (0 when unavailable).
+	StatusCode int
+	// Error holds the hook failure message ("" on success/skip).
+	Error string
+}
+
 // FuzzStore defines the interface for fuzz job and result persistence.
 type FuzzStore interface {
 	// SaveFuzzJob persists a new fuzz job.
@@ -86,6 +110,16 @@ type FuzzStore interface {
 	// CountFuzzResults returns the total number of results for a fuzz job
 	// matching the given filter options, ignoring Limit and Offset.
 	CountFuzzResults(ctx context.Context, fuzzID string, opts FuzzResultListOptions) (int, error)
+
+	// SaveFuzzMacroResult persists a single per-iteration pre/post
+	// macro hook outcome. INSERT OR REPLACE on the (fuzz_id, index_num,
+	// hook_name) PK so re-runs of the same hook within an iteration
+	// overwrite the prior row rather than failing (USK-960).
+	SaveFuzzMacroResult(ctx context.Context, result *FuzzMacroResult) error
+
+	// ListFuzzMacroResults retrieves all macro hook outcomes for a fuzz
+	// job ordered by (index_num, hook_name).
+	ListFuzzMacroResults(ctx context.Context, fuzzID string) ([]*FuzzMacroResult, error)
 }
 
 // FuzzResultListOptions configures fuzz result listing behavior.
@@ -454,6 +488,85 @@ func scanFuzzResult(row scannable) (*FuzzResult, error) {
 	}
 
 	return &result, nil
+}
+
+// SaveFuzzMacroResult persists a single per-iteration pre/post macro
+// hook outcome (USK-960). Uses INSERT OR REPLACE on the
+// (fuzz_id, index_num, hook_name) PK so a re-fired hook in the same
+// iteration overwrites the prior row rather than failing on unique
+// constraint — matches the iteration-scoped semantics where the most
+// recent invocation is the truth.
+func (s *SQLiteStore) SaveFuzzMacroResult(ctx context.Context, result *FuzzMacroResult) error {
+	return s.enqueueWrite(ctx, func(ctx context.Context) error {
+		var streamID *string
+		if result.StreamID != "" {
+			sid := result.StreamID
+			streamID = &sid
+		}
+		var statusCode *int
+		if result.StatusCode != 0 {
+			sc := result.StatusCode
+			statusCode = &sc
+		}
+		var errStr *string
+		if result.Error != "" {
+			errStr = &result.Error
+		}
+		_, err := s.db.ExecContext(ctx,
+			`INSERT OR REPLACE INTO fuzz_macro_results (fuzz_id, index_num, hook_name, stream_id, status, status_code, error)
+			 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			result.FuzzID,
+			result.IndexNum,
+			result.HookName,
+			streamID,
+			result.Status,
+			statusCode,
+			errStr,
+		)
+		if err != nil {
+			return fmt.Errorf("insert fuzz macro result: %w", err)
+		}
+		return nil
+	})
+}
+
+// ListFuzzMacroResults retrieves all macro hook outcomes for a fuzz job
+// ordered by (index_num, hook_name). hook_name sorts pre before post
+// lexically — matches the iteration's execution order.
+func (s *SQLiteStore) ListFuzzMacroResults(ctx context.Context, fuzzID string) ([]*FuzzMacroResult, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT fuzz_id, index_num, hook_name, stream_id, status, status_code, error
+		 FROM fuzz_macro_results
+		 WHERE fuzz_id = ?
+		 ORDER BY index_num ASC, hook_name ASC`, fuzzID)
+	if err != nil {
+		return nil, fmt.Errorf("list fuzz macro results: %w", err)
+	}
+	defer rows.Close()
+
+	var results []*FuzzMacroResult
+	for rows.Next() {
+		var (
+			r          FuzzMacroResult
+			streamID   sql.NullString
+			statusCode sql.NullInt64
+			errStr     sql.NullString
+		)
+		if err := rows.Scan(&r.FuzzID, &r.IndexNum, &r.HookName, &streamID, &r.Status, &statusCode, &errStr); err != nil {
+			return nil, fmt.Errorf("scan fuzz macro result: %w", err)
+		}
+		if streamID.Valid {
+			r.StreamID = streamID.String
+		}
+		if statusCode.Valid {
+			r.StatusCode = int(statusCode.Int64)
+		}
+		if errStr.Valid {
+			r.Error = errStr.String
+		}
+		results = append(results, &r)
+	}
+	return results, rows.Err()
 }
 
 // PayloadsToJSON converts a map of position ID to payload value into JSON string.
