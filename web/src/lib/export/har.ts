@@ -7,6 +7,7 @@
  * available via the MCP query tool — no backend changes are required.
  */
 
+import { isPseudoHeader } from "../http2/pseudoHeaders.js";
 import type { FlowDetailResult, FlowEntry } from "../mcp/types.js";
 
 // ---------------------------------------------------------------------------
@@ -261,6 +262,12 @@ function mapHttpVersion(protocol: string): string {
 
 /**
  * Flatten the multi-value headers map into a flat array of {name, value} pairs.
+ *
+ * HAR 1.2 §6.2.4 / §6.2.6 forbid HTTP/2 pseudo-headers (`:method`, `:path`,
+ * `:authority`, `:scheme`, `:status`) from appearing in `request.headers[]`
+ * or `response.headers[]` — their semantic content is already carried in
+ * `request.method` / `request.url` / `response.status`. Strict HAR
+ * validators reject entries that violate this, so we filter at the sink.
  */
 function flattenHeaders(
   headers?: Record<string, string[]> | null,
@@ -268,6 +275,7 @@ function flattenHeaders(
   if (!headers) return [];
   const result: HarHeader[] = [];
   for (const [name, values] of Object.entries(headers)) {
+    if (isPseudoHeader(name)) continue;
     for (const value of values) {
       result.push({ name, value });
     }
