@@ -18,6 +18,14 @@ const TABS = [
   { id: "rules", label: "Rules" },
 ];
 
+// Adaptive polling thresholds for the intercept queue (USK-974). When the
+// queue holds at least one entry, poll aggressively so newly-arriving items
+// and post-action queue updates feel responsive. When the queue is empty,
+// fall back to 5s to reduce idle load. The Issue body explicitly accepts up
+// to 5s latency for the first item to surface in the idle state.
+const INTERCEPT_POLL_ACTIVE_MS = 1000;
+const INTERCEPT_POLL_IDLE_MS = 5000;
+
 const HTTP_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
 
 const HTTP_STATUS_CODES = [
@@ -55,14 +63,27 @@ export function InterceptPage() {
   const { addToast } = useToast();
   const { interceptAction, loading: executeLoading } = useInterceptAction();
 
-  // Poll intercept queue every second
+  // Adaptive polling state derived from the previously-rendered queue
+  // depth. Stored as a boolean so the timer is only re-armed on the
+  // empty ↔ non-empty transition, not on every poll that mutates queue
+  // contents at fixed length. The polling `useEffect` inside `useQuery`
+  // re-arms whenever `pollInterval` changes, so once the first non-empty
+  // result lands the next render swaps from idle (5s) to active (1s)
+  // cadence and back (USK-974). `pauseWhenHidden` additionally suspends
+  // the timer entirely while the tab is in the background.
+  const [queueHasItems, setQueueHasItems] = useState<boolean>(false);
+  const queuePollInterval = queueHasItems
+    ? INTERCEPT_POLL_ACTIVE_MS
+    : INTERCEPT_POLL_IDLE_MS;
+
   const {
     data: queueData,
     loading: queueLoading,
     error: queueError,
     refetch: refetchQueue,
   } = useQuery<"intercept_queue">("intercept_queue", {
-    pollInterval: 1000,
+    pollInterval: queuePollInterval,
+    pauseWhenHidden: true,
   });
 
   // Fetch config for intercept rules summary
@@ -72,6 +93,17 @@ export function InterceptPage() {
   } = useQuery<"config">("config");
 
   const queue: InterceptQueueResult = queueData ?? { items: [], count: 0 };
+
+  // Mirror the live queue's emptiness into state so the adaptive
+  // `pollInterval` computed above sees the latest value on the next
+  // render. Only the empty ↔ non-empty boolean is tracked so the polling
+  // `useEffect` does not tear down and re-arm its timer for fixed-length
+  // mutations (e.g., one entry replaced by another) — the interval stays
+  // stable in the active cadence until the queue actually drains.
+  useEffect(() => {
+    const next = queue.items.length > 0;
+    setQueueHasItems((prev) => (prev === next ? prev : next));
+  }, [queue.items.length]);
 
   // Clear selectedId when the selected entry is no longer in the queue
   useEffect(() => {

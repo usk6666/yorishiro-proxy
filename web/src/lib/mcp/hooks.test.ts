@@ -31,7 +31,7 @@
  * invariant — keeping the webui test surface dependency-free.
  */
 
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { McpClient } from "./client.js";
 
 // ---------------------------------------------------------------------------
@@ -229,6 +229,7 @@ const {
   useSecurity,
   useConfigure,
   useProxyControl,
+  useQuery,
 } = await import("./hooks.js");
 
 // ---------------------------------------------------------------------------
@@ -677,5 +678,170 @@ describe("useProxyControl — start/stop identity stability", () => {
 
     expect(outs[1]!.start).not.toBe(outs[0]!.start);
     expect(outs[1]!.stop).not.toBe(outs[0]!.stop);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// useQuery — pauseWhenHidden + Page Visibility (USK-974)
+// ---------------------------------------------------------------------------
+//
+// Vitest's default test environment is node with no `document` global, so
+// the production `usePageVisible()` helper short-circuits on the
+// `typeof document === "undefined"` guard. To exercise the visibility-aware
+// polling code path we install a minimal `document` stub on `globalThis` in
+// `beforeEach` and tear it down in `afterEach` so no state leaks between
+// tests. The stub exposes the bits the helper actually touches:
+// `visibilityState` (read by the seed + the listener) and
+// `addEventListener` / `removeEventListener` for `visibilitychange`. Timers
+// are mocked with `vi.useFakeTimers()` so `setInterval` callbacks are
+// driven deterministically via `vi.advanceTimersByTimeAsync(ms)`.
+
+/** Shape of the `document` stub installed by the suite below. */
+interface DocStub {
+  visibilityState: "visible" | "hidden";
+  addEventListener: (type: string, handler: () => void) => void;
+  removeEventListener: (type: string, handler: () => void) => void;
+  /** Manually fire all `visibilitychange` listeners (test helper). */
+  fireVisibilityChange: () => void;
+}
+
+function makeDocStub(initial: "visible" | "hidden"): DocStub {
+  const listeners = new Set<() => void>();
+  return {
+    visibilityState: initial,
+    addEventListener(type, handler) {
+      if (type === "visibilitychange") listeners.add(handler);
+    },
+    removeEventListener(type, handler) {
+      if (type === "visibilitychange") listeners.delete(handler);
+    },
+    fireVisibilityChange() {
+      for (const h of listeners) h();
+    },
+  };
+}
+
+describe("useQuery — pauseWhenHidden + Page Visibility", () => {
+  let doc: DocStub;
+  let originalDocument: PropertyDescriptor | undefined;
+  let querySpy: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    // Snapshot any pre-existing `document` (none in node, but be defensive
+    // in case a future test setup adds jsdom) so we can restore it later.
+    originalDocument = Object.getOwnPropertyDescriptor(globalThis, "document");
+    doc = makeDocStub("visible");
+    Object.defineProperty(globalThis, "document", {
+      configurable: true,
+      writable: true,
+      value: doc,
+    });
+
+    // Mock timers so `setInterval` is driven deterministically.
+    vi.useFakeTimers();
+
+    // Fresh client + query spy per test. The hook awaits the returned
+    // promise; resolving with `null` keeps the success path simple.
+    querySpy = vi.fn().mockResolvedValue(null);
+    ctx.client = { query: querySpy } as unknown as McpClient;
+    ctx.status = "connected";
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    if (originalDocument) {
+      Object.defineProperty(globalThis, "document", originalDocument);
+    } else {
+      delete (globalThis as Record<string, unknown>).document;
+    }
+  });
+
+  it("does not arm the polling interval while the page is hidden (pauseWhenHidden=true)", async () => {
+    doc.visibilityState = "hidden";
+
+    driveHook(
+      () =>
+        useQuery("macros", {
+          pollInterval: 1000,
+          pauseWhenHidden: true,
+        }),
+      1,
+    );
+
+    // The initial fetch effect still runs — only the periodic timer is
+    // gated by visibility. Drain microtasks for the first fetch.
+    await vi.advanceTimersByTimeAsync(0);
+    const initialCalls = querySpy.mock.calls.length;
+    expect(initialCalls).toBeGreaterThanOrEqual(1);
+
+    // Advance well past several poll cycles. No interval should be armed,
+    // so the call count must not grow.
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(querySpy.mock.calls.length).toBe(initialCalls);
+  });
+
+  it("fires one immediate refetch on hidden → visible and re-arms the interval", async () => {
+    doc.visibilityState = "hidden";
+
+    // Initial render with the page hidden.
+    let outs = driveHook(
+      () =>
+        useQuery("macros", {
+          pollInterval: 1000,
+          pauseWhenHidden: true,
+        }),
+      1,
+    );
+
+    await vi.advanceTimersByTimeAsync(0);
+    const callsAfterInitial = querySpy.mock.calls.length;
+
+    // Flip to visible, fire the listener, then re-render to let the
+    // updated `pageVisible` state propagate through the hook's effects.
+    doc.visibilityState = "visible";
+    doc.fireVisibilityChange();
+
+    outs = driveHook(
+      () =>
+        useQuery("macros", {
+          pollInterval: 1000,
+          pauseWhenHidden: true,
+        }),
+      1,
+    );
+    expect(outs[0]).toBeDefined();
+    await vi.advanceTimersByTimeAsync(0);
+
+    // The transition must have triggered exactly one immediate fetch on
+    // top of any baseline calls observed while hidden.
+    const callsAfterTransition = querySpy.mock.calls.length;
+    expect(callsAfterTransition).toBeGreaterThan(callsAfterInitial);
+
+    // Subsequent timer advances must now produce additional fetches via
+    // the re-armed `setInterval`. Advance by ~3 intervals and require at
+    // least one further call to land.
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(querySpy.mock.calls.length).toBeGreaterThan(callsAfterTransition);
+  });
+
+  it("arms the polling interval normally when pauseWhenHidden is omitted (regression guard)", async () => {
+    doc.visibilityState = "hidden";
+
+    driveHook(
+      () =>
+        useQuery("macros", {
+          pollInterval: 1000,
+        }),
+      1,
+    );
+
+    await vi.advanceTimersByTimeAsync(0);
+    const initialCalls = querySpy.mock.calls.length;
+    expect(initialCalls).toBeGreaterThanOrEqual(1);
+
+    // With the default `pauseWhenHidden: false`, the interval must arm
+    // regardless of visibility — confirms the new option is fully opt-in.
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(querySpy.mock.calls.length).toBeGreaterThan(initialCalls);
   });
 });

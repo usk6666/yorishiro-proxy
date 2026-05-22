@@ -39,8 +39,11 @@ export function MacrosPage() {
   const { macro: macroAction, loading: actionLoading } = useMacro();
 
   // --- Query macros list ---
+  // `pauseWhenHidden` halts the 5s poll while the tab is in the background
+  // (USK-974); a single refetch fires on the hidden → visible transition.
   const { data, loading, error, refetch } = useQuery("macros", {
     pollInterval: 5000,
+    pauseWhenHidden: true,
   });
 
   const macros = data?.macros ?? [];
