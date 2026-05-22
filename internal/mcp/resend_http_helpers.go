@@ -21,6 +21,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/usk6666/yorishiro-proxy/internal/connector"
 	httputilpkg "github.com/usk6666/yorishiro-proxy/internal/connector/transport"
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
@@ -491,8 +492,12 @@ func pluginEngineForResend(s *Server) *pluginv2.Engine {
 // while guaranteeing the negotiated wire matches the Layer we drive (USK-717).
 func buildResendHTTPDialFunc(transport httputilpkg.TLSTransport, addr string, useTLS bool, sni string) session.DialFunc {
 	return func(ctx context.Context, _ *envelope.Envelope) (layer.Channel, error) {
-		dialer := &net.Dialer{Timeout: defaultReplayTimeout}
-		conn, err := dialer.DialContext(ctx, "tcp", addr)
+		// MaybeDialViaUpstreamProxy consults ctx for a per-flow upstream
+		// proxy override (ContextWithUpstreamProxyOverride) — used by the
+		// fuzz / resend per-iteration rotation path. When ctx carries no
+		// override, this falls through to a plain net.Dialer dial,
+		// preserving the historical direct-dial behaviour.
+		conn, err := connector.MaybeDialViaUpstreamProxy(ctx, addr, defaultReplayTimeout)
 		if err != nil {
 			return nil, fmt.Errorf("dial %s: %w", addr, err)
 		}

@@ -253,7 +253,7 @@ func (s *Server) buildFuzzHTTPPlan(ctx context.Context, input *fuzzHTTPInput) (*
 // populated for both successful and error variants. Store-write
 // failures are non-fatal (slog.Warn + continue) — the wire data is on
 // disk via RecordStep and remains the source of truth.
-func (s *Server) runFuzzHTTPVariants(ctx context.Context, plan *fuzzHTTPPlan, timeout time.Duration, stopOn5xx bool, tag, fuzzID string) ([]fuzzHTTPVariantRow, int, string, error) {
+func (s *Server) runFuzzHTTPVariants(ctx context.Context, plan *fuzzHTTPPlan, timeout time.Duration, stopOn5xx bool, tag, fuzzID string, upstreamProxy *UpstreamProxyConfig) ([]fuzzHTTPVariantRow, int, string, error) {
 	encoders := buildFuzzHTTPEncoderRegistry()
 	pipe := s.buildFuzzHTTPPipeline(encoders)
 	dial := buildResendHTTPDialFunc(s.connector.tlsTransport, plan.dialAddr, plan.useTLS, plan.sni)
@@ -289,8 +289,32 @@ func (s *Server) runFuzzHTTPVariants(ctx context.Context, plan *fuzzHTTPPlan, ti
 			return nil, completed, "", fmt.Errorf("variant %d: decode payloads: %w", variantIdx, err)
 		}
 
+		// Per-variant upstream proxy override (residential proxy IP
+		// rotation): expand UpstreamProxy.url_template against this
+		// variant's §__iteration§ (= variantIdx) and a fresh §__nonce§,
+		// attaching the parsed URL to the dial ctx via
+		// connector.ContextWithUpstreamProxyOverride. When the caller did
+		// not supply upstream_proxy the iterCtx == ctx and the dial falls
+		// through to the historical direct-dial path. Template-expand
+		// errors (parse / scheme / CRLF guard) are NON-FATAL at the
+		// per-variant level: record on the row and continue to the next
+		// variant so a single malformed expansion does not abort the run.
+		iterCtx, ipErr := upstreamProxy.ResolveForIteration(ctx, variantIdx)
+		if ipErr != nil {
+			row := fuzzHTTPVariantRow{
+				Index:    variantIdx,
+				Payloads: payloads,
+				Error:    ipErr.Error(),
+			}
+			rows = append(rows, row)
+			completed++
+			s.saveFuzzHTTPResult(ctx, fuzzID, variantIdx, row, payloads)
+			nextIndices(indices, plan.positions)
+			continue
+		}
+
 		variantStart := time.Now()
-		row, statusCode, runErr := s.runFuzzHTTPSingleVariant(ctx, plan, pipe, dial, timeout, variantIdx, payloads, tag)
+		row, statusCode, runErr := s.runFuzzHTTPSingleVariant(iterCtx, plan, pipe, dial, timeout, variantIdx, payloads, tag)
 		row.DurationMs = time.Since(variantStart).Milliseconds()
 
 		if runErr != nil {

@@ -9,6 +9,7 @@ import (
 
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/layer"
+	"github.com/usk6666/yorishiro-proxy/internal/macro"
 	"github.com/usk6666/yorishiro-proxy/internal/pipeline"
 	"github.com/usk6666/yorishiro-proxy/internal/session"
 )
@@ -317,9 +318,15 @@ func extractResponseInfo(env *envelope.Envelope) (int, []byte) {
 	}
 }
 
-// mergeKVStore merges src into dst. Keys in src overwrite existing keys in dst.
+// mergeKVStore merges src into dst. Keys in src overwrite existing keys
+// in dst, except for runtime-reserved keys (macro.IsReservedKey) which
+// are silently dropped so a hook's KV result cannot shadow runtime state
+// such as §__nonce§ / §__iteration§ that callers downstream depend on.
 func mergeKVStore(dst, src map[string]string) {
 	for k, v := range src {
+		if macro.IsReservedKey(k) {
+			continue
+		}
 		dst[k] = v
 	}
 }

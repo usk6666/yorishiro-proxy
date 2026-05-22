@@ -75,6 +75,24 @@ func RedactProxyURL(rawURL string) string {
 	return u.String()
 }
 
+// MaybeDialViaUpstreamProxy dials targetAddr either directly or through
+// the upstream proxy URL carried by ctx (set via
+// ContextWithUpstreamProxyOverride). When ctx carries no override OR an
+// explicit nil URL override, this falls through to a plain net.Dialer.
+//
+// Used by control-plane resend / fuzz dial paths that opt into the
+// per-flow override mechanism without participating in the live MITM
+// per-listener / global resolution chain — those paths historically
+// dialed direct via net.Dialer, so adding this wrapper preserves the
+// existing default behaviour while enabling per-iteration rotation.
+func MaybeDialViaUpstreamProxy(ctx context.Context, targetAddr string, timeout time.Duration) (net.Conn, error) {
+	if u, present := UpstreamProxyOverrideFromContext(ctx); present && u != nil {
+		return DialViaUpstreamProxy(ctx, u, targetAddr, timeout)
+	}
+	dialer := &net.Dialer{Timeout: timeout}
+	return dialer.DialContext(ctx, "tcp", targetAddr)
+}
+
 // DialViaUpstreamProxy dials the target address through the upstream proxy.
 // For HTTP proxies, it sends a CONNECT request and returns the tunneled connection.
 // For SOCKS5 proxies, it uses the golang.org/x/net/proxy package.

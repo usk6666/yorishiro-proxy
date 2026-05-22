@@ -384,6 +384,11 @@ func (c *BuildConfig) UpstreamProxyForListener(name string) *url.URL {
 // (set by FullListener via ContextWithListenerName) (USK-826).
 //
 // Resolution order:
+//  0. Per-flow override installed via ContextWithUpstreamProxyOverride.
+//     Present-but-nil is honoured as an explicit "direct dial" — the
+//     resolver returns nil without consulting any lower-priority slot.
+//     Used by control-plane resend / fuzz per-iteration rotation
+//     (residential proxy IP switching).
 //  1. Per-listener override installed via SetUpstreamProxyForListener for
 //     the ctx's listener name.
 //  2. Process-global override installed via SetUpstreamProxy.
@@ -397,6 +402,9 @@ func (c *BuildConfig) UpstreamProxyForListener(name string) *url.URL {
 func (c *BuildConfig) EffectiveUpstreamProxyForCtx(ctx context.Context) *url.URL {
 	if c == nil {
 		return nil
+	}
+	if u, present := UpstreamProxyOverrideFromContext(ctx); present {
+		return u
 	}
 	if name := ListenerNameFromContext(ctx); name != "" {
 		c.upstreamProxyPerListenerMu.RLock()

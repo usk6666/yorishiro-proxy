@@ -410,6 +410,28 @@ func TestMergeKVStore(t *testing.T) {
 	}
 }
 
+func TestMergeKVStore_DropsReservedKeys(t *testing.T) {
+	// A pre-send / post-receive hook returning a "__nonce" KV result must
+	// not be able to shadow runtime-reserved variables that the
+	// per-iteration upstream-proxy resolver depends on.
+	dst := map[string]string{"__nonce": "runtime-value"}
+	src := map[string]string{
+		"__nonce":     "hook-attempt",
+		"__iteration": "hook-attempt",
+		"safe":        "ok",
+	}
+	mergeKVStore(dst, src)
+	if dst["__nonce"] != "runtime-value" {
+		t.Errorf("__nonce was overwritten: %q", dst["__nonce"])
+	}
+	if _, present := dst["__iteration"]; present {
+		t.Errorf("__iteration leaked into dst: %v", dst["__iteration"])
+	}
+	if dst["safe"] != "ok" {
+		t.Errorf("non-reserved key was filtered: %q", dst["safe"])
+	}
+}
+
 // --- Job.Run tests ---
 
 func TestJobRun(t *testing.T) {
