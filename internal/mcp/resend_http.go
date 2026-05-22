@@ -53,6 +53,8 @@ type resendHTTPInput struct {
 	TimeoutMs       *int        `json:"timeout_ms,omitempty" jsonschema:"per-request timeout in milliseconds; default 30000"`
 	TLSFingerprint  string      `json:"tls_fingerprint,omitempty" jsonschema:"informational v1; per-call selection deferred — server uses its configured fingerprint"`
 	Tag             string      `json:"tag,omitempty" jsonschema:"tag stored on the new flow's Tags map"`
+
+	UpstreamProxy *UpstreamProxyConfig `json:"upstream_proxy,omitempty" jsonschema:"optional upstream proxy override applied to this resend invocation. url_template is expanded once per call with §__iteration§=0 and a fresh §__nonce§; the parsed URL tunnels the dial via HTTP CONNECT or SOCKS5. Used for residential proxy IP switching when chained with fuzz / repeated resends"`
 }
 
 // resendHTTPResult is the structured response of the resend_http tool.
@@ -140,6 +142,17 @@ func (s *Server) handleResendHTTP(ctx context.Context, _ *gomcp.CallToolRequest,
 	}
 	rtCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+
+	// Per-flow upstream proxy override (residential proxy IP rotation):
+	// expand input.UpstreamProxy.url_template against the runtime-reserved
+	// §__iteration§ / §__nonce§ variables and attach the parsed URL to the
+	// dial ctx. resend is a single iteration per MCP call, so iteration=0.
+	// When input.UpstreamProxy is nil / empty, rtCtx is returned unchanged
+	// and the dial falls through to the historical direct-dial path.
+	rtCtx, err = input.UpstreamProxy.ResolveForIteration(rtCtx, 0)
+	if err != nil {
+		return nil, nil, fmt.Errorf("resend_http: %w", err)
+	}
 
 	pipe := s.buildResendHTTPPipeline()
 	dial := buildResendHTTPDialFunc(s.connector.tlsTransport, addr, useTLS, sni)

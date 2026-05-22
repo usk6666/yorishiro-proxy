@@ -83,6 +83,8 @@ type fuzzHTTPInput struct {
 
 	Positions []fuzzHTTPPosition `json:"positions" jsonschema:"REQUIRED ordered position list; each describes a typed path into HTTPMessage and the payloads to substitute"`
 	StopOn5xx bool               `json:"stop_on_5xx,omitempty" jsonschema:"when true, abort the remaining variants once any variant returns a 5xx response"`
+
+	UpstreamProxy *UpstreamProxyConfig `json:"upstream_proxy,omitempty" jsonschema:"optional upstream proxy override applied per variant. url_template is re-expanded once per variant against §__iteration§ (variant index) and §__nonce§ (per-variant UUID), and the parsed URL tunnels the variant's dial via HTTP CONNECT or SOCKS5. Used for residential proxy IP rotation: each variant exits from a distinct upstream IP"`
 }
 
 // fuzzHTTPPosition describes one fuzz position. Path is a typed
@@ -193,7 +195,7 @@ func (s *Server) handleFuzzHTTP(ctx context.Context, _ *gomcp.CallToolRequest, i
 	// writes that must not be cancelled by the request context.
 	s.saveFuzzHTTPJob(context.Background(), fuzzID, &input, plan)
 
-	rows, completed, stopReason, runErr := s.runFuzzHTTPVariants(ctx, plan, timeout, input.StopOn5xx, input.Tag, fuzzID)
+	rows, completed, stopReason, runErr := s.runFuzzHTTPVariants(ctx, plan, timeout, input.StopOn5xx, input.Tag, fuzzID, input.UpstreamProxy)
 
 	// Use a fresh background ctx so the closing UPDATE always lands,
 	// even on caller-side ctx cancel. The store-write is best-effort:
