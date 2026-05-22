@@ -27,6 +27,34 @@
   border-radius: var(--radius-md);
 }
 
+.patch-editor-mode-row {
+  display: flex;
+  gap: var(--space-sm);
+  align-items: center;
+}
+
+.patch-editor-mode-select {
+  height: 28px;
+  padding: 0 var(--space-sm);
+  font-size: var(--font-size-xs);
+  color: var(--text-primary);
+  background-color: var(--bg-secondary);
+  border: 1px solid var(--border-muted);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%238b949e' d='M3 5l3 3 3-3'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 6px center;
+  padding-right: 20px;
+}
+
+.patch-editor-mode-select:focus {
+  outline: none;
+  border-color: var(--accent-primary);
+  box-shadow: 0 0 0 2px rgba(88, 166, 255, 0.2);
+}
+
 .patch-editor-row {
   display: flex;
   gap: var(--space-sm);
@@ -63,6 +91,7 @@
   width: 28px;
   height: 28px;
   flex-shrink: 0;
+  margin-left: auto;
   font-family: var(--font-mono);
   font-size: var(--font-size-sm);
   color: var(--text-muted);
@@ -82,4 +111,15 @@
 .patch-editor-spacer {
   width: 28px;
   flex-shrink: 0;
+}
+
+/* Inline validation error for empty or conflicting patches (USK-973). */
+.patch-editor-error {
+  font-size: var(--font-size-xs);
+  color: var(--accent-danger);
+  padding-left: var(--space-xs);
+}
+
+.patch-editor-field[aria-invalid="true"] {
+  border-color: var(--accent-danger);
 }
