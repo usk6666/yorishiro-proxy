@@ -504,6 +504,12 @@ export function ResendPage() {
   const [headers, setHeaders] = useState<Array<{ key: string; value: string }>>([]);
   const [body, setBody] = useState("");
   const [bodyPatches, setBodyPatches] = useState<BodyPatch[]>([]);
+  // BodyPatchEditor validity gate (USK-973). The editor enforces the
+  // backend's exactly-one-of contract (json_path xor regex) and surfaces
+  // empty/conflicting rows; the Send button is disabled while any row
+  // fails, avoiding a needless server round-trip and the prior UX where
+  // both fields were addressable on the same row.
+  const [bodyPatchesValid, setBodyPatchesValid] = useState(true);
 
   // HTTP raw editor state.
   const [httpEditorMode, setHttpEditorMode] = useState<"structured" | "raw">("structured");
@@ -1502,7 +1508,11 @@ export function ResendPage() {
                     </div>
                   )}
                   {requestTab === "patches" && (
-                    <BodyPatchEditor patches={bodyPatches} onChange={setBodyPatches} />
+                    <BodyPatchEditor
+                      patches={bodyPatches}
+                      onChange={setBodyPatches}
+                      onValidityChange={setBodyPatchesValid}
+                    />
                   )}
                 </Tabs>
 
@@ -1538,7 +1548,12 @@ export function ResendPage() {
                   <Button
                     variant="primary"
                     onClick={() => handleHttpSend()}
-                    disabled={httpSending}
+                    disabled={httpSending || !bodyPatchesValid}
+                    title={
+                      !bodyPatchesValid
+                        ? "Fix body patch validation errors before sending"
+                        : undefined
+                    }
                   >
                     {httpSending ? "Sending..." : "Send"}
                   </Button>
