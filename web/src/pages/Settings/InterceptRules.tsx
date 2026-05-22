@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Button, Input, useToast } from "../../components/ui/index.js";
 import { useConfigure } from "../../lib/mcp/hooks.js";
 import type { ConfigResult, InterceptRule } from "../../lib/mcp/types.js";
@@ -17,7 +17,7 @@ const TIMEOUT_BEHAVIOR_OPTIONS = ["auto_release", "auto_drop"] as const;
  * Note: The config query does not return individual rule details.
  * We manage rules via the configure tool's intercept_rules section.
  */
-export function InterceptRules({ config: _config, onRefresh }: InterceptRulesProps) {
+export function InterceptRules({ config, onRefresh }: InterceptRulesProps) {
   const { addToast } = useToast();
   const { configure, loading: configureLoading } = useConfigure();
 
@@ -37,6 +37,20 @@ export function InterceptRules({ config: _config, onRefresh }: InterceptRulesPro
   // Intercept queue settings
   const [queueTimeoutMs, setQueueTimeoutMs] = useState("");
   const [queueTimeoutBehavior, setQueueTimeoutBehavior] = useState<"auto_release" | "auto_drop">("auto_release");
+
+  // USK-977: prefill queue settings from the latest config snapshot on
+  // initial mount and whenever the backend echoes a fresh value (e.g.
+  // after onRefresh()). The TS type for timeout_behavior is the loose
+  // `string` (mirrors ConfigureResult); narrow at runtime to defend
+  // against an unexpected backend value corrupting the form state.
+  useEffect(() => {
+    const q = config.intercept_queue;
+    if (!q) return;
+    setQueueTimeoutMs(String(q.timeout_ms));
+    if (q.timeout_behavior === "auto_release" || q.timeout_behavior === "auto_drop") {
+      setQueueTimeoutBehavior(q.timeout_behavior);
+    }
+  }, [config.intercept_queue]);
 
   const resetForm = () => {
     setRuleId("");

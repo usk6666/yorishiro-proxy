@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"testing"
+	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/usk6666/yorishiro-proxy/internal/cert"
 	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/connector"
 	"github.com/usk6666/yorishiro-proxy/internal/proxybuild"
+	"github.com/usk6666/yorishiro-proxy/internal/rules/common"
 	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
 
@@ -236,6 +238,139 @@ func TestQuery_Config_ProtocolCaps_OmittedWhenZero(t *testing.T) {
 		if _, present := raw[key]; present {
 			t.Errorf("expected JSON key %q to be OMITTED for zero value, raw[%q]=%v", key, key, raw[key])
 		}
+	}
+}
+
+// TestQuery_Config_InterceptQueue_Populated is the USK-977 regression for
+// the "intercept queue config missing from query config" gap deferred from
+// USK-969 (PR #43). When the server is wired with a HoldQueue (the
+// production wiring path), query("config") must echo the intercept_queue
+// settings so the WebUI InterceptRules tab can prefill its form on initial
+// mount.
+func TestQuery_Config_InterceptQueue_Populated(t *testing.T) {
+	t.Parallel()
+
+	// Wire a HoldQueue with explicit non-default values so the round-trip
+	// is observably distinct from the NewHoldQueue defaults.
+	const wantTimeoutMs int64 = 45_000
+	const wantBehavior = common.TimeoutAutoDrop
+
+	hold := common.NewHoldQueue()
+	hold.SetTimeout(time.Duration(wantTimeoutMs) * time.Millisecond)
+	hold.SetTimeoutBehavior(wantBehavior)
+
+	ctx := context.Background()
+	ca := newTestCA(t)
+	store := newTestStore(t)
+	s := newServer(ctx, ca, store, nil, WithHoldQueue(hold))
+
+	ct, st := gomcp.NewInMemoryTransports()
+	ss, err := s.server.Connect(ctx, st, nil)
+	if err != nil {
+		t.Fatalf("server connect: %v", err)
+	}
+	t.Cleanup(func() { ss.Close() })
+
+	client := gomcp.NewClient(&gomcp.Implementation{Name: "test", Version: "v0.0.1"}, nil)
+	cs, err := client.Connect(ctx, ct, nil)
+	if err != nil {
+		t.Fatalf("client connect: %v", err)
+	}
+	t.Cleanup(func() { cs.Close() })
+
+	result := callQuery(t, cs, queryInput{Resource: "config"})
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	// Round-trip through queryConfigResult to verify Go-typed values.
+	var out queryConfigResult
+	unmarshalQueryResult(t, result, &out)
+	if out.InterceptQueue == nil {
+		t.Fatalf("InterceptQueue = nil, want non-nil (holdQueue is wired)")
+	}
+	if out.InterceptQueue.TimeoutMs != wantTimeoutMs {
+		t.Errorf("InterceptQueue.TimeoutMs = %d, want %d", out.InterceptQueue.TimeoutMs, wantTimeoutMs)
+	}
+	if out.InterceptQueue.TimeoutBehavior != string(wantBehavior) {
+		t.Errorf("InterceptQueue.TimeoutBehavior = %q, want %q", out.InterceptQueue.TimeoutBehavior, string(wantBehavior))
+	}
+	switch out.InterceptQueue.TimeoutBehavior {
+	case "auto_release", "auto_drop":
+		// OK — one of the two canonical values.
+	default:
+		t.Errorf("InterceptQueue.TimeoutBehavior = %q, want one of {auto_release, auto_drop}", out.InterceptQueue.TimeoutBehavior)
+	}
+
+	// Round-trip through a generic map to verify the snake_case JSON key
+	// is present in the wire payload (omitempty did not skip it).
+	if len(result.Content) == 0 {
+		t.Fatal("result.Content is empty")
+	}
+	textPart, ok := result.Content[0].(*gomcp.TextContent)
+	if !ok {
+		t.Fatalf("expected TextContent, got %T", result.Content[0])
+	}
+	var raw map[string]any
+	if err := json.Unmarshal([]byte(textPart.Text), &raw); err != nil {
+		t.Fatalf("unmarshal raw JSON: %v", err)
+	}
+	if _, present := raw["intercept_queue"]; !present {
+		t.Errorf("expected JSON key %q to be present, raw=%v", "intercept_queue", raw)
+	}
+}
+
+// TestQuery_Config_InterceptQueue_OmittedWhenNil confirms the
+// `omitempty` JSON tag drops `intercept_queue` from the wire payload
+// when the proxy has not been started (holdQueue == nil). The shape
+// stays stable for WebUI clients that key off presence.
+func TestQuery_Config_InterceptQueue_OmittedWhenNil(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	ca := newTestCA(t)
+	store := newTestStore(t)
+	// No WithHoldQueue option — pipeline.holdQueue stays nil.
+	s := newServer(ctx, ca, store, nil)
+
+	ct, st := gomcp.NewInMemoryTransports()
+	ss, err := s.server.Connect(ctx, st, nil)
+	if err != nil {
+		t.Fatalf("server connect: %v", err)
+	}
+	t.Cleanup(func() { ss.Close() })
+
+	client := gomcp.NewClient(&gomcp.Implementation{Name: "test", Version: "v0.0.1"}, nil)
+	cs, err := client.Connect(ctx, ct, nil)
+	if err != nil {
+		t.Fatalf("client connect: %v", err)
+	}
+	t.Cleanup(func() { cs.Close() })
+
+	result := callQuery(t, cs, queryInput{Resource: "config"})
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	var out queryConfigResult
+	unmarshalQueryResult(t, result, &out)
+	if out.InterceptQueue != nil {
+		t.Errorf("InterceptQueue = %+v, want nil (holdQueue not wired)", out.InterceptQueue)
+	}
+
+	if len(result.Content) == 0 {
+		t.Fatal("result.Content is empty")
+	}
+	textPart, ok := result.Content[0].(*gomcp.TextContent)
+	if !ok {
+		t.Fatalf("expected TextContent, got %T", result.Content[0])
+	}
+	var raw map[string]any
+	if err := json.Unmarshal([]byte(textPart.Text), &raw); err != nil {
+		t.Fatalf("unmarshal raw JSON: %v", err)
+	}
+	if _, present := raw["intercept_queue"]; present {
+		t.Errorf("expected JSON key %q to be OMITTED when holdQueue is nil, raw[%q]=%v", "intercept_queue", "intercept_queue", raw["intercept_queue"])
 	}
 }
 
