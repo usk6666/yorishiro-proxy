@@ -81,6 +81,25 @@ type fuzzWSInput struct {
 
 	Positions   []fuzzWSPosition `json:"positions" jsonschema:"REQUIRED ordered position list; each describes a typed path into WSMessage and the payloads to substitute"`
 	StopOnClose bool             `json:"stop_on_close,omitempty" jsonschema:"when true, abort the remaining variants once any variant receives a Close frame"`
+
+	// PreMacro / PostMacro: pre/post macro hooks (USK-984 — mirror of
+	// USK-960 / USK-961 / USK-981 on fuzz_http). scope="iteration"
+	// (default) shares a per-variant KV Store with the variant's pipeline
+	// so reserved keys §__iteration§ / §__nonce§, pre extracts, and (for
+	// post) reserved __response_* keys are visible to template expansion.
+	// scope="job" runs the hook exactly once outside the variant loop
+	// against a job-scoped KV Store that is merged into each iteration's
+	// store before per-iteration reserved keys are seeded. mix-scope (pre
+	// and post with independent scope) is supported.
+	//
+	// post_macro on scope="iteration" injects WS-specific reserved keys
+	// before the macro runs: __response_opcode (text|binary|close),
+	// __response_payload (terminating frame bytes, 64 KiB cap),
+	// __response_close_code (uint16, 0 when the terminating frame is not
+	// a Close — see help_fuzz_ws.md), __response_close_reason (string).
+	// __response_headers is N/A (WS frames have no headers).
+	PreMacro  *MacroConfig `json:"pre_macro,omitempty" jsonschema:"pre macro hook executed before a variant's dial + upgrade. scope=iteration (default; fires once per variant) | job (fires once before the variant loop). on_error: skip|abort|continue (default skip). For scope=job, skip returns a successful job result with completed_variants=0 and stopped_reason set"`
+	PostMacro *MacroConfig `json:"post_macro,omitempty" jsonschema:"post macro hook executed after a variant's terminating frame. scope=iteration (default; fires once per variant against __response_opcode / __response_payload / __response_close_code / __response_close_reason reserved keys) | job (fires once after the variant loop completes; no __response_* keys). on_error: skip|abort|continue (default skip)"`
 }
 
 // fuzzWSPosition describes one fuzz position. Path is a typed reference
@@ -191,7 +210,7 @@ func (s *Server) handleFuzzWS(ctx context.Context, _ *gomcp.CallToolRequest, inp
 	// being created — the finalize UPDATE below relies on this row.
 	s.saveFuzzWSJob(context.Background(), fuzzID, &input, plan)
 
-	rows, completed, stopReason, runErr := s.runFuzzWSVariants(ctx, plan, timeout, input.StopOnClose, input.Tag, fuzzID)
+	rows, completed, stopReason, runErr := s.runFuzzWSVariants(ctx, plan, timeout, input.StopOnClose, input.Tag, fuzzID, input.PreMacro, input.PostMacro)
 
 	// Use a fresh background ctx so the closing UPDATE always lands,
 	// even on caller-side ctx cancel.
