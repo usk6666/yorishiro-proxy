@@ -22,6 +22,7 @@ import type {
   ResendGRPCResult,
   ResendHTTPParams,
   ResendHTTPResult,
+  ResendRawBytePatch,
   ResendRawParams,
   ResendRawTypedResult,
   ResendWSResult,
@@ -262,6 +263,32 @@ function extractFlowPath(urlStr: string): string {
 }
 
 /**
+ * Extract the FIN bit from the first send-direction frame in a loaded
+ * WebSocket flow (USK-967).
+ *
+ * Frames are projected into `message_preview` with `metadata["ws_fin"]`
+ * (see `internal/pipeline/record_step.go:1231`). Returns `true` when the
+ * flow has no message_preview, no send-direction frame, or the metadata
+ * value is missing/unparseable — matching the historical default but
+ * preserving the wire-observed FIN=0 when one is recorded. Without this,
+ * a frame loaded with FIN=0 silently default-resends with FIN=1, which
+ * is a wire-faithfulness violation.
+ */
+function extractFlowFin(flow: FlowDetailResult): boolean {
+  const preview = flow.message_preview;
+  if (!preview || preview.length === 0) return true;
+  for (const msg of preview) {
+    if (msg.direction === "send") {
+      const raw = msg.metadata?.ws_fin;
+      if (raw === "true") return true;
+      if (raw === "false") return false;
+      return true;
+    }
+  }
+  return true;
+}
+
+/**
  * Map a `Record<string, string[]>` headers map (the FlowDetailResult
  * wire shape) to the ordered `{key,value}` rows the HeaderEditor consumes.
  * Mirrors the inline conversion in the HTTP populate path.
@@ -488,6 +515,11 @@ export function ResendPage() {
   const [targetAddr, setTargetAddr] = useState("");
   const [useTls, setUseTls] = useState(false);
   const [rawPatches, setRawPatches] = useState<RawPatch[]>([]);
+  // RawPatchEditor validity gate (USK-967). The editor surfaces invalid
+  // offset entries (non-numeric / empty / negative / fractional) inline
+  // and toggles this flag via onValidityChange so the Send button is
+  // disabled before the prior silent NaN→0 coercion path is reached.
+  const [rawPatchesValid, setRawPatchesValid] = useState(true);
   const [tcpMode, setTcpMode] = useState<"resend_raw" | "tcp_replay">("resend_raw");
 
   // gRPC editor state — USK-936. Minimum-viable MVP exposes service /
@@ -722,14 +754,16 @@ export function ResendPage() {
         messagePayload: flow.request_body || "",
       });
     } else if (isWsFlow(flow)) {
-      // WebSocket flow: populate single-frame editor from the handshake URL.
+      // WebSocket flow: populate single-frame editor from the handshake URL
+      // and (USK-967) honour the first send-direction frame's FIN bit
+      // so a loaded FIN=0 frame doesn't silently default-resend with FIN=1.
       const path = extractFlowPath(flow.url || "");
       setWsState({
         targetAddr: flow.conn_info?.server_addr ?? "",
         scheme: extractUseTls(flow) ? "wss" : "ws",
         path,
         opcode: "text",
-        fin: true,
+        fin: extractFlowFin(flow),
         payload: "",
         bodyEncoding: "text",
         compressed: false,
@@ -743,6 +777,9 @@ export function ResendPage() {
       setTargetAddr(flow.conn_info?.server_addr ?? "");
       setUseTls(!!flow.conn_info?.tls_version);
       setRawPatches([]);
+      // Reset to valid for the empty-patches default; the editor will
+      // re-notify after the first edit (USK-967).
+      setRawPatchesValid(true);
       setTcpMode("resend_raw");
       setTcpRequestTab("messages");
     } else {
@@ -1037,23 +1074,52 @@ export function ResendPage() {
       return;
     }
 
-    const params: ResendRawParams = {
-      flow_id: activeFlowId,
-      target_addr: targetAddr.trim(),
-      use_tls: useTls || undefined,
-      patches:
-        rawPatches.length > 0
-          ? rawPatches.map((p) => ({
-              offset: p.offset ?? 0,
-              data: p.data_base64 ?? "",
-              data_encoding: "base64",
-            }))
-          : undefined,
-      tag: tag || undefined,
-    };
-
     setTcpResendRawSending(true);
     try {
+      // USK-967: the previous `p.offset ?? 0` fallback silently coerced an
+      // invalid offset (typically a NaN from a non-numeric editor input)
+      // to 0, which writes the patch at a wholly different position than
+      // the user intended — exactly the byte-level fuzz failure mode we
+      // exist to avoid. The submit button is gated on `rawPatchesValid`,
+      // so this path is unreachable when an offset row is invalid; the
+      // throw acts as a defense-in-depth assertion against a future
+      // regression in the validity wiring.
+      const offsetPatches: ResendRawBytePatch[] = [];
+      for (const p of rawPatches) {
+        const mode =
+          p.find_text != null || p.replace_text != null
+            ? "find_replace_text"
+            : p.find_base64 != null || p.replace_base64 != null
+              ? "find_replace_hex"
+              : "offset";
+        if (mode === "offset") {
+          if (
+            p.offset == null ||
+            !Number.isInteger(p.offset) ||
+            p.offset < 0
+          ) {
+            throw new Error(
+              "resend_raw: invalid offset reached submit; RawPatchEditor validity gate failed",
+            );
+          }
+          offsetPatches.push({
+            offset: p.offset,
+            data: p.data_base64 ?? "",
+            data_encoding: "base64",
+          });
+        }
+        // Note: find/replace modes are not part of ResendRawParams.patches
+        // (the typed schema is offset-only). They are preserved in state
+        // for future use but skipped here — matching the prior behaviour.
+      }
+      const params: ResendRawParams = {
+        flow_id: activeFlowId,
+        target_addr: targetAddr.trim(),
+        use_tls: useTls || undefined,
+        patches: offsetPatches.length > 0 ? offsetPatches : undefined,
+        tag: tag || undefined,
+      };
+
       const typedResult: ResendRawTypedResult = await client.resendRaw(params);
       const adapted: TcpResendResult = {
         new_flow_id: typedResult.stream_id,
@@ -1859,7 +1925,11 @@ export function ResendPage() {
                   <TcpMessageList messages={tcpMessages} />
                 )}
                 {tcpRequestTab === "raw_patches" && (
-                  <RawPatchEditor patches={rawPatches} onChange={setRawPatches} />
+                  <RawPatchEditor
+                    patches={rawPatches}
+                    onChange={setRawPatches}
+                    onValidityChange={setRawPatchesValid}
+                  />
                 )}
               </Tabs>
             )}
@@ -1883,7 +1953,16 @@ export function ResendPage() {
                   <Button
                     variant="primary"
                     onClick={() => handleResendRaw()}
-                    disabled={tcpResendRawSending || !targetAddr.trim()}
+                    disabled={
+                      tcpResendRawSending ||
+                      !targetAddr.trim() ||
+                      !rawPatchesValid
+                    }
+                    title={
+                      !rawPatchesValid
+                        ? "Fix raw patch validation errors before sending"
+                        : undefined
+                    }
                   >
                     {tcpResendRawSending ? "Sending..." : "Send Raw"}
                   </Button>

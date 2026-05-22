@@ -111,3 +111,14 @@
   color: var(--accent-danger);
   background-color: rgba(248, 81, 73, 0.1);
 }
+
+/* Inline validation error for the offset field (USK-967). */
+.raw-patch-editor-error {
+  font-size: var(--font-size-xs);
+  color: var(--accent-danger);
+  padding-left: var(--space-xs);
+}
+
+.raw-patch-editor-field[aria-invalid="true"] {
+  border-color: var(--accent-danger);
+}
