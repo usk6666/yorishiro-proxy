@@ -193,11 +193,11 @@ function inferMode(v: UpstreamProxyEditorValue | null | undefined): Mode {
  * calls `onChange` for every keystroke; the active payload variant is
  * already what the backend expects).
  *
- * NOTE (USK-976): when the listener is currently using rotation, the
- * `status` query does not yet expose `upstream_proxy_template` /
- * `upstream_proxy_rotation_policy`, so on page reload the editor will
- * default to Simple mode with an empty field even if rotation is
- * actually live. This pre-population gap is tracked separately.
+ * USK-976 closed the prefill gap: the `status` query now exposes
+ * `upstream_proxy_template` / `upstream_proxy_rotation_policy` per
+ * listener, and the parent (`ConnectionSettings`) feeds the
+ * structured rotation shape directly so `inferMode` enters rotation
+ * mode automatically when the live config is a rotation.
  */
 export function UpstreamProxyEditor({
   value,

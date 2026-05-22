@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -704,5 +705,151 @@ func TestProxyStart_Reset_PreservesOtherListenerOverride(t *testing.T) {
 	}
 	if got := manager.UpstreamProxyForListener("alpha"); got != "" {
 		t.Errorf("alpha = %q, want empty", got)
+	}
+}
+
+// TestQueryStatus_PerListenerUpstreamProxyRotation verifies the USK-976
+// surface: when a listener is configured with USK-959 rotation
+// (url_template + rotation.policy), query("status").listeners[*] echoes
+// the redacted template and the policy on that listener's entry — and
+// non-rotation listeners do not carry the fields (omitempty correctness).
+//
+// The template carries a "secret" password substring to exercise the
+// connector.RedactProxyURL call at the publish boundary.
+func TestQueryStatus_PerListenerUpstreamProxyRotation(t *testing.T) {
+	manager := newTestProxybuildManager(t)
+	cs := setupMultiListenerTestSession(t, manager)
+	defer manager.StopAll(context.Background())
+
+	// Start two listeners.
+	for _, name := range []string{"alpha", "beta"} {
+		result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+			Name: "proxy_start",
+			Arguments: map[string]any{
+				"name":        name,
+				"listen_addr": "127.0.0.1:0",
+			},
+		})
+		if err != nil {
+			t.Fatalf("proxy_start(%s): %v", name, err)
+		}
+		if result.IsError {
+			t.Fatalf("proxy_start(%s) failed: %v", name, result.Content)
+		}
+	}
+
+	// Configure rotation on listener "beta" only. Use a template with a
+	// real password component so we can assert the redaction zeroed it
+	// out on the status surface.
+	const rotationTemplate = "http://user-§__nonce§:secret@127.0.0.1:65432"
+	const rotationPolicy = "per_request"
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "configure",
+		Arguments: map[string]any{
+			"name": "beta",
+			"upstream_proxy": map[string]any{
+				"url_template": rotationTemplate,
+				"rotation": map[string]any{
+					"policy": rotationPolicy,
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("configure(beta rotation): %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("configure(beta rotation) failed: %v", result.Content)
+	}
+
+	// Manager-level state sanity-check: beta carries the raw rotation,
+	// alpha does not.
+	tplBeta, polBeta := manager.UpstreamProxyRotationForListener("beta")
+	if tplBeta != rotationTemplate {
+		t.Errorf("beta rotation template = %q, want round-trip %q", tplBeta, rotationTemplate)
+	}
+	if polBeta != rotationPolicy {
+		t.Errorf("beta rotation policy = %q, want %q", polBeta, rotationPolicy)
+	}
+	tplAlpha, polAlpha := manager.UpstreamProxyRotationForListener("alpha")
+	if tplAlpha != "" || polAlpha != "" {
+		t.Errorf("alpha leaked rotation: template=%q policy=%q", tplAlpha, polAlpha)
+	}
+
+	// Query the status surface and verify the per-listener entries.
+	statusResult, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name:      "query",
+		Arguments: map[string]any{"resource": "status"},
+	})
+	if err != nil {
+		t.Fatalf("query/status: %v", err)
+	}
+	if statusResult.IsError {
+		t.Fatalf("query/status failed: %v", statusResult.Content)
+	}
+
+	var status queryStatusResult
+	tc := statusResult.Content[0].(*gomcp.TextContent)
+	if err := json.Unmarshal([]byte(tc.Text), &status); err != nil {
+		t.Fatalf("unmarshal status: %v", err)
+	}
+
+	entries := map[string]queryListenerStatusEntry{}
+	for _, l := range status.Listeners {
+		entries[l.Name] = l
+	}
+
+	betaEntry, ok := entries["beta"]
+	if !ok {
+		t.Fatalf("beta listener missing from status.Listeners (got %d entries)", len(status.Listeners))
+	}
+	if betaEntry.UpstreamProxyTemplate == "" {
+		t.Errorf("beta upstream_proxy_template empty; want redacted template")
+	}
+	// Redaction must zero out the "secret" password substring.
+	if strings.Contains(betaEntry.UpstreamProxyTemplate, "secret") {
+		t.Errorf("beta upstream_proxy_template leaked password: %q", betaEntry.UpstreamProxyTemplate)
+	}
+	// The template macro and the host:port must still be visible so the
+	// editor can re-populate. The §__nonce§ marker passes through
+	// RedactProxyURL because it contains no '@'.
+	if !strings.Contains(betaEntry.UpstreamProxyTemplate, "§__nonce§") {
+		t.Errorf("beta upstream_proxy_template dropped §__nonce§ macro: %q", betaEntry.UpstreamProxyTemplate)
+	}
+	if !strings.Contains(betaEntry.UpstreamProxyTemplate, "127.0.0.1:65432") {
+		t.Errorf("beta upstream_proxy_template dropped host:port: %q", betaEntry.UpstreamProxyTemplate)
+	}
+	if betaEntry.UpstreamProxyRotationPolicy != rotationPolicy {
+		t.Errorf("beta upstream_proxy_rotation_policy = %q, want %q",
+			betaEntry.UpstreamProxyRotationPolicy, rotationPolicy)
+	}
+	// When rotation is configured, no literal URL is set.
+	if betaEntry.UpstreamProxy != "" {
+		t.Errorf("beta upstream_proxy = %q, want empty (rotation is active)", betaEntry.UpstreamProxy)
+	}
+
+	alphaEntry, ok := entries["alpha"]
+	if !ok {
+		t.Fatalf("alpha listener missing from status.Listeners")
+	}
+	// Non-rotation listener: rotation fields must be empty (omitempty
+	// correctness — the JSON wire form should omit them entirely, and
+	// the deserialised struct should carry the zero value).
+	if alphaEntry.UpstreamProxyTemplate != "" {
+		t.Errorf("alpha upstream_proxy_template = %q, want empty", alphaEntry.UpstreamProxyTemplate)
+	}
+	if alphaEntry.UpstreamProxyRotationPolicy != "" {
+		t.Errorf("alpha upstream_proxy_rotation_policy = %q, want empty", alphaEntry.UpstreamProxyRotationPolicy)
+	}
+
+	// Belt-and-braces: verify the raw JSON for the alpha entry actually
+	// omits the rotation fields (omitempty on the struct).
+	if !strings.Contains(tc.Text, `"name":"alpha"`) {
+		t.Fatalf("status JSON missing alpha entry: %s", tc.Text)
+	}
+	// Strict: the raw JSON must not contain "secret" anywhere — the
+	// only place it could appear is via leaked beta credentials.
+	if strings.Contains(tc.Text, "secret") {
+		t.Errorf("status JSON leaked rotation password: %s", tc.Text)
 	}
 }

@@ -1,7 +1,11 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Button, Input, useToast } from "../../components/ui/index.js";
 import { useConfigure } from "../../lib/mcp/hooks.js";
-import type { StatusResult } from "../../lib/mcp/types.js";
+import type {
+  ListenerStatusEntry,
+  StatusResult,
+  UpstreamProxyRotationInput,
+} from "../../lib/mcp/types.js";
 import {
   UpstreamProxyEditor,
   type UpstreamProxyEditorValue,
@@ -15,6 +19,56 @@ interface ConnectionSettingsProps {
 }
 
 const DEFAULT_LISTENER = "default";
+
+/**
+ * Find the per-listener status entry matching `name`. Returns undefined
+ * when the listeners array is missing or no entry matches.
+ */
+function findListenerEntry(
+  status: StatusResult,
+  name: string,
+): ListenerStatusEntry | undefined {
+  return status.listeners?.find((l) => l.name === name);
+}
+
+/**
+ * Build the initial value for the UpstreamProxyEditor from the current
+ * status snapshot. USK-976 prefill order:
+ *
+ *  1. If the selected listener's status entry carries a rotation
+ *     template, return the structured `UpstreamProxyRotationInput`
+ *     shape — UpstreamProxyEditor.inferMode will enter rotation mode
+ *     when handed that shape.
+ *  2. Else if the entry carries a literal `upstream_proxy`, return it.
+ *  3. Else fall back to the top-level `status.upstream_proxy` (the
+ *     global default; relevant for the default listener when no
+ *     per-listener entry has been materialised yet).
+ *
+ * The redacted form is what the backend returns; the editor's state
+ * will mirror the redacted URL until the operator edits, which is
+ * deliberate (we never receive the unredacted credential back from
+ * the server). The rotation `url_template` is also redacted at this
+ * layer — round-tripping a save on top of a redacted template would
+ * persist the literal "xxxxx" placeholder; the editor surfaces this
+ * by populating the visible value.
+ */
+function deriveUpstreamProxyValue(
+  status: StatusResult,
+  selectedListener: string,
+): UpstreamProxyEditorValue {
+  const entry = findListenerEntry(status, selectedListener);
+  if (entry?.upstream_proxy_template && entry?.upstream_proxy_rotation_policy) {
+    const rotation: UpstreamProxyRotationInput = {
+      url_template: entry.upstream_proxy_template,
+      rotation: { policy: entry.upstream_proxy_rotation_policy },
+    };
+    return rotation;
+  }
+  if (entry?.upstream_proxy) {
+    return entry.upstream_proxy;
+  }
+  return status.upstream_proxy || "";
+}
 
 /**
  * ConnectionSettings — manage connection limits, timeouts, and upstream proxy.
@@ -32,15 +86,6 @@ export function ConnectionSettings({ status, onRefresh }: ConnectionSettingsProp
   const [peekTimeout, setPeekTimeout] = useState(String(status.peek_timeout_ms));
   const [requestTimeout, setRequestTimeout] = useState(String(status.request_timeout_ms));
 
-  // Upstream proxy. Backend follow-up USK-976 will expose rotation
-  // template/policy in the status query; until then, the editor cannot
-  // pre-populate the rotation form after page reload — it falls back to
-  // the (status.upstream_proxy) literal URL, which is "" when rotation
-  // is live.
-  const [upstreamProxy, setUpstreamProxy] = useState<UpstreamProxyEditorValue>(
-    status.upstream_proxy || "",
-  );
-
   // Listener scope for the Upstream Proxy card (USK-826/USK-959).
   // `configure({ name })` currently scopes only the upstream_proxy
   // section; other cards remain process-global, so the selector lives
@@ -51,13 +96,27 @@ export function ConnectionSettings({ status, onRefresh }: ConnectionSettingsProp
   );
   const [selectedListener, setSelectedListener] = useState<string>(DEFAULT_LISTENER);
 
-  // Sync state when status changes
+  // Upstream proxy. USK-976 plumbs `upstream_proxy_template` +
+  // `upstream_proxy_rotation_policy` on each listener entry, so on
+  // re-read we can restore the rotation form state. Falls back to
+  // the literal URL form (`upstream_proxy`) when no rotation is
+  // active, and to the global `status.upstream_proxy` when the
+  // listener entry is missing entirely.
+  const [upstreamProxy, setUpstreamProxy] = useState<UpstreamProxyEditorValue>(() =>
+    deriveUpstreamProxyValue(status, selectedListener),
+  );
+
+  // Sync state when status changes or the selected listener changes.
+  // Rotation prefill depends on `selectedListener` so it MUST be in
+  // the deps list — without it, switching scope after the initial
+  // mount would leave the editor stuck on the previous listener's
+  // rotation/literal form.
   useEffect(() => {
     setMaxConnections(String(status.max_connections));
     setPeekTimeout(String(status.peek_timeout_ms));
     setRequestTimeout(String(status.request_timeout_ms));
-    setUpstreamProxy(status.upstream_proxy || "");
-  }, [status]);
+    setUpstreamProxy(deriveUpstreamProxyValue(status, selectedListener));
+  }, [status, selectedListener]);
 
   // If the selected listener disappears (stopped externally), fall back
   // to the default listener so the next save targets a running scope.

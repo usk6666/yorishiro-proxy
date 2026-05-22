@@ -2087,12 +2087,21 @@ func messagesHaveOversizedBody(msgs []*flow.Flow) bool {
 // UpstreamProxy (USK-826) carries the redacted per-listener upstream-proxy
 // URL; an empty string means "direct dial" or "inherits the global / boot-time
 // fallback". Multi-listener chained MITM is the canonical multi-value case.
+//
+// UpstreamProxyTemplate / UpstreamProxyRotationPolicy (USK-959 / USK-976)
+// carry the rotating-template form when the listener is using USK-959
+// rotation. The template is redacted via connector.RedactProxyURL at the
+// publish boundary (templates may resolve to credentials). The policy
+// string is an enum with no credential content and passes through verbatim.
+// Both fields are empty (omitempty) when the listener is not using rotation.
 type queryListenerStatusEntry struct {
-	Name              string `json:"name"`
-	ListenAddr        string `json:"listen_addr"`
-	ActiveConnections int    `json:"active_connections"`
-	UptimeSeconds     int64  `json:"uptime_seconds"`
-	UpstreamProxy     string `json:"upstream_proxy,omitempty"`
+	Name                        string `json:"name"`
+	ListenAddr                  string `json:"listen_addr"`
+	ActiveConnections           int    `json:"active_connections"`
+	UptimeSeconds               int64  `json:"uptime_seconds"`
+	UpstreamProxy               string `json:"upstream_proxy,omitempty"`
+	UpstreamProxyTemplate       string `json:"upstream_proxy_template,omitempty"`
+	UpstreamProxyRotationPolicy string `json:"upstream_proxy_rotation_policy,omitempty"`
 }
 
 // queryStatusResult is the response for the status resource.
@@ -2153,12 +2162,17 @@ func (s *Server) populateManagerStatus(result *queryStatusResult) {
 		for _, st := range statuses {
 			// USK-826: redact per-listener upstream_proxy at publish time
 			// (the manager keeps the raw form for in-process inspection).
+			// USK-959 / USK-976: same redaction convention for the rotation
+			// template; the rotation policy is an enum string and is
+			// published verbatim.
 			entry := queryListenerStatusEntry{
-				Name:              st.Name,
-				ListenAddr:        st.ListenAddr,
-				ActiveConnections: st.ActiveConnections,
-				UptimeSeconds:     st.UptimeSeconds,
-				UpstreamProxy:     connector.RedactProxyURL(st.UpstreamProxy),
+				Name:                        st.Name,
+				ListenAddr:                  st.ListenAddr,
+				ActiveConnections:           st.ActiveConnections,
+				UptimeSeconds:               st.UptimeSeconds,
+				UpstreamProxy:               connector.RedactProxyURL(st.UpstreamProxy),
+				UpstreamProxyTemplate:       connector.RedactProxyURL(st.UpstreamProxyTemplate),
+				UpstreamProxyRotationPolicy: st.UpstreamProxyRotationPolicy,
 			}
 			result.Listeners = append(result.Listeners, entry)
 		}
