@@ -279,11 +279,6 @@ func (s *Server) runFuzzHTTPVariants(ctx context.Context, plan *fuzzHTTPPlan, ti
 		default:
 		}
 
-		// TODO(USK-817 sibling: budget counter, P5-19)
-		if err := s.waitRateLimit(ctx, rateLimitHost); err != nil {
-			return rows, completed, fmt.Sprintf("rate limit: %v", err), nil
-		}
-
 		payloads, err := decodeFuzzHTTPPayloads(plan.positions, indices)
 		if err != nil {
 			return nil, completed, "", fmt.Errorf("variant %d: decode payloads: %w", variantIdx, err)
@@ -299,6 +294,10 @@ func (s *Server) runFuzzHTTPVariants(ctx context.Context, plan *fuzzHTTPPlan, ti
 		// errors (parse / scheme / CRLF guard) are NON-FATAL at the
 		// per-variant level: record on the row and continue to the next
 		// variant so a single malformed expansion does not abort the run.
+		//
+		// Resolved BEFORE waitRateLimit so a permanently-malformed template
+		// does not burn rate-limit slots producing zero wire traffic — the
+		// failure short-circuits to row.Error and the next iteration.
 		iterCtx, ipErr := upstreamProxy.ResolveForIteration(ctx, variantIdx)
 		if ipErr != nil {
 			row := fuzzHTTPVariantRow{
@@ -311,6 +310,11 @@ func (s *Server) runFuzzHTTPVariants(ctx context.Context, plan *fuzzHTTPPlan, ti
 			s.saveFuzzHTTPResult(ctx, fuzzID, variantIdx, row, payloads)
 			nextIndices(indices, plan.positions)
 			continue
+		}
+
+		// TODO(USK-817 sibling: budget counter, P5-19)
+		if err := s.waitRateLimit(ctx, rateLimitHost); err != nil {
+			return rows, completed, fmt.Sprintf("rate limit: %v", err), nil
 		}
 
 		variantStart := time.Now()

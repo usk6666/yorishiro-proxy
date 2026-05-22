@@ -39,16 +39,16 @@ func ParseUpstreamProxy(rawURL string) (*url.URL, error) {
 	}
 
 	if u.Host == "" {
-		return nil, fmt.Errorf("upstream proxy URL has no host: %s", rawURL)
+		return nil, fmt.Errorf("upstream proxy URL has no host: %s", RedactProxyURL(rawURL))
 	}
 
 	// Ensure host:port format.
 	host, port, splitErr := net.SplitHostPort(u.Host)
 	if splitErr != nil {
-		return nil, fmt.Errorf("upstream proxy URL must include a port (e.g. %s://host:port): %s", u.Scheme, rawURL)
+		return nil, fmt.Errorf("upstream proxy URL must include a port (e.g. %s://host:port): %s", u.Scheme, RedactProxyURL(rawURL))
 	}
 	if host == "" || port == "" {
-		return nil, fmt.Errorf("upstream proxy URL has empty host or port: %s", rawURL)
+		return nil, fmt.Errorf("upstream proxy URL has empty host or port: %s", RedactProxyURL(rawURL))
 	}
 
 	return u, nil
@@ -85,6 +85,11 @@ func RedactProxyURL(rawURL string) string {
 // per-listener / global resolution chain — those paths historically
 // dialed direct via net.Dialer, so adding this wrapper preserves the
 // existing default behaviour while enabling per-iteration rotation.
+//
+// Note: this intentionally does NOT consult EffectiveUpstreamProxyForCtx,
+// so resend/fuzz dials do not inherit per-listener / global upstream-proxy
+// configuration — they are opt-in via ContextWithUpstreamProxyOverride
+// only.
 func MaybeDialViaUpstreamProxy(ctx context.Context, targetAddr string, timeout time.Duration) (net.Conn, error) {
 	if u, present := UpstreamProxyOverrideFromContext(ctx); present && u != nil {
 		return DialViaUpstreamProxy(ctx, u, targetAddr, timeout)
