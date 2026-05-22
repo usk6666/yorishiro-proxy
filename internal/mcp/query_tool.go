@@ -2320,6 +2320,11 @@ type queryConfigResult struct {
 	// echoed here — that surface is owned by the `security` MCP tool
 	// (different lifecycle and audit semantics).
 	CaptureScope *queryCaptureScopeResult `json:"capture_scope"`
+	// InterceptQueue echoes the current intercept HoldQueue settings
+	// (USK-977). Reuses the configure-side response struct so the wire
+	// shape matches `configure({intercept_queue: ...})` byte-for-byte.
+	// Omitted when s.pipeline.holdQueue is nil (proxy not yet started).
+	InterceptQueue *configureInterceptQueueResult `json:"intercept_queue,omitempty"`
 }
 
 // queryCaptureScopeResult is the JSON shape returned for the
@@ -2426,6 +2431,14 @@ func (s *Server) handleQueryConfig() (*gomcp.CallToolResult, *queryConfigResult,
 
 	result.TLSFingerprint = s.currentTLSFingerprint()
 	result.CaptureScope = s.currentCaptureScope()
+
+	// USK-977: surface intercept_queue config so the WebUI InterceptRules
+	// tab can prefill its form. Nil-guard mirrors configureInterceptQueue
+	// (configure_tool.go) — holdQueue may be nil if the proxy has not
+	// started yet.
+	if s.pipeline.holdQueue != nil {
+		result.InterceptQueue = s.interceptQueueResult()
+	}
 
 	return nil, result, nil
 }

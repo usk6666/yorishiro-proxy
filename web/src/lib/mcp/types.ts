@@ -694,6 +694,21 @@ export interface ConfigResult {
   peek_timeout_ms: number;
   request_timeout_ms: number;
   tls_fingerprint: string;
+  /**
+   * Current intercept HoldQueue settings (USK-977). Mirrors the
+   * `ConfigureResult.intercept_queue` shape byte-for-byte so callers can
+   * reuse the same render path. Omitted when the proxy has not yet
+   * initialized the queue (server start race).
+   */
+  intercept_queue?: {
+    timeout_ms: number;
+    timeout_behavior: string;
+    queued_items: number;
+    protocol_overrides?: Record<
+      string,
+      { timeout_ms: number; timeout_behavior: string }
+    >;
+  };
 }
 
 /** Response for query resource="ca_cert". */
