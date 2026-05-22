@@ -31,10 +31,10 @@ export type { McpContextValue, McpProviderProps } from "./context.js";
 
 // Hooks
 export {
-  useConfigure, useInterceptAction, useMacro, useManage, useMcpClient, useProxyControl, useQuery, useSecurity
+  useConfigure, useGrpcSchema, useGrpcSchemaList, useInterceptAction, useMacro, useManage, useMcpClient, usePluginIntrospect, useProxyControl, useQuery, useSecurity
 } from "./hooks.js";
 export type {
-  UseConfigureResult, UseInterceptActionResult, UseMacroResult, UseManageResult, UseMcpClientResult, UseProxyControlResult, UseQueryOptions,
+  UseConfigureResult, UseGrpcSchemaListResult, UseGrpcSchemaResult, UseInterceptActionResult, UseMacroResult, UseManageResult, UseMcpClientResult, UsePluginIntrospectResult, UseProxyControlResult, UseQueryOptions,
   UseQueryResult, UseSecurityResult
 } from "./hooks.js";
 

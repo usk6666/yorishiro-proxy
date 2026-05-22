@@ -217,6 +217,14 @@ export class McpClient {
     }
 
     // Parse the structured result from the content.
+    //
+    // yorishiro-proxy's MCP tools return a single JSON-text ContentBlock as
+    // their contract. If the content array is missing, empty, or its first
+    // block is not a text block, that is a contract violation by the server
+    // — surface it as an explicit error instead of silently casting the raw
+    // ToolResult to `T`, which used to propagate to callers and trigger
+    // downstream `JSON.parse("")` crashes or property-undefined surprises
+    // (USK-966).
     if (
       result.content &&
       Array.isArray(result.content) &&
@@ -228,7 +236,9 @@ export class McpClient {
       }
     }
 
-    return result as unknown as T;
+    throw new Error(
+      `MCP tool '${name}' returned no parseable content`,
+    );
   }
 
   // -----------------------------------------------------------------------
