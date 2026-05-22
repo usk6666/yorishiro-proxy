@@ -443,6 +443,15 @@ func (l *fuzzHTTPVariantLoop) runOne(ctx context.Context, variantIdx int) (strin
 	variantStart := time.Now()
 	row, statusCode, runErr := l.s.runFuzzHTTPSingleVariant(iterCtx, l.plan, l.pipe, l.dial, l.timeout, variantIdx, expandedPayloads, l.tag, kvStore)
 	row.DurationMs = time.Since(variantStart).Milliseconds()
+	// USK-960: keep row.Payloads aligned with what saveFuzzHTTPResult
+	// persists to fuzz_results.payloads — the operator-supplied (un-
+	// expanded) payload map, NOT the post-template-expansion form.
+	// Rationale: fuzz_results.payloads is the replay-input view (re-run
+	// this row with a different kvStore); the wire-actual bytes are
+	// already preserved via the per-variant Flow rows under row.StreamID.
+	// Without this assignment the in-memory MCP response and the
+	// persisted row diverged whenever any §var§ resolved.
+	row.Payloads = payloads
 	if runErr != nil {
 		row.Error = runErr.Error()
 	}

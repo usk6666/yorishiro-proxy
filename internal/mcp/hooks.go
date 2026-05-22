@@ -51,6 +51,25 @@ const (
 // downstream invocation.
 const maxResponseBodyKVBytes = 64 * 1024
 
+// maxResponseHeaderValueKVBytes caps the bytes copied into a single
+// __response_headers__<lower(name)>__ kvStore entry. A malicious upstream
+// could return a very long single-header value (Set-Cookie payloads,
+// Server-Timing dumps, X-Debug-* leakage) and amplify memory by having
+// templates substitute the full value into multiple downstream macro
+// invocations. 8 KiB matches the order of magnitude of typical HTTP
+// header value caps and is generous for legitimate cases (Bearer tokens,
+// CSRF tokens) while bounding attacker-controlled growth (CWE-770).
+const maxResponseHeaderValueKVBytes = 8 * 1024
+
+// maxResponseHeaderKVCount caps the number of distinct response headers
+// injected into the kvStore as __response_headers__<lower(name)>__
+// entries. The recorded flow keeps the full header list untouched; this
+// only bounds the kvStore-side projection consumed by post_macro template
+// expansion (CWE-770). 256 covers any reasonable response while
+// preventing a malicious upstream emitting a Set-Cookie storm from
+// inflating the per-iteration kvStore.
+const maxResponseHeaderKVCount = 256
+
 // hooksInput holds the hook configuration for fuzz/resend actions. The
 // JSON keys are pre_macro / post_macro (USK-960 nomenclature) — older
 // pre_send / post_receive spellings are not accepted. The dormant
@@ -315,6 +334,17 @@ func (he *hookExecutor) executePostMacro(ctx context.Context, statusCode int, re
 // Existing reserved-key writes for the same iteration are overwritten so
 // a re-run of post_macro within the same kvStore sees the latest response
 // rather than a stale snapshot.
+//
+// CWE-770 caps:
+//   - __response_body is truncated to maxResponseBodyKVBytes (64 KiB).
+//   - Per-header values are truncated to maxResponseHeaderValueKVBytes
+//     (8 KiB); the cap protects template substitution from amplifying
+//     an attacker-controlled X-Debug / Set-Cookie payload across multiple
+//     downstream macro invocations.
+//   - At most maxResponseHeaderKVCount (256) distinct headers are
+//     injected; remaining headers are silently dropped from the kvStore
+//     projection. The recorded wire flow keeps every header — the cap
+//     only bounds the control-plane kvStore convenience view.
 func injectResponseVars(kvStore map[string]string, statusCode int, responseBody []byte, responseHeaders map[string][]string) {
 	kvStore[macroResponseStatusKey] = fmt.Sprintf("%d", statusCode)
 
@@ -324,15 +354,27 @@ func injectResponseVars(kvStore map[string]string, statusCode int, responseBody 
 	}
 	kvStore[macroResponseBodyKey] = string(body)
 
+	injected := 0
 	for name, values := range responseHeaders {
 		if len(values) == 0 {
 			continue
+		}
+		if injected >= maxResponseHeaderKVCount {
+			// Stop injecting once the per-iteration kvStore header cap is
+			// reached. The wire-recorded flow already holds every header;
+			// the kvStore projection is a control-plane convenience.
+			break
 		}
 		// Last value wins for duplicate-name headers. The wire-recorded
 		// flow keeps every occurrence; the kvStore is a control-plane
 		// convenience and intentionally collapses duplicates so template
 		// expansion gets a single string per key.
-		kvStore[macroResponseHeaderKeyPrefix+strings.ToLower(name)+macroResponseHeaderKeySuffix] = values[len(values)-1]
+		v := values[len(values)-1]
+		if len(v) > maxResponseHeaderValueKVBytes {
+			v = v[:maxResponseHeaderValueKVBytes]
+		}
+		kvStore[macroResponseHeaderKeyPrefix+strings.ToLower(name)+macroResponseHeaderKeySuffix] = v
+		injected++
 	}
 }
 
