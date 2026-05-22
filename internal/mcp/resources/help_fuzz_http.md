@@ -55,11 +55,19 @@ Per-VARIANT timeout in milliseconds. Default `30000`.
 
 ### pre_macro / post_macro (object, optional)
 
-Pre and post macro hooks dispatched around variants by name. Both fields take the same shape (USK-960, USK-961):
+Pre and post macro hooks dispatched around variants by name. Both fields take the same shape (USK-960, USK-961, USK-981):
 
 - **name** (string, REQUIRED): the stored macro name (defined via the `macro` tool's `define_macro` action).
 - **scope** (string, optional): `"iteration"` (default) or `"job"`. See "Macro hook scopes" below.
 - **on_error** (string, optional): `"skip"` (default) | `"abort"` | `"continue"`. See "OnError semantics" below.
+- **vars** (object string→string, optional): static kvStore overrides injected before the macro runs. For `scope="iteration"` the map is injected into every variant's per-iteration kvStore (after the job-store copy, before reserved-key seeding). For `scope="job"` it is injected once into the job kvStore at job start. Keys with the reserved prefix (`__`) are **silently dropped** at injection time so a `vars` entry cannot shadow runtime-populated keys (`__iteration`, `__nonce`, `__response_*`) — the runtime-seeded value always wins (USK-981).
+- **run_interval** (string, optional): hook firing cadence — **`scope="iteration"` only**. Rejected with an error when paired with `scope="job"` (job-scope hooks fire exactly once by construction).
+  - pre_macro legal values: `"always"` (default) | `"once"` | `"every_n"` | `"on_error"`.
+  - post_macro legal values: `"always"` (default) | `"on_status"` | `"on_match"`.
+  - The pre/post legal sets are disjoint: `on_status` and `on_match` are post-only; `once`, `every_n`, and `on_error` are pre-only. Picking the wrong direction is rejected at MCP-tool input parse time.
+- **n** (integer, optional): companion to pre_macro `run_interval="every_n"`. Required when `run_interval="every_n"`; must be ≥ 1.
+- **status_codes** (array of integer, optional): companion to post_macro `run_interval="on_status"`. Required when `run_interval="on_status"`.
+- **match_pattern** (string, optional): companion to post_macro `run_interval="on_match"`. Required when `run_interval="on_match"`.
 
 The hook macro shares the per-iteration (or per-job) KV Store with the fuzz request — `§var§` templates in the request inherit pre-macro extracts, and post-macros (scope=iteration only) receive `__response_status` / `__response_body` / `__response_headers__<lower(name)>__` reserved keys.
 
@@ -72,7 +80,7 @@ The hook macro shares the per-iteration (or per-job) KV Store with the fuzz requ
 
 Mix-scope is supported — `pre_macro` and `post_macro` may pick their scope independently. The job-scope KV Store is merged into each iteration's per-variant store at iteration start; per-iteration reserved keys then overwrite any conflicting job keys ("iteration wins"). So `pre_macro { scope: "job" }` extracting `session_token` makes `§session_token§` resolvable in every variant's request templates.
 
-> `run_interval` is `scope="iteration"` only — the engine knob for `every_n` / `on_status` / etc. dispatch is meaningful only when the hook fires per-variant. `scope="job"` hooks fire exactly once by construction (the call site, not `run_interval`, owns the single-fire guarantee); once the `run_interval` field is publicly surfaced on the fuzz_http hook config, pairing it with `scope="job"` will be rejected at validation time.
+> `run_interval` is `scope="iteration"` only — the engine knob for `every_n` / `on_status` / etc. dispatch is meaningful only when the hook fires per-variant. `scope="job"` hooks fire exactly once by construction (the call site, not `run_interval`, owns the single-fire guarantee); pairing `run_interval` with `scope="job"` is **rejected at MCP-tool input parse** with the error `"run_interval is only valid for scope=iteration; for scope=job the hook fires exactly once"` (USK-961 Q10, surfaced in USK-981).
 
 #### OnError semantics
 

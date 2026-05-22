@@ -138,6 +138,29 @@
           "type": "string",
           "description": "skip (default; iteration scope skips the variant, job scope skips the whole job) | abort (aborts the whole fuzz run) | continue (record the error and proceed).",
           "enum": ["skip", "abort", "continue"]
+        },
+        "vars": {
+          "type": "object",
+          "description": "Static kvStore overrides injected before the macro runs. For scope=iteration, injected into every variant's per-iteration kvStore after the job-store copy and before reserved-key seeding. For scope=job, injected once into the job kvStore at job start. Keys with the '__' reserved prefix are silently dropped at injection time so a Vars entry cannot shadow runtime-populated reserved keys (__iteration, __nonce, __response_*).",
+          "additionalProperties": { "type": "string" }
+        },
+        "run_interval": {
+          "type": "string",
+          "description": "Hook firing cadence — scope=iteration only. For pre_macro: always (default) | once | every_n | on_error. Rejected with an error when scope='job' (scope=job hooks fire exactly once by construction)."
+        },
+        "n": {
+          "type": "integer",
+          "description": "Iteration cadence for pre_macro run_interval='every_n'. Required when run_interval='every_n'.",
+          "minimum": 1
+        },
+        "status_codes": {
+          "type": "array",
+          "description": "Response status codes gating post_macro run_interval='on_status'. pre_macro does NOT accept on_status — this field is rejected on pre_macro with a non-empty value.",
+          "items": { "type": "integer" }
+        },
+        "match_pattern": {
+          "type": "string",
+          "description": "Response body regex pattern for post_macro run_interval='on_match'. pre_macro does NOT accept on_match — this field is rejected on pre_macro with a non-empty value."
         }
       },
       "additionalProperties": false
@@ -160,6 +183,29 @@
           "type": "string",
           "description": "skip (default; log warn + record error row) | abort (post failures never abort the run; behaviour matches skip for post) | continue (same as skip).",
           "enum": ["skip", "abort", "continue"]
+        },
+        "vars": {
+          "type": "object",
+          "description": "Static kvStore overrides injected before the macro runs. For scope=iteration, injected into every variant's per-iteration kvStore after the job-store copy and before reserved-key seeding. For scope=job, injected once into the job kvStore at job start. Keys with the '__' reserved prefix are silently dropped at injection time so a Vars entry cannot shadow runtime-populated reserved keys (__iteration, __nonce, __response_*).",
+          "additionalProperties": { "type": "string" }
+        },
+        "run_interval": {
+          "type": "string",
+          "description": "Hook firing cadence — scope=iteration only. For post_macro: always (default) | on_status | on_match. Rejected with an error when scope='job' (scope=job hooks fire exactly once by construction)."
+        },
+        "n": {
+          "type": "integer",
+          "description": "Reserved for pre_macro run_interval='every_n'. post_macro does NOT accept every_n; supplying n on post_macro has no effect.",
+          "minimum": 1
+        },
+        "status_codes": {
+          "type": "array",
+          "description": "Response status codes gating post_macro run_interval='on_status'. Required when run_interval='on_status'.",
+          "items": { "type": "integer" }
+        },
+        "match_pattern": {
+          "type": "string",
+          "description": "Response body regex pattern for post_macro run_interval='on_match'. Required when run_interval='on_match'."
         }
       },
       "additionalProperties": false

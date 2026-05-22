@@ -36,6 +36,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -136,6 +137,55 @@ type fuzzHTTPMacroConfig struct {
 	//                unresolved §var§ literals — recorded in
 	//                fuzz_results.error).
 	OnError string `json:"on_error,omitempty" jsonschema:"skip (default) | abort | continue"`
+
+	// Vars is a static map of kvStore overrides injected before the macro
+	// runs. Keys with the reserved prefix ("__") are silently dropped at
+	// injection time (matches internal/job/job.go:mergeKVStore precedent)
+	// so a Vars entry cannot shadow runtime-populated reserved keys such
+	// as __iteration / __nonce / __response_* (USK-981 Q2).
+	//
+	// scope="iteration": Vars is injected into every variant's per-
+	// iteration kvStore after the job-store copy and before
+	// SeedIterationKV — so the operator's static overrides are visible to
+	// §var§ template expansion on the variant request but cannot shadow
+	// per-iteration reserved keys.
+	//
+	// scope="job": Vars is injected once into the job kvStore at job
+	// start. The job-store is then naturally merged into every per-
+	// iteration kvStore via the existing copy at iteration setup.
+	Vars map[string]string `json:"vars,omitempty" jsonschema:"static kvStore overrides injected before the macro runs. Keys with the '__' reserved prefix are silently dropped (USK-981)"`
+
+	// RunInterval gates when the hook fires across iterations. Only valid
+	// for scope="iteration" — scope="job" hooks fire exactly once by
+	// construction and the validator rejects scope="job" + non-empty
+	// RunInterval (USK-961 Q10).
+	//
+	// pre_macro legal values: "always" (default) | "once" | "every_n" |
+	// "on_error". post_macro legal values: "always" (default) |
+	// "on_status" | "on_match". Pre and post have disjoint legal sets;
+	// validation runs per-direction via the underlying hooks.go
+	// validators (USK-981 Q7).
+	RunInterval string `json:"run_interval,omitempty" jsonschema:"hook firing cadence (scope=iteration only). pre_macro: always (default) | once | every_n | on_error. post_macro: always (default) | on_status | on_match. Rejected when scope='job'"`
+
+	// N is the interval count for RunInterval="every_n". Required when
+	// RunInterval="every_n"; ignored otherwise.
+	N int `json:"n,omitempty" jsonschema:"iteration cadence for RunInterval='every_n' (>= 1)"`
+
+	// StatusCodes is the list of response status codes that gate
+	// post_macro firing for RunInterval="on_status". Required when
+	// RunInterval="on_status"; ignored otherwise. post_macro only.
+	StatusCodes []int `json:"status_codes,omitempty" jsonschema:"response status codes for post_macro RunInterval='on_status'"`
+
+	// MatchPattern is the regex pattern matched against the response body
+	// for post_macro RunInterval="on_match". Required when
+	// RunInterval="on_match"; ignored otherwise. post_macro only.
+	MatchPattern string `json:"match_pattern,omitempty" jsonschema:"response body regex pattern for post_macro RunInterval='on_match'"`
+
+	// compiledPattern is the pre-compiled MatchPattern, set during
+	// validation so the hook executor reuses it across iterations rather
+	// than recompiling. Not serialised — internal to the validator/
+	// executor handoff. Matches the precedent on hookConfig.compiledPattern.
+	compiledPattern *regexp.Regexp `json:"-"`
 }
 
 // fuzzHTTPPosition describes one fuzz position. Path is a typed
