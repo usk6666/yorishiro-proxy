@@ -1388,3 +1388,521 @@ func TestFuzzHTTPMacro_ScopeJobPreSkipOnErrorReturnsStoppedReason(t *testing.T) 
 			r.HookName, r.IndexNum, r.Status)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// USK-981 — per-hook Vars overrides + RunInterval field surface.
+// ---------------------------------------------------------------------------
+
+// TestFuzzHTTPMacro_VarsOverrideSeedsKVStore verifies that pre_macro.vars
+// (scope=iteration) seeds every variant's per-iteration kvStore so the
+// header value template §static_token§ resolves on the wire even though
+// no macro extract was configured to populate it. Covers USK-981 §6
+// test #1 (Vars seeds iteration kvStore for §var§ resolution).
+func TestFuzzHTTPMacro_VarsOverrideSeedsKVStore(t *testing.T) {
+	cs, store := setupFuzzHTTPMacroSession(t)
+
+	// preServer is a no-op; the pre macro has no extract. Vars is the
+	// only path that can put §static_token§ in the kvStore.
+	preServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(preServer.Close)
+
+	var fuzzTokens atomic.Pointer[[]string]
+	fuzzServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		tok := r.Header.Get("X-Token")
+		for {
+			old := fuzzTokens.Load()
+			var cur []string
+			if old != nil {
+				cur = append(cur, *old...)
+			}
+			cur = append(cur, tok)
+			if fuzzTokens.CompareAndSwap(old, &cur) {
+				break
+			}
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(fuzzServer.Close)
+
+	preFlowID := recordMacroFlow(t, store, "POST", preServer.URL+"/noop", nil, nil)
+	defineMacroForTest(t, cs, "pre-noop-vars", preFlowID, "", "", nil)
+
+	authority := strings.TrimPrefix(fuzzServer.URL, "http://")
+	res, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "fuzz_http",
+		Arguments: map[string]any{
+			"method":    "GET",
+			"scheme":    "http",
+			"authority": authority,
+			"path":      "/probe",
+			"headers": []map[string]any{
+				{"name": "Host", "value": authority},
+				{"name": "X-Token", "value": "§static_token§"},
+			},
+			"positions": []map[string]any{
+				{"path": "path", "payloads": []string{"/a", "/b"}},
+			},
+			"timeout_ms": 5000,
+			"pre_macro": map[string]any{
+				"name": "pre-noop-vars",
+				"vars": map[string]any{
+					"static_token": "vars-supplied-token",
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool fuzz_http: %v", err)
+	}
+	if res.IsError {
+		var msg strings.Builder
+		for _, c := range res.Content {
+			if tc, ok := c.(*gomcp.TextContent); ok {
+				msg.WriteString(tc.Text)
+				msg.WriteString("\n")
+			}
+		}
+		t.Fatalf("fuzz_http returned error: %s", msg.String())
+	}
+
+	var out fuzzHTTPResult
+	raw, _ := json.Marshal(res.StructuredContent)
+	_ = json.Unmarshal(raw, &out)
+	if out.CompletedVariants != 2 {
+		t.Fatalf("CompletedVariants = %d, want 2", out.CompletedVariants)
+	}
+
+	tokens := *fuzzTokens.Load()
+	if len(tokens) != 2 {
+		t.Fatalf("fuzz received %d requests, want 2", len(tokens))
+	}
+	for i, tok := range tokens {
+		if tok != "vars-supplied-token" {
+			t.Errorf("variant %d X-Token = %q, want vars-supplied-token (from pre_macro.vars)", i, tok)
+		}
+	}
+}
+
+// TestFuzzHTTPMacro_VarsCollideWithReservedKeys verifies that a Vars
+// entry whose key matches the reserved prefix ("__iteration") is
+// silently dropped at injection time, so the iteration loop's seeded
+// value of §__iteration§ (variantIdx) wins over the operator's
+// override. Covers USK-981 §6 test #2.
+func TestFuzzHTTPMacro_VarsCollideWithReservedKeys(t *testing.T) {
+	cs, store := setupFuzzHTTPMacroSession(t)
+
+	preServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(preServer.Close)
+
+	var fuzzIters atomic.Pointer[[]string]
+	fuzzServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		val := r.Header.Get("X-Iter")
+		for {
+			old := fuzzIters.Load()
+			var cur []string
+			if old != nil {
+				cur = append(cur, *old...)
+			}
+			cur = append(cur, val)
+			if fuzzIters.CompareAndSwap(old, &cur) {
+				break
+			}
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(fuzzServer.Close)
+
+	preFlowID := recordMacroFlow(t, store, "POST", preServer.URL+"/noop", nil, nil)
+	defineMacroForTest(t, cs, "pre-noop-reserved", preFlowID, "", "", nil)
+
+	authority := strings.TrimPrefix(fuzzServer.URL, "http://")
+	res, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "fuzz_http",
+		Arguments: map[string]any{
+			"method":    "GET",
+			"scheme":    "http",
+			"authority": authority,
+			"path":      "/probe",
+			"headers": []map[string]any{
+				{"name": "Host", "value": authority},
+				{"name": "X-Iter", "value": "§__iteration§"},
+			},
+			"positions": []map[string]any{
+				{"path": "path", "payloads": []string{"/a", "/b", "/c"}},
+			},
+			"timeout_ms": 5000,
+			"pre_macro": map[string]any{
+				"name": "pre-noop-reserved",
+				"vars": map[string]any{
+					// Reserved-key collision: should be silently dropped so
+					// the iteration loop's seeded value wins. Without the
+					// drop, every variant's X-Iter would read "operator-
+					// override".
+					"__iteration": "operator-override",
+					// Companion non-reserved key to confirm Vars injection
+					// is otherwise functional in the same call.
+					"static_key": "static-value",
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool fuzz_http: %v", err)
+	}
+	if res.IsError {
+		var msg strings.Builder
+		for _, c := range res.Content {
+			if tc, ok := c.(*gomcp.TextContent); ok {
+				msg.WriteString(tc.Text)
+				msg.WriteString("\n")
+			}
+		}
+		t.Fatalf("fuzz_http returned error: %s", msg.String())
+	}
+
+	var out fuzzHTTPResult
+	raw, _ := json.Marshal(res.StructuredContent)
+	_ = json.Unmarshal(raw, &out)
+	if out.CompletedVariants != 3 {
+		t.Fatalf("CompletedVariants = %d, want 3", out.CompletedVariants)
+	}
+
+	iters := *fuzzIters.Load()
+	if len(iters) != 3 {
+		t.Fatalf("fuzz received %d requests, want 3", len(iters))
+	}
+	// Each variant must see its own variant index (0, 1, 2) — the Vars
+	// "__iteration" override must NOT have shadowed the per-iteration
+	// reserved key.
+	for i, got := range iters {
+		want := fmt.Sprintf("%d", i)
+		if got != want {
+			t.Errorf("variant %d X-Iter = %q, want %q (reserved-key Vars override must be silently dropped)", i, got, want)
+		}
+		if got == "operator-override" {
+			t.Errorf("variant %d X-Iter = %q — reserved-key Vars override leaked", i, got)
+		}
+	}
+}
+
+// TestFuzzHTTPMacro_VarsScopeJobInjectedOncePerJob verifies that
+// pre_macro.vars on a scope="job" hook is injected into the job
+// kvStore once at job start and propagated into every per-iteration
+// kvStore via the existing copy at iteration setup. Covers USK-981
+// §6 test #3.
+func TestFuzzHTTPMacro_VarsScopeJobInjectedOncePerJob(t *testing.T) {
+	cs, store := setupFuzzHTTPMacroSession(t)
+
+	var preCalls int32
+	preServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&preCalls, 1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(preServer.Close)
+
+	var fuzzTokens atomic.Pointer[[]string]
+	fuzzServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		tok := r.Header.Get("X-Token")
+		for {
+			old := fuzzTokens.Load()
+			var cur []string
+			if old != nil {
+				cur = append(cur, *old...)
+			}
+			cur = append(cur, tok)
+			if fuzzTokens.CompareAndSwap(old, &cur) {
+				break
+			}
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(fuzzServer.Close)
+
+	preFlowID := recordMacroFlow(t, store, "POST", preServer.URL+"/noop", nil, nil)
+	defineMacroForTest(t, cs, "pre-job-vars-only", preFlowID, "", "", nil)
+
+	authority := strings.TrimPrefix(fuzzServer.URL, "http://")
+	res, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "fuzz_http",
+		Arguments: map[string]any{
+			"method":    "GET",
+			"scheme":    "http",
+			"authority": authority,
+			"path":      "/probe",
+			"headers": []map[string]any{
+				{"name": "Host", "value": authority},
+				{"name": "X-Token", "value": "§job_token§"},
+			},
+			"positions": []map[string]any{
+				{"path": "path", "payloads": []string{"/a", "/b", "/c"}},
+			},
+			"timeout_ms": 5000,
+			"pre_macro": map[string]any{
+				"name":  "pre-job-vars-only",
+				"scope": "job",
+				"vars": map[string]any{
+					"job_token": "job-vars-token",
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool fuzz_http: %v", err)
+	}
+	if res.IsError {
+		var msg strings.Builder
+		for _, c := range res.Content {
+			if tc, ok := c.(*gomcp.TextContent); ok {
+				msg.WriteString(tc.Text)
+				msg.WriteString("\n")
+			}
+		}
+		t.Fatalf("fuzz_http returned error: %s", msg.String())
+	}
+
+	var out fuzzHTTPResult
+	raw, _ := json.Marshal(res.StructuredContent)
+	_ = json.Unmarshal(raw, &out)
+	if out.CompletedVariants != 3 {
+		t.Fatalf("CompletedVariants = %d, want 3", out.CompletedVariants)
+	}
+
+	// Pre-job macro called exactly once (scope=job semantics).
+	if got := atomic.LoadInt32(&preCalls); got != 1 {
+		t.Errorf("pre macro called %d times, want 1 (scope=job)", got)
+	}
+
+	// Every variant must see the job-scope Vars value via the job-store
+	// copy at iteration setup.
+	tokens := *fuzzTokens.Load()
+	if len(tokens) != 3 {
+		t.Fatalf("fuzz received %d requests, want 3", len(tokens))
+	}
+	for i, tok := range tokens {
+		if tok != "job-vars-token" {
+			t.Errorf("variant %d X-Token = %q, want job-vars-token (from pre_macro.vars at scope=job)", i, tok)
+		}
+	}
+}
+
+// TestFuzzHTTPMacro_RunIntervalWithScopeJobRejected verifies the
+// cross-field validator rejects scope="job" + non-empty run_interval
+// at MCP-tool input parse time, with the documented verbatim error
+// message. Covers USK-981 §6 test #4 (USK-961 Q10).
+func TestFuzzHTTPMacro_RunIntervalWithScopeJobRejected(t *testing.T) {
+	cs, store := setupFuzzHTTPMacroSession(t)
+
+	preServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(preServer.Close)
+	fuzzServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(fuzzServer.Close)
+
+	preFlowID := recordMacroFlow(t, store, "POST", preServer.URL+"/noop", nil, nil)
+	defineMacroForTest(t, cs, "pre-reject", preFlowID, "", "", nil)
+
+	authority := strings.TrimPrefix(fuzzServer.URL, "http://")
+	res, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "fuzz_http",
+		Arguments: map[string]any{
+			"method":    "GET",
+			"scheme":    "http",
+			"authority": authority,
+			"path":      "/probe",
+			"headers": []map[string]any{
+				{"name": "Host", "value": authority},
+			},
+			"positions": []map[string]any{
+				{"path": "path", "payloads": []string{"/a"}},
+			},
+			"timeout_ms": 5000,
+			"pre_macro": map[string]any{
+				"name":         "pre-reject",
+				"scope":        "job",
+				"run_interval": "once",
+			},
+		},
+	})
+	if err != nil {
+		// Some MCP transports surface validation errors as a tool-call
+		// failure rather than an in-band error result. Both are
+		// acceptable, but the error text must include the verbatim
+		// message.
+		if !strings.Contains(err.Error(), "run_interval is only valid for scope=iteration") {
+			t.Fatalf("err = %v, want to contain the documented reject message", err)
+		}
+		return
+	}
+	if !res.IsError {
+		t.Fatalf("expected IsError=true for scope=job + run_interval, got IsError=false")
+	}
+	var msg strings.Builder
+	for _, c := range res.Content {
+		if tc, ok := c.(*gomcp.TextContent); ok {
+			msg.WriteString(tc.Text)
+		}
+	}
+	got := msg.String()
+	if !strings.Contains(got, "run_interval is only valid for scope=iteration") {
+		t.Errorf("error text = %q, want to contain 'run_interval is only valid for scope=iteration; for scope=job the hook fires exactly once'", got)
+	}
+	if !strings.Contains(got, "for scope=job the hook fires exactly once") {
+		t.Errorf("error text = %q, want to contain the second-clause documented reject message", got)
+	}
+}
+
+// TestFuzzHTTPMacro_RunIntervalEveryN_PreFiresEveryNthIteration verifies
+// that pre_macro.run_interval="every_n" with N=3 fires on iterations 0,
+// 3, 6 only. Covers USK-981 §6 test #5.
+func TestFuzzHTTPMacro_RunIntervalEveryN_PreFiresEveryNthIteration(t *testing.T) {
+	cs, store := setupFuzzHTTPMacroSession(t)
+
+	var preCalls int32
+	preServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&preCalls, 1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(preServer.Close)
+
+	var fuzzCalls int32
+	fuzzServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&fuzzCalls, 1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(fuzzServer.Close)
+
+	preFlowID := recordMacroFlow(t, store, "POST", preServer.URL+"/noop", nil, nil)
+	defineMacroForTest(t, cs, "pre-every-n", preFlowID, "", "", nil)
+
+	// 7 variants: pre fires on iter 0, 3, 6 → 3 pre calls.
+	payloads := []string{"/a0", "/a1", "/a2", "/a3", "/a4", "/a5", "/a6"}
+	authority := strings.TrimPrefix(fuzzServer.URL, "http://")
+	res, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "fuzz_http",
+		Arguments: map[string]any{
+			"method":    "GET",
+			"scheme":    "http",
+			"authority": authority,
+			"path":      "/probe",
+			"headers": []map[string]any{
+				{"name": "Host", "value": authority},
+			},
+			"positions": []map[string]any{
+				{"path": "path", "payloads": payloads},
+			},
+			"timeout_ms": 5000,
+			"pre_macro": map[string]any{
+				"name":         "pre-every-n",
+				"run_interval": "every_n",
+				"n":            3,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool fuzz_http: %v", err)
+	}
+	if res.IsError {
+		var msg strings.Builder
+		for _, c := range res.Content {
+			if tc, ok := c.(*gomcp.TextContent); ok {
+				msg.WriteString(tc.Text)
+				msg.WriteString("\n")
+			}
+		}
+		t.Fatalf("fuzz_http returned error: %s", msg.String())
+	}
+
+	var out fuzzHTTPResult
+	raw, _ := json.Marshal(res.StructuredContent)
+	_ = json.Unmarshal(raw, &out)
+	if out.CompletedVariants != len(payloads) {
+		t.Fatalf("CompletedVariants = %d, want %d", out.CompletedVariants, len(payloads))
+	}
+	if got := atomic.LoadInt32(&fuzzCalls); int(got) != len(payloads) {
+		t.Errorf("fuzz server saw %d requests, want %d", got, len(payloads))
+	}
+	// Pre fires on iter 0, 3, 6 → 3 calls for 7 variants with N=3.
+	if got := atomic.LoadInt32(&preCalls); got != 3 {
+		t.Errorf("pre macro called %d times, want 3 (every_n=3 over 7 iters: 0,3,6)", got)
+	}
+}
+
+// TestFuzzHTTPMacro_RunIntervalOnce verifies that pre_macro
+// .run_interval="once" fires on iteration 0 only and the remaining
+// iterations skip the pre hook. Covers USK-981 §6 test #6.
+func TestFuzzHTTPMacro_RunIntervalOnce(t *testing.T) {
+	cs, store := setupFuzzHTTPMacroSession(t)
+
+	var preCalls int32
+	preServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&preCalls, 1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(preServer.Close)
+
+	var fuzzCalls int32
+	fuzzServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&fuzzCalls, 1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(fuzzServer.Close)
+
+	preFlowID := recordMacroFlow(t, store, "POST", preServer.URL+"/noop", nil, nil)
+	defineMacroForTest(t, cs, "pre-once", preFlowID, "", "", nil)
+
+	authority := strings.TrimPrefix(fuzzServer.URL, "http://")
+	res, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "fuzz_http",
+		Arguments: map[string]any{
+			"method":    "GET",
+			"scheme":    "http",
+			"authority": authority,
+			"path":      "/probe",
+			"headers": []map[string]any{
+				{"name": "Host", "value": authority},
+			},
+			"positions": []map[string]any{
+				{"path": "path", "payloads": []string{"/a", "/b", "/c", "/d"}},
+			},
+			"timeout_ms": 5000,
+			"pre_macro": map[string]any{
+				"name":         "pre-once",
+				"run_interval": "once",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool fuzz_http: %v", err)
+	}
+	if res.IsError {
+		var msg strings.Builder
+		for _, c := range res.Content {
+			if tc, ok := c.(*gomcp.TextContent); ok {
+				msg.WriteString(tc.Text)
+				msg.WriteString("\n")
+			}
+		}
+		t.Fatalf("fuzz_http returned error: %s", msg.String())
+	}
+
+	var out fuzzHTTPResult
+	raw, _ := json.Marshal(res.StructuredContent)
+	_ = json.Unmarshal(raw, &out)
+	if out.CompletedVariants != 4 {
+		t.Fatalf("CompletedVariants = %d, want 4", out.CompletedVariants)
+	}
+	if got := atomic.LoadInt32(&fuzzCalls); got != 4 {
+		t.Errorf("fuzz server saw %d requests, want 4", got)
+	}
+	// Pre fires once only.
+	if got := atomic.LoadInt32(&preCalls); got != 1 {
+		t.Errorf("pre macro called %d times, want 1 (run_interval=once)", got)
+	}
+}
