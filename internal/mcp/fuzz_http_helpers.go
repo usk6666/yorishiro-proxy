@@ -418,10 +418,25 @@ func buildJobHookExecutor(s *Server, preMacro, postMacro *fuzzHTTPMacroConfig) (
 // true when the loop reached the post-job firing path (natural
 // exhaustion or stop_on_5xx); it is false on ctx cancel. retErr
 // non-nil signals an unrecoverable abort and post-job MUST NOT fire.
+//
+// USK-979: ctx-cancel detection bubbles up through retErr wrapped with
+// %w so errors.Is(retErr, context.Canceled) / context.DeadlineExceeded
+// drives the post-job gate. The ctx-cancel error is consumed here (NOT
+// returned to the caller) so the run still reports success with a
+// stopped_reason — preserving the pre-refactor in-band cancel semantics
+// (Q23 / TestFuzzHTTP_FinalizesUnderCallerCancel).
 func (l *fuzzHTTPVariantLoop) runVariantLoop(ctx context.Context) (bool, string, error) {
 	for variantIdx := 0; variantIdx < l.plan.totalVariants; variantIdx++ {
 		stop, retErr := l.runOne(ctx, variantIdx)
 		if retErr != nil {
+			if errors.Is(retErr, context.Canceled) || errors.Is(retErr, context.DeadlineExceeded) {
+				// Q5: post-job does NOT fire on ctx cancel. Surface the
+				// cancel reason via stopped_reason for parity with the
+				// pre-USK-979 string-sentinel path; do NOT propagate as
+				// retErr so the caller still finalizes the fuzz_jobs
+				// row normally.
+				return false, fmt.Sprintf("ctx cancelled: %v", retErr), nil
+			}
 			// pre-iteration abort or other unrecoverable error. Per
 			// Q5: post-job does NOT fire on pre-iteration abort.
 			return false, "", retErr
@@ -429,9 +444,8 @@ func (l *fuzzHTTPVariantLoop) runVariantLoop(ctx context.Context) (bool, string,
 		if stop == "" {
 			continue
 		}
-		// stop_on_5xx and ctx cancel both reach here. Per Q5: post-job
-		// fires on stop_on_5xx but NOT on ctx cancel.
-		return !strings.HasPrefix(stop, "ctx cancelled:"), stop, nil
+		// stop_on_5xx reaches here. Per Q5: post-job fires on stop_on_5xx.
+		return true, stop, nil
 	}
 	return true, "", nil
 }
@@ -495,14 +509,17 @@ type fuzzHTTPVariantLoop struct {
 
 // runOne executes a single iteration of the variant loop. Returns
 // (stopReason, retErr): stopReason "" means continue; non-empty means
-// stop with that reason; retErr propagates an abort up the call stack.
-// The branching is by design: upstream resolution / pre macro / template
-// expansion each have their own short-circuit semantics, and a single
-// return type would conflate them.
+// stop with that reason (e.g., stop_on_5xx); retErr propagates an
+// abort up the call stack. ctx cancel is surfaced via retErr wrapped
+// with %w so the caller can distinguish via errors.Is(context.Canceled)
+// / errors.Is(context.DeadlineExceeded) instead of string-matching the
+// stop reason (USK-979). The branching is by design: upstream resolution
+// / pre macro / template expansion each have their own short-circuit
+// semantics, and a single return type would conflate them.
 func (l *fuzzHTTPVariantLoop) runOne(ctx context.Context, variantIdx int) (string, error) {
 	select {
 	case <-ctx.Done():
-		return fmt.Sprintf("ctx cancelled: %v", ctx.Err()), nil
+		return "", fmt.Errorf("variant %d: %w", variantIdx, ctx.Err())
 	default:
 	}
 
