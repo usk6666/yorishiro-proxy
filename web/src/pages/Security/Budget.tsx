@@ -67,11 +67,11 @@ export function Budget() {
   }, [status]);
 
   // Sync form state when data changes and not editing.
+  // Render numeric max_total_requests unconditionally so an explicit 0 (no agent
+  // override / policy applies) is faithfully shown rather than collapsing to "".
   useEffect(() => {
     if (data && !editing) {
-      setAgentMaxRequests(
-        data.agent.max_total_requests > 0 ? String(data.agent.max_total_requests) : "",
-      );
+      setAgentMaxRequests(String(data.agent.max_total_requests));
       setAgentMaxDuration(
         data.agent.max_duration !== "0s" && data.agent.max_duration !== ""
           ? data.agent.max_duration
@@ -124,9 +124,9 @@ export function Budget() {
   const handleCancel = useCallback(() => {
     setEditing(false);
     if (data) {
-      setAgentMaxRequests(
-        data.agent.max_total_requests > 0 ? String(data.agent.max_total_requests) : "",
-      );
+      // Symmetric with the sync effect above: render numeric max_total_requests
+      // unconditionally so an explicit 0 survives the cancel-revert path.
+      setAgentMaxRequests(String(data.agent.max_total_requests));
       setAgentMaxDuration(
         data.agent.max_duration !== "0s" && data.agent.max_duration !== ""
           ? data.agent.max_duration

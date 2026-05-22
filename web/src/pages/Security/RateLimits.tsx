@@ -50,10 +50,13 @@ export function RateLimits() {
   }, [status, fetchRateLimits]);
 
   // Sync form state when data changes and not editing.
+  // Render numeric values unconditionally — backend RateLimitConfig is bi-state
+  // (number always present; 0 = no limit). Collapsing 0 to "" would hide an
+  // explicit "unlimited" setting and let the operator overwrite it unintentionally.
   useEffect(() => {
     if (data && !editing) {
-      setAgentRps(data.agent.max_requests_per_second > 0 ? String(data.agent.max_requests_per_second) : "");
-      setAgentHostRps(data.agent.max_requests_per_host_per_second > 0 ? String(data.agent.max_requests_per_host_per_second) : "");
+      setAgentRps(String(data.agent.max_requests_per_second));
+      setAgentHostRps(String(data.agent.max_requests_per_host_per_second));
     }
   }, [data, editing]);
 
@@ -92,8 +95,10 @@ export function RateLimits() {
   const handleCancel = useCallback(() => {
     setEditing(false);
     if (data) {
-      setAgentRps(data.agent.max_requests_per_second > 0 ? String(data.agent.max_requests_per_second) : "");
-      setAgentHostRps(data.agent.max_requests_per_host_per_second > 0 ? String(data.agent.max_requests_per_host_per_second) : "");
+      // Symmetric with the sync effect above: render numeric values unconditionally
+      // so an explicit 0 (unlimited) survives the cancel-revert path.
+      setAgentRps(String(data.agent.max_requests_per_second));
+      setAgentHostRps(String(data.agent.max_requests_per_host_per_second));
     }
   }, [data]);
 
