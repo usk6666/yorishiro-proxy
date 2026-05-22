@@ -17,7 +17,11 @@ interface ConnectionSettingsProps {
 const DEFAULT_LISTENER = "default";
 
 /**
- * ConnectionSettings — manage connection limits, timeouts, upstream proxy, and intercept queue.
+ * ConnectionSettings — manage connection limits, timeouts, and upstream proxy.
+ *
+ * Intercept queue configuration (timeout / behavior) lives on the Intercept
+ * Rules tab as the single source of truth (USK-969). A small pointer note is
+ * retained here for discoverability.
  */
 export function ConnectionSettings({ status, onRefresh }: ConnectionSettingsProps) {
   const { addToast } = useToast();
@@ -46,10 +50,6 @@ export function ConnectionSettings({ status, onRefresh }: ConnectionSettingsProp
     [status.listeners],
   );
   const [selectedListener, setSelectedListener] = useState<string>(DEFAULT_LISTENER);
-
-  // Intercept queue
-  const [queueTimeout, setQueueTimeout] = useState("");
-  const [queueBehavior, setQueueBehavior] = useState<"auto_release" | "auto_drop">("auto_release");
 
   // Sync state when status changes
   useEffect(() => {
@@ -143,31 +143,6 @@ export function ConnectionSettings({ status, onRefresh }: ConnectionSettingsProp
     }
   }, [upstreamProxy, selectedListener, configure, addToast, onRefresh]);
 
-  const handleSaveInterceptQueue = useCallback(async () => {
-    const timeoutMs = queueTimeout.trim() ? parseInt(queueTimeout, 10) : null;
-
-    if (queueTimeout.trim() && (isNaN(timeoutMs as number) || (timeoutMs as number) < 0)) {
-      addToast({ type: "warning", message: "Timeout must be a non-negative number" });
-      return;
-    }
-
-    try {
-      await configure({
-        intercept_queue: {
-          timeout_ms: timeoutMs,
-          timeout_behavior: queueBehavior,
-        },
-      });
-      addToast({ type: "success", message: "Intercept queue settings updated" });
-      onRefresh();
-    } catch (err) {
-      addToast({
-        type: "error",
-        message: `Failed to update: ${err instanceof Error ? err.message : String(err)}`,
-      });
-    }
-  }, [queueTimeout, queueBehavior, configure, addToast, onRefresh]);
-
   const listenerSelectorDisabled = loading || listenerNames.length === 0;
 
   return (
@@ -259,44 +234,15 @@ export function ConnectionSettings({ status, onRefresh }: ConnectionSettingsProp
         </div>
       </div>
 
-      {/* Intercept Queue */}
+      {/* Intercept Queue — moved to the Intercept Rules tab (USK-969). */}
       <div className="settings-card">
         <div className="settings-card-header">
           <span className="settings-card-title">Intercept Queue</span>
-          <Button
-            variant="primary"
-            size="sm"
-            onClick={handleSaveInterceptQueue}
-            disabled={loading}
-          >
-            Save
-          </Button>
         </div>
         <div className="settings-card-body">
           <p className="settings-section-desc">
-            Configure timeout and behavior for intercepted requests waiting in the queue.
+            Intercept queue timeout and behavior are now configured on the Intercept Rules tab.
           </p>
-          <div className="settings-form-row">
-            <Input
-              label="Queue Timeout (ms)"
-              value={queueTimeout}
-              onChange={(e) => setQueueTimeout(e.target.value)}
-              type="number"
-              placeholder="Leave empty for no timeout"
-            />
-            <div className="input-wrapper">
-              <label className="input-label" htmlFor="queue-behavior">Timeout Behavior</label>
-              <select
-                id="queue-behavior"
-                className="settings-select"
-                value={queueBehavior}
-                onChange={(e) => setQueueBehavior(e.target.value as "auto_release" | "auto_drop")}
-              >
-                <option value="auto_release">Auto Release</option>
-                <option value="auto_drop">Auto Drop</option>
-              </select>
-            </div>
-          </div>
         </div>
       </div>
     </div>
