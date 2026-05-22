@@ -189,16 +189,29 @@ func NewHTTP1ForwardHandler(cfg HTTP1ForwardHandlerConfig) HandlerFunc {
 
 		// Step 4: Dial upstream plain TCP. TLSConfig=nil → DialUpstreamRaw
 		// returns a plain net.Conn with no TLS handshake. UpstreamProxy is
-		// honored when configured. EffectiveUpstreamProxyForCtx is
+		// honored when configured. EffectiveUpstreamProxyForCtxErr is
 		// consulted so runtime proxy_start / configure updates reach this
-		// dial AND per-listener overrides apply (USK-734 + USK-826).
+		// dial AND per-listener overrides + rotation apply (USK-734 +
+		// USK-826 + USK-959). On rotation resolver error, fail-closed
+		// with 502 — silent direct-dial fallback is a privacy regression.
 		var dialOpts DialRawOpts
+		// USK-959: stamp the dial target on ctx so the per_target_host
+		// rotation policy can scope state by upstream host.
+		dialCtx := ContextWithDialTarget(ctx, target)
 		if cfg.BuildCfg != nil {
-			dialOpts.UpstreamProxy = cfg.BuildCfg.EffectiveUpstreamProxyForCtx(ctx)
+			u, perr := cfg.BuildCfg.EffectiveUpstreamProxyForCtxErr(dialCtx)
+			if perr != nil {
+				connLogger.Warn("plain HTTP upstream proxy rotation failed; failing closed",
+					"target", target, "error", perr)
+				writeForwardErrorResponse(pc, 502, "Bad Gateway",
+					"yorishiro-proxy: upstream proxy rotation failed")
+				return nil
+			}
+			dialOpts.UpstreamProxy = u
 		}
 		dialOpts.DialTimeout = dialTimeoutPlainHTTP
 
-		upstreamConn, _, derr := DialUpstreamRaw(ctx, target, dialOpts)
+		upstreamConn, _, derr := DialUpstreamRaw(dialCtx, target, dialOpts)
 		if derr != nil {
 			connLogger.Debug("plain HTTP upstream dial failed", "error", derr)
 			writeForwardErrorResponse(pc, 502, "Bad Gateway",

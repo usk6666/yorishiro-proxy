@@ -152,7 +152,16 @@ func socks5Passthrough(ctx context.Context, cfg SOCKS5HandlerConfig, pc *PeekCon
 		return false
 	}
 	logger.Debug("TLS passthrough relay", "target", target)
-	relayErr := runPassthroughRelay(ctx, pc, target, passDialOpts(ctx, cfg.BuildCfg), cfg.PassthroughObserver)
+	// USK-959: stamp the dial target on ctx so the per_target_host
+	// rotation policy can scope state by upstream host.
+	dialCtx := ContextWithDialTarget(ctx, target)
+	opts, perr := passDialOpts(dialCtx, cfg.BuildCfg)
+	if perr != nil {
+		logger.Warn("TLS passthrough upstream proxy rotation failed (socks5); failing closed",
+			"target", target, "error", perr)
+		return true
+	}
+	relayErr := runPassthroughRelay(dialCtx, pc, target, opts, cfg.PassthroughObserver)
 	if relayErr != nil {
 		logger.Warn("TLS passthrough ended", "target", target, "sni_peek_target", host, "error", relayErr)
 	}

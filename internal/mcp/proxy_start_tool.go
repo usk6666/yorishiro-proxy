@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -58,12 +59,28 @@ type proxyStartInput struct {
 	// Defaults to "127.0.0.1:8080" if empty.
 	ListenAddr string `json:"listen_addr,omitempty" jsonschema:"TCP address to listen on, defaults to 127.0.0.1:8080 if omitted"`
 
-	// UpstreamProxy is the URL of an upstream proxy to route all outgoing traffic through.
-	// Supported schemes: http://host:port (HTTP CONNECT proxy), socks5://host:port (SOCKS5 proxy).
-	// Authentication: http://user:pass@host:port (Basic auth), socks5://user:pass@host:port.
-	// If omitted, traffic is sent directly to the target (no upstream proxy).
-	// This setting takes precedence over HTTP_PROXY/HTTPS_PROXY environment variables.
-	UpstreamProxy string `json:"upstream_proxy,omitempty" jsonschema:"upstream proxy URL (http://host:port or socks5://host:port) for chaining proxies"`
+	// UpstreamProxy is the URL of an upstream proxy to route all outgoing
+	// traffic through.
+	//
+	// Legacy string form (USK-826): a literal proxy URL ("http://host:port"
+	// HTTP CONNECT proxy or "socks5://host:port" SOCKS5 proxy). Auth via
+	// "http://user:pass@host:port" (Basic) or socks5 equivalent.
+	//
+	// Structured object form (USK-959): enables per-listener rotation via
+	// url_template + rotation policy. Supported policies: per_request,
+	// per_connection, per_target_host, sticky. §__nonce§ substitutes a
+	// fresh UUID per resolution event for residential-proxy IP rotation.
+	// Example:
+	//
+	//   {"url_template": "http://session-§__nonce§:pass@proxy:8080",
+	//    "rotation": {"policy": "per_request"}}
+	//
+	// JSON typing: declared as `any` so the schema generator accepts
+	// both string and object; the handler parses via
+	// parseUpstreamProxyInput at the tool entry. If omitted, traffic
+	// flows direct (no upstream proxy). This setting takes precedence
+	// over HTTP_PROXY/HTTPS_PROXY environment variables.
+	UpstreamProxy any `json:"upstream_proxy,omitempty" jsonschema:"upstream proxy: literal URL string (http://host:port or socks5://host:port) OR object {url|url_template, rotation:{policy: per_request|per_connection|per_target_host|sticky}} for per-listener rotation (USK-959)"`
 
 	// TLSPassthrough is a list of domain patterns that should bypass TLS interception.
 	// Supported formats: exact match ("example.com") or wildcard ("*.example.com").
@@ -461,14 +478,8 @@ func (s *Server) applyProxyStartPipeline(input *proxyStartInput) error {
 			return err
 		}
 	}
-	if input.UpstreamProxy != "" {
-		listenerName := input.Name
-		if listenerName == "" {
-			listenerName = proxybuild.DefaultListenerName
-		}
-		if err := s.applyUpstreamProxy(input.UpstreamProxy, listenerName); err != nil {
-			return fmt.Errorf("upstream_proxy: %w", err)
-		}
+	if err := s.applyProxyStartUpstreamProxy(input); err != nil {
+		return err
 	}
 	if len(input.TLSPassthrough) > 0 {
 		if err := s.applyTLSPassthrough(input.TLSPassthrough); err != nil {
@@ -491,6 +502,49 @@ func (s *Server) applyProxyStartPipeline(input *proxyStartInput) error {
 		}
 	}
 	return s.applyProxyStartTLS(input)
+}
+
+// applyProxyStartUpstreamProxy parses the polymorphic upstream_proxy
+// input and routes to the literal-URL / rotation / disable branch.
+// Extracted from applyProxyStartPipeline to keep that function under
+// the gocyclo budget after USK-959 added the rotation surface.
+func (s *Server) applyProxyStartUpstreamProxy(input *proxyStartInput) error {
+	if input.UpstreamProxy == nil {
+		return nil
+	}
+	parsed, perr := parseUpstreamProxyInput(input.UpstreamProxy)
+	if perr != nil {
+		return perr
+	}
+	if parsed == nil {
+		return nil
+	}
+	listenerName := input.Name
+	if listenerName == "" {
+		listenerName = proxybuild.DefaultListenerName
+	}
+	if err := parsed.Validate(); err != nil {
+		return err
+	}
+	switch {
+	case parsed.IsRotation():
+		cfg := parsed.RotationConfig()
+		if err := s.applyUpstreamProxyRotation(cfg, listenerName); err != nil {
+			return fmt.Errorf("upstream_proxy: %w", err)
+		}
+	case parsed.IsLiteralDisable():
+		if err := s.applyUpstreamProxy("", listenerName); err != nil {
+			return fmt.Errorf("upstream_proxy: %w", err)
+		}
+	default:
+		u := parsed.LiteralURL()
+		if u != "" {
+			if err := s.applyUpstreamProxy(u, listenerName); err != nil {
+				return fmt.Errorf("upstream_proxy: %w", err)
+			}
+		}
+	}
+	return nil
 }
 
 // applyProxyStartTLS validates and applies TLS-related settings (fingerprint, client cert).
@@ -858,8 +912,23 @@ func (s *Server) applyProxyDefaultStrings(input *proxyStartInput, d *config.Prox
 	if input.ListenAddr == "" && d.ListenAddr != "" {
 		input.ListenAddr = d.ListenAddr
 	}
-	if input.UpstreamProxy == "" && d.UpstreamProxy != "" {
-		input.UpstreamProxy = d.UpstreamProxy
+	if input.UpstreamProxy == nil {
+		if d.UpstreamProxyStruct != nil && d.UpstreamProxyStruct.URLTemplate != "" {
+			// USK-959: file config carries a structured rotation. Mirror
+			// into the proxy_start input as a map (the schema is `any`
+			// so the handler accepts both shapes).
+			rotMap := map[string]any{}
+			if d.UpstreamProxyStruct.Rotation != nil {
+				rotMap["policy"] = d.UpstreamProxyStruct.Rotation.Policy
+			}
+			input.UpstreamProxy = map[string]any{
+				"url_template": d.UpstreamProxyStruct.URLTemplate,
+				"rotation":     rotMap,
+			}
+		} else if d.UpstreamProxy != "" {
+			// Legacy USK-826 string form.
+			input.UpstreamProxy = d.UpstreamProxy
+		}
 	}
 	if input.SOCKS5Auth == "" && d.SOCKS5Auth != "" {
 		input.SOCKS5Auth = d.SOCKS5Auth
@@ -999,6 +1068,53 @@ func (s *Server) applyUpstreamProxy(rawURL, listenerName string) error {
 	}
 
 	return nil
+}
+
+// applyUpstreamProxyRotation installs (or clears) a rotating upstream-
+// proxy resolver scoped to the named listener (USK-959).
+//
+// cfg must carry a non-empty Template + supported Policy. Stage 1
+// probe-expansion runs at this level (via the structured config
+// validator) so a malformed template fails the MCP tool call rather
+// than the first live dial. Passing nil clears any active rotation.
+//
+// The Manager wires the resolver into the bound BuildConfig so the
+// next live data-path dial under the listener consults the resolver.
+// configure_tool dynamic tuning: re-calling this method replaces the
+// resolver entirely, dropping per-conn / per-host / sticky caches.
+func (s *Server) applyUpstreamProxyRotation(cfg *connector.RotationConfig, listenerName string) error {
+	if listenerName == "" {
+		listenerName = proxybuild.DefaultListenerName
+	}
+	if managerIsNil(s.connector.manager) {
+		return fmt.Errorf("proxy manager is not initialized")
+	}
+	if cfg == nil {
+		return s.connector.manager.SetUpstreamProxyRotationForListener(listenerName, nil)
+	}
+	// Stage 1 fail-closed: probe-expand the template once so any
+	// macro / CRLF / scheme failure surfaces here rather than at the
+	// first dial. The probe does NOT commit any resolver state.
+	if _, err := probeRotationTemplate(cfg.Template); err != nil {
+		return fmt.Errorf("upstream_proxy.url_template: %w", err)
+	}
+	return s.connector.manager.SetUpstreamProxyRotationForListener(listenerName, cfg)
+}
+
+// probeRotationTemplate runs the connector-side resolver against a
+// synthetic nonce / iteration to confirm the template expands into a
+// well-formed upstream proxy URL. Used by the MCP layer to enforce
+// Stage 1 fail-closed at config-apply time. Returns the parsed URL on
+// success (caller may discard) plus any expansion / CRLF / parse
+// error.
+func probeRotationTemplate(template string) (*url.URL, error) {
+	cfg := &connector.UpstreamProxyConfig{URLTemplate: template}
+	ctx, err := cfg.ResolveForIteration(context.Background(), 0)
+	if err != nil {
+		return nil, err
+	}
+	u, _ := connector.UpstreamProxyOverrideFromContext(ctx)
+	return u, nil
 }
 
 // applyTLSPassthrough validates and adds the TLS passthrough patterns.

@@ -86,6 +86,39 @@ func LoggerFromContext(ctx context.Context, fallback *slog.Logger) *slog.Logger 
 	return slog.Default()
 }
 
+// Dial target context key for the live MITM data path. The TCP-level
+// target ("host" or "host:port") is attached when entering BuildConnectionStack
+// / passthrough relays / forward dials so downstream resolvers (notably
+// the per-listener upstream-proxy rotation resolver, USK-959) can scope
+// state by upstream host without re-threading the target through every
+// dial helper signature.
+//
+// Distinct from forwardTargetCtxKey (TCP-forward-mode signal) and from
+// envelope.EnvelopeContext.TargetHost (carried inside envelopes, not
+// the dial-time-only signal). Empty when the dial path did not stamp
+// it (e.g. control-plane dials).
+type dialTargetCtxKey struct{}
+
+// ContextWithDialTarget stores the dial-time upstream target string on
+// ctx. The string is opaque to this package: typically "host:port" for
+// CONNECT/SOCKS5 paths, "host" without port for plain HTTP forward.
+// Callers must pass the value they will dial — the rotation resolver
+// (USK-959) uses the verbatim string as the per_target_host cache key
+// so distinct services on the same host get distinct rotation slots.
+func ContextWithDialTarget(ctx context.Context, target string) context.Context {
+	return context.WithValue(ctx, dialTargetCtxKey{}, target)
+}
+
+// DialTargetFromContext retrieves the dial-time upstream target string
+// stored via ContextWithDialTarget. Returns empty string when no target
+// was attached (e.g. plain control-plane dials).
+func DialTargetFromContext(ctx context.Context) string {
+	if v, ok := ctx.Value(dialTargetCtxKey{}).(string); ok {
+		return v
+	}
+	return ""
+}
+
 // Forward target context key for storing TCP forwarding metadata, used by TCP
 // forward listeners to pass the target to L7 protocol handlers without
 // requiring CONNECT or other protocol-level target resolution.

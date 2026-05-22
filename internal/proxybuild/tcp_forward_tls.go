@@ -465,8 +465,19 @@ func dialForwardUpstream(
 	dialOpts := connector.DialRawOpts{
 		DialTimeout: tcpForwardDialTimeout,
 	}
+	// USK-959: stamp the dial target on ctx so the per_target_host
+	// rotation policy can scope state by upstream host.
+	ctx = connector.ContextWithDialTarget(ctx, entry.target)
 	if parentStack != nil && parentStack.BuildConfig != nil {
-		dialOpts.UpstreamProxy = parentStack.BuildConfig.EffectiveUpstreamProxyForCtx(ctx)
+		u, perr := parentStack.BuildConfig.EffectiveUpstreamProxyForCtxErr(ctx)
+		if perr != nil {
+			// USK-959: fail-closed on rotation resolver error. TCP-
+			// forward TLS callers treat this as an upstream dial
+			// failure and surface a "stack build" / "upstream_tls_error"
+			// failure reason via their recorder.
+			return nil, nil, fmt.Errorf("upstream proxy rotation: %w", perr)
+		}
+		dialOpts.UpstreamProxy = u
 	}
 
 	// entry is non-nil by construction — both callers

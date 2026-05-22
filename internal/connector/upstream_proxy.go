@@ -55,24 +55,58 @@ func ParseUpstreamProxy(rawURL string) (*url.URL, error) {
 }
 
 // RedactProxyURL returns a copy of the raw proxy URL string with the password
-// portion of userinfo replaced by "xxxxx". If the URL cannot be parsed or has
-// no password, it is returned unchanged.
+// portion of userinfo replaced by "xxxxx". If the URL cannot be parsed and
+// contains userinfo characters, the userinfo region (text between "://" and
+// "@") is redacted via lexical substring replacement. If the URL has no
+// userinfo or no password, it is returned unchanged.
+//
+// The lexical fallback exists for USK-959 templates: a §__nonce§ macro in
+// the userinfo position breaks url.Parse (the section sign is not valid
+// userinfo), so without this branch a template like
+//
+//	http://session-§__nonce§:secret-pass@proxy.example:8080
+//
+// would leak the literal password to the status surface. The lexical path
+// preserves the URL shape (scheme + ://, host:port) while wiping anything
+// between "://" and the FIRST "@" that precedes the host.
 func RedactProxyURL(rawURL string) string {
 	if rawURL == "" {
 		return ""
 	}
-	u, err := url.Parse(rawURL)
-	if err != nil {
+	if u, err := url.Parse(rawURL); err == nil {
+		if u.User == nil {
+			return rawURL
+		}
+		if _, hasPassword := u.User.Password(); !hasPassword {
+			return rawURL
+		}
+		u.User = url.UserPassword(u.User.Username(), "xxxxx")
+		return u.String()
+	}
+	// Fallback: lexical redact of userinfo region. Bounded by the
+	// FIRST '@' after the scheme delimiter so we do not consume past
+	// the host segment if the password contains an '@' (unusual but
+	// possible). The redacted form keeps the same shape so callers
+	// can see scheme + host:port without exposing credentials.
+	schemeIdx := strings.Index(rawURL, "://")
+	if schemeIdx < 0 {
 		return rawURL
 	}
-	if u.User == nil {
+	userinfoStart := schemeIdx + 3
+	atIdx := strings.Index(rawURL[userinfoStart:], "@")
+	if atIdx < 0 {
 		return rawURL
 	}
-	if _, hasPassword := u.User.Password(); !hasPassword {
+	atIdx += userinfoStart
+	// Within userinfo, redact only the password half (after ":") if
+	// present so the username remains visible for diagnostics.
+	colonIdx := strings.Index(rawURL[userinfoStart:atIdx], ":")
+	if colonIdx < 0 {
+		// No password — leave untouched.
 		return rawURL
 	}
-	u.User = url.UserPassword(u.User.Username(), "xxxxx")
-	return u.String()
+	colonIdx += userinfoStart
+	return rawURL[:colonIdx+1] + "xxxxx" + rawURL[atIdx:]
 }
 
 // MaybeDialViaUpstreamProxy dials targetAddr either directly or through

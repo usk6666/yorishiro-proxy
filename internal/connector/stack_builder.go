@@ -107,6 +107,21 @@ type BuildConfig struct {
 	upstreamProxyPerListenerMu sync.RWMutex
 	upstreamProxyPerListener   map[string]*url.URL
 
+	// rotationByListener stores per-listener RotationResolvers for the
+	// per-listener template-driven rotation surface (USK-959). The
+	// dial path consults the resolver INSIDE EffectiveUpstreamProxyForCtx
+	// between the ctx-override (priority 0) and the per-listener static
+	// URL (priority 1) so all upstream-proxy call sites participate
+	// without per-site edits. The map is keyed by listener name; a
+	// resolver presence overrides the static per-listener URL for that
+	// listener.
+	//
+	// Writers are MCP-tool goroutines (configure_tool /
+	// proxy_start_tool); readers are per-connection dial-path
+	// goroutines. RWMutex matches the per-listener static map.
+	rotationByListenerMu sync.RWMutex
+	rotationByListener   map[string]*RotationResolver
+
 	// HostTLSResolver resolves per-host TLS overrides (InsecureSkipVerify,
 	// ClientCert, RootCAs). Nil means use global settings for all hosts.
 	HostTLSResolver *HostTLSResolver
@@ -379,6 +394,72 @@ func (c *BuildConfig) UpstreamProxyForListener(name string) *url.URL {
 	return c.upstreamProxyPerListener[name]
 }
 
+// SetRotationForListener installs (or clears) a per-listener
+// RotationResolver (USK-959). When non-nil, the resolver overrides
+// the per-listener static URL (SetUpstreamProxyForListener) so the
+// dial path mints / consults an expanded URL per pass according to
+// the resolver's policy. Passing nil clears the resolver so the
+// static per-listener URL re-emerges.
+//
+// An empty name is treated as DefaultListenerName. Writers are
+// configure_tool / proxy_start_tool goroutines; readers are
+// per-connection dial-path goroutines.
+func (c *BuildConfig) SetRotationForListener(name string, r *RotationResolver) {
+	if c == nil {
+		return
+	}
+	if name == "" {
+		name = DefaultListenerName
+	}
+	c.rotationByListenerMu.Lock()
+	defer c.rotationByListenerMu.Unlock()
+	if r == nil {
+		delete(c.rotationByListener, name)
+		return
+	}
+	if c.rotationByListener == nil {
+		c.rotationByListener = make(map[string]*RotationResolver)
+	}
+	c.rotationByListener[name] = r
+}
+
+// RotationForListener returns the per-listener RotationResolver
+// installed via SetRotationForListener, or nil when no resolver is
+// configured. An empty name is treated as DefaultListenerName.
+func (c *BuildConfig) RotationForListener(name string) *RotationResolver {
+	if c == nil {
+		return nil
+	}
+	if name == "" {
+		name = DefaultListenerName
+	}
+	c.rotationByListenerMu.RLock()
+	defer c.rotationByListenerMu.RUnlock()
+	return c.rotationByListener[name]
+}
+
+// ReleaseConnectionState drops any per-connection state held by
+// per-listener resolvers for connID (USK-959). Called from
+// ConnectionStack.Close so per_connection rotation entries do not leak
+// across the client disconnect. No-op when c is nil or no resolvers
+// are installed.
+func (c *BuildConfig) ReleaseConnectionState(connID string) {
+	if c == nil || connID == "" {
+		return
+	}
+	c.rotationByListenerMu.RLock()
+	resolvers := make([]*RotationResolver, 0, len(c.rotationByListener))
+	for _, r := range c.rotationByListener {
+		if r != nil {
+			resolvers = append(resolvers, r)
+		}
+	}
+	c.rotationByListenerMu.RUnlock()
+	for _, r := range resolvers {
+		r.ReleaseConnection(connID)
+	}
+}
+
 // EffectiveUpstreamProxyForCtx returns the upstream proxy URL the live
 // dial path should use for a connection whose ctx carries a listener name
 // (set by FullListener via ContextWithListenerName) (USK-826).
@@ -389,10 +470,20 @@ func (c *BuildConfig) UpstreamProxyForListener(name string) *url.URL {
 //     resolver returns nil without consulting any lower-priority slot.
 //     Used by control-plane resend / fuzz per-iteration rotation
 //     (residential proxy IP switching).
-//  1. Per-listener override installed via SetUpstreamProxyForListener for
-//     the ctx's listener name.
-//  2. Process-global override installed via SetUpstreamProxy.
-//  3. Boot-time UpstreamProxy field.
+//  1. Per-listener RotationResolver installed via SetRotationForListener
+//     for the ctx's listener name (USK-959). The resolver mints / picks
+//     an expanded URL according to its policy. A resolver error (macro
+//     expansion / CRLF / parse failure) is silently swallowed in this
+//     accessor — callers that need the error must use the parallel
+//     EffectiveUpstreamProxyForCtxErr method. Existing legacy callers
+//     using this method continue to work but observe a nil URL on
+//     resolver error (effectively "direct dial" fallback). USK-959
+//     migrates all dial-path callers to the Err variant so this
+//     fail-open path is unreachable in production.
+//  2. Per-listener static URL installed via SetUpstreamProxyForListener
+//     for the ctx's listener name.
+//  3. Process-global override installed via SetUpstreamProxy.
+//  4. Boot-time UpstreamProxy field.
 //
 // Falls back to EffectiveUpstreamProxy() when the ctx does not carry a
 // listener name (e.g. control-plane resend paths that do not flow through
@@ -400,21 +491,43 @@ func (c *BuildConfig) UpstreamProxyForListener(name string) *url.URL {
 // once USK-826 is wired in; callers must NOT read the UpstreamProxy field
 // directly because it observes only the boot-time value.
 func (c *BuildConfig) EffectiveUpstreamProxyForCtx(ctx context.Context) *url.URL {
+	u, _ := c.EffectiveUpstreamProxyForCtxErr(ctx)
+	return u
+}
+
+// EffectiveUpstreamProxyForCtxErr is the error-returning sibling of
+// EffectiveUpstreamProxyForCtx (USK-959). Returns the resolved URL plus
+// any error surfaced by a per-listener RotationResolver (macro expansion
+// / CRLF guard / ParseUpstreamProxy failure). Callers MUST fail closed
+// on a non-nil error — never fall back to a direct dial, which would
+// silently bypass the configured upstream proxy and leak the dial to the
+// open internet.
+//
+// Resolution order matches EffectiveUpstreamProxyForCtx; the only
+// difference is the surfaced error on rotation failure.
+func (c *BuildConfig) EffectiveUpstreamProxyForCtxErr(ctx context.Context) (*url.URL, error) {
 	if c == nil {
-		return nil
+		return nil, nil
 	}
 	if u, present := UpstreamProxyOverrideFromContext(ctx); present {
-		return u
+		return u, nil
 	}
 	if name := ListenerNameFromContext(ctx); name != "" {
+		c.rotationByListenerMu.RLock()
+		resolver := c.rotationByListener[name]
+		c.rotationByListenerMu.RUnlock()
+		if resolver != nil {
+			target := DialTargetFromContext(ctx)
+			return resolver.Resolve(ctx, name, target)
+		}
 		c.upstreamProxyPerListenerMu.RLock()
 		u, ok := c.upstreamProxyPerListener[name]
 		c.upstreamProxyPerListenerMu.RUnlock()
 		if ok {
-			return u
+			return u, nil
 		}
 	}
-	return c.EffectiveUpstreamProxy()
+	return c.EffectiveUpstreamProxy(), nil
 }
 
 // EffectiveTLSFingerprint returns the uTLS browser fingerprint profile
@@ -505,6 +618,12 @@ func BuildConnectionStack(
 	if cfg == nil || cfg.ProxyConfig == nil {
 		return nil, nil, nil, fmt.Errorf("connector: BuildConnectionStack: nil config")
 	}
+	// USK-959: stamp the dial target on ctx so the per-listener
+	// rotation resolver (consulted inside dialUpstreamWithALPN via
+	// EffectiveUpstreamProxyForCtxErr) can scope state by upstream
+	// host. Idempotent — re-stamping the same key on a child ctx is
+	// harmless.
+	ctx = ContextWithDialTarget(ctx, target)
 	if cfg.Issuer == nil {
 		return nil, nil, nil, fmt.Errorf("connector: BuildConnectionStack: nil issuer")
 	}
@@ -1190,13 +1309,21 @@ func dialUpstreamWithALPN(
 		upstreamTLSCfg.RootCAs = rootCAsConfig.RootCAs
 	}
 
+	upstreamProxy, proxyErr := cfg.EffectiveUpstreamProxyForCtxErr(ctx)
+	if proxyErr != nil {
+		// USK-959: fail-closed on rotation resolver error. Do NOT fall
+		// back to a direct dial — silent bypass = privacy regression.
+		slog.WarnContext(ctx, "connector: upstream proxy rotation failed; failing closed",
+			"target", target, "error", proxyErr)
+		return nil, nil, fmt.Errorf("connector: upstream dial for %s: upstream proxy rotation: %w", target, proxyErr)
+	}
 	conn, snap, err := DialUpstreamRaw(ctx, target, DialRawOpts{
 		TLSConfig:          upstreamTLSCfg,
 		InsecureSkipVerify: insecureSkip,
 		UTLSProfile:        cfg.EffectiveTLSFingerprint(),
 		ClientCert:         clientCert,
 		OfferALPN:          offerALPN,
-		UpstreamProxy:      cfg.EffectiveUpstreamProxyForCtx(ctx),
+		UpstreamProxy:      upstreamProxy,
 	})
 	if err != nil {
 		return nil, nil, fmt.Errorf("connector: upstream dial for %s: %w", target, err)
@@ -1578,13 +1705,20 @@ func buildRawPassthroughStack(
 		upstreamTLSCfg.RootCAs = hostTLS.rootCAs.RootCAs
 	}
 
+	upstreamProxy, proxyErr := cfg.EffectiveUpstreamProxyForCtxErr(ctx)
+	if proxyErr != nil {
+		clientTLSConn.Close()
+		slog.WarnContext(ctx, "connector: upstream proxy rotation failed (raw passthrough); failing closed",
+			"target", target, "error", proxyErr)
+		return nil, nil, nil, fmt.Errorf("connector: upstream dial for %s: upstream proxy rotation: %w", target, proxyErr)
+	}
 	upstreamConn, upstreamSnap, err := DialUpstreamRaw(ctx, target, DialRawOpts{
 		TLSConfig:          upstreamTLSCfg,
 		InsecureSkipVerify: insecureSkip,
 		UTLSProfile:        cfg.EffectiveTLSFingerprint(),
 		ClientCert:         clientCert,
 		OfferALPN:          []string{"http/1.1"},
-		UpstreamProxy:      cfg.EffectiveUpstreamProxyForCtx(ctx),
+		UpstreamProxy:      upstreamProxy,
 	})
 	if err != nil {
 		clientTLSConn.Close()

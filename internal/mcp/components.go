@@ -163,6 +163,16 @@ type proxyManager interface {
 	// per-listener upstream-proxy entry (USK-826). Equivalent to
 	// SetUpstreamProxyForListener(name, "").
 	ClearUpstreamProxyForListener(name string)
+	// SetUpstreamProxyRotationForListener installs (or clears) a
+	// rotating upstream-proxy resolver for the named listener
+	// (USK-959). Passing nil clears the resolver — the literal
+	// per-listener URL re-emerges (USK-826). The MCP layer is
+	// responsible for Stage 1 probe-expansion before calling.
+	SetUpstreamProxyRotationForListener(name string, cfg *connector.RotationConfig) error
+	// UpstreamProxyRotationForListener returns the operator-supplied
+	// template + policy for the named listener (USK-959). Both empty
+	// when no rotation is configured.
+	UpstreamProxyRotationForListener(name string) (template, policy string)
 	// SetTLSFingerprint installs a runtime uTLS browser fingerprint
 	// profile override on the bound BuildConfig so the live MITM
 	// data-path's next upstream dial picks up the new profile

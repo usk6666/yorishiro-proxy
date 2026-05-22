@@ -306,7 +306,12 @@ func BuildBytechunkStack(
 func dialPlainUpstream(ctx context.Context, target string, cfg *BuildConfig) (net.Conn, error) {
 	var dialOpts DialRawOpts
 	if cfg != nil {
-		dialOpts.UpstreamProxy = cfg.EffectiveUpstreamProxyForCtx(ctx)
+		u, err := cfg.EffectiveUpstreamProxyForCtxErr(ctx)
+		if err != nil {
+			// USK-959: fail-closed on rotation resolver error.
+			return nil, fmt.Errorf("connector: plain upstream dial for %s: upstream proxy rotation: %w", target, err)
+		}
+		dialOpts.UpstreamProxy = u
 	}
 	conn, _, err := DialUpstreamRaw(ctx, target, dialOpts)
 	if err != nil {

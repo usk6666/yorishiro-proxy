@@ -621,8 +621,22 @@ type ProxyConfig struct {
 	// Use UnmarshalJSON for backward-compatible parsing.
 	TCPForwards map[string]*ForwardConfig `json:"tcp_forwards,omitempty"`
 
-	// UpstreamProxy is the upstream proxy URL for proxy chaining.
-	UpstreamProxy string `json:"upstream_proxy,omitempty"`
+	// UpstreamProxy is the upstream proxy URL for proxy chaining (legacy
+	// USK-826 string form). When the config file uses the structured
+	// object form (USK-959), this field holds the URL extracted from the
+	// object's "url" key — or remains empty when "url_template" is set
+	// instead. Use UpstreamProxyStruct for the full structured form
+	// (URL, URLTemplate, Rotation).
+	//
+	// Wire schema: the JSON key "upstream_proxy" is polymorphic — string
+	// (legacy) or object (USK-959). ProxyConfig.UnmarshalJSON dispatches.
+	UpstreamProxy string `json:"-"`
+
+	// UpstreamProxyStruct carries the structured per-listener upstream
+	// proxy config (USK-959). Set by ProxyConfig.UnmarshalJSON when the
+	// "upstream_proxy" JSON value is an object; nil when the legacy
+	// string form is used (UpstreamProxy holds the literal URL then).
+	UpstreamProxyStruct *UpstreamProxyConfig `json:"-"`
 
 	// TLSFingerprint selects the TLS ClientHello fingerprint profile for upstream connections.
 	// Valid values: "chrome" (default), "firefox", "safari", "edge", "random", "none" (standard crypto/tls).
@@ -807,27 +821,37 @@ func (c *ProxyConfig) Validate() error {
 	if err := c.GRPCSchema.Validate(); err != nil {
 		return err
 	}
+	if c.UpstreamProxyStruct != nil {
+		if err := c.UpstreamProxyStruct.Validate(); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
 // UnmarshalJSON implements json.Unmarshaler for ProxyConfig.
-// It handles backward-compatible deserialization of TCPForwards, which can be
-// either a string value (legacy: "host:port") or a structured ForwardConfig object.
+// It handles backward-compatible deserialization of:
+//   - TCPForwards, which can be either a string value (legacy: "host:port")
+//     or a structured ForwardConfig object.
+//   - UpstreamProxy, which can be either a string (legacy USK-826
+//     literal URL) or an object (USK-959 structured: url|url_template +
+//     rotation).
 func (c *ProxyConfig) UnmarshalJSON(data []byte) error {
 	// Use an alias type to avoid infinite recursion.
 	type proxyConfigAlias ProxyConfig
-	// Temporarily override TCPForwards to capture raw JSON.
-	type proxyConfigWithRawForwards struct {
+	// Temporarily override polymorphic fields to capture raw JSON.
+	type proxyConfigWithRaw struct {
 		proxyConfigAlias
-		TCPForwards json.RawMessage `json:"tcp_forwards,omitempty"`
+		TCPForwards   json.RawMessage `json:"tcp_forwards,omitempty"`
+		UpstreamProxy json.RawMessage `json:"upstream_proxy,omitempty"`
 	}
 
-	var raw proxyConfigWithRawForwards
+	var raw proxyConfigWithRaw
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return err
 	}
 
-	// Copy all fields except TCPForwards.
+	// Copy all fields except the polymorphic ones.
 	*c = ProxyConfig(raw.proxyConfigAlias)
 
 	// Parse TCPForwards with backward compatibility.
@@ -839,7 +863,48 @@ func (c *ProxyConfig) UnmarshalJSON(data []byte) error {
 		c.TCPForwards = parsed
 	}
 
+	// Parse UpstreamProxy: string (legacy) or object (USK-959).
+	if len(raw.UpstreamProxy) > 0 {
+		s, obj, err := unmarshalUpstreamProxy(raw.UpstreamProxy)
+		if err != nil {
+			return fmt.Errorf("upstream_proxy: %w", err)
+		}
+		c.UpstreamProxy = s
+		c.UpstreamProxyStruct = obj
+	}
+
 	return nil
+}
+
+// unmarshalUpstreamProxy parses a JSON value that can be either a
+// string (legacy USK-826 literal URL) or an object (USK-959 structured
+// form with url|url_template + rotation). Returns the legacy string
+// form (populated for both legacy and object-with-url shapes) plus the
+// structured form (nil when the input was a plain string).
+func unmarshalUpstreamProxy(data json.RawMessage) (string, *UpstreamProxyConfig, error) {
+	trimmed := strings.TrimSpace(string(data))
+	if trimmed == "" || trimmed == "null" {
+		return "", nil, nil
+	}
+	if strings.HasPrefix(trimmed, "\"") {
+		var s string
+		if err := json.Unmarshal(data, &s); err != nil {
+			return "", nil, fmt.Errorf("must be a string or object: %w", err)
+		}
+		return s, nil, nil
+	}
+	var obj UpstreamProxyConfig
+	if err := json.Unmarshal(data, &obj); err != nil {
+		return "", nil, err
+	}
+	// Mirror the URL form into the legacy string field so existing
+	// callers (proxy_start_tool defaults merge) keep working without
+	// branching on the polymorphic shape.
+	legacy := ""
+	if obj.URL != "" {
+		legacy = obj.URL
+	}
+	return legacy, &obj, nil
 }
 
 // unmarshalTCPForwards parses a JSON value that can be either:
