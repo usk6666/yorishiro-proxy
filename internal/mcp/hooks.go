@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/config"
@@ -19,12 +20,67 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/macro"
 )
 
-// hooksInput holds the hook configuration for resend/fuzz actions.
+// Reserved KV Store keys used by pass_response injection. See
+// internal/macro/reserved.go for the broader reserved-key contract;
+// the "__" prefix prevents user-controlled macros from shadowing these
+// runtime-populated values via the mergeKVStore reserved-key filter.
+const (
+	// macroResponseStatusKey is the kvStore key receiving the HTTP
+	// response status code as a base-10 decimal string.
+	macroResponseStatusKey = macro.ReservedKeyPrefix + "response_status"
+
+	// macroResponseBodyKey is the kvStore key receiving the HTTP response
+	// body verbatim, capped at maxResponseBodyKVBytes.
+	macroResponseBodyKey = macro.ReservedKeyPrefix + "response_body"
+
+	// macroResponseHeaderKeyPrefix / macroResponseHeaderKeySuffix bracket the
+	// per-header kvStore keys: __response_headers__<lower(name)>__. Header
+	// names are lowercased on insert so the key stays stable regardless of
+	// wire casing — the recorded flow's header list keeps original casing.
+	macroResponseHeaderKeyPrefix = macro.ReservedKeyPrefix + "response_headers" + macro.ReservedKeyPrefix
+	macroResponseHeaderKeySuffix = macro.ReservedKeyPrefix
+)
+
+// maxResponseBodyKVBytes caps the body bytes copied into the kvStore via
+// __response_body. Templates substituting the entire body into a follow-up
+// macro step's URL or header would otherwise OOM on attacker-controlled
+// large responses (CWE-770). 64 KiB matches the order of magnitude used by
+// the macro engine's MaxStepBodySize (1 MiB) downsized for the kvStore-
+// versus-state distinction: state captures the whole body for guard
+// evaluation; kvStore values feed into template expansion at every
+// downstream invocation.
+const maxResponseBodyKVBytes = 64 * 1024
+
+// maxResponseHeaderValueKVBytes caps the bytes copied into a single
+// __response_headers__<lower(name)>__ kvStore entry. A malicious upstream
+// could return a very long single-header value (Set-Cookie payloads,
+// Server-Timing dumps, X-Debug-* leakage) and amplify memory by having
+// templates substitute the full value into multiple downstream macro
+// invocations. 8 KiB matches the order of magnitude of typical HTTP
+// header value caps and is generous for legitimate cases (Bearer tokens,
+// CSRF tokens) while bounding attacker-controlled growth (CWE-770).
+const maxResponseHeaderValueKVBytes = 8 * 1024
+
+// maxResponseHeaderKVCount caps the number of distinct response headers
+// injected into the kvStore as __response_headers__<lower(name)>__
+// entries. The recorded flow keeps the full header list untouched; this
+// only bounds the kvStore-side projection consumed by post_macro template
+// expansion (CWE-770). 256 covers any reasonable response while
+// preventing a malicious upstream emitting a Set-Cookie storm from
+// inflating the per-iteration kvStore.
+const maxResponseHeaderKVCount = 256
+
+// hooksInput holds the hook configuration for fuzz/resend actions. The
+// JSON keys are pre_macro / post_macro (USK-960 nomenclature) — older
+// pre_send / post_receive spellings are not accepted. The dormant
+// scaffold that originated this file (PR #78, orphaned by PR #688's
+// legacy-tool retirement) is re-attached to fuzz_http as the engine
+// for per-iteration pre/post macro dispatch.
 type hooksInput struct {
-	// PreSend is the hook executed before the main request is sent.
-	PreSend *hookConfig `json:"pre_send,omitempty"`
-	// PostReceive is the hook executed after the main response is received.
-	PostReceive *hookConfig `json:"post_receive,omitempty"`
+	// PreMacro is the hook executed before the main request is sent.
+	PreMacro *hookConfig `json:"pre_macro,omitempty"`
+	// PostMacro is the hook executed after the main response is received.
+	PostMacro *hookConfig `json:"post_macro,omitempty"`
 }
 
 // hookConfig defines a single hook's configuration.
@@ -34,8 +90,8 @@ type hookConfig struct {
 	// Vars are runtime variable overrides for the macro.
 	Vars map[string]string `json:"vars,omitempty"`
 	// RunInterval controls when the hook fires.
-	// For pre_send: "always" (default), "once", "every_n", "on_error".
-	// For post_receive: "always" (default), "on_status", "on_match".
+	// For pre_macro: "always" (default), "once", "every_n", "on_error".
+	// For post_macro: "always" (default), "on_status", "on_match".
 	RunInterval string `json:"run_interval,omitempty"`
 	// N is the interval count for "every_n" run_interval.
 	N int `json:"n,omitempty"`
@@ -47,20 +103,20 @@ type hookConfig struct {
 	// Set during validation to avoid recompilation on every invocation.
 	compiledPattern *regexp.Regexp
 	// PassResponse passes the main request's response to the macro when true.
-	// Only applicable to post_receive hooks.
+	// Only applicable to post_macro hooks.
 	PassResponse bool `json:"pass_response,omitempty"`
 }
 
-// validPreSendIntervals are the allowed run_interval values for pre_send hooks.
-var validPreSendIntervals = map[string]bool{
+// validPreMacroIntervals are the allowed run_interval values for pre_macro hooks.
+var validPreMacroIntervals = map[string]bool{
 	"always":   true,
 	"once":     true,
 	"every_n":  true,
 	"on_error": true,
 }
 
-// validPostReceiveIntervals are the allowed run_interval values for post_receive hooks.
-var validPostReceiveIntervals = map[string]bool{
+// validPostMacroIntervals are the allowed run_interval values for post_macro hooks.
+var validPostMacroIntervals = map[string]bool{
 	"always":    true,
 	"on_status": true,
 	"on_match":  true,
@@ -71,21 +127,21 @@ func validateHooks(hooks *hooksInput) error {
 	if hooks == nil {
 		return nil
 	}
-	if hooks.PreSend != nil {
-		if err := validatePreSendHook(hooks.PreSend); err != nil {
-			return fmt.Errorf("pre_send: %w", err)
+	if hooks.PreMacro != nil {
+		if err := validatePreMacroHook(hooks.PreMacro); err != nil {
+			return fmt.Errorf("pre_macro: %w", err)
 		}
 	}
-	if hooks.PostReceive != nil {
-		if err := validatePostReceiveHook(hooks.PostReceive); err != nil {
-			return fmt.Errorf("post_receive: %w", err)
+	if hooks.PostMacro != nil {
+		if err := validatePostMacroHook(hooks.PostMacro); err != nil {
+			return fmt.Errorf("post_macro: %w", err)
 		}
 	}
 	return nil
 }
 
-// validatePreSendHook validates a pre_send hook configuration.
-func validatePreSendHook(h *hookConfig) error {
+// validatePreMacroHook validates a pre_macro hook configuration.
+func validatePreMacroHook(h *hookConfig) error {
 	if h.Macro == "" {
 		return fmt.Errorf("macro name is required")
 	}
@@ -93,7 +149,7 @@ func validatePreSendHook(h *hookConfig) error {
 	if interval == "" {
 		interval = "always"
 	}
-	if !validPreSendIntervals[interval] {
+	if !validPreMacroIntervals[interval] {
 		return fmt.Errorf("invalid run_interval %q: must be one of always, once, every_n, on_error", interval)
 	}
 	if interval == "every_n" && h.N <= 0 {
@@ -102,8 +158,8 @@ func validatePreSendHook(h *hookConfig) error {
 	return nil
 }
 
-// validatePostReceiveHook validates a post_receive hook configuration.
-func validatePostReceiveHook(h *hookConfig) error {
+// validatePostMacroHook validates a post_macro hook configuration.
+func validatePostMacroHook(h *hookConfig) error {
 	if h.Macro == "" {
 		return fmt.Errorf("macro name is required")
 	}
@@ -111,7 +167,7 @@ func validatePostReceiveHook(h *hookConfig) error {
 	if interval == "" {
 		interval = "always"
 	}
-	if !validPostReceiveIntervals[interval] {
+	if !validPostMacroIntervals[interval] {
 		return fmt.Errorf("invalid run_interval %q: must be one of always, on_status, on_match", interval)
 	}
 	if interval == "on_status" && len(h.StatusCodes) == 0 {
@@ -134,10 +190,11 @@ func validatePostReceiveHook(h *hookConfig) error {
 }
 
 // hookState tracks the execution state of hooks across multiple iterations
-// (used by fuzzer). For single resend calls, a fresh hookState is created each time.
+// (used by fuzzer). For single-shot resend calls, a fresh hookState is
+// created each time.
 type hookState struct {
-	// preSendExecuted tracks whether the pre_send hook has been executed (for "once").
-	preSendExecuted bool
+	// preMacroExecuted tracks whether the pre_macro hook has been executed (for "once").
+	preMacroExecuted bool
 	// requestCount tracks the total number of main requests sent (for "every_n").
 	requestCount int
 	// lastStatusCode is the status code from the previous main request (for "on_error").
@@ -146,7 +203,7 @@ type hookState struct {
 	lastError bool
 }
 
-// hookExecutor provides methods to execute pre_send and post_receive hooks
+// hookExecutor provides methods to execute pre_macro and post_macro hooks
 // using the macro engine. It is created per resend call or per fuzz iteration batch.
 //
 // It holds a *Server reference because hooks need to read from three components
@@ -168,76 +225,157 @@ func newHookExecutor(s *Server, hooks *hooksInput, state *hookState) *hookExecut
 	}
 }
 
-// executePreSend runs the pre_send hook if configured and the run_interval condition is met.
-// Returns the KV Store from the macro execution (for template expansion), or nil if not executed.
-func (he *hookExecutor) executePreSend(ctx context.Context) (map[string]string, error) {
-	if he.hooks == nil || he.hooks.PreSend == nil {
+// executePreMacro runs the pre_macro hook if configured and the run_interval
+// condition is met. Returns the KV Store from the macro execution (for
+// template expansion downstream), or nil if not executed.
+//
+// kvStore, when non-nil, is shared with the engine via RunWithKV — extracted
+// values land directly in the caller-owned map so subsequent hooks (post_macro)
+// see them without an explicit re-merge.
+func (he *hookExecutor) executePreMacro(ctx context.Context, kvStore map[string]string) (map[string]string, error) {
+	if he.hooks == nil || he.hooks.PreMacro == nil {
 		return nil, nil
 	}
 
-	h := he.hooks.PreSend
-	if !he.shouldRunPreSend(h) {
+	h := he.hooks.PreMacro
+	if !he.shouldRunPreMacro(h) {
 		return nil, nil
 	}
 
-	result, err := he.runMacro(ctx, h.Macro, h.Vars)
+	// Seed the caller-supplied store with hook.Vars (non-destructive — existing
+	// caller-owned reserved keys win) so the macro sees both per-iteration
+	// state and the operator's static hook overrides.
+	for k, v := range h.Vars {
+		if _, ok := kvStore[k]; !ok {
+			kvStore[k] = v
+		}
+	}
+
+	result, err := he.runMacroWithKV(ctx, h.Macro, kvStore)
 	if err != nil {
-		return nil, fmt.Errorf("pre_send hook: %w", err)
+		return nil, fmt.Errorf("pre_macro hook: %w", err)
 	}
 
 	if result.Status != "completed" {
-		return nil, fmt.Errorf("pre_send hook macro %q failed: %s", h.Macro, result.Error)
+		return nil, fmt.Errorf("pre_macro hook macro %q failed: %s", h.Macro, result.Error)
 	}
 
 	return result.KVStore, nil
 }
 
-// executePostReceive runs the post_receive hook if configured and the run_interval condition is met.
-// The statusCode and responseBody are from the main request's response.
-// The kvStore parameter carries KV Store values from the preceding pre_send hook execution.
-// When merging vars, the priority order is:
-//  1. pre_send KV Store (highest priority)
-//  2. hook config vars (lowest priority)
+// executePostMacro runs the post_macro hook if configured and the
+// run_interval condition is met. The statusCode and responseBody are from
+// the main request's response.
 //
-// This ensures that values produced by pre_send (e.g., auth_session) take precedence
-// over static hook config vars when the same key exists in both.
-func (he *hookExecutor) executePostReceive(ctx context.Context, statusCode int, responseBody []byte, kvStore map[string]string) error {
-	if he.hooks == nil || he.hooks.PostReceive == nil {
+// kvStore carries the shared per-iteration KV Store. When non-nil it is
+// shared with the engine via RunWithKV so pre_macro extracts AND
+// PassResponse-injected variables are visible to the post macro's template
+// expansions without an explicit re-merge. The legacy nil-kvStore path is
+// retained for callers that do not own a long-lived store.
+//
+// The priority order for variable resolution remains:
+//  1. caller-owned KV Store entries (highest priority — covers reserved
+//     keys, pre_macro extracts, response injection)
+//  2. post_macro hook config vars (filled in only for keys the caller did
+//     not already populate)
+func (he *hookExecutor) executePostMacro(ctx context.Context, statusCode int, responseBody []byte, responseHeaders map[string][]string, kvStore map[string]string) error {
+	if he.hooks == nil || he.hooks.PostMacro == nil {
 		return nil
 	}
 
-	h := he.hooks.PostReceive
-	if !he.shouldRunPostReceive(h, statusCode, responseBody) {
+	h := he.hooks.PostMacro
+	if !he.shouldRunPostMacro(h, statusCode, responseBody) {
 		return nil
 	}
 
-	// Start with hook config vars as the base.
-	vars := make(map[string]string)
+	// When the caller did not supply a kvStore we mint a fresh one — the
+	// macro engine accepts nil but for the Vars-merge dance below we want a
+	// concrete map.
+	if kvStore == nil {
+		kvStore = make(map[string]string)
+	}
+
+	// Hook config vars fill in only for keys the caller's store does not
+	// already define. Caller wins on conflict (matches the pre-USK-960
+	// "pre_send KV Store wins over hook config vars" rule).
 	for k, v := range h.Vars {
-		vars[k] = v
+		if _, ok := kvStore[k]; !ok {
+			kvStore[k] = v
+		}
 	}
 
-	// Merge pre_send KV Store values. These take precedence over hook config vars.
-	for k, v := range kvStore {
-		vars[k] = v
-	}
-
-	// If pass_response is true, pass the response status code and body as variables.
+	// If pass_response is true, inject the response status / body / per-
+	// header values as reserved variables. These overwrite any prior writes
+	// from the same iteration so a re-invocation of post_macro sees the
+	// latest response, not a stale snapshot.
 	if h.PassResponse {
-		vars["__response_status"] = fmt.Sprintf("%d", statusCode)
-		vars["__response_body"] = string(responseBody)
+		injectResponseVars(kvStore, statusCode, responseBody, responseHeaders)
 	}
 
-	result, err := he.runMacro(ctx, h.Macro, vars)
+	result, err := he.runMacroWithKV(ctx, h.Macro, kvStore)
 	if err != nil {
-		return fmt.Errorf("post_receive hook: %w", err)
+		return fmt.Errorf("post_macro hook: %w", err)
 	}
 
 	if result.Status != "completed" {
-		return fmt.Errorf("post_receive hook macro %q failed: %s", h.Macro, result.Error)
+		return fmt.Errorf("post_macro hook macro %q failed: %s", h.Macro, result.Error)
 	}
 
 	return nil
+}
+
+// injectResponseVars writes the canonical __response_* reserved keys
+// (status, body, per-header) into kvStore for consumption by post_macro
+// template expansion. Header names are lowercased so the kvStore key is
+// stable regardless of wire casing — the recorded wire flow keeps its
+// original casing untouched (per project MITM principle: lossless
+// representations live on the wire path).
+//
+// Existing reserved-key writes for the same iteration are overwritten so
+// a re-run of post_macro within the same kvStore sees the latest response
+// rather than a stale snapshot.
+//
+// CWE-770 caps:
+//   - __response_body is truncated to maxResponseBodyKVBytes (64 KiB).
+//   - Per-header values are truncated to maxResponseHeaderValueKVBytes
+//     (8 KiB); the cap protects template substitution from amplifying
+//     an attacker-controlled X-Debug / Set-Cookie payload across multiple
+//     downstream macro invocations.
+//   - At most maxResponseHeaderKVCount (256) distinct headers are
+//     injected; remaining headers are silently dropped from the kvStore
+//     projection. The recorded wire flow keeps every header — the cap
+//     only bounds the control-plane kvStore convenience view.
+func injectResponseVars(kvStore map[string]string, statusCode int, responseBody []byte, responseHeaders map[string][]string) {
+	kvStore[macroResponseStatusKey] = fmt.Sprintf("%d", statusCode)
+
+	body := responseBody
+	if len(body) > maxResponseBodyKVBytes {
+		body = body[:maxResponseBodyKVBytes]
+	}
+	kvStore[macroResponseBodyKey] = string(body)
+
+	injected := 0
+	for name, values := range responseHeaders {
+		if len(values) == 0 {
+			continue
+		}
+		if injected >= maxResponseHeaderKVCount {
+			// Stop injecting once the per-iteration kvStore header cap is
+			// reached. The wire-recorded flow already holds every header;
+			// the kvStore projection is a control-plane convenience.
+			break
+		}
+		// Last value wins for duplicate-name headers. The wire-recorded
+		// flow keeps every occurrence; the kvStore is a control-plane
+		// convenience and intentionally collapses duplicates so template
+		// expansion gets a single string per key.
+		v := values[len(values)-1]
+		if len(v) > maxResponseHeaderValueKVBytes {
+			v = v[:maxResponseHeaderValueKVBytes]
+		}
+		kvStore[macroResponseHeaderKeyPrefix+strings.ToLower(name)+macroResponseHeaderKeySuffix] = v
+		injected++
+	}
 }
 
 // updateState updates the hook state after a main request completes.
@@ -248,8 +386,8 @@ func (he *hookExecutor) updateState(statusCode int, hadError bool) {
 	he.state.lastError = hadError
 }
 
-// shouldRunPreSend evaluates whether the pre_send hook should fire based on run_interval.
-func (he *hookExecutor) shouldRunPreSend(h *hookConfig) bool {
+// shouldRunPreMacro evaluates whether the pre_macro hook should fire based on run_interval.
+func (he *hookExecutor) shouldRunPreMacro(h *hookConfig) bool {
 	interval := h.RunInterval
 	if interval == "" {
 		interval = "always"
@@ -259,10 +397,10 @@ func (he *hookExecutor) shouldRunPreSend(h *hookConfig) bool {
 	case "always":
 		return true
 	case "once":
-		if he.state.preSendExecuted {
+		if he.state.preMacroExecuted {
 			return false
 		}
-		he.state.preSendExecuted = true
+		he.state.preMacroExecuted = true
 		return true
 	case "every_n":
 		// Run on 0th, nth, 2nth, ... request.
@@ -284,8 +422,8 @@ func (he *hookExecutor) shouldRunPreSend(h *hookConfig) bool {
 	}
 }
 
-// shouldRunPostReceive evaluates whether the post_receive hook should fire.
-func (he *hookExecutor) shouldRunPostReceive(h *hookConfig, statusCode int, responseBody []byte) bool {
+// shouldRunPostMacro evaluates whether the post_macro hook should fire.
+func (he *hookExecutor) shouldRunPostMacro(h *hookConfig, statusCode int, responseBody []byte) bool {
 	interval := h.RunInterval
 	if interval == "" {
 		interval = "always"
@@ -316,8 +454,15 @@ func (he *hookExecutor) shouldRunPostReceive(h *hookConfig, statusCode int, resp
 	}
 }
 
-// runMacro loads a macro from the DB and runs it with the given vars.
-func (he *hookExecutor) runMacro(ctx context.Context, macroName string, vars map[string]string) (*macro.Result, error) {
+// runMacroWithKV loads a macro from the DB and runs it via Engine.RunWithKV
+// against the caller-supplied kvStore. Extracted values land directly in
+// kvStore in place, so the caller can thread a single per-iteration store
+// across multiple hook invocations (pre then post in fuzz_http) without
+// re-merging.
+//
+// Pass nil for kvStore to run the macro against a fresh empty store; this
+// path is equivalent to a vars=nil call into Engine.Run.
+func (he *hookExecutor) runMacroWithKV(ctx context.Context, macroName string, kvStore map[string]string) (*macro.Result, error) {
 	s := he.s
 	if s.flowStore.store == nil {
 		return nil, fmt.Errorf("flow store is not initialized")
@@ -352,7 +497,7 @@ func (he *hookExecutor) runMacro(ctx context.Context, macroName string, vars map
 		return nil, fmt.Errorf("create macro engine: %w", err)
 	}
 
-	result, err := engine.Run(ctx, m, vars)
+	result, err := engine.RunWithKV(ctx, m, kvStore)
 	if err != nil {
 		return nil, fmt.Errorf("run macro: %w", err)
 	}

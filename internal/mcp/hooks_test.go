@@ -23,27 +23,27 @@ func TestValidateHooks_Nil(t *testing.T) {
 	}
 }
 
-func TestValidateHooks_EmptyPreSendMacro(t *testing.T) {
+func TestValidateHooks_EmptyPreMacro(t *testing.T) {
 	hooks := &hooksInput{
-		PreSend: &hookConfig{},
+		PreMacro: &hookConfig{},
 	}
 	err := validateHooks(hooks)
 	if err == nil {
-		t.Fatal("expected error for empty pre_send macro name")
+		t.Fatal("expected error for empty pre_macro macro name")
 	}
 }
 
-func TestValidateHooks_EmptyPostReceiveMacro(t *testing.T) {
+func TestValidateHooks_EmptyPostMacro(t *testing.T) {
 	hooks := &hooksInput{
-		PostReceive: &hookConfig{},
+		PostMacro: &hookConfig{},
 	}
 	err := validateHooks(hooks)
 	if err == nil {
-		t.Fatal("expected error for empty post_receive macro name")
+		t.Fatal("expected error for empty post_macro macro name")
 	}
 }
 
-func TestValidateHooks_ValidPreSendIntervals(t *testing.T) {
+func TestValidateHooks_ValidPreMacroIntervals(t *testing.T) {
 	tests := []struct {
 		name     string
 		interval string
@@ -63,7 +63,7 @@ func TestValidateHooks_ValidPreSendIntervals(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			hooks := &hooksInput{
-				PreSend: &hookConfig{
+				PreMacro: &hookConfig{
 					Macro:       "test-macro",
 					RunInterval: tt.interval,
 					N:           tt.n,
@@ -77,7 +77,7 @@ func TestValidateHooks_ValidPreSendIntervals(t *testing.T) {
 	}
 }
 
-func TestValidateHooks_ValidPostReceiveIntervals(t *testing.T) {
+func TestValidateHooks_ValidPostMacroIntervals(t *testing.T) {
 	tests := []struct {
 		name         string
 		interval     string
@@ -98,7 +98,7 @@ func TestValidateHooks_ValidPostReceiveIntervals(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			hooks := &hooksInput{
-				PostReceive: &hookConfig{
+				PostMacro: &hookConfig{
 					Macro:        "test-macro",
 					RunInterval:  tt.interval,
 					StatusCodes:  tt.statusCodes,
@@ -113,7 +113,7 @@ func TestValidateHooks_ValidPostReceiveIntervals(t *testing.T) {
 	}
 }
 
-func TestValidatePostReceiveHook_MatchPatternLength(t *testing.T) {
+func TestValidatePostMacroHook_MatchPatternLength(t *testing.T) {
 	tests := []struct {
 		name    string
 		pattern string
@@ -138,51 +138,51 @@ func TestValidatePostReceiveHook_MatchPatternLength(t *testing.T) {
 				RunInterval:  "on_match",
 				MatchPattern: tt.pattern,
 			}
-			err := validatePostReceiveHook(h)
+			err := validatePostMacroHook(h)
 			if (err != nil) != tt.wantErr {
-				t.Errorf("validatePostReceiveHook() error = %v, wantErr %v", err, tt.wantErr)
+				t.Errorf("validatePostMacroHook() error = %v, wantErr %v", err, tt.wantErr)
 			}
 		})
 	}
 }
 
-// --- shouldRunPreSend tests ---
+// --- shouldRunPreMacro tests ---
 
-func TestShouldRunPreSend_Always(t *testing.T) {
+func TestShouldRunPreMacro_Always(t *testing.T) {
 	he := &hookExecutor{
 		state: &hookState{},
 	}
 	h := &hookConfig{Macro: "m", RunInterval: "always"}
 	for i := 0; i < 5; i++ {
-		if !he.shouldRunPreSend(h) {
-			t.Errorf("iteration %d: shouldRunPreSend(always) = false, want true", i)
+		if !he.shouldRunPreMacro(h) {
+			t.Errorf("iteration %d: shouldRunPreMacro(always) = false, want true", i)
 		}
 		he.state.requestCount++
 	}
 }
 
-func TestShouldRunPreSend_Once(t *testing.T) {
+func TestShouldRunPreMacro_Once(t *testing.T) {
 	he := &hookExecutor{
 		state: &hookState{},
 	}
 	h := &hookConfig{Macro: "m", RunInterval: "once"}
 
 	// First call should return true.
-	if !he.shouldRunPreSend(h) {
-		t.Error("first call: shouldRunPreSend(once) = false, want true")
+	if !he.shouldRunPreMacro(h) {
+		t.Error("first call: shouldRunPreMacro(once) = false, want true")
 	}
 	he.state.requestCount++
 
 	// Subsequent calls should return false.
 	for i := 0; i < 5; i++ {
-		if he.shouldRunPreSend(h) {
-			t.Errorf("call %d: shouldRunPreSend(once) = true, want false", i+2)
+		if he.shouldRunPreMacro(h) {
+			t.Errorf("call %d: shouldRunPreMacro(once) = true, want false", i+2)
 		}
 		he.state.requestCount++
 	}
 }
 
-func TestShouldRunPreSend_EveryN(t *testing.T) {
+func TestShouldRunPreMacro_EveryN(t *testing.T) {
 	he := &hookExecutor{
 		state: &hookState{},
 	}
@@ -190,74 +190,74 @@ func TestShouldRunPreSend_EveryN(t *testing.T) {
 
 	expected := []bool{true, false, false, true, false, false, true}
 	for i, want := range expected {
-		got := he.shouldRunPreSend(h)
+		got := he.shouldRunPreMacro(h)
 		if got != want {
-			t.Errorf("iteration %d: shouldRunPreSend(every_3) = %v, want %v", i, got, want)
+			t.Errorf("iteration %d: shouldRunPreMacro(every_3) = %v, want %v", i, got, want)
 		}
 		he.state.requestCount++
 	}
 }
 
-func TestShouldRunPreSend_OnError(t *testing.T) {
+func TestShouldRunPreMacro_OnError(t *testing.T) {
 	he := &hookExecutor{
 		state: &hookState{},
 	}
 	h := &hookConfig{Macro: "m", RunInterval: "on_error"}
 
 	// First request: always run (no previous error to check).
-	if !he.shouldRunPreSend(h) {
-		t.Error("first request: shouldRunPreSend(on_error) = false, want true")
+	if !he.shouldRunPreMacro(h) {
+		t.Error("first request: shouldRunPreMacro(on_error) = false, want true")
 	}
 	he.state.requestCount++
 	he.state.lastStatusCode = 200
 
 	// After 200: should not run.
-	if he.shouldRunPreSend(h) {
-		t.Error("after 200: shouldRunPreSend(on_error) = true, want false")
+	if he.shouldRunPreMacro(h) {
+		t.Error("after 200: shouldRunPreMacro(on_error) = true, want false")
 	}
 	he.state.requestCount++
 	he.state.lastStatusCode = 401
 
 	// After 401: should run.
-	if !he.shouldRunPreSend(h) {
-		t.Error("after 401: shouldRunPreSend(on_error) = false, want true")
+	if !he.shouldRunPreMacro(h) {
+		t.Error("after 401: shouldRunPreMacro(on_error) = false, want true")
 	}
 	he.state.requestCount++
 	he.state.lastError = true
 	he.state.lastStatusCode = 0
 
 	// After transport error: should run.
-	if !he.shouldRunPreSend(h) {
-		t.Error("after error: shouldRunPreSend(on_error) = false, want true")
+	if !he.shouldRunPreMacro(h) {
+		t.Error("after error: shouldRunPreMacro(on_error) = false, want true")
 	}
 }
 
-// --- shouldRunPostReceive tests ---
+// --- shouldRunPostMacro tests ---
 
-func TestShouldRunPostReceive_Always(t *testing.T) {
+func TestShouldRunPostMacro_Always(t *testing.T) {
 	he := &hookExecutor{state: &hookState{}}
 	h := &hookConfig{Macro: "m", RunInterval: "always"}
-	if !he.shouldRunPostReceive(h, 200, nil) {
-		t.Error("shouldRunPostReceive(always) = false, want true")
+	if !he.shouldRunPostMacro(h, 200, nil) {
+		t.Error("shouldRunPostMacro(always) = false, want true")
 	}
 }
 
-func TestShouldRunPostReceive_OnStatus(t *testing.T) {
+func TestShouldRunPostMacro_OnStatus(t *testing.T) {
 	he := &hookExecutor{state: &hookState{}}
 	h := &hookConfig{Macro: "m", RunInterval: "on_status", StatusCodes: []int{401, 403}}
 
-	if he.shouldRunPostReceive(h, 200, nil) {
-		t.Error("shouldRunPostReceive(on_status, 200) = true, want false")
+	if he.shouldRunPostMacro(h, 200, nil) {
+		t.Error("shouldRunPostMacro(on_status, 200) = true, want false")
 	}
-	if !he.shouldRunPostReceive(h, 401, nil) {
-		t.Error("shouldRunPostReceive(on_status, 401) = false, want true")
+	if !he.shouldRunPostMacro(h, 401, nil) {
+		t.Error("shouldRunPostMacro(on_status, 401) = false, want true")
 	}
-	if !he.shouldRunPostReceive(h, 403, nil) {
-		t.Error("shouldRunPostReceive(on_status, 403) = false, want true")
+	if !he.shouldRunPostMacro(h, 403, nil) {
+		t.Error("shouldRunPostMacro(on_status, 403) = false, want true")
 	}
 }
 
-func TestShouldRunPostReceive_OnMatch(t *testing.T) {
+func TestShouldRunPostMacro_OnMatch(t *testing.T) {
 	he := &hookExecutor{state: &hookState{}}
 	h := &hookConfig{
 		Macro:           "m",
@@ -266,11 +266,11 @@ func TestShouldRunPostReceive_OnMatch(t *testing.T) {
 		compiledPattern: regexp.MustCompile(`"error":\s*true`),
 	}
 
-	if he.shouldRunPostReceive(h, 200, []byte(`{"ok":true}`)) {
-		t.Error("shouldRunPostReceive(on_match, no match) = true, want false")
+	if he.shouldRunPostMacro(h, 200, []byte(`{"ok":true}`)) {
+		t.Error("shouldRunPostMacro(on_match, no match) = true, want false")
 	}
-	if !he.shouldRunPostReceive(h, 200, []byte(`{"error": true}`)) {
-		t.Error("shouldRunPostReceive(on_match, match) = false, want true")
+	if !he.shouldRunPostMacro(h, 200, []byte(`{"error": true}`)) {
+		t.Error("shouldRunPostMacro(on_match, match) = false, want true")
 	}
 }
 
@@ -303,9 +303,9 @@ func TestHookState_UpdateState(t *testing.T) {
 	}
 }
 
-// --- executePostReceive KV Store merge tests ---
+// --- executePostMacro KV Store merge tests ---
 
-func TestExecutePostReceive_KVStoreMerge(t *testing.T) {
+func TestExecutePostMacro_KVStoreMerge(t *testing.T) {
 	// Create a macro step server that echoes back received headers.
 	macroServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(200)
@@ -350,7 +350,7 @@ func TestExecutePostReceive_KVStoreMerge(t *testing.T) {
 	// Create the hook executor with post_receive hook that has its own vars.
 	s := newServer(context.Background(), nil, store, nil)
 	hooks := &hooksInput{
-		PostReceive: &hookConfig{
+		PostMacro: &hookConfig{
 			Macro:       "logout-macro",
 			RunInterval: "always",
 			Vars:        map[string]string{"auth_session": "config-session-value"},
@@ -359,16 +359,16 @@ func TestExecutePostReceive_KVStoreMerge(t *testing.T) {
 	state := &hookState{}
 	executor := newHookExecutor(s, hooks, state)
 
-	// Call executePostReceive with KV Store from pre_send that has the same key.
-	// pre_send KV Store should take precedence over hook config vars.
-	kvStore := map[string]string{"auth_session": "pre-send-session-value"}
-	err := executor.executePostReceive(ctx, 200, []byte("ok"), kvStore)
+	// Call executePostMacro with KV Store from pre_macro that has the same key.
+	// pre_macro KV Store should take precedence over hook config vars.
+	kvStore := map[string]string{"auth_session": "pre-macro-session-value"}
+	err := executor.executePostMacro(ctx, 200, []byte("ok"), nil, kvStore)
 	if err != nil {
-		t.Fatalf("executePostReceive: %v", err)
+		t.Fatalf("executePostMacro: %v", err)
 	}
 }
 
-func TestExecutePostReceive_NilKVStore(t *testing.T) {
+func TestExecutePostMacro_NilKVStore(t *testing.T) {
 	// When kvStore is nil, only hook config vars should be used.
 	macroServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(200)
@@ -409,7 +409,7 @@ func TestExecutePostReceive_NilKVStore(t *testing.T) {
 
 	s := newServer(context.Background(), nil, store, nil)
 	hooks := &hooksInput{
-		PostReceive: &hookConfig{
+		PostMacro: &hookConfig{
 			Macro:       "cleanup-macro",
 			RunInterval: "always",
 			Vars:        map[string]string{"key": "value"},
@@ -419,13 +419,13 @@ func TestExecutePostReceive_NilKVStore(t *testing.T) {
 	executor := newHookExecutor(s, hooks, state)
 
 	// Call with nil kvStore — should not panic or error.
-	err := executor.executePostReceive(ctx, 200, []byte("ok"), nil)
+	err := executor.executePostMacro(ctx, 200, []byte("ok"), nil, nil)
 	if err != nil {
-		t.Fatalf("executePostReceive with nil kvStore: %v", err)
+		t.Fatalf("executePostMacro with nil kvStore: %v", err)
 	}
 }
 
-func TestExecutePostReceive_EmptyKVStore(t *testing.T) {
+func TestExecutePostMacro_EmptyKVStore(t *testing.T) {
 	// When kvStore is empty, only hook config vars should be used.
 	macroServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(200)
@@ -466,7 +466,7 @@ func TestExecutePostReceive_EmptyKVStore(t *testing.T) {
 
 	s := newServer(context.Background(), nil, store, nil)
 	hooks := &hooksInput{
-		PostReceive: &hookConfig{
+		PostMacro: &hookConfig{
 			Macro:       "cleanup-macro-2",
 			RunInterval: "always",
 			Vars:        map[string]string{"key": "value"},
@@ -476,9 +476,9 @@ func TestExecutePostReceive_EmptyKVStore(t *testing.T) {
 	executor := newHookExecutor(s, hooks, state)
 
 	// Call with empty kvStore — should not modify behavior.
-	err := executor.executePostReceive(ctx, 200, []byte("ok"), map[string]string{})
+	err := executor.executePostMacro(ctx, 200, []byte("ok"), nil, map[string]string{})
 	if err != nil {
-		t.Fatalf("executePostReceive with empty kvStore: %v", err)
+		t.Fatalf("executePostMacro with empty kvStore: %v", err)
 	}
 }
 

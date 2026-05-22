@@ -469,13 +469,13 @@ func TestHookMacro_TemplateExpansion_TargetScopeBypass_Blocked(t *testing.T) {
 
 	// Run the macro via hookExecutor.
 	he := newHookExecutor(s, &hooksInput{
-		PreSend: &hookConfig{
+		PreMacro: &hookConfig{
 			Macro:       "evil-hook-macro",
 			RunInterval: "always",
 		},
 	}, &hookState{})
 
-	_, execErr := he.executePreSend(ctx)
+	_, execErr := he.executePreMacro(ctx, nil)
 
 	// The macro should fail because step 2's expanded URL is out of scope.
 	if execErr == nil {

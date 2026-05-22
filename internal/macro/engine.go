@@ -32,9 +32,50 @@ func NewEngine(sendFunc SendFunc, fetcher FlowFetcher) (*Engine, error) {
 
 // Run executes a macro definition with optional variable overrides.
 // The vars parameter can override or supplement the macro's InitialVars.
+//
+// Run creates a fresh KV Store seeded with the macro's InitialVars and
+// then vars. Callers needing to share a single KV Store across multiple
+// macro invocations (e.g. fuzz_http's per-iteration pre/post hooks where
+// the same kvStore must carry §__iteration§ / §__nonce§ into pre, accept
+// extracts from pre, then thread response variables into post) should
+// use RunWithKV instead.
 func (e *Engine) Run(ctx context.Context, macro *Macro, vars map[string]string) (*Result, error) {
+	kvStore := make(map[string]string)
+	for k, v := range macro.InitialVars {
+		kvStore[k] = v
+	}
+	for k, v := range vars {
+		kvStore[k] = v
+	}
+	return e.RunWithKV(ctx, macro, kvStore)
+}
+
+// RunWithKV executes a macro definition against the supplied KV Store.
+// The caller owns the kvStore lifetime — RunWithKV writes extracted
+// values into it in place and returns the same map via Result.KVStore.
+// Pass nil to start with an empty store; macro.InitialVars are merged
+// in (non-destructively, existing entries win) before step execution.
+//
+// This is the entry point for callers that need to thread state across
+// multiple macro invocations within the same logical iteration (e.g.
+// fuzz_http pre/post hooks sharing per-iteration nonces and response
+// variables). Callers that simply want a one-shot run with override
+// vars should use Run instead.
+func (e *Engine) RunWithKV(ctx context.Context, macro *Macro, kvStore map[string]string) (*Result, error) {
 	if err := validateMacro(macro); err != nil {
 		return nil, fmt.Errorf("invalid macro: %w", err)
+	}
+
+	if kvStore == nil {
+		kvStore = make(map[string]string)
+	}
+	// Seed InitialVars only for keys the caller did not pre-populate so
+	// existing caller-owned values (per-iteration reserved keys, prior
+	// hook extracts) take precedence over the macro's static defaults.
+	for k, v := range macro.InitialVars {
+		if _, ok := kvStore[k]; !ok {
+			kvStore[k] = v
+		}
 	}
 
 	// Determine the macro-level timeout.
@@ -46,15 +87,6 @@ func (e *Engine) Run(ctx context.Context, macro *Macro, vars map[string]string) 
 	// Apply macro-level timeout.
 	macroCtx, macroCancel := context.WithTimeout(ctx, time.Duration(macroTimeoutMs)*time.Millisecond)
 	defer macroCancel()
-
-	// Initialize the KV Store with initial vars, then apply overrides.
-	kvStore := make(map[string]string)
-	for k, v := range macro.InitialVars {
-		kvStore[k] = v
-	}
-	for k, v := range vars {
-		kvStore[k] = v
-	}
 
 	result := &Result{
 		MacroName:   macro.Name,

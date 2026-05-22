@@ -39,14 +39,18 @@ import (
 	"log/slog"
 	"net"
 	"regexp"
+	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
 
+	"github.com/usk6666/yorishiro-proxy/internal/connector"
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/http1"
+	"github.com/usk6666/yorishiro-proxy/internal/macro"
 	"github.com/usk6666/yorishiro-proxy/internal/pipeline"
 	"github.com/usk6666/yorishiro-proxy/internal/session"
 )
@@ -118,6 +122,48 @@ func validateFuzzHTTPInput(input *fuzzHTTPInput) error {
 		if totalVariants > maxFuzzHTTPVariants {
 			return fmt.Errorf("positions cartesian product exceeds %d variants (computed at position %d); reduce payload counts or split into multiple calls", maxFuzzHTTPVariants, i)
 		}
+	}
+	if err := validateFuzzHTTPMacroConfig("pre_macro", input.PreMacro); err != nil {
+		return err
+	}
+	if err := validateFuzzHTTPMacroConfig("post_macro", input.PostMacro); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validateFuzzHTTPMacroConfig validates one pre/post macro hook config.
+// scope="iteration" (default) is accepted; scope="job" is rejected at
+// validation with a deferred-to-USK-961 message (the field is parsed so
+// forward-compat clients can speak it without runtime support).
+//
+// macro-name lookup is intentionally deferred to runtime — checking the
+// stored macros table here would require an extra DB roundtrip for every
+// fuzz_http call. Runtime invocation surfaces the missing-macro error via
+// loadAndBuildMacroDeps and short-circuits the iteration per the OnError
+// policy.
+func validateFuzzHTTPMacroConfig(label string, cfg *fuzzHTTPMacroConfig) error {
+	if cfg == nil {
+		return nil
+	}
+	if cfg.Name == "" {
+		return fmt.Errorf("%s: name is required", label)
+	}
+	scope := cfg.Scope
+	if scope == "" {
+		scope = "iteration"
+	}
+	switch scope {
+	case "iteration":
+	case "job":
+		return fmt.Errorf("%s: scope=%q is deferred to follow-up: USK-961", label, scope)
+	default:
+		return fmt.Errorf("%s: invalid scope %q (must be iteration; job is deferred to USK-961)", label, scope)
+	}
+	switch cfg.OnError {
+	case "", "skip", "abort", "continue":
+	default:
+		return fmt.Errorf("%s: invalid on_error %q (must be skip, abort, or continue)", label, cfg.OnError)
 	}
 	return nil
 }
@@ -253,14 +299,21 @@ func (s *Server) buildFuzzHTTPPlan(ctx context.Context, input *fuzzHTTPInput) (*
 // populated for both successful and error variants. Store-write
 // failures are non-fatal (slog.Warn + continue) — the wire data is on
 // disk via RecordStep and remains the source of truth.
-func (s *Server) runFuzzHTTPVariants(ctx context.Context, plan *fuzzHTTPPlan, timeout time.Duration, stopOn5xx bool, tag, fuzzID string, upstreamProxy *UpstreamProxyConfig) ([]fuzzHTTPVariantRow, int, string, error) {
-	encoders := buildFuzzHTTPEncoderRegistry()
-	pipe := s.buildFuzzHTTPPipeline(encoders)
-	dial := buildResendHTTPDialFunc(s.connector.tlsTransport, plan.dialAddr, plan.useTLS, plan.sni)
-
-	rows := make([]fuzzHTTPVariantRow, 0, plan.totalVariants)
-	indices := make([]int, len(plan.positions))
-	completed := 0
+func (s *Server) runFuzzHTTPVariants(ctx context.Context, plan *fuzzHTTPPlan, timeout time.Duration, stopOn5xx bool, tag, fuzzID string, upstreamProxy *UpstreamProxyConfig, preMacro, postMacro *fuzzHTTPMacroConfig) ([]fuzzHTTPVariantRow, int, string, error) {
+	loop := &fuzzHTTPVariantLoop{
+		s:             s,
+		plan:          plan,
+		timeout:       timeout,
+		stopOn5xx:     stopOn5xx,
+		tag:           tag,
+		fuzzID:        fuzzID,
+		upstreamProxy: upstreamProxy,
+		preMacro:      preMacro,
+		postMacro:     postMacro,
+		encoders:      buildFuzzHTTPEncoderRegistry(),
+	}
+	loop.pipe = s.buildFuzzHTTPPipeline(loop.encoders)
+	loop.dial = buildResendHTTPDialFunc(s.connector.tlsTransport, plan.dialAddr, plan.useTLS, plan.sni)
 
 	// Strip the port to align rate-limit bucket keys with the live data path
 	// (connector/connect_handler.go, http1_forward_handler.go, socks5.go) and
@@ -271,75 +324,401 @@ func (s *Server) runFuzzHTTPVariants(ctx context.Context, plan *fuzzHTTPPlan, ti
 	if err != nil {
 		rateLimitHost = plan.baseMsg.Authority
 	}
+	loop.rateLimitHost = rateLimitHost
+
+	// hookExecutor is constructed once and reused across iterations so
+	// pre_macro state ("once", "every_n", "on_error") tracks across the
+	// whole fuzz run. The hookExecutor's PreMacro / PostMacro fields are
+	// the engine-facing form: build a hooksInput from the fuzzHTTPMacro
+	// config and force pass_response=true on the post hook so __response_*
+	// reserved keys land in the shared kvStore before the post macro fires.
+	if preMacro != nil || postMacro != nil {
+		hooks := &hooksInput{}
+		if preMacro != nil {
+			hooks.PreMacro = &hookConfig{Macro: preMacro.Name, RunInterval: "always"}
+		}
+		if postMacro != nil {
+			hooks.PostMacro = &hookConfig{Macro: postMacro.Name, RunInterval: "always", PassResponse: true}
+		}
+		loop.hookExec = newHookExecutor(s, hooks, &hookState{})
+	} else {
+		loop.hookExec = newHookExecutor(s, nil, &hookState{})
+	}
+
+	loop.rows = make([]fuzzHTTPVariantRow, 0, plan.totalVariants)
+	loop.indices = make([]int, len(plan.positions))
 
 	for variantIdx := 0; variantIdx < plan.totalVariants; variantIdx++ {
-		select {
-		case <-ctx.Done():
-			return rows, completed, fmt.Sprintf("ctx cancelled: %v", ctx.Err()), nil
-		default:
+		stop, retErr := loop.runOne(ctx, variantIdx)
+		if retErr != nil {
+			return loop.rows, loop.completed, "", retErr
 		}
-
-		payloads, err := decodeFuzzHTTPPayloads(plan.positions, indices)
-		if err != nil {
-			return nil, completed, "", fmt.Errorf("variant %d: decode payloads: %w", variantIdx, err)
-		}
-
-		// Per-variant upstream proxy override (residential proxy IP
-		// rotation): expand UpstreamProxy.url_template against this
-		// variant's §__iteration§ (= variantIdx) and a fresh §__nonce§,
-		// attaching the parsed URL to the dial ctx via
-		// connector.ContextWithUpstreamProxyOverride. When the caller did
-		// not supply upstream_proxy the iterCtx == ctx and the dial falls
-		// through to the historical direct-dial path. Template-expand
-		// errors (parse / scheme / CRLF guard) are NON-FATAL at the
-		// per-variant level: record on the row and continue to the next
-		// variant so a single malformed expansion does not abort the run.
-		//
-		// Resolved BEFORE waitRateLimit so a permanently-malformed template
-		// does not burn rate-limit slots producing zero wire traffic — the
-		// failure short-circuits to row.Error and the next iteration.
-		iterCtx, ipErr := upstreamProxy.ResolveForIteration(ctx, variantIdx)
-		if ipErr != nil {
-			row := fuzzHTTPVariantRow{
-				Index:    variantIdx,
-				Payloads: payloads,
-				Error:    ipErr.Error(),
-			}
-			rows = append(rows, row)
-			completed++
-			s.saveFuzzHTTPResult(ctx, fuzzID, variantIdx, row, payloads)
-			nextIndices(indices, plan.positions)
-			continue
-		}
-
-		// TODO(USK-817 sibling: budget counter, P5-19)
-		if err := s.waitRateLimit(ctx, rateLimitHost); err != nil {
-			return rows, completed, fmt.Sprintf("rate limit: %v", err), nil
-		}
-
-		variantStart := time.Now()
-		row, statusCode, runErr := s.runFuzzHTTPSingleVariant(iterCtx, plan, pipe, dial, timeout, variantIdx, payloads, tag)
-		row.DurationMs = time.Since(variantStart).Milliseconds()
-
-		if runErr != nil {
-			row.Error = runErr.Error()
-		}
-		rows = append(rows, row)
-		completed++
-
-		// USK-827: persist per-variant fuzz_results row so the aggregation
-		// view (`query fuzz_results { fuzz_id }` + USK-278 outliers_only)
-		// is populated. Save failures are non-fatal — wire data on disk via
-		// RecordStep is the source of truth.
-		s.saveFuzzHTTPResult(ctx, fuzzID, variantIdx, row, payloads)
-
-		nextIndices(indices, plan.positions)
-
-		if stopOn5xx && statusCode >= 500 && statusCode < 600 {
-			return rows, completed, fmt.Sprintf("stop_on_5xx: variant %d returned %d", variantIdx, statusCode), nil
+		if stop != "" {
+			return loop.rows, loop.completed, stop, nil
 		}
 	}
-	return rows, completed, "", nil
+	return loop.rows, loop.completed, "", nil
+}
+
+// fuzzHTTPVariantLoop bundles the per-run state shared across iterations
+// so the inner loop body (runOne) is a method on a small struct instead
+// of an 11-argument free function. The split keeps cyclomatic complexity
+// per method below the project threshold without changing semantics.
+type fuzzHTTPVariantLoop struct {
+	s             *Server
+	plan          *fuzzHTTPPlan
+	timeout       time.Duration
+	stopOn5xx     bool
+	tag           string
+	fuzzID        string
+	upstreamProxy *UpstreamProxyConfig
+	preMacro      *fuzzHTTPMacroConfig
+	postMacro     *fuzzHTTPMacroConfig
+	encoders      *pipeline.WireEncoderRegistry
+	pipe          *pipeline.Pipeline
+	dial          session.DialFunc
+	hookExec      *hookExecutor
+	rateLimitHost string
+
+	rows      []fuzzHTTPVariantRow
+	indices   []int
+	completed int
+}
+
+// runOne executes a single iteration of the variant loop. Returns
+// (stopReason, retErr): stopReason "" means continue; non-empty means
+// stop with that reason; retErr propagates an abort up the call stack.
+// The branching is by design: upstream resolution / pre macro / template
+// expansion each have their own short-circuit semantics, and a single
+// return type would conflate them.
+func (l *fuzzHTTPVariantLoop) runOne(ctx context.Context, variantIdx int) (string, error) {
+	select {
+	case <-ctx.Done():
+		return fmt.Sprintf("ctx cancelled: %v", ctx.Err()), nil
+	default:
+	}
+
+	payloads, err := decodeFuzzHTTPPayloads(l.plan.positions, l.indices)
+	if err != nil {
+		return "", fmt.Errorf("variant %d: decode payloads: %w", variantIdx, err)
+	}
+
+	// Per-iteration kvStore — canonical state container for this variant.
+	// Seeded with §__iteration§ / §__nonce§ via ResolveForIterationWithKV
+	// (or SeedIterationKV when no upstream rotation is configured).
+	kvStore := make(map[string]string)
+	connector.SeedIterationKV(kvStore, variantIdx)
+
+	iterCtx, ipErr := l.upstreamProxy.ResolveForIterationWithKV(ctx, variantIdx, kvStore)
+	if ipErr != nil {
+		l.recordVariantError(ctx, variantIdx, payloads, ipErr.Error())
+		nextIndices(l.indices, l.plan.positions)
+		return "", nil
+	}
+
+	preState, retErr := l.runPreMacro(ctx, iterCtx, variantIdx, payloads, kvStore)
+	if retErr != nil {
+		return "", retErr
+	}
+	if preState == fuzzHTTPPreSkipped {
+		nextIndices(l.indices, l.plan.positions)
+		return "", nil
+	}
+
+	if err := l.s.waitRateLimit(ctx, l.rateLimitHost); err != nil {
+		return fmt.Sprintf("rate limit: %v", err), nil
+	}
+
+	// Capture unresolved-token list AFTER kvStore is populated with
+	// pre_macro extracts but BEFORE the variant fires.
+	unresolved := collectUnresolvedFuzzTokens(l.plan.positions, payloads, kvStore)
+
+	expandedPayloads, expandErr := expandFuzzHTTPPayloads(payloads, kvStore)
+	if expandErr != nil {
+		l.recordVariantError(ctx, variantIdx, payloads, fmt.Sprintf("template expansion: %v", expandErr))
+		nextIndices(l.indices, l.plan.positions)
+		return "", nil
+	}
+
+	variantStart := time.Now()
+	row, statusCode, runErr := l.s.runFuzzHTTPSingleVariant(iterCtx, l.plan, l.pipe, l.dial, l.timeout, variantIdx, expandedPayloads, l.tag, kvStore)
+	row.DurationMs = time.Since(variantStart).Milliseconds()
+	// USK-960: keep row.Payloads aligned with what saveFuzzHTTPResult
+	// persists to fuzz_results.payloads — the operator-supplied (un-
+	// expanded) payload map, NOT the post-template-expansion form.
+	// Rationale: fuzz_results.payloads is the replay-input view (re-run
+	// this row with a different kvStore); the wire-actual bytes are
+	// already preserved via the per-variant Flow rows under row.StreamID.
+	// Without this assignment the in-memory MCP response and the
+	// persisted row diverged whenever any §var§ resolved.
+	row.Payloads = payloads
+	if runErr != nil {
+		row.Error = runErr.Error()
+	}
+	if len(unresolved) > 0 {
+		diag := fmt.Sprintf("unresolved-tokens: [%s]", strings.Join(unresolved, ", "))
+		if row.Error == "" {
+			row.Error = diag
+		} else {
+			row.Error = row.Error + "; " + diag
+		}
+	}
+	l.rows = append(l.rows, row)
+	l.completed++
+	l.s.saveFuzzHTTPResult(ctx, l.fuzzID, variantIdx, row, payloads)
+
+	// pre_macro outcome is guaranteed != fuzzHTTPPreSkipped here (the
+	// skip branch above already short-circuited via continue/return).
+	// Gate post_macro purely on postMacro being configured.
+	_ = preState
+	if l.postMacro != nil {
+		l.runPostMacro(ctx, iterCtx, variantIdx, row, kvStore)
+	}
+
+	nextIndices(l.indices, l.plan.positions)
+
+	if l.stopOn5xx && statusCode >= 500 && statusCode < 600 {
+		return fmt.Sprintf("stop_on_5xx: variant %d returned %d", variantIdx, statusCode), nil
+	}
+	return "", nil
+}
+
+// fuzzHTTPPreMacroOutcome marks whether the variant loop should proceed
+// with the upstream send after pre_macro resolution.
+type fuzzHTTPPreMacroOutcome int
+
+const (
+	// fuzzHTTPPreOK = pre macro ran successfully, or was not configured;
+	// continue to body send.
+	fuzzHTTPPreOK fuzzHTTPPreMacroOutcome = iota
+	// fuzzHTTPPreSkipped = pre macro failed under on_error=skip; the
+	// caller has already recorded the skipped row, do NOT send the
+	// variant, do NOT fire post_macro.
+	fuzzHTTPPreSkipped
+)
+
+// runPreMacro dispatches the pre_macro hook for this iteration and
+// translates the OnError policy into a pre-macro outcome. Returns
+// (outcome, retErr): retErr non-nil aborts the whole fuzz run; outcome
+// drives the caller's decision to send or short-circuit.
+func (l *fuzzHTTPVariantLoop) runPreMacro(ctx context.Context, iterCtx context.Context, variantIdx int, payloads map[string]string, kvStore map[string]string) (fuzzHTTPPreMacroOutcome, error) {
+	if l.preMacro == nil {
+		return fuzzHTTPPreOK, nil
+	}
+	_, hookErr := l.hookExec.executePreMacro(iterCtx, kvStore)
+	if hookErr == nil {
+		l.s.saveFuzzMacroHookResult(ctx, l.fuzzID, variantIdx, "pre", "", "ok", 0, "")
+		return fuzzHTTPPreOK, nil
+	}
+	policy := l.preMacro.OnError
+	if policy == "" {
+		policy = "skip"
+	}
+	switch policy {
+	case "abort":
+		l.s.saveFuzzMacroHookResult(ctx, l.fuzzID, variantIdx, "pre", "", "error", 0, hookErr.Error())
+		return fuzzHTTPPreOK, fmt.Errorf("variant %d pre_macro hook abort: %w", variantIdx, hookErr)
+	case "continue":
+		slog.WarnContext(ctx, "fuzz_http: pre_macro hook error (on_error=continue)",
+			"fuzz_id", l.fuzzID, "variant", variantIdx, "error", hookErr)
+		l.s.saveFuzzMacroHookResult(ctx, l.fuzzID, variantIdx, "pre", "", "error", 0, hookErr.Error())
+		return fuzzHTTPPreOK, nil
+	default: // skip
+		l.s.saveFuzzMacroHookResult(ctx, l.fuzzID, variantIdx, "pre", "", "skipped", 0, hookErr.Error())
+		row := fuzzHTTPVariantRow{
+			Index:    variantIdx,
+			Payloads: payloads,
+			Error:    fmt.Sprintf("pre_macro hook failed (on_error=skip): %v", hookErr),
+		}
+		l.rows = append(l.rows, row)
+		l.completed++
+		l.s.saveFuzzHTTPResult(ctx, l.fuzzID, variantIdx, row, payloads)
+		return fuzzHTTPPreSkipped, nil
+	}
+}
+
+// runPostMacro fires the post_macro hook against the same kvStore that
+// pre_macro and the upstream-proxy expansion shared. Post failures
+// NEVER abort the run — record a fuzz_macro_results row and return.
+func (l *fuzzHTTPVariantLoop) runPostMacro(ctx context.Context, iterCtx context.Context, variantIdx int, row fuzzHTTPVariantRow, kvStore map[string]string) {
+	responseStatus := row.StatusCode
+	responseBody, responseHeaders := l.s.fetchFuzzVariantResponse(ctx, row.StreamID)
+	hookErr := l.hookExec.executePostMacro(iterCtx, responseStatus, responseBody, responseHeaders, kvStore)
+	if hookErr != nil {
+		slog.WarnContext(ctx, "fuzz_http: post_macro hook error",
+			"fuzz_id", l.fuzzID, "variant", variantIdx, "error", hookErr)
+		l.s.saveFuzzMacroHookResult(ctx, l.fuzzID, variantIdx, "post", "", "error", responseStatus, hookErr.Error())
+		return
+	}
+	l.s.saveFuzzMacroHookResult(ctx, l.fuzzID, variantIdx, "post", "", "ok", responseStatus, "")
+}
+
+// recordVariantError appends a synthetic error-row to the variant rows
+// (no upstream send happened) and persists the matching fuzz_results
+// row. Used by short-circuit paths (upstream proxy expansion failure,
+// template expansion failure) where the variant never reached
+// runFuzzHTTPSingleVariant.
+func (l *fuzzHTTPVariantLoop) recordVariantError(ctx context.Context, variantIdx int, payloads map[string]string, msg string) {
+	row := fuzzHTTPVariantRow{
+		Index:    variantIdx,
+		Payloads: payloads,
+		Error:    msg,
+	}
+	l.rows = append(l.rows, row)
+	l.completed++
+	l.s.saveFuzzHTTPResult(ctx, l.fuzzID, variantIdx, row, payloads)
+}
+
+// expandFuzzHTTPEnvelope rewrites the HTTPMessage's templated fields
+// (Path / RawQuery / header values / Body) by running each through
+// macro.ExpandTemplate against kvStore. Unknown §var§ tokens are left
+// literal so the wire still sees them under on_error=continue — the
+// caller's collectUnresolvedFuzzTokens surfaces them as diagnostics on
+// the variant row.
+//
+// CRLF guard: expanded values are NOT checked for CR/LF here. The base-
+// header CRLF guard runs in validateResendHTTPInput on the user input
+// at fuzz_http call time. Template-substituted values reached via a
+// pre_macro extract are operator-controlled (the macro must be defined
+// to extract them) and the fuzz_http tool is the protocol smuggling
+// fuzzer — see the package-level "Payload passthrough" note. Callers
+// needing strict-no-CRLF mode should sanitise their macro extracts at
+// the source.
+func expandFuzzHTTPEnvelope(msg *envelope.HTTPMessage, kvStore map[string]string) error {
+	expand := func(in string) (string, error) {
+		if in == "" {
+			return in, nil
+		}
+		return macro.ExpandTemplate(in, kvStore)
+	}
+	var err error
+	if msg.Path, err = expand(msg.Path); err != nil {
+		return fmt.Errorf("path: %w", err)
+	}
+	if msg.RawQuery, err = expand(msg.RawQuery); err != nil {
+		return fmt.Errorf("raw_query: %w", err)
+	}
+	for i := range msg.Headers {
+		v, err := expand(msg.Headers[i].Value)
+		if err != nil {
+			return fmt.Errorf("header[%d] value: %w", i, err)
+		}
+		msg.Headers[i].Value = v
+	}
+	if len(msg.Body) > 0 {
+		expanded, err := expand(string(msg.Body))
+		if err != nil {
+			return fmt.Errorf("body: %w", err)
+		}
+		msg.Body = []byte(expanded)
+	}
+	return nil
+}
+
+// expandFuzzHTTPPayloads applies macro.ExpandTemplate to each per-position
+// payload against the shared per-iteration kvStore. Unknown §var§ tokens
+// are left literal (ExpandTemplate's natural behaviour); the caller
+// surfaces them via collectUnresolvedFuzzTokens. Returns a new map; does
+// NOT mutate the input.
+func expandFuzzHTTPPayloads(payloads map[string]string, kvStore map[string]string) (map[string]string, error) {
+	out := make(map[string]string, len(payloads))
+	for path, payload := range payloads {
+		expanded, err := macro.ExpandTemplate(payload, kvStore)
+		if err != nil {
+			return nil, fmt.Errorf("position %q: %w", path, err)
+		}
+		out[path] = expanded
+	}
+	return out, nil
+}
+
+// collectUnresolvedFuzzTokens scans each position payload for §var§
+// tokens that do not resolve in kvStore. Returns the sorted union of
+// distinct unresolved variable names so the row diagnostic is stable
+// across runs (sorted) and free of duplicates (set semantics).
+func collectUnresolvedFuzzTokens(positions []fuzzHTTPPosition, payloads map[string]string, kvStore map[string]string) []string {
+	seen := make(map[string]struct{})
+	for _, pos := range positions {
+		payload, ok := payloads[pos.Path]
+		if !ok {
+			continue
+		}
+		// Scan for §...§ pairs; any inner expression whose first pipe-
+		// separated component is not in kvStore is unresolved.
+		remaining := payload
+		for {
+			openIdx := strings.Index(remaining, macro.DelimOpen)
+			if openIdx == -1 {
+				break
+			}
+			after := remaining[openIdx+len(macro.DelimOpen):]
+			closeIdx := strings.Index(after, macro.DelimClose)
+			if closeIdx == -1 {
+				break
+			}
+			expr := strings.TrimSpace(strings.SplitN(after[:closeIdx], "|", 2)[0])
+			if expr != "" {
+				if _, exists := kvStore[expr]; !exists {
+					seen[expr] = struct{}{}
+				}
+			}
+			remaining = after[closeIdx+len(macro.DelimClose):]
+		}
+	}
+	if len(seen) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(seen))
+	for k := range seen {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// fetchFuzzVariantResponse reads the recorded receive flow for the
+// variant's stream so executePostMacro can inject __response_body and
+// __response_headers__<lower(name)>__ reserved keys into the shared
+// kvStore. Returns nil body + nil headers on any lookup failure — the
+// post macro then sees an empty body / no header keys, which matches the
+// "no response captured" semantics for the on_error=continue path where
+// the upstream may not have answered.
+func (s *Server) fetchFuzzVariantResponse(ctx context.Context, streamID string) ([]byte, map[string][]string) {
+	if streamID == "" || s.flowStore.store == nil {
+		return nil, nil
+	}
+	flows, err := s.flowStore.store.GetFlows(ctx, streamID, flow.FlowListOptions{Direction: "receive"})
+	if err != nil || len(flows) == 0 {
+		return nil, nil
+	}
+	last := flows[len(flows)-1]
+	return last.Body, last.Headers
+}
+
+// saveFuzzMacroHookResult persists a single per-iteration pre/post macro
+// hook outcome. Store-write failures are logged at slog.Warn and ignored
+// — the fuzz_results / wire data on disk remain the source of truth.
+func (s *Server) saveFuzzMacroHookResult(ctx context.Context, fuzzID string, indexNum int, hookName, streamID, status string, statusCode int, errMsg string) {
+	if s.jobRunner == nil || s.jobRunner.fuzzStore == nil {
+		return
+	}
+	r := &flow.FuzzMacroResult{
+		FuzzID:     fuzzID,
+		IndexNum:   indexNum,
+		HookName:   hookName,
+		StreamID:   streamID,
+		Status:     status,
+		StatusCode: statusCode,
+		Error:      errMsg,
+	}
+	if err := s.jobRunner.fuzzStore.SaveFuzzMacroResult(ctx, r); err != nil {
+		slog.WarnContext(ctx, "fuzz_http: save fuzz_macro_results row failed",
+			"fuzz_id", fuzzID,
+			"variant", indexNum,
+			"hook", hookName,
+			"error", err,
+		)
+	}
 }
 
 // fuzzHTTPJobConfig is the JSON payload persisted to fuzz_jobs.config.
@@ -551,7 +930,7 @@ func (s *Server) buildFuzzHTTPPipeline(encoders *pipeline.WireEncoderRegistry) *
 // and before the upstream dial. On a violation the variant is recorded
 // with row.Error set and returns statusCode=0 — the caller continues
 // iterating; a single blocked variant does not abort the whole run.
-func (s *Server) runFuzzHTTPSingleVariant(ctx context.Context, plan *fuzzHTTPPlan, p *pipeline.Pipeline, dial session.DialFunc, timeout time.Duration, variantIdx int, payloads map[string]string, tag string) (fuzzHTTPVariantRow, int, error) {
+func (s *Server) runFuzzHTTPSingleVariant(ctx context.Context, plan *fuzzHTTPPlan, p *pipeline.Pipeline, dial session.DialFunc, timeout time.Duration, variantIdx int, payloads map[string]string, tag string, kvStore map[string]string) (fuzzHTTPVariantRow, int, error) {
 	row := fuzzHTTPVariantRow{
 		Index:    variantIdx,
 		Payloads: payloads,
@@ -563,6 +942,20 @@ func (s *Server) runFuzzHTTPSingleVariant(ctx context.Context, plan *fuzzHTTPPla
 	if !ok {
 		return row, 0, fmt.Errorf("variant envelope has %T, expected *HTTPMessage", variantEnv.Message)
 	}
+
+	// USK-960: expand §var§ templates on the base envelope fields against
+	// the per-iteration kvStore. This runs BEFORE position application so
+	// per-position payloads (which substitute directly via assignment)
+	// take precedence — a fuzz position is the canonical override, the
+	// template is the macro-driven backstop. Unknown vars are left as
+	// literals (ExpandTemplate's natural behaviour); the caller's
+	// collectUnresolvedFuzzTokens surfaces them to fuzz_results.error.
+	if len(kvStore) > 0 {
+		if err := expandFuzzHTTPEnvelope(variantMsg, kvStore); err != nil {
+			return row, 0, fmt.Errorf("expand variant envelope: %w", err)
+		}
+	}
+
 	for _, pos := range plan.positions {
 		payload, ok := payloads[pos.Path]
 		if !ok {

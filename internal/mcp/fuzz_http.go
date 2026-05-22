@@ -85,6 +85,40 @@ type fuzzHTTPInput struct {
 	StopOn5xx bool               `json:"stop_on_5xx,omitempty" jsonschema:"when true, abort the remaining variants once any variant returns a 5xx response"`
 
 	UpstreamProxy *UpstreamProxyConfig `json:"upstream_proxy,omitempty" jsonschema:"optional upstream proxy override applied per variant. url_template is re-expanded once per variant against §__iteration§ (variant index) and §__nonce§ (per-variant UUID), and the parsed URL tunnels the variant's dial via HTTP CONNECT or SOCKS5. Used for residential proxy IP rotation: each variant exits from a distinct upstream IP"`
+
+	// PreMacro / PostMacro: per-iteration macro hooks (USK-960). Use a
+	// shared per-variant KV Store so reserved keys §__iteration§ /
+	// §__nonce§ are visible to both macros, extracts from pre flow into
+	// the fuzz body's §var§ expansion, and reserved __response_status /
+	// __response_body / __response_headers__<lower(name)>__ keys land in
+	// the same store before post fires.
+	PreMacro  *fuzzHTTPMacroConfig `json:"pre_macro,omitempty" jsonschema:"per-iteration pre macro hook executed before each variant's send. scope=iteration (job deferred to USK-961). on_error: skip|abort|continue (default skip)"`
+	PostMacro *fuzzHTTPMacroConfig `json:"post_macro,omitempty" jsonschema:"per-iteration post macro hook executed after each variant's response. scope=iteration (job deferred to USK-961). on_error: skip|abort|continue (default skip). pass_response is forced on so __response_status / __response_body / __response_headers__<lower(name)>__ are visible to the macro's template expansion"`
+}
+
+// fuzzHTTPMacroConfig is the per-iteration pre/post macro hook configuration
+// for fuzz_http (USK-960). Wire-compatible scaffold for future per-job
+// scope (USK-961); scope="job" is accepted at the schema boundary but
+// rejected at validation so forward-compat clients can speak the field
+// without runtime support landing yet.
+type fuzzHTTPMacroConfig struct {
+	// Name is the stored macro name (defined via macro.define).
+	Name string `json:"name" jsonschema:"REQUIRED stored macro name"`
+
+	// Scope: "iteration" (MVP) or "job" (deferred to USK-961). Empty
+	// defaults to "iteration".
+	Scope string `json:"scope,omitempty" jsonschema:"iteration (default) | job (deferred to USK-961; rejected at validation today)"`
+
+	// OnError selects the iteration's behaviour when the hook errors.
+	//   "skip"     (default) — record the iteration as skipped, do not send
+	//                          the fuzz request, do not run the post hook,
+	//                          continue to the next variant.
+	//   "abort"    — abort the fuzz run with an error.
+	//   "continue" — log the error, persist a fuzz_macro_results row, and
+	//                continue to the variant's send (templates may carry
+	//                unresolved §var§ literals — recorded in
+	//                fuzz_results.error).
+	OnError string `json:"on_error,omitempty" jsonschema:"skip (default) | abort | continue"`
 }
 
 // fuzzHTTPPosition describes one fuzz position. Path is a typed
@@ -195,7 +229,7 @@ func (s *Server) handleFuzzHTTP(ctx context.Context, _ *gomcp.CallToolRequest, i
 	// writes that must not be cancelled by the request context.
 	s.saveFuzzHTTPJob(context.Background(), fuzzID, &input, plan)
 
-	rows, completed, stopReason, runErr := s.runFuzzHTTPVariants(ctx, plan, timeout, input.StopOn5xx, input.Tag, fuzzID, input.UpstreamProxy)
+	rows, completed, stopReason, runErr := s.runFuzzHTTPVariants(ctx, plan, timeout, input.StopOn5xx, input.Tag, fuzzID, input.UpstreamProxy, input.PreMacro, input.PostMacro)
 
 	// Use a fresh background ctx so the closing UPDATE always lands,
 	// even on caller-side ctx cancel. The store-write is best-effort:

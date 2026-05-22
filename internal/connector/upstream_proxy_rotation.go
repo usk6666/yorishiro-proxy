@@ -68,6 +68,11 @@ type UpstreamProxyConfig struct {
 // Errors are returned with the user-facing prefix
 // "upstream_proxy.url_template" so MCP tool handlers can surface them
 // verbatim.
+//
+// Each call mints a throwaway kvStore seeded with §__iteration§ /
+// §__nonce§. Callers that need to share the per-iteration kvStore with
+// other consumers (e.g. fuzz_http's pre/post macro hooks per USK-960)
+// should use ResolveForIterationWithKV instead.
 func (c *UpstreamProxyConfig) ResolveForIteration(ctx context.Context, iteration int) (context.Context, error) {
 	if c == nil || c.URLTemplate == "" {
 		return ctx, nil
@@ -84,6 +89,57 @@ func (c *UpstreamProxyConfig) ResolveForIteration(ctx context.Context, iteration
 	}
 
 	return ContextWithUpstreamProxyOverride(ctx, parsed), nil
+}
+
+// ResolveForIterationWithKV expands the URL template against kvStore
+// (which the caller owns), parses the result, and returns a ctx carrying
+// the per-flow override. The reserved keys §__iteration§ / §__nonce§
+// are written into kvStore by this method before expansion. Both keys
+// overwrite any pre-existing values for the same iteration so the
+// per-iteration semantics match the throwaway-kvStore behaviour of
+// ResolveForIteration. Returns the input ctx unchanged (and leaves
+// kvStore untouched) when c is nil or URLTemplate is empty.
+//
+// Use this entry point when a single kvStore must thread through both
+// the upstream proxy expansion and other per-iteration consumers (macro
+// hooks, template-substituted fuzz body fields, etc.). The kvStore
+// becomes the canonical per-iteration state — extracts from pre macros
+// land here, fuzz body §var§ expansion reads from here, and reserved
+// keys populated here flow into the upstream proxy URL.
+func (c *UpstreamProxyConfig) ResolveForIterationWithKV(ctx context.Context, iteration int, kvStore map[string]string) (context.Context, error) {
+	if c == nil || c.URLTemplate == "" {
+		return ctx, nil
+	}
+	if kvStore == nil {
+		// Defensive: callers should pass a non-nil store, but a nil here
+		// can be recovered transparently by falling back to the legacy
+		// throwaway path. Without this the next line would panic.
+		return c.ResolveForIteration(ctx, iteration)
+	}
+
+	kvStore[macro.ReservedKeyPrefix+"iteration"] = strconv.Itoa(iteration)
+	kvStore[macro.ReservedKeyPrefix+"nonce"] = uuid.NewString()
+
+	parsed, err := expandAndParseTemplate(c.URLTemplate, kvStore)
+	if err != nil {
+		return nil, err
+	}
+
+	return ContextWithUpstreamProxyOverride(ctx, parsed), nil
+}
+
+// SeedIterationKV writes the per-iteration reserved keys §__iteration§
+// and §__nonce§ into kvStore in place. Called by fuzz_http's variant
+// loop head to populate the canonical per-iteration kvStore even when no
+// upstream-proxy override is configured — pre/post macro hooks and fuzz
+// body §var§ expansion need the reserved keys regardless of whether
+// upstream rotation is active.
+func SeedIterationKV(kvStore map[string]string, iteration int) {
+	if kvStore == nil {
+		return
+	}
+	kvStore[macro.ReservedKeyPrefix+"iteration"] = strconv.Itoa(iteration)
+	kvStore[macro.ReservedKeyPrefix+"nonce"] = uuid.NewString()
 }
 
 // expandAndParseTemplate performs macro expansion, CRLF guard, and
