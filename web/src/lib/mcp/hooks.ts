@@ -184,6 +184,15 @@ export interface UseQueryOptions {
   pollInterval?: number;
   /** When false, the query is not executed. Defaults to true. */
   enabled?: boolean;
+  /**
+   * When true, the polling timer is suspended while the document is hidden
+   * (`document.visibilityState === "hidden"`). On the `hidden → visible`
+   * transition, the hook fires one immediate refetch and then re-arms the
+   * interval. The initial fetch and dependency-driven refetches are not
+   * gated by visibility — only the periodic timer. Defaults to false for
+   * backwards compatibility with existing callers.
+   */
+  pauseWhenHidden?: boolean;
   /** Additional filter parameters. */
   filter?: QueryFilter;
   /** Flow or macro ID (for resource="flow", "messages", "macro"). */
@@ -198,6 +207,36 @@ export interface UseQueryOptions {
   limit?: number;
   /** Pagination offset. */
   offset?: number;
+}
+
+// ---------------------------------------------------------------------------
+// usePageVisible — private helper backing the `pauseWhenHidden` useQuery
+// option. Mirrors the Page Visibility API as a boolean React state, with
+// SSR-safe guards so node-environment tests (and any future SSR) can import
+// `hooks.ts` without a real `document`.
+// ---------------------------------------------------------------------------
+
+function usePageVisible(): boolean {
+  const [visible, setVisible] = useState<boolean>(() => {
+    if (typeof document === "undefined") return true;
+    return document.visibilityState !== "hidden";
+  });
+
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    const handler = () => {
+      setVisible(document.visibilityState !== "hidden");
+    };
+    // Seed once on mount so a render that occurred while hidden picks up
+    // the current state even if no `visibilitychange` event has fired.
+    handler();
+    document.addEventListener("visibilitychange", handler);
+    return () => {
+      document.removeEventListener("visibilitychange", handler);
+    };
+  }, []);
+
+  return visible;
 }
 
 /** Return type for useQuery. */
@@ -239,6 +278,8 @@ export function useQuery<R extends QueryResource>(
 
   const enabled = options.enabled !== false;
   const pollInterval = options.pollInterval;
+  const pauseWhenHidden = options.pauseWhenHidden === true;
+  const pageVisible = usePageVisible();
 
   // Stable JSON key over the request-shaping fields. Order matters and
   // must stay in lock-step with the query call below so consumers get
@@ -319,10 +360,31 @@ export function useQuery<R extends QueryResource>(
     fetchData();
   }, [enabled, status, fetchData]);
 
-  // Polling.
+  // Track whether the previous polling-effect run paused due to hidden
+  // visibility, so the next run that observes `pageVisible === true` can
+  // fire one immediate refetch on the hidden → visible transition. The
+  // ref is intentionally outside `pauseWhenHidden` gating: when the option
+  // is disabled, the flag is never set, so no spurious refetch fires.
+  const wasPausedHiddenRef = useRef(false);
+
+  // Polling. When `pauseWhenHidden` is on and the page is hidden, the
+  // periodic timer is not armed — the effect simply returns without
+  // scheduling anything. When the page returns to visible, the effect
+  // re-runs (because `pageVisible` is a dep), fires one immediate
+  // `fetchData()` to refresh stale data, then arms the interval as usual.
   useEffect(() => {
     if (!enabled || !pollInterval || pollInterval <= 0 || status !== "connected") {
       return;
+    }
+
+    if (pauseWhenHidden && !pageVisible) {
+      wasPausedHiddenRef.current = true;
+      return;
+    }
+
+    if (pauseWhenHidden && wasPausedHiddenRef.current) {
+      wasPausedHiddenRef.current = false;
+      fetchData();
     }
 
     const timer = setInterval(() => {
@@ -330,7 +392,7 @@ export function useQuery<R extends QueryResource>(
     }, pollInterval);
 
     return () => clearInterval(timer);
-  }, [enabled, status, fetchData, pollInterval]);
+  }, [enabled, status, fetchData, pollInterval, pauseWhenHidden, pageVisible]);
 
   return { data, loading, error, refetch: fetchData };
 }
