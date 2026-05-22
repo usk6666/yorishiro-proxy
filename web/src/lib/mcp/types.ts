@@ -794,10 +794,19 @@ export interface MacrosResult {
   count: number;
 }
 
+/**
+ * Where in the message to extract a value from in a macro step.
+ *
+ * Mirrors `ExtractionFrom` in `internal/macro/types.go`. Closed set —
+ * extending the backend requires extending this union and the
+ * `EXTRACTION_FROM_OPTIONS` array in `MacroDetailPage.tsx`.
+ */
+export type ExtractionFrom = "request" | "response";
+
 /** Extraction rule in a macro step. */
 export interface ExtractionRule {
   name: string;
-  from: string;
+  from: ExtractionFrom;
   source: string;
   header_name?: string;
   regex?: string;
