@@ -282,12 +282,20 @@ type proxyManager interface {
 // UpstreamProxy (USK-826) carries the per-listener upstream-proxy URL.
 // query_tool redacts the URL before publishing it on the status resource;
 // the raw form is preserved here for in-process inspection.
+//
+// UpstreamProxyTemplate / UpstreamProxyRotationPolicy (USK-959 / USK-976)
+// carry the rotating-template form. Both fields are empty when the listener
+// is not using rotation. query_tool redacts UpstreamProxyTemplate via
+// connector.RedactProxyURL before publishing; the raw form is preserved
+// here for in-process inspection (matches the UpstreamProxy convention).
 type ListenerStatus struct {
-	Name              string `json:"name"`
-	ListenAddr        string `json:"listen_addr"`
-	ActiveConnections int    `json:"active_connections"`
-	UptimeSeconds     int64  `json:"uptime_seconds"`
-	UpstreamProxy     string `json:"upstream_proxy,omitempty"`
+	Name                        string `json:"name"`
+	ListenAddr                  string `json:"listen_addr"`
+	ActiveConnections           int    `json:"active_connections"`
+	UptimeSeconds               int64  `json:"uptime_seconds"`
+	UpstreamProxy               string `json:"upstream_proxy,omitempty"`
+	UpstreamProxyTemplate       string `json:"upstream_proxy_template,omitempty"`
+	UpstreamProxyRotationPolicy string `json:"upstream_proxy_rotation_policy,omitempty"`
 }
 
 // managerIsNil reports whether m is either a nil interface or wraps a
@@ -324,11 +332,13 @@ func listenerStatuses(m proxyManager) []ListenerStatus {
 		out := make([]ListenerStatus, len(in))
 		for i, s := range in {
 			out[i] = ListenerStatus{
-				Name:              s.Name,
-				ListenAddr:        s.ListenAddr,
-				ActiveConnections: s.ActiveConnections,
-				UptimeSeconds:     s.UptimeSeconds,
-				UpstreamProxy:     s.UpstreamProxy,
+				Name:                        s.Name,
+				ListenAddr:                  s.ListenAddr,
+				ActiveConnections:           s.ActiveConnections,
+				UptimeSeconds:               s.UptimeSeconds,
+				UpstreamProxy:               s.UpstreamProxy,
+				UpstreamProxyTemplate:       s.UpstreamProxyTemplate,
+				UpstreamProxyRotationPolicy: s.UpstreamProxyRotationPolicy,
 			}
 		}
 		return out

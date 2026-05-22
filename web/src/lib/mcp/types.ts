@@ -597,6 +597,25 @@ export interface ListenerStatusEntry {
   listen_addr: string;
   active_connections: number;
   uptime_seconds: number;
+  /**
+   * Per-listener upstream-proxy URL (USK-826), redacted. Empty when the
+   * listener has no per-listener override (inherits the global default
+   * or direct-dial), or when USK-959 rotation is active (in which case
+   * `upstream_proxy_template` carries the template instead).
+   */
+  upstream_proxy?: string;
+  /**
+   * Per-listener upstream-proxy rotation template (USK-959 / USK-976),
+   * redacted. Present only when the listener is using rotation; the
+   * editor uses this (together with `upstream_proxy_rotation_policy`)
+   * to restore the rotation form state after a page reload.
+   */
+  upstream_proxy_template?: string;
+  /**
+   * Per-listener upstream-proxy rotation policy (USK-959 / USK-976).
+   * Present only when the listener is using rotation.
+   */
+  upstream_proxy_rotation_policy?: UpstreamProxyPolicy;
 }
 
 /** Rate limit status in the status response. */
