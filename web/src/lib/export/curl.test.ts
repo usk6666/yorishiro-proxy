@@ -233,4 +233,74 @@ describe("generateCurl", () => {
     expect(result).toContain("curl");
     expect(result).not.toContain("-X");
   });
+
+  // ---------------------------------------------------------------------------
+  // HTTP/2 pseudo-headers
+  //
+  // `-H ':method: GET'` is invalid in curl (curl rejects leading-colon names
+  // and the shell would need awkward escaping anyway). The information they
+  // carry — method, scheme, authority, path — is already encoded in the
+  // method flag + URL we emit above, so the export must filter them.
+  // ---------------------------------------------------------------------------
+
+  it("filters HTTP/2 request pseudo-headers", () => {
+    const result = generateCurl(
+      makeFlow({
+        protocol: "HTTP/2",
+        method: "GET",
+        url: "https://example.com/api",
+        request_headers: {
+          ":method": ["GET"],
+          ":path": ["/api"],
+          ":authority": ["example.com"],
+          ":scheme": ["https"],
+          "user-agent": ["test-agent/1.0"],
+        },
+      })
+    );
+    expect(result).not.toContain(":method");
+    expect(result).not.toContain(":path");
+    expect(result).not.toContain(":authority");
+    expect(result).not.toContain(":scheme");
+    expect(result).not.toContain("-H ':");
+    expect(result).toContain("-H 'user-agent: test-agent/1.0'");
+    expect(result).toContain("'https://example.com/api'");
+  });
+
+  it("filters HTTP/2 pseudo-headers regardless of casing", () => {
+    const result = generateCurl(
+      makeFlow({
+        protocol: "HTTP/2",
+        method: "POST",
+        url: "https://example.com/upload",
+        request_body: "hello",
+        request_headers: {
+          ":METHOD": ["POST"],
+          ":Path": ["/upload"],
+          "Content-Type": ["text/plain"],
+        },
+      })
+    );
+    expect(result).not.toContain(":METHOD");
+    expect(result).not.toContain(":Path");
+    expect(result).toContain("-H 'Content-Type: text/plain'");
+  });
+
+  it("preserves the method and URL when pseudo-headers are present", () => {
+    const result = generateCurl(
+      makeFlow({
+        protocol: "HTTP/2",
+        method: "DELETE",
+        url: "https://example.com/items/42",
+        request_headers: {
+          ":method": ["DELETE"],
+          ":path": ["/items/42"],
+          ":authority": ["example.com"],
+          ":scheme": ["https"],
+        },
+      })
+    );
+    expect(result).toContain("-X 'DELETE'");
+    expect(result).toContain("'https://example.com/items/42'");
+  });
 });

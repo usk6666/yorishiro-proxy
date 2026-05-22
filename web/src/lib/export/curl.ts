@@ -5,6 +5,7 @@
  * terminals, scripts, or other tooling common in vulnerability assessments.
  */
 
+import { isPseudoHeader } from "../http2/pseudoHeaders.js";
 import type { FlowDetailResult } from "../mcp/types.js";
 
 // ---------------------------------------------------------------------------
@@ -61,6 +62,10 @@ export function generateCurl(flow: FlowDetailResult): string {
   const headers = flow.request_headers ?? {};
   for (const [name, values] of Object.entries(headers)) {
     if (IMPLICIT_HEADERS.has(name.toLowerCase())) continue;
+    // HTTP/2 pseudo-headers (`:method`, `:path`, ...) cannot be passed via
+    // curl's `-H` flag; their semantic content is already carried in the
+    // request-line (method + URL) built above.
+    if (isPseudoHeader(name)) continue;
 
     for (const v of values) {
       parts.push("-H '" + shellEscape(name + ": " + v) + "'");

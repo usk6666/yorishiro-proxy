@@ -10,8 +10,18 @@
  */
 
 import { Badge } from "../../components/ui/Badge.js";
+import {
+  REQUEST_PSEUDO_HEADERS,
+  RESPONSE_PSEUDO_HEADERS,
+  isPseudoHeader,
+} from "../../lib/http2/pseudoHeaders.js";
 import type { FlowDetailResult, MessageEntry } from "../../lib/mcp/types.js";
 import "./FlowDetailPage.css";
+
+// Re-export for backward compatibility with existing consumers
+// (FlowDetailHTTPMessage.tsx). The source of truth lives in
+// `lib/http2/pseudoHeaders.ts`.
+export { isPseudoHeader };
 
 // ---------------------------------------------------------------------------
 // Types
@@ -29,22 +39,6 @@ export interface Http2PseudoHeadersProps {
 export interface Http2StreamGroupProps {
   messages: MessageEntry[];
 }
-
-// ---------------------------------------------------------------------------
-// Constants
-// ---------------------------------------------------------------------------
-
-/** HTTP/2 request pseudo-header names. */
-const REQUEST_PSEUDO_HEADERS = [":method", ":path", ":authority", ":scheme"];
-
-/** HTTP/2 response pseudo-header names. */
-const RESPONSE_PSEUDO_HEADERS = [":status"];
-
-/** All HTTP/2 pseudo-header names. */
-const ALL_PSEUDO_HEADERS = new Set([
-  ...REQUEST_PSEUDO_HEADERS,
-  ...RESPONSE_PSEUDO_HEADERS,
-]);
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -70,11 +64,6 @@ function isH2TLS(flow: FlowDetailResult): boolean {
 /** Extract stream ID from a message's metadata. */
 function getStreamId(msg: MessageEntry): string | undefined {
   return msg.metadata?.stream_id;
-}
-
-/** Check if a header name is an HTTP/2 pseudo-header. */
-export function isPseudoHeader(name: string): boolean {
-  return ALL_PSEUDO_HEADERS.has(name.toLowerCase());
 }
 
 /** Extract pseudo-headers from a header map. */
