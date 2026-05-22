@@ -1113,6 +1113,110 @@ func TestFuzzHTTPMacro_ScopeJobPreAbortOnErrorAbortsJob(t *testing.T) {
 	}
 }
 
+// TestFuzzHTTPMacro_ScopeJobPreContinueOnErrorProceeds covers pre=job +
+// on_error=continue + failing macro: every variant runs because the
+// continue policy proceeds with whatever jobKVStore captured, one
+// fuzz_macro_results row at index_num=-1 / status="error" records the
+// pre-job failure, and CompletedVariants == totalVariants. Sibling to
+// TestFuzzHTTPMacro_ScopeJobPreAbortOnErrorAbortsJob (USK-979 AC#2).
+func TestFuzzHTTPMacro_ScopeJobPreContinueOnErrorProceeds(t *testing.T) {
+	cs, store := setupFuzzHTTPMacroSession(t)
+
+	// preServer returns 500 — required extract fails. With on_error=continue
+	// the variant loop must still proceed.
+	preServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(preServer.Close)
+
+	var fuzzCalls int32
+	fuzzServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&fuzzCalls, 1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(fuzzServer.Close)
+
+	preFlowID := recordMacroFlow(t, store, "POST", preServer.URL+"/login", nil, nil)
+	defineMacroForTest(t, cs, "pre-required-job-continue", preFlowID, "", "", []map[string]any{
+		{
+			"name":      "session_token",
+			"from":      "response",
+			"source":    "body_json",
+			"json_path": "$.session_token",
+			"required":  true,
+		},
+	})
+
+	authority := strings.TrimPrefix(fuzzServer.URL, "http://")
+	totalVariants := 3
+	res, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "fuzz_http",
+		Arguments: map[string]any{
+			"method":    "GET",
+			"scheme":    "http",
+			"authority": authority,
+			"path":      "/probe",
+			"headers": []map[string]any{
+				{"name": "Host", "value": authority},
+			},
+			"positions": []map[string]any{
+				{"path": "path", "payloads": []string{"/a", "/b", "/c"}},
+			},
+			"timeout_ms": 5000,
+			"pre_macro":  map[string]any{"name": "pre-required-job-continue", "scope": "job", "on_error": "continue"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool fuzz_http: %v", err)
+	}
+	if res.IsError {
+		var msg strings.Builder
+		for _, c := range res.Content {
+			if tc, ok := c.(*gomcp.TextContent); ok {
+				msg.WriteString(tc.Text)
+				msg.WriteString("\n")
+			}
+		}
+		t.Fatalf("fuzz_http returned unexpected error (on_error=continue must not abort): %s", msg.String())
+	}
+
+	var out fuzzHTTPResult
+	raw, _ := json.Marshal(res.StructuredContent)
+	_ = json.Unmarshal(raw, &out)
+
+	if out.CompletedVariants != totalVariants {
+		t.Errorf("CompletedVariants = %d, want %d (on_error=continue must run every variant)", out.CompletedVariants, totalVariants)
+	}
+	if got := atomic.LoadInt32(&fuzzCalls); int(got) != totalVariants {
+		t.Errorf("fuzz server saw %d requests, want %d", got, totalVariants)
+	}
+	if out.StoppedReason != "" {
+		t.Errorf("StoppedReason = %q, want \"\" (continue must not set a stopped_reason)", out.StoppedReason)
+	}
+
+	fs := store.(flow.FuzzStore)
+	results, err := fs.ListFuzzMacroResults(context.Background(), out.FuzzID)
+	if err != nil {
+		t.Fatalf("ListFuzzMacroResults: %v", err)
+	}
+	// continue policy records the pre-job failure as one row at
+	// index_num=-1 / status="error". No post hook is configured, so this
+	// is the only fuzz_macro_results row expected.
+	if len(results) != 1 {
+		t.Fatalf("fuzz_macro_results rows = %d, want 1", len(results))
+	}
+	r := results[0]
+	if r.HookName != "pre" {
+		t.Errorf("hook_name = %q, want pre", r.HookName)
+	}
+	if r.IndexNum != -1 {
+		t.Errorf("index_num = %d, want -1 (job-scope sentinel)", r.IndexNum)
+	}
+	if r.Status != "error" {
+		t.Errorf("status = %q, want error (on_error=continue records the failure)", r.Status)
+	}
+}
+
 // TestFuzzHTTPMacro_ScopeJobIndexNumSentinel asserts that
 // ListFuzzMacroResults rows for job-scope hooks have IndexNum == -1
 // exactly (covers AC#5 of USK-961).

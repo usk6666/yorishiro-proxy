@@ -72,7 +72,7 @@ The hook macro shares the per-iteration (or per-job) KV Store with the fuzz requ
 
 Mix-scope is supported — `pre_macro` and `post_macro` may pick their scope independently. The job-scope KV Store is merged into each iteration's per-variant store at iteration start; per-iteration reserved keys then overwrite any conflicting job keys ("iteration wins"). So `pre_macro { scope: "job" }` extracting `session_token` makes `§session_token§` resolvable in every variant's request templates.
 
-> `run_interval` is the underlying engine knob for `every_n` / `on_status` / etc. dispatch. It is rejected when `scope="job"` because the hook fires exactly once by construction (the call site, not `run_interval`, owns the single-fire guarantee).
+> `run_interval` is `scope="iteration"` only — the engine knob for `every_n` / `on_status` / etc. dispatch is meaningful only when the hook fires per-variant. `scope="job"` hooks fire exactly once by construction (the call site, not `run_interval`, owns the single-fire guarantee); once the `run_interval` field is publicly surfaced on the fuzz_http hook config, pairing it with `scope="job"` will be rejected at validation time.
 
 #### OnError semantics
 
