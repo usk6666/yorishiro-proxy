@@ -1896,6 +1896,85 @@ func TestQuery_Session_VariantMessages(t *testing.T) {
 	}
 }
 
+// TestQuery_Session_VariantOriginalRequest_BodyTruncated confirms that
+// Flow.BodyTruncated on the original send message is propagated onto
+// queryVariantRequest.BodyTruncated in the flow detail response. Symmetric
+// with the existing queryVariantResponse.BodyTruncated coverage (USK-965).
+func TestQuery_Session_VariantOriginalRequest_BodyTruncated(t *testing.T) {
+	t.Parallel()
+	store := newTestStore(t)
+
+	ctx := context.Background()
+	id := "variant-trunc-sess"
+
+	sess := &flow.Stream{
+		ID:        id,
+		ConnID:    "conn-" + id,
+		Protocol:  "HTTPS",
+		State:     "complete",
+		Timestamp: time.Now().UTC(),
+		Duration:  200 * time.Millisecond,
+	}
+	if err := store.SaveStream(ctx, sess); err != nil {
+		t.Fatalf("SaveStream: %v", err)
+	}
+
+	origURL, _ := url.Parse("https://example.com/original")
+	originalSend := &flow.Flow{
+		ID:            id + "-send-orig",
+		StreamID:      id,
+		Sequence:      0,
+		Direction:     "send",
+		Timestamp:     time.Now().UTC(),
+		Method:        "POST",
+		URL:           origURL,
+		Headers:       map[string][]string{"Host": {"example.com"}},
+		Body:          []byte("original truncated body"),
+		BodyTruncated: true,
+		Metadata:      map[string]string{"variant": "original"},
+	}
+	if err := store.SaveFlow(ctx, originalSend); err != nil {
+		t.Fatalf("SaveFlow(original): %v", err)
+	}
+
+	modURL, _ := url.Parse("https://example.com/modified")
+	modifiedSend := &flow.Flow{
+		ID:        id + "-send-mod",
+		StreamID:  id,
+		Sequence:  1,
+		Direction: "send",
+		Timestamp: time.Now().UTC(),
+		Method:    "POST",
+		URL:       modURL,
+		Headers:   map[string][]string{"Host": {"example.com"}},
+		Body:      []byte("modified body"),
+		Metadata:  map[string]string{"variant": "modified"},
+	}
+	if err := store.SaveFlow(ctx, modifiedSend); err != nil {
+		t.Fatalf("SaveFlow(modified): %v", err)
+	}
+
+	cs := setupQueryTestSession(t, store)
+
+	result := callQuery(t, cs, queryInput{
+		Resource: "flow",
+		ID:       id,
+	})
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	var out queryFlowResult
+	unmarshalQueryResult(t, result, &out)
+
+	if out.OriginalRequest == nil {
+		t.Fatal("original_request is nil, expected original variant data")
+	}
+	if !out.OriginalRequest.BodyTruncated {
+		t.Errorf("original_request.body_truncated = false, want true (mirrors Flow.BodyTruncated on the original send message)")
+	}
+}
+
 func TestQuery_Session_NoVariantMessages(t *testing.T) {
 	t.Parallel()
 	store := newTestStore(t)

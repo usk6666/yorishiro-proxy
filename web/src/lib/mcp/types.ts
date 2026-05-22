@@ -370,6 +370,22 @@ export interface MessageEntry {
   body_encoding_applied?: string;
   /** Anomaly detail when decode was attempted but rejected or failed. */
   body_decode_anomaly?: DecodeAnomaly;
+  /**
+   * Record-time truncation flag: set when the pipeline RecordStep `MaxBodySize`
+   * cap fired at storage time. Mirrors `Flow.BodyTruncated` on the backend and
+   * is independent of any response-time query cap.
+   */
+  body_truncated?: boolean;
+  /**
+   * Response-time truncation flag: set when the MCP query `include_bodies` /
+   * `body_max_bytes` params suppressed or capped the body bytes returned to
+   * the caller. Distinct from `body_truncated`.
+   */
+  body_truncated_by_query?: boolean;
+  /** Pre-truncation wire-form byte length when body_truncated_by_query=true. */
+  body_original_size?: number;
+  /** Pre-truncation decoded-form byte length when body_truncated_by_query=true. */
+  body_decoded_original_size?: number;
   metadata?: Record<string, string>;
   timestamp: string;
 }
@@ -381,6 +397,12 @@ export interface VariantRequest {
   headers: Record<string, string[]>;
   body: string;
   body_encoding: string;
+  /**
+   * Record-time truncation flag for the original request body. Mirrors
+   * `Flow.BodyTruncated` on the backend. Optional because older recordings
+   * (pre-USK-965) may have omitted the field; render as `false` when missing.
+   */
+  body_truncated?: boolean;
   /** Body after Content-Encoding decode (USK-731). Empty when no codec applied. */
   body_decoded?: string;
   /** "text" | "base64" — transport encoding of body_decoded. */

@@ -97,21 +97,25 @@ function extractPseudoHeaders(
   return result;
 }
 
-/** Filter out pseudo-headers from a header map, returning only regular headers. */
+/** Filter out pseudo-headers from a header map, returning only regular headers.
+ *
+ * If the input contains only pseudo-headers (e.g. HEAD response with just
+ * `:status`), the result is an empty object — NOT the unfiltered input. The
+ * pseudo-headers are rendered by `Http2PseudoHeaders`, so leaking them back
+ * into the regular Headers tab would double-display them. (USK-965)
+ */
 export function filterRegularHeaders(
   headers: Record<string, string[]> | null,
 ): Record<string, string[]> | null {
   if (!headers) return headers;
 
   const filtered: Record<string, string[]> = {};
-  let hasRegular = false;
   for (const [key, values] of Object.entries(headers)) {
     if (!isPseudoHeader(key)) {
       filtered[key] = values;
-      hasRegular = true;
     }
   }
-  return hasRegular ? filtered : headers;
+  return filtered;
 }
 
 /** Group messages by stream ID. Returns null if no stream_id metadata exists. */
