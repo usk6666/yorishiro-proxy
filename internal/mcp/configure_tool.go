@@ -36,17 +36,29 @@ type configureInput struct {
 	// silently dropping the per-listener directive.
 	Name string `json:"name,omitempty" jsonschema:"listener name; currently scopes upstream_proxy only, other sections remain process-global (default: 'default')"`
 
-	// UpstreamProxy configures the upstream proxy URL.
-	// Set to a proxy URL (e.g. "http://proxy:3128" or "socks5://proxy:1080") to route traffic through it.
-	// Set to empty string "" to disable (direct connection).
-	// If omitted (nil pointer), the setting is not changed.
+	// UpstreamProxy configures the upstream proxy URL or rotating
+	// template (USK-826 + USK-959). Accepts two shapes:
+	//
+	// Legacy string form: a literal proxy URL ("http://proxy:3128" or
+	// "socks5://proxy:1080"). Empty string disables (direct connection).
+	//
+	// Structured object form (USK-959):
+	//   {"url_template": "http://session-§__nonce§:pass@proxy:8080",
+	//    "rotation": {"policy": "per_request"}}
+	// Supported policies: per_request, per_connection,
+	// per_target_host, sticky. §__nonce§ substitutes a fresh UUID per
+	// resolution event.
+	//
+	// JSON typing: declared as `any` so the schema generator accepts
+	// both string and object; the handler parses via
+	// parseUpstreamProxyInput at the tool entry. If omitted, the
+	// setting is not changed.
 	//
 	// USK-826: scoped to the listener identified by the top-level "name"
 	// field (default: "default"). Multi-listener chained MITM (listener
 	// B routes its traffic through listener A) requires per-listener
-	// scoping; setting upstream_proxy without "name" applies to the
-	// default listener only.
-	UpstreamProxy *string `json:"upstream_proxy,omitempty" jsonschema:"upstream proxy URL scoped to the listener named by 'name' (empty string to disable, omit to keep current)"`
+	// scoping.
+	UpstreamProxy any `json:"upstream_proxy,omitempty" jsonschema:"upstream proxy: literal URL string (http://host:port or socks5://host:port) OR object {url|url_template, rotation:{policy: per_request|per_connection|per_target_host|sticky}} (USK-959)"`
 
 	// TLSPassthrough configures TLS passthrough patterns.
 	// For merge: use add/remove arrays.
@@ -317,8 +329,20 @@ type configureResult struct {
 	// Status indicates the result of the operation.
 	Status string `json:"status"`
 
-	// UpstreamProxy shows the current upstream proxy URL (empty string means direct).
+	// UpstreamProxy shows the current upstream proxy URL (empty string
+	// means direct). When the listener is using USK-959 rotation, this
+	// field is empty and UpstreamProxyTemplate / UpstreamProxyRotationPolicy
+	// carry the rotation state instead.
 	UpstreamProxy *string `json:"upstream_proxy,omitempty"`
+
+	// UpstreamProxyTemplate echoes the current rotation template (redacted
+	// via connector.RedactProxyURL) when the listener is using USK-959
+	// rotation. Empty otherwise.
+	UpstreamProxyTemplate *string `json:"upstream_proxy_template,omitempty"`
+
+	// UpstreamProxyRotationPolicy echoes the current rotation policy
+	// when the listener is using USK-959 rotation. Empty otherwise.
+	UpstreamProxyRotationPolicy *string `json:"upstream_proxy_rotation_policy,omitempty"`
 
 	// TLSPassthrough summarizes the current TLS passthrough state.
 	TLSPassthrough *configurePassthroughResult `json:"tls_passthrough,omitempty"`
@@ -674,8 +698,21 @@ func (s *Server) configureCaptureScope(operation string, in *configureCaptureSco
 // — otherwise the call returns an error so chained-MITM misconfiguration
 // surfaces loudly rather than silently dropping the directive (this is
 // consistent with the proxy_stop / proxy_start error semantics).
+//
+// USK-959: the input is polymorphic — a JSON string is the legacy
+// literal-URL form; a JSON object enables rotation via url_template +
+// rotation policy. Stage 1 validation (URL ⊕ URLTemplate, policy
+// whitelist, template probe-expansion) runs at the input boundary so
+// malformed shapes fail the tool call rather than the first dial.
 func (s *Server) configureUpstreamProxy(input configureInput, result *configureResult) error {
 	if input.UpstreamProxy == nil {
+		return nil
+	}
+	parsed, err := parseUpstreamProxyInput(input.UpstreamProxy)
+	if err != nil {
+		return err
+	}
+	if parsed == nil {
 		return nil
 	}
 	listenerName := input.Name
@@ -693,12 +730,45 @@ func (s *Server) configureUpstreamProxy(input configureInput, result *configureR
 		return fmt.Errorf("upstream_proxy: listener %q: %w", listenerName, proxybuild.ErrListenerNotFound)
 	}
 
-	if err := s.applyUpstreamProxy(*input.UpstreamProxy, listenerName); err != nil {
-		return fmt.Errorf("upstream_proxy: %w", err)
+	if err := parsed.Validate(); err != nil {
+		return err
 	}
+
+	switch {
+	case parsed.IsRotation():
+		// USK-959: structured rotation form. The Manager wires the
+		// resolver into the BuildConfig; the literal-URL slot is
+		// cleared as part of the Manager method.
+		cfg := parsed.RotationConfig()
+		if err := s.applyUpstreamProxyRotation(cfg, listenerName); err != nil {
+			return fmt.Errorf("upstream_proxy: %w", err)
+		}
+	case parsed.IsLiteralDisable():
+		// Legacy: empty string disables.
+		if err := s.applyUpstreamProxy("", listenerName); err != nil {
+			return fmt.Errorf("upstream_proxy: %w", err)
+		}
+		// Also explicitly clear any rotation so a previous
+		// configure call's rotation does not survive.
+		_ = s.applyUpstreamProxyRotation(nil, listenerName)
+	default:
+		// Legacy literal URL form. URL may come from the string form
+		// (suppliedAsString=true) or from the object form's "url"
+		// key (no rotation).
+		if err := s.applyUpstreamProxy(parsed.LiteralURL(), listenerName); err != nil {
+			return fmt.Errorf("upstream_proxy: %w", err)
+		}
+	}
+
 	current := ""
 	if !managerIsNil(s.connector.manager) {
 		current = connector.RedactProxyURL(s.connector.manager.UpstreamProxyForListener(listenerName))
+		template, policy := s.connector.manager.UpstreamProxyRotationForListener(listenerName)
+		if template != "" {
+			redactedTpl := connector.RedactProxyURL(template)
+			result.UpstreamProxyTemplate = &redactedTpl
+			result.UpstreamProxyRotationPolicy = &policy
+		}
 	}
 	result.UpstreamProxy = &current
 	return nil

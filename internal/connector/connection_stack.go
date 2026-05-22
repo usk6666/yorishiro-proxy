@@ -52,6 +52,13 @@ type ConnectionStack struct {
 	// poolKey is the PoolKey under which upstreamH2 was obtained. Zero value
 	// when upstreamH2 is nil.
 	poolKey pool.PoolKey
+
+	// buildCfg is the BuildConfig that produced this stack, captured for
+	// per-connection cleanup (USK-959: per_request and per_connection
+	// rotation resolvers track state by ConnID, which must be released
+	// on stack Close). nil when the stack was constructed without
+	// proxybuild wiring (e.g. unit tests).
+	buildCfg *BuildConfig
 }
 
 // sideSubStack pairs the stream-scoped client and upstream Layer overlays
@@ -73,6 +80,19 @@ type sideStack struct {
 // connection identifier.
 func NewConnectionStack(connID string) *ConnectionStack {
 	return &ConnectionStack{ConnID: connID}
+}
+
+// SetBuildConfig wires the BuildConfig that produced this stack so
+// Close can fire per-connection cleanup (USK-959 rotation resolver
+// state). No-op when cfg is nil; subsequent Close still runs the
+// standard Layer teardown.
+func (s *ConnectionStack) SetBuildConfig(cfg *BuildConfig) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.buildCfg = cfg
 }
 
 // PushClient adds a new top layer to the client side and makes it the
@@ -326,6 +346,10 @@ func (s *ConnectionStack) Close() error {
 	s.mu.Lock()
 	subs := s.streamSubStacks
 	s.streamSubStacks = nil
+	// Snapshot the cleanup deps under the same lock so concurrent
+	// SetBuildConfig writes do not race with Close. ConnID is immutable
+	// (set at construction) so we don't need to snapshot it.
+	buildCfg := s.buildCfg
 	defer s.mu.Unlock()
 
 	var firstErr error
@@ -361,6 +385,12 @@ func (s *ConnectionStack) Close() error {
 	s.upstream = sideStack{}
 	// Intentionally NOT clearing upstreamH2 / poolKey: the pool owns the
 	// Layer and the handler is still responsible for Pool.Put using poolKey.
+
+	// USK-959: release per-connection rotation state. Fires AFTER Layer
+	// teardown so any in-flight resolver lookups have already returned.
+	if buildCfg != nil {
+		buildCfg.ReleaseConnectionState(s.ConnID)
+	}
 
 	if firstErr != nil {
 		return fmt.Errorf("connection stack close: %w", firstErr)

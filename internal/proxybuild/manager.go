@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"sync"
 	"time"
 
@@ -101,8 +102,25 @@ type Manager struct {
 	// parsed *url.URL. Mutations guarded by m.mu.
 	upstreamProxyPerListener map[string]string
 
+	// upstreamProxyRotationPerListener tracks the per-listener rotation
+	// state for the URL-template form (USK-959). Stored alongside the
+	// legacy string map so status surfaces can report the active
+	// template (redacted) and policy without re-stringifying the
+	// resolver's internal state. Mutations guarded by m.mu.
+	upstreamProxyRotationPerListener map[string]*upstreamProxyRotationEntry
+
 	mu        sync.Mutex
 	listeners map[string]*listenerEntry
+}
+
+// upstreamProxyRotationEntry pairs the operator-supplied template
+// (verbatim, so the status surface can redact via
+// connector.RedactProxyURL) with the resolved RotationPolicy. The
+// BuildConfig holds the live RotationResolver; this struct is purely
+// for status reporting.
+type upstreamProxyRotationEntry struct {
+	Template string
+	Policy   string
 }
 
 // NewManager constructs a Manager. cfg.StackFactory is required; nil
@@ -314,12 +332,23 @@ func (m *Manager) Status() (running bool, listenAddr string) {
 // string as stored via SetUpstreamProxyForListener, empty when no
 // per-listener override is set. The MCP status surface is responsible
 // for redaction via connector.RedactProxyURL before serialising.
+//
+// UpstreamProxyTemplate / UpstreamProxyRotationPolicy (USK-959) carry
+// the rotating-template form. Both fields are empty when the listener
+// is not using rotation (UpstreamProxy carries the literal URL or the
+// listener has no upstream proxy configured). When rotation IS active,
+// UpstreamProxy is empty (the literal URL doesn't exist — only a
+// template). The MCP status surface MUST redact UpstreamProxyTemplate
+// via connector.RedactProxyURL before serialising; the template may
+// resolve to credentials.
 type ListenerStatus struct {
-	Name              string `json:"name"`
-	ListenAddr        string `json:"listen_addr"`
-	ActiveConnections int    `json:"active_connections"`
-	UptimeSeconds     int64  `json:"uptime_seconds"`
-	UpstreamProxy     string `json:"upstream_proxy,omitempty"`
+	Name                        string `json:"name"`
+	ListenAddr                  string `json:"listen_addr"`
+	ActiveConnections           int    `json:"active_connections"`
+	UptimeSeconds               int64  `json:"uptime_seconds"`
+	UpstreamProxy               string `json:"upstream_proxy,omitempty"`
+	UpstreamProxyTemplate       string `json:"upstream_proxy_template,omitempty"`
+	UpstreamProxyRotationPolicy string `json:"upstream_proxy_rotation_policy,omitempty"`
 }
 
 // ListenerStatuses returns a snapshot of every running listener. Returns
@@ -338,13 +367,18 @@ func (m *Manager) ListenerStatuses() []ListenerStatus {
 		if !entry.startedAt.IsZero() {
 			uptime = int64(time.Since(entry.startedAt).Seconds())
 		}
-		out = append(out, ListenerStatus{
+		status := ListenerStatus{
 			Name:              name,
 			ListenAddr:        entry.listenAddr,
 			ActiveConnections: entry.stack.Listener.ActiveConnections(),
 			UptimeSeconds:     uptime,
 			UpstreamProxy:     m.upstreamProxyPerListener[name],
-		})
+		}
+		if rot := m.upstreamProxyRotationPerListener[name]; rot != nil {
+			status.UpstreamProxyTemplate = rot.Template
+			status.UpstreamProxyRotationPolicy = rot.Policy
+		}
+		out = append(out, status)
 	}
 	return out
 }
@@ -551,14 +585,32 @@ func (m *Manager) SetUpstreamProxyForListener(name, proxyURL string) {
 	if name == "" {
 		name = DefaultListenerName
 	}
+	// Parse outside the lock so a malformed URL does not deadlock under
+	// m.mu — the result is consumed inside the critical section below.
+	var parsed *url.URL
+	var parseErr error
+	if proxyURL != "" {
+		parsed, parseErr = connector.ParseUpstreamProxy(proxyURL)
+	}
+
 	m.mu.Lock()
 	if proxyURL == "" {
 		delete(m.upstreamProxyPerListener, name)
+		// USK-959 (F-4): an empty proxyURL means "no upstream proxy of
+		// any flavour for this listener" — clear the rotation slot too
+		// so the setter is symmetric with the non-empty branch (which
+		// already clears rotation). Without this, calling the setter
+		// with "" would leave an orphan resolver active.
+		delete(m.upstreamProxyRotationPerListener, name)
 	} else {
 		if m.upstreamProxyPerListener == nil {
 			m.upstreamProxyPerListener = make(map[string]string)
 		}
 		m.upstreamProxyPerListener[name] = proxyURL
+		// USK-959: setting a literal URL clears any active rotation
+		// for the listener — they are mutually exclusive at the wire
+		// level (cf. UpstreamProxyConfig.Validate).
+		delete(m.upstreamProxyRotationPerListener, name)
 	}
 	// Maintain the legacy default-listener mirror on m.upstreamProxy so
 	// UpstreamProxy() / status surfaces keep working for callers that have
@@ -567,30 +619,137 @@ func (m *Manager) SetUpstreamProxyForListener(name, proxyURL string) {
 		m.upstreamProxy = proxyURL
 	}
 	bc := m.buildCfg
+	// USK-959 (S-2 / CWE-362): perform BuildConfig writes under m.mu so
+	// the manager-status mutations above and the BuildConfig mutations
+	// below form one atomic critical section. Without this, two
+	// configure_tool calls racing on the same listener could observe
+	// (status says rotation X, bc has rotation Y) for a brief window.
+	// Lock ordering is m.mu → bc.upstreamProxyPerListenerMu /
+	// bc.rotationByListenerMu; no reader of those bc muxes acquires
+	// m.mu, so this is safe.
+	if bc != nil {
+		if proxyURL == "" {
+			bc.SetUpstreamProxyForListener(name, nil)
+			bc.SetRotationForListener(name, nil)
+		} else {
+			// Clear any stale rotation first so the new literal URL is
+			// the only thing the dial path consults.
+			bc.SetRotationForListener(name, nil)
+			if parseErr == nil {
+				bc.SetUpstreamProxyForListener(name, parsed)
+			}
+		}
+	}
 	m.mu.Unlock()
 
-	if bc == nil {
-		return
-	}
-	if proxyURL == "" {
-		bc.SetUpstreamProxyForListener(name, nil)
-		return
-	}
-	parsed, err := connector.ParseUpstreamProxy(proxyURL)
-	if err != nil {
+	// Logging happens after releasing m.mu so a slow log sink cannot
+	// stall other manager callers. parseErr captures the malformed-URL
+	// case where status was still updated but the live dial path stays
+	// on the previous URL (the per-listener slot is not overwritten).
+	if proxyURL != "" && parseErr != nil {
 		m.logger.Warn("upstream proxy URL not applied to live dial path",
-			"listener", name, "url", connector.RedactProxyURL(proxyURL), "error", err)
-		return
+			"listener", name, "url", connector.RedactProxyURL(proxyURL), "error", parseErr)
 	}
-	bc.SetUpstreamProxyForListener(name, parsed)
 }
 
 // ClearUpstreamProxyForListener removes the named listener's per-listener
-// upstream-proxy entry (USK-826). Equivalent to
-// SetUpstreamProxyForListener(name, ""). Provided as a named accessor so
-// the proxy_start reset path expresses intent clearly.
+// upstream-proxy entry (USK-826) AND any rotation resolver installed via
+// SetUpstreamProxyRotationForListener (USK-959). Equivalent to
+// SetUpstreamProxyForListener(name, "") + SetUpstreamProxyRotationForListener(name, nil).
+// Provided as a named accessor so the proxy_start reset path expresses
+// intent clearly.
 func (m *Manager) ClearUpstreamProxyForListener(name string) {
 	m.SetUpstreamProxyForListener(name, "")
+	m.SetUpstreamProxyRotationForListener(name, nil)
+}
+
+// SetUpstreamProxyRotationForListener installs (or clears) a rotating
+// upstream-proxy resolver for the named listener (USK-959). cfg.URLTemplate
+// must be non-empty, cfg.Rotation.Policy must be one of the four
+// supported policies. Passing nil clears the resolver — the listener
+// then falls back to its static per-listener URL (USK-826) or the
+// process-global / boot-time slot.
+//
+// The Manager stores the template + policy for status reporting AND
+// hands a fresh RotationResolver to the bound BuildConfig so the live
+// dial path consults it inside EffectiveUpstreamProxyForCtxErr. An
+// empty name is treated as DefaultListenerName.
+//
+// configure_tool dynamic tuning: re-calling this method with a fresh
+// cfg replaces the resolver entirely so per-conn / per-host / sticky
+// caches are dropped on the same call. In-flight connections keep the
+// URL they already captured (the previous resolver still exists in
+// goroutine-local state until GC).
+//
+// Returns an error when cfg is malformed (template fails probe
+// expansion, policy not recognised). Callers must ensure the listener
+// is running before invoking (the MCP layer enforces this).
+func (m *Manager) SetUpstreamProxyRotationForListener(name string, cfg *connector.RotationConfig) error {
+	if name == "" {
+		name = DefaultListenerName
+	}
+	m.mu.Lock()
+	if cfg == nil {
+		delete(m.upstreamProxyRotationPerListener, name)
+		bc := m.buildCfg
+		m.mu.Unlock()
+		if bc != nil {
+			bc.SetRotationForListener(name, nil)
+		}
+		return nil
+	}
+	// Defensive policy validation (the MCP layer already validated, but
+	// programmatic callers may bypass).
+	if !cfg.Policy.IsValid() {
+		m.mu.Unlock()
+		return fmt.Errorf("rotation policy %q is not supported", cfg.Policy)
+	}
+	if cfg.Template == "" {
+		m.mu.Unlock()
+		return fmt.Errorf("rotation template is empty")
+	}
+	// Record for status surfaces.
+	if m.upstreamProxyRotationPerListener == nil {
+		m.upstreamProxyRotationPerListener = make(map[string]*upstreamProxyRotationEntry)
+	}
+	m.upstreamProxyRotationPerListener[name] = &upstreamProxyRotationEntry{
+		Template: cfg.Template,
+		Policy:   string(cfg.Policy),
+	}
+	// When rotation is active, the legacy literal slot must be empty —
+	// they are mutually exclusive at the wire level.
+	delete(m.upstreamProxyPerListener, name)
+	if name == DefaultListenerName {
+		m.upstreamProxy = ""
+	}
+	bc := m.buildCfg
+	m.mu.Unlock()
+
+	if bc == nil {
+		return nil
+	}
+	// Clear any literal per-listener URL so the resolver path is the
+	// only one consulted for this listener.
+	bc.SetUpstreamProxyForListener(name, nil)
+	resolver := connector.NewRotationResolver(*cfg, 0, 0)
+	bc.SetRotationForListener(name, resolver)
+	return nil
+}
+
+// UpstreamProxyRotationForListener returns the operator-supplied
+// template and policy for the named listener (USK-959), or empty
+// strings when no rotation is configured. An empty name is treated as
+// DefaultListenerName.
+func (m *Manager) UpstreamProxyRotationForListener(name string) (template, policy string) {
+	if name == "" {
+		name = DefaultListenerName
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if rot := m.upstreamProxyRotationPerListener[name]; rot != nil {
+		return rot.Template, rot.Policy
+	}
+	return "", ""
 }
 
 // UpstreamProxy returns the stored upstream proxy URL for the default

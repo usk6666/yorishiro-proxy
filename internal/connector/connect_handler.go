@@ -137,16 +137,22 @@ type CONNECTHandlerConfig struct {
 
 // passDialOpts builds DialRawOpts for TLS passthrough relay. It safely
 // handles a nil BuildCfg (only UpstreamProxy is needed for passthrough).
-// EffectiveUpstreamProxyForCtx is consulted so a runtime proxy_start /
+// EffectiveUpstreamProxyForCtxErr is consulted so a runtime proxy_start /
 // configure switch reaches the next passthrough dial (USK-734) AND a
-// per-listener override (USK-826) takes effect when the ctx carries the
-// listener name.
-func passDialOpts(ctx context.Context, buildCfg *BuildConfig) DialRawOpts {
+// per-listener override (USK-826) + rotation (USK-959) take effect when
+// the ctx carries the listener name. Returns an error on rotation
+// resolver failure — caller must fail-closed (close client conn) rather
+// than dial direct (privacy regression).
+func passDialOpts(ctx context.Context, buildCfg *BuildConfig) (DialRawOpts, error) {
 	var opts DialRawOpts
 	if buildCfg != nil {
-		opts.UpstreamProxy = buildCfg.EffectiveUpstreamProxyForCtx(ctx)
+		u, err := buildCfg.EffectiveUpstreamProxyForCtxErr(ctx)
+		if err != nil {
+			return opts, err
+		}
+		opts.UpstreamProxy = u
 	}
-	return opts
+	return opts, nil
 }
 
 // NewCONNECTHandler returns a HandlerFunc that processes CONNECT tunnel
@@ -240,7 +246,16 @@ func connectPassthrough(ctx context.Context, cfg CONNECTHandlerConfig, pc *PeekC
 		return false
 	}
 	logger.Debug("TLS passthrough relay", "target", target)
-	relayErr := runPassthroughRelay(ctx, pc, target, passDialOpts(ctx, cfg.BuildCfg), cfg.PassthroughObserver)
+	// USK-959: stamp the dial target on ctx so the per_target_host
+	// rotation policy can scope state by upstream host.
+	dialCtx := ContextWithDialTarget(ctx, target)
+	opts, perr := passDialOpts(dialCtx, cfg.BuildCfg)
+	if perr != nil {
+		logger.Warn("TLS passthrough upstream proxy rotation failed; failing closed",
+			"target", target, "error", perr)
+		return true
+	}
+	relayErr := runPassthroughRelay(dialCtx, pc, target, opts, cfg.PassthroughObserver)
 	if relayErr != nil {
 		logger.Warn("TLS passthrough ended", "target", target, "sni_peek_target", host, "error", relayErr)
 	}
@@ -313,6 +328,9 @@ func runTLSMITM(
 		}
 		return
 	}
+	// USK-959: wire the BuildConfig in so ConnectionStack.Close can
+	// release per-connection rotation state when the client disconnects.
+	stack.SetBuildConfig(buildCfg)
 	logger.Debug("connection stack built")
 	dispatchStack(ctx, stack, clientSnap, upstreamSnap, target, buildCfg, onStack, onHTTP2Stack)
 }

@@ -88,6 +88,13 @@ func poolKeyForH2(ctx context.Context, target string, cfg *BuildConfig, hostTLS 
 	// transit a different upstream proxy (USK-734); pooled entries
 	// established for listener A must not be reused for listener B
 	// (USK-826).
+	//
+	// USK-959: For per_request rotation, every dial mints a fresh URL so
+	// the pool key always differs — no pooling reuse, as intended (each
+	// HTTP/2 outbound TCP dial gets its own URL → its own pooled Layer
+	// keyspace). Resolver errors are swallowed here (key minted with
+	// empty proxyURL); the live dial path catches the error via
+	// EffectiveUpstreamProxyForCtxErr and fails closed there.
 	proxyURL := ""
 	if cfg != nil {
 		if u := cfg.EffectiveUpstreamProxyForCtx(ctx); u != nil {
