@@ -9,6 +9,7 @@ import { Tabs } from "../../components/ui/Tabs.js";
 import { useToast } from "../../components/ui/Toast.js";
 import { useMacro, useQuery } from "../../lib/mcp/hooks.js";
 import type {
+  ExtractionFrom,
   ExtractionRule,
   GuardCondition,
   MacroDefineResult,
@@ -33,7 +34,7 @@ const ON_ERROR_OPTIONS = [
   { value: "retry", label: "Retry" },
 ];
 
-const EXTRACTION_FROM_OPTIONS = [
+const EXTRACTION_FROM_OPTIONS: readonly { value: ExtractionFrom; label: string }[] = [
   { value: "request", label: "Request" },
   { value: "response", label: "Response" },
 ];
@@ -79,7 +80,7 @@ interface StepFormEntry {
 interface ExtractionFormEntry {
   key: string;
   name: string;
-  from: string;
+  from: ExtractionFrom;
   source: string;
   headerName: string;
   regex: string;
@@ -1052,7 +1053,9 @@ function StepEditor({
                       className="macro-select"
                       value={ext.from}
                       onChange={(e) =>
-                        updateExtraction(ext.key, { from: e.target.value })
+                        updateExtraction(ext.key, {
+                          from: e.target.value as ExtractionFrom,
+                        })
                       }
                     >
                       {EXTRACTION_FROM_OPTIONS.map((o) => (
