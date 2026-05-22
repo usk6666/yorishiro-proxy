@@ -1454,7 +1454,12 @@ export interface SecurityTestTargetResult {
   tested_target: TestedTarget;
 }
 
-/** Rate limit configuration (mirrors Go proxy.RateLimitConfig). */
+/**
+ * Rate limit configuration (mirrors Go `connector.RateLimitConfig`).
+ *
+ * All fields use 0 = "no limit" as the unlimited sentinel. The wire never
+ * sends null/undefined for these fields; they are always present as numbers.
+ */
 export interface RateLimitConfig {
   max_requests_per_second: number;
   max_requests_per_host_per_second: number;
@@ -1474,7 +1479,13 @@ export interface SecurityGetRateLimitsResult {
   effective: RateLimitConfig;
 }
 
-/** Budget configuration (mirrors Go proxy.BudgetConfig). */
+/**
+ * Budget configuration (mirrors Go `connector.BudgetConfig`).
+ *
+ * `max_total_requests` uses 0 as the "no agent override" sentinel; `max_duration`
+ * uses "" or "0s" for the same meaning. The wire never sends null/undefined for
+ * these fields; they are always present as a number / string respectively.
+ */
 export interface BudgetConfig {
   max_total_requests: number;
   max_duration: string;
