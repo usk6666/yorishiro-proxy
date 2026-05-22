@@ -462,6 +462,16 @@ CREATE INDEX IF NOT EXISTS idx_flows_stream_id_timestamp ON flows(stream_id, tim
 // recordMacroStepSession; status is one of "ok", "skipped", "error";
 // status_code carries the macro's last HTTP step status when available.
 //
+// index_num is the 0-based variant index for scope="iteration" rows.
+// USK-961 introduces scope="job" hooks (pre-job / post-job that fire
+// once outside the variant loop); those rows use index_num=-1 as the
+// documented sentinel so the (fuzz_id, index_num, hook_name) primary
+// key stays unique without a schema migration. The column is INTEGER
+// NOT NULL, so -1 is a legal value (NULL is not). There are no
+// external consumers of this table today; the sentinel is consumed
+// only by the test path and the `query` MCP tool surfaces does not
+// include fuzz_macro_results.
+//
 // idx_fuzz_macro_results_fuzz_id mirrors the fuzz_results companion index
 // so query-by-fuzz_id reads run as predicate scans.
 const schemaV17 = `

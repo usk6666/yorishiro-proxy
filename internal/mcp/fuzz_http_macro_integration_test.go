@@ -668,52 +668,619 @@ func TestFuzzHTTPMacro_OnErrorContinue_UnresolvedDiagInPositionPayload(t *testin
 }
 
 // ---------------------------------------------------------------------------
-// AC#4 — scope="job" deferral: validation reject with USK-961 message.
+// USK-961 — scope="job" + mix-scope tests.
 // ---------------------------------------------------------------------------
 
-func TestFuzzHTTPMacro_ScopeJobRejectedAsDeferredToUSK961(t *testing.T) {
+// TestFuzzHTTPMacro_ScopeJobPreSharesKVAcrossVariants covers AC#1 +
+// AC#2 of USK-961: pre=job login once → fuzz N variants share the
+// extracted token via templated header; post=iteration audits each.
+// Asserts pre-job fires exactly once (fuzz_macro_results row at
+// index_num=-1, hook_name="pre"); post-iteration fires N times.
+func TestFuzzHTTPMacro_ScopeJobPreSharesKVAcrossVariants(t *testing.T) {
 	cs, store := setupFuzzHTTPMacroSession(t)
 
-	// We don't need a working pre macro target — validation rejects
-	// before runtime. Define a minimal macro so the runtime path would
-	// otherwise succeed.
-	dummyServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	// preServer issues the same session_token every call so we can
+	// assert every variant sees the same value.
+	var preCalls int32
+	preServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&preCalls, 1)
+		fmt.Fprint(w, `{"session_token":"job-tok-shared"}`)
+	}))
+	t.Cleanup(preServer.Close)
+
+	// postServer records the URL query so we can assert the post macro's
+	// OverrideURL expanded against per-iteration kvStore + the inherited
+	// pre-job extract.
+	var postRecords atomic.Pointer[[]map[string]string]
+	postServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rec := map[string]string{"query": r.URL.RawQuery}
+		for {
+			old := postRecords.Load()
+			var cur []map[string]string
+			if old != nil {
+				cur = append(cur, *old...)
+			}
+			cur = append(cur, rec)
+			if postRecords.CompareAndSwap(old, &cur) {
+				break
+			}
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(postServer.Close)
+
+	// fuzzServer records the X-Token header so we can confirm every
+	// variant carried the pre-job extracted token.
+	var fuzzTokens atomic.Pointer[[]string]
+	fuzzServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		tok := r.Header.Get("X-Token")
+		for {
+			old := fuzzTokens.Load()
+			var cur []string
+			if old != nil {
+				cur = append(cur, *old...)
+			}
+			cur = append(cur, tok)
+			if fuzzTokens.CompareAndSwap(old, &cur) {
+				break
+			}
+		}
 		w.WriteHeader(http.StatusOK)
 	}))
-	t.Cleanup(dummyServer.Close)
-	flowID := recordMacroFlow(t, store, "POST", dummyServer.URL+"/x", nil, nil)
-	defineMacroForTest(t, cs, "noop-macro", flowID, "", "", nil)
+	t.Cleanup(fuzzServer.Close)
 
+	preFlowID := recordMacroFlow(t, store, "POST", preServer.URL+"/login", nil, nil)
+	postFlowID := recordMacroFlow(t, store, "POST", postServer.URL+"/audit", nil, nil)
+
+	defineMacroForTest(t, cs, "pre-job-login", preFlowID, "", "", []map[string]any{
+		{
+			"name":      "session_token",
+			"from":      "response",
+			"source":    "body_json",
+			"json_path": "$.session_token",
+			"required":  true,
+		},
+	})
+	// post-iteration audits each variant's status. References §session_token§
+	// to confirm job-store extracts are merged into per-iteration kvStore.
+	overrideURL := postServer.URL + "/audit?iter=§__iteration§&token=§session_token§"
+	defineMacroForTest(t, cs, "post-iter-audit", postFlowID, overrideURL, "audit", nil)
+
+	authority := strings.TrimPrefix(fuzzServer.URL, "http://")
 	res, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
 		Name: "fuzz_http",
 		Arguments: map[string]any{
 			"method":    "GET",
 			"scheme":    "http",
-			"authority": "127.0.0.1:1",
-			"path":      "/x",
+			"authority": authority,
+			"path":      "/probe",
 			"headers": []map[string]any{
-				{"name": "Host", "value": "127.0.0.1:1"},
+				{"name": "Host", "value": authority},
+				{"name": "X-Token", "value": "§session_token§"},
 			},
 			"positions": []map[string]any{
-				{"path": "path", "payloads": []string{"/a"}},
+				{"path": "path", "payloads": []string{"/a", "/b", "/c"}},
 			},
-			"timeout_ms": 1000,
-			"pre_macro":  map[string]any{"name": "noop-macro", "scope": "job"},
+			"timeout_ms": 5000,
+			"pre_macro":  map[string]any{"name": "pre-job-login", "scope": "job"},
+			"post_macro": map[string]any{"name": "post-iter-audit", "scope": "iteration"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool fuzz_http: %v", err)
+	}
+	if res.IsError {
+		var msg strings.Builder
+		for _, c := range res.Content {
+			if tc, ok := c.(*gomcp.TextContent); ok {
+				msg.WriteString(tc.Text)
+				msg.WriteString("\n")
+			}
+		}
+		t.Fatalf("fuzz_http returned error: %s", msg.String())
+	}
+
+	var out fuzzHTTPResult
+	raw, _ := json.Marshal(res.StructuredContent)
+	if err := json.Unmarshal(raw, &out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if out.CompletedVariants != 3 {
+		t.Fatalf("CompletedVariants = %d, want 3", out.CompletedVariants)
+	}
+
+	// AC: pre-job called exactly once.
+	if got := atomic.LoadInt32(&preCalls); got != 1 {
+		t.Errorf("pre macro called %d times, want 1 (scope=job)", got)
+	}
+
+	// AC: every variant carried the shared token.
+	tokens := *fuzzTokens.Load()
+	if len(tokens) != 3 {
+		t.Fatalf("fuzz received %d requests, want 3", len(tokens))
+	}
+	for i, tok := range tokens {
+		if tok != "job-tok-shared" {
+			t.Errorf("variant %d X-Token = %q, want job-tok-shared", i, tok)
+		}
+	}
+
+	// AC: post-iteration called 3 times. The OverrideURL referenced
+	// §session_token§ so post-iteration confirms the job-store extract
+	// is merged into each iteration's kvStore.
+	if postRecords.Load() == nil {
+		t.Fatal("post server received no requests")
+	}
+	pRecs := *postRecords.Load()
+	if len(pRecs) != 3 {
+		t.Fatalf("post server received %d requests, want 3", len(pRecs))
+	}
+	for i, rec := range pRecs {
+		if !strings.Contains(rec["query"], "token=job-tok-shared") {
+			t.Errorf("post-iter[%d] query = %q, want to contain token=job-tok-shared", i, rec["query"])
+		}
+	}
+
+	// AC: fuzz_macro_results — 1 pre row (index_num=-1, hook="pre") + 3
+	// post rows (index_num=0..2, hook="post"), all "ok".
+	fs := store.(flow.FuzzStore)
+	results, err := fs.ListFuzzMacroResults(context.Background(), out.FuzzID)
+	if err != nil {
+		t.Fatalf("ListFuzzMacroResults: %v", err)
+	}
+	if len(results) != 4 {
+		t.Fatalf("fuzz_macro_results rows = %d, want 4", len(results))
+	}
+	preRows, postRows := 0, 0
+	for _, r := range results {
+		if r.Status != "ok" {
+			t.Errorf("row hook=%s idx=%d status=%q, want ok (err=%q)", r.HookName, r.IndexNum, r.Status, r.Error)
+		}
+		switch r.HookName {
+		case "pre":
+			preRows++
+			if r.IndexNum != -1 {
+				t.Errorf("pre row index_num = %d, want -1 (job-scope sentinel)", r.IndexNum)
+			}
+		case "post":
+			postRows++
+			if r.IndexNum < 0 || r.IndexNum >= 3 {
+				t.Errorf("post row index_num = %d, want 0..2", r.IndexNum)
+			}
+		}
+	}
+	if preRows != 1 {
+		t.Errorf("pre rows = %d, want 1", preRows)
+	}
+	if postRows != 3 {
+		t.Errorf("post rows = %d, want 3", postRows)
+	}
+}
+
+// TestFuzzHTTPMacro_ScopeJobPostFiresOnceAfterLoop covers the mix-scope
+// pre=iteration + post=job case. Asserts post-job fires exactly once
+// after the last variant, with index_num=-1. Also asserts post-job's
+// kvStore does NOT contain __response_* keys (Q4 / Q21).
+func TestFuzzHTTPMacro_ScopeJobPostFiresOnceAfterLoop(t *testing.T) {
+	cs, store := setupFuzzHTTPMacroSession(t)
+
+	// preServer rotates a per-iteration token.
+	var preCalls int32
+	preServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := atomic.AddInt32(&preCalls, 1)
+		fmt.Fprintf(w, `{"per_iter_token":"tok-%d"}`, n)
+	}))
+	t.Cleanup(preServer.Close)
+
+	// postServer records the URL query so we can assert the post-job
+	// template did NOT see any __response_* keys (they should be left
+	// literal because the kvStore for post-job is the job kvStore, not
+	// the discarded per-iteration store).
+	var postRecords atomic.Pointer[[]map[string]string]
+	postServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rec := map[string]string{"query": r.URL.RawQuery}
+		for {
+			old := postRecords.Load()
+			var cur []map[string]string
+			if old != nil {
+				cur = append(cur, *old...)
+			}
+			cur = append(cur, rec)
+			if postRecords.CompareAndSwap(old, &cur) {
+				break
+			}
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(postServer.Close)
+
+	fuzzServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(fuzzServer.Close)
+
+	preFlowID := recordMacroFlow(t, store, "POST", preServer.URL+"/login", nil, nil)
+	postFlowID := recordMacroFlow(t, store, "POST", postServer.URL+"/summary", nil, nil)
+
+	defineMacroForTest(t, cs, "pre-iter-rotate", preFlowID, "", "", []map[string]any{
+		{
+			"name":      "per_iter_token",
+			"from":      "response",
+			"source":    "body_json",
+			"json_path": "$.per_iter_token",
+			"required":  true,
+		},
+	})
+	// Post-job's OverrideURL references __response_status — for post-job
+	// scope this key should NOT be in the kvStore, so the template
+	// resolves to the literal "§__response_status§".
+	overrideURL := postServer.URL + "/summary?rs=§__response_status§"
+	defineMacroForTest(t, cs, "post-job-summary", postFlowID, overrideURL, "summary", nil)
+
+	authority := strings.TrimPrefix(fuzzServer.URL, "http://")
+	res, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "fuzz_http",
+		Arguments: map[string]any{
+			"method":    "GET",
+			"scheme":    "http",
+			"authority": authority,
+			"path":      "/probe",
+			"headers": []map[string]any{
+				{"name": "Host", "value": authority},
+			},
+			"positions": []map[string]any{
+				{"path": "path", "payloads": []string{"/a", "/b"}},
+			},
+			"timeout_ms": 5000,
+			"pre_macro":  map[string]any{"name": "pre-iter-rotate", "scope": "iteration"},
+			"post_macro": map[string]any{"name": "post-job-summary", "scope": "job"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool fuzz_http: %v", err)
+	}
+	if res.IsError {
+		var msg strings.Builder
+		for _, c := range res.Content {
+			if tc, ok := c.(*gomcp.TextContent); ok {
+				msg.WriteString(tc.Text)
+				msg.WriteString("\n")
+			}
+		}
+		t.Fatalf("fuzz_http returned error: %s", msg.String())
+	}
+
+	var out fuzzHTTPResult
+	raw, _ := json.Marshal(res.StructuredContent)
+	_ = json.Unmarshal(raw, &out)
+	if out.CompletedVariants != 2 {
+		t.Fatalf("CompletedVariants = %d, want 2", out.CompletedVariants)
+	}
+
+	// AC: pre-iteration called twice; post-job called once.
+	if got := atomic.LoadInt32(&preCalls); got != 2 {
+		t.Errorf("pre called %d times, want 2 (scope=iteration)", got)
+	}
+	if postRecords.Load() == nil {
+		t.Fatal("post server received no requests")
+	}
+	pRecs := *postRecords.Load()
+	if len(pRecs) != 1 {
+		t.Fatalf("post server received %d requests, want 1 (scope=job)", len(pRecs))
+	}
+
+	// AC: post-job kvStore did NOT carry __response_status — the
+	// template is left literal because the variable was never set.
+	if !strings.Contains(pRecs[0]["query"], "rs=%C2%A7__response_status%C2%A7") &&
+		!strings.Contains(pRecs[0]["query"], "rs=§__response_status§") {
+		t.Errorf("post-job query = %q, want literal §__response_status§ (post-job must not see __response_* keys)", pRecs[0]["query"])
+	}
+
+	// AC: fuzz_macro_results — 2 pre rows (index_num=0,1) + 1 post row
+	// (index_num=-1), all ok.
+	fs := store.(flow.FuzzStore)
+	results, err := fs.ListFuzzMacroResults(context.Background(), out.FuzzID)
+	if err != nil {
+		t.Fatalf("ListFuzzMacroResults: %v", err)
+	}
+	if len(results) != 3 {
+		t.Fatalf("fuzz_macro_results rows = %d, want 3", len(results))
+	}
+	preRows, postRows := 0, 0
+	for _, r := range results {
+		switch r.HookName {
+		case "pre":
+			preRows++
+			if r.IndexNum < 0 || r.IndexNum >= 2 {
+				t.Errorf("pre row index_num = %d, want 0..1", r.IndexNum)
+			}
+		case "post":
+			postRows++
+			if r.IndexNum != -1 {
+				t.Errorf("post row index_num = %d, want -1 (job-scope sentinel)", r.IndexNum)
+			}
+		}
+	}
+	if preRows != 2 {
+		t.Errorf("pre rows = %d, want 2", preRows)
+	}
+	if postRows != 1 {
+		t.Errorf("post rows = %d, want 1", postRows)
+	}
+}
+
+// TestFuzzHTTPMacro_ScopeJobPreAbortOnErrorAbortsJob covers pre=job +
+// on_error=abort + failing macro: zero variants run; caller-side error
+// contains "pre_macro hook abort (scope=job)"; one fuzz_macro_results
+// row at index_num=-1, status="error".
+func TestFuzzHTTPMacro_ScopeJobPreAbortOnErrorAbortsJob(t *testing.T) {
+	cs, store := setupFuzzHTTPMacroSession(t)
+
+	// preServer returns 500 — required extract fails — abort policy.
+	preServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(preServer.Close)
+
+	var fuzzCalls int32
+	fuzzServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&fuzzCalls, 1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(fuzzServer.Close)
+
+	preFlowID := recordMacroFlow(t, store, "POST", preServer.URL+"/login", nil, nil)
+	defineMacroForTest(t, cs, "pre-required-job-abort", preFlowID, "", "", []map[string]any{
+		{
+			"name":      "session_token",
+			"from":      "response",
+			"source":    "body_json",
+			"json_path": "$.session_token",
+			"required":  true,
+		},
+	})
+
+	authority := strings.TrimPrefix(fuzzServer.URL, "http://")
+	res, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "fuzz_http",
+		Arguments: map[string]any{
+			"method":    "GET",
+			"scheme":    "http",
+			"authority": authority,
+			"path":      "/probe",
+			"headers": []map[string]any{
+				{"name": "Host", "value": authority},
+			},
+			"positions": []map[string]any{
+				{"path": "path", "payloads": []string{"/a", "/b", "/c"}},
+			},
+			"timeout_ms": 5000,
+			"pre_macro":  map[string]any{"name": "pre-required-job-abort", "scope": "job", "on_error": "abort"},
 		},
 	})
 	if err != nil {
 		t.Fatalf("CallTool fuzz_http: %v", err)
 	}
 	if !res.IsError {
-		t.Fatal("expected IsError for scope=job, got success")
+		t.Fatal("expected IsError for pre=job + on_error=abort, got success")
 	}
+
 	var msg strings.Builder
 	for _, c := range res.Content {
 		if tc, ok := c.(*gomcp.TextContent); ok {
 			msg.WriteString(tc.Text)
 		}
 	}
-	if !strings.Contains(msg.String(), "USK-961") {
-		t.Errorf("error message = %q, want to contain USK-961", msg.String())
+	if !strings.Contains(msg.String(), "pre_macro hook abort (scope=job)") {
+		t.Errorf("error = %q, want to contain 'pre_macro hook abort (scope=job)'", msg.String())
+	}
+
+	if got := atomic.LoadInt32(&fuzzCalls); got != 0 {
+		t.Errorf("fuzz server saw %d requests, want 0 (pre-job abort must short-circuit before any variant)", got)
+	}
+
+	// Look up the fuzz_id from the fuzz_jobs table — we need it to
+	// query fuzz_macro_results. The pre_macro hook saved a row with
+	// fuzzID set, so we list all macro results and find the matching
+	// one. (Alternative: use a deterministic fuzz_id, but the tool
+	// generates one internally.)
+	fs := store.(flow.FuzzStore)
+	jobs, err := fs.ListFuzzJobs(context.Background(), flow.FuzzJobListOptions{})
+	if err != nil {
+		t.Fatalf("ListFuzzJobs: %v", err)
+	}
+	if len(jobs) == 0 {
+		t.Fatal("no fuzz_jobs row recorded; pre-job abort must still create the job row")
+	}
+	// Take the most recent job.
+	fuzzID := jobs[0].ID
+	results, err := fs.ListFuzzMacroResults(context.Background(), fuzzID)
+	if err != nil {
+		t.Fatalf("ListFuzzMacroResults: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("fuzz_macro_results rows = %d, want 1", len(results))
+	}
+	r := results[0]
+	if r.HookName != "pre" {
+		t.Errorf("hook_name = %q, want pre", r.HookName)
+	}
+	if r.IndexNum != -1 {
+		t.Errorf("index_num = %d, want -1 (job-scope sentinel)", r.IndexNum)
+	}
+	if r.Status != "error" {
+		t.Errorf("status = %q, want error (on_error=abort + failure)", r.Status)
+	}
+}
+
+// TestFuzzHTTPMacro_ScopeJobIndexNumSentinel asserts that
+// ListFuzzMacroResults rows for job-scope hooks have IndexNum == -1
+// exactly (covers AC#5 of USK-961).
+func TestFuzzHTTPMacro_ScopeJobIndexNumSentinel(t *testing.T) {
+	cs, store := setupFuzzHTTPMacroSession(t)
+
+	preServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"k":"v"}`)
+	}))
+	t.Cleanup(preServer.Close)
+	postServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(postServer.Close)
+	fuzzServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(fuzzServer.Close)
+
+	preFlowID := recordMacroFlow(t, store, "POST", preServer.URL+"/login", nil, nil)
+	postFlowID := recordMacroFlow(t, store, "POST", postServer.URL+"/sum", nil, nil)
+	defineMacroForTest(t, cs, "pre-noop-job", preFlowID, "", "", nil)
+	defineMacroForTest(t, cs, "post-noop-job", postFlowID, "", "", nil)
+
+	authority := strings.TrimPrefix(fuzzServer.URL, "http://")
+	res, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "fuzz_http",
+		Arguments: map[string]any{
+			"method":    "GET",
+			"scheme":    "http",
+			"authority": authority,
+			"path":      "/probe",
+			"headers": []map[string]any{
+				{"name": "Host", "value": authority},
+			},
+			"positions": []map[string]any{
+				{"path": "path", "payloads": []string{"/a", "/b"}},
+			},
+			"timeout_ms": 5000,
+			"pre_macro":  map[string]any{"name": "pre-noop-job", "scope": "job"},
+			"post_macro": map[string]any{"name": "post-noop-job", "scope": "job"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool fuzz_http: %v", err)
+	}
+	if res.IsError {
+		var msg strings.Builder
+		for _, c := range res.Content {
+			if tc, ok := c.(*gomcp.TextContent); ok {
+				msg.WriteString(tc.Text)
+				msg.WriteString("\n")
+			}
+		}
+		t.Fatalf("fuzz_http returned error: %s", msg.String())
+	}
+
+	var out fuzzHTTPResult
+	raw, _ := json.Marshal(res.StructuredContent)
+	_ = json.Unmarshal(raw, &out)
+
+	fs := store.(flow.FuzzStore)
+	results, err := fs.ListFuzzMacroResults(context.Background(), out.FuzzID)
+	if err != nil {
+		t.Fatalf("ListFuzzMacroResults: %v", err)
+	}
+	// Both job-scope hooks must produce exactly one row each at
+	// index_num=-1.
+	if len(results) != 2 {
+		t.Fatalf("fuzz_macro_results rows = %d, want 2", len(results))
+	}
+	for _, r := range results {
+		if r.IndexNum != -1 {
+			t.Errorf("hook=%s index_num = %d, want -1 (job-scope sentinel)", r.HookName, r.IndexNum)
+		}
+		if r.Status != "ok" {
+			t.Errorf("hook=%s status = %q, want ok", r.HookName, r.Status)
+		}
+	}
+}
+
+// TestFuzzHTTPMacro_ScopeJobPreSkipOnErrorReturnsStoppedReason covers
+// U1 (user-confirmed): pre=job + on_error=skip + failing macro returns
+// success with CompletedVariants=0 and stopped_reason set. One
+// fuzz_macro_results row at index_num=-1, status="skipped".
+func TestFuzzHTTPMacro_ScopeJobPreSkipOnErrorReturnsStoppedReason(t *testing.T) {
+	cs, store := setupFuzzHTTPMacroSession(t)
+
+	preServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(preServer.Close)
+
+	var fuzzCalls int32
+	fuzzServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&fuzzCalls, 1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(fuzzServer.Close)
+
+	preFlowID := recordMacroFlow(t, store, "POST", preServer.URL+"/login", nil, nil)
+	defineMacroForTest(t, cs, "pre-required-job-skip", preFlowID, "", "", []map[string]any{
+		{
+			"name":      "session_token",
+			"from":      "response",
+			"source":    "body_json",
+			"json_path": "$.session_token",
+			"required":  true,
+		},
+	})
+
+	authority := strings.TrimPrefix(fuzzServer.URL, "http://")
+	res, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "fuzz_http",
+		Arguments: map[string]any{
+			"method":    "GET",
+			"scheme":    "http",
+			"authority": authority,
+			"path":      "/probe",
+			"headers": []map[string]any{
+				{"name": "Host", "value": authority},
+			},
+			"positions": []map[string]any{
+				{"path": "path", "payloads": []string{"/a", "/b", "/c"}},
+			},
+			"timeout_ms": 5000,
+			"pre_macro":  map[string]any{"name": "pre-required-job-skip", "scope": "job", "on_error": "skip"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool fuzz_http: %v", err)
+	}
+	if res.IsError {
+		var msg strings.Builder
+		for _, c := range res.Content {
+			if tc, ok := c.(*gomcp.TextContent); ok {
+				msg.WriteString(tc.Text)
+				msg.WriteString("\n")
+			}
+		}
+		t.Fatalf("fuzz_http returned unexpected error: %s", msg.String())
+	}
+
+	var out fuzzHTTPResult
+	raw, _ := json.Marshal(res.StructuredContent)
+	_ = json.Unmarshal(raw, &out)
+
+	if out.CompletedVariants != 0 {
+		t.Errorf("CompletedVariants = %d, want 0 (pre-job skip must short-circuit before any variant)", out.CompletedVariants)
+	}
+	if !strings.Contains(out.StoppedReason, "pre_macro hook skipped (scope=job, on_error=skip)") {
+		t.Errorf("StoppedReason = %q, want to contain 'pre_macro hook skipped (scope=job, on_error=skip)'", out.StoppedReason)
+	}
+	if got := atomic.LoadInt32(&fuzzCalls); got != 0 {
+		t.Errorf("fuzz server saw %d requests, want 0", got)
+	}
+
+	fs := store.(flow.FuzzStore)
+	results, err := fs.ListFuzzMacroResults(context.Background(), out.FuzzID)
+	if err != nil {
+		t.Fatalf("ListFuzzMacroResults: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("fuzz_macro_results rows = %d, want 1", len(results))
+	}
+	r := results[0]
+	if r.HookName != "pre" || r.IndexNum != -1 || r.Status != "skipped" {
+		t.Errorf("row = {hook=%q, index_num=%d, status=%q}, want {hook=pre, index_num=-1, status=skipped}",
+			r.HookName, r.IndexNum, r.Status)
 	}
 }
