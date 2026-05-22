@@ -65,7 +65,14 @@ type FuzzResult struct {
 type FuzzMacroResult struct {
 	// FuzzID is the parent fuzz_jobs row id.
 	FuzzID string
-	// IndexNum is the 0-based variant index within the job.
+	// IndexNum is the 0-based variant index within the job for
+	// per-iteration (scope="iteration") hook rows. For scope="job"
+	// hook rows (USK-961 — pre-job / post-job hooks that fire exactly
+	// once outside the variant loop) IndexNum is -1, the documented
+	// sentinel. The underlying schemaV17 column is INTEGER NOT NULL,
+	// so -1 is a legal value (NULL is not) and the (fuzz_id,
+	// index_num, hook_name) primary key remains unique without a
+	// schema migration.
 	IndexNum int
 	// HookName is "pre" or "post".
 	HookName string

@@ -86,28 +86,45 @@ type fuzzHTTPInput struct {
 
 	UpstreamProxy *UpstreamProxyConfig `json:"upstream_proxy,omitempty" jsonschema:"optional upstream proxy override applied per variant. url_template is re-expanded once per variant against §__iteration§ (variant index) and §__nonce§ (per-variant UUID), and the parsed URL tunnels the variant's dial via HTTP CONNECT or SOCKS5. Used for residential proxy IP rotation: each variant exits from a distinct upstream IP"`
 
-	// PreMacro / PostMacro: per-iteration macro hooks (USK-960). Use a
-	// shared per-variant KV Store so reserved keys §__iteration§ /
-	// §__nonce§ are visible to both macros, extracts from pre flow into
-	// the fuzz body's §var§ expansion, and reserved __response_status /
-	// __response_body / __response_headers__<lower(name)>__ keys land in
-	// the same store before post fires.
-	PreMacro  *fuzzHTTPMacroConfig `json:"pre_macro,omitempty" jsonschema:"per-iteration pre macro hook executed before each variant's send. scope=iteration (job deferred to USK-961). on_error: skip|abort|continue (default skip)"`
-	PostMacro *fuzzHTTPMacroConfig `json:"post_macro,omitempty" jsonschema:"per-iteration post macro hook executed after each variant's response. scope=iteration (job deferred to USK-961). on_error: skip|abort|continue (default skip). pass_response is forced on so __response_status / __response_body / __response_headers__<lower(name)>__ are visible to the macro's template expansion"`
+	// PreMacro / PostMacro: pre/post macro hooks (USK-960 per-iteration,
+	// USK-961 per-job + mix-scope). scope="iteration" (default) shares a
+	// per-variant KV Store with the variant's pipeline so reserved keys
+	// §__iteration§ / §__nonce§, pre extracts, and (for post) reserved
+	// __response_* keys are visible to template expansion. scope="job"
+	// runs the hook exactly once outside the variant loop against a
+	// job-scoped KV Store that is merged into each iteration's store
+	// before per-iteration reserved keys are seeded — so pre=job extracts
+	// flow into every variant's request templating. mix-scope (pre and
+	// post with independent scope) is supported.
+	PreMacro  *fuzzHTTPMacroConfig `json:"pre_macro,omitempty" jsonschema:"pre macro hook executed before a variant's send. scope=iteration (default; fires once per variant) | job (fires once before the variant loop; extracts shared with every variant). on_error: skip|abort|continue (default skip). For scope=job, skip returns a successful job result with completed_variants=0 and stopped_reason set"`
+	PostMacro *fuzzHTTPMacroConfig `json:"post_macro,omitempty" jsonschema:"post macro hook executed after a variant's response. scope=iteration (default; fires once per variant against __response_* reserved keys) | job (fires once after the variant loop completes; no __response_* keys, since there is no single response). on_error: skip|abort|continue (default skip). For scope=iteration, pass_response is forced on so __response_status / __response_body / __response_headers__<lower(name)>__ are visible to the macro's template expansion"`
 }
 
-// fuzzHTTPMacroConfig is the per-iteration pre/post macro hook configuration
-// for fuzz_http (USK-960). Wire-compatible scaffold for future per-job
-// scope (USK-961); scope="job" is accepted at the schema boundary but
-// rejected at validation so forward-compat clients can speak the field
-// without runtime support landing yet.
+// fuzzHTTPMacroConfig is the pre/post macro hook configuration for
+// fuzz_http (USK-960 per-iteration, USK-961 per-job + mix-scope).
+//
+// scope="iteration" (default) fires once per variant; the per-iteration
+// KV Store is allocated fresh in the variant loop with reserved keys
+// §__iteration§ / §__nonce§ seeded and (for post) reserved __response_*
+// keys injected before the macro runs.
+//
+// scope="job" fires exactly once outside the variant loop against a
+// separate job-scoped KV Store that is merged into each iteration's
+// store before per-iteration reserved keys are seeded — so pre=job
+// extracts flow into every variant's request templating, and post=job
+// summarises after the loop completes. Reserved keys (§__iteration§,
+// §__nonce§, __response_*) are NOT visible to job-scope macros (the
+// loop has not started for pre-job, and is over with discarded per-
+// iteration kvStores for post-job). run_interval is rejected when
+// scope="job" (single-fire by construction).
 type fuzzHTTPMacroConfig struct {
 	// Name is the stored macro name (defined via macro.define).
 	Name string `json:"name" jsonschema:"REQUIRED stored macro name"`
 
-	// Scope: "iteration" (MVP) or "job" (deferred to USK-961). Empty
-	// defaults to "iteration".
-	Scope string `json:"scope,omitempty" jsonschema:"iteration (default) | job (deferred to USK-961; rejected at validation today)"`
+	// Scope: "iteration" (default) or "job". Mix-scope is supported —
+	// pre and post may independently select their scope. Empty defaults
+	// to "iteration".
+	Scope string `json:"scope,omitempty" jsonschema:"iteration (default; fires once per variant) | job (fires once outside the variant loop; KV Store is shared across the whole job and merged into each iteration's per-variant store)"`
 
 	// OnError selects the iteration's behaviour when the hook errors.
 	//   "skip"     (default) — record the iteration as skipped, do not send

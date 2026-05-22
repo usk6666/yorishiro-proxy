@@ -53,6 +53,42 @@ When `true`, abort the remaining variants once any variant returns a 5xx respons
 ### timeout_ms (integer, optional)
 Per-VARIANT timeout in milliseconds. Default `30000`.
 
+### pre_macro / post_macro (object, optional)
+
+Pre and post macro hooks dispatched around variants by name. Both fields take the same shape (USK-960, USK-961):
+
+- **name** (string, REQUIRED): the stored macro name (defined via the `macro` tool's `define_macro` action).
+- **scope** (string, optional): `"iteration"` (default) or `"job"`. See "Macro hook scopes" below.
+- **on_error** (string, optional): `"skip"` (default) | `"abort"` | `"continue"`. See "OnError semantics" below.
+
+The hook macro shares the per-iteration (or per-job) KV Store with the fuzz request — `§var§` templates in the request inherit pre-macro extracts, and post-macros (scope=iteration only) receive `__response_status` / `__response_body` / `__response_headers__<lower(name)>__` reserved keys.
+
+#### Macro hook scopes
+
+| Scope | Pre fires | Post fires | KV Store lifetime | `__response_*` keys | `§__iteration§` / `§__nonce§` |
+|-------|-----------|------------|-------------------|---------------------|-------------------------------|
+| `iteration` (default) | Before each variant's send | After each variant's response | Fresh per variant | Visible to post | Seeded each iteration |
+| `job` | Once before the variant loop | Once after the variant loop (incl. `stop_on_5xx` exit) | Shared across the whole job | NOT visible | NOT seeded |
+
+Mix-scope is supported — `pre_macro` and `post_macro` may pick their scope independently. The job-scope KV Store is merged into each iteration's per-variant store at iteration start; per-iteration reserved keys then overwrite any conflicting job keys ("iteration wins"). So `pre_macro { scope: "job" }` extracting `session_token` makes `§session_token§` resolvable in every variant's request templates.
+
+> `run_interval` is the underlying engine knob for `every_n` / `on_status` / etc. dispatch. It is rejected when `scope="job"` because the hook fires exactly once by construction (the call site, not `run_interval`, owns the single-fire guarantee).
+
+#### OnError semantics
+
+| OnError | pre / scope=iteration | pre / scope=job | post / either scope |
+|---------|----------------------|-----------------|--------------------|
+| `skip` (default) | Skip the variant: don't send, don't run post. Record `fuzz_macro_results.status="skipped"`. | Skip the entire job — `completed_variants=0`, `stopped_reason="pre_macro hook skipped (scope=job, on_error=skip): ..."`. | Record `fuzz_macro_results.status="error"`. Never aborts the run. |
+| `abort` | Abort the whole fuzz run with an error. | Abort the whole job before any variant runs. | Record `fuzz_macro_results.status="error"`. Never aborts (post-job runs after the loop has completed; nothing left to abort). |
+| `continue` | Log warn + record error row, proceed with whatever the kvStore captured; templates may carry unresolved `§var§` literals (surfaced in `fuzz_results.error`). | Log warn + record error row, proceed with variant loop. | Same as `skip` for post. |
+
+#### fuzz_macro_results schema notes
+
+The `fuzz_macro_results` table (one row per hook invocation) keys on `(fuzz_id, index_num, hook_name)`:
+
+- **`index_num`** is the 0-based variant index for `scope="iteration"` rows.
+- **`index_num = -1`** is the sentinel for `scope="job"` rows — pre-job and post-job each emit a single row at `index_num=-1`. This avoids a schema migration. There are no external consumers (the `query` MCP tool does not surface `fuzz_macro_results` today); the sentinel is consumed only by internal tooling.
+
 ## Result fields
 
 - `fuzz_id` (string, UUID) — primary key of the `fuzz_jobs` row created for this run. Chain with `query { resource: "fuzz_results", filter: { fuzz_id: "...", outliers_only: true } }` to surface outlier variants without re-running the fuzz job (USK-827 + USK-278).
@@ -150,3 +186,23 @@ Variant Streams are stamped `origin = "fuzz"`, so `query { resource: "flows", fi
   ]
 }
 ```
+
+### Mix-scope macro hooks: login once, fuzz N, summarise once
+```json
+{
+  "method": "GET",
+  "scheme": "https",
+  "authority": "api.target.com",
+  "path": "/v1/profile",
+  "headers": [
+    {"name": "Host", "value": "api.target.com"},
+    {"name": "Authorization", "value": "Bearer §session_token§"}
+  ],
+  "positions": [
+    {"path": "headers[1].value", "payloads": ["Bearer §session_token§", "Bearer §session_token§ "]}
+  ],
+  "pre_macro":  {"name": "login-once", "scope": "job"},
+  "post_macro": {"name": "audit-summary", "scope": "job"}
+}
+```
+`pre_macro` (scope=job) runs once before the variant loop, extracts `session_token` into the job-scoped KV Store; every variant then sees `§session_token§` in the templated `Authorization` header. `post_macro` (scope=job) runs once after the loop completes — it can summarise the run via its own template against the job-scoped KV Store.
