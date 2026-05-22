@@ -48,9 +48,6 @@ func ContextWithUpstreamProxyOverride(ctx context.Context, u *url.URL) context.C
 // carries no override and the caller falls back to per-listener /
 // global resolution.
 func UpstreamProxyOverrideFromContext(ctx context.Context) (u *url.URL, present bool) {
-	if ctx == nil {
-		return nil, false
-	}
 	v, ok := ctx.Value(upstreamProxyOverrideCtxKey{}).(*upstreamProxyOverrideValue)
 	if !ok {
 		return nil, false

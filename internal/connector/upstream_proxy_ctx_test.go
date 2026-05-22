@@ -46,14 +46,6 @@ func TestUpstreamProxyOverride_ExplicitNilIsDirectDial(t *testing.T) {
 	}
 }
 
-func TestUpstreamProxyOverride_NilCtxSafe(t *testing.T) {
-	//nolint:staticcheck // intentional: helper must not panic on nil ctx
-	got, present := UpstreamProxyOverrideFromContext(nil)
-	if present || got != nil {
-		t.Fatalf("expected (nil, false) for nil ctx, got (%v, %v)", got, present)
-	}
-}
-
 // TestBuildConfig_EffectiveUpstreamProxyForCtx_PerFlowOverride verifies the
 // resolution priority: ctx override (USK residential-proxy rotation) wins
 // over per-listener (USK-826) over global (USK-734) over boot-time.
