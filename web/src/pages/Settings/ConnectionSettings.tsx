@@ -5,6 +5,7 @@ import type { StatusResult } from "../../lib/mcp/types.js";
 import {
   UpstreamProxyEditor,
   type UpstreamProxyEditorValue,
+  redactUpstreamProxyURL,
   validateUpstreamProxyPayload,
 } from "./UpstreamProxyEditor.js";
 
@@ -117,10 +118,15 @@ export function ConnectionSettings({ status, onRefresh }: ConnectionSettingsProp
         upstream_proxy: payload || "",
       });
 
+      // Redact the URL before echoing in the toast to avoid leaking
+      // userinfo credentials to the UI surface (CWE-200). Mirrors the
+      // backend `connector.RedactProxyURL` behaviour for the read-back
+      // path. The rotation summary deliberately does not echo the
+      // template (which may also embed secrets).
       const summary =
         typeof payload === "string"
           ? payload
-            ? `Upstream proxy set to ${payload}`
+            ? `Upstream proxy set to ${redactUpstreamProxyURL(payload)}`
             : "Upstream proxy disabled"
           : `Rotation enabled (${"url_template" in payload && payload.url_template ? "template set" : "no template"})`;
 

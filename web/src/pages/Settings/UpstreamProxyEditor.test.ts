@@ -17,6 +17,7 @@ import type {
 } from "../../lib/mcp/types.js";
 import {
   buildUpstreamProxyPayload,
+  redactUpstreamProxyURL,
   validateUpstreamProxyPayload,
   type UpstreamProxyEditorValue,
 } from "./UpstreamProxyEditor.js";
@@ -229,5 +230,123 @@ describe("payload-shape parity with the wire schema (USK-959)", () => {
     // hits Save with an empty Simple URL field.
     const out = buildUpstreamProxyPayload("simple", "   ", "", "per_request");
     expect(out).toBe("");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// isRotationUpstream — tightened predicate covers full rotation shape
+// ---------------------------------------------------------------------------
+
+describe("isRotationUpstream (tightened predicate)", () => {
+  it("returns false when rotation is missing", () => {
+    expect(isRotationUpstream({ url_template: "http://x" })).toBe(false);
+  });
+
+  it("returns false when rotation is null", () => {
+    expect(
+      isRotationUpstream({ url_template: "http://x", rotation: null }),
+    ).toBe(false);
+  });
+
+  it("returns false when rotation has no policy", () => {
+    expect(
+      isRotationUpstream({ url_template: "http://x", rotation: {} }),
+    ).toBe(false);
+  });
+
+  it("returns false when policy is not one of the four allowed values", () => {
+    expect(
+      isRotationUpstream({
+        url_template: "http://x",
+        rotation: { policy: "round_robin" },
+      }),
+    ).toBe(false);
+  });
+
+  it("returns true for all four documented policy values", () => {
+    const policies: UpstreamProxyPolicy[] = [
+      "per_request",
+      "per_connection",
+      "per_target_host",
+      "sticky",
+    ];
+    for (const p of policies) {
+      expect(
+        isRotationUpstream({ url_template: "http://x", rotation: { policy: p } }),
+      ).toBe(true);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// validateUpstreamProxyPayload — empty-template warning (UX gap fix)
+// ---------------------------------------------------------------------------
+
+describe("validateUpstreamProxyPayload (empty-template rotation)", () => {
+  it("warns when rotation form has an empty url_template", () => {
+    // Synthesises the editor's emit-with-empty-template case — the
+    // type guard returns false here (length === 0), so the catch-all
+    // branch must surface the warning. Cast through unknown because
+    // `UpstreamProxyEditorValue` would normally narrow to the
+    // non-empty rotation form.
+    const v = {
+      url_template: "",
+      rotation: { policy: "per_request" as UpstreamProxyPolicy },
+    } as unknown as UpstreamProxyEditorValue;
+    const w = validateUpstreamProxyPayload(v);
+    expect(w.some((m) => /empty|reject/i.test(m))).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// redactUpstreamProxyURL — CWE-200 userinfo masking
+// ---------------------------------------------------------------------------
+
+describe("redactUpstreamProxyURL", () => {
+  it("returns the empty string unchanged", () => {
+    expect(redactUpstreamProxyURL("")).toBe("");
+  });
+
+  it("returns a URL without userinfo unchanged", () => {
+    expect(redactUpstreamProxyURL("http://proxy:3128")).toBe("http://proxy:3128");
+  });
+
+  it("masks the password half when user:password is present", () => {
+    const out = redactUpstreamProxyURL("http://alice:s3cret@proxy:3128");
+    expect(out).toMatch(/^http:\/\/alice:xxxxx@proxy:3128\/?$/);
+    expect(out).not.toContain("s3cret");
+  });
+
+  it("masks the entire userinfo when only a bare token is present", () => {
+    const out = redactUpstreamProxyURL("http://API-KEY@proxy:3128");
+    expect(out).toMatch(/^http:\/\/xxxxx@proxy:3128\/?$/);
+    expect(out).not.toContain("API-KEY");
+  });
+
+  it("masks credentials in socks5 URLs", () => {
+    const out = redactUpstreamProxyURL("socks5://u:p@proxy:1080");
+    expect(out).not.toContain("p@");
+    expect(out).toContain("xxxxx");
+  });
+
+  it("falls back to lexical redaction for template URLs (URL parser would reject §)", () => {
+    // `§` is not a valid userinfo character per WHATWG URL parser,
+    // forcing the lexical fallback path.
+    const out = redactUpstreamProxyURL("http://session-§__nonce§:secret@proxy:8080");
+    expect(out).not.toContain("secret");
+    expect(out).toContain("xxxxx");
+    expect(out).toContain("session-§__nonce§");
+  });
+
+  it("lexical fallback masks whole userinfo when no colon present", () => {
+    // Force the lexical path with a template-bearing URL (§ triggers
+    // the lexical branch). No colon inside userinfo — the entire
+    // userinfo region is masked.
+    const out = redactUpstreamProxyURL("http://§__nonce§-token@proxy:8080");
+    expect(out).toBe("http://xxxxx@proxy:8080");
+  });
+
+  it("returns the input unchanged when there is no scheme separator", () => {
+    expect(redactUpstreamProxyURL("not-a-url")).toBe("not-a-url");
   });
 });

@@ -230,10 +230,23 @@ export type UpstreamProxyRotationInput =
       rotation: { policy: UpstreamProxyPolicy };
     };
 
+const ROTATION_POLICIES: readonly UpstreamProxyPolicy[] = [
+  "per_request",
+  "per_connection",
+  "per_target_host",
+  "sticky",
+] as const;
+
 /**
  * Type guard for the rotation variant of `UpstreamProxyRotationInput`.
- * Returns true only when the value is an object carrying `url_template`
- * (the rotation form). Literal-URL forms (string or `{ url }`) return false.
+ * Returns true only when the value is an object carrying a non-empty
+ * `url_template` AND a well-formed `rotation: { policy }` sub-object
+ * whose `policy` is one of the four documented values. Literal-URL
+ * forms (string or `{ url }`) return false.
+ *
+ * The runtime check is intentionally as tight as the return-type
+ * predicate so callers may safely access `value.rotation.policy`
+ * after the guard returns true (CWE-704 / defensive type narrowing).
  */
 export function isRotationUpstream(
   v: unknown,
@@ -242,7 +255,17 @@ export function isRotationUpstream(
     return false;
   }
   const o = v as { url_template?: unknown; rotation?: unknown };
-  return typeof o.url_template === "string" && o.url_template.length > 0;
+  if (typeof o.url_template !== "string" || o.url_template.length === 0) {
+    return false;
+  }
+  if (o.rotation === null || typeof o.rotation !== "object") {
+    return false;
+  }
+  const rot = o.rotation as { policy?: unknown };
+  return (
+    typeof rot.policy === "string" &&
+    (ROTATION_POLICIES as readonly string[]).includes(rot.policy)
+  );
 }
 
 /** Parameters for the configure tool. */

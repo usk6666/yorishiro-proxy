@@ -33,6 +33,60 @@ const ANY_MACRO_RE = /§[^§]+§/;
 const PROXY_SCHEME_RE = /^(?:https?|socks5):\/\//;
 
 /**
+ * Mask the credential portion of userinfo in a proxy URL when surfacing
+ * the URL in UI toasts / status text. Mirrors the backend
+ * `connector.RedactProxyURL` semantics (CWE-200): a `user:password`
+ * userinfo keeps the username visible and masks the password; a single
+ * bare token in userinfo (often a session key) is masked entirely.
+ * Falls back to lexical substitution when the URL is not parsable by
+ * `URL` (e.g., when it contains `§macro§` characters).
+ */
+export function redactUpstreamProxyURL(raw: string): string {
+  if (raw === "") {
+    return raw;
+  }
+  // Macro-bearing template URLs (§…§) bypass the structured URL parser
+  // path: the WHATWG URL parser percent-encodes the section sign,
+  // mutating the template shape. The lexical path preserves the
+  // template bytes exactly while masking the userinfo region.
+  if (!raw.includes("§")) {
+    try {
+      const u = new URL(raw);
+      if (!u.username && !u.password) {
+        return raw;
+      }
+      if (u.password) {
+        u.password = "xxxxx";
+        return u.toString();
+      }
+      // Single-token userinfo (no `:password` colon) — mask the whole
+      // thing. URL.toString preserves the no-password shape.
+      u.username = "xxxxx";
+      return u.toString();
+    } catch {
+      // Fall through to lexical path.
+    }
+  }
+  // Lexical fallback. Mirrors the Go fallback path: scan from the
+  // scheme separator to the first `@`, masking the password half
+  // when a `:` exists inside the userinfo region.
+  const schemeIdx = raw.indexOf("://");
+  if (schemeIdx < 0) {
+    return raw;
+  }
+  const userinfoStart = schemeIdx + 3;
+  const atIdx = raw.indexOf("@", userinfoStart);
+  if (atIdx < 0) {
+    return raw;
+  }
+  const colonIdx = raw.indexOf(":", userinfoStart);
+  if (colonIdx < 0 || colonIdx >= atIdx) {
+    return raw.slice(0, userinfoStart) + "xxxxx" + raw.slice(atIdx);
+  }
+  return raw.slice(0, colonIdx + 1) + "xxxxx" + raw.slice(atIdx);
+}
+
+/**
  * Pure helper used by the editor (and exercised by tests) to translate
  * the local component state into the polymorphic wire value. Kept
  * stand-alone so unit tests can exercise it without rendering React.
@@ -88,6 +142,22 @@ export function validateUpstreamProxyPayload(
         `Rotation template has no §var§ macro (e.g. ${NONCE_MACRO}); each resolution will return the same URL`,
       );
     }
+    return warnings;
+  }
+
+  // Rotation-shape object with an empty url_template. `isRotationUpstream`
+  // requires `url_template.length > 0`, so the editor's rotation-mode
+  // emit-with-empty-template case lands here. Backend will reject with
+  // "one of url or url_template is required", but warn-on-save should
+  // surface the issue before the round-trip.
+  if (
+    typeof value === "object" &&
+    value !== null &&
+    "url_template" in value &&
+    typeof (value as { url_template?: unknown }).url_template === "string" &&
+    (value as { url_template: string }).url_template.length === 0
+  ) {
+    warnings.push("Rotation template is empty; backend will reject this save");
   }
 
   return warnings;
