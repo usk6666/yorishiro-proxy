@@ -36,7 +36,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"regexp"
 	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -97,95 +96,8 @@ type fuzzHTTPInput struct {
 	// before per-iteration reserved keys are seeded — so pre=job extracts
 	// flow into every variant's request templating. mix-scope (pre and
 	// post with independent scope) is supported.
-	PreMacro  *fuzzHTTPMacroConfig `json:"pre_macro,omitempty" jsonschema:"pre macro hook executed before a variant's send. scope=iteration (default; fires once per variant) | job (fires once before the variant loop; extracts shared with every variant). on_error: skip|abort|continue (default skip). For scope=job, skip returns a successful job result with completed_variants=0 and stopped_reason set"`
-	PostMacro *fuzzHTTPMacroConfig `json:"post_macro,omitempty" jsonschema:"post macro hook executed after a variant's response. scope=iteration (default; fires once per variant against __response_* reserved keys) | job (fires once after the variant loop completes; no __response_* keys, since there is no single response). on_error: skip|abort|continue (default skip). For scope=iteration, pass_response is forced on so __response_status / __response_body / __response_headers__<lower(name)>__ are visible to the macro's template expansion"`
-}
-
-// fuzzHTTPMacroConfig is the pre/post macro hook configuration for
-// fuzz_http (USK-960 per-iteration, USK-961 per-job + mix-scope).
-//
-// scope="iteration" (default) fires once per variant; the per-iteration
-// KV Store is allocated fresh in the variant loop with reserved keys
-// §__iteration§ / §__nonce§ seeded and (for post) reserved __response_*
-// keys injected before the macro runs.
-//
-// scope="job" fires exactly once outside the variant loop against a
-// separate job-scoped KV Store that is merged into each iteration's
-// store before per-iteration reserved keys are seeded — so pre=job
-// extracts flow into every variant's request templating, and post=job
-// summarises after the loop completes. Reserved keys (§__iteration§,
-// §__nonce§, __response_*) are NOT visible to job-scope macros (the
-// loop has not started for pre-job, and is over with discarded per-
-// iteration kvStores for post-job). run_interval is rejected when
-// scope="job" (single-fire by construction).
-type fuzzHTTPMacroConfig struct {
-	// Name is the stored macro name (defined via macro.define).
-	Name string `json:"name" jsonschema:"REQUIRED stored macro name"`
-
-	// Scope: "iteration" (default) or "job". Mix-scope is supported —
-	// pre and post may independently select their scope. Empty defaults
-	// to "iteration".
-	Scope string `json:"scope,omitempty" jsonschema:"iteration (default; fires once per variant) | job (fires once outside the variant loop; KV Store is shared across the whole job and merged into each iteration's per-variant store)"`
-
-	// OnError selects the iteration's behaviour when the hook errors.
-	//   "skip"     (default) — record the iteration as skipped, do not send
-	//                          the fuzz request, do not run the post hook,
-	//                          continue to the next variant.
-	//   "abort"    — abort the fuzz run with an error.
-	//   "continue" — log the error, persist a fuzz_macro_results row, and
-	//                continue to the variant's send (templates may carry
-	//                unresolved §var§ literals — recorded in
-	//                fuzz_results.error).
-	OnError string `json:"on_error,omitempty" jsonschema:"skip (default) | abort | continue"`
-
-	// Vars is a static map of kvStore overrides injected before the macro
-	// runs. Keys with the reserved prefix ("__") are silently dropped at
-	// injection time (matches internal/job/job.go:mergeKVStore precedent)
-	// so a Vars entry cannot shadow runtime-populated reserved keys such
-	// as __iteration / __nonce / __response_* (USK-981 Q2).
-	//
-	// scope="iteration": Vars is injected into every variant's per-
-	// iteration kvStore after the job-store copy and before
-	// SeedIterationKV — so the operator's static overrides are visible to
-	// §var§ template expansion on the variant request but cannot shadow
-	// per-iteration reserved keys.
-	//
-	// scope="job": Vars is injected once into the job kvStore at job
-	// start. The job-store is then naturally merged into every per-
-	// iteration kvStore via the existing copy at iteration setup.
-	Vars map[string]string `json:"vars,omitempty" jsonschema:"static kvStore overrides injected before the macro runs. Keys with the '__' reserved prefix are silently dropped (USK-981)"`
-
-	// RunInterval gates when the hook fires across iterations. Only valid
-	// for scope="iteration" — scope="job" hooks fire exactly once by
-	// construction and the validator rejects scope="job" + non-empty
-	// RunInterval (USK-961 Q10).
-	//
-	// pre_macro legal values: "always" (default) | "once" | "every_n" |
-	// "on_error". post_macro legal values: "always" (default) |
-	// "on_status" | "on_match". Pre and post have disjoint legal sets;
-	// validation runs per-direction via the underlying hooks.go
-	// validators (USK-981 Q7).
-	RunInterval string `json:"run_interval,omitempty" jsonschema:"hook firing cadence (scope=iteration only). pre_macro: always (default) | once | every_n | on_error. post_macro: always (default) | on_status | on_match. Rejected when scope='job'"`
-
-	// N is the interval count for RunInterval="every_n". Required when
-	// RunInterval="every_n"; ignored otherwise.
-	N int `json:"n,omitempty" jsonschema:"iteration cadence for RunInterval='every_n' (>= 1)"`
-
-	// StatusCodes is the list of response status codes that gate
-	// post_macro firing for RunInterval="on_status". Required when
-	// RunInterval="on_status"; ignored otherwise. post_macro only.
-	StatusCodes []int `json:"status_codes,omitempty" jsonschema:"response status codes for post_macro RunInterval='on_status'"`
-
-	// MatchPattern is the regex pattern matched against the response body
-	// for post_macro RunInterval="on_match". Required when
-	// RunInterval="on_match"; ignored otherwise. post_macro only.
-	MatchPattern string `json:"match_pattern,omitempty" jsonschema:"response body regex pattern for post_macro RunInterval='on_match'"`
-
-	// compiledPattern is the pre-compiled MatchPattern, set during
-	// validation so the hook executor reuses it across iterations rather
-	// than recompiling. Not serialised — internal to the validator/
-	// executor handoff. Matches the precedent on hookConfig.compiledPattern.
-	compiledPattern *regexp.Regexp `json:"-"`
+	PreMacro  *MacroConfig `json:"pre_macro,omitempty" jsonschema:"pre macro hook executed before a variant's send. scope=iteration (default; fires once per variant) | job (fires once before the variant loop; extracts shared with every variant). on_error: skip|abort|continue (default skip). For scope=job, skip returns a successful job result with completed_variants=0 and stopped_reason set"`
+	PostMacro *MacroConfig `json:"post_macro,omitempty" jsonschema:"post macro hook executed after a variant's response. scope=iteration (default; fires once per variant against __response_* reserved keys) | job (fires once after the variant loop completes; no __response_* keys, since there is no single response). on_error: skip|abort|continue (default skip). For scope=iteration, pass_response is forced on so __response_status / __response_body / __response_headers__<lower(name)>__ are visible to the macro's template expansion"`
 }
 
 // fuzzHTTPPosition describes one fuzz position. Path is a typed
