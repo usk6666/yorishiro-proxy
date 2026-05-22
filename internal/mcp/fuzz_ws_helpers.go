@@ -200,12 +200,57 @@ func (s *Server) buildFuzzWSPlan(ctx context.Context, input *fuzzWSInput) (*fuzz
 // populated for both successful and error variants. Store-write
 // failures are non-fatal (slog.Warn + continue) — the wire data is on
 // disk via RecordStep and remains the source of truth.
+//
+// USK-984: per-iteration and per-job macro hooks plumb through the
+// shared fuzzWSVariantLoop. The pure refactor preserves the prior
+// behaviour when preMacro / postMacro are nil — the only structural
+// change is moving the inline loop body into methods on
+// *fuzzWSVariantLoop so the macro wiring sits where fuzz_http's does.
 func (s *Server) runFuzzWSVariants(ctx context.Context, plan *fuzzWSPlan, timeout time.Duration, stopOnClose bool, tag, fuzzID string) ([]fuzzWSVariantRow, int, string, error) {
-	pipe := s.buildFuzzWSPipeline(plan.encoders)
+	loop := buildFuzzWSVariantLoop(s, plan, timeout, stopOnClose, tag, fuzzID)
+	completedNormally, earlyStopReason, retErr := loop.runVariantLoop(ctx)
+	if retErr != nil {
+		return loop.rows, loop.completed, "", retErr
+	}
+	_ = completedNormally // unused without macro hooks; USK-984 wires post-job in commit 2
+	return loop.rows, loop.completed, earlyStopReason, nil
+}
 
-	rows := make([]fuzzWSVariantRow, 0, plan.totalVariants)
-	indices := make([]int, len(plan.positions))
-	completed := 0
+// fuzzWSVariantLoop bundles the per-run state shared across iterations
+// so the inner loop body (runOne) is a method on a small struct instead
+// of an N-argument free function. Mirrors fuzzHTTPVariantLoop in
+// fuzz_http_helpers.go; the macro hook wiring in commit 2 (USK-984) plugs
+// into the same seam.
+type fuzzWSVariantLoop struct {
+	s             *Server
+	plan          *fuzzWSPlan
+	timeout       time.Duration
+	stopOnClose   bool
+	tag           string
+	fuzzID        string
+	pipe          *pipeline.Pipeline
+	rateLimitHost string
+
+	rows      []fuzzWSVariantRow
+	indices   []int
+	completed int
+}
+
+// buildFuzzWSVariantLoop assembles the per-run state container shared by
+// all variants. Split out of runFuzzWSVariants to keep that function
+// below the gocyclo threshold; the construction logic is mechanical
+// (mirror of buildFuzzHTTPVariantLoop) and has no branch fan-out outside
+// the rate-limit host parse.
+func buildFuzzWSVariantLoop(s *Server, plan *fuzzWSPlan, timeout time.Duration, stopOnClose bool, tag, fuzzID string) *fuzzWSVariantLoop {
+	loop := &fuzzWSVariantLoop{
+		s:           s,
+		plan:        plan,
+		timeout:     timeout,
+		stopOnClose: stopOnClose,
+		tag:         tag,
+		fuzzID:      fuzzID,
+	}
+	loop.pipe = s.buildFuzzWSPipeline(plan.encoders)
 
 	// Strip the port to align rate-limit bucket keys with the live data path
 	// (connector/connect_handler.go, http1_forward_handler.go, socks5.go) and
@@ -216,46 +261,90 @@ func (s *Server) runFuzzWSVariants(ctx context.Context, plan *fuzzWSPlan, timeou
 	if err != nil {
 		rateLimitHost = plan.base.upgradeURL.Host
 	}
+	loop.rateLimitHost = rateLimitHost
 
-	for variantIdx := 0; variantIdx < plan.totalVariants; variantIdx++ {
-		select {
-		case <-ctx.Done():
-			return rows, completed, fmt.Sprintf("ctx cancelled: %v", ctx.Err()), nil
-		default:
+	loop.rows = make([]fuzzWSVariantRow, 0, plan.totalVariants)
+	loop.indices = make([]int, len(plan.positions))
+	return loop
+}
+
+// runVariantLoop drives the variant loop body and returns
+// (completedNormally, earlyStopReason, retErr). completedNormally is
+// true when the loop reached the post-job firing path (natural
+// exhaustion or stop_on_close); it is false on ctx cancel. retErr
+// non-nil signals an unrecoverable abort and post-job MUST NOT fire.
+//
+// Mirrors fuzzHTTPVariantLoop.runVariantLoop — ctx-cancel detection
+// bubbles up through retErr wrapped with %w so errors.Is(retErr,
+// context.Canceled) drives the post-job gate.
+func (l *fuzzWSVariantLoop) runVariantLoop(ctx context.Context) (bool, string, error) {
+	for variantIdx := 0; variantIdx < l.plan.totalVariants; variantIdx++ {
+		stop, retErr := l.runOne(ctx, variantIdx)
+		if retErr != nil {
+			if errors.Is(retErr, context.Canceled) || errors.Is(retErr, context.DeadlineExceeded) {
+				// post-job does NOT fire on ctx cancel. Surface the cancel
+				// reason via stopped_reason for parity with the pre-USK-984
+				// string-sentinel path; do NOT propagate as retErr so the
+				// caller still finalizes the fuzz_jobs row normally.
+				return false, fmt.Sprintf("ctx cancelled: %v", retErr), nil
+			}
+			// pre-iteration abort or other unrecoverable error.
+			return false, "", retErr
 		}
-
-		// TODO(USK-817 sibling: budget counter, P5-19)
-		if err := s.waitRateLimit(ctx, rateLimitHost); err != nil {
-			return rows, completed, fmt.Sprintf("rate limit: %v", err), nil
+		if stop == "" {
+			continue
 		}
-
-		payloads, err := decodeFuzzWSPayloads(plan.positions, indices)
-		if err != nil {
-			return nil, completed, "", fmt.Errorf("variant %d: decode payloads: %w", variantIdx, err)
-		}
-
-		variantStart := time.Now()
-		row, gotClose, runErr := s.runFuzzWSSingleVariant(ctx, plan, pipe, timeout, variantIdx, payloads, tag)
-		row.DurationMs = time.Since(variantStart).Milliseconds()
-		if runErr != nil {
-			row.Error = runErr.Error()
-		}
-		rows = append(rows, row)
-		completed++
-
-		// USK-831: persist per-variant fuzz_results row so the aggregation
-		// view (`query fuzz_results { fuzz_id }` + USK-278 outliers_only)
-		// is populated. Save failures are non-fatal — wire data on disk via
-		// RecordStep is the source of truth.
-		s.saveFuzzWSResult(ctx, fuzzID, variantIdx, row, payloads)
-
-		nextIndicesWS(indices, plan.positions)
-
-		if stopOnClose && gotClose {
-			return rows, completed, fmt.Sprintf("stop_on_close: variant %d received Close frame", variantIdx), nil
-		}
+		// stop_on_close reaches here.
+		return true, stop, nil
 	}
-	return rows, completed, "", nil
+	return true, "", nil
+}
+
+// runOne executes a single iteration of the variant loop. Returns
+// (stopReason, retErr): stopReason "" means continue; non-empty means
+// stop with that reason (e.g., stop_on_close); retErr propagates an
+// abort up the call stack. ctx cancel is surfaced via retErr wrapped
+// with %w so the caller can distinguish via errors.Is(context.Canceled)
+// / errors.Is(context.DeadlineExceeded) instead of string-matching the
+// stop reason.
+func (l *fuzzWSVariantLoop) runOne(ctx context.Context, variantIdx int) (string, error) {
+	select {
+	case <-ctx.Done():
+		return "", fmt.Errorf("variant %d: %w", variantIdx, ctx.Err())
+	default:
+	}
+
+	// TODO(USK-817 sibling: budget counter, P5-19)
+	if err := l.s.waitRateLimit(ctx, l.rateLimitHost); err != nil {
+		return fmt.Sprintf("rate limit: %v", err), nil
+	}
+
+	payloads, err := decodeFuzzWSPayloads(l.plan.positions, l.indices)
+	if err != nil {
+		return "", fmt.Errorf("variant %d: decode payloads: %w", variantIdx, err)
+	}
+
+	variantStart := time.Now()
+	row, gotClose, runErr := l.s.runFuzzWSSingleVariant(ctx, l.plan, l.pipe, l.timeout, variantIdx, payloads, l.tag)
+	row.DurationMs = time.Since(variantStart).Milliseconds()
+	if runErr != nil {
+		row.Error = runErr.Error()
+	}
+	l.rows = append(l.rows, row)
+	l.completed++
+
+	// USK-831: persist per-variant fuzz_results row so the aggregation
+	// view (`query fuzz_results { fuzz_id }` + USK-278 outliers_only)
+	// is populated. Save failures are non-fatal — wire data on disk via
+	// RecordStep is the source of truth.
+	l.s.saveFuzzWSResult(ctx, l.fuzzID, variantIdx, row, payloads)
+
+	nextIndicesWS(l.indices, l.plan.positions)
+
+	if l.stopOnClose && gotClose {
+		return fmt.Sprintf("stop_on_close: variant %d received Close frame", variantIdx), nil
+	}
+	return "", nil
 }
 
 // fuzzWSJobConfig is the JSON payload persisted to fuzz_jobs.config.
