@@ -45,6 +45,46 @@ When `true`, abort the remaining variants once any variant fails (network error,
 ### timeout_ms (integer, optional)
 Per-VARIANT timeout in milliseconds. Default `30000`.
 
+### pre_macro / post_macro (object, optional)
+
+Pre and post macro hooks dispatched around variants by name (USK-986). Both fields take the same shape as the `fuzz_http` siblings (USK-960 / USK-961 / USK-981):
+
+- **name** (string, REQUIRED): the stored macro name (defined via the `macro` tool's `define_macro` action).
+- **scope** (string, optional): `"iteration"` (default) or `"job"`. See "Macro hook scopes" below.
+- **on_error** (string, optional): `"skip"` (default) | `"abort"` | `"continue"`.
+- **vars** (object string→string, optional): static kvStore overrides injected before the macro runs. Keys with the reserved prefix (`__`) are **silently dropped** so a `vars` entry cannot shadow runtime-populated keys.
+- **run_interval** (string, optional): hook firing cadence — **`scope="iteration"` only**.
+  - pre_macro legal values: `"always"` (default) | `"once"` | `"every_n"` | `"on_error"`.
+  - post_macro legal values: `"always"` (default) | `"on_match"`.
+- **n** (integer, optional): companion to pre_macro `run_interval="every_n"`. Required when `run_interval="every_n"`; must be ≥ 1.
+- **match_pattern** (string, optional): companion to post_macro `run_interval="on_match"`. The buffer matched is `__response_body` (received bytes, 64 KiB cap).
+
+#### Adaptor note — raw has no L7 status
+
+Raw is the "+1 adaptor" in the typed-fuzz macro family. Raw is a byte stream, not a request/response transaction — it has no L7 status code and no header set. The following keys / values are therefore raw-specific:
+
+| Reserved key | Behaviour on fuzz_raw |
+|--------------|-----------------------|
+| `__response_body` | YES — received bytes, capped at 64 KiB (independent of the row's 16 MiB `truncated` cap). |
+| `__response_chunks` | YES — receive-loop envelope count, base-10 decimal string. |
+| `__response_truncated` | YES — `"true"` if the receive loop hit the 16 MiB response cap, `"false"` otherwise. |
+| `__response_status` | **NOT injected** (raw has no L7 status — MITM principle: do not invent hypothetical surface). |
+| `__response_headers__<lower(name)>__` | **NOT injected** (raw has no headers). |
+
+And the corresponding `run_interval` adjustment:
+
+- `run_interval="on_status"` is **REJECTED at MCP-tool input parse** with the verbatim error message `fuzz_raw: post_macro run_interval="on_status" not supported (raw has no L7 status)` (and the matching pre-side `fuzz_raw: pre_macro run_interval="on_status" not supported (raw has no L7 status)`).
+- Use `run_interval="on_match"` with a `match_pattern` regex against `__response_body` to gate post_macro on response-byte content.
+
+#### Macro hook scopes
+
+| Scope | Pre fires | Post fires | KV Store lifetime | `__response_*` keys | `§__iteration§` / `§__nonce§` |
+|-------|-----------|------------|-------------------|---------------------|-------------------------------|
+| `iteration` (default) | Before each variant's dial | After each variant's receive loop (EOF or response cap) | Fresh per variant | Visible to post (raw subset: body/chunks/truncated) | Seeded each iteration |
+| `job` | Once before the variant loop | Once after the variant loop (incl. `stop_on_error` exit) | Shared across the whole job | NOT visible | NOT seeded |
+
+Mix-scope is supported — `pre_macro` and `post_macro` may pick their scope independently. `run_interval` paired with `scope="job"` is **rejected at MCP-tool input parse** (job-scope hooks fire exactly once by construction).
+
 ## Result fields
 
 - `fuzz_id` (string, UUID) — primary key of the `fuzz_jobs` row created for this run. Chain with `query { resource: "fuzz_results", filter: { fuzz_id: "...", outliers_only: true } }` to surface outlier variants without re-running the fuzz job (USK-837 + USK-278, parity with USK-827 for `fuzz_http`).

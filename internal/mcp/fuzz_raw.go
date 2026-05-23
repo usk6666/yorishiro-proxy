@@ -86,6 +86,24 @@ type fuzzRawInput struct {
 
 	Positions   []fuzzRawPosition `json:"positions" jsonschema:"REQUIRED ordered position list; each describes a typed path into the payload and the payloads to substitute"`
 	StopOnError bool              `json:"stop_on_error,omitempty" jsonschema:"when true, abort the remaining variants once any variant fails (network error, timeout, or pipeline drop)"`
+
+	// PreMacro / PostMacro: pre/post macro hooks (USK-986; sibling of
+	// USK-960 / USK-961 / USK-983 for fuzz_http). scope="iteration"
+	// (default) shares a per-variant KV Store with the variant's pipeline
+	// so reserved keys §__iteration§ / §__nonce§, pre extracts, and (for
+	// post) the raw-specific __response_* keys (__response_body /
+	// __response_chunks / __response_truncated) are visible to template
+	// expansion. scope="job" runs the hook exactly once outside the
+	// variant loop against a job-scoped KV Store that is merged into
+	// each iteration's store before per-iteration reserved keys are
+	// seeded.
+	//
+	// Raw-specific constraint: post_macro run_interval="on_status" is
+	// REJECTED at validation because raw has no L7 status concept (only
+	// a byte stream and chunk count). Use run_interval="on_match"
+	// against the received bytes via __response_body instead.
+	PreMacro  *MacroConfig `json:"pre_macro,omitempty" jsonschema:"pre macro hook executed before a variant's dial. scope=iteration (default; fires once per variant) | job (fires once before the variant loop; extracts shared with every variant). on_error: skip|abort|continue (default skip). run_interval='on_status' is rejected (raw has no L7 status)"`
+	PostMacro *MacroConfig `json:"post_macro,omitempty" jsonschema:"post macro hook executed after a variant's receive loop ends (EOF or response cap). scope=iteration (default; fires once per variant against __response_body / __response_chunks / __response_truncated reserved keys — no __response_status / __response_headers, raw has no L7 status concept) | job (fires once after the variant loop completes; no __response_* keys). on_error: skip|abort|continue (default skip). run_interval='on_status' is rejected; use run_interval='on_match' against __response_body bytes"`
 }
 
 // fuzzRawPosition describes one fuzz position. Path is one of:
@@ -147,7 +165,10 @@ func (s *Server) registerFuzzRaw() {
 			"flow_id is OPTIONAL; when empty, override_bytes or a 'payload' position must supply the variant bytes. " +
 			"The cartesian product of positions yields the variant sequence (capped at 1000 per call). " +
 			"Wire bytes are NEVER normalized — they reach the wire verbatim. " +
-			"stop_on_error aborts on the first failure. See yorishiro://help/fuzz_raw.",
+			"stop_on_error aborts on the first failure. " +
+			"pre_macro / post_macro hooks dispatch around each variant (scope=iteration) or once per job (scope=job); " +
+			"raw has no L7 status concept so post_macro run_interval='on_status' is rejected — use 'on_match' against __response_body. " +
+			"See yorishiro://help/fuzz_raw.",
 	}, s.handleFuzzRaw)
 }
 
@@ -198,7 +219,7 @@ func (s *Server) handleFuzzRaw(ctx context.Context, _ *gomcp.CallToolRequest, in
 	// row existing. Mirrors fuzz_http (USK-827) precedent.
 	s.saveFuzzRawJob(context.Background(), fuzzID, &input, plan)
 
-	rows, completed, stopReason, runErr := s.runFuzzRawVariants(ctx, plan, timeout, input.StopOnError, input.Tag, fuzzID)
+	rows, completed, stopReason, runErr := s.runFuzzRawVariants(ctx, plan, timeout, input.StopOnError, input.Tag, fuzzID, input.PreMacro, input.PostMacro)
 
 	// Use a fresh background ctx so the closing UPDATE always lands,
 	// even on caller-side ctx cancel. The store-write is best-effort:

@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -39,6 +40,19 @@ const (
 	// wire casing — the recorded flow's header list keeps original casing.
 	macroResponseHeaderKeyPrefix = macro.ReservedKeyPrefix + "response_headers" + macro.ReservedKeyPrefix
 	macroResponseHeaderKeySuffix = macro.ReservedKeyPrefix
+
+	// macroResponseChunksKey is the kvStore key receiving the count of
+	// receive-loop envelopes / chunks that materialised the variant's
+	// response. Used by fuzz_raw (USK-986); raw has no L7 status concept
+	// but the chunk count is a useful shape diagnostic for post_macro
+	// templates. Value is the base-10 decimal string of the chunk count.
+	macroResponseChunksKey = macro.ReservedKeyPrefix + "response_chunks"
+
+	// macroResponseTruncatedKey is the kvStore key receiving "true" or
+	// "false" depending on whether the variant's receive loop hit the
+	// response cap (maxResendRawResponse, 16 MiB) before EOF. Used by
+	// fuzz_raw (USK-986).
+	macroResponseTruncatedKey = macro.ReservedKeyPrefix + "response_truncated"
 )
 
 // maxResponseBodyKVBytes caps the body bytes copied into the kvStore via
@@ -375,6 +389,40 @@ func injectResponseVars(kvStore map[string]string, statusCode int, responseBody 
 		}
 		kvStore[macroResponseHeaderKeyPrefix+strings.ToLower(name)+macroResponseHeaderKeySuffix] = v
 		injected++
+	}
+}
+
+// injectRawResponseVars writes the raw-specific __response_* reserved
+// keys (__response_body / __response_chunks / __response_truncated)
+// into kvStore for consumption by fuzz_raw post_macro template
+// expansion (USK-986). Raw has NO L7 status concept — __response_status
+// and __response_headers* are intentionally NOT injected, matching the
+// MITM principle "do not invent hypothetical surface" (CLAUDE.md). The
+// chunk count and truncated flag are the shape diagnostics raw can
+// honestly surface.
+//
+// Existing reserved-key writes for the same iteration are overwritten
+// so a re-run of post_macro within the same kvStore sees the latest
+// response rather than a stale snapshot — matches injectResponseVars's
+// semantics.
+//
+// CWE-770 caps:
+//   - __response_body is truncated to maxResponseBodyKVBytes (64 KiB).
+//     The variant's wire-recorded response (capped at maxResendRawResponse,
+//     16 MiB, by the receive loop) is independent of this kvStore-side
+//     truncation — the row's row.Truncated flag reflects the 16 MiB cap,
+//     not the 64 KiB kvStore cap.
+func injectRawResponseVars(kvStore map[string]string, responseBody []byte, chunks int, truncated bool) {
+	body := responseBody
+	if len(body) > maxResponseBodyKVBytes {
+		body = body[:maxResponseBodyKVBytes]
+	}
+	kvStore[macroResponseBodyKey] = string(body)
+	kvStore[macroResponseChunksKey] = strconv.Itoa(chunks)
+	if truncated {
+		kvStore[macroResponseTruncatedKey] = "true"
+	} else {
+		kvStore[macroResponseTruncatedKey] = "false"
 	}
 }
 
