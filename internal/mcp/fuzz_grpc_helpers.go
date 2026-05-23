@@ -707,13 +707,18 @@ func (l *fuzzGRPCVariantLoop) runPreMacro(ctx context.Context, variantIdx int, p
 // we pass nil body / nil headers.
 func (l *fuzzGRPCVariantLoop) runPostMacro(ctx context.Context, variantIdx int, row fuzzGRPCVariantRow, body []byte, kvStore map[string]string) {
 	injectGRPCResponseVars(kvStore, row.Status, row.StatusMessage, body, row.ResponseMessageCount, row.ResponseTotalBytes)
-	// Pass nil body / nil headers so the HTTP-shaped injectResponseVars
-	// inside executePostMacro (gated by hookConfig.PassResponse=true)
-	// becomes a no-op for the gRPC-specific keys we just wrote. The
-	// statusCode parameter feeds the on_status RunInterval gate, so we
-	// pass the gRPC status (int(row.Status)) — operators specifying
+	// Pass the captured body to executePostMacro so:
+	//   - shouldRunPostMacro evaluates run_interval="on_match" against
+	//     the real gRPC payload bytes (the help-doc promises this).
+	//   - the HTTP-shape injectResponseVars writes the same body to
+	//     __response_body that injectGRPCResponseVars just wrote
+	//     (idempotent — same key, same bytes).
+	// Pass nil headers because gRPC trailer metadata is exposed via the
+	// recorded Flow under row.StreamID, not the kvStore projection v1.
+	// The statusCode parameter feeds the on_status RunInterval gate, so
+	// we pass the gRPC status (int(row.Status)) — operators specifying
 	// status_codes: [14] get UNAVAILABLE matching.
-	hookErr := l.hookExec.executePostMacro(ctx, int(row.Status), nil, nil, kvStore)
+	hookErr := l.hookExec.executePostMacro(ctx, int(row.Status), body, nil, kvStore)
 	if hookErr != nil {
 		slog.WarnContext(ctx, "fuzz_grpc: post_macro hook error",
 			"fuzz_id", l.fuzzID, "variant", variantIdx, "error", hookErr)

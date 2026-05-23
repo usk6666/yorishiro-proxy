@@ -799,3 +799,144 @@ func TestFuzzGRPCMacro_ResponseStatusInjected_GRPCDomain(t *testing.T) {
 		t.Errorf("post[1] query = %q, want to contain status_message", r1["query"])
 	}
 }
+
+// ---------------------------------------------------------------------------
+// 9. __response_body reserved key carries the gRPC DATA payload (NOT empty)
+// ---------------------------------------------------------------------------
+
+// TestFuzzGRPCMacro_ResponseBodyInjected asserts that the post_macro
+// kvStore receives the concatenated gRPC DATA payload bytes via the
+// __response_body reserved key — i.e. that the HTTP-shape injection
+// inside executePostMacro does NOT clobber the gRPC body to empty.
+// Companion to the help_fuzz_grpc.md contract for __response_body.
+func TestFuzzGRPCMacro_ResponseBodyInjected(t *testing.T) {
+	cs, store := setupFuzzGRPCMacroSession(t)
+
+	// postServer records each post macro's override-body so we can check
+	// the body was templated with the gRPC echo payload.
+	var postRecords atomic.Pointer[[]string]
+	postServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		buf := make([]byte, r.ContentLength)
+		_, _ = r.Body.Read(buf)
+		for {
+			old := postRecords.Load()
+			var cur []string
+			if old != nil {
+				cur = append(cur, *old...)
+			}
+			cur = append(cur, string(buf))
+			if postRecords.CompareAndSwap(old, &cur) {
+				break
+			}
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(postServer.Close)
+
+	upstream := &fuzzGRPCEchoServer{} // default: append "|echo" to req
+	addr, shutdown := startFuzzGRPCUpstream(t, upstream)
+	defer shutdown()
+
+	postFlowID := recordMacroFlow(t, store, "POST", postServer.URL+"/audit", nil, []byte("placeholder"))
+	defineMacroForTest(t, cs, "post-grpc-body", postFlowID, postServer.URL+"/audit", "BODY=§__response_body§", nil)
+
+	out, isErr, errText := callFuzzGRPCMacro(t, cs, map[string]any{
+		"target_addr": addr,
+		"scheme":      "https",
+		"service":     fuzzGRPCServiceName,
+		"method":      fuzzGRPCMethodUnary,
+		"messages": []map[string]any{
+			{"payload": "seed"},
+		},
+		"positions": []map[string]any{
+			{"path": "messages[0].payload", "payloads": []string{"hello"}},
+		},
+		"timeout_ms": 10000,
+		"post_macro": map[string]any{"name": "post-grpc-body"},
+	})
+	if isErr {
+		t.Fatalf("fuzz_grpc returned error: %s", errText)
+	}
+	if out.CompletedVariants != 1 {
+		t.Fatalf("CompletedVariants = %d, want 1", out.CompletedVariants)
+	}
+
+	if postRecords.Load() == nil {
+		t.Fatal("post server received no requests")
+	}
+	pRecs := *postRecords.Load()
+	if len(pRecs) != 1 {
+		t.Fatalf("post server received %d requests, want 1", len(pRecs))
+	}
+	// echo handler returns req+"|echo"; req was "hello" → body should
+	// contain "hello|echo" (the gRPC DATA wire payload is a protobuf-
+	// encoded bytes message wrapping that string, so we look for the
+	// substring inside the templated BODY=... output).
+	if !strings.Contains(pRecs[0], "hello|echo") {
+		t.Errorf("post body = %q, want to contain %q (gRPC __response_body must NOT be clobbered to empty)", pRecs[0], "hello|echo")
+	}
+	// Empty body is the regression signature — the bug this test pins.
+	if pRecs[0] == "BODY=" {
+		t.Errorf("post body = %q, __response_body was clobbered to empty string", pRecs[0])
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 10. post_macro run_interval=on_match fires when gRPC body matches pattern
+// ---------------------------------------------------------------------------
+
+// TestFuzzGRPCMacro_OnMatchPostFiresOnBodyMatch asserts that
+// run_interval=on_match against the gRPC concatenated DATA payload is
+// honoured — the body parameter passed to shouldRunPostMacro must be the
+// captured gRPC body, not nil. Two variants: one whose echo response
+// matches the pattern (post fires), and one whose response does not
+// (post skipped).
+func TestFuzzGRPCMacro_OnMatchPostFiresOnBodyMatch(t *testing.T) {
+	cs, store := setupFuzzGRPCMacroSession(t)
+
+	var postCalls int32
+	postServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&postCalls, 1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(postServer.Close)
+
+	upstream := &fuzzGRPCEchoServer{} // echo appends "|echo"
+	addr, shutdown := startFuzzGRPCUpstream(t, upstream)
+	defer shutdown()
+
+	postFlowID := recordMacroFlow(t, store, "POST", postServer.URL+"/audit", nil, nil)
+	defineMacroForTest(t, cs, "post-grpc-on-match", postFlowID, "", "", nil)
+
+	out, isErr, errText := callFuzzGRPCMacro(t, cs, map[string]any{
+		"target_addr": addr,
+		"scheme":      "https",
+		"service":     fuzzGRPCServiceName,
+		"method":      fuzzGRPCMethodUnary,
+		"messages": []map[string]any{
+			{"payload": "seed"},
+		},
+		// Two variants — only "match-me" payload's response will contain
+		// "match-me|echo" matching the regex; "skip-me" will not.
+		"positions": []map[string]any{
+			{"path": "messages[0].payload", "payloads": []string{"match-me", "skip-me"}},
+		},
+		"timeout_ms": 10000,
+		"post_macro": map[string]any{
+			"name":          "post-grpc-on-match",
+			"run_interval":  "on_match",
+			"match_pattern": "match-me\\|echo",
+		},
+	})
+	if isErr {
+		t.Fatalf("fuzz_grpc returned error: %s", errText)
+	}
+	if out.CompletedVariants != 2 {
+		t.Fatalf("CompletedVariants = %d, want 2", out.CompletedVariants)
+	}
+
+	// Exactly one variant's response matched the pattern → post fires once.
+	if got := atomic.LoadInt32(&postCalls); got != 1 {
+		t.Errorf("post macro called %d times, want 1 (only variant 0 body matches)", got)
+	}
+}
