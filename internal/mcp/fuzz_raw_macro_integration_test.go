@@ -740,6 +740,157 @@ func TestFuzzRawMacro_RunIntervalOnMatch_FiresAgainstResponseBody(t *testing.T) 
 	}
 }
 
+// ---------------------------------------------------------------------------
+//  10. PRE→POST EXTRACT PROPAGATION (regression for runPreMacro-shadowed
+//     kvStore bug discovered in PR #58 review, USK-986). Mirrors fuzz_http's
+//     pre→post extract propagation: pre records an extract, post resolves
+//     §extract§ via the per-iteration kvStore owned by runOne.
+//
+// ---------------------------------------------------------------------------
+//
+// TestFuzzRawMacro_PreExtractVisibleInPostMacro asserts that an extract
+// recorded by pre_macro is visible to post_macro via §var§ expansion.
+//
+// Regression test for the runPreMacro-shadowed-kvStore bug discovered in
+// PR #58 review (USK-986). Before the fix, runPreMacro built its own
+// local kvStore via PrepareIteration and discarded it on return; the
+// kvStore that runPostMacro consumed never received pre's extracts. After
+// the fix, runOne owns the kvStore lifecycle and threads it through both
+// runPreMacro and runPostMacro — mirroring fuzz_http's pattern.
+func TestFuzzRawMacro_PreExtractVisibleInPostMacro(t *testing.T) {
+	cs, store := setupFuzzRawMacroSession(t)
+	addr, _ := startRawEchoServer(t, []byte("RESPDATA"))
+
+	// preServer issues a fresh session_token per request so each
+	// iteration's extract receives a distinct token. If the kvStore is
+	// shadowed, post_macro's §session_token§ template will NOT resolve
+	// and the post server's query will contain the literal §session_token§
+	// instead of the extracted value.
+	var preCalls int32
+	preServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := atomic.AddInt32(&preCalls, 1)
+		fmt.Fprintf(w, `{"session_token":"tok-%d"}`, n)
+	}))
+	t.Cleanup(preServer.Close)
+
+	// postServer records the URL query so we can assert the §session_token§
+	// extract propagated from pre→post via the shared kvStore.
+	var postRecords atomic.Pointer[[]map[string]string]
+	postServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rec := map[string]string{
+			"path":  r.URL.Path,
+			"query": r.URL.RawQuery,
+		}
+		for {
+			old := postRecords.Load()
+			var cur []map[string]string
+			if old != nil {
+				cur = append(cur, *old...)
+			}
+			cur = append(cur, rec)
+			if postRecords.CompareAndSwap(old, &cur) {
+				break
+			}
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(postServer.Close)
+
+	preFlowID := recordMacroFlow(t, store, "POST", preServer.URL+"/login", map[string][]string{
+		"Content-Type": {"application/json"},
+	}, []byte(`{"u":"alice"}`))
+	postFlowID := recordMacroFlow(t, store, "POST", postServer.URL+"/audit", nil, nil)
+
+	defineMacroForTest(t, cs, "pre-extract-raw", preFlowID, "", "", []map[string]any{
+		{
+			"name":      "session_token",
+			"from":      "response",
+			"source":    "body_json",
+			"json_path": "$.session_token",
+			"required":  true,
+		},
+	})
+
+	// post macro: OverrideURL references the pre-extracted session_token
+	// via §session_token§. If runPreMacro shadows the kvStore (the bug),
+	// this template token will fail to resolve and the post server's
+	// query will NOT contain a tok-N value.
+	overrideURL := postServer.URL + "/audit?token=§session_token§"
+	defineMacroForTest(t, cs, "post-uses-extract-raw", postFlowID, overrideURL, "", nil)
+
+	res, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "fuzz_raw",
+		Arguments: map[string]any{
+			"target_addr": addr,
+			"positions": []map[string]any{
+				{"path": "payload", "payloads": []string{"v1", "v2"}},
+			},
+			"timeout_ms": 5000,
+			"pre_macro":  map[string]any{"name": "pre-extract-raw"},
+			"post_macro": map[string]any{"name": "post-uses-extract-raw"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if res.IsError {
+		var msg strings.Builder
+		for _, c := range res.Content {
+			if tc, ok := c.(*gomcp.TextContent); ok {
+				msg.WriteString(tc.Text)
+			}
+		}
+		t.Fatalf("tool error: %s", msg.String())
+	}
+
+	// pre called once per variant.
+	if got := atomic.LoadInt32(&preCalls); got != 2 {
+		t.Errorf("pre called %d times, want 2 (once per variant)", got)
+	}
+
+	// Wait for async post fires.
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if pr := postRecords.Load(); pr != nil && len(*pr) >= 2 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	prPtr := postRecords.Load()
+	if prPtr == nil {
+		t.Fatal("post server received no requests")
+	}
+	prs := *prPtr
+	if len(prs) != 2 {
+		t.Fatalf("post server received %d requests, want 2", len(prs))
+	}
+
+	// The core regression assertion: each post query must contain a
+	// resolved tok-N from the pre extract — NOT the literal §session_token§
+	// nor an empty value. Before the fix, this assertion fails because the
+	// pre-iteration kvStore was discarded by runPreMacro.
+	gotTokens := make(map[string]bool)
+	for i, rec := range prs {
+		q := rec["query"]
+		if strings.Contains(q, "§session_token§") {
+			t.Errorf("post[%d] query = %q contains unresolved §session_token§ — pre extract did not propagate to post (kvStore shadow regression)", i, q)
+		}
+		if !strings.Contains(q, "token=tok-") {
+			t.Errorf("post[%d] query = %q, want to contain token=tok-N (pre extract should propagate via shared kvStore)", i, q)
+		}
+		// Strip "token=" prefix so we can dedupe by value.
+		for _, part := range strings.Split(q, "&") {
+			if strings.HasPrefix(part, "token=") {
+				gotTokens[strings.TrimPrefix(part, "token=")] = true
+			}
+		}
+	}
+	if !gotTokens["tok-1"] || !gotTokens["tok-2"] {
+		t.Errorf("post queries got tokens = %v, want both tok-1 and tok-2 (each iteration's extract must be distinct)", gotTokens)
+	}
+}
+
 // decodeFuzzRawResult is the structured-content decoder shared across
 // fuzz_raw macro tests. Mirrors callFuzzRaw but accepts the raw
 // CallToolResult so the test can inspect IsError or chained calls.

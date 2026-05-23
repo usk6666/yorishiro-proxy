@@ -579,7 +579,7 @@ func (l *fuzzRawVariantLoop) runOne(ctx context.Context, variantIdx int) (string
 	// pre_macro (iteration-scope only). When pre is scope="job", the
 	// executor was invoked once outside the loop by runPreJobMacro.
 	if IsIterationScope(l.preMacro) {
-		preOutcome := l.runPreMacro(ctx, variantIdx, payloads)
+		preOutcome := l.runPreMacro(ctx, variantIdx, payloads, kvStore)
 		switch preOutcome {
 		case fuzzRawPreSkipped:
 			BumpHookIterationCount(l.hookExec)
@@ -660,12 +660,13 @@ const (
 
 // runPreMacro dispatches the pre_macro hook for this iteration and
 // translates the OnError policy into a pre-macro outcome. Mirrors
-// fuzz_http's runPreMacro structure.
-func (l *fuzzRawVariantLoop) runPreMacro(ctx context.Context, variantIdx int, payloads map[string]string) fuzzRawPreMacroOutcome {
+// fuzz_http's runPreMacro structure. The kvStore parameter is the
+// per-iteration store owned by runOne — pre_macro extracts land here
+// so runPostMacro can resolve §var§ tokens that reference them.
+func (l *fuzzRawVariantLoop) runPreMacro(ctx context.Context, variantIdx int, payloads map[string]string, kvStore map[string]string) fuzzRawPreMacroOutcome {
 	if l.preMacro == nil {
 		return fuzzRawPreOK
 	}
-	kvStore := PrepareIteration(l.jobKVStore, l.preMacro, l.postMacro, variantIdx)
 	_, hookErr := l.hookExec.executePreMacro(ctx, kvStore)
 	if hookErr == nil {
 		l.s.saveFuzzMacroHookResult(ctx, l.fuzzID, variantIdx, "pre", "", "ok", 0, "")
