@@ -305,12 +305,16 @@ func InjectVarsRespectingReserved(dst map[string]string, src map[string]string) 
 // BumpHookIterationCount advances the hookState.requestCount by one so
 // the next iteration's shouldRunPreMacro / shouldRunPostMacro engine
 // gates evaluate against the post-iteration counter (USK-981). Pure
-// counter increment — lastStatusCode / lastError remain at zero values
-// because correctly wiring those requires deciding what counts as an
-// "error" for the on_error gate (transport error vs 4xx vs 5xx vs
-// pre-macro skip), which is deferred to USK-982. This makes
-// RunInterval="every_n" and "once" work end-to-end without committing
-// to on_error semantics yet.
+// counter increment — lastStatusCode / lastError remain untouched and
+// carry over from the previous wire-completed iteration. Use this on
+// pre-wire abort paths (pre-macro skip, template-expansion error,
+// upstream-proxy resolution failure) where there is no wire result to
+// record but the slot must still be consumed for every_n / once gates.
+//
+// Wire-completed iterations should call hookExecutor.updateState
+// (statusCode, runErr != nil) instead — that helper bumps requestCount
+// AND records the wire result so the on_error gate sees the correct
+// previous-iteration status on the next evaluation (USK-982).
 //
 // Shared by fuzz_http / fuzz_ws / fuzz_grpc / fuzz_raw (USK-983) —
 // converted from a method on *fuzzHTTPVariantLoop to a free function so

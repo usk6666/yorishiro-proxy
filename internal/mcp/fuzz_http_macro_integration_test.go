@@ -1906,3 +1906,166 @@ func TestFuzzHTTPMacro_RunIntervalOnce(t *testing.T) {
 		t.Errorf("pre macro called %d times, want 1 (run_interval=once)", got)
 	}
 }
+
+// TestFuzzHTTPMacro_RunIntervalOnError_FiresAfterError verifies that
+// pre_macro.run_interval="on_error" fires only on the iteration that
+// follows a wire-recorded error (HTTP status >= 400 or transport error).
+// With 3 iterations where the middle (iter 1) returns 500 and iters 0
+// and 2 return 200, pre fires exactly once — on iter 2, reacting to
+// iter 1's 500. Iter 0 does NOT fire (no previous request to react to,
+// per USK-982 D-Q6). Covers USK-982 acceptance criterion #1.
+func TestFuzzHTTPMacro_RunIntervalOnError_FiresAfterError(t *testing.T) {
+	cs, store := setupFuzzHTTPMacroSession(t)
+
+	var preCalls int32
+	preServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&preCalls, 1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(preServer.Close)
+
+	var fuzzCalls int32
+	fuzzServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := atomic.AddInt32(&fuzzCalls, 1)
+		// fuzzCalls is now the 1-based count of this hit. The middle
+		// iteration (1-based n == 2, 0-based iter 1) returns 500; the
+		// surrounding iterations return 200.
+		if n == 2 {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(fuzzServer.Close)
+
+	preFlowID := recordMacroFlow(t, store, "POST", preServer.URL+"/noop", nil, nil)
+	defineMacroForTest(t, cs, "pre-on-error", preFlowID, "", "", nil)
+
+	payloads := []string{"/a0", "/a1", "/a2"}
+	authority := strings.TrimPrefix(fuzzServer.URL, "http://")
+	res, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "fuzz_http",
+		Arguments: map[string]any{
+			"method":    "GET",
+			"scheme":    "http",
+			"authority": authority,
+			"path":      "/probe",
+			"headers": []map[string]any{
+				{"name": "Host", "value": authority},
+			},
+			"positions": []map[string]any{
+				{"path": "path", "payloads": payloads},
+			},
+			"timeout_ms": 5000,
+			"pre_macro": map[string]any{
+				"name":         "pre-on-error",
+				"run_interval": "on_error",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool fuzz_http: %v", err)
+	}
+	if res.IsError {
+		var msg strings.Builder
+		for _, c := range res.Content {
+			if tc, ok := c.(*gomcp.TextContent); ok {
+				msg.WriteString(tc.Text)
+				msg.WriteString("\n")
+			}
+		}
+		t.Fatalf("fuzz_http returned error: %s", msg.String())
+	}
+
+	var out fuzzHTTPResult
+	raw, _ := json.Marshal(res.StructuredContent)
+	_ = json.Unmarshal(raw, &out)
+	if out.CompletedVariants != len(payloads) {
+		t.Fatalf("CompletedVariants = %d, want %d", out.CompletedVariants, len(payloads))
+	}
+	if got := atomic.LoadInt32(&fuzzCalls); int(got) != len(payloads) {
+		t.Errorf("fuzz server saw %d requests, want %d", got, len(payloads))
+	}
+	// Pre fires only on iter 2, reacting to iter 1's 500 → 1 call.
+	// Iter 0: requestCount==0 → no fire (USK-982 D-Q6).
+	// Iter 1: previous (iter 0) was 200 → no fire.
+	// Iter 2: previous (iter 1) was 500 → fire.
+	if got := atomic.LoadInt32(&preCalls); got != 1 {
+		t.Errorf("pre macro called %d times, want 1 (on_error fires only on iter 2 after iter 1's 500)", got)
+	}
+}
+
+// TestFuzzHTTPMacro_RunIntervalOnError_DoesNotFireWithoutError verifies
+// that pre_macro.run_interval="on_error" never fires when every iteration
+// is a successful 200 — there is no error to react to and iter 0 does
+// not fire vacuously (USK-982 D-Q6). Covers USK-982 acceptance criterion #2.
+func TestFuzzHTTPMacro_RunIntervalOnError_DoesNotFireWithoutError(t *testing.T) {
+	cs, store := setupFuzzHTTPMacroSession(t)
+
+	var preCalls int32
+	preServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&preCalls, 1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(preServer.Close)
+
+	var fuzzCalls int32
+	fuzzServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&fuzzCalls, 1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(fuzzServer.Close)
+
+	preFlowID := recordMacroFlow(t, store, "POST", preServer.URL+"/noop", nil, nil)
+	defineMacroForTest(t, cs, "pre-on-error-quiet", preFlowID, "", "", nil)
+
+	payloads := []string{"/a0", "/a1", "/a2"}
+	authority := strings.TrimPrefix(fuzzServer.URL, "http://")
+	res, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "fuzz_http",
+		Arguments: map[string]any{
+			"method":    "GET",
+			"scheme":    "http",
+			"authority": authority,
+			"path":      "/probe",
+			"headers": []map[string]any{
+				{"name": "Host", "value": authority},
+			},
+			"positions": []map[string]any{
+				{"path": "path", "payloads": payloads},
+			},
+			"timeout_ms": 5000,
+			"pre_macro": map[string]any{
+				"name":         "pre-on-error-quiet",
+				"run_interval": "on_error",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool fuzz_http: %v", err)
+	}
+	if res.IsError {
+		var msg strings.Builder
+		for _, c := range res.Content {
+			if tc, ok := c.(*gomcp.TextContent); ok {
+				msg.WriteString(tc.Text)
+				msg.WriteString("\n")
+			}
+		}
+		t.Fatalf("fuzz_http returned error: %s", msg.String())
+	}
+
+	var out fuzzHTTPResult
+	raw, _ := json.Marshal(res.StructuredContent)
+	_ = json.Unmarshal(raw, &out)
+	if out.CompletedVariants != len(payloads) {
+		t.Fatalf("CompletedVariants = %d, want %d", out.CompletedVariants, len(payloads))
+	}
+	if got := atomic.LoadInt32(&fuzzCalls); int(got) != len(payloads) {
+		t.Errorf("fuzz server saw %d requests, want %d", got, len(payloads))
+	}
+	// All responses are 200 — pre never fires.
+	if got := atomic.LoadInt32(&preCalls); got != 0 {
+		t.Errorf("pre macro called %d times, want 0 (on_error never fires when all iters are 200)", got)
+	}
+}
