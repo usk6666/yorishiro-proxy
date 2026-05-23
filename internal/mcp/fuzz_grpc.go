@@ -96,6 +96,25 @@ type fuzzGRPCInput struct {
 
 	Positions   []fuzzGRPCPosition `json:"positions" jsonschema:"REQUIRED ordered position list; each describes a typed path into the GRPCStart/GRPCData shape and the payloads to substitute"`
 	StopOnNonOK bool               `json:"stop_on_non_ok,omitempty" jsonschema:"when true, abort the remaining variants once any variant returns a non-OK gRPC status (or terminates without a trailer)"`
+
+	// PreMacro / PostMacro: pre/post macro hooks (USK-985 — gRPC sibling
+	// of USK-960/USK-961/USK-981 on fuzz_http). scope="iteration" (default)
+	// shares a per-variant KV Store with the variant's pipeline so reserved
+	// keys §__iteration§ / §__nonce§, pre extracts, and (for post) reserved
+	// __response_* keys are visible to template expansion. scope="job"
+	// runs the hook exactly once outside the variant loop against a
+	// job-scoped KV Store that is merged into each iteration's store
+	// before per-iteration reserved keys are seeded — so pre=job extracts
+	// flow into every variant's request templating. mix-scope (pre and
+	// post with independent scope) is supported.
+	//
+	// gRPC-specific status domain: __response_status carries the gRPC
+	// status code (0 = OK, 1..16 = canonical gRPC error codes per
+	// google.golang.org/grpc/codes), NOT an HTTP status. RunInterval
+	// on_status matches against this domain — see help_fuzz_grpc.md for
+	// the canonical code-to-name mapping.
+	PreMacro  *MacroConfig `json:"pre_macro,omitempty" jsonschema:"pre macro hook executed before a variant's dial. scope=iteration (default; fires once per variant) | job (fires once before the variant loop; extracts shared with every variant). on_error: skip|abort|continue (default skip). For scope=job, skip returns a successful job result with completed_variants=0 and stopped_reason set"`
+	PostMacro *MacroConfig `json:"post_macro,omitempty" jsonschema:"post macro hook executed after a variant's end-trailer is received. scope=iteration (default; fires once per variant against gRPC-specific __response_* reserved keys: __response_status (gRPC 0-16 domain), __response_status_message, __response_body (capped 64KiB), __response_message_count, __response_total_bytes) | job (fires once after the variant loop completes; no __response_* keys, since there is no single response). on_error: skip|abort|continue (default skip)"`
 }
 
 // fuzzGRPCPosition describes one fuzz position. Path is a typed
@@ -218,7 +237,7 @@ func (s *Server) handleFuzzGRPC(ctx context.Context, _ *gomcp.CallToolRequest, i
 	// row existing. Mirrors USK-827 / fuzz_http precedent.
 	s.saveFuzzGRPCJob(context.Background(), fuzzID, &input, plan)
 
-	rows, completed, stopReason, runErr := s.runFuzzGRPCVariants(ctx, plan, timeout, input.StopOnNonOK, input.Tag, fuzzID)
+	rows, completed, stopReason, runErr := s.runFuzzGRPCVariants(ctx, plan, timeout, input.StopOnNonOK, input.Tag, fuzzID, input.PreMacro, input.PostMacro)
 
 	// Use a fresh background ctx so the closing UPDATE always lands,
 	// even on caller-side ctx cancel. The store-write is best-effort:

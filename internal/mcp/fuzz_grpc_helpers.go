@@ -67,6 +67,15 @@ const maxFuzzGRPCPositions = 32
 // service-name / payload fuzz cases and matches fuzz_http.
 const maxFuzzGRPCPayloadSize = 1 << 20
 
+// maxFuzzGRPCResponseBodyCapture caps the per-variant concatenated DATA
+// payload retained in-memory for the post_macro __response_body kvStore
+// key (USK-985). 64 KiB matches maxResponseBodyKVBytes (the HTTP fuzz
+// cap on __response_body) — the gRPC LPM Layer does not bound message
+// size on its own, so capping at capture time avoids loading multi-MiB
+// streaming responses into memory just to discard them at template
+// expansion (CWE-770).
+const maxFuzzGRPCResponseBodyCapture = 64 * 1024
+
 // validFuzzGRPCRoots lists the GRPCStart scalar field paths that
 // fuzz_grpc accepts. metadata[N].* and messages[N].payload paths are
 // matched separately via regex; this set covers the scalar fields.
@@ -146,6 +155,12 @@ func validateFuzzGRPCInput(input *fuzzGRPCInput) error {
 		if totalVariants > maxFuzzGRPCVariants {
 			return fmt.Errorf("positions cartesian product exceeds %d variants (computed at position %d); reduce payload counts or split into multiple calls", maxFuzzGRPCVariants, i)
 		}
+	}
+	if err := ValidateMacroConfig("pre_macro", input.PreMacro, true); err != nil {
+		return err
+	}
+	if err := ValidateMacroConfig("post_macro", input.PostMacro, false); err != nil {
+		return err
 	}
 	return nil
 }
@@ -399,13 +414,63 @@ func parseProtoKeyParts(key string) []string {
 // populated for both successful and error variants. Store-write
 // failures are non-fatal (slog.Warn + continue) — the wire data is on
 // disk via RecordStep and remains the source of truth.
-func (s *Server) runFuzzGRPCVariants(ctx context.Context, plan *fuzzGRPCPlan, timeout time.Duration, stopOnNonOK bool, tag, fuzzID string) ([]fuzzGRPCVariantRow, int, string, error) {
-	encoders := buildResendGRPCEncoderRegistry()
-	pipe := s.buildFuzzGRPCPipeline(encoders)
+//
+// USK-985: scope="job" hooks fire exactly once outside the variant
+// loop against a separate job-scoped kvStore that is merged into each
+// iteration's per-variant store. pre-job runs between loop-state setup
+// and the for-variant loop; post-job runs after the loop body exits
+// (including the stop_on_non_ok terminal path, but NOT on ctx cancel
+// or pre-job abort). Mirrors the fuzz_http precedent in USK-961.
+func (s *Server) runFuzzGRPCVariants(ctx context.Context, plan *fuzzGRPCPlan, timeout time.Duration, stopOnNonOK bool, tag, fuzzID string, preMacro, postMacro *MacroConfig) ([]fuzzGRPCVariantRow, int, string, error) {
+	loop := buildFuzzGRPCVariantLoop(s, plan, timeout, stopOnNonOK, tag, fuzzID, preMacro, postMacro)
 
-	rows := make([]fuzzGRPCVariantRow, 0, plan.totalVariants)
-	indices := make([]int, len(plan.positions))
-	completed := 0
+	// USK-985 pre-job: fire once before the variant loop. Abort short-
+	// circuits the whole job; skip returns success with stopped_reason;
+	// continue records the error and proceeds with whatever jobKVStore
+	// captured.
+	if IsJobScope(preMacro) {
+		jobAction, stopReason, retErr := loop.runPreJobMacro(ctx)
+		if retErr != nil {
+			return loop.rows, loop.completed, "", retErr
+		}
+		if jobAction == fuzzGRPCPreJobSkipAll {
+			return loop.rows, loop.completed, stopReason, nil
+		}
+	}
+
+	completedNormally, earlyStopReason, retErr := loop.runVariantLoop(ctx)
+	if retErr != nil {
+		return loop.rows, loop.completed, "", retErr
+	}
+
+	// USK-985 post-job: fire after the variant loop exits. Mirrors
+	// USK-961 Q5 rule — post-job fires on natural exhaustion or
+	// stop_on_non_ok exit, but NOT on ctx cancel.
+	if completedNormally && IsJobScope(postMacro) {
+		loop.runPostJobMacro(ctx)
+	}
+
+	return loop.rows, loop.completed, earlyStopReason, nil
+}
+
+// buildFuzzGRPCVariantLoop assembles the per-run state container shared
+// by all variants. Split out of runFuzzGRPCVariants to keep that function
+// below the gocyclo threshold; mirrors fuzz_http's
+// buildFuzzHTTPVariantLoop (USK-961). The construction logic is
+// mechanical and has no branch fan-out outside the hook-config assembly.
+func buildFuzzGRPCVariantLoop(s *Server, plan *fuzzGRPCPlan, timeout time.Duration, stopOnNonOK bool, tag, fuzzID string, preMacro, postMacro *MacroConfig) *fuzzGRPCVariantLoop {
+	loop := &fuzzGRPCVariantLoop{
+		s:           s,
+		plan:        plan,
+		timeout:     timeout,
+		stopOnNonOK: stopOnNonOK,
+		tag:         tag,
+		fuzzID:      fuzzID,
+		preMacro:    preMacro,
+		postMacro:   postMacro,
+		encoders:    buildResendGRPCEncoderRegistry(),
+	}
+	loop.pipe = s.buildFuzzGRPCPipeline(loop.encoders)
 
 	// Strip the port to align rate-limit bucket keys with the live data path
 	// (connector/connect_handler.go, http1_forward_handler.go, socks5.go) and
@@ -416,47 +481,328 @@ func (s *Server) runFuzzGRPCVariants(ctx context.Context, plan *fuzzGRPCPlan, ti
 	if err != nil {
 		rateLimitHost = plan.basePlan.authority
 	}
+	loop.rateLimitHost = rateLimitHost
 
-	for variantIdx := 0; variantIdx < plan.totalVariants; variantIdx++ {
-		select {
-		case <-ctx.Done():
-			return rows, completed, fmt.Sprintf("ctx cancelled: %v", ctx.Err()), nil
-		default:
+	loop.hookExec = BuildIterationHookExecutor(s, preMacro, postMacro)
+	loop.jobHookExec, loop.jobKVStore = BuildJobHookExecutor(s, preMacro, postMacro)
+
+	loop.rows = make([]fuzzGRPCVariantRow, 0, plan.totalVariants)
+	loop.indices = make([]int, len(plan.positions))
+
+	return loop
+}
+
+// fuzzGRPCVariantLoop bundles the per-run state shared across iterations
+// so the inner loop body (runOne) is a method on a small struct instead
+// of a many-argument free function. Mirrors fuzz_http's
+// fuzzHTTPVariantLoop (USK-961).
+//
+// USK-985 adds jobKVStore + jobHookExec for scope="job" hooks. The two
+// kvStores (per-iteration + job) are deliberately separate: per-iteration
+// reserved keys (§__iteration§ / §__nonce§ / __response_*) overwrite any
+// conflicting keys from the job store at iteration start ("iteration
+// wins" — matches the "caller wins" precedent in executePreMacro /
+// executePostMacro's vars-merge dance).
+type fuzzGRPCVariantLoop struct {
+	s           *Server
+	plan        *fuzzGRPCPlan
+	timeout     time.Duration
+	stopOnNonOK bool
+	tag         string
+	fuzzID      string
+	preMacro    *MacroConfig
+	postMacro   *MacroConfig
+	encoders    *pipeline.WireEncoderRegistry
+	pipe        *pipeline.Pipeline
+	hookExec    *hookExecutor
+	// jobHookExec is the executor for scope="job" hooks. Distinct from
+	// hookExec so the iteration-side hookState.preMacroExecuted state is
+	// not flipped by the job-side single-fire call. Nil when no hook is
+	// scope="job".
+	jobHookExec *hookExecutor
+	// jobKVStore is the kvStore shared across all variants for scope="job"
+	// hooks. pre-job extracts land here; iteration runs copy this into a
+	// fresh per-iteration kvStore before seeding reserved keys; post-job
+	// reads back what pre-job wrote. Nil when no hook is scope="job".
+	jobKVStore    map[string]string
+	rateLimitHost string
+
+	rows      []fuzzGRPCVariantRow
+	indices   []int
+	completed int
+}
+
+// runVariantLoop drives the variant loop body and returns
+// (completedNormally, earlyStopReason, retErr). completedNormally is
+// true when the loop reached the post-job firing path (natural
+// exhaustion or stop_on_non_ok); it is false on ctx cancel. retErr
+// non-nil signals an unrecoverable abort and post-job MUST NOT fire.
+// Mirrors fuzz_http's runVariantLoop (USK-979/USK-961).
+func (l *fuzzGRPCVariantLoop) runVariantLoop(ctx context.Context) (bool, string, error) {
+	for variantIdx := 0; variantIdx < l.plan.totalVariants; variantIdx++ {
+		stop, retErr := l.runOne(ctx, variantIdx)
+		if retErr != nil {
+			if errors.Is(retErr, context.Canceled) || errors.Is(retErr, context.DeadlineExceeded) {
+				// post-job does NOT fire on ctx cancel. Surface the cancel
+				// reason via stopped_reason; do NOT propagate as retErr so
+				// the caller still finalizes the fuzz_jobs row normally.
+				return false, fmt.Sprintf("ctx cancelled: %v", retErr), nil
+			}
+			// pre-iteration abort or other unrecoverable error. post-job
+			// does NOT fire on pre-iteration abort.
+			return false, "", retErr
 		}
-
-		// TODO(USK-817 sibling: budget counter, P5-19)
-		if err := s.waitRateLimit(ctx, rateLimitHost); err != nil {
-			return rows, completed, fmt.Sprintf("rate limit: %v", err), nil
+		if stop == "" {
+			continue
 		}
+		// stop_on_non_ok reaches here. post-job fires on stop_on_non_ok.
+		return true, stop, nil
+	}
+	return true, "", nil
+}
 
-		payloads, err := decodeFuzzGRPCPayloads(plan.positions, indices)
-		if err != nil {
-			return nil, completed, "", fmt.Errorf("variant %d: decode payloads: %w", variantIdx, err)
+// runOne executes a single iteration of the variant loop. Returns
+// (stopReason, retErr): stopReason "" means continue; non-empty means
+// stop with that reason (e.g., stop_on_non_ok); retErr propagates an
+// abort up the call stack. ctx cancel is surfaced via retErr wrapped
+// with %w so the caller can distinguish via errors.Is.
+func (l *fuzzGRPCVariantLoop) runOne(ctx context.Context, variantIdx int) (string, error) {
+	select {
+	case <-ctx.Done():
+		return "", fmt.Errorf("variant %d: %w", variantIdx, ctx.Err())
+	default:
+	}
+
+	if err := l.s.waitRateLimit(ctx, l.rateLimitHost); err != nil {
+		return fmt.Sprintf("rate limit: %v", err), nil
+	}
+
+	payloads, err := decodeFuzzGRPCPayloads(l.plan.positions, l.indices)
+	if err != nil {
+		return "", fmt.Errorf("variant %d: decode payloads: %w", variantIdx, err)
+	}
+
+	// USK-985: build the per-iteration kvStore (jobKV copy + iter-scope
+	// Vars + reserved-key seeding) shared between the variant request
+	// templating and the pre/post macro hooks.
+	kvStore := PrepareIteration(l.jobKVStore, l.preMacro, l.postMacro, variantIdx)
+
+	// USK-985: pre-iteration only fires when pre is configured at
+	// scope="iteration" (empty defaults to iteration). When pre is
+	// scope="job", the executor was invoked once outside the loop.
+	if IsIterationScope(l.preMacro) {
+		preState, retErr := l.runPreMacro(ctx, variantIdx, payloads, kvStore)
+		if retErr != nil {
+			return "", retErr
 		}
-
-		variantStart := time.Now()
-		row, statusCode, runErr := s.runFuzzGRPCSingleVariant(ctx, plan, pipe, timeout, variantIdx, payloads, tag)
-		row.DurationMs = time.Since(variantStart).Milliseconds()
-
-		if runErr != nil {
-			row.Error = runErr.Error()
-		}
-		rows = append(rows, row)
-		completed++
-
-		// USK-831: persist per-variant fuzz_results row so the aggregation
-		// view (`query fuzz_results { fuzz_id }` + USK-278 outliers_only)
-		// is populated. Save failures are non-fatal — wire data on disk via
-		// RecordStep is the source of truth.
-		s.saveFuzzGRPCResult(ctx, fuzzID, variantIdx, row, payloads)
-
-		nextFuzzGRPCIndices(indices, plan.positions)
-
-		if stopOnNonOK && (runErr != nil || statusCode != 0) {
-			return rows, completed, fmt.Sprintf("stop_on_non_ok: variant %d returned status=%d err=%q", variantIdx, statusCode, errString(runErr)), nil
+		if preState == fuzzGRPCPreSkipped {
+			// USK-981: bump the iteration counter even on skip so
+			// RunInterval engine gates (every_n) treat skipped iterations
+			// as consuming their slot.
+			BumpHookIterationCount(l.hookExec)
+			nextFuzzGRPCIndices(l.indices, l.plan.positions)
+			return "", nil
 		}
 	}
-	return rows, completed, "", nil
+
+	variantStart := time.Now()
+	row, statusCode, body, runErr := l.s.runFuzzGRPCSingleVariant(ctx, l.plan, l.pipe, l.timeout, variantIdx, payloads, l.tag)
+	row.DurationMs = time.Since(variantStart).Milliseconds()
+
+	if runErr != nil {
+		row.Error = runErr.Error()
+	}
+	l.rows = append(l.rows, row)
+	l.completed++
+	l.s.saveFuzzGRPCResult(ctx, l.fuzzID, variantIdx, row, payloads)
+
+	// USK-985: gate post-iteration on scope="iteration" (or empty —
+	// defaults to iteration). scope="job" post runs once after the
+	// variant loop completes.
+	if IsIterationScope(l.postMacro) {
+		l.runPostMacro(ctx, variantIdx, row, body, kvStore)
+	}
+
+	// USK-981: bump the iteration counter at the end of every normal-
+	// path iteration so RunInterval engine gates (every_n) see one more
+	// completed iteration before the next runOne call evaluates
+	// shouldRunPreMacro.
+	BumpHookIterationCount(l.hookExec)
+
+	nextFuzzGRPCIndices(l.indices, l.plan.positions)
+
+	if l.stopOnNonOK && (runErr != nil || statusCode != 0) {
+		return fmt.Sprintf("stop_on_non_ok: variant %d returned status=%d err=%q", variantIdx, statusCode, errString(runErr)), nil
+	}
+	return "", nil
+}
+
+// fuzzGRPCPreMacroOutcome marks whether the variant loop should proceed
+// with the upstream send after pre_macro resolution. Mirrors fuzz_http's
+// fuzzHTTPPreMacroOutcome.
+type fuzzGRPCPreMacroOutcome int
+
+const (
+	// fuzzGRPCPreOK = pre macro ran successfully, or was not configured;
+	// continue to body send.
+	fuzzGRPCPreOK fuzzGRPCPreMacroOutcome = iota
+	// fuzzGRPCPreSkipped = pre macro failed under on_error=skip; the
+	// caller has already recorded the skipped row, do NOT send the
+	// variant, do NOT fire post_macro.
+	fuzzGRPCPreSkipped
+)
+
+// runPreMacro dispatches the pre_macro hook for this iteration and
+// translates the OnError policy into a pre-macro outcome. Returns
+// (outcome, retErr): retErr non-nil aborts the whole fuzz run; outcome
+// drives the caller's decision to send or short-circuit. Mirrors
+// fuzz_http's runPreMacro (USK-960).
+func (l *fuzzGRPCVariantLoop) runPreMacro(ctx context.Context, variantIdx int, payloads map[string]string, kvStore map[string]string) (fuzzGRPCPreMacroOutcome, error) {
+	if l.preMacro == nil {
+		return fuzzGRPCPreOK, nil
+	}
+	_, hookErr := l.hookExec.executePreMacro(ctx, kvStore)
+	if hookErr == nil {
+		l.s.saveFuzzMacroHookResult(ctx, l.fuzzID, variantIdx, "pre", "", "ok", 0, "")
+		return fuzzGRPCPreOK, nil
+	}
+	policy := l.preMacro.OnError
+	if policy == "" {
+		policy = "skip"
+	}
+	switch policy {
+	case "abort":
+		l.s.saveFuzzMacroHookResult(ctx, l.fuzzID, variantIdx, "pre", "", "error", 0, hookErr.Error())
+		return fuzzGRPCPreOK, fmt.Errorf("variant %d pre_macro hook abort: %w", variantIdx, hookErr)
+	case "continue":
+		slog.WarnContext(ctx, "fuzz_grpc: pre_macro hook error (on_error=continue)",
+			"fuzz_id", l.fuzzID, "variant", variantIdx, "error", hookErr)
+		l.s.saveFuzzMacroHookResult(ctx, l.fuzzID, variantIdx, "pre", "", "error", 0, hookErr.Error())
+		return fuzzGRPCPreOK, nil
+	default: // skip
+		l.s.saveFuzzMacroHookResult(ctx, l.fuzzID, variantIdx, "pre", "", "skipped", 0, hookErr.Error())
+		row := fuzzGRPCVariantRow{
+			Index:    variantIdx,
+			Payloads: payloads,
+			Error:    fmt.Sprintf("pre_macro hook failed (on_error=skip): %v", hookErr),
+		}
+		l.rows = append(l.rows, row)
+		l.completed++
+		l.s.saveFuzzGRPCResult(ctx, l.fuzzID, variantIdx, row, payloads)
+		return fuzzGRPCPreSkipped, nil
+	}
+}
+
+// runPostMacro fires the post_macro hook against the same kvStore that
+// pre_macro shared. Post failures NEVER abort the run — record a
+// fuzz_macro_results row and return. Mirrors fuzz_http's runPostMacro.
+//
+// USK-985: gRPC-specific __response_* keys (status / status_message /
+// body / message_count / total_bytes) are injected into kvStore BEFORE
+// executePostMacro fires so the gRPC status domain (0-16) is visible to
+// the macro's template expansion. The statusCode passed to
+// executePostMacro is the gRPC status code (0-16) so the on_status
+// RunInterval gate matches against gRPC codes; PassResponse-driven
+// HTTP-shaped injection inside executePostMacro becomes a no-op because
+// we pass nil body / nil headers.
+func (l *fuzzGRPCVariantLoop) runPostMacro(ctx context.Context, variantIdx int, row fuzzGRPCVariantRow, body []byte, kvStore map[string]string) {
+	injectGRPCResponseVars(kvStore, row.Status, row.StatusMessage, body, row.ResponseMessageCount, row.ResponseTotalBytes)
+	// Pass nil body / nil headers so the HTTP-shaped injectResponseVars
+	// inside executePostMacro (gated by hookConfig.PassResponse=true)
+	// becomes a no-op for the gRPC-specific keys we just wrote. The
+	// statusCode parameter feeds the on_status RunInterval gate, so we
+	// pass the gRPC status (int(row.Status)) — operators specifying
+	// status_codes: [14] get UNAVAILABLE matching.
+	hookErr := l.hookExec.executePostMacro(ctx, int(row.Status), nil, nil, kvStore)
+	if hookErr != nil {
+		slog.WarnContext(ctx, "fuzz_grpc: post_macro hook error",
+			"fuzz_id", l.fuzzID, "variant", variantIdx, "error", hookErr)
+		l.s.saveFuzzMacroHookResult(ctx, l.fuzzID, variantIdx, "post", "", "error", int(row.Status), hookErr.Error())
+		return
+	}
+	l.s.saveFuzzMacroHookResult(ctx, l.fuzzID, variantIdx, "post", "", "ok", int(row.Status), "")
+}
+
+// fuzzGRPCJobPreOutcome marks the pre-job hook's effect on the
+// surrounding job loop. Mirrors fuzz_http's fuzzHTTPJobPreOutcome.
+type fuzzGRPCJobPreOutcome int
+
+const (
+	// fuzzGRPCPreJobOK = pre-job ran successfully (or under
+	// on_error=continue): proceed with the variant loop.
+	fuzzGRPCPreJobOK fuzzGRPCJobPreOutcome = iota
+	// fuzzGRPCPreJobSkipAll = pre-job failed under on_error=skip: skip
+	// the entire job. fuzz_grpc returns a successful result with
+	// CompletedVariants=0 and stopped_reason set (USK-961 U1 precedent).
+	fuzzGRPCPreJobSkipAll
+)
+
+// runPreJobMacro fires the pre_macro hook ONCE outside the variant loop
+// (scope="job"). Behavior on failure follows the OnError policy:
+//
+//   - abort: return a wrapped error that aborts the whole job before any
+//     variant runs (caller propagates as retErr).
+//   - continue: log warn, record a fuzz_macro_results row at
+//     index_num=-1, status="error"; proceed with whatever jobKVStore
+//     captured.
+//   - skip: record a fuzz_macro_results row at index_num=-1,
+//     status="skipped"; return fuzzGRPCPreJobSkipAll so the caller
+//     short-circuits the whole job with a stopped_reason.
+//
+// fuzz_macro_results.index_num=-1 is the documented sentinel for
+// job-scope hook rows (jobScopeIndexNumSentinel; defined in
+// fuzz_http_helpers.go and shared across fuzz_* per USK-983).
+func (l *fuzzGRPCVariantLoop) runPreJobMacro(ctx context.Context) (fuzzGRPCJobPreOutcome, string, error) {
+	if l.jobHookExec == nil || l.preMacro == nil || !IsJobScope(l.preMacro) {
+		return fuzzGRPCPreJobOK, "", nil
+	}
+	_, hookErr := l.jobHookExec.executePreMacro(ctx, l.jobKVStore)
+	if hookErr == nil {
+		l.s.saveFuzzMacroHookResult(ctx, l.fuzzID, jobScopeIndexNumSentinel, "pre", "", "ok", 0, "")
+		return fuzzGRPCPreJobOK, "", nil
+	}
+	policy := l.preMacro.OnError
+	if policy == "" {
+		policy = "skip"
+	}
+	switch policy {
+	case "abort":
+		l.s.saveFuzzMacroHookResult(ctx, l.fuzzID, jobScopeIndexNumSentinel, "pre", "", "error", 0, hookErr.Error())
+		return fuzzGRPCPreJobOK, "", fmt.Errorf("pre_macro hook abort (scope=job): %w", hookErr)
+	case "continue":
+		slog.WarnContext(ctx, "fuzz_grpc: pre_macro hook error (scope=job, on_error=continue)",
+			"fuzz_id", l.fuzzID, "error", hookErr)
+		l.s.saveFuzzMacroHookResult(ctx, l.fuzzID, jobScopeIndexNumSentinel, "pre", "", "error", 0, hookErr.Error())
+		return fuzzGRPCPreJobOK, "", nil
+	default: // skip
+		l.s.saveFuzzMacroHookResult(ctx, l.fuzzID, jobScopeIndexNumSentinel, "pre", "", "skipped", 0, hookErr.Error())
+		stopReason := fmt.Sprintf("pre_macro hook skipped (scope=job, on_error=skip): %v", hookErr)
+		return fuzzGRPCPreJobSkipAll, stopReason, nil
+	}
+}
+
+// runPostJobMacro fires the post_macro hook ONCE after the variant loop
+// completes (scope="job"). Post-job fires on natural exhaustion or
+// stop_on_non_ok, but NOT on ctx cancel (the caller gates on
+// completedNormally). Post-job sees only the jobKVStore — per-iteration
+// response keys (__response_*) are NOT available because each
+// iteration's kvStore was discarded. Mirrors fuzz_http's runPostJobMacro
+// (USK-961 Q5/Q21).
+func (l *fuzzGRPCVariantLoop) runPostJobMacro(ctx context.Context) {
+	if l.jobHookExec == nil || l.postMacro == nil || !IsJobScope(l.postMacro) {
+		return
+	}
+	// Post-job has no per-iteration response to inject. Pass zero values
+	// for status / body / headers; PassResponse=false on the jobHookExec
+	// makes the HTTP-shaped injection a no-op.
+	hookErr := l.jobHookExec.executePostMacro(ctx, 0, nil, nil, l.jobKVStore)
+	if hookErr != nil {
+		slog.WarnContext(ctx, "fuzz_grpc: post_macro hook error (scope=job)",
+			"fuzz_id", l.fuzzID, "error", hookErr)
+		l.s.saveFuzzMacroHookResult(ctx, l.fuzzID, jobScopeIndexNumSentinel, "post", "", "error", 0, hookErr.Error())
+		return
+	}
+	l.s.saveFuzzMacroHookResult(ctx, l.fuzzID, jobScopeIndexNumSentinel, "post", "", "ok", 0, "")
 }
 
 // fuzzGRPCJobConfig is the JSON payload persisted to fuzz_jobs.config.
@@ -668,7 +1014,16 @@ func errString(err error) string {
 // run loop continues to the next variant. Safety-blocked variants do
 // NOT trigger stop_on_non_ok (which fires only on runErr != nil or a
 // non-zero gRPC status code), matching the fuzz_http precedent.
-func (s *Server) runFuzzGRPCSingleVariant(ctx context.Context, plan *fuzzGRPCPlan, p *pipeline.Pipeline, timeout time.Duration, variantIdx int, payloads map[string]string, tag string) (fuzzGRPCVariantRow, uint32, error) {
+//
+// USK-985: returns the per-variant concatenated DATA payload bytes
+// (capped at maxFuzzGRPCResponseBodyCapture / 64 KiB at capture time)
+// for post_macro __response_body injection. Truncation happens here
+// rather than at injection time so multi-MiB streaming responses are
+// not loaded into memory only to be discarded by the kvStore cap
+// (CWE-770). The full per-flow wire payloads remain retrievable via
+// the recorded Flow rows under row.StreamID — this return is the
+// kvStore convenience projection, not the source of truth.
+func (s *Server) runFuzzGRPCSingleVariant(ctx context.Context, plan *fuzzGRPCPlan, p *pipeline.Pipeline, timeout time.Duration, variantIdx int, payloads map[string]string, tag string) (fuzzGRPCVariantRow, uint32, []byte, error) {
 	row := fuzzGRPCVariantRow{
 		Index:    variantIdx,
 		Payloads: payloads,
@@ -686,11 +1041,11 @@ func (s *Server) runFuzzGRPCSingleVariant(ctx context.Context, plan *fuzzGRPCPla
 			continue
 		}
 		if err := applyFuzzGRPCPosition(variantPlan, pos.Path, payload, jsonMuts); err != nil {
-			return row, 0, fmt.Errorf("apply position %q: %w", pos.Path, err)
+			return row, 0, nil, fmt.Errorf("apply position %q: %w", pos.Path, err)
 		}
 	}
 	if err := commitFuzzGRPCJSONMutations(variantPlan, jsonMuts); err != nil {
-		return row, 0, fmt.Errorf("commit JSON-path mutations: %w", err)
+		return row, 0, nil, fmt.Errorf("commit JSON-path mutations: %w", err)
 	}
 	// Re-derive the canonical URL after potential service/method mutation
 	// so the safety filter and any downstream consumer see the substituted
@@ -710,7 +1065,7 @@ func (s *Server) runFuzzGRPCSingleVariant(ctx context.Context, plan *fuzzGRPCPla
 	// the run loop continues to the next variant.
 	if v := s.checkSafetyInput(concatResendGRPCPayloads(variantPlan), variantPlan.canonicalURL.String(), variantPlan.metadata); v != nil {
 		row.Error = safetyViolationError(v)
-		return row, 0, nil
+		return row, 0, nil, nil
 	}
 
 	rtCtx, cancel := context.WithTimeout(ctx, timeout)
@@ -718,7 +1073,7 @@ func (s *Server) runFuzzGRPCSingleVariant(ctx context.Context, plan *fuzzGRPCPla
 
 	endEnv, recvData, _, err := s.runResendGRPC(rtCtx, variantPlan, p)
 	if err != nil {
-		return row, 0, err
+		return row, 0, nil, err
 	}
 
 	if endEnv != nil {
@@ -728,6 +1083,13 @@ func (s *Server) runFuzzGRPCSingleVariant(ctx context.Context, plan *fuzzGRPCPla
 		}
 	}
 	row.ResponseMessageCount = len(recvData)
+	// USK-985: capture the concatenated DATA payload bytes alongside the
+	// per-variant byte sum. Cap at maxFuzzGRPCResponseBodyCapture so a
+	// streaming response cannot bloat the post_macro kvStore (CWE-770).
+	// Truncation is at capture time so we never allocate beyond the cap
+	// even when the upstream emits gigabyte responses; row.ResponseTotalBytes
+	// still records the true wire total because it counts per-payload-len.
+	body := captureGRPCResponseBody(recvData)
 	for _, e := range recvData {
 		if dataMsg, ok := e.Message.(*envelope.GRPCDataMessage); ok {
 			row.ResponseTotalBytes += len(dataMsg.Payload)
@@ -740,7 +1102,79 @@ func (s *Server) runFuzzGRPCSingleVariant(ctx context.Context, plan *fuzzGRPCPla
 	if tag != "" && s.flowStore.store != nil {
 		s.applyResendGRPCTag(ctx, variantPlan.streamID, tag)
 	}
-	return row, row.Status, nil
+	return row, row.Status, body, nil
+}
+
+// injectGRPCResponseVars writes the gRPC-specific __response_* reserved
+// keys into kvStore for consumption by fuzz_grpc post_macro template
+// expansion. USK-985.
+//
+// Keys written:
+//   - __response_status: gRPC status code as decimal string (0-16 domain
+//     per google.golang.org/grpc/codes; 0 = OK). Operators specifying
+//     run_interval=on_status with status_codes must supply gRPC codes,
+//     NOT HTTP codes.
+//   - __response_status_message: gRPC end-trailer status_message field
+//     verbatim (empty on OK).
+//   - __response_body: concatenated DATA-payload bytes from the receive
+//     side, capped at maxFuzzGRPCResponseBodyCapture (64 KiB) at capture
+//     time. CWE-770: cap is enforced at capture inside
+//     runFuzzGRPCSingleVariant rather than here so multi-MiB streaming
+//     responses are never loaded into memory beyond the cap.
+//   - __response_message_count: number of receive-side DATA envelopes
+//     (decimal int).
+//   - __response_total_bytes: pre-truncation byte sum across every
+//     receive-side DATA envelope (decimal int; matches
+//     fuzz_results.response_length).
+//
+// Header-projected keys (__response_headers__<lower(name)>__) are NOT
+// written: gRPC metadata is exposed only via the trailer-metadata path,
+// which v1 of this seam defers to follow-up (USK-985 design lock). The
+// recorded Flow under row.StreamID retains the full trailer metadata for
+// drill-down via the query tool.
+func injectGRPCResponseVars(kvStore map[string]string, status uint32, statusMessage string, body []byte, messageCount, totalBytes int) {
+	kvStore[macroResponseStatusKey] = strconv.FormatUint(uint64(status), 10)
+	kvStore[macroResponseStatusMessageKey] = statusMessage
+	kvStore[macroResponseBodyKey] = string(body)
+	kvStore[macroResponseMessageCountKey] = strconv.Itoa(messageCount)
+	kvStore[macroResponseTotalBytesKey] = strconv.Itoa(totalBytes)
+}
+
+// captureGRPCResponseBody concatenates the DATA-message payloads from
+// recvData, stopping once maxFuzzGRPCResponseBodyCapture is reached.
+// USK-985: callers consume this as the source for the post_macro
+// __response_body kvStore key. Truncation happens here (at receive-side
+// walk time) rather than at template-expansion time so streaming
+// responses with many GiB of payload do not allocate beyond the cap.
+//
+// Order: recvData is in receive order as appended by
+// receiveResendGRPCResponses (resend_grpc_helpers.go), which is on-wire
+// order — deterministic per stream.
+func captureGRPCResponseBody(recvData []*envelope.Envelope) []byte {
+	if len(recvData) == 0 {
+		return nil
+	}
+	buf := make([]byte, 0, maxFuzzGRPCResponseBodyCapture)
+	for _, e := range recvData {
+		dataMsg, ok := e.Message.(*envelope.GRPCDataMessage)
+		if !ok || len(dataMsg.Payload) == 0 {
+			continue
+		}
+		remaining := maxFuzzGRPCResponseBodyCapture - len(buf)
+		if remaining <= 0 {
+			break
+		}
+		if len(dataMsg.Payload) <= remaining {
+			buf = append(buf, dataMsg.Payload...)
+			continue
+		}
+		buf = append(buf, dataMsg.Payload[:remaining]...)
+		break
+	}
+	if len(buf) == 0 {
+		return nil
+	}
+	return buf
 }
 
 // nextFuzzGRPCIndices increments the variant index counter (mixed-radix

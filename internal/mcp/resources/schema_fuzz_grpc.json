@@ -118,6 +118,96 @@
     "stop_on_non_ok": {
       "type": "boolean",
       "description": "When true, abort the remaining variants once any variant returns a non-OK gRPC status."
+    },
+    "pre_macro": {
+      "type": "object",
+      "description": "Pre macro hook executed before a variant's dial (scope=iteration) or before the variant loop starts (scope=job). The hook macro shares the KV Store with the fuzz request so extracts flow into §var§ template expansion. For scope=job + on_error=skip, the whole job short-circuits with completed_variants=0 and stopped_reason set.",
+      "required": ["name"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Stored macro name (defined via the macro tool's define_macro action)."
+        },
+        "scope": {
+          "type": "string",
+          "description": "iteration (default; fires once per variant) | job (fires once outside the variant loop; KV Store is shared across the whole job).",
+          "enum": ["iteration", "job"]
+        },
+        "on_error": {
+          "type": "string",
+          "description": "skip (default; iteration scope skips the variant, job scope skips the whole job) | abort (aborts the whole fuzz run) | continue (record the error and proceed).",
+          "enum": ["skip", "abort", "continue"]
+        },
+        "vars": {
+          "type": "object",
+          "description": "Static kvStore overrides injected before the macro runs. For scope=iteration, injected into every variant's per-iteration kvStore after the job-store copy and before reserved-key seeding. For scope=job, injected once into the job kvStore at job start. Keys with the '__' reserved prefix are silently dropped at injection time so a Vars entry cannot shadow runtime-populated reserved keys (__iteration, __nonce, __response_*).",
+          "additionalProperties": { "type": "string" }
+        },
+        "run_interval": {
+          "type": "string",
+          "description": "Hook firing cadence — scope=iteration only. For pre_macro: always (default) | once | every_n | on_error. Rejected with an error when scope='job' (scope=job hooks fire exactly once by construction)."
+        },
+        "n": {
+          "type": "integer",
+          "description": "Iteration cadence for pre_macro run_interval='every_n'. Required when run_interval='every_n'.",
+          "minimum": 1
+        },
+        "status_codes": {
+          "type": "array",
+          "description": "Response status codes gating post_macro run_interval='on_status'. For fuzz_grpc the status domain is the gRPC code space (0=OK, 1..16 per google.golang.org/grpc/codes) — NOT HTTP status. pre_macro does NOT accept on_status — this field is rejected on pre_macro with a non-empty value.",
+          "items": { "type": "integer" }
+        },
+        "match_pattern": {
+          "type": "string",
+          "description": "Response body regex pattern for post_macro run_interval='on_match'. Matched against the concatenated DATA payload bytes (capped at 64 KiB). pre_macro does NOT accept on_match — this field is rejected on pre_macro with a non-empty value."
+        }
+      },
+      "additionalProperties": false
+    },
+    "post_macro": {
+      "type": "object",
+      "description": "Post macro hook executed after a variant's end-trailer is received (scope=iteration) or after the variant loop completes (scope=job). For scope=iteration, gRPC-specific __response_* reserved keys are injected: __response_status (gRPC 0-16 domain, NOT HTTP), __response_status_message, __response_body (capped 64KiB), __response_message_count, __response_total_bytes. For scope=job, no per-iteration response is injected (the loop is over). Fires on natural exhaustion or stop_on_non_ok exit, but NOT on ctx cancel.",
+      "required": ["name"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Stored macro name (defined via the macro tool's define_macro action)."
+        },
+        "scope": {
+          "type": "string",
+          "description": "iteration (default; fires once per variant) | job (fires once after the variant loop completes).",
+          "enum": ["iteration", "job"]
+        },
+        "on_error": {
+          "type": "string",
+          "description": "skip (default; log warn + record error row) | abort (post failures never abort the run; behaviour matches skip for post) | continue (same as skip).",
+          "enum": ["skip", "abort", "continue"]
+        },
+        "vars": {
+          "type": "object",
+          "description": "Static kvStore overrides injected before the macro runs. For scope=iteration, injected into every variant's per-iteration kvStore after the job-store copy and before reserved-key seeding. For scope=job, injected once into the job kvStore at job start. Keys with the '__' reserved prefix are silently dropped at injection time so a Vars entry cannot shadow runtime-populated reserved keys (__iteration, __nonce, __response_*).",
+          "additionalProperties": { "type": "string" }
+        },
+        "run_interval": {
+          "type": "string",
+          "description": "Hook firing cadence — scope=iteration only. For post_macro: always (default) | on_status | on_match. Rejected with an error when scope='job' (scope=job hooks fire exactly once by construction)."
+        },
+        "n": {
+          "type": "integer",
+          "description": "Reserved for pre_macro run_interval='every_n'. post_macro does NOT accept every_n; supplying n on post_macro has no effect.",
+          "minimum": 1
+        },
+        "status_codes": {
+          "type": "array",
+          "description": "Response status codes gating post_macro run_interval='on_status'. For fuzz_grpc the domain is the gRPC code space (0=OK, 1..16 per google.golang.org/grpc/codes) — NOT HTTP status. Required when run_interval='on_status'.",
+          "items": { "type": "integer" }
+        },
+        "match_pattern": {
+          "type": "string",
+          "description": "Response body regex pattern for post_macro run_interval='on_match'. Matched against the concatenated DATA payload bytes (capped at 64 KiB). Required when run_interval='on_match'."
+        }
+      },
+      "additionalProperties": false
     }
   },
   "additionalProperties": false
