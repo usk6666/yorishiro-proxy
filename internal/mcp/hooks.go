@@ -24,7 +24,8 @@ import (
 // Reserved KV Store keys used by pass_response injection. See
 // internal/macro/reserved.go for the broader reserved-key contract;
 // the "__" prefix prevents user-controlled macros from shadowing these
-// runtime-populated values via the mergeKVStore reserved-key filter.
+// runtime-populated values via the macro.IsReservedKey filter applied
+// at every KV-store merge site.
 const (
 	// macroResponseStatusKey is the kvStore key receiving the HTTP
 	// response status code as a base-10 decimal string.

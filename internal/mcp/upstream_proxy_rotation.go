@@ -7,7 +7,7 @@
 //
 // Reserved variables (prefix "__") cannot be set or shadowed by
 // user-supplied macros — see internal/macro/reserved.go and the
-// mergeKVStore guard in internal/job/job.go.
+// InjectVarsRespectingReserved guard in internal/mcp/fuzz_macro_common.go.
 package mcp
 
 import (

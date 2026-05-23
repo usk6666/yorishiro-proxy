@@ -118,9 +118,13 @@ internal/
                            #   engine.go, rule.go, preset.go (destructive-sql,
                            #   destructive-os-command), preset_pii.go (credit-card,
                            #   japan-my-number, email, japan-phone)
-  job/                     # Job runner with EnvelopeSource interface
+  job/                     # EnvelopeSource impls (per-protocol resend/fuzz sources)
+                           #   consumed by internal/mcp/{resend_*,fuzz_*}_helpers.go.
+                           #   source.go (EnvelopeSource interface),
                            #   http_source.go, ws_source.go, grpc_source.go, raw_source.go,
-                           #   fuzz_http_source.go, fuzz_raw_source.go
+                           #   fuzz_http_source.go, fuzz_raw_source.go,
+                           #   byte_patch.go (raw-payload patching),
+                           #   template.go (§var§ expansion for fuzz sources)
   macro/                   # Macro engine: template / guard / extract / encoder
   flow/                    # Stream/Flow Store (sqlite); HAR / JSONL export, import
   cert/                    # Root CA + dynamic server cert issuance

@@ -725,7 +725,8 @@ func expandFuzzWSPayloads(payloads map[string]string, kvStore map[string]string)
 // keys injected into the per-iteration kvStore before post_macro runs
 // (USK-984). The "__" prefix matches the existing __response_status /
 // __response_body / __response_headers__ convention so user-supplied
-// macros cannot shadow them via the mergeKVStore reserved-key filter.
+// macros cannot shadow them via the macro.IsReservedKey filter applied
+// at every KV-store merge site.
 const (
 	// macroResponseOpcodeKey carries the terminating frame's opcode
 	// name ("text", "binary", "close", etc.). Distinct from
