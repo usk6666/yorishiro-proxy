@@ -64,7 +64,7 @@ type MacroConfig struct {
 
 	// Vars is a static map of kvStore overrides injected before the macro
 	// runs. Keys with the reserved prefix ("__") are silently dropped at
-	// injection time (matches internal/job/job.go:mergeKVStore precedent)
+	// injection time via macro.IsReservedKey (see internal/macro/reserved.go)
 	// so a Vars entry cannot shadow runtime-populated reserved keys such
 	// as __iteration / __nonce / __response_* (USK-981 Q2).
 	//
@@ -258,8 +258,8 @@ func resolveRunInterval(s string) string {
 // USK-981: scope="job" forces RunInterval="always" (the validator
 // already rejected non-empty RunInterval for scope="job", so this is
 // belt-and-braces). Vars from job-scope hooks is injected into the
-// returned jobKVStore with reserved-key silent-drop — matches the
-// internal/job/job.go mergeKVStore precedent.
+// returned jobKVStore with reserved-key silent-drop — see
+// InjectVarsRespectingReserved below.
 func BuildJobHookExecutor(s *Server, preMacro, postMacro *MacroConfig) (*hookExecutor, map[string]string) {
 	if !IsJobScope(preMacro) && !IsJobScope(postMacro) {
 		return nil, nil
@@ -282,17 +282,12 @@ func BuildJobHookExecutor(s *Server, preMacro, postMacro *MacroConfig) (*hookExe
 }
 
 // InjectVarsRespectingReserved copies src into dst, silently dropping
-// keys with the reserved prefix ("__") so a user-supplied Vars entry
-// cannot shadow runtime-populated reserved keys (USK-981 Q2). Matches
-// the internal/job/job.go:mergeKVStore precedent.
+// keys with the reserved prefix ("__") via macro.IsReservedKey so a
+// user-supplied Vars entry cannot shadow runtime-populated reserved
+// keys (USK-981 Q2). See internal/macro/reserved.go for the canonical
+// reserved-key contract.
 //
 // Shared by fuzz_http / fuzz_ws / fuzz_grpc / fuzz_raw (USK-983).
-//
-// Local replication is preferred over importing internal/job for two
-// reasons: (1) the package boundary is control plane (internal/mcp) →
-// data path (internal/job), which the project conventions discourage;
-// (2) the function is small enough that DRYing it would cost more in
-// indirection than it saves.
 func InjectVarsRespectingReserved(dst map[string]string, src map[string]string) {
 	for k, v := range src {
 		if macro.IsReservedKey(k) {

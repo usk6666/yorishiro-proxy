@@ -1,33 +1,32 @@
-// Package job defines the execution unit for resend/fuzz operations.
+// Package job collects the per-protocol [EnvelopeSource] implementations
+// and byte-patch utilities consumed by the resend / fuzz MCP tool helpers
+// in internal/mcp/ (resend_http / resend_ws / resend_grpc / resend_raw /
+// fuzz_http / fuzz_raw).
 //
-// Job is NOT a Pipeline Step — it is a separate execution layer that wraps
-// the Pipeline with Macro hook support (pre-send, post-receive).
+// # Sources
 //
-// Normal proxy traffic flows through:
+// Each Source rebuilds the send-direction Envelope for a recorded stream
+// (optionally with overrides applied) and yields it via [EnvelopeSource.Next].
+// MCP helpers drive the Source from their own send/receive loops; this
+// package does not provide its own run loop.
 //
-//	Connector → RunSession(client Channel, dial, pipeline)
+//   - HTTPResendSource (http_source.go)
+//   - WSResendSource   (ws_source.go)
+//   - GRPCResendSource (grpc_source.go)
+//   - RawResendSource  (raw_source.go)
+//   - FuzzHTTPSource   (fuzz_http_source.go)
+//   - FuzzRawSource    (fuzz_raw_source.go)
 //
-// Resend/fuzz traffic flows through:
+// # Byte patching
 //
-//	Job(EnvelopeSource, dial, pipeline, macro hooks).Run()
+// [BytePatch] / [ApplyPatches] (byte_patch.go) provide a single-byte / byte-range
+// patch primitive used by fuzz_raw and resend_raw to apply offset-anchored
+// edits on top of a recorded raw payload.
 //
-// Job has its own send/receive loop and does NOT use RunSession (which is
-// designed for bidirectional proxy sessions). Each iteration:
+// # Template expansion
 //
-//  1. Source.Next() yields the next Envelope to send
-//  2. Pre-send macro hook fires (if configured and RunInterval matches)
-//  3. Pipeline.Run processes the send Envelope
-//  4. Dial upstream → Channel.Send → Channel.Next (response)
-//  5. Pipeline.Run processes the response Envelope
-//  6. Post-receive macro hook fires (if configured and RunInterval matches)
-//  7. HookState updated for RunInterval evaluation on next iteration
-//
-// Macro hooks are Job-level concerns because:
-//   - Macros are specified per Job (not applied to normal proxy traffic)
-//   - RunInterval (once, every_n, on_error, on_status) requires Job-level state
-//   - Post-receive runs after Pipeline completion
-//   - Macros are inherently stateful (KV Store shared across hooks)
-//
-// Macro internal requests use Pipeline.Without(InterceptStep). All other Steps
-// (HostScope, Safety, Transform, Record) still apply to Macro traffic.
+// [ExpandEnvelopeTemplates] (template.go) applies §variable§ template
+// expansion to an Envelope's Message fields using a KV store. Used by the
+// fuzz Sources to inject per-iteration macro state into reconstructed
+// requests.
 package job

@@ -7,9 +7,9 @@ import "strings"
 // nonce, iteration counter, ...) and MUST NOT be overwritten by
 // user-supplied macros, hook results, or input vars.
 //
-// Callers that merge user-controlled maps into a shared KVStore (the Job
-// runner's mergeKVStore, MCP per-iteration injection sites) filter such
-// writes via IsReservedKey so a malicious or careless macro cannot
+// Callers that merge user-controlled maps into a shared KVStore (the
+// MCP per-iteration / per-job injection sites in internal/mcp/) filter
+// such writes via IsReservedKey so a malicious or careless macro cannot
 // shadow runtime state like §__nonce§ that downstream template
 // expansion relies on.
 const ReservedKeyPrefix = "__"
