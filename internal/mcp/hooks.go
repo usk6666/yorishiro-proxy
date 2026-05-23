@@ -494,10 +494,14 @@ func (he *hookExecutor) shouldRunPreMacro(h *hookConfig) bool {
 		}
 		return he.state.requestCount%h.N == 0
 	case "on_error":
-		// Run if the previous request had an error (4xx/5xx or transport error).
-		// Always run on the first request (no previous error to check).
+		// Fires when the previous main request had an error (transport
+		// error or HTTP status >= 400). Returns false on the first
+		// iteration — there is no previous request to react to (USK-982).
+		// This makes "fires only after a real error" match the operator
+		// mental model and avoids a vacuous iter-0 fire when no error has
+		// been observed yet.
 		if he.state.requestCount == 0 {
-			return true
+			return false
 		}
 		return he.state.lastError || he.state.lastStatusCode >= 400
 	default:

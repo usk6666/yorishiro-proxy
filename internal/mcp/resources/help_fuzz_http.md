@@ -65,6 +65,7 @@ Pre and post macro hooks dispatched around variants by name. Both fields take th
   - pre_macro legal values: `"always"` (default) | `"once"` | `"every_n"` | `"on_error"`.
   - post_macro legal values: `"always"` (default) | `"on_status"` | `"on_match"`.
   - The pre/post legal sets are disjoint: `on_status` and `on_match` are post-only; `once`, `every_n`, and `on_error` are pre-only. Picking the wrong direction is rejected at MCP-tool input parse time.
+  - `on_error` semantics (USK-982): fires when the previous variant's response was a transport error or had HTTP status >= 400. Does **NOT** fire on iteration 0 — there is no previous request to react to. Use for reactive flows like "re-authenticate after a 401". The trigger looks at the previous iteration only; consecutive errors will fire the hook on every iteration after the first error, while a single error fires it exactly once on the next iteration.
 - **n** (integer, optional): companion to pre_macro `run_interval="every_n"`. Required when `run_interval="every_n"`; must be ≥ 1.
 - **status_codes** (array of integer, optional): companion to post_macro `run_interval="on_status"`. Required when `run_interval="on_status"`.
 - **match_pattern** (string, optional): companion to post_macro `run_interval="on_match"`. Required when `run_interval="on_match"`.

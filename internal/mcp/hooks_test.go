@@ -204,9 +204,11 @@ func TestShouldRunPreMacro_OnError(t *testing.T) {
 	}
 	h := &hookConfig{Macro: "m", RunInterval: "on_error"}
 
-	// First request: always run (no previous error to check).
-	if !he.shouldRunPreMacro(h) {
-		t.Error("first request: shouldRunPreMacro(on_error) = false, want true")
+	// First request: do NOT run (no previous request to react to —
+	// USK-982 D-Q6: "fires only after a real error" means iter 0 must
+	// not fire vacuously).
+	if he.shouldRunPreMacro(h) {
+		t.Error("first request: shouldRunPreMacro(on_error) = true, want false (USK-982: no previous request)")
 	}
 	he.state.requestCount++
 	he.state.lastStatusCode = 200

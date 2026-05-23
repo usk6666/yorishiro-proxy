@@ -454,8 +454,13 @@ func (l *fuzzHTTPVariantLoop) runOne(ctx context.Context, variantIdx int) (strin
 		// engine gates (every_n) treat skipped iterations as consuming
 		// their slot. Without this, on iteration 3 the gate would still
 		// see requestCount=0 from the iter-0 skip and re-fire pre_macro
-		// on every subsequent iteration. lastStatusCode / lastError stay
-		// untouched (D1 deferred to USK-982).
+		// on every subsequent iteration.
+		//
+		// USK-982: stay on counter-only Bump here — the skip path never
+		// reached the wire so there is no wire result to record. The
+		// previous wire-completed iteration's lastStatusCode / lastError
+		// remain in place, so an on_error gate on the next iteration
+		// still reacts to the most recent real outcome.
 		BumpHookIterationCount(l.hookExec)
 		nextIndices(l.indices, l.plan.positions)
 		return "", nil
@@ -474,6 +479,9 @@ func (l *fuzzHTTPVariantLoop) runOne(ctx context.Context, variantIdx int) (strin
 	expandedPayloads, expandErr := expandFuzzHTTPPayloads(payloads, kvStore)
 	if expandErr != nil {
 		l.recordVariantError(ctx, variantIdx, payloads, fmt.Sprintf("template expansion: %v", expandErr))
+		// USK-982: counter-only bump — like prep.skipped, template-
+		// expansion failures never reached the wire, so lastStatusCode /
+		// lastError carry over from the previous wire-completed iter.
 		BumpHookIterationCount(l.hookExec)
 		nextIndices(l.indices, l.plan.positions)
 		return "", nil
@@ -516,12 +524,21 @@ func (l *fuzzHTTPVariantLoop) runOne(ctx context.Context, variantIdx int) (strin
 		l.runPostMacro(ctx, iterCtx, variantIdx, row, kvStore)
 	}
 
-	// USK-981: bump the iteration counter at the end of every normal-
-	// path iteration so RunInterval engine gates (every_n) see one more
-	// completed iteration before the next runOne call evaluates
-	// shouldRunPreMacro. lastStatusCode / lastError stay untouched
-	// (D1 deferred to USK-982).
-	BumpHookIterationCount(l.hookExec)
+	// USK-981 / USK-982: record the iteration's wire result so the next
+	// runOne call's shouldRunPreMacro sees the correct lastStatusCode /
+	// lastError for the on_error gate, AND advance the iteration counter
+	// for the every_n gate. updateState bumps requestCount and records
+	// (statusCode, runErr != nil) atomically — replacing the counter-
+	// only BumpHookIterationCount used during USK-981.
+	//
+	// Note the per-call-site distinction: only this normal-path branch
+	// has wire-result information. The pre-wire abort branches above
+	// (prep.skipped, template-expansion error) keep BumpHookIterationCount
+	// since they never reached the wire and have no wire result to
+	// record — leaving lastStatusCode / lastError unchanged so the
+	// previous wire-completed iteration's outcome carries over to the
+	// next on_error evaluation.
+	l.hookExec.updateState(statusCode, runErr != nil)
 
 	nextIndices(l.indices, l.plan.positions)
 
