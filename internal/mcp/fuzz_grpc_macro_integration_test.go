@@ -28,6 +28,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -938,5 +939,185 @@ func TestFuzzGRPCMacro_OnMatchPostFiresOnBodyMatch(t *testing.T) {
 	// Exactly one variant's response matched the pattern → post fires once.
 	if got := atomic.LoadInt32(&postCalls); got != 1 {
 		t.Errorf("post macro called %d times, want 1 (only variant 0 body matches)", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 11. RUN_INTERVAL="on_error" — pre fires only after a previous variant had
+//     a transport error OR a non-OK gRPC trailer status. USK-988 acceptance
+//     gate.
+//
+//     gRPC has two error layers (transport vs trailer status) and the
+//     fuzz_grpc adapter folds both into the hadError boolean when calling
+//     hookExecutor.updateState(0, runErr != nil || row.Status != 0).
+//     statusCode=0 is intentional — the shared engine's HTTP-flavored
+//     `lastStatusCode >= 400` rule does not apply to gRPC's 0-16 status
+//     domain (MITM Principle #2 — protocol-canonical). These tests mirror
+//     the fuzz_http TestFuzzHTTPMacro_RunIntervalOnError_* pair from PR #60
+//     (USK-982) and the fuzz_raw analogs from PR #63 (USK-989).
+// ---------------------------------------------------------------------------
+
+// TestFuzzGRPCMacro_RunIntervalOnError_FiresAfterError verifies the
+// USK-988 wiring: pre_macro.run_interval="on_error" fires on every
+// iteration that follows a transport-error iteration. The upstream is
+// a TCP listener that accepts then immediately closes the connection
+// (mirrors the TestFuzzGRPC_ErrorVariantRecordedAsFuzzResult fixture),
+// so every variant fails with a dial / handshake error (runErr != nil
+// and row.Status stays 0 because the trailer was never received).
+//
+// With 3 variants:
+//   - Iter 0: requestCount==0 → no fire (USK-982 engine-side guard).
+//   - Iter 1: previous (iter 0) had runErr != nil → fire.
+//   - Iter 2: previous (iter 1) had runErr != nil → fire.
+//
+// Expected preCalls == 2.
+//
+// Acceptance criterion for USK-988: without the updateState wiring,
+// lastError stays false across iterations and pre never fires
+// (vacuous behaviour identical to the pre-USK-982 fuzz_http bug).
+func TestFuzzGRPCMacro_RunIntervalOnError_FiresAfterError(t *testing.T) {
+	cs, store := setupFuzzGRPCMacroSession(t)
+
+	// Listener that accepts then immediately closes — emulates a dead
+	// upstream that breaks during the TLS handshake / HTTP/2 preface.
+	// Every variant surfaces runErr != nil. (Pattern lifted from
+	// TestFuzzGRPC_ErrorVariantRecordedAsFuzzResult in
+	// fuzz_grpc_integration_test.go.)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			c, aerr := ln.Accept()
+			if aerr != nil {
+				return
+			}
+			_ = c.Close()
+		}
+	}()
+	addr := ln.Addr().String()
+
+	var preCalls int32
+	preServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&preCalls, 1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(preServer.Close)
+
+	preFlowID := recordMacroFlow(t, store, "POST", preServer.URL+"/noop", nil, nil)
+	defineMacroForTest(t, cs, "pre-on-error-grpc", preFlowID, "", "", nil)
+
+	out, isErr, errText := callFuzzGRPCMacro(t, cs, map[string]any{
+		"target_addr": addr,
+		"scheme":      "https",
+		"service":     fuzzGRPCServiceName,
+		"method":      fuzzGRPCMethodUnary,
+		"messages": []map[string]any{
+			{"payload": "seed"},
+		},
+		"positions": []map[string]any{
+			{"path": "messages[0].payload", "payloads": []string{"v1", "v2", "v3"}},
+		},
+		"timeout_ms": 2000,
+		"pre_macro": map[string]any{
+			"name":         "pre-on-error-grpc",
+			"run_interval": "on_error",
+		},
+	})
+	if isErr {
+		t.Fatalf("fuzz_grpc returned error: %s", errText)
+	}
+	if out.CompletedVariants != 3 {
+		t.Fatalf("CompletedVariants = %d, want 3", out.CompletedVariants)
+	}
+
+	// Pre fires on iter 1 (reacting to iter 0's runErr) and iter 2
+	// (reacting to iter 1's runErr). Iter 0 itself does not fire by the
+	// requestCount==0 engine guard.
+	if got := atomic.LoadInt32(&preCalls); got != 2 {
+		t.Errorf("pre macro called %d times, want 2 (on_error fires on iter 1 and iter 2 after iter 0/1 transport failures)", got)
+	}
+
+	// Sanity: every variant row carries a non-empty Error.
+	if len(out.Variants) != 3 {
+		t.Fatalf("len(Variants) = %d, want 3", len(out.Variants))
+	}
+	for i, v := range out.Variants {
+		if v.Error == "" {
+			t.Errorf("variants[%d].Error = empty, want non-empty (dead upstream)", i)
+		}
+	}
+}
+
+// TestFuzzGRPCMacro_RunIntervalOnError_DoesNotFireWithoutError verifies
+// the negative path: pre_macro.run_interval="on_error" never fires when
+// every iteration succeeds (runErr == nil AND row.Status == 0). With 3
+// variants all hitting a healthy echo upstream, pre must fire 0 times.
+//
+// Acceptance criterion for USK-988: iter-0 never fires vacuously
+// (requestCount==0 short-circuit from USK-982), and subsequent iters
+// see lastError==false from the prior successful updateState(0, false)
+// calls so the gate stays closed. Mirrors
+// TestFuzzHTTPMacro_RunIntervalOnError_DoesNotFireWithoutError and
+// TestFuzzRawMacro_RunIntervalOnError_DoesNotFireWithoutError.
+func TestFuzzGRPCMacro_RunIntervalOnError_DoesNotFireWithoutError(t *testing.T) {
+	cs, store := setupFuzzGRPCMacroSession(t)
+
+	upstream := &fuzzGRPCEchoServer{}
+	addr, shutdown := startFuzzGRPCUpstream(t, upstream)
+	defer shutdown()
+
+	var preCalls int32
+	preServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&preCalls, 1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(preServer.Close)
+
+	preFlowID := recordMacroFlow(t, store, "POST", preServer.URL+"/noop", nil, nil)
+	defineMacroForTest(t, cs, "pre-on-error-quiet-grpc", preFlowID, "", "", nil)
+
+	out, isErr, errText := callFuzzGRPCMacro(t, cs, map[string]any{
+		"target_addr": addr,
+		"scheme":      "https",
+		"service":     fuzzGRPCServiceName,
+		"method":      fuzzGRPCMethodUnary,
+		"messages": []map[string]any{
+			{"payload": "seed"},
+		},
+		"positions": []map[string]any{
+			{"path": "messages[0].payload", "payloads": []string{"a", "b", "c"}},
+		},
+		"timeout_ms": 10000,
+		"pre_macro": map[string]any{
+			"name":         "pre-on-error-quiet-grpc",
+			"run_interval": "on_error",
+		},
+	})
+	if isErr {
+		t.Fatalf("fuzz_grpc returned error: %s", errText)
+	}
+	if out.CompletedVariants != 3 {
+		t.Fatalf("CompletedVariants = %d, want 3", out.CompletedVariants)
+	}
+
+	// All 3 variants completed cleanly — pre never fires.
+	if got := atomic.LoadInt32(&preCalls); got != 0 {
+		t.Errorf("pre macro called %d times, want 0 (on_error never fires when every iter has runErr=nil and status=0)", got)
+	}
+
+	// Sanity: every variant row carries empty Error and OK status (0).
+	if len(out.Variants) != 3 {
+		t.Fatalf("len(Variants) = %d, want 3", len(out.Variants))
+	}
+	for i, v := range out.Variants {
+		if v.Error != "" {
+			t.Errorf("variants[%d].Error = %q, want empty (healthy upstream)", i, v.Error)
+		}
+		if v.Status != uint32(codes.OK) {
+			t.Errorf("variants[%d].Status = %d, want 0 (OK)", i, v.Status)
+		}
 	}
 }
