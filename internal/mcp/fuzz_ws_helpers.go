@@ -394,6 +394,12 @@ func (l *fuzzWSVariantLoop) runOne(ctx context.Context, variantIdx int) (string,
 		// USK-981 parity: bump the iteration counter even on skip so
 		// RunInterval engine gates (every_n) treat skipped iterations as
 		// consuming their slot.
+		//
+		// USK-987: stay on counter-only Bump here — the skip path never
+		// reached the wire so there is no wire result to record. The
+		// previous wire-completed iteration's lastStatusCode / lastError
+		// remain in place, so an on_error gate on the next iteration
+		// still reacts to the most recent real outcome.
 		BumpHookIterationCount(l.hookExec)
 		nextIndicesWS(l.indices, l.plan.positions)
 		return "", nil
@@ -413,6 +419,9 @@ func (l *fuzzWSVariantLoop) runOne(ctx context.Context, variantIdx int) (string,
 	expandedPayloads, expandErr := expandFuzzWSPayloads(payloads, kvStore)
 	if expandErr != nil {
 		l.recordVariantError(ctx, variantIdx, payloads, fmt.Sprintf("template expansion: %v", expandErr))
+		// USK-987: counter-only bump — like prep.skipped, template-
+		// expansion failures never reached the wire, so lastStatusCode /
+		// lastError carry over from the previous wire-completed iter.
 		BumpHookIterationCount(l.hookExec)
 		nextIndicesWS(l.indices, l.plan.positions)
 		return "", nil
@@ -449,11 +458,29 @@ func (l *fuzzWSVariantLoop) runOne(ctx context.Context, variantIdx int) (string,
 		l.runPostMacro(ctx, variantIdx, row, kvStore)
 	}
 
-	// USK-981 parity: bump the iteration counter at the end of every
-	// normal-path iteration so RunInterval engine gates (every_n) see one
-	// more completed iteration before the next runOne call evaluates
-	// shouldRunPreMacro.
-	BumpHookIterationCount(l.hookExec)
+	// USK-981 / USK-987: record the iteration's wire result so the next
+	// runOne call's shouldRunPreMacro sees the correct lastStatusCode /
+	// lastError for the on_error gate, AND advance the iteration counter
+	// for the every_n gate. updateState bumps requestCount and records
+	// (statusCode, runErr != nil) atomically — replacing the counter-
+	// only BumpHookIterationCount used during USK-981.
+	//
+	// Pass statusCode=0 unconditionally: WS close frame codes (RFC 6455
+	// §7.4) are L7 graceful-shutdown signals, not error signals. Passing
+	// int(row.CloseCode) would make a normal closure (Close=1000) trip
+	// the on_error gate (1000 >= 400). Only the transport-error signal
+	// (runErr != nil) drives on_error for WS. Close-code-driven on_error
+	// is deferred — file a follow-up Issue when a concrete operator
+	// scenario emerges (YAGNI / MITM Principle #6).
+	//
+	// Note the per-call-site distinction: only this normal-path branch
+	// has wire-result information. The pre-wire abort branches above
+	// (prep.skipped, template-expansion error) keep BumpHookIterationCount
+	// since they never reached the wire and have no wire result to
+	// record — leaving lastStatusCode / lastError unchanged so the
+	// previous wire-completed iteration's outcome carries over to the
+	// next on_error evaluation.
+	l.hookExec.updateState(0, runErr != nil)
 
 	nextIndicesWS(l.indices, l.plan.positions)
 

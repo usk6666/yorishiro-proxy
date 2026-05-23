@@ -23,6 +23,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -646,5 +647,139 @@ func TestFuzzWSMacro_ResponseOpcodeInjected_ForTextFrame(t *testing.T) {
 		if !matched {
 			t.Errorf("post[%d] query = %q, want body= one of %v", i, rec["query"], payloads)
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 9 — pre_macro.run_interval="on_error": fires only on the iteration that
+// follows a wire-recorded transport error.
+// ---------------------------------------------------------------------------
+
+// TestFuzzWSMacro_RunIntervalOnError_FiresAfterError verifies that
+// pre_macro.run_interval="on_error" fires only on iterations that follow
+// a wire-recorded transport error. With 3 variants pointing at an
+// immediately-closed listener every variant fails at upgrade, so pre
+// fires on iter 1 and iter 2 (reacting to iter 0's and iter 1's
+// transport errors) but NOT on iter 0 (requestCount==0 — no previous
+// request to react to, per USK-982). Covers USK-987 acceptance criterion.
+func TestFuzzWSMacro_RunIntervalOnError_FiresAfterError(t *testing.T) {
+	cs, store := setupFuzzWSMacroSession(t)
+
+	// Listener that accepts then immediately closes — emulates a
+	// dead-on-arrival upstream that fails the upgrade handshake. Every
+	// variant produces a transport error (upgrade or receive fails).
+	// Pattern mirrors fuzz_ws_integration_test.go:610 (USK-836).
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			_ = c.Close()
+		}
+	}()
+	addr := ln.Addr().String()
+
+	var preCalls int32
+	preServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&preCalls, 1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(preServer.Close)
+
+	preFlowID := recordMacroFlow(t, store, "POST", preServer.URL+"/noop", nil, nil)
+	defineMacroForTest(t, cs, "pre-on-error", preFlowID, "", "", nil)
+
+	payloads := []string{"v1", "v2", "v3"}
+	_, out := callFuzzWSMacro(t, cs, map[string]any{
+		"target_addr": addr,
+		"scheme":      "ws",
+		"path":        "/echo",
+		"opcode":      "text",
+		"positions": []map[string]any{
+			{"path": "payload", "payloads": payloads},
+		},
+		"timeout_ms": 2000,
+		"pre_macro": map[string]any{
+			"name":         "pre-on-error",
+			"run_interval": "on_error",
+		},
+	})
+	if out == nil {
+		t.Fatal("fuzz_ws returned IsError or nil structured content")
+	}
+	if out.CompletedVariants != len(payloads) {
+		t.Fatalf("CompletedVariants = %d, want %d", out.CompletedVariants, len(payloads))
+	}
+
+	// Sanity: every variant did fail at the wire (the test depends on it).
+	for i, v := range out.Variants {
+		if v.Error == "" {
+			t.Errorf("variants[%d]: Error is empty, want non-empty (upstream closes before upgrade)", i)
+		}
+	}
+
+	// Iter 0: requestCount==0 → no fire (USK-982 iter-0 guard).
+	// Iter 1: previous (iter 0) was a transport error → fire.
+	// Iter 2: previous (iter 1) was a transport error → fire.
+	// Total: len(payloads) - 1 = 2.
+	want := int32(len(payloads) - 1)
+	if got := atomic.LoadInt32(&preCalls); got != want {
+		t.Errorf("pre macro called %d times, want %d (on_error fires on iter 1+ after transport errors; iter 0 does not fire)", got, want)
+	}
+}
+
+// TestFuzzWSMacro_RunIntervalOnError_DoesNotFireWithoutError verifies
+// that pre_macro.run_interval="on_error" never fires when every variant
+// completes successfully against an echo server — there is no transport
+// error to react to and iter 0 does not fire vacuously (USK-982 iter-0
+// guard). Confirms close-frame codes (RFC 6455 §7.4) do NOT trigger
+// on_error: the echo server's graceful shutdown emits Close=1000 but
+// that is an L7 graceful signal, not an error (USK-987 design Q1=(a)
+// + Q3 statusCode=0).
+func TestFuzzWSMacro_RunIntervalOnError_DoesNotFireWithoutError(t *testing.T) {
+	cs, store := setupFuzzWSMacroSession(t)
+	addr, cleanup := newWebSocketEchoServer(t)
+	defer cleanup()
+
+	var preCalls int32
+	preServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&preCalls, 1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(preServer.Close)
+
+	preFlowID := recordMacroFlow(t, store, "POST", preServer.URL+"/noop", nil, nil)
+	defineMacroForTest(t, cs, "pre-on-error-quiet", preFlowID, "", "", nil)
+
+	payloads := []string{"a", "b", "c"}
+	_, out := callFuzzWSMacro(t, cs, map[string]any{
+		"target_addr": addr,
+		"scheme":      "ws",
+		"path":        "/echo",
+		"opcode":      "text",
+		"positions": []map[string]any{
+			{"path": "payload", "payloads": payloads},
+		},
+		"timeout_ms": 5000,
+		"pre_macro": map[string]any{
+			"name":         "pre-on-error-quiet",
+			"run_interval": "on_error",
+		},
+	})
+	if out == nil {
+		t.Fatal("fuzz_ws returned IsError or nil structured content")
+	}
+	if out.CompletedVariants != len(payloads) {
+		t.Fatalf("CompletedVariants = %d, want %d", out.CompletedVariants, len(payloads))
+	}
+	// No variant errored — pre never fires.
+	if got := atomic.LoadInt32(&preCalls); got != 0 {
+		t.Errorf("pre macro called %d times, want 0 (on_error never fires when all iters succeed; close-frame codes do not trigger on_error)", got)
 	}
 }
