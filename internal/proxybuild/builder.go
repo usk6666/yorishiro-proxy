@@ -868,26 +868,25 @@ func buildOnHTTP2Stack(p *pipeline.Pipeline, deps Deps, logger *slog.Logger) con
 		upstreamLOpts := httpaggregator.OptionsFromLayer(upstreamH2)
 		upstreamLOpts.StateReleaser = deps.PluginV2Engine
 
-		// USK-816: when the pooled upstreamH2 goes stale during a long
-		// intercept hold (server GOAWAY / idle FIN), per-stream dial closures
+		// USK-816 / USK-991: when the pooled upstreamH2 (or a previously
+		// redialed Layer) goes stale during a long intercept hold — server
+		// GOAWAY / idle FIN — per-stream dial closures transparently
 		// fall back to a fresh dial. The fresh Layer is shared across all
-		// subsequent streams in this CONNECT lifecycle via redial.Load +
-		// mutex-serialised redial.Store, so concurrent streams do not each
-		// open a new upstream conn. The fresh Layer is owned by this handler
-		// — it is closed in the deferred cleanup below.
-		var redial atomic.Pointer[http2.Layer]
-		// Single-writer close: only the goroutine that wins the redialDial
-		// mutex and stores into redial owns its Close. Subsequent loads
-		// observe the pointer and reuse without taking ownership.
-		var redialDial sync.Mutex
-		redialFn := func(dctx context.Context, t string, stale *http2.Layer) (*http2.Layer, error) {
-			return connector.RedialUpstreamH2(dctx, t, stale, deps.BuildConfig)
+		// subsequent streams in this CONNECT lifecycle via redialChain.current
+		// + mutex-serialised dial, so concurrent streams do not each open a
+		// new upstream conn. The fresh Layers are owned by this handler — all
+		// chain steps are closed in the deferred cleanup below.
+		//
+		// USK-991: the chain is unbounded (browser-equivalent transparency:
+		// no cap; the per-CONNECT lifetime is the natural bound). Prior
+		// Layers are retained for the CONNECT's lifetime so in-flight
+		// streams on them drain naturally up to GOAWAY's last_stream_id
+		// (RFC 9113 §6.8) — close-on-CONNECT-exit, not close-on-swap.
+		chain := newRedialChain()
+		redialFn := func(dctx context.Context, t string, stale *http2.Layer, generation int) (*http2.Layer, error) {
+			return connector.RedialUpstreamH2(dctx, t, stale, deps.BuildConfig, generation)
 		}
-		defer func() {
-			if l := redial.Load(); l != nil {
-				_ = l.Close()
-			}
-		}()
+		defer chain.closeAll()
 
 		var wg sync.WaitGroup
 		for {
@@ -985,7 +984,7 @@ func buildOnHTTP2Stack(p *pipeline.Pipeline, deps Deps, logger *slog.Logger) con
 						return
 					}
 					dial := func(dctx context.Context, env *envelope.Envelope) (layer.Channel, error) {
-						upL := selectUpstreamForDial(dctx, target, upstreamH2, &redial, &redialDial, redialFn, logger)
+						upL := selectUpstreamForDial(dctx, target, upstreamH2, chain, redialFn, logger)
 						upCh, oerr := upL.OpenStream(dctx)
 						if oerr != nil {
 							return nil, oerr
@@ -1023,11 +1022,71 @@ func buildOnHTTP2Stack(p *pipeline.Pipeline, deps Deps, logger *slog.Logger) con
 	}
 }
 
+// redialFunc is the closure proxybuild hands to selectUpstreamForDial.
+// generation is 1 for the first redial off the pooled upstreamH2, 2 for
+// the next chain step, etc. (USK-991). Implementations stamp the fresh
+// Layer's ConnID with a generation-aware suffix so per-step diagnostics
+// stay readable.
+type redialFunc func(ctx context.Context, target string, stale *http2.Layer, generation int) (*http2.Layer, error)
+
+// redialChain holds the chain of fresh *http2.Layer instances produced
+// by recursive GOAWAY-driven redials within a single CONNECT lifecycle
+// (USK-991). The pooled upstreamH2 is the implicit chain[0] and is
+// managed separately by dispatchStack (Pool.Put/Close).
+//
+// Invariants:
+//   - mu serialises append-to-layers + current.Store. Single-writer-on-
+//     append guarantees no in-flight goroutine observes a partially
+//     constructed slice and that current always points to a Layer
+//     already inserted into layers.
+//   - current is a pointer to the most recently appended fresh Layer or
+//     nil before the first redial; readers (selectUpstreamForDial) use
+//     it on the fast path without acquiring mu.
+//   - layers retains every fresh Layer for the CONNECT's lifetime. They
+//     are all closed by closeAll() from the buildOnHTTP2Stack defer.
+//     Browser-equivalent semantics: prior chain steps drain their in-
+//     flight streams naturally up to GOAWAY's last_stream_id (RFC 9113
+//     §6.8); the proxy does not tear them down on swap.
+type redialChain struct {
+	mu      sync.Mutex
+	layers  []*http2.Layer
+	current atomic.Pointer[http2.Layer]
+}
+
+func newRedialChain() *redialChain {
+	return &redialChain{}
+}
+
+// closeAll closes every fresh Layer accumulated in the chain. Called
+// from the buildOnHTTP2Stack defer at CONNECT exit. Idempotent on
+// repeated calls because http2.Layer.Close() is itself idempotent (the
+// USK-739/798 patterns establish this for both directions).
+func (c *redialChain) closeAll() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, l := range c.layers {
+		_ = l.Close()
+	}
+	// Hand back the empty slot so a CONNECT that somehow re-enters
+	// (it does not today) would not double-close.
+	c.layers = nil
+	c.current.Store(nil)
+}
+
 // selectUpstreamForDial returns the *http2.Layer to use for OpenStream on
-// this dial attempt. It re-checks the pooled upstreamH2's liveness via
-// GoAwayClosed / IsShutdown (USK-816). When stale, it fresh-dials a
-// replacement Layer atomically, sharing the result with concurrent streams
-// in the same CONNECT lifecycle.
+// this dial attempt. It walks the redial chain and re-checks the
+// currently-active Layer's liveness via GoAwayClosed / IsShutdown each
+// call (USK-816 for the 1st step, USK-991 for the recursive case).
+// When the active Layer is stale, it fresh-dials a replacement Layer
+// under chain.mu, appends to chain.layers, atomically swaps
+// chain.current, and returns the fresh Layer. The same fresh Layer is
+// observed by concurrent streams via chain.current.Load() so they do
+// not each open a new upstream conn.
+//
+// Active-Layer selection rule:
+//   - chain.current.Load() if non-nil (we've already redialed at least
+//     once in this CONNECT)
+//   - else the pooled upstreamH2
 //
 // Why GoAwayClosed/IsShutdown at dial-closure time: USK-796 added the same
 // check at Pool.Get to evict stale entries before handing them out, but
@@ -1035,7 +1094,7 @@ func buildOnHTTP2Stack(p *pipeline.Pipeline, deps Deps, logger *slog.Logger) con
 // span server GOAWAY / idle-close mid-CONNECT — the pool already gave us
 // the Layer, so the dial closure must re-check.
 //
-// Why we do NOT Pool.Evict the stale Layer here: the surrounding
+// Why we do NOT Pool.Evict the stale pooled Layer here: the surrounding
 // dispatchStack flow runs `Pool.Put(poolKey, upstreamH2)` deferred at
 // handler exit, and the still-running clientToUpstream goroutines on
 // other concurrent streams may still hold references. Single-writer
@@ -1043,43 +1102,88 @@ func buildOnHTTP2Stack(p *pipeline.Pipeline, deps Deps, logger *slog.Logger) con
 // pool's selectLocked path on the next Pool.Get — it is the canonical
 // stale-entry evictor (USK-796) and runs after our handler has returned.
 //
-// The redialDial mutex serialises the fresh-dial attempt so concurrent
-// streams observing staleness produce one upstream conn (not N). On
-// dial failure, the original (stale) upstreamH2 is returned — OpenStream
-// will then surface the underlying error to the caller, so failure
-// propagates naturally (state=error / failure_reason=refused).
+// Why we hold prior chain steps until CONNECT exit (USK-991): browser-
+// equivalent semantics. A GOAWAY tells the client "no new streams" but
+// existing streams up to last_stream_id complete normally (RFC 9113
+// §6.8). Closing prior chain steps on swap would abort their in-flight
+// streams; holding them lets those streams drain and only NEW streams
+// fall through to the fresh chain step. The slice is bounded in
+// practice by the CONNECT's lifetime — there is no chain cap; this is
+// a deliberate decision for diagnostic transparency, see USK-991.
+//
+// The chain.mu serialises the fresh-dial attempt so concurrent streams
+// observing staleness produce one upstream conn (not N). On dial
+// failure, the previous (stale) Layer is returned — OpenStream will
+// then surface the underlying error to the caller, so failure
+// propagates naturally (state=error / failure_reason=refused). The
+// failed dial is NOT cached, so the next call retries cleanly.
 func selectUpstreamForDial(
 	dctx context.Context,
 	target string,
 	upstreamH2 *http2.Layer,
-	redial *atomic.Pointer[http2.Layer],
-	redialDial *sync.Mutex,
-	redialFn func(context.Context, string, *http2.Layer) (*http2.Layer, error),
+	chain *redialChain,
+	dialFresh redialFunc,
 	logger *slog.Logger,
 ) *http2.Layer {
-	if l := redial.Load(); l != nil {
-		return l
+	// Fast path: lock-free read of the active Layer. current.Load() is
+	// either nil (no redial yet — use pooled) or points to a Layer that
+	// was appended to chain.layers under chain.mu prior to the swap, so
+	// readers observing it are guaranteed to see a valid entry.
+	active := upstreamH2
+	if l := chain.current.Load(); l != nil {
+		active = l
 	}
-	if !(upstreamH2.GoAwayClosed() || upstreamH2.IsShutdown()) {
-		return upstreamH2
+	if !isStaleH2(active) {
+		return active
 	}
 
-	redialDial.Lock()
-	defer redialDial.Unlock()
-	if l := redial.Load(); l != nil {
-		return l
+	// Slow path: race to fresh-dial the next chain step. The mutex
+	// serialises both the re-check and the append+swap, so concurrent
+	// streams observing the same stale Layer collapse into a single
+	// fresh dial — and at most one per stale step.
+	chain.mu.Lock()
+	defer chain.mu.Unlock()
+	// Re-check under lock — another goroutine may have already swapped in
+	// the next chain step while we were spinning on mu.
+	active = upstreamH2
+	if l := chain.current.Load(); l != nil {
+		active = l
+	}
+	if !isStaleH2(active) {
+		return active
 	}
 
-	fresh, err := redialFn(dctx, target, upstreamH2)
+	// Generation = number of fresh Layers already appended + 1. The
+	// pooled upstreamH2 is implicit chain[0] (generation 0); the first
+	// fresh dial is generation 1, the second is generation 2, etc. The
+	// connector helper translates generation into the ConnID suffix
+	// (`/upstream-redial` for gen 1; `/upstream-redial-N` for gen >= 2).
+	nextGen := len(chain.layers) + 1
+	fresh, err := dialFresh(dctx, target, active, nextGen)
 	if err != nil {
 		logger.Warn("proxybuild: upstream h2 redial failed",
-			"target", target, "error", err)
-		return upstreamH2
+			"target", target, "generation", nextGen, "error", err)
+		// Return the (stale) active Layer. The caller's OpenStream will
+		// surface the underlying ErrorRefused so the session records
+		// state=error / failure_reason=refused — the failure mode is
+		// then visible to the operator rather than silently swallowed.
+		// The failed dial is NOT appended to chain.layers, so the next
+		// call retries cleanly.
+		return active
 	}
-	redial.Store(fresh)
+	chain.layers = append(chain.layers, fresh)
+	chain.current.Store(fresh)
 	logger.Debug("proxybuild: upstream h2 redialed after stale-conn detection",
-		"target", target)
+		"target", target, "generation", nextGen)
 	return fresh
+}
+
+// isStaleH2 returns true when the layer has emitted GOAWAY-close or
+// been observed shutdown (USK-796 surfaces). Used by both the fast and
+// slow paths of selectUpstreamForDial; the slow path re-checks under
+// chain.mu so concurrent stream redials still single-flight.
+func isStaleH2(l *http2.Layer) bool {
+	return l.GoAwayClosed() || l.IsShutdown()
 }
 
 // buildSessionOptions populates the SessionOptions threaded into every
