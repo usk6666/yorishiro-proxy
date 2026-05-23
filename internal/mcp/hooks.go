@@ -32,6 +32,12 @@ const (
 
 	// macroResponseBodyKey is the kvStore key receiving the HTTP response
 	// body verbatim, capped at maxResponseBodyKVBytes.
+	//
+	// USK-985: also reused by fuzz_grpc post_macro for the concatenated
+	// gRPC DATA payload (capped at maxFuzzGRPCResponseBodyCapture / 64
+	// KiB at capture time). The byte cap is enforced at capture inside
+	// runFuzzGRPCSingleVariant rather than at injection — see the doc
+	// comment there for the streaming-response rationale.
 	macroResponseBodyKey = macro.ReservedKeyPrefix + "response_body"
 
 	// macroResponseHeaderKeyPrefix / macroResponseHeaderKeySuffix bracket the
@@ -53,6 +59,35 @@ const (
 	// response cap (maxResendRawResponse, 16 MiB) before EOF. Used by
 	// fuzz_raw (USK-986).
 	macroResponseTruncatedKey = macro.ReservedKeyPrefix + "response_truncated"
+
+	// USK-985: gRPC-specific __response_* reserved keys for fuzz_grpc
+	// post_macro. The status domain differs from HTTP — gRPC status is
+	// 0-16 per google.golang.org/grpc/codes (0 = OK, 1..16 = canonical
+	// error codes), while __response_status under fuzz_http carries an
+	// HTTP status (200-599). The shared key NAME __response_status is
+	// reused for cross-protocol macro portability; the value-DOMAIN is
+	// protocol-specific and operators specifying run_interval=on_status
+	// must supply codes appropriate to the fuzz tool they invoke. See
+	// help_fuzz_grpc.md for the canonical gRPC status mapping.
+
+	// macroResponseStatusMessageKey is the kvStore key receiving the
+	// gRPC end trailer's status_message field as a verbatim string. Empty
+	// on a clean OK trailer; non-empty on canonical error codes (e.g.
+	// "deadline exceeded" for status=4). fuzz_grpc only — fuzz_http does
+	// not populate this key.
+	macroResponseStatusMessageKey = macro.ReservedKeyPrefix + "response_status_message"
+
+	// macroResponseMessageCountKey is the kvStore key receiving the
+	// per-variant gRPC DATA-envelope count (decimal int). fuzz_grpc only.
+	macroResponseMessageCountKey = macro.ReservedKeyPrefix + "response_message_count"
+
+	// macroResponseTotalBytesKey is the kvStore key receiving the
+	// per-variant gRPC DATA-payload byte sum (decimal int). This is the
+	// pre-truncation total of every receive-side DATA payload (so it
+	// matches fuzz_results.response_length); __response_body is the
+	// concatenated payload bytes after the 64 KiB capture cap. fuzz_grpc
+	// only.
+	macroResponseTotalBytesKey = macro.ReservedKeyPrefix + "response_total_bytes"
 )
 
 // maxResponseBodyKVBytes caps the body bytes copied into the kvStore via

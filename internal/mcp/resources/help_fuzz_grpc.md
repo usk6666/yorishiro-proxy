@@ -72,6 +72,69 @@ When `true`, abort the remaining variants once any variant returns a non-OK gRPC
 ### timeout_ms (integer, optional)
 Per-VARIANT timeout in milliseconds. Default `30000`.
 
+### pre_macro / post_macro (object, optional)
+
+Pre and post macro hooks dispatched around variants by name. Both fields take the same shape as `fuzz_http` (USK-985, gRPC sibling of USK-960/961/981):
+
+- **name** (string, REQUIRED): the stored macro name (defined via the `macro` tool's `define_macro` action).
+- **scope** (string, optional): `"iteration"` (default) or `"job"`. See "Macro hook scopes" below.
+- **on_error** (string, optional): `"skip"` (default) | `"abort"` | `"continue"`. Same semantics as `fuzz_http` — see the [fuzz_http help-doc](yorishiro://help/fuzz_http) for the full matrix.
+- **vars** (object string→string, optional): static kvStore overrides injected before the macro runs. Keys with the reserved prefix (`__`) are silently dropped.
+- **run_interval** (string, optional): hook firing cadence — **`scope="iteration"` only**. Rejected with an error when paired with `scope="job"` (job-scope hooks fire exactly once by construction).
+  - pre_macro legal values: `"always"` (default) | `"once"` | `"every_n"` | `"on_error"`.
+  - post_macro legal values: `"always"` (default) | `"on_status"` | `"on_match"`.
+- **n** (integer, optional): companion to pre_macro `run_interval="every_n"`. Required when `run_interval="every_n"`; must be ≥ 1.
+- **status_codes** (array of integer, optional): companion to post_macro `run_interval="on_status"`. Required when `run_interval="on_status"`. **The status domain is gRPC, not HTTP** — see below.
+- **match_pattern** (string, optional): companion to post_macro `run_interval="on_match"`. Matched against the concatenated DATA payload bytes (capped at 64 KiB). Required when `run_interval="on_match"`.
+
+#### gRPC firing points
+
+| Hook | Iteration unit | When it fires |
+|------|----------------|---------------|
+| `pre_macro` (`scope=iteration`) | 1 variant = 1 unary RPC | Before dial (i.e. before TLS handshake / HTTP/2 SETTINGS) |
+| `post_macro` (`scope=iteration`) | 1 variant = 1 unary RPC | After the end trailer is received (or after stream termination on abnormal close) |
+| `pre_macro` (`scope=job`) | Whole job | Once before the variant loop starts |
+| `post_macro` (`scope=job`) | Whole job | Once after the variant loop completes — on natural exhaustion or `stop_on_non_ok` exit, **NOT on ctx cancel** |
+
+#### __response_* reserved keys (gRPC)
+
+`post_macro` with `scope=iteration` receives these reserved keys in the per-variant kvStore (overwritten on each iteration):
+
+| Key | Type | gRPC source |
+|-----|------|-------------|
+| `__response_status` | uint32 → decimal string | gRPC end-trailer status code (0..16 per `google.golang.org/grpc/codes`) |
+| `__response_status_message` | string | gRPC end-trailer `status_message` field (empty on OK) |
+| `__response_body` | bytes → string | Concatenation of every receive-direction DATA payload, **capped at 64 KiB at capture time** |
+| `__response_message_count` | int → decimal string | Number of receive-direction DATA envelopes |
+| `__response_total_bytes` | int → decimal string | Pre-truncation byte sum across every receive-direction DATA payload — matches `fuzz_results.response_length` |
+
+> **`__response_status` is the gRPC status code, NOT an HTTP status.** Operators supplying `run_interval="on_status"` with `status_codes: [...]` must supply gRPC codes — `[0]` for OK, `[14]` for UNAVAILABLE, `[16]` for UNAUTHENTICATED, etc. Supplying HTTP codes (200, 503) will silently fail to match because the gRPC RPC's wire status is in the 0-16 domain. See `google.golang.org/grpc/codes` for the canonical enum:
+> ```
+> 0 OK | 1 Cancelled | 2 Unknown | 3 InvalidArgument | 4 DeadlineExceeded |
+> 5 NotFound | 6 AlreadyExists | 7 PermissionDenied | 8 ResourceExhausted |
+> 9 FailedPrecondition | 10 Aborted | 11 OutOfRange | 12 Unimplemented |
+> 13 Internal | 14 Unavailable | 15 DataLoss | 16 Unauthenticated
+> ```
+> Header-projected keys (`__response_headers__<lower(name)>__`) and trailer-metadata keys are **NOT** populated by `fuzz_grpc` v1 — trailer-metadata wiring is deferred to follow-up. The recorded Flow under `row.stream_id` retains the full trailer metadata for drill-down via the `query` tool.
+
+#### Macro hook scopes
+
+Same shape as `fuzz_http`. See the [fuzz_http help-doc](yorishiro://help/fuzz_http) "Macro hook scopes" section for the full matrix. Quick summary:
+
+| Scope | Pre fires | Post fires | KV Store lifetime | `__response_*` keys | `§__iteration§` / `§__nonce§` |
+|-------|-----------|------------|-------------------|---------------------|-------------------------------|
+| `iteration` (default) | Before each variant's dial | After each variant's end-trailer | Fresh per variant | Visible to post | Seeded each iteration |
+| `job` | Once before the variant loop | Once after the variant loop (incl. `stop_on_non_ok` exit) | Shared across the whole job | NOT visible | NOT seeded |
+
+Mix-scope is supported — `pre_macro` and `post_macro` may pick their scope independently.
+
+#### fuzz_macro_results schema notes
+
+The `fuzz_macro_results` table (one row per hook invocation) keys on `(fuzz_id, index_num, hook_name)`:
+
+- **`index_num`** is the 0-based variant index for `scope="iteration"` rows.
+- **`index_num = -1`** is the sentinel for `scope="job"` rows.
+
 ## Result fields
 
 - `fuzz_id` (string, UUID) — primary key of the `fuzz_jobs` row created for this run. Chain with `query { resource: "fuzz_results", filter: { fuzz_id: "...", outliers_only: true } }` to surface outlier variants without re-running the fuzz job (USK-835 + USK-278; parity with `fuzz_http` USK-827).
@@ -204,3 +267,47 @@ Both positions target the same message — the per-variant re-encode merges both
   ]
 }
 ```
+
+### Mix-scope macro hooks: login once, fuzz N RPCs, summarise once
+```json
+{
+  "target_addr": "grpc.target.com:443",
+  "scheme": "https",
+  "service": "pkg.Greeter",
+  "method": "SayHello",
+  "metadata": [
+    {"name": "authorization", "value": "Bearer §session_token§"}
+  ],
+  "messages": [
+    {"payload": "CgVhbGljZQ==", "body_encoding": "base64"}
+  ],
+  "positions": [
+    {"path": "metadata[0].value", "payloads": ["Bearer §session_token§", "Bearer §session_token§ "]}
+  ],
+  "pre_macro":  {"name": "login-once", "scope": "job"},
+  "post_macro": {"name": "audit-summary", "scope": "job"}
+}
+```
+`pre_macro` (scope=job) runs once before the variant loop, extracts `session_token` into the job-scoped KV Store; every variant then sees `§session_token§` in the templated `authorization` metadata. `post_macro` (scope=job) runs once after the loop completes.
+
+### Post macro gated on gRPC UNAVAILABLE (status code 14)
+```json
+{
+  "target_addr": "grpc.target.com:443",
+  "scheme": "https",
+  "service": "pkg.Greeter",
+  "method": "SayHello",
+  "messages": [
+    {"payload": "CgVhbGljZQ==", "body_encoding": "base64"}
+  ],
+  "positions": [
+    {"path": "messages[0].payload", "encoding": "base64", "payloads": ["CgVhbGljZQ==", "AAEC", "////"]}
+  ],
+  "post_macro": {
+    "name": "alert-on-unavailable",
+    "run_interval": "on_status",
+    "status_codes": [14]
+  }
+}
+```
+`status_codes: [14]` matches the **gRPC** UNAVAILABLE code per `google.golang.org/grpc/codes` — NOT HTTP 503. Supplying `[503]` here would silently never fire because `__response_status` carries the gRPC code, not the HTTP-equivalent.
