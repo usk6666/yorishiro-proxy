@@ -87,6 +87,8 @@ Pre and post macro hooks dispatched around variants by name. Both fields take th
 - **status_codes** (array of integer, optional): companion to post_macro `run_interval="on_status"`. Required when `run_interval="on_status"`. **The status domain is gRPC, not HTTP** — see below.
 - **match_pattern** (string, optional): companion to post_macro `run_interval="on_match"`. Matched against the concatenated DATA payload bytes (capped at 64 KiB). Required when `run_interval="on_match"`.
 
+`run_interval="on_error"` semantics (USK-988): pre_macro fires when the previous variant returned **either** a transport-level error (`runErr != nil` — dial failure, TLS / HTTP/2 preface failure, deadline) **OR** a non-OK gRPC trailer status code (1-16 per `google.golang.org/grpc/codes`). gRPC's status domain is 0-16, so the engine's HTTP-flavored `lastStatusCode >= 400` rule does not apply here — both gRPC error layers are folded into the trigger at the fuzz_grpc adapter site (MITM Principle #2 — protocol-canonical). Iter-0 never fires because there is no previous variant to react to. Pre-wire abort iterations (pre_macro skip, pre_macro abort) consume a counter slot but leave the previous wire-completed iteration's error signal in place, so the gate still reacts to the most recent real outcome.
+
 #### gRPC firing points
 
 | Hook | Iteration unit | When it fires |

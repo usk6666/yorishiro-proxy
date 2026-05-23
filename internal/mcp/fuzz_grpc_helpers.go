@@ -623,11 +623,31 @@ func (l *fuzzGRPCVariantLoop) runOne(ctx context.Context, variantIdx int) (strin
 		l.runPostMacro(ctx, variantIdx, row, body, kvStore)
 	}
 
-	// USK-981: bump the iteration counter at the end of every normal-
-	// path iteration so RunInterval engine gates (every_n) see one more
-	// completed iteration before the next runOne call evaluates
-	// shouldRunPreMacro.
-	BumpHookIterationCount(l.hookExec)
+	// USK-981 / USK-988: record the iteration's wire result so the next
+	// runOne call's shouldRunPreMacro sees the correct lastError for the
+	// on_error gate, AND advance the iteration counter for the every_n
+	// gate. updateState bumps requestCount and records
+	// (statusCode, hadError) atomically — replacing the counter-only
+	// BumpHookIterationCount used during USK-981.
+	//
+	// gRPC has two error layers — transport (runErr) and trailer status
+	// (row.Status != 0, codes 1-16 per google.golang.org/grpc/codes).
+	// Fold both into the hadError boolean at this adapter site: the
+	// shared hookExecutor.shouldRunPreMacro on_error rule is
+	// `lastError || lastStatusCode >= 400` — that HTTP-flavored >= 400
+	// branch does not apply to gRPC's 0-16 status domain (MITM
+	// Principle #2 — protocol-canonical; USK-983 shared-seam discipline
+	// — no protocol-specific knowledge in the shared engine). So we
+	// pass statusCode=0 and OR both gRPC error layers into hadError.
+	// Mirrors the fuzz_ws / fuzz_raw shape (USK-987 / USK-989).
+	//
+	// Note the per-call-site distinction: only this normal-path branch
+	// has wire-result information. The pre-wire abort branch above
+	// (pre-iteration skip) keeps BumpHookIterationCount since it never
+	// reached the wire and has no wire result to record — leaving
+	// lastError unchanged so the previous wire-completed iteration's
+	// outcome carries over to the next on_error evaluation.
+	l.hookExec.updateState(0, runErr != nil || row.Status != 0)
 
 	nextFuzzGRPCIndices(l.indices, l.plan.positions)
 
