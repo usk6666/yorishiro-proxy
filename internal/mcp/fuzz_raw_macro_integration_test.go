@@ -891,6 +891,234 @@ func TestFuzzRawMacro_PreExtractVisibleInPostMacro(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+//  11. RUN_INTERVAL="on_error" — pre fires only after a real transport error
+//     on the previous iteration. USK-989 acceptance gate.
+//
+//     Raw has no L7 status concept, so the on_error gate only reacts to
+//     transport-level failures (runErr != nil). These tests mirror the
+//     fuzz_http TestFuzzHTTPMacro_RunIntervalOnError_* pair from PR #60
+//     (USK-982), substituting "iter returns 500" with "iter dials a
+//     RST-then-close server".
+// ---------------------------------------------------------------------------
+
+// startRawFlakeServer accepts incoming connections and RSTs the first
+// failCount of them (SetLinger(0) + close before the client's send is
+// drained), then responds normally for every subsequent connection.
+// Used by USK-989's on_error tests so iter N fails at the transport
+// level (runErr != nil) and iter N+1's pre_macro can react via the
+// on_error gate.
+//
+// Returns the listen address and a getter for per-connection captures
+// (succeeded connections only — RST'd connections have no captured
+// payload because they never reached the read loop).
+func startRawFlakeServer(t *testing.T, failCount int, response []byte) (string, func() [][]byte) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+
+	var (
+		mu       sync.Mutex
+		captures [][]byte
+		accepted int32
+	)
+	go func() {
+		for {
+			conn, aerr := ln.Accept()
+			if aerr != nil {
+				return
+			}
+			n := atomic.AddInt32(&accepted, 1)
+			go func(c net.Conn, idx int32) {
+				if idx <= int32(failCount) {
+					// RST the connection — SetLinger(0) + Close sends RST,
+					// surfacing as a send-side or receive-side transport
+					// error (runErr != nil) on the fuzz_raw side.
+					if tc, ok := c.(*net.TCPConn); ok {
+						_ = tc.SetLinger(0)
+					}
+					_ = c.Close()
+					return
+				}
+				defer c.Close()
+				buf := make([]byte, 4096)
+				var got []byte
+				_ = c.SetReadDeadline(time.Now().Add(2 * time.Second))
+				rn, _ := c.Read(buf)
+				if rn > 0 {
+					got = append(got, buf[:rn]...)
+					_, _ = c.Write(response)
+				}
+				mu.Lock()
+				captures = append(captures, got)
+				mu.Unlock()
+			}(conn, n)
+		}
+	}()
+
+	return ln.Addr().String(), func() [][]byte {
+		mu.Lock()
+		defer mu.Unlock()
+		out := make([][]byte, len(captures))
+		for i, c := range captures {
+			cc := make([]byte, len(c))
+			copy(cc, c)
+			out[i] = cc
+		}
+		return out
+	}
+}
+
+// TestFuzzRawMacro_RunIntervalOnError_FiresAfterError verifies the
+// USK-989 wiring: pre_macro.run_interval="on_error" fires exactly once
+// on the iteration that follows a transport-level error (runErr != nil).
+// With 2 variants where iter 0 hits a RST'd connection and iter 1
+// reaches a healthy server, pre should fire only on iter 1.
+//
+// Acceptance criterion for USK-989: hookExecutor.updateState is wired
+// in fuzz_raw's variant-loop wire-completion point so on_error sees the
+// actual transport-error signal on the next iteration. Without the
+// wiring, lastError stays false across iterations and pre never fires
+// (vacuous behaviour identical to the pre-USK-982 fuzz_http bug).
+//
+// Mirrors TestFuzzHTTPMacro_RunIntervalOnError_FiresAfterError from
+// PR #60 (USK-982) — raw replaces "iter returns 500" with "iter dials
+// a RST'd server" because raw has no L7 status concept.
+func TestFuzzRawMacro_RunIntervalOnError_FiresAfterError(t *testing.T) {
+	cs, store := setupFuzzRawMacroSession(t)
+	// 1st connection RST'd; subsequent connections respond normally.
+	addr, _ := startRawFlakeServer(t, 1, []byte("OK"))
+
+	var preCalls int32
+	preServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&preCalls, 1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(preServer.Close)
+
+	preFlowID := recordMacroFlow(t, store, "POST", preServer.URL+"/noop", nil, nil)
+	defineMacroForTest(t, cs, "pre-on-error-raw", preFlowID, "", "", nil)
+
+	res, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "fuzz_raw",
+		Arguments: map[string]any{
+			"target_addr": addr,
+			"positions": []map[string]any{
+				{"path": "payload", "payloads": []string{"v1", "v2"}},
+			},
+			"timeout_ms": 5000,
+			"pre_macro": map[string]any{
+				"name":         "pre-on-error-raw",
+				"run_interval": "on_error",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool fuzz_raw: %v", err)
+	}
+	if res.IsError {
+		var msg strings.Builder
+		for _, c := range res.Content {
+			if tc, ok := c.(*gomcp.TextContent); ok {
+				msg.WriteString(tc.Text)
+				msg.WriteString("\n")
+			}
+		}
+		t.Fatalf("fuzz_raw returned error: %s", msg.String())
+	}
+
+	// Pre fires only on iter 1, reacting to iter 0's transport RST.
+	// Iter 0: requestCount==0 → no fire (USK-982 D-Q6).
+	// Iter 1: previous (iter 0) had runErr != nil → fire.
+	if got := atomic.LoadInt32(&preCalls); got != 1 {
+		t.Errorf("pre macro called %d times, want 1 (on_error fires only on iter 1 after iter 0's transport RST)", got)
+	}
+
+	// Sanity: variant rows recorded the right outcomes — iter 0 has a
+	// non-empty Error, iter 1 has empty Error.
+	out := decodeFuzzRawResult(t, res)
+	if out.CompletedVariants != 2 {
+		t.Fatalf("CompletedVariants = %d, want 2", out.CompletedVariants)
+	}
+	if len(out.Variants) != 2 {
+		t.Fatalf("Variants len = %d, want 2", len(out.Variants))
+	}
+	if out.Variants[0].Error == "" {
+		t.Errorf("variants[0].Error = %q, want non-empty (RST'd connection)", out.Variants[0].Error)
+	}
+	if out.Variants[1].Error != "" {
+		t.Errorf("variants[1].Error = %q, want empty (healthy connection)", out.Variants[1].Error)
+	}
+}
+
+// TestFuzzRawMacro_RunIntervalOnError_DoesNotFireWithoutError verifies
+// that pre_macro.run_interval="on_error" never fires when every
+// iteration completes cleanly (no transport error). With 3 variants
+// all hitting a healthy echo server, pre must fire 0 times.
+//
+// Negative-path acceptance for USK-989: iter-0 never fires vacuously
+// (requestCount==0 short-circuit from USK-982), and subsequent iters
+// see lastError==false from the prior successful updateState call so
+// the gate stays closed.
+//
+// Mirrors TestFuzzHTTPMacro_RunIntervalOnError_DoesNotFireWithoutError
+// from PR #60 (USK-982).
+func TestFuzzRawMacro_RunIntervalOnError_DoesNotFireWithoutError(t *testing.T) {
+	cs, store := setupFuzzRawMacroSession(t)
+	addr, getRecv := startRawEchoServer(t, []byte("OK"))
+
+	var preCalls int32
+	preServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&preCalls, 1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(preServer.Close)
+
+	preFlowID := recordMacroFlow(t, store, "POST", preServer.URL+"/noop", nil, nil)
+	defineMacroForTest(t, cs, "pre-on-error-quiet-raw", preFlowID, "", "", nil)
+
+	payloads := []string{"v1", "v2", "v3"}
+	res, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "fuzz_raw",
+		Arguments: map[string]any{
+			"target_addr": addr,
+			"positions": []map[string]any{
+				{"path": "payload", "payloads": payloads},
+			},
+			"timeout_ms": 5000,
+			"pre_macro": map[string]any{
+				"name":         "pre-on-error-quiet-raw",
+				"run_interval": "on_error",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool fuzz_raw: %v", err)
+	}
+	if res.IsError {
+		var msg strings.Builder
+		for _, c := range res.Content {
+			if tc, ok := c.(*gomcp.TextContent); ok {
+				msg.WriteString(tc.Text)
+				msg.WriteString("\n")
+			}
+		}
+		t.Fatalf("fuzz_raw returned error: %s", msg.String())
+	}
+
+	// All 3 variants completed successfully — pre never fires.
+	caps := waitForCaptures(getRecv, len(payloads), 3*time.Second)
+	if len(caps) != len(payloads) {
+		t.Fatalf("captured %d connections, want %d", len(caps), len(payloads))
+	}
+	if got := atomic.LoadInt32(&preCalls); got != 0 {
+		t.Errorf("pre macro called %d times, want 0 (on_error never fires when all iters succeed)", got)
+	}
+}
+
 // decodeFuzzRawResult is the structured-content decoder shared across
 // fuzz_raw macro tests. Mirrors callFuzzRaw but accepts the raw
 // CallToolResult so the test can inspect IsError or chained calls.

@@ -582,12 +582,22 @@ func (l *fuzzRawVariantLoop) runOne(ctx context.Context, variantIdx int) (string
 		preOutcome := l.runPreMacro(ctx, variantIdx, payloads, kvStore)
 		switch preOutcome {
 		case fuzzRawPreSkipped:
+			// USK-989: counter-only bump — the skip path never reached
+			// the wire so there is no wire result to record. The previous
+			// wire-completed iteration's lastError remains in place, so
+			// an on_error gate on the next iteration still reacts to the
+			// most recent real outcome. Mirrors fuzz_http's prep.skipped
+			// path (PR #60 / USK-982).
 			BumpHookIterationCount(l.hookExec)
 			nextFuzzRawIndices(l.indices, l.plan.positions)
 			return "", nil
 		case fuzzRawPreAborted:
 			// on_error=abort: row recorded with row.Error set by
 			// runPreMacro; halt the loop with a documented stop reason.
+			// USK-989: counter-only bump — abort is also a pre-wire path
+			// (the macro errored before any upstream dial), so there is
+			// no wire result to record. lastError carries over from the
+			// previous wire-completed iteration.
 			BumpHookIterationCount(l.hookExec)
 			nextFuzzRawIndices(l.indices, l.plan.positions)
 			return fmt.Sprintf("pre_macro abort: variant %d failed", variantIdx), nil
@@ -615,7 +625,28 @@ func (l *fuzzRawVariantLoop) runOne(ctx context.Context, variantIdx int) (string
 		l.runPostMacro(ctx, variantIdx, row, respBytes, chunks, truncated, kvStore)
 	}
 
-	BumpHookIterationCount(l.hookExec)
+	// USK-981 / USK-989: record the iteration's wire result so the next
+	// runOne call's shouldRunPreMacro sees the correct lastError for the
+	// on_error gate, AND advance the iteration counter for the every_n
+	// gate. updateState bumps requestCount and records
+	// (statusCode, runErr != nil) atomically — replacing the counter-
+	// only BumpHookIterationCount used during USK-981.
+	//
+	// statusCode is fixed at 0 because raw has no L7 status concept —
+	// the on_error gate's `lastStatusCode >= 400` branch in
+	// shouldRunPreMacro will therefore never fire on raw; only the
+	// `lastError` (transport-error) branch applies. This matches the
+	// raw adaptor contract (USK-986 + help_fuzz_raw.md: "raw has no L7
+	// status"). The 0 is NOT a bug.
+	//
+	// Note the per-call-site distinction: only this normal-path branch
+	// has wire-result information. The pre-wire abort branches above
+	// (pre-macro skip, pre-macro abort) keep BumpHookIterationCount
+	// since they never reached the wire and have no wire result to
+	// record — leaving lastError unchanged so the previous wire-
+	// completed iteration's outcome carries over to the next on_error
+	// evaluation. Mirrors PR #60 / USK-982 for fuzz_http.
+	l.hookExec.updateState(0, runErr != nil)
 	nextFuzzRawIndices(l.indices, l.plan.positions)
 
 	if l.stopOnError && runErr != nil {
