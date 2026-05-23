@@ -14,12 +14,25 @@ import (
 // upstream proxy) are resolved through cfg the same way the original
 // CONNECT path did — runtime-mutable overrides therefore reach the redial.
 //
+// generation identifies which step of the redial chain this dial is for
+// (USK-991): generation==1 is the first redial off the pooled Layer
+// (label suffix `/upstream-redial`, preserving the USK-816 wire log shape);
+// generation>=2 appends `-N` (e.g. `/upstream-redial-2`) so subsequent
+// chain steps are individually identifiable in flow / structured logs.
+// Callers in proxybuild pass len(chain)+1 (where chain is the slice of
+// prior fresh Layers).
+//
 // USK-816: invoked by proxybuild.buildOnHTTP2Stack at dial-closure time
 // when the pooled upstreamH2 has gone stale during a long intercept hold
 // (server sent GOAWAY, or upstream FIN closed the conn). The fresh Layer
 // is owned by the caller — this helper does NOT insert it into HTTP2Pool
 // because the per-CONNECT lifecycle owns the redial; reuse across
 // CONNECTs is the pool's job and is opt-in via Pool.Put.
+//
+// USK-991: also invoked when a previously redialed Layer itself goes
+// stale (recursive GOAWAY chain). Browser-equivalent semantics: every
+// GOAWAY observed mid-CONNECT triggers a fresh dial transparently; no
+// cap on chain length (the per-CONNECT lifecycle is the natural bound).
 //
 // Returned errors are upstream dial / TLS / http2.New errors verbatim so
 // the caller can wrap them via fmt.Errorf("dial: %w", ...) the same way
@@ -33,6 +46,7 @@ func RedialUpstreamH2(
 	target string,
 	stale *http2.Layer,
 	cfg *BuildConfig,
+	generation int,
 ) (*http2.Layer, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("connector: RedialUpstreamH2: cfg is nil")
@@ -73,11 +87,7 @@ func RedialUpstreamH2(
 	// fresh stream on the wire — not to re-record TLS.
 	envCtx := stale.EnvelopeContextTemplate()
 
-	connID := envCtx.ConnID
-	if connID == "" {
-		connID = "redial"
-	}
-	connID += "/upstream-redial"
+	connID := redialConnIDLabel(envCtx.ConnID, generation)
 
 	fresh, err := http2.New(upstreamConn, connID, http2.ClientRole,
 		http2.WithScheme("https"),
@@ -92,4 +102,22 @@ func RedialUpstreamH2(
 	}
 
 	return fresh, nil
+}
+
+// redialConnIDLabel composes the ConnID suffix for a fresh redial Layer.
+// generation<=1 yields the historical `/upstream-redial` suffix (USK-816
+// wire log shape); generation>=2 appends `-N` so each chain step in a
+// multi-GOAWAY CONNECT (USK-991) is individually identifiable in flow
+// records and structured logs. An empty incoming ConnID is replaced
+// with the literal "redial" so the resulting label is never just
+// `/upstream-redial` (which would be ambiguous across CONNECTs in log
+// aggregators).
+func redialConnIDLabel(baseConnID string, generation int) string {
+	if baseConnID == "" {
+		baseConnID = "redial"
+	}
+	if generation <= 1 {
+		return baseConnID + "/upstream-redial"
+	}
+	return fmt.Sprintf("%s/upstream-redial-%d", baseConnID, generation)
 }
