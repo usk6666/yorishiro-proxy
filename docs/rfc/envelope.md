@@ -1421,6 +1421,27 @@ This RFC is **accepted** as of 2026-04-12. Implementation proceeds on N1.
 **Post-N9 deferred design decisions:**
 - [ ] `WireLevelTap` interface unification — **deferred 2026-05-15 (USK-900)**. The five frame-level record callback sibling Options (`http2.WithFrameRecordCallback`, `http1.WithChunkRecordCallback`, `grpc.WithLPMFrameRecordCallback`, `httpaggregator.WithH2FrameRecordCallback`, `grpc.WithH2DataFrameRecordCallback`) already share their session-side closure builder (`session/h2_frame_record.go` `wireLevelRecordCallback()`), so the main boilerplate cost is already absorbed. Layer-side Option contracts remain per-Layer ad-hoc by design: `http1.WithChunkRecordCallback` is constrained to `func([]byte)` by the parser-level `ChunkRecordSetter` hook (parser owns chunk-boundary detection, not the Layer), so a naive `WireLevelTap` seam would degenerate into "four uniform + one adaptor". Re-evaluate when a 6th sibling appears (e.g. a WebSocket per-frame record producer) or when the http1 parser hook is revisited for an unrelated reason — at that point the seam will be either fully uniform or clearly fragmented, and the decision becomes unambiguous.
 
+### 11.1 Macro hook `__response_*` key matrix per protocol
+
+The `pre_macro` / `post_macro` hooks on the typed fuzz tools (`fuzz_http` / `fuzz_ws` / `fuzz_grpc` / `fuzz_raw`) inject a per-protocol set of reserved keys into the per-iteration KV Store so `post_macro` templates can reference the response. Each protocol's surface differs because the wire reality differs — raw has no L7 status, WS has framed message events instead of headers, gRPC has trailers in addition to headers, and HTTP has the canonical status / headers / body triplet. This is consistent with the MITM principle "do not invent hypothetical surface" (CLAUDE.md §MITM Implementation Principles #6).
+
+| Protocol | `__response_status` | `__response_body` | `__response_headers__<lower(name)>__` | `__response_chunks` | `__response_truncated` |
+| -------- | ------------------- | ----------------- | -------------------------------------- | ------------------- | ----------------------- |
+| http     | YES (3-digit status, base-10 decimal string) | YES (64 KiB cap) | YES (≤ 256 entries × 8 KiB) | n/a | n/a |
+| ws       | TBD pending USK-984 acceptance | TBD pending USK-984 | n/a (WS has no headers post-handshake) | TBD pending USK-984 | TBD pending USK-984 |
+| grpc     | TBD pending USK-985 acceptance | TBD pending USK-985 | TBD pending USK-985 (trailers as well) | TBD pending USK-985 | TBD pending USK-985 |
+| raw      | **NO** (raw has no L7 status) | YES (64 KiB cap) | n/a (raw has no headers) | YES (receive-loop envelope count, decimal string) | YES (`"true"` / `"false"` — set when the receive loop hit the 16 MiB cap) |
+
+Implementation references:
+- HTTP: `internal/mcp/hooks.go:injectResponseVars` (status + body + headers).
+- Raw: `internal/mcp/hooks.go:injectRawResponseVars` (body + chunks + truncated). USK-986.
+- The shared `MacroConfig` validator (`internal/mcp/fuzz_macro_common.go:ValidateMacroConfig`) stays protocol-neutral; protocol-specific rejects (e.g. `fuzz_raw` rejecting `run_interval="on_status"`) live in the per-protocol input validator (`internal/mcp/fuzz_raw_helpers.go:validateFuzzRawMacroConfig`).
+
+`run_interval` cross-protocol compatibility:
+- `on_status`: HTTP yes, raw NO (rejected at validation — no status concept).
+- `on_match`: regex against `__response_body` — applicable to every protocol that surfaces body bytes.
+- `every_n`, `once`, `on_error`: protocol-neutral (per-iteration cadence is a loop knob, not a wire knob).
+
 ---
 
 ## Appendix A: Naming Decisions

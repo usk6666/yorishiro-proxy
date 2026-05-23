@@ -94,6 +94,96 @@
     "stop_on_error": {
       "type": "boolean",
       "description": "When true, abort the remaining variants once any variant fails (network error, timeout, or pipeline drop)."
+    },
+    "pre_macro": {
+      "type": "object",
+      "description": "Pre macro hook executed before a variant's dial (scope=iteration) or before the variant loop starts (scope=job). The hook macro shares the KV Store with the variant so extracts flow into §var§ template expansion. For scope=job + on_error=skip, the whole job short-circuits with completed_variants=0 and stopped_reason set. Raw-specific: run_interval='on_status' is REJECTED at validation because raw has no L7 status concept.",
+      "required": ["name"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Stored macro name (defined via the macro tool's define_macro action)."
+        },
+        "scope": {
+          "type": "string",
+          "description": "iteration (default; fires once per variant) | job (fires once outside the variant loop; KV Store is shared across the whole job).",
+          "enum": ["iteration", "job"]
+        },
+        "on_error": {
+          "type": "string",
+          "description": "skip (default; iteration scope skips the variant, job scope skips the whole job) | abort (aborts the whole fuzz run) | continue (record the error and proceed).",
+          "enum": ["skip", "abort", "continue"]
+        },
+        "vars": {
+          "type": "object",
+          "description": "Static kvStore overrides injected before the macro runs. Keys with the '__' reserved prefix are silently dropped at injection time so a Vars entry cannot shadow runtime-populated reserved keys (__iteration, __nonce, __response_*).",
+          "additionalProperties": { "type": "string" }
+        },
+        "run_interval": {
+          "type": "string",
+          "description": "Hook firing cadence — scope=iteration only. For pre_macro: always (default) | once | every_n | on_error. Rejected with an error when scope='job' or run_interval='on_status' (raw has no L7 status)."
+        },
+        "n": {
+          "type": "integer",
+          "description": "Iteration cadence for pre_macro run_interval='every_n'. Required when run_interval='every_n'.",
+          "minimum": 1
+        },
+        "status_codes": {
+          "type": "array",
+          "description": "Reserved for post_macro on HTTP-style tools. fuzz_raw rejects run_interval='on_status' (raw has no L7 status), so this field has no effect.",
+          "items": { "type": "integer" }
+        },
+        "match_pattern": {
+          "type": "string",
+          "description": "Response body regex pattern for post_macro run_interval='on_match'. fuzz_raw's __response_body is the matched byte buffer."
+        }
+      },
+      "additionalProperties": false
+    },
+    "post_macro": {
+      "type": "object",
+      "description": "Post macro hook executed after a variant's receive loop completes (scope=iteration) or after the variant loop completes (scope=job). For scope=iteration, raw-specific reserved keys are injected: __response_body (received bytes, 64 KiB cap), __response_chunks, __response_truncated. NOT injected: __response_status, __response_headers* (raw has no L7 status concept — MITM principle: do not invent hypothetical surface). For scope=job, no per-iteration response is injected. Raw-specific: run_interval='on_status' is REJECTED at validation; use run_interval='on_match' against __response_body bytes.",
+      "required": ["name"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Stored macro name (defined via the macro tool's define_macro action)."
+        },
+        "scope": {
+          "type": "string",
+          "description": "iteration (default; fires once per variant) | job (fires once after the variant loop completes).",
+          "enum": ["iteration", "job"]
+        },
+        "on_error": {
+          "type": "string",
+          "description": "skip (default; log warn + record error row) | abort (post failures never abort the run; behaviour matches skip for post) | continue (same as skip).",
+          "enum": ["skip", "abort", "continue"]
+        },
+        "vars": {
+          "type": "object",
+          "description": "Static kvStore overrides injected before the macro runs. Keys with the '__' reserved prefix are silently dropped at injection time.",
+          "additionalProperties": { "type": "string" }
+        },
+        "run_interval": {
+          "type": "string",
+          "description": "Hook firing cadence — scope=iteration only. For post_macro: always (default) | on_match. on_status is REJECTED for fuzz_raw (raw has no L7 status; use on_match against __response_body)."
+        },
+        "n": {
+          "type": "integer",
+          "description": "Reserved for pre_macro run_interval='every_n'. post_macro does NOT accept every_n.",
+          "minimum": 1
+        },
+        "status_codes": {
+          "type": "array",
+          "description": "Rejected on fuzz_raw — raw has no L7 status concept.",
+          "items": { "type": "integer" }
+        },
+        "match_pattern": {
+          "type": "string",
+          "description": "Response body regex pattern for post_macro run_interval='on_match'. Required when run_interval='on_match'. The matched buffer is __response_body (received bytes, 64 KiB cap)."
+        }
+      },
+      "additionalProperties": false
     }
   },
   "additionalProperties": false

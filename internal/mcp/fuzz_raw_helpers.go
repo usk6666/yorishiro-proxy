@@ -111,6 +111,36 @@ func validateFuzzRawInput(input *fuzzRawInput) error {
 	if input.FlowID == "" && !hasOverride && !hasPayloadPosition {
 		return errors.New("fuzz_raw: at least one of flow_id, override_bytes, or a 'payload' position must supply the variant bytes")
 	}
+	if err := validateFuzzRawMacroConfig(input); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validateFuzzRawMacroConfig validates the per-iteration / per-job
+// macro hook configs (USK-986). Raw is the "+1 adaptor" in USK-980's
+// N-1 uniform + 1 adaptor pattern — raw has no L7 status concept, so
+// run_interval="on_status" is REJECTED upfront with the documented
+// verbatim error message before delegating to the shared
+// ValidateMacroConfig for the rest of the cross-field rules.
+//
+// The shared validator (fuzz_macro_common.go:ValidateMacroConfig) stays
+// protocol-neutral; the raw-specific reject lives here as a thin pre-
+// check wrapper so the shared seam does not have to grow a protocol-
+// aware branch.
+func validateFuzzRawMacroConfig(input *fuzzRawInput) error {
+	if input.PreMacro != nil && input.PreMacro.RunInterval == "on_status" {
+		return errors.New(`fuzz_raw: pre_macro run_interval="on_status" not supported (raw has no L7 status)`)
+	}
+	if input.PostMacro != nil && input.PostMacro.RunInterval == "on_status" {
+		return errors.New(`fuzz_raw: post_macro run_interval="on_status" not supported (raw has no L7 status)`)
+	}
+	if err := ValidateMacroConfig("pre_macro", input.PreMacro, true); err != nil {
+		return err
+	}
+	if err := ValidateMacroConfig("post_macro", input.PostMacro, false); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -390,69 +420,403 @@ func decodeFuzzRawBasePatches(in []resendRawBP) ([]job.BytePatch, error) {
 // populated for both successful and error variants. Store-write
 // failures are non-fatal (slog.Warn + continue) — the wire data is on
 // disk via RecordStep and remains the source of truth.
-func (s *Server) runFuzzRawVariants(ctx context.Context, plan *fuzzRawPlan, timeout time.Duration, stopOnError bool, tag, fuzzID string) ([]fuzzRawVariantRow, int, string, error) {
+//
+// USK-986: scope="job" hooks fire exactly once outside the variant
+// loop against a separate job-scoped kvStore that is merged into each
+// iteration's per-variant store. pre-job runs between loop-state setup
+// and the for-variant loop; post-job runs after the loop body exits
+// (including the stop_on_error terminal path, but NOT on ctx cancel
+// or pre-job abort).
+func (s *Server) runFuzzRawVariants(ctx context.Context, plan *fuzzRawPlan, timeout time.Duration, stopOnError bool, tag, fuzzID string, preMacro, postMacro *MacroConfig) ([]fuzzRawVariantRow, int, string, error) {
+	loop := buildFuzzRawVariantLoop(s, plan, timeout, stopOnError, tag, fuzzID, preMacro, postMacro)
+
+	// USK-986 pre-job: fire once before the variant loop. Abort short-
+	// circuits the whole job; skip returns success with stopped_reason;
+	// continue records the error and proceeds with whatever jobKVStore
+	// captured. Mirrors the fuzz_http pattern (USK-961).
+	if IsJobScope(preMacro) {
+		jobAction, stopReason, retErr := loop.runPreJobMacro(ctx)
+		if retErr != nil {
+			return loop.rows, loop.completed, "", retErr
+		}
+		if jobAction == fuzzRawPreJobSkipAll {
+			return loop.rows, loop.completed, stopReason, nil
+		}
+	}
+
+	completedNormally, earlyStopReason, retErr := loop.runVariantLoop(ctx)
+	if retErr != nil {
+		return loop.rows, loop.completed, "", retErr
+	}
+
+	// USK-986 post-job: fire after the variant loop exits. post-job
+	// fires on natural exhaustion or stop_on_error exit, but NOT on
+	// ctx cancel (mirrors fuzz_http Q5).
+	if completedNormally && IsJobScope(postMacro) {
+		loop.runPostJobMacro(ctx)
+	}
+
+	return loop.rows, loop.completed, earlyStopReason, nil
+}
+
+// fuzzRawVariantLoop bundles the per-run state shared across iterations
+// so the inner loop body (runOne) is a method on a small struct instead
+// of a wide free function. Mirrors fuzzHTTPVariantLoop's shape (USK-961)
+// adapted for raw's simpler dial / receive-loop semantics: no upstream-
+// proxy rotation, no template expansion on the base bytes (raw is a
+// byte stream — template expansion happens on the position payloads
+// only via §var§ tokens that are then assembled into the variant bytes).
+type fuzzRawVariantLoop struct {
+	s             *Server
+	plan          *fuzzRawPlan
+	timeout       time.Duration
+	stopOnError   bool
+	tag           string
+	fuzzID        string
+	preMacro      *MacroConfig
+	postMacro     *MacroConfig
+	pipe          *pipeline.Pipeline
+	hookExec      *hookExecutor
+	jobHookExec   *hookExecutor
+	jobKVStore    map[string]string
+	rateLimitHost string
+
+	rows      []fuzzRawVariantRow
+	indices   []int
+	completed int
+}
+
+// buildFuzzRawVariantLoop assembles the per-run state container shared
+// by all variants. Split out of runFuzzRawVariants to keep that function
+// below the gocyclo threshold and mirror the fuzz_http construction
+// pattern.
+func buildFuzzRawVariantLoop(s *Server, plan *fuzzRawPlan, timeout time.Duration, stopOnError bool, tag, fuzzID string, preMacro, postMacro *MacroConfig) *fuzzRawVariantLoop {
+	loop := &fuzzRawVariantLoop{
+		s:           s,
+		plan:        plan,
+		timeout:     timeout,
+		stopOnError: stopOnError,
+		tag:         tag,
+		fuzzID:      fuzzID,
+		preMacro:    preMacro,
+		postMacro:   postMacro,
+	}
+
 	encoders := buildResendRawEncoderRegistry()
-	pipe := s.buildFuzzRawPipeline(encoders)
+	loop.pipe = s.buildFuzzRawPipeline(encoders)
 
-	rows := make([]fuzzRawVariantRow, 0, plan.totalVariants)
-	indices := make([]int, len(plan.positions))
-	completed := 0
+	loop.rateLimitHost, _, _ = net.SplitHostPort(plan.dialAddr)
 
-	rateLimitHost, _, _ := net.SplitHostPort(plan.dialAddr)
+	loop.hookExec = BuildIterationHookExecutor(s, preMacro, postMacro)
+	// USK-986 adaptor: raw post_macro injects its own __response_body /
+	// __response_chunks / __response_truncated via injectRawResponseVars
+	// — we do NOT want the HTTP-shaped injectResponseVars (status + body
+	// + headers) to fire and overwrite with stale / hypothetical fields.
+	// BuildIterationHookExecutor hard-codes PassResponse=true for the
+	// HTTP path; for raw we flip it back off so the post-macro engine
+	// uses ONLY the keys we explicitly injected. shouldRunPostMacro's
+	// on_match gate still receives the raw bytes via executePostMacro's
+	// responseBody argument (independent of PassResponse).
+	if loop.hookExec != nil && loop.hookExec.hooks != nil && loop.hookExec.hooks.PostMacro != nil {
+		loop.hookExec.hooks.PostMacro.PassResponse = false
+	}
+	loop.jobHookExec, loop.jobKVStore = BuildJobHookExecutor(s, preMacro, postMacro)
 
-	for variantIdx := 0; variantIdx < plan.totalVariants; variantIdx++ {
+	loop.rows = make([]fuzzRawVariantRow, 0, plan.totalVariants)
+	loop.indices = make([]int, len(plan.positions))
+	return loop
+}
+
+// runVariantLoop drives the variant loop body and returns
+// (completedNormally, earlyStopReason, retErr). completedNormally is
+// true when the loop reached the post-job firing path (natural
+// exhaustion or stop_on_error); it is false on ctx cancel. retErr
+// non-nil propagates an unrecoverable failure (e.g. per-variant payload
+// size cap exceeded) up to the MCP tool boundary as an IsError result.
+// Mirrors fuzz_http's runVariantLoop pattern.
+func (l *fuzzRawVariantLoop) runVariantLoop(ctx context.Context) (bool, string, error) {
+	for variantIdx := 0; variantIdx < l.plan.totalVariants; variantIdx++ {
 		select {
 		case <-ctx.Done():
-			return rows, completed, fmt.Sprintf("ctx cancelled: %v", ctx.Err()), nil
+			return false, fmt.Sprintf("ctx cancelled: %v", ctx.Err()), nil
 		default:
 		}
 
 		// TODO(USK-817 sibling: budget counter, P5-19)
-		if err := s.waitRateLimit(ctx, rateLimitHost); err != nil {
-			return rows, completed, fmt.Sprintf("rate limit: %v", err), nil
+		if err := l.s.waitRateLimit(ctx, l.rateLimitHost); err != nil {
+			return true, fmt.Sprintf("rate limit: %v", err), nil
 		}
 
-		payloads, err := decodeFuzzRawPayloads(plan.positions, indices)
-		if err != nil {
-			return nil, completed, "", fmt.Errorf("variant %d: decode payloads: %w", variantIdx, err)
+		stop, retErr := l.runOne(ctx, variantIdx)
+		if retErr != nil {
+			return false, "", retErr
 		}
-
-		variantStart := time.Now()
-		row, runErr := s.runFuzzRawSingleVariant(ctx, plan, pipe, timeout, variantIdx, payloads, tag)
-		row.DurationMs = time.Since(variantStart).Milliseconds()
-
-		if runErr != nil {
-			row.Error = runErr.Error()
-		}
-		rows = append(rows, row)
-		completed++
-
-		// USK-837: persist per-variant fuzz_results row so the aggregation
-		// view (`query fuzz_results { fuzz_id }` + USK-278 outliers_only)
-		// is populated. Save failures are non-fatal — wire data on disk via
-		// RecordStep is the source of truth.
-		s.saveFuzzRawResult(ctx, fuzzID, variantIdx, row, payloads)
-
-		nextFuzzRawIndices(indices, plan.positions)
-
-		if stopOnError && runErr != nil {
-			return rows, completed, fmt.Sprintf("stop_on_error: variant %d failed: %v", variantIdx, runErr), nil
+		if stop != "" {
+			// stop_on_error exit. Mirrors fuzz_http's Q5: post-job fires
+			// on stop_on_error.
+			return true, stop, nil
 		}
 	}
-	return rows, completed, "", nil
+	return true, "", nil
 }
 
-// runFuzzRawSingleVariant executes one variant: assembles variant
-// bytes from the base + per-variant patches + per-variant "payload"
-// position, runs the safety filter, dials, sends, receives, and
-// returns the row.
+// runOne executes a single iteration of the variant loop. Returns
+// (stopReason, retErr). stopReason "" means continue; non-empty signals
+// an early loop stop (e.g. stop_on_error / pre_macro abort). retErr
+// non-nil aborts the whole run with a hard error (e.g. payload decode
+// cap exceeded — mirrors the pre-refactor behaviour).
+func (l *fuzzRawVariantLoop) runOne(ctx context.Context, variantIdx int) (string, error) {
+	payloads, err := decodeFuzzRawPayloads(l.plan.positions, l.indices)
+	if err != nil {
+		return "", fmt.Errorf("variant %d: decode payloads: %w", variantIdx, err)
+	}
+
+	// USK-986: build the per-iteration kvStore (job-store merge +
+	// iteration-scope Vars + reserved __iteration / __nonce). pre_macro
+	// extracts and the response __response_* keys (post path) land here.
+	kvStore := PrepareIteration(l.jobKVStore, l.preMacro, l.postMacro, variantIdx)
+
+	// pre_macro (iteration-scope only). When pre is scope="job", the
+	// executor was invoked once outside the loop by runPreJobMacro.
+	if IsIterationScope(l.preMacro) {
+		preOutcome := l.runPreMacro(ctx, variantIdx, payloads)
+		switch preOutcome {
+		case fuzzRawPreSkipped:
+			BumpHookIterationCount(l.hookExec)
+			nextFuzzRawIndices(l.indices, l.plan.positions)
+			return "", nil
+		case fuzzRawPreAborted:
+			// on_error=abort: row recorded with row.Error set by
+			// runPreMacro; halt the loop with a documented stop reason.
+			BumpHookIterationCount(l.hookExec)
+			nextFuzzRawIndices(l.indices, l.plan.positions)
+			return fmt.Sprintf("pre_macro abort: variant %d failed", variantIdx), nil
+		}
+	}
+
+	variantStart := time.Now()
+	row, respBytes, chunks, truncated, runErr := l.s.runFuzzRawSingleVariantWithResponse(ctx, l.plan, l.pipe, l.timeout, variantIdx, payloads, l.tag)
+	row.DurationMs = time.Since(variantStart).Milliseconds()
+
+	if runErr != nil {
+		row.Error = runErr.Error()
+	}
+	l.rows = append(l.rows, row)
+	l.completed++
+
+	// USK-837: persist per-variant fuzz_results row so the aggregation
+	// view is populated. Save failures are non-fatal.
+	l.s.saveFuzzRawResult(ctx, l.fuzzID, variantIdx, row, payloads)
+
+	// post_macro (iteration-scope only). scope="job" post fires once
+	// outside the loop. Suppress post on transport error / pre-iteration
+	// short-circuit — mirrors fuzz_http's "errored variant" gate.
+	if IsIterationScope(l.postMacro) && runErr == nil {
+		l.runPostMacro(ctx, variantIdx, row, respBytes, chunks, truncated, kvStore)
+	}
+
+	BumpHookIterationCount(l.hookExec)
+	nextFuzzRawIndices(l.indices, l.plan.positions)
+
+	if l.stopOnError && runErr != nil {
+		return fmt.Sprintf("stop_on_error: variant %d failed: %v", variantIdx, runErr), nil
+	}
+	return "", nil
+}
+
+// recordVariantError appends a synthetic error-row to the variant rows
+// (no upstream send happened) and persists the matching fuzz_results
+// row. Used by short-circuit paths (payload decode failure) where the
+// variant never reached runFuzzRawSingleVariant. Mirrors the fuzz_http
+// pattern.
+func (l *fuzzRawVariantLoop) recordVariantError(ctx context.Context, variantIdx int, payloads map[string]string, msg string) {
+	row := fuzzRawVariantRow{
+		Index:    variantIdx,
+		Payloads: payloads,
+		Error:    msg,
+	}
+	l.rows = append(l.rows, row)
+	l.completed++
+	l.s.saveFuzzRawResult(ctx, l.fuzzID, variantIdx, row, payloads)
+}
+
+// fuzzRawPreMacroOutcome marks whether the variant loop should proceed
+// with the upstream send after pre_macro resolution.
+type fuzzRawPreMacroOutcome int
+
+const (
+	// fuzzRawPreOK = pre macro ran successfully (or was not configured);
+	// continue to the variant send.
+	fuzzRawPreOK fuzzRawPreMacroOutcome = iota
+	// fuzzRawPreSkipped = pre macro failed under on_error=skip; the
+	// caller has already recorded the skipped row, do NOT send the
+	// variant, do NOT fire post_macro.
+	fuzzRawPreSkipped
+	// fuzzRawPreAborted = pre macro failed under on_error=abort; the
+	// caller must terminate the entire variant loop. The row was
+	// already recorded with row.Error set.
+	fuzzRawPreAborted
+)
+
+// runPreMacro dispatches the pre_macro hook for this iteration and
+// translates the OnError policy into a pre-macro outcome. Mirrors
+// fuzz_http's runPreMacro structure.
+func (l *fuzzRawVariantLoop) runPreMacro(ctx context.Context, variantIdx int, payloads map[string]string) fuzzRawPreMacroOutcome {
+	if l.preMacro == nil {
+		return fuzzRawPreOK
+	}
+	kvStore := PrepareIteration(l.jobKVStore, l.preMacro, l.postMacro, variantIdx)
+	_, hookErr := l.hookExec.executePreMacro(ctx, kvStore)
+	if hookErr == nil {
+		l.s.saveFuzzMacroHookResult(ctx, l.fuzzID, variantIdx, "pre", "", "ok", 0, "")
+		return fuzzRawPreOK
+	}
+	policy := l.preMacro.OnError
+	if policy == "" {
+		policy = "skip"
+	}
+	switch policy {
+	case "abort":
+		l.s.saveFuzzMacroHookResult(ctx, l.fuzzID, variantIdx, "pre", "", "error", 0, hookErr.Error())
+		// fuzz_raw abort: record the variant as errored AND signal the
+		// caller to terminate the whole loop. Mirrors fuzz_http's abort
+		// path (which propagates as retErr); fuzz_raw expresses the same
+		// intent via a distinct outcome value so the variant loop's
+		// stop_on_error-style halt covers both transport errors and
+		// pre-hook aborts uniformly.
+		l.recordVariantError(ctx, variantIdx, payloads, fmt.Sprintf("pre_macro hook abort: %v", hookErr))
+		return fuzzRawPreAborted
+	case "continue":
+		slog.WarnContext(ctx, "fuzz_raw: pre_macro hook error (on_error=continue)",
+			"fuzz_id", l.fuzzID, "variant", variantIdx, "error", hookErr)
+		l.s.saveFuzzMacroHookResult(ctx, l.fuzzID, variantIdx, "pre", "", "error", 0, hookErr.Error())
+		return fuzzRawPreOK
+	default: // skip
+		l.s.saveFuzzMacroHookResult(ctx, l.fuzzID, variantIdx, "pre", "", "skipped", 0, hookErr.Error())
+		row := fuzzRawVariantRow{
+			Index:    variantIdx,
+			Payloads: payloads,
+			Error:    fmt.Sprintf("pre_macro hook failed (on_error=skip): %v", hookErr),
+		}
+		l.rows = append(l.rows, row)
+		l.completed++
+		l.s.saveFuzzRawResult(ctx, l.fuzzID, variantIdx, row, payloads)
+		return fuzzRawPreSkipped
+	}
+}
+
+// runPostMacro fires the post_macro hook against the shared kvStore.
+// Raw injects __response_body / __response_chunks / __response_truncated
+// directly via injectRawResponseVars (NOT __response_status /
+// __response_headers — raw has no L7 status concept; USK-986 adaptor).
+//
+// PassResponse is forced OFF on the raw hookExec (see
+// buildFuzzRawVariantLoop) so the HTTP-shaped injectResponseVars
+// (status + body + headers) does NOT fire and overwrite our raw inject.
+// respBytes is still threaded into executePostMacro so the
+// shouldRunPostMacro gate (on_match against responseBody) sees the
+// real wire bytes. run_interval="on_status" is REJECTED upfront for
+// raw, so statusCode is irrelevant here.
+func (l *fuzzRawVariantLoop) runPostMacro(ctx context.Context, variantIdx int, row fuzzRawVariantRow, respBytes []byte, chunks int, truncated bool, kvStore map[string]string) {
+	injectRawResponseVars(kvStore, respBytes, chunks, truncated)
+	hookErr := l.hookExec.executePostMacro(ctx, 0, respBytes, nil, kvStore)
+	if hookErr != nil {
+		slog.WarnContext(ctx, "fuzz_raw: post_macro hook error",
+			"fuzz_id", l.fuzzID, "variant", variantIdx, "error", hookErr)
+		l.s.saveFuzzMacroHookResult(ctx, l.fuzzID, variantIdx, "post", "", "error", 0, hookErr.Error())
+		_ = row
+		return
+	}
+	l.s.saveFuzzMacroHookResult(ctx, l.fuzzID, variantIdx, "post", "", "ok", 0, "")
+}
+
+// fuzzRawJobPreOutcome marks the pre-job hook's effect on the
+// surrounding job loop.
+type fuzzRawJobPreOutcome int
+
+const (
+	// fuzzRawPreJobOK = pre-job ran successfully (or under
+	// on_error=continue): proceed with the variant loop.
+	fuzzRawPreJobOK fuzzRawJobPreOutcome = iota
+	// fuzzRawPreJobSkipAll = pre-job failed under on_error=skip: skip
+	// the entire job. fuzz_raw returns a successful result with
+	// CompletedVariants=0 and stopped_reason set. Mirrors fuzz_http U1.
+	fuzzRawPreJobSkipAll
+)
+
+// runPreJobMacro fires the pre_macro hook ONCE outside the variant loop
+// (scope="job"). Mirrors fuzz_http's runPreJobMacro structure. Failure
+// policies: abort → wrapped error; continue → log+record+proceed; skip
+// → record + short-circuit whole job via fuzzRawPreJobSkipAll.
+//
+// fuzz_macro_results.index_num=-1 is the documented sentinel for
+// job-scope hook rows.
+func (l *fuzzRawVariantLoop) runPreJobMacro(ctx context.Context) (fuzzRawJobPreOutcome, string, error) {
+	if l.jobHookExec == nil || l.preMacro == nil || !IsJobScope(l.preMacro) {
+		return fuzzRawPreJobOK, "", nil
+	}
+	_, hookErr := l.jobHookExec.executePreMacro(ctx, l.jobKVStore)
+	if hookErr == nil {
+		l.s.saveFuzzMacroHookResult(ctx, l.fuzzID, jobScopeIndexNumSentinel, "pre", "", "ok", 0, "")
+		return fuzzRawPreJobOK, "", nil
+	}
+	policy := l.preMacro.OnError
+	if policy == "" {
+		policy = "skip"
+	}
+	switch policy {
+	case "abort":
+		l.s.saveFuzzMacroHookResult(ctx, l.fuzzID, jobScopeIndexNumSentinel, "pre", "", "error", 0, hookErr.Error())
+		return fuzzRawPreJobOK, "", fmt.Errorf("pre_macro hook abort (scope=job): %w", hookErr)
+	case "continue":
+		slog.WarnContext(ctx, "fuzz_raw: pre_macro hook error (scope=job, on_error=continue)",
+			"fuzz_id", l.fuzzID, "error", hookErr)
+		l.s.saveFuzzMacroHookResult(ctx, l.fuzzID, jobScopeIndexNumSentinel, "pre", "", "error", 0, hookErr.Error())
+		return fuzzRawPreJobOK, "", nil
+	default: // skip — short-circuit the whole job with stopped_reason
+		l.s.saveFuzzMacroHookResult(ctx, l.fuzzID, jobScopeIndexNumSentinel, "pre", "", "skipped", 0, hookErr.Error())
+		stopReason := fmt.Sprintf("pre_macro hook skipped (scope=job, on_error=skip): %v", hookErr)
+		return fuzzRawPreJobSkipAll, stopReason, nil
+	}
+}
+
+// runPostJobMacro fires the post_macro hook ONCE after the variant loop
+// completes (scope="job"). post-job fires on natural exhaustion or
+// stop_on_error, but NOT on ctx cancel (the caller gates on
+// completedNormally). post-job sees ONLY the jobKVStore — per-iteration
+// __response_* keys are not available because each iteration's kvStore
+// was discarded. Mirrors fuzz_http Q5 / Q21.
+func (l *fuzzRawVariantLoop) runPostJobMacro(ctx context.Context) {
+	if l.jobHookExec == nil || l.postMacro == nil || !IsJobScope(l.postMacro) {
+		return
+	}
+	hookErr := l.jobHookExec.executePostMacro(ctx, 0, nil, nil, l.jobKVStore)
+	if hookErr != nil {
+		slog.WarnContext(ctx, "fuzz_raw: post_macro hook error (scope=job)",
+			"fuzz_id", l.fuzzID, "error", hookErr)
+		l.s.saveFuzzMacroHookResult(ctx, l.fuzzID, jobScopeIndexNumSentinel, "post", "", "error", 0, hookErr.Error())
+		return
+	}
+	l.s.saveFuzzMacroHookResult(ctx, l.fuzzID, jobScopeIndexNumSentinel, "post", "", "ok", 0, "")
+}
+
+// runFuzzRawSingleVariantWithResponse executes one variant: assembles
+// variant bytes from the base + per-variant patches + per-variant
+// "payload" position, runs the safety filter, dials, sends, receives,
+// and returns the row PLUS the response bytes + chunk count + truncated
+// flag so the caller can inject the raw-specific __response_* keys
+// into the post_macro kvStore (USK-986).
 //
 // Per-variant SafetyFilter input gating runs after variant assembly
 // and before the upstream dial (mirroring fuzz_http per-variant
 // semantics). On a violation the variant is recorded with row.Error
 // set and returns nil error so the run loop continues; a single
-// blocked variant does not abort the whole run.
-func (s *Server) runFuzzRawSingleVariant(ctx context.Context, plan *fuzzRawPlan, p *pipeline.Pipeline, timeout time.Duration, variantIdx int, payloads map[string]string, tag string) (fuzzRawVariantRow, error) {
+// blocked variant does not abort the whole run. respBytes is nil /
+// chunks=0 / truncated=false on a safety-filter violation or pre-
+// network short-circuit — the caller's gate (runErr != nil OR row.Error
+// set OR fuzzRawPreSkipped on the pre side) keeps post_macro
+// suppressed in those paths.
+func (s *Server) runFuzzRawSingleVariantWithResponse(ctx context.Context, plan *fuzzRawPlan, p *pipeline.Pipeline, timeout time.Duration, variantIdx int, payloads map[string]string, tag string) (fuzzRawVariantRow, []byte, int, bool, error) {
 	row := fuzzRawVariantRow{
 		Index:    variantIdx,
 		Payloads: payloads,
@@ -460,10 +824,10 @@ func (s *Server) runFuzzRawSingleVariant(ctx context.Context, plan *fuzzRawPlan,
 
 	variantBytes, err := assembleFuzzRawVariantBytes(plan, payloads)
 	if err != nil {
-		return row, fmt.Errorf("assemble variant bytes: %w", err)
+		return row, nil, 0, false, fmt.Errorf("assemble variant bytes: %w", err)
 	}
 	if len(variantBytes) > maxResendRawPayload {
-		return row, fmt.Errorf("variant payload too large: %d > %d", len(variantBytes), maxResendRawPayload)
+		return row, nil, 0, false, fmt.Errorf("variant payload too large: %d > %d", len(variantBytes), maxResendRawPayload)
 	}
 
 	row.StreamID = uuid.NewString()
@@ -475,7 +839,7 @@ func (s *Server) runFuzzRawSingleVariant(ctx context.Context, plan *fuzzRawPlan,
 	// continues to the next variant.
 	if v := s.checkSafetyInput(variantBytes, "", nil); v != nil {
 		row.Error = safetyViolationError(v)
-		return row, nil
+		return row, nil, 0, false, nil
 	}
 
 	rtCtx, cancel := context.WithTimeout(ctx, timeout)
@@ -483,7 +847,7 @@ func (s *Server) runFuzzRawSingleVariant(ctx context.Context, plan *fuzzRawPlan,
 
 	respBytes, chunks, truncated, err := s.runFuzzRawSingleExchange(rtCtx, plan, row.StreamID, variantBytes, p)
 	if err != nil {
-		return row, err
+		return row, nil, 0, false, err
 	}
 	row.ResponseSize = len(respBytes)
 	row.ResponseChunks = chunks
@@ -495,7 +859,7 @@ func (s *Server) runFuzzRawSingleVariant(ctx context.Context, plan *fuzzRawPlan,
 	if tag != "" && s.flowStore.store != nil {
 		s.applyResendRawTag(ctx, row.StreamID, tag)
 	}
-	return row, nil
+	return row, respBytes, chunks, truncated, nil
 }
 
 // runFuzzRawSingleExchange runs one variant's send/receive cycle and
