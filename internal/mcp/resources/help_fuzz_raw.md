@@ -59,6 +59,8 @@ Pre and post macro hooks dispatched around variants by name (USK-986). Both fiel
 - **n** (integer, optional): companion to pre_macro `run_interval="every_n"`. Required when `run_interval="every_n"`; must be ≥ 1.
 - **match_pattern** (string, optional): companion to post_macro `run_interval="on_match"`. The buffer matched is `__response_body` (received bytes, 64 KiB cap).
 
+`run_interval="on_error"` semantics (USK-989): pre_macro fires when the previous iteration's transport-level send/receive failed (`runErr != nil`). Raw has no L7 status concept, so HTTP-style 4xx/5xx triggers do not apply — only transport errors (dial failure, write/read failure, deadline) qualify. Iter-0 never fires because there is no previous iteration to react to. Pre-wire abort iterations (pre_macro skip, pre_macro abort) consume a counter slot but leave the previous wire-completed iteration's error signal in place, so the gate still reacts to the most recent real outcome.
+
 #### Adaptor note — raw has no L7 status
 
 Raw is the "+1 adaptor" in the typed-fuzz macro family. Raw is a byte stream, not a request/response transaction — it has no L7 status code and no header set. The following keys / values are therefore raw-specific:
