@@ -330,14 +330,23 @@ func (l *Layer) GoAwayClosed() bool {
 	return false
 }
 
-// goAwayObsEntry is one registration with the per-registration sync.Once
-// that gates the observer call. removed is set under goAwayObsMu when
-// the registration's cancel func runs so an in-flight handleGoAwayFrame
-// snapshot does not re-fire a cancelled entry (the snapshot still holds
-// a *goAwayObsEntry pointer, but checking entry.removed under once.Do is
-// not feasible — once already gates the second call. cancel atomically
-// removes the entry from the live slice so subsequent GOAWAYs and
-// re-registrations cannot reach it).
+// goAwayObsEntry is one registration with a per-registration sync.Once
+// that gates the observer call so each cb fires at most once per
+// (Layer, registration) tuple regardless of how many GOAWAY frames the
+// peer sends.
+//
+// Cancellation semantics: the registration's cancel func removes the
+// entry from l.goAwayObs under goAwayObsMu. An in-flight
+// handleGoAwayFrame snapshot taken before cancel may still hold a
+// *goAwayObsEntry pointer to a removed entry; if entry.once.Do has not
+// yet run on that pointer at the moment cancel completes, the cb still
+// fires once (the per-registration Once gates the call, not the live
+// slice membership). Subsequent GOAWAYs after cancel cannot re-fire
+// because the entry is no longer reachable from the live slice. The
+// pre-fire-versus-cancel race window is intrinsic to the snapshot-then-
+// fire-outside-the-lock design (chosen so a misbehaved cb cannot stall
+// the readerLoop's mutex) and is documented as acceptable: cb runs at
+// most one extra time beyond the cancel call.
 type goAwayObsEntry struct {
 	cb   func()
 	once sync.Once
