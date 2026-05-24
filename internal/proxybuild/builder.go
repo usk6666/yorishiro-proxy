@@ -984,8 +984,9 @@ func buildOnHTTP2Stack(p *pipeline.Pipeline, deps Deps, logger *slog.Logger) con
 						return
 					}
 					dial := func(dctx context.Context, env *envelope.Envelope) (layer.Channel, error) {
-						upL := selectUpstreamForDial(dctx, target, upstreamH2, chain, redialFn, logger)
-						upCh, oerr := upL.OpenStream(dctx)
+						upL, upCh, oerr := openUpstreamStreamWithRetry(
+							dctx, target, upstreamH2, chain, redialFn, logger,
+						)
 						if oerr != nil {
 							return nil, oerr
 						}
@@ -1184,6 +1185,126 @@ func selectUpstreamForDial(
 // chain.mu so concurrent stream redials still single-flight.
 func isStaleH2(l *http2.Layer) bool {
 	return l.GoAwayClosed() || l.IsShutdown()
+}
+
+// openStreamFunc is the OpenStream signature, injected so the unit test
+// can drive Refused-then-succeed sequences deterministically without
+// staging real layer.Shutdown transitions. The production caller uses
+// http2OpenStream which adapts (*http2.Layer).OpenStream verbatim.
+type openStreamFunc func(ctx context.Context, l *http2.Layer) (layer.Channel, error)
+
+// http2OpenStream is the production binding of openStreamFunc.
+func http2OpenStream(ctx context.Context, l *http2.Layer) (layer.Channel, error) {
+	return l.OpenStream(ctx)
+}
+
+// openUpstreamStreamWithRetry resolves the active upstream Layer via
+// selectUpstreamForDial and calls OpenStream on it. When OpenStream
+// returns a `*layer.StreamError{Code: ErrorRefused}` (USK-993 residual
+// race: the Layer was healthy at selectUpstreamForDial time but
+// transitioned to shutdown / GOAWAY before the OpenStream syscall), the
+// helper retries exactly once. The retry re-calls selectUpstreamForDial,
+// which detects the staleness via isStaleH2 and fresh-dials under
+// chain.mu single-flight (so concurrent streams sharing the same race
+// converge on a single new Layer).
+//
+// Retry budget:
+//   - Exactly 1 retry per dial closure invocation. If the second attempt
+//     also returns Refused (or any other error), the underlying error is
+//     returned verbatim — session records state=error / failure_reason=
+//     refused, matching the pre-fix observable. The retry budget is
+//     stack-local, so it cannot accumulate across requests.
+//
+// Idempotency:
+//   - OpenStream returns ErrorRefused before any HEADERS frame is
+//     enqueued (see internal/layer/http2/layer.go:481-498: the three
+//     Refused emission sites — "layer shutdown", "GOAWAY sent",
+//     "GOAWAY received" — all return before sendHeadersEvent /
+//     allocateAndEnqueueFirstHeaders ever runs). No stream_id is
+//     allocated; no bytes hit the wire. Retry is byte-for-byte
+//     equivalent to a fresh request regardless of HTTP method, so POST/
+//     PUT/DELETE etc. are safe (stronger than RFC 9113 §6.8 needs).
+//
+// Classifier:
+//   - We match by Code (layer.ErrorRefused), not by Reason string. All
+//     three Refused emission sites are pre-HEADERS races with identical
+//     retry-safety; Reason-string matching would be brittle.
+//
+// Browser parity:
+//   - Without the retry, the residual race window between
+//     selectUpstreamForDial and OpenStream surfaces as state=error to
+//     operators even though zero wire bytes were sent — diagnostic
+//     distortion (see CLAUDE.md feedback memory: MITM browser-parity
+//     north star). The retry absorbs the failure transparently when a
+//     fresh dial succeeds.
+func openUpstreamStreamWithRetry(
+	dctx context.Context,
+	target string,
+	upstreamH2 *http2.Layer,
+	chain *redialChain,
+	dialFresh redialFunc,
+	logger *slog.Logger,
+) (*http2.Layer, layer.Channel, error) {
+	return openUpstreamStreamWithRetryFn(
+		dctx, target, upstreamH2, chain, dialFresh, http2OpenStream, logger,
+	)
+}
+
+// openUpstreamStreamWithRetryFn is the OpenStream-injectable form used
+// by tests. Production code calls openUpstreamStreamWithRetry which
+// passes http2OpenStream.
+func openUpstreamStreamWithRetryFn(
+	dctx context.Context,
+	target string,
+	upstreamH2 *http2.Layer,
+	chain *redialChain,
+	dialFresh redialFunc,
+	openStream openStreamFunc,
+	logger *slog.Logger,
+) (*http2.Layer, layer.Channel, error) {
+	upL := selectUpstreamForDial(dctx, target, upstreamH2, chain, dialFresh, logger)
+	upCh, err := openStream(dctx, upL)
+	if err == nil {
+		return upL, upCh, nil
+	}
+	if !isRefusedStreamError(err) {
+		return nil, nil, err
+	}
+	// Attempt 1 returned Refused. Retry exactly once. The second
+	// selectUpstreamForDial sees the now-stale Layer (the very Refused
+	// codes imply shutdown/GOAWAY on upL) and fresh-dials under
+	// chain.mu. Concurrent streams hitting the same race converge on
+	// the same fresh Layer through chain.current.
+	logger.Debug("proxybuild: OpenStream refused, retrying after fresh dial",
+		"target", target, "reason", refusedReason(err))
+	upL2 := selectUpstreamForDial(dctx, target, upstreamH2, chain, dialFresh, logger)
+	upCh2, err2 := openStream(dctx, upL2)
+	if err2 != nil {
+		return nil, nil, err2
+	}
+	return upL2, upCh2, nil
+}
+
+// isRefusedStreamError reports whether err is a *layer.StreamError whose
+// Code is layer.ErrorRefused. Matches all three OpenStream Refused
+// emission sites (layer shutdown / GOAWAY sent / GOAWAY received) — all
+// pre-HEADERS, so all retry-safe regardless of HTTP method.
+func isRefusedStreamError(err error) bool {
+	var se *layer.StreamError
+	if !errors.As(err, &se) {
+		return false
+	}
+	return se.Code == layer.ErrorRefused
+}
+
+// refusedReason returns the Reason field of a refused StreamError for
+// logging. Returns the error's string form if Reason is unavailable.
+func refusedReason(err error) string {
+	var se *layer.StreamError
+	if errors.As(err, &se) {
+		return se.Reason
+	}
+	return err.Error()
 }
 
 // buildSessionOptions populates the SessionOptions threaded into every

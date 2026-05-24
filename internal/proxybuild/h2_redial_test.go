@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/usk6666/yorishiro-proxy/internal/envelope"
+	"github.com/usk6666/yorishiro-proxy/internal/layer"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/http2"
 )
 
@@ -507,3 +509,371 @@ func TestRedialChain_CloseAllClosesEveryStep(t *testing.T) {
 	// re-entry; closeAll must not panic).
 	chain.closeAll()
 }
+
+// USK-993 — auto-redial-and-retry on `Refused: layer shutdown` at OpenStream.
+//
+// The N-chain redial (USK-991) closes the chain.mu serialisation gap, but a
+// residual race remains: selectUpstreamForDial returns Layer L (healthy at
+// the time of staleness check) and the caller's OpenStream syscall sees L
+// shut down before the channel is constructed. OpenStream returns
+// *layer.StreamError{Code: ErrorRefused, Reason: <one of three pre-HEADERS
+// races>} and the request would previously die with state=error even
+// though zero wire bytes were sent. USK-993 wraps the dial closure with a
+// one-shot retry that re-runs selectUpstreamForDial (which now observes
+// the stale Layer and fresh-dials under chain.mu single-flight).
+
+// TestOpenUpstreamStreamWithRetry_RefusedTriggersRetry pins the core
+// USK-993 invariant: attempt 1 returns ErrorRefused → exactly one redial
+// is requested → attempt 2 succeeds → the caller receives the fresh
+// Layer's Channel. Table-driven across the three Refused reasons.
+func TestOpenUpstreamStreamWithRetry_RefusedTriggersRetry(t *testing.T) {
+	cases := []struct {
+		name   string
+		reason string
+	}{
+		{"layer_shutdown", "layer shutdown"},
+		{"goaway_sent", "GOAWAY sent"},
+		{"goaway_received", "GOAWAY received"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			pooled, pooledPeer := dialPeerH2Layer(t)
+			defer pooled.Close()
+			defer pooledPeer.Close()
+
+			fresh, freshPeer := dialPeerH2Layer(t)
+			defer fresh.Close()
+			defer freshPeer.Close()
+
+			// Drive pooled into stale so the *second* selectUpstreamForDial
+			// call inside the helper fresh-dials. The first call returns the
+			// pooled Layer (the helper does not drive shutdown between the
+			// two selectUpstreamForDial calls — the stub openStream is what
+			// surfaces the Refused, mimicking the residual race).
+			_ = pooledPeer.Close()
+			awaitShutdown(t, pooled)
+
+			var redialCalls int32
+			redialFn := func(_ context.Context, _ string, _ *http2.Layer, _ int) (*http2.Layer, error) {
+				atomic.AddInt32(&redialCalls, 1)
+				return fresh, nil
+			}
+
+			stubChan := stubChannel{streamID: 7}
+			var openCalls int32
+			openFn := func(_ context.Context, l *http2.Layer) (layer.Channel, error) {
+				n := atomic.AddInt32(&openCalls, 1)
+				if n == 1 {
+					return nil, &layer.StreamError{
+						Code:   layer.ErrorRefused,
+						Reason: tc.reason,
+					}
+				}
+				if l != fresh {
+					t.Errorf("attempt %d: openStream got %p, want fresh %p", n, l, fresh)
+				}
+				return stubChan, nil
+			}
+
+			chain := newRedialChain()
+			gotL, gotCh, err := openUpstreamStreamWithRetryFn(
+				context.Background(), "example.test:443",
+				pooled, chain, redialFn, openFn, silentLogger(),
+			)
+			if err != nil {
+				t.Fatalf("openUpstreamStreamWithRetryFn: %v", err)
+			}
+			if gotL != fresh {
+				t.Errorf("returned Layer = %p, want fresh %p", gotL, fresh)
+			}
+			if gotCh != stubChan {
+				t.Errorf("returned Channel = %#v, want stub", gotCh)
+			}
+			if n := atomic.LoadInt32(&openCalls); n != 2 {
+				t.Errorf("openStream called %d times, want exactly 2 (attempt + 1 retry)", n)
+			}
+			if n := atomic.LoadInt32(&redialCalls); n != 1 {
+				t.Errorf("redialFn called %d times, want exactly 1", n)
+			}
+		})
+	}
+}
+
+// TestOpenUpstreamStreamWithRetry_BudgetExactlyOne pins that a second
+// Refused does NOT trigger a third attempt — the budget is exactly 1
+// retry per dial closure invocation. The 2nd Refused error is returned
+// verbatim so session.ClassifyError preserves the taxonomy
+// (state=error / failure_reason=refused).
+func TestOpenUpstreamStreamWithRetry_BudgetExactlyOne(t *testing.T) {
+	pooled, pooledPeer := dialPeerH2Layer(t)
+	defer pooled.Close()
+	defer pooledPeer.Close()
+
+	fresh, freshPeer := dialPeerH2Layer(t)
+	defer fresh.Close()
+	defer freshPeer.Close()
+
+	_ = pooledPeer.Close()
+	awaitShutdown(t, pooled)
+
+	redialFn := func(_ context.Context, _ string, _ *http2.Layer, _ int) (*http2.Layer, error) {
+		return fresh, nil
+	}
+
+	wantReason := "GOAWAY received"
+	var openCalls int32
+	openFn := func(_ context.Context, _ *http2.Layer) (layer.Channel, error) {
+		atomic.AddInt32(&openCalls, 1)
+		return nil, &layer.StreamError{Code: layer.ErrorRefused, Reason: wantReason}
+	}
+
+	chain := newRedialChain()
+	_, _, err := openUpstreamStreamWithRetryFn(
+		context.Background(), "example.test:443",
+		pooled, chain, redialFn, openFn, silentLogger(),
+	)
+	if err == nil {
+		t.Fatal("openUpstreamStreamWithRetryFn returned nil error, want second-attempt Refused")
+	}
+	var se *layer.StreamError
+	if !errors.As(err, &se) {
+		t.Fatalf("returned error is not *layer.StreamError: %T %v", err, err)
+	}
+	if se.Code != layer.ErrorRefused {
+		t.Errorf("se.Code = %v, want ErrorRefused", se.Code)
+	}
+	if se.Reason != wantReason {
+		t.Errorf("se.Reason = %q, want %q (verbatim second-attempt error)", se.Reason, wantReason)
+	}
+	if n := atomic.LoadInt32(&openCalls); n != 2 {
+		t.Errorf("openStream called %d times, want exactly 2 (attempt + 1 retry, budget cap)", n)
+	}
+}
+
+// TestOpenUpstreamStreamWithRetry_NonRefusedPassesThrough confirms that
+// errors other than ErrorRefused are NOT retried — they pass through
+// verbatim. Retry-safety reasoning depends on the pre-HEADERS guarantee
+// of the three Refused emission sites; other errors (e.g. ErrorInternal,
+// ErrorAborted, context cancellation) may have written wire bytes and
+// must not be retried.
+func TestOpenUpstreamStreamWithRetry_NonRefusedPassesThrough(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+	}{
+		{"internal_error", &layer.StreamError{Code: layer.ErrorInternalError, Reason: "boom"}},
+		{"aborted", &layer.StreamError{Code: layer.ErrorAborted, Reason: "peer rst"}},
+		{"protocol_error", &layer.StreamError{Code: layer.ErrorProtocol, Reason: "malformed"}},
+		{"context_canceled", context.Canceled},
+		{"plain_error", errors.New("dial: network unreachable")},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			pooled, peer := dialPeerH2Layer(t)
+			defer pooled.Close()
+			defer peer.Close()
+
+			redialFn := func(_ context.Context, _ string, _ *http2.Layer, _ int) (*http2.Layer, error) {
+				t.Error("redialFn must not be called for non-Refused error")
+				return nil, errors.New("unexpected redial")
+			}
+
+			var openCalls int32
+			openFn := func(_ context.Context, _ *http2.Layer) (layer.Channel, error) {
+				atomic.AddInt32(&openCalls, 1)
+				return nil, tc.err
+			}
+
+			chain := newRedialChain()
+			_, _, err := openUpstreamStreamWithRetryFn(
+				context.Background(), "example.test:443",
+				pooled, chain, redialFn, openFn, silentLogger(),
+			)
+			if !errors.Is(err, tc.err) && err != tc.err { //nolint:errorlint
+				// errors.Is matches *StreamError by Code (see Is()); plain errors
+				// are reference-equal. Both paths above cover the comparison.
+				if !sameErr(err, tc.err) {
+					t.Errorf("got err = %v, want %v (verbatim)", err, tc.err)
+				}
+			}
+			if n := atomic.LoadInt32(&openCalls); n != 1 {
+				t.Errorf("openStream called %d times, want exactly 1 (no retry on non-Refused)", n)
+			}
+		})
+	}
+}
+
+// TestOpenUpstreamStreamWithRetry_FirstAttemptSucceedsNoRetry pins the
+// happy path: when attempt 1 succeeds, no retry is attempted and no
+// redial is triggered.
+func TestOpenUpstreamStreamWithRetry_FirstAttemptSucceedsNoRetry(t *testing.T) {
+	pooled, peer := dialPeerH2Layer(t)
+	defer pooled.Close()
+	defer peer.Close()
+
+	redialFn := func(_ context.Context, _ string, _ *http2.Layer, _ int) (*http2.Layer, error) {
+		t.Error("redialFn must not be called on happy path")
+		return nil, errors.New("unexpected redial")
+	}
+
+	stubChan := stubChannel{streamID: 3}
+	var openCalls int32
+	openFn := func(_ context.Context, l *http2.Layer) (layer.Channel, error) {
+		atomic.AddInt32(&openCalls, 1)
+		if l != pooled {
+			t.Errorf("openStream got %p, want pooled %p", l, pooled)
+		}
+		return stubChan, nil
+	}
+
+	chain := newRedialChain()
+	gotL, gotCh, err := openUpstreamStreamWithRetryFn(
+		context.Background(), "example.test:443",
+		pooled, chain, redialFn, openFn, silentLogger(),
+	)
+	if err != nil {
+		t.Fatalf("openUpstreamStreamWithRetryFn: %v", err)
+	}
+	if gotL != pooled {
+		t.Errorf("returned Layer = %p, want pooled %p", gotL, pooled)
+	}
+	if gotCh != stubChan {
+		t.Errorf("returned Channel = %#v, want stub", gotCh)
+	}
+	if n := atomic.LoadInt32(&openCalls); n != 1 {
+		t.Errorf("openStream called %d times, want exactly 1 (no retry on success)", n)
+	}
+}
+
+// TestOpenUpstreamStreamWithRetry_ConcurrentRefusedSingleFlightRedial
+// pins that N concurrent streams hitting the residual race converge on a
+// single fresh dial via chain.mu (USK-993 layered on USK-991's single-
+// flight). Each goroutine sees Refused on attempt 1 and must observe the
+// same fresh Layer on attempt 2; the redialFn must fire exactly once.
+func TestOpenUpstreamStreamWithRetry_ConcurrentRefusedSingleFlightRedial(t *testing.T) {
+	pooled, pooledPeer := dialPeerH2Layer(t)
+	defer pooled.Close()
+	defer pooledPeer.Close()
+
+	// Drive pooled stale so the second selectUpstreamForDial call inside
+	// each helper invocation observes staleness and converges on
+	// chain.mu.
+	_ = pooledPeer.Close()
+	awaitShutdown(t, pooled)
+
+	fresh, freshPeer := dialPeerH2Layer(t)
+	defer fresh.Close()
+	defer freshPeer.Close()
+
+	var redialCalls int32
+	gate := make(chan struct{})
+	redialFn := func(_ context.Context, _ string, _ *http2.Layer, _ int) (*http2.Layer, error) {
+		<-gate
+		atomic.AddInt32(&redialCalls, 1)
+		return fresh, nil
+	}
+
+	openFn := func(_ context.Context, l *http2.Layer) (layer.Channel, error) {
+		if l == pooled {
+			// Stage the residual race: pooled was returned even though
+			// stale (selectUpstream's fast path may return it before the
+			// IsShutdown flip is observed in another goroutine on a real
+			// system; the stub forces the symptom).
+			return nil, &layer.StreamError{Code: layer.ErrorRefused, Reason: "layer shutdown"}
+		}
+		return stubChannel{streamID: 1}, nil
+	}
+
+	chain := newRedialChain()
+	const n = 8
+	results := make(chan *http2.Layer, n)
+	for i := 0; i < n; i++ {
+		go func() {
+			gotL, _, err := openUpstreamStreamWithRetryFn(
+				context.Background(), "example.test:443",
+				pooled, chain, redialFn, openFn, silentLogger(),
+			)
+			if err != nil {
+				t.Errorf("openUpstreamStreamWithRetryFn: %v", err)
+				results <- nil
+				return
+			}
+			results <- gotL
+		}()
+	}
+
+	// Let goroutines converge on chain.mu, then release the dial.
+	time.Sleep(50 * time.Millisecond)
+	close(gate)
+
+	for i := 0; i < n; i++ {
+		select {
+		case got := <-results:
+			if got != fresh {
+				t.Errorf("goroutine %d got %p, want fresh %p", i, got, fresh)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("goroutine %d did not return", i)
+		}
+	}
+	if got := atomic.LoadInt32(&redialCalls); got != 1 {
+		t.Errorf("redialFn fired %d times, want 1 (single-flight under chain.mu)", got)
+	}
+}
+
+// TestIsRefusedStreamError covers the classifier directly.
+func TestIsRefusedStreamError(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"refused_layer_shutdown", &layer.StreamError{Code: layer.ErrorRefused, Reason: "layer shutdown"}, true},
+		{"refused_goaway_sent", &layer.StreamError{Code: layer.ErrorRefused, Reason: "GOAWAY sent"}, true},
+		{"refused_goaway_received", &layer.StreamError{Code: layer.ErrorRefused, Reason: "GOAWAY received"}, true},
+		{"refused_no_reason", &layer.StreamError{Code: layer.ErrorRefused}, true},
+		{"internal_error", &layer.StreamError{Code: layer.ErrorInternalError}, false},
+		{"aborted", &layer.StreamError{Code: layer.ErrorAborted}, false},
+		{"canceled", &layer.StreamError{Code: layer.ErrorCanceled}, false},
+		{"protocol_error", &layer.StreamError{Code: layer.ErrorProtocol}, false},
+		{"context_canceled", context.Canceled, false},
+		{"plain_error", errors.New("network unreachable"), false},
+		{"wrapped_refused", fmt.Errorf("dial: %w", &layer.StreamError{Code: layer.ErrorRefused, Reason: "layer shutdown"}), true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isRefusedStreamError(tc.err); got != tc.want {
+				t.Errorf("isRefusedStreamError(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
+}
+
+// sameErr returns true if a and b refer to the same error value, handling
+// the *layer.StreamError comparison case (errors.Is matches by Code only,
+// so reference equality is required for "verbatim" assertions).
+func sameErr(a, b error) bool {
+	if a == nil && b == nil {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+	return a.Error() == b.Error()
+}
+
+// stubChannel implements layer.Channel for OpenStream return values in
+// the unit test. The retry helper only inspects the returned Channel by
+// passing it through to the caller, so the methods below are minimal
+// stubs that never fire on the test paths.
+type stubChannel struct {
+	streamID int
+}
+
+func (s stubChannel) StreamID() string                                   { return fmt.Sprintf("stub-%d", s.streamID) }
+func (s stubChannel) Next(_ context.Context) (*envelope.Envelope, error) { return nil, io.EOF }
+func (s stubChannel) Send(_ context.Context, _ *envelope.Envelope) error { return nil }
+func (s stubChannel) Close() error                                       { return nil }
+func (s stubChannel) Closed() <-chan struct{}                            { return nil }
+func (s stubChannel) Err() error                                         { return nil }
