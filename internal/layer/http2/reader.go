@@ -131,19 +131,33 @@ func (l *Layer) handleGoAwayFrame(f *frame.Frame) error {
 	}
 	slog.Warn("http2: peer sent GOAWAY", attrs...)
 
-	// USK-992: fire the optional WithGoAwayObserver callback exactly once
-	// before failStreamsAfterGoAway. Ordering matters: at this point
-	// l.conn has recorded GOAWAY-received, so GoAwayClosed() will read
-	// true for any subsequent IsStaleH2 check the observer's consumer
-	// performs. The observer is contracted to be non-blocking (godoc on
-	// WithGoAwayObserver) so this site does not stall the readerLoop.
-	// Wrapped in sync.Once via l.goAwayObserverOnce so multi-GOAWAY
-	// bursts (RFC 9113 §6.8) and any hostile-peer flood fire at most
-	// one observer call per Layer; downstream debouncing (e.g. the
-	// proxybuild pre-warm worker's cap=1 wake channel) is layered on
-	// top.
-	if l.opts.goAwayObserver != nil {
-		l.goAwayObserverOnce.Do(l.opts.goAwayObserver)
+	// USK-992 / USK-994: fire every registered GOAWAY observer exactly
+	// once before failStreamsAfterGoAway. Ordering matters: at this
+	// point l.conn has recorded GOAWAY-received, so GoAwayClosed() will
+	// read true for any subsequent IsStaleH2 check the observers'
+	// consumers perform.
+	//
+	// Observers are contracted to be non-blocking (godoc on
+	// WithGoAwayObserver / RegisterGoAwayObserver), but to defend
+	// against a misbehaved consumer we snapshot the list under
+	// goAwayObsMu and drop the lock BEFORE firing each cb. This both
+	// prevents the readerLoop's lock from being held across cb runtime
+	// and lets a cancel func called from another goroutine make
+	// progress concurrently with an in-flight cb.
+	//
+	// Per-registration sync.Once (entry.once) enforces single-fire per
+	// (Layer, registration) tuple — multi-GOAWAY bursts (RFC 9113 §6.8)
+	// and any hostile-peer flood fire each observer at most once;
+	// downstream debouncing (e.g. the proxybuild pre-warm worker's
+	// cap=1 wake channel) is layered on top.
+	l.goAwayObsMu.Lock()
+	l.goAwayHit = true
+	snapshot := make([]*goAwayObsEntry, len(l.goAwayObs))
+	copy(snapshot, l.goAwayObs)
+	l.goAwayObsMu.Unlock()
+	for _, entry := range snapshot {
+		e := entry
+		e.once.Do(e.cb)
 	}
 
 	// Notify all open streams with id > lastStreamID.

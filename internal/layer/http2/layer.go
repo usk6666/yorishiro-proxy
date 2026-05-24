@@ -177,10 +177,18 @@ func WithStateReleaser(r pluginv2.StateReleaser) Option {
 // readerLoop hot path.
 //
 // nil cb is a no-op (the option may be passed unconditionally). The
-// callback is wrapped in sync.Once internally so a single Layer that
-// receives multiple GOAWAY frames (RFC 9113 §6.8 permits multiple
-// GOAWAYs with non-decreasing last_stream_id; a hostile peer can also
-// burst them) still fires cb exactly once.
+// callback fires at most once per Layer regardless of how many GOAWAY
+// frames the peer sends (RFC 9113 §6.8 permits multiple GOAWAYs with
+// non-decreasing last_stream_id; a hostile peer can also burst them):
+// the bootstrap registration installed by this Option is wrapped in
+// the same per-registration sync.Once as any caller of
+// RegisterGoAwayObserver.
+//
+// USK-994: WithGoAwayObserver is the construction-time bootstrap over
+// the runtime-attachable mechanism. Use RegisterGoAwayObserver when you
+// need to attach an observer to an already-constructed Layer (e.g. a
+// pooled Layer handed out by connector/h2_pool to a CONNECT that wants
+// to participate in proactive pre-warm).
 func WithGoAwayObserver(cb func()) Option {
 	return func(o *options) { o.goAwayObserver = cb }
 }
@@ -237,12 +245,28 @@ type Layer struct {
 	shutdown     chan struct{}
 	shutdownOnce sync.Once
 
-	// goAwayObserverOnce guards the observer registered via
-	// WithGoAwayObserver so it fires at most once per Layer even when the
-	// peer sends multiple GOAWAY frames (RFC 9113 §6.8 permits non-
-	// decreasing last_stream_id over multiple GOAWAYs; a hostile peer can
-	// also burst them). Wraps the call site in handleGoAwayFrame.
-	goAwayObserverOnce sync.Once
+	// goAwayObsMu protects goAwayObs and goAwayHit. Held only briefly:
+	//   - registration / cancellation: append / O(N) pointer-identity scan
+	//     over a list whose typical length is 1-4 (one per CONNECT sharing
+	//     the pooled Layer up to MaxStreamsPerConn).
+	//   - handleGoAwayFrame: snapshot the slice and set goAwayHit, drop the
+	//     lock, then fire each entry's per-registration sync.Once outside
+	//     the lock so a misbehaved observer cannot stall the readerLoop's
+	//     mutex.
+	//
+	// Each registration carries its own sync.Once (goAwayObsEntry.once) so
+	// concurrent CONNECTs sharing one pooled Layer each get exactly one
+	// observer fire per (Layer, registration) tuple — whether they
+	// registered before the first GOAWAY arrived (normal path) or after
+	// (fires synchronously inside RegisterGoAwayObserver).
+	//
+	// USK-994: see RegisterGoAwayObserver for the runtime-attachable API.
+	// WithGoAwayObserver remains the construction-time bootstrap; it
+	// installs itself via the same mechanism inside New so the two paths
+	// share one observer list.
+	goAwayObsMu sync.Mutex
+	goAwayObs   []*goAwayObsEntry
+	goAwayHit   bool
 
 	windowUpdated chan struct{}
 
@@ -304,6 +328,106 @@ func (l *Layer) GoAwayClosed() bool {
 		return true
 	}
 	return false
+}
+
+// goAwayObsEntry is one registration with a per-registration sync.Once
+// that gates the observer call so each cb fires at most once per
+// (Layer, registration) tuple regardless of how many GOAWAY frames the
+// peer sends.
+//
+// Cancellation semantics: the registration's cancel func removes the
+// entry from l.goAwayObs under goAwayObsMu. An in-flight
+// handleGoAwayFrame snapshot taken before cancel may still hold a
+// *goAwayObsEntry pointer to a removed entry; if entry.once.Do has not
+// yet run on that pointer at the moment cancel completes, the cb still
+// fires once (the per-registration Once gates the call, not the live
+// slice membership). Subsequent GOAWAYs after cancel cannot re-fire
+// because the entry is no longer reachable from the live slice. The
+// pre-fire-versus-cancel race window is intrinsic to the snapshot-then-
+// fire-outside-the-lock design (chosen so a misbehaved cb cannot stall
+// the readerLoop's mutex) and is documented as acceptable: cb runs at
+// most one extra time beyond the cancel call.
+type goAwayObsEntry struct {
+	cb   func()
+	once sync.Once
+}
+
+// RegisterGoAwayObserver attaches cb to fire exactly once when the Layer
+// observes a peer GOAWAY frame. Returns a cancel func the caller MUST
+// invoke at lifecycle end (e.g. CONNECT exit) to remove cb from the
+// Layer's observer list — Layers outlive any single CONNECT (they are
+// pooled), so leaving cb registered would (a) leak the per-CONNECT
+// closure capture across CONNECTs (memory) and (b) cause a GOAWAY in a
+// future CONNECT to tickle the dead CONNECT's wake channel
+// (correctness).
+//
+// If the Layer has ALREADY observed GOAWAY at registration time
+// (GoAwayClosed() reads true), cb fires synchronously before
+// RegisterGoAwayObserver returns. This closes the race between
+// Pool.Get returning a Layer that observed GOAWAY between the previous
+// CONNECT's release and this CONNECT's Get, and the caller installing
+// the observer.
+//
+// Each cb is independently wrapped in sync.Once so different CONNECTs
+// sharing the same pooled Layer each receive exactly one observer fire
+// per (Layer, registration) tuple — regardless of whether they
+// registered before or after the first GOAWAY arrived.
+//
+// Contract — non-blocking callback: inherits the WithGoAwayObserver
+// rules verbatim (see godoc on WithGoAwayObserver). The callback runs
+// on the readerLoop goroutine when a peer GOAWAY arrives during the
+// registration's lifetime, or synchronously on the caller's goroutine
+// when GOAWAY was observed before registration.
+//
+// nil cb is a no-op; the returned cancel func is also a no-op (safe to
+// defer unconditionally).
+//
+// The returned cancel func is idempotent — calling it more than once is
+// safe.
+//
+// USK-994: introduced to plumb proactive pre-warm wake signalling
+// through the pool-constructed chain[0] Layer in
+// internal/proxybuild/builder.go::buildOnHTTP2Stack.
+func (l *Layer) RegisterGoAwayObserver(cb func()) (cancel func()) {
+	if cb == nil {
+		return func() {}
+	}
+	entry := &goAwayObsEntry{cb: cb}
+
+	l.goAwayObsMu.Lock()
+	hit := l.goAwayHit
+	if !hit {
+		l.goAwayObs = append(l.goAwayObs, entry)
+	}
+	l.goAwayObsMu.Unlock()
+
+	if hit {
+		// GOAWAY already observed before this registration. Fire
+		// synchronously outside the lock so cb's contract (non-blocking)
+		// does not pin goAwayObsMu. Use the entry's own once so a
+		// pathological cancel + re-fire path stays single-fire.
+		entry.once.Do(cb)
+		// No live entry to remove; cancel is a no-op.
+		return func() {}
+	}
+
+	var cancelOnce sync.Once
+	return func() {
+		cancelOnce.Do(func() {
+			l.goAwayObsMu.Lock()
+			defer l.goAwayObsMu.Unlock()
+			// O(N) pointer-identity scan; N is typically 1-4.
+			for i, e := range l.goAwayObs {
+				if e == entry {
+					// Order-preserving removal — order does not matter
+					// for observer semantics, but keeps debug output
+					// stable.
+					l.goAwayObs = append(l.goAwayObs[:i], l.goAwayObs[i+1:]...)
+					return
+				}
+			}
+		})
+	}
 }
 
 // IsShutdown reports whether this Layer's shutdown channel has been closed.
@@ -465,6 +589,15 @@ func New(conn net.Conn, streamID string, role Role, opts ...Option) (*Layer, err
 	if err := l.runPreface(); err != nil {
 		_ = conn.Close()
 		return nil, err
+	}
+
+	// USK-994: install the WithGoAwayObserver bootstrap (if any) through
+	// the runtime-attachable mechanism so the single fire path is
+	// uniform with RegisterGoAwayObserver callers. The bootstrap
+	// observer lives for the Layer's lifetime, so we discard the cancel
+	// func — matches the pre-USK-994 single-slot semantics exactly.
+	if o.goAwayObserver != nil {
+		_ = l.RegisterGoAwayObserver(o.goAwayObserver)
 	}
 
 	go l.writerLoop()
