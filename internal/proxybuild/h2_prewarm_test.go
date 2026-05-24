@@ -774,6 +774,157 @@ func TestRedialChain_PrewarmAndReactiveCooperate(t *testing.T) {
 	}
 }
 
+// TestRedialChain_PrewarmFiresOnPooledChain0GoAway is the USK-994
+// invariant in test form: when the chain[0] Layer (i.e. the pool-
+// constructed Layer handed to buildOnHTTP2Stack as upstreamH2) observes
+// GOAWAY, the pre-warm worker dials a fresh upstream proactively. This
+// closes the latency-distortion gap PR #67 (USK-992) explicitly left
+// open: pre-USK-994, only chain[1+] observed GOAWAY via the
+// construction-time WithGoAwayObserver wired inside RedialUpstreamH2;
+// chain[0]'s first GOAWAY only triggered the reactive selectUpstream
+// path at the next user request, lumping the TCP+TLS handshake onto the
+// user-visible latency.
+//
+// Staging mirrors the production wiring in buildOnHTTP2Stack:
+//  1. Mint pooled (chain[0]) with NO observer — same as the connector
+//     pool's dialFn does today.
+//  2. Construct the chain, the redialFn, and the wake worker.
+//  3. Register the observer on pooled via Layer.RegisterGoAwayObserver
+//     (the production code path), with the head-comparison guard.
+//  4. Inject a real GOAWAY into pooled.
+//  5. Assert worker dials → chain.current swaps to fresh.
+func TestRedialChain_PrewarmFiresOnPooledChain0GoAway(t *testing.T) {
+	chain := newRedialChain()
+
+	// Pre-mint fresh up front so we don't race on assignment inside the
+	// worker goroutine.
+	fresh, freshPeer := dialPeerH2Layer(t)
+	defer fresh.Close()
+	defer freshPeer.Close()
+
+	var dialCount int32
+	dialReady := make(chan struct{}, 1)
+	dialReleased := make(chan struct{})
+	redialFn := func(_ context.Context, _ string, _ *http2.Layer, _ int) (*http2.Layer, error) {
+		atomic.AddInt32(&dialCount, 1)
+		select {
+		case dialReady <- struct{}{}:
+		default:
+		}
+		<-dialReleased
+		return fresh, nil
+	}
+
+	// pooled is constructed without WithGoAwayObserver — same as the
+	// connector pool's dialFn shape pre-buildOnHTTP2Stack.
+	pooled, pooledPeer := dialPeerH2Layer(t)
+	defer pooled.Close()
+	defer pooledPeer.Close()
+
+	// chain[0] is the pooled Layer in production. selectUpstreamForDial
+	// falls back to upstreamH2 when chain.current is nil; pre-USK-994
+	// the worker never saw chain[0]'s GOAWAY because it had no observer.
+	// We do NOT seed chain.layers or chain.current with pooled — that
+	// mirrors the production state at the start of buildOnHTTP2Stack
+	// (chain.current is nil; chain[0] is implicitly upstreamH2).
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	chain.startPrewarmWorker(ctx, "example.test:443", redialFn, nil, silentLogger())
+	defer chain.closeAll()
+
+	// USK-994 production wiring: attach the observer on the pooled Layer
+	// AFTER construction via the runtime-attachable RegisterGoAwayObserver.
+	// The closure mirrors the production head-comparison guard exactly.
+	unregister := pooled.RegisterGoAwayObserver(func() {
+		if chain.current.Load() != nil {
+			return // not the head (a reactive redial already swapped in)
+		}
+		chain.tickleWake()
+	})
+	defer unregister()
+
+	// Inject real GOAWAY → observer fires → wake tickled.
+	injectGoAwayFromPeer(t, pooledPeer, 0, 0)
+	awaitGoAwayClosed(t, pooled)
+
+	// Worker enters dial.
+	select {
+	case <-dialReady:
+	case <-time.After(2 * time.Second):
+		t.Fatal("worker did not enter dial within 2s of injected chain[0] GOAWAY")
+	}
+	close(dialReleased)
+
+	// Wait for the swap.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && chain.current.Load() != fresh {
+		time.Sleep(5 * time.Millisecond)
+	}
+	cur := chain.current.Load()
+	if cur != fresh {
+		t.Fatalf("chain.current = %p, want fresh %p (worker did not swap)", cur, fresh)
+	}
+	if got := atomic.LoadInt32(&dialCount); got != 1 {
+		t.Errorf("redialFn called %d times, want 1", got)
+	}
+}
+
+// TestRedialChain_PrewarmPooledObserverGatedByHeadAfterSwap covers the
+// post-swap gating invariant for the USK-994 chain[0] observer: once
+// chain.current has been swapped to chain[1+] (e.g. by selectUpstream
+// or the pre-warm worker), subsequent GOAWAYs on the chain[0] pooled
+// Layer (RFC 9113 §6.8 multi-GOAWAY) must NOT trigger another
+// pre-warm dial — chain[0] is no longer the head; its streams are
+// draining out under browser-equivalent semantics.
+//
+// This mirrors TestRedialChain_ObserverGatesByCurrentHead but for the
+// chain[0] (pooled) observer closure produced by buildOnHTTP2Stack.
+func TestRedialChain_PrewarmPooledObserverGatedByHeadAfterSwap(t *testing.T) {
+	chain := newRedialChain()
+
+	pooled, pooledPeer := dialPeerH2Layer(t)
+	defer pooled.Close()
+	defer pooledPeer.Close()
+	swapped, swappedPeer := dialPeerH2Layer(t)
+	defer swapped.Close()
+	defer swappedPeer.Close()
+
+	// Simulate a prior chain swap: chain.current points to a non-pooled
+	// (chain[1+]) Layer.
+	chain.layers = append(chain.layers, swapped)
+	chain.current.Store(swapped)
+
+	// Build the production observer closure for the pooled Layer.
+	var pooledObserverFires int32
+	unregister := pooled.RegisterGoAwayObserver(func() {
+		if chain.current.Load() != nil {
+			return
+		}
+		atomic.AddInt32(&pooledObserverFires, 1)
+		chain.tickleWake()
+	})
+	defer unregister()
+
+	// Inject GOAWAY into pooled. The observer fires but the head-comparison
+	// guard skips chain.tickleWake.
+	injectGoAwayFromPeer(t, pooledPeer, 0, 0)
+	awaitGoAwayClosed(t, pooled)
+
+	// wake must remain unbuffered.
+	select {
+	case <-chain.wake:
+		t.Error("pooled chain[0] GOAWAY tickled wake despite swapped layer being head")
+	case <-time.After(100 * time.Millisecond):
+		// expected: head-comparison guard tripped
+	}
+	// And the firing-counter is 0 (the gate returns before
+	// tickleWake increments the counter).
+	if got := atomic.LoadInt32(&pooledObserverFires); got != 0 {
+		t.Errorf("pooled observer fires past gate = %d, want 0", got)
+	}
+}
+
 // Compile-time sanity: confirm the test file compiles without unused
 // imports.
 var _ = sync.Once{}

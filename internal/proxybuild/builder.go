@@ -898,16 +898,18 @@ func buildOnHTTP2Stack(p *pipeline.Pipeline, deps Deps, logger *slog.Logger) con
 		// draining under browser-equivalent semantics (RFC 9113 §6.8)
 		// and the chain has already moved on.
 		//
-		// Note: chain[0] (the pooled upstreamH2) is intentionally NOT
-		// wired with this observer. The pooled Layer is constructed in
-		// the connector pool's dialFn before buildOnHTTP2Stack runs and
-		// the chain therefore does not exist at that construction time.
-		// Adding a runtime setter to *http2.Layer to retroactively wire
-		// an observer was considered and rejected (design review Q15 —
-		// YAGNI, construction-only). The practical impact: the first
-		// GOAWAY in a CONNECT relies on the USK-991 reactive path; once
-		// any reactive redial has happened, every subsequent GOAWAY in
-		// the same CONNECT triggers proactive pre-warm.
+		// USK-994: chain[0] (the pooled upstreamH2) is wired with the
+		// observer via Layer.RegisterGoAwayObserver, the runtime-
+		// attachable counterpart of http2.WithGoAwayObserver. The pooled
+		// Layer is constructed in the connector pool's dialFn before
+		// buildOnHTTP2Stack runs, so the construction-time option cannot
+		// reach it (USK-992 design review Q15 deferred the runtime setter
+		// pending a concrete consumer; USK-994 is that consumer). See
+		// registerPooledChainHeadObserver for the head-comparison guard
+		// and cancel-lifecycle invariants.
+		unregisterPooledObserver := registerPooledChainHeadObserver(upstreamH2, chain)
+		defer unregisterPooledObserver()
+
 		redialFn := func(dctx context.Context, t string, stale *http2.Layer, generation int) (*http2.Layer, error) {
 			// firingLayerCell breaks the chicken-and-egg: the observer
 			// closure is passed to http2.New before the fresh Layer
@@ -1090,6 +1092,35 @@ func buildOnHTTP2Stack(p *pipeline.Pipeline, deps Deps, logger *slog.Logger) con
 			}
 		}
 	}
+}
+
+// registerPooledChainHeadObserver attaches a GOAWAY observer onto the
+// pooled chain[0] Layer (the upstreamH2 *http2.Layer handed to
+// buildOnHTTP2Stack) so the first GOAWAY observed inside a CONNECT
+// also triggers the proactive pre-warm worker — closing the
+// chain[0]-only latency-distortion gap PR #67 (USK-992) explicitly
+// left open. See USK-994 for the design and the chain[1+] symmetry.
+//
+// The observer applies the head-comparison guard (design review Q5):
+// wake fires only while chain[0] is the current head. Once
+// selectUpstreamForDial or the pre-warm worker swaps chain.current to
+// chain[1+], subsequent GOAWAYs on chain[0] (RFC 9113 §6.8 multi-
+// GOAWAY permitted) are gated out — those streams are draining under
+// browser-equivalent semantics and the chain has moved on.
+//
+// The returned cancel func MUST run at CONNECT exit — the pooled Layer
+// outlives this CONNECT (it is returned to the pool by dispatchStack),
+// so leaving the registration in place would (a) leak the per-CONNECT
+// closure capture across CONNECTs and (b) cause a future CONNECT's
+// GOAWAY observation to tickle this CONNECT's already-stale wake
+// channel.
+func registerPooledChainHeadObserver(pooled *http2.Layer, chain *redialChain) (cancel func()) {
+	return pooled.RegisterGoAwayObserver(func() {
+		if chain.current.Load() != nil {
+			return
+		}
+		chain.tickleWake()
+	})
 }
 
 // redialFunc is the closure proxybuild hands to selectUpstreamForDial.
