@@ -883,10 +883,79 @@ func buildOnHTTP2Stack(p *pipeline.Pipeline, deps Deps, logger *slog.Logger) con
 		// streams on them drain naturally up to GOAWAY's last_stream_id
 		// (RFC 9113 §6.8) — close-on-CONNECT-exit, not close-on-swap.
 		chain := newRedialChain()
+		// USK-992: the observer closure tickled when a fresh chain step
+		// observes peer GOAWAY. Wired onto each fresh Layer minted by
+		// RedialUpstreamH2 via http2.WithGoAwayObserver. The non-blocking
+		// send semantics match the WithGoAwayObserver contract (no
+		// blocking work in the readerLoop goroutine).
+		//
+		// Pre-warm fires only when the firing Layer is the current chain
+		// head — comparison against chain.current.Load() at callback time
+		// (per-Layer pointer capture via firingLayerCell, populated
+		// immediately after http2.New returns inside RedialUpstreamH2
+		// wrap). A GOAWAY on a no-longer-current (drained-out) prior
+		// chain step must not trigger pre-warm: those streams are
+		// draining under browser-equivalent semantics (RFC 9113 §6.8)
+		// and the chain has already moved on.
+		//
+		// Note: chain[0] (the pooled upstreamH2) is intentionally NOT
+		// wired with this observer. The pooled Layer is constructed in
+		// the connector pool's dialFn before buildOnHTTP2Stack runs and
+		// the chain therefore does not exist at that construction time.
+		// Adding a runtime setter to *http2.Layer to retroactively wire
+		// an observer was considered and rejected (design review Q15 —
+		// YAGNI, construction-only). The practical impact: the first
+		// GOAWAY in a CONNECT relies on the USK-991 reactive path; once
+		// any reactive redial has happened, every subsequent GOAWAY in
+		// the same CONNECT triggers proactive pre-warm.
 		redialFn := func(dctx context.Context, t string, stale *http2.Layer, generation int) (*http2.Layer, error) {
-			return connector.RedialUpstreamH2(dctx, t, stale, deps.BuildConfig, generation)
+			// firingLayerCell breaks the chicken-and-egg: the observer
+			// closure is passed to http2.New before the fresh Layer
+			// pointer exists; we assign the pointer immediately after
+			// http2.New returns (atomic.Pointer for safe publication
+			// across goroutines — observer fires on readerLoop, this
+			// assignment runs on the selectUpstreamForDial slow-path or
+			// pre-warm worker goroutine).
+			var firingLayerCell atomic.Pointer[http2.Layer]
+			fresh, err := connector.RedialUpstreamH2(dctx, t, stale, deps.BuildConfig, generation, func() {
+				firing := firingLayerCell.Load()
+				if firing == nil {
+					// Race: observer fired before the dial-completion
+					// store. Could happen only if GOAWAY arrives in the
+					// microsecond between http2.New return and the store
+					// below — vanishingly rare. Skip; the firing Layer
+					// is by construction the freshly minted one, and
+					// the worker's own stale-head re-check on the next
+					// genuine wake will catch up.
+					return
+				}
+				if firing != chain.current.Load() {
+					// Per design review Q5: a GOAWAY on a non-head Layer
+					// (already-swapped-out chain step) does NOT trigger
+					// pre-warm. The drain-out semantics are handled by
+					// the per-stream session lifecycle.
+					return
+				}
+				chain.tickleWake()
+			})
+			if err != nil {
+				return nil, err
+			}
+			// Publish the fresh Layer pointer for the observer closure
+			// captured above. The observer reads via Load() which
+			// synchronises-with this Store.
+			firingLayerCell.Store(fresh)
+			return fresh, nil
 		}
 		defer chain.closeAll()
+		// USK-992: start the per-CONNECT pre-warm worker. Owned by this
+		// CONNECT — exits when ctx cancels (CONNECT teardown) or
+		// chain.closeAll signals via prewarmDone. The worker performs
+		// blocking TCP+TLS handshakes off the wire-read hot path so
+		// next-request latency benefits from a pre-warmed connection.
+		// The same redialFn is shared with selectUpstreamForDial — the
+		// observer is wired onto whichever Layer the call mints.
+		chain.startPrewarmWorker(ctx, target, redialFn, nil, logger)
 
 		var wg sync.WaitGroup
 		for {
@@ -1048,21 +1117,179 @@ type redialFunc func(ctx context.Context, target string, stale *http2.Layer, gen
 //     Browser-equivalent semantics: prior chain steps drain their in-
 //     flight streams naturally up to GOAWAY's last_stream_id (RFC 9113
 //     §6.8); the proxy does not tear them down on swap.
+//
+// USK-992 — proactive pre-warm:
+//   - wake is a cap=1 buffered channel tickled (via non-blocking send)
+//     from the WithGoAwayObserver callback wired onto each fresh chain
+//     step. The cap=1 + non-blocking-send idiom collapses N rapid
+//     GOAWAY observations into at most one in-flight pre-warm dial per
+//     CONNECT (sibling of *http2.Layer.windowUpdated/signalWindowUpdate).
+//   - prewarmDone is closed by closeAll under closeOnce so the worker
+//     goroutine exits exactly once. Single-writer close ownership of
+//     prewarmDone belongs to closeAll (CLAUDE.md Concurrency Checklist).
+//   - The worker goroutine is started by startPrewarmWorker from
+//     buildOnHTTP2Stack and exits on ctx.Done() OR prewarmDone close.
+//     A pre-warm dial in flight when teardown begins still honors ctx
+//     (RedialUpstreamH2's dial helper); the worker checks ctx.Err()
+//     after each dial before appending to chain.layers, immediately
+//     closing any Layer that returns after teardown so no goroutine
+//     leak.
 type redialChain struct {
 	mu      sync.Mutex
 	layers  []*http2.Layer
 	current atomic.Pointer[http2.Layer]
+
+	wake        chan struct{}
+	prewarmDone chan struct{}
+	closeOnce   sync.Once
 }
 
 func newRedialChain() *redialChain {
-	return &redialChain{}
+	return &redialChain{
+		wake:        make(chan struct{}, 1),
+		prewarmDone: make(chan struct{}),
+	}
+}
+
+// tickleWake performs the canonical non-blocking send on c.wake. Mirrors
+// *http2.Layer.signalWindowUpdate (internal/layer/http2/reader.go:622).
+// Safe to call concurrently from any goroutine, including the
+// WithGoAwayObserver callback firing on readerLoop. A wake already
+// buffered is the dedup signal: the next wake observation will drain
+// it and dial once for the run of inputs that arrived while the wake
+// was pending.
+func (c *redialChain) tickleWake() {
+	select {
+	case c.wake <- struct{}{}:
+	default:
+	}
+}
+
+// startPrewarmWorker launches the per-CONNECT pre-warm worker goroutine.
+// The worker blocks on c.wake; each drain runs one dialFresh and, on
+// success, appends the fresh Layer to chain.layers and atomically swaps
+// chain.current under chain.mu. The worker exits on ctx.Done() (CONNECT
+// teardown) or c.prewarmDone close (closeAll).
+//
+// The pre-warm dial uses generation = len(chain.layers)+1 so the
+// fresh Layer's ConnID suffix mirrors the reactive path
+// (selectUpstreamForDial). Both worker-driven and reactive paths share
+// chain.mu so they serialise cleanly at the append step. The reactive
+// path's own re-check under chain.mu means if it wins the race and
+// dials first, the worker's pre-dial isStaleH2 check on the now-fresh
+// head skips the redundant dial. Conversely if pre-warm wins, the
+// reactive path's selectUpstreamForDial sees the pre-warmed Layer as
+// the new head and bypasses its own dial.
+//
+// onGoAwayHook is reserved for future per-Layer head-comparison wiring
+// done outside dialFresh; today callers pass nil because dialFresh
+// already wires the observer at construction.
+func (c *redialChain) startPrewarmWorker(
+	ctx context.Context,
+	target string,
+	dialFresh redialFunc,
+	onGoAwayHook func(*http2.Layer) func(),
+	logger *slog.Logger,
+) {
+	_ = onGoAwayHook // accepted for documented future symmetry; today the observer is wired inside dialFresh
+	go c.runPrewarmWorker(ctx, target, dialFresh, logger)
+}
+
+// runPrewarmWorker is the worker body. Extracted so startPrewarmWorker
+// composes cleanly with the goroutine launch.
+func (c *redialChain) runPrewarmWorker(
+	ctx context.Context,
+	target string,
+	dialFresh redialFunc,
+	logger *slog.Logger,
+) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-c.prewarmDone:
+			return
+		case <-c.wake:
+		}
+
+		// Read the current head before dialing. If the head is already
+		// healthy (spurious wake — e.g. observer tickled but reactive
+		// path already replaced the head), skip the dial.
+		head := c.headLayer()
+		if head != nil && !isStaleH2(head) {
+			continue
+		}
+
+		// Compute generation under mu, then drop the lock for the
+		// blocking dial. The reactive path may interleave and increment
+		// chain.layers concurrently; the worker's post-dial re-check
+		// under mu handles that gracefully.
+		c.mu.Lock()
+		nextGen := len(c.layers) + 1
+		head = c.headLayer()
+		if head != nil && !isStaleH2(head) {
+			c.mu.Unlock()
+			continue
+		}
+		c.mu.Unlock()
+
+		fresh, err := dialFresh(ctx, target, head, nextGen)
+		if err != nil {
+			// Speculative diagnostic only — the reactive path picks up on
+			// the next request. Worker keeps running for subsequent wake
+			// events (the failed dial is NOT appended; chain.current is
+			// unchanged).
+			logger.Debug("proxybuild: pre-warm h2 redial failed",
+				"target", target, "generation", nextGen, "error", err)
+			continue
+		}
+
+		// Ctx may have canceled while we were dialing. If so, close the
+		// fresh Layer immediately — append after teardown would leak
+		// both the Layer's goroutines and its memory across the CONNECT
+		// boundary.
+		if ctx.Err() != nil {
+			_ = fresh.Close()
+			return
+		}
+		// Append + swap under mu. selectUpstreamForDial readers see the
+		// new head via chain.current.Load() on their next call.
+		c.mu.Lock()
+		c.layers = append(c.layers, fresh)
+		c.current.Store(fresh)
+		c.mu.Unlock()
+		logger.Debug("proxybuild: pre-warm h2 dialed successfully",
+			"target", target, "generation", nextGen)
+	}
+}
+
+// headLayer returns the current chain head (current.Load() if
+// non-nil). The atomic Load means callers do not need c.mu; the head
+// is only Stored after layers append under c.mu so an observer
+// reading current sees a Layer already inserted into layers.
+func (c *redialChain) headLayer() *http2.Layer {
+	return c.current.Load()
 }
 
 // closeAll closes every fresh Layer accumulated in the chain. Called
 // from the buildOnHTTP2Stack defer at CONNECT exit. Idempotent on
 // repeated calls because http2.Layer.Close() is itself idempotent (the
 // USK-739/798 patterns establish this for both directions).
+//
+// USK-992: closeAll also signals the pre-warm worker to exit via
+// closeOnce on prewarmDone. The worker honors prewarmDone in the same
+// select arm as ctx.Done() so it returns promptly. A pre-warm dial
+// still in flight when closeAll runs honors ctx via its dial helper
+// (the CONNECT ctx is canceled before closeAll's defer runs in the
+// caller, or will be shortly after); the worker's post-dial ctx.Err()
+// check Closes any returned Layer to prevent leaks across CONNECT
+// boundaries.
 func (c *redialChain) closeAll() {
+	c.closeOnce.Do(func() {
+		if c.prewarmDone != nil {
+			close(c.prewarmDone)
+		}
+	})
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	for _, l := range c.layers {

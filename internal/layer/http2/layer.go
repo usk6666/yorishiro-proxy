@@ -57,6 +57,7 @@ type options struct {
 	bodySpillThreshold   int64
 	maxBody              int64
 	stateReleaser        pluginv2.StateReleaser
+	goAwayObserver       func()
 	// enableConnectProtocol overrides the ServerRole-only default
 	// advertisement of SETTINGS_ENABLE_CONNECT_PROTOCOL. Tracked as a
 	// pointer so the zero value of options can be distinguished from
@@ -149,6 +150,41 @@ func WithStateReleaser(r pluginv2.StateReleaser) Option {
 	return func(o *options) { o.stateReleaser = r }
 }
 
+// WithGoAwayObserver registers cb to fire exactly once when the Layer
+// observes a peer GOAWAY frame on the wire. The callback is invoked from
+// the readerLoop goroutine at internal/layer/http2/reader.go's
+// handleGoAwayFrame site, after Conn.HandleGoAway records the state
+// transition and before failStreamsAfterGoAway notifies open streams —
+// the earliest deterministic point at which GoAwayClosed() will read
+// true on subsequent calls.
+//
+// Contract — non-blocking callback:
+//
+//   - cb MUST return promptly (microseconds, not milliseconds). The
+//     readerLoop is the sole consumer of the upstream TCP/TLS conn; any
+//     work performed inside cb stalls every other frame on this
+//     connection (DATA / HEADERS / WINDOW_UPDATE / PING_ACK).
+//   - cb MUST NOT call back into this Layer's blocking surfaces
+//     (Close, Channel.Send/Next on this Layer). Doing so risks self-
+//     deadlock because some of those paths re-enter the readerLoop's
+//     synchronisation surfaces.
+//   - cb MUST NOT acquire mutexes whose holders may themselves block on
+//     readerLoop progress.
+//
+// Typical use (USK-992): cb is a closure that performs a non-blocking
+// send on a buffered cap=1 wake channel consumed by a separate worker
+// goroutine. The worker performs the actual TCP+TLS dial, off the
+// readerLoop hot path.
+//
+// nil cb is a no-op (the option may be passed unconditionally). The
+// callback is wrapped in sync.Once internally so a single Layer that
+// receives multiple GOAWAY frames (RFC 9113 §6.8 permits multiple
+// GOAWAYs with non-decreasing last_stream_id; a hostile peer can also
+// burst them) still fires cb exactly once.
+func WithGoAwayObserver(cb func()) Option {
+	return func(o *options) { o.goAwayObserver = cb }
+}
+
 // BodyBufferOpts exposes the aggregator-relevant body configuration values
 // threaded into this Layer at construction time. The aggregator reads these
 // when wrapping a per-stream Channel so body accumulation respects the same
@@ -200,6 +236,13 @@ type Layer struct {
 
 	shutdown     chan struct{}
 	shutdownOnce sync.Once
+
+	// goAwayObserverOnce guards the observer registered via
+	// WithGoAwayObserver so it fires at most once per Layer even when the
+	// peer sends multiple GOAWAY frames (RFC 9113 §6.8 permits non-
+	// decreasing last_stream_id over multiple GOAWAYs; a hostile peer can
+	// also burst them). Wraps the call site in handleGoAwayFrame.
+	goAwayObserverOnce sync.Once
 
 	windowUpdated chan struct{}
 
