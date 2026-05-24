@@ -41,12 +41,20 @@ import (
 // Wire fidelity: the fresh Layer is constructed identically to the
 // original buildH2Stack path (same options, same EnvelopeContext template),
 // so envelopes flowing through it round-trip with the same wire shape.
+//
+// USK-992: the optional onGoAway callback is wired onto the fresh Layer
+// via http2.WithGoAwayObserver so the caller can react to GOAWAY
+// observation on this Layer (the proactive pre-warm worker uses this to
+// tickle its wake channel). nil disables the hook. The callback must
+// satisfy the WithGoAwayObserver non-blocking contract — see the godoc
+// on http2.WithGoAwayObserver.
 func RedialUpstreamH2(
 	ctx context.Context,
 	target string,
 	stale *http2.Layer,
 	cfg *BuildConfig,
 	generation int,
+	onGoAway func(),
 ) (*http2.Layer, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("connector: RedialUpstreamH2: cfg is nil")
@@ -96,6 +104,7 @@ func RedialUpstreamH2(
 		http2.WithBodySpillThreshold(cfg.BodySpillThreshold),
 		http2.WithMaxBodySize(cfg.MaxBodySize),
 		http2.WithStateReleaser(cfg.PluginV2Engine),
+		http2.WithGoAwayObserver(onGoAway),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("connector: redial h2 layer: %w", err)
