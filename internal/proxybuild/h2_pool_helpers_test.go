@@ -286,7 +286,10 @@ func (s *flowStoreForH2Pool) Streams() []*flow.Stream {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	out := make([]*flow.Stream, len(s.streams))
-	copy(out, s.streams)
+	for i, st := range s.streams {
+		cp := *st
+		out[i] = &cp
+	}
 	return out
 }
 
@@ -294,7 +297,10 @@ func (s *flowStoreForH2Pool) Flows() []*flow.Flow {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	out := make([]*flow.Flow, len(s.flows))
-	copy(out, s.flows)
+	for i, f := range s.flows {
+		cp := *f
+		out[i] = &cp
+	}
 	return out
 }
 
