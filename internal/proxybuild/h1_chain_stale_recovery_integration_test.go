@@ -15,7 +15,6 @@ import (
 	"math/big"
 	"net"
 	"net/http"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -184,6 +183,15 @@ func TestHTTP1StaleConnRecovery_AfterIdleClose(t *testing.T) {
 // through the same dial path the redial uses — keeps the integration
 // test honest (the test fails the same way the production redial would
 // if RedialUpstreamH1 ever diverged).
+//
+// Test-only quirk: the bootstrap reuses RedialUpstreamH1, which stamps
+// the produced Layer's streamID with the redial-label suffix
+// (`/upstream-redial`). The test's assertions are scoped to the
+// EnvelopeContext template (ConnID / TargetHost set via
+// WithEnvelopeContext), not the streamID, so this does not affect
+// correctness — but production callers should not use generation==0 on
+// a real initial dial path; that branch is reserved for the chain's
+// own bootstrap-via-redial pattern in this test harness.
 func dialInitialUpstream(t *testing.T, target string, cfg *connector.BuildConfig, envCtxTmpl envelope.EnvelopeContext) (*http1.Layer, error) {
 	t.Helper()
 	stale := http1.New(nopConn{}, "stream-998-bootstrap", envelope.Receive,
@@ -280,5 +288,3 @@ func (nopConn) RemoteAddr() net.Addr             { return &net.TCPAddr{} }
 func (nopConn) SetDeadline(time.Time) error      { return nil }
 func (nopConn) SetReadDeadline(time.Time) error  { return nil }
 func (nopConn) SetWriteDeadline(time.Time) error { return nil }
-
-var _ = sync.Mutex{}

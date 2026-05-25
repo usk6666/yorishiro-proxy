@@ -37,11 +37,19 @@ func TestHealthCheck_PeerClosed_ReturnsErr(t *testing.T) {
 	// reset (varies by platform; both classify as stale).
 	_ = client.Close()
 
-	// Give the OS a moment to surface the FIN through the loopback.
-	time.Sleep(20 * time.Millisecond)
-
-	if err := l.HealthCheck(); err == nil {
-		t.Fatal("HealthCheck on peer-closed conn: got nil, want non-nil (stale)")
+	// Poll HealthCheck until the FIN propagates through the loopback
+	// (bounded; flake-resistant on slow CI). HealthCheck itself is sub-
+	// millisecond so a tight polling loop is cheap.
+	deadline := time.Now().Add(2 * time.Second)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		if lastErr = l.HealthCheck(); lastErr != nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if lastErr == nil {
+		t.Fatal("HealthCheck on peer-closed conn: got nil after polling, want non-nil (stale)")
 	}
 }
 
@@ -173,12 +181,19 @@ func TestHealthCheck_IdleByteFromUpstream_TreatedAsStale(t *testing.T) {
 	if _, err := client.Write([]byte("Z")); err != nil {
 		t.Fatalf("write idle byte: %v", err)
 	}
-	// Give the loopback a moment to deliver.
-	time.Sleep(20 * time.Millisecond)
-
-	err := l.HealthCheck()
-	if err == nil {
-		t.Fatal("HealthCheck on idle-byte conn: got nil, want non-nil (stale)")
+	// Poll HealthCheck until the byte reaches the netpoller (bounded;
+	// flake-resistant on slow CI). HealthCheck itself is sub-millisecond
+	// so a tight polling loop is cheap.
+	deadline := time.Now().Add(2 * time.Second)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		if lastErr = l.HealthCheck(); lastErr != nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if lastErr == nil {
+		t.Fatal("HealthCheck on idle-byte conn: got nil after polling, want non-nil (stale)")
 	}
 }
 

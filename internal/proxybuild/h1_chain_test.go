@@ -75,14 +75,24 @@ func TestH1Chain_EnsureFresh_RedialFailureSurfaced(t *testing.T) {
 
 	// Close the peer to make HealthCheck observe a stale state.
 	_ = client.Close()
-	time.Sleep(20 * time.Millisecond)
 
 	chain := newH1Chain(initial, "127.0.0.1:1", nil) // nil cfg + invalid target
 	defer chain.closeAll()
 
-	_, err := chain.EnsureFresh(context.Background())
+	// Poll EnsureFresh until the loopback FIN propagates and HealthCheck
+	// flips to stale; once stale the nil cfg surfaces a dial error.
+	// Bounded; flake-resistant on slow CI.
+	deadline := time.Now().Add(2 * time.Second)
+	var err error
+	for time.Now().Before(deadline) {
+		_, err = chain.EnsureFresh(context.Background())
+		if err != nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 	if err == nil {
-		t.Fatal("EnsureFresh on stale Layer with nil cfg: got nil, want dial error")
+		t.Fatal("EnsureFresh on stale Layer with nil cfg: got nil after polling, want dial error")
 	}
 }
 

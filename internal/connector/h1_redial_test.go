@@ -6,6 +6,9 @@ import (
 	"testing"
 )
 
+// These guards lock RedialUpstreamH1's defensive preconditions so callers
+// surface a structured error instead of silently nil-dereferencing.
+
 // TestRedialUpstreamH1_NilCfg locks the defensive guard so callers never
 // silently dial with a half-built BuildConfig.
 func TestRedialUpstreamH1_NilCfg(t *testing.T) {
@@ -34,16 +37,15 @@ func TestRedialUpstreamH1_NilStale(t *testing.T) {
 	}
 }
 
-// TestRedialUpstreamH1_InvalidTarget asserts that an empty or invalid
-// target surfaces as a structured error rather than reaching the dial.
-func TestRedialUpstreamH1_InvalidTarget(t *testing.T) {
-	cfg := &BuildConfig{}
-	// nil stale would short-circuit first, so we need a non-nil
-	// placeholder *http1.Layer. Reaching the target-check branch is
-	// impossible without a real Layer, so instead assert via direct
-	// extractHost (the helper RedialUpstreamH1 calls).
+// TestExtractHost_EmptyReturnsEmpty locks the upstream contract that
+// RedialUpstreamH1 relies on: an empty target string yields an empty
+// host, which RedialUpstreamH1 then surfaces as a structured
+// `invalid target %q` error rather than reaching the dial. Reaching
+// RedialUpstreamH1's target-check branch directly requires a non-nil
+// stale Layer (constructed over a live conn), which is exercised by the
+// e2e integration test; this unit guard checks the helper boundary only.
+func TestExtractHost_EmptyReturnsEmpty(t *testing.T) {
 	if got := extractHost(""); got != "" {
 		t.Errorf("extractHost(\"\") = %q, want empty (so RedialUpstreamH1 surfaces invalid target)", got)
 	}
-	_ = cfg
 }
