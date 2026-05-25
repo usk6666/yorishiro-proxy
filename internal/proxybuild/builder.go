@@ -843,7 +843,18 @@ func runHTTP1Exchange(
 		if env != nil {
 			reqProto = env.Protocol
 		}
-		return connector.WrapH1UpstreamForDispatch(upCh, reqProto, streamGRPCWebOpts), nil
+		// Capture the dispatch closure so the USK-999 retry wrapper can
+		// re-apply the same per-protocol wrapping on the fresh
+		// OpenExchange channel produced by chain.Redial.
+		dispatchWrap := func(ch layer.Channel) layer.Channel {
+			return connector.WrapH1UpstreamForDispatch(ch, reqProto, streamGRPCWebOpts)
+		}
+		dispatched := dispatchWrap(upCh)
+		// USK-999: wrap in a retrying upstream channel that absorbs the
+		// ~5% race window left by USK-998 Phase 1 (server FIN between
+		// HealthCheck and Write). On *http1.StaleUpstreamError{ReplaySafe:true}
+		// the wrapper force-redials the chain and replays the Send once.
+		return newRetryingUpstreamChannel(dispatched, chain, dispatchWrap, logger, target), nil
 	}
 	if err := session.RunStackSessionExchange(ctx, stack, dispatchedCh, dial, p, sessOpts); err != nil && !errors.Is(err, context.Canceled) {
 		logger.Debug("proxybuild: http1 exchange ended with error", "target", target, "error", err)
