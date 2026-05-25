@@ -4,8 +4,10 @@ import (
 	"bufio"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -16,6 +18,12 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/layer/http1/parser"
 	"github.com/usk6666/yorishiro-proxy/internal/pluginv2"
 )
+
+// healthCheckProbeDeadline bounds the one-byte probe read in
+// [Layer.HealthCheck]. Long enough for the Go netpoller to surface a
+// queued peer FIN / RST (typically sub-millisecond); short enough that
+// a healthy connection's dial is not visibly delayed.
+const healthCheckProbeDeadline = 1 * time.Millisecond
 
 // Layer wraps a net.Conn in an HTTP/1.x Layer. It yields one Channel per
 // HTTP request-response exchange (RFC-001 §3.3 — Channel granularity is the
@@ -606,6 +614,119 @@ func (l *Layer) Close() error {
 		}
 	})
 	return err
+}
+
+// EnvelopeContextTemplate returns a value copy of the EnvelopeContext stamped
+// onto envelopes produced by this Layer. Used by the proxybuild h1 redial
+// chain (USK-998) to give a freshly redialed Layer the same ConnID /
+// TargetHost / TLS provenance for wire-log continuity. Mirrors
+// [http2.Layer.EnvelopeContextTemplate].
+func (l *Layer) EnvelopeContextTemplate() envelope.EnvelopeContext {
+	return l.envCtx
+}
+
+// HealthCheck performs a non-blocking peek on the underlying conn to detect
+// a stale upstream connection (USK-998). It is intended for the
+// Receive-direction (upstream-facing) Layer when no exchange is currently
+// in flight — typically called by the proxybuild h1 redial chain inside
+// the per-exchange dial closure, before the next request is registered.
+//
+// Returns nil when the connection is alive (or when this Layer is
+// Send-direction, or when pendingQ is non-empty — in which case
+// spawnLoopReceive will observe any FIN naturally as part of the next
+// parseResponse). Returns a non-nil error when the connection is stale
+// (peer-closed, RST, or any non-timeout read error). The caller should
+// Close this Layer and redial when stale.
+//
+// Mechanism: a 1ms read deadline is set on the conn, then a one-byte
+// peek read runs against it. The 1ms window is long enough for Go's
+// netpoller cycle to surface a peer FIN / RST that the kernel has
+// already queued on the socket, but short enough that the proactive
+// probe does not visibly stall the per-exchange dial when the connection
+// is healthy. The deadline is restored on defer so subsequent legitimate
+// reads from spawnLoopReceive are not pre-poisoned. Errors classified:
+//   - net.Error.Timeout / os.ErrDeadlineExceeded → alive (no FIN observed)
+//   - any other read error (io.EOF / net.ErrClosed / ECONNRESET / …) → stale
+//   - n > 0 (server wrote a byte during idle) → stale; the surplus byte is
+//     dropped (see Trade-off below)
+//
+// Invariant: the caller must arrange that no in-flight exchange is
+// registered on this Layer when calling HealthCheck. The proxybuild h1
+// chain calls it only from the dial closure, before any Send is dispatched
+// for the new exchange. As a defence in depth, if pendingQ is non-empty
+// HealthCheck short-circuits with nil (treating the connection as alive)
+// rather than disrupting an in-flight exchange.
+//
+// Concurrency: HealthCheck holds pendingMu for the duration of the read.
+// spawnLoopReceive parks on pendingNotify (without holding pendingMu)
+// while pendingQ is empty, so the deadline-driven read does not race
+// with the parser goroutine in the expected use case.
+//
+// Trade-off (wire fidelity): if the upstream wrote one or more bytes
+// during idle when pendingQ is empty, those bytes cannot be attributed to
+// any HTTP transaction. RFC 9112 forbids idle keep-alive connections from
+// carrying data between exchanges, so any such byte is either a
+// wire-protocol violation by the peer or a TLS close_notify alert. Either
+// way the connection is being terminated, so HealthCheck treats this as a
+// stale signal and the surplus byte is dropped — accepting a single-byte
+// fidelity loss in exchange for not propagating a corrupt connection into
+// the next exchange.
+func (l *Layer) HealthCheck() error {
+	if l == nil {
+		return nil
+	}
+	// Send-direction (client-facing) is driven by spawnLoopSend which is
+	// always actively reading; the proactive peek does not apply.
+	if l.direction != envelope.Receive {
+		return nil
+	}
+
+	// Already-closed Layers are stale by definition.
+	select {
+	case <-l.closed:
+		return net.ErrClosed
+	default:
+	}
+
+	l.pendingMu.Lock()
+	defer l.pendingMu.Unlock()
+	if len(l.pendingQ) > 0 {
+		// In-flight exchange: spawnLoopReceive is responsible for observing
+		// FIN as part of its parseResponse. Treat as alive — the caller
+		// must not call HealthCheck mid-exchange.
+		return nil
+	}
+
+	if l.conn == nil {
+		return nil
+	}
+
+	// 1ms deadline lets the netpoller surface a queued FIN/RST without
+	// stalling the dial on a healthy conn (the proxy is already paying
+	// for the round trip to upstream a moment later). Using a strictly
+	// past deadline (time.Now()) would short-circuit before the runtime
+	// could observe the kernel's RDHUP state on some platforms.
+	_ = l.conn.SetReadDeadline(time.Now().Add(healthCheckProbeDeadline))
+	defer func() { _ = l.conn.SetReadDeadline(time.Time{}) }()
+
+	var buf [1]byte
+	n, err := l.conn.Read(buf[:])
+	if err != nil {
+		var netErr net.Error
+		if errors.As(err, &netErr) && netErr.Timeout() {
+			return nil
+		}
+		if errors.Is(err, os.ErrDeadlineExceeded) {
+			return nil
+		}
+		return err
+	}
+	if n > 0 {
+		// RFC 9112 violation by the upstream, or TLS alert. Either way
+		// the connection is unusable; report stale and drop the byte.
+		return fmt.Errorf("http1: unexpected idle byte from upstream (n=%d)", n)
+	}
+	return nil
 }
 
 // activeChannel returns the most-recently-yielded Channel for Layer-level
