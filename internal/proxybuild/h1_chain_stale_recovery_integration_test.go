@@ -113,7 +113,7 @@ func TestHTTP1StaleConnRecovery_AfterIdleClose(t *testing.T) {
 	}
 	defer initial.Close()
 
-	chain := newH1Chain(initial, target, cfg)
+	chain := newH1Chain(initial, target, cfg, nil, nil)
 	defer chain.closeAll()
 
 	// First exchange: HealthCheck on a freshly dialed conn returns

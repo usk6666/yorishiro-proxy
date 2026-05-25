@@ -571,6 +571,13 @@ func NewLiveManager(
 	// blocked-recording AC). socks5Negotiator is the process-singleton
 	// owned by the caller (USK-770) so MCP socks5_auth runtime mutations
 	// reach every listener built from this factory.
+	// h1Metrics is constructed before NewManager so the same pointer is
+	// captured by both: the Manager exposes it via H1UpstreamMetrics()
+	// (consumed by the MCP query(resource:"status") tool), and the
+	// factory closure threads it into every per-listener Deps so every
+	// h1Chain / retryingUpstreamChannel updates the same Manager-level
+	// counter set. USK-1000.
+	h1Metrics := proxybuild.NewH1UpstreamMetrics()
 	factory := func(ctx context.Context, name, addr string) (*proxybuild.Stack, error) {
 		return proxybuild.BuildLiveStack(ctx, proxybuild.Deps{
 			Logger:                  logger,
@@ -605,6 +612,8 @@ func NewLiveManager(
 			// every listener built by this factory.
 			RecordGRPCMaxMessagesPerStream: buildCfg.GRPCMaxMessagesPerStream,
 			RecordSSEMaxEventsPerStream:    buildCfg.SSEMaxEventsPerStream,
+			// USK-1000: shared HTTP/1.x upstream redial / replay counters.
+			H1UpstreamMetrics: h1Metrics,
 		})
 	}
 	mgr, err := proxybuild.NewManager(proxybuild.ManagerConfig{
@@ -615,6 +624,9 @@ func NewLiveManager(
 		// lets Manager.SetUpstreamProxy mutate the live dial-path's
 		// dynamic upstream-proxy slot at runtime (USK-734).
 		BuildConfig: buildCfg,
+		// USK-1000: bind the metrics counters so Manager.H1UpstreamMetrics
+		// returns the same counters every Deps update.
+		H1UpstreamMetrics: h1Metrics,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("init proxybuild manager: %w", err)

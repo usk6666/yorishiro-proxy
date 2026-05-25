@@ -21,6 +21,7 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/encoding/protoschema"
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
+	"github.com/usk6666/yorishiro-proxy/internal/proxybuild"
 	"github.com/usk6666/yorishiro-proxy/internal/rules/common"
 	"google.golang.org/protobuf/reflect/protoreflect"
 )
@@ -2105,25 +2106,33 @@ type queryListenerStatusEntry struct {
 }
 
 // queryStatusResult is the response for the status resource.
+//
+// H1Upstream (USK-1000) carries the HTTP/1.x upstream redial / replay
+// counters maintained by the bound proxybuild.Manager. The pointer is
+// nil when no manager is bound; otherwise the embedded snapshot is
+// always populated (zero counters when nothing has happened yet).
+// omitempty keeps the field absent for test runs that don't wire a
+// Manager.
 type queryStatusResult struct {
-	Running           bool                       `json:"running"`
-	ListenAddr        string                     `json:"listen_addr"`
-	Listeners         []queryListenerStatusEntry `json:"listeners,omitempty"`
-	ListenerCount     int                        `json:"listener_count"`
-	UpstreamProxy     string                     `json:"upstream_proxy"`
-	ActiveConnections int                        `json:"active_connections"`
-	MaxConnections    int                        `json:"max_connections"`
-	PeekTimeoutMs     int64                      `json:"peek_timeout_ms"`
-	RequestTimeoutMs  int64                      `json:"request_timeout_ms"`
-	TotalFlows        int                        `json:"total_flows"`
-	DBSizeBytes       int64                      `json:"db_size_bytes"`
-	UptimeSeconds     int64                      `json:"uptime_seconds"`
-	CAInitialized     bool                       `json:"ca_initialized"`
-	SOCKS5Enabled     bool                       `json:"socks5_enabled"`
-	SOCKS5Auth        string                     `json:"socks5_auth,omitempty"`
-	TLSFingerprint    string                     `json:"tls_fingerprint"`
-	RateLimits        *queryRateLimitStatus      `json:"rate_limits,omitempty"`
-	Budget            *queryBudgetStatus         `json:"budget,omitempty"`
+	Running           bool                                  `json:"running"`
+	ListenAddr        string                                `json:"listen_addr"`
+	Listeners         []queryListenerStatusEntry            `json:"listeners,omitempty"`
+	ListenerCount     int                                   `json:"listener_count"`
+	UpstreamProxy     string                                `json:"upstream_proxy"`
+	ActiveConnections int                                   `json:"active_connections"`
+	MaxConnections    int                                   `json:"max_connections"`
+	PeekTimeoutMs     int64                                 `json:"peek_timeout_ms"`
+	RequestTimeoutMs  int64                                 `json:"request_timeout_ms"`
+	TotalFlows        int                                   `json:"total_flows"`
+	DBSizeBytes       int64                                 `json:"db_size_bytes"`
+	UptimeSeconds     int64                                 `json:"uptime_seconds"`
+	CAInitialized     bool                                  `json:"ca_initialized"`
+	SOCKS5Enabled     bool                                  `json:"socks5_enabled"`
+	SOCKS5Auth        string                                `json:"socks5_auth,omitempty"`
+	TLSFingerprint    string                                `json:"tls_fingerprint"`
+	RateLimits        *queryRateLimitStatus                 `json:"rate_limits,omitempty"`
+	Budget            *queryBudgetStatus                    `json:"budget,omitempty"`
+	H1Upstream        *proxybuild.H1UpstreamMetricsSnapshot `json:"h1_upstream,omitempty"`
 }
 
 // queryRateLimitStatus holds rate limit information for the status response.
@@ -2154,6 +2163,13 @@ func (s *Server) populateManagerStatus(result *queryStatusResult) {
 	result.PeekTimeoutMs = s.connector.manager.PeekTimeout().Milliseconds()
 	result.UptimeSeconds = int64(s.connector.manager.Uptime().Seconds())
 	result.ListenerCount = s.connector.manager.ListenerCount()
+
+	// USK-1000: surface the HTTP/1.x upstream redial / replay counters.
+	// The snapshot is a value type — the pointer wraps it so JSON
+	// `omitempty` semantics let test runs without a Manager-backed
+	// implementation omit the field entirely.
+	h1Snap := s.connector.manager.H1UpstreamMetrics()
+	result.H1Upstream = &h1Snap
 
 	// Populate per-listener statuses.
 	statuses := listenerStatuses(s.connector.manager)

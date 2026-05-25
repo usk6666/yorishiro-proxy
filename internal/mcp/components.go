@@ -272,6 +272,12 @@ type proxyManager interface {
 	// Boot-time only; no setter.
 	SSEMaxEventsPerStream() int
 	StartTCPForwardsNamedAny(ctx context.Context, name string, params any) error
+	// H1UpstreamMetrics surfaces the USK-998 / USK-999 / USK-1000
+	// HTTP/1.x upstream redial / replay counter snapshot. Returns the
+	// zero snapshot when no Manager is bound. The MCP
+	// query(resource:"status") tool consumes this to populate the
+	// `h1_upstream` field on the status result.
+	H1UpstreamMetrics() proxybuild.H1UpstreamMetricsSnapshot
 }
 
 // ListenerStatus is the mcp-package shape of per-listener status used by

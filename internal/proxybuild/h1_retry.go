@@ -56,6 +56,12 @@ type retryingUpstreamChannel struct {
 	retried atomic.Bool
 	logger  *slog.Logger
 	target  string
+
+	// metrics (USK-1000) is the Manager-level h1UpstreamMetrics shared
+	// across every per-CONNECT chain and every per-exchange retry
+	// wrapper built under the same Manager. May be nil — every counter
+	// call is nil-safe.
+	metrics *H1UpstreamMetrics
 }
 
 // newRetryingUpstreamChannel constructs the wrapper around an already-
@@ -65,18 +71,25 @@ type retryingUpstreamChannel struct {
 // SAME dispatch closure (typically `connector.WrapH1UpstreamForDispatch(_,
 // reqProto, streamGRPCWebOpts)`) so the retry leg is dispatched
 // identically.
+//
+// USK-1000: metrics is the Manager-level h1UpstreamMetrics. nil is
+// safe — every counter call is nil-safe — but production callers
+// thread the same pointer through every retry wrapper so the counters
+// aggregate across exchanges.
 func newRetryingUpstreamChannel(
 	inner layer.Channel,
 	chain *h1Chain,
 	wrapper func(layer.Channel) layer.Channel,
 	logger *slog.Logger,
 	target string,
+	metrics *H1UpstreamMetrics,
 ) *retryingUpstreamChannel {
 	r := &retryingUpstreamChannel{
 		chain:   chain,
 		wrapper: wrapper,
 		logger:  logger,
 		target:  target,
+		metrics: metrics,
 	}
 	r.inner.Store(&inner)
 	return r
@@ -119,7 +132,28 @@ func (r *retryingUpstreamChannel) Send(ctx context.Context, env *envelope.Envelo
 	}
 
 	var stale *http1.StaleUpstreamError
-	if !errors.As(err, &stale) || !stale.ReplaySafe {
+	if !errors.As(err, &stale) {
+		return err
+	}
+	// USK-1000: every observed stale Send (regardless of ReplaySafe)
+	// is a HealthCheck race-window miss. Count first so the
+	// fail_nonidempotent / fail_body_consumed counters below stay a
+	// strict subset (caller can verify: write_epipe >= replay_fail_*).
+	r.metrics.incWriteEpipe()
+
+	if !stale.ReplaySafe {
+		// Phase 2's truth-table refuses replay; classify by stage so
+		// operators can tell non-idempotent (header) apart from
+		// body-already-consumed (body). The Stage values are pinned
+		// by internal/layer/http1/replay_safe_test.go.
+		switch stale.Stage {
+		case "body":
+			r.metrics.incReplayFailBodyConsumed()
+		default:
+			// "header" — and any future Stage values default here
+			// rather than silently skipping the counter.
+			r.metrics.incReplayFailNonidempotent()
+		}
 		return err
 	}
 	// Budget claim. CompareAndSwap is the single source of truth for the
@@ -134,6 +168,10 @@ func (r *retryingUpstreamChannel) Send(ctx context.Context, env *envelope.Envelo
 
 	freshLayer, derr := r.chain.Redial(ctx)
 	if derr != nil {
+		// USK-1000: chain.Redial dial-failure path. incRedialFailedWriteEpipe
+		// already fired inside h1Chain.Redial; we additionally count the
+		// retry-wrapper-observable "could not redial" outcome.
+		r.metrics.incReplayFailRedial()
 		// Surface the original stale error AND the dial error so callers
 		// using errors.As(_, &*http1.StaleUpstreamError{}) can still
 		// reach the original Stage/ReplaySafe diagnostic. errors.Join
@@ -144,6 +182,7 @@ func (r *retryingUpstreamChannel) Send(ctx context.Context, env *envelope.Envelo
 
 	freshCh := freshLayer.OpenExchange()
 	if freshCh == nil {
+		r.metrics.incReplayFailRedialReplay()
 		return fmt.Errorf("http1: stale-conn replay: fresh layer closed before OpenExchange: %w", err)
 	}
 
@@ -158,10 +197,19 @@ func (r *retryingUpstreamChannel) Send(ctx context.Context, env *envelope.Envelo
 	// Write (sendRequest holds writeMu). On a second EPIPE the wrapper
 	// returns it verbatim — budget already consumed.
 	if rerr := wrapped.Send(ctx, env); rerr != nil {
-		r.logger.Debug("proxybuild: http1 stale-conn replay failed",
+		// USK-1000 (scope-adjustment #3): the post-redial Send still
+		// errored — distinct outcome from "could not redial".
+		r.metrics.incReplayFailRedialReplay()
+		// Per CLAUDE.md Log Level Guidelines a replay-failure is a
+		// retry-attempt that didn't help — Warn so operators see it
+		// (matches h2's "upstream h2 redial failed" Warn precedent).
+		r.logger.Warn("proxybuild: http1 stale-conn replay failed",
 			"target", r.target, "original_stage", stale.Stage, "replay_error", rerr)
 		return rerr
 	}
+	r.metrics.incReplaySuccess()
+	r.logger.Debug("proxybuild: http1 stale-conn replay succeeded",
+		"target", r.target, "original_stage", stale.Stage)
 	return nil
 }
 

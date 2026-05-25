@@ -50,7 +50,7 @@ func TestH1Chain_EnsureFresh_PassThroughWhenAlive(t *testing.T) {
 	initial := http1.New(server, "stream-passthru", envelope.Receive)
 	defer initial.Close()
 
-	chain := newH1Chain(initial, "example.com:443", nil)
+	chain := newH1Chain(initial, "example.com:443", nil, nil, nil)
 	defer chain.closeAll()
 
 	got, err := chain.EnsureFresh(context.Background())
@@ -76,7 +76,7 @@ func TestH1Chain_EnsureFresh_RedialFailureSurfaced(t *testing.T) {
 	// Close the peer to make HealthCheck observe a stale state.
 	_ = client.Close()
 
-	chain := newH1Chain(initial, "127.0.0.1:1", nil) // nil cfg + invalid target
+	chain := newH1Chain(initial, "127.0.0.1:1", nil, nil, nil) // nil cfg + invalid target
 	defer chain.closeAll()
 
 	// Poll EnsureFresh until the loopback FIN propagates and HealthCheck
@@ -108,7 +108,7 @@ func TestH1Chain_CloseAll_ClosesEveryLayer(t *testing.T) {
 	layer1 := http1.New(server1, "stream-close-1", envelope.Receive)
 	layer2 := http1.New(server2, "stream-close-2", envelope.Receive)
 
-	chain := newH1Chain(layer1, "example.com:443", nil)
+	chain := newH1Chain(layer1, "example.com:443", nil, nil, nil)
 	// Simulate a prior successful redial by injecting the second Layer
 	// into the chain by hand. The real path appends through EnsureFresh's
 	// dial; here we exercise closeAll's iteration shape directly without
