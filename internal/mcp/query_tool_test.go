@@ -14,6 +14,7 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/cert"
 	"github.com/usk6666/yorishiro-proxy/internal/connector"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
+	"github.com/usk6666/yorishiro-proxy/internal/proxybuild"
 )
 
 // setupQueryTestSession creates an MCP client session for query tool tests.
@@ -836,6 +837,62 @@ func TestQuery_Status_WithSessions(t *testing.T) {
 
 	if out.TotalFlows != 2 {
 		t.Errorf("total_flows = %d, want 2", out.TotalFlows)
+	}
+}
+
+// TestQuery_Status_H1UpstreamMetrics_Empty asserts the status
+// resource surfaces the USK-1000 h1_upstream counter snapshot. With
+// no upstream activity the embedded counters are all zero but the
+// field itself is populated (i.e. a Manager IS bound) so the AI
+// agent can distinguish "no Manager wired" (field absent) from
+// "Manager wired, no churn yet" (field present, counters zero).
+func TestQuery_Status_H1UpstreamMetrics_Empty(t *testing.T) {
+	t.Parallel()
+	store := newTestStore(t)
+	manager := newTestProxybuildManager(t)
+	if err := manager.Start(context.Background(), "127.0.0.1:0"); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	cs := setupQueryStatusTestSession(t, store, manager)
+
+	result := callQuery(t, cs, queryInput{Resource: "status"})
+	if result.IsError {
+		t.Fatalf("expected success: %v", result.Content)
+	}
+
+	var out queryStatusResult
+	unmarshalQueryResult(t, result, &out)
+
+	if out.H1Upstream == nil {
+		t.Fatal("h1_upstream = nil; want non-nil snapshot when Manager is bound")
+	}
+	// Every counter should be zero until a CONNECT redials.
+	want := proxybuild.H1UpstreamMetricsSnapshot{}
+	if *out.H1Upstream != want {
+		t.Errorf("h1_upstream = %+v, want %+v (all zero)", *out.H1Upstream, want)
+	}
+}
+
+// TestQuery_Status_H1UpstreamMetrics_NoManager asserts the
+// h1_upstream field is OMITTED from the status payload when no
+// Manager is bound. omitempty + nil pointer ensures the JSON
+// surface stays clean for the "no Manager wired" case.
+func TestQuery_Status_H1UpstreamMetrics_NoManager(t *testing.T) {
+	t.Parallel()
+	store := newTestStore(t)
+	cs := setupQueryTestSession(t, store)
+
+	result := callQuery(t, cs, queryInput{Resource: "status"})
+	if result.IsError {
+		t.Fatalf("expected success: %v", result.Content)
+	}
+
+	var out queryStatusResult
+	unmarshalQueryResult(t, result, &out)
+
+	if out.H1Upstream != nil {
+		t.Errorf("h1_upstream = %+v, want nil (no Manager bound)", *out.H1Upstream)
 	}
 }
 

@@ -2,6 +2,7 @@ package proxybuild
 
 import (
 	"context"
+	"log/slog"
 	"sync"
 
 	"github.com/usk6666/yorishiro-proxy/internal/connector"
@@ -31,23 +32,59 @@ import (
 //     from the client Channel are time-sliced by the spawn loop anyway —
 //     but the mutex defends against concurrent dial closures from
 //     pipelined exchanges and against a racing CONNECT teardown.
+//
+// USK-1000: chains carry a back-reference to the Manager-level
+// [h1UpstreamMetrics] so each stale-detect / redial / close-all event
+// updates the manager-wide counters. metrics may be nil for tests that
+// construct an h1Chain directly without a Manager; every counter call
+// is nil-safe.
 type h1Chain struct {
 	mu      sync.Mutex
 	current *http1.Layer
 	layers  []*http1.Layer
 	target  string
 	cfg     *connector.BuildConfig
+
+	// logger is used for stale-detect / redial-success / redial-failure
+	// observability per CLAUDE.md Log Level Guidelines. Debug for normal
+	// detect/success, Warn for dial failures (matches h2's
+	// `proxybuild: upstream h2 redial failed` Warn).
+	logger *slog.Logger
+
+	// metrics receives counter updates for stale_detected_total,
+	// redial_total, redial_failed_total, and the chain_generation
+	// gauge family. Nil-safe.
+	metrics *H1UpstreamMetrics
+
+	// liveGen is the number of redial steps this chain currently
+	// contributes to the manager-wide chainGenerationLive gauge. Bumped
+	// under c.mu on every redial-append; consumed by closeAll so the
+	// manager's live counter is decremented by the exact contribution
+	// of this chain. Tracking the contribution here (rather than
+	// recomputing from len(c.layers) at close time) keeps the counter
+	// stable if future evolutions change how layers are accounted.
+	liveGen int64
 }
 
 // newH1Chain wraps the initial upstream Layer (the one constructed at
 // CONNECT-time by buildStackFromRoute) so subsequent dial-time stale checks
-// can redial transparently.
-func newH1Chain(initial *http1.Layer, target string, cfg *connector.BuildConfig) *h1Chain {
+// can redial transparently. logger and metrics are USK-1000 plumbing
+// (see h1UpstreamMetrics); both may be nil — the chain operates
+// identically minus the observability emit.
+func newH1Chain(
+	initial *http1.Layer,
+	target string,
+	cfg *connector.BuildConfig,
+	logger *slog.Logger,
+	metrics *H1UpstreamMetrics,
+) *h1Chain {
 	return &h1Chain{
 		current: initial,
 		layers:  []*http1.Layer{initial},
 		target:  target,
 		cfg:     cfg,
+		logger:  logger,
+		metrics: metrics,
 	}
 }
 
@@ -62,14 +99,29 @@ func newH1Chain(initial *http1.Layer, target string, cfg *connector.BuildConfig)
 // closeAll. HealthCheck holds [http1.Layer.pendingMu] briefly during its
 // 1-byte SetReadDeadline read; that mutex does not race with the parser
 // goroutine in the expected (pendingQ empty) case.
+//
+// USK-1000 metrics: HealthCheck-err → incStaleDetectedHealthcheck.
+// RedialUpstreamH1 success → incRedialHealthcheck + observeChainGeneration.
+// RedialUpstreamH1 error → incRedialFailedHealthcheck.
 func (c *h1Chain) EnsureFresh(ctx context.Context) (*http1.Layer, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if err := c.current.HealthCheck(); err == nil {
 		return c.current, nil
 	}
+	// HealthCheck failed: stale upstream observed.
+	c.metrics.incStaleDetectedHealthcheck()
+	if c.logger != nil {
+		c.logger.Debug("proxybuild: http1 stale detected, redialing",
+			"target", c.target, "trigger", "healthcheck", "generation", len(c.layers))
+	}
 	fresh, err := connector.RedialUpstreamH1(ctx, c.target, c.current, c.cfg, len(c.layers))
 	if err != nil {
+		c.metrics.incRedialFailedHealthcheck()
+		if c.logger != nil {
+			c.logger.Warn("proxybuild: http1 redial failed",
+				"target", c.target, "trigger", "healthcheck", "error", err)
+		}
 		return nil, err
 	}
 	// Close the stale Layer synchronously. HTTP/1 is wire-serial and
@@ -79,6 +131,8 @@ func (c *h1Chain) EnsureFresh(ctx context.Context) (*http1.Layer, error) {
 	_ = c.current.Close()
 	c.current = fresh
 	c.layers = append(c.layers, fresh)
+	c.bumpGenerationLocked()
+	c.metrics.incRedialHealthcheck()
 	return fresh, nil
 }
 
@@ -102,11 +156,19 @@ func (c *h1Chain) EnsureFresh(ctx context.Context) (*http1.Layer, error) {
 // Returns the fresh Layer on success or the dial error verbatim on
 // failure; the caller surfaces the failure as state="error" on the
 // session (matching the EnsureFresh dial-failure shape).
+//
+// USK-1000 metrics: success → incRedialWriteEpipe + observeChainGeneration.
+// Failure → incRedialFailedWriteEpipe.
 func (c *h1Chain) Redial(ctx context.Context) (*http1.Layer, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	fresh, err := connector.RedialUpstreamH1(ctx, c.target, c.current, c.cfg, len(c.layers))
 	if err != nil {
+		c.metrics.incRedialFailedWriteEpipe()
+		if c.logger != nil {
+			c.logger.Warn("proxybuild: http1 redial failed",
+				"target", c.target, "trigger", "write_epipe", "error", err)
+		}
 		return nil, err
 	}
 	// Close the stale Layer synchronously. The retry wrapper is the
@@ -116,16 +178,43 @@ func (c *h1Chain) Redial(ctx context.Context) (*http1.Layer, error) {
 	_ = c.current.Close()
 	c.current = fresh
 	c.layers = append(c.layers, fresh)
+	c.bumpGenerationLocked()
+	c.metrics.incRedialWriteEpipe()
+	if c.logger != nil {
+		c.logger.Debug("proxybuild: http1 redialed after write EPIPE",
+			"target", c.target, "trigger", "write_epipe", "generation", len(c.layers)-1)
+	}
 	return fresh, nil
+}
+
+// bumpGenerationLocked updates the chain-generation gauges after a
+// successful redial-append. Caller MUST hold c.mu — both the layer
+// slice and the local liveGen are mutated. The generation value
+// reported to the metrics struct is the number of redial steps
+// (len(layers) - 1) so the implicit initial Layer is generation 0
+// and the first redial is generation 1, matching the
+// RedialUpstreamH1(generation=N) ConnID suffix convention.
+func (c *h1Chain) bumpGenerationLocked() {
+	gen := int64(len(c.layers) - 1)
+	c.liveGen = gen
+	c.metrics.observeChainGeneration(gen)
 }
 
 // closeAll closes every Layer in the chain. Called from the CONNECT-exit
 // deferred cleanup in runHTTP1ExchangeLoop so every redial step's parser
 // goroutine and underlying conn is torn down.
+//
+// USK-1000: releases this chain's contribution to the manager-wide
+// chainGenerationLive gauge so the gauge stays meaningful across many
+// CONNECTs (otherwise it would grow monotonically forever).
 func (c *h1Chain) closeAll() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	for _, l := range c.layers {
 		_ = l.Close()
+	}
+	if c.liveGen > 0 {
+		c.metrics.releaseChainGeneration(c.liveGen)
+		c.liveGen = 0
 	}
 }

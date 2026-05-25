@@ -130,6 +130,21 @@ func (s *dummyUpstreamServer) handle(c net.Conn) {
 // then dials a fresh HTTP/1.1 conn to s.addr through RedialUpstreamH1.
 func buildFlakyChain(t *testing.T, s *dummyUpstreamServer, failCount int32) (*h1Chain, *http1.Layer, *flakyConn) {
 	t.Helper()
+	return buildFlakyChainWithMetrics(t, s, failCount, nil)
+}
+
+// buildFlakyChainWithMetrics is the metrics-aware form: callers
+// supplying a non-nil [H1UpstreamMetrics] can read counter values
+// after the retry path runs to assert end-to-end instrumentation.
+// Tests that don't care about counters use [buildFlakyChain] which
+// delegates here with nil.
+func buildFlakyChainWithMetrics(
+	t *testing.T,
+	s *dummyUpstreamServer,
+	failCount int32,
+	metrics *H1UpstreamMetrics,
+) (*h1Chain, *http1.Layer, *flakyConn) {
+	t.Helper()
 	// Dial the upstream once via raw TCP and wrap with flakyConn.
 	rawConn, err := net.Dial("tcp", s.addr)
 	if err != nil {
@@ -150,7 +165,7 @@ func buildFlakyChain(t *testing.T, s *dummyUpstreamServer, failCount int32) (*h1
 	// CONNECT-MITM shape.
 	cfg := &connector.BuildConfig{InsecureSkipVerify: true}
 
-	chain := newH1Chain(initial, s.addr, cfg)
+	chain := newH1Chain(initial, s.addr, cfg, nil, metrics)
 	t.Cleanup(func() { chain.closeAll() })
 
 	return chain, initial, flaky
@@ -217,7 +232,7 @@ func TestHTTP1_StaleConn_GET_RetryPath(t *testing.T) {
 		t.Fatal("OpenExchange returned nil")
 	}
 	dispatchWrap := func(ch layer.Channel) layer.Channel { return ch }
-	wrapper := newRetryingUpstreamChannel(dispatchWrap(upCh), chain, dispatchWrap, slog.Default(), s.addr)
+	wrapper := newRetryingUpstreamChannel(dispatchWrap(upCh), chain, dispatchWrap, slog.Default(), s.addr, nil)
 
 	if err := sendOneRequest(t, wrapper, "GET", "/replayed", nil, false); err != nil {
 		t.Fatalf("Send (GET, expected retry-success): %v", err)
@@ -241,6 +256,58 @@ func TestHTTP1_StaleConn_GET_RetryPath(t *testing.T) {
 	}
 }
 
+// TestHTTP1_StaleConn_GET_RetryPath_Metrics is the USK-1000 mirror of
+// TestHTTP1_StaleConn_GET_RetryPath: same retry-path-success scenario
+// but with a non-nil [H1UpstreamMetrics] threaded through the chain
+// and wrapper so the counter snapshot can be asserted end-to-end.
+// Pins the chain→retry→success counter triplet
+// (write_epipe + redial_write_epipe + replay_success).
+func TestHTTP1_StaleConn_GET_RetryPath_Metrics(t *testing.T) {
+	s := startDummyUpstream(t)
+
+	metrics := NewH1UpstreamMetrics()
+	chain, _, _ := buildFlakyChainWithMetrics(t, s, 1, metrics)
+
+	upCh := chain.current.OpenExchange()
+	if upCh == nil {
+		t.Fatal("OpenExchange returned nil")
+	}
+	dispatchWrap := func(ch layer.Channel) layer.Channel { return ch }
+	wrapper := newRetryingUpstreamChannel(dispatchWrap(upCh), chain, dispatchWrap, slog.Default(), s.addr, metrics)
+
+	if err := sendOneRequest(t, wrapper, "GET", "/metric-replayed", nil, false); err != nil {
+		t.Fatalf("Send (GET, expected retry-success): %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if _, err := wrapper.Next(ctx); err != nil {
+		t.Fatalf("Next after retry: %v", err)
+	}
+
+	snap := metrics.Snapshot()
+	if snap.WriteEpipe != 1 {
+		t.Errorf("write_epipe = %d, want 1", snap.WriteEpipe)
+	}
+	if snap.RedialWriteEpipe != 1 {
+		t.Errorf("redial_write_epipe = %d, want 1", snap.RedialWriteEpipe)
+	}
+	if snap.ReplaySuccess != 1 {
+		t.Errorf("replay_success = %d, want 1", snap.ReplaySuccess)
+	}
+	// The healthcheck-triggered path did NOT fire on this exchange
+	// (the wrapper used force-redial after EPIPE).
+	if snap.StaleDetectedHealthcheck != 0 || snap.RedialHealthcheck != 0 {
+		t.Errorf("healthcheck-trigger counters fired unexpectedly: %+v", snap)
+	}
+	if snap.ChainGenerationMax != 1 {
+		t.Errorf("chain_generation_max = %d, want 1 (one redial step)", snap.ChainGenerationMax)
+	}
+	if snap.ChainGenerationLive != 1 {
+		t.Errorf("chain_generation_live = %d, want 1 (chain still open)", snap.ChainGenerationLive)
+	}
+}
+
 // TestHTTP1_StaleConn_POST_NoRetry: POST → first Write EPIPE → wrapper
 // observes ReplaySafe=false → returns the StaleUpstreamError to the
 // caller. No retry, no chain.Redial.
@@ -254,7 +321,7 @@ func TestHTTP1_StaleConn_POST_NoRetry(t *testing.T) {
 		t.Fatal("OpenExchange returned nil")
 	}
 	dispatchWrap := func(ch layer.Channel) layer.Channel { return ch }
-	wrapper := newRetryingUpstreamChannel(dispatchWrap(upCh), chain, dispatchWrap, slog.Default(), s.addr)
+	wrapper := newRetryingUpstreamChannel(dispatchWrap(upCh), chain, dispatchWrap, slog.Default(), s.addr, nil)
 
 	err := sendOneRequest(t, wrapper, "POST", "/no-replay", []byte("payload"), false)
 	if err == nil {
@@ -285,7 +352,7 @@ func TestHTTP1_StaleConn_PUT_WithBuffer_Retry(t *testing.T) {
 		t.Fatal("OpenExchange returned nil")
 	}
 	dispatchWrap := func(ch layer.Channel) layer.Channel { return ch }
-	wrapper := newRetryingUpstreamChannel(dispatchWrap(upCh), chain, dispatchWrap, slog.Default(), s.addr)
+	wrapper := newRetryingUpstreamChannel(dispatchWrap(upCh), chain, dispatchWrap, slog.Default(), s.addr, nil)
 
 	if err := sendOneRequest(t, wrapper, "PUT", "/put-replay", []byte("put-payload"), true); err != nil {
 		t.Fatalf("Send (PUT with buffered body, expected retry-success): %v", err)
@@ -319,7 +386,7 @@ func TestHTTP1_NoEnvelopeLossOnRetry(t *testing.T) {
 		t.Fatal("OpenExchange returned nil")
 	}
 	dispatchWrap := func(ch layer.Channel) layer.Channel { return ch }
-	wrapper := newRetryingUpstreamChannel(dispatchWrap(upCh), chain, dispatchWrap, slog.Default(), s.addr)
+	wrapper := newRetryingUpstreamChannel(dispatchWrap(upCh), chain, dispatchWrap, slog.Default(), s.addr, nil)
 
 	if err := sendOneRequest(t, wrapper, "GET", "/observable", nil, false); err != nil {
 		t.Fatalf("Send (GET): %v", err)
@@ -364,7 +431,7 @@ func TestHTTP1_StaleConn_RetryBudgetOneShot(t *testing.T) {
 		t.Fatal("OpenExchange returned nil")
 	}
 	dispatchWrap := func(ch layer.Channel) layer.Channel { return ch }
-	wrapper := newRetryingUpstreamChannel(dispatchWrap(upCh), chain, dispatchWrap, slog.Default(), s.addr)
+	wrapper := newRetryingUpstreamChannel(dispatchWrap(upCh), chain, dispatchWrap, slog.Default(), s.addr, nil)
 
 	// First Send: GET → EPIPE → retry → succeed.
 	if err := sendOneRequest(t, wrapper, "GET", "/first", nil, false); err != nil {
@@ -419,7 +486,7 @@ func TestHTTP1_StaleConn_NonReplaySafe_ReturnsErrorVerbatim(t *testing.T) {
 
 	upCh := chain.current.OpenExchange()
 	dispatchWrap := func(ch layer.Channel) layer.Channel { return ch }
-	wrapper := newRetryingUpstreamChannel(dispatchWrap(upCh), chain, dispatchWrap, slog.Default(), s.addr)
+	wrapper := newRetryingUpstreamChannel(dispatchWrap(upCh), chain, dispatchWrap, slog.Default(), s.addr, nil)
 
 	err := sendOneRequest(t, wrapper, "POST", "/no-retry", []byte("p"), false)
 	if err == nil {
@@ -458,6 +525,7 @@ func TestHTTP1_FlakyConn_NonStaleErrorNotRetried(t *testing.T) {
 		func(ch layer.Channel) layer.Channel { return ch },
 		slog.Default(),
 		"127.0.0.1:0",
+		nil,
 	)
 
 	msg := &envelope.HTTPMessage{Method: "GET", Path: "/", Authority: "example.com"}

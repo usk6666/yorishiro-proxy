@@ -244,6 +244,15 @@ type Deps struct {
 	// dispatch.
 	RecordGRPCLPMFrameMaxPerStream int
 
+	// H1UpstreamMetrics aggregates USK-998 Phase 1 + USK-999 Phase 2 +
+	// USK-1000 HTTP/1.x upstream redial / replay counters. nil-safe —
+	// every emit point inside h1Chain / retryingUpstreamChannel
+	// short-circuits on a nil pointer. The production wiring
+	// (internal/mcpserver/init.go) constructs a single h1UpstreamMetrics
+	// on Manager and threads the same pointer through Deps so all
+	// per-CONNECT chains under one Manager share the counter set.
+	H1UpstreamMetrics *H1UpstreamMetrics
+
 	// RecordGRPCWebBase64MaxPerStream caps the number of gRPC-Web
 	// text-variant body wire envelopes (WireLevel=grpcweb-base64,
 	// pre-decode base64 body bytes captured by the grpcweb Layer's
@@ -746,7 +755,7 @@ func runHTTP1ExchangeLoop(
 	// per-exchange dial closure can detect a stale keep-alive conn
 	// (server idle FIN / RST) and transparently redial. closeAll on
 	// CONNECT exit tears down every redial step (original + successors).
-	chain := newH1Chain(upstreamH1, target, deps.BuildConfig)
+	chain := newH1Chain(upstreamH1, target, deps.BuildConfig, logger, deps.H1UpstreamMetrics)
 	defer chain.closeAll()
 	var wg sync.WaitGroup
 	for {
@@ -762,7 +771,7 @@ func runHTTP1ExchangeLoop(
 			wg.Add(1)
 			go func(ch layer.Channel) {
 				defer wg.Done()
-				runHTTP1Exchange(ctx, stack, ch, chain, p, sessOpts, target, grpcwebOpts, logger)
+				runHTTP1Exchange(ctx, stack, ch, chain, p, sessOpts, target, grpcwebOpts, logger, deps.H1UpstreamMetrics)
 			}(clientCh)
 		}
 	}
@@ -792,6 +801,7 @@ func runHTTP1Exchange(
 	target string,
 	baseGRPCWebOpts []grpcweb.Option,
 	logger *slog.Logger,
+	metrics *H1UpstreamMetrics,
 ) {
 	// Per-exchange wire-record Option for the gRPC-Web text-variant
 	// base64 wire bytes. The same closure is installed on both the
@@ -854,7 +864,7 @@ func runHTTP1Exchange(
 		// ~5% race window left by USK-998 Phase 1 (server FIN between
 		// HealthCheck and Write). On *http1.StaleUpstreamError{ReplaySafe:true}
 		// the wrapper force-redials the chain and replays the Send once.
-		return newRetryingUpstreamChannel(dispatched, chain, dispatchWrap, logger, target), nil
+		return newRetryingUpstreamChannel(dispatched, chain, dispatchWrap, logger, target, metrics), nil
 	}
 	if err := session.RunStackSessionExchange(ctx, stack, dispatchedCh, dial, p, sessOpts); err != nil && !errors.Is(err, context.Canceled) {
 		logger.Debug("proxybuild: http1 exchange ended with error", "target", target, "error", err)
