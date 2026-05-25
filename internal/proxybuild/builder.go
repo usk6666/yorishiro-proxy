@@ -742,6 +742,12 @@ func runHTTP1ExchangeLoop(
 	logger *slog.Logger,
 ) {
 	grpcwebOpts := connector.GRPCWebOptionsFromBuildConfig(deps.BuildConfig)
+	// USK-998: wrap the per-CONNECT upstream Layer in a chain so each
+	// per-exchange dial closure can detect a stale keep-alive conn
+	// (server idle FIN / RST) and transparently redial. closeAll on
+	// CONNECT exit tears down every redial step (original + successors).
+	chain := newH1Chain(upstreamH1, target, deps.BuildConfig)
+	defer chain.closeAll()
 	var wg sync.WaitGroup
 	for {
 		select {
@@ -756,7 +762,7 @@ func runHTTP1ExchangeLoop(
 			wg.Add(1)
 			go func(ch layer.Channel) {
 				defer wg.Done()
-				runHTTP1Exchange(ctx, stack, ch, upstreamH1, p, sessOpts, target, grpcwebOpts, logger)
+				runHTTP1Exchange(ctx, stack, ch, chain, p, sessOpts, target, grpcwebOpts, logger)
 			}(clientCh)
 		}
 	}
@@ -780,7 +786,7 @@ func runHTTP1Exchange(
 	ctx context.Context,
 	stack *connector.ConnectionStack,
 	clientCh layer.Channel,
-	upstreamH1 *http1.Layer,
+	chain *h1Chain,
 	p *pipeline.Pipeline,
 	sessOpts session.SessionOptions,
 	target string,
@@ -815,7 +821,14 @@ func runHTTP1Exchange(
 		return
 	}
 
-	dial := func(_ context.Context, env *envelope.Envelope) (layer.Channel, error) {
+	dial := func(dctx context.Context, env *envelope.Envelope) (layer.Channel, error) {
+		// USK-998: probe the current upstream Layer for staleness (peer
+		// idle-FIN / RST during keep-alive) and transparently redial when
+		// stale. Returns the same Layer fast when alive.
+		upstreamH1, err := chain.EnsureFresh(dctx)
+		if err != nil {
+			return nil, fmt.Errorf("dial: %w", err)
+		}
 		upCh := upstreamH1.OpenExchange()
 		if upCh == nil {
 			return nil, fmt.Errorf("proxybuild: upstream http1 layer closed before opening exchange for %s", target)
