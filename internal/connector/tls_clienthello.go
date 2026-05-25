@@ -33,6 +33,10 @@ const tlsExtensionServerName = 0x0000
 // server_name extension (RFC 6066 §3).
 const tlsServerNameTypeHostname = 0x00
 
+// tlsExtensionALPN is the ExtensionType value for the Application-Layer
+// Protocol Negotiation (ALPN) extension (RFC 7301 §3.1, IANA-assigned 16).
+const tlsExtensionALPN = 0x0010
+
 // parseClientHelloSNI extracts the SNI host_name value from a TLS
 // ClientHello carried at the start of buf. Returns an empty string with
 // nil error when the ClientHello does not include the SNI extension or
@@ -51,15 +55,53 @@ const tlsServerNameTypeHostname = 0x00
 // matches the L4-capable principle — the proxy must remain
 // passthrough-faithful even when the first record is junk.
 func parseClientHelloSNI(buf []byte) (string, error) {
-	hello, err := unwrapClientHelloBody(buf)
-	if err != nil {
-		return "", err
-	}
-	exts, err := skipToExtensions(hello)
+	exts, err := parseClientHelloExtensions(buf)
 	if err != nil {
 		return "", err
 	}
 	return findSNIInExtensions(exts)
+}
+
+// parseClientHelloALPN extracts the offered ALPN protocol name list from a
+// TLS ClientHello carried at the start of buf. Returns a nil slice with nil
+// error when the ClientHello does not include the ALPN extension or
+// includes it with an empty ProtocolNameList — both are legal per RFC 7301
+// §3.1 and must not cause the caller to abort the relay.
+//
+// The returned slice preserves the wire order of the client's preference
+// list so callers (e.g. sniff-first MITM upstream dial) can forward the
+// offered protocols unchanged.
+//
+// Returns errClientHelloIncomplete when buf truncates a length-prefixed
+// region; the caller should peek more bytes (up to the configured cap)
+// and retry. Returns errNotClientHello when the first byte is not a
+// Handshake record or the inner handshake type is not ClientHello — the
+// caller treats this as "no ALPN" and continues without retry.
+//
+// Other errors (legacy_version mismatch, malformed TLS record framing)
+// are surfaced verbatim for diagnostic logging but never fatal: the
+// caller's audit flow records ALPN=nil and relays the bytes anyway. This
+// matches the L4-capable principle — the proxy must remain
+// passthrough-faithful even when the first record is junk.
+func parseClientHelloALPN(buf []byte) ([]string, error) {
+	exts, err := parseClientHelloExtensions(buf)
+	if err != nil {
+		return nil, err
+	}
+	return findALPNInExtensions(exts)
+}
+
+// parseClientHelloExtensions is the shared prelude for the SNI and ALPN
+// entry points: it validates the TLS record + Handshake headers and
+// returns the extensions block slice. Both parseClientHelloSNI and
+// parseClientHelloALPN sit on top of this helper so the framing checks
+// stay in one place.
+func parseClientHelloExtensions(buf []byte) ([]byte, error) {
+	hello, err := unwrapClientHelloBody(buf)
+	if err != nil {
+		return nil, err
+	}
+	return skipToExtensions(hello)
 }
 
 // unwrapClientHelloBody validates the TLS record + Handshake headers and
@@ -229,4 +271,76 @@ func parseServerNameExtension(extData []byte) string {
 		}
 	}
 	return ""
+}
+
+// findALPNInExtensions scans an extensions block for the ALPN extension
+// and returns the offered ProtocolNameList in wire order. Returns a nil
+// slice + nil error when the ALPN extension is not present or when it
+// carries a zero-entry ProtocolNameList — both legal per RFC 7301 §3.1
+// (the spec does not forbid an empty list, only a zero-length name).
+//
+// The function is deliberately fail-soft: name entries with name_length
+// == 0 (which RFC 7301 forbids) are skipped rather than treated as a
+// hard error, matching the MITM principle of "do not crash on
+// attacker-controlled input". Truncation of the extension data or of an
+// entry's name bytes still returns errClientHelloIncomplete so the
+// caller knows to peek more bytes.
+func findALPNInExtensions(exts []byte) ([]string, error) {
+	for len(exts) >= 4 {
+		extType := int(exts[0])<<8 | int(exts[1])
+		extDataLen := int(exts[2])<<8 | int(exts[3])
+		exts = exts[4:]
+		if len(exts) < extDataLen {
+			return nil, errClientHelloIncomplete
+		}
+		extData := exts[:extDataLen]
+		exts = exts[extDataLen:]
+
+		if extType != tlsExtensionALPN {
+			continue
+		}
+		return parseALPNExtension(extData)
+	}
+	return nil, nil
+}
+
+// parseALPNExtension decodes the ProtocolNameList carried in the ALPN
+// extension data (RFC 7301 §3.1):
+//
+//	ProtocolNameList:
+//	  uint16 total_length          (covers the entries below)
+//	  ProtocolName entries:
+//	    uint8 name_length          (MUST be >= 1 per RFC)
+//	    opaque name[name_length]
+//
+// Returns a nil slice + nil error when the list is empty (zero entries).
+// Returns errClientHelloIncomplete when either the outer length prefix
+// or an individual entry's name bytes are truncated.
+func parseALPNExtension(extData []byte) ([]string, error) {
+	if len(extData) < 2 {
+		return nil, errClientHelloIncomplete
+	}
+	listLen := int(extData[0])<<8 | int(extData[1])
+	entries := extData[2:]
+	if len(entries) < listLen {
+		return nil, errClientHelloIncomplete
+	}
+	entries = entries[:listLen]
+	var offers []string
+	for len(entries) >= 1 {
+		nameLen := int(entries[0])
+		entries = entries[1:]
+		if len(entries) < nameLen {
+			return nil, errClientHelloIncomplete
+		}
+		name := entries[:nameLen]
+		entries = entries[nameLen:]
+		// RFC 7301 forbids zero-length names; skip rather than error
+		// to remain passthrough-faithful on malformed input.
+		if nameLen == 0 {
+			continue
+		}
+		offers = append(offers, string(name))
+	}
+	return offers, nil
 }
