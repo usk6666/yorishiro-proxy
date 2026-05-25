@@ -2113,6 +2113,10 @@ type queryListenerStatusEntry struct {
 // always populated (zero counters when nothing has happened yet).
 // omitempty keeps the field absent for test runs that don't wire a
 // Manager.
+//
+// H2Upstream (USK-1001) is the h1-parity field for the HTTP/2 redial
+// surface (prewarm worker / reactive GOAWAY-driven redial / OpenStream
+// Refused retry). Same nil-vs-populated semantics as H1Upstream.
 type queryStatusResult struct {
 	Running           bool                                  `json:"running"`
 	ListenAddr        string                                `json:"listen_addr"`
@@ -2133,6 +2137,7 @@ type queryStatusResult struct {
 	RateLimits        *queryRateLimitStatus                 `json:"rate_limits,omitempty"`
 	Budget            *queryBudgetStatus                    `json:"budget,omitempty"`
 	H1Upstream        *proxybuild.H1UpstreamMetricsSnapshot `json:"h1_upstream,omitempty"`
+	H2Upstream        *proxybuild.H2UpstreamMetricsSnapshot `json:"h2_upstream,omitempty"`
 }
 
 // queryRateLimitStatus holds rate limit information for the status response.
@@ -2170,6 +2175,12 @@ func (s *Server) populateManagerStatus(result *queryStatusResult) {
 	// implementation omit the field entirely.
 	h1Snap := s.connector.manager.H1UpstreamMetrics()
 	result.H1Upstream = &h1Snap
+
+	// USK-1001: surface the HTTP/2 upstream redial / refused-retry
+	// counters (h1 parity). Same nil-vs-populated semantics as
+	// H1Upstream above.
+	h2Snap := s.connector.manager.H2UpstreamMetrics()
+	result.H2Upstream = &h2Snap
 
 	// Populate per-listener statuses.
 	statuses := listenerStatuses(s.connector.manager)

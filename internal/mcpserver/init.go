@@ -578,6 +578,11 @@ func NewLiveManager(
 	// h1Chain / retryingUpstreamChannel updates the same Manager-level
 	// counter set. USK-1000.
 	h1Metrics := proxybuild.NewH1UpstreamMetrics()
+	// h2Metrics is the USK-1001 h1-parity counter set for the HTTP/2
+	// upstream redial / refused-retry surface. Same construction +
+	// dual-plumb pattern as h1Metrics — one struct per Manager, shared
+	// by every per-CONNECT redialChain via Deps.
+	h2Metrics := proxybuild.NewH2UpstreamMetrics()
 	factory := func(ctx context.Context, name, addr string) (*proxybuild.Stack, error) {
 		return proxybuild.BuildLiveStack(ctx, proxybuild.Deps{
 			Logger:                  logger,
@@ -614,6 +619,9 @@ func NewLiveManager(
 			RecordSSEMaxEventsPerStream:    buildCfg.SSEMaxEventsPerStream,
 			// USK-1000: shared HTTP/1.x upstream redial / replay counters.
 			H1UpstreamMetrics: h1Metrics,
+			// USK-1001: shared HTTP/2 upstream redial / refused-retry
+			// counters (h1 parity). Same shared-singleton pattern.
+			H2UpstreamMetrics: h2Metrics,
 		})
 	}
 	mgr, err := proxybuild.NewManager(proxybuild.ManagerConfig{
@@ -627,6 +635,10 @@ func NewLiveManager(
 		// USK-1000: bind the metrics counters so Manager.H1UpstreamMetrics
 		// returns the same counters every Deps update.
 		H1UpstreamMetrics: h1Metrics,
+		// USK-1001: bind the h2 metrics counters so
+		// Manager.H2UpstreamMetrics returns the same counters every
+		// Deps update.
+		H2UpstreamMetrics: h2Metrics,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("init proxybuild manager: %w", err)

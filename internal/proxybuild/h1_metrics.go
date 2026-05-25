@@ -350,9 +350,11 @@ type H1UpstreamMetricsSnapshot struct {
 // Snapshot returns the current values atomically-loaded from each
 // counter. Safe to call concurrently with increments — each Load is
 // independent, so the snapshot is a "tear-able" view (no global
-// barrier across counters). This matches Prometheus scrape semantics
-// (counters are independently scraped) and the connector.BudgetManager
-// precedent. Returns the zero snapshot when m is nil.
+// barrier across counters). Cross-counter invariants (e.g.
+// write_epipe ≥ replay_fail_*) MAY NOT hold under concurrent
+// increments; this matches Prometheus scrape semantics (counters are
+// independently scraped) and the connector.BudgetManager precedent.
+// Returns the zero snapshot when m is nil.
 func (m *H1UpstreamMetrics) Snapshot() H1UpstreamMetricsSnapshot {
 	if m == nil {
 		return H1UpstreamMetricsSnapshot{}

@@ -253,6 +253,16 @@ type Deps struct {
 	// per-CONNECT chains under one Manager share the counter set.
 	H1UpstreamMetrics *H1UpstreamMetrics
 
+	// H2UpstreamMetrics aggregates USK-991 (reactive redial) + USK-992
+	// (pre-warm) + USK-993 (Refused retry) + USK-1001 HTTP/2 upstream
+	// counters. nil-safe — every emit point inside redialChain /
+	// openUpstreamStreamWithRetryFn short-circuits on a nil pointer.
+	// The production wiring (internal/mcpserver/init.go) constructs a
+	// single H2UpstreamMetrics on Manager and threads the same pointer
+	// through Deps so all per-CONNECT chains under one Manager share
+	// the counter set.
+	H2UpstreamMetrics *H2UpstreamMetrics
+
 	// RecordGRPCWebBase64MaxPerStream caps the number of gRPC-Web
 	// text-variant body wire envelopes (WireLevel=grpcweb-base64,
 	// pre-decode base64 body bytes captured by the grpcweb Layer's
@@ -916,7 +926,7 @@ func buildOnHTTP2Stack(p *pipeline.Pipeline, deps Deps, logger *slog.Logger) con
 		// Layers are retained for the CONNECT's lifetime so in-flight
 		// streams on them drain naturally up to GOAWAY's last_stream_id
 		// (RFC 9113 §6.8) — close-on-CONNECT-exit, not close-on-swap.
-		chain := newRedialChain()
+		chain := newRedialChain(deps.H2UpstreamMetrics)
 		// USK-992: the observer closure tickled when a fresh chain step
 		// observes peer GOAWAY. Wired onto each fresh Layer minted by
 		// RedialUpstreamH2 via http2.WithGoAwayObserver. The non-blocking
@@ -1207,12 +1217,36 @@ type redialChain struct {
 	wake        chan struct{}
 	prewarmDone chan struct{}
 	closeOnce   sync.Once
+
+	// metrics receives counter updates for the USK-1001 h2 upstream
+	// redial / refused-retry surface. Mirrors h1Chain.metrics — nil-safe
+	// (every emit helper guards on a nil receiver) so tests that
+	// construct a redialChain directly without a Manager continue to
+	// work unchanged.
+	metrics *H2UpstreamMetrics
+
+	// liveGen is the number of redial steps this chain currently
+	// contributes to the manager-wide chainGenerationLive gauge. Bumped
+	// under c.mu on every redial-append (both the reactive
+	// selectUpstreamForDial slow path and the pre-warm worker);
+	// consumed by closeAll so the manager's live counter is decremented
+	// by the exact contribution of this chain. Tracking the
+	// contribution here (rather than recomputing from len(c.layers) at
+	// close time) keeps the counter stable if future evolutions change
+	// how layers are accounted.
+	liveGen int64
 }
 
-func newRedialChain() *redialChain {
+// newRedialChain constructs a redialChain. metrics may be nil — every
+// counter emit helper short-circuits on a nil receiver. Production
+// callers thread the Manager-level [H2UpstreamMetrics] pointer here so
+// every per-CONNECT chain emits into the same struct (mirrors
+// newH1Chain). Tests that don't care about counters pass nil.
+func newRedialChain(metrics *H2UpstreamMetrics) *redialChain {
 	return &redialChain{
 		wake:        make(chan struct{}, 1),
 		prewarmDone: make(chan struct{}),
+		metrics:     metrics,
 	}
 }
 
@@ -1277,6 +1311,15 @@ func (c *redialChain) runPrewarmWorker(
 		case <-c.wake:
 		}
 
+		// USK-1001: count GOAWAY observations at the CONSUMER (worker
+		// drain) rather than the observer callback. Each drained wake
+		// event represents one peer GOAWAY (or pooled-Layer GOAWAY
+		// observation) that reached the prewarm path — head-mismatched
+		// observer callbacks short-circuit at the callsite before
+		// tickleWake, so a drained wake is by construction a relevant
+		// GOAWAY for the current chain head.
+		c.metrics.incGoAwayObservedPrewarm()
+
 		// Read the current head before dialing. If the head is already
 		// healthy (spurious wake — e.g. observer tickled but reactive
 		// path already replaced the head), skip the dial.
@@ -1300,6 +1343,8 @@ func (c *redialChain) runPrewarmWorker(
 
 		fresh, err := dialFresh(ctx, target, head, nextGen)
 		if err != nil {
+			// USK-1001: count failed pre-warm dials.
+			c.metrics.incRedialFailedPrewarm()
 			// Speculative diagnostic only — the reactive path picks up on
 			// the next request. Worker keeps running for subsequent wake
 			// events (the failed dial is NOT appended; chain.current is
@@ -1322,10 +1367,40 @@ func (c *redialChain) runPrewarmWorker(
 		c.mu.Lock()
 		c.layers = append(c.layers, fresh)
 		c.current.Store(fresh)
+		// USK-1001: bump the per-chain liveGen and emit the
+		// chain-generation gauges under mu — the same single-writer
+		// invariant that protects c.layers protects c.liveGen.
+		c.bumpGenerationLocked()
 		c.mu.Unlock()
+		// USK-1001: count successful pre-warm dials. Emitted after mu
+		// is released so a slow downstream emit cannot stall the
+		// next reactive selectUpstreamForDial picking up the fresh
+		// head.
+		c.metrics.incRedialPrewarm()
 		logger.Debug("proxybuild: pre-warm h2 dialed successfully",
 			"target", target, "generation", nextGen)
 	}
+}
+
+// bumpGenerationLocked updates the chain-generation gauges after a
+// successful redial-append. Caller MUST hold c.mu — both the layer
+// slice and the local liveGen are mutated. The generation value
+// reported to the metrics struct is the number of redial steps
+// (len(layers) - 1 for the reactive path that appends BEFORE this
+// call; len(layers) for the prewarm worker which appends inside the
+// same critical section that calls us — both yield the same "steps"
+// count because the pre-warm worker appends THEN bumps). Mirrors
+// h1Chain.bumpGenerationLocked.
+//
+// In the production wiring, callers append THEN call bumpGenerationLocked,
+// so the chain step count reported to the gauge is len(layers) - 0 = N
+// for the Nth fresh Layer. The implicit pooled chain[0] is generation 0
+// (NOT counted here); the first fresh redial is generation 1, the
+// second is generation 2, etc.
+func (c *redialChain) bumpGenerationLocked() {
+	gen := int64(len(c.layers))
+	c.liveGen = gen
+	c.metrics.observeChainGeneration(gen)
 }
 
 // headLayer returns the current chain head (current.Load() if
@@ -1359,6 +1434,15 @@ func (c *redialChain) closeAll() {
 	defer c.mu.Unlock()
 	for _, l := range c.layers {
 		_ = l.Close()
+	}
+	// USK-1001: release this chain's contribution to the manager-wide
+	// chainGenerationLive gauge so it stays meaningful across many
+	// CONNECTs (otherwise it would grow monotonically forever). The
+	// gauge max is untouched — it tracks the all-time high-water
+	// mark by design.
+	if c.liveGen > 0 {
+		c.metrics.releaseChainGeneration(c.liveGen)
+		c.liveGen = 0
 	}
 	// Hand back the empty slot so a CONNECT that somehow re-enters
 	// (it does not today) would not double-close.
@@ -1418,6 +1502,50 @@ func selectUpstreamForDial(
 	dialFresh redialFunc,
 	logger *slog.Logger,
 ) *http2.Layer {
+	return selectUpstreamForDialWithTrigger(
+		dctx, target, upstreamH2, chain, dialFresh, dialTriggerReactive, logger,
+	)
+}
+
+// dialTrigger discriminates the call-site context for
+// selectUpstreamForDialWithTrigger so the USK-1001 metrics emit point
+// can attribute redials to the correct trigger label
+// (reactive vs refused_stream). The pre-warm worker dials via
+// dialFresh directly and does NOT call selectUpstreamForDial, so
+// "prewarm" is not part of this enum.
+type dialTrigger uint8
+
+const (
+	// dialTriggerReactive is the normal selectUpstreamForDial call from
+	// the per-stream dial closure (USK-991 / USK-993 first-attempt
+	// path). Maps to {goaway_observed,redial,redial_failed}_reactive.
+	dialTriggerReactive dialTrigger = iota
+	// dialTriggerRefusedStream is the retry call from
+	// openUpstreamStreamWithRetryFn after the first OpenStream
+	// returned a Refused error (USK-993 race-recovery path). Maps to
+	// {redial,redial_failed}_refused_stream — the goaway-observed
+	// counter is NOT incremented from this trigger because the
+	// race that drives it is OpenStream-side, not GOAWAY-observation.
+	dialTriggerRefusedStream
+)
+
+// selectUpstreamForDialWithTrigger is selectUpstreamForDial with an
+// explicit trigger discriminator so the USK-1001 redial metrics can
+// distinguish the two call sites (reactive vs refused_stream).
+//
+// All semantics other than the metric trigger label match
+// selectUpstreamForDial — see that function's doc comment for
+// active-Layer selection, browser-equivalent semantics, and the
+// chain.mu single-flight discussion.
+func selectUpstreamForDialWithTrigger(
+	dctx context.Context,
+	target string,
+	upstreamH2 *http2.Layer,
+	chain *redialChain,
+	dialFresh redialFunc,
+	trigger dialTrigger,
+	logger *slog.Logger,
+) *http2.Layer {
 	// Fast path: lock-free read of the active Layer. current.Load() is
 	// either nil (no redial yet — use pooled) or points to a Layer that
 	// was appended to chain.layers under chain.mu prior to the swap, so
@@ -1428,6 +1556,20 @@ func selectUpstreamForDial(
 	}
 	if !isStaleH2(active) {
 		return active
+	}
+
+	// USK-1001: count GOAWAY observations at the CONSUMER (slow-path
+	// entry, after isStaleH2 has already returned true on the fast
+	// path). One stale observation per slow-path entry on the
+	// reactive trigger only — the refused_stream trigger represents
+	// the OpenStream-side race-recovery path and is not a fresh
+	// stale-conn observation. The under-mu re-check below may see
+	// the staleness already resolved by a concurrent goroutine, but
+	// the divergence-point semantics (matches h1's
+	// incStaleDetectedHealthcheck) means we count what THIS goroutine
+	// observed.
+	if trigger == dialTriggerReactive {
+		chain.metrics.incGoAwayObservedReactive()
 	}
 
 	// Slow path: race to fresh-dial the next chain step. The mutex
@@ -1454,6 +1596,13 @@ func selectUpstreamForDial(
 	nextGen := len(chain.layers) + 1
 	fresh, err := dialFresh(dctx, target, active, nextGen)
 	if err != nil {
+		// USK-1001: attribute the failed dial to the calling trigger.
+		switch trigger {
+		case dialTriggerReactive:
+			chain.metrics.incRedialFailedReactive()
+		case dialTriggerRefusedStream:
+			chain.metrics.incRedialFailedRefusedStream()
+		}
 		logger.Warn("proxybuild: upstream h2 redial failed",
 			"target", target, "generation", nextGen, "error", err)
 		// Return the (stale) active Layer. The caller's OpenStream will
@@ -1466,6 +1615,17 @@ func selectUpstreamForDial(
 	}
 	chain.layers = append(chain.layers, fresh)
 	chain.current.Store(fresh)
+	// USK-1001: bump the per-chain liveGen + emit chain-generation
+	// gauges under mu (the single-writer invariant that protects
+	// chain.layers also protects chain.liveGen).
+	chain.bumpGenerationLocked()
+	// USK-1001: attribute the successful dial to the calling trigger.
+	switch trigger {
+	case dialTriggerReactive:
+		chain.metrics.incRedialReactive()
+	case dialTriggerRefusedStream:
+		chain.metrics.incRedialRefusedStream()
+	}
 	logger.Debug("proxybuild: upstream h2 redialed after stale-conn detection",
 		"target", target, "generation", nextGen)
 	return fresh
@@ -1554,6 +1714,8 @@ func openUpstreamStreamWithRetryFn(
 	openStream openStreamFunc,
 	logger *slog.Logger,
 ) (*http2.Layer, layer.Channel, error) {
+	// First attempt: reactive-trigger selectUpstreamForDial. Stale-conn
+	// observations attributed to {goaway_observed,redial,redial_failed}_reactive.
 	upL := selectUpstreamForDial(dctx, target, upstreamH2, chain, dialFresh, logger)
 	upCh, err := openStream(dctx, upL)
 	if err == nil {
@@ -1562,15 +1724,57 @@ func openUpstreamStreamWithRetryFn(
 	if !isRefusedStreamError(err) {
 		return nil, nil, err
 	}
+	// USK-1001: count every observed Refused at the FIRST OpenStream
+	// attempt. Counted before the retry decision so retry-success vs
+	// retry-fail outcomes (incRetry*) form a separate partition of
+	// this counter.
+	chain.metrics.incRefused()
 	// Attempt 1 returned Refused. Retry exactly once. The second
 	// selectUpstreamForDial sees the now-stale Layer (the very Refused
 	// codes imply shutdown/GOAWAY on upL) and fresh-dials under
 	// chain.mu. Concurrent streams hitting the same race converge on
 	// the same fresh Layer through chain.current.
+	//
+	// USK-1001: dispatch the retry's selectUpstreamForDial with
+	// dialTriggerRefusedStream so the redial attribution lands under
+	// the refused_stream label instead of reactive — they are different
+	// races (GOAWAY-observed vs OpenStream-side Refused) and the MCP
+	// status surface keeps them distinct.
 	logger.Debug("proxybuild: OpenStream refused, retrying after fresh dial",
 		"target", target, "reason", refusedReason(err))
-	upL2 := selectUpstreamForDial(dctx, target, upstreamH2, chain, dialFresh, logger)
+	upL2 := selectUpstreamForDialWithTrigger(
+		dctx, target, upstreamH2, chain, dialFresh, dialTriggerRefusedStream, logger,
+	)
 	upCh2, err2 := openStream(dctx, upL2)
+	// USK-1001 Q9 heuristic: classify the retry OUTCOME by (upL == upL2)
+	// + err2. The redial COUNT is already accounted by the trigger
+	// dispatch inside selectUpstreamForDialWithTrigger, so this switch
+	// only updates retry_total — no double-counting of redials.
+	//
+	// Approximate caveat: a concurrent pre-warm worker may have
+	// already swapped chain.current to a fresh Layer between the two
+	// calls, so upL2 != upL even though this goroutine's retry path
+	// did not itself dial (selectUpstreamForDialWithTrigger took the
+	// "active is no longer stale under mu" early-return). That case
+	// classifies as fail_redial_retry / success even though no
+	// refused_stream redial was performed — over-counting the retry
+	// path. The under-count is symmetric (a prewarm stalemate that
+	// resolves at the same time can also mask a real retry-path
+	// success). See design review Q9.
+	switch {
+	case err2 == nil:
+		chain.metrics.incRetrySuccess()
+	case upL2 != upL:
+		// Retry path's selectUpstream returned a different Layer (a
+		// redial succeeded or pre-warm intervened) but the post-redial
+		// OpenStream still failed.
+		chain.metrics.incRetryFailRedialRetry()
+	default:
+		// err2 != nil && upL2 == upL: selectUpstream fell back to the
+		// same stale Layer (its dial failed) AND OpenStream failed on
+		// it again.
+		chain.metrics.incRetryFailRedial()
+	}
 	if err2 != nil {
 		return nil, nil, err2
 	}

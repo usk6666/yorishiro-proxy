@@ -104,7 +104,7 @@ func TestSelectUpstreamForDial_StaleLayerTriggersRedial(t *testing.T) {
 		return fresh, nil
 	}
 
-	chain := newRedialChain()
+	chain := newRedialChain(nil)
 	got := selectUpstreamForDial(context.Background(), "example.test:443",
 		stale, chain, redialFn, silentLogger())
 
@@ -148,7 +148,7 @@ func TestSelectUpstreamForDial_HealthyLayerSkipsRedial(t *testing.T) {
 		return nil, errors.New("unexpected redial")
 	}
 
-	chain := newRedialChain()
+	chain := newRedialChain(nil)
 	got := selectUpstreamForDial(context.Background(), "example.test:443",
 		healthy, chain, redialFn, silentLogger())
 
@@ -179,7 +179,7 @@ func TestSelectUpstreamForDial_RedialFailureFallsBackToStale(t *testing.T) {
 		return nil, wantErr
 	}
 
-	chain := newRedialChain()
+	chain := newRedialChain(nil)
 	got := selectUpstreamForDial(context.Background(), "example.test:443",
 		stale, chain, redialFn, silentLogger())
 
@@ -245,7 +245,7 @@ func TestSelectUpstreamForDial_ConcurrentStreamsShareSingleRedial(t *testing.T) 
 		return fresh, nil
 	}
 
-	chain := newRedialChain()
+	chain := newRedialChain(nil)
 	const n = 8
 	results := make(chan *http2.Layer, n)
 	for i := 0; i < n; i++ {
@@ -320,7 +320,7 @@ func TestSelectUpstreamForDial_NChainRedials(t *testing.T) {
 		return freshSeq[i-1], nil
 	}
 
-	chain := newRedialChain()
+	chain := newRedialChain(nil)
 
 	// Stage 0: kill pooled, expect fresh1 with generation=1.
 	_ = pooledPeer.Close()
@@ -401,7 +401,7 @@ func TestSelectUpstreamForDial_NChainConcurrentSingleFlightPerStep(t *testing.T)
 		}
 	}
 
-	chain := newRedialChain()
+	chain := newRedialChain(nil)
 	const m = 8
 
 	// Step A: pooled is stale → all M goroutines must converge on fresh1.
@@ -484,7 +484,7 @@ func TestRedialChain_CloseAllClosesEveryStep(t *testing.T) {
 	fresh3, peer3 := dialPeerH2Layer(t)
 	defer peer3.Close()
 
-	chain := newRedialChain()
+	chain := newRedialChain(nil)
 	chain.layers = append(chain.layers, fresh1, fresh2, fresh3)
 	chain.current.Store(fresh3)
 
@@ -575,7 +575,7 @@ func TestOpenUpstreamStreamWithRetry_RefusedTriggersRetry(t *testing.T) {
 				return stubChan, nil
 			}
 
-			chain := newRedialChain()
+			chain := newRedialChain(nil)
 			gotL, gotCh, err := openUpstreamStreamWithRetryFn(
 				context.Background(), "example.test:443",
 				pooled, chain, redialFn, openFn, silentLogger(),
@@ -627,7 +627,7 @@ func TestOpenUpstreamStreamWithRetry_BudgetExactlyOne(t *testing.T) {
 		return nil, &layer.StreamError{Code: layer.ErrorRefused, Reason: wantReason}
 	}
 
-	chain := newRedialChain()
+	chain := newRedialChain(nil)
 	_, _, err := openUpstreamStreamWithRetryFn(
 		context.Background(), "example.test:443",
 		pooled, chain, redialFn, openFn, silentLogger(),
@@ -684,7 +684,7 @@ func TestOpenUpstreamStreamWithRetry_NonRefusedPassesThrough(t *testing.T) {
 				return nil, tc.err
 			}
 
-			chain := newRedialChain()
+			chain := newRedialChain(nil)
 			_, _, err := openUpstreamStreamWithRetryFn(
 				context.Background(), "example.test:443",
 				pooled, chain, redialFn, openFn, silentLogger(),
@@ -726,7 +726,7 @@ func TestOpenUpstreamStreamWithRetry_FirstAttemptSucceedsNoRetry(t *testing.T) {
 		return stubChan, nil
 	}
 
-	chain := newRedialChain()
+	chain := newRedialChain(nil)
 	gotL, gotCh, err := openUpstreamStreamWithRetryFn(
 		context.Background(), "example.test:443",
 		pooled, chain, redialFn, openFn, silentLogger(),
@@ -784,7 +784,7 @@ func TestOpenUpstreamStreamWithRetry_ConcurrentRefusedSingleFlightRedial(t *test
 		return stubChannel{streamID: 1}, nil
 	}
 
-	chain := newRedialChain()
+	chain := newRedialChain(nil)
 	const n = 8
 	results := make(chan *http2.Layer, n)
 	for i := 0; i < n; i++ {

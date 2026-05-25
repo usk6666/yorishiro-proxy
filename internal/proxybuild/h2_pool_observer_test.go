@@ -103,7 +103,7 @@ func TestH2PoolObserver_PreWarmFiresOnPooledLayerGoAway(t *testing.T) {
 	defer (*peer).Close()
 
 	// Construct the chain + worker shape buildOnHTTP2Stack produces.
-	chain := newRedialChain()
+	chain := newRedialChain(nil)
 
 	var dialCount int32
 	dialReady := make(chan struct{}, 1)
