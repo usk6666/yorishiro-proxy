@@ -866,6 +866,51 @@ func applyHostTLSRegistry(r *resolvedTLS, target string, reg *transport.HostTLSR
 	return nil
 }
 
+// tryH2PoolFastPath consults the HTTP/2 connection pool before any upstream
+// TLS dial. On hit it reuses the cached Layer and skips the upstream
+// handshake entirely — the whole point of pooling, and externally observable
+// via upstream TCP accept count staying flat across same-target CONNECTs.
+//
+// A pool hit implies ALPN=h2 because poolKeyForH2 is only minted for the h2
+// route. USK-997: when sniff-first peeked.ALPN is set, only take the fast
+// path when the client actually advertised h2 — otherwise the cached Layer
+// is unusable for this client and we'd burn a redial anyway. Release the
+// reservation back to the pool (it stays healthy for the next h2-capable
+// caller) and signal handled=false so the caller falls through.
+//
+// Returns handled=true when the fast path was taken (success or error) and
+// the caller should return immediately. handled=false means the pool was
+// disabled, missed, or skipped — proceed to sniff-first / cache / miss paths.
+func tryH2PoolFastPath(
+	ctx context.Context,
+	clientConn net.Conn,
+	target, host, connID string,
+	peeked ClientHelloPeek,
+	hostTLS *resolvedTLS,
+	cfg *BuildConfig,
+) (*ConnectionStack, *envelope.TLSSnapshot, *envelope.TLSSnapshot, bool, error) {
+	if cfg.HTTP2Pool == nil {
+		return nil, nil, nil, false, nil
+	}
+	poolKey := poolKeyForH2(ctx, target, cfg, hostTLS)
+	pooled, perr := cfg.HTTP2Pool.Get(poolKey)
+	if perr != nil || pooled == nil {
+		return nil, nil, nil, false, nil
+	}
+	if peeked.ALPN != nil && !alpnListContains(peeked.ALPN, ALPNProtocolH2) {
+		// Sniff saw the client cannot speak h2 — pool hit is useless.
+		// Release and fall through; the cached Layer stays available for
+		// the next h2 client.
+		cfg.HTTP2Pool.Put(poolKey, pooled)
+		slog.Debug("connector: h2 pool entry skipped (sniff-first: client cannot speak h2)",
+			"target", target, "conn_id", connID, "client_offered", peeked.ALPN,
+		)
+		return nil, nil, nil, false, nil
+	}
+	stack, cs, us, ferr := buildPoolHitFastPath(ctx, clientConn, target, host, connID, pooled, poolKey, cfg, peeked)
+	return stack, cs, us, true, ferr
+}
+
 func buildALPNRoutedStack(
 	ctx context.Context,
 	clientConn net.Conn,
@@ -884,36 +929,8 @@ func buildALPNRoutedStack(
 		return nil, nil, nil, err
 	}
 
-	// H2 pool fast path: consult the pool BEFORE upstream TLS dial. On hit
-	// we reuse the cached Layer and skip the upstream handshake entirely —
-	// the whole point of pooling, and externally observable via upstream
-	// TCP accept count staying flat across same-target CONNECTs.
-	//
-	// A pool hit implies ALPN=h2 because poolKeyForH2 is only minted for
-	// the h2 route. USK-997: when sniff-first peeked.ALPN is set, only
-	// take the fast path when the client actually advertised h2 — otherwise
-	// the cached Layer is unusable for this client and we'd burn a redial
-	// anyway. Release the reservation back to the pool (it stays healthy
-	// for the next h2-capable caller) and fall through to miss/sniff path.
-	if cfg.HTTP2Pool != nil {
-		poolKey := poolKeyForH2(ctx, target, cfg, hostTLS)
-		if pooled, perr := cfg.HTTP2Pool.Get(poolKey); perr == nil && pooled != nil {
-			if peeked.ALPN != nil && !alpnListContains(peeked.ALPN, ALPNProtocolH2) {
-				// Sniff saw the client cannot speak h2 — pool hit is
-				// useless. Release and fall through; the cached Layer
-				// stays available for the next h2 client.
-				cfg.HTTP2Pool.Put(poolKey, pooled)
-				slog.Debug("connector: h2 pool entry skipped (sniff-first: client cannot speak h2)",
-					"target", target, "conn_id", connID, "client_offered", peeked.ALPN,
-				)
-			} else {
-				stack, cs, us, ferr := buildPoolHitFastPath(ctx, clientConn, target, host, connID, pooled, poolKey, cfg, peeked)
-				if ferr == nil {
-					return stack, cs, us, nil
-				}
-				return nil, nil, nil, ferr
-			}
-		}
+	if stack, cs, us, handled, ferr := tryH2PoolFastPath(ctx, clientConn, target, host, connID, peeked, hostTLS, cfg); handled {
+		return stack, cs, us, ferr
 	}
 
 	// Sniff-first branch (USK-997): when the client's ALPN list is in hand,
