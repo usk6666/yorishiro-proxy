@@ -81,7 +81,7 @@ func TestBuildConnectionStack_RawPassthrough(t *testing.T) {
 			resultCh <- buildResult{nil, err}
 			return
 		}
-		stack, _, _, err := BuildConnectionStack(context.Background(), serverConn, target, buildCfg)
+		stack, _, _, err := BuildConnectionStack(context.Background(), serverConn, target, buildCfg, ClientHelloPeek{})
 		resultCh <- buildResult{stack, err}
 	}()
 
@@ -204,7 +204,7 @@ func TestBuildConnectionStack_HTTPMITMStack(t *testing.T) {
 			resultCh <- buildResult{err: err}
 			return
 		}
-		stack, clientSnap, upstreamSnap, err := BuildConnectionStack(context.Background(), serverConn, target, buildCfg)
+		stack, clientSnap, upstreamSnap, err := BuildConnectionStack(context.Background(), serverConn, target, buildCfg, ClientHelloPeek{})
 		resultCh <- buildResult{stack, clientSnap, upstreamSnap, err}
 	}()
 
@@ -291,7 +291,7 @@ func TestBuildConnectionStack_NilConfig(t *testing.T) {
 	defer clientConn.Close()
 	defer proxyConn.Close()
 
-	_, _, _, err := BuildConnectionStack(context.Background(), proxyConn, "example.com:443", nil)
+	_, _, _, err := BuildConnectionStack(context.Background(), proxyConn, "example.com:443", nil, ClientHelloPeek{})
 	if err == nil {
 		t.Error("expected error for nil config")
 	}
@@ -384,7 +384,7 @@ func TestBuildConnectionStack_H2MITMStack(t *testing.T) {
 			resultCh <- buildResult{err: acceptErr}
 			return
 		}
-		stack, clientSnap, upstreamSnap, buildErr := BuildConnectionStack(context.Background(), serverConn, target, buildCfg)
+		stack, clientSnap, upstreamSnap, buildErr := BuildConnectionStack(context.Background(), serverConn, target, buildCfg, ClientHelloPeek{})
 		resultCh <- buildResult{stack, clientSnap, upstreamSnap, buildErr}
 	}()
 
@@ -638,7 +638,7 @@ func TestBuildConnectionStack_H2PoolFastPath_ClientMITMFailReleasesReservation(t
 			resultCh <- buildResult{err: acceptErr}
 			return
 		}
-		stack, _, _, buildErr := BuildConnectionStack(context.Background(), serverConn, target, buildCfg)
+		stack, _, _, buildErr := BuildConnectionStack(context.Background(), serverConn, target, buildCfg, ClientHelloPeek{})
 		resultCh <- buildResult{stack: stack, err: buildErr}
 	}()
 
@@ -727,7 +727,7 @@ func TestBuildPoolHitFastPath_TakesFastPath(t *testing.T) {
 
 	_, _, _, ferr := buildPoolHitFastPath(
 		context.Background(), clientConn, target, "127.0.0.1", "test-conn",
-		pooled, poolKey, buildCfg,
+		pooled, poolKey, buildCfg, ClientHelloPeek{},
 	)
 
 	// We expect a non-nil error from performClientMITM (the closed pipe);

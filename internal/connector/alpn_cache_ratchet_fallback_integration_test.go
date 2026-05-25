@@ -12,8 +12,11 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/connector"
 )
 
-// TestALPNCache_StaleH1_DoesNotPinH2CapableClient is the regression guard
-// for USK-884.
+// TestALPNCache_StaleH1_DoesNotPinH2CapableClient_Fallback is the
+// regression guard for USK-884 exercised on the legacy fallback path.
+// USK-997 promoted sniff-first MITM to the primary route; this test
+// disables the peek (fullListenerOpts.disableClientHelloPeek) so the
+// pre-sniff cache-hit + widening behaviour stays covered.
 //
 // Pre-condition: the ALPN cache has been seeded with "http/1.1" for the
 // target — e.g. by a previous CONNECT from an h1-only client. In real
@@ -54,7 +57,7 @@ import (
 //     and the wss-over-h2 integration test.
 //   - MCP tool integration: not exercised — the harness uses the in-
 //     process FullListener directly.
-func TestALPNCache_StaleH1_DoesNotPinH2CapableClient(t *testing.T) {
+func TestALPNCache_StaleH1_DoesNotPinH2CapableClient_Fallback(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -84,7 +87,10 @@ func TestALPNCache_StaleH1_DoesNotPinH2CapableClient(t *testing.T) {
 	poisonKey := connector.ALPNCacheKey{HostPort: target}
 	cache.Set(poisonKey, "http/1.1")
 
-	proxyAddr, _, _ := startFullListenerProxy(t, ctx, fullListenerOpts{alpnCache: cache})
+	proxyAddr, _, _ := startFullListenerProxy(t, ctx, fullListenerOpts{
+		alpnCache:              cache,
+		disableClientHelloPeek: true,
+	})
 
 	// Client offers [h2, http/1.1]. Pre-fix the proxy would advertise
 	// ["http/1.1"] only (the poisoned cache value), the TLS handshake
@@ -124,11 +130,12 @@ func TestALPNCache_StaleH1_DoesNotPinH2CapableClient(t *testing.T) {
 	}
 }
 
-// TestALPNCache_StaleH1_HTTP1ClientStillWorks is the negative control
-// for USK-884: an h1-only client must still negotiate http/1.1 cleanly
-// when the cache is seeded with http/1.1. The fix widens the proxy's
-// offer set without forcing h2 onto h1-only clients.
-func TestALPNCache_StaleH1_HTTP1ClientStillWorks(t *testing.T) {
+// TestALPNCache_StaleH1_HTTP1ClientStillWorks_Fallback is the negative
+// control for USK-884 on the legacy fallback path. An h1-only client
+// must still negotiate http/1.1 cleanly when the cache is seeded with
+// http/1.1. USK-997 made sniff-first primary, so this variant disables
+// the peek to keep the fallback widening regression covered.
+func TestALPNCache_StaleH1_HTTP1ClientStillWorks_Fallback(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -144,7 +151,10 @@ func TestALPNCache_StaleH1_HTTP1ClientStillWorks(t *testing.T) {
 	cache := connector.NewALPNCache(connector.DefaultALPNCacheSize, connector.DefaultALPNCacheTTL)
 	cache.Set(connector.ALPNCacheKey{HostPort: target}, "http/1.1")
 
-	proxyAddr, _, wg := startFullListenerProxy(t, ctx, fullListenerOpts{alpnCache: cache})
+	proxyAddr, _, wg := startFullListenerProxy(t, ctx, fullListenerOpts{
+		alpnCache:              cache,
+		disableClientHelloPeek: true,
+	})
 
 	wg.Add(1)
 	rawReq := fmt.Sprintf("GET /h1-still-works HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n", target)

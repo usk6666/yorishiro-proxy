@@ -477,6 +477,9 @@ func startFullListenerProxy(
 	if opts.alpnCache != nil {
 		buildCfg.ALPNCache = opts.alpnCache
 	}
+	if opts.disableClientHelloPeek {
+		buildCfg.DisableClientHelloPeek = true
+	}
 
 	connectNeg := connector.NewCONNECTNegotiator(slog.Default())
 	socks5Neg := connector.NewSOCKS5Negotiator(slog.Default())
@@ -571,6 +574,13 @@ type fullListenerOpts struct {
 	// listener handles its first CONNECT. Nil disables ALPN caching for
 	// this listener instance.
 	alpnCache *connector.ALPNCache
+
+	// USK-997: opt out of the sniff-first ClientHello peek so an
+	// integration test can keep exercising the legacy fallback path
+	// (cache hit / miss / pool fast-path). Defaults to false (sniff-first
+	// primary path is active) — set true in regression tests that target
+	// the pre-USK-997 widening logic.
+	disableClientHelloPeek bool
 }
 
 // waitSessionDone waits for the WaitGroup with a timeout.

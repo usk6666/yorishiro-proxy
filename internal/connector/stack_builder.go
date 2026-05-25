@@ -299,6 +299,22 @@ type BuildConfig struct {
 	// runtime; production paths do not branch on this value. Read via
 	// ClientMITMHandshakeCount; reset via ResetClientMITMHandshakeCount.
 	clientMITMHandshakes atomic.Uint64
+
+	// DisableClientHelloPeek is a test-only opt-out for the sniff-first
+	// ClientHello peek (USK-997). When true, runTLSMITM skips
+	// peekClientHelloSNIAndALPN and threads an empty ClientHelloPeek into
+	// BuildConnectionStack so callers exercise the legacy fallback paths
+	// (buildCacheHitPath / buildCacheMissPath / buildPoolHitFastPath).
+	//
+	// Production code MUST NOT set this. The flag exists solely so the
+	// e2e integration tests that historically exercised the
+	// speculative-then-redial path (alpn_mismatch_integration_test,
+	// alpn_cache_ratchet_integration_test) can keep verifying the
+	// fallback path now that sniff-first is the primary route. Matches
+	// the USK-813 ClientMITMHandshakeCount precedent: production
+	// observability/test-only knobs may sit on BuildConfig as long as
+	// the godoc says "test-only".
+	DisableClientHelloPeek bool
 }
 
 // EffectiveUpstreamProxy returns the upstream proxy URL the live data path
@@ -591,19 +607,63 @@ func (c *BuildConfig) ResetClientMITMHandshakeCount() {
 	c.clientMITMHandshakes.Store(0)
 }
 
+// ClientHelloPeek carries the SNI + ALPN list extracted from the client's
+// first TLS ClientHello by runTLSMITM via peekClientHelloSNIAndALPN
+// (USK-997). It is threaded through BuildConnectionStack so the
+// sniff-first MITM path can forward the client's ALPN list verbatim to
+// upstream and advertise upstream's pick back to the client.
+//
+// Zero-value semantics: callers that do not (or cannot) peek pass
+// ClientHelloPeek{}; both fields empty steer BuildConnectionStack into
+// the legacy fallback paths (cache hit / miss / pool) so the
+// pre-USK-997 behaviour is preserved by construction. Stack-builder unit
+// tests rely on this zero-value contract; integration tests that need
+// the same effect for FullListener-driven flows set
+// BuildConfig.DisableClientHelloPeek instead.
+//
+// Wire fidelity (CLAUDE.md MITM Principle #1, #3): the ALPN slice
+// preserves the client's wire order exactly. Do not sort, dedup, or
+// case-normalise — the upstream's ALPN pick depends on the offer list
+// being byte-identical to what the client sent.
+type ClientHelloPeek struct {
+	// SNI is the host_name value from the client's server_name
+	// extension, or empty when the client sent no SNI extension or the
+	// peek failed. The MITM cert presentation path can take advantage
+	// of an early SNI value even if the ALPN field is nil (partial
+	// peek success — User-Confirmed Decision #U3).
+	SNI string
+
+	// ALPN is the offered ProtocolNameList in wire order, or nil when
+	// the client sent no ALPN extension, the peek failed, or the ALPN
+	// extension itself was truncated. nil means "fall back to the
+	// legacy widening logic for the ALPN axis"; a non-nil slice means
+	// "forward this list verbatim to upstream and advertise upstream's
+	// pick back to the client".
+	ALPN []string
+}
+
 // BuildConnectionStack constructs a ConnectionStack for the given CONNECT
 // target and client connection, based on per-host configuration policy.
 //
 // Three modes are supported:
 //   - raw_passthrough: client [TLS MITM → ByteChunk], upstream [TLS → ByteChunk]
 //     (config-level override, ignores ALPN)
-//   - ALPN-routed MITM: upstream dial first to learn ALPN, then client MITM
-//     offering the learned ALPN, then layer selection based on ALPN
-//   - ALPN cache hit: client MITM offering cached ALPN, upstream dial with
-//     cached ALPN, verify match
+//   - sniff-first MITM (USK-997): when peeked.ALPN is non-empty, dial
+//     upstream offering peeked.ALPN verbatim, then perform the client
+//     MITM with NextProtos = [upstreamPick]. End-to-end single ALPN
+//     holds by construction; mismatch-redial logic becomes fallback-only.
+//   - legacy ALPN-routed MITM (peeked.ALPN nil / fallback): upstream dial
+//     first to learn ALPN, then client MITM offering the learned ALPN,
+//     with refresh-on-mismatch redial.
 //
 // The client-side TLS MITM handshake is performed inside this function
 // because the stack builder owns the TLS layer decision.
+//
+// peeked carries the SNI + ALPN list captured from the client's first
+// TLS ClientHello (typically by runTLSMITM via peekClientHelloSNIAndALPN).
+// Passing ClientHelloPeek{} (zero value) steers the build through the
+// legacy fallback paths — this is the canonical opt-out for stack-builder
+// unit tests that do not exercise the new sniff path.
 //
 // Returns the stack, the client-facing MITM TLS snapshot (synthetic cert
 // we presented to the client), and the upstream TLS snapshot (the real
@@ -614,6 +674,7 @@ func BuildConnectionStack(
 	clientConn net.Conn,
 	target string,
 	cfg *BuildConfig,
+	peeked ClientHelloPeek,
 ) (*ConnectionStack, *envelope.TLSSnapshot, *envelope.TLSSnapshot, error) {
 	if cfg == nil || cfg.ProxyConfig == nil {
 		return nil, nil, nil, fmt.Errorf("connector: BuildConnectionStack: nil config")
@@ -635,7 +696,7 @@ func BuildConnectionStack(
 		return buildRawPassthroughStack(ctx, clientConn, target, connID, cfg)
 	}
 
-	return buildALPNRoutedStack(ctx, clientConn, target, connID, cfg)
+	return buildALPNRoutedStack(ctx, clientConn, target, connID, cfg, peeked)
 }
 
 // buildALPNRoutedStack dials upstream first to learn the negotiated ALPN,
@@ -811,6 +872,7 @@ func buildALPNRoutedStack(
 	target string,
 	connID string,
 	cfg *BuildConfig,
+	peeked ClientHelloPeek,
 ) (*ConnectionStack, *envelope.TLSSnapshot, *envelope.TLSSnapshot, error) {
 	host, _, err := net.SplitHostPort(target)
 	if err != nil {
@@ -828,19 +890,39 @@ func buildALPNRoutedStack(
 	// TCP accept count staying flat across same-target CONNECTs.
 	//
 	// A pool hit implies ALPN=h2 because poolKeyForH2 is only minted for
-	// the h2 route, so we can offer "h2" to the client MITM without
-	// consulting the ALPN cache. On miss (including Pool.Get returning
-	// ErrClosed, a dead Layer, or a capacity-capped Layer) fall through
-	// to the existing ALPN-cache / upstream-dial flow.
+	// the h2 route. USK-997: when sniff-first peeked.ALPN is set, only
+	// take the fast path when the client actually advertised h2 — otherwise
+	// the cached Layer is unusable for this client and we'd burn a redial
+	// anyway. Release the reservation back to the pool (it stays healthy
+	// for the next h2-capable caller) and fall through to miss/sniff path.
 	if cfg.HTTP2Pool != nil {
 		poolKey := poolKeyForH2(ctx, target, cfg, hostTLS)
 		if pooled, perr := cfg.HTTP2Pool.Get(poolKey); perr == nil && pooled != nil {
-			stack, cs, us, ferr := buildPoolHitFastPath(ctx, clientConn, target, host, connID, pooled, poolKey, cfg)
-			if ferr == nil {
-				return stack, cs, us, nil
+			if peeked.ALPN != nil && !alpnListContains(peeked.ALPN, ALPNProtocolH2) {
+				// Sniff saw the client cannot speak h2 — pool hit is
+				// useless. Release and fall through; the cached Layer
+				// stays available for the next h2 client.
+				cfg.HTTP2Pool.Put(poolKey, pooled)
+				slog.Debug("connector: h2 pool entry skipped (sniff-first: client cannot speak h2)",
+					"target", target, "conn_id", connID, "client_offered", peeked.ALPN,
+				)
+			} else {
+				stack, cs, us, ferr := buildPoolHitFastPath(ctx, clientConn, target, host, connID, pooled, poolKey, cfg, peeked)
+				if ferr == nil {
+					return stack, cs, us, nil
+				}
+				return nil, nil, nil, ferr
 			}
-			return nil, nil, nil, ferr
 		}
+	}
+
+	// Sniff-first branch (USK-997): when the client's ALPN list is in hand,
+	// forward it verbatim to upstream and advertise upstream's pick back
+	// to the client. End-to-end single ALPN holds by construction; the
+	// legacy mismatch-redial logic stays reachable only for the fallback
+	// path (peeked.ALPN == nil).
+	if peeked.ALPN != nil {
+		return buildSniffFirstStack(ctx, clientConn, target, host, connID, peeked, hostTLS, cfg)
 	}
 
 	// Check ALPN cache.
@@ -1080,6 +1162,130 @@ func buildCacheMissPath(
 	return clientTLSConn, upstreamConn, clientSnap, upstreamSnap, nil
 }
 
+// buildSniffFirstStack handles the USK-997 sniff-first MITM path: the
+// client's offered ALPN list (captured by runTLSMITM's
+// peekClientHelloSNIAndALPN call) is forwarded verbatim to upstream;
+// upstream's negotiated pick is then offered as a single-element ALPN
+// list to the MITM client. End-to-end single ALPN holds by construction
+// — no mismatch redial is needed on the happy path.
+//
+// Order matters:
+//  1. Dial upstream with offerALPN = peeked.ALPN exactly (wire order
+//     preserved; MITM Principle #1).
+//  2. Build the MITM advertise from upstreamSnap.ALPN
+//     (mitmAdvertiseFromUpstreamPick: single-element list, empty → nil).
+//  3. Run the client MITM TLS handshake.
+//  4. Defence-in-depth assert: if the client picks something other than
+//     upstream's choice (should be impossible given step 2 advertises a
+//     single element), Warn-log with structured fields and fall through
+//     to canonicalRedialALPNOffer-based redial. RFC 7301 §3.2 violation
+//     servers cannot trigger this because step 2 already narrowed to
+//     [upstream pick]; the assert covers genuinely-broken clients.
+//  5. ALPN cache: Set the upstream pick (single string) so later legacy
+//     fallback paths benefit from the learned value.
+//
+// On any failure the relevant conn is closed before return.
+func buildSniffFirstStack(
+	ctx context.Context,
+	clientConn net.Conn,
+	target, host, connID string,
+	peeked ClientHelloPeek,
+	hostTLS *resolvedTLS,
+	cfg *BuildConfig,
+) (*ConnectionStack, *envelope.TLSSnapshot, *envelope.TLSSnapshot, error) {
+	// Step 1: dial upstream with the client's offered list verbatim.
+	upstreamConn, upstreamSnap, err := dialUpstreamWithALPN(ctx, target, host,
+		peeked.ALPN, hostTLS.insecureSkip, hostTLS.clientCert, hostTLS.rootCAs, cfg)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	upstreamALPN := ""
+	if upstreamSnap != nil {
+		upstreamALPN = upstreamSnap.ALPN
+	}
+
+	// Early validate the route so we don't waste a client MITM handshake on
+	// an unknown / unroutable upstream ALPN.
+	if _, routeErr := alpnRoute(upstreamALPN); routeErr != nil {
+		_ = upstreamConn.Close()
+		return nil, nil, nil, fmt.Errorf("connector: %s: %w", target, routeErr)
+	}
+
+	// Step 2: build the MITM advertise. Single-element list — the client
+	// can only pick this one, so by construction the post-handshake
+	// client ALPN equals upstream's pick.
+	clientOffers := mitmAdvertiseFromUpstreamPick(upstreamALPN)
+
+	// Step 3: client MITM TLS handshake.
+	clientTLSConn, clientSnap, err := performClientMITM(ctx, clientConn, host, clientOffers, cfg)
+	if err != nil {
+		_ = upstreamConn.Close()
+		return nil, nil, nil, err
+	}
+
+	clientALPN := ""
+	if clientSnap != nil {
+		clientALPN = clientSnap.ALPN
+	}
+
+	// Step 4: defense-in-depth assert. Should never fire on the happy
+	// path: clientOffers has at most one element, so the client cannot
+	// negotiate anything else. A mismatch indicates either an
+	// upstream-empty-ALPN handshake (clientOffers=nil → client picks
+	// "" which matches "" upstream) or a genuinely broken client.
+	// Treat as soft-recoverable: Warn + fall through to redial logic.
+	if !clientALPNMatchesUpstream(clientALPN, upstreamALPN) {
+		slog.WarnContext(ctx, "connector: sniff-first ALPN mismatch (defense-in-depth)",
+			"target", target,
+			"conn_id", connID,
+			"peeked_alpn", peeked.ALPN,
+			"upstream_alpn", upstreamALPN,
+			"client_alpn", clientALPN,
+		)
+		// Redial upstream with the client's effective pick so the inner
+		// stack stays single-protocol. This mirrors buildCacheMissPath's
+		// mismatch branch.
+		_ = upstreamConn.Close()
+		redialOffer := canonicalRedialALPNOffer(clientALPN)
+		upstreamConn, upstreamSnap, err = dialUpstreamWithALPN(ctx, target, host,
+			redialOffer, hostTLS.insecureSkip, hostTLS.clientCert, hostTLS.rootCAs, cfg)
+		if err != nil {
+			_ = clientTLSConn.Close()
+			return nil, nil, nil, err
+		}
+		if upstreamSnap != nil {
+			upstreamALPN = upstreamSnap.ALPN
+		}
+	}
+
+	// Step 5: cache the learned upstream pick. Single string per Resolved
+	// Decision #13 / User-Confirmed Decision #U2 — schema unchanged.
+	if cfg.ALPNCache != nil {
+		cacheKey := ALPNCacheKeyFromConfig(target, cfg)
+		cfg.ALPNCache.Set(cacheKey, upstreamALPN)
+	}
+
+	// USK-793: source of truth for routing is the client-negotiated ALPN
+	// (which here equals upstream's pick by construction or by post-redial
+	// reality).
+	route, routeErr := alpnRoute(clientALPN)
+	if routeErr != nil {
+		_ = upstreamConn.Close()
+		_ = clientTLSConn.Close()
+		return nil, nil, nil, fmt.Errorf("connector: %s: %w", target, routeErr)
+	}
+
+	slog.Debug("connector: sniff-first ALPN routed",
+		"target", target, "conn_id", connID,
+		"peeked_alpn", peeked.ALPN,
+		"client_alpn", clientALPN, "upstream_alpn", upstreamALPN,
+		"route", route,
+	)
+
+	return buildStackFromRoute(ctx, clientTLSConn, upstreamConn, target, connID, route, clientSnap, upstreamSnap, hostTLS, cfg)
+}
+
 // buildPoolHitFastPath constructs the ConnectionStack without dialing
 // upstream — the cached h2 Layer is reused as-is. The caller has already
 // obtained pooled via cfg.HTTP2Pool.Get (inUseCount is incremented);
@@ -1089,13 +1295,19 @@ func buildCacheMissPath(
 // healthy — Evict would destroy a reusable connection for an unrelated
 // client-side problem).
 //
-// USK-793: the client MITM offers both [h2, http/1.1] so a client that
-// cannot speak h2 (e.g. curl --http1.1) negotiates a non-empty protocol
-// the proxy can dispatch on. If the client picks anything other than h2,
-// the pool reservation is released (Put, not Evict — the cached Layer is
-// healthy) and we fall back to a fresh ALPN-routed dial that re-negotiates
-// upstream with http/1.1 to match the client. The pooled h2 Layer remains
-// available for the next CONNECT whose client _can_ speak h2.
+// USK-793 (legacy / fallback): the client MITM offers both [h2, http/1.1]
+// so a client that cannot speak h2 (e.g. curl --http1.1) negotiates a
+// non-empty protocol the proxy can dispatch on. If the client picks
+// anything other than h2, the pool reservation is released (Put, not
+// Evict — the cached Layer is healthy) and we fall back to a fresh
+// ALPN-routed dial that re-negotiates upstream with http/1.1 to match
+// the client.
+//
+// USK-997: when peeked.ALPN is non-empty AND contains h2 (the caller
+// already gated for this), the client MITM offers only [h2] — the sniff
+// confirmed the client speaks it, so the legacy widening is unnecessary
+// and counter-productive (it would let a buggy client pick http/1.1
+// after explicitly advertising h2 in its sniffed list).
 //
 // Returns (stack, clientSnap, upstreamSnap, err). The upstreamSnap is read
 // from pooled.EnvelopeContextTemplate() — authoritative per USK-619 (the
@@ -1107,8 +1319,15 @@ func buildPoolHitFastPath(
 	pooled *http2.Layer,
 	poolKey pool.PoolKey,
 	cfg *BuildConfig,
+	peeked ClientHelloPeek,
 ) (*ConnectionStack, *envelope.TLSSnapshot, *envelope.TLSSnapshot, error) {
 	clientOffers := clientALPNOffersForUpstream(ALPNProtocolH2)
+	// USK-997: when the client's offer list is in hand and includes h2,
+	// narrow to [h2] only — the sniff already confirmed h2 is acceptable
+	// to the client, no need to widen.
+	if peeked.ALPN != nil && alpnListContains(peeked.ALPN, ALPNProtocolH2) {
+		clientOffers = []string{ALPNProtocolH2}
+	}
 
 	clientTLSConn, clientSnap, err := performClientMITM(ctx, clientConn, host, clientOffers, cfg)
 	if err != nil {

@@ -299,6 +299,19 @@ func connectShouldRunTLSMITM(ctx context.Context, cfg CONNECTHandlerConfig, pc *
 // the resulting stack to OnStack / OnHTTP2Stack. Shared by CONNECT and SOCKS5
 // handlers so the TLS branch behaves identically across tunnel entry points.
 //
+// USK-997: before delegating to BuildConnectionStack this function peeks
+// the client's first TLS ClientHello (non-consuming, bounded by
+// clientHelloPeekTimeout / clientHelloPeekSize) and extracts SNI + ALPN
+// list. The result is threaded through BuildConnectionStack as
+// ClientHelloPeek so the sniff-first MITM path can forward the client's
+// ALPN list verbatim to upstream and advertise upstream's pick back to
+// the client. Peek failures (timeout, non-TLS, > 4 KiB, ECH) fall through
+// silently — BuildConnectionStack sees an empty ClientHelloPeek and
+// routes through the legacy cache/miss/pool fallbacks.
+//
+// BuildConfig.DisableClientHelloPeek (test-only) skips the peek entirely
+// so integration tests can exercise the fallback path.
+//
 // On stack-build failure, onUpstreamTLSError (when non-nil) is invoked with
 // the CONNECT/SOCKS5 authority and the underlying error so callers
 // (proxybuild) can persist a state="error" flow.Stream — the USK-784 parity
@@ -315,7 +328,14 @@ func runTLSMITM(
 	onUpstreamTLSError OnUpstreamTLSErrorFunc,
 	logger *slog.Logger,
 ) {
-	stack, clientSnap, upstreamSnap, err := BuildConnectionStack(ctx, pc, target, buildCfg)
+	// USK-997: sniff-first peek. Test-only DisableClientHelloPeek bypasses.
+	var peeked ClientHelloPeek
+	if buildCfg == nil || !buildCfg.DisableClientHelloPeek {
+		sni, alpn := peekClientHelloSNIAndALPN(pc)
+		peeked = ClientHelloPeek{SNI: sni, ALPN: alpn}
+	}
+
+	stack, clientSnap, upstreamSnap, err := BuildConnectionStack(ctx, pc, target, buildCfg, peeked)
 	if err != nil {
 		// Upstream-side / stack-build failures land here. Clients see a
 		// closed tunnel; without a recorded Stream the failure is invisible

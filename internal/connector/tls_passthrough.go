@@ -124,20 +124,6 @@ func (f PassthroughObserverFunc) OnComplete(ctx context.Context, obs Passthrough
 	}
 }
 
-// passthroughSNIPeekTimeout bounds how long the connector waits for the
-// client's TLS ClientHello before starting the relay. The value is
-// generous on purpose — clients that connect through a high-latency link
-// or take a moment to send the first record must not be denied a flow
-// recording. If the deadline fires the relay still proceeds; the audit
-// flow simply records SNI="".
-const passthroughSNIPeekTimeout = 5 * time.Second
-
-// passthroughSNIPeekSize is the initial peek window the connector uses to
-// extract SNI from the client ClientHello. Real ClientHellos with the
-// modern extension set easily fit in 4 KiB; clients that exceed it are
-// recorded with SNI="" and the relay proceeds normally.
-const passthroughSNIPeekSize = 4096
-
 // RelayTLSPassthrough performs a bidirectional raw TCP relay between the
 // client connection and an upstream connection dialed to the given target.
 // No TLS termination occurs — the proxy forwards the client's encrypted
@@ -253,7 +239,7 @@ func relayTLSPassthroughWithObserver(
 // are logged at Debug since they are routine on the wire (TLS 1.2 fallbacks,
 // TLS-over-something exotic, etc.).
 //
-// The peek is bounded by passthroughSNIPeekTimeout. Resetting the read
+// The peek is bounded by clientHelloPeekTimeout. Resetting the read
 // deadline after the peek is critical: bufio.Reader.Peek reads from the
 // underlying conn under the deadline, and leaving the deadline armed
 // would cause the relay's first io.Copy read to fail with a deadline
@@ -263,7 +249,7 @@ func peekClientHelloSNI(clientConn net.Conn) string {
 	if !ok {
 		return ""
 	}
-	if err := pc.SetReadDeadline(time.Now().Add(passthroughSNIPeekTimeout)); err != nil {
+	if err := pc.SetReadDeadline(time.Now().Add(clientHelloPeekTimeout)); err != nil {
 		slog.Debug("connector: passthrough SNI peek deadline arm failed", "error", err)
 		return ""
 	}
@@ -273,7 +259,7 @@ func peekClientHelloSNI(clientConn net.Conn) string {
 		_ = pc.SetReadDeadline(time.Time{})
 	}()
 
-	buf, err := pc.Peek(passthroughSNIPeekSize)
+	buf, err := pc.Peek(clientHelloPeekSize)
 	if err != nil && len(buf) == 0 {
 		// True peek failure (timeout / EOF / closed). Audit flow records
 		// SNI="" and the relay still runs (the underlying io.Copy will
