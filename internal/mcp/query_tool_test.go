@@ -896,6 +896,59 @@ func TestQuery_Status_H1UpstreamMetrics_NoManager(t *testing.T) {
 	}
 }
 
+// TestQuery_Status_H2UpstreamMetrics_Empty mirrors the H1 test for
+// the USK-1001 h2 counter snapshot. With no upstream activity all
+// counters are zero but the field itself is populated (Manager IS
+// bound) so the AI agent can distinguish "no Manager wired" (field
+// absent) from "Manager wired, no churn yet" (field present, counters
+// zero).
+func TestQuery_Status_H2UpstreamMetrics_Empty(t *testing.T) {
+	t.Parallel()
+	store := newTestStore(t)
+	manager := newTestProxybuildManager(t)
+	if err := manager.Start(context.Background(), "127.0.0.1:0"); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	cs := setupQueryStatusTestSession(t, store, manager)
+
+	result := callQuery(t, cs, queryInput{Resource: "status"})
+	if result.IsError {
+		t.Fatalf("expected success: %v", result.Content)
+	}
+
+	var out queryStatusResult
+	unmarshalQueryResult(t, result, &out)
+
+	if out.H2Upstream == nil {
+		t.Fatal("h2_upstream = nil; want non-nil snapshot when Manager is bound")
+	}
+	want := proxybuild.H2UpstreamMetricsSnapshot{}
+	if *out.H2Upstream != want {
+		t.Errorf("h2_upstream = %+v, want %+v (all zero)", *out.H2Upstream, want)
+	}
+}
+
+// TestQuery_Status_H2UpstreamMetrics_NoManager mirrors the H1 test —
+// the h2_upstream field is OMITTED when no Manager is bound.
+func TestQuery_Status_H2UpstreamMetrics_NoManager(t *testing.T) {
+	t.Parallel()
+	store := newTestStore(t)
+	cs := setupQueryTestSession(t, store)
+
+	result := callQuery(t, cs, queryInput{Resource: "status"})
+	if result.IsError {
+		t.Fatalf("expected success: %v", result.Content)
+	}
+
+	var out queryStatusResult
+	unmarshalQueryResult(t, result, &out)
+
+	if out.H2Upstream != nil {
+		t.Errorf("h2_upstream = %+v, want nil (no Manager bound)", *out.H2Upstream)
+	}
+}
+
 // --- Test: config resource ---
 
 func TestQuery_Config_Default(t *testing.T) {

@@ -138,7 +138,7 @@ func TestRedialChain_PrewarmFiresOnWake(t *testing.T) {
 	_ = pooledPeer.Close()
 	awaitShutdown(t, pooled)
 
-	chain := newRedialChain()
+	chain := newRedialChain(nil)
 	// Manually seed the chain head with pooled (mirrors what
 	// selectUpstreamForDial would do on first reactive redial).
 	chain.layers = append(chain.layers, pooled)
@@ -205,7 +205,7 @@ func TestRedialChain_PrewarmDedupsOnRapidWakeBursts(t *testing.T) {
 		return fresh, nil
 	}
 
-	chain := newRedialChain()
+	chain := newRedialChain(nil)
 	chain.layers = append(chain.layers, pooled)
 	chain.current.Store(pooled)
 
@@ -253,7 +253,7 @@ func TestRedialChain_PrewarmDedupsOnRapidWakeBursts(t *testing.T) {
 // termination via ctx.Done(). When the CONNECT context cancels, the
 // worker exits without leaking goroutines.
 func TestRedialChain_PrewarmWorkerExitsCleanlyOnCtxCancel(t *testing.T) {
-	chain := newRedialChain()
+	chain := newRedialChain(nil)
 	// dialFn never fires because we don't tickle wake.
 	redialFn := func(_ context.Context, _ string, _ *http2.Layer, _ int) (*http2.Layer, error) {
 		t.Error("redialFn must not be called when wake is never tickled")
@@ -302,7 +302,7 @@ func TestRedialChain_PrewarmFailedDialKeepsWorkerAlive(t *testing.T) {
 		return nil, dialErr
 	}
 
-	chain := newRedialChain()
+	chain := newRedialChain(nil)
 	chain.layers = append(chain.layers, pooled)
 	chain.current.Store(pooled)
 
@@ -354,7 +354,7 @@ func TestRedialChain_PrewarmFailedDialKeepsWorkerAlive(t *testing.T) {
 //  3. Worker drains wake, calls redialFn (gated), returns fresh2.
 //  4. Assert chain.current swaps to fresh2 before any selectUpstreamForDial.
 func TestRedialChain_PrewarmFiresViaRealGoAwayObserver(t *testing.T) {
-	chain := newRedialChain()
+	chain := newRedialChain(nil)
 
 	// Pre-mint fresh2 up front so we don't race on assignment inside the
 	// worker goroutine.
@@ -426,7 +426,7 @@ func TestRedialChain_PrewarmFiresViaRealGoAwayObserver(t *testing.T) {
 // is technically canceled (it's the CONNECT-exit defer); the worker
 // must respect prewarmDone in its select.
 func TestRedialChain_CloseAllExitsWorkerEvenWithoutCtxCancel(t *testing.T) {
-	chain := newRedialChain()
+	chain := newRedialChain(nil)
 	redialFn := func(_ context.Context, _ string, _ *http2.Layer, _ int) (*http2.Layer, error) {
 		t.Error("redialFn must not fire when wake is never tickled")
 		return nil, errors.New("unexpected dial")
@@ -455,7 +455,7 @@ func TestRedialChain_CloseAllExitsWorkerEvenWithoutCtxCancel(t *testing.T) {
 // (which would panic with "close of closed channel"). Mirrors the
 // USK-991 idempotency test of closeAll's layer-close pass.
 func TestRedialChain_CloseAllIsIdempotent(t *testing.T) {
-	chain := newRedialChain()
+	chain := newRedialChain(nil)
 
 	// Run a second time after the worker has exited. closeAll wraps the
 	// close(prewarmDone) in sync.Once so the second call is a no-op.
@@ -505,7 +505,7 @@ func TestRedialChain_PrewarmRespectsCtxCancelMidDial(t *testing.T) {
 		return fresh, nil
 	}
 
-	chain := newRedialChain()
+	chain := newRedialChain(nil)
 	chain.layers = append(chain.layers, pooled)
 	chain.current.Store(pooled)
 
@@ -559,7 +559,7 @@ func TestRedialChain_PrewarmRespectsCtxCancelMidDial(t *testing.T) {
 // buildOnHTTP2Stack (not on redialChain itself), this test asserts on
 // the assembled production closure shape by recreating it.
 func TestRedialChain_ObserverGatesByCurrentHead(t *testing.T) {
-	chain := newRedialChain()
+	chain := newRedialChain(nil)
 	// We construct two fresh Layers: layerA and layerB. layerB becomes
 	// the current head; layerA's observer fires after the swap and must
 	// NOT tickle wake.
@@ -611,7 +611,7 @@ func TestRedialChain_ObserverGatesByCurrentHead(t *testing.T) {
 // the rapid-burst dedup tested in
 // TestRedialChain_PrewarmDedupsOnRapidWakeBursts.
 func TestRedialChain_TickleWakeCapacityOne(t *testing.T) {
-	chain := newRedialChain()
+	chain := newRedialChain(nil)
 	// 3 tickles back-to-back — only the first should buffer.
 	chain.tickleWake()
 	chain.tickleWake()
@@ -639,7 +639,7 @@ func TestRedialChain_TickleWakeCapacityOne(t *testing.T) {
 // — we don't need a "calling it twice panics" invariant (the worker
 // API is internal and only called by buildOnHTTP2Stack).
 func TestRedialChain_PrewarmWorkerExitsViaCloseAllAfterIdle(t *testing.T) {
-	chain := newRedialChain()
+	chain := newRedialChain(nil)
 	redialFn := func(_ context.Context, _ string, _ *http2.Layer, _ int) (*http2.Layer, error) {
 		t.Error("redialFn must not fire when wake is never tickled")
 		return nil, errors.New("unexpected dial")
@@ -682,7 +682,7 @@ type stubWorkerHarness struct {
 func newStubWorkerHarness(t *testing.T) *stubWorkerHarness {
 	t.Helper()
 	h := &stubWorkerHarness{
-		chain:     newRedialChain(),
+		chain:     newRedialChain(nil),
 		dialReady: make(chan struct{}, 8),
 		dialNext:  make(chan *http2.Layer, 8),
 		t:         t,
@@ -794,7 +794,7 @@ func TestRedialChain_PrewarmAndReactiveCooperate(t *testing.T) {
 //  4. Inject a real GOAWAY into pooled.
 //  5. Assert worker dials → chain.current swaps to fresh.
 func TestRedialChain_PrewarmFiresOnPooledChain0GoAway(t *testing.T) {
-	chain := newRedialChain()
+	chain := newRedialChain(nil)
 
 	// Pre-mint fresh up front so we don't race on assignment inside the
 	// worker goroutine.
@@ -881,7 +881,7 @@ func TestRedialChain_PrewarmFiresOnPooledChain0GoAway(t *testing.T) {
 // This mirrors TestRedialChain_ObserverGatesByCurrentHead but for the
 // chain[0] (pooled) observer closure produced by buildOnHTTP2Stack.
 func TestRedialChain_PrewarmPooledObserverGatedByHeadAfterSwap(t *testing.T) {
-	chain := newRedialChain()
+	chain := newRedialChain(nil)
 
 	pooled, pooledPeer := dialPeerH2Layer(t)
 	defer pooled.Close()

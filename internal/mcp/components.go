@@ -278,6 +278,13 @@ type proxyManager interface {
 	// query(resource:"status") tool consumes this to populate the
 	// `h1_upstream` field on the status result.
 	H1UpstreamMetrics() proxybuild.H1UpstreamMetricsSnapshot
+
+	// H2UpstreamMetrics surfaces the USK-991 / USK-992 / USK-993 /
+	// USK-1001 HTTP/2 upstream redial / refused-retry counter snapshot
+	// (h1 parity). Returns the zero snapshot when no Manager is bound.
+	// The MCP query(resource:"status") tool consumes this to populate
+	// the `h2_upstream` field on the status result.
+	H2UpstreamMetrics() proxybuild.H2UpstreamMetricsSnapshot
 }
 
 // ListenerStatus is the mcp-package shape of per-listener status used by

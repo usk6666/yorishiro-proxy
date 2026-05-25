@@ -79,6 +79,17 @@ type ManagerConfig struct {
 	// working snapshot accessor; they just won't see counters from any
 	// listener built via a Deps that omitted the matching field.
 	H1UpstreamMetrics *H1UpstreamMetrics
+
+	// H2UpstreamMetrics is the Manager-level USK-1001 counter set —
+	// h1 parity for the HTTP/2 upstream redial / refused-retry surface.
+	// When non-nil, [Manager.H2UpstreamMetrics] returns a snapshot of
+	// these counters; production wiring threads the SAME pointer into
+	// every [Deps.H2UpstreamMetrics] so all per-CONNECT chains emit
+	// into the same struct. nil constructs a fresh empty counter set
+	// inside NewManager — callers that omit the field still get a
+	// working snapshot accessor; they just won't see counters from any
+	// listener built via a Deps that omitted the matching field.
+	H2UpstreamMetrics *H2UpstreamMetrics
 }
 
 // Manager orchestrates one or more named live Stacks. It exposes
@@ -133,6 +144,14 @@ type Manager struct {
 	// [Manager.H1UpstreamMetrics] for the snapshot accessor and
 	// internal/proxybuild/h1_metrics.go for the schema.
 	h1Upstream *H1UpstreamMetrics
+
+	// h2Upstream collects USK-991 + USK-992 + USK-993 + USK-1001
+	// observability counters for the HTTP/2 upstream redial /
+	// refused-retry surface. Same scoping rules as h1Upstream — one
+	// per Manager, threaded through every per-CONNECT redialChain via
+	// Deps. See [Manager.H2UpstreamMetrics] for the snapshot accessor
+	// and internal/proxybuild/h2_metrics.go for the schema.
+	h2Upstream *H2UpstreamMetrics
 }
 
 // upstreamProxyRotationEntry pairs the operator-supplied template
@@ -164,12 +183,18 @@ func NewManager(cfg ManagerConfig) (*Manager, error) {
 	if h1Metrics == nil {
 		h1Metrics = NewH1UpstreamMetrics()
 	}
+	// USK-1001: same singleton/fallback pattern for the h2 counter set.
+	h2Metrics := cfg.H2UpstreamMetrics
+	if h2Metrics == nil {
+		h2Metrics = NewH2UpstreamMetrics()
+	}
 	return &Manager{
 		logger:     logger,
 		factory:    cfg.StackFactory,
 		buildCfg:   cfg.BuildConfig,
 		listeners:  make(map[string]*listenerEntry),
 		h1Upstream: h1Metrics,
+		h2Upstream: h2Metrics,
 	}, nil
 }
 
@@ -193,6 +218,31 @@ func (m *Manager) H1UpstreamMetrics() H1UpstreamMetricsSnapshot {
 	// reassigned, so a lock is unnecessary for the pointer read. The
 	// snapshot itself uses atomic Loads inside.
 	return m.h1Upstream.Snapshot()
+}
+
+// H2UpstreamMetrics returns a snapshot of the USK-991 / USK-992 /
+// USK-993 / USK-1001 HTTP/2 upstream redial counters maintained under
+// this Manager. The snapshot is a value type so callers may retain it
+// safely; subsequent increments do not back-mutate the returned
+// struct.
+//
+// The MCP query(resource:"status") tool surfaces these counters to
+// AI agents under the `h2_upstream` field. The counter set matches
+// the design review schema (3 stale-detect counters + 3 redial
+// triggers + 3 redial-failed triggers + 3 retry outcomes +
+// chain_generation gauge family — 12 counters + 2 gauges, mirroring
+// the h1 14-field shape).
+//
+// Shared-seam extraction with H1UpstreamMetrics is deferred to a
+// follow-up Issue per memory `feedback_shared_seam_hardcoded_flag` —
+// once both protocols have counters of identical shape we can lift
+// them into a shared file without baking h1-only assumptions into
+// the seam.
+func (m *Manager) H2UpstreamMetrics() H2UpstreamMetricsSnapshot {
+	// h2Upstream is set at construction by NewManager and never
+	// reassigned, so a lock is unnecessary for the pointer read. The
+	// snapshot itself uses atomic Loads inside.
+	return m.h2Upstream.Snapshot()
 }
 
 // Start is shorthand for StartNamed(ctx, DefaultListenerName, listenAddr).
