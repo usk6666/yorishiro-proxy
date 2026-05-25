@@ -1,3 +1,31 @@
+// ALPN routing helpers.
+//
+// Two flows coexist after USK-997:
+//
+//	Sniff-first MITM (primary, USK-997)
+//	  client ClientHello peek → forward client ALPN list verbatim to
+//	  upstream → upstream picks → MITM advertise = [upstream pick]
+//	  → client necessarily picks the same → end-to-end single ALPN.
+//	  mitmAdvertiseFromUpstreamPick builds the single-element list.
+//
+//	Legacy speculate-then-redial (fallback only)
+//	  Used when the ClientHello peek fails (timeout, non-TLS, ECH,
+//	  > 4 KiB CH, or test opt-out via BuildConfig.DisableClientHelloPeek):
+//	    cache hit → MITM offer HTTP-family superset → upstream
+//	      offered the client's pick → mismatch refresh
+//	    cache miss → upstream offer [h2, http/1.1] → MITM offer
+//	      client-supportable widening → mismatch redial
+//	  defaultALPNOffer / clientALPNOffersForUpstream /
+//	  canonicalRedialALPNOffer / clientALPNMatchesUpstream are reachable
+//	  only in this fallback path; their USK-793 / USK-884 history is
+//	  orthogonal to the sniff-first flow (which never widens past
+//	  upstream's authoritative pick).
+//
+// MITM Principle #1 (CLAUDE.md): the ALPN list is forwarded to upstream
+// in the client's wire order, byte-identical. Do not sort, dedup, or
+// case-normalise — upstream selection depends on the offer list being
+// the exact bytes the client sent.
+
 package connector
 
 import (
@@ -30,14 +58,62 @@ func alpnRoute(negotiatedALPN string) (string, error) {
 	}
 }
 
-// defaultALPNOffer is the ALPN list offered to upstream on cache miss.
-// We offer both h2 and http/1.1 to learn the server's preference.
-// On cache hit, only the cached ALPN is offered.
+// defaultALPNOffer is the ALPN list offered to upstream on cache miss
+// in the legacy fallback path. We offer both h2 and http/1.1 to learn
+// the server's preference; on cache hit, only the cached ALPN is offered.
+//
+// USK-997: reached only when the client's ClientHello peek failed
+// (timeout / non-TLS / > 4 KiB / ECH / test opt-out via
+// BuildConfig.DisableClientHelloPeek). The sniff-first primary path
+// forwards the client's offered ALPN list verbatim instead.
 var defaultALPNOffer = []string{ALPNProtocolH2, ALPNProtocolHTTP11}
+
+// mitmAdvertiseFromUpstreamPick builds the ALPN list the MITM
+// (client-facing) TLS server should advertise after upstream's
+// authoritative pick has been learned by the sniff-first flow
+// (USK-997). The returned slice has at most one element:
+//
+//   - upstreamALPN == "": returns nil. Go's crypto/tls then omits the
+//     ALPN extension entirely from the ServerHello, matching the
+//     observed upstream reality (servers that did not negotiate ALPN
+//     must not be impersonated as having done so).
+//   - upstreamALPN non-empty: returns []string{upstreamALPN}. The
+//     client can only pick this single value, so the post-handshake
+//     client ALPN equals upstream's pick by construction — no
+//     mismatch-redial dance.
+//
+// This is the sniff-first-only sibling of clientALPNOffersForUpstream
+// (the legacy widening helper retained for the fallback path).
+func mitmAdvertiseFromUpstreamPick(upstreamALPN string) []string {
+	if upstreamALPN == "" {
+		return nil
+	}
+	return []string{upstreamALPN}
+}
+
+// alpnListContains reports whether protocol appears anywhere in offers,
+// using byte-exact comparison. Used by the sniff-first H2 pool fast path
+// to decide whether the client's offered list permits the cached h2
+// Layer (USK-997). nil/empty offers return false.
+func alpnListContains(offers []string, protocol string) bool {
+	for _, o := range offers {
+		if o == protocol {
+			return true
+		}
+	}
+	return false
+}
 
 // clientALPNOffersForUpstream returns the ALPN list the proxy should
 // advertise to the client during MITM TLS handshake, given what we know
 // about the upstream's selected ALPN.
+//
+// USK-997: reachable only via the legacy fallback path (cache hit /
+// cache miss / pool fast-path branches in buildALPNRoutedStack when the
+// ClientHello peek did not return an ALPN list — see the file-level
+// flow diagram). The sniff-first primary path advertises a single
+// element list via mitmAdvertiseFromUpstreamPick instead and never
+// invokes this helper.
 //
 // USK-793: the proxy MUST offer a superset of what the client might want,
 // not only the upstream's choice. Otherwise a client that only speaks
@@ -107,9 +183,12 @@ func clientALPNOffersForUpstream(upstreamALPN string) []string {
 }
 
 // clientALPNMatchesUpstream reports whether a client-negotiated ALPN
-// produces the same dispatch route as upstream's. Used by
-// buildCacheMissPath / buildCacheHitPath to decide whether to re-dial
-// upstream so the inner stack stays single-protocol end-to-end.
+// produces the same dispatch route as upstream's. Used by the legacy
+// fallback paths (buildCacheMissPath / buildCacheHitPath) to decide
+// whether to re-dial upstream so the inner stack stays single-protocol
+// end-to-end, and by the sniff-first defense-in-depth assert in
+// buildSniffFirstStack (which should never fire on the happy path
+// because mitmAdvertiseFromUpstreamPick narrows to a single element).
 //
 // An empty client ALPN matches an empty or "http/1.1" upstream ALPN
 // because alpnRoute collapses both to "http1".
@@ -124,6 +203,11 @@ func clientALPNMatchesUpstream(clientALPN, upstreamALPN string) bool {
 // client ALPN (no offer / no overlap) to ["http/1.1"] because that is
 // the protocol Go's TLS server falls back to when no overlap exists,
 // and the only protocol the proxy can actually serve in that mode.
+//
+// USK-997: invoked by the legacy fallback paths (buildCacheMissPath
+// mismatch branch, buildCacheHitPath redial setup) and by the
+// sniff-first defense-in-depth assert in buildSniffFirstStack when the
+// MITM somehow produced a client ALPN different from upstream's pick.
 func canonicalRedialALPNOffer(clientALPN string) []string {
 	if clientALPN == "" {
 		return []string{ALPNProtocolHTTP11}

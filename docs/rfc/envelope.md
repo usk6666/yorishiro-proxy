@@ -557,6 +557,38 @@ package grpclayer
 func Wrap(stream layer.Channel, firstHeaders *envelope.Envelope, role Role) layer.Channel
 ```
 
+#### 3.3.3 MITM ALPN Transparency (Sniff-First)
+
+A subtle wire-faithfulness requirement applies to the TLS MITM path: when the proxy
+terminates the client's TLS in order to inspect L7 traffic, the ALPN extension on
+both wires must reflect the upstream's authoritative pick — not a guess the proxy
+made up speculatively. RFC 7301 servers like `demo1.nextcloud.com` (USK-995) violate
+§3.2 by returning `http/1.1` even for a solo `h2` ALPN offer; the proxy must propagate
+that wrong pick transparently rather than impose its own opinion, otherwise it injects
+a protocol mismatch the wire never had.
+
+The sniff-first MITM flow (USK-997, `internal/connector/connect_handler.go runTLSMITM` →
+`stack_builder.go buildSniffFirstStack`):
+
+1. CONNECT/SOCKS5 200 → peek the inner ClientHello via `peekClientHelloSNIAndALPN`
+   (non-consuming, bounded by `clientHelloPeekTimeout`/`clientHelloPeekSize`).
+2. Forward the client's ALPN list to upstream **verbatim** (`dialUpstreamWithALPN`
+   receives `peeked.ALPN` directly — no sort, no dedup, no case fold; MITM
+   Principle #1).
+3. Observe upstream's negotiated pick on the resulting `TLSSnapshot.ALPN`.
+4. Advertise that pick as a single-element ALPN list to the MITM client
+   (`mitmAdvertiseFromUpstreamPick` returns `[upstreamPick]`, or `nil` when
+   upstream did not negotiate ALPN so the proxy omits the extension entirely).
+5. The client necessarily picks the same single value → end-to-end single-ALPN
+   holds by construction; the legacy speculate-then-redial dance is reachable
+   only on peek failure (timeout, non-TLS, ECH, ClientHello > 4 KiB).
+
+The pre-sniff widening helpers (`clientALPNOffersForUpstream`,
+`canonicalRedialALPNOffer`, `clientALPNMatchesUpstream`, `defaultALPNOffer`)
+remain as fallback-only safety nets when the peek did not return an ALPN
+list. Their USK-793 / USK-884 history is orthogonal to the sniff-first
+flow, which never widens past upstream's authoritative pick.
+
 ### 3.4 ConnectionStack
 
 A per-connection runtime object representing the layer stack. Held by the Connector while the connection is alive; owned by Session for the duration of `RunSession`.

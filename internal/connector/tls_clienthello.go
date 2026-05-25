@@ -3,7 +3,25 @@ package connector
 import (
 	"errors"
 	"fmt"
+	"time"
 )
+
+// clientHelloPeekTimeout bounds how long the connector waits for the
+// client's TLS ClientHello before falling back to a non-peek path. The
+// value is generous on purpose — clients that connect through a
+// high-latency link or take a moment to send the first record must not
+// be denied a SNI / ALPN sniff. If the deadline fires callers proceed
+// with the pre-USK-997 fallback (passthrough records SNI=""; sniff-first
+// MITM falls through to the existing cache/miss/pool paths).
+const clientHelloPeekTimeout = 5 * time.Second
+
+// clientHelloPeekSize is the initial peek window the connector uses to
+// extract SNI and ALPN from the client ClientHello. Real ClientHellos with
+// the modern extension set easily fit in 4 KiB; clients that exceed it are
+// handled by the appropriate fallback path. Also a Slowloris safety knob:
+// peeking up to 4 KiB bounds the unauthenticated buffer the proxy holds
+// before either starting the relay or routing through the fallback.
+const clientHelloPeekSize = 4096
 
 // errClientHelloIncomplete is returned by parseClientHelloSNI when the peek
 // buffer does not yet contain a complete ClientHello extension list. The

@@ -15,8 +15,11 @@ import (
 	"time"
 )
 
-// TestCONNECT_ClientHTTP1Upstream_H2_NoMisdispatch is the regression guard
-// for USK-793.
+// TestCONNECT_ClientHTTP1Upstream_H2_NoMisdispatch_Fallback is the
+// regression guard for USK-793 exercised on the legacy fallback path.
+// USK-997 made sniff-first MITM the primary route; this test keeps
+// coverage of the pre-sniff widening + mismatch-redial flow by opting
+// out of the peek via fullListenerOpts.disableClientHelloPeek.
 //
 // Setup: an upstream TLS server that advertises both "h2" and "http/1.1"
 // ALPN protocols (with "h2" first, so it would be picked when the proxy
@@ -39,7 +42,7 @@ import (
 // mismatch and re-dials upstream with "http/1.1" so the inner stack
 // is single-protocol end-to-end. Round-trip succeeds; flow is recorded
 // with state=complete, protocol=http, scheme=https.
-func TestCONNECT_ClientHTTP1Upstream_H2_NoMisdispatch(t *testing.T) {
+func TestCONNECT_ClientHTTP1Upstream_H2_NoMisdispatch_Fallback(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -52,7 +55,9 @@ func TestCONNECT_ClientHTTP1Upstream_H2_NoMisdispatch(t *testing.T) {
 	defer upstreamLn.Close()
 	target := upstreamLn.Addr().String()
 
-	proxyAddr, store, wg := startFullListenerProxy(t, ctx, fullListenerOpts{})
+	proxyAddr, store, wg := startFullListenerProxy(t, ctx, fullListenerOpts{
+		disableClientHelloPeek: true,
+	})
 
 	wg.Add(1)
 	rawReq := fmt.Sprintf(
@@ -123,11 +128,12 @@ func TestCONNECT_ClientHTTP1Upstream_H2_NoMisdispatch(t *testing.T) {
 	}
 }
 
-// TestCONNECT_ClientH2Upstream_H2_StillWorks is the positive control for
-// USK-793: a client offering both "h2" and "http/1.1" against an upstream
-// that prefers "h2" must still negotiate h2 end-to-end. The test guards
-// against the "fix everything to h1" regression mode.
-func TestCONNECT_ClientH2Upstream_H2_StillWorks(t *testing.T) {
+// TestCONNECT_ClientH2Upstream_H2_StillWorks_Fallback is the positive
+// control for USK-793 on the legacy fallback path. USK-997 moved
+// sniff-first to the primary route; this variant continues to verify
+// the pre-sniff widening behaviour. The test guards against the
+// "fix everything to h1" regression mode on the fallback flow.
+func TestCONNECT_ClientH2Upstream_H2_StillWorks_Fallback(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -142,7 +148,9 @@ func TestCONNECT_ClientH2Upstream_H2_StillWorks(t *testing.T) {
 	defer upstreamLn.Close()
 	target := upstreamLn.Addr().String()
 
-	proxyAddr, _, wg := startFullListenerProxy(t, ctx, fullListenerOpts{})
+	proxyAddr, _, wg := startFullListenerProxy(t, ctx, fullListenerOpts{
+		disableClientHelloPeek: true,
+	})
 
 	// Client offers both protocols. Should pick h2 (proxy's first offer
 	// matches upstream's first offer).
