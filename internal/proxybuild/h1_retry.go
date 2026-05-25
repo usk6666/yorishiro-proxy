@@ -122,12 +122,9 @@ func (r *retryingUpstreamChannel) Send(ctx context.Context, env *envelope.Envelo
 	if !errors.As(err, &stale) || !stale.ReplaySafe {
 		return err
 	}
-	if r.retried.Load() {
-		return err
-	}
-	// Budget claim. CompareAndSwap so a hypothetical concurrent Send
-	// (not the production shape, but defensive) cannot consume the
-	// budget twice.
+	// Budget claim. CompareAndSwap is the single source of truth for the
+	// one-shot guarantee — a Load fast-path before this would be a no-op
+	// because CAS already short-circuits on the false→true transition.
 	if !r.retried.CompareAndSwap(false, true) {
 		return err
 	}
@@ -137,15 +134,17 @@ func (r *retryingUpstreamChannel) Send(ctx context.Context, env *envelope.Envelo
 
 	freshLayer, derr := r.chain.Redial(ctx)
 	if derr != nil {
-		// Surface the original stale error wrapped so the session
-		// records state=error with the underlying syscall reason
-		// intact; the dial error is annotated for operator triage.
-		return fmt.Errorf("http1: stale-conn redial: %w (after %v)", derr, err)
+		// Surface the original stale error AND the dial error so callers
+		// using errors.As(_, &*http1.StaleUpstreamError{}) can still
+		// reach the original Stage/ReplaySafe diagnostic. errors.Join
+		// keeps both chains reachable; the session records state=error
+		// with both pieces of context intact for operator triage.
+		return fmt.Errorf("http1: stale-conn redial: %w", errors.Join(derr, err))
 	}
 
 	freshCh := freshLayer.OpenExchange()
 	if freshCh == nil {
-		return fmt.Errorf("http1: stale-conn replay: fresh layer closed before OpenExchange (after %v)", err)
+		return fmt.Errorf("http1: stale-conn replay: fresh layer closed before OpenExchange: %w", err)
 	}
 
 	wrapped := freshCh

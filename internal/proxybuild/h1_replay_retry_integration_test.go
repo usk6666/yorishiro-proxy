@@ -349,13 +349,11 @@ func TestHTTP1_NoEnvelopeLossOnRetry(t *testing.T) {
 	}
 }
 
-// TestHTTP1_StaleConn_RetryBudgetOneShot: a wrapper that exhausts its
-// 1-retry budget refuses a second retry. We simulate by setting the
-// flakyConn failCount=1 (one EPIPE) but also forcing the retry path's
-// fresh dial to fail — chain.Redial returns an error. The Send result
-// surfaces a non-nil error (no infinite retry).
-//
-// This pins the "exactly one retry" invariant from the design review.
+// TestHTTP1_StaleConn_RetryBudgetOneShot pins the "exactly one retry"
+// invariant from the design review. After the first EPIPE → retry →
+// succeed cycle, we drive a second Send through a stub inner that
+// surfaces another *StaleUpstreamError{ReplaySafe:true}; the wrapper
+// MUST return it verbatim without calling chain.Redial a second time.
 func TestHTTP1_StaleConn_RetryBudgetOneShot(t *testing.T) {
 	s := startDummyUpstream(t)
 
@@ -373,10 +371,38 @@ func TestHTTP1_StaleConn_RetryBudgetOneShot(t *testing.T) {
 		t.Fatalf("Send 1st: %v", err)
 	}
 
-	// Confirm the retried bool flipped — subsequent Sends are not
-	// auto-retried (one-shot budget per wrapper).
+	// Confirm the retried bool flipped — budget consumed.
 	if !wrapper.retried.Load() {
 		t.Error("wrapper.retried = false after successful retry, want true (budget consumed)")
+	}
+
+	// Snapshot the chain length AFTER the first retry so a stray
+	// second redial would be observable.
+	layersAfterFirst := len(chain.layers)
+
+	// Swap the inner to a stub that returns ReplaySafe=true stale; the
+	// wrapper MUST surface this verbatim because the one-shot budget is
+	// consumed.
+	stale := &http1.StaleUpstreamError{
+		Underlying: syscall.EPIPE,
+		ReplaySafe: true,
+		Stage:      "header",
+	}
+	stub := layer.Channel(&replayStubChannel{sendErr: stale})
+	wrapper.inner.Store(&stub)
+
+	msg := &envelope.HTTPMessage{Method: "GET", Path: "/second", Authority: "example.com"}
+	env := &envelope.Envelope{Protocol: envelope.ProtocolHTTP, Direction: envelope.Send, Message: msg}
+	err := wrapper.Send(context.Background(), env)
+	if err == nil {
+		t.Fatal("Send 2nd: got nil, want StaleUpstreamError verbatim (budget exhausted)")
+	}
+	var stale2 *http1.StaleUpstreamError
+	if !errors.As(err, &stale2) {
+		t.Fatalf("Send 2nd: err = %v (%T), want *StaleUpstreamError verbatim", err, err)
+	}
+	if got := len(chain.layers); got != layersAfterFirst {
+		t.Errorf("chain.layers = %d after second Send; want %d (no second redial)", got, layersAfterFirst)
 	}
 }
 
