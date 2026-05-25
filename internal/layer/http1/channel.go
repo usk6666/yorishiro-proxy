@@ -6,11 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/url"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/google/uuid"
@@ -22,6 +24,176 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/layer/http1/parser"
 	"github.com/usk6666/yorishiro-proxy/internal/pluginv2"
 )
+
+// StaleUpstreamError is returned by [channel.Send] (Receive direction)
+// when an upstream wire Write fails with a classifier-recognised "peer
+// closed the keep-alive connection" error and the request is structurally
+// safe to replay on a fresh upstream Layer (USK-999 / USK-998 Phase 2).
+//
+// The proxybuild HTTP/1.x exchange wrapper inspects this error via
+// [errors.As], consults ReplaySafe, and — when true and the wrapper's
+// 1-retry budget has not been consumed — force-redials the upstream Layer
+// (via h1Chain.Redial) and replays the Send exactly once. Stage tracks
+// where the failed Write happened so the wrapper can refuse replay after
+// any wire-visible body bytes (RFC 9112 §9.5 "client cannot retry a
+// request after observing any response", strengthened to "after any body
+// bytes" because partial body emission desynchronises persistent
+// connections regardless of method idempotency).
+//
+// Defined here (rather than in proxybuild) because the wire-Write classifier
+// lives inside the send-path goroutine and the wrapper must remain a thin
+// adaptor — keeping the type in the http1 package preserves the MITM
+// principle "data-path stays close to its protocol" and matches the way
+// HTTP/2 surfaces refused-stream errors via *layer.StreamError.
+type StaleUpstreamError struct {
+	// Underlying is the original net write error (EPIPE/ECONNRESET/EOF/net.ErrClosed),
+	// possibly wrapped in *net.OpError → *os.SyscallError → syscall.Errno.
+	Underlying error
+	// ReplaySafe reports whether the caller may retry this request after
+	// a fresh upstream redial. False when partial body bytes were already
+	// emitted, when the original body was truncated by MaxRawCaptureSize,
+	// or when the method's idempotency profile disallows replay.
+	ReplaySafe bool
+	// Stage identifies the wire-Write call that failed:
+	//   - "header" — the first Write of the request (request line + headers
+	//     in patched-header / synthetic paths; rawReq.RawBytes in the
+	//     zero-copy fast path, which is header-only).
+	//   - "body"   — a subsequent Write of body bytes (writeOpaqueBody /
+	//     writeBody).
+	Stage string
+}
+
+// Error implements error.
+func (e *StaleUpstreamError) Error() string {
+	return fmt.Sprintf("http1 upstream stale (%s): %v", e.Stage, e.Underlying)
+}
+
+// Unwrap returns the wrapped underlying error so errors.Is / errors.As
+// reach the syscall sentinels in callers' classifiers.
+func (e *StaleUpstreamError) Unwrap() error { return e.Underlying }
+
+// isStaleConnErr reports whether err is a known stale-connection write
+// error class. The four sentinels cover the FIN/RST race window left by
+// USK-998 Phase 1's HealthCheck-then-Write gap:
+//
+//   - syscall.EPIPE — Linux/macOS write after peer FIN (most common).
+//   - syscall.ECONNRESET — peer sent RST mid-write (TCP reset).
+//   - io.EOF — surfaces from some net stacks (rare; defensive).
+//   - net.ErrClosed — local conn already closed (e.g. parser goroutine
+//     observed FIN and Closed before this Send acquired writeMu).
+//
+// io.ErrUnexpectedEOF is deliberately NOT included — that sentinel is a
+// parser-side EOF marker, not a Write classifier; treating it as stale
+// would over-match into the response-read path.
+//
+// errors.Is unwraps *net.OpError → *os.SyscallError → syscall.Errno
+// natively on Linux/macOS, so wrapped forms are detected.
+func isStaleConnErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	return errors.Is(err, syscall.EPIPE) ||
+		errors.Is(err, syscall.ECONNRESET) ||
+		errors.Is(err, io.EOF) ||
+		errors.Is(err, net.ErrClosed)
+}
+
+// replaySafeMethods is the set of HTTP methods whose retry is allowed
+// before any body bytes have been written. PUT/DELETE/TRACE are
+// idempotent per RFC 9110 §9.2.2; GET/HEAD/OPTIONS are safe per §9.2.1.
+//
+// POST and PATCH are excluded (non-idempotent unless an Idempotency-Key
+// is present — Issue body defers that policy to a follow-up).
+//
+// CONNECT is excluded as a transport method (no per-exchange replay
+// semantic; CONNECT tunnels live above this Layer).
+var replaySafeMethods = map[string]struct{}{
+	"GET":     {},
+	"HEAD":    {},
+	"OPTIONS": {},
+	"DELETE":  {},
+	"TRACE":   {},
+	"PUT":     {},
+}
+
+// isReplaySafe decides whether a Send that failed with a stale-conn
+// classifier may be replayed on a fresh upstream Layer.
+//
+// Truth table:
+//
+//	stage="body"                            → false (partial body emitted)
+//	rawReq.RawBodyTruncated == true         → false (cannot reconstruct full body)
+//	method ∈ {GET,HEAD,OPTIONS,DELETE,TRACE}→ true
+//	method == PUT and body buffered/empty   → true (memory []byte, BodyBuffer, or no body)
+//	method == POST/PATCH (any body shape)   → false (no Idempotency-Key v1)
+//	other (CONNECT, custom verbs)           → false
+//
+// "body buffered" means either msg.Body is a memory []byte (replay re-
+// emits it) or msg.BodyBuffer is non-nil (BodyBuffer.Reader returns a
+// fresh independent reader per call — multi-shot replay is wire-byte
+// equivalent). Zero-length bodies are trivially buffered.
+func isReplaySafe(msg *envelope.HTTPMessage, opaque *opaqueHTTP1, stage string) bool {
+	if stage == "body" {
+		return false
+	}
+	if opaque != nil && opaque.rawReq != nil && opaque.rawReq.RawBodyTruncated {
+		return false
+	}
+	if msg == nil {
+		return false
+	}
+	if _, ok := replaySafeMethods[strings.ToUpper(msg.Method)]; !ok {
+		return false
+	}
+	// For PUT specifically the design table requires "body buffered" —
+	// memory []byte or *bodybuf.BodyBuffer. Both BodyBuffer modes (memory
+	// and disk-spilled) are multi-shot per bodybuf.BodyBuffer.Reader().
+	// Empty body (no Body, no BodyBuffer) is trivially replay-safe.
+	return true
+}
+
+// wrapStaleErr translates a wire-Write error into a *StaleUpstreamError
+// when isStaleConnErr matches. Non-stale errors pass through verbatim so
+// the regular error path stays unchanged. msg / opaque / stage drive the
+// ReplaySafe decision.
+//
+// Callers wrap the result with fmt.Errorf("http1: send X: %w", ...) when
+// they would have done so on the original error — that preserves the
+// existing error-text shape AND keeps errors.As(err, &*StaleUpstreamError{})
+// reachable through the wrap.
+func wrapStaleErr(err error, msg *envelope.HTTPMessage, opaque *opaqueHTTP1, stage string) error {
+	if !isStaleConnErr(err) {
+		return err
+	}
+	return &StaleUpstreamError{
+		Underlying: err,
+		ReplaySafe: isReplaySafe(msg, opaque, stage),
+		Stage:      stage,
+	}
+}
+
+// wrapSendBodyStaleErr applies stale-conn classification to an error
+// returned by writeOpaqueBody / writeBody on the request-Send path. The
+// inner write helpers already wrap with fmt.Errorf("http1: …: %w", err),
+// so isStaleConnErr unwraps through that wrap to reach the syscall
+// sentinels. ReplaySafe is forced false (stage="body") — any body byte
+// already on the wire desynchronises persistent connections.
+//
+// When the original error is not a stale sentinel, the wrapped error is
+// returned verbatim so the regular session error path is unchanged.
+func wrapSendBodyStaleErr(err error, msg *envelope.HTTPMessage, opaque *opaqueHTTP1) error {
+	if err == nil {
+		return nil
+	}
+	if !isStaleConnErr(err) {
+		return err
+	}
+	return &StaleUpstreamError{
+		Underlying: err,
+		ReplaySafe: isReplaySafe(msg, opaque, "body"),
+		Stage:      "body",
+	}
+}
 
 // opaqueHTTP1 holds Layer-specific data stored in Envelope.Opaque.
 // Pipeline Steps must not type-assert on this.
@@ -1031,11 +1203,19 @@ func (c *channel) sendRequestOpaque(msg *envelope.HTTPMessage, opaque *opaqueHTT
 		!kvEqual(msg.Headers, opaque.origKV), isBodyChanged(msg, opaque))
 
 	// Zero-copy fast path: nothing changed and we don't need a TE→CL rewrite.
+	// rawReq.RawBytes is header-only; the body flows through writeOpaqueBody
+	// separately. The header Write may hit EPIPE/ECONNRESET in the USK-999
+	// race window (server FIN between HealthCheck and Write) — wrapStaleErr
+	// converts the error into *StaleUpstreamError so the proxybuild retry
+	// wrapper can replay on a fresh upstream Layer.
 	if !d.headersChanged && !d.bodyChanged && !d.rewriteTEToCL && len(rawReq.RawBytes) > 0 {
 		if _, err := c.layer.conn.Write(rawReq.RawBytes); err != nil {
-			return fmt.Errorf("http1: send request raw: %w", err)
+			return fmt.Errorf("http1: send request raw: %w", wrapStaleErr(err, msg, opaque, "header"))
 		}
-		return c.writeOpaqueBody(msg, rawReq.RawBody, rawReq.RawBodyBuffer, d.useRawBody, "request")
+		if err := c.writeOpaqueBody(msg, rawReq.RawBody, rawReq.RawBodyBuffer, d.useRawBody, "request"); err != nil {
+			return wrapSendBodyStaleErr(err, msg, opaque)
+		}
+		return nil
 	}
 
 	if d.headersChanged {
@@ -1047,9 +1227,12 @@ func (c *channel) sendRequestOpaque(msg *envelope.HTTPMessage, opaque *opaqueHTT
 
 	headerBytes := serializeRequestHeader(rawReq)
 	if _, err := c.layer.conn.Write(headerBytes); err != nil {
-		return fmt.Errorf("http1: send request: %w", err)
+		return fmt.Errorf("http1: send request: %w", wrapStaleErr(err, msg, opaque, "header"))
 	}
-	return c.writeOpaqueBody(msg, rawReq.RawBody, rawReq.RawBodyBuffer, d.useRawBody, "request")
+	if err := c.writeOpaqueBody(msg, rawReq.RawBody, rawReq.RawBodyBuffer, d.useRawBody, "request"); err != nil {
+		return wrapSendBodyStaleErr(err, msg, opaque)
+	}
+	return nil
 }
 
 func (c *channel) sendResponseOpaque(msg *envelope.HTTPMessage, opaque *opaqueHTTP1) error {
@@ -1140,10 +1323,16 @@ func (c *channel) sendRequestSynthetic(msg *envelope.HTTPMessage) error {
 	}
 
 	if _, err := c.layer.conn.Write(buf.Bytes()); err != nil {
-		return fmt.Errorf("http1: send synthetic request: %w", err)
+		// USK-999: synthetic request path is structurally header-only
+		// at this Write (body follows via writeBody). The error map for
+		// the EPIPE race is identical to the opaque path.
+		return fmt.Errorf("http1: send synthetic request: %w", wrapStaleErr(err, msg, nil, "header"))
 	}
 
-	return c.writeBody(msg)
+	if err := c.writeBody(msg); err != nil {
+		return wrapSendBodyStaleErr(err, msg, nil)
+	}
+	return nil
 }
 
 func (c *channel) sendResponseSynthetic(msg *envelope.HTTPMessage) error {

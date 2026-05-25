@@ -82,6 +82,43 @@ func (c *h1Chain) EnsureFresh(ctx context.Context) (*http1.Layer, error) {
 	return fresh, nil
 }
 
+// Redial forces a fresh upstream Layer regardless of HealthCheck verdict.
+// Used by the USK-999 Phase 2 retry wrapper when a wire-Write surfaced a
+// *http1.StaleUpstreamError — by definition the current Layer's peer
+// closed mid-Write, so re-running HealthCheck would just confirm what the
+// failed write already proved. The unconditional dial path is symmetric
+// to EnsureFresh's redial branch (lines 71-82) — same RedialUpstreamH1
+// call, same close-stale + append + swap-current bookkeeping — minus the
+// HealthCheck short-circuit.
+//
+// Concurrency: acquires c.mu so concurrent EnsureFresh and closeAll are
+// serialised the same way EnsureFresh's redial path serialises them.
+// HTTP/1 is wire-serial per RFC 9112 §9.5 and the retry wrapper holds the
+// per-exchange one-shot budget atomically, so two Redial calls cannot
+// race on the same exchange — but the mutex defends against an upstream
+// passing through a CONNECT teardown mid-retry (closeAll Close + Redial
+// dial vs. one of them winning racily).
+//
+// Returns the fresh Layer on success or the dial error verbatim on
+// failure; the caller surfaces the failure as state="error" on the
+// session (matching the EnsureFresh dial-failure shape).
+func (c *h1Chain) Redial(ctx context.Context) (*http1.Layer, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	fresh, err := connector.RedialUpstreamH1(ctx, c.target, c.current, c.cfg, len(c.layers))
+	if err != nil {
+		return nil, err
+	}
+	// Close the stale Layer synchronously. The retry wrapper is the
+	// only path to Redial, and it holds an exclusive one-shot budget
+	// per exchange — there is no in-flight reader on c.current to
+	// disrupt. Close is sync.Once-guarded inside the Layer.
+	_ = c.current.Close()
+	c.current = fresh
+	c.layers = append(c.layers, fresh)
+	return fresh, nil
+}
+
 // closeAll closes every Layer in the chain. Called from the CONNECT-exit
 // deferred cleanup in runHTTP1ExchangeLoop so every redial step's parser
 // goroutine and underlying conn is torn down.
