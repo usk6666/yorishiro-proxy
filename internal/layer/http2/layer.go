@@ -396,6 +396,20 @@ func (l *Layer) RegisterGoAwayObserver(cb func()) (cancel func()) {
 
 	l.goAwayObsMu.Lock()
 	hit := l.goAwayHit
+	if !hit && l.GoAwayClosed() {
+		// USK-1003: handleGoAwayFrame flips conn-level state via
+		// l.conn.HandleGoAway BEFORE acquiring goAwayObsMu to set
+		// goAwayHit (reader.go:101 vs reader.go:153-154). A caller that
+		// observes GoAwayClosed() == true and immediately registers can
+		// race into the gap between those two writes — goAwayHit reads
+		// false here, the entry would be appended to l.goAwayObs, and
+		// the reader's pending snapshot would fire cb async. The godoc
+		// promises a synchronous fire when GOAWAY is already visible,
+		// so cross-check the conn-level signal under goAwayObsMu and
+		// treat it as already-hit. GoAwayClosed() reads conn-level
+		// mutexes, not goAwayObsMu, so this is safe to call here.
+		hit = true
+	}
 	if !hit {
 		l.goAwayObs = append(l.goAwayObs, entry)
 	}
