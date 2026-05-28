@@ -1351,24 +1351,39 @@ func TestFuzzGRPC_FinalizesUnderCallerCancel(t *testing.T) {
 	})
 	_ = res // either an in-band stopped_reason or a transport-level cancel error is OK
 
-	// Query fuzz_jobs through a fresh context (the caller cancel does not
-	// affect this query).
-	jobsRes, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
-		Name: "query",
-		Arguments: map[string]any{
-			"resource": "fuzz_jobs",
-			"filter":   map[string]any{"tag": "usk-835-cancel"},
-		},
-	})
-	if err != nil {
-		t.Fatalf("query fuzz_jobs: %v", err)
-	}
-	if jobsRes.IsError {
-		t.Fatalf("query fuzz_jobs returned error: %+v", jobsRes.Content)
-	}
+	// The cancelled CallTool may return to the client before the server's
+	// handler has actually finished. finalizeFuzzGRPCJob uses
+	// context.Background() internally so the closing UPDATE WILL eventually
+	// land — but not necessarily before this test reaches the assertion.
+	// Poll fuzz_jobs until completed_at is non-nil (mirror of USK-953 for
+	// fuzz_http; the http/ws/raw siblings already poll).
+	pollDeadline := time.Now().Add(2 * time.Second)
 	var jobsOut queryFuzzJobsResult
-	if err := json.Unmarshal([]byte(jobsRes.Content[0].(*gomcp.TextContent).Text), &jobsOut); err != nil {
-		t.Fatalf("unmarshal jobs: %v", err)
+	for {
+		jobsRes, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+			Name: "query",
+			Arguments: map[string]any{
+				"resource": "fuzz_jobs",
+				"filter":   map[string]any{"tag": "usk-835-cancel"},
+			},
+		})
+		if err != nil {
+			t.Fatalf("query fuzz_jobs: %v", err)
+		}
+		if jobsRes.IsError {
+			t.Fatalf("query fuzz_jobs returned error: %+v", jobsRes.Content)
+		}
+		jobsOut = queryFuzzJobsResult{}
+		if err := json.Unmarshal([]byte(jobsRes.Content[0].(*gomcp.TextContent).Text), &jobsOut); err != nil {
+			t.Fatalf("unmarshal jobs: %v", err)
+		}
+		if jobsOut.Total == 1 && jobsOut.Jobs[0].CompletedAt != nil {
+			break
+		}
+		if time.Now().After(pollDeadline) {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 	if jobsOut.Total != 1 {
 		t.Fatalf("jobs total = %d, want 1 (start INSERT must land via background ctx)", jobsOut.Total)

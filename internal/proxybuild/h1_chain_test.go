@@ -11,7 +11,12 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/layer/http1"
 )
 
-// testTCPPair returns a connected TCP pair; the caller closes both sides.
+// testTCPPair returns a connected TCP pair. Both ends are registered
+// with t.Cleanup so they stay alive (preventing the *net.TCPConn
+// finalizer from closing whichever side the caller discards via `_`,
+// which surfaced as a ~0.2% HealthCheck EOF flake) and are closed when
+// the test ends. Callers may still defer Close on either end without
+// double-close concerns — net.Conn.Close is idempotent.
 // We use real loopback TCP rather than net.Pipe so SetReadDeadline
 // behaves the same way the production code path observes (net.Pipe is
 // strictly synchronous and does not surface a queued FIN through the
@@ -36,6 +41,10 @@ func testTCPPair(t *testing.T) (client, server net.Conn) {
 		t.Fatal(err)
 	}
 	server = <-ch
+	t.Cleanup(func() {
+		_ = client.Close()
+		_ = server.Close()
+	})
 	return client, server
 }
 
