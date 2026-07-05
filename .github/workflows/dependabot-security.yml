@@ -40,7 +40,7 @@ jobs:
   security-update:
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    # Environment secrets (DEPSEC_APP_ID / DEPSEC_APP_PRIVATE_KEY) are only
+    # Environment secrets (DEPSEC_APP_CLIENT_ID / DEPSEC_APP_PRIVATE_KEY) are only
     # readable by a job that declares the environment. Restrict the environment's
     # deployment branches to `main` so only the scheduled/main run can mint the
     # high-privilege App token. Do NOT add "required reviewers" unless you want to
@@ -55,7 +55,7 @@ jobs:
         id: app-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
-          app-id: ${{ secrets.DEPSEC_APP_ID }}
+          client-id: ${{ secrets.DEPSEC_APP_CLIENT_ID }}
           private-key: ${{ secrets.DEPSEC_APP_PRIVATE_KEY }}
           # Needs permissions: Dependabot alerts (read), Contents (write),
           # Pull requests (write). Install the App on this repo only.
@@ -153,25 +153,27 @@ jobs:
 
           # Changed files vs base. plan.json / pr-body.md live in $RUNNER_TEMP,
           # so only the dependency manifests (go.mod, go.sum, web/package.json,
-          # lockfile) appear here.
-          adds="$(git diff --name-only --diff-filter=d HEAD | while read -r f; do
-            jq -n --arg p "$f" --arg c "$(base64 -w0 "$f")" '{path:$p, contents:$c}'
-          done | jq -s '.')"
-          dels="$(git diff --name-only --diff-filter=D HEAD | jq -R 'select(length>0)|{path:.}' | jq -s '.')"
+          # lockfile) appear here. Base64-encode each file's contents with jq's
+          # --rawfile/@base64 and write to files — the lockfile is large, so the
+          # blobs must never sit on the jq argv (ARG_MAX: "Argument list too long").
+          git diff --name-only --diff-filter=d HEAD | while IFS= read -r f; do
+            jq -n --arg p "$f" --rawfile c "$f" '{path:$p, contents:($c|@base64)}'
+          done | jq -s '.' > "$RUNNER_TEMP/adds.json"
+          git diff --name-only --diff-filter=D HEAD | jq -R 'select(length>0)|{path:.}' | jq -s '.' > "$RUNNER_TEMP/dels.json"
 
           jq -n \
             --arg repo "$GITHUB_REPOSITORY" \
             --arg branch "$branch" \
             --arg sha "$base_sha" \
             --arg msg "fix(deps): weekly Dependabot security updates (>=7d release age)" \
-            --argjson adds "$adds" \
-            --argjson dels "$dels" \
+            --slurpfile adds "$RUNNER_TEMP/adds.json" \
+            --slurpfile dels "$RUNNER_TEMP/dels.json" \
             '{query:"mutation($input:CreateCommitOnBranchInput!){createCommitOnBranch(input:$input){commit{url}}}",
               variables:{input:{
                 branch:{repositoryNameWithOwner:$repo, branchName:$branch},
                 message:{headline:$msg},
                 expectedHeadOid:$sha,
-                fileChanges:{additions:$adds, deletions:$dels}}}}' \
+                fileChanges:{additions:$adds[0], deletions:$dels[0]}}}}' \
             > "$RUNNER_TEMP/commit.json"
           gh api graphql --input "$RUNNER_TEMP/commit.json" >/dev/null
 
