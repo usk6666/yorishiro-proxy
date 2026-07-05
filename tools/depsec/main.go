@@ -104,9 +104,11 @@ type ghAlert struct {
 
 func fetchAlerts(ctx context.Context, apiBase, owner, repo, token string) ([]Alert, error) {
 	hc := &http.Client{Timeout: 30 * time.Second}
+	// The Dependabot alerts API uses cursor pagination (Link header rel="next"),
+	// NOT ?page=N — the page parameter returns HTTP 400. Follow the Link header.
+	url := fmt.Sprintf("%s/repos/%s/%s/dependabot/alerts?state=open&per_page=100", apiBase, owner, repo)
 	var out []Alert
-	for page := 1; ; page++ {
-		url := fmt.Sprintf("%s/repos/%s/%s/dependabot/alerts?state=open&per_page=100&page=%d", apiBase, owner, repo, page)
+	for pages := 0; url != "" && pages < 1000; pages++ {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 		if err != nil {
 			return nil, err
@@ -120,6 +122,7 @@ func fetchAlerts(ctx context.Context, apiBase, owner, repo, token string) ([]Ale
 			return nil, err
 		}
 		body, err := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
+		link := resp.Header.Get("Link")
 		resp.Body.Close()
 		if err != nil {
 			return nil, err
@@ -133,7 +136,7 @@ func fetchAlerts(ctx context.Context, apiBase, owner, repo, token string) ([]Ale
 
 		var batch []ghAlert
 		if err := json.Unmarshal(body, &batch); err != nil {
-			return nil, fmt.Errorf("decode alerts page %d: %w", page, err)
+			return nil, fmt.Errorf("decode alerts: %w", err)
 		}
 		for _, a := range batch {
 			if a.State != "open" {
@@ -151,10 +154,37 @@ func fetchAlerts(ctx context.Context, apiBase, owner, repo, token string) ([]Ale
 				URL:          a.HTMLURL,
 			})
 		}
-		if len(batch) < 100 {
-			return out, nil
+
+		next := parseNextLink(link)
+		if next == "" || next == url {
+			break
+		}
+		url = next
+	}
+	return out, nil
+}
+
+// parseNextLink extracts the rel="next" URL from a GitHub Link header, or "" if
+// there is no next page. Format:
+//
+//	<https://api.github.com/...&after=CUR>; rel="next", <...>; rel="prev"
+func parseNextLink(header string) string {
+	for _, part := range strings.Split(header, ",") {
+		segs := strings.Split(part, ";")
+		if len(segs) < 2 {
+			continue
+		}
+		u := strings.TrimSpace(segs[0])
+		if !strings.HasPrefix(u, "<") || !strings.HasSuffix(u, ">") {
+			continue
+		}
+		for _, s := range segs[1:] {
+			if v := strings.TrimSpace(s); v == `rel="next"` || v == "rel=next" {
+				return u[1 : len(u)-1]
+			}
 		}
 	}
+	return ""
 }
 
 // loadNpmDirect returns the set of package names declared directly in

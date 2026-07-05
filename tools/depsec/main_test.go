@@ -47,6 +47,54 @@ func TestFetchAlerts(t *testing.T) {
 	}
 }
 
+func TestFetchAlerts_CursorPagination(t *testing.T) {
+	// The Dependabot API paginates by cursor (Link header), never ?page=N.
+	var srvURL string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("page") != "" {
+			t.Errorf("must not use ?page= pagination; got %q", r.URL.RawQuery)
+		}
+		switch r.URL.Query().Get("after") {
+		case "":
+			// First page advertises a next cursor.
+			w.Header().Set("Link", `<`+srvURL+`/repos/o/r/dependabot/alerts?state=open&per_page=100&after=CUR>; rel="next"`)
+			w.Write([]byte(`[{"number":1,"state":"open","dependency":{"package":{"ecosystem":"go","name":"m1"}},"security_vulnerability":{"first_patched_version":{"identifier":"v1"}}}]`))
+		case "CUR":
+			// Last page: no Link header.
+			w.Write([]byte(`[{"number":2,"state":"open","dependency":{"package":{"ecosystem":"npm","name":"m2"}},"security_vulnerability":{"first_patched_version":{"identifier":"2.0.0"}}}]`))
+		default:
+			t.Errorf("unexpected cursor %q", r.URL.Query().Get("after"))
+		}
+	}))
+	defer srv.Close()
+	srvURL = srv.URL
+
+	alerts, err := fetchAlerts(context.Background(), srv.URL, "o", "r", "tkn")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(alerts) != 2 {
+		t.Fatalf("want 2 alerts across 2 pages, got %d: %+v", len(alerts), alerts)
+	}
+	if alerts[0].Name != "m1" || alerts[1].Name != "m2" {
+		t.Errorf("pagination aggregation wrong: %+v", alerts)
+	}
+}
+
+func TestParseNextLink(t *testing.T) {
+	cases := map[string]string{
+		``: "",
+		`<https://api.github.com/x?after=A>; rel="next"`:                                                  "https://api.github.com/x?after=A",
+		`<https://api.github.com/x?before=B>; rel="prev", <https://api.github.com/x?after=A>; rel="next"`: "https://api.github.com/x?after=A",
+		`<https://api.github.com/x?before=B>; rel="prev"`:                                                 "",
+	}
+	for in, want := range cases {
+		if got := parseNextLink(in); got != want {
+			t.Errorf("parseNextLink(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 func TestFetchAlerts_ForbiddenIsExplicit(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"message":"Resource not accessible"}`, http.StatusForbidden)
