@@ -144,11 +144,17 @@ jobs:
 
           # Reset the branch ref to the current base so expectedHeadOid is known.
           # (git diff below is relative to that same base, so the API commit
-          # contains exactly this run's dependency-manifest changes.)
-          if ! gh api -X PATCH "repos/$GITHUB_REPOSITORY/git/refs/heads/$branch" \
-                 -f sha="$base_sha" -F force=true >/dev/null 2>&1; then
-            gh api -X POST "repos/$GITHUB_REPOSITORY/git/refs" \
-              -f ref="refs/heads/$branch" -f sha="$base_sha" >/dev/null
+          # contains exactly this run's dependency-manifest changes.) Check
+          # existence first, then send an explicit JSON body via --input: a
+          # force-update needs {"force": true} as a real boolean, which the -F
+          # shorthand does not reliably encode. Force is required because a prior
+          # run's branch tip is not an ancestor of the new base (non-fast-forward).
+          if gh api "repos/$GITHUB_REPOSITORY/git/refs/heads/$branch" >/dev/null 2>&1; then
+            printf '{"sha":"%s","force":true}' "$base_sha" \
+              | gh api -X PATCH "repos/$GITHUB_REPOSITORY/git/refs/heads/$branch" --input - >/dev/null
+          else
+            printf '{"ref":"refs/heads/%s","sha":"%s"}' "$branch" "$base_sha" \
+              | gh api -X POST "repos/$GITHUB_REPOSITORY/git/refs" --input - >/dev/null
           fi
 
           # Changed files vs base. plan.json / pr-body.md live in $RUNNER_TEMP,
