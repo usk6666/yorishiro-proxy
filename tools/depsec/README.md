@@ -37,7 +37,8 @@ Create a GitHub App installed on this repo only, with permissions:
 **Dependabot alerts: read**, **Contents: write**, **Pull requests: write**.
 Store its credentials as:
 
-- `DEPSEC_APP_ID`
+- `DEPSEC_APP_CLIENT_ID` (the App's **Client ID**, e.g. `Iv23li...` — shown on
+  the App's settings page; `app-id` is deprecated in favor of `client-id`)
 - `DEPSEC_APP_PRIVATE_KEY`
 
 ## Test
