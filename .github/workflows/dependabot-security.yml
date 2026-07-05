@@ -11,10 +11,13 @@ name: Dependabot security updates
 #     direct packages Dependabot flagged; pnpm refuses versions younger than the
 #     window. Transitive npm packages are never auto-overridden (manual review).
 #
-# The PR is opened with a GitHub App token (not GITHUB_TOKEN) for two reasons:
-# reading Dependabot alerts needs the "Dependabot alerts: read" permission, and a
-# PR authored by an App token triggers the normal CI workflows that validate it
-# (PRs authored by GITHUB_TOKEN do not).
+# The PR is opened with a GitHub App token (not GITHUB_TOKEN) for three reasons:
+# reading Dependabot alerts needs the "Dependabot alerts: read" permission; a PR
+# authored by an App token triggers the normal CI workflows that validate it (PRs
+# authored by GITHUB_TOKEN do not); and the commit is created through the GitHub
+# API (createCommitOnBranch), which GitHub signs — satisfying the repo's
+# "verified signatures" ruleset without weakening it (a `git push` from the
+# runner would be unsigned and rejected).
 
 on:
   schedule:
@@ -44,9 +47,10 @@ jobs:
     # manually approve every weekly run (it would pause the job).
     environment: dependabot-security
     steps:
-      # Mint the App token BEFORE checkout so checkout persists it as the git
-      # credential — otherwise `git push` would use the read-only automatic
-      # GITHUB_TOKEN (github-actions[bot]) and be rejected.
+      # Mint the App token first; every network step below (alert fetch, the
+      # createCommitOnBranch commit, PR create/edit) authenticates as the App via
+      # GH_TOKEN/GITHUB_TOKEN. The commit is made through the GitHub API, not a
+      # `git push`, so it is server-signed and passes the verified-signatures rule.
       - name: Mint GitHub App token
         id: app-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
@@ -130,14 +134,46 @@ jobs:
           fi
 
           branch="automated/security-updates"
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git checkout -B "$branch"
-          # plan.json / pr-body.md live in $RUNNER_TEMP, so this only stages the
-          # dependency manifests (go.mod, go.sum, web/package.json, lockfile).
-          git add -A
-          git commit -m "fix(deps): weekly Dependabot security updates (>=7d release age)"
-          git push --force origin "$branch"
+          base_sha="$(git rev-parse HEAD)"
+
+          # The repo requires verified (signed) commits. A commit made in the
+          # runner via `git commit`/`git push` is unsigned and gets rejected by
+          # the ruleset. Instead, create the commit through the GitHub API
+          # (GraphQL createCommitOnBranch) — GitHub signs API-authored commits,
+          # so they satisfy the signature rule while keeping it enforced.
+
+          # Reset the branch ref to the current base so expectedHeadOid is known.
+          # (git diff below is relative to that same base, so the API commit
+          # contains exactly this run's dependency-manifest changes.)
+          if ! gh api -X PATCH "repos/$GITHUB_REPOSITORY/git/refs/heads/$branch" \
+                 -f sha="$base_sha" -F force=true >/dev/null 2>&1; then
+            gh api -X POST "repos/$GITHUB_REPOSITORY/git/refs" \
+              -f ref="refs/heads/$branch" -f sha="$base_sha" >/dev/null
+          fi
+
+          # Changed files vs base. plan.json / pr-body.md live in $RUNNER_TEMP,
+          # so only the dependency manifests (go.mod, go.sum, web/package.json,
+          # lockfile) appear here.
+          adds="$(git diff --name-only --diff-filter=d HEAD | while read -r f; do
+            jq -n --arg p "$f" --arg c "$(base64 -w0 "$f")" '{path:$p, contents:$c}'
+          done | jq -s '.')"
+          dels="$(git diff --name-only --diff-filter=D HEAD | jq -R 'select(length>0)|{path:.}' | jq -s '.')"
+
+          jq -n \
+            --arg repo "$GITHUB_REPOSITORY" \
+            --arg branch "$branch" \
+            --arg sha "$base_sha" \
+            --arg msg "fix(deps): weekly Dependabot security updates (>=7d release age)" \
+            --argjson adds "$adds" \
+            --argjson dels "$dels" \
+            '{query:"mutation($input:CreateCommitOnBranchInput!){createCommitOnBranch(input:$input){commit{url}}}",
+              variables:{input:{
+                branch:{repositoryNameWithOwner:$repo, branchName:$branch},
+                message:{headline:$msg},
+                expectedHeadOid:$sha,
+                fileChanges:{additions:$adds, deletions:$dels}}}}' \
+            > "$RUNNER_TEMP/commit.json"
+          gh api graphql --input "$RUNNER_TEMP/commit.json" >/dev/null
 
           if gh pr list --head "$branch" --state open --json number --jq 'length' | grep -qx 0; then
             gh pr create --base main --head "$branch" \
