@@ -44,8 +44,9 @@ jobs:
     # manually approve every weekly run (it would pause the job).
     environment: dependabot-security
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-
+      # Mint the App token BEFORE checkout so checkout persists it as the git
+      # credential — otherwise `git push` would use the read-only automatic
+      # GITHUB_TOKEN (github-actions[bot]) and be rejected.
       - name: Mint GitHub App token
         id: app-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
@@ -54,6 +55,10 @@ jobs:
           private-key: ${{ secrets.DEPSEC_APP_PRIVATE_KEY }}
           # Needs permissions: Dependabot alerts (read), Contents (write),
           # Pull requests (write). Install the App on this repo only.
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          token: ${{ steps.app-token.outputs.token }}
 
       - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
         with:
@@ -75,21 +80,23 @@ jobs:
         run: |
           set -euo pipefail
           cd tools/depsec
+          # Write plan/body OUTSIDE the working tree so they are never committed
+          # to the PR branch.
           go run . \
             -owner "${GITHUB_REPOSITORY%/*}" \
             -repo "${GITHUB_REPOSITORY#*/}" \
             -package-json ../../web/package.json \
-            -plan-out ../../plan.json \
-            -body-out ../../pr-body.md \
+            -plan-out "$RUNNER_TEMP/plan.json" \
+            -body-out "$RUNNER_TEMP/pr-body.md" \
             -min-age "$MIN_AGE"
 
       - name: Show plan
-        run: cat plan.json
+        run: cat "$RUNNER_TEMP/plan.json"
 
       - name: Apply Go module bumps
         run: |
           set -euo pipefail
-          mapfile -t gomods < <(jq -r '(.go_accepted // [])[] | "\(.name)@\(.target_version)"' plan.json)
+          mapfile -t gomods < <(jq -r '(.go_accepted // [])[] | "\(.name)@\(.target_version)"' "$RUNNER_TEMP/plan.json")
           if [ ${#gomods[@]} -eq 0 ]; then
             echo "no eligible Go bumps"
           else
@@ -103,7 +110,7 @@ jobs:
       - name: Apply npm direct-dependency updates
         run: |
           set -euo pipefail
-          mapfile -t npmpkgs < <(jq -r '(.npm_update // [])[].name' plan.json)
+          mapfile -t npmpkgs < <(jq -r '(.npm_update // [])[].name' "$RUNNER_TEMP/plan.json")
           if [ ${#npmpkgs[@]} -eq 0 ]; then
             echo "no npm direct updates"
           else
@@ -126,6 +133,8 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git checkout -B "$branch"
+          # plan.json / pr-body.md live in $RUNNER_TEMP, so this only stages the
+          # dependency manifests (go.mod, go.sum, web/package.json, lockfile).
           git add -A
           git commit -m "fix(deps): weekly Dependabot security updates (>=7d release age)"
           git push --force origin "$branch"
@@ -133,8 +142,8 @@ jobs:
           if gh pr list --head "$branch" --state open --json number --jq 'length' | grep -qx 0; then
             gh pr create --base main --head "$branch" \
               --title "fix(deps): weekly Dependabot security updates" \
-              --body-file pr-body.md
+              --body-file "$RUNNER_TEMP/pr-body.md"
           else
             echo "PR already open for $branch; branch updated in place."
-            gh pr edit "$branch" --body-file pr-body.md || true
+            gh pr edit "$branch" --body-file "$RUNNER_TEMP/pr-body.md" || true
           fi
