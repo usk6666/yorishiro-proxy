@@ -15,7 +15,7 @@
     "highlight.js": "^11.11.1",
     "react": "^19.2.5",
     "react-dom": "^19.2.5",
-    "react-router": "^7.15.0",
+    "react-router": "^8.0.1",
     "react-router-dom": "^7.15.0"
   },
   "pnpm": {
@@ -34,7 +34,7 @@
     "globals": "^16.5.0",
     "typescript": "~5.8.3",
     "typescript-eslint": "^8.59.2",
-    "vite": "^6.4.2",
+    "vite": "^8.1.0",
     "vitest": "^4.1.5"
   }
 }
