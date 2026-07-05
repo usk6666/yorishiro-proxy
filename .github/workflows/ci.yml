@@ -18,7 +18,7 @@ jobs:
 
       - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v5.0.0
         with:
-          version: 9
+          version: 10 # >= 10.16 honors web/.npmrc minimum-release-age
 
       - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
         with:
@@ -122,3 +122,23 @@ jobs:
 
       - name: Test (e2e smoke)
         run: go test -race -v -tags 'e2e e2e_smoke' -timeout 10m ./...
+
+  # tools/depsec is a separate Go module (stdlib only, not shipped in the binary)
+  # that drives the weekly Dependabot security-update workflow. Gate its
+  # supply-chain-critical decision logic on every PR that touches it.
+  depsec-tool:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version: "1.25.x"
+
+      - name: Vet + test depsec
+        working-directory: tools/depsec
+        run: |
+          test -z "$(gofmt -l .)" || (echo "not gofmt-clean:" && gofmt -l . && exit 1)
+          go vet ./...
+          go test -race ./...

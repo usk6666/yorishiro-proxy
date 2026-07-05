@@ -1,0 +1,140 @@
+name: Dependabot security updates
+
+# Weekly, supply-chain-aware security-update PR.
+#
+# Policy (see CLAUDE.md "Supply chain risk"):
+#   - Go: no native minimum-release-age exists, so tools/depsec gates each fix on
+#     the module's Go-proxy publish time and applies only those >= 7 days old.
+#     Newer fixes are deferred to a later run (acceptable).
+#   - npm: the age gate + Takumi Guard registry + exclusions are enforced natively
+#     by web/.npmrc via pnpm (>= 10.16). We only run `pnpm update --latest` on the
+#     direct packages Dependabot flagged; pnpm refuses versions younger than the
+#     window. Transitive npm packages are never auto-overridden (manual review).
+#
+# The PR is opened with a GitHub App token (not GITHUB_TOKEN) for two reasons:
+# reading Dependabot alerts needs the "Dependabot alerts: read" permission, and a
+# PR authored by an App token triggers the normal CI workflows that validate it
+# (PRs authored by GITHUB_TOKEN do not).
+
+on:
+  schedule:
+    - cron: "17 6 * * 1" # Mondays 06:17 UTC
+  workflow_dispatch:
+    inputs:
+      min-age:
+        description: "Minimum release age for Go fixes (Go duration, e.g. 168h)"
+        required: false
+        default: "168h"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dependabot-security
+  cancel-in-progress: false
+
+jobs:
+  security-update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # Environment secrets (DEPSEC_APP_ID / DEPSEC_APP_PRIVATE_KEY) are only
+    # readable by a job that declares the environment. Restrict the environment's
+    # deployment branches to `main` so only the scheduled/main run can mint the
+    # high-privilege App token. Do NOT add "required reviewers" unless you want to
+    # manually approve every weekly run (it would pause the job).
+    environment: dependabot-security
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Mint GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.DEPSEC_APP_ID }}
+          private-key: ${{ secrets.DEPSEC_APP_PRIVATE_KEY }}
+          # Needs permissions: Dependabot alerts (read), Contents (write),
+          # Pull requests (write). Install the App on this repo only.
+
+      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version: "1.25.x"
+
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v5.0.0
+        with:
+          version: 10 # >= 10.16 so web/.npmrc `minimum-release-age` is honored
+
+      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        with:
+          node-version: "24"
+
+      - name: Compute update plan
+        id: plan
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+          MIN_AGE: ${{ github.event.inputs.min-age || '168h' }}
+        run: |
+          set -euo pipefail
+          cd tools/depsec
+          go run . \
+            -owner "${GITHUB_REPOSITORY%/*}" \
+            -repo "${GITHUB_REPOSITORY#*/}" \
+            -package-json ../../web/package.json \
+            -plan-out ../../plan.json \
+            -body-out ../../pr-body.md \
+            -min-age "$MIN_AGE"
+
+      - name: Show plan
+        run: cat plan.json
+
+      - name: Apply Go module bumps
+        run: |
+          set -euo pipefail
+          mapfile -t gomods < <(jq -r '(.go_accepted // [])[] | "\(.name)@\(.target_version)"' plan.json)
+          if [ ${#gomods[@]} -eq 0 ]; then
+            echo "no eligible Go bumps"
+          else
+            for m in "${gomods[@]}"; do
+              echo "go get $m"
+              go get "$m"
+            done
+            go mod tidy
+          fi
+
+      - name: Apply npm direct-dependency updates
+        run: |
+          set -euo pipefail
+          mapfile -t npmpkgs < <(jq -r '(.npm_update // [])[].name' plan.json)
+          if [ ${#npmpkgs[@]} -eq 0 ]; then
+            echo "no npm direct updates"
+          else
+            echo "pnpm update --latest ${npmpkgs[*]}"
+            # web/.npmrc enforces registry + minimum-release-age + exclusions.
+            pnpm --dir web update --latest "${npmpkgs[@]}"
+          fi
+
+      - name: Open or update PR
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "No changes to apply (all fixes deferred or none eligible)."
+            exit 0
+          fi
+
+          branch="automated/security-updates"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B "$branch"
+          git add -A
+          git commit -m "fix(deps): weekly Dependabot security updates (>=7d release age)"
+          git push --force origin "$branch"
+
+          if gh pr list --head "$branch" --state open --json number --jq 'length' | grep -qx 0; then
+            gh pr create --base main --head "$branch" \
+              --title "fix(deps): weekly Dependabot security updates" \
+              --body-file pr-body.md
+          else
+            echo "PR already open for $branch; branch updated in place."
+            gh pr edit "$branch" --body-file pr-body.md || true
+          fi
