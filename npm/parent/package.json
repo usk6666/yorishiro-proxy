@@ -1,0 +1,41 @@
+{
+  "name": "@usk6666/yorishiro-proxy",
+  "version": "0.0.0",
+  "description": "AI-first MITM proxy tool operated as an MCP server. Intercept, record, and replay traffic for AI agents.",
+  "keywords": [
+    "mcp",
+    "proxy",
+    "mitm",
+    "ai",
+    "security",
+    "pentest",
+    "http",
+    "websocket",
+    "grpc"
+  ],
+  "homepage": "https://github.com/usk6666/yorishiro-proxy#readme",
+  "bugs": {
+    "url": "https://github.com/usk6666/yorishiro-proxy/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/usk6666/yorishiro-proxy.git"
+  },
+  "license": "Apache-2.0",
+  "author": "usk6666",
+  "type": "commonjs",
+  "bin": {
+    "yorishiro-proxy": "bin/cli.js"
+  },
+  "files": [
+    "bin/cli.js",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "optionalDependencies": {}
+}

@@ -53,13 +53,25 @@ Yorishiro Proxy runs as an [MCP (Model Context Protocol)](https://modelcontextpr
 
 ### 1. Get the Binary
 
-Download a prebuilt binary from the [GitHub Releases](https://github.com/usk6666/yorishiro-proxy/releases) page, or build from source:
+Install via npm / npx (the correct prebuilt binary for your platform is fetched automatically as an optional dependency — no postinstall, no network fetch at install time):
+
+```bash
+# Install globally
+npm i -g @usk6666/yorishiro-proxy
+
+# Or run without installing
+npx @usk6666/yorishiro-proxy install
+```
+
+Alternatively, download a prebuilt binary from the [GitHub Releases](https://github.com/usk6666/yorishiro-proxy/releases) page, or build from source:
 
 ```bash
 git clone https://github.com/usk6666/yorishiro-proxy.git
 cd yorishiro-proxy
 make build    # outputs bin/yorishiro-proxy
 ```
+
+> The npm distribution, GitHub Releases, and the `yorishiro-proxy upgrade` self-update path all coexist — use whichever fits your workflow.
 
 ### 2. Configure MCP
 
