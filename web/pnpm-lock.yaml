@@ -21,8 +21,8 @@ importers:
         specifier: ^19.2.5
         version: 19.2.5(react@19.2.5)
       react-router:
-        specifier: ^8.0.1
-        version: 8.0.1(react-dom@19.2.5(react@19.2.5))(react@19.2.5)
+        specifier: ^8.1.0
+        version: 8.1.0(react-dom@19.2.5(react@19.2.5))(react@19.2.5)
       react-router-dom:
         specifier: ^7.15.0
         version: 7.15.0(react-dom@19.2.5(react@19.2.5))(react@19.2.5)
@@ -1221,8 +1221,8 @@ packages:
       react-dom:
         optional: true
 
-  react-router@8.0.1:
-    resolution: {integrity: sha512-5EL/fANovVUhRK50NLS8RYfX0BxrimoKsHWUPPy8v5UEl8i6vzF7e4POo3u+AhPItDwccUAJjMfIOmydxBJmQw==}
+  react-router@8.1.0:
+    resolution: {integrity: sha512-Mdfi61uObuvWNN9OhChOC0HV6YWOIfKRzEWOvCHRSuQg8IM+Nv10edaM/2HE8ZixBpUTdQbruyWqC3sDkkh9vw==}
     engines: {node: '>=22.22.0'}
     peerDependencies:
       react: '>=19.2.7'
@@ -2656,7 +2656,7 @@ snapshots:
     optionalDependencies:
       react-dom: 19.2.5(react@19.2.5)
 
-  react-router@8.0.1(react-dom@19.2.5(react@19.2.5))(react@19.2.5):
+  react-router@8.1.0(react-dom@19.2.5(react@19.2.5))(react@19.2.5):
     dependencies:
       cookie-es: 3.1.1
       react: 19.2.5
