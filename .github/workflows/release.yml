@@ -124,6 +124,16 @@ jobs:
               dist/*
           fi
 
+      # Hand the exact release binaries off to the npm-publish job (tag push only).
+      # The npm packages bundle these same binaries — no rebuild, no drift.
+      - name: Upload npm release binaries
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: npm-release-binaries
+          path: dist/
+          retention-days: 7
+
       # workflow_dispatch: upload assets to existing release if tag is provided,
       # otherwise upload as build artifacts.
       - name: Upload assets to existing release
@@ -147,3 +157,59 @@ jobs:
           name: release-binaries-${{ steps.version.outputs.version }}
           path: dist/
           retention-days: 7
+
+  # Publish the same release binaries as npm packages via the
+  # optionalDependencies pattern. OIDC Trusted Publishing — no long-lived token.
+  # Tag pushes only; dev-<sha> dispatch builds are never published.
+  npm-publish:
+    needs: release
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write # OIDC token for npm Trusted Publishing + provenance
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+
+      # Node 24 bundles npm 10.x, which cannot do OIDC Trusted Publishing.
+      # Trusted Publishing + --provenance requires npm >= 11.5.1.
+      - name: Pin npm for OIDC Trusted Publishing
+        run: npm install -g npm@^11.5.1
+
+      # Reuse the exact binaries the release job built and uploaded.
+      - name: Download release binaries
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: npm-release-binaries
+          path: dist
+
+      - name: Generate npm packages
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: node npm/generate.mjs --version "${VERSION}" --dist ./dist --out ./npm-dist
+
+      # Publish children first, then the parent last, so the parent's
+      # optionalDependencies all resolve at publish time. Prereleases go to the
+      # `next` dist-tag, matching the GitHub Release --prerelease detection.
+      - name: Publish to npm
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          NPM_TAG="latest"
+          if echo "${VERSION}" | grep -qE '[-](alpha|beta|rc)'; then
+            NPM_TAG="next"
+          fi
+          echo "Publishing with dist-tag: ${NPM_TAG}"
+          for plat in linux-x64 linux-arm64 darwin-x64 darwin-arm64 win32-x64; do
+            echo "Publishing @usk6666/yorishiro-proxy-${plat}..."
+            npm publish "npm-dist/yorishiro-proxy-${plat}" \
+              --access public --provenance --tag "${NPM_TAG}"
+          done
+          echo "Publishing @usk6666/yorishiro-proxy (parent)..."
+          npm publish "npm-dist/yorishiro-proxy" \
+            --access public --provenance --tag "${NPM_TAG}"
