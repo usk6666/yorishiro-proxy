@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"fmt"
 	"log/slog"
@@ -172,15 +173,30 @@ func (s *Server) checkSafetyInput(body []byte, rawURL string, headers []envelope
 }
 
 // safetyViolationError returns a generic error message for MCP clients when a safety
-// filter violation occurs. Details (rule ID, target, pattern) are logged server-side
-// to prevent leaking filter internals to the AI agent, which could enable bypass attempts.
+// filter violation occurs. Details (rule ID, target, matched-fragment digest) are logged
+// server-side to prevent leaking filter internals to the AI agent, which could enable
+// bypass attempts.
 func safetyViolationError(v *safety.InputViolation) string {
 	slog.Warn("SafetyFilter violation",
 		"rule_id", v.RuleID,
 		"rule_name", v.RuleName,
 		"target", v.Target,
-		"matched_on", v.MatchedOn,
+		"matched_on", redactMatchedFragment(v.MatchedOn),
 	)
 	return "SafetyFilter blocked this operation: request blocked by safety policy. " +
 		"This payload was classified as destructive and cannot be sent."
+}
+
+// redactMatchedFragment obfuscates a safety-filter matched fragment for logging.
+// The raw fragment is a slice of the request that triggered the match (e.g. an
+// Authorization/Cookie header value or a request-body span), so it must never be
+// logged in clear text (CWE-312). A truncated SHA-256 digest plus the byte length
+// preserves cross-log correlation and lets an operator confirm a repeated match
+// without exposing the underlying sensitive bytes.
+func redactMatchedFragment(fragment string) string {
+	if fragment == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(fragment))
+	return fmt.Sprintf("sha256:%x len=%d", sum[:8], len(fragment))
 }
