@@ -282,6 +282,51 @@ func TestRecordStep_SendDoesNotProjectClientMITMToConnInfo(t *testing.T) {
 	}
 }
 
+// TestRecordStep_SendProjectsClientFingerprint verifies that a Send envelope
+// whose client-facing snapshot carries JA3/JA4 fingerprints (USK-1015)
+// triggers an UpdateStream that sets ONLY the tls_client_ja* fields — never
+// the synthetic MITM cert / version columns.
+func TestRecordStep_SendProjectsClientFingerprint(t *testing.T) {
+	w := &mockWriter{}
+	step := NewRecordStep(w, nil)
+
+	clientSnap := &envelope.TLSSnapshot{
+		Version:   tls.VersionTLS13,
+		ClientJA3: "4b808534aaed88ea8efee030f1b46c4d",
+		ClientJA4: "t13d0508h2_e133e205ac38_4e31876e0826",
+		PeerCertificate: &x509.Certificate{
+			Subject: pkix.Name{CommonName: "synthetic-mitm-cert"},
+		},
+	}
+	env := &envelope.Envelope{
+		StreamID:  "stream-1",
+		FlowID:    "flow-send",
+		Direction: envelope.Send,
+		Sequence:  0,
+		Protocol:  envelope.ProtocolHTTP,
+		Message:   &envelope.HTTPMessage{Method: "GET"},
+		Context: envelope.EnvelopeContext{
+			ConnID: "conn-1",
+			TLS:    clientSnap,
+		},
+	}
+	step.Process(context.Background(), env)
+
+	if len(w.updates) != 1 {
+		t.Fatalf("expected 1 UpdateStream call, got %d", len(w.updates))
+	}
+	got := w.updates[0].update
+	if got.TLSClientJA3 != clientSnap.ClientJA3 || got.TLSClientJA4 != clientSnap.ClientJA4 {
+		t.Errorf("fingerprint update = (%q, %q), want (%q, %q)",
+			got.TLSClientJA3, got.TLSClientJA4, clientSnap.ClientJA3, clientSnap.ClientJA4)
+	}
+	// The synthetic MITM cert / version must NOT leak into ConnInfo.
+	if got.TLSServerCertSubject != "" || got.TLSVersion != "" {
+		t.Errorf("synthetic MITM data leaked: subject=%q version=%q",
+			got.TLSServerCertSubject, got.TLSVersion)
+	}
+}
+
 // TestRecordStep_ReceiveWithoutTLSSkipsUpdate verifies that Receive envelopes
 // without a TLS snapshot (e.g., cleartext h2c) do not fire a no-op
 // UpdateStream.

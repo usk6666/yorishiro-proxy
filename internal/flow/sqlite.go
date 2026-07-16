@@ -140,7 +140,7 @@ func (s *SQLiteStore) saveStreamSync(ctx context.Context, st *Stream) error {
 		tags = string(tagsJSON)
 	}
 
-	var clientAddr, serverAddr, tlsVersion, tlsCipher, tlsALPN, tlsCertSubject string
+	var clientAddr, serverAddr, tlsVersion, tlsCipher, tlsALPN, tlsCertSubject, tlsClientJA3, tlsClientJA4 string
 	if st.ConnInfo != nil {
 		clientAddr = st.ConnInfo.ClientAddr
 		serverAddr = st.ConnInfo.ServerAddr
@@ -148,6 +148,8 @@ func (s *SQLiteStore) saveStreamSync(ctx context.Context, st *Stream) error {
 		tlsCipher = st.ConnInfo.TLSCipher
 		tlsALPN = st.ConnInfo.TLSALPN
 		tlsCertSubject = st.ConnInfo.TLSServerCertSubject
+		tlsClientJA3 = st.ConnInfo.TLSClientJA3
+		tlsClientJA4 = st.ConnInfo.TLSClientJA4
 	}
 
 	state := st.State
@@ -165,8 +167,8 @@ func (s *SQLiteStore) saveStreamSync(ctx context.Context, st *Stream) error {
 	}
 
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO streams (id, conn_id, protocol, scheme, state, timestamp, duration_ms, tags, client_addr, server_addr, tls_version, tls_cipher, tls_alpn, tls_server_cert_subject, blocked_by, send_ms, wait_ms, receive_ms, failure_reason, origin)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO streams (id, conn_id, protocol, scheme, state, timestamp, duration_ms, tags, client_addr, server_addr, tls_version, tls_cipher, tls_alpn, tls_server_cert_subject, blocked_by, send_ms, wait_ms, receive_ms, failure_reason, origin, tls_client_ja3, tls_client_ja4)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		st.ID,
 		st.ConnID,
 		st.Protocol,
@@ -187,6 +189,8 @@ func (s *SQLiteStore) saveStreamSync(ctx context.Context, st *Stream) error {
 		st.ReceiveMs,
 		st.FailureReason,
 		string(origin),
+		tlsClientJA3,
+		tlsClientJA4,
 	)
 	if err != nil {
 		return fmt.Errorf("insert stream: %w", err)
@@ -337,6 +341,8 @@ func buildStreamUpdateSets(update StreamUpdate) ([]string, []interface{}, error)
 	addString("tls_cipher", update.TLSCipher)
 	addString("tls_alpn", update.TLSALPN)
 	addString("tls_server_cert_subject", update.TLSServerCertSubject)
+	addString("tls_client_ja3", update.TLSClientJA3)
+	addString("tls_client_ja4", update.TLSClientJA4)
 	addInt64("send_ms", update.SendMs)
 	addInt64("wait_ms", update.WaitMs)
 	addInt64("receive_ms", update.ReceiveMs)
@@ -415,7 +421,7 @@ func ValidateStreamID(id string) error {
 }
 
 // streamColumns is the list of columns selected in stream queries.
-const streamColumns = `id, conn_id, protocol, scheme, state, timestamp, duration_ms, tags, client_addr, server_addr, tls_version, tls_cipher, tls_alpn, tls_server_cert_subject, blocked_by, send_ms, wait_ms, receive_ms, failure_reason, origin`
+const streamColumns = `id, conn_id, protocol, scheme, state, timestamp, duration_ms, tags, client_addr, server_addr, tls_version, tls_cipher, tls_alpn, tls_server_cert_subject, blocked_by, send_ms, wait_ms, receive_ms, failure_reason, origin, tls_client_ja3, tls_client_ja4`
 
 // buildStreamWhereClause constructs a SQL WHERE clause from StreamListOptions.
 // Method, URLPattern, StatusCode, and HTTPVersion are matched via EXISTS
@@ -1157,6 +1163,17 @@ type scannable interface {
 	Scan(dest ...interface{}) error
 }
 
+// connInfoFromColumns returns a pointer to ci when any field is populated,
+// or nil when the row carried no connection metadata at all. Kept out of
+// scanStream to bound that function's cyclomatic complexity as the TLS
+// column set grows.
+func connInfoFromColumns(ci ConnectionInfo) *ConnectionInfo {
+	if ci == (ConnectionInfo{}) {
+		return nil
+	}
+	return &ci
+}
+
 func scanStream(row scannable) (*Stream, error) {
 	var (
 		st             Stream
@@ -1175,6 +1192,8 @@ func scanStream(row scannable) (*Stream, error) {
 		receiveMs      sql.NullInt64
 		failureReason  string
 		origin         string
+		tlsClientJA3   string
+		tlsClientJA4   string
 	)
 
 	err := row.Scan(
@@ -1198,6 +1217,8 @@ func scanStream(row scannable) (*Stream, error) {
 		&receiveMs,
 		&failureReason,
 		&origin,
+		&tlsClientJA3,
+		&tlsClientJA4,
 	)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -1220,16 +1241,16 @@ func scanStream(row scannable) (*Stream, error) {
 	st.Timestamp = ts
 	st.Duration = time.Duration(durationMs) * time.Millisecond
 
-	if clientAddr != "" || serverAddr != "" || tlsVersion != "" || tlsCipher != "" || tlsALPN != "" || tlsCertSubject != "" {
-		st.ConnInfo = &ConnectionInfo{
-			ClientAddr:           clientAddr,
-			ServerAddr:           serverAddr,
-			TLSVersion:           tlsVersion,
-			TLSCipher:            tlsCipher,
-			TLSALPN:              tlsALPN,
-			TLSServerCertSubject: tlsCertSubject,
-		}
-	}
+	st.ConnInfo = connInfoFromColumns(ConnectionInfo{
+		ClientAddr:           clientAddr,
+		ServerAddr:           serverAddr,
+		TLSVersion:           tlsVersion,
+		TLSCipher:            tlsCipher,
+		TLSALPN:              tlsALPN,
+		TLSServerCertSubject: tlsCertSubject,
+		TLSClientJA3:         tlsClientJA3,
+		TLSClientJA4:         tlsClientJA4,
+	})
 
 	st.BlockedBy = blockedBy
 	st.FailureReason = failureReason

@@ -113,6 +113,8 @@ type ExportConnInfo struct {
 	TLSCipher            string `json:"tls_cipher,omitempty"`
 	TLSALPN              string `json:"tls_alpn,omitempty"`
 	TLSServerCertSubject string `json:"tls_server_cert_subject,omitempty"`
+	TLSClientJA3         string `json:"tls_client_ja3,omitempty"`
+	TLSClientJA4         string `json:"tls_client_ja4,omitempty"`
 }
 
 // ExportFlow is the JSON-serializable representation of a Flow.
@@ -233,6 +235,8 @@ func streamToExport(s *Stream) *ExportStream {
 			TLSCipher:            s.ConnInfo.TLSCipher,
 			TLSALPN:              s.ConnInfo.TLSALPN,
 			TLSServerCertSubject: s.ConnInfo.TLSServerCertSubject,
+			TLSClientJA3:         s.ConnInfo.TLSClientJA3,
+			TLSClientJA4:         s.ConnInfo.TLSClientJA4,
 		}
 	}
 	return es

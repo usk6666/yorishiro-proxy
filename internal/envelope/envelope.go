@@ -333,12 +333,26 @@ type EnvelopeContext struct {
 // It is immutable after construction and safe to share across envelopes
 // on the same connection.
 type TLSSnapshot struct {
-	SNI               string
-	ALPN              string
-	PeerCertificate   *x509.Certificate
-	ClientFingerprint string // JA3 or JA4 hash of the client's ClientHello
-	Version           uint16
-	CipherSuite       uint16
+	SNI             string
+	ALPN            string
+	PeerCertificate *x509.Certificate
+	// ClientFingerprint is the client's ClientHello fingerprint exposed to
+	// plugins via the legacy `client_fingerprint` dict key. It is set to
+	// ClientJA4 for back-compat; prefer ClientJA3 / ClientJA4 for the
+	// explicit forms (USK-1015).
+	ClientFingerprint string
+	// ClientJA3 is the MD5 JA3 fingerprint of the client's ClientHello, or
+	// empty when the proxy did not observe / could not parse it (e.g. no
+	// ClientHello peek, malformed hello, or a ClientHello larger than the
+	// peek cap). Populated only on the CLIENT-facing MITM snapshot; the
+	// proxy's own outbound (upstream) ClientHello is never fingerprinted
+	// into this field (USK-1015).
+	ClientJA3 string
+	// ClientJA4 is the JA4 (TLS client) fingerprint of the client's
+	// ClientHello. Same population/empty semantics as ClientJA3.
+	ClientJA4   string
+	Version     uint16
+	CipherSuite uint16
 }
 
 // VersionName returns a human-readable TLS version string

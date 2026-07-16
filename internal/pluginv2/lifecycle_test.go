@@ -313,6 +313,31 @@ func TestBuildTLSHandshakeDict_NilSnapshot(t *testing.T) {
 	}
 }
 
+// TestBuildTLSHandshakeDict_Fingerprints verifies the ja3 / ja4 / legacy
+// client_fingerprint keys are populated from the snapshot (USK-1015).
+func TestBuildTLSHandshakeDict_Fingerprints(t *testing.T) {
+	snap := &envelope.TLSSnapshot{
+		SNI:               "example.com",
+		ClientJA3:         "4b808534aaed88ea8efee030f1b46c4d",
+		ClientJA4:         "t13d0508h2_e133e205ac38_4e31876e0826",
+		ClientFingerprint: "t13d0508h2_e133e205ac38_4e31876e0826",
+	}
+	d := BuildTLSHandshakeDict("server", snap)
+	for key, want := range map[string]string{
+		"ja3":                snap.ClientJA3,
+		"ja4":                snap.ClientJA4,
+		"client_fingerprint": snap.ClientFingerprint,
+	} {
+		v, ok, err := d.Get(starlark.String(key))
+		if err != nil || !ok {
+			t.Fatalf("Get(%s): ok=%v err=%v", key, ok, err)
+		}
+		if s := string(v.(starlark.String)); s != want {
+			t.Errorf("%s = %q, want %q", key, s, want)
+		}
+	}
+}
+
 func TestBuildWSCloseDict_NilMessage(t *testing.T) {
 	d := BuildWSCloseDict(nil)
 	if err := d.SetKey(starlark.String("__probe__"), starlark.None); err == nil {

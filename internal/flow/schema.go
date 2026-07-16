@@ -489,6 +489,17 @@ CREATE TABLE IF NOT EXISTS fuzz_macro_results (
 CREATE INDEX IF NOT EXISTS idx_fuzz_macro_results_fuzz_id ON fuzz_macro_results(fuzz_id);
 `
 
+// schemaV18 adds the client TLS ClientHello fingerprint columns to streams
+// (USK-1015): tls_client_ja3 (MD5 JA3) and tls_client_ja4 (JA4). Populated
+// by RecordStep from the client-facing MITM TLSSnapshot, which the connector
+// stamps from the ClientHello peek. Empty for non-TLS streams, for streams
+// whose ClientHello exceeded the peek cap, and for rows backfilled from
+// earlier schema versions. Additive ALTER TABLE — no FK toggle needed.
+const schemaV18 = `
+ALTER TABLE streams ADD COLUMN tls_client_ja3 TEXT NOT NULL DEFAULT '';
+ALTER TABLE streams ADD COLUMN tls_client_ja4 TEXT NOT NULL DEFAULT '';
+`
+
 var migrations = map[int]string{
 	1:  schemaV1,
 	2:  schemaV2,
@@ -507,6 +518,7 @@ var migrations = map[int]string{
 	15: schemaV15,
 	16: schemaV16,
 	17: schemaV17,
+	18: schemaV18,
 }
 
 func migrate(ctx context.Context, db *sql.DB) error {

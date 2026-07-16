@@ -1779,6 +1779,8 @@ func buildConnInfoResult(ci *flow.ConnectionInfo) *connInfoResult {
 		TLSCipher:            ci.TLSCipher,
 		TLSALPN:              ci.TLSALPN,
 		TLSServerCertSubject: ci.TLSServerCertSubject,
+		TLSClientJA3:         ci.TLSClientJA3,
+		TLSClientJA4:         ci.TLSClientJA4,
 	}
 }
 

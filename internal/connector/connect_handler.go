@@ -331,8 +331,7 @@ func runTLSMITM(
 	// USK-997: sniff-first peek. Test-only DisableClientHelloPeek bypasses.
 	var peeked ClientHelloPeek
 	if buildCfg == nil || !buildCfg.DisableClientHelloPeek {
-		sni, alpn := peekClientHelloSNIAndALPN(pc)
-		peeked = ClientHelloPeek{SNI: sni, ALPN: alpn}
+		peeked = peekClientHelloSNIAndALPN(pc)
 	}
 
 	stack, clientSnap, upstreamSnap, err := BuildConnectionStack(ctx, pc, target, buildCfg, peeked)

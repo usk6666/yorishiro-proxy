@@ -284,6 +284,8 @@ func (r *passthroughRecorder) envelopeForScope(streamID string, obs connector.Pa
 		Protocol:  envelope.ProtocolTLSHandshake,
 		Message: &envelope.TLSHandshakeMessage{
 			SNI:          obs.SNI,
+			ClientJA3:    obs.ClientJA3,
+			ClientJA4:    obs.ClientJA4,
 			LocalAddr:    obs.LocalAddr,
 			RemoteAddr:   obs.RemoteAddr,
 			UpstreamAddr: obs.UpstreamAddr,
@@ -292,8 +294,13 @@ func (r *passthroughRecorder) envelopeForScope(streamID string, obs connector.Pa
 			TargetHost: obs.TargetHost,
 		},
 	}
-	if obs.SNI != "" {
-		env.Context.TLS = &envelope.TLSSnapshot{SNI: obs.SNI}
+	if obs.SNI != "" || obs.ClientJA3 != "" || obs.ClientJA4 != "" {
+		env.Context.TLS = &envelope.TLSSnapshot{
+			SNI:               obs.SNI,
+			ClientJA3:         obs.ClientJA3,
+			ClientJA4:         obs.ClientJA4,
+			ClientFingerprint: obs.ClientJA4,
+		}
 	}
 	return env
 }
@@ -307,6 +314,12 @@ func passthroughMetadata(obs connector.PassthroughObservation) map[string]string
 	}
 	if obs.SNI != "" {
 		m["sni"] = obs.SNI
+	}
+	if obs.ClientJA3 != "" {
+		m["client_ja3"] = obs.ClientJA3
+	}
+	if obs.ClientJA4 != "" {
+		m["client_ja4"] = obs.ClientJA4
 	}
 	if obs.LocalAddr != "" {
 		m["local_addr"] = obs.LocalAddr

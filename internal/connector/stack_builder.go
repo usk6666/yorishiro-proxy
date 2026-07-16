@@ -640,6 +640,17 @@ type ClientHelloPeek struct {
 	// "forward this list verbatim to upstream and advertise upstream's
 	// pick back to the client".
 	ALPN []string
+
+	// ClientJA3 / ClientJA4 are the client's ClientHello fingerprints
+	// computed from the same peek buffer (USK-1015). Empty when the peek
+	// failed, the ClientHello was malformed, or it exceeded the peek cap.
+	// Unlike ALPN these are pure observation overlay — they never steer
+	// the build path; performClientMITM stamps them onto the client-facing
+	// TLSSnapshot so plugins / flow recording can surface them. Capture
+	// only: mirroring the client fingerprint to the upstream dial is
+	// unimplemented (deferred).
+	ClientJA3 string
+	ClientJA4 string
 }
 
 // BuildConnectionStack constructs a ConnectionStack for the given CONNECT
@@ -959,10 +970,10 @@ func buildALPNRoutedStack(
 
 	if cacheHit {
 		clientTLSConn, upstreamConn, clientSnap, upstreamSnap, err = buildCacheHitPath(
-			ctx, clientConn, target, host, cachedALPN, cacheKey, hostTLS, cfg)
+			ctx, clientConn, target, host, cachedALPN, cacheKey, peeked, hostTLS, cfg)
 	} else {
 		clientTLSConn, upstreamConn, clientSnap, upstreamSnap, err = buildCacheMissPath(
-			ctx, clientConn, target, host, cacheKey, hostTLS, cfg)
+			ctx, clientConn, target, host, cacheKey, peeked, hostTLS, cfg)
 	}
 	if err != nil {
 		return nil, nil, nil, err
@@ -1025,11 +1036,12 @@ func buildCacheHitPath(
 	clientConn net.Conn,
 	target, host, cachedALPN string,
 	cacheKey ALPNCacheKey,
+	peeked ClientHelloPeek,
 	hostTLS *resolvedTLS,
 	cfg *BuildConfig,
 ) (clientTLSConn net.Conn, upstreamConn net.Conn, clientSnap, upstreamSnap *envelope.TLSSnapshot, err error) {
 	clientOffers := clientALPNOffersForUpstream(cachedALPN)
-	clientTLSConn, clientSnap, err = performClientMITM(ctx, clientConn, host, clientOffers, cfg)
+	clientTLSConn, clientSnap, err = performClientMITM(ctx, clientConn, host, clientOffers, peeked, cfg)
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
@@ -1104,6 +1116,7 @@ func buildCacheMissPath(
 	clientConn net.Conn,
 	target, host string,
 	cacheKey ALPNCacheKey,
+	peeked ClientHelloPeek,
 	hostTLS *resolvedTLS,
 	cfg *BuildConfig,
 ) (clientTLSConn net.Conn, upstreamConn net.Conn, clientSnap, upstreamSnap *envelope.TLSSnapshot, err error) {
@@ -1135,7 +1148,7 @@ func buildCacheMissPath(
 	// a non-empty protocol the proxy can dispatch on. See function comment
 	// for the rationale (USK-793).
 	clientOffers := clientALPNOffersForUpstream(upstreamALPN)
-	clientTLSConn, clientSnap, err = performClientMITM(ctx, clientConn, host, clientOffers, cfg)
+	clientTLSConn, clientSnap, err = performClientMITM(ctx, clientConn, host, clientOffers, peeked, cfg)
 	if err != nil {
 		upstreamConn.Close()
 		return nil, nil, nil, nil, err
@@ -1235,7 +1248,7 @@ func buildSniffFirstStack(
 	clientOffers := mitmAdvertiseFromUpstreamPick(upstreamALPN)
 
 	// Step 3: client MITM TLS handshake.
-	clientTLSConn, clientSnap, err := performClientMITM(ctx, clientConn, host, clientOffers, cfg)
+	clientTLSConn, clientSnap, err := performClientMITM(ctx, clientConn, host, clientOffers, peeked, cfg)
 	if err != nil {
 		_ = upstreamConn.Close()
 		return nil, nil, nil, err
@@ -1346,7 +1359,7 @@ func buildPoolHitFastPath(
 		clientOffers = []string{ALPNProtocolH2}
 	}
 
-	clientTLSConn, clientSnap, err := performClientMITM(ctx, clientConn, host, clientOffers, cfg)
+	clientTLSConn, clientSnap, err := performClientMITM(ctx, clientConn, host, clientOffers, peeked, cfg)
 	if err != nil {
 		// Release the pool reservation — Layer is healthy, we just didn't
 		// complete the client-side handshake. Put (not Evict) keeps the
@@ -1489,11 +1502,19 @@ func fallbackPoolHitToFreshDial(
 // An empty / nil alpnOffers leaves NextProtos unset so the client never sees
 // the ALPN extension; the client will speak whatever default it prefers
 // (HTTP/1.x for browsers and curl).
+//
+// peek carries the client's ClientHello fingerprints (USK-1015). They are
+// stamped onto the returned client-facing TLSSnapshot uniformly for every
+// MITM build branch (sniff-first, cache-hit, cache-miss, pool-hit, fallback)
+// so plugin / flow surfaces see the client's JA3/JA4 regardless of ALPN.
+// A zero-value peek leaves the fingerprint fields empty (forward callers,
+// tests).
 func performClientMITM(
 	ctx context.Context,
 	clientConn net.Conn,
 	host string,
 	alpnOffers []string,
+	peek ClientHelloPeek,
 	cfg *BuildConfig,
 ) (net.Conn, *envelope.TLSSnapshot, error) {
 	// USK-813: count entries for the test-only ClientMITMHandshakeCount
@@ -1520,6 +1541,15 @@ func performClientMITM(
 	tlsConn, clientSnap, err := tlslayer.Server(ctx, clientConn, serverTLSCfg)
 	if err != nil {
 		return nil, nil, fmt.Errorf("%w: %w", ErrClientTLSMITMHandshake, err)
+	}
+	// USK-1015: stamp the client's ClientHello fingerprints onto the
+	// client-facing snapshot BEFORE firing the on_handshake hook so plugins
+	// observe ja3/ja4. ClientFingerprint mirrors ClientJA4 for the legacy
+	// `client_fingerprint` plugin key. Never applied to the upstream snapshot.
+	if clientSnap != nil {
+		clientSnap.ClientJA3 = peek.ClientJA3
+		clientSnap.ClientJA4 = peek.ClientJA4
+		clientSnap.ClientFingerprint = peek.ClientJA4
 	}
 	fireTLSHandshakeHook(ctx, cfg, "server", clientSnap)
 	return tlsConn, clientSnap, nil

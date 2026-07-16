@@ -614,6 +614,17 @@ func (s *RecordStep) Process(ctx context.Context, env *envelope.Envelope) Result
 		s.updateStreamTLS(ctx, env)
 	}
 
+	// USK-1015: project the client's ClientHello JA3/JA4 into ConnInfo. These
+	// live on the CLIENT-facing MITM snapshot, which is stamped on Send
+	// envelopes (the upstream Receive snapshot never carries them), so the
+	// projection is gated on the fingerprint fields being present rather than
+	// on direction. Idempotent — repeated Send envelopes rewrite the same
+	// two columns without clobbering the upstream TLS columns (empty fields
+	// are skipped by buildStreamUpdateSets).
+	if env.Context.TLS != nil && (env.Context.TLS.ClientJA3 != "" || env.Context.TLS.ClientJA4 != "") {
+		s.updateStreamClientFingerprint(ctx, env)
+	}
+
 	// USK-802: per-Stream record cap gate for streaming protocols
 	// (gRPC GRPCDataMessage / SSE SSEMessage). Wire forwarding has
 	// already happened by the time this Step runs in the Pipeline; the
@@ -783,6 +794,26 @@ func (s *RecordStep) updateStreamTLS(ctx context.Context, env *envelope.Envelope
 	}
 	if err := s.store.UpdateStream(ctx, env.StreamID, update); err != nil {
 		s.logger.Error("record step: TLS snapshot update failed",
+			"stream_id", env.StreamID,
+			"error", err,
+		)
+	}
+}
+
+// updateStreamClientFingerprint projects the client's ClientHello JA3/JA4
+// fingerprints (USK-1015) from env.Context.TLS into Stream.ConnInfo. Fires
+// on any envelope whose snapshot carries a non-empty fingerprint — in
+// practice the Send-direction client-facing snapshot. Only the two
+// tls_client_ja* columns are set so the per-Receive upstream TLS projection
+// is never clobbered (empty StreamUpdate fields are skipped downstream).
+func (s *RecordStep) updateStreamClientFingerprint(ctx context.Context, env *envelope.Envelope) {
+	tls := env.Context.TLS
+	update := flow.StreamUpdate{
+		TLSClientJA3: tls.ClientJA3,
+		TLSClientJA4: tls.ClientJA4,
+	}
+	if err := s.store.UpdateStream(ctx, env.StreamID, update); err != nil {
+		s.logger.Error("record step: client fingerprint update failed",
 			"stream_id", env.StreamID,
 			"error", err,
 		)
@@ -1138,6 +1169,12 @@ func (s *RecordStep) envelopeToFlow(ctx context.Context, env *envelope.Envelope)
 func projectTLSHandshake(m *envelope.TLSHandshakeMessage, fl *flow.Flow) {
 	if m.SNI != "" {
 		fl.Metadata["sni"] = m.SNI
+	}
+	if m.ClientJA3 != "" {
+		fl.Metadata["client_ja3"] = m.ClientJA3
+	}
+	if m.ClientJA4 != "" {
+		fl.Metadata["client_ja4"] = m.ClientJA4
 	}
 	if m.LocalAddr != "" {
 		fl.Metadata["local_addr"] = m.LocalAddr
