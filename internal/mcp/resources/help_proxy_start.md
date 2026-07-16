@@ -73,8 +73,8 @@ Each entry maps a local port number (string key) to either:
 
 ### tls_fingerprint (string, optional)
 TLS ClientHello fingerprint profile for upstream connections.
-- `"chrome"` (default): Mimic Chrome browser TLS fingerprint.
-- `"firefox"`: Mimic Firefox browser TLS fingerprint.
+- `"firefox"` (default): Mimic Firefox browser TLS fingerprint (camoufox coherence).
+- `"chrome"`: Mimic Chrome browser TLS fingerprint.
 - `"safari"`: Mimic Safari browser TLS fingerprint.
 - `"edge"`: Mimic Edge browser TLS fingerprint.
 - `"random"`: Select a random browser fingerprint per connection.

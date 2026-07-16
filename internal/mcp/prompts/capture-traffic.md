@@ -43,7 +43,7 @@ If `listen_addr` was not provided, default to `127.0.0.1:8080`.
 Scope tips:
 - Use `capture_scope` (recording filter) to keep the flow store focused.
 - Use `tls_passthrough` for services with certificate pinning — TLS interception is what breaks pinning, not recording.
-- For Cloudflare-style WAF detection issues, configure `tls_fingerprint` on `proxy_start` (default `chrome`).
+- For Cloudflare-style WAF detection issues, configure `tls_fingerprint` on `proxy_start` (default `firefox`).
 - Only use `security set_target_scope` (the transmission gate) if you must hard-block third-party requests — it typically breaks browser-driven flows because pages depend on third-party assets.
 
 ### 2. Drive the browser via playwright-cli

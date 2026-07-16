@@ -522,9 +522,14 @@ func NewLiveBuildConfig(
 	bc.GRPCMaxMessagesPerStream = config.ResolveGRPCMaxMessagesPerStream(proxyCfg.GRPC)
 	bc.SSEMaxEventsPerStream = config.ResolveSSEMaxEventsPerStream(proxyCfg.SSE)
 	bc.MaxBodySize = config.ResolveMaxBodySize(proxyCfg)
-	if proxyCfg.TLSFingerprint != "" {
-		bc.TLSFingerprint = proxyCfg.TLSFingerprint
-	}
+	// USK-1013: default the upstream TLS fingerprint to firefox (camoufox
+	// coherence). Pass a nil cfg so the live-dial path keeps its proxyCfg-only
+	// contract (it has historically not consulted top-level cfg.TLSFingerprint,
+	// unlike the resend axis in InitTLSTransport). The resolver maps the "none"
+	// opt-out sentinel to "" so bc.EffectiveTLSFingerprint() selects the
+	// standard crypto/tls stack (clientStandard) rather than hard-erroring the
+	// dial on an unknown uTLS profile.
+	bc.TLSFingerprint = config.ResolveTLSFingerprint(nil, proxyCfg)
 
 	return bc
 }
@@ -729,21 +734,19 @@ func applyHostTLSEntries(reg *transport.HostTLSRegistry, entries map[string]*con
 // standard transport is used otherwise. The HostTLSRegistry threaded in
 // here applies per-host mTLS / verify overrides.
 //
-// TLSFingerprint resolution order (USK-719):
+// TLSFingerprint resolution order (USK-719, default firefox per USK-1013):
 //
 //  1. proxyCfg.TLSFingerprint — populated by `-tls-fingerprint` CLI flag
 //     and by the proxy-config file's `tls_fingerprint`. This is the
 //     surface most users discover first.
 //  2. cfg.TLSFingerprint — populated by the top-level config file's
 //     `tls_fingerprint`. Kept for backward compatibility.
-//  3. empty — falls back to StandardTransport.
+//  3. "firefox" — the default when both are empty (camoufox coherence).
+//
+// The "none" opt-out sentinel resolves to "" (via config.ResolveTLSFingerprint)
+// and falls back to StandardTransport.
 func InitTLSTransport(cfg *config.Config, proxyCfg *config.ProxyConfig, reg *transport.HostTLSRegistry, logger *slog.Logger) transport.TLSTransport {
-	fingerprint := ""
-	if proxyCfg.TLSFingerprint != "" {
-		fingerprint = proxyCfg.TLSFingerprint
-	} else if cfg.TLSFingerprint != "" {
-		fingerprint = cfg.TLSFingerprint
-	}
+	fingerprint := config.ResolveTLSFingerprint(cfg, proxyCfg)
 
 	if fingerprint != "" {
 		profile, err := transport.ParseBrowserProfile(fingerprint)

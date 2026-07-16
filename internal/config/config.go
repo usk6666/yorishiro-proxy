@@ -194,10 +194,12 @@ type Config struct {
 	TLSPassthrough []string `json:"tls_passthrough"`
 
 	// TLSFingerprint selects the TLS ClientHello fingerprint profile for
-	// upstream HTTPS connections. When set, uTLS is used to mimic a browser's
-	// TLS fingerprint, evading JA3/JA4-based bot detection.
-	// Valid values: "chrome", "firefox", "safari", "edge", "random".
-	// Empty or unset means Go's default TLS stack is used (no fingerprint spoofing).
+	// upstream HTTPS connections. uTLS is used to mimic a browser's TLS
+	// fingerprint, evading JA3/JA4-based bot detection.
+	// Valid values: "firefox" (default), "chrome", "safari", "edge", "random",
+	// "none" (standard crypto/tls, no fingerprint spoofing).
+	// Empty or unset resolves to "firefox" (see config.ResolveTLSFingerprint,
+	// USK-1013); use "none" to opt out of uTLS spoofing.
 	TLSFingerprint string `json:"tls_fingerprint"`
 
 	// ClientCertPath is the path to the PEM-encoded client certificate file
@@ -328,6 +330,42 @@ func ResolveDBPath(value string) (string, error) {
 
 	// Otherwise treat as a CWD-relative path (backward compatible).
 	return value, nil
+}
+
+// DefaultTLSFingerprint is the upstream TLS ClientHello fingerprint profile
+// used when neither the proxy config nor the top-level config selects one.
+// Firefox is the default so the proxy's own TLS fingerprint stays coherent
+// with the camoufox anti-detect browser pairing (M47/M48) out of the box.
+// Chrome parity remains available via explicit configuration.
+const DefaultTLSFingerprint = "firefox"
+
+// ResolveTLSFingerprint returns the effective upstream TLS ClientHello
+// fingerprint profile name, applying the precedence:
+//
+//  1. proxyCfg.TLSFingerprint (per-listener config / `-tls-fingerprint` flag)
+//  2. cfg.TLSFingerprint (top-level config; pass a nil cfg to skip this tier
+//     and preserve the live-dial path's proxyCfg-only contract)
+//  3. DefaultTLSFingerprint ("firefox")
+//
+// The opt-out sentinel "none" (case-insensitive) resolves to "" so the caller
+// dials with the standard crypto/tls stack (no uTLS spoofing). Any other value
+// passes through unchanged for downstream profile validation. This is the
+// single source of truth for the firefox default and the "none" escape hatch;
+// call it from every boot-time fingerprint resolution site (USK-1013).
+func ResolveTLSFingerprint(cfg *Config, proxyCfg *ProxyConfig) string {
+	fingerprint := ""
+	if proxyCfg != nil && proxyCfg.TLSFingerprint != "" {
+		fingerprint = proxyCfg.TLSFingerprint
+	} else if cfg != nil && cfg.TLSFingerprint != "" {
+		fingerprint = cfg.TLSFingerprint
+	}
+	if fingerprint == "" {
+		fingerprint = DefaultTLSFingerprint
+	}
+	if strings.EqualFold(strings.TrimSpace(fingerprint), "none") {
+		return ""
+	}
+	return fingerprint
 }
 
 // validateProjectName checks that a project name contains only safe characters.
@@ -639,7 +677,8 @@ type ProxyConfig struct {
 	UpstreamProxyStruct *UpstreamProxyConfig `json:"-"`
 
 	// TLSFingerprint selects the TLS ClientHello fingerprint profile for upstream connections.
-	// Valid values: "chrome" (default), "firefox", "safari", "edge", "random", "none" (standard crypto/tls).
+	// Valid values: "firefox" (default), "chrome", "safari", "edge", "random", "none" (standard crypto/tls).
+	// Empty or unset resolves to "firefox" (config.ResolveTLSFingerprint, USK-1013).
 	TLSFingerprint string `json:"tls_fingerprint,omitempty"`
 
 	// ClientCertPath is the path to a PEM-encoded client certificate for mTLS (global).
