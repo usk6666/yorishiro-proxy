@@ -105,6 +105,10 @@ func RedialUpstreamH2(
 		http2.WithMaxBodySize(cfg.MaxBodySize),
 		http2.WithStateReleaser(cfg.PluginV2Engine),
 		http2.WithGoAwayObserver(onGoAway),
+		// USK-1007: preserve the Firefox-shaped upstream H2 fingerprint
+		// across GOAWAY redials (USK-991 browser-parity north-star) —
+		// no-op (Chrome shape) when tls_fingerprint is not firefox.
+		http2.WithH2Fingerprint(cfg.EffectiveTLSFingerprint()),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("connector: redial h2 layer: %w", err)

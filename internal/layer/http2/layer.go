@@ -58,6 +58,11 @@ type options struct {
 	maxBody              int64
 	stateReleaser        pluginv2.StateReleaser
 	goAwayObserver       func()
+	// h2FingerprintProfile is the raw tls_fingerprint value (e.g.
+	// "firefox") driving the upstream (ClientRole) HTTP/2 send-shape. Empty
+	// / unknown / non-firefox values resolve to H2FingerprintDefault. See
+	// WithH2Fingerprint and resolveH2Fingerprint (fingerprint.go).
+	h2FingerprintProfile string
 	// enableConnectProtocol overrides the ServerRole-only default
 	// advertisement of SETTINGS_ENABLE_CONNECT_PROTOCOL. Tracked as a
 	// pointer so the zero value of options can be distinguished from
@@ -102,6 +107,18 @@ func WithMaxConcurrentStreams(n uint32) Option {
 // the decoder will accept. 0 = use HPACK's defaultMaxHeaderListSize.
 func WithMaxHeaderListSize(n uint32) Option {
 	return func(o *options) { o.maxHeaderListSize = n }
+}
+
+// WithH2Fingerprint selects the browser-shaped HTTP/2 send-fingerprint the
+// upstream (ClientRole) Layer presents to the peer, sourced from the
+// existing tls_fingerprint value (BuildConfig.EffectiveTLSFingerprint). Only
+// "firefox" diverges from the historical (Chrome-shaped) behaviour; every
+// other value — chrome / edge / safari / random / none / unknown / empty —
+// keeps the pre-USK-1007 SETTINGS, WINDOW_UPDATE increment, and pseudo-header
+// order byte-for-byte. The profile has no effect on ServerRole (client-facing)
+// Layers: browser fingerprinting concerns the proxy's *upstream* send-shape.
+func WithH2Fingerprint(profile string) Option {
+	return func(o *options) { o.h2FingerprintProfile = profile }
 }
 
 // WithBodySpillDir records the directory used for body spill temp files.
@@ -227,6 +244,12 @@ type Layer struct {
 	encoder     *hpack.Encoder
 
 	encoderTableSize uint32
+
+	// h2Fingerprint is the resolved browser send-fingerprint for this Layer
+	// (set once in New). It drives the request pseudo-header order emitted by
+	// the native send path (sendHeadersEvent). ClientRole-only: ServerRole
+	// Layers always resolve to H2FingerprintDefault.
+	h2Fingerprint H2Fingerprint
 
 	mu         sync.Mutex
 	channels   map[uint32]*channel
@@ -547,6 +570,12 @@ func New(conn net.Conn, streamID string, role Role, opts ...Option) (*Layer, err
 		opt(&o)
 	}
 
+	// USK-1007: resolve the browser send-fingerprint once. Firefox shaping
+	// applies to the upstream (ClientRole) send-shape only; every other
+	// profile (and every ServerRole Layer) resolves to the default
+	// Chrome-shaped behaviour, keeping the pre-USK-1007 wire output intact.
+	fp := resolveH2Fingerprint(o.h2FingerprintProfile, role)
+
 	httpConn := NewConn()
 	if o.initialSettings != nil {
 		settings := *o.initialSettings
@@ -556,11 +585,14 @@ func New(conn net.Conn, streamID string, role Role, opts ...Option) (*Layer, err
 			return nil, err
 		}
 	} else {
-		def := DefaultSettings()
-		def.InitialWindowSize = defaultLargeStreamWindow
+		def := defaultLocalSettings(fp)
 		// Apply per-field MaxConcurrentStreams override only when the
 		// caller did not supply a full WithInitialSettings; the explicit
-		// override wins per the WithMaxConcurrentStreams contract.
+		// override wins per the WithMaxConcurrentStreams contract. (The
+		// Firefox shape drops MAX_CONCURRENT_STREAMS from the wire regardless
+		// — firefoxSettingsFrame never emits it — but honouring the field
+		// here keeps the local-settings accounting consistent for the
+		// unusual firefox+WithMaxConcurrentStreams combination.)
 		if o.maxConcurrentStreams != 0 {
 			def.MaxConcurrentStreams = o.maxConcurrentStreams
 		}
@@ -598,6 +630,7 @@ func New(conn net.Conn, streamID string, role Role, opts ...Option) (*Layer, err
 		windowUpdated:      make(chan struct{}, 1),
 		nextClientStreamID: 1,
 		encoderTableSize:   local.HeaderTableSize,
+		h2Fingerprint:      fp,
 	}
 
 	if err := l.runPreface(); err != nil {
@@ -618,10 +651,10 @@ func New(conn net.Conn, streamID string, role Role, opts ...Option) (*Layer, err
 	go l.readerLoop()
 
 	l.enqueueWrite(writeRequest{settings: &writeSettings{
-		params: settingsToFrame(local, role),
+		params: settingsToFrame(local, role, fp),
 	}})
 
-	bump := uint32(defaultLargeConnWindow - defaultConnectionWindowSize)
+	bump := connWindowIncrement(fp)
 	if err := l.conn.IncrementRecvWindow(bump); err != nil {
 		_ = conn.Close()
 		return nil, err
@@ -824,7 +857,16 @@ func (l *Layer) runPreface() error {
 // initial SETTINGS frame entirely. This keeps the wire output identical
 // to the pre-USK-764 behaviour for endpoints that do not support extended
 // CONNECT.
-func settingsToFrame(s Settings, role Role) []frame.Setting {
+//
+// USK-1007: when fp == H2FingerprintFirefox on a ClientRole Layer, the
+// Firefox-shaped ordered set is emitted instead (firefoxSettingsFrame) —
+// HEADER_TABLE_SIZE, ENABLE_PUSH, INITIAL_WINDOW_SIZE, MAX_FRAME_SIZE, with
+// MAX_CONCURRENT_STREAMS dropped. Every other fingerprint keeps the default
+// (Chrome-shaped) emission below byte-for-byte.
+func settingsToFrame(s Settings, role Role, fp H2Fingerprint) []frame.Setting {
+	if fp == H2FingerprintFirefox && role == ClientRole {
+		return firefoxSettingsFrame(s)
+	}
 	out := []frame.Setting{
 		{ID: frame.SettingHeaderTableSize, Value: s.HeaderTableSize},
 	}

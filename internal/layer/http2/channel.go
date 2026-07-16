@@ -341,7 +341,11 @@ func (c *channel) Send(ctx context.Context, env *envelope.Envelope) error {
 // id. Server-role channels arrive here with h2Stream pre-populated from
 // the inbound frame and skip allocation.
 func (c *channel) sendHeadersEvent(ctx context.Context, env *envelope.Envelope, evt *H2HeadersEvent) error {
-	fields := BuildHeaderFieldsFromEvent(env, evt)
+	// USK-1007: use the Layer's resolved browser fingerprint so the request
+	// pseudo-header order on the wire matches the advertised browser identity
+	// (Firefox: :method :path :authority :scheme). ServerRole / non-firefox
+	// Layers resolve to H2FingerprintDefault (Chrome-shaped order).
+	fields := BuildHeaderFieldsFromEventWithFingerprint(env, evt, c.layer.h2Fingerprint)
 	done := make(chan error, 1)
 
 	if err := c.allocateAndEnqueueFirstHeaders(ctx, fields, evt.EndStream, done); err != nil {
@@ -581,6 +585,18 @@ func BuildHeaderFieldsFromEvent(env *envelope.Envelope, evt *H2HeadersEvent) []h
 	return fields
 }
 
+// BuildHeaderFieldsFromEventWithFingerprint is the fingerprint-aware variant
+// of BuildHeaderFieldsFromEvent (USK-1007). fp selects the request
+// pseudo-header order: H2FingerprintFirefox emits :method :path :authority
+// :scheme; every other value keeps the historical :method :scheme :authority
+// :path order. Response pseudo-headers (:status) are unaffected. The native
+// send path (sendHeadersEvent) calls this with the Layer's resolved
+// fingerprint so the wire order matches the browser identity.
+func BuildHeaderFieldsFromEventWithFingerprint(env *envelope.Envelope, evt *H2HeadersEvent, fp H2Fingerprint) []hpack.HeaderField {
+	fields, _ := buildHeaderFieldsFromEventWithDiag(env, evt, fp)
+	return fields
+}
+
 // BuildHeaderFieldsFromEventWithDiag is the diagnostic-aware variant of
 // BuildHeaderFieldsFromEvent. It returns the HPACK field list and the
 // verbatim wire-name(s) of any RFC 7540 §8.1.2.2 / RFC 9113 §8.2.2
@@ -597,12 +613,22 @@ func BuildHeaderFieldsFromEvent(env *envelope.Envelope, evt *H2HeadersEvent) []h
 // mirror the receive-side anomaly Detail shape (assembler.go
 // regularHeaderAnomalies).
 func BuildHeaderFieldsFromEventWithDiag(env *envelope.Envelope, evt *H2HeadersEvent) ([]hpack.HeaderField, []string) {
+	return buildHeaderFieldsFromEventWithDiag(env, evt, H2FingerprintDefault)
+}
+
+// buildHeaderFieldsFromEventWithDiag is the shared implementation behind
+// BuildHeaderFieldsFromEventWithDiag (default fingerprint) and
+// BuildHeaderFieldsFromEventWithFingerprint (explicit fingerprint). fp only
+// affects request pseudo-header ordering (appendRequestPseudoHeaders); the
+// connection-specific strip and response path are identical for all
+// fingerprints.
+func buildHeaderFieldsFromEventWithDiag(env *envelope.Envelope, evt *H2HeadersEvent, fp H2Fingerprint) ([]hpack.HeaderField, []string) {
 	out := make([]hpack.HeaderField, 0, len(evt.Headers)+5)
 
 	if isResponseHeadersEvent(env, evt) {
 		out = appendResponsePseudoHeaders(out, evt)
 	} else {
-		out = appendRequestPseudoHeaders(out, evt)
+		out = appendRequestPseudoHeaders(out, evt, fp)
 	}
 
 	var stripped []string
@@ -650,22 +676,28 @@ func appendResponsePseudoHeaders(out []hpack.HeaderField, evt *H2HeadersEvent) [
 }
 
 // appendRequestPseudoHeaders adds the :method / :scheme / :authority /
-// :path / :protocol pseudo-headers for a request HEADERS event in
-// canonical wire order. Defaults mirror the previous inline logic in
-// BuildHeaderFieldsFromEvent for backward compatibility.
-func appendRequestPseudoHeaders(out []hpack.HeaderField, evt *H2HeadersEvent) []hpack.HeaderField {
+// :path / :protocol pseudo-headers for a request HEADERS event.
+//
+// The pseudo-header *order* is proxy-authored (the wire-observed order is
+// discarded on the Send path — HPACK re-encodes from the structured event),
+// so selecting it by fingerprint is not a normalization of wire-real data
+// (CLAUDE.md MITM Principle #1 applies to real headers, appended verbatim by
+// the caller after these pseudo-headers). USK-1007:
+//
+//   - H2FingerprintDefault (Chrome-shaped): :method :scheme :authority :path
+//   - H2FingerprintFirefox:                 :method :path :authority :scheme
+//
+// :authority is emitted only when non-empty (both orders). :protocol is
+// appended last for extended CONNECT (RFC 8441 §4), unchanged across
+// fingerprints.
+func appendRequestPseudoHeaders(out []hpack.HeaderField, evt *H2HeadersEvent, fp H2Fingerprint) []hpack.HeaderField {
 	method := evt.Method
 	if method == "" {
 		method = "GET"
 	}
-	out = append(out, hpack.HeaderField{Name: ":method", Value: method})
 	scheme := evt.Scheme
 	if scheme == "" {
 		scheme = "https"
-	}
-	out = append(out, hpack.HeaderField{Name: ":scheme", Value: scheme})
-	if evt.Authority != "" {
-		out = append(out, hpack.HeaderField{Name: ":authority", Value: evt.Authority})
 	}
 	path := evt.Path
 	if path == "" {
@@ -674,7 +706,29 @@ func appendRequestPseudoHeaders(out []hpack.HeaderField, evt *H2HeadersEvent) []
 	if evt.RawQuery != "" {
 		path = path + "?" + evt.RawQuery
 	}
-	out = append(out, hpack.HeaderField{Name: ":path", Value: path})
+
+	methodField := hpack.HeaderField{Name: ":method", Value: method}
+	schemeField := hpack.HeaderField{Name: ":scheme", Value: scheme}
+	pathField := hpack.HeaderField{Name: ":path", Value: path}
+	hasAuthority := evt.Authority != ""
+	authorityField := hpack.HeaderField{Name: ":authority", Value: evt.Authority}
+
+	if fp == H2FingerprintFirefox {
+		// Firefox: :method :path :authority :scheme
+		out = append(out, methodField, pathField)
+		if hasAuthority {
+			out = append(out, authorityField)
+		}
+		out = append(out, schemeField)
+	} else {
+		// Default (Chrome-shaped): :method :scheme :authority :path
+		out = append(out, methodField, schemeField)
+		if hasAuthority {
+			out = append(out, authorityField)
+		}
+		out = append(out, pathField)
+	}
+
 	// RFC 8441 §4: extended CONNECT carries :protocol on the request.
 	// Emit it only when the event actually populates the field — this
 	// keeps classic CONNECT (Method=CONNECT, ConnectProtocol="")
