@@ -185,7 +185,7 @@ type proxyManager interface {
 	// profile reflecting any runtime SetTLSFingerprint override on top
 	// of the boot-time BuildConfig.TLSFingerprint (USK-809). Returns
 	// the empty string when no BuildConfig is bound. Callers must NOT
-	// substitute a "chrome" default — empty is the canonical "no
+	// substitute the "firefox" boot default — empty is the canonical "no
 	// fingerprint configured" sentinel.
 	TLSFingerprint() string
 	// SetMaxConcurrentStreams installs a runtime override for the

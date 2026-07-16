@@ -948,8 +948,8 @@ func (m *Manager) MaxConcurrentStreams() uint32 {
 // the boot-time BuildConfig.TLSFingerprint when no override is in
 // effect. Returns the empty string when no BuildConfig is bound — the
 // caller is responsible for translating empty into a user-facing
-// representation if desired (this accessor does NOT substitute a
-// "chrome" default).
+// representation if desired (this accessor does NOT substitute the
+// "firefox" boot default — empty stays empty).
 func (m *Manager) TLSFingerprint() string {
 	m.mu.Lock()
 	bc := m.buildCfg

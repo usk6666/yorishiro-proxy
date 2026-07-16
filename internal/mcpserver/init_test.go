@@ -435,15 +435,35 @@ func TestInitHostTLSRegistry_PerHostFromProxyConfig(t *testing.T) {
 
 // --- InitTLSTransport tests (USK-719) ---
 
-// TestInitTLSTransport_Default verifies the no-fingerprint case yields a
-// StandardTransport.
+// TestInitTLSTransport_Default verifies that the no-fingerprint case now
+// resolves to the firefox default (USK-1013), yielding a UTLSTransport with
+// ProfileFirefox rather than a StandardTransport.
 func TestInitTLSTransport_Default(t *testing.T) {
 	logger := testLogger(t)
 	cfg := config.Default()
 
 	got := InitTLSTransport(cfg, &config.ProxyConfig{}, nil, logger)
+	utls, ok := got.(*transport.UTLSTransport)
+	if !ok {
+		t.Fatalf("got %T, want *UTLSTransport (firefox default)", got)
+	}
+	if utls.Profile != transport.ProfileFirefox {
+		t.Errorf("Profile = %v, want ProfileFirefox (default)", utls.Profile)
+	}
+}
+
+// TestInitTLSTransport_NoneOptsOut verifies the "none" escape hatch: an
+// explicit "none" resolves to "" (config.ResolveTLSFingerprint) so the resend
+// axis falls back to StandardTransport instead of the firefox default
+// (USK-1013 U1).
+func TestInitTLSTransport_NoneOptsOut(t *testing.T) {
+	logger := testLogger(t)
+	cfg := config.Default()
+	proxyCfg := &config.ProxyConfig{TLSFingerprint: "none"}
+
+	got := InitTLSTransport(cfg, proxyCfg, nil, logger)
 	if _, ok := got.(*transport.StandardTransport); !ok {
-		t.Errorf("got %T, want *StandardTransport", got)
+		t.Errorf("got %T, want *StandardTransport for none opt-out", got)
 	}
 }
 
@@ -514,6 +534,41 @@ func TestInitTLSTransport_InvalidProfileFallback(t *testing.T) {
 	got := InitTLSTransport(cfg, proxyCfg, nil, logger)
 	if _, ok := got.(*transport.StandardTransport); !ok {
 		t.Errorf("got %T, want *StandardTransport on invalid profile", got)
+	}
+}
+
+// TestNewLiveBuildConfig_TLSFingerprintDefault verifies the live-dial boot
+// path (USK-1013): an unset fingerprint is pinned to the firefox default,
+// "none" opts out to standard TLS (empty EffectiveTLSFingerprint → clientStandard),
+// and an explicit profile passes through. The live path is proxyCfg-only, so
+// a top-level cfg.TLSFingerprint must NOT leak in when proxyCfg is empty.
+func TestNewLiveBuildConfig_TLSFingerprintDefault(t *testing.T) {
+	tests := []struct {
+		name       string
+		proxyFP    string
+		topLevelFP string
+		wantStored string // bc.TLSFingerprint
+		wantEffect string // bc.EffectiveTLSFingerprint()
+	}{
+		{"unset defaults to firefox", "", "", "firefox", "firefox"},
+		{"none opts out to standard TLS", "none", "", "", ""},
+		{"explicit chrome passes through", "chrome", "", "chrome", "chrome"},
+		{"live path ignores top-level cfg", "", "safari", "firefox", "firefox"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := config.Default()
+			cfg.TLSFingerprint = tt.topLevelFP
+			proxyCfg := &config.ProxyConfig{TLSFingerprint: tt.proxyFP}
+
+			bc := NewLiveBuildConfig(cfg, proxyCfg, nil, nil, nil)
+			if bc.TLSFingerprint != tt.wantStored {
+				t.Errorf("bc.TLSFingerprint = %q, want %q", bc.TLSFingerprint, tt.wantStored)
+			}
+			if got := bc.EffectiveTLSFingerprint(); got != tt.wantEffect {
+				t.Errorf("bc.EffectiveTLSFingerprint() = %q, want %q (selects clientStandard when empty)", got, tt.wantEffect)
+			}
+		})
 	}
 }
 

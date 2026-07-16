@@ -119,9 +119,9 @@ type proxyStartInput struct {
 	SOCKS5Password string `json:"socks5_password,omitempty" jsonschema:"password for SOCKS5 password authentication"`
 
 	// TLSFingerprint selects the TLS ClientHello fingerprint profile for upstream connections.
-	// Valid values: "chrome" (default), "firefox", "safari", "edge", "random", "none" (standard crypto/tls).
-	// If omitted, defaults to "chrome".
-	TLSFingerprint string `json:"tls_fingerprint,omitempty" jsonschema:"TLS fingerprint profile: chrome (default), firefox, safari, edge, random, none"`
+	// Valid values: "firefox" (default), "chrome", "safari", "edge", "random", "none" (standard crypto/tls).
+	// If omitted, defaults to "firefox" (camoufox coherence, USK-1013).
+	TLSFingerprint string `json:"tls_fingerprint,omitempty" jsonschema:"TLS fingerprint profile: firefox (default), chrome, safari, edge, random, none"`
 
 	// ClientCertPath is the path to a PEM-encoded client certificate for mTLS with upstream servers (global).
 	// Must be used together with client_key. If omitted, no client certificate is presented.
@@ -430,9 +430,10 @@ func (s *Server) resetSettingsToDefaults(listenerName string) {
 		setter.SetUpstreamProxy(nil)
 	}
 
-	// Reset TLS fingerprint to default ("chrome"), including transport rebuild.
+	// Reset TLS fingerprint to default ("firefox"), including transport rebuild.
 	// Use applyTLSFingerprint to ensure transport is reconstructed (USK-467).
-	_ = s.applyTLSFingerprint("chrome")
+	// firefox is the boot default (config.DefaultTLSFingerprint, USK-1013).
+	_ = s.applyTLSFingerprint(config.DefaultTLSFingerprint)
 
 	// Reset global client certificate.
 	if s.connector.hostTLSRegistry != nil {

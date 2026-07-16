@@ -1617,7 +1617,9 @@ func TestProxyStart_ResetsLimitsAndTimeoutsOnRestart(t *testing.T) {
 }
 
 // TestProxyStart_ResetsTLSFingerprintOnRestart verifies that TLS fingerprint
-// is reset to "chrome" (default) when proxy_start omits tls_fingerprint.
+// is reset to "firefox" (default, USK-1013) when proxy_start omits
+// tls_fingerprint. Start from chrome to prove the reset moves the profile back
+// to the firefox default.
 func TestProxyStart_ResetsTLSFingerprintOnRestart(t *testing.T) {
 	manager := newTestProxybuildManager(t)
 
@@ -1630,7 +1632,7 @@ func TestProxyStart_ResetsTLSFingerprintOnRestart(t *testing.T) {
 	// Step 1: Start proxy with custom fingerprint.
 	result, err := callProxyStart(t, cs, map[string]any{
 		"listen_addr":     "127.0.0.1:0",
-		"tls_fingerprint": "firefox",
+		"tls_fingerprint": "chrome",
 	})
 	if err != nil {
 		t.Fatalf("CallTool (first start): %v", err)
@@ -1638,8 +1640,8 @@ func TestProxyStart_ResetsTLSFingerprintOnRestart(t *testing.T) {
 	if result.IsError {
 		t.Fatalf("unexpected error on first start: %v", result.Content)
 	}
-	if mockFP.profile != "firefox" {
-		t.Errorf("tls_fingerprint after first start = %q, want %q", mockFP.profile, "firefox")
+	if mockFP.profile != "chrome" {
+		t.Errorf("tls_fingerprint after first start = %q, want %q", mockFP.profile, "chrome")
 	}
 
 	// Step 2: Stop and restart without fingerprint.
@@ -1664,8 +1666,8 @@ func TestProxyStart_ResetsTLSFingerprintOnRestart(t *testing.T) {
 	}
 
 	// Verify fingerprint was reset to default.
-	if mockFP.profile != "chrome" {
-		t.Errorf("tls_fingerprint after restart = %q, want %q (default)", mockFP.profile, "chrome")
+	if mockFP.profile != "firefox" {
+		t.Errorf("tls_fingerprint after restart = %q, want %q (default)", mockFP.profile, "firefox")
 	}
 }
 

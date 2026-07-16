@@ -474,9 +474,12 @@ func TestProxyStart_TLSFingerprint_NoneUsesStandardTransport(t *testing.T) {
 }
 
 func TestResetSettingsToDefaults_RebuildsTLSTransport(t *testing.T) {
-	setter := &mockTLSFingerprintSetter{profile: "firefox"}
+	// USK-1013: the boot default is firefox, so resetSettingsToDefaults must
+	// restore firefox (not chrome). Start from chrome to prove the reset moves
+	// the profile back to the firefox default.
+	setter := &mockTLSFingerprintSetter{profile: "chrome"}
 	initialTransport := &transport.UTLSTransport{
-		Profile:            transport.ProfileFirefox,
+		Profile:            transport.ProfileChrome,
 		InsecureSkipVerify: true,
 	}
 
@@ -490,12 +493,12 @@ func TestResetSettingsToDefaults_RebuildsTLSTransport(t *testing.T) {
 	// Reset to defaults.
 	s.resetSettingsToDefaults(proxybuild.DefaultListenerName)
 
-	// Profile should be reset to "chrome".
-	if setter.profile != "chrome" {
-		t.Errorf("setter.profile = %q, want chrome", setter.profile)
+	// Profile should be reset to "firefox".
+	if setter.profile != "firefox" {
+		t.Errorf("setter.profile = %q, want firefox", setter.profile)
 	}
 
-	// Transport should be rebuilt as UTLSTransport with Chrome profile.
+	// Transport should be rebuilt as UTLSTransport with Firefox profile.
 	if setter.transport == nil {
 		t.Fatal("transport was not set after reset")
 	}
@@ -503,8 +506,8 @@ func TestResetSettingsToDefaults_RebuildsTLSTransport(t *testing.T) {
 	if !ok {
 		t.Fatalf("transport type = %T, want *transport.UTLSTransport", setter.transport)
 	}
-	if ut.Profile != transport.ProfileChrome {
-		t.Errorf("transport profile = %v, want ProfileChrome", ut.Profile)
+	if ut.Profile != transport.ProfileFirefox {
+		t.Errorf("transport profile = %v, want ProfileFirefox", ut.Profile)
 	}
 	if !ut.InsecureSkipVerify {
 		t.Error("InsecureSkipVerify should be inherited from initial transport")
