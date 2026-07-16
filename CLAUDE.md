@@ -45,6 +45,7 @@ Each connection is an explicit stack of `Layer`s (RFC-001 §3.3); each Layer yie
 | Raw TCP | N/A | YES (byte stream) | Smuggling-safe pass-through (`bytechunk` Layer). Forward: supported (USK-911~917). |
 | SOCKS5 | N/A | N/A (excluded as transport layer itself) | Apply raw bytes/L7 to the protocol delegated after handshake/tunnel |
 | TLS handshake | YES (observation) | N/A | `TLSHandshakeMessage` envelope; SNI / ALPN / JA3 / JA4 visible to plugins |
+| HTTP/3 / QUIC | NO | NO | Out of scope (USK-1016). No UDP listener; ALPN advertises only `h2` / `http/1.1`. Proxied Firefox does not use h3 (h3 cannot traverse a `CONNECT` proxy), so absence is a weak bot signal. See [RFC-001 §11](docs/rfc/envelope.md#11-acceptance-record-and-deferred-items). |
 
 > **TCP forward L7 dispatch (USK-911~917)**: All L7-supported protocols above are also usable through TCP forward mode (`tcp_forwards`) with independent client-side (`tls`) and upstream-side (`upstream_tls`) TLS axes. See `internal/proxybuild/tcp_forward.go` for the dispatch matrix and [RFC-001 §3.4.2](docs/rfc/envelope.md#342-tcp-forward-l7-dispatch).
 
