@@ -124,6 +124,14 @@ type ConnectionInfo struct {
 	// TLSServerCertSubject is the subject DN of the upstream server's TLS certificate.
 	// Empty for non-TLS connections.
 	TLSServerCertSubject string
+	// TLSClientJA3 is the JA3 (MD5) fingerprint of the client's TLS
+	// ClientHello, captured by the MITM ClientHello peek (USK-1015). Empty
+	// for non-TLS connections or when the ClientHello could not be observed
+	// / parsed (e.g. it exceeded the peek cap).
+	TLSClientJA3 string
+	// TLSClientJA4 is the JA4 (TLS client) fingerprint of the client's TLS
+	// ClientHello. Same population/empty semantics as TLSClientJA3.
+	TLSClientJA4 string
 }
 
 // Flow represents a single directional message within a stream.
@@ -239,6 +247,12 @@ type StreamUpdate struct {
 	// TLSServerCertSubject sets the upstream server TLS certificate subject in ConnInfo.
 	// Only applied when non-empty.
 	TLSServerCertSubject string
+	// TLSClientJA3 sets the client ClientHello JA3 fingerprint in ConnInfo
+	// (USK-1015). Only applied when non-empty.
+	TLSClientJA3 string
+	// TLSClientJA4 sets the client ClientHello JA4 fingerprint in ConnInfo
+	// (USK-1015). Only applied when non-empty.
+	TLSClientJA4 string
 	// SendMs sets the request send time in milliseconds.
 	// Only applied when non-nil.
 	SendMs *int64

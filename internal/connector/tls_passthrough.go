@@ -10,6 +10,8 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+
+	"github.com/usk6666/yorishiro-proxy/internal/tlsfingerprint"
 )
 
 // PassthroughObservation captures everything the proxy could observe about
@@ -48,6 +50,15 @@ type PassthroughObservation struct {
 	// empty when the dial itself failed (in which case OnComplete is
 	// invoked with Outcome="failed" and OnStart never fired).
 	UpstreamAddr string
+
+	// ClientJA3 / ClientJA4 are the client's ClientHello fingerprints
+	// computed from the SNI peek buffer (USK-1015). Empty when the peek
+	// failed or the ClientHello was malformed. Under passthrough the proxy
+	// never decrypts the tunnel, but the ClientHello is sent in the clear
+	// before the encrypted handshake body, so the fingerprint is a legal
+	// observation (unlike ALPN / negotiated version, which are not).
+	ClientJA3 string
+	ClientJA4 string
 
 	// TargetHost is the hostname portion of the CONNECT / SOCKS5 target
 	// authority the client requested (without ":port"). Unlike
@@ -184,13 +195,15 @@ func relayTLSPassthroughWithObserver(
 	// Best-effort SNI peek before the relay starts. The peek is bounded by
 	// passthroughSNIPeekTimeout so a misbehaving client cannot stall the
 	// relay forever; failure is logged and the audit flow records SNI="".
-	var sni string
+	var sni, clientJA3, clientJA4 string
 	if observer != nil {
-		sni = peekClientHelloSNI(clientConn)
+		sni, clientJA3, clientJA4 = peekClientHelloSNI(clientConn)
 	}
 
 	obs := PassthroughObservation{
 		SNI:          sni,
+		ClientJA3:    clientJA3,
+		ClientJA4:    clientJA4,
 		LocalAddr:    netAddrString(clientConn.LocalAddr()),
 		RemoteAddr:   netAddrString(clientConn.RemoteAddr()),
 		UpstreamAddr: netAddrString(upstreamConn.RemoteAddr()),
@@ -244,14 +257,21 @@ func relayTLSPassthroughWithObserver(
 // underlying conn under the deadline, and leaving the deadline armed
 // would cause the relay's first io.Copy read to fail with a deadline
 // error before any TLS bytes flowed.
-func peekClientHelloSNI(clientConn net.Conn) string {
+//
+// USK-1015: the peek also computes the client's JA3/JA4 fingerprints from
+// the same buffer. Under passthrough the proxy never decrypts the tunnel,
+// but the ClientHello is on the wire in the clear, so the fingerprint is a
+// legal observation (added ONLY here; ALPN / negotiated version stay absent
+// to keep the "no fabricated data" contract). Empty on any peek/parse
+// failure, matching the SNI fallback.
+func peekClientHelloSNI(clientConn net.Conn) (sni, ja3, ja4 string) {
 	pc, ok := clientConn.(*PeekConn)
 	if !ok {
-		return ""
+		return "", "", ""
 	}
 	if err := pc.SetReadDeadline(time.Now().Add(clientHelloPeekTimeout)); err != nil {
 		slog.Debug("connector: passthrough SNI peek deadline arm failed", "error", err)
-		return ""
+		return "", "", ""
 	}
 	defer func() {
 		// Clear the deadline regardless of peek outcome so the relay's
@@ -266,13 +286,14 @@ func peekClientHelloSNI(clientConn net.Conn) string {
 		// either see a closed conn and return promptly, or unblock on
 		// the next byte the client sends).
 		slog.Debug("connector: passthrough SNI peek failed", "error", err)
-		return ""
+		return "", "", ""
 	}
+	ja3, ja4 = tlsfingerprint.Compute(buf)
 	sni, parseErr := parseClientHelloSNI(buf)
 	if parseErr != nil && !errors.Is(parseErr, errNotClientHello) && !errors.Is(parseErr, errClientHelloIncomplete) {
 		slog.Debug("connector: passthrough SNI parse failed", "error", parseErr, "buffered", len(buf))
 	}
-	return sni
+	return sni, ja3, ja4
 }
 
 // netAddrString returns a.String() or empty when a is nil.

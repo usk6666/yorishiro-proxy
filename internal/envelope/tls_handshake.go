@@ -57,6 +57,16 @@ type TLSHandshakeMessage struct {
 	// the extension — case-preserved per the wire (no normalization).
 	SNI string
 
+	// ClientJA3 / ClientJA4 are the client's ClientHello fingerprints
+	// (USK-1015), computed from the same peek buffer that yields SNI. Unlike
+	// ALPN and the negotiated TLS version — which are intentionally absent
+	// because the proxy does not see them under passthrough — the ClientHello
+	// itself is on the wire in the clear before the encrypted handshake body,
+	// so its fingerprint is a legal observation and does not fabricate data.
+	// Empty when the peek failed or the ClientHello was malformed.
+	ClientJA3 string
+	ClientJA4 string
+
 	// LocalAddr is the proxy-side local address of the client-facing TCP
 	// socket, formatted as host:port (net.Addr.String()). For an IPv4
 	// listener bound to "127.0.0.1:8080" with ephemeral upstream port, the

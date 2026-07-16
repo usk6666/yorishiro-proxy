@@ -5,6 +5,8 @@ import (
 	"log/slog"
 	"net"
 	"time"
+
+	"github.com/usk6666/yorishiro-proxy/internal/tlsfingerprint"
 )
 
 // peekClientHelloSNIAndALPN reads the first TLS record from clientConn
@@ -50,14 +52,21 @@ import (
 // peek window + deadline pattern but differ in what they extract;
 // keeping them as separate entry points keeps the passthrough hot path
 // (which never needs ALPN) on the smaller, one-purpose function.
-func peekClientHelloSNIAndALPN(clientConn net.Conn) (sni string, alpn []string) {
+//
+// USK-1015: the peek also computes the client's JA3/JA4 fingerprints from
+// the same buffered ClientHello (no extra read, no consumption). The
+// fingerprints are pure observation overlay carried on the returned
+// ClientHelloPeek; they never steer the build path. When the peek fails,
+// the ClientHello is malformed, or it exceeds the peek cap the fingerprint
+// fields stay empty — consistent with the SNI/ALPN fallback semantics.
+func peekClientHelloSNIAndALPN(clientConn net.Conn) ClientHelloPeek {
 	pc, ok := clientConn.(*PeekConn)
 	if !ok {
-		return "", nil
+		return ClientHelloPeek{}
 	}
 	if err := pc.SetReadDeadline(time.Now().Add(clientHelloPeekTimeout)); err != nil {
 		slog.Debug("connector: client hello peek deadline arm failed", "error", err)
-		return "", nil
+		return ClientHelloPeek{}
 	}
 	defer func() {
 		// Clear the deadline regardless of peek outcome so the subsequent
@@ -81,20 +90,22 @@ func peekClientHelloSNIAndALPN(clientConn net.Conn) (sni string, alpn []string) 
 	headerBuf, err := pc.Peek(recordHeaderLen)
 	if err != nil && len(headerBuf) == 0 {
 		slog.Debug("connector: client hello header peek failed", "error", err)
-		return "", nil
+		return ClientHelloPeek{}
 	}
 	if len(headerBuf) < recordHeaderLen {
 		// Truncated header — treat as "no ClientHello"; same as the
 		// errClientHelloIncomplete fall-through below.
-		return "", nil
+		return ClientHelloPeek{}
 	}
 	// TLS record length is bytes [3:5] (big-endian uint16).
 	recordLen := int(headerBuf[3])<<8 | int(headerBuf[4])
 	wantBytes := recordHeaderLen + recordLen
 	if wantBytes > clientHelloPeekSize {
 		// ClientHello larger than our hard cap — fall back silently
-		// (Slowloris safety; Resolved Decision #21).
-		return "", nil
+		// (Slowloris safety; Resolved Decision #21). The fingerprint is
+		// simply not computed for oversized ClientHellos (USK-1015 known
+		// limitation), matching today's SNI/ALPN fallback.
+		return ClientHelloPeek{}
 	}
 	buf, err := pc.Peek(wantBytes)
 	if err != nil && len(buf) == 0 {
@@ -102,8 +113,13 @@ func peekClientHelloSNIAndALPN(clientConn net.Conn) (sni string, alpn []string) 
 		// so the caller's existing path (cache hit / miss / pool) handles
 		// the connection. Debug-logged because routine on the wire.
 		slog.Debug("connector: client hello peek failed", "error", err)
-		return "", nil
+		return ClientHelloPeek{}
 	}
+
+	// USK-1015: compute JA3/JA4 from the same buffered ClientHello. Pure
+	// overlay — the peek leaves the bytes for the real handshake untouched.
+	// Fail-soft: a malformed hello yields empty fingerprints.
+	ja3, ja4 := tlsfingerprint.Compute(buf)
 
 	// Parse extensions block once via the shared helper (USK-996 extracted
 	// this seam specifically so SNI + ALPN share the TLS framing dance).
@@ -113,7 +129,10 @@ func peekClientHelloSNIAndALPN(clientConn net.Conn) (sni string, alpn []string) 
 			slog.Debug("connector: client hello extensions parse failed",
 				"error", extErr, "buffered", len(buf))
 		}
-		return "", nil
+		// Even when SNI/ALPN extraction fails we may still have valid
+		// fingerprints (e.g. a hello with no extensions block). Return them
+		// so ALPN-less / HTTP/1.1-only clients still get JA3/JA4.
+		return ClientHelloPeek{ClientJA3: ja3, ClientJA4: ja4}
 	}
 
 	// SNI: empty (no extension) and parse error both fold into "" — the
@@ -138,5 +157,10 @@ func peekClientHelloSNIAndALPN(clientConn net.Conn) (sni string, alpn []string) 
 		alpnList = nil
 	}
 
-	return sni, alpnList
+	return ClientHelloPeek{
+		SNI:       sni,
+		ALPN:      alpnList,
+		ClientJA3: ja3,
+		ClientJA4: ja4,
+	}
 }

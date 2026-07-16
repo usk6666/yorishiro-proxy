@@ -44,6 +44,8 @@ func makeTestSession(t *testing.T, store *SQLiteStore, id, protocol, urlStr stri
 			TLSCipher:            "TLS_AES_128_GCM_SHA256",
 			TLSALPN:              "h2",
 			TLSServerCertSubject: "CN=example.com",
+			TLSClientJA3:         "4b808534aaed88ea8efee030f1b46c4d",
+			TLSClientJA4:         "t13d0508h2_e133e205ac38_4e31876e0826",
 		},
 	}
 	if err := store.SaveStream(ctx, fl); err != nil {
@@ -148,6 +150,15 @@ func TestExportImportRoundTrip(t *testing.T) {
 		if origSess.ConnInfo != nil && importedSess.ConnInfo != nil {
 			if origSess.ConnInfo.TLSVersion != importedSess.ConnInfo.TLSVersion {
 				t.Errorf("session %s TLSVersion mismatch", id)
+			}
+			// USK-1015: client fingerprint columns survive export/import.
+			if origSess.ConnInfo.TLSClientJA3 != importedSess.ConnInfo.TLSClientJA3 {
+				t.Errorf("session %s TLSClientJA3 mismatch: got %q want %q", id,
+					importedSess.ConnInfo.TLSClientJA3, origSess.ConnInfo.TLSClientJA3)
+			}
+			if origSess.ConnInfo.TLSClientJA4 != importedSess.ConnInfo.TLSClientJA4 {
+				t.Errorf("session %s TLSClientJA4 mismatch: got %q want %q", id,
+					importedSess.ConnInfo.TLSClientJA4, origSess.ConnInfo.TLSClientJA4)
 			}
 		}
 
@@ -1032,6 +1043,8 @@ func TestExportImportRoundTrip_WithValidateIDs(t *testing.T) {
 			TLSCipher:            "TLS_AES_128_GCM_SHA256",
 			TLSALPN:              "h2",
 			TLSServerCertSubject: "CN=example.com",
+			TLSClientJA3:         "4b808534aaed88ea8efee030f1b46c4d",
+			TLSClientJA4:         "t13d0508h2_e133e205ac38_4e31876e0826",
 		},
 	}
 	if err := store.SaveStream(ctx, fl); err != nil {

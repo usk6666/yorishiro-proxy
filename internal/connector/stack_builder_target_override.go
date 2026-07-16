@@ -721,7 +721,10 @@ func PerformClientMITM(
 	if host == "" {
 		return nil, nil, fmt.Errorf("connector: PerformClientMITM: empty host")
 	}
-	return performClientMITM(ctx, clientConn, host, alpnOffers, cfg)
+	// USK-1015: forward callers have no client ClientHello peek (the accepted
+	// connection's first TLS bytes are consumed by tlslayer.Server inside
+	// performClientMITM), so no JA3/JA4 is available — pass a zero-value peek.
+	return performClientMITM(ctx, clientConn, host, alpnOffers, ClientHelloPeek{}, cfg)
 }
 
 // DialUpstreamWithALPN is the exported wrapper for the package-private

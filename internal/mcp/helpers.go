@@ -112,6 +112,10 @@ type connInfoResult struct {
 	TLSALPN string `json:"tls_alpn,omitempty"`
 	// TLSServerCertSubject is the subject DN of the upstream server certificate.
 	TLSServerCertSubject string `json:"tls_server_cert_subject,omitempty"`
+	// TLSClientJA3 is the JA3 fingerprint of the client's TLS ClientHello.
+	TLSClientJA3 string `json:"tls_client_ja3,omitempty"`
+	// TLSClientJA4 is the JA4 fingerprint of the client's TLS ClientHello.
+	TLSClientJA4 string `json:"tls_client_ja4,omitempty"`
 }
 
 // checkTargetScopeURL checks a URL against the target scope rules.

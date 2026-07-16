@@ -282,6 +282,8 @@ func exportToStream(es *ExportStream) (*Stream, error) {
 			TLSCipher:            es.ConnInfo.TLSCipher,
 			TLSALPN:              es.ConnInfo.TLSALPN,
 			TLSServerCertSubject: es.ConnInfo.TLSServerCertSubject,
+			TLSClientJA3:         es.ConnInfo.TLSClientJA3,
+			TLSClientJA4:         es.ConnInfo.TLSClientJA4,
 		}
 	}
 

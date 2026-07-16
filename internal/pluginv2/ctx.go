@@ -269,13 +269,15 @@ func tlsSnapshotValue(s *envelope.TLSSnapshot) starlark.Value {
 	if s == nil {
 		return starlark.None
 	}
-	d := starlark.NewDict(6)
+	d := starlark.NewDict(8)
 	_ = d.SetKey(starlark.String("sni"), starlark.String(s.SNI))
 	_ = d.SetKey(starlark.String("alpn"), starlark.String(s.ALPN))
 	_ = d.SetKey(starlark.String("version_name"), starlark.String(s.VersionName()))
 	_ = d.SetKey(starlark.String("cipher_name"), starlark.String(s.CipherName()))
 	_ = d.SetKey(starlark.String("peer_cert_subject"), starlark.String(s.PeerCertSubject()))
 	_ = d.SetKey(starlark.String("client_fingerprint"), starlark.String(s.ClientFingerprint))
+	_ = d.SetKey(starlark.String("ja3"), starlark.String(s.ClientJA3))
+	_ = d.SetKey(starlark.String("ja4"), starlark.String(s.ClientJA4))
 	d.Freeze()
 	return d
 }

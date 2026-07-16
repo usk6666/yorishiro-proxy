@@ -154,6 +154,8 @@ func TestSQLiteStore_ConnInfo(t *testing.T) {
 			TLSCipher:            "TLS_AES_128_GCM_SHA256",
 			TLSALPN:              "h2",
 			TLSServerCertSubject: "CN=example.com",
+			TLSClientJA3:         "4b808534aaed88ea8efee030f1b46c4d",
+			TLSClientJA4:         "t13d0508h2_e133e205ac38_4e31876e0826",
 		},
 	}
 
@@ -174,6 +176,56 @@ func TestSQLiteStore_ConnInfo(t *testing.T) {
 	}
 	if got.ConnInfo.TLSVersion != "TLS 1.3" {
 		t.Errorf("TLSVersion = %q, want %q", got.ConnInfo.TLSVersion, "TLS 1.3")
+	}
+	// USK-1015: client ClientHello fingerprint columns round-trip.
+	if got.ConnInfo.TLSClientJA3 != "4b808534aaed88ea8efee030f1b46c4d" {
+		t.Errorf("TLSClientJA3 = %q, want %q", got.ConnInfo.TLSClientJA3, "4b808534aaed88ea8efee030f1b46c4d")
+	}
+	if got.ConnInfo.TLSClientJA4 != "t13d0508h2_e133e205ac38_4e31876e0826" {
+		t.Errorf("TLSClientJA4 = %q, want %q", got.ConnInfo.TLSClientJA4, "t13d0508h2_e133e205ac38_4e31876e0826")
+	}
+}
+
+// TestSQLiteStore_UpdateStreamClientFingerprint verifies the UpdateStream
+// path (used by RecordStep's Send-side projection) sets only the JA3/JA4
+// columns without clobbering the upstream TLS columns (USK-1015).
+func TestSQLiteStore_UpdateStreamClientFingerprint(t *testing.T) {
+	t.Parallel()
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	fl := &Stream{Protocol: "HTTPS", Timestamp: time.Now().UTC()}
+	if err := store.SaveStream(ctx, fl); err != nil {
+		t.Fatalf("SaveStream: %v", err)
+	}
+	// First the upstream-side TLS projection (Receive path).
+	if err := store.UpdateStream(ctx, fl.ID, StreamUpdate{
+		TLSVersion:           "TLS 1.3",
+		TLSServerCertSubject: "CN=example.com",
+	}); err != nil {
+		t.Fatalf("UpdateStream(upstream): %v", err)
+	}
+	// Then the client fingerprint projection (Send path) — must not clobber.
+	if err := store.UpdateStream(ctx, fl.ID, StreamUpdate{
+		TLSClientJA3: "ja3hash",
+		TLSClientJA4: "t13d0508h2_aaaaaaaaaaaa_bbbbbbbbbbbb",
+	}); err != nil {
+		t.Fatalf("UpdateStream(fingerprint): %v", err)
+	}
+
+	got, err := store.GetStream(ctx, fl.ID)
+	if err != nil {
+		t.Fatalf("GetStream: %v", err)
+	}
+	if got.ConnInfo == nil {
+		t.Fatal("ConnInfo is nil")
+	}
+	if got.ConnInfo.TLSVersion != "TLS 1.3" || got.ConnInfo.TLSServerCertSubject != "CN=example.com" {
+		t.Errorf("upstream TLS columns clobbered: version=%q subject=%q",
+			got.ConnInfo.TLSVersion, got.ConnInfo.TLSServerCertSubject)
+	}
+	if got.ConnInfo.TLSClientJA3 != "ja3hash" || got.ConnInfo.TLSClientJA4 != "t13d0508h2_aaaaaaaaaaaa_bbbbbbbbbbbb" {
+		t.Errorf("fingerprint columns = (%q, %q)", got.ConnInfo.TLSClientJA3, got.ConnInfo.TLSClientJA4)
 	}
 }
 

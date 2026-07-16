@@ -80,9 +80,9 @@ func TestPeekClientHelloSNIAndALPN_NotPeekConn(t *testing.T) {
 	defer a.Close()
 	defer b.Close()
 
-	sni, alpn := peekClientHelloSNIAndALPN(a)
-	if sni != "" || alpn != nil {
-		t.Errorf("non-PeekConn: got (%q, %v), want (\"\", nil)", sni, alpn)
+	peeked := peekClientHelloSNIAndALPN(a)
+	if peeked.SNI != "" || peeked.ALPN != nil {
+		t.Errorf("non-PeekConn: got (%q, %v), want (\"\", nil)", peeked.SNI, peeked.ALPN)
 	}
 }
 
@@ -95,9 +95,9 @@ func TestPeekClientHelloSNIAndALPN_ClosedPeekConn(t *testing.T) {
 	_ = b.Close() // peer close → peek sees EOF
 	_ = a.Close()
 
-	sni, alpn := peekClientHelloSNIAndALPN(pc)
-	if sni != "" || alpn != nil {
-		t.Errorf("closed conn: got (%q, %v), want (\"\", nil)", sni, alpn)
+	peeked := peekClientHelloSNIAndALPN(pc)
+	if peeked.SNI != "" || peeked.ALPN != nil {
+		t.Errorf("closed conn: got (%q, %v), want (\"\", nil)", peeked.SNI, peeked.ALPN)
 	}
 }
 
@@ -114,9 +114,9 @@ func TestPeekClientHelloSNIAndALPN_NonTLSBytes(t *testing.T) {
 		_, _ = b.Write([]byte("GET / HTTP/1.1\r\nHost: x\r\n\r\n"))
 	}()
 
-	sni, alpn := peekClientHelloSNIAndALPN(pc)
-	if sni != "" || alpn != nil {
-		t.Errorf("non-TLS bytes: got (%q, %v), want (\"\", nil)", sni, alpn)
+	peeked := peekClientHelloSNIAndALPN(pc)
+	if peeked.SNI != "" || peeked.ALPN != nil {
+		t.Errorf("non-TLS bytes: got (%q, %v), want (\"\", nil)", peeked.SNI, peeked.ALPN)
 	}
 	_ = b.Close()
 }
@@ -148,12 +148,16 @@ func TestPeekClientHelloSNIAndALPN_ValidClientHello(t *testing.T) {
 		_ = conn.Close()
 	}()
 
-	sni, alpn := peekClientHelloSNIAndALPN(pc)
-	if sni != wantSNI {
-		t.Errorf("sni = %q, want %q", sni, wantSNI)
+	peeked := peekClientHelloSNIAndALPN(pc)
+	if peeked.SNI != wantSNI {
+		t.Errorf("sni = %q, want %q", peeked.SNI, wantSNI)
 	}
-	if !reflect.DeepEqual(alpn, wantALPN) {
-		t.Errorf("alpn = %v, want %v", alpn, wantALPN)
+	if !reflect.DeepEqual(peeked.ALPN, wantALPN) {
+		t.Errorf("alpn = %v, want %v", peeked.ALPN, wantALPN)
+	}
+	// USK-1015: a real ClientHello yields non-empty JA3/JA4.
+	if peeked.ClientJA3 == "" || peeked.ClientJA4 == "" {
+		t.Errorf("expected non-empty fingerprints, got ja3=%q ja4=%q", peeked.ClientJA3, peeked.ClientJA4)
 	}
 
 	_ = a.Close()
@@ -181,12 +185,12 @@ func TestPeekClientHelloSNIAndALPN_SNIOnlyNoALPN(t *testing.T) {
 		_ = conn.Close()
 	}()
 
-	sni, alpn := peekClientHelloSNIAndALPN(pc)
-	if sni != wantSNI {
-		t.Errorf("sni = %q, want %q", sni, wantSNI)
+	peeked := peekClientHelloSNIAndALPN(pc)
+	if peeked.SNI != wantSNI {
+		t.Errorf("sni = %q, want %q", peeked.SNI, wantSNI)
 	}
-	if alpn != nil {
-		t.Errorf("alpn = %v, want nil (no extension)", alpn)
+	if peeked.ALPN != nil {
+		t.Errorf("alpn = %v, want nil (no extension)", peeked.ALPN)
 	}
 
 	_ = a.Close()
@@ -385,8 +389,7 @@ func runBuildConnectionStackSniffFirstWithCfg(
 		pc := NewPeekConn(serverConn)
 		// Drive the sniff manually here (we're calling
 		// BuildConnectionStack directly, not via runTLSMITM).
-		sni, alpn := peekClientHelloSNIAndALPN(pc)
-		peeked := ClientHelloPeek{SNI: sni, ALPN: alpn}
+		peeked := peekClientHelloSNIAndALPN(pc)
 		s, cs, us, bErr := BuildConnectionStack(context.Background(), pc, target, buildCfg, peeked)
 		var cALPN, uALPN string
 		if cs != nil {

@@ -197,7 +197,7 @@ func BuildSOCKS5ConnectDict(connID, clientAddr, targetAddr string) *starlark.Dic
 // (USK-670) so plugin authors see one shape across ctx.tls and the
 // lifecycle dict.
 func BuildTLSHandshakeDict(side string, snap *envelope.TLSSnapshot) *starlark.Dict {
-	d := starlark.NewDict(7)
+	d := starlark.NewDict(9)
 	_ = d.SetKey(starlark.String("side"), starlark.String(side))
 	if snap != nil {
 		_ = d.SetKey(starlark.String("sni"), starlark.String(snap.SNI))
@@ -206,6 +206,8 @@ func BuildTLSHandshakeDict(side string, snap *envelope.TLSSnapshot) *starlark.Di
 		_ = d.SetKey(starlark.String("cipher_name"), starlark.String(snap.CipherName()))
 		_ = d.SetKey(starlark.String("peer_cert_subject"), starlark.String(snap.PeerCertSubject()))
 		_ = d.SetKey(starlark.String("client_fingerprint"), starlark.String(snap.ClientFingerprint))
+		_ = d.SetKey(starlark.String("ja3"), starlark.String(snap.ClientJA3))
+		_ = d.SetKey(starlark.String("ja4"), starlark.String(snap.ClientJA4))
 	} else {
 		_ = d.SetKey(starlark.String("sni"), starlark.String(""))
 		_ = d.SetKey(starlark.String("alpn"), starlark.String(""))
@@ -213,6 +215,8 @@ func BuildTLSHandshakeDict(side string, snap *envelope.TLSSnapshot) *starlark.Di
 		_ = d.SetKey(starlark.String("cipher_name"), starlark.String(""))
 		_ = d.SetKey(starlark.String("peer_cert_subject"), starlark.String(""))
 		_ = d.SetKey(starlark.String("client_fingerprint"), starlark.String(""))
+		_ = d.SetKey(starlark.String("ja3"), starlark.String(""))
+		_ = d.SetKey(starlark.String("ja4"), starlark.String(""))
 	}
 	d.Freeze()
 	return d
