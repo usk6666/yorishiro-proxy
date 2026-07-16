@@ -724,6 +724,23 @@ All forwarded streams reuse the same `Pipeline` and `RecordStep`, so Flow / Stre
 
 **gRPC-Web auto-classify (USK-934).** The `http` arm (and `auto` arm when it dispatches to HTTP/1.1) inspects the first request's `Content-Type` header per-exchange. When it matches `application/grpc-web[-text][+proto|…]`, the per-exchange client Channel is wrapped with `grpcweb.Wrap` (downstream) and the upstream Channel is wrapped via `connector.WrapH1UpstreamForDispatch` (upstream symmetry) — Stream `Protocol` is then re-tagged to `grpc-web` by `record_step.maybeRetagProtocol`. This mirrors the H2 sibling pattern (`connector.DispatchH2Stream`) so HTTP/1.1 keep-alive that mixes grpc-web POST and JSON POST on the same connection routes correctly per-exchange. See `internal/connector/h1_dispatch.go`.
 
+#### 3.4.3 Upstream HTTP/2 Fingerprint Parity (USK-1007)
+
+Anti-bot frontends (Cloudflare, Akamai) fingerprint a client's **HTTP/2 behaviour** — SETTINGS values + wire order, the connection-level WINDOW_UPDATE increment, and the request pseudo-header order — in addition to the TLS ClientHello. For the proxy's MITM identity to be coherent, its own *upstream* (ClientRole) H2 send-shape must match the browser it claims to be.
+
+The shape is driven by the existing `tls_fingerprint` value (no separate `h2_fingerprint` config): `http2.WithH2Fingerprint(cfg.EffectiveTLSFingerprint())` is threaded through all four upstream ClientRole dial seams (`stack_builder.go` pool dial, `connect_inner_dispatch.go` h2c, `stack_builder_target_override.go` forward, `h2_redial.go` GOAWAY redial). Only `firefox` diverges:
+
+- **SETTINGS** (`internal/layer/http2/fingerprint.go`, `firefoxSettingsFrame`): `HEADER_TABLE_SIZE=65536`, `ENABLE_PUSH=0`, `INITIAL_WINDOW_SIZE=131072`, `MAX_FRAME_SIZE=16384`, in that wire order; `MAX_CONCURRENT_STREAMS` dropped.
+- **Connection WINDOW_UPDATE**: stream-0 increment `12517377` (12 MiB window) vs the default 16 MiB.
+- **Request pseudo-header order** (`appendRequestPseudoHeaders`): Firefox `:method :path :authority :scheme` vs the default (Chrome-shaped) `:method :scheme :authority :path`.
+
+Every other profile (chrome / edge / safari / random / none / unset) and every ServerRole Layer keep the pre-USK-1007 behaviour byte-for-byte. Pinned against a Firefox 120 capture (coherent with the uTLS `Firefox_120` ClientHello, USK-1014); Akamai H2 fingerprint `1:65536;2:0;4:131072;5:16384|12517377|0|m,p,a,s`. `env.Raw` (the wire-observed snapshot) is never modified — this is an upstream send-shape only.
+
+> **Known limitations.**
+> - **PRIORITY frames / stream-dependency tree — unimplemented: USK-1018.** Firefox's HTTP/2 PRIORITY tree is not reproduced (RFC 9113 deprecated the scheme; high engine cost given lazy stream-id allocation). Acceptance is verifiable on SETTINGS + WINDOW_UPDATE + pseudo-order without it.
+> - **safari / edge / random** get coherent TLS but Chrome-shaped H2 (only `firefox` has an H2 profile today; an independent `h2_fingerprint` axis is deferred to M48).
+> - The offline recorded **modified-variant** re-encode (`httpaggregator.EncodeWireBytes`, used by `RecordStep` for the diagnostic `env.Raw` of a rule/plugin-mutated request) uses the default pseudo-header order regardless of fingerprint. The **live wire** is always correct (it is re-decomposed from the structured `HTTPMessage` through the fingerprint-aware native send path, not from the recorded bytes); wiring the per-connection fingerprint into the shared per-stack `WireEncoderRegistry` requires envelope-carried or per-connection registry plumbing, deferred.
+
 ### 3.5 Pipeline Step Categorization
 
 Pipeline interface is unchanged:

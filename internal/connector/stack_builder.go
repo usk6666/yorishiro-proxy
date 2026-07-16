@@ -1719,6 +1719,9 @@ func buildH2Stack(
 			http2.WithBodySpillThreshold(cfg.BodySpillThreshold),
 			http2.WithMaxBodySize(cfg.MaxBodySize),
 			http2.WithStateReleaser(cfg.PluginV2Engine),
+			// USK-1007: Firefox-shaped upstream H2 fingerprint when
+			// tls_fingerprint=firefox; no-op (Chrome shape) otherwise.
+			http2.WithH2Fingerprint(cfg.EffectiveTLSFingerprint()),
 		)
 		if lerr != nil {
 			// http2.New already closed upstreamConn on failure.
