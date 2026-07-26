@@ -525,10 +525,14 @@ func NewLiveBuildConfig(
 	// USK-1013: default the upstream TLS fingerprint to firefox (camoufox
 	// coherence). Pass a nil cfg so the live-dial path keeps its proxyCfg-only
 	// contract (it has historically not consulted top-level cfg.TLSFingerprint,
-	// unlike the resend axis in InitTLSTransport). The resolver maps the "none"
-	// opt-out sentinel to "" so bc.EffectiveTLSFingerprint() selects the
-	// standard crypto/tls stack (clientStandard) rather than hard-erroring the
-	// dial on an unknown uTLS profile.
+	// unlike the resend axis in InitTLSTransport).
+	//
+	// USK-1021: the stored value is the fingerprint *identity*, so an explicit
+	// "none" is kept verbatim rather than flattened to "" — that keeps the
+	// reporting surfaces able to distinguish "operator opted out" from
+	// "nothing configured", and matches what a runtime proxy_start / configure
+	// override installs. The sentinel is resolved to the standard crypto/tls
+	// stack at the dial seam by bc.EffectiveUTLSProfile().
 	bc.TLSFingerprint = config.ResolveTLSFingerprint(nil, proxyCfg)
 
 	return bc
@@ -743,10 +747,10 @@ func applyHostTLSEntries(reg *transport.HostTLSRegistry, entries map[string]*con
 //     `tls_fingerprint`. Kept for backward compatibility.
 //  3. "firefox" — the default when both are empty (camoufox coherence).
 //
-// The "none" opt-out sentinel resolves to "" (via config.ResolveTLSFingerprint)
-// and falls back to StandardTransport.
+// The "none" opt-out sentinel resolves to "" (via config.UTLSProfileFor) and
+// falls back to StandardTransport.
 func InitTLSTransport(cfg *config.Config, proxyCfg *config.ProxyConfig, reg *transport.HostTLSRegistry, logger *slog.Logger) transport.TLSTransport {
-	fingerprint := config.ResolveTLSFingerprint(cfg, proxyCfg)
+	fingerprint := config.UTLSProfileFor(config.ResolveTLSFingerprint(cfg, proxyCfg))
 
 	if fingerprint != "" {
 		profile, err := transport.ParseBrowserProfile(fingerprint)

@@ -71,12 +71,17 @@ var firefoxH2Shape = fpH2Shape{
 	pseudo:     []string{":method", ":path", ":authority", ":scheme"},
 }
 
-// chromeH2Shape is the default (Chrome-ish) baseline every non-firefox
-// profile — including "none" — resolves to: SETTINGS 1:4096, 2:0, 3:500,
-// 4:16777216, 5:16384 (MAX_CONCURRENT_STREAMS present), a 16 MiB - 65535
-// connection-window bump, and pseudo-header order :method :scheme :authority
-// :path.
-var chromeH2Shape = fpH2Shape{
+// defaultH2Shape is the proxy's historical (Chrome-ish) baseline that every
+// non-firefox profile — including "none" — resolves to via
+// resolveH2Fingerprint: SETTINGS 1:4096, 2:0, 3:500, 4:16777216, 5:16384
+// (MAX_CONCURRENT_STREAMS present), a 16 MiB - 65535 connection-window bump,
+// and pseudo-header order :method :scheme :authority :path.
+//
+// It is named "default", not "chrome", because it is the proxy's own
+// pre-USK-1007 send-shape rather than a real Chrome 120 capture; the chrome
+// sub-test asserts it as a baseline, and the none sub-test asserts it because
+// a profile claiming no browser identity has nothing to be coherent with.
+var defaultH2Shape = fpH2Shape{
 	settings: []frame.Setting{
 		{ID: frame.SettingHeaderTableSize, Value: 4096},
 		{ID: frame.SettingEnablePush, Value: 0},
@@ -105,25 +110,20 @@ func TestE2E_FingerprintCoherence_UpstreamShape(t *testing.T) {
 		fingerprint string
 		helloID     *utls.ClientHelloID // nil for "none" (standard crypto/tls)
 		wantH2      fpH2Shape
-		skip        string // non-empty → t.Skip referencing the blocking Issue
 	}{
-		{"firefox", "firefox", &utls.HelloFirefox_Auto, firefoxH2Shape, ""},
-		{"chrome", "chrome", &utls.HelloChrome_Auto, chromeH2Shape, ""},
-		// USK-1021: proxy_start installs the raw "none" sentinel as the
-		// live-dial override instead of resolving it to "" (standard TLS),
-		// so the MITM upstream dial fails with `unsupported uTLS profile
-		// "none"`. This sub-case is the regression test — un-skip once the
-		// fix lands. Do NOT weaken the assertions to make it pass
-		// (MITM-diagnostic test philosophy).
-		{"none", "none", nil, chromeH2Shape, "not yet implemented: USK-1021 (proxy_start none→standard-TLS override)"},
+		{"firefox", "firefox", &utls.HelloFirefox_Auto, firefoxH2Shape},
+		{"chrome", "chrome", &utls.HelloChrome_Auto, defaultH2Shape},
+		// USK-1021 regression: proxy_start used to install the raw "none"
+		// sentinel as the live-dial override instead of resolving it to ""
+		// (standard TLS) at the dial seam, so the MITM upstream dial failed
+		// with `unsupported uTLS profile "none"`. Do NOT weaken the
+		// assertions (MITM-diagnostic test philosophy).
+		{"none", "none", nil, defaultH2Shape},
 	}
 
 	for _, tc := range cases {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			if tc.skip != "" {
-				t.Skip(tc.skip)
-			}
 			// ResolveTLSFingerprint defaults unset → firefox, so every
 			// sub-test MUST set -tls-fingerprint explicitly.
 			h := mcptest.StartHarness(t, mcptest.HarnessOptions{

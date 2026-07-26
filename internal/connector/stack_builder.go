@@ -564,6 +564,29 @@ func (c *BuildConfig) EffectiveTLSFingerprint() string {
 	return c.TLSFingerprint
 }
 
+// EffectiveUTLSProfile returns the uTLS parrot profile the next upstream
+// dial should instantiate, derived from EffectiveTLSFingerprint by
+// resolving the "none" opt-out sentinel to "" (standard crypto/tls, no
+// uTLS spoofing) — see config.UTLSProfileFor.
+//
+// The two accessors carry different meanings and are NOT interchangeable
+// (USK-1021):
+//
+//   - EffectiveTLSFingerprint is the fingerprint *identity* the proxy
+//     claims. It feeds the reporting surfaces (query config / configure)
+//     and the HTTP/2 send-shape selection, both of which are already
+//     sentinel-aware.
+//   - EffectiveUTLSProfile is the *dial* value. Use it wherever a profile
+//     name reaches tlslayer (DialRawOpts.UTLSProfile) or keys a cache
+//     whose entries are discriminated by the actual dial identity.
+//
+// Passing the raw identity to the dial path is the USK-1021 bug: tlslayer
+// fail-hards on any profile name outside its parrot table, so a live
+// "none" override aborted every MITM upstream dial.
+func (c *BuildConfig) EffectiveUTLSProfile() string {
+	return config.UTLSProfileFor(c.EffectiveTLSFingerprint())
+}
+
 // SetTLSFingerprint installs a runtime override for the uTLS browser
 // fingerprint profile. Subsequent calls to EffectiveTLSFingerprint
 // return profile (or fall back to the static TLSFingerprint field when
@@ -1586,7 +1609,7 @@ func dialUpstreamWithALPN(
 	conn, snap, err := DialUpstreamRaw(ctx, target, DialRawOpts{
 		TLSConfig:          upstreamTLSCfg,
 		InsecureSkipVerify: insecureSkip,
-		UTLSProfile:        cfg.EffectiveTLSFingerprint(),
+		UTLSProfile:        cfg.EffectiveUTLSProfile(),
 		ClientCert:         clientCert,
 		OfferALPN:          offerALPN,
 		UpstreamProxy:      upstreamProxy,
@@ -1984,7 +2007,7 @@ func buildRawPassthroughStack(
 	upstreamConn, upstreamSnap, err := DialUpstreamRaw(ctx, target, DialRawOpts{
 		TLSConfig:          upstreamTLSCfg,
 		InsecureSkipVerify: insecureSkip,
-		UTLSProfile:        cfg.EffectiveTLSFingerprint(),
+		UTLSProfile:        cfg.EffectiveUTLSProfile(),
 		ClientCert:         clientCert,
 		OfferALPN:          []string{"http/1.1"},
 		UpstreamProxy:      upstreamProxy,

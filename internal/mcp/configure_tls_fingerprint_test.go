@@ -7,6 +7,7 @@ import (
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/usk6666/yorishiro-proxy/internal/config"
+	"github.com/usk6666/yorishiro-proxy/internal/connector"
 	"github.com/usk6666/yorishiro-proxy/internal/connector/transport"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/proxybuild"
@@ -511,6 +512,124 @@ func TestResetSettingsToDefaults_RebuildsTLSTransport(t *testing.T) {
 	}
 	if !ut.InsecureSkipVerify {
 		t.Error("InsecureSkipVerify should be inherited from initial transport")
+	}
+}
+
+// setupLiveBuildConfigSession wires an MCP session to a proxybuild.Manager
+// bound to buildCfg. Unlike setupTLSFingerprintTestSession (which passes a
+// nil manager and only observes the test-only tlsFingerprintSetter), this
+// harness exercises the production path: proxy_start / configure install
+// their runtime override on a real *connector.BuildConfig, so the test can
+// assert what the LIVE MITM upstream dial would actually do.
+func setupLiveBuildConfigSession(t *testing.T, buildCfg *connector.BuildConfig, opts ...ServerOption) *gomcp.ClientSession {
+	t.Helper()
+	ctx := context.Background()
+
+	manager := newTestProxybuildManagerWithBuildConfig(t, buildCfg)
+	ca := newTestCA(t)
+	s := newServer(ctx, ca, nil, manager, opts...)
+
+	ct, st := gomcp.NewInMemoryTransports()
+	ss, err := s.server.Connect(ctx, st, nil)
+	if err != nil {
+		t.Fatalf("server connect: %v", err)
+	}
+	t.Cleanup(func() { ss.Close() })
+
+	client := gomcp.NewClient(&gomcp.Implementation{Name: "test-client", Version: "v0.0.1"}, nil)
+	cs, err := client.Connect(ctx, ct, nil)
+	if err != nil {
+		t.Fatalf("client connect: %v", err)
+	}
+	t.Cleanup(func() { cs.Close() })
+
+	return cs
+}
+
+// assertLiveDialOptsOut is the shared assertion for the USK-1021 fix: the
+// live dial must select the standard crypto/tls stack (empty uTLS profile)
+// while the reported identity still says "none". Reporting "" here would be
+// the USK-809 lying-reporter class; dialing "none" is the USK-1021 crash.
+func assertLiveDialOptsOut(t *testing.T, buildCfg *connector.BuildConfig) {
+	t.Helper()
+	if got := buildCfg.EffectiveUTLSProfile(); got != "" {
+		t.Errorf("EffectiveUTLSProfile() = %q, want %q — tlslayer hard-errors on any name outside its parrot table, so the live MITM dial fails", got, "")
+	}
+	if got := buildCfg.EffectiveTLSFingerprint(); got != "none" {
+		t.Errorf("EffectiveTLSFingerprint() = %q, want %q (claimed identity must survive the dial-seam resolution)", got, "none")
+	}
+}
+
+// TestProxyStart_TLSFingerprint_NoneFromConfigDefault_LiveDialUsesStandardTLS
+// is the USK-1021 Case A regression through the real MCP surface: a server
+// booted with `-tls-fingerprint none` and then hit with a plain proxy_start
+// (no explicit tls_fingerprint) used to install the raw "none" sentinel as
+// the live-dial override, so every MITM upstream dial failed with
+// `tlslayer: unsupported uTLS profile "none"`.
+func TestProxyStart_TLSFingerprint_NoneFromConfigDefault_LiveDialUsesStandardTLS(t *testing.T) {
+	buildCfg := &connector.BuildConfig{TLSFingerprint: "none"}
+	cs := setupLiveBuildConfigSession(t, buildCfg,
+		WithProxyDefaults(&config.ProxyConfig{TLSFingerprint: "none"}),
+	)
+
+	result, err := callProxyStart(t, cs, map[string]any{"listen_addr": "127.0.0.1:0"})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	assertLiveDialOptsOut(t, buildCfg)
+}
+
+// TestProxyStart_TLSFingerprint_NoneOverBootFirefox_LiveDialUsesStandardTLS
+// is the USK-1021 Case B regression: an explicit runtime opt-out layered on
+// top of a spoofing boot value must actually stop spoofing. The naive fix
+// (mapping "none" to "" before Manager.SetTLSFingerprint) would CLEAR the
+// override instead, silently falling back to the boot-time firefox parrot.
+func TestProxyStart_TLSFingerprint_NoneOverBootFirefox_LiveDialUsesStandardTLS(t *testing.T) {
+	buildCfg := &connector.BuildConfig{TLSFingerprint: "firefox"}
+	cs := setupLiveBuildConfigSession(t, buildCfg)
+
+	result, err := callProxyStart(t, cs, map[string]any{
+		"listen_addr":     "127.0.0.1:0",
+		"tls_fingerprint": "none",
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("expected success, got error: %v", result.Content)
+	}
+
+	assertLiveDialOptsOut(t, buildCfg)
+}
+
+// TestConfigure_TLSFingerprint_NoneOverBootFirefox_LiveDialUsesStandardTLS
+// is Case B through the configure tool, plus the positive control: switching
+// back to firefox must re-enable the uTLS parrot on the live dial path.
+func TestConfigure_TLSFingerprint_NoneOverBootFirefox_LiveDialUsesStandardTLS(t *testing.T) {
+	buildCfg := &connector.BuildConfig{TLSFingerprint: "firefox"}
+	cs := setupLiveBuildConfigSession(t, buildCfg)
+
+	none := "none"
+	if result := callConfigure(t, cs, configureInput{TLSFingerprint: &none}); result.IsError {
+		t.Fatalf("configure none: expected success, got error: %v", result.Content)
+	}
+	assertLiveDialOptsOut(t, buildCfg)
+
+	// Positive control: the opt-out is not sticky — a later firefox
+	// selection must reach the dial path as a real uTLS parrot.
+	firefox := "firefox"
+	if result := callConfigure(t, cs, configureInput{TLSFingerprint: &firefox}); result.IsError {
+		t.Fatalf("configure firefox: expected success, got error: %v", result.Content)
+	}
+	if got := buildCfg.EffectiveUTLSProfile(); got != "firefox" {
+		t.Errorf("EffectiveUTLSProfile() = %q, want firefox after switching back", got)
+	}
+	if got := buildCfg.EffectiveTLSFingerprint(); got != "firefox" {
+		t.Errorf("EffectiveTLSFingerprint() = %q, want firefox after switching back", got)
 	}
 }
 

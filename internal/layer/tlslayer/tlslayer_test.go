@@ -367,18 +367,34 @@ func TestClient_NilTLSConfig(t *testing.T) {
 	}
 }
 
+// TestClient_UnsupportedUTLSProfile pins the fail-hard contract: any
+// UTLSProfile outside the parrot table must error rather than silently
+// degrade to a Go-native ClientHello — a silent downgrade is exactly the
+// fingerprint lie M47 exists to prevent.
+//
+// The "none" row documents the resolution boundary (USK-1021): the config
+// opt-out sentinel is resolved to "" upstream, at
+// connector.BuildConfig.EffectiveUTLSProfile. This layer knows nothing about
+// it and must keep erroring, so the boundary is not allowed to migrate down
+// into internal/layer/.
 func TestClient_UnsupportedUTLSProfile(t *testing.T) {
-	plain, server := net.Pipe()
-	defer plain.Close()
-	defer server.Close()
+	profiles := []string{"nonexistent", "none"}
 
-	opts := ClientOpts{
-		TLSConfig:   &tls.Config{ServerName: "test"},
-		UTLSProfile: "nonexistent",
-	}
+	for _, profile := range profiles {
+		t.Run(profile, func(t *testing.T) {
+			plain, server := net.Pipe()
+			defer plain.Close()
+			defer server.Close()
 
-	_, _, err := Client(context.Background(), plain, opts)
-	if err == nil {
-		t.Fatal("expected error with unsupported uTLS profile")
+			opts := ClientOpts{
+				TLSConfig:   &tls.Config{ServerName: "test"},
+				UTLSProfile: profile,
+			}
+
+			_, _, err := Client(context.Background(), plain, opts)
+			if err == nil {
+				t.Fatalf("expected error with unsupported uTLS profile %q", profile)
+			}
+		})
 	}
 }
