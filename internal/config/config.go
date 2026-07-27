@@ -35,11 +35,11 @@ func (c *Config) Validate() error {
 	if c.DialTimeout < 0 {
 		return fmt.Errorf("dial_timeout must be >= 0, got %s", c.DialTimeout)
 	}
-	if c.LogLevel != "" && !validLogLevels[strings.ToLower(c.LogLevel)] {
-		return fmt.Errorf("invalid log level: %q (must be debug, info, warn, or error)", c.LogLevel)
+	if err := c.validateLogging(); err != nil {
+		return err
 	}
-	if lf := strings.ToLower(c.LogFormat); lf != "" && lf != "text" && lf != "json" {
-		return fmt.Errorf("invalid log format: %q (must be text or json)", c.LogFormat)
+	if err := validateTLSFingerprintField(c.TLSFingerprint); err != nil {
+		return err
 	}
 	if c.RetentionMaxFlows < 0 {
 		return fmt.Errorf("retention_max_flows must be >= 0, got %d", c.RetentionMaxFlows)
@@ -55,6 +55,19 @@ func (c *Config) Validate() error {
 	}
 	if err := c.validateMaxRawCaptureSize(); err != nil {
 		return err
+	}
+	return nil
+}
+
+// validateLogging checks the log level / log format enums. Both accept the
+// empty string (meaning "use the default") and compare case-insensitively.
+// Extracted from Validate to keep that function under the gocyclo threshold.
+func (c *Config) validateLogging() error {
+	if c.LogLevel != "" && !validLogLevels[strings.ToLower(c.LogLevel)] {
+		return fmt.Errorf("invalid log level: %q (must be debug, info, warn, or error)", c.LogLevel)
+	}
+	if lf := strings.ToLower(c.LogFormat); lf != "" && lf != "text" && lf != "json" {
+		return fmt.Errorf("invalid log format: %q (must be text or json)", c.LogFormat)
 	}
 	return nil
 }
@@ -388,6 +401,63 @@ func UTLSProfileFor(fingerprint string) string {
 		return ""
 	}
 	return fingerprint
+}
+
+// tlsFingerprintNames lists the accepted tls_fingerprint identity values in
+// documentation order. Five name a uTLS parrot profile; "none" is the opt-out
+// sentinel that UTLSProfileFor resolves to "" at the dial seam.
+var tlsFingerprintNames = []string{"chrome", "firefox", "safari", "edge", "random", "none"}
+
+// validTLSFingerprints is the lookup set derived from tlsFingerprintNames.
+var validTLSFingerprints = func() map[string]bool {
+	m := make(map[string]bool, len(tlsFingerprintNames))
+	for _, name := range tlsFingerprintNames {
+		m[name] = true
+	}
+	return m
+}()
+
+// ValidTLSFingerprint reports whether fingerprint names one of the six
+// accepted TLS fingerprint identities. The comparison is case-insensitive
+// with surrounding whitespace trimmed — the same normalization every
+// consumption seam already applies (UTLSProfileFor, tlslayer.clientUTLS,
+// transport.ParseBrowserProfile, http2.resolveH2Fingerprint) — so a spelling
+// this predicate accepts is a spelling that works coherently end to end.
+//
+// The empty string reports false. Whether "unset" is acceptable is a
+// per-entry-point policy rather than a property of the vocabulary: the
+// file-config validators treat "" as "unset → DefaultTLSFingerprint" and skip
+// the check, while the `-tls-fingerprint` CLI flag and the MCP proxy_start /
+// configure tools only reach this predicate for an explicit override.
+//
+// This is the single source of truth for the fingerprint vocabulary
+// (USK-1032); it validates only. File-config validation must not write the
+// normalized spelling back into ProxyConfig.TLSFingerprint: the stored
+// identity stays verbatim so ResolveTLSFingerprint / UTLSProfileFor observe
+// the operator's exact bytes (USK-1021).
+func ValidTLSFingerprint(fingerprint string) bool {
+	return validTLSFingerprints[strings.ToLower(strings.TrimSpace(fingerprint))]
+}
+
+// TLSFingerprintNamesList returns the accepted tls_fingerprint values joined
+// with ", " for use in error messages. Stable documentation order so the
+// config-file, CLI-flag, and MCP-tool surfaces all enumerate the same list.
+func TLSFingerprintNamesList() string {
+	return strings.Join(tlsFingerprintNames, ", ")
+}
+
+// validateTLSFingerprintField checks a tls_fingerprint config-file field.
+// An empty value is accepted: it is the documented "unset" spelling that
+// ResolveTLSFingerprint maps to DefaultTLSFingerprint. The value is never
+// rewritten — see ValidTLSFingerprint.
+func validateTLSFingerprintField(fingerprint string) error {
+	if fingerprint == "" {
+		return nil
+	}
+	if !ValidTLSFingerprint(fingerprint) {
+		return fmt.Errorf("tls_fingerprint %q is not valid (expected %s)", fingerprint, TLSFingerprintNamesList())
+	}
+	return nil
 }
 
 // validateProjectName checks that a project name contains only safe characters.
@@ -870,7 +940,15 @@ type SafetyFilterRuleConfig struct {
 //
 // Other ProxyConfig sections (WebSocket / GRPC / SSE limits, SafetyFilter)
 // continue to use their dedicated standalone validators called from main.
+//
+// USK-1032: tls_fingerprint is checked here so a config-file typo fails at
+// load time instead of silently falling back to a Go-native ClientHello on
+// the resend / fuzz dial path while `query config` still reports the typo
+// back to the agent. Validation rejects; it never rewrites the field.
 func (c *ProxyConfig) Validate() error {
+	if err := validateTLSFingerprintField(c.TLSFingerprint); err != nil {
+		return err
+	}
 	for i := range c.Plugins {
 		if err := c.Plugins[i].Validate(); err != nil {
 			return fmt.Errorf("plugins[%d]: %w", i, err)

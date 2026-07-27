@@ -12,6 +12,7 @@ import (
 
 	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/connector"
+	"github.com/usk6666/yorishiro-proxy/internal/connector/transport"
 	httprules "github.com/usk6666/yorishiro-proxy/internal/rules/http"
 )
 
@@ -930,6 +931,67 @@ func TestApplyTLSPassthrough(t *testing.T) {
 				if tt.pl.Len() != tt.wantLen {
 					t.Errorf("passthrough len = %d, want %d", tt.pl.Len(), tt.wantLen)
 				}
+			}
+		})
+	}
+}
+
+// TestApplyTLSFingerprint_Vocabulary covers the shared fingerprint vocabulary
+// at the MCP entry point (USK-1032). proxy_start / configure now accept the
+// same spellings as the config file and the -tls-fingerprint CLI flag:
+// case-insensitive, surrounding whitespace trimmed. The empty string stays
+// rejected — both callers only reach here for an explicit override.
+func TestApplyTLSFingerprint_Vocabulary(t *testing.T) {
+	tests := []struct {
+		name        string
+		profile     string
+		wantErr     bool
+		wantUTLS    bool
+		wantProfile transport.BrowserProfile
+	}{
+		{name: "firefox", profile: "firefox", wantUTLS: true, wantProfile: transport.ProfileFirefox},
+		{name: "padded mixed case", profile: "  FireFox  ", wantUTLS: true, wantProfile: transport.ProfileFirefox},
+		{name: "none opts out of uTLS", profile: "none"},
+		{name: "padded none opts out of uTLS", profile: " none "},
+		{name: "typo is rejected", profile: "firefx", wantErr: true},
+		{name: "padded typo is rejected", profile: "  firefx  ", wantErr: true},
+		{name: "empty is rejected", profile: "", wantErr: true},
+		{name: "whitespace only is rejected", profile: "   ", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := mkServerFromLegacyDeps(legacyDeps{})
+			err := s.applyTLSFingerprint(tt.profile)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("applyTLSFingerprint(%q) = nil, want error", tt.profile)
+				}
+				if !strings.Contains(err.Error(), "invalid tls_fingerprint") {
+					t.Errorf("error = %q, want substring %q", err, "invalid tls_fingerprint")
+				}
+				if !strings.Contains(err.Error(), config.TLSFingerprintNamesList()) {
+					t.Errorf("error = %q, want it to enumerate %q", err, config.TLSFingerprintNamesList())
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("applyTLSFingerprint(%q): %v", tt.profile, err)
+			}
+			switch tr := s.connector.tlsTransport.(type) {
+			case *transport.UTLSTransport:
+				if !tt.wantUTLS {
+					t.Fatalf("transport = UTLSTransport(%s), want StandardTransport", tr.Profile)
+				}
+				if tr.Profile != tt.wantProfile {
+					t.Errorf("uTLS profile = %s, want %s", tr.Profile, tt.wantProfile)
+				}
+			case *transport.StandardTransport:
+				if tt.wantUTLS {
+					t.Fatal("transport = StandardTransport, want UTLSTransport")
+				}
+			default:
+				t.Fatalf("unexpected transport type %T", tr)
 			}
 		})
 	}
