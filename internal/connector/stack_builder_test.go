@@ -7,6 +7,7 @@ import (
 	"crypto/x509"
 	"io"
 	"net"
+	"slices"
 	"testing"
 	"time"
 
@@ -18,7 +19,31 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/layer/http2/pool"
 )
 
+// TestBuildConnectionStack_RawPassthrough exercises the raw-passthrough
+// branch of BuildConnectionStack, which owns the second (and only other)
+// DialRawOpts.UTLSProfile call site besides dialUpstreamWithALPN.
+//
+// The "none" row is the USK-1021 regression for this site: reverting it to
+// EffectiveTLSFingerprint would leave the bug live for the
+// tls_fingerprint=none + raw_passthrough_hosts combination, where the raw
+// sentinel reaches tlslayer and hard-errors the upstream dial.
 func TestBuildConnectionStack_RawPassthrough(t *testing.T) {
+	for _, tt := range []struct {
+		name           string
+		tlsFingerprint string
+	}{
+		{name: "unset fingerprint", tlsFingerprint: ""},
+		{name: "none opts out of uTLS (USK-1021)", tlsFingerprint: "none"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			runRawPassthroughStack(t, tt.tlsFingerprint)
+		})
+	}
+}
+
+func runRawPassthroughStack(t *testing.T, tlsFingerprint string) {
+	t.Helper()
+
 	// --- Setup: upstream TLS server that echoes data ---
 	serverCfg, err := newSelfSignedTLSConfig("target.example.com")
 	if err != nil {
@@ -57,6 +82,7 @@ func TestBuildConnectionStack_RawPassthrough(t *testing.T) {
 		ProxyConfig:        proxyCfg,
 		Issuer:             issuer,
 		InsecureSkipVerify: true,
+		TLSFingerprint:     tlsFingerprint,
 	}
 
 	// Use a TCP listener instead of net.Pipe to avoid TLS handshake
@@ -1084,12 +1110,12 @@ func TestBuildConfig_TLSFingerprint_NilSafe(t *testing.T) {
 // silently keep dialing Firefox.
 func TestBuildConfig_EffectiveUTLSProfile(t *testing.T) {
 	tests := []struct {
-		name       string
-		static     string
-		override   string // "" → do not call SetTLSFingerprint
-		wantUTLS   string
-		wantIdent  string
-		nilReceive bool
+		name        string
+		static      string
+		override    string // "" → do not call SetTLSFingerprint
+		wantUTLS    string
+		wantIdent   string
+		nilReceiver bool
 	}{
 		{name: "boot none opts out (Case A)", static: "none", wantUTLS: "", wantIdent: "none"},
 		{name: "runtime none over boot firefox opts out (Case B)", static: "firefox", override: "none", wantUTLS: "", wantIdent: "none"},
@@ -1101,13 +1127,13 @@ func TestBuildConfig_EffectiveUTLSProfile(t *testing.T) {
 		{name: "none is trimmed", static: "  none  ", wantUTLS: "", wantIdent: "  none  "},
 		{name: "runtime none spelling variant opts out", static: "chrome", override: " None ", wantUTLS: "", wantIdent: " None "},
 		{name: "unknown profile is not silently downgraded", static: "firefx", wantUTLS: "firefx", wantIdent: "firefx"},
-		{name: "nil receiver", nilReceive: true, wantUTLS: "", wantIdent: ""},
+		{name: "nil receiver", nilReceiver: true, wantUTLS: "", wantIdent: ""},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var cfg *BuildConfig
-			if !tt.nilReceive {
+			if !tt.nilReceiver {
 				cfg = &BuildConfig{TLSFingerprint: tt.static}
 				if tt.override != "" {
 					cfg.SetTLSFingerprint(tt.override)
@@ -1127,27 +1153,48 @@ func TestBuildConfig_EffectiveUTLSProfile(t *testing.T) {
 	}
 }
 
+// Row names for TestDialUpstreamWithALPN_NoneFingerprintDialsStandardTLS,
+// declared as constants because the post-loop positive control looks the
+// captured ClientHellos back up by row name.
+const (
+	rowDialBootNone = "boot none (Case A)"
+	rowDialFirefox  = "firefox still uses uTLS (positive control)"
+)
+
 // TestDialUpstreamWithALPN_NoneFingerprintDialsStandardTLS pins the USK-1021
 // fix at the seam that actually matters: the MITM upstream dial. Asserting
 // EffectiveUTLSProfile() alone would not catch a regression that reverts the
-// DialRawOpts.UTLSProfile call sites to EffectiveTLSFingerprint, so this test
-// performs a real handshake against a local TLS server.
+// DialRawOpts.UTLSProfile call site in dialUpstreamWithALPN to
+// EffectiveTLSFingerprint, so this test performs a real handshake against a
+// local TLS server. (The sibling DialRawOpts.UTLSProfile site in
+// buildRawPassthroughStack is covered by
+// TestBuildConnectionStack_RawPassthrough's "none" row.)
 //
 // Pre-fix, the "none" rows produced
-// `tlslayer: unsupported uTLS profile "none"` and the client leg EOF'd; the
-// firefox row is the positive control proving the seam still routes real
-// profile names into uTLS.
+// `tlslayer: unsupported uTLS profile "none"` and the client leg EOF'd.
+//
+// The firefox row is the positive control. "Handshake did not error" alone
+// would not prove uTLS was engaged — a regression mapping every profile to
+// "" dials standard crypto/tls successfully — so the ClientHello is captured
+// server-side via GetConfigForClient and the firefox row's offered cipher
+// list is asserted to differ from the opt-out row's. Full JA3/JA4 coherence
+// is the e2e harness's job (internal/mcptest); this only needs to
+// discriminate uTLS-on from uTLS-off.
 func TestDialUpstreamWithALPN_NoneFingerprintDialsStandardTLS(t *testing.T) {
 	tests := []struct {
 		name     string
 		static   string
 		override string // "" → do not call SetTLSFingerprint
 	}{
-		{name: "boot none (Case A)", static: "none"},
+		{name: rowDialBootNone, static: "none"},
 		{name: "runtime none over boot firefox (Case B)", static: "firefox", override: "none"},
 		{name: "runtime none spelling variant", static: "chrome", override: "  NONE  "},
-		{name: "firefox still uses uTLS (positive control)", static: "firefox"},
+		{name: rowDialFirefox, static: "firefox"},
 	}
+
+	// offeredCiphers records the cipher-suite list each row actually put on
+	// the wire, keyed by row name.
+	offeredCiphers := make(map[string][]uint16, len(tests))
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1155,6 +1202,21 @@ func TestDialUpstreamWithALPN_NoneFingerprintDialsStandardTLS(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+
+			// Capture the ClientHello server-side. Returning (nil, nil)
+			// keeps the original config. The channel is buffered so the
+			// handshake never blocks on the test goroutine, and it is a
+			// channel rather than a plain variable so the read below is
+			// race-free under -race.
+			helloCh := make(chan []uint16, 1)
+			serverCfg.GetConfigForClient = func(chi *tls.ClientHelloInfo) (*tls.Config, error) {
+				select {
+				case helloCh <- append([]uint16(nil), chi.CipherSuites...):
+				default:
+				}
+				return nil, nil
+			}
+
 			ln, err := tls.Listen("tcp", "127.0.0.1:0", serverCfg)
 			if err != nil {
 				t.Fatal(err)
@@ -1196,7 +1258,31 @@ func TestDialUpstreamWithALPN_NoneFingerprintDialsStandardTLS(t *testing.T) {
 			if snap.Version == 0 {
 				t.Error("expected non-zero TLS version")
 			}
+
+			select {
+			case suites := <-helloCh:
+				if len(suites) == 0 {
+					t.Fatal("captured ClientHello carried no cipher suites")
+				}
+				offeredCiphers[tt.name] = suites
+			case <-time.After(5 * time.Second):
+				t.Fatal("timed out waiting for the server-side ClientHello capture")
+			}
 		})
+	}
+
+	firefoxSuites, ok := offeredCiphers[rowDialFirefox]
+	if !ok {
+		t.Fatalf("no ClientHello captured for row %q", rowDialFirefox)
+	}
+	noneSuites, ok := offeredCiphers[rowDialBootNone]
+	if !ok {
+		t.Fatalf("no ClientHello captured for row %q", rowDialBootNone)
+	}
+	if slices.Equal(firefoxSuites, noneSuites) {
+		t.Errorf("firefox and none offered identical ClientHello cipher suites %v; "+
+			"the firefox row must dial through the uTLS parrot, not the Go-native stack "+
+			"(a regression resolving every profile to \"\" would look like this)", firefoxSuites)
 	}
 }
 

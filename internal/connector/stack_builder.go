@@ -49,12 +49,14 @@ type BuildConfig struct {
 	// InsecureSkipVerify disables TLS certificate verification on upstream.
 	InsecureSkipVerify bool
 
-	// TLSFingerprint selects the uTLS browser fingerprint profile for upstream.
-	// This is the static (init-time) value; runtime updates from
-	// proxy_start / configure flow through SetTLSFingerprint and
-	// EffectiveTLSFingerprint. Live data-path readers MUST call
-	// EffectiveTLSFingerprint() — direct field reads observe only the
-	// boot-time value (USK-809).
+	// TLSFingerprint is the upstream TLS fingerprint *identity* the proxy
+	// claims, including the "none" opt-out sentinel. This is the static
+	// (init-time) value; runtime updates from proxy_start / configure flow
+	// through SetTLSFingerprint and EffectiveTLSFingerprint. Readers MUST
+	// NOT read this field directly — it observes only the boot-time value
+	// (USK-809). Call EffectiveTLSFingerprint() for the claimed identity
+	// (reporting surfaces, HTTP/2 send-shape selection) and
+	// EffectiveUTLSProfile() for the value handed to a dial (USK-1021).
 	TLSFingerprint string
 
 	// tlsFingerprintDynamic stores the runtime-mutable TLS fingerprint
@@ -546,14 +548,20 @@ func (c *BuildConfig) EffectiveUpstreamProxyForCtxErr(ctx context.Context) (*url
 	return c.EffectiveUpstreamProxy(), nil
 }
 
-// EffectiveTLSFingerprint returns the uTLS browser fingerprint profile
-// the live data path should use for the next upstream dial. Runtime
-// updates installed via SetTLSFingerprint take precedence over the
-// static TLSFingerprint field set at boot. Returns the empty string when
-// neither is configured (the dial path then falls back to standard TLS).
-// This is the canonical accessor for live dial-path code (USK-809);
-// callers MUST NOT read the TLSFingerprint field directly because it
-// observes only the boot-time value.
+// EffectiveTLSFingerprint returns the TLS fingerprint *identity* the
+// proxy currently claims for upstream connections — the "none" opt-out
+// sentinel included, returned verbatim. Runtime updates installed via
+// SetTLSFingerprint take precedence over the static TLSFingerprint field
+// set at boot. Returns the empty string when neither is configured.
+//
+// This is the canonical accessor for reporting surfaces (query config /
+// configure) and for the HTTP/2 send-shape selection, both of which are
+// sentinel-aware; callers MUST NOT read the TLSFingerprint field
+// directly because it observes only the boot-time value (USK-809).
+//
+// It is NOT the dial accessor: code that hands a profile name to
+// tlslayer (DialRawOpts.UTLSProfile) must call EffectiveUTLSProfile
+// instead, which resolves the sentinel (USK-1021).
 func (c *BuildConfig) EffectiveTLSFingerprint() string {
 	if c == nil {
 		return ""
@@ -573,9 +581,11 @@ func (c *BuildConfig) EffectiveTLSFingerprint() string {
 // (USK-1021):
 //
 //   - EffectiveTLSFingerprint is the fingerprint *identity* the proxy
-//     claims. It feeds the reporting surfaces (query config / configure)
-//     and the HTTP/2 send-shape selection, both of which are already
-//     sentinel-aware.
+//     claims. It feeds the reporting surfaces (query config / configure),
+//     which distinguish an explicit "none" opt-out from an unconfigured
+//     "", and the HTTP/2 send-shape selection, which is merely
+//     sentinel-tolerant (resolveH2Fingerprint maps both "none" and "" to
+//     the default shape).
 //   - EffectiveUTLSProfile is the *dial* value. Use it wherever a profile
 //     name reaches tlslayer (DialRawOpts.UTLSProfile) or keys a cache
 //     whose entries are discriminated by the actual dial identity.
@@ -583,18 +593,33 @@ func (c *BuildConfig) EffectiveTLSFingerprint() string {
 // Passing the raw identity to the dial path is the USK-1021 bug: tlslayer
 // fail-hards on any profile name outside its parrot table, so a live
 // "none" override aborted every MITM upstream dial.
+//
+// Load-bearing invariant for the cache keys derived from this accessor
+// (poolKeyForH2, ALPNCacheKeyFromConfig): config.UTLSProfileFor must
+// never merge two identities that http2.resolveH2Fingerprint
+// distinguishes. A pooled h2 connection's SETTINGS / WINDOW_UPDATE /
+// pseudo-header send-shape is fixed at creation from the *identity*,
+// while the pool key derives from the *dial* value — so merging a pair
+// the H2 selection separates would let a connection be reused under the
+// wrong send-shape, a silent fingerprint incoherence. Today the only
+// merged set is the "none" spellings plus "", which all share both the
+// standard-crypto/tls handshake and the default H2 shape. Re-check this
+// when adding a second sentinel/alias to UTLSProfileFor, or when
+// resolveH2Fingerprint starts discriminating beyond "firefox".
 func (c *BuildConfig) EffectiveUTLSProfile() string {
 	return config.UTLSProfileFor(c.EffectiveTLSFingerprint())
 }
 
-// SetTLSFingerprint installs a runtime override for the uTLS browser
-// fingerprint profile. Subsequent calls to EffectiveTLSFingerprint
-// return profile (or fall back to the static TLSFingerprint field when
-// profile is empty). The runtime override is the wire-up consumed by
-// proxy_start / configure to make the fingerprint change reach the
-// live dial path (USK-809); writes are atomic with respect to
-// concurrent dial-path reads. Passing the empty string clears the
-// override.
+// SetTLSFingerprint installs a runtime override for the claimed TLS
+// fingerprint identity, stored unresolved — an override of "none" is
+// kept verbatim and resolved to "" only at the dial seam by
+// EffectiveUTLSProfile (USK-1021). Subsequent calls to
+// EffectiveTLSFingerprint return profile (or fall back to the static
+// TLSFingerprint field when profile is empty). The runtime override is
+// the wire-up consumed by proxy_start / configure to make the
+// fingerprint change reach the live dial path (USK-809); writes are
+// atomic with respect to concurrent dial-path reads. Passing the empty
+// string clears the override.
 func (c *BuildConfig) SetTLSFingerprint(profile string) {
 	if c == nil {
 		return

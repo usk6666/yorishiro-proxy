@@ -349,10 +349,12 @@ const DefaultTLSFingerprint = "firefox"
 //
 // The returned value is identity-preserving: the opt-out sentinel "none" is
 // returned verbatim rather than flattened to "", so the reporting surfaces
-// (query config / configure results) and the HTTP/2 send-shape selection can
-// distinguish "operator explicitly opted out" from "nothing configured".
-// Mapping the sentinel to the uTLS parrot name is the separate job of
-// UTLSProfileFor, which must be applied at the dial seam.
+// (query config / configure results) can distinguish "operator explicitly
+// opted out" from "nothing configured". The HTTP/2 send-shape selection is
+// only sentinel-tolerant — it accepts the raw identity but maps both "none"
+// and "" to the default shape. Mapping the sentinel to the uTLS parrot name
+// is the separate job of UTLSProfileFor, which must be applied at the dial
+// seam.
 //
 // This is the single source of truth for the firefox default (USK-1013);
 // call it from every boot-time fingerprint resolution site.

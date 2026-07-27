@@ -752,9 +752,12 @@ func PerformClientMITM(
 //     cfg.ResolvePerHostTLS(target) — which remains private until a
 //     downstream Issue (USK-915) needs it.
 //
-//   - cfg.EffectiveTLSFingerprint and cfg.EffectiveUpstreamProxyForCtx
+//   - cfg.EffectiveUTLSProfile and cfg.EffectiveUpstreamProxyForCtx
 //     continue to govern uTLS profile selection and upstream-proxy
 //     traversal exactly as in the BuildConnectionStack callsite.
+//     EffectiveUTLSProfile — not EffectiveTLSFingerprint — is the dial
+//     accessor: it resolves the "none" opt-out sentinel that tlslayer
+//     would otherwise reject as an unknown parrot name (USK-1021).
 //
 //   - Observability: the (tls, on_handshake) hook fires for the "client"
 //     side (proxy dialing upstream) when snap is non-nil. Forward callers
