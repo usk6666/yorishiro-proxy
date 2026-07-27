@@ -339,19 +339,25 @@ func ResolveDBPath(value string) (string, error) {
 // Chrome parity remains available via explicit configuration.
 const DefaultTLSFingerprint = "firefox"
 
-// ResolveTLSFingerprint returns the effective upstream TLS ClientHello
-// fingerprint profile name, applying the precedence:
+// ResolveTLSFingerprint returns the fingerprint *identity* the proxy claims
+// for upstream connections, applying the precedence:
 //
 //  1. proxyCfg.TLSFingerprint (per-listener config / `-tls-fingerprint` flag)
 //  2. cfg.TLSFingerprint (top-level config; pass a nil cfg to skip this tier
 //     and preserve the live-dial path's proxyCfg-only contract)
 //  3. DefaultTLSFingerprint ("firefox")
 //
-// The opt-out sentinel "none" (case-insensitive) resolves to "" so the caller
-// dials with the standard crypto/tls stack (no uTLS spoofing). Any other value
-// passes through unchanged for downstream profile validation. This is the
-// single source of truth for the firefox default and the "none" escape hatch;
-// call it from every boot-time fingerprint resolution site (USK-1013).
+// The returned value is identity-preserving: the opt-out sentinel "none" is
+// returned verbatim rather than flattened to "", so the reporting surfaces
+// (query config / configure results) can distinguish "operator explicitly
+// opted out" from "nothing configured". The HTTP/2 send-shape selection is
+// only sentinel-tolerant — it accepts the raw identity but maps both "none"
+// and "" to the default shape. Mapping the sentinel to the uTLS parrot name
+// is the separate job of UTLSProfileFor, which must be applied at the dial
+// seam.
+//
+// This is the single source of truth for the firefox default (USK-1013);
+// call it from every boot-time fingerprint resolution site.
 func ResolveTLSFingerprint(cfg *Config, proxyCfg *ProxyConfig) string {
 	fingerprint := ""
 	if proxyCfg != nil && proxyCfg.TLSFingerprint != "" {
@@ -362,6 +368,22 @@ func ResolveTLSFingerprint(cfg *Config, proxyCfg *ProxyConfig) string {
 	if fingerprint == "" {
 		fingerprint = DefaultTLSFingerprint
 	}
+	return fingerprint
+}
+
+// UTLSProfileFor maps a fingerprint identity to the uTLS parrot profile name
+// the dial path should instantiate. The opt-out sentinel "none"
+// (case-insensitive, surrounding whitespace trimmed) maps to "", which every
+// dial seam reads as "use the standard crypto/tls stack, no uTLS spoofing".
+// Every other value — including "" itself — passes through unchanged so the
+// downstream profile lookup keeps its fail-hard-on-typo property: a
+// misspelled "firefx" must error loudly rather than silently degrade to a
+// Go-native ClientHello (USK-1021).
+//
+// This is the single source of truth for the "none" escape hatch. Apply it at
+// the uTLS-profile consumption seam only; the identity carried through config,
+// runtime overrides, and reporting stays unresolved.
+func UTLSProfileFor(fingerprint string) string {
 	if strings.EqualFold(strings.TrimSpace(fingerprint), "none") {
 		return ""
 	}

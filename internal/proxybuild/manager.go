@@ -942,14 +942,20 @@ func (m *Manager) MaxConcurrentStreams() uint32 {
 	return bc.EffectiveMaxConcurrentStreams()
 }
 
-// TLSFingerprint returns the effective uTLS browser fingerprint profile
-// from the bound BuildConfig (USK-809). The returned value reflects any
-// runtime override installed via SetTLSFingerprint and falls back to
-// the boot-time BuildConfig.TLSFingerprint when no override is in
-// effect. Returns the empty string when no BuildConfig is bound — the
-// caller is responsible for translating empty into a user-facing
-// representation if desired (this accessor does NOT substitute the
-// "firefox" boot default — empty stays empty).
+// TLSFingerprint returns the claimed TLS fingerprint *identity* from the
+// bound BuildConfig (USK-809) — the "none" opt-out sentinel included,
+// returned verbatim rather than resolved to a uTLS parrot name. The
+// returned value reflects any runtime override installed via
+// SetTLSFingerprint and falls back to the boot-time
+// BuildConfig.TLSFingerprint when no override is in effect. Returns the
+// empty string when no BuildConfig is bound — the caller is responsible
+// for translating empty into a user-facing representation if desired
+// (this accessor does NOT substitute the "firefox" boot default — empty
+// stays empty).
+//
+// This is a reporting accessor, not a dial value: every consumer feeds a
+// user-facing surface. Dial-path code calls
+// BuildConfig.EffectiveUTLSProfile instead (USK-1021).
 func (m *Manager) TLSFingerprint() string {
 	m.mu.Lock()
 	bc := m.buildCfg

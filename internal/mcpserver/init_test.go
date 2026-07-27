@@ -539,21 +539,29 @@ func TestInitTLSTransport_InvalidProfileFallback(t *testing.T) {
 
 // TestNewLiveBuildConfig_TLSFingerprintDefault verifies the live-dial boot
 // path (USK-1013): an unset fingerprint is pinned to the firefox default,
-// "none" opts out to standard TLS (empty EffectiveTLSFingerprint → clientStandard),
-// and an explicit profile passes through. The live path is proxyCfg-only, so
-// a top-level cfg.TLSFingerprint must NOT leak in when proxyCfg is empty.
+// "none" opts out to standard TLS, and an explicit profile passes through.
+// The live path is proxyCfg-only, so a top-level cfg.TLSFingerprint must NOT
+// leak in when proxyCfg is empty.
+//
+// USK-1021 contract change: an explicit "none" is now STORED verbatim (it was
+// flattened to "" before) so the reporting surfaces can distinguish "operator
+// opted out" from "nothing configured", matching what a runtime
+// proxy_start / configure "none" override installs. The opt-out is applied at
+// the dial seam instead — bc.EffectiveUTLSProfile() is "" and therefore
+// selects clientStandard.
 func TestNewLiveBuildConfig_TLSFingerprintDefault(t *testing.T) {
 	tests := []struct {
 		name       string
 		proxyFP    string
 		topLevelFP string
 		wantStored string // bc.TLSFingerprint
-		wantEffect string // bc.EffectiveTLSFingerprint()
+		wantEffect string // bc.EffectiveTLSFingerprint() — claimed identity
+		wantUTLS   string // bc.EffectiveUTLSProfile() — dial value
 	}{
-		{"unset defaults to firefox", "", "", "firefox", "firefox"},
-		{"none opts out to standard TLS", "none", "", "", ""},
-		{"explicit chrome passes through", "chrome", "", "chrome", "chrome"},
-		{"live path ignores top-level cfg", "", "safari", "firefox", "firefox"},
+		{"unset defaults to firefox", "", "", "firefox", "firefox", "firefox"},
+		{"none opts out to standard TLS at the dial seam", "none", "", "none", "none", ""},
+		{"explicit chrome passes through", "chrome", "", "chrome", "chrome", "chrome"},
+		{"live path ignores top-level cfg", "", "safari", "firefox", "firefox", "firefox"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -566,7 +574,10 @@ func TestNewLiveBuildConfig_TLSFingerprintDefault(t *testing.T) {
 				t.Errorf("bc.TLSFingerprint = %q, want %q", bc.TLSFingerprint, tt.wantStored)
 			}
 			if got := bc.EffectiveTLSFingerprint(); got != tt.wantEffect {
-				t.Errorf("bc.EffectiveTLSFingerprint() = %q, want %q (selects clientStandard when empty)", got, tt.wantEffect)
+				t.Errorf("bc.EffectiveTLSFingerprint() = %q, want %q (claimed identity)", got, tt.wantEffect)
+			}
+			if got := bc.EffectiveUTLSProfile(); got != tt.wantUTLS {
+				t.Errorf("bc.EffectiveUTLSProfile() = %q, want %q (selects clientStandard when empty)", got, tt.wantUTLS)
 			}
 		})
 	}
