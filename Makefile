@@ -8,6 +8,11 @@ COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 DATE    ?= $(shell date -u '+%Y-%m-%dT%H:%M:%SZ')
 LDFLAGS := -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.date=$(DATE)
 
+# Pinned golangci-lint version. Single source of truth: .golangci-lint-version,
+# which CI consumes via golangci-lint-action's `version-file` input, so the
+# local and CI rule sets cannot drift.
+GOLANGCI_LINT_VERSION := $(shell cat .golangci-lint-version 2>/dev/null)
+
 .PHONY: build build-ui ensure-ui dev-ui test test-fast test-ui test-e2e test-e2e-smoke test-cover vet lint fmt clean bench bench-compare
 
 build: build-ui vet
@@ -64,17 +69,29 @@ vet: ensure-ui
 fmt:
 	gofmt -w .
 
+# lint = the Go toolchain's own gofmt over the whole tree, plus golangci-lint
+# for govet / staticcheck / ineffassign / gocyclo (see .golangci.yml for why
+# gofmt is deliberately NOT delegated to golangci-lint).
 lint: ensure-ui
 	@echo "==> gofmt check"
 	@test -z "$$(gofmt -l .)" || (echo "Files not formatted:" && gofmt -l . && exit 1)
-	@echo "==> go vet"
-	go vet ./...
-	@echo "==> staticcheck"
-	staticcheck ./...
-	@echo "==> ineffassign"
-	ineffassign ./...
-	@echo "==> gocyclo (threshold: 15)"
-	@test -z "$$(gocyclo -over 15 -ignore '_test\.go$$' .)" || (gocyclo -over 15 -ignore '_test\.go$$' . && exit 1)
+	@command -v golangci-lint >/dev/null 2>&1 || { \
+		echo "golangci-lint not found on PATH."; \
+		echo "Install the pinned version -- do NOT use 'go install ...@latest':"; \
+		echo "golangci-lint $(GOLANGCI_LINT_VERSION) declares 'go 1.26.0', so building"; \
+		echo "it from source needs go1.26+, which is exactly the breakage USK-1043 removes."; \
+		echo ""; \
+		echo "  curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/$(GOLANGCI_LINT_VERSION)/install.sh \\"; \
+		echo "    | sh -s -- -b $$(go env GOPATH)/bin $(GOLANGCI_LINT_VERSION)"; \
+		exit 1; }
+	@have="v$$(golangci-lint version --short)"; \
+	 if [ "$$have" != "$(GOLANGCI_LINT_VERSION)" ]; then \
+		echo "golangci-lint version mismatch: have $$have, pinned $(GOLANGCI_LINT_VERSION)."; \
+		echo "Local results can diverge from CI. Install the pinned version (see above)."; \
+		exit 1; \
+	 fi
+	@echo "==> golangci-lint $(GOLANGCI_LINT_VERSION)"
+	golangci-lint run
 
 bench: ensure-ui
 	go test -bench=. -benchmem -run=^$$ ./...
