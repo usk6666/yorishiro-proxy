@@ -1,0 +1,72 @@
+name: OpenSSF Scorecard
+
+# Supply-chain posture scoring for this repository.
+#
+# Scorecard grades ~18 security-hygiene checks (pinned dependencies, branch
+# protection, signed releases, dangerous workflow patterns, SAST, token
+# permissions, …) and publishes the result to the OpenSSF public dataset, which
+# backs the README badge.
+#
+# `publish_results: true` is what feeds the badge, and it requires
+# `id-token: write` — the action mints an OIDC token so the OpenSSF API can
+# verify the results really came from a run in this repository. Results are only
+# published from `main` (scheduled runs and pushes); this is intentionally not a
+# pull_request workflow, since a fork PR cannot be allowed to publish a score.
+#
+# Known limitation: the Branch-Protection check cannot read ruleset/branch
+# protection settings with the default GITHUB_TOKEN, so it scores as
+# inconclusive. Granting it requires a PAT with `administration: read`, stored
+# as the `SCORECARD_TOKEN` secret and passed via `repo_token:`. Deliberately not
+# done here — a long-lived admin-scoped token in CI is a worse supply-chain
+# trade than one unscored check.
+#
+# 05:41 UTC Tuesdays: off-peak, and clear of `nightly-e2e` (17:00 daily) and
+# `dependabot-security` (Mondays 06:17).
+
+on:
+  schedule:
+    - cron: "41 5 * * 2"
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions: read-all
+
+jobs:
+  analysis:
+    name: Scorecard analysis
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      # Upload the SARIF result to the repository's code-scanning view.
+      security-events: write
+      # Let the Token-Permissions check read this repo's workflow definitions.
+      actions: read
+      contents: read
+      # Required by publish_results (OIDC attestation to the OpenSSF API).
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Run analysis
+        uses: ossf/scorecard-action@2d1146689b8cda280b9bc96326124645441f03bc # v2.4.4
+        with:
+          results_file: results.sarif
+          results_format: sarif
+          publish_results: true
+
+      # Retained briefly so a score regression can be diffed against the raw
+      # result without re-running the analysis.
+      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: scorecard-results
+          path: results.sarif
+          retention-days: 5
+
+      - name: Upload to code scanning
+        uses: github/codeql-action/upload-sarif@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
+        with:
+          sarif_file: results.sarif
