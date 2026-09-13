@@ -116,7 +116,7 @@ func (s *Server) registerManage() {
 			"export / delete the same set of flows they were inspecting. " +
 			"For delete_flows, top-level protocol/scheme/http_version and params.filter cannot be combined in a single call; supply one form. " +
 			"File paths (output_path / input_path) are resolved relative to the proxy server process's working directory, NOT the MCP caller's cwd — pass absolute paths when the server cwd is unknown to the caller (e.g. HTTP remote MCP). " +
-			"See yorishiro://help/manage.",
+			"Full reference: call docs(topic=\"manage\").",
 	}, s.handleManage)
 }
 

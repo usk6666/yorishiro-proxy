@@ -2032,8 +2032,8 @@ func TestProxyStartTool_DescriptionGuidesToConfigure(t *testing.T) {
 			phrase: "Do NOT call proxy_start repeatedly",
 		},
 		{
-			name:   "links to help resource",
-			phrase: "yorishiro://help/proxy_start",
+			name:   "routes to the docs tool",
+			phrase: `docs(topic="proxy_start")`,
 		},
 	}
 	for _, tc := range cases {

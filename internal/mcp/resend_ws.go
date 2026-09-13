@@ -95,7 +95,7 @@ func (s *Server) registerResendWS() {
 			"is recovered from the recorded flow; otherwise target_addr + path are required and " +
 			"compressed frames are unsupported. target_addr redirects the dial target while preserving " +
 			"the recovered :authority. For non-WebSocket flows use resend_http / resend_grpc / resend_raw. " +
-			"See yorishiro://help/resend_ws.",
+			"Full reference: call docs(topic=\"resend_ws\").",
 	}, s.handleResendWS)
 }
 

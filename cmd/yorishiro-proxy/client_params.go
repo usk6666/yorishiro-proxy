@@ -17,6 +17,7 @@ import (
 // shared / cross-cutting tools keep "action" as the first positional for
 // convenience, matching their pre-typed-split CLI ergonomics.
 var positionalArgMapping = map[string][]string{
+	"docs":              {"topic", "section"},
 	"query":             {"resource", "id"},
 	"intercept":         {"action"},
 	"manage":            {"action"},

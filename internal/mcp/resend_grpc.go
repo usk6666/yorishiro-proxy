@@ -152,7 +152,7 @@ func (s *Server) registerResendGRPC() {
 			"preserving wire case/order/duplicates. trailer_metadata is optional — when set, the request " +
 			"terminates via a trailer HEADERS frame instead of END_STREAM on the last DATA. target_addr " +
 			"redirects the dial target while preserving the recovered :authority. For non-gRPC flows use " +
-			"resend_http / resend_ws / resend_raw. See yorishiro://help/resend_grpc.",
+			"resend_http / resend_ws / resend_raw. Full reference: call docs(topic=\"resend_grpc\").",
 	}, s.handleResendGRPC)
 }
 

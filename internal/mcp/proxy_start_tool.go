@@ -101,9 +101,9 @@ type proxyStartInput struct {
 	// Values can be strings (legacy: "host:port") or ForwardConfig objects
 	// ({target, protocol, tls, upstream_tls}). Uses map[string]any to accept
 	// both formats in the MCP JSON schema; parsed into *config.ForwardConfig
-	// by parseTCPForwardsAny. See yorishiro://help/proxy_start for the full
-	// TLS × upstream_tls matrix.
-	TCPForwards map[string]any `json:"tcp_forwards,omitempty" jsonschema:"TCP forwarding map: local port -> upstream host:port string (legacy) or {target, protocol, tls, upstream_tls, upstream_insecure_skip_verify} object. protocol: auto|raw|http|http2|grpc|websocket|sse (empty=auto). tls=client-side TLS MITM termination on the forwarded port; upstream_tls=upstream-dial TLS encryption to target. Both default false and are independent (4 combinations: plaintext/plaintext, TLS-terminate/plaintext, plaintext/TLS, TLS-terminate/TLS). upstream_insecure_skip_verify (optional bool) is a per-entry override: skip upstream TLS certificate verification for this forward; default inherits global insecure_skip_verify. See yorishiro://help/proxy_start for the full matrix."`
+	// by parseTCPForwardsAny. Full reference: call docs(topic="proxy_start")
+	// for the full TLS × upstream_tls matrix.
+	TCPForwards map[string]any `json:"tcp_forwards,omitempty" jsonschema:"TCP forwarding map: local port -> upstream host:port string (legacy) or {target, protocol, tls, upstream_tls, upstream_insecure_skip_verify} object. protocol: auto|raw|http|http2|grpc|websocket|sse (empty=auto). tls=client-side TLS MITM termination on the forwarded port; upstream_tls=upstream-dial TLS encryption to target. Both default false and are independent (4 combinations: plaintext/plaintext, TLS-terminate/plaintext, plaintext/TLS, TLS-terminate/TLS). upstream_insecure_skip_verify (optional bool) is a per-entry override: skip upstream TLS certificate verification for this forward; default inherits global insecure_skip_verify. Full reference: call docs(topic=\"proxy_start\")."`
 
 	// SOCKS5Auth specifies the SOCKS5 authentication method.
 	// Valid values: "none" (default), "password".
@@ -152,7 +152,7 @@ type proxyStartInput struct {
 	// CaptureScope filters which flows are persisted to the flow store
 	// without altering wire transmission (USK-776). Use this to suppress
 	// noise from third-party CDNs, analytics, fonts, etc. while keeping
-	// browser-driven sessions functional. See yorishiro://help/proxy_start.
+	// browser-driven sessions functional. Full reference: call docs(topic="proxy_start").
 	CaptureScope *captureScopeInput `json:"capture_scope,omitempty" jsonschema:"recording-only observability filter; out-of-scope flows are still proxied but not stored"`
 }
 
@@ -245,7 +245,7 @@ func (s *Server) registerProxyStart() {
 			"For in-session partial updates (add/remove a single rule, change one timeout) use the " +
 			"`configure` tool with operation='merge' or 'replace' instead. " +
 			"Persistent settings belong in the config file. " +
-			"See yorishiro://help/proxy_start for parameter details and misuse patterns.",
+			"Full reference: call docs(topic=\"proxy_start\").",
 	}, s.handleProxyStart)
 }
 

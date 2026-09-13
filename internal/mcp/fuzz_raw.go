@@ -168,7 +168,7 @@ func (s *Server) registerFuzzRaw() {
 			"stop_on_error aborts on the first failure. " +
 			"pre_macro / post_macro hooks dispatch around each variant (scope=iteration) or once per job (scope=job); " +
 			"raw has no L7 status concept so post_macro run_interval='on_status' is rejected — use 'on_match' against __response_body. " +
-			"See yorishiro://help/fuzz_raw.",
+			"Full reference: call docs(topic=\"fuzz_raw\").",
 	}, s.handleFuzzRaw)
 }
 

@@ -23,7 +23,7 @@ import (
 // schemaCache is a process-wide cache of resolved JSON schemas, shared by
 // every MCP Server instance built in this process.
 //
-// The 18 tool input/output struct types registered by registerTools are
+// The 19 tool input/output struct types registered by registerTools are
 // fixed at compile time, so caching by reflect.Type is unconditionally
 // correct. The cache is concurrent-safe (gomcp.SchemaCache uses sync.Map
 // internally) and cheaply amortises a 1+ second per-server reflection cost
@@ -433,6 +433,7 @@ func (s *Server) registerTools() {
 	s.registerSecurity()
 	s.registerPluginIntrospect()
 	s.registerGRPCSchema()
+	s.registerDocs()
 }
 
 // grpcSchemaRegistry returns the process-global gRPC schema registry,

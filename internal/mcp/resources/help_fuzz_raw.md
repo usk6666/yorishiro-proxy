@@ -31,7 +31,7 @@ Unlike `resend_raw` (where `flow_id` is REQUIRED), `fuzz_raw` makes `flow_id` OP
 
 - `flow_id` (optional), `target_addr` (REQUIRED), `use_tls`, `sni`, `override_bytes`, `override_bytes_encoding`, `override_bytes_set`, `patches[]`, `insecure_skip_verify`, `tls_fingerprint`, `tag`, `timeout_ms`
 
-See [help_resend_raw](yorishiro://help/resend_raw) for the inherited fields. Documentation here is on fuzz-specific fields only.
+Call `docs(topic="resend_raw")` for the inherited fields. Documentation here is on fuzz-specific fields only.
 
 ### positions (array, REQUIRED)
 Ordered position list; at least one entry. Each position has:

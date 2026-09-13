@@ -18,13 +18,37 @@ type resourceDef struct {
 	description string
 	mimeType    string
 	filename    string // path within the embedded FS (e.g. "resources/help_query.md")
+
+	// topic is the docs-tool topic name for this resource — the value an
+	// agent passes as docs(topic=...). Populated on helpResources only;
+	// schemaResources deliberately leave it empty because the hand-written
+	// JSON Schemas duplicate the InputSchema that tools/list already
+	// delivers, so exposing them through the docs tool would cost index
+	// tokens for zero new information (USK-1036).
+	//
+	// Explicit rather than derived from name: a strings.TrimPrefix(name,
+	// "help_") rule would silently promote any future help-prefixed schema
+	// entry into the docs namespace.
+	topic string
 }
 
-// helpResources lists all help resources.
+// helpResources lists all help resources. Every entry is both an MCP
+// resource (yorishiro://help/<topic>) and a docs-tool topic; the slice order
+// is the order topics appear in the docs() index, so getting-started leads
+// and the cross-cutting concept topics trail the per-tool references.
 var helpResources = []resourceDef{
+	{
+		uri:         "yorishiro://help/getting-started",
+		name:        "help_getting-started",
+		topic:       "getting-started",
+		description: "End-to-end first session: MCP setup, proxy_start, CA certificate install, first capture, inspect, replay.",
+		mimeType:    "text/markdown",
+		filename:    "resources/help_getting-started.md",
+	},
 	{
 		uri:         "yorishiro://help/proxy_start",
 		name:        "help_proxy_start",
+		topic:       "proxy_start",
 		description: "Full parameter documentation and usage examples for the proxy_start tool.",
 		mimeType:    "text/markdown",
 		filename:    "resources/help_proxy_start.md",
@@ -32,6 +56,7 @@ var helpResources = []resourceDef{
 	{
 		uri:         "yorishiro://help/proxy_stop",
 		name:        "help_proxy_stop",
+		topic:       "proxy_stop",
 		description: "Documentation for the proxy_stop tool.",
 		mimeType:    "text/markdown",
 		filename:    "resources/help_proxy_stop.md",
@@ -39,6 +64,7 @@ var helpResources = []resourceDef{
 	{
 		uri:         "yorishiro://help/query",
 		name:        "help_query",
+		topic:       "query",
 		description: "Resource list, filter syntax, and usage examples for the query tool.",
 		mimeType:    "text/markdown",
 		filename:    "resources/help_query.md",
@@ -46,6 +72,7 @@ var helpResources = []resourceDef{
 	{
 		uri:         "yorishiro://help/manage",
 		name:        "help_manage",
+		topic:       "manage",
 		description: "Action list, parameter syntax, and usage examples for the manage tool (delete_flows, export_flows, import_flows, regenerate_ca_cert).",
 		mimeType:    "text/markdown",
 		filename:    "resources/help_manage.md",
@@ -53,6 +80,7 @@ var helpResources = []resourceDef{
 	{
 		uri:         "yorishiro://help/macro",
 		name:        "help_macro",
+		topic:       "macro",
 		description: "Action list, parameter syntax, and usage examples for the macro tool (define_macro, run_macro, delete_macro).",
 		mimeType:    "text/markdown",
 		filename:    "resources/help_macro.md",
@@ -60,6 +88,7 @@ var helpResources = []resourceDef{
 	{
 		uri:         "yorishiro://help/intercept",
 		name:        "help_intercept",
+		topic:       "intercept",
 		description: "Action list, parameter syntax, and usage examples for the intercept tool (release, modify_and_forward, drop).",
 		mimeType:    "text/markdown",
 		filename:    "resources/help_intercept.md",
@@ -67,6 +96,7 @@ var helpResources = []resourceDef{
 	{
 		uri:         "yorishiro://help/configure",
 		name:        "help_configure",
+		topic:       "configure",
 		description: "Operation types, merge/replace syntax, and usage examples for the configure tool.",
 		mimeType:    "text/markdown",
 		filename:    "resources/help_configure.md",
@@ -74,6 +104,7 @@ var helpResources = []resourceDef{
 	{
 		uri:         "yorishiro://help/examples",
 		name:        "help_examples",
+		topic:       "examples",
 		description: "Common vulnerability assessment workflow examples using yorishiro-proxy.",
 		mimeType:    "text/markdown",
 		filename:    "resources/help_examples.md",
@@ -81,6 +112,7 @@ var helpResources = []resourceDef{
 	{
 		uri:         "yorishiro://help/security",
 		name:        "help_security",
+		topic:       "security",
 		description: "Two-layer target scope architecture, action syntax, and usage examples for the security tool.",
 		mimeType:    "text/markdown",
 		filename:    "resources/help_security.md",
@@ -88,6 +120,7 @@ var helpResources = []resourceDef{
 	{
 		uri:         "yorishiro://help/resend_http",
 		name:        "help_resend_http",
+		topic:       "resend_http",
 		description: "Parameter documentation and examples for the resend_http tool (HTTPMessage-typed HTTP resend).",
 		mimeType:    "text/markdown",
 		filename:    "resources/help_resend_http.md",
@@ -95,6 +128,7 @@ var helpResources = []resourceDef{
 	{
 		uri:         "yorishiro://help/resend_ws",
 		name:        "help_resend_ws",
+		topic:       "resend_ws",
 		description: "Parameter documentation and examples for the resend_ws tool (WSMessage-typed WebSocket frame resend).",
 		mimeType:    "text/markdown",
 		filename:    "resources/help_resend_ws.md",
@@ -102,6 +136,7 @@ var helpResources = []resourceDef{
 	{
 		uri:         "yorishiro://help/resend_grpc",
 		name:        "help_resend_grpc",
+		topic:       "resend_grpc",
 		description: "Parameter documentation and examples for the resend_grpc tool (GRPCStart/Data/End-typed gRPC RPC resend).",
 		mimeType:    "text/markdown",
 		filename:    "resources/help_resend_grpc.md",
@@ -109,6 +144,7 @@ var helpResources = []resourceDef{
 	{
 		uri:         "yorishiro://help/resend_raw",
 		name:        "help_resend_raw",
+		topic:       "resend_raw",
 		description: "Parameter documentation and examples for the resend_raw tool (RawMessage-typed byte payload resend).",
 		mimeType:    "text/markdown",
 		filename:    "resources/help_resend_raw.md",
@@ -116,6 +152,7 @@ var helpResources = []resourceDef{
 	{
 		uri:         "yorishiro://help/fuzz_http",
 		name:        "help_fuzz_http",
+		topic:       "fuzz_http",
 		description: "Parameter documentation, position path syntax, and examples for the fuzz_http tool.",
 		mimeType:    "text/markdown",
 		filename:    "resources/help_fuzz_http.md",
@@ -123,6 +160,7 @@ var helpResources = []resourceDef{
 	{
 		uri:         "yorishiro://help/fuzz_ws",
 		name:        "help_fuzz_ws",
+		topic:       "fuzz_ws",
 		description: "Parameter documentation, position path syntax, and examples for the fuzz_ws tool.",
 		mimeType:    "text/markdown",
 		filename:    "resources/help_fuzz_ws.md",
@@ -130,6 +168,7 @@ var helpResources = []resourceDef{
 	{
 		uri:         "yorishiro://help/fuzz_grpc",
 		name:        "help_fuzz_grpc",
+		topic:       "fuzz_grpc",
 		description: "Parameter documentation, position path syntax, and examples for the fuzz_grpc tool.",
 		mimeType:    "text/markdown",
 		filename:    "resources/help_fuzz_grpc.md",
@@ -137,6 +176,7 @@ var helpResources = []resourceDef{
 	{
 		uri:         "yorishiro://help/fuzz_raw",
 		name:        "help_fuzz_raw",
+		topic:       "fuzz_raw",
 		description: "Parameter documentation, position path syntax, and examples for the fuzz_raw tool (HTTP request smuggling fuzzer).",
 		mimeType:    "text/markdown",
 		filename:    "resources/help_fuzz_raw.md",
@@ -144,6 +184,7 @@ var helpResources = []resourceDef{
 	{
 		uri:         "yorishiro://help/plugin_introspect",
 		name:        "help_plugin_introspect",
+		topic:       "plugin_introspect",
 		description: "Documentation and example output for the plugin_introspect tool.",
 		mimeType:    "text/markdown",
 		filename:    "resources/help_plugin_introspect.md",
@@ -151,9 +192,26 @@ var helpResources = []resourceDef{
 	{
 		uri:         "yorishiro://help/grpc_schema",
 		name:        "help_grpc_schema",
+		topic:       "grpc_schema",
 		description: "Action list, parameter syntax, descriptor-set requirements, and usage examples for the grpc_schema tool (register, list, unregister, clear).",
 		mimeType:    "text/markdown",
 		filename:    "resources/help_grpc_schema.md",
+	},
+	{
+		uri:         "yorishiro://help/template-syntax",
+		name:        "help_template-syntax",
+		topic:       "template-syntax",
+		description: "Where the §var§ KV Store template syntax is expanded, and which tool parameters accept it.",
+		mimeType:    "text/markdown",
+		filename:    "resources/help_template-syntax.md",
+	},
+	{
+		uri:         "yorishiro://help/docs",
+		name:        "help_docs",
+		topic:       "docs",
+		description: "How the docs tool itself works: the topic index, section slicing, and the error paths.",
+		mimeType:    "text/markdown",
+		filename:    "resources/help_docs.md",
 	},
 }
 

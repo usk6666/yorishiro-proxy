@@ -119,7 +119,7 @@ func (s *Server) registerGRPCSchema() {
 			"'clear' (remove all). " +
 			"Once a schema is registered, query messages decodes matching gRPC Data bodies as protojson with real " +
 			"field names (body_decoded_encoding=\"proto-json\") and resend_grpc accepts body_encoding=\"proto-json\". " +
-			"Schemaless fallback always applies when no schema matches. See yorishiro://help/grpc_schema.",
+			"Schemaless fallback always applies when no schema matches. Full reference: call docs(topic=\"grpc_schema\").",
 	}, s.handleGRPCSchemaTool)
 }
 

@@ -2,7 +2,7 @@
 
 Start (or initialize) the proxy server with optional configuration. The proxy listens on the specified address and begins intercepting HTTP/HTTPS/SOCKS5 traffic.
 
-**Reset semantics (USK-407)**: each `proxy_start` call fully resets all prior session settings to the values supplied in the request. Fields omitted from the request revert to their defaults — including `capture_scope`, `tls_passthrough`, `intercept_rules`, `auto_transform`, `tcp_forwards`, SOCKS5 auth, TLS fingerprint, and connection/timeout limits. Use `proxy_start` for first-time startup or session initialization. For in-session partial updates to a running listener (adding a single rule, changing one timeout, etc.), use the [`configure`](yorishiro://help/configure) tool instead.
+**Reset semantics (USK-407)**: each `proxy_start` call fully resets all prior session settings to the values supplied in the request. Fields omitted from the request revert to their defaults — including `capture_scope`, `tls_passthrough`, `intercept_rules`, `auto_transform`, `tcp_forwards`, SOCKS5 auth, TLS fingerprint, and connection/timeout limits. Use `proxy_start` for first-time startup or session initialization. For in-session partial updates to a running listener (adding a single rule, changing one timeout, etc.), use the `configure` tool instead — call `docs(topic="configure")`.
 
 ## Parameters
 
@@ -213,7 +213,7 @@ Example:
 }}
 ```
 
-See the [`configure`](yorishiro://help/configure) tool for the full merge / replace surface (add, remove, enable, disable per rule ID, or full-section replacement).
+Call `docs(topic="configure")` for the full merge / replace surface (add, remove, enable, disable per rule ID, or full-section replacement).
 
 ## Usage Examples
 

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -54,6 +55,9 @@ func TestListResources_AllRegistered(t *testing.T) {
 
 	// Verify all expected help resources are present.
 	expectedHelpURIs := []string{
+		"yorishiro://help/getting-started",
+		"yorishiro://help/template-syntax",
+		"yorishiro://help/docs",
 		"yorishiro://help/proxy_start",
 		"yorishiro://help/proxy_stop",
 		"yorishiro://help/query",
@@ -106,7 +110,7 @@ func TestListResources_AllRegistered(t *testing.T) {
 		}
 	}
 
-	// Total expected count = 19 help + 17 schema = 36.
+	// Total expected count = 22 help + 17 schema = 39.
 	expectedCount := len(expectedHelpURIs) + len(expectedSchemaURIs)
 	if len(result.Resources) != expectedCount {
 		t.Errorf("resource count = %d, want %d", len(result.Resources), expectedCount)
@@ -491,6 +495,143 @@ func TestHelpResources_NonEmpty(t *testing.T) {
 			text := string(data)
 			if !strings.HasPrefix(text, "# ") {
 				t.Errorf("help file %s does not start with a markdown heading", rd.filename)
+			}
+		})
+	}
+}
+
+// TestResourceDefinitions_EveryEmbeddedFileIsRegistered is the reverse
+// direction of TestResourceDefinitions_AllFilesExist: that test proves every
+// registry entry resolves to a file, this one proves every embedded file is
+// reachable through the registry.
+//
+// Without it, dropping a new resources/*.md into the tree and forgetting the
+// helpResources entry compiles, passes every existing test, and silently
+// ships a document no agent can reach — which is the class of failure
+// USK-1036 exists to close.
+func TestResourceDefinitions_EveryEmbeddedFileIsRegistered(t *testing.T) {
+	entries, err := resourcesFS.ReadDir("resources")
+	if err != nil {
+		t.Fatalf("read embedded resources dir: %v", err)
+	}
+
+	helpByFile := make(map[string]resourceDef, len(helpResources))
+	for _, rd := range helpResources {
+		if prev, dup := helpByFile[rd.filename]; dup {
+			t.Errorf("file %s is registered twice (%s and %s)", rd.filename, prev.name, rd.name)
+		}
+		helpByFile[rd.filename] = rd
+	}
+	schemaByFile := make(map[string]resourceDef, len(schemaResources))
+	for _, rd := range schemaResources {
+		if prev, dup := schemaByFile[rd.filename]; dup {
+			t.Errorf("file %s is registered twice (%s and %s)", rd.filename, prev.name, rd.name)
+		}
+		schemaByFile[rd.filename] = rd
+	}
+
+	seenMD, seenJSON := 0, 0
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := "resources/" + e.Name()
+		switch {
+		case strings.HasSuffix(e.Name(), ".md"):
+			seenMD++
+			rd, ok := helpByFile[name]
+			if !ok {
+				t.Errorf("embedded file %s has no helpResources entry; add one (uri, name, topic, description, mimeType, filename)", name)
+				continue
+			}
+			if rd.topic == "" {
+				t.Errorf("help resource %s has an empty topic; it would be unreachable via the docs tool", rd.name)
+			}
+		case strings.HasSuffix(e.Name(), ".json"):
+			seenJSON++
+			if _, ok := schemaByFile[name]; !ok {
+				t.Errorf("embedded file %s has no schemaResources entry", name)
+			}
+		default:
+			t.Errorf("unexpected embedded resource %s: only *.md and *.json are registered", name)
+		}
+	}
+
+	if seenMD != len(helpResources) {
+		t.Errorf("embedded *.md count = %d, helpResources = %d", seenMD, len(helpResources))
+	}
+	if seenJSON != len(schemaResources) {
+		t.Errorf("embedded *.json count = %d, schemaResources = %d", seenJSON, len(schemaResources))
+	}
+}
+
+// TestResourceDefinitions_TopicFieldPopulation asserts the topic namespace
+// invariant: every help resource is a docs topic, no schema resource is.
+// The topic field is set explicitly rather than derived from the name so a
+// future schema entry cannot drift into the docs namespace by accident.
+func TestResourceDefinitions_TopicFieldPopulation(t *testing.T) {
+	seen := make(map[string]string, len(helpResources))
+	for _, rd := range helpResources {
+		if rd.topic == "" {
+			t.Errorf("help resource %s has no topic", rd.name)
+			continue
+		}
+		if prev, dup := seen[rd.topic]; dup {
+			t.Errorf("topic %q is claimed by both %s and %s", rd.topic, prev, rd.name)
+		}
+		seen[rd.topic] = rd.name
+
+		// The URI path segment and the topic must agree, so an agent that
+		// saw yorishiro://help/X can call docs(topic="X") and vice versa.
+		if want := "yorishiro://help/" + rd.topic; rd.uri != want {
+			t.Errorf("resource %s: uri = %q, want %q to match topic %q", rd.name, rd.uri, want, rd.topic)
+		}
+		if want := "resources/help_" + rd.topic + ".md"; rd.filename != want {
+			t.Errorf("resource %s: filename = %q, want %q to match topic %q", rd.name, rd.filename, want, rd.topic)
+		}
+	}
+
+	for _, rd := range schemaResources {
+		if rd.topic != "" {
+			t.Errorf("schema resource %s has topic %q; schema resources are deliberately not docs topics", rd.name, rd.topic)
+		}
+	}
+}
+
+// TestHelpResources_ValidUTF8NoControlBytes guards the delivery path.
+//
+// help_fuzz_ws.md shipped a raw NUL byte inside a JSON example for months
+// (file(1) classified it as "data", and grep treated it as binary, which hid
+// a stale cross-link in the same file). The docs tool makes these documents
+// the primary reference surface for every agent, so a control byte is no
+// longer a cosmetic defect.
+//
+// Tab, LF and CR are the only control characters markdown legitimately needs.
+func TestHelpResources_ValidUTF8NoControlBytes(t *testing.T) {
+	entries, err := resourcesFS.ReadDir("resources")
+	if err != nil {
+		t.Fatalf("read embedded resources dir: %v", err)
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := "resources/" + e.Name()
+		t.Run(e.Name(), func(t *testing.T) {
+			data, err := resourcesFS.ReadFile(name)
+			if err != nil {
+				t.Fatalf("read %s: %v", name, err)
+			}
+			if !utf8.Valid(data) {
+				t.Fatalf("%s is not valid UTF-8", name)
+			}
+			for i, b := range data {
+				if b == '\t' || b == '\n' || b == '\r' {
+					continue
+				}
+				if b < 0x20 || b == 0x7f {
+					t.Fatalf("%s: control byte 0x%02x at offset %d", name, b, i)
+				}
 			}
 		})
 	}

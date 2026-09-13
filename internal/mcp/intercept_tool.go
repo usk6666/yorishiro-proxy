@@ -77,7 +77,7 @@ func (s *Server) registerIntercept() {
 			"includes forwarded_at_unix_ms; if the upstream half-closed during a long hold, " +
 			"the affected Stream is tagged " +
 			"intercept_hold_outcome=upstream_closed_after_intercept_release " +
-			"(query resource=stream id=<…> to inspect). See yorishiro://help/intercept.",
+			"(query resource=stream id=<…> to inspect). Full reference: call docs(topic=\"intercept\").",
 	}, s.handleInterceptTool)
 }
 
