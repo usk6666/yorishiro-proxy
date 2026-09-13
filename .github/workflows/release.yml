@@ -11,12 +11,18 @@ on:
         required: false
         type: string
 
+# Least privilege at the top level. Only the `release` job raises `contents`
+# to write, and only because it creates/updates GitHub Releases; `npm-publish`
+# declares its own narrower set. Keeping the write scope off the top level
+# means a step added to any future job does not silently inherit it.
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   release:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # gh release create / gh release upload
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -177,9 +183,14 @@ jobs:
           registry-url: "https://registry.npmjs.org"
 
       # Node 24 bundles npm 10.x, which cannot do OIDC Trusted Publishing.
-      # Trusted Publishing + --provenance requires npm >= 11.5.1.
+      # Trusted Publishing + --provenance requires npm >= 11.5.1, but the pin is
+      # exact rather than `^11.5.1`: a range resolves to whatever npm was
+      # published most recently, publish day included, which is the exposure
+      # `web/.npmrc`'s minimum-release-age gate exists to close. This runs in the
+      # job that holds the OIDC token, so it is the worst place to take that
+      # risk. Bump deliberately, the way the Action SHA pins are bumped.
       - name: Pin npm for OIDC Trusted Publishing
-        run: npm install -g npm@^11.5.1
+        run: npm install -g npm@11.19.1
 
       # Reuse the exact binaries the release job built and uploaded.
       - name: Download release binaries

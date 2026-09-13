@@ -51,11 +51,16 @@ jobs:
           name: ui-dist
           path: internal/mcp/webui/dist/
 
+      # Pinned, never `@latest`: `@latest` follows the newest tag, and that tag's
+      # go.mod can require a toolchain newer than the `1.25.x` pinned above —
+      # the break PR #96 already paid to diagnose for staticcheck. Both versions
+      # below are what `@latest` resolves to today, so this is a freeze, not a
+      # bump. Superseded once USK-1043 folds these into golangci-lint.
       - name: Install linters
         run: |
           go install honnef.co/go/tools/cmd/staticcheck@v0.7.0
-          go install github.com/gordonklaus/ineffassign@latest
-          go install github.com/fzipp/gocyclo/cmd/gocyclo@latest
+          go install github.com/gordonklaus/ineffassign@v0.2.0
+          go install github.com/fzipp/gocyclo/cmd/gocyclo@v0.6.0
 
       - name: Lint
         run: make lint
