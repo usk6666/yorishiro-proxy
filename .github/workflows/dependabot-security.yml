@@ -7,9 +7,11 @@ name: Dependabot security updates
 #     the module's Go-proxy publish time and applies only those >= 7 days old.
 #     Newer fixes are deferred to a later run (acceptable).
 #   - npm: the age gate + Takumi Guard registry + exclusions are enforced natively
-#     by web/.npmrc via pnpm (>= 10.16). We only run `pnpm update --latest` on the
-#     direct packages Dependabot flagged; pnpm refuses versions younger than the
-#     window. Transitive npm packages are never auto-overridden (manual review).
+#     by web/.npmrc via pnpm (>= 10.16); pnpm refuses versions younger than the
+#     window. We run `pnpm update --latest` on the direct packages Dependabot
+#     flagged, then a plain `pnpm update` to refresh transitive packages within
+#     the ranges their parents already declare. Transitive packages are never
+#     force-overridden via pnpm.overrides — that stays manual.
 #
 # The PR is opened with a GitHub App token (not GITHUB_TOKEN) for three reasons:
 # reading Dependabot alerts needs the "Dependabot alerts: read" permission; a PR
@@ -121,6 +123,37 @@ jobs:
             echo "pnpm update --latest ${npmpkgs[*]}"
             # web/.npmrc enforces registry + minimum-release-age + exclusions.
             pnpm --dir web update --latest "${npmpkgs[@]}"
+          fi
+
+      # Forcing a transitive package to a version its parent never declared is an
+      # override, and this repo forbids those. Refreshing one WITHIN the range its
+      # parent already declares is an ordinary update — and it is the only thing
+      # that moves these packages at all, since they have no package.json entry of
+      # their own. Skipping it is why 48 of the 54 open npm alerts on 2026-09-13
+      # had sat unmoved since the workflow went live: their fixed versions were in
+      # range the whole time.
+      #
+      # Two flags carry the policy, and both matter:
+      #   no --latest  — package.json ranges are the ceiling.
+      #   --no-save    — pnpm would otherwise raise each declared range's floor to
+      #                  whatever it just resolved. Leaving the manifest untouched
+      #                  is what makes the claim checkable: the reviewer sees only
+      #                  lockfile movement, all of it inside ranges the manifest
+      #                  already declared. (The direct-dep step above DOES edit
+      #                  package.json — bumping a direct dep past its declared
+      #                  range is the whole point there.)
+      # web/.npmrc still enforces the age window, the Takumi Guard registry, and
+      # the exclusions. Gated on the plan actually listing transitive alerts so a
+      # quiet week does not open a PR full of unrelated in-range churn.
+      - name: Refresh transitive npm deps within declared ranges
+        run: |
+          set -euo pipefail
+          n="$(jq -r '(.npm_manual // []) | length' "$RUNNER_TEMP/plan.json")"
+          if [ "$n" -eq 0 ]; then
+            echo "no transitive npm alerts; skipping in-range refresh"
+          else
+            echo "pnpm update --no-save (in-range) for $n transitive alert(s)"
+            pnpm --dir web update --no-save
           fi
 
       - name: Open or update PR

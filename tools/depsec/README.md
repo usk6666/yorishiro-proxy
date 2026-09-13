@@ -15,7 +15,7 @@ mechanism native to each ecosystem:
 
 | Ecosystem | Age gate mechanism | This tool's role |
 |-----------|--------------------|------------------|
-| **npm**   | pnpm (>= 10.16) via `web/.npmrc` `minimum-release-age=10080` (7 days) + Takumi Guard registry + `minimum-release-age-exclude[]` | Only classifies which **direct** deps Dependabot flagged, so the workflow runs `pnpm update --latest <them>`. pnpm refuses too-new versions. Transitive npm packages are routed to manual review, never auto-overridden. |
+| **npm**   | pnpm (>= 10.16) via `web/.npmrc` `minimum-release-age=10080` (7 days) + Takumi Guard registry + `minimum-release-age-exclude[]` | Classifies which **direct** deps Dependabot flagged, so the workflow runs `pnpm update --latest <them>`. pnpm refuses too-new versions. Transitive packages are reported separately (`npm_manual`); the workflow refreshes them with a plain `pnpm update` (within their parents' declared ranges) but never force-overrides via `pnpm.overrides`. |
 | **go**    | none native | This tool queries the Go module proxy for each fix's publish time and applies only fixes `>= min-age` old (`go_accepted`); newer fixes are deferred (`go_deferred`) and retried next run. |
 
 ## Run
