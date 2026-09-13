@@ -35,7 +35,7 @@ Note each `flow_id`. Pass them into the macro step definitions below.
 
 The setup macro performs: login → CSRF token retrieval → test resource creation. Run it before each main request.
 
-> **Two different syntaxes below.** The double-brace `{{ name }}` tokens (such as `{{ setup_macro_name }}`) are *prompt arguments*: this server expands them when it delivers the playbook, before you ever read it. The `§var§` tokens (such as `§session_cookie§`) are *macro KV-store variables*: the macro engine expands them at run time from values extracted by earlier steps. Leave every `§var§` exactly as written — do not substitute it yourself.
+> **Two different syntaxes below.** The double-brace `{{ name }}` tokens (spaced here only for illustration; the real tokens in the body are unspaced) are *prompt arguments*: this server expands them when it delivers the playbook, before you ever read it — so by the time you see this text they are already filled in, not literal. The `§var§` tokens (such as `§session_cookie§`) are *macro KV-store variables*: the macro engine expands them at run time from values extracted by earlier steps. Leave every `§var§` exactly as written — do not substitute it yourself.
 
 ```json
 // macro
