@@ -71,13 +71,13 @@ As a MITM proxy, yorishiro-proxy must faithfully represent wire-level reality. T
 
 ```
 cmd/yorishiro-proxy/       # Entry point
-  main.go                  # CLI root: server/client/version/install/upgrade subcommands
+  main.go                  # CLI root: server/client/docs/version/install/upgrade subcommands
   client.go                # CLI client subcommand (MCP client via Streamable HTTP)
   client_params.go         # Flag → JSON parameter conversion engine
   client_format.go         # Result formatting (JSON / table output)
-  serverjson.go            # server.json multi-instance entry management (used for client auto-discovery)
+  docs.go                  # Offline `docs` subcommand (embedded help; no server needed)
   install.go, upgrade.go,  # Subcommand handlers
-  version.go, browser.go
+  version.go
 internal/
   envelope/                # Protocol-agnostic Envelope + typed Message
                            #   envelope.go (Envelope, EnvelopeContext, TLSSnapshot, Direction, Protocol, KeyValue)
@@ -136,7 +136,8 @@ internal/
                            #   typed resend: resend_http / resend_ws / resend_grpc / resend_raw
                            #   typed fuzz:   fuzz_http   / fuzz_ws   / fuzz_grpc   / fuzz_raw
                            #   plugin_introspect, query (with Protocol filter), intercept,
-                           #   macro, manage, configure, security, proxy_start / proxy_stop
+                           #   macro, manage, configure, security, proxy_start / proxy_stop,
+                           #   docs (embedded help corpus; shared with the CLI docs subcommand)
   session/                 # RunSession (universal session loop, OnComplete hook)
   logging/                 # Structured logging (log/slog)
   payload/, setup/, testutil/, selfupdate/

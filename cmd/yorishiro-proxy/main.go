@@ -29,6 +29,8 @@ func run(ctx context.Context) error {
 			return runServer(ctx, flag.CommandLine, os.Args[2:])
 		case "client":
 			return runClient(ctx, os.Args[2:])
+		case "docs":
+			return runDocs(os.Stdout, os.Args[2:])
 		case "install":
 			return runInstall(ctx, os.Args[2:])
 		case "upgrade":
@@ -56,6 +58,7 @@ func runServer(ctx context.Context, fs *flag.FlagSet, args []string) error {
 		fmt.Fprintf(fs.Output(), "Subcommands:\n")
 		fmt.Fprintf(fs.Output(), "  server   Start the proxy server (default when no subcommand given)\n")
 		fmt.Fprintf(fs.Output(), "  client   Call MCP tools via CLI\n")
+		fmt.Fprintf(fs.Output(), "  docs     Show tool documentation (works offline)\n")
 		fmt.Fprintf(fs.Output(), "  install  Install and configure components (MCP, CA, Playwright)\n")
 		fmt.Fprintf(fs.Output(), "  upgrade  Check for and install updates from GitHub Releases\n")
 		fmt.Fprintf(fs.Output(), "  version  Print version information\n\n")
@@ -74,6 +77,7 @@ func runServer(ctx context.Context, fs *flag.FlagSet, args []string) error {
 		fmt.Fprintf(fs.Output(), "  yorishiro-proxy install                          # install all components\n")
 		fmt.Fprintf(fs.Output(), "  yorishiro-proxy install mcp                      # register MCP config only\n")
 		fmt.Fprintf(fs.Output(), "  yorishiro-proxy install ca --trust               # generate CA + register in OS\n")
+		fmt.Fprintf(fs.Output(), "  yorishiro-proxy docs macro                       # print a reference (no server needed)\n")
 		fmt.Fprintf(fs.Output(), "  yorishiro-proxy -db pentest-2026                 # project DB: ~/.yorishiro-proxy/pentest-2026.db\n")
 		fmt.Fprintf(fs.Output(), "  YP_DB=client-audit yorishiro-proxy               # project name via env var\n")
 		fmt.Fprintf(fs.Output(), "  YP_INSECURE=true yorishiro-proxy                  # skip TLS verification\n")
