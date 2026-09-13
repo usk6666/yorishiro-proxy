@@ -29,3 +29,23 @@ func TestCompareVersions(t *testing.T) {
 		}
 	}
 }
+
+func TestGoVersionTag(t *testing.T) {
+	cases := map[string]string{
+		// The shape the Dependabot API actually returns for Go advisories.
+		"0.52.0":                             "v0.52.0",
+		"1.83.1":                             "v1.83.1",
+		"v0.52.0":                            "v0.52.0", // idempotent
+		" 0.52.0":                            "v0.52.0",
+		"":                                   "",
+		"v0.0.0-20260210143700-b62fd896b91b": "v0.0.0-20260210143700-b62fd896b91b",
+	}
+	for in, want := range cases {
+		if got := goVersionTag(in); got != want {
+			t.Errorf("goVersionTag(%q) = %q, want %q", in, got, want)
+		}
+		if got := goVersionTag(want); got != want {
+			t.Errorf("goVersionTag(%q) not idempotent: %q", want, got)
+		}
+	}
+}

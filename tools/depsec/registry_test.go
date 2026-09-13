@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -57,5 +58,27 @@ func TestHTTPClock_Non200(t *testing.T) {
 	c := &httpClock{hc: srv.Client(), goBase: srv.URL}
 	if _, err := c.releasedAt(context.Background(), "go", "m", "v1.0.0"); err == nil {
 		t.Error("expected error on 404")
+	}
+}
+
+// TestHTTPClock_GoRejectsBareVersion guards the USK-1039 regression at the
+// consumption seam. GitHub reports Go patched versions without the leading "v";
+// the module proxy 404s on that form, and the caller used to swallow the 404 as
+// "cannot determine release age" and skip the fix for weeks. buildPlan
+// canonicalizes via goVersionTag — if a future caller forgets, fail loudly
+// instead of going out to the network and guessing.
+func TestHTTPClock_GoRejectsBareVersion(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("must not reach the proxy with a bare version; got path %q", r.URL.Path)
+	}))
+	defer srv.Close()
+
+	c := &httpClock{hc: srv.Client(), goBase: srv.URL}
+	_, err := c.releasedAt(context.Background(), "go", "golang.org/x/crypto", "0.52.0")
+	if err == nil {
+		t.Fatal("want an error for a non-canonical go module version")
+	}
+	if !strings.Contains(err.Error(), `"v0.52.0"`) {
+		t.Errorf("error should name the canonical form, got %v", err)
 	}
 }
