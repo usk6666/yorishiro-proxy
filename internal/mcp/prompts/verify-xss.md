@@ -21,7 +21,7 @@ If any required field is empty, ask the user.
 2. Run the marker sweep — every payload uses the `YP_` prefix so it is identifiable in the response. No script execution occurs.
 
    ```json
-   // fuzz_http
+   // fuzz_http — {{YP_TEMPLATE}} / §YP_TEMPLATE§ are literal marker payloads, not placeholders
    {
      "flow_id": "{{target_flow_id}}",
      "positions": [
@@ -43,7 +43,7 @@ If any required field is empty, ask the user.
    }
    ```
 
-   `§YP_TEMPLATE§` is a marker for detecting macro KVS template syntax injection. The fuzz engine does not apply template expansion to payload values, so the literal string is what reaches the upstream.
+   The last two payloads are template-injection markers, not placeholders that get expanded here. `{{YP_TEMPLATE}}` is not a declared prompt argument, so `prompts/get` leaves it literal. `§YP_TEMPLATE§` targets the macro KV-store syntax: the fuzz engine *does* run `§var§` expansion over payloads, but `YP_TEMPLATE` is never a KV-store key, so the marker reaches the wire literally. Both are looking for a sink that itself interprets the marker syntax.
 
 3. Filter for responses that echoed the marker:
 
@@ -68,6 +68,7 @@ If any required field is empty, ask the user.
 - Response contains `<YP_TAG>` as-is → not escaped, XSS is present.
 - Response contains `&lt;YP_TAG&gt;` → properly escaped, not vulnerable at this sink.
 - `§YP_TEMPLATE§` appearing literally is expected — that marker tests a different sink (macro template expansion), not browser XSS.
+- The `§YP_TEMPLATE§` variant reports `unresolved-tokens: [YP_TEMPLATE]` in its `fuzz_results` `error` field. This is expected and is **not** a failure — it only records that the marker was not a KV-store key (which is the whole point of the probe). Do not retry or abandon the sweep because of it.
 
 ## Reporting
 

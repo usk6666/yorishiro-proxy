@@ -25,6 +25,28 @@
 //
 // Arguments are flat map[string]string per the MCP go-sdk PromptArgument
 // shape — there is no JSON schema, no type, no enum.
+//
+// # {{}} vs §§ in playbook bodies
+//
+// A playbook body may legitimately contain two unrelated template
+// syntaxes, and contributors must keep them distinguishable to the model:
+//
+//   - {{arg_name}} — an MCP prompt argument, expanded server-side here at
+//     prompts/get time (this file). Every {{arg_name}} token in a body
+//     MUST correspond to a declared PromptArgument, or the caller's value
+//     is silently dropped and the literal token ships to the model.
+//   - §var§ — a macro / fuzz KV-store variable (internal/macro), expanded
+//     at wire-send time, never here. It uses U+00A7 precisely to avoid the
+//     {{}} collision; see internal/macro/template.go.
+//
+// When a playbook uses §var§ (e.g. stateful-fuzz-loop.md) or ships a
+// deliberately-unexpanded {{marker}} as a template-injection probe (e.g.
+// verify-xss.md's {{YP_TEMPLATE}} / §YP_TEMPLATE§ pair), add a sentence in
+// the body that names which syntax is which, so the model does not infer
+// the two forms are interchangeable. A deliberately-literal {{marker}}
+// that is NOT a declared argument must also be registered in the
+// per-prompt literal-marker allowlist in prompts_test.go, which otherwise
+// fails the userPrompts↔corpus consistency check.
 package mcp
 
 import (
