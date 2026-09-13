@@ -100,6 +100,13 @@ type macroDefineMacroResult struct {
 	Name      string `json:"name"`
 	StepCount int    `json:"step_count"`
 	Created   bool   `json:"created"`
+	// Warnings holds non-fatal template diagnostics produced by the static
+	// check in macro.ValidateMacroTemplates: foreign templating syntax that
+	// will never be substituted, and §name§ references that resolve against
+	// neither initial_vars nor a preceding step's extract rules. The macro is
+	// still saved — see USK-1035 for why these are warnings, not errors.
+	// Variable names only; no KV Store values.
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 // macroRunMacroResult is the structured output of the run_macro action.
@@ -152,6 +159,13 @@ func (s *Server) handleDefineMacro(ctx context.Context, params macroParams) (*ma
 		return nil, fmt.Errorf("invalid macro definition: %w", err)
 	}
 
+	// Static, non-fatal template check. Surfaces foreign syntax and
+	// statically unresolvable §name§ references at define time so the
+	// operator does not have to send a request to discover the mistake.
+	// Deliberately never an error: run_macro's params.vars may supply the
+	// missing names later, which is a legitimate workflow (USK-1035).
+	templateWarnings := macro.ValidateMacroTemplates(m)
+
 	// Reject non-HTTP flow_ids at define time so operators see the
 	// problem immediately. Mirrors the run_macro re-check below to
 	// close the TOCTOU gap when a flow's protocol changes between
@@ -191,6 +205,7 @@ func (s *Server) handleDefineMacro(ctx context.Context, params macroParams) (*ma
 		Name:      params.Name,
 		StepCount: len(params.Steps),
 		Created:   isNew,
+		Warnings:  templateWarnings,
 	}, nil
 }
 

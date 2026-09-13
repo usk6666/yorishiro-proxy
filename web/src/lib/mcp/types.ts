@@ -1344,6 +1344,12 @@ export interface MacroDefineResult {
   name: string;
   step_count: number;
   created: boolean;
+  /**
+   * Non-fatal template diagnostics from the define-time static check
+   * (foreign templating syntax, unresolved §name§ references). The macro is
+   * always saved — a warning is never an error.
+   */
+  warnings?: string[];
 }
 
 /** Step result entry for run_macro. */
@@ -1353,6 +1359,12 @@ export interface MacroStepResult {
   status_code?: number;
   duration_ms?: number;
   error?: string;
+  /**
+   * Non-fatal template diagnostics for this step (foreign templating syntax
+   * left on the wire, or a §name§ the live KV Store could not resolve).
+   * Present when `status` is `"warning"`.
+   */
+  warnings?: string[];
 }
 
 /** Result of run_macro action. */

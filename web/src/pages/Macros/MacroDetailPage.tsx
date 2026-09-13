@@ -49,6 +49,10 @@ const EXTRACTION_SOURCE_OPTIONS: readonly { value: ExtractionSource; label: stri
   { value: "url", label: "URL" },
 ];
 
+/** How many define-time template warnings are shown as toasts before the
+ *  remainder is summarised in a single line. */
+const MAX_DEFINE_WARNING_TOASTS = 3;
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -452,7 +456,7 @@ export function MacroDetailPage() {
     }
 
     try {
-      await macroAction<MacroDefineResult>({
+      const defineResult = await macroAction<MacroDefineResult>({
         action: "define_macro",
         params: {
           name: name.trim(),
@@ -463,6 +467,21 @@ export function MacroDetailPage() {
         },
       });
       addToast({ type: "success", message: `Macro "${name}" saved` });
+
+      // Define-time template diagnostics (foreign templating syntax, or a
+      // §name§ that resolves against neither initial_vars nor a preceding
+      // step's extract). Never an error — the macro is saved either way.
+      const templateWarnings = defineResult?.warnings ?? [];
+      for (const w of templateWarnings.slice(0, MAX_DEFINE_WARNING_TOASTS)) {
+        addToast({ type: "warning", message: w, duration: 10000 });
+      }
+      if (templateWarnings.length > MAX_DEFINE_WARNING_TOASTS) {
+        addToast({
+          type: "warning",
+          message: `...and ${templateWarnings.length - MAX_DEFINE_WARNING_TOASTS} more template warning(s)`,
+          duration: 10000,
+        });
+      }
 
       // If creating new, navigate to the edit page
       if (isNew) {

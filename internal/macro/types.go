@@ -168,9 +168,10 @@ type StepResult struct {
 	// ID is the step identifier.
 	ID string
 	// Status indicates the step outcome: "completed", "warning", "skipped",
-	// or "error". "warning" is set when the step otherwise completed but
-	// the unresolved-template detector found residual {{var}}/${var}/%var%
-	// tokens on the wire (see detector.go).
+	// or "error". "warning" is set when the step otherwise completed but a
+	// template detector fired: residual {{var}}/${var}/%var% tokens on the
+	// wire (detector.go) or a §name§ reference the KV Store could not
+	// resolve (unresolved.go).
 	Status string
 	// StatusCode is the HTTP response status code (zero if not available).
 	StatusCode int
@@ -179,9 +180,15 @@ type StepResult struct {
 	// Error holds the error message if the step failed.
 	Error string
 	// Warnings contains non-fatal diagnostic messages produced during the
-	// step. Currently populated by the unresolved-template detector when a
-	// substituted request still contains foreign-templating tokens such as
-	// {{var}}, ${var}, or %var%. Empty for clean steps.
+	// step, one per (scan location, category):
+	//
+	//   - foreign-templating tokens ({{var}}, ${var}, %var%) that survived
+	//     substitution and are on the wire verbatim (detector.go);
+	//   - §name§ references in the step's overrides that the KV Store could
+	//     not resolve, listing the available variable names (unresolved.go).
+	//
+	// Variable NAMES only — a KV Store value never appears here. Empty for
+	// clean steps.
 	Warnings []string
 }
 

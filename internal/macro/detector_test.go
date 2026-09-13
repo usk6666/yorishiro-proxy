@@ -266,15 +266,45 @@ func TestDetectUnresolvedTemplates_PercentEncodingNotFalsePositive(t *testing.T)
 	}
 }
 
-func TestDetectUnresolvedTemplates_SectionSignNotFlagged(t *testing.T) {
-	// §var§ is the SUPPORTED syntax — it survives ExpandTemplate as a literal
-	// if the var is unknown, and the detector must not flag it.
+// TestDetectUnresolvedTemplates_SectionSignHandledByVarScanner records a
+// reversal of USK-846's original scope statement.
+//
+// The former TestDetectUnresolvedTemplates_SectionSignNotFlagged asserted that
+// an unresolved §var§ produces NO signal anywhere. USK-1035 established that
+// this was the more damaging hole of the two: correct syntax plus a misspelt
+// variable name reached the wire completely silently, and the upstream's
+// 200 OK on the literal token gave the operator no way to converge.
+//
+// The reversal is deliberately NOT implemented inside
+// DetectUnresolvedTemplates: that function is the post-substitution FOREIGN-
+// syntax scanner, and it has neither the KV Store nor the pre-expansion
+// template needed to tell "unresolved §var§" from "operator-authored literal
+// §". So it still returns nothing here — the signal now comes from
+// DetectUnresolvedVars (unresolved.go), which this test pins.
+func TestDetectUnresolvedTemplates_SectionSignHandledByVarScanner(t *testing.T) {
 	req := &SendRequest{
 		URL:     "https://example.com/§unknown§",
 		Headers: map[string][]string{"X-A": {"§missing§"}},
 		Body:    []byte("body=§nope§"),
 	}
 	if got := DetectUnresolvedTemplates(req); len(got) != 0 {
-		t.Errorf("§...§ tokens are out of scope for this detector; got %v", got)
+		t.Errorf("§...§ tokens are out of scope for the foreign-syntax detector; got %v", got)
+	}
+
+	// ...but the same names MUST produce a signal from the §-var scanner.
+	step := &Step{
+		ID:              "s1",
+		OverrideURL:     "https://example.com/§unknown§",
+		OverrideHeaders: map[string]string{"X-A": "§missing§"},
+		OverrideBody:    strPtr("body=§nope§"),
+	}
+	got := DetectUnresolvedVars(step, map[string]string{"known": "v"})
+	if len(got) != 3 {
+		t.Fatalf("DetectUnresolvedVars len = %d, want 3 (url, header, body); got %v", len(got), got)
+	}
+	for _, want := range []string{"§unknown§", "§missing§", "§nope§"} {
+		if !strings.Contains(strings.Join(got, "\n"), want) {
+			t.Errorf("warnings %v missing %q", got, want)
+		}
 	}
 }
