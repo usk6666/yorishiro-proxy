@@ -14,7 +14,7 @@ func renderBody(p Plan) string {
 	b.WriteString("Automated weekly PR.\n\n")
 	b.WriteString("- **Go**: only fixes whose patched version has been public for at least ")
 	fmt.Fprintf(&b, "%.0f days are applied; newer fixes are deferred to a later run.\n", p.MinAgeDays)
-	b.WriteString("- **npm**: applied via `pnpm update`; the release-age window, Takumi Guard registry, and exclusions are enforced natively by `web/.npmrc`.\n\n")
+	b.WriteString("- **npm**: direct deps via `pnpm update --latest`, transitive deps refreshed within their parents' declared ranges via a plain `pnpm update`; the release-age window, Takumi Guard registry, and exclusions are enforced natively by `web/.npmrc`.\n\n")
 
 	if len(p.GoAccepted) > 0 {
 		b.WriteString("### Go — applied\n\n")
@@ -53,8 +53,8 @@ func renderBody(p Plan) string {
 	}
 
 	if len(p.NpmManual) > 0 {
-		b.WriteString("### npm — needs manual review (transitive dependencies)\n\n")
-		b.WriteString("Per this repo's supply-chain policy, transitive npm packages are not auto-overridden.\n\n")
+		b.WriteString("### npm — transitive (refreshed in-range; override never forced)\n\n")
+		b.WriteString("These have no `package.json` entry of their own. A plain `pnpm update` refreshed them within the range their parent package already declares; per this repo's supply-chain policy they are never forced to a version the parent did not declare (`pnpm.overrides`). If a package below is still flagged after this PR lands, its fix is outside the parent's range — bump the parent or wait for the parent's release.\n\n")
 		b.WriteString("| Package | Fixed in | Severity | Advisory |\n")
 		b.WriteString("|---|---|---|---|\n")
 		for _, c := range p.NpmManual {

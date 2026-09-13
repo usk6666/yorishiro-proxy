@@ -45,7 +45,9 @@ type Candidate struct {
 //     `minimum-release-age` + the Takumi Guard registry, so pnpm enforces the age
 //     window and supply-chain proxy natively at install time. We only tell the
 //     workflow WHICH direct packages to `pnpm update`; pnpm decides the version.
-//     Transitive npm packages are never auto-overridden (NpmManual).
+//     Transitive npm packages are never force-overridden via pnpm.overrides
+//     (NpmManual). The workflow does refresh them within the range their parent
+//     already declares — that is an ordinary update, not an override.
 //   - go: Go has no native minimum-release-age mechanism, so we gate explicitly
 //     using the module's publish time from the Go proxy (GoAccepted / GoDeferred).
 type Plan struct {
@@ -55,7 +57,7 @@ type Plan struct {
 	GoAccepted []Candidate `json:"go_accepted"` // apply via `go get name@target`
 	GoDeferred []Candidate `json:"go_deferred"` // patched version younger than min age
 	NpmUpdate  []Candidate `json:"npm_update"`  // direct deps for `pnpm update --latest name` (pnpm gates age)
-	NpmManual  []Candidate `json:"npm_manual"`  // transitive npm; manual review only
+	NpmManual  []Candidate `json:"npm_manual"`  // transitive npm; in-range refresh only, never force-overridden
 	Errors     []string    `json:"errors"`
 }
 
@@ -86,7 +88,7 @@ func buildPlan(ctx context.Context, alerts []Alert, npmDirect map[string]bool, c
 				// Version selection + age gate happen in pnpm via .npmrc.
 				plan.NpmUpdate = append(plan.NpmUpdate, cand)
 			} else {
-				cand.Reason = "transitive npm dependency; not auto-overridden (manual review required)"
+				cand.Reason = "transitive npm dependency; refreshed only within the range its parent declares, never force-overridden. Still listed after the run means the fix is out of range and needs manual review"
 				plan.NpmManual = append(plan.NpmManual, cand)
 			}
 

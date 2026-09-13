@@ -267,6 +267,25 @@ All GPL variants (GPL-2.0, GPL-3.0, LGPL-2.1, LGPL-3.0, AGPL-3.0)
 
 When adding new external dependencies, verify the license with the `/license-check` skill.
 
+## Supply Chain Risk Policy
+
+Dependency updates are gated on **release age** so a freshly compromised version is never pulled in on publish day. The weekly `.github/workflows/dependabot-security.yml` run is the only automated path that edits dependency manifests; `tools/depsec` decides *what* to apply and the workflow applies it.
+
+### npm
+
+- The age window, registry, and exclusions live in `web/.npmrc` (`minimum-release-age`, the Takumi Guard proxy registry, `minimum-release-age-exclude[]`). pnpm >= 10.16 enforces them natively at install time — do not reimplement any of it in the workflow or in `tools/depsec`.
+- **`pnpm.overrides` is forbidden.** Forcing a transitive package to a version its parent never declared decouples the lockfile from what upstream actually tested, and the pin silently outlives the parent's own fix.
+- **Refreshing a transitive package within the range its parent already declares is allowed**, and the workflow does it automatically with `pnpm update --no-save` (no `--latest`, and the manifest is left untouched so the reviewer sees only lockfile movement). This is an ordinary update, not an override: the parent's semver contract is the ceiling. Do not conflate the two — treating every transitive package as untouchable is what let 48 in-range fixes sit unapplied for 10 weeks (USK-1040).
+- A transitive fix that falls **outside** the parent's declared range is the one case that needs manual review: bump the parent, or wait for the parent's release. Never reach for an override to shortcut it.
+
+### Go
+
+Go has no native minimum-release-age mechanism, so `tools/depsec` gates each fix explicitly on the module's publish time from the Go module proxy and applies only fixes at least 7 days old. Newer fixes are deferred to a later run. Note that the Dependabot API reports Go patched versions **without** the leading `v`; canonicalize with `goVersionTag` before touching the proxy or `go get` (USK-1039).
+
+### Judging severity
+
+Dependabot alerts are module-level and carry no reachability analysis. Before treating a Go alert as urgent, check whether the vulnerable package is actually linked: `go list -deps ./cmd/yorishiro-proxy`. For npm, check whether the package reaches the shipped bundle at all — most of `web/`'s alerts are build-time or dev-only tooling and never appear in `internal/mcp/webui/dist/`.
+
 ## Development Workflow
 
 1. `/project status` — Check milestone progress and decide what to work on next

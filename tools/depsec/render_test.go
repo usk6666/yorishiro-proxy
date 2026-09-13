@@ -37,7 +37,8 @@ func TestRenderBody(t *testing.T) {
 		"### Go — deferred",
 		"github.com/baz/qux",
 		"2026-07-10", // eligible date
-		"### npm — needs manual review",
+		"### npm — transitive (refreshed in-range; override never forced)",
+		"never forced to a version the parent did not declare",
 		"`nested`",
 		"### Could not process",
 		"no fixed version",
