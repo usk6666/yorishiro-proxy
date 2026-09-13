@@ -34,13 +34,13 @@
               "override_method": { "type": "string" },
               "override_url": { "type": "string" },
               "override_headers": { "type": "object", "additionalProperties": { "type": "string" } },
-              "override_body": { "type": "string" },
+              "override_body": { "type": ["null", "string"] },
               "on_error": { "type": "string", "enum": ["abort", "skip", "retry"] },
               "retry_count": { "type": "integer", "minimum": 1 },
               "retry_delay_ms": { "type": "integer", "minimum": 0 },
               "timeout_ms": { "type": "integer", "minimum": 1 },
               "extract": {
-                "type": "array",
+                "type": ["null", "array"],
                 "items": {
                   "type": "object",
                   "required": ["name", "from", "source"],
@@ -58,7 +58,7 @@
                 }
               },
               "when": {
-                "type": "object",
+                "type": ["null", "object"],
                 "properties": {
                   "step": { "type": "string" },
                   "status_code": { "type": "integer" },

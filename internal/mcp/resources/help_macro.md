@@ -21,7 +21,7 @@ Save a macro definition (upsert) with steps, extraction rules, and guards. If a 
 - **steps** (array, required): Ordered list of macro steps. Each step:
   - **id** (string, required): Unique step identifier within the macro.
   - **flow_id** (string, required): Recorded flow to use as a template.
-  - **override_method** (string, optional): Override HTTP method.
+  - **override_method** (string, optional): Override HTTP method. Supports `§variable§` templates (see "Variable substitution syntax" below).
   - **override_url** (string, optional): Override request URL. Supports `§variable§` templates (see "Variable substitution syntax" below).
   - **override_headers** (object, optional): Header overrides as key-value pairs. Supports `§variable§` templates in values.
   - **override_body** (string, optional): Override request body. Supports `§variable§` templates.
@@ -125,9 +125,27 @@ Store before the request is sent. Unknown variables are left literally as
 `§name§` on the wire.
 
 ```text
+override_method:  "§http_verb§"
 override_headers: {"Cookie": "PHPSESSID=§session_cookie§"}
 override_body:    "user=admin&token=§csrf_token§"
 override_url:     "https://api.example.com/users/§user_id§"
+```
+
+These four `override_*` fields are the **only** template expansion sites. In
+`override_headers` only the values are expanded; header names are copied
+verbatim. Fields under `extract` and `when` are never expanded.
+
+### Encoder chain
+
+A template expression may pipe the value through one or more encoders:
+`§name | encoder1 | encoder2§`. Available encoders: `url_encode`, `base64`,
+`base64_decode`, `hex`, `html_encode`, `lower`, `upper`, `md5`, `sha256`. An
+unknown encoder name (or an empty variable/encoder name) fails the step, unlike
+an unknown *variable*, which is left literal.
+
+```text
+override_url:  "https://example.com/?q=§payload | url_encode§"
+override_body: "auth=§credentials | base64§"
 ```
 
 ### Foreign syntaxes are NOT substituted

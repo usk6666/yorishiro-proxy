@@ -14,26 +14,26 @@ import (
 type macroToolInput struct {
 	// Action specifies the macro action to execute.
 	// Available actions: define_macro, run_macro, delete_macro.
-	Action string `json:"action"`
+	Action string `json:"action" jsonschema:"REQUIRED action to execute: define_macro|run_macro|delete_macro"`
 	// Params holds action-specific parameters.
-	Params macroToolParams `json:"params"`
+	Params macroToolParams `json:"params" jsonschema:"action-specific parameters; only the fields relevant to the chosen action are read"`
 }
 
 // macroToolParams holds the union of all macro action-specific parameters.
 // Only the fields relevant to the specified action are used.
 type macroToolParams struct {
 	// Name is the macro name (required for all macro actions).
-	Name string `json:"name,omitempty" jsonschema:"macro name"`
+	Name string `json:"name,omitempty" jsonschema:"macro name; required for every action. define_macro upserts an existing macro with the same name"`
 	// Description is a human-readable description (define_macro).
-	Description string `json:"description,omitempty" jsonschema:"macro description"`
+	Description string `json:"description,omitempty" jsonschema:"human-readable macro description for define_macro"`
 	// Steps defines the macro steps (define_macro).
-	Steps []macroStepInput `json:"steps,omitempty" jsonschema:"macro steps for define_macro"`
+	Steps []macroStepInput `json:"steps,omitempty" jsonschema:"ordered list of steps executed in sequence for define_macro; maximum 50"`
 	// InitialVars are pre-populated KV Store entries (define_macro).
-	InitialVars map[string]string `json:"initial_vars,omitempty" jsonschema:"initial KV Store entries for define_macro"`
+	InitialVars map[string]string `json:"initial_vars,omitempty" jsonschema:"pre-populated KV Store entries for define_macro; reference each key from a step's override_method / override_url / override_headers value / override_body as §key§ (U+00A7 SECTION SIGN on both sides). Keys are case-sensitive"`
 	// MacroTimeout is the overall macro timeout in milliseconds (define_macro).
-	MacroTimeout int `json:"macro_timeout_ms,omitempty" jsonschema:"macro timeout in milliseconds"`
+	MacroTimeout int `json:"macro_timeout_ms,omitempty" jsonschema:"overall macro timeout in milliseconds; default 300000"`
 	// Vars are runtime variable overrides for run_macro.
-	Vars map[string]string `json:"vars,omitempty" jsonschema:"runtime variable overrides for run_macro"`
+	Vars map[string]string `json:"vars,omitempty" jsonschema:"runtime KV Store overrides for run_macro, merged over the macro's initial_vars; reference each key from a step's override_* field as §key§"`
 }
 
 // availableMacroActions lists the valid action names for the macro tool.
@@ -45,7 +45,16 @@ func (s *Server) registerMacro() {
 		Name: "macro",
 		Description: "Define and execute multi-step macro workflows for chained security testing. " +
 			"Actions: 'define_macro' (upsert, with steps, extraction rules, and guards), " +
-			"'run_macro' (execute a stored macro), 'delete_macro'. See yorishiro://help/macro.",
+			"'run_macro' (execute a stored macro), 'delete_macro'. " +
+			"Variables: write §name§ (U+00A7 SECTION SIGN on BOTH sides) to interpolate a KV Store value into " +
+			"steps[].override_method / override_url / override_headers values / override_body — " +
+			"e.g. override_headers {\"Cookie\": \"PHPSESSID=§session_cookie§\"}. " +
+			"Optional encoder chain: §name | url_encode | base64§; an unknown encoder fails the step. " +
+			"{{name}}, ${name} and %name% are NOT expanded — they are sent literally on the wire, and a " +
+			"post-substitution scan of the url / header values / body reports step status \"warning\" with warnings[]. " +
+			"An unknown §name§ is also left literal. " +
+			"Values come from params.initial_vars, run_macro params.vars, and earlier steps' extract[].name. " +
+			"See yorishiro://help/macro.",
 	}, s.handleMacroTool)
 }
 
