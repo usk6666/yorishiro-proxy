@@ -34,43 +34,57 @@ type macroParams struct {
 }
 
 // macroStepInput represents a single macro step in the MCP input.
+//
+// Every field carries a jsonschema tag because these tags are the only
+// macro documentation an MCP client sees without reading a resource
+// (USK-1034). The four override_* fields are the sole template-expansion
+// sites in a macro, so each of their tags names the §name§ syntax
+// explicitly; see internal/macro/engine.go buildRequest.
+//
+// NOTE: a jsonschema tag must not begin with a WORD= token — the
+// jsonschema-go inference rejects it and gomcp.AddTool panics at server
+// construction. Keep examples such as PHPSESSID=§sid§ mid-sentence.
 type macroStepInput struct {
-	ID              string            `json:"id"`
-	StreamID        string            `json:"flow_id"`
-	OverrideMethod  string            `json:"override_method,omitempty"`
-	OverrideURL     string            `json:"override_url,omitempty"`
-	OverrideHeaders map[string]string `json:"override_headers,omitempty"`
-	OverrideBody    *string           `json:"override_body,omitempty"`
-	OnError         string            `json:"on_error,omitempty"`
-	RetryCount      int               `json:"retry_count,omitempty"`
-	RetryDelayMs    int               `json:"retry_delay_ms,omitempty"`
-	TimeoutMs       int               `json:"timeout_ms,omitempty"`
-	Extract         []extractionInput `json:"extract,omitempty"`
-	When            *guardInput       `json:"when,omitempty"`
+	ID              string            `json:"id" jsonschema:"unique step identifier within the macro; referenced by a later step's when.step"`
+	StreamID        string            `json:"flow_id" jsonschema:"id of a recorded HTTP flow used as the request template — take it from query resource=\"flows\" flows[].id. Non-HTTP flows are rejected; use resend_ws / resend_grpc / resend_raw instead"`
+	OverrideMethod  string            `json:"override_method,omitempty" jsonschema:"HTTP method override; empty inherits the recorded flow's method. Supports §name§ template expansion against the KV Store"`
+	OverrideURL     string            `json:"override_url,omitempty" jsonschema:"request URL override; replaces the recorded flow's URL. Supports §name§ template expansion (U+00A7 SECTION SIGN on both sides) against the KV Store — e.g. https://api.example.com/users/§user_id§. {{name}} / ${name} / %name% are NOT expanded"`
+	OverrideHeaders map[string]string `json:"override_headers,omitempty" jsonschema:"header overrides applied on top of the recorded flow's headers; each key replaces all existing values for that name, matched case-sensitively against the recorded header name (HTTP/2 flows record lowercase names, so use cookie not Cookie there). VALUES support §name§ template expansion, keys do not — e.g. {\"Cookie\": \"PHPSESSID=§session_cookie§\"}. {{name}} / ${name} / %name% are NOT expanded. Expanded keys or values containing CR or LF are rejected"`
+	OverrideBody    *string           `json:"override_body,omitempty" jsonschema:"request body override; omit to inherit the recorded flow's body. Supports §name§ template expansion against the KV Store — e.g. user=admin&token=§csrf_token§. {{name}} / ${name} / %name% are NOT expanded and are sent literally on the wire"`
+	OnError         string            `json:"on_error,omitempty" jsonschema:"abort|skip|retry; default abort. retry honours retry_count and retry_delay_ms"`
+	RetryCount      int               `json:"retry_count,omitempty" jsonschema:"retries when on_error is retry; default 3, maximum 10"`
+	RetryDelayMs    int               `json:"retry_delay_ms,omitempty" jsonschema:"delay between retries in milliseconds; default 1000"`
+	TimeoutMs       int               `json:"timeout_ms,omitempty" jsonschema:"step timeout in milliseconds; default 60000"`
+	Extract         []extractionInput `json:"extract,omitempty" jsonschema:"value extraction rules run after the step completes; each result is written to the KV Store under its name. No field in this object is §name§-expanded"`
+	When            *guardInput       `json:"when,omitempty" jsonschema:"guard condition; the step runs only when it matches, otherwise it is skipped. No field in this object is §name§-expanded"`
 }
 
 // extractionInput represents a value extraction rule in the MCP input.
+// Extracted values land in the KV Store and become §name§ references for
+// later steps. No field here is itself template-expanded.
 type extractionInput struct {
-	Name       string `json:"name"`
-	From       string `json:"from"`
-	Source     string `json:"source"`
-	HeaderName string `json:"header_name,omitempty"`
-	Regex      string `json:"regex,omitempty"`
-	Group      int    `json:"group,omitempty"`
-	JSONPath   string `json:"json_path,omitempty"`
-	Default    string `json:"default,omitempty"`
-	Required   bool   `json:"required,omitempty"`
+	Name       string `json:"name" jsonschema:"KV Store key the extracted value is stored under; later steps reference it as §name§"`
+	From       string `json:"from" jsonschema:"request|response — which side of this step to extract from; source status always reads the response"`
+	Source     string `json:"source" jsonschema:"header|body|body_json|status|url"`
+	HeaderName string `json:"header_name,omitempty" jsonschema:"header name to read; used when source is header"`
+	Regex      string `json:"regex,omitempty" jsonschema:"regular expression applied to the selected source; used with header, body and url. Maximum 1024 bytes, matched against at most 1 MiB of input"`
+	Group      int    `json:"group,omitempty" jsonschema:"capture group index for regex; 0 means the full match"`
+	JSONPath   string `json:"json_path,omitempty" jsonschema:"JSON Path expression; used when source is body_json"`
+	Default    string `json:"default,omitempty" jsonschema:"fallback value written to the KV Store when extraction produces no value; ignored when required is true"`
+	Required   bool   `json:"required,omitempty" jsonschema:"when true, the step fails if extraction produces no value; on_error then decides whether the macro aborts"`
 }
 
 // guardInput represents a step guard condition in the MCP input.
+// All conditions set on a guard must hold (AND); negate inverts the result.
+// No field here is template-expanded.
 type guardInput struct {
-	Step            string            `json:"step,omitempty"`
-	StatusCode      *int              `json:"status_code,omitempty"`
-	StatusCodeRange [2]int            `json:"status_code_range,omitempty"`
-	HeaderMatch     map[string]string `json:"header_match,omitempty"`
-	BodyMatch       string            `json:"body_match,omitempty"`
-	ExtractedVar    string            `json:"extracted_var,omitempty"`
-	Negate          bool              `json:"negate,omitempty"`
+	Step            string            `json:"step,omitempty" jsonschema:"id of a previously executed step whose recorded response this guard evaluates; required unless the guard uses extracted_var alone. A step that has not run, or was skipped, never matches"`
+	StatusCode      *int              `json:"status_code,omitempty" jsonschema:"exact status code the referenced step's response must have"`
+	StatusCodeRange [2]int            `json:"status_code_range,omitempty" jsonschema:"inclusive [min, max] status code range for the referenced step's response; exactly two integers. [0, 0] means unset"`
+	HeaderMatch     map[string]string `json:"header_match,omitempty" jsonschema:"response header name to regular expression; every entry must match (AND). Each pattern is at most 1024 bytes"`
+	BodyMatch       string            `json:"body_match,omitempty" jsonschema:"regular expression matched against the referenced step's response body (first 1 MiB); the pattern is at most 1024 bytes"`
+	ExtractedVar    string            `json:"extracted_var,omitempty" jsonschema:"KV Store key that must exist for the step to run"`
+	Negate          bool              `json:"negate,omitempty" jsonschema:"invert the entire guard condition"`
 }
 
 // macroConfig is the JSON structure stored in the macros table config column.
