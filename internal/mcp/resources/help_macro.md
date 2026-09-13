@@ -34,7 +34,7 @@ Save a macro definition (upsert) with steps, extraction rules, and guards. If a 
 - **initial_vars** (object, optional): Pre-populated KV Store entries.
 - **macro_timeout_ms** (integer, optional): Overall macro timeout in ms (default: 300000).
 
-Returns: name, step_count, created (true if new, false if updated).
+Returns: name, step_count, created (true if new, false if updated), and `warnings[]` — non-fatal template diagnostics from the static check (see "Unknown §variable§ names" below). The macro is always saved; a warning is never an error.
 
 ### run_macro
 Execute a stored macro for testing. The macro is loaded from DB and run with the macro engine.
@@ -43,7 +43,7 @@ Execute a stored macro for testing. The macro is loaded from DB and run with the
 - **name** (string, required): Name of the macro to run.
 - **vars** (object, optional): Runtime variable overrides for the KV Store.
 
-Returns: macro_name, status ("completed"/"error"/"timeout"), steps_executed, kv_store, step_results[], error. Each step_results entry includes `id`, `status` ("completed"/"warning"/"skipped"/"error"), `status_code`, `duration_ms`, `error`, and `warnings[]` (populated when the unresolved-template detector matches — see "Variable substitution syntax" below).
+Returns: macro_name, status ("completed"/"error"/"timeout"), steps_executed, kv_store, step_results[], error. Each step_results entry includes `id`, `status` ("completed"/"warning"/"skipped"/"error"), `status_code`, `duration_ms`, `error`, and `warnings[]` (populated when a template detector matches — either a foreign syntax that was not substituted, or a `§name§` the KV Store could not resolve; see "Variable substitution syntax" below).
 
 ### delete_macro
 Remove a stored macro definition.
@@ -122,7 +122,8 @@ Returns: name, deleted.
 The **only** supported template syntax is `§name§` (U+00A7 section sign on both
 sides). Variable references using the supported syntax are replaced from the KV
 Store before the request is sent. Unknown variables are left literally as
-`§name§` on the wire.
+`§name§` on the wire — but no longer silently: both `define_macro` and
+`run_macro` report them in `warnings[]` (see "Unknown §variable§ names" below).
 
 ```text
 override_headers: {"Cookie": "PHPSESSID=§session_cookie§"}
@@ -147,7 +148,9 @@ warning:
 
 - `StepResult.Status` is set to `"warning"` (instead of `"completed"`).
 - `StepResult.Warnings` lists the locations and matched patterns
-  (`url: ...`, `header:X-Session: ...`, `body: ...`).
+  (`url: ...`, `header:X-Session: ...`, `body: ...`), each rendered with the
+  supported rewrite, e.g.
+  `header:X-Session: {{session}} → §session§ — not expanded; ...`.
 - A structured `slog.Warn` entry is emitted with `macro`, `step`, and detail.
 
 The macro continues to run; the warning is observational only. To suppress the
@@ -166,3 +169,52 @@ warning is preferred over silently shipping an unresolved variable on the wire.
 
 Body content is scanned only within the first 64 KiB to bound CPU cost. URL
 and header values are scanned in full.
+
+### Unknown §variable§ names
+
+Using the correct `§name§` syntax with a variable name that does not exist —
+a typo such as `§sesion_cookie§` for `§session_cookie§` — also produces a
+warning. The token itself is still sent on the wire verbatim (the engine never
+rewrites operator-authored bytes), but it is no longer silent:
+
+- **`define_macro`** runs a static check and returns `warnings[]`. A name is
+  reported when it resolves against neither `initial_vars`, nor a **preceding**
+  step's `extract[].name`, nor a reserved `__` key. Example:
+
+  ```text
+  step[get-csrf] header:Cookie: §sesion_cookie§ — not defined by initial_vars,
+  a preceding step's extract, or a reserved __ key; it is sent literally on the
+  wire unless run_macro supplies it via params.vars
+  ```
+
+  This is a **warning, never an error** — the macro is still saved. Supplying
+  the value later through `run_macro`'s `params.vars` is a legitimate pattern,
+  so ignore the warning when that is the plan. A step's own `extract` rules are
+  not in scope for that same step: extraction runs after the request is sent.
+
+- **`run_macro`** re-checks each step against the live KV Store just before the
+  request goes out, and lists the variable names that *are* available:
+
+  ```text
+  header:Cookie: §sesion_cookie§ — variable not found in KV Store;
+  available: __nonce, csrf_token, session_cookie
+  ```
+
+  The step's `status` becomes `"warning"` and a `slog.Warn` entry is emitted.
+  The hint lists **key names only** — KV Store values may hold session tokens
+  and are never echoed into a warning or a server log.
+
+Scope and limits:
+
+- Only the four `override_*` fields (`override_method`, `override_url`,
+  `override_headers` values, `override_body`) are scanned. A `§name§` that
+  appears in the **recorded base flow** is neither expanded nor warned about:
+  that is recorded victim traffic, where a literal `§` is ordinary content
+  (statute section numbers, SSTI probes).
+- `§ name §` (inner whitespace) and `§name | base64§` (encoder chain) are both
+  live lookup sites and are reported. `§unclosed`, a lone `§`, and `§§` are not
+  lookup sites, so they never warn.
+- A step skipped by its `when` guard is never scanned — it never reaches the
+  wire.
+- Unlike the foreign-syntax detector, this check has no false positives: a name
+  is reported if and only if the expansion engine would have left it in place.

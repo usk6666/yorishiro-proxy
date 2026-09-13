@@ -58,7 +58,10 @@ func ExpandTemplate(input string, kvStore map[string]string) (string, error) {
 // "var_name | encoder1 | encoder2".
 func expandExpression(expr string, kvStore map[string]string) (string, error) {
 	parts := strings.Split(expr, "|")
-	varName := strings.TrimSpace(parts[0])
+	// templateVarName (unresolved.go) is the single definition of "which
+	// component of the expression is the variable name". The unresolved-var
+	// scanner mirrors this function, so both must read the name identically.
+	varName := templateVarName(expr)
 
 	if varName == "" {
 		return "", fmt.Errorf("empty variable name")

@@ -865,6 +865,10 @@ func expandFuzzHTTPPayloads(payloads map[string]string, kvStore map[string]strin
 // tokens that do not resolve in kvStore. Returns the sorted union of
 // distinct unresolved variable names so the row diagnostic is stable
 // across runs (sorted) and free of duplicates (set semantics).
+//
+// The per-payload scan is delegated to macro.UnresolvedVars, which mirrors
+// macro.ExpandTemplate's pairing semantics by construction. Keeping a second
+// private copy of that loop here would let the two drift (USK-1035).
 func collectUnresolvedFuzzTokens(positions []fuzzHTTPPosition, payloads map[string]string, kvStore map[string]string) []string {
 	seen := make(map[string]struct{})
 	for _, pos := range positions {
@@ -872,26 +876,8 @@ func collectUnresolvedFuzzTokens(positions []fuzzHTTPPosition, payloads map[stri
 		if !ok {
 			continue
 		}
-		// Scan for §...§ pairs; any inner expression whose first pipe-
-		// separated component is not in kvStore is unresolved.
-		remaining := payload
-		for {
-			openIdx := strings.Index(remaining, macro.DelimOpen)
-			if openIdx == -1 {
-				break
-			}
-			after := remaining[openIdx+len(macro.DelimOpen):]
-			closeIdx := strings.Index(after, macro.DelimClose)
-			if closeIdx == -1 {
-				break
-			}
-			expr := strings.TrimSpace(strings.SplitN(after[:closeIdx], "|", 2)[0])
-			if expr != "" {
-				if _, exists := kvStore[expr]; !exists {
-					seen[expr] = struct{}{}
-				}
-			}
-			remaining = after[closeIdx+len(macro.DelimClose):]
+		for _, name := range macro.UnresolvedVars(payload, kvStore) {
+			seen[name] = struct{}{}
 		}
 	}
 	if len(seen) == 0 {

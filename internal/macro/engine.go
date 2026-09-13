@@ -314,6 +314,22 @@ func (e *Engine) doStepExecution(ctx context.Context, macroName string, step *St
 		}
 	}
 
+	// Scan the PRE-substitution overrides for §name§ references that the KV
+	// Store cannot resolve. Those reach the wire as literal text, which for a
+	// misspelt variable name used to be entirely silent — the upstream simply
+	// answered 200 OK on the literal token. See unresolved.go (USK-1035).
+	// The warning text carries variable NAMES only, never KV Store values.
+	if varWarnings := DetectUnresolvedVars(step, kvStore); len(varWarnings) > 0 {
+		for _, w := range varWarnings {
+			slog.WarnContext(ctx, "macro: unresolved template variable",
+				"macro", macroName,
+				"step", step.ID,
+				"detail", w,
+			)
+		}
+		warnings = append(warnings, varWarnings...)
+	}
+
 	// Send the request.
 	resp, err := e.sendFunc(stepCtx, req)
 	if err != nil {
