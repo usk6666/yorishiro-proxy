@@ -161,8 +161,8 @@
       "Bash(wget:*)",
       "Read(**/*key*)",
       "Read(**/*token*)",
-      "Write(.env*)",
-      "Write(**/secrets/**)"
+      "Edit(.env*)",
+      "Edit(**/secrets/**)"
     ]
   },
   "hooks": {},
