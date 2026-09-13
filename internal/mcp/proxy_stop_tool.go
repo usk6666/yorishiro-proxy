@@ -31,7 +31,7 @@ func (s *Server) registerProxyStop() {
 		Name: "proxy_stop",
 		Description: "Stop a named proxy listener (or all running listeners when 'name' is omitted). " +
 			"Performs a graceful shutdown waiting for in-flight connections to complete. " +
-			"See yorishiro://help/proxy_stop.",
+			"Full reference: call docs(topic=\"proxy_stop\").",
 	}, s.handleProxyStop)
 }
 

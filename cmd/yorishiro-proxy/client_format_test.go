@@ -77,6 +77,148 @@ func TestResolveFormat_TTY_DefaultsToJSON(t *testing.T) {
 	}
 }
 
+// --- resolveToolFormat / prose-tool rendering tests (USK-1036 F-1) ---
+//
+// docs is the only tool that returns markdown instead of a JSON object. Every
+// JSON renderer would escape a 16 KB document into a single string, so the
+// no-preference path resolves to "text" for it — while an explicitly chosen
+// format still wins, because scripts may want the envelope.
+
+const docsMarkdownFixture = "# docs\n\nA \"quoted\" line.\n\n## Parameters\n"
+
+func TestResolveToolFormat_ProseToolDefaultsToText(t *testing.T) {
+	t.Setenv("YP_CLIENT_FORMAT", "")
+	orig := isTTYFunc
+	t.Cleanup(func() { isTTYFunc = orig })
+
+	// Both TTY branches of resolveFormat would otherwise pick a JSON renderer.
+	for _, tty := range []bool{true, false} {
+		isTTYFunc = func(*os.File) bool { return tty }
+		if got := resolveToolFormat("", "docs"); got != "text" {
+			t.Errorf("resolveToolFormat(\"\", \"docs\") with tty=%v = %q, want \"text\"", tty, got)
+		}
+	}
+}
+
+func TestResolveToolFormat_ExplicitFlagWins(t *testing.T) {
+	t.Setenv("YP_CLIENT_FORMAT", "")
+	for _, format := range []string{"json", "raw", "table"} {
+		if got := resolveToolFormat(format, "docs"); got != format {
+			t.Errorf("resolveToolFormat(%q, \"docs\") = %q, want %q", format, got, format)
+		}
+	}
+}
+
+func TestResolveToolFormat_EnvVarWins(t *testing.T) {
+	t.Setenv("YP_CLIENT_FORMAT", "json")
+	if got := resolveToolFormat("", "docs"); got != "json" {
+		t.Errorf("resolveToolFormat with YP_CLIENT_FORMAT=json = %q, want \"json\"", got)
+	}
+}
+
+func TestResolveToolFormat_JSONToolUnaffected(t *testing.T) {
+	t.Setenv("YP_CLIENT_FORMAT", "")
+	orig := isTTYFunc
+	isTTYFunc = func(*os.File) bool { return true }
+	t.Cleanup(func() { isTTYFunc = orig })
+
+	if got := resolveToolFormat("", "query"); got != "json" {
+		t.Errorf("resolveToolFormat(\"\", \"query\") = %q, want \"json\"", got)
+	}
+}
+
+func TestPrintToolResult_TextPrintsDocumentVerbatim(t *testing.T) {
+	var buf bytes.Buffer
+	result := makeTextResult(docsMarkdownFixture, false)
+
+	if err := printToolResult(&buf, "docs", result, "text", false, false); err != nil {
+		t.Fatalf("printToolResult format=text: %v", err)
+	}
+
+	got := buf.String()
+	if got != docsMarkdownFixture+"\n" {
+		t.Errorf("format=text did not print the document verbatim:\ngot  %q\nwant %q", got, docsMarkdownFixture+"\n")
+	}
+	// The defect being fixed: a JSON rendering escapes the newlines and quotes.
+	if strings.Contains(got, `\n`) || strings.Contains(got, `\"`) {
+		t.Errorf("format=text escaped the document like JSON: %q", got)
+	}
+}
+
+func TestPrintToolResult_TextFallsBackToJSONWithoutTextContent(t *testing.T) {
+	var buf bytes.Buffer
+	result := &gomcp.CallToolResult{Content: []gomcp.Content{}}
+
+	if err := printToolResult(&buf, "docs", result, "text", false, false); err != nil {
+		t.Fatalf("printToolResult format=text no content: %v", err)
+	}
+	if !strings.Contains(buf.String(), "{") {
+		t.Errorf("expected a JSON envelope fallback, got %q", buf.String())
+	}
+}
+
+// --raw and --quiet are orthogonal to the prose default and keep their
+// documented meaning: --raw forces compact JSON, --quiet suppresses success.
+
+func TestPrintToolResult_RawFlagStillOverridesForProseTool(t *testing.T) {
+	var buf bytes.Buffer
+	result := makeTextResult(docsMarkdownFixture, false)
+
+	if err := printToolResult(&buf, "docs", result, "text", false, true); err != nil {
+		t.Fatalf("printToolResult docs --raw: %v", err)
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &parsed); err != nil {
+		t.Errorf("--raw did not produce JSON for docs: %v (%q)", err, buf.String())
+	}
+}
+
+func TestPrintToolResult_QuietStillSuppressesProseTool(t *testing.T) {
+	var buf bytes.Buffer
+	result := makeTextResult(docsMarkdownFixture, false)
+
+	if err := printToolResult(&buf, "docs", result, "text", true, false); err != nil {
+		t.Fatalf("printToolResult docs --quiet: %v", err)
+	}
+	if buf.Len() != 0 {
+		t.Errorf("quiet did not suppress docs output: %q", buf.String())
+	}
+}
+
+func TestPrintToolResult_ExplicitJSONStillMarshalsProseTool(t *testing.T) {
+	var buf bytes.Buffer
+	result := makeTextResult(docsMarkdownFixture, false)
+
+	if err := printToolResult(&buf, "docs", result, "json", false, false); err != nil {
+		t.Fatalf("printToolResult docs --format json: %v", err)
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &parsed); err != nil {
+		t.Errorf("--format json did not produce JSON for docs: %v (%q)", err, buf.String())
+	}
+}
+
+// TestPrintToolResult_TableProseToolNoJSONWarning covers the other half of the
+// finding: --format table used to reach the prose only by way of a "could not
+// parse tool response as JSON" warning, which described nothing wrong.
+func TestPrintToolResult_TableProseToolNoJSONWarning(t *testing.T) {
+	var out, errOut bytes.Buffer
+	origErr := errWriter
+	errWriter = &errOut
+	t.Cleanup(func() { errWriter = origErr })
+
+	result := makeTextResult(docsMarkdownFixture, false)
+	if err := printToolResult(&out, "docs", result, "table", false, false); err != nil {
+		t.Fatalf("printToolResult docs --format table: %v", err)
+	}
+	if out.String() != docsMarkdownFixture+"\n" {
+		t.Errorf("format=table did not print the document verbatim: %q", out.String())
+	}
+	if errOut.Len() != 0 {
+		t.Errorf("format=table warned about a document that is not meant to be JSON: %q", errOut.String())
+	}
+}
+
 // --- extractTextContent tests ---
 
 func TestExtractTextContent_HasText(t *testing.T) {

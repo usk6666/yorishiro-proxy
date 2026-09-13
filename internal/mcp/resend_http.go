@@ -84,7 +84,7 @@ func (s *Server) registerResendHTTP() {
 			"path may carry a literal '?' (auto-split into path + raw_query); supplying " +
 			"both raw_query AND a '?' in path is rejected. " +
 			"override_host redirects the dial target while preserving the request's :authority. " +
-			"For non-HTTP flows use resend_ws / resend_grpc / resend_raw. See yorishiro://help/resend_http.",
+			"For non-HTTP flows use resend_ws / resend_grpc / resend_raw. Full reference: call docs(topic=\"resend_http\").",
 	}, s.handleResendHTTP)
 }
 

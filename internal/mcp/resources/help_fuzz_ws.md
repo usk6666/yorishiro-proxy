@@ -27,7 +27,7 @@ When `flow_id` is set, the upgrade Stream's send/receive Flows seed the upgrade-
 
 - `flow_id`, `target_addr`, `scheme`, `path`, `raw_query`, `opcode`, `fin`, `payload`, `body_encoding`, `payload_set`, `masked`, `mask`, `close_code`, `close_reason`, `compressed`, `tls_fingerprint`, `tag`, `timeout_ms`
 
-See [help_resend_ws](yorishiro://help/resend_ws) for the inherited fields. Documentation here is on fuzz-specific fields only.
+Call `docs(topic="resend_ws")` for the inherited fields. Documentation here is on fuzz-specific fields only.
 
 ### positions (array, REQUIRED)
 Ordered position list; at least one entry. Each position has:
@@ -151,7 +151,7 @@ Variant Streams are stamped `origin = "fuzz"`, so `query { resource: "flows", fi
   "positions": [
     {
       "path": "close_reason",
-      "payloads": ["bye", " ", "<script>alert(1)</script>"]
+      "payloads": ["bye", "\u0000", "<script>alert(1)</script>"]
     }
   ]
 }

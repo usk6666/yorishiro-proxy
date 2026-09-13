@@ -164,7 +164,7 @@ func (s *Server) registerFuzzWS() {
 			"each position is a typed path (payload | close_reason) with payloads[]. The cartesian product " +
 			"of positions yields the variant sequence (capped at 1000 per call). Variants run sequentially over " +
 			"a freshly dialled and upgraded connection. stop_on_close aborts on the first upstream Close frame. " +
-			"See yorishiro://help/fuzz_ws.",
+			"Full reference: call docs(topic=\"fuzz_ws\").",
 	}, s.handleFuzzWS)
 }
 

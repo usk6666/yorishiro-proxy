@@ -20,6 +20,29 @@ import (
 // clientToolHelp maps tool names to their hardcoded parameter descriptions.
 // This allows `client <tool> --help` to work without a server connection.
 var clientToolHelp = map[string]string{
+	"docs": `docs: Self-service documentation for every MCP tool.
+
+Parameters (key=value, or bare positional words):
+  topic=<name>            Documentation topic to print. Omit to list every topic.
+  section=<heading>       Print only one section of that topic instead of the
+                          whole document. Accepts the heading text or its slug,
+                          case-insensitively; sub-sections come with the match.
+
+Topics:
+  One per MCP tool -- proxy_start, proxy_stop, query, manage, macro, intercept,
+  configure, security, resend_http, resend_ws, resend_grpc, resend_raw,
+  fuzz_http, fuzz_ws, fuzz_grpc, fuzz_raw, plugin_introspect, grpc_schema --
+  plus the concept topics getting-started, examples, template-syntax and docs.
+
+  An unknown topic prints the list of valid topics; an unknown section prints
+  that topic's heading outline.
+
+Examples:
+  yorishiro-proxy client docs
+  yorishiro-proxy client docs macro
+  yorishiro-proxy client docs macro "Variable substitution syntax"
+  yorishiro-proxy client docs topic=fuzz_http section="Macro hook scopes"`,
+
 	"query": `query: Unified information query tool.
 
 Parameters (key=value):
@@ -436,7 +459,7 @@ Examples:
   yorishiro-proxy client grpc_schema action=unregister params.service=pkg.Greeter
   yorishiro-proxy client grpc_schema action=clear
 
-See yorishiro://help/grpc_schema for full documentation.`,
+Full reference: call docs(topic="grpc_schema").`,
 }
 
 // clientToolList is the ordered list of available MCP tools for help display.
@@ -446,6 +469,7 @@ See yorishiro://help/grpc_schema for full documentation.`,
 // adding a new server tool without updating this list (or vice versa) fails
 // that test.
 var clientToolList = []string{
+	"docs",
 	"query",
 	"proxy_start",
 	"proxy_stop",
@@ -468,6 +492,7 @@ var clientToolList = []string{
 
 // clientToolDescriptions maps tool names to their short descriptions for list display.
 var clientToolDescriptions = map[string]string{
+	"docs":              "Self-service documentation for every MCP tool",
 	"query":             "Unified query for flows, status, config, etc.",
 	"proxy_start":       "Start a proxy listener",
 	"proxy_stop":        "Stop proxy listener(s)",
@@ -546,7 +571,9 @@ func printClientUsage(w io.Writer) {
 	fmt.Fprintf(w, "                            (env: YP_CLIENT_TOKEN, default: auto-detect from server.json)\n")
 	fmt.Fprintf(w, "                            WARNING: --token exposes the token in process listings (ps aux).\n")
 	fmt.Fprintf(w, "                            Prefer YP_CLIENT_TOKEN env var in sensitive environments.\n")
-	fmt.Fprintf(w, "  --format json|table|raw   Output format (env: YP_CLIENT_FORMAT, default: json or raw when piped)\n")
+	fmt.Fprintf(w, "  --format <fmt>            Output format: json|table|raw|text\n")
+	fmt.Fprintf(w, "                            (env: YP_CLIENT_FORMAT, default: json, or raw when piped;\n")
+	fmt.Fprintf(w, "                            docs defaults to text, which prints the document unescaped)\n")
 	fmt.Fprintf(w, "  --raw                     Compact JSON output without indentation (for pipes/scripts)\n")
 	fmt.Fprintf(w, "  -q, --quiet               Suppress output on success (for scripting)\n\n")
 	fmt.Fprintf(w, "Tool parameters are passed as key=value pairs:\n")
@@ -792,7 +819,7 @@ func runClientTool(ctx context.Context, toolName string, args []string) error {
 	var flagRaw bool
 	fs.StringVar(&flagAddr, "server-addr", "", "server address (host:port)")
 	fs.StringVar(&flagToken, "token", "", "bearer token (prefer YP_CLIENT_TOKEN env var to avoid token appearing in process list)")
-	fs.StringVar(&flagFormat, "format", "", "output format: json, table, or raw (env: YP_CLIENT_FORMAT)")
+	fs.StringVar(&flagFormat, "format", "", "output format: json, table, raw, or text (env: YP_CLIENT_FORMAT; docs defaults to text)")
 	fs.BoolVar(&flagQuiet, "quiet", false, "suppress output on success")
 	fs.BoolVar(&flagQuiet, "q", false, "suppress output on success")
 	fs.BoolVar(&flagRaw, "raw", false, "raw JSON output without indentation")
@@ -867,8 +894,10 @@ func runClientTool(ctx context.Context, toolName string, args []string) error {
 		return fmt.Errorf("call tool %q: %w", toolName, err)
 	}
 
-	// Resolve effective format and output the result.
-	format := resolveFormat(flagFormat)
+	// Resolve effective format and output the result. The tool name matters:
+	// with no explicit format, a prose tool (docs) renders as text rather than
+	// as an escaped JSON string.
+	format := resolveToolFormat(flagFormat, toolName)
 	return printToolResult(os.Stdout, toolName, result, format, flagQuiet, flagRaw)
 }
 

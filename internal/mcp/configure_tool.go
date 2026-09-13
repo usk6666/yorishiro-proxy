@@ -448,7 +448,7 @@ func (s *Server) registerConfigure() {
 			"The optional top-level 'name' field scopes upstream_proxy to a single listener (default: 'default'); " +
 			"other sections (capture_scope, tls_passthrough, intercept_rules, auto_transform, ...) currently remain " +
 			"process-global regardless of 'name'. Multi-listener chained MITM requires per-listener upstream_proxy " +
-			"scoping (USK-826). See yorishiro://help/configure.",
+			"scoping (USK-826). Full reference: call docs(topic=\"configure\").",
 	}, s.handleConfigure)
 }
 

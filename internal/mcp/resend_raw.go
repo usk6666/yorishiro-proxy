@@ -97,7 +97,7 @@ func (s *Server) registerResendRaw() {
 			"entirely; patches[] applies offset-based byte replacements (mutually exclusive). target_addr " +
 			"requires an explicit port. Wire bytes are NEVER normalized — they reach the wire verbatim, " +
 			"making this the smuggling/anomaly-test surface (dual-CL/TE, malformed framing, etc.). " +
-			"See yorishiro://help/resend_raw.",
+			"Full reference: call docs(topic=\"resend_raw\").",
 	}, s.handleResendRaw)
 }
 

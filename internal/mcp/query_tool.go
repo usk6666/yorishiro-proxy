@@ -493,7 +493,7 @@ func (s *Server) registerQuery() {
 			"Modified flows surface both original and modified variants (variant=original|modified). " +
 			"For large bodies that would exceed the MCP token cap on flow / messages, pass " +
 			"include_bodies=false (metadata only) or body_max_bytes=N (per-side byte cap). " +
-			"See yorishiro://help/query for the full filter / field / sort reference.",
+			"Full reference: call docs(topic=\"query\").",
 	}, s.handleQuery)
 }
 

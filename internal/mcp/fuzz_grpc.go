@@ -175,7 +175,7 @@ func (s *Server) registerFuzzGRPC() {
 			"messages[N].payload | messages[N].payload.<FFFF:OOOO:type>) with payloads[]. The JSON-path form " +
 			"mutates one scalar field inside a proto-schemaless-json payload (USK-925). The cartesian product " +
 			"of positions yields the variant sequence (capped at 1000 per call). Each variant runs on an " +
-			"independent stream. stop_on_non_ok aborts on the first non-OK gRPC status. See yorishiro://help/fuzz_grpc.",
+			"independent stream. stop_on_non_ok aborts on the first non-OK gRPC status. Full reference: call docs(topic=\"fuzz_grpc\").",
 	}, s.handleFuzzGRPC)
 }
 

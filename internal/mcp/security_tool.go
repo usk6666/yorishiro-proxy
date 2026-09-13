@@ -67,7 +67,7 @@ func (s *Server) registerSecurity() {
 			"on the Agent Layer. The Policy Layer (set by config) is read-only and bounds Agent rules. " +
 			"Actions: set_target_scope, update_target_scope, get_target_scope, test_target, " +
 			"set_rate_limits, get_rate_limits, set_budget, get_budget, get_safety_filter. " +
-			"See yorishiro://help/security.",
+			"Full reference: call docs(topic=\"security\").",
 	}, s.handleSecurity)
 }
 

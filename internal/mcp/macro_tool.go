@@ -54,7 +54,7 @@ func (s *Server) registerMacro() {
 			"post-substitution scan of the url / header values / body reports step status \"warning\" with warnings[]. " +
 			"An unknown §name§ is also left literal. " +
 			"Values come from params.initial_vars, run_macro params.vars, and earlier steps' extract[].name. " +
-			"See yorishiro://help/macro.",
+			"Full reference: call docs(topic=\"macro\").",
 	}, s.handleMacroTool)
 }
 

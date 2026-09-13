@@ -55,7 +55,7 @@ func (s *Server) registerPluginIntrospect() {
 		Name: "plugin_introspect",
 		Description: "List loaded plugins with their (protocol, event, phase) hook registrations and " +
 			"the redacted PluginConfig.Vars map. Returns an empty list when no plugin engine is configured. " +
-			"See yorishiro://help/plugin_introspect.",
+			"Full reference: call docs(topic=\"plugin_introspect\").",
 	}, s.handlePluginIntrospect)
 }
 

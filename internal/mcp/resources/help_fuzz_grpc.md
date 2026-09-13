@@ -56,7 +56,7 @@ The recorded send-direction GRPCStart Flow seeds the per-variant base envelope; 
 
 - `flow_id`, `target_addr`, `scheme`, `service`, `method`, `metadata[]`, `encoding`, `accept_encoding[]`, `messages[]`, `trailer_metadata[]`, `tls_fingerprint`, `tag`, `timeout_ms`
 
-See [help_resend_grpc](yorishiro://help/resend_grpc) for the inherited fields. Documentation here is on fuzz-specific fields only.
+Call `docs(topic="resend_grpc")` for the inherited fields. Documentation here is on fuzz-specific fields only.
 
 ### positions (array, REQUIRED)
 Ordered position list; at least one entry. Each position has:
@@ -78,7 +78,7 @@ Pre and post macro hooks dispatched around variants by name. Both fields take th
 
 - **name** (string, REQUIRED): the stored macro name (defined via the `macro` tool's `define_macro` action).
 - **scope** (string, optional): `"iteration"` (default) or `"job"`. See "Macro hook scopes" below.
-- **on_error** (string, optional): `"skip"` (default) | `"abort"` | `"continue"`. Same semantics as `fuzz_http` — see the [fuzz_http help-doc](yorishiro://help/fuzz_http) for the full matrix.
+- **on_error** (string, optional): `"skip"` (default) | `"abort"` | `"continue"`. Same semantics as `fuzz_http` — call `docs(topic="fuzz_http")` for the full matrix.
 - **vars** (object string→string, optional): static kvStore overrides injected before the macro runs. Keys with the reserved prefix (`__`) are silently dropped.
 - **run_interval** (string, optional): hook firing cadence — **`scope="iteration"` only**. Rejected with an error when paired with `scope="job"` (job-scope hooks fire exactly once by construction).
   - pre_macro legal values: `"always"` (default) | `"once"` | `"every_n"` | `"on_error"`.
@@ -121,7 +121,7 @@ Pre and post macro hooks dispatched around variants by name. Both fields take th
 
 #### Macro hook scopes
 
-Same shape as `fuzz_http`. See the [fuzz_http help-doc](yorishiro://help/fuzz_http) "Macro hook scopes" section for the full matrix. Quick summary:
+Same shape as `fuzz_http`. Call `docs(topic="fuzz_http", section="Macro hook scopes")` for the full matrix. Quick summary:
 
 | Scope | Pre fires | Post fires | KV Store lifetime | `__response_*` keys | `§__iteration§` / `§__nonce§` |
 |-------|-----------|------------|-------------------|---------------------|-------------------------------|
