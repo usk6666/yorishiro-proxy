@@ -12,6 +12,7 @@ import (
 	gohttp "net/http"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -142,7 +143,26 @@ func startSSEOverH2Upstream(t *testing.T) (string, func()) {
 // an h2 GET /events through it. Reads up to numEvents from the response body
 // (line-oriented; SSE events are separated by blank lines). Returns nil on
 // success.
+//
+// On return the client h2 conn is torn down deterministically (see the
+// h2ConnsMu comment below), so callers may follow this with
+// waitSessionDone.
 func driveSSEOverH2ThroughProxy(proxyAddr, upstreamAddr string, numEvents int) error {
+	// Capture the underlying TLS conns DialTLS returns so we can force-
+	// close them before returning. tr.CloseIdleConnections() alone races
+	// with xhttp2.Transport's internal "is this conn idle?" bookkeeping
+	// — under CI load the response reader may not have released the conn
+	// to the pool by the time the transport is closed, so the proxy's
+	// clientL.Channels() never observes a remote close and the
+	// onHTTP2Stack callback hangs until the caller's waitSessionDone
+	// deadline fires. Closing the underlying conn directly is
+	// deterministic. Same workaround as the one documented in
+	// TestFullListener_CONNECT_SSE_OverH2_SiblingNonInterference
+	// (USK-1044).
+	var (
+		h2ConnsMu sync.Mutex
+		h2Conns   []net.Conn
+	)
 	tr := &xhttp2.Transport{
 		TLSClientConfig: &tls.Config{
 			InsecureSkipVerify: true, //nolint:gosec // test
@@ -173,10 +193,29 @@ func driveSSEOverH2ThroughProxy(proxyAddr, upstreamAddr string, numEvents int) e
 				_ = raw.Close()
 				return nil, err
 			}
+			h2ConnsMu.Lock()
+			h2Conns = append(h2Conns, tlsConn)
+			h2ConnsMu.Unlock()
 			return tlsConn, nil
 		},
 	}
 	defer tr.CloseIdleConnections()
+	// Force-close the captured underlying TLS conns so the proxy's
+	// onHTTP2Stack observes the client h2 conn close deterministically
+	// and exits its for-select loop, firing the deferred wg.Done() the
+	// caller's waitSessionDone is blocked on. Registered after the
+	// tr.CloseIdleConnections defer and before the resp.Body.Close defer
+	// below, so the LIFO teardown order is: body close → force-close raw
+	// conns → CloseIdleConnections — matching the sibling test, where
+	// the force-close runs after the response readers return and before
+	// the deferred tr.CloseIdleConnections at test exit.
+	defer func() {
+		h2ConnsMu.Lock()
+		for _, c := range h2Conns {
+			_ = c.Close()
+		}
+		h2ConnsMu.Unlock()
+	}()
 
 	url := fmt.Sprintf("https://%s/events", upstreamAddr)
 	req, err := gohttp.NewRequest("GET", url, nil)
