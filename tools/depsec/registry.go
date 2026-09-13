@@ -38,6 +38,13 @@ func (c *httpClock) releasedAt(ctx context.Context, ecosystem, name, version str
 	if ecosystem != "go" {
 		return time.Time{}, fmt.Errorf("release-age lookup not supported for ecosystem %q (npm is gated by pnpm/.npmrc)", ecosystem)
 	}
+	// The proxy only answers canonical tags. A bare "0.52.0" (the shape the
+	// Dependabot API returns) 404s here, which used to be swallowed by the
+	// caller as "cannot determine release age" and silently skipped the fix.
+	// buildPlan canonicalizes via goVersionTag; fail loudly if anyone forgets.
+	if tag := goVersionTag(version); tag != version {
+		return time.Time{}, fmt.Errorf("go %s@%s: non-canonical module version, want %q", name, version, tag)
+	}
 	url := fmt.Sprintf("%s/%s/@v/%s.info", c.goBase, goModuleEscape(name), version)
 	body, err := c.get(ctx, url)
 	if err != nil {

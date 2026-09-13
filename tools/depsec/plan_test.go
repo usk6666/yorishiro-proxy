@@ -174,3 +174,49 @@ func findCandidate(cs []Candidate, name string) *Candidate {
 	}
 	return nil
 }
+
+// TestBuildPlan_GoVersionGetsVPrefix pins the regression fixed in USK-1039: the
+// Dependabot API reports Go patched versions WITHOUT a leading "v", and both the
+// module-proxy lookup and the workflow's `go get` reject that form. The plan
+// must canonicalize once so every downstream consumer sees "vX.Y.Z".
+func TestBuildPlan_GoVersionGetsVPrefix(t *testing.T) {
+	now := time.Date(2026, 9, 13, 0, 0, 0, 0, time.UTC)
+	old := now.Add(-30 * 24 * time.Hour)
+
+	// Keyed on the canonical version only: a bare-version lookup finds no canned
+	// time and surfaces as a plan error, exactly like the real proxy 404 did.
+	clock := fakeClock{times: map[string]time.Time{
+		"go golang.org/x/crypto v0.52.0":    old,
+		"go google.golang.org/grpc v1.83.1": old,
+	}}
+
+	alerts := []Alert{
+		{Ecosystem: "go", Name: "golang.org/x/crypto", FirstPatched: "0.52.0", Severity: "critical"},
+		// Two advisories on one module, both bare: the highest must still win.
+		{Ecosystem: "go", Name: "google.golang.org/grpc", FirstPatched: "1.82.1", Severity: "high"},
+		{Ecosystem: "go", Name: "google.golang.org/grpc", FirstPatched: "1.83.1", Severity: "medium"},
+		{Ecosystem: "npm", Name: "left-pad", FirstPatched: "1.3.0", Severity: "high"},
+	}
+	plan := buildPlan(context.Background(), alerts, map[string]bool{"left-pad": true}, clock, 7*24*time.Hour, now)
+
+	if len(plan.Errors) != 0 {
+		t.Fatalf("bare Go versions must not be skipped: %v", plan.Errors)
+	}
+	for name, want := range map[string]string{
+		"golang.org/x/crypto":    "v0.52.0",
+		"google.golang.org/grpc": "v1.83.1",
+	} {
+		c := findCandidate(plan.GoAccepted, name)
+		if c == nil {
+			t.Fatalf("want %s accepted, got %+v", name, plan.GoAccepted)
+		}
+		if c.TargetVersion != want {
+			t.Errorf("%s target_version = %q, want %q (the workflow feeds this to `go get`)", name, c.TargetVersion, want)
+		}
+	}
+
+	// npm versions are bare by convention and must not be touched.
+	if n := findCandidate(plan.NpmUpdate, "left-pad"); n == nil || n.TargetVersion != "1.3.0" {
+		t.Errorf("npm target_version must stay bare, got %+v", n)
+	}
+}

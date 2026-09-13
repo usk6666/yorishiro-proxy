@@ -98,10 +98,16 @@ func buildPlan(ctx context.Context, alerts []Alert, npmDirect map[string]bool, c
 					fmt.Sprintf("go %s: no fixed version in any advisory; needs manual triage", g.Name))
 				continue
 			}
-			released, err := clock.releasedAt(ctx, g.Ecosystem, g.Name, g.TargetVersion)
+			// GitHub reports Go patched versions without the leading "v"
+			// ("0.52.0"); the module proxy and `go get` both reject that form.
+			// Canonicalize once here so the tag reaches every consumer — the
+			// release-age lookup below AND plan.json's target_version, which
+			// the workflow feeds straight to `go get`.
+			cand.TargetVersion = goVersionTag(g.TargetVersion)
+			released, err := clock.releasedAt(ctx, g.Ecosystem, g.Name, cand.TargetVersion)
 			if err != nil {
 				plan.Errors = append(plan.Errors,
-					fmt.Sprintf("go %s@%s: cannot determine release age (%v); skipped for safety", g.Name, g.TargetVersion, err))
+					fmt.Sprintf("go %s@%s: cannot determine release age (%v); skipped for safety", g.Name, cand.TargetVersion, err))
 				continue
 			}
 			cand.ReleasedAt = released

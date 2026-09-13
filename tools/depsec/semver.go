@@ -56,3 +56,18 @@ func numericFields(v string) []int {
 	}
 	return out
 }
+
+// goVersionTag normalizes a Go module version to its canonical `vX.Y.Z` tag
+// form. GitHub's Dependabot API reports Go patched versions WITHOUT the leading
+// "v" (e.g. "0.52.0"), but both the module proxy (`/@v/v0.52.0.info`) and
+// `go get mod@v0.52.0` reject the bare form with "invalid version". Idempotent,
+// so an already-canonical version passes through unchanged.
+//
+// Go-only: npm versions are bare by convention and must not be touched.
+func goVersionTag(v string) string {
+	v = strings.TrimSpace(v)
+	if v == "" || strings.HasPrefix(v, "v") {
+		return v
+	}
+	return "v" + v
+}
