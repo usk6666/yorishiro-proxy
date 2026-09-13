@@ -135,6 +135,12 @@ These four `override_*` fields are the **only** template expansion sites. In
 `override_headers` only the values are expanded; header names are copied
 verbatim. Fields under `extract` and `when` are never expanded.
 
+An `override_headers` key replaces the recorded flow's header only when it
+matches the recorded name **case-sensitively**. HTTP/2 flows record lowercase
+header names (RFC 9113), so on an h2-recorded flow use `cookie`, not `Cookie` —
+otherwise the override is added alongside the recorded header instead of
+replacing it.
+
 ### Encoder chain
 
 A template expression may pipe the value through one or more encoders:

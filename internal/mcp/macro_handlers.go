@@ -46,10 +46,10 @@ type macroParams struct {
 // construction. Keep examples such as PHPSESSID=§sid§ mid-sentence.
 type macroStepInput struct {
 	ID              string            `json:"id" jsonschema:"unique step identifier within the macro; referenced by a later step's when.step"`
-	StreamID        string            `json:"flow_id" jsonschema:"id of a recorded HTTP flow used as the request template — take it from query resource=\"flows\" items[].id. Non-HTTP flows are rejected; use resend_ws / resend_grpc / resend_raw instead"`
+	StreamID        string            `json:"flow_id" jsonschema:"id of a recorded HTTP flow used as the request template — take it from query resource=\"flows\" flows[].id. Non-HTTP flows are rejected; use resend_ws / resend_grpc / resend_raw instead"`
 	OverrideMethod  string            `json:"override_method,omitempty" jsonschema:"HTTP method override; empty inherits the recorded flow's method. Supports §name§ template expansion against the KV Store"`
 	OverrideURL     string            `json:"override_url,omitempty" jsonschema:"request URL override; replaces the recorded flow's URL. Supports §name§ template expansion (U+00A7 SECTION SIGN on both sides) against the KV Store — e.g. https://api.example.com/users/§user_id§. {{name}} / ${name} / %name% are NOT expanded"`
-	OverrideHeaders map[string]string `json:"override_headers,omitempty" jsonschema:"header overrides applied on top of the recorded flow's headers; each key replaces all existing values for that name. VALUES support §name§ template expansion, keys do not — e.g. {\"Cookie\": \"PHPSESSID=§session_cookie§\"}. {{name}} / ${name} / %name% are NOT expanded. Expanded keys or values containing CR or LF are rejected"`
+	OverrideHeaders map[string]string `json:"override_headers,omitempty" jsonschema:"header overrides applied on top of the recorded flow's headers; each key replaces all existing values for that name, matched case-sensitively against the recorded header name (HTTP/2 flows record lowercase names, so use cookie not Cookie there). VALUES support §name§ template expansion, keys do not — e.g. {\"Cookie\": \"PHPSESSID=§session_cookie§\"}. {{name}} / ${name} / %name% are NOT expanded. Expanded keys or values containing CR or LF are rejected"`
 	OverrideBody    *string           `json:"override_body,omitempty" jsonschema:"request body override; omit to inherit the recorded flow's body. Supports §name§ template expansion against the KV Store — e.g. user=admin&token=§csrf_token§. {{name}} / ${name} / %name% are NOT expanded and are sent literally on the wire"`
 	OnError         string            `json:"on_error,omitempty" jsonschema:"abort|skip|retry; default abort. retry honours retry_count and retry_delay_ms"`
 	RetryCount      int               `json:"retry_count,omitempty" jsonschema:"retries when on_error is retry; default 3, maximum 10"`
@@ -70,8 +70,8 @@ type extractionInput struct {
 	Regex      string `json:"regex,omitempty" jsonschema:"regular expression applied to the selected source; used with header, body and url. Maximum 1024 bytes, matched against at most 1 MiB of input"`
 	Group      int    `json:"group,omitempty" jsonschema:"capture group index for regex; 0 means the full match"`
 	JSONPath   string `json:"json_path,omitempty" jsonschema:"JSON Path expression; used when source is body_json"`
-	Default    string `json:"default,omitempty" jsonschema:"fallback value written to the KV Store when extraction finds nothing; ignored when required is true"`
-	Required   bool   `json:"required,omitempty" jsonschema:"when true, the macro fails if extraction finds nothing"`
+	Default    string `json:"default,omitempty" jsonschema:"fallback value written to the KV Store when extraction produces no value; ignored when required is true"`
+	Required   bool   `json:"required,omitempty" jsonschema:"when true, the step fails if extraction produces no value; on_error then decides whether the macro aborts"`
 }
 
 // guardInput represents a step guard condition in the MCP input.

@@ -204,7 +204,8 @@ func sortedObjectNames(m map[string]map[string]any) []string {
 // express default/minimum structurally (a "WORD=" prefix panics AddTool), so
 // they are prose — and prose drifts silently without this test.
 func TestMacroToolSchema_StepDefaultsMatchEngine(t *testing.T) {
-	props := macroStepProperties(t, macroToolSchema(t))
+	schema := macroToolSchema(t)
+	props := macroStepProperties(t, schema)
 
 	tests := []struct {
 		field string
@@ -233,13 +234,50 @@ func TestMacroToolSchema_StepDefaultsMatchEngine(t *testing.T) {
 			macro.DefaultRetryCount, macro.MaxRetryCount, macro.DefaultRetryDelayMs, macro.DefaultStepTimeoutMs)
 	}
 
-	// params.macro_timeout_ms documents DefaultMacroTimeoutMs.
-	paramsProps := navSchema(t, macroToolSchema(t), "properties", "params", "properties")
+	// params.macro_timeout_ms documents DefaultMacroTimeoutMs; params.steps
+	// documents MaxSteps.
+	paramsProps := navSchema(t, schema, "properties", "params", "properties")
 	if desc := schemaDescription(t, paramsProps, "macro_timeout_ms"); !strings.Contains(desc, "300000") {
 		t.Errorf("macro_timeout_ms description %q does not mention the default 300000", desc)
 	}
 	if macro.DefaultMacroTimeoutMs != 300000 {
 		t.Errorf("DefaultMacroTimeoutMs = %d; update the macro_timeout_ms jsonschema tag", macro.DefaultMacroTimeoutMs)
+	}
+	if desc := schemaDescription(t, paramsProps, "steps"); !strings.Contains(desc, "50") {
+		t.Errorf("steps description %q does not mention the maximum 50", desc)
+	}
+	if macro.MaxSteps != 50 {
+		t.Errorf("MaxSteps = %d; update the steps jsonschema tag", macro.MaxSteps)
+	}
+
+	// The ReDoS caps (CWE-1333) documented on extract[].regex and on the two
+	// guard regex fields are security-relevant limits: drift here misleads an
+	// agent about how much input is actually scanned.
+	extractProps := navSchema(t, props, "extract", "items", "properties")
+	whenProps := navSchema(t, props, "when", "properties")
+	for _, tc := range []struct {
+		name  string
+		props map[string]any
+		field string
+		want  []string
+	}{
+		{"extract.regex", extractProps, "regex", []string{"1024", "1 MiB"}},
+		{"when.header_match", whenProps, "header_match", []string{"1024"}},
+		{"when.body_match", whenProps, "body_match", []string{"1024", "1 MiB"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			desc := schemaDescription(t, tc.props, tc.field)
+			for _, want := range tc.want {
+				if !strings.Contains(desc, want) {
+					t.Errorf("%s description %q does not mention %q", tc.name, desc, want)
+				}
+			}
+		})
+	}
+	if macro.MaxRegexPatternLen != 1024 || macro.MaxRegexInputSize != 1<<20 || macro.MaxStepBodySize != 1<<20 {
+		t.Errorf("macro regex/body caps changed; update the regex, header_match and body_match "+
+			"jsonschema tags: pattern=%d input=%d body=%d",
+			macro.MaxRegexPatternLen, macro.MaxRegexInputSize, macro.MaxStepBodySize)
 	}
 }
 
