@@ -1,10 +1,12 @@
 package macro
 
 import (
+	"fmt"
 	"reflect"
 	"sort"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 // strPtr returns a pointer to s, for Step.OverrideBody.
@@ -591,5 +593,182 @@ func TestValidateMacroTemplates_Deterministic(t *testing.T) {
 		if !reflect.DeepEqual(got, first) {
 			t.Fatalf("iteration %d produced different warnings:\n%v\n%v", i, got, first)
 		}
+	}
+}
+
+// TestValidateMacroTemplates_RegexScanBoundedSectionScanIsNot is the
+// anti-regression guard for USK-1035 review F-1/S-2. The regex-based
+// foreign-syntax scan is capped at MaxUnresolvedScanBytes so an unbounded
+// override_body cannot drive unbounded regex work (CWE-770), while the
+// regex-free §name§ walk stays uncapped — truncating it would reinstate the
+// silent-send hole this Issue exists to close.
+func TestValidateMacroTemplates_RegexScanBoundedSectionScanIsNot(t *testing.T) {
+	filler := strings.Repeat("a", MaxUnresolvedScanBytes)
+	body := "{{near}}" + filler + "{{far}} §typo§"
+	m := &Macro{
+		Name:  "big",
+		Steps: []Step{{ID: "s1", OverrideBody: strPtr(body)}},
+	}
+
+	joined := strings.Join(ValidateMacroTemplates(m), "\n")
+
+	if !strings.Contains(joined, "{{near}}") {
+		t.Errorf("warnings = %q, want the foreign token inside the %d-byte window reported",
+			joined, MaxUnresolvedScanBytes)
+	}
+	if strings.Contains(joined, "{{far}}") {
+		t.Errorf("warnings = %q, foreign token beyond %d bytes must not be scanned",
+			joined, MaxUnresolvedScanBytes)
+	}
+	if !strings.Contains(joined, "§typo§") {
+		t.Errorf("warnings = %q, want the §name§ scan to report a token beyond the regex window",
+			joined)
+	}
+}
+
+// TestDetectUnresolvedVars_SectionScanIgnoresRegexWindow pins the same
+// guarantee on the run-time path: a misspelt variable a megabyte into the body
+// still warns.
+func TestDetectUnresolvedVars_SectionScanIgnoresRegexWindow(t *testing.T) {
+	body := strings.Repeat("a", MaxUnresolvedScanBytes+1) + "§typo§"
+	step := &Step{ID: "s1", OverrideBody: strPtr(body)}
+
+	got := DetectUnresolvedVars(step, map[string]string{"session": "v"})
+	if len(got) != 1 {
+		t.Fatalf("len(warnings) = %d, want 1; got %v", len(got), got)
+	}
+	if !strings.Contains(got[0], "§typo§") {
+		t.Errorf("warning = %q, want §typo§ reported past the %d-byte regex window",
+			got[0], MaxUnresolvedScanBytes)
+	}
+}
+
+// TestAvailableVarsHint_ResponseHeaderKeysDoNotStarveAuthoredNames covers
+// USK-1035 review F-2: `_` (0x5F) sorts before every lowercase letter, so a
+// single sort would let the runtime __response_headers__* projection (up to
+// 256 keys in the fuzz post_macro path) occupy every sample slot — hiding the
+// very names the operator mistyped.
+func TestAvailableVarsHint_ResponseHeaderKeysDoNotStarveAuthoredNames(t *testing.T) {
+	kv := map[string]string{
+		"session_cookie": "v",
+		"csrf_token":     "v",
+	}
+	for i := 0; i < 40; i++ {
+		kv[fmt.Sprintf("__response_headers__x_custom_%02d__", i)] = "v"
+	}
+
+	step := &Step{ID: "s1", OverrideHeaders: map[string]string{"Cookie": "§sesion_cookie§"}}
+	got := DetectUnresolvedVars(step, kv)
+	if len(got) != 1 {
+		t.Fatalf("len(warnings) = %d, want 1; got %v", len(got), got)
+	}
+	w := got[0]
+
+	for _, want := range []string{"csrf_token", "session_cookie"} {
+		if !strings.Contains(w, want) {
+			t.Errorf("warning = %q, missing operator-authored name %q", w, want)
+		}
+	}
+	// Reserved keys stay visible in the slots the authored names leave free:
+	// §__response_status§ and friends are legitimately referenceable.
+	if !strings.Contains(w, "__response_headers__") {
+		t.Errorf("warning = %q, want reserved keys still listed after the authored ones", w)
+	}
+	if authoredIdx, reservedIdx := strings.Index(w, "csrf_token"), strings.Index(w, "__response_headers__"); authoredIdx > reservedIdx {
+		t.Errorf("warning = %q, want authored names listed before reserved keys", w)
+	}
+}
+
+// TestAvailableVarsHint_ReservedOnlyStoreStillLists guards the fallback half
+// of F-2: reserved keys must not become permanently invisible.
+func TestAvailableVarsHint_ReservedOnlyStoreStillLists(t *testing.T) {
+	kv := map[string]string{"__nonce": "v", "__iteration": "v"}
+	step := &Step{ID: "s1", OverrideURL: "https://example.com/§typo§"}
+
+	got := DetectUnresolvedVars(step, kv)
+	if len(got) != 1 {
+		t.Fatalf("len(warnings) = %d, want 1; got %v", len(got), got)
+	}
+	for _, want := range []string{"__iteration", "__nonce"} {
+		if !strings.Contains(got[0], want) {
+			t.Errorf("warning = %q, missing reserved key %q", got[0], want)
+		}
+	}
+	if strings.Contains(got[0], "the KV Store is empty") {
+		t.Errorf("warning = %q, store is not empty", got[0])
+	}
+}
+
+// TestVarNameRendering_TruncatesOverlongNames covers USK-1035 review S-1
+// (CWE-779): injectResponseVars caps response header VALUES but not NAMES, so
+// an attacker-chosen header name would otherwise be rendered verbatim into a
+// warning that engine.go logs once per step per fuzz iteration. The same bound
+// applies to an operator-authored §<very long name>§ token.
+func TestVarNameRendering_TruncatesOverlongNames(t *testing.T) {
+	longKey := "__response_headers__" + strings.Repeat("a", 300) + "__"
+	longName := strings.Repeat("b", 300)
+	kv := map[string]string{longKey: "v"}
+	step := &Step{ID: "s1", OverrideBody: strPtr(DelimOpen + longName + DelimClose)}
+
+	got := DetectUnresolvedVars(step, kv)
+	if len(got) != 1 {
+		t.Fatalf("len(warnings) = %d, want 1; got %v", len(got), got)
+	}
+	w := got[0]
+
+	if strings.Contains(w, longName) {
+		t.Errorf("warning rendered the operator-authored name in full: %q", w)
+	}
+	if strings.Contains(w, longKey) {
+		t.Errorf("warning rendered the KV Store key name in full: %q", w)
+	}
+	if !strings.Contains(w, strings.Repeat("b", maxRenderedVarNameBytes)) {
+		t.Errorf("warning = %q, want the first %d bytes of the name kept", w, maxRenderedVarNameBytes)
+	}
+	if n := strings.Count(w, varNameElision); n != 2 {
+		t.Errorf("warning = %q, want 2 elision markers, got %d", w, n)
+	}
+	if !utf8.ValidString(w) {
+		t.Errorf("warning is not valid UTF-8: %q", w)
+	}
+}
+
+func TestTruncateVarName(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		wantCut bool
+	}{
+		{name: "short", input: "session_cookie", wantCut: false},
+		{name: "empty", input: "", wantCut: false},
+		{name: "exactly at cap", input: strings.Repeat("a", maxRenderedVarNameBytes), wantCut: false},
+		{name: "one byte over", input: strings.Repeat("a", maxRenderedVarNameBytes+1), wantCut: true},
+		// 30 × U+3042 = 90 bytes; the cut at 64 lands mid-rune and must back
+		// off so the rendered name stays valid UTF-8 in slog / JSON output.
+		{name: "multibyte", input: strings.Repeat("あ", 30), wantCut: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := truncateVarName(tc.input)
+			if !tc.wantCut {
+				if got != tc.input {
+					t.Fatalf("truncateVarName(%d bytes) = %q, want the input unchanged", len(tc.input), got)
+				}
+				return
+			}
+			if !strings.HasSuffix(got, varNameElision) {
+				t.Errorf("truncateVarName(%d bytes) = %q, want the elision marker", len(tc.input), got)
+			}
+			if n := len(got) - len(varNameElision); n > maxRenderedVarNameBytes {
+				t.Errorf("rendered %d name bytes, want <= %d", n, maxRenderedVarNameBytes)
+			}
+			if !utf8.ValidString(got) {
+				t.Errorf("truncateVarName(%q) = %q, not valid UTF-8", tc.input, got)
+			}
+			if !strings.HasPrefix(tc.input, strings.TrimSuffix(got, varNameElision)) {
+				t.Errorf("truncateVarName(%q) = %q, want a prefix of the input", tc.input, got)
+			}
+		})
 	}
 }

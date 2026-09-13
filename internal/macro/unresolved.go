@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"unicode/utf8"
 )
 
 // maxAvailableVarSamples caps how many KV Store key names a single
@@ -16,6 +17,26 @@ import (
 // MCP client via run_macro's kv_store field; the server log is a different
 // trust boundary and must keep carrying names only.
 const maxAvailableVarSamples = 10
+
+// maxRenderedVarNameBytes bounds how many bytes of a SINGLE variable name a
+// warning renders. It matches the identifier length the foreign-syntax
+// patterns already accept (`[A-Za-z_][A-Za-z0-9_]{0,63}`, i.e. 64 bytes), so
+// every legitimate identifier still renders in full.
+//
+// SECURITY (USK-1035 review, CWE-779): not every KV Store key name is
+// operator-authored. internal/mcp/hooks.go's injectResponseVars projects
+// upstream response headers into `__response_headers__<lower(name)>__` keys
+// and caps the header VALUE only — the NAME is unbounded (the HTTP/1.x parser
+// accepts very long header names). Those names reach availableVarsHint, whose
+// output engine.go emits via slog.Warn once per warning, per step, per fuzz
+// iteration. The bound lives in the rendering layer alone: what
+// injectResponseVars writes into the KV Store — and therefore what §name§
+// expansion resolves against — is unchanged.
+const maxRenderedVarNameBytes = 64
+
+// varNameElision marks a variable name that truncateVarName cut short, so a
+// reader can tell an elided name from one that genuinely ends there.
+const varNameElision = "…(truncated)"
 
 // unresolvedVarRemediation is appended to run-time unresolved-variable
 // warnings. It states the diagnosis; availableVarsHint supplies the cure.
@@ -201,7 +222,10 @@ func ValidateMacroTemplates(m *Macro) []string {
 	for i := range m.Steps {
 		step := &m.Steps[i]
 		for _, loc := range stepTemplateLocations(step) {
-			if msg := scanForResiduals(loc.value); msg != "" {
+			// Only the REGEX scan is bounded (CWE-770). The §name§ walk
+			// below stays unbounded on purpose — see
+			// MaxUnresolvedScanBytes.
+			if msg := scanForResiduals(boundRegexScanInput(loc.value)); msg != "" {
 				warnings = append(warnings, fmt.Sprintf("step[%s] %s: %s", step.ID, loc.label, msg))
 			}
 			names := sortedUnresolved(templateVarNames(loc.value), func(name string) bool {
@@ -266,27 +290,74 @@ func stepTemplateLocations(step *Step) []templateLocation {
 }
 
 // formatVarTokens renders unresolved variable names back into their §name§
-// wire form, capped at maxSamplesPerLocation.
+// wire form, capped at maxSamplesPerLocation tokens and, per token, at
+// maxRenderedVarNameBytes. An operator-authored `§<very long name>§` has the
+// same unbounded-rendering property as an attacker-influenced KV key name, so
+// both go through truncateVarName.
 func formatVarTokens(names []string) string {
 	tokens := make([]string, 0, len(names))
 	for _, name := range names {
-		tokens = append(tokens, DelimOpen+name+DelimClose)
+		tokens = append(tokens, DelimOpen+truncateVarName(name)+DelimClose)
 	}
 	return joinSamples(tokens, maxSamplesPerLocation)
 }
 
+// truncateVarName bounds one rendered variable name to
+// maxRenderedVarNameBytes, appending varNameElision when it was cut. The cut
+// backs off to a UTF-8 rune boundary so a truncated name stays valid UTF-8 in
+// slog / JSON output.
+//
+// SECURITY: a rendering bound only — see maxRenderedVarNameBytes. No KV Store
+// entry is altered, and no KV Store VALUE ever reaches this function.
+func truncateVarName(name string) string {
+	if len(name) <= maxRenderedVarNameBytes {
+		return name
+	}
+	cut := maxRenderedVarNameBytes
+	for cut > 0 && !utf8.RuneStart(name[cut]) {
+		cut--
+	}
+	return name[:cut] + varNameElision
+}
+
 // availableVarsHint renders the KV Store key names an operator can actually
 // reference, capped at maxAvailableVarSamples and sorted for determinism.
+//
+// Operator-authored names are listed BEFORE reserved __ keys (USK-1035 review
+// F-2). A single sort over the whole store would starve them: `_` (0x5F) sorts
+// ahead of every lowercase letter, and the fuzz / post_macro path injects up
+// to 256 `__response_headers__<name>__` keys, which would then occupy every
+// sample slot. The hint is shown precisely when an operator mistyped a name,
+// so the names they authored must survive the cap. Reserved keys stay visible
+// in whatever slots the authored names leave free — they are legitimately
+// referenceable (§__response_status§) — and are listed on their own when the
+// store holds nothing else.
+//
+// Each name renders through truncateVarName: header-derived key names are
+// attacker-influenced and unbounded at the injection site.
 //
 // SECURITY: key names only — see maxAvailableVarSamples.
 func availableVarsHint(kvStore map[string]string) string {
 	if len(kvStore) == 0 {
 		return "the KV Store is empty (supply variables via the macro's initial_vars or run_macro params.vars)"
 	}
-	names := make([]string, 0, len(kvStore))
+	authored := make([]string, 0, len(kvStore))
+	reserved := make([]string, 0, len(kvStore))
 	for name := range kvStore {
-		names = append(names, name)
+		if IsReservedKey(name) {
+			reserved = append(reserved, name)
+			continue
+		}
+		authored = append(authored, name)
 	}
-	sort.Strings(names)
-	return "available: " + joinSamples(names, maxAvailableVarSamples)
+	sort.Strings(authored)
+	sort.Strings(reserved)
+
+	samples := make([]string, 0, len(authored)+len(reserved))
+	for _, group := range [][]string{authored, reserved} {
+		for _, name := range group {
+			samples = append(samples, truncateVarName(name))
+		}
+	}
+	return "available: " + joinSamples(samples, maxAvailableVarSamples)
 }

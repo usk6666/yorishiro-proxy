@@ -7,10 +7,17 @@ import (
 	"strings"
 )
 
-// MaxUnresolvedScanBytes bounds the body region scanned by
-// DetectUnresolvedTemplates to keep detector cost bounded for large bodies.
-// URL and header values are scanned in full (size-bounded by HTTP practical
+// MaxUnresolvedScanBytes bounds the region handed to the REGEX-based
+// foreign-syntax scan (scanForResiduals) to keep detector cost bounded for
+// large bodies. In DetectUnresolvedTemplates it caps the body only; URL and
+// header values are scanned in full there (size-bounded by HTTP practical
 // limits and CRLF anti-injection rules elsewhere in the engine).
+//
+// The bound applies to the regex scan ONLY. The regex-free §name§ walker in
+// unresolved.go (templateVarNames / UnresolvedVars) is deliberately NOT
+// bounded: it is a single linear pass with no superlinear surface, and
+// truncating its input would let a §typo§ past the cap reach the wire
+// unwarned — exactly the silent-send hole USK-1035 exists to close.
 const MaxUnresolvedScanBytes = 64 << 10
 
 // maxSamplesPerLocation caps how many distinct matched patterns are surfaced
@@ -107,6 +114,21 @@ func DetectUnresolvedTemplates(req *SendRequest) []string {
 	}
 
 	return warnings
+}
+
+// boundRegexScanInput truncates s to MaxUnresolvedScanBytes so the three
+// compiled foreign-syntax patterns never run over an unbounded string, and so
+// scanForResiduals cannot accumulate an unbounded number of samples before
+// joinSamples renders the first few (CWE-770, USK-1035 review F-1/S-2).
+//
+// Callers that scan a §name§ template must NOT reuse this helper for the
+// §-walker input — see MaxUnresolvedScanBytes for why that scan stays
+// unbounded.
+func boundRegexScanInput(s string) string {
+	if len(s) > MaxUnresolvedScanBytes {
+		return s[:MaxUnresolvedScanBytes]
+	}
+	return s
 }
 
 // scanForResiduals runs the three compiled patterns against s and returns

@@ -167,8 +167,16 @@ uploads, Postgres `pg_format` strings, shell heredocs containing `${VAR}`) WILL
 trigger a warning. This is the documented tradeoff — surfacing a spurious
 warning is preferred over silently shipping an unresolved variable on the wire.
 
-Body content is scanned only within the first 64 KiB to bound CPU cost. URL
-and header values are scanned in full.
+The 64 KiB window bounds **this** scan only — the foreign-syntax check, which
+is regex-based, so its CPU cost has to be capped. In `run_macro` the cap
+applies to the body (URL and header values are scanned in full); in
+`define_macro`'s static check every scanned `override_*` field is capped the
+same way.
+
+The `§name§` check described below is **not** capped: it is a regex-free
+linear walk, and truncating its input would let a `§typo§` past the 64 KiB
+mark reach the wire unwarned — the exact silent-send hole that check exists to
+close.
 
 ### Unknown §variable§ names
 
@@ -197,12 +205,17 @@ rewrites operator-authored bytes), but it is no longer silent:
 
   ```text
   header:Cookie: §sesion_cookie§ — variable not found in KV Store;
-  available: __nonce, csrf_token, session_cookie
+  available: csrf_token, session_cookie, __nonce
   ```
 
   The step's `status` becomes `"warning"` and a `slog.Warn` entry is emitted.
   The hint lists **key names only** — KV Store values may hold session tokens
-  and are never echoed into a warning or a server log.
+  and are never echoed into a warning or a server log. Your own variable names
+  are listed before reserved `__` keys, so the runtime-injected
+  `__response_headers__<name>__` projection (up to 256 keys in the fuzz
+  `post_macro` path) cannot crowd them out of the list. Individual names longer
+  than 64 bytes are rendered truncated (`…(truncated)`); the KV Store entry
+  itself is untouched and still resolves in full.
 
 Scope and limits:
 
@@ -218,3 +231,5 @@ Scope and limits:
   wire.
 - Unlike the foreign-syntax detector, this check has no false positives: a name
   is reported if and only if the expansion engine would have left it in place.
+- Unlike the foreign-syntax detector, this check has **no 64 KiB window**: a
+  `§typo§` a megabyte into `override_body` is still reported.
