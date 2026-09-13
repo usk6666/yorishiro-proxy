@@ -6,7 +6,7 @@ Verify SQL injection on a recorded HTTP flow. Defaults to time-based blind SQLi 
 
 - `target_flow_id`: recorded `flow_id` of the request that reaches the suspected SQL sink. Required.
 - `injection_point`: typed `fuzz_http.positions[].path` for the sink — typically `body`, `raw_query`, or `headers[N].value`. Required.
-- `technique`: one of `time-based`, `error-based`, `union-orderby`, `union-select`. Optional; defaults to `time-based`.
+- `technique`: `{{technique}}` — one of `time-based`, `error-based`, `union-orderby`, `union-select`. Optional; an empty value means `time-based`.
 
 If any required field is empty, ask the user.
 

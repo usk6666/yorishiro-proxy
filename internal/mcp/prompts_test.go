@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -445,5 +446,219 @@ func TestMakePromptHandler_InvalidFilename(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "read embedded prompt") {
 		t.Errorf("error = %q, want it to contain 'read embedded prompt'", err.Error())
+	}
+}
+
+// promptPlaceholderRe matches an identifier-shaped {{name}} double-brace
+// placeholder. The token shape is reused verbatim from
+// internal/macro/detector.go:34 (reHandlebars). An identifier-anchored
+// interior (no leading dot, no spaces) is required so that Go
+// text/template's {{.Field}} form (which prompts.go:17-20 deliberately
+// treats as *not* a placeholder) and spaced/illustrative {{ name }} prose
+// are correctly ignored. It is a package-level compile-time var — never
+// built from prompt content (Principle 5).
+var promptPlaceholderRe = regexp.MustCompile(`\{\{([A-Za-z_][A-Za-z0-9_]{0,63})\}\}`)
+
+// promptLiteralMarkers lists, per prompt, the {{ident}} tokens that appear
+// in a playbook body on purpose but are NOT declared arguments — they are
+// template-injection probe markers meant to reach the wire literally.
+//
+// Keyed per-prompt (not a flat global set) so a marker declared for one
+// playbook cannot silence a genuine collision in another. Every entry MUST
+// still be present in its playbook (asserted below), so a removed marker
+// does not leave a dead exception behind.
+var promptLiteralMarkers = map[string][]string{
+	"verify-xss": {"YP_TEMPLATE"},
+}
+
+// TestPrompts_ArgumentCorpusConsistency asserts bidirectional consistency
+// between each prompt's declared arguments (userPrompts) and the {{ident}}
+// placeholders in its embedded playbook body:
+//
+//	(a) every {{ident}} token in a body is either a declared argument of
+//	    that prompt or an allowlisted literal marker for that prompt; and
+//	(b) every declared argument appears as {{name}} in that prompt's body,
+//	    so the caller-supplied value is not silently dropped.
+//
+// It reads the RAW embedded body (never the expanded form) so that literal
+// markers it exists to find are still present (Principle 3).
+func TestPrompts_ArgumentCorpusConsistency(t *testing.T) {
+	for _, pd := range userPrompts {
+		pd := pd
+		t.Run(pd.name, func(t *testing.T) {
+			body, err := promptsFS.ReadFile(pd.filename)
+			if err != nil {
+				t.Fatalf("read embedded prompt %s: %v", pd.filename, err)
+			}
+			raw := string(body)
+
+			declared := make(map[string]bool, len(pd.arguments))
+			for _, a := range pd.arguments {
+				declared[a.Name] = true
+			}
+			markers := make(map[string]bool)
+			for _, m := range promptLiteralMarkers[pd.name] {
+				markers[m] = true
+			}
+
+			// Direction (a): every {{ident}} token is declared or an
+			// allowlisted literal marker.
+			for _, m := range promptPlaceholderRe.FindAllStringSubmatch(raw, -1) {
+				tok := m[1]
+				if declared[tok] || markers[tok] {
+					continue
+				}
+				t.Errorf("%s: {{%s}} is neither a declared argument of prompt %q "+
+					"nor an allowlisted literal marker; declare it in userPrompts "+
+					"or add it to promptLiteralMarkers[%q]", pd.filename, tok, pd.name, pd.name)
+			}
+
+			// Direction (b): every declared argument is actually interpolated.
+			for _, a := range pd.arguments {
+				if !strings.Contains(raw, "{{"+a.Name+"}}") {
+					t.Errorf("%s: declared argument %q has no {{%s}} placeholder in the "+
+						"body — the caller's value is silently dropped", pd.filename, a.Name, a.Name)
+				}
+			}
+		})
+	}
+}
+
+// TestPrompts_LiteralMarkerAllowlistNotStale ensures every allowlisted
+// literal marker is still present in its playbook, so a removed marker does
+// not leave a dead exception behind.
+func TestPrompts_LiteralMarkerAllowlistNotStale(t *testing.T) {
+	byName := make(map[string]promptDef, len(userPrompts))
+	for _, pd := range userPrompts {
+		byName[pd.name] = pd
+	}
+	for name, markers := range promptLiteralMarkers {
+		pd, ok := byName[name]
+		if !ok {
+			t.Errorf("promptLiteralMarkers references unknown prompt %q", name)
+			continue
+		}
+		body, err := promptsFS.ReadFile(pd.filename)
+		if err != nil {
+			t.Fatalf("read embedded prompt %s: %v", pd.filename, err)
+		}
+		raw := string(body)
+		for _, m := range markers {
+			if !strings.Contains(raw, "{{"+m+"}}") {
+				t.Errorf("%s: allowlisted literal marker {{%s}} is no longer present; "+
+					"remove the stale entry from promptLiteralMarkers[%q]", pd.filename, m, name)
+			}
+		}
+	}
+}
+
+// TestGetPrompt_VerifyXSSMarkersRetainedLiterally pins the intended
+// behaviour that verify-xss's template-injection markers survive
+// prompts/get expansion unchanged: {{YP_TEMPLATE}} is not a declared
+// argument (so ReplaceAll never touches it) and the section-sign marker is
+// a macro KV-store token that this handler never expands.
+func TestGetPrompt_VerifyXSSMarkersRetainedLiterally(t *testing.T) {
+	var pd promptDef
+	for _, p := range userPrompts {
+		if p.name == "verify-xss" {
+			pd = p
+			break
+		}
+	}
+	if pd.name == "" {
+		t.Fatal("verify-xss prompt not found in userPrompts")
+	}
+
+	h := makePromptHandler(pd)
+	res, err := h(context.Background(), &gomcp.GetPromptRequest{
+		Params: &gomcp.GetPromptParams{
+			Name: pd.name,
+			Arguments: map[string]string{
+				"target_flow_id":  "flow-123",
+				"injection_point": "raw_query",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("handler: %v", err)
+	}
+	tc, ok := res.Messages[0].Content.(*gomcp.TextContent)
+	if !ok {
+		t.Fatalf("content type = %T, want *gomcp.TextContent", res.Messages[0].Content)
+	}
+	for _, want := range []string{"{{YP_TEMPLATE}}", "§YP_TEMPLATE§"} {
+		if !strings.Contains(tc.Text, want) {
+			t.Errorf("expanded body missing literal marker %q", want)
+		}
+	}
+	// The declared arguments themselves must have been substituted away.
+	for _, gone := range []string{"{{target_flow_id}}", "{{injection_point}}"} {
+		if strings.Contains(tc.Text, gone) {
+			t.Errorf("declared-argument placeholder %q survived expansion", gone)
+		}
+	}
+}
+
+// TestGetPrompt_NoDeclaredPlaceholderLeftAfterExpansion asserts that, for
+// every prompt, once all declared arguments are given non-empty values, no
+// {{arg}} token for any *declared* argument remains in the expanded body.
+// This is corpus-wide (Decision #4) and complements
+// TestGetPrompt_ArgumentSubstitution / TestGetPrompt_OptionalArgumentDefault,
+// which additionally assert the substituted value appears.
+func TestGetPrompt_NoDeclaredPlaceholderLeftAfterExpansion(t *testing.T) {
+	for _, pd := range userPrompts {
+		pd := pd
+		t.Run(pd.name, func(t *testing.T) {
+			args := make(map[string]string, len(pd.arguments))
+			for _, a := range pd.arguments {
+				// A value with no braces so it cannot reintroduce a token.
+				args[a.Name] = "val-" + a.Name
+			}
+			h := makePromptHandler(pd)
+			res, err := h(context.Background(), &gomcp.GetPromptRequest{
+				Params: &gomcp.GetPromptParams{Name: pd.name, Arguments: args},
+			})
+			if err != nil {
+				t.Fatalf("handler: %v", err)
+			}
+			tc, ok := res.Messages[0].Content.(*gomcp.TextContent)
+			if !ok {
+				t.Fatalf("content type = %T, want *gomcp.TextContent", res.Messages[0].Content)
+			}
+			for _, a := range pd.arguments {
+				if strings.Contains(tc.Text, "{{"+a.Name+"}}") {
+					t.Errorf("%s: {{%s}} still present after expansion with all args set", pd.filename, a.Name)
+				}
+			}
+		})
+	}
+}
+
+// TestPromptPlaceholderRe_TokenShape proves the placeholder regex matches
+// snake_case identifiers while ignoring Go text/template's {{.Field}} form
+// and spaced/illustrative interiors.
+func TestPromptPlaceholderRe_TokenShape(t *testing.T) {
+	tests := []struct {
+		name  string
+		in    string
+		match bool
+	}{
+		{"snake_case", "{{snake_case}}", true},
+		{"single_lower", "{{a}}", true},
+		{"leading_underscore", "{{_x}}", true},
+		{"go_template_field", "{{.Field}}", false},
+		{"spaced_interior", "{{ spaced }}", false},
+		{"leading_space", "{{ name}}", false},
+		{"dotted_interior", "{{foo.bar}}", false},
+		{"empty", "{{}}", false},
+	}
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			got := promptPlaceholderRe.MatchString(tc.in)
+			if got != tc.match {
+				t.Errorf("MatchString(%q) = %v, want %v", tc.in, got, tc.match)
+			}
+		})
 	}
 }
