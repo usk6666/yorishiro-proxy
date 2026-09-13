@@ -1,4 +1,5 @@
-// Package mcp exposes this server's own documentation through the docs tool.
+// Package mcp docs_tool.go exposes this server's own documentation through the
+// docs tool.
 //
 // # Why a tool and not just a resource
 //

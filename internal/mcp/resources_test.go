@@ -636,3 +636,37 @@ func TestHelpResources_ValidUTF8NoControlBytes(t *testing.T) {
 		})
 	}
 }
+
+// TestHelpResources_HeadingDepthWithinOutline is a corpus invariant, not a
+// unit test: it constrains what may be written into resources/*.md.
+//
+// extractDocsSection can address any heading from H2 down, but only H2 appears
+// in the docs() index and only H2–H4 in the unknown-section outline
+// (docsOutlineMaxLevel). A deeper heading would therefore be addressable via
+// section= while appearing on no discovery surface at all — an agent could
+// only reach it by guessing the exact text, which is precisely the failure
+// class the docs tool exists to remove (USK-1036).
+//
+// help_docs.md states the H2–H4 range to agents as a contract; this test is
+// what keeps that statement true. To introduce H5, raise docsOutlineMaxLevel
+// and update that sentence — do not delete this test.
+func TestHelpResources_HeadingDepthWithinOutline(t *testing.T) {
+	for _, rd := range helpResources {
+		if rd.topic == "" {
+			continue
+		}
+		t.Run(rd.topic, func(t *testing.T) {
+			data, err := resourcesFS.ReadFile(rd.filename)
+			if err != nil {
+				t.Fatalf("read %s: %v", rd.filename, err)
+			}
+			for _, h := range scanDocsHeadings(strings.Split(string(data), "\n")) {
+				if h.level > docsOutlineMaxLevel {
+					t.Errorf("%s:%d: H%d heading %q exceeds docsOutlineMaxLevel (%d); "+
+						"it is addressable via section= but listed in neither the docs() index nor the unknown-section outline",
+						rd.filename, h.start+1, h.level, h.text, docsOutlineMaxLevel)
+				}
+			}
+		})
+	}
+}

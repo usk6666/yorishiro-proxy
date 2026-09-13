@@ -7,10 +7,22 @@ import (
 )
 
 // docsOutlineMaxLevel bounds the heading depth listed on the unknown-section
-// error path. The docs tool can address H2–H6, but listing every level of a
-// large document (help_configure.md has 43 H2+H3 headings) would cost more
-// tokens than simply reading the document. H2–H4 keeps the worst case around
-// 150 tokens for a single topic. No help document uses H5 or H6 today.
+// error path and — via TestHelpResources_HeadingDepthWithinOutline — the depth
+// the help corpus itself is allowed to reach.
+//
+// extractDocsSection can address any heading from H2 down, but listing every
+// level of a large document (help_configure.md has 43 H2+H3 headings) would
+// cost more tokens than reading the document. H2–H4 keeps the worst outline
+// under ~600 est tokens (help_examples.md: 57 entries, 2,269 chars; then
+// configure 431, proxy_start 407, query 362).
+//
+// The corpus invariant is the other half of the bound. A heading deeper than
+// this constant would be addressable via section= yet listed in neither the
+// H2 index nor this outline — an undiscoverable section, which is the exact
+// failure class the docs tool exists to remove. No help document uses H5 or
+// H6 today, and help_docs.md states the H2–H4 range to agents as a contract;
+// a document that genuinely needs H5 should raise this constant (and that
+// sentence), not drop the invariant.
 const docsOutlineMaxLevel = 4
 
 // docsHeading is one ATX markdown heading located inside a help document.
@@ -139,16 +151,26 @@ func slugifyDocsHeading(s string) string {
 // docsSectionMatches reports whether selector addresses heading. Matching is
 // case-insensitive and whitespace-trimmed against the literal heading text,
 // and additionally accepts the heading's slug form.
+//
+// Callers that test one selector against many headings normalise the selector
+// once and call docsSelectorMatches directly; see extractDocsSection.
 func docsSectionMatches(selector, heading string) bool {
-	sel := strings.ToLower(strings.TrimSpace(selector))
-	if sel == "" {
+	return docsSelectorMatches(strings.ToLower(strings.TrimSpace(selector)), slugifyDocsHeading(selector), heading)
+}
+
+// docsSelectorMatches is docsSectionMatches over an already-normalised
+// selector: selLower is the lower-cased, whitespace-trimmed literal form and
+// selSlug its slug form. Both derive only from the caller's selector, so they
+// are hoisted out of the scan loop rather than rebuilt once per heading.
+func docsSelectorMatches(selLower, selSlug, heading string) bool {
+	if selLower == "" {
 		return false
 	}
-	if sel == strings.ToLower(strings.TrimSpace(heading)) {
+	if selLower == strings.ToLower(strings.TrimSpace(heading)) {
 		return true
 	}
 	slug := slugifyDocsHeading(heading)
-	return slug != "" && slugifyDocsHeading(selector) == slug
+	return slug != "" && selSlug == slug
 }
 
 // docsH2Sections returns the H2 heading texts of doc, in document order.
@@ -180,17 +202,25 @@ func docsH2Sections(doc string) []string {
 //
 // When several headings share the same text (help_configure.md has "Usage
 // Examples" twice), the first is returned with a trailing note. Erroring
-// instead would block an agent that spelled a real section correctly.
+// instead would block an agent that spelled a real section correctly. The
+// note names the escape hatch, because section= cannot address the later
+// duplicates: docs(topic=...) without section= returns all of them.
 func extractDocsSection(topic, doc, selector string) (string, error) {
 	lines := strings.Split(doc, "\n")
 	headings := scanDocsHeadings(lines)
+
+	// Both selector forms are invariant across the scan, so they are computed
+	// here instead of per heading: otherwise a long selector is re-normalised
+	// once for every heading in the document (57 in help_examples.md).
+	selLower := strings.ToLower(strings.TrimSpace(selector))
+	selSlug := slugifyDocsHeading(selector)
 
 	var matches []int
 	for i, h := range headings {
 		if h.level < 2 {
 			continue
 		}
-		if docsSectionMatches(selector, h.text) {
+		if docsSelectorMatches(selLower, selSlug, h.text) {
 			matches = append(matches, i)
 		}
 	}
@@ -211,7 +241,9 @@ func extractDocsSection(topic, doc, selector string) (string, error) {
 
 	body := strings.TrimRight(strings.Join(lines[h.start:end], "\n"), "\n")
 	if len(matches) > 1 {
-		body += fmt.Sprintf("\n\n(note: %d sections in this topic share this heading; this is the first)", len(matches))
+		body += fmt.Sprintf("\n\n(note: %d sections in this topic share this heading; this is the first. "+
+			"section= has no disambiguator for the others — call docs(topic=%q) without section= "+
+			"for the whole document, which contains all %d.)", len(matches), topic, len(matches))
 	}
 	return body, nil
 }

@@ -16,9 +16,9 @@ Return only one heading-anchored section instead of the whole document. Requires
 
 - Matching is case-insensitive and whitespace-trimmed.
 - Both the literal heading text and its GitHub-style slug work: `section="Variable substitution syntax"` and `section="variable-substitution-syntax"` select the same section.
-- Addressable levels are `##` through `######`. The `#` document title is not addressable — `docs(topic=X)` already returns it.
+- Addressable levels are `##` through `####`. Every help document is held to that depth by a test, so no section exists that the index or the unknown-section outline does not list. The `#` document title is not addressable — `docs(topic=X)` already returns it.
 - A match includes its sub-sections: selecting an `##` heading returns its `###` and `####` children too.
-- When two sections share a heading text, the first is returned with a trailing note saying how many share it.
+- When two sections share a heading text, the first is returned with a trailing note saying how many share it. `section=` cannot reach the later ones; call `docs(topic=X)` without `section=` to get the whole document instead.
 - An unknown section returns an error listing that topic's `##`–`####` outline, spelled exactly as it must be passed back.
 
 ## The index

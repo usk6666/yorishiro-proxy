@@ -50,6 +50,39 @@ func resolveFormat(flagFormat string) string {
 	return "json"
 }
 
+// proseTools lists the tools whose response body is prose rather than a JSON
+// object. Every other tool returns a JSON text block, so the json/table/raw
+// renderers can parse it; running markdown through them instead prints a
+// multi-kilobyte document as one escaped JSON string.
+//
+// docs (USK-1036) is the only such tool today. Its whole purpose is to put
+// documentation in front of a reader, so an unreadable rendering defeats it.
+var proseTools = map[string]bool{
+	"docs": true,
+}
+
+// toolReturnsProse reports whether toolName's payload is prose, not JSON.
+func toolReturnsProse(toolName string) bool {
+	return proseTools[toolName]
+}
+
+// resolveToolFormat is resolveFormat plus the prose-tool default.
+//
+// resolveFormat's final fallback picks between two JSON renderings, which is
+// right for the JSON-returning tools but not for a prose tool: both would
+// escape the document into a single string. So when the caller expressed no
+// preference at all — no --format flag, no YP_CLIENT_FORMAT — a prose tool
+// resolves to "text" instead, which writes the document as-is.
+//
+// An explicitly chosen format always wins, exactly as before: `--format json`
+// still yields JSON for docs, for callers that want the envelope.
+func resolveToolFormat(flagFormat, toolName string) string {
+	if toolReturnsProse(toolName) && flagFormat == "" && os.Getenv("YP_CLIENT_FORMAT") == "" {
+		return "text"
+	}
+	return resolveFormat(flagFormat)
+}
+
 // extractTextContent returns the text from the first TextContent block in the result.
 // Returns an empty string when no TextContent is found.
 func extractTextContent(result *gomcp.CallToolResult) string {
@@ -62,7 +95,7 @@ func extractTextContent(result *gomcp.CallToolResult) string {
 }
 
 // printToolResult writes the formatted tool result to w.
-// format must be one of "json", "table", or "raw".
+// format must be one of "json", "table", "raw", or "text".
 // When quiet is true, output is suppressed on success (IsError=false).
 // When raw is true, compact JSON is used regardless of format.
 func printToolResult(w io.Writer, toolName string, result *gomcp.CallToolResult, format string, quiet, raw bool) error {
@@ -83,9 +116,24 @@ func printToolResult(w io.Writer, toolName string, result *gomcp.CallToolResult,
 		return printResultTable(w, toolName, result)
 	case "raw":
 		return printResultRaw(w, result)
+	case "text":
+		return printResultText(w, result)
 	default:
-		return fmt.Errorf("unsupported format %q: must be json, table, or raw", format)
+		return fmt.Errorf("unsupported format %q: must be json, table, raw, or text", format)
 	}
+}
+
+// printResultText writes the result's text block verbatim, with no JSON
+// envelope and no escaping. It is the default rendering for prose tools (see
+// resolveToolFormat) and can be requested for any tool with --format text.
+func printResultText(w io.Writer, result *gomcp.CallToolResult) error {
+	text := extractTextContent(result)
+	if text == "" {
+		// Nothing to print verbatim; show the envelope rather than nothing.
+		return printResultJSON(w, result)
+	}
+	fmt.Fprintln(w, text)
+	return nil
 }
 
 // printResultJSON writes result as indented JSON.
@@ -126,6 +174,15 @@ func printResultTable(w io.Writer, toolName string, result *gomcp.CallToolResult
 	if text == "" {
 		// No text content; fall back to indented JSON.
 		return printResultJSON(w, result)
+	}
+
+	// A prose tool's payload is markdown by design, so printing it IS the
+	// human-readable rendering. Going through the parse below would emit a
+	// "could not parse tool response as JSON" warning that describes nothing
+	// wrong.
+	if toolReturnsProse(toolName) {
+		fmt.Fprintln(w, text)
+		return nil
 	}
 
 	// Parse the JSON text block to determine what to render.

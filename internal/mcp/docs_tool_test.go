@@ -398,6 +398,11 @@ func TestDocsIndex_ReturnsIndependentCopies(t *testing.T) {
 	}
 	original := first[0].Sections[0]
 	first[0].Sections[0] = "MUTATED"
+	// If the defensive copy ever regresses, first[0].Sections aliases the
+	// process-global sync.OnceValue registry, so this write would leak into
+	// every sibling test that reads DocsIndex(). Restore it either way to keep
+	// the failure local to this test instead of cascading.
+	defer func() { first[0].Sections[0] = original }()
 
 	second := DocsIndex()
 	if second[0].Sections[0] != original {
