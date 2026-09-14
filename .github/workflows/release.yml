@@ -207,6 +207,12 @@ jobs:
       # Publish children first, then the parent last, so the parent's
       # optionalDependencies all resolve at publish time. Prereleases go to the
       # `next` dist-tag, matching the GitHub Release --prerelease detection.
+      #
+      # Every path argument keeps its leading `./`. npm-package-arg only treats
+      # an argument as a local directory when it starts with `./`, `/`, `~/`, or
+      # a drive letter; a bare `npm-dist/yorishiro-proxy-linux-x64` is `owner/repo`
+      # shaped, so npm resolves it as a GitHub shorthand and fails with
+      # `git ls-remote ssh://git@github.com/npm-dist/...` / exit 128 (USK-1050).
       - name: Publish to npm
         env:
           VERSION: ${{ github.ref_name }}
@@ -218,9 +224,9 @@ jobs:
           echo "Publishing with dist-tag: ${NPM_TAG}"
           for plat in linux-x64 linux-arm64 darwin-x64 darwin-arm64 win32-x64; do
             echo "Publishing @usk6666/yorishiro-proxy-${plat}..."
-            npm publish "npm-dist/yorishiro-proxy-${plat}" \
+            npm publish "./npm-dist/yorishiro-proxy-${plat}" \
               --access public --provenance --tag "${NPM_TAG}"
           done
           echo "Publishing @usk6666/yorishiro-proxy (parent)..."
-          npm publish "npm-dist/yorishiro-proxy" \
+          npm publish "./npm-dist/yorishiro-proxy" \
             --access public --provenance --tag "${NPM_TAG}"
