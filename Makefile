@@ -89,12 +89,15 @@ lint: ensure-ui
 			echo "  -> the file is missing."; \
 		elif [ -z "$$raw" ]; then \
 			echo "  -> the file is empty."; \
+		elif [ "$$lines" -ne 1 ]; then \
+			echo "  -> it holds $$lines lines; expected exactly one."; \
 		elif printf '%s' "$$raw" | tr -d '\r' | grep -Eq '^v[0-9]+\.[0-9]+(\.[0-9]+)?$$'; then \
 			echo "  -> it has CRLF line endings; re-check it out with LF (.gitattributes pins this)."; \
 		else \
 			echo "  -> got: $$raw"; \
 		fi; \
-		echo "CI enforces the same shape via golangci-lint-action's version-file input."; \
+		echo "golangci-lint-action's version-file input enforces the same vX.Y[.Z] shape in CI,"; \
+		echo "though it trims surrounding whitespace first, so this check is the stricter of the two."; \
 		exit 1; \
 	 fi
 	@pinned='$(GOLANGCI_LINT_VERSION)'; bad=0; \
