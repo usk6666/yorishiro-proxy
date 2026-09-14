@@ -29,19 +29,23 @@ Parameters (key=value, or bare positional words):
                           case-insensitively; sub-sections come with the match.
 
 Topics:
-  One per MCP tool -- proxy_start, proxy_stop, query, manage, macro, intercept,
-  configure, security, resend_http, resend_ws, resend_grpc, resend_raw,
-  fuzz_http, fuzz_ws, fuzz_grpc, fuzz_raw, plugin_introspect, grpc_schema --
-  plus the concept topics getting-started, examples, template-syntax and docs.
-
-  An unknown topic prints the list of valid topics; an unknown section prints
-  that topic's heading outline.
+  Every MCP tool name is a topic, plus the concept topics getting-started,
+  examples, template-syntax and docs. Run 'yorishiro-proxy docs' for the
+  current list -- an unknown topic also prints it, and an unknown section
+  prints that topic's heading outline.
 
 Examples:
   yorishiro-proxy client docs
   yorishiro-proxy client docs macro
   yorishiro-proxy client docs macro "Variable substitution syntax"
-  yorishiro-proxy client docs topic=fuzz_http section="Macro hook scopes"`,
+  yorishiro-proxy client docs topic=fuzz_http section="Macro hook scopes"
+
+No server running? The same documents are embedded in this binary and the
+subcommand takes bare words instead of key=value:
+  yorishiro-proxy docs                     # list every topic
+  yorishiro-proxy docs macro               # print a whole document
+
+Full reference (no server required): yorishiro-proxy docs docs`,
 
 	"query": `query: Unified information query tool.
 
@@ -77,7 +81,9 @@ Examples:
   yorishiro-proxy client query resource=flows limit=10
   yorishiro-proxy client query resource=flow id=abc123
   yorishiro-proxy client query resource=flows filter.protocol=HTTPS filter.method=POST
-  yorishiro-proxy client query resource=status`,
+  yorishiro-proxy client query resource=status
+
+Full reference (no server required): yorishiro-proxy docs query`,
 
 	"proxy_start": `proxy_start: Start a proxy listener.
 
@@ -92,7 +98,9 @@ Parameters (key=value):
 
 Examples:
   yorishiro-proxy client proxy_start listen_addr=127.0.0.1:8080
-  yorishiro-proxy client proxy_start name=secondary listen_addr=127.0.0.1:9090`,
+  yorishiro-proxy client proxy_start name=secondary listen_addr=127.0.0.1:9090
+
+Full reference (no server required): yorishiro-proxy docs proxy_start`,
 
 	"proxy_stop": `proxy_stop: Stop proxy listener(s).
 
@@ -101,7 +109,9 @@ Parameters (key=value):
 
 Examples:
   yorishiro-proxy client proxy_stop
-  yorishiro-proxy client proxy_stop name=secondary`,
+  yorishiro-proxy client proxy_stop name=secondary
+
+Full reference (no server required): yorishiro-proxy docs proxy_stop`,
 
 	"configure": `configure: Configure runtime proxy settings.
 
@@ -121,7 +131,9 @@ TLS passthrough (dot-notation):
 Examples:
   yorishiro-proxy client configure upstream_proxy=http://proxy:8888
   yorishiro-proxy client configure tls_passthrough.add=example.com,*.internal
-  yorishiro-proxy client configure tls_fingerprint=chrome`,
+  yorishiro-proxy client configure tls_fingerprint=chrome
+
+Full reference (no server required): yorishiro-proxy docs configure`,
 
 	"intercept": `intercept: Act on intercepted requests in the intercept queue.
 
@@ -141,7 +153,9 @@ Parameters (key=value):
 Examples:
   yorishiro-proxy client intercept action=release params.intercept_id=abc123
   yorishiro-proxy client intercept action=drop params.intercept_id=abc123
-  yorishiro-proxy client intercept action=modify_and_forward params.intercept_id=abc123 params.override_body='{"new":"data"}'`,
+  yorishiro-proxy client intercept action=modify_and_forward params.intercept_id=abc123 params.override_body='{"new":"data"}'
+
+Full reference (no server required): yorishiro-proxy docs intercept`,
 
 	"resend_http": `resend_http: Resend or construct an HTTP request through the proxy stack.
 
@@ -167,7 +181,9 @@ Note: headers ([{name, value}] ordered list) and body_patches require JSON input
 Examples:
   yorishiro-proxy client resend_http flow_id=abc123
   yorishiro-proxy client resend_http flow_id=abc123 method=POST body='{"x":1}' body_encoding=text
-  yorishiro-proxy client resend_http method=GET scheme=https authority=example.com path=/api`,
+  yorishiro-proxy client resend_http method=GET scheme=https authority=example.com path=/api
+
+Full reference (no server required): yorishiro-proxy docs resend_http`,
 
 	"resend_ws": `resend_ws: Resend a single WebSocket frame on a freshly dialled upstream connection.
 
@@ -193,7 +209,9 @@ Parameters (key=value or --key=value):
 
 Examples:
   yorishiro-proxy client resend_ws flow_id=abc123 opcode=text payload=hello
-  yorishiro-proxy client resend_ws target_addr=127.0.0.1:8080 scheme=ws path=/socket opcode=ping`,
+  yorishiro-proxy client resend_ws target_addr=127.0.0.1:8080 scheme=ws path=/socket opcode=ping
+
+Full reference (no server required): yorishiro-proxy docs resend_ws`,
 
 	"resend_grpc": `resend_grpc: Resend a gRPC unary RPC on a freshly dialled HTTP/2 upstream.
 
@@ -215,7 +233,9 @@ Note: messages ([{payload, body_encoding, compressed}]) and metadata / trailer_m
 
 Examples:
   yorishiro-proxy client resend_grpc flow_id=abc123
-  yorishiro-proxy client resend_grpc target_addr=127.0.0.1:50051 service=pkg.Greeter method=SayHello`,
+  yorishiro-proxy client resend_grpc target_addr=127.0.0.1:50051 service=pkg.Greeter method=SayHello
+
+Full reference (no server required): yorishiro-proxy docs resend_grpc`,
 
 	"resend_raw": `resend_raw: Resend a recorded raw byte payload on a freshly dialled TCP/TLS upstream.
 
@@ -238,7 +258,9 @@ Note: patches ([{offset, data, data_encoding}]) requires JSON input — use the 
 
 Examples:
   yorishiro-proxy client resend_raw flow_id=abc123 target_addr=127.0.0.1:8080
-  yorishiro-proxy client resend_raw flow_id=abc123 target_addr=example.com:443 use_tls=true`,
+  yorishiro-proxy client resend_raw flow_id=abc123 target_addr=example.com:443 use_tls=true
+
+Full reference (no server required): yorishiro-proxy docs resend_raw`,
 
 	"manage": `manage: Manage flow data and CA certificates.
 
@@ -267,7 +289,9 @@ Examples:
   yorishiro-proxy client manage action=delete_flows params.flow_id=abc123
   yorishiro-proxy client manage action=delete_flows params.older_than_days=7 params.confirm=true
   yorishiro-proxy client manage action=export_flows params.format=har params.output_path=/tmp/export.har
-  yorishiro-proxy client manage action=regenerate_ca_cert`,
+  yorishiro-proxy client manage action=regenerate_ca_cert
+
+Full reference (no server required): yorishiro-proxy docs manage`,
 
 	"security": `security: Configure runtime security settings.
 
@@ -291,7 +315,9 @@ Parameters (key=value):
 Examples:
   yorishiro-proxy client security action=get_target_scope
   yorishiro-proxy client security action=test_target params.url=https://example.com
-  yorishiro-proxy client security action=set_rate_limits params.max_requests_per_second=100`,
+  yorishiro-proxy client security action=set_rate_limits params.max_requests_per_second=100
+
+Full reference (no server required): yorishiro-proxy docs security`,
 
 	"macro": `macro: Define and execute macro workflows.
 
@@ -304,12 +330,15 @@ Parameters (key=value):
   params.description=<desc>         Macro description (for define_macro)
   params.macro_timeout_ms=<n>       Overall macro timeout in ms (default: 300000)
 
-Note: define_macro requires complex 'steps' array — use JSON input or MCP client for full definitions.
+Note: define_macro takes a 'steps' array — run 'yorishiro-proxy docs macro' for the full
+      schema, the §var§ substitution syntax, and worked examples (no server required).
       Use 'query resource=macros' to list macros, 'query resource=macro id=<name>' to inspect.
 
 Examples:
   yorishiro-proxy client macro action=run_macro params.name=my_macro
-  yorishiro-proxy client macro action=delete_macro params.name=my_macro`,
+  yorishiro-proxy client macro action=delete_macro params.name=my_macro
+
+Full reference (no server required): yorishiro-proxy docs macro`,
 
 	"fuzz_http": `fuzz_http: Synchronously fuzz an HTTP request (cartesian product, capped at 1000 variants).
 
@@ -335,7 +364,9 @@ Note: positions[] is REQUIRED — each is {path, payloads[], encoding}. Supporte
 
 Examples:
   yorishiro-proxy client fuzz_http flow_id=abc123  (positions supplied via JSON)
-  yorishiro-proxy client fuzz_http flow_id=abc123 stop_on_5xx=true tag=path-fuzz`,
+  yorishiro-proxy client fuzz_http flow_id=abc123 stop_on_5xx=true tag=path-fuzz
+
+Full reference (no server required): yorishiro-proxy docs fuzz_http`,
 
 	"fuzz_ws": `fuzz_ws: Synchronously fuzz a WebSocket frame (cartesian product, capped at 1000 variants).
 
@@ -364,7 +395,9 @@ Note: positions[] is REQUIRED — each is {path, payloads[], encoding}. Supporte
       payload | close_reason. Use JSON input or MCP client for the positions array.
 
 Examples:
-  yorishiro-proxy client fuzz_ws flow_id=abc123 opcode=text  (positions supplied via JSON)`,
+  yorishiro-proxy client fuzz_ws flow_id=abc123 opcode=text  (positions supplied via JSON)
+
+Full reference (no server required): yorishiro-proxy docs fuzz_ws`,
 
 	"fuzz_grpc": `fuzz_grpc: Synchronously fuzz a gRPC unary RPC (cartesian product, capped at 1000 variants).
 
@@ -387,7 +420,9 @@ Note: positions[] is REQUIRED — each is {path, payloads[], encoding}. Supporte
       use the MCP client for full definitions. messages requires at least one element.
 
 Examples:
-  yorishiro-proxy client fuzz_grpc flow_id=abc123  (positions supplied via JSON)`,
+  yorishiro-proxy client fuzz_grpc flow_id=abc123  (positions supplied via JSON)
+
+Full reference (no server required): yorishiro-proxy docs fuzz_grpc`,
 
 	"fuzz_raw": `fuzz_raw: Synchronously fuzz a raw byte payload (HTTP smuggling surface, capped at 1000 variants).
 
@@ -411,7 +446,9 @@ Note: positions[] is REQUIRED — each is {path, payloads[], encoding}. Supporte
       Wire bytes are NEVER normalized — they reach the wire verbatim.
 
 Examples:
-  yorishiro-proxy client fuzz_raw flow_id=abc123 target_addr=127.0.0.1:8080  (positions via JSON)`,
+  yorishiro-proxy client fuzz_raw flow_id=abc123 target_addr=127.0.0.1:8080  (positions via JSON)
+
+Full reference (no server required): yorishiro-proxy docs fuzz_raw`,
 
 	"plugin_introspect": `plugin_introspect: List loaded Starlark plugins with their hook registrations.
 
@@ -422,7 +459,9 @@ Returns one entry per loaded pluginv2 plugin: name, path, enabled flag, the list
 the redacted PluginConfig.Vars map (RedactKeys substitute "<redacted>"; large values truncated).
 
 Examples:
-  yorishiro-proxy client plugin_introspect`,
+  yorishiro-proxy client plugin_introspect
+
+Full reference (no server required): yorishiro-proxy docs plugin_introspect`,
 
 	"grpc_schema": `grpc_schema: Manage .proto schemas for schema-aware gRPC decode/encode.
 
@@ -459,7 +498,7 @@ Examples:
   yorishiro-proxy client grpc_schema action=unregister params.service=pkg.Greeter
   yorishiro-proxy client grpc_schema action=clear
 
-Full reference: call docs(topic="grpc_schema").`,
+Full reference (no server required): yorishiro-proxy docs grpc_schema`,
 }
 
 // clientToolList is the ordered list of available MCP tools for help display.
@@ -579,6 +618,10 @@ func printClientUsage(w io.Writer) {
 	fmt.Fprintf(w, "Tool parameters are passed as key=value pairs:\n")
 	fmt.Fprintf(w, "  yorishiro-proxy client query resource=flows limit=10\n\n")
 	fmt.Fprintf(w, "Run 'yorishiro-proxy client <tool> --help' for tool-specific parameters.\n")
+	fmt.Fprintf(w, "\nFull documentation, without a running server:\n")
+	fmt.Fprintf(w, "  yorishiro-proxy docs                     List every documentation topic\n")
+	fmt.Fprintf(w, "  yorishiro-proxy docs <topic>             Print a whole document\n")
+	fmt.Fprintf(w, "  yorishiro-proxy docs <topic> \"<heading>\"  Print one section of it\n")
 }
 
 // printToolHelp prints the hardcoded help for a specific tool.

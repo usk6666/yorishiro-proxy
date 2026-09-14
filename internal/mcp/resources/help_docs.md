@@ -53,6 +53,21 @@ Return only one heading-anchored section instead of the whole document. Requires
 {"topic": "macro", "section": "variable-substitution-syntax"}
 ```
 
+## From the CLI
+
+The same documents are reachable without a running server, because they are embedded in the binary (USK-1037):
+
+```
+yorishiro-proxy docs                                        # the topic index
+yorishiro-proxy docs macro                                  # a whole document
+yorishiro-proxy docs macro "Variable substitution syntax"   # one section
+yorishiro-proxy docs macro --section variable-substitution-syntax
+```
+
+The topic and section are bare positional words; `--section` is accepted as an alternative to the second positional, and giving both is an error. This subcommand opens no socket, so it works before `proxy_start`, before MCP registration, and when nothing is listening at all.
+
+Against a *running* server the MCP tool is also reachable through the generic client path, which uses `key=value` instead: `yorishiro-proxy client docs topic=macro section="Variable substitution syntax"`. The two print the same document; only the argument grammar differs.
+
 ## Notes
 
 - Documents are returned verbatim from the binary's embedded copy; there is no filesystem or network read, and no output size cap.
