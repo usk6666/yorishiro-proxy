@@ -139,6 +139,8 @@ All proxy operations are exposed through typed MCP tools:
 | `manage` | Manage flow data (delete/export/import) and CA certificate regeneration |
 | `security` | Configure target scope rules, rate limits, diagnostic budgets, and SafetyFilter inspection (Policy Layer + Agent Layer) |
 | `plugin_introspect` | Read-only listing of loaded Starlark plugins and their `(protocol, event, phase)` hook registrations |
+| `grpc_schema` | Register, list, unregister, and clear protobuf descriptor sets used to decode and encode gRPC payloads |
+| `docs` | Self-service reference for every tool: topic index, full documents, or a single heading-anchored section |
 
 ## Web UI
 
@@ -177,6 +179,7 @@ yorishiro-proxy provides the following subcommands:
 |------------|-------------|
 | `server` | Start the proxy server (default when no subcommand given) |
 | `client` | Call MCP tools on a running server via CLI |
+| `docs` | Print the built-in tool documentation (works offline, no server required) |
 | `install` | Install and configure components (MCP, CA, Playwright) |
 | `upgrade` | Check for and install updates from GitHub Releases |
 | `version` | Print version information |
@@ -187,6 +190,14 @@ The `client` subcommand connects to a running server and calls MCP tools with `k
 yorishiro-proxy client query resource=status
 yorishiro-proxy client proxy_start listen_addr=127.0.0.1:8080
 yorishiro-proxy client query resource=flows limit=10
+```
+
+The `docs` subcommand prints the same reference documentation the MCP `docs` tool serves, straight from the binary -- no server, no network:
+
+```bash
+yorishiro-proxy docs                  # topic index
+yorishiro-proxy docs macro            # full reference for the macro tool
+yorishiro-proxy docs macro --section "Variable substitution syntax"
 ```
 
 For the full list of server flags, client options, and environment variables, run `yorishiro-proxy server -help` or `yorishiro-proxy client -help`, or see the [documentation](https://usk6666.github.io/yorishiro-proxy-docs/).
