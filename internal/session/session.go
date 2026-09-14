@@ -2496,6 +2496,43 @@ func upgradePending(notice *UpgradeNotice) bool {
 	return notice != nil && notice.Pending() != ""
 }
 
+// upgradeExitOrErr maps a session-goroutine-terminating error to
+// ErrUpgradePending when notice has already latched a pending UpgradeKind,
+// and returns err unchanged otherwise.
+//
+// USK-1042: an upgrade is normal control flow, but it is signalled through
+// errgroup's error channel — RunSession's errgroup.WithContext cancels the
+// shared ctx the moment the peer goroutine returns the (non-nil)
+// ErrUpgradePending. Any wire operation in flight at that instant fails with
+// "context canceled", which is a handoff artifact and not a genuine failure.
+// Classifying it as genuine makes the caller's cascade-close defer Close() an
+// upstream Channel that has neither end-stream set — on HTTP/2 that emits
+// RST_STREAM(CANCEL) and kills a still-live response body (the SSE
+// truncation this guards against).
+//
+// USK-1042: the guard is deliberately broad — once the notice is latched it
+// replaces EVERY dispatch error, not only context.Canceled. The narrow
+// errors.Is(err, context.Canceled) form is less robust: only the h2 path
+// returns a bare ctx.Err(); other Channels may wrap it, so the narrow form
+// would miss the very cancellation this targets. Accepted cost: a genuine
+// *layer.StreamError co-occurring with a pending upgrade loses its
+// ClassifyError projection into flow.StreamUpdate.FailureReason for this
+// result. That is not a silent-success path — the fault re-surfaces in the
+// post-swap relay (driveSSEEventLoop / the wsRelay* loop), which still
+// records State="error".
+//
+// Ordering is safe: the notice is latched by the peer BEFORE it returns
+// ErrUpgradePending, and the errgroup cancel happens after that return, so
+// the latch is always visible by the time the cancellation is observed.
+// UpgradeNotice's accessors are mutex-guarded, so the cross-goroutine read
+// is properly synchronised.
+func upgradeExitOrErr(notice *UpgradeNotice, err error) error {
+	if upgradePending(notice) {
+		return ErrUpgradePending
+	}
+	return err
+}
+
 // clientToUpstream reads Envelopes from the client, runs them through the
 // Pipeline, and forwards them to the upstream Channel. It creates the upstream
 // Channel lazily on the first forwarded Envelope and signals uh.ready.
@@ -2577,7 +2614,12 @@ func clientToUpstream(
 		}
 		forwarded, perr := dispatchClientAction(ctx, client, uh, dial, env, resp, action)
 		if perr != nil {
-			return perr
+			// USK-1042: upgrade-pending takes precedence over dispatch
+			// errors, symmetric with the client.Next branch above. A
+			// Send that was in flight when the upgrade handoff cancelled
+			// the errgroup ctx must not be mistaken for a genuine
+			// failure — see upgradeExitOrErr.
+			return upgradeExitOrErr(notice, perr)
 		}
 		if forwarded {
 			relayed = true

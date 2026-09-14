@@ -32,6 +32,13 @@ type mockChannel struct {
 	sendErr       error         // if set, Send returns this error
 	nextGate      chan struct{} // if non-nil, Next waits for a value before each return
 
+	// sendHook, when non-nil, replaces the default Send behavior entirely.
+	// It lets a test construct a precise interleaving around the moment a
+	// Send is in flight (e.g. the session ctx being canceled mid-Send)
+	// without resorting to sleeps. Envelopes handled by the hook are not
+	// appended to sent.
+	sendHook func(ctx context.Context, env *envelope.Envelope) error
+
 	// Terminal-state tracking exposed via Closed/Err. A test can call
 	// fireTerminated(err) to model a post-EOF terminal event (e.g., a
 	// RST_STREAM that arrives after the peer already half-closed). The
@@ -84,7 +91,10 @@ func (m *mockChannel) Next(ctx context.Context) (*envelope.Envelope, error) {
 	return env, nil
 }
 
-func (m *mockChannel) Send(_ context.Context, env *envelope.Envelope) error {
+func (m *mockChannel) Send(ctx context.Context, env *envelope.Envelope) error {
+	if m.sendHook != nil {
+		return m.sendHook(ctx, env)
+	}
 	if m.sendErr != nil {
 		return m.sendErr
 	}
@@ -1330,6 +1340,123 @@ func TestRunSession_NoCascadeOnNormalEOF(t *testing.T) {
 	}
 	if gotErr != nil {
 		t.Errorf("OnComplete err = %v, want nil (normal EOF)", gotErr)
+	}
+}
+
+// TestClientToUpstream_DispatchErrorVsUpgradePending verifies the cascade-close
+// policy at clientToUpstream's dispatchClientAction error exit (USK-1042).
+//
+// An upgrade is normal control flow, but it is signalled through errgroup's
+// error channel: RunSession's errgroup.WithContext cancels the shared ctx on
+// the FIRST non-nil error, and the peer goroutine's ErrUpgradePending is
+// non-nil. When that cancel lands while dispatchClientAction sits inside
+// upstream.Send, Send fails with "context canceled" — which is not a genuine
+// failure. Classifying it as one lets the cascade-close defer Close() an
+// upstream Channel that has neither end-stream set, which on HTTP/2 emits
+// RST_STREAM(CANCEL) and truncates the still-live SSE response body (the
+// abort is then masked as a clean EOF, so every layer reports success).
+//
+// The guard must be bidirectional: upgrade-pending suppresses the cascade,
+// but a dispatch error with no upgrade pending must still cascade — that is
+// the USK-616 behavior which unblocks the peer goroutine's parked Next.
+//
+// The interleaving is constructed directly inside the upstream Send hook (no
+// sleeps, no -count=N stress) and the REAL clientToUpstream runs, so the real
+// cascade defer makes the decision. USK-902 previously regressed on this same
+// flake precisely because its tests simulated the producer via markTerminated
+// and so never exercised this path.
+func TestClientToUpstream_DispatchErrorVsUpgradePending(t *testing.T) {
+	sendStreamErr := &layer.StreamError{Code: layer.ErrorInternalError, Reason: "upstream broke"}
+
+	tests := []struct {
+		name string
+		// latchUpgrade models the peer goroutine latching the notice
+		// immediately before it returns ErrUpgradePending — which is
+		// what makes errgroup cancel the shared ctx in production.
+		latchUpgrade bool
+		// cancelCtx makes the in-flight Send observe the errgroup cancel
+		// and fail with ctx.Err(), as a real Channel.Send would.
+		cancelCtx  bool
+		sendErr    error // returned by the Send hook when cancelCtx is false
+		wantErr    error // errors.Is target for clientToUpstream's return
+		wantClosed bool  // did the cascade-close defer fire?
+	}{
+		{
+			name:         "upgrade_pending_ctx_cancel_keeps_upstream_open",
+			latchUpgrade: true,
+			cancelCtx:    true,
+			wantErr:      ErrUpgradePending,
+			wantClosed:   false,
+		},
+		{
+			name:       "ctx_cancel_without_upgrade_cascade_closes",
+			cancelCtx:  true,
+			wantErr:    context.Canceled,
+			wantClosed: true,
+		},
+		{
+			name:       "genuine_send_error_without_upgrade_cascade_closes",
+			sendErr:    sendStreamErr,
+			wantErr:    sendStreamErr,
+			wantClosed: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			notice := &UpgradeNotice{}
+			ctx, cancel := context.WithCancel(WithUpgradeNotice(context.Background(), notice))
+			defer cancel()
+
+			var sendCalls int
+			upstreamCh := &mockChannel{streamID: "upstream"}
+			upstreamCh.sendHook = func(sctx context.Context, _ *envelope.Envelope) error {
+				sendCalls++
+				if tt.latchUpgrade {
+					notice.trySetPending(UpgradeSSE)
+				}
+				if tt.cancelCtx {
+					cancel()
+					return sctx.Err()
+				}
+				return tt.sendErr
+			}
+
+			clientCh := &mockChannel{
+				streamID:      "client",
+				nextEnvelopes: []*envelope.Envelope{makeEnvelopeWithStreamID(envelope.Send, 0, "upgrade-stream")},
+			}
+			dial := func(_ context.Context, _ *envelope.Envelope) (layer.Channel, error) {
+				return upstreamCh, nil
+			}
+			uh := &upstreamHolder{
+				ready: make(chan struct{}),
+				done:  make(chan struct{}),
+			}
+
+			err := clientToUpstream(
+				ctx, clientCh, dial, pipeline.New(passStep{}),
+				uh, &streamCapture{}, &bodyBufRegistry{}, SessionOptions{},
+			)
+
+			if sendCalls != 1 {
+				t.Fatalf("upstream Send hook calls = %d, want 1 (the dispatch error path was never reached)", sendCalls)
+			}
+			if uh.ch != upstreamCh {
+				t.Fatalf("uh.ch = %v, want the dialed upstream mock", uh.ch)
+			}
+			if !errors.Is(err, tt.wantErr) {
+				t.Errorf("clientToUpstream err = %v, want wrapping %v", err, tt.wantErr)
+			}
+			if got := upstreamCh.isClosed(); got != tt.wantClosed {
+				t.Errorf("upstream closed = %v, want %v (Close calls = %d)",
+					got, tt.wantClosed, upstreamCh.getCloseCalls())
+			}
+			if !tt.wantClosed && upstreamCh.getCloseCalls() != 0 {
+				t.Errorf("upstream Close calls = %d, want 0 — the cascade close would emit "+
+					"RST_STREAM(CANCEL) on the live upstream stream", upstreamCh.getCloseCalls())
+			}
+		})
 	}
 }
 
