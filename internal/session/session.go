@@ -2510,6 +2510,17 @@ func upgradePending(notice *UpgradeNotice) bool {
 // RST_STREAM(CANCEL) and kills a still-live response body (the SSE
 // truncation this guards against).
 //
+// USK-1042: the guard is deliberately broad — once the notice is latched it
+// replaces EVERY dispatch error, not only context.Canceled. The narrow
+// errors.Is(err, context.Canceled) form is less robust: only the h2 path
+// returns a bare ctx.Err(); other Channels may wrap it, so the narrow form
+// would miss the very cancellation this targets. Accepted cost: a genuine
+// *layer.StreamError co-occurring with a pending upgrade loses its
+// ClassifyError projection into flow.StreamUpdate.FailureReason for this
+// result. That is not a silent-success path — the fault re-surfaces in the
+// post-swap relay (driveSSEEventLoop / the wsRelay* loop), which still
+// records State="error".
+//
 // Ordering is safe: the notice is latched by the peer BEFORE it returns
 // ErrUpgradePending, and the errgroup cancel happens after that return, so
 // the latch is always visible by the time the cancellation is observed.
