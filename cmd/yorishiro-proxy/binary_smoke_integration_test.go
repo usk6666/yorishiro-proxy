@@ -516,3 +516,131 @@ func serveBinarySmokeConn(conn net.Conn, stopCh <-chan struct{}) {
 		return
 	}
 }
+
+// TestBinarySmoke_DocsSubcommandWorksOffline is the USK-1037 acceptance test
+// at the exec'd-binary layer: with no server running, no server.json
+// discoverable and a bogus client endpoint configured, `yorishiro-proxy docs
+// macro` must still reach the §var§ template syntax.
+//
+// "Works offline" is exactly the property that regresses silently. Every
+// other docs assertion lives in the fast tier and would keep passing if a
+// refactor routed the subcommand through the MCP client path. The env below
+// is the oracle that would not:
+//
+//   - HOME points at an empty temp dir, so defaultServerJSONPath finds no
+//     server.json. Without this a developer's real ~/.yorishiro-proxy/
+//     server.json could make the test silently online.
+//   - YP_CLIENT_ADDR names a port that was bound and immediately closed, and
+//     YP_CLIENT_TOKEN is bogus. Both are read only on the client path, so
+//     today they are inert — that is the point. If docs ever starts dialling,
+//     this test goes red instead of quietly depending on a live server.
+func TestBinarySmoke_DocsSubcommandWorksOffline(t *testing.T) {
+	binary := buildBinary(t)
+	deadPort := pickFreeBinaryPort(t)
+
+	// A temp HOME with no server.json, plus an endpoint that cannot answer.
+	env := append(os.Environ(),
+		"HOME="+t.TempDir(),
+		"YP_CLIENT_ADDR=127.0.0.1:"+strconv.Itoa(deadPort),
+		"YP_CLIENT_TOKEN=bogus-token-no-server-is-running",
+	)
+
+	t.Run("document reaches the template syntax", func(t *testing.T) {
+		stdout := runDocsBinary(t, binary, env, "docs", "macro")
+		if !strings.Contains(stdout, "§name§") {
+			t.Errorf("`docs macro` did not reach the §name§ template syntax; got %d bytes", len(stdout))
+		}
+	})
+
+	t.Run("section flag narrows the document", func(t *testing.T) {
+		full := runDocsBinary(t, binary, env, "docs", "macro")
+		section := runDocsBinary(t, binary, env,
+			"docs", "macro", "--section", "Variable substitution syntax")
+
+		if !strings.Contains(section, "§name§") {
+			t.Error("`docs macro --section ...` did not reach the §name§ syntax")
+		}
+		if !strings.HasPrefix(section, "## Variable substitution syntax") {
+			t.Errorf("section does not start at its own heading:\n%.80s", section)
+		}
+		// The flag must actually narrow the output. This is the assertion
+		// that catches Go's flag package silently dropping --section when it
+		// follows a positional argument.
+		if len(section) >= len(full) {
+			t.Errorf("--section did not narrow the output: section=%d bytes, full=%d bytes",
+				len(section), len(full))
+		}
+		if !strings.Contains(full, strings.TrimRight(section, "\n")) {
+			t.Error("section is not a contiguous substring of the full document")
+		}
+	})
+
+	t.Run("index lists topics", func(t *testing.T) {
+		stdout := runDocsBinary(t, binary, env, "docs")
+		for _, want := range []string{"**macro**", "**getting-started**", "yorishiro-proxy docs <topic>"} {
+			if !strings.Contains(stdout, want) {
+				t.Errorf("`docs` index is missing %q", want)
+			}
+		}
+	})
+
+	t.Run("help exits zero to stdout", func(t *testing.T) {
+		stdout := runDocsBinary(t, binary, env, "docs", "--help")
+		if !strings.Contains(stdout, "Usage: yorishiro-proxy docs") {
+			t.Errorf("`docs --help` did not print usage to stdout:\n%s", stdout)
+		}
+	})
+
+	// The unknown-topic path exits non-zero, so it cannot use runDocsBinary
+	// (which fatals on a non-zero exit) and needs the *exec.ExitError idiom.
+	t.Run("unknown topic exits non-zero with the topic list on stderr", func(t *testing.T) {
+		cmd := exec.Command(binary, "docs", "no-such-topic")
+		cmd.Env = env
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+
+		err := cmd.Run()
+		if err == nil {
+			t.Fatalf("`docs no-such-topic` exited 0, want non-zero\nstdout=%s", stdout.String())
+		}
+		exitErr, ok := err.(*exec.ExitError)
+		if !ok {
+			t.Fatalf("run: %v", err)
+		}
+		if exitErr.ExitCode() != 1 {
+			t.Errorf("exit code = %d, want 1", exitErr.ExitCode())
+		}
+		for _, want := range []string{"unknown docs topic", "macro", "getting-started"} {
+			if !strings.Contains(stderr.String(), want) {
+				t.Errorf("stderr is missing %q:\n%s", want, stderr.String())
+			}
+		}
+	})
+}
+
+// runDocsBinary runs the binary with the given args and env, requires a zero
+// exit, and returns stdout.
+func runDocsBinary(t *testing.T, binary string, env []string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command(binary, args...)
+	cmd.Env = env
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	// The docs path does no I/O beyond an embed.FS read, so this bound is
+	// generous; it exists so a regression that starts dialling fails visibly
+	// rather than blocking CI.
+	timeoutCh := time.AfterFunc(15*time.Second, func() {
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+	})
+	defer timeoutCh.Stop()
+
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("%v exit error: %v\nstdout=%s\nstderr=%s", args, err, stdout.String(), stderr.String())
+	}
+	return stdout.String()
+}
