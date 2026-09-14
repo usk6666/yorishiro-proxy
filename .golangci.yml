@@ -2,16 +2,23 @@
 #
 # Scope note (USK-1043): this file deliberately enables ONLY the linters that
 # replace the previously hand-installed binaries. `linters.default: none` keeps
-# golangci-lint's own default set (errcheck, unused, ...) switched off --
-# adopting it would flood existing code with new findings and turn a CI
-# reliability fix into a refactor. Adding linters is a separate, incremental
-# change.
+# golangci-lint's own default set (errcheck, ...) switched off -- adopting it
+# would flood existing code with new findings and turn a CI reliability fix
+# into a refactor. Adding linters is a separate, incremental change.
 #
 # gofmt is intentionally NOT migrated here; `make lint` keeps running the Go
 # toolchain's own `gofmt -l .` over the whole working tree. Two reasons:
 #   1. Reach. `gofmt -l .` walks every .go file; `golangci-lint run` only sees
 #      the default build configuration of this module, which excludes all 137
 #      `//go:build e2e` files and all of tools/depsec.
+#      gocyclo shares the tools/depsec half of that blind spot: the old
+#      `gocyclo -over 15 -ignore '_test\.go$' .` was a filesystem walk from the
+#      repo root, so it reached tools/depsec, whereas `golangci-lint run`
+#      cannot see a nested module. Accepted trade-off: tools/depsec is
+#      stdlib-only, its highest function is complexity 14 (fetchAlerts,
+#      main.go:105), and it is gated by the `depsec-tool` CI job. (The e2e
+#      files are NOT a gocyclo regression -- all 137 are `_test.go`, which
+#      `-ignore '_test\.go$'` already excluded.)
 #   2. Fidelity. golangci-lint vendors github.com/golangci/gofmt, a fork that
 #      disagrees with the toolchain's gofmt on composite-literal indentation, so
 #      `make fmt` (gofmt -w .) would no longer guarantee `make lint` passes.
@@ -19,9 +26,12 @@
 version: "2"
 
 run:
-  # golangci-lint's own default is 1m, which is not enough for this module on a
-  # cold CI runner (measured 2m10s end-to-end with an empty Go build cache;
-  # package loading alone logged 2m46s).
+  # v2 has NO timeout by default -- `golangci-lint run --help` on v2.13.2 prints
+  # "Timeout for total work. Disabled by default" (the 1m default was v1's).
+  # So this does not raise a too-low ceiling, it introduces one on purpose: a
+  # pathological run should fail as a named golangci-lint timeout rather than be
+  # killed opaquely when the job's own `timeout-minutes: 15` expires. The two
+  # numbers are meant to stay ordered that way -- lint timeout < job timeout.
   timeout: 10m
 
 linters:
@@ -31,6 +41,15 @@ linters:
     - govet
     - ineffassign
     - staticcheck
+    # `unused` is NOT an addition to the replaced rule set -- it restores part
+    # of it. The standalone `staticcheck` binary (cmd/staticcheck v0.7.0)
+    # registers unused.Analyzer unconditionally and it is not marked NonDefault,
+    # so `staticcheck ./...` reported U1000 by default. golangci-lint splits it
+    # out as its own linter, so `default: none` would silently drop U1000 --
+    # and `make lint` was staticcheck's only caller, so nothing else backstops
+    # it. Do not "tidy this away" as part of the default set: removing it
+    # reopens a real gap (USK-1043).
+    - unused
 
   settings:
     gocyclo:

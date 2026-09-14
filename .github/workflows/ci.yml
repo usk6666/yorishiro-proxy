@@ -57,8 +57,13 @@ jobs:
           name: ui-dist
           path: internal/mcp/webui/dist/
 
-      # install-only: the action just places the pinned binary on PATH; `make lint`
-      # remains the single definition of what linting means (CLAUDE.md).
+      # install-only: the action does NOT run the linter -- `make lint` stays the
+      # single definition of what linting means (CLAUDE.md). It is not purely an
+      # installer, though: at the pinned commit, run() calls restoreCache() and
+      # plugins.install() BEFORE the install-only early return, and postRun()
+      # calls saveCache() unconditionally. So this step also restores and saves a
+      # GitHub Actions cache of $HOME/.cache/golangci-lint (GOLANGCI_LINT_CACHE --
+      # analysis results, not the binary).
       #
       # install-mode defaults to `binary`, which downloads the prebuilt release
       # via @actions/tool-cache. Do NOT set `install-mode: goinstall`:

@@ -115,7 +115,7 @@ make test
 
 - Auto-format with `gofmt -w .`
 - `make lint` runs a `gofmt -l .` check, then `golangci-lint run`
-  (govet / staticcheck / ineffassign / gocyclo, configured in `.golangci.yml`)
+  (govet / staticcheck / unused / ineffassign / gocyclo, configured in `.golangci.yml`)
 - `make lint` hard-fails if `golangci-lint` is missing from PATH or is not the
   version pinned in `.golangci-lint-version`; it prints the install command.
   Do **not** `go install` golangci-lint — use the official `install.sh`

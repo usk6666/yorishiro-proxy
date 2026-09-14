@@ -11,6 +11,12 @@ LDFLAGS := -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.date=$(DA
 # Pinned golangci-lint version. Single source of truth: .golangci-lint-version,
 # which CI consumes via golangci-lint-action's `version-file` input, so the
 # local and CI rule sets cannot drift.
+#
+# The `lint` recipe validates the file's shape (`vX.Y[.Z]`, one line) before
+# using this value, so a missing / empty / CRLF / malformed file produces a
+# named error instead of an empty substitution. The check lives in the recipe
+# rather than a parse-time `$(error ...)` so that an unrelated target such as
+# `make clean` still works when the file is broken.
 GOLANGCI_LINT_VERSION := $(shell cat .golangci-lint-version 2>/dev/null)
 
 .PHONY: build build-ui ensure-ui dev-ui test test-fast test-ui test-e2e test-e2e-smoke test-cover vet lint fmt clean bench bench-compare
@@ -69,25 +75,47 @@ vet: ensure-ui
 fmt:
 	gofmt -w .
 
-# lint = the Go toolchain's own gofmt over the whole tree, plus golangci-lint
-# for govet / staticcheck / ineffassign / gocyclo (see .golangci.yml for why
+# lint = the Go toolchain's own gofmt over the whole tree, plus golangci-lint for
+# govet / staticcheck / unused / ineffassign / gocyclo (see .golangci.yml for why
 # gofmt is deliberately NOT delegated to golangci-lint).
 lint: ensure-ui
 	@echo "==> gofmt check"
 	@test -z "$$(gofmt -l .)" || (echo "Files not formatted:" && gofmt -l . && exit 1)
-	@command -v golangci-lint >/dev/null 2>&1 || { \
+	@raw=$$(cat .golangci-lint-version 2>/dev/null); \
+	 lines=$$(printf '%s\n' "$$raw" | grep -c ''); \
+	 if [ "$$lines" -ne 1 ] || ! printf '%s' "$$raw" | grep -Eq '^v[0-9]+\.[0-9]+(\.[0-9]+)?$$'; then \
+		echo ".golangci-lint-version must hold exactly one version tag, e.g. v2.13.2."; \
+		if [ ! -f .golangci-lint-version ]; then \
+			echo "  -> the file is missing."; \
+		elif [ -z "$$raw" ]; then \
+			echo "  -> the file is empty."; \
+		elif printf '%s' "$$raw" | tr -d '\r' | grep -Eq '^v[0-9]+\.[0-9]+(\.[0-9]+)?$$'; then \
+			echo "  -> it has CRLF line endings; re-check it out with LF (.gitattributes pins this)."; \
+		else \
+			echo "  -> got: $$raw"; \
+		fi; \
+		echo "CI enforces the same shape via golangci-lint-action's version-file input."; \
+		exit 1; \
+	 fi
+	@pinned='$(GOLANGCI_LINT_VERSION)'; bad=0; \
+	 if ! command -v golangci-lint >/dev/null 2>&1; then \
 		echo "golangci-lint not found on PATH."; \
+		bad=1; \
+	 else \
+		have="v$$(golangci-lint version --short)"; \
+		if [ "$$have" != "$$pinned" ]; then \
+			echo "golangci-lint version mismatch: have $$have, pinned $$pinned."; \
+			echo "Local results can diverge from CI."; \
+			bad=1; \
+		fi; \
+	 fi; \
+	 if [ "$$bad" -eq 1 ]; then \
 		echo "Install the pinned version -- do NOT use 'go install ...@latest':"; \
-		echo "golangci-lint $(GOLANGCI_LINT_VERSION) declares 'go 1.26.0', so building"; \
-		echo "it from source needs go1.26+, which is exactly the breakage USK-1043 removes."; \
+		echo "golangci-lint $$pinned declares 'go 1.26.0', so building it from source"; \
+		echo "needs go1.26+, which is exactly the breakage USK-1043 removes."; \
 		echo ""; \
-		echo "  curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/$(GOLANGCI_LINT_VERSION)/install.sh \\"; \
-		echo "    | sh -s -- -b $$(go env GOPATH)/bin $(GOLANGCI_LINT_VERSION)"; \
-		exit 1; }
-	@have="v$$(golangci-lint version --short)"; \
-	 if [ "$$have" != "$(GOLANGCI_LINT_VERSION)" ]; then \
-		echo "golangci-lint version mismatch: have $$have, pinned $(GOLANGCI_LINT_VERSION)."; \
-		echo "Local results can diverge from CI. Install the pinned version (see above)."; \
+		echo "  curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/$$pinned/install.sh \\"; \
+		echo "    | sh -s -- -b $$(go env GOPATH)/bin $$pinned"; \
 		exit 1; \
 	 fi
 	@echo "==> golangci-lint $(GOLANGCI_LINT_VERSION)"

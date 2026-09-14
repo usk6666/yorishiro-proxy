@@ -25,7 +25,7 @@ An end-to-end workflow skill for implementing a Linear Issue through to PR creat
 7. **Write tests**: Write tests for the implementation
 8. **Verify**:
    - Auto-format with `gofmt -w .`
-   - `make lint` (gofmt check + golangci-lint: govet / staticcheck / ineffassign / gocyclo)
+   - `make lint` (gofmt check + golangci-lint: govet / staticcheck / unused / ineffassign / gocyclo)
    - `make build`
    - `make test`
 9. **Commit**: Commit in Conventional Commits format
