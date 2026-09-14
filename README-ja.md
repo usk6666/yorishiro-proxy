@@ -113,21 +113,23 @@ MCP サーバが起動したら、AI エージェントからトラフィック�
 
 ## MCP ツール
 
-すべてのプロキシ操作は 11 個の MCP ツールとして公開されます:
+すべてのプロキシ操作は型付き MCP ツールとして公開されます:
 
 | ツール | 用途 |
 |--------|------|
 | `proxy_start` | キャプチャスコープ、TLS パススルー、インターセプトルール、Auto-Transform、TCP フォワーディング、プロトコル設定付きでプロキシリスナを起動 |
 | `proxy_stop` | 1 つまたはすべてのリスナのグレースフルシャットダウン |
 | `configure` | ランタイム設定変更（上流プロキシ、キャプチャスコープ、TLS パススルー、インターセプトルール、Auto-Transform、接続制限） |
-| `query` | 統合情報取得: フロー、フロー詳細、メッセージ、プロキシステータス、設定、CA 証明書、インターセプトキュー、マクロ、Fuzz ジョブ/結果 |
-| `resend` | 記録されたリクエストをミューテーション付きでリプレイ（メソッド/URL/ヘッダ/ボディのオーバーライド、JSON パッチ、生バイトパッチ、ドライラン）および 2 フローの構造化比較 |
-| `fuzz` | ペイロードセット、ポジション、並行制御、停止条件付きの Fuzz テストキャンペーンを実行 |
+| `query` | 統合情報取得: フロー、フロー詳細、メッセージ、プロキシステータス、設定、CA 証明書、インターセプトキュー、マクロ、Fuzz ジョブ/結果。Protocol family フィルタ（`http`/`ws`/`grpc`/`grpc-web`/`sse`/`raw`/`tls-handshake`）に対応 |
+| `resend_http` / `resend_ws` / `resend_grpc` / `resend_raw` | 記録されたフローをプロトコル型付きスキーマ（HTTPMessage / WSMessage / GRPC{Start,Data,End}Message / RawMessage）でリプレイ。ヘッダ/ボディ/URL のオーバーライド、JSON パッチ、生バイトパッチ、ドライランに対応 |
+| `fuzz_http` / `fuzz_ws` / `fuzz_grpc` / `fuzz_raw` | ポジション駆動のペイロード Fuzz。バリアントごとに Safety ゲートを適用 |
 | `macro` | 変数抽出、ガード、フック付きのマルチステップマクロワークフローを定義・実行 |
 | `intercept` | インターセプトされたリクエストに対してリリース、変更して転送、またはドロップ |
 | `manage` | フローデータの管理（削除/エクスポート/インポート）と CA 証明書の再生成 |
 | `security` | Target Scope ルール、レート制限、診断バジェットの設定（Policy Layer + Agent Layer） |
-| `plugin` | Starlark プラグインの一覧表示、リロード、有効化、無効化をランタイムで実行 |
+| `plugin_introspect` | ロード済み Starlark プラグインと、その `(protocol, event, phase)` フック登録の読み取り専用一覧 |
+| `grpc_schema` | gRPC ペイロードのデコード/エンコードに使う protobuf descriptor set の登録・一覧・解除・クリア |
+| `docs` | 全ツールのセルフサービス・リファレンス: トピック一覧、全文、または見出し単位の 1 セクション |
 
 ## Web UI
 
@@ -165,6 +167,7 @@ yorishiro-proxy は以下のサブコマンドを提供します:
 |------------|------|
 | `server` | プロキシサーバを起動（サブコマンド省略時のデフォルト） |
 | `client` | 実行中のサーバに対して CLI で MCP ツールを呼び出し |
+| `docs` | 組み込みのツールドキュメントを表示（オフライン動作。サーバ起動不要） |
 | `install` | コンポーネントのインストール・設定（MCP, CA, Playwright） |
 | `upgrade` | GitHub Releases からアップデートを確認・インストール |
 | `version` | バージョン情報を表示 |
@@ -175,6 +178,14 @@ yorishiro-proxy は以下のサブコマンドを提供します:
 yorishiro-proxy client query resource=status
 yorishiro-proxy client proxy_start listen_addr=127.0.0.1:8080
 yorishiro-proxy client query resource=flows limit=10
+```
+
+`docs` サブコマンドは MCP の `docs` ツールと同じリファレンスをバイナリから直接出力します。サーバもネットワークも不要です:
+
+```bash
+yorishiro-proxy docs                  # トピック一覧
+yorishiro-proxy docs macro            # macro ツールのリファレンス全文
+yorishiro-proxy docs macro --section "Variable substitution syntax"
 ```
 
 サーバフラグ、クライアントオプション、環境変数の全一覧は `yorishiro-proxy server -help` / `yorishiro-proxy client -help` を実行するか、[ドキュメント](https://usk6666.github.io/yorishiro-proxy-docs/)を参照してください。
