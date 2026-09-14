@@ -1,0 +1,85 @@
+# golangci-lint configuration.
+#
+# Scope note (USK-1043): this file deliberately enables ONLY the linters that
+# replace the previously hand-installed binaries. `linters.default: none` keeps
+# golangci-lint's own default set (errcheck, ...) switched off -- adopting it
+# would flood existing code with new findings and turn a CI reliability fix
+# into a refactor. Adding linters is a separate, incremental change.
+#
+# gofmt is intentionally NOT migrated here; `make lint` keeps running the Go
+# toolchain's own `gofmt -l .` over the whole working tree. Two reasons:
+#   1. Reach. `gofmt -l .` walks every .go file; `golangci-lint run` only sees
+#      the default build configuration of this module, which excludes all 137
+#      `//go:build e2e` files and all of tools/depsec.
+#      gocyclo shares the tools/depsec half of that blind spot: the old
+#      `gocyclo -over 15 -ignore '_test\.go$' .` was a filesystem walk from the
+#      repo root, so it reached tools/depsec, whereas `golangci-lint run`
+#      cannot see a nested module. Accepted trade-off: tools/depsec is
+#      stdlib-only, its highest function is complexity 14 (fetchAlerts,
+#      main.go:105), and it is gated by the `depsec-tool` CI job. (The e2e
+#      files are NOT a gocyclo regression -- all 137 are `_test.go`, which
+#      `-ignore '_test\.go$'` already excluded.)
+#   2. Fidelity. golangci-lint vendors github.com/golangci/gofmt, a fork that
+#      disagrees with the toolchain's gofmt on composite-literal indentation, so
+#      `make fmt` (gofmt -w .) would no longer guarantee `make lint` passes.
+# gofmt ships with the Go toolchain, so keeping it costs no `go install`.
+version: "2"
+
+run:
+  # v2 has NO timeout by default -- `golangci-lint run --help` on v2.13.2 prints
+  # "Timeout for total work. Disabled by default" (the 1m default was v1's).
+  # So this does not raise a too-low ceiling, it introduces one on purpose: a
+  # pathological run should fail as a named golangci-lint timeout rather than be
+  # killed opaquely when the job's own `timeout-minutes: 15` expires. The two
+  # numbers are meant to stay ordered that way -- lint timeout < job timeout.
+  timeout: 10m
+
+linters:
+  default: none
+  enable:
+    - gocyclo
+    - govet
+    - ineffassign
+    - staticcheck
+    # `unused` is NOT an addition to the replaced rule set -- it restores part
+    # of it. The standalone `staticcheck` binary (cmd/staticcheck v0.7.0)
+    # registers unused.Analyzer unconditionally and it is not marked NonDefault,
+    # so `staticcheck ./...` reported U1000 by default. golangci-lint splits it
+    # out as its own linter, so `default: none` would silently drop U1000 --
+    # and `make lint` was staticcheck's only caller, so nothing else backstops
+    # it. Do not "tidy this away" as part of the default set: removing it
+    # reopens a real gap (USK-1043).
+    - unused
+
+  settings:
+    gocyclo:
+      # Equivalent to `gocyclo -over 15`: reports complexity strictly > 15.
+      min-complexity: 15
+
+    staticcheck:
+      # golangci-lint's `staticcheck` linter bundles staticcheck + gosimple +
+      # stylecheck + quickfix, and defaults to
+      #   ["all", "-ST1000", "-ST1003", "-ST1016", "-ST1020", "-ST1021", "-ST1022"]
+      # which is BROADER than the standalone `staticcheck` binary this replaces.
+      # cmd/staticcheck ships no QF checks at all, and its lintcmd additionally
+      # disables every check documented as "non-default" -- a filter golangci-lint
+      # does not apply. Without the list below, current main produces 14 findings
+      # that `staticcheck ./...` never reported.
+      checks:
+        - all
+        - "-QF*"    # quickfix category: not shipped by cmd/staticcheck
+        - "-SA9003" # non-default in cmd/staticcheck
+        - "-ST1000" # non-default
+        - "-ST1003" # non-default
+        - "-ST1016" # non-default
+        - "-ST1020" # non-default
+        - "-ST1021" # non-default
+        - "-ST1022" # non-default
+        - "-ST1023" # non-default
+
+  exclusions:
+    rules:
+      # Equivalent to `gocyclo -ignore '_test\.go$'`.
+      - path: _test\.go
+        linters:
+          - gocyclo

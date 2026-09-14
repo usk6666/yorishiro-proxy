@@ -173,7 +173,11 @@ make test
 ```
 
 - Auto-format with `gofmt -w .`
-- `make lint` runs gofmt check + go vet + staticcheck + ineffassign
+- `make lint` runs a `gofmt -l .` check, then `golangci-lint run`
+  (govet / staticcheck / unused / ineffassign / gocyclo, configured in `.golangci.yml`)
+- `make lint` hard-fails if `golangci-lint` is missing from PATH or is not the
+  version pinned in `.golangci-lint-version`; it prints the install command.
+  Do **not** `go install` golangci-lint — use the official `install.sh`
 - Fix any issues flagged by lint and re-run
 - Repeat until everything passes
 
@@ -225,7 +229,7 @@ Confirm the following before completing implementation:
 
 - [ ] All Issue requirements are satisfied
 - [ ] Tests are written for new code
-- [ ] `make lint` passes completely (gofmt, go vet, staticcheck, ineffassign)
+- [ ] `make lint` passes completely (gofmt check + golangci-lint: govet, staticcheck, unused, ineffassign, gocyclo)
 - [ ] `make build` succeeds
 - [ ] `make test` passes completely
 - [ ] Commit message is in Conventional Commits format

@@ -156,10 +156,31 @@ make test-e2e       # full tier (nightly): ensure-ui → go test -race -v -tags 
 make test-cover     # ensure-ui → test with coverage report
 make vet            # ensure-ui → go vet ./...
 make fmt            # Format all files with gofmt -w .
-make lint           # gofmt check + go vet + staticcheck + ineffassign
+make lint           # gofmt check + golangci-lint (govet/staticcheck/unused/ineffassign/gocyclo)
 make bench          # ensure-ui → run benchmarks
 make clean          # Delete build artifacts
 ```
+
+> **Linting (USK-1043)**: `make lint` runs two things. First the Go toolchain's own
+> `gofmt -l .` over the whole working tree, then `golangci-lint run`.
+> The golangci-lint version is pinned in `.golangci-lint-version` (a single source of
+> truth shared by the Makefile and the CI job, which passes it to
+> `golangci-lint-action` via `version-file:`), and `make lint` hard-fails if the
+> binary on your PATH is a different version — local and CI results cannot drift.
+> Install the pinned version with golangci-lint's official `install.sh`; do **not**
+> `go install` it, because its source declares a newer Go than this module's floor.
+>
+> `.golangci.yml` enables exactly five linters — `govet`, `staticcheck`, `unused`,
+> `ineffassign`, `gocyclo` — with `linters.default: none`. golangci-lint's own
+> default set stays off deliberately; enabling more is a separate, incremental change.
+> `unused` is in that list to *restore* a check, not to add one: the standalone
+> `staticcheck` binary reported U1000 by default, and golangci-lint splits `unused`
+> out into its own linter, so omitting it would silently drop U1000 coverage.
+> `gofmt` is deliberately **not** delegated to golangci-lint: `golangci-lint run`
+> only loads the default build configuration, so it cannot see the `//go:build e2e`
+> files or `tools/depsec`, and it vendors a gofmt fork that disagrees with the
+> toolchain on composite-literal indentation. Keeping `gofmt -l .` costs nothing
+> (it ships with Go) and keeps `make fmt` a guarantee that `make lint` passes.
 
 > **e2e test tiers (USK-728)**: e2e tests are split into three tiers.
 > - **fast** (`make test`/`make test-fast`): untagged unit tests only.
@@ -249,6 +270,8 @@ Level selection for `log/slog` follows these criteria:
 | Connection timeout to CONNECT tunnel target | `Debug` | Network-dependent. Returns error response to client, but not a proxy anomaly |
 
 ## Dependency License Policy
+
+**Scope**: this policy governs **distributed** dependencies — anything linked into the shipped binary or the published npm artifacts, i.e. what `/license-check`'s `go list -m -json all` can see. Build-time-only tools that run as separate executables (linters, formatters) are out of scope: golangci-lint, for instance, is GPL-3.0 but appears in no `go.mod`/`go.sum`, and its diagnostic output is not a derivative work — the same reason GCC's licence does not infect the programs it compiles. Two caveats: this holds only while such a tool is never vendored or redistributed in a release artifact, and `golangci-lint custom` would build a combined GPL-3.0 binary, which must not be shipped.
 
 ### Allowed
 
