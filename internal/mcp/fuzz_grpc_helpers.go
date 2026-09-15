@@ -1488,7 +1488,13 @@ func rebuildFuzzGRPCCanonicalURL(variantPlan *resendGRPCPlan) {
 // mutation. streamID / connID are regenerated so each variant gets an
 // independent gRPC stream as recorded by RecordStep. Slices that fuzz
 // positions can mutate (metadata, messages) are deep-copied; immutable
-// fields (encoding, acceptEncoding, trailerMetadata, warnings) are shared.
+// fields (encoding, acceptEncoding, trailerMetadata) are shared.
+//
+// warnings is deep-copied too, even though nothing appends to it
+// per-variant today: it is an append-target by construction, and sharing
+// one backing array across N variants means the first per-variant append
+// would overwrite its siblings' entries in place rather than extending its
+// own list.
 //
 // The scalar dial fields — useTLS, scheme, authority,
 // observedUpstreamTLSVersion — ride along on the `out := *base` copy, so a
@@ -1521,6 +1527,11 @@ func cloneFuzzGRPCPlan(base *resendGRPCPlan) *resendGRPCPlan {
 			}
 		}
 		out.messages = ms
+	}
+	if len(base.warnings) > 0 {
+		ws := make([]string, len(base.warnings))
+		copy(ws, base.warnings)
+		out.warnings = ws
 	}
 	// trailerMetadata is read-only across variants (we don't fuzz it);
 	// share the slice.

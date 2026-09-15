@@ -113,11 +113,19 @@ type resendGRPCResult struct {
 	End           *resendGRPCEndResult   `json:"end,omitempty"`
 	DurationMs    int64                  `json:"duration_ms"`
 	Tag           string                 `json:"tag,omitempty"`
-	// Warnings carries non-fatal hints surfaced to the caller. USK-923
-	// emits a "proto-json round-trip drops N unknown field bytes" warning
-	// when the source flow's bytes (looked up via input.FlowID) contained
-	// fields not in the registered schema; the lossy edge is documented
-	// in help_grpc_schema.md.
+	// Warnings carries non-fatal hints surfaced to the caller.
+	//
+	// USK-1056 emits the dial-provenance advisories and they lead the list:
+	// one whenever the dial target came from the recorded flow's
+	// client-declared :authority (i.e. flow_id without target_addr), and
+	// one when a recovered :scheme=http was dialled over TLS because the
+	// proxy had observed a TLS upstream for that stream. Both name the
+	// override that pins the behaviour (target_addr / scheme).
+	//
+	// USK-923 follows with a "proto-json round-trip drops N unknown field
+	// bytes" warning when the source flow's bytes (looked up via
+	// input.FlowID) contained fields not in the registered schema; the
+	// lossy edge is documented in help_grpc_schema.md.
 	Warnings []string `json:"warnings,omitempty"`
 }
 
@@ -247,7 +255,10 @@ func (s *Server) handleResendGRPC(ctx context.Context, _ *gomcp.CallToolRequest,
 	// before the MCP result returns.
 	finalizeResendStream(ctx, s.flowStore.store, plan.streamID, err)
 	if err != nil {
-		return nil, nil, fmt.Errorf("resend_grpc: %w", err)
+		// USK-1056: warnings[] never ships on the failure path, so a dial
+		// the proxy upgraded to TLS on its own must explain itself through
+		// the error instead.
+		return nil, nil, wrapResendGRPCRunError(plan, err)
 	}
 
 	if input.Tag != "" && s.flowStore.store != nil {

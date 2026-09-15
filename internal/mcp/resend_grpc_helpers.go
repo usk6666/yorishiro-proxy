@@ -241,6 +241,16 @@ type resendGRPCPlan struct {
 	// applyResendGRPCDialGroundTruth. Always empty on the from-scratch path.
 	observedUpstreamTLSVersion string
 
+	// tlsUpgradedFromObservation records that applyResendGRPCDialGroundTruth
+	// flipped useTLS on from observedUpstreamTLSVersion rather than from the
+	// recovered scheme. It exists so a *failed* run can name the proxy's own
+	// transport decision in the returned error: warnings[] is only attached
+	// to a successful result, and the one topology this upgrade is knowingly
+	// wrong for (a tcp_forwards plaintext client leg fronting an
+	// upstream_tls upstream) always fails at the handshake. See
+	// wrapResendGRPCRunError.
+	tlsUpgradedFromObservation bool
+
 	// service / method are the post-override values that populate
 	// :path and the GRPCStartMessage.
 	service string
@@ -367,6 +377,20 @@ func (s *Server) buildResendGRPCPlan(ctx context.Context, input *resendGRPCInput
 // upgrade a recovered "http" to a TLS dial, and must NEVER downgrade: an
 // empty TLSVersion leaves the recovered decision untouched.
 //
+// Note the residual gap this leaves, which is stronger than "ambiguous":
+// the observation is written only by RecordStep.updateStreamTLS, which
+// fires exclusively on Receive envelopes carrying a TLS snapshot, so the
+// recorded client — the very actor this guard is aimed at — can suppress
+// the oracle deterministically by never letting a response be observed
+// (abort after HEADERS, or target a hanging endpoint), and the original
+// cleartext replay is then unchanged. There is no second source to fall
+// back on: Stream.Scheme is projected from the same client-declared
+// GRPCStartMessage.Scheme, and updateStreamClientFingerprint writes only
+// JA3/JA4. Closing it needs a connector-level change — stamp the upstream
+// TLS snapshot at connect time instead of on first Receive — which is out
+// of scope here; `target_addr` plus an explicit `scheme` remain the
+// caller-side pin.
+//
 // # What is deliberately NOT changed
 //
 //   - plan.scheme keeps the recorded value. The resent HEADERS frame must
@@ -389,7 +413,16 @@ func applyResendGRPCDialGroundTruth(ctx context.Context, input *resendGRPCInput,
 	}
 	if input.Scheme == "" && !plan.useTLS && plan.observedUpstreamTLSVersion != "" {
 		plan.useTLS = true
-		w := fmt.Sprintf("resend_grpc: the recorded flow declares :scheme=%q, but the proxy observed %s on the upstream leg of that stream; dialling with TLS. The resent HEADERS frame still carries :scheme=%q (wire fidelity). Pass scheme=\"http\" to force a cleartext replay.",
+		plan.tlsUpgradedFromObservation = true
+		// %q on the observed version, matching plan.scheme beside it:
+		// ConnInfo.TLSVersion is bounded on the live recorder path
+		// (envelope.TLSSnapshot.VersionName), but manage{action:
+		// "import_flows"} copies it verbatim out of caller-supplied JSONL
+		// (internal/flow/import.go) and warnings[] is returned to the AI
+		// agent without passing through the Output Filter. Quoting keeps a
+		// crafted multi-line value from restructuring the advisory
+		// (CWE-117).
+		w := fmt.Sprintf("resend_grpc: the recorded flow declares :scheme=%q, but the proxy observed %q on the upstream leg of that stream; dialling with TLS. The resent HEADERS frame still carries :scheme=%q (wire fidelity). Pass scheme=\"http\" to force a cleartext replay.",
 			plan.scheme, plan.observedUpstreamTLSVersion, plan.scheme)
 		plan.warnings = append(plan.warnings, w)
 		slog.WarnContext(ctx, "resend_grpc: upgrading resend dial to TLS from observed transport",
@@ -412,6 +445,33 @@ func applyResendGRPCDialGroundTruth(ctx context.Context, input *resendGRPCInput,
 			"authority", plan.authority,
 		)
 	}
+}
+
+// wrapResendGRPCRunError applies the tool's error prefix to a failure from
+// runResendGRPC, and — only when USK-1056 upgraded the dial to TLS from the
+// recorded transport observation — names that decision and the escape
+// hatch out of it.
+//
+// plan.warnings reaches the caller solely through result.Warnings, which is
+// built after this point, so on a failed run the MCP caller would otherwise
+// see a bare `tls handshake ...: EOF` with nothing connecting it to a
+// transport the proxy chose against the flow's recorded :scheme. That is
+// exactly the accepted false positive of this PR: a tcp_forwards topology
+// with a plaintext client leg and upstream_tls=true records the forward
+// listener as :authority while the observed TLS belongs to the upstream
+// beyond it, so the upgrade dials TLS at a plaintext listener and always
+// fails at the handshake.
+//
+// The non-upgraded wrap is byte-identical to the previous text so existing
+// error assertions are unaffected. The observed version is %q-quoted for
+// the same CWE-117 reason as the warning it mirrors: it can carry imported,
+// unvalidated bytes.
+func wrapResendGRPCRunError(plan *resendGRPCPlan, err error) error {
+	if plan == nil || !plan.tlsUpgradedFromObservation {
+		return fmt.Errorf("resend_grpc: %w", err)
+	}
+	return fmt.Errorf("resend_grpc: %w (the dial was upgraded to TLS because the proxy observed %q on the recorded stream's upstream leg while its :scheme was %q; pass scheme=\"http\" to force a cleartext replay)",
+		err, plan.observedUpstreamTLSVersion, plan.scheme)
 }
 
 // resolveResendGRPCStart pulls Service / Method / Metadata / Encoding /

@@ -11,6 +11,7 @@ package mcp
 
 import (
 	"context"
+	"errors"
 	"net/url"
 	"strings"
 	"testing"
@@ -599,7 +600,7 @@ func TestBuildResendGRPCPlan_DialTLSFromObservedTransport(t *testing.T) {
 			wantScheme:         "http",
 			wantUseTLS:         true,
 			wantDialAddr:       "api.example.com:443",
-			wantWarning:        "observed TLS 1.3 on the upstream leg",
+			wantWarning:        `observed "TLS 1.3" on the upstream leg`,
 		},
 		{
 			// (b) One-sided: absence of an observation is not evidence.
@@ -665,7 +666,7 @@ func TestBuildResendGRPCPlan_DialTLSFromObservedTransport(t *testing.T) {
 			wantScheme:         "http",
 			wantUseTLS:         true,
 			wantDialAddr:       "127.0.0.1:443",
-			wantWarning:        "observed TLS 1.2 on the upstream leg",
+			wantWarning:        `observed "TLS 1.2" on the upstream leg`,
 		},
 	}
 
@@ -727,6 +728,13 @@ func TestBuildResendGRPCPlan_DialTLSFromObservedTransport(t *testing.T) {
 				t.Errorf("GRPCStartMessage.Scheme = %q, want %q", msg.Scheme, tc.wantScheme)
 			}
 
+			// wantWarning is set exactly on the observed-transport upgrade
+			// cases, so it doubles as the expectation for the flag the
+			// failure path reads (wrapResendGRPCRunError).
+			wantUpgraded := tc.wantWarning != ""
+			if plan.tlsUpgradedFromObservation != wantUpgraded {
+				t.Errorf("plan.tlsUpgradedFromObservation = %v, want %v", plan.tlsUpgradedFromObservation, wantUpgraded)
+			}
 			if tc.wantWarning != "" {
 				if !containsWarning(plan.warnings, tc.wantWarning) {
 					t.Errorf("plan.warnings = %q, want one containing %q", plan.warnings, tc.wantWarning)
@@ -843,6 +851,148 @@ func TestRebuildFuzzGRPCCanonicalURL_FollowsPlanSchemeNotUseTLS(t *testing.T) {
 					variant.canonicalURL.String(), base.canonicalURL.String())
 			}
 		})
+	}
+}
+
+// TestWrapResendGRPCRunError_ExplainsObservedTransportUpgrade pins the
+// USK-1056 failure-path advisory.
+//
+// plan.warnings is only ever attached to result.Warnings, which is built
+// after runResendGRPC succeeds — so on the one topology this change
+// knowingly breaks (a tcp_forwards plaintext client leg fronting an
+// upstream_tls upstream, where the observed TLS belongs to a hop beyond the
+// recorded :authority) the caller would see a bare handshake error with
+// nothing naming the proxy's own transport choice, nor the documented way
+// out of it.
+//
+// The non-upgraded wrap must stay byte-identical: existing assertions on
+// "resend_grpc: ..." error text depend on it.
+func TestWrapResendGRPCRunError_ExplainsObservedTransportUpgrade(t *testing.T) {
+	t.Parallel()
+
+	inner := errors.New("tls handshake 127.0.0.1:8443: EOF")
+	unchanged := "resend_grpc: " + inner.Error()
+
+	t.Run("no_upgrade_wrap_is_unchanged", func(t *testing.T) {
+		t.Parallel()
+		plan := &resendGRPCPlan{scheme: "https", useTLS: true}
+		if got := wrapResendGRPCRunError(plan, inner).Error(); got != unchanged {
+			t.Errorf("error = %q, want exactly %q", got, unchanged)
+		}
+	})
+
+	t.Run("nil_plan_wrap_is_unchanged", func(t *testing.T) {
+		t.Parallel()
+		if got := wrapResendGRPCRunError(nil, inner).Error(); got != unchanged {
+			t.Errorf("error = %q, want exactly %q", got, unchanged)
+		}
+	})
+
+	t.Run("upgraded_dial_names_its_provenance_and_the_escape_hatch", func(t *testing.T) {
+		t.Parallel()
+		plan := &resendGRPCPlan{
+			scheme:                     "http",
+			useTLS:                     true,
+			observedUpstreamTLSVersion: "TLS 1.3",
+			tlsUpgradedFromObservation: true,
+		}
+		err := wrapResendGRPCRunError(plan, inner)
+		if !errors.Is(err, inner) {
+			t.Error("errors.Is(err, inner) = false, want true (the cause must stay unwrappable)")
+		}
+		got := err.Error()
+		for _, want := range []string{
+			inner.Error(),
+			"upgraded to TLS",
+			`observed "TLS 1.3"`,
+			`:scheme was "http"`,
+			`scheme="http"`,
+		} {
+			if !strings.Contains(got, want) {
+				t.Errorf("error = %q, want it to contain %q", got, want)
+			}
+		}
+	})
+}
+
+// TestCloneFuzzGRPCPlan_WarningsAreNotAliased pins the half of the
+// fuzz_grpc warning wiring that the result shape cannot show: warnings is
+// an append-target by construction, so sharing one backing array across N
+// variant plans means the first per-variant append writes *into* the
+// siblings' array instead of extending its own list.
+//
+// The base slice is given spare capacity deliberately — at len == cap a
+// shared slice is indistinguishable from a copied one, because append
+// reallocates and the aliasing bug hides.
+func TestCloneFuzzGRPCPlan_WarningsAreNotAliased(t *testing.T) {
+	t.Parallel()
+
+	base := &resendGRPCPlan{
+		authority: "api.example.com",
+		scheme:    "http",
+		service:   "hello.HelloService",
+		method:    "SayHello",
+		warnings:  append(make([]string, 0, 4), "base-0", "base-1"),
+	}
+
+	a := cloneFuzzGRPCPlan(base)
+	b := cloneFuzzGRPCPlan(base)
+
+	a.warnings = append(a.warnings, "variant-a")
+	b.warnings = append(b.warnings, "variant-b")
+
+	if got := a.warnings[len(a.warnings)-1]; got != "variant-a" {
+		t.Errorf("variant A's own appended warning = %q, want %q (a sibling's append reached it through a shared array)", got, "variant-a")
+	}
+	if got := b.warnings[len(b.warnings)-1]; got != "variant-b" {
+		t.Errorf("variant B's own appended warning = %q, want %q", got, "variant-b")
+	}
+	if len(base.warnings) != 2 {
+		t.Errorf("base.warnings length = %d, want 2 (a variant append must not extend the base)", len(base.warnings))
+	}
+	if base.warnings[0] != "base-0" || base.warnings[1] != "base-1" {
+		t.Errorf("base.warnings = %q, want the original entries untouched", base.warnings)
+	}
+}
+
+// TestHandleFuzzGRPC_SurfacesBasePlanDialWarnings pins the fuzz_grpc half
+// of the USK-1056 advisory wiring: plan.warnings is resolved once on the
+// base plan, and fuzz_grpc must hand it to the agent the way resend_grpc
+// does. Without it the only trace of an N-variant campaign aimed at a
+// client-declared host is a server-side log the caller cannot see.
+//
+// The recorded authority is a closed loopback port, so every variant fails
+// at the dial — which is deliberate: per-variant dial errors land in
+// row.Error and the handler still returns a result, so the assertion is on
+// the result wiring and needs no upstream.
+func TestHandleFuzzGRPC_SurfacesBasePlanDialWarnings(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := newTestStore(t)
+	declared := &url.URL{Scheme: "http", Host: "127.0.0.1:1", Path: "/hello.HelloService/SayHello"}
+	flowID := saveUSK1056GRPCFlow(t, store, declared, "")
+
+	s := newServer(ctx, nil, store, nil)
+	timeout := 2000
+	_, res, err := s.handleFuzzGRPC(ctx, nil, fuzzGRPCInput{
+		FlowID:    flowID,
+		Messages:  []resendGRPCData{{Payload: "hello"}},
+		TimeoutMs: &timeout,
+		Positions: []fuzzGRPCPosition{{
+			Path:     "messages[0].payload",
+			Payloads: []string{"a", "b"},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("handleFuzzGRPC: %v", err)
+	}
+	if res == nil {
+		t.Fatal("handleFuzzGRPC returned a nil result")
+	}
+	const want = "client-declared :authority"
+	if !containsWarning(res.Warnings, want) {
+		t.Errorf("result.Warnings = %q, want one containing %q", res.Warnings, want)
 	}
 }
 
