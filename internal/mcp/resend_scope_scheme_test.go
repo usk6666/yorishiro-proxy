@@ -47,7 +47,7 @@ type scopeSchemeCase struct {
 	policyDenies []connector.TargetRule
 	agentAllows  []connector.TargetRule
 	agentDenies  []connector.TargetRule
-	run          func(t *testing.T, s *Server) error
+	run          func(s *Server) error
 	wantErr      bool
 	// wantErrContains is checked only when wantErr is true.
 	wantErrContains string
@@ -75,7 +75,7 @@ func TestResendScopeScheme_NonTLSDialMatchesSchemeConditionedRules(t *testing.T)
 		{
 			name:        "raw/deny_plaintext_metadata_dial",
 			agentDenies: metadataDenyHTTP(),
-			run: func(_ *testing.T, s *Server) error {
+			run: func(s *Server) error {
 				return s.checkResendRawScope(&resendRawPlan{
 					useTLS:   false,
 					dialAddr: "169.254.169.254:80",
@@ -87,7 +87,7 @@ func TestResendScopeScheme_NonTLSDialMatchesSchemeConditionedRules(t *testing.T)
 		{
 			name:         "raw/allow_plaintext_internal_dial",
 			policyAllows: []connector.TargetRule{{Hostname: "internal.example", Schemes: []string{"http"}}},
-			run: func(_ *testing.T, s *Server) error {
+			run: func(s *Server) error {
 				return s.checkResendRawScope(&resendRawPlan{
 					useTLS:   false,
 					dialAddr: "internal.example:8080",
@@ -99,7 +99,7 @@ func TestResendScopeScheme_NonTLSDialMatchesSchemeConditionedRules(t *testing.T)
 			// guard that the http/https mapping did not get inverted.
 			name:        "raw/deny_tls_dial_still_matches_https_rule",
 			agentDenies: []connector.TargetRule{{Hostname: "169.254.169.254", Schemes: []string{"https"}}},
-			run: func(_ *testing.T, s *Server) error {
+			run: func(s *Server) error {
 				return s.checkResendRawScope(&resendRawPlan{
 					useTLS:   true,
 					dialAddr: "169.254.169.254:443",
@@ -114,7 +114,7 @@ func TestResendScopeScheme_NonTLSDialMatchesSchemeConditionedRules(t *testing.T)
 			// RFC-001 §3.8 — the fix must not collapse into "match all".
 			name:        "raw/https_only_deny_does_not_catch_plaintext_dial",
 			agentDenies: []connector.TargetRule{{Hostname: "169.254.169.254", Schemes: []string{"https"}}},
-			run: func(_ *testing.T, s *Server) error {
+			run: func(s *Server) error {
 				return s.checkResendRawScope(&resendRawPlan{
 					useTLS:   false,
 					dialAddr: "169.254.169.254:80",
@@ -126,7 +126,7 @@ func TestResendScopeScheme_NonTLSDialMatchesSchemeConditionedRules(t *testing.T)
 		{
 			name:        "ws/deny_plaintext_metadata_redirect",
 			agentDenies: metadataDenyHTTP(),
-			run: func(_ *testing.T, s *Server) error {
+			run: func(s *Server) error {
 				return s.checkResendWSScope(&resendWSPlan{
 					useTLS:     false,
 					upgradeURL: &url.URL{Scheme: "http", Host: "example.com", Path: "/"},
@@ -139,7 +139,7 @@ func TestResendScopeScheme_NonTLSDialMatchesSchemeConditionedRules(t *testing.T)
 		{
 			name:         "ws/allow_plaintext_redirect",
 			policyAllows: plaintextAllowPair(),
-			run: func(_ *testing.T, s *Server) error {
+			run: func(s *Server) error {
 				return s.checkResendWSScope(&resendWSPlan{
 					useTLS:     false,
 					upgradeURL: &url.URL{Scheme: "http", Host: "example.com", Path: "/"},
@@ -152,7 +152,7 @@ func TestResendScopeScheme_NonTLSDialMatchesSchemeConditionedRules(t *testing.T)
 		{
 			name:        "grpc/deny_plaintext_metadata_redirect",
 			agentDenies: metadataDenyHTTP(),
-			run: func(_ *testing.T, s *Server) error {
+			run: func(s *Server) error {
 				return s.checkResendGRPCScope(&resendGRPCPlan{
 					scheme:       "http",
 					useTLS:       false,
@@ -166,7 +166,7 @@ func TestResendScopeScheme_NonTLSDialMatchesSchemeConditionedRules(t *testing.T)
 		{
 			name:         "grpc/allow_plaintext_redirect",
 			policyAllows: plaintextAllowPair(),
-			run: func(_ *testing.T, s *Server) error {
+			run: func(s *Server) error {
 				return s.checkResendGRPCScope(&resendGRPCPlan{
 					scheme:       "http",
 					useTLS:       false,
@@ -188,7 +188,7 @@ func TestResendScopeScheme_NonTLSDialMatchesSchemeConditionedRules(t *testing.T)
 			// criteria forbid; this case fails again if anyone switches back.
 			name:        "grpc/override_leg_follows_plan_scheme_not_useTLS",
 			agentDenies: []connector.TargetRule{{Hostname: "10.0.0.5", Schemes: []string{"http"}}},
-			run: func(_ *testing.T, s *Server) error {
+			run: func(s *Server) error {
 				return s.checkResendGRPCScope(&resendGRPCPlan{
 					scheme:       "http",
 					useTLS:       true, // observed-transport upgrade
@@ -199,12 +199,54 @@ func TestResendScopeScheme_NonTLSDialMatchesSchemeConditionedRules(t *testing.T)
 			wantErr:         true,
 			wantErrContains: "blocked by agent deny rule",
 		},
+		{
+			// USK-1061 review round 1 (C-2). plan.scheme is NOT
+			// constrained to the scope vocabulary:
+			// extractResendGRPCStartFields reads Flow.URL.Scheme with no
+			// allowlist, and that value is the client-declared ":scheme"
+			// pseudo-header. On the observed-TLS-upgrade path the dial is
+			// TLS while plan.scheme keeps the recorded value, so before
+			// the clamp this leg was handed "gopher" and matched nothing
+			// — a deny that used to fire (the pre-USK-1061 code passed
+			// "https" here, derived from useTLS) silently stopped firing.
+			// resendGRPCScopeScheme falls back to the transport only when
+			// plan.scheme carries no usable answer.
+			name:        "grpc/out_of_vocabulary_scheme_clamps_to_transport",
+			agentDenies: []connector.TargetRule{{Hostname: "10.0.0.5", Schemes: []string{"https"}}},
+			run: func(s *Server) error {
+				return s.checkResendGRPCScope(&resendGRPCPlan{
+					scheme:       "gopher",
+					useTLS:       true,
+					canonicalURL: &url.URL{Scheme: "gopher", Host: "example.com", Path: "/pkg.Svc/M"},
+					dialAddr:     "10.0.0.5:443",
+				})
+			},
+			wantErr:         true,
+			wantErrContains: "blocked by agent deny rule",
+		},
+		{
+			// The canonical leg is clamped too, so the two legs of one
+			// check cannot disagree on the scheme axis. Same plan, deny
+			// moved onto the canonical authority, no redirect.
+			name:        "grpc/out_of_vocabulary_scheme_clamps_on_canonical_leg",
+			agentDenies: []connector.TargetRule{{Hostname: "example.com", Schemes: []string{"https"}}},
+			run: func(s *Server) error {
+				return s.checkResendGRPCScope(&resendGRPCPlan{
+					scheme:       "gopher",
+					useTLS:       true,
+					canonicalURL: &url.URL{Scheme: "gopher", Host: "example.com:443", Path: "/pkg.Svc/M"},
+					dialAddr:     "example.com:443",
+				})
+			},
+			wantErr:         true,
+			wantErrContains: "blocked by agent deny rule",
+		},
 
 		// --- resend_http ------------------------------------------------
 		{
 			name:        "http/deny_plaintext_metadata_override_host",
 			agentDenies: metadataDenyHTTP(),
-			run: func(_ *testing.T, s *Server) error {
+			run: func(s *Server) error {
 				msg := &envelope.HTTPMessage{
 					Method:    "GET",
 					Scheme:    "http",
@@ -219,7 +261,7 @@ func TestResendScopeScheme_NonTLSDialMatchesSchemeConditionedRules(t *testing.T)
 		{
 			name:         "http/allow_plaintext_override_host",
 			policyAllows: plaintextAllowPair(),
-			run: func(_ *testing.T, s *Server) error {
+			run: func(s *Server) error {
 				msg := &envelope.HTTPMessage{
 					Method:    "GET",
 					Scheme:    "http",
@@ -229,6 +271,41 @@ func TestResendScopeScheme_NonTLSDialMatchesSchemeConditionedRules(t *testing.T)
 				return s.checkResendHTTPScope(msg, "10.0.0.5:80", "10.0.0.5:80")
 			},
 		},
+
+		// --- the two rule dimensions the table declares but no case
+		// above populates (USK-1061 review round 1, C-8) -----------------
+		{
+			// Policy denies are evaluated before agent denies and carry a
+			// distinct reason string, so a case that never populates them
+			// leaves the highest-priority list untested.
+			name:         "policy_deny_plaintext_metadata_dial",
+			policyDenies: metadataDenyHTTP(),
+			run: func(s *Server) error {
+				return s.checkResendRawScope(&resendRawPlan{
+					useTLS:   false,
+					dialAddr: "169.254.169.254:80",
+				})
+			},
+			wantErr:         true,
+			wantErrContains: "blocked by policy deny rule",
+		},
+		{
+			// The agent allow list is the one SetAgentRules validates
+			// against the policy allow boundary, so this row exercises
+			// both that admission check (the agent rule must be covered by
+			// the broader policy rule) and the CheckTarget leg that
+			// consults agentAllows. A blank scheme false-blocks here just
+			// as it does on the policy allow leg.
+			name:         "agent_allow_plaintext_internal_dial",
+			policyAllows: []connector.TargetRule{{Hostname: "*.example", Schemes: []string{"http"}}},
+			agentAllows:  []connector.TargetRule{{Hostname: "internal.example", Schemes: []string{"http"}}},
+			run: func(s *Server) error {
+				return s.checkResendRawScope(&resendRawPlan{
+					useTLS:   false,
+					dialAddr: "internal.example:8080",
+				})
+			},
+		},
 	}
 
 	for _, tc := range cases {
@@ -236,7 +313,7 @@ func TestResendScopeScheme_NonTLSDialMatchesSchemeConditionedRules(t *testing.T)
 			s := mkServerFromLegacyDeps(legacyDeps{
 				targetScope: newScopeWithRules(t, tc.policyAllows, tc.policyDenies, tc.agentAllows, tc.agentDenies),
 			})
-			err := tc.run(t, s)
+			err := tc.run(s)
 			assertScopeVerdict(t, err, tc.wantErr, tc.wantErrContains)
 		})
 	}
@@ -260,7 +337,7 @@ func TestBuildFuzzRawPlan_NonTLSDialMatchesSchemeConditionedRules(t *testing.T) 
 		{
 			name:        "deny_plaintext_metadata_dial",
 			agentDenies: metadataDenyHTTP(),
-			run: func(_ *testing.T, s *Server) error {
+			run: func(s *Server) error {
 				_, err := s.buildFuzzRawPlan(context.Background(), &fuzzRawInput{
 					TargetAddr:    "169.254.169.254:80",
 					UseTLS:        false,
@@ -274,7 +351,7 @@ func TestBuildFuzzRawPlan_NonTLSDialMatchesSchemeConditionedRules(t *testing.T) 
 		{
 			name:         "allow_plaintext_internal_dial",
 			policyAllows: []connector.TargetRule{{Hostname: "internal.example", Schemes: []string{"http"}}},
-			run: func(_ *testing.T, s *Server) error {
+			run: func(s *Server) error {
 				_, err := s.buildFuzzRawPlan(context.Background(), &fuzzRawInput{
 					TargetAddr:    "internal.example:8080",
 					UseTLS:        false,
@@ -290,7 +367,7 @@ func TestBuildFuzzRawPlan_NonTLSDialMatchesSchemeConditionedRules(t *testing.T) 
 			s := mkServerFromLegacyDeps(legacyDeps{
 				targetScope: newScopeWithRules(t, tc.policyAllows, tc.policyDenies, tc.agentAllows, tc.agentDenies),
 			})
-			err := tc.run(t, s)
+			err := tc.run(s)
 			assertScopeVerdict(t, err, tc.wantErr, tc.wantErrContains)
 		})
 	}
@@ -342,6 +419,12 @@ func TestValidateResendSchemeAllowlist_CoversFlowIDPath(t *testing.T) {
 			input: resendWSInput{FlowID: "f", Opcode: "text"},
 		},
 		{
+			// Case-insensitivity is the sibling of the http row below —
+			// both validators must agree (USK-1061 review round 1, C-3).
+			name:  "negative_control_flow_id_path_accepts_uppercase_wss",
+			input: resendWSInput{FlowID: "f", Scheme: "WSS", Opcode: "text"},
+		},
+		{
 			name:  "negative_control_from_scratch_still_accepts_wss",
 			input: resendWSInput{TargetAddr: "example.com:443", Path: "/ws", Scheme: "wss", Opcode: "text"},
 		},
@@ -386,6 +469,22 @@ func TestValidateResendSchemeAllowlist_CoversFlowIDPath(t *testing.T) {
 		{
 			name:  "negative_control_flow_id_path_accepts_empty_scheme",
 			input: resendHTTPInput{FlowID: "f"},
+		},
+		{
+			// USK-1061 review round 1 (C-3). The hoist must not smuggle in
+			// a NEW rejection on the path it newly covers. `{flow_id,
+			// scheme: "HTTPS"}` ran correctly end to end before the hoist
+			// — resolveResendHTTPDial uses EqualFold and both scope legs
+			// lowercase — and resend_ws accepts the uppercase spelling, so
+			// a byte-exact check here would have been a silent behaviour
+			// change plus a divergence between two sibling validators.
+			// RFC 3986 §3.1 makes URL schemes case-insensitive.
+			name:  "negative_control_flow_id_path_accepts_uppercase_https",
+			input: resendHTTPInput{FlowID: "f", Scheme: "HTTPS"},
+		},
+		{
+			name:  "negative_control_from_scratch_accepts_uppercase_http",
+			input: resendHTTPInput{Method: "GET", Scheme: "HTTP", Authority: "example.com", Path: "/"},
 		},
 		{
 			name:  "negative_control_from_scratch_still_accepts_https",
@@ -478,16 +577,28 @@ func TestBuildResendWSPlan_SchemeHTTPS_DecouplesDialFromScopeCheck(t *testing.T)
 	})
 }
 
-// TestValidateRawTargetAddr_RejectsEmptyPort pins the small hardening that
-// rides along with USK-1061.
+// TestValidateRawTargetAddr_RejectsUnresolvablePort pins the hardening that
+// rides along with USK-1061 and the USK-1085 follow-up.
 //
-// net.SplitHostPort("h:") succeeds with an empty port, so the bare-split
-// check both raw tools used accepted "169.254.169.254:" — which then reaches
-// checkTargetScopeAddr and makes targetDefaultPort return 0, so any rule
-// carrying a `ports` condition stops matching. Same silent-non-match shape as
-// the blank scheme, one field over. Not exploitable (the dial fails
-// afterwards), but the scope check should never see a port it cannot resolve.
-func TestValidateRawTargetAddr_RejectsEmptyPort(t *testing.T) {
+// Two spellings reach checkTargetScopeAddr with a port targetDefaultPort
+// cannot resolve, and they differ in severity:
+//
+//   - "169.254.169.254:" — net.SplitHostPort succeeds with an empty port, so
+//     the bare-split check both raw tools used accepted it. targetDefaultPort
+//     returns 0, so any `ports`-bearing rule stops matching. Not exploitable:
+//     the dial fails afterwards.
+//   - "169.254.169.254:http" — a SERVICE NAME. net.SplitHostPort accepts it
+//     and so does the dial, because net.Dial resolves the port through
+//     net.LookupPort, whose builtin table maps "http" -> 80. targetDefaultPort
+//     still returns 0. That is a validate/use parsing discrepancy: a deny rule
+//     of {"hostname": "169.254.169.254", "ports": [80]} does not match, and the
+//     socket lands on port 80 anyway (USK-1085).
+//
+// The host guard is deliberately broader than "explicit port required":
+// net.Dial("tcp", ":80") resolves to the local system, so the bare `:port`
+// form was an implicit localhost dial that no `hostname`-bearing rule could
+// match (validateTargetRules requires a non-empty hostname).
+func TestValidateRawTargetAddr_RejectsUnresolvablePort(t *testing.T) {
 	cases := []struct {
 		addr    string
 		wantErr string
@@ -495,7 +606,13 @@ func TestValidateRawTargetAddr_RejectsEmptyPort(t *testing.T) {
 		{addr: "169.254.169.254:", wantErr: "port cannot be empty"},
 		{addr: ":80", wantErr: "host cannot be empty"},
 		{addr: "example.com", wantErr: "must be host:port"},
+		{addr: "169.254.169.254:http", wantErr: "must be a decimal number"},
+		{addr: "169.254.169.254:https", wantErr: "must be a decimal number"},
+		{addr: "example.com:0", wantErr: "must be a decimal number"},
+		{addr: "example.com:99999", wantErr: "must be a decimal number"},
+		{addr: "example.com:+80", wantErr: "must be a decimal number"},
 		{addr: "example.com:80"},
+		{addr: "example.com:65535"},
 		{addr: "[::1]:443"},
 	}
 	for _, tc := range cases {
@@ -518,14 +635,148 @@ func TestValidateRawTargetAddr_RejectsEmptyPort(t *testing.T) {
 
 	// Both raw tools must share the guard — this is the drift the shared
 	// helper exists to prevent.
-	rawIn := resendRawInput{FlowID: "f", TargetAddr: "169.254.169.254:"}
-	if err := validateResendRawInput(&rawIn); err == nil {
-		t.Error("validateResendRawInput with an empty port = nil, want an error")
+	for _, addr := range []string{"169.254.169.254:", "169.254.169.254:http"} {
+		rawIn := resendRawInput{FlowID: "f", TargetAddr: addr}
+		if err := validateResendRawInput(&rawIn); err == nil {
+			t.Errorf("validateResendRawInput(target_addr=%q) = nil, want an error", addr)
+		}
+		fuzzIn := fuzzRawInput{TargetAddr: addr, OverrideBytes: "x"}
+		if err := validateFuzzRawTargetAndSNI(&fuzzIn); err == nil {
+			t.Errorf("validateFuzzRawTargetAndSNI(target_addr=%q) = nil, want an error", addr)
+		}
 	}
-	fuzzIn := fuzzRawInput{TargetAddr: "169.254.169.254:", OverrideBytes: "x"}
-	if err := validateFuzzRawTargetAndSNI(&fuzzIn); err == nil {
-		t.Error("validateFuzzRawTargetAndSNI with an empty port = nil, want an error")
+}
+
+// TestValidateOverrideHost_MirrorsRawTargetAddrPortRule pins that
+// resend_http / fuzz_http's override_host carries the same decimal-port rule
+// as the raw tools' target_addr. The scope engine is shared, so a service
+// name in override_host reaches checkTargetScopeAddr with exactly the
+// port-0 degradation described above (USK-1085).
+func TestValidateOverrideHost_MirrorsRawTargetAddrPortRule(t *testing.T) {
+	cases := []struct {
+		host    string
+		wantErr string
+	}{
+		{host: "169.254.169.254:http", wantErr: "must be a decimal number"},
+		{host: "169.254.169.254:https", wantErr: "must be a decimal number"},
+		{host: "example.com:0", wantErr: "must be a decimal number"},
+		{host: "example.com:99999", wantErr: "must be a decimal number"},
+		{host: "169.254.169.254:", wantErr: "port cannot be empty"},
+		{host: ":80", wantErr: "host cannot be empty"},
+		{host: "example.com:80"},
+		{host: "[::1]:443"},
 	}
+	for _, tc := range cases {
+		t.Run(tc.host, func(t *testing.T) {
+			err := validateOverrideHost(tc.host)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("validateOverrideHost(%q) = %v, want nil", tc.host, err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("validateOverrideHost(%q) = nil, want %q", tc.host, tc.wantErr)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("error = %v, want it to contain %q", err, tc.wantErr)
+			}
+		})
+	}
+
+	// And through the tool's own validator, so the wiring is pinned too.
+	in := resendHTTPInput{FlowID: "f", OverrideHost: "169.254.169.254:http"}
+	if err := validateResendHTTPInput(&in); err == nil {
+		t.Error("validateResendHTTPInput(override_host=\"169.254.169.254:http\") = nil, want an error")
+	}
+}
+
+// TestBuildResendHTTPEnvelope_SchemelessFlow_ScopeChecksAsPlaintext is the
+// USK-1061 review-round-1 regression for C-1: resend_http was the one of the
+// five fixed call sites whose resolved scheme could still be "", so the
+// bypass this Issue exists to close stayed reachable through it.
+//
+// The blank is planted by ordinary wire traffic. internal/layer/http2's
+// assembler records `:scheme` verbatim and flags a missing one only for
+// extended CONNECT (RFC 8441 §4), so a normal h2 request that omits
+// `:scheme` is recorded with Scheme=="" and no anomaly; httpaggregator copies
+// it into HTTPMessage.Scheme, RecordStep projects it into Flow.URL, and the
+// SQLite round-trip ("//host/path") preserves the blank — which this test
+// reproduces by going through the real store rather than a mock.
+//
+// Two legs, two axes:
+//
+//   - deny: {flow_id, override_host: "169.254.169.254:80"} against a deny of
+//     {"hostname": "169.254.169.254", "schemes": ["http"]}. The canonical
+//     authority is a different host that appears in no rule, so only the
+//     override leg can satisfy the assertion.
+//   - allow: the blank also drives CheckURL's defaultPort("", "") to 0, so a
+//     `ports`-bearing allow rule false-blocks a legitimate resend at the same
+//     time. Both axes recover from the one default.
+func TestBuildResendHTTPEnvelope_SchemelessFlow_ScopeChecksAsPlaintext(t *testing.T) {
+	t.Run("deny_override_host_is_blocked", func(t *testing.T) {
+		store := newTestStore(t)
+		flowID := saveSchemelessHTTPFlow(t, store, "//example.com:80/api")
+		s := mkServerFromLegacyDeps(legacyDeps{
+			store:       store,
+			targetScope: newScopeWithRules(t, nil, nil, nil, metadataDenyHTTP()),
+		})
+
+		input := resendHTTPInput{FlowID: flowID, OverrideHost: "169.254.169.254:80"}
+		env, err := s.buildResendHTTPEnvelope(context.Background(), &input)
+		if err != nil {
+			t.Fatalf("buildResendHTTPEnvelope: %v", err)
+		}
+		msg, ok := env.Message.(*envelope.HTTPMessage)
+		if !ok {
+			t.Fatalf("env.Message = %T, want *envelope.HTTPMessage", env.Message)
+		}
+		if msg.Scheme != "http" {
+			t.Fatalf("msg.Scheme = %q, want %q — a blank reaches the scope check and matches no schemes-bearing rule", msg.Scheme, "http")
+		}
+		err = s.checkResendHTTPScope(msg, input.OverrideHost, input.OverrideHost)
+		assertScopeVerdict(t, err, true, "blocked by agent deny rule")
+	})
+
+	t.Run("allow_canonical_leg_infers_the_default_port", func(t *testing.T) {
+		store := newTestStore(t)
+		// No port on the recorded authority: the canonical leg's port then
+		// comes from defaultPort(scheme, ""), which is 0 for a blank.
+		flowID := saveSchemelessHTTPFlow(t, store, "//internal.example/api")
+		s := mkServerFromLegacyDeps(legacyDeps{
+			store: store,
+			targetScope: newScopeWithRules(t,
+				[]connector.TargetRule{{Hostname: "internal.example", Ports: []int{80}, Schemes: []string{"http"}}},
+				nil, nil, nil),
+		})
+
+		env, err := s.buildResendHTTPEnvelope(context.Background(), &resendHTTPInput{FlowID: flowID})
+		if err != nil {
+			t.Fatalf("buildResendHTTPEnvelope: %v", err)
+		}
+		msg := env.Message.(*envelope.HTTPMessage)
+		assertScopeVerdict(t, s.checkResendHTTPScope(msg, "internal.example:80", ""), false, "")
+	})
+
+	t.Run("recorded_stream_transport_wins_over_the_http_fallback", func(t *testing.T) {
+		// The fallback prefers the recorded handshake transport, mirroring
+		// resend_grpc's USK-920 Stream.Scheme fallback (allowlisted to the
+		// scope vocabulary), and only then settles on "http".
+		if got := resendHTTPFallbackScheme(&flow.Stream{Scheme: "https"}); got != "https" {
+			t.Errorf("resendHTTPFallbackScheme(Stream{https}) = %q, want %q", got, "https")
+		}
+		if got := resendHTTPFallbackScheme(&flow.Stream{Scheme: "HTTPS"}); got != "https" {
+			t.Errorf("resendHTTPFallbackScheme(Stream{HTTPS}) = %q, want %q", got, "https")
+		}
+		// "tcp" is a canonical Stream.Scheme value but is not in the scope
+		// engine's vocabulary, so it must not leak through.
+		if got := resendHTTPFallbackScheme(&flow.Stream{Scheme: "tcp"}); got != "http" {
+			t.Errorf("resendHTTPFallbackScheme(Stream{tcp}) = %q, want %q", got, "http")
+		}
+		if got := resendHTTPFallbackScheme(nil); got != "http" {
+			t.Errorf("resendHTTPFallbackScheme(nil) = %q, want %q", got, "http")
+		}
+	})
 }
 
 // newScopeWithRules assembles a real *connector.TargetScope. Policy rules are
@@ -556,6 +807,54 @@ func assertScopeVerdict(t *testing.T, err error, wantErr bool, wantErrContains s
 	if err != nil {
 		t.Fatalf("scope check = %v, want nil — a schemes-bearing allow rule stopped matching", err)
 	}
+}
+
+// saveSchemelessHTTPFlow persists a minimal recorded HTTP stream whose
+// Flow.URL carries no scheme — the shape RecordStep produces for an HTTP/2
+// request that omitted the `:scheme` pseudo-header. Stream.Scheme is left
+// empty for the same reason: createStream derives it from the very same
+// HTTPMessage.Scheme, so a schemeless request leaves both blank.
+//
+// Goes through the real SQLite store so the "//host/path" String() ->
+// url.Parse round-trip production performs is exercised rather than assumed.
+func saveSchemelessHTTPFlow(t *testing.T, store flow.Store, rawURL string) string {
+	t.Helper()
+	ctx := context.Background()
+
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		t.Fatalf("url.Parse(%q): %v", rawURL, err)
+	}
+	if u.Scheme != "" {
+		t.Fatalf("url.Parse(%q).Scheme = %q, want empty — the fixture must reproduce the schemeless shape", rawURL, u.Scheme)
+	}
+
+	streamID := uuid.NewString()
+	st := &flow.Stream{
+		ID:        streamID,
+		ConnID:    uuid.NewString(),
+		Protocol:  "HTTP/2",
+		State:     "complete",
+		Timestamp: time.Now(),
+	}
+	if err := store.SaveStream(ctx, st); err != nil {
+		t.Fatalf("SaveStream: %v", err)
+	}
+
+	sendFlow := &flow.Flow{
+		ID:        uuid.NewString(),
+		StreamID:  streamID,
+		Sequence:  0,
+		Direction: "send",
+		Timestamp: time.Now(),
+		Method:    "GET",
+		URL:       u,
+		Headers:   map[string][]string{"accept": {"*/*"}},
+	}
+	if err := store.SaveFlow(ctx, sendFlow); err != nil {
+		t.Fatalf("SaveFlow: %v", err)
+	}
+	return streamID
 }
 
 // saveWSUpgradeFlow persists a minimal recorded WebSocket stream: one Stream

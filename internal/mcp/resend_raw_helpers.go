@@ -102,9 +102,33 @@ func validateResendRawInput(input *resendRawInput) error {
 // — which then reaches checkTargetScopeAddr and makes targetDefaultPort
 // return 0, so any rule carrying a `ports` condition stops matching, the
 // same silent-non-match shape as the blank scheme. The dial fails
-// afterwards, so this was not exploitable; rejecting it up front keeps the
-// scope check from ever seeing a port it cannot resolve. Mirrors
-// validateOverrideHost, which already rejected both empty halves.
+// afterwards, so that particular spelling was not exploitable. Mirrors
+// validateOverrideHost, which enforces the identical rule on override_host.
+//
+// USK-1085: the empty port is not the only way to reach a port the scope
+// engine cannot resolve, so this validator also requires the port to be
+// decimal. net.SplitHostPort accepts a **service name** in the port
+// position, and unlike the empty case the dial does resolve it:
+// net.LookupPort's builtin table maps "http" -> 80 and "https" -> 443, while
+// targetDefaultPort returns 0 for any non-digit port. `resend_raw
+// {target_addr: "169.254.169.254:http"}` therefore walked past a deny rule
+// of {"hostname": "169.254.169.254", "ports": [80]} — the scope engine saw
+// port 0, the rule did not match, and the socket landed on port 80. That is
+// a validate/use parsing discrepancy, not merely an unresolvable port, which
+// is why the previous wording of this comment ("keeps the scope check from
+// ever seeing a port it cannot resolve") overstated what the empty-port
+// check alone achieved. isDecimalPort is the shared gate; see its doc for
+// why it mirrors targetDefaultPort's digit loop instead of using Atoi alone.
+//
+// The host guard is slightly broader than the contract's wording suggests
+// and that widening is deliberate: net.SplitHostPort(":80") succeeds with an
+// empty host, and net.Dial("tcp", ":80") resolves to the local system — so
+// the bare `:port` form was an implicit localhost dial that NO
+// `hostname`-bearing rule could ever match, because validateTargetRules
+// requires a non-empty hostname. Both raw tools document "Explicit port
+// required" (`resend_raw.go`, `fuzz_raw.go`, `help_resend_raw.md`) and
+// neither ever documented the bare form, so rejecting it enforces the stated
+// contract rather than changing it.
 func validateRawTargetAddr(addr string) error {
 	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
@@ -115,6 +139,9 @@ func validateRawTargetAddr(addr string) error {
 	}
 	if port == "" {
 		return fmt.Errorf("invalid target_addr %q: port cannot be empty", addr)
+	}
+	if !isDecimalPort(port) {
+		return fmt.Errorf("invalid target_addr %q: port %q must be a decimal number in 1-65535 (a service name resolves at dial time but not in the scope check)", addr, port)
 	}
 	return nil
 }

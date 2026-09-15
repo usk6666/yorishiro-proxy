@@ -893,16 +893,73 @@ func concatResendGRPCPayloads(plan *resendGRPCPlan) []byte {
 // "https" — and is already lowercased by resolveResendGRPCStart, but
 // the recovered-from-flow value bypasses that ToLower, so lowercase
 // here as CheckURL does on the canonical leg.
+//
+// Both legs read resendGRPCScopeScheme, not plan.scheme directly — see
+// that function for why the value has to be clamped into the scope
+// engine's vocabulary before it is matched against a rule.
 func (s *Server) checkResendGRPCScope(plan *resendGRPCPlan) error {
-	if err := s.checkTargetScopeURL(plan.canonicalURL); err != nil {
+	scopeScheme := resendGRPCScopeScheme(plan)
+	canonical := plan.canonicalURL
+	if canonical != nil && canonical.Scheme != scopeScheme {
+		clamped := *canonical
+		clamped.Scheme = scopeScheme
+		canonical = &clamped
+	}
+	if err := s.checkTargetScopeURL(canonical); err != nil {
 		return err
 	}
 	if plan.dialAddr != plan.canonicalURL.Host {
-		if err := s.checkTargetScopeAddr(strings.ToLower(plan.scheme), plan.dialAddr); err != nil {
+		if err := s.checkTargetScopeAddr(scopeScheme, plan.dialAddr); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// resendGRPCScopeScheme clamps plan.scheme into the TargetScope `schemes`
+// vocabulary, for the scope check only. Never returns anything but "http"
+// or "https".
+//
+// USK-1061 (review round 1): plan.scheme is unconstrained on the flow_id
+// path. extractResendGRPCStartFields reads Flow.URL.Scheme with no
+// allowlist, and that value is the client-declared `:scheme` pseudo-header —
+// attacker-controlled. The asymmetry is visible in this file: the USK-920
+// Stream.Scheme fallback in resolveResendGRPCStart *is* allowlisted to
+// {http, https}; its primary source is not. validateResendGRPCStringFields
+// covers only the user-supplied override.
+//
+// Passing an out-of-vocabulary value straight through would matter here
+// specifically because of the applyResendGRPCDialGroundTruth upgrade path
+// (input.Scheme == "" && !plan.useTLS && plan.observedUpstreamTLSVersion !=
+// ""): the dial becomes TLS while plan.scheme stays at the recorded value,
+// so the override leg — which before USK-1061 derived "https" from useTLS
+// and did match a `schemes: ["https"]` deny — would start passing e.g.
+// "gopher" and match nothing at all. Turning a matching deny into a
+// never-matching one is a deny-direction weakening, and it is not covered by
+// the http-vs-https reasoning above: where the value is inside the
+// vocabulary "neither is fail-safe" is a fair call, but where it is outside
+// it entirely, "no rule can ever match" is not defensible in either list.
+//
+// The clamp lives at this seam rather than on plan.scheme itself because
+// plan.scheme is a *wire* value: USK-1056's acceptance criterion is that it
+// is never derived from or rewritten by useTLS, and reproducing the recorded
+// `:scheme` byte-for-byte on the resent HEADERS frame is the point of the
+// tool. Rewriting it would also change what the recorded resend Flow shows.
+// Only the policy predicate is normalized; the bytes are not touched.
+//
+// An in-vocabulary plan.scheme always wins over useTLS, which is what keeps
+// the USK-1056 divergence case (scheme "http" + useTLS true) pinned to
+// "http". useTLS is consulted only when plan.scheme carries no usable
+// answer, and there it is the transport the socket will actually use.
+func resendGRPCScopeScheme(plan *resendGRPCPlan) string {
+	switch s := strings.ToLower(plan.scheme); s {
+	case "http", "https":
+		return s
+	}
+	if plan.useTLS {
+		return "https"
+	}
+	return "http"
 }
 
 // buildResendGRPCEncoderRegistry constructs the WireEncoderRegistry

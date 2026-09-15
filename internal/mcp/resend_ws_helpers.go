@@ -466,10 +466,16 @@ func resendWSUpgradeURL(scheme, authority, path, rawQuery string) *url.URL {
 // matching there — a plaintext-scoped deny no-opped (bypass), a
 // plaintext-scoped allow false-blocked. Passing "ws"/"wss" instead would
 // reproduce the identical never-matches defect, because validateTargetRules
-// rejects any scheme outside {http, https}, so a rule can never contain
-// them. Reading the canonical leg's own value also keeps the two legs of
-// one check from disagreeing on the scheme axis; lowercasing mirrors
-// TargetScope.CheckURL, which lowercases before matching.
+// rejects any scheme outside {http, https}, so an Agent-layer rule can never
+// contain them. (That guarantee is Agent-layer only: a Policy-layer rule
+// loaded from the config file is not scheme-validated at all —
+// config.LoadPolicyFile checks JSON validity and mcpserver.ConvertTargetRules
+// copies Schemes verbatim. Closing that gap is USK-1084. It does not change
+// the conclusion here: a rule containing "ws" would simply never match
+// anything, which is the outcome this mapping exists to avoid.) Reading the
+// canonical leg's own value also keeps the two legs of one check from
+// disagreeing on the scheme axis; lowercasing mirrors TargetScope.CheckURL,
+// which lowercases before matching.
 func (s *Server) checkResendWSScope(plan *resendWSPlan) error {
 	if err := s.checkTargetScopeURL(plan.upgradeURL); err != nil {
 		return err
