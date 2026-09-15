@@ -15,8 +15,15 @@
 //     RemoveMetadata, ReplacePayload, SetStatus, SetStatusMessage.
 //   - SafetyEngine.CheckInput type-switches on the gRPC message type
 //     and evaluates against gRPC-local Targets (metadata, payload,
-//     service, method) plus the existing common.TargetBody for preset
-//     reuse (TargetBody maps to the gRPC payload).
+//     service, method) plus the shared common Targets the built-in
+//     presets declare, for preset reuse: common.TargetBody maps to the
+//     gRPC payload on a Data message, and common.TargetURL /
+//     common.TargetQuery map to the request-side :path (with its query
+//     rejoined) and to the query alone on a Start message — USK-1073.
+//     Reading :path is what lets the destructive-sql /
+//     destructive-os-command presets fire on an RPC target, including a
+//     :path too malformed for the Service / Method view to represent
+//     (USK-1053).
 //
 // MITM principles enforced by this package:
 //
