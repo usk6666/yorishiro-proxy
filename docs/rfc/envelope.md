@@ -870,6 +870,53 @@ The following ideas have come up repeatedly and are deliberately rejected:
 - USK-702 (Done, 2026-05-04) — Input Filter modify_and_forward recheck wired into `InterceptStep.holdAndDispatch`. Send-only by design.
 - USK-894 (Canceled, 2026-05-15) — Investigation concluded that Receive-direction modify_and_forward does not need a SafetyEngine recheck because it cannot harm the upstream server; browser-side effects are out of scope for SafetyFilter. This subsection codifies the rationale so the question does not need to be re-litigated.
 
+### 3.8 TargetScope `schemes`: a transport-confidentiality predicate
+
+`TargetRule.Schemes` (`internal/connector/scope.go`) is the one scope condition whose meaning is not inferable from its name, and getting it wrong is silent in both directions. This subsection is the authoritative definition.
+
+#### What it means
+
+`schemes` selects on **transport confidentiality — plaintext vs TLS — spelled with the `http` / `https` tokens**. It is *not* an L7 application-protocol axis. The vocabulary is closed: `internal/mcp/helpers.go` `allowedSchemes` is `{http, https}` and `validateTargetRules` rejects anything else with `scheme %q is not allowed (use http or https)`.
+
+Two existing data-path callers fix this reading:
+
+- `internal/layer/http1/http1_forward_handler.go` passes `http` / `https` explicitly "so scope rules can disambiguate http vs https traffic for the same host".
+- `internal/connector/connect_handler.go` scopes a `CONNECT` tunnel as `"https"` — even though the tunnel may carry SMTP. The predicate is about the leg's confidentiality, not its payload.
+
+Every caller therefore maps its own transport onto the same two tokens: WebSocket maps `ws → http` and `wss → https` (`resendWSUpgradeURL`); raw TCP and gRPC map their `use_tls` / `:scheme` decision the same way. Inventing per-protocol tokens (`ws`, `tcp`, `raw`, `tls`) is **rejected** — see Anti-patterns.
+
+#### Why a blank scheme is never safe
+
+`matchTargetRule` is AND logic: `if len(rule.Schemes) > 0 && !containsStringFold(rule.Schemes, scheme) { return false }`. A blank scheme matches no `schemes`-bearing rule, and `CheckTarget` evaluates deny → allow, so the same blank breaks both lists in opposite ways:
+
+| Rule | Effect of a blank scheme | Security outcome |
+|------|--------------------------|------------------|
+| deny `{hostname: "169.254.169.254", schemes: ["http"]}` | rule stops matching; evaluation falls through to the allow check, which is empty | **BYPASS** — cloud metadata reachable |
+| allow `{hostname: "internal.example", schemes: ["http"]}` | rule stops matching | **FALSE BLOCK** — `not in policy allow list` on a legitimate target |
+
+There is no fail-safe blank semantic: deny wants "unknown matches everything" and allow wants "unknown matches nothing", so any *single* rule for the blank case is fail-open in exactly one direction. An asymmetric per-list semantic is conceivable but is a behaviour change to a live policy engine with deliberate blank callers, and is deferred (§11).
+
+Consequently the fix for a blank scheme belongs at the **call sites**, not in `matchTargetRule` and not as a `"" → "http"` default inside the shared `checkTargetScopeAddr` seam: defaulting there would silently mis-scope a caller whose transport is genuinely unknown.
+
+#### The one accepted blank caller
+
+`internal/connector/socks5.go` passes `""`. SOCKS5 must send `REP=0x02` **before** any tunnel byte, so at check time the tunneled transport has not been observed and there is nothing to sniff. `schemes`-bearing rules do not match SOCKS5 targets; scope them by `hostname` / `ports`, or scope the tunneled protocol instead. This is documented at the call site and is the reason the blank case must stay expressible.
+
+#### Anti-patterns (do not propose)
+
+- **"Extend the vocabulary with `ws` / `wss` / `tcp` / `raw` / `tls`"** — it costs the config struct, `validateTargetRules`, `ruleCoversRule`'s policy-boundary subset logic, `schema_security.json`, `help_security.md` and the WebUI, and it creates a *new* silent-non-match class: every existing `schemes: ["http"]` deny would stop covering raw traffic the moment `raw` became a distinct token.
+- **"Make `matchTargetRule` fail-safe for a blank scheme"** — provably impossible with one semantic (above).
+- **"Default `""` to `"http"` in `checkTargetScopeAddr`"** — mis-scopes the genuinely-unknown SOCKS5 caller as plaintext, trading a visible gap for an invisible wrong answer.
+
+This is **not** in tension with MITM Principle 2 ("each protocol has its own canonical form; do not unify across protocols"). Principle 2 governs *wire-data representation* — HTTP/1.x header casing vs RFC 9113 lowercase, and so on. `schemes` is a control-plane **policy predicate** that borrows URL scheme names for a transport property. Inventing per-protocol policy tokens would be the violation, not the fix.
+
+#### Acceptance record
+
+- USK-1061 (Done, 2026-09-15) — five MCP control-plane scope call sites (`checkResendHTTPScope`, `checkResendGRPCScope`, `checkResendWSScope`, `checkResendRawScope`, `buildFuzzRawPlan`'s inline copy, reaching 8 MCP tools) passed `""` on the non-TLS path, no-opping every `schemes`-bearing rule. Each now passes the scheme its canonical leg already matched on (`canonicalURL.Scheme` / `plan.scheme` / `upgradeURL.Scheme`) or, for L4, the `use_tls → {http, https}` mapping. `plan.scheme` rather than `plan.useTLS` for gRPC, preserving USK-1056's "never derive scheme from useTLS". `fuzz_raw`'s duplicate now shares `checkRawDialScope`. Same change folded in the USK-1051 precedent for `resend_http` / `resend_ws`: the scheme allowlist was hoisted into the unconditional validator so the `flow_id` path is covered — previously `resend_ws {flow_id, scheme: "https"}` set `useTLS=false` (plaintext dial) while handing the scope check `"https"`, so an allow rule scoped to TLS approved a cleartext credential replay (CWE-319).
+- USK-1081 — the same blank-scheme defect in the live data path (`internal/pipeline/host_scope_step.go`); tracked separately because the fix lives in a different layer.
+
+**Observable change for existing operator configs**: deny rules become strictly stricter; allow rules become more permissive, but only to exactly what the operator authored. No configuration becomes more permissive than it was written to be.
+
 ---
 
 ## 4. Canonical Scenarios
@@ -1480,6 +1527,7 @@ This RFC is **accepted** as of 2026-04-12. Implementation proceeds on N1.
 - [ ] `WireLevelTap` interface unification — **deferred 2026-05-15 (USK-900)**. The five frame-level record callback sibling Options (`http2.WithFrameRecordCallback`, `http1.WithChunkRecordCallback`, `grpc.WithLPMFrameRecordCallback`, `httpaggregator.WithH2FrameRecordCallback`, `grpc.WithH2DataFrameRecordCallback`) already share their session-side closure builder (`session/h2_frame_record.go` `wireLevelRecordCallback()`), so the main boilerplate cost is already absorbed. Layer-side Option contracts remain per-Layer ad-hoc by design: `http1.WithChunkRecordCallback` is constrained to `func([]byte)` by the parser-level `ChunkRecordSetter` hook (parser owns chunk-boundary detection, not the Layer), so a naive `WireLevelTap` seam would degenerate into "four uniform + one adaptor". Re-evaluate when a 6th sibling appears (e.g. a WebSocket per-frame record producer) or when the http1 parser hook is revisited for an unrelated reason — at that point the seam will be either fully uniform or clearly fragmented, and the decision becomes unambiguous.
 - [ ] HTTP/3 / QUIC — **out of scope, deferred 2026-07-16 (USK-1016)**. The proxy is h3/QUIC-incapable: there is no UDP listener and the TLS layer advertises only `h2` / `http/1.1` in ALPN. This is a **weak** bot signal for the anti-detect use case (M47/M48): a Firefox routed through an explicit HTTP proxy does **not** use HTTP/3 anyway, because h3 runs over QUIC/UDP and cannot traverse a `CONNECT` proxy — the same reason a real Firefox behind a corporate proxy falls back to h2. So a proxied Firefox presenting no h3 is *expected*, coherent behaviour, not an anomaly. Actual h3/QUIC MITM (a UDP listener, QUIC transport termination, and `h3` ALPN) is a separate, much larger milestone and is explicitly out of scope here. **Alt-Svc note:** an upstream may still send an `Alt-Svc: h3=...` response header advertising its own h3 endpoint; a strict detector could flag that the advertised h3 service is never exercised by the proxied client. Stripping that header is **already achievable today** with a user-authored response `TransformRemoveHeader` rule (`HeaderName: "Alt-Svc"`, `Direction: response`) — no new code required. A dedicated opt-in `suppress_alt_svc` config knob is **deferred to M48**. **Re-open trigger:** a reproducible camoufox/Cloudflare detection that flips green when the upstream `Alt-Svc` header is stripped from the client-bound response (justifies the dedicated knob), or a decision to build real h3/QUIC MITM (justifies the UDP listener + `h3` ALPN work). Cross-referenced from §3.4.3.
 - [ ] gRPC-Web `:path` overlay — **deferred 2026-09-15 (USK-1053 → USK-1069)**. `internal/layer/grpcweb/channel.go` builds its `GRPCStartMessage` without populating `Path` / `RawQuery`, so the USK-1053 Send-side rule (the observed `:path` wins when `parseGRPCPath` cannot represent it) has nothing to act on there and a malformed gRPC-Web `:path` is still normalized to `/Service/Method`. The gRPC-Web Layer sits over both HTTP/1.x and HTTP/2, so the fix needs a per-transport path source rather than a copy of the h2-only projection, and it collides with the in-flight USK-1057 work on the same file. **Re-open trigger:** USK-1057 merges (removing the collision), at which point USK-1069 applies the same overlay + precedence rule to `grpcweb`.
+- [ ] Asymmetric fail-safe `matchTargetRule` for a blank scheme — **deferred 2026-09-15 (USK-1061)**. `TargetRule.Schemes` matching is symmetric today: a blank scheme matches no `schemes`-bearing rule, in the deny list and the allow list alike (§3.8). No *single* semantic can be fail-safe in both — deny wants "unknown matches everything", allow wants "unknown matches nothing" — so the only correct-in-both-directions design is a per-list asymmetric rule: treat a blank scheme as matching every deny rule's `schemes` condition and no allow rule's. That is a behaviour change to a live policy engine, and its blast radius is not the MCP call sites USK-1061 fixed (those now pass a resolved scheme) but the remaining deliberate blank callers — `internal/connector/socks5.go` and `TargetScope.CheckURL(nil)` — where it would start blocking traffic that a `schemes`-bearing deny rule was never written to cover. **Re-open trigger:** a third genuinely-unknown-transport caller appears (which would make the blank case structural rather than the SOCKS5 special case it is today), or a SOCKS5-side inner-byte peek lands that makes the blank scheme avoidable there, at which point the asymmetric rule protects only `CheckURL(nil)` and the trade-off becomes cheap. The current symmetric semantic is pinned by `TestCheckTarget_BlankScheme_DoesNotMatchSchemeRule` (`internal/connector/scope_test.go`) so it cannot be changed silently.
 - [ ] Two residual `:path` losses at the HTTP/2 Layer — **accepted 2026-09-15 (USK-1053)**, shared verbatim with `HTTPMessage` and therefore not gRPC-specific. (1) `:path: ""` is re-emitted as `/`, because `appendRequestPseudoHeaders` (`internal/layer/http2/channel.go`) substitutes `/` for an empty path. (2) A bare trailing `?` (`/x?`) is destroyed: `splitPath` (`internal/layer/http2/assembler.go`) yields `RawQuery=""`, and the rejoin only re-adds `?` when `RawQuery` is non-empty. Both are losses in the shared `Path`/`RawQuery` split, so fixing them means changing the H2 event representation for *all* HTTP traffic, not just gRPC; the wire-observed bytes remain intact in `Envelope.Raw` either way. **Re-open trigger:** a diagnostic scenario where re-emitting an empty or bare-`?` `:path` verbatim changes upstream behaviour (e.g. a WAF bypass reproduction that only fires on the exact byte form) — that would justify replacing the split pair with a single verbatim `:path` field plus derived accessors across the HTTP/2 Layer and `HTTPMessage` together.
 
 ### 11.1 Macro hook `__response_*` key matrix per protocol

@@ -246,6 +246,16 @@ func (n *SOCKS5Negotiator) Negotiate(ctx context.Context, conn net.Conn) (contex
 	// Scheme is passed as "" because at handshake time SOCKS5 does not know
 	// the tunneled protocol. Scope rules that are restricted by Schemes
 	// (e.g. Schemes: ["https"]) will not match here.
+	//
+	// USK-1061: that consequence is accepted here and nowhere else. `schemes`
+	// means transport confidentiality (plaintext vs TLS) spelled with the
+	// http/https tokens, so every caller that has actually resolved its
+	// transport must pass "http" or "https" — a blank value silently no-ops
+	// both DENY rules (bypass) and ALLOW rules (false block), and no single
+	// blank semantic is fail-safe in both directions. This site is the one
+	// genuine unknown: REP=0x02 must precede any tunnel byte, so there is
+	// nothing to sniff yet. Scope the tunneled protocol instead. See
+	// RFC-001 §3.8 and internal/mcp/helpers.go checkTargetScopeAddr.
 	if n.Scope != nil && n.Scope.HasRules() {
 		host, portStr, splitErr := net.SplitHostPort(target)
 		port := 0

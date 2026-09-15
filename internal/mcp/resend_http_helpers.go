@@ -67,7 +67,8 @@ func validateOverrideHost(host string) error {
 
 // validateResendHTTPInput rejects malformed inputs at the schema boundary
 // before any expensive lookups (flow store, dial) run. Header CR/LF guards,
-// body-encoding parse, body_patch shape, and required-field rules live here.
+// body-encoding parse, body_patch shape, the http/https allowlist on a
+// user-supplied scheme, and required-field rules live here.
 func validateResendHTTPInput(input *resendHTTPInput) error {
 	if input.FollowRedirects != nil && *input.FollowRedirects {
 		return errors.New("follow_redirects is not supported by resend_http")
@@ -85,14 +86,51 @@ func validateResendHTTPInput(input *resendHTTPInput) error {
 			return fmt.Errorf("invalid override_host %q: %w", input.OverrideHost, err)
 		}
 	}
+	if err := validateResendHTTPScheme(input.Scheme); err != nil {
+		return err
+	}
 	if input.FlowID == "" {
 		return validateResendHTTPFromScratch(input)
 	}
 	return nil
 }
 
+// validateResendHTTPScheme applies the http/https allowlist to a
+// user-supplied scheme. An empty value is accepted here — it means "not
+// supplied", and validateResendHTTPFromScratch separately requires one on
+// the from-scratch path.
+//
+// USK-1061: the allowlist lives here — not in validateResendHTTPFromScratch
+// — because it must cover the flow_id path too, applying the USK-1051
+// precedent already in force for resend_grpc (see
+// validateResendGRPCStringFields). input.Scheme takes precedence over the
+// recovered Flow.URL scheme in buildResendHTTPEnvelopeWithMeta, so on the
+// flow_id path an arbitrary value used to reach the canonical *url.URL that
+// checkResendHTTPScope matches rules against. `resend_http {flow_id: "f",
+// scheme: "gopher", authority: "169.254.169.254:80"}` therefore walked past
+// a deny rule of {"hostname": "169.254.169.254", "schemes": ["http"]}: the
+// rule's scheme condition did not match "gopher", evaluation fell through
+// to the allow check, and with no allow rules configured the metadata
+// service was reachable. fuzz_http rebuilds the same canonical URL per
+// variant, so an unvalidated value would also make the checked URL and the
+// dial disagree.
+//
+// The recovered-from-flow scheme is deliberately left unchecked: recorded
+// wire values must not be sanitized (MITM Principle 1). Unlike gRPC, the
+// resolved value never reaches the wire here — internal/layer/http1 emits
+// an origin-form request line and never serializes .Scheme — so this guards
+// the scope check and the Flow projection, not the bytes.
+func validateResendHTTPScheme(scheme string) error {
+	if scheme != "" && scheme != "http" && scheme != "https" {
+		return fmt.Errorf("unsupported scheme %q: only http and https are allowed", scheme)
+	}
+	return nil
+}
+
 // validateResendHTTPFromScratch checks that all required HTTPMessage fields
-// are present when flow_id is omitted (the from-scratch path).
+// are present when flow_id is omitted (the from-scratch path). The scheme's
+// value is allowlist-checked on both paths by validateResendHTTPScheme,
+// which runs unconditionally; only its presence is enforced here.
 func validateResendHTTPFromScratch(input *resendHTTPInput) error {
 	missing := []string{}
 	if input.Method == "" {
@@ -109,9 +147,6 @@ func validateResendHTTPFromScratch(input *resendHTTPInput) error {
 	}
 	if len(missing) > 0 {
 		return fmt.Errorf("flow_id is empty; %s required", strings.Join(missing, ", "))
-	}
-	if input.Scheme != "http" && input.Scheme != "https" {
-		return fmt.Errorf("unsupported scheme %q: only http and https are allowed", input.Scheme)
 	}
 	return nil
 }
@@ -394,17 +429,21 @@ func resolveResendHTTPDial(msg *envelope.HTTPMessage, overrideHost string) (addr
 // swallowing the canonical-leg scope check (USK-672 review S-1, CWE-918).
 // Falling through to the override leg only is not enough — the canonical
 // authority is the path the dial actually takes when override_host is empty.
+//
+// USK-1061: the override leg is handed the same scheme the canonical leg
+// matched on. It previously derived "https" or "" from msg.Scheme, and that
+// blank made every `schemes`-bearing rule stop matching on the override leg
+// — a deny rule scoped to plaintext no-opped (bypass), and an allow rule
+// scoped to plaintext false-blocked. Two legs of one check must not disagree
+// on the scheme axis. Lowercasing mirrors TargetScope.CheckURL, which
+// lowercases before matching, so targetDefaultPort's inference lands too.
 func (s *Server) checkResendHTTPScope(msg *envelope.HTTPMessage, addr, overrideHost string) error {
 	canonical := resendHTTPRequestURL(msg)
 	if err := s.checkTargetScopeURL(canonical); err != nil {
 		return err
 	}
 	if overrideHost != "" {
-		scheme := ""
-		if strings.EqualFold(msg.Scheme, "https") {
-			scheme = "https"
-		}
-		if err := s.checkTargetScopeAddr(scheme, addr); err != nil {
+		if err := s.checkTargetScopeAddr(strings.ToLower(canonical.Scheme), addr); err != nil {
 			return err
 		}
 	}

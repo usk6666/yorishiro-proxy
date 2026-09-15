@@ -80,7 +80,7 @@ type fuzzGRPCInput struct {
 
 	FlowID          string           `json:"flow_id,omitempty" jsonschema:"recorded gRPC stream id; when set, omitted Start fields and the encoding hint are inherited from the original RPC"`
 	TargetAddr      string           `json:"target_addr,omitempty" jsonschema:"upstream host:port. Required when flow_id is empty"`
-	Scheme          string           `json:"scheme,omitempty" jsonschema:"http or https; defaults to https. http selects plaintext h2c"`
+	Scheme          string           `json:"scheme,omitempty" jsonschema:"http or https; defaults to https. http selects plaintext h2c. With flow_id the recorded (client-declared) :scheme is used, except that a recovered http is dialled over TLS when the proxy observed a TLS upstream for that stream; an explicit http here always forces cleartext"`
 	Service         string           `json:"service,omitempty" jsonschema:"gRPC service name (e.g. pkg.Greeter); required when flow_id is empty"`
 	Method          string           `json:"method,omitempty" jsonschema:"gRPC method name (e.g. SayHello); required when flow_id is empty"`
 	Metadata        []headerKV       `json:"metadata,omitempty" jsonschema:"ordered metadata list; preserves wire case, order and duplicates"`

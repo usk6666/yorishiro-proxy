@@ -49,11 +49,20 @@ type securityParams struct {
 }
 
 // targetRuleInput is the JSON input representation of a target rule.
+//
+// USK-1061: Schemes carries a jsonschema description because its meaning is
+// not inferable from its name. It is a transport-confidentiality axis
+// ("http" = plaintext, "https" = TLS) that applies to every scoped protocol,
+// and it narrows a rule in BOTH directions — a deny scoped to "https" does
+// not block the plaintext dial to the same host. An agent that reads it as
+// "the L7 protocol" writes rules that silently never match. The other three
+// fields are self-describing and are documented in help_security.md /
+// schema_security.json.
 type targetRuleInput struct {
 	Hostname   string   `json:"hostname"`
 	Ports      []int    `json:"ports,omitempty"`
 	PathPrefix string   `json:"path_prefix,omitempty"`
-	Schemes    []string `json:"schemes,omitempty"`
+	Schemes    []string `json:"schemes,omitempty" jsonschema:"transport confidentiality to match: http (plaintext) or https (TLS); no other value is accepted. Applies to every scoped protocol - a WebSocket target matches as http (ws) or https (wss), raw TCP and gRPC likewise. Narrows the rule in BOTH directions: a deny with [\"https\"] does not block a plaintext dial to the same host, and an allow with [\"https\"] does not permit one. Omit to match both transports (the safer default for deny rules)"`
 }
 
 // availableSecurityActions lists the valid action names for error messages.

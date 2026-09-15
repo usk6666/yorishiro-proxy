@@ -146,9 +146,32 @@ Response:
 | `hostname` | string | Required. Exact match or wildcard `*.example.com` |
 | `ports` | int[] | Optional. Match specific ports. Empty = all ports |
 | `path_prefix` | string | Optional. Match URL path prefix. Empty = all paths |
-| `schemes` | string[] | Optional. Match URL schemes (http, https). Empty = all schemes |
+| `schemes` | string[] | Optional. Match transport confidentiality: `http` = plaintext, `https` = TLS. Only these two values are accepted. Empty = both |
 
 All specified fields must match for a rule to apply (AND logic).
+
+### What `schemes` means
+
+`schemes` is a **transport confidentiality** axis, not an L7 application-protocol
+axis. It is spelled with the `http` / `https` tokens because those are the names
+operators already use for "plaintext" and "TLS", but it applies to every protocol
+the proxy scopes:
+
+- A WebSocket target is matched as `http` (`ws://`) or `https` (`wss://`). Writing
+  `"schemes": ["ws"]` is rejected — the rule would never match anything.
+- A raw TCP or gRPC target is matched the same way: `https` when the leg is
+  TLS-terminated, `http` when it is cleartext.
+- A `CONNECT` tunnel is matched as `https` even if it turns out to carry SMTP.
+
+**A `schemes` condition narrows a rule in both directions.** A deny rule carrying
+`"schemes": ["https"]` does not block the plaintext dial to the same host, and an
+allow rule carrying `"schemes": ["https"]` does not permit one. Omit `schemes` when
+you mean "this host, on any transport" — that is the safer default for deny rules.
+
+**One target is deliberately unmatchable by any `schemes`-bearing rule**: a SOCKS5
+`CONNECT` is scope-checked before the tunnel carries a single byte, so the proxy
+does not yet know whether TLS follows. Scope such traffic by `hostname` / `ports`,
+or scope the tunneled protocol instead.
 
 ## Rate Limiting
 
