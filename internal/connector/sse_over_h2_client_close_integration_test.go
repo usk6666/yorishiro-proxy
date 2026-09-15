@@ -78,7 +78,36 @@ func TestFullListener_CONNECT_SSE_OverH2_ClientCancel_StateCompleteWithTag(t *te
 		}
 	}
 	if sseStream == nil {
-		t.Fatalf("no SSE Stream recorded after client cancel; streams=%+v", streams)
+		// USK-1052: this branch fires intermittently on the nightly full
+		// tier and the recorded Stream's State is what discriminates the
+		// two candidate causes — but `%+v` on a []*flow.Stream renders
+		// pointer addresses, so every CI reproduction so far has been
+		// uninterpretable.
+		//
+		//   State="complete" + FailureReason="" and no harness WARN → the
+		//     upstream Channel was cascade-closed around the upgrade
+		//     handoff. channel.Close on a stream with neither end-stream
+		//     set emits RST_STREAM(CANCEL) while stamping
+		//     markTerminated(io.EOF), so the detach drain sees a clean EOF
+		//     and every layer reports success (the USK-1042 family).
+		//   State != "complete" → runUpgradeSSEOverH2 aborted. The harness
+		//     logs the session error as a WARN naming the exit; State stays
+		//     "active" for the error returns that precede the OnComplete
+		//     defer, and becomes "error" for the ones after it.
+		//
+		// The flow dump separates "the 2xx response was never recorded"
+		// from "the response was recorded but no SSE event followed".
+		flows := store.allFlows()
+		for i, st := range streams {
+			t.Logf("recorded stream[%d]: id=%s protocol=%q scheme=%q state=%q failure_reason=%q tags=%v",
+				i, st.ID, st.Protocol, st.Scheme, st.State, st.FailureReason, st.Tags)
+		}
+		for i, f := range flows {
+			t.Logf("recorded flow[%d]: stream=%s seq=%d direction=%s body=%dB raw=%dB",
+				i, f.StreamID, f.Sequence, f.Direction, len(f.Body), len(f.RawBytes))
+		}
+		t.Fatalf("no SSE Stream recorded after client cancel (%d stream(s) / %d flow(s) dumped above)",
+			len(streams), len(flows))
 	}
 
 	if sseStream.state != "complete" {

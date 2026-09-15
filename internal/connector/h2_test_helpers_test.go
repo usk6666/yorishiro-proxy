@@ -192,7 +192,20 @@ func startFullListenerProxyWithH2(
 						}
 						return connector.WrapH2UpstreamForDispatch(upCh, reqProto, upstreamLOpts, nil, nil), nil
 					}
-					_ = session.RunStackSessionExchange(ctx, stack, aggCh, dial, p, sessOpts)
+					// USK-1052: do not discard the session result. When an
+					// over-h2 swap aborts before relaying anything, the
+					// returned error is the only place the reason survives —
+					// OnComplete projects a graceful state="complete" for a
+					// cascade-closed upstream, so the recorded Stream cannot
+					// tell the two apart.
+					//
+					// slog rather than t.Logf: this goroutine can outlive the
+					// test on the waitSessionDone timeout path, and t.Logf
+					// after the test completes panics.
+					if serr := session.RunStackSessionExchange(ctx, stack, aggCh, dial, p, sessOpts); serr != nil {
+						slog.Warn("test harness: RunStackSessionExchange returned error",
+							"stream_id", aggCh.StreamID(), "err", serr)
+					}
 				}(clientCh)
 			}
 		}
