@@ -185,7 +185,7 @@ make clean          # Delete build artifacts
 > **e2e test tiers (USK-728)**: e2e tests are split into three tiers.
 > - **fast** (`make test`/`make test-fast`): untagged unit tests only.
 > - **smoke** (`make test-e2e-smoke`): merge-gate subset — files with `//go:build e2e` only. Run by CI on every PR.
-> - **full** (`make test-e2e`): every e2e file — smoke ∪ exhaustive. Run nightly via `.github/workflows/nightly-e2e.yml`.
+> - **full** (`make test-e2e`): every e2e file — smoke ∪ exhaustive. Run nightly via `.github/workflows/nightly-e2e.yml`; also on dependency-update PRs (head branch `automated/security-updates`) as `ci.yml`'s `test-e2e-full` merge-gate job, and on any push to `main` touching `go.mod` / `go.sum` (USK-1055).
 >
 > The `e2e_smoke` build tag is an **exclusion filter**: smoke files keep plain `//go:build e2e`; exhaustive files use `//go:build e2e && !e2e_smoke` so they drop out of the smoke tier but remain in the full tier under `-tags e2e` alone. This guarantees `smoke ⊂ full`.
 >
