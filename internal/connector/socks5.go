@@ -256,6 +256,15 @@ func (n *SOCKS5Negotiator) Negotiate(ctx context.Context, conn net.Conn) (contex
 	// genuine unknown: REP=0x02 must precede any tunnel byte, so there is
 	// nothing to sniff yet. Scope the tunneled protocol instead. See
 	// RFC-001 §3.8 and internal/mcp/helpers.go checkTargetScopeAddr.
+	//
+	// USK-1081 narrowed, but did not close, that gap. Once the tunnel is
+	// established, every envelope that carries an EnvelopeContext (the
+	// http1 / h2 stacks, with or without a terminated TLS layer) is
+	// re-checked by pipeline.HostScopeStep, which derives the scheme from
+	// Context.TLS. The residue is the bytechunk (raw TCP) route: its
+	// envelopes carry no TargetHost, so HostScopeStep short-circuits and
+	// this blank-scheme check is the only scope gate a raw SOCKS5 tunnel
+	// ever passes through.
 	if n.Scope != nil && n.Scope.HasRules() {
 		host, portStr, splitErr := net.SplitHostPort(target)
 		port := 0
