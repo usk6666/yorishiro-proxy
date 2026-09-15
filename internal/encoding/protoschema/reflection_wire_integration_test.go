@@ -25,7 +25,11 @@
 // e2e Subsystem Verification Checklist applicability — the rows covered
 // here are Communication success, Raw bytes / wire fidelity (via the h2c
 // byte tap in TestDiscover_RealWire_H2C_RequestPseudoHeadersOnTheWire)
-// and Error paths (the v1 -> v1alpha UNIMPLEMENTED fallback). Stream
+// and Error paths in both of its senses: the protocol error path, where
+// the dial succeeds and the server answers with a real UNIMPLEMENTED
+// status driving the v1 -> v1alpha fallback (Test C), and the transport
+// error path, where the dial itself fails inside
+// defaultReflectionDialFunc / dialReflectionUpstream (Test D). Stream
 // recording, Flow recording, State transitions, Plugin hook firing,
 // Variant recording and MCP `query` retrieval are N/A by design:
 // grpc_schema discover is a control-plane outbound dial that runs no
@@ -474,6 +478,15 @@ func TestDiscover_RealWire_H2C_RequestPseudoHeadersOnTheWire(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
+	// startReflectionUpstream registers its own Close for whatever
+	// listener it is handed, but only after two t.Fatalf-capable steps
+	// (protodesc.NewFiles, net.SplitHostPort). Register teardown here, at
+	// the point of acquisition, so a Fatal in either cannot leak the
+	// socket for the life of the test binary. The resulting double Close
+	// on the happy path is harmless — net.TCPListener.Close is idempotent
+	// and the second call's ErrClosed is discarded — so do not "tidy"
+	// this back into a leak.
+	t.Cleanup(func() { _ = base.Close() })
 	rec := &wireRecorder{}
 	port, obs := startReflectionUpstream(t, reflectionUpstreamOptions{
 		registerV1: true,
@@ -572,4 +585,72 @@ func TestDiscover_RealWire_FallsBackToV1AlphaOnUnimplemented(t *testing.T) {
 		t.Errorf("upstream FullMethod = %q, want %q", fullMethod, want)
 	}
 	assertSingleMetadataValue(t, md, ":authority", targetAddr)
+}
+
+// -----------------------------------------------------------------------------
+// Test D — production dialer, transport error path
+// -----------------------------------------------------------------------------
+
+// TestDiscover_RealWire_DialFailureSurfacesTransportError covers the one
+// error class Tests A-C structurally cannot reach: a *transport* failure
+// raised inside defaultReflectionDialFunc / dialReflectionUpstream. Test
+// C's UNIMPLEMENTED fallback is a *protocol* error — the dial succeeded
+// and the server answered — so without this test every transport wrap in
+// the production dialer (`dial %s: %w`, `http2 layer: %w`,
+// `open stream: %w`, `send Start: %w`, `tls handshake %s: %w`) is text no
+// test has ever executed, and a dial error could start being swallowed
+// or mangled without CI noticing.
+//
+// The target is a loopback port bound only long enough to learn its
+// number and then released, so connect() is refused immediately rather
+// than hanging. No hardcoded port: a fixed number could legitimately be
+// in use on a developer box.
+func TestDiscover_RealWire_DialFailureSurfacesTransportError(t *testing.T) {
+	probe, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen to reserve an unbound port: %v", err)
+	}
+	targetAddr := probe.Addr().String()
+	if cerr := probe.Close(); cerr != nil {
+		t.Fatalf("close the probe listener %s: %v", targetAddr, cerr)
+	}
+
+	assertProductionDialer(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Deliberately shorter than reflectionWireTimeout: this value also
+	// becomes net.Dialer.Timeout, and on a host that blackholes rather
+	// than refuses the connect it is the only thing between this test and
+	// a full-length stall of the merge gate.
+	res, err := Discover(ctx, DiscoverOptions{
+		TargetAddr: targetAddr,
+		Scheme:     "http",
+		Timeout:    2 * time.Second,
+	})
+	if err == nil {
+		t.Fatalf("Discover against the released port %s returned no error (res = %+v)", targetAddr, res)
+	}
+	if res != nil {
+		t.Errorf("Discover returned a non-nil result alongside an error: %+v", res)
+	}
+
+	// Discriminating, but deliberately not on the errno text: the
+	// "connect: connection refused" tail is OS-specific. What is pinned
+	// here are the two wraps this codebase owns — dialReflectionUpstream's
+	// `dial <addr>: ` and Discover's variant wrap, which must name v1
+	// because a dial error surfaces on the very first iteration.
+	wantPrefix := "reflection (v1): dial " + targetAddr + ": "
+	if got := err.Error(); !strings.HasPrefix(got, wantPrefix) {
+		t.Errorf("Discover error = %q, want prefix %q", got, wantPrefix)
+	}
+	// isUnimplementedErr is false for a transport error, so the variant
+	// loop must return immediately. Were it ever to fall through, the
+	// surfaced error would name v1alpha — either as the second variant's
+	// wrap or inside the both-variants "does not implement gRPC
+	// reflection" message.
+	if strings.Contains(err.Error(), "v1alpha") {
+		t.Errorf("Discover fell back to v1alpha on a transport error: %v", err)
+	}
 }
