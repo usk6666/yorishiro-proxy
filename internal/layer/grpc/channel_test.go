@@ -8,6 +8,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -1606,6 +1607,51 @@ func TestSchemeForStart_NilArgs(t *testing.T) {
 	}
 	if got := schemeForStart(envWithTLS, nil, "http"); got != "https" {
 		t.Errorf("schemeForStart(tlsEnv, nil, http) = %q, want https", got)
+	}
+}
+
+// TestChannel_SendTypedNilStartMessageReturnsError drives the caller-level
+// path that makes the nil guards in authorityForStart / schemeForStart
+// reachable defence rather than dead code (USK-1051 review F-2 / S-3).
+//
+// Send's `env.Message == nil` check tests the interface, not the pointer
+// inside it, so a typed-nil *GRPCStartMessage passes it and lands in
+// sendStart — which dereferences m unconditionally (buildStartHeaderKVs
+// reads m.Metadata on its first line, buildGRPCPath reads m.Service /
+// m.Method two lines later). Without sendStart's explicit guard the
+// Channel panics on this input instead of returning an error, which
+// MITM Principle #5 forbids on a wire path.
+func TestChannel_SendTypedNilStartMessageReturnsError(t *testing.T) {
+	t.Parallel()
+	stub := newStubInner("stream-1")
+	ch := Wrap(stub, nil, RoleClient)
+	defer ch.Close()
+
+	var nilStart *envelope.GRPCStartMessage
+	env := &envelope.Envelope{
+		StreamID:  "stream-1",
+		Direction: envelope.Send,
+		Protocol:  envelope.ProtocolGRPC,
+		Message:   nilStart,
+	}
+	// Precondition: a non-nil interface holding a nil pointer. If this
+	// ever trips, the test is no longer exercising the intended path.
+	if env.Message == nil {
+		t.Fatal("precondition: env.Message must be a non-nil interface holding a typed nil")
+	}
+
+	err := ch.Send(context.Background(), env)
+	if err == nil {
+		t.Fatal("Send(typed-nil *GRPCStartMessage) = nil, want an error")
+	}
+	if !strings.Contains(err.Error(), "nil GRPCStartMessage") {
+		t.Errorf("error = %q, want it to mention \"nil GRPCStartMessage\"", err.Error())
+	}
+
+	stub.mu.Lock()
+	defer stub.mu.Unlock()
+	if len(stub.sent) != 0 {
+		t.Errorf("inner.sent length = %d, want 0 (a malformed Start must not reach the wire)", len(stub.sent))
 	}
 }
 

@@ -898,6 +898,18 @@ func (c *grpcChannel) Send(ctx context.Context, env *envelope.Envelope) error {
 // grpc-encoding is remembered for subsequent Send-direction LPM
 // re-encoding.
 func (c *grpcChannel) sendStart(ctx context.Context, env *envelope.Envelope, m *envelope.GRPCStartMessage) error {
+	// Send's type switch matches on the dynamic type, so a typed-nil
+	// *GRPCStartMessage carried in a non-nil env.Message interface passes
+	// Send's `env.Message == nil` check and lands here. Reject it up
+	// front: every path below dereferences m unconditionally
+	// (buildStartHeaderKVs reads m.Metadata on its first line, and
+	// buildGRPCPath reads m.Service / m.Method), so without this guard the
+	// Channel would panic on a wire path instead of returning an error,
+	// and the defensive nil checks inside schemeForStart /
+	// authorityForStart could never run.
+	if m == nil {
+		return errors.New("grpc: Send: nil GRPCStartMessage")
+	}
 	headers := buildStartHeaderKVs(env, m)
 
 	// Compute :path either from Service/Method or from a fallback. Empty
@@ -1410,8 +1422,12 @@ func buildEndTrailerKVs(m *envelope.GRPCEndMessage) []envelope.KeyValue {
 	return out
 }
 
-// methodOr returns evt.Method when set, else fallback. POST is the
-// canonical gRPC verb.
+// methodOr returns fallback unconditionally; the message and envelope
+// arguments are ignored. gRPC's HTTP/2 mapping fixes the request verb at
+// POST, and neither GRPCStartMessage nor Envelope carries a :method field
+// to prefer over the caller's literal. The parameters are retained so the
+// call site in sendStart reads uniformly with schemeForStart /
+// authorityForStart / statusFor.
 func methodOr(_ *envelope.GRPCStartMessage, env *envelope.Envelope, fallback string) string {
 	_ = env
 	return fallback
@@ -1469,10 +1485,12 @@ func authorityForStart(m *envelope.GRPCStartMessage) string {
 	return m.Authority
 }
 
-// statusFor returns evt.Status for a Receive-side Start envelope (HTTP
-// 200 typical), else 0. The HTTP/2 Layer's encoder uses Status to choose
-// between request and response pseudo-headers when env.Direction is not
-// available.
+// statusFor returns a literal 200 for a Receive-side Start envelope, else
+// 0; the message argument is ignored. gRPC's HTTP/2 mapping fixes the
+// response :status at 200 — RPC failures travel in the grpc-status
+// trailer, not the HTTP status — so GRPCStartMessage carries no status
+// field to read. The HTTP/2 Layer's encoder uses Status to choose between
+// request and response pseudo-headers when env.Direction is not available.
 func statusFor(env *envelope.Envelope, _ *envelope.GRPCStartMessage) int {
 	if env != nil && env.Direction == envelope.Receive {
 		return 200

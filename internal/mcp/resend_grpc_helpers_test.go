@@ -10,7 +10,9 @@
 package mcp
 
 import (
+	"context"
 	"net/url"
+	"strings"
 	"testing"
 
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
@@ -277,6 +279,206 @@ func TestBuildResendGRPCStartEnvelope_CarriesAuthorityAndScheme(t *testing.T) {
 			// be able to fall back to it for :authority.
 			if env.Context.TargetHost != "" {
 				t.Errorf("env.Context.TargetHost = %q, want empty (no Layer-side fallback source)", env.Context.TargetHost)
+			}
+		})
+	}
+}
+
+// TestBuildResendGRPCPlan_ResolvesAuthorityAndScheme drives the real
+// producer — buildResendGRPCPlan — rather than a hand-built plan literal,
+// so it proves the `plan.scheme = scheme` / `plan.authority = authority`
+// assignments are actually reached (USK-1051 review F-1).
+//
+// The h2c subtests are the load-bearing ones: schemeForStart's literal
+// fallback is "https", so a plan that dropped plan.scheme would still emit
+// ":scheme: https" and every https-only assertion would keep passing. Only
+// an input that resolves to "http" distinguishes "the assignment ran" from
+// "the fallback happened to match".
+//
+// buildResendGRPCPlan needs no flow store when FlowID is empty: the
+// recovery branch is skipped, and populateResendGRPCMessages is
+// nil-receiver-safe for the text/base64 body encodings used here.
+func TestBuildResendGRPCPlan_ResolvesAuthorityAndScheme(t *testing.T) {
+	t.Parallel()
+
+	msgs := []resendGRPCData{{Payload: "hello"}}
+
+	cases := []struct {
+		name          string
+		input         *resendGRPCInput
+		wantScheme    string
+		wantAuthority string
+		wantUseTLS    bool
+	}{
+		{
+			name: "explicit_http_is_h2c",
+			input: &resendGRPCInput{
+				TargetAddr: "127.0.0.1:50051",
+				Scheme:     "http",
+				Service:    "hello.HelloService",
+				Method:     "SayHello",
+				Messages:   msgs,
+			},
+			wantScheme:    "http",
+			wantAuthority: "127.0.0.1:50051",
+			wantUseTLS:    false,
+		},
+		{
+			name: "explicit_https",
+			input: &resendGRPCInput{
+				TargetAddr: "api.example.com:443",
+				Scheme:     "https",
+				Service:    "hello.HelloService",
+				Method:     "SayHello",
+				Messages:   msgs,
+			},
+			wantScheme:    "https",
+			wantAuthority: "api.example.com:443",
+			wantUseTLS:    true,
+		},
+		{
+			name: "omitted_scheme_defaults_to_https",
+			input: &resendGRPCInput{
+				TargetAddr: "api.example.com:443",
+				Service:    "hello.HelloService",
+				Method:     "SayHello",
+				Messages:   msgs,
+			},
+			wantScheme:    "https",
+			wantAuthority: "api.example.com:443",
+			wantUseTLS:    true,
+		},
+		{
+			name: "uppercase_http_is_normalised_and_still_h2c",
+			input: &resendGRPCInput{
+				TargetAddr: "127.0.0.1:50051",
+				Scheme:     "HTTP",
+				Service:    "hello.HelloService",
+				Method:     "SayHello",
+				Messages:   msgs,
+			},
+			wantScheme:    "http",
+			wantAuthority: "127.0.0.1:50051",
+			wantUseTLS:    false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s := &Server{}
+			plan, err := s.buildResendGRPCPlan(context.Background(), tc.input)
+			if err != nil {
+				t.Fatalf("buildResendGRPCPlan: %v", err)
+			}
+			if plan.scheme != tc.wantScheme {
+				t.Errorf("plan.scheme = %q, want %q", plan.scheme, tc.wantScheme)
+			}
+			if plan.authority != tc.wantAuthority {
+				t.Errorf("plan.authority = %q, want %q", plan.authority, tc.wantAuthority)
+			}
+			if plan.useTLS != tc.wantUseTLS {
+				t.Errorf("plan.useTLS = %v, want %v", plan.useTLS, tc.wantUseTLS)
+			}
+
+			// End-to-end through the envelope builder: the resolved values
+			// must land on the GRPCStartMessage, which is the only source
+			// the gRPC Layer reads for :authority / :scheme.
+			env := buildResendGRPCStartEnvelope(plan)
+			msg, ok := env.Message.(*envelope.GRPCStartMessage)
+			if !ok {
+				t.Fatalf("env.Message type = %T, want *envelope.GRPCStartMessage", env.Message)
+			}
+			if msg.Scheme != tc.wantScheme {
+				t.Errorf("GRPCStartMessage.Scheme = %q, want %q", msg.Scheme, tc.wantScheme)
+			}
+			if msg.Authority != tc.wantAuthority {
+				t.Errorf("GRPCStartMessage.Authority = %q, want %q", msg.Authority, tc.wantAuthority)
+			}
+		})
+	}
+}
+
+// TestValidateResendGRPCInput_SchemeAllowlist pins USK-1051 review S-1:
+// the http/https allowlist must apply on the flow_id path too, not only
+// on the from-scratch path.
+//
+// Before the fix the allowlist lived in validateResendGRPCFromScratch,
+// which validateResendGRPCInput calls only when FlowID is empty. Since
+// this PR the resolved scheme reaches the wire as the :scheme
+// pseudo-header, so an arbitrary value on the flow_id path would be
+// forwarded verbatim while fuzz_grpc's scope/safety canonicalURL
+// re-derived a different scheme from plan.useTLS.
+func TestValidateResendGRPCInput_SchemeAllowlist(t *testing.T) {
+	t.Parallel()
+
+	msgs := []resendGRPCData{{Payload: "hello"}}
+
+	cases := []struct {
+		name    string
+		input   *resendGRPCInput
+		wantErr bool
+	}{
+		{
+			name:    "flow_id_path_rejects_file_scheme",
+			input:   &resendGRPCInput{FlowID: "stream-1", Scheme: "file", Messages: msgs},
+			wantErr: true,
+		},
+		{
+			name:    "flow_id_path_rejects_gopher_scheme",
+			input:   &resendGRPCInput{FlowID: "stream-1", Scheme: "gopher", Messages: msgs},
+			wantErr: true,
+		},
+		{
+			name:    "flow_id_path_accepts_http",
+			input:   &resendGRPCInput{FlowID: "stream-1", Scheme: "http", Messages: msgs},
+			wantErr: false,
+		},
+		{
+			name:    "flow_id_path_accepts_https",
+			input:   &resendGRPCInput{FlowID: "stream-1", Scheme: "https", Messages: msgs},
+			wantErr: false,
+		},
+		{
+			name:    "flow_id_path_accepts_uppercase_https",
+			input:   &resendGRPCInput{FlowID: "stream-1", Scheme: "HTTPS", Messages: msgs},
+			wantErr: false,
+		},
+		{
+			name:    "flow_id_path_accepts_empty_scheme",
+			input:   &resendGRPCInput{FlowID: "stream-1", Messages: msgs},
+			wantErr: false,
+		},
+		{
+			// Regression guard for the path that already worked, so a
+			// future refactor cannot drop the check from both sides.
+			name: "from_scratch_path_still_rejects_file_scheme",
+			input: &resendGRPCInput{
+				TargetAddr: "127.0.0.1:50051",
+				Scheme:     "file",
+				Service:    "hello.HelloService",
+				Method:     "SayHello",
+				Messages:   msgs,
+			},
+			wantErr: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := validateResendGRPCInput(tc.input)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("validateResendGRPCInput() = nil, want an unsupported-scheme error")
+				}
+				if !strings.Contains(err.Error(), "unsupported scheme") {
+					t.Errorf("error = %q, want it to mention \"unsupported scheme\"", err.Error())
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("validateResendGRPCInput() = %v, want nil", err)
 			}
 		})
 	}
