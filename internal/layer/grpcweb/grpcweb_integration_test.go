@@ -859,8 +859,17 @@ func runRoundTripHTTP1(t *testing.T, base64Wire bool) {
 	assertGRPCWebStream(t, store)
 
 	flows := flowsForFirstStream(store)
+	// USK-1057 pin on the recorded side. The overlay is not only a wire
+	// change: RecordStep's projectGRPCStart builds Flow.URL out of
+	// GRPCStartMessage.Authority / Scheme / Path, so before the fix the
+	// send-start flow reached the MCP surface with a nil URL and
+	// `resend_grpc { flow_id }` had no RPC target to recover.
 	if startF := firstFlowWithEvent(flows, "send", "start"); startF == nil {
 		t.Errorf("missing send-start flow; flows=%d", len(flows))
+	} else if startF.URL == nil {
+		t.Errorf("send-start Flow.URL = nil, want the observed authority %q recorded", target)
+	} else if startF.URL.Host != target {
+		t.Errorf("send-start Flow.URL.Host = %q, want %q", startF.URL.Host, target)
 	}
 	if dataF := firstFlowWithEvent(flows, "send", "data"); dataF == nil {
 		t.Errorf("missing send-data flow; flows=%d", len(flows))
