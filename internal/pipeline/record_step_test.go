@@ -3212,6 +3212,8 @@ func metadataKeysSorted(m map[string]string) []string {
 // The table covers every observable shape produced by gRPC channel.go's
 // buildStartMessage:
 //   - Full triple — happy path (https, h2c, response-side empty).
+//   - Query-bearing :path — RawQuery projection (USK-1053).
+//   - Unparseable :path (Service+Method empty) — verbatim path (USK-1053).
 //   - Path missing but Service+Method present — defensive reconstruction.
 //   - Response-side (Authority+Scheme empty) — no URL projection.
 //
@@ -3220,13 +3222,14 @@ func metadataKeysSorted(m map[string]string) []string {
 // silently regress to the pre-USK-920 behavior.
 func TestRecordStep_GRPCStartProjectsURLAndScheme(t *testing.T) {
 	cases := []struct {
-		name       string
-		msg        *envelope.GRPCStartMessage
-		wantURL    bool
-		wantHost   string
-		wantScheme string
-		wantPath   string
-		wantStream string
+		name         string
+		msg          *envelope.GRPCStartMessage
+		wantURL      bool
+		wantHost     string
+		wantScheme   string
+		wantPath     string
+		wantRawQuery string
+		wantStream   string
 	}{
 		{
 			name: "full_https",
@@ -3257,6 +3260,42 @@ func TestRecordStep_GRPCStartProjectsURLAndScheme(t *testing.T) {
 			wantScheme: "http",
 			wantPath:   "/hello.HelloService/SayHello",
 			wantStream: "http",
+		},
+		{
+			// USK-1053: the query component of :path now has a home on
+			// GRPCStartMessage, so it must reach Flow.URL instead of
+			// being dropped.
+			name: "query_bearing_path_projects_raw_query",
+			msg: &envelope.GRPCStartMessage{
+				Service:   "hello.HelloService",
+				Method:    "SayHello",
+				Authority: "api.example.com:443",
+				Scheme:    "https",
+				Path:      "/hello.HelloService/SayHello",
+				RawQuery:  "trace=1&debug",
+			},
+			wantURL:      true,
+			wantHost:     "api.example.com:443",
+			wantScheme:   "https",
+			wantPath:     "/hello.HelloService/SayHello",
+			wantRawQuery: "trace=1&debug",
+			wantStream:   "https",
+		},
+		{
+			// USK-1053: a :path parseGRPCPath cannot represent leaves
+			// Service/Method empty, but Flow.URL.Path must still show the
+			// bytes the wire carried.
+			name: "unparseable_path_projects_verbatim",
+			msg: &envelope.GRPCStartMessage{
+				Authority: "api.example.com:443",
+				Scheme:    "https",
+				Path:      "/NoSlash",
+			},
+			wantURL:    true,
+			wantHost:   "api.example.com:443",
+			wantScheme: "https",
+			wantPath:   "/NoSlash",
+			wantStream: "https",
 		},
 		{
 			name: "path_missing_reconstructed_from_service_method",
@@ -3325,6 +3364,9 @@ func TestRecordStep_GRPCStartProjectsURLAndScheme(t *testing.T) {
 				}
 				if fl.URL.Path != tc.wantPath {
 					t.Errorf("flow URL.Path = %q, want %q", fl.URL.Path, tc.wantPath)
+				}
+				if fl.URL.RawQuery != tc.wantRawQuery {
+					t.Errorf("flow URL.RawQuery = %q, want %q", fl.URL.RawQuery, tc.wantRawQuery)
 				}
 			} else if fl.URL != nil {
 				t.Errorf("flow URL = %+v, want nil for response-side Start", fl.URL)

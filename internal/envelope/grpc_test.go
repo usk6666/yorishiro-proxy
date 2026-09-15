@@ -30,6 +30,15 @@ func TestGRPCStartMessage_CloneMessage_DeepCopy(t *testing.T) {
 	orig := &GRPCStartMessage{
 		Service: "example.Greeter",
 		Method:  "SayHello",
+		// USK-920 / USK-1053 overlay fields. CloneMessage produces the
+		// *original* variant, and grpcStartModified deliberately never
+		// diffs these, so a field dropped from the clone would silently
+		// strip data from the recorded original with no variant to flag
+		// it. Distinct non-empty values keep a drop unambiguous.
+		Authority: "greeter.example.com",
+		Scheme:    "https",
+		Path:      "/example.Greeter/SayHello",
+		RawQuery:  "trace=1&verbose=on",
 		Metadata: []KeyValue{
 			{Name: "x-request-id", Value: "abc123"},
 			{Name: "authorization", Value: "Bearer xyz"},
@@ -47,6 +56,18 @@ func TestGRPCStartMessage_CloneMessage_DeepCopy(t *testing.T) {
 	}
 	if cloned.Method != orig.Method {
 		t.Errorf("Method: got %q, want %q", cloned.Method, orig.Method)
+	}
+	if cloned.Authority != orig.Authority {
+		t.Errorf("Authority: got %q, want %q", cloned.Authority, orig.Authority)
+	}
+	if cloned.Scheme != orig.Scheme {
+		t.Errorf("Scheme: got %q, want %q", cloned.Scheme, orig.Scheme)
+	}
+	if cloned.Path != orig.Path {
+		t.Errorf("Path: got %q, want %q", cloned.Path, orig.Path)
+	}
+	if cloned.RawQuery != orig.RawQuery {
+		t.Errorf("RawQuery: got %q, want %q", cloned.RawQuery, orig.RawQuery)
 	}
 	if cloned.Timeout != orig.Timeout {
 		t.Errorf("Timeout: got %v, want %v", cloned.Timeout, orig.Timeout)
