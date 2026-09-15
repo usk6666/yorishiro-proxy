@@ -142,6 +142,59 @@ jobs:
       - name: Test (e2e smoke)
         run: go test -race -v -tags 'e2e e2e_smoke' -timeout 10m ./...
 
+  # Dependency-update PRs exist to prove behavioural compatibility, so the smoke
+  # subset is the wrong tier for them: a dependency can only break what its
+  # callers exercise, and most of those callers live in the exhaustive tier.
+  # USK-1055 — PR #115 (grpc 1.83.1 -> 1.83.2 plus five x/ modules) went green on
+  # the smoke tier, merged, and turned 21 `e2e && !e2e_smoke` tests in
+  # internal/mcp red on the next nightly, ~8 h later.
+  #
+  # The condition is the depsec workflow's fixed branch name; that workflow
+  # applies no labels, so the branch is its only stable marker. Keep this literal
+  # in sync with the `branch=` assignment in
+  # .github/workflows/dependabot-security.yml.
+  #
+  # Job-level `if:` deliberately, NOT a separate workflow with a `branches:`
+  # filter: a workflow skipped by path/branch filtering leaves its checks
+  # "Pending", which blocks merging if the check is required. A job skipped by a
+  # conditional instead "will report its status as 'Success'" and "will not
+  # prevent a pull request from merging, even if it is a required check"
+  # (GitHub Actions docs, "Using conditions to control job execution"). That is
+  # what makes this job safe to promote to a required check later.
+  test-e2e-full:
+    needs: setup
+    if: github.event_name == 'pull_request' && github.head_ref == 'automated/security-updates'
+    runs-on: ubuntu-latest
+    # 45, not 15: `make test-e2e` passes `-timeout 30m` to `go test`, and this
+    # repo lets the inner timeout fire first so a hang reports "test timed out"
+    # with a goroutine dump instead of an opaque job kill (same rationale as the
+    # lint job above). Mirrors nightly-e2e.yml.
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version: "1.25.x"
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ui-dist
+          path: internal/mcp/webui/dist/
+
+      # Same soft requirement as nightly-e2e.yml: without protoc the four
+      # grpc_schema source="file" tests t.Skip rather than fail, so omitting this
+      # step would silently make this job cover less than the nightly does.
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      # Through the Makefile, not a hand-copied `go test` line: the full tier
+      # needs GODEBUG=http2xconnect=1 and the Makefile is where that is recorded
+      # (USK-1058). `ensure-ui` no-ops because the artifact above populated
+      # dist/ — same pattern as the `lint` job.
+      - name: Test (e2e full)
+        run: make test-e2e
+
   # tools/depsec is a separate Go module (stdlib only, not shipped in the binary)
   # that drives the weekly Dependabot security-update workflow. Gate its
   # supply-chain-critical decision logic on every PR that touches it.

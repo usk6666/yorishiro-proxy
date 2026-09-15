@@ -166,6 +166,9 @@ jobs:
             exit 0
           fi
 
+          # ci.yml's `test-e2e-full` job keys off this exact branch name to run
+          # the full e2e tier on this PR (USK-1055). Renaming it here without
+          # updating that job silently drops the dep-PR back to smoke-only.
           branch="automated/security-updates"
           base_sha="$(git rev-parse HEAD)"
 
