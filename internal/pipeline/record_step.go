@@ -1308,6 +1308,13 @@ func projectGRPCStart(m *envelope.GRPCStartMessage, fl *flow.Flow) {
 			Scheme: m.Scheme,
 			Host:   m.Authority,
 			Path:   path,
+			// USK-1053: the query component now has a home on
+			// GRPCStartMessage, so a query-bearing RPC target survives
+			// into Flow.URL instead of being silently dropped. No
+			// previously recorded output changes — before USK-1053 this
+			// field was always zero. resend_grpc's flow-recovery splits
+			// only URL.Path (resend_grpc_helpers.go), so it is unaffected.
+			RawQuery: m.RawQuery,
 		}
 	}
 	if hdrs := keyValuesToMap(m.Metadata); hdrs != nil {

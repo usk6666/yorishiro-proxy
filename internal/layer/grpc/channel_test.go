@@ -1573,8 +1573,11 @@ func TestChannel_SendStartPseudoHeadersComeFromMessage(t *testing.T) {
 			if evt.Scheme != tc.wantScheme {
 				t.Errorf("H2HeadersEvent.Scheme = %q, want %q", evt.Scheme, tc.wantScheme)
 			}
-			// :path stays derived from Service/Method (USK-1051 defers the
-			// :path work); assert it so the deferral is pinned.
+			// These messages carry no Path overlay, so :path stays
+			// derived from Service/Method (USK-1053's rule falls through
+			// to the rebuild on an empty Path — the same shape every
+			// synthetic producer uses). Assert it so a future change to
+			// pathForStart cannot silently regress resend / fuzz.
 			if want := "/svc.S/M"; evt.Path != want {
 				t.Errorf("H2HeadersEvent.Path = %q, want %q", evt.Path, want)
 			}
@@ -1652,6 +1655,226 @@ func TestChannel_SendTypedNilStartMessageReturnsError(t *testing.T) {
 	defer stub.mu.Unlock()
 	if len(stub.sent) != 0 {
 		t.Errorf("inner.sent length = %d, want 0 (a malformed Start must not reach the wire)", len(stub.sent))
+	}
+}
+
+// ----------------------------------------------------------------------
+// USK-1053: :path round-trip through Receive → Send.
+// ----------------------------------------------------------------------
+
+// TestChannel_SendStartPathRoundTrip is the round-trip invariant for
+// USK-1053: for every (:path, :rawquery) pair a client can put on the
+// wire, driving it in through the inner HTTP/2 event stream and back out
+// through Send must reproduce that pair byte-identically — unless the
+// derived Service/Method view was mutated in between, in which case the
+// rebuild from Service/Method wins.
+//
+// The assertion is on the H2HeadersEvent (Path, RawQuery) pair rather
+// than on a single joined string because the join belongs to the HTTP/2
+// Layer: appendRequestPseudoHeaders (internal/layer/http2/channel.go)
+// emits `Path + "?" + RawQuery` when RawQuery is non-empty, and
+// substitutes "/" for an empty Path. Re-implementing that join here
+// would only test the test.
+func TestChannel_SendStartPathRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		// path / rawQuery are the post-splitPath pair the HTTP/2
+		// assembler hands the gRPC Layer for an observed :path.
+		path     string
+		rawQuery string
+		// mutate stands in for an Intercept / Transform / plugin Step
+		// editing the L7 view between Next and Send.
+		mutate       func(*envelope.GRPCStartMessage)
+		wantPath     string
+		wantRawQuery string
+		why          string
+	}{
+		{
+			name:     "well_formed_path_rebuilds_identically",
+			path:     "/pkg.Svc/Do",
+			wantPath: "/pkg.Svc/Do",
+			why:      "no regression: the parseable case still goes through buildGRPCPath",
+		},
+		{
+			name:         "query_is_carried_across",
+			path:         "/pkg.Svc/Do",
+			rawQuery:     "trace=1",
+			wantPath:     "/pkg.Svc/Do",
+			wantRawQuery: "trace=1",
+			why:          "GRPCStartMessage.RawQuery is the new carrier for the query string",
+		},
+		{
+			name:     "no_inner_slash_survives",
+			path:     "/NoSlash",
+			wantPath: "/NoSlash",
+			why:      "core fix: parseGRPCPath cannot represent this, so the wire overlay wins",
+		},
+		{
+			name:     "no_leading_slash_survives",
+			path:     "noslash",
+			wantPath: "noslash",
+			why:      "parseGRPCPath rejects a missing leading slash",
+		},
+		{
+			name:     "leading_double_slash_survives",
+			path:     "//Do",
+			wantPath: "//Do",
+			why:      "leading \"//\" leaves an empty service segment, which parseGRPCPath rejects",
+		},
+		{
+			name:     "trailing_slash_survives",
+			path:     "/pkg.Svc/Do/",
+			wantPath: "/pkg.Svc/Do/",
+			why:      "parseGRPCPath rejects an empty method segment",
+		},
+		{
+			name:     "multi_slash_stays_on_the_rebuild_branch",
+			path:     "/a/b/c",
+			wantPath: "/a/b/c",
+			why:      `parseGRPCPath splits at the LAST slash, so Service="a/b" round-trips via the rebuild`,
+		},
+		{
+			// Contrast with leading_double_slash_survives: three
+			// segments give parseGRPCPath a non-empty service ("/pkg"),
+			// so this one IS parseable and the rebuild reproduces it.
+			name:     "leading_double_slash_with_two_segments_stays_on_the_rebuild_branch",
+			path:     "//pkg/Do",
+			wantPath: "//pkg/Do",
+			why:      `parseGRPCPath yields Service="/pkg" Method="Do", which buildGRPCPath rebuilds identically`,
+		},
+		{
+			name:     "empty_path_falls_through_to_the_rebuild",
+			path:     "",
+			wantPath: "/",
+			why:      "documented residual loss: an empty :path is indistinguishable from a synthetic producer that never set one",
+		},
+		{
+			name: "service_method_override_beats_a_parseable_path",
+			path: "/pkg.Svc/Do",
+			mutate: func(m *envelope.GRPCStartMessage) {
+				m.Service = "new.Svc"
+				m.Method = "NewDo"
+			},
+			wantPath: "/new.Svc/NewDo",
+			why:      "the Issue's blocker #1: intercept's service/method override must keep working untouched",
+		},
+		{
+			name: "clearing_service_and_method_on_a_parseable_path_emits_root",
+			path: "/pkg.Svc/Do",
+			mutate: func(m *envelope.GRPCStartMessage) {
+				m.Service = ""
+				m.Method = ""
+			},
+			wantPath: "/",
+			why:      "U2's unchanged half: a parseable path stays on the rebuild branch even when both fields are cleared",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			stub := newStubInner("stream-1")
+			hdrs := requestStartHeaders(tc.path)
+			hdrs.RawQuery = tc.rawQuery
+			stub.pushHeaders(envelope.Send, []byte("HPACK"), hdrs)
+
+			ch := Wrap(stub, nil, RoleServer)
+			defer ch.Close()
+
+			env, err := ch.Next(context.Background())
+			if err != nil {
+				t.Fatalf("Next: %v", err)
+			}
+			sm, ok := env.Message.(*envelope.GRPCStartMessage)
+			if !ok {
+				t.Fatalf("Next message type = %T, want *envelope.GRPCStartMessage", env.Message)
+			}
+			// Precondition: the wire overlay actually captured the
+			// observed pair. Without this the Send-side assertion could
+			// pass for the wrong reason.
+			if sm.Path != tc.path || sm.RawQuery != tc.rawQuery {
+				t.Fatalf("Receive overlay = (Path %q, RawQuery %q), want (%q, %q)",
+					sm.Path, sm.RawQuery, tc.path, tc.rawQuery)
+			}
+			if tc.mutate != nil {
+				tc.mutate(sm)
+			}
+
+			if err := ch.Send(context.Background(), env); err != nil {
+				t.Fatalf("Send Start: %v", err)
+			}
+
+			stub.mu.Lock()
+			defer stub.mu.Unlock()
+			if len(stub.sent) != 1 {
+				t.Fatalf("inner.sent length = %d, want 1", len(stub.sent))
+			}
+			evt, ok := stub.sent[0].Message.(*http2.H2HeadersEvent)
+			if !ok {
+				t.Fatalf("inner message type = %T, want *http2.H2HeadersEvent", stub.sent[0].Message)
+			}
+			if evt.Path != tc.wantPath {
+				t.Errorf("H2HeadersEvent.Path = %q, want %q (%s)", evt.Path, tc.wantPath, tc.why)
+			}
+			if evt.RawQuery != tc.wantRawQuery {
+				t.Errorf("H2HeadersEvent.RawQuery = %q, want %q (%s)", evt.RawQuery, tc.wantRawQuery, tc.why)
+			}
+		})
+	}
+}
+
+// TestPathForStart is the direct unit table for the precedence rule,
+// mirroring TestAuthorityForStart_NilMessage / TestSchemeForStart_NilArgs.
+//
+// There is deliberately no nil-message row: unlike authorityForStart /
+// schemeForStart, pathForStart carries no nil guard, because sendStart
+// rejects a typed-nil *GRPCStartMessage before any of them run
+// (TestChannel_SendTypedNilStartMessageReturnsError pins that). Adding
+// one here would be dead defence (USK-1051 review F-2).
+func TestPathForStart(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		msg  *envelope.GRPCStartMessage
+		want string
+	}{
+		{
+			name: "no_path_and_no_service_method_yields_root",
+			msg:  &envelope.GRPCStartMessage{},
+			want: "/",
+		},
+		{
+			name: "empty_path_rebuilds_from_service_method",
+			msg:  &envelope.GRPCStartMessage{Service: "pkg.Svc", Method: "Do"},
+			want: "/pkg.Svc/Do",
+		},
+		{
+			name: "parseable_path_loses_to_the_derived_view",
+			msg:  &envelope.GRPCStartMessage{Service: "new.Svc", Method: "NewDo", Path: "/pkg.Svc/Do"},
+			want: "/new.Svc/NewDo",
+		},
+		{
+			name: "unparseable_path_wins",
+			msg:  &envelope.GRPCStartMessage{Path: "/NoSlash"},
+			want: "/NoSlash",
+		},
+		{
+			name: "unparseable_path_wins_even_against_a_populated_derived_view",
+			msg:  &envelope.GRPCStartMessage{Service: "pkg.Svc", Method: "Do", Path: "noslash"},
+			want: "noslash",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := pathForStart(tc.msg); got != tc.want {
+				t.Errorf("pathForStart(%+v) = %q, want %q", tc.msg, got, tc.want)
+			}
+		})
 	}
 }
 

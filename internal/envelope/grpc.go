@@ -34,21 +34,40 @@ type GRPCStartMessage struct {
 	Scheme string
 
 	// Path is the :path pseudo-header from the request-side HEADERS
-	// frame ("/Service/Method"), minus any query string. Empty on the
-	// response side. USK-920. Service / Method are also parsed out
-	// individually; Path is retained so a malformed :path (which yields
-	// Service="" Method="") still leaves an inspectable trace.
+	// frame ("/Service/Method"), minus any query string (which lives on
+	// RawQuery). Empty on the response side. USK-920. Service / Method
+	// are also parsed out individually; Path is retained so a malformed
+	// :path (which yields Service="" Method="") still leaves an
+	// inspectable trace.
 	//
-	// NOT byte-verbatim: the HTTP/2 assembler splits ":path" into
-	// H2HeadersEvent.Path + .RawQuery, and this type has no RawQuery
-	// field, so a query-bearing :path loses its query here (the full
-	// wire bytes remain in Envelope.Raw). The Send path does not read
-	// this field either — the gRPC Layer rebuilds :path from Service /
-	// Method, which is what makes the intercept service/method override
-	// work. Making Path lossless and authoritative on Send was considered
-	// and deferred to a follow-up of USK-1051 (which fixed the same class
-	// of defect for :authority and :scheme).
+	// USK-1053 made Path authoritative on Send under a narrow rule: the
+	// derived Service/Method view wins whenever the observed :path was
+	// parseable into it, and Path wins only when it was not (no inner
+	// slash, leading "//", trailing "/", no leading "/"). That keeps the
+	// intercept / plugin service+method override working exactly as
+	// before while stopping the gRPC Layer from normalizing a malformed
+	// :path into "/Service/Method" or "/" on the way to the upstream
+	// (MITM Principle #1). An empty Path falls through to the rebuild, so
+	// synthetic producers (resend_grpc / fuzz_grpc) that never set it are
+	// unaffected. See pathForStart in internal/layer/grpc/channel.go.
+	//
+	// Two residual losses remain, both inherited from the HTTP/2 Layer's
+	// Path/RawQuery split and shared verbatim with HTTPMessage — they are
+	// not specific to gRPC and are not fixable here:
+	//   - ":path: \"\"" is re-emitted as "/" (appendRequestPseudoHeaders
+	//     substitutes "/" for an empty path).
+	//   - a bare trailing "?" is destroyed: splitPath yields
+	//     RawQuery="", and the rejoin only re-adds "?" when RawQuery is
+	//     non-empty.
+	// The full wire bytes remain in Envelope.Raw in both cases.
 	Path string
+
+	// RawQuery is the query component of the request-side :path, without
+	// the leading "?" — the same split the HTTP/2 Layer performs into
+	// H2HeadersEvent.Path + .RawQuery, and the same representation
+	// HTTPMessage uses. Empty on the response side, and empty when the
+	// observed :path carried no query. USK-1053.
+	RawQuery string
 
 	// Metadata is the full gRPC metadata list. HTTP/2 pseudo-headers are
 	// NOT included here — they belong to the transport layer and are
@@ -90,6 +109,7 @@ func (m *GRPCStartMessage) CloneMessage() Message {
 		Authority:      m.Authority,
 		Scheme:         m.Scheme,
 		Path:           m.Path,
+		RawQuery:       m.RawQuery,
 		Metadata:       cloneKeyValues(m.Metadata),
 		Timeout:        m.Timeout,
 		ContentType:    m.ContentType,

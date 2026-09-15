@@ -384,17 +384,22 @@ func buildGRPCStartDict(d *MessageDict, m *envelope.GRPCStartMessage) {
 	d.markReadOnly(anomKey)
 
 	d.builder = func(d *MessageDict) (envelope.Message, error) {
-		// USK-1051: Authority / Scheme / Path (the USK-920 derived L7
-		// overlay) are deliberately NOT exposed as dict keys — doing so
-		// would widen the documented hook surface (RFC-001 §9.3). They
-		// must still be carried across the rebuild: this builder runs
-		// whenever a plugin mutates ANY field, and dropping them would
-		// erase Flow.URL and, on the Send path, the :authority /
-		// :scheme pseudo-headers the gRPC Layer emits from them.
+		// USK-1051 / USK-1053: Authority / Scheme / Path / RawQuery (the
+		// USK-920 derived L7 overlay) are deliberately NOT exposed as
+		// dict keys — doing so would widen the documented hook surface
+		// (RFC-001 §9.3). They must still be carried across the rebuild:
+		// this builder runs whenever a plugin mutates ANY field, and
+		// dropping them would erase Flow.URL and, on the Send path, the
+		// :authority / :scheme pseudo-headers plus the query component
+		// of :path that the gRPC Layer emits from them. Path is safe to
+		// carry even when a plugin rewrites service / method: per
+		// pathForStart the rebuild from Service+Method wins on any
+		// parseable path, so there is no stale-Path hazard.
 		out := &envelope.GRPCStartMessage{
 			Authority: m.Authority,
 			Scheme:    m.Scheme,
 			Path:      m.Path,
+			RawQuery:  m.RawQuery,
 			Anomalies: m.Anomalies,
 		}
 		if err := readScalar(d, "service", &out.Service); err != nil {

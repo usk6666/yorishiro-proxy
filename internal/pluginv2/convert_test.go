@@ -178,8 +178,9 @@ func TestRoundTrip_GRPCStartMessage(t *testing.T) {
 	}
 }
 
-// TestGRPCStart_PseudoHeaderOverlaySurvivesMutation pins USK-1051: the
-// USK-920 derived overlay (Authority / Scheme / Path) is deliberately NOT
+// TestGRPCStart_PseudoHeaderOverlaySurvivesMutation pins USK-1051 and
+// USK-1053: the USK-920 derived overlay (Authority / Scheme / Path /
+// RawQuery) is deliberately NOT
 // exposed as plugin-mutable dict keys, but the builder — which runs
 // whenever a plugin touches ANY field — must still carry it across the
 // rebuild.
@@ -225,6 +226,7 @@ def hook(msg):
 				Authority:   "vhost.example:8443",
 				Scheme:      "http",
 				Path:        "/greeter.Greeter/SayHello",
+				RawQuery:    "trace=1",
 				Metadata:    []envelope.KeyValue{{Name: "x-token", Value: "abc"}},
 				ContentType: "application/grpc+proto",
 			}
@@ -256,6 +258,9 @@ def hook(msg):
 			if gm.Path != m.Path {
 				t.Errorf("Path = %q, want %q (must survive rebuild)", gm.Path, m.Path)
 			}
+			if gm.RawQuery != m.RawQuery {
+				t.Errorf("RawQuery = %q, want %q (must survive rebuild)", gm.RawQuery, m.RawQuery)
+			}
 		})
 	}
 }
@@ -272,6 +277,7 @@ func TestGRPCStart_PseudoHeadersAreNotPluginMutableKeys(t *testing.T) {
 		Authority: "vhost.example:8443",
 		Scheme:    "http",
 		Path:      "/greeter.Greeter/SayHello",
+		RawQuery:  "trace=1",
 	}
 	env := &envelope.Envelope{Message: m}
 	d, err := convertMessageToDict(env)
@@ -282,7 +288,7 @@ func TestGRPCStart_PseudoHeadersAreNotPluginMutableKeys(t *testing.T) {
 	for _, k := range d.sortedKeysForTest() {
 		present[k] = true
 	}
-	for _, key := range []string{"authority", "scheme", "path"} {
+	for _, key := range []string{"authority", "scheme", "path", "raw_query"} {
 		if present[key] {
 			t.Errorf("dict key %q is present; pseudo-headers must stay off the plugin hook surface", key)
 		}

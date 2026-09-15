@@ -239,9 +239,17 @@ type GRPCStartMessage struct {
     // response side (response HEADERS only carry :status). The pseudo-
     // header wire bytes remain in Envelope.Raw — these fields are an
     // overlay, not a replacement.
+    //
+    // USK-1053 added RawQuery (the query component, without the leading
+    // "?" — the same split H2HeadersEvent and HTTPMessage use) and made
+    // Path authoritative on Send only when parseGRPCPath could not
+    // represent it; on any parseable :path the derived Service/Method
+    // view still wins, which is what keeps the intercept / plugin
+    // service+method override working.
     Authority string
     Scheme    string
     Path      string
+    RawQuery  string
 
     // gRPC metadata — custom and reserved. HTTP/2 pseudo-headers (:method,
     // :path, :status, etc.) are NOT included here; they belong to the
@@ -1471,6 +1479,9 @@ This RFC is **accepted** as of 2026-04-12. Implementation proceeds on N1.
 **Post-N9 deferred design decisions:**
 - [ ] `WireLevelTap` interface unification — **deferred 2026-05-15 (USK-900)**. The five frame-level record callback sibling Options (`http2.WithFrameRecordCallback`, `http1.WithChunkRecordCallback`, `grpc.WithLPMFrameRecordCallback`, `httpaggregator.WithH2FrameRecordCallback`, `grpc.WithH2DataFrameRecordCallback`) already share their session-side closure builder (`session/h2_frame_record.go` `wireLevelRecordCallback()`), so the main boilerplate cost is already absorbed. Layer-side Option contracts remain per-Layer ad-hoc by design: `http1.WithChunkRecordCallback` is constrained to `func([]byte)` by the parser-level `ChunkRecordSetter` hook (parser owns chunk-boundary detection, not the Layer), so a naive `WireLevelTap` seam would degenerate into "four uniform + one adaptor". Re-evaluate when a 6th sibling appears (e.g. a WebSocket per-frame record producer) or when the http1 parser hook is revisited for an unrelated reason — at that point the seam will be either fully uniform or clearly fragmented, and the decision becomes unambiguous.
 - [ ] HTTP/3 / QUIC — **out of scope, deferred 2026-07-16 (USK-1016)**. The proxy is h3/QUIC-incapable: there is no UDP listener and the TLS layer advertises only `h2` / `http/1.1` in ALPN. This is a **weak** bot signal for the anti-detect use case (M47/M48): a Firefox routed through an explicit HTTP proxy does **not** use HTTP/3 anyway, because h3 runs over QUIC/UDP and cannot traverse a `CONNECT` proxy — the same reason a real Firefox behind a corporate proxy falls back to h2. So a proxied Firefox presenting no h3 is *expected*, coherent behaviour, not an anomaly. Actual h3/QUIC MITM (a UDP listener, QUIC transport termination, and `h3` ALPN) is a separate, much larger milestone and is explicitly out of scope here. **Alt-Svc note:** an upstream may still send an `Alt-Svc: h3=...` response header advertising its own h3 endpoint; a strict detector could flag that the advertised h3 service is never exercised by the proxied client. Stripping that header is **already achievable today** with a user-authored response `TransformRemoveHeader` rule (`HeaderName: "Alt-Svc"`, `Direction: response`) — no new code required. A dedicated opt-in `suppress_alt_svc` config knob is **deferred to M48**. **Re-open trigger:** a reproducible camoufox/Cloudflare detection that flips green when the upstream `Alt-Svc` header is stripped from the client-bound response (justifies the dedicated knob), or a decision to build real h3/QUIC MITM (justifies the UDP listener + `h3` ALPN work). Cross-referenced from §3.4.3.
+
+- [ ] gRPC-Web `:path` overlay — **deferred 2026-09-15 (USK-1053 → USK-1069)**. `internal/layer/grpcweb/channel.go` builds its `GRPCStartMessage` without populating `Path` / `RawQuery`, so the USK-1053 Send-side rule (the observed `:path` wins when `parseGRPCPath` cannot represent it) has nothing to act on there and a malformed gRPC-Web `:path` is still normalized to `/Service/Method`. The gRPC-Web Layer sits over both HTTP/1.x and HTTP/2, so the fix needs a per-transport path source rather than a copy of the h2-only projection, and it collides with the in-flight USK-1057 work on the same file. **Re-open trigger:** USK-1057 merges (removing the collision), at which point USK-1069 applies the same overlay + precedence rule to `grpcweb`.
+- [ ] Two residual `:path` losses at the HTTP/2 Layer — **accepted 2026-09-15 (USK-1053)**, shared verbatim with `HTTPMessage` and therefore not gRPC-specific. (1) `:path: ""` is re-emitted as `/`, because `appendRequestPseudoHeaders` (`internal/layer/http2/channel.go`) substitutes `/` for an empty path. (2) A bare trailing `?` (`/x?`) is destroyed: `splitPath` (`internal/layer/http2/assembler.go`) yields `RawQuery=""`, and the rejoin only re-adds `?` when `RawQuery` is non-empty. Both are losses in the shared `Path`/`RawQuery` split, so fixing them means changing the H2 event representation for *all* HTTP traffic, not just gRPC; the wire-observed bytes remain intact in `Envelope.Raw` either way. **Re-open trigger:** a diagnostic scenario where re-emitting an empty or bare-`?` `:path` verbatim changes upstream behaviour (e.g. a WAF bypass reproduction that only fires on the exact byte form) — that would justify replacing the split pair with a single verbatim `:path` field plus derived accessors across the HTTP/2 Layer and `HTTPMessage` together.
 
 ### 11.1 Macro hook `__response_*` key matrix per protocol
 

@@ -903,20 +903,23 @@ func (c *grpcChannel) sendStart(ctx context.Context, env *envelope.Envelope, m *
 	// Send's `env.Message == nil` check and lands here. Reject it up
 	// front: every path below dereferences m unconditionally
 	// (buildStartHeaderKVs reads m.Metadata on its first line, and
-	// buildGRPCPath reads m.Service / m.Method), so without this guard the
-	// Channel would panic on a wire path instead of returning an error,
-	// and the defensive nil checks inside schemeForStart /
-	// authorityForStart could never run.
+	// pathForStart reads m.Path / m.Service / m.Method), so without this
+	// guard the Channel would panic on a wire path instead of returning
+	// an error, and the defensive nil checks inside schemeForStart /
+	// authorityForStart could never run. pathForStart relies on this
+	// guard instead of carrying its own (USK-1053).
 	if m == nil {
 		return errors.New("grpc: Send: nil GRPCStartMessage")
 	}
 	headers := buildStartHeaderKVs(env, m)
 
-	// Compute :path either from Service/Method or from a fallback. Empty
-	// Service+Method preserves the malformed-path round-trip case (the
-	// Layer is permissive on Receive per D1; on Send we mirror the
-	// caller's intent — if they cleared both, we emit "/").
-	pathPseudo := buildGRPCPath(m.Service, m.Method)
+	// Compute :path from the derived Service/Method view, falling back to
+	// the wire overlay when that view cannot represent the observed :path
+	// (USK-1053). The query component rides along on RawQuery and is
+	// rejoined by the HTTP/2 Layer's appendRequestPseudoHeaders — do not
+	// join it here, or parseGRPCPath would later read it as part of the
+	// method name. See pathForStart for the precedence rule.
+	pathPseudo := pathForStart(m)
 
 	// EndStream on a Send-side Start is unusual (gRPC clients always
 	// follow with at least one DATA), but if no body or trailers will
@@ -927,6 +930,7 @@ func (c *grpcChannel) sendStart(ctx context.Context, env *envelope.Envelope, m *
 		Scheme:    schemeForStart(env, m, "https"),
 		Authority: authorityForStart(m),
 		Path:      pathPseudo,
+		RawQuery:  m.RawQuery,
 		Status:    statusFor(env, m),
 		Headers:   headers,
 		EndStream: false,
@@ -1086,6 +1090,7 @@ func buildStartMessage(evt *http2.H2HeadersEvent, dir envelope.Direction) (*enve
 		msg.Authority = evt.Authority
 		msg.Scheme = evt.Scheme
 		msg.Path = evt.Path
+		msg.RawQuery = evt.RawQuery
 		msg.Service, msg.Method = parseGRPCPath(evt.Path)
 	}
 	return msg, msg.Encoding
@@ -1483,6 +1488,36 @@ func authorityForStart(m *envelope.GRPCStartMessage) string {
 		return ""
 	}
 	return m.Authority
+}
+
+// pathForStart resolves the :path pseudo-header for a Send-side Start.
+//
+// Service / Method are the derived L7 view; Path is the wire overlay
+// (USK-920). The derived view wins whenever the observed :path was
+// parseable into it — that is what keeps the intercept / plugin
+// service+method override working exactly as it did before USK-1053.
+// When parseGRPCPath could not represent the observed :path (no inner
+// slash, leading "//" with a single remaining segment, trailing "/", no
+// leading "/"), rebuilding would normalize it to "/" — destroying a
+// malformed path the wire actually carried — so the overlay wins
+// instead (MITM Principle #1 / RFC-001 §3 "L7 parsing is an overlay").
+//
+// An empty Path falls through to the rebuild, so synthetic producers
+// (resend_grpc / fuzz_grpc) that never populate it keep their pre-USK-1053
+// behaviour exactly; this is what stops the rule from regressing them the
+// way a naive "Path always wins" rule would (the USK-1051 defect class).
+//
+// Unlike authorityForStart / schemeForStart there is deliberately no nil
+// guard: sendStart is the sole call site and rejects a typed-nil message
+// before reaching here, so a guard would be dead defence (USK-1051
+// review F-2).
+func pathForStart(m *envelope.GRPCStartMessage) string {
+	if m.Path != "" {
+		if svc, method := parseGRPCPath(m.Path); svc == "" && method == "" {
+			return m.Path
+		}
+	}
+	return buildGRPCPath(m.Service, m.Method)
 }
 
 // statusFor returns a literal 200 for a Receive-side Start envelope, else
