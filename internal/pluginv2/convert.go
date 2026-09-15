@@ -391,10 +391,13 @@ func buildGRPCStartDict(d *MessageDict, m *envelope.GRPCStartMessage) {
 		// this builder runs whenever a plugin mutates ANY field, and
 		// dropping them would erase Flow.URL and, on the Send path, the
 		// :authority / :scheme pseudo-headers plus the query component
-		// of :path that the gRPC Layer emits from them. Path is safe to
-		// carry even when a plugin rewrites service / method: per
-		// pathForStart the rebuild from Service+Method wins on any
-		// parseable path, so there is no stale-Path hazard.
+		// of :path that the gRPC Layer emits from them. Carrying Path
+		// across a plugin's service / method rewrite is safe on any
+		// parseable :path, where pathForStart lets the rebuild from
+		// Service+Method win. On an unparseable observed :path the
+		// carried Path wins instead, so that rewrite does not reach the
+		// wire — intentional (the wire overlay is the only faithful
+		// representation there), not a stale-Path oversight.
 		out := &envelope.GRPCStartMessage{
 			Authority: m.Authority,
 			Scheme:    m.Scheme,

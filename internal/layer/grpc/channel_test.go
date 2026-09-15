@@ -433,6 +433,12 @@ func TestParseGRPCPath(t *testing.T) {
 		{"/foo", "", ""},
 		{"/foo/", "", ""},    // trailing slash → no method
 		{"//Method", "", ""}, // empty service before first slash
+		// Two inner slashes: the split happens at the LAST one. That
+		// is what makes "//Method" above unparseable while "//pkg/Do"
+		// here is parseable — the asymmetry pathForStart's precedence
+		// rule rests on. USK-1053.
+		{"/a/b/c", "a/b", "c"},
+		{"//pkg/Do", "/pkg", "Do"},
 	}
 	for _, tc := range cases {
 		gotSvc, gotM := parseGRPCPath(tc.path)

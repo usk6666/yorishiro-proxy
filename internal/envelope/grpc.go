@@ -43,13 +43,18 @@ type GRPCStartMessage struct {
 	// USK-1053 made Path authoritative on Send under a narrow rule: the
 	// derived Service/Method view wins whenever the observed :path was
 	// parseable into it, and Path wins only when it was not (no inner
-	// slash, leading "//", trailing "/", no leading "/"). That keeps the
-	// intercept / plugin service+method override working exactly as
-	// before while stopping the gRPC Layer from normalizing a malformed
-	// :path into "/Service/Method" or "/" on the way to the upstream
-	// (MITM Principle #1). An empty Path falls through to the rebuild, so
-	// synthetic producers (resend_grpc / fuzz_grpc) that never set it are
-	// unaffected. See pathForStart in internal/layer/grpc/channel.go.
+	// slash, leading "//" with a single remaining segment, trailing "/",
+	// no leading "/"). That keeps the intercept / plugin service+method
+	// override working on any parseable :path while stopping the gRPC
+	// Layer from normalizing a malformed :path into "/Service/Method" or
+	// "/" on the way to the upstream (MITM Principle #1). The narrower
+	// scope is deliberate: on an unparseable observed :path a service /
+	// method override no longer reaches the wire, because rebuilding
+	// there would destroy the malformed path the wire actually carried —
+	// the overlay is the only faithful representation, so it wins. An
+	// empty Path falls through to the rebuild, so synthetic producers
+	// (resend_grpc / fuzz_grpc) that never set it are unaffected. See
+	// pathForStart in internal/layer/grpc/channel.go.
 	//
 	// Two residual losses remain, both inherited from the HTTP/2 Layer's
 	// Path/RawQuery split and shared verbatim with HTTPMessage — they are
