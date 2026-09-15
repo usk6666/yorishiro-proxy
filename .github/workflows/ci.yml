@@ -195,9 +195,10 @@ jobs:
       - name: Test (e2e full)
         run: make test-e2e
 
-  # web/ had no test gate of any kind before this job. `test-ui` has existed in the
-  # Makefile since the Web UI landed, but no workflow ever invoked it, so the 17
-  # test files / 335 tests under web/src have never once run in CI.
+  # web/ had no test gate of any kind before this job. The `test-ui` target has
+  # existed in the Makefile since the vitest harness landed (PR #397), but no
+  # workflow ever invoked it, so the 17 test files / 335 tests under web/src have
+  # never once run in CI.
   #
   # That bites hardest on the weekly dependency PR. dependabot-security.yml
   # updates Go *and* npm, yet on the npm side `test` and `test-e2e-smoke` run only
