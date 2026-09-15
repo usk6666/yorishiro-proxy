@@ -401,6 +401,47 @@ git worktree prune
 
 If stale worktrees accumulate, check with `git worktree list` and remove individually with `git worktree remove`.
 
+## Permission Policy (`.claude/settings.json`)
+
+The three permission lists were rewritten for auto mode, where a classifier judges
+each un-listed tool call instead of every unknown command reaching the user as a
+prompt. That inverts what each list is for, so keep new entries in the right one.
+
+| List | Meaning under auto mode | Admission test |
+|------|------------------------|----------------|
+| `deny` | Hard boundary. The classifier cannot override it, so this is the only backstop left. | The action is never legitimate in this repo, **and** the rule matches the whole class rather than one literal string. |
+| `ask` | Forces a prompt even when the classifier would allow. Reserved for irreversible loss. | Losing this cannot be undone from reflog, the remote, or a rebuild. |
+| `allow` | Skips the classifier entirely. | Deterministic and hard to misuse — *not* merely "usually fine". |
+
+Consequences worth remembering:
+
+- **Anything context-dependent belongs in no list.** `find`, `curl`, `gh api`, and
+  `git rebase` are safe or destructive depending on their arguments, which is
+  exactly the judgement the classifier makes per call. Listing them in `ask`
+  taxes the safe 99% to catch the 1%; listing them in `allow` waves the 1% through.
+- **`deny` rules must match a class.** The old `Bash(dd if=/dev/zero of=/dev/sda)`
+  was an exact-match rule that `of=/dev/sdb` walked straight past. Prefer
+  `Bash(dd:*)`. For the same reason, a `--long-flag` deny needs its short form
+  too (`git push --force` *and* `git push -f`).
+- **Prefix rules cannot see past the first token run.** `Bash(git worktree remove --force:*)`
+  never fires on `git worktree remove <path> --force`, and `git push origin +main:main`
+  force-pushes without matching any `--force` rule. Where a rule cannot be expressed,
+  rely on the classifier and branch protection rather than writing one that looks
+  like it works.
+- **`Read(...)` deny rules also feed `sandbox.filesystem.denyRead`**, so a broad glob
+  can block the *test process* from reading a file it just generated. This is why the
+  CA private key is denied as `Read(**/.yorishiro-proxy/ca/**)` — the real path — and
+  not as `Read(**/*.key)`, which would collide with certs that `internal/cert` tests
+  generate in temp dirs.
+- **The `make` targets are listed one by one**, mirroring `.PHONY` in the Makefile,
+  so that adding a target does not silently inherit an allow rule. Add the new target
+  here when you add it to the Makefile.
+- **Supply-chain commands stay in `ask`.** `go get` / `go install` are gated because
+  Go has no native minimum-release-age mechanism (see "Supply Chain Risk Policy").
+  pnpm is not gated here — `web/.npmrc` enforces the age window natively at install time.
+- `gh pr merge` / `gh pr close` are deliberately absent from `allow`: merging is
+  outward-facing and should get a look.
+
 ## Branch Strategy
 
 - `main` — Always maintains a passing build and test state
