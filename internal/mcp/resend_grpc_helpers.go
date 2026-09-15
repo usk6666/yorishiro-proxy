@@ -869,16 +869,36 @@ func concatResendGRPCPayloads(plan *resendGRPCPlan) []byte {
 // RPC URL and (when target_addr redirects the dial) the override
 // target. Both must pass; an override that bypasses scope is rejected
 // even when the canonical authority is in-scope.
+//
+// USK-1061: the override leg reads plan.scheme, not plan.useTLS. It used
+// to derive "https"/"" from useTLS, and the blank made every
+// `schemes`-bearing rule stop matching there — a plaintext-scoped deny
+// no-opped (bypass), a plaintext-scoped allow false-blocked. Three
+// reasons plan.scheme is the right source rather than a repaired
+// useTLS mapping:
+//
+//  1. The canonical leg already matches on plan.scheme (via
+//     canonicalURL). Two legs of one check disagreeing on the scheme
+//     axis is incoherent regardless of which value is "better".
+//  2. USK-1056's acceptance criterion is "never derive scheme from
+//     useTLS, and never rewrite scheme from useTLS" (see plan.scheme's
+//     doc). Reading useTLS at this seam is deriving it.
+//  3. plan.scheme is what `test_target` and the recorded flow both
+//     show, so it is the value an operator can predict a verdict from.
+//
+// The two agree everywhere except the observed-TLS-upgrade path in
+// applyResendGRPCDialGroundTruth (scheme stays "http", useTLS flips to
+// true); neither is fail-safe there, so precedent decides. plan.scheme
+// is never empty — finalizeResendGRPCAuthorityScheme defaults it to
+// "https" — and is already lowercased by resolveResendGRPCStart, but
+// the recovered-from-flow value bypasses that ToLower, so lowercase
+// here as CheckURL does on the canonical leg.
 func (s *Server) checkResendGRPCScope(plan *resendGRPCPlan) error {
 	if err := s.checkTargetScopeURL(plan.canonicalURL); err != nil {
 		return err
 	}
-	overrideScheme := ""
-	if plan.useTLS {
-		overrideScheme = "https"
-	}
 	if plan.dialAddr != plan.canonicalURL.Host {
-		if err := s.checkTargetScopeAddr(overrideScheme, plan.dialAddr); err != nil {
+		if err := s.checkTargetScopeAddr(strings.ToLower(plan.scheme), plan.dialAddr); err != nil {
 			return err
 		}
 	}

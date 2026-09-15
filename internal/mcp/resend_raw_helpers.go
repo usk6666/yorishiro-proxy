@@ -77,8 +77,8 @@ func validateResendRawInput(input *resendRawInput) error {
 	if err := validateResendRawNoCRLF("sni", input.SNI); err != nil {
 		return err
 	}
-	if _, _, splitErr := net.SplitHostPort(input.TargetAddr); splitErr != nil {
-		return fmt.Errorf("invalid target_addr %q: must be host:port (%v)", input.TargetAddr, splitErr)
+	if err := validateRawTargetAddr(input.TargetAddr); err != nil {
+		return err
 	}
 	if input.OverrideBytesEncoding != "" && input.OverrideBytesEncoding != "text" && input.OverrideBytesEncoding != "base64" {
 		return fmt.Errorf("unsupported override_bytes_encoding %q: must be text or base64", input.OverrideBytesEncoding)
@@ -90,6 +90,31 @@ func validateResendRawInput(input *resendRawInput) error {
 		if err := validateResendRawPatch(i, p); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// validateRawTargetAddr enforces the "host:port, explicit port mandatory"
+// contract both raw tools advertise. Shared by resend_raw and fuzz_raw.
+//
+// USK-1061: net.SplitHostPort("h:") succeeds with an empty port, so the
+// bare-`net.SplitHostPort` check both tools used accepted `169.254.169.254:`
+// — which then reaches checkTargetScopeAddr and makes targetDefaultPort
+// return 0, so any rule carrying a `ports` condition stops matching, the
+// same silent-non-match shape as the blank scheme. The dial fails
+// afterwards, so this was not exploitable; rejecting it up front keeps the
+// scope check from ever seeing a port it cannot resolve. Mirrors
+// validateOverrideHost, which already rejected both empty halves.
+func validateRawTargetAddr(addr string) error {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return fmt.Errorf("invalid target_addr %q: must be host:port (%v)", addr, err)
+	}
+	if host == "" {
+		return fmt.Errorf("invalid target_addr %q: host cannot be empty", addr)
+	}
+	if port == "" {
+		return fmt.Errorf("invalid target_addr %q: port cannot be empty", addr)
 	}
 	return nil
 }
@@ -236,14 +261,36 @@ func buildResendRawOverrides(input *resendRawInput) (job.RawResendOverrides, err
 }
 
 // checkResendRawScope enforces TargetScope rules on the dial target.
-// scheme is "https" when use_tls=true and "" otherwise — the scope
-// engine accepts a blank scheme per checkTargetScopeAddr.
 func (s *Server) checkResendRawScope(plan *resendRawPlan) error {
-	scheme := ""
-	if plan.useTLS {
+	return s.checkRawDialScope(plan.useTLS, plan.dialAddr)
+}
+
+// checkRawDialScope enforces TargetScope rules on an L4 dial target,
+// mapping the transport decision onto the scope engine's scheme
+// vocabulary. Shared by resend_raw and fuzz_raw so the two cannot drift.
+//
+// USK-1061: this used to pass "https" when use_tls=true and "" otherwise,
+// with a comment claiming "the scope engine accepts a blank scheme per
+// checkTargetScopeAddr". The engine does accept it, but it also matches
+// the scheme against every rule's `schemes` condition, so at that moment
+// every `schemes`-bearing rule stopped matching — a deny scoped to
+// plaintext no-opped (bypass to e.g. 169.254.169.254:80), and an allow
+// scoped to plaintext false-blocked a legitimate resend. The comment
+// recorded a misreading of a shared seam whose own doc named only the
+// port-inference effect; both are corrected.
+//
+// A byte stream has no application scheme, but `schemes` is not an
+// application-protocol axis: it is transport confidentiality spelled with
+// the http/https tokens (connect_handler.go scopes a CONNECT tunnel that
+// may carry SMTP as "https" for exactly this reason), and resend_raw's own
+// input field is literally named use_tls. So the mapping is coherent even
+// for a raw TCP payload. See RFC-001 §3.8.
+func (s *Server) checkRawDialScope(useTLS bool, dialAddr string) error {
+	scheme := "http"
+	if useTLS {
 		scheme = "https"
 	}
-	return s.checkTargetScopeAddr(scheme, plan.dialAddr)
+	return s.checkTargetScopeAddr(scheme, dialAddr)
 }
 
 // buildResendRawEncoderRegistry constructs the WireEncoderRegistry
