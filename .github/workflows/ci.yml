@@ -151,7 +151,8 @@ jobs:
   #
   # The condition is the depsec workflow's fixed branch name; that workflow
   # applies no labels, so the branch is its only stable marker. Keep this literal
-  # in sync with .github/workflows/dependabot-security.yml:169.
+  # in sync with the `branch=` assignment in
+  # .github/workflows/dependabot-security.yml.
   #
   # Job-level `if:` deliberately, NOT a separate workflow with a `branches:`
   # filter: a workflow skipped by path/branch filtering leaves its checks
