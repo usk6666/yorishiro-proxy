@@ -1453,6 +1453,162 @@ func TestChannel_SendDataPropagatesEndStreamToInner(t *testing.T) {
 	}
 }
 
+// ----------------------------------------------------------------------
+// USK-1051: Send-side :authority / :scheme come from the L7 overlay
+// (GRPCStartMessage.Authority / .Scheme, projected on Receive by
+// USK-920), never from Envelope.Context.
+//
+// Every case below sets Context.TargetHost to a value that differs from
+// the message's Authority, so a regression to the old
+// authorityFromContext behaviour fails loudly instead of coincidentally
+// matching.
+// ----------------------------------------------------------------------
+
+func TestChannel_SendStartPseudoHeadersComeFromMessage(t *testing.T) {
+	t.Parallel()
+
+	tlsSnapshot := &envelope.TLSSnapshot{SNI: "sni.example", ALPN: "h2"}
+
+	cases := []struct {
+		name string
+		// message-side L7 overlay
+		msgAuthority string
+		msgScheme    string
+		// envelope context (the value the OLD code used)
+		targetHost string
+		tls        *envelope.TLSSnapshot
+
+		wantAuthority string
+		wantScheme    string
+	}{
+		{
+			name:          "message_authority_wins_over_connect_target",
+			msgAuthority:  "vhost.example:8443",
+			msgScheme:     "http",
+			targetHost:    "127.0.0.1:34483",
+			wantAuthority: "vhost.example:8443",
+			wantScheme:    "http",
+		},
+		{
+			name: "empty_authority_is_not_substituted_from_target_host",
+			// RFC 9113 §8.3.1 forbids an intermediary from synthesising
+			// :authority when the original request carried none. The H2
+			// Layer omits the field entirely for an empty value.
+			msgAuthority:  "",
+			msgScheme:     "https",
+			targetHost:    "127.0.0.1:34483",
+			wantAuthority: "",
+			wantScheme:    "https",
+		},
+		{
+			name:          "observed_h2c_scheme_is_not_upgraded_to_https_under_tls_context",
+			msgAuthority:  "plain.example:80",
+			msgScheme:     "http",
+			targetHost:    "127.0.0.1:34483",
+			tls:           tlsSnapshot,
+			wantAuthority: "plain.example:80",
+			wantScheme:    "http",
+		},
+		{
+			name: "empty_scheme_falls_back_to_tls_derivation",
+			// Synthetic producers (resend_grpc / reflection discover) may
+			// leave Scheme empty; deriving it is correct because RFC 9113
+			// §8.3.1 requires exactly one non-empty value.
+			msgAuthority:  "api.example:443",
+			msgScheme:     "",
+			targetHost:    "127.0.0.1:34483",
+			tls:           tlsSnapshot,
+			wantAuthority: "api.example:443",
+			wantScheme:    "https",
+		},
+		{
+			name:          "empty_scheme_without_tls_uses_literal_fallback",
+			msgAuthority:  "api.example:443",
+			msgScheme:     "",
+			targetHost:    "127.0.0.1:34483",
+			wantAuthority: "api.example:443",
+			wantScheme:    "https",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			stub := newStubInner("stream-1")
+			ch := Wrap(stub, nil, RoleClient)
+			defer ch.Close()
+
+			startEnv := &envelope.Envelope{
+				StreamID:  "stream-1",
+				Direction: envelope.Send,
+				Protocol:  envelope.ProtocolGRPC,
+				Message: &envelope.GRPCStartMessage{
+					Service:   "svc.S",
+					Method:    "M",
+					Authority: tc.msgAuthority,
+					Scheme:    tc.msgScheme,
+				},
+				Context: envelope.EnvelopeContext{
+					TargetHost: tc.targetHost,
+					TLS:        tc.tls,
+				},
+			}
+			if err := ch.Send(context.Background(), startEnv); err != nil {
+				t.Fatalf("Send Start: %v", err)
+			}
+
+			stub.mu.Lock()
+			defer stub.mu.Unlock()
+			if len(stub.sent) != 1 {
+				t.Fatalf("inner.sent length = %d, want 1", len(stub.sent))
+			}
+			evt, ok := stub.sent[0].Message.(*http2.H2HeadersEvent)
+			if !ok {
+				t.Fatalf("inner message type = %T, want *http2.H2HeadersEvent", stub.sent[0].Message)
+			}
+			if evt.Authority != tc.wantAuthority {
+				t.Errorf("H2HeadersEvent.Authority = %q, want %q", evt.Authority, tc.wantAuthority)
+			}
+			if evt.Scheme != tc.wantScheme {
+				t.Errorf("H2HeadersEvent.Scheme = %q, want %q", evt.Scheme, tc.wantScheme)
+			}
+			// :path stays derived from Service/Method (USK-1051 defers the
+			// :path work); assert it so the deferral is pinned.
+			if want := "/svc.S/M"; evt.Path != want {
+				t.Errorf("H2HeadersEvent.Path = %q, want %q", evt.Path, want)
+			}
+		})
+	}
+}
+
+// TestAuthorityForStart_NilMessage pins the defensive nil guard: the old
+// authorityFromContext nil-checked its argument and sendStart's type
+// switch cannot rule out a typed-nil *GRPCStartMessage in an interface.
+func TestAuthorityForStart_NilMessage(t *testing.T) {
+	t.Parallel()
+	if got := authorityForStart(nil); got != "" {
+		t.Errorf("authorityForStart(nil) = %q, want empty", got)
+	}
+}
+
+// TestSchemeForStart_NilArgs pins the defensive nil guards on both
+// parameters and the literal-fallback tail.
+func TestSchemeForStart_NilArgs(t *testing.T) {
+	t.Parallel()
+	if got := schemeForStart(nil, nil, "https"); got != "https" {
+		t.Errorf("schemeForStart(nil, nil, https) = %q, want https", got)
+	}
+	if got := schemeForStart(nil, &envelope.GRPCStartMessage{Scheme: "http"}, "https"); got != "http" {
+		t.Errorf("schemeForStart(nil, {Scheme:http}, https) = %q, want http", got)
+	}
+	envWithTLS := &envelope.Envelope{
+		Context: envelope.EnvelopeContext{TLS: &envelope.TLSSnapshot{ALPN: "h2"}},
+	}
+	if got := schemeForStart(envWithTLS, nil, "http"); got != "https" {
+		t.Errorf("schemeForStart(tlsEnv, nil, http) = %q, want https", got)
+	}
+}
+
 func TestPercentEncodeDecodeRoundTrip(t *testing.T) {
 	t.Parallel()
 	cases := []string{

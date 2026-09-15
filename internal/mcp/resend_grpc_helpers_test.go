@@ -1,5 +1,6 @@
 // Package mcp resend_grpc_helpers_test.go — unit coverage for
-// extractResendGRPCStartFields (USK-920).
+// extractResendGRPCStartFields (USK-920) and for the Send-side
+// pseudo-header projection onto the synthesised Start envelope (USK-1051).
 //
 // projectGRPCStart (internal/pipeline/record_step.go) writes grpc_service /
 // grpc_method into Flow.Metadata unconditionally, and after USK-920 also
@@ -12,6 +13,7 @@ import (
 	"net/url"
 	"testing"
 
+	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 )
 
@@ -189,6 +191,92 @@ func TestPickGRPCStartFlow_FirstFlow(t *testing.T) {
 			got := pickGRPCStartFlow(tc.flows)
 			if got == nil || got.ID != "first" {
 				t.Fatalf("pickGRPCStartFlow returned %v, want flow ID 'first'", got)
+			}
+		})
+	}
+}
+
+// TestBuildResendGRPCStartEnvelope_CarriesAuthorityAndScheme pins USK-1051:
+// the gRPC Layer derives :authority / :scheme from the GRPCStartMessage
+// overlay alone (no Envelope.Context.TargetHost fallback), and this
+// synthetic envelope's Context carries only a ConnID. If the builder stops
+// copying plan.authority / plan.scheme onto the message, the HEADERS frame
+// goes out with no :authority and grpc-go >=1.83.2 rejects the RPC with
+// codes.Internal before the handler ever runs.
+//
+// fuzz_grpc shares this builder via cloneFuzzGRPCPlan (a by-value struct
+// copy that carries both fields), so this one assertion covers both tools.
+func TestBuildResendGRPCStartEnvelope_CarriesAuthorityAndScheme(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name          string
+		plan          *resendGRPCPlan
+		wantAuthority string
+		wantScheme    string
+	}{
+		{
+			name: "tls_plan",
+			plan: &resendGRPCPlan{
+				streamID:  "stream-1",
+				connID:    "conn-1",
+				authority: "api.example.com:443",
+				scheme:    "https",
+				service:   "hello.HelloService",
+				method:    "SayHello",
+			},
+			wantAuthority: "api.example.com:443",
+			wantScheme:    "https",
+		},
+		{
+			name: "h2c_plan",
+			plan: &resendGRPCPlan{
+				streamID:  "stream-2",
+				connID:    "conn-2",
+				authority: "127.0.0.1:50051",
+				scheme:    "http",
+				service:   "hello.HelloService",
+				method:    "SayHello",
+			},
+			wantAuthority: "127.0.0.1:50051",
+			wantScheme:    "http",
+		},
+		{
+			name: "authority_differs_from_dial_target",
+			// target_addr override: the dial goes to dialAddr but the
+			// :authority pseudo-header keeps the canonical vhost.
+			plan: &resendGRPCPlan{
+				streamID:  "stream-3",
+				connID:    "conn-3",
+				authority: "vhost.example:8443",
+				dialAddr:  "127.0.0.1:9999",
+				scheme:    "https",
+				service:   "hello.HelloService",
+				method:    "SayHello",
+			},
+			wantAuthority: "vhost.example:8443",
+			wantScheme:    "https",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			env := buildResendGRPCStartEnvelope(tc.plan)
+			msg, ok := env.Message.(*envelope.GRPCStartMessage)
+			if !ok {
+				t.Fatalf("env.Message type = %T, want *envelope.GRPCStartMessage", env.Message)
+			}
+			if msg.Authority != tc.wantAuthority {
+				t.Errorf("GRPCStartMessage.Authority = %q, want %q", msg.Authority, tc.wantAuthority)
+			}
+			if msg.Scheme != tc.wantScheme {
+				t.Errorf("GRPCStartMessage.Scheme = %q, want %q", msg.Scheme, tc.wantScheme)
+			}
+			// The Context is intentionally ConnID-only: the Layer must not
+			// be able to fall back to it for :authority.
+			if env.Context.TargetHost != "" {
+				t.Errorf("env.Context.TargetHost = %q, want empty (no Layer-side fallback source)", env.Context.TargetHost)
 			}
 		})
 	}

@@ -196,6 +196,13 @@ type resendGRPCPlan struct {
 	sni       string
 	authority string
 
+	// scheme is the resolved ":scheme" pseudo-header value ("https" or
+	// "http"), carried explicitly rather than re-derived from
+	// canonicalURL: cloneFuzzGRPCPlan nils canonicalURL so the caller can
+	// rebuild it after per-variant service/method substitution, so reading
+	// it at envelope-build time would be order-dependent (USK-1051).
+	scheme string
+
 	// service / method are the post-override values that populate
 	// :path and the GRPCStartMessage.
 	service string
@@ -255,6 +262,7 @@ func (s *Server) buildResendGRPCPlan(ctx context.Context, input *resendGRPCInput
 	}
 	plan.dialAddr, plan.sni = resolveResendGRPCDialTarget(dialAuthority, plan.useTLS)
 	plan.authority = authority
+	plan.scheme = scheme
 	plan.canonicalURL = resendGRPCCanonicalURL(scheme, authority, plan.service, plan.method)
 
 	if len(plan.metadata) == 0 {
@@ -904,10 +912,23 @@ func receiveResendGRPCResponses(ctx context.Context, plan *resendGRPCPlan, ch la
 // (the gRPC Layer's sendStart consults this for the content-type pseudo-
 // header and for downstream content-type detection on the upstream side
 // via DispatchH2Stream).
+//
+// USK-1051: Authority / Scheme must be set on the message, not left to the
+// Layer. The gRPC Layer derives the :authority / :scheme pseudo-headers
+// from the GRPCStartMessage overlay alone (there is no Context.TargetHost
+// fallback by design), and this synthetic envelope's Context carries only
+// a ConnID. Without these two fields the HEADERS frame would go out with
+// no :authority at all, which gRPC servers reject with codes.Internal
+// ("no host or :authority header present") since grpc-go 1.83.2.
+//
+// fuzz_grpc shares this builder via cloneFuzzGRPCPlan (a by-value struct
+// copy), so both tools are covered here.
 func buildResendGRPCStartEnvelope(plan *resendGRPCPlan) *envelope.Envelope {
 	msg := &envelope.GRPCStartMessage{
 		Service:        plan.service,
 		Method:         plan.method,
+		Authority:      plan.authority,
+		Scheme:         plan.scheme,
 		Metadata:       plan.metadata,
 		Encoding:       plan.encoding,
 		AcceptEncoding: plan.acceptEncoding,

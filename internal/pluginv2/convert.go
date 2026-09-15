@@ -384,7 +384,19 @@ func buildGRPCStartDict(d *MessageDict, m *envelope.GRPCStartMessage) {
 	d.markReadOnly(anomKey)
 
 	d.builder = func(d *MessageDict) (envelope.Message, error) {
-		out := &envelope.GRPCStartMessage{Anomalies: m.Anomalies}
+		// USK-1051: Authority / Scheme / Path (the USK-920 derived L7
+		// overlay) are deliberately NOT exposed as dict keys — doing so
+		// would widen the documented hook surface (RFC-001 §9.3). They
+		// must still be carried across the rebuild: this builder runs
+		// whenever a plugin mutates ANY field, and dropping them would
+		// erase Flow.URL and, on the Send path, the :authority /
+		// :scheme pseudo-headers the gRPC Layer emits from them.
+		out := &envelope.GRPCStartMessage{
+			Authority: m.Authority,
+			Scheme:    m.Scheme,
+			Path:      m.Path,
+			Anomalies: m.Anomalies,
+		}
 		if err := readScalar(d, "service", &out.Service); err != nil {
 			return nil, err
 		}

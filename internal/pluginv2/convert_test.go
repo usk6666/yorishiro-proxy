@@ -178,6 +178,117 @@ func TestRoundTrip_GRPCStartMessage(t *testing.T) {
 	}
 }
 
+// TestGRPCStart_PseudoHeaderOverlaySurvivesMutation pins USK-1051: the
+// USK-920 derived overlay (Authority / Scheme / Path) is deliberately NOT
+// exposed as plugin-mutable dict keys, but the builder — which runs
+// whenever a plugin touches ANY field — must still carry it across the
+// rebuild.
+//
+// Dropping it is not cosmetic: RecordStep gates Flow.URL on
+// Authority/Scheme, and after USK-1051 the gRPC Layer emits the wire
+// :authority / :scheme from these exact fields, so a plugin that merely
+// appends a metadata entry would otherwise strip :authority off the
+// HEADERS frame and get the RPC rejected by grpc-go >=1.83.2.
+func TestGRPCStart_PseudoHeaderOverlaySurvivesMutation(t *testing.T) {
+	cases := []struct {
+		name string
+		src  string
+	}{
+		{
+			name: "metadata_mutation",
+			src: `
+def hook(msg):
+    msg["metadata"].append("x-added", "1")
+`,
+		},
+		{
+			name: "service_mutation",
+			src: `
+def hook(msg):
+    msg["service"] = "other.Service"
+`,
+		},
+		{
+			name: "encoding_mutation",
+			src: `
+def hook(msg):
+    msg["encoding"] = "identity"
+`,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := &envelope.GRPCStartMessage{
+				Service:     "greeter.Greeter",
+				Method:      "SayHello",
+				Authority:   "vhost.example:8443",
+				Scheme:      "http",
+				Path:        "/greeter.Greeter/SayHello",
+				Metadata:    []envelope.KeyValue{{Name: "x-token", Value: "abc"}},
+				ContentType: "application/grpc+proto",
+			}
+			env := &envelope.Envelope{Message: m}
+			d, err := runHook(t, env, tc.src)
+			if err != nil {
+				t.Fatalf("hook: %v", err)
+			}
+			if d.classify() != MutationMessageOnly {
+				t.Fatalf("classify = %s, want message_only (the rebuild path must run)", d.classify())
+			}
+			got, _, _, err := dictToMessage(d)
+			if err != nil {
+				t.Fatalf("dictToMessage: %v", err)
+			}
+			gm, ok := got.(*envelope.GRPCStartMessage)
+			if !ok {
+				t.Fatalf("rebuilt message type = %T, want *envelope.GRPCStartMessage", got)
+			}
+			if gm == m {
+				t.Fatal("expected a freshly built message, got the original alias")
+			}
+			if gm.Authority != m.Authority {
+				t.Errorf("Authority = %q, want %q (must survive rebuild)", gm.Authority, m.Authority)
+			}
+			if gm.Scheme != m.Scheme {
+				t.Errorf("Scheme = %q, want %q (must survive rebuild)", gm.Scheme, m.Scheme)
+			}
+			if gm.Path != m.Path {
+				t.Errorf("Path = %q, want %q (must survive rebuild)", gm.Path, m.Path)
+			}
+		})
+	}
+}
+
+// TestGRPCStart_PseudoHeadersAreNotPluginMutableKeys pins the scope
+// decision that USK-1051 preserves the overlay WITHOUT widening the
+// documented 17-entry hook surface (RFC-001 §9.3). Exposing these as dict
+// keys would need docs + plugin_introspect work and is deliberately out of
+// scope; this test fails loudly if someone adds them casually.
+func TestGRPCStart_PseudoHeadersAreNotPluginMutableKeys(t *testing.T) {
+	m := &envelope.GRPCStartMessage{
+		Service:   "greeter.Greeter",
+		Method:    "SayHello",
+		Authority: "vhost.example:8443",
+		Scheme:    "http",
+		Path:      "/greeter.Greeter/SayHello",
+	}
+	env := &envelope.Envelope{Message: m}
+	d, err := convertMessageToDict(env)
+	if err != nil {
+		t.Fatalf("convert: %v", err)
+	}
+	present := map[string]bool{}
+	for _, k := range d.sortedKeysForTest() {
+		present[k] = true
+	}
+	for _, key := range []string{"authority", "scheme", "path"} {
+		if present[key] {
+			t.Errorf("dict key %q is present; pseudo-headers must stay off the plugin hook surface", key)
+		}
+	}
+}
+
 func TestRoundTrip_GRPCDataMessage(t *testing.T) {
 	m := &envelope.GRPCDataMessage{
 		Service:    "greeter.Greeter",
