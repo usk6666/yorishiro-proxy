@@ -31,9 +31,30 @@ func NewHostScopeStep(scope *connector.TargetScope) *HostScopeStep {
 // TargetScope policy. Returns Drop if the target is blocked, Continue
 // otherwise. Envelopes without a TargetHost are always allowed.
 //
+// Only Send-direction envelopes are checked, mirroring HTTPScopeStep.
+// This is a connection-level gate, and a connection-level gate must reach
+// exactly one verdict per connection. Since USK-1081 the scheme comes
+// from Envelope.Context.TLS, which is per-Layer and not per-stack
+// (RFC-001 §3.1): a tcp_forward entry with `tls` and no `upstream_tls`
+// stamps a snapshot on the client Layer's EnvelopeContext and nil on the
+// upstream Layer's (connector/stack_builder_target_override.go), so
+// without this gate the Send leg would derive "https", the Receive leg
+// "http", and a Schemes-bearing rule could reach opposite verdicts on the
+// two halves of one exchange.
+//
+// Gating loses no coverage. Both legs are stamped with the same
+// Context.TargetHost, so the Receive-leg check was already redundant on
+// hostname and port; the only axis it added was the scheme — exactly the
+// axis that diverges. The client-facing Layer is the one that emits Send
+// (connector/stack_builder.go), so the surviving check reads the
+// confidentiality of the leg the client is actually speaking on.
+//
 // The scheme handed to CheckTarget is derived from Envelope.Context.TLS
 // (see hostScopeScheme).
 func (s *HostScopeStep) Process(_ context.Context, env *envelope.Envelope) Result {
+	if env.Direction != envelope.Send {
+		return Result{}
+	}
 	if s.scope == nil || env.Context.TargetHost == "" {
 		return Result{}
 	}
@@ -91,8 +112,10 @@ func (s *HostScopeStep) Process(_ context.Context, env *envelope.Envelope) Resul
 //
 // Because TLS is per-Layer and not per-stack (RFC-001 §3.1), the two legs
 // of a connection with independent TLS axes (a tcp_forward entry with
-// `tls` but no `upstream_tls`, say) derive different schemes. That is the
-// wire reality of each leg, and it is what a Schemes rule is asking about.
+// `tls` but no `upstream_tls`, say) carry different snapshots and would
+// derive different schemes. Process therefore calls this only on
+// Send-direction envelopes, so the connection is scoped once, on the
+// client-facing leg's wire reality.
 func hostScopeScheme(env *envelope.Envelope) string {
 	if env.Context.TLS != nil {
 		return "https"

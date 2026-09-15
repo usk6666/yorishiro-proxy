@@ -311,9 +311,15 @@ func TestHostScopeStep_SchemeDerivedFromTLS(t *testing.T) {
 		wantAction   Action
 	}{
 		{
-			// The verbatim allow rule from help_security.md. Pre-fix this
-			// returned Respond + a synthetic 403 on every request, so an
-			// operator who copied our own documentation proxied nothing.
+			// The allow-rule shape published in help_security.md
+			// (hostname + ports + schemes). Pre-fix this returned Respond
+			// + a synthetic 403 on every request, so an operator who
+			// copied our own documentation proxied nothing. The doc writes
+			// that rule to the Agent Layer via set_target_scope, so there
+			// it trips CheckTarget step 4 ("not in agent allow list"); it
+			// is mounted on the Policy Layer here, which shares
+			// matchTargetRule and trips step 3. The agent-layer case below
+			// pins step 4 directly.
 			name: "documented https allow rule matches a TLS connection",
 			policyAllows: []connector.TargetRule{
 				{Hostname: "api.target.com", Ports: []int{443}, Schemes: []string{"https"}},
@@ -324,8 +330,13 @@ func TestHostScopeStep_SchemeDerivedFromTLS(t *testing.T) {
 			wantAction: Continue,
 		},
 		{
-			// Deny side, raw TCP: there is no HTTPScopeStep backstop for a
-			// RawMessage, so a deny missed here is a deny missed entirely.
+			// Deny side, RawMessage: HostScopeStep is Message-agnostic, so
+			// the derivation must apply here too. This is a contract pin,
+			// not live coverage — production raw envelopes carry no
+			// TargetHost (internal/layer/bytechunk/channel.go stamps only
+			// ReceivedAt, and bytechunk.New takes no envelope-context
+			// parameter), so they short-circuit before this point. Tracked
+			// as USK-1083.
 			name: "http deny rule matches a plaintext connection",
 			policyDenies: []connector.TargetRule{
 				{Hostname: "169.254.169.254", Schemes: []string{"http"}},
@@ -557,6 +568,138 @@ func TestHostScopeStep_SchemeDerivation_ShortCircuits(t *testing.T) {
 			r := tt.step.Process(context.Background(), env)
 			if r.Action != Continue {
 				t.Errorf("got action %v, want Continue", r.Action)
+			}
+		})
+	}
+}
+
+// TestHostScopeStep_DirectionGate pins the Direction gate added in the
+// USK-1081 review round: HostScopeStep evaluates Send-direction envelopes
+// only, exactly like its sibling HTTPScopeStep.
+//
+// Before USK-1081 both legs derived the identical blank scheme, so the Step
+// could not disagree with itself across directions. Deriving from
+// Context.TLS makes divergence reachable, because TLS is stamped per Layer
+// and not per stack (RFC-001 §3.1): a tcp_forward entry with `tls` and no
+// `upstream_tls` gives the client Layer a snapshot and the upstream Layer
+// nil (connector/stack_builder_target_override.go), so a Schemes-bearing
+// rule would see "https" on the Send leg and "http" on the Receive leg.
+//
+// The losing Receive verdict is then mishandled downstream, in both shapes.
+// For an *HTTPMessage the Step returns Respond, but session.upstreamToClient
+// branches only on pipeline.Drop, so the Respond falls through to
+// client.Send and the real upstream response is relayed anyway — fail-open,
+// and OnPipelineDrop never fires, so no audit Stream is written. Every other
+// Message type gets a bare Drop, silently discarding inbound events on an
+// otherwise established connection; SSE and gRPC reach that shape, because
+// post-swap SSE events inherit the upstream response envelope's context
+// (sse.Wrap copies firstResponse.Context) and gRPC Receive events come
+// straight off the upstream HTTP/2 Layer. Post-upgrade WebSocket frames do
+// not: both post-swap ws Layers are built from the *upgrade request's*
+// context (session.wsEnvelopeContextFromUpgradeReq), so they carry the
+// client leg's TLS in both directions and cannot disagree.
+//
+// Gating loses nothing: both legs are stamped with the same
+// Context.TargetHost, so the Receive check was already redundant on
+// hostname and port and only added the scheme axis.
+func TestHostScopeStep_DirectionGate(t *testing.T) {
+	tlsOn := &envelope.TLSSnapshot{}
+	httpsAllow := []connector.TargetRule{
+		{Hostname: "api.target.com", Ports: []int{443}, Schemes: []string{"https"}},
+	}
+
+	tests := []struct {
+		name         string
+		policyAllows []connector.TargetRule
+		policyDenies []connector.TargetRule
+		direction    envelope.Direction
+		tls          *envelope.TLSSnapshot
+		msg          envelope.Message
+		wantAction   Action
+	}{
+		{
+			// The Send leg: TLS terminated client-side, so the https allow
+			// rule matches and the connection is scoped once, here.
+			name:         "send leg over TLS matches the https allow rule",
+			policyAllows: httpsAllow,
+			direction:    envelope.Send,
+			tls:          tlsOn,
+			msg:          &envelope.HTTPMessage{Method: "GET", Path: "/"},
+			wantAction:   Continue,
+		},
+		{
+			// Same connection, upstream leg: cleartext, so the same rule
+			// would derive "http" and miss, blocking the response. Without
+			// the gate this was Respond — which upstreamToClient discards,
+			// relaying the upstream response unaudited.
+			name:         "receive leg without TLS is not re-checked (http)",
+			policyAllows: httpsAllow,
+			direction:    envelope.Receive,
+			tls:          nil,
+			msg:          &envelope.HTTPMessage{Status: 200, StatusReason: "OK"},
+			wantAction:   Continue,
+		},
+		{
+			// The non-HTTP shape of the same divergence. Without the gate
+			// this was a bare Drop with no terminator and no audit record:
+			// the SSE response passes (it is an HTTPMessage, so the Respond
+			// is discarded and relayed), the layer swaps, and then every
+			// event vanishes — an established, silently dead stream.
+			name:         "receive leg without TLS is not re-checked (sse event)",
+			policyAllows: httpsAllow,
+			direction:    envelope.Receive,
+			tls:          nil,
+			msg:          &envelope.SSEMessage{Event: "message", Data: "hi"},
+			wantAction:   Continue,
+		},
+		{
+			// The gate is unconditional, not "skip only when the verdict
+			// would have differed": an outright deny on the target host
+			// still continues on the Receive leg, because the Send leg has
+			// already decided for the whole connection.
+			name:         "receive leg skips an unconditional deny",
+			policyDenies: []connector.TargetRule{{Hostname: "api.target.com"}},
+			direction:    envelope.Receive,
+			tls:          tlsOn,
+			msg:          &envelope.HTTPMessage{Status: 200, StatusReason: "OK"},
+			wantAction:   Continue,
+		},
+		{
+			// Control for the case above: the same deny does fire on Send,
+			// so the gate is what produced the Continue, not a broken rule.
+			name:         "send leg still enforces the same deny",
+			policyDenies: []connector.TargetRule{{Hostname: "api.target.com"}},
+			direction:    envelope.Send,
+			tls:          tlsOn,
+			msg:          &envelope.HTTPMessage{Method: "GET", Path: "/"},
+			wantAction:   Respond,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			scope := connector.NewTargetScope()
+			scope.SetPolicyRules(tt.policyAllows, tt.policyDenies)
+			step := NewHostScopeStep(scope)
+
+			env := &envelope.Envelope{
+				Direction: tt.direction,
+				Context: envelope.EnvelopeContext{
+					TargetHost: "api.target.com:443",
+					TLS:        tt.tls,
+				},
+				Message: tt.msg,
+			}
+			r := step.Process(context.Background(), env)
+
+			if r.Action != tt.wantAction {
+				t.Fatalf("got action %v, want %v", r.Action, tt.wantAction)
+			}
+			if tt.wantAction == Continue && r != (Result{}) {
+				t.Errorf("Continue: got %+v, want the zero Result", r)
+			}
+			if tt.wantAction != Continue && r.BlockedBy != BlockedByTargetScope {
+				t.Errorf("blocked: BlockedBy = %q, want %q", r.BlockedBy, BlockedByTargetScope)
 			}
 		})
 	}
