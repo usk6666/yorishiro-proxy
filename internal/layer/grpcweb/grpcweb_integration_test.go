@@ -781,12 +781,52 @@ func firstFlowWithEvent(flows []*flow.Flow, dir, event string) *flow.Flow {
 // Round-trip tests (tests 1-4)
 // ---------------------------------------------------------------------------
 
+// hostCapture is a mutex-guarded slot for the authority the upstream
+// actually observed. The upstream handlers run on their own goroutines, so
+// the assertion side must not read the value unsynchronised.
+type hostCapture struct {
+	mu   sync.Mutex
+	host string
+}
+
+func (h *hostCapture) set(v string) {
+	h.mu.Lock()
+	h.host = v
+	h.mu.Unlock()
+}
+
+func (h *hostCapture) get() string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.host
+}
+
+// hostHeaderFrom extracts the HTTP/1.x Host header value from raw request
+// bytes. Returns "" when the header is absent.
+func hostHeaderFrom(reqBytes []byte) string {
+	for _, line := range strings.Split(string(reqBytes), "\r\n") {
+		if line == "" {
+			break
+		}
+		name, value, ok := strings.Cut(line, ":")
+		if !ok {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(name), "host") {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
 func runRoundTripHTTP1(t *testing.T, base64Wire bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
+	var upstreamHost hostCapture
 	respPayload := []byte("hello-grpc-web")
-	upstreamLn, _ := startGRPCWebHTTP1Upstream(t, func(_ []byte) []byte {
+	upstreamLn, _ := startGRPCWebHTTP1Upstream(t, func(reqBytes []byte) []byte {
+		upstreamHost.set(hostHeaderFrom(reqBytes))
 		return buildGRPCWebResponseHTTP(respPayload, 0, "OK", base64Wire)
 	})
 	defer upstreamLn.Close()
@@ -805,11 +845,31 @@ func runRoundTripHTTP1(t *testing.T, base64Wire bool) {
 		t.Fatal("timeout waiting for session to complete")
 	}
 
+	// USK-1057 regression guard. Populating the GRPCStartMessage L7 overlay
+	// must not disturb the HTTP/1.x wire: on HTTP/1.x the authority travels
+	// as an ordinary Host header, so it survives stripStartHeaders →
+	// rebuildStartHeaders as Metadata, and the http1 send path builds its
+	// header block from msg.Headers without ever reading
+	// HTTPMessage.Authority. This assertion converts that argument into an
+	// executable guarantee.
+	if got := upstreamHost.get(); got != target {
+		t.Errorf("upstream saw Host = %q, want %q", got, target)
+	}
+
 	assertGRPCWebStream(t, store)
 
 	flows := flowsForFirstStream(store)
+	// USK-1057 pin on the recorded side. The overlay is not only a wire
+	// change: RecordStep's projectGRPCStart builds Flow.URL out of
+	// GRPCStartMessage.Authority / Scheme / Path, so before the fix the
+	// send-start flow reached the MCP surface with a nil URL and
+	// `resend_grpc { flow_id }` had no RPC target to recover.
 	if startF := firstFlowWithEvent(flows, "send", "start"); startF == nil {
 		t.Errorf("missing send-start flow; flows=%d", len(flows))
+	} else if startF.URL == nil {
+		t.Errorf("send-start Flow.URL = nil, want the observed authority %q recorded", target)
+	} else if startF.URL.Host != target {
+		t.Errorf("send-start Flow.URL.Host = %q, want %q", startF.URL.Host, target)
 	}
 	if dataF := firstFlowWithEvent(flows, "send", "data"); dataF == nil {
 		t.Errorf("missing send-data flow; flows=%d", len(flows))
@@ -839,8 +899,10 @@ func runRoundTripHTTP2(t *testing.T, base64Wire bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
+	var upstreamHost hostCapture
 	respPayload := []byte("hello-grpc-web-h2")
-	upAddr, upShutdown := startGRPCWebHTTP2Upstream(t, func(_ *nethttp.Request) ([]byte, string) {
+	upAddr, upShutdown := startGRPCWebHTTP2Upstream(t, func(r *nethttp.Request) ([]byte, string) {
+		upstreamHost.set(r.Host)
 		body := buildGRPCWebResponseBody(respPayload, 0, "OK", base64Wire)
 		ct := "application/grpc-web+proto"
 		if base64Wire {
@@ -855,6 +917,17 @@ func runRoundTripHTTP2(t *testing.T, base64Wire bool) {
 	status, _, _ := sendGRPCWebHTTP2Request(t, proxyAddr, upAddr, []byte("ping"), base64Wire)
 	if status != 200 {
 		t.Errorf("client status = %d, want 200", status)
+	}
+
+	// USK-1057: the client's :authority must reach the upstream wire.
+	// x/net/http2's server maps :authority → req.Host (falling back to the
+	// Host header, which an h2 client does not send). Before the fix the
+	// grpcweb Layer dropped the pseudo-header entirely on the
+	// HTTPMessage → GRPCStartMessage → HTTPMessage round trip, the encoder
+	// omitted :authority, and this read "". x/net/http2 validates only
+	// :method / :scheme / :path, so nothing else in this suite noticed.
+	if got := upstreamHost.get(); got != upAddr {
+		t.Errorf("upstream saw :authority = %q, want %q", got, upAddr)
 	}
 
 	if !waitFor(t, 5*time.Second, func() bool {
