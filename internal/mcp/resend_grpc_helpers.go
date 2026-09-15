@@ -93,11 +93,16 @@ func validateResendGRPCInput(input *resendGRPCInput) error {
 // too. input.Scheme takes precedence over the recovered scheme in
 // resolveResendGRPCStart, and since this PR the resolved value reaches the
 // wire as the :scheme pseudo-header (plan.scheme →
-// GRPCStartMessage.Scheme). fuzz_grpc meanwhile re-derives the
-// scope/safety canonicalURL's scheme from plan.useTLS, so an unvalidated
-// third value would make the checked URL and the wire disagree. The
-// recovered-from-flow scheme is deliberately left unchecked: recorded wire
-// values must not be sanitized.
+// GRPCStartMessage.Scheme). fuzz_grpc rebuilds the scope/safety
+// canonicalURL per variant, so an unvalidated third value would make the
+// checked URL and the wire disagree. The recovered-from-flow scheme is
+// deliberately left unchecked: recorded wire values must not be sanitized.
+//
+// USK-1056: the rebuild now reads plan.scheme rather than re-deriving it
+// from plan.useTLS (see rebuildFuzzGRPCCanonicalURL), because those two can
+// diverge once the dial decision consults observed transport. That makes
+// this allowlist the single gate on the one value both the wire and the
+// checked URL come from.
 func validateResendGRPCStringFields(input *resendGRPCInput) error {
 	if err := validateResendGRPCNoCRLF("service", input.Service); err != nil {
 		return err
@@ -204,6 +209,11 @@ type resendGRPCPlan struct {
 	// authority is the value used for the :authority pseudo-header and the
 	// HEADERS frame; dialAddr is the actual host:port the dialer sees
 	// (overridden by target_addr when supplied).
+	//
+	// USK-1056: useTLS is a transport decision, not a projection of scheme.
+	// The two agree on the from-scratch path, but on the flow_id path
+	// applyResendGRPCDialGroundTruth may set useTLS=true while scheme stays
+	// "http" — see that function for why.
 	useTLS    bool
 	dialAddr  string
 	sni       string
@@ -214,7 +224,32 @@ type resendGRPCPlan struct {
 	// canonicalURL: cloneFuzzGRPCPlan nils canonicalURL so the caller can
 	// rebuild it after per-variant service/method substitution, so reading
 	// it at envelope-build time would be order-dependent (USK-1051).
+	//
+	// USK-1056: never derive scheme from useTLS and never rewrite scheme
+	// from observed transport. On the flow_id path this is the recorded
+	// client-declared :scheme, and reproducing it byte-for-byte on the
+	// resent HEADERS frame is the point of the tool.
 	scheme string
+
+	// observedUpstreamTLSVersion is the transport ground truth recovered
+	// alongside the flow: Stream.ConnInfo.TLSVersion, which
+	// RecordStep.updateStreamTLS writes from the *upstream* leg's TLS
+	// snapshot on every Receive envelope. Non-empty means the proxy itself
+	// completed a TLS handshake with the upstream while recording. Empty is
+	// ambiguous (genuine cleartext, an h2c leg, or simply no Receive
+	// envelope yet), which is why it is a one-sided oracle — see
+	// applyResendGRPCDialGroundTruth. Always empty on the from-scratch path.
+	observedUpstreamTLSVersion string
+
+	// tlsUpgradedFromObservation records that applyResendGRPCDialGroundTruth
+	// flipped useTLS on from observedUpstreamTLSVersion rather than from the
+	// recovered scheme. It exists so a *failed* run can name the proxy's own
+	// transport decision in the returned error: warnings[] is only attached
+	// to a successful result, and the one topology this upgrade is knowingly
+	// wrong for (a tcp_forwards plaintext client leg fronting an
+	// upstream_tls upstream) always fails at the handshake. See
+	// wrapResendGRPCRunError.
+	tlsUpgradedFromObservation bool
 
 	// service / method are the post-override values that populate
 	// :path and the GRPCStartMessage.
@@ -234,6 +269,11 @@ type resendGRPCPlan struct {
 	// trailerMetadata, when non-nil, terminates the stream via a
 	// Send-direction trailer HEADERS frame.
 	trailerMetadata []envelope.KeyValue
+
+	// warnings collects non-fatal advisories raised while resolving the
+	// plan (USK-1056: dial-provenance and TLS-upgrade notices). The
+	// resend_grpc handler prepends them to the tool result's warnings[].
+	warnings []string
 }
 
 // resendGRPCDataPlan is one LPM ready for envelope construction.
@@ -257,6 +297,11 @@ type resendGRPCDataPlan struct {
 // the receive-direction GRPCStart Flow supplies the negotiated upstream
 // AcceptEncoding default. When flow_id is empty, every Start field comes
 // from the user.
+//
+// USK-1056: the recovered authority / scheme are client-declared values and
+// must not decide the socket on their own. applyResendGRPCDialGroundTruth
+// runs between the scheme resolution and the dial-target resolution to
+// reconcile them against the recorded transport observation.
 func (s *Server) buildResendGRPCPlan(ctx context.Context, input *resendGRPCInput) (*resendGRPCPlan, error) {
 	plan := &resendGRPCPlan{
 		streamID: uuid.NewString(),
@@ -268,15 +313,22 @@ func (s *Server) buildResendGRPCPlan(ctx context.Context, input *resendGRPCInput
 		return nil, err
 	}
 
+	plan.authority = authority
+	plan.scheme = scheme
 	plan.useTLS = scheme == "https"
+
+	// USK-1056: reconcile the transport decision with what the proxy
+	// actually observed BEFORE the dial target is resolved — the default
+	// port that resolveResendGRPCDialTarget appends (443 vs 80) follows
+	// plan.useTLS.
+	applyResendGRPCDialGroundTruth(ctx, input, plan)
+
 	dialAuthority := authority
 	if input.TargetAddr != "" {
 		dialAuthority = input.TargetAddr
 	}
 	plan.dialAddr, plan.sni = resolveResendGRPCDialTarget(dialAuthority, plan.useTLS)
-	plan.authority = authority
-	plan.scheme = scheme
-	plan.canonicalURL = resendGRPCCanonicalURL(scheme, authority, plan.service, plan.method)
+	plan.canonicalURL = resendGRPCCanonicalURL(plan.scheme, authority, plan.service, plan.method)
 
 	if len(plan.metadata) == 0 {
 		plan.metadata = recoveredMeta
@@ -295,6 +347,131 @@ func (s *Server) buildResendGRPCPlan(ctx context.Context, input *resendGRPCInput
 		plan.trailerMetadata = headerKVsToKeyValues(input.TrailerMetadata)
 	}
 	return plan, nil
+}
+
+// applyResendGRPCDialGroundTruth reconciles the dial parameters recovered
+// from a recorded flow against the transport the proxy actually observed,
+// and records advisories for the parts that cannot be reconciled
+// (USK-1056). No-op on the from-scratch path, where every field is the
+// caller's own input.
+//
+// # Why the recovered scheme cannot decide the socket
+//
+// Flow.URL on a gRPC stream is projected (record_step.go projectGRPCStart)
+// straight from GRPCStartMessage.Authority / .Scheme, which the HTTP/2
+// assembler copies verbatim out of the client's HEADERS block. Recording
+// them unvalidated is correct — MITM Principle 1 — but it means both are
+// client-declared, i.e. untrusted, and this tool turns them into a dial.
+// A client that sends ":scheme: http" inside an otherwise TLS session gets
+// the recorded metadata (including `authorization`) replayed in cleartext
+// on port 80: CWE-319, reached through a CWE-918-shaped dial.
+//
+// # The one-sided oracle
+//
+// Stream.ConnInfo.TLSVersion is an independently observed L4 fact:
+// RecordStep.updateStreamTLS writes it from the upstream leg's TLS
+// snapshot. Non-empty therefore means "the proxy completed a TLS handshake
+// with the upstream while recording this stream" and is trustworthy.
+// Empty means only "TLS was not observed" — which also covers a stream
+// that never received a response, and genuine h2c. So the oracle may
+// upgrade a recovered "http" to a TLS dial, and must NEVER downgrade: an
+// empty TLSVersion leaves the recovered decision untouched.
+//
+// Note the residual gap this leaves, which is stronger than "ambiguous":
+// the observation is written only by RecordStep.updateStreamTLS, which
+// fires exclusively on Receive envelopes carrying a TLS snapshot, so the
+// recorded client — the very actor this guard is aimed at — can suppress
+// the oracle deterministically by never letting a response be observed
+// (abort after HEADERS, or target a hanging endpoint), and the original
+// cleartext replay is then unchanged. There is no second source to fall
+// back on: Stream.Scheme is projected from the same client-declared
+// GRPCStartMessage.Scheme, and updateStreamClientFingerprint writes only
+// JA3/JA4. Closing it needs a connector-level change — stamp the upstream
+// TLS snapshot at connect time instead of on first Receive — which is out
+// of scope here; `target_addr` plus an explicit `scheme` remain the
+// caller-side pin.
+//
+// # What is deliberately NOT changed
+//
+//   - plan.scheme keeps the recorded value. The resent HEADERS frame must
+//     carry the same ":scheme" the wire carried, so a byte-diff of the
+//     recorded flow and the outgoing frame stays empty; only the TCP/TLS
+//     handshake differs. Rewriting it would reverse USK-1051.
+//   - plan.authority keeps the recorded value, and so does the dial target
+//     derived from it. Nothing in a persisted flow records the address the
+//     proxy originally connected to (Stream.ConnInfo.ServerAddr is written
+//     only by the TLS-passthrough recorder and the handshake-error audit
+//     path), so there is no better address to substitute — only a warning
+//     to raise, and `target_addr` to pin it with.
+//
+// An explicit input.Scheme always wins: it is the caller's own decision,
+// already allowlist-checked by validateResendGRPCStringFields, and is the
+// documented way to force a cleartext replay.
+func applyResendGRPCDialGroundTruth(ctx context.Context, input *resendGRPCInput, plan *resendGRPCPlan) {
+	if input.FlowID == "" {
+		return
+	}
+	if input.Scheme == "" && !plan.useTLS && plan.observedUpstreamTLSVersion != "" {
+		plan.useTLS = true
+		plan.tlsUpgradedFromObservation = true
+		// %q on the observed version, matching plan.scheme beside it:
+		// ConnInfo.TLSVersion is bounded on the live recorder path
+		// (envelope.TLSSnapshot.VersionName), but manage{action:
+		// "import_flows"} copies it verbatim out of caller-supplied JSONL
+		// (internal/flow/import.go) and warnings[] is returned to the AI
+		// agent without passing through the Output Filter. Quoting keeps a
+		// crafted multi-line value from restructuring the advisory
+		// (CWE-117).
+		w := fmt.Sprintf("resend_grpc: the recorded flow declares :scheme=%q, but the proxy observed %q on the upstream leg of that stream; dialling with TLS. The resent HEADERS frame still carries :scheme=%q (wire fidelity). Pass scheme=\"http\" to force a cleartext replay.",
+			plan.scheme, plan.observedUpstreamTLSVersion, plan.scheme)
+		plan.warnings = append(plan.warnings, w)
+		slog.WarnContext(ctx, "resend_grpc: upgrading resend dial to TLS from observed transport",
+			"flow_id", input.FlowID,
+			"declared_scheme", plan.scheme,
+			"observed_tls_version", plan.observedUpstreamTLSVersion,
+			"authority", plan.authority,
+		)
+	}
+	if input.TargetAddr == "" {
+		// Not an anomaly — this is Mode A working as documented — so it is
+		// surfaced to the caller (who is the party that can pass
+		// target_addr) but logged at Debug: CLAUDE.md's Log Level
+		// Guidelines demote a Warn that fires on every normal operation.
+		plan.warnings = append(plan.warnings,
+			fmt.Sprintf("resend_grpc: the dial target was derived from the recorded flow's client-declared :authority (%q); no recorded field pins the address the proxy originally connected to. Pass target_addr to control the dial explicitly.",
+				plan.authority))
+		slog.DebugContext(ctx, "resend_grpc: dial target derived from client-declared :authority",
+			"flow_id", input.FlowID,
+			"authority", plan.authority,
+		)
+	}
+}
+
+// wrapResendGRPCRunError applies the tool's error prefix to a failure from
+// runResendGRPC, and — only when USK-1056 upgraded the dial to TLS from the
+// recorded transport observation — names that decision and the escape
+// hatch out of it.
+//
+// plan.warnings reaches the caller solely through result.Warnings, which is
+// built after this point, so on a failed run the MCP caller would otherwise
+// see a bare `tls handshake ...: EOF` with nothing connecting it to a
+// transport the proxy chose against the flow's recorded :scheme. That is
+// exactly the accepted false positive of this PR: a tcp_forwards topology
+// with a plaintext client leg and upstream_tls=true records the forward
+// listener as :authority while the observed TLS belongs to the upstream
+// beyond it, so the upgrade dials TLS at a plaintext listener and always
+// fails at the handshake.
+//
+// The non-upgraded wrap is byte-identical to the previous text so existing
+// error assertions are unaffected. The observed version is %q-quoted for
+// the same CWE-117 reason as the warning it mirrors: it can carry imported,
+// unvalidated bytes.
+func wrapResendGRPCRunError(plan *resendGRPCPlan, err error) error {
+	if plan == nil || !plan.tlsUpgradedFromObservation {
+		return fmt.Errorf("resend_grpc: %w", err)
+	}
+	return fmt.Errorf("resend_grpc: %w (the dial was upgraded to TLS because the proxy observed %q on the recorded stream's upstream leg while its :scheme was %q; pass scheme=\"http\" to force a cleartext replay)",
+		err, plan.observedUpstreamTLSVersion, plan.scheme)
 }
 
 // resolveResendGRPCStart pulls Service / Method / Metadata / Encoding /
@@ -344,9 +521,10 @@ func applyResendGRPCUserStartFields(input *resendGRPCInput, plan *resendGRPCPlan
 
 // recoverResendGRPCStartFromFlow loads the original RPC's Send / Receive
 // GRPCStart Flows and returns the recovered (authority, scheme,
-// metadata, encoding, accept-encoding) values. Side-effect: fills empty
+// metadata, encoding, accept-encoding) values. Side-effects: fills empty
 // plan.service / plan.method from the recovered URL.Path (or Metadata
-// fallback for legacy flows that pre-date USK-920).
+// fallback for legacy flows that pre-date USK-920), and stamps
+// plan.observedUpstreamTLSVersion from Stream.ConnInfo (USK-1056).
 //
 // USK-920: Stream.Scheme is consulted as a secondary scheme source so
 // listener-captured gRPC flows (where the gRPC Layer's GRPCStartMessage
@@ -359,6 +537,14 @@ func (s *Server) recoverResendGRPCStartFromFlow(ctx context.Context, flowID stri
 	}
 	if !resendGRPCSupportedProtocols[stream.Protocol] {
 		return "", "", nil, "", nil, fmt.Errorf("resend_grpc: protocol %q not supported by this tool — use resend_http / resend_ws / resend_raw for non-gRPC flows", stream.Protocol)
+	}
+	// USK-1056: carry the observed upstream transport alongside the
+	// declared L7 overlay so the dial decision has a second, independently
+	// recorded source. ConnInfo is nil for every stream that never saw a
+	// Receive envelope carrying a TLS snapshot (h2c, pre-response, imported
+	// rows), hence the nil guard — absence is never treated as evidence.
+	if stream.ConnInfo != nil {
+		plan.observedUpstreamTLSVersion = stream.ConnInfo.TLSVersion
 	}
 	recAuthority, recService, recMethod, recScheme := extractResendGRPCStartFields(sendStart)
 	if plan.service == "" {
@@ -373,6 +559,11 @@ func (s *Server) recoverResendGRPCStartFromFlow(ctx context.Context, flowID stri
 	// rows pre-dating the pseudo-header projection), fall back to the
 	// stream-level handshake transport. Stream.Scheme is "https" / "http"
 	// / "tcp" per types.go; only the first two are meaningful to gRPC.
+	//
+	// USK-1056: this fallback is NOT a second, independent source —
+	// createStream sets Stream.Scheme from the same client-declared
+	// GRPCStartMessage.Scheme — so it inherits the same untrusted
+	// provenance and is reconciled by the same ground-truth check.
 	if scheme == "" && stream.Scheme != "" {
 		if s := strings.ToLower(stream.Scheme); s == "http" || s == "https" {
 			scheme = s

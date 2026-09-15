@@ -146,6 +146,14 @@ type fuzzGRPCResult struct {
 	Variants          []fuzzGRPCVariantRow `json:"variants"`
 	DurationMs        int64                `json:"duration_ms"`
 	Tag               string               `json:"tag,omitempty"`
+	// Warnings carries the base plan's non-fatal dial advisories, mirroring
+	// resendGRPCResult.Warnings (USK-1056). They matter more here than on a
+	// single resend: the dial-provenance notice says an N-variant campaign
+	// is aimed at a client-declared host, and the TLS-upgrade notice
+	// explains a transport that contradicts the :scheme every recorded
+	// variant shows. They are resolved once on the base plan, so they
+	// describe the whole run rather than any one variant.
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 // fuzzGRPCVariantRow is one variant's compact result row. Status is
@@ -258,5 +266,9 @@ func (s *Server) handleFuzzGRPC(ctx context.Context, _ *gomcp.CallToolRequest, i
 		Variants:          rows,
 		DurationMs:        duration.Milliseconds(),
 		Tag:               input.Tag,
+		// USK-1056: surface the base plan's dial advisories, mirroring
+		// handleResendGRPC. Copied rather than aliased so the result cannot
+		// share a backing array with a plan the variant loop may still hold.
+		Warnings: append([]string(nil), plan.basePlan.warnings...),
 	}, nil
 }

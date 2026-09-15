@@ -150,6 +150,7 @@ The `fuzz_macro_results` table (one row per hook invocation) keys on `(fuzz_id, 
   - `payloads` (object): position path -> chosen payload, for correlation
   - `error` / `duration_ms`
 - `duration_ms` / `tag`
+- `warnings[]` — optional, non-fatal advisories resolved once on the base plan and therefore describing the whole run: the Mode A dial-provenance notice (the campaign is aimed at the recorded flow's client-declared `:authority`) and the observed-transport TLS-upgrade notice (USK-1056). Both mirror `resend_grpc`; see `docs(topic="resend_grpc")` → "What decides the dial in Mode A".
 
 ## Aggregation: outlier-driven triage (recommended workflow)
 

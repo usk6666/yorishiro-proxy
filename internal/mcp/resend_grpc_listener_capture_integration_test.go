@@ -431,6 +431,14 @@ func TestResendGRPCListenerCapture_FlowIDAlone_Base64(t *testing.T) {
 	if upSrv.callCnt < 2 {
 		t.Errorf("upstream callCnt=%d, want >= 2 after resend", upSrv.callCnt)
 	}
+	// USK-1056: this is Mode A (flow_id, no target_addr), so the dial came
+	// from the recorded flow's client-declared :authority. Assert the
+	// advisory survives the whole plan → handler → result path — the unit
+	// tests stop at buildResendGRPCPlan, so the prepend in
+	// handleResendGRPC is only pinned here.
+	if !containsWarning(out.Warnings, "client-declared :authority") {
+		t.Errorf("result.Warnings = %q, want one containing %q", out.Warnings, "client-declared :authority")
+	}
 }
 
 // TestResendGRPCListenerCapture_FlowIDAlone_ProtoSchemalessJSON exercises

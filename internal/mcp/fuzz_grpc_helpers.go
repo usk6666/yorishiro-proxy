@@ -1072,14 +1072,7 @@ func (s *Server) runFuzzGRPCSingleVariant(ctx context.Context, plan *fuzzGRPCPla
 	if err := commitFuzzGRPCJSONMutations(variantPlan, jsonMuts); err != nil {
 		return row, 0, nil, fmt.Errorf("commit JSON-path mutations: %w", err)
 	}
-	// Re-derive the canonical URL after potential service/method mutation
-	// so the safety filter and any downstream consumer see the substituted
-	// values. Authority/scheme do not change per variant.
-	scheme := "http"
-	if variantPlan.useTLS {
-		scheme = "https"
-	}
-	variantPlan.canonicalURL = resendGRPCCanonicalURL(scheme, variantPlan.authority, variantPlan.service, variantPlan.method)
+	rebuildFuzzGRPCCanonicalURL(variantPlan)
 
 	row.StreamID = variantPlan.streamID
 
@@ -1467,11 +1460,46 @@ func commitFuzzGRPCJSONMutations(plan *resendGRPCPlan, jsonMuts map[int]map[stri
 	return nil
 }
 
+// rebuildFuzzGRPCCanonicalURL re-derives the variant plan's canonical URL
+// after per-variant service/method substitution, so the safety filter and
+// any downstream consumer see the substituted values. cloneFuzzGRPCPlan
+// nils canonicalURL precisely so this must run before the URL is read.
+//
+// USK-1056: the scheme comes from variantPlan.scheme and must never be
+// re-derived from variantPlan.useTLS. Those two can legitimately disagree
+// now — a flow_id resend whose recorded :scheme is "http" but whose
+// recorded upstream leg was observed as TLS dials with TLS while still
+// putting ":scheme: http" on the wire. Deriving from useTLS would make the
+// URL the safety / scope filters check disagree with the URL the wire
+// expresses, which is the exact USK-1051 failure mode.
+//
+// Split out of runFuzzGRPCSingleVariant so the invariant is assertable
+// without dialling an upstream.
+func rebuildFuzzGRPCCanonicalURL(variantPlan *resendGRPCPlan) {
+	variantPlan.canonicalURL = resendGRPCCanonicalURL(
+		variantPlan.scheme,
+		variantPlan.authority,
+		variantPlan.service,
+		variantPlan.method,
+	)
+}
+
 // cloneFuzzGRPCPlan returns a deep copy of plan suitable for per-variant
 // mutation. streamID / connID are regenerated so each variant gets an
 // independent gRPC stream as recorded by RecordStep. Slices that fuzz
 // positions can mutate (metadata, messages) are deep-copied; immutable
 // fields (encoding, acceptEncoding, trailerMetadata) are shared.
+//
+// warnings is deep-copied too, even though nothing appends to it
+// per-variant today: it is an append-target by construction, and sharing
+// one backing array across N variants means the first per-variant append
+// would overwrite its siblings' entries in place rather than extending its
+// own list.
+//
+// The scalar dial fields — useTLS, scheme, authority,
+// observedUpstreamTLSVersion — ride along on the `out := *base` copy, so a
+// USK-1056 TLS upgrade decided once on the base plan applies to every
+// variant without being re-derived per variant.
 //
 // canonicalURL is left dangling here and re-derived in the caller after
 // position application (since service/method may mutate per variant).
@@ -1499,6 +1527,11 @@ func cloneFuzzGRPCPlan(base *resendGRPCPlan) *resendGRPCPlan {
 			}
 		}
 		out.messages = ms
+	}
+	if len(base.warnings) > 0 {
+		ws := make([]string, len(base.warnings))
+		copy(ws, base.warnings)
+		out.warnings = ws
 	}
 	// trailerMetadata is read-only across variants (we don't fuzz it);
 	// share the slice.
