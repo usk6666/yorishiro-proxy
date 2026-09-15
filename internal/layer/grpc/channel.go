@@ -496,11 +496,16 @@ func (c *grpcChannel) absorbHeaders(ev *envelope.Envelope, evt *http2.H2HeadersE
 		c.fireOnEnd(firedEndEnv, firedEndMsg)
 	}
 
-	// Path-warning: log under Warn outside the mutex to keep critical
-	// section short. Service/Method=="" iff buildStartMessage failed to
-	// parse; surface to operator (D1 — tolerant).
+	// Path-log: emitted outside the mutex to keep the critical section
+	// short. Service/Method=="" iff buildStartMessage failed to parse.
+	// Debug, not Warn (USK-1075): the trigger is client-controlled and
+	// fires once per stream with no dedup, so H2 multiplexing turns it
+	// into a log-amplification vector on untrusted input — CLAUDE.md's
+	// "client sends invalid request" Debug row. The D1 "surface to
+	// operator" rationale lapsed at USK-1053: the observed :path now
+	// survives into Envelope.Raw and the flow record either way.
 	if startMsg.Service == "" && startMsg.Method == "" && ev.Direction == envelope.Send {
-		slog.Warn("grpc: malformed :path; emitting Service=\"\" Method=\"\"",
+		slog.Debug("grpc: malformed :path; emitting Service=\"\" Method=\"\"",
 			"stream_id", ev.StreamID,
 			"path", evt.Path,
 		)
