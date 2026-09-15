@@ -65,8 +65,8 @@ import (
 // of unusual server-style trailer behaviour from a client position.
 type resendGRPCInput struct {
 	FlowID          string           `json:"flow_id,omitempty" jsonschema:"recorded gRPC stream id; when set, omitted Start fields and the encoding hint are inherited from the original RPC"`
-	TargetAddr      string           `json:"target_addr,omitempty" jsonschema:"upstream host:port. Required when flow_id is empty. When supplied with flow_id, redirects the dial target while preserving the recovered :authority"`
-	Scheme          string           `json:"scheme,omitempty" jsonschema:"http or https; defaults to https. http selects plaintext h2c"`
+	TargetAddr      string           `json:"target_addr,omitempty" jsonschema:"upstream host:port. Required when flow_id is empty. When supplied with flow_id, redirects the dial target while preserving the recovered :authority. Without it the dial follows the recorded flow's client-declared :authority, which is untrusted input — pass target_addr to pin the destination"`
+	Scheme          string           `json:"scheme,omitempty" jsonschema:"http or https; defaults to https. http selects plaintext h2c. With flow_id the recorded (client-declared) :scheme is used, except that a recovered http is dialled over TLS when the proxy observed a TLS upstream for that stream; an explicit http here always forces cleartext"`
 	Service         string           `json:"service,omitempty" jsonschema:"gRPC service name (e.g. pkg.Greeter); required when flow_id is empty"`
 	Method          string           `json:"method,omitempty" jsonschema:"gRPC method name (e.g. SayHello); required when flow_id is empty"`
 	Metadata        []headerKV       `json:"metadata,omitempty" jsonschema:"ordered metadata list; preserves wire case, order and duplicates"`
@@ -150,7 +150,9 @@ func (s *Server) registerResendGRPC() {
 			"service/method/metadata/encoding inherit from the recorded send and are overridden by user fields; " +
 			"otherwise target_addr + service + method are required. metadata is an ordered [{name, value}] list " +
 			"preserving wire case/order/duplicates. trailer_metadata is optional — when set, the request " +
-			"terminates via a trailer HEADERS frame instead of END_STREAM on the last DATA. target_addr " +
+			"terminates via a trailer HEADERS frame instead of END_STREAM on the last DATA. With flow_id the " +
+			"dial follows the recorded, client-declared :authority unless target_addr pins it, and a recovered " +
+			"scheme=http is dialled over TLS when the proxy observed a TLS upstream for that stream. target_addr " +
 			"redirects the dial target while preserving the recovered :authority. For non-gRPC flows use " +
 			"resend_http / resend_ws / resend_raw. Full reference: call docs(topic=\"resend_grpc\").",
 	}, s.handleResendGRPC)
@@ -231,7 +233,12 @@ func (s *Server) handleResendGRPC(ctx context.Context, _ *gomcp.CallToolRequest,
 	// means a decode → user edit → encode round-trip dropped N bytes;
 	// surface a non-fatal warning so the AI agent can opt into a lossless
 	// alternative (proto-schemaless-json / base64).
-	warnings := s.collectResendGRPCUnknownFieldWarnings(ctx, &input, plan)
+	//
+	// USK-1056: plan.warnings (dial provenance / observed-transport TLS
+	// upgrade) are raised at plan-build time and lead the list, so the
+	// agent sees the transport advisory before the payload one.
+	warnings := append(append([]string(nil), plan.warnings...),
+		s.collectResendGRPCUnknownFieldWarnings(ctx, &input, plan)...)
 
 	endEnv, recvData, recvStartMeta, err := s.runResendGRPC(rtCtx, plan, pipe)
 	// USK-789: resend bypasses session.RunSession so the proxy path's

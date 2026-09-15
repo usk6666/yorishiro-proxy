@@ -14,6 +14,9 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/google/uuid"
 
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
@@ -482,4 +485,373 @@ func TestValidateResendGRPCInput_SchemeAllowlist(t *testing.T) {
 			}
 		})
 	}
+}
+
+// ---------------------------------------------------------------------------
+// USK-1056: the dial must not be decided by client-declared data alone.
+// ---------------------------------------------------------------------------
+
+// saveUSK1056GRPCFlow persists a minimal recorded gRPC stream — one Stream
+// row (optionally carrying an observed upstream TLS version) plus one
+// send-direction GRPCStart Flow whose URL is the client-declared
+// :scheme / :authority / :path projection — and returns the stream id.
+//
+// It deliberately goes through the real SQLite store rather than a mock.
+// Flow.URL is persisted as f.URL.String() and read back through
+// url.Parse, and net/url lowercases the scheme on that read. A mock store
+// would hand back whatever *url.URL the test built and would therefore
+// assert behaviour production never exhibits (USK-1056 design review,
+// constraint A).
+func saveUSK1056GRPCFlow(t *testing.T, store flow.Store, declaredURL *url.URL, observedTLSVersion string) string {
+	t.Helper()
+	ctx := context.Background()
+
+	streamID := uuid.NewString()
+	st := &flow.Stream{
+		ID:        streamID,
+		ConnID:    uuid.NewString(),
+		Protocol:  "grpc",
+		State:     "complete",
+		Timestamp: time.Now(),
+	}
+	// createStream projects Stream.Scheme from the same client-declared
+	// GRPCStartMessage.Scheme, so mirror that here: it is not a second,
+	// independent source.
+	if declaredURL != nil {
+		st.Scheme = declaredURL.Scheme
+	}
+	if observedTLSVersion != "" {
+		// RecordStep.updateStreamTLS writes these from the upstream leg's
+		// TLS snapshot on Receive envelopes.
+		st.ConnInfo = &flow.ConnectionInfo{
+			TLSVersion: observedTLSVersion,
+			TLSCipher:  "TLS_AES_128_GCM_SHA256",
+			TLSALPN:    "h2",
+		}
+	}
+	if err := store.SaveStream(ctx, st); err != nil {
+		t.Fatalf("SaveStream: %v", err)
+	}
+
+	sendFlow := &flow.Flow{
+		ID:        uuid.NewString(),
+		StreamID:  streamID,
+		Sequence:  0,
+		Direction: "send",
+		Timestamp: time.Now(),
+		URL:       declaredURL,
+		Headers: map[string][]string{
+			"authorization": {"Bearer recorded-secret"},
+		},
+		Metadata: map[string]string{"grpc_event": "start"},
+	}
+	if err := store.SaveFlow(ctx, sendFlow); err != nil {
+		t.Fatalf("SaveFlow: %v", err)
+	}
+	return streamID
+}
+
+// TestBuildResendGRPCPlan_DialTLSFromObservedTransport pins USK-1056.
+//
+// Flow.URL on a gRPC stream is projected from GRPCStartMessage.Authority /
+// .Scheme, which the HTTP/2 assembler copies verbatim out of the client's
+// HEADERS block — so the recovered scheme is client-declared. Deciding the
+// socket from it alone lets a recorded TLS session replay in cleartext on
+// port 80 together with its recorded `authorization` metadata.
+//
+// The fix reconciles it against Stream.ConnInfo.TLSVersion, an
+// independently observed L4 fact, as a strictly one-sided oracle. Two
+// assertions are load-bearing in every upgrade case:
+//
+//  1. plan.useTLS flips to true (the socket is protected), AND
+//  2. plan.scheme and plan.canonicalURL.Scheme stay "http" (the wire and
+//     the recorded flow are NOT distorted — reversing that would undo
+//     USK-1051 and violate MITM Principle 1).
+func TestBuildResendGRPCPlan_DialTLSFromObservedTransport(t *testing.T) {
+	t.Parallel()
+
+	msgs := []resendGRPCData{{Payload: "hello"}}
+
+	cases := []struct {
+		name string
+		// declaredURL is what the client put on the wire, as projected
+		// into Flow.URL by record_step.go projectGRPCStart.
+		declaredURL *url.URL
+		// observedTLSVersion is Stream.ConnInfo.TLSVersion; "" means the
+		// whole ConnInfo is absent after the store round-trip.
+		observedTLSVersion string
+		// inputScheme is the caller's explicit scheme override.
+		inputScheme string
+		inputTarget string
+
+		wantScheme   string
+		wantUseTLS   bool
+		wantDialAddr string
+		wantWarning  string
+	}{
+		{
+			// (a) The attack shape: correct authority, spoofed :scheme.
+			// No :authority spoofing is needed — a hostname-only
+			// TargetScope rule passes this unchanged.
+			name:               "declared_http_but_upstream_was_tls_upgrades_dial_only",
+			declaredURL:        &url.URL{Scheme: "http", Host: "api.example.com", Path: "/hello.HelloService/SayHello"},
+			observedTLSVersion: "TLS 1.3",
+			wantScheme:         "http",
+			wantUseTLS:         true,
+			wantDialAddr:       "api.example.com:443",
+			wantWarning:        "observed TLS 1.3 on the upstream leg",
+		},
+		{
+			// (b) One-sided: absence of an observation is not evidence.
+			// ConnInfo is nil for every h2c stream and for any stream
+			// that never saw a Receive envelope.
+			name:         "declared_http_with_no_conninfo_stays_cleartext",
+			declaredURL:  &url.URL{Scheme: "http", Host: "127.0.0.1:50051", Path: "/hello.HelloService/SayHello"},
+			wantScheme:   "http",
+			wantUseTLS:   false,
+			wantDialAddr: "127.0.0.1:50051",
+		},
+		{
+			// (c) An explicit scheme is the caller's own decision and is
+			// the documented way to force a cleartext replay.
+			name:               "explicit_http_override_is_never_upgraded",
+			declaredURL:        &url.URL{Scheme: "https", Host: "api.example.com", Path: "/hello.HelloService/SayHello"},
+			observedTLSVersion: "TLS 1.3",
+			inputScheme:        "http",
+			wantScheme:         "http",
+			wantUseTLS:         false,
+			wantDialAddr:       "api.example.com:80",
+		},
+		{
+			// (d) Decision B regression guard: an absent recovered scheme
+			// already fails safe via the https default, and must keep
+			// doing so. "//host/path" is the string form that survives the
+			// SQLite String()/url.Parse round-trip with an empty scheme.
+			name:         "empty_recovered_scheme_still_defaults_to_https",
+			declaredURL:  &url.URL{Host: "api.example.com", Path: "/hello.HelloService/SayHello"},
+			wantScheme:   "https",
+			wantUseTLS:   true,
+			wantDialAddr: "api.example.com:443",
+		},
+		{
+			// Never downgrade: a recovered https with no TLS observation
+			// (e.g. the RPC never got a response) stays on TLS.
+			name:         "declared_https_with_no_conninfo_stays_tls",
+			declaredURL:  &url.URL{Scheme: "https", Host: "api.example.com", Path: "/hello.HelloService/SayHello"},
+			wantScheme:   "https",
+			wantUseTLS:   true,
+			wantDialAddr: "api.example.com:443",
+		},
+		{
+			// Constraint A, pinned rather than assumed: an uppercase
+			// ":scheme: HTTPS" cannot survive the store, because Flow.URL
+			// round-trips through net/url which lowercases it. This is why
+			// the exact-match `scheme == "https"` in buildResendGRPCPlan is
+			// not itself a live bypass.
+			name:         "uppercase_declared_scheme_is_normalised_by_the_store",
+			declaredURL:  &url.URL{Scheme: "HTTPS", Host: "api.example.com", Path: "/hello.HelloService/SayHello"},
+			wantScheme:   "https",
+			wantUseTLS:   true,
+			wantDialAddr: "api.example.com:443",
+		},
+		{
+			// target_addr pins the address but not the transport: the
+			// scheme axis keeps its own override, so the upgrade still
+			// applies and the redirected dial gets the TLS default port.
+			name:               "target_addr_redirect_still_upgrades_transport",
+			declaredURL:        &url.URL{Scheme: "http", Host: "api.example.com", Path: "/hello.HelloService/SayHello"},
+			observedTLSVersion: "TLS 1.2",
+			inputTarget:        "127.0.0.1",
+			wantScheme:         "http",
+			wantUseTLS:         true,
+			wantDialAddr:       "127.0.0.1:443",
+			wantWarning:        "observed TLS 1.2 on the upstream leg",
+		},
+	}
+
+	// One store for the whole table: newTestStore runs the full schema
+	// migration, which is the expensive part under -race, and every case
+	// gets its own stream id anyway. The parent's t.Cleanup(Close) runs
+	// only after all parallel subtests have finished.
+	store := newTestStore(t)
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			flowID := saveUSK1056GRPCFlow(t, store, tc.declaredURL, tc.observedTLSVersion)
+
+			s := &Server{flowStore: NewFlowStore(store, nil)}
+			input := &resendGRPCInput{
+				FlowID:     flowID,
+				Scheme:     tc.inputScheme,
+				TargetAddr: tc.inputTarget,
+				Messages:   msgs,
+			}
+			plan, err := s.buildResendGRPCPlan(context.Background(), input)
+			if err != nil {
+				t.Fatalf("buildResendGRPCPlan: %v", err)
+			}
+
+			if plan.useTLS != tc.wantUseTLS {
+				t.Errorf("plan.useTLS = %v, want %v", plan.useTLS, tc.wantUseTLS)
+			}
+			// Anti-distortion guard. plan.scheme is what reaches the
+			// upstream HEADERS frame as :scheme via
+			// buildResendGRPCStartEnvelope.
+			if plan.scheme != tc.wantScheme {
+				t.Errorf("plan.scheme = %q, want %q (the recorded :scheme must not be rewritten)", plan.scheme, tc.wantScheme)
+			}
+			if plan.canonicalURL == nil {
+				t.Fatal("plan.canonicalURL = nil, want a URL")
+			}
+			if plan.canonicalURL.Scheme != tc.wantScheme {
+				t.Errorf("plan.canonicalURL.Scheme = %q, want %q (scope/safety must check the wire scheme)", plan.canonicalURL.Scheme, tc.wantScheme)
+			}
+			if plan.dialAddr != tc.wantDialAddr {
+				t.Errorf("plan.dialAddr = %q, want %q", plan.dialAddr, tc.wantDialAddr)
+			}
+			// The recorded credential must still be replayed verbatim —
+			// this fix changes the socket, not the payload.
+			if len(plan.metadata) == 0 {
+				t.Error("plan.metadata is empty, want the recovered authorization header")
+			}
+
+			// End-to-end: the resolved scheme lands on the message the
+			// gRPC Layer reads for :scheme.
+			env := buildResendGRPCStartEnvelope(plan)
+			msg, ok := env.Message.(*envelope.GRPCStartMessage)
+			if !ok {
+				t.Fatalf("env.Message type = %T, want *envelope.GRPCStartMessage", env.Message)
+			}
+			if msg.Scheme != tc.wantScheme {
+				t.Errorf("GRPCStartMessage.Scheme = %q, want %q", msg.Scheme, tc.wantScheme)
+			}
+
+			if tc.wantWarning != "" {
+				if !containsWarning(plan.warnings, tc.wantWarning) {
+					t.Errorf("plan.warnings = %q, want one containing %q", plan.warnings, tc.wantWarning)
+				}
+			} else if containsWarning(plan.warnings, "dialling with TLS") {
+				t.Errorf("plan.warnings = %q, want no TLS-upgrade warning", plan.warnings)
+			}
+		})
+	}
+}
+
+// TestBuildResendGRPCPlan_WarnsOnClientDeclaredDialTarget pins USK-1056
+// decision U3: nothing in a persisted flow records the address the proxy
+// originally connected to (createStream never fills ConnInfo.ServerAddr on
+// the MITM path), so the host axis cannot be corrected — only reported.
+// The warning is the caller's signal to pass target_addr.
+func TestBuildResendGRPCPlan_WarnsOnClientDeclaredDialTarget(t *testing.T) {
+	t.Parallel()
+
+	const want = "client-declared :authority"
+	msgs := []resendGRPCData{{Payload: "hello"}}
+	declared := &url.URL{Scheme: "https", Host: "api.example.com", Path: "/hello.HelloService/SayHello"}
+
+	cases := []struct {
+		name        string
+		targetAddr  string
+		flowID      bool
+		wantWarning bool
+	}{
+		{name: "flow_id_without_target_addr_warns", flowID: true, wantWarning: true},
+		{name: "flow_id_with_target_addr_is_silent", flowID: true, targetAddr: "127.0.0.1:50051", wantWarning: false},
+		{name: "from_scratch_is_silent", flowID: false, targetAddr: "127.0.0.1:50051", wantWarning: false},
+	}
+
+	store := newTestStore(t)
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			input := &resendGRPCInput{TargetAddr: tc.targetAddr, Messages: msgs}
+			if tc.flowID {
+				input.FlowID = saveUSK1056GRPCFlow(t, store, declared, "")
+			} else {
+				input.Service = "hello.HelloService"
+				input.Method = "SayHello"
+			}
+
+			s := &Server{flowStore: NewFlowStore(store, nil)}
+			plan, err := s.buildResendGRPCPlan(context.Background(), input)
+			if err != nil {
+				t.Fatalf("buildResendGRPCPlan: %v", err)
+			}
+			if got := containsWarning(plan.warnings, want); got != tc.wantWarning {
+				t.Errorf("warning containing %q present = %v, want %v (warnings=%q)", want, got, tc.wantWarning, plan.warnings)
+			}
+		})
+	}
+}
+
+// TestRebuildFuzzGRPCCanonicalURL_FollowsPlanSchemeNotUseTLS is the
+// USK-1056 WATCH item. cloneFuzzGRPCPlan nils canonicalURL and the
+// per-variant rebuild recreates it; before this fix the rebuild derived
+// the scheme from variantPlan.useTLS, which was equivalent only while
+// useTLS and scheme could not diverge. Now that an observed-transport
+// upgrade makes them diverge, a useTLS-derived rebuild would hand the
+// safety / scope filters an "https://" URL for an RPC whose wire :scheme
+// is "http" — the USK-1051 wire/checked-URL disagreement, reintroduced.
+func TestRebuildFuzzGRPCCanonicalURL_FollowsPlanSchemeNotUseTLS(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name       string
+		scheme     string
+		useTLS     bool
+		wantScheme string
+	}{
+		{name: "upgraded_plan_keeps_http_in_the_checked_url", scheme: "http", useTLS: true, wantScheme: "http"},
+		{name: "plain_h2c_plan", scheme: "http", useTLS: false, wantScheme: "http"},
+		{name: "plain_tls_plan", scheme: "https", useTLS: true, wantScheme: "https"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			base := &resendGRPCPlan{
+				streamID:  "base-stream",
+				connID:    "base-conn",
+				authority: "api.example.com",
+				scheme:    tc.scheme,
+				useTLS:    tc.useTLS,
+				dialAddr:  "api.example.com:443",
+				service:   "hello.HelloService",
+				method:    "SayHello",
+			}
+			base.canonicalURL = resendGRPCCanonicalURL(base.scheme, base.authority, base.service, base.method)
+
+			variant := cloneFuzzGRPCPlan(base)
+			if variant.canonicalURL != nil {
+				t.Fatalf("cloneFuzzGRPCPlan left canonicalURL = %v, want nil so the rebuild is mandatory", variant.canonicalURL)
+			}
+			if variant.scheme != tc.scheme {
+				t.Errorf("cloned scheme = %q, want %q", variant.scheme, tc.scheme)
+			}
+			if variant.useTLS != tc.useTLS {
+				t.Errorf("cloned useTLS = %v, want %v", variant.useTLS, tc.useTLS)
+			}
+
+			rebuildFuzzGRPCCanonicalURL(variant)
+			if variant.canonicalURL.Scheme != tc.wantScheme {
+				t.Errorf("variant canonicalURL.Scheme = %q, want %q", variant.canonicalURL.Scheme, tc.wantScheme)
+			}
+			if variant.canonicalURL.String() != base.canonicalURL.String() {
+				t.Errorf("variant canonicalURL = %q, want it to agree with the base plan's %q",
+					variant.canonicalURL.String(), base.canonicalURL.String())
+			}
+		})
+	}
+}
+
+// containsWarning reports whether any entry of warnings contains substr.
+func containsWarning(warnings []string, substr string) bool {
+	for _, w := range warnings {
+		if strings.Contains(w, substr) {
+			return true
+		}
+	}
+	return false
 }

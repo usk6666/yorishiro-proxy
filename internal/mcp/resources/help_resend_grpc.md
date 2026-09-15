@@ -27,16 +27,27 @@ The original RPC's send-direction GRPCStart Flow supplies `service` / `method` /
 
 `target_addr`, `service`, and `method` are REQUIRED. No encoding state is inherited.
 
+## What decides the dial in Mode A (USK-1056)
+
+`Flow.URL` for a gRPC stream is projected from `GRPCStartMessage.Authority` / `.Scheme`, which the HTTP/2 assembler copies verbatim out of the client's HEADERS block. Recording them unvalidated is deliberate wire fidelity (RFC-001 MITM Principle 1), but it means **both are client-declared, i.e. untrusted**, and `flow_id` mode turns them into a socket.
+
+- **Address.** Without `target_addr`, the dial goes to the recorded `:authority`. Nothing in a persisted flow records the address the proxy originally connected to, so there is no verified address to prefer — pass `target_addr` when the recording's client may have been hostile. Every Mode A call without `target_addr` reports this in `warnings[]`.
+- **Transport.** A recovered `scheme=http` is reconciled against `Stream.ConnInfo.TLSVersion`, which the recorder writes from the **upstream leg's** TLS snapshot and is therefore an independently observed L4 fact. When it is non-empty the resend dials with TLS anyway and reports it in `warnings[]`, so a spoofed `:scheme: http` cannot replay the recorded `authorization` metadata in cleartext on port 80. The check is one-sided: an empty `TLSVersion` only means "TLS was not observed" (it also covers h2c and streams that never got a response) and never downgrades a recovered `https`.
+- **What never changes.** `plan.scheme` keeps the recorded value, so the resent HEADERS frame carries the same `:scheme` the wire carried. Only the TCP/TLS handshake differs; a byte-diff of the recorded flow against the outgoing frame stays empty.
+- **Overrides win.** An explicit `scheme` is always honoured — pass `scheme: "http"` to force a cleartext replay.
+
+> Known false positive: in a `tcp_forwards` topology with a plaintext client leg and `upstream_tls: true`, the recorded `:authority` is the forward listener (plaintext) while the observed TLS belongs to the upstream beyond it. The upgrade then attempts TLS against the plaintext listener. Pass `scheme: "http"` for that topology.
+
 ## Parameters
 
 ### flow_id (string, optional)
 Recorded gRPC stream id. When set, omitted Start fields and the encoding hint are inherited.
 
 ### target_addr (string, conditional)
-Upstream `host:port`. REQUIRED when `flow_id` is empty. When supplied with `flow_id`, redirects the dial target while preserving the recovered `:authority`.
+Upstream `host:port`. REQUIRED when `flow_id` is empty. When supplied with `flow_id`, redirects the dial target while preserving the recovered `:authority`. When omitted in Mode A the dial follows the recorded, **client-declared** `:authority` — see "What decides the dial in Mode A".
 
 ### scheme (string, optional)
-`"http"` or `"https"`. Defaults to `"https"`. `"http"` selects plaintext h2c.
+`"http"` or `"https"`. Defaults to `"https"`. `"http"` selects plaintext h2c. In Mode A the recorded `:scheme` is used unless overridden here, except that a recovered `http` is dialled over TLS when the proxy observed a TLS upstream for that stream (the `:scheme` sent on the wire stays `http`). An explicit `"http"` always forces cleartext.
 
 ### service (string, conditional)
 gRPC service name (e.g. `"pkg.Greeter"`). Required when `flow_id` is empty.
@@ -88,6 +99,7 @@ Tag stored on the new flow's `Tags` map.
 - `start_metadata` — ordered `[{name, value}]` from the response GRPCStart
 - `messages[]` — decoded response Data LPMs (`payload`, `payload_encoding`, `compressed`). The gRPC Layer always decompresses for inspection convenience; original wire bytes preserved on `Flow.RawBytes`.
 - `end` — optional. Contains `status` (gRPC code; 0 = OK), `message`, and `trailers` (excluding `grpc-status`, `grpc-message`, `grpc-status-details-bin`). May be `null` when the upstream terminated without a trailer HEADERS frame — diagnostic callers should treat that as "abnormal termination observed; no trailer received".
+- `warnings[]` — optional, non-fatal advisories. Mode A dial-provenance and observed-transport TLS-upgrade notices (USK-1056) come first, followed by `proto-json` unknown-field notices (USK-923).
 - `duration_ms` / `tag`
 
 ## Examples
