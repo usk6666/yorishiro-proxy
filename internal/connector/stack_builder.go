@@ -606,6 +606,19 @@ func (c *BuildConfig) EffectiveTLSFingerprint() string {
 // standard-crypto/tls handshake and the default H2 shape. Re-check this
 // when adding a second sentinel/alias to UTLSProfileFor, or when
 // resolveH2Fingerprint starts discriminating beyond "firefox".
+//
+// The opposite direction — one dial splitting across two keys — is
+// reachable and benign. UTLSProfileFor trims and case-folds only while
+// testing for the "none" sentinel; every parrot identity passes through
+// verbatim. So a padded or mixed-case config-file spelling ("  Firefox  ",
+// stored verbatim per USK-1021) and its CLI/MCP equivalent ("firefox",
+// lowercased by ApplyTLSFingerprintFlag / applyTLSFingerprint) occupy
+// separate pool and ALPN-cache keyspaces even though tlslayer normalizes
+// both to the same parrot at the dial. USK-1032 made those spellings
+// officially valid config input, so this is now reachable from an ordinary
+// config file rather than only from an unvalidated typo. It costs a
+// redundant dial and a duplicate cache entry; it can never cause an
+// incorrect reuse, because over-discriminating keys only under-share.
 func (c *BuildConfig) EffectiveUTLSProfile() string {
 	return config.UTLSProfileFor(c.EffectiveTLSFingerprint())
 }
