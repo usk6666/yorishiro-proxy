@@ -195,6 +195,52 @@ jobs:
       - name: Test (e2e full)
         run: make test-e2e
 
+  # web/ had no test gate of any kind before this job. The `test-ui` target has
+  # existed in the Makefile since the vitest harness landed (PR #397), but no
+  # workflow ever invoked it, so the 17 test files / 335 tests under web/src have
+  # never once run in CI.
+  #
+  # That bites hardest on the weekly dependency PR. dependabot-security.yml
+  # updates Go *and* npm, yet on the npm side `test` and `test-e2e-smoke` run only
+  # Go tests and `build-ui` proves only that the bundle still compiles. npm bumps
+  # were therefore merging with zero behavioural verification -- the npm-side
+  # counterpart of the Go-side hole that test-e2e-full closes above (USK-1055).
+  #
+  # A separate job, deliberately NOT a step appended to `setup`. Five jobs declare
+  # `needs: setup`, and GitHub skips a job whose `needs:` target failed, so a
+  # single broken 3-second React logic test would fail `setup` and skip lint,
+  # build, test and both e2e tiers -- the PR would come back with no Go signal at
+  # all. Putting the step after the upload-artifact step does not help: `needs:`
+  # keys off the job's conclusion, not on whether the artifact was uploaded.
+  #
+  # No `needs:` at all, for the same reason depsec-tool has none: `make test-ui`
+  # runs pnpm against web/ source and never reads internal/mcp/webui/dist/, so
+  # `needs: setup` would serialize it behind a build artifact it does not consume.
+  # Independent, it starts at t=0 and adds no wall-clock to the run.
+  #
+  # Through the Makefile, not a hand-copied `pnpm test`: the Makefile is the single
+  # source of truth for what a tier means. Hand-copying the command is exactly what
+  # let nightly-e2e.yml lose GODEBUG=http2xconnect=1 and silently SKIP three
+  # wss-over-h2 tests for four months (USK-1058).
+  test-ui:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v5.0.0
+        with:
+          version: 10 # >= 10.16 honors web/.npmrc minimum-release-age
+
+      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        with:
+          node-version: "24"
+          cache: "pnpm"
+          cache-dependency-path: web/pnpm-lock.yaml
+
+      - name: Test (web UI)
+        run: make test-ui
+
   # tools/depsec is a separate Go module (stdlib only, not shipped in the binary)
   # that drives the weekly Dependabot security-update workflow. Gate its
   # supply-chain-critical decision logic on every PR that touches it.
