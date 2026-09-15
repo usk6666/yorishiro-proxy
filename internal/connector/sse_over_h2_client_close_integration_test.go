@@ -11,6 +11,7 @@ import (
 	"net"
 	gohttp "net/http"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -191,11 +192,29 @@ func startSSEOverH2InfiniteUpstream(t *testing.T) (string, func()) {
 // Returns whatever the transport surfaces; the caller decides whether to
 // fail on it. The wire-observed result (recorded Stream state + tags)
 // is the authoritative assertion target.
+//
+// On return the client h2 conn is torn down deterministically (see the
+// h2ConnsMu comment below), so callers may follow this with
+// waitSessionDone.
 func driveSSEOverH2ThroughProxyWithCancel(
 	ctx context.Context,
 	proxyAddr, upstreamAddr string,
 	cancel context.CancelFunc,
 ) error {
+	// Capture the underlying TLS conns DialTLS returns so we can force-
+	// close them before returning. tr.CloseIdleConnections() alone races
+	// with xhttp2.Transport's internal "is this conn idle?" bookkeeping
+	// — under CI load the response reader may not have released the conn
+	// to the pool by the time the transport is closed, so the proxy's
+	// clientL.Channels() never observes a remote close and the
+	// onHTTP2Stack callback hangs until the caller's waitSessionDone
+	// deadline fires. Closing the underlying conn directly is
+	// deterministic. USK-1059: same workaround USK-1044 applied to the
+	// sibling driveSSEOverH2ThroughProxy; this variant was missed.
+	var (
+		h2ConnsMu sync.Mutex
+		h2Conns   []net.Conn
+	)
 	tr := &xhttp2.Transport{
 		TLSClientConfig: &tls.Config{
 			InsecureSkipVerify: true, //nolint:gosec // test
@@ -226,10 +245,32 @@ func driveSSEOverH2ThroughProxyWithCancel(
 				_ = raw.Close()
 				return nil, err
 			}
+			h2ConnsMu.Lock()
+			h2Conns = append(h2Conns, tlsConn)
+			h2ConnsMu.Unlock()
 			return tlsConn, nil
 		},
 	}
 	defer tr.CloseIdleConnections()
+	// Force-close the captured underlying TLS conns so the proxy's
+	// onHTTP2Stack observes the client h2 conn close deterministically
+	// and exits its for-select loop, firing the deferred wg.Done() the
+	// caller's waitSessionDone is blocked on. Registered after the
+	// tr.CloseIdleConnections defer and before the resp.Body.Close defer
+	// below, so the LIFO teardown order is: body close → force-close raw
+	// conns → CloseIdleConnections — matching the sibling helper.
+	//
+	// This runs well after the mid-stream cancel the test is about, so
+	// the RST_STREAM(CANCEL) the proxy attributes terminated_by="client"
+	// to has already been observed; the force-close only bounds the
+	// connection-level teardown.
+	defer func() {
+		h2ConnsMu.Lock()
+		for _, c := range h2Conns {
+			_ = c.Close()
+		}
+		h2ConnsMu.Unlock()
+	}()
 
 	url := fmt.Sprintf("https://%s/events", upstreamAddr)
 	req, err := gohttp.NewRequestWithContext(ctx, "GET", url, nil)
