@@ -50,8 +50,10 @@
 //   - Service / Method are extracted from :path with the scheme
 //     "/Service/Method". Malformed :path values (missing, empty, no
 //     leading slash, no separator, single segment) yield Service="" and
-//     Method="" together with a Warn log. The malformed path is surfaced
-//     to Pipeline rather than hidden, for diagnostic purposes — the
+//     Method="" together with a Debug log — Debug rather than Warn since
+//     USK-1075, because the trigger is client-controlled and fires once
+//     per stream with no dedup. The malformed path is surfaced to
+//     Pipeline rather than hidden, for diagnostic purposes — the
 //     Envelope.Raw still contains the original wire bytes.
 //
 // Sequence numbering (D3):

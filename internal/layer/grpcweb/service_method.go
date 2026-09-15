@@ -6,7 +6,7 @@ import "strings"
 // "/pkg.Service/Method" into Service ("pkg.Service") and Method ("Method").
 // Tolerant policy (matches USK-640 and the legacy grpc.ParseServiceMethod):
 // empty / malformed paths return ("", "", false). Callers are expected to
-// log a slog.Warn at the call site rather than failing the stream.
+// log at the call site rather than failing the stream.
 //
 // This helper is duplicated in internal/layer/grpc per RFC-001 N7
 // implementation discipline (no premature cross-package abstraction during

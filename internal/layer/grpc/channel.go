@@ -502,8 +502,9 @@ func (c *grpcChannel) absorbHeaders(ev *envelope.Envelope, evt *http2.H2HeadersE
 	// fires once per stream with no dedup, so H2 multiplexing turns it
 	// into a log-amplification vector on untrusted input — CLAUDE.md's
 	// "client sends invalid request" Debug row. The D1 "surface to
-	// operator" rationale lapsed at USK-1053: the observed :path now
-	// survives into Envelope.Raw and the flow record either way.
+	// operator" rationale does not need Warn: the observed :path has
+	// always survived into Envelope.Raw, reaches the flow record via
+	// USK-920, and since USK-1053 rides the re-emitted wire too.
 	if startMsg.Service == "" && startMsg.Method == "" && ev.Direction == envelope.Send {
 		slog.Debug("grpc: malformed :path; emitting Service=\"\" Method=\"\"",
 			"stream_id", ev.StreamID,
