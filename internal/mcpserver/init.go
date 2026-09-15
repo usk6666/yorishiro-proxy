@@ -749,6 +749,15 @@ func applyHostTLSEntries(reg *transport.HostTLSRegistry, entries map[string]*con
 //
 // The "none" opt-out sentinel resolves to "" (via config.UTLSProfileFor) and
 // falls back to StandardTransport.
+//
+// An unparseable profile name logs a warning and degrades to
+// StandardTransport. Since USK-1032 all three entry points (config file via
+// ProxyConfig.Validate, `-tls-fingerprint` via ApplyTLSFingerprintFlag, and
+// the MCP proxy_start / configure tools) reject unknown names before boot
+// reaches here, so this branch is defence-in-depth rather than the primary
+// guard. It deliberately stays fail-soft: making it fail-hard would change
+// the signature to return an error and add a new boot-failure mode for an
+// input that is now unreachable.
 func InitTLSTransport(cfg *config.Config, proxyCfg *config.ProxyConfig, reg *transport.HostTLSRegistry, logger *slog.Logger) transport.TLSTransport {
 	fingerprint := config.UTLSProfileFor(config.ResolveTLSFingerprint(cfg, proxyCfg))
 

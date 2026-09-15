@@ -177,6 +177,45 @@ func TestApplyTLSFingerprintFlag_CLIOverridesConfig(t *testing.T) {
 	}
 }
 
+// TestApplyTLSFingerprintFlag_TrimsWhitespace covers the USK-1032 alignment:
+// the CLI flag now accepts the same spellings as the config file and the MCP
+// tools, i.e. case-insensitive with surrounding whitespace trimmed.
+func TestApplyTLSFingerprintFlag_TrimsWhitespace(t *testing.T) {
+	tests := []struct {
+		name    string
+		flag    string
+		want    string
+		wantErr bool
+	}{
+		{"padded none", "  none  ", "none", false},
+		{"padded mixed case", " FireFox ", "firefox", false},
+		{"tab and newline padding", "\tchrome\n", "chrome", false},
+		{"whitespace only is not a name", "   ", "", true},
+		{"padded typo is still rejected", "  firefx  ", "", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := ApplyTLSFingerprintFlag(tt.flag, &config.ProxyConfig{})
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("expected error for %q, got nil", tt.flag)
+				}
+				if !strings.Contains(err.Error(), "invalid -tls-fingerprint value") {
+					t.Errorf("error = %q, want substring %q", err, "invalid -tls-fingerprint value")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if result.TLSFingerprint != tt.want {
+				t.Errorf("TLSFingerprint = %q, want %q", result.TLSFingerprint, tt.want)
+			}
+		})
+	}
+}
+
 func TestApplyTLSFingerprintFlag_FromConfigFile(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.json")

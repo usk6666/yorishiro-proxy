@@ -1139,20 +1139,14 @@ func (s *Server) applyTLSPassthrough(patterns []string) error {
 	return nil
 }
 
-// validTLSFingerprints is the set of accepted TLS fingerprint profile names.
-var validTLSFingerprints = map[string]bool{
-	"chrome":  true,
-	"firefox": true,
-	"safari":  true,
-	"edge":    true,
-	"random":  true,
-	"none":    true,
-}
-
 // applyTLSFingerprint validates the profile name, builds the corresponding
 // TLSTransport, and applies both the profile name and transport to all
 // registered handlers and connector.tlsTransport (used by resend).
-// The profile name is normalized to lowercase before validation.
+// The profile name is trimmed and lowercased before validation against the
+// shared vocabulary (config.ValidTLSFingerprint), which is the same set the
+// config file and the `-tls-fingerprint` CLI flag accept (USK-1032). The
+// empty string is not a valid override here — proxy_start and configure only
+// call this for an explicitly supplied tls_fingerprint.
 //
 // The validated profile is also installed as a runtime override on the
 // proxybuild.Manager's bound BuildConfig (USK-809), so the next live
@@ -1161,10 +1155,10 @@ var validTLSFingerprints = map[string]bool{
 // boot-time fingerprint regardless of runtime proxy_start / configure
 // changes (the prior behaviour observed only by resend transport).
 func (s *Server) applyTLSFingerprint(profile string) error {
-	profile = strings.ToLower(profile)
-	if !validTLSFingerprints[profile] {
-		return fmt.Errorf("invalid tls_fingerprint %q: valid values are chrome, firefox, safari, edge, random, none", profile)
+	if !config.ValidTLSFingerprint(profile) {
+		return fmt.Errorf("invalid tls_fingerprint %q: valid values are %s", profile, config.TLSFingerprintNamesList())
 	}
+	profile = strings.ToLower(strings.TrimSpace(profile))
 
 	transport := s.buildTLSTransport(profile)
 

@@ -466,19 +466,23 @@ type ConfigsResult struct {
 // ApplyTLSFingerprintFlag validates and applies the CLI -tls-fingerprint
 // flag value. Returns the (possibly initialized) ProxyConfig with the
 // fingerprint set.
+//
+// An empty flag is a no-op: it leaves whatever the config file supplied
+// (already validated by ProxyConfig.Validate) in place. A non-empty flag is
+// an explicit override, so it is matched against the shared vocabulary
+// (config.ValidTLSFingerprint) case-insensitively with surrounding
+// whitespace trimmed — the same set the config file and the MCP
+// proxy_start / configure tools accept (USK-1032). The normalized spelling
+// is what gets stored; the error message quotes the operator's original
+// input.
 func ApplyTLSFingerprintFlag(tlsFingerprint string, proxyCfg *config.ProxyConfig) (*config.ProxyConfig, error) {
 	if tlsFingerprint == "" {
 		return proxyCfg, nil
 	}
-	tlsFingerprint = strings.ToLower(tlsFingerprint)
-	validProfiles := map[string]bool{
-		"chrome": true, "firefox": true, "safari": true,
-		"edge": true, "random": true, "none": true,
+	if !config.ValidTLSFingerprint(tlsFingerprint) {
+		return nil, fmt.Errorf("invalid -tls-fingerprint value %q: valid values are %s", tlsFingerprint, config.TLSFingerprintNamesList())
 	}
-	if !validProfiles[tlsFingerprint] {
-		return nil, fmt.Errorf("invalid -tls-fingerprint value %q: valid values are chrome, firefox, safari, edge, random, none", tlsFingerprint)
-	}
-	proxyCfg.TLSFingerprint = tlsFingerprint
+	proxyCfg.TLSFingerprint = strings.ToLower(strings.TrimSpace(tlsFingerprint))
 	return proxyCfg, nil
 }
 

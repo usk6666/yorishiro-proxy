@@ -4,6 +4,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/usk6666/yorishiro-proxy/internal/config"
@@ -804,6 +805,47 @@ func TestLoadConfigs_InvalidConfigFile(t *testing.T) {
 	_, err := LoadConfigs(cfgPath, "")
 	if err == nil {
 		t.Fatal("expected error for invalid config file")
+	}
+}
+
+// TestLoadConfigs_InvalidTLSFingerprint pins the USK-1032 boot gate: a
+// config-file typo must fail at load time. Before this, the value reached
+// runtime unrejected — InitTLSTransport degraded to a Go-native ClientHello
+// on the resend / fuzz dial path while `query config` kept reporting the typo.
+func TestLoadConfigs_InvalidTLSFingerprint(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.json")
+	writeTestFile(t, cfgPath, `{"tls_fingerprint": "firefx"}`)
+
+	_, err := LoadConfigs(cfgPath, "")
+	if err == nil {
+		t.Fatal("expected error for typo'd tls_fingerprint, got nil")
+	}
+	if !strings.Contains(err.Error(), "tls_fingerprint") {
+		t.Errorf("error = %q, want it to name the tls_fingerprint field", err)
+	}
+}
+
+// TestLoadConfigs_TLSFingerprintSpellingsAccepted proves the boot gate accepts
+// every spelling the consumption seams already normalize (case-insensitive,
+// whitespace-trimmed) and stores the operator's bytes verbatim — validation
+// rejects, it never rewrites (USK-1021).
+func TestLoadConfigs_TLSFingerprintSpellingsAccepted(t *testing.T) {
+	for _, fingerprint := range []string{"firefox", "Firefox", "  NONE  ", "none", "random"} {
+		t.Run(fingerprint, func(t *testing.T) {
+			dir := t.TempDir()
+			cfgPath := filepath.Join(dir, "config.json")
+			writeTestFile(t, cfgPath, `{"tls_fingerprint": "`+fingerprint+`"}`)
+
+			result, err := LoadConfigs(cfgPath, "")
+			if err != nil {
+				t.Fatalf("LoadConfigs(%q): %v", fingerprint, err)
+			}
+			if result.ProxyCfg.TLSFingerprint != fingerprint {
+				t.Errorf("TLSFingerprint = %q, want the verbatim file value %q",
+					result.ProxyCfg.TLSFingerprint, fingerprint)
+			}
+		})
 	}
 }
 
