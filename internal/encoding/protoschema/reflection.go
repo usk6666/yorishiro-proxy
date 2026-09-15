@@ -10,11 +10,20 @@
 // (Resolved #4).
 //
 // Transport — the discover RPC is dialled via the in-house HTTP/2 Layer
-// plus the gRPC Layer wrap (the same recipe used by resend_grpc). NO
-// runtime dependency on google.golang.org/grpc is introduced; only the
-// generated proto types under
-// google.golang.org/grpc/reflection/grpc_reflection_v1 (and v1alpha)
-// are imported (Resolved #11; project Principle #4).
+// plus the gRPC Layer wrap (the same recipe used by resend_grpc), never
+// through grpc-go's own client stack: the state machine below drives
+// Envelopes directly and speaks the reflection wire protocol itself
+// (Resolved #11; project Principle #4).
+//
+// The grpc-go *runtime* is nevertheless linked into the shipped binary.
+// The import below pulls in google.golang.org/grpc/reflection/
+// grpc_reflection_v1 for its message types, and that package also carries
+// the generated service stub, which imports google.golang.org/grpc —
+// `go list -deps ./cmd/yorishiro-proxy` reports 65 google.golang.org/grpc*
+// packages including the bare root. This costs binary size only (the code
+// is never called on this path) and is licence-clean (Apache-2.0, on the
+// allow-list), but an earlier version of this comment claimed no runtime
+// dependency was introduced, which was not true (USK-1054).
 //
 // Protocol — v1 is tried first; on a stream-level UNIMPLEMENTED (gRPC
 // status code 12) status the discover transparently falls back to
