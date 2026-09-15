@@ -48,5 +48,13 @@ jobs:
       - name: Build UI
         run: make build-ui
 
+      # Go through the Makefile, not a hand-copied `go test` line. The full
+      # tier additionally needs GODEBUG=http2xconnect=1 (RFC 8441 extended
+      # CONNECT in golang.org/x/net/http2, read at package init) and the
+      # Makefile is where that requirement is recorded. This step used to
+      # duplicate the command without the GODEBUG, so every WSS-over-h2 e2e
+      # test self-skipped on every nightly since 2026-05-09 — and because the
+      # full tier runs nowhere else, they were running in no job at all.
+      # The `ensure-ui` prerequisite is a no-op here: Build UI ran above.
       - name: Test (e2e full)
-        run: go test -race -v -tags e2e -timeout 30m ./...
+        run: make test-e2e
