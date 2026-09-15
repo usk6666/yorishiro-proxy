@@ -116,11 +116,25 @@ func TestUSK816_H2Pool_InterceptRelease_ResponseRelays(t *testing.T) {
 		t.Fatal("client never received upstream response after intercept release (USK-816 reproduced)")
 	}
 
-	// Wait for recording to settle.
+	// Wait for recording to settle. The predicate must cover every field
+	// asserted below, not just the row counts: Stream.State is stamped
+	// "complete" by a separate OnComplete event that lands a few
+	// milliseconds *after* the two Flows, so a count-only predicate
+	// releases the loop while State is still "active" and the assertion
+	// below fails for no production reason (USK-1060 — ~5% on the nightly
+	// full tier, 36/600 under a 6-way parallel local stress run; a probe
+	// at this line measured the State flip at 2.0-3.6ms and never absent,
+	// so OnComplete always fires and only the wait was missing).
+	// Same shape as the settle loop in
+	// h2_openstream_retry_integration_test.go (USK-993). "error" counts
+	// as settled so a genuinely failed stream fails the assertion
+	// immediately instead of burning the full deadline.
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
 		if len(store.Streams()) >= 1 && len(store.Flows()) >= 2 {
-			break
+			if got := store.Streams()[0].State; got == "complete" || got == "error" {
+				break
+			}
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
