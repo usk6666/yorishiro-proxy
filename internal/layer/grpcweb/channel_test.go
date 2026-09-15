@@ -1110,3 +1110,242 @@ func TestEmitAnomalyStart_QueueDrainsThenEOF(t *testing.T) {
 		t.Errorf("second Next() err = %v, want io.EOF; envelope=%v", err2, env2)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// USK-1057: request-side pseudo-header overlay (:authority / :scheme / :path)
+// ---------------------------------------------------------------------------
+
+// httpEnvWithOverlay builds an HTTPMessage envelope shaped the way the real
+// producers hand one to the grpcweb Layer: the request pseudo-headers live
+// in the typed HTTPMessage fields — httpaggregator projects them out of the
+// H2 HEADERS frame (splitHeaders removes them from Headers entirely), and
+// http1 fills Authority from the Host header. On HTTP/2 they are never
+// present inside Headers.
+//
+// This is a separate constructor rather than an extra parameter on
+// mustHTTPRequestEnv because that helper deliberately stuffs ":authority"
+// into Headers to exercise the D7 strip set (TestRoundTrip_BinaryHTTP1Style),
+// a shape the real aggregator never produces.
+func httpEnvWithOverlay(
+	streamID string,
+	dir envelope.Direction,
+	headers []envelope.KeyValue,
+	body []byte,
+	path, authority, scheme string,
+) *envelope.Envelope {
+	msg := &envelope.HTTPMessage{
+		Path:      path,
+		Authority: authority,
+		Scheme:    scheme,
+		Headers:   headers,
+		Body:      body,
+	}
+	if dir == envelope.Send {
+		msg.Method = "POST"
+	} else {
+		msg.Status = 200
+		msg.StatusReason = "OK"
+	}
+	return &envelope.Envelope{
+		StreamID:  streamID,
+		Sequence:  0,
+		Direction: dir,
+		Protocol:  envelope.ProtocolHTTP,
+		Message:   msg,
+	}
+}
+
+// TestRefill_PopulatesRequestOverlayFromHTTPMessage pins the USK-1057
+// producer half: refillFromHTTPMessage must project the wire-observed
+// :authority / :scheme / :path off the inbound request HTTPMessage onto the
+// GRPCStartMessage L7 overlay, exactly as internal/layer/grpc does for
+// native gRPC (USK-920).
+//
+// Before the fix these three fields were never written anywhere in the
+// grpcweb package, so the Send half had nothing to read and the upstream H2
+// leg emitted a request with :authority omitted entirely.
+func TestRefill_PopulatesRequestOverlayFromHTTPMessage(t *testing.T) {
+	body := EncodeFrame(false, false, []byte("overlay-req"))
+	headers := []envelope.KeyValue{
+		{Name: "content-type", Value: "application/grpc-web+proto"},
+		{Name: "x-custom-meta", Value: "abc"},
+	}
+	in := httpEnvWithOverlay("s-overlay-req", envelope.Send, headers, body,
+		"/pkg.Svc/Do", "api.example.test", "https")
+
+	mock := newMockChannel("s-overlay-req", in)
+	ch := Wrap(mock, RoleServer)
+
+	envs := drainEnvelopes(t, ch, 5)
+	if len(envs) == 0 {
+		t.Fatal("no envelopes emitted")
+	}
+	start, ok := envs[0].Message.(*envelope.GRPCStartMessage)
+	if !ok {
+		t.Fatalf("envs[0].Message = %T, want *GRPCStartMessage", envs[0].Message)
+	}
+	if start.Authority != "api.example.test" {
+		t.Errorf("start.Authority = %q, want %q", start.Authority, "api.example.test")
+	}
+	if start.Scheme != "https" {
+		t.Errorf("start.Scheme = %q, want %q", start.Scheme, "https")
+	}
+	if start.Path != "/pkg.Svc/Do" {
+		t.Errorf("start.Path = %q, want %q", start.Path, "/pkg.Svc/Do")
+	}
+	// The overlay must travel in typed fields only. Re-injecting a
+	// pseudo-header into Metadata would break the D7 strip contract that
+	// TestRoundTrip_BinaryHTTP1Style pins.
+	if hasHeader(start.Metadata, ":authority") || hasHeader(start.Metadata, ":scheme") {
+		t.Errorf("Metadata must not carry pseudo-headers: %v", start.Metadata)
+	}
+}
+
+// TestRefill_ResponseSideLeavesOverlayEmpty is the bidirectional guard for
+// the dir == Send gate in applyRequestOverlay. A Receive-direction
+// HTTPMessage must leave Authority / Scheme / Path zero even when the
+// message happens to carry request-shaped values, because a response HEADERS
+// frame legitimately has no :authority / :scheme / :path (http2's
+// buildHeadersEvent only projects them for direction == Send).
+//
+// Without this test, deleting the gate would be invisible.
+func TestRefill_ResponseSideLeavesOverlayEmpty(t *testing.T) {
+	trailer := []byte("grpc-status: 0\r\ngrpc-message: OK\r\n")
+	body := append([]byte{}, EncodeFrame(false, false, []byte("overlay-resp"))...)
+	body = append(body, EncodeFrame(true, false, trailer)...)
+
+	headers := []envelope.KeyValue{
+		{Name: "content-type", Value: "application/grpc-web+proto"},
+	}
+	// Request-shaped values deliberately planted on a Receive-direction
+	// message: the gate, not the absence of data, must keep them out.
+	in := httpEnvWithOverlay("s-overlay-resp", envelope.Receive, headers, body,
+		"/pkg.Svc/Do", "api.example.test", "https")
+
+	mock := newMockChannel("s-overlay-resp", in)
+	ch := Wrap(mock, RoleClient)
+
+	envs := drainEnvelopes(t, ch, 5)
+	if len(envs) == 0 {
+		t.Fatal("no envelopes emitted")
+	}
+	start, ok := envs[0].Message.(*envelope.GRPCStartMessage)
+	if !ok {
+		t.Fatalf("envs[0].Message = %T, want *GRPCStartMessage", envs[0].Message)
+	}
+	if start.Authority != "" {
+		t.Errorf("start.Authority = %q, want empty on the response side", start.Authority)
+	}
+	if start.Scheme != "" {
+		t.Errorf("start.Scheme = %q, want empty on the response side", start.Scheme)
+	}
+	if start.Path != "" {
+		t.Errorf("start.Path = %q, want empty on the response side", start.Path)
+	}
+}
+
+// TestSend_AuthorityFromOverlayReachesHTTPMessage pins the USK-1057 consumer
+// half: buildHTTPMessage must read :authority / :scheme off the
+// GRPCStartMessage L7 overlay so the assembled outbound HTTPMessage carries
+// them to the inner Layer (httpaggregator → H2HeadersEvent → wire).
+//
+// The empty-overlay sub-case pins the absence of an
+// Envelope.Context.TargetHost fallback (RFC 9113 §8.3.1): a client that
+// omitted :authority must still produce a request with no :authority, even
+// though the CONNECT target is sitting right there on the Context.
+func TestSend_AuthorityFromOverlayReachesHTTPMessage(t *testing.T) {
+	const decoyTarget = "connect-target.invalid:443"
+
+	tests := []struct {
+		name          string
+		authority     string
+		scheme        string
+		wantAuthority string
+		wantScheme    string
+	}{
+		{
+			name:          "overlay populated is forwarded verbatim",
+			authority:     "api.example.test",
+			scheme:        "https",
+			wantAuthority: "api.example.test",
+			wantScheme:    "https",
+		},
+		{
+			name:          "h2c scheme is not rewritten to https",
+			authority:     "api.example.test:8080",
+			scheme:        "http",
+			wantAuthority: "api.example.test:8080",
+			wantScheme:    "http",
+		},
+		{
+			name:          "empty overlay stays empty (no TargetHost fallback)",
+			authority:     "",
+			scheme:        "",
+			wantAuthority: "",
+			wantScheme:    "",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			mock := newMockChannel("s-send-overlay")
+			ch := Wrap(mock, RoleClient)
+
+			ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+			defer cancel()
+
+			// Context.TargetHost is a decoy: any fallback onto it would
+			// flip the empty sub-case and corrupt the populated ones.
+			envCtx := envelope.EnvelopeContext{TargetHost: decoyTarget}
+
+			startEnv := &envelope.Envelope{
+				StreamID:  "s-send-overlay",
+				Direction: envelope.Send,
+				Protocol:  envelope.ProtocolGRPCWeb,
+				Context:   envCtx,
+				Message: &envelope.GRPCStartMessage{
+					Service:     "pkg.Svc",
+					Method:      "Do",
+					ContentType: "application/grpc-web+proto",
+					Authority:   tc.authority,
+					Scheme:      tc.scheme,
+					Path:        "/pkg.Svc/Do",
+				},
+			}
+			dataEnv := &envelope.Envelope{
+				StreamID:  "s-send-overlay",
+				Direction: envelope.Send,
+				Protocol:  envelope.ProtocolGRPCWeb,
+				Context:   envCtx,
+				Message:   &envelope.GRPCDataMessage{Payload: []byte("payload-1")},
+			}
+			endEnv := &envelope.Envelope{
+				StreamID:  "s-send-overlay",
+				Direction: envelope.Send,
+				Protocol:  envelope.ProtocolGRPCWeb,
+				Context:   envCtx,
+				Message:   &envelope.GRPCEndMessage{},
+			}
+
+			for i, e := range []*envelope.Envelope{startEnv, dataEnv, endEnv} {
+				if err := ch.Send(ctx, e); err != nil {
+					t.Fatalf("Send(%d): %v", i, err)
+				}
+			}
+
+			if got := len(mock.sent); got != 1 {
+				t.Fatalf("inner.Send fired %d times, want 1", got)
+			}
+			hm, ok := mock.sent[0].Message.(*envelope.HTTPMessage)
+			if !ok {
+				t.Fatalf("inner.Send Message = %T, want *HTTPMessage", mock.sent[0].Message)
+			}
+			if hm.Authority != tc.wantAuthority {
+				t.Errorf("HTTPMessage.Authority = %q, want %q", hm.Authority, tc.wantAuthority)
+			}
+			if hm.Scheme != tc.wantScheme {
+				t.Errorf("HTTPMessage.Scheme = %q, want %q", hm.Scheme, tc.wantScheme)
+			}
+		})
+	}
+}

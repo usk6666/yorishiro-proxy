@@ -337,6 +337,7 @@ func (c *channel) refillFromHTTPMessage(ctx context.Context, env *envelope.Envel
 		Encoding:       encoding,
 		AcceptEncoding: acceptEnc,
 	}
+	applyRequestOverlay(start, msg, dir)
 
 	// Decode body LPMs. Returns ParseResult with DataFrames + optional
 	// TrailerFrame. Empty body → empty result, no error. The cap is the
@@ -465,6 +466,40 @@ func (c *channel) refillFromHTTPMessage(ctx context.Context, env *envelope.Envel
 		c.fireOnEnd(firedEndEnv, firedEndMsg)
 	}
 	return nil
+}
+
+// applyRequestOverlay projects the request-side pseudo-headers
+// (:authority / :scheme / :path) from the inbound HTTPMessage onto the
+// derived L7 overlay of the GRPCStartMessage, mirroring the USK-920
+// projection that internal/layer/grpc.buildStartMessage performs for
+// native gRPC.
+//
+// USK-1057: without this, the fields stay zero for gRPC-Web and the
+// Send-side buildHTTPMessage has nothing to read, so an H2 upstream leg
+// emits a request with :authority omitted entirely and :scheme silently
+// defaulted to "https" by the HTTP/2 encoder — the USK-1051 defect class
+// reproduced one Layer over.
+//
+// Guarded on dir because response-side HTTPMessages legitimately carry
+// none of these: http2's buildHeadersEvent only projects the request
+// pseudo-headers when direction == Send, and http1's parseRequestURI runs
+// on requests only. Projecting unconditionally would be a no-op today but
+// would silently fabricate a request authority onto a response overlay the
+// moment any producer changed.
+//
+// Works for both inner transports: on HTTP/2 msg.Authority originates from
+// the client's :authority pseudo-header; on HTTP/1.x it originates from
+// the Host header. Only the overlay changes — Envelope.Raw is untouched
+// and the HTTP/1.x send path never reads HTTPMessage.Authority (it
+// re-emits the preserved Host header out of Metadata), so no HTTP/1.x wire
+// byte moves.
+func applyRequestOverlay(start *envelope.GRPCStartMessage, msg *envelope.HTTPMessage, dir envelope.Direction) {
+	if dir != envelope.Send {
+		return
+	}
+	start.Authority = msg.Authority
+	start.Scheme = msg.Scheme
+	start.Path = msg.Path
 }
 
 // classifyParseError maps a DecodeBody error to a recoverable Anomaly type.
@@ -1036,7 +1071,9 @@ func encodeTrailerPayload(end *envelope.GRPCEndMessage) []byte {
 
 // buildHTTPMessage reconstructs an outbound HTTPMessage for inner.Send. The
 // request side (Send-side from the caller's perspective) sets Method=POST
-// and Path=/Service/Method per gRPC-Web convention. The response side keeps
+// and Path=/Service/Method per gRPC-Web convention, and carries the
+// wire-observed :authority / :scheme forward from the Start message's
+// derived L7 overlay (USK-1057). The response side keeps
 // Status/StatusReason from the original Receive-side context envelope when
 // available.
 func buildHTTPMessage(
@@ -1059,18 +1096,31 @@ func buildHTTPMessage(
 		if start.Service != "" || start.Method != "" {
 			msg.Path = "/" + start.Service + "/" + start.Method
 		}
-		// Caller-provided Authority/Scheme on srcEnv.Context is opaque to
-		// HTTPMessage; leave Authority/Scheme empty unless srcEnv carries
-		// useful values via its Message (when re-issuing a captured request).
-		if srcEnv != nil {
-			if hm, ok := srcEnv.Message.(*envelope.HTTPMessage); ok {
-				msg.Authority = hm.Authority
-				msg.Scheme = hm.Scheme
-				if hm.RawQuery != "" {
-					msg.RawQuery = hm.RawQuery
-				}
-			}
-		}
+		// USK-1057: :authority and :scheme come from the derived L7 overlay
+		// only — the fields refillFromHTTPMessage projects from the
+		// wire-observed request (applyRequestOverlay). There is deliberately
+		// NO Envelope.Context.TargetHost fallback: RFC 9113 §8.3.1 requires
+		// an intermediary forwarding a request over HTTP/2 to construct
+		// :authority from the authority information in the control data of
+		// the *original request*, and forbids generating one when the
+		// original request carried none. The CONNECT target is not that
+		// control data, and substituting it would let the proxy repair a
+		// client that omitted :authority — succeeding through the proxy
+		// while failing direct. Mirrors internal/layer/grpc.authorityForStart.
+		//
+		// The HTTP/2 encoder omits :authority entirely when this is empty
+		// (appendRequestPseudoHeaders), so a client's own omission survives
+		// onto the upstream wire. A client that sends only "host:" still
+		// works: stripStartHeaders keeps non-pseudo headers in Metadata, so
+		// "host" reaches the upstream verbatim.
+		//
+		// No TLS-derived :scheme fallback either (unlike grpc's
+		// schemeForStart): every live producer of a gRPC-Web Start reaches
+		// here through applyRequestOverlay, http2 already defaults an empty
+		// :scheme, and the HTTP/1.x send path ignores the field — a fallback
+		// would be unreachable code.
+		msg.Authority = start.Authority
+		msg.Scheme = start.Scheme
 	case envelope.Receive:
 		// Response side: status from srcEnv if available; otherwise default
 		// to 200.
