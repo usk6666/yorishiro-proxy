@@ -342,12 +342,23 @@ func TestResendGRPC_UnaryRoundTrip(t *testing.T) {
 	var result resendGRPCResult
 	decodeResendGRPCResult(t, res, &result)
 
-	req, _, full, _ := upstream.snapshot()
+	req, md, full, _ := upstream.snapshot()
 	if string(req) != "ping" {
 		t.Errorf("upstream req = %q, want ping", req)
 	}
 	if full != "/"+resendGRPCServiceName+"/"+resendGRPCMethodUnary {
 		t.Errorf("upstream full = %q, want correct path", full)
+	}
+
+	// USK-1051: resend_grpc must actually emit :authority. The synthetic
+	// Start envelope carries only a ConnID on its Context, so the gRPC
+	// Layer has nothing but GRPCStartMessage.Authority to work from — and
+	// grpc-go >=1.83.2 aborts the stream with codes.Internal ("no host or
+	// :authority header present") before the handler runs when it is
+	// missing. :authority is reserved-but-whitelisted, so it is visible
+	// through metadata.FromIncomingContext.
+	if got := md.Get(":authority"); len(got) != 1 || got[0] != addr {
+		t.Errorf("upstream observed :authority = %v, want [%s] (the resolved target)", got, addr)
 	}
 	if len(result.Messages) != 1 {
 		t.Fatalf("result.Messages len = %d, want 1", len(result.Messages))

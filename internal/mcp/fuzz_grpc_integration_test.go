@@ -418,6 +418,18 @@ func TestFuzzGRPC_PayloadPositionGeneratesVariants(t *testing.T) {
 		}
 	}
 
+	// USK-1051: every fuzz variant must carry :authority. fuzz_grpc shares
+	// the resend Start-envelope builder via cloneFuzzGRPCPlan, whose
+	// synthetic Context holds only a ConnID — so the value can only come
+	// from GRPCStartMessage.Authority. grpc-go >=1.83.2 rejects a HEADERS
+	// frame without it (codes.Internal) before the handler runs, which
+	// would show up here as zero observed requests.
+	for i, o := range observed {
+		if got := o.Metadata.Get(":authority"); len(got) != 1 || got[0] != addr {
+			t.Errorf("variant %d: upstream observed :authority = %v, want [%s]", i, got, addr)
+		}
+	}
+
 	// AC#3: PluginStepPost fires per Start (1 send + 1 receive = 2) +
 	// per Data (1 send + 1 receive = 2) per variant. Pre never fires
 	// (resend bypass per RFC §9.3 D1).

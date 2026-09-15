@@ -34,10 +34,20 @@ type GRPCStartMessage struct {
 	Scheme string
 
 	// Path is the :path pseudo-header from the request-side HEADERS
-	// frame ("/Service/Method"). Empty on the response side. USK-920.
-	// Service / Method are also parsed out individually; Path is retained
-	// verbatim so a malformed :path (which yields Service="" Method="")
-	// still leaves an inspectable trace.
+	// frame ("/Service/Method"), minus any query string. Empty on the
+	// response side. USK-920. Service / Method are also parsed out
+	// individually; Path is retained so a malformed :path (which yields
+	// Service="" Method="") still leaves an inspectable trace.
+	//
+	// NOT byte-verbatim: the HTTP/2 assembler splits ":path" into
+	// H2HeadersEvent.Path + .RawQuery, and this type has no RawQuery
+	// field, so a query-bearing :path loses its query here (the full
+	// wire bytes remain in Envelope.Raw). The Send path does not read
+	// this field either — the gRPC Layer rebuilds :path from Service /
+	// Method, which is what makes the intercept service/method override
+	// work. Making Path lossless and authoritative on Send was considered
+	// and deferred to a follow-up of USK-1051 (which fixed the same class
+	// of defect for :authority and :scheme).
 	Path string
 
 	// Metadata is the full gRPC metadata list. HTTP/2 pseudo-headers are

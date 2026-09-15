@@ -405,9 +405,16 @@ func applyWSModify(env *envelope.Envelope, _ *envelope.WSMessage, params *wsMess
 }
 
 // applyGRPCStartModify clones the envelope and applies overrides to a
-// GRPCStartMessage. Metadata is replaced wholesale when non-nil; transport
-// pseudo-headers (:authority, :path, etc.) live on Envelope.Context and
-// are intentionally not modifiable through this surface.
+// GRPCStartMessage. Metadata is replaced wholesale when non-nil.
+//
+// The request pseudo-headers are not directly modifiable through this
+// surface. :path is set indirectly — the gRPC Layer rebuilds it from the
+// (possibly overridden) Service / Method pair on Send, so the observed
+// GRPCStartMessage.Path is left untouched here and only documents what
+// the wire carried. :authority and :scheme are carried verbatim on the
+// cloned message (env.Clone deep-copies them via CloneMessage) and
+// forwarded unchanged, so an override here never rewrites what the client
+// put on the wire (USK-920 / USK-1051).
 func applyGRPCStartModify(env *envelope.Envelope, _ *envelope.GRPCStartMessage, params *grpcStartMessageModify) (*envelope.Envelope, error) {
 	if params == nil {
 		return env.Clone(), nil

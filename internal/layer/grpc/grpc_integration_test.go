@@ -904,6 +904,93 @@ func TestGRPC_UnaryRoundTrip(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// USK-1051: the client-sent :authority must reach the upstream byte-for-byte.
+//
+// The divergence is built into the harness and needs no extra setup:
+// dialGRPCViaProxy passes tls.Config{ServerName: "localhost"} to
+// credentials.NewTLS, and grpc-go derives cc.authority from the creds'
+// ServerName, so the client puts ":authority: localhost" on the wire. The
+// upstream, meanwhile, listens on 127.0.0.1:0 and that literal host:port is
+// what the CONNECT request (and therefore Envelope.Context.TargetHost)
+// carries. Before the fix the Send path rebuilt :authority from
+// Context.TargetHost and the upstream observed "127.0.0.1:PORT" — a
+// diagnostic distortion against any authority-routed vhost.
+//
+// Note: grpc.WithAuthority is NOT usable to make the divergence explicit —
+// grpc-go errors at dial time when it disagrees with the creds ServerName.
+// ---------------------------------------------------------------------------
+
+func TestGRPC_ClientAuthorityReachesUpstreamVerbatim(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	ca, issuer := makeCA(t)
+
+	var (
+		mu       sync.Mutex
+		observed metadata.MD
+	)
+	srv := &echoServer{
+		unary: func(hctx context.Context, req []byte) ([]byte, error) {
+			if md, ok := metadata.FromIncomingContext(hctx); ok {
+				mu.Lock()
+				observed = md.Copy()
+				mu.Unlock()
+			}
+			return append([]byte("echo:"), req...), nil
+		},
+	}
+	upAddr, upStop := startGRPCUpstream(t, ca, issuer, srv)
+	defer upStop()
+
+	proxyAddr, store := startGRPCMITMProxy(t, ctx, ca, issuer, pipelineOpts{})
+
+	cc := dialGRPCViaProxy(ctx, t, proxyAddr, upAddr)
+	defer cc.Close()
+
+	var resp []byte
+	req := []byte("authority-probe")
+	if err := cc.Invoke(ctx, echoFullMethod(echoMethodUnary), &req, &resp); err != nil {
+		t.Fatalf("Invoke: %v", err)
+	}
+	if want := "echo:authority-probe"; string(resp) != want {
+		t.Fatalf("resp = %q, want %q", resp, want)
+	}
+
+	mu.Lock()
+	got := observed
+	mu.Unlock()
+	if got == nil {
+		t.Fatal("upstream handler observed no incoming metadata")
+	}
+
+	// grpc-go classifies :authority as reserved but whitelisted, so it is
+	// attached to the incoming metadata (unlike :scheme, which is reserved
+	// and NOT whitelisted — assert that one in the unit test instead).
+	auth := got.Get(":authority")
+	if len(auth) != 1 {
+		t.Fatalf("upstream observed :authority = %v, want exactly one value", auth)
+	}
+	// grpc-go's cc.authority is the creds ServerName set by dialGRPCViaProxy.
+	const wantAuthority = "localhost"
+	if auth[0] != wantAuthority {
+		t.Errorf("upstream observed :authority = %q, want %q (the client-sent value)", auth[0], wantAuthority)
+	}
+	if auth[0] == upAddr {
+		t.Errorf("upstream observed :authority = %q — the CONNECT target was substituted for the client's value", auth[0])
+	}
+
+	// The recorded L7 overlay must agree with what went out on the wire.
+	st := firstGRPCStream(t, store, 5*time.Second)
+	sendStart := waitForGRPCFlows(t, store, st.ID, "start", "send", 1, 5*time.Second)
+	if u := sendStart[0].URL; u == nil {
+		t.Error("send Start Flow.URL is nil; expected the USK-920 pseudo-header projection")
+	} else if u.Host != wantAuthority {
+		t.Errorf("send Start Flow.URL.Host = %q, want %q", u.Host, wantAuthority)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Scenario 2: Server streaming
 // ---------------------------------------------------------------------------
 

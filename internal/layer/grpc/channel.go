@@ -898,6 +898,18 @@ func (c *grpcChannel) Send(ctx context.Context, env *envelope.Envelope) error {
 // grpc-encoding is remembered for subsequent Send-direction LPM
 // re-encoding.
 func (c *grpcChannel) sendStart(ctx context.Context, env *envelope.Envelope, m *envelope.GRPCStartMessage) error {
+	// Send's type switch matches on the dynamic type, so a typed-nil
+	// *GRPCStartMessage carried in a non-nil env.Message interface passes
+	// Send's `env.Message == nil` check and lands here. Reject it up
+	// front: every path below dereferences m unconditionally
+	// (buildStartHeaderKVs reads m.Metadata on its first line, and
+	// buildGRPCPath reads m.Service / m.Method), so without this guard the
+	// Channel would panic on a wire path instead of returning an error,
+	// and the defensive nil checks inside schemeForStart /
+	// authorityForStart could never run.
+	if m == nil {
+		return errors.New("grpc: Send: nil GRPCStartMessage")
+	}
 	headers := buildStartHeaderKVs(env, m)
 
 	// Compute :path either from Service/Method or from a fallback. Empty
@@ -912,8 +924,8 @@ func (c *grpcChannel) sendStart(ctx context.Context, env *envelope.Envelope, m *
 	// here on Start: gRPC requires DATA + trailer HEADERS minimum.
 	hdrEvt := &http2.H2HeadersEvent{
 		Method:    methodOr(m, env, "POST"),
-		Scheme:    schemeFromContext(env, "https"),
-		Authority: authorityFromContext(env),
+		Scheme:    schemeForStart(env, m, "https"),
+		Authority: authorityForStart(m),
 		Path:      pathPseudo,
 		Status:    statusFor(env, m),
 		Headers:   headers,
@@ -1410,38 +1422,75 @@ func buildEndTrailerKVs(m *envelope.GRPCEndMessage) []envelope.KeyValue {
 	return out
 }
 
-// methodOr returns evt.Method when set, else fallback. POST is the
-// canonical gRPC verb.
+// methodOr returns fallback unconditionally; the message and envelope
+// arguments are ignored. gRPC's HTTP/2 mapping fixes the request verb at
+// POST, and neither GRPCStartMessage nor Envelope carries a :method field
+// to prefer over the caller's literal. The parameters are retained so the
+// call site in sendStart reads uniformly with schemeForStart /
+// authorityForStart / statusFor.
 func methodOr(_ *envelope.GRPCStartMessage, env *envelope.Envelope, fallback string) string {
 	_ = env
 	return fallback
 }
 
-// schemeFromContext picks "https" when TLS metadata is present on the
-// envelope context, "http" otherwise (with a final fallback). gRPC over
-// plaintext is technically allowed.
-func schemeFromContext(env *envelope.Envelope, fallback string) string {
+// schemeForStart resolves the :scheme pseudo-header for a Send-side Start.
+//
+// USK-1051: the wire-observed value on the L7 overlay
+// (GRPCStartMessage.Scheme, projected by absorbHeaders per USK-920) wins,
+// so an h2c RPC observed as ":scheme: http" is forwarded as "http" rather
+// than being silently rewritten to "https" (MITM Principle #1 — do not
+// normalize what the wire did not normalize).
+//
+// Synthetic producers (resend_grpc / fuzz_grpc / reflection discover) that
+// leave Scheme empty fall back to the envelope's TLS metadata, then to the
+// caller-supplied literal. Unlike :authority, deriving :scheme is correct
+// rather than a fabrication: RFC 9113 §8.3.1 requires exactly one
+// non-empty value on every request, and the HTTP/2 Layer's
+// appendRequestPseudoHeaders already defaults an empty scheme to "https".
+func schemeForStart(env *envelope.Envelope, m *envelope.GRPCStartMessage, fallback string) string {
+	if m != nil && m.Scheme != "" {
+		return m.Scheme
+	}
 	if env != nil && env.Context.TLS != nil {
 		return "https"
 	}
 	return fallback
 }
 
-// authorityFromContext returns env.Context.TargetHost when set; empty
-// otherwise. The HTTP/2 Layer's BuildHeaderFieldsFromEvent does not emit
-// an empty :authority, which matches gRPC's wire reality (some servers
-// reject empty :authority).
-func authorityFromContext(env *envelope.Envelope) string {
-	if env == nil {
+// authorityForStart resolves the :authority pseudo-header for a Send-side
+// Start from the L7 overlay only (GRPCStartMessage.Authority, projected by
+// absorbHeaders per USK-920).
+//
+// USK-1051: there is deliberately NO Envelope.Context.TargetHost fallback.
+// RFC 9113 §8.3.1 requires an intermediary forwarding a request over
+// HTTP/2 to construct :authority from the authority information in the
+// control data of the *original request*, and forbids generating one when
+// the original request carried none. The CONNECT target is not that
+// control data — substituting it rewrites a value the wire actually
+// carried, and would let the proxy repair a client that omitted
+// :authority (succeeding through the proxy while failing direct), which is
+// exactly the diagnostic distortion this tool must not introduce.
+//
+// A client that legitimately sends only "host:" still works:
+// buildStartMessage keeps non-pseudo headers in Metadata, so "host"
+// reaches the upstream verbatim and gRPC's A41 host→:authority rename
+// applies there.
+//
+// The HTTP/2 Layer's appendRequestPseudoHeaders omits the field entirely
+// when this returns "", preserving the client's omission on the wire.
+func authorityForStart(m *envelope.GRPCStartMessage) string {
+	if m == nil {
 		return ""
 	}
-	return env.Context.TargetHost
+	return m.Authority
 }
 
-// statusFor returns evt.Status for a Receive-side Start envelope (HTTP
-// 200 typical), else 0. The HTTP/2 Layer's encoder uses Status to choose
-// between request and response pseudo-headers when env.Direction is not
-// available.
+// statusFor returns a literal 200 for a Receive-side Start envelope, else
+// 0; the message argument is ignored. gRPC's HTTP/2 mapping fixes the
+// response :status at 200 — RPC failures travel in the grpc-status
+// trailer, not the HTTP status — so GRPCStartMessage carries no status
+// field to read. The HTTP/2 Layer's encoder uses Status to choose between
+// request and response pseudo-headers when env.Direction is not available.
 func statusFor(env *envelope.Envelope, _ *envelope.GRPCStartMessage) int {
 	if env != nil && env.Direction == envelope.Receive {
 		return 200

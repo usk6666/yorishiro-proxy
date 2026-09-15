@@ -84,8 +84,20 @@ func validateResendGRPCInput(input *resendGRPCInput) error {
 }
 
 // validateResendGRPCStringFields runs CRLF guards on every user-supplied
-// URL / RPC name component. Recovered headers are NOT sanitized (MITM
+// URL / RPC name component, plus the http/https allowlist on a
+// user-supplied scheme. Recovered headers are NOT sanitized (MITM
 // principle); these guards apply only to user-input fields.
+//
+// USK-1051: the scheme allowlist lives here — not in
+// validateResendGRPCFromScratch — because it must cover the flow_id path
+// too. input.Scheme takes precedence over the recovered scheme in
+// resolveResendGRPCStart, and since this PR the resolved value reaches the
+// wire as the :scheme pseudo-header (plan.scheme →
+// GRPCStartMessage.Scheme). fuzz_grpc meanwhile re-derives the
+// scope/safety canonicalURL's scheme from plan.useTLS, so an unvalidated
+// third value would make the checked URL and the wire disagree. The
+// recovered-from-flow scheme is deliberately left unchecked: recorded wire
+// values must not be sanitized.
 func validateResendGRPCStringFields(input *resendGRPCInput) error {
 	if err := validateResendGRPCNoCRLF("service", input.Service); err != nil {
 		return err
@@ -95,6 +107,9 @@ func validateResendGRPCStringFields(input *resendGRPCInput) error {
 	}
 	if err := validateResendGRPCNoCRLF("scheme", input.Scheme); err != nil {
 		return err
+	}
+	if scheme := strings.ToLower(input.Scheme); scheme != "" && scheme != "http" && scheme != "https" {
+		return fmt.Errorf("unsupported scheme %q: only http and https are allowed", input.Scheme)
 	}
 	return validateResendGRPCNoCRLF("target_addr", input.TargetAddr)
 }
@@ -146,8 +161,10 @@ func validateResendGRPCNoCRLF(field, v string) error {
 
 // validateResendGRPCFromScratch checks the required fields when flow_id
 // is omitted. Service / Method / target_addr must be supplied; the scheme
-// defaults to https; compressed=true on any message requires Encoding to
-// be set up-front so the LPM compression byte makes sense to the Layer.
+// defaults to https (and is allowlist-checked on both paths by
+// validateResendGRPCStringFields, which runs unconditionally);
+// compressed=true on any message requires Encoding to be set up-front so
+// the LPM compression byte makes sense to the Layer.
 func validateResendGRPCFromScratch(input *resendGRPCInput) error {
 	missing := []string{}
 	if input.TargetAddr == "" {
@@ -161,10 +178,6 @@ func validateResendGRPCFromScratch(input *resendGRPCInput) error {
 	}
 	if len(missing) > 0 {
 		return fmt.Errorf("flow_id is empty; %s required", strings.Join(missing, ", "))
-	}
-	scheme := strings.ToLower(input.Scheme)
-	if scheme != "" && scheme != "http" && scheme != "https" {
-		return fmt.Errorf("unsupported scheme %q: only http and https are allowed", input.Scheme)
 	}
 	for i, m := range input.Messages {
 		if m.Compressed && input.Encoding == "" {
@@ -195,6 +208,13 @@ type resendGRPCPlan struct {
 	dialAddr  string
 	sni       string
 	authority string
+
+	// scheme is the resolved ":scheme" pseudo-header value ("https" or
+	// "http"), carried explicitly rather than re-derived from
+	// canonicalURL: cloneFuzzGRPCPlan nils canonicalURL so the caller can
+	// rebuild it after per-variant service/method substitution, so reading
+	// it at envelope-build time would be order-dependent (USK-1051).
+	scheme string
 
 	// service / method are the post-override values that populate
 	// :path and the GRPCStartMessage.
@@ -255,6 +275,7 @@ func (s *Server) buildResendGRPCPlan(ctx context.Context, input *resendGRPCInput
 	}
 	plan.dialAddr, plan.sni = resolveResendGRPCDialTarget(dialAuthority, plan.useTLS)
 	plan.authority = authority
+	plan.scheme = scheme
 	plan.canonicalURL = resendGRPCCanonicalURL(scheme, authority, plan.service, plan.method)
 
 	if len(plan.metadata) == 0 {
@@ -904,10 +925,23 @@ func receiveResendGRPCResponses(ctx context.Context, plan *resendGRPCPlan, ch la
 // (the gRPC Layer's sendStart consults this for the content-type pseudo-
 // header and for downstream content-type detection on the upstream side
 // via DispatchH2Stream).
+//
+// USK-1051: Authority / Scheme must be set on the message, not left to the
+// Layer. The gRPC Layer derives the :authority / :scheme pseudo-headers
+// from the GRPCStartMessage overlay alone (there is no Context.TargetHost
+// fallback by design), and this synthetic envelope's Context carries only
+// a ConnID. Without these two fields the HEADERS frame would go out with
+// no :authority at all, which gRPC servers reject with codes.Internal
+// ("no host or :authority header present") since grpc-go 1.83.2.
+//
+// fuzz_grpc shares this builder via cloneFuzzGRPCPlan (a by-value struct
+// copy), so both tools are covered here.
 func buildResendGRPCStartEnvelope(plan *resendGRPCPlan) *envelope.Envelope {
 	msg := &envelope.GRPCStartMessage{
 		Service:        plan.service,
 		Method:         plan.method,
+		Authority:      plan.authority,
+		Scheme:         plan.scheme,
 		Metadata:       plan.metadata,
 		Encoding:       plan.encoding,
 		AcceptEncoding: plan.acceptEncoding,
