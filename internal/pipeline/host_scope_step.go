@@ -12,7 +12,8 @@ import (
 // HostScopeStep is an Envelope-only Pipeline Step that validates the
 // connection's target host against the TargetScope policy. It uses
 // Envelope.Context.TargetHost (populated from CONNECT or SOCKS5 target)
-// and never type-asserts on Message.
+// and Envelope.Context.TLS, and never type-asserts on Message to reach
+// the scope decision.
 //
 // This is the host-level scope check. Path-based HTTP scope is a separate
 // Step added in N3 (HTTPScopeStep).
@@ -29,7 +30,31 @@ func NewHostScopeStep(scope *connector.TargetScope) *HostScopeStep {
 // Process checks whether the envelope's target host is allowed by the
 // TargetScope policy. Returns Drop if the target is blocked, Continue
 // otherwise. Envelopes without a TargetHost are always allowed.
+//
+// Only Send-direction envelopes are checked, mirroring HTTPScopeStep.
+// This is a connection-level gate, and a connection-level gate must reach
+// exactly one verdict per connection. Since USK-1081 the scheme comes
+// from Envelope.Context.TLS, which is per-Layer and not per-stack
+// (RFC-001 §3.1): a tcp_forward entry with `tls` and no `upstream_tls`
+// stamps a snapshot on the client Layer's EnvelopeContext and nil on the
+// upstream Layer's (connector/stack_builder_target_override.go), so
+// without this gate the Send leg would derive "https", the Receive leg
+// "http", and a Schemes-bearing rule could reach opposite verdicts on the
+// two halves of one exchange.
+//
+// Gating loses no coverage. Both legs are stamped with the same
+// Context.TargetHost, so the Receive-leg check was already redundant on
+// hostname and port; the only axis it added was the scheme — exactly the
+// axis that diverges. The client-facing Layer is the one that emits Send
+// (connector/stack_builder.go), so the surviving check reads the
+// confidentiality of the leg the client is actually speaking on.
+//
+// The scheme handed to CheckTarget is derived from Envelope.Context.TLS
+// (see hostScopeScheme).
 func (s *HostScopeStep) Process(_ context.Context, env *envelope.Envelope) Result {
+	if env.Direction != envelope.Send {
+		return Result{}
+	}
 	if s.scope == nil || env.Context.TargetHost == "" {
 		return Result{}
 	}
@@ -46,9 +71,13 @@ func (s *HostScopeStep) Process(_ context.Context, env *envelope.Envelope) Resul
 		port, _ = strconv.Atoi(portStr)
 	}
 
-	// Pass empty scheme and path — HostScopeStep is a connection-level
-	// check that only validates hostname and port.
-	allowed, _ := s.scope.CheckTarget("", host, port, "")
+	// Path is passed empty: this is a connection-level check and no
+	// request path is known yet. The scheme, however, IS known — it is
+	// the connection's transport confidentiality — and must be passed,
+	// because matchTargetRule is AND logic: a rule carrying a Schemes
+	// condition silently stops matching when the scheme is blank
+	// (USK-1081).
+	allowed, _ := s.scope.CheckTarget(hostScopeScheme(env), host, port, "")
 	if !allowed {
 		// USK-829: when the connection's first envelope is an HTTP
 		// request, synthesize a 403 terminator so the client sees a
@@ -65,4 +94,31 @@ func (s *HostScopeStep) Process(_ context.Context, env *envelope.Envelope) Resul
 		return Result{Action: Drop, BlockedBy: BlockedByTargetScope}
 	}
 	return Result{}
+}
+
+// hostScopeScheme derives the TargetScope scheme token for a connection-
+// level check from the envelope's TLS state.
+//
+// TargetRule.Schemes describes transport confidentiality — plaintext
+// versus TLS — spelled with the "http" / "https" tokens, not the L7
+// application protocol. That is the meaning the connection-level handler
+// gates already encode with their literals: connectPolicyAllow scopes a
+// CONNECT tunnel as "https" even though the tunnel may carry any protocol,
+// and the plain HTTP forward handler scopes as "http" "so scope rules can
+// disambiguate http vs https traffic for the same host". Envelope.Context.TLS
+// is non-nil exactly when a TLS layer is in the stack, so it answers the
+// same question without inspecting Message — which is what lets
+// HostScopeStep stay protocol-agnostic.
+//
+// Because TLS is per-Layer and not per-stack (RFC-001 §3.1), the two legs
+// of a connection with independent TLS axes (a tcp_forward entry with
+// `tls` but no `upstream_tls`, say) carry different snapshots and would
+// derive different schemes. Process therefore calls this only on
+// Send-direction envelopes, so the connection is scoped once, on the
+// client-facing leg's wire reality.
+func hostScopeScheme(env *envelope.Envelope) string {
+	if env.Context.TLS != nil {
+		return "https"
+	}
+	return "http"
 }

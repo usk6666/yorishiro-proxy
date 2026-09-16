@@ -256,6 +256,29 @@ func (n *SOCKS5Negotiator) Negotiate(ctx context.Context, conn net.Conn) (contex
 	// genuine unknown: REP=0x02 must precede any tunnel byte, so there is
 	// nothing to sniff yet. Scope the tunneled protocol instead. See
 	// RFC-001 §3.8 and internal/mcp/helpers.go checkTargetScopeAddr.
+	//
+	// USK-1081 narrowed, but did not close, that gap. Once the tunnel is
+	// established, every envelope stamped with an EnvelopeContext by its
+	// Layer — the http1 / h2 stacks with or without a terminated TLS
+	// layer, and the post-Upgrade ws / sse / grpc Layers, which inherit a
+	// connection-scoped context from the handshake
+	// (session.wsEnvelopeContextFromUpgradeReq, sse.Wrap) — is re-checked
+	// by pipeline.HostScopeStep, which derives the scheme from
+	// Context.TLS.
+	//
+	// Two residues remain, and for this connection the blank-scheme check
+	// above is the only scope gate either of them ever passes through:
+	//
+	//  1. The TLS passthrough relay (socks5Passthrough in
+	//     socks5_handler.go, plus the ProxyConfig.IsRawPassthrough
+	//     short-circuit) runs before any stack is built, so there is no
+	//     ConnectionStack and no Pipeline at all. The only scope-shaped
+	//     evaluation on that path is
+	//     proxybuild.passthroughRecorder.envelopeForScope, which feeds
+	//     flow.RecordScope capture filtering — not HostScopeStep.
+	//  2. The bytechunk (raw TCP) route does build a stack, but its
+	//     envelopes carry no TargetHost, so HostScopeStep short-circuits
+	//     before the derivation. Tracked as USK-1083.
 	if n.Scope != nil && n.Scope.HasRules() {
 		host, portStr, splitErr := net.SplitHostPort(target)
 		port := 0
