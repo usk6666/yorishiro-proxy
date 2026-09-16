@@ -102,7 +102,7 @@
         },
         "schemes": {
           "type": "array",
-          "description": "Optional. Match URL schemes. Empty = all schemes.",
+          "description": "Optional. Match transport confidentiality: 'http' = plaintext, 'https' = TLS. Applies to every scoped protocol, not just HTTP -- a WebSocket target matches as http (ws) or https (wss), and a raw TCP or gRPC target matches the same way; 'ws'/'wss'/'tcp' are rejected. Narrows the rule in BOTH directions: a deny with schemes ['https'] does not block the plaintext dial to the same host, and an allow with schemes ['https'] does not permit one. Empty = both transports (the safer default for deny rules).",
           "items": { "type": "string", "enum": ["http", "https"] }
         }
       },

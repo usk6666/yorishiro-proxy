@@ -85,6 +85,9 @@ func validateResendWSInput(input *resendWSInput) error {
 	if err := validateResendWSNoCRLF("scheme", input.Scheme); err != nil {
 		return err
 	}
+	if err := validateResendWSScheme(input.Scheme); err != nil {
+		return err
+	}
 	if err := validateResendWSNoCRLF("target_addr", input.TargetAddr); err != nil {
 		return err
 	}
@@ -114,9 +117,43 @@ func validateResendWSNoCRLF(field, v string) error {
 	return nil
 }
 
+// validateResendWSScheme applies the ws/wss allowlist to a user-supplied
+// scheme. An empty value is accepted — it means "not supplied", and
+// resolveResendWSAddress then defaults it to "ws".
+//
+// USK-1061: the allowlist lives here — not in validateResendWSFromScratch
+// — because it must cover the flow_id path too, applying the USK-1051
+// precedent already in force for resend_grpc (see
+// validateResendGRPCStringFields). input.Scheme wins over the recovered
+// value (mergeResendWSURL falls back only when the user value is empty),
+// and the resolved value drives two decisions that then disagree:
+//
+//	resend_ws {flow_id: "f", scheme: "https"}
+//	  1. plan.useTLS = scheme == "wss"  -> false, so the dial is PLAINTEXT
+//	  2. resendWSUpgradeURL maps only ws/wss, so "https" falls through its
+//	     switch unchanged -> upgradeURL.Scheme == "https"
+//	  3. a recorded authority already carrying :80 makes dialAddr equal
+//	     upgradeURL.Host, so the override leg is skipped entirely
+//	  => the canonical leg is handed "https" and an allow rule of
+//	     {"hostname": "example.com", "schemes": ["https"]} approves a
+//	     cleartext dial to port 80, replaying recorded credentials
+//	     (Cookie / Authorization) in the clear — CWE-319.
+//
+// Rejecting the value up front keeps the transport decision and the
+// scope-checked scheme derived from one validated input. The
+// recovered-from-flow scheme is deliberately left unchecked: recorded wire
+// values must not be sanitized (MITM Principle 1).
+func validateResendWSScheme(scheme string) error {
+	if s := strings.ToLower(scheme); s != "" && s != "ws" && s != "wss" {
+		return fmt.Errorf("unsupported scheme %q: only ws and wss are allowed", scheme)
+	}
+	return nil
+}
+
 // validateResendWSFromScratch checks the required fields when flow_id is
 // omitted. Compressed=true is rejected here because there's no recorded
-// extension header to drive deflate.
+// extension header to drive deflate. The scheme's value is allowlist-checked
+// on both paths by validateResendWSScheme, which runs unconditionally.
 func validateResendWSFromScratch(input *resendWSInput) error {
 	missing := []string{}
 	if input.TargetAddr == "" {
@@ -127,10 +164,6 @@ func validateResendWSFromScratch(input *resendWSInput) error {
 	}
 	if len(missing) > 0 {
 		return fmt.Errorf("flow_id is empty; %s required", strings.Join(missing, ", "))
-	}
-	scheme := strings.ToLower(input.Scheme)
-	if scheme != "" && scheme != "ws" && scheme != "wss" {
-		return fmt.Errorf("unsupported scheme %q: only ws and wss are allowed", input.Scheme)
 	}
 	if input.Compressed != nil && *input.Compressed {
 		return errors.New("compressed=true requires flow_id to recover negotiated permessage-deflate parameters")
@@ -425,16 +458,30 @@ func resendWSUpgradeURL(scheme, authority, path, rawQuery string) *url.URL {
 // case, so the extra check is redundant but safe. The simpler rule is
 // preferred over a port-normalizing comparison so the override path
 // stays explicit when target_addr really does redirect the dial.
+//
+// USK-1061: the override leg reads plan.upgradeURL.Scheme, which
+// resendWSUpgradeURL has already mapped into the scope engine's
+// vocabulary (ws -> http, wss -> https). It used to derive "https"/""
+// from plan.useTLS, and the blank made every `schemes`-bearing rule stop
+// matching there — a plaintext-scoped deny no-opped (bypass), a
+// plaintext-scoped allow false-blocked. Passing "ws"/"wss" instead would
+// reproduce the identical never-matches defect, because validateTargetRules
+// rejects any scheme outside {http, https}, so an Agent-layer rule can never
+// contain them. (That guarantee is Agent-layer only: a Policy-layer rule
+// loaded from the config file is not scheme-validated at all —
+// config.LoadPolicyFile checks JSON validity and mcpserver.ConvertTargetRules
+// copies Schemes verbatim. Closing that gap is USK-1084. It does not change
+// the conclusion here: a rule containing "ws" would simply never match
+// anything, which is the outcome this mapping exists to avoid.) Reading the
+// canonical leg's own value also keeps the two legs of one check from
+// disagreeing on the scheme axis; lowercasing mirrors TargetScope.CheckURL,
+// which lowercases before matching.
 func (s *Server) checkResendWSScope(plan *resendWSPlan) error {
 	if err := s.checkTargetScopeURL(plan.upgradeURL); err != nil {
 		return err
 	}
-	overrideScheme := ""
-	if plan.useTLS {
-		overrideScheme = "https"
-	}
 	if plan.dialAddr != plan.upgradeURL.Host {
-		if err := s.checkTargetScopeAddr(overrideScheme, plan.dialAddr); err != nil {
+		if err := s.checkTargetScopeAddr(strings.ToLower(plan.upgradeURL.Scheme), plan.dialAddr); err != nil {
 			return err
 		}
 	}

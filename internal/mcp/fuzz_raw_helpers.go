@@ -156,10 +156,7 @@ func validateFuzzRawTargetAndSNI(input *fuzzRawInput) error {
 	if err := validateFuzzRawNoCRLF("sni", input.SNI); err != nil {
 		return err
 	}
-	if _, _, splitErr := net.SplitHostPort(input.TargetAddr); splitErr != nil {
-		return fmt.Errorf("invalid target_addr %q: must be host:port (%v)", input.TargetAddr, splitErr)
-	}
-	return nil
+	return validateRawTargetAddr(input.TargetAddr)
 }
 
 // validateFuzzRawOverrideAndPatches checks override_bytes_encoding,
@@ -333,12 +330,10 @@ func (s *Server) buildFuzzRawPlan(ctx context.Context, input *fuzzRawInput) (*fu
 	}
 
 	// Enforce TargetScope on the dial address before any per-variant
-	// work. Mirrors resend_raw's checkResendRawScope.
-	scheme := ""
-	if plan.useTLS {
-		scheme = "https"
-	}
-	if err := s.checkTargetScopeAddr(scheme, plan.dialAddr); err != nil {
+	// work. USK-1061: this was an inline copy of resend_raw's body, free
+	// to drift from it; both now share checkRawDialScope, which is also
+	// where the transport -> scheme mapping is documented.
+	if err := s.checkRawDialScope(plan.useTLS, plan.dialAddr); err != nil {
 		return nil, err
 	}
 

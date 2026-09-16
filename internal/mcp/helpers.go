@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -139,15 +140,47 @@ func checkTargetScopeURLHelper(ts *connector.TargetScope, u *url.URL) error {
 }
 
 // checkTargetScopeAddr checks a host:port address against the target scope rules.
-// The scheme is used for default port inference (e.g., "https" -> 443).
 // Returns nil if the target is allowed or if no rules are configured (open mode).
 // Returns a descriptive error if the target is blocked.
+//
+// # The scheme argument has two effects, not one (USK-1061)
+//
+// It is easy to read this parameter as a port-inference hint only — it does
+// feed targetDefaultPort (e.g. "https" -> 443 when the address carries no
+// port) — but it is also matched against every rule's `schemes` condition by
+// connector.matchTargetRule. Passing a scheme the caller has not actually
+// resolved therefore silently changes the verdict in BOTH directions:
+//
+//   - a blank scheme makes every `schemes`-bearing DENY rule stop matching,
+//     so evaluation falls through to the allow check and an
+//     otherwise-blocked target is ALLOWED;
+//   - a blank scheme makes every `schemes`-bearing ALLOW rule stop matching,
+//     so a legitimate target is rejected with "not in ... allow list".
+//
+// There is no fail-safe blank value: deny wants "unknown matches
+// everything" and allow wants "unknown matches nothing", so any single
+// semantic is fail-open in exactly one direction. Callers must pass the
+// scheme they resolved. `schemes` is spelled in the `http` / `https`
+// vocabulary and means transport confidentiality (plaintext vs TLS), not
+// the L7 application protocol — see RFC-001 §3.8. A caller that terminates
+// TLS passes "https"; a plaintext dial passes "http"; a WebSocket caller
+// maps ws -> http and wss -> https (an Agent-layer rule can never contain
+// "ws"/"wss", which validateTargetRules rejects; the Policy layer is not
+// scheme-validated — USK-1084 — but an unvalidated token there matches
+// nothing, so the mapping is required either way).
+//
+// Blank is deliberately NOT defaulted to "http" here: connector.socks5.go
+// passes "" because at handshake time it genuinely does not know the
+// tunneled transport, and silently scoping that as plaintext would be a
+// different wrong answer. The blank-scheme trade-off is pinned by
+// TestCheckTarget_BlankScheme_DoesNotMatchSchemeRule.
 func (s *Server) checkTargetScopeAddr(scheme, addr string) error {
 	return checkTargetScopeAddrHelper(s.connector.targetScope, scheme, addr)
 }
 
 // checkTargetScopeAddrHelper checks a host:port address against the given target scope rules.
 // This is a standalone version of Server.checkTargetScopeAddr for use by handler structs.
+// See Server.checkTargetScopeAddr for the scheme argument's contract.
 func checkTargetScopeAddrHelper(ts *connector.TargetScope, scheme, addr string) error {
 	if ts == nil || !ts.HasRules() {
 		return nil
@@ -164,6 +197,40 @@ func checkTargetScopeAddrHelper(ts *connector.TargetScope, scheme, addr string) 
 		return fmt.Errorf("request blocked by target scope: host %q is %s", host, reason)
 	}
 	return nil
+}
+
+// isDecimalPort reports whether a port string taken from net.SplitHostPort is
+// a decimal TCP port number the scope engine can resolve.
+//
+// USK-1085: net.SplitHostPort leaves whatever followed the colon in the port
+// position, including a service name — "169.254.169.254:http" splits cleanly.
+// The dial then resolves that name through net.LookupPort ("http" -> 80,
+// "https" -> 443), but targetDefaultPort returns 0 for any non-digit port, so
+// every `ports`-bearing rule stops matching while the socket still lands on
+// the real port. This predicate is the shared gate that keeps the two parsers
+// from disagreeing; callers reject up front rather than letting the scope
+// check see a port it cannot resolve. Port 0 is rejected too: it is not a
+// dialable destination and targetDefaultPort cannot distinguish it from its
+// own "unparseable" return value.
+//
+// The digit loop mirrors targetDefaultPort's rather than delegating the whole
+// job to strconv.Atoi: Atoi accepts a leading sign, so "+80" would pass here
+// and still make targetDefaultPort return 0 — re-opening the very
+// discrepancy this predicate exists to close.
+func isDecimalPort(port string) bool {
+	if port == "" {
+		return false
+	}
+	for _, c := range port {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	n, err := strconv.Atoi(port)
+	if err != nil {
+		return false
+	}
+	return n >= 1 && n <= 65535
 }
 
 // checkSafetyInput validates request data against the safety filter engine.

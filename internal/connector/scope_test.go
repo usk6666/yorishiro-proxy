@@ -6,6 +6,95 @@ import (
 	"testing"
 )
 
+// TestCheckTarget_BlankScheme_DoesNotMatchSchemeRule pins the blank-scheme
+// semantic of matchTargetRule (USK-1061).
+//
+// This is not a regression test — it passes both before and after the
+// USK-1061 fix, deliberately. Its job is to convert an accidental semantic
+// into a stated contract.
+//
+// matchTargetRule is AND logic, so a blank scheme matches no rule that
+// carries a Schemes condition. That is symmetric across the deny list and
+// the allow list, and it therefore breaks the engine in opposite ways in the
+// two lists: a non-matching DENY rule lets CheckTarget fall through to the
+// allow check (bypass), while a non-matching ALLOW rule blocks a legitimate
+// target (false block). No single semantic for the blank case is fail-safe
+// in both directions, so the correct fix is at the call sites — every caller
+// that has resolved its transport must pass "http" or "https".
+//
+// Two callers deliberately still pass a blank scheme and rely on exactly this
+// behaviour: connector/socks5.go (REP=0x02 must precede any tunnel byte, so
+// the tunneled transport genuinely is not known yet) and CheckURL(nil).
+// Changing this to an asymmetric per-list rule would start blocking traffic
+// those callers were never scoped for, which is why the trade-off is pinned
+// here rather than left to be rediscovered. See RFC-001 §3.8.
+func TestCheckTarget_BlankScheme_DoesNotMatchSchemeRule(t *testing.T) {
+	tests := []struct {
+		name        string
+		policyAllow []TargetRule
+		policyDeny  []TargetRule
+		scheme      string
+		wantAllowed bool
+		wantReason  string
+	}{
+		{
+			name:        "blank scheme slips past a schemes-bearing deny rule",
+			policyDeny:  []TargetRule{{Hostname: "169.254.169.254", Schemes: []string{"http"}}},
+			scheme:      "",
+			wantAllowed: true,
+		},
+		{
+			name:        "resolved scheme is caught by the same deny rule",
+			policyDeny:  []TargetRule{{Hostname: "169.254.169.254", Schemes: []string{"http"}}},
+			scheme:      "http",
+			wantAllowed: false,
+			wantReason:  "blocked by policy deny rule",
+		},
+		{
+			name:        "a deny rule without Schemes catches the blank scheme",
+			policyDeny:  []TargetRule{{Hostname: "169.254.169.254"}},
+			scheme:      "",
+			wantAllowed: false,
+			wantReason:  "blocked by policy deny rule",
+		},
+		{
+			name:        "blank scheme fails a schemes-bearing allow rule",
+			policyAllow: []TargetRule{{Hostname: "169.254.169.254", Schemes: []string{"http"}}},
+			scheme:      "",
+			wantAllowed: false,
+			wantReason:  "not in policy allow list",
+		},
+		{
+			name:        "resolved scheme satisfies the same allow rule",
+			policyAllow: []TargetRule{{Hostname: "169.254.169.254", Schemes: []string{"http"}}},
+			scheme:      "http",
+			wantAllowed: true,
+		},
+		{
+			name:        "an allow rule without Schemes accepts the blank scheme",
+			policyAllow: []TargetRule{{Hostname: "169.254.169.254"}},
+			scheme:      "",
+			wantAllowed: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := NewTargetScope()
+			s.SetPolicyRules(tt.policyAllow, tt.policyDeny)
+
+			allowed, reason := s.CheckTarget(tt.scheme, "169.254.169.254", 80, "/")
+			if allowed != tt.wantAllowed {
+				t.Errorf("CheckTarget(%q, ...) allowed = %v, want %v (reason %q)",
+					tt.scheme, allowed, tt.wantAllowed, reason)
+			}
+			if tt.wantReason != "" && reason != tt.wantReason {
+				t.Errorf("reason = %q, want %q", reason, tt.wantReason)
+			}
+		})
+	}
+}
+
 func TestNewTargetScope(t *testing.T) {
 	s := NewTargetScope()
 	if s == nil {
