@@ -62,6 +62,55 @@ func materializePayload(msg *envelope.GRPCDataMessage) []byte {
 	return msg.Payload
 }
 
+// reconstructURL builds a full URL string from GRPCStartMessage fields.
+// Used for common.TargetURL safety matching. No net/url dependency.
+//
+// The shape is byte-for-byte identical to rules/http.reconstructURL over
+// the same Scheme/Authority/Path/RawQuery representation (which
+// GRPCStartMessage shares verbatim with HTTPMessage), so a preset rule
+// authored against HTTP semantics means the same thing when it is
+// evaluated on a gRPC Start. The duplication rather than a shared helper
+// is deliberate — MITM Principle 2, each protocol owns its canonical
+// form — and this variant is not identical: it reads a different struct
+// and carries the Service/Method fallback below, which HTTP has no
+// analogue for.
+//
+// Read-only, per MITM Principle 1: nothing here lowercases the
+// authority, strips a default port, percent-decodes, or collapses
+// slashes. Normalizing at the scan boundary would make the engine match
+// against something the wire never carried.
+func reconstructURL(msg *envelope.GRPCStartMessage) string {
+	if msg == nil {
+		return ""
+	}
+	path := msg.Path
+	if path == "" && (msg.Service != "" || msg.Method != "") {
+		// A missing :path with a non-empty Service/Method means the
+		// Start did not come from buildStartMessage — i.e. a synthetic
+		// Start from resend_grpc / fuzz_grpc, which never sets Path.
+		// Reconstructing here approximates what layer/grpc.pathForStart
+		// will put on the wire for such a message. The behaviour mirrored
+		// byte-for-byte is projectGRPCStart in
+		// internal/pipeline/record_step.go, which answered the identical
+		// question for Flow.URL — including the all-empty case, where
+		// both leave the path empty while layer/grpc.buildGRPCPath would
+		// emit "/" (no consequence: "/" matches no preset).
+		path = "/" + msg.Service + "/" + msg.Method
+	}
+	var b strings.Builder
+	if msg.Scheme != "" {
+		b.WriteString(msg.Scheme)
+		b.WriteString("://")
+	}
+	b.WriteString(msg.Authority)
+	b.WriteString(path)
+	if msg.RawQuery != "" {
+		b.WriteByte('?')
+		b.WriteString(msg.RawQuery)
+	}
+	return b.String()
+}
+
 // containsCRLF returns true when s contains CR or LF. Used to reject
 // metadata mutations that would inject framing bytes (CWE-113).
 func containsCRLF(s string) bool {

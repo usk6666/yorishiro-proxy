@@ -37,8 +37,13 @@ const (
 type Violation struct {
 	RuleID   string
 	RuleName string
-	Target   string // "metadata", "payload", "service", "method"
-	Match    string // matched fragment (verbatim from regex)
+	// Target names the matched target: "metadata", "payload",
+	// "service", "method", "url", or "query" from extractTarget, or
+	// "metadata:<name>" from CheckMetadataTarget. Nothing in the
+	// production path branches on this value — it is operator-facing
+	// only (slog field in internal/pipeline/safety_step.go).
+	Target string
+	Match  string // matched fragment (verbatim from regex)
 }
 
 // SafetyEngine checks gRPC events against safety rules. Thread-safe.
@@ -54,11 +59,13 @@ func NewSafetyEngine() *SafetyEngine {
 
 // LoadPreset compiles and adds all rules from a named preset.
 //
-// When a preset rule's Targets contains common.TargetBody (the HTTP
-// body target from the existing presets), the gRPC engine treats it
-// as TargetPayload. This is the closest analogue and lets the existing
-// destructive-sql / destructive-os-command presets work unchanged
-// against gRPC payloads.
+// LoadPreset itself performs no target remapping — the preset's Targets
+// are compiled and stored verbatim, exactly as in http.LoadPreset and
+// ws.LoadPreset. The reuse contract is implemented one level down, in
+// extractTarget: common.TargetBody reads the gRPC payload, and
+// common.TargetURL / common.TargetQuery read the Start message's :path
+// and query. That is what lets the existing destructive-sql /
+// destructive-os-command presets work unchanged against gRPC.
 func (e *SafetyEngine) LoadPreset(name string) error {
 	preset, err := common.LookupPreset(name)
 	if err != nil {
@@ -164,8 +171,22 @@ func (e *SafetyEngine) checkRule(rule *common.CompiledRule, msg envelope.Message
 // "" when the target is not applicable to this message type (so the
 // caller's loop simply continues).
 //
-// common.TargetBody is an alias for the gRPC payload target when the
-// message is GRPCDataMessage (preset reuse contract).
+// Three shared common.Targets are honoured so the built-in presets —
+// which declare Targets{TargetBody, TargetURL, TargetQuery} — actually
+// evaluate against gRPC (preset reuse contract):
+//
+//   - common.TargetBody aliases the gRPC payload target on a
+//     GRPCDataMessage.
+//   - common.TargetURL reads the full reconstructed request URL on a
+//     GRPCStartMessage — scheme://authority + the request-side :path +
+//     ?query, see reconstructURL — so a url rule anchored at the path
+//     alone (`^/pkg\.Svc/`) never matches. common.TargetQuery reads that
+//     query on its own (USK-1073).
+//
+// The Data and End arms deliberately have no url/query cases: neither
+// message type carries Path / RawQuery / Authority / Scheme, so the
+// fallthrough at the end of the function is both correct and the only
+// way to stay under the gocyclo ceiling.
 func extractTarget(target common.Target, msg envelope.Message) (data, name string) {
 	switch m := msg.(type) {
 	case *envelope.GRPCStartMessage:
@@ -176,6 +197,33 @@ func extractTarget(target common.Target, msg envelope.Message) (data, name strin
 			return m.Service, "service"
 		case TargetMethod:
 			return m.Method, "method"
+		// USK-1073. Scan-only: reconstructURL and m.RawQuery are read
+		// verbatim, and neither this arm nor anything it calls writes
+		// back to the message or to Envelope.Raw.
+		//
+		// Known residual (USK-1078): under the USK-702
+		// modify_and_forward recheck, an operator override of
+		// Service/Method on a *parseable* original :path makes
+		// layer/grpc.pathForStart emit "/newSvc/newMethod" while m.Path
+		// still holds the observed pre-override path — so the url target
+		// scans the pre-override path. This is not a regression
+		// introduced here (before USK-1073 the url target scanned
+		// nothing at all), and closing it needs parseGRPCPath, which is
+		// unexported in internal/layer/grpc.
+		//
+		// Known residual (gRPC-Web; no Issue filed yet):
+		// layer/grpcweb.applyRequestOverlay copies Authority / Scheme /
+		// Path onto the Start but never RawQuery — the identifier appears
+		// nowhere in internal/layer/grpcweb — so on gRPC-Web traffic the
+		// query target is inert and the url target carries no query.
+		// Currently harmless rather than a bypass: the gRPC-Web Send path
+		// rebuilds msg.Path from Service/Method, dropping the query
+		// before it reaches upstream, so the unscanned bytes are also
+		// never forwarded.
+		case common.TargetURL:
+			return reconstructURL(m), "url"
+		case common.TargetQuery:
+			return m.RawQuery, "query"
 		}
 
 	case *envelope.GRPCDataMessage:
