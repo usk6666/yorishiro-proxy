@@ -318,7 +318,11 @@ func (c *channel) refillFromHTTPMessage(ctx context.Context, env *envelope.Envel
 	if msg.Path != "" {
 		s, m, ok := parseServiceMethod(msg.Path)
 		if !ok {
-			slog.Warn("grpcweb: malformed :path; emitting empty service/method",
+			// Debug, not Warn (USK-1075): sibling of the gRPC Layer's
+			// log. Client-controlled and fired once per stream with no
+			// dedup, so it is a log-amplification vector on untrusted
+			// input — CLAUDE.md's "client sends invalid request" Debug row.
+			slog.Debug("grpcweb: malformed :path; emitting empty service/method",
 				"path", msg.Path,
 				"stream_id", env.StreamID,
 			)
