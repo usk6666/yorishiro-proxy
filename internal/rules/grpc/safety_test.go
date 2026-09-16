@@ -756,10 +756,14 @@ func TestExtractTarget_URLQueryNotApplicableToDataOrEnd(t *testing.T) {
 	}
 	for kind, msg := range msgs {
 		for _, target := range []common.Target{common.TargetURL, common.TargetQuery} {
-			data, name := extractTarget(target, msg)
-			if data != "" || name != "" {
-				t.Errorf("extractTarget(%q, %s) = (%q, %q), want empty", target, kind, data, name)
-			}
+			// Subtests: map iteration order is randomized, so without
+			// them a failure is neither ordered nor reproducible via -run.
+			t.Run(kind+"/"+string(target), func(t *testing.T) {
+				data, name := extractTarget(target, msg)
+				if data != "" || name != "" {
+					t.Errorf("extractTarget(%q, %s) = (%q, %q), want empty", target, kind, data, name)
+				}
+			})
 		}
 	}
 }

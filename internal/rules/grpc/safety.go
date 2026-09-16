@@ -177,8 +177,11 @@ func (e *SafetyEngine) checkRule(rule *common.CompiledRule, msg envelope.Message
 //
 //   - common.TargetBody aliases the gRPC payload target on a
 //     GRPCDataMessage.
-//   - common.TargetURL and common.TargetQuery read the request-side
-//     :path and its query on a GRPCStartMessage (USK-1073).
+//   - common.TargetURL reads the full reconstructed request URL on a
+//     GRPCStartMessage — scheme://authority + the request-side :path +
+//     ?query, see reconstructURL — so a url rule anchored at the path
+//     alone (`^/pkg\.Svc/`) never matches. common.TargetQuery reads that
+//     query on its own (USK-1073).
 //
 // The Data and End arms deliberately have no url/query cases: neither
 // message type carries Path / RawQuery / Authority / Scheme, so the
@@ -207,6 +210,16 @@ func extractTarget(target common.Target, msg envelope.Message) (data, name strin
 		// introduced here (before USK-1073 the url target scanned
 		// nothing at all), and closing it needs parseGRPCPath, which is
 		// unexported in internal/layer/grpc.
+		//
+		// Known residual (gRPC-Web; no Issue filed yet):
+		// layer/grpcweb.applyRequestOverlay copies Authority / Scheme /
+		// Path onto the Start but never RawQuery — the identifier appears
+		// nowhere in internal/layer/grpcweb — so on gRPC-Web traffic the
+		// query target is inert and the url target carries no query.
+		// Currently harmless rather than a bypass: the gRPC-Web Send path
+		// rebuilds msg.Path from Service/Method, dropping the query
+		// before it reaches upstream, so the unscanned bytes are also
+		// never forwarded.
 		case common.TargetURL:
 			return reconstructURL(m), "url"
 		case common.TargetQuery:

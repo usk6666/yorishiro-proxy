@@ -18,12 +18,14 @@
 //     service, method) plus the shared common Targets the built-in
 //     presets declare, for preset reuse: common.TargetBody maps to the
 //     gRPC payload on a Data message, and common.TargetURL /
-//     common.TargetQuery map to the request-side :path (with its query
-//     rejoined) and to the query alone on a Start message — USK-1073.
-//     Reading :path is what lets the destructive-sql /
-//     destructive-os-command presets fire on an RPC target, including a
-//     :path too malformed for the Service / Method view to represent
-//     (USK-1053).
+//     common.TargetQuery map to the full reconstructed request URL
+//     (scheme://authority + the request-side :path + ?query) and to the
+//     query alone on a Start message — USK-1073. A url rule is therefore
+//     matched against scheme and authority too, so a pattern anchored at
+//     the path alone never fires. Reading :path is what lets the
+//     destructive-sql / destructive-os-command presets fire on an RPC
+//     target, including a :path too malformed for the Service / Method
+//     view to represent (USK-1053).
 //
 // MITM principles enforced by this package:
 //

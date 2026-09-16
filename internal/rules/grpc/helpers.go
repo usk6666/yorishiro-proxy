@@ -88,10 +88,13 @@ func reconstructURL(msg *envelope.GRPCStartMessage) string {
 		// A missing :path with a non-empty Service/Method means the
 		// Start did not come from buildStartMessage — i.e. a synthetic
 		// Start from resend_grpc / fuzz_grpc, which never sets Path.
-		// Reconstructing here scans what layer/grpc.pathForStart will
-		// actually put on the wire for such a message. Mirrors
-		// projectGRPCStart in internal/pipeline/record_step.go, which
-		// answered the identical question for Flow.URL.
+		// Reconstructing here approximates what layer/grpc.pathForStart
+		// will put on the wire for such a message. The behaviour mirrored
+		// byte-for-byte is projectGRPCStart in
+		// internal/pipeline/record_step.go, which answered the identical
+		// question for Flow.URL — including the all-empty case, where
+		// both leave the path empty while layer/grpc.buildGRPCPath would
+		// emit "/" (no consequence: "/" matches no preset).
 		path = "/" + msg.Service + "/" + msg.Method
 	}
 	var b strings.Builder
