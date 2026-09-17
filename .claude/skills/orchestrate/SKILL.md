@@ -364,7 +364,7 @@ Trust the sub-agent's bottom-up scope reassessment when it has actually attempte
    - Single-source-of-truth design citation (link the design-review answers, not the original Linear body which is now superseded)
    - `blockedBy` chain so Linear shows the order
 4. Update the parent issue (do **not** close it). It becomes the "final cleanup + audit" PR after splits land. Set `blockedBy` to the new split issues. Move state back to `Backlog`.
-5. Cleanup discipline: remove only the worktrees this session launched. Use `git worktree remove -f -f <path>` to override locks (the failed sub-agent may have left lock files). Do not bulk-delete other sessions' worktrees.
+5. Cleanup discipline: remove only the worktrees this session launched, via the canonical snippet in `CLAUDE.md` → Worktree Cleanup. `--force --force` is required to override locks (a failed sub-agent may have left lock files). Do not bulk-delete other sessions' worktrees.
 
 #### 2-3. Parallel Launch Example
 
@@ -403,11 +403,18 @@ Launch the following Agent for each PR with `run_in_background: true`:
 Agent(
   description="Review gate PR #<N>",
   subagent_type="general-purpose",
-  isolation="worktree",
   run_in_background=true,
   prompt=<review gate prompt>
 )
 ```
+
+**No `isolation` here, deliberately.** This agent launches other agents and touches no files
+itself — it reads the PR through `gh` and delegates all code access to the reviewers and fixers
+it spawns, which ARE isolated. Isolating it would make those children nest at
+`agent-<parent>/.claude/worktrees/agent-<child>`; because `.claude/worktrees/` is gitignored,
+removing the parent then leaves an unregistered husk directory that only `rm` can reclaim. Tell
+the agent explicitly that it is running in the caller's checkout and must not check out a branch,
+fetch into it, or edit/stage/commit anything there.
 
 **Review Gate Prompt Content:**
 
@@ -552,15 +559,18 @@ do not bulk-delete. **Only target the worktrees of sub-agents you launched.**
 3. After all batches and review cycles complete, run the following for each recorded agent ID
    (design-reviewer + implementer + review-gate + nested fixer/code-reviewer/security-reviewer IDs):
 
-```bash
-git worktree remove .claude/worktrees/agent-<agentId> --force 2>/dev/null || true
-```
+Write those IDs one per line to a file and run the canonical cleanup snippet against it.
 
-3. Clean up metadata after all deletions:
+> Use the canonical cleanup snippet in `CLAUDE.md` → **Agent Isolation Strategy → Worktree
+> Cleanup**. Do not construct `.claude/worktrees/agent-<id>` from an ID (a nested sub-agent's
+> worktree lives inside its parent's, so the path does not exist and the remove silently
+> no-ops), use `--force --force` (a single `--force` fails on a locked worktree), and never
+> select paths with `grep -F -f` (this machine's `grep` is ugrep: an empty pattern file matches
+> every line).
 
-```bash
-git worktree prune
-```
+Because the review-gate Agent is launched **without** isolation (2.5-2), the reviewer and fixer
+worktrees it creates are flat siblings of the ones this phase created — there is no nesting to
+unwind. The snippet resolves real paths anyway, so it stays correct if that ever changes.
 
 - Delete all worktrees you launched regardless of success/failure (changes are pushed to remote)
 - Debug information for failed Issues is accessible via Linear comments and `git checkout <branch-name>`

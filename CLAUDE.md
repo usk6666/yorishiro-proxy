@@ -318,8 +318,9 @@ Dependabot alerts are module-level and carry no reachability analysis. Before tr
 4. `/implement <Issue ID>` — Implement, test, commit, and create PR for a single Issue
 5. `/review-gate` — Run Code Review + Security Review in parallel for a PR. If issues found, auto-fix → re-review (up to 2 rounds)
 6. `/project sync` — Update roadmap documents after implementation is complete
+7. `/autopilot` — Unattended variant of `/orchestrate` for scheduled runs (Desktop local scheduled task). One Issue per run through to a review-gated PR; never merges. See `.claude/skills/autopilot/SETUP.md`
 
-> **Note**: `/implement` assumes single-session, solo execution. Use `/orchestrate` for parallel implementation of multiple Issues.
+> **Note**: `/implement` assumes single-session, solo execution. Use `/orchestrate` for parallel implementation of multiple Issues, and `/autopilot` only from a scheduled (unattended) session.
 
 ### Config Checklist for New Feature Milestones
 
@@ -360,7 +361,8 @@ To prevent git conflicts during parallel work by sub-agents, apply the following
 ### Principles
 
 - **Lock the main worktree (the repository clone origin) to the main branch and prohibit direct work** — All branch switching and commits happen inside worktrees. The main branch cannot be pushed to directly due to branch protection
-- **All sub-agents are launched with `isolation: "worktree"`** — During parallel execution, checking out the main worktree's HEAD conflicts with the code state read by other agents, so even read-only review agents are isolated in worktrees
+- **Sub-agents that touch the working tree are launched with `isolation: "worktree"`** — During parallel execution, checking out the main worktree's HEAD conflicts with the code state read by other agents, so even read-only review agents that check out a branch are isolated in worktrees
+- **An agent whose only job is to orchestrate other agents is NOT isolated** — A sub-agent's worktree is created under its own cwd, so isolating a parent makes every child nest at `agent-<parent>/.claude/worktrees/agent-<child>`. Since `.claude/worktrees/` is gitignored, `git worktree remove <parent>` leaves that subtree behind as an *unregistered* directory holding still-registered children — reclaimable only with `rm`, which is in the `ask` list and therefore stalls an unattended run. A delegated review-gate agent reads the PR through `gh` and delegates all code access to its own isolated sub-agents, so it needs no worktree of its own; leaving it un-isolated keeps every leaf worktree flat
 - **Never `git checkout` the main worktree to a different branch when the user has parallel work in progress** — Run `git status` first; if the working tree has user-owned modifications, treat the main worktree as locked. Use `git worktree add -b <new-branch> .claude/worktrees/<short-name> <base>` to materialise side tasks in an isolated checkout instead. Do not reuse `.claude/worktrees/agent-*` paths (those are reserved for sub-agents) — pick a descriptive sibling.
 - **Verify main-worktree branch after parallel-agent return** — Sub-agents launched with `isolation: "worktree"` occasionally write edits into the main clone instead of the worktree (Edit-tool race), leaving the main clone on a feature branch. After every parallel-agent return, run `git branch --show-current` and `git worktree list`; if the main clone is off-base, switch back with `git checkout <base> && git pull --rebase origin <base>` before launching downstream agents.
 
@@ -372,11 +374,13 @@ To prevent git conflicts during parallel work by sub-agents, apply the following
 | fixer | Fix review findings, commit, push | `"worktree"` |
 | code-reviewer | Checkout target branch, read diff, post review | `"worktree"` |
 | security-reviewer | Checkout target branch, read diff, post review | `"worktree"` |
+| review-gate (delegated) | Launch reviewers/fixers, aggregate verdict; touches no files itself | **none** — isolating it nests its children |
 
 ### When Adding New Agents
 
-1. All sub-agents must use `isolation: "worktree"` by default
-2. Document the isolation setting in the calling skill (`.claude/skills/*/SKILL.md`)
+1. Sub-agents that read or write the working tree use `isolation: "worktree"` by default
+2. Sub-agents that only launch and aggregate other sub-agents take **no** isolation
+3. Document the isolation setting in the calling skill (`.claude/skills/*/SKILL.md`)
 
 ### Worktree Cleanup
 
@@ -389,17 +393,50 @@ The Claude Code Task tool does not auto-delete worktrees when they have changes 
 |-------|---------------|
 | `/orchestrate` | Phase 3-3 (after all batches and reviews complete) |
 | `/review-gate` | Phase 6 (after review cycle completes) |
+| `/autopilot` | Phase 6-1 (end of every run, success or failure) |
 | `/code-review` | Step 7 (after reporting results) |
 
 Each skill tracks the agent IDs of the sub-agents it launched and deletes **only those worktrees**.
 Do not bulk-delete to avoid destroying active worktrees of other sessions.
 
+This is the canonical snippet. `$IDS` is a file holding one recorded agent ID per line — never a
+glob of `agent-*`:
+
 ```bash
-git worktree remove .claude/worktrees/agent-<agentId> --force 2>/dev/null || true
+git worktree list --porcelain | awk '/^worktree /{print $2}' > "$IDS.wt"
+: > "$IDS.targets"
+while read -r id _rest; do
+  [ -n "$id" ] || continue
+  while read -r wt; do
+    case "$wt" in *"agent-$id"*) printf '%s\n' "$wt" >> "$IDS.targets" ;; esac
+  done < "$IDS.wt"
+done < "$IDS"
+
+sort -u "$IDS.targets" | awk '{print length, $0}' | sort -rn | cut -d' ' -f2- |
+while read -r wt; do
+  git worktree remove "$wt" --force --force 2>/dev/null || true
+done
 git worktree prune
 ```
 
-If stale worktrees accumulate, check with `git worktree list` and remove individually with `git worktree remove`.
+Three things in it are load-bearing; all three were verified on 2026-09-17 after a nested
+`/orchestrate` run left a 110 MB unregistered husk on disk:
+
+1. **Never construct `.claude/worktrees/agent-<id>` from an ID.** A sub-agent launched by another
+   sub-agent nests under its parent, so the top-level path does not exist and the remove silently
+   no-ops behind `2>/dev/null || true`. Resolve real paths from `git worktree list` and remove
+   deepest first, so a child is unregistered before its parent's directory disappears.
+2. **`--force --force`, not `--force`.** A single `--force` fails with exit 128 on a *locked*
+   worktree (`cannot remove a locked working tree`), which an agent that is still registered
+   leaves behind. `git worktree unlock` first is the equivalent alternative.
+3. **Never select the paths with `grep -F -f <id-file>`.** The `grep` on this machine is **ugrep**,
+   and with an empty pattern file it matches *every* line — an empty ID list would then delete
+   other sessions' worktrees. The `case` loop above selects nothing when the list is empty.
+
+If stale worktrees accumulate, check with `git worktree list` and remove individually with
+`git worktree remove <path> --force --force`. An *unregistered* leftover directory (present on
+disk, absent from `git worktree list`) can only be removed with `rm` — ask the user rather than
+running it from an unattended session.
 
 ## Permission Policy (`.claude/settings.json`)
 

@@ -97,6 +97,16 @@ After reporting results, delete **only the worktree of the sub-agent launched in
 Use the agent ID from the Task tool return value and run:
 
 ```bash
-git worktree remove .claude/worktrees/agent-<agentId> --force 2>/dev/null || true
+git worktree list --porcelain | awk '/^worktree /{print $2}' |
+  while read -r wt; do
+    case "$wt" in *"agent-<agentId>"*) git worktree remove "$wt" --force --force 2>/dev/null || true ;; esac
+  done
 git worktree prune
 ```
+
+> Use the canonical cleanup snippet in `CLAUDE.md` → **Agent Isolation Strategy → Worktree
+> Cleanup**. Do not construct `.claude/worktrees/agent-<id>` from an ID (a nested sub-agent's
+> worktree lives inside its parent's, so the path does not exist and the remove silently
+> no-ops), use `--force --force` (a single `--force` fails on a locked worktree), and never
+> select paths with `grep -F -f` (this machine's `grep` is ugrep: an empty pattern file matches
+> every line).
