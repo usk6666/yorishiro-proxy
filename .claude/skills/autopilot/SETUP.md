@@ -48,7 +48,10 @@ Linear 側のラベル（`autopilot`, `autopilot:skip`, `autopilot:needs-decisio
 ### 1-3. ローカル環境の確認
 
 - `golangci-lint version --short` が `.golangci-lint-version` と一致すること（不一致だと毎回 ABORTED）
-- `gh auth status` が OK、`pnpm` / `go` が PATH にあること
+- `ghtkn info --log-level warn | jq -r '.agent.running, .agent.locked'` が `true` / `false` であること
+  （`gh` は呼び出しごとに `ghtkn get` でトークンを取る alias なので、agent が停止・ロック中だと
+  `gh auth status` が**失敗ではなくハング**します。Phase 0 はこれを `gh auth status` より先に見ます）
+- `gh auth status` が OK、`pnpm` / `go` / `jq` が PATH にあること
 - Claude Code の Linear MCP（`.mcp.json` の `linear-server`）が認証済みであること
 - Desktop の **Settings → Desktop app → General → Keep computer awake** を ON
   （スリープ中の回は skip され、復帰時に 1 回だけ catch-up 実行されます）
@@ -108,7 +111,8 @@ Desktop の **Code タブ → Routines → New routine → Local**
 - autopilot が反応するレビューコメントは **`usk6666` のものだけ**です（公開リポジトリでの第三者コメントによるプロンプトインジェクション対策）。
 - PR のマージで後続 Issue の依存が解決します。autopilot は **In Review の依存を満たしたとみなさない**（スタック PR を作らない）ので、マージが滞ると新規着手も止まります。
 - 1 回の実行で新規 Issue は 1 件まで、オープンな autopilot PR は 3 件まで（WIP 制限）。調整は `SKILL.md` の Run Configuration で。
-- review-gate は sub-agent に委譲され、レビュー本文はそちらの context に留まります。本体に戻るのは判定と PR に貼るレポート表だけなので、実行レポートにレビューの全文は出ません（PR のコメントを見てください）。
+- review-gate・PR トリアージ（Phase 2-1）・Issue 選定（Phase 3-3）は sub-agent に委譲され、生ログやレビュー本文はそちらの context に留まります。本体に戻るのは判定と PR に貼るレポート表だけなので、実行レポートにレビューの全文は出ません（PR のコメントを見てください）。
+- ラベルを書き換えたり Issue を claim するのは常に本体です。委譲先は報告するだけで、書き込みは一箇所に集約されています（クラッシュ時の回収を成立させるため）。
 - `.github/`・`.claude/`・`CLAUDE.md`・`Makefile` 等を変更する Issue（例: M51 の CI 系）は自動で `needs-human` になります。
 
 ## 3. トラブルシュート
@@ -116,7 +120,7 @@ Desktop の **Code タブ → Routines → New routine → Local**
 | 症状 | 確認ポイント |
 |---|---|
 | レポートが `ABORTED` | Phase 0 のどのチェックか。多いのは golangci-lint のバージョン不一致、Linear MCP の再認証 |
-| セッションが止まっている | 許可プロンプト待ち。承認して「Always allow」。`ask` リストのコマンドを使っていたらスキルの不具合なので報告 |
+| セッションが止まっている | まず ghtkn。agent がロック/停止中だと最初の `gh` で入力待ちになります（`ghtkn auth` は対話必須なので人間が実行）。そうでなければ許可プロンプト待ち — 承認して「Always allow」。`ask` リストのコマンドを使っていたらスキルの不具合なので報告 |
 | 実行されない | PC スリープ / アプリ終了 / 前回実行がまだ継続中（重複実行は自動 skip） |
 | `.claude/worktrees/agent-*` が増える | レポートの Health 欄に件数が出ます。Phase 6-1 は `~/.claude/autopilot-runs/<RUN_ID>.agents`（agent ledger）を読んで消すので、残っている場合はその ledger と `git worktree list` を突き合わせる。入れ子 worktree は親の中（`agent-<親>/.claude/worktrees/agent-<子>`）にあるので、トップレベルだけ見ても見つからない |
 | 同じ Issue で何度も失敗 | 2 回目で `autopilot:retried` → `needs-human` に自動エスカレーションされます |

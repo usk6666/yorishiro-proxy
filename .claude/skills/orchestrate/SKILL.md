@@ -187,7 +187,7 @@ Task(
 | `{{PACKAGES_TO_SURVEY}}` | Packages the Issue creates, modifies, or depends on |
 | `{{COMPLETED_CONTEXT}}` | The `{{DEPENDENCY_CONTEXT}}` you already built in Phase 1 (outputs of completed dependency Issues — types, interfaces, file paths) |
 | `{{PRODUCT_IDENTITY}}` | Read from `.claude/skills/review-gate/SKILL.md` Phase 1-4 "Product context" block — single source of truth |
-| `{{PRINCIPLES}}` | The 6 MITM Implementation Principles from `CLAUDE.md` (quoted verbatim) |
+| `{{PRINCIPLES}}` | The **MITM Implementation Principles** list from `CLAUDE.md`, quoted verbatim — all items, not a fixed count (the list grows; do not hardcode a number here) |
 
 **Concurrency**: same cap as the implementer batch (max 3 from Notes). If the upcoming batch
 has more than 3 Issues, run design reviews in sub-batches matching the implementer parallel
