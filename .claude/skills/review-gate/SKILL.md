@@ -324,15 +324,18 @@ do not bulk-delete.
 1. Record agent IDs from each Task call in Phases 2 through 4
 2. Run the following for each recorded agent ID:
 
-```bash
-git worktree remove .claude/worktrees/agent-<agentId> --force 2>/dev/null || true
-```
+Write those IDs one per line to a file and run the canonical cleanup snippet against it.
 
-3. Clean up metadata after all deletions:
+> Use the canonical cleanup snippet in `CLAUDE.md` → **Agent Isolation Strategy → Worktree
+> Cleanup**. Do not construct `.claude/worktrees/agent-<id>` from an ID (a nested sub-agent's
+> worktree lives inside its parent's, so the path does not exist and the remove silently
+> no-ops), use `--force --force` (a single `--force` fails on a locked worktree), and never
+> select paths with `grep -F -f` (this machine's `grep` is ugrep: an empty pattern file matches
+> every line).
 
-```bash
-git worktree prune
-```
+3. When this skill runs as a **delegated agent** (from `/orchestrate` 2.5 or `/autopilot` Phase 5),
+   clean up your own reviewers and fixers here, before returning, and still report every ID in
+   `agent_ids`. The caller treats that list as a fallback, not as your cleanup.
 
 Note: When called from `/orchestrate`, bulk deletion happens in Phase 3-3, so there may be duplication,
 but it is idempotent so no problem. This effectively functions only when `/review-gate` is run standalone.
