@@ -283,13 +283,33 @@ All GPL variants (GPL-2.0, GPL-3.0, LGPL-2.1, LGPL-3.0, AGPL-3.0)
 
 ### Approved Dependencies
 
-- `github.com/modelcontextprotocol/go-sdk` — Official MCP Go SDK
-- `modernc.org/sqlite` — Pure Go SQLite driver (BSD-3-Clause)
-- `github.com/google/uuid` — UUID generation (Apache-2.0)
-- `golang.org/x/sync` — Concurrency control utilities such as singleflight (BSD-3-Clause)
-- `go.starlark.net` — Starlark script engine (BSD-3-Clause)
+Every module in the `require` block of `go.mod`, with the licence taken from the module's own
+`LICENSE` file rather than from a package index. Indirect dependencies are governed by the same
+policy but are deliberately not enumerated — `/license-check` walks the whole graph on every run.
 
-When adding new external dependencies, verify the license with the `/license-check` skill.
+| Module | License | Why it is here |
+|--------|---------|----------------|
+| `github.com/modelcontextprotocol/go-sdk` | Apache-2.0 | Official MCP Go SDK. Its `LICENSE` opens with the MCP project's MIT → Apache-2.0 transition notice, so contributions whose authors have not consented to relicensing are still MIT. Both are Allowed. |
+| `modernc.org/sqlite` | BSD-3-Clause | Pure Go SQLite driver behind the Stream / Flow Store |
+| `github.com/google/uuid` | BSD-3-Clause | StreamID / FlowID generation |
+| `golang.org/x/sync` | BSD-3-Clause | `errgroup` / `singleflight` |
+| `go.starlark.net` | BSD-3-Clause | Starlark engine for `internal/pluginv2` |
+| `golang.org/x/net` | BSD-3-Clause | `http2` / `hpack` / `h2c` / `proxy` primitives used by the HTTP/2 data path |
+| `github.com/refraction-networking/utls` | BSD-3-Clause | uTLS ClientHello fingerprinting (`internal/layer/tlslayer`, `internal/connector/transport`) |
+| `github.com/andybalholm/brotli` | MIT | Brotli body decode (`internal/bodydecode`) |
+| `github.com/klauspost/compress` | Apache-2.0 | zstd / s2 body decode and protobuf framing compression |
+| `golang.org/x/time` | BSD-3-Clause | Rate limiting in `internal/connector/ratelimit.go` |
+| `google.golang.org/grpc` | Apache-2.0 | Server-reflection client and the MCP-side gRPC resend / fuzz helpers. **Not** in the proxy data path — gRPC on the wire is parsed natively (see "No external proxy libraries"). |
+| `google.golang.org/protobuf` | BSD-3-Clause | Descriptor / reflection handling in `internal/encoding/protoschema` |
+| `go.uber.org/goleak` | MIT | Goroutine-leak assertions. Test-only — absent from `go list -deps ./cmd/yorishiro-proxy`, so it is never shipped. |
+
+The Web UI's production npm dependencies are in scope as well, because `make build-ui` bundles them
+into `internal/mcp/webui/dist/`; they are declared in `web/package.json` and audited by the same
+skill. `web/`'s `devDependencies` are build-time-only tooling and fall under the Scope exemption
+above — confirm a package really does not reach `dist/` before relying on that.
+
+When adding a new module to `go.mod` or to `web/package.json`'s `dependencies`, verify the license
+with the `/license-check` skill, and add a row here for a direct Go dependency.
 
 ## Supply Chain Risk Policy
 
