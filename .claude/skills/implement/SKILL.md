@@ -20,15 +20,15 @@ An end-to-end workflow skill for implementing a Linear Issue through to PR creat
    - fix: `fix/<id>-<short-desc>`
    - other: `chore/<id>-<short-desc>`
 4. **Design review** (mandatory for any Issue that introduces a new public type, modifies an interface, or touches more than one package; **skip for** docstring-only / test-only / single-call-site fixes — note the skip reason in the user-facing plan): launch the design-reviewer agent. See "Design Review Invocation" below.
-5. **Present plan to user**: Issue summary, file actions (new / modified / untouched), key resolved decisions from the design review, deferred items, unresolved questions. Get user confirmation before implementing. For trivial Issues that skipped Step 4, present a one-paragraph plan instead.
-6. **Implement**: Implement code based on the plan
-7. **Write tests**: Write tests for the implementation
+5. **Present plan to user**: Issue summary, file actions (new / modified / untouched), key resolved decisions from the design review, the **Test Plan** (the failing tests that will be written first), deferred items, unresolved questions. Get user confirmation before implementing. For trivial Issues that skipped Step 4, present a one-paragraph plan that still names the failing test(s) to write first, or the TDD exemption that applies.
+6. **Red — write failing tests first**: Follow "TDD Workflow" Phase 1 in `.claude/agents/implementer.md` (it is the single source for the rules and exemptions). Write the tests plus compile-only scaffolding, run them with `make test-pkg PKG=<pkg> RUN=<regexp>`, confirm each fails on its assertion (not a compile error or `no tests to run`), and commit them alone as `test(<scope>): add failing tests for <Issue ID>`. Keep the `--- FAIL:` lines for the PR body.
+7. **Green, then refactor**: Implement until the Phase 1 tests pass, without weakening any Phase 1 assertion (implementer.md Phase 2), then refactor.
 8. **Verify**:
    - Auto-format with `gofmt -w .`
    - `make lint` (gofmt check + golangci-lint: govet / staticcheck / unused / ineffassign / gocyclo)
    - `make build`
    - `make test`
-9. **Commit**: Commit in Conventional Commits format
+9. **Commit**: Commit in Conventional Commits format, as a separate commit after the Step 6 red commit (do not amend or squash them together)
    - Include `Refs: <Issue ID>` in the commit message footer
 10. **Push**: Push to remote with `git push -u origin <branch-name>`
 11. **Create PR**:
@@ -74,6 +74,14 @@ Process the result:
 
 ## Test plan
 - [ ] Test items
+
+## TDD evidence
+- Red commit: <sha> (or: exempt — <reason>)
+- Failing output at the red commit:
+  ```
+  --- FAIL: TestX_Scenario ... <assertion message>
+  ```
+- Phase 1 test changes after the red commit: none (or: <commit> — <why>)
 
 Resolves <Issue ID>
 Linear: https://linear.app/usk6666/issue/<Issue ID>

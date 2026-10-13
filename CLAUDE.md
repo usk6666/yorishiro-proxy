@@ -151,6 +151,8 @@ make build-ui       # Build the React/Vite app in web/ and generate dist/
 make ensure-ui      # Run build-ui only if dist/ does not exist (lightweight)
 make test           # fast tier: ensure-ui → go test -race -v ./... (unit tests only)
 make test-fast      # alias for `make test`; explicit naming for the fast tier (USK-728)
+make test-pkg PKG=./internal/<pkg>/... [RUN=<regexp>] [TAGS=e2e]
+                    # one package/pattern only — the TDD red/green loop
 make test-e2e-smoke # smoke tier (merge gate): ensure-ui → go test -race -v -tags 'e2e e2e_smoke' ./...
 make test-e2e       # full tier (nightly): ensure-ui → go test -race -v -tags e2e ./...
 make test-cover     # ensure-ui → test with coverage report
@@ -339,6 +341,21 @@ Dependabot alerts are module-level and carry no reachability analysis. Before tr
 5. `/review-gate` — Run Code Review + Security Review in parallel for a PR. If issues found, auto-fix → re-review (up to 2 rounds)
 6. `/project sync` — Update roadmap documents after implementation is complete
 7. `/autopilot` — Unattended variant of `/orchestrate` for scheduled runs (Desktop local scheduled task). One Issue per run through to a review-gated PR; never merges. See `.claude/skills/autopilot/SETUP.md`
+
+### Test-Driven Development
+
+Implementation is test-first across `/implement`, `/orchestrate` and `/autopilot`; the rules live
+in one place, "TDD Workflow" in `.claude/agents/implementer.md`. In short:
+
+- `milestone-planner` writes acceptance criteria as behaviors a test can observe;
+  `design-reviewer` turns them into a **Test Plan** (behavior / real seam / fixture source / tier / expected red).
+- The implementer commits the failing tests **alone first** (`test(<scope>): add failing tests for <ID>`),
+  having seen each fail on its assertion via `make test-pkg`, then implements without weakening them.
+  The PR body carries a "TDD evidence" section. Squash merge keeps the red commit off `main`.
+- `code-reviewer` re-runs the red commit, diffs `*_test.go` from red to HEAD for weakening, and
+  falls back to a mutation check when red evidence is missing.
+- Exempt: docs/CI-only, renames, behavior-preserving refactors (existing or characterization tests
+  must pass first), and test-only Issues (prove each test can fail by local mutation instead).
 
 > **Note**: `/implement` assumes single-session, solo execution. Use `/orchestrate` for parallel implementation of multiple Issues, and `/autopilot` only from a scheduled (unattended) session.
 

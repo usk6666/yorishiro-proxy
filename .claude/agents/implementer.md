@@ -56,6 +56,9 @@ decisions.
 If the design review was skipped (you will see a one-line skip notice), implement directly
 per the Issue description while still adhering to CLAUDE.md conventions.
 
+If the findings include a **Test Plan**, it is the list of failing tests you write in TDD
+Phase 1 below. You may add tests to it; do not drop one without saying why in the PR body.
+
 ## First Steps
 
 1. Read `CLAUDE.md` at the project root to understand coding conventions and architecture
@@ -98,6 +101,64 @@ git checkout -b {{BRANCH_NAME}} main
 - Do not swallow errors. Always handle them or return to the caller
 - Define sentinel errors or custom error types only when necessary
 - Wrap errors so they can be checked with `errors.Is` / `errors.As`
+
+## TDD Workflow (mandatory)
+
+This project develops test-first. The point is not ceremony: a test that has never been seen
+failing has not been shown to detect anything. Tests written after the implementation tend to
+be fitted to it, drive a simulated producer instead of the real one, or use fixtures in a shape
+the real API never returns — every one of those has let a real bug through here before.
+
+Work in three phases, with the first phase committed on its own.
+
+### Phase 1 — Red: failing tests first
+
+1. From the Issue's acceptance criteria and the design review's Test Plan, write the tests
+   **before** any production code. Each test states one behavior the Issue requires.
+2. Drive the **real** code path: call the real producer/entry point, not a hand-built terminal
+   state. Build fixtures from a shape the real wire/API produces (cite where you took it from).
+   For MITM data-path behavior, assert recording outcomes (Stream/Flow/raw bytes), not merely
+   that bytes flowed.
+3. Add only the minimum production scaffolding needed to **compile** (new type, function stub
+   returning zero values / `errors.New("not implemented")`). No behavior.
+4. Run the targeted tests and confirm they fail **for the reason the test describes** — an
+   assertion failure, not a compile error, panic in setup, or `no tests to run`:
+   ```bash
+   make test-pkg PKG=./internal/<pkg>/... RUN='TestName_Scenario|TestOther'
+   # e2e test? add TAGS=e2e
+   ```
+   Check the output names each new test under `--- FAIL:`. If a test passes already, either the
+   behavior exists (re-read the Issue premise and report it) or the test does not test it.
+5. Commit only the tests and the scaffolding:
+   ```
+   test(<scope>): add failing tests for {{ISSUE_ID}}
+
+   Refs: {{ISSUE_ID}}
+   ```
+   Save the trimmed `--- FAIL:` lines (test name + assertion message) for the PR body.
+
+**Exempt from Phase 1** (state the exemption in the PR body under "TDD evidence"):
+- docs-only, comment-only, CI/workflow-only, or pure rename changes
+- behavior-preserving refactors — instead, confirm the existing tests covering the touched code
+  pass **before** you change it; if none cover it, first commit characterization tests that pin
+  today's behavior (these pass, and that is the point)
+- test-only Issues (e.g. adding e2e coverage) — instead, prove each new test can fail: break the
+  behavior it covers locally (mutation), see it fail, revert the mutation, and report it
+
+### Phase 2 — Green: implement until the tests pass
+
+- Write the production code to make the Phase 1 tests pass. Re-run `make test-pkg` as you go.
+- **Do not weaken, delete, or rewrite a Phase 1 assertion to make it pass.** If a Phase 1 test
+  was genuinely wrong (it encoded a misreading of the Issue), fix it in a separate commit
+  `test(<scope>): correct <test> expectation` and explain why in the PR body. Reviewers diff the
+  test files between the Phase 1 commit and HEAD and treat unexplained weakening as HIGH.
+- If the implementation reveals behavior the Issue needs but Phase 1 did not cover, write that
+  test first, see it fail, then make it pass.
+
+### Phase 3 — Refactor
+
+With everything green, clean up production and test code without changing behavior, then run
+the full verification below.
 
 ## Test Requirements
 
@@ -163,7 +224,7 @@ func TestFunctionName_Scenario(t *testing.T) {
 
 ## Verification Steps
 
-After writing all code, run the following in order and confirm everything passes:
+After Phase 3, run the following in order and confirm everything passes:
 
 ```bash
 gofmt -w .
@@ -202,6 +263,10 @@ Commit steps:
 2. Create commit with `git commit`
 3. Push to remote with `git push -u origin {{BRANCH_NAME}}`
 
+Keep the Phase 1 `test(...)` commit separate from the implementation commit(s) — do not squash
+or amend them together. The PR is squash-merged, so the red commit never lands on `main`; it
+exists so reviewers can check out the red state and re-run it.
+
 ## PR Creation
 
 Create a Pull Request with `gh pr create`:
@@ -217,6 +282,14 @@ Create a Pull Request with `gh pr create`:
 ## Test plan
 - [ ] Test items
 
+## TDD evidence
+- Red commit: <sha of the Phase 1 test commit> (or: exempt — <reason>)
+- Failing output at the red commit:
+  ```
+  --- FAIL: TestX_Scenario ... <assertion message>
+  ```
+- Phase 1 test changes after the red commit: none (or: <commit> — <why the expectation was wrong>)
+
 Resolves {{ISSUE_ID}}
 Linear: https://linear.app/usk6666/issue/{{ISSUE_ID}}
 
@@ -228,7 +301,9 @@ Linear: https://linear.app/usk6666/issue/{{ISSUE_ID}}
 Confirm the following before completing implementation:
 
 - [ ] All Issue requirements are satisfied
-- [ ] Tests are written for new code
+- [ ] Failing tests were committed first and observed failing for the stated reason (or the exemption is stated)
+- [ ] No Phase 1 assertion was weakened; any corrected expectation has its own commit and explanation
+- [ ] The PR body has the "TDD evidence" section
 - [ ] `make lint` passes completely (gofmt check + golangci-lint: govet, staticcheck, unused, ineffassign, gocyclo)
 - [ ] `make build` succeeds
 - [ ] `make test` passes completely
@@ -244,7 +319,7 @@ After completing the work, report the following as the final message:
 
 1. **Implementation Summary**: Overview of what was implemented
 2. **Created/Modified File List**: Paths and roles of each file
-3. **Test Summary**: Test count, coverage information
+3. **Test Summary**: Test count, coverage information, red commit SHA and the tests it showed failing
 4. **PR URL**: URL of the created PR
 5. **Notes**: Points to focus on during review, known limitations
 
