@@ -73,7 +73,31 @@ Review the PR from the following perspectives. If issues are found for any persp
 - Compatibility with `-race` flag (no data races)
 - `t.Helper()` in test helpers
 
-### 5. Code Health
+### 5. TDD Evidence
+
+The project develops test-first (`.claude/agents/implementer.md` "TDD Workflow"). Verify the
+evidence rather than trusting the PR body — this is the only check that a new test can fail.
+
+1. Read the PR body's "TDD evidence" section and list the PR commits:
+   `gh pr view {{PR_NUMBER}} --json body,commits`.
+2. **Red commit exists** (unless a stated exemption applies — docs/CI-only, rename,
+   behavior-preserving refactor, test-only Issue): check it out in your worktree
+   (`gh pr checkout {{PR_NUMBER}}` then `git checkout <red-sha>`), run the listed tests with
+   `make test-pkg PKG=<pkg> RUN=<regexp>` (add `TAGS=e2e` for e2e files), and confirm each fails
+   on an **assertion** — not a compile error, setup panic, or `no tests to run`. Return to the
+   PR head (`git checkout -`) before reading further.
+3. **No weakening**: `git diff <red-sha> HEAD -- '*_test.go'` must only add tests. A loosened,
+   deleted, or rewritten Phase 1 assertion without its own `test(...): correct ...` commit and a
+   PR-body explanation is **HIGH**.
+4. **Tests drive the real path**: a test that constructs the end state directly instead of
+   calling the producer, or whose fixture uses a shape the real API/wire never produces, is
+   **HIGH** when it is the only test covering an acceptance criterion.
+5. Red evidence missing with no exemption → **MEDIUM**, and run a mutation check yourself:
+   revert the core behavior change locally (do not commit), run the new tests, and restore.
+   If they still pass, the tests do not cover the change → **HIGH**.
+6. For exempt PRs, check the exemption is genuine (a "refactor" that changes behavior is not).
+
+### 6. Code Health
 
 - No dead code, unused variables, or unused imports
 - Resource leaks (file handles, connections, goroutine `defer Close`)
@@ -102,7 +126,7 @@ FINDINGS:
     Severity: CRITICAL | HIGH | MEDIUM | LOW | NIT
     File: <file path>
     Line: <line number or range>
-    Category: Correctness | GoConventions | Architecture | TestQuality | CodeHealth
+    Category: Correctness | GoConventions | Architecture | TestQuality | TDDEvidence | CodeHealth
     Description: <description of the problem>
     Suggestion: <fix suggestion>
 
@@ -192,7 +216,7 @@ gh api repos/{owner}/{repo}/pulls/{{PR_NUMBER}}/comments \
 
 ## Important Constraints
 
-- **Read-only**: Do not make any code changes, commits, or pushes
+- **Read-only**: Do not make any code changes, commits, or pushes (checking out the red commit and a local, uncommitted mutation check for §5 are allowed; restore the PR head afterwards)
 - **Scoped**: Only review files included in the PR diff
 - **Constructive**: Always include specific fix suggestions, not just problem descriptions
 - **Objective**: Base on project conventions and Go best practices, not personal preference

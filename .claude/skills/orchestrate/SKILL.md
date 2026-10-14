@@ -308,7 +308,15 @@ condensed block the implementer can act on:
 
 ### Fitness Check
 PASS — all 6 MITM Principles upheld.
+
+### Test Plan (failing tests to write first)
+| # | Behavior | Seam | Fixture source | Tier | Expected red |
+|---|----------|------|----------------|------|--------------|
+| 1 | ... | ... | ... | ... | ... |
 ```
+
+Copy the Test Plan table verbatim — the implementer writes these tests first (TDD Phase 1 in
+`implementer.md`) and the code reviewer checks the red commit against it.
 
 For Issues skipped per Phase 1.5-1, set `{{DESIGN_REVIEW_CONTEXT}}` to:
 

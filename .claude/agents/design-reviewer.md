@@ -119,6 +119,28 @@ For each principle, verify:
 
 Flag any fitness failures — these may require scope adjustment.
 
+### Step 4.5: Test Plan (Issue scope only — skip at milestone scope)
+
+The implementer works test-first: it writes these tests, commits them, and must see them fail
+before writing production code. Design the tests now, while the boundary survey is fresh.
+
+For each acceptance criterion / resolved behavior, specify one test:
+
+- **Behavior** — one sentence, observable from outside the unit ("a duplicate `Set-Cookie`
+  with different casing is recorded as two headers in wire order").
+- **Seam** — the real entry point the test drives (function / Layer / listener / MCP tool),
+  taken from the boundary survey. Never a hand-constructed terminal state that skips the
+  producer: a test that calls the end state directly proves nothing about reachability.
+- **Fixture source** — where the input shape comes from (RFC example, an existing recorded
+  payload, a sibling test that already uses the real shape). Flag any fixture you had to invent.
+- **Tier** — unit (`make test`) / smoke e2e (`//go:build e2e`) / exhaustive e2e
+  (`//go:build e2e && !e2e_smoke`), per CLAUDE.md.
+- **Expected red** — what the failure looks like before implementation (which assertion fails
+  and why). If you cannot say why it would fail today, the behavior may already exist — check,
+  and report it as a premise problem.
+
+For a bug fix, the first test must reproduce the reported failure through the real path.
+
 ### Step 5: Report
 
 Return a structured report in this exact format:
@@ -149,6 +171,11 @@ DESIGN_REVIEW_RESULT:
 | Principle | Status | Notes |
 |-----------|--------|-------|
 | ... | PASS / FAIL / N/A | ... |
+
+## Test Plan (Issue scope only)
+| # | Behavior | Seam | Fixture source | Tier | Expected red |
+|---|----------|------|----------------|------|--------------|
+| 1 | ... | ... | ... | unit / smoke / exhaustive | ... |
 
 ## Scope Adjustment Recommendations (if any)
 <only if fitness check revealed issues>

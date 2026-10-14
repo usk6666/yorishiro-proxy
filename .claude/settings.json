@@ -115,6 +115,7 @@
       "Bash(make test-e2e)",
       "Bash(make test-e2e-smoke)",
       "Bash(make test-fast)",
+      "Bash(make test-pkg:*)",
       "Bash(make test-ui)",
       "Bash(make vet)",
 

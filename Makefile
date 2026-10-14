@@ -19,7 +19,7 @@ LDFLAGS := -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.date=$(DA
 # `make clean` still works when the file is broken.
 GOLANGCI_LINT_VERSION := $(shell cat .golangci-lint-version 2>/dev/null)
 
-.PHONY: build build-ui ensure-ui dev-ui test test-fast test-ui test-e2e test-e2e-smoke test-cover vet lint fmt clean bench bench-compare
+.PHONY: build build-ui ensure-ui dev-ui test test-fast test-pkg test-ui test-e2e test-e2e-smoke test-cover vet lint fmt clean bench bench-compare
 
 build: build-ui vet
 	go build -ldflags "$(LDFLAGS)" -o $(BINDIR)/$(BINARY) ./cmd/yorishiro-proxy
@@ -43,6 +43,20 @@ test: ensure-ui
 # test-fast is an alias for `test` to make the 3-tier naming (fast/smoke/full)
 # explicit at the call site (see USK-728).
 test-fast: test
+
+# test-pkg runs a single package (or package pattern) for the TDD red/green
+# loop, so a failing test can be observed without the full 4-minute tier.
+#   make test-pkg PKG=./internal/layer/http1/... [RUN='TestFoo|TestBar'] [TAGS=e2e]
+# The values reach go test through the environment rather than recipe text,
+# so shell metacharacters in them are never executed, and a PKG word that
+# starts with `-` is rejected so it cannot smuggle in a go test flag (-exec).
+test-pkg: export PKG := $(PKG)
+test-pkg: export RUN := $(RUN)
+test-pkg: export TAGS := $(TAGS)
+test-pkg: ensure-ui
+	@if [ -z "$$PKG" ]; then echo "usage: make test-pkg PKG=./internal/<pkg>/... [RUN=<regexp>] [TAGS=<build tags>]" >&2; exit 2; fi
+	@for p in $$PKG; do case "$$p" in -*) echo "test-pkg: PKG must list packages, not flags: $$p" >&2; exit 2;; esac; done
+	GODEBUG=http2xconnect=1 go test -race -v -timeout 10m -tags "$$TAGS" -run "$$RUN" $$PKG
 
 # test-e2e-smoke is the merge-gate tier: M46 harness scenarios (USK-722–USK-727)
 # plus a representative subset of connector / layer e2e tests covering each

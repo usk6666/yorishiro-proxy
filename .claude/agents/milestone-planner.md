@@ -80,7 +80,10 @@ Using the survey results and design review output, break the milestone into issu
 - Scope: which files to create, modify, or copy
 - Dependencies: which issues must complete first
 - Key design decisions from Step 2 that apply to this issue
-- Acceptance criteria (what "done" looks like)
+- Acceptance criteria (what "done" looks like), each phrased as a behavior a test can observe
+  (Given / When / Then, or "input X through seam Y is recorded as Z") — the implementer writes
+  these as failing tests first, so a criterion no test can check ("works correctly", "is robust")
+  must be rewritten or dropped
 - Priority: Urgent (blocker for others) / High (on critical path) / Medium (parallelizable) / Low (cleanup/docs)
 
 ### Step 4: Report
@@ -111,8 +114,8 @@ MILESTONE_PLAN_RESULT:
 - **Scope**: <files to create/modify/copy>
 - **Dependencies**: None / Issue N
 - **Design decisions**: <which resolved decisions from Step 2 apply>
-- **Acceptance criteria**:
-  - [ ] ...
+- **Acceptance criteria** (testable behaviors; note the tier — unit / smoke / exhaustive):
+  - [ ] Given ..., when ..., then ... (unit)
   - [ ] ...
 
 #### Issue 2: <title>

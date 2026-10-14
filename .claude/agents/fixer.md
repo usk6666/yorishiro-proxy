@@ -77,6 +77,13 @@ Fix findings in this order:
 - **Avoid new problems**: Do not introduce new bugs or security issues with fixes
 - **Update tests**: If fixes require test updates, always update them
 - **Preserve existing tests**: Do not break existing tests
+- **Never weaken a test to make it pass**: do not loosen, delete, or rewrite an assertion to get
+  green. If the assertion itself is wrong, fix it in its own `test(...): correct ...` commit and
+  explain why in your report
+- **Test-first for correctness fixes**: for a Correctness / TDDEvidence finding, first add a
+  test that fails on the current PR head (run it with `make test-pkg PKG=<pkg> RUN=<regexp>` and
+  see the assertion fail), commit it, then fix. Report the failing output in your summary so it
+  can be appended to the PR body's "TDD evidence" section
 - **No refactoring**: Do not refactor code unrelated to the findings
 
 ### MITM Design Principle Guardrail
