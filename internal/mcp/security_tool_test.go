@@ -1446,34 +1446,9 @@ func TestValidateTargetRules(t *testing.T) {
 	}
 }
 
-func TestValidateHostname(t *testing.T) {
-	tests := []struct {
-		name     string
-		hostname string
-		wantErr  bool
-	}{
-		{"simple domain", "example.com", false},
-		{"subdomain", "sub.example.com", false},
-		{"wildcard", "*.example.com", false},
-		{"ipv4", "10.0.0.1", false},
-		{"ipv6 bracket", "[2001:db8::1]", false},
-		{"trailing dot", "example.com.", true},
-		{"wildcard trailing dot", "*.example.com.", true},
-		{"empty wildcard domain", "*.", true},
-		{"double dot", "example..com", true},
-		{"underscore rejected", "test_host.com", true},
-		{"label too long", strings.Repeat("a", 64) + ".com", true},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			err := validateHostname(tt.hostname)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("validateHostname(%q) error = %v, wantErr %v", tt.hostname, err, tt.wantErr)
-			}
-		})
-	}
-}
+// Hostname-form rows formerly in TestValidateHostname moved to
+// internal/config TestValidateTargetRule when the per-rule core moved there
+// (USK-1084); underscore labels flipped to accepted there.
 
 func TestToTargetRules(t *testing.T) {
 	inputs := []targetRuleInput{
@@ -1681,6 +1656,80 @@ func TestTargetRuleMatchesLocal(t *testing.T) {
 			got := targetRuleMatchesLocal(tt.a, tt.b)
 			if got != tt.want {
 				t.Errorf("targetRuleMatchesLocal() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestSecurity_SetTargetScope_AcceptsBareIPv6AndUnderscore is USK-1084 T10:
+// the Agent layer now delegates per-rule syntax to the shared config core,
+// which accepts bare IPv6 literals and underscore labels because the data
+// path matches them (gates pass hosts unbracketed via net.SplitHostPort /
+// url.Hostname). Widening only — the rule must also enforce.
+func TestSecurity_SetTargetScope_AcceptsBareIPv6AndUnderscore(t *testing.T) {
+	ts := connector.NewTargetScope()
+	cs := setupSecurityTestSession(t, ts)
+
+	result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "security",
+		Arguments: securityMarshal(t, securityInput{
+			Action: "set_target_scope",
+			Params: securityParams{
+				Denies: []targetRuleInput{
+					{Hostname: "fd00:ec2::254"},
+					{Hostname: "db_primary"},
+				},
+			},
+		}),
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("set_target_scope rejected bare IPv6 / underscore: %s", extractTextContent(result))
+	}
+	if allowed, _ := ts.CheckTarget("http", "fd00:ec2::254", 80, ""); allowed {
+		t.Error("CheckTarget(fd00:ec2::254) allowed, want blocked by agent deny")
+	}
+	if allowed, _ := ts.CheckTarget("http", "db_primary", 5432, ""); allowed {
+		t.Error("CheckTarget(db_primary) allowed, want blocked by agent deny")
+	}
+}
+
+// TestSecurity_SetTargetScope_KeepsAgentErrorWording guards that delegation
+// to the config core keeps the Agent layer's "<kind> rule <i>: ..." wording.
+func TestSecurity_SetTargetScope_KeepsAgentErrorWording(t *testing.T) {
+	tests := []struct {
+		name   string
+		params securityParams
+		want   string
+	}{
+		{"ftp scheme", securityParams{Allows: []targetRuleInput{{Hostname: "example.com", Schemes: []string{"ftp"}}}},
+			`allows rule 0: scheme "ftp" is not allowed (use http or https)`},
+		{"javascript scheme", securityParams{Denies: []targetRuleInput{{Hostname: "ok.com"}, {Hostname: "example.com", Schemes: []string{"javascript"}}}},
+			`denies rule 1: scheme "javascript" is not allowed (use http or https)`},
+		{"port out of range", securityParams{Allows: []targetRuleInput{{Hostname: "example.com", Ports: []int{0}}}},
+			"allows rule 0: port 0 is out of range (1-65535)"},
+		{"empty hostname", securityParams{Allows: []targetRuleInput{{Hostname: ""}}},
+			"allows rule 0: hostname is required"},
+		{"trailing dot", securityParams{Allows: []targetRuleInput{{Hostname: "example.com."}}},
+			`allows rule 0: hostname "example.com.": trailing dot is not allowed`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cs := setupSecurityTestSession(t, connector.NewTargetScope())
+			result, err := cs.CallTool(context.Background(), &gomcp.CallToolParams{
+				Name:      "security",
+				Arguments: securityMarshal(t, securityInput{Action: "set_target_scope", Params: tc.params}),
+			})
+			if err != nil {
+				t.Fatalf("CallTool: %v", err)
+			}
+			if !result.IsError {
+				t.Fatal("expected IsError=true")
+			}
+			if got := extractTextContent(result); !strings.Contains(got, tc.want) {
+				t.Errorf("error text = %q, want substring %q", got, tc.want)
 			}
 		})
 	}

@@ -3,8 +3,11 @@ package mcpserver
 import (
 	"context"
 	"flag"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestRun_RejectsInvalidLogLevel verifies that Run surfaces config
@@ -97,3 +100,43 @@ func TestRun_RejectsAllTransportsDisabled(t *testing.T) {
 type discardWriter struct{}
 
 func (discardWriter) Write(p []byte) (int, error) { return len(p), nil }
+
+// TestRun_RejectsInvalidTargetPolicyFile is USK-1084 T3: the
+// -target-policy-file flag reaches LoadConfigs' validation and Run refuses
+// to start. A bare "*" hostname can never equal a data-path host
+// (matchHostname only understands exact names and "*." prefixes), so the
+// deny would silently match nothing.
+//
+// -no-http-mcp without -stdio-mcp makes Run return on its own even when the
+// policy is accepted, so a missing gate shows up as a wrong error (an
+// assertion failure), not a hang; the timeout is a second backstop.
+func TestRun_RejectsInvalidTargetPolicyFile(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	dir := t.TempDir()
+	policyPath := filepath.Join(dir, "policy.json")
+	if err := os.WriteFile(policyPath, []byte(`{"denies":[{"hostname":"*"}]}`), 0o644); err != nil {
+		t.Fatalf("write policy file: %v", err)
+	}
+
+	fs := flag.NewFlagSet("smoke-policy", flag.ContinueOnError)
+	fs.SetOutput(discardWriter{})
+
+	args := []string{
+		"-target-policy-file", policyPath,
+		"-db", filepath.Join(dir, "smoke-policy.db"),
+		"-ca-ephemeral",
+		"-no-http-mcp",
+	}
+
+	err := Run(ctx, fs, args, RunOptions{Version: "smoke"})
+	if err == nil {
+		t.Fatal("Run with invalid -target-policy-file: expected error, got nil")
+	}
+	for _, want := range []string{"load target policy file", "denies[0]", `hostname "*"`} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("Run error = %q, want substring %q", err.Error(), want)
+		}
+	}
+}
