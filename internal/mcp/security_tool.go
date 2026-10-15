@@ -508,7 +508,12 @@ func validateTargetRules(kind string, rules []targetRuleInput) error {
 		if r.Hostname == "" {
 			return fmt.Errorf("%s rule %d: hostname is required", kind, i)
 		}
-		if err := config.ValidateTargetRule(r.Hostname, r.Ports, r.Schemes); err != nil {
+		if err := config.ValidateTargetRule(config.TargetRuleConfig{
+			Hostname:   r.Hostname,
+			Ports:      r.Ports,
+			PathPrefix: r.PathPrefix,
+			Schemes:    r.Schemes,
+		}); err != nil {
 			return fmt.Errorf("%s rule %d: %w", kind, i, err)
 		}
 	}

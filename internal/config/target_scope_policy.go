@@ -47,18 +47,18 @@ var targetRuleSchemes = map[string]bool{
 //     schemes already matches both).
 //
 // Errors carry no location prefix; callers add one ("denies[0]: ...").
-func ValidateTargetRule(hostname string, ports []int, schemes []string) error {
-	if hostname != "" {
-		if err := validateTargetHostname(hostname); err != nil {
+func ValidateTargetRule(r TargetRuleConfig) error {
+	if r.Hostname != "" {
+		if err := validateTargetHostname(r.Hostname); err != nil {
 			return err
 		}
 	}
-	for _, p := range ports {
+	for _, p := range r.Ports {
 		if p < 1 || p > 65535 {
 			return fmt.Errorf("port %d is out of range (1-65535)", p)
 		}
 	}
-	for _, s := range schemes {
+	for _, s := range r.Schemes {
 		if s == "" {
 			return fmt.Errorf("scheme %q is not allowed (use http or https; omit schemes to match both)", s)
 		}
@@ -183,12 +183,12 @@ func (p *TargetScopePolicyConfig) Validate() error {
 		return nil
 	}
 	for i, r := range p.Allows {
-		if err := ValidateTargetRule(r.Hostname, r.Ports, r.Schemes); err != nil {
+		if err := ValidateTargetRule(r); err != nil {
 			return fmt.Errorf("allows[%d]: %w", i, err)
 		}
 	}
 	for i, r := range p.Denies {
-		if err := ValidateTargetRule(r.Hostname, r.Ports, r.Schemes); err != nil {
+		if err := ValidateTargetRule(r); err != nil {
 			return fmt.Errorf("denies[%d]: %w", i, err)
 		}
 	}
