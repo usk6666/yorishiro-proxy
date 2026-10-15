@@ -1446,34 +1446,9 @@ func TestValidateTargetRules(t *testing.T) {
 	}
 }
 
-func TestValidateHostname(t *testing.T) {
-	tests := []struct {
-		name     string
-		hostname string
-		wantErr  bool
-	}{
-		{"simple domain", "example.com", false},
-		{"subdomain", "sub.example.com", false},
-		{"wildcard", "*.example.com", false},
-		{"ipv4", "10.0.0.1", false},
-		{"ipv6 bracket", "[2001:db8::1]", false},
-		{"trailing dot", "example.com.", true},
-		{"wildcard trailing dot", "*.example.com.", true},
-		{"empty wildcard domain", "*.", true},
-		{"double dot", "example..com", true},
-		{"underscore rejected", "test_host.com", true},
-		{"label too long", strings.Repeat("a", 64) + ".com", true},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			err := validateHostname(tt.hostname)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("validateHostname(%q) error = %v, wantErr %v", tt.hostname, err, tt.wantErr)
-			}
-		})
-	}
-}
+// Hostname-form rows formerly in TestValidateHostname moved to
+// internal/config TestValidateTargetRule when the per-rule core moved there
+// (USK-1084); underscore labels flipped to accepted there.
 
 func TestToTargetRules(t *testing.T) {
 	inputs := []targetRuleInput{

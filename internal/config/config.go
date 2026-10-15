@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -633,6 +634,8 @@ type HostTLSEntry struct {
 type TargetRuleConfig struct {
 	// Hostname matches the target hostname (case-insensitive).
 	// Supports wildcard prefix "*.example.com" to match all subdomains.
+	// When empty, the rule matches any host. See ValidateTargetRule for the
+	// accepted forms (bare "*", "host:port" and URLs are rejected).
 	Hostname string `json:"hostname"`
 
 	// Ports restricts the rule to specific port numbers.
@@ -643,8 +646,12 @@ type TargetRuleConfig struct {
 	// When empty, all paths are matched.
 	PathPrefix string `json:"path_prefix,omitempty"`
 
-	// Schemes restricts the rule to specific URL schemes (e.g., "http", "https").
-	// When nil or empty, all schemes are matched.
+	// Schemes restricts the rule by transport confidentiality: "http"
+	// (plaintext) or "https" (TLS), compared case-insensitively. The
+	// vocabulary is closed (RFC-001 §3.8) — WebSocket and raw TCP traffic is
+	// scoped as http / https too — and any other token, including "", is
+	// rejected at load by TargetScopePolicyConfig.Validate. When nil or
+	// empty, all schemes are matched.
 	Schemes []string `json:"schemes,omitempty"`
 }
 
@@ -945,6 +952,11 @@ type SafetyFilterRuleConfig struct {
 // load time instead of silently falling back to a Go-native ClientHello on
 // the resend / fuzz dial path while `query config` still reports the typo
 // back to the agent. Validation rejects; it never rewrites the field.
+//
+// USK-1084: target_scope_policy is checked via
+// TargetScopePolicyConfig.Validate even when -target-policy-file shadows it,
+// like every other section — a Policy-layer rule that can never match would
+// otherwise turn an operator deny into a silent no-op.
 func (c *ProxyConfig) Validate() error {
 	if err := validateTLSFingerprintField(c.TLSFingerprint); err != nil {
 		return err
@@ -964,6 +976,9 @@ func (c *ProxyConfig) Validate() error {
 		if err := c.UpstreamProxyStruct.Validate(); err != nil {
 			return err
 		}
+	}
+	if err := c.TargetScopePolicy.Validate(); err != nil {
+		return fmt.Errorf("target_scope_policy: %w", err)
 	}
 	return nil
 }
@@ -1111,20 +1126,36 @@ func LoadFile(path string) (*ProxyConfig, error) {
 //	  "denies": [{"hostname": "*.internal.corp"}]
 //	}
 //
-// It returns an error if the file does not exist or contains invalid JSON.
+// It returns an error if the file does not exist, is not a single JSON
+// object, carries a field this struct does not define, or fails
+// TargetScopePolicyConfig.Validate. Decoding is strict (USK-1084) so that a
+// file overwritten with an unrelated JSON document — e.g. a HAR export
+// ({"log": ...}) — or a misspelled key ("denys") is refused instead of
+// loading as an empty, allow-all policy. Unlike LoadFile, which stays
+// lenient, this is the only input of the operator's ceiling.
 func LoadPolicyFile(path string) (*TargetScopePolicyConfig, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read policy file %s: %w", path, err)
 	}
 
+	// json.Valid also rejects trailing data after the first value.
 	if !json.Valid(data) {
 		return nil, fmt.Errorf("parse policy file %s: invalid JSON", path)
 	}
+	if trimmed := bytes.TrimSpace(data); len(trimmed) == 0 || trimmed[0] != '{' {
+		return nil, fmt.Errorf("parse policy file %s: must contain a JSON object", path)
+	}
 
 	var policy TargetScopePolicyConfig
-	if err := json.Unmarshal(data, &policy); err != nil {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&policy); err != nil {
 		return nil, fmt.Errorf("parse policy file %s: %w", path, err)
+	}
+
+	if err := policy.Validate(); err != nil {
+		return nil, fmt.Errorf("validate policy file %s: %w", path, err)
 	}
 
 	return &policy, nil

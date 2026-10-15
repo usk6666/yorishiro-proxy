@@ -164,10 +164,9 @@ func checkTargetScopeURLHelper(ts *connector.TargetScope, u *url.URL) error {
 // vocabulary and means transport confidentiality (plaintext vs TLS), not
 // the L7 application protocol — see RFC-001 §3.8. A caller that terminates
 // TLS passes "https"; a plaintext dial passes "http"; a WebSocket caller
-// maps ws -> http and wss -> https (an Agent-layer rule can never contain
-// "ws"/"wss", which validateTargetRules rejects; the Policy layer is not
-// scheme-validated — USK-1084 — but an unvalidated token there matches
-// nothing, so the mapping is required either way).
+// maps ws -> http and wss -> https (no rule on either layer can contain
+// "ws"/"wss": config.ValidateTargetRule rejects them for Agent-layer rules
+// and, since USK-1084, for Policy-layer rules at startup).
 //
 // Blank is deliberately NOT defaulted to "http" here: connector.socks5.go
 // passes "" because at handshake time it genuinely does not know the

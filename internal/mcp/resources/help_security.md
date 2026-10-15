@@ -8,7 +8,7 @@ This tool is separate from `configure` to allow MCP clients to apply different a
 
 Target scope uses a **Policy Layer** and an **Agent Layer**:
 
-- **Policy Layer** (immutable): Set at startup from the configuration file. Defines the upper boundary for what the agent can access. Cannot be modified at runtime.
+- **Policy Layer** (immutable): Set at startup from the configuration file. Defines the upper boundary for what the agent can access. Cannot be modified at runtime. Policy rules are validated at startup with the same rules as this tool (`schemes` only `http` / `https`, ports 1-65535, a hostname that can match — no `*`, `host:port` or URL), except that a Policy rule may omit `hostname`; `rate_limits` / `budget` values must be >= 0, and the dedicated policy file must not contain unknown fields. An invalid policy stops the server instead of loading a rule that silently matches nothing.
 - **Agent Layer** (mutable): Controlled by this tool. Can further restrict access within the Policy Layer boundaries. Agent allow rules must fall within the Policy allow scope.
 
 ### Evaluation Order

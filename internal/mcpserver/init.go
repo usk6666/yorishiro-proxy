@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/cert"
@@ -273,17 +274,31 @@ func InitTargetScope(policy *config.TargetScopePolicyConfig) *connector.TargetSc
 
 // ConvertTargetRules converts config.TargetRuleConfig entries into
 // connector.TargetRule values. Returns nil for an empty input.
+//
+// The rules are expected to have passed config.TargetScopePolicyConfig.Validate
+// (LoadConfigs guarantees it for both boot sources). Schemes are lowercased
+// here, mirroring the Agent layer's toTargetRules (USK-1084), so both layers
+// hold the canonical §3.8 tokens; the config struct keeps the operator's
+// spelling.
 func ConvertTargetRules(cfgRules []config.TargetRuleConfig) []connector.TargetRule {
 	if len(cfgRules) == 0 {
 		return nil
 	}
 	rules := make([]connector.TargetRule, len(cfgRules))
 	for i, r := range cfgRules {
+		schemes := r.Schemes
+		if len(schemes) > 0 {
+			normalized := make([]string, len(schemes))
+			for j, s := range schemes {
+				normalized[j] = strings.ToLower(s)
+			}
+			schemes = normalized
+		}
 		rules[i] = connector.TargetRule{
 			Hostname:   r.Hostname,
 			Ports:      r.Ports,
 			PathPrefix: r.PathPrefix,
-			Schemes:    r.Schemes,
+			Schemes:    schemes,
 		}
 	}
 	return rules
