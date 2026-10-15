@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/usk6666/yorishiro-proxy/internal/connector"
@@ -118,6 +119,9 @@ func TestSecurity_GetTargetScope_WithPolicyAndAgent(t *testing.T) {
 		[]connector.TargetRule{{Hostname: "*.target.com"}},
 		[]connector.TargetRule{{Hostname: "*.internal.corp"}},
 	)
+	// USK-1115: the source is reported from the recorded origin rather than
+	// hardcoded, so the fixture records where its policy "came from".
+	ts.SetPolicyOrigin(connector.PolicyOrigin{Source: "config file", LoadedAt: time.Now()})
 	_ = ts.SetAgentRules(
 		[]connector.TargetRule{{Hostname: "api.target.com"}},
 		[]connector.TargetRule{{Hostname: "admin.target.com"}},

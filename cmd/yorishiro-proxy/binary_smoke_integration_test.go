@@ -175,7 +175,9 @@ type serverProcess struct {
 // startServerProcess launches `<binary> server` with the supplied
 // listen port, bearer token, and DB path. Stderr is captured into
 // stderr; the boot goroutine signals on done once Wait() returns.
-func startServerProcess(t *testing.T, binary string, port int, token, dbPath string) *serverProcess {
+// extra is appended after the defaults, so a flag there overrides the
+// default of the same name (e.g. "-log-level", "info").
+func startServerProcess(t *testing.T, binary string, port int, token, dbPath string, extra ...string) *serverProcess {
 	t.Helper()
 
 	srv := &serverProcess{
@@ -183,14 +185,15 @@ func startServerProcess(t *testing.T, binary string, port int, token, dbPath str
 		done:   make(chan struct{}),
 	}
 
-	srv.cmd = exec.Command(binary,
+	args := []string{
 		"server",
 		"-mcp-http-addr", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)),
 		"-mcp-http-token", token,
 		"-db", dbPath,
 		"-ca-ephemeral",
 		"-log-level", "error",
-	)
+	}
+	srv.cmd = exec.Command(binary, append(args, extra...)...)
 	// stdout is reserved for MCP stdio when -stdio-mcp is set; it is
 	// silent in HTTP-only mode but we still discard it so the test
 	// process does not inherit any stray bytes.

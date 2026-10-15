@@ -142,6 +142,7 @@ type policyLayerResult struct {
 	Allows    []connector.TargetRule `json:"allows"`
 	Denies    []connector.TargetRule `json:"denies"`
 	Source    string                 `json:"source"`
+	LoadedAt  string                 `json:"loaded_at,omitempty"`
 	Immutable bool                   `json:"immutable"`
 }
 

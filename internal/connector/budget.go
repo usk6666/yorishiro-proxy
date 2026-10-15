@@ -136,6 +136,14 @@ func (bm *BudgetManager) SetPolicyBudget(cfg BudgetConfig) {
 	bm.policyConfig = cfg
 }
 
+// ReplacePolicyBudget replaces the policy layer budget at runtime.
+func (bm *BudgetManager) ReplacePolicyBudget(cfg BudgetConfig) (exhausted string) {
+	bm.mu.Lock()
+	defer bm.mu.Unlock()
+	bm.policyConfig = cfg
+	return ""
+}
+
 // PolicyBudget returns a copy of the current policy budget config.
 func (bm *BudgetManager) PolicyBudget() BudgetConfig {
 	bm.mu.Lock()

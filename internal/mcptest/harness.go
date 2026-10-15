@@ -213,6 +213,11 @@ type Harness struct {
 	// HarnessOptions.ConfigJSON. Empty when ConfigJSON is empty.
 	ConfigPath string
 
+	// policyReload drives the server's Policy Layer reload path — the same
+	// mcpserver.RunOptions.PolicyReload hook the binary wires to SIGHUP.
+	// See ReloadPolicy.
+	policyReload *policyReloadDriver
+
 	// Cleanup tears down the harness in this order: client session ->
 	// upstream test server -> MCP server (via context cancel + wait).
 	// Idempotent: calling more than once is a no-op. t.Cleanup is also
@@ -259,7 +264,8 @@ func StartHarness(t *testing.T, opts HarnessOptions) *Harness {
 	runCtx, runCancel := context.WithCancel(context.Background())
 	addrCh := make(chan string, 1)
 	runErrCh := make(chan error, 1)
-	go runMCPServer(runCtx, args, addrCh, runErrCh)
+	reload := newPolicyReloadDriver()
+	go runMCPServer(runCtx, args, addrCh, runErrCh, reload)
 
 	addr := waitForListening(t, addrCh, runErrCh, runCancel, upstream)
 	baseURL := fmt.Sprintf("http://%s/", addr)
@@ -295,6 +301,7 @@ func StartHarness(t *testing.T, opts HarnessOptions) *Harness {
 		UpstreamCapture:     capture,
 		ExportDir:           exportDir,
 		ConfigPath:          configPath,
+		policyReload:        reload,
 		Cleanup:             cleanup,
 	}
 
@@ -595,11 +602,13 @@ func buildHTTP1Upstream(opts HarnessOptions, mtlsDir string) (*httptest.Server, 
 // builds a fresh flag.FlagSet (per the mcpserver.Run contract) and
 // publishes the resolved listen address through addrCh; the final
 // return value of Run lands in runErrCh.
-func runMCPServer(ctx context.Context, args []string, addrCh chan<- string, runErrCh chan<- error) {
+func runMCPServer(ctx context.Context, args []string, addrCh chan<- string, runErrCh chan<- error, reload *policyReloadDriver) {
 	fs := flag.NewFlagSet("mcptest", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	runErrCh <- mcpserver.Run(ctx, fs, args, mcpserver.RunOptions{
-		Version: "mcptest",
+		Version:        "mcptest",
+		PolicyReload:   reload.install,
+		OnPolicyReload: reload.report,
 		OnHTTPListening: func(addr string) {
 			// Non-blocking send: addrCh is buffered to size 1.
 			// Guard with select so a misbehaving caller cannot

@@ -89,6 +89,33 @@ type RunOptions struct {
 	// internal/mcptest/ (USK-724) which needs to learn the OS-assigned
 	// port before issuing tools/call requests.
 	OnHTTPListening func(addr string)
+
+	// PolicyReload, when non-nil, is called once during Run — and only when
+	// a Policy Layer source (-target-policy-file or -config) is configured —
+	// to obtain the trigger whose events re-read that source and replace
+	// the Policy Layer (USK-1115). Signals stay in cmd/yorishiro-proxy,
+	// which wires SIGHUP here; the mcptest harness wires a plain channel.
+	// With no policy source configured the hook is never called, so the
+	// caller's default (for SIGHUP: terminate) is unchanged.
+	PolicyReload func() PolicyReloadTrigger
+
+	// OnPolicyReload, when non-nil, is invoked after every reload attempt
+	// with its result (nil = the new Policy Layer is installed). Intended
+	// for the mcptest harness, which needs to know when a reload finished.
+	OnPolicyReload func(err error)
+}
+
+// PolicyReloadTrigger is a source of Policy Layer reload requests, returned
+// by RunOptions.PolicyReload.
+type PolicyReloadTrigger struct {
+	// Name labels reloads from this trigger in the log (e.g. "SIGHUP").
+	Name string
+	// C delivers one value per reload request. Requests that arrive while
+	// a reload is running may be coalesced by the sender (buffer of 1).
+	C <-chan struct{}
+	// Stop releases the trigger. Run calls it once when it returns. May be
+	// nil.
+	Stop func()
 }
 
 // Run parses CLI flags from args using fs, then performs the full server

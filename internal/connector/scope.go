@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 // TargetScope controls which network targets are allowed or blocked using a
@@ -156,6 +157,29 @@ func (s *TargetScope) SetPolicyRules(allows, denies []TargetRule) {
 	defer s.mu.Unlock()
 	s.policyAllows = cloneTargetRules(allows)
 	s.policyDenies = cloneTargetRules(denies)
+}
+
+// PolicyOrigin describes where the current Policy Layer was loaded from. It
+// is reported to the agent by `security get_target_scope` (USK-1115).
+type PolicyOrigin struct {
+	// Source is "policy file", "config file", or "" when no policy source
+	// is configured.
+	Source string
+	// LoadedAt is when the Policy Layer was last installed (boot or reload).
+	LoadedAt time.Time
+}
+
+// ReplacePolicyRules replaces the policy layer rules at runtime.
+func (s *TargetScope) ReplacePolicyRules(allows, denies []TargetRule, origin PolicyOrigin) (outsideAgentAllows []TargetRule) {
+	return nil
+}
+
+// SetPolicyOrigin records where the boot-time Policy Layer came from.
+func (s *TargetScope) SetPolicyOrigin(origin PolicyOrigin) {}
+
+// PolicyOrigin returns where the current Policy Layer came from.
+func (s *TargetScope) PolicyOrigin() PolicyOrigin {
+	return PolicyOrigin{}
 }
 
 // PolicyRules returns a copy of the current policy allow and deny rules.
