@@ -58,6 +58,8 @@ func policyRejectCases() []policyRejectCase {
 			[]string{"denies[0]", `hostname "*."`}},
 		{"unterminated bracket", `{"denies":[{"hostname":"["}]}`,
 			[]string{"denies[0]", `hostname "["`}},
+		{"wildcard over bare ipv6", `{"denies":[{"hostname":"*.fd00::1"}]}`,
+			[]string{"denies[0]", `hostname "*.fd00::1"`, "wildcard is not allowed on an IP literal"}},
 		// --- ports outside 1-65535 ---
 		{"port zero", `{"denies":[{"hostname":"a.test","ports":[0]}]}`,
 			[]string{"denies[0]", "port 0 is out of range (1-65535)"}},
@@ -272,6 +274,10 @@ func TestValidateTargetRule(t *testing.T) {
 		{"star prefix without dot", "*example.com", nil, nil, "invalid character"},
 		{"mid-label wildcard", "a.*.example.com", nil, nil, "invalid character"},
 		{"bracketed ipv6 with port", "[::1]:443", nil, nil, "mismatched brackets"},
+		// A wildcard over a bare IPv6 literal can never match: no host ends
+		// with ".fd00::1". The bare literal itself stays accepted (above).
+		{"wildcard over bare ipv6 loopback", "*.::1", nil, nil, "wildcard is not allowed on an IP literal"},
+		{"wildcard over bare ipv6", "*.fd00::1", nil, nil, "wildcard is not allowed on an IP literal"},
 		// rejected ports / schemes
 		{"port zero", "example.com", []int{0}, nil, "port 0 is out of range (1-65535)"},
 		{"port above max", "example.com", []int{99999}, nil, "port 99999 is out of range (1-65535)"},
