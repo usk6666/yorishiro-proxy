@@ -56,6 +56,7 @@ var EnvVarMap = map[string]string{
 	"mcp-http-addr":      "YP_MCP_HTTP_ADDR",
 	"mcp-http-token":     "YP_MCP_HTTP_TOKEN",
 	"ui-dir":             "YP_UI_DIR",
+	"export-dir":         "YP_EXPORT_DIR",
 	"target-policy-file": "YP_TARGET_POLICY_FILE",
 	"open-browser":       "YP_OPEN_BROWSER",
 	"tls-fingerprint":    "YP_TLS_FINGERPRINT",
@@ -135,6 +136,9 @@ func Run(ctx context.Context, fs *flag.FlagSet, args []string, opts RunOptions) 
 	fs.StringVar(&cfg.MCPHTTPAddr, "mcp-http-addr", defaultMCPHTTPAddr, "Streamable HTTP MCP listen address; use 0 for OS-assigned port (env: YP_MCP_HTTP_ADDR)")
 	fs.StringVar(&cfg.MCPHTTPToken, "mcp-http-token", cfg.MCPHTTPToken, "HTTP Bearer auth token, auto-generated if empty (env: YP_MCP_HTTP_TOKEN)")
 	fs.StringVar(&cfg.UIDir, "ui-dir", cfg.UIDir, "directory for WebUI static files, overrides embedded assets (env: YP_UI_DIR)")
+	fs.StringVar(&cfg.ExportDir, "export-dir", cfg.ExportDir,
+		"directory confining manage export_flows / import_flows file paths; relative paths resolve against it,\n"+
+			"    paths outside it are rejected (default ~/.yorishiro-proxy/exports) (env: YP_EXPORT_DIR)")
 
 	// -open-browser enables auto-opening the WebUI; default is disabled.
 	var openBrowser bool

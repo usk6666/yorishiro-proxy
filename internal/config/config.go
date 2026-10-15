@@ -243,6 +243,15 @@ type Config struct {
 	// CLI flag: -ui-dir, env: YP_UI_DIR.
 	UIDir string `json:"-"`
 
+	// ExportDir is the directory that confines every server-side file read
+	// and write performed by the MCP manage tool's export_flows /
+	// import_flows actions (USK-1127). Relative output_path / input_path
+	// values resolve against it; paths outside it are rejected. Empty means
+	// DefaultExportDir() (~/.yorishiro-proxy/exports/). Operator-only: it is
+	// not reachable from any MCP tool. Excluded from JSON serialization.
+	// CLI flag: -export-dir, env: YP_EXPORT_DIR.
+	ExportDir string `json:"-"`
+
 	// SafetyFilterEnabled controls whether the SafetyFilter engine is active.
 	// This can be set via CLI flag (-safety-filter) or environment variable
 	// (YP_SAFETY_FILTER_ENABLED). When explicitly set, it overrides the config

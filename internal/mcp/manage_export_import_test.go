@@ -157,11 +157,10 @@ func TestExportFlowsAction_FilePermissions(t *testing.T) {
 	t.Parallel()
 	store := newTestStore(t)
 	ca := newTestCA(t)
-	cs := setupTestSession(t, ca, store)
+	cs, dir := setupExportSession(t, ca, store)
 
 	makeExportTestSession(t, store, "sess-perm-1")
 
-	dir := t.TempDir()
 	outputPath := filepath.Join(dir, "export.jsonl")
 
 	result := manageCallTool(t, cs, map[string]any{
@@ -189,11 +188,10 @@ func TestExportFlowsAction_SymlinkRejected(t *testing.T) {
 	t.Parallel()
 	store := newTestStore(t)
 	ca := newTestCA(t)
-	cs := setupTestSession(t, ca, store)
+	cs, dir := setupExportSession(t, ca, store)
 
 	makeExportTestSession(t, store, "sess-symlink-1")
 
-	dir := t.TempDir()
 	realFile := filepath.Join(dir, "real.jsonl")
 	if err := os.WriteFile(realFile, []byte(""), 0600); err != nil {
 		t.Fatalf("write: %v", err)
@@ -255,9 +253,8 @@ func TestImportFlowsAction_SymlinkRejected(t *testing.T) {
 	t.Parallel()
 	store := newTestStore(t)
 	ca := newTestCA(t)
-	cs := setupTestSession(t, ca, store)
+	cs, dir := setupExportSession(t, ca, store)
 
-	dir := t.TempDir()
 	realFile := filepath.Join(dir, "data.jsonl")
 	if err := os.WriteFile(realFile, []byte(`{"stream":{"id":"s","conn_id":"c","protocol":"HTTPS","state":"complete","timestamp":"2026-02-15T10:00:00Z","duration_ms":100},"flows":[],"version":"1"}`), 0600); err != nil {
 		t.Fatalf("write: %v", err)
@@ -282,11 +279,10 @@ func TestExportFlowsAction_AtomicWrite(t *testing.T) {
 	t.Parallel()
 	store := newTestStore(t)
 	ca := newTestCA(t)
-	cs := setupTestSession(t, ca, store)
+	cs, dir := setupExportSession(t, ca, store)
 
 	makeExportTestSession(t, store, "sess-atomic-1")
 
-	dir := t.TempDir()
 	outputPath := filepath.Join(dir, "atomic-export.jsonl")
 
 	result := manageCallTool(t, cs, map[string]any{
@@ -324,9 +320,8 @@ func TestImportFlowsAction_ValidUUIDRequired(t *testing.T) {
 	t.Parallel()
 	store := newTestStore(t)
 	ca := newTestCA(t)
-	cs := setupTestSession(t, ca, store)
+	cs, dir := setupExportSession(t, ca, store)
 
-	dir := t.TempDir()
 	dataFile := filepath.Join(dir, "invalid-ids.jsonl")
 	// Non-UUID flow IDs should be rejected when MCP handler enables validation
 	if err := os.WriteFile(dataFile, []byte(`{"stream":{"id":"not-uuid","conn_id":"c","protocol":"HTTPS","state":"complete","timestamp":"2026-02-15T10:00:00Z","duration_ms":100},"flows":[],"version":"1"}`), 0600); err != nil {
@@ -452,7 +447,7 @@ func TestExportImportRoundTrip_MCP(t *testing.T) {
 	t.Parallel()
 	store := newTestStore(t)
 	ca := newTestCA(t)
-	cs := setupTestSession(t, ca, store)
+	cs, dir := setupExportSession(t, ca, store)
 
 	// Mix of session types:
 	// - HTTPS with ConnInfo (normal proxy session)
@@ -474,7 +469,6 @@ func TestExportImportRoundTrip_MCP(t *testing.T) {
 		"550e8400-e29b-41d4-a716-446655440009",
 		"HTTP/1.x", true)
 
-	dir := t.TempDir()
 	exportPath := filepath.Join(dir, "export.jsonl")
 
 	// Step 1: Export
@@ -551,7 +545,7 @@ func TestExportFlowsAction_SchemePreserved(t *testing.T) {
 	t.Parallel()
 	store := newTestStore(t)
 	ca := newTestCA(t)
-	cs := setupTestSession(t, ca, store)
+	cs, dir := setupExportSession(t, ca, store)
 
 	ctx := context.Background()
 	ts := time.Date(2026, 5, 9, 12, 0, 0, 0, time.UTC)
@@ -580,7 +574,6 @@ func TestExportFlowsAction_SchemePreserved(t *testing.T) {
 		t.Fatalf("SaveFlow: %v", err)
 	}
 
-	dir := t.TempDir()
 	outputPath := filepath.Join(dir, "export.jsonl")
 
 	result := manageCallTool(t, cs, map[string]any{
@@ -618,11 +611,10 @@ func TestExportFlowsAction_PathTraversalCleaned(t *testing.T) {
 	t.Parallel()
 	store := newTestStore(t)
 	ca := newTestCA(t)
-	cs := setupTestSession(t, ca, store)
+	cs, dir := setupExportSession(t, ca, store)
 
 	makeExportTestSession(t, store, "sess-traverse-1")
 
-	dir := t.TempDir()
 	// Path with .. components - should be cleaned/normalised
 	outputPath := filepath.Join(dir, "sub", "..", "export.jsonl")
 

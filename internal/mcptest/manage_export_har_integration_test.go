@@ -68,12 +68,16 @@ func TestE2E_Manage_ExportFlowsHAR(t *testing.T) {
 	waitForFlowCount(t, h, len(cases), 5*time.Second)
 
 	// --- Export HAR via manage tool ---
-	outPath := filepath.Join(t.TempDir(), "export.har")
+	// USK-1127: a relative output_path resolves against the server's
+	// export directory (-export-dir), and the response reports the
+	// absolute path the file landed at.
+	const outName = "usk1127-export.har"
+	outPath := filepath.Join(h.ExportDir, outName)
 	exportRes := h.MustOK(t, "manage", map[string]any{
 		"action": "export_flows",
 		"params": map[string]any{
 			"format":      "har",
-			"output_path": outPath,
+			"output_path": outName,
 		},
 	})
 	if got := numFromAny(exportRes.Decoded["exported_count"]); got < int64(len(cases)) {
@@ -81,6 +85,9 @@ func TestE2E_Manage_ExportFlowsHAR(t *testing.T) {
 	}
 	if got, _ := exportRes.Decoded["format"].(string); got != "har" {
 		t.Errorf("manage export_flows: format = %q, want %q", got, "har")
+	}
+	if got, _ := exportRes.Decoded["output_path"].(string); got != outPath {
+		t.Errorf("manage export_flows: output_path = %q, want %q (inside the export directory)", got, outPath)
 	}
 
 	// --- Read the file from disk and validate HAR 1.2 shape ---

@@ -38,6 +38,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -106,6 +107,19 @@ type HarnessOptions struct {
 	// rejects malformed input at boot, so misconfigured tests fail loudly
 	// in waitForListening rather than at first tool call.
 	ConfigJSON string
+
+	// ExtraArgs is appended verbatim to the mcpserver.Run argument list
+	// after the harness defaults, so a flag given here overrides the
+	// default of the same name (flag.FlagSet keeps the last value). Use it
+	// for CLI flags that have no dedicated HarnessOptions field, e.g.
+	// "-target-policy-file", "-export-dir", or "-ca-cert"/"-ca-key".
+	//
+	// Two defaults are adjusted rather than overridden: when ExtraArgs
+	// sets -ca-cert or -ca-key the harness drops its default -ca-ephemeral
+	// (the two modes are mutually exclusive at boot), and when ExtraArgs
+	// sets -export-dir, Harness.ExportDir reports that value instead of
+	// the harness-provided temp directory.
+	ExtraArgs []string
 }
 
 // ToolCall is a (name, args) pair used for HarnessOptions.PreStartTools.
@@ -188,6 +202,17 @@ type Harness struct {
 	// a coherent Firefox (or Chrome / standard) fingerprint on the wire.
 	UpstreamCapture *UpstreamCapture
 
+	// ExportDir is the server's export directory (-export-dir): the only
+	// place manage export_flows / import_flows may read or write files
+	// (USK-1127). The harness defaults it to a per-test t.TempDir() so
+	// harness runs never touch the developer's ~/.yorishiro-proxy/exports;
+	// HarnessOptions.ExtraArgs may override it.
+	ExportDir string
+
+	// ConfigPath is the on-disk path of the -config file materialised from
+	// HarnessOptions.ConfigJSON. Empty when ConfigJSON is empty.
+	ConfigPath string
+
 	// Cleanup tears down the harness in this order: client session ->
 	// upstream test server -> MCP server (via context cancel + wait).
 	// Idempotent: calling more than once is a no-op. t.Cleanup is also
@@ -224,7 +249,7 @@ func StartHarness(t *testing.T, opts HarnessOptions) *Harness {
 	})
 	t.Cleanup(restoreServerJSON)
 
-	args := buildRunArgs(t, opts, token)
+	args, exportDir, configPath := buildRunArgs(t, opts, token)
 	mtlsDir := t.TempDir()
 	upstream, mtls, fpObserver, grpcHits, grpcWebHits, wsHits, capture, err := buildUpstream(opts, mtlsDir)
 	if err != nil {
@@ -268,6 +293,8 @@ func StartHarness(t *testing.T, opts HarnessOptions) *Harness {
 		GRPCWebObservedHits: grpcWebHits,
 		WSObservedHits:      wsHits,
 		UpstreamCapture:     capture,
+		ExportDir:           exportDir,
+		ConfigPath:          configPath,
 		Cleanup:             cleanup,
 	}
 
@@ -354,19 +381,25 @@ func validateOptions(t *testing.T, opts HarnessOptions) {
 
 // buildRunArgs constructs the args slice fed to mcpserver.Run. Defaults
 // are tuned for headless test mode: an OS-assigned loopback port, an
-// ephemeral CA, an isolated SQLite path under t.TempDir().
-func buildRunArgs(t *testing.T, opts HarnessOptions, token string) []string {
+// ephemeral CA, an isolated SQLite path and export directory under
+// t.TempDir(). It also returns the effective export directory and the
+// materialised -config path ("" when ConfigJSON is empty).
+func buildRunArgs(t *testing.T, opts HarnessOptions, token string) (args []string, exportDir, configPath string) {
 	t.Helper()
 	logLevel := opts.LogLevel
 	if logLevel == "" {
 		logLevel = "error"
 	}
 	dbPath := filepath.Join(t.TempDir(), "harness.db")
-	args := []string{
+	exportDir = t.TempDir()
+	if v, ok := flagValue(opts.ExtraArgs, "export-dir"); ok {
+		exportDir = v
+	}
+	args = []string{
 		"-mcp-http-addr", "127.0.0.1:0",
 		"-mcp-http-token", token,
 		"-db", dbPath,
-		"-ca-ephemeral",
+		"-export-dir", exportDir,
 		"-log-level", logLevel,
 		// httptest.NewTLSServer uses a self-signed leaf certificate that
 		// the proxy's upstream-TLS verification would otherwise reject.
@@ -375,17 +408,51 @@ func buildRunArgs(t *testing.T, opts HarnessOptions, token string) []string {
 		// any scenario that drives traffic through the proxy.
 		"-insecure",
 	}
+	_, hasCACert := flagValue(opts.ExtraArgs, "ca-cert")
+	_, hasCAKey := flagValue(opts.ExtraArgs, "ca-key")
+	if !hasCACert && !hasCAKey {
+		args = append(args, "-ca-ephemeral")
+	}
 	if opts.TLSFingerprint != "" {
 		args = append(args, "-tls-fingerprint", opts.TLSFingerprint)
 	}
 	if opts.ConfigJSON != "" {
-		cfgPath := filepath.Join(t.TempDir(), "harness-config.json")
-		if err := writeConfigFile(cfgPath, opts.ConfigJSON); err != nil {
+		configPath = filepath.Join(t.TempDir(), "harness-config.json")
+		if err := writeConfigFile(configPath, opts.ConfigJSON); err != nil {
 			t.Fatalf("mcptest: write config file: %v", err)
 		}
-		args = append(args, "-config", cfgPath)
+		args = append(args, "-config", configPath)
 	}
-	return args
+	args = append(args, opts.ExtraArgs...)
+	return args, exportDir, configPath
+}
+
+// flagValue reports the last value given for the named flag in args,
+// accepting the four spellings the flag package parses: -name v, --name v,
+// -name=v and --name=v. A trailing "-name" with no value reports ok with
+// an empty value (flag.Parse would reject it anyway).
+func flagValue(args []string, name string) (value string, ok bool) {
+	for i := 0; i < len(args); i++ {
+		a := strings.TrimPrefix(args[i], "-")
+		a = strings.TrimPrefix(a, "-")
+		if a == args[i] {
+			continue // not a flag
+		}
+		if a == name {
+			ok = true
+			value = ""
+			if i+1 < len(args) {
+				value = args[i+1]
+				i++
+			}
+			continue
+		}
+		if strings.HasPrefix(a, name+"=") {
+			ok = true
+			value = strings.TrimPrefix(a, name+"=")
+		}
+	}
+	return value, ok
 }
 
 // writeConfigFile materialises HarnessOptions.ConfigJSON to disk so that
