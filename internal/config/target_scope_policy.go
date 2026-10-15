@@ -25,14 +25,23 @@ var targetRuleSchemes = map[string]bool{
 // or can never equal a data-path target, never reject a form that matches
 // today. connector.matchTargetRule ANDs every condition, so a rule carrying
 // an unmatchable condition matches nothing — for a deny that is fail-open.
+// The one deliberate exception is a trailing-dot hostname (see below): it is
+// rejected although it can match, and that rejection fails closed.
 //
 //   - hostname "" is accepted (the rule matches any host). Otherwise it must
 //     be an exact name, a "*.domain" wildcard, an IPv4 literal, or an IPv6
 //     literal, bare ("fd00:ec2::254") or bracketed ("[::1]"). Data-path gates
 //     pass hosts unbracketed (net.SplitHostPort / url.Hostname), so only the
 //     bare form matches today; the bracketed form stays accepted on both
-//     layers and its matching is a separate fix. Labels may contain letters,
-//     digits, '-' and '_'.
+//     layers and its matching is a separate fix. A wildcard over a bare IPv6
+//     literal ("*.::1") is rejected: no host ends with ".::1". Labels may
+//     contain letters, digits, '-' and '_'.
+//   - a trailing-dot hostname ("internal.corp.") is rejected. The data path
+//     does not strip the trailing dot, so such a rule matches only targets
+//     spelled as an FQDN ("CONNECT internal.corp.:443") and misses the usual
+//     dotless spelling — almost always an operator mistake. Rejecting it
+//     fails closed: startup (or the security tool call) refuses loudly
+//     instead of installing a rule that covers less than it appears to.
 //   - ports must be in 1-65535.
 //   - schemes must be http or https in any case; "" is rejected (omitting
 //     schemes already matches both).
@@ -64,15 +73,17 @@ func ValidateTargetRule(hostname string, ports []int, schemes []string) error {
 // ValidateTargetRule for the accepted forms. It must not panic on any input.
 func validateTargetHostname(hostname string) error {
 	h := hostname
-	if strings.HasPrefix(h, "*.") {
+	wildcard := strings.HasPrefix(h, "*.")
+	if wildcard {
 		h = h[2:]
 		if h == "" {
 			return fmt.Errorf("hostname %q: wildcard must be followed by a domain", hostname)
 		}
 	}
 
-	// A trailing dot never equals the dotless host the data path sees for
-	// the same name, so a rule written as an FQDN would silently not match.
+	// A trailing-dot rule matches only FQDN-spelled targets (the data path
+	// does not strip the dot), so it is rejected as a likely operator
+	// mistake. The rejection fails closed: the caller refuses the rule.
 	if strings.HasSuffix(h, ".") {
 		return fmt.Errorf("hostname %q: trailing dot is not allowed", hostname)
 	}
@@ -91,6 +102,10 @@ func validateTargetHostname(hostname string) error {
 	// Bare IPv6: fd00:ec2::254. A colon is otherwise never valid, so
 	// "host:port" and URLs fall through to the domain check and fail there.
 	if strings.Contains(h, ":") && net.ParseIP(h) != nil {
+		if wildcard {
+			// No host ends with ".fd00::1", so the rule could never match.
+			return fmt.Errorf("hostname %q: wildcard is not allowed on an IP literal", hostname)
+		}
 		return nil
 	}
 
