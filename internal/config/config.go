@@ -57,6 +57,27 @@ func (c *Config) Validate() error {
 	if err := c.validateMaxRawCaptureSize(); err != nil {
 		return err
 	}
+	if err := c.validateExportDir(); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validateExportDir checks an operator-supplied ExportDir: it must exist
+// and be a directory (sibling of the body_spill_dir check). An empty value
+// selects DefaultExportDir(), which the server creates on demand, so it
+// skips the filesystem checks.
+func (c *Config) validateExportDir() error {
+	if c.ExportDir == "" {
+		return nil
+	}
+	fi, err := os.Stat(c.ExportDir)
+	if err != nil {
+		return fmt.Errorf("export_dir %q does not exist (create it, or omit -export-dir / YP_EXPORT_DIR to use the default): %w", c.ExportDir, err)
+	}
+	if !fi.IsDir() {
+		return fmt.Errorf("export_dir %q is not a directory", c.ExportDir)
+	}
 	return nil
 }
 
@@ -303,6 +324,19 @@ func DefaultDBPath() string {
 		return "yorishiro.db"
 	}
 	return filepath.Join(home, ".yorishiro-proxy", "yorishiro.db")
+}
+
+// DefaultExportDir returns the default export directory confining manage
+// export_flows / import_flows file paths (USK-1127):
+// ~/.yorishiro-proxy/exports, beside the default DB and the persisted CA.
+// If the user's home directory cannot be resolved, it falls back to
+// ./.yorishiro-proxy/exports (mirroring cert.DefaultCADir).
+func DefaultExportDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return filepath.Join(".", ".yorishiro-proxy", "exports")
+	}
+	return filepath.Join(home, ".yorishiro-proxy", "exports")
 }
 
 // EnsureDBDir creates the parent directory of the given database path if it does

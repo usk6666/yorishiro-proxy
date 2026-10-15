@@ -125,7 +125,7 @@ Returns: `messages[]` (id, sequence, direction, method, url, status_code, header
 ### status
 Get current proxy status and health metrics. No additional parameters.
 
-Returns: running, listen_addr, active_connections, total_flows, db_size_bytes, uptime_seconds, ca_initialized, tls_fingerprint.
+Returns: running, listen_addr, active_connections, total_flows, db_size_bytes, uptime_seconds, ca_initialized, tls_fingerprint, export_dir (the directory `manage` export_flows / import_flows file paths are confined to).
 
 ### config
 Get current configuration including upstream proxy, TLS passthrough, TCP forwards, and runtime knobs. No additional parameters.

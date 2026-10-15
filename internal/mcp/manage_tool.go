@@ -4,10 +4,10 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -55,10 +55,10 @@ type manageParams struct {
 	Format        string        `json:"format,omitempty" jsonschema:"export format: jsonl (default) or har (HTTP Archive 1.2)"`
 	Filter        *exportFilter `json:"filter,omitempty" jsonschema:"flow filter for export"`
 	IncludeBodies *bool         `json:"include_bodies,omitempty" jsonschema:"include message bodies in export (default: true)"`
-	OutputPath    string        `json:"output_path,omitempty" jsonschema:"file path to write export data; resolved relative to the proxy server process's working directory — pass an absolute path when the server cwd is unknown to the caller (e.g. HTTP remote MCP)"`
+	OutputPath    string        `json:"output_path,omitempty" jsonschema:"file path to write export data, confined to the server's export directory (query resource=status reports it as export_dir). A relative path (recommended, e.g. flows.har) resolves against the export directory; an absolute path must lie inside it; anything else is rejected. Subdirectories must already exist."`
 
 	// import_flows parameters
-	InputPath  string `json:"input_path,omitempty" jsonschema:"file path to read import data; resolved relative to the proxy server process's working directory — pass an absolute path when the server cwd is unknown to the caller (e.g. HTTP remote MCP)"`
+	InputPath  string `json:"input_path,omitempty" jsonschema:"file path to read import data, confined to the server's export directory (query resource=status reports it as export_dir). A relative path (e.g. flows.jsonl) resolves against the export directory; an absolute path must lie inside it; anything else is rejected."`
 	OnConflict string `json:"on_conflict,omitempty" jsonschema:"conflict policy: skip or replace (default: skip)"`
 }
 
@@ -115,7 +115,8 @@ func (s *Server) registerManage() {
 			"Filter axes (protocol / scheme / http_version / url_pattern / time) mirror the query tool's filter so analysts can " +
 			"export / delete the same set of flows they were inspecting. " +
 			"For delete_flows, top-level protocol/scheme/http_version and params.filter cannot be combined in a single call; supply one form. " +
-			"File paths (output_path / input_path) are resolved relative to the proxy server process's working directory, NOT the MCP caller's cwd — pass absolute paths when the server cwd is unknown to the caller (e.g. HTTP remote MCP). " +
+			"File paths (output_path / input_path) are confined to the server's export directory (operator-set via -export-dir, default ~/.yorishiro-proxy/exports; query resource=status reports it as export_dir): " +
+			"relative paths such as \"flows.har\" resolve against it, absolute paths must lie inside it, and anything outside it is rejected. " +
 			"Full reference: call docs(topic=\"manage\").",
 	}, s.handleManage)
 }
@@ -463,25 +464,6 @@ func (s *Server) handleManageRegenerateCA() (*gomcp.CallToolResult, *executeRege
 // maxInlineExportFlows is the maximum number of flows returned inline.
 const maxInlineExportFlows = 100
 
-// validateFilePath sanitises and validates a user-supplied file path.
-func validateFilePath(path string) (string, error) {
-	if path == "" {
-		return "", fmt.Errorf("file path must not be empty")
-	}
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		return "", fmt.Errorf("resolve absolute path: %w", err)
-	}
-	cleaned := filepath.Clean(abs)
-	info, err := os.Lstat(cleaned)
-	if err == nil {
-		if info.Mode()&os.ModeSymlink != 0 {
-			return "", fmt.Errorf("file path must not be a symbolic link: %s", cleaned)
-		}
-	}
-	return cleaned, nil
-}
-
 // executeExportFlowsResult is the structured output of the export_flows action.
 type executeExportFlowsResult struct {
 	ExportedCount int    `json:"exported_count"`
@@ -513,11 +495,19 @@ func (s *Server) handleManageExportFlows(ctx context.Context, params manageParam
 		if params.OutputPath == "" {
 			return nil, fmt.Errorf("HAR export requires output_path: HAR is a single JSON object and cannot be returned inline")
 		}
-		return s.exportFlowsToHARFile(ctx, params.OutputPath, opts)
+		target, err := s.resolveManagedPath(ctx, "export_flows", "output_path", params.OutputPath)
+		if err != nil {
+			return nil, err
+		}
+		return s.exportFlowsToHARFile(ctx, target, opts)
 	}
 
 	if params.OutputPath != "" {
-		return s.exportFlowsToFile(ctx, params.OutputPath, format, opts)
+		target, err := s.resolveManagedPath(ctx, "export_flows", "output_path", params.OutputPath)
+		if err != nil {
+			return nil, err
+		}
+		return s.exportFlowsToFile(ctx, target, format, opts)
 	}
 
 	return s.exportFlowsInline(ctx, format, opts)
@@ -608,59 +598,33 @@ func resolveExportWireLevel(filter *exportFilter) (string, error) {
 	return value, nil
 }
 
-// writeToFileAtomic validates the output path and atomically writes content
-// via a temp file. The writeFn callback receives the temp file to write to and
-// returns the number of items written.
-func writeToFileAtomic(outputPath string, writeFn func(f *os.File) (int, error)) (cleanPath string, n int, err error) {
-	cleanPath, err = validateFilePath(outputPath)
+// resolveManagedPath confines a manage-tool file path to the export
+// directory (USK-1127). param names the tool parameter for error context.
+// An attempt to reach outside the directory is logged at Warn: it is
+// either a misconfigured caller or an agent probing the Policy Layer, and
+// the operator should see it either way.
+func (s *Server) resolveManagedPath(ctx context.Context, action, param, requested string) (exportPath, error) {
+	target, err := resolveExportPath(s.misc.exportDir, requested)
 	if err != nil {
-		return "", 0, fmt.Errorf("invalid output_path: %w", err)
-	}
-
-	dir := filepath.Dir(cleanPath)
-	tmpFile, err := os.CreateTemp(dir, ".yorishiro-export-*.tmp")
-	if err != nil {
-		return "", 0, fmt.Errorf("create temp file for export: %w", err)
-	}
-	tmpPath := tmpFile.Name()
-	success := false
-	defer func() {
-		tmpFile.Close()
-		if !success {
-			os.Remove(tmpPath)
+		var outside *exportPathOutsideError
+		if errors.As(err, &outside) {
+			slog.WarnContext(ctx, "manage: file path outside export directory rejected",
+				"tool", "manage",
+				"action", action,
+				"param", param,
+				"requested_path", requested,
+				"export_dir", s.misc.exportDir,
+			)
 		}
-	}()
-
-	if err := tmpFile.Chmod(0600); err != nil {
-		return "", 0, fmt.Errorf("set file permissions: %w", err)
+		return exportPath{}, fmt.Errorf("invalid %s: %w", param, err)
 	}
-
-	n, err = writeFn(tmpFile)
-	if err != nil {
-		return "", 0, err
-	}
-
-	if err := tmpFile.Close(); err != nil {
-		return "", 0, fmt.Errorf("close temp file: %w", err)
-	}
-
-	if info, statErr := os.Lstat(cleanPath); statErr == nil {
-		if info.Mode()&os.ModeSymlink != 0 {
-			return "", 0, fmt.Errorf("output_path must not be a symbolic link: %s", cleanPath)
-		}
-	}
-
-	if err := os.Rename(tmpPath, cleanPath); err != nil {
-		return "", 0, fmt.Errorf("rename temp file to output: %w", err)
-	}
-	success = true
-
-	return cleanPath, n, nil
+	return target, nil
 }
 
-// exportFlowsToFile exports flows to a file at the given output path.
-func (s *Server) exportFlowsToFile(ctx context.Context, outputPath, format string, opts flow.ExportOptions) (*executeExportFlowsResult, error) {
-	cleanPath, n, err := writeToFileAtomic(outputPath, func(f *os.File) (int, error) {
+// exportFlowsToFile exports flows as JSONL to target inside the export
+// directory.
+func (s *Server) exportFlowsToFile(ctx context.Context, target exportPath, format string, opts flow.ExportOptions) (*executeExportFlowsResult, error) {
+	n, err := writeExportFileAtomic(s.misc.exportDir, target, func(f *os.File) (int, error) {
 		count, err := flow.ExportStreams(ctx, s.flowStore.store, f, opts)
 		if err != nil {
 			return 0, fmt.Errorf("export flows: %w", err)
@@ -674,7 +638,7 @@ func (s *Server) exportFlowsToFile(ctx context.Context, outputPath, format strin
 	return &executeExportFlowsResult{
 		ExportedCount: n,
 		Format:        format,
-		OutputPath:    cleanPath,
+		OutputPath:    target.abs,
 	}, nil
 }
 
@@ -697,9 +661,10 @@ func (s *Server) exportFlowsInline(ctx context.Context, format string, opts flow
 	}, nil
 }
 
-// exportFlowsToHARFile exports flows to a HAR file at the given output path.
-func (s *Server) exportFlowsToHARFile(ctx context.Context, outputPath string, opts flow.ExportOptions) (*executeExportFlowsResult, error) {
-	cleanPath, n, err := writeToFileAtomic(outputPath, func(f *os.File) (int, error) {
+// exportFlowsToHARFile exports flows as HAR 1.2 to target inside the
+// export directory.
+func (s *Server) exportFlowsToHARFile(ctx context.Context, target exportPath, opts flow.ExportOptions) (*executeExportFlowsResult, error) {
+	n, err := writeExportFileAtomic(s.misc.exportDir, target, func(f *os.File) (int, error) {
 		count, err := flow.ExportHAR(ctx, s.flowStore.store, f, opts, s.version)
 		if err != nil {
 			return 0, fmt.Errorf("export HAR: %w", err)
@@ -713,7 +678,7 @@ func (s *Server) exportFlowsToHARFile(ctx context.Context, outputPath string, op
 	return &executeExportFlowsResult{
 		ExportedCount: n,
 		Format:        "har",
-		OutputPath:    cleanPath,
+		OutputPath:    target.abs,
 	}, nil
 }
 
@@ -736,9 +701,9 @@ func (s *Server) handleManageImportFlows(ctx context.Context, params manageParam
 		return nil, fmt.Errorf("input_path is required for import_flows action")
 	}
 
-	cleanPath, err := validateFilePath(params.InputPath)
+	target, err := s.resolveManagedPath(ctx, "import_flows", "input_path", params.InputPath)
 	if err != nil {
-		return nil, fmt.Errorf("invalid input_path: %w", err)
+		return nil, err
 	}
 
 	conflict := flow.ConflictSkip
@@ -753,26 +718,28 @@ func (s *Server) handleManageImportFlows(ctx context.Context, params manageParam
 		}
 	}
 
-	f, err := os.Open(cleanPath)
-	if err != nil {
-		return nil, fmt.Errorf("open input file: %w", err)
-	}
-	defer f.Close()
-
-	result, err := flow.ImportStreams(ctx, s.flowStore.store, f, flow.ImportOptions{
-		OnConflict:       conflict,
-		MaxScannerBuffer: config.ResolveMaxImportScannerBuffer(s.connector.proxyDefaults),
-		ValidateIDs:      true,
+	var result *flow.ImportResult
+	err = readExportFile(s.misc.exportDir, target, func(f *os.File) error {
+		r, err := flow.ImportStreams(ctx, s.flowStore.store, f, flow.ImportOptions{
+			OnConflict:       conflict,
+			MaxScannerBuffer: config.ResolveMaxImportScannerBuffer(s.connector.proxyDefaults),
+			ValidateIDs:      true,
+		})
+		if err != nil {
+			return fmt.Errorf("import flows: %w", err)
+		}
+		result = r
+		return nil
 	})
 	if err != nil {
-		return nil, fmt.Errorf("import flows: %w", err)
+		return nil, err
 	}
 
 	return &executeImportFlowsResult{
 		Imported:     result.Imported,
 		Skipped:      result.Skipped,
 		Errors:       result.Errors,
-		Source:       cleanPath,
+		Source:       target.abs,
 		ErrorDetails: result.ErrorDetails,
 	}, nil
 }

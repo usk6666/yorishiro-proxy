@@ -2140,6 +2140,12 @@ type queryStatusResult struct {
 	Budget            *queryBudgetStatus                    `json:"budget,omitempty"`
 	H1Upstream        *proxybuild.H1UpstreamMetricsSnapshot `json:"h1_upstream,omitempty"`
 	H2Upstream        *proxybuild.H2UpstreamMetricsSnapshot `json:"h2_upstream,omitempty"`
+	// ExportDir is the directory that confines manage export_flows /
+	// import_flows file paths (USK-1127). Relative output_path /
+	// input_path values resolve against it. Published here so remote
+	// (HTTP MCP) callers can learn where their exports land. Empty means
+	// file export / import is disabled.
+	ExportDir string `json:"export_dir"`
 }
 
 // queryRateLimitStatus holds rate limit information for the status response.
@@ -2216,6 +2222,7 @@ func (s *Server) populateManagerStatus(result *queryStatusResult) {
 func (s *Server) handleQueryStatus(ctx context.Context) (*gomcp.CallToolResult, *queryStatusResult, error) {
 	result := &queryStatusResult{
 		DBSizeBytes: -1,
+		ExportDir:   s.misc.exportDir,
 	}
 
 	s.populateManagerStatus(result)
@@ -2354,6 +2361,10 @@ type queryConfigResult struct {
 	// shape matches `configure({intercept_queue: ...})` byte-for-byte.
 	// Omitted when s.pipeline.holdQueue is nil (proxy not yet started).
 	InterceptQueue *configureInterceptQueueResult `json:"intercept_queue,omitempty"`
+	// ExportDir echoes the export directory confining manage
+	// export_flows / import_flows file paths (USK-1127); mirrors
+	// query resource=status export_dir.
+	ExportDir string `json:"export_dir"`
 }
 
 // queryCaptureScopeResult is the JSON shape returned for the
@@ -2385,7 +2396,7 @@ type queryPassthroughResult struct {
 
 // handleQueryConfig returns the current configuration (TLS passthrough + connector knobs).
 func (s *Server) handleQueryConfig() (*gomcp.CallToolResult, *queryConfigResult, error) {
-	result := &queryConfigResult{}
+	result := &queryConfigResult{ExportDir: s.misc.exportDir}
 
 	if !managerIsNil(s.connector.manager) {
 		result.UpstreamProxy = connector.RedactProxyURL(s.connector.manager.UpstreamProxy())
