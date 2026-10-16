@@ -33,6 +33,10 @@ type HTTP1ForwardHandlerConfig struct {
 	// RateLimiter checks per-host rate limits. Nil disables.
 	RateLimiter *RateLimiter
 
+	// LiveConns, when non-nil, tracks every admitted forward connection so a
+	// policy change that no longer admits its target closes it (USK-1160).
+	LiveConns *LiveConns
+
 	// OnStack is called after the per-connection stack is built. The
 	// callback owns the session lifecycle (RunSession wiring); see
 	// connector.OnStackFunc for the contract.

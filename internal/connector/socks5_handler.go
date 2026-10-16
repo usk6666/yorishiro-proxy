@@ -19,6 +19,10 @@ type SOCKS5HandlerConfig struct {
 	// BuildCfg configures ConnectionStack construction.
 	BuildCfg *BuildConfig
 
+	// LiveConns, when non-nil, tracks every admitted tunnel so a policy
+	// change that no longer admits its target closes it (USK-1160).
+	LiveConns *LiveConns
+
 	// PassthroughList, if non-nil, identifies hosts whose TLS traffic should
 	// be relayed without MITM. Matching hosts bypass the ConnectionStack.
 	PassthroughList *PassthroughList

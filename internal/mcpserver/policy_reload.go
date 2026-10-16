@@ -194,8 +194,11 @@ type policyReloader struct {
 	scope  *connector.TargetScope
 	rl     *connector.RateLimiter
 	bm     *connector.BudgetManager
-	logger *slog.Logger
-	now    func() time.Time
+	// liveConns, when non-nil, is reconciled after every successful
+	// reload (USK-1160).
+	liveConns *connector.LiveConns
+	logger    *slog.Logger
+	now       func() time.Time
 }
 
 func newPolicyReloader(source PolicySource, scope *connector.TargetScope, rl *connector.RateLimiter, bm *connector.BudgetManager, logger *slog.Logger) *policyReloader {

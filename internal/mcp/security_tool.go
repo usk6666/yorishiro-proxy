@@ -171,6 +171,15 @@ type testedTarget struct {
 	Path     string `json:"path"`
 }
 
+// WithLiveConns wires the process-wide live-connection registry so a
+// set_target_scope / update_target_scope write closes the live connections
+// the new rules no longer admit (USK-1160).
+func WithLiveConns(reg *connector.LiveConns) ServerOption {
+	return func(s *Server) {
+		s.connector.liveConns = reg
+	}
+}
+
 // handleSetTargetScope replaces all agent allow and deny rules.
 func (s *Server) handleSetTargetScope(params securityParams) (*gomcp.CallToolResult, any, error) {
 	if s.connector.targetScope == nil {
