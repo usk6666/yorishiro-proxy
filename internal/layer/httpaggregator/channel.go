@@ -147,6 +147,28 @@ func (a *aggregatorChannel) Err() error {
 // closed so a USK-671 dispatch path watching the inner Closed() signal
 // has already run any terminal-event hook before the dict is cleared.
 func (a *aggregatorChannel) Close() error {
+	a.closeWith(a.inner.Close)
+	return nil
+}
+
+// CloseRefused is Close for a stream the far side of the proxy refused
+// without processing it (USK-1157). It runs the same aggregator teardown and
+// cascades to the inner Channel's CloseRefused when it has one (the HTTP/2
+// stream picks RST_STREAM(REFUSED_STREAM) vs CANCEL from wire state), else
+// to its Close. Shares Close's sync.Once.
+func (a *aggregatorChannel) CloseRefused() error {
+	a.closeWith(func() error {
+		if rc, ok := a.inner.(interface{ CloseRefused() error }); ok {
+			return rc.CloseRefused()
+		}
+		return a.inner.Close()
+	})
+	return nil
+}
+
+// closeWith is the single teardown path behind Close and CloseRefused;
+// closeInner cascades to the inner Channel.
+func (a *aggregatorChannel) closeWith(closeInner func() error) {
 	a.closeOnce.Do(func() {
 		a.mu.Lock()
 		a.closed = true
@@ -162,10 +184,9 @@ func (a *aggregatorChannel) Close() error {
 		a.emittedFlowIDs = nil
 		a.mu.Unlock()
 		close(a.recvDone)
-		_ = a.inner.Close()
+		_ = closeInner()
 		a.releaseTransactionStates(connID, flows)
 	})
-	return nil
 }
 
 // releaseTransactionStates fires ReleaseTransaction for every FlowID the
@@ -815,6 +836,3 @@ func buildH2FrameWireEnvelope(env *envelope.Envelope, evt *http2.H2DataEvent) *e
 		Context: env.Context,
 	}
 }
-
-// CloseRefused is a placeholder for USK-1157 (red commit scaffolding).
-func (a *aggregatorChannel) CloseRefused() error { return a.Close() }

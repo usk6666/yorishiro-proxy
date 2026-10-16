@@ -421,6 +421,64 @@ type upstreamHolder struct {
 	ch    layer.Channel
 	ready chan struct{} // closed when upstream Channel is established
 	done  chan struct{} // closed when goroutine 1 (client->upstream) exits
+
+	// dialErr is the error the dial returned, if any. Written only by
+	// goroutine 1 (client->upstream); read after the errgroup's Wait.
+	dialErr error
+	// recvErr is the terminal non-EOF error upstream.Next returned, if
+	// any. Written only by goroutine 2 (upstream->client); read after the
+	// errgroup's Wait.
+	recvErr error
+}
+
+// refused reports whether the UPSTREAM declared the stream unprocessed —
+// GOAWAY with a last_stream_id below it, RST_STREAM(REFUSED_STREAM), or an
+// OpenStream refusal that outlived the dial's retry — as opposed to a
+// refusal the client sent or a local failure. Only valid after the
+// errgroup's Wait.
+//
+// uh.ch.Err() covers the mid-request Send path, where the upstream Send
+// fails with a plain error but the Channel's terminal error is the
+// refusal.
+func (uh *upstreamHolder) refused() bool {
+	if isRefusedStreamError(uh.dialErr) || isRefusedStreamError(uh.recvErr) {
+		return true
+	}
+	return uh.ch != nil && isRefusedStreamError(uh.ch.Err())
+}
+
+// isRefusedStreamError reports whether err wraps a
+// *layer.StreamError{Code: ErrorRefused}.
+func isRefusedStreamError(err error) bool {
+	var se *layer.StreamError
+	return errors.As(err, &se) && se != nil && se.Code == layer.ErrorRefused
+}
+
+// refusedCloser is implemented by client Channels (the HTTP/2 stream and the
+// httpaggregator / gRPC / gRPC-Web wrappers over it) that can tell their
+// peer a stream was refused without processing — RST_STREAM(REFUSED_STREAM)
+// instead of CANCEL — so the peer may retry it (RFC 9113 §8.7). The Channel
+// decides from its own wire state whether the refusal still applies (a
+// response that already started cannot be refused).
+type refusedCloser interface {
+	CloseRefused() error
+}
+
+// closeClient tears the client Channel down at the end of a session. When
+// the upstream refused the stream, the refusal is propagated to the client
+// via CloseRefused so a browser retries the request exactly as it would
+// had it been talking to the origin directly (USK-1157); otherwise, or when
+// the client Channel cannot express a refusal, it is a plain Close.
+func closeClient(client layer.Channel, upstreamRefused bool) {
+	if upstreamRefused {
+		if rc, ok := client.(refusedCloser); ok {
+			slog.Debug("session: upstream refused the stream; closing client stream as refused",
+				"stream_id", client.StreamID())
+			_ = rc.CloseRefused()
+			return
+		}
+	}
+	_ = client.Close()
 }
 
 // ClassifyError returns the canonical label for a stream-level error if err
@@ -457,6 +515,11 @@ func ClassifyError(err error) string {
 // error the context is cancelled and the other goroutine terminates. io.EOF
 // from Channel.Next is treated as normal stream termination, not an error.
 func RunSession(ctx context.Context, client layer.Channel, dial DialFunc, p *pipeline.Pipeline, opts ...SessionOptions) (retErr error) {
+	// upstreamRefused is decided after the errgroup's Wait, BEFORE the
+	// deferred upstream Close below runs (defers are LIFO), and consumed
+	// by the client teardown — see closeClient.
+	var upstreamRefused bool
+
 	// Cleanup is conditional: when the session exits with ErrUpgradePending
 	// the caller (RunStackSession) needs the underlying wires alive so it
 	// can DetachStream and construct the post-upgrade Layer. A normal exit
@@ -465,7 +528,7 @@ func RunSession(ctx context.Context, client layer.Channel, dial DialFunc, p *pip
 		if errors.Is(retErr, ErrUpgradePending) {
 			return
 		}
-		_ = client.Close()
+		closeClient(client, upstreamRefused)
 	}()
 
 	var opt SessionOptions
@@ -521,6 +584,7 @@ func RunSession(ctx context.Context, client layer.Channel, dial DialFunc, p *pip
 	})
 
 	result := g.Wait()
+	upstreamRefused = result != nil && uh.refused()
 
 	// On upgrade, expose the still-live upstream Channel via the session's
 	// notice helper so RunStackSession can construct the post-upgrade Layer
@@ -2671,6 +2735,7 @@ func dispatchClientAction(
 	if uh.ch == nil {
 		u, derr := dial(ctx, env)
 		if derr != nil {
+			uh.dialErr = derr
 			return false, fmt.Errorf("dial: %w", derr)
 		}
 		uh.ch = u
@@ -2735,7 +2800,7 @@ func upstreamToClient(
 	for {
 		env, err := upstreamNext(ctx, uh.ch, notice)
 		if err != nil || env == nil {
-			return upstreamToClientFinish(ctx, opt, clientID, err, relayed)
+			return upstreamToClientFinish(ctx, opt, uh, clientID, err, relayed)
 		}
 
 		if clientID != "" {
@@ -2835,8 +2900,10 @@ func upstreamToClient(
 //     surface verbatim WITHOUT touching the tracker (it is not a wire
 //     teardown).
 //   - any other err: stream-level error (e.g. WS Layer's mapped
-//     StreamError on peer-reset); check the tracker (same reasoning as
-//     EOF — the upstream stopped talking) and return the original err.
+//     StreamError on peer-reset); record it on uh.recvErr (USK-1157:
+//     RunSession reads it to tell an upstream refusal from a client-side
+//     one), check the tracker (same reasoning as EOF — the upstream
+//     stopped talking) and return the original err.
 //
 // USK-860: relayed reflects whether the upstream→client relay loop
 // successfully forwarded at least one envelope before this terminal
@@ -2844,9 +2911,12 @@ func upstreamToClient(
 // diagnostic tag is suppressed on the canonical false-positive path
 // (modify_and_forward request → 200 OK relayed end-to-end → normal
 // upstream close).
-func upstreamToClientFinish(ctx context.Context, opt SessionOptions, clientID string, err error, relayed bool) error {
+func upstreamToClientFinish(ctx context.Context, opt SessionOptions, uh *upstreamHolder, clientID string, err error, relayed bool) error {
 	if errors.Is(err, ErrUpgradePending) {
 		return err
+	}
+	if err != nil {
+		uh.recvErr = err
 	}
 	checkInterceptReleaseEOF(ctx, opt, clientID, envelope.Receive, relayed)
 	return err
