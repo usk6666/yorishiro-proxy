@@ -44,6 +44,18 @@ const maxExportPathLen = 4096
 // operator reading them) knows which knob controls the directory.
 const exportDirHint = "set -export-dir / YP_EXPORT_DIR or use a path relative to it"
 
+// exportEvalSymlinks and exportLstat are the filesystem probes
+// resolveExportPath performs. They are package variables only so a test
+// can record every probed path and assert that none lies lexically
+// outside the export directory: an agent-supplied path must be rejected
+// before any filesystem access (on Windows a UNC path would otherwise
+// open an SMB / WebDAV connection and leak the proxy user's NTLM hash;
+// on Linux it could trigger autofs or stall on a network mount).
+var (
+	exportEvalSymlinks = filepath.EvalSymlinks
+	exportLstat        = os.Lstat
+)
+
 // WithExportDir sets the directory that confines manage export_flows /
 // import_flows file paths (USK-1127). Relative output_path / input_path
 // values resolve against it and paths outside it are rejected. An empty
@@ -96,7 +108,7 @@ func resolveExportPath(exportDir, requested string) (exportPath, error) {
 		return exportPath{}, err
 	}
 
-	rootReal, err := filepath.EvalSymlinks(exportDir)
+	rootReal, err := exportEvalSymlinks(exportDir)
 	if err != nil {
 		return exportPath{}, fmt.Errorf("export directory %s is unavailable: %w; set -export-dir / YP_EXPORT_DIR to an existing directory", exportDir, err)
 	}
@@ -113,7 +125,7 @@ func resolveExportPath(exportDir, requested string) (exportPath, error) {
 
 	// The parent must exist (no implicit mkdir) and, once symlinks are
 	// resolved, must still be inside the export directory.
-	parentReal, err := filepath.EvalSymlinks(filepath.Join(rootReal, filepath.Dir(rel)))
+	parentReal, err := exportEvalSymlinks(filepath.Join(rootReal, filepath.Dir(rel)))
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return exportPath{}, fmt.Errorf("directory %q does not exist in export directory %s; subdirectories are not created automatically", filepath.Dir(rel), exportDir)
@@ -124,7 +136,7 @@ func resolveExportPath(exportDir, requested string) (exportPath, error) {
 		return exportPath{}, outside
 	}
 
-	if info, err := os.Lstat(filepath.Join(parentReal, filepath.Base(rel))); err == nil && info.Mode()&os.ModeSymlink != 0 {
+	if info, err := exportLstat(filepath.Join(parentReal, filepath.Base(rel))); err == nil && info.Mode()&os.ModeSymlink != 0 {
 		return exportPath{}, fmt.Errorf("file path must not be a symbolic link: %s", filepath.Join(exportDir, rel))
 	}
 
@@ -172,7 +184,7 @@ func relInsideRoot(root, rootReal, p string) (string, bool) {
 			return rel, true
 		}
 	}
-	parentReal, err := filepath.EvalSymlinks(filepath.Dir(p))
+	parentReal, err := exportEvalSymlinks(filepath.Dir(p))
 	if err != nil {
 		return "", false
 	}

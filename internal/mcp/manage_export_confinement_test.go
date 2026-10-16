@@ -4,9 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
 	"testing"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -200,6 +203,75 @@ func TestResolveExportPath_RootUnavailable(t *testing.T) {
 		t.Error("resolveExportPath with missing export directory: want error, got nil")
 	} else if !strings.Contains(err.Error(), missing) || !strings.Contains(err.Error(), "-export-dir") {
 		t.Errorf("error %q does not name the missing root %q and the -export-dir flag", err, missing)
+	}
+}
+
+// TestResolveExportPath_NoProbeOutsideRoot pins the S-1 invariant: a
+// requested path that lies lexically outside both forms of the export
+// directory (as configured, and symlink-resolved) is rejected before any
+// filesystem access. A probe of such a path is attacker-controlled I/O:
+// on Windows a UNC path opens an SMB / WebDAV connection (leaking the
+// proxy user's NTLM hash), on Linux it can trigger autofs or stall on a
+// network mount. Not parallel: it swaps the package-level probe seam.
+func TestResolveExportPath_NoProbeOutsideRoot(t *testing.T) {
+	f := newExportFixture(t)
+	rootReal, err := filepath.EvalSymlinks(f.root)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(%s): %v", f.root, err)
+	}
+	// An alias of the root that is NOT the configured form: reaching the
+	// root through it requires resolving symlinks outside the root.
+	alias := filepath.Join(t.TempDir(), "alias")
+	mustSymlink(t, f.root, alias)
+
+	var (
+		mu     sync.Mutex
+		probed []string
+	)
+	record := func(p string) {
+		mu.Lock()
+		defer mu.Unlock()
+		probed = append(probed, p)
+	}
+	origEval, origLstat := exportEvalSymlinks, exportLstat
+	t.Cleanup(func() { exportEvalSymlinks, exportLstat = origEval, origLstat })
+	exportEvalSymlinks = func(p string) (string, error) { record(p); return origEval(p) }
+	exportLstat = func(p string) (fs.FileInfo, error) { record(p); return origLstat(p) }
+
+	requests := []string{
+		filepath.Join(f.outside, "secret.json"),
+		filepath.Join(f.outside, "missing", "x.har"),
+		f.root + "-sibling/x.jsonl",
+		filepath.Join(alias, "x.jsonl"),
+	}
+	if runtime.GOOS == "windows" {
+		requests = append(requests,
+			`\\attacker\share\a\x.har`,
+			`\\attacker@80\share\x.har`,
+			`\\?\UNC\attacker\share\x.har`,
+			`\\.\pipe\x`,
+			`\rooted\x.har`,
+			`C:x.har`,
+		)
+	}
+
+	for _, req := range requests {
+		mu.Lock()
+		probed = nil
+		mu.Unlock()
+
+		_, err := resolveExportPath(f.root, req)
+		var outside *exportPathOutsideError
+		if !errors.As(err, &outside) {
+			t.Errorf("resolveExportPath(%q) error = %v, want *exportPathOutsideError", req, err)
+		}
+		mu.Lock()
+		for _, p := range probed {
+			if !pathWithin(f.root, p) && !pathWithin(rootReal, p) {
+				t.Errorf("resolveExportPath(%q) probed %q, which lies outside export directory %s, before rejecting it", req, p, f.root)
+			}
+		}
+		mu.Unlock()
 	}
 }
 
