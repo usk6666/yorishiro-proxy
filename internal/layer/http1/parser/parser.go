@@ -3,6 +3,7 @@ package parser
 import (
 	"bufio"
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"strconv"
