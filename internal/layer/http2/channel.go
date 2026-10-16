@@ -564,6 +564,9 @@ func (c *channel) Close() error {
 	return nil
 }
 
+// CloseRefused is a placeholder for USK-1157 (red commit scaffolding).
+func (c *channel) CloseRefused() error { return c.Close() }
+
 // BuildHeaderFieldsFromEvent constructs the HPACK header field list for an
 // H2HeadersEvent, generating request or response pseudo-headers based on
 // envelope.Direction.

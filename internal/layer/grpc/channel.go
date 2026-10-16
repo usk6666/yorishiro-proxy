@@ -1590,3 +1590,6 @@ func cloneBytes(b []byte) []byte {
 	copy(out, b)
 	return out
 }
+
+// CloseRefused is a placeholder for USK-1157 (red commit scaffolding).
+func (c *grpcChannel) CloseRefused() error { return c.Close() }

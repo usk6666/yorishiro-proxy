@@ -815,3 +815,6 @@ func buildH2FrameWireEnvelope(env *envelope.Envelope, evt *http2.H2DataEvent) *e
 		Context: env.Context,
 	}
 }
+
+// CloseRefused is a placeholder for USK-1157 (red commit scaffolding).
+func (a *aggregatorChannel) CloseRefused() error { return a.Close() }

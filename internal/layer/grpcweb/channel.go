@@ -1179,3 +1179,6 @@ func formatGRPCTimeout(d time.Duration) string {
 	}
 	return strconv.FormatInt(ms, 10) + "m"
 }
+
+// CloseRefused is a placeholder for USK-1157 (red commit scaffolding).
+func (c *channel) CloseRefused() error { return c.Close() }
