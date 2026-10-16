@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"time"
+
+	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 )
 
 // ExportFormatVersion is the current JSONL export format version.
@@ -262,7 +264,7 @@ func flowsToExport(flows []*Flow, includeBodies bool) []*ExportFlow {
 			Metadata:      f.Metadata,
 		}
 		if f.URL != nil {
-			ef.URL = f.URL.String()
+			ef.URL = envelope.WireURLString(f.URL)
 		}
 		if includeBodies {
 			if len(f.Body) > 0 {

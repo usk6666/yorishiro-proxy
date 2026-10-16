@@ -172,7 +172,7 @@ type HTTPMessage struct {
     Method    string
     Scheme    string   // "http" | "https"
     Authority string   // Host header or :authority
-    Path      string
+    Path      string   // wire form: request-target / :path up to the first '?', percent-encoding untouched (USK-1139)
     RawQuery  string
 
     // Response-side fields (valid when Envelope.Direction == Receive)

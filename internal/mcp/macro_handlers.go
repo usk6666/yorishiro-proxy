@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/config"
+	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/macro"
 )
@@ -681,7 +682,7 @@ func (f *storeFlowFetcher) GetFlowRequest(ctx context.Context, flowID string) (*
 		Body:    msg.Body,
 	}
 	if msg.URL != nil {
-		req.URL = msg.URL.String()
+		req.URL = envelope.WireURLString(msg.URL)
 	}
 
 	return req, nil

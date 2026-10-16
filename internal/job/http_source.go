@@ -113,7 +113,7 @@ func extractURLParts(f *flow.Flow) (scheme, authority, path, rawQuery string) {
 		scheme = "http"
 	}
 	authority = f.URL.Host
-	path = f.URL.Path
+	path = envelope.WirePath(f.URL)
 	if path == "" {
 		path = "/"
 	}

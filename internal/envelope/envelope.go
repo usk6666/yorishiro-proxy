@@ -256,8 +256,9 @@ type EnvelopeContext struct {
 
 	// UpgradePath is the URL path observed on the HTTP Upgrade request that
 	// initiated a non-HTTP protocol (WebSocket via HTTP/1.1 Upgrade, or HTTP/2
-	// CONNECT with :protocol). Populated by the Layer that consumes the Upgrade
-	// (WSLayer at construction in USK-642). Empty for non-upgraded protocols.
+	// CONNECT with :protocol), in wire form like HTTPMessage.Path (USK-1139).
+	// Populated by the Layer that consumes the Upgrade (WSLayer at
+	// construction in USK-642). Empty for non-upgraded protocols.
 	UpgradePath string
 
 	// UpgradeQuery is the URL query string observed on the HTTP Upgrade
@@ -265,7 +266,8 @@ type EnvelopeContext struct {
 	UpgradeQuery string
 
 	// RequestPath, RequestMethod, RequestRawQuery carry the wire-observed
-	// request line fields onto subsequent envelopes for the same HTTP
+	// request line fields (RequestPath in wire form, like HTTPMessage.Path)
+	// onto subsequent envelopes for the same HTTP
 	// transaction so response-phase rule matching (direction:"both" with
 	// path_pattern or methods conditions) can evaluate against the paired
 	// request. Populated by HTTP-producing Layers (HTTP/1.x channel via

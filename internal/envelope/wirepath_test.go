@@ -175,6 +175,19 @@ func TestParseWireURL_NeverFails(t *testing.T) {
 	}
 }
 
+// TestParseWireURL_LowercasesScheme pins the url.Parse contract store
+// readers depend on (resend_grpc scheme handling, USK-1056): the scheme is
+// returned lowercased while the path stays byte-exact.
+func TestParseWireURL_LowercasesScheme(t *testing.T) {
+	got := ParseWireURL("HTTPS://Example.com/A%3Fb")
+	if got.Scheme != "https" {
+		t.Errorf("Scheme = %q, want https", got.Scheme)
+	}
+	if got.Host != "Example.com" || WirePath(got) != "/A%3Fb" {
+		t.Errorf("host/path = %q %q, want Example.com /A%%3Fb", got.Host, WirePath(got))
+	}
+}
+
 // TestParseWireURL_LegacyRows pins that rows written by the pre-USK-1139
 // url.String() projection still parse into the same scheme / host / query
 // and yield the stored path bytes as the wire path.

@@ -922,8 +922,9 @@ func wsHandshakeStreamID(upgradeReq *envelope.Envelope) string {
 //
 // MITM principle 1 (do not normalize the wire): the Path and RawQuery
 // are taken verbatim from the wire-observed HTTPMessage, not from any
-// derived URL parser, so case / percent-encoding / empty-query distinction
-// survives onto the WS envelope.
+// derived URL parser, so case / percent-encoding survives onto the WS
+// envelope. (Percent-encoding survives on HTTP/1.x Upgrades too since
+// USK-1139, when HTTPMessage.Path became wire form on every protocol.)
 func wsEnvelopeContextFromUpgradeReq(upgradeReq *envelope.Envelope) (envelope.EnvelopeContext, bool) {
 	if upgradeReq == nil {
 		return envelope.EnvelopeContext{}, false

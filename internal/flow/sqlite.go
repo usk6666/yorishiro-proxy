@@ -6,13 +6,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"net/url"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
 	_ "modernc.org/sqlite"
+
+	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 )
 
 // drainTimeout is the maximum duration allowed for flushing remaining writes
@@ -767,7 +768,7 @@ func (s *SQLiteStore) saveFlowSync(ctx context.Context, f *Flow) error {
 
 	urlStr := ""
 	if f.URL != nil {
-		urlStr = f.URL.String()
+		urlStr = envelope.WireURLString(f.URL)
 	}
 
 	// Project Metadata["variant"] into the dedicated column so the V11
@@ -1309,10 +1310,9 @@ func scanFlow(row scannable) (*Flow, error) {
 	}
 
 	if urlStr != "" {
-		parsed, err := url.Parse(urlStr)
-		if err == nil {
-			f.URL = parsed
-		}
+		// USK-1139: never-failing wire-form parse. url.Parse rejected
+		// stored paths such as "%zz" and silently dropped Flow.URL.
+		f.URL = envelope.ParseWireURL(urlStr)
 	}
 
 	if err := json.Unmarshal([]byte(headersStr), &f.Headers); err != nil {
