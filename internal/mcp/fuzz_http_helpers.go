@@ -1240,29 +1240,38 @@ func (s *Server) runFuzzHTTPSingleVariant(ctx context.Context, plan *fuzzHTTPPla
 //     rewrite the very fields the scope engine matches on, after the plan
 //     check saw the base message.
 //
-// The variant message goes through checkResendHTTPScope — its canonical
-// URL, plus the plan.dialAddr leg when override_host is set. Without
-// override_host that helper never looks at plan.dialAddr, which is safe for
-// resend_http (the dial is derived from the same authority it checks) but
-// not here: the fuzz dial target was fixed at plan time from the BASE
-// message, so a variant whose authority or scheme moved to an allowed
-// value would pass while still being dialled to a host the reload has just
-// denied. The dial leg is therefore checked on its own in that case, with
-// the base scheme the dial transport actually uses (plan.useTLS is derived
-// from it). It is an address check — no path — like every other dial leg,
-// so a path-scoped deny on the BASE path cannot false-block a variant that
-// moved its path away.
+// Two legs, both must pass:
+//
+//   - Canonical leg: the variant's own URL (scheme, authority, path) —
+//     what the request claims to address.
+//   - Wire leg: what is actually put on the wire. The fuzz connection was
+//     fixed at plan time from the BASE message: plan.dialAddr (base
+//     authority, or override_host) and plan.useTLS (base scheme). The
+//     HTTP/1 encoder writes the variant's path as the request target and
+//     never writes msg.Authority / msg.Scheme to the wire (the Host header
+//     is whatever msg.Headers carries). So the leg is judged on the
+//     connection scheme derived from plan.useTLS — never the mutated
+//     variant scheme — the dialled address, and the variant's
+//     post-mutation path.
+//
+// checkResendHTTPScope is deliberately not reused for the variant: its
+// override leg takes the scheme from the message, which for a `scheme`
+// position is not the scheme the connection uses (wrongly allowing a
+// plaintext dial a plaintext-only deny forbids, or wrongly denying a TLS
+// one). Judging the variant path on the wire leg makes path_prefix rules
+// apply to the host that receives the request: an authority or scheme
+// move cannot carry a denied path past a deny on the dial target, a
+// path_prefix allow on the dial target is not false-denied, and a variant
+// whose path moved away from a denied prefix is not blocked.
 func (s *Server) checkFuzzHTTPVariantScope(plan *fuzzHTTPPlan, variantMsg *envelope.HTTPMessage) error {
-	if err := s.checkResendHTTPScope(variantMsg, plan.dialAddr, plan.overrideHost); err != nil {
+	if err := s.checkTargetScopeURL(resendHTTPRequestURL(variantMsg)); err != nil {
 		return err
 	}
-	if plan.overrideHost != "" {
-		return nil // the override leg above already checked plan.dialAddr
+	connScheme := "http"
+	if plan.useTLS {
+		connScheme = "https"
 	}
-	if variantMsg.Authority == plan.baseMsg.Authority && strings.EqualFold(variantMsg.Scheme, plan.baseMsg.Scheme) {
-		return nil // the canonical leg above already covered the dial target
-	}
-	return s.checkTargetScopeAddr(strings.ToLower(plan.baseMsg.Scheme), plan.dialAddr)
+	return s.checkTargetScopeAddrPath(connScheme, plan.dialAddr, variantMsg.Path)
 }
 
 // runFuzzHTTPSingleExchange runs one variant's send/receive cycle and
