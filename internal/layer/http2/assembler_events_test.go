@@ -32,7 +32,7 @@ func TestAssembler_InitialHeadersEndStream(t *testing.T) {
 	enc := hpack.NewEncoder(4096, true)
 	fragment := enc.Encode(hdrs)
 
-	env, err := asm.handleHeadersFrame(fragment, true, true, dec, envelope.Send)
+	env, _, err := asm.handleHeadersFrame(fragment, true, true, dec, envelope.Send)
 	if err != nil {
 		t.Fatalf("handleHeadersFrame: %v", err)
 	}
@@ -66,7 +66,7 @@ func TestAssembler_HeadersThenDataThenTrailers(t *testing.T) {
 		{Name: ":authority", Value: "x"},
 		{Name: ":path", Value: "/"},
 	}
-	env, err := asm.handleHeadersFrame(enc.Encode(hdrs), true, false, dec, envelope.Send)
+	env, _, err := asm.handleHeadersFrame(enc.Encode(hdrs), true, false, dec, envelope.Send)
 	if err != nil {
 		t.Fatalf("handleHeadersFrame: %v", err)
 	}
@@ -91,7 +91,7 @@ func TestAssembler_HeadersThenDataThenTrailers(t *testing.T) {
 
 	// Trailer HEADERS (END_STREAM).
 	trail := []hpack.HeaderField{{Name: "grpc-status", Value: "0"}}
-	trailEnv, err := asm.handleHeadersFrame(enc.Encode(trail), true, true, dec, envelope.Send)
+	trailEnv, _, err := asm.handleHeadersFrame(enc.Encode(trail), true, true, dec, envelope.Send)
 	if err != nil {
 		t.Fatalf("handleHeadersFrame (trailers): %v", err)
 	}
@@ -116,7 +116,7 @@ func TestAssembler_ContinuationFloodGuard(t *testing.T) {
 
 	// Exceed maxHeaderFragmentBytes in one shot.
 	big := make([]byte, maxHeaderFragmentBytes+1)
-	_, err := asm.handleHeadersFrame(big, false, false, dec, envelope.Send)
+	_, _, err := asm.handleHeadersFrame(big, false, false, dec, envelope.Send)
 	if err == nil {
 		t.Fatal("expected ConnError for oversized fragment")
 	}
@@ -134,7 +134,7 @@ func TestAssembler_TrailersWithPseudoHeaderFlagsAnomaly(t *testing.T) {
 		{Name: ":authority", Value: "x"},
 		{Name: ":path", Value: "/"},
 	}
-	_, _ = asm.handleHeadersFrame(enc.Encode(init), true, false, dec, envelope.Send)
+	_, _, _ = asm.handleHeadersFrame(enc.Encode(init), true, false, dec, envelope.Send)
 
 	// DATA to transition into phaseBodyOrTrailers via HEADERS-after-DATA.
 	_ = asm.handleDataFrame([]byte{}, false)
@@ -144,7 +144,7 @@ func TestAssembler_TrailersWithPseudoHeaderFlagsAnomaly(t *testing.T) {
 		{Name: ":foo", Value: "bar"},
 		{Name: "trailer-ok", Value: "v"},
 	}
-	env, err := asm.handleHeadersFrame(enc.Encode(trail), true, true, dec, envelope.Send)
+	env, _, err := asm.handleHeadersFrame(enc.Encode(trail), true, true, dec, envelope.Send)
 	if err != nil {
 		t.Fatalf("handleHeadersFrame: %v", err)
 	}
@@ -174,7 +174,7 @@ func TestAssembler_DataEndStreamTransitionsDone(t *testing.T) {
 		{Name: ":authority", Value: "x"},
 		{Name: ":path", Value: "/"},
 	}
-	_, _ = asm.handleHeadersFrame(enc.Encode(init), true, false, dec, envelope.Send)
+	_, _, _ = asm.handleHeadersFrame(enc.Encode(init), true, false, dec, envelope.Send)
 
 	env := asm.handleDataFrame([]byte("done"), true)
 	if env == nil {

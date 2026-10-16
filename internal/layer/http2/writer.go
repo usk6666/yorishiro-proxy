@@ -36,8 +36,9 @@ type writeRequest struct {
 }
 
 // writeHeaders encodes and writes a HEADERS block (+ CONTINUATION* as
-// needed). endStream places END_STREAM on the final frame of the block.
-// Used for both initial HEADERS and trailer HEADERS.
+// needed). endStream places END_STREAM on the HEADERS frame that opens the
+// block — never on a CONTINUATION frame (RFC 9113 §6.2, §6.10). Used for
+// both initial HEADERS and trailer HEADERS.
 type writeHeaders struct {
 	streamID  uint32
 	fields    []hpack.HeaderField
@@ -215,7 +216,9 @@ func (l *Layer) handleWriteGoAway(req *writeGoAway) {
 
 // handleWriteHeaders encodes the given header field list via the Layer's
 // HPACK encoder and writes HEADERS (+ CONTINUATION*) respecting the peer's
-// MAX_FRAME_SIZE. endStream places END_STREAM on the final frame.
+// MAX_FRAME_SIZE. endStream places END_STREAM on the HEADERS frame (the
+// first frame of the block), as RFC 9113 §6.2 requires; CONTINUATION frames
+// cannot carry it.
 func (l *Layer) handleWriteHeaders(req *writeHeaders) {
 	peer := l.conn.PeerSettings()
 	if peer.MaxHeaderListSize > 0 {

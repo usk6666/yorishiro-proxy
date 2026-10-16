@@ -79,6 +79,14 @@ type eventAssembler struct {
 	// continuationCount counts CONTINUATION frames received for the current
 	// header block (resets when END_HEADERS is observed).
 	continuationCount int
+	// blockEndStream latches END_STREAM for the header block currently being
+	// accumulated. RFC 9113 §6.2 places END_STREAM on the HEADERS frame that
+	// opens the block, while the block itself only completes on the frame
+	// carrying END_HEADERS (possibly a later CONTINUATION, which never
+	// carries END_STREAM — §6.10). Consumed and reset at END_HEADERS so a
+	// split block yields the same event and stream state as a single-frame
+	// one (USK-1137).
+	blockEndStream bool
 
 	// fragRaw accumulates the raw fragment bytes across HEADERS + CONTINUATION
 	// (or trailer HEADERS + CONTINUATION) so the emitted event's Envelope.Raw
@@ -402,20 +410,28 @@ func isInformationalStatus(code int) bool {
 // END_HEADERS is observed, the decoded block is converted to an event
 // envelope (H2HeadersEvent for phaseInitialHeaders, H2TrailersEvent for
 // phaseTrailers) and returned. Otherwise the fragment is accumulated and
-// (nil, nil) is returned.
+// (nil, false, nil) is returned.
 //
-// Returns (*envelope.Envelope, error). A non-nil *envelope.Envelope is
-// ready to deliver to the channel's recv side. A *ConnError is returned if
-// the cumulative fragment size exceeds maxHeaderFragmentBytes
-// (CONTINUATION-flood DoS guard) or if the decode itself fails.
+// endStream is the END_STREAM flag of the frame being processed: the
+// HEADERS frame's flag, or false for CONTINUATION (RFC 9113 §6.10). It is
+// latched across the block, so END_STREAM on HEADERS(!END_HEADERS) takes
+// effect when the final CONTINUATION completes the block (RFC 9113 §6.2).
+//
+// Returns (*envelope.Envelope, blockEndStream, error). A non-nil
+// *envelope.Envelope is ready to deliver to the channel's recv side.
+// blockEndStream is true only on the call that completes a header block
+// whose HEADERS frame carried END_STREAM; the caller uses it to drive the
+// stream-state transition. A *ConnError is returned if the cumulative
+// fragment size exceeds maxHeaderFragmentBytes (CONTINUATION-flood DoS
+// guard) or if the decode itself fails.
 func (a *eventAssembler) handleHeadersFrame(
 	fragment []byte,
 	endHeaders, endStream bool,
 	decoder *hpack.Decoder,
 	direction envelope.Direction,
-) (*envelope.Envelope, error) {
+) (*envelope.Envelope, bool, error) {
 	if len(a.fragBuf)+len(fragment) > maxHeaderFragmentBytes {
-		return nil, &ConnError{
+		return nil, false, &ConnError{
 			Code:   ErrCodeCompression,
 			Reason: fmt.Sprintf("header block fragment exceeds %d bytes (stream %d)", maxHeaderFragmentBytes, a.streamID),
 		}
@@ -432,25 +448,29 @@ func (a *eventAssembler) handleHeadersFrame(
 		a.phase = phaseTrailers
 	}
 
+	a.blockEndStream = a.blockEndStream || endStream
+
 	if !endHeaders {
 		a.continuationCount++
 		if a.continuationCount > maxContinuationFrames {
-			return nil, &ConnError{
+			return nil, false, &ConnError{
 				Code:   ErrCodeEnhanceYourCalm,
 				Reason: fmt.Sprintf("too many CONTINUATION frames (>%d) for stream %d", maxContinuationFrames, a.streamID),
 			}
 		}
-		return nil, nil
+		return nil, false, nil
 	}
 
-	// END_HEADERS observed; reset continuation counter for any future block
-	// (trailers).
+	// END_HEADERS observed; reset the per-block state for any future block
+	// (trailers). The latched END_STREAM applies to this completed block.
 	a.continuationCount = 0
+	endStream = a.blockEndStream
+	a.blockEndStream = false
 
 	decoded, dErr := decoder.Decode(a.fragBuf)
 	a.fragBuf = nil
 	if dErr != nil {
-		return nil, fmt.Errorf("http2: decode header block (stream %d): %w", a.streamID, dErr)
+		return nil, false, fmt.Errorf("http2: decode header block (stream %d): %w", a.streamID, dErr)
 	}
 
 	// Capture accumulated raw bytes for the event.
@@ -480,14 +500,14 @@ func (a *eventAssembler) handleHeadersFrame(
 		// Direction == Receive guards request-side HEADERS (which never have
 		// :status and would parse as Status == 0).
 		if direction == envelope.Receive && isInformationalStatus(evt.Status) {
-			return env, nil
+			return env, endStream, nil
 		}
 		if endStream {
 			a.phase = phaseDone
 		} else {
 			a.phase = phaseBodyOrTrailers
 		}
-		return env, nil
+		return env, endStream, nil
 
 	case phaseTrailers:
 		// Trailers always END_STREAM (RFC 9113 §8.1). Direction mirrors the
@@ -507,10 +527,10 @@ func (a *eventAssembler) handleHeadersFrame(
 			Message:   evt,
 		}
 		a.phase = phaseDone
-		return env, nil
+		return env, endStream, nil
 	}
 
-	return nil, nil
+	return nil, endStream, nil
 }
 
 // handleDataFrame builds an H2DataEvent envelope for a single DATA frame.
