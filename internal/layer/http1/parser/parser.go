@@ -3,6 +3,7 @@ package parser
 import (
 	"bufio"
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"strconv"
@@ -36,6 +37,10 @@ const (
 	// maxHeaderCount limits the number of individual header lines.
 	maxHeaderCount = 10000
 )
+
+// ErrRequestLineTooLong is returned (wrapped) by ParseRequest when the
+// request line exceeds the request-line limit.
+var ErrRequestLineTooLong = errors.New("request line too long")
 
 // ParseOptions carries per-parse knobs that the channel layer threads through
 // to bound header / body raw-bytes capture in memory mode. The zero value
