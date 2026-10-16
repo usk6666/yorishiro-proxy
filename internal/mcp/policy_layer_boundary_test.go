@@ -6,6 +6,7 @@ import (
 	"go/parser"
 	"go/token"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -21,19 +22,32 @@ import (
 // Layer. Every Policy Layer writer on the three engines is named
 // SetPolicy* / ReplacePolicy* (TargetScope.SetPolicyRules /
 // ReplacePolicyRules / SetPolicyOrigin, RateLimiter.SetPolicyLimits,
-// BudgetManager.SetPolicyBudget / ReplacePolicyBudget); the only runtime
-// writer is internal/mcpserver's SIGHUP-driven reloader. This test parses
-// every non-test Go file under internal/mcp and fails on any call to such a
-// method.
+// BudgetManager.SetPolicyBudget / ReplacePolicyBudget); the only writers
+// are internal/mcpserver's boot wiring and SIGHUP-driven reloader.
+//
+// The agent reaches far more than internal/mcp through MCP tools
+// (pluginv2, job, macro, proxybuild, ...), so the guard is a repo-wide
+// allowlist (security review S-2): it parses every non-test Go file of the
+// module and fails on any reference to such a method outside
+// internal/mcpserver and internal/connector (which defines them). Hidden
+// directories (.git, .claude/worktrees), vendor, testdata, node_modules
+// and dist are skipped.
 func TestPolicyLayer_NotWritableFromMCP(t *testing.T) {
+	root := moduleRoot(t)
+	allowed := []string{
+		filepath.Join("internal", "mcpserver") + string(filepath.Separator),
+		filepath.Join("internal", "connector") + string(filepath.Separator),
+	}
 	fset := token.NewFileSet()
 	var violations []string
-	err := filepath.WalkDir(".", func(path string, d fs.DirEntry, err error) error {
+	scanned := 0
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 		if d.IsDir() {
-			if d.Name() == "node_modules" || d.Name() == "dist" {
+			name := d.Name()
+			if path != root && (strings.HasPrefix(name, ".") || name == "vendor" || name == "testdata" || name == "node_modules" || name == "dist") {
 				return filepath.SkipDir
 			}
 			return nil
@@ -41,10 +55,20 @@ func TestPolicyLayer_NotWritableFromMCP(t *testing.T) {
 		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
 			return nil
 		}
-		f, err := parser.ParseFile(fset, path, nil, 0)
+		rel, err := filepath.Rel(root, path)
 		if err != nil {
 			return err
 		}
+		for _, prefix := range allowed {
+			if strings.HasPrefix(rel, prefix) {
+				return nil
+			}
+		}
+		f, err := parser.ParseFile(fset, path, nil, parser.SkipObjectResolution)
+		if err != nil {
+			return err
+		}
+		scanned++
 		ast.Inspect(f, func(n ast.Node) bool {
 			sel, ok := n.(*ast.SelectorExpr)
 			if !ok {
@@ -59,11 +83,36 @@ func TestPolicyLayer_NotWritableFromMCP(t *testing.T) {
 		return nil
 	})
 	if err != nil {
-		t.Fatalf("walk internal/mcp: %v", err)
+		t.Fatalf("walk %s: %v", root, err)
+	}
+	// Guard against a walk that silently covers nothing (wrong root, an
+	// over-broad skip): the module has several hundred such files.
+	if scanned < 100 {
+		t.Fatalf("scanned only %d non-test Go files under %s; the walk is not covering the module", scanned, root)
 	}
 	if len(violations) > 0 {
-		t.Errorf("internal/mcp references a Policy Layer writer; the agent-facing MCP must not modify the Policy Layer:\n%s",
+		t.Errorf("a Policy Layer writer is referenced outside internal/mcpserver and internal/connector; only the operator's boot/SIGHUP path may modify the Policy Layer:\n%s",
 			strings.Join(violations, "\n"))
+	}
+}
+
+// moduleRoot walks up from the test's working directory to the directory
+// holding go.mod.
+func moduleRoot(t *testing.T) string {
+	t.Helper()
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			t.Fatal("go.mod not found above the test's working directory")
+		}
+		dir = parent
 	}
 }
 

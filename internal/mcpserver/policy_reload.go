@@ -255,6 +255,20 @@ func (r *policyReloader) Reload(trigger string) error {
 		"effective_max_total_requests", effBudget.MaxTotalRequests,
 		"effective_max_duration", effBudget.MaxDuration.String(),
 	)
+	// The -config source is decoded leniently, as at boot, so a misspelled
+	// key ("target_scope_polcy", "deny") or an emptied file reloads as "no
+	// policy". Refusing it would diverge from boot; say it loudly instead
+	// (security review S-1). Reload-only: boot behavior is unchanged.
+	if (len(beforeAllows) > 0 || len(beforeDenies) > 0) && len(snap.allows) == 0 && len(snap.denies) == 0 {
+		r.logger.Warn("reloaded policy has no allow or deny rules; the previous target scope policy rules were removed",
+			"trigger", trigger,
+			"source", loaded.Source,
+			"path", loaded.Path,
+			"allows_before", len(beforeAllows),
+			"denies_before", len(beforeDenies),
+			"policy_section_present", loaded.Policy != nil,
+		)
+	}
 	if len(outside) > 0 {
 		hosts := make([]string, len(outside))
 		for i, rule := range outside {

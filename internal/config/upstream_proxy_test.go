@@ -57,6 +57,38 @@ func TestUpstreamProxyConfig_Validate_RotationProbeRejectsMalformed(t *testing.T
 	}
 }
 
+// TestUpstreamProxyConfig_Validate_ParseErrorRedactsUserinfo: url.Parse
+// errors embed the whole input URL, so echoing one verbatim leaked the
+// template's userinfo credentials into the error, which boot prints and a
+// SIGHUP policy reload logs (USK-1115 security review S-3). The error
+// still names the reason.
+func TestUpstreamProxyConfig_Validate_ParseErrorRedactsUserinfo(t *testing.T) {
+	cases := []struct {
+		name, tpl, wantReason string
+	}{
+		{"invalid userinfo", "http://session-§__nonce§:s3cr3t pass@proxy.example:8080", "invalid userinfo"},
+		{"invalid escape", "http://session-§__nonce§:s3cr3t%zz@proxy.example:8080", "invalid URL escape"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := &UpstreamProxyConfig{
+				URLTemplate: tc.tpl,
+				Rotation:    &UpstreamProxyRotation{Policy: "per_request"},
+			}
+			err := c.Validate()
+			if err == nil {
+				t.Fatal("expected a parse error")
+			}
+			if strings.Contains(err.Error(), "s3cr3t") || strings.Contains(err.Error(), "session-") {
+				t.Errorf("error leaks the template userinfo: %v", err)
+			}
+			if !strings.Contains(err.Error(), "url_template") || !strings.Contains(err.Error(), tc.wantReason) {
+				t.Errorf("error = %v, want the url_template prefix and reason %q", err, tc.wantReason)
+			}
+		})
+	}
+}
+
 // TestUpstreamProxyConfig_Validate_RotationProbeRejectsIterationMacro
 // verifies Stage 1 / Stage 2 KV parity: §__iteration§ is NOT exposed on
 // the live data path (the runtime resolver populates only §__nonce§),
