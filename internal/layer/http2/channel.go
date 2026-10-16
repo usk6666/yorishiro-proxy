@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -70,10 +71,22 @@ type channel struct {
 	// error via markTerminated without being shadowed by an io.EOF stamp.
 	recvClosed atomic.Bool
 
-	mu         sync.Mutex
-	sequence   int
-	headersHas bool // true after first request HEADERS sent (client side)
+	mu       sync.Mutex
+	sequence int
+	// headersHas is set, under mu and before the frame is handed to the
+	// writer queue, when this endpoint first enqueues a HEADERS frame on the
+	// stream — the request HEADERS for a client-role channel, the first
+	// response HEADERS (1xx included) for a server-role channel. CloseRefused
+	// reads it: once HEADERS is queued the writer will put it on the wire
+	// even if the Send gives up on its ctx, so the peer will see a response
+	// start and REFUSED_STREAM no longer applies. Keying on "enqueued" rather
+	// than "write completed" keeps a RST_STREAM(REFUSED_STREAM) from landing
+	// behind a still-queued response HEADERS (USK-1157).
+	headersHas bool
 	closed     bool
+	// rstSent is set when MarkTerminatedWithRST put a RST_STREAM on the
+	// wire; Close must not emit a second one (USK-1157).
+	rstSent bool
 
 	// sentEndStream / recvEndStream drive Close's RST-or-not decision
 	// (USK-618). sentEndStream is set when a Send path emits END_STREAM on
@@ -233,6 +246,9 @@ func (c *channel) H2StreamID() uint32 { return c.h2Stream.Load() }
 // teardown).
 func (c *channel) MarkTerminatedWithRST(code uint32, err error) {
 	if id := c.h2Stream.Load(); id != 0 {
+		c.mu.Lock()
+		c.rstSent = true
+		c.mu.Unlock()
 		c.layer.enqueueWrite(writeRequest{rst: &writeRST{streamID: id, code: code}})
 	}
 	if err == nil {
@@ -277,7 +293,7 @@ func (c *channel) Next(ctx context.Context) (*envelope.Envelope, error) {
 		// recv is closed; drain a pending error if any, otherwise EOF.
 		select {
 		case se := <-c.errCh:
-			return nil, se
+			return nil, c.observeStreamError(se)
 		default:
 		}
 		return nil, io.EOF
@@ -289,19 +305,35 @@ func (c *channel) Next(ctx context.Context) (*envelope.Envelope, error) {
 			// Drain a pending error if any.
 			select {
 			case se := <-c.errCh:
-				return nil, se
+				return nil, c.observeStreamError(se)
 			default:
 			}
 			return nil, io.EOF
 		}
 		return env, nil
 	case se := <-c.errCh:
-		return nil, se
+		return nil, c.observeStreamError(se)
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	case <-c.layer.shutdown:
 		return nil, io.EOF
 	}
+}
+
+// observeStreamError installs se as the terminal error before Next hands it
+// to the consumer, and returns it.
+//
+// The reader's failStream / failStreamsAfterGoAway push onto errCh BEFORE
+// they call markTerminated, so without this a consumer could observe the
+// StreamError from Next, start its teardown, and reach Close (whose
+// markTerminated(io.EOF) would then win first-writer-wins) before the
+// reader recorded the StreamError. Close's RST decision and the session's
+// upstream-refused check both read Err(), so it must already hold the
+// StreamError by the time anyone has seen it (USK-1157). markTerminated is
+// idempotent; the reader's own later call is a no-op.
+func (c *channel) observeStreamError(se *layer.StreamError) error {
+	c.markTerminated(se)
+	return se
 }
 
 // Send writes the given event envelope onto this stream. The Message must
@@ -348,6 +380,20 @@ func (c *channel) sendHeadersEvent(ctx context.Context, env *envelope.Envelope, 
 	fields := BuildHeaderFieldsFromEventWithFingerprint(env, evt, c.layer.h2Fingerprint)
 	done := make(chan error, 1)
 
+	// Record the HEADERS as sent before it reaches the writer queue, and
+	// atomically with the closed check, so closeStream (which reads both
+	// under mu) either sees the stream closed first — and this Send never
+	// enqueues — or sees headersHas and picks CANCEL over REFUSED_STREAM.
+	// If the enqueue below then fails, headersHas stays true and a later
+	// CloseRefused falls back to CANCEL, the conservative code.
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return errors.New("http2: send on closed channel")
+	}
+	c.headersHas = true
+	c.mu.Unlock()
+
 	if err := c.allocateAndEnqueueFirstHeaders(ctx, fields, evt.EndStream, done); err != nil {
 		return err
 	}
@@ -356,7 +402,6 @@ func (c *channel) sendHeadersEvent(ctx context.Context, env *envelope.Envelope, 
 		return err
 	}
 	c.mu.Lock()
-	c.headersHas = true
 	if evt.EndStream {
 		c.sentEndStream = true
 	}
@@ -526,7 +571,8 @@ func (c *channel) sendTrailersEvent(ctx context.Context, evt *H2TrailersEvent) e
 }
 
 // Close tears down the receive side and, for abnormal terminations, emits
-// RST_STREAM(CANCEL). Idempotent.
+// RST_STREAM(CANCEL). Idempotent; mutually exclusive with CloseRefused (the
+// first of the two to run decides the code).
 //
 // USK-740 guard: when h2Stream == 0 we have not yet told the peer this
 // stream exists (lazy id allocation: OpenStream is a pure constructor;
@@ -534,23 +580,63 @@ func (c *channel) sendTrailersEvent(ctx context.Context, evt *H2TrailersEvent) e
 // RST_STREAM on an idle stream is a connection-level error per RFC 9113
 // §5.4.2, so we skip the wire emit on the close-before-send path. The
 // local teardown half (markTerminated, closeChannelRecv) still runs.
+//
+// USK-1157 guard: no RST_STREAM is emitted when the stream was already
+// reset on the wire or refused by the peer's GOAWAY — see
+// streamAlreadyReset.
 func (c *channel) Close() error {
+	c.closeStream(false)
+	return nil
+}
+
+// CloseRefused is Close for a stream the far side of the proxy refused
+// without processing it (upstream GOAWAY above the stream, or upstream
+// RST_STREAM(REFUSED_STREAM)). When this endpoint has not yet queued any
+// HEADERS on the stream, the reset carries REFUSED_STREAM instead of CANCEL
+// so the peer knows the request was not processed and may retry it
+// (RFC 9113 §8.7) — what a browser talking to the origin directly would
+// have been told. Once HEADERS (including a 1xx) went out, the peer has
+// seen a response begin and CloseRefused behaves exactly like Close.
+//
+// Shares Close's sync.Once: whichever of the two runs first decides the
+// code, and the other is a no-op. USK-1157.
+func (c *channel) CloseRefused() error {
+	c.closeStream(true)
+	return nil
+}
+
+// closeStream is the single teardown path behind Close and CloseRefused.
+func (c *channel) closeStream(refused bool) {
 	c.closeSendOnce.Do(func() {
 		c.mu.Lock()
 		c.closed = true
 		sentEnd := c.sentEndStream
 		recvEnd := c.recvEndStream
+		headersSent := c.headersHas
+		rstSent := c.rstSent
 		c.mu.Unlock()
 
 		// Only emit RST_STREAM if the peer has been told this stream
 		// exists (h2Stream != 0) AND the close is abnormal (one side
-		// still open). The h2Stream guard makes the close-before-send
-		// path spec-compliant; the abnormal-close guard preserves the
-		// USK-618 bilateral-close contract.
-		if id := c.h2Stream.Load(); id != 0 && (!sentEnd || !recvEnd) {
+		// still open) AND the stream has not already been reset. The
+		// h2Stream guard makes the close-before-send path spec-compliant;
+		// the abnormal-close guard preserves the USK-618 bilateral-close
+		// contract.
+		if id := c.h2Stream.Load(); id != 0 && (!sentEnd || !recvEnd) && !rstSent && !c.streamAlreadyReset(id) {
+			code := ErrCodeCancel
+			if refused && !headersSent {
+				code = ErrCodeRefusedStream
+			}
+			if refused {
+				slog.Debug("http2: closing refused stream",
+					"conn_stream_id", c.layer.streamID,
+					"h2_stream_id", id,
+					"rst_code", ErrCodeString(code),
+					"response_headers_sent", headersSent)
+			}
 			c.layer.enqueueWrite(writeRequest{rst: &writeRST{
 				streamID: id,
-				code:     ErrCodeCancel,
+				code:     code,
 			}})
 		}
 		// Order matters: markTerminated FIRST so a reader currently blocked
@@ -561,7 +647,37 @@ func (c *channel) Close() error {
 		c.markTerminated(io.EOF)
 		c.layer.closeChannelRecv(c)
 	})
-	return nil
+}
+
+// streamAlreadyReset reports whether the stream already ended abnormally on
+// the wire, so a teardown RST_STREAM would be redundant or forbidden
+// (USK-1157). A *layer.StreamError terminal is only ever installed by:
+//
+//   - a peer RST_STREAM (handleStreamRST → failStream): RFC 9113 §5.4.2
+//     forbids answering RST_STREAM with RST_STREAM;
+//   - a stream-level WINDOW_UPDATE error (reader), which enqueues its own
+//     RST_STREAM before failStream;
+//   - MarkTerminatedWithRST, which emits its own RST_STREAM;
+//   - a peer GOAWAY whose last_stream_id is below this stream
+//     (failStreamsAfterGoAway): RFC 9113 §6.8 — the GOAWAY sender never
+//     processed the stream and ignores further frames on it.
+//
+// Exception: the reader applies a received GOAWAY's last_stream_id to every
+// open stream regardless of role, but last_stream_id only covers streams
+// initiated by the GOAWAY's receiver. A ServerRole Layer's channels are
+// peer-initiated, so a client GOAWAY does not close them on the client's
+// side; the client still expects them to end, and the CANCEL is kept.
+func (c *channel) streamAlreadyReset(id uint32) bool {
+	var se *layer.StreamError
+	if !errors.As(c.Err(), &se) {
+		return false
+	}
+	if c.layer.role == ServerRole && se.Code == layer.ErrorRefused {
+		if received, last, _ := c.layer.conn.GoAwayReceived(); received && id > last {
+			return false
+		}
+	}
+	return true
 }
 
 // BuildHeaderFieldsFromEvent constructs the HPACK header field list for an
