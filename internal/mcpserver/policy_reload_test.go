@@ -393,6 +393,107 @@ func TestPolicyReload_WarnsWhenBudgetAlreadyExhausted(t *testing.T) {
 	}
 }
 
+// policyRulesRemovedWarn is the Warn a reload logs when it drops every
+// policy allow and deny rule.
+const policyRulesRemovedWarn = "reloaded policy has no allow or deny rules; the previous target scope policy rules were removed"
+
+// TestPolicyReload_WarnsWhenPolicyRulesRemoved (security review S-1): the
+// -config source is decoded leniently, as at boot, so a misspelled key or
+// an emptied file reloads as "no policy" and silently drops every allow
+// and deny. The reload cannot refuse it without diverging from boot, but
+// it must say so loudly: a Warn naming the source path and the rule counts
+// that were dropped.
+func TestPolicyReload_WarnsWhenPolicyRulesRemoved(t *testing.T) {
+	const bootConfig = `{"target_scope_policy":{"allows":[{"hostname":"old.test"},{"hostname":"*.old.test"}],"denies":[{"hostname":"bad.old.test"}]}}`
+	const bootPolicyFile = `{"allows":[{"hostname":"old.test"},{"hostname":"*.old.test"}],"denies":[{"hostname":"bad.old.test"}]}`
+	cases := []struct {
+		name           string
+		policyFile     bool // source is -target-policy-file instead of -config
+		content        string
+		sectionPresent bool
+	}{
+		{"config: misspelled top-level key", false, `{"target_scope_polcy":{"allows":[{"hostname":"new.test"}]}}`, false},
+		{"config: misspelled keys inside the section", false, `{"target_scope_policy":{"allow":[{"hostname":"new.test"}],"deny":[{"hostname":"bad.test"}]}}`, true},
+		{"config: empty object", false, `{}`, false},
+		{"config: null", false, `null`, false},
+		{"policy file: empty object", true, `{}`, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "source.json")
+			var e policyEngines
+			var source PolicySource
+			if tc.policyFile {
+				writeFile(t, path, bootPolicyFile)
+				e = bootEngines(t, "", path)
+				source = PolicySource{PolicyFile: path}
+			} else {
+				writeFile(t, path, bootConfig)
+				e = bootEngines(t, path, "")
+				source = PolicySource{ConfigFile: path}
+			}
+			h := &recordingHandler{}
+			writeFile(t, path, tc.content)
+			if err := e.reloader(source, slog.New(h)).Reload("SIGHUP"); err != nil {
+				t.Fatalf("Reload: %v (boot accepts this file, so reload must too)", err)
+			}
+			if e.scope.HasPolicyRules() {
+				t.Fatal("precondition: the reload was expected to clear the policy rules")
+			}
+			warn, ok := h.find(slog.LevelWarn, policyRulesRemovedWarn)
+			if !ok {
+				t.Fatalf("missing Warn %q; got:\n%s", policyRulesRemovedWarn, h.dump())
+			}
+			wantSource := "config file"
+			if tc.policyFile {
+				wantSource = "policy file"
+			}
+			want := map[string]string{
+				"trigger":                "SIGHUP",
+				"source":                 wantSource,
+				"path":                   path,
+				"allows_before":          "2",
+				"denies_before":          "1",
+				"policy_section_present": fmt.Sprint(tc.sectionPresent),
+			}
+			for k, w := range want {
+				if got, ok := warn[k]; !ok || got.String() != w {
+					t.Errorf("Warn attr %s = %v (present=%v), want %s", k, got, ok, w)
+				}
+			}
+		})
+	}
+
+	// Negative controls: the Warn is about losing rules, not about every
+	// reload or every rule-less policy.
+	t.Run("narrowing that keeps rules does not warn", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "config.json")
+		writeFile(t, path, bootConfig)
+		e := bootEngines(t, path, "")
+		h := &recordingHandler{}
+		writeFile(t, path, `{"target_scope_policy":{"denies":[{"hostname":"bad.old.test"}]}}`)
+		if err := e.reloader(PolicySource{ConfigFile: path}, slog.New(h)).Reload("SIGHUP"); err != nil {
+			t.Fatalf("Reload: %v", err)
+		}
+		if _, ok := h.find(slog.LevelWarn, policyRulesRemovedWarn); ok {
+			t.Errorf("unexpected Warn %q for a reload that keeps a deny rule; got:\n%s", policyRulesRemovedWarn, h.dump())
+		}
+	})
+	t.Run("no rules before and after does not warn", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "config.json")
+		writeFile(t, path, `{}`)
+		e := bootEngines(t, path, "")
+		h := &recordingHandler{}
+		writeFile(t, path, `{"target_scope_policy":{"rate_limits":{"max_requests_per_second":5}}}`)
+		if err := e.reloader(PolicySource{ConfigFile: path}, slog.New(h)).Reload("SIGHUP"); err != nil {
+			t.Fatalf("Reload: %v", err)
+		}
+		if _, ok := h.find(slog.LevelWarn, policyRulesRemovedWarn); ok {
+			t.Errorf("unexpected Warn %q when there were no rules to remove; got:\n%s", policyRulesRemovedWarn, h.dump())
+		}
+	})
+}
+
 // TestPolicyReload_ConcurrentWithReaders is T10 (run under -race): reloads,
 // concurrent reloads, and the data-path readers of all three engines.
 func TestPolicyReload_ConcurrentWithReaders(t *testing.T) {
