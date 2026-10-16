@@ -7,14 +7,28 @@ import (
 
 // defaultMaxHeaderListSize is the default maximum total size of decoded
 // header fields per header block (in bytes, using RFC 7540 Section 6.5.2
-// calculation: name length + value length + 32 per field). This prevents
-// resource exhaustion from attacker-controlled header blocks.
-const defaultMaxHeaderListSize = 64 * 1024 // 64 KB
+// calculation: name length + value length + 32 per field). It bounds the
+// decoded expansion of attacker-controlled header blocks (e.g. one dynamic
+// table entry referenced many times — the HPACK bomb) at parse time.
+//
+// 1 MiB is set for browser parity (USK-1137): it is above what browsers
+// themselves accept — Chromium net/http/http_network_session.h
+// kSpdyMaxHeaderListSize = 256 * 1024, Firefox
+// network.http.max_response_header_size = 393216 (StaticPrefList.yaml) —
+// so the proxy never rejects a header block a browser would send or
+// accept. It matches Go net/http DefaultMaxHeaderBytes (1 << 20), which
+// x/net http2/server.go maxHeaderListSize() uses by default, and our raw
+// fragment cap maxHeaderFragmentBytes (internal/layer/http2/assembler.go).
+const defaultMaxHeaderListSize = 1 << 20 // 1 MiB
 
-// defaultMaxStringLength is the maximum length of a single decoded string
-// literal (header name or value). This prevents excessive memory allocation
-// from crafted string length fields.
-const defaultMaxStringLength = 16 * 1024 // 16 KB
+// defaultMaxStringLength is the maximum length of a single string literal
+// (header name or value), checked against the wire length before any
+// allocation. It equals defaultMaxHeaderListSize, as x/net
+// http2/server.go maxHeaderStringLen() returns maxHeaderListSize(): a single
+// string can never legitimately exceed the list it belongs to. The old
+// 16 KiB cap rejected real Google Ad Manager requests with a 21–26 KiB
+// :path (USK-1137).
+const defaultMaxStringLength = defaultMaxHeaderListSize
 
 // Decoder decodes HPACK-encoded header blocks.
 type Decoder struct {
