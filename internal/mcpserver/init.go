@@ -468,6 +468,7 @@ func assembleLiveManager(
 	sseTransformEngine *sserules.TransformEngine,
 	passthrough *connector.PassthroughList,
 	targetScope *connector.TargetScope,
+	liveConns *connector.LiveConns,
 	rateLimiter *connector.RateLimiter,
 	budgetManager *connector.BudgetManager,
 	safetyEngine *safety.Engine,
@@ -480,7 +481,7 @@ func assembleLiveManager(
 	buildCfg := NewLiveBuildConfig(cfg, proxyCfg, issuer, pluginv2Engine, hostTLSRegistry)
 	return NewLiveManager(cfg, proxyCfg, store, issuer, pluginv2Engine,
 		holdQueue, releaseTracker, holdTracker, httpInterceptEngine, wsInterceptEngine, grpcInterceptEngine, sseInterceptEngine,
-		httpTransformEngine, sseTransformEngine, passthrough, targetScope, rateLimiter, budgetManager, safetyEngine, perProtoSafety, buildCfg,
+		httpTransformEngine, sseTransformEngine, passthrough, targetScope, liveConns, rateLimiter, budgetManager, safetyEngine, perProtoSafety, buildCfg,
 		socks5Negotiator, recordScope, logger)
 }
 
@@ -574,6 +575,7 @@ func NewLiveManager(
 	sseTransformEngine *sserules.TransformEngine,
 	passthrough *connector.PassthroughList,
 	targetScope *connector.TargetScope,
+	liveConns *connector.LiveConns,
 	rateLimiter *connector.RateLimiter,
 	budgetManager *connector.BudgetManager,
 	safetyEngine *safety.Engine,
@@ -627,6 +629,7 @@ func NewLiveManager(
 			MaxConnections:          cfg.MaxConnections,
 			PassthroughList:         passthrough,
 			Scope:                   targetScope,
+			LiveConns:               liveConns,
 			RateLimiter:             rateLimiter,
 			BudgetManager:           budgetManager,
 			SOCKS5Negotiator:        socks5Negotiator,

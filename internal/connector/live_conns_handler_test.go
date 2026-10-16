@@ -174,17 +174,6 @@ func assertClosedWithin(t *testing.T, c net.Conn, d time.Duration) {
 	}
 }
 
-func waitFor(t *testing.T, d time.Duration, what string, cond func() bool) {
-	t.Helper()
-	deadline := time.Now().Add(d)
-	for !cond() {
-		if time.Now().After(deadline) {
-			t.Fatalf("timed out after %v waiting for %s", d, what)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-}
-
 func denyHost(scope *TargetScope, host string) {
 	scope.ReplacePolicyRules(nil, []TargetRule{{Hostname: host}}, PolicyOrigin{Source: "test"})
 }

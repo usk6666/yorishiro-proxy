@@ -101,6 +101,12 @@ type Deps struct {
 	// SOCKS5 negotiations. nil = allow all.
 	Scope *connector.TargetScope
 
+	// LiveConns is the process-wide live-connection registry (USK-1160).
+	// The CONNECT, SOCKS5 and plain-HTTP-forward handlers register every
+	// connection they admit, so a policy change that no longer admits its
+	// target closes it. nil disables tracking.
+	LiveConns *connector.LiveConns
+
 	// RecordScope is the recording-only observability filter applied by
 	// RecordStep (USK-776). nil = capture every flow (current default).
 	// When non-nil, the same pointer is shared with the MCP control
@@ -426,6 +432,7 @@ func BuildLiveStack(_ context.Context, deps Deps) (*Stack, error) {
 		BuildCfg:            deps.BuildConfig,
 		Scope:               deps.Scope,
 		RateLimiter:         deps.RateLimiter,
+		LiveConns:           deps.LiveConns,
 		PassthroughList:     deps.PassthroughList,
 		PassthroughObserver: passthroughObserver,
 		OnStack:             buildOnStack(p, deps, logger),
@@ -459,6 +466,7 @@ func BuildLiveStack(_ context.Context, deps Deps) (*Stack, error) {
 	socks5Handler := connector.NewSOCKS5Handler(connector.SOCKS5HandlerConfig{
 		Negotiator:          socks5Negotiator,
 		BuildCfg:            deps.BuildConfig,
+		LiveConns:           deps.LiveConns,
 		PassthroughList:     deps.PassthroughList,
 		PassthroughObserver: passthroughObserver,
 		OnStack:             buildOnStack(p, deps, logger),
@@ -481,6 +489,7 @@ func BuildLiveStack(_ context.Context, deps Deps) (*Stack, error) {
 		BuildCfg:               deps.BuildConfig,
 		Scope:                  deps.Scope,
 		RateLimiter:            deps.RateLimiter,
+		LiveConns:              deps.LiveConns,
 		OnStack:                buildOnStack(p, deps, logger),
 		RequestTimeout:         deps.RequestTimeout,
 		RequestTimeoutProvider: wrapper.RequestTimeout,

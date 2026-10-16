@@ -279,21 +279,16 @@ func (n *SOCKS5Negotiator) Negotiate(ctx context.Context, conn net.Conn) (contex
 	//  2. The bytechunk (raw TCP) route does build a stack, but its
 	//     envelopes carry no TargetHost, so HostScopeStep short-circuits
 	//     before the derivation. Tracked as USK-1083.
-	if n.Scope != nil && n.Scope.HasRules() {
-		host, portStr, splitErr := net.SplitHostPort(target)
-		port := 0
-		if splitErr == nil {
-			if p, perr := strconv.Atoi(portStr); perr == nil {
-				port = p
-			}
-		}
-		allowed, reason := n.Scope.CheckTarget("", host, port, "")
-		if !allowed {
-			n.logger(ctx).Info("socks5 target blocked by scope",
-				"target", target, "reason", reason)
-			_ = writeSOCKS5Reply(conn, socks5ReplyConnectionNotAllowed)
-			return ctx, target, ErrSOCKS5BlockedByScope
-		}
+	//
+	// USK-1160: a later policy change does reach both residues — the
+	// handler registers the tunnel in LiveConns with socks5ScopeCheck, and
+	// a reload / security-tool write that no longer admits target closes
+	// it. The scheme used for that re-check is the same blank one.
+	if allowed, reason := socks5ScopeCheck(n.Scope, target); !allowed {
+		n.logger(ctx).Info("socks5 target blocked by scope",
+			"target", target, "reason", reason)
+		_ = writeSOCKS5Reply(conn, socks5ReplyConnectionNotAllowed)
+		return ctx, target, ErrSOCKS5BlockedByScope
 	}
 
 	// Step 4: RateLimit check.
@@ -634,4 +629,23 @@ func (n *SOCKS5Negotiator) logger(ctx context.Context) *slog.Logger {
 		return l
 	}
 	return slog.Default()
+}
+
+// socks5ScopeCheck is the SOCKS5 gate's scope check: blank scheme (see the
+// USK-1061 note in Negotiate), the requested host and port, path "". It is
+// both the admission check and the live-connection predicate (USK-1160).
+// A nil or rule-less scope allows everything; an unparsable port is
+// checked as 0, exactly as at admission.
+func socks5ScopeCheck(scope *TargetScope, target string) (allowed bool, reason string) {
+	if scope == nil || !scope.HasRules() {
+		return true, ""
+	}
+	host, portStr, splitErr := net.SplitHostPort(target)
+	port := 0
+	if splitErr == nil {
+		if p, perr := strconv.Atoi(portStr); perr == nil {
+			port = p
+		}
+	}
+	return scope.CheckTarget("", host, port, "")
 }

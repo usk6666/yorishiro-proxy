@@ -199,6 +199,8 @@ func (s *Server) handleSetTargetScope(params securityParams) (*gomcp.CallToolRes
 	if err := s.connector.targetScope.SetAgentRules(allows, denies); err != nil {
 		return nil, nil, fmt.Errorf("set agent rules: %w", err)
 	}
+	// USK-1160: close the live connections the new rules no longer admit.
+	s.connector.liveConns.Reconcile("security_tool")
 
 	currentAllows, currentDenies := s.connector.targetScope.AgentRules()
 	return nil, &setTargetScopeResult{
@@ -238,6 +240,8 @@ func (s *Server) handleUpdateTargetScope(params securityParams) (*gomcp.CallTool
 	); err != nil {
 		return nil, nil, fmt.Errorf("merge agent rules: %w", err)
 	}
+	// USK-1160: close the live connections the new rules no longer admit.
+	s.connector.liveConns.Reconcile("security_tool")
 
 	currentAllows, currentDenies := s.connector.targetScope.AgentRules()
 	return nil, &setTargetScopeResult{

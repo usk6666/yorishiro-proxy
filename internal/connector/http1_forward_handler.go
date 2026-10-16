@@ -159,23 +159,37 @@ func NewHTTP1ForwardHandler(cfg HTTP1ForwardHandlerConfig) HandlerFunc {
 		// Step 2: TargetScope check. Plain HTTP forward proxy uses scheme
 		// "http" so scope rules can disambiguate http vs https traffic for
 		// the same host.
-		if cfg.Scope != nil && cfg.Scope.HasRules() {
-			host, portStr, splitErr := net.SplitHostPort(target)
-			if splitErr != nil {
-				connLogger.Debug("plain HTTP: invalid target", "error", splitErr)
-				writeForwardErrorResponse(pc, 400, "Bad Request",
-					"yorishiro-proxy: invalid forward-proxy target")
-				return nil
-			}
-			port, _ := strconv.Atoi(portStr)
-			allowed, reason := cfg.Scope.CheckTarget("http", host, port, "")
-			if !allowed {
-				connLogger.Info("plain HTTP target blocked by scope",
-					"reason", reason)
-				writeForwardErrorResponse(pc, 403, "Forbidden",
-					"yorishiro-proxy: target blocked by scope")
-				return nil
-			}
+		allowed, reason, splitErr := forwardScopeCheck(cfg.Scope, target)
+		if splitErr != nil {
+			connLogger.Debug("plain HTTP: invalid target", "error", splitErr)
+			writeForwardErrorResponse(pc, 400, "Bad Request",
+				"yorishiro-proxy: invalid forward-proxy target")
+			return nil
+		}
+		if !allowed {
+			connLogger.Info("plain HTTP target blocked by scope",
+				"reason", reason)
+			writeForwardErrorResponse(pc, 403, "Forbidden",
+				"yorishiro-proxy: target blocked by scope")
+			return nil
+		}
+
+		// USK-1160: track the admitted connection. One entry per accepted
+		// client connection, keyed on target — the upstream this handler
+		// dials and to which the connection's upstream leg stays bound for
+		// its whole life (later keep-alive requests reuse it whatever their
+		// Host header says; HostScopeStep re-checks each of them). A policy
+		// change that no longer admits target cancels ctx, which the dial
+		// and the OnStack session watch.
+		ctx, release, ok := trackAdmitted(ctx, cfg.LiveConns, "http1-forward", target, func() (bool, string) {
+			allowed, reason, _ := forwardScopeCheck(cfg.Scope, target)
+			return allowed, reason
+		}, connLogger)
+		defer release()
+		if !ok {
+			writeForwardErrorResponse(pc, 403, "Forbidden",
+				"yorishiro-proxy: target blocked by scope")
+			return nil
 		}
 
 		// Step 3: RateLimit check.
@@ -249,6 +263,24 @@ func NewHTTP1ForwardHandler(cfg HTTP1ForwardHandlerConfig) HandlerFunc {
 
 		return nil
 	}
+}
+
+// forwardScopeCheck is the plain-HTTP forward gate's scope check: scheme
+// "http", the forward target's host and port, path "". It is both the
+// admission check and the live-connection predicate (USK-1160). A nil or
+// rule-less scope allows everything. err is non-nil only for a target that
+// is not host:port (then allowed is false).
+func forwardScopeCheck(scope *TargetScope, target string) (allowed bool, reason string, err error) {
+	if scope == nil || !scope.HasRules() {
+		return true, "", nil
+	}
+	host, portStr, err := net.SplitHostPort(target)
+	if err != nil {
+		return false, "invalid forward-proxy target", err
+	}
+	port, _ := strconv.Atoi(portStr)
+	allowed, reason = scope.CheckTarget("http", host, port, "")
+	return allowed, reason, nil
 }
 
 // peekForwardTarget peeks the first request bytes from pc and extracts the

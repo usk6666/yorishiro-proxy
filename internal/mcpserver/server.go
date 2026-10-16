@@ -390,6 +390,11 @@ func assembleAndRunMCPServer(
 	logger *slog.Logger,
 ) error {
 	targetScope := InitTargetScope(targetScopePolicy)
+	// USK-1160: process-singleton live-connection registry. The data-path
+	// gates register admitted connections in it (proxybuild.Deps.LiveConns);
+	// the policy reloader and the MCP security tool reconcile it after
+	// every successful scope write.
+	liveConns := connector.NewLiveConns(logger)
 	rateLimiter := InitRateLimiter(targetScopePolicy, logger)
 	// USK-818: process-singleton BudgetManager owned here so the live
 	// data path's BudgetStep, the resend/fuzz dispatch helpers, and the
@@ -440,7 +445,7 @@ func assembleAndRunMCPServer(
 
 	manager, err := assembleLiveManager(cfg, proxyCfg, store, issuer, pluginv2Engine,
 		holdQueue, releaseTracker, holdTracker, httpInterceptEngine, wsInterceptEngine, grpcInterceptEngine, sseInterceptEngine,
-		httpTransformEngine, sseTransformEngine, passthrough, targetScope, rateLimiter, budgetManager, safetyEngine, perProtoSafety, hostTLSRegistry,
+		httpTransformEngine, sseTransformEngine, passthrough, targetScope, liveConns, rateLimiter, budgetManager, safetyEngine, perProtoSafety, hostTLSRegistry,
 		socks5Negotiator, recordScope, logger)
 	if err != nil {
 		return err
@@ -478,7 +483,7 @@ func assembleAndRunMCPServer(
 	// shutdown callback can reach the manager). Deferred after
 	// budgetManager.Stop so it runs first: no reload can touch a stopped
 	// BudgetManager.
-	stopReloader := startPolicyReloader(ctx, reload, targetScope, rateLimiter, budgetManager, logger)
+	stopReloader := startPolicyReloader(ctx, reload, targetScope, liveConns, rateLimiter, budgetManager, logger)
 	defer stopReloader()
 
 	socks5AuthSetter := newSOCKS5AuthAdapter(socks5Negotiator, logger)
@@ -489,6 +494,7 @@ func assembleAndRunMCPServer(
 	if err != nil {
 		return err
 	}
+	opts = append(opts, mcp.WithLiveConns(liveConns))
 
 	mcpServer := mcp.NewServer(
 		mcpComps.misc,

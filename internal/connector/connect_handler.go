@@ -193,6 +193,18 @@ func NewCONNECTHandler(cfg CONNECTHandlerConfig) HandlerFunc {
 			return nil
 		}
 
+		// USK-1160: track the admitted tunnel so a policy change that no
+		// longer admits target cancels ctx — which every route below
+		// (passthrough relay, inner dispatch, TLS MITM stack) watches.
+		ctx, release, ok := trackAdmitted(ctx, cfg.LiveConns, "connect", target, func() (bool, string) {
+			allowed, reason, _ := connectScopeCheck(cfg.Scope, target)
+			return allowed, reason
+		}, connLogger)
+		defer release()
+		if !ok {
+			return nil
+		}
+
 		// Step 4: TLS passthrough check.
 		if connectPassthrough(ctx, cfg, pc, target, connLogger) {
 			return nil
@@ -214,18 +226,14 @@ func NewCONNECTHandler(cfg CONNECTHandlerConfig) HandlerFunc {
 // connectPolicyAllow runs the scope and rate-limit gates. Returns false when
 // the connection has been rejected (a log line was emitted; caller returns).
 func connectPolicyAllow(cfg CONNECTHandlerConfig, target string, logger *slog.Logger) bool {
-	if cfg.Scope != nil && cfg.Scope.HasRules() {
-		host, portStr, splitErr := net.SplitHostPort(target)
-		if splitErr != nil {
-			logger.Debug("invalid CONNECT target", "error", splitErr)
-			return false
-		}
-		port, _ := strconv.Atoi(portStr)
-		allowed, reason := cfg.Scope.CheckTarget("https", host, port, "")
-		if !allowed {
-			logger.Info("CONNECT target blocked by scope", "reason", reason)
-			return false
-		}
+	allowed, reason, splitErr := connectScopeCheck(cfg.Scope, target)
+	if splitErr != nil {
+		logger.Debug("invalid CONNECT target", "error", splitErr)
+		return false
+	}
+	if !allowed {
+		logger.Info("CONNECT target blocked by scope", "reason", reason)
+		return false
 	}
 	if cfg.RateLimiter != nil {
 		host, _, _ := net.SplitHostPort(target)
@@ -237,6 +245,25 @@ func connectPolicyAllow(cfg CONNECTHandlerConfig, target string, logger *slog.Lo
 		}
 	}
 	return true
+}
+
+// connectScopeCheck is the CONNECT gate's scope check: scheme "https",
+// the CONNECT authority's host and port, path "". It is both the admission
+// check and the live-connection predicate (USK-1160), so a tunnel survives
+// a policy change iff an identical new CONNECT would be admitted. A nil or
+// rule-less scope allows everything. err is non-nil only for an authority
+// that is not host:port (then allowed is false).
+func connectScopeCheck(scope *TargetScope, target string) (allowed bool, reason string, err error) {
+	if scope == nil || !scope.HasRules() {
+		return true, "", nil
+	}
+	host, portStr, err := net.SplitHostPort(target)
+	if err != nil {
+		return false, "invalid CONNECT target", err
+	}
+	port, _ := strconv.Atoi(portStr)
+	allowed, reason = scope.CheckTarget("https", host, port, "")
+	return allowed, reason, nil
 }
 
 // connectPassthrough handles the TLS passthrough relay. Returns true when
@@ -260,10 +287,21 @@ func connectPassthrough(ctx context.Context, cfg CONNECTHandlerConfig, pc *PeekC
 		return true
 	}
 	relayErr := runPassthroughRelay(dialCtx, pc, target, opts, cfg.PassthroughObserver)
-	if relayErr != nil {
+	logPassthroughEnd(logger, target, host, relayErr)
+	return true
+}
+
+// logPassthroughEnd logs a passthrough relay's abnormal end. A relay cut by
+// a policy change (USK-1160) was already logged at Info by
+// LiveConns.Reconcile, so it is only a Debug line here.
+func logPassthroughEnd(logger *slog.Logger, target, host string, relayErr error) {
+	switch {
+	case relayErr == nil:
+	case errors.Is(relayErr, ErrTargetScopeRevoked):
+		logger.Debug("TLS passthrough closed: target no longer in scope", "target", target, "error", relayErr)
+	default:
 		logger.Warn("TLS passthrough ended", "target", target, "sni_peek_target", host, "error", relayErr)
 	}
-	return true
 }
 
 // runPassthroughRelay dispatches to the observer-aware relay when an

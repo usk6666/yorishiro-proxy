@@ -28,9 +28,13 @@ import (
 //
 // A reload re-reads the same source boot used, validates it completely,
 // and only then swaps the three engines. Any failure leaves the running
-// policy untouched. New connections and new envelopes see the new policy;
-// decisions already taken for a live connection (passthrough relays,
-// running fuzz jobs, held intercepts) are not revisited (USK-1128).
+// policy untouched. New connections and new envelopes see the new policy,
+// and every live connection admitted by the CONNECT / SOCKS5 / plain-forward
+// gates is re-evaluated with the check that admitted it: one that would not
+// be admitted now is closed (connector.LiveConns, USK-1160) — including
+// TLS passthrough relays and bytechunk tunnels, which no per-envelope step
+// ever re-checks. A path_prefix-only deny closes no connection; the
+// per-request HTTPScopeStep enforces it.
 
 // PolicySource names where the Policy Layer is read from. The precedence is
 // the one LoadConfigs applies at boot: PolicyFile (-target-policy-file) when
@@ -234,6 +238,10 @@ func (r *policyReloader) Reload(trigger string) error {
 	beforeAllows, beforeDenies := r.scope.PolicyRules()
 	outside := r.scope.ReplacePolicyRules(snap.allows, snap.denies,
 		connector.PolicyOrigin{Source: loaded.Source, LoadedAt: r.now()})
+	// USK-1160: close the live connections the new scope no longer admits.
+	// Inside r.mu, right after the scope swap, so reconciles of
+	// concurrent reloads cannot interleave out of order.
+	liveClosed := r.liveConns.Reconcile(trigger)
 	r.rl.SetPolicyLimits(snap.rate)
 	exhausted := r.bm.ReplacePolicyBudget(snap.budget)
 
@@ -257,7 +265,13 @@ func (r *policyReloader) Reload(trigger string) error {
 		"policy_max_duration", snap.budget.MaxDuration.String(),
 		"effective_max_total_requests", effBudget.MaxTotalRequests,
 		"effective_max_duration", effBudget.MaxDuration.String(),
+		"live_conns_closed", liveClosed,
 	)
+	if liveClosed > 0 {
+		r.logger.Warn("target scope policy reload closed live connections",
+			"trigger", trigger,
+			"live_conns_closed", liveClosed)
+	}
 	// The -config source is decoded leniently, as at boot, so a misspelled
 	// key ("target_scope_polcy", "deny") or an emptied file reloads as "no
 	// policy". Refusing it would diverge from boot; say it loudly instead
@@ -336,7 +350,9 @@ func installPolicyReload(opts RunOptions, source PolicySource) PolicyReloadTrigg
 // returned stop function cancels it and waits for an in-flight reload to
 // finish. Call it only once the engines are fully started (BudgetManager
 // armed), so a reload never races boot.
-func startPolicyReloader(ctx context.Context, w policyReloadWiring, scope *connector.TargetScope, rl *connector.RateLimiter, bm *connector.BudgetManager, logger *slog.Logger) (stop func()) {
+//
+// liveConns (may be nil) is reconciled after every successful reload.
+func startPolicyReloader(ctx context.Context, w policyReloadWiring, scope *connector.TargetScope, liveConns *connector.LiveConns, rl *connector.RateLimiter, bm *connector.BudgetManager, logger *slog.Logger) (stop func()) {
 	if w.boot != nil && w.boot.Source != "" {
 		scope.SetPolicyOrigin(connector.PolicyOrigin{Source: w.boot.Source, LoadedAt: time.Now()})
 	}
@@ -344,6 +360,7 @@ func startPolicyReloader(ctx context.Context, w policyReloadWiring, scope *conne
 		return func() {}
 	}
 	reloader := newPolicyReloader(w.source, scope, rl, bm, logger)
+	reloader.liveConns = liveConns
 	rctx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
 	go func() {
