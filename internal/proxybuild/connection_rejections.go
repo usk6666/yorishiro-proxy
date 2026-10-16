@@ -103,6 +103,12 @@ type ConnectionRejections struct {
 	ctx      context.Context
 	cancel   context.CancelFunc
 	wg       sync.WaitGroup
+
+	// beforeRelease is a test-only seam, nil in production. When set
+	// before the first Record, the drainer calls it after observing an
+	// empty queue and before releasing ownership — the exact window the
+	// release-then-recheck in drain exists to cover.
+	beforeRelease func()
 }
 
 // rejectionRecord is one queued audit write.
@@ -257,9 +263,19 @@ func (c *ConnectionRejections) Close() {
 // inScope reports whether the rejection passes capture_scope. The synthetic
 // envelope carries only what was observed before the refusal: the target
 // authority and, for HTTP/1.x, the request line.
+//
+// With no authority (HTTP/1.x origin-form, an unparsable absolute-form
+// target, or a kind that never names a target) no hostname rule can
+// match. The live pipeline would have had the Host header, so an exclude
+// rule on Hostname might well have dropped this request; fail closed and
+// count it as out of scope rather than persist a target the operator may
+// have excluded (USK-1142 review S-1).
 func (c *ConnectionRejections) inScope(info connector.RejectInfo, authority string) bool {
 	if c.scope.IsEmpty() {
 		return true
+	}
+	if authority == "" && c.scope.HasHostnameExclude() {
+		return false
 	}
 	env := &envelope.Envelope{Context: envelope.EnvelopeContext{TargetHost: authority}}
 	if info.DetectedKind == connector.ProtocolHTTP1 {
@@ -327,7 +343,15 @@ func (c *ConnectionRejections) drain() {
 			c.running.Store(false)
 			return
 		default:
+			if c.beforeRelease != nil {
+				c.beforeRelease()
+			}
 			c.running.Store(false)
+			// Store-buffer pattern against enqueue's send + running.Load.
+			// len(chan) is not a synchronising operation in the Go memory
+			// model; this relies on the runtime reading qcount after the
+			// seq-cst Store (true on amd64, and on arm64 via chanlen's
+			// internals). Guarded by the DrainerRecheck tests.
 			if len(c.queue) == 0 || !c.running.CompareAndSwap(false, true) {
 				return
 			}
@@ -376,6 +400,15 @@ func (c *ConnectionRejections) write(rec rejectionRecord) {
 	ctx, cancel := context.WithTimeout(c.ctx, rejectionRecordTimeout)
 	defer cancel()
 	if err := c.store.SaveStream(ctx, st); err != nil {
+		if c.ctx.Err() != nil {
+			// Aborted by Close at shutdown: expected, not data loss to
+			// alert on.
+			c.logger.Debug("proxybuild: capacity-rejection stream save aborted by close",
+				"listener", info.Listener,
+				"error", err,
+			)
+			return
+		}
 		c.logger.Error("proxybuild: capacity-rejection stream save failed",
 			"listener", info.Listener,
 			"target", info.Target,
@@ -505,6 +538,7 @@ type ConnectionRejectionsSnapshot struct {
 	// write rate cap or a full recorder queue.
 	Unrecorded int64 `json:"unrecorded"`
 	// OutOfScope counts rejections not recorded because capture_scope
-	// excludes their target.
+	// excludes their target, or because the target names no host while a
+	// hostname exclude rule is set (fail closed).
 	OutOfScope int64 `json:"out_of_scope"`
 }

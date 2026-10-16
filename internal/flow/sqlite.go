@@ -27,6 +27,10 @@ type SQLiteStore struct {
 	done    chan struct{}
 	wg      sync.WaitGroup
 	logger  *slog.Logger
+
+	// closeMu guards onClose; see OnClose.
+	closeMu sync.Mutex
+	onClose []func()
 }
 
 type writeOp struct {
@@ -1153,8 +1157,28 @@ func (s *SQLiteStore) ClearGRPCSchemas(ctx context.Context) (int64, error) {
 	return deleted, nil
 }
 
-// Close shuts down the writer goroutine and closes the database.
+// OnClose registers fn to run at the start of Close, while the store still
+// accepts writes, in reverse registration order. It lets a background
+// writer whose lifetime is tied to the store stop before the database
+// closes, instead of queueing writes that can no longer complete. fn must
+// not call Close.
+func (s *SQLiteStore) OnClose(fn func()) {
+	s.closeMu.Lock()
+	defer s.closeMu.Unlock()
+	s.onClose = append(s.onClose, fn)
+}
+
+// Close runs the OnClose hooks, shuts down the writer goroutine and closes
+// the database.
 func (s *SQLiteStore) Close() error {
+	s.closeMu.Lock()
+	hooks := s.onClose
+	s.onClose = nil
+	s.closeMu.Unlock()
+	for i := len(hooks) - 1; i >= 0; i-- {
+		hooks[i]()
+	}
+
 	close(s.done)
 	s.wg.Wait()
 	return s.db.Close()

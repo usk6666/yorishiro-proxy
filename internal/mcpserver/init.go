@@ -607,13 +607,20 @@ func NewLiveManager(
 	// loops (via the Manager) so query(status).connection_rejections and
 	// the blocked_by="capacity" audit Streams see every refusal. It
 	// writes through the same store and honours the same capture_scope
-	// as the live RecordStep. Its recorder goroutine runs only while
-	// audit writes are queued, so no explicit shutdown hook is needed.
+	// as the live RecordStep. It is process-lifetime (it outlives
+	// proxy_stop / proxy_start, both of which go through StopAll), so it
+	// is closed from the store's OnClose hook instead: at shutdown that
+	// runs after the deferred StopAll and before the database closes,
+	// aborting any queued audit writes rather than letting them fail
+	// against a closed store.
 	rejections := proxybuild.NewConnectionRejections(proxybuild.ConnectionRejectionsConfig{
 		Store:  store,
 		Scope:  recordScope,
 		Logger: logger,
 	})
+	if store != nil {
+		store.OnClose(rejections.Close)
+	}
 	factory := func(ctx context.Context, name, addr string) (*proxybuild.Stack, error) {
 		return proxybuild.BuildLiveStack(ctx, proxybuild.Deps{
 			Logger:                  logger,
