@@ -24,7 +24,7 @@ var largePath = "/?q=" + strings.Repeat("x", 21000)
 // TestLayer_ServerRole_LargePath_SplitAcrossContinuation covers Test Plan #8:
 // a body-less GET whose 21 KiB :path is sent as raw (non-Huffman) HPACK split
 // across HEADERS + CONTINUATION yields one H2HeadersEvent carrying the full
-// path, then io.EOF.
+// path (split into Path and RawQuery), then io.EOF.
 func TestLayer_ServerRole_LargePath_SplitAcrossContinuation(t *testing.T) {
 	l, peer, cleanup := startServerLayer(t)
 	defer cleanup()
@@ -55,8 +55,10 @@ func TestLayer_ServerRole_LargePath_SplitAcrossContinuation(t *testing.T) {
 	if !ok {
 		t.Fatalf("first Message = %T, want *H2HeadersEvent", env.Message)
 	}
-	if evt.Path != largePath {
-		t.Errorf("Path is %d bytes, want the full %d-byte :path", len(evt.Path), len(largePath))
+	// H2HeadersEvent splits :path into Path and RawQuery at the first '?'.
+	if got := evt.Path + "?" + evt.RawQuery; evt.Path != "/" || got != largePath {
+		t.Errorf("Path = %q, RawQuery is %d bytes; want the full %d-byte :path %q?<%d bytes>",
+			evt.Path, len(evt.RawQuery), len(largePath), "/", len(largePath)-2)
 	}
 	if evt.Method != "GET" || evt.Authority != "securepubads.g.doubleclick.net" {
 		t.Errorf("pseudo-headers = %s %s, want GET securepubads.g.doubleclick.net", evt.Method, evt.Authority)
