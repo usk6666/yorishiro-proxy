@@ -338,6 +338,14 @@ type capacityRejectionHarness struct {
 
 func newCapacityRejectionHarness(t *testing.T, maxConns int) *capacityRejectionHarness {
 	t.Helper()
+	return newCapacityRejectionHarnessWith(t, maxConns, nil)
+}
+
+// newCapacityRejectionHarnessWith is newCapacityRejectionHarness with a
+// hook to adjust the FullListenerConfig (OnReject, Logger, ...) and the
+// constructed listener (test clock) before Start.
+func newCapacityRejectionHarnessWith(t *testing.T, maxConns int, mutate func(*FullListenerConfig), prepare ...func(*FullListener)) *capacityRejectionHarness {
+	t.Helper()
 	h := &capacityRejectionHarness{
 		t:        t,
 		barrier:  make(chan struct{}),
@@ -347,7 +355,7 @@ func newCapacityRejectionHarness(t *testing.T, maxConns int) *capacityRejectionH
 		mu       sync.Mutex
 		handling int
 	)
-	h.fl = newTestFullListener(t, FullListenerConfig{
+	cfg := FullListenerConfig{
 		MaxConnections: maxConns,
 		OnTCP: func(ctx context.Context, pc *PeekConn) error {
 			mu.Lock()
@@ -359,7 +367,14 @@ func newCapacityRejectionHarness(t *testing.T, maxConns int) *capacityRejectionH
 			mu.Unlock()
 			return nil
 		},
-	})
+	}
+	if mutate != nil {
+		mutate(&cfg)
+	}
+	h.fl = newTestFullListener(t, cfg)
+	for _, p := range prepare {
+		p(h.fl)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	h.cancel = cancel
 	startFullListener(t, ctx, h.fl)

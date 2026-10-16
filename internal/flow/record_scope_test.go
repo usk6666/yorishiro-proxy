@@ -371,3 +371,30 @@ func TestRecordScope_HTTPMessage_AuthorityWins(t *testing.T) {
 	}
 	_ = url.URL{}
 }
+
+func TestRecordScope_HasHostnameExclude(t *testing.T) {
+	var nilScope *RecordScope
+	if nilScope.HasHostnameExclude() {
+		t.Error("nil scope: HasHostnameExclude = true, want false")
+	}
+	cases := []struct {
+		name     string
+		includes []ScopeRule
+		excludes []ScopeRule
+		want     bool
+	}{
+		{name: "empty", want: false},
+		{name: "include hostname only", includes: []ScopeRule{{Hostname: "a.example"}}, want: false},
+		{name: "exclude path or method only", excludes: []ScopeRule{{URLPrefix: "/admin"}, {Method: "DELETE"}}, want: false},
+		{name: "exclude hostname", excludes: []ScopeRule{{URLPrefix: "/admin"}, {Hostname: "*.example"}}, want: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rs := NewRecordScope()
+			rs.SetRules(tc.includes, tc.excludes)
+			if got := rs.HasHostnameExclude(); got != tc.want {
+				t.Errorf("HasHostnameExclude = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
