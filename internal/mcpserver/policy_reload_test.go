@@ -77,10 +77,10 @@ func (h *recordingHandler) dump() string {
 
 func discardLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
 
-// writeFile writes content to path atomically (temp file + rename), the way
+// writeFileAtomic writes content to path atomically (temp file + rename), the way
 // an operator's distributor should, so concurrent readers never observe a
 // half-written file.
-func writeFile(t *testing.T, path, content string) {
+func writeFileAtomic(t *testing.T, path, content string) {
 	t.Helper()
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, []byte(content), 0o600); err != nil {
@@ -145,7 +145,7 @@ const bootPolicy = `{
 // booting with that file). request_count survives (R6).
 func TestPolicyReload_AppliesNewPolicyFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "policy.json")
-	writeFile(t, path, bootPolicy)
+	writeFileAtomic(t, path, bootPolicy)
 	e := bootEngines(t, "", path)
 	e.bm.RecordRequest()
 	e.bm.RecordRequest()
@@ -154,7 +154,7 @@ func TestPolicyReload_AppliesNewPolicyFile(t *testing.T) {
 		t.Fatal("precondition: old.test blocked at boot")
 	}
 
-	writeFile(t, path, `{"allows":[{"hostname":"new.test"}],"denies":[{"hostname":"old.test"}]}`)
+	writeFileAtomic(t, path, `{"allows":[{"hostname":"new.test"}],"denies":[{"hostname":"old.test"}]}`)
 	before := time.Now()
 	if err := e.reloader(PolicySource{PolicyFile: path}, discardLogger()).Reload("test"); err != nil {
 		t.Fatalf("Reload: %v", err)
@@ -200,7 +200,7 @@ func TestPolicyReload_RejectsInvalidPolicyKeepsOld(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "policy.json")
-			writeFile(t, path, bootPolicy)
+			writeFileAtomic(t, path, bootPolicy)
 			e := bootEngines(t, "", path)
 			e.scope.SetPolicyOrigin(connector.PolicyOrigin{Source: "policy file", LoadedAt: time.Unix(1, 0)})
 			want := e.state()
@@ -210,7 +210,7 @@ func TestPolicyReload_RejectsInvalidPolicyKeepsOld(t *testing.T) {
 					t.Fatal(err)
 				}
 			} else {
-				writeFile(t, path, tc.content)
+				writeFileAtomic(t, path, tc.content)
 			}
 
 			err := e.reloader(PolicySource{PolicyFile: path}, discardLogger()).Reload("test")
@@ -235,11 +235,11 @@ func TestPolicyReload_RejectsInvalidPolicyKeepsOld(t *testing.T) {
 // whole config exactly as boot does.
 func TestPolicyReload_ConfigFileSource(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
-	writeFile(t, path, `{"target_scope_policy":{"allows":[{"hostname":"old.test"}]}}`)
+	writeFileAtomic(t, path, `{"target_scope_policy":{"allows":[{"hostname":"old.test"}]}}`)
 	e := bootEngines(t, path, "")
 	r := e.reloader(PolicySource{ConfigFile: path}, discardLogger())
 
-	writeFile(t, path, `{"target_scope_policy":{"allows":[{"hostname":"new.test"}]}}`)
+	writeFileAtomic(t, path, `{"target_scope_policy":{"allows":[{"hostname":"new.test"}]}}`)
 	if err := r.Reload("test"); err != nil {
 		t.Fatalf("Reload: %v", err)
 	}
@@ -253,7 +253,7 @@ func TestPolicyReload_ConfigFileSource(t *testing.T) {
 	// A config that boot would refuse (invalid protocol limits) is refused
 	// on reload too, even though its policy section is valid.
 	want := e.state()
-	writeFile(t, path, `{"target_scope_policy":{"allows":[{"hostname":"other.test"}]},"web_socket":{"max_frame_size":-1}}`)
+	writeFileAtomic(t, path, `{"target_scope_policy":{"allows":[{"hostname":"other.test"}]},"web_socket":{"max_frame_size":-1}}`)
 	if err := r.Reload("test"); err == nil {
 		t.Error("Reload accepted a config file that boot would reject")
 	}
@@ -262,7 +262,7 @@ func TestPolicyReload_ConfigFileSource(t *testing.T) {
 	}
 
 	// Removing the section is a full replacement: no policy at all.
-	writeFile(t, path, `{}`)
+	writeFileAtomic(t, path, `{}`)
 	if err := r.Reload("test"); err != nil {
 		t.Fatalf("Reload of a config without target_scope_policy: %v", err)
 	}
@@ -277,12 +277,12 @@ func TestPolicyReload_PolicyFileShadowsConfigFile(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.json")
 	polPath := filepath.Join(dir, "policy.json")
-	writeFile(t, cfgPath, `{"target_scope_policy":{"allows":[{"hostname":"from-config.test"}]}}`)
-	writeFile(t, polPath, `{"allows":[{"hostname":"from-policy.test"}]}`)
+	writeFileAtomic(t, cfgPath, `{"target_scope_policy":{"allows":[{"hostname":"from-config.test"}]}}`)
+	writeFileAtomic(t, polPath, `{"allows":[{"hostname":"from-policy.test"}]}`)
 	e := bootEngines(t, cfgPath, polPath)
 
-	writeFile(t, cfgPath, `{"target_scope_policy":{"allows":[{"hostname":"config-v2.test"}]}}`)
-	writeFile(t, polPath, `{"allows":[{"hostname":"policy-v2.test"}]}`)
+	writeFileAtomic(t, cfgPath, `{"target_scope_policy":{"allows":[{"hostname":"config-v2.test"}]}}`)
+	writeFileAtomic(t, polPath, `{"allows":[{"hostname":"policy-v2.test"}]}`)
 	if err := e.reloader(PolicySource{ConfigFile: cfgPath, PolicyFile: polPath}, discardLogger()).Reload("test"); err != nil {
 		t.Fatalf("Reload: %v", err)
 	}
@@ -310,7 +310,7 @@ func TestPolicyReload_NoSourceWarnsAndDoesNothing(t *testing.T) {
 // agent allows that the narrowed policy no longer covers (R2, T6).
 func TestPolicyReload_Logs(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "policy.json")
-	writeFile(t, path, `{"allows":[{"hostname":"*.a.test"},{"hostname":"*.b.test"}],"denies":[{"hostname":"bad.test"}]}`)
+	writeFileAtomic(t, path, `{"allows":[{"hostname":"*.a.test"},{"hostname":"*.b.test"}],"denies":[{"hostname":"bad.test"}]}`)
 	e := bootEngines(t, "", path)
 	if err := e.scope.SetAgentRules([]connector.TargetRule{{Hostname: "x.a.test"}, {Hostname: "y.b.test"}}, nil); err != nil {
 		t.Fatalf("SetAgentRules: %v", err)
@@ -319,7 +319,7 @@ func TestPolicyReload_Logs(t *testing.T) {
 	r := e.reloader(PolicySource{PolicyFile: path}, slog.New(h))
 
 	newPolicy := `{"allows":[{"hostname":"*.a.test"}],"rate_limits":{"max_requests_per_second":5},"budget":{"max_duration":"1h"}}`
-	writeFile(t, path, newPolicy)
+	writeFileAtomic(t, path, newPolicy)
 	if err := r.Reload("SIGHUP"); err != nil {
 		t.Fatalf("Reload: %v", err)
 	}
@@ -357,7 +357,7 @@ func TestPolicyReload_Logs(t *testing.T) {
 		t.Errorf("Warn agent_allows = %q, want only y.b.test", got)
 	}
 
-	writeFile(t, path, `{"allows":[{"hostname":"*"}]}`)
+	writeFileAtomic(t, path, `{"allows":[{"hostname":"*"}]}`)
 	if err := r.Reload("SIGHUP"); err == nil {
 		t.Fatal("Reload accepted hostname \"*\"")
 	}
@@ -378,13 +378,13 @@ func TestPolicyReload_Logs(t *testing.T) {
 // about to stop.
 func TestPolicyReload_WarnsWhenBudgetAlreadyExhausted(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "policy.json")
-	writeFile(t, path, `{}`)
+	writeFileAtomic(t, path, `{}`)
 	e := bootEngines(t, "", path)
 	for i := 0; i < 3; i++ {
 		e.bm.RecordRequest()
 	}
 	h := &recordingHandler{}
-	writeFile(t, path, `{"budget":{"max_total_requests":2}}`)
+	writeFileAtomic(t, path, `{"budget":{"max_total_requests":2}}`)
 	if err := e.reloader(PolicySource{PolicyFile: path}, slog.New(h)).Reload("test"); err != nil {
 		t.Fatalf("Reload: %v", err)
 	}
@@ -424,16 +424,16 @@ func TestPolicyReload_WarnsWhenPolicyRulesRemoved(t *testing.T) {
 			var e policyEngines
 			var source PolicySource
 			if tc.policyFile {
-				writeFile(t, path, bootPolicyFile)
+				writeFileAtomic(t, path, bootPolicyFile)
 				e = bootEngines(t, "", path)
 				source = PolicySource{PolicyFile: path}
 			} else {
-				writeFile(t, path, bootConfig)
+				writeFileAtomic(t, path, bootConfig)
 				e = bootEngines(t, path, "")
 				source = PolicySource{ConfigFile: path}
 			}
 			h := &recordingHandler{}
-			writeFile(t, path, tc.content)
+			writeFileAtomic(t, path, tc.content)
 			if err := e.reloader(source, slog.New(h)).Reload("SIGHUP"); err != nil {
 				t.Fatalf("Reload: %v (boot accepts this file, so reload must too)", err)
 			}
@@ -468,10 +468,10 @@ func TestPolicyReload_WarnsWhenPolicyRulesRemoved(t *testing.T) {
 	// reload or every rule-less policy.
 	t.Run("narrowing that keeps rules does not warn", func(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "config.json")
-		writeFile(t, path, bootConfig)
+		writeFileAtomic(t, path, bootConfig)
 		e := bootEngines(t, path, "")
 		h := &recordingHandler{}
-		writeFile(t, path, `{"target_scope_policy":{"denies":[{"hostname":"bad.old.test"}]}}`)
+		writeFileAtomic(t, path, `{"target_scope_policy":{"denies":[{"hostname":"bad.old.test"}]}}`)
 		if err := e.reloader(PolicySource{ConfigFile: path}, slog.New(h)).Reload("SIGHUP"); err != nil {
 			t.Fatalf("Reload: %v", err)
 		}
@@ -481,10 +481,10 @@ func TestPolicyReload_WarnsWhenPolicyRulesRemoved(t *testing.T) {
 	})
 	t.Run("no rules before and after does not warn", func(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "config.json")
-		writeFile(t, path, `{}`)
+		writeFileAtomic(t, path, `{}`)
 		e := bootEngines(t, path, "")
 		h := &recordingHandler{}
-		writeFile(t, path, `{"target_scope_policy":{"rate_limits":{"max_requests_per_second":5}}}`)
+		writeFileAtomic(t, path, `{"target_scope_policy":{"rate_limits":{"max_requests_per_second":5}}}`)
 		if err := e.reloader(PolicySource{ConfigFile: path}, slog.New(h)).Reload("SIGHUP"); err != nil {
 			t.Fatalf("Reload: %v", err)
 		}
@@ -499,7 +499,7 @@ func TestPolicyReload_WarnsWhenPolicyRulesRemoved(t *testing.T) {
 func TestPolicyReload_ConcurrentWithReaders(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "policy.json")
-	writeFile(t, path, bootPolicy)
+	writeFileAtomic(t, path, bootPolicy)
 	e := bootEngines(t, "", path)
 	r := e.reloader(PolicySource{PolicyFile: path}, discardLogger())
 
@@ -545,7 +545,7 @@ func TestPolicyReload_ConcurrentWithReaders(t *testing.T) {
 		}()
 	}
 	for i := 0; i < 50; i++ {
-		writeFile(t, path, variants[i%2])
+		writeFileAtomic(t, path, variants[i%2])
 		time.Sleep(time.Millisecond)
 	}
 	close(stop)
@@ -559,7 +559,7 @@ func TestPolicyReload_ConcurrentWithReaders(t *testing.T) {
 // reload and reports its result; cancelling ctx ends the loop.
 func TestPolicyReloader_RunConsumesTriggers(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "policy.json")
-	writeFile(t, path, bootPolicy)
+	writeFileAtomic(t, path, bootPolicy)
 	e := bootEngines(t, "", path)
 	r := e.reloader(PolicySource{PolicyFile: path}, discardLogger())
 
@@ -572,7 +572,7 @@ func TestPolicyReloader_RunConsumesTriggers(t *testing.T) {
 		r.run(ctx, trig, "test", func(err error) { results <- err })
 	}()
 
-	writeFile(t, path, `{"denies":[{"hostname":"old.test"}]}`)
+	writeFileAtomic(t, path, `{"denies":[{"hostname":"old.test"}]}`)
 	trig <- struct{}{}
 	select {
 	case err := <-results:
@@ -605,9 +605,9 @@ func TestPolicyReloader_RunConsumesTriggers(t *testing.T) {
 func TestRun_PolicyReloadHookOnlyWithPolicySource(t *testing.T) {
 	dir := t.TempDir()
 	policyPath := filepath.Join(dir, "policy.json")
-	writeFile(t, policyPath, `{"allows":[{"hostname":"x.test"}]}`)
+	writeFileAtomic(t, policyPath, `{"allows":[{"hostname":"x.test"}]}`)
 	configPath := filepath.Join(dir, "config.json")
-	writeFile(t, configPath, `{}`)
+	writeFileAtomic(t, configPath, `{}`)
 
 	cases := []struct {
 		name          string
