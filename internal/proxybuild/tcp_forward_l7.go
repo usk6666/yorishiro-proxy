@@ -327,9 +327,12 @@ func runForwardHTTP1ExchangeWithFilter(
 	}
 }
 
-// tcpForwardRequestPeekTimeout bounds the first-envelope peek used by the
-// websocket/sse expectation filter. A client that opens the conn but
-// never sends a request should not hold up the goroutine indefinitely.
+// tcpForwardRequestPeekTimeout is the ctx deadline for the first-envelope
+// peek used by the websocket/sse expectation filter. Note that the HTTP/1.x
+// Send Channel's Next does not observe ctx, so this value alone does not
+// bound the peek; the effective bound is the Layer's request-head deadline
+// (request_timeout_ms from the request's first byte, keep-alive idle bound
+// before it — USK-1162).
 // Aligned with targetOverrideAutoPeekTimeout (5s) — small enough to limit
 // slow-loris goroutine occupation on filtered arms (review finding S-1
 // from review-gate), generous enough to absorb legitimate brief pauses

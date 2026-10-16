@@ -221,7 +221,10 @@ func (m *Manager) handleTCPForwardTLSConn(
 		tlsCfg = mitmServerConfigForForward(parentStack.BuildConfig.Issuer, targetHost, alpnOffers)
 	}
 
-	tlsConn, clientSnap, err := tlslayer.Server(connCtx, clientConn, tlsCfg)
+	// USK-1162: bound the client-side handshake by request_timeout_ms.
+	hsCtx, hsCancel := context.WithTimeout(connCtx, parentStack.BuildConfig.EffectiveRequestHeaderTimeout())
+	tlsConn, clientSnap, err := tlslayer.Server(hsCtx, clientConn, tlsCfg)
+	hsCancel()
 	if err != nil {
 		// Wrap with the canonical client-side sentinel so the recorder
 		// classifies this as FailureReason="client_tls_error" (matches the

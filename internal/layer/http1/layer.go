@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"os"
 	"strings"
@@ -484,6 +485,57 @@ func (l *Layer) peekPending() *channel {
 		return nil
 	}
 	return l.pendingQ[0]
+}
+
+// awaitRequestHead applies the WithRequestHeaderTimeout bound before a
+// client-side request parse (USK-1162). It reports whether a header
+// deadline is armed on l.conn; the caller must clear it as soon as the
+// request line and header section have been parsed.
+//
+// Phase 1 (idle): when no byte of the next request is buffered, wait up to
+// max(keep-alive idle, header timeout) for the first byte. Phase 2
+// (header): from the first byte, the request head must complete within the
+// header timeout. Pipelined requests already in the buffer skip phase 1.
+//
+// Returns the Peek error on idle expiry or peer close (io.EOF for a clean
+// keep-alive close). Not active on Receive Layers or without the option.
+func (l *Layer) awaitRequestHead() (armed bool, err error) {
+	if l.direction != envelope.Send || l.opts.requestHeaderTimeout == nil {
+		return false, nil
+	}
+	headerTimeout := l.opts.requestHeaderTimeout()
+	if headerTimeout <= 0 {
+		return false, nil
+	}
+	if l.reader.Buffered() == 0 {
+		idle := DefaultKeepAliveIdleTimeout
+		if l.opts.keepAliveIdleTimeout != nil {
+			if v := l.opts.keepAliveIdleTimeout(); v > 0 {
+				idle = v
+			}
+		}
+		if idle < headerTimeout {
+			idle = headerTimeout
+		}
+		_ = l.conn.SetReadDeadline(time.Now().Add(idle))
+		if _, err := l.reader.Peek(1); err != nil {
+			_ = l.conn.SetReadDeadline(time.Time{})
+			if errors.Is(err, os.ErrDeadlineExceeded) {
+				l.logRequestHeadTimeout("keep-alive idle", err)
+			}
+			return false, err
+		}
+	}
+	_ = l.conn.SetReadDeadline(time.Now().Add(headerTimeout))
+	return true, nil
+}
+
+// logRequestHeadTimeout records a USK-1162 request-head deadline expiry at
+// Debug: a slow or idle client is a client-side condition, not a proxy
+// anomaly.
+func (l *Layer) logRequestHeadTimeout(phase string, err error) {
+	slog.Debug("http1: client request head timed out; closing connection",
+		"stream_id", l.streamID, "phase", phase, "error", err)
 }
 
 // spawnLoopSend parses requests sequentially and yields one Channel per

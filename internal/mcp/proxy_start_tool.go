@@ -146,7 +146,7 @@ type proxyStartInput struct {
 
 	// RequestTimeoutMs is the timeout in milliseconds for reading HTTP request headers.
 	// Defaults to 60000 (60s) if omitted or zero.
-	RequestTimeoutMs *int `json:"request_timeout_ms,omitempty" jsonschema:"HTTP request header read timeout in milliseconds (default: 60000)"`
+	RequestTimeoutMs *int `json:"request_timeout_ms,omitempty" jsonschema:"Request-head timeout in milliseconds: HTTP/1.x request line + headers, CONNECT request, client TLS handshake (default: 60000)"`
 
 	// CaptureScope filters which flows are persisted to the flow store
 	// without altering wire transmission (USK-776). Use this to suppress

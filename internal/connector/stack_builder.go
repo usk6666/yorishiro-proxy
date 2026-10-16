@@ -877,13 +877,29 @@ const DefaultRequestHeaderTimeout = 60 * time.Second
 // RequestHeaderTimeout when positive, else DefaultRequestHeaderTimeout.
 // Safe on a nil receiver (returns the default).
 func (c *BuildConfig) EffectiveRequestHeaderTimeout() time.Duration {
-	return 0
+	if c == nil {
+		return DefaultRequestHeaderTimeout
+	}
+	if dyn := time.Duration(c.requestHeaderTimeoutDynamic.Load()); dyn > 0 {
+		return dyn
+	}
+	if c.RequestHeaderTimeout > 0 {
+		return c.RequestHeaderTimeout
+	}
+	return DefaultRequestHeaderTimeout
 }
 
 // SetRequestHeaderTimeout installs a runtime override for
 // EffectiveRequestHeaderTimeout. Non-positive values clear the override.
 // Safe on a nil receiver (no-op).
 func (c *BuildConfig) SetRequestHeaderTimeout(d time.Duration) {
+	if c == nil {
+		return
+	}
+	if d < 0 {
+		d = 0
+	}
+	c.requestHeaderTimeoutDynamic.Store(int64(d))
 }
 
 // resolvePerHostTLS resolves per-host TLS overrides from the BuildConfig.
@@ -1632,7 +1648,12 @@ func performClientMITM(
 	// makes a defensive copy of alpnOffers internally.
 	serverTLSCfg := cfg.Issuer.MITMServerConfig(host, alpnOffers)
 
-	tlsConn, clientSnap, err := tlslayer.Server(ctx, clientConn, serverTLSCfg)
+	// USK-1162: bound the client-side handshake by request_timeout_ms
+	// (net/http bounds its TLS handshake by ReadHeaderTimeout too). On
+	// expiry crypto/tls closes clientConn.
+	hsCtx, hsCancel := context.WithTimeout(ctx, cfg.EffectiveRequestHeaderTimeout())
+	tlsConn, clientSnap, err := tlslayer.Server(hsCtx, clientConn, serverTLSCfg)
+	hsCancel()
 	if err != nil {
 		return nil, nil, fmt.Errorf("%w: %w", ErrClientTLSMITMHandshake, err)
 	}
@@ -1754,6 +1775,8 @@ func buildStackFromRoute(
 			http1.WithMaxBodySize(cfg.MaxBodySize),
 			http1.WithMaxRawCaptureSize(cfg.MaxRawCaptureSize),
 			http1.WithStateReleaser(cfg.PluginV2Engine),
+			// USK-1162: bound the client request head (request_timeout_ms).
+			http1.WithRequestHeaderTimeout(cfg.EffectiveRequestHeaderTimeout),
 		)
 		stack.PushClient(clientLayer)
 
@@ -2038,7 +2061,12 @@ func buildRawPassthroughStack(
 	// ticket key is stable across connections to the same host (USK-795).
 	serverTLSCfg := cfg.Issuer.MITMServerConfig(host, nil)
 
-	clientTLSConn, clientSnap, err := tlslayer.Server(ctx, clientConn, serverTLSCfg)
+	// USK-1162: bound the client-side handshake by request_timeout_ms
+	// (net/http bounds its TLS handshake by ReadHeaderTimeout too). On
+	// expiry crypto/tls closes clientConn.
+	hsCtx, hsCancel := context.WithTimeout(ctx, cfg.EffectiveRequestHeaderTimeout())
+	clientTLSConn, clientSnap, err := tlslayer.Server(hsCtx, clientConn, serverTLSCfg)
+	hsCancel()
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("%w for %s: %w", ErrClientTLSMITMHandshake, target, err)
 	}

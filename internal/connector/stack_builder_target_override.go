@@ -571,6 +571,8 @@ func buildTargetOverrideHTTPStack(
 		http1.WithBodySpillThreshold(cfg.BodySpillThreshold),
 		http1.WithMaxBodySize(cfg.MaxBodySize),
 		http1.WithStateReleaser(cfg.PluginV2Engine),
+		// USK-1162: bound the client request head (request_timeout_ms).
+		http1.WithRequestHeaderTimeout(cfg.EffectiveRequestHeaderTimeout),
 	)
 	stack.PushClient(clientLayer)
 
