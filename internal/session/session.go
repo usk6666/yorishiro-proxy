@@ -425,8 +425,8 @@ type upstreamHolder struct {
 	// dialErr is the error the dial returned, if any. Written only by
 	// goroutine 1 (client->upstream); read after the errgroup's Wait.
 	dialErr error
-	// recvErr is the terminal non-EOF error upstream.Next returned, if
-	// any. Written only by goroutine 2 (upstream->client); read after the
+	// recvErr is the terminal error (io.EOF included) the upstream->client
+	// goroutine finished with, if any. Written only by goroutine 2 (upstream->client); read after the
 	// errgroup's Wait.
 	recvErr error
 }

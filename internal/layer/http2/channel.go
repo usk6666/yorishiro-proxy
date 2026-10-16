@@ -73,11 +73,15 @@ type channel struct {
 
 	mu       sync.Mutex
 	sequence int
-	// headersHas is set after the first HEADERS frame this endpoint wrote
-	// on the stream reached the wire — the request HEADERS for a
-	// client-role channel, the first response HEADERS (1xx included) for a
-	// server-role channel. CloseRefused reads it: once HEADERS went out the
-	// peer has seen a response start, so REFUSED_STREAM no longer applies.
+	// headersHas is set, under mu and before the frame is handed to the
+	// writer queue, when this endpoint first enqueues a HEADERS frame on the
+	// stream — the request HEADERS for a client-role channel, the first
+	// response HEADERS (1xx included) for a server-role channel. CloseRefused
+	// reads it: once HEADERS is queued the writer will put it on the wire
+	// even if the Send gives up on its ctx, so the peer will see a response
+	// start and REFUSED_STREAM no longer applies. Keying on "enqueued" rather
+	// than "write completed" keeps a RST_STREAM(REFUSED_STREAM) from landing
+	// behind a still-queued response HEADERS (USK-1157).
 	headersHas bool
 	closed     bool
 	// rstSent is set when MarkTerminatedWithRST put a RST_STREAM on the
@@ -376,6 +380,20 @@ func (c *channel) sendHeadersEvent(ctx context.Context, env *envelope.Envelope, 
 	fields := BuildHeaderFieldsFromEventWithFingerprint(env, evt, c.layer.h2Fingerprint)
 	done := make(chan error, 1)
 
+	// Record the HEADERS as sent before it reaches the writer queue, and
+	// atomically with the closed check, so closeStream (which reads both
+	// under mu) either sees the stream closed first — and this Send never
+	// enqueues — or sees headersHas and picks CANCEL over REFUSED_STREAM.
+	// If the enqueue below then fails, headersHas stays true and a later
+	// CloseRefused falls back to CANCEL, the conservative code.
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return errors.New("http2: send on closed channel")
+	}
+	c.headersHas = true
+	c.mu.Unlock()
+
 	if err := c.allocateAndEnqueueFirstHeaders(ctx, fields, evt.EndStream, done); err != nil {
 		return err
 	}
@@ -384,7 +402,6 @@ func (c *channel) sendHeadersEvent(ctx context.Context, env *envelope.Envelope, 
 		return err
 	}
 	c.mu.Lock()
-	c.headersHas = true
 	if evt.EndStream {
 		c.sentEndStream = true
 	}
@@ -574,7 +591,7 @@ func (c *channel) Close() error {
 
 // CloseRefused is Close for a stream the far side of the proxy refused
 // without processing it (upstream GOAWAY above the stream, or upstream
-// RST_STREAM(REFUSED_STREAM)). When this endpoint has not yet written any
+// RST_STREAM(REFUSED_STREAM)). When this endpoint has not yet queued any
 // HEADERS on the stream, the reset carries REFUSED_STREAM instead of CANCEL
 // so the peer knows the request was not processed and may retry it
 // (RFC 9113 §8.7) — what a browser talking to the origin directly would
