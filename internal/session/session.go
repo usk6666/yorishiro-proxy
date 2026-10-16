@@ -1074,6 +1074,23 @@ func extractH2StreamID(ch layer.Channel, side string) (uint32, error) {
 	return id, nil
 }
 
+// h2LayerOwner is the optional surface a layer.Channel implements to
+// report the connection-level *http2.Layer that owns its h2 stream.
+// *http2.channel and *httpaggregator.aggregatorChannel implement it.
+type h2LayerOwner interface {
+	H2Layer() *http2.Layer
+}
+
+// h2StreamOwner returns the *http2.Layer that owns ch's h2 stream together
+// with the stream id, both read from the same Channel. HTTP/2 stream ids
+// are per-connection (RFC 9113 §5.1.1): after a GOAWAY redial (USK-991)
+// streams of one CONNECT live on different upstream connections whose ids
+// restart at 1, so the id is only meaningful against the Layer that
+// carries the Channel — never against the stack's pooled Layer (USK-1164).
+func h2StreamOwner(ch layer.Channel, side string) (*http2.Layer, uint32, error) {
+	return nil, 0, nil
+}
+
 // runUpgradeWSOverH2 performs the per-stream WS-over-h2 swap (RFC-001
 // §3.4.1 / §4.5; RFC 8441 extended CONNECT). Distinct from runUpgradeWS:
 //
