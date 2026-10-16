@@ -172,12 +172,16 @@ func TestProxybuild_PlainHTTP_KeepAliveSlowlorisSecondRequestClosed(t *testing.T
 	defer cancel()
 	upstream := startUSK1162Upstream(t)
 	host := strings.TrimPrefix(upstream.URL, "http://")
-	proxyAddr := startUSK1162Proxy(t, ctx, &flowStoreCapture{})
+	store := &flowStoreCapture{}
+	proxyAddr := startUSK1162Proxy(t, ctx, store)
 
 	conn, br := usk1162Dial(t, proxyAddr)
 	if code, body := usk1162RoundTrip(t, conn, br, usk1162Get(host, "/one")); code != 200 || body != "path=/one body=" {
 		t.Fatalf("request 1 = %d %q", code, body)
 	}
+	// Settle request 1's recording first, so the post-timeout check below
+	// cannot pass vacuously because recording had not happened yet.
+	firstID := usk1162AwaitSingleComplete(t, store, 5*time.Second)
 
 	done := make(chan struct{})
 	defer close(done)
@@ -187,6 +191,48 @@ func TestProxybuild_PlainHTTP_KeepAliveSlowlorisSecondRequestClosed(t *testing.T
 	if got := usk1162AwaitClose(t, br, conn, 3*time.Second); got != "" {
 		t.Errorf("proxy replied to a trickled request: %.120q", got)
 	}
+
+	// Settled design: a request-head timeout records nothing. Watch the
+	// store for a bounded window after the close: no second stream may
+	// appear, and request 1's stream must not be re-finalised as error.
+	watch := time.Now().Add(1 * time.Second)
+	for {
+		streams := store.Streams()
+		if len(streams) != 1 {
+			t.Fatalf("request-head timeout was recorded: want 1 stream (request 1), got %d: %s",
+				len(streams), summarizeStreamProtocols(streams))
+		}
+		for _, u := range store.StreamUpdates(firstID) {
+			if u.State != "complete" {
+				t.Fatalf("request 1 stream re-finalised as %q after the request-head timeout (reason %q)",
+					u.State, u.FailureReason)
+			}
+		}
+		if time.Now().After(watch) {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// usk1162AwaitSingleComplete waits until store holds exactly one stream
+// whose updates include state "complete", and returns its ID.
+func usk1162AwaitSingleComplete(t *testing.T, store *flowStoreCapture, guard time.Duration) string {
+	t.Helper()
+	deadline := time.Now().Add(guard)
+	for time.Now().Before(deadline) {
+		if streams := store.Streams(); len(streams) == 1 {
+			for _, u := range store.StreamUpdates(streams[0].ID) {
+				if u.State == "complete" {
+					return streams[0].ID
+				}
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("request 1 was not recorded as one complete stream within %v; streams=%s",
+		guard, summarizeStreamProtocols(store.Streams()))
+	return ""
 }
 
 // Test Plan #6(i): keep-alive requests spaced further apart than the header

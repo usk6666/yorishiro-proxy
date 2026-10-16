@@ -629,7 +629,8 @@ func (m *Manager) PeekTimeout() time.Duration {
 // by the plain-HTTP forward handler and the CONNECT / SOCKS5 inner-byte
 // peek (USK-844), and the request-head bound on the bound BuildConfig
 // (USK-1162: HTTP/1.x request line + headers, CONNECT request, client-side
-// TLS MITM handshake; next request / next connection semantics). Applies immediately to every running listener via the
+// TLS MITM handshake; next request / next connection semantics). Applies
+// immediately to every running listener via the
 // per-listener atomic-Int64 slot wired in BuildLiveStack; the value is
 // also remembered so listeners started later inherit it. Non-positive
 // values are stored verbatim — Listener.SetRequestTimeout normalises any
