@@ -160,7 +160,8 @@ func (l *Layer) handleGoAwayFrame(f *frame.Frame) error {
 		e.once.Do(e.cb)
 	}
 
-	// Notify all open streams with id > lastStreamID.
+	// Notify the streams this Layer opened with id > lastStreamID; the
+	// peer's own streams are outside last_stream_id's scope (§6.8).
 	l.failStreamsAfterGoAway(lastStreamID, &layer.StreamError{
 		Code:   layer.ErrorRefused,
 		Reason: fmt.Sprintf("GOAWAY (%s)", codeName),
@@ -620,12 +621,20 @@ func (l *Layer) failStream(streamID uint32, se *layer.StreamError) {
 	l.closeChannelRecv(ch)
 }
 
-// failStreamsAfterGoAway notifies every open stream with id > lastStreamID.
+// failStreamsAfterGoAway notifies every open stream THIS Layer initiated
+// with id > lastStreamID.
+//
+// RFC 9113 §6.8: a GOAWAY's last_stream_id is the highest stream "initiated
+// by the receiver of the GOAWAY" that the sender processed, so it says
+// nothing about the streams the GOAWAY's sender opened itself. On a
+// ServerRole Layer that means a client GOAWAY (e.g. a browser draining with
+// GOAWAY(0)) leaves the client's own in-flight streams untouched (USK-1174);
+// they end normally or via connection teardown.
 func (l *Layer) failStreamsAfterGoAway(lastStreamID uint32, se *layer.StreamError) {
 	l.mu.Lock()
 	channels := make([]*channel, 0)
 	for id, ch := range l.channels {
-		if id > lastStreamID {
+		if l.isLocallyInitiated(id) && id > lastStreamID {
 			channels = append(channels, ch)
 		}
 	}
@@ -638,6 +647,12 @@ func (l *Layer) failStreamsAfterGoAway(lastStreamID uint32, se *layer.StreamErro
 		ch.markTerminated(se)
 		l.closeChannelRecv(ch)
 	}
+}
+
+// isLocallyInitiated reports whether streamID was opened by this endpoint:
+// clients use odd ids, servers even ids (RFC 9113 §5.1.1).
+func (l *Layer) isLocallyInitiated(streamID uint32) bool {
+	return (streamID%2 == 1) == (l.role == ClientRole)
 }
 
 // broadcastShutdown closes all per-channel recv chans and the channelOut chan.
