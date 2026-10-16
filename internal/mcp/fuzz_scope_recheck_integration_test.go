@@ -459,3 +459,286 @@ func TestFuzzHTTP_ScopeRecheck_DialLegCheckedWhenAuthorityMutated(t *testing.T) 
 	}
 	assertScopeRecheckRows(t, errs, out.CompletedVariants, out.StoppedReason, g.hits.Load())
 }
+
+// ---------------------------------------------------------------------------
+// fuzz_http — the dial leg judges what is put on the wire
+// ---------------------------------------------------------------------------
+//
+// fuzz_http fixes the connection at plan time: plan.dialAddr (base authority
+// or override_host) and plan.useTLS (base scheme). The HTTP/1 encoder then
+// writes the variant's path as the request target. The dial leg of the
+// per-variant check must therefore judge (connection scheme, dial address,
+// variant path) — not the mutated variant scheme, and not an empty path.
+
+// pathRecorder is an upstream handler that records every request path it
+// receives.
+type pathRecorder struct {
+	mu    sync.Mutex
+	paths []string
+}
+
+func (r *pathRecorder) handler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		r.mu.Lock()
+		r.paths = append(r.paths, req.URL.Path)
+		r.mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	})
+}
+
+func (r *pathRecorder) snapshot() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.paths...)
+}
+
+// assertNoDeniedPathOnWire fails when the upstream ever saw a path under
+// the denied prefix.
+func assertNoDeniedPathOnWire(t *testing.T, rec *pathRecorder, deniedPrefix string) {
+	t.Helper()
+	for _, p := range rec.snapshot() {
+		if strings.HasPrefix(p, deniedPrefix) {
+			t.Errorf("upstream received %q — a path the policy denies on this host reached the wire", p)
+		}
+	}
+}
+
+// assertFuzzHTTPRowsByPayload checks every variant row: a row is expected
+// to carry a scope rejection iff denied(row.Payloads) is true; any other
+// row must have completed with status 200.
+func assertFuzzHTTPRowsByPayload(t *testing.T, out fuzzHTTPResult, wantRows int, denied func(map[string]string) bool) {
+	t.Helper()
+	if len(out.Variants) != wantRows {
+		t.Fatalf("len(variants) = %d, want %d", len(out.Variants), wantRows)
+	}
+	for _, v := range out.Variants {
+		if denied(v.Payloads) {
+			if !strings.Contains(v.Error, scopeRecheckErrSubstr) {
+				t.Errorf("variant %v: error = %q status = %d, want a %q rejection", v.Payloads, v.Error, v.StatusCode, scopeRecheckErrSubstr)
+			}
+			continue
+		}
+		if v.Error != "" || v.StatusCode != http.StatusOK {
+			t.Errorf("variant %v: error = %q status = %d, want status 200 and no error (wrongly denied)", v.Payloads, v.Error, v.StatusCode)
+		}
+	}
+}
+
+// TestFuzzHTTP_ScopeRecheck_OverrideHostScheme_PlaintextDialStillDenied
+// pins F-1 (wrongly allowed): with override_host, a `scheme` position that
+// flips the canonical scheme to https does not change the connection —
+// plan.useTLS came from the base http scheme, so the dial to the override
+// target stays plaintext. A reload that denies plaintext to that target
+// must reject every later variant.
+func TestFuzzHTTP_ScopeRecheck_OverrideHostScheme_PlaintextDialStillDenied(t *testing.T) {
+	allows := []connector.TargetRule{{Hostname: "127.0.0.1"}, {Hostname: "vhost.test"}}
+	scope := connector.NewTargetScope()
+	scope.SetPolicyRules(allows, nil)
+	cs := setupFuzzScopeRecheckSession(t, scope)
+	g := newVariantGate(t)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		g.enter()
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(upstream.Close)
+
+	ch := callFuzzToolAsync(cs, "fuzz_http", map[string]any{
+		"method":        "GET",
+		"scheme":        "http",
+		"authority":     "vhost.test",
+		"path":          "/",
+		"override_host": strings.TrimPrefix(upstream.URL, "http://"),
+		"positions": []map[string]any{
+			{"path": "scheme", "payloads": []string{"http", "https", "https"}},
+		},
+		"timeout_ms": 10000,
+	})
+	g.waitArrived(t)
+	scope.ReplacePolicyRules(allows,
+		[]connector.TargetRule{{Hostname: "127.0.0.1", Schemes: []string{"http"}}},
+		connector.PolicyOrigin{Source: "policy file", LoadedAt: time.Now()})
+	g.open()
+
+	var out fuzzHTTPResult
+	awaitFuzzResult(t, ch, &out)
+	errs := make([]string, len(out.Variants))
+	for i, v := range out.Variants {
+		errs[i] = v.Error
+	}
+	assertScopeRecheckRows(t, errs, out.CompletedVariants, out.StoppedReason, g.hits.Load())
+}
+
+// TestFuzzHTTP_ScopeRecheck_OverrideHostScheme_TLSDialNotWronglyDenied
+// pins F-1 (wrongly denied): base https + override_host, a variant whose
+// canonical scheme is http still travels over the TLS connection the plan
+// opened. A deny scoped to plaintext on the override target must not
+// block it.
+func TestFuzzHTTP_ScopeRecheck_OverrideHostScheme_TLSDialNotWronglyDenied(t *testing.T) {
+	scope := connector.NewTargetScope()
+	scope.SetPolicyRules(
+		[]connector.TargetRule{{Hostname: "127.0.0.1"}, {Hostname: "vhost.test"}},
+		[]connector.TargetRule{{Hostname: "127.0.0.1", Schemes: []string{"http"}}},
+	)
+	cs := setupFuzzScopeRecheckSession(t, scope)
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(upstream.Close)
+
+	ch := callFuzzToolAsync(cs, "fuzz_http", map[string]any{
+		"method":        "GET",
+		"scheme":        "https",
+		"authority":     "vhost.test",
+		"path":          "/",
+		"override_host": strings.TrimPrefix(upstream.URL, "https://"),
+		"positions": []map[string]any{
+			{"path": "scheme", "payloads": []string{"https", "http"}},
+		},
+		"timeout_ms": 10000,
+	})
+	var out fuzzHTTPResult
+	awaitFuzzResult(t, ch, &out)
+	assertFuzzHTTPRowsByPayload(t, out, 2, func(map[string]string) bool { return false })
+}
+
+// TestFuzzHTTP_ScopeRecheck_AuthorityUnderPathPrefixAllow pins F-2: an
+// `authority` position (Host-header fuzzing) under path-scoped allow rules
+// must not be wrongly denied — the dial leg is judged on the path that is
+// actually sent, which the allow rule covers.
+func TestFuzzHTTP_ScopeRecheck_AuthorityUnderPathPrefixAllow(t *testing.T) {
+	scope := connector.NewTargetScope()
+	scope.SetPolicyRules([]connector.TargetRule{
+		{Hostname: "127.0.0.1", PathPrefix: "/api"},
+		{Hostname: "vhost.test", PathPrefix: "/api"},
+	}, nil)
+	cs := setupFuzzScopeRecheckSession(t, scope)
+	rec := &pathRecorder{}
+	upstream := httptest.NewServer(rec.handler())
+	t.Cleanup(upstream.Close)
+	authority := strings.TrimPrefix(upstream.URL, "http://")
+
+	ch := callFuzzToolAsync(cs, "fuzz_http", map[string]any{
+		"method":    "GET",
+		"scheme":    "http",
+		"authority": authority,
+		"path":      "/api/items",
+		"positions": []map[string]any{
+			{"path": "authority", "payloads": []string{authority, "vhost.test"}},
+		},
+		"timeout_ms": 10000,
+	})
+	var out fuzzHTTPResult
+	awaitFuzzResult(t, ch, &out)
+	assertFuzzHTTPRowsByPayload(t, out, 2, func(map[string]string) bool { return false })
+	if got := len(rec.snapshot()); got != 2 {
+		t.Errorf("upstream hits = %d, want 2", got)
+	}
+}
+
+// TestFuzzHTTP_ScopeRecheck_AuthorityPlusPathDeniedOnDialTarget pins S-1:
+// moving the authority does not move the connection. A variant with
+// authority=decoy.test and path=/admin is still sent as `GET /admin` to
+// the base host, so a path deny on the base host must reject it. A
+// variant whose path stays away from the denied prefix must still go out.
+func TestFuzzHTTP_ScopeRecheck_AuthorityPlusPathDeniedOnDialTarget(t *testing.T) {
+	scope := connector.NewTargetScope()
+	scope.SetPolicyRules(
+		[]connector.TargetRule{{Hostname: "127.0.0.1"}, {Hostname: "decoy.test"}},
+		[]connector.TargetRule{{Hostname: "127.0.0.1", PathPrefix: "/admin"}},
+	)
+	cs := setupFuzzScopeRecheckSession(t, scope)
+	rec := &pathRecorder{}
+	upstream := httptest.NewServer(rec.handler())
+	t.Cleanup(upstream.Close)
+	authority := strings.TrimPrefix(upstream.URL, "http://")
+
+	ch := callFuzzToolAsync(cs, "fuzz_http", map[string]any{
+		"method":    "GET",
+		"scheme":    "http",
+		"authority": authority,
+		"path":      "/public",
+		"positions": []map[string]any{
+			{"path": "authority", "payloads": []string{authority, "decoy.test"}},
+			{"path": "path", "payloads": []string{"/public", "/admin"}},
+		},
+		"timeout_ms": 10000,
+	})
+	var out fuzzHTTPResult
+	awaitFuzzResult(t, ch, &out)
+	assertFuzzHTTPRowsByPayload(t, out, 4, func(p map[string]string) bool { return p["path"] == "/admin" })
+	assertNoDeniedPathOnWire(t, rec, "/admin")
+}
+
+// TestFuzzHTTP_ScopeRecheck_SchemePlusPathDeniedOnPlaintextDial pins the
+// scheme half of S-1: a `scheme` position flipping the canonical scheme to
+// https leaves the plaintext connection in place, so a deny on
+// {schemes:[http], path_prefix:/admin} must still reject `GET /admin`.
+func TestFuzzHTTP_ScopeRecheck_SchemePlusPathDeniedOnPlaintextDial(t *testing.T) {
+	scope := connector.NewTargetScope()
+	scope.SetPolicyRules(
+		[]connector.TargetRule{{Hostname: "127.0.0.1"}},
+		[]connector.TargetRule{{Hostname: "127.0.0.1", Schemes: []string{"http"}, PathPrefix: "/admin"}},
+	)
+	cs := setupFuzzScopeRecheckSession(t, scope)
+	rec := &pathRecorder{}
+	upstream := httptest.NewServer(rec.handler())
+	t.Cleanup(upstream.Close)
+	authority := strings.TrimPrefix(upstream.URL, "http://")
+
+	ch := callFuzzToolAsync(cs, "fuzz_http", map[string]any{
+		"method":    "GET",
+		"scheme":    "http",
+		"authority": authority,
+		"path":      "/public",
+		"positions": []map[string]any{
+			{"path": "scheme", "payloads": []string{"http", "https"}},
+			{"path": "path", "payloads": []string{"/public", "/admin"}},
+		},
+		"timeout_ms": 10000,
+	})
+	var out fuzzHTTPResult
+	awaitFuzzResult(t, ch, &out)
+	assertFuzzHTTPRowsByPayload(t, out, 4, func(p map[string]string) bool { return p["path"] == "/admin" })
+	assertNoDeniedPathOnWire(t, rec, "/admin")
+}
+
+// TestResendHTTP_OverrideHostPathDenyApplies pins S-2: resend_http sends
+// the request path to the override_host target, so a path deny on that
+// target must apply even though the canonical authority is allowed.
+func TestResendHTTP_OverrideHostPathDenyApplies(t *testing.T) {
+	scope := connector.NewTargetScope()
+	scope.SetPolicyRules(
+		[]connector.TargetRule{{Hostname: "127.0.0.1"}, {Hostname: "vhost.test"}},
+		[]connector.TargetRule{{Hostname: "127.0.0.1", PathPrefix: "/admin"}},
+	)
+	cs := setupFuzzScopeRecheckSession(t, scope)
+	rec := &pathRecorder{}
+	upstream := httptest.NewServer(rec.handler())
+	t.Cleanup(upstream.Close)
+	override := strings.TrimPrefix(upstream.URL, "http://")
+
+	allowed := callResendHTTP(t, cs, map[string]any{
+		"method":        "GET",
+		"scheme":        "http",
+		"authority":     "vhost.test",
+		"path":          "/public",
+		"override_host": override,
+	})
+	if allowed.IsError {
+		t.Fatalf("resend of /public via override_host rejected: %s", extractTextContent(allowed))
+	}
+
+	denied := callResendHTTP(t, cs, map[string]any{
+		"method":        "GET",
+		"scheme":        "http",
+		"authority":     "vhost.test",
+		"path":          "/admin",
+		"override_host": override,
+	})
+	if !denied.IsError {
+		t.Errorf("resend of /admin via override_host succeeded — the override target's path deny was not applied")
+	} else if got := extractTextContent(denied); !strings.Contains(got, scopeRecheckErrSubstr) {
+		t.Errorf("error = %q, want a %q rejection", got, scopeRecheckErrSubstr)
+	}
+	assertNoDeniedPathOnWire(t, rec, "/admin")
+}
