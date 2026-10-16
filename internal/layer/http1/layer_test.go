@@ -1170,6 +1170,37 @@ func TestParseRequestURI(t *testing.T) {
 		{"/", "example.com", "/", "", "example.com"},
 		{"*", "example.com", "*", "", "example.com"},
 		{"http://example.com/abs?k=v", "", "/abs", "k=v", "example.com"},
+
+		// USK-1139: the path is the request-target exactly as on the wire —
+		// percent-encoding is never decoded — split at the first '?' the
+		// same way the HTTP/2 assembler splits :path.
+		{"/check_uuid/https%3A%2F%2Fsync.example%2Fsetuid%3Fa%3D1?q=x%3Ay", "example.com",
+			"/check_uuid/https%3A%2F%2Fsync.example%2Fsetuid%3Fa%3D1", "q=x%3Ay", "example.com"},
+		{"/a%3Fb?x=1", "example.com", "/a%3Fb", "x=1", "example.com"},
+		{"/a%2Fb", "example.com", "/a%2Fb", "", "example.com"},
+		{"/%61dmin", "example.com", "/%61dmin", "", "example.com"},
+		{"/a%20b", "example.com", "/a%20b", "", "example.com"},
+		{"/a%zz?x=1", "example.com", "/a%zz", "x=1", "example.com"},
+		{"/a%", "example.com", "/a%", "", "example.com"},
+		{"/{{7*7}}", "example.com", "/{{7*7}}", "", "example.com"},
+		{"/caf\xc3\xa9", "example.com", "/caf\xc3\xa9", "", "example.com"},
+		{"/a#b?c", "example.com", "/a#b", "c", "example.com"},
+		{"//foo/bar", "example.com", "//foo/bar", "", "example.com"},
+		{"/p?a?b", "example.com", "/p", "a?b", "example.com"},
+		// Absolute-form: authority from the URI, raw remainder split at '?'.
+		{"http://example.com/a%3Fb%2Fc?k=v", "", "/a%3Fb%2Fc", "k=v", "example.com"},
+		{"http://example.com/a%zz?k=v", "", "/a%zz", "k=v", "example.com"},
+		{"http://user@example.com/p%20q", "", "/p%20q", "", "example.com"},
+		{"http://example.com/p", "other.example", "/p", "", "other.example"},
+		{"http://example.com", "", "", "", "example.com"},
+		{"http://example.com?x=1", "", "", "x=1", "example.com"},
+
+		// Characterization (unchanged by USK-1139): authority-form and
+		// garbage targets keep the pre-existing fallback.
+		{"example.com:443", "example.com:443", "", "", "example.com:443"},
+		{"abc", "example.com", "abc", "", "example.com"},
+		{"abc?x=1", "example.com", "abc?x=1", "", "example.com"},
+		{"", "example.com", "", "", "example.com"},
 	}
 	for _, tt := range tests {
 		headers := parser.RawHeaders{}
