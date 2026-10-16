@@ -240,9 +240,10 @@ func isValidLabelChar(c rune) bool {
 //
 // It is the single reuse point for every path that installs a Policy layer:
 // ProxyConfig.Validate (config-file target_scope_policy section) and
-// LoadPolicyFile (-target-policy-file) call it, so startup refuses an invalid
-// policy, and a future reload path that goes through LoadPolicyFile inherits
-// the same gate. Validation rejects; it never rewrites the operator's values
+// LoadPolicyFile / ParsePolicyFile (-target-policy-file) call it, so startup
+// refuses an invalid policy, and the SIGHUP Policy Layer reload (USK-1115,
+// which parses through the same functions) rejects it while keeping the
+// running policy. Validation rejects; it never rewrites the operator's values
 // (uppercase schemes are accepted here and lowercased when the rules are
 // converted to connector.TargetRule).
 func (p *TargetScopePolicyConfig) Validate() error {

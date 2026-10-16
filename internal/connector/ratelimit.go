@@ -64,7 +64,8 @@ const maxHostLimiters = 1024
 type RateLimiter struct {
 	mu sync.Mutex
 
-	// Policy layer rate limits (immutable after initialization).
+	// Policy layer rate limits (operator-only: set at boot, replaced only by
+	// the operator's reload — never by the agent).
 	policyConfig RateLimitConfig
 	// Agent layer rate limits (mutable at runtime).
 	agentConfig RateLimitConfig
@@ -85,8 +86,10 @@ func NewRateLimiter() *RateLimiter {
 	}
 }
 
-// SetPolicyLimits sets the immutable policy layer rate limits.
-// This should only be called during initialization.
+// SetPolicyLimits sets the policy layer rate limits and rebuilds the
+// limiters, so it takes effect on the next Check. It is called at boot and
+// by the operator's Policy Layer reload (internal/mcpserver, USK-1115); the
+// agent-facing MCP must never call it.
 func (rl *RateLimiter) SetPolicyLimits(cfg RateLimitConfig) {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()

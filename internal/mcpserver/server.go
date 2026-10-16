@@ -234,6 +234,18 @@ func Run(ctx context.Context, fs *flag.FlagSet, args []string, opts RunOptions) 
 	targetScopePolicy := configs.TargetScopePolicy
 	targetScopePolicySource := configs.TargetScopePolicySource
 
+	// USK-1115: obtain the Policy Layer reload trigger (SIGHUP in the
+	// binary) as soon as the boot policy has loaded, and only when a policy
+	// source exists. Requests arriving before the reloader starts are
+	// buffered by the trigger.
+	reload := policyReloadWiring{
+		source:   PolicySource{ConfigFile: configFile, PolicyFile: targetPolicyFile},
+		boot:     configs.Policy,
+		onReload: opts.OnPolicyReload,
+	}
+	reload.trigger = installPolicyReload(opts, reload.source)
+	defer reload.trigger.Stop()
+
 	// Apply CLI TLS fingerprint flag. CLI flag takes precedence over config file.
 	proxyCfg, err = ApplyTLSFingerprintFlag(tlsFingerprint, proxyCfg)
 	if err != nil {
@@ -321,7 +333,7 @@ func Run(ctx context.Context, fs *flag.FlagSet, args []string, opts RunOptions) 
 	return assembleAndRunMCPServer(ctx, cfg, proxyCfg, ca, issuer, store, pluginv2Engine,
 		holdQueue, releaseTracker, holdTracker, httpInterceptEngine, wsInterceptEngine, grpcInterceptEngine,
 		sseInterceptEngine, httpTransformEngine, sseTransformEngine, passthrough,
-		targetScopePolicy, targetScopePolicySource, openBrowser, stdioMCP, versionStr, opts.OnHTTPListening, logger)
+		targetScopePolicy, targetScopePolicySource, reload, openBrowser, stdioMCP, versionStr, opts.OnHTTPListening, logger)
 }
 
 // checkResolvedConfig runs the boot checks that need both the CLI Config
@@ -371,6 +383,7 @@ func assembleAndRunMCPServer(
 	passthrough *connector.PassthroughList,
 	targetScopePolicy *config.TargetScopePolicyConfig,
 	targetScopePolicySource string,
+	reload policyReloadWiring,
 	openBrowserFlag, stdioMCP bool,
 	version string,
 	onHTTPListening func(addr string),
@@ -460,6 +473,14 @@ func assembleAndRunMCPServer(
 	})
 	defer budgetManager.Stop()
 
+	// USK-1115: serve Policy Layer reload requests only now that all three
+	// engines are started (the BudgetManager timer is armed and its
+	// shutdown callback can reach the manager). Deferred after
+	// budgetManager.Stop so it runs first: no reload can touch a stopped
+	// BudgetManager.
+	stopReloader := startPolicyReloader(ctx, reload, targetScope, rateLimiter, budgetManager, logger)
+	defer stopReloader()
+
 	socks5AuthSetter := newSOCKS5AuthAdapter(socks5Negotiator, logger)
 	mcpComps, webUIToken, opts, err := buildMCPComponents(ctx, cfg, proxyCfg, ca, issuer, store, manager,
 		passthrough, holdQueue, releaseTracker, httpInterceptEngine, wsInterceptEngine, grpcInterceptEngine, sseInterceptEngine,
@@ -510,6 +531,9 @@ type ConfigsResult struct {
 	ProxyCfg                *config.ProxyConfig
 	TargetScopePolicy       *config.TargetScopePolicyConfig
 	TargetScopePolicySource string
+	// Policy is the policy source as read at boot, with its file
+	// fingerprint. Never nil; Policy.Source is "" when no source is set.
+	Policy *LoadedPolicy
 }
 
 // ApplyTLSFingerprintFlag validates and applies the CLI -tls-fingerprint
@@ -544,47 +568,40 @@ func ApplyTLSFingerprintFlag(tlsFingerprint string, proxyCfg *config.ProxyConfig
 // ValidateSafetyFilterConfig. Validation rejects negative numbers and
 // accepts zero (= "use default" per project convention; see
 // config.ResolveBodySpillThreshold).
+//
+// The policy half goes through the same loaders as LoadPolicySource, which
+// the runtime Policy Layer reload uses (USK-1115), so reloading a source is
+// validated exactly like booting with it.
 func LoadConfigs(configFile, targetPolicyFile string) (*ConfigsResult, error) {
-	var proxyCfg *config.ProxyConfig
+	// proxybuild.BuildLiveStack requires a non-nil ProxyConfig. When no
+	// -config file is provided, supply a zero-valued config so downstream
+	// consumers can rely on the non-nil contract.
+	proxyCfg := &config.ProxyConfig{}
+	policy := &LoadedPolicy{}
 	if configFile != "" {
 		var err error
-		proxyCfg, err = config.LoadFile(configFile)
+		proxyCfg, policy, err = loadConfigFileSource(configFile)
 		if err != nil {
-			return nil, fmt.Errorf("load config file: %w", err)
-		}
-		if err := config.ValidateProtocolLimits(proxyCfg); err != nil {
-			return nil, fmt.Errorf("invalid protocol limits: %w", err)
-		}
-		if err := proxyCfg.Validate(); err != nil {
-			return nil, fmt.Errorf("invalid proxy config: %w", err)
+			return nil, err
 		}
 	}
-
-	if proxyCfg == nil {
-		// proxybuild.BuildLiveStack requires a non-nil ProxyConfig.
-		// When no -config file is provided, supply a zero-valued config so
-		// downstream consumers can rely on the non-nil contract.
-		proxyCfg = &config.ProxyConfig{}
-	}
-
-	var targetScopePolicy *config.TargetScopePolicyConfig
-	var targetScopePolicySource string
 	if targetPolicyFile != "" {
 		var err error
-		targetScopePolicy, err = config.LoadPolicyFile(targetPolicyFile)
+		policy, err = loadPolicyFileSource(targetPolicyFile)
 		if err != nil {
-			return nil, fmt.Errorf("load target policy file: %w", err)
+			return nil, err
 		}
-		targetScopePolicySource = "policy file"
-	} else if proxyCfg.TargetScopePolicy != nil {
-		targetScopePolicy = proxyCfg.TargetScopePolicy
-		targetScopePolicySource = "config file"
 	}
 
+	var targetScopePolicySource string
+	if policy.Policy != nil {
+		targetScopePolicySource = policy.Source
+	}
 	return &ConfigsResult{
 		ProxyCfg:                proxyCfg,
-		TargetScopePolicy:       targetScopePolicy,
+		TargetScopePolicy:       policy.Policy,
 		TargetScopePolicySource: targetScopePolicySource,
+		Policy:                  policy,
 	}, nil
 }
 

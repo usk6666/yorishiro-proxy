@@ -68,6 +68,10 @@ func runServer(ctx context.Context, fs *flag.FlagSet, args []string) error {
 		fmt.Fprintf(fs.Output(), "  All flags accept a YP_ prefixed environment variable as fallback.\n")
 		fmt.Fprintf(fs.Output(), "  Priority: CLI flag > environment variable > config file > default value.\n")
 		fmt.Fprintf(fs.Output(), "  Naming: replace hyphens with underscores, uppercase (e.g. -log-level -> YP_LOG_LEVEL).\n")
+		fmt.Fprintf(fs.Output(), "\nSignals (Unix):\n")
+		fmt.Fprintf(fs.Output(), "  SIGHUP  re-read the target scope policy (-target-policy-file, else -config) and\n")
+		fmt.Fprintf(fs.Output(), "          replace the running Policy Layer; an invalid file is rejected and the\n")
+		fmt.Fprintf(fs.Output(), "          current policy kept. Without either flag SIGHUP terminates as before.\n")
 		fmt.Fprintf(fs.Output(), "\nExamples:\n")
 		fmt.Fprintf(fs.Output(), "  yorishiro-proxy server                           # HTTP MCP on random port (default)\n")
 		fmt.Fprintf(fs.Output(), "  yorishiro-proxy server -stdio-mcp                # HTTP MCP + stdio MCP\n")
@@ -83,6 +87,7 @@ func runServer(ctx context.Context, fs *flag.FlagSet, args []string) error {
 		fmt.Fprintf(fs.Output(), "  YP_INSECURE=true yorishiro-proxy                  # skip TLS verification\n")
 	}
 	return mcpserver.Run(ctx, fs, args, mcpserver.RunOptions{
-		Version: version,
+		Version:      version,
+		PolicyReload: sighupPolicyReload,
 	})
 }

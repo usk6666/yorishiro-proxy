@@ -13,7 +13,9 @@ import (
 // TargetScope controls which network targets are allowed or blocked using a
 // two-layer architecture: Policy Layer and Agent Layer.
 //
-// The Policy Layer is set at initialization time and is immutable thereafter.
+// The Policy Layer is set at initialization time and can afterwards be
+// replaced only by the operator (ReplacePolicyRules, driven by the SIGHUP
+// reload in internal/mcpserver — USK-1115); the agent can never change it.
 // It defines the upper boundary for what the Agent Layer can permit. The Agent
 // Layer is mutable at runtime via the security MCP tool and can further restrict
 // access within the Policy Layer's boundaries.
@@ -30,9 +32,11 @@ import (
 type TargetScope struct {
 	mu sync.RWMutex
 
-	// Policy Layer (immutable after initialization)
+	// Policy Layer (operator-only: set at boot, replaced only by the
+	// operator's reload path — never by the agent)
 	policyAllows []TargetRule // upper boundary — agent can only operate within this range
 	policyDenies []TargetRule // always BLOCK — agent cannot unblock
+	policyOrigin PolicyOrigin // where the current policy came from
 
 	// Agent Layer (mutable via security tool)
 	agentAllows []TargetRule // further restrict within policy allows
@@ -149,9 +153,9 @@ func (s *TargetScope) CheckURL(u *url.URL) (allowed bool, reason string) {
 	return s.CheckTarget(scheme, hostname, port, path)
 }
 
-// SetPolicyRules sets the immutable policy layer rules. This should only be
-// called during initialization before the TargetScope is shared with other
-// goroutines. Policy rules cannot be changed after they are set.
+// SetPolicyRules sets the policy layer rules at initialization. The only
+// runtime replacement is ReplacePolicyRules (operator reload); the agent
+// layer cannot change policy rules.
 func (s *TargetScope) SetPolicyRules(allows, denies []TargetRule) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -169,17 +173,50 @@ type PolicyOrigin struct {
 	LoadedAt time.Time
 }
 
-// ReplacePolicyRules replaces the policy layer rules at runtime.
+// ReplacePolicyRules replaces the policy layer rules and their origin in one
+// critical section, so a concurrent CheckTarget sees either the old or the
+// new policy, never a mix. It is the operator's runtime path (the
+// SIGHUP-driven reload in internal/mcpserver, USK-1115); the agent-facing
+// MCP must never call it.
+//
+// Agent rules are kept verbatim even when the new policy no longer covers
+// them: pruning an agent allow would drop the agent's self-restriction and
+// widen what it can reach, and rejecting the reload would let the agent
+// block the operator's change. An agent allow outside the new policy simply
+// stops matching (CheckTarget blocks it as "not in policy allow list"). The
+// agent allows that are outside the new policy allow boundary are returned
+// so the caller can tell the operator.
 func (s *TargetScope) ReplacePolicyRules(allows, denies []TargetRule, origin PolicyOrigin) (outsideAgentAllows []TargetRule) {
-	return nil
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.policyAllows = cloneTargetRules(allows)
+	s.policyDenies = cloneTargetRules(denies)
+	s.policyOrigin = origin
+	if len(s.policyAllows) == 0 {
+		return nil
+	}
+	for _, r := range s.agentAllows {
+		if !isRuleCoveredByPolicy(s.policyAllows, r) {
+			outsideAgentAllows = append(outsideAgentAllows, cloneTargetRule(r))
+		}
+	}
+	return outsideAgentAllows
 }
 
-// SetPolicyOrigin records where the boot-time Policy Layer came from.
-func (s *TargetScope) SetPolicyOrigin(origin PolicyOrigin) {}
+// SetPolicyOrigin records where the boot-time Policy Layer came from. Boot
+// installs the rules with SetPolicyRules and the origin here; a reload sets
+// both at once with ReplacePolicyRules.
+func (s *TargetScope) SetPolicyOrigin(origin PolicyOrigin) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.policyOrigin = origin
+}
 
 // PolicyOrigin returns where the current Policy Layer came from.
 func (s *TargetScope) PolicyOrigin() PolicyOrigin {
-	return PolicyOrigin{}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.policyOrigin
 }
 
 // PolicyRules returns a copy of the current policy allow and deny rules.

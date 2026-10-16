@@ -137,7 +137,9 @@ type getTargetScopeResult struct {
 	EffectiveMode string            `json:"effective_mode"`
 }
 
-// policyLayerResult represents the immutable Policy Layer in get_target_scope output.
+// policyLayerResult represents the Policy Layer in get_target_scope output.
+// Immutable means "immutable by the agent": only the operator can replace
+// it (SIGHUP reload, USK-1115).
 type policyLayerResult struct {
 	Allows    []connector.TargetRule `json:"allows"`
 	Denies    []connector.TargetRule `json:"denies"`
@@ -246,9 +248,19 @@ func (s *Server) handleGetTargetScope() (*gomcp.CallToolResult, any, error) {
 	agentAllows, agentDenies := s.connector.targetScope.AgentRules()
 	policyAllows, policyDenies := s.connector.targetScope.PolicyRules()
 
-	source := "none"
-	if s.connector.targetScope.HasPolicyRules() {
-		source = "config file"
+	// USK-1115: report where the Policy Layer actually came from (policy
+	// file vs config file) and when it was last installed — the operator
+	// can replace it at runtime (SIGHUP), so loaded_at tells the agent which
+	// version it is looking at. immutable stays true: it means "immutable
+	// by the agent".
+	origin := s.connector.targetScope.PolicyOrigin()
+	source := origin.Source
+	if source == "" {
+		source = "none"
+	}
+	var loadedAt string
+	if !origin.LoadedAt.IsZero() {
+		loadedAt = origin.LoadedAt.UTC().Format(time.RFC3339Nano)
 	}
 
 	return nil, &getTargetScopeResult{
@@ -256,6 +268,7 @@ func (s *Server) handleGetTargetScope() (*gomcp.CallToolResult, any, error) {
 			Allows:    ensureNonNilRules(policyAllows),
 			Denies:    ensureNonNilRules(policyDenies),
 			Source:    source,
+			LoadedAt:  loadedAt,
 			Immutable: true,
 		},
 		Agent: agentLayerResult{

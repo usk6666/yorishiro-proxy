@@ -8,7 +8,7 @@ This tool is separate from `configure` to allow MCP clients to apply different a
 
 Target scope uses a **Policy Layer** and an **Agent Layer**:
 
-- **Policy Layer** (immutable): Set at startup from the configuration file. Defines the upper boundary for what the agent can access. Cannot be modified at runtime. Policy rules are validated at startup with the same rules as this tool (`schemes` only `http` / `https`, ports 1-65535, a hostname that can match — no `*`, `host:port` or URL), except that a Policy rule may omit `hostname`; `rate_limits` / `budget` values must be >= 0, and the dedicated policy file must not contain unknown fields. An invalid policy stops the server instead of loading a rule that silently matches nothing.
+- **Policy Layer** (immutable by the agent): Set at startup from `-target-policy-file`, else the config file's `target_scope_policy` section. Defines the upper boundary for what the agent can access. No action of this tool — or of any MCP tool, over stdio or HTTP — can modify it; only the operator can replace it at runtime (see [Reloading the Policy Layer](#reloading-the-policy-layer-operator-only)). Policy rules are validated at startup with the same rules as this tool (`schemes` only `http` / `https`, ports 1-65535, a hostname that can match — no `*`, `host:port` or URL), except that a Policy rule may omit `hostname`; `rate_limits` / `budget` values must be >= 0, and the dedicated policy file must not contain unknown fields. An invalid policy stops the server instead of loading a rule that silently matches nothing.
 - **Agent Layer** (mutable): Controlled by this tool. Can further restrict access within the Policy Layer boundaries. Agent allow rules must fall within the Policy allow scope.
 
 ### Evaluation Order
@@ -41,6 +41,20 @@ A `target_scope` deny surfaces differently depending on how the request entered 
 | Transparent HTTPS via CONNECT tunnel | Proxy returns `HTTP/1.1 200 Connection Established` (the tunnel acknowledgement is sent before the scope check), then closes the connection. The client's inner TLS handshake fails with EOF. Note that the `200` line refers to the CONNECT tunnel, **not** to the backend -- no backend bytes are exchanged. |
 | Transparent plain-HTTP forward proxy | Proxy returns `HTTP/1.1 403 Forbidden` with body `yorishiro-proxy: target blocked by scope`. |
 | MCP tool-initiated request (`resend_*`, `fuzz_*`, `macro`, `intercept modify_and_forward`) | MCP error response with the violation reason. |
+
+### Reloading the Policy Layer (operator only)
+
+The operator replaces the running Policy Layer — target scope `allows` / `denies`, `rate_limits` and `budget` together — by editing the policy source and sending the server process `SIGHUP` (Unix only). There is deliberately no MCP tool or action for this: the path is reserved for whoever controls the process, never for the agent.
+
+- **Enabled only with a policy source**: the `SIGHUP` handler is installed only when the server was started with `-target-policy-file` or `-config`. Without either, `SIGHUP` terminates the process as before.
+- **Source**: the same one used at startup — `-target-policy-file` when given, otherwise the config file's `target_scope_policy` section (the whole config file is validated as at startup, but only the policy section is applied; other config sections are not reloaded).
+- **Full replacement**: reloading is equivalent to starting with that file. A section omitted from the new file (e.g. `rate_limits`) is cleared.
+- **Atomic**: the new file is validated completely before anything changes. Malformed JSON, an unknown field, an out-of-vocabulary `schemes` token or a negative limit rejects the whole reload; the previous policy stays in force and an Error line (`target scope policy reload rejected; previous policy retained`) is logged.
+- **What it applies to**: new connections and new requests. Connections that already passed the scope check (TLS passthrough relays, running fuzz jobs, held intercepts) keep their earlier decision.
+- **Agent Layer on narrowing**: Agent rules are kept unchanged. An agent allow rule the new policy no longer covers simply stops matching (requests to it are blocked with `not in policy allow list`) and a Warn line lists such rules. The agent's restriction is never dropped, so narrowing the policy never widens what the agent can reach.
+- **Budget**: the request counter is **not** reset by a reload; the duration limit is re-armed against the new value, measured from the original session start. A budget narrowed below current usage stops the proxy (on the next request, or immediately for the duration limit).
+- **Audit**: a successful reload logs `target scope policy reloaded` at Info with the trigger, source path, file `sha256` and `mtime`, rule counts before/after, and the resulting policy and effective rate limits and budget. `get_target_scope` reports `source` and `loaded_at` so the agent can see that the policy changed.
+- **Placement**: keep the policy file in a directory that neither the proxy's user nor the agent can write. File permissions alone are not enough — anyone who can write the directory can replace the file by rename, which is how `manage` export writes its files — so never place it where `manage` export can write.
 
 ## Actions
 
@@ -103,7 +117,8 @@ Response:
   "policy": {
     "allows": [{"hostname": "*.target.com"}],
     "denies": [{"hostname": "*.internal.corp"}],
-    "source": "config file",
+    "source": "policy file",
+    "loaded_at": "2026-10-16T09:30:00Z",
     "immutable": true
   },
   "agent": {
@@ -181,7 +196,7 @@ for live proxied traffic is safest written without `schemes`.
 
 ## Rate Limiting
 
-Rate limits use the same two-layer architecture as target scope. The Policy Layer defines upper bounds (set via config file); the Agent Layer can set equal or stricter limits at runtime.
+Rate limits use the same two-layer architecture as target scope. The Policy Layer defines upper bounds (set via the policy file or config file; replaceable only by the operator's `SIGHUP` reload); the Agent Layer can set equal or stricter limits at runtime.
 
 Requests that exceed rate limits receive a `429 Too Many Requests` response with an `X-Blocked-By: rate_limit` header.
 

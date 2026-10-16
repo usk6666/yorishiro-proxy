@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/cert"
 	"github.com/usk6666/yorishiro-proxy/internal/config"
@@ -194,10 +193,8 @@ func InitSafetyFilter(cfg *config.Config, proxyCfg *config.ProxyConfig, logger *
 func InitRateLimiter(policy *config.TargetScopePolicyConfig, logger *slog.Logger) *connector.RateLimiter {
 	rl := connector.NewRateLimiter()
 	if policy != nil && policy.RateLimits != nil {
-		rl.SetPolicyLimits(connector.RateLimitConfig{
-			MaxRequestsPerSecond:        policy.RateLimits.MaxRequestsPerSecond,
-			MaxRequestsPerHostPerSecond: policy.RateLimits.MaxRequestsPerHostPerSecond,
-		})
+		// Same conversion as the runtime reload (policySnapshot, USK-1115).
+		rl.SetPolicyLimits(policyRateLimits(policy))
 		logger.Info("rate limits policy loaded",
 			"max_rps", policy.RateLimits.MaxRequestsPerSecond,
 			"max_rps_per_host", policy.RateLimits.MaxRequestsPerHostPerSecond)
@@ -214,14 +211,12 @@ func InitRateLimiter(policy *config.TargetScopePolicyConfig, logger *slog.Logger
 func InitBudgetManager(policy *config.TargetScopePolicyConfig, logger *slog.Logger) *connector.BudgetManager {
 	bm := connector.NewBudgetManager()
 	if policy != nil && policy.Budget != nil {
-		maxDuration := time.Duration(policy.Budget.MaxDuration)
-		bm.SetPolicyBudget(connector.BudgetConfig{
-			MaxTotalRequests: policy.Budget.MaxTotalRequests,
-			MaxDuration:      maxDuration,
-		})
+		// Same conversion as the runtime reload (policySnapshot, USK-1115).
+		budget := policyBudget(policy)
+		bm.SetPolicyBudget(budget)
 		logger.Info("budget policy loaded",
-			"max_total_requests", policy.Budget.MaxTotalRequests,
-			"max_duration", maxDuration)
+			"max_total_requests", budget.MaxTotalRequests,
+			"max_duration", budget.MaxDuration)
 	}
 	return bm
 }
