@@ -108,6 +108,8 @@ Requires: `id` (flow ID).
 
 Returns: id, conn_id, protocol, state, method, url, request/response headers and bodies, raw bytes (base64), connection info, protocol_summary, message_preview (for streaming), original_request (for variant flows), timestamps.
 
+The `url` field (here, in `flows[]`, in `messages[]` and in `original_request`) carries the request path in wire form — percent-encoding exactly as sent, not decoded. A JSON string cannot carry bytes that are not valid UTF-8, so any such path or query bytes are shown `%XX`-escaped (upper-case hex, e.g. the wire byte `0xFF` appears as `%FF`); every other byte is verbatim. `resend_http` with `flow_id` still replays the original wire bytes, not the escaped text.
+
 When `decode_bodies` is `true` (the default) and the body is decodable, the response also includes `request_body_decoded` / `response_body_decoded` (plaintext / proto-json / proto-schemaless JSON after Output Filter masking), `request_body_decoded_encoding` / `response_body_decoded_encoding` (`text`, `base64`, `proto-json`, or `proto-schemaless-json`), and `request_body_encoding_applied` / `response_body_encoding_applied` (codec name — `gzip` / `br` / `deflate` / `zstd` for HTTP `Content-Encoding`, `proto-json` for schema-aware gRPC Data envelopes, or `proto-schemaless` for schemaless gRPC Data envelopes). On decode failure, `request_body_decode_anomaly` / `response_body_decode_anomaly` carry `{type, detail}`: HTTP path uses `unknown_encoding`, `malformed`, `size_exceeded`, `chain_rejected`, `truncated_decode`; gRPC path uses `proto_malformed` or `proto_schema_mismatch` (schema-aware path hit but wire bytes failed to parse — schemaless fallback still runs).
 
 ### messages

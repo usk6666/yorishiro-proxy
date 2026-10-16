@@ -9,8 +9,10 @@ import (
 	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
+
 	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/connector"
+	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/safety"
 )
 
@@ -311,7 +313,7 @@ func (s *Server) handleTestTarget(params securityParams) (*gomcp.CallToolResult,
 			Hostname: u.Hostname(),
 			Port:     port,
 			Scheme:   scheme,
-			Path:     u.Path,
+			Path:     envelope.WirePath(u),
 		},
 	}, nil
 }
@@ -329,7 +331,7 @@ func findMatchedRuleAndLayer(ts *connector.TargetScope, u *url.URL, allowed bool
 	scheme := strings.ToLower(u.Scheme)
 	hostname := u.Hostname()
 	port := targetDefaultPort(scheme, u.Port())
-	path := u.Path
+	path := envelope.WirePath(u)
 
 	// If denied, check policy denies first, then agent denies.
 	if !allowed {

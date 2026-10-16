@@ -33,11 +33,11 @@ HTTP method (e.g. `"GET"`, `"POST"`). Required when `flow_id` is empty.
 Host / `:authority` value (e.g. `"example.com:8443"`). Required when `flow_id` is empty. Used both in the request line/`:authority` and as the default Host header when none is supplied.
 
 ### path (string, conditional)
-Request path including the leading slash. Required when `flow_id` is empty.
+Request path including the leading slash. Required when `flow_id` is empty. Sent and recorded exactly as given (wire form): percent-encoding is neither decoded nor added, so `/a%2Fb` goes out as `/a%2Fb` and `/a b` as `/a b`. When inherited from `flow_id`, the recorded wire-form path is replayed byte-for-byte.
 
 A literal `?` embedded in `path` is auto-split into `path` + `raw_query`: the prefix before the first `?` becomes the new `path` and the suffix (without the `?`) routes to `raw_query`. This lets callers paste a full path-with-query in one field (`curl --url` style). Supplying **both** `raw_query` AND a `?` in `path` is rejected with an explicit error — drop one and resubmit.
 
-> Why auto-split? Without it, `path: "/x?a=1"` recorded `Flow.URL` as `/x%3Fa=1` (the `?` percent-encoded to `%3F`) because the URL projection at record time treats `Path` as a path segment. The wire was always correct — only the recorded URL drifted (USK-859).
+> Why auto-split? A literal `?` in `path` would otherwise be indistinguishable from the query delimiter in the recorded `Flow.URL`; before USK-1139 it was recorded as `%3F` (USK-859). The wire was always correct — only the recorded URL drifted.
 
 ### raw_query (string, optional)
 Raw query string WITHOUT the leading `?`. Mutually exclusive with embedding a query in `path`.

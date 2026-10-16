@@ -1459,11 +1459,47 @@ func readBodyWithThreshold(r io.Reader, spillDir string, spillThreshold, maxBody
 	return bb, nil, nil
 }
 
+// parseRequestURI splits an HTTP/1.x request-target into the wire-form path,
+// the raw query and the authority (USK-1139). The path is returned exactly as
+// the client wrote it — percent-encoding is never decoded — split at the
+// first '?', the same rule the HTTP/2 assembler applies to :path, so
+// HTTPMessage.Path means the same thing on both protocols (MITM Principles
+// 1 and 3). As on HTTP/2, a bare trailing '?' is not distinguishable from
+// no query afterwards (RFC-001 §11 accepted residual).
+//
+//   - origin-form ("/p?q"): split at the first '?'.
+//   - absolute-form ("http://h/p?q", RFC 9112 §3.2.2): the authority comes
+//     from net/url applied to "scheme://authority" only (so a path net/url
+//     rejects, such as "%zz", cannot lose the authority); the raw remainder
+//     is split at the first '?'. The Host header still wins when present.
+//   - asterisk-form ("*"): unchanged.
+//   - anything else (authority-form, garbage): the pre-USK-1139 net/url
+//     fallback, unchanged.
 func parseRequestURI(requestURI string, headers parser.RawHeaders) (path, rawQuery, authority string) {
 	authority = headers.Get("Host")
 
 	if requestURI == "*" {
 		return "*", "", authority
+	}
+
+	if strings.HasPrefix(requestURI, "/") {
+		path, rawQuery = splitWireTarget(requestURI)
+		return path, rawQuery, authority
+	}
+
+	if i := strings.Index(requestURI, "://"); i > 0 && isURIScheme(requestURI[:i]) {
+		afterScheme := requestURI[i+3:]
+		end := strings.IndexAny(afterScheme, "/?")
+		if end < 0 {
+			end = len(afterScheme)
+		}
+		if u, err := url.ParseRequestURI(requestURI[:i+3] + afterScheme[:end]); err == nil {
+			path, rawQuery = splitWireTarget(afterScheme[end:])
+			if u.Host != "" && authority == "" {
+				authority = u.Host
+			}
+			return path, rawQuery, authority
+		}
 	}
 
 	u, err := url.ParseRequestURI(requestURI)
@@ -1479,6 +1515,29 @@ func parseRequestURI(requestURI string, headers parser.RawHeaders) (path, rawQue
 	}
 
 	return path, rawQuery, authority
+}
+
+// splitWireTarget splits a wire request-target remainder at the first '?'.
+func splitWireTarget(s string) (path, rawQuery string) {
+	if i := strings.IndexByte(s, '?'); i >= 0 {
+		return s[:i], s[i+1:]
+	}
+	return s, ""
+}
+
+// isURIScheme reports whether s is an RFC 3986 §3.1 scheme
+// (ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )).
+func isURIScheme(s string) bool {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case 'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z':
+		case i > 0 && ('0' <= c && c <= '9' || c == '+' || c == '-' || c == '.'):
+		default:
+			return false
+		}
+	}
+	return s != ""
 }
 
 func extractStatusReason(status string) string {

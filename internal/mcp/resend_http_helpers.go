@@ -239,7 +239,7 @@ func (s *Server) buildResendHTTPEnvelopeWithMeta(ctx context.Context, input *res
 				authority = sendFlow.URL.Host
 			}
 			if path == "" {
-				path = sendFlow.URL.Path
+				path = envelope.WirePath(sendFlow.URL)
 				if path == "" {
 					path = "/"
 				}
@@ -328,8 +328,10 @@ func resendHTTPFallbackScheme(stream *flow.Stream) string {
 // The wire-send path already concatenates `Path + "?" + RawQuery` verbatim
 // — so a literal `?` in `Path` did emit correctly on the wire. The
 // corruption was downstream: `envelopeToFlow` (`internal/pipeline/record_step.go`)
-// projects `{Path, RawQuery}` into a `&url.URL{}` whose `String()` then
-// percent-encodes the literal `?` inside `Path` to `%3F`. Splitting at the
+// projected `{Path, RawQuery}` into a `&url.URL{}` whose `String()` then
+// percent-encoded the literal `?` inside `Path` to `%3F`. Since USK-1139 the
+// projection stores the wire path verbatim, so an unsplit `?` would instead
+// read back as the query delimiter — the split is still required. Splitting at the
 // MCP control-plane edge keeps wire-observed raw bytes untouched and only
 // fixes the L7 projection (CLAUDE.md MITM Principle 1).
 //
@@ -523,14 +525,11 @@ func (s *Server) checkResendHTTPScope(msg *envelope.HTTPMessage, addr, overrideH
 // resendHTTPRequestURL composes the canonical *url.URL used for scope
 // matching and safety filter input. Built directly from validated
 // HTTPMessage fields without a String → Parse round-trip; see
-// checkResendHTTPScope for the rationale.
+// checkResendHTTPScope for the rationale. msg.Path is wire form (USK-1139),
+// so the URL is built with envelope.URLFromWirePath and serialized with
+// envelope.WireURLString — never url.URL.String(), which re-escapes it.
 func resendHTTPRequestURL(msg *envelope.HTTPMessage) *url.URL {
-	return &url.URL{
-		Scheme:   msg.Scheme,
-		Host:     msg.Authority,
-		Path:     msg.Path,
-		RawQuery: msg.RawQuery,
-	}
+	return envelope.URLFromWirePath(msg.Scheme, msg.Authority, msg.Path, msg.RawQuery)
 }
 
 // buildResendHTTPPipeline constructs the resend Pipeline:

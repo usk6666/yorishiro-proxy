@@ -864,7 +864,7 @@ func extractFlowSummary(msgs []*flow.Flow) (method, urlStr string, statusCode in
 			if method == "" || variant == "modified" {
 				method = msg.Method
 				if msg.URL != nil {
-					urlStr = msg.URL.String()
+					urlStr = envelope.WireURLStringJSONSafe(msg.URL)
 				}
 			}
 		}
@@ -1508,7 +1508,7 @@ func (s *Server) buildOriginalRequest(originalMsg *flow.Flow, decodeEnabled bool
 	}
 	var origURLStr string
 	if originalMsg.URL != nil {
-		origURLStr = originalMsg.URL.String()
+		origURLStr = envelope.WireURLStringJSONSafe(originalMsg.URL)
 	}
 	v := &queryVariantRequest{
 		Method:        originalMsg.Method,
@@ -1722,7 +1722,7 @@ func (s *Server) projectFlowSide(msg *flow.Flow, decodeEnabled bool, limit bodyL
 	}
 	out.method = msg.Method
 	if msg.URL != nil {
-		out.url = msg.URL.String()
+		out.url = envelope.WireURLStringJSONSafe(msg.URL)
 	}
 	out.statusCode = msg.StatusCode
 	out.headers = map[string][]string(s.filterOutputHeaders(http.Header(msg.Headers)))
@@ -1881,7 +1881,7 @@ func (s *Server) convertMessagesToEntries(msgs []*flow.Flow, decodeEnabled bool,
 
 		var urlStr string
 		if msg.URL != nil {
-			urlStr = msg.URL.String()
+			urlStr = envelope.WireURLStringJSONSafe(msg.URL)
 		}
 
 		entry := queryMessageEntry{

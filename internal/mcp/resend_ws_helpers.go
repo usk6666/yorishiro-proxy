@@ -293,7 +293,7 @@ func mergeResendWSURL(u *url.URL, scheme, authority, upgradePath, rawQuery strin
 		authority = u.Host
 	}
 	if upgradePath == "" {
-		upgradePath = u.Path
+		upgradePath = envelope.WirePath(u)
 		if upgradePath == "" {
 			upgradePath = "/"
 		}
@@ -439,12 +439,9 @@ func resendWSUpgradeURL(scheme, authority, path, rawQuery string) *url.URL {
 	case "wss":
 		mapped = "https"
 	}
-	return &url.URL{
-		Scheme:   mapped,
-		Host:     authority,
-		Path:     path,
-		RawQuery: rawQuery,
-	}
+	// USK-1139: path is the wire-form upgrade path; read it back with
+	// envelope.WirePath, never URL.Path (decoded).
+	return envelope.URLFromWirePath(mapped, authority, path, rawQuery)
 }
 
 // checkResendWSScope enforces TargetScope rules on both the canonical
@@ -521,7 +518,7 @@ func (s *Server) buildResendWSEnvelope(plan *resendWSPlan) (*pipeline.WireEncode
 		Message:   msg,
 		Context: envelope.EnvelopeContext{
 			ConnID:       plan.connID,
-			UpgradePath:  plan.upgradeURL.Path,
+			UpgradePath:  envelope.WirePath(plan.upgradeURL),
 			UpgradeQuery: plan.upgradeURL.RawQuery,
 		},
 	}
@@ -607,7 +604,7 @@ func dialResendWSUpstream(ctx context.Context, transport httputilpkg.TLSTranspor
 func performResendWSUpgrade(ctx context.Context, conn net.Conn, plan *resendWSPlan) (io.Reader, io.Writer, io.Closer, string, error) {
 	wsKey := generateResendWSKey()
 	headers := buildResendWSUpgradeHeaders(plan.upgradeHeaders, plan.upgradeURL.Host, wsKey, plan.compressed, plan.extensionHeader)
-	upgradeEnv := http1.BuildSendEnvelope("GET", plan.upgradeURL.Scheme, plan.upgradeURL.Host, plan.upgradeURL.Path, plan.upgradeURL.RawQuery, headers, nil)
+	upgradeEnv := http1.BuildSendEnvelope("GET", plan.upgradeURL.Scheme, plan.upgradeURL.Host, envelope.WirePath(plan.upgradeURL), plan.upgradeURL.RawQuery, headers, nil)
 
 	// Receive direction = upstream-client side: writes requests on Send,
 	// parses responses on Next. Same pattern as resend_http L410.
@@ -782,7 +779,7 @@ func buildResendWSLayerOpts(plan *resendWSPlan, extensionHeader string) []ws.Opt
 	opts := []ws.Option{
 		ws.WithEnvelopeContext(envelope.EnvelopeContext{
 			ConnID:       plan.connID,
-			UpgradePath:  plan.upgradeURL.Path,
+			UpgradePath:  envelope.WirePath(plan.upgradeURL),
 			UpgradeQuery: plan.upgradeURL.RawQuery,
 		}),
 	}
@@ -869,7 +866,7 @@ func buildResendWSPongEnvelope(plan *resendWSPlan, streamID string, sequence int
 		},
 		Context: envelope.EnvelopeContext{
 			ConnID:       plan.connID,
-			UpgradePath:  plan.upgradeURL.Path,
+			UpgradePath:  envelope.WirePath(plan.upgradeURL),
 			UpgradeQuery: plan.upgradeURL.RawQuery,
 		},
 	}

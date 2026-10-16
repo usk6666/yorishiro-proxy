@@ -8,10 +8,11 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"net/url"
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 )
 
 // ConflictPolicy determines behavior when an imported stream ID already exists.
@@ -313,11 +314,9 @@ func exportToFlow(ef *ExportFlow) (*Flow, error) {
 	}
 
 	if ef.URL != "" {
-		parsed, err := url.Parse(ef.URL)
-		if err != nil {
-			return nil, fmt.Errorf("parse flow URL: %w", err)
-		}
-		f.URL = parsed
+		// USK-1139: the exported url carries the wire path verbatim;
+		// ParseWireURL accepts every shape the exporter writes.
+		f.URL = envelope.ParseWireURL(ef.URL)
 	}
 
 	if ef.Body != "" {
