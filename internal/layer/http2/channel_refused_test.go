@@ -344,3 +344,42 @@ func TestChannel_Close_ServerRole_ClientGoAwayKeepsCancel(t *testing.T) {
 		t.Errorf("RST_STREAM codes on stream 1 = %v, want [%d] (CANCEL)", got, ErrCodeCancel)
 	}
 }
+
+// TestChannel_CloseRefused_ServerRole_QueuedHeadersKeepsCancel pins that the
+// REFUSED-vs-CANCEL decision is keyed on response HEADERS having been handed
+// to the writer, not on the write having completed. When a response HEADERS
+// Send gives up on its ctx while the frame is still queued (the writer is
+// blocked because the client is not reading), the writer still emits that
+// HEADERS later; a REFUSED_STREAM queued behind it would tell the client the
+// request was not processed after a response had already begun (USK-1157).
+func TestChannel_CloseRefused_ServerRole_QueuedHeadersKeepsCancel(t *testing.T) {
+	l, peer, cleanup := startServerLayer(t)
+	defer cleanup()
+	ch := acceptServerStream(t, l, peer)
+
+	// The peer is not reading, so the net.Pipe write of the HEADERS frame
+	// blocks and the Send's done never fires before its ctx expires.
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	err := ch.Send(ctx, &envelope.Envelope{
+		Direction: envelope.Receive,
+		Protocol:  envelope.ProtocolHTTP,
+		Message:   &H2HeadersEvent{Status: 103},
+	})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Send(103) err = %v, want context.DeadlineExceeded (HEADERS still queued)", err)
+	}
+
+	rc, ok := ch.(refusedCloser)
+	if !ok {
+		t.Fatalf("server-role channel %T does not implement CloseRefused", ch)
+	}
+	if err := rc.CloseRefused(); err != nil {
+		t.Fatalf("CloseRefused: %v", err)
+	}
+
+	got := collectRSTs(t, peer, 300*time.Millisecond)[1]
+	if len(got) != 1 || got[0] != ErrCodeCancel {
+		t.Errorf("RST_STREAM codes on stream 1 = %v, want [%d] (CANCEL): the queued 103 HEADERS reached the client first", got, ErrCodeCancel)
+	}
+}
