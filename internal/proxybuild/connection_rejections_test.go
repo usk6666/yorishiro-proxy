@@ -443,3 +443,73 @@ func TestConnectionRejections_CloseStopsRecorder(t *testing.T) {
 		t.Errorf("Total = %d, want 3", got)
 	}
 }
+
+// TestConnectionRejections_NoAuthorityUnderHostnameExclude (USK-1142
+// review S-1): an HTTP/1.x origin-form rejection carries no authority, so
+// no hostname rule can match it. Under an exclude rule that constrains
+// Hostname the target may belong to an excluded host, so the rejection
+// fails closed (out_of_scope, nothing persisted) instead of writing its
+// path/query to the store. With no hostname-bearing exclude rule the audit
+// Stream is still written.
+func TestConnectionRejections_NoAuthorityUnderHostnameExclude(t *testing.T) {
+	originForm := func(i int) connector.RejectInfo {
+		info := connectReject(i, "/secret?token=x")
+		info.DetectedKind = connector.ProtocolHTTP1
+		info.Method = "GET"
+		return info
+	}
+	cases := []struct {
+		name           string
+		excludes       []flow.ScopeRule
+		wantSaved      bool
+		wantOutOfScope int64
+	}{
+		{name: "hostname exclude fails closed", excludes: []flow.ScopeRule{{Hostname: "secret.example"}}, wantSaved: false, wantOutOfScope: 1},
+		{name: "hostname+path exclude fails closed", excludes: []flow.ScopeRule{{Hostname: "secret.example", URLPrefix: "/secret"}}, wantSaved: false, wantOutOfScope: 1},
+		{name: "empty scope still records", excludes: nil, wantSaved: true, wantOutOfScope: 0},
+		{name: "path-only exclude still records", excludes: []flow.ScopeRule{{URLPrefix: "/admin"}}, wantSaved: true, wantOutOfScope: 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := &recordingFlowStore{}
+			scope := flow.NewRecordScope()
+			scope.SetRules(nil, tc.excludes)
+			c := NewConnectionRejections(ConnectionRejectionsConfig{Store: store, Scope: scope, Logger: silentLogger()})
+			t.Cleanup(c.Close)
+
+			c.Record(originForm(1))
+			// Sentinel with an authority no exclude rule matches. The single
+			// recorder is FIFO, so once the sentinel is saved the origin-form
+			// record has either been saved already or was never queued.
+			c.Record(connectReject(2, "other.example:443"))
+
+			want := 1
+			if tc.wantSaved {
+				want = 2
+			}
+			streams := waitForStreams(t, store, want)
+			if len(streams) != want {
+				t.Fatalf("saved streams = %d, want %d", len(streams), want)
+			}
+			sawTarget := false
+			for _, st := range streams {
+				if st.Tags["target"] == "/secret?token=x" {
+					sawTarget = true
+				}
+			}
+			if sawTarget != tc.wantSaved {
+				t.Errorf("origin-form target persisted = %v, want %v", sawTarget, tc.wantSaved)
+			}
+			snap := c.Snapshot()
+			if snap.OutOfScope != tc.wantOutOfScope {
+				t.Errorf("OutOfScope = %d, want %d", snap.OutOfScope, tc.wantOutOfScope)
+			}
+			if snap.Total != 2 {
+				t.Errorf("Total = %d, want 2", snap.Total)
+			}
+			if got := recentAt(t, snap, 1).Recorded; got != tc.wantSaved {
+				t.Errorf("origin-form entry recorded = %v, want %v", got, tc.wantSaved)
+			}
+		})
+	}
+}
