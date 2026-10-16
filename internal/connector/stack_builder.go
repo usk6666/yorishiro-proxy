@@ -273,8 +273,8 @@ type BuildConfig struct {
 	// facing) Layer; the outbound (upstream / ClientRole) Layer continues
 	// to honour the peer's advertised limit.
 	//
-	// Per-connection stream worst-case under the default fan-out:
-	// MaxConcurrentStreams × MaxConnections = 500 × 128 = 64,000 streams.
+	// Per-listener stream worst-case under the default fan-out:
+	// MaxConcurrentStreams × MaxConnections = 500 × 512 = 256,000 streams.
 	// See internal/config/limits.go for the RAM-side worst-case math.
 	//
 	// This is the static (boot-time) value; runtime updates from

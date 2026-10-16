@@ -281,7 +281,7 @@ func Default() *Config {
 		PeekTimeout:     30 * time.Second,
 		RequestTimeout:  60 * time.Second,
 		DialTimeout:     30 * time.Second,
-		MaxConnections:  128,
+		MaxConnections:  DefaultMaxConnections,
 		CleanupInterval: time.Hour,
 	}
 }

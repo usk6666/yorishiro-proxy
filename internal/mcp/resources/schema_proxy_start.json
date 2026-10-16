@@ -105,7 +105,7 @@
     },
     "max_connections": {
       "type": "integer",
-      "description": "Maximum number of concurrent proxy connections. Default: 128.",
+      "description": "Maximum number of concurrent proxy connections. Default: 512.",
       "minimum": 1,
       "maximum": 100000
     },

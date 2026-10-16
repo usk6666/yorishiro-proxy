@@ -93,7 +93,7 @@ func TestProxyStartDocs_MaxConnectionsDefaultMatchesConstant(t *testing.T) {
 		text := readResourceText(t, "yorishiro://help/proxy_start")
 		// Scope the match to the max_connections section so another
 		// parameter's "Default:" line cannot satisfy it.
-		section := regexp.MustCompile("(?s)### max_connections \\(.*?\\n(.*?)\\n### ").FindStringSubmatch(text)
+		section := regexp.MustCompile(`(?s)### max_connections \(.*?\n(.*?)\n### `).FindStringSubmatch(text)
 		if section == nil {
 			t.Fatal("help/proxy_start has no max_connections section")
 		}

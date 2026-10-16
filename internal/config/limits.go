@@ -15,34 +15,57 @@ package config
 // BodySpillThreshold rather than by MaxBodySize.
 //
 // CWE-770 note: these limits serve as a defense against resource exhaustion.
-// The per-connection RAM worst case (request + response in flight) is bounded
-// by:
+//
+// MaxConnections (default DefaultMaxConnections below) is a concurrency cap
+// — it bounds file descriptors and per-connection goroutines — not a RAM
+// ceiling. It applies per listener (SOCKS5 shares the listener's cap) and
+// separately per TCP forward entry. A nominal "every connection is moving a
+// spill-threshold body in each direction" figure is:
 //
 //	BodySpillThreshold × 2 (req + resp) × MaxConnections
-//	= 10 MiB × 2 × 128 ≈ 2.5 GiB
+//	= 10 MiB × 2 × 512 ≈ 10 GiB
 //
-// The default MaxConnections (DefaultMaxConnections = 128 in
-// internal/connector/listener_common.go) is chosen with this RAM ceiling in
-// mind. Operators should consider total memory capacity and adjust
-// MaxConnections via the proxy_start MCP tool or configure_limits when
-// running under heavy load.
+// That formula was never a true bound and is not one now: an HTTP/2
+// connection carries up to SETTINGS_MAX_CONCURRENT_STREAMS streams, each
+// with its own spill budget (see below), and WebSocket / gRPC messages are
+// assembled in memory up to MaxWebSocketMessageSize / MaxGRPCMessageSize.
+// Conversely, most connections a browser holds are idle keep-alive
+// connections or CONNECT tunnels, which hold no body buffers at all, so the
+// typical footprint is far below the nominal figure.
+//
+// The default is sized for a single proxied browser rather than for that
+// nominal figure. Browsers pool well past the old default of 128: Chromium
+// (net/socket/client_socket_pool_manager.cc) allows
+// g_max_sockets_per_proxy_chain = 128 normal + 128 WebSocket sockets per
+// proxy chain with g_socket_soft_cap_per_pool = 256, and Firefox
+// (modules/libpref/init/all.js) sets network.http.max-connections = 900 on
+// desktop. One ad-heavy page was enough to exceed 128 (USK-1141). Operators
+// with tighter memory or FD budgets lower MaxConnections via the
+// proxy_start / configure MCP tools.
 //
 // HTTP/2 stream fan-out (USK-862): the per-connection stream worst case is
 // bounded by the advertised SETTINGS_MAX_CONCURRENT_STREAMS. The H2 Layer
 // default (internal/layer/http2/connstate.go defaultMaxConcurrentStreams)
 // was raised from 100 to 500 to support high-multiplexing pages, so the
-// proxy-wide worst-case stream count is:
+// per-listener worst-case stream count is:
 //
 //	defaultMaxConcurrentStreams × MaxConnections
-//	= 500 × 128 = 64,000 streams
+//	= 500 × 512 = 256,000 streams
 //
-// Stream-level RAM is still bounded by the same per-body budget (each H2
-// stream's BodyBuffer obeys BodySpillThreshold), so the RAM ceiling above
-// is unchanged — only the per-connection goroutine fan-out increases.
-// Operators concerned about goroutine pressure can re-tighten this cap via
-// Config.MaxConcurrentStreams (CLI -max-concurrent-streams /
-// YP_MAX_CONCURRENT_STREAMS) which threads through
+// Each H2 stream's BodyBuffer obeys BodySpillThreshold individually, which
+// is why the nominal RAM figure above understates a fully loaded H2
+// connection. Operators concerned about goroutine or memory pressure can
+// re-tighten this cap via Config.MaxConcurrentStreams (CLI
+// -max-concurrent-streams / YP_MAX_CONCURRENT_STREAMS) which threads through
 // connector.BuildConfig.MaxConcurrentStreams to the client-facing Layer.
+
+// DefaultMaxConnections is the default concurrent-connection cap per
+// listener and per TCP forward entry. It is the single definition: config
+// seeds Config.MaxConnections from it, connector.DefaultMaxConnections
+// aliases it (connector imports config, so the constant cannot live there),
+// and the proxy_start MCP tool resets to it when max_connections is omitted
+// (USK-407). See the CWE-770 note above for how the value was chosen.
+const DefaultMaxConnections = 512
 
 const (
 	// MaxBodySize is the unified maximum size for both reading upstream
