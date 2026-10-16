@@ -57,6 +57,27 @@ func (c *Config) Validate() error {
 	if err := c.validateMaxRawCaptureSize(); err != nil {
 		return err
 	}
+	if err := c.validateExportDir(); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validateExportDir checks an operator-supplied ExportDir: it must exist
+// and be a directory (sibling of the body_spill_dir check). An empty value
+// selects DefaultExportDir(), which the server creates on demand, so it
+// skips the filesystem checks.
+func (c *Config) validateExportDir() error {
+	if c.ExportDir == "" {
+		return nil
+	}
+	fi, err := os.Stat(c.ExportDir)
+	if err != nil {
+		return fmt.Errorf("export_dir %q does not exist (create it, or omit -export-dir / YP_EXPORT_DIR to use the default): %w", c.ExportDir, err)
+	}
+	if !fi.IsDir() {
+		return fmt.Errorf("export_dir %q is not a directory", c.ExportDir)
+	}
 	return nil
 }
 
@@ -243,6 +264,15 @@ type Config struct {
 	// CLI flag: -ui-dir, env: YP_UI_DIR.
 	UIDir string `json:"-"`
 
+	// ExportDir is the directory that confines every server-side file read
+	// and write performed by the MCP manage tool's export_flows /
+	// import_flows actions (USK-1127). Relative output_path / input_path
+	// values resolve against it; paths outside it are rejected. Empty means
+	// DefaultExportDir() (~/.yorishiro-proxy/exports/). Operator-only: it is
+	// not reachable from any MCP tool. Excluded from JSON serialization.
+	// CLI flag: -export-dir, env: YP_EXPORT_DIR.
+	ExportDir string `json:"-"`
+
 	// SafetyFilterEnabled controls whether the SafetyFilter engine is active.
 	// This can be set via CLI flag (-safety-filter) or environment variable
 	// (YP_SAFETY_FILTER_ENABLED). When explicitly set, it overrides the config
@@ -294,6 +324,19 @@ func DefaultDBPath() string {
 		return "yorishiro.db"
 	}
 	return filepath.Join(home, ".yorishiro-proxy", "yorishiro.db")
+}
+
+// DefaultExportDir returns the default export directory confining manage
+// export_flows / import_flows file paths (USK-1127):
+// ~/.yorishiro-proxy/exports, beside the default DB and the persisted CA.
+// If the user's home directory cannot be resolved, it falls back to
+// ./.yorishiro-proxy/exports (mirroring cert.DefaultCADir).
+func DefaultExportDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return filepath.Join(".", ".yorishiro-proxy", "exports")
+	}
+	return filepath.Join(home, ".yorishiro-proxy", "exports")
 }
 
 // EnsureDBDir creates the parent directory of the given database path if it does

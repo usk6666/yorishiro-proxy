@@ -87,11 +87,11 @@
         },
         "output_path": {
           "type": "string",
-          "description": "File path to write export data."
+          "description": "File path to write export data, confined to the server's export directory (query status export_dir; set by the operator via -export-dir / YP_EXPORT_DIR, default ~/.yorishiro-proxy/exports). Relative paths resolve against it; absolute paths must lie inside it."
         },
         "input_path": {
           "type": "string",
-          "description": "File path to read import data."
+          "description": "File path to read import data, confined to the server's export directory (query status export_dir). Relative paths resolve against it; absolute paths must lie inside it."
         },
         "on_conflict": {
           "type": "string",

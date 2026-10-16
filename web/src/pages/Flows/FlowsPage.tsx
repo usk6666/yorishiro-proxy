@@ -925,7 +925,7 @@ export function FlowsPage() {
             <div className="flows-dialog-field">
               <Input
                 label="File path"
-                placeholder="/path/to/flows.jsonl"
+                placeholder="flows.jsonl (relative to the server export directory)"
                 value={importPath}
                 onChange={(e) => setImportPath(e.target.value)}
               />

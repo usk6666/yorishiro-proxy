@@ -121,14 +121,13 @@ func listStreamIDs(t *testing.T, store flow.Store) []string {
 func TestManageExport_FilterScheme(t *testing.T) {
 	t.Parallel()
 	store := newTestStore(t)
-	cs := setupTestSession(t, newTestCA(t), store)
+	cs, dir := setupExportSession(t, newTestCA(t), store)
 
 	seedFilterStream(t, store, "https-h2", "http", "https", "h2")
 	seedFilterStream(t, store, "https-h11", "http", "https", "http/1.1")
 	seedFilterStream(t, store, "plain-http", "http", "http", "http/1.1")
 	seedFilterStream(t, store, "wss", "ws", "wss", "")
 
-	dir := t.TempDir()
 	out := filepath.Join(dir, "scheme.jsonl")
 
 	result := manageCallTool(t, cs, map[string]any{
@@ -157,13 +156,12 @@ func TestManageExport_FilterScheme(t *testing.T) {
 func TestManageExport_FilterHTTPVersion(t *testing.T) {
 	t.Parallel()
 	store := newTestStore(t)
-	cs := setupTestSession(t, newTestCA(t), store)
+	cs, dir := setupExportSession(t, newTestCA(t), store)
 
 	seedFilterStream(t, store, "h2-https", "http", "https", "h2")
 	seedFilterStream(t, store, "h2c-plain", "http", "http", "h2c")
 	seedFilterStream(t, store, "h11-https", "http", "https", "http/1.1")
 
-	dir := t.TempDir()
 	out := filepath.Join(dir, "version.jsonl")
 
 	result := manageCallTool(t, cs, map[string]any{
@@ -191,14 +189,13 @@ func TestManageExport_FilterHTTPVersion(t *testing.T) {
 func TestManageExport_FilterCombination_AND(t *testing.T) {
 	t.Parallel()
 	store := newTestStore(t)
-	cs := setupTestSession(t, newTestCA(t), store)
+	cs, dir := setupExportSession(t, newTestCA(t), store)
 
 	seedFilterStream(t, store, "match", "http", "https", "h2")
 	seedFilterStream(t, store, "wrong-scheme", "http", "http", "h2")
 	seedFilterStream(t, store, "wrong-version", "http", "https", "http/1.1")
 	seedFilterStream(t, store, "wrong-protocol", "ws", "https", "h2")
 
-	dir := t.TempDir()
 	out := filepath.Join(dir, "combo.jsonl")
 
 	result := manageCallTool(t, cs, map[string]any{
@@ -229,11 +226,10 @@ func TestManageExport_FilterCombination_AND(t *testing.T) {
 func TestManageExport_FilterRejectsInvalidScheme(t *testing.T) {
 	t.Parallel()
 	store := newTestStore(t)
-	cs := setupTestSession(t, newTestCA(t), store)
+	cs, dir := setupExportSession(t, newTestCA(t), store)
 
 	seedFilterStream(t, store, "any", "http", "https", "h2")
 
-	dir := t.TempDir()
 	out := filepath.Join(dir, "bad-scheme.jsonl")
 
 	result := manageCallTool(t, cs, map[string]any{

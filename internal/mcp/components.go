@@ -527,6 +527,9 @@ type Misc struct {
 	dbPath        string
 	rateLimiter   *connector.RateLimiter
 	budgetManager *connector.BudgetManager
+	// exportDir confines manage export_flows / import_flows file I/O
+	// (USK-1127). Set via WithExportDir; empty disables file export/import.
+	exportDir string
 }
 
 // NewMisc constructs a Misc component. ctx should be the application

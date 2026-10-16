@@ -56,6 +56,7 @@ var EnvVarMap = map[string]string{
 	"mcp-http-addr":      "YP_MCP_HTTP_ADDR",
 	"mcp-http-token":     "YP_MCP_HTTP_TOKEN",
 	"ui-dir":             "YP_UI_DIR",
+	"export-dir":         "YP_EXPORT_DIR",
 	"target-policy-file": "YP_TARGET_POLICY_FILE",
 	"open-browser":       "YP_OPEN_BROWSER",
 	"tls-fingerprint":    "YP_TLS_FINGERPRINT",
@@ -135,6 +136,10 @@ func Run(ctx context.Context, fs *flag.FlagSet, args []string, opts RunOptions) 
 	fs.StringVar(&cfg.MCPHTTPAddr, "mcp-http-addr", defaultMCPHTTPAddr, "Streamable HTTP MCP listen address; use 0 for OS-assigned port (env: YP_MCP_HTTP_ADDR)")
 	fs.StringVar(&cfg.MCPHTTPToken, "mcp-http-token", cfg.MCPHTTPToken, "HTTP Bearer auth token, auto-generated if empty (env: YP_MCP_HTTP_TOKEN)")
 	fs.StringVar(&cfg.UIDir, "ui-dir", cfg.UIDir, "directory for WebUI static files, overrides embedded assets (env: YP_UI_DIR)")
+	fs.StringVar(&cfg.ExportDir, "export-dir", cfg.ExportDir,
+		"directory confining manage export_flows / import_flows file paths; relative paths resolve against it,\n"+
+			"    paths outside it are rejected. Must be a dedicated directory used only for exports: MCP callers\n"+
+			"    can overwrite any file in it (default ~/.yorishiro-proxy/exports) (env: YP_EXPORT_DIR)")
 
 	// -open-browser enables auto-opening the WebUI; default is disabled.
 	var openBrowser bool
@@ -208,16 +213,9 @@ func Run(ctx context.Context, fs *flag.FlagSet, args []string, opts RunOptions) 
 		return err
 	}
 
-	// Cross-struct invariant: the resolved BodySpillThreshold (RAM cap on
-	// Config) must not exceed the resolved MaxBodySize (wire cap on
-	// ProxyConfig). Config.Validate enforces the raw BodySpillThreshold
-	// against the package constant; this re-check uses the resolved values
-	// so the default-spill-threshold case (zero → 10 MiB) is also caught
-	// when the operator overrides max_body_size to a smaller value.
-	resolvedThreshold := config.ResolveBodySpillThreshold(cfg)
-	resolvedMaxBody := config.ResolveMaxBodySize(proxyCfg)
-	if resolvedThreshold > resolvedMaxBody {
-		return fmt.Errorf("invalid configuration: body_spill_threshold (%d) must be <= max_body_size (%d)", resolvedThreshold, resolvedMaxBody)
+	exportDir, err := checkResolvedConfig(cfg, proxyCfg, configFile, targetPolicyFile)
+	if err != nil {
+		return err
 	}
 
 	infra, err := InitInfra(ctx, cfg)
@@ -227,6 +225,7 @@ func Run(ctx context.Context, fs *flag.FlagSet, args []string, opts RunOptions) 
 	defer infra.Cleanup()
 	logger := infra.Logger
 	store := infra.Store
+	prepareExportDir(exportDir, logger)
 
 	// Initialize CA and certificate issuer for HTTPS MITM.
 	ca, err := InitCA(cfg, logger)
@@ -296,6 +295,29 @@ func Run(ctx context.Context, fs *flag.FlagSet, args []string, opts RunOptions) 
 		holdQueue, releaseTracker, holdTracker, httpInterceptEngine, wsInterceptEngine, grpcInterceptEngine,
 		sseInterceptEngine, httpTransformEngine, sseTransformEngine, passthrough,
 		targetScopePolicy, targetScopePolicySource, openBrowser, stdioMCP, versionStr, opts.OnHTTPListening, logger)
+}
+
+// checkResolvedConfig runs the boot checks that need both the CLI Config
+// and the loaded ProxyConfig, before any infrastructure is created (so a
+// refused boot leaves nothing on disk). Extracted from Run to keep it
+// under the gocyclo budget.
+func checkResolvedConfig(cfg *config.Config, proxyCfg *config.ProxyConfig, configFile, targetPolicyFile string) (exportDirSetting, error) {
+	// Cross-struct invariant: the resolved BodySpillThreshold (RAM cap on
+	// Config) must not exceed the resolved MaxBodySize (wire cap on
+	// ProxyConfig). Config.Validate enforces the raw BodySpillThreshold
+	// against the package constant; this re-check uses the resolved values
+	// so the default-spill-threshold case (zero → 10 MiB) is also caught
+	// when the operator overrides max_body_size to a smaller value.
+	resolvedThreshold := config.ResolveBodySpillThreshold(cfg)
+	resolvedMaxBody := config.ResolveMaxBodySize(proxyCfg)
+	if resolvedThreshold > resolvedMaxBody {
+		return exportDirSetting{}, fmt.Errorf("invalid configuration: body_spill_threshold (%d) must be <= max_body_size (%d)", resolvedThreshold, resolvedMaxBody)
+	}
+
+	// USK-1127: resolve the export directory and refuse to start when it
+	// contains an operator-owned path (policy / config / CA / DB / log /
+	// UI / plugin scripts / TLS material).
+	return setupExportDir(cfg, configFile, targetPolicyFile, proxyCfg)
 }
 
 // assembleAndRunMCPServer is the hot final phase of Run: build the live
@@ -657,6 +679,9 @@ func buildMCPComponents(
 
 	opts := []mcp.ServerOption{
 		mcp.WithVersion(version),
+		// USK-1127: cfg.ExportDir holds the absolute export directory
+		// resolved (and isolation-checked) by setupExportDir in Run.
+		mcp.WithExportDir(cfg.ExportDir),
 	}
 	if cfg.UIDir != "" {
 		opts = append(opts, mcp.WithUIDir(cfg.UIDir))

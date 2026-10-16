@@ -163,9 +163,8 @@ func TestManageDelete_SchemeWSS_Rejected(t *testing.T) {
 // rejects params.filter.scheme="ws".
 func TestManageExport_SchemeWS_Rejected(t *testing.T) {
 	store := newTestStore(t)
-	cs := setupTestSession(t, newTestCA(t), store)
+	cs, dir := setupExportSession(t, newTestCA(t), store)
 
-	dir := t.TempDir()
 	result := manageCallTool(t, cs, map[string]any{
 		"action": "export_flows",
 		"params": map[string]any{

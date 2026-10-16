@@ -356,13 +356,12 @@ func TestExportFlows_HARIgnoresWireLevel(t *testing.T) {
 	t.Parallel()
 	store := newTestStore(t)
 	ca := newTestCA(t)
-	cs := setupTestSession(t, ca, store)
+	cs, dir := setupExportSession(t, ca, store)
 
 	// Use the HTTP-shaped helper so HAR's protocol gate passes (gRPC is
 	// filtered out by harStreamIncluded).
 	makeExportTestSession(t, store, "sess-har-wire-all")
 
-	dir := t.TempDir()
 	outputPath := filepath.Join(dir, "out.har")
 	result := manageCallTool(t, cs, map[string]any{
 		"action": "export_flows",

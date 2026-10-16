@@ -51,7 +51,7 @@ Export flows to JSONL or HAR (HTTP Archive 1.2) format with optional filtering.
   - **time_after** (string, optional): Include flows after this time (RFC3339 format).
   - **time_before** (string, optional): Include flows before this time (RFC3339 format).
 - **include_bodies** (boolean, optional): Include message body and raw_bytes in export (default: `true`). Set to `false` for metadata-only export.
-- **output_path** (string, optional for JSONL, **required for HAR**): File path to write the export data. Resolved relative to the proxy server process's working directory, NOT the MCP caller's cwd — pass an absolute path when the server cwd is unknown to the caller (e.g. HTTP remote MCP). JSONL supports inline output when omitted; HAR always requires a file path.
+- **output_path** (string, optional for JSONL, **required for HAR**): File path to write the export data, confined to the server's export directory (see "File paths" below). Pass a relative name such as `"flows.har"`. JSONL supports inline output when omitted; HAR always requires a file path.
 
 **Format details:**
 - **JSONL**: Each line is a complete JSON object containing a flow and its messages. Supports inline and file output.
@@ -63,10 +63,24 @@ Returns: exported_count, format, output_path (if file output), data (if inline o
 Import flows from a JSONL file. Each line must be a valid export record with version "1".
 
 **Parameters:**
-- **input_path** (string, required): File path to read the JSONL import data. Resolved relative to the proxy server process's working directory, NOT the MCP caller's cwd — pass an absolute path when the server cwd is unknown to the caller (e.g. HTTP remote MCP).
+- **input_path** (string, required): File path to read the JSONL import data, confined to the server's export directory (see "File paths" below), e.g. `"flows.jsonl"`.
 - **on_conflict** (string, optional): Conflict resolution policy for duplicate flow IDs. `"skip"` (default) skips existing flows; `"replace"` deletes and re-imports.
 
 Returns: imported, skipped, errors, source.
+
+### File paths (output_path / input_path)
+Every file `export_flows` writes and `import_flows` reads lives in one **export directory** on the proxy server's filesystem. The operator sets it at server start with `-export-dir` / `YP_EXPORT_DIR` (default `~/.yorishiro-proxy/exports/`); no MCP tool can change it. `query { resource: "status" }` (and `resource: "config"`) reports it as `export_dir`, which is how HTTP-remote callers learn where their files land.
+
+- A **relative** path resolves against the export directory: `"flows.har"`, `"run1/flows.jsonl"`. This is the recommended form.
+- An **absolute** path is accepted only if it lies inside the export directory, spelled as reported in `export_dir` (or as its symlink-resolved real path). An absolute path that reaches the directory through some other symlinked alias is rejected; use a relative path instead.
+- Anything else — an absolute path elsewhere, a `..` escape, a symlink inside the directory that points outside it — is rejected with `path "..." resolves outside export directory <dir>; set -export-dir / YP_EXPORT_DIR or use a path relative to it`.
+- A symlink as the final component is rejected with `file path must not be a symbolic link: <path>`.
+- Subdirectories must already exist; they are not created. Re-exporting to an existing name overwrites it.
+- The returned `output_path` / `source` is the absolute path inside the export directory.
+
+The server refuses to start if the export directory contains its config file, target policy file, CA certificate/key, database, log file, server.json, WebUI directory, plugin scripts or TLS client certificate / key / CA bundle files, so an export can never overwrite them.
+
+**Operators:** `-export-dir` must be a **dedicated directory used only for exports**. The boot check only knows the proxy's own files; anything else inside the directory can be overwritten by an MCP caller. For example, a directory such as `~/.config` would let an agent replace shell or autostart files (code execution on the next login). `$HOME` itself is refused because it contains `~/.yorishiro-proxy/`. (Before USK-1127, relative paths resolved against the server process's working directory and absolute paths were unrestricted — that USK-868 contract is superseded.)
 
 ## Usage Examples
 
@@ -138,7 +152,7 @@ Returns: imported, skipped, errors, source.
   "params": {
     "format": "jsonl",
     "include_bodies": true,
-    "output_path": "/tmp/export.jsonl"
+    "output_path": "export.jsonl"
   }
 }
 ```
@@ -150,7 +164,7 @@ Returns: imported, skipped, errors, source.
   "params": {
     "format": "har",
     "include_bodies": true,
-    "output_path": "/tmp/export.har"
+    "output_path": "export.har"
   }
 }
 ```
@@ -165,7 +179,7 @@ Returns: imported, skipped, errors, source.
       "protocol": "http",
       "url_pattern": "/api/"
     },
-    "output_path": "/tmp/api-flows.har"
+    "output_path": "api-flows.har"
   }
 }
 ```
@@ -177,7 +191,7 @@ Returns: imported, skipped, errors, source.
   "params": {
     "format": "jsonl",
     "filter": {"scheme": "https"},
-    "output_path": "/tmp/https-flows.jsonl"
+    "output_path": "https-flows.jsonl"
   }
 }
 ```
@@ -189,7 +203,7 @@ Returns: imported, skipped, errors, source.
   "params": {
     "format": "jsonl",
     "filter": {"http_version": "h2"},
-    "output_path": "/tmp/h2-flows.jsonl"
+    "output_path": "h2-flows.jsonl"
   }
 }
 ```
@@ -216,7 +230,7 @@ Returns: imported, skipped, errors, source.
 {
   "action": "import_flows",
   "params": {
-    "input_path": "/tmp/export.jsonl",
+    "input_path": "export.jsonl",
     "on_conflict": "skip"
   }
 }
@@ -227,7 +241,7 @@ Returns: imported, skipped, errors, source.
 {
   "action": "import_flows",
   "params": {
-    "input_path": "/tmp/export.jsonl",
+    "input_path": "export.jsonl",
     "on_conflict": "replace"
   }
 }
