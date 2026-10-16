@@ -317,3 +317,30 @@ func TestChannel_CloseRefused_ServerRole(t *testing.T) {
 		})
 	}
 }
+
+// TestChannel_Close_ServerRole_ClientGoAwayKeepsCancel guards the exception
+// in streamAlreadyReset: a client's GOAWAY last_stream_id only covers
+// streams the proxy (its receiver) initiated, so the client-initiated
+// streams the reader nevertheless fails as refused are still open on the
+// client's side and must still be reset with CANCEL on teardown.
+func TestChannel_Close_ServerRole_ClientGoAwayKeepsCancel(t *testing.T) {
+	l, peer, cleanup := startServerLayer(t)
+	defer cleanup()
+	ch := acceptServerStream(t, l, peer)
+
+	if err := peer.wr.WriteGoAway(0, ErrCodeNo, nil); err != nil {
+		t.Fatalf("write GOAWAY: %v", err)
+	}
+	select {
+	case <-ch.Closed():
+	case <-time.After(2 * time.Second):
+		t.Fatal("channel not terminated after client GOAWAY")
+	}
+	if err := ch.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	got := collectRSTs(t, peer, 300*time.Millisecond)[1]
+	if len(got) != 1 || got[0] != ErrCodeCancel {
+		t.Errorf("RST_STREAM codes on stream 1 = %v, want [%d] (CANCEL)", got, ErrCodeCancel)
+	}
+}
