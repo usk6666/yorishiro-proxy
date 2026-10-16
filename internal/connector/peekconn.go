@@ -2,8 +2,14 @@ package connector
 
 import (
 	"bufio"
+	"errors"
 	"net"
 )
+
+// CloseWrite is a scaffold for USK-1163; not yet implemented.
+func (pc *PeekConn) CloseWrite() error {
+	return errors.ErrUnsupported
+}
 
 // PeekConn wraps a net.Conn with a buffered reader, allowing bytes to be
 // peeked without consuming them from the stream. Subsequent Read calls

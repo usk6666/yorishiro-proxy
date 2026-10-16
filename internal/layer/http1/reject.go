@@ -14,17 +14,20 @@ const (
 	// cannot pin the Layer's goroutine.
 	rejectWriteTimeout = 5 * time.Second
 
-	// rejectLingerTimeout bounds how long the Layer keeps reading (and
-	// discarding) the rest of the rejected request after the 414 is out.
-	// Closing a TCP socket with unread received data makes the kernel send
-	// RST instead of FIN, and an RST can make the client discard the 414
-	// before reading it. Matches Go net/http's rstAvoidanceDelay (500ms),
-	// which its server waits out in closeWriteAndWait after a 431.
-	rejectLingerTimeout = 500 * time.Millisecond
-
 	// rejectLingerMaxBytes caps the bytes discarded while lingering.
 	rejectLingerMaxBytes = 1 << 20
 )
+
+// rejectLingerTimeout bounds how long the Layer keeps reading (and
+// discarding) the rest of the rejected request after the 414 is out.
+// Closing a TCP socket with unread received data makes the kernel send
+// RST instead of FIN, and an RST can make the client discard the 414
+// before reading it. Matches Go net/http's rstAvoidanceDelay (500ms),
+// which its server waits out in closeWriteAndWait after a 431.
+//
+// A var only so tests can stretch it (export_test.go); never reassigned
+// in production code.
+var rejectLingerTimeout = 500 * time.Millisecond
 
 // uriTooLongBody is the plain-text body of the 414 response.
 const uriTooLongBody = "request line too long\r\n"
