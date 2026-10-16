@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -122,5 +123,51 @@ func TestFullListener_CONNECT_HTTPS_MITM_LongRequestLine(t *testing.T) {
 	}
 	if recv := store.flowsByDirection("receive"); len(recv) < 1 || recv[0].StatusCode != 200 {
 		t.Errorf("receive flows = %d, want one with StatusCode 200", len(recv))
+	}
+}
+
+// TestFullListener_CONNECT_HTTPS_MITM_RequestLineTooLong_414 covers the
+// over-limit side of USK-1137 defect D on the production path: a request
+// line past the 4 MiB limit, sent inside CONNECT + TLS MITM, gets a 414 URI
+// Too Long with Connection: close from the proxy followed by a clean
+// close, never reaches upstream, and is not recorded.
+func TestFullListener_CONNECT_HTTPS_MITM_RequestLineTooLong_414(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	var upstreamHits atomic.Int32
+	upstreamLn, _ := startUpstreamHTTPS(t, func(_ []byte) []byte {
+		upstreamHits.Add(1)
+		return []byte("HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello")
+	})
+	defer upstreamLn.Close()
+	target := upstreamLn.Addr().String()
+
+	proxyAddr, store, wg := startFullListenerProxy(t, ctx, fullListenerOpts{})
+
+	wg.Add(1)
+	tlsConn := connectThroughProxy(t, proxyAddr, target)
+	defer tlsConn.Close()
+
+	rawReq := "GET /?q=" + strings.Repeat("x", 4<<20) + " HTTP/1.1\r\nHost: " + target + "\r\n\r\n"
+	go func() { _, _ = tlsConn.Write([]byte(rawReq)) }()
+
+	_ = tlsConn.SetReadDeadline(time.Now().Add(15 * time.Second))
+	resp, err := io.ReadAll(tlsConn)
+	if err != nil {
+		t.Errorf("reading the response: %v (want the 414 followed by a clean close)", err)
+	}
+	if !bytes.HasPrefix(resp, []byte("HTTP/1.1 414 URI Too Long\r\n")) {
+		t.Fatalf("response = %.200q, want HTTP/1.1 414 URI Too Long", resp)
+	}
+	if !bytes.Contains(resp, []byte("\r\nConnection: close\r\n")) {
+		t.Errorf("414 response lacks Connection: close: %q", resp)
+	}
+	waitSessionDone(t, wg)
+	if n := upstreamHits.Load(); n != 0 {
+		t.Errorf("upstream received %d requests, want 0", n)
+	}
+	if n := len(store.flowsByDirection("send")); n != 0 {
+		t.Errorf("recorded %d send flows for the rejected request, want 0", n)
 	}
 }

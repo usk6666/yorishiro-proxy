@@ -767,6 +767,11 @@ func (c *channel) parseRequest() (*envelope.Envelope, error) {
 		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 			return nil, io.EOF
 		}
+		if errors.Is(err, parser.ErrRequestLineTooLong) {
+			// USK-1137: answer 414 instead of an empty reply. parseRequest
+			// runs only on the client-facing (Send) side.
+			c.layer.rejectRequestLineTooLong()
+		}
 		return nil, fmt.Errorf("http1: parse request: %w", err)
 	}
 

@@ -21,7 +21,7 @@ import (
 
 // e2eBigHeaderValue mirrors the reporter's 10 KiB reproducer; 4 of them make
 // a ~36 KiB HPACK block that needs at least two CONTINUATION frames. Kept
-// below the 16 KiB per-string HPACK cap so these tests isolate defect A.
+// below the pre-USK-1137 16 KiB per-string HPACK cap so these tests isolate defect A.
 var e2eBigHeaderValue = strings.Repeat("x", 10*1024)
 
 var e2eBigHeaderNames = []string{"X-A", "X-B", "X-C", "X-D"}
