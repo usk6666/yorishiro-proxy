@@ -69,6 +69,12 @@ type options struct {
 	// "explicitly disabled". nil = use role default (ServerRole = 1,
 	// ClientRole = 0); non-nil = use the supplied bool.
 	enableConnectProtocol *bool
+	// afterLoopsStart is a USK-1138 test seam: when non-nil, startLoops
+	// calls it right after launching writerLoop / readerLoop. Tests use it
+	// to hold New() in the window where readerLoop can already process the
+	// peer's SETTINGS, which forces the scheduling that let a SETTINGS ACK
+	// precede our own SETTINGS on the wire. No production Option sets it.
+	afterLoopsStart func()
 }
 
 // Option configures a Layer.
@@ -647,15 +653,22 @@ func New(conn net.Conn, streamID string, role Role, opts ...Option) (*Layer, err
 		_ = l.RegisterGoAwayObserver(o.goAwayObserver)
 	}
 
-	go l.writerLoop()
-	go l.readerLoop()
-
+	// USK-1138: queue our SETTINGS (and the connection WINDOW_UPDATE)
+	// BEFORE starting the goroutines. RFC 9113 §3.4 requires our SETTINGS
+	// to be the first frame we send. If readerLoop ran first it could
+	// process a peer SETTINGS that is already readable (e.g. coalesced
+	// with the client preface) and queue its ACK ahead of our SETTINGS;
+	// nghttp2 / curl reject that with GOAWAY(PROTOCOL_ERROR, "SETTINGS
+	// expected"). writerLoop is the single FIFO consumer, so wire order is
+	// enqueue order. writerQueue is buffered (64) and writerDone is still
+	// open, so these two enqueues never block.
 	l.enqueueWrite(writeRequest{settings: &writeSettings{
 		params: settingsToFrame(local, role, fp),
 	}})
 
 	bump := connWindowIncrement(fp)
 	if err := l.conn.IncrementRecvWindow(bump); err != nil {
+		// No goroutines have been started yet, so nothing leaks.
 		_ = conn.Close()
 		return nil, err
 	}
@@ -665,7 +678,20 @@ func New(conn net.Conn, streamID string, role Role, opts ...Option) (*Layer, err
 		skipLocalUpdate: true,
 	}})
 
+	l.startLoops()
+
 	return l, nil
+}
+
+// startLoops launches the writer and reader goroutines. Both terminate on
+// Close() (writerDone / readerDone). The afterLoopsStart hook, if set, runs
+// after both goroutines have been started (USK-1138 test seam).
+func (l *Layer) startLoops() {
+	go l.writerLoop()
+	go l.readerLoop()
+	if l.opts.afterLoopsStart != nil {
+		l.opts.afterLoopsStart()
+	}
 }
 
 const defaultLargeConnWindow = 16 * 1024 * 1024
