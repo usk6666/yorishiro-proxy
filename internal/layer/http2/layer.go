@@ -653,14 +653,22 @@ func New(conn net.Conn, streamID string, role Role, opts ...Option) (*Layer, err
 		_ = l.RegisterGoAwayObserver(o.goAwayObserver)
 	}
 
-	l.startLoops()
-
+	// USK-1138: queue our SETTINGS (and the connection WINDOW_UPDATE)
+	// BEFORE starting the goroutines. RFC 9113 §3.4 requires our SETTINGS
+	// to be the first frame we send. If readerLoop ran first it could
+	// process a peer SETTINGS that is already readable (e.g. coalesced
+	// with the client preface) and queue its ACK ahead of our SETTINGS;
+	// nghttp2 / curl reject that with GOAWAY(PROTOCOL_ERROR, "SETTINGS
+	// expected"). writerLoop is the single FIFO consumer, so wire order is
+	// enqueue order. writerQueue is buffered (64) and writerDone is still
+	// open, so these two enqueues never block.
 	l.enqueueWrite(writeRequest{settings: &writeSettings{
 		params: settingsToFrame(local, role, fp),
 	}})
 
 	bump := connWindowIncrement(fp)
 	if err := l.conn.IncrementRecvWindow(bump); err != nil {
+		// No goroutines have been started yet, so nothing leaks.
 		_ = conn.Close()
 		return nil, err
 	}
@@ -669,6 +677,8 @@ func New(conn net.Conn, streamID string, role Role, opts ...Option) (*Layer, err
 		increment:       bump,
 		skipLocalUpdate: true,
 	}})
+
+	l.startLoops()
 
 	return l, nil
 }
