@@ -8,10 +8,12 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/usk6666/yorishiro-proxy/internal/connector"
 	"github.com/usk6666/yorishiro-proxy/internal/mcpserver"
 )
 
@@ -560,4 +562,20 @@ func sliceEqual(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// TestClientToolHelp_ProxyStartMaxConnectionsDefault keeps the CLI summary of
+// the max_connections default in step with the value the listener applies
+// (USK-1141). The help text is a string literal, so nothing else ties it to
+// connector.DefaultMaxConnections.
+func TestClientToolHelp_ProxyStartMaxConnectionsDefault(t *testing.T) {
+	help, ok := clientToolHelp["proxy_start"]
+	if !ok {
+		t.Fatal(`clientToolHelp["proxy_start"] is missing`)
+	}
+	want := "max_connections=<n>     Max concurrent connections (default: " +
+		strconv.Itoa(connector.DefaultMaxConnections) + ")"
+	if !strings.Contains(help, want) {
+		t.Errorf("clientToolHelp[\"proxy_start\"] does not contain %q:\n%s", want, help)
+	}
 }
