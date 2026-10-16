@@ -319,6 +319,7 @@ func TestCONNECTHandler_LiveConns_BytechunkCtxCancelled(t *testing.T) {
 	scope := NewTargetScope()
 	reg := NewLiveConns(newTestLogger())
 	causeCh := make(chan error, 1)
+	started := make(chan struct{})
 
 	client, done := serveOneConn(t, NewCONNECTHandler(CONNECTHandlerConfig{
 		Negotiator:       NewCONNECTNegotiator(newTestLogger()),
@@ -328,6 +329,7 @@ func TestCONNECTHandler_LiveConns_BytechunkCtxCancelled(t *testing.T) {
 		InnerPeekTimeout: 2 * time.Second,
 		OnStack: func(ctx context.Context, stack *ConnectionStack, _, _ *envelope.TLSSnapshot, _ string) {
 			defer stack.Close()
+			close(started)
 			select {
 			case <-ctx.Done():
 				causeCh <- context.Cause(ctx)
@@ -341,7 +343,17 @@ func TestCONNECTHandler_LiveConns_BytechunkCtxCancelled(t *testing.T) {
 	if _, err := client.Write([]byte{0x00, 0x01, 'r', 'a', 'w'}); err != nil {
 		t.Fatalf("write raw bytes: %v", err)
 	}
-	waitFor(t, 5*time.Second, "bytechunk connection registered", func() bool { return reg.Len() == 1 })
+	// Wait until the bytechunk stack reached OnStack: the tunnel is
+	// registered before the inner peek, so checking Len alone would race
+	// the cut against the upstream dial.
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("bytechunk stack never reached OnStack")
+	}
+	if got := reg.Len(); got != 1 {
+		t.Fatalf("registry Len with bytechunk tunnel open = %d, want 1", got)
+	}
 
 	scope.SetPolicyRules(nil, []TargetRule{{Hostname: "127.0.0.1"}})
 	if n := reg.Reconcile("test"); n != 1 {
