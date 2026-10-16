@@ -10,6 +10,7 @@ package config
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/url"
@@ -204,6 +205,14 @@ func probeExpandTemplate(tpl string) error {
 		// it here means the operator sees the error at config-apply
 		// time rather than at the first live dial (Stage 2 fail-closed
 		// also catches it, but later).
+		//
+		// *url.Error embeds the whole input URL, userinfo credentials
+		// included, and this error is printed at boot and logged by a
+		// SIGHUP policy reload (CWE-532). Keep only the reason.
+		var uerr *url.Error
+		if errors.As(err, &uerr) {
+			err = uerr.Err
+		}
 		return fmt.Errorf("parse expanded URL: %w", err)
 	}
 	if u.Host == "" {

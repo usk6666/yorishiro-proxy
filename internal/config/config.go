@@ -705,8 +705,9 @@ type TargetRuleConfig struct {
 }
 
 // TargetScopePolicyConfig defines the target scope policy rules loaded from
-// a config file or a dedicated policy file. These rules are immutable at runtime
-// and cannot be changed via MCP tools.
+// a config file or a dedicated policy file. They cannot be changed via MCP
+// tools; at runtime only the operator can replace them, by re-reading the
+// same source on SIGHUP (internal/mcpserver policy reload, USK-1115).
 type TargetScopePolicyConfig struct {
 	// Allows lists the rules that permit network access.
 	// When non-empty, only targets matching at least one allow rule are permitted.
@@ -717,11 +718,13 @@ type TargetScopePolicyConfig struct {
 	Denies []TargetRuleConfig `json:"denies,omitempty"`
 
 	// RateLimits configures rate limiting for AI agent request throttling.
-	// These limits are immutable at runtime (Policy Layer).
+	// Policy Layer: not changeable by the agent; replaced only by the
+	// operator's SIGHUP reload.
 	RateLimits *RateLimitPolicyConfig `json:"rate_limits,omitempty"`
 
 	// Budget configures diagnostic session budgets (max total requests, max duration).
-	// These limits are immutable at runtime (Policy Layer).
+	// Policy Layer: not changeable by the agent; replaced only by the
+	// operator's SIGHUP reload.
 	Budget *BudgetPolicyConfig `json:"budget,omitempty"`
 }
 
@@ -1153,7 +1156,14 @@ func LoadFile(path string) (*ProxyConfig, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read config file %s: %w", path, err)
 	}
+	return ParseFile(path, data)
+}
 
+// ParseFile parses config file contents the caller has already read from
+// path (used only in error messages). It is LoadFile without the read, so a
+// caller that also fingerprints the file (the Policy Layer reload, USK-1115)
+// parses exactly the bytes it hashed.
+func ParseFile(path string, data []byte) (*ProxyConfig, error) {
 	// Validate that the file contains valid JSON before unmarshalling.
 	if !json.Valid(data) {
 		return nil, fmt.Errorf("parse config file %s: invalid JSON", path)
@@ -1187,7 +1197,14 @@ func LoadPolicyFile(path string) (*TargetScopePolicyConfig, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read policy file %s: %w", path, err)
 	}
+	return ParsePolicyFile(path, data)
+}
 
+// ParsePolicyFile applies LoadPolicyFile's strict decoding and validation to
+// policy file contents the caller has already read from path (used only in
+// error messages), so the Policy Layer reload (USK-1115) validates exactly
+// the bytes it fingerprints.
+func ParsePolicyFile(path string, data []byte) (*TargetScopePolicyConfig, error) {
 	// json.Valid also rejects trailing data after the first value.
 	if !json.Valid(data) {
 		return nil, fmt.Errorf("parse policy file %s: invalid JSON", path)

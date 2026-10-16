@@ -10,7 +10,8 @@ import (
 )
 
 // BudgetConfig holds the budget settings for a diagnostic session.
-// It supports two levels: Policy (immutable, set at startup) and Agent (mutable at runtime).
+// It supports two levels: Policy (set at startup, replaceable only by the
+// operator's reload) and Agent (mutable at runtime via the security tool).
 // The Agent layer can only set limits that are equal to or stricter than the Policy layer.
 //
 // MaxDuration is serialized as a human-readable string (e.g. "30m", "1h") in JSON
@@ -96,7 +97,8 @@ func (c BudgetConfig) IsZero() bool {
 type BudgetManager struct {
 	mu sync.Mutex
 
-	// Policy layer budget (immutable after initialization).
+	// Policy layer budget (operator-only: set at boot, replaced only by the
+	// operator's reload via ReplacePolicyBudget — never by the agent).
 	policyConfig BudgetConfig
 	// Agent layer budget (mutable at runtime).
 	agentConfig BudgetConfig
@@ -128,12 +130,45 @@ func NewBudgetManager() *BudgetManager {
 	return &BudgetManager{}
 }
 
-// SetPolicyBudget sets the immutable policy layer budget.
-// This should only be called during initialization.
+// SetPolicyBudget sets the policy layer budget at initialization. It only
+// stores the config (the timer is armed by Start); runtime replacement goes
+// through ReplacePolicyBudget.
 func (bm *BudgetManager) SetPolicyBudget(cfg BudgetConfig) {
 	bm.mu.Lock()
 	defer bm.mu.Unlock()
 	bm.policyConfig = cfg
+}
+
+// ReplacePolicyBudget replaces the policy layer budget at runtime. It is
+// the operator's path (the SIGHUP-driven reload in internal/mcpserver,
+// USK-1115); the agent-facing MCP must never call it.
+//
+// Unlike SetAgentBudget it does NOT start a fresh session: request_count,
+// the session start time and any recorded shutdown reason are kept, so a
+// reload cannot be used to grant a spent session a new allowance. The
+// duration timer IS re-armed against the new effective limit, measured
+// from the original session start.
+//
+// When the new effective budget is already exhausted it returns a
+// description (the request budget then stops the proxy on the next
+// RecordRequest; the duration budget fires right away); otherwise "".
+func (bm *BudgetManager) ReplacePolicyBudget(cfg BudgetConfig) (exhausted string) {
+	bm.mu.Lock()
+	defer bm.mu.Unlock()
+	bm.policyConfig = cfg
+
+	eff := BudgetConfig{
+		MaxTotalRequests: effectiveBudgetInt64(bm.policyConfig.MaxTotalRequests, bm.agentConfig.MaxTotalRequests),
+		MaxDuration:      effectiveBudgetDuration(bm.policyConfig.MaxDuration, bm.agentConfig.MaxDuration),
+	}
+	if count := bm.requestCount.Load(); eff.MaxTotalRequests > 0 && count >= eff.MaxTotalRequests {
+		exhausted = fmt.Sprintf("request budget: %d requests already made, limit %d", count, eff.MaxTotalRequests)
+	} else if eff.MaxDuration > 0 && !bm.startTime.IsZero() && time.Since(bm.startTime) >= eff.MaxDuration {
+		exhausted = fmt.Sprintf("duration budget: %s elapsed, limit %s", time.Since(bm.startTime).Round(time.Second), eff.MaxDuration)
+	}
+
+	bm.resetDurationTimerLocked()
+	return exhausted
 }
 
 // PolicyBudget returns a copy of the current policy budget config.
