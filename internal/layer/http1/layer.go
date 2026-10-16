@@ -113,6 +113,45 @@ type options struct {
 	// reaches its terminal state. Drives ReleaseTransaction(ConnID, FlowID)
 	// for every envelope the Channel emitted via Next. nil = no-op.
 	stateReleaser pluginv2.StateReleaser
+
+	// requestHeaderTimeout / keepAliveIdleTimeout bound the client-side
+	// request head (USK-1162). See WithRequestHeaderTimeout.
+	requestHeaderTimeout func() time.Duration
+	keepAliveIdleTimeout func() time.Duration
+}
+
+// DefaultKeepAliveIdleTimeout is how long a Send-direction Layer with a
+// request header timeout waits for the first byte of the next request
+// (USK-1162). 120s outlasts the keep-alive idle timeout of mainstream
+// browsers (Firefox: 115s) so the proxy never races a browser that is about
+// to reuse the connection.
+const DefaultKeepAliveIdleTimeout = 120 * time.Second
+
+// WithRequestHeaderTimeout bounds how long a Send-direction (client-facing)
+// Layer waits for one request's request line and header section — the
+// net/http ReadHeaderTimeout equivalent (USK-1162).
+//
+// The bound has two phases. While no byte of the next request has arrived,
+// the Layer waits up to max(keep-alive idle timeout, fn()) — see
+// WithKeepAliveIdleTimeout and DefaultKeepAliveIdleTimeout. Once the first
+// byte arrives, the rest of the request line and headers must arrive within
+// fn(). The deadline is cleared before the body is read, so slow bodies and
+// Expect: 100-continue are unaffected. On expiry the parse fails and the
+// connection is closed without a response; nothing is recorded.
+//
+// fn is consulted at the start of every request parse so a runtime change
+// applies to the next request. A nil fn or a non-positive return disables
+// both phases. The option is ignored on Receive-direction Layers.
+func WithRequestHeaderTimeout(fn func() time.Duration) Option {
+	return func(o *options) { o.requestHeaderTimeout = fn }
+}
+
+// WithKeepAliveIdleTimeout overrides DefaultKeepAliveIdleTimeout for the
+// idle phase of WithRequestHeaderTimeout. A nil fn or a non-positive return
+// keeps the default. It has no effect unless WithRequestHeaderTimeout is
+// also active. Intended for tests.
+func WithKeepAliveIdleTimeout(fn func() time.Duration) Option {
+	return func(o *options) { o.keepAliveIdleTimeout = fn }
 }
 
 // Option configures a Layer.

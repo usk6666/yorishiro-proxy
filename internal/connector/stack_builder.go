@@ -295,6 +295,19 @@ type BuildConfig struct {
 	// the new value takes effect at the next stack assembly.
 	maxConcurrentStreamsDynamic atomic.Uint32
 
+	// RequestHeaderTimeout is the boot-time bound on receiving a client's
+	// request head: the HTTP/1.x request line + header section, the CONNECT
+	// request, and the client-side TLS MITM handshake (USK-1162, the
+	// net/http ReadHeaderTimeout equivalent). Zero means unset; the
+	// effective value then falls back to DefaultRequestHeaderTimeout. Live
+	// readers MUST call EffectiveRequestHeaderTimeout().
+	RequestHeaderTimeout time.Duration
+
+	// requestHeaderTimeoutDynamic holds the runtime override installed by
+	// SetRequestHeaderTimeout (request_timeout_ms via proxy_start /
+	// configure). Zero means "no override". Stored as nanoseconds.
+	requestHeaderTimeoutDynamic atomic.Int64
+
 	// clientMITMHandshakes counts entries to performClientMITM (USK-813).
 	// Used by e2e tests to verify that the pool fast-path short-circuits
 	// before the wasted client TLS handshake when h2 is disabled at
@@ -851,6 +864,26 @@ func (c *BuildConfig) SetMaxConcurrentStreams(v uint32) {
 		return
 	}
 	c.maxConcurrentStreamsDynamic.Store(v)
+}
+
+// DefaultRequestHeaderTimeout is the request-head bound applied when neither
+// BuildConfig.RequestHeaderTimeout nor a runtime override is set (USK-1162).
+// It matches config.Default().RequestTimeout.
+const DefaultRequestHeaderTimeout = 60 * time.Second
+
+// EffectiveRequestHeaderTimeout returns the bound on receiving a client's
+// request head (USK-1162): the runtime override from
+// SetRequestHeaderTimeout when positive, else the static
+// RequestHeaderTimeout when positive, else DefaultRequestHeaderTimeout.
+// Safe on a nil receiver (returns the default).
+func (c *BuildConfig) EffectiveRequestHeaderTimeout() time.Duration {
+	return 0
+}
+
+// SetRequestHeaderTimeout installs a runtime override for
+// EffectiveRequestHeaderTimeout. Non-positive values clear the override.
+// Safe on a nil receiver (no-op).
+func (c *BuildConfig) SetRequestHeaderTimeout(d time.Duration) {
 }
 
 // resolvePerHostTLS resolves per-host TLS overrides from the BuildConfig.

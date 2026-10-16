@@ -480,6 +480,9 @@ func startFullListenerProxy(
 	if opts.disableClientHelloPeek {
 		buildCfg.DisableClientHelloPeek = true
 	}
+	if opts.requestHeaderTimeout > 0 {
+		buildCfg.SetRequestHeaderTimeout(opts.requestHeaderTimeout)
+	}
 
 	connectNeg := connector.NewCONNECTNegotiator(slog.Default())
 	socks5Neg := connector.NewSOCKS5Negotiator(slog.Default())
@@ -581,6 +584,10 @@ type fullListenerOpts struct {
 	// primary path is active) — set true in regression tests that target
 	// the pre-USK-997 widening logic.
 	disableClientHelloPeek bool
+
+	// USK-1162: optional request-head bound installed on BuildConfig via
+	// SetRequestHeaderTimeout (the request_timeout_ms runtime path).
+	requestHeaderTimeout time.Duration
 }
 
 // waitSessionDone waits for the WaitGroup with a timeout.
