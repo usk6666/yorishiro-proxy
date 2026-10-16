@@ -41,7 +41,13 @@ var positionalArgMapping = map[string][]string{
 // toolSchema holds the parsed properties from a tool's JSON Schema InputSchema.
 type toolSchema struct {
 	// properties maps parameter name → type string (e.g. "string", "number", "boolean", "array", "object").
+	// A nullable JSON Schema type array (e.g. ["null", "integer"]) is resolved to its
+	// non-null member; see schemaPropertyType.
 	properties map[string]string
+	// nested maps a top-level parameter name → child name → resolved type string,
+	// taken from that parameter's own "properties". It types dot-notation
+	// children (e.g. params.older_than_days=7) against the parent's schema.
+	nested map[string]map[string]string
 	// required is the set of required parameter names.
 	required map[string]bool
 	// enums maps parameter name → allowed values.
@@ -61,6 +67,7 @@ func parseToolSchema(inputSchema any) *toolSchema {
 
 	ts := &toolSchema{
 		properties: make(map[string]string),
+		nested:     make(map[string]map[string]string),
 		required:   make(map[string]bool),
 		enums:      make(map[string][]string),
 	}
@@ -86,33 +93,58 @@ func parseSchemaRequired(ts *toolSchema, m map[string]any) {
 	}
 }
 
-// parseSchemaProperties fills ts.properties and ts.enums from the "properties" object in a JSON Schema map.
+// parseSchemaProperties fills ts.properties, ts.nested and ts.enums from the
+// "properties" object in a JSON Schema map.
 func parseSchemaProperties(ts *toolSchema, m map[string]any) {
-	props, ok := m["properties"]
-	if !ok {
-		return
-	}
-	propsMap, ok := props.(map[string]any)
-	if !ok {
-		return
-	}
-	for name, propVal := range propsMap {
-		propMap, ok := propVal.(map[string]any)
-		if !ok {
-			continue
-		}
+	for name, propMap := range schemaPropertyMaps(m) {
 		ts.properties[name] = schemaPropertyType(propMap)
 		if enumVals := schemaPropertyEnums(propMap); enumVals != nil {
 			ts.enums[name] = enumVals
 		}
+		children := schemaPropertyMaps(propMap)
+		if len(children) == 0 {
+			continue
+		}
+		childTypes := make(map[string]string, len(children))
+		for child, childMap := range children {
+			childTypes[child] = schemaPropertyType(childMap)
+		}
+		ts.nested[name] = childTypes
 	}
 }
 
-// schemaPropertyType returns the "type" string from a JSON Schema property map, defaulting to "string".
+// schemaPropertyMaps returns the property-name → property-schema entries of the
+// "properties" object in a JSON Schema map, skipping entries that are not objects.
+// Returns nil when there is no usable "properties" object.
+func schemaPropertyMaps(m map[string]any) map[string]map[string]any {
+	propsMap, ok := m["properties"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	out := make(map[string]map[string]any, len(propsMap))
+	for name, propVal := range propsMap {
+		if propMap, ok := propVal.(map[string]any); ok {
+			out[name] = propMap
+		}
+	}
+	return out
+}
+
+// schemaPropertyType returns the type of a JSON Schema property map, defaulting to "string".
+//
+// "type" may be a string or, per JSON Schema 2020-12 §6.1.1, an array of type names.
+// The MCP server's schema generator renders every optional (pointer / slice) field
+// as ["null", X]. For an array the first string element that is not "null" is used,
+// regardless of its position; an array with no such element resolves to "string".
 func schemaPropertyType(propMap map[string]any) string {
-	if t, ok := propMap["type"]; ok {
-		if ts, ok := t.(string); ok {
-			return ts
+	switch t := propMap["type"].(type) {
+	case string:
+		return t
+	case []any:
+		for _, elem := range t {
+			if s, ok := elem.(string); ok && s != "null" {
+				return s
+			}
 		}
 	}
 	return "string"
@@ -203,7 +235,8 @@ func applyPositionalArg(result map[string]any, posMapping []string, posIndex int
 // If key contains a "." (dot-notation), it expands into a nested map.
 // For example, "filter.method" with value "POST" produces result["filter"] = {"method": "POST"}.
 // If result["filter"] already exists as map[string]any, the child key is merged into it.
-// Type coercion uses the schema's parent key properties if no direct match for the dot-notation key.
+// A dot-notation child is typed against the parent property's own schema
+// (schema.nested[parent][child]); a child the parent does not declare stays a string.
 func applyKeyValue(result map[string]any, key, value string, schema *toolSchema) {
 	dotIdx := strings.IndexByte(key, '.')
 	if dotIdx < 0 {
@@ -216,9 +249,22 @@ func applyKeyValue(result map[string]any, key, value string, schema *toolSchema)
 	if !ok {
 		nested = make(map[string]any)
 	}
-	// Attempt type coercion using the child key directly; if not in schema, treat as string.
-	nested[child] = coerceValue(child, value, schema)
+	nested[child] = coerceNestedValue(parent, child, value, schema)
 	result[parent] = nested
+}
+
+// coerceNestedValue converts a dot-notation child value using the type the
+// parent property's schema declares for that child. If schema is nil or the
+// child is not declared, returns the string as-is.
+func coerceNestedValue(parent, child, value string, schema *toolSchema) any {
+	if schema == nil {
+		return value
+	}
+	typ, ok := schema.nested[parent][child]
+	if !ok {
+		return value
+	}
+	return coerceTyped(typ, value)
 }
 
 // validateToolParams warns on unknown parameters and errors on missing required ones.
@@ -266,6 +312,13 @@ func coerceValue(key, value string, schema *toolSchema) any {
 	if !ok {
 		return value
 	}
+	return coerceTyped(typ, value)
+}
+
+// coerceTyped converts a string value to the Go type matching a resolved JSON
+// Schema type. A value that does not parse as that type is returned unchanged,
+// so the server's schema validation reports it.
+func coerceTyped(typ, value string) any {
 	switch typ {
 	case "integer":
 		i, err := strconv.ParseInt(value, 10, 64)
