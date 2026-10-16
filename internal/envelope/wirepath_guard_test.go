@@ -60,7 +60,13 @@ var wireURLGuardRules = []wireURLGuardRule{
 	{
 		name:    "decoded URL.Path read where the wire path is meant",
 		pattern: regexp.MustCompile(`(URL|\bu)\.Path\b`),
-		dirs:    []string{"internal/mcp/", "internal/job/", "internal/connector/"},
+		// USK-1139 review F-2: every package that consumes a recorded or
+		// in-flight wire path, not just the original three.
+		dirs: []string{
+			"internal/mcp/", "internal/job/", "internal/connector/",
+			"internal/flow/", "internal/pipeline/", "internal/session/",
+			"internal/rules/", "internal/macro/", "internal/fuzzer/",
+		},
 		allow: []string{
 			// net/http server request in the Web UI handler.
 			"r.URL.Path",

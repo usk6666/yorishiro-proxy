@@ -16,19 +16,35 @@ import (
 // pentest shapes (invented) that net/url cannot round-trip through
 // String() → Parse() byte-exactly, including %zz which today makes the
 // sqlite read silently drop Flow.URL and the JSONL import fail.
+//
+// json is the form the JSON surfaces (JSONL export, HAR, query output) carry
+// when it differs from wire: a JSON string cannot hold bytes that are not
+// valid UTF-8, so those bytes — and only those — are shown %XX-escaped
+// (USK-1139 review F-1). SQLite keeps the wire bytes either way.
 var flowWirePaths = []struct {
 	name string
 	wire string
+	json string
 }{
-	{"reported cookie-sync", "/check_uuid/https%3A%2F%2Fsync.example%2Fsetuid%3Fa%3D1"},
-	{"encoded question mark", "/a%3Fb"},
-	{"encoded unreserved", "/%61dmin"},
-	{"invalid escape", "/a%zz"},
-	{"bare percent", "/a%"},
-	{"template braces", "/{{7*7}}"},
-	{"pipe", "/a|b"},
-	{"raw utf-8", "/caf\xc3\xa9"},
-	{"control byte", "/ctl\x01x"},
+	{"reported cookie-sync", "/check_uuid/https%3A%2F%2Fsync.example%2Fsetuid%3Fa%3D1", ""},
+	{"encoded question mark", "/a%3Fb", ""},
+	{"encoded unreserved", "/%61dmin", ""},
+	{"invalid escape", "/a%zz", ""},
+	{"bare percent", "/a%", ""},
+	{"template braces", "/{{7*7}}", ""},
+	{"pipe", "/a|b", ""},
+	{"raw utf-8", "/caf\xc3\xa9", ""},
+	{"control byte", "/ctl\x01x", ""},
+	{"invalid utf-8", "/\xff\xfe", "/%FF%FE"},
+	{"invalid utf-8 mid-segment", "/a\x80b", "/a%80b"},
+}
+
+// jsonWire returns the path as the JSON surfaces carry it.
+func jsonWire(wire, jsonForm string) string {
+	if jsonForm != "" {
+		return jsonForm
+	}
+	return wire
 }
 
 func saveWirePathFlow(t *testing.T, store *SQLiteStore, id, wire string) {
@@ -93,7 +109,10 @@ func TestExportImport_FlowURLKeepsWirePath(t *testing.T) {
 			if _, err := ExportStreams(ctx, src, &buf, ExportOptions{}); err != nil {
 				t.Fatalf("ExportStreams: %v", err)
 			}
-			want := "https://example.com" + p.wire + "?q=x%3Ay"
+			// JSON cannot carry non-UTF-8 bytes: the exported url (and so
+			// the imported row) carries them %XX-escaped (F-1).
+			wantPath := jsonWire(p.wire, p.json)
+			want := "https://example.com" + wantPath + "?q=x%3Ay"
 			var rec ExportRecord
 			sc := bufio.NewScanner(bytes.NewReader(buf.Bytes()))
 			for sc.Scan() {
@@ -120,8 +139,8 @@ func TestExportImport_FlowURLKeepsWirePath(t *testing.T) {
 			if err != nil || len(flows) != 1 || flows[0].URL == nil {
 				t.Fatalf("imported flows = %v, err %v", flows, err)
 			}
-			if got := envelope.WirePath(flows[0].URL); got != p.wire {
-				t.Errorf("imported WirePath = %q, want %q", got, p.wire)
+			if got := envelope.WirePath(flows[0].URL); got != wantPath {
+				t.Errorf("imported WirePath = %q, want %q", got, wantPath)
 			}
 		})
 	}
@@ -146,7 +165,7 @@ func TestExportHAR_FlowURLKeepsWirePath(t *testing.T) {
 			if len(har.Log.Entries) != 1 {
 				t.Fatalf("entries = %d, want 1", len(har.Log.Entries))
 			}
-			want := "https://example.com" + p.wire + "?q=x%3Ay"
+			want := "https://example.com" + jsonWire(p.wire, p.json) + "?q=x%3Ay"
 			if got := har.Log.Entries[0].Request.URL; got != want {
 				t.Errorf("HAR request.url = %q, want %q", got, want)
 			}
