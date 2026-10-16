@@ -505,6 +505,9 @@ func BuildLiveStack(_ context.Context, deps Deps) (*Stack, error) {
 		OnCONNECT:      wrapper.wrapHandler(connectHandler),
 		OnSOCKS5:       wrapper.wrapHandler(socks5Handler),
 		OnHTTP1:        wrapper.wrapHandler(http1ForwardHandler),
+		// USK-1142: surface capacity rejections to the Manager-level
+		// aggregator (status + rate-capped audit Streams).
+		OnReject: rejectCallback(deps.ConnectionRejections),
 		// USK-710: OnHTTP1 wired for plain-HTTP forward proxy. OnHTTP2
 		// (h2c) and OnTCP (raw TCP forward) remain scaffold-deferred —
 		// the h2c entry point has no Linear issue today and TCP forward

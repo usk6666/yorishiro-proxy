@@ -101,9 +101,17 @@ type FullListener struct {
 	onHTTP2   HandlerFunc
 	onTCP     HandlerFunc
 
+	// onReject receives one RejectInfo per capacity rejection (USK-1142).
+	// nil keeps the log-only behaviour.
+	onReject func(RejectInfo)
+
 	// now is the clock used for rejection timestamps and the Warn
-	// rate limiter. Overridable in tests.
+	// rate limiter. Overridable in tests (before Start).
 	now func() time.Time
+
+	// rejectWarn rate-limits the capacity-rejection Warn log. Its clock
+	// reads fl.now on every call so a test clock is honoured.
+	rejectWarn *RejectWarnLimiter
 
 	mu       sync.Mutex
 	listener net.Listener
@@ -145,9 +153,11 @@ func NewFullListener(cfg FullListenerConfig) *FullListener {
 		onHTTP1:        cfg.OnHTTP1,
 		onHTTP2:        cfg.OnHTTP2,
 		onTCP:          cfg.OnTCP,
+		onReject:       cfg.OnReject,
 		now:            time.Now,
 		ready:          make(chan struct{}),
 	}
+	fl.rejectWarn = NewRejectWarnLimiter(func() time.Time { return fl.now() })
 	fl.peekTimeoutNs.Store(int64(peekTimeout))
 	return fl
 }
@@ -313,6 +323,12 @@ func (fl *FullListener) handleConn(ctx context.Context, conn net.Conn) {
 // signal for raw TCP, and h2c 503 over HTTP/2 SETTINGS/HEADERS frames is a
 // follow-up (out of scope per USK-906).
 //
+// USK-1142: for HTTP/1.x and CONNECT the request line is read (never the
+// headers) under the same rejectPeekTimeout deadline, so the refused
+// request-target can be reported verbatim to OnReject. The rejection is
+// then handed to OnReject (O(1), non-blocking by contract) and logged —
+// Debug per rejection, Warn rate-limited per listener.
+//
 // Bounded lifetime: rejectPeekTimeout (1s) + rejectWriteDeadline (5s).
 // Slowloris-safe — the peek deadline is short enough that even a sustained
 // stall does not allow reject goroutines to accumulate faster than they
@@ -323,39 +339,46 @@ func (fl *FullListener) handleRejection(conn net.Conn, maxConns int) {
 	defer conn.Close()
 
 	pc := NewPeekConn(conn)
-	remoteAddr := conn.RemoteAddr().String()
+	info := RejectInfo{
+		Listener:       fl.name,
+		RemoteAddr:     conn.RemoteAddr().String(),
+		DetectedKind:   ProtocolUnknown,
+		MaxConnections: maxConns,
+		At:             fl.now(),
+	}
 
 	// Short peek deadline so a stalled client cannot tie up the rejection
-	// path. Reset before the Write so the subsequent rejectWriteDeadline
-	// applies cleanly (separated read/write deadlines).
+	// path. It is absolute: detection and the request-line read share it.
+	// Reset before the Write so the subsequent rejectWriteDeadline applies
+	// cleanly (separated read/write deadlines).
 	_ = conn.SetReadDeadline(time.Now().Add(rejectPeekTimeout))
 
 	kind, _, ok := fl.detectProtocol(pc, fl.logger)
+	isHTTP := ok && (kind == ProtocolHTTP1 || kind == ProtocolHTTPConnect)
+	if isHTTP {
+		info.Method, info.Target, info.TargetTruncated = readRejectRequestLine(pc)
+	}
 	_ = conn.SetReadDeadline(time.Time{})
 
-	wrote503 := false
-	if ok && (kind == ProtocolHTTP1 || kind == ProtocolHTTPConnect) {
+	if isHTTP {
 		_ = conn.SetWriteDeadline(time.Now().Add(rejectWriteDeadline))
 		if _, err := conn.Write([]byte(capacityRejection503Response)); err == nil {
-			wrote503 = true
+			info.WroteResponse = true
 		}
 		_ = conn.SetWriteDeadline(time.Time{})
 	}
 
-	// Use the detected kind when peek succeeded; surface the unknown bucket
+	// Use the detected kind when peek succeeded; keep the unknown bucket
 	// when the peek timed out or failed so the operator can distinguish a
 	// well-formed-but-rejected client from a stalled one.
-	detected := ProtocolUnknown
 	if ok {
-		detected = kind
+		info.DetectedKind = kind
 	}
 
-	fl.logger.Warn("connection rejected: at capacity",
-		"remote_addr", remoteAddr,
-		"max_connections", maxConns,
-		"detected_kind", detected.String(),
-		"wrote_503", wrote503,
-	)
+	if fl.onReject != nil {
+		fl.onReject(info)
+	}
+	LogCapacityRejection(fl.logger, fl.rejectWarn, info)
 }
 
 // handlerFor returns the registered handler callback for the given protocol

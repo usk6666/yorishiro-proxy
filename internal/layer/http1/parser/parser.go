@@ -3,7 +3,6 @@ package parser
 import (
 	"bufio"
 	"bytes"
-	"errors"
 	"fmt"
 	"io"
 	"strconv"
@@ -260,7 +259,7 @@ func capInt(n int64) int {
 // (e.g. the connector's capacity-rejection path) wrap r around an
 // io.LimitReader.
 func ParseRequestLine(r *bufio.Reader) (method, requestTarget, proto string, err error) {
-	return "", "", "", errors.New("not implemented")
+	return parseRequestLine(r, nil)
 }
 
 // parseRequestLine reads the request line (e.g., "GET /path HTTP/1.1\r\n").

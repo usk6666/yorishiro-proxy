@@ -112,6 +112,7 @@ Path to a PEM-encoded client private key for mTLS with upstream servers (global)
 Maximum number of concurrent proxy connections.
 - Default: `512`
 - Range: 1-100000
+- Connections refused at the cap are reported in `query` `status` → `connection_rejections` and as flows with `blocked_by: "capacity"`.
 
 ### max_concurrent_streams (integer, optional)
 HTTP/2 `SETTINGS_MAX_CONCURRENT_STREAMS` advertised to clients on the inbound (proxy-acting-as-server) Layer.

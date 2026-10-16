@@ -230,8 +230,8 @@ type queryFilter struct {
 	URLPattern string `json:"url_pattern,omitempty" jsonschema:"URL substring search pattern"`
 	// StatusCode filters flows/fuzz_results by HTTP response status code.
 	StatusCode int `json:"status_code,omitempty" jsonschema:"HTTP response status code filter"`
-	// BlockedBy filters flows by blocked_by value (e.g. "target_scope", "intercept_drop", "rate_limit").
-	BlockedBy string `json:"blocked_by,omitempty" jsonschema:"blocked_by filter (e.g. target_scope, intercept_drop, rate_limit)"`
+	// BlockedBy filters flows by blocked_by value (e.g. "target_scope", "intercept_drop", "rate_limit", "capacity").
+	BlockedBy string `json:"blocked_by,omitempty" jsonschema:"blocked_by filter (e.g. target_scope, intercept_drop, rate_limit, capacity)"`
 	// Origin filters streams by how they came into existence (USK-786):
 	// "proxy" for live MITM-recorded traffic, "resend" for streams created by the
 	// resend_* MCP tools, "fuzz" reserved for fuzz campaigns. Empty disables the filter.
@@ -323,7 +323,7 @@ var validFilterHTTPVersions = []string{"http/1.0", "http/1.1", "h2", "h2c"}
 var validFilterStates = []string{"active", "complete", "error"}
 
 // validFilterBlockedBy lists valid values for filter.blocked_by.
-var validFilterBlockedBy = []string{"target_scope", "intercept_drop", "rate_limit", "safety_filter", "budget"}
+var validFilterBlockedBy = []string{"target_scope", "intercept_drop", "rate_limit", "safety_filter", "budget", "capacity"}
 
 // validFilterOrigins lists valid values for filter.origin (USK-786).
 // Mirrors flow.Origin constants; "fuzz" is reserved for forward compatibility.
@@ -2140,6 +2140,11 @@ type queryStatusResult struct {
 	Budget            *queryBudgetStatus                    `json:"budget,omitempty"`
 	H1Upstream        *proxybuild.H1UpstreamMetricsSnapshot `json:"h1_upstream,omitempty"`
 	H2Upstream        *proxybuild.H2UpstreamMetricsSnapshot `json:"h2_upstream,omitempty"`
+	// ConnectionRejections (USK-1142) reports connections the proxy
+	// refused because max_connections was saturated: cumulative totals,
+	// per-kind counts, and the most recent rejections with their target.
+	// Same nil-vs-populated semantics as H1Upstream.
+	ConnectionRejections *proxybuild.ConnectionRejectionsSnapshot `json:"connection_rejections,omitempty"`
 	// ExportDir is the directory that confines manage export_flows /
 	// import_flows file paths (USK-1127). Relative output_path /
 	// input_path values resolve against it. Published here so remote
@@ -2189,6 +2194,11 @@ func (s *Server) populateManagerStatus(result *queryStatusResult) {
 	// H1Upstream above.
 	h2Snap := s.connector.manager.H2UpstreamMetrics()
 	result.H2Upstream = &h2Snap
+
+	// USK-1142: capacity rejections — the agent's only view of
+	// connections refused before any flow existed.
+	rejSnap := s.connector.manager.ConnectionRejections()
+	result.ConnectionRejections = &rejSnap
 
 	// Populate per-listener statuses.
 	statuses := listenerStatuses(s.connector.manager)

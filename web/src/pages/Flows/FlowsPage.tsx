@@ -33,7 +33,7 @@ const PROTOCOLS = ["HTTP/1.x", "HTTPS", "WebSocket", "HTTP/2", "gRPC", "gRPC-Web
 const METHODS = ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"] as const;
 const FLOW_STATES = ["active", "complete", "error"] as const;
 const SCHEMES = ["https", "http", "wss", "ws", "tcp"] as const;
-const BLOCKED_BY = ["target_scope", "intercept_drop", "rate_limit", "safety_filter"] as const;
+const BLOCKED_BY = ["target_scope", "intercept_drop", "rate_limit", "safety_filter", "budget", "capacity"] as const;
 const PAGE_SIZES = [25, 50, 100] as const;
 const POLL_INTERVALS = [
   { label: "Off", value: 0 },

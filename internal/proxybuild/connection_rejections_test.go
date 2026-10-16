@@ -288,10 +288,10 @@ func TestConnectionRejections_RateCap(t *testing.T) {
 	for i := 0; i < n; i++ {
 		c.Record(connectReject(i, "flood.example:443"))
 	}
-	streams := waitForStreams(t, store, 5)
+	waitForStreams(t, store, 5)
 	// Give a straggler write a moment to (wrongly) appear.
 	time.Sleep(50 * time.Millisecond)
-	streams = store.savedStreams()
+	streams := store.savedStreams()
 	if len(streams) != 5 {
 		t.Errorf("saved streams = %d, want 5 (burst)", len(streams))
 	}
@@ -386,9 +386,9 @@ func TestConnectionRejections_CaptureScope(t *testing.T) {
 	c.Record(connectReject(1, "b.example:443"))
 	c.Record(connectReject(2, "a.example:443"))
 
-	streams := waitForStreams(t, store, 1)
+	waitForStreams(t, store, 1)
 	time.Sleep(50 * time.Millisecond)
-	streams = store.savedStreams()
+	streams := store.savedStreams()
 	if len(streams) != 1 {
 		t.Fatalf("saved streams = %d, want 1 (in-scope only)", len(streams))
 	}
