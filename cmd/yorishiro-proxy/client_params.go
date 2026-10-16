@@ -323,9 +323,13 @@ func coerceTyped(typ, value string) any {
 	case "integer":
 		i, err := strconv.ParseInt(value, 10, 64)
 		if err != nil {
-			// Try float and truncate to int64.
+			// Try float and truncate to int64. NaN, ±Inf and values outside
+			// [-2^63, 2^63) have no int64 form (the conversion is
+			// implementation-defined), so leave them for server validation.
+			// The upper bound is exclusive because float64(math.MaxInt64)
+			// rounds up to 2^63.
 			f, ferr := strconv.ParseFloat(value, 64)
-			if ferr != nil {
+			if ferr != nil || !(f >= -9223372036854775808.0 && f < 9223372036854775808.0) {
 				return value
 			}
 			return int64(f)
