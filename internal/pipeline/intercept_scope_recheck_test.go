@@ -1,8 +1,11 @@
 package pipeline
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -191,6 +194,65 @@ func TestInterceptStep_ScopeRecheck_ModifyAndForwardToDeniedTarget(t *testing.T)
 
 			assertTargetScope403(t, step.Process(context.Background(), held))
 		})
+	}
+}
+
+// A blocked modify_and_forward must leave the denied rewritten target in
+// the block log: the recorded flow carries the original (in-scope) held
+// envelope, so without this the attempted target appears nowhere (S-2,
+// CWE-778). The query string is not logged.
+func TestInterceptStep_ScopeRecheck_ModifyAndForwardBlockLogsDeniedTarget(t *testing.T) {
+	scope := connector.NewTargetScope()
+	scope.SetPolicyRules(nil, []connector.TargetRule{{Hostname: "denied.example"}})
+	queue := common.NewHoldQueue()
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, nil))
+	step := NewInterceptStep(
+		newTestInterceptEngine(newCatchAllRequestRule()),
+		nil, nil, nil, queue, nil, logger,
+	).WithScopeRecheck(NewHostScopeStep(scope), NewHTTPScopeStep(scope))
+
+	held := recheckHTTPRequest("/public")
+	modified := held.Clone()
+	mm := modified.Message.(*envelope.HTTPMessage)
+	mm.Authority = "denied.example:8443"
+	mm.Scheme = "https"
+	mm.Path = "/admin/users"
+	mm.RawQuery = "token=s3cr3t"
+
+	whileHeld(t, queue, nil, &common.HoldAction{Type: common.ActionModifyAndForward, Modified: modified})
+
+	assertTargetScope403(t, step.Process(context.Background(), held))
+
+	var rec map[string]any
+	found := false
+	for _, line := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
+		if line == "" {
+			continue
+		}
+		var m map[string]any
+		if err := json.Unmarshal([]byte(line), &m); err != nil {
+			t.Fatalf("log line %q is not JSON: %v", line, err)
+		}
+		if m["msg"] == "intercept: release blocked by target scope re-check" {
+			rec, found = m, true
+		}
+	}
+	if !found {
+		t.Fatalf("no scope re-check block log line; log output:\n%s", buf.String())
+	}
+	for key, want := range map[string]string{
+		"scheme":      "https",
+		"authority":   "denied.example:8443",
+		"path":        "/admin/users",
+		"target_host": recheckTarget,
+	} {
+		if got, _ := rec[key].(string); got != want {
+			t.Errorf("block log %s = %q, want %q (log: %v)", key, got, want, rec)
+		}
+	}
+	if strings.Contains(buf.String(), "s3cr3t") {
+		t.Errorf("block log leaks the query string: %s", buf.String())
 	}
 }
 

@@ -125,16 +125,32 @@ func recheckScope(ctx context.Context, host *HostScopeStep, httpStep *HTTPScopeS
 // hold, logging a block. The returned Result is forwarded verbatim by
 // holdAndDispatch so the session emits the same 403 / Drop and the same
 // OnPipelineDrop audit record as a head-of-pipeline scope deny.
+//
+// The block log carries the denied target of the forward envelope
+// (connection TargetHost, plus scheme / authority / path for an HTTP
+// request). The recorded flow holds the original held envelope, so for a
+// modify_and_forward that rewrote the target this log line is the only
+// trace of the attempted out-of-scope target. The query string, headers
+// and body are deliberately not logged.
 func (s *InterceptStep) recheckReleaseScope(ctx context.Context, held, forward *envelope.Envelope, action common.ActionType) Result {
 	r := recheckScope(ctx, s.hostScope, s.httpScope, forward)
 	if r.Action != Continue && s.logger != nil {
-		s.logger.InfoContext(ctx, "intercept: release blocked by target scope re-check",
+		attrs := []any{
 			slog.String("flow_id", held.FlowID),
 			slog.String("direction", held.Direction.String()),
 			slog.String("protocol", string(held.Protocol)),
 			slog.String("hold_action", action.String()),
 			slog.String("action", r.Action.String()),
-		)
+			slog.String("target_host", forward.Context.TargetHost),
+		}
+		if m, ok := forward.Message.(*envelope.HTTPMessage); ok {
+			attrs = append(attrs,
+				slog.String("scheme", m.Scheme),
+				slog.String("authority", m.Authority),
+				slog.String("path", m.Path),
+			)
+		}
+		s.logger.InfoContext(ctx, "intercept: release blocked by target scope re-check", attrs...)
 	}
 	return r
 }
