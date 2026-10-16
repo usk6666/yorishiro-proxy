@@ -417,12 +417,25 @@ func dispatchStack(
 		// h2 route: always return the Layer to the pool on exit (if one
 		// exists). Pool.Put is a no-op when the pool is nil, but we must
 		// still close the Layer in that case so no goroutines leak.
+		//
+		// USK-1160: a connection cut because its target is no longer
+		// admitted retires the Layer instead, so no idle socket to the
+		// denied host is parked in the pool. Retire only closes it once
+		// no other borrower holds it: another connection sharing the
+		// pooled Layer (same PoolKey, so same target) may have been
+		// admitted by a gate whose check still passes — the SOCKS5 gate
+		// checks a blank scheme where CONNECT checks "https" — and must
+		// keep its streams. A sharer cut by the same Reconcile retires
+		// too, and the last one out closes the Layer.
 		poolKey := stack.PoolKey()
 		defer func() {
-			if buildCfg != nil && buildCfg.HTTP2Pool != nil {
-				buildCfg.HTTP2Pool.Put(poolKey, upstreamH2)
-			} else {
+			switch {
+			case buildCfg == nil || buildCfg.HTTP2Pool == nil:
 				_ = upstreamH2.Close()
+			case errors.Is(context.Cause(ctx), ErrTargetScopeRevoked):
+				buildCfg.HTTP2Pool.Retire(poolKey, upstreamH2)
+			default:
+				buildCfg.HTTP2Pool.Put(poolKey, upstreamH2)
 			}
 		}()
 

@@ -465,6 +465,81 @@ func TestEvict_UnknownLayer_NoOp(t *testing.T) {
 	}
 }
 
+// USK-1160: a borrower cut by a scope revocation retires the Layer; with no
+// other borrower it is dropped and closed instead of parked as idle.
+func TestRetire_SoleBorrower_DropsAndCloses(t *testing.T) {
+	p := New(PoolOptions{})
+	defer p.Close()
+	key := PoolKey{HostPort: "example:443", TLSConfigHash: "abc"}
+	fake := newFakeLayer("a")
+	putFake(t, p, key, fake)
+	if g, _ := getFake(t, p, key); g != fake {
+		t.Fatalf("borrow = %v, want the pooled fake", g)
+	}
+	p.retireLayer(key, fake)
+	if g, err := getFake(t, p, key); err != nil || g != nil {
+		t.Fatalf("retired entry still present: %v, %v", g, err)
+	}
+	waitUntil(t, func() bool { return fake.closeCount.Load() > 0 })
+}
+
+// USK-1160: a Layer still borrowed by another connection (whose own
+// admission check may still pass) is not closed by Retire; the remaining
+// borrower's normal Put keeps it pooled.
+func TestRetire_SharedBorrower_KeepsLayerForRemainingBorrower(t *testing.T) {
+	p := New(PoolOptions{})
+	defer p.Close()
+	key := PoolKey{HostPort: "example:443", TLSConfigHash: "abc"}
+	fake := newFakeLayer("shared")
+	putFake(t, p, key, fake)
+	for i := 0; i < 2; i++ {
+		if g, _ := getFake(t, p, key); g != fake {
+			t.Fatalf("borrow %d = %v, want the pooled fake", i, g)
+		}
+	}
+	p.retireLayer(key, fake) // the cut borrower
+	time.Sleep(50 * time.Millisecond)
+	if fake.closeCount.Load() != 0 {
+		t.Fatal("Retire closed a Layer another borrower still holds")
+	}
+	putFake(t, p, key, fake) // the still-admitted borrower ends normally
+	g, err := getFake(t, p, key)
+	if err != nil || g != fake {
+		t.Fatalf("after remaining borrower's Put, Get = %v, %v; want the fake kept pooled", g, err)
+	}
+	if fake.closeCount.Load() != 0 {
+		t.Fatal("Layer closed after the remaining borrower's Put")
+	}
+}
+
+// USK-1160: when every sharer is cut, the last Retire closes the Layer.
+func TestRetire_LastOfSharedBorrowers_Closes(t *testing.T) {
+	p := New(PoolOptions{})
+	defer p.Close()
+	key := PoolKey{HostPort: "example:443", TLSConfigHash: "abc"}
+	fake := newFakeLayer("shared")
+	putFake(t, p, key, fake)
+	_, _ = getFake(t, p, key)
+	_, _ = getFake(t, p, key)
+	p.retireLayer(key, fake)
+	p.retireLayer(key, fake)
+	if g, err := getFake(t, p, key); err != nil || g != nil {
+		t.Fatalf("retired entry still present: %v, %v", g, err)
+	}
+	waitUntil(t, func() bool { return fake.closeCount.Load() > 0 })
+}
+
+func TestRetire_OrphanLayer_Closes(t *testing.T) {
+	p := New(PoolOptions{})
+	defer p.Close()
+	key := PoolKey{HostPort: "example:443", TLSConfigHash: "abc"}
+	fake := newFakeLayer("orphan")
+	p.retireLayer(key, fake)
+	if fake.closeCount.Load() != 1 {
+		t.Fatalf("orphan retire should close fake once, got %d", fake.closeCount.Load())
+	}
+}
+
 func TestClose_ClosesPooledLayers(t *testing.T) {
 	p := New(PoolOptions{})
 	k1 := PoolKey{HostPort: "h1:443", TLSConfigHash: "x"}

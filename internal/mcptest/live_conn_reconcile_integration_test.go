@@ -6,7 +6,9 @@ package mcptest_test
 
 import (
 	"bufio"
+	"context"
 	"crypto/sha1" //nolint:gosec // RFC 6455 Sec-WebSocket-Accept is defined over SHA-1
+	"crypto/tls"
 	"encoding/base64"
 	"fmt"
 	"io"
@@ -19,6 +21,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"golang.org/x/net/http2"
 
 	"github.com/usk6666/yorishiro-proxy/internal/mcptest"
 )
@@ -408,5 +412,89 @@ func TestE2E_LiveConnReconcile_PlainForwardStreamCutOnReload(t *testing.T) {
 		if time.Now().After(deadline) {
 			t.Fatalf("upstream kept streaming after the cut (%d events)", events.Load())
 		}
+	}
+}
+
+// h2CountingUpstream is an HTTPS upstream that negotiates HTTP/2 and
+// counts the requests it served.
+func h2CountingUpstream(t *testing.T) (*httptest.Server, *atomic.Int64) {
+	t.Helper()
+	var hits atomic.Int64
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+		_, _ = io.WriteString(w, "h2-upstream")
+	}))
+	srv.EnableHTTP2 = true
+	srv.StartTLS()
+	t.Cleanup(srv.Close)
+	return srv, &hits
+}
+
+// TestE2E_LiveConnReconcile_MITMHTTP2CutOnReload: a CONNECT tunnel MITM'd
+// on the h2 route (OnHTTP2Stack, pooled upstream Layer) is closed by the
+// reload, and a request on it afterwards never reaches the upstream.
+func TestE2E_LiveConnReconcile_MITMHTTP2CutOnReload(t *testing.T) {
+	upstream, hits := h2CountingUpstream(t)
+	target := upstream.Listener.Addr().String()
+	h, policyPath := bootReloadHarness(t)
+	proxyAddr := startProxyWithPassthrough(t, h)
+
+	raw, err := dialCONNECTTunnel(proxyAddr, target)
+	if err != nil {
+		t.Fatalf("CONNECT: %v", err)
+	}
+	tc := tls.Client(raw, &tls.Config{ //nolint:gosec // the client does not trust the proxy's MITM CA
+		InsecureSkipVerify: true,
+		ServerName:         "127.0.0.1",
+		NextProtos:         []string{"h2"},
+	})
+	_ = tc.SetDeadline(time.Now().Add(10 * time.Second))
+	if err := tc.Handshake(); err != nil {
+		_ = raw.Close()
+		t.Fatalf("client TLS handshake over tunnel: %v", err)
+	}
+	_ = tc.SetDeadline(time.Time{})
+	t.Cleanup(func() { _ = tc.Close() })
+	if got := tc.ConnectionState().NegotiatedProtocol; got != "h2" {
+		t.Fatalf("negotiated ALPN = %q, want h2 (the test must exercise the h2 MITM route)", got)
+	}
+	cc, err := (&http2.Transport{}).NewClientConn(tc)
+	if err != nil {
+		t.Fatalf("http2 NewClientConn: %v", err)
+	}
+	t.Cleanup(func() { _ = cc.Close() })
+
+	get := func(path string) (*http.Response, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://"+target+path, nil)
+		if err != nil {
+			t.Fatalf("new request: %v", err)
+		}
+		resp, err := cc.RoundTrip(req)
+		if err == nil {
+			_, _ = io.Copy(io.Discard, resp.Body)
+			_ = resp.Body.Close()
+		}
+		return resp, err
+	}
+	if resp, err := get("/before"); err != nil || resp.StatusCode != http.StatusOK || hits.Load() != 1 {
+		t.Fatalf("before reload: resp=%v err=%v hits=%d, want 200 and 1", resp, err, hits.Load())
+	}
+
+	reloadDenyLoopback(t, h, policyPath)
+	deadline := time.Now().Add(5 * time.Second)
+	for !cc.State().Closed {
+		if time.Now().After(deadline) {
+			t.Fatalf("h2 client connection still open 5s after the policy change (state %+v)", cc.State())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if resp, err := get("/after"); err == nil {
+		t.Errorf("GET /after on the cut connection succeeded with status %d", resp.StatusCode)
+	}
+	time.Sleep(200 * time.Millisecond)
+	if got := hits.Load(); got != 1 {
+		t.Errorf("upstream hits after reload = %d, want 1 — the cut connection still carried a request", got)
 	}
 }

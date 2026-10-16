@@ -527,6 +527,64 @@ func (p *Pool) evictLayer(key PoolKey, l poolLayer) {
 	slog.Debug("h2pool evict-orphan", "key", key.String())
 }
 
+// Retire returns a borrowed Layer like Put, except that the Layer is never
+// kept as an idle entry: once no other borrower holds it, it is dropped
+// from the pool and closed. While another borrower still holds it, only
+// this caller's slot is released and the last borrower's Put / Retire
+// decides its fate.
+//
+// It is for a borrower whose connection was cut because its target is no
+// longer admitted (USK-1160): Put would park the Layer as idle, and idle
+// entries are only pruned by a later Get for the same key, so a socket to
+// the denied host could stay open indefinitely. Closing it outright would
+// be wrong too: the same pooled Layer may be shared with a connection
+// whose own admission check still passes (e.g. a SOCKS5 tunnel, checked
+// with a blank scheme, next to a CONNECT tunnel cut by an https-only
+// rule).
+//
+// A Layer that is not (or no longer) in the pool has no other borrower and
+// is closed.
+func (p *Pool) Retire(key PoolKey, l *http2.Layer) {
+	if l == nil {
+		return
+	}
+	p.retireLayer(key, l)
+}
+
+func (p *Pool) retireLayer(key PoolKey, l poolLayer) {
+	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		_ = l.Close()
+		return
+	}
+	var found *entry
+	for _, e := range p.entries[key] {
+		if e.layer == l {
+			found = e
+			break
+		}
+	}
+	if found == nil {
+		p.mu.Unlock()
+		_ = l.Close()
+		slog.Debug("h2pool retire-orphan", "key", key.String())
+		return
+	}
+	if found.inUseCount > 0 {
+		found.inUseCount--
+	}
+	if found.inUseCount > 0 {
+		found.lastUsed = p.opts.NowFn()
+		p.mu.Unlock()
+		slog.Debug("h2pool retire deferred to remaining borrower", "key", key.String(), "in_use", found.inUseCount)
+		return
+	}
+	p.dropEntryLocked(found)
+	p.mu.Unlock()
+	slog.Debug("h2pool retire", "key", key.String())
+}
+
 // Close closes every pooled Layer in parallel, bounded at closeAllTimeout.
 // Further Get / Put / GetOrDial calls return ErrClosed.
 func (p *Pool) Close() error {
