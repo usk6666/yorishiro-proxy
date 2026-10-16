@@ -236,17 +236,28 @@ func (l *Layer) handleStreamHeaders(f *frame.Frame) error {
 	l.updatePendingHeaderStream(f.Header.StreamID, endHeaders)
 
 	direction := l.headerDirection(asm)
-	env, err := asm.handleHeadersFrame(fragment, endHeaders, endStream, l.decoder, direction)
+	env, blockEndStream, err := asm.handleHeadersFrame(fragment, endHeaders, endStream, l.decoder, direction)
 	if err != nil {
 		return err
 	}
+	l.finishHeaderFrame(f.Header.StreamID, ch, asm, env, blockEndStream)
+	return nil
+}
+
+// finishHeaderFrame is the shared tail of handleStreamHeaders and
+// handleStreamContinuation. It delivers the event produced by a completed
+// header block (if any) and, when that block's HEADERS frame carried
+// END_STREAM, transitions the stream to half-closed (remote). blockEndStream
+// comes from the assembler, which latches END_STREAM from the HEADERS frame
+// across any CONTINUATION frames (RFC 9113 §6.2), so a split header block
+// reaches the same stream state as a single-frame one (USK-1137).
+func (l *Layer) finishHeaderFrame(streamID uint32, ch *channel, asm *eventAssembler, env *envelope.Envelope, blockEndStream bool) {
 	if env != nil {
 		l.deliverEnvelope(ch, env, asm)
 	}
-	if endHeaders && endStream {
-		_ = l.conn.Streams().Transition(f.Header.StreamID, EventRecvEndStream)
+	if blockEndStream {
+		_ = l.conn.Streams().Transition(streamID, EventRecvEndStream)
 	}
-	return nil
 }
 
 // updatePendingHeaderStream tracks which stream is mid-CONTINUATION so a
@@ -300,16 +311,16 @@ func (l *Layer) handleStreamContinuation(f *frame.Frame) error {
 		direction = asm.initialDirection
 	}
 
-	env, err := asm.handleHeadersFrame(fragment, endHeaders, false, l.decoder, direction)
+	// CONTINUATION never carries END_STREAM (RFC 9113 §6.10); the assembler
+	// applies the END_STREAM latched from the opening HEADERS frame.
+	env, blockEndStream, err := asm.handleHeadersFrame(fragment, endHeaders, false, l.decoder, direction)
 	if err != nil {
 		return err
 	}
 	if endHeaders {
 		l.pendingHeaderStream = 0
 	}
-	if env != nil {
-		l.deliverEnvelope(ch, env, asm)
-	}
+	l.finishHeaderFrame(f.Header.StreamID, ch, asm, env, blockEndStream)
 	return nil
 }
 

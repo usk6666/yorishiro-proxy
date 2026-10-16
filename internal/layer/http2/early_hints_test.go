@@ -47,7 +47,7 @@ func TestAssembler_EarlyHints_ThenFinalResponse(t *testing.T) {
 				{Name: ":status", Value: itoa3(tc.informational)},
 				{Name: "link", Value: "</style.css>; rel=preload; as=style"},
 			}
-			env1, err := asm.handleHeadersFrame(enc.Encode(info), true, false, dec, envelope.Receive)
+			env1, _, err := asm.handleHeadersFrame(enc.Encode(info), true, false, dec, envelope.Receive)
 			if err != nil {
 				t.Fatalf("first HEADERS: %v", err)
 			}
@@ -67,7 +67,7 @@ func TestAssembler_EarlyHints_ThenFinalResponse(t *testing.T) {
 				{Name: ":status", Value: itoa3(tc.final)},
 				{Name: "content-type", Value: "text/html"},
 			}
-			env2, err := asm.handleHeadersFrame(enc.Encode(final), true, tc.finalEndStream, dec, envelope.Receive)
+			env2, _, err := asm.handleHeadersFrame(enc.Encode(final), true, tc.finalEndStream, dec, envelope.Receive)
 			if err != nil {
 				t.Fatalf("second HEADERS: %v", err)
 			}
@@ -115,7 +115,7 @@ func TestAssembler_EarlyHints_ThenFinalResponse_WithDataFrame(t *testing.T) {
 		{Name: ":status", Value: "103"},
 		{Name: "link", Value: "</a.css>; rel=preload"},
 	}
-	if _, err := asm.handleHeadersFrame(enc.Encode(info), true, false, dec, envelope.Receive); err != nil {
+	if _, _, err := asm.handleHeadersFrame(enc.Encode(info), true, false, dec, envelope.Receive); err != nil {
 		t.Fatalf("103 HEADERS: %v", err)
 	}
 
@@ -124,7 +124,7 @@ func TestAssembler_EarlyHints_ThenFinalResponse_WithDataFrame(t *testing.T) {
 		{Name: ":status", Value: "200"},
 		{Name: "content-type", Value: "text/html"},
 	}
-	envFinal, err := asm.handleHeadersFrame(enc.Encode(final), true, false, dec, envelope.Receive)
+	envFinal, _, err := asm.handleHeadersFrame(enc.Encode(final), true, false, dec, envelope.Receive)
 	if err != nil {
 		t.Fatalf("200 HEADERS: %v", err)
 	}
@@ -162,7 +162,7 @@ func TestAssembler_MultipleInformational_ThenFinal(t *testing.T) {
 
 	for i, status := range []string{"100", "103", "200"} {
 		hdrs := []hpack.HeaderField{{Name: ":status", Value: status}}
-		env, err := asm.handleHeadersFrame(enc.Encode(hdrs), true, status == "200", dec, envelope.Receive)
+		env, _, err := asm.handleHeadersFrame(enc.Encode(hdrs), true, status == "200", dec, envelope.Receive)
 		if err != nil {
 			t.Fatalf("HEADERS #%d (%s): %v", i, status, err)
 		}
@@ -200,7 +200,7 @@ func TestAssembler_GenuineTrailers_StillDetected(t *testing.T) {
 		{Name: ":authority", Value: "x"},
 		{Name: ":path", Value: "/"},
 	}
-	env1, err := asm.handleHeadersFrame(enc.Encode(hdrs), true, false, dec, envelope.Send)
+	env1, _, err := asm.handleHeadersFrame(enc.Encode(hdrs), true, false, dec, envelope.Send)
 	if err != nil {
 		t.Fatalf("initial HEADERS: %v", err)
 	}
@@ -215,7 +215,7 @@ func TestAssembler_GenuineTrailers_StillDetected(t *testing.T) {
 
 	// Trailer HEADERS — END_STREAM, post-DATA, must decode as H2TrailersEvent.
 	trailers := []hpack.HeaderField{{Name: "grpc-status", Value: "0"}}
-	envT, err := asm.handleHeadersFrame(enc.Encode(trailers), true, true, dec, envelope.Send)
+	envT, _, err := asm.handleHeadersFrame(enc.Encode(trailers), true, true, dec, envelope.Send)
 	if err != nil {
 		t.Fatalf("trailer HEADERS: %v", err)
 	}

@@ -45,7 +45,7 @@ func TestAssembler_ClassicCONNECT_NoProtocol(t *testing.T) {
 		{Name: ":method", Value: "CONNECT"},
 		{Name: ":authority", Value: "example.com:443"},
 	}
-	env, err := asm.handleHeadersFrame(enc.Encode(hdrs), true, false, dec, envelope.Send)
+	env, _, err := asm.handleHeadersFrame(enc.Encode(hdrs), true, false, dec, envelope.Send)
 	if err != nil {
 		t.Fatalf("handleHeadersFrame: %v", err)
 	}
@@ -80,7 +80,7 @@ func TestAssembler_ExtendedCONNECT_Websocket(t *testing.T) {
 		{Name: ":path", Value: "/chat"},
 		{Name: ":protocol", Value: "websocket"},
 	}
-	env, err := asm.handleHeadersFrame(enc.Encode(hdrs), true, false, dec, envelope.Send)
+	env, _, err := asm.handleHeadersFrame(enc.Encode(hdrs), true, false, dec, envelope.Send)
 	if err != nil {
 		t.Fatalf("handleHeadersFrame: %v", err)
 	}
@@ -121,7 +121,7 @@ func TestAssembler_ProtocolPseudo_OnNonCONNECT_FlagsAnomaly(t *testing.T) {
 		{Name: ":path", Value: "/"},
 		{Name: ":protocol", Value: "websocket"},
 	}
-	env, err := asm.handleHeadersFrame(enc.Encode(hdrs), true, false, dec, envelope.Send)
+	env, _, err := asm.handleHeadersFrame(enc.Encode(hdrs), true, false, dec, envelope.Send)
 	if err != nil {
 		t.Fatalf("handleHeadersFrame: %v", err)
 	}
@@ -152,7 +152,7 @@ func TestAssembler_DuplicateProtocol_FlagsAnomaly(t *testing.T) {
 		{Name: ":protocol", Value: "websocket"},
 		{Name: ":protocol", Value: "webtransport"},
 	}
-	env, err := asm.handleHeadersFrame(enc.Encode(hdrs), true, false, dec, envelope.Send)
+	env, _, err := asm.handleHeadersFrame(enc.Encode(hdrs), true, false, dec, envelope.Send)
 	if err != nil {
 		t.Fatalf("handleHeadersFrame: %v", err)
 	}
@@ -177,7 +177,7 @@ func TestAssembler_ExtendedCONNECT_MissingScheme_FlagsAnomaly(t *testing.T) {
 		{Name: ":path", Value: "/chat"},
 		{Name: ":protocol", Value: "websocket"},
 	}
-	env, err := asm.handleHeadersFrame(enc.Encode(hdrs), true, false, dec, envelope.Send)
+	env, _, err := asm.handleHeadersFrame(enc.Encode(hdrs), true, false, dec, envelope.Send)
 	if err != nil {
 		t.Fatalf("handleHeadersFrame: %v", err)
 	}
@@ -201,7 +201,7 @@ func TestAssembler_ExtendedCONNECT_MissingPath_FlagsAnomaly(t *testing.T) {
 		{Name: ":authority", Value: "x"},
 		{Name: ":protocol", Value: "websocket"},
 	}
-	env, err := asm.handleHeadersFrame(enc.Encode(hdrs), true, false, dec, envelope.Send)
+	env, _, err := asm.handleHeadersFrame(enc.Encode(hdrs), true, false, dec, envelope.Send)
 	if err != nil {
 		t.Fatalf("handleHeadersFrame: %v", err)
 	}
