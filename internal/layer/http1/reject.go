@@ -43,6 +43,15 @@ var uriTooLongResponse = []byte("HTTP/1.1 414 URI Too Long\r\n" +
 	uriTooLongBody)
 
 // closeWriter is implemented by *net.TCPConn and *tls.Conn (close_notify).
+//
+// Known limitation: on the plain-HTTP forward path (and plain HTTP inside
+// CONNECT) l.conn is a *connector.PeekConn, which embeds net.Conn and so
+// does not expose CloseWrite. There the 414 path skips the half-close and
+// relies on the drain alone for RST avoidance; the 414 is still delivered.
+// PeekConn deliberately does not grow a CloseWrite method here: the TLS
+// passthrough relay (connector.relayBidirectionalCounted) type-asserts the
+// same interface on the client conn, so adding it would also change
+// half-close behaviour on that path. Tracked as a follow-up to USK-1137.
 type closeWriter interface {
 	CloseWrite() error
 }
@@ -69,6 +78,8 @@ func (l *Layer) rejectRequestLineTooLong() {
 			_ = cw.CloseWrite()
 		}
 		_ = l.conn.SetReadDeadline(time.Now().Add(rejectLingerTimeout))
+		// Drain the rest of the rejected request so Close sends FIN, not
+		// RST. Pinned by TestLayer_Send_RequestLineTooLong_DrainsBeforeClose.
 		_, _ = io.CopyN(io.Discard, l.conn, rejectLingerMaxBytes)
 	}
 	_ = l.conn.Close()

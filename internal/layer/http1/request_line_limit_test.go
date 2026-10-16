@@ -202,3 +202,98 @@ func truncateForLog(b []byte) string {
 	}
 	return string(b)
 }
+
+// TestLayer_Send_RequestLineTooLong_DrainsBeforeClose pins the linger/drain
+// step of rejectRequestLineTooLong. A real client (curl, Go net/http) can
+// still be uploading the oversized request when the 414 goes out. If the
+// Layer closed straight after the 414, that upload would land on a closed
+// socket: the kernel answers RST and the client's next write fails with
+// ECONNRESET/EPIPE, which makes such clients abandon the response. The drain
+// keeps reading for rejectLingerTimeout, so an upload that finishes within
+// that window completes cleanly and the connection ends with FIN.
+//
+// The tail is sent only after the 414 has been read, so whether it is still
+// in flight when the Layer gives up on the request does not depend on
+// kernel socket buffer sizes.
+func TestLayer_Send_RequestLineTooLong_DrainsBeforeClose(t *testing.T) {
+	client, server := testConn(t)
+	defer client.Close()
+	defer server.Close()
+
+	// Bound what the kernel can absorb on the client's behalf (client send
+	// buffer + server receive buffer) well below the tail uploaded below.
+	// Without this, loopback autotuning grows the server's receive buffer
+	// to megabytes during the 4 MiB request line, the whole tail can be
+	// queued in the gap between the 414 write and Close, and the client
+	// sees the FIN before the RST, so the no-drain mutation slips through.
+	// Set before any data flows; large enough that the 4 MiB transfer
+	// stays fast.
+	if err := client.(*net.TCPConn).SetWriteBuffer(64 << 10); err != nil {
+		t.Fatalf("SetWriteBuffer: %v", err)
+	}
+	if err := server.(*net.TCPConn).SetReadBuffer(128 << 10); err != nil {
+		t.Fatalf("SetReadBuffer: %v", err)
+	}
+
+	l := New(server, "conn-414-drain", envelope.Send)
+	defer l.Close()
+
+	nextErr := make(chan error, 1)
+	go func() {
+		ch := <-l.Channels()
+		_, err := ch.Next(context.Background())
+		nextErr <- err
+	}()
+
+	// Past the 4 MiB request-line limit by one full default read buffer
+	// (4 KiB), no line terminator: readLine checks the limit per
+	// ReadSlice segment, so the limit trips only once a whole segment
+	// pushes the line over it.
+	head := "GET /" + strings.Repeat("x", 4<<20+4096)
+	headErr := make(chan error, 1)
+	go func() {
+		_, err := client.Write([]byte(head))
+		headErr <- err
+	}()
+
+	_ = client.SetReadDeadline(time.Now().Add(10 * time.Second))
+	status := "HTTP/1.1 414 URI Too Long\r\n"
+	got := make([]byte, len(status))
+	if _, err := io.ReadFull(client, got); err != nil {
+		t.Fatalf("reading the 414 status line: %v", err)
+	}
+	if string(got) != status {
+		t.Fatalf("status line = %q, want %q", got, status)
+	}
+	if err := <-headErr; err != nil {
+		t.Fatalf("writing the over-limit request line: %v", err)
+	}
+
+	// The client keeps uploading the rest of the rejected request: 768 KiB
+	// in 16 KiB writes — more than the bounded kernel buffers absorb, less
+	// than rejectLingerMaxBytes. Without the drain the server closes with
+	// the tail unread, answers RST, and a later write fails.
+	chunk := []byte(strings.Repeat("x", 16<<10))
+	for i := 0; i < 48; i++ {
+		if _, err := client.Write(chunk); err != nil {
+			t.Fatalf("client upload chunk %d failed: %v (want the Layer to drain the rejected request before closing, so no RST)", i, err)
+		}
+	}
+
+	rest, err := io.ReadAll(client)
+	if err != nil {
+		t.Errorf("reading the rest of the 414: %v (want a clean EOF)", err)
+	}
+	if !strings.HasSuffix(string(rest), uriTooLongBody) {
+		t.Errorf("rest of response = %q, want it to end with the 414 body", truncateForLog(rest))
+	}
+
+	select {
+	case err := <-nextErr:
+		if !errors.Is(err, parser.ErrRequestLineTooLong) {
+			t.Errorf("Next err = %v, want parser.ErrRequestLineTooLong", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Channel Next did not return")
+	}
+}
