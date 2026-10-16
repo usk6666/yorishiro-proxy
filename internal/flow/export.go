@@ -264,7 +264,10 @@ func flowsToExport(flows []*Flow, includeBodies bool) []*ExportFlow {
 			Metadata:      f.Metadata,
 		}
 		if f.URL != nil {
-			ef.URL = envelope.WireURLString(f.URL)
+			// JSON cannot carry non-UTF-8 path bytes; they are exported
+			// %XX-escaped, so importing such a row stores the escaped
+			// form (USK-1139).
+			ef.URL = envelope.WireURLStringJSONSafe(f.URL)
 		}
 		if includeBodies {
 			if len(f.Body) > 0 {

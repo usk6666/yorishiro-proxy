@@ -44,8 +44,6 @@ import (
 	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
-
-	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 )
 
 // resendGRPCInput is the typed input for the resend_grpc tool.
@@ -203,7 +201,7 @@ func (s *Server) handleResendGRPC(ctx context.Context, _ *gomcp.CallToolRequest,
 	if err := s.checkResendGRPCScope(plan); err != nil {
 		return nil, nil, err
 	}
-	if v := s.checkSafetyInput(concatResendGRPCPayloads(plan), envelope.WireURLString(plan.canonicalURL), plan.metadata); v != nil {
+	if v := s.checkSafetyInput(concatResendGRPCPayloads(plan), plan.canonicalURL, plan.metadata); v != nil {
 		return nil, nil, fmt.Errorf("%s", safetyViolationError(v))
 	}
 

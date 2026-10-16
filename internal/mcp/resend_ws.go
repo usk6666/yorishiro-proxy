@@ -30,8 +30,6 @@ import (
 	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
-
-	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 )
 
 // resendWSInput is the typed input for the resend_ws tool.
@@ -134,7 +132,7 @@ func (s *Server) handleResendWS(ctx context.Context, _ *gomcp.CallToolRequest, i
 	if err := s.checkResendWSScope(plan); err != nil {
 		return nil, nil, err
 	}
-	if v := s.checkSafetyInput(plan.payload, envelope.WireURLString(plan.upgradeURL), plan.upgradeHeaders); v != nil {
+	if v := s.checkSafetyInput(plan.payload, plan.upgradeURL, plan.upgradeHeaders); v != nil {
 		return nil, nil, fmt.Errorf("%s", safetyViolationError(v))
 	}
 

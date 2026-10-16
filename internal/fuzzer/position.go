@@ -7,6 +7,8 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+
+	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 )
 
 // Position defines a location in an HTTP request where payloads are injected.
@@ -273,19 +275,22 @@ func replaceQuery(data *RequestData, pos Position, payload string) error {
 	return nil
 }
 
+// replacePath operates on the wire-form path (USK-1139): Match is applied to
+// envelope.WirePath(data.URL), and the payload is wire bytes sent verbatim —
+// "%2e%2e" stays "%2e%2e" rather than being re-escaped to "%252e%252e".
 func replacePath(data *RequestData, pos Position, payload string) error {
 	if data.URL == nil {
 		return fmt.Errorf("URL is nil, cannot replace path")
 	}
+	next := payload
 	if pos.Match != "" {
 		re, err := regexp.Compile(pos.Match)
 		if err != nil {
 			return fmt.Errorf("compile match pattern: %w", err)
 		}
-		data.URL.Path = replaceWithCapture(re, data.URL.Path, payload)
-	} else {
-		data.URL.Path = payload
+		next = replaceWithCapture(re, envelope.WirePath(data.URL), payload)
 	}
+	envelope.SetWirePath(data.URL, next)
 	return nil
 }
 

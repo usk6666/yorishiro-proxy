@@ -3,6 +3,7 @@ package envelope
 import (
 	"net/url"
 	"strings"
+	"unicode/utf8"
 )
 
 // This file is the single place where a wire-form request path meets
@@ -21,8 +22,12 @@ import (
 // safety URLs built from wire paths) therefore goes through these helpers:
 //
 //   - URLFromWirePath builds a URL whose RawPath is the wire path.
+//   - SetWirePath replaces the path of an existing URL with a wire path.
 //   - WirePath reads the wire path back.
 //   - WireURLString serializes with the wire path, in url.String()'s shape.
+//   - WireURLStringJSONSafe is WireURLString for JSON output surfaces.
+//   - DecodedPathURLString is WireURLString with the path percent-decoded,
+//     for either-form security matching.
 //   - ParseWireURL is the never-failing inverse of WireURLString.
 //
 // TestWireURLGuard_NoDirectNetURLOnWirePaths keeps direct net/url use from
@@ -81,11 +86,27 @@ func URLFromWirePath(scheme, host, wirePath, rawQuery string) *url.URL {
 	}
 }
 
+// SetWirePath replaces u's path with wirePath, exactly as URLFromWirePath
+// would have built it: RawPath holds the wire bytes and Path their lenient
+// decoding, so WirePath(u) returns wirePath verbatim. Callers that rewrite
+// a path with wire bytes (fuzzer path positions) use this instead of
+// assigning u.Path, which WirePath would treat as decoded and re-escape.
+// No-op for nil.
+func SetWirePath(u *url.URL, wirePath string) {
+	if u == nil {
+		return
+	}
+	u.Path = LenientDecodePath(wirePath)
+	u.RawPath = wirePath
+}
+
 // WirePath returns the wire-form request path of u. When RawPath is set and
 // still describes Path (a caller has not rewritten Path since the URL was
 // built), RawPath is returned verbatim. Otherwise — a URL built by net/url,
-// or one whose Path a caller mutated (fuzzer positions) — it falls back to
-// u.EscapedPath(). Returns "" for nil.
+// or one whose Path a caller assigned directly — Path is treated as a
+// DECODED path and re-escaped via u.EscapedPath(), so a '%' in it becomes
+// "%25" (an assigned "/%2e%2e" comes back as "/%252e%252e"). To put wire
+// bytes into an existing URL, use SetWirePath. Returns "" for nil.
 func WirePath(u *url.URL) string {
 	if u == nil {
 		return ""
@@ -102,10 +123,86 @@ func WirePath(u *url.URL) string {
 // WirePath(u) verbatim. Host is escaped exactly as url.String() escapes it,
 // so a host can never contain the '/' '?' '@' delimiters ParseWireURL
 // splits on. Returns "" for nil.
+//
+// The result is byte-exact and may therefore hold bytes that are not valid
+// UTF-8; JSON output surfaces use WireURLStringJSONSafe instead.
+//
+// Known non-round-trip cases with ParseWireURL. These are the shapes
+// url.String() / url.Parse() never round-tripped either (not a USK-1139
+// regression). A recorded request with a scheme and a host produces none
+// of them; case 3 needs a request with neither (a Host-less HTTP/1.x
+// request):
+//
+//  1. Host set and a path that does not start with '/': a '/' is written
+//     before the path, so it reads back with a leading '/'.
+//  2. Scheme set, Host empty, and a path that does not start with '/': the
+//     "//" authority marker is still written, so "scheme://a/b" reads back
+//     with "a" as the host and "/b" as the path.
+//  3. Scheme blank, Host empty, and a "//"-leading path: "//x/y" reads back
+//     with "x" as the host and "/y" as the path.
 func WireURLString(u *url.URL) string {
 	if u == nil {
 		return ""
 	}
+	return wireURLString(u, WirePath(u))
+}
+
+// WireURLStringJSONSafe is WireURLString for JSON output surfaces (JSONL
+// export, HAR request.url, the MCP query tool). A JSON string cannot carry
+// bytes that are not valid UTF-8 — encoding/json silently replaces each
+// with U+FFFD — so EscapeInvalidUTF8 percent-encodes exactly those bytes as
+// "%XX" and leaves everything else (valid UTF-8, existing escapes, control
+// bytes) verbatim. This is lossy for those bytes only: "%FF" in the output
+// may stand for the wire byte 0xFF or for a literal "%FF" on the wire, so a
+// JSONL import of such a row stores the escaped form. The SQLite store and
+// the wire keep the original bytes. Returns "" for nil.
+func WireURLStringJSONSafe(u *url.URL) string {
+	return EscapeInvalidUTF8(WireURLString(u))
+}
+
+// DecodedPathURLString is WireURLString with the path replaced by
+// LenientDecodePath(WirePath(u)); scheme, authority and query are unchanged.
+// It is a matching aid only: a security gate that matches a URL against a
+// deny rule tries both WireURLString(u) and this decoded form (USK-1139
+// either-form matching), so a percent-encoded path cannot slip past a rule
+// its decoded form — what the upstream acts on — would trip. Never send or
+// store the result. Returns "" for nil.
+func DecodedPathURLString(u *url.URL) string {
+	if u == nil {
+		return ""
+	}
+	return wireURLString(u, LenientDecodePath(WirePath(u)))
+}
+
+// EscapeInvalidUTF8 percent-encodes ("%XX", upper-case hex) every byte of s
+// that is not part of a valid UTF-8 sequence and returns everything else
+// unchanged. It returns s itself when s is already valid UTF-8.
+func EscapeInvalidUTF8(s string) string {
+	if utf8.ValidString(s) {
+		return s
+	}
+	const hexDigits = "0123456789ABCDEF"
+	var b strings.Builder
+	b.Grow(len(s) + 8)
+	for i := 0; i < len(s); {
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if r == utf8.RuneError && size == 1 {
+			c := s[i]
+			b.WriteByte('%')
+			b.WriteByte(hexDigits[c>>4])
+			b.WriteByte(hexDigits[c&0x0f])
+			i++
+			continue
+		}
+		b.WriteString(s[i : i+size])
+		i += size
+	}
+	return b.String()
+}
+
+// wireURLString serializes u in url.String()'s shape, writing path verbatim
+// in place of u's own path.
+func wireURLString(u *url.URL, path string) string {
 	var b strings.Builder
 	if u.Scheme != "" {
 		b.WriteString(u.Scheme)
@@ -114,7 +211,6 @@ func WireURLString(u *url.URL) string {
 	if u.Opaque != "" {
 		b.WriteString(u.Opaque)
 	} else {
-		path := WirePath(u)
 		writeWireAuthority(&b, u, path)
 		if path != "" && path[0] != '/' && u.Host != "" {
 			b.WriteByte('/')
@@ -164,7 +260,8 @@ func writeWireAuthority(b *strings.Builder, u *url.URL, path string) {
 // accepts invalid escapes and control bytes, so a stored Flow.URL is never
 // silently dropped on read. '#' is not treated as a fragment delimiter
 // because a wire path may legitimately contain it; recorded URLs never
-// carry a fragment.
+// carry a fragment. See WireURLString for the known non-round-trip cases
+// (a non-'/' path next to a host; a hostless non-'/' or "//"-leading path).
 func ParseWireURL(s string) *url.URL {
 	rest := s
 	scheme := ""

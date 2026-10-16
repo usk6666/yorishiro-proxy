@@ -189,6 +189,8 @@ type HTTPMessage struct {
 
 **Note:** HTTP/2 and HTTP/1.x share this type. The layer below is responsible for translating to/from wire-specific representation. `HTTPMessage` is the *natural* form for both.
 
+**Wire-form path surfaces (USK-1139):** `Flow.URL` is stored with the wire path byte-exact (`internal/envelope/wirepath.go`). JSON output surfaces — JSONL export, HAR `request.url`, the MCP `query` tool — cannot carry bytes that are not valid UTF-8, so they show exactly those bytes `%XX`-escaped (`envelope.WireURLStringJSONSafe`); a JSONL import of such a row therefore stores the escaped text. Security gates (TargetScope `path_prefix`, Input SafetyFilter `url` / gRPC `service` / `method` targets, the MCP-plane resend / fuzz safety check) match either the wire path or its single-pass percent-decoded form and fail closed.
+
 #### 3.2.2 WSMessage
 
 Represents one WebSocket frame. Frame-level, not message-level — control frames (Ping/Pong/Close) are surfaced as their own Envelopes.

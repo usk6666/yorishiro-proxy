@@ -352,7 +352,7 @@ func buildHARRequest(f *Flow, protocol string, includeBodies bool) *HARRequest {
 	reqURL := ""
 	var queryParams []*HARNameValue
 	if f.URL != nil {
-		reqURL = envelope.WireURLString(f.URL)
+		reqURL = envelope.WireURLStringJSONSafe(f.URL)
 		queryParams = urlQueryToHAR(f.URL.Query())
 	}
 	if queryParams == nil {

@@ -147,24 +147,85 @@ func (e *SafetyEngine) CheckInputAll(ctx context.Context, env *envelope.Envelope
 func (e *SafetyEngine) checkRule(rule *common.CompiledRule, msg envelope.Message) *Violation {
 	for _, target := range rule.Targets {
 		data, name := extractTarget(target, msg)
-		if data == "" {
-			continue
+		if v := matchRuleData(rule, data, name); v != nil {
+			return v
 		}
-		match := rule.Pattern.Find([]byte(data))
-		if match == nil {
-			continue
-		}
-		if rule.Validator != nil && !rule.Validator(match) {
-			continue
-		}
-		return &Violation{
-			RuleID:   rule.ID,
-			RuleName: rule.Name,
-			Target:   name,
-			Match:    string(match),
+		// USK-1139: the :path (and the Service / Method split from it) is
+		// wire form — gRPC-Web over HTTP/1.x included — so url / service /
+		// method rules are also matched against the percent-decoded form
+		// the upstream acts on. Input Safety is deny-only, so matching
+		// either form fails closed.
+		for _, decoded := range decodedTargetForms(target, msg) {
+			if decoded == data {
+				continue
+			}
+			if v := matchRuleData(rule, decoded, name); v != nil {
+				return v
+			}
 		}
 	}
 	return nil
+}
+
+// matchRuleData applies rule's pattern (and optional validator) to data.
+func matchRuleData(rule *common.CompiledRule, data, name string) *Violation {
+	if data == "" {
+		return nil
+	}
+	match := rule.Pattern.Find([]byte(data))
+	if match == nil {
+		return nil
+	}
+	if rule.Validator != nil && !rule.Validator(match) {
+		return nil
+	}
+	return &Violation{
+		RuleID:   rule.ID,
+		RuleName: rule.Name,
+		Target:   name,
+		Match:    string(match),
+	}
+}
+
+// decodedTargetForms returns the percent-decoded variants of a url /
+// service / method target for either-form matching (USK-1139). Other
+// targets (metadata, payload, query) return nil: they are not derived from
+// the request path. Read-only — nothing here writes back to msg.
+//
+// Service and Method are tried both decoded on their own and re-split from
+// the decoded :path, because a "%2F" in the wire path moves the
+// service/method boundary once decoded (the upstream splits the decoded
+// path).
+func decodedTargetForms(target common.Target, msg envelope.Message) []string {
+	switch m := msg.(type) {
+	case *envelope.GRPCStartMessage:
+		switch target {
+		case common.TargetURL:
+			return []string{reconstructURLDecodedPath(m)}
+		case TargetService, TargetMethod:
+			forms := []string{decodedServiceOrMethod(target, m.Service, m.Method)}
+			if m.Path != "" {
+				if s, meth, ok := splitServiceMethod(envelope.LenientDecodePath(m.Path)); ok {
+					forms = append(forms, decodedServiceOrMethod(target, s, meth))
+				}
+			}
+			return forms
+		}
+	case *envelope.GRPCDataMessage:
+		if target == TargetService || target == TargetMethod {
+			return []string{decodedServiceOrMethod(target, m.Service, m.Method)}
+		}
+	}
+	return nil
+}
+
+// decodedServiceOrMethod returns the lenient-decoded service (for
+// TargetService) or method (for TargetMethod).
+func decodedServiceOrMethod(target common.Target, service, method string) string {
+	if target == TargetService {
+		return envelope.LenientDecodePath(service)
+	}
+	return envelope.LenientDecodePath(method)
 }
 
 // extractTarget pulls the target data out of a gRPC message. Returns
