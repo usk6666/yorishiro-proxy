@@ -846,6 +846,7 @@ SafetyFilter has **two filters with completely different purposes, layers, and p
 - **Behaviour**: blocks at wire time. HTTPMessage violations emit `Action=Respond` with a synthetic 403; mid-stream WS/gRPC frames emit `Action=Drop`. `BlockedBy=safety_filter` is stamped on the recorded flow.
 - **Protected target**: the **upstream server**.
 - **Modify-and-forward recheck (USK-702)**: the Send-side modify_and_forward path in `InterceptStep.holdAndDispatch` re-runs the same `SafetyStep.Process` against the operator-supplied modified envelope, closing the bypass where an AI agent first issues a benign request and then rewrites the body to a destructive payload at hold time.
+- **Release scope recheck (USK-1159)**: before that safety recheck, every release — manual, timeout auto-release, and modify_and_forward — re-runs `HostScopeStep` and `HTTPScopeStep` against the envelope about to be forwarded (the modified one for modify_and_forward), so a scope narrowed during the hold or a rewritten target is denied with the same 403 / Drop and `BlockedBy=target_scope` as at the head of the Pipeline.
 
 #### Output Filter (MCP control plane, on AI return)
 

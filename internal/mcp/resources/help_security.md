@@ -28,7 +28,8 @@ Both Policy Layer and Agent Layer `target_scope` rules apply to **all** proxy tr
 | Traffic source | Policy Layer | Agent Layer |
 |---|---|---|
 | Transparent MITM (HTTP CONNECT tunnel, plain HTTP forward proxy, SOCKS5 tunnel) | Applied | Applied |
-| MCP tool-initiated requests (`resend_http`, `resend_ws`, `resend_grpc`, `resend_raw`, `fuzz_http`, `fuzz_ws`, `fuzz_grpc`, `fuzz_raw`, `macro`, `intercept modify_and_forward`) | Applied | Applied |
+| MCP tool-initiated requests (`resend_http`, `resend_ws`, `resend_grpc`, `resend_raw`, `fuzz_http`, `fuzz_ws`, `fuzz_grpc`, `fuzz_raw`, `macro`) | Applied | Applied |
+| Intercepted traffic released from a hold (`intercept` `release` / `modify_and_forward`, timeout auto-release) | Applied | Applied |
 
 This means `set_target_scope` and `update_target_scope` take effect immediately for both AI-agent-driven MCP calls and any client traffic flowing through the proxy (curl, browser, etc.). The same evaluator drives both the live pipeline's `HostScopeStep` / `HTTPScopeStep` and the MCP-tool pre-flight check.
 
@@ -40,7 +41,8 @@ A `target_scope` deny surfaces differently depending on how the request entered 
 |---|---|
 | Transparent HTTPS via CONNECT tunnel | Proxy returns `HTTP/1.1 200 Connection Established` (the tunnel acknowledgement is sent before the scope check), then closes the connection. The client's inner TLS handshake fails with EOF. Note that the `200` line refers to the CONNECT tunnel, **not** to the backend -- no backend bytes are exchanged. |
 | Transparent plain-HTTP forward proxy | Proxy returns `HTTP/1.1 403 Forbidden` with body `yorishiro-proxy: target blocked by scope`. |
-| MCP tool-initiated request (`resend_*`, `fuzz_*`, `macro`, `intercept modify_and_forward`) | MCP error response with the violation reason. |
+| MCP tool-initiated request (`resend_*`, `fuzz_*`, `macro`) | MCP error response with the violation reason. |
+| Intercept release (`release`, `modify_and_forward`, timeout auto-release) | The `intercept` call itself succeeds. Scope is checked again at release time, with the rules in force then, against the request being forwarded — for `modify_and_forward`, the modified one. A deny added while the request was held (policy reload or this tool) or a rewrite of `authority` / `path` into a denied target blocks it: an HTTP request gets `403 Forbidden` with body `{"error":"blocked by target_scope","blocked_by":"target_scope"}`, a WebSocket / gRPC message is dropped, and the block is recorded as a flow with `blocked_by: target_scope`. |
 
 ### Reloading the Policy Layer (operator only)
 

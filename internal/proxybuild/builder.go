@@ -627,9 +627,11 @@ func buildPipeline(deps Deps, encoders *pipeline.WireEncoderRegistry, logger *sl
 	recordOpts = append(recordOpts, pipeline.WithGRPCWebBase64MaxPerStream(grpcWebBase64Cap))
 
 	safetyStep := pipeline.NewSafetyStep(deps.HTTPSafetyEngine, deps.WSSafetyEngine, deps.GRPCSafetyEngine, logger)
+	hostScopeStep := pipeline.NewHostScopeStep(deps.Scope)
+	httpScopeStep := pipeline.NewHTTPScopeStep(deps.Scope)
 	return pipeline.New(
-		pipeline.NewHostScopeStep(deps.Scope),
-		pipeline.NewHTTPScopeStep(deps.Scope),
+		hostScopeStep,
+		httpScopeStep,
 		// USK-818: BudgetStep at position #3 — after the scope checks
 		// (those are operator-policy denials, not chargeable) and
 		// before SafetyStep / Intercept / Transform / PluginPost / Record
@@ -641,8 +643,12 @@ func buildPipeline(deps Deps, encoders *pipeline.WireEncoderRegistry, logger *sl
 		pipeline.NewPluginStepPre(deps.PluginV2Engine, encoders, logger),
 		// safetyStep is shared with InterceptStep so a modify_and_forward
 		// release re-runs the same per-protocol input checks (USK-702).
+		// The scope Steps are shared so every release (manual, timeout
+		// auto-release, modify_and_forward) re-checks the envelope it
+		// forwards against the live TargetScope (USK-1159).
 		pipeline.NewInterceptStep(deps.HTTPInterceptEngine, deps.WSInterceptEngine, deps.GRPCInterceptEngine, deps.SSEInterceptEngine, deps.HoldQueue, safetyStep, logger).
-			WithHoldTracker(deps.InterceptHoldTracker),
+			WithHoldTracker(deps.InterceptHoldTracker).
+			WithScopeRecheck(hostScopeStep, httpScopeStep),
 		pipeline.NewTransformStep(deps.HTTPTransformEngine, deps.WSTransformEngine, deps.GRPCTransformEngine, deps.SSETransformEngine),
 		pipeline.NewPluginStepPost(deps.PluginV2Engine, encoders, logger),
 		pipeline.NewRecordStep(deps.FlowStore, logger, recordOpts...),
