@@ -213,6 +213,56 @@ func TestCoerceValue_IntegerType(t *testing.T) {
 	}
 }
 
+// TestCoerceValue_IntegerFloatFallback_NonRepresentable pins the float
+// fallback of the "integer" coercion: a value that parses only as a float
+// which int64 cannot represent (NaN, ±Inf, or outside [-2^63, 2^63)) must
+// reach the server as the raw string, both for a top-level property and for a
+// dot-notation child typed by its parent's schema. Converting such a float to
+// int64 is implementation-defined in Go (math.MinInt64 on amd64).
+func TestCoerceValue_IntegerFloatFallback_NonRepresentable(t *testing.T) {
+	schema := &toolSchema{
+		properties: map[string]string{"limit": "integer"},
+		required:   map[string]bool{},
+		enums:      map[string][]string{},
+		nested:     map[string]map[string]string{"filter": {"status_code": "integer"}},
+	}
+
+	tests := []struct {
+		input string
+		want  any
+	}{
+		// Not representable as int64: left unchanged for server validation.
+		{"1e300", "1e300"},
+		{"-1e300", "-1e300"},
+		{"NaN", "NaN"},
+		{"nan", "nan"},
+		{"Inf", "Inf"},
+		{"+Inf", "+Inf"},
+		{"-Inf", "-Inf"},
+		{"9.3e18", "9.3e18"},
+		{"-9.3e18", "-9.3e18"},
+		// 2^63 overflows ParseInt and is the first float out of range.
+		{"9223372036854775808", "9223372036854775808"},
+		{"9.223372036854775808e18", "9.223372036854775808e18"},
+		// In range: still coerced (fractional part truncated, as before).
+		{"7.0", int64(7)},
+		{"7.5", int64(7)},
+		{"-7.5", int64(-7)},
+		{"1e3", int64(1000)},
+		{"9.2e18", int64(9200000000000000000)},
+		{"-9.223372036854775808e18", int64(-9223372036854775808)},
+		{"42", int64(42)},
+	}
+	for _, tt := range tests {
+		if got := coerceValue("limit", tt.input, schema); got != tt.want {
+			t.Errorf("coerceValue('limit', %q) = %v (%T), want %v (%T)", tt.input, got, got, tt.want, tt.want)
+		}
+		if got := coerceNestedValue("filter", "status_code", tt.input, schema); got != tt.want {
+			t.Errorf("coerceNestedValue('filter', 'status_code', %q) = %v (%T), want %v (%T)", tt.input, got, got, tt.want, tt.want)
+		}
+	}
+}
+
 func TestCoerceValue_NumberType(t *testing.T) {
 	schema := &toolSchema{
 		properties: map[string]string{"rate": "number"},
