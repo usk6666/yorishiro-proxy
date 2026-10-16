@@ -138,7 +138,8 @@ func Run(ctx context.Context, fs *flag.FlagSet, args []string, opts RunOptions) 
 	fs.StringVar(&cfg.UIDir, "ui-dir", cfg.UIDir, "directory for WebUI static files, overrides embedded assets (env: YP_UI_DIR)")
 	fs.StringVar(&cfg.ExportDir, "export-dir", cfg.ExportDir,
 		"directory confining manage export_flows / import_flows file paths; relative paths resolve against it,\n"+
-			"    paths outside it are rejected (default ~/.yorishiro-proxy/exports) (env: YP_EXPORT_DIR)")
+			"    paths outside it are rejected. Must be a dedicated directory used only for exports: MCP callers\n"+
+			"    can overwrite any file in it (default ~/.yorishiro-proxy/exports) (env: YP_EXPORT_DIR)")
 
 	// -open-browser enables auto-opening the WebUI; default is disabled.
 	var openBrowser bool

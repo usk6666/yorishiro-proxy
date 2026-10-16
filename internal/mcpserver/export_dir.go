@@ -141,22 +141,33 @@ func protectedBootPaths(cfg *config.Config, configFile, targetPolicyFile string,
 // resolves inside exportDir (or, for directories, when exportDir resolves
 // inside it). Paths are compared after symlink resolution of their longest
 // existing prefix, so neither a symlinked -export-dir nor a not-yet-created
-// file (DB, default CA) slips through.
+// file (DB, default CA) slips through. Each comparison is also made by
+// identity (insideDir / os.SameFile), which catches aliases a lexical
+// comparison misses: a case-variant spelling on a case-insensitive
+// filesystem, or a bind-mounted directory.
 func checkExportDirIsolation(exportDir string, protected []protectedPath) error {
 	root, err := resolveExistingPrefix(exportDir)
 	if err != nil {
 		return fmt.Errorf("resolve export directory %s: %w", exportDir, err)
 	}
+	// rootInfo is nil when the export directory does not exist yet (the
+	// default, created after this check); the lexical comparison still
+	// applies then.
+	rootInfo, _ := os.Stat(root)
 	for _, p := range protected {
 		resolved, err := resolveExistingPrefix(p.path)
 		if err != nil {
 			return fmt.Errorf("resolve %s %s: %w", p.what, p.path, err)
 		}
-		if isWithin(root, resolved) {
+		if insideDir(root, rootInfo, resolved) {
 			return fmt.Errorf("refusing to start: %s %s is inside the export directory %s, where the MCP manage tool could overwrite it; "+
 				"choose a separate -export-dir / YP_EXPORT_DIR", p.what, p.path, exportDir)
 		}
-		if p.isDir && isWithin(resolved, root) {
+		if !p.isDir {
+			continue
+		}
+		dirInfo, _ := os.Stat(resolved)
+		if insideDir(resolved, dirInfo, root) {
 			return fmt.Errorf("refusing to start: the export directory %s is inside the %s %s, where the MCP manage tool could replace its files; "+
 				"choose a separate -export-dir / YP_EXPORT_DIR", exportDir, p.what, p.path)
 		}
@@ -186,6 +197,32 @@ func resolveExistingPrefix(p string) (string, error) {
 			return abs, nil
 		}
 		rest = filepath.Join(filepath.Base(cur), rest)
+		cur = parent
+	}
+}
+
+// insideDir reports whether the absolute path p is dir or lies beneath it,
+// either lexically (isWithin) or by identity: p itself or one of its
+// existing ancestors is the same file as dir (os.SameFile against
+// dirInfo, the os.Stat of dir). dirInfo may be nil when dir does not
+// exist, in which case only the lexical comparison applies. Boot-time
+// only: dir and p are operator-supplied, so the ancestor Stat calls are
+// not attacker-directed I/O.
+func insideDir(dir string, dirInfo fs.FileInfo, p string) bool {
+	if isWithin(dir, p) {
+		return true
+	}
+	if dirInfo == nil {
+		return false
+	}
+	for cur := p; ; {
+		if fi, err := os.Stat(cur); err == nil && os.SameFile(dirInfo, fi) {
+			return true
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return false
+		}
 		cur = parent
 	}
 }

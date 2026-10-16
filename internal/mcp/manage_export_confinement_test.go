@@ -206,6 +206,67 @@ func TestResolveExportPath_RootUnavailable(t *testing.T) {
 	}
 }
 
+// TestResolveExportPath_RootAliases covers the two lexical containment
+// branches of relInsideRoot when the root has a symlinked alias: the
+// configured form (exportDir given as the alias) and the symlink-resolved
+// form (absolute real path while exportDir is the alias). An absolute path
+// through an alias that is neither form is rejected without resolving it.
+func TestResolveExportPath_RootAliases(t *testing.T) {
+	t.Parallel()
+	f := newExportFixture(t)
+	alias := filepath.Join(t.TempDir(), "alias")
+	mustSymlink(t, f.root, alias)
+
+	type want int
+	const (
+		wantOK want = iota
+		wantOutside
+	)
+	cases := []struct {
+		name      string
+		exportDir string
+		requested string
+		want      want
+		wantAbs   string
+	}{
+		// exportDir is the alias: absolute paths through it match the
+		// configured-root branch.
+		{name: "alias root, absolute through alias", exportDir: alias, requested: filepath.Join(alias, "x.jsonl"), want: wantOK, wantAbs: filepath.Join(alias, "x.jsonl")},
+		{name: "alias root, absolute through alias subdir", exportDir: alias, requested: filepath.Join(alias, "sub", "x.jsonl"), want: wantOK, wantAbs: filepath.Join(alias, "sub", "x.jsonl")},
+		{name: "alias root, relative", exportDir: alias, requested: "x.jsonl", want: wantOK, wantAbs: filepath.Join(alias, "x.jsonl")},
+		{name: "alias root, escaping dir symlink through alias", exportDir: alias, requested: filepath.Join(alias, "escape", "x.jsonl"), want: wantOutside},
+		{name: "alias root, relative escaping dir symlink", exportDir: alias, requested: "escape/x.jsonl", want: wantOutside},
+		// exportDir is the alias: the real path matches the
+		// symlink-resolved-root branch; abs is reported in the configured form.
+		{name: "alias root, absolute real path", exportDir: alias, requested: filepath.Join(f.root, "x.jsonl"), want: wantOK, wantAbs: filepath.Join(alias, "x.jsonl")},
+		{name: "alias root, absolute real path through escaping symlink", exportDir: alias, requested: filepath.Join(f.root, "escape", "x.jsonl"), want: wantOutside},
+		// exportDir is the real root: an alias that is not a configured
+		// form is outside (resolving it would be I/O on an outside path).
+		{name: "real root, absolute through unconfigured alias", exportDir: f.root, requested: filepath.Join(alias, "x.jsonl"), want: wantOutside},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := resolveExportPath(tc.exportDir, tc.requested)
+			switch tc.want {
+			case wantOK:
+				if err != nil {
+					t.Fatalf("resolveExportPath(%q, %q) error = %v, want success", tc.exportDir, tc.requested, err)
+				}
+				if got.abs != tc.wantAbs {
+					t.Errorf("resolveExportPath(%q, %q).abs = %q, want %q", tc.exportDir, tc.requested, got.abs, tc.wantAbs)
+				}
+			case wantOutside:
+				var outside *exportPathOutsideError
+				if !errors.As(err, &outside) {
+					t.Fatalf("resolveExportPath(%q, %q) error = %v, want *exportPathOutsideError", tc.exportDir, tc.requested, err)
+				}
+			}
+		})
+	}
+}
+
 // TestResolveExportPath_NoProbeOutsideRoot pins the S-1 invariant: a
 // requested path that lies lexically outside both forms of the export
 // directory (as configured, and symlink-resolved) is rejected before any

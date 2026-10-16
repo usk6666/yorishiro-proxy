@@ -72,12 +72,15 @@ Returns: imported, skipped, errors, source.
 Every file `export_flows` writes and `import_flows` reads lives in one **export directory** on the proxy server's filesystem. The operator sets it at server start with `-export-dir` / `YP_EXPORT_DIR` (default `~/.yorishiro-proxy/exports/`); no MCP tool can change it. `query { resource: "status" }` (and `resource: "config"`) reports it as `export_dir`, which is how HTTP-remote callers learn where their files land.
 
 - A **relative** path resolves against the export directory: `"flows.har"`, `"run1/flows.jsonl"`. This is the recommended form.
-- An **absolute** path is accepted only if it lies inside the export directory.
-- Anything else — an absolute path elsewhere, a `..` escape, a symlink inside the directory that points outside it, a symlink as the final component — is rejected with `path "..." resolves outside export directory <dir>; set -export-dir / YP_EXPORT_DIR or use a path relative to it`.
+- An **absolute** path is accepted only if it lies inside the export directory, spelled as reported in `export_dir` (or as its symlink-resolved real path). An absolute path that reaches the directory through some other symlinked alias is rejected; use a relative path instead.
+- Anything else — an absolute path elsewhere, a `..` escape, a symlink inside the directory that points outside it — is rejected with `path "..." resolves outside export directory <dir>; set -export-dir / YP_EXPORT_DIR or use a path relative to it`.
+- A symlink as the final component is rejected with `file path must not be a symbolic link: <path>`.
 - Subdirectories must already exist; they are not created. Re-exporting to an existing name overwrites it.
 - The returned `output_path` / `source` is the absolute path inside the export directory.
 
-The server refuses to start if the export directory contains its config file, target policy file, CA certificate/key, database, log file, WebUI directory or plugin scripts, so an export can never overwrite them. (Before USK-1127, relative paths resolved against the server process's working directory and absolute paths were unrestricted — that USK-868 contract is superseded.)
+The server refuses to start if the export directory contains its config file, target policy file, CA certificate/key, database, log file, server.json, WebUI directory, plugin scripts or TLS client certificate / key / CA bundle files, so an export can never overwrite them.
+
+**Operators:** `-export-dir` must be a **dedicated directory used only for exports**. The boot check only knows the proxy's own files; anything else inside the directory can be overwritten by an MCP caller. For example, a directory such as `~/.config` would let an agent replace shell or autostart files (code execution on the next login). `$HOME` itself is refused because it contains `~/.yorishiro-proxy/`. (Before USK-1127, relative paths resolved against the server process's working directory and absolute paths were unrestricted — that USK-868 contract is superseded.)
 
 ## Usage Examples
 

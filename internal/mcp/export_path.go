@@ -93,13 +93,15 @@ func (e *exportPathOutsideError) Error() string {
 // resolveExportPath maps requested onto exportDir.
 //
 // Relative paths resolve against exportDir. Absolute paths are accepted
-// only when they lie inside it — either lexically or after resolving
-// symlinks in their parent directory, so an alias of the root (e.g. a
-// symlinked /tmp) still matches. The parent directory must already exist
-// (subdirectories are never created), a final-component symlink is
-// rejected, and any intermediate symlink that leads outside the directory
-// is rejected. Containment uses filepath.Rel + filepath.IsLocal, never a
-// string-prefix test.
+// only when they lie lexically inside exportDir as configured or inside
+// its symlink-resolved form; an absolute path that reaches the directory
+// through some other alias is rejected. That lexical decision is made
+// before any filesystem access to the requested path: every probe below
+// touches only paths inside the export directory. The parent directory
+// must already exist (subdirectories are never created), a
+// final-component symlink is rejected, and any intermediate symlink that
+// leads outside the directory is rejected. Containment uses filepath.Rel +
+// filepath.IsLocal, never a string-prefix test.
 func resolveExportPath(exportDir, requested string) (exportPath, error) {
 	if exportDir == "" {
 		return exportPath{}, errors.New("file export/import is disabled: no export directory is configured; set -export-dir / YP_EXPORT_DIR on the server")
@@ -175,24 +177,20 @@ func lexicalRel(root, rootReal, requested string) (rel string, ok bool) {
 }
 
 // relInsideRoot returns the root-relative form of the absolute, clean
-// path p when p lies inside the export directory, trying the configured
-// root, its symlink-resolved form, and finally p with its parent's
-// symlinks resolved (for callers that spell the root through an alias).
+// path p when p lies lexically inside the configured root or its
+// symlink-resolved form. It is purely lexical and must stay so: p is
+// agent-supplied, and resolving symlinks in a path outside the root would
+// be attacker-directed I/O (a UNC path on Windows makes the server
+// authenticate to a remote SMB / WebDAV host). Callers that spell the root
+// through any other alias must use a relative path or the form reported
+// as export_dir.
 func relInsideRoot(root, rootReal, p string) (string, bool) {
 	for _, r := range []string{root, rootReal} {
 		if rel, err := filepath.Rel(r, p); err == nil && (rel == "." || filepath.IsLocal(rel)) {
 			return rel, true
 		}
 	}
-	parentReal, err := exportEvalSymlinks(filepath.Dir(p))
-	if err != nil {
-		return "", false
-	}
-	rel, err := filepath.Rel(rootReal, filepath.Join(parentReal, filepath.Base(p)))
-	if err != nil || (rel != "." && !filepath.IsLocal(rel)) {
-		return "", false
-	}
-	return rel, true
+	return "", false
 }
 
 // pathWithin reports whether p equals root or lies beneath it. Both must
@@ -291,5 +289,14 @@ func readExportFile(exportDir string, target exportPath, readFn func(f *os.File)
 		return fmt.Errorf("open input file: %w", err)
 	}
 	defer f.Close()
+	// Re-check on the opened handle: the entry may have been swapped for a
+	// non-regular file between the Lstat above and the Open.
+	fi, err := f.Stat()
+	if err != nil {
+		return fmt.Errorf("stat input file: %w", err)
+	}
+	if !fi.Mode().IsRegular() {
+		return fmt.Errorf("input_path must be a regular file: %s", target.abs)
+	}
 	return readFn(f)
 }
