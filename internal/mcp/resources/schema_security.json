@@ -89,7 +89,7 @@
       "properties": {
         "hostname": {
           "type": "string",
-          "description": "Required. Exact match or wildcard '*.example.com'. Also accepts IPv4 or bracketed IPv6 ('[::1]')."
+          "description": "Required. Exact match or wildcard '*.example.com'. Also accepts IPv4 or IPv6, bare ('::1') or bracketed ('[::1]'); every textual form of one IPv6 address is the same host. A wildcard over an IP literal is rejected."
         },
         "ports": {
           "type": "array",
@@ -98,7 +98,7 @@
         },
         "path_prefix": {
           "type": "string",
-          "description": "Optional. Match URL path prefix. Empty = all paths."
+          "description": "Optional. Literal, case-sensitive prefix of the request path (not a glob). Must start with '/' and must not contain '*', '?' or '#' -- '/api/' already matches everything under /api/, and the query/fragment is not part of the path. Empty = all paths."
         },
         "schemes": {
           "type": "array",

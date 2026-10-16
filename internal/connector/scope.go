@@ -2,6 +2,7 @@ package connector
 
 import (
 	"fmt"
+	"net/netip"
 	"net/url"
 	"strconv"
 	"strings"
@@ -42,14 +43,19 @@ type TargetScope struct {
 type TargetRule struct {
 	// Hostname matches the target hostname (case-insensitive).
 	// Supports wildcard prefix "*.example.com" to match all subdomains.
-	// Required for the rule to be meaningful.
+	// An IPv6 literal may be written bare ("::1") or bracketed ("[::1]");
+	// every textual form of one address is the same host (see
+	// canonicalScopeHost). Empty matches any host (Policy layer only; the
+	// Agent layer requires a hostname).
 	Hostname string `json:"hostname"`
 
 	// Ports restricts the rule to specific port numbers.
 	// When nil or empty, all ports are matched.
 	Ports []int `json:"ports,omitempty"`
 
-	// PathPrefix matches the beginning of the request URL path (case-sensitive).
+	// PathPrefix matches the beginning of the request URL path with a
+	// literal, case-sensitive prefix comparison — not a glob. It must start
+	// with "/" and contain no "*", "?" or "#" (config.ValidateTargetRule).
 	// When empty, all paths are matched.
 	PathPrefix string `json:"path_prefix,omitempty"`
 
@@ -331,13 +337,19 @@ func ruleCoversRule(covering, covered TargetRule) bool {
 
 // hostnameCoveredBy checks if the covering hostname pattern encompasses the
 // covered hostname pattern. For example:
+//   - "" covers every hostname (it matches any host, as in matchTargetRule)
 //   - "*.example.com" covers "sub.example.com" (exact is subset of wildcard)
 //   - "*.example.com" covers "*.example.com" (same wildcard)
 //   - "example.com" covers "example.com" (same exact)
+//   - "::1" covers "[::1]" (same IPv6 address, see canonicalScopeHost)
 //   - "*.example.com" does NOT cover "*.other.com"
+//   - a non-empty covering hostname does NOT cover "" (any host)
 func hostnameCoveredBy(covering, covered string) bool {
-	coveringLower := strings.ToLower(covering)
-	coveredLower := strings.ToLower(covered)
+	if covering == "" {
+		return true
+	}
+	coveringLower := canonicalScopeHost(covering)
+	coveredLower := canonicalScopeHost(covered)
 
 	// Exact match.
 	if coveringLower == coveredLower {
@@ -362,6 +374,14 @@ func hostnameCoveredBy(covering, covered string) bool {
 	return false
 }
 
+// MatchTargetRule reports whether a target matches a single TargetRule —
+// the exact predicate CheckTarget applies. It is exported so the MCP
+// security tool can name the rule that decided a test_target verdict without
+// keeping a copy that drifts from the engine (USK-1129).
+func MatchTargetRule(rule TargetRule, scheme, hostname string, port int, path string) bool {
+	return matchTargetRule(rule, scheme, hostname, port, path)
+}
+
 // matchTargetRule checks if a target matches a single TargetRule.
 // All non-empty/non-nil fields in the rule must match (AND logic).
 func matchTargetRule(rule TargetRule, scheme, hostname string, port int, path string) bool {
@@ -382,10 +402,11 @@ func matchTargetRule(rule TargetRule, scheme, hostname string, port int, path st
 
 // matchHostname performs case-insensitive hostname matching with wildcard support.
 // Pattern "*.example.com" matches "sub.example.com" but not "example.com".
-// Exact patterns match exactly.
+// Exact patterns match exactly; both sides are compared in canonical form
+// (canonicalScopeHost), so an IPv6 rule matches every spelling of its address.
 func matchHostname(pattern, hostname string) bool {
-	pattern = strings.ToLower(pattern)
-	hostname = strings.ToLower(hostname)
+	pattern = canonicalScopeHost(pattern)
+	hostname = canonicalScopeHost(hostname)
 
 	if strings.HasPrefix(pattern, "*.") {
 		suffix := pattern[1:] // ".example.com"
@@ -393,6 +414,37 @@ func matchHostname(pattern, hostname string) bool {
 	}
 
 	return pattern == hostname
+}
+
+// canonicalScopeHost returns the form in which TargetScope compares a rule
+// hostname with a target hostname: lowercased, one enclosing "[...]" pair
+// stripped, and an IPv6 literal rewritten to its RFC 5952 text form via
+// net/netip ("[0:0::1]" -> "::1").
+//
+// Data-path gates hand CheckTarget an IPv6 host in two spellings — bracket-
+// stripped when the authority carries a port (net.SplitHostPort,
+// url.Hostname), verbatim "[::1]" when it does not (the port-less fallback)
+// — and rules may be authored either way, so without this a "[::1]" rule
+// never matched a ported target and a "::1" rule never matched a port-less
+// one (USK-1129). Brackets are stripped regardless of content, mirroring
+// net.SplitHostPort. IPv4-mapped IPv6 is NOT unmapped ("::ffff:10.0.0.1"
+// stays distinct from "10.0.0.1"), and no other host form is rewritten.
+//
+// This is a comparison-only normalization of a control-plane predicate:
+// stored rules and recorded wire data are never rewritten. The input may be
+// an attacker-controlled Host header; the length guard keeps "[", "]" and
+// "[]" verbatim and nothing here can panic.
+func canonicalScopeHost(h string) string {
+	h = strings.ToLower(h)
+	if len(h) > 2 && h[0] == '[' && h[len(h)-1] == ']' {
+		h = h[1 : len(h)-1]
+	}
+	if strings.IndexByte(h, ':') >= 0 {
+		if addr, err := netip.ParseAddr(h); err == nil && addr.Is6() {
+			return addr.String()
+		}
+	}
+	return h
 }
 
 // containsInt reports whether the slice contains the given value.
@@ -437,9 +489,19 @@ func defaultPort(scheme, portStr string) int {
 	}
 }
 
+// TargetRuleEqual reports whether two rules are the same rule — the
+// equality TargetScope uses to dedupe added rules and to find rules to
+// remove. Exported for the MCP security tool's policy-deny removal guard
+// (USK-1129).
+func TargetRuleEqual(a, b TargetRule) bool {
+	return targetRuleEqual(a, b)
+}
+
 // targetRuleEqual reports whether two TargetRule values are equal.
+// Hostnames compare in canonical form (canonicalScopeHost), so "::1" and
+// "[::1]" are one rule.
 func targetRuleEqual(a, b TargetRule) bool {
-	if !strings.EqualFold(a.Hostname, b.Hostname) {
+	if canonicalScopeHost(a.Hostname) != canonicalScopeHost(b.Hostname) {
 		return false
 	}
 	if a.PathPrefix != b.PathPrefix {

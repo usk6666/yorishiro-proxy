@@ -143,9 +143,9 @@ Response:
 
 | Field | Type | Description |
 |---|---|---|
-| `hostname` | string | Required. Exact match or wildcard `*.example.com` |
+| `hostname` | string | Required. Exact match or wildcard `*.example.com`. IPv4 and IPv6 literals are accepted; IPv6 may be bare (`::1`) or bracketed (`[::1]`) and every textual form of one address is the same host. A wildcard over an IP literal (`*.10.0.0.1`) is rejected |
 | `ports` | int[] | Optional. Match specific ports. Empty = all ports |
-| `path_prefix` | string | Optional. Match URL path prefix. Empty = all paths |
+| `path_prefix` | string | Optional. Literal, case-sensitive prefix of the request path — not a glob. Must start with `/`; `*`, `?` and `#` are rejected (`/api/` already matches everything under `/api/`; the query and fragment are not part of the path). Empty = all paths |
 | `schemes` | string[] | Optional. Match transport confidentiality: `http` = plaintext, `https` = TLS. Only these two values are accepted. Empty = both |
 
 All specified fields must match for a rule to apply (AND logic).

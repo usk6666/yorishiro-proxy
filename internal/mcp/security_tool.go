@@ -303,7 +303,9 @@ func (s *Server) handleTestTarget(params securityParams) (*gomcp.CallToolResult,
 }
 
 // findMatchedRuleAndLayer identifies which rule caused the allow/deny decision
-// and which layer (policy or agent) made the decision.
+// and which layer (policy or agent) made the decision. It applies the
+// engine's own predicate (connector.MatchTargetRule) so the reported rule
+// cannot drift from the one CheckTarget used.
 // The reason string from CheckTarget is used to determine the layer when no
 // specific deny rule matched (i.e., "not in X allow list" cases).
 func findMatchedRuleAndLayer(ts *connector.TargetScope, u *url.URL, allowed bool, reason string) (*connector.TargetRule, string) {
@@ -318,13 +320,13 @@ func findMatchedRuleAndLayer(ts *connector.TargetScope, u *url.URL, allowed bool
 	// If denied, check policy denies first, then agent denies.
 	if !allowed {
 		for _, rule := range policyDenies {
-			if matchTargetRuleFields(rule, scheme, hostname, port, path) {
+			if connector.MatchTargetRule(rule, scheme, hostname, port, path) {
 				r := rule
 				return &r, "policy"
 			}
 		}
 		for _, rule := range agentDenies {
-			if matchTargetRuleFields(rule, scheme, hostname, port, path) {
+			if connector.MatchTargetRule(rule, scheme, hostname, port, path) {
 				r := rule
 				return &r, "agent"
 			}
@@ -337,7 +339,7 @@ func findMatchedRuleAndLayer(ts *connector.TargetScope, u *url.URL, allowed bool
 	// If allowed and there are agent allow rules, find the matching agent allow rule.
 	if len(agentAllows) > 0 {
 		for _, rule := range agentAllows {
-			if matchTargetRuleFields(rule, scheme, hostname, port, path) {
+			if connector.MatchTargetRule(rule, scheme, hostname, port, path) {
 				r := rule
 				return &r, "agent"
 			}
@@ -347,7 +349,7 @@ func findMatchedRuleAndLayer(ts *connector.TargetScope, u *url.URL, allowed bool
 	// If allowed and there are policy allow rules, find the matching policy allow rule.
 	if len(policyAllows) > 0 {
 		for _, rule := range policyAllows {
-			if matchTargetRuleFields(rule, scheme, hostname, port, path) {
+			if connector.MatchTargetRule(rule, scheme, hostname, port, path) {
 				r := rule
 				return &r, "policy"
 			}
@@ -385,93 +387,12 @@ func validateNotPolicyDenies(ts *connector.TargetScope, removeDenies []connector
 
 	for _, rem := range removeDenies {
 		for _, pd := range policyDenies {
-			if targetRuleMatchesLocal(rem, pd) {
+			if connector.TargetRuleEqual(rem, pd) {
 				return fmt.Errorf("cannot remove policy deny rule %q: policy rules are immutable", rem.Hostname)
 			}
 		}
 	}
 	return nil
-}
-
-// targetRuleMatchesLocal checks if two target rules are equivalent.
-// Comparison is case-insensitive for hostname and schemes.
-func targetRuleMatchesLocal(a, b connector.TargetRule) bool {
-	if !strings.EqualFold(a.Hostname, b.Hostname) {
-		return false
-	}
-	if a.PathPrefix != b.PathPrefix {
-		return false
-	}
-	if len(a.Ports) != len(b.Ports) {
-		return false
-	}
-	for i := range a.Ports {
-		if a.Ports[i] != b.Ports[i] {
-			return false
-		}
-	}
-	if len(a.Schemes) != len(b.Schemes) {
-		return false
-	}
-	for i := range a.Schemes {
-		if !strings.EqualFold(a.Schemes[i], b.Schemes[i]) {
-			return false
-		}
-	}
-	return true
-}
-
-// matchTargetRuleFields checks if a target matches a single TargetRule.
-// This is a local re-implementation of the unexported proxy.matchTargetRule
-// for use in the MCP handler.
-func matchTargetRuleFields(rule connector.TargetRule, scheme, hostname string, port int, path string) bool {
-	if rule.Hostname != "" && !matchHostnameLocal(rule.Hostname, hostname) {
-		return false
-	}
-	if len(rule.Ports) > 0 && !containsIntLocal(rule.Ports, port) {
-		return false
-	}
-	if rule.PathPrefix != "" && !strings.HasPrefix(path, rule.PathPrefix) {
-		return false
-	}
-	if len(rule.Schemes) > 0 && !containsStringFoldLocal(rule.Schemes, scheme) {
-		return false
-	}
-	return true
-}
-
-// matchHostnameLocal performs case-insensitive hostname matching with wildcard support.
-// Pattern "*.example.com" matches "sub.example.com" but not "example.com".
-func matchHostnameLocal(pattern, hostname string) bool {
-	pattern = strings.ToLower(pattern)
-	hostname = strings.ToLower(hostname)
-
-	if strings.HasPrefix(pattern, "*.") {
-		suffix := pattern[1:] // ".example.com"
-		return strings.HasSuffix(hostname, suffix) && hostname != pattern[2:]
-	}
-	return pattern == hostname
-}
-
-// containsIntLocal reports whether the slice contains the given value.
-func containsIntLocal(slice []int, val int) bool {
-	for _, v := range slice {
-		if v == val {
-			return true
-		}
-	}
-	return false
-}
-
-// containsStringFoldLocal reports whether the slice contains the given string
-// (case-insensitive comparison).
-func containsStringFoldLocal(slice []string, val string) bool {
-	for _, v := range slice {
-		if strings.EqualFold(v, val) {
-			return true
-		}
-	}
-	return false
 }
 
 // targetDefaultPort returns the port number from the URL port string.
@@ -498,11 +419,12 @@ func targetDefaultPort(scheme, portStr string) int {
 }
 
 // validateTargetRules validates each Agent-layer target rule. Per-rule
-// syntax (hostname form, port range, the closed {http, https} scheme
-// vocabulary) is delegated to config.ValidateTargetRule, the core shared with
-// the Policy layer (USK-1084). The Agent layer additionally requires a
-// hostname; the Policy layer accepts hostname-less rules such as a
-// {"ports": [22]} deny.
+// syntax (hostname form, port range, path_prefix form, the closed
+// {http, https} scheme vocabulary) is delegated to config.ValidateTargetRule,
+// the core shared with the Policy layer (USK-1084, USK-1129). The Agent layer
+// additionally requires a hostname; the Policy layer accepts hostname-less
+// rules such as a {"ports": [22]} deny. Callers apply it to add/set rules
+// only: remove rules are not validated, so a stale rule stays removable.
 func validateTargetRules(kind string, rules []targetRuleInput) error {
 	for i, r := range rules {
 		if r.Hostname == "" {
