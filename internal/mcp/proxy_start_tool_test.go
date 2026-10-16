@@ -1667,8 +1667,8 @@ func TestProxyStart_ResetsLimitsAndTimeoutsOnRestart(t *testing.T) {
 	}
 
 	// Verify defaults were restored.
-	if got := manager.MaxConnections(); got != 128 {
-		t.Errorf("max_connections after restart = %d, want 128 (default)", got)
+	if got := manager.MaxConnections(); got != 512 {
+		t.Errorf("max_connections after restart = %d, want 512 (default)", got)
 	}
 	if got := manager.PeekTimeout(); got != 30*time.Second {
 		t.Errorf("peek_timeout after restart = %v, want 30s (default)", got)

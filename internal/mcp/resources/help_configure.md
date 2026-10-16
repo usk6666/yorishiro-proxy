@@ -538,7 +538,7 @@ Each rule is AND-evaluated across `hostname` / `url_prefix` / `method`; at least
 ### Set connection limits
 ```json
 {
-  "max_connections": 256,
+  "max_connections": 1024,
   "peek_timeout_ms": 10000,
   "request_timeout_ms": 30000
 }

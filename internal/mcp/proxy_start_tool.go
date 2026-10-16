@@ -37,9 +37,6 @@ const (
 	minMaxConcurrentStreams = 1
 	maxMaxConcurrentStreams = 65535
 
-	// defaultMaxConnections is the default concurrent connection limit.
-	// Must match connector.DefaultMaxConnections (128).
-	defaultMaxConnections = 128
 	// defaultPeekTimeout is the default protocol detection timeout.
 	// Must match connector.DefaultPeekTimeout (30s).
 	defaultPeekTimeout = 30 * time.Second
@@ -132,8 +129,10 @@ type proxyStartInput struct {
 	ClientKeyPath string `json:"client_key,omitempty" jsonschema:"PEM client private key path for mTLS (global)"`
 
 	// MaxConnections is the maximum number of concurrent proxy connections.
-	// Defaults to 128 if omitted or zero.
-	MaxConnections *int `json:"max_connections,omitempty" jsonschema:"maximum concurrent connections (default: 128)"`
+	// Defaults to connector.DefaultMaxConnections (512) if omitted. The
+	// jsonschema tag must be a literal; TestProxyStartDocs_MaxConnectionsDefaultMatchesConstant
+	// keeps it in step with the constant.
+	MaxConnections *int `json:"max_connections,omitempty" jsonschema:"maximum concurrent connections (default: 512)"`
 
 	// MaxConcurrentStreams caps the per-connection HTTP/2 stream
 	// concurrency advertised to clients via SETTINGS_MAX_CONCURRENT_STREAMS
@@ -406,7 +405,7 @@ func (s *Server) resetSettingsToDefaults(listenerName string) {
 
 	// Reset connection limits and timeouts to defaults.
 	if !managerIsNil(s.connector.manager) {
-		s.connector.manager.SetMaxConnections(defaultMaxConnections)
+		s.connector.manager.SetMaxConnections(connector.DefaultMaxConnections)
 		s.connector.manager.SetPeekTimeout(defaultPeekTimeout)
 		// USK-862: clear the runtime override so the next stack assembly
 		// falls back to the boot-time BuildConfig.MaxConcurrentStreams

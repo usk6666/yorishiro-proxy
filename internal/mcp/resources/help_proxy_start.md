@@ -110,7 +110,7 @@ Path to a PEM-encoded client private key for mTLS with upstream servers (global)
 
 ### max_connections (integer, optional)
 Maximum number of concurrent proxy connections.
-- Default: `128`
+- Default: `512`
 - Range: 1-100000
 
 ### max_concurrent_streams (integer, optional)

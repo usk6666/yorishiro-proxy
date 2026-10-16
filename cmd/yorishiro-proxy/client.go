@@ -92,7 +92,7 @@ Parameters (key=value):
   listen_addr=<host:port> Listen address (default: 127.0.0.1:8080)
   upstream_proxy=<url>    Upstream proxy URL
   tls_fingerprint=<prof>  TLS fingerprint profile (chrome, firefox, safari, edge, random, none)
-  max_connections=<n>     Max concurrent connections (default: 128)
+  max_connections=<n>     Max concurrent connections (default: 512)
   peek_timeout_ms=<n>     Protocol detection timeout in ms (default: 30000)
   request_timeout_ms=<n>  HTTP request timeout in ms (default: 60000)
 

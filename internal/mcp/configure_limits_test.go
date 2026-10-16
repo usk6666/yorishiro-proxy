@@ -409,7 +409,7 @@ func TestQuery_Status_ShowsLimitsAndTimeouts(t *testing.T) {
 	manager := newTestProxybuildManager(t)
 
 	// Set custom values before starting.
-	manager.SetMaxConnections(512)
+	manager.SetMaxConnections(1024)
 	manager.SetPeekTimeout(10 * time.Second)
 
 	ctx := context.Background()
@@ -433,8 +433,8 @@ func TestQuery_Status_ShowsLimitsAndTimeouts(t *testing.T) {
 	if !out.Running {
 		t.Error("running = false, want true")
 	}
-	if out.MaxConnections != 512 {
-		t.Errorf("max_connections = %d, want 512", out.MaxConnections)
+	if out.MaxConnections != 1024 {
+		t.Errorf("max_connections = %d, want 1024", out.MaxConnections)
 	}
 	if out.PeekTimeoutMs != 10000 {
 		t.Errorf("peek_timeout_ms = %d, want 10000", out.PeekTimeoutMs)
@@ -464,8 +464,8 @@ func TestQuery_Status_DefaultLimitsAndTimeouts(t *testing.T) {
 	unmarshalQueryResult(t, result, &out)
 
 	// Default values.
-	if out.MaxConnections != 128 {
-		t.Errorf("max_connections = %d, want 128 (default)", out.MaxConnections)
+	if out.MaxConnections != 512 {
+		t.Errorf("max_connections = %d, want 512 (default)", out.MaxConnections)
 	}
 	if out.PeekTimeoutMs != 30000 {
 		t.Errorf("peek_timeout_ms = %d, want 30000 (default)", out.PeekTimeoutMs)

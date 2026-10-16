@@ -1016,7 +1016,7 @@ func TestQuery_Config_WithManagerFields(t *testing.T) {
 	}
 
 	// Set non-default values so we can verify them.
-	manager.SetMaxConnections(512)
+	manager.SetMaxConnections(1024)
 	manager.SetPeekTimeout(5 * time.Second)
 
 	ca := newTestCA(t)
@@ -1048,8 +1048,8 @@ func TestQuery_Config_WithManagerFields(t *testing.T) {
 	var out queryConfigResult
 	unmarshalQueryResult(t, result, &out)
 
-	if out.MaxConnections != 512 {
-		t.Errorf("max_connections = %d, want 512", out.MaxConnections)
+	if out.MaxConnections != 1024 {
+		t.Errorf("max_connections = %d, want 1024", out.MaxConnections)
 	}
 	if out.PeekTimeoutMs != 5000 {
 		t.Errorf("peek_timeout_ms = %d, want 5000", out.PeekTimeoutMs)
