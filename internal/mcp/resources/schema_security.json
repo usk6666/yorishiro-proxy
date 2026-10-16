@@ -89,7 +89,7 @@
       "properties": {
         "hostname": {
           "type": "string",
-          "description": "Required. Exact match or wildcard '*.example.com'. Also accepts IPv4 or IPv6, bare ('::1') or bracketed ('[::1]'); every textual form of one IPv6 address is the same host. A wildcard over an IP literal is rejected."
+          "description": "Required. Exact match or wildcard '*.example.com'. Also accepts IPv4 or IPv6, bare ('::1') or bracketed ('[::1]'); every zone-less textual form of one IPv6 address is the same host. A zone-qualified target such as '[fe80::1%eth0]' keeps its zone and does not match a zone-less rule (rules cannot carry a zone). A wildcard over an IP literal is rejected."
         },
         "ports": {
           "type": "array",

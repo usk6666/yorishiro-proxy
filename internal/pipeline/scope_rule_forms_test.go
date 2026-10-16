@@ -55,8 +55,8 @@ func parseH1Request(t *testing.T, raw string) *envelope.Envelope {
 	return env
 }
 
-// TestHTTPScopeStep_IPv6RuleForms is T3: every IPv6 spelling of one address
-// is the same target, whichever spelling the rule and the Host header use.
+// TestHTTPScopeStep_IPv6RuleForms is T3: every zone-less IPv6 spelling of one
+// address is the same target, whichever spelling the rule and the Host header use.
 func TestHTTPScopeStep_IPv6RuleForms(t *testing.T) {
 	tests := []struct {
 		name      string

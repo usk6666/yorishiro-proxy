@@ -44,9 +44,11 @@ type TargetRule struct {
 	// Hostname matches the target hostname (case-insensitive).
 	// Supports wildcard prefix "*.example.com" to match all subdomains.
 	// An IPv6 literal may be written bare ("::1") or bracketed ("[::1]");
-	// every textual form of one address is the same host (see
-	// canonicalScopeHost). Empty matches any host (Policy layer only; the
-	// Agent layer requires a hostname).
+	// every zone-less textual form of one address is the same host (see
+	// canonicalScopeHost). A zone-qualified target such as "[fe80::1%eth0]"
+	// keeps its zone and does not match a zone-less rule (rules cannot carry
+	// a zone). Empty matches any host (Policy layer only; the Agent layer
+	// requires a hostname).
 	Hostname string `json:"hostname"`
 
 	// Ports restricts the rule to specific port numbers.
@@ -403,7 +405,8 @@ func matchTargetRule(rule TargetRule, scheme, hostname string, port int, path st
 // matchHostname performs case-insensitive hostname matching with wildcard support.
 // Pattern "*.example.com" matches "sub.example.com" but not "example.com".
 // Exact patterns match exactly; both sides are compared in canonical form
-// (canonicalScopeHost), so an IPv6 rule matches every spelling of its address.
+// (canonicalScopeHost), so an IPv6 rule matches every zone-less spelling of
+// its address.
 func matchHostname(pattern, hostname string) bool {
 	pattern = canonicalScopeHost(pattern)
 	hostname = canonicalScopeHost(hostname)
@@ -429,6 +432,11 @@ func matchHostname(pattern, hostname string) bool {
 // one (USK-1129). Brackets are stripped regardless of content, mirroring
 // net.SplitHostPort. IPv4-mapped IPv6 is NOT unmapped ("::ffff:10.0.0.1"
 // stays distinct from "10.0.0.1"), and no other host form is rewritten.
+// An IPv6 zone is kept: netip.ParseAddr accepts it and String() preserves
+// it, so a zone-qualified target such as "[fe80::1%eth0]" canonicalizes to
+// "fe80::1%eth0" and does not match a zone-less rule (rules cannot carry a
+// zone — ValidateTargetRule rejects one). Whether to drop the zone is an
+// open design question tracked with USK-1132.
 //
 // This is a comparison-only normalization of a control-plane predicate:
 // stored rules and recorded wire data are never rewritten. The input may be

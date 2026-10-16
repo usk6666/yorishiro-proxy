@@ -26,7 +26,7 @@ func discardLogger() *slog.Logger {
 // TestConnectPolicyAllow_IPv6RuleForms is T1: the CONNECT gate receives the
 // target exactly as the client wrote it ("[::1]:443") and splits it with
 // net.SplitHostPort before CheckTarget. A Policy deny written in either IPv6
-// spelling must block every spelling of the same address.
+// spelling must block every zone-less spelling of the same address.
 func TestConnectPolicyAllow_IPv6RuleForms(t *testing.T) {
 	tests := []struct {
 		name      string

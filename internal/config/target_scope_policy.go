@@ -36,7 +36,9 @@ var targetRuleSchemes = map[string]bool{
 //     spellings are equivalent: connector compares hosts on a canonical form
 //     (one enclosing bracket pair stripped, IPv6 in its RFC 5952 text form),
 //     so "[::1]", "::1" and "0:0::1" are the same rule and match the same
-//     targets (USK-1129). A wildcard over an IP literal ("*.::1",
+//     targets (USK-1129). A zone-qualified target such as "[fe80::1%eth0]"
+//     keeps its zone and does not match a zone-less rule (rules cannot carry
+//     a zone; see USK-1132). A wildcard over an IP literal ("*.::1",
 //     "*.[::1]", "*.10.0.0.1") is rejected: no host ends with ".::1".
 //     Labels may contain letters, digits, '-' and '_'.
 //   - a trailing-dot hostname ("internal.corp.") is rejected. The data path
