@@ -677,16 +677,22 @@ type HostTLSEntry struct {
 type TargetRuleConfig struct {
 	// Hostname matches the target hostname (case-insensitive).
 	// Supports wildcard prefix "*.example.com" to match all subdomains.
-	// When empty, the rule matches any host. See ValidateTargetRule for the
-	// accepted forms (bare "*", "host:port" and URLs are rejected).
+	// IPv6 literals may be bare ("::1") or bracketed ("[::1]"); both match
+	// every zone-less spelling of the address. A zone-qualified target such
+	// as "[fe80::1%eth0]" keeps its zone and does not match a zone-less rule
+	// (rules cannot carry a zone). When empty, the rule matches any host.
+	// See ValidateTargetRule for the accepted forms (bare "*", "host:port",
+	// URLs and wildcards over IP literals are rejected).
 	Hostname string `json:"hostname"`
 
 	// Ports restricts the rule to specific port numbers.
 	// When nil or empty, all ports are matched.
 	Ports []int `json:"ports,omitempty"`
 
-	// PathPrefix matches the beginning of the request URL path (case-sensitive).
-	// When empty, all paths are matched.
+	// PathPrefix matches the beginning of the request URL path with a
+	// literal, case-sensitive prefix comparison — not a glob. It must start
+	// with "/" and contain no "*", "?" or "#"; ValidateTargetRule rejects
+	// anything else at load. When empty, all paths are matched.
 	PathPrefix string `json:"path_prefix,omitempty"`
 
 	// Schemes restricts the rule by transport confidentiality: "http"

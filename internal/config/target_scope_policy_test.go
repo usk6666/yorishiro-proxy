@@ -60,6 +60,28 @@ func policyRejectCases() []policyRejectCase {
 			[]string{"denies[0]", `hostname "["`}},
 		{"wildcard over bare ipv6", `{"denies":[{"hostname":"*.fd00::1"}]}`,
 			[]string{"denies[0]", `hostname "*.fd00::1"`, "wildcard is not allowed on an IP literal"}},
+		// USK-1129: a wildcard over a bracketed IPv6 or an IPv4 literal can
+		// never match either: no host ends with ".[::1]" or ".10.0.0.1".
+		{"wildcard over bracketed ipv6", `{"denies":[{"hostname":"*.[::1]"}]}`,
+			[]string{"denies[0]", `hostname "*.[::1]"`, "wildcard is not allowed on an IP literal"}},
+		{"wildcard over ipv4", `{"denies":[{"hostname":"*.10.0.0.1"}]}`,
+			[]string{"denies[0]", `hostname "*.10.0.0.1"`, "wildcard is not allowed on an IP literal"}},
+		// --- path_prefix forms that never match data-path traffic (USK-1129) ---
+		// Data-path paths start with "/" (origin- and absolute-form), are
+		// split at "?" and carry no fragment, and the match is a literal
+		// strings.HasPrefix — so these rules are silently ineffective.
+		{"path_prefix without leading slash", `{"denies":[{"hostname":"a.test","path_prefix":"admin"}]}`,
+			[]string{"denies[0]", `path_prefix "admin" must start with "/"`, `"/admin"`}},
+		{"path_prefix bare star", `{"denies":[{"path_prefix":"*"}]}`,
+			[]string{"denies[0]", `path_prefix "*"`, "literal prefix match"}},
+		{"path_prefix trailing star", `{"allows":[{"hostname":"a.test","path_prefix":"/api/*"}]}`,
+			[]string{"allows[0]", `path_prefix "/api/*"`, "literal prefix match", `drop the trailing "*"`, `"/api/"`}},
+		{"path_prefix mid-path star", `{"denies":[{"hostname":"a.test","path_prefix":"/a/*/b"}]}`,
+			[]string{"denies[0]", `path_prefix "/a/*/b"`, "literal prefix match"}},
+		{"path_prefix with query", `{"denies":[{"hostname":"a.test","path_prefix":"/search?q="}]}`,
+			[]string{"denies[0]", `path_prefix "/search?q="`, "query/fragment is not part of the path"}},
+		{"path_prefix with fragment", `{"denies":[{"hostname":"a.test","path_prefix":"/x#y"}]}`,
+			[]string{"denies[0]", `path_prefix "/x#y"`, "query/fragment is not part of the path"}},
 		// --- ports outside 1-65535 ---
 		{"port zero", `{"denies":[{"hostname":"a.test","ports":[0]}]}`,
 			[]string{"denies[0]", "port 0 is out of range (1-65535)"}},
@@ -196,11 +218,17 @@ func TestLoadPolicyFile_StrictDecoding(t *testing.T) {
 
 // TestLoadPolicyFile_AcceptsWorkingForms is a guard (T7 at the config seam):
 // every form here matches a data-path host today and must keep loading.
+//
+// The {path_prefix: "/v2/"} allow is a well-formed rule, but as an ALLOW it
+// takes effect only for checks that carry a path (MCP URL checks and the
+// per-request HTTPScopeStep); the connection-level gates pass an empty path
+// and so do not match it (USK-1130). It is listed here for its syntax only.
 func TestLoadPolicyFile_AcceptsWorkingForms(t *testing.T) {
 	body := `{
 		"allows": [
 			{"hostname": "*.example.com", "ports": [1, 443, 65535]},
-			{"hostname": "api.staging.test", "path_prefix": "/v2/", "schemes": ["https"]}
+			{"hostname": "api.staging.test", "path_prefix": "/v2/", "schemes": ["https"]},
+			{"hostname": "api.staging.test", "path_prefix": "/"}
 		],
 		"denies": [
 			{"hostname": "fd00:ec2::254"},
@@ -212,7 +240,8 @@ func TestLoadPolicyFile_AcceptsWorkingForms(t *testing.T) {
 			{"hostname": "Mixed-Case.Example.COM"},
 			{"hostname": "x.test", "schemes": []},
 			{"hostname": "y.test", "schemes": ["HTTP", "Https"]},
-			{"ports": [22]}
+			{"ports": [22]},
+			{"hostname": "z.test", "path_prefix": "/admin"}
 		]
 	}`
 	policy, err := LoadPolicyFile(writePolicyFile(t, body))
@@ -283,17 +312,82 @@ func TestValidateTargetRule(t *testing.T) {
 		{"port above max", "example.com", []int{99999}, nil, "port 99999 is out of range (1-65535)"},
 		{"ftp scheme", "example.com", nil, []string{"ftp"}, `scheme "ftp" is not allowed (use http or https)`},
 		{"empty scheme", "example.com", nil, []string{""}, "omit schemes to match both"},
+		// USK-1129: a wildcard over a bracketed IPv6 or an IPv4 literal can
+		// never match: no host ends with ".[::1]" or ".10.0.0.1".
+		{"wildcard over bracketed ipv6", "*.[::1]", nil, nil, "wildcard is not allowed on an IP literal"},
+		{"wildcard over ipv4", "*.10.0.0.1", nil, nil, "wildcard is not allowed on an IP literal"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			err := ValidateTargetRule(tc.hostname, tc.ports, tc.schemes)
+			rule := TargetRuleConfig{Hostname: tc.hostname, Ports: tc.ports, Schemes: tc.schemes}
+			err := ValidateTargetRule(rule)
 			if tc.wantErr == "" {
 				if err != nil {
-					t.Fatalf("ValidateTargetRule(%q, %v, %q) = %v, want nil", tc.hostname, tc.ports, tc.schemes, err)
+					t.Fatalf("ValidateTargetRule(%+v) = %v, want nil", rule, err)
 				}
 				return
 			}
 			assertErrContains(t, err, tc.wantErr)
+		})
+	}
+}
+
+// TestValidateTargetRule_PathPrefix is USK-1129 T6 at the core. A data-path
+// request path always starts with "/" (origin- and absolute-form; HTTP/2
+// :path likewise), is split at "?" before matching and carries no fragment,
+// and matchTargetRule compares with a literal, case-sensitive
+// strings.HasPrefix. A path_prefix that breaks any of those can never match
+// normal traffic — for a deny that is fail-open — so the core rejects it
+// with a hint instead of rewriting it. Glob-looking "*" is rejected rather
+// than supported (user decision 2026-10-15): the match is already a prefix
+// match, so "/api/*" was always a misreading of "/api/".
+func TestValidateTargetRule_PathPrefix(t *testing.T) {
+	tests := []struct {
+		name       string
+		hostname   string
+		pathPrefix string
+		wantErr    []string // nil = accept
+	}{
+		// accepted: literal paths from "/"
+		{"empty (all paths)", "example.com", "", nil},
+		{"root", "example.com", "/", nil},
+		{"admin", "example.com", "/admin", nil},
+		{"trailing slash", "example.com", "/api/", nil},
+		{"percent-encoded byte", "example.com", "/a%20b", nil},
+		{"on empty hostname", "", "/internal/", nil},
+		// rejected: no leading slash
+		{"no leading slash", "example.com", "admin",
+			[]string{`path_prefix "admin" must start with "/" (e.g. "/admin")`}},
+		{"no leading slash nested", "example.com", "api/v2",
+			[]string{`path_prefix "api/v2" must start with "/" (e.g. "/api/v2")`}},
+		// rejected: glob misreadings
+		{"bare star", "example.com", "*",
+			[]string{`path_prefix "*"`, "literal prefix match"}},
+		{"trailing star", "example.com", "/api/*",
+			[]string{`path_prefix "/api/*"`, "literal prefix match", `drop the trailing "*" (e.g. "/api/*" -> "/api/")`}},
+		{"double trailing star", "example.com", "/api/**",
+			[]string{`path_prefix "/api/**"`, "literal prefix match"}},
+		{"mid-path star", "example.com", "/a/*/b",
+			[]string{`path_prefix "/a/*/b"`, "literal prefix match"}},
+		{"star without slash", "example.com", "admin*",
+			[]string{`path_prefix "admin*"`}},
+		// rejected: query / fragment
+		{"query", "example.com", "/search?q=",
+			[]string{`path_prefix "/search?q="`, "query/fragment is not part of the path"}},
+		{"fragment", "example.com", "/x#y",
+			[]string{`path_prefix "/x#y"`, "query/fragment is not part of the path"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rule := TargetRuleConfig{Hostname: tc.hostname, PathPrefix: tc.pathPrefix}
+			err := ValidateTargetRule(rule)
+			if tc.wantErr == nil {
+				if err != nil {
+					t.Fatalf("ValidateTargetRule(%+v) = %v, want nil", rule, err)
+				}
+				return
+			}
+			assertErrContains(t, err, tc.wantErr...)
 		})
 	}
 }

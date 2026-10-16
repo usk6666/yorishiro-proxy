@@ -1227,30 +1227,9 @@ func TestSecurity_NoPolicyBackwardCompat(t *testing.T) {
 	}
 }
 
-// Test helper functions.
-func TestMatchHostnameLocal(t *testing.T) {
-	tests := []struct {
-		pattern  string
-		hostname string
-		want     bool
-	}{
-		{"example.com", "example.com", true},
-		{"example.com", "Example.COM", true},
-		{"example.com", "other.com", false},
-		{"*.example.com", "sub.example.com", true},
-		{"*.example.com", "deep.sub.example.com", true},
-		{"*.example.com", "example.com", false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.pattern+"_"+tt.hostname, func(t *testing.T) {
-			got := matchHostnameLocal(tt.pattern, tt.hostname)
-			if got != tt.want {
-				t.Errorf("matchHostnameLocal(%q, %q) = %v, want %v", tt.pattern, tt.hostname, got, tt.want)
-			}
-		})
-	}
-}
+// TestMatchHostnameLocal was removed with matchHostnameLocal (USK-1129):
+// test_target now uses connector.MatchTargetRule, whose hostname matching is
+// covered in internal/connector (scope_test.go, scope_rule_forms_test.go).
 
 func TestTargetDefaultPort(t *testing.T) {
 	tests := []struct {
@@ -1606,60 +1585,10 @@ func TestValidateNotPolicyDenies(t *testing.T) {
 	}
 }
 
-func TestTargetRuleMatchesLocal(t *testing.T) {
-	tests := []struct {
-		name string
-		a    connector.TargetRule
-		b    connector.TargetRule
-		want bool
-	}{
-		{
-			name: "exact match",
-			a:    connector.TargetRule{Hostname: "example.com"},
-			b:    connector.TargetRule{Hostname: "example.com"},
-			want: true,
-		},
-		{
-			name: "case insensitive hostname",
-			a:    connector.TargetRule{Hostname: "Example.COM"},
-			b:    connector.TargetRule{Hostname: "example.com"},
-			want: true,
-		},
-		{
-			name: "different hostname",
-			a:    connector.TargetRule{Hostname: "a.com"},
-			b:    connector.TargetRule{Hostname: "b.com"},
-			want: false,
-		},
-		{
-			name: "with matching ports",
-			a:    connector.TargetRule{Hostname: "a.com", Ports: []int{80, 443}},
-			b:    connector.TargetRule{Hostname: "a.com", Ports: []int{80, 443}},
-			want: true,
-		},
-		{
-			name: "different ports",
-			a:    connector.TargetRule{Hostname: "a.com", Ports: []int{80}},
-			b:    connector.TargetRule{Hostname: "a.com", Ports: []int{443}},
-			want: false,
-		},
-		{
-			name: "with matching schemes",
-			a:    connector.TargetRule{Hostname: "a.com", Schemes: []string{"HTTPS"}},
-			b:    connector.TargetRule{Hostname: "a.com", Schemes: []string{"https"}},
-			want: true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := targetRuleMatchesLocal(tt.a, tt.b)
-			if got != tt.want {
-				t.Errorf("targetRuleMatchesLocal() = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
+// TestTargetRuleMatchesLocal was removed with targetRuleMatchesLocal
+// (USK-1129): validateNotPolicyDenies now uses connector.TargetRuleEqual,
+// covered by internal/connector TestTargetRuleEqual and
+// TestTargetRuleEqual_IPv6Spellings.
 
 // TestSecurity_SetTargetScope_AcceptsBareIPv6AndUnderscore is USK-1084 T10:
 // the Agent layer now delegates per-rule syntax to the shared config core,

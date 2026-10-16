@@ -16,10 +16,12 @@ var targetRuleSchemes = map[string]bool{
 	"https": true,
 }
 
-// ValidateTargetRule validates one target scope rule's hostname, ports and
-// schemes. It is the per-rule core shared by both TargetScope layers: the
-// Policy layer (TargetScopePolicyConfig.Validate) and the Agent layer (the
-// MCP `security` tool, which adds its own "hostname is required" check).
+// ValidateTargetRule validates one target scope rule's hostname, ports,
+// path_prefix and schemes. It is the per-rule core shared by both
+// TargetScope layers: the Policy layer (TargetScopePolicyConfig.Validate) and
+// the Agent layer (the MCP `security` tool, which adds its own "hostname is
+// required" check). Remove operations on the Agent layer deliberately skip
+// it, so a stale rule can always be removed.
 //
 // The rule it enforces: reject what is outside the closed scheme vocabulary
 // or can never equal a data-path target, never reject a form that matches
@@ -30,12 +32,15 @@ var targetRuleSchemes = map[string]bool{
 //
 //   - hostname "" is accepted (the rule matches any host). Otherwise it must
 //     be an exact name, a "*.domain" wildcard, an IPv4 literal, or an IPv6
-//     literal, bare ("fd00:ec2::254") or bracketed ("[::1]"). Data-path gates
-//     pass hosts unbracketed (net.SplitHostPort / url.Hostname), so only the
-//     bare form matches today; the bracketed form stays accepted on both
-//     layers and its matching is a separate fix. A wildcard over a bare IPv6
-//     literal ("*.::1") is rejected: no host ends with ".::1". Labels may
-//     contain letters, digits, '-' and '_'.
+//     literal, bare ("fd00:ec2::254") or bracketed ("[::1]"). The two IPv6
+//     spellings are equivalent: connector compares hosts on a canonical form
+//     (one enclosing bracket pair stripped, IPv6 in its RFC 5952 text form),
+//     so "[::1]", "::1" and "0:0::1" are the same rule and match the same
+//     targets (USK-1129). A zone-qualified target such as "[fe80::1%eth0]"
+//     keeps its zone and does not match a zone-less rule (rules cannot carry
+//     a zone; see USK-1132). A wildcard over an IP literal ("*.::1",
+//     "*.[::1]", "*.10.0.0.1") is rejected: no host ends with ".::1".
+//     Labels may contain letters, digits, '-' and '_'.
 //   - a trailing-dot hostname ("internal.corp.") is rejected. The data path
 //     does not strip the trailing dot, so such a rule matches only targets
 //     spelled as an FQDN ("CONNECT internal.corp.:443") and misses the usual
@@ -43,22 +48,27 @@ var targetRuleSchemes = map[string]bool{
 //     fails closed: startup (or the security tool call) refuses loudly
 //     instead of installing a rule that covers less than it appears to.
 //   - ports must be in 1-65535.
+//   - path_prefix "" is accepted (all paths). Otherwise it must start with
+//     "/" and contain no "*", "?" or "#" (see validatePathPrefix).
 //   - schemes must be http or https in any case; "" is rejected (omitting
 //     schemes already matches both).
 //
 // Errors carry no location prefix; callers add one ("denies[0]: ...").
-func ValidateTargetRule(hostname string, ports []int, schemes []string) error {
-	if hostname != "" {
-		if err := validateTargetHostname(hostname); err != nil {
+func ValidateTargetRule(r TargetRuleConfig) error {
+	if r.Hostname != "" {
+		if err := validateTargetHostname(r.Hostname); err != nil {
 			return err
 		}
 	}
-	for _, p := range ports {
+	if err := validatePathPrefix(r.PathPrefix); err != nil {
+		return err
+	}
+	for _, p := range r.Ports {
 		if p < 1 || p > 65535 {
 			return fmt.Errorf("port %d is out of range (1-65535)", p)
 		}
 	}
-	for _, s := range schemes {
+	for _, s := range r.Schemes {
 		if s == "" {
 			return fmt.Errorf("scheme %q is not allowed (use http or https; omit schemes to match both)", s)
 		}
@@ -96,6 +106,10 @@ func validateTargetHostname(hostname string) error {
 		if net.ParseIP(h[1:len(h)-1]) == nil {
 			return fmt.Errorf("hostname %q: invalid IPv6 address", hostname)
 		}
+		if wildcard {
+			// No host ends with ".[::1]", so the rule could never match.
+			return fmt.Errorf("hostname %q: wildcard is not allowed on an IP literal", hostname)
+		}
 		return nil
 	}
 
@@ -113,10 +127,63 @@ func validateTargetHostname(hostname string) error {
 		if net.ParseIP(h) == nil {
 			return fmt.Errorf("hostname %q: invalid IPv4 address", hostname)
 		}
+		if wildcard {
+			// A host ending in ".10.0.0.1" is not a name any client
+			// resolves (an all-numeric final label is parsed as IPv4), so
+			// the rule could never match a real target.
+			return fmt.Errorf("hostname %q: wildcard is not allowed on an IP literal", hostname)
+		}
 		return nil
 	}
 
 	return validateDomainName(h, hostname)
+}
+
+// validatePathPrefix checks a target rule path_prefix. "" (all paths) is
+// accepted. connector.matchTargetRule compares it with a literal,
+// case-sensitive strings.HasPrefix against the request path, and every
+// request path the data path produces for normal traffic starts with "/"
+// (origin-form, absolute-form and HTTP/2 :path alike), is already split at
+// "?" and never carries a fragment. A prefix that breaks any of those can
+// never match, which for a deny is fail-open, so it is rejected with a hint
+// rather than rewritten:
+//
+//   - "*" anywhere: path_prefix is already a prefix match, so "/api/*" is a
+//     glob misreading of "/api/". Glob and regex are deliberately not
+//     supported. Checked first so "*" gets this hint rather than the
+//     leading-"/" one.
+//   - "?" or "#": the query and fragment are not part of the matched path.
+//   - no leading "/": "admin" never matches "/admin". "OPTIONS *" (path
+//     "*") is not carved out; a rule for it would be a deny on a probe.
+func validatePathPrefix(p string) error {
+	if p == "" {
+		return nil
+	}
+	if strings.ContainsAny(p, "?#") {
+		return fmt.Errorf("path_prefix %q: query/fragment is not part of the path; use the path only", p)
+	}
+	if i := strings.IndexByte(p, '*'); i >= 0 {
+		trimmed := strings.TrimRight(p, "*")
+		if strings.Contains(trimmed, "*") {
+			return fmt.Errorf("path_prefix %q: path_prefix is a literal prefix match and \"*\" is not a wildcard; use the literal prefix before it (e.g. %q)", p, withLeadingSlash(p[:i]))
+		}
+		if trimmed == "" {
+			return fmt.Errorf("path_prefix %q: path_prefix is a literal prefix match; drop the trailing \"*\" (omit path_prefix to match every path)", p)
+		}
+		return fmt.Errorf("path_prefix %q: path_prefix is a literal prefix match; drop the trailing \"*\" (e.g. %q -> %q)", p, p, withLeadingSlash(trimmed))
+	}
+	if !strings.HasPrefix(p, "/") {
+		return fmt.Errorf("path_prefix %q must start with \"/\" (e.g. %q)", p, withLeadingSlash(p))
+	}
+	return nil
+}
+
+// withLeadingSlash returns p with a leading "/" for use in an error hint.
+func withLeadingSlash(p string) string {
+	if strings.HasPrefix(p, "/") {
+		return p
+	}
+	return "/" + p
 }
 
 // isIPv4Like reports whether s looks like an IPv4 address (digits and dots only).
@@ -183,12 +250,12 @@ func (p *TargetScopePolicyConfig) Validate() error {
 		return nil
 	}
 	for i, r := range p.Allows {
-		if err := ValidateTargetRule(r.Hostname, r.Ports, r.Schemes); err != nil {
+		if err := ValidateTargetRule(r); err != nil {
 			return fmt.Errorf("allows[%d]: %w", i, err)
 		}
 	}
 	for i, r := range p.Denies {
-		if err := ValidateTargetRule(r.Hostname, r.Ports, r.Schemes); err != nil {
+		if err := ValidateTargetRule(r); err != nil {
 			return fmt.Errorf("denies[%d]: %w", i, err)
 		}
 	}
