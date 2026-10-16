@@ -111,6 +111,24 @@ type refusingH2Origin struct {
 
 func startRefusingH2Origin(t *testing.T, mode refusingOriginMode, batch int) *refusingH2Origin {
 	t.Helper()
+	ln := listenTLSH2Origin(t)
+	o := &refusingH2Origin{
+		addr:          ln.Addr().String(),
+		ln:            ln,
+		mode:          mode,
+		batch:         batch,
+		refused:       make(map[uint32]bool),
+		firstConnDone: make(chan struct{}),
+	}
+	go o.acceptLoop()
+	t.Cleanup(o.close)
+	return o
+}
+
+// listenTLSH2Origin returns a TLS listener on 127.0.0.1 with a self-signed
+// localhost certificate that negotiates only h2.
+func listenTLSH2Origin(t *testing.T) net.Listener {
+	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatal(err)
@@ -139,17 +157,7 @@ func startRefusingH2Origin(t *testing.T, mode refusingOriginMode, batch int) *re
 	if err != nil {
 		t.Fatal(err)
 	}
-	o := &refusingH2Origin{
-		addr:          ln.Addr().String(),
-		ln:            ln,
-		mode:          mode,
-		batch:         batch,
-		refused:       make(map[uint32]bool),
-		firstConnDone: make(chan struct{}),
-	}
-	go o.acceptLoop()
-	t.Cleanup(o.close)
-	return o
+	return ln
 }
 
 func (o *refusingH2Origin) acceptLoop() {

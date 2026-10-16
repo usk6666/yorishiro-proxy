@@ -65,63 +65,177 @@ func TestReader_SettingsAck(t *testing.T) {
 	t.Fatal("did not receive SETTINGS ACK")
 }
 
+// TestReader_GoAwayMarksStreams pins the ClientRole half of RFC 9113 §6.8:
+// an upstream GOAWAY whose last_stream_id is below a stream the proxy
+// opened means the upstream never processed it, so the stream fails as
+// refused.
+//
+// USK-1174: this test used to drive a ServerRole Layer and assert that a
+// *client's* GOAWAY(0) failed the client's own stream as refused — which
+// pinned the bug. The ServerRole half is now the inverted
+// TestReader_GoAwayFromClient_PeerStreamsUnaffected.
 func TestReader_GoAwayMarksStreams(t *testing.T) {
-	l, peer, cleanup := startServerLayer(t)
+	l, peer, cleanup := startClientLayer(t)
 	defer cleanup()
 	peer.consumePeerSettings(t)
-	peer.sendInitialSettings(t)
-	peer.expectSettingsAck(t)
 
-	// Open a peer-initiated stream (id=1) and grab the channel.
-	headers := []hpack.HeaderField{
-		{Name: ":method", Value: "GET"},
-		{Name: ":scheme", Value: "https"},
-		{Name: ":authority", Value: "x"},
-		{Name: ":path", Value: "/"},
-	}
-	encoded := peer.encoder.Encode(headers)
-	if err := peer.wr.WriteHeaders(1, false, true, encoded); err != nil {
-		t.Fatalf("write HEADERS: %v", err)
+	ch, id := openClientGET(t, l, peer)
+	if id != 1 {
+		t.Fatalf("first client stream id = %d, want 1", id)
 	}
 
-	var ch layer.Channel
-	select {
-	case ch = <-l.Channels():
-	case <-time.After(time.Second):
-		t.Fatal("no channel emitted")
-	}
-
-	// Drain the in-flight envelope (no body yet, but headers without
-	// END_STREAM means we'll hold).
-	// Actually with no END_STREAM, no envelope is yielded yet.
-
-	// Send GOAWAY with last_stream_id=0 — this stream (1) is > 0, so it
-	// should fail.
+	// last_stream_id=0: stream 1 (> 0) was never processed upstream.
 	if err := peer.wr.WriteGoAway(0, ErrCodeNo, nil); err != nil {
 		t.Fatalf("write GOAWAY: %v", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	// USK-637: post-split, the initial HEADERS emits an H2HeadersEvent
-	// envelope even without END_STREAM. Drain it; the GOAWAY that follows
-	// surfaces on the channel's error path.
-	env, err := ch.Next(ctx)
-	if err == nil {
-		if _, ok := env.Message.(*H2HeadersEvent); !ok {
-			t.Fatalf("first envelope Message = %T, want *H2HeadersEvent", env.Message)
-		}
-		_, err = ch.Next(ctx)
-	}
-	if err == nil {
-		t.Fatal("Next: want error after GOAWAY, got nil")
-	}
+	err := nextUntilError(t, ch)
 	var se *layer.StreamError
 	if !errors.As(err, &se) {
 		t.Fatalf("Next: want *layer.StreamError, got %T (%v)", err, err)
 	}
 	if se.Code != layer.ErrorRefused {
 		t.Errorf("StreamError code = %s, want refused", se.Code)
+	}
+}
+
+// TestReader_GoAwayFromClient_PeerStreamsUnaffected is the ServerRole half
+// of RFC 9113 §6.8 (USK-1174): a GOAWAY's last_stream_id names the highest
+// stream *initiated by the GOAWAY's receiver*. A client GOAWAY received by
+// the proxy's ServerRole Layer therefore says nothing about the streams the
+// client itself opened; a browser draining with GOAWAY(0) still expects
+// the in-flight responses. The stream must stay open and a response sent
+// afterwards must reach the client intact.
+func TestReader_GoAwayFromClient_PeerStreamsUnaffected(t *testing.T) {
+	l, peer, cleanup := startServerLayer(t)
+	defer cleanup()
+	ch := acceptServerStream(t, l, peer)
+
+	if err := peer.wr.WriteGoAway(0, ErrCodeNo, nil); err != nil {
+		t.Fatalf("write GOAWAY: %v", err)
+	}
+	syncPing(t, peer)
+
+	select {
+	case <-ch.Closed():
+		t.Fatalf("client-opened stream terminated by the client's own GOAWAY(0): Err = %v", ch.Err())
+	default:
+	}
+	if err := ch.Err(); err != nil {
+		t.Fatalf("Err after client GOAWAY = %v, want nil", err)
+	}
+
+	sendErr := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if err := ch.Send(ctx, &envelope.Envelope{
+			Direction: envelope.Receive,
+			Protocol:  envelope.ProtocolHTTP,
+			Message:   &H2HeadersEvent{Status: 200},
+		}); err != nil {
+			sendErr <- err
+			return
+		}
+		sendErr <- ch.Send(ctx, &envelope.Envelope{
+			Direction: envelope.Receive,
+			Protocol:  envelope.ProtocolHTTP,
+			Message:   &H2DataEvent{Payload: []byte("ok"), EndStream: true},
+		})
+	}()
+
+	var sawHeaders, sawEnd bool
+	var body []byte
+	deadline := time.Now().Add(2 * time.Second)
+	for !sawEnd && time.Now().Before(deadline) {
+		f, err := peer.rd.ReadFrame()
+		if err != nil {
+			t.Fatalf("ReadFrame: %v", err)
+		}
+		if f.Header.StreamID != 1 {
+			continue
+		}
+		switch f.Header.Type {
+		case frame.TypeHeaders:
+			sawHeaders = true
+		case frame.TypeData:
+			p, _ := f.DataPayload()
+			body = append(body, p...)
+			sawEnd = f.Header.Flags.Has(frame.FlagEndStream)
+		case frame.TypeRSTStream:
+			code, _ := f.RSTStreamErrorCode()
+			t.Fatalf("RST_STREAM(%s) on stream 1 after client GOAWAY, want the response", ErrCodeString(code))
+		}
+	}
+	if err := <-sendErr; err != nil {
+		t.Fatalf("Send response: %v", err)
+	}
+	if !sawHeaders || !sawEnd || string(body) != "ok" {
+		t.Errorf("response on stream 1: headers=%v end_stream=%v body=%q, want headers, END_STREAM, %q", sawHeaders, sawEnd, body, "ok")
+	}
+}
+
+// syncPing round-trips a PING so every frame the peer wrote before it has
+// been processed by the Layer's reader (frames are handled in order).
+func syncPing(t *testing.T, peer *h2Peer) {
+	t.Helper()
+	data := [8]byte{'s', 'y', 'n', 'c'}
+	if err := peer.wr.WritePing(false, data); err != nil {
+		t.Fatalf("write PING: %v", err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		f, err := peer.rd.ReadFrame()
+		if err != nil {
+			t.Fatalf("ReadFrame (PING ACK): %v", err)
+		}
+		if f.Header.Type == frame.TypePing && f.Header.Flags.Has(frame.FlagAck) {
+			if got, _ := f.PingData(); got == data {
+				return
+			}
+		}
+	}
+	t.Fatal("did not receive PING ACK")
+}
+
+// TestReader_GoAwayFromUpstream_StreamAtOrBelowLastSurvives pins that an
+// upstream GOAWAY only fails the proxy-opened streams ABOVE last_stream_id
+// (RFC 9113 §6.8): with streams 1 and 3 open, GOAWAY(1) refuses 3 while 1
+// still receives its response.
+func TestReader_GoAwayFromUpstream_StreamAtOrBelowLastSurvives(t *testing.T) {
+	l, peer, cleanup := startClientLayer(t)
+	defer cleanup()
+	peer.consumePeerSettings(t)
+
+	ch1, id1 := openClientGET(t, l, peer)
+	ch3, id3 := openClientGET(t, l, peer)
+	if id1 != 1 || id3 != 3 {
+		t.Fatalf("client stream ids = %d, %d; want 1, 3", id1, id3)
+	}
+
+	if err := peer.wr.WriteGoAway(1, ErrCodeNo, nil); err != nil {
+		t.Fatalf("write GOAWAY: %v", err)
+	}
+	enc := peer.encoder.Encode([]hpack.HeaderField{{Name: ":status", Value: "200"}})
+	if err := peer.wr.WriteHeaders(1, true, true, enc); err != nil {
+		t.Fatalf("write response HEADERS: %v", err)
+	}
+
+	err := nextUntilError(t, ch3)
+	var se *layer.StreamError
+	if !errors.As(err, &se) || se.Code != layer.ErrorRefused {
+		t.Errorf("stream 3 Next err = %v, want StreamError{refused}", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	env, err := ch1.Next(ctx)
+	if err != nil {
+		t.Fatalf("stream 1 Next: %v, want the response HEADERS", err)
+	}
+	evt, ok := env.Message.(*H2HeadersEvent)
+	if !ok || evt.Status != 200 {
+		t.Errorf("stream 1 first envelope = %T %+v, want *H2HeadersEvent{Status:200}", env.Message, env.Message)
 	}
 }
 
