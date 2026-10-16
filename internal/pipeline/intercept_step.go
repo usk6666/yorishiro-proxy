@@ -30,6 +30,8 @@ type InterceptStep struct {
 	queue       *common.HoldQueue
 	safety      *SafetyStep
 	holdTracker *common.HoldTracker
+	hostScope   *HostScopeStep
+	httpScope   *HTTPScopeStep
 	logger      *slog.Logger
 }
 
@@ -70,6 +72,15 @@ func NewInterceptStep(
 // work unchanged. Returns the receiver for fluent construction.
 func (s *InterceptStep) WithHoldTracker(t *common.HoldTracker) *InterceptStep {
 	s.holdTracker = t
+	return s
+}
+
+// WithScopeRecheck wires the scope Steps that are re-run against the
+// envelope about to be forwarded when a hold is released (USK-1159).
+// Returns the receiver for fluent construction.
+func (s *InterceptStep) WithScopeRecheck(host *HostScopeStep, http *HTTPScopeStep) *InterceptStep {
+	s.hostScope = host
+	s.httpScope = http
 	return s
 }
 
