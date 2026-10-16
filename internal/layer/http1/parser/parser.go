@@ -250,6 +250,19 @@ func capInt(n int64) int {
 	return int(n)
 }
 
+// ParseRequestLine reads only the request line from r and splits it into
+// method, request-target, and HTTP-version exactly as observed on the wire.
+// No headers are read. It shares the line reader and splitting rules with
+// ParseRequest, including the request-line length limit and best-effort
+// handling of a partial line (EOF or deadline before the terminator).
+//
+// Callers that must bound the read more tightly than the request-line limit
+// (e.g. the connector's capacity-rejection path) wrap r around an
+// io.LimitReader.
+func ParseRequestLine(r *bufio.Reader) (method, requestTarget, proto string, err error) {
+	return "", "", "", errors.New("not implemented")
+}
+
 // parseRequestLine reads the request line (e.g., "GET /path HTTP/1.1\r\n").
 func parseRequestLine(r *bufio.Reader, cw rawSink) (method, requestURI, proto string, err error) {
 	line, err := readLine(r, cw, maxRequestLineSize)

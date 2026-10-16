@@ -74,6 +74,11 @@ type FullListenerConfig struct {
 	OnHTTP1   HandlerFunc
 	OnHTTP2   HandlerFunc
 	OnTCP     HandlerFunc
+
+	// OnReject, when non-nil, is called once per connection refused
+	// because MaxConnections was saturated (USK-1142). It runs on the
+	// reject goroutine and must be O(1), non-blocking, and I/O-free.
+	OnReject func(RejectInfo)
 }
 
 // FullListener accepts TCP connections, performs two-stage protocol detection,
@@ -95,6 +100,10 @@ type FullListener struct {
 	onHTTP1   HandlerFunc
 	onHTTP2   HandlerFunc
 	onTCP     HandlerFunc
+
+	// now is the clock used for rejection timestamps and the Warn
+	// rate limiter. Overridable in tests.
+	now func() time.Time
 
 	mu       sync.Mutex
 	listener net.Listener
@@ -136,6 +145,7 @@ func NewFullListener(cfg FullListenerConfig) *FullListener {
 		onHTTP1:        cfg.OnHTTP1,
 		onHTTP2:        cfg.OnHTTP2,
 		onTCP:          cfg.OnTCP,
+		now:            time.Now,
 		ready:          make(chan struct{}),
 	}
 	fl.peekTimeoutNs.Store(int64(peekTimeout))

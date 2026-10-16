@@ -90,6 +90,13 @@ type ManagerConfig struct {
 	// working snapshot accessor; they just won't see counters from any
 	// listener built via a Deps that omitted the matching field.
 	H2UpstreamMetrics *H2UpstreamMetrics
+
+	// ConnectionRejections is the Manager-level capacity-rejection
+	// aggregator (USK-1142). Production wiring shares the same pointer
+	// with every Deps.ConnectionRejections so FullListener rejections and
+	// TCP forward rejections land in one status view. nil constructs a
+	// count-only aggregator (no flow recording).
+	ConnectionRejections *ConnectionRejections
 }
 
 // Manager orchestrates one or more named live Stacks. It exposes
@@ -196,6 +203,13 @@ func NewManager(cfg ManagerConfig) (*Manager, error) {
 		h1Upstream: h1Metrics,
 		h2Upstream: h2Metrics,
 	}, nil
+}
+
+// ConnectionRejections returns a snapshot of the capacity-rejection
+// aggregate (USK-1142) surfaced by query(resource:"status") as
+// `connection_rejections`.
+func (m *Manager) ConnectionRejections() ConnectionRejectionsSnapshot {
+	return ConnectionRejectionsSnapshot{}
 }
 
 // H1UpstreamMetrics returns a snapshot of the USK-998 / USK-999 /

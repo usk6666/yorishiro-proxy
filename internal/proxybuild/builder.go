@@ -253,6 +253,15 @@ type Deps struct {
 	// per-CONNECT chains under one Manager share the counter set.
 	H1UpstreamMetrics *H1UpstreamMetrics
 
+	// ConnectionRejections is the Manager-level aggregator of connections
+	// refused because max_connections was saturated (USK-1142). When
+	// non-nil, BuildLiveStack wires its Record method into the
+	// FullListener's OnReject. The production wiring constructs one
+	// instance and shares it with ManagerConfig.ConnectionRejections so
+	// the status accessor reports what the listener produced. nil keeps
+	// the pre-USK-1142 behaviour (log only).
+	ConnectionRejections *ConnectionRejections
+
 	// H2UpstreamMetrics aggregates USK-991 (reactive redial) + USK-992
 	// (pre-warm) + USK-993 (Refused retry) + USK-1001 HTTP/2 upstream
 	// counters. nil-safe — every emit point inside redialChain /
