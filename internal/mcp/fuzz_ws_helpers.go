@@ -1013,6 +1013,16 @@ func (s *Server) runFuzzWSSingleVariant(ctx context.Context, plan *fuzzWSPlan, p
 
 	row.StreamID = variantPlan.streamID
 
+	// USK-1158: per-variant TargetScope re-check (upgrade URL + dial
+	// target), Scope → Safety like the Pipeline. The engine is live, so a
+	// policy reload or an agent `security` change since the plan-time
+	// check applies to every variant not yet sent. Recorded exactly like a
+	// safety violation below.
+	if err := s.checkResendWSScope(variantPlan); err != nil {
+		row.Error = err.Error()
+		return row, false, nil
+	}
+
 	// SafetyFilter input gating after position application, before
 	// dial. Mirrors fuzz_http per-variant semantics.
 	if v := s.checkSafetyInput(variantPlan.payload, variantPlan.upgradeURL.String(), variantPlan.upgradeHeaders); v != nil {

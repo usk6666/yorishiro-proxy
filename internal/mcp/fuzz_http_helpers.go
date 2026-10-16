@@ -1144,7 +1144,9 @@ func (s *Server) buildFuzzHTTPPipeline(encoders *pipeline.WireEncoderRegistry) *
 // Per-variant SafetyFilter input gating runs after position application
 // and before the upstream dial. On a violation the variant is recorded
 // with row.Error set and returns statusCode=0 — the caller continues
-// iterating; a single blocked variant does not abort the whole run.
+// iterating; a single blocked variant does not abort the whole run. A
+// per-variant TargetScope re-check (checkFuzzHTTPVariantScope, USK-1158)
+// runs just before it with the same recording semantics.
 func (s *Server) runFuzzHTTPSingleVariant(ctx context.Context, plan *fuzzHTTPPlan, p *pipeline.Pipeline, dial session.DialFunc, timeout time.Duration, variantIdx int, payloads map[string]string, tag string, kvStore map[string]string) (fuzzHTTPVariantRow, int, error) {
 	row := fuzzHTTPVariantRow{
 		Index:    variantIdx,
@@ -1181,12 +1183,19 @@ func (s *Server) runFuzzHTTPSingleVariant(ctx context.Context, plan *fuzzHTTPPla
 		}
 	}
 
+	// USK-1158: per-variant TargetScope re-check, Scope → Safety like the
+	// Pipeline. Recorded exactly like a safety violation below.
+	row.StreamID = variantEnv.StreamID
+	if err := s.checkFuzzHTTPVariantScope(plan, variantMsg); err != nil {
+		row.Error = err.Error()
+		return row, 0, nil
+	}
+
 	// SafetyFilter input gating: run AFTER position application so the
 	// destructive-sql / destructive-os-command presets see the substituted
 	// payload (matches fuzz_tool.go per-payload semantics). On a violation
 	// we record the variant with row.Error and return statusCode=0 — the
 	// run loop continues to the next variant.
-	row.StreamID = variantEnv.StreamID
 	if v := s.checkSafetyInput(variantMsg.Body, resendHTTPRequestURL(variantMsg).String(), variantMsg.Headers); v != nil {
 		row.Error = safetyViolationError(v)
 		return row, 0, nil
@@ -1218,6 +1227,42 @@ func (s *Server) runFuzzHTTPSingleVariant(ctx context.Context, plan *fuzzHTTPPla
 		s.applyResendHTTPTag(ctx, variantEnv.StreamID, tag)
 	}
 	return row, row.StatusCode, nil
+}
+
+// checkFuzzHTTPVariantScope re-runs the plan-time TargetScope check for one
+// variant, immediately before it is sent (USK-1158). Two reasons it cannot
+// rely on the check buildFuzzHTTPPlan made once:
+//
+//   - The scope engine is live: a policy reload (SIGHUP) or an agent
+//     `security` change during the run must apply to every variant not yet
+//     sent. A variant already in flight is left to finish.
+//   - authority / scheme / path / raw_query positions and §var§ expansion
+//     rewrite the very fields the scope engine matches on, after the plan
+//     check saw the base message.
+//
+// The variant message goes through checkResendHTTPScope — its canonical
+// URL, plus the plan.dialAddr leg when override_host is set. Without
+// override_host that helper never looks at plan.dialAddr, which is safe for
+// resend_http (the dial is derived from the same authority it checks) but
+// not here: the fuzz dial target was fixed at plan time from the BASE
+// message, so a variant whose authority or scheme moved to an allowed
+// value would pass while still being dialled to a host the reload has just
+// denied. The dial leg is therefore checked on its own in that case, with
+// the base scheme the dial transport actually uses (plan.useTLS is derived
+// from it). It is an address check — no path — like every other dial leg,
+// so a path-scoped deny on the BASE path cannot false-block a variant that
+// moved its path away.
+func (s *Server) checkFuzzHTTPVariantScope(plan *fuzzHTTPPlan, variantMsg *envelope.HTTPMessage) error {
+	if err := s.checkResendHTTPScope(variantMsg, plan.dialAddr, plan.overrideHost); err != nil {
+		return err
+	}
+	if plan.overrideHost != "" {
+		return nil // the override leg above already checked plan.dialAddr
+	}
+	if variantMsg.Authority == plan.baseMsg.Authority && strings.EqualFold(variantMsg.Scheme, plan.baseMsg.Scheme) {
+		return nil // the canonical leg above already covered the dial target
+	}
+	return s.checkTargetScopeAddr(strings.ToLower(plan.baseMsg.Scheme), plan.dialAddr)
 }
 
 // runFuzzHTTPSingleExchange runs one variant's send/receive cycle and

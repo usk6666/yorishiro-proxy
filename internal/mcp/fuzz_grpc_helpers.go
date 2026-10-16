@@ -1076,6 +1076,17 @@ func (s *Server) runFuzzGRPCSingleVariant(ctx context.Context, plan *fuzzGRPCPla
 
 	row.StreamID = variantPlan.streamID
 
+	// USK-1158: per-variant TargetScope re-check on the post-mutation plan,
+	// Scope → Safety like the Pipeline. `service` / `method` positions
+	// rewrite the :path the scope engine matches on (canonicalURL is
+	// rebuilt above), and the engine is live, so a policy reload or an
+	// agent `security` change since the plan-time check applies to every
+	// variant not yet sent. Recorded exactly like a safety violation below.
+	if err := s.checkResendGRPCScope(variantPlan); err != nil {
+		row.Error = err.Error()
+		return row, 0, nil, nil
+	}
+
 	// SafetyFilter input gating: run AFTER position application so the
 	// destructive-sql / destructive-os-command presets see the substituted
 	// payloads (matches fuzz_http per-variant semantics — USK-677 F-1/S-1
