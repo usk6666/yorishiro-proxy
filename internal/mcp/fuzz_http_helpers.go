@@ -1196,7 +1196,7 @@ func (s *Server) runFuzzHTTPSingleVariant(ctx context.Context, plan *fuzzHTTPPla
 	// payload (matches fuzz_tool.go per-payload semantics). On a violation
 	// we record the variant with row.Error and return statusCode=0 — the
 	// run loop continues to the next variant.
-	if v := s.checkSafetyInput(variantMsg.Body, resendHTTPRequestURL(variantMsg).String(), variantMsg.Headers); v != nil {
+	if v := s.checkSafetyInput(variantMsg.Body, resendHTTPRequestURL(variantMsg), variantMsg.Headers); v != nil {
 		row.Error = safetyViolationError(v)
 		return row, 0, nil
 	}
@@ -1252,7 +1252,9 @@ func (s *Server) runFuzzHTTPSingleVariant(ctx context.Context, plan *fuzzHTTPPla
 //     is whatever msg.Headers carries). So the leg is judged on the
 //     connection scheme derived from plan.useTLS — never the mutated
 //     variant scheme — the dialled address, and the variant's
-//     post-mutation path.
+//     post-mutation path. variantMsg.Path is wire form (USK-1139), the
+//     same form the live HTTPScopeStep hands CheckTarget; never pass the
+//     decoded URL.Path of resendHTTPRequestURL here.
 //
 // checkResendHTTPScope is deliberately not reused for the variant: its
 // override leg takes the scheme from the message, which for a `scheme`

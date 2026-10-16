@@ -40,4 +40,11 @@ const (
 	// over-budget. The audit Stream lets operators see exactly which
 	// request tripped the limit (USK-818).
 	BlockedByBudget = "budget"
+
+	// BlockedByCapacity attributes an audit Stream to a connection the
+	// listener refused because max_connections was saturated (USK-1142).
+	// No Pipeline Step emits it: the connection is refused before any
+	// Layer or Pipeline exists. The proxybuild connection-rejection
+	// recorder writes it directly.
+	BlockedByCapacity = "capacity"
 )

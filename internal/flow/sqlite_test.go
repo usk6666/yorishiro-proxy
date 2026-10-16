@@ -31,6 +31,47 @@ func newTestStore(t *testing.T) *SQLiteStore {
 	return store
 }
 
+// TestSQLiteStore_OnCloseRunsBeforeWritesStop: OnClose hooks run in
+// reverse registration order at the start of Close, while the store still
+// accepts writes, and run only once.
+func TestSQLiteStore_OnCloseRunsBeforeWritesStop(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "onclose.db")
+	store, err := NewSQLiteStore(ctx, dbPath, testutil.DiscardLogger())
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+
+	var order []string
+	store.OnClose(func() { order = append(order, "first") })
+	var saveErr error
+	store.OnClose(func() {
+		order = append(order, "second")
+		saveErr = store.SaveStream(ctx, &Stream{ID: "hook-write", Protocol: "raw", State: "error", Timestamp: time.Now()})
+	})
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if got := strings.Join(order, ","); got != "second,first" {
+		t.Errorf("hook order = %q, want second,first", got)
+	}
+	if saveErr != nil {
+		t.Fatalf("SaveStream from OnClose hook: %v (store must still accept writes)", saveErr)
+	}
+
+	reopened, err := NewSQLiteStore(ctx, dbPath, testutil.DiscardLogger())
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer reopened.Close()
+	if _, err := reopened.GetStream(ctx, "hook-write"); err != nil {
+		t.Errorf("GetStream(hook-write) after Close: %v, want the hook's write persisted", err)
+	}
+	if len(order) != 2 {
+		t.Errorf("hooks ran %d times, want 2", len(order))
+	}
+}
+
 func mustParseURL(raw string) *url.URL {
 	u, err := url.Parse(raw)
 	if err != nil {

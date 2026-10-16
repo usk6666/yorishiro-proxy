@@ -56,6 +56,7 @@ Export flows to JSONL or HAR (HTTP Archive 1.2) format with optional filtering.
 **Format details:**
 - **JSONL**: Each line is a complete JSON object containing a flow and its messages. Supports inline and file output.
 - **HAR**: HTTP Archive 1.2 format. Single JSON object compatible with browser DevTools, Burp Suite, and OWASP ZAP. File output only. Raw TCP and gRPC flows are excluded. WebSocket flows include `_webSocketMessages` custom field. Binary bodies are base64-encoded with `content.encoding: "base64"`.
+- **URLs** (both formats): the request path is exported in wire form (percent-encoding as sent). JSON cannot carry bytes that are not valid UTF-8, so such path / query bytes are written `%XX`-escaped (e.g. the wire byte `0xFF` as `%FF`); all other bytes are verbatim. This is the one lossy case: importing such a JSONL row stores the escaped text, not the original byte.
 
 Returns: exported_count, format, output_path (if file output), data (if inline output).
 

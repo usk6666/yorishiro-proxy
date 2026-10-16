@@ -90,6 +90,13 @@ type ManagerConfig struct {
 	// working snapshot accessor; they just won't see counters from any
 	// listener built via a Deps that omitted the matching field.
 	H2UpstreamMetrics *H2UpstreamMetrics
+
+	// ConnectionRejections is the Manager-level capacity-rejection
+	// aggregator (USK-1142). Production wiring shares the same pointer
+	// with every Deps.ConnectionRejections so FullListener rejections and
+	// TCP forward rejections land in one status view. nil constructs a
+	// count-only aggregator (no flow recording).
+	ConnectionRejections *ConnectionRejections
 }
 
 // Manager orchestrates one or more named live Stacks. It exposes
@@ -152,6 +159,11 @@ type Manager struct {
 	// Deps. See [Manager.H2UpstreamMetrics] for the snapshot accessor
 	// and internal/proxybuild/h2_metrics.go for the schema.
 	h2Upstream *H2UpstreamMetrics
+
+	// rejections aggregates capacity rejections from every listener and
+	// TCP forward under this Manager (USK-1142). Set at construction and
+	// never reassigned. See [Manager.ConnectionRejections].
+	rejections *ConnectionRejections
 }
 
 // upstreamProxyRotationEntry pairs the operator-supplied template
@@ -188,6 +200,12 @@ func NewManager(cfg ManagerConfig) (*Manager, error) {
 	if h2Metrics == nil {
 		h2Metrics = NewH2UpstreamMetrics()
 	}
+	// USK-1142: same shared-pointer pattern; the fallback counts
+	// rejections but records no audit Streams (no store).
+	rejections := cfg.ConnectionRejections
+	if rejections == nil {
+		rejections = NewConnectionRejections(ConnectionRejectionsConfig{Logger: logger})
+	}
 	return &Manager{
 		logger:     logger,
 		factory:    cfg.StackFactory,
@@ -195,7 +213,15 @@ func NewManager(cfg ManagerConfig) (*Manager, error) {
 		listeners:  make(map[string]*listenerEntry),
 		h1Upstream: h1Metrics,
 		h2Upstream: h2Metrics,
+		rejections: rejections,
 	}, nil
+}
+
+// ConnectionRejections returns a snapshot of the capacity-rejection
+// aggregate (USK-1142) surfaced by query(resource:"status") as
+// `connection_rejections`.
+func (m *Manager) ConnectionRejections() ConnectionRejectionsSnapshot {
+	return m.rejections.Snapshot()
 }
 
 // H1UpstreamMetrics returns a snapshot of the USK-998 / USK-999 /

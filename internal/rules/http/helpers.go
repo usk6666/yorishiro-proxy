@@ -100,15 +100,27 @@ func headerAdd(headers []envelope.KeyValue, name, value string) []envelope.KeyVa
 }
 
 // reconstructURL builds a full URL string from HTTPMessage fields.
-// Used for TargetURL safety matching. No net/url dependency.
+// Used for TargetURL safety matching. No net/url dependency. The path is
+// msg.Path verbatim (wire form).
 func reconstructURL(msg *envelope.HTTPMessage) string {
+	return buildURLString(msg, msg.Path)
+}
+
+// reconstructURLDecodedPath is reconstructURL with the path percent-decoded
+// (envelope.LenientDecodePath); the query stays raw. TargetURL safety
+// matching tries it after the wire form (USK-1139).
+func reconstructURLDecodedPath(msg *envelope.HTTPMessage) string {
+	return buildURLString(msg, envelope.LenientDecodePath(msg.Path))
+}
+
+func buildURLString(msg *envelope.HTTPMessage, path string) string {
 	var b strings.Builder
 	if msg.Scheme != "" {
 		b.WriteString(msg.Scheme)
 		b.WriteString("://")
 	}
 	b.WriteString(msg.Authority)
-	b.WriteString(msg.Path)
+	b.WriteString(path)
 	if msg.RawQuery != "" {
 		b.WriteByte('?')
 		b.WriteString(msg.RawQuery)

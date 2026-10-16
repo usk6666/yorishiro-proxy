@@ -253,6 +253,15 @@ type Deps struct {
 	// per-CONNECT chains under one Manager share the counter set.
 	H1UpstreamMetrics *H1UpstreamMetrics
 
+	// ConnectionRejections is the Manager-level aggregator of connections
+	// refused because max_connections was saturated (USK-1142). When
+	// non-nil, BuildLiveStack wires its Record method into the
+	// FullListener's OnReject. The production wiring constructs one
+	// instance and shares it with ManagerConfig.ConnectionRejections so
+	// the status accessor reports what the listener produced. nil keeps
+	// the pre-USK-1142 behaviour (log only).
+	ConnectionRejections *ConnectionRejections
+
 	// H2UpstreamMetrics aggregates USK-991 (reactive redial) + USK-992
 	// (pre-warm) + USK-993 (Refused retry) + USK-1001 HTTP/2 upstream
 	// counters. nil-safe — every emit point inside redialChain /
@@ -496,6 +505,9 @@ func BuildLiveStack(_ context.Context, deps Deps) (*Stack, error) {
 		OnCONNECT:      wrapper.wrapHandler(connectHandler),
 		OnSOCKS5:       wrapper.wrapHandler(socks5Handler),
 		OnHTTP1:        wrapper.wrapHandler(http1ForwardHandler),
+		// USK-1142: surface capacity rejections to the Manager-level
+		// aggregator (status + rate-capped audit Streams).
+		OnReject: rejectCallback(deps.ConnectionRejections),
 		// USK-710: OnHTTP1 wired for plain-HTTP forward proxy. OnHTTP2
 		// (h2c) and OnTCP (raw TCP forward) remain scaffold-deferred —
 		// the h2c entry point has no Linear issue today and TCP forward

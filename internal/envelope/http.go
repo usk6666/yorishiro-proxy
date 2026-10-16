@@ -116,7 +116,15 @@ type HTTPMessage struct {
 	// Authority is the Host header or :authority pseudo-header.
 	Authority string
 
-	// Path is the request path.
+	// Path is the request path exactly as observed on the wire: the
+	// HTTP/1.x request-target or the HTTP/2 :path pseudo-header, up to (not
+	// including) the first '?'. Percent-encoding is never decoded and
+	// nothing is normalized, so HTTP/1.x and HTTP/2 carry the same bytes for
+	// the same request (USK-1139; RFC 9112 §3.2, RFC 9113 §8.3.1). For an
+	// HTTP/1.x absolute-form target it is the path part after the
+	// authority; for asterisk-form it is "*". Matchers that also want the
+	// decoded form use envelope.LenientDecodePath; conversion to and from
+	// *url.URL goes through wirepath.go (URLFromWirePath / WirePath).
 	Path string
 
 	// RawQuery is the raw query string (without leading '?').

@@ -24,7 +24,7 @@ import (
 // (x/net http2 Transport writeHeaders, Chrome on large :path values).
 
 // bigHeaderValue mirrors the reporter's reproducer (10 KiB per value). It is
-// below the current 16 KiB HPACK string cap so this test isolates defect A
+// below the pre-USK-1137 16 KiB HPACK string cap so this test isolates defect A
 // from the separate limit defects of the same Issue.
 var bigHeaderValue = strings.Repeat("x", 10*1024)
 

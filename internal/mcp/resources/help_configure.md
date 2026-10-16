@@ -75,7 +75,7 @@ Each intercept rule has:
 - **direction** (string): `"request"`, `"response"`, or `"both"`.
 - **conditions** (object): Matching criteria:
   - **host_pattern** (string): Regex for hostname matching (port excluded).
-  - **path_pattern** (string): Regex for URL path matching.
+  - **path_pattern** (string): Regex for URL path matching. The path is the wire form on both HTTP/1.x and HTTP/2 — percent-encoding is not decoded (`/a%3Fb` is matched as those bytes), and the query string is excluded.
   - **methods** (array of strings): HTTP method whitelist.
   - **header_match** (object): Header name to regex mapping (AND logic).
   - **upgrade_url_pattern** (string): Regex for WebSocket upgrade URL matching (WebSocket rules only).
@@ -383,6 +383,7 @@ Configures the intercept queue behavior.
 
 ### max_connections (integer, optional)
 Dynamically changes the maximum number of concurrent proxy connections. Range: 1-100000.
+Connections refused at the cap are reported in `query` `status` → `connection_rejections` and as flows with `blocked_by: "capacity"`.
 
 ### max_concurrent_streams (integer, optional)
 Dynamically changes the HTTP/2 `SETTINGS_MAX_CONCURRENT_STREAMS` advertised to clients on the inbound (proxy-acting-as-server) Layer. Range: 1-65535. Default (when neither `configure` nor the config file sets it): `500` (USK-862).
@@ -409,7 +410,7 @@ Honours the top-level `operation` discriminator:
 - `"merge"` (default): applies `add_includes` / `remove_includes` / `add_excludes` / `remove_excludes` deltas.
 - `"replace"`: overwrites both rule lists with `includes` / `excludes`.
 
-Each rule is AND-evaluated across `hostname` / `url_prefix` / `method`; at least one field must be non-empty. Excludes win over includes.
+Each rule is AND-evaluated across `hostname` / `url_prefix` / `method`; at least one field must be non-empty. Excludes win over includes. `url_prefix` is compared byte-exact against the wire-form request path (percent-encoding not decoded, query excluded) on both HTTP/1.x and HTTP/2.
 
 #### Add a capture include rule (merge)
 ```json

@@ -78,11 +78,43 @@ func materializePayload(msg *envelope.GRPCDataMessage) []byte {
 // Read-only, per MITM Principle 1: nothing here lowercases the
 // authority, strips a default port, percent-decodes, or collapses
 // slashes. Normalizing at the scan boundary would make the engine match
-// against something the wire never carried.
+// against something the wire never carried. The percent-decoded view used
+// for USK-1139 either-form matching is a separate, additional candidate
+// (reconstructURLDecodedPath); it never replaces this wire form.
 func reconstructURL(msg *envelope.GRPCStartMessage) string {
 	if msg == nil {
 		return ""
 	}
+	return buildURLString(msg, startPath(msg))
+}
+
+// reconstructURLDecodedPath is reconstructURL with the path percent-decoded
+// (envelope.LenientDecodePath); the query stays raw. TargetURL safety
+// matching tries it after the wire form (USK-1139 either-form matching).
+// A matching aid only — never written back to the message.
+func reconstructURLDecodedPath(msg *envelope.GRPCStartMessage) string {
+	if msg == nil {
+		return ""
+	}
+	return buildURLString(msg, envelope.LenientDecodePath(startPath(msg)))
+}
+
+// splitServiceMethod splits a "/Service/Method" path at its last '/',
+// mirroring layer/grpcweb.parseServiceMethod (which derives the Start's
+// Service / Method from the wire :path). ok is false for a path with no
+// separator or an empty service / method.
+func splitServiceMethod(path string) (service, method string, ok bool) {
+	p := strings.TrimPrefix(path, "/")
+	idx := strings.LastIndex(p, "/")
+	if idx <= 0 || idx == len(p)-1 {
+		return "", "", false
+	}
+	return p[:idx], p[idx+1:], true
+}
+
+// startPath returns the Start's :path, synthesizing "/Service/Method" for a
+// Start that carries no Path (see reconstructURL).
+func startPath(msg *envelope.GRPCStartMessage) string {
 	path := msg.Path
 	if path == "" && (msg.Service != "" || msg.Method != "") {
 		// A missing :path with a non-empty Service/Method means the
@@ -97,6 +129,11 @@ func reconstructURL(msg *envelope.GRPCStartMessage) string {
 		// emit "/" (no consequence: "/" matches no preset).
 		path = "/" + msg.Service + "/" + msg.Method
 	}
+	return path
+}
+
+// buildURLString writes scheme://authority + path + ?query verbatim.
+func buildURLString(msg *envelope.GRPCStartMessage, path string) string {
 	var b strings.Builder
 	if msg.Scheme != "" {
 		b.WriteString(msg.Scheme)

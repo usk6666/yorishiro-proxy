@@ -3,6 +3,7 @@ package parser
 import (
 	"bufio"
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"strconv"
@@ -25,8 +26,19 @@ const (
 	// → ParseOptions.MaxRawCapture.
 	MaxRawCaptureSize = 2 << 20 // 2 MiB
 
-	// maxRequestLineSize limits the request/status line length.
-	maxRequestLineSize = 8192 // 8 KiB
+	// maxRequestLineSize limits the request/status line length. It is
+	// enforced by readLine before each append, so at most this many bytes
+	// are buffered per line.
+	//
+	// 4 MiB — the same budget as maxHeaderSize — is set for browser parity
+	// (USK-1137): browsers send request targets far beyond the old 8 KiB
+	// cap, up to Chromium url/url_constants.h kMaxURLChars = 2 * 1024 * 1024
+	// and Firefox network.standard-url.max-length = 1048576, both reachable
+	// in absolute-form through a forward proxy. A line above
+	// MaxRawCaptureSize still parses; RawBytes is then truncated with
+	// Truncated=true. The status line shares the limit; that is harmless
+	// because real status lines are tiny.
+	maxRequestLineSize = 4 << 20 // 4 MiB
 
 	// maxHeaderSize limits the total header section size (including all lines).
 	// Set above MaxRawCaptureSize so raw bytes truncation is tested before
@@ -36,6 +48,17 @@ const (
 	// maxHeaderCount limits the number of individual header lines.
 	maxHeaderCount = 10000
 )
+
+// ErrRequestLineTooLong is returned (wrapped) by ParseRequest and
+// ParseRequestWithOptions when the request line exceeds the request-line
+// limit. The client-facing HTTP/1 Layer answers it with 414 URI Too Long
+// (RFC 9110 §15.5.15). An over-long status line on the response side does
+// not wrap it: that is an upstream fault, not a client one.
+var ErrRequestLineTooLong = errors.New("request line too long")
+
+// errLineTooLong is the unexported cause readLine wraps when a line exceeds
+// its maxLen.
+var errLineTooLong = errors.New("line exceeds maximum length")
 
 // ParseOptions carries per-parse knobs that the channel layer threads through
 // to bound header / body raw-bytes capture in memory mode. The zero value
@@ -227,10 +250,26 @@ func capInt(n int64) int {
 	return int(n)
 }
 
+// ParseRequestLine reads only the request line from r and splits it into
+// method, request-target, and HTTP-version exactly as observed on the wire.
+// No headers are read. It shares the line reader and splitting rules with
+// ParseRequest, including the request-line length limit and best-effort
+// handling of a partial line (EOF or deadline before the terminator).
+//
+// Callers that must bound the read more tightly than the request-line limit
+// (e.g. the connector's capacity-rejection path) wrap r around an
+// io.LimitReader.
+func ParseRequestLine(r *bufio.Reader) (method, requestTarget, proto string, err error) {
+	return parseRequestLine(r, nil)
+}
+
 // parseRequestLine reads the request line (e.g., "GET /path HTTP/1.1\r\n").
 func parseRequestLine(r *bufio.Reader, cw rawSink) (method, requestURI, proto string, err error) {
 	line, err := readLine(r, cw, maxRequestLineSize)
 	if err != nil {
+		if errors.Is(err, errLineTooLong) {
+			return "", "", "", fmt.Errorf("read request line: %w: %w", ErrRequestLineTooLong, err)
+		}
 		return "", "", "", fmt.Errorf("read request line: %w", err)
 	}
 
@@ -299,7 +338,7 @@ func readLine(r *bufio.Reader, cw rawSink, maxLen int) (string, error) {
 			if remaining > 0 && cw != nil {
 				cw.write(segment[:remaining])
 			}
-			return "", fmt.Errorf("line exceeds maximum length %d", maxLen)
+			return "", fmt.Errorf("%w %d", errLineTooLong, maxLen)
 		}
 
 		line = append(line, segment...)

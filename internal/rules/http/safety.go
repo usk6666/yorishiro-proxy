@@ -107,25 +107,43 @@ func (e *SafetyEngine) CheckInputAll(ctx context.Context, msg *envelope.HTTPMess
 func (e *SafetyEngine) checkRule(ctx context.Context, rule *common.CompiledRule, msg *envelope.HTTPMessage) *Violation {
 	for _, target := range rule.Targets {
 		data, targetName := e.extractTarget(ctx, target, msg)
-		if data == "" {
-			continue
+		if v := matchRuleData(rule, data, targetName); v != nil {
+			return v
 		}
-		match := rule.Pattern.Find([]byte(data))
-		if match == nil {
-			continue
-		}
-		// Apply optional validator (e.g. Luhn check).
-		if rule.Validator != nil && !rule.Validator(match) {
-			continue
-		}
-		return &Violation{
-			RuleID:   rule.ID,
-			RuleName: rule.Name,
-			Target:   targetName,
-			Match:    string(match),
+		// USK-1139: msg.Path is wire form on every protocol, so the url
+		// target is also matched against the percent-decoded path. Input
+		// Safety is deny-only, so matching either form fails closed and
+		// keeps every match HTTP/1.x made when its Path was decoded.
+		if target == common.TargetURL {
+			if decoded := reconstructURLDecodedPath(msg); decoded != data {
+				if v := matchRuleData(rule, decoded, targetName); v != nil {
+					return v
+				}
+			}
 		}
 	}
 	return nil
+}
+
+// matchRuleData applies rule's pattern (and optional validator) to data.
+func matchRuleData(rule *common.CompiledRule, data, targetName string) *Violation {
+	if data == "" {
+		return nil
+	}
+	match := rule.Pattern.Find([]byte(data))
+	if match == nil {
+		return nil
+	}
+	// Apply optional validator (e.g. Luhn check).
+	if rule.Validator != nil && !rule.Validator(match) {
+		return nil
+	}
+	return &Violation{
+		RuleID:   rule.ID,
+		RuleName: rule.Name,
+		Target:   targetName,
+		Match:    string(match),
+	}
 }
 
 func (e *SafetyEngine) extractTarget(ctx context.Context, target common.Target, msg *envelope.HTTPMessage) (data, targetName string) {

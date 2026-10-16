@@ -7,7 +7,6 @@ import (
 	"encoding/base64"
 	"errors"
 	"log/slog"
-	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -1111,12 +1110,10 @@ func (s *RecordStep) envelopeToFlow(ctx context.Context, env *envelope.Envelope)
 		s.projectHTTPBody(ctx, env, m, fl)
 
 		if m.Path != "" || m.Authority != "" {
-			fl.URL = &url.URL{
-				Scheme:   m.Scheme,
-				Host:     m.Authority,
-				Path:     m.Path,
-				RawQuery: m.RawQuery,
-			}
+			// USK-1139: m.Path is the wire-form path on every protocol;
+			// URLFromWirePath keeps those bytes verbatim in Flow.URL
+			// (a plain &url.URL{Path: ...} would re-escape them).
+			fl.URL = envelope.URLFromWirePath(m.Scheme, m.Authority, m.Path, m.RawQuery)
 		}
 
 		if hdrs := keyValuesToMap(m.Headers); hdrs != nil {
@@ -1304,18 +1301,12 @@ func projectGRPCStart(m *envelope.GRPCStartMessage, fl *flow.Flow) {
 			// the URL is still well-formed for downstream consumers.
 			path = "/" + m.Service + "/" + m.Method
 		}
-		fl.URL = &url.URL{
-			Scheme: m.Scheme,
-			Host:   m.Authority,
-			Path:   path,
-			// USK-1053: the query component now has a home on
-			// GRPCStartMessage, so a query-bearing RPC target survives
-			// into Flow.URL instead of being silently dropped. No
-			// previously recorded output changes — before USK-1053 this
-			// field was always zero. resend_grpc's flow-recovery splits
-			// only URL.Path (resend_grpc_helpers.go), so it is unaffected.
-			RawQuery: m.RawQuery,
-		}
+		// USK-1053: the query component has a home on GRPCStartMessage,
+		// so a query-bearing RPC target survives into Flow.URL.
+		// resend_grpc's flow-recovery splits only the path
+		// (resend_grpc_helpers.go), so it is unaffected. USK-1139: path is
+		// the wire :path, kept verbatim.
+		fl.URL = envelope.URLFromWirePath(m.Scheme, m.Authority, path, m.RawQuery)
 	}
 	if hdrs := keyValuesToMap(m.Metadata); hdrs != nil {
 		fl.Headers = hdrs

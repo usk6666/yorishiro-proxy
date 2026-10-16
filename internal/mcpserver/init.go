@@ -602,6 +602,25 @@ func NewLiveManager(
 	// dual-plumb pattern as h1Metrics — one struct per Manager, shared
 	// by every per-CONNECT redialChain via Deps.
 	h2Metrics := proxybuild.NewH2UpstreamMetrics()
+	// USK-1142: one capacity-rejection aggregator per Manager, shared by
+	// every listener's FullListener (via Deps) and the TCP forward accept
+	// loops (via the Manager) so query(status).connection_rejections and
+	// the blocked_by="capacity" audit Streams see every refusal. It
+	// writes through the same store and honours the same capture_scope
+	// as the live RecordStep. It is process-lifetime (it outlives
+	// proxy_stop / proxy_start, both of which go through StopAll), so it
+	// is closed from the store's OnClose hook instead: at shutdown that
+	// runs after the deferred StopAll and before the database closes,
+	// aborting any queued audit writes rather than letting them fail
+	// against a closed store.
+	rejections := proxybuild.NewConnectionRejections(proxybuild.ConnectionRejectionsConfig{
+		Store:  store,
+		Scope:  recordScope,
+		Logger: logger,
+	})
+	if store != nil {
+		store.OnClose(rejections.Close)
+	}
 	factory := func(ctx context.Context, name, addr string) (*proxybuild.Stack, error) {
 		return proxybuild.BuildLiveStack(ctx, proxybuild.Deps{
 			Logger:                  logger,
@@ -641,6 +660,8 @@ func NewLiveManager(
 			// USK-1001: shared HTTP/2 upstream redial / refused-retry
 			// counters (h1 parity). Same shared-singleton pattern.
 			H2UpstreamMetrics: h2Metrics,
+			// USK-1142: shared capacity-rejection aggregator.
+			ConnectionRejections: rejections,
 		})
 	}
 	mgr, err := proxybuild.NewManager(proxybuild.ManagerConfig{
@@ -658,6 +679,10 @@ func NewLiveManager(
 		// Manager.H2UpstreamMetrics returns the same counters every
 		// Deps update.
 		H2UpstreamMetrics: h2Metrics,
+		// USK-1142: bind the capacity-rejection aggregator so
+		// Manager.ConnectionRejections reports what every listener and
+		// TCP forward produced.
+		ConnectionRejections: rejections,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("init proxybuild manager: %w", err)

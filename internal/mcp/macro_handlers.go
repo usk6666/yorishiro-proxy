@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/config"
+	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/macro"
 )
@@ -624,7 +625,7 @@ func (s *Server) macroSendFunc(macroName string) macro.SendFunc {
 		// the resend handler), so we must explicitly validate the outbound
 		// request against the safety engine here. This mirrors the check in
 		// handleResendAction / checkInterceptSafety for other MCP tools.
-		if v := s.checkSafetyInput(req.Body, httpReq.URL.String(), httpHeaderToKeyValues(httpReq.Header)); v != nil {
+		if v := s.checkSafetyInput(req.Body, httpReq.URL, httpHeaderToKeyValues(httpReq.Header)); v != nil {
 			return nil, fmt.Errorf("%s", safetyViolationError(v))
 		}
 
@@ -681,7 +682,7 @@ func (f *storeFlowFetcher) GetFlowRequest(ctx context.Context, flowID string) (*
 		Body:    msg.Body,
 	}
 	if msg.URL != nil {
-		req.URL = msg.URL.String()
+		req.URL = envelope.WireURLString(msg.URL)
 	}
 
 	return req, nil

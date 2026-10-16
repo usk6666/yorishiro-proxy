@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 )
 
 // TargetScope controls which network targets are allowed or blocked using a
@@ -63,6 +65,8 @@ type TargetRule struct {
 	// PathPrefix matches the beginning of the request URL path with a
 	// literal, case-sensitive prefix comparison — not a glob. It must start
 	// with "/" and contain no "*", "?" or "#" (config.ValidateTargetRule).
+	// The path is matched in either its wire form or its percent-decoded
+	// form (USK-1139, see PathPrefixMatches).
 	// When empty, all paths are matched.
 	PathPrefix string `json:"path_prefix,omitempty"`
 
@@ -148,7 +152,10 @@ func (s *TargetScope) CheckURL(u *url.URL) (allowed bool, reason string) {
 	scheme := strings.ToLower(u.Scheme)
 	hostname := u.Hostname()
 	port := defaultPort(scheme, u.Port())
-	path := u.Path
+	// USK-1139: match on the wire-form path; matchTargetRule also tries
+	// its percent-decoded form, so a net/url-parsed URL and a Flow.URL
+	// built by envelope.URLFromWirePath decide identically.
+	path := envelope.WirePath(u)
 
 	return s.CheckTarget(scheme, hostname, port, path)
 }
@@ -454,13 +461,29 @@ func matchTargetRule(rule TargetRule, scheme, hostname string, port int, path st
 	if len(rule.Ports) > 0 && !containsInt(rule.Ports, port) {
 		return false
 	}
-	if rule.PathPrefix != "" && !strings.HasPrefix(path, rule.PathPrefix) {
+	if rule.PathPrefix != "" && !PathPrefixMatches(path, rule.PathPrefix) {
 		return false
 	}
 	if len(rule.Schemes) > 0 && !containsStringFold(rule.Schemes, scheme) {
 		return false
 	}
 	return true
+}
+
+// PathPrefixMatches reports whether a path_prefix rule matches path, which is
+// the request path in wire form (USK-1139). The rule matches when either the
+// wire form or its single-pass percent-decoded form
+// (envelope.LenientDecodePath) starts with prefix, so "/admin" matches
+// "/admin", "/%61dmin" and "/adm%69n" alike, and a prefix written in encoded
+// form ("/a%20b") still matches the wire bytes it names. For deny rules this
+// fails closed; every path a rule matched before USK-1139 on HTTP/1.x
+// (decoded) or HTTP/2 (wire) is still matched. Dot-segment removal, "%2F"
+// semantics and case folding are out of scope here (USK-1131).
+func PathPrefixMatches(path, prefix string) bool {
+	if strings.HasPrefix(path, prefix) {
+		return true
+	}
+	return strings.HasPrefix(envelope.LenientDecodePath(path), prefix)
 }
 
 // matchHostname performs case-insensitive hostname matching with wildcard support.

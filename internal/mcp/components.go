@@ -285,6 +285,12 @@ type proxyManager interface {
 	// The MCP query(resource:"status") tool consumes this to populate
 	// the `h2_upstream` field on the status result.
 	H2UpstreamMetrics() proxybuild.H2UpstreamMetricsSnapshot
+
+	// ConnectionRejections surfaces the USK-1142 capacity-rejection
+	// aggregate (connections refused because max_connections was
+	// saturated). The MCP query(resource:"status") tool consumes this to
+	// populate the `connection_rejections` field on the status result.
+	ConnectionRejections() proxybuild.ConnectionRejectionsSnapshot
 }
 
 // ListenerStatus is the mcp-package shape of per-listener status used by

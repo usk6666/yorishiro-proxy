@@ -127,6 +127,25 @@ func (s *RecordScope) IsEmpty() bool {
 	return len(s.includes) == 0 && len(s.excludes) == 0
 }
 
+// HasHostnameExclude reports whether any exclude rule constrains Hostname.
+// Callers that evaluate an envelope with no derivable hostname use it to
+// fail closed: such an envelope can never match a hostname rule, so an
+// exclude-only scope would otherwise keep traffic that may belong to an
+// excluded host. O(rules), no allocation.
+func (s *RecordScope) HasHostnameExclude() bool {
+	if s == nil {
+		return false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, r := range s.excludes {
+		if r.Hostname != "" {
+			return true
+		}
+	}
+	return false
+}
+
 // ShouldRecord reports whether env should be persisted to the flow
 // store. A nil RecordScope is treated as the empty (capture-all) scope.
 //

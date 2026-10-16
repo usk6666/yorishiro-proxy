@@ -159,8 +159,8 @@ func requestDataToEnvelope(data *fuzzer.RequestData) *envelope.Envelope {
 			scheme = data.URL.Scheme
 		}
 		authority = data.URL.Host
-		if data.URL.Path != "" {
-			path = data.URL.Path
+		if p := envelope.WirePath(data.URL); p != "" {
+			path = p
 		}
 		rawQuery = data.URL.RawQuery
 	}

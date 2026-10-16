@@ -138,7 +138,7 @@ func (s *Server) handleResendRaw(ctx context.Context, _ *gomcp.CallToolRequest, 
 	// Safety filter: feed the full payload as the body input. URL is empty
 	// (no L7 view), headers nil — raw bytes carry the entire wire surface
 	// so the body argument exhaustively represents the request.
-	if v := s.checkSafetyInput(plan.payload, "", nil); v != nil {
+	if v := s.checkSafetyInput(plan.payload, nil, nil); v != nil {
 		return nil, nil, fmt.Errorf("%s", safetyViolationError(v))
 	}
 

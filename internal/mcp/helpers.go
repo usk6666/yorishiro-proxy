@@ -249,12 +249,27 @@ func isDecimalPort(port string) bool {
 
 // checkSafetyInput validates request data against the safety filter engine.
 // Returns nil if no safety engine is configured or if the input passes.
-// Returns an InputViolation if the input is blocked.
-func (s *Server) checkSafetyInput(body []byte, rawURL string, headers []envelope.KeyValue) *safety.InputViolation {
+// Returns an InputViolation if the input is blocked. u is the request URL
+// (nil for protocols without one, e.g. raw TCP).
+//
+// USK-1139 either-form matching: u's path is wire form, so the url / query
+// targets are checked against both envelope.WireURLString(u) and
+// envelope.DecodedPathURLString(u). Input Safety is deny-only, so a match
+// on either form blocks (fail closed). The decoded form is a matching aid
+// only; what is sent stays the wire path.
+func (s *Server) checkSafetyInput(body []byte, u *url.URL, headers []envelope.KeyValue) *safety.InputViolation {
 	if s.pipeline.safetyEngine == nil {
 		return nil
 	}
-	return s.pipeline.safetyEngine.CheckInput(body, rawURL, headers)
+	wire := envelope.WireURLString(u)
+	if v := s.pipeline.safetyEngine.CheckInput(body, wire, headers); v != nil {
+		return v
+	}
+	if decoded := envelope.DecodedPathURLString(u); decoded != wire {
+		// body / headers were already checked above; only the URL differs.
+		return s.pipeline.safetyEngine.CheckInput(nil, decoded, nil)
+	}
+	return nil
 }
 
 // safetyViolationError returns a generic error message for MCP clients when a safety

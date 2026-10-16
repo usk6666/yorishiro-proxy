@@ -767,7 +767,10 @@ func recordMacroStepSessionDeps(
 		recordedHeaders[key] = values
 	}
 
-	parsedURL := httpReq.URL
+	// USK-1139: record the path net/http put on the wire (EscapedPath, the
+	// same bytes RequestURI() writes) through the wire-path helper so the
+	// store keeps it verbatim.
+	parsedURL := envelope.URLFromWirePath(httpReq.URL.Scheme, httpReq.URL.Host, httpReq.URL.EscapedPath(), httpReq.URL.RawQuery)
 
 	sendMsg := &flow.Flow{
 		StreamID:  fl.ID,

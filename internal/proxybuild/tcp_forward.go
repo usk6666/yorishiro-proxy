@@ -89,6 +89,10 @@ type tcpForwardEntry struct {
 	activeConns atomic.Int64
 	maxConns    atomic.Int64
 
+	// rejectWarn rate-limits this forward's capacity-rejection Warn log
+	// (USK-1142).
+	rejectWarn *connector.RejectWarnLimiter
+
 	// tlsServerCfg is the per-entry MITM *tls.Config used to terminate
 	// client-side TLS when fc.TLS=true (USK-915). Built once at listener
 	// start so crypto/tls's lazy session-ticket key persists across every
@@ -191,14 +195,15 @@ func (m *Manager) startTCPForwardListener(
 	// independently of the parent listener.
 	listenerCtx, cancel := context.WithCancel(ctx)
 	entry := &tcpForwardEntry{
-		port:     port,
-		target:   fc.Target,
-		protocol: fc.Protocol,
-		addr:     ln.Addr().String(),
-		cancel:   cancel,
-		done:     make(chan struct{}),
-		netLn:    ln,
-		fc:       fc,
+		port:       port,
+		target:     fc.Target,
+		protocol:   fc.Protocol,
+		addr:       ln.Addr().String(),
+		cancel:     cancel,
+		done:       make(chan struct{}),
+		netLn:      ln,
+		fc:         fc,
+		rejectWarn: connector.NewRejectWarnLimiter(nil),
 	}
 	// Seed the per-forward connection cap from the manager-level setting so
 	// SetMaxConnections fan-out reaches forward listeners. 0 = unlimited.
@@ -275,15 +280,21 @@ func (m *Manager) runTCPForwardAcceptLoop(
 		if maxConns := entry.maxConns.Load(); maxConns > 0 {
 			if entry.activeConns.Add(1) > maxConns {
 				entry.activeConns.Add(-1)
-				if m.logger.Enabled(ctx, slog.LevelWarn) {
-					m.logger.Warn("tcp forward connection rejected: at capacity",
-						"name", parentListenerName,
-						"port", entry.port,
-						"remote_addr", conn.RemoteAddr().String(),
-						"max_connections", maxConns,
-					)
+				// USK-1142: no reads on this inline path — the target is
+				// the configured forward target. Record is O(1) and
+				// non-blocking, so the accept loop is not slowed.
+				info := connector.RejectInfo{
+					Listener:       parentListenerName,
+					ForwardPort:    entry.port,
+					RemoteAddr:     conn.RemoteAddr().String(),
+					DetectedKind:   connector.ProtocolTCP,
+					Target:         entry.target,
+					MaxConnections: int(maxConns),
+					At:             time.Now(),
 				}
 				_ = conn.Close()
+				m.rejections.Record(info)
+				connector.LogCapacityRejection(m.logger, entry.rejectWarn, info)
 				continue
 			}
 			counted = true

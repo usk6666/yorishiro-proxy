@@ -742,3 +742,67 @@ func TestResendHTTP_OverrideHostPathDenyApplies(t *testing.T) {
 	}
 	assertNoDeniedPathOnWire(t, rec, "/admin")
 }
+
+// TestScopeRecheck_PathLegsJudgeWirePath pins the path form the path-
+// bearing address legs hand CheckTarget after USK-1139: the wire path
+// (== msg.Path), the form TargetScope.CheckURL and the live HTTPScopeStep
+// match on. A path_prefix written in encoded form ("/a%20b") names wire
+// bytes; CheckTarget matches it against the wire path or its single
+// decoding. Handing the leg the already-decoded URL.Path ("/a b/x") would
+// make the encoded deny on the dial / override target never match.
+func TestScopeRecheck_PathLegsJudgeWirePath(t *testing.T) {
+	newScope := func() *connector.TargetScope {
+		scope := connector.NewTargetScope()
+		scope.SetPolicyRules(
+			[]connector.TargetRule{{Hostname: "127.0.0.1"}, {Hostname: "vhost.test"}},
+			[]connector.TargetRule{{Hostname: "127.0.0.1", PathPrefix: "/a%20b"}},
+		)
+		return scope
+	}
+
+	t.Run("resend_http override leg", func(t *testing.T) {
+		cs := setupFuzzScopeRecheckSession(t, newScope())
+		rec := &pathRecorder{}
+		upstream := httptest.NewServer(rec.handler())
+		t.Cleanup(upstream.Close)
+		override := strings.TrimPrefix(upstream.URL, "http://")
+
+		denied := callResendHTTP(t, cs, map[string]any{
+			"method":        "GET",
+			"scheme":        "http",
+			"authority":     "vhost.test",
+			"path":          "/a%20b/x",
+			"override_host": override,
+		})
+		if !denied.IsError {
+			t.Errorf("resend of /a%%20b/x via override_host succeeded — the encoded path_prefix deny on the override target was not applied")
+		} else if got := extractTextContent(denied); !strings.Contains(got, scopeRecheckErrSubstr) {
+			t.Errorf("error = %q, want a %q rejection", got, scopeRecheckErrSubstr)
+		}
+		assertNoDeniedPathOnWire(t, rec, "/a b")
+	})
+
+	t.Run("fuzz_http dial leg", func(t *testing.T) {
+		cs := setupFuzzScopeRecheckSession(t, newScope())
+		rec := &pathRecorder{}
+		upstream := httptest.NewServer(rec.handler())
+		t.Cleanup(upstream.Close)
+		authority := strings.TrimPrefix(upstream.URL, "http://")
+
+		ch := callFuzzToolAsync(cs, "fuzz_http", map[string]any{
+			"method":    "GET",
+			"scheme":    "http",
+			"authority": authority,
+			"path":      "/public",
+			"positions": []map[string]any{
+				{"path": "authority", "payloads": []string{"vhost.test"}},
+				{"path": "path", "payloads": []string{"/public", "/a%20b/x"}},
+			},
+			"timeout_ms": 10000,
+		})
+		var out fuzzHTTPResult
+		awaitFuzzResult(t, ch, &out)
+		assertFuzzHTTPRowsByPayload(t, out, 2, func(p map[string]string) bool { return p["path"] == "/a%20b/x" })
+		assertNoDeniedPathOnWire(t, rec, "/a b")
+	})
+}

@@ -21,7 +21,7 @@ Filter options for the `flows`, `messages`, `fuzz_jobs`, and `fuzz_results` reso
 - **method** (string): HTTP method filter for flows (e.g. `"GET"`, `"POST"`).
 - **url_pattern** (string): URL substring match for flows (e.g. `"/api/"`).
 - **status_code** (integer): HTTP status code filter for flows and fuzz_results (e.g. `200`, `404`).
-- **blocked_by** (string): Filter for blocked flows (e.g. `"target_scope"`, `"intercept_drop"`, `"rate_limit"`, `"safety_filter"`).
+- **blocked_by** (string): Filter for blocked flows. One of `"target_scope"`, `"intercept_drop"`, `"rate_limit"`, `"safety_filter"`, `"budget"`, `"capacity"`. `"capacity"` streams are connections the proxy refused because `max_connections` was reached: state `error`, `server_addr` = the refused target (CONNECT authority, HTTP/1.x absolute-form authority, or TCP forward target), `tags.target` = the request-target as received. They are written at most ~10/s and only for targets inside `capture_scope`; the full count is in `status` → `connection_rejections`.
 - **origin** (string): Stream origin classification filter (`"proxy"` for live MITM traffic, `"resend"` for resend_* MCP tool streams, `"fuzz"` reserved for fuzz campaigns).
 - **state** (string): Flow lifecycle state filter (`"active"`, `"complete"`, `"error"`).
 - **conn_id** (string): Connection ID filter for flows (exact match). Use to find all flows from the same connection.
@@ -108,6 +108,8 @@ Requires: `id` (flow ID).
 
 Returns: id, conn_id, protocol, state, method, url, request/response headers and bodies, raw bytes (base64), connection info, protocol_summary, message_preview (for streaming), original_request (for variant flows), timestamps.
 
+The `url` field (here, in `flows[]`, in `messages[]` and in `original_request`) carries the request path in wire form — percent-encoding exactly as sent, not decoded. A JSON string cannot carry bytes that are not valid UTF-8, so any such path or query bytes are shown `%XX`-escaped (upper-case hex, e.g. the wire byte `0xFF` appears as `%FF`); every other byte is verbatim. `resend_http` with `flow_id` still replays the original wire bytes, not the escaped text.
+
 When `decode_bodies` is `true` (the default) and the body is decodable, the response also includes `request_body_decoded` / `response_body_decoded` (plaintext / proto-json / proto-schemaless JSON after Output Filter masking), `request_body_decoded_encoding` / `response_body_decoded_encoding` (`text`, `base64`, `proto-json`, or `proto-schemaless-json`), and `request_body_encoding_applied` / `response_body_encoding_applied` (codec name — `gzip` / `br` / `deflate` / `zstd` for HTTP `Content-Encoding`, `proto-json` for schema-aware gRPC Data envelopes, or `proto-schemaless` for schemaless gRPC Data envelopes). On decode failure, `request_body_decode_anomaly` / `response_body_decode_anomaly` carry `{type, detail}`: HTTP path uses `unknown_encoding`, `malformed`, `size_exceeded`, `chain_rejected`, `truncated_decode`; gRPC path uses `proto_malformed` or `proto_schema_mismatch` (schema-aware path hit but wire bytes failed to parse — schemaless fallback still runs).
 
 ### messages
@@ -125,7 +127,7 @@ Returns: `messages[]` (id, sequence, direction, method, url, status_code, header
 ### status
 Get current proxy status and health metrics. No additional parameters.
 
-Returns: running, listen_addr, active_connections, total_flows, db_size_bytes, uptime_seconds, ca_initialized, tls_fingerprint, export_dir (the directory `manage` export_flows / import_flows file paths are confined to).
+Returns: running, listen_addr, active_connections, total_flows, db_size_bytes, uptime_seconds, ca_initialized, tls_fingerprint, export_dir (the directory `manage` export_flows / import_flows file paths are confined to), connection_rejections (connections refused because `max_connections` was reached, counted since server start: `total`, `last_at`, `by_kind` {http1, connect, socks5, http2, tcp, unknown}, `recent[]` newest first (at, listener, forward_port, remote_addr, detected_kind, method, target, target_truncated, wrote_503, max_connections, recorded), `unrecorded` (audit streams shed by the write rate cap or a full recorder queue), `out_of_scope` (not recorded because `capture_scope` excludes the target, or the target names no host while a hostname exclude rule is set)).
 
 ### config
 Get current configuration including upstream proxy, TLS passthrough, TCP forwards, and runtime knobs. No additional parameters.

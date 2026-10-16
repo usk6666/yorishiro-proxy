@@ -6,13 +6,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"net/url"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
 	_ "modernc.org/sqlite"
+
+	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 )
 
 // drainTimeout is the maximum duration allowed for flushing remaining writes
@@ -26,6 +27,10 @@ type SQLiteStore struct {
 	done    chan struct{}
 	wg      sync.WaitGroup
 	logger  *slog.Logger
+
+	// closeMu guards onClose; see OnClose.
+	closeMu sync.Mutex
+	onClose []func()
 }
 
 type writeOp struct {
@@ -767,7 +772,7 @@ func (s *SQLiteStore) saveFlowSync(ctx context.Context, f *Flow) error {
 
 	urlStr := ""
 	if f.URL != nil {
-		urlStr = f.URL.String()
+		urlStr = envelope.WireURLString(f.URL)
 	}
 
 	// Project Metadata["variant"] into the dedicated column so the V11
@@ -1152,8 +1157,28 @@ func (s *SQLiteStore) ClearGRPCSchemas(ctx context.Context) (int64, error) {
 	return deleted, nil
 }
 
-// Close shuts down the writer goroutine and closes the database.
+// OnClose registers fn to run at the start of Close, while the store still
+// accepts writes, in reverse registration order. It lets a background
+// writer whose lifetime is tied to the store stop before the database
+// closes, instead of queueing writes that can no longer complete. fn must
+// not call Close.
+func (s *SQLiteStore) OnClose(fn func()) {
+	s.closeMu.Lock()
+	defer s.closeMu.Unlock()
+	s.onClose = append(s.onClose, fn)
+}
+
+// Close runs the OnClose hooks, shuts down the writer goroutine and closes
+// the database.
 func (s *SQLiteStore) Close() error {
+	s.closeMu.Lock()
+	hooks := s.onClose
+	s.onClose = nil
+	s.closeMu.Unlock()
+	for i := len(hooks) - 1; i >= 0; i-- {
+		hooks[i]()
+	}
+
 	close(s.done)
 	s.wg.Wait()
 	return s.db.Close()
@@ -1309,10 +1334,9 @@ func scanFlow(row scannable) (*Flow, error) {
 	}
 
 	if urlStr != "" {
-		parsed, err := url.Parse(urlStr)
-		if err == nil {
-			f.URL = parsed
-		}
+		// USK-1139: never-failing wire-form parse. url.Parse rejected
+		// stored paths such as "%zz" and silently dropped Flow.URL.
+		f.URL = envelope.ParseWireURL(urlStr)
 	}
 
 	if err := json.Unmarshal([]byte(headersStr), &f.Headers); err != nil {

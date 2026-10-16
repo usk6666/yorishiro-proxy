@@ -1025,7 +1025,7 @@ func (s *Server) runFuzzWSSingleVariant(ctx context.Context, plan *fuzzWSPlan, p
 
 	// SafetyFilter input gating after position application, before
 	// dial. Mirrors fuzz_http per-variant semantics.
-	if v := s.checkSafetyInput(variantPlan.payload, variantPlan.upgradeURL.String(), variantPlan.upgradeHeaders); v != nil {
+	if v := s.checkSafetyInput(variantPlan.payload, variantPlan.upgradeURL, variantPlan.upgradeHeaders); v != nil {
 		row.Error = safetyViolationError(v)
 		return row, false, nil
 	}
@@ -1049,7 +1049,7 @@ func (s *Server) runFuzzWSSingleVariant(ctx context.Context, plan *fuzzWSPlan, p
 		Message:   variantMsg,
 		Context: envelope.EnvelopeContext{
 			ConnID:       variantPlan.connID,
-			UpgradePath:  variantPlan.upgradeURL.Path,
+			UpgradePath:  envelope.WirePath(variantPlan.upgradeURL),
 			UpgradeQuery: variantPlan.upgradeURL.RawQuery,
 		},
 	}

@@ -621,7 +621,7 @@ func extractResendGRPCStartFields(f *flow.Flow) (authority, service, method, sch
 	if f.URL != nil {
 		authority = f.URL.Host
 		scheme = f.URL.Scheme
-		parts := strings.SplitN(strings.TrimPrefix(f.URL.Path, "/"), "/", 2)
+		parts := strings.SplitN(strings.TrimPrefix(envelope.WirePath(f.URL), "/"), "/", 2)
 		if len(parts) == 2 {
 			service = parts[0]
 			method = parts[1]
@@ -740,11 +740,8 @@ func resolveResendGRPCDialTarget(authority string, useTLS bool) (addr, sni strin
 // validated fields (no String → Parse round-trip — CWE-918 lesson from
 // USK-672).
 func resendGRPCCanonicalURL(scheme, authority, service, method string) *url.URL {
-	return &url.URL{
-		Scheme: scheme,
-		Host:   authority,
-		Path:   "/" + service + "/" + method,
-	}
+	// USK-1139: "/Service/Method" is the :path sent on the wire.
+	return envelope.URLFromWirePath(scheme, authority, "/"+service+"/"+method, "")
 }
 
 // populateResendGRPCMessages decodes each message's payload per

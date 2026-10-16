@@ -874,7 +874,7 @@ func (s *Server) runFuzzRawSingleVariantWithResponse(ctx context.Context, plan *
 	// payload (matches fuzz_http per-variant semantics). On a violation we
 	// record the variant with row.Error and return nil err — the run loop
 	// continues to the next variant.
-	if v := s.checkSafetyInput(variantBytes, "", nil); v != nil {
+	if v := s.checkSafetyInput(variantBytes, nil, nil); v != nil {
 		row.Error = safetyViolationError(v)
 		return row, nil, 0, false, nil
 	}
