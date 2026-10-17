@@ -119,8 +119,10 @@ func runTCPForwardHTTP1ExchangeLoop(
 	// session.GRPCWebBase64RecordOption — same wiring shape as the
 	// MITM-routed path.
 	var baseGRPCWebOpts []grpcweb.Option
+	var headRecorder requestHeadRecorder
 	if parentStack != nil {
 		baseGRPCWebOpts = connector.GRPCWebOptionsFromBuildConfig(parentStack.BuildConfig)
+		headRecorder = parentStack.requestHeadRecorder
 	}
 	var wg sync.WaitGroup
 	for {
@@ -136,7 +138,7 @@ func runTCPForwardHTTP1ExchangeLoop(
 			wg.Add(1)
 			go func(ch layer.Channel) {
 				defer wg.Done()
-				runForwardHTTP1Exchange(ctx, stack, ch, upstreamH1, p, sessOpts, target, logger, filter, baseGRPCWebOpts)
+				runForwardHTTP1Exchange(ctx, stack, ch, upstreamH1, p, sessOpts, target, logger, filter, baseGRPCWebOpts, headRecorder)
 			}(clientCh)
 		}
 	}
@@ -176,6 +178,7 @@ func runForwardHTTP1Exchange(
 	logger *slog.Logger,
 	filter exchangeFilter,
 	baseGRPCWebOpts []grpcweb.Option,
+	headRecorder requestHeadRecorder,
 ) {
 	// USK-934: per-exchange grpc-web auto-classify Options. The same
 	// closure is installed on both the client-side DispatchH1Channel and
@@ -188,10 +191,10 @@ func runForwardHTTP1Exchange(
 	streamGRPCWebOpts = append(streamGRPCWebOpts, grpcWebBase64Opt)
 
 	if filter == nil {
-		runForwardHTTP1ExchangeNoFilter(ctx, stack, clientCh, upstreamH1, p, sessOpts, target, logger, streamGRPCWebOpts)
+		runForwardHTTP1ExchangeNoFilter(ctx, stack, clientCh, upstreamH1, p, sessOpts, target, logger, streamGRPCWebOpts, headRecorder)
 		return
 	}
-	runForwardHTTP1ExchangeWithFilter(ctx, stack, clientCh, upstreamH1, p, sessOpts, target, logger, filter, streamGRPCWebOpts)
+	runForwardHTTP1ExchangeWithFilter(ctx, stack, clientCh, upstreamH1, p, sessOpts, target, logger, filter, streamGRPCWebOpts, headRecorder)
 }
 
 // runForwardHTTP1ExchangeNoFilter is the no-filter arm of
@@ -208,10 +211,13 @@ func runForwardHTTP1ExchangeNoFilter(
 	target string,
 	logger *slog.Logger,
 	streamGRPCWebOpts []grpcweb.Option,
+	headRecorder requestHeadRecorder,
 ) {
 	dispatchedCh, err := connector.DispatchH1Channel(ctx, clientCh, grpcweb.RoleServer, streamGRPCWebOpts, logger)
 	if err != nil {
 		_ = clientCh.Close()
+		// USK-1181: record a request head the Layer itself closed.
+		recordH1RequestHead(ctx, headRecorder, stack.ConnID, target, err)
 		if !errors.Is(err, context.Canceled) {
 			logger.Debug("proxybuild: tcp forward http1 dispatch failed",
 				"target", target, "stream_id", clientCh.StreamID(), "error", err)
@@ -256,6 +262,7 @@ func runForwardHTTP1ExchangeWithFilter(
 	logger *slog.Logger,
 	filter exchangeFilter,
 	streamGRPCWebOpts []grpcweb.Option,
+	headRecorder requestHeadRecorder,
 ) {
 	// Request-phase filter: peek the first envelope. If the filter rejects,
 	// synthesise a 502, fire the Pipeline-Drop audit, and return without
@@ -264,8 +271,11 @@ func runForwardHTTP1ExchangeWithFilter(
 	first, err := clientCh.Next(peekCtx)
 	peekCancel()
 	if err != nil {
-		// Peer disconnected before sending a request — nothing to do.
+		// Peer disconnected before sending a request — nothing to do —
+		// or the Layer closed the request head itself (USK-1181), which
+		// is recorded.
 		_ = clientCh.Close()
+		recordH1RequestHead(ctx, headRecorder, stack.ConnID, target, err)
 		logger.Debug("proxybuild: tcp forward http1 exchange peer hung up before request", "target", target, "error", err)
 		return
 	}

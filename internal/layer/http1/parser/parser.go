@@ -60,6 +60,62 @@ var ErrRequestLineTooLong = errors.New("request line too long")
 // its maxLen.
 var errLineTooLong = errors.New("line exceeds maximum length")
 
+// ErrHeaderSectionTooLarge is returned (wrapped) by ParseRequest and
+// ParseRequestWithOptions when the request header section exceeds a parser
+// limit: more than maxHeaderCount lines, a single line over maxHeaderSize,
+// or a total size over maxHeaderSize. The client-facing HTTP/1 Layer
+// answers it with 431 Request Header Fields Too Large (RFC 6585 §5).
+var ErrHeaderSectionTooLarge = errors.New("request header section too large")
+
+// errHeaderLimit is the unexported cause parseHeaderLines wraps when the
+// header count or total size limit trips.
+var errHeaderLimit = errors.New("header section limit exceeded")
+
+// PartialRequestError is the error ParseRequestWithOptions returns when it
+// fails after reading some of the request head. It carries the wire bytes
+// consumed so far so callers can record what the client actually sent
+// (USK-1181). The parsed fields are best-effort overlays; Raw is
+// authoritative.
+//
+// errors.Is / errors.As see through it to Err (ErrRequestLineTooLong,
+// ErrHeaderSectionTooLarge, os.ErrDeadlineExceeded, io.EOF, ...).
+type PartialRequestError struct {
+	// Err is the underlying parse error.
+	Err error
+	// Raw holds the request-head bytes read before the failure, capped at
+	// ParseOptions.MaxRawCapture. Nil when no byte was read.
+	Raw []byte
+	// Truncated reports that Raw was cut at the capture cap.
+	Truncated bool
+	// RequestLineComplete reports that the request line, including its
+	// terminator, was read. Method / RequestURI / Proto are set only then.
+	RequestLineComplete bool
+	// Method, RequestURI and Proto are the request-line fields as observed
+	// on the wire.
+	Method     string
+	RequestURI string
+	Proto      string
+	// Headers holds the header lines fully read before the failure, in
+	// wire order. A trailing fragment cut by the failure is not included.
+	Headers RawHeaders
+}
+
+// Error returns the underlying error's message.
+func (e *PartialRequestError) Error() string {
+	if e == nil || e.Err == nil {
+		return "partial request"
+	}
+	return e.Err.Error()
+}
+
+// Unwrap returns the underlying error.
+func (e *PartialRequestError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
 // ParseOptions carries per-parse knobs that the channel layer threads through
 // to bound header / body raw-bytes capture in memory mode. The zero value
 // means "use the package defaults" — equivalent to calling ParseRequest /
@@ -147,13 +203,21 @@ func ParseRequest(r *bufio.Reader) (*RawRequest, error) {
 // recorded rather than returning errors. Errors are returned only for
 // unrecoverable I/O failures or when no meaningful request can be extracted
 // at all (e.g., connection closed).
+//
+// Every error is a *PartialRequestError carrying the request-head bytes
+// read before the failure (USK-1181). A header section over a parser limit
+// wraps ErrHeaderSectionTooLarge.
 func ParseRequestWithOptions(r *bufio.Reader, opts ParseOptions) (*RawRequest, error) {
 	cw := &captureWriter{cap: capInt(opts.MaxRawCapture)}
 
 	// Parse request line.
-	method, requestURI, proto, err := parseRequestLine(r, cw)
+	method, requestURI, proto, lineTerminated, err := parseRequestLineTerm(r, cw)
 	if err != nil {
-		return nil, fmt.Errorf("parse request line: %w", err)
+		return nil, &PartialRequestError{
+			Err:       fmt.Errorf("parse request line: %w", err),
+			Raw:       cw.bytes(),
+			Truncated: cw.truncated,
+		}
 	}
 
 	req := &RawRequest{
@@ -165,7 +229,20 @@ func ParseRequestWithOptions(r *bufio.Reader, opts ParseOptions) (*RawRequest, e
 	// Parse headers.
 	headers, anomalies, err := parseHeaders(r, cw)
 	if err != nil {
-		return nil, fmt.Errorf("parse headers: %w", err)
+		if errors.Is(err, errHeaderLimit) || errors.Is(err, errLineTooLong) {
+			err = fmt.Errorf("%w: %w", ErrHeaderSectionTooLarge, err)
+		}
+		perr := &PartialRequestError{
+			Err:                 fmt.Errorf("parse headers: %w", err),
+			Raw:                 cw.bytes(),
+			Truncated:           cw.truncated,
+			RequestLineComplete: lineTerminated,
+			Headers:             headers,
+		}
+		if lineTerminated {
+			perr.Method, perr.RequestURI, perr.Proto = method, requestURI, proto
+		}
+		return nil, perr
 	}
 	req.Headers = headers
 	req.Anomalies = anomalies
@@ -265,12 +342,20 @@ func ParseRequestLine(r *bufio.Reader) (method, requestTarget, proto string, err
 
 // parseRequestLine reads the request line (e.g., "GET /path HTTP/1.1\r\n").
 func parseRequestLine(r *bufio.Reader, cw rawSink) (method, requestURI, proto string, err error) {
-	line, err := readLine(r, cw, maxRequestLineSize)
+	method, requestURI, proto, _, err = parseRequestLineTerm(r, cw)
+	return method, requestURI, proto, err
+}
+
+// parseRequestLineTerm is parseRequestLine that also reports whether the
+// line ended with its terminator (false for a partial line cut by EOF or a
+// read error).
+func parseRequestLineTerm(r *bufio.Reader, cw rawSink) (method, requestURI, proto string, terminated bool, err error) {
+	line, terminated, err := readLineTerm(r, cw, maxRequestLineSize)
 	if err != nil {
 		if errors.Is(err, errLineTooLong) {
-			return "", "", "", fmt.Errorf("read request line: %w: %w", ErrRequestLineTooLong, err)
+			return "", "", "", false, fmt.Errorf("read request line: %w: %w", ErrRequestLineTooLong, err)
 		}
-		return "", "", "", fmt.Errorf("read request line: %w", err)
+		return "", "", "", false, fmt.Errorf("read request line: %w", err)
 	}
 
 	// Split into exactly 3 parts: METHOD SP REQUEST-URI SP HTTP-VERSION
@@ -283,10 +368,10 @@ func parseRequestLine(r *bufio.Reader, cw rawSink) (method, requestURI, proto st
 		if len(parts) >= 2 {
 			requestURI = parts[1]
 		}
-		return method, requestURI, "HTTP/1.1", nil
+		return method, requestURI, "HTTP/1.1", terminated, nil
 	}
 
-	return parts[0], parts[1], parts[2], nil
+	return parts[0], parts[1], parts[2], terminated, nil
 }
 
 // parseStatusLine reads the status line (e.g., "HTTP/1.1 200 OK\r\n").
@@ -328,7 +413,16 @@ func parseStatusLine(r *bufio.Reader, cw rawSink) (proto string, statusCode int,
 // Returns the line content without the terminator.
 // Returns an error if the line exceeds maxLen.
 func readLine(r *bufio.Reader, cw rawSink, maxLen int) (string, error) {
+	line, _, err := readLineTerm(r, cw, maxLen)
+	return line, err
+}
+
+// readLineTerm is readLine that also reports whether the returned line
+// ended with its LF terminator. A partial line returned on EOF or a read
+// error reports false.
+func readLineTerm(r *bufio.Reader, cw rawSink, maxLen int) (string, bool, error) {
 	var line []byte
+	terminated := false
 	for {
 		segment, err := r.ReadSlice('\n')
 
@@ -338,7 +432,7 @@ func readLine(r *bufio.Reader, cw rawSink, maxLen int) (string, error) {
 			if remaining > 0 && cw != nil {
 				cw.write(segment[:remaining])
 			}
-			return "", fmt.Errorf("%w %d", errLineTooLong, maxLen)
+			return "", false, fmt.Errorf("%w %d", errLineTooLong, maxLen)
 		}
 
 		line = append(line, segment...)
@@ -347,6 +441,7 @@ func readLine(r *bufio.Reader, cw rawSink, maxLen int) (string, error) {
 		}
 
 		if err == nil {
+			terminated = true
 			break
 		}
 		if err == bufio.ErrBufferFull {
@@ -358,7 +453,7 @@ func readLine(r *bufio.Reader, cw rawSink, maxLen int) (string, error) {
 			// Return what we have on EOF (partial line).
 			break
 		}
-		return "", err
+		return "", false, err
 	}
 
 	// Strip exactly one trailing CRLF or LF terminator, preserving any other
@@ -372,7 +467,7 @@ func readLine(r *bufio.Reader, cw rawSink, maxLen int) (string, error) {
 		}
 		line = line[:n]
 	}
-	return string(line), nil
+	return string(line), terminated, nil
 }
 
 // parseHeaders parses HTTP headers until the blank line terminator.
@@ -397,21 +492,30 @@ func parseHeaderLines(r *bufio.Reader, cw rawSink, maxSize int) (RawHeaders, []A
 	var headers RawHeaders
 	var anomalies []Anomaly
 	var totalSize int
+	// lastIsFragment reports that headers[len(headers)-1] came from a line
+	// cut short by EOF / a read error. On a later read error it is dropped
+	// from the returned (partial) headers so callers never see a fragment
+	// as a complete header (USK-1181).
+	lastIsFragment := false
 
 	for {
 		if len(headers) >= maxHeaderCount {
-			return headers, anomalies, fmt.Errorf("header count exceeds limit %d", maxHeaderCount)
+			return headers, anomalies, fmt.Errorf("%w: header count exceeds limit %d", errHeaderLimit, maxHeaderCount)
 		}
 
-		line, err := readLine(r, cw, maxSize)
+		line, terminated, err := readLineTerm(r, cw, maxSize)
 		if err != nil {
+			if lastIsFragment {
+				headers = headers[:len(headers)-1]
+			}
 			return headers, anomalies, fmt.Errorf("read header line: %w", err)
 		}
 
 		totalSize += len(line) + 2 // approximate +2 for CRLF
 		if totalSize > maxSize {
-			return headers, anomalies, fmt.Errorf("header section exceeds maximum size %d", maxSize)
+			return headers, anomalies, fmt.Errorf("%w: header section exceeds maximum size %d", errHeaderLimit, maxSize)
 		}
+		lastIsFragment = false
 
 		// Empty line = end of headers.
 		if line == "" {
@@ -437,48 +541,54 @@ func parseHeaderLines(r *bufio.Reader, cw rawSink, maxSize int) (RawHeaders, []A
 			continue
 		}
 
-		// Parse "Name: Value".
-		colonIdx := strings.IndexByte(line, ':')
-		if colonIdx < 0 {
-			// No colon — malformed header; record as best-effort with empty value.
-			headers = append(headers, RawHeader{Name: line, Value: ""})
-			continue
-		}
-
-		name := line[:colonIdx]
-		value := line[colonIdx+1:]
-
-		// Check for space before colon (header injection / obfuscation).
-		if strings.HasSuffix(name, " ") || strings.HasSuffix(name, "\t") {
-			anomalies = append(anomalies, Anomaly{
-				Type:   AnomalyHeaderInjection,
-				Detail: fmt.Sprintf("whitespace before colon in header name: %q", name),
-			})
-		}
-
-		// Check for embedded CR in header name or value (bare \r not part of line terminator).
-		if strings.ContainsRune(name, '\r') || strings.ContainsRune(value, '\r') {
-			anomalies = append(anomalies, Anomaly{
-				Type:   AnomalyHeaderInjection,
-				Detail: fmt.Sprintf("embedded CR in header: %q", name),
-			})
-		}
-
-		// Preserve raw value before OWS trimming for anomaly detection.
-		rawValue := value
-		// Trim optional leading whitespace from value (OWS per RFC 7230).
-		value = strings.TrimLeft(value, " \t")
-		// Trim trailing OWS.
-		value = strings.TrimRight(value, " \t")
-
-		hdr := RawHeader{Name: name, Value: value}
-		if rawValue != value {
-			hdr.RawValue = rawValue
-		}
-		headers = append(headers, hdr)
+		headers = append(headers, parseHeaderField(line, &anomalies))
+		lastIsFragment = !terminated
 	}
 
 	return headers, anomalies, nil
+}
+
+// parseHeaderField parses one "Name: Value" header line, appending any
+// anomalies it detects. A line without a colon is kept best-effort as a
+// header with that name and an empty value.
+func parseHeaderField(line string, anomalies *[]Anomaly) RawHeader {
+	colonIdx := strings.IndexByte(line, ':')
+	if colonIdx < 0 {
+		// No colon — malformed header; record as best-effort with empty value.
+		return RawHeader{Name: line, Value: ""}
+	}
+
+	name := line[:colonIdx]
+	value := line[colonIdx+1:]
+
+	// Check for space before colon (header injection / obfuscation).
+	if strings.HasSuffix(name, " ") || strings.HasSuffix(name, "\t") {
+		*anomalies = append(*anomalies, Anomaly{
+			Type:   AnomalyHeaderInjection,
+			Detail: fmt.Sprintf("whitespace before colon in header name: %q", name),
+		})
+	}
+
+	// Check for embedded CR in header name or value (bare \r not part of line terminator).
+	if strings.ContainsRune(name, '\r') || strings.ContainsRune(value, '\r') {
+		*anomalies = append(*anomalies, Anomaly{
+			Type:   AnomalyHeaderInjection,
+			Detail: fmt.Sprintf("embedded CR in header: %q", name),
+		})
+	}
+
+	// Preserve raw value before OWS trimming for anomaly detection.
+	rawValue := value
+	// Trim optional leading whitespace from value (OWS per RFC 7230).
+	value = strings.TrimLeft(value, " \t")
+	// Trim trailing OWS.
+	value = strings.TrimRight(value, " \t")
+
+	hdr := RawHeader{Name: name, Value: value}
+	if rawValue != value {
+		hdr.RawValue = rawValue
+	}
+	return hdr
 }
 
 // detectSmugglingAnomalies inspects headers for HTTP request smuggling patterns.

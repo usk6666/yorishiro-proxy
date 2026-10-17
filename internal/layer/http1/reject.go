@@ -1,16 +1,17 @@
 package http1
 
 import (
+	"bytes"
 	"io"
 	"log/slog"
 	"strconv"
 	"time"
 )
 
-// Bounds for the proxy-generated 414 written when a client's request line
-// exceeds the parser limit (USK-1137).
+// Bounds for the proxy-generated 414 / 431 written when a client's request
+// line (USK-1137) or header section (USK-1181) exceeds the parser limit.
 const (
-	// rejectWriteTimeout bounds the 414 write so a client that never reads
+	// rejectWriteTimeout bounds the 414 / 431 write so a client that never reads
 	// cannot pin the Layer's goroutine.
 	rejectWriteTimeout = 5 * time.Second
 
@@ -56,25 +57,43 @@ type closeWriter interface {
 	CloseWrite() error
 }
 
-// rejectRequestLineTooLong answers a request whose request line exceeded
-// the parser limit with 414 URI Too Long + Connection: close, then closes
-// the connection. Only the client-facing (envelope.Send) Layer calls it:
-// the request was never framed, so there is no envelope and nothing is
-// recorded (same as an over-limit header section).
+// headerTooLargeBody is the plain-text body of the 431 response.
+const headerTooLargeBody = "request header fields too large\r\n"
+
+// headerTooLargeResponse is the complete 431 Request Header Fields Too Large
+// response (RFC 6585 §5) the client-facing Layer writes for an over-limit
+// header section (USK-1181). Same shape and rationale as
+// uriTooLongResponse.
+var headerTooLargeResponse = []byte("HTTP/1.1 431 Request Header Fields Too Large\r\n" +
+	"Server: yorishiro-proxy\r\n" +
+	"Content-Type: text/plain; charset=utf-8\r\n" +
+	"Content-Length: " + strconv.Itoa(len(headerTooLargeBody)) + "\r\n" +
+	"Connection: close\r\n" +
+	"\r\n" +
+	headerTooLargeBody)
+
+// rejectRequestHead answers a request head that exceeded a parser limit
+// with resp (the 414 or the 431, both Connection: close), then closes the
+// connection. Only the client-facing (envelope.Send) Layer calls it: the
+// request was never framed, so there is no envelope. It returns a copy of
+// the bytes it wrote and whether the write succeeded, so the caller can
+// record the response (USK-1181).
 //
 // Every step is bounded: the write by rejectWriteTimeout, the linger by
-// rejectLingerTimeout and rejectLingerMaxBytes. writeMu is held so the 414
-// cannot interleave with any other write on this connection.
-func (l *Layer) rejectRequestLineTooLong() {
+// rejectLingerTimeout and rejectLingerMaxBytes. writeMu is held so the
+// response cannot interleave with any other write on this connection.
+func (l *Layer) rejectRequestHead(resp []byte) (written []byte, ok bool) {
 	l.writeMu.Lock()
 	defer l.writeMu.Unlock()
 
-	slog.Debug("http1: request line exceeds limit; answering 414 and closing",
-		"stream_id", l.streamID, "conn_id", l.envCtx.ConnID)
+	slog.Debug("http1: request head exceeds limit; answering and closing",
+		"stream_id", l.streamID, "conn_id", l.envCtx.ConnID,
+		"status_line", statusLineOf(resp))
 
 	_ = l.conn.SetWriteDeadline(time.Now().Add(rejectWriteTimeout))
-	if _, err := l.conn.Write(uriTooLongResponse); err == nil {
-		if cw, ok := l.conn.(closeWriter); ok {
+	if _, err := l.conn.Write(resp); err == nil {
+		ok = true
+		if cw, isCW := l.conn.(closeWriter); isCW {
 			_ = cw.CloseWrite()
 		}
 		_ = l.conn.SetReadDeadline(time.Now().Add(rejectLingerTimeout))
@@ -83,4 +102,13 @@ func (l *Layer) rejectRequestLineTooLong() {
 		_, _ = io.CopyN(io.Discard, l.conn, rejectLingerMaxBytes)
 	}
 	_ = l.conn.Close()
+	return append([]byte(nil), resp...), ok
+}
+
+// statusLineOf returns resp's first line without its terminator.
+func statusLineOf(resp []byte) string {
+	if i := bytes.IndexByte(resp, '\r'); i >= 0 {
+		return string(resp[:i])
+	}
+	return string(resp)
 }
