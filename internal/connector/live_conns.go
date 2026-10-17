@@ -73,8 +73,9 @@ type liveConnEntry struct {
 	cancel context.CancelCauseFunc
 	// cut is set (under LiveConns.mu) once the entry was cancelled, so a
 	// later Reconcile does not count or log it again before the handler
-	// unwinds and releases it.
-	cut bool
+	// unwinds and releases it. Atomic so RevokePending reads it without
+	// the lock. A cut entry keeps pending as it was.
+	cut atomic.Bool
 	// pins counts the intercept holds in flight on this connection
 	// (LiveConnHandle.Pin / Unpin, USK-1192). Guarded by LiveConns.mu.
 	pins int
@@ -190,7 +191,7 @@ func (r *LiveConns) ReconcileWithDeferred(trigger string) (revoked, deferred int
 	r.mu.Lock()
 	snapshot := make([]*liveConnEntry, 0, len(r.conns))
 	for _, e := range r.conns {
-		if !e.cut && e.info.Admit != nil {
+		if !e.cut.Load() && e.info.Admit != nil {
 			snapshot = append(snapshot, e)
 		}
 	}
@@ -201,7 +202,7 @@ func (r *LiveConns) ReconcileWithDeferred(trigger string) (revoked, deferred int
 	for _, e := range snapshot {
 		allowed, reason := e.info.Admit()
 		r.mu.Lock()
-		if e.cut {
+		if e.cut.Load() {
 			r.mu.Unlock()
 			continue // a concurrent Reconcile / Settle got there first
 		}
@@ -236,7 +237,7 @@ func (r *LiveConns) ReconcileWithDeferred(trigger string) (revoked, deferred int
 		// No hold in flight: cut now. A pending entry whose holds all
 		// resolved without a Settle (backstop) was counted when it was
 		// revoked.
-		e.cut = true
+		e.cut.Store(true)
 		r.mu.Unlock()
 		e.cancel(fmt.Errorf("%w: %s", ErrTargetScopeRevoked, reason))
 		if !wasPending {
@@ -331,7 +332,7 @@ func (h *LiveConnHandle) Pin() bool {
 	}
 	h.reg.mu.Lock()
 	defer h.reg.mu.Unlock()
-	if h.e.cut {
+	if h.e.cut.Load() {
 		return false
 	}
 	h.e.pins++
@@ -362,9 +363,7 @@ func (h *LiveConnHandle) RevokePending() bool {
 	if h.e.pending.Load() {
 		return true
 	}
-	h.reg.mu.Lock()
-	defer h.reg.mu.Unlock()
-	return h.e.cut
+	return h.e.cut.Load()
 }
 
 // Settle cuts the connection iff it is revoke-pending, no hold is in
@@ -377,7 +376,7 @@ func (h *LiveConnHandle) Settle() {
 	}
 	r, e := h.reg, h.e
 	r.mu.Lock()
-	ready := !e.cut && e.pending.Load() && e.pins == 0
+	ready := !e.cut.Load() && e.pending.Load() && e.pins == 0
 	r.mu.Unlock()
 	if !ready {
 		return
@@ -388,21 +387,21 @@ func (h *LiveConnHandle) Settle() {
 	}
 
 	r.mu.Lock()
-	if e.cut || !e.pending.Load() || e.pins > 0 {
+	if e.cut.Load() || !e.pending.Load() || e.pins > 0 {
 		// A concurrent Reconcile / Settle decided, or a new hold started.
 		r.mu.Unlock()
 		return
 	}
-	e.pending.Store(false)
 	trigger := e.trigger
-	e.trigger = ""
 	if allowed {
+		e.pending.Store(false)
+		e.trigger = ""
 		r.mu.Unlock()
 		r.logger.Info("live connection revocation withdrawn: target admitted again",
 			r.logAttrs(e, "trigger", trigger)...)
 		return
 	}
-	e.cut = true
+	e.cut.Store(true)
 	r.mu.Unlock()
 	e.cancel(fmt.Errorf("%w: %s", ErrTargetScopeRevoked, reason))
 	r.logger.Info("live connection closed: target no longer in scope",
