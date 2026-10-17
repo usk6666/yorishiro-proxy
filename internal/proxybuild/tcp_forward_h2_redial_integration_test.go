@@ -204,8 +204,10 @@ func TestTCPForwardH2_UpstreamGoAway_StopReleasesRedialedLayers(t *testing.T) {
 	cancel()
 	_ = cli.conn.Close()
 	goleak.VerifyNone(t, ignore,
-		// The origin's per-connection serve goroutines exit at t.Cleanup.
+		// The origin's accept loop and per-connection serve goroutines exit
+		// at t.Cleanup. Their stacks sit in net poll / Accept / ReadFrame,
+		// so match any frame rather than the top one.
+		goleak.IgnoreAnyFunction("github.com/usk6666/yorishiro-proxy/internal/proxybuild_test.(*refusingH2Origin).acceptLoop"),
 		goleak.IgnoreAnyFunction("github.com/usk6666/yorishiro-proxy/internal/proxybuild_test.(*refusingH2Origin).acceptLoop.func1"),
-		goleak.IgnoreTopFunction("github.com/usk6666/yorishiro-proxy/internal/proxybuild_test.(*refusingH2Origin).acceptLoop"),
 	)
 }

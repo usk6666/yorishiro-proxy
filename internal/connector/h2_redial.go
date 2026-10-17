@@ -2,26 +2,10 @@ package connector
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"net"
 
-	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/http2"
 )
-
-// NewForwardUpstreamH2Layer constructs the upstream (ClientRole) HTTP/2
-// Layer for a tcp_forward connection. Scaffolding for USK-1165.
-func NewForwardUpstreamH2Layer(
-	conn net.Conn,
-	label string,
-	scheme string,
-	envCtx envelope.EnvelopeContext,
-	cfg *BuildConfig,
-	onGoAway func(),
-) (*http2.Layer, error) {
-	return nil, errors.New("connector: NewForwardUpstreamH2Layer: not implemented")
-}
 
 // RedialUpstreamH2 establishes a fresh upstream HTTP/2 *Layer for target,
 // reusing the EnvelopeContext template carried by stale (so the new Layer
