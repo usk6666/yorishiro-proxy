@@ -110,6 +110,7 @@ func (r *LiveConns) Register(ctx context.Context, c LiveConn) (context.Context, 
 	id := r.nextID
 	r.conns[id] = e
 	r.mu.Unlock()
+	cctx = context.WithValue(cctx, liveConnKey{}, &LiveConnHandle{reg: r, e: e})
 
 	var once sync.Once
 	release := func() {
@@ -209,4 +210,44 @@ func trackAdmitted(ctx context.Context, reg *LiveConns, via, target string, admi
 		return tctx, release, false
 	}
 	return tctx, release, true
+}
+
+// liveConnKey is the context key under which Register stores the
+// connection's *LiveConnHandle.
+type liveConnKey struct{}
+
+// LiveConnHandle is the per-connection view of a LiveConns entry. A nil
+// handle is valid and inert.
+type LiveConnHandle struct {
+	reg *LiveConns
+	e   *liveConnEntry
+}
+
+// LiveConnFromContext returns the handle Register stored in ctx, or nil.
+func LiveConnFromContext(ctx context.Context) *LiveConnHandle {
+	if ctx == nil {
+		return nil
+	}
+	h, _ := ctx.Value(liveConnKey{}).(*LiveConnHandle)
+	return h
+}
+
+// SettleLiveConn calls Settle on the handle carried by ctx (nil-safe).
+func SettleLiveConn(ctx context.Context) { LiveConnFromContext(ctx).Settle() }
+
+// Pin is a USK-1192 scaffolding stub.
+func (h *LiveConnHandle) Pin() bool { return true }
+
+// Unpin is a USK-1192 scaffolding stub.
+func (h *LiveConnHandle) Unpin() {}
+
+// RevokePending is a USK-1192 scaffolding stub.
+func (h *LiveConnHandle) RevokePending() bool { return false }
+
+// Settle is a USK-1192 scaffolding stub.
+func (h *LiveConnHandle) Settle() {}
+
+// ReconcileWithDeferred is a USK-1192 scaffolding stub.
+func (r *LiveConns) ReconcileWithDeferred(trigger string) (revoked, deferred int) {
+	return r.Reconcile(trigger), 0
 }
