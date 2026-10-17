@@ -396,7 +396,15 @@ Streams beyond this cap are rejected with `RST_STREAM(REFUSED_STREAM)` per RFC 9
 Dynamically changes the protocol detection timeout in milliseconds. Range: 100-600000.
 
 ### request_timeout_ms (integer, optional)
-Dynamically changes the HTTP request header read timeout in milliseconds. Range: 100-600000.
+Dynamically changes the request-head timeout in milliseconds. Range: 100-600000.
+
+It bounds, per client connection:
+- each HTTP/1.x request's request line + header section, counted from the request's first byte (every request on a keep-alive connection, plain HTTP, MITM HTTPS and `tcp_forwards` alike);
+- the `CONNECT` request itself;
+- the client-side TLS MITM handshake;
+- the plain-HTTP forward target peek and the CONNECT / SOCKS5 inner first-byte peek.
+
+The request body is not covered. A client that misses the deadline is disconnected without a response and nothing is recorded. Separately, an idle client keep-alive connection (no byte of the next request) is closed after 120 seconds, or after `request_timeout_ms` if that is longer. Changes apply to the next request / next connection.
 
 ### client_cert (object, optional)
 Global mTLS client certificate configuration for upstream connections.

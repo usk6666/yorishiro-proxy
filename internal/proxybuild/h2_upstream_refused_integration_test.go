@@ -92,6 +92,7 @@ type refusingH2Origin struct {
 	ln    net.Listener
 	mode  refusingOriginMode
 	batch int
+	grpc  bool
 
 	accepts atomic.Int64
 	wg      sync.WaitGroup
@@ -111,12 +112,41 @@ type refusingH2Origin struct {
 
 func startRefusingH2Origin(t *testing.T, mode refusingOriginMode, batch int) *refusingH2Origin {
 	t.Helper()
-	ln := listenTLSH2Origin(t)
+	return startRefusingH2OriginOpts(t, refusingOriginOpts{mode: mode, batch: batch})
+}
+
+// refusingOriginOpts configures startRefusingH2OriginOpts. The zero value
+// of every field other than mode / batch reproduces startRefusingH2Origin.
+type refusingOriginOpts struct {
+	mode  refusingOriginMode
+	batch int
+	// plaintext serves h2c (prior-knowledge HTTP/2 over cleartext TCP)
+	// instead of h2 over TLS (USK-1165: tcp_forward with upstream_tls=false).
+	plaintext bool
+	// grpc answers every request with a native gRPC response (HEADERS
+	// content-type application/grpc, one LPM DATA frame, grpc-status
+	// trailers) instead of text/plain.
+	grpc bool
+}
+
+func startRefusingH2OriginOpts(t *testing.T, opts refusingOriginOpts) *refusingH2Origin {
+	t.Helper()
+	var ln net.Listener
+	var err error
+	if opts.plaintext {
+		ln, err = net.Listen("tcp", "127.0.0.1:0")
+	} else {
+		ln, err = tls.Listen("tcp", "127.0.0.1:0", refusingOriginTLSConfig(t))
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
 	o := &refusingH2Origin{
 		addr:          ln.Addr().String(),
 		ln:            ln,
-		mode:          mode,
-		batch:         batch,
+		mode:          opts.mode,
+		batch:         opts.batch,
+		grpc:          opts.grpc,
 		refused:       make(map[uint32]bool),
 		firstConnDone: make(chan struct{}),
 	}
@@ -125,9 +155,9 @@ func startRefusingH2Origin(t *testing.T, mode refusingOriginMode, batch int) *re
 	return o
 }
 
-// listenTLSH2Origin returns a TLS listener on 127.0.0.1 with a self-signed
-// localhost certificate that negotiates only h2.
-func listenTLSH2Origin(t *testing.T) net.Listener {
+// refusingOriginTLSConfig returns a self-signed localhost TLS config
+// advertising ALPN h2.
+func refusingOriginTLSConfig(t *testing.T) *tls.Config {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -149,11 +179,17 @@ func listenTLSH2Origin(t *testing.T) net.Listener {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tlsCfg := &tls.Config{
+	return &tls.Config{
 		Certificates: []tls.Certificate{{Certificate: [][]byte{certDER}, PrivateKey: key}},
 		NextProtos:   []string{"h2"},
 	}
-	ln, err := tls.Listen("tcp", "127.0.0.1:0", tlsCfg)
+}
+
+// listenTLSH2Origin returns a TLS listener on 127.0.0.1 with a self-signed
+// localhost certificate that negotiates only h2.
+func listenTLSH2Origin(t *testing.T) net.Listener {
+	t.Helper()
+	ln, err := tls.Listen("tcp", "127.0.0.1:0", refusingOriginTLSConfig(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -221,6 +257,7 @@ type originConn struct {
 	idx  int64
 	enc  *hpack.Encoder
 	buf  bytes.Buffer
+	grpc bool
 }
 
 func (oc *originConn) writeHeaders(streamID uint32, endStream bool, fields ...hpack.HeaderField) error {
@@ -239,6 +276,9 @@ func (oc *originConn) writeHeaders(streamID uint32, endStream bool, fields ...hp
 }
 
 func (oc *originConn) writeOK(streamID uint32) error {
+	if oc.grpc {
+		return oc.writeGRPCOK(streamID)
+	}
 	body := []byte("ok from origin conn " + strconv.FormatInt(oc.idx, 10))
 	if err := oc.writeHeaders(streamID, false,
 		hpack.HeaderField{Name: ":status", Value: "200"},
@@ -249,6 +289,28 @@ func (oc *originConn) writeOK(streamID uint32) error {
 		return err
 	}
 	return oc.fr.WriteData(streamID, true, body)
+}
+
+// writeGRPCOK answers streamID with a native gRPC response: response
+// HEADERS, one length-prefixed message carrying the connection index, and
+// grpc-status 0 trailers (the frame sequence grpc-go servers emit for a
+// unary call).
+func (oc *originConn) writeGRPCOK(streamID uint32) error {
+	if err := oc.writeHeaders(streamID, false,
+		hpack.HeaderField{Name: ":status", Value: "200"},
+		hpack.HeaderField{Name: "content-type", Value: "application/grpc"},
+		hpack.HeaderField{Name: "x-origin-conn", Value: strconv.FormatInt(oc.idx, 10)},
+	); err != nil {
+		return err
+	}
+	msg := []byte("conn " + strconv.FormatInt(oc.idx, 10))
+	lpm := append([]byte{0, 0, 0, 0, byte(len(msg))}, msg...)
+	if err := oc.fr.WriteData(streamID, false, lpm); err != nil {
+		return err
+	}
+	return oc.writeHeaders(streamID, true,
+		hpack.HeaderField{Name: "grpc-status", Value: "0"},
+	)
 }
 
 // handleControl answers SETTINGS / PING; returns true when f was a control
@@ -274,7 +336,7 @@ func (o *refusingH2Origin) serveConn(c net.Conn, idx int64) {
 	if _, err := io.ReadFull(c, preface); err != nil || string(preface) != http2.ClientPreface {
 		return
 	}
-	oc := &originConn{conn: c, fr: http2.NewFramer(c, c), idx: idx}
+	oc := &originConn{conn: c, fr: http2.NewFramer(c, c), idx: idx, grpc: o.grpc}
 	oc.enc = hpack.NewEncoder(&oc.buf)
 	oc.fr.ReadMetaHeaders = hpack.NewDecoder(4096, nil)
 	oc.fr.MaxHeaderListSize = 1 << 20
@@ -435,10 +497,13 @@ func (r *rawStreamResult) done() bool { return r.ended || r.rst }
 
 // rawH2Client is a frame-level h2 client speaking through a CONNECT tunnel.
 type rawH2Client struct {
-	conn *tls.Conn
-	fr   *http2.Framer
-	enc  *hpack.Encoder
-	buf  bytes.Buffer
+	conn net.Conn
+	// scheme is the :scheme pseudo-header sendGETs writes; empty means
+	// "https".
+	scheme string
+	fr     *http2.Framer
+	enc    *hpack.Encoder
+	buf    bytes.Buffer
 }
 
 func dialRawH2ThroughProxy(t *testing.T, proxyAddr, target string) *rawH2Client {
@@ -483,7 +548,7 @@ func (c *rawH2Client) sendGETs(t *testing.T, authority string, ids ...uint32) {
 		c.buf.Reset()
 		for _, f := range []hpack.HeaderField{
 			{Name: ":method", Value: "GET"},
-			{Name: ":scheme", Value: "https"},
+			{Name: ":scheme", Value: c.schemeOrHTTPS()},
 			{Name: ":authority", Value: authority},
 			{Name: ":path", Value: fmt.Sprintf("/req-%d", id)},
 		} {
@@ -500,6 +565,13 @@ func (c *rawH2Client) sendGETs(t *testing.T, authority string, ids ...uint32) {
 			t.Fatalf("write HEADERS on stream %d: %v", id, err)
 		}
 	}
+}
+
+func (c *rawH2Client) schemeOrHTTPS() string {
+	if c.scheme == "" {
+		return "https"
+	}
+	return c.scheme
 }
 
 // collect reads frames until every stream in ids is done (END_STREAM or

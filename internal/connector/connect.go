@@ -62,7 +62,9 @@ var ErrNotCONNECT = errors.New("connector: expected CONNECT request")
 // for the tunnel phase.
 //
 // The context is used only for logging; the underlying I/O uses any
-// deadlines that have already been set on the connection.
+// deadlines that have already been set on the connection. The CONNECT
+// handler arms BuildConfig.EffectiveRequestHeaderTimeout before calling
+// Negotiate so a trickled CONNECT request is bounded (USK-1162).
 func (n *CONNECTNegotiator) Negotiate(ctx context.Context, pc *PeekConn) (string, error) {
 	if pc == nil {
 		return "", fmt.Errorf("connector: CONNECTNegotiator.Negotiate: nil conn")

@@ -172,7 +172,11 @@ func NewCONNECTHandler(cfg CONNECTHandlerConfig) HandlerFunc {
 		connLogger := LoggerFromContext(ctx, logger)
 
 		// Step 1: CONNECT negotiation (parses request, sends 200 OK).
+		// USK-1162: bound the CONNECT request head by request_timeout_ms
+		// so a trickling client cannot hold the slot (nil-safe BuildCfg).
+		_ = pc.SetReadDeadline(time.Now().Add(cfg.BuildCfg.EffectiveRequestHeaderTimeout()))
 		target, err := cfg.Negotiator.Negotiate(ctx, pc)
+		_ = pc.SetReadDeadline(time.Time{})
 		if err != nil {
 			if errors.Is(err, ErrNotCONNECT) {
 				connLogger.Debug("not a CONNECT request", "error", err)

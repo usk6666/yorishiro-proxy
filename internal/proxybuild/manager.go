@@ -627,7 +627,10 @@ func (m *Manager) PeekTimeout() time.Duration {
 
 // SetRequestTimeout updates the HTTP request header read timeout enforced
 // by the plain-HTTP forward handler and the CONNECT / SOCKS5 inner-byte
-// peek (USK-844). Applies immediately to every running listener via the
+// peek (USK-844), and the request-head bound on the bound BuildConfig
+// (USK-1162: HTTP/1.x request line + headers, CONNECT request, client-side
+// TLS MITM handshake; next request / next connection semantics). Applies
+// immediately to every running listener via the
 // per-listener atomic-Int64 slot wired in BuildLiveStack; the value is
 // also remembered so listeners started later inherit it. Non-positive
 // values are stored verbatim — Listener.SetRequestTimeout normalises any
@@ -642,10 +645,15 @@ func (m *Manager) SetRequestTimeout(d time.Duration) {
 	for _, entry := range m.listeners {
 		listeners = append(listeners, entry.stack.Listener)
 	}
+	bc := m.buildCfg
 	m.mu.Unlock()
 	for _, l := range listeners {
 		l.SetRequestTimeout(d)
 	}
+	// USK-1162: the same knob bounds the client-side request head on every
+	// HTTP/1.x request, the CONNECT request, and the client-side TLS MITM
+	// handshake. Nil-safe when no BuildConfig is bound.
+	bc.SetRequestHeaderTimeout(d)
 }
 
 // RequestTimeout returns the configured HTTP request header read timeout

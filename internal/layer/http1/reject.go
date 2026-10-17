@@ -14,17 +14,20 @@ const (
 	// cannot pin the Layer's goroutine.
 	rejectWriteTimeout = 5 * time.Second
 
-	// rejectLingerTimeout bounds how long the Layer keeps reading (and
-	// discarding) the rest of the rejected request after the 414 is out.
-	// Closing a TCP socket with unread received data makes the kernel send
-	// RST instead of FIN, and an RST can make the client discard the 414
-	// before reading it. Matches Go net/http's rstAvoidanceDelay (500ms),
-	// which its server waits out in closeWriteAndWait after a 431.
-	rejectLingerTimeout = 500 * time.Millisecond
-
 	// rejectLingerMaxBytes caps the bytes discarded while lingering.
 	rejectLingerMaxBytes = 1 << 20
 )
+
+// rejectLingerTimeout bounds how long the Layer keeps reading (and
+// discarding) the rest of the rejected request after the 414 is out.
+// Closing a TCP socket with unread received data makes the kernel send
+// RST instead of FIN, and an RST can make the client discard the 414
+// before reading it. Matches Go net/http's rstAvoidanceDelay (500ms),
+// which its server waits out in closeWriteAndWait after a 431.
+//
+// A var only so tests can stretch it (export_test.go); never reassigned
+// in production code.
+var rejectLingerTimeout = 500 * time.Millisecond
 
 // uriTooLongBody is the plain-text body of the 414 response.
 const uriTooLongBody = "request line too long\r\n"
@@ -42,16 +45,13 @@ var uriTooLongResponse = []byte("HTTP/1.1 414 URI Too Long\r\n" +
 	"\r\n" +
 	uriTooLongBody)
 
-// closeWriter is implemented by *net.TCPConn and *tls.Conn (close_notify).
-//
-// Known limitation: on the plain-HTTP forward path (and plain HTTP inside
-// CONNECT) l.conn is a *connector.PeekConn, which embeds net.Conn and so
-// does not expose CloseWrite. There the 414 path skips the half-close and
-// relies on the drain alone for RST avoidance; the 414 is still delivered.
-// PeekConn deliberately does not grow a CloseWrite method here: the TLS
-// passthrough relay (connector.relayBidirectionalCounted) type-asserts the
-// same interface on the client conn, so adding it would also change
-// half-close behaviour on that path. Tracked as a follow-up to USK-1137.
+// closeWriter is implemented by *net.TCPConn, *tls.Conn (close_notify) and
+// *connector.PeekConn, which forwards to its inner conn (USK-1163). On the
+// plain-HTTP forward path (and plain HTTP inside CONNECT / SOCKS5 /
+// tcp_forward) l.conn is a PeekConn, so the 414 is followed by a FIN there
+// too. PeekConn returns an error (ignored here) when its inner conn cannot
+// half-close, which leaves the drain alone for RST avoidance. Pinned by
+// TestLayer_Send_RequestLineTooLong_PeekConnHalfCloses.
 type closeWriter interface {
 	CloseWrite() error
 }

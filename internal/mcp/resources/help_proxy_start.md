@@ -128,7 +128,7 @@ Timeout in milliseconds for protocol detection on new connections.
 - Range: 100-600000
 
 ### request_timeout_ms (integer, optional)
-Timeout in milliseconds for reading HTTP request headers.
+Timeout in milliseconds for receiving a client's request head: each HTTP/1.x request line + header section (from the request's first byte, on every keep-alive request), the `CONNECT` request, and the client-side TLS MITM handshake. The request body is not covered. A client that misses it is disconnected without a response. Idle client keep-alive connections are closed after 120 seconds (or `request_timeout_ms`, if longer). See `configure` for the full list.
 - Default: `60000` (60 seconds)
 - Range: 100-600000
 

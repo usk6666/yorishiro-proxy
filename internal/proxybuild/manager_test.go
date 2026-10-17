@@ -442,6 +442,40 @@ func TestManager_MaxConcurrentStreams_NoBoundBuildConfig(t *testing.T) {
 	}
 }
 
+// TestManager_SetRequestTimeout_FansOutToBuildConfig pins USK-1162: the
+// request_timeout_ms runtime setter also drives the BuildConfig request-head
+// bound read by the HTTP/1.x client Layer, CONNECT negotiation, and the
+// client-side TLS MITM handshake.
+func TestManager_SetRequestTimeout_FansOutToBuildConfig(t *testing.T) {
+	bc := &connector.BuildConfig{}
+	mgr, err := NewManager(ManagerConfig{
+		Logger:       silentLogger(),
+		StackFactory: func(_ context.Context, _, _ string) (*Stack, error) { return nil, errors.New("unused") },
+		BuildConfig:  bc,
+	})
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	mgr.SetRequestTimeout(1500 * time.Millisecond)
+	if got := bc.EffectiveRequestHeaderTimeout(); got != 1500*time.Millisecond {
+		t.Errorf("EffectiveRequestHeaderTimeout = %v, want 1.5s", got)
+	}
+	mgr.SetRequestTimeout(0)
+	if got := bc.EffectiveRequestHeaderTimeout(); got != connector.DefaultRequestHeaderTimeout {
+		t.Errorf("after SetRequestTimeout(0) = %v, want default", got)
+	}
+
+	// No bound BuildConfig: must not panic.
+	mgr2, err := NewManager(ManagerConfig{
+		Logger:       silentLogger(),
+		StackFactory: func(_ context.Context, _, _ string) (*Stack, error) { return nil, errors.New("unused") },
+	})
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	mgr2.SetRequestTimeout(time.Second)
+}
+
 func TestManager_TCPForwards_NilParamsAccepted(t *testing.T) {
 	// StartTCPForwards(nil) is a no-op (no forwards to bind) — must not
 	// return an error and must not bind anything.

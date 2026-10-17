@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"os"
 	"strings"
@@ -113,6 +114,45 @@ type options struct {
 	// reaches its terminal state. Drives ReleaseTransaction(ConnID, FlowID)
 	// for every envelope the Channel emitted via Next. nil = no-op.
 	stateReleaser pluginv2.StateReleaser
+
+	// requestHeaderTimeout / keepAliveIdleTimeout bound the client-side
+	// request head (USK-1162). See WithRequestHeaderTimeout.
+	requestHeaderTimeout func() time.Duration
+	keepAliveIdleTimeout func() time.Duration
+}
+
+// DefaultKeepAliveIdleTimeout is how long a Send-direction Layer with a
+// request header timeout waits for the first byte of the next request
+// (USK-1162). 120s outlasts the keep-alive idle timeout of mainstream
+// browsers (Firefox: 115s) so the proxy never races a browser that is about
+// to reuse the connection.
+const DefaultKeepAliveIdleTimeout = 120 * time.Second
+
+// WithRequestHeaderTimeout bounds how long a Send-direction (client-facing)
+// Layer waits for one request's request line and header section — the
+// net/http ReadHeaderTimeout equivalent (USK-1162).
+//
+// The bound has two phases. While no byte of the next request has arrived,
+// the Layer waits up to max(keep-alive idle timeout, fn()) — see
+// WithKeepAliveIdleTimeout and DefaultKeepAliveIdleTimeout. Once the first
+// byte arrives, the rest of the request line and headers must arrive within
+// fn(). The deadline is cleared before the body is read, so slow bodies and
+// Expect: 100-continue are unaffected. On expiry the parse fails and the
+// connection is closed without a response; nothing is recorded.
+//
+// fn is consulted at the start of every request parse so a runtime change
+// applies to the next request. A nil fn or a non-positive return disables
+// both phases. The option is ignored on Receive-direction Layers.
+func WithRequestHeaderTimeout(fn func() time.Duration) Option {
+	return func(o *options) { o.requestHeaderTimeout = fn }
+}
+
+// WithKeepAliveIdleTimeout overrides DefaultKeepAliveIdleTimeout for the
+// idle phase of WithRequestHeaderTimeout. A nil fn or a non-positive return
+// keeps the default. It has no effect unless WithRequestHeaderTimeout is
+// also active. Intended for tests.
+func WithKeepAliveIdleTimeout(fn func() time.Duration) Option {
+	return func(o *options) { o.keepAliveIdleTimeout = fn }
 }
 
 // Option configures a Layer.
@@ -445,6 +485,57 @@ func (l *Layer) peekPending() *channel {
 		return nil
 	}
 	return l.pendingQ[0]
+}
+
+// awaitRequestHead applies the WithRequestHeaderTimeout bound before a
+// client-side request parse (USK-1162). It reports whether a header
+// deadline is armed on l.conn; the caller must clear it as soon as the
+// request line and header section have been parsed.
+//
+// Phase 1 (idle): when no byte of the next request is buffered, wait up to
+// max(keep-alive idle, header timeout) for the first byte. Phase 2
+// (header): from the first byte, the request head must complete within the
+// header timeout. Pipelined requests already in the buffer skip phase 1.
+//
+// Returns the Peek error on idle expiry or peer close (io.EOF for a clean
+// keep-alive close). Not active on Receive Layers or without the option.
+func (l *Layer) awaitRequestHead() (armed bool, err error) {
+	if l.direction != envelope.Send || l.opts.requestHeaderTimeout == nil {
+		return false, nil
+	}
+	headerTimeout := l.opts.requestHeaderTimeout()
+	if headerTimeout <= 0 {
+		return false, nil
+	}
+	if l.reader.Buffered() == 0 {
+		idle := DefaultKeepAliveIdleTimeout
+		if l.opts.keepAliveIdleTimeout != nil {
+			if v := l.opts.keepAliveIdleTimeout(); v > 0 {
+				idle = v
+			}
+		}
+		if idle < headerTimeout {
+			idle = headerTimeout
+		}
+		_ = l.conn.SetReadDeadline(time.Now().Add(idle))
+		if _, err := l.reader.Peek(1); err != nil {
+			_ = l.conn.SetReadDeadline(time.Time{})
+			if errors.Is(err, os.ErrDeadlineExceeded) {
+				l.logRequestHeadTimeout("keep-alive idle", err)
+			}
+			return false, err
+		}
+	}
+	_ = l.conn.SetReadDeadline(time.Now().Add(headerTimeout))
+	return true, nil
+}
+
+// logRequestHeadTimeout records a USK-1162 request-head deadline expiry at
+// Debug: a slow or idle client is a client-side condition, not a proxy
+// anomaly.
+func (l *Layer) logRequestHeadTimeout(phase string, err error) {
+	slog.Debug("http1: client request head timed out; closing connection",
+		"stream_id", l.streamID, "phase", phase, "error", err)
 }
 
 // spawnLoopSend parses requests sequentially and yields one Channel per

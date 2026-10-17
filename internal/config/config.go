@@ -179,7 +179,11 @@ type Config struct {
 	// PeekTimeout is the timeout for protocol detection on new connections.
 	PeekTimeout time.Duration `json:"peek_timeout"`
 
-	// RequestTimeout is the timeout for reading HTTP request headers.
+	// RequestTimeout bounds receiving a client's request head: each HTTP/1.x
+	// request line + header section, the CONNECT request, and the
+	// client-side TLS MITM handshake (USK-1162), plus the plain-HTTP
+	// forward target peek and CONNECT / SOCKS5 inner peek (USK-844). The
+	// request body is not covered.
 	RequestTimeout time.Duration `json:"request_timeout"`
 
 	// DialTimeout is the timeout for establishing upstream TCP connections

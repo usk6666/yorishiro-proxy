@@ -103,9 +103,9 @@ type configureInput struct {
 	// Takes effect for the next incoming connection.
 	PeekTimeoutMs *int `json:"peek_timeout_ms,omitempty" jsonschema:"protocol detection timeout in milliseconds (100-600000)"`
 
-	// RequestTimeoutMs dynamically changes the HTTP request header read timeout in milliseconds.
+	// RequestTimeoutMs dynamically changes the request-head timeout in milliseconds (USK-1162).
 	// Takes effect for the next incoming request.
-	RequestTimeoutMs *int `json:"request_timeout_ms,omitempty" jsonschema:"HTTP request header read timeout in milliseconds (100-600000)"`
+	RequestTimeoutMs *int `json:"request_timeout_ms,omitempty" jsonschema:"Request-head timeout in milliseconds: HTTP/1.x request line + headers, CONNECT request, client TLS handshake (100-600000)"`
 
 	// Budget dynamically configures diagnostic session budget limits.
 	// Agent layer budget values must not exceed policy limits.
