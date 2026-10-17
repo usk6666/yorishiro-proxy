@@ -119,6 +119,15 @@ type options struct {
 	// request head (USK-1162). See WithRequestHeaderTimeout.
 	requestHeaderTimeout func() time.Duration
 	keepAliveIdleTimeout func() time.Duration
+
+	// afterInitialYield is a USK-1184 test seam: when non-nil, the
+	// Send-direction goroutine in New calls it right after handing the
+	// initial deferred-parse Channel to Channels(), before it waits for that
+	// Channel to terminate. Tests use it to hold the goroutine until a
+	// Layer.Close has landed during the initial parse, which forces the
+	// scheduling where termDone and l.closed are both ready at once. No
+	// production Option sets it.
+	afterInitialYield func()
 }
 
 // DefaultKeepAliveIdleTimeout is how long a Send-direction Layer with a
@@ -325,6 +334,9 @@ func New(conn net.Conn, streamID string, direction envelope.Direction, opts ...O
 			case l.chOut <- initial:
 			case <-l.closed:
 				return
+			}
+			if l.opts.afterInitialYield != nil {
+				l.opts.afterInitialYield()
 			}
 			// Wait for the initial exchange to fully terminate (session
 			// closed the Channel, parse failed, or Layer-level close)
