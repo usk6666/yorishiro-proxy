@@ -630,7 +630,7 @@ func (c *channel) closeStream(refused bool) {
 		// h2Stream guard makes the close-before-send path spec-compliant;
 		// the abnormal-close guard preserves the USK-618 bilateral-close
 		// contract.
-		if id := c.h2Stream.Load(); id != 0 && (!sentEnd || !recvEnd) && !rstSent && !c.streamAlreadyReset(id) {
+		if id := c.h2Stream.Load(); id != 0 && (!sentEnd || !recvEnd) && !rstSent && !c.streamAlreadyReset() {
 			code := ErrCodeCancel
 			if refused && !headersSent {
 				code = ErrCodeRefusedStream
@@ -666,26 +666,13 @@ func (c *channel) closeStream(refused bool) {
 //   - a stream-level WINDOW_UPDATE error (reader), which enqueues its own
 //     RST_STREAM before failStream;
 //   - MarkTerminatedWithRST, which emits its own RST_STREAM;
-//   - a peer GOAWAY whose last_stream_id is below this stream
-//     (failStreamsAfterGoAway): RFC 9113 §6.8 — the GOAWAY sender never
-//     processed the stream and ignores further frames on it.
-//
-// Exception: the reader applies a received GOAWAY's last_stream_id to every
-// open stream regardless of role, but last_stream_id only covers streams
-// initiated by the GOAWAY's receiver. A ServerRole Layer's channels are
-// peer-initiated, so a client GOAWAY does not close them on the client's
-// side; the client still expects them to end, and the CANCEL is kept.
-func (c *channel) streamAlreadyReset(id uint32) bool {
+//   - a peer GOAWAY whose last_stream_id is below a stream this Layer
+//     initiated (failStreamsAfterGoAway): RFC 9113 §6.8 — the GOAWAY
+//     sender never processed the stream and ignores further frames on it.
+//     Peer-initiated streams are never failed by a GOAWAY (USK-1174).
+func (c *channel) streamAlreadyReset() bool {
 	var se *layer.StreamError
-	if !errors.As(c.Err(), &se) {
-		return false
-	}
-	if c.layer.role == ServerRole && se.Code == layer.ErrorRefused {
-		if received, last, _ := c.layer.conn.GoAwayReceived(); received && id > last {
-			return false
-		}
-	}
-	return true
+	return errors.As(c.Err(), &se)
 }
 
 // BuildHeaderFieldsFromEvent constructs the HPACK header field list for an

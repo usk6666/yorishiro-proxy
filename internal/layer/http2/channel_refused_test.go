@@ -318,11 +318,14 @@ func TestChannel_CloseRefused_ServerRole(t *testing.T) {
 	}
 }
 
-// TestChannel_Close_ServerRole_ClientGoAwayKeepsCancel guards the exception
-// in streamAlreadyReset: a client's GOAWAY last_stream_id only covers
-// streams the proxy (its receiver) initiated, so the client-initiated
-// streams the reader nevertheless fails as refused are still open on the
-// client's side and must still be reset with CANCEL on teardown.
+// TestChannel_Close_ServerRole_ClientGoAwayKeepsCancel pins that a client's
+// GOAWAY does not leave the client's own streams open on teardown: its
+// last_stream_id only covers streams the proxy (its receiver) initiated
+// (RFC 9113 §6.8), so a client-opened stream is still open on the client's
+// side after GOAWAY(0), and an abnormal Close before the response's
+// END_STREAM must reset it with exactly one CANCEL (USK-1157 intent,
+// re-expressed for USK-1174 now that the GOAWAY no longer terminates the
+// stream).
 func TestChannel_Close_ServerRole_ClientGoAwayKeepsCancel(t *testing.T) {
 	l, peer, cleanup := startServerLayer(t)
 	defer cleanup()
@@ -331,17 +334,50 @@ func TestChannel_Close_ServerRole_ClientGoAwayKeepsCancel(t *testing.T) {
 	if err := peer.wr.WriteGoAway(0, ErrCodeNo, nil); err != nil {
 		t.Fatalf("write GOAWAY: %v", err)
 	}
+	syncPing(t, peer)
 	select {
 	case <-ch.Closed():
-	case <-time.After(2 * time.Second):
-		t.Fatal("channel not terminated after client GOAWAY")
+		t.Fatalf("client-opened stream terminated by the client's GOAWAY(0): Err = %v", ch.Err())
+	default:
 	}
+
 	if err := ch.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
 	got := collectRSTs(t, peer, 300*time.Millisecond)[1]
 	if len(got) != 1 || got[0] != ErrCodeCancel {
 		t.Errorf("RST_STREAM codes on stream 1 = %v, want [%d] (CANCEL)", got, ErrCodeCancel)
+	}
+}
+
+// TestChannel_Close_ServerRole_ClientGoAwayThenRSTNoReply pins RFC 9113
+// §5.4.2 on the client leg after a client GOAWAY: when the client resets
+// its own stream (here with REFUSED_STREAM) after GOAWAY(0), the proxy must
+// not answer that RST_STREAM with one of its own. Before USK-1174 the
+// GOAWAY had already marked the stream refused (first-writer-wins), and the
+// ServerRole exception in streamAlreadyReset then emitted CANCEL.
+func TestChannel_Close_ServerRole_ClientGoAwayThenRSTNoReply(t *testing.T) {
+	l, peer, cleanup := startServerLayer(t)
+	defer cleanup()
+	ch := acceptServerStream(t, l, peer)
+
+	if err := peer.wr.WriteGoAway(0, ErrCodeNo, nil); err != nil {
+		t.Fatalf("write GOAWAY: %v", err)
+	}
+	if err := peer.wr.WriteRSTStream(1, ErrCodeRefusedStream); err != nil {
+		t.Fatalf("write RST_STREAM: %v", err)
+	}
+	select {
+	case <-ch.Closed():
+	case <-time.After(2 * time.Second):
+		t.Fatal("channel not terminated after client RST_STREAM")
+	}
+
+	if err := ch.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if got := collectRSTs(t, peer, 300*time.Millisecond)[1]; len(got) != 0 {
+		t.Errorf("RST_STREAM codes sent on stream 1 = %v, want none (RFC 9113 §5.4.2)", got)
 	}
 }
 

@@ -185,6 +185,17 @@ func refusingOriginTLSConfig(t *testing.T) *tls.Config {
 	}
 }
 
+// listenTLSH2Origin returns a TLS listener on 127.0.0.1 with a self-signed
+// localhost certificate that negotiates only h2.
+func listenTLSH2Origin(t *testing.T) net.Listener {
+	t.Helper()
+	ln, err := tls.Listen("tcp", "127.0.0.1:0", refusingOriginTLSConfig(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ln
+}
+
 func (o *refusingH2Origin) acceptLoop() {
 	for {
 		c, err := o.ln.Accept()
