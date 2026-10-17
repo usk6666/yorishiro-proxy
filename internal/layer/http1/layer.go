@@ -488,8 +488,8 @@ func (l *Layer) peekPending() *channel {
 }
 
 // awaitRequestHead applies the WithRequestHeaderTimeout bound before a
-// client-side request parse (USK-1162). It reports whether a header
-// deadline is armed on l.conn; the caller must clear it as soon as the
+// client-side request parse (USK-1162). It returns the header deadline
+// armed on l.conn (zero when none); the caller must clear it as soon as the
 // request line and header section have been parsed.
 //
 // Phase 1 (idle): when no byte of the next request is buffered, wait up to
@@ -499,13 +499,13 @@ func (l *Layer) peekPending() *channel {
 //
 // Returns the Peek error on idle expiry or peer close (io.EOF for a clean
 // keep-alive close). Not active on Receive Layers or without the option.
-func (l *Layer) awaitRequestHead() (armed bool, err error) {
+func (l *Layer) awaitRequestHead() (armed time.Duration, err error) {
 	if l.direction != envelope.Send || l.opts.requestHeaderTimeout == nil {
-		return false, nil
+		return 0, nil
 	}
 	headerTimeout := l.opts.requestHeaderTimeout()
 	if headerTimeout <= 0 {
-		return false, nil
+		return 0, nil
 	}
 	if l.reader.Buffered() == 0 {
 		idle := DefaultKeepAliveIdleTimeout
@@ -523,11 +523,11 @@ func (l *Layer) awaitRequestHead() (armed bool, err error) {
 			if errors.Is(err, os.ErrDeadlineExceeded) {
 				l.logRequestHeadTimeout("keep-alive idle", err)
 			}
-			return false, err
+			return 0, err
 		}
 	}
 	_ = l.conn.SetReadDeadline(time.Now().Add(headerTimeout))
-	return true, nil
+	return headerTimeout, nil
 }
 
 // logRequestHeadTimeout records a USK-1162 request-head deadline expiry at
@@ -565,6 +565,14 @@ func (l *Layer) spawnLoopSend() {
 			ch.markTerminated(perr)
 			if errors.Is(perr, io.EOF) {
 				return
+			}
+			// USK-1181: a request head the Layer itself closed is
+			// surfaced through Next (not just Err) so the consumer can
+			// record it. Other parse errors keep the io.EOF Next
+			// contract existing consumers rely on.
+			var head *RequestHeadError
+			if errors.As(perr, &head) {
+				ch.queuedErr = perr
 			}
 			// Yield the channel so consumers see the terminal state, then
 			// exit (the conn is unlikely to recover from a parse error).

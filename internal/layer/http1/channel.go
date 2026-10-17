@@ -762,6 +762,12 @@ func (c *channel) releaseStreamState() {
 // then request line + headers). The deadline is cleared before returning,
 // so the body read that follows is not covered. Returns io.EOF for a clean
 // peer close.
+//
+// USK-1181: when the Layer itself ends the connection after bytes of the
+// request arrived — header deadline expiry, or an over-limit request line
+// (414) / header section (431) — the error is a *RequestHeadError carrying
+// the received bytes. A zero-byte idle expiry, a peer close and a Layer
+// shutdown are returned as plain errors.
 func (c *channel) parseRequestHead() (*parser.RawRequest, error) {
 	armed, err := c.layer.awaitRequestHead()
 	if err != nil {
@@ -770,27 +776,63 @@ func (c *channel) parseRequestHead() (*parser.RawRequest, error) {
 		}
 		return nil, fmt.Errorf("http1: wait for request: %w", err)
 	}
+	started := time.Now()
 	rawReq, err := parser.ParseRequestWithOptions(c.layer.reader, parser.ParseOptions{
 		MaxRawCapture: c.bodyOpts.maxRawCapture,
 	})
-	if armed {
+	if armed > 0 {
 		_ = c.layer.conn.SetReadDeadline(time.Time{})
 	}
-	if err != nil {
-		if armed && errors.Is(err, os.ErrDeadlineExceeded) {
-			c.layer.logRequestHeadTimeout("header", err)
-		}
-		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
-			return nil, io.EOF
-		}
-		if errors.Is(err, parser.ErrRequestLineTooLong) {
-			// USK-1137: answer 414 instead of an empty reply. parseRequest
-			// runs only on the client-facing (Send) side.
-			c.layer.rejectRequestLineTooLong()
-		}
-		return nil, fmt.Errorf("http1: parse request: %w", err)
+	if err == nil {
+		return rawReq, nil
 	}
-	return rawReq, nil
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return nil, io.EOF
+	}
+	wrapped := fmt.Errorf("http1: parse request: %w", err)
+
+	var head *RequestHeadError
+	switch {
+	case armed > 0 && errors.Is(err, os.ErrDeadlineExceeded):
+		c.layer.logRequestHeadTimeout("header", err)
+		head = &RequestHeadError{Reason: RequestHeadTimeout}
+	case errors.Is(err, parser.ErrRequestLineTooLong):
+		// USK-1137: answer 414 instead of an empty reply. parseRequest
+		// runs only on the client-facing (Send) side.
+		head = &RequestHeadError{Reason: RequestHeadLineTooLong, Status: 414}
+		head.Response, head.ResponseWritten = c.layer.rejectRequestHead(uriTooLongResponse)
+	case errors.Is(err, parser.ErrHeaderSectionTooLarge):
+		// USK-1181: answer 431 (RFC 6585 §5) instead of an empty reply.
+		head = &RequestHeadError{Reason: RequestHeadHeaderTooLarge, Status: 431}
+		head.Response, head.ResponseWritten = c.layer.rejectRequestHead(headerTooLargeResponse)
+	default:
+		return nil, wrapped
+	}
+	head.Scheme = c.scheme
+	head.Timeout = armed
+	head.Started = started
+	head.Err = wrapped
+	head.Phase = RequestHeadPhaseRequestLine
+	var perr *parser.PartialRequestError
+	if errors.As(err, &perr) {
+		head.Raw = perr.Raw
+		head.RawTruncated = perr.Truncated
+		if perr.RequestLineComplete {
+			head.Phase = RequestHeadPhaseHeaders
+			head.Method = perr.Method
+			head.RequestTarget = perr.RequestURI
+			head.Proto = perr.Proto
+			head.Headers = perr.Headers
+			head.Path, head.RawQuery, head.Authority = parseRequestURI(perr.RequestURI, perr.Headers)
+		}
+	}
+	if head.Reason == RequestHeadTimeout && len(head.Raw) == 0 {
+		// Zero bytes of the request: not a proxy-closed request head
+		// (unreachable while awaitRequestHead peeks the first byte, kept
+		// so the recording rule does not depend on that).
+		return nil, wrapped
+	}
+	return nil, head
 }
 
 // parseRequest reads one HTTP request from the parent Layer's bufio.Reader
