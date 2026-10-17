@@ -1218,8 +1218,11 @@ type redialFunc func(ctx context.Context, target string, stale *http2.Layer, gen
 //   - current is a pointer to the most recently appended fresh Layer or
 //     nil before the first redial; readers (selectUpstreamForDial) use
 //     it on the fast path without acquiring mu.
-//   - layers retains every fresh Layer for the CONNECT's lifetime. They
-//     are all closed by closeAll() from the buildOnHTTP2Stack defer.
+//   - layers retains every fresh Layer for the connection's lifetime.
+//     They are all closed by closeAll() via the stop func returned by
+//     startH2UpstreamRedial, which the connection owner runs at exit
+//     (buildOnHTTP2Stack for CONNECT, runTCPForwardH2Loop for
+//     tcp_forward, USK-1165).
 //     Browser-equivalent semantics: prior chain steps drain their in-
 //     flight streams naturally up to GOAWAY's last_stream_id (RFC 9113
 //     §6.8); the proxy does not tear them down on swap.
@@ -1234,7 +1237,8 @@ type redialFunc func(ctx context.Context, target string, stale *http2.Layer, gen
 //     goroutine exits exactly once. Single-writer close ownership of
 //     prewarmDone belongs to closeAll (CLAUDE.md Concurrency Checklist).
 //   - The worker goroutine is started by startPrewarmWorker from
-//     buildOnHTTP2Stack and exits on ctx.Done() OR prewarmDone close.
+//     startH2UpstreamRedial (called by buildOnHTTP2Stack and
+//     runTCPForwardH2Loop) and exits on ctx.Done() OR prewarmDone close.
 //     A pre-warm dial in flight when teardown begins still honors ctx
 //     (RedialUpstreamH2's dial helper); the worker checks ctx.Err()
 //     after each dial before appending to chain.layers, immediately
@@ -1469,7 +1473,9 @@ func (c *redialChain) headLayer() *http2.Layer {
 }
 
 // closeAll closes every fresh Layer accumulated in the chain. Called
-// from the buildOnHTTP2Stack defer at CONNECT exit. Idempotent on
+// from the stop func startH2UpstreamRedial returns, which the connection
+// owner runs at exit (buildOnHTTP2Stack at CONNECT exit,
+// runTCPForwardH2Loop at tcp_forward connection exit). Idempotent on
 // repeated calls because http2.Layer.Close() is itself idempotent (the
 // USK-739/798 patterns establish this for both directions).
 //

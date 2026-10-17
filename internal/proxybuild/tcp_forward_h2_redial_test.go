@@ -282,6 +282,19 @@ func TestNewForwardH2Mint_PreservesConnShape(t *testing.T) {
 			if gotSettings := recvSettings(t, settingsCh); !reflect.DeepEqual(gotSettings, want) {
 				t.Errorf("redialed SETTINGS = %v, want conn #1 shape %v", gotSettings, want)
 			}
+
+			// The minted Layer must carry the onGoAway the mint was given:
+			// it is the pre-warm worker's wake source for generation 2+.
+			// The peer goroutine is draining by now, so writing from here
+			// does not race its reads.
+			injectGoAwayFromPeer(t, peer, 0, 0)
+			deadline := time.Now().Add(3 * time.Second)
+			for goAways.Load() == 0 && time.Now().Before(deadline) {
+				time.Sleep(5 * time.Millisecond)
+			}
+			if n := goAways.Load(); n != 1 {
+				t.Errorf("GOAWAY observer calls = %d, want 1 (mint must wire onGoAway)", n)
+			}
 		})
 	}
 }
