@@ -19,6 +19,7 @@ import (
 	"golang.org/x/net/http2/hpack"
 
 	"github.com/usk6666/yorishiro-proxy/internal/config"
+	"github.com/usk6666/yorishiro-proxy/internal/proxybuild"
 )
 
 func boolPtr(b bool) *bool { return &b }
@@ -165,7 +166,11 @@ func TestTCPForwardH2_UpstreamGoAway_PrewarmWithoutRequest(t *testing.T) {
 		t.Fatalf("origin accepted %d connections after GOAWAY, want 2 via pre-warm (metrics %+v)",
 			n, mgr.H2UpstreamMetrics())
 	}
-	m := mgr.H2UpstreamMetrics()
+	// The success counter is bumped after the fresh Layer is built, i.e.
+	// after the origin already counted the accept.
+	m := waitH2Metrics(mgr.H2UpstreamMetrics, func(m proxybuild.H2UpstreamMetricsSnapshot) bool {
+		return m.RedialPrewarm >= 1
+	}, 2*time.Second)
 	if m.RedialPrewarm < 1 || m.RedialFailedPrewarm != 0 {
 		t.Errorf("RedialPrewarm = %d, RedialFailedPrewarm = %d; want >= 1 and 0", m.RedialPrewarm, m.RedialFailedPrewarm)
 	}

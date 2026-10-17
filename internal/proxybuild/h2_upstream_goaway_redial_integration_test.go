@@ -150,6 +150,23 @@ func waitAccepts(origin *refusingH2Origin, want int64, timeout time.Duration) in
 	}
 }
 
+// waitH2Metrics polls snap until done reports true or timeout, returning
+// the last snapshot.
+func waitH2Metrics(
+	snap func() proxybuild.H2UpstreamMetricsSnapshot,
+	done func(proxybuild.H2UpstreamMetricsSnapshot) bool,
+	timeout time.Duration,
+) proxybuild.H2UpstreamMetricsSnapshot {
+	deadline := time.Now().Add(timeout)
+	for {
+		m := snap()
+		if done(m) || time.Now().After(deadline) {
+			return m
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 // updatesFor returns every StreamUpdate recorded for id.
 func (s *flowStoreForH2Pool) updatesFor(id string) []flow.StreamUpdate {
 	s.mu.Lock()
@@ -187,8 +204,15 @@ func runForwardGoAwayRedial(
 	}
 	waitStreamOutcomes(t, store, map[string]int{"complete/": 2}, 5*time.Second)
 
-	m := mgr.H2UpstreamMetrics()
-	if redials := m.RedialReactive + m.RedialPrewarm + m.RedialRefusedStream; redials < 1 {
+	// The pre-warm success counter is bumped just after the fresh Layer is
+	// published as the chain head, so stream 3 may complete first.
+	totalRedials := func(m proxybuild.H2UpstreamMetricsSnapshot) int64 {
+		return m.RedialReactive + m.RedialPrewarm + m.RedialRefusedStream
+	}
+	m := waitH2Metrics(mgr.H2UpstreamMetrics, func(m proxybuild.H2UpstreamMetricsSnapshot) bool {
+		return totalRedials(m) >= 1
+	}, 2*time.Second)
+	if redials := totalRedials(m); redials < 1 {
 		t.Errorf("h2 upstream redials = %d (%+v), want >= 1", redials, m)
 	}
 }
@@ -240,7 +264,12 @@ func TestH2Prewarm_Chain0GoAway_OpensSecondConnectionWithoutRequest(t *testing.T
 		t.Fatalf("origin accepted %d connections after chain[0] GOAWAY, want 2 via pre-warm (prewarm redials=%d, prewarm failures=%d)",
 			n, m.RedialPrewarm, m.RedialFailedPrewarm)
 	}
-	m := metrics.Snapshot()
+	// The origin counts the accept at TCP accept time; the pre-warm success
+	// counter is bumped only after the TLS handshake and http2.New return,
+	// so wait for it rather than sampling it at the instant of the accept.
+	m := waitH2Metrics(metrics.Snapshot, func(m proxybuild.H2UpstreamMetricsSnapshot) bool {
+		return m.RedialPrewarm >= 1
+	}, 2*time.Second)
 	if m.RedialPrewarm < 1 {
 		t.Errorf("RedialPrewarm = %d, want >= 1", m.RedialPrewarm)
 	}
