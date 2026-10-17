@@ -395,6 +395,9 @@ type Connector struct {
 	upstreamProxySetters  []upstreamProxySetter
 	requestTimeoutSetters []requestTimeoutSetter
 	rateLimiterSetters    []rateLimiterSetter
+	// liveConns is the live-connection registry the security tool
+	// reconciles after an Agent Layer write (USK-1160). nil disables.
+	liveConns *connector.LiveConns
 }
 
 // NewConnector constructs a Connector. Most fields are optional; the manager

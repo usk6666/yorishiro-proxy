@@ -434,9 +434,11 @@ func relayBidirectionalCounted(ctx context.Context, a, b net.Conn, aToB, bToA *a
 
 	wg.Wait()
 
-	// If the context was cancelled, report that instead of the copy error.
+	// If the context was cancelled, report why instead of the copy error:
+	// a live-connection cut (USK-1160) carries ErrTargetScopeRevoked as the
+	// cause, which the passthrough audit flow then records as its error.
 	if ctx.Err() != nil {
-		return ctx.Err()
+		return context.Cause(ctx)
 	}
 	return copyErr
 }

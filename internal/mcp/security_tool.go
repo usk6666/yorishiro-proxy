@@ -173,6 +173,15 @@ type testedTarget struct {
 	Path     string `json:"path"`
 }
 
+// WithLiveConns wires the process-wide live-connection registry so a
+// set_target_scope / update_target_scope write closes the live connections
+// the new rules no longer admit (USK-1160).
+func WithLiveConns(reg *connector.LiveConns) ServerOption {
+	return func(s *Server) {
+		s.connector.liveConns = reg
+	}
+}
+
 // handleSetTargetScope replaces all agent allow and deny rules.
 func (s *Server) handleSetTargetScope(params securityParams) (*gomcp.CallToolResult, any, error) {
 	if s.connector.targetScope == nil {
@@ -192,6 +201,8 @@ func (s *Server) handleSetTargetScope(params securityParams) (*gomcp.CallToolRes
 	if err := s.connector.targetScope.SetAgentRules(allows, denies); err != nil {
 		return nil, nil, fmt.Errorf("set agent rules: %w", err)
 	}
+	// USK-1160: close the live connections the new rules no longer admit.
+	s.connector.liveConns.Reconcile("security_tool")
 
 	currentAllows, currentDenies := s.connector.targetScope.AgentRules()
 	return nil, &setTargetScopeResult{
@@ -231,6 +242,8 @@ func (s *Server) handleUpdateTargetScope(params securityParams) (*gomcp.CallTool
 	); err != nil {
 		return nil, nil, fmt.Errorf("merge agent rules: %w", err)
 	}
+	// USK-1160: close the live connections the new rules no longer admit.
+	s.connector.liveConns.Reconcile("security_tool")
 
 	currentAllows, currentDenies := s.connector.targetScope.AgentRules()
 	return nil, &setTargetScopeResult{
