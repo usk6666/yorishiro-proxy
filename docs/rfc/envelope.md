@@ -635,6 +635,8 @@ The stack is mutable — WebSocket Upgrade is expressed as `ReplaceClientTop(wsL
 
 To localize the swap to a single stream without disturbing siblings, `ConnectionStack` carries a per-stream **sub-stack overlay** keyed by stream id. The overlay is empty by default; the connection-level chain is unchanged when no entry is registered. When an extended CONNECT swap occurs (USK-765), the orchestrator constructs a `ws.Layer` pair in h2 mode (see §3.3.2) over the per-stream byte triple returned by `http2.Layer.DetachStream(streamID)` and registers it on the overlay for that stream id only.
 
+`DetachStream` MUST be called on the `http2.Layer` that owns the stream — the Layer reported by the stream's Channel (`H2Layer()`, paired with `H2StreamID()`) — never on the stack's pooled upstream Layer: after an upstream GOAWAY the redial chain (USK-991) places later streams of the same CONNECT on different connections whose stream ids restart at 1, so the pooled Layer would detach an unrelated stream (USK-1164).
+
 ```go
 package connector
 

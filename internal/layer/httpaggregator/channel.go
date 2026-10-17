@@ -126,6 +126,10 @@ func (a *aggregatorChannel) H2StreamID() uint32 {
 // GOAWAY redial streams of one CONNECT live on different connections
 // (USK-1164).
 func (a *aggregatorChannel) H2Layer() *http2.Layer {
+	type h2LayerOwner interface{ H2Layer() *http2.Layer }
+	if v, ok := a.inner.(h2LayerOwner); ok {
+		return v.H2Layer()
+	}
 	return nil
 }
 

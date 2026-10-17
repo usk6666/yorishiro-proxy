@@ -223,7 +223,7 @@ func (c *channel) H2StreamID() uint32 { return c.h2Stream.Load() }
 // particular after a GOAWAY redial, where streams of one CONNECT live on
 // different upstream connections. The upgrade orchestrator uses it to
 // call DetachStream on the owning Layer (USK-1164).
-func (c *channel) H2Layer() *Layer { return nil }
+func (c *channel) H2Layer() *Layer { return c.layer }
 
 // MarkTerminatedWithRST emits RST_STREAM with the given wire error code and
 // marks the channel terminated locally. Intended for the aggregator's
