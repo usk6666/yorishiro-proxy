@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 )
 
 // Live-connection registry (USK-1160).
@@ -31,6 +32,16 @@ import (
 // path ""); per-request HTTPScopeStep covers those. TargetScope stays a pure
 // engine: the writers of the scope (the policy reloader and the MCP
 // security tool) call Reconcile after a successful write.
+//
+// A connection carrying intercept holds is revoked but not cut at once
+// (USK-1192): cutting it would make each held request vanish without an
+// answer or a record. The Pipeline pins the connection for every hold
+// (LiveConnHandle.Pin, keyed through the Register context); HostScopeStep
+// blocks every new Send-direction envelope on a revoked connection; and
+// the session settles the cut after the last hold's Result was dispatched
+// (SettleLiveConn), so the release re-check's 403 target_scope reaches the
+// client and the audit record first. Receive-direction data from the
+// denied host keeps flowing until then (bounded by the hold timeout).
 
 // ErrTargetScopeRevoked is the context cancel cause of a live connection
 // that a policy change no longer admits. Handlers and relays can test for
@@ -60,10 +71,22 @@ type LiveConn struct {
 type liveConnEntry struct {
 	info   LiveConn
 	cancel context.CancelCauseFunc
-	// cut is set (under LiveConns.mu) once Reconcile cancelled the entry,
-	// so a later Reconcile does not count or log it again before the
-	// handler unwinds and releases it.
+	// cut is set (under LiveConns.mu) once the entry was cancelled, so a
+	// later Reconcile does not count or log it again before the handler
+	// unwinds and releases it.
 	cut bool
+	// pins counts the intercept holds in flight on this connection
+	// (LiveConnHandle.Pin / Unpin, USK-1192). Guarded by LiveConns.mu.
+	pins int
+	// pending is set when Reconcile revoked the entry while pins > 0: the
+	// cut is deferred until the last hold resolved and its Result was
+	// dispatched (LiveConnHandle.Settle). Written only under
+	// LiveConns.mu; atomic so the per-envelope RevokePending read on the
+	// data path takes no lock.
+	pending atomic.Bool
+	// trigger labels the policy change that revoked a pending entry; the
+	// deferred cut logs it. Guarded by LiveConns.mu.
+	trigger string
 }
 
 // LiveConns is the process-wide registry of admitted live connections. The
@@ -88,7 +111,10 @@ func NewLiveConns(logger *slog.Logger) *LiveConns {
 // Register tracks an admitted connection. It returns a context derived
 // from ctx that Reconcile cancels (cause wrapping ErrTargetScopeRevoked)
 // once c.Admit fails, and a release function the handler must call when
-// the connection ends (defer it). release is idempotent.
+// the connection ends (defer it). release is idempotent. The returned
+// context carries the connection's *LiveConnHandle (LiveConnFromContext),
+// through which the Pipeline defers the cut while an intercept hold is in
+// flight (USK-1192).
 //
 // The entry is inserted first and c.Admit is then re-run once, so a policy
 // change that lands between the gate's admission check and Register is
@@ -134,14 +160,32 @@ func (r *LiveConns) Register(ctx context.Context, c LiveConn) (context.Context, 
 }
 
 // Reconcile re-evaluates every live connection against the current scope
-// and cancels each one that would not be admitted now. trigger labels the
+// and revokes each one that would not be admitted now. trigger labels the
 // policy change in the log ("SIGHUP", "security_tool", ...). It returns the
-// number of connections closed by this call; a connection already closed
+// number of connections revoked by this call; a connection already revoked
 // by an earlier Reconcile is not counted again. Widening or unchanged
-// rules close nothing, so calling it after every write is safe.
+// rules revoke nothing, so calling it after every write is safe.
+//
+// A revoked connection is cut (its context cancelled) at once, unless it
+// has intercept holds in flight (LiveConnHandle.Pin, USK-1192): then the
+// cut is deferred until the last hold resolved and its Result was
+// dispatched (LiveConnHandle.Settle), so a held request is answered and
+// recorded instead of vanishing with its connection. While deferred the
+// connection is RevokePending and HostScopeStep blocks every new
+// Send-direction envelope on it. A deferred connection whose target is
+// admitted again by a later Reconcile (or by Settle's re-check) is no
+// longer revoked.
 func (r *LiveConns) Reconcile(trigger string) int {
+	revoked, _ := r.ReconcileWithDeferred(trigger)
+	return revoked
+}
+
+// ReconcileWithDeferred is Reconcile that also reports how many of the
+// revoked connections had their cut deferred for in-flight intercept
+// holds (deferred <= revoked).
+func (r *LiveConns) ReconcileWithDeferred(trigger string) (revoked, deferred int) {
 	if r == nil {
-		return 0
+		return 0, 0
 	}
 	r.mu.Lock()
 	snapshot := make([]*liveConnEntry, 0, len(r.conns))
@@ -153,32 +197,65 @@ func (r *LiveConns) Reconcile(trigger string) int {
 	r.mu.Unlock()
 
 	// The predicates take the TargetScope read lock; evaluate them outside
-	// r.mu so a slow scope read never stalls Register / release.
-	closed := 0
+	// r.mu so a slow scope read never stalls Register / release / Pin.
 	for _, e := range snapshot {
 		allowed, reason := e.info.Admit()
+		r.mu.Lock()
+		if e.cut {
+			r.mu.Unlock()
+			continue // a concurrent Reconcile / Settle got there first
+		}
+		wasPending := e.pending.Load()
 		if allowed {
+			if wasPending {
+				e.pending.Store(false)
+				e.trigger = ""
+			}
+			r.mu.Unlock()
+			if wasPending {
+				r.logger.Info("live connection revocation withdrawn: target admitted again",
+					r.logAttrs(e, "trigger", trigger)...)
+			}
 			continue
 		}
-		r.mu.Lock()
-		already := e.cut
+		if e.pins > 0 {
+			if !wasPending {
+				e.pending.Store(true)
+				e.trigger = trigger
+			}
+			holds := e.pins
+			r.mu.Unlock()
+			if !wasPending {
+				revoked++
+				deferred++
+				r.logger.Info("live connection revoked: close deferred until intercept holds resolve",
+					r.logAttrs(e, "reason", reason, "trigger", trigger, "holds", holds)...)
+			}
+			continue
+		}
+		// No hold in flight: cut now. A pending entry whose holds all
+		// resolved without a Settle (backstop) was counted when it was
+		// revoked.
 		e.cut = true
 		r.mu.Unlock()
-		if already {
-			continue // a concurrent Reconcile got there first
-		}
 		e.cancel(fmt.Errorf("%w: %s", ErrTargetScopeRevoked, reason))
-		closed++
+		if !wasPending {
+			revoked++
+		}
 		r.logger.Info("live connection closed: target no longer in scope",
-			"conn_id", e.info.ConnID,
-			"listener", e.info.Listener,
-			"via", e.info.Via,
-			"target", e.info.Target,
-			"reason", reason,
-			"trigger", trigger,
-		)
+			r.logAttrs(e, "reason", reason, "trigger", trigger, "deferred", wasPending)...)
 	}
-	return closed
+	return revoked, deferred
+}
+
+// logAttrs returns the per-connection log attributes followed by extra.
+func (r *LiveConns) logAttrs(e *liveConnEntry, extra ...any) []any {
+	return append([]any{
+		"conn_id", e.info.ConnID,
+		"listener", e.info.Listener,
+		"via", e.info.Via,
+		"target", e.info.Target,
+	}, extra...)
 }
 
 // Len returns the number of registered live connections.
@@ -216,14 +293,17 @@ func trackAdmitted(ctx context.Context, reg *LiveConns, via, target string, admi
 // connection's *LiveConnHandle.
 type liveConnKey struct{}
 
-// LiveConnHandle is the per-connection view of a LiveConns entry. A nil
-// handle is valid and inert.
+// LiveConnHandle is the Pipeline's view of one registered live connection
+// (USK-1192). Every method is nil-safe; a nil handle (a connection that no
+// gate registered, or a nil registry) is inert: Pin succeeds, RevokePending
+// is false, Unpin and Settle do nothing.
 type LiveConnHandle struct {
 	reg *LiveConns
 	e   *liveConnEntry
 }
 
-// LiveConnFromContext returns the handle Register stored in ctx, or nil.
+// LiveConnFromContext returns the handle of the live connection whose
+// Register context ctx derives from, or nil.
 func LiveConnFromContext(ctx context.Context) *LiveConnHandle {
 	if ctx == nil {
 		return nil
@@ -232,22 +312,99 @@ func LiveConnFromContext(ctx context.Context) *LiveConnHandle {
 	return h
 }
 
-// SettleLiveConn calls Settle on the handle carried by ctx (nil-safe).
-func SettleLiveConn(ctx context.Context) { LiveConnFromContext(ctx).Settle() }
+// SettleLiveConn settles the live connection carried by ctx (see
+// LiveConnHandle.Settle). The session calls it after dispatching each
+// Pipeline Result, so a deferred cut runs only once the Result of the last
+// hold reached the wire. A ctx without a handle is a no-op.
+func SettleLiveConn(ctx context.Context) {
+	LiveConnFromContext(ctx).Settle()
+}
 
-// Pin is a USK-1192 scaffolding stub.
-func (h *LiveConnHandle) Pin() bool { return true }
+// Pin records an intercept hold about to start on the connection, so a
+// Reconcile that revokes the connection defers its cut. It reports false
+// when the connection was already cut: the caller must not hold, and
+// answers the envelope as a target scope block instead. Each successful
+// Pin must be paired with exactly one Unpin.
+func (h *LiveConnHandle) Pin() bool {
+	if h == nil {
+		return true
+	}
+	h.reg.mu.Lock()
+	defer h.reg.mu.Unlock()
+	if h.e.cut {
+		return false
+	}
+	h.e.pins++
+	return true
+}
 
-// Unpin is a USK-1192 scaffolding stub.
-func (h *LiveConnHandle) Unpin() {}
+// Unpin records that a hold resolved. It never cuts the connection: the
+// Result of the hold has not been dispatched yet, and Settle (called by
+// the session after dispatch) decides the cut.
+func (h *LiveConnHandle) Unpin() {
+	if h == nil {
+		return
+	}
+	h.reg.mu.Lock()
+	if h.e.pins > 0 {
+		h.e.pins--
+	}
+	h.reg.mu.Unlock()
+}
 
-// RevokePending is a USK-1192 scaffolding stub.
-func (h *LiveConnHandle) RevokePending() bool { return false }
+// RevokePending reports whether the connection was revoked by a policy
+// change — its cut is deferred for in-flight holds, or it was already cut.
+// Lock-free; HostScopeStep calls it for every Send-direction envelope.
+func (h *LiveConnHandle) RevokePending() bool {
+	if h == nil {
+		return false
+	}
+	if h.e.pending.Load() {
+		return true
+	}
+	h.reg.mu.Lock()
+	defer h.reg.mu.Unlock()
+	return h.e.cut
+}
 
-// Settle is a USK-1192 scaffolding stub.
-func (h *LiveConnHandle) Settle() {}
+// Settle cuts the connection iff it is revoke-pending, no hold is in
+// flight, and its admission check still fails; if the check passes again
+// (the scope was widened meanwhile) the revocation is withdrawn instead.
+// The fast path (not pending) takes no lock.
+func (h *LiveConnHandle) Settle() {
+	if h == nil || !h.e.pending.Load() {
+		return
+	}
+	r, e := h.reg, h.e
+	r.mu.Lock()
+	ready := !e.cut && e.pending.Load() && e.pins == 0
+	r.mu.Unlock()
+	if !ready {
+		return
+	}
+	allowed, reason := true, ""
+	if e.info.Admit != nil {
+		allowed, reason = e.info.Admit()
+	}
 
-// ReconcileWithDeferred is a USK-1192 scaffolding stub.
-func (r *LiveConns) ReconcileWithDeferred(trigger string) (revoked, deferred int) {
-	return r.Reconcile(trigger), 0
+	r.mu.Lock()
+	if e.cut || !e.pending.Load() || e.pins > 0 {
+		// A concurrent Reconcile / Settle decided, or a new hold started.
+		r.mu.Unlock()
+		return
+	}
+	e.pending.Store(false)
+	trigger := e.trigger
+	e.trigger = ""
+	if allowed {
+		r.mu.Unlock()
+		r.logger.Info("live connection revocation withdrawn: target admitted again",
+			r.logAttrs(e, "trigger", trigger)...)
+		return
+	}
+	e.cut = true
+	r.mu.Unlock()
+	e.cancel(fmt.Errorf("%w: %s", ErrTargetScopeRevoked, reason))
+	r.logger.Info("live connection closed: target no longer in scope",
+		r.logAttrs(e, "reason", reason, "trigger", trigger, "deferred", true)...)
 }

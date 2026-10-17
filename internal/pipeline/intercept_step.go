@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/usk6666/yorishiro-proxy/internal/connector"
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/rules/common"
 	grpcrules "github.com/usk6666/yorishiro-proxy/internal/rules/grpc"
@@ -273,26 +274,9 @@ func (s *InterceptStep) holdAndDispatch(ctx context.Context, env *envelope.Envel
 		)
 	}
 
-	// USK-854: stamp the (StreamID, Direction) tuple on the shared
-	// HoldTracker before HoldQueue.Hold blocks so the session keepalive
-	// goroutine can observe the in-flight hold and inject WS Pings if
-	// (and only if) the operator opted in via the web_socket.hold_keepalive_*
-	// config knob. ForgetHold runs unconditionally after Hold returns so a
-	// release / drop / modify all clear the entry — the keepalive goroutine
-	// observes IsHeld=false on its next tick and terminates cleanly.
-	// nil tracker is a no-op (test stacks).
-	if s.holdTracker != nil {
-		s.holdTracker.MarkHold(env.StreamID, env.Direction, time.Now())
-		defer s.holdTracker.ForgetHold(env.StreamID, env.Direction)
-	}
-
-	action, err := s.queue.Hold(ctx, env, matchedRules)
-	if err != nil {
-		// Context cancelled while waiting. No user action ever resolved
-		// the hold; do not attribute this to intercept_drop because no
-		// drop decision was made — the surrounding session is being
-		// torn down.
-		return Result{Action: Drop}
+	action, blocked, ok := s.hold(ctx, env, matchedRules)
+	if !ok {
+		return blocked
 	}
 
 	switch action.Type {
@@ -372,4 +356,63 @@ func (s *InterceptStep) holdAndDispatch(ctx context.Context, env *envelope.Envel
 		// it is scope-checked like one.
 		return s.recheckReleaseScope(ctx, env, env, action.Type)
 	}
+}
+
+// pinLiveConnForHold pins the live connection carried by ctx for the
+// duration of a hold (USK-1192), so a policy change that revokes it
+// defers the cut instead of cancelling ctx under the hold — which would
+// drop the held envelope with no answer and no record. The session
+// settles the cut after it dispatched the hold's Result. The caller must
+// Unpin the returned handle (nil-safe) when the hold resolves.
+//
+// ok=false means the connection was already cut: the caller must not hold
+// and returns blocked instead — a synthetic 403 for a Send HTTP request, a
+// Drop otherwise (the Receive relay forwards the envelope on any non-Drop
+// action), both attributed to target_scope. A ctx without a live-conn
+// handle (no gate registered the connection) always pins.
+func pinLiveConnForHold(ctx context.Context, env *envelope.Envelope) (lc *connector.LiveConnHandle, blocked Result, ok bool) {
+	lc = connector.LiveConnFromContext(ctx)
+	if lc.Pin() {
+		return lc, Result{}, true
+	}
+	if env.Direction == envelope.Send {
+		return nil, targetScopeBlock(env), false
+	}
+	return nil, Result{Action: Drop, BlockedBy: BlockedByTargetScope}, false
+}
+
+// hold blocks env on the HoldQueue until an action resolves it, with the
+// session-facing bookkeeping around the wait (HoldTracker stamp, live
+// connection pin). ok=false means no action resolved the hold and the
+// caller returns blocked verbatim.
+func (s *InterceptStep) hold(ctx context.Context, env *envelope.Envelope, matchedRules []string) (action *common.HoldAction, blocked Result, ok bool) {
+	// USK-854: stamp the (StreamID, Direction) tuple on the shared
+	// HoldTracker before HoldQueue.Hold blocks so the session keepalive
+	// goroutine can observe the in-flight hold and inject WS Pings if
+	// (and only if) the operator opted in via the web_socket.hold_keepalive_*
+	// config knob. ForgetHold runs unconditionally after Hold returns so a
+	// release / drop / modify all clear the entry — the keepalive goroutine
+	// observes IsHeld=false on its next tick and terminates cleanly.
+	// nil tracker is a no-op (test stacks).
+	if s.holdTracker != nil {
+		s.holdTracker.MarkHold(env.StreamID, env.Direction, time.Now())
+		defer s.holdTracker.ForgetHold(env.StreamID, env.Direction)
+	}
+
+	// USK-1192: pin the live connection for the duration of the hold.
+	lc, blocked, ok := pinLiveConnForHold(ctx, env)
+	if !ok {
+		return nil, blocked, false
+	}
+	defer lc.Unpin()
+
+	action, err := s.queue.Hold(ctx, env, matchedRules)
+	if err != nil {
+		// Context cancelled while waiting. No user action ever resolved
+		// the hold; do not attribute this to intercept_drop because no
+		// drop decision was made — the surrounding session is being
+		// torn down.
+		return nil, Result{Action: Drop}, false
+	}
+	return action, Result{}, true
 }

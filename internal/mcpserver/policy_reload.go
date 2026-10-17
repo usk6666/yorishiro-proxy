@@ -35,6 +35,15 @@ import (
 // TLS passthrough relays and bytechunk tunnels, which no per-envelope step
 // ever re-checks. A path_prefix-only deny closes no connection; the
 // per-request HTTPScopeStep enforces it.
+//
+// A connection carrying intercept holds is revoked at once — every new
+// request on it is answered 403 target_scope — but closed only after its
+// holds were released or timed out and each held request was answered and
+// recorded per the release re-check (USK-1192). Until then
+// Receive-direction data from the denied host (responses of other h2
+// streams, SSE events, WebSocket server frames) keeps reaching the client,
+// bounded by the hold timeout. live_conns_closed counts the revoked
+// connections, live_conns_deferred those whose close was deferred.
 
 // PolicySource names where the Policy Layer is read from. The precedence is
 // the one LoadConfigs applies at boot: PolicyFile (-target-policy-file) when
@@ -241,7 +250,7 @@ func (r *policyReloader) Reload(trigger string) error {
 	// USK-1160: close the live connections the new scope no longer admits.
 	// Inside r.mu, right after the scope swap, so reconciles of
 	// concurrent reloads cannot interleave out of order.
-	liveClosed := r.liveConns.Reconcile(trigger)
+	liveClosed, liveDeferred := r.liveConns.ReconcileWithDeferred(trigger)
 	r.rl.SetPolicyLimits(snap.rate)
 	exhausted := r.bm.ReplacePolicyBudget(snap.budget)
 
@@ -266,6 +275,7 @@ func (r *policyReloader) Reload(trigger string) error {
 		"effective_max_total_requests", effBudget.MaxTotalRequests,
 		"effective_max_duration", effBudget.MaxDuration.String(),
 		"live_conns_closed", liveClosed,
+		"live_conns_deferred", liveDeferred,
 	)
 	if liveClosed > 0 {
 		r.logger.Warn("target scope policy reload closed live connections",
