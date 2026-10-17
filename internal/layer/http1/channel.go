@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -756,14 +757,29 @@ func (c *channel) releaseStreamState() {
 
 // --- Parse implementations (called by Layer.spawnLoop) ---
 
-// parseRequest reads one HTTP request from the parent Layer's bufio.Reader
-// and returns the envelope. Sets c.connClosed if the request had
-// Connection: close.
-func (c *channel) parseRequest() (*envelope.Envelope, error) {
+// parseRequestHead parses the request line and header section, bounded by
+// the Layer's request-head deadline when configured (USK-1162: idle wait,
+// then request line + headers). The deadline is cleared before returning,
+// so the body read that follows is not covered. Returns io.EOF for a clean
+// peer close.
+func (c *channel) parseRequestHead() (*parser.RawRequest, error) {
+	armed, err := c.layer.awaitRequestHead()
+	if err != nil {
+		if errors.Is(err, io.EOF) {
+			return nil, io.EOF
+		}
+		return nil, fmt.Errorf("http1: wait for request: %w", err)
+	}
 	rawReq, err := parser.ParseRequestWithOptions(c.layer.reader, parser.ParseOptions{
 		MaxRawCapture: c.bodyOpts.maxRawCapture,
 	})
+	if armed {
+		_ = c.layer.conn.SetReadDeadline(time.Time{})
+	}
 	if err != nil {
+		if armed && errors.Is(err, os.ErrDeadlineExceeded) {
+			c.layer.logRequestHeadTimeout("header", err)
+		}
 		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 			return nil, io.EOF
 		}
@@ -773,6 +789,17 @@ func (c *channel) parseRequest() (*envelope.Envelope, error) {
 			c.layer.rejectRequestLineTooLong()
 		}
 		return nil, fmt.Errorf("http1: parse request: %w", err)
+	}
+	return rawReq, nil
+}
+
+// parseRequest reads one HTTP request from the parent Layer's bufio.Reader
+// and returns the envelope. Sets c.connClosed if the request had
+// Connection: close.
+func (c *channel) parseRequest() (*envelope.Envelope, error) {
+	rawReq, err := c.parseRequestHead()
+	if err != nil {
+		return nil, err
 	}
 
 	// Mint per-exchange identity.

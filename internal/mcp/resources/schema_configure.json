@@ -93,7 +93,7 @@
     },
     "request_timeout_ms": {
       "type": "integer",
-      "description": "HTTP request header read timeout in milliseconds.",
+      "description": "Request-head timeout in milliseconds: HTTP/1.x request line + headers, CONNECT request, client TLS handshake.",
       "minimum": 100,
       "maximum": 600000
     },
