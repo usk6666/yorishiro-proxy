@@ -64,6 +64,27 @@ func requirePrewarmCapped(
 	return after
 }
 
+// waitAcceptsStable polls origin.accepts until it has not changed for
+// window, or timeout elapses. Returns the last count and whether it
+// settled.
+func waitAcceptsStable(origin *refusingH2Origin, window, timeout time.Duration) (int64, bool) {
+	deadline := time.Now().Add(timeout)
+	last := origin.accepts.Load()
+	since := time.Now()
+	for time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+		n := origin.accepts.Load()
+		if n != last {
+			last, since = n, time.Now()
+			continue
+		}
+		if time.Since(since) >= window {
+			return last, true
+		}
+	}
+	return last, false
+}
+
 // TestH2Prewarm_GoAwayEveryConn_ConnectIdleIsCapped is AC1 on the CONNECT
 // path: an idle client tunnel, no request at all.
 func TestH2Prewarm_GoAwayEveryConn_ConnectIdleIsCapped(t *testing.T) {
@@ -125,13 +146,15 @@ func TestTCPForwardH2_GoAwayEveryConn_RequestsStayBounded(t *testing.T) {
 		}
 	}
 
+	// The GOAWAY that refused the last stream also wakes one more pre-warm
+	// (the refused head carried a stream), which may be accepted just after
+	// the client saw the RST — so wait for the count to settle rather than
+	// sampling right after the last response.
 	limit := idle + requests*perRequest
-	before := origin.accepts.Load()
-	time.Sleep(500 * time.Millisecond)
-	after := origin.accepts.Load()
-	if after > limit || after != before {
-		t.Errorf("origin accepted %d connections after %d requests (%d at the start of a 500ms window), want <= %d and stable (metrics %+v)",
-			after, requests, before, limit, mgr.H2UpstreamMetrics())
+	after, stable := waitAcceptsStable(origin, 500*time.Millisecond, 5*time.Second)
+	if after > limit || !stable {
+		t.Errorf("origin accepted %d connections after %d requests (stable for 500ms: %v), want <= %d and stable (metrics %+v)",
+			after, requests, stable, limit, mgr.H2UpstreamMetrics())
 	}
 
 	if err := mgr.StopAll(context.Background()); err != nil {
