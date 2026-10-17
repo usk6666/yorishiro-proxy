@@ -859,6 +859,16 @@ func (s *Server) runFuzzRawSingleVariantWithResponse(ctx context.Context, plan *
 
 	row.StreamID = uuid.NewString()
 
+	// USK-1158: per-variant TargetScope re-check against the plan's dial
+	// target, Scope → Safety like the Pipeline. The engine is live, so a
+	// policy reload or an agent `security` change since the plan-time
+	// check applies to every variant not yet sent. Recorded exactly like a
+	// safety violation below.
+	if err := s.checkRawDialScope(plan.useTLS, plan.dialAddr); err != nil {
+		row.Error = err.Error()
+		return row, nil, 0, false, nil
+	}
+
 	// SafetyFilter input gating: run AFTER variant assembly so the
 	// destructive-sql / destructive-os-command presets see the substituted
 	// payload (matches fuzz_http per-variant semantics). On a violation we

@@ -1144,7 +1144,9 @@ func (s *Server) buildFuzzHTTPPipeline(encoders *pipeline.WireEncoderRegistry) *
 // Per-variant SafetyFilter input gating runs after position application
 // and before the upstream dial. On a violation the variant is recorded
 // with row.Error set and returns statusCode=0 — the caller continues
-// iterating; a single blocked variant does not abort the whole run.
+// iterating; a single blocked variant does not abort the whole run. A
+// per-variant TargetScope re-check (checkFuzzHTTPVariantScope, USK-1158)
+// runs just before it with the same recording semantics.
 func (s *Server) runFuzzHTTPSingleVariant(ctx context.Context, plan *fuzzHTTPPlan, p *pipeline.Pipeline, dial session.DialFunc, timeout time.Duration, variantIdx int, payloads map[string]string, tag string, kvStore map[string]string) (fuzzHTTPVariantRow, int, error) {
 	row := fuzzHTTPVariantRow{
 		Index:    variantIdx,
@@ -1181,12 +1183,19 @@ func (s *Server) runFuzzHTTPSingleVariant(ctx context.Context, plan *fuzzHTTPPla
 		}
 	}
 
+	// USK-1158: per-variant TargetScope re-check, Scope → Safety like the
+	// Pipeline. Recorded exactly like a safety violation below.
+	row.StreamID = variantEnv.StreamID
+	if err := s.checkFuzzHTTPVariantScope(plan, variantMsg); err != nil {
+		row.Error = err.Error()
+		return row, 0, nil
+	}
+
 	// SafetyFilter input gating: run AFTER position application so the
 	// destructive-sql / destructive-os-command presets see the substituted
 	// payload (matches fuzz_tool.go per-payload semantics). On a violation
 	// we record the variant with row.Error and return statusCode=0 — the
 	// run loop continues to the next variant.
-	row.StreamID = variantEnv.StreamID
 	if v := s.checkSafetyInput(variantMsg.Body, resendHTTPRequestURL(variantMsg), variantMsg.Headers); v != nil {
 		row.Error = safetyViolationError(v)
 		return row, 0, nil
@@ -1218,6 +1227,53 @@ func (s *Server) runFuzzHTTPSingleVariant(ctx context.Context, plan *fuzzHTTPPla
 		s.applyResendHTTPTag(ctx, variantEnv.StreamID, tag)
 	}
 	return row, row.StatusCode, nil
+}
+
+// checkFuzzHTTPVariantScope re-runs the plan-time TargetScope check for one
+// variant, immediately before it is sent (USK-1158). Two reasons it cannot
+// rely on the check buildFuzzHTTPPlan made once:
+//
+//   - The scope engine is live: a policy reload (SIGHUP) or an agent
+//     `security` change during the run must apply to every variant not yet
+//     sent. A variant already in flight is left to finish.
+//   - authority / scheme / path / raw_query positions and §var§ expansion
+//     rewrite the very fields the scope engine matches on, after the plan
+//     check saw the base message.
+//
+// Two legs, both must pass:
+//
+//   - Canonical leg: the variant's own URL (scheme, authority, path) —
+//     what the request claims to address.
+//   - Wire leg: what is actually put on the wire. The fuzz connection was
+//     fixed at plan time from the BASE message: plan.dialAddr (base
+//     authority, or override_host) and plan.useTLS (base scheme). The
+//     HTTP/1 encoder writes the variant's path as the request target and
+//     never writes msg.Authority / msg.Scheme to the wire (the Host header
+//     is whatever msg.Headers carries). So the leg is judged on the
+//     connection scheme derived from plan.useTLS — never the mutated
+//     variant scheme — the dialled address, and the variant's
+//     post-mutation path. variantMsg.Path is wire form (USK-1139), the
+//     same form the live HTTPScopeStep hands CheckTarget; never pass the
+//     decoded URL.Path of resendHTTPRequestURL here.
+//
+// checkResendHTTPScope is deliberately not reused for the variant: its
+// override leg takes the scheme from the message, which for a `scheme`
+// position is not the scheme the connection uses (wrongly allowing a
+// plaintext dial a plaintext-only deny forbids, or wrongly denying a TLS
+// one). Judging the variant path on the wire leg makes path_prefix rules
+// apply to the host that receives the request: an authority or scheme
+// move cannot carry a denied path past a deny on the dial target, a
+// path_prefix allow on the dial target is not false-denied, and a variant
+// whose path moved away from a denied prefix is not blocked.
+func (s *Server) checkFuzzHTTPVariantScope(plan *fuzzHTTPPlan, variantMsg *envelope.HTTPMessage) error {
+	if err := s.checkTargetScopeURL(resendHTTPRequestURL(variantMsg)); err != nil {
+		return err
+	}
+	connScheme := "http"
+	if plan.useTLS {
+		connScheme = "https"
+	}
+	return s.checkTargetScopeAddrPath(connScheme, plan.dialAddr, variantMsg.Path)
 }
 
 // runFuzzHTTPSingleExchange runs one variant's send/receive cycle and

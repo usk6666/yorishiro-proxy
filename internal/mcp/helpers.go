@@ -177,10 +177,25 @@ func (s *Server) checkTargetScopeAddr(scheme, addr string) error {
 	return checkTargetScopeAddrHelper(s.connector.targetScope, scheme, addr)
 }
 
+// checkTargetScopeAddrPath is checkTargetScopeAddr plus the request path
+// that is sent over the connection to addr. Use it when the caller knows
+// the path that reaches addr (an HTTP request target), so `path_prefix`
+// rules apply to that leg: an address-only check can never match a
+// path_prefix allow (false deny) nor a path_prefix deny (bypass).
+func (s *Server) checkTargetScopeAddrPath(scheme, addr, path string) error {
+	return checkTargetScopeAddrPathHelper(s.connector.targetScope, scheme, addr, path)
+}
+
 // checkTargetScopeAddrHelper checks a host:port address against the given target scope rules.
 // This is a standalone version of Server.checkTargetScopeAddr for use by handler structs.
 // See Server.checkTargetScopeAddr for the scheme argument's contract.
 func checkTargetScopeAddrHelper(ts *connector.TargetScope, scheme, addr string) error {
+	return checkTargetScopeAddrPathHelper(ts, scheme, addr, "")
+}
+
+// checkTargetScopeAddrPathHelper is the shared body of the address checks;
+// path "" is the address-only form. See Server.checkTargetScopeAddrPath.
+func checkTargetScopeAddrPathHelper(ts *connector.TargetScope, scheme, addr, path string) error {
 	if ts == nil || !ts.HasRules() {
 		return nil
 	}
@@ -191,7 +206,7 @@ func checkTargetScopeAddrHelper(ts *connector.TargetScope, scheme, addr string) 
 		portStr = ""
 	}
 	port := targetDefaultPort(scheme, portStr)
-	allowed, reason := ts.CheckTarget(scheme, host, port, "")
+	allowed, reason := ts.CheckTarget(scheme, host, port, path)
 	if !allowed {
 		return fmt.Errorf("request blocked by target scope: host %q is %s", host, reason)
 	}

@@ -509,13 +509,22 @@ func resolveResendHTTPDial(msg *envelope.HTTPMessage, overrideHost string) (addr
 // scoped to plaintext false-blocked. Two legs of one check must not disagree
 // on the scheme axis. Lowercasing mirrors TargetScope.CheckURL, which
 // lowercases before matching, so targetDefaultPort's inference lands too.
+//
+// USK-1158: the override leg is also handed the request path, because that
+// path is what the HTTP/1 encoder writes as the request target on the
+// connection to the override target. Address-only, a path_prefix deny on
+// the override target never matched (bypass) and a path_prefix allow on it
+// never matched either (false deny). The path is handed in wire form
+// (envelope.WirePath, == msg.Path), the same form TargetScope.CheckURL and
+// the live HTTPScopeStep match on; canonical.Path is only the lenient
+// decoding since USK-1139, and CheckTarget decodes once more itself.
 func (s *Server) checkResendHTTPScope(msg *envelope.HTTPMessage, addr, overrideHost string) error {
 	canonical := resendHTTPRequestURL(msg)
 	if err := s.checkTargetScopeURL(canonical); err != nil {
 		return err
 	}
 	if overrideHost != "" {
-		if err := s.checkTargetScopeAddr(strings.ToLower(canonical.Scheme), addr); err != nil {
+		if err := s.checkTargetScopeAddrPath(strings.ToLower(canonical.Scheme), addr, envelope.WirePath(canonical)); err != nil {
 			return err
 		}
 	}
