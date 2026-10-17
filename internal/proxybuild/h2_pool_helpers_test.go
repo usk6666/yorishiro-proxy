@@ -193,6 +193,22 @@ func startProxyForH2PoolInterceptTest(
 	pool *h2pool.Pool,
 ) (proxyAddr string) {
 	t.Helper()
+	return startProxyForH2PoolInterceptTestWithMetrics(t, ctx, store, intercept, holdQueue, pool, nil)
+}
+
+// startProxyForH2PoolInterceptTestWithMetrics is startProxyForH2PoolInterceptTest
+// with an H2UpstreamMetrics sink wired into Deps (nil = none), so a test can
+// observe the redial / pre-warm counters the CONNECT path emits.
+func startProxyForH2PoolInterceptTestWithMetrics(
+	t *testing.T,
+	ctx context.Context,
+	store flow.Writer,
+	intercept *httprules.InterceptEngine,
+	holdQueue *common.HoldQueue,
+	pool *h2pool.Pool,
+	metrics *proxybuild.H2UpstreamMetrics,
+) (proxyAddr string) {
+	t.Helper()
 
 	ca := &cert.CA{}
 	if err := ca.Generate(); err != nil {
@@ -217,6 +233,7 @@ func startProxyForH2PoolInterceptTest(
 		},
 		HTTPInterceptEngine: intercept,
 		HoldQueue:           holdQueue,
+		H2UpstreamMetrics:   metrics,
 	}
 
 	stack, err := proxybuild.BuildLiveStack(ctx, deps)

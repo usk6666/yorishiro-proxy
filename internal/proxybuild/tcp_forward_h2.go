@@ -568,6 +568,48 @@ func (r *replayChannel) Send(ctx context.Context, env *envelope.Envelope) error 
 	return r.inner.Send(ctx, env)
 }
 
+// mintH2Func mints a fresh upstream HTTP/2 Layer with onGoAway wired as
+// its GOAWAY observer. Scaffolding for USK-1165.
+type mintH2Func func(ctx context.Context, target string, stale *http2.Layer, generation int, onGoAway func()) (*http2.Layer, error)
+
+// forwardUpstreamDialFunc dials one fresh upstream transport for a
+// tcp_forward connection. Scaffolding for USK-1165.
+type forwardUpstreamDialFunc func(ctx context.Context) (net.Conn, *envelope.TLSSnapshot, error)
+
+// newForwardH2Mint returns the mintH2Func for a tcp_forward h2
+// connection. Scaffolding for USK-1165.
+func newForwardH2Mint(
+	_ forwardUpstreamDialFunc,
+	_ envelope.EnvelopeContext,
+	_ string,
+	_ *connector.BuildConfig,
+) mintH2Func {
+	return func(context.Context, string, *http2.Layer, int, func()) (*http2.Layer, error) {
+		return nil, errors.New("tcp forward h2: redial not implemented")
+	}
+}
+
+// forwardH2Upstream is the per-connection upstream selector for a
+// tcp_forward h2 connection. Scaffolding for USK-1165.
+type forwardH2Upstream struct {
+	target     string
+	chain0     *http2.Layer
+	chain      *redialChain
+	redial     redialFunc
+	openStream openStreamFunc
+	logger     *slog.Logger
+}
+
+// open opens one upstream stream. Scaffolding for USK-1165: today's
+// behaviour (single OpenStream on chain[0], no redial, no retry).
+func (u *forwardH2Upstream) open(ctx context.Context) (*http2.Layer, layer.Channel, error) {
+	ch, err := u.openStream(ctx, u.chain0)
+	if err != nil {
+		return nil, nil, err
+	}
+	return u.chain0, ch, nil
+}
+
 func (r *replayChannel) Close() error            { return r.inner.Close() }
 func (r *replayChannel) Closed() <-chan struct{} { return r.inner.Closed() }
 func (r *replayChannel) Err() error              { return r.inner.Err() }
