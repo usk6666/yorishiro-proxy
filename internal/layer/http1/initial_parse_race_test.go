@@ -32,6 +32,10 @@ func withAfterInitialYieldForTest(fn func()) Option {
 //     writes (parseFailed, termMu acquisition) behind a concurrent
 //     Layer.Close without creating the happens-before edge that would hide
 //     the race from the detector.
+//   - reads logs every Read (entry time, bytes returned). Only the reading
+//     goroutine takes logMu while the test is still closing the Layer, so
+//     the log adds no ordering edge towards the closer; tests inspect it
+//     with readLog only AFTER Layer.Close has returned.
 type probeConn struct {
 	net.Conn
 	firstRead   chan struct{}
@@ -39,6 +43,16 @@ type probeConn struct {
 	inFlight    atomic.Int32
 	maxInFlight atomic.Int32
 	errDelay    time.Duration
+
+	logMu sync.Mutex
+	reads []readRecord
+}
+
+// readRecord is one probeConn.Read call: when it was entered and how many
+// bytes it returned.
+type readRecord struct {
+	entered time.Time
+	n       int
 }
 
 func newProbeConn(c net.Conn, errDelay time.Duration) *probeConn {
@@ -46,6 +60,7 @@ func newProbeConn(c net.Conn, errDelay time.Duration) *probeConn {
 }
 
 func (c *probeConn) Read(p []byte) (int, error) {
+	entered := time.Now()
 	n := c.inFlight.Add(1)
 	for {
 		m := c.maxInFlight.Load()
@@ -56,10 +71,39 @@ func (c *probeConn) Read(p []byte) (int, error) {
 	c.firstOnce.Do(func() { close(c.firstRead) })
 	rn, err := c.Conn.Read(p)
 	c.inFlight.Add(-1)
+	c.logMu.Lock()
+	c.reads = append(c.reads, readRecord{entered: entered, n: rn})
+	c.logMu.Unlock()
 	if err != nil && c.errDelay > 0 {
 		time.Sleep(c.errDelay)
 	}
 	return rn, err
+}
+
+// readLog returns a copy of the Read log. Call it only after Layer.Close
+// has returned: taking logMu earlier would order the test goroutine after
+// the parser's writes and hide the race under test.
+func (c *probeConn) readLog() []readRecord {
+	c.logMu.Lock()
+	defer c.logMu.Unlock()
+	return append([]readRecord(nil), c.reads...)
+}
+
+// bodyReadEnteredBefore reports whether log shows a Read entered before
+// cutoff after earlier Reads had already delivered the first total bytes.
+// Reads on the Layer's conn are sequential (one parser at a time), and once
+// the whole request head is buffered the parser parses it and mints
+// currentStreamID without reading again, so such a Read can only be the body
+// read that follows the minted ID.
+func bodyReadEnteredBefore(log []readRecord, total int, cutoff time.Time) bool {
+	got := 0
+	for i, r := range log {
+		got += r.n
+		if got >= total {
+			return i+1 < len(log) && log[i+1].entered.Before(cutoff)
+		}
+	}
+	return false
 }
 
 func waitSignal(t *testing.T, sig <-chan struct{}, what string) {
@@ -274,9 +318,13 @@ func TestChannel_NextAfterLayerClose_DeferredReturnsErrWithoutParsing(t *testing
 // test sleeps, because any channel or atomic hand-off from the writer side
 // would add the ordering edge that hides the race. The assertion is the race
 // detector; the ReleaseStream count proves the read actually happened.
+//
+// A fixed sleep can be too short on a loaded runner. Each attempt checks,
+// only after Layer.Close has returned, whether the body Read had been entered
+// before the close (probeConn's Read log against a timestamp taken right
+// before Layer.Close). Attempts where it had not are retried with a longer
+// sleep; every attempt where it had must see exactly one ReleaseStream.
 func TestLayer_CloseDuringBodyRead_NoStreamIDRace(t *testing.T) {
-	const partialPost = "POST /t4 HTTP/1.1\r\nHost: example.com\r\nContent-Length: 10\r\n\r\nab"
-
 	tests := []struct {
 		name     string
 		keepWarm bool // serve one complete request first so the spawn loop parses the partial one
@@ -286,50 +334,79 @@ func TestLayer_CloseDuringBodyRead_NoStreamIDRace(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			client, server := net.Pipe()
-			defer client.Close()
-
-			rec := &recordingReleaser{}
-			probe := newProbeConn(server, 50*time.Millisecond)
-			l := New(probe, "conn-t4", envelope.Send,
-				WithEnvelopeContext(envelope.EnvelopeContext{ConnID: "conn-t4"}),
-				WithStateReleaser(rec),
-			)
-			defer l.Close()
-
-			ch := <-l.Channels()
-			if tt.keepWarm {
-				first := "GET /first HTTP/1.1\r\nHost: example.com\r\nContent-Length: 0\r\n\r\n"
-				go func() { _, _ = client.Write([]byte(first)) }()
-				r := waitNext(t, nextAsync(ch), 2*time.Second, "first keep-alive request")
-				if r.err != nil {
-					t.Fatalf("first Next: %v", r.err)
+			const maxAttempts = 5
+			settle := 100 * time.Millisecond
+			for attempt := 1; attempt <= maxAttempts; attempt++ {
+				if runCloseDuringBodyRead(t, tt.keepWarm, settle) {
+					return
 				}
-				_ = ch.Close()
+				t.Logf("attempt %d: body Read not entered within %v before Layer.Close; retrying", attempt, settle)
+				settle *= 2
 			}
-
-			var res <-chan nextResult
-			if !tt.keepWarm {
-				res = nextAsync(ch)
-			}
-			go func() { _, _ = client.Write([]byte(partialPost)) }()
-
-			// Let the parser mint currentStreamID and park on the body read.
-			time.Sleep(100 * time.Millisecond)
-			streamsBefore := rec.streamCount()
-			_ = l.Close()
-
-			if res != nil {
-				r := waitNext(t, res, 2*time.Second, "deferred Next after Layer.Close")
-				if r.err == nil {
-					t.Fatalf("Next after Layer.Close: got envelope, want an error")
-				}
-			}
-			drainChannels(t, l)
-
-			if got := rec.streamCount() - streamsBefore; got != 1 {
-				t.Errorf("ReleaseStream calls for the in-flight exchange = %d, want 1", got)
-			}
+			t.Fatalf("precondition never met in %d attempts: the parser did not enter the body Read before Layer.Close", maxAttempts)
 		})
 	}
+}
+
+// runCloseDuringBodyRead runs one attempt of
+// TestLayer_CloseDuringBodyRead_NoStreamIDRace. It returns false, without
+// asserting the ReleaseStream count, only when the probe's Read log shows
+// the body Read had not been entered before Layer.Close.
+func runCloseDuringBodyRead(t *testing.T, keepWarm bool, settle time.Duration) bool {
+	t.Helper()
+	const (
+		first       = "GET /first HTTP/1.1\r\nHost: example.com\r\nContent-Length: 0\r\n\r\n"
+		partialPost = "POST /t4 HTTP/1.1\r\nHost: example.com\r\nContent-Length: 10\r\n\r\nab"
+	)
+
+	client, server := net.Pipe()
+	defer client.Close()
+
+	rec := &recordingReleaser{}
+	probe := newProbeConn(server, 50*time.Millisecond)
+	l := New(probe, "conn-t4", envelope.Send,
+		WithEnvelopeContext(envelope.EnvelopeContext{ConnID: "conn-t4"}),
+		WithStateReleaser(rec),
+	)
+	defer l.Close()
+
+	ch := <-l.Channels()
+	total := len(partialPost)
+	if keepWarm {
+		total += len(first)
+		go func() { _, _ = client.Write([]byte(first)) }()
+		r := waitNext(t, nextAsync(ch), 2*time.Second, "first keep-alive request")
+		if r.err != nil {
+			t.Fatalf("first Next: %v", r.err)
+		}
+		_ = ch.Close()
+	}
+
+	var res <-chan nextResult
+	if !keepWarm {
+		res = nextAsync(ch)
+	}
+	go func() { _, _ = client.Write([]byte(partialPost)) }()
+
+	// Let the parser mint currentStreamID and park on the body read.
+	time.Sleep(settle)
+	streamsBefore := rec.streamCount()
+	closeAt := time.Now()
+	_ = l.Close()
+
+	if res != nil {
+		r := waitNext(t, res, 2*time.Second, "deferred Next after Layer.Close")
+		if r.err == nil {
+			t.Fatalf("Next after Layer.Close: got envelope, want an error")
+		}
+	}
+	drainChannels(t, l)
+
+	if !bodyReadEnteredBefore(probe.readLog(), total, closeAt) {
+		return false
+	}
+	if got := rec.streamCount() - streamsBefore; got != 1 {
+		t.Errorf("ReleaseStream calls for the in-flight exchange = %d, want 1", got)
+	}
+	return true
 }
