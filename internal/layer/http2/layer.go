@@ -747,7 +747,8 @@ func (l *Layer) OpenStream(ctx context.Context) (layer.Channel, error) {
 	return newChannel(l, 0), nil
 }
 
-// Close tears down the Layer: sends GOAWAY, drains the writer, closes
+// Close tears down the Layer: sends GOAWAY (best-effort; skipped if the
+// writer cannot accept it within closeDrainTimeout), drains the writer, closes
 // streams, closes the connection. Safe to call multiple times.
 func (l *Layer) Close() error {
 	l.mu.Lock()
@@ -758,11 +759,17 @@ func (l *Layer) Close() error {
 	l.closed = true
 	l.mu.Unlock()
 
+	// USK-1180: GOAWAY on teardown is advisory (RFC 9113 §6.8), so the
+	// enqueue is bounded. If the writer is parked (e.g. in waitForWindow on
+	// an exhausted peer window) and the queue is full, a blocking enqueue
+	// would never return — shutdown is not closed yet, so nothing wakes the
+	// writer, the reader, or this goroutine. Give up on GOAWAY instead and
+	// proceed to close(shutdown), which unblocks every waiter.
 	last := l.conn.Streams().LastPeerStreamID()
-	l.enqueueWrite(writeRequest{goAway: &writeGoAway{
+	l.enqueueWriteBounded(writeRequest{goAway: &writeGoAway{
 		lastStreamID: last,
 		code:         ErrCodeNo,
-	}})
+	}}, closeDrainTimeout)
 
 	l.shutdownOnce.Do(func() { close(l.shutdown) })
 
@@ -814,6 +821,36 @@ func (l *Layer) enqueueWrite(req writeRequest) {
 	case <-l.shutdown:
 		failWriteRequest(req, ErrWriterClosed)
 	}
+}
+
+// enqueueWriteBounded is enqueueWrite for callers that must not wait
+// indefinitely for queue space: it waits at most d for the writer to accept
+// req and reports whether it did. On timeout req is failed with
+// ErrWriterClosed. Used by Close (USK-1180), which runs before shutdown is
+// closed and therefore cannot rely on enqueueWrite's `<-l.shutdown` escape.
+func (l *Layer) enqueueWriteBounded(req writeRequest, d time.Duration) bool {
+	select {
+	case <-l.writerDone:
+		failWriteRequest(req, ErrWriterClosed)
+		return false
+	default:
+	}
+	select {
+	case l.writerQueue <- req:
+		return true
+	default:
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case l.writerQueue <- req:
+		return true
+	case <-l.writerDone:
+	case <-l.shutdown:
+	case <-timer.C:
+	}
+	failWriteRequest(req, ErrWriterClosed)
+	return false
 }
 
 // failWriteRequest delivers err on the done channel of whichever sub-request
