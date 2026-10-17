@@ -215,13 +215,34 @@ func (c *channel) Err() error {
 // Close cascades to inner.Close exactly once and fires the layer's own
 // terminal signal so observers parked on Closed() unblock.
 func (c *channel) Close() error {
+	c.closeWith(c.inner.Close)
+	return nil
+}
+
+// CloseRefused is Close for a stream the far side of the proxy refused
+// without processing it (USK-1157). It cascades to the inner Channel's
+// CloseRefused when it has one (an aggregator over an HTTP/2 stream, which
+// picks RST_STREAM(REFUSED_STREAM) vs CANCEL from wire state), else to its
+// Close. Shares Close's sync.Once.
+func (c *channel) CloseRefused() error {
+	c.closeWith(func() error {
+		if rc, ok := c.inner.(interface{ CloseRefused() error }); ok {
+			return rc.CloseRefused()
+		}
+		return c.inner.Close()
+	})
+	return nil
+}
+
+// closeWith is the single teardown path behind Close and CloseRefused;
+// closeInner cascades to the inner Channel.
+func (c *channel) closeWith(closeInner func() error) {
 	c.closeOnce.Do(func() {
 		// Set a terminal error if none has been recorded yet; an explicit
 		// Close represents normal teardown so we use io.EOF.
 		c.terminate(io.EOF)
-		_ = c.inner.Close()
+		_ = closeInner()
 	})
-	return nil
 }
 
 // Next returns the next gRPC-Web envelope. When the emission queue is

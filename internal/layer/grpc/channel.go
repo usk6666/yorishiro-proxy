@@ -256,12 +256,33 @@ func (c *grpcChannel) Err() error {
 // Close cascades to inner.Close per N6.7 cascade discipline. Idempotent
 // via sync.Once.
 func (c *grpcChannel) Close() error {
+	c.closeWith(c.inner.Close)
+	return nil
+}
+
+// CloseRefused is Close for a stream the far side of the proxy refused
+// without processing it (USK-1157). It cascades to the inner Channel's
+// CloseRefused when it has one (the HTTP/2 stream picks
+// RST_STREAM(REFUSED_STREAM) vs CANCEL from wire state), else to its Close.
+// Shares Close's sync.Once.
+func (c *grpcChannel) CloseRefused() error {
+	c.closeWith(func() error {
+		if rc, ok := c.inner.(interface{ CloseRefused() error }); ok {
+			return rc.CloseRefused()
+		}
+		return c.inner.Close()
+	})
+	return nil
+}
+
+// closeWith is the single teardown path behind Close and CloseRefused;
+// closeInner cascades to the inner Channel.
+func (c *grpcChannel) closeWith(closeInner func() error) {
 	c.closeOnce.Do(func() {
-		_ = c.inner.Close()
+		_ = closeInner()
 		c.setTermErr(io.EOF)
 		c.closeRecvDone()
 	})
-	return nil
 }
 
 // setTermErr caches err as the terminal error if not already set (first-
