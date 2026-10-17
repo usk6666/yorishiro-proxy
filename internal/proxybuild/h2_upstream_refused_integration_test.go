@@ -74,7 +74,25 @@ const (
 	// HEADERS, then RST_STREAM(REFUSED_STREAM) on the same stream; keep
 	// serving the connection normally.
 	originEarlyHintsThenRST
+	// originGoAwayEveryConn (USK-1179): on EVERY connection, wait for the
+	// client's SETTINGS, pause goAwayEveryConnDelay, send
+	// GOAWAY(NO_ERROR, last_stream_id=0) and keep reading — answering
+	// nothing — until the connection closes. batch is unused.
+	originGoAwayEveryConn
+	// originGoAwayAfterEachFirst (USK-1179): on EVERY connection, answer
+	// the first request with 200, send GOAWAY(NO_ERROR,
+	// last_stream_id=that stream) and keep reading until the connection
+	// closes. batch is unused.
+	originGoAwayAfterEachFirst
 )
+
+// goAwayEveryConnDelay is how long originGoAwayEveryConn waits after the
+// client's SETTINGS before sending GOAWAY. The proxy's ClientRole
+// http2.New does not wait for the peer's SETTINGS, and the pre-warm GOAWAY
+// observer ignores a GOAWAY that lands before the fresh Layer is published
+// as the chain head; the pause keeps every GOAWAY after that publish, which
+// is the worst case for the pre-warm loop USK-1179 caps.
+const goAwayEveryConnDelay = 20 * time.Millisecond
 
 const refusalHold = 500 * time.Millisecond
 
@@ -344,12 +362,83 @@ func (o *refusingH2Origin) serveConn(c net.Conn, idx int64) {
 		return
 	}
 
+	switch o.mode {
+	case originGoAwayEveryConn:
+		o.goAwayEveryConn(oc)
+		return
+	case originGoAwayAfterEachFirst:
+		o.goAwayAfterEachFirst(oc)
+		return
+	}
+
 	if idx == 1 {
 		if !o.runScenario(oc) {
 			return
 		}
 	}
 	o.serveAll(oc)
+}
+
+// goAwayEveryConn implements originGoAwayEveryConn on one connection.
+func (o *refusingH2Origin) goAwayEveryConn(oc *originConn) {
+	for {
+		f, err := oc.fr.ReadFrame()
+		if err != nil {
+			return
+		}
+		if _, werr := oc.handleControl(f); werr != nil {
+			return
+		}
+		if sf, ok := f.(*http2.SettingsFrame); ok && !sf.IsAck() {
+			break
+		}
+	}
+	time.Sleep(goAwayEveryConnDelay)
+	if err := oc.fr.WriteGoAway(0, http2.ErrCodeNo, nil); err != nil {
+		return
+	}
+	drainUntilClosed(oc)
+}
+
+// goAwayAfterEachFirst implements originGoAwayAfterEachFirst on one
+// connection.
+func (o *refusingH2Origin) goAwayAfterEachFirst(oc *originConn) {
+	for {
+		f, err := oc.fr.ReadFrame()
+		if err != nil {
+			return
+		}
+		if ok, werr := oc.handleControl(f); ok {
+			if werr != nil {
+				return
+			}
+			continue
+		}
+		if mh, ok := f.(*http2.MetaHeadersFrame); ok {
+			if err := oc.writeOK(mh.StreamID); err != nil {
+				return
+			}
+			if err := oc.fr.WriteGoAway(mh.StreamID, http2.ErrCodeNo, nil); err != nil {
+				return
+			}
+			drainUntilClosed(oc)
+			return
+		}
+	}
+}
+
+// drainUntilClosed answers control frames and ignores everything else until
+// the connection closes.
+func drainUntilClosed(oc *originConn) {
+	for {
+		f, err := oc.fr.ReadFrame()
+		if err != nil {
+			return
+		}
+		if _, werr := oc.handleControl(f); werr != nil {
+			return
+		}
+	}
 }
 
 // serveAll answers every request HEADERS with 200 until the conn closes.
