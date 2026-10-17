@@ -126,6 +126,13 @@ func RedialUpstreamH2(
 // `/upstream-redial` (which would be ambiguous across CONNECTs in log
 // aggregators).
 func redialConnIDLabel(baseConnID string, generation int) string {
+	return RedialConnIDLabel(baseConnID, generation)
+}
+
+// RedialConnIDLabel is the exported form of the redial-step Layer label
+// (`<connID>/upstream-redial[-N]`) so the tcp_forward h2 redial (USK-1165)
+// labels its chain steps exactly like the CONNECT path does.
+func RedialConnIDLabel(baseConnID string, generation int) string {
 	if baseConnID == "" {
 		baseConnID = "redial"
 	}
