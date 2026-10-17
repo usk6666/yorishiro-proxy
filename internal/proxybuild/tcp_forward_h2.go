@@ -144,7 +144,89 @@ func (m *Manager) handleTCPForwardH2ConnWithOverride(
 	}()
 
 	isGRPCFilter := fwdProto == connector.ForwardProtocolGRPC
-	runTCPForwardH2Loop(connCtx, parentStack, stack, entry.target, connLogger, isGRPCFilter)
+	// USK-1165: every upstream connection dialed after a GOAWAY re-runs
+	// the same forward dial (upstream_tls, ALPN offer, InsecureSkipVerify
+	// tri-state, upstream-proxy rotation, tls on_handshake hook) as the
+	// first one.
+	redial := forwardH2Redial{
+		dial: func(dctx context.Context) (net.Conn, *envelope.TLSSnapshot, error) {
+			return dialForwardUpstream(dctx, entry, override, parentStack, connLogger)
+		},
+		scheme:  targetParams.Scheme,
+		metrics: m.h2Upstream,
+	}
+	runTCPForwardH2Loop(connCtx, parentStack, stack, entry.target, connLogger, isGRPCFilter, redial)
+}
+
+// forwardUpstreamDialFunc dials one fresh upstream transport for a
+// tcp_forward connection: plain TCP for h2c, or TCP + a completed upstream
+// TLS handshake (whose snapshot is returned) when upstream_tls=true.
+type forwardUpstreamDialFunc func(ctx context.Context) (net.Conn, *envelope.TLSSnapshot, error)
+
+// forwardH2Redial carries what runTCPForwardH2Loop needs to open upstream
+// connections after the first one went stale (USK-1165).
+type forwardH2Redial struct {
+	// dial re-runs the forward connection's upstream dial.
+	dial forwardUpstreamDialFunc
+	// scheme is the scheme conn #1's upstream Layer was built with.
+	scheme string
+	// metrics is the Manager-level counter set shared with the CONNECT
+	// path (query(resource:"status").h2_upstream). nil-safe.
+	metrics *H2UpstreamMetrics
+}
+
+// newForwardH2Mint returns the mintH2Func for a tcp_forward h2
+// connection. Each call dials a fresh upstream transport via dial and
+// builds the Layer with connector.NewForwardUpstreamH2Layer — the option
+// set conn #1 used — so the redialed connection keeps conn #1's SETTINGS
+// fingerprint and :scheme. The EnvelopeContext keeps conn #1's identity
+// (tmpl.ConnID / TargetHost) and stamps the NEW dial's upstream TLS
+// snapshot (nil for h2c): it is a different TLS session and recordings of
+// streams served by it must reflect that.
+//
+// stale is ignored: the template comes from conn #1, so a nil stale (the
+// pre-warm worker before the first redial) is harmless here.
+func newForwardH2Mint(
+	dial forwardUpstreamDialFunc,
+	tmpl envelope.EnvelopeContext,
+	scheme string,
+	cfg *connector.BuildConfig,
+) mintH2Func {
+	return func(ctx context.Context, _ string, _ *http2.Layer, generation int, onGoAway func()) (*http2.Layer, error) {
+		conn, snap, err := dial(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("tcp forward h2 redial: %w", err)
+		}
+		envCtx := tmpl
+		envCtx.TLS = snap
+		fresh, err := connector.NewForwardUpstreamH2Layer(conn,
+			connector.RedialConnIDLabel(tmpl.ConnID, generation), scheme, envCtx, cfg, onGoAway)
+		if err != nil {
+			return nil, fmt.Errorf("tcp forward h2 redial: %w", err)
+		}
+		return fresh, nil
+	}
+}
+
+// forwardH2Upstream is the per-connection upstream selector shared by
+// every stream of one tcp_forward h2 connection. chain0 is the stack's
+// upstream Layer (owned by the stack); chain holds the Layers dialed after
+// it went stale (owned by runTCPForwardH2Loop).
+type forwardH2Upstream struct {
+	target     string
+	chain0     *http2.Layer
+	chain      *redialChain
+	redial     redialFunc
+	openStream openStreamFunc
+	logger     *slog.Logger
+}
+
+// open opens one upstream stream with the CONNECT path's semantics
+// (USK-991 / USK-993): a stale head (GOAWAY / shutdown) is replaced by a
+// fresh dial shared across concurrent streams, and an OpenStream refused
+// before HEADERS is retried exactly once.
+func (u *forwardH2Upstream) open(ctx context.Context) (*http2.Layer, layer.Channel, error) {
+	return openUpstreamStreamWithRetryFn(ctx, u.target, u.chain0, u.chain, u.redial, u.openStream, u.logger)
 }
 
 // mapH2ForwardProtocol translates a ForwardConfig.Protocol value into a
@@ -203,7 +285,14 @@ func buildH2TargetParams(
 //
 //   - Upstream is dialed per-conn (no h2_pool integration — forward
 //     dials fresh per accepted client TCP conn by design).
-//   - No redial machinery (pool staleness is a MITM-only concern).
+//   - The same redial machinery as CONNECT (USK-1165): when the upstream
+//     Layer goes stale (GOAWAY / shutdown) the next stream is opened on a
+//     freshly dialed connection (redial.dial + newForwardH2Mint), an
+//     OpenStream refused before HEADERS is retried once, and GOAWAY on
+//     the current head wakes the pre-warm worker. The stack owns chain[0];
+//     this function owns every redialed Layer and closes them after all
+//     streams finished, so streams on a GOAWAY'd connection drain up to
+//     its last_stream_id (RFC 9113 §6.8).
 //   - When isGRPCFilter is true, the first envelope of each stream is
 //     peeked and its content-type validated; non-gRPC streams are
 //     refused with RST_STREAM(REFUSED_STREAM) and a state="error" Stream
@@ -220,6 +309,7 @@ func runTCPForwardH2Loop(
 	target string,
 	logger *slog.Logger,
 	isGRPCFilter bool,
+	redial forwardH2Redial,
 ) {
 	clientL, ok := stack.ClientTopmost().(*http2.Layer)
 	if !ok {
@@ -242,6 +332,28 @@ func runTCPForwardH2Loop(
 	upstreamLOpts := httpaggregator.OptionsFromLayer(upstreamH2)
 	upstreamLOpts.StateReleaser = parentStack.PluginV2Engine
 
+	// USK-1165: redial machinery shared with the CONNECT path. rctx bounds
+	// the pre-warm worker (and any pre-warm dial in flight) to this loop;
+	// it is canceled before stopRedial so a dial that completes during
+	// teardown is closed instead of appended. Both run after wg.Wait()
+	// (every return below waits first).
+	rctx, rcancel := context.WithCancel(ctx)
+	chain := newRedialChain(redial.metrics)
+	mint := newForwardH2Mint(redial.dial, upstreamH2.EnvelopeContextTemplate(), redial.scheme, parentStack.BuildConfig)
+	redialFn, stopRedial := startH2UpstreamRedial(rctx, target, upstreamH2, chain, mint, logger)
+	defer func() {
+		rcancel()
+		stopRedial()
+	}()
+	upstream := &forwardH2Upstream{
+		target:     target,
+		chain0:     upstreamH2,
+		chain:      chain,
+		redial:     redialFn,
+		openStream: http2OpenStream,
+		logger:     logger,
+	}
+
 	var wg sync.WaitGroup
 	for {
 		select {
@@ -257,7 +369,7 @@ func runTCPForwardH2Loop(
 			go func(ch layer.Channel) {
 				defer wg.Done()
 				dispatchForwardH2Stream(
-					ctx, parentStack, stack, ch, upstreamH2,
+					ctx, parentStack, stack, ch, upstream,
 					target, logger, isGRPCFilter,
 					sessOpts, clientLOpts, upstreamLOpts,
 					grpcOpts, grpcwebOpts,
@@ -275,7 +387,7 @@ func dispatchForwardH2Stream(
 	parentStack *Stack,
 	stack *connector.ConnectionStack,
 	ch layer.Channel,
-	upstreamH2 *http2.Layer,
+	upstream *forwardH2Upstream,
 	target string,
 	logger *slog.Logger,
 	isGRPCFilter bool,
@@ -329,16 +441,23 @@ func dispatchForwardH2Stream(
 	}
 
 	dial := func(dctx context.Context, env *envelope.Envelope) (layer.Channel, error) {
-		upCh, oerr := upstreamH2.OpenStream(dctx)
+		upL, upCh, oerr := upstream.open(dctx)
 		if oerr != nil {
 			return nil, oerr
+		}
+		// A redialed Layer's body configuration is projected onto the
+		// per-stream wrap (mirrors buildOnHTTP2Stack).
+		lopts := upstreamLOpts
+		if upL != upstream.chain0 {
+			lopts = httpaggregator.OptionsFromLayer(upL)
+			lopts.StateReleaser = parentStack.PluginV2Engine
 		}
 		var reqProto envelope.Protocol
 		if env != nil {
 			reqProto = env.Protocol
 		}
 		return connector.WrapH2UpstreamForDispatchFull(
-			upCh, reqProto, upstreamLOpts, streamGRPCOpts, streamGRPCWebOpts, streamAggOpts,
+			upCh, reqProto, lopts, streamGRPCOpts, streamGRPCWebOpts, streamAggOpts,
 		), nil
 	}
 
@@ -566,44 +685,6 @@ func (r *replayChannel) Next(ctx context.Context) (*envelope.Envelope, error) {
 
 func (r *replayChannel) Send(ctx context.Context, env *envelope.Envelope) error {
 	return r.inner.Send(ctx, env)
-}
-
-// forwardUpstreamDialFunc dials one fresh upstream transport for a
-// tcp_forward connection. Scaffolding for USK-1165.
-type forwardUpstreamDialFunc func(ctx context.Context) (net.Conn, *envelope.TLSSnapshot, error)
-
-// newForwardH2Mint returns the mintH2Func for a tcp_forward h2
-// connection. Scaffolding for USK-1165.
-func newForwardH2Mint(
-	_ forwardUpstreamDialFunc,
-	_ envelope.EnvelopeContext,
-	_ string,
-	_ *connector.BuildConfig,
-) mintH2Func {
-	return func(context.Context, string, *http2.Layer, int, func()) (*http2.Layer, error) {
-		return nil, errors.New("tcp forward h2: redial not implemented")
-	}
-}
-
-// forwardH2Upstream is the per-connection upstream selector for a
-// tcp_forward h2 connection. Scaffolding for USK-1165.
-type forwardH2Upstream struct {
-	target     string
-	chain0     *http2.Layer
-	chain      *redialChain
-	redial     redialFunc
-	openStream openStreamFunc
-	logger     *slog.Logger
-}
-
-// open opens one upstream stream. Scaffolding for USK-1165: today's
-// behaviour (single OpenStream on chain[0], no redial, no retry).
-func (u *forwardH2Upstream) open(ctx context.Context) (*http2.Layer, layer.Channel, error) {
-	ch, err := u.openStream(ctx, u.chain0)
-	if err != nil {
-		return nil, nil, err
-	}
-	return u.chain0, ch, nil
 }
 
 func (r *replayChannel) Close() error            { return r.inner.Close() }

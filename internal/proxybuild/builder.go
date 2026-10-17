@@ -1266,6 +1266,11 @@ type redialChain struct {
 	// close time) keeps the counter stable if future evolutions change
 	// how layers are accounted.
 	liveGen int64
+
+	// closed is set under mu by closeAll; the pre-warm worker checks it
+	// before appending so a dial completing after teardown is closed
+	// rather than leaked.
+	closed bool
 }
 
 // newRedialChain constructs a redialChain. metrics may be nil — every
@@ -1409,6 +1414,14 @@ func (c *redialChain) runPrewarmWorker(
 		// Append + swap under mu. selectUpstreamForDial readers see the
 		// new head via chain.current.Load() on their next call.
 		c.mu.Lock()
+		if c.closed {
+			// closeAll already ran (it can race the ctx check above when
+			// ctx outlives the connection's streams): appending now would
+			// leave a Layer nobody closes.
+			c.mu.Unlock()
+			_ = fresh.Close()
+			return
+		}
 		c.layers = append(c.layers, fresh)
 		c.current.Store(fresh)
 		// USK-1001: bump the per-chain liveGen and emit the
@@ -1476,6 +1489,7 @@ func (c *redialChain) closeAll() {
 	})
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.closed = true
 	for _, l := range c.layers {
 		_ = l.Close()
 	}

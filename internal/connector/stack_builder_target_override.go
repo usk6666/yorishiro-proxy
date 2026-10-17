@@ -448,20 +448,10 @@ func buildTargetOverrideH2CStack(
 
 	// Upstream first so we can sniff its SETTINGS_ENABLE_CONNECT_PROTOCOL
 	// value (mirrors BuildPlainH2CStack USK-871 commentary).
-	upstreamLayer, err := http2.New(upstreamConn, connID+"/upstream", http2.ClientRole,
-		http2.WithScheme(scheme),
-		http2.WithEnvelopeContext(upstreamEnvCtx),
-		http2.WithBodySpillDir(cfg.BodySpillDir),
-		http2.WithBodySpillThreshold(cfg.BodySpillThreshold),
-		http2.WithMaxBodySize(cfg.MaxBodySize),
-		http2.WithStateReleaser(cfg.PluginV2Engine),
-		// USK-1007: Firefox-shaped upstream H2 fingerprint when
-		// tls_fingerprint=firefox; no-op (Chrome shape) otherwise.
-		http2.WithH2Fingerprint(cfg.EffectiveTLSFingerprint()),
-	)
+	upstreamLayer, err := NewForwardUpstreamH2Layer(upstreamConn, connID+"/upstream", scheme, upstreamEnvCtx, cfg, nil)
 	if err != nil {
-		// http2.New already closed upstreamConn on failure; close the
-		// client conn to release resources.
+		// NewForwardUpstreamH2Layer already closed upstreamConn on
+		// failure; close the client conn to release resources.
 		_ = clientConn.Close()
 		return nil, fmt.Errorf("connector: buildTargetOverrideH2CStack: upstream h2 layer: %w", err)
 	}
@@ -503,6 +493,53 @@ func buildTargetOverrideH2CStack(
 	stack.PushUpstream(upstreamLayer)
 
 	return stack, nil
+}
+
+// NewForwardUpstreamH2Layer constructs the upstream (ClientRole) HTTP/2
+// Layer of a tcp_forward h2 connection over an already-dialed conn (plain
+// TCP for h2c, or a completed upstream TLS handshake). It is the single
+// option set for that Layer: buildTargetOverrideH2CStack uses it for the
+// connection's first upstream Layer and the tcp_forward redial (USK-1165)
+// uses it for every Layer dialed after GOAWAY, so a redialed connection
+// sends the same SETTINGS fingerprint and stamps the same EnvelopeContext
+// shape as the first one (RFC-001 §3.4.3).
+//
+// label is the Layer's diagnostic id (`<connID>/upstream` for the first
+// Layer, RedialConnIDLabel for redials). scheme "" defaults to "http".
+// onGoAway, when non-nil, is wired via http2.WithGoAwayObserver and must
+// honour that option's non-blocking contract. On error conn is closed.
+func NewForwardUpstreamH2Layer(
+	conn net.Conn,
+	label string,
+	scheme string,
+	envCtx envelope.EnvelopeContext,
+	cfg *BuildConfig,
+	onGoAway func(),
+) (*http2.Layer, error) {
+	if cfg == nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("connector: NewForwardUpstreamH2Layer: cfg is nil")
+	}
+	if scheme == "" {
+		scheme = "http"
+	}
+	l, err := http2.New(conn, label, http2.ClientRole,
+		http2.WithScheme(scheme),
+		http2.WithEnvelopeContext(envCtx),
+		http2.WithBodySpillDir(cfg.BodySpillDir),
+		http2.WithBodySpillThreshold(cfg.BodySpillThreshold),
+		http2.WithMaxBodySize(cfg.MaxBodySize),
+		http2.WithStateReleaser(cfg.PluginV2Engine),
+		http2.WithGoAwayObserver(onGoAway),
+		// USK-1007: Firefox-shaped upstream H2 fingerprint when
+		// tls_fingerprint=firefox; no-op (Chrome shape) otherwise.
+		http2.WithH2Fingerprint(cfg.EffectiveTLSFingerprint()),
+	)
+	if err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+	return l, nil
 }
 
 // buildTargetOverrideHTTPStack is the target-override sibling of
