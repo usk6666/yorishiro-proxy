@@ -1755,6 +1755,14 @@ func http2OpenStream(ctx context.Context, l *http2.Layer) (layer.Channel, error)
 //     allocated; no bytes hit the wire. Retry is byte-for-byte
 //     equivalent to a fresh request regardless of HTTP method, so POST/
 //     PUT/DELETE etc. are safe (stronger than RFC 9113 §6.8 needs).
+//   - The retry covers OpenStream only. A GOAWAY that lands AFTER
+//     OpenStream returned but before the first HEADERS Send is refused
+//     by allocateAndEnqueueFirstHeaders (USK-1175), still before any id
+//     is allocated or bytes hit the wire; that refusal surfaces from
+//     the session's first Send, not here, and is propagated to the
+//     client as RST_STREAM(REFUSED_STREAM) (USK-1157) — the client
+//     retries, and its next OpenStream finds the Layer stale and
+//     redials. A proxy-side re-send of it is out of scope (USK-1190).
 //
 // Classifier:
 //   - We match by Code (layer.ErrorRefused), not by Reason string. All
