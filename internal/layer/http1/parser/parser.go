@@ -60,6 +60,62 @@ var ErrRequestLineTooLong = errors.New("request line too long")
 // its maxLen.
 var errLineTooLong = errors.New("line exceeds maximum length")
 
+// ErrHeaderSectionTooLarge is returned (wrapped) by ParseRequest and
+// ParseRequestWithOptions when the request header section exceeds a parser
+// limit: more than maxHeaderCount lines, a single line over maxHeaderSize,
+// or a total size over maxHeaderSize. The client-facing HTTP/1 Layer
+// answers it with 431 Request Header Fields Too Large (RFC 6585 §5).
+var ErrHeaderSectionTooLarge = errors.New("request header section too large")
+
+// errHeaderLimit is the unexported cause parseHeaderLines wraps when the
+// header count or total size limit trips.
+var errHeaderLimit = errors.New("header section limit exceeded")
+
+// PartialRequestError is the error ParseRequestWithOptions returns when it
+// fails after reading some of the request head. It carries the wire bytes
+// consumed so far so callers can record what the client actually sent
+// (USK-1181). The parsed fields are best-effort overlays; Raw is
+// authoritative.
+//
+// errors.Is / errors.As see through it to Err (ErrRequestLineTooLong,
+// ErrHeaderSectionTooLarge, os.ErrDeadlineExceeded, io.EOF, ...).
+type PartialRequestError struct {
+	// Err is the underlying parse error.
+	Err error
+	// Raw holds the request-head bytes read before the failure, capped at
+	// ParseOptions.MaxRawCapture. Nil when no byte was read.
+	Raw []byte
+	// Truncated reports that Raw was cut at the capture cap.
+	Truncated bool
+	// RequestLineComplete reports that the request line, including its
+	// terminator, was read. Method / RequestURI / Proto are set only then.
+	RequestLineComplete bool
+	// Method, RequestURI and Proto are the request-line fields as observed
+	// on the wire.
+	Method     string
+	RequestURI string
+	Proto      string
+	// Headers holds the header lines fully read before the failure, in
+	// wire order. A trailing fragment cut by the failure is not included.
+	Headers RawHeaders
+}
+
+// Error returns the underlying error's message.
+func (e *PartialRequestError) Error() string {
+	if e == nil || e.Err == nil {
+		return "partial request"
+	}
+	return e.Err.Error()
+}
+
+// Unwrap returns the underlying error.
+func (e *PartialRequestError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
 // ParseOptions carries per-parse knobs that the channel layer threads through
 // to bound header / body raw-bytes capture in memory mode. The zero value
 // means "use the package defaults" — equivalent to calling ParseRequest /
