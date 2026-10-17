@@ -1061,17 +1061,61 @@ type h2StreamIDer interface {
 // cannot be performed without knowing the wire stream id.
 func extractH2StreamID(ch layer.Channel, side string) (uint32, error) {
 	if ch == nil {
-		return 0, fmt.Errorf("session: h2 ws upgrade: %s channel is nil", side)
+		return 0, fmt.Errorf("session: h2 upgrade: %s channel is nil", side)
 	}
 	idr, ok := ch.(h2StreamIDer)
 	if !ok {
-		return 0, fmt.Errorf("session: h2 ws upgrade: %s channel %T does not expose H2StreamID", side, ch)
+		return 0, fmt.Errorf("session: h2 upgrade: %s channel %T does not expose H2StreamID", side, ch)
 	}
 	id := idr.H2StreamID()
 	if id == 0 {
-		return 0, fmt.Errorf("session: h2 ws upgrade: %s channel reports h2 stream id 0", side)
+		return 0, fmt.Errorf("session: h2 upgrade: %s channel reports h2 stream id 0", side)
 	}
 	return id, nil
+}
+
+// h2LayerOwner is the optional surface a layer.Channel implements to
+// report the connection-level *http2.Layer that owns its h2 stream.
+// *http2.channel and *httpaggregator.aggregatorChannel implement it.
+type h2LayerOwner interface {
+	H2Layer() *http2.Layer
+}
+
+// h2StreamOwner returns the *http2.Layer that owns ch's h2 stream together
+// with the stream id, both read from the same Channel. HTTP/2 stream ids
+// are per-connection (RFC 9113 §5.1.1): after a GOAWAY redial (USK-991)
+// streams of one CONNECT live on different upstream connections whose ids
+// restart at 1, so the id is only meaningful against the Layer that
+// carries the Channel — never against the stack's pooled Layer (USK-1164).
+func h2StreamOwner(ch layer.Channel, side string) (*http2.Layer, uint32, error) {
+	id, err := extractH2StreamID(ch, side)
+	if err != nil {
+		return nil, 0, err
+	}
+	owner, ok := ch.(h2LayerOwner)
+	if !ok {
+		return nil, 0, fmt.Errorf("session: h2 upgrade: %s channel %T does not expose H2Layer", side, ch)
+	}
+	l := owner.H2Layer()
+	if l == nil {
+		return nil, 0, fmt.Errorf("session: h2 upgrade: %s channel %T reports nil H2Layer", side, ch)
+	}
+	return l, id, nil
+}
+
+// h2UpgradeEndpoints resolves, for each side of an h2 upgrade, the Layer
+// that owns the stream and the stream id on that Layer. Both come from the
+// Channel carrying the stream (USK-1164).
+func h2UpgradeEndpoints(clientCh, upstreamCh layer.Channel) (clientH2 *http2.Layer, clientID uint32, upstreamH2 *http2.Layer, upstreamID uint32, err error) {
+	clientH2, clientID, err = h2StreamOwner(clientCh, "client")
+	if err != nil {
+		return nil, 0, nil, 0, err
+	}
+	upstreamH2, upstreamID, err = h2StreamOwner(upstreamCh, "upstream")
+	if err != nil {
+		return nil, 0, nil, 0, err
+	}
+	return clientH2, clientID, upstreamH2, upstreamID, nil
 }
 
 // runUpgradeWSOverH2 performs the per-stream WS-over-h2 swap (RFC-001
@@ -1101,11 +1145,11 @@ func runUpgradeWSOverH2(
 	upgradeReq *envelope.Envelope,
 	extensionHeader string,
 ) (retErr error) {
-	clientH2, upstreamH2, err := h2LayersFromStack(stack)
-	if err != nil {
-		return err
-	}
-	clientStreamID, upstreamStreamID, err := h2StreamIDsForUpgrade(clientCh, upstreamCh)
+	// USK-1164: each side's Layer comes from the Channel that carries the
+	// stream, never from the stack. After a GOAWAY redial (USK-991) this
+	// CONNECT's upstream streams live on several connections, and the
+	// stack's pooled Layer is only the first of them.
+	clientH2, clientStreamID, upstreamH2, upstreamStreamID, err := h2UpgradeEndpoints(clientCh, upstreamCh)
 	if err != nil {
 		return err
 	}
@@ -1447,75 +1491,6 @@ func wsRelayHandlePolicy(
 		return fmt.Errorf("ws/h2 relay: src.Send (respond): %w", serr)
 	}
 	return nil
-}
-
-// h2LayersFromStack returns the client and upstream connection-level
-// HTTP/2 Layers for the ws-over-h2 swap. The client-side Layer is always
-// the stack's ClientTopmost. The upstream-side Layer lives in one of two
-// places depending on how the stack was built:
-//
-//   - "h2" ALPN route (the production wss-over-h2 case): the upstream
-//     HTTP/2 Layer is held by the connection pool and exposed via
-//     stack.UpstreamH2Layer(). It is NOT pushed onto stack.upstream so
-//     that its lifecycle stays with the pool — stack.Close() must not
-//     close a pooled Layer (RFC-001 §3.4.1; see stack_builder.go
-//     buildH2Stack rationale).
-//   - Test paths that wire the upstream H2 Layer via PushUpstream: the
-//     Layer surfaces through stack.UpstreamTopmost(). Older session-
-//     level tests (session_upgrade_test.go) follow this shape, so the
-//     fallback keeps them working without forcing every caller to hand
-//     the Layer in separately.
-//
-// USK-781: before this fallback, runUpgradeWSOverH2 always asked for
-// UpstreamTopmost() and failed with a "<nil>" error on the live h2 route,
-// silently aborting the post-swap session before any WS frame could
-// flow.
-func h2LayersFromStack(stack *connector.ConnectionStack) (*http2.Layer, *http2.Layer, error) {
-	return h2LayersFromAccessor(stack)
-}
-
-// h2StackAccessor is the slice of *connector.ConnectionStack that
-// h2LayersFromStack needs. Extracting this interface lets unit tests
-// fake the stack without constructing real *http2.Layer instances on
-// both sides (USK-783). Production code passes a *connector.ConnectionStack
-// (which satisfies this interface verbatim).
-type h2StackAccessor interface {
-	ClientTopmost() layer.Layer
-	UpstreamTopmost() layer.Layer
-	UpstreamH2Layer() *http2.Layer
-}
-
-// h2LayersFromAccessor is the test-shaped implementation of
-// h2LayersFromStack. Behavior is identical; only the input type differs.
-func h2LayersFromAccessor(stack h2StackAccessor) (*http2.Layer, *http2.Layer, error) {
-	clientTop := stack.ClientTopmost()
-	clientH2, ok := clientTop.(*http2.Layer)
-	if !ok {
-		return nil, nil, fmt.Errorf("session: ws/h2 upgrade requires *http2.Layer client topmost, got %T", clientTop)
-	}
-	if pooled := stack.UpstreamH2Layer(); pooled != nil {
-		return clientH2, pooled, nil
-	}
-	upstreamTop := stack.UpstreamTopmost()
-	upstreamH2, ok := upstreamTop.(*http2.Layer)
-	if !ok {
-		return nil, nil, fmt.Errorf("session: ws/h2 upgrade requires *http2.Layer upstream layer (pool or topmost), got %T", upstreamTop)
-	}
-	return clientH2, upstreamH2, nil
-}
-
-// h2StreamIDsForUpgrade extracts both the client- and upstream-side h2
-// stream ids from the channels passed by the orchestrator.
-func h2StreamIDsForUpgrade(clientCh, upstreamCh layer.Channel) (uint32, uint32, error) {
-	c, err := extractH2StreamID(clientCh, "client")
-	if err != nil {
-		return 0, 0, err
-	}
-	u, err := extractH2StreamID(upstreamCh, "upstream")
-	if err != nil {
-		return 0, 0, err
-	}
-	return c, u, nil
 }
 
 // detachBothSides peels per-stream framing on both Layers; rolls back
@@ -2189,12 +2164,11 @@ func runUpgradeSSEOverH2(
 	clientCh, upstreamCh layer.Channel,
 	firstResp *envelope.Envelope,
 ) (retErr error) {
-	clientH2, upstreamH2, err := h2LayersFromStack(stack)
-	if err != nil {
-		return err
-	}
-
-	clientStreamID, upstreamStreamID, err := h2StreamIDsForUpgrade(clientCh, upstreamCh)
+	// USK-1164: each side's Layer comes from the Channel that carries the
+	// stream, never from the stack. After a GOAWAY redial (USK-991) this
+	// CONNECT's upstream streams live on several connections, and the
+	// stack's pooled Layer is only the first of them.
+	clientH2, clientStreamID, upstreamH2, upstreamStreamID, err := h2UpgradeEndpoints(clientCh, upstreamCh)
 	if err != nil {
 		return err
 	}

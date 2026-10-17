@@ -119,6 +119,20 @@ func (a *aggregatorChannel) H2StreamID() uint32 {
 	return 0
 }
 
+// H2Layer returns the *http2.Layer that owns the underlying h2 stream when
+// the aggregator wraps an *http2.channel; returns nil otherwise. Paired
+// with H2StreamID: the upgrade orchestrator must DetachStream on the Layer
+// that owns the stream, not on a stack-level pooled Layer, because after a
+// GOAWAY redial streams of one CONNECT live on different connections
+// (USK-1164).
+func (a *aggregatorChannel) H2Layer() *http2.Layer {
+	type h2LayerOwner interface{ H2Layer() *http2.Layer }
+	if v, ok := a.inner.(h2LayerOwner); ok {
+		return v.H2Layer()
+	}
+	return nil
+}
+
 // Closed returns the underlying Channel's Closed signal. Aggregator does
 // not add its own Closed signal — terminal events (EOF, StreamError) are
 // surfaced through Next per the Channel contract.
