@@ -41,7 +41,8 @@ type closeProbeFrame struct {
 }
 
 // startCloseProbeReader reads every frame the Layer writes so net.Pipe never
-// back-pressures the writer for any reason other than flow control. The
+// back-pressures the writer (tests that need a writer stuck in a socket
+// write because the peer stopped reading use startPausableProbeReader). The
 // goroutine exits when the pipe closes.
 func startCloseProbeReader(peer *h2Peer) <-chan closeProbeFrame {
 	out := make(chan closeProbeFrame, 4096)
@@ -172,7 +173,7 @@ func assertCloseBoundedNoLeak(t *testing.T, l *Layer, peer *h2Peer, ignore golea
 	select {
 	case <-closed:
 	case <-time.After(closeFullQueueBound):
-		t.Errorf("Layer.Close did not return within %v with the writer blocked on flow control and writerQueue full", closeFullQueueBound)
+		t.Errorf("Layer.Close did not return within %v with the writer stuck in a socket write (peer stopped reading) and writerQueue full", closeFullQueueBound)
 	}
 	_ = peer.conn.Close()
 	if err := goleak.Find(ignore); err != nil {
