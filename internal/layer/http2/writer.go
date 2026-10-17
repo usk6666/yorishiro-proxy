@@ -174,8 +174,17 @@ func (l *Layer) failDrainQueuedWrites() {
 
 func (l *Layer) dispatchWrite(req writeRequest) {
 	// Resets observed by the reader must apply before any later-dequeued
-	// write for the same stream is considered.
-	l.applyPendingResets()
+	// write for the same stream is considered. A window grant that is
+	// already signalled goes to parked streams first, so newly queued DATA
+	// cannot take connection window ahead of them; the drained signal is
+	// acted on here, so no wake is lost.
+	select {
+	case <-l.windowUpdated:
+		l.applyPendingResets()
+		l.serviceParked()
+	default:
+		l.applyPendingResets()
+	}
 	switch {
 	case req.headers != nil:
 		l.scheduleStreamWrite(req.headers.streamID, req)
@@ -275,6 +284,10 @@ func (l *Layer) handleWriteHeaders(req *writeHeaders) {
 // resume point, and true once req is finished and its done signalled.
 func (l *Layer) writeDataProgress(req *writeDataEvent) bool {
 	if len(req.payload) == 0 {
+		if req.abandoned.Load() {
+			deliverDone(req.done, errWriteAbandoned)
+			return true
+		}
 		var err error
 		if req.endStream {
 			err = l.frameWriter.WriteData(req.streamID, true, nil)
@@ -290,6 +303,13 @@ func (l *Layer) writeDataProgress(req *writeDataEvent) bool {
 	for req.off < len(req.payload) {
 		if req.abandoned.Load() {
 			deliverDone(req.done, errWriteAbandoned)
+			return true
+		}
+		// A reset the reader recorded while this grant was being written
+		// stops it at the frame boundary (RFC 9113 §5.1), with the same
+		// result as a reset observed while parked.
+		if ok, err := l.resetErr(req.streamID); ok {
+			deliverDone(req.done, err)
 			return true
 		}
 		n, err := l.reserveWindow(req.streamID, len(req.payload)-req.off, maxFrameSize)
