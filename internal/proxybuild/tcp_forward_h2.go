@@ -568,10 +568,6 @@ func (r *replayChannel) Send(ctx context.Context, env *envelope.Envelope) error 
 	return r.inner.Send(ctx, env)
 }
 
-// mintH2Func mints a fresh upstream HTTP/2 Layer with onGoAway wired as
-// its GOAWAY observer. Scaffolding for USK-1165.
-type mintH2Func func(ctx context.Context, target string, stale *http2.Layer, generation int, onGoAway func()) (*http2.Layer, error)
-
 // forwardUpstreamDialFunc dials one fresh upstream transport for a
 // tcp_forward connection. Scaffolding for USK-1165.
 type forwardUpstreamDialFunc func(ctx context.Context) (net.Conn, *envelope.TLSSnapshot, error)
