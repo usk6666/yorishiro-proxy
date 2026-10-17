@@ -462,7 +462,10 @@ func (c *channel) allocateAndEnqueueFirstHeaders(ctx context.Context, fields []h
 	// stream would hang until the peer closes the connection. Checked
 	// under l.mu: HandleGoAway records the flag before
 	// failStreamsAfterGoAway takes l.mu, so either we register first and
-	// that scan refuses us, or we observe the flag here.
+	// that scan refuses us, or we observe the flag here. That ordering
+	// argument applies to a received GOAWAY only; when this Layer sent
+	// GOAWAY there is no per-stream sweep, and the check is simply the
+	// RFC 9113 §6.8 gate on opening new streams.
 	if se := l.goAwayRefusal(); se != nil {
 		l.mu.Unlock()
 		c.refuseUnopened(se)

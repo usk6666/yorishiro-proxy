@@ -138,6 +138,12 @@ func TestChannel_FirstHeadersAfterGoAway_Refused(t *testing.T) {
 // refused: either Send itself is refused (GOAWAY first) or the HEADERS went
 // out and the GOAWAY scan refuses the allocated stream (Send first). It
 // must never hang until a deadline.
+//
+// This is a probabilistic liveness and -race guard: whether a given run
+// hits the losing interleaving depends on scheduling, so it does not fail
+// deterministically without the fix. The deterministic tests above carry
+// the acceptance criteria (refusal of a post-GOAWAY first HEADERS, no id
+// allocated, refusal surfaced via Err/Next).
 func TestChannel_FirstHeadersRacingGoAway_NeverHangs(t *testing.T) {
 	const iterations = 200
 	for i := 0; i < iterations; i++ {
