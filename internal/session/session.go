@@ -1379,7 +1379,13 @@ func wsRelayDirection(
 	// sufficient; no atomics needed.
 	var relayed bool
 
+	// USK-1192: settle a live-connection cut deferred for an intercept
+	// hold once that hold's Result was dispatched — at the top of every
+	// iteration (after the previous envelope's dispatch, before blocking
+	// on the next read) and on every exit path.
+	defer connector.SettleLiveConn(ctx)
 	for {
+		connector.SettleLiveConn(ctx)
 		env, err := src.Next(ctx)
 		if err != nil {
 			return wsRelayNextErr(ctx, err, userOpt, streamID, srcDir, relayed)
@@ -1796,7 +1802,13 @@ func driveSSEEventLoop(
 	nextSeq *int,
 	maxEventSize int,
 ) error {
+	// USK-1192: settle a live-connection cut deferred for an intercept
+	// hold once that hold's Result was dispatched — at the top of every
+	// iteration (after the previous envelope's dispatch, before blocking
+	// on the next read) and on every exit path.
+	defer connector.SettleLiveConn(ctx)
 	for {
+		connector.SettleLiveConn(ctx)
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -2608,7 +2620,13 @@ func clientToUpstream(
 	// Single-goroutine read and write — plain bool is sufficient.
 	var relayed bool
 
+	// USK-1192: settle a live-connection cut deferred for an intercept
+	// hold once that hold's Result was dispatched — at the top of every
+	// iteration (after the previous envelope's dispatch, before blocking
+	// on the next read) and on every exit path.
+	defer connector.SettleLiveConn(ctx)
 	for {
+		connector.SettleLiveConn(ctx)
 		env, nerr := client.Next(ctx)
 		if nerr != nil {
 			// Upgrade-pending takes precedence over EOF/errors: when the
@@ -2772,7 +2790,13 @@ func upstreamToClient(
 	// bool is sufficient.
 	var relayed bool
 
+	// USK-1192: settle a live-connection cut deferred for an intercept
+	// hold once that hold's Result was dispatched — at the top of every
+	// iteration (after the previous envelope's dispatch, before blocking
+	// on the next read) and on every exit path.
+	defer connector.SettleLiveConn(ctx)
 	for {
+		connector.SettleLiveConn(ctx)
 		env, err := upstreamNext(ctx, uh.ch, notice)
 		if err != nil || env == nil {
 			return upstreamToClientFinish(ctx, opt, uh, clientID, err, relayed)

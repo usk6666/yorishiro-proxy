@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/usk6666/yorishiro-proxy/internal/connector"
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/layer"
 )
@@ -218,6 +219,13 @@ func runWSHoldKeepaliveLoop(
 			// The goroutine itself terminates on ctx cancel / dst.Closed /
 			// stop / Send error, not on a transient IsHeld=false.
 			if !opt.InterceptHoldTracker.IsHeld(streamID, dstDirection) {
+				continue
+			}
+			// USK-1192: a policy change revoked this connection and its
+			// cut is deferred only until the hold resolves. Keeping the
+			// denied upstream's idle timer alive is exactly what the
+			// revocation forbids, so inject nothing meanwhile.
+			if connector.LiveConnFromContext(ctx).RevokePending() {
 				continue
 			}
 			if err := sendSyntheticPing(ctx, sender, streamID, dstDirection, connID); err != nil {
