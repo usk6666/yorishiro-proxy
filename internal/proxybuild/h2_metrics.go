@@ -233,6 +233,10 @@ func (m *H2UpstreamMetrics) incRedialFailedPrewarm() {
 // worker skips replacing a speculative head that went away unused
 // (USK-1179).
 func (m *H2UpstreamMetrics) incPrewarmSuppressed() {
+	if m == nil {
+		return
+	}
+	m.prewarmSuppressed.Add(1)
 }
 
 // incRedialFailedReactive increments the

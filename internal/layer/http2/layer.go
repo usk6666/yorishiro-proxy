@@ -516,7 +516,9 @@ func (l *Layer) ActiveStreamCount() int {
 // an OpenStream that is refused, or a channel that is opened but never
 // sends HEADERS, does not count.
 func (l *Layer) InitiatedStreams() bool {
-	return false
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.nextClientStreamID > 1
 }
 
 // PeerMaxConcurrentStreams returns the peer-advertised
