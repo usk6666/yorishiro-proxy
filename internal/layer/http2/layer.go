@@ -742,16 +742,28 @@ func (l *Layer) OpenStream(ctx context.Context) (layer.Channel, error) {
 	default:
 	}
 
-	if sent, _ := l.conn.GoAwaySent(); sent {
-		return nil, &layer.StreamError{Code: layer.ErrorRefused, Reason: "GOAWAY sent"}
-	}
-	if recv, _, _ := l.conn.GoAwayReceived(); recv {
-		return nil, &layer.StreamError{Code: layer.ErrorRefused, Reason: "GOAWAY received"}
+	if se := l.goAwayRefusal(); se != nil {
+		return nil, se
 	}
 
 	// Pure constructor: bind to layer, leave h2Stream==0 so the first
 	// sendHeadersEvent can allocate the id under l.mu.
 	return newChannel(l, 0), nil
+}
+
+// goAwayRefusal returns the refusal for a new locally initiated stream once
+// the connection has sent or received GOAWAY, or nil. RFC 9113 §6.8: after
+// GOAWAY an endpoint MUST NOT open additional streams, whatever the
+// last_stream_id. OpenStream and the lazy first-HEADERS id allocation
+// (USK-1175) share it so the two gates refuse on identical predicates.
+func (l *Layer) goAwayRefusal() *layer.StreamError {
+	if sent, _ := l.conn.GoAwaySent(); sent {
+		return &layer.StreamError{Code: layer.ErrorRefused, Reason: "GOAWAY sent"}
+	}
+	if recv, _, _ := l.conn.GoAwayReceived(); recv {
+		return &layer.StreamError{Code: layer.ErrorRefused, Reason: "GOAWAY received"}
+	}
+	return nil
 }
 
 // Close tears down the Layer: sends GOAWAY (best-effort; skipped if the
