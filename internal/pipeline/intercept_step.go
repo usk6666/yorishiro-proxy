@@ -365,7 +365,8 @@ func (s *InterceptStep) holdAndDispatch(ctx context.Context, env *envelope.Envel
 // settles the cut after it dispatched the hold's Result. The caller must
 // Unpin the returned handle (nil-safe) when the hold resolves.
 //
-// ok=false means the connection was already cut: the caller must not hold
+// ok=false means the connection was already cut or is revoke-pending (a
+// new hold must not extend a deferred cut): the caller must not hold
 // and returns blocked instead — a synthetic 403 for a Send HTTP request, a
 // Drop otherwise (the Receive relay forwards the envelope on any non-Drop
 // action), both attributed to target_scope. A ctx without a live-conn

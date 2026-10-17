@@ -42,8 +42,10 @@ import (
 // recorded per the release re-check (USK-1192). Until then
 // Receive-direction data from the denied host (responses of other h2
 // streams, SSE events, WebSocket server frames) keeps reaching the client,
-// bounded by the hold timeout. live_conns_closed counts the revoked
-// connections, live_conns_deferred those whose close was deferred.
+// bounded by the hold timeout (a revoked connection takes no new hold;
+// a Receive envelope matching an intercept rule is dropped instead).
+// live_conns_closed counts the revoked connections, live_conns_deferred
+// those whose close was deferred.
 
 // PolicySource names where the Policy Layer is read from. The precedence is
 // the one LoadConfigs applies at boot: PolicyFile (-target-policy-file) when
@@ -280,7 +282,8 @@ func (r *policyReloader) Reload(trigger string) error {
 	if liveClosed > 0 {
 		r.logger.Warn("target scope policy reload closed live connections",
 			"trigger", trigger,
-			"live_conns_closed", liveClosed)
+			"live_conns_closed", liveClosed,
+			"live_conns_deferred", liveDeferred)
 	}
 	// The -config source is decoded leniently, as at boot, so a misspelled
 	// key ("target_scope_polcy", "deny") or an emptied file reloads as "no

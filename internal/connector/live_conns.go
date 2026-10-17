@@ -41,7 +41,9 @@ import (
 // the session settles the cut after the last hold's Result was dispatched
 // (SettleLiveConn), so the release re-check's 403 target_scope reaches the
 // client and the audit record first. Receive-direction data from the
-// denied host keeps flowing until then (bounded by the hold timeout).
+// denied host keeps flowing until then (bounded by the hold timeout:
+// Pin refuses a revoke-pending connection, so no new hold extends the
+// deferral).
 
 // ErrTargetScopeRevoked is the context cancel cause of a live connection
 // that a policy change no longer admits. Handlers and relays can test for
@@ -176,6 +178,16 @@ func (r *LiveConns) Register(ctx context.Context, c LiveConn) (context.Context, 
 // Send-direction envelope on it. A deferred connection whose target is
 // admitted again by a later Reconcile (or by Settle's re-check) is no
 // longer revoked.
+//
+// Known window (accepted, the same loss as a Pin that races an
+// already-cut connection): a pending entry whose last
+// hold already Unpinned but whose Result the session has not dispatched
+// yet has pins == 0, so a second Reconcile landing in that gap takes the
+// no-hold branch and cuts it at once (the backstop for a Settle that never
+// runs). The held request is still recorded, but its 403 target_scope may
+// not reach the client. Closing the gap would need a "Result dispatched"
+// signal separate from Unpin; it is not worth it for a two-writes race
+// inside one dispatch.
 func (r *LiveConns) Reconcile(trigger string) int {
 	revoked, _ := r.ReconcileWithDeferred(trigger)
 	return revoked
@@ -323,16 +335,24 @@ func SettleLiveConn(ctx context.Context) {
 
 // Pin records an intercept hold about to start on the connection, so a
 // Reconcile that revokes the connection defers its cut. It reports false
-// when the connection was already cut: the caller must not hold, and
-// answers the envelope as a target scope block instead. Each successful
-// Pin must be paired with exactly one Unpin.
+// when the connection was already cut or is revoke-pending: the caller
+// must not hold, and answers the envelope as a target scope block instead.
+// Each successful Pin must be paired with exactly one Unpin.
+//
+// Refusing while pending keeps the deferral bounded: only the holds that
+// were in flight when the connection was revoked delay the cut. Otherwise
+// concurrent long-lived streams (h2 gRPC / SSE with a Receive intercept
+// rule) could chain new holds so the pin count never reaches 0 and the
+// connection is never cut. While pending only Receive envelopes reach
+// Pin — HostScopeStep blocks every Send first. A revocation withdrawn by
+// a widening Reconcile / Settle clears pending, so Pin succeeds again.
 func (h *LiveConnHandle) Pin() bool {
 	if h == nil {
 		return true
 	}
 	h.reg.mu.Lock()
 	defer h.reg.mu.Unlock()
-	if h.e.cut.Load() {
+	if h.e.cut.Load() || h.e.pending.Load() {
 		return false
 	}
 	h.e.pins++
@@ -388,7 +408,8 @@ func (h *LiveConnHandle) Settle() {
 
 	r.mu.Lock()
 	if e.cut.Load() || !e.pending.Load() || e.pins > 0 {
-		// A concurrent Reconcile / Settle decided, or a new hold started.
+		// A concurrent Reconcile / Settle decided (a widening one may
+		// also have let a new hold Pin since).
 		r.mu.Unlock()
 		return
 	}
