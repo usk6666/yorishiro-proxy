@@ -133,6 +133,63 @@ func TestChannel_FirstHeadersAfterGoAway_Refused(t *testing.T) {
 	}
 }
 
+// TestLayer_ConnErrorGoAway_RecordedBeforeWrite pins the ordering the
+// "GOAWAY sent after a connection error" case above depends on: GoAwaySent
+// must be recorded when the Layer commits to the GOAWAY, not after the
+// writer has put the frame on the wire. Otherwise the peer can read our
+// GOAWAY while GoAwaySent is still false, and a first Send in that window
+// opens a stream after our GOAWAY (RFC 9113 §6.8).
+//
+// The test makes that window deterministic: net.Pipe is synchronous, so
+// while the peer does not read, the writer is blocked inside the GOAWAY
+// write and cannot record anything afterwards. GoAwaySent must still
+// become true, and a first Send must be refused.
+func TestLayer_ConnErrorGoAway_RecordedBeforeWrite(t *testing.T) {
+	l, peer, cleanup := startClientLayer(t)
+	defer cleanup()
+	peer.consumePeerSettings(t)
+
+	lc, err := l.OpenStream(context.Background())
+	if err != nil {
+		t.Fatalf("OpenStream: %v", err)
+	}
+	ch := lc.(*channel)
+
+	// Connection-level WINDOW_UPDATE with a zero increment: a connection
+	// error of type PROTOCOL_ERROR (RFC 9113 §6.9). The peer reads nothing
+	// from here on, so the writer stays blocked on the GOAWAY write.
+	if err := peer.wr.WriteRawBytes([]byte{0, 0, 4, byte(frame.TypeWindowUpdate), 0, 0, 0, 0, 0, 0, 0, 0, 0}); err != nil {
+		t.Fatalf("write WINDOW_UPDATE(0): %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if sent, _ := l.conn.GoAwaySent(); sent {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("GoAwaySent not recorded while the GOAWAY write is pending")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	assertRefused(t, "Send err", ch.Send(ctx, getHeadersEnvelope()))
+	if id := ch.H2StreamID(); id != 0 {
+		t.Errorf("H2StreamID = %d after refused first HEADERS, want 0 (no id allocated)", id)
+	}
+
+	// Unblock the writer so cleanup does not wait out closeDrainTimeout.
+	go func() {
+		for {
+			if _, err := peer.rd.ReadFrame(); err != nil {
+				return
+			}
+		}
+	}()
+}
+
 // TestChannel_FirstHeadersRacingGoAway_NeverHangs races the first HEADERS
 // Send against GOAWAY(0) processing. Whichever wins, the stream must end
 // refused: either Send itself is refused (GOAWAY first) or the HEADERS went
