@@ -120,13 +120,13 @@ type options struct {
 	requestHeaderTimeout func() time.Duration
 	keepAliveIdleTimeout func() time.Duration
 
-	// afterInitialYield is a USK-1184 test seam: when non-nil, the
-	// Send-direction goroutine in New calls it right after handing the
-	// initial deferred-parse Channel to Channels(), before it waits for that
-	// Channel to terminate. Tests use it to hold the goroutine until a
-	// Layer.Close has landed during the initial parse, which forces the
-	// scheduling where termDone and l.closed are both ready at once. No
-	// production Option sets it.
+	// afterInitialYield is a USK-1184 test seam: when non-nil,
+	// runInitialSend (the Send-direction goroutine started by New) calls it
+	// right after handing the initial deferred-parse Channel to Channels(),
+	// before it waits for that Channel to terminate. Tests use it to hold
+	// the goroutine until a Layer.Close has landed during the initial
+	// parse, which forces the scheduling where termDone and l.closed are
+	// both ready at once. No production Option sets it.
 	afterInitialYield func()
 }
 
@@ -328,44 +328,7 @@ func New(conn net.Conn, streamID string, direction envelope.Direction, opts ...O
 		// concurrently.
 		initial := l.newChannelLocked()
 		initial.deferredParse = true
-		go func() {
-			defer close(l.chOut)
-			select {
-			case l.chOut <- initial:
-			case <-l.closed:
-				return
-			}
-			if l.opts.afterInitialYield != nil {
-				l.opts.afterInitialYield()
-			}
-			// Wait for the initial exchange to fully terminate (session
-			// closed the Channel, parse failed, or Layer-level close)
-			// BEFORE entering the spawn loop. Doing so keeps the spawn
-			// loop's reader access strictly sequential with the session's
-			// per-exchange Channel access — necessary because HTTP/1.1 is
-			// wire-serial and because Upgrade flows (WS / SSE) call
-			// DetachStream synchronously on a still-open Layer; a
-			// concurrently parking spawn loop on conn.Read would race
-			// with the Detach handover. termDone fires from:
-			//   - session.RunSession's deferred client.Close (normal end)
-			//   - parser error inside nextSend's deferred parse path
-			//   - Upgrade flow's DetachStream → markTerminated
-			//   - Layer.Close pulling all pending Channels down
-			select {
-			case <-initial.termDone:
-			case <-l.closed:
-				return
-			}
-			// Skip the spawn loop on terminal conditions:
-			//   - connClosed: request had Connection: close → no more reqs
-			//   - isDetached: upgrade transferred conn ownership
-			//   - parseFailed: parseRequest error left the bufio in a bad
-			//     state; another parse would just compound the failure
-			if initial.connClosed || l.isDetached() || initial.parseFailed {
-				return
-			}
-			l.spawnLoopSend()
-		}()
+		go l.runInitialSend(initial)
 	case envelope.Receive:
 		// For back-compat with single-shot consumers (tests, MCP resend), the
 		// Layer auto-yields one Channel via Channels() so the legacy pattern
@@ -396,6 +359,62 @@ func New(conn net.Conn, streamID string, direction envelope.Direction, opts ...O
 	}
 
 	return l
+}
+
+// runInitialSend is the Send-direction goroutine started by New. It hands
+// the initial deferred-parse Channel to Channels(), waits until that
+// exchange is over and its deferred parse has released the reader, then
+// runs spawnLoopSend for any further keep-alive requests. It closes chOut
+// on exit.
+func (l *Layer) runInitialSend(initial *channel) {
+	defer close(l.chOut)
+	select {
+	case l.chOut <- initial:
+	case <-l.closed:
+		return
+	}
+	if l.opts.afterInitialYield != nil {
+		l.opts.afterInitialYield()
+	}
+	// Wait for the initial exchange to fully terminate (session closed the
+	// Channel, parse failed, or Layer-level close) BEFORE entering the spawn
+	// loop. Doing so keeps the spawn loop's reader access strictly
+	// sequential with the session's per-exchange Channel access — necessary
+	// because HTTP/1.1 is wire-serial and because Upgrade flows (WS / SSE)
+	// call DetachStream synchronously on a still-open Layer; a concurrently
+	// parking spawn loop on conn.Read would race with the Detach handover.
+	// termDone fires from:
+	//   - session.RunSession's deferred client.Close (normal end)
+	//   - parser error inside nextSend's deferred parse path
+	//   - Upgrade flow's DetachStream → markTerminated
+	//   - Layer.Close pulling all pending Channels down
+	select {
+	case <-initial.termDone:
+	case <-l.closed:
+		return
+	}
+	// USK-1184: termDone does not mean the deferred parse has finished.
+	// Layer.Close (ConnectionStack.Close from a ctx watcher) or
+	// Channel.Close can fire it while Next is still inside parseRequest on
+	// the caller's goroutine, still about to write parseFailed / connClosed
+	// and still using the reader. readerReleased is closed only after the
+	// parse returned (or by a Close that found no parse in flight), so
+	// waiting on it orders the flag reads below after those writes and
+	// keeps the spawn loop off a reader the deferred parse still owns.
+	select {
+	case <-initial.readerReleased:
+	case <-l.closed:
+		return
+	}
+	// Skip the spawn loop on terminal conditions:
+	//   - connClosed: request had Connection: close → no more reqs
+	//   - isDetached: upgrade transferred conn ownership
+	//   - parseFailed: parseRequest error left the bufio in a bad state;
+	//     another parse would just compound the failure
+	if initial.connClosed || l.isDetached() || initial.parseFailed {
+		return
+	}
+	l.spawnLoopSend()
 }
 
 // Channels returns a channel that yields per-exchange Channels.
