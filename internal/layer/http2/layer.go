@@ -298,7 +298,12 @@ type Layer struct {
 	goAwayObs   []*goAwayObsEntry
 	goAwayHit   bool
 
+	// windowUpdated (cap 1) wakes the writer to resume DATA parked on flow
+	// control and to apply stream resets recorded in sched (USK-1166).
 	windowUpdated chan struct{}
+
+	// sched is the writer goroutine's flow-control scheduler (USK-1166).
+	sched *writeSched
 
 	// nextClientStreamID is the next odd id to hand out to a client-
 	// initiated stream. Allocation happens lazily — on the first
@@ -635,6 +640,7 @@ func New(conn net.Conn, streamID string, role Role, opts ...Option) (*Layer, err
 		readerDone:         make(chan struct{}),
 		shutdown:           make(chan struct{}),
 		windowUpdated:      make(chan struct{}, 1),
+		sched:              newWriteSched(),
 		nextClientStreamID: 1,
 		encoderTableSize:   local.HeaderTableSize,
 		h2Fingerprint:      fp,
@@ -761,8 +767,9 @@ func (l *Layer) Close() error {
 	l.mu.Unlock()
 
 	// USK-1180: GOAWAY on teardown is advisory (RFC 9113 §6.8), so the
-	// enqueue is bounded. If the writer is parked (e.g. in waitForWindow on
-	// an exhausted peer window) and the queue is full, a blocking enqueue
+	// enqueue is bounded. If the writer cannot drain the queue (since
+	// USK-1166 it no longer waits on flow control, but a socket write can
+	// still block on a peer that stops reading) and the queue is full, a blocking enqueue
 	// would never return — shutdown is not closed yet, so nothing wakes the
 	// writer, the reader, or this goroutine. Give up on GOAWAY instead and
 	// proceed to close(shutdown), which unblocks every waiter.

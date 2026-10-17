@@ -391,7 +391,15 @@ func (l *Layer) handleStreamRST(f *frame.Frame) error {
 	// surfaced the error here, lateClientErrorWatcher would cascade a
 	// CANCEL to the original client and abort an exchange that was already
 	// successful on the wire.
+	//
+	// USK-1166: either way the stream is closed for sending (RFC 9113 §5.1),
+	// so the writer drops DATA / HEADERS parked or queued for it. NO_ERROR
+	// completes those Sends with nil — RFC 9113 §8.1's "abort transmission
+	// of a request without error" after an early complete response (e.g. a
+	// 413 for an upload); any other code completes them with the stream
+	// error.
 	if code == ErrCodeNo {
+		l.resetStreamWrites(f.Header.StreamID, nil)
 		l.gracefulCloseStream(f.Header.StreamID)
 		return nil
 	}
@@ -399,6 +407,7 @@ func (l *Layer) handleStreamRST(f *frame.Frame) error {
 		Code:   translateH2StreamError(code),
 		Reason: ErrCodeString(code),
 	}
+	l.resetStreamWrites(f.Header.StreamID, se)
 	l.failStream(f.Header.StreamID, se)
 	return nil
 }
@@ -636,6 +645,11 @@ func (l *Layer) failStreamsAfterGoAway(lastStreamID uint32, se *layer.StreamErro
 	for id, ch := range l.channels {
 		if l.isLocallyInitiated(id) && id > lastStreamID {
 			channels = append(channels, ch)
+			// USK-1166: the peer ignores every further frame on a
+			// refused stream, so the writer drops its queued / parked
+			// writes rather than holding them for window that will
+			// never come.
+			l.resetStreamWrites(id, se)
 		}
 	}
 	l.mu.Unlock()
@@ -674,7 +688,8 @@ func (l *Layer) broadcastShutdown() {
 	})
 }
 
-// signalWindowUpdate wakes the writer if it is blocked waiting for a window.
+// signalWindowUpdate wakes the writer so it resumes DATA parked on flow
+// control and applies pending stream resets (USK-1166). Never blocks.
 func (l *Layer) signalWindowUpdate() {
 	select {
 	case l.windowUpdated <- struct{}{}:

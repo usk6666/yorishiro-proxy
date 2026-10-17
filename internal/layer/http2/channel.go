@@ -518,13 +518,22 @@ func (c *channel) sendDataEvent(ctx context.Context, evt *H2DataEvent) error {
 		return errors.New("http2: DATA before HEADERS — channel has no allocated stream id")
 	}
 	done := make(chan error, 1)
-	c.layer.enqueueWrite(writeRequest{dataEvent: &writeDataEvent{
+	req := &writeDataEvent{
 		streamID:  id,
 		payload:   evt.Payload,
 		endStream: evt.EndStream,
 		done:      done,
-	}})
+	}
+	c.layer.enqueueWrite(writeRequest{dataEvent: req})
 	if err := waitDone(ctx, done, c.layer.shutdown); err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil && errors.Is(err, ctxErr) {
+			// USK-1166: the caller gave up; withdraw whatever the writer
+			// has not written yet (e.g. DATA parked on flow control) so it
+			// does not reach the wire later. Wake the writer so a parked
+			// request is dropped now rather than at the next window change.
+			req.abandoned.Store(true)
+			c.layer.signalWindowUpdate()
+		}
 		return err
 	}
 	if evt.EndStream {

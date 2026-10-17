@@ -38,11 +38,14 @@ import (
 // Writer semantics:
 //   - Each Write call enqueues exactly one DATA frame request on the
 //     connection's writer queue. Multi-frame fragmentation is performed
-//     by the writer goroutine (handleWriteDataEvent) per peer
+//     by the writer goroutine (writeDataProgress) per peer
 //     MAX_FRAME_SIZE — the caller writes opaque bytes in arbitrary chunk
 //     sizes and the wire layer takes care of frame boundaries.
-//   - Writes block on flow control just like the existing event-granular
-//     Send path.
+//   - A Write returns once its bytes are on the wire, just like the
+//     event-granular Send path: DATA that does not fit the peer's flow
+//     control windows is parked per stream by the writer's scheduler
+//     (writeSched) and resumed on WINDOW_UPDATE, without stalling other
+//     streams (USK-1166).
 //   - Closing the writer emits an END_STREAM-on-empty-DATA frame, signalling
 //     the local half-close of the per-stream byte tunnel.
 //

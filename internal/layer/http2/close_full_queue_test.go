@@ -2,6 +2,7 @@ package http2
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -16,13 +17,18 @@ import (
 // USK-1180: Layer.Close must not park forever enqueueing its GOAWAY when the
 // writer queue is full. The wedge is built from real producers only:
 //
-//   - the writer is parked in waitForWindow because a DATA payload exceeds
-//     the peer's stream window and the peer never grants more;
+//   - the writer is stuck in a socket write because the peer stopped
+//     reading (net.Pipe has no buffer, so the first frame written after the
+//     peer pauses blocks);
 //   - the reader keeps enqueueing two WINDOW_UPDATEs per DATA frame the peer
-//     sends on another stream (maybeWindowUpdate) until writerQueue is full,
-//     after which the reader itself parks in enqueueWrite.
+//     sends (maybeWindowUpdate) until writerQueue is full, after which the
+//     reader itself parks in enqueueWrite.
 //
-// The scenario mirrors the USK-1166 reachability probe.
+// Until USK-1166 the writer could also be stuck waiting for flow-control
+// window; that wedge no longer exists (the writer parks DATA per stream and
+// keeps serving the queue — see writer_flowcontrol_test.go), so the stuck
+// writer is now produced by the one cause that remains: a peer that does
+// not read.
 
 const closeFullQueueBound = 2 * time.Second
 
@@ -35,7 +41,8 @@ type closeProbeFrame struct {
 }
 
 // startCloseProbeReader reads every frame the Layer writes so net.Pipe never
-// back-pressures the writer for any reason other than flow control. The
+// back-pressures the writer (tests that need a writer stuck in a socket
+// write because the peer stopped reading use startPausableProbeReader). The
 // goroutine exits when the pipe closes.
 func startCloseProbeReader(peer *h2Peer) <-chan closeProbeFrame {
 	out := make(chan closeProbeFrame, 4096)
@@ -50,6 +57,31 @@ func startCloseProbeReader(peer *h2Peer) <-chan closeProbeFrame {
 		}
 	}()
 	return out
+}
+
+// startPausableProbeReader is startCloseProbeReader with a pause: after
+// pause() the goroutine stops reading (it may finish the frame it is
+// currently reading) and exits, so the Layer's next socket write blocks.
+func startPausableProbeReader(peer *h2Peer) (frames <-chan closeProbeFrame, pause func()) {
+	out := make(chan closeProbeFrame, 4096)
+	stop := make(chan struct{})
+	var once sync.Once
+	go func() {
+		defer close(out)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			f, err := peer.rd.ReadFrame()
+			if err != nil {
+				return
+			}
+			out <- closeProbeFrame{typ: f.Header.Type, streamID: f.Header.StreamID, flags: f.Header.Flags, n: int(f.Header.Length)}
+		}
+	}()
+	return out, func() { once.Do(func() { close(stop) }) }
 }
 
 // drainCloseProbeFrames discards frames for d.
@@ -141,7 +173,7 @@ func assertCloseBoundedNoLeak(t *testing.T, l *Layer, peer *h2Peer, ignore golea
 	select {
 	case <-closed:
 	case <-time.After(closeFullQueueBound):
-		t.Errorf("Layer.Close did not return within %v with the writer blocked on flow control and writerQueue full", closeFullQueueBound)
+		t.Errorf("Layer.Close did not return within %v with the writer stuck in a socket write (peer stopped reading) and writerQueue full", closeFullQueueBound)
 	}
 	_ = peer.conn.Close()
 	if err := goleak.Find(ignore); err != nil {
@@ -157,34 +189,22 @@ func TestLayer_Close_WriterBlockedQueueFull_ClientRole(t *testing.T) {
 	peer.consumePeerSettings(t)
 	peer.sendInitialSettings(t)
 	peer.expectSettingsAck(t)
-	frames := startCloseProbeReader(peer)
+	frames, pause := startPausableProbeReader(peer)
 
-	// Grow the connection window so only the stream window limits stream 1.
-	if err := peer.wr.WriteWindowUpdate(0, 10<<20); err != nil {
-		t.Fatal(err)
-	}
 	lc1, err := l.OpenStream(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := <-sendAsyncEnv(lc1, &H2HeadersEvent{Method: "POST", Scheme: "https", Authority: "example.com", Path: "/upload"}); err != nil {
+	if err := <-sendAsyncEnv(lc1, &H2HeadersEvent{Method: "GET", Scheme: "https", Authority: "example.com", Path: "/", EndStream: true}); err != nil {
 		t.Fatalf("send headers 1: %v", err)
 	}
-	lc3, err := l.OpenStream(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := <-sendAsyncEnv(lc3, &H2HeadersEvent{Method: "GET", Scheme: "https", Authority: "example.com", Path: "/", EndStream: true}); err != nil {
-		t.Fatalf("send headers 3: %v", err)
-	}
-	// 200000 bytes > the default 65535 stream window: the writer parks in
-	// waitForWindow once the window is spent.
-	_ = sendAsyncEnv(lc1, &H2DataEvent{Payload: make([]byte, 200000), EndStream: true})
-	drainCloseProbeFrames(frames, 300*time.Millisecond)
+	drainCloseProbeFrames(frames, 100*time.Millisecond)
 
-	drainChannel(lc3)
+	// The peer stops reading: the writer's next socket write blocks.
+	pause()
+	drainChannel(lc1)
 	hdr := peer.encoder.Encode([]hpack.HeaderField{{Name: ":status", Value: "200"}})
-	_ = floodData(peer, 3, hdr, true, 60)
+	_ = floodData(peer, 1, hdr, true, 60)
 
 	waitWriterQueueFull(t, l)
 	assertCloseBoundedNoLeak(t, l, peer, ignore)
@@ -198,10 +218,8 @@ func TestLayer_Close_WriterBlockedQueueFull_ServerRole(t *testing.T) {
 	peer.consumePeerSettings(t)
 	peer.sendInitialSettings(t)
 	peer.expectSettingsAck(t)
-	frames := startCloseProbeReader(peer)
-	if err := peer.wr.WriteWindowUpdate(0, 10<<20); err != nil {
-		t.Fatal(err)
-	}
+	frames, pause := startPausableProbeReader(peer)
+	drainCloseProbeFrames(frames, 100*time.Millisecond)
 
 	reqHdr := func(method string) []byte {
 		return peer.encoder.Encode([]hpack.HeaderField{
@@ -220,25 +238,10 @@ func TestLayer_Close_WriterBlockedQueueFull_ServerRole(t *testing.T) {
 		return nil
 	}
 
-	// Stream 1: GET; the proxy answers with a body larger than the window.
-	if err := peer.wr.WriteHeaders(1, true, true, reqHdr("GET")); err != nil {
-		t.Fatal(err)
-	}
-	ch1 := acceptChannel()
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	if _, err := ch1.Next(ctx); err != nil {
-		cancel()
-		t.Fatal(err)
-	}
-	cancel()
-	if err := <-sendAsyncEnv(ch1, &H2HeadersEvent{Status: 200}); err != nil {
-		t.Fatal(err)
-	}
-	_ = sendAsyncEnv(ch1, &H2DataEvent{Payload: make([]byte, 200000), EndStream: true})
-	drainCloseProbeFrames(frames, 300*time.Millisecond)
-
-	// Stream 3: POST whose request body the client floods in small frames.
-	_ = floodData(peer, 3, reqHdr("POST"), true, 60)
+	// The peer stops reading: the writer's next socket write blocks.
+	pause()
+	// Stream 1: POST whose request body the client floods in small frames.
+	_ = floodData(peer, 1, reqHdr("POST"), true, 60)
 	drainChannel(acceptChannel())
 
 	waitWriterQueueFull(t, l)
