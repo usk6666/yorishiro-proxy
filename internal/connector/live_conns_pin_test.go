@@ -174,6 +174,75 @@ func TestLiveConns_PinOnCutEntryFails(t *testing.T) {
 	}
 }
 
+// S-1 (USK-1192 review): a Pin while the entry is revoke-pending must be
+// refused. Otherwise two long-lived streams on one connection can chain
+// Receive-direction holds (A resolves, B still pinned; A's next message
+// pins again; B resolves; ...) so pins never reach 0 and the deferred cut
+// never happens — Receive data from the denied host would flow with no
+// time bound.
+func TestLiveConns_PinWhilePendingRefused(t *testing.T) {
+	scope := NewTargetScope()
+	scope.SetPolicyRules(allowOnly("a.test"), nil)
+	reg := NewLiveConns(newTestLogger())
+	ctx, h := registerPinTest(t, reg, scope, "a.test")
+
+	if !h.Pin() { // stream A's hold
+		t.Fatal("Pin A on a live entry = false, want true")
+	}
+	if !h.Pin() { // stream B's hold
+		t.Fatal("Pin B on a live entry = false, want true")
+	}
+	scope.ReplacePolicyRules(nil, allowOnly("a.test"), PolicyOrigin{})
+	reg.Reconcile("narrow")
+	if !h.RevokePending() {
+		t.Fatal("precondition: RevokePending = false after a deferring Reconcile")
+	}
+
+	// A resolves; B still pinned, so nothing is cut yet.
+	h.Unpin()
+	h.Settle()
+	if ctx.Err() != nil {
+		t.Fatalf("entry cut with B still pinned: %v", context.Cause(ctx))
+	}
+	// A's next upstream message tries to hold again: must be refused.
+	if h.Pin() {
+		t.Error("Pin while revoke-pending = true, want false (chained holds would starve the deferred cut)")
+		h.Unpin()
+	}
+	// B resolves: the last original pin is gone, so Settle cuts.
+	h.Unpin()
+	h.Settle()
+	if !errors.Is(context.Cause(ctx), ErrTargetScopeRevoked) {
+		t.Errorf("cause after the last original hold settled = %v, want ErrTargetScopeRevoked", context.Cause(ctx))
+	}
+}
+
+// Guard: once a widening withdraws the revocation, Pin works again.
+func TestLiveConns_PinAfterWithdrawnRevocation(t *testing.T) {
+	scope := NewTargetScope()
+	scope.SetPolicyRules(allowOnly("a.test"), nil)
+	reg := NewLiveConns(newTestLogger())
+	ctx, h := registerPinTest(t, reg, scope, "a.test")
+
+	h.Pin()
+	scope.ReplacePolicyRules(nil, allowOnly("a.test"), PolicyOrigin{})
+	reg.Reconcile("narrow")
+	scope.ReplacePolicyRules(allowOnly("a.test"), nil, PolicyOrigin{})
+	h.Unpin()
+	h.Settle() // withdraws: the target is admitted again
+	if h.RevokePending() {
+		t.Fatal("precondition: RevokePending = true after the widening Settle")
+	}
+	if !h.Pin() {
+		t.Fatal("Pin after a withdrawn revocation = false, want true")
+	}
+	h.Unpin()
+	h.Settle()
+	if ctx.Err() != nil {
+		t.Errorf("entry cut after widening: %v", context.Cause(ctx))
+	}
+}
+
 func TestLiveConns_PendingCountedOnce(t *testing.T) {
 	scope := NewTargetScope()
 	scope.SetPolicyRules(allowOnly("a.test"), nil)
