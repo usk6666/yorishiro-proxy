@@ -1278,6 +1278,15 @@ type redialFunc func(ctx context.Context, target string, stale *http2.Layer, gen
 //     pre-warmed head that served a stream is pre-warmed past as before,
 //     so an idle connection costs at most chain[0] plus one speculative
 //     upstream connection however often the upstream sends GOAWAY.
+//   - Each client request adds at most four upstream connections.
+//     Normally it is three: the reactive dial, at most one
+//     refused-stream retry dial, and one pre-warm off a head that
+//     carried the stream. A fourth is possible in a narrow race: the
+//     reactive head's GOAWAY lands after it is published as the head
+//     but before OpenStream, so the stream is refused while that head
+//     is unused, and the worker still pre-warms off it because
+//     reactive-minted heads are exempt from suppression. The bound is
+//     constant and request-driven either way.
 type redialChain struct {
 	mu      sync.Mutex
 	layers  []*http2.Layer
@@ -1422,7 +1431,9 @@ func (c *redialChain) runPrewarmWorker(
 		// nothing to show for it. The reactive path dials when a request
 		// actually needs the upstream; a head that carried a stream (or
 		// was minted by the reactive path, or is chain[0]) is still
-		// pre-warmed past.
+		// pre-warmed past. Because reactive heads are exempt even when
+		// unused, one request can cost up to four upstream dials (see
+		// redialChain).
 		if head != nil && head == lastSpeculative && !head.InitiatedStreams() {
 			c.metrics.incPrewarmSuppressed()
 			logger.Debug("proxybuild: pre-warm suppressed: speculative head GOAWAY'd unused",

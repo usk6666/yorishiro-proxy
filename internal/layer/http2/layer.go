@@ -511,8 +511,8 @@ func (l *Layer) ActiveStreamCount() int {
 }
 
 // InitiatedStreams reports whether this Layer has ever allocated a
-// locally initiated stream id, i.e. sent a request HEADERS on a stream
-// it opened (USK-1179). The signal is client-side and lifetime-scoped:
+// locally initiated stream id for a request HEADERS (USK-1179). The
+// signal is client-side and lifetime-scoped:
 // an OpenStream that is refused, or a channel that is opened but never
 // sends HEADERS, does not count.
 func (l *Layer) InitiatedStreams() bool {
