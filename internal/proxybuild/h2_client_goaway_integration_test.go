@@ -217,19 +217,13 @@ func TestH2ClientGoAway_InFlightResponseCompletes(t *testing.T) {
 	if err := cli.fr.WriteGoAway(0, http2.ErrCodeNo, nil); err != nil {
 		t.Fatalf("write GOAWAY: %v", err)
 	}
-	// Give the proxy time to act on the GOAWAY before the body exists;
-	// pre-USK-1174 it cancelled stream 1 on both legs right here.
-	time.Sleep(300 * time.Millisecond)
-	close(origin.release)
-
 	res := &rawStreamResult{}
 	var body []byte
-	_ = cli.conn.SetReadDeadline(time.Now().Add(10 * time.Second))
-	for !res.done() {
-		f, err := cli.fr.ReadFrame()
-		if err != nil {
-			break
-		}
+	// handle folds one frame read from the proxy into res / body. It is
+	// shared by the PING sync below and the response read loop, so a frame
+	// that arrives before the PING ACK (e.g. a regressed RST_STREAM on
+	// stream 1) is recorded rather than lost.
+	handle := func(f http2.Frame) {
 		switch ff := f.(type) {
 		case *http2.SettingsFrame:
 			if !ff.IsAck() {
@@ -256,6 +250,37 @@ func TestH2ClientGoAway_InFlightResponseCompletes(t *testing.T) {
 				res.rst, res.rstCode = true, ff.ErrCode
 			}
 		}
+	}
+
+	// Sync with the proxy before the body exists: the proxy's ServerRole
+	// reader handles frames in wire order, so once it ACKs a PING written
+	// after the GOAWAY it has already acted on the GOAWAY — pre-USK-1174 it
+	// cancelled stream 1 on both legs right there. A fixed sleep could let
+	// a slow runner release the body first and mask the regression.
+	syncData := [8]byte{'g', 'o', 'a', 'w', 'a', 'y', 's', 'y'}
+	if err := cli.fr.WritePing(false, syncData); err != nil {
+		t.Fatalf("write sync PING: %v", err)
+	}
+	_ = cli.conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+	for {
+		f, err := cli.fr.ReadFrame()
+		if err != nil {
+			t.Fatalf("waiting for sync PING ACK after GOAWAY: %v", err)
+		}
+		if pf, ok := f.(*http2.PingFrame); ok && pf.IsAck() && pf.Data == syncData {
+			break
+		}
+		handle(f)
+	}
+	close(origin.release)
+
+	_ = cli.conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+	for !res.done() {
+		f, err := cli.fr.ReadFrame()
+		if err != nil {
+			break
+		}
+		handle(f)
 	}
 	_ = cli.conn.SetReadDeadline(time.Time{})
 	if res.rst {
