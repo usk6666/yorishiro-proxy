@@ -59,6 +59,28 @@ func pollErrorFlow(t *testing.T, h *mcptest.Harness, reason string) map[string]a
 	}
 }
 
+// pollFlowDetail polls query(flow, id) until every key in fields is a
+// non-empty string. The Stream row lands before its Flows (the store
+// writes asynchronously, in order), so a detail read right after the
+// stream appears can miss them.
+func pollFlowDetail(t *testing.T, h *mcptest.Harness, id string, fields ...string) mcptest.ToolResult {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		res := h.MustOK(t, "query", map[string]any{"resource": "flow", "id": id})
+		ready := true
+		for _, f := range fields {
+			if s, _ := res.Decoded[f].(string); s == "" {
+				ready = false
+			}
+		}
+		if ready || time.Now().After(deadline) {
+			return res
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
 func decodeB64Field(t *testing.T, m map[string]any, key string) string {
 	t.Helper()
 	s, _ := m[key].(string)
@@ -110,7 +132,7 @@ func TestE2E_RequestHeadTimeout_RecordedAndQueryable(t *testing.T) {
 	}
 
 	id, _ := entry["id"].(string)
-	detail := h.MustOK(t, "query", map[string]any{"resource": "flow", "id": id})
+	detail := pollFlowDetail(t, h, id, "raw_request")
 	if detail.Decoded["state"] != "error" {
 		t.Errorf("flow state = %v, want error", detail.Decoded["state"])
 	}
@@ -145,7 +167,7 @@ func TestE2E_RequestLineTooLong_RecordedWithResponse(t *testing.T) {
 
 	entry := pollErrorFlow(t, h, "request_line_too_long")
 	id, _ := entry["id"].(string)
-	detail := h.MustOK(t, "query", map[string]any{"resource": "flow", "id": id})
+	detail := pollFlowDetail(t, h, id, "raw_request", "raw_response")
 	if code, _ := detail.Decoded["response_status_code"].(float64); int(code) != 414 {
 		t.Errorf("response_status_code = %v, want 414", detail.Decoded["response_status_code"])
 	}
