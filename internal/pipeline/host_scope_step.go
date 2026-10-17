@@ -51,9 +51,22 @@ func NewHostScopeStep(scope *connector.TargetScope) *HostScopeStep {
 //
 // The scheme handed to CheckTarget is derived from Envelope.Context.TLS
 // (see hostScopeScheme).
-func (s *HostScopeStep) Process(_ context.Context, env *envelope.Envelope) Result {
+//
+// A Send envelope on a live connection that a policy change revoked but
+// whose cut is deferred for in-flight intercept holds (USK-1192,
+// connector.LiveConnHandle.RevokePending) is blocked regardless of
+// CheckTarget: the gate that admitted the connection already decided it
+// may carry nothing more to its target, and this Step's own verdict can
+// differ from the gate's (the gate scopes a SOCKS5 tunnel with a blank
+// scheme, a CONNECT tunnel as "https"; this Step derives the scheme from
+// TLS state). The intercept release re-check reuses this Step and so
+// inherits the block.
+func (s *HostScopeStep) Process(ctx context.Context, env *envelope.Envelope) Result {
 	if env.Direction != envelope.Send {
 		return Result{}
+	}
+	if connector.LiveConnFromContext(ctx).RevokePending() {
+		return targetScopeBlock(env)
 	}
 	if s.scope == nil || env.Context.TargetHost == "" {
 		return Result{}
@@ -79,21 +92,26 @@ func (s *HostScopeStep) Process(_ context.Context, env *envelope.Envelope) Resul
 	// (USK-1081).
 	allowed, _ := s.scope.CheckTarget(hostScopeScheme(env), host, port, "")
 	if !allowed {
-		// USK-829: when the connection's first envelope is an HTTP
-		// request, synthesize a 403 terminator so the client sees a
-		// clean close instead of hanging on its read timeout. Non-HTTP
-		// envelopes keep the legacy silent Drop — protocol-correct
-		// terminators for raw/ws/gRPC are deferred (D2-D5).
-		if _, ok := env.Message.(*envelope.HTTPMessage); ok {
-			return Result{
-				Action:    Respond,
-				Response:  buildPolicyDropResponse(env, BlockedByTargetScope, nil),
-				BlockedBy: BlockedByTargetScope,
-			}
-		}
-		return Result{Action: Drop, BlockedBy: BlockedByTargetScope}
+		return targetScopeBlock(env)
 	}
 	return Result{}
+}
+
+// targetScopeBlock is the Result of a target scope deny for env.
+//
+// USK-829: when the envelope is an HTTP message, synthesize a 403
+// terminator so the client sees a clean close instead of hanging on its
+// read timeout. Non-HTTP envelopes keep the legacy silent Drop —
+// protocol-correct terminators for raw/ws/gRPC are deferred (D2-D5).
+func targetScopeBlock(env *envelope.Envelope) Result {
+	if _, ok := env.Message.(*envelope.HTTPMessage); ok {
+		return Result{
+			Action:    Respond,
+			Response:  buildPolicyDropResponse(env, BlockedByTargetScope, nil),
+			BlockedBy: BlockedByTargetScope,
+		}
+	}
+	return Result{Action: Drop, BlockedBy: BlockedByTargetScope}
 }
 
 // hostScopeScheme derives the TargetScope scheme token for a connection-
