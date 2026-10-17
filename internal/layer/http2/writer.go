@@ -3,6 +3,7 @@ package http2
 import (
 	"errors"
 	"fmt"
+	"sync/atomic"
 
 	"github.com/usk6666/yorishiro-proxy/internal/layer/http2/frame"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/http2/hpack"
@@ -58,6 +59,14 @@ type writeDataEvent struct {
 	payload   []byte
 	endStream bool
 	done      chan error
+
+	// off is how much of payload has been written. Writer goroutine only;
+	// non-zero while the request is parked part-way (USK-1166).
+	off int
+	// abandoned is set by the sending goroutine when its ctx expired before
+	// the write finished; the writer then drops the unwritten remainder at
+	// the next frame boundary instead of writing it later (USK-1166).
+	abandoned atomic.Bool
 }
 
 // writeRST emits a RST_STREAM frame.
@@ -114,9 +123,16 @@ type writeGoAway struct {
 // enqueues an empty END_STREAM DATA from a deferred call AFTER the client
 // h2 layer's reader saw EOF and broadcastShutdown ran, and waitDone's
 // `<-shutdown` fall-through (`return <-done`) requires done to fire.
+//
+// USK-1166: the writer never blocks on flow control. DATA that does not fit
+// the peer's windows is parked per stream (see writeSched) and resumed when
+// windowUpdated fires; the same signal carries stream resets recorded by the
+// reader. Writes still parked at exit are failed with ErrWriterClosed by
+// failParkedWrites, so the exit invariant above covers them too.
 func (l *Layer) writerLoop() {
 	defer close(l.writerDone)
 	defer l.failDrainQueuedWrites()
+	defer l.failParkedWrites(ErrWriterClosed)
 
 	for {
 		select {
@@ -132,6 +148,9 @@ func (l *Layer) writerLoop() {
 			}
 		case req := <-l.writerQueue:
 			l.dispatchWrite(req)
+		case <-l.windowUpdated:
+			l.applyPendingResets()
+			l.serviceParked()
 		}
 	}
 }
@@ -154,11 +173,14 @@ func (l *Layer) failDrainQueuedWrites() {
 }
 
 func (l *Layer) dispatchWrite(req writeRequest) {
+	// Resets observed by the reader must apply before any later-dequeued
+	// write for the same stream is considered.
+	l.applyPendingResets()
 	switch {
 	case req.headers != nil:
-		l.handleWriteHeaders(req.headers)
+		l.scheduleStreamWrite(req.headers.streamID, req)
 	case req.dataEvent != nil:
-		l.handleWriteDataEvent(req.dataEvent)
+		l.scheduleStreamWrite(req.dataEvent.streamID, req)
 	case req.rst != nil:
 		l.handleWriteRST(req.rst)
 	case req.windowUpdate != nil:
@@ -175,6 +197,10 @@ func (l *Layer) dispatchWrite(req writeRequest) {
 }
 
 func (l *Layer) handleWriteRST(req *writeRST) {
+	// RFC 9113 §5.1 / §6.9: once RST_STREAM is sent no DATA or HEADERS may
+	// follow on the stream; drop anything parked for it before the RST goes
+	// out (USK-1166).
+	l.purgeStream(req.streamID, localResetError(req.code))
 	err := l.frameWriter.WriteRSTStream(req.streamID, req.code)
 	deliverDone(req.done, err)
 }
@@ -241,44 +267,49 @@ func (l *Layer) handleWriteHeaders(req *writeHeaders) {
 	deliverDone(req.done, err)
 }
 
-// handleWriteDataEvent writes req.payload as one or more DATA frames,
-// splitting at MAX_FRAME_SIZE and respecting flow control. When
-// req.endStream is true, END_STREAM is placed on the final frame. A nil
-// payload combined with endStream=true produces a single empty DATA frame.
-func (l *Layer) handleWriteDataEvent(req *writeDataEvent) {
+// writeDataProgress writes as much of req as the stream and connection send
+// windows allow, splitting at MAX_FRAME_SIZE; END_STREAM goes on the final
+// frame, and a nil payload with endStream=true is a single empty END_STREAM
+// DATA frame. It never waits for window (USK-1166): it reports false when
+// the windows are exhausted with payload left over, leaving req.off at the
+// resume point, and true once req is finished and its done signalled.
+func (l *Layer) writeDataProgress(req *writeDataEvent) bool {
+	if len(req.payload) == 0 {
+		var err error
+		if req.endStream {
+			err = l.frameWriter.WriteData(req.streamID, true, nil)
+		}
+		deliverDone(req.done, err)
+		return true
+	}
+
 	maxFrameSize := int(l.frameWriter.MaxFrameSize())
 	if maxFrameSize == 0 {
 		maxFrameSize = int(frame.DefaultMaxFrameSize)
 	}
-
-	body := req.payload
-	if len(body) == 0 {
-		// Empty payload.
-		if req.endStream {
-			err := l.frameWriter.WriteData(req.streamID, true, nil)
-			deliverDone(req.done, err)
-			return
+	for req.off < len(req.payload) {
+		if req.abandoned.Load() {
+			deliverDone(req.done, errWriteAbandoned)
+			return true
 		}
-		// Empty payload, no END_STREAM: no-op.
-		deliverDone(req.done, nil)
-		return
-	}
-
-	for len(body) > 0 {
-		n, err := l.waitForWindow(req.streamID, len(body), maxFrameSize)
+		n, err := l.reserveWindow(req.streamID, len(req.payload)-req.off, maxFrameSize)
 		if err != nil {
 			deliverDone(req.done, err)
-			return
+			return true
 		}
-		chunk := body[:n]
-		body = body[n:]
-		endStream := req.endStream && len(body) == 0
+		if n == 0 {
+			return false
+		}
+		chunk := req.payload[req.off : req.off+n]
+		req.off += n
+		endStream := req.endStream && req.off == len(req.payload)
 		if err := l.frameWriter.WriteData(req.streamID, endStream, chunk); err != nil {
 			deliverDone(req.done, err)
-			return
+			return true
 		}
 	}
 	deliverDone(req.done, nil)
+	return true
 }
 
 // checkHeaderListSize returns an error when the cumulative Size() of fields
@@ -320,50 +351,35 @@ func (l *Layer) writeHeaderBlock(streamID uint32, encoded []byte, endStream bool
 	return l.frameWriter.WriteContinuation(streamID, true, rest)
 }
 
-// waitForWindow blocks until the smaller of {stream send window, conn send
-// window, requested, maxFrameSize} is positive, then consumes that many bytes
-// from both windows and returns the consumed amount.
-func (l *Layer) waitForWindow(streamID uint32, requested, maxFrameSize int) (int, error) {
-	for {
-		select {
-		case <-l.shutdown:
-			return 0, ErrWriterClosed
-		default:
-		}
-
-		streamWin, ok := l.conn.Streams().GetSendWindow(streamID)
-		if !ok {
-			return 0, fmt.Errorf("http2: stream %d does not exist for window check", streamID)
-		}
-		connWin := l.conn.SendWindow()
-
-		avail := requested
-		if int(streamWin) < avail {
-			avail = int(streamWin)
-		}
-		if int(connWin) < avail {
-			avail = int(connWin)
-		}
-		if maxFrameSize > 0 && maxFrameSize < avail {
-			avail = maxFrameSize
-		}
-		if avail > 0 {
-			if err := l.conn.Streams().ConsumeSendWindow(streamID, int32(avail)); err != nil {
-				return 0, err
-			}
-			if err := l.conn.ConsumeSendWindow(int32(avail)); err != nil {
-				_ = l.conn.Streams().IncrementSendWindow(streamID, uint32(avail))
-				return 0, err
-			}
-			return avail, nil
-		}
-
-		select {
-		case <-l.windowUpdated:
-		case <-l.shutdown:
-			return 0, ErrWriterClosed
-		}
+// reserveWindow consumes and returns min{stream send window, conn send
+// window, requested, maxFrameSize} bytes from both windows, or 0 when either
+// window is exhausted. It never blocks (USK-1166).
+func (l *Layer) reserveWindow(streamID uint32, requested, maxFrameSize int) (int, error) {
+	streamWin, ok := l.conn.Streams().GetSendWindow(streamID)
+	if !ok {
+		return 0, fmt.Errorf("http2: stream %d does not exist for window check", streamID)
 	}
+	avail := requested
+	if int(streamWin) < avail {
+		avail = int(streamWin)
+	}
+	if connWin := int(l.conn.SendWindow()); connWin < avail {
+		avail = connWin
+	}
+	if maxFrameSize > 0 && maxFrameSize < avail {
+		avail = maxFrameSize
+	}
+	if avail <= 0 {
+		return 0, nil
+	}
+	if err := l.conn.Streams().ConsumeSendWindow(streamID, int32(avail)); err != nil {
+		return 0, err
+	}
+	if err := l.conn.ConsumeSendWindow(int32(avail)); err != nil {
+		_ = l.conn.Streams().IncrementSendWindow(streamID, uint32(avail))
+		return 0, err
+	}
+	return avail, nil
 }
 
 // deliverDone sends err on done if non-nil.
