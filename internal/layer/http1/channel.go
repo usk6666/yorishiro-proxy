@@ -253,16 +253,36 @@ type channel struct {
 	deferredParse bool
 
 	// readerReleased is closed when this Channel relinquishes exclusive
-	// access to the parent Layer's bufio.Reader — either after a deferred
-	// Next() returns, or on Close. Only meaningful when deferredParse=true.
+	// access to the parent Layer's bufio.Reader: after a deferred Next()
+	// finishes its parse, or on Close when no deferred parse is in flight.
+	// Only meaningful when deferredParse=true.
+	//
+	// USK-1184: the New() goroutine waits on readerReleased (after
+	// termDone) before reading parseFailed / connClosed and before starting
+	// spawnLoopSend. termDone alone is not enough: Layer.Close (and
+	// Channel.Close) can fire it while the deferred parse is still running
+	// on the Next caller's goroutine. close(readerReleased) runs after the
+	// parse wrote those flags, so it is the happens-before edge for them.
 	readerReleased    chan struct{}
 	readerReleaseOnce sync.Once
+
+	// readerState arbitrates bufio.Reader ownership between the deferred
+	// Next() and Close (USK-1184): readerIdle → readerParsing (Next owns
+	// the reader) → readerDone; or readerIdle → readerDone (Close or a
+	// terminated Channel's Next won). Only the transition into readerDone
+	// closes readerReleased, so Close never hands the reader to the spawn
+	// loop while a deferred parse is still using it. It is a CAS rather
+	// than a mutex because Channel.Close does not close the conn and must
+	// not block behind a silent client.
+	readerState atomic.Int32
 
 	// parseFailed is set when the deferred-parse Next() returned a
 	// parser error (vs successful parse + later Close). The deferred-parse
 	// goroutine in Layer.New() reads this to decide whether to enter
 	// spawnLoopSend; entering after a parse error would just compound
-	// the failure on a wedged bufio.Reader.
+	// the failure on a wedged bufio.Reader. Written by the Next caller's
+	// goroutine before releaseReader; read by the New() goroutine only
+	// after readerReleased is closed.
 	parseFailed bool
 
 	// responseReady carries response deliveries from spawnLoopReceive to
@@ -283,9 +303,15 @@ type channel struct {
 	closeOnce           sync.Once
 
 	// Per-exchange state.
-	currentStreamID string // minted in parseRequest / inherited via response delivery
-	sequence        int    // 0=request; 1+=responses (1xx-aware)
-	connClosed      bool   // peer signalled Connection: close on this exchange
+	//
+	// currentStreamID is minted in parseRequest (Send) or inherited via
+	// response delivery (Receive). On the Send side the parsing goroutine
+	// writes it under termMu, and releaseStreamState reads it under termMu,
+	// because Layer.Close can terminate the Channel from another goroutine
+	// while the request body is still being read (USK-1184).
+	currentStreamID string
+	sequence        int  // 0=request; 1+=responses (1xx-aware)
+	connClosed      bool // peer signalled Connection: close on this exchange
 
 	// USK-721: priorRespWasInformational tracks whether the previous response
 	// emitted on this Channel was 1xx, so the next response advances Sequence.
@@ -456,20 +482,7 @@ func (c *channel) nextSend(_ context.Context) (*envelope.Envelope, error) {
 	// release the parent Layer's reader so the spawn loop can take over
 	// for additional keep-alive requests.
 	if c.deferredParse {
-		if c.delivered {
-			return nil, io.EOF
-		}
-		env, err := c.parseRequest()
-		if err != nil {
-			c.parseFailed = true
-		}
-		c.releaseReader()
-		if err != nil {
-			c.markTerminated(err)
-			return nil, err
-		}
-		c.delivered = true
-		return env, nil
+		return c.nextSendDeferred()
 	}
 
 	if c.queuedErr != nil {
@@ -491,6 +504,66 @@ func (c *channel) nextSend(_ context.Context) (*envelope.Envelope, error) {
 	}
 	c.delivered = true
 	return c.queuedEnv, nil
+}
+
+// Reader ownership states for channel.readerState (USK-1184).
+const (
+	readerIdle int32 = iota
+	readerParsing
+	readerDone
+)
+
+// nextSendDeferred is nextSend for the auto-yielded initial Channel: it
+// parses the request on the caller's goroutine, then releases the parent
+// Layer's reader so the spawn loop can take over.
+//
+// USK-1184: once the Channel is terminated (Close, Layer.Close, a prior
+// parse error) Next returns the terminal error without parsing, per the
+// layer.Channel Closed() contract. A Close that lands mid-parse does not
+// release the reader; this function does, after the parse wrote
+// parseFailed / connClosed.
+func (c *channel) nextSendDeferred() (*envelope.Envelope, error) {
+	if c.delivered {
+		return nil, io.EOF
+	}
+	select {
+	case <-c.termDone:
+		c.tryReleaseIdleReader()
+		return nil, c.terminalErr()
+	default:
+	}
+	if !c.readerState.CompareAndSwap(readerIdle, readerParsing) {
+		return nil, c.terminalErr()
+	}
+	env, err := c.parseRequest()
+	if err != nil {
+		c.parseFailed = true
+	}
+	c.readerState.Store(readerDone)
+	c.releaseReader()
+	if err != nil {
+		c.markTerminated(err)
+		return nil, err
+	}
+	c.delivered = true
+	return env, nil
+}
+
+// tryReleaseIdleReader releases the parent Layer's reader unless a
+// deferred parse currently owns it (USK-1184). Idempotent.
+func (c *channel) tryReleaseIdleReader() {
+	if c.readerState.CompareAndSwap(readerIdle, readerDone) {
+		c.releaseReader()
+	}
+}
+
+// terminalErr returns Err(), falling back to io.EOF for the defensive case
+// where the reader was released without a terminal error being recorded.
+func (c *channel) terminalErr() error {
+	if err := c.Err(); err != nil {
+		return err
+	}
+	return io.EOF
 }
 
 // releaseReader signals to the parent Layer's deferred-parse goroutine that
@@ -646,10 +719,13 @@ func (c *channel) Send(ctx context.Context, env *envelope.Envelope) error {
 // send-select observes termDone, releases responseReadyMu, and then lets
 // closeResponseReady acquire the mutex to close the channel. Reversing
 // this order would deadlock against a full responseReady buffer.
+//
+// USK-1184: if a deferred Next is parsing, Close leaves the reader with it;
+// nextSendDeferred releases the reader once the parse returns.
 func (c *channel) Close() error {
 	c.markTerminated(io.EOF)
 	c.closeResponseReady()
-	c.releaseReader()
+	c.tryReleaseIdleReader()
 	return nil
 }
 
@@ -749,10 +825,16 @@ func (c *channel) releaseStreamState() {
 	if c.layer != nil && c.layer.isDetached() {
 		return
 	}
-	if c.currentStreamID == "" || c.ctxTmpl.ConnID == "" {
+	// USK-1184: Layer.Close can run this while parseRequest is still
+	// reading the body on another goroutine; copy the ID under termMu and
+	// call the releaser outside the lock.
+	c.termMu.Lock()
+	streamID := c.currentStreamID
+	c.termMu.Unlock()
+	if streamID == "" || c.ctxTmpl.ConnID == "" {
 		return
 	}
-	c.stateReleaser.ReleaseStream(c.ctxTmpl.ConnID, c.currentStreamID)
+	c.stateReleaser.ReleaseStream(c.ctxTmpl.ConnID, streamID)
 }
 
 // --- Parse implementations (called by Layer.spawnLoop) ---
@@ -802,8 +884,13 @@ func (c *channel) parseRequest() (*envelope.Envelope, error) {
 		return nil, err
 	}
 
-	// Mint per-exchange identity.
-	c.currentStreamID = uuid.New().String()
+	// Mint per-exchange identity. currentStreamID is written under termMu
+	// because Layer.Close may read it concurrently via releaseStreamState
+	// while the body below is still being read (USK-1184).
+	streamID := uuid.New().String()
+	c.termMu.Lock()
+	c.currentStreamID = streamID
+	c.termMu.Unlock()
 	c.sequence = 0
 
 	path, rawQuery, authority := parseRequestURI(rawReq.RequestURI, rawReq.Headers)
@@ -880,7 +967,7 @@ func (c *channel) parseRequest() (*envelope.Envelope, error) {
 	envCtx.ReceivedAt = time.Now()
 
 	env := &envelope.Envelope{
-		StreamID:  c.currentStreamID,
+		StreamID:  streamID,
 		FlowID:    uuid.New().String(),
 		Sequence:  c.sequence,
 		Direction: envelope.Send,
