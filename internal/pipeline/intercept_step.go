@@ -18,10 +18,18 @@ import (
 // HTTP / WebSocket / gRPC / SSE messages are dispatched to their respective
 // per-protocol InterceptEngines. Unknown Message types pass through.
 //
-// On ActionModifyAndForward, the user-supplied modified envelope is re-checked
-// against the SafetyStep before being released downstream — defense-in-depth
-// for the case where SafetyStep already gated the original held envelope but
-// the modify_and_forward payload re-introduces a destructive pattern (USK-702).
+// When a hold is released to be forwarded — manual release, timeout
+// auto-release, or modify_and_forward — the envelope about to be forwarded
+// is first re-checked against HostScopeStep / HTTPScopeStep (USK-1159, wired
+// via WithScopeRecheck): the scope may have narrowed while the envelope was
+// held (operator policy reload, agent `security` tool), and
+// modify_and_forward can rewrite the request target.
+//
+// On ActionModifyAndForward, the user-supplied modified envelope is then
+// re-checked against the SafetyStep before being released downstream —
+// defense-in-depth for the case where SafetyStep already gated the original
+// held envelope but the modify_and_forward payload re-introduces a
+// destructive pattern (USK-702).
 type InterceptStep struct {
 	http        *httprules.InterceptEngine
 	ws          *wsrules.InterceptEngine
@@ -30,6 +38,8 @@ type InterceptStep struct {
 	queue       *common.HoldQueue
 	safety      *SafetyStep
 	holdTracker *common.HoldTracker
+	hostScope   *HostScopeStep
+	httpScope   *HTTPScopeStep
 	logger      *slog.Logger
 }
 
@@ -71,6 +81,78 @@ func NewInterceptStep(
 func (s *InterceptStep) WithHoldTracker(t *common.HoldTracker) *InterceptStep {
 	s.holdTracker = t
 	return s
+}
+
+// WithScopeRecheck wires the scope Steps that are re-run against the
+// envelope about to be forwarded when a hold is released (USK-1159). Pass
+// the same instances the Pipeline runs at its head so the re-check consults
+// the same live TargetScope. Either Step may be nil (that half of the
+// re-check is skipped); without this option a release is not re-checked.
+// Returns the receiver for fluent construction.
+func (s *InterceptStep) WithScopeRecheck(host *HostScopeStep, http *HTTPScopeStep) *InterceptStep {
+	s.hostScope = host
+	s.httpScope = http
+	return s
+}
+
+// recheckScope re-runs the scope Steps, in Pipeline order (HostScopeStep
+// then HTTPScopeStep), against env and returns the first non-Continue
+// Result verbatim — Respond with a synthetic 403 and
+// BlockedBy=target_scope for an HTTP request, Drop with
+// BlockedBy=target_scope otherwise. It returns the zero Result when both
+// allow env or are nil. Both Steps are Send-only, so a Receive envelope
+// always passes.
+//
+// It exists for code that forwards an envelope after the head of the
+// Pipeline already scope-checked an earlier form of it: an intercept
+// release (scope may have narrowed during the hold, or modify_and_forward
+// rewrote the target) and, later, plugin rewrites (USK-1150).
+func recheckScope(ctx context.Context, host *HostScopeStep, httpStep *HTTPScopeStep, env *envelope.Envelope) Result {
+	if host != nil {
+		if r := host.Process(ctx, env); r.Action != Continue {
+			return r
+		}
+	}
+	if httpStep != nil {
+		if r := httpStep.Process(ctx, env); r.Action != Continue {
+			return r
+		}
+	}
+	return Result{}
+}
+
+// recheckReleaseScope runs recheckScope for an envelope released from a
+// hold, logging a block. The returned Result is forwarded verbatim by
+// holdAndDispatch so the session emits the same 403 / Drop and the same
+// OnPipelineDrop audit record as a head-of-pipeline scope deny.
+//
+// The block log carries the denied target of the forward envelope
+// (connection TargetHost, plus scheme / authority / path for an HTTP
+// request). The recorded flow holds the original held envelope, so for a
+// modify_and_forward that rewrote the target this log line is the only
+// trace of the attempted out-of-scope target. The query string, headers
+// and body are deliberately not logged.
+func (s *InterceptStep) recheckReleaseScope(ctx context.Context, held, forward *envelope.Envelope, action common.ActionType) Result {
+	r := recheckScope(ctx, s.hostScope, s.httpScope, forward)
+	if r.Action != Continue && s.logger != nil {
+		attrs := []any{
+			slog.String("flow_id", held.FlowID),
+			slog.String("direction", held.Direction.String()),
+			slog.String("protocol", string(held.Protocol)),
+			slog.String("hold_action", action.String()),
+			slog.String("action", r.Action.String()),
+			slog.String("target_host", forward.Context.TargetHost),
+		}
+		if m, ok := forward.Message.(*envelope.HTTPMessage); ok {
+			attrs = append(attrs,
+				slog.String("scheme", m.Scheme),
+				slog.String("authority", m.Authority),
+				slog.String("path", m.Path),
+			)
+		}
+		s.logger.InfoContext(ctx, "intercept: release blocked by target scope re-check", attrs...)
+	}
+	return r
 }
 
 // Process type-switches on env.Message and dispatches to the per-protocol
@@ -215,7 +297,11 @@ func (s *InterceptStep) holdAndDispatch(ctx context.Context, env *envelope.Envel
 
 	switch action.Type {
 	case common.ActionRelease:
-		return Result{}
+		// Covers manual release and timeout auto-release (HoldQueue
+		// returns ActionRelease on expiry under auto_release). The held
+		// envelope is forwarded unchanged; re-check its scope against the
+		// current rules (USK-1159).
+		return s.recheckReleaseScope(ctx, env, env, action.Type)
 	case common.ActionDrop:
 		// USK-829: when the held envelope is an HTTPMessage (Send or
 		// Receive direction), synthesize a 403 response so the client
@@ -234,6 +320,18 @@ func (s *InterceptStep) holdAndDispatch(ctx context.Context, env *envelope.Envel
 		}
 		return Result{Action: Drop, BlockedBy: BlockedByInterceptDrop}
 	case common.ActionModifyAndForward:
+		// USK-1159: re-check scope on the envelope that will actually be
+		// forwarded — the modified one, whose authority / path the
+		// operator or agent may have rewritten — before the safety
+		// re-check (Pipeline order: Scope → Safety). A nil Modified is
+		// forwarded as the held envelope (Result.Envelope nil keeps env).
+		forward := action.Modified
+		if forward == nil {
+			forward = env
+		}
+		if r := s.recheckReleaseScope(ctx, env, forward, action.Type); r.Action != Continue {
+			return r
+		}
 		// Defense-in-depth: re-check the user-supplied modified envelope
 		// against SafetyStep. The original held envelope already passed
 		// SafetyStep at hold time (Pipeline order: Safety → Intercept), but
@@ -270,6 +368,8 @@ func (s *InterceptStep) holdAndDispatch(ctx context.Context, env *envelope.Envel
 		}
 		return Result{Envelope: action.Modified}
 	default:
-		return Result{}
+		// An unknown action forwards the held envelope like a release, so
+		// it is scope-checked like one.
+		return s.recheckReleaseScope(ctx, env, env, action.Type)
 	}
 }
