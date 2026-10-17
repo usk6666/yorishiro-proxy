@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"sync"
 	"time"
@@ -766,10 +767,18 @@ func (l *Layer) Close() error {
 	// writer, the reader, or this goroutine. Give up on GOAWAY instead and
 	// proceed to close(shutdown), which unblocks every waiter.
 	last := l.conn.Streams().LastPeerStreamID()
-	l.enqueueWriteBounded(writeRequest{goAway: &writeGoAway{
+	if !l.enqueueWriteBounded(writeRequest{goAway: &writeGoAway{
 		lastStreamID: last,
 		code:         ErrCodeNo,
-	}}, closeDrainTimeout)
+	}}, closeDrainTimeout) {
+		// The peer will see the connection close without a GOAWAY. Leave a
+		// trace so that anomaly is explainable from the proxy log.
+		slog.Debug("http2: GOAWAY not sent on Close; writer queue full or writer already exited",
+			slog.String("role", l.role.String()),
+			slog.String("conn_stream_id", l.streamID),
+			slog.Uint64("last_stream_id", uint64(last)),
+		)
+	}
 
 	l.shutdownOnce.Do(func() { close(l.shutdown) })
 
