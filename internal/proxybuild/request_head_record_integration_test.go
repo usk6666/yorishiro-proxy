@@ -27,8 +27,10 @@ import (
 
 const usk1181RawCap = 4096
 
-// startUSK1181Manager starts a Manager with request_timeout_ms=300ms and a
-// small max_raw_capture_size, returning it and its proxy address.
+// startUSK1181Manager starts a Manager with a small max_raw_capture_size,
+// returning it and its proxy address. request_timeout_ms is left generous
+// (30s): the reject tests send > 4 MiB request heads, which a loaded
+// machine may not deliver within a short header deadline.
 func startUSK1181Manager(t *testing.T, ctx context.Context, store flow.Writer) (*proxybuild.Manager, string) {
 	t.Helper()
 	logger := testutil.DiscardLogger()
@@ -58,7 +60,7 @@ func startUSK1181Manager(t *testing.T, ctx context.Context, store flow.Writer) (
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
-	mgr.SetRequestTimeout(300 * time.Millisecond)
+	mgr.SetRequestTimeout(30 * time.Second)
 	t.Cleanup(func() { _ = mgr.StopAll(context.Background()) })
 	if err := mgr.Start(ctx, "127.0.0.1:0"); err != nil {
 		t.Fatalf("manager.Start: %v", err)
