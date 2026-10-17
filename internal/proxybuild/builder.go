@@ -1155,7 +1155,7 @@ func startH2UpstreamRedial(
 ) (redialFunc, func()) {
 	unregister := registerPooledChainHeadObserver(chain0, chain)
 	redialFn := headGatedRedialFunc(chain, mint)
-	chain.startPrewarmWorker(ctx, target, redialFn, nil, logger)
+	chain.startPrewarmWorker(ctx, target, redialFn, chain0, logger)
 	return redialFn, func() {
 		chain.closeAll()
 		unregister()
@@ -1311,18 +1311,22 @@ func (c *redialChain) tickleWake() {
 // reactive path's selectUpstreamForDial sees the pre-warmed Layer as
 // the new head and bypasses its own dial.
 //
-// onGoAwayHook is reserved for future per-Layer head-comparison wiring
-// done outside dialFresh; today callers pass nil because dialFresh
-// already wires the observer at construction.
+// chain0 is the Layer the connection started with (the implicit
+// chain[0]: the pooled upstreamH2 on the CONNECT path, the stack's
+// upstream Layer on the tcp_forward path). While no redial has happened
+// yet chain.current is nil, so chain0 is the head the worker checks for
+// staleness and hands to dialFresh as stale (USK-1178: passing nil made
+// connector.RedialUpstreamH2 fail with "stale is nil", so the USK-994
+// chain[0] pre-warm never succeeded). nil is accepted for tests that
+// drive the worker without a chain[0].
 func (c *redialChain) startPrewarmWorker(
 	ctx context.Context,
 	target string,
 	dialFresh redialFunc,
-	onGoAwayHook func(*http2.Layer) func(),
+	chain0 *http2.Layer,
 	logger *slog.Logger,
 ) {
-	_ = onGoAwayHook // accepted for documented future symmetry; today the observer is wired inside dialFresh
-	go c.runPrewarmWorker(ctx, target, dialFresh, logger)
+	go c.runPrewarmWorker(ctx, target, dialFresh, chain0, logger)
 }
 
 // runPrewarmWorker is the worker body. Extracted so startPrewarmWorker
@@ -1331,8 +1335,17 @@ func (c *redialChain) runPrewarmWorker(
 	ctx context.Context,
 	target string,
 	dialFresh redialFunc,
+	chain0 *http2.Layer,
 	logger *slog.Logger,
 ) {
+	// activeHead is the Layer new streams would use right now: the latest
+	// fresh step, or chain0 before the first redial.
+	activeHead := func() *http2.Layer {
+		if h := c.headLayer(); h != nil {
+			return h
+		}
+		return chain0
+	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -1354,7 +1367,7 @@ func (c *redialChain) runPrewarmWorker(
 		// Read the current head before dialing. If the head is already
 		// healthy (spurious wake — e.g. observer tickled but reactive
 		// path already replaced the head), skip the dial.
-		head := c.headLayer()
+		head := activeHead()
 		if head != nil && !isStaleH2(head) {
 			continue
 		}
@@ -1365,7 +1378,7 @@ func (c *redialChain) runPrewarmWorker(
 		// under mu handles that gracefully.
 		c.mu.Lock()
 		nextGen := len(c.layers) + 1
-		head = c.headLayer()
+		head = activeHead()
 		if head != nil && !isStaleH2(head) {
 			c.mu.Unlock()
 			continue
