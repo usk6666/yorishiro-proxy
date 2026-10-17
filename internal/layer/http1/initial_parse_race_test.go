@@ -231,6 +231,38 @@ func TestChannel_NextAfterClose_DeferredReturnsErrWithoutParsing(t *testing.T) {
 	}
 }
 
+// TestChannel_NextAfterLayerClose_DeferredReturnsErrWithoutParsing covers
+// the other way an initial Channel can be terminated before its first Next:
+// Layer.Close, which never calls Channel.Close and so leaves the reader
+// unclaimed. Next must still honour the Closed() contract — return the same
+// terminal error as Err() — rather than parse the closed conn and surface a
+// read error that disagrees with Err().
+func TestChannel_NextAfterLayerClose_DeferredReturnsErrWithoutParsing(t *testing.T) {
+	client, server := net.Pipe()
+	defer client.Close()
+
+	probe := newProbeConn(server, 0)
+	l := New(probe, "conn-t3b", envelope.Send)
+
+	ch := <-l.Channels()
+	_ = l.Close()
+	waitSignal(t, ch.Closed(), "initial Channel Closed() after Layer.Close")
+
+	r := waitNext(t, nextAsync(ch), time.Second, "Next after Layer.Close")
+	if r.env != nil {
+		t.Errorf("Next after Layer.Close: env = %+v, want nil", r.env)
+	}
+	if r.err != ch.Err() {
+		t.Errorf("Next after Layer.Close: err = %v, want Err() = %v", r.err, ch.Err())
+	}
+	if !errors.Is(r.err, io.EOF) {
+		t.Errorf("Next after Layer.Close: err = %v, want io.EOF", r.err)
+	}
+	if got := probe.maxInFlight.Load(); got != 0 {
+		t.Errorf("conn.Read calls after Layer.Close = %d, want 0 (Next parsed a terminated Channel)", got)
+	}
+}
+
 // TestLayer_CloseDuringBodyRead_NoStreamIDRace pins the currentStreamID half
 // of USK-1184: parseRequest mints currentStreamID on the parsing goroutine
 // once the request head is parsed, then blocks reading the body. Layer.Close
