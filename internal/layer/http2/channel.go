@@ -455,6 +455,22 @@ func (c *channel) allocateAndEnqueueFirstHeaders(ctx context.Context, fields []h
 		l.mu.Unlock()
 		return ErrWriterClosed
 	}
+	// USK-1175: a channel obtained from OpenStream before the connection's
+	// GOAWAY must not open a stream after it (RFC 9113 §6.8). The peer
+	// would ignore an id above its last_stream_id, and the GOAWAY scan
+	// (failStreamsAfterGoAway) has already run or will not see us, so the
+	// stream would hang until the peer closes the connection. Checked
+	// under l.mu: HandleGoAway records the flag before
+	// failStreamsAfterGoAway takes l.mu, so either we register first and
+	// that scan refuses us, or we observe the flag here. That ordering
+	// argument applies to a received GOAWAY only; when this Layer sent
+	// GOAWAY there is no per-stream sweep, and the check is simply the
+	// RFC 9113 §6.8 gate on opening new streams.
+	if se := l.goAwayRefusal(); se != nil {
+		l.mu.Unlock()
+		c.refuseUnopened(se)
+		return se
+	}
 
 	id := l.nextClientStreamID
 	l.nextClientStreamID += 2
@@ -501,6 +517,22 @@ func (c *channel) allocateAndEnqueueFirstHeaders(ctx context.Context, fields []h
 		failWriteRequest(req, ctx.Err())
 		return ctx.Err()
 	}
+}
+
+// refuseUnopened records se as the terminal error of a client-initiated
+// channel whose stream was never opened on the wire (no id allocated,
+// nothing registered), mirroring failStreamsAfterGoAway: Next surfaces the
+// refusal, and Err reports it so the session propagates REFUSED_STREAM to
+// its client instead of CANCEL (USK-1157 / USK-1175). Close later skips the
+// RST_STREAM because h2Stream is still 0 (RFC 9113 §5.4.2: no RST on an
+// idle stream).
+func (c *channel) refuseUnopened(se *layer.StreamError) {
+	select {
+	case c.errCh <- se:
+	default:
+	}
+	c.markTerminated(se)
+	c.layer.closeChannelRecv(c)
 }
 
 // sendDataEvent writes a DATA frame (or splits the payload into multiple
