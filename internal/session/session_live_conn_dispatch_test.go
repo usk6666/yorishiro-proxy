@@ -151,7 +151,8 @@ func (c *dispatchChan) openGate() {
 }
 
 // snapshot returns the envelopes sent so far and how many had been sent
-// when the connection cut closed the channel (-1: not closed).
+// when the connection cut closed the channel (-1: not closed yet — the
+// closeOnCut watcher closes it asynchronously, so wait on closed first).
 func (c *dispatchChan) snapshot() ([]*envelope.Envelope, int) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -387,6 +388,7 @@ func TestRunSession_LiveConn_SiblingSettleDuringReleasedRespond(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("stream A's session did not end after the cut")
 	}
+	waitSignal(t, a.closed, "the cut to close stream A's channel")
 	sent, atCut := a.snapshot()
 	if len(sent) < 1 || atCut < 1 {
 		t.Fatalf("stream A received %d envelopes before the cut (at cut: %d), want its 403 first", len(sent), atCut)
@@ -502,6 +504,7 @@ func TestWSRelay_LiveConn_SendRelaySettleDuringReleasedFrame(t *testing.T) {
 			t.Fatal("WS relay did not end after the cut")
 		}
 	}
+	waitSignal(t, client.closed, "the cut to close the client channel")
 	sent, atCut := client.snapshot()
 	if len(sent) != 1 || atCut != 1 {
 		t.Fatalf("client received %d frames (at cut: %d), want the released frame before the cut", len(sent), atCut)
