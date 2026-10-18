@@ -126,6 +126,10 @@ func TestHoldPinHandoff_ConcurrentReconcileSettle(t *testing.T) {
 	close(stop)
 	wg.Wait()
 	pins.Release()
+	// The racing goroutines may not have run a Reconcile after the deny
+	// landed (the loop is short); revoke deterministically now. With every
+	// handed-off pin released there is no hold left, so it cuts.
+	reg.Reconcile("final")
 	h.Settle()
 	if !errors.Is(context.Cause(ctx), ErrTargetScopeRevoked) {
 		t.Errorf("cause = %v, want ErrTargetScopeRevoked once every handed-off pin was released", context.Cause(ctx))
