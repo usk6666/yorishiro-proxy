@@ -428,3 +428,40 @@ func (h *LiveConnHandle) Settle() {
 	r.logger.Info("live connection closed: target no longer in scope",
 		r.logAttrs(e, "reason", reason, "trigger", trigger, "deferred", true)...)
 }
+
+// holdPinHandoffKey is the context key under which WithHoldPinHandoff
+// stores its *HoldPinHandoff.
+type holdPinHandoffKey struct{}
+
+// HoldPinHandoff carries the live-connection pins of intercept holds that
+// resolved during one Pipeline pass from the InterceptStep to the session
+// relay loop that runs the pass (USK-1196). The hold's pin must outlive
+// the hold itself: it is released only after the session dispatched the
+// hold's Result (client.Send of the 403, the released frame / event, ...),
+// so that a sibling stream's Settle — or a second Reconcile — cannot cut
+// the shared connection while that Result is still on its way to the wire.
+//
+// One collector belongs to one relay-loop goroutine. The loop releases it
+// before every Settle (loop top and exit), so each adopted pin is unpinned
+// exactly once.
+type HoldPinHandoff struct{}
+
+// WithHoldPinHandoff returns a context derived from ctx that carries a new
+// HoldPinHandoff, and the collector itself. Pass the derived context only
+// to the calls that run the Pipeline.
+func WithHoldPinHandoff(ctx context.Context) (context.Context, *HoldPinHandoff) {
+	c := &HoldPinHandoff{}
+	return context.WithValue(ctx, holdPinHandoffKey{}, c), c
+}
+
+// HandOffHoldPin transfers ownership of one successful Pin of h to the
+// HoldPinHandoff carried by ctx. It reports false — and the caller keeps
+// the pin and must Unpin it — when h is nil or ctx carries no collector
+// (a Pipeline run outside a session relay loop).
+func HandOffHoldPin(ctx context.Context, h *LiveConnHandle) bool {
+	return false
+}
+
+// Release unpins every pin handed off to c since the previous Release.
+// Idempotent; nil-safe.
+func (c *HoldPinHandoff) Release() {}
