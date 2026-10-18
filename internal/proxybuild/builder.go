@@ -964,8 +964,13 @@ func buildOnHTTP2Stack(p *pipeline.Pipeline, deps Deps, logger *slog.Logger) con
 		// new upstream conn. The fresh Layers are owned by this handler — all
 		// chain steps are closed in the deferred cleanup below.
 		//
-		// USK-991: the chain is unbounded (browser-equivalent transparency:
-		// no cap; the per-CONNECT lifetime is the natural bound). Prior
+		// USK-991: the reactive chain is unbounded (browser-equivalent
+		// transparency: each request that finds the head stale may redial,
+		// with at most one retry; the per-CONNECT lifetime is the natural
+		// bound). The speculative pre-warm is not: it stops after a
+		// pre-warmed head goes away without carrying a stream (USK-1179),
+		// so an upstream that GOAWAYs every connection cannot make an
+		// idle CONNECT redial in a loop. Prior
 		// Layers are retained for the CONNECT's lifetime so in-flight
 		// streams on them drain naturally up to GOAWAY's last_stream_id
 		// (RFC 9113 §6.8) — close-on-CONNECT-exit, not close-on-swap.
@@ -1212,8 +1217,12 @@ func headGatedRedialFunc(chain *redialChain, mint mintH2Func) redialFunc {
 			firing := firingLayerCell.Load()
 			if firing == nil {
 				// Race: observer fired before the dial-completion store.
-				// Vanishingly rare; the worker's own stale-head re-check on
-				// the next genuine wake catches up.
+				// ClientRole http2.New does not wait for the peer's
+				// SETTINGS, so an upstream that sends GOAWAY immediately
+				// can land here; the wake is dropped and the head stays
+				// stale until the reactive path (or a later wake) replaces
+				// it. That is safe — at worst one pre-warm is skipped — and
+				// it can only reduce the dial rate USK-1179 bounds.
 				return
 			}
 			if firing != chain.current.Load() {
@@ -1275,6 +1284,25 @@ type redialFunc func(ctx context.Context, target string, stale *http2.Layer, gen
 //     after each dial before appending to chain.layers, immediately
 //     closing any Layer that returns after teardown so no goroutine
 //     leak.
+//
+// USK-1179 — pre-warm cap:
+//   - The worker does not replace a head it dialed itself that never
+//     carried a locally initiated stream (http2.Layer.InitiatedStreams).
+//     The wake is consumed and counted as prewarm_suppressed; the head
+//     stays in place and the reactive path redials when a request needs
+//     it. chain[0] and reactive-minted heads are exempt, and a
+//     pre-warmed head that served a stream is pre-warmed past as before,
+//     so an idle connection costs at most chain[0] plus one speculative
+//     upstream connection however often the upstream sends GOAWAY.
+//   - Each client request adds at most four upstream connections.
+//     Normally it is three: the reactive dial, at most one
+//     refused-stream retry dial, and one pre-warm off a head that
+//     carried the stream. A fourth is possible in a narrow race: the
+//     reactive head's GOAWAY lands after it is published as the head
+//     but before OpenStream, so the stream is refused while that head
+//     is unused, and the worker still pre-warms off it because
+//     reactive-minted heads are exempt from suppression. The bound is
+//     constant and request-driven either way.
 type redialChain struct {
 	mu      sync.Mutex
 	layers  []*http2.Layer
@@ -1386,6 +1414,9 @@ func (c *redialChain) runPrewarmWorker(
 		}
 		return chain0
 	}
+	// lastSpeculative is the Layer this worker most recently dialed and
+	// published (USK-1179). Read and written only on this goroutine.
+	var lastSpeculative *http2.Layer
 	for {
 		select {
 		case <-ctx.Done():
@@ -1404,26 +1435,27 @@ func (c *redialChain) runPrewarmWorker(
 		// GOAWAY for the current chain head.
 		c.metrics.incGoAwayObservedPrewarm()
 
-		// Read the current head before dialing. If the head is already
-		// healthy (spurious wake — e.g. observer tickled but reactive
-		// path already replaced the head), skip the dial.
-		head := activeHead()
-		if head != nil && !isStaleH2(head) {
+		head, nextGen, stale := c.staleHeadForPrewarm(activeHead)
+		if !stale {
 			continue
 		}
 
-		// Compute generation under mu, then drop the lock for the
-		// blocking dial. The reactive path may interleave and increment
-		// chain.layers concurrently; the worker's post-dial re-check
-		// under mu handles that gracefully.
-		c.mu.Lock()
-		nextGen := len(c.layers) + 1
-		head = activeHead()
-		if head != nil && !isStaleH2(head) {
-			c.mu.Unlock()
+		// USK-1179: do not replace a head this worker produced itself
+		// that never carried a locally initiated stream. Against an
+		// upstream that answers every connection with GOAWAY, replacing
+		// it would redial every RTT for the connection's lifetime with
+		// nothing to show for it. The reactive path dials when a request
+		// actually needs the upstream; a head that carried a stream (or
+		// was minted by the reactive path, or is chain[0]) is still
+		// pre-warmed past. Because reactive heads are exempt even when
+		// unused, one request can cost up to four upstream dials (see
+		// redialChain).
+		if head != nil && head == lastSpeculative && !head.InitiatedStreams() {
+			c.metrics.incPrewarmSuppressed()
+			logger.Debug("proxybuild: pre-warm suppressed: speculative head GOAWAY'd unused",
+				"target", target, "generation", nextGen-1)
 			continue
 		}
-		c.mu.Unlock()
 
 		fresh, err := dialFresh(ctx, target, head, nextGen)
 		if err != nil {
@@ -1464,6 +1496,7 @@ func (c *redialChain) runPrewarmWorker(
 		// invariant that protects c.layers protects c.liveGen.
 		c.bumpGenerationLocked()
 		c.mu.Unlock()
+		lastSpeculative = fresh
 		// USK-1001: count successful pre-warm dials. Emitted after mu
 		// is released so a slow downstream emit cannot stall the
 		// next reactive selectUpstreamForDial picking up the fresh
@@ -1472,6 +1505,31 @@ func (c *redialChain) runPrewarmWorker(
 		logger.Debug("proxybuild: pre-warm h2 dialed successfully",
 			"target", target, "generation", nextGen)
 	}
+}
+
+// staleHeadForPrewarm returns the head the pre-warm worker would replace
+// and the generation of the replacement. stale is false when the head is
+// already healthy (spurious wake — e.g. observer tickled but the reactive
+// path already replaced the head), in which case the worker skips the
+// dial.
+//
+// The generation is computed under mu, then the lock is dropped for the
+// blocking dial. The reactive path may interleave and increment
+// chain.layers concurrently; the worker's post-dial re-check under mu
+// handles that gracefully.
+func (c *redialChain) staleHeadForPrewarm(activeHead func() *http2.Layer) (head *http2.Layer, nextGen int, stale bool) {
+	head = activeHead()
+	if head != nil && !isStaleH2(head) {
+		return nil, 0, false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	nextGen = len(c.layers) + 1
+	head = activeHead()
+	if head != nil && !isStaleH2(head) {
+		return nil, 0, false
+	}
+	return head, nextGen, true
 }
 
 // bumpGenerationLocked updates the chain-generation gauges after a
@@ -1580,8 +1638,12 @@ func (c *redialChain) closeAll() {
 // §6.8). Closing prior chain steps on swap would abort their in-flight
 // streams; holding them lets those streams drain and only NEW streams
 // fall through to the fresh chain step. The slice is bounded in
-// practice by the CONNECT's lifetime — there is no chain cap; this is
-// a deliberate decision for diagnostic transparency, see USK-991.
+// practice by the CONNECT's lifetime — there is no cap on reactive
+// redials; this is a deliberate decision for diagnostic transparency,
+// see USK-991. Each reactive redial is driven by a request (at most
+// one fresh dial plus one refused-stream retry per stream). The
+// speculative pre-warm worker is capped separately (USK-1179, see
+// redialChain).
 //
 // The chain.mu serialises the fresh-dial attempt so concurrent streams
 // observing staleness produce one upstream conn (not N). On dial

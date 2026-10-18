@@ -38,6 +38,7 @@ func TestH2Metrics_NilSafe(t *testing.T) {
 	m.incRedialReactive()
 	m.incRedialRefusedStream()
 	m.incRedialFailedPrewarm()
+	m.incPrewarmSuppressed()
 	m.incRedialFailedReactive()
 	m.incRedialFailedRefusedStream()
 	m.incRetrySuccess()
@@ -95,6 +96,11 @@ func TestH2Metrics_DirectIncrements(t *testing.T) {
 			name: "redial_failed_prewarm",
 			emit: (*H2UpstreamMetrics).incRedialFailedPrewarm,
 			want: func(s H2UpstreamMetricsSnapshot) int64 { return s.RedialFailedPrewarm },
+		},
+		{
+			name: "prewarm_suppressed",
+			emit: (*H2UpstreamMetrics).incPrewarmSuppressed,
+			want: func(s H2UpstreamMetricsSnapshot) int64 { return s.PrewarmSuppressed },
 		},
 		{
 			name: "redial_failed_reactive",

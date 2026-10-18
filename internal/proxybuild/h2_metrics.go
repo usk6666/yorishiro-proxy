@@ -87,6 +87,14 @@ type H2UpstreamMetrics struct {
 	// chain.current is unchanged.
 	redialFailedPrewarm atomic.Int64
 
+	// prewarmSuppressed counts pre-warm wakes the worker consumed without
+	// dialing because the GOAWAY'd head was the worker's own previous
+	// speculative connection and it never carried a locally initiated
+	// stream (USK-1179). Each such wake would otherwise have opened one
+	// more upstream connection against an upstream that answers every
+	// connection with GOAWAY.
+	prewarmSuppressed atomic.Int64
+
 	// redialFailedReactive counts dial failures inside
 	// selectUpstreamForDial's slow path. The stale Layer is returned
 	// to the caller; OpenStream surfaces the underlying refused error.
@@ -220,6 +228,17 @@ func (m *H2UpstreamMetrics) incRedialFailedPrewarm() {
 	m.redialFailedPrewarm.Add(1)
 }
 
+// incPrewarmSuppressed increments the
+// http2_upstream_prewarm_suppressed_total counter when the pre-warm
+// worker skips replacing a speculative head that went away unused
+// (USK-1179).
+func (m *H2UpstreamMetrics) incPrewarmSuppressed() {
+	if m == nil {
+		return
+	}
+	m.prewarmSuppressed.Add(1)
+}
+
 // incRedialFailedReactive increments the
 // http2_upstream_redial_failed_total{trigger="reactive"} counter on a
 // selectUpstreamForDial slow-path dial failure.
@@ -345,6 +364,11 @@ type H2UpstreamMetricsSnapshot struct {
 	// http2_upstream_redial_failed_total{trigger="prewarm"}.
 	RedialFailedPrewarm int64 `json:"redial_failed_prewarm"`
 
+	// PrewarmSuppressed is http2_upstream_prewarm_suppressed_total: pre-warm
+	// wakes skipped because the GOAWAY'd head was an unused speculative
+	// connection (USK-1179).
+	PrewarmSuppressed int64 `json:"prewarm_suppressed"`
+
 	// RedialFailedReactive is
 	// http2_upstream_redial_failed_total{trigger="reactive"}.
 	RedialFailedReactive int64 `json:"redial_failed_reactive"`
@@ -396,6 +420,7 @@ func (m *H2UpstreamMetrics) Snapshot() H2UpstreamMetricsSnapshot {
 		RedialReactive:            m.redialReactive.Load(),
 		RedialRefusedStream:       m.redialRefusedStream.Load(),
 		RedialFailedPrewarm:       m.redialFailedPrewarm.Load(),
+		PrewarmSuppressed:         m.prewarmSuppressed.Load(),
 		RedialFailedReactive:      m.redialFailedReactive.Load(),
 		RedialFailedRefusedStream: m.redialFailedRefusedStream.Load(),
 		RetrySuccess:              m.retrySuccess.Load(),

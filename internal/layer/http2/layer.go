@@ -510,6 +510,17 @@ func (l *Layer) ActiveStreamCount() int {
 	return l.conn.Streams().ActiveCount()
 }
 
+// InitiatedStreams reports whether this Layer has ever allocated a
+// locally initiated stream id for a request HEADERS (USK-1179). The
+// signal is client-side and lifetime-scoped:
+// an OpenStream that is refused, or a channel that is opened but never
+// sends HEADERS, does not count.
+func (l *Layer) InitiatedStreams() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.nextClientStreamID > 1
+}
+
 // PeerMaxConcurrentStreams returns the peer-advertised
 // SETTINGS_MAX_CONCURRENT_STREAMS.
 func (l *Layer) PeerMaxConcurrentStreams() uint32 {
