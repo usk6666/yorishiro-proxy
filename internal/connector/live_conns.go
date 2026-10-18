@@ -45,9 +45,10 @@ import (
 // SettleLiveConn), so the release re-check's 403 target_scope reaches the
 // client and the audit record first — even when a sibling stream of the
 // same h2 connection Settles meanwhile. Receive-direction data from the
-// denied host keeps flowing until then (bounded by the hold timeout:
-// Pin refuses a revoke-pending connection, so no new hold extends the
-// deferral).
+// denied host keeps flowing until then: bounded by the hold timeout plus
+// however long the Result's client.Send stays parked (Pin refuses a
+// revoke-pending connection, so no new hold extends the deferral; see the
+// Reconcile note on a client that never reads).
 
 // ErrTargetScopeRevoked is the context cancel cause of a live connection
 // that a policy change no longer admits. Handlers and relays can test for
@@ -197,8 +198,15 @@ func (r *LiveConns) Register(ctx context.Context, c LiveConn) (context.Context, 
 // it, so the revoked connection is not cut until that Send fails or
 // returns (before USK-1196 a second Reconcile could cut it). The denied
 // upstream receives no Send-direction data meanwhile (HostScopeStep blocks
-// it). Re-open trigger: M54 exposing the proxy listener to untrusted
-// clients — bound it with the client write deadline specified by USK-1182.
+// it), but Receive-direction data keeps flowing. On HTTP/2 the client can
+// stall only the held stream: withholding WINDOW_UPDATE for it parks the
+// Result's DATA in the writer's flow-control scheduler (USK-1166), so the
+// Send stays blocked while the client keeps reading the connection and
+// already-open sibling streams (SSE, gRPC streaming) from the revoked host
+// keep relaying with no time limit. Re-open trigger: M54 exposing the proxy
+// listener to untrusted clients — bound the parked Result Send itself (a
+// socket write deadline alone does not cover the h2 per-stream stall), per
+// USK-1182.
 func (r *LiveConns) Reconcile(trigger string) int {
 	revoked, _ := r.ReconcileWithDeferred(trigger)
 	return revoked
