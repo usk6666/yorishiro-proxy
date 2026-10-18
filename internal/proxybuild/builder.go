@@ -351,6 +351,11 @@ type Stack struct {
 	// callbacks that finalise Stream state. May be nil when no recording
 	// is configured.
 	FlowStore flow.Writer
+
+	// requestHeadRecorder records request heads the proxy closed before an
+	// Envelope existed (USK-1181). Shared with TCP forward listeners that
+	// piggyback on this Stack. Nil when FlowStore is nil.
+	requestHeadRecorder requestHeadRecorder
 }
 
 // BuildLiveStack assembles a per-listener Stack from deps. Validates
@@ -418,6 +423,11 @@ func BuildLiveStack(_ context.Context, deps Deps) (*Stack, error) {
 	// the no-observer io.Copy hot path.
 	passthroughObserver := newPassthroughRecorder(deps.FlowStore, listenerName, logger, deps.RecordScope)
 
+	// USK-1181: recorder for request heads the HTTP/1 Layer closes itself
+	// (header deadline with bytes received, 414, 431) before any Envelope
+	// exists. Called from every HTTP/1 exchange loop.
+	headRecorder := buildRequestHeadRecorder(deps.FlowStore, deps.RecordScope, listenerName, logger)
+
 	// proxybuild.Listener wraps the FullListener so it can interpose
 	// connection.on_connect / on_disconnect lifecycle hooks AND host the
 	// runtime request_timeout_ms slot (USK-844). The wrapper is
@@ -444,7 +454,7 @@ func BuildLiveStack(_ context.Context, deps Deps) (*Stack, error) {
 		LiveConns:           deps.LiveConns,
 		PassthroughList:     deps.PassthroughList,
 		PassthroughObserver: passthroughObserver,
-		OnStack:             buildOnStack(p, deps, logger),
+		OnStack:             buildOnStack(p, deps, headRecorder, logger),
 		OnHTTP2Stack:        buildOnHTTP2Stack(pH2, deps, logger),
 		OnUpstreamTLSError:  upstreamTLSErrorRecorder,
 		// USK-844: thread the configured request timeout into the inner-byte
@@ -478,7 +488,7 @@ func BuildLiveStack(_ context.Context, deps Deps) (*Stack, error) {
 		LiveConns:           deps.LiveConns,
 		PassthroughList:     deps.PassthroughList,
 		PassthroughObserver: passthroughObserver,
-		OnStack:             buildOnStack(p, deps, logger),
+		OnStack:             buildOnStack(p, deps, headRecorder, logger),
 		OnHTTP2Stack:        buildOnHTTP2Stack(pH2, deps, logger),
 		OnUpstreamTLSError:  upstreamTLSErrorRecorder,
 		// USK-844: thread the configured request timeout into the inner-byte
@@ -499,7 +509,7 @@ func BuildLiveStack(_ context.Context, deps Deps) (*Stack, error) {
 		Scope:                  deps.Scope,
 		RateLimiter:            deps.RateLimiter,
 		LiveConns:              deps.LiveConns,
-		OnStack:                buildOnStack(p, deps, logger),
+		OnStack:                buildOnStack(p, deps, headRecorder, logger),
 		RequestTimeout:         deps.RequestTimeout,
 		RequestTimeoutProvider: wrapper.RequestTimeout,
 		Logger:                 logger,
@@ -534,6 +544,7 @@ func BuildLiveStack(_ context.Context, deps Deps) (*Stack, error) {
 		HoldQueue:             deps.HoldQueue,
 		BuildConfig:           deps.BuildConfig,
 		FlowStore:             deps.FlowStore,
+		requestHeadRecorder:   headRecorder,
 	}, nil
 }
 
@@ -704,7 +715,7 @@ func buildPipeline(deps Deps, encoders *pipeline.WireEncoderRegistry, logger *sl
 //
 // Pattern mirrors the proven recipe in
 // internal/connector/full_listener_integration_test.go.
-func buildOnStack(p *pipeline.Pipeline, deps Deps, logger *slog.Logger) connector.OnStackFunc {
+func buildOnStack(p *pipeline.Pipeline, deps Deps, headRecorder requestHeadRecorder, logger *slog.Logger) connector.OnStackFunc {
 	sessOpts := buildSessionOptions(deps, deps.ListenerName)
 	return func(ctx context.Context, stack *connector.ConnectionStack, _, _ *envelope.TLSSnapshot, target string) {
 		defer stack.Close()
@@ -740,7 +751,7 @@ func buildOnStack(p *pipeline.Pipeline, deps Deps, logger *slog.Logger) connecto
 					"upstream_type", fmt.Sprintf("%T", stack.UpstreamTopmost()))
 				return
 			}
-			runHTTP1ExchangeLoop(ctx, stack, clientH1, upstreamH1, p, deps, sessOpts, target, logger)
+			runHTTP1ExchangeLoop(ctx, stack, clientH1, upstreamH1, p, deps, sessOpts, target, headRecorder, logger)
 			return
 		}
 
@@ -785,6 +796,7 @@ func runHTTP1ExchangeLoop(
 	deps Deps,
 	sessOpts session.SessionOptions,
 	target string,
+	headRecorder requestHeadRecorder,
 	logger *slog.Logger,
 ) {
 	grpcwebOpts := connector.GRPCWebOptionsFromBuildConfig(deps.BuildConfig)
@@ -808,7 +820,7 @@ func runHTTP1ExchangeLoop(
 			wg.Add(1)
 			go func(ch layer.Channel) {
 				defer wg.Done()
-				runHTTP1Exchange(ctx, stack, ch, chain, p, sessOpts, target, grpcwebOpts, logger, deps.H1UpstreamMetrics)
+				runHTTP1Exchange(ctx, stack, ch, chain, p, sessOpts, target, grpcwebOpts, headRecorder, logger, deps.H1UpstreamMetrics)
 			}(clientCh)
 		}
 	}
@@ -837,6 +849,7 @@ func runHTTP1Exchange(
 	sessOpts session.SessionOptions,
 	target string,
 	baseGRPCWebOpts []grpcweb.Option,
+	headRecorder requestHeadRecorder,
 	logger *slog.Logger,
 	metrics *H1UpstreamMetrics,
 ) {
@@ -860,7 +873,10 @@ func runHTTP1Exchange(
 		// surfaces these as state="error" but the dispatcher consumed
 		// the first Next so there's no envelope to drive the record
 		// path. The http1 layer cleans up its own state on Close.
+		// USK-1181: a request head the Layer itself closed (deadline,
+		// 414, 431) never became an envelope; record it here.
 		_ = clientCh.Close()
+		recordH1RequestHead(ctx, headRecorder, stack.ConnID, target, err)
 		if !errors.Is(err, context.Canceled) {
 			logger.Debug("proxybuild: http1 dispatch failed",
 				"target", target, "stream_id", clientCh.StreamID(), "error", err)
@@ -1817,6 +1833,14 @@ func http2OpenStream(ctx context.Context, l *http2.Layer) (layer.Channel, error)
 //     allocated; no bytes hit the wire. Retry is byte-for-byte
 //     equivalent to a fresh request regardless of HTTP method, so POST/
 //     PUT/DELETE etc. are safe (stronger than RFC 9113 §6.8 needs).
+//   - The retry covers OpenStream only. A GOAWAY that lands AFTER
+//     OpenStream returned but before the first HEADERS Send is refused
+//     by allocateAndEnqueueFirstHeaders (USK-1175), still before any id
+//     is allocated or bytes hit the wire; that refusal surfaces from
+//     the session's first Send, not here, and is propagated to the
+//     client as RST_STREAM(REFUSED_STREAM) (USK-1157) — the client
+//     retries, and its next OpenStream finds the Layer stale and
+//     redials. A proxy-side re-send of it is out of scope (USK-1190).
 //
 // Classifier:
 //   - We match by Code (layer.ErrorRefused), not by Reason string. All

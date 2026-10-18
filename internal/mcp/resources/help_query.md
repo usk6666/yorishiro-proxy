@@ -95,6 +95,13 @@ Flow state indicates the lifecycle stage:
 - `"complete"`: Finished successfully
 - `"error"`: Failed (e.g. 502 error, upstream connection failure)
 
+HTTP/1.x request heads the proxy itself closed before the request was complete are recorded as `"error"` flows with `tags.closed_by = "proxy"` and one of these `failure_reason` values:
+- `request_head_timeout`: the request line + headers did not arrive within `request_timeout_ms` (`tags.request_timeout_ms` is the value in force). A keep-alive connection that closes or goes idle with zero bytes of a next request is not recorded.
+- `request_line_too_long`: the request line exceeded the parser limit; the proxy answered `414 URI Too Long`.
+- `request_header_too_large`: the header section exceeded the parser limit; the proxy answered `431 Request Header Fields Too Large`.
+
+`tags.phase` is `request_line` or `headers`. `raw_request` holds the bytes received, capped at `max_raw_capture_size`; the send message's `metadata.raw_truncated = "true"` marks a capture cut at the cap and `metadata.raw_captured_bytes` gives its length. For 414 / 431 the returned response is in `response_status_code` / `raw_response` (message `metadata.proxy_generated = "true"`); `tags.wrote_response = "false"` means the response could not be written. Such a flow shares `conn_id` with the earlier requests on the same connection. These flows are written even when the client never completes a request, so a client can create them by sending a partial or oversized request head; `capture_scope` (which hosts are recorded) and `max_raw_capture_size` (how many bytes each flow keeps) bound what is stored.
+
 When intercept/transform modifies a request, the flow contains variant messages. The `original_request` field is populated with the pre-modification request data for diff comparison. The main request fields show the modified (actually sent) version.
 
 For streaming flows (message_count > 2), the response includes:

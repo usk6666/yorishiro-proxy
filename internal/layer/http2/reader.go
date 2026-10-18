@@ -710,8 +710,22 @@ func (l *Layer) handleReadError(err error) {
 
 	var ce *ConnError
 	if errors.As(err, &ce) {
+		last := l.conn.Streams().LastPeerStreamID()
+		// USK-1175: record GoAwaySent before the GOAWAY is enqueued, not
+		// after the writer has put it on the wire. Otherwise the peer can
+		// read our GOAWAY while GoAwaySent is still false, and a first
+		// Send in that window passes goAwayRefusal() and puts HEADERS on
+		// the wire after our GOAWAY (RFC 9113 §6.8). The mark is taken
+		// under l.mu, which Send holds across its check and its HEADERS
+		// enqueue: either that HEADERS is queued ahead of this GOAWAY, or
+		// Send observes the flag and refuses. The enqueue itself stays
+		// outside l.mu so a full writer queue cannot block Close (which
+		// takes l.mu before closing shutdown).
+		l.mu.Lock()
+		l.conn.MarkGoAwaySent(last)
+		l.mu.Unlock()
 		l.enqueueWrite(writeRequest{goAway: &writeGoAway{
-			lastStreamID: l.conn.Streams().LastPeerStreamID(),
+			lastStreamID: last,
 			code:         ce.Code,
 		}})
 	}
