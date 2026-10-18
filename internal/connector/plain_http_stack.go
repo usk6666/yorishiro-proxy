@@ -63,6 +63,7 @@ func BuildPlainHTTPStack(
 		http1.WithBodySpillDir(cfg.BodySpillDir),
 		http1.WithBodySpillThreshold(cfg.BodySpillThreshold),
 		http1.WithMaxBodySize(cfg.MaxBodySize),
+		http1.WithMaxRawCaptureSize(cfg.MaxRawCaptureSize),
 		http1.WithStateReleaser(cfg.PluginV2Engine),
 		// USK-1162: bound the client request head (request_timeout_ms).
 		http1.WithRequestHeaderTimeout(cfg.EffectiveRequestHeaderTimeout),
@@ -75,6 +76,7 @@ func BuildPlainHTTPStack(
 		http1.WithBodySpillDir(cfg.BodySpillDir),
 		http1.WithBodySpillThreshold(cfg.BodySpillThreshold),
 		http1.WithMaxBodySize(cfg.MaxBodySize),
+		http1.WithMaxRawCaptureSize(cfg.MaxRawCaptureSize),
 		http1.WithStateReleaser(cfg.PluginV2Engine),
 		// USK-655: bypass body draining for SSE responses so the swap
 		// orchestrator (session.runUpgradeSSE) can hand the still-open body

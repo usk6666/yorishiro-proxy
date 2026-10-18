@@ -166,7 +166,9 @@ func usk1162Get(upstreamHost, path string) string {
 }
 
 // Test Plan #5: a keep-alive request trickled after a completed exchange
-// is cut off by the header bound.
+// is cut off by the header bound. USK-1181 flipped the recording
+// expectation: the cut-off request is now recorded as its own error stream
+// on the same connection (it used to leave nothing).
 func TestProxybuild_PlainHTTP_KeepAliveSlowlorisSecondRequestClosed(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -192,26 +194,55 @@ func TestProxybuild_PlainHTTP_KeepAliveSlowlorisSecondRequestClosed(t *testing.T
 		t.Errorf("proxy replied to a trickled request: %.120q", got)
 	}
 
-	// Settled design: a request-head timeout records nothing. Watch the
-	// store for a bounded window after the close: no second stream may
-	// appear, and request 1's stream must not be re-finalised as error.
-	watch := time.Now().Add(1 * time.Second)
-	for {
-		streams := store.Streams()
-		if len(streams) != 1 {
-			t.Fatalf("request-head timeout was recorded: want 1 stream (request 1), got %d: %s",
-				len(streams), summarizeStreamProtocols(streams))
-		}
-		for _, u := range store.StreamUpdates(firstID) {
-			if u.State != "complete" {
-				t.Fatalf("request 1 stream re-finalised as %q after the request-head timeout (reason %q)",
-					u.State, u.FailureReason)
+	// USK-1181: the proxy-initiated close of request 2 is recorded as its
+	// own state=error stream on the same connection (same ConnID), carrying
+	// the bytes trickled before the close. Request 1's stream stays
+	// complete.
+	var errStream *flow.Stream
+	deadline := time.Now().Add(5 * time.Second)
+	for errStream == nil {
+		for _, st := range store.Streams() {
+			if st.ID != firstID && st.State == "error" {
+				errStream = st
 			}
 		}
-		if time.Now().After(watch) {
-			return
+		if errStream == nil {
+			if time.Now().After(deadline) {
+				t.Fatalf("request-head timeout of request 2 was not recorded; streams=%s",
+					summarizeStreamProtocols(store.Streams()))
+			}
+			time.Sleep(20 * time.Millisecond)
 		}
-		time.Sleep(50 * time.Millisecond)
+	}
+	if errStream.FailureReason != "request_head_timeout" {
+		t.Errorf("request 2 FailureReason = %q, want request_head_timeout", errStream.FailureReason)
+	}
+	var first *flow.Stream
+	for _, st := range store.Streams() {
+		if st.ID == firstID {
+			first = st
+		}
+	}
+	if first == nil || first.ConnID == "" || errStream.ConnID != first.ConnID {
+		t.Errorf("request 2 ConnID = %q, want request 1's ConnID %v", errStream.ConnID, first)
+	}
+	var sent *flow.Flow
+	for _, f := range store.Flows() {
+		if f.StreamID == errStream.ID && f.Direction == "send" {
+			sent = f
+		}
+	}
+	if sent == nil || len(sent.RawBytes) == 0 || !strings.HasPrefix(slow, string(sent.RawBytes)) {
+		t.Errorf("request 2 send flow raw bytes are not a non-empty prefix of the trickled request: %+v", sent)
+	}
+	if got := len(store.Streams()); got != 2 {
+		t.Errorf("streams = %d, want 2 (request 1 complete + request 2 error): %s", got, summarizeStreamProtocols(store.Streams()))
+	}
+	for _, u := range store.StreamUpdates(firstID) {
+		if u.State != "complete" {
+			t.Fatalf("request 1 stream re-finalised as %q after the request-head timeout (reason %q)",
+				u.State, u.FailureReason)
+		}
 	}
 }
 
