@@ -362,8 +362,8 @@ func (s *InterceptStep) holdAndDispatch(ctx context.Context, env *envelope.Envel
 // duration of a hold (USK-1192), so a policy change that revokes it
 // defers the cut instead of cancelling ctx under the hold — which would
 // drop the held envelope with no answer and no record. The session
-// settles the cut after it dispatched the hold's Result. The caller must
-// Unpin the returned handle (nil-safe) when the hold resolves.
+// settles the cut after it dispatched the hold's Result. When the hold
+// resolves the caller must release the pin with releaseHoldPin.
 //
 // ok=false means the connection was already cut or is revoke-pending (a
 // new hold must not extend a deferred cut): the caller must not hold
@@ -380,6 +380,20 @@ func pinLiveConnForHold(ctx context.Context, env *envelope.Envelope) (lc *connec
 		return nil, targetScopeBlock(env), false
 	}
 	return nil, Result{Action: Drop, BlockedBy: BlockedByTargetScope}, false
+}
+
+// releaseHoldPin ends the hold's ownership of its live-connection pin
+// (USK-1196). Inside a session relay loop (a HoldPinHandoff in ctx) the pin
+// is handed off to the loop, which keeps the connection pinned until it
+// dispatched this pass's Result — the 403 / released envelope must reach
+// the wire before a Settle (this stream's, or a sibling h2 stream's) may
+// cut the connection. Without a collector (MCP resend / fuzz, record-only
+// pipelines) the pin is dropped here. Either way the pin has exactly one
+// owner that unpins it once.
+func releaseHoldPin(ctx context.Context, lc *connector.LiveConnHandle) {
+	if !connector.HandOffHoldPin(ctx, lc) {
+		lc.Unpin()
+	}
 }
 
 // hold blocks env on the HoldQueue until an action resolves it, with the
@@ -405,7 +419,7 @@ func (s *InterceptStep) hold(ctx context.Context, env *envelope.Envelope, matche
 	if !ok {
 		return nil, blocked, false
 	}
-	defer lc.Unpin()
+	defer releaseHoldPin(ctx, lc)
 
 	action, err := s.queue.Hold(ctx, env, matchedRules)
 	if err != nil {

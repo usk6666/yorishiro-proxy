@@ -1323,6 +1323,26 @@ func runWSOverH2Relay(
 	return result
 }
 
+// liveConnSettler returns the context a relay loop passes to its
+// Pipeline-running calls and the loop's settle function (USK-1196). The
+// context carries a HoldPinHandoff, so an intercept hold that resolves in
+// a pass hands its live-connection pin to the loop instead of dropping it
+// at resolution; settle releases those pins and then settles the
+// connection (connector.SettleLiveConn on ctx). Calling settle only after
+// the pass's Result was dispatched keeps a revoked connection — shared by
+// every stream session of an h2 connection and by both relay directions —
+// from being cut by a sibling's Settle while the Result is still on its
+// way to the wire. Release precedes Settle so the releasing loop's own
+// Settle can cut. Only the Pipeline-running calls get the derived
+// context; it adds a value, not a cancellation.
+func liveConnSettler(ctx context.Context) (pipelineCtx context.Context, settle func()) {
+	pctx, pins := connector.WithHoldPinHandoff(ctx)
+	return pctx, func() {
+		pins.Release()
+		connector.SettleLiveConn(ctx)
+	}
+}
+
 // wsRelayDirection reads envelopes from src, runs them through the
 // Pipeline, and Sends each non-Drop envelope on dst. Returns nil on
 // graceful EOF and a wrapped error otherwise. Drop / Respond actions are
@@ -1382,10 +1402,13 @@ func wsRelayDirection(
 	// USK-1192: settle a live-connection cut deferred for an intercept
 	// hold once that hold's Result was dispatched — at the top of every
 	// iteration (after the previous envelope's dispatch, before blocking
-	// on the next read) and on every exit path.
-	defer connector.SettleLiveConn(ctx)
+	// on the next read) and on every exit path. USK-1196: the Pipeline
+	// runs on pctx, so a hold resolved in this loop hands its pin to this
+	// loop, and settle releases it only after the Result was dispatched.
+	pctx, settle := liveConnSettler(ctx)
+	defer settle()
 	for {
-		connector.SettleLiveConn(ctx)
+		settle()
 		env, err := src.Next(ctx)
 		if err != nil {
 			return wsRelayNextErr(ctx, err, userOpt, streamID, srcDir, relayed)
@@ -1393,7 +1416,7 @@ func wsRelayDirection(
 		if streamID == "" {
 			streamID = env.StreamID
 		}
-		env, action, resp, blockedBy := runPipelineTracked(ctx, p, env, reg)
+		env, action, resp, blockedBy := runPipelineTracked(pctx, p, env, reg)
 		if action == pipeline.Drop || action == pipeline.Respond {
 			if serr := wsRelayHandlePolicy(ctx, src, action, env, resp, blockedBy, userOpt.OnPipelineDrop); serr != nil {
 				return serr
@@ -1805,22 +1828,25 @@ func driveSSEEventLoop(
 	// USK-1192: settle a live-connection cut deferred for an intercept
 	// hold once that hold's Result was dispatched — at the top of every
 	// iteration (after the previous envelope's dispatch, before blocking
-	// on the next read) and on every exit path.
-	defer connector.SettleLiveConn(ctx)
+	// on the next read) and on every exit path. USK-1196: the Pipeline
+	// runs on pctx, so a hold resolved in this loop hands its pin to this
+	// loop, and settle releases it only after the Result was dispatched.
+	pctx, settle := liveConnSettler(ctx)
+	defer settle()
 	for {
-		connector.SettleLiveConn(ctx)
+		settle()
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 		raw, rerr := br.Next()
 		if rerr != nil && errors.Is(rerr, sse.ErrEventTooLarge) {
-			return handleSSEEventTooLarge(ctx, p, clientWriter, chunkedTE, streamID, flowCtx, nextSeq, maxEventSize, len(raw), rerr)
+			return handleSSEEventTooLarge(pctx, p, clientWriter, chunkedTE, streamID, flowCtx, nextSeq, maxEventSize, len(raw), rerr)
 		}
 		if rerr != nil && !errors.Is(rerr, io.EOF) {
 			return rerr
 		}
 		if len(raw) > 0 {
-			if err := deliverOneSSEEvent(ctx, p, clientWriter, raw, chunkedTE, streamID, flowCtx, nextSeq); err != nil {
+			if err := deliverOneSSEEvent(pctx, p, clientWriter, raw, chunkedTE, streamID, flowCtx, nextSeq); err != nil {
 				// USK-903: propagate ErrClientGoneAcked to OnComplete
 				// so the projection layer can stamp the
 				// "terminated_by=client" attribution tag instead of
@@ -2623,10 +2649,13 @@ func clientToUpstream(
 	// USK-1192: settle a live-connection cut deferred for an intercept
 	// hold once that hold's Result was dispatched — at the top of every
 	// iteration (after the previous envelope's dispatch, before blocking
-	// on the next read) and on every exit path.
-	defer connector.SettleLiveConn(ctx)
+	// on the next read) and on every exit path. USK-1196: the Pipeline
+	// runs on pctx, so a hold resolved in this loop hands its pin to this
+	// loop, and settle releases it only after the Result was dispatched.
+	pctx, settle := liveConnSettler(ctx)
+	defer settle()
 	for {
-		connector.SettleLiveConn(ctx)
+		settle()
 		env, nerr := client.Next(ctx)
 		if nerr != nil {
 			// Upgrade-pending takes precedence over EOF/errors: when the
@@ -2655,7 +2684,7 @@ func clientToUpstream(
 		}
 		sc.set(env.StreamID)
 
-		env, action, resp, blockedBy := runPipelineTracked(ctx, p, env, reg)
+		env, action, resp, blockedBy := runPipelineTracked(pctx, p, env, reg)
 		// USK-782 / USK-829: surface the BlockedBy attribution to the
 		// session-side recorder before continuing the loop. Wire
 		// forwarding still short-circuits on Drop (dispatchClientAction
@@ -2793,10 +2822,13 @@ func upstreamToClient(
 	// USK-1192: settle a live-connection cut deferred for an intercept
 	// hold once that hold's Result was dispatched — at the top of every
 	// iteration (after the previous envelope's dispatch, before blocking
-	// on the next read) and on every exit path.
-	defer connector.SettleLiveConn(ctx)
+	// on the next read) and on every exit path. USK-1196: the Pipeline
+	// runs on pctx, so a hold resolved in this loop hands its pin to this
+	// loop, and settle releases it only after the Result was dispatched.
+	pctx, settle := liveConnSettler(ctx)
+	defer settle()
 	for {
-		connector.SettleLiveConn(ctx)
+		settle()
 		env, err := upstreamNext(ctx, uh.ch, notice)
 		if err != nil || env == nil {
 			return upstreamToClientFinish(ctx, opt, uh, clientID, err, relayed)
@@ -2806,7 +2838,7 @@ func upstreamToClient(
 			env.StreamID = clientID
 		}
 
-		env, action, _, blockedBy := runPipelineTracked(ctx, p, env, reg)
+		env, action, _, blockedBy := runPipelineTracked(pctx, p, env, reg)
 		if action == pipeline.Drop {
 			// USK-782: receive-direction Drops (e.g. Safety on a Receive
 			// arm — currently no engine emits one, but the path is wired

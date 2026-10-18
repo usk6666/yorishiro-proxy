@@ -36,11 +36,15 @@ import (
 // A connection carrying intercept holds is revoked but not cut at once
 // (USK-1192): cutting it would make each held request vanish without an
 // answer or a record. The Pipeline pins the connection for every hold
-// (LiveConnHandle.Pin, keyed through the Register context); HostScopeStep
-// blocks every new Send-direction envelope on a revoked connection; and
-// the session settles the cut after the last hold's Result was dispatched
-// (SettleLiveConn), so the release re-check's 403 target_scope reaches the
-// client and the audit record first. Receive-direction data from the
+// (LiveConnHandle.Pin, keyed through the Register context) and, when the
+// hold resolves, hands the pin to the session relay loop that ran the pass
+// (HoldPinHandoff, USK-1196), which keeps it until it dispatched the hold's
+// Result; HostScopeStep blocks every new Send-direction envelope on a
+// revoked connection; and the session settles the cut after the last
+// hold's Result was dispatched (HoldPinHandoff.Release, then
+// SettleLiveConn), so the release re-check's 403 target_scope reaches the
+// client and the audit record first — even when a sibling stream of the
+// same h2 connection Settles meanwhile. Receive-direction data from the
 // denied host keeps flowing until then (bounded by the hold timeout:
 // Pin refuses a revoke-pending connection, so no new hold extends the
 // deferral).
@@ -79,7 +83,9 @@ type liveConnEntry struct {
 	// the lock. A cut entry keeps pending as it was.
 	cut atomic.Bool
 	// pins counts the intercept holds in flight on this connection
-	// (LiveConnHandle.Pin / Unpin, USK-1192). Guarded by LiveConns.mu.
+	// (LiveConnHandle.Pin / Unpin, USK-1192), including resolved holds
+	// whose Result the session has not dispatched yet (HoldPinHandoff,
+	// USK-1196). Guarded by LiveConns.mu.
 	pins int
 	// pending is set when Reconcile revoked the entry while pins > 0: the
 	// cut is deferred until the last hold resolved and its Result was
@@ -179,15 +185,20 @@ func (r *LiveConns) Register(ctx context.Context, c LiveConn) (context.Context, 
 // admitted again by a later Reconcile (or by Settle's re-check) is no
 // longer revoked.
 //
-// Known window (accepted, the same loss as a Pin that races an
-// already-cut connection): a pending entry whose last
-// hold already Unpinned but whose Result the session has not dispatched
-// yet has pins == 0, so a second Reconcile landing in that gap takes the
-// no-hold branch and cuts it at once (the backstop for a Settle that never
-// runs). The held request is still recorded, but its 403 target_scope may
-// not reach the client. Closing the gap would need a "Result dispatched"
-// signal separate from Unpin; it is not worth it for a two-writes race
-// inside one dispatch.
+// A resolved hold whose Result the session has not dispatched yet still
+// counts as pinned (its pin was handed off to the session relay loop,
+// HoldPinHandoff, USK-1196), so a second Reconcile landing in that gap
+// defers like the first instead of cutting the connection under the
+// Result. The pins == 0 branch below remains the backstop for a Settle
+// that never runs.
+//
+// Deferred (USK-1196, owner USK-1182): a client that never reads now keeps
+// the handed-off pin for as long as the Result's client.Send is parked on
+// it, so the revoked connection is not cut until that Send fails or
+// returns (before USK-1196 a second Reconcile could cut it). The denied
+// upstream receives no Send-direction data meanwhile (HostScopeStep blocks
+// it). Re-open trigger: M54 exposing the proxy listener to untrusted
+// clients — bound it with the client write deadline specified by USK-1182.
 func (r *LiveConns) Reconcile(trigger string) int {
 	revoked, _ := r.ReconcileWithDeferred(trigger)
 	return revoked
@@ -327,8 +338,10 @@ func LiveConnFromContext(ctx context.Context) *LiveConnHandle {
 
 // SettleLiveConn settles the live connection carried by ctx (see
 // LiveConnHandle.Settle). The session calls it after dispatching each
-// Pipeline Result, so a deferred cut runs only once the Result of the last
-// hold reached the wire. A ctx without a handle is a no-op.
+// Pipeline Result — right after releasing the pins handed off for that
+// Result (HoldPinHandoff.Release) — so a deferred cut runs only once the
+// Result of the last hold reached the wire. A ctx without a handle is a
+// no-op.
 func SettleLiveConn(ctx context.Context) {
 	LiveConnFromContext(ctx).Settle()
 }
@@ -337,7 +350,8 @@ func SettleLiveConn(ctx context.Context) {
 // Reconcile that revokes the connection defers its cut. It reports false
 // when the connection was already cut or is revoke-pending: the caller
 // must not hold, and answers the envelope as a target scope block instead.
-// Each successful Pin must be paired with exactly one Unpin.
+// Each successful Pin must be paired with exactly one Unpin — by the
+// caller, or by the HoldPinHandoff it handed the pin to.
 //
 // Refusing while pending keeps the deferral bounded: only the holds that
 // were in flight when the connection was revoked delay the cut. Otherwise
@@ -359,9 +373,11 @@ func (h *LiveConnHandle) Pin() bool {
 	return true
 }
 
-// Unpin records that a hold resolved. It never cuts the connection: the
-// Result of the hold has not been dispatched yet, and Settle (called by
-// the session after dispatch) decides the cut.
+// Unpin drops one pin. It never cuts the connection: Settle (called by the
+// session after dispatch) decides the cut. Inside a session relay loop the
+// InterceptStep does not Unpin at hold resolution but hands the pin off
+// (HandOffHoldPin), and the loop Unpins it after dispatching the hold's
+// Result (HoldPinHandoff.Release).
 func (h *LiveConnHandle) Unpin() {
 	if h == nil {
 		return
@@ -444,7 +460,13 @@ type holdPinHandoffKey struct{}
 // One collector belongs to one relay-loop goroutine. The loop releases it
 // before every Settle (loop top and exit), so each adopted pin is unpinned
 // exactly once.
-type HoldPinHandoff struct{}
+type HoldPinHandoff struct {
+	// n mirrors len(pins) so Release with nothing adopted (every pass
+	// without a hold) takes no lock.
+	n    atomic.Int32
+	mu   sync.Mutex
+	pins []*LiveConnHandle
+}
 
 // WithHoldPinHandoff returns a context derived from ctx that carries a new
 // HoldPinHandoff, and the collector itself. Pass the derived context only
@@ -457,11 +479,36 @@ func WithHoldPinHandoff(ctx context.Context) (context.Context, *HoldPinHandoff) 
 // HandOffHoldPin transfers ownership of one successful Pin of h to the
 // HoldPinHandoff carried by ctx. It reports false — and the caller keeps
 // the pin and must Unpin it — when h is nil or ctx carries no collector
-// (a Pipeline run outside a session relay loop).
+// (a Pipeline run outside a session relay loop: MCP resend / fuzz,
+// record-only pipelines).
 func HandOffHoldPin(ctx context.Context, h *LiveConnHandle) bool {
-	return false
+	if h == nil || ctx == nil {
+		return false
+	}
+	c, _ := ctx.Value(holdPinHandoffKey{}).(*HoldPinHandoff)
+	if c == nil {
+		return false
+	}
+	c.mu.Lock()
+	c.pins = append(c.pins, h)
+	c.n.Store(int32(len(c.pins)))
+	c.mu.Unlock()
+	return true
 }
 
-// Release unpins every pin handed off to c since the previous Release.
-// Idempotent; nil-safe.
-func (c *HoldPinHandoff) Release() {}
+// Release unpins every pin handed off to c since the previous Release, so
+// each adopted pin is unpinned exactly once. Call it before Settle, after
+// the Result of the pass was dispatched. Idempotent; nil-safe.
+func (c *HoldPinHandoff) Release() {
+	if c == nil || c.n.Load() == 0 {
+		return
+	}
+	c.mu.Lock()
+	pins := c.pins
+	c.pins = nil
+	c.n.Store(0)
+	c.mu.Unlock()
+	for _, h := range pins {
+		h.Unpin()
+	}
+}
