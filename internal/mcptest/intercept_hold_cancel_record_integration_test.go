@@ -11,6 +11,7 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"net"
 	"testing"
 	"time"
 
@@ -82,7 +83,11 @@ func TestE2E_InterceptHoldCancel_ProxyStopRecordsHeldRequest(t *testing.T) {
 }
 
 // T2: a WS echo frame held on Receive, then the client's TCP connection is
-// cut without a Close frame.
+// reset (RST, no WS Close frame). The client-direction read fails, the
+// session tears down and cancels the Receive hold's ctx. A plain FIN
+// without a Close frame is a graceful EOF on the WS wire and does not end
+// the peer-direction hold — that is client-disconnect detection during a
+// hold, tracked separately (USK-1217).
 func TestE2E_InterceptHoldCancel_WSClientAbortRecordsHeldFrame(t *testing.T) {
 	h := mcptest.StartHarness(t, mcptest.HarnessOptions{UpstreamProto: "ws"})
 	proxyAddr := startProxyWithRules(t, h, []map[string]any{{
@@ -109,12 +114,19 @@ func TestE2E_InterceptHoldCancel_WSClientAbortRecordsHeldFrame(t *testing.T) {
 		t.Errorf("upstream WS hits = %d, want 1", got)
 	}
 
-	// Abrupt client abort: drop the TCP connection under TLS, no WS Close.
+	// Abrupt client abort: reset the TCP connection under TLS, no WS Close.
 	tlsConn, ok := conn.(*tls.Conn)
 	if !ok {
 		t.Fatalf("conn is %T, want *tls.Conn", conn)
 	}
-	_ = tlsConn.NetConn().Close()
+	tcpConn, ok := tlsConn.NetConn().(*net.TCPConn)
+	if !ok {
+		t.Fatalf("underlying conn is %T, want *net.TCPConn", tlsConn.NetConn())
+	}
+	if err := tcpConn.SetLinger(0); err != nil {
+		t.Fatalf("SetLinger(0): %v", err)
+	}
+	_ = tcpConn.Close()
 
 	assertCancelledAuditStream(t, waitForCancelledFlow(t, h), entry)
 }
