@@ -145,6 +145,13 @@ type lpmFrame struct {
 // *layer.StreamError.
 var errMessageTooLarge = errors.New("grpc: message too large")
 
+// errSendAfterEnd is returned by Send when the requested direction already
+// emitted its End (END_STREAM went out). Anything after END_STREAM on the
+// same h2 stream is a STREAM_CLOSED connection error (RFC 9113 §5.1) that
+// would kill every RPC multiplexed on the connection, so the Channel
+// refuses it (USK-1202).
+var errSendAfterEnd = errors.New("grpc: send after End on this direction")
+
 // directionState holds reassembler + start-headers metadata for one
 // direction of an RPC. Per-direction so bidi streams have independent
 // buffers, and so the gRPC content-encoding negotiated on the request
@@ -155,6 +162,11 @@ type directionState struct {
 	service      string
 	method       string
 	encoding     string // grpc-encoding value (last-seen on this direction)
+	contentType  string // content-type of this direction's Start (wire value)
+	// endSent latches once Send emitted this direction's End (END_STREAM
+	// went out). Every later Send on the direction fails with
+	// errSendAfterEnd (USK-1202).
+	endSent bool
 }
 
 // pendingEnvelope is one envelope queued for emission. The channel may
@@ -171,6 +183,18 @@ type grpcChannel struct {
 	inner    layer.Channel
 	role     Role
 	streamID string
+
+	// sendMu serializes Send. It is held across the direction-state check
+	// and the inner Send so a racing Send cannot slip a frame in between
+	// (e.g. response HEADERS enqueued after a proxy-synthesized
+	// Trailers-Only, or anything after END_STREAM). Never acquired while
+	// holding mu, and never acquired by the Next path (USK-1202).
+	//
+	// A Data Send parked on the peer's flow control keeps holding sendMu
+	// until the write completes, its ctx is cancelled, or the Layer shuts
+	// down, so a terminator Send queues behind it. That is intentional:
+	// trailers must not overtake DATA already committed to the stream.
+	sendMu sync.Mutex
 
 	mu      sync.Mutex
 	peeked  *envelope.Envelope // from Wrap(..., firstHeaders); cleared after first read
@@ -466,6 +490,7 @@ func (c *grpcChannel) absorbHeaders(ev *envelope.Envelope, evt *http2.H2HeadersE
 	dir.service = startMsg.Service
 	dir.method = startMsg.Method
 	dir.encoding = encoding
+	dir.contentType = startMsg.ContentType
 	dir.startEmitted = true
 
 	startEnv := &envelope.Envelope{
@@ -904,10 +929,25 @@ func (c *grpcChannel) dirStateLocked(d envelope.Direction) *directionState {
 // GRPCDataMessage envelopes prefer Envelope.Raw verbatim when non-empty
 // (to round-trip exact wire bytes). Otherwise the wrapper re-encodes
 // Payload using Compressed + the negotiated grpc-encoding.
+//
+// Send calls are serialized. Once a direction's End was sent, every further
+// Send on that direction fails with an error wrapping errSendAfterEnd: a
+// frame after END_STREAM would be a STREAM_CLOSED connection error (RFC
+// 9113 §5.1) that kills every RPC multiplexed on the connection (USK-1202).
 func (c *grpcChannel) Send(ctx context.Context, env *envelope.Envelope) error {
 	if env == nil || env.Message == nil {
 		return errors.New("grpc: Send: nil envelope or Message")
 	}
+	c.sendMu.Lock()
+	defer c.sendMu.Unlock()
+
+	c.mu.Lock()
+	ended := c.dirStateLocked(env.Direction).endSent
+	c.mu.Unlock()
+	if ended {
+		return fmt.Errorf("grpc: Send %T: %w", env.Message, errSendAfterEnd)
+	}
+
 	switch m := env.Message.(type) {
 	case *envelope.GRPCStartMessage:
 		return c.sendStart(ctx, env, m)
@@ -970,6 +1010,7 @@ func (c *grpcChannel) sendStart(ctx context.Context, env *envelope.Envelope, m *
 	dir.service = m.Service
 	dir.method = m.Method
 	dir.encoding = m.Encoding
+	dir.contentType = m.ContentType
 	dir.startEmitted = true
 	c.mu.Unlock()
 
@@ -1053,13 +1094,56 @@ func (c *grpcChannel) sendData(ctx context.Context, env *envelope.Envelope, m *e
 	return c.inner.Send(ctx, innerEnv)
 }
 
-// sendEnd converts a GRPCEndMessage envelope into an H2TrailersEvent
-// envelope. The trailer fields are reconstructed from m.Status,
+// sendEnd converts a GRPCEndMessage envelope into the HTTP/2 event that ends
+// its direction. The status fields are reconstructed from m.Status,
 // m.Message, m.StatusDetails, and m.Trailers (non-status remainder).
+//
+// Normally that is an H2TrailersEvent. A Receive-direction End with no
+// response Start sent before it — a proxy-synthesized reply such as a
+// SafetyFilter / intercept-drop terminator or a plugin RESPOND_GRPC — is
+// instead rendered as a gRPC "Trailers-Only" response (PROTOCOL-HTTP2.md):
+// ONE HEADERS frame carrying :status 200, content-type, and the status
+// fields, with END_STREAM. A bare trailers block there would be a HEADERS
+// frame without :status, which RFC 9113 §8.3.2 makes malformed (USK-1202).
+// The content-type mirrors the request's when one was observed.
+//
+// Caller (Send) holds c.sendMu. The direction's endSent latch is set before
+// the inner Send so a failed write is not retried with more frames.
 func (c *grpcChannel) sendEnd(ctx context.Context, env *envelope.Envelope, m *envelope.GRPCEndMessage) error {
-	trailers := buildEndTrailerKVs(m)
-	tEvt := &http2.H2TrailersEvent{
-		Trailers: trailers,
+	statusKVs := buildEndTrailerKVs(m)
+
+	c.mu.Lock()
+	dir := c.dirStateLocked(env.Direction)
+	trailersOnly := env.Direction == envelope.Receive && !dir.startEmitted
+	contentType := c.send.contentType
+	dir.endSent = true
+	if trailersOnly {
+		dir.startEmitted = true
+	}
+	c.mu.Unlock()
+
+	var msg envelope.Message
+	if trailersOnly {
+		if contentType == "" {
+			contentType = "application/grpc"
+		}
+		headers := make([]envelope.KeyValue, 0, len(statusKVs)+1)
+		headers = append(headers, envelope.KeyValue{Name: "content-type", Value: contentType})
+		for _, kv := range statusKVs {
+			// Mirror the trailers path, which drops pseudo-headers: the
+			// Layer emits :status itself.
+			if strings.HasPrefix(kv.Name, ":") {
+				continue
+			}
+			headers = append(headers, kv)
+		}
+		msg = &http2.H2HeadersEvent{
+			Status:    statusFor(env, nil),
+			Headers:   headers,
+			EndStream: true,
+		}
+	} else {
+		msg = &http2.H2TrailersEvent{Trailers: statusKVs}
 	}
 	innerEnv := &envelope.Envelope{
 		StreamID:  env.StreamID,
@@ -1067,7 +1151,7 @@ func (c *grpcChannel) sendEnd(ctx context.Context, env *envelope.Envelope, m *en
 		Sequence:  env.Sequence,
 		Direction: env.Direction,
 		Protocol:  envelope.ProtocolHTTP,
-		Message:   tEvt,
+		Message:   msg,
 		Context:   env.Context,
 	}
 	return c.inner.Send(ctx, innerEnv)

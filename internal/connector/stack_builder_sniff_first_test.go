@@ -74,7 +74,7 @@ func TestALPNListContains(t *testing.T) {
 
 // TestPeekClientHelloSNIAndALPN_NotPeekConn covers the non-PeekConn
 // branch: callers that pass a plain net.Conn get a fail-soft empty
-// return, never a panic. Sibling of peekClientHelloSNI's contract.
+// return, never a panic.
 func TestPeekClientHelloSNIAndALPN_NotPeekConn(t *testing.T) {
 	a, b := net.Pipe()
 	defer a.Close()

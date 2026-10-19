@@ -1787,6 +1787,13 @@ func sseMessageModified(a, b *envelope.SSEMessage) bool {
 // get a Stream row, so any Flow that survives the gate must arrive on a
 // Stream that does exist.
 //
+// The first Send envelope may be a Message-less wire_level overlay
+// (h2-frame on the aggregator path, grpcweb-base64) that precedes the
+// semantic envelope. Its producers stamp the stream's wire-observed
+// request head on EnvelopeContext (RequestMethod / RequestPath /
+// RequestAuthority) and flow.RecordScope reads it for overlays, so the
+// cached decision equals the semantic envelope's (USK-1199).
+//
 // The fallback for cache misses on non-first-Send envelopes is
 // "do not record". Under realistic load (concurrent stream count well
 // below cache capacity) misses do not occur. Above capacity the proxy

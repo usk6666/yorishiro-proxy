@@ -115,35 +115,81 @@ func TestPopulateResendGRPCMessages_ProtoSchemalessJSON_InvalidJSON(t *testing.T
 	}
 }
 
+// setMaxResendGRPCPayloadForTest lowers maxResendGRPCPayload for the
+// duration of t and restores it via t.Cleanup. Callers must NOT call
+// t.Parallel(): the cap is a package var read by every resend/fuzz gRPC
+// populate call.
+func setMaxResendGRPCPayloadForTest(t *testing.T, n int) {
+	t.Helper()
+	prev := maxResendGRPCPayload
+	maxResendGRPCPayload = n
+	t.Cleanup(func() { maxResendGRPCPayload = prev })
+}
+
 // TestPopulateResendGRPCMessages_ProtoSchemalessJSON_SizeCapEnforced
 // asserts the maxResendGRPCPayload cap fires on the POST-encode byte
-// length (JSON-amplification guard). A JSON payload that encodes to
-// exactly maxResendGRPCPayload+1 must be rejected.
+// length (JSON-amplification guard) at the exact boundary: a payload
+// that encodes to exactly the cap is accepted, one that encodes to cap+1
+// is rejected. The accept case's JSON text is itself longer than the
+// cap, so a check on the pre-encode JSON length would wrongly reject it.
+//
+// The cap is lowered to 1 KiB so the boundary is crossed without
+// building 16 MiB fixtures (USK-1205). Not parallel: it overrides a
+// package var.
 func TestPopulateResendGRPCMessages_ProtoSchemalessJSON_SizeCapEnforced(t *testing.T) {
-	t.Parallel()
-	// Build a String field whose value byte length pushes the encoded
-	// proto size past the cap by 1. Tag byte 0x0a + varint length + value
-	// bytes, where the varint length itself takes 4 bytes for a value
-	// near 16 MiB. We make the inner string len = maxResendGRPCPayload
-	// so the total wire size is len + varint(len) + 1 > cap.
-	const valueLen = maxResendGRPCPayload
-	bigValue := strings.Repeat("A", valueLen)
-	payload := `{"0001:0000:String":"` + bigValue + `"}`
+	const testCap = 1024
+	setMaxResendGRPCPayloadForTest(t, testCap)
 
-	input := &resendGRPCInput{
-		Messages: []resendGRPCData{
-			{Payload: payload, BodyEncoding: "proto-schemaless-json"},
-		},
+	jsonWithString := func(n int) string {
+		return `{"0001:0000:String":"` + strings.Repeat("A", n) + `"}`
 	}
-	plan := &resendGRPCPlan{}
-	srv := &Server{}
-	err := srv.populateResendGRPCMessages(input, plan)
-	if err == nil {
-		t.Fatal("expected payload-too-large error, got nil")
+	populate := func(payload string) (*resendGRPCPlan, error) {
+		input := &resendGRPCInput{
+			Messages: []resendGRPCData{
+				{Payload: payload, BodyEncoding: "proto-schemaless-json"},
+			},
+		}
+		plan := &resendGRPCPlan{}
+		srv := &Server{}
+		return plan, srv.populateResendGRPCMessages(input, plan)
 	}
-	if !strings.Contains(err.Error(), "payload too large") {
-		t.Errorf("error must mention payload too large, got: %q", err.Error())
+
+	// Measure the encoder's framing overhead (tag + length varint) from a
+	// successful populate instead of hand-computing it. A 512-byte value
+	// uses the same 2-byte length varint as the ~1 KiB values below.
+	const probeLen = 512
+	probePlan, err := populate(jsonWithString(probeLen))
+	if err != nil {
+		t.Fatalf("probe populate: %v", err)
 	}
+	overhead := len(probePlan.messages[0].payload) - probeLen
+	if overhead <= 0 {
+		t.Fatalf("probe: encoded length %d not larger than value length %d", len(probePlan.messages[0].payload), probeLen)
+	}
+
+	t.Run("encoded size == cap is accepted", func(t *testing.T) {
+		payload := jsonWithString(testCap - overhead)
+		if len(payload) <= testCap {
+			t.Fatalf("precondition: JSON length %d must exceed cap %d so only a post-encode check accepts it", len(payload), testCap)
+		}
+		plan, err := populate(payload)
+		if err != nil {
+			t.Fatalf("populate at exactly cap: %v", err)
+		}
+		if got := len(plan.messages[0].payload); got != testCap {
+			t.Fatalf("encoded length = %d, want exactly cap %d", got, testCap)
+		}
+	})
+
+	t.Run("encoded size == cap+1 is rejected", func(t *testing.T) {
+		_, err := populate(jsonWithString(testCap - overhead + 1))
+		if err == nil {
+			t.Fatal("expected payload-too-large error, got nil")
+		}
+		if want := "messages[0]: payload too large: 1025 > 1024"; err.Error() != want {
+			t.Errorf("error = %q, want %q", err.Error(), want)
+		}
+	})
 }
 
 // TestPopulateResendGRPCMessages_ProtoSchemalessJSON_RequiresEncodingForCompressed

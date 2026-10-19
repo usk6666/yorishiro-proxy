@@ -3,6 +3,7 @@ package pipeline
 import (
 	"bytes"
 	"context"
+	"regexp"
 	"testing"
 
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
@@ -250,7 +251,11 @@ func TestSafetyStep_WS_NilEngine(t *testing.T) {
 	}
 }
 
-func TestSafetyStep_GRPCData_DangerousPayload_Drop(t *testing.T) {
+// TestSafetyStep_GRPCData_DangerousPayload_Respond pins the USK-1202
+// contract: a native-gRPC Send Data block yields Respond with a synthetic
+// Receive-direction GRPCEndMessage (grpc-status 7 PERMISSION_DENIED) so the
+// client RPC fails promptly instead of hanging until its own deadline.
+func TestSafetyStep_GRPCData_DangerousPayload_Respond(t *testing.T) {
 	grpcEngine := newTestGRPCSafetyEngine(t)
 	step := NewSafetyStep(nil, nil, grpcEngine, nil)
 
@@ -260,17 +265,138 @@ func TestSafetyStep_GRPCData_DangerousPayload_Drop(t *testing.T) {
 		Payload: []byte("DROP TABLE users"),
 	}
 	env := &envelope.Envelope{
+		StreamID:  "stream-1",
+		FlowID:    "flow-1",
+		Sequence:  4,
 		Direction: envelope.Send,
 		Protocol:  envelope.ProtocolGRPC,
+		Context:   envelope.EnvelopeContext{TargetHost: "api.example.com:443"},
 		Message:   msg,
 	}
 
 	result := step.Process(context.Background(), env)
+	assertGRPCPolicyDropResult(t, result, env, BlockedBySafetyFilter)
+}
+
+// TestSafetyStep_GRPCStart_DangerousMethod_Respond covers the Start-target
+// arm (service/method/metadata): blocked before upstream is dialed, same
+// Respond shape as the Data arm.
+func TestSafetyStep_GRPCStart_DangerousMethod_Respond(t *testing.T) {
+	grpcEngine := grpcrules.NewSafetyEngine()
+	grpcEngine.AddRule(common.CompiledRule{
+		ID:      "custom:method",
+		Name:    "block method",
+		Pattern: regexp.MustCompile(`^DropAll$`),
+		Targets: []common.Target{grpcrules.TargetMethod},
+	})
+	step := NewSafetyStep(nil, nil, grpcEngine, nil)
+
+	env := &envelope.Envelope{
+		StreamID:  "stream-2",
+		FlowID:    "flow-2",
+		Sequence:  0,
+		Direction: envelope.Send,
+		Protocol:  envelope.ProtocolGRPC,
+		Message:   &envelope.GRPCStartMessage{Service: "Admin", Method: "DropAll"},
+	}
+
+	result := step.Process(context.Background(), env)
+	assertGRPCPolicyDropResult(t, result, env, BlockedBySafetyFilter)
+	end := result.Response.Message.(*envelope.GRPCEndMessage)
+	if v, ok := kvValue(end.Trailers, "x-yorishiro-matched-rules"); !ok || v != "custom:method" {
+		t.Errorf("x-yorishiro-matched-rules = %q (present=%v), want %q", v, ok, "custom:method")
+	}
+}
+
+// TestSafetyStep_GRPCWeb_DangerousPayload_StillDrop guards the USK-1202 scope
+// boundary: gRPC-Web keeps Drop until USK-1220 gives it a terminator.
+func TestSafetyStep_GRPCWeb_DangerousPayload_StillDrop(t *testing.T) {
+	grpcEngine := newTestGRPCSafetyEngine(t)
+	step := NewSafetyStep(nil, nil, grpcEngine, nil)
+
+	env := &envelope.Envelope{
+		Direction: envelope.Send,
+		Protocol:  envelope.ProtocolGRPCWeb,
+		Message: &envelope.GRPCDataMessage{
+			Service: "Admin",
+			Method:  "Query",
+			Payload: []byte("DROP TABLE users"),
+		},
+	}
+
+	result := step.Process(context.Background(), env)
 	if result.Action != Drop {
-		t.Errorf("GRPCData_Dangerous: got action %v, want Drop", result.Action)
+		t.Errorf("GRPCWeb_Dangerous: got action %v, want Drop (USK-1220 scope)", result.Action)
 	}
 	if result.BlockedBy != BlockedBySafetyFilter {
-		t.Errorf("GRPCData_Dangerous: BlockedBy = %q, want %q", result.BlockedBy, BlockedBySafetyFilter)
+		t.Errorf("GRPCWeb_Dangerous: BlockedBy = %q, want %q", result.BlockedBy, BlockedBySafetyFilter)
+	}
+	if result.Response != nil {
+		t.Errorf("GRPCWeb_Dangerous: Response = %+v, want nil", result.Response)
+	}
+}
+
+func kvValue(kvs []envelope.KeyValue, name string) (string, bool) {
+	for _, kv := range kvs {
+		if kv.Name == name {
+			return kv.Value, true
+		}
+	}
+	return "", false
+}
+
+// assertGRPCPolicyDropResult checks the USK-1202 native-gRPC policy-drop
+// Result shape: Respond + BlockedBy + a Receive GRPCEndMessage whose identity
+// mirrors buildPolicyDropResponse (same StreamID/FlowID/Context/Protocol,
+// Sequence+1, Raw nil).
+func assertGRPCPolicyDropResult(t *testing.T, result Result, env *envelope.Envelope, reason string) {
+	t.Helper()
+	if result.Action != Respond {
+		t.Fatalf("got action %v, want Respond (USK-1202 gRPC terminator)", result.Action)
+	}
+	if result.BlockedBy != reason {
+		t.Errorf("BlockedBy = %q, want %q", result.BlockedBy, reason)
+	}
+	resp := result.Response
+	if resp == nil {
+		t.Fatal("Response is nil; want synthetic GRPCEnd envelope")
+	}
+	if resp == env {
+		t.Fatal("Response aliases the blocked envelope; want a new envelope")
+	}
+	if resp.Direction != envelope.Receive {
+		t.Errorf("Response.Direction = %v, want Receive", resp.Direction)
+	}
+	if resp.StreamID != env.StreamID || resp.FlowID != env.FlowID {
+		t.Errorf("Response identity = (%q,%q), want (%q,%q)", resp.StreamID, resp.FlowID, env.StreamID, env.FlowID)
+	}
+	if resp.Sequence != env.Sequence+1 {
+		t.Errorf("Response.Sequence = %d, want %d", resp.Sequence, env.Sequence+1)
+	}
+	if resp.Protocol != env.Protocol {
+		t.Errorf("Response.Protocol = %q, want %q", resp.Protocol, env.Protocol)
+	}
+	if resp.Context != env.Context {
+		t.Errorf("Response.Context = %+v, want %+v", resp.Context, env.Context)
+	}
+	if resp.Raw != nil {
+		t.Errorf("Response.Raw = %q, want nil (Layer renders from Message)", resp.Raw)
+	}
+	end, ok := resp.Message.(*envelope.GRPCEndMessage)
+	if !ok {
+		t.Fatalf("Response.Message = %T, want *GRPCEndMessage", resp.Message)
+	}
+	if end.Status != 7 {
+		t.Errorf("GRPCEnd.Status = %d, want 7 (PERMISSION_DENIED)", end.Status)
+	}
+	if end.Message != "blocked by "+reason {
+		t.Errorf("GRPCEnd.Message = %q, want %q", end.Message, "blocked by "+reason)
+	}
+	if v, _ := kvValue(end.Trailers, "server"); v != "yorishiro-proxy" {
+		t.Errorf("server trailer = %q, want yorishiro-proxy", v)
+	}
+	if _, ok := kvValue(end.Trailers, "x-yorishiro-matched-rules"); !ok {
+		t.Errorf("x-yorishiro-matched-rules trailer missing: %v", end.Trailers)
 	}
 }
 
@@ -474,8 +600,8 @@ func TestSafetyStep_GRPC_WireFidelity_OnDrop(t *testing.T) {
 	payloadSnap := append([]byte(nil), payloadOriginal...)
 	rawSnap := append([]byte(nil), rawOriginal...)
 
-	if result := step.Process(context.Background(), env); result.Action != Drop {
-		t.Fatalf("expected Drop action; got %v (rule precondition failed)", result.Action)
+	if result := step.Process(context.Background(), env); result.Action != Respond {
+		t.Fatalf("expected Respond action; got %v (rule precondition failed)", result.Action)
 	}
 
 	if !bytes.Equal(msg.Payload, payloadSnap) {

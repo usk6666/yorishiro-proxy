@@ -58,7 +58,7 @@ Modify an intercepted item and forward it with the specified changes.
 Returns: intercept_id, action, status, phase, protocol, and item details.
 
 ### drop
-Drop an intercepted item, returning a 502 Bad Gateway response to the HTTP client or discarding the WebSocket frame.
+Drop an intercepted item, returning a 403 Forbidden response (`blocked_by: intercept_drop`) to the HTTP client or discarding the WebSocket frame. Dropping a native gRPC request item (start or a client message) ends the RPC with `grpc-status: 7` (PERMISSION_DENIED) and `grpc-message: blocked by intercept_drop`.
 
 **Parameters:**
 - **intercept_id** (string, required): ID of the intercepted item from the intercept queue.

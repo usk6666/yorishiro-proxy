@@ -44,10 +44,13 @@ type writeSched struct {
 	// written (RFC 9113 §5.1: closed after RST_STREAM sent or received; or
 	// refused by GOAWAY). The value is the result delivered to the done
 	// channel of a request for that stream; nil means RST_STREAM(NO_ERROR),
-	// the peer's "stop sending, without error" (RFC 9113 §8.1). Entries
-	// live for the connection's lifetime, like StreamMap entries (pruning
-	// both is USK-1176). Only streams StreamMap knows are recorded, so
-	// reset never outgrows StreamMap (see purgeStream).
+	// the peer's "stop sending, without error" (RFC 9113 §8.1). An entry
+	// outlives the stream's StreamMap entry so that Sends the consumer
+	// still makes on the Channel get that result; it is pruned when the
+	// Channel leaves l.channels (forgetStreamWrites, USK-1176), after which
+	// no further Send can reach the writer. Only streams StreamMap knows,
+	// or whose Channel is registered, are recorded, so a flood of refused
+	// streams cannot grow it (see purgeStream).
 	reset map[uint32]error
 
 	mu sync.Mutex
@@ -57,8 +60,13 @@ type writeSched struct {
 	// cannot grow it while the writer is stuck in a socket write; the first
 	// result recorded wins.
 	pending map[uint32]error
-	// hasPending mirrors len(pending) > 0 so the writer's per-frame check
-	// is a single atomic load when no reset is in flight. Written under mu.
+	// forget holds stream ids whose reset entry the writer is to drop, set
+	// when the stream's Channel leaves l.channels (USK-1176). Applied after
+	// pending, so a reset and its pruning recorded together both apply.
+	forget map[uint32]struct{}
+	// hasPending mirrors len(pending) > 0 || len(forget) > 0 so the
+	// writer's per-frame check is a single atomic load when nothing is in
+	// flight. Written under mu.
 	hasPending atomic.Bool
 }
 
@@ -73,7 +81,19 @@ func newWriteSched() *writeSched {
 		parked:  make(map[uint32]*parkedStream),
 		reset:   make(map[uint32]error),
 		pending: make(map[uint32]error),
+		forget:  make(map[uint32]struct{}),
 	}
+}
+
+// forgetStreamWrites tells the writer to drop streamID's reset entry: the
+// stream is closed and its Channel has left l.channels, so no further write
+// for it can arrive (USK-1176). Safe from any goroutine; never blocks.
+func (l *Layer) forgetStreamWrites(streamID uint32) {
+	l.sched.mu.Lock()
+	l.sched.forget[streamID] = struct{}{}
+	l.sched.hasPending.Store(true)
+	l.sched.mu.Unlock()
+	l.signalWindowUpdate()
 }
 
 // resetStreamWrites tells the writer that no further HEADERS / DATA may be
@@ -98,11 +118,16 @@ func (l *Layer) applyPendingResets() {
 	}
 	l.sched.mu.Lock()
 	pending := l.sched.pending
+	forget := l.sched.forget
 	l.sched.pending = make(map[uint32]error)
+	l.sched.forget = make(map[uint32]struct{})
 	l.sched.hasPending.Store(false)
 	l.sched.mu.Unlock()
 	for id, err := range pending {
-		l.purgeStream(id, err)
+		l.purgeStream(id, err, true)
+	}
+	for id := range forget {
+		delete(l.sched.reset, id)
 	}
 }
 
@@ -132,11 +157,18 @@ func (l *Layer) resetErr(streamID uint32) (bool, error) {
 // peer streams are transitioned before their Channel is emitted), so there
 // is nothing to suppress. This keeps reset no larger than StreamMap when
 // the reader refuses a flood of new peer streams with RST_STREAM (CWE-770).
-func (l *Layer) purgeStream(streamID uint32, err error) {
+//
+// registered is true for a reset recorded through resetStreamWrites, whose
+// callers only name streams with a registered Channel. Such a reset is
+// recorded even if the stream has already been retired from StreamMap — the
+// reader retires a stream right after it records a received RST_STREAM, so
+// the writer may apply that reset only afterwards (USK-1144) — because the
+// consumer's later Sends on the Channel must still get its result.
+func (l *Layer) purgeStream(streamID uint32, err error, registered bool) {
 	ps, parked := l.sched.parked[streamID]
 	if prev, ok := l.sched.reset[streamID]; ok {
 		err = prev
-	} else if parked || l.conn.Streams().Get(streamID) != nil {
+	} else if registered || parked || l.conn.Streams().Get(streamID) != nil {
 		l.sched.reset[streamID] = err
 	}
 	if !parked {
@@ -197,6 +229,13 @@ func (l *Layer) writeStreamRequest(req writeRequest) bool {
 	// (serviceParked) withdraws the rest of its FIFO too.
 	if ok, err := l.resetErr(streamIDOf(req)); ok {
 		failWriteRequest(req, err)
+		return true
+	}
+	// RFC 9113 §5.1: nothing but PRIORITY may be sent on a closed stream.
+	// A closed stream has no StreamMap entry (USK-1144); every stream this
+	// endpoint may still write on has one (see purgeStream).
+	if l.conn.Streams().Get(streamIDOf(req)) == nil {
+		failWriteRequest(req, errStreamClosed)
 		return true
 	}
 	if req.headers != nil {
