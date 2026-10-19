@@ -31,19 +31,12 @@ const (
 	spillThresholdTest = 256 << 10
 	// largeBodySize is above spillThresholdTest, so it spills to disk.
 	largeBodySize = 1 << 20
-	// smallBodySize is below spillThresholdTest, so it stays in memory.
-	smallBodySize = 128 << 10
 
 	// destructiveSQLMarker is any SQL fragment that matches the
 	// destructive-sql:drop rule pattern ((?i)DROP\s+TABLE\s+...). Embedded
 	// in a large POST body to prove safety filtering materializes a
 	// disk-backed body and matches against it.
 	destructiveSQLMarker = "DROP TABLE users;"
-
-	// secretMarker is the plaintext replaced by TransformReplaceBody rules
-	// in the tests that exercise Transform on disk-backed bodies.
-	secretMarker = "SECRET"
-	replaceWith  = "REDACTED"
 )
 
 // makeLargeBody returns size bytes of deterministic content. Values cycle

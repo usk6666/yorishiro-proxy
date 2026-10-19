@@ -292,14 +292,6 @@ func (s *testStore) flowsForStream(streamID string) []*flow.Flow {
 	return out
 }
 
-func (s *testStore) allFlows() []*flow.Flow {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	out := make([]*flow.Flow, len(s.flows))
-	copy(out, s.flows)
-	return out
-}
-
 func (s *testStore) getUpdates(streamID string) []flow.StreamUpdate {
 	s.mu.Lock()
 	defer s.mu.Unlock()

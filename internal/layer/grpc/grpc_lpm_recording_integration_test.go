@@ -601,3 +601,11 @@ func TestGRPCLPMRecording_HARExcludesFrame(t *testing.T) {
 		}
 	}
 }
+
+func (s *testStore) allFlows() []*flow.Flow {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]*flow.Flow, len(s.flows))
+	copy(out, s.flows)
+	return out
+}

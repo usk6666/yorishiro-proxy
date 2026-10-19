@@ -34,24 +34,9 @@ const (
 	h2SpillThresholdTest = 256 << 10
 	// h2LargeBodySize is above h2SpillThresholdTest, so it spills to disk.
 	h2LargeBodySize = 1 << 20
-	// h2SmallBodySize is below h2SpillThresholdTest, so it stays in memory.
-	h2SmallBodySize = 128 << 10
-
-	// h2MaxBodyTestCap sits between the spill threshold and h2LargeBodySize,
-	// so the cap is breached on the disk-spill path (bodybuf's maxSize
-	// check). The code path is identical to the production 254 MiB cap.
-	h2MaxBodyTestCap = 512 << 10
 
 	h2DestructiveSQLMarker = "DROP TABLE users;"
 	h2SecretMarker         = "SECRET"
-	// h2ReplaceWith is intentionally the SAME LENGTH as h2SecretMarker so
-	// that the Transform rewrite keeps the total body size identical.
-	// h2 wire encoding inherits the request's Content-Length pseudo-header
-	// from msg.Headers; restamping CL after a body-length change is a
-	// separate improvement (not in scope for USK-635). A same-length
-	// replacement exercises the disk-backed materialize path without
-	// depending on the CL restamp.
-	h2ReplaceWith = "SECRE7"
 )
 
 // makeH2LargeBody returns size bytes with a deterministic repeating pattern.

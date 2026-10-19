@@ -54,6 +54,16 @@ import (
 // round trips (TestHTTPSMITM_LargeBody*) moved here from
 // mitm_integration_test.go.
 
+const (
+	// smallBodySize is below spillThresholdTest, so it stays in memory.
+	smallBodySize = 128 << 10
+
+	// secretMarker is the plaintext replaced by TransformReplaceBody rules
+	// in the tests that exercise Transform on disk-backed bodies.
+	secretMarker = "SECRET"
+	replaceWith  = "REDACTED"
+)
+
 // ---------------------------------------------------------------------------
 // Body helpers
 // ---------------------------------------------------------------------------
