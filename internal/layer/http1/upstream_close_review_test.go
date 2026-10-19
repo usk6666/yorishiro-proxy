@@ -178,12 +178,13 @@ func TestLayer_Receive_TerminalExit_RetiresLayer(t *testing.T) {
 			l := New(client, "up-1", envelope.Receive)
 			defer l.Close()
 			ch := l.OpenExchange()
-			sendGET(t, ch)
-			// Opened before the receive loop ends; its request is sent after.
+			// Opened before the receive loop can end (it parses only once a
+			// request is registered); its request is sent after it ended.
 			late := l.OpenExchange()
 			if late == nil {
 				t.Fatal("OpenExchange before the loop ended = nil")
 			}
+			sendGET(t, ch)
 
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 			defer cancel()
