@@ -1,4 +1,4 @@
-//go:build e2e && !e2e_smoke
+//go:build e2e
 
 package mcptest_test
 
