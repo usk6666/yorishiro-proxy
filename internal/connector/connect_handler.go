@@ -5,7 +5,6 @@ import (
 	"errors"
 	"log/slog"
 	"net"
-	"strconv"
 	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
@@ -295,16 +294,16 @@ func connectPolicyAllow(cfg CONNECTHandlerConfig, target string, logger *slog.Lo
 // check and the live-connection predicate (USK-1160), so a tunnel survives
 // a policy change iff an identical new CONNECT would be admitted. A nil or
 // rule-less scope allows everything. err is non-nil only for an authority
-// that is not host:port (then allowed is false).
+// that SplitTargetHostPort rejects (then allowed is false), so a port the
+// scope cannot read as the dialer does fails closed (USK-1249).
 func connectScopeCheck(scope *TargetScope, target string) (allowed bool, reason string, err error) {
 	if scope == nil || !scope.HasRules() {
 		return true, "", nil
 	}
-	host, portStr, err := net.SplitHostPort(target)
+	host, port, err := SplitTargetHostPort(target)
 	if err != nil {
 		return false, "invalid CONNECT target", err
 	}
-	port, _ := strconv.Atoi(portStr)
 	allowed, reason = scope.CheckTarget("https", host, port, "")
 	return allowed, reason, nil
 }
