@@ -1606,6 +1606,19 @@ var httpAnomalyKeys = map[envelope.AnomalyType]string{
 	envelope.H2UnsupportedConnectProtocol:             "http_anomaly_h2_unsupported_connect_protocol",
 }
 
+// HTTPAnomalyMetadataKeys returns a copy of the closed HTTP AnomalyType →
+// flow Metadata key table RecordStep projects with. The MCP query tool
+// decodes those keys with its own reverse table
+// (internal/mcp flowMetadataAnomalyKeyToType); this accessor lets a test
+// there fail when the two diverge (USK-1229 review F-3).
+func HTTPAnomalyMetadataKeys() map[envelope.AnomalyType]string {
+	out := make(map[envelope.AnomalyType]string, len(httpAnomalyKeys))
+	for k, v := range httpAnomalyKeys {
+		out[k] = v
+	}
+	return out
+}
+
 // httpAnomalyMetadataKey returns the stable Metadata key under which an
 // HTTP anomaly's Detail is recorded (USK-849). Unknown types are
 // surfaced under a stable `http_anomaly_unknown_<lowercased-type>`
