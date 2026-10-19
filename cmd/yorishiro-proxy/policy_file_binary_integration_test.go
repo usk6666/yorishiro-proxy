@@ -43,6 +43,7 @@ func TestE2E_Binary_RefusesInvalidTargetPolicyFile(t *testing.T) {
 		"-log-level", "error",
 		"-target-policy-file", policyPath,
 	)
+	cmd.Env = binaryChildEnv(t.TempDir())
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Start(); err != nil {

@@ -45,6 +45,7 @@ func runClientTool(t *testing.T, binary string, port int, token, tool string, pa
 		"--format", "json",
 	}, params...)
 	cmd := exec.Command(binary, args...)
+	cmd.Env = binaryChildEnv(t.TempDir())
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -98,8 +99,8 @@ func TestE2E_Binary_SIGHUPReloadsPolicy(t *testing.T) {
 	srv := startServerProcess(t, binary, port, token, filepath.Join(dir, "sighup.db"),
 		"-target-policy-file", policyPath, "-log-level", "info")
 	defer srv.terminate(t)
-	if !waitForListener(net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), 15*time.Second) {
-		t.Fatalf("binary server did not bind within 15s; stderr:\n%s", srv.stderrSnapshot())
+	if !waitForListener(net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), binaryBootTimeout) {
+		t.Fatalf("binary server did not bind within %v; stderr:\n%s", binaryBootTimeout, srv.stderrSnapshot())
 	}
 
 	testTarget := func(host string) bool {
@@ -175,8 +176,8 @@ func TestE2E_Binary_SIGHUPWithoutPolicySourceUnchanged(t *testing.T) {
 	port := pickFreeBinaryPort(t)
 	srv := startServerProcess(t, binary, port, "binary-sighup-nosrc-token-0123456789", filepath.Join(t.TempDir(), "nosrc.db"))
 	defer srv.terminate(t)
-	if !waitForListener(net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), 15*time.Second) {
-		t.Fatalf("binary server did not bind within 15s; stderr:\n%s", srv.stderrSnapshot())
+	if !waitForListener(net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), binaryBootTimeout) {
+		t.Fatalf("binary server did not bind within %v; stderr:\n%s", binaryBootTimeout, srv.stderrSnapshot())
 	}
 
 	if err := srv.cmd.Process.Signal(syscall.SIGHUP); err != nil {
@@ -211,6 +212,7 @@ func TestE2E_Binary_StdioAgentCannotModifyPolicyLayer(t *testing.T) {
 		"-ca-ephemeral",
 		"-log-level", "error",
 	)
+	cmd.Env = binaryChildEnv(t.TempDir())
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	client := gomcp.NewClient(&gomcp.Implementation{Name: "usk1115-stdio", Version: "0"}, nil)
