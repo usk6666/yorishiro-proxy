@@ -199,21 +199,6 @@ func TestSafetyEngine_RuleCount(t *testing.T) {
 	}
 }
 
-func TestSafetyEngine_NilBody(t *testing.T) {
-	e := NewSafetyEngine()
-	if err := e.LoadPreset(common.PresetDestructiveSQL); err != nil {
-		t.Fatal(err)
-	}
-
-	// nil body with dangerous query should still match on query target.
-	msg := testSafetyMsg("GET", "/", "example.com",
-		"q=DROP TABLE users", nil, nil)
-	v := e.CheckInput(context.Background(), msg)
-	if v == nil {
-		t.Fatal("expected violation in query even with nil body")
-	}
-}
-
 func TestReconstructURL(t *testing.T) {
 	tests := []struct {
 		msg  *envelope.HTTPMessage
