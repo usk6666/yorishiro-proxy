@@ -252,9 +252,12 @@ func TestLayer_ServerRole_LateWindowUpdateAndRSTOnClosedStream(t *testing.T) {
 	// A frame for stream 1 in the reply stream would be a violation; the
 	// round trip on stream 3 fails on RST_STREAM/GOAWAY for stream 3 or
 	// on a read error if the connection was dropped.
-	if err := peer.wr.WriteHeaders(3, true, true, peer.encoder.Encode(usk1144RequestFields)); err != nil {
-		t.Fatalf("write HEADERS stream 3: %v", err)
-	}
+	//
+	// The write runs concurrently with the reads: if the Layer dropped the
+	// connection its reader no longer drains the synchronous pipe, so a
+	// write here would block while the Layer's writer blocks on its GOAWAY.
+	frag3 := peer.encoder.Encode(usk1144RequestFields)
+	go func() { _ = peer.wr.WriteHeaders(3, true, true, frag3) }()
 	_ = peer.conn.SetReadDeadline(time.Now().Add(2 * time.Second))
 	for {
 		f, err := peer.rd.ReadFrame()
@@ -507,6 +510,9 @@ func TestLayer_ServerRole_RefusedStreamKeepsHPACKInSync(t *testing.T) {
 	defer cleanup()
 	peer.consumePeerSettings(t)
 	peer.sendInitialSettings(t)
+	// A write into a connection the Layer dropped would block forever on
+	// the synchronous pipe; fail instead.
+	_ = peer.conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 
 	reqFields := append(append([]hpack.HeaderField(nil), usk1144RequestFields...),
 		hpack.HeaderField{Name: "x-usk1144", Value: "dynamic-table-entry"})
