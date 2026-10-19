@@ -131,6 +131,17 @@ func TestGRPCWeb_MalformedResponseForwardedToClient(t *testing.T) {
 	if !bytes.Equal(startF.RawBytes, malformedLPMBody) {
 		t.Errorf("receive start RawBytes = %q, want %q", startF.RawBytes, malformedLPMBody)
 	}
+
+	// Review F-2: the flush-sentinel End is recorded, but the upstream sent
+	// no parseable trailer — the record must say so (anomaly marker) rather
+	// than show a clean grpc_status=0 the upstream never sent.
+	endF := firstFlowWithEvent(flowsForFirstStream(store), "receive", "end")
+	if endF == nil {
+		t.Fatal("no receive end flow recorded")
+	}
+	if endF.Metadata["grpc_anomaly_malformed_lpm"] == "" {
+		t.Errorf("receive end flow missing grpc_anomaly_malformed_lpm (recorded as a clean End); metadata: %v", endF.Metadata)
+	}
 }
 
 // h2BodyCapture is a mutex-guarded record of what an h2 upstream handler

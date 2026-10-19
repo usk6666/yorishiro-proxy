@@ -1105,9 +1105,10 @@ func TestEmitAnomalyStart_QueueDrainsThenEOF(t *testing.T) {
 		t.Errorf("Envelope.Raw = %q, want the malformed body bytes", env1.Raw)
 	}
 
-	// Second Next: USK-1203 — a clean sentinel End (Raw nil, no anomaly)
-	// follows the anomaly Start so the opposite-side Send flushes the
-	// passthrough body to the wire.
+	// Second Next: USK-1203 — a sentinel End (Raw nil) follows the anomaly
+	// Start so the opposite-side Send flushes the passthrough body to the
+	// wire. It carries the Start's anomaly type so the recorded End reads
+	// as "no trailer observed", not a clean grpc_status=0 (review F-2).
 	env2, err2 := ch.Next(ctx)
 	if err2 != nil {
 		t.Fatalf("second Next() err = %v, want sentinel End envelope", err2)
@@ -1116,8 +1117,11 @@ func TestEmitAnomalyStart_QueueDrainsThenEOF(t *testing.T) {
 	if !ok {
 		t.Fatalf("second envelope Message type = %T, want *envelope.GRPCEndMessage", env2.Message)
 	}
-	if len(env2.Raw) != 0 || len(end.Anomalies) != 0 {
-		t.Errorf("sentinel End Raw=%q Anomalies=%v, want both empty", env2.Raw, end.Anomalies)
+	if len(env2.Raw) != 0 {
+		t.Errorf("sentinel End Raw = %q, want empty", env2.Raw)
+	}
+	if len(end.Anomalies) != 1 || end.Anomalies[0].Type != envelope.AnomalyMalformedGRPCWebBase64 {
+		t.Errorf("sentinel End Anomalies = %v, want one %q", end.Anomalies, envelope.AnomalyMalformedGRPCWebBase64)
 	}
 
 	// Third Next: must return io.EOF (clean termination).
@@ -1156,8 +1160,14 @@ func TestEmitAnomalyStart_ReceiveDirectionQueuesSentinelEnd(t *testing.T) {
 	if !ok {
 		t.Fatalf("second envelope Message = %T, want *GRPCEndMessage", envs[1].Message)
 	}
-	if len(envs[1].Raw) != 0 || len(end.Anomalies) != 0 {
-		t.Errorf("sentinel End Raw=%q Anomalies=%v, want both empty", envs[1].Raw, end.Anomalies)
+	if len(envs[1].Raw) != 0 {
+		t.Errorf("sentinel End Raw = %q, want empty", envs[1].Raw)
+	}
+	// Review F-2: the upstream sent no parseable trailer, so the recorded
+	// End must not read as a clean grpc_status=0 — it carries the Start's
+	// anomaly type.
+	if len(end.Anomalies) != 1 || end.Anomalies[0].Type != envelope.AnomalyMalformedGRPCWebLPM {
+		t.Errorf("sentinel End Anomalies = %v, want one %q", end.Anomalies, envelope.AnomalyMalformedGRPCWebLPM)
 	}
 }
 
@@ -1222,10 +1232,13 @@ func TestSend_PassthroughStartRaw(t *testing.T) {
 				StreamID: "s-pt", Direction: tt.dir, Raw: tt.raw,
 				Message: &envelope.GRPCStartMessage{
 					Service: "pkg.Echo", Method: "Say", ContentType: tt.ct,
-					Metadata: []envelope.KeyValue{{Name: "Content-Length", Value: cl}},
+					Metadata:  []envelope.KeyValue{{Name: "Content-Length", Value: cl}},
+					Anomalies: []envelope.Anomaly{{Type: envelope.AnomalyMalformedGRPCWebLPM}},
 				},
 			}
-			end := &envelope.Envelope{StreamID: "s-pt", Direction: tt.dir, Message: &envelope.GRPCEndMessage{}}
+			end := &envelope.Envelope{StreamID: "s-pt", Direction: tt.dir, Message: &envelope.GRPCEndMessage{
+				Anomalies: []envelope.Anomaly{{Type: envelope.AnomalyMalformedGRPCWebLPM}},
+			}}
 			hm := sendAll(t, ch, mock, start, end)
 			if !bytes.Equal(hm.Body, tt.raw) {
 				t.Errorf("Body = %q, want verbatim %q", hm.Body, tt.raw)
