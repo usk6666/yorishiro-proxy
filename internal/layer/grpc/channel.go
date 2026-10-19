@@ -62,8 +62,11 @@ type reassembler struct {
 // feed appends src to the in-progress LPM. Returns one lpmFrame per
 // complete LPM; multiple LPMs in one src yield multiple frames.
 //
-// max bounds the maximum payload size; exceeding it returns
-// errMessageTooLarge (the channel maps it to a *layer.StreamError).
+// max bounds the maximum payload size; exceeding it returns an
+// *lpmTooLargeError (errors.Is errMessageTooLarge; the channel maps it to
+// a *layer.StreamError). The frames completed earlier in the same src are
+// returned alongside the error so the caller can still record them
+// (USK-1254).
 //
 // Zero-length payloads are handled correctly: when wireLen==0 the prefix
 // transition immediately emits a frame without consuming any payload
@@ -90,7 +93,7 @@ func (r *reassembler) feed(src []byte, max uint32) ([]lpmFrame, error) {
 			r.compress = r.prefBuf[0] != 0
 			r.wireLen = binary.BigEndian.Uint32(r.prefBuf[1:5])
 			if r.wireLen > max {
-				return out, errMessageTooLarge
+				return out, r.tooLarge(src, max)
 			}
 			copy(r.prefix[:], r.prefBuf)
 			r.prefBuf = nil
@@ -114,6 +117,7 @@ func (r *reassembler) feed(src []byte, max uint32) ([]lpmFrame, error) {
 				}
 			}
 			out = append(out, lpmFrame{
+				Prefix:     r.prefix,
 				Compressed: r.compress,
 				WireLength: r.wireLen,
 				Payload:    r.payload,
@@ -130,14 +134,82 @@ func (r *reassembler) feed(src []byte, max uint32) ([]lpmFrame, error) {
 	}
 }
 
+// tooLarge builds the error feed returns when the just-completed prefix
+// declares more than max payload bytes. r.prefBuf holds the 5 observed
+// prefix bytes (possibly accumulated across DATA frames) and src is the
+// remainder of the current DATA frame after the prefix. The captured bytes
+// are the verbatim prefix plus at most the declared length of src —
+// nothing beyond the current DATA event is read (USK-1254).
+func (r *reassembler) tooLarge(src []byte, max uint32) *lpmTooLargeError {
+	take := len(src)
+	if uint64(take) > uint64(r.wireLen) {
+		take = int(r.wireLen)
+	}
+	raw := make([]byte, 0, len(r.prefBuf)+take)
+	raw = append(raw, r.prefBuf...)
+	raw = append(raw, src[:take]...)
+	return &lpmTooLargeError{
+		declared:   r.wireLen,
+		max:        max,
+		compressed: r.compress,
+		raw:        raw,
+	}
+}
+
+// partial reports the observed bytes of the LPM still being reassembled
+// (USK-1254), as a fresh slice. In the prefix phase it is the 1-4 prefix
+// bytes seen so far (prefixComplete=false); in the payload phase it is the
+// verbatim 5-byte prefix plus the payload bytes received so far. ok is
+// false when no LPM is in progress.
+func (r *reassembler) partial() (raw []byte, prefixComplete, ok bool) {
+	switch r.phase {
+	case phaseWaitingPrefix:
+		if len(r.prefBuf) == 0 {
+			return nil, false, false
+		}
+		return append([]byte(nil), r.prefBuf...), false, true
+	case phaseWaitingPayload:
+		raw = make([]byte, 0, lpmPrefixLen+len(r.payload))
+		raw = append(raw, r.prefix[:]...)
+		raw = append(raw, r.payload...)
+		return raw, true, true
+	}
+	return nil, false, false
+}
+
 // lpmFrame is one fully reassembled LPM. Payload is the compressed bytes
 // (or raw bytes if Compressed=false) — decompression happens in the
-// channel's emit path.
+// channel's emit path. Prefix is the 5-byte prefix exactly as observed on
+// the wire (the flag byte is not normalized to 0/1).
 type lpmFrame struct {
+	Prefix     [lpmPrefixLen]byte
 	Compressed bool
 	WireLength uint32
 	Payload    []byte
 }
+
+// wireBytes returns the LPM exactly as observed (verbatim prefix +
+// payload) in a fresh slice.
+func (f lpmFrame) wireBytes() []byte {
+	out := make([]byte, 0, lpmPrefixLen+len(f.Payload))
+	out = append(out, f.Prefix[:]...)
+	return append(out, f.Payload...)
+}
+
+// lpmTooLargeError is returned by reassembler.feed when an LPM prefix
+// declares a length above the per-Channel cap. It carries what was
+// observed of the rejected LPM so the channel can record it as an
+// AnomalyGRPCLPMTooLarge row (USK-1254). errors.Is(err,
+// errMessageTooLarge) holds.
+type lpmTooLargeError struct {
+	declared   uint32
+	max        uint32
+	compressed bool
+	raw        []byte // verbatim prefix + payload bytes of the same DATA frame (≤ declared)
+}
+
+func (e *lpmTooLargeError) Error() string { return errMessageTooLarge.Error() }
+func (e *lpmTooLargeError) Unwrap() error { return errMessageTooLarge }
 
 // errMessageTooLarge is returned by reassembler.feed when an LPM length
 // exceeds the per-Channel cap (defaults to config.MaxGRPCMessageSize but
@@ -581,7 +653,10 @@ func (c *grpcChannel) absorbHeaders(ev *envelope.Envelope, evt *http2.H2HeadersE
 //   - When END_STREAM arrives mid-LPM (reassembler still in prefix or
 //     payload phase with buffered bytes), the half-LPM has no faithful
 //     gRPC envelope representation; surface as
-//     *layer.StreamError{ErrorProtocol}.
+//     *layer.StreamError{ErrorProtocol}. Its observed bytes are still
+//     recorded through the LPM record callback as an
+//     AnomalyGRPCLPMTruncated row (USK-1254), as are the observed bytes
+//     of an LPM rejected by the message-size cap (AnomalyGRPCLPMTooLarge).
 func (c *grpcChannel) absorbData(ev *envelope.Envelope, evt *http2.H2DataEvent) error {
 	// USK-899 (F-1 fix): fire the per-H2-DATA-frame wire-record callback
 	// BEFORE LPM reassembly and BEFORE acquiring c.mu. The h2-frame
@@ -611,8 +686,14 @@ func (c *grpcChannel) absorbData(ev *envelope.Envelope, evt *http2.H2DataEvent) 
 	queuedBefore := len(c.queued)
 	frames, err := dir.reasm.feed(evt.Payload, c.maxMessageSize)
 	if err != nil {
-		c.mu.Unlock()
-		if errors.Is(err, errMessageTooLarge) {
+		var tooLarge *lpmTooLargeError
+		if errors.As(err, &tooLarge) {
+			// USK-1254 case 2: record the LPMs completed earlier in this
+			// event, then the rejected LPM as an anomaly row, before the
+			// (unchanged) RST + StreamError.
+			wireEnvs := c.tooLargeWireEnvelopesLocked(ev, dir, evt, frames, tooLarge)
+			c.mu.Unlock()
+			c.fireLPMFrameRecords(wireEnvs)
 			se := &layer.StreamError{
 				Code:   layer.ErrorInternalError,
 				Reason: "grpc: message too large",
@@ -620,7 +701,8 @@ func (c *grpcChannel) absorbData(ev *envelope.Envelope, evt *http2.H2DataEvent) 
 			c.rstInner(se)
 			return se
 		}
-		// Defensive: feed currently only produces errMessageTooLarge.
+		c.mu.Unlock()
+		// Defensive: feed currently only produces *lpmTooLargeError.
 		return fmt.Errorf("grpc: reassemble: %w", err)
 	}
 
@@ -637,6 +719,11 @@ func (c *grpcChannel) absorbData(ev *envelope.Envelope, evt *http2.H2DataEvent) 
 		dataEnv, derr := c.buildDataEnvelopeLocked(ev, dir, f)
 		if derr != nil {
 			c.mu.Unlock()
+			// USK-1254: the LPMs completed before the failing one in this
+			// event were observed on the wire; record them before the
+			// (unchanged) RST + StreamError. The failing LPM itself gets
+			// no anomaly row here (deferred, D3).
+			c.fireLPMFrameRecords(lpmWireEnvs)
 			c.rstInner(derr)
 			return derr
 		}
@@ -655,7 +742,17 @@ func (c *grpcChannel) absorbData(ev *envelope.Envelope, evt *http2.H2DataEvent) 
 		// Reject mid-LPM termination: the reassembler still holds a
 		// partial prefix or partial payload after consuming this frame.
 		if dir.reasm.phase != phaseWaitingPrefix || len(dir.reasm.prefBuf) > 0 {
+			// USK-1254 case 3: record the truncated LPM as an anomaly row
+			// after the LPMs completed earlier in this event, before the
+			// (unchanged) RST + StreamError. The partial LPM itself is
+			// never queued for Next.
+			if c.lpmFrameRecordCallback != nil {
+				if env := c.buildTruncatedLPMEnvelopeLocked(ev, dir, evt); env != nil {
+					lpmWireEnvs = append(lpmWireEnvs, env)
+				}
+			}
 			c.mu.Unlock()
+			c.fireLPMFrameRecords(lpmWireEnvs)
 			se := &layer.StreamError{
 				Code:   layer.ErrorProtocol,
 				Reason: "grpc: stream ended mid-LPM",
@@ -687,10 +784,87 @@ func (c *grpcChannel) absorbData(ev *envelope.Envelope, evt *http2.H2DataEvent) 
 	// here because Next is the same goroutine that called absorbData
 	// (so the consumer cannot observe the semantic envelopes queued
 	// above until absorbData returns).
-	for _, env := range lpmWireEnvs {
+	c.fireLPMFrameRecords(lpmWireEnvs)
+	return nil
+}
+
+// fireLPMFrameRecords hands envs to the LPM record callback in order. Must
+// be called WITHOUT c.mu held (the callback may write to SQLite). envs is
+// empty whenever the callback is nil.
+func (c *grpcChannel) fireLPMFrameRecords(envs []*envelope.Envelope) {
+	for _, env := range envs {
 		c.lpmFrameRecordCallback(env)
 	}
-	return nil
+}
+
+// tooLargeWireEnvelopesLocked builds the LPM record envelopes for the
+// LPM-cap-trip path (USK-1254 case 2): one plain row per LPM completed
+// earlier in the same DATA event, then the AnomalyGRPCLPMTooLarge row for
+// the rejected LPM. Returns nil when no LPM record callback is installed.
+// Must hold c.mu.
+func (c *grpcChannel) tooLargeWireEnvelopesLocked(ev *envelope.Envelope, dir *directionState, evt *http2.H2DataEvent, frames []lpmFrame, e *lpmTooLargeError) []*envelope.Envelope {
+	if c.lpmFrameRecordCallback == nil {
+		return nil
+	}
+	envs := make([]*envelope.Envelope, 0, len(frames)+1)
+	for _, f := range frames {
+		envs = append(envs, c.buildLPMWireEnvelopeLocked(ev, f.wireBytes()))
+	}
+	envs = append(envs, c.buildPartialLPMEnvelopeLocked(ev, dir, e.raw, e.compressed, e.declared, evt.EndStream, envelope.Anomaly{
+		Type:   envelope.AnomalyGRPCLPMTooLarge,
+		Detail: fmt.Sprintf("declared=%d cap=%d captured=%d", e.declared, e.max, len(e.raw)-lpmPrefixLen),
+	}))
+	return envs
+}
+
+// buildTruncatedLPMEnvelopeLocked builds the AnomalyGRPCLPMTruncated row
+// for an LPM cut short by END_STREAM (USK-1254 case 3) from the
+// reassembler's in-progress state. Returns nil when no LPM is in
+// progress. Must hold c.mu.
+func (c *grpcChannel) buildTruncatedLPMEnvelopeLocked(ev *envelope.Envelope, dir *directionState, evt *http2.H2DataEvent) *envelope.Envelope {
+	raw, prefixComplete, ok := dir.reasm.partial()
+	if !ok {
+		return nil
+	}
+	if !prefixComplete {
+		// Neither the flag nor the length is known; leave both zero (the
+		// RecordStep projection omits them rather than fabricate values).
+		return c.buildPartialLPMEnvelopeLocked(ev, dir, raw, false, 0, evt.EndStream, envelope.Anomaly{
+			Type:   envelope.AnomalyGRPCLPMTruncated,
+			Detail: fmt.Sprintf("prefix_bytes=%d", len(raw)),
+		})
+	}
+	r := &dir.reasm
+	return c.buildPartialLPMEnvelopeLocked(ev, dir, raw, r.compress, r.wireLen, evt.EndStream, envelope.Anomaly{
+		Type:   envelope.AnomalyGRPCLPMTruncated,
+		Detail: fmt.Sprintf("declared=%d observed=%d", r.wireLen, len(r.payload)),
+	})
+}
+
+// buildPartialLPMEnvelopeLocked constructs the LPM record envelope for an
+// LPM the reassembler could not complete (USK-1254). Unlike the per-LPM
+// rows built by buildLPMWireEnvelopeLocked it carries a GRPCDataMessage —
+// Payload nil, WireLength = the declared length, Anomalies = a — so the
+// typed anomaly reaches RecordStep. raw must be a fresh slice of the
+// observed bytes. The envelope is handed only to the LPM record callback
+// (record-only Pipeline); it is never queued for Next and so never
+// forwarded. Must hold c.mu.
+func (c *grpcChannel) buildPartialLPMEnvelopeLocked(ev *envelope.Envelope, dir *directionState, raw []byte, compressed bool, declared uint32, endStream bool, a envelope.Anomaly) *envelope.Envelope {
+	return &envelope.Envelope{
+		StreamID:  ev.StreamID,
+		Direction: ev.Direction,
+		Protocol:  envelope.ProtocolGRPC,
+		Raw:       raw,
+		Message: &envelope.GRPCDataMessage{
+			Service:    dir.service,
+			Method:     dir.method,
+			Compressed: compressed,
+			WireLength: declared,
+			EndStream:  endStream,
+			Anomalies:  []envelope.Anomaly{a},
+		},
+		Context: ev.Context,
+	}
 }
 
 // buildH2DataFrameWireEnvelope constructs the per-H2-DATA-frame wire-record

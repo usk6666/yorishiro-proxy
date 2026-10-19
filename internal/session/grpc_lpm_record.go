@@ -54,6 +54,17 @@
 // the record-only Pipeline. The same closure is installed on both
 // wraps, so all LPMs end up under one Stream row.
 //
+// Partial LPMs (USK-1254): the same callback also receives one envelope
+// per LPM the grpc Layer could not complete — declared length over the
+// message-size cap, or END_STREAM mid-LPM. Raw is the observed partial
+// bytes; Message is a GRPCDataMessage carrying a typed anomaly
+// (GRPCLPMTooLarge / GRPCLPMTruncated) that RecordStep projects into
+// grpc_anomaly_lpm_too_large / grpc_anomaly_lpm_truncated Metadata. The
+// closure below needs no special handling: it stamps identity + WireLevel
+// exactly as for a complete LPM. The row is overlay-only (hidden from the
+// default semantic MCP view); the stream's error state is what surfaces
+// at the semantic level.
+//
 // Live? Defense-in-depth (per USK-896 Issue body). No live bug is
 // currently triggering this gap; the goal is to make smuggling /
 // compressed-flag / multi-LPM-packing anomalies observable when they

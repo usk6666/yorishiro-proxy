@@ -2969,6 +2969,24 @@ func TestExtractAnomaliesFromFlows(t *testing.T) {
 			wantTypes: []string{"CLTE", "MalformedGRPCWebBase64", "ObsFold"},
 		},
 		{
+			// USK-1254: native gRPC partial-LPM anomalies map to their
+			// canonical types, distinct from gRPC-Web's malformed LPM.
+			name: "native gRPC partial-LPM anomalies",
+			flows: []*flow.Flow{
+				{Direction: "send", Metadata: map[string]string{
+					"grpc_anomaly_lpm_too_large": "declared=200 cap=100 captured=8",
+				}},
+				{Direction: "receive", Metadata: map[string]string{
+					"grpc_anomaly_lpm_truncated": "declared=10 observed=4",
+				}},
+			},
+			wantTypes: []string{"GRPCLPMTooLarge", "GRPCLPMTruncated"},
+			wantDetail: map[string]string{
+				"GRPCLPMTooLarge":  "declared=200 cap=100 captured=8",
+				"GRPCLPMTruncated": "declared=10 observed=4",
+			},
+		},
+		{
 			name: "unknown anomaly key surfaces verbatim",
 			flows: []*flow.Flow{
 				{Direction: "send", Metadata: map[string]string{
