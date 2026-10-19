@@ -28,6 +28,10 @@ const (
 	// this label (USK-782 design scope guards).
 	BlockedByInterceptDrop = "intercept_drop"
 
+	// BlockedByInterceptCancelled attributes a Drop to an intercept hold
+	// whose ctx ended before any action resolved it (USK-1193).
+	BlockedByInterceptCancelled = "intercept_cancelled"
+
 	// BlockedByRateLimit is reserved for a future RateLimitStep; no
 	// Pipeline Step emits it today. The session-side recorder accepts
 	// the label so future Issues only need to add the Step.
