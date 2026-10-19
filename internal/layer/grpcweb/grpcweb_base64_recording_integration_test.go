@@ -524,12 +524,12 @@ func TestGRPCWebBase64Recording_MalformedBase64StillFires(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	upstreamLn, _ := startGRPCWebHTTP1Upstream(t, func(_ []byte) []byte {
-		// Upstream may receive a connection (the proxy dials lazily on
-		// the first upstream.Send carrying the Anomaly Start) but never
-		// a real request body — the session latches EOF inside the
-		// channel after emitAnomalyStart.
-		return buildGRPCWebResponseHTTP([]byte("never"), 0, "OK", false)
+	// USK-1203: the malformed base64 text is forwarded to the upstream
+	// verbatim — no decode, no re-encode — and the upstream's reply is
+	// relayed back to the client.
+	upstreamResp := buildGRPCWebResponseHTTP([]byte("ack-malformed-b64"), 0, "OK", false)
+	upstreamLn, captured := startGRPCWebHTTP1Upstream(t, func(_ []byte) []byte {
+		return upstreamResp
 	})
 	defer upstreamLn.Close()
 	target := upstreamLn.Addr().String()
@@ -547,21 +547,17 @@ func TestGRPCWebBase64Recording_MalformedBase64StillFires(t *testing.T) {
 	if _, err := tlsConn.Write(append([]byte(req), malformedBody...)); err != nil {
 		t.Fatalf("write malformed request: %v", err)
 	}
-	// Drain response (session terminates via EOF after the anomaly).
-	_ = tlsConn.SetReadDeadline(time.Now().Add(5 * time.Second))
-	tmp := make([]byte, 1024)
-	for {
-		_, err := tlsConn.Read(tmp)
-		if err != nil {
-			break
-		}
-	}
+	clientResp := readUntilClose(tlsConn, 5*time.Second)
 
 	select {
 	case <-sessionDone:
 	case <-time.After(15 * time.Second):
 		t.Fatal("timeout waiting for session to complete")
 	}
+
+	assertClientGotUpstreamResponse(t, clientResp, upstreamResp)
+	upstreamLn.Close()
+	assertUpstreamBody(t, captured(), malformedBody)
 
 	st := firstBase64Stream(t, store, 5*time.Second)
 

@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -1104,10 +1105,277 @@ func TestEmitAnomalyStart_QueueDrainsThenEOF(t *testing.T) {
 		t.Errorf("Envelope.Raw = %q, want the malformed body bytes", env1.Raw)
 	}
 
-	// Second Next: must return io.EOF (clean termination).
+	// Second Next: USK-1203 — a clean sentinel End (Raw nil, no anomaly)
+	// follows the anomaly Start so the opposite-side Send flushes the
+	// passthrough body to the wire.
 	env2, err2 := ch.Next(ctx)
-	if !errors.Is(err2, io.EOF) {
-		t.Errorf("second Next() err = %v, want io.EOF; envelope=%v", err2, env2)
+	if err2 != nil {
+		t.Fatalf("second Next() err = %v, want sentinel End envelope", err2)
+	}
+	end, ok := env2.Message.(*envelope.GRPCEndMessage)
+	if !ok {
+		t.Fatalf("second envelope Message type = %T, want *envelope.GRPCEndMessage", env2.Message)
+	}
+	if len(env2.Raw) != 0 || len(end.Anomalies) != 0 {
+		t.Errorf("sentinel End Raw=%q Anomalies=%v, want both empty", env2.Raw, end.Anomalies)
+	}
+
+	// Third Next: must return io.EOF (clean termination).
+	env3, err3 := ch.Next(ctx)
+	if !errors.Is(err3, io.EOF) {
+		t.Errorf("third Next() err = %v, want io.EOF; envelope=%v", err3, env3)
+	}
+}
+
+// TestEmitAnomalyStart_ReceiveDirectionQueuesSentinelEnd — USK-1203: the
+// response side gets the same Start(Raw=body) + sentinel End pair, so a
+// malformed upstream response is flushed to the client by the RoleServer
+// Send path instead of stalling at sendStartLocked.
+func TestEmitAnomalyStart_ReceiveDirectionQueuesSentinelEnd(t *testing.T) {
+	headers := []envelope.KeyValue{{Name: "content-type", Value: "application/grpc-web+proto"}}
+	body := []byte{0x00, 0x00, 0x00, 0x03, 0xe8, 'a', 'b', 'c', 'd'}
+	in := mustHTTPResponseEnv("s-anom-recv", headers, body, 200)
+	mock := newMockChannel("s-anom-recv", in)
+	ch := Wrap(mock, RoleClient)
+
+	envs := drainEnvelopes(t, ch, 5)
+	if len(envs) != 2 {
+		t.Fatalf("got %d envelopes, want 2 (Start + sentinel End)", len(envs))
+	}
+	start, ok := envs[0].Message.(*envelope.GRPCStartMessage)
+	if !ok || len(start.Anomalies) != 1 || start.Anomalies[0].Type != envelope.AnomalyMalformedGRPCWebLPM {
+		t.Fatalf("first envelope = %T %+v, want Start with MalformedGRPCWebLPM", envs[0].Message, envs[0].Message)
+	}
+	if !bytes.Equal(envs[0].Raw, body) {
+		t.Errorf("Start Raw = %q, want %q", envs[0].Raw, body)
+	}
+	if envs[1].Direction != envelope.Receive {
+		t.Errorf("End Direction = %v, want Receive", envs[1].Direction)
+	}
+	end, ok := envs[1].Message.(*envelope.GRPCEndMessage)
+	if !ok {
+		t.Fatalf("second envelope Message = %T, want *GRPCEndMessage", envs[1].Message)
+	}
+	if len(envs[1].Raw) != 0 || len(end.Anomalies) != 0 {
+		t.Errorf("sentinel End Raw=%q Anomalies=%v, want both empty", envs[1].Raw, end.Anomalies)
+	}
+}
+
+// --- USK-1203: Send-side passthrough / trailer forwarding / framing ---
+
+// headerValuesKV returns every value of name (case-insensitive) in order.
+func headerValuesKV(kvs []envelope.KeyValue, name string) []string {
+	var out []string
+	for _, kv := range kvs {
+		if strings.EqualFold(kv.Name, name) {
+			out = append(out, kv.Value)
+		}
+	}
+	return out
+}
+
+// sendAll pushes envs through ch.Send and returns the single HTTPMessage the
+// inner Channel received.
+func sendAll(t *testing.T, ch layer.Channel, mock *mockChannel, envs ...*envelope.Envelope) *envelope.HTTPMessage {
+	t.Helper()
+	ctx := context.Background()
+	for i, env := range envs {
+		if err := ch.Send(ctx, env); err != nil {
+			t.Fatalf("Send[%d] (%T): %v", i, env.Message, err)
+		}
+	}
+	if got := len(mock.sent); got != 1 {
+		t.Fatalf("inner.Send fired %d times, want 1", got)
+	}
+	hm, ok := mock.sent[0].Message.(*envelope.HTTPMessage)
+	if !ok {
+		t.Fatalf("inner.Send Message = %T", mock.sent[0].Message)
+	}
+	return hm
+}
+
+// TestSend_PassthroughStartRaw — a Start carrying the malformed body on
+// env.Raw followed by the sentinel End is flushed verbatim: no base64
+// re-wrap (Raw is already wire form), no synthesized trailer, and the
+// observed Content-Length is kept byte-identical.
+func TestSend_PassthroughStartRaw(t *testing.T) {
+	binaryBody := []byte{0x00, 0x00, 0x00, 0x03, 0xe8, 'a', 'b', 'c', 'd'}
+	textBody := []byte("!!!definitely-not-base64!!!")
+	tests := []struct {
+		name string
+		role Role
+		dir  envelope.Direction
+		ct   string
+		raw  []byte
+	}{
+		{"request binary", RoleClient, envelope.Send, "application/grpc-web+proto", binaryBody},
+		{"request text", RoleClient, envelope.Send, "application/grpc-web-text+proto", textBody},
+		{"response binary", RoleServer, envelope.Receive, "application/grpc-web+proto", binaryBody},
+		{"response text", RoleServer, envelope.Receive, "application/grpc-web-text+proto", textBody},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mock := newMockChannel("s-pt")
+			ch := Wrap(mock, tt.role)
+			cl := strconv.Itoa(len(tt.raw))
+			start := &envelope.Envelope{
+				StreamID: "s-pt", Direction: tt.dir, Raw: tt.raw,
+				Message: &envelope.GRPCStartMessage{
+					Service: "pkg.Echo", Method: "Say", ContentType: tt.ct,
+					Metadata: []envelope.KeyValue{{Name: "Content-Length", Value: cl}},
+				},
+			}
+			end := &envelope.Envelope{StreamID: "s-pt", Direction: tt.dir, Message: &envelope.GRPCEndMessage{}}
+			hm := sendAll(t, ch, mock, start, end)
+			if !bytes.Equal(hm.Body, tt.raw) {
+				t.Errorf("Body = %q, want verbatim %q", hm.Body, tt.raw)
+			}
+			if got := headerValuesKV(hm.Headers, "Content-Length"); len(got) != 1 || got[0] != cl {
+				t.Errorf("Content-Length = %q, want [%q]", got, cl)
+			}
+		})
+	}
+}
+
+// TestSend_RequestTrailerForwarded — a Send-direction End that represents an
+// observed request trailer frame is forwarded (Principle 1), while the clean
+// synthetic End adds nothing.
+func TestSend_RequestTrailerForwarded(t *testing.T) {
+	dataFrame := EncodeFrame(false, false, []byte("ping"))
+	trailerFrame := EncodeFrame(true, false, []byte("grpc-status: 0\r\n"))
+	anomaly := []envelope.Anomaly{{Type: envelope.AnomalyUnexpectedGRPCWebRequestTrailer, Detail: "x"}}
+	tests := []struct {
+		name     string
+		ct       string
+		dataRaw  []byte
+		endRaw   []byte
+		end      *envelope.GRPCEndMessage
+		wantBody []byte
+	}{
+		{
+			name: "binary raw trailer", ct: "application/grpc-web+proto",
+			dataRaw: dataFrame, endRaw: trailerFrame,
+			end:      &envelope.GRPCEndMessage{Anomalies: anomaly},
+			wantBody: append(append([]byte{}, dataFrame...), trailerFrame...),
+		},
+		{
+			name: "text raw trailer", ct: "application/grpc-web-text+proto",
+			dataRaw: EncodeBase64Body(dataFrame), endRaw: EncodeBase64Body(trailerFrame),
+			end:      &envelope.GRPCEndMessage{Anomalies: anomaly},
+			wantBody: EncodeBase64Body(append(append([]byte{}, dataFrame...), trailerFrame...)),
+		},
+		{
+			name: "anomaly without raw re-encodes from fields", ct: "application/grpc-web+proto",
+			dataRaw:  dataFrame,
+			end:      &envelope.GRPCEndMessage{Status: 0, Anomalies: anomaly},
+			wantBody: append(append([]byte{}, dataFrame...), trailerFrame...),
+		},
+		{
+			name: "clean synthetic end adds nothing", ct: "application/grpc-web+proto",
+			dataRaw:  dataFrame,
+			end:      &envelope.GRPCEndMessage{},
+			wantBody: dataFrame,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mock := newMockChannel("s-rt")
+			ch := Wrap(mock, RoleClient)
+			hm := sendAll(t, ch, mock,
+				&envelope.Envelope{StreamID: "s-rt", Direction: envelope.Send,
+					Message: &envelope.GRPCStartMessage{Service: "pkg.Echo", Method: "Say", ContentType: tt.ct}},
+				&envelope.Envelope{StreamID: "s-rt", Direction: envelope.Send, Raw: tt.dataRaw,
+					Message: &envelope.GRPCDataMessage{Payload: []byte("ping")}},
+				&envelope.Envelope{StreamID: "s-rt", Direction: envelope.Send, Raw: tt.endRaw, Message: tt.end},
+			)
+			if !bytes.Equal(hm.Body, tt.wantBody) {
+				t.Errorf("Body = %q, want %q", hm.Body, tt.wantBody)
+			}
+		})
+	}
+}
+
+// TestSend_ContentLengthRewrittenOnLengthChange — the re-assembled body is
+// 9 bytes but the Start Metadata still carries the client's stale
+// Content-Length: 5. The value is rewritten in place (name casing and
+// position preserved).
+func TestSend_ContentLengthRewrittenOnLengthChange(t *testing.T) {
+	mock := newMockChannel("s-cl")
+	ch := Wrap(mock, RoleClient)
+	hm := sendAll(t, ch, mock,
+		&envelope.Envelope{StreamID: "s-cl", Direction: envelope.Send,
+			Message: &envelope.GRPCStartMessage{
+				Service: "pkg.Echo", Method: "Say", ContentType: "application/grpc-web+proto",
+				Metadata: []envelope.KeyValue{
+					{Name: "Host", Value: "example.com"},
+					{Name: "CONTENT-LENGTH", Value: "5"},
+					{Name: "X-After", Value: "1"},
+				},
+			}},
+		&envelope.Envelope{StreamID: "s-cl", Direction: envelope.Send,
+			Message: &envelope.GRPCDataMessage{Payload: []byte("ping")}},
+		&envelope.Envelope{StreamID: "s-cl", Direction: envelope.Send, Message: &envelope.GRPCEndMessage{}},
+	)
+	if len(hm.Body) != 9 {
+		t.Fatalf("Body len = %d, want 9", len(hm.Body))
+	}
+	want := []envelope.KeyValue{
+		{Name: "content-type", Value: "application/grpc-web+proto"},
+		{Name: "Host", Value: "example.com"},
+		{Name: "CONTENT-LENGTH", Value: "9"},
+		{Name: "X-After", Value: "1"},
+	}
+	if !kvEqual(hm.Headers, want) {
+		t.Errorf("Headers = %v, want %v", hm.Headers, want)
+	}
+}
+
+func kvEqual(a, b []envelope.KeyValue) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// TestReconcileBodyFraming covers the framing-header rule applied at the
+// re-assembly seam (USK-1203; USK-769 precedent).
+func TestReconcileBodyFraming(t *testing.T) {
+	kv := func(pairs ...string) []envelope.KeyValue {
+		var out []envelope.KeyValue
+		for i := 0; i+1 < len(pairs); i += 2 {
+			out = append(out, envelope.KeyValue{Name: pairs[i], Value: pairs[i+1]})
+		}
+		return out
+	}
+	tests := []struct {
+		name    string
+		in      []envelope.KeyValue
+		bodyLen int
+		want    []envelope.KeyValue
+	}{
+		{"match is byte-identical", kv("A", "1", "Content-Length", "9", "B", "2"), 9, kv("A", "1", "Content-Length", "9", "B", "2")},
+		{"mismatch rewritten in place", kv("A", "1", "Content-Length", "23", "B", "2"), 25, kv("A", "1", "Content-Length", "25", "B", "2")},
+		{"absent stays absent", kv("A", "1"), 25, kv("A", "1")},
+		{"absent stays absent with empty body", nil, 0, nil},
+		{"casing kept", kv("content-LENGTH", "3"), 4, kv("content-LENGTH", "4")},
+		{"h2 lowercase", kv("content-length", "3"), 4, kv("content-length", "4")},
+		{"TE dropped and CL appended", kv("A", "1", "Transfer-Encoding", "chunked", "B", "2"), 9, kv("A", "1", "B", "2", "Content-Length", "9")},
+		{"TE dropped and existing CL rewritten in place", kv("Content-Length", "3", "transfer-encoding", "chunked"), 9, kv("Content-Length", "9")},
+		{"duplicate CL kept when one already matches", kv("Content-Length", "9", "Content-Length", "10"), 9, kv("Content-Length", "9", "Content-Length", "10")},
+		{"duplicate CL all rewritten when none matches", kv("Content-Length", "3", "Content-Length", "4"), 9, kv("Content-Length", "9", "Content-Length", "9")},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := reconcileBodyFraming(tt.in, tt.bodyLen)
+			if !kvEqual(got, tt.want) {
+				t.Errorf("reconcileBodyFraming(%v, %d) = %v, want %v", tt.in, tt.bodyLen, got, tt.want)
+			}
+		})
 	}
 }
 

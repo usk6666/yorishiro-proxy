@@ -1188,6 +1188,13 @@ func rebuildStartHeaders(start *envelope.GRPCStartMessage) []envelope.KeyValue {
 	return out
 }
 
+// reconcileBodyFraming is a USK-1203 scaffold; the implementation follows in
+// the fix commit.
+func reconcileBodyFraming(headers []envelope.KeyValue, bodyLen int) []envelope.KeyValue {
+	_ = bodyLen
+	return headers
+}
+
 // formatGRPCTimeout returns a grpc-timeout-formatted string. The simplest
 // safe choice is milliseconds with the 'm' unit for any positive duration.
 func formatGRPCTimeout(d time.Duration) string {
