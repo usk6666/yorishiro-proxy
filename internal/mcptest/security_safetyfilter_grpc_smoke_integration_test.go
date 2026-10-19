@@ -14,7 +14,10 @@
 //
 //  1. A benign gRPC unary payload reaches the upstream (sanity gate).
 //  2. A destructive-SQL gRPC unary payload does NOT reach the upstream
-//     — pipeline.SafetyStep blocked it.
+//     — pipeline.SafetyStep blocked it — and the client promptly gets
+//     grpc-status 7 PERMISSION_DENIED (USK-1202).
+//  3. The blocked RPC is recorded with blocked_by=safety_filter and
+//     state=error, the same rule as an HTTP SafetyFilter block.
 //
 // The destructive-sql preset's regex matches the gRPC payload bytes
 // via internal/rules/grpc/safety.extractTarget's
@@ -36,10 +39,13 @@ package mcptest_test
 import (
 	"bytes"
 	"context"
+	"strings"
 	"testing"
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"github.com/usk6666/yorishiro-proxy/internal/mcptest"
 )
@@ -101,29 +107,74 @@ func TestE2E_SafetyFilter_BlocksDestructiveSQL_GRPC(t *testing.T) {
 		t.Fatalf("upstream per-method hits after benign call = %d, want 1", got)
 	}
 
-	// (2) Destructive-SQL payload — must NOT reach the upstream. The
-	// preset matches "DROP TABLE users" via the SQL-keyword regex.
-	// SafetyStep contract is "drop the envelope on Send", not "return
-	// a specific gRPC status", so the durable assertion is the
-	// upstream hit counter. The RPC may complete with a transport / RPC
-	// error or with an empty response — either is acceptable; what
-	// matters is that the upstream handler did not run. (Mirrors the
-	// HTTP smoke's tolerance pattern.)
+	// (2) Destructive-SQL payload — must NOT reach the upstream, and the
+	// client must be told so promptly (USK-1202). The preset matches
+	// "DROP TABLE users" via the SQL-keyword regex; SafetyStep answers a
+	// native-gRPC block with grpc-status 7 PERMISSION_DENIED (the gRPC
+	// analogue of the HTTP 403). Only this call gets a short deadline,
+	// so a proxy that leaves the RPC hanging fails on DeadlineExceeded
+	// instead of passing.
 	destructiveReq := []byte("DROP TABLE users")
 	var destructiveResp []byte
 	hitsBefore := h.GRPCObservedHits.Total()
-	invokeErr := cc.Invoke(ctx, mcptest.GRPCSafetyEchoMethod, &destructiveReq, &destructiveResp,
+	blockedCtx, blockedCancel := context.WithTimeout(ctx, 2*time.Second)
+	defer blockedCancel()
+	start := time.Now()
+	invokeErr := cc.Invoke(blockedCtx, mcptest.GRPCSafetyEchoMethod, &destructiveReq, &destructiveResp,
 		grpc.ForceCodec(grpcRegressionRawCodec{}))
-	hitsAfter := h.GRPCObservedHits.Total()
-	if hitsAfter != hitsBefore {
+	elapsed := time.Since(start)
+	if invokeErr == nil {
+		t.Fatalf("destructive gRPC call succeeded (resp=%q); SafetyFilter did not block", destructiveResp)
+	}
+	st, ok := status.FromError(invokeErr)
+	if !ok {
+		t.Fatalf("destructive gRPC call error is not a gRPC status: %T %v", invokeErr, invokeErr)
+	}
+	if st.Code() != codes.PermissionDenied {
+		t.Errorf("destructive gRPC call status = %v (%q) after %v; want PermissionDenied", st.Code(), st.Message(), elapsed)
+	}
+	if !strings.Contains(st.Message(), "safety_filter") {
+		t.Errorf("destructive gRPC call status message = %q; want it to contain safety_filter", st.Message())
+	}
+	if elapsed > 1500*time.Millisecond {
+		t.Errorf("destructive gRPC call took %v to fail; want < 1.5s (the proxy must end the RPC, not the client deadline)", elapsed)
+	}
+	if hitsAfter := h.GRPCObservedHits.Total(); hitsAfter != hitsBefore {
 		t.Errorf("upstream hits advanced after destructive gRPC call: before=%d after=%d (block failed)",
 			hitsBefore, hitsAfter)
 	}
-	if invokeErr == nil && bytes.Equal(destructiveResp, destructiveReq) {
-		// An echo response that matches the request would prove the
-		// upstream answered — strictly stronger than the hit-counter
-		// assertion above. Surfacing both makes the failure mode
-		// obvious in test output.
-		t.Errorf("destructive gRPC call returned an echo response; SafetyFilter did not block")
+
+	// (3) Recording: the blocked RPC is an audit Stream with
+	// blocked_by=safety_filter and state=error, the same rule as an HTTP
+	// SafetyFilter block. SaveStream goes through an async write queue,
+	// so poll briefly.
+	var blocked map[string]any
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) && blocked == nil {
+		res := h.MustOK(t, "query", map[string]any{
+			"resource": "flows",
+			"filter": map[string]any{
+				"blocked_by": "safety_filter",
+				"protocol":   "grpc",
+			},
+		})
+		if flows, _ := res.Decoded["flows"].([]any); len(flows) > 0 {
+			blocked, _ = flows[0].(map[string]any)
+		}
+		if blocked == nil {
+			time.Sleep(50 * time.Millisecond)
+		}
+	}
+	if blocked == nil {
+		t.Fatalf("query(flows, blocked_by=safety_filter, protocol=grpc) returned 0 results; the block was not recorded")
+	}
+	if got, _ := blocked["blocked_by"].(string); got != "safety_filter" {
+		t.Errorf("blocked Stream.blocked_by = %q, want safety_filter", got)
+	}
+	if got, _ := blocked["state"].(string); !strings.EqualFold(got, "error") {
+		t.Errorf("blocked Stream.state = %q, want error", got)
+	}
+	if got, _ := blocked["protocol"].(string); got != "grpc" {
+		t.Errorf("blocked Stream.protocol = %q, want grpc", got)
 	}
 }

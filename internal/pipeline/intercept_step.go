@@ -291,16 +291,22 @@ func (s *InterceptStep) holdAndDispatch(ctx context.Context, env *envelope.Envel
 		// Receive direction), synthesize a 403 response so the client
 		// sees a clean close instead of hanging until its own read
 		// timeout. The session loop dispatches Respond via client.Send
-		// (dispatchClientAction / wsRelayDirection). Mid-stream WS / gRPC
-		// data drops keep Action=Drop — protocol-correct terminators
-		// (Close frame, trailers) are deferred to follow-up Issues
-		// (D2 / D3).
-		if _, ok := env.Message.(*envelope.HTTPMessage); ok {
+		// (dispatchClientAction / wsRelayDirection).
+		//
+		// USK-1202: a held Send-direction native-gRPC Start / Data gets
+		// the same grpc-status 7 PERMISSION_DENIED terminator as a
+		// SafetyFilter block. A Receive-direction gRPC drop skips one
+		// streamed message and keeps Drop; WS (Close frame) and gRPC-Web
+		// (USK-1220) also keep Drop.
+		switch env.Message.(type) {
+		case *envelope.HTTPMessage:
 			return Result{
 				Action:    Respond,
 				Response:  buildPolicyDropResponse(env, BlockedByInterceptDrop, matchedRules),
 				BlockedBy: BlockedByInterceptDrop,
 			}
+		case *envelope.GRPCStartMessage, *envelope.GRPCDataMessage:
+			return grpcPolicyDropResult(env, BlockedByInterceptDrop, matchedRules)
 		}
 		return Result{Action: Drop, BlockedBy: BlockedByInterceptDrop}
 	case common.ActionModifyAndForward:
@@ -326,8 +332,8 @@ func (s *InterceptStep) holdAndDispatch(ctx context.Context, env *envelope.Envel
 			recheck := s.safety.Process(ctx, action.Modified)
 			// USK-829: SafetyStep now returns Respond (with a synthetic
 			// 403 envelope) for HTTPMessage blocks instead of Drop. The
-			// recheck must forward both Action shapes — Drop for mid-
-			// stream WS / gRPC paths, Respond for HTTPMessage paths —
+			// recheck must forward both Action shapes — Drop for WS /
+			// gRPC-Web, Respond for HTTPMessage and native gRPC (USK-1202) —
 			// so the modify_and_forward bypass is rejected with the same
 			// wire behaviour as a direct SafetyStep block.
 			if recheck.Action == Drop || recheck.Action == Respond {
@@ -423,10 +429,20 @@ func (s *InterceptStep) hold(ctx context.Context, env *envelope.Envelope, matche
 
 	action, err := s.queue.Hold(ctx, env, matchedRules)
 	if err != nil {
-		// Context cancelled while waiting. No user action ever resolved
-		// the hold; do not attribute this to intercept_drop because no
-		// drop decision was made — the surrounding session is being
-		// torn down.
+		// HoldQueue.Hold fails only when ctx ended while waiting
+		// (proxy_stop, session teardown, peer-direction failure); it has
+		// already removed the queue entry. No agent action resolved the
+		// hold, so this is not an intercept_drop — but it must not vanish
+		// unrecorded either (USK-1193): attribute it to
+		// intercept_cancelled so the session's OnPipelineDrop writes the
+		// audit Stream. Always Drop, never the HTTP 403 Respond: the ctx
+		// is gone and there is nobody left to answer. A Release racing
+		// the cancel can report "released" to the agent while this path
+		// wins the select; the Stream then still records the outcome
+		// that actually happened on the wire.
+		if ctx.Err() != nil {
+			return nil, Result{Action: Drop, BlockedBy: BlockedByInterceptCancelled}, false
+		}
 		return nil, Result{Action: Drop}, false
 	}
 	return action, Result{}, true

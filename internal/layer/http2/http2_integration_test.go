@@ -307,6 +307,10 @@ type pipelineOpts struct {
 	// recordMaxBodySize caps flow.Flow.Body when RecordStep materializes a
 	// BodyBuffer. Zero means "use config.MaxBodySize".
 	recordMaxBodySize int64
+	// prependCustomSteps are optional extra Steps prepended to the pipeline
+	// (before HostScope). Used for mid-flight inspection of envelope state,
+	// e.g. asserting that a body actually spilled to disk.
+	prependCustomSteps []pipeline.Step
 }
 
 func buildPipeline(store flow.Writer, opts pipelineOpts) *pipeline.Pipeline {
@@ -321,14 +325,16 @@ func buildPipeline(store flow.Writer, opts pipelineOpts) *pipeline.Pipeline {
 		recordOpts = append(recordOpts, pipeline.WithMaxBodySize(opts.recordMaxBodySize))
 	}
 
-	steps := []pipeline.Step{
+	steps := make([]pipeline.Step, 0, 6+len(opts.prependCustomSteps))
+	steps = append(steps, opts.prependCustomSteps...)
+	steps = append(steps,
 		pipeline.NewHostScopeStep(opts.hostScope),
 		pipeline.NewHTTPScopeStep(opts.httpScope),
 		pipeline.NewSafetyStep(opts.safetyEngine, nil, nil, slog.Default()),
 		pipeline.NewTransformStep(opts.transformEngine, nil, nil, nil),
 		pipeline.NewInterceptStep(opts.interceptEngine, nil, nil, nil, opts.holdQueue, nil, slog.Default()),
 		pipeline.NewRecordStep(store, slog.Default(), recordOpts...),
-	}
+	)
 	return pipeline.New(steps...)
 }
 

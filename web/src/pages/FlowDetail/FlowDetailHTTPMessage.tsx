@@ -459,7 +459,9 @@ export function FlowDetailHTTPMessage({ flow }: FlowDetailHTTPMessageProps) {
               </Tabs>
             ) : (
               <div className="sd-no-response">
-                {flow.state === "error"
+                {flow.blocked_by === "intercept_cancelled"
+                  ? "This request was held by an intercept rule and the connection or proxy went away before it was released or dropped."
+                  : flow.state === "error"
                   ? "This flow ended with an error. No response was received from the upstream server."
                   : flow.state === "active"
                     ? "This flow is still active. The response has not been received yet."

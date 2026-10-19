@@ -55,7 +55,10 @@ var resendGRPCSupportedProtocols = map[string]bool{
 // error rather than a mid-Send StreamError. The Layer enforces a higher
 // cap via config.MaxGRPCMessageSize (254 MiB) — the schema-side cap is
 // fail-fast for misuse, not a security boundary on its own.
-const maxResendGRPCPayload = 16 << 20
+//
+// A var only so tests can lower it (setMaxResendGRPCPayloadForTest);
+// never reassigned in production code.
+var maxResendGRPCPayload = 16 << 20
 
 // validateResendGRPCInput rejects malformed inputs at the schema boundary
 // before any expensive lookups (flow store, dial) run.

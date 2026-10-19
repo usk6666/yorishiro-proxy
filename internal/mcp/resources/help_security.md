@@ -408,6 +408,8 @@ When SafetyFilter blocks a request at the proxy layer:
 - **Header**: `X-Block-Reason: safety_filter`
 - **Body**: JSON object with violation details (rule ID, rule name, and match location)
 
+For a native gRPC call the RPC fails with `grpc-status: 7` (PERMISSION_DENIED) and `grpc-message: blocked by safety_filter`; the matched rule IDs travel comma-separated in the `x-yorishiro-matched-rules` trailer (bytes outside visible ASCII, `%`, and `,` inside an ID are percent-encoded). A blocked message in a bidi/client stream ends the whole RPC. gRPC-Web messages are dropped without a status.
+
 When SafetyFilter blocks an MCP tool operation (resend, fuzz, intercept modify_and_forward, macro):
 
 - **MCP error response** with violation details

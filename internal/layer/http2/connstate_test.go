@@ -686,12 +686,15 @@ func TestConn_HandleRSTStream(t *testing.T) {
 	}
 
 	rstFrame := makeRSTStreamFrame(1, ErrCodeCancel)
-	errCode, err := c.HandleRSTStream(rstFrame)
+	errCode, ignored, err := c.HandleRSTStream(rstFrame)
 	if err != nil {
 		t.Fatalf("HandleRSTStream error: %v", err)
 	}
 	if errCode != ErrCodeCancel {
 		t.Errorf("errCode = %d, want %d", errCode, ErrCodeCancel)
+	}
+	if ignored {
+		t.Error("ignored = true for RST_STREAM on an open stream, want false")
 	}
 
 	s := c.Streams().Get(1)
@@ -704,7 +707,7 @@ func TestConn_HandleRSTStream_ZeroStreamID(t *testing.T) {
 	c := NewConn()
 
 	rstFrame := makeRSTStreamFrame(0, ErrCodeCancel)
-	_, err := c.HandleRSTStream(rstFrame)
+	_, _, err := c.HandleRSTStream(rstFrame)
 	if err == nil {
 		t.Fatal("expected error for RST_STREAM with stream ID 0")
 	}
@@ -801,7 +804,7 @@ func TestConn_HandleRSTStream_IdleStream(t *testing.T) {
 
 	// RST_STREAM on an idle (never-seen) stream should be a connection error.
 	rstFrame := makeRSTStreamFrame(99, ErrCodeCancel)
-	_, err := c.HandleRSTStream(rstFrame)
+	_, _, err := c.HandleRSTStream(rstFrame)
 	if err == nil {
 		t.Fatal("expected error for RST_STREAM on idle stream")
 	}
@@ -909,5 +912,30 @@ func makeRSTStreamFrame(streamID, errCode uint32) *frame.Frame {
 			StreamID: streamID,
 		},
 		Payload: payload,
+	}
+}
+
+// TestConn_HandleRSTStream_RetiredStreamIsIgnored pins review F-1: an
+// RST_STREAM on a stream that has closed and been retired (no entry) is
+// reported as ignored, so the caller does not handle it as a live stream.
+func TestConn_HandleRSTStream_RetiredStreamIsIgnored(t *testing.T) {
+	c := NewConn()
+	if err := c.Streams().Transition(1, EventSendHeaders); err != nil {
+		t.Fatal(err)
+	}
+	c.Streams().Remove(1)
+
+	code, ignored, err := c.HandleRSTStream(makeRSTStreamFrame(1, ErrCodeCancel))
+	if err != nil {
+		t.Fatalf("HandleRSTStream on retired stream: %v", err)
+	}
+	if !ignored {
+		t.Error("ignored = false for RST_STREAM on a retired stream, want true")
+	}
+	if code != ErrCodeCancel {
+		t.Errorf("code = %d, want %d", code, ErrCodeCancel)
+	}
+	if c.Streams().Get(1) != nil {
+		t.Error("RST_STREAM on a retired stream re-created its entry")
 	}
 }

@@ -945,6 +945,10 @@ func (c *channel) parseRequest() (*envelope.Envelope, error) {
 	c.ctxTmpl.RequestPath = path
 	c.ctxTmpl.RequestMethod = rawReq.Method
 	c.ctxTmpl.RequestRawQuery = rawQuery
+	// USK-1199: the authority HTTPMessage.Authority carries, so a
+	// Message-less overlay of this exchange (grpcweb-base64) matches
+	// capture_scope hostname rules the way the semantic envelope does.
+	c.ctxTmpl.RequestAuthority = authority
 
 	// USK-772: configure raw-body disk-spill on the parser body reader before
 	// drain so chunked / identity bodies above BodySpillThreshold are captured
@@ -1272,6 +1276,7 @@ func (c *channel) sendRequest(msg *envelope.HTTPMessage, env *envelope.Envelope)
 	c.ctxTmpl.RequestPath = msg.Path
 	c.ctxTmpl.RequestMethod = msg.Method
 	c.ctxTmpl.RequestRawQuery = msg.RawQuery
+	c.ctxTmpl.RequestAuthority = msg.Authority
 
 	// USK-730: register this Channel in the parent Layer's pendingQ
 	// atomically with the wire write so the response FIFO matches the

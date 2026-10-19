@@ -151,9 +151,10 @@ func TestBuildPipelineDropRecorder_NoMessage_MinimalStream(t *testing.T) {
 }
 
 // TestBuildPipelineDropRecorder_EmptyBlockedBy_NoOp verifies the recorder
-// silently ignores a Drop with no attribution. Plugin ActionDrop and the
-// context-cancel hold path emit empty BlockedBy on purpose (USK-782 design
-// scope guards) and must not produce an audit row.
+// silently ignores a Drop with no attribution. Plugin ActionDrop emits
+// empty BlockedBy on purpose (USK-782 design scope guards) and must not
+// produce an audit row. (The context-cancelled hold path is attributed to
+// intercept_cancelled since USK-1193.)
 func TestBuildPipelineDropRecorder_EmptyBlockedBy_NoOp(t *testing.T) {
 	store := &recordingFlowStore{}
 	rec := buildPipelineDropRecorder(store, "live", silentLogger(), newBlockedStreamSet())

@@ -63,13 +63,12 @@ type Result struct {
 	// the session loop can record an audit Stream for the blocked envelope
 	// (USK-782 / USK-829). It is surfaced by RunWithBlockedBy for both Drop
 	// and Respond and may be empty when a Step short-circuits without an
-	// attribution (e.g. plugin ActionDrop / RESPOND, intercept user-action
-	// drop on receive — explicitly out of scope per USK-782 design). It is
-	// ignored for Continue.
+	// attribution (e.g. plugin ActionDrop / RESPOND — explicitly out of
+	// scope per USK-782 design). It is ignored for Continue.
 	//
 	// Canonical values are the same set accepted by the MCP query tool's
-	// blocked_by filter: "target_scope", "intercept_drop", "rate_limit",
-	// "safety_filter", "budget".
+	// blocked_by filter: "target_scope", "intercept_drop",
+	// "intercept_cancelled", "rate_limit", "safety_filter", "budget".
 	BlockedBy string
 }
 

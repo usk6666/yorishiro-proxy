@@ -193,8 +193,27 @@ func (s *RecordScope) ShouldRecord(env *envelope.Envelope) bool {
 // derivable the empty string is returned and any rule with a Hostname
 // field will fail to match — which is correct for include-mode
 // (out-of-scope) and harmless for exclude-only (kept).
+//
+// USK-1199: a Message-less wire_level overlay (h2-frame, grpcweb-base64)
+// can be a stream's first Send envelope — on the aggregator h2 path and
+// the gRPC-Web text path the body's overlay reaches RecordStep before
+// the semantic HTTPMessage / GRPCStartMessage, and RecordStep caches the
+// per-stream decision on it. For those envelopes the request head comes
+// from the wire-observed EnvelopeContext.RequestMethod / RequestPath /
+// RequestAuthority the producing Layer stamps from the same stream's
+// HEADERS / request line, so the cached decision equals the semantic
+// one (including the hostname under HTTP/2 connection coalescing).
 func extractScopeFields(env *envelope.Envelope) (method, hostname, path string) {
 	hostname = scopeHostnameFromContext(env)
+
+	if env.Message == nil && isScopeOverlay(env) {
+		method = env.Context.RequestMethod
+		path = env.Context.RequestPath
+		if h := scopeHostnameFromAuthority(env.Context.RequestAuthority); h != "" {
+			hostname = h
+		}
+		return method, hostname, path
+	}
 
 	switch m := env.Message.(type) {
 	case *envelope.HTTPMessage:
@@ -219,6 +238,14 @@ func extractScopeFields(env *envelope.Envelope) (method, hostname, path string) 
 		}
 	}
 	return method, hostname, path
+}
+
+// isScopeOverlay reports whether env is a non-semantic wire_level
+// overlay (WireLevel stamped by the session record helpers). Mirrors
+// pipeline.isWireLevelOverlay.
+func isScopeOverlay(env *envelope.Envelope) bool {
+	wl := env.Context.WireLevel
+	return wl != "" && wl != WireLevelSemantic
 }
 
 // scopeHostnameFromContext returns the connection-level hostname (Context

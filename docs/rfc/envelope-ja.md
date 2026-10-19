@@ -577,7 +577,7 @@ SafetyFilter は **目的・層・保護対象が完全に異なる 2 つのフ�
 
 - **目的**: AI Agent が破壊的な脆弱性診断ペイロード (SQL injection / OS command injection / 上流データ破壊) を upstream server に送信するのを防ぐ。
 - **層**: ライブデータパス — `internal/pipeline/safety_step.go` がプロトコル別の `internal/rules/{http,ws,grpc}/safety.go` エンジンに dispatch する。Send 方向のみ評価 (`safety_step.go` で `env.Direction != envelope.Send` のとき早期 `Result{}`)。
-- **挙動**: wire 上で block。HTTPMessage 違反は synthetic 403 (`Action=Respond`)、mid-stream WS/gRPC フレームは `Action=Drop`。記録された flow には `BlockedBy=safety_filter` がスタンプされる。
+- **挙動**: wire 上で block。HTTPMessage 違反は synthetic 403 (`Action=Respond`)。native gRPC の Start/Data 違反は Receive 方向の synthetic `GRPCEndMessage` (grpc-status 7 PERMISSION_DENIED、`grpc-message: blocked by safety_filter`、`server: yorishiro-proxy`、`x-yorishiro-matched-rules`) で `Action=Respond` し、`internal/layer/grpc` が Trailers-Only 応答 (レスポンス HEADERS 中継済みなら trailers) として描画、session はその RPC を終了して dial 済みの upstream stream を閉じる (USK-1202)。保留中の Send 方向 native gRPC Start/Data への intercept `drop` も同じ終端を `BlockedBy=intercept_drop` で返す。WS フレームと gRPC-Web メッセージは引き続き `Action=Drop` (gRPC-Web の終端は USK-1220)。記録された flow には `BlockedBy=safety_filter` がスタンプされる。
 - **保護対象**: **upstream server**。
 - **modify_and_forward 再チェック (USK-702)**: `InterceptStep.holdAndDispatch` の Send 方向 modify_and_forward 経路は、operator が書き換えた envelope に対して同じ `SafetyStep.Process` を再実行する。これにより「AI Agent が SafetyFilter を通る無害なリクエストを送らせ → hold 中に destructive payload に書き換えて release」という迂回経路を塞ぐ。
 

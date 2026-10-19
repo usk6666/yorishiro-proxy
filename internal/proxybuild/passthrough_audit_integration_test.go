@@ -538,3 +538,196 @@ func TestProxybuild_TLSPassthrough_InScope_HostnameMatch(t *testing.T) {
 		t.Errorf("Flow.Metadata[sni] = %q, want passthrough-meta-upstream", flows[0].Metadata["sni"])
 	}
 }
+
+// recordedPassthroughHandshakeBound is the latency budget for a TLS
+// handshake through a recorded passthrough relay. The pre-USK-1170 SNI
+// peek waited for its 5 s deadline on every connection, so anything under
+// 1 s proves the peek returns as soon as the ClientHello is buffered.
+const recordedPassthroughHandshakeBound = time.Second
+
+// startRecordedPassthroughProxy builds a live stack with a FlowStore (so
+// the passthrough audit recorder — and with it the SNI peek — is active)
+// and the TLS echo upstream on the passthrough list.
+func startRecordedPassthroughProxy(ctx context.Context, t *testing.T) (proxyAddr, upstreamAddr string, upstreamCert *x509.Certificate, store *passthroughAuditStore) {
+	t.Helper()
+
+	upstreamAddr, upstreamCert, cleanup := startTLSEchoServer(t)
+	t.Cleanup(cleanup)
+	upstreamHost, _, _ := net.SplitHostPort(upstreamAddr)
+
+	pl := connector.NewPassthroughList()
+	pl.Add(upstreamHost)
+
+	store = newPassthroughAuditStore()
+	ca := &cert.CA{}
+	if err := ca.Generate(); err != nil {
+		t.Fatalf("CA.Generate: %v", err)
+	}
+	stack, err := proxybuild.BuildLiveStack(ctx, proxybuild.Deps{
+		Logger:          testutil.DiscardLogger(),
+		ListenerName:    "usk-1170-test",
+		ListenAddr:      "127.0.0.1:0",
+		FlowStore:       store,
+		PassthroughList: pl,
+		BuildConfig: &connector.BuildConfig{
+			ProxyConfig: &config.ProxyConfig{},
+			Issuer:      cert.NewIssuer(ca),
+		},
+	})
+	if err != nil {
+		t.Fatalf("BuildLiveStack: %v", err)
+	}
+	go func() { _ = stack.Listener.Start(ctx) }()
+	select {
+	case <-stack.Listener.Ready():
+	case <-time.After(5 * time.Second):
+		t.Fatal("listener never reported ready")
+	}
+	return stack.Listener.Addr(), upstreamAddr, upstreamCert, store
+}
+
+// assertTimedPassthroughHandshakeRecorded runs a TLS handshake + echo over
+// an established tunnel, asserts the handshake beat the latency bound, and
+// then asserts the audit Flow still carries SNI and JA3/JA4.
+func assertTimedPassthroughHandshakeRecorded(t *testing.T, conn net.Conn, upstreamCert *x509.Certificate, store *passthroughAuditStore) {
+	t.Helper()
+
+	rootPool := x509.NewCertPool()
+	rootPool.AddCert(upstreamCert)
+	tlsConn := tls.Client(conn, &tls.Config{
+		RootCAs:    rootPool,
+		ServerName: "passthrough-meta-upstream",
+	})
+	_ = conn.SetDeadline(time.Now().Add(15 * time.Second))
+	start := time.Now()
+	if err := tlsConn.Handshake(); err != nil {
+		t.Fatalf("client TLS handshake through passthrough: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed >= recordedPassthroughHandshakeBound {
+		t.Errorf("handshake through recorded passthrough took %v, want < %v", elapsed, recordedPassthroughHandshakeBound)
+	}
+	payload := []byte("usk-1170 recorded passthrough latency")
+	if _, err := tlsConn.Write(payload); err != nil {
+		t.Fatalf("tlsConn.Write: %v", err)
+	}
+	rb := make([]byte, len(payload))
+	if _, err := io.ReadFull(tlsConn, rb); err != nil {
+		t.Fatalf("tlsConn.Read: %v", err)
+	}
+	_ = tlsConn.Close()
+	_ = conn.Close()
+
+	deadline := time.Now().Add(3 * time.Second)
+	var streams []*flow.Stream
+	var flows []*flow.Flow
+	for time.Now().Before(deadline) {
+		streams, flows = store.snapshot()
+		if len(streams) > 0 && len(flows) > 0 && streams[0].State == "complete" {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if len(streams) != 1 || len(flows) != 1 {
+		t.Fatalf("expected 1 audit Stream + 1 Flow, got %d streams / %d flows", len(streams), len(flows))
+	}
+	if streams[0].State != "complete" {
+		t.Errorf("Stream.State = %q, want complete", streams[0].State)
+	}
+	md := flows[0].Metadata
+	if md["sni"] != "passthrough-meta-upstream" {
+		t.Errorf("Flow.Metadata[sni] = %q, want passthrough-meta-upstream", md["sni"])
+	}
+	if len(md["client_ja3"]) != 32 {
+		t.Errorf("Flow.Metadata[client_ja3] = %q, want 32-char md5 hex", md["client_ja3"])
+	}
+	if md["client_ja4"] == "" {
+		t.Errorf("Flow.Metadata[client_ja4] is empty, want a fingerprint")
+	}
+}
+
+// TestProxybuild_TLSPassthrough_Recorded_CONNECT_HandshakeNotStalled is the
+// USK-1170 regression: with recording enabled, the passthrough SNI peek
+// must not hold the handshake for clientHelloPeekTimeout.
+func TestProxybuild_TLSPassthrough_Recorded_CONNECT_HandshakeNotStalled(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	proxyAddr, upstreamAddr, upstreamCert, store := startRecordedPassthroughProxy(ctx, t)
+
+	conn, err := net.DialTimeout("tcp", proxyAddr, 5*time.Second)
+	if err != nil {
+		t.Fatalf("dial proxy: %v", err)
+	}
+	defer conn.Close()
+
+	connectReq := fmt.Sprintf("CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", upstreamAddr, upstreamAddr)
+	if _, werr := conn.Write([]byte(connectReq)); werr != nil {
+		t.Fatalf("write CONNECT: %v", werr)
+	}
+	want := "HTTP/1.1 200 Connection Established\r\n\r\n"
+	resp := make([]byte, len(want))
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if _, rerr := io.ReadFull(conn, resp); rerr != nil {
+		t.Fatalf("read CONNECT response: %v", rerr)
+	}
+	if string(resp) != want {
+		t.Fatalf("CONNECT response = %q", resp)
+	}
+
+	assertTimedPassthroughHandshakeRecorded(t, conn, upstreamCert, store)
+}
+
+// TestProxybuild_TLSPassthrough_Recorded_SOCKS5_HandshakeNotStalled is the
+// SOCKS5 sibling of the CONNECT regression (socks5Passthrough shares the
+// observed relay). USK-1170.
+func TestProxybuild_TLSPassthrough_Recorded_SOCKS5_HandshakeNotStalled(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	proxyAddr, upstreamAddr, upstreamCert, store := startRecordedPassthroughProxy(ctx, t)
+	upstreamHost, portStr, _ := net.SplitHostPort(upstreamAddr)
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		t.Fatalf("parse port: %v", err)
+	}
+	ip := net.ParseIP(upstreamHost).To4()
+	if ip == nil {
+		t.Fatalf("upstream host %q is not IPv4", upstreamHost)
+	}
+
+	conn, err := net.DialTimeout("tcp", proxyAddr, 5*time.Second)
+	if err != nil {
+		t.Fatalf("dial proxy: %v", err)
+	}
+	defer conn.Close()
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+
+	// Greeting: VER=5, NMETHODS=1, METHOD=NO_AUTH.
+	if _, werr := conn.Write([]byte{0x05, 0x01, 0x00}); werr != nil {
+		t.Fatalf("write SOCKS5 greeting: %v", werr)
+	}
+	method := make([]byte, 2)
+	if _, rerr := io.ReadFull(conn, method); rerr != nil {
+		t.Fatalf("read SOCKS5 method selection: %v", rerr)
+	}
+	if method[0] != 0x05 || method[1] != 0x00 {
+		t.Fatalf("SOCKS5 method selection = %x, want 0500", method)
+	}
+	// CONNECT: VER=5, CMD=1, RSV=0, ATYP=IPv4, ADDR, PORT.
+	req := []byte{0x05, 0x01, 0x00, 0x01}
+	req = append(req, ip...)
+	req = append(req, byte(port>>8), byte(port))
+	if _, werr := conn.Write(req); werr != nil {
+		t.Fatalf("write SOCKS5 CONNECT: %v", werr)
+	}
+	// Reply with IPv4 BND.ADDR: 10 bytes.
+	reply := make([]byte, 10)
+	if _, rerr := io.ReadFull(conn, reply); rerr != nil {
+		t.Fatalf("read SOCKS5 reply: %v", rerr)
+	}
+	if reply[0] != 0x05 || reply[1] != 0x00 {
+		t.Fatalf("SOCKS5 reply = %x, want VER=05 REP=00", reply[:2])
+	}
+
+	assertTimedPassthroughHandshakeRecorded(t, conn, upstreamCert, store)
+}
