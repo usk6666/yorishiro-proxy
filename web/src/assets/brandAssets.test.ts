@@ -28,14 +28,28 @@ const webAssets = import.meta.glob<string>("./*.svg", {
 const DARK_LOGO = "./yorishiro-proxy-logo-dark.svg";
 const ICON = "./yorishiro-proxy-icon.svg";
 
-function stripCommentsAndStyle(svg: string): string {
-  return svg
-    .replace(/<!--[\s\S]*?-->/g, "")
-    .replace(/<style>[\s\S]*?<\/style>/g, "");
+// Removes every [open, close) span by splitting on the delimiters rather than
+// with a regex replace, so no partial delimiter can survive a single pass.
+// An unterminated span drops the rest of the input.
+function stripSpans(svg: string, open: string, close: string): string {
+  const [head, ...rest] = svg.split(open);
+  return (
+    head +
+    rest
+      .map((part) => {
+        const end = part.indexOf(close);
+        return end < 0 ? "" : part.slice(end + close.length);
+      })
+      .join("")
+  );
 }
 
 function stripComments(svg: string): string {
-  return svg.replace(/<!--[\s\S]*?-->/g, "");
+  return stripSpans(svg, "<!--", "-->");
+}
+
+function stripCommentsAndStyle(svg: string): string {
+  return stripSpans(stripComments(svg), "<style>", "</style>");
 }
 
 // Comments are stripped first: the derivation comment in the dark copy
