@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -30,13 +32,15 @@ func TestRunner_Install_AllTargets(t *testing.T) {
 	dir := t.TempDir()
 	origDir := chdir(t, dir)
 	defer chdir(t, origDir)
+	home := sandboxHome(t)
+	bin, marker := stubVerifyBinary(t)
 
 	var out bytes.Buffer
 	opts := Options{
 		Target:     TargetAll,
 		Scope:      "project",
 		ListenAddr: "127.0.0.1:8080",
-		BinaryPath: "/usr/bin/yorishiro-proxy",
+		BinaryPath: bin,
 	}
 
 	runner := NewRunner(opts, &mockPrompter{}, &out)
@@ -68,6 +72,10 @@ func TestRunner_Install_AllTargets(t *testing.T) {
 	if _, err := os.Stat(dir + "/.mcp.json"); err != nil {
 		t.Errorf(".mcp.json not created: %v", err)
 	}
+	if !strings.Contains(output, "Testing MCP server startup... OK") {
+		t.Errorf("verification did not report OK\nfull output:\n%s", output)
+	}
+	assertInstallAllSandboxed(t, home, marker)
 }
 
 func TestRunner_Install_MCPOnly(t *testing.T) {
@@ -189,6 +197,8 @@ func TestRunner_Install_Interactive(t *testing.T) {
 	dir := t.TempDir()
 	origDir := chdir(t, dir)
 	defer chdir(t, origDir)
+	home := sandboxHome(t)
+	bin, marker := stubVerifyBinary(t)
 
 	var out bytes.Buffer
 	prompter := &mockPrompter{
@@ -201,7 +211,7 @@ func TestRunner_Install_Interactive(t *testing.T) {
 		Target:      TargetAll,
 		ListenAddr:  "127.0.0.1:8080",
 		Interactive: true,
-		BinaryPath:  "/usr/bin/yorishiro-proxy",
+		BinaryPath:  bin,
 	}
 
 	runner := NewRunner(opts, prompter, &out)
@@ -219,6 +229,7 @@ func TestRunner_Install_Interactive(t *testing.T) {
 	if !strings.Contains(output, "MCP configuration") {
 		t.Error("output missing MCP step")
 	}
+	assertInstallAllSandboxed(t, home, marker)
 }
 
 func TestRunner_Install_PlaywrightNonInteractive(t *testing.T) {
@@ -305,4 +316,48 @@ func chdir(t *testing.T, dir string) string {
 		t.Fatalf("chdir: %v", err)
 	}
 	return orig
+}
+
+// sandboxHome points HOME (and XDG_CONFIG_HOME) at a fresh temp dir so the
+// default CA directory and the user-scope MCP config resolve there instead
+// of the developer's real home (USK-1208). Returns the temp HOME.
+func sandboxHome(t *testing.T) string {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	return home
+}
+
+// stubVerifyBinary writes a shell script that records it ran and exits 0,
+// for the install's VerifyMCPServer step. A hard-coded path such as
+// /usr/bin/yorishiro-proxy would start a real proxy for 3 s wherever one
+// is installed. Returns (binary, marker).
+func stubVerifyBinary(t *testing.T) (string, string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("the verification stub is a POSIX shell script")
+	}
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "verified")
+	bin := filepath.Join(dir, "yorishiro-proxy-stub")
+	script := "#!/bin/sh\n: > " + shellQuote(marker) + "\nexit 0\n"
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatalf("write verify stub: %v", err)
+	}
+	return bin, marker
+}
+
+// assertInstallAllSandboxed checks that an all-targets install put its CA
+// under the sandboxed HOME and verified the stub binary.
+func assertInstallAllSandboxed(t *testing.T, home, marker string) {
+	t.Helper()
+	for _, name := range []string{"ca.crt", "ca.key"} {
+		if _, err := os.Stat(filepath.Join(home, ".yorishiro-proxy", "ca", name)); err != nil {
+			t.Errorf("%s not created under the sandboxed HOME: %v", name, err)
+		}
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Errorf("verification did not execute the configured binary: %v", err)
+	}
 }

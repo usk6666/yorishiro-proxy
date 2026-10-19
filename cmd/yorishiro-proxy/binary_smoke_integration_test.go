@@ -72,9 +72,9 @@ func TestE2E_Binary_ServerClientRoundTrip(t *testing.T) {
 	srv := startServerProcess(t, binary, port, token, dbPath)
 	defer srv.terminate(t)
 
-	if !waitForListener(net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), 15*time.Second) {
+	if !waitForListener(net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), binaryBootTimeout) {
 		srv.terminate(t)
-		t.Fatalf("binary server did not bind 127.0.0.1:%d within 15s; stderr so far:\n%s", port, srv.stderrSnapshot())
+		t.Fatalf("binary server did not bind 127.0.0.1:%d within %v; stderr so far:\n%s", port, binaryBootTimeout, srv.stderrSnapshot())
 	}
 
 	statusJSON := runClientQuery(t, binary, port, token, "status")
@@ -92,12 +92,50 @@ func TestE2E_Binary_ServerClientRoundTrip(t *testing.T) {
 	// MCP round-trip works end-to-end via the binary.
 	_ = parsed.Running
 
+	// server.json discovery file: written under the child's (sandboxed)
+	// HOME while the server runs — never the developer's real home.
+	serverJSON := filepath.Join(srv.home, ".yorishiro-proxy", "server.json")
+	pid := srv.cmd.Process.Pid
+	if !waitForServerJSONEntry(serverJSON, pid, true, 5*time.Second) {
+		t.Errorf("server.json under the sandboxed HOME (%s) has no entry for pid %d", serverJSON, pid)
+	}
+
 	// Graceful shutdown assertion: SIGTERM, expect exit 0 within 10s.
 	if err := srv.cmd.Process.Signal(syscall.SIGTERM); err != nil {
 		t.Fatalf("send SIGTERM to server: %v", err)
 	}
 	if err := srv.waitWithTimeout(10 * time.Second); err != nil {
 		t.Errorf("server did not shut down cleanly after SIGTERM: %v\nstderr:\n%s", err, srv.stderrSnapshot())
+	}
+	if !waitForServerJSONEntry(serverJSON, pid, false, 0) {
+		t.Errorf("server.json still lists pid %d after a clean shutdown", pid)
+	}
+}
+
+// waitForServerJSONEntry polls the server.json at path until an entry for
+// pid is present (want=true) or absent (want=false), or timeout elapses.
+// It checks at least once. Returns whether the wanted state was observed.
+func waitForServerJSONEntry(path string, pid int, want bool, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		var entries []struct {
+			PID int `json:"pid"`
+		}
+		found := false
+		if data, err := os.ReadFile(path); err == nil && json.Unmarshal(data, &entries) == nil {
+			for _, e := range entries {
+				if e.PID == pid {
+					found = true
+				}
+			}
+		}
+		if found == want {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 }
 
@@ -126,7 +164,18 @@ func buildBinary(t *testing.T) string {
 		// that package. `go build` works against the current package
 		// the same way as it would from the project root with the
 		// full ./cmd/yorishiro-proxy path.
-		cmd := exec.Command("go", "build", "-o", out, ".")
+		//
+		// Mirror the test binary's -race setting: `go test -race` has
+		// already compiled every dependency with race instrumentation,
+		// and a plain `go build` cannot reuse any of it (USK-1208: 30-41 s
+		// on CI). The environment, and so the build cache, is inherited
+		// unchanged — never point HOME elsewhere for this command.
+		args := []string{"build"}
+		if raceEnabled {
+			args = append(args, "-race")
+		}
+		args = append(args, "-o", out, ".")
+		cmd := exec.Command("go", args...)
 		cmd.Stderr = os.Stderr
 		if err := cmd.Run(); err != nil {
 			binaryBuildErr = fmt.Errorf("go build: %w", err)
@@ -138,6 +187,27 @@ func buildBinary(t *testing.T) string {
 		t.Fatalf("build binary: %v", binaryBuildErr)
 	}
 	return binaryBuildPath
+}
+
+// binaryBootTimeout bounds how long a spawned server may take to bind its
+// MCP listener. Generous because the child is a -race binary when the test
+// is (see buildBinary), and race-instrumented SQLite migrations make its
+// boot several times slower on a loaded runner. It is a bound, not a
+// sleep: a healthy boot returns as soon as the port answers.
+const binaryBootTimeout = 30 * time.Second
+
+// binaryChildEnv returns the environment for a spawned yorishiro-proxy
+// child: the test's own environment with HOME (and XDG_CONFIG_HOME) moved
+// to home, so the child's server.json, default export directory and any
+// other ~/.yorishiro-proxy write land in a temp dir instead of the
+// developer's real home (USK-1208), and with the race detector's 1 s
+// at-exit sleep disabled (the child is a -race binary when the test is).
+func binaryChildEnv(home string) []string {
+	return append(os.Environ(),
+		"HOME="+home,
+		"XDG_CONFIG_HOME="+filepath.Join(home, ".config"),
+		"GORACE="+strings.TrimSpace(os.Getenv("GORACE")+" atexit_sleep_ms=0"),
+	)
 }
 
 // pickFreeBinaryPort returns an ephemeral loopback port suitable for
@@ -164,6 +234,7 @@ func pickFreeBinaryPort(t *testing.T) int {
 // under exitMu to keep close-on-exit and read-result independent.
 type serverProcess struct {
 	cmd      *exec.Cmd
+	home     string // the child's HOME (a per-server temp dir)
 	stderr   *bytes.Buffer
 	stderrMu sync.Mutex
 	done     chan struct{}
@@ -181,6 +252,7 @@ func startServerProcess(t *testing.T, binary string, port int, token, dbPath str
 	t.Helper()
 
 	srv := &serverProcess{
+		home:   t.TempDir(),
 		stderr: new(bytes.Buffer),
 		done:   make(chan struct{}),
 	}
@@ -194,6 +266,7 @@ func startServerProcess(t *testing.T, binary string, port int, token, dbPath str
 		"-log-level", "error",
 	}
 	srv.cmd = exec.Command(binary, append(args, extra...)...)
+	srv.cmd.Env = binaryChildEnv(srv.home)
 	// stdout is reserved for MCP stdio when -stdio-mcp is set; it is
 	// silent in HTTP-only mode but we still discard it so the test
 	// process does not inherit any stray bytes.
@@ -295,6 +368,7 @@ func runClientQuery(t *testing.T, binary string, port int, token, resource strin
 		"--format", "json",
 		"resource="+resource,
 	)
+	cmd.Env = binaryChildEnv(t.TempDir())
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -372,10 +446,10 @@ func TestE2E_Binary_CurlProxytunnel_Smoke(t *testing.T) {
 	srv := startServerProcess(t, binary, mcpPort, token, dbPath)
 	defer srv.terminate(t)
 
-	if !waitForListener(net.JoinHostPort("127.0.0.1", strconv.Itoa(mcpPort)), 15*time.Second) {
+	if !waitForListener(net.JoinHostPort("127.0.0.1", strconv.Itoa(mcpPort)), binaryBootTimeout) {
 		srv.terminate(t)
-		t.Fatalf("binary server did not bind 127.0.0.1:%d within 15s; stderr so far:\n%s",
-			mcpPort, srv.stderrSnapshot())
+		t.Fatalf("binary server did not bind 127.0.0.1:%d within %v; stderr so far:\n%s",
+			mcpPort, binaryBootTimeout, srv.stderrSnapshot())
 	}
 
 	// Use the client subcommand to invoke proxy_start. The proxy must
@@ -421,6 +495,7 @@ func startProxyViaClient(t *testing.T, binary string, mcpPort int, token string,
 		"--format", "json",
 		"listen_addr=127.0.0.1:"+strconv.Itoa(proxyPort),
 	)
+	cmd.Env = binaryChildEnv(t.TempDir())
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -542,8 +617,7 @@ func TestBinarySmoke_DocsSubcommandWorksOffline(t *testing.T) {
 	deadPort := pickFreeBinaryPort(t)
 
 	// A temp HOME with no server.json, plus an endpoint that cannot answer.
-	env := append(os.Environ(),
-		"HOME="+t.TempDir(),
+	env := append(binaryChildEnv(t.TempDir()),
 		"YP_CLIENT_ADDR=127.0.0.1:"+strconv.Itoa(deadPort),
 		"YP_CLIENT_TOKEN=bogus-token-no-server-is-running",
 	)

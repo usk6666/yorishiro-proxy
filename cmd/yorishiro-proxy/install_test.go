@@ -2,39 +2,89 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/usk6666/yorishiro-proxy/internal/setup"
 )
 
-func TestRunInstall_AllTargets(t *testing.T) {
+// sandboxInstallEnv points HOME (and XDG_CONFIG_HOME) at a fresh temp dir
+// and changes into another, so an install writes nothing under the
+// developer's real home or the package directory (USK-1208). Returns
+// (home, cwd).
+func sandboxInstallEnv(t *testing.T) (string, string) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	cwd := t.TempDir()
+	t.Chdir(cwd)
+	return home, cwd
+}
+
+// stubVerifyBinary writes a shell script that records it ran and exits 0.
+// It stands in for the yorishiro-proxy binary that the install's
+// verification step executes; without it the step executes os.Executable()
+// — this test binary — which runs the whole test suite until the 3 s
+// verification timeout kills it.
+func stubVerifyBinary(t *testing.T) (bin, marker string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("the verification stub is a POSIX shell script")
+	}
 	dir := t.TempDir()
-	origDir, err := os.Getwd()
+	marker = filepath.Join(dir, "verified")
+	bin = filepath.Join(dir, "yorishiro-proxy-stub")
+	script := "#!/bin/sh\n: > " + shellQuote(marker) + "\nexit 0\n"
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatalf("write verify stub: %v", err)
+	}
+	return bin, marker
+}
+
+func TestRunInstall_AllTargets(t *testing.T) {
+	home, cwd := sandboxInstallEnv(t)
+	bin, marker := stubVerifyBinary(t)
+
+	// No target (all), non-interactive by default, no --ca-dir.
+	opts, err := parseInstallOptions(nil)
 	if err != nil {
-		t.Fatalf("getwd: %v", err)
+		t.Fatalf("parseInstallOptions() error: %v", err)
 	}
-	if err := os.Chdir(dir); err != nil {
-		t.Fatalf("chdir: %v", err)
+	if opts.Target != setup.TargetAll {
+		t.Fatalf("parsed target = %q, want %q", opts.Target, setup.TargetAll)
 	}
-	defer func() {
-		if err := os.Chdir(origDir); err != nil {
-			t.Logf("chdir back: %v", err)
+	opts.BinaryPath = bin
+
+	runner := setup.NewRunner(opts, setup.NewStdinPrompter(strings.NewReader(""), io.Discard), io.Discard)
+	if err := runner.Install(context.Background()); err != nil {
+		t.Fatalf("Install() error: %v", err)
+	}
+
+	// The project-scope MCP config lands in cwd and points at the binary.
+	data, err := os.ReadFile(filepath.Join(cwd, ".mcp.json"))
+	if err != nil {
+		t.Fatalf(".mcp.json not created: %v", err)
+	}
+	if !strings.Contains(string(data), bin) {
+		t.Errorf(".mcp.json does not reference the binary %s:\n%s", bin, data)
+	}
+
+	// The default CA directory resolves under the sandboxed HOME.
+	for _, name := range []string{"ca.crt", "ca.key"} {
+		if _, err := os.Stat(filepath.Join(home, ".yorishiro-proxy", "ca", name)); err != nil {
+			t.Errorf("%s not created under the sandboxed HOME: %v", name, err)
 		}
-	}()
-
-	// Run install with no target (all) — non-interactive by default.
-	err = runInstall(context.Background(), nil)
-	if err != nil {
-		t.Fatalf("runInstall() error: %v", err)
 	}
 
-	// Check that .mcp.json was created.
-	configPath := filepath.Join(dir, ".mcp.json")
-	if _, err := os.Stat(configPath); err != nil {
-		t.Errorf(".mcp.json not created: %v", err)
+	// The verification step ran the configured binary, not this test binary.
+	if _, err := os.Stat(marker); err != nil {
+		t.Errorf("verification did not execute the configured binary: %v", err)
 	}
 }
 
@@ -142,25 +192,28 @@ func TestRunInstall_TrustFlagOnWrongTarget(t *testing.T) {
 }
 
 func TestRunInstall_UserScopeFlag(t *testing.T) {
-	dir := t.TempDir()
-	origDir, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	if err := os.Chdir(dir); err != nil {
-		t.Fatalf("chdir: %v", err)
-	}
-	defer func() {
-		if err := os.Chdir(origDir); err != nil {
-			t.Logf("chdir back: %v", err)
-		}
-	}()
+	home, cwd := sandboxInstallEnv(t)
 
-	// --user-scope should write to user scope (which would be ~/.claude/settings.json).
-	// Just verify the flag is accepted without error.
-	err = runInstall(context.Background(), []string{"mcp", "--user-scope"})
-	if err != nil {
+	// --user-scope writes ~/.claude/settings.json — under the sandboxed HOME.
+	if err := runInstall(context.Background(), []string{"mcp", "--user-scope"}); err != nil {
 		t.Fatalf("runInstall(mcp --user-scope) error: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(home, ".claude", "settings.json"))
+	if err != nil {
+		t.Fatalf("user-scope settings.json not created under the sandboxed HOME: %v", err)
+	}
+	var settings struct {
+		MCPServers map[string]json.RawMessage `json:"mcpServers"`
+	}
+	if err := json.Unmarshal(data, &settings); err != nil {
+		t.Fatalf("decode settings.json: %v\n%s", err, data)
+	}
+	if _, ok := settings.MCPServers["yorishiro-proxy"]; !ok {
+		t.Errorf("settings.json has no mcpServers.yorishiro-proxy entry:\n%s", data)
+	}
+	if _, err := os.Stat(filepath.Join(cwd, ".mcp.json")); !os.IsNotExist(err) {
+		t.Errorf("--user-scope also wrote a project .mcp.json (stat err = %v)", err)
 	}
 }
 
@@ -226,4 +279,11 @@ func TestParseInstallTarget(t *testing.T) {
 			}
 		})
 	}
+}
+
+// shellQuote returns s as a single-quoted POSIX shell word, escaping any
+// embedded single quote (close the quote, emit an escaped quote, reopen)
+// so a quote in TMPDIR cannot break out of the script's quoting.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }

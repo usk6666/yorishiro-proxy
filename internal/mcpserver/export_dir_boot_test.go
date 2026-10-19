@@ -3,6 +3,7 @@ package mcpserver
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"os"
 	"path/filepath"
@@ -16,11 +17,11 @@ import (
 // (the only place manage export_flows may write) contains a file the
 // operator relies on — policy, config, CA, DB, log, WebUI assets, plugin
 // scripts — so an MCP caller can never overwrite it. Every case drives
-// the production entry point (Run). -no-http-mcp without -stdio-mcp makes
-// a fully booted server return "no MCP transport enabled" instead of
-// blocking, so "boot proceeded past the check" is observable.
+// the production entry point (Run). The OnBootComplete hook makes a fully
+// booted server return bootPassedSentinel instead of starting its
+// transports, so "boot proceeded past the check" is observable.
 
-const bootPassedSentinel = "no MCP transport enabled"
+const bootPassedSentinel = "usk1127 test: boot completed"
 
 // runBoot runs the production entry point with args and returns its error.
 func runBoot(t *testing.T, args []string) error {
@@ -29,7 +30,13 @@ func runBoot(t *testing.T, args []string) error {
 	defer cancel()
 	fs := flag.NewFlagSet("usk1127", flag.ContinueOnError)
 	fs.SetOutput(discardWriter{})
-	return Run(ctx, fs, append(args, "-no-http-mcp"), RunOptions{Version: "test"})
+	return Run(ctx, fs, append(args, "-mcp-http-addr", "127.0.0.1:0"), RunOptions{
+		Version:        "test",
+		OnBootComplete: func() error { return errors.New(bootPassedSentinel) },
+		// Backstop: reached only if OnBootComplete stopped aborting Run;
+		// end it so that is an assertion failure, not a hang.
+		OnHTTPListening: func(string) { cancel() },
+	})
 }
 
 func writeFile(t *testing.T, p, content string) string {

@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -235,6 +236,25 @@ func TestHelperProcess(t *testing.T) {
 	os.Exit(code)
 }
 
+// helperRaceEnv disables the race detector's at-exit sleep in re-exec'd
+// helper children. Harmless when the test binary is not built with -race.
+const helperRaceEnv = "GORACE=atexit_sleep_ms=0"
+
+// TestInstallScriptedExecCommand_HelperSkipsRaceExitSleep guards the
+// helper child's environment: without helperRaceEnv every successful fake
+// certutil call costs a 1 s sleep under -race (USK-1208). The env check
+// is the guard; wall-clock timing is deliberately not asserted.
+func TestInstallScriptedExecCommand_HelperSkipsRaceExitSleep(t *testing.T) {
+	installScriptedExecCommand(t, []scriptedCertutil{{subcmd: "-L"}})
+	cmd := execCommand("certutil", "-L", "-d", "sql:/nonexistent")
+	if !slices.Contains(cmd.Env, helperRaceEnv) {
+		t.Fatalf("helper env = %q, want it to contain %q", cmd.Env, helperRaceEnv)
+	}
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("helper run: %v", err)
+	}
+}
+
 // scriptedCertutil represents the canned response certutil should
 // produce for one invocation (subcommand = the first non-flag arg, e.g.
 // "-A", "-D", "-N").
@@ -287,6 +307,9 @@ func installScriptedExecCommand(t *testing.T, script []scriptedCertutil) *[]stri
 			"HELPER_STDOUT=" + entry.stdout,
 			"HELPER_STDERR=" + entry.stderr,
 			fmt.Sprintf("HELPER_EXIT=%d", entry.exit),
+			// A -race test binary sleeps 1 s in its exit path whenever it
+			// exits 0; the helper child is such a binary (USK-1208).
+			helperRaceEnv,
 		}
 		return cmd
 	}
