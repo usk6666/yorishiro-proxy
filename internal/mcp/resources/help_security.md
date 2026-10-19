@@ -193,15 +193,44 @@ SOCKS5 `CONNECT` is scope-checked before the tunnel carries a single byte, so th
 proxy does not yet know whether TLS follows. Scope such traffic by `hostname` /
 `ports`, or scope the tunneled protocol instead.
 
-Three live-data-path checks do not observe the transport: SOCKS5 (blank scheme),
-the `CONNECT` admission gate (always `https`), and raw TCP inside a tunnel, which
-is not re-checked per connection after the gate (USK-1083) — so a deny carrying
-`"schemes": ["http"]` does not block cleartext non-HTTP TCP through `CONNECT`.
+The tunneled protocol *is* scoped with a scheme: once a SOCKS5 or `CONNECT`
+tunnel carries traffic, the connection-level host check runs on it again with
+the scheme of the client-facing leg — including raw TCP that matches no known
+protocol (`http` when it is cleartext, `https` when the proxy terminated TLS on
+it) and every `tcp_forwards` entry, `protocol: raw` included.
+
+Two live-data-path admission gates do not observe the transport: SOCKS5
+(blank scheme) and the `CONNECT` admission gate (always `https`); the tunneled
+traffic behind them is re-checked as described above.
+
 For HTTP requests (including WebSocket / SSE upgrade requests and HTTP/2), the
 proxy matches `schemes` against the transport of the client's connection — TLS or not — not
 a client-declared HTTP/2 `:scheme` (which may be absent or disagree with the
 connection) and not a `scheme` set via intercept `modify_and_forward`. The
 recorded request still shows the scheme exactly as the client declared it.
+
+### How a deny shows up on the wire
+
+| Traffic | What the client sees | Recorded |
+|---|---|---|
+| HTTP/1.x, HTTP/2 request | `403` with `X-Blocked-By: target_scope` | Stream with `blocked_by: target_scope`, `state: error` |
+| Raw TCP (bytechunk — CONNECT / SOCKS5 tunnels carrying an unknown protocol, `raw_passthrough_hosts`, `tcp_forwards` with `protocol: raw` or an `auto` fallback to raw) | The connection is closed (EOF) at the first byte the client sends; none of the client's bytes reach the denied host | One raw Stream with `blocked_by: target_scope`, `state: error` |
+| WebSocket, gRPC message | The message is dropped; the connection stays open | Stream with `blocked_by: target_scope` |
+
+A raw connection is closed rather than having single chunks dropped because a
+byte stream has no message boundary to drop at: removing some bytes and relaying
+the rest would hand the peer a corrupted stream. An upstream that speaks first
+(an SMTP / FTP / IMAP banner) can still deliver its greeting before the client's
+first byte is checked.
+
+The check runs on the client's first byte, not at connect time, so the denied
+host is still *contacted*: the upstream TCP connection is already open when
+that byte is examined, and on `raw_passthrough_hosts`, an unrecognised-ALPN
+tunnel or a `tcp_forwards` entry with `upstream_tls` the upstream TLS handshake
+(SNI included) has already completed too. A CONNECT admitted as `https` and
+then denied by an `http`-scheme rule on its inner plaintext, and every
+`tcp_forwards` entry, are cases that reach the denied host this way; an
+accept-time gate for `tcp_forwards` is tracked as USK-1161.
 
 ## Rate Limiting
 

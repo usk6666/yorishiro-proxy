@@ -266,21 +266,21 @@ func (n *SOCKS5Negotiator) Negotiate(ctx context.Context, conn net.Conn) (contex
 	// by pipeline.HostScopeStep, which derives the scheme from
 	// Context.TLS.
 	//
-	// Two residues remain, and for this connection the blank-scheme check
-	// above is the only scope gate either of them ever passes through:
+	// The bytechunk (raw TCP) route is covered too since USK-1083: its
+	// Layers stamp ConnID / TargetHost / per-leg TLS, so HostScopeStep
+	// checks plaintext raw bytes as "http" and raw-over-TLS as "https",
+	// and a deny closes the connection.
 	//
-	//  1. The TLS passthrough relay (socks5Passthrough in
-	//     socks5_handler.go, plus the ProxyConfig.IsRawPassthrough
-	//     short-circuit) runs before any stack is built, so there is no
-	//     ConnectionStack and no Pipeline at all. The only scope-shaped
-	//     evaluation on that path is
-	//     proxybuild.passthroughRecorder.envelopeForScope, which feeds
-	//     flow.RecordScope capture filtering — not HostScopeStep.
-	//  2. The bytechunk (raw TCP) route does build a stack, but its
-	//     envelopes carry no TargetHost, so HostScopeStep short-circuits
-	//     before the derivation. Tracked as USK-1083.
+	// One residue remains, and for this connection the blank-scheme check
+	// above is the only scope gate it ever passes through: the TLS
+	// passthrough relay (socks5Passthrough in socks5_handler.go, plus the
+	// ProxyConfig.IsRawPassthrough short-circuit) runs before any stack is
+	// built, so there is no ConnectionStack and no Pipeline at all. The
+	// only scope-shaped evaluation on that path is
+	// proxybuild.passthroughRecorder.envelopeForScope, which feeds
+	// flow.RecordScope capture filtering — not HostScopeStep.
 	//
-	// USK-1160: a later policy change does reach both residues — the
+	// USK-1160: a later policy change does reach that residue — the
 	// handler registers the tunnel in LiveConns with socks5ScopeCheck, and
 	// a reload / security-tool write that no longer admits target closes
 	// it. The scheme used for that re-check is the same blank one.

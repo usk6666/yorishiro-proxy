@@ -309,7 +309,7 @@ func BuildConnectionStackWithTarget(
 
 	switch protocol {
 	case ForwardProtocolRaw:
-		return buildTargetOverrideRawStack(ctx, clientConn, upstreamConn, params.Target, cfg)
+		return buildTargetOverrideRawStack(ctx, clientConn, upstreamConn, params.Target, params.ClientTLSSnapshot, params.UpstreamTLSSnapshot, cfg)
 	case ForwardProtocolHTTP, ForwardProtocolWebSocket, ForwardProtocolSSE:
 		// USK-913: HTTP/1.x stack assembly is identical across the three
 		// arms. The "websocket"/"sse" expectation filter is applied at the
@@ -345,22 +345,40 @@ func BuildConnectionStackWithTarget(
 // callsite shape when they add ctx-aware behaviour (e.g. ctx-cancel-aware
 // dial in USK-916). The current bytechunk path performs no I/O so ctx is
 // not consulted today.
+//
+// USK-1083: each Layer's EnvelopeContext carries ConnID, TargetHost and
+// the TLS snapshot of its own leg — clientTLS when the forward port
+// terminated TLS (tls=true), upstreamTLS when the dial did (upstream_tls)
+// — so HostScopeStep derives the scheme from the client-facing leg.
 func buildTargetOverrideRawStack(
 	_ context.Context,
 	clientConn, upstreamConn net.Conn,
 	target string,
-	_ *BuildConfig,
+	clientTLS, upstreamTLS *envelope.TLSSnapshot,
+	cfg *BuildConfig,
 ) (*ConnectionStack, error) {
 	connID := uuid.New().String()
 	stack := NewConnectionStack(connID)
 
-	clientLayer := bytechunk.New(clientConn, connID+"/client", envelope.Send)
+	clientLayer := bytechunk.New(clientConn, connID+"/client", envelope.Send,
+		bytechunk.WithEnvelopeContext(envelope.EnvelopeContext{
+			ConnID:     connID,
+			TargetHost: target,
+			TLS:        clientTLS,
+		}),
+		bytechunk.WithStateReleaser(cfgPluginEngine(cfg)),
+	)
 	stack.PushClient(clientLayer)
 
-	upstreamLayer := bytechunk.New(upstreamConn, connID+"/upstream", envelope.Receive)
+	upstreamLayer := bytechunk.New(upstreamConn, connID+"/upstream", envelope.Receive,
+		bytechunk.WithEnvelopeContext(envelope.EnvelopeContext{
+			ConnID:     connID,
+			TargetHost: target,
+			TLS:        upstreamTLS,
+		}),
+	)
 	stack.PushUpstream(upstreamLayer)
 
-	_ = target // bytechunk does not stamp target into envelopes; field is informational
 	return stack, nil
 }
 
@@ -683,14 +701,14 @@ func buildTargetOverrideAutoStack(
 		// unexpected-but-recoverable shape per CLAUDE.md log-level guidance.
 		logger.Warn("connector: target-override Auto observed TLS first byte; falling back to Raw (set \"tls\": true on the tcp_forwards entry to terminate client TLS for MITM)",
 			"target", target)
-		return buildTargetOverrideRawStack(ctx, pc, upstreamConn, target, cfg)
+		return buildTargetOverrideRawStack(ctx, pc, upstreamConn, target, clientTLS, upstreamTLS, cfg)
 	default:
 		// InnerUnknown / InnerBytechunk — fall through to Raw. Log at
 		// Debug because this is the design-intended graceful fallback;
 		// raw recording is still useful (L4-capable principle).
 		logger.Debug("connector: target-override Auto fell back to Raw",
 			"target", target, "peek_kind", kind.String())
-		return buildTargetOverrideRawStack(ctx, pc, upstreamConn, target, cfg)
+		return buildTargetOverrideRawStack(ctx, pc, upstreamConn, target, clientTLS, upstreamTLS, cfg)
 	}
 }
 

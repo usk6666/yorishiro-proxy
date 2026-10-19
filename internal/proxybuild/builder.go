@@ -786,9 +786,29 @@ func isRawRelayStack(stack *connector.ConnectionStack) bool {
 // keeps the lazy dial of session.RunStackSession.
 func runSingleChannelSession(ctx context.Context, stack *connector.ConnectionStack, dial session.DialFunc, p *pipeline.Pipeline, opts session.SessionOptions) error {
 	if isRawRelayStack(stack) {
-		return session.RunPreDialedStackSession(ctx, stack, p, opts)
+		return runRawRelaySession(ctx, stack, p, opts)
 	}
 	return session.RunStackSession(ctx, stack, dial, p, opts)
+}
+
+// runRawRelaySession runs the pre-dialed session for a [bytechunk →
+// bytechunk] raw relay and then releases the client Layer's plugin scopes
+// once more (USK-1083 review S-2). The client Layer releases them on its
+// first Close, but when the ctx-cancel watcher makes that Close, a
+// PluginStep dispatch already in flight re-creates the (ConnID, client
+// StreamID) scope, and the deferred stack.Close no longer reaches the
+// Layers. Once RunPreDialedStackSession has returned no session goroutine
+// can dispatch again, so this release is the last one.
+//
+// The client Layer is captured before the session runs: stack.Close
+// clears the stack's Layer list, so ClientTopmost is nil afterwards.
+func runRawRelaySession(ctx context.Context, stack *connector.ConnectionStack, p *pipeline.Pipeline, opts session.SessionOptions) error {
+	clientRaw, _ := stack.ClientTopmost().(*bytechunk.Layer)
+	err := session.RunPreDialedStackSession(ctx, stack, p, opts)
+	if clientRaw != nil {
+		clientRaw.ReleaseState()
+	}
+	return err
 }
 
 // runHTTP1ExchangeLoop iterates the HTTP/1.x client Layer's Channels()
