@@ -128,13 +128,16 @@ type ParseOptions struct {
 	// reach it.
 	MaxRawCapture int64
 
-	// RequestMethod is the method of the request a parsed response
-	// answers. Only ParseResponseWithOptions consults it: a response to
-	// HEAD has no body whatever its Content-Length / Transfer-Encoding
-	// declare (RFC 9112 §6.3 rule 1), so its body is read as empty and
-	// the bytes that follow are left for the next response. Empty means
-	// unknown and keeps the header-framed body rules.
-	RequestMethod string
+	// RequestMethod reports the method of the request a parsed response
+	// answers. Only ParseResponseWithOptions consults it, once, after the
+	// response's header section has been read — so a caller whose parse
+	// starts before its request is written still sees the method. A
+	// response to HEAD has no body whatever its Content-Length /
+	// Transfer-Encoding declare (RFC 9112 §6.3 rule 1), so its body is
+	// read as empty and the bytes that follow are left for the next
+	// response. Nil, or an empty result, means unknown and keeps the
+	// header-framed body rules.
+	RequestMethod func() string
 }
 
 // rawSink is the minimal write/truncation interface used by readLine and
@@ -310,7 +313,7 @@ func ParseResponseWithOptions(r *bufio.Reader, opts ParseOptions) (*RawResponse,
 	detectSmugglingAnomalies(resp.Headers, &resp.Anomalies)
 
 	// Determine body reader.
-	if opts.RequestMethod == "HEAD" {
+	if opts.RequestMethod != nil && opts.RequestMethod() == "HEAD" {
 		// RFC 9112 §6.3 rule 1: a response to HEAD ends after its header
 		// section; the framing headers describe the GET body it omits.
 		resp.Body = newIdentityBodyReaderWithCap(io.LimitReader(r, 0), opts.MaxRawCapture)

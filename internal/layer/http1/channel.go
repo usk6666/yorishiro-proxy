@@ -447,6 +447,12 @@ type channel struct {
 	requestSent  atomic.Bool
 	postFinalErr atomic.Pointer[layer.StreamError]
 
+	// requestMethod is the method sendRequest wrote, read by the response
+	// parser once the response head is in (USK-1229 review F-1: HEAD
+	// responses are bodyless). Atomic because the parse can start before
+	// the Send (Next-before-Send registration).
+	requestMethod atomic.Pointer[string]
+
 	// USK-721: priorRespWasInformational tracks whether the previous response
 	// emitted on this Channel was 1xx, so the next response advances Sequence.
 	priorRespWasInformational bool
@@ -1192,10 +1198,11 @@ func (c *channel) parseRequest() (*envelope.Envelope, error) {
 func (c *channel) parseResponse() (env *envelope.Envelope, isInformational, truncated bool, err error) {
 	rawResp, err := parser.ParseResponseWithOptions(c.layer.reader, parser.ParseOptions{
 		MaxRawCapture: c.bodyOpts.maxRawCapture,
-		// USK-1229 review F-1: the paired request's method (stamped by
-		// sendRequest before appendPending, so pendingMu orders it before
-		// this read) makes a HEAD response bodyless.
-		RequestMethod: c.ctxTmpl.RequestMethod,
+		// USK-1229 review F-1: the paired request's method makes a HEAD
+		// response bodyless. Read through an atomic after the response
+		// head arrived: on the Next-before-Send path the parse starts
+		// before sendRequest stored it.
+		RequestMethod: c.pairedRequestMethod,
 	})
 	if err != nil {
 		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
@@ -1434,6 +1441,8 @@ func (c *channel) sendRequest(msg *envelope.HTTPMessage, env *envelope.Envelope)
 	// forwards one).
 	c.ctxTmpl.RequestPath = msg.Path
 	c.ctxTmpl.RequestMethod = msg.Method
+	method := msg.Method
+	c.requestMethod.Store(&method)
 	c.ctxTmpl.RequestRawQuery = msg.RawQuery
 	c.ctxTmpl.RequestAuthority = msg.Authority
 
@@ -1501,6 +1510,15 @@ func (c *channel) sendResponse(msg *envelope.HTTPMessage, env *envelope.Envelope
 		c.noteResponseWritten(msg, rawWins)
 	}
 	return err
+}
+
+// pairedRequestMethod returns the method of the request this Receive
+// Channel sent, or "" when none was sent yet (USK-1229 review F-1).
+func (c *channel) pairedRequestMethod() string {
+	if p := c.requestMethod.Load(); p != nil {
+		return *p
+	}
+	return ""
 }
 
 // noteResponseWritten records, for the USK-1229 keep-alive rule, what a
