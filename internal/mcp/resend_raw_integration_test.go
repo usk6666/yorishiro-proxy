@@ -141,6 +141,26 @@ func nowSuffix() string {
 	return time.Now().Format("150405.000000000")
 }
 
+// Read deadlines for the looping raw upstream test servers (USK-1206).
+// The raw resend / fuzz client writes its payload in one go and then reads
+// until the server closes, so every exchange ends on the server's idle
+// timer. A long first-byte deadline keeps a slow proxy from being mistaken
+// for silence; once bytes are flowing, a short idle deadline ends the
+// exchange shortly after the last one instead of seconds later.
+const (
+	rawUpstreamFirstByteDeadline = 2 * time.Second
+	rawUpstreamIdleDeadline      = 200 * time.Millisecond
+)
+
+// rawUpstreamReadDeadline returns the deadline for the next Read on a raw
+// upstream test conn, given whether any bytes have arrived yet.
+func rawUpstreamReadDeadline(gotBytes bool) time.Time {
+	if gotBytes {
+		return time.Now().Add(rawUpstreamIdleDeadline)
+	}
+	return time.Now().Add(rawUpstreamFirstByteDeadline)
+}
+
 // startTCPEcho stands up a TCP echo server and returns its address +
 // a captured-bytes getter (everything the server receives, in order).
 func startTCPEcho(t *testing.T) (string, func() []byte) {
@@ -161,10 +181,12 @@ func startTCPEcho(t *testing.T) (string, func() []byte) {
 		}
 		defer conn.Close()
 		buf := make([]byte, 4096)
+		gotBytes := false
 		for {
-			_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+			_ = conn.SetReadDeadline(rawUpstreamReadDeadline(gotBytes))
 			n, err := conn.Read(buf)
 			if n > 0 {
+				gotBytes = true
 				mu.Lock()
 				recv = append(recv, buf[:n]...)
 				mu.Unlock()
@@ -205,10 +227,12 @@ func startTLSEcho(t *testing.T) (string, func() []byte) {
 		}
 		defer conn.Close()
 		buf := make([]byte, 4096)
+		gotBytes := false
 		for {
-			_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+			_ = conn.SetReadDeadline(rawUpstreamReadDeadline(gotBytes))
 			n, err := conn.Read(buf)
 			if n > 0 {
+				gotBytes = true
 				mu.Lock()
 				recv = append(recv, buf[:n]...)
 				mu.Unlock()

@@ -9,7 +9,6 @@ import (
 	"net/http/httptest"
 	"sync"
 	"sync/atomic"
-	"time"
 
 	"golang.org/x/net/http2"
 
@@ -191,7 +190,8 @@ func buildGRPCWebUpstream() (*httptest.Server, *FingerprintObserver, *GRPCWebHit
 
 // grpcWebListener wraps a TCP listener with a single Accept goroutine
 // that promotes each connection to TLS (h2 ALPN) and serves it via
-// http2.Server. Close drains all in-flight connections.
+// http2.Server. Close force-closes every accepted connection and waits
+// for the serving goroutines, mirroring UpstreamCapture.Close.
 type grpcWebListener struct {
 	net.Listener
 
@@ -202,6 +202,22 @@ type grpcWebListener struct {
 	acceptDone sync.WaitGroup
 	connsWG    sync.WaitGroup
 	once       sync.Once
+
+	connMu sync.Mutex
+	closed bool
+	conns  []net.Conn
+}
+
+// trackConn registers c for force-close on Close. It returns false once
+// Close has begun, in which case the caller must close c itself.
+func (l *grpcWebListener) trackConn(c net.Conn) bool {
+	l.connMu.Lock()
+	defer l.connMu.Unlock()
+	if l.closed {
+		return false
+	}
+	l.conns = append(l.conns, c)
+	return true
 }
 
 func (l *grpcWebListener) serve() {
@@ -212,6 +228,10 @@ func (l *grpcWebListener) serve() {
 			// Listener.Close was called or another fatal accept error;
 			// terminate the accept loop so Close can complete.
 			return
+		}
+		if !l.trackConn(c) {
+			_ = c.Close()
+			continue
 		}
 		l.connsWG.Add(1)
 		go func(raw net.Conn) {
@@ -230,24 +250,26 @@ func (l *grpcWebListener) serve() {
 
 func (l *grpcWebListener) Close() error {
 	l.once.Do(func() {
+		l.connMu.Lock()
+		l.closed = true
+		conns := l.conns
+		l.conns = nil
+		l.connMu.Unlock()
+
 		// Close the underlying listener so the accept goroutine exits
 		// the next time Accept returns.
 		_ = l.Listener.Close()
 		l.acceptDone.Wait()
-		// Bound the in-flight wait so a hung handler cannot deadlock
-		// test cleanup.
-		done := make(chan struct{})
-		go func() {
-			l.connsWG.Wait()
-			close(done)
-		}()
-		select {
-		case <-done:
-		case <-time.After(5 * time.Second):
-			// Fall through — the handler goroutines hold only
-			// per-connection state and will be released when their
-			// tls.Conn deadline fires.
+		// Force-close every accepted connection: a peer that keeps its
+		// h2 connection pooled would otherwise hold ServeConn open
+		// until a timer fired (USK-1206).
+		for _, c := range conns {
+			_ = c.Close()
 		}
+		// After the force-close nothing legitimate keeps a serving
+		// goroutine alive, so this wait is unbounded, like
+		// UpstreamCapture.Close.
+		l.connsWG.Wait()
 	})
 	return nil
 }

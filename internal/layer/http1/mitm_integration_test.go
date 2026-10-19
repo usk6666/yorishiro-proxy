@@ -1320,7 +1320,7 @@ func TestHTTPSMITM_SafetyBlock(t *testing.T) {
 	defer cancel()
 
 	upstreamReceived := make(chan struct{}, 1)
-	upstreamLn, _ := startUpstreamHTTPS(t, func(_ []byte) []byte {
+	upstreamLn, getUpstreamReqs := startUpstreamHTTPS(t, func(_ []byte) []byte {
 		upstreamReceived <- struct{}{}
 		return []byte("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
 	})
@@ -1371,11 +1371,32 @@ func TestHTTPSMITM_SafetyBlock(t *testing.T) {
 	}
 
 	// --- Verify upstream received NO data ---
+	assertUpstreamNotReached(t, upstreamLn, getUpstreamReqs, upstreamReceived,
+		"safety filter did not block the request")
+}
+
+// assertUpstreamNotReached decides "the request never reached upstream" by
+// observing what startUpstreamHTTPS captured, not by waiting out a timer
+// (USK-1206). Call it only after the proxy session is done: the session
+// teardown closes the upstream connection the stack dialed eagerly, so the
+// capture loop ends on EOF; closing the listener releases the accept when
+// no connection was dialed at all. Either way the getter returns at once.
+func assertUpstreamNotReached(
+	t *testing.T,
+	upstreamLn net.Listener,
+	getUpstreamReqs func() [][]byte,
+	upstreamReceived <-chan struct{},
+	failMsg string,
+) {
+	t.Helper()
+	_ = upstreamLn.Close()
+	if reqs := getUpstreamReqs(); len(reqs) != 0 {
+		t.Errorf("upstream captured %d request(s) — %s: %q", len(reqs), failMsg, reqs)
+	}
 	select {
 	case <-upstreamReceived:
-		t.Error("upstream handler was called — safety filter did not block the request")
-	case <-time.After(1 * time.Second):
-		// Good: upstream was never called.
+		t.Errorf("upstream handler was called — %s", failMsg)
+	default:
 	}
 }
 

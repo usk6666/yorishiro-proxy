@@ -19,7 +19,6 @@
 package mcptest_test
 
 import (
-	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -353,10 +352,11 @@ func startWSSOverH2Upstream(t *testing.T) (string, func()) {
 		_ = srv.Serve(ln)
 	}()
 
+	// Close, not Shutdown: the proxy keeps its pooled upstream h2
+	// connection open, so a graceful Shutdown always ran out its timeout
+	// (USK-1206). The test's assertions are complete by teardown time.
 	return ln.Addr().String(), func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		_ = srv.Shutdown(ctx)
+		_ = srv.Close()
 		_ = ln.Close()
 	}
 }

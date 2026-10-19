@@ -652,14 +652,17 @@ func waitForListening(t *testing.T, addrCh <-chan string, runErrCh <-chan error,
 // sync.Once so callers can safely invoke it multiple times (the
 // example in the Issue uses defer h.Cleanup() in addition to
 // t.Cleanup, which would otherwise fire the teardown twice).
+//
+// The proxy is stopped before the upstream: while mcpserver.Run is alive
+// it holds pooled upstream connections open, so closing the upstream
+// first made its Close wait on connections nobody was going to release
+// (USK-1206). Once Run has returned, those connections are gone and the
+// upstream closes at once.
 func makeCleanup(t *testing.T, client *Client, upstream *httptest.Server, runCancel context.CancelFunc, runCtx context.Context, runErrCh <-chan error) func() {
 	var once sync.Once
 	return func() {
 		once.Do(func() {
 			client.Close()
-			if upstream != nil {
-				upstream.Close()
-			}
 			runCancel()
 			select {
 			case err := <-runErrCh:
@@ -668,6 +671,9 @@ func makeCleanup(t *testing.T, client *Client, upstream *httptest.Server, runCan
 				}
 			case <-time.After(10 * time.Second):
 				t.Errorf("mcptest: mcpserver.Run did not exit within 10s of context cancel")
+			}
+			if upstream != nil {
+				upstream.Close()
 			}
 		})
 	}
