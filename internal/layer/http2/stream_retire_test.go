@@ -590,3 +590,209 @@ func TestLayer_ServerRole_RefusedStreamKeepsHPACKInSync(t *testing.T) {
 		t.Errorf("stream 5 headers = %v, want x-usk1144-refused: second-entry (HPACK desync after refused stream)", evt.Headers)
 	}
 }
+
+// usk1144TrailerEntry is a header the peer's late trailers insert into its
+// HPACK encoder's dynamic table; the next header block references it.
+var usk1144TrailerEntry = hpack.HeaderField{Name: "x-usk1144-trailer", Value: "late-trailer-entry"}
+
+// writeLateTrailers writes a trailers block (HEADERS with END_STREAM but
+// without END_HEADERS, then a CONTINUATION) on sid, so both the HEADERS and
+// the CONTINUATION routing of a closed stream are exercised.
+func writeLateTrailers(peer *h2Peer, sid uint32) error {
+	frag := peer.encoder.Encode([]hpack.HeaderField{usk1144TrailerEntry})
+	half := len(frag) / 2
+	if err := peer.wr.WriteHeaders(sid, true, false, frag[:half]); err != nil {
+		return err
+	}
+	return peer.wr.WriteContinuation(sid, true, frag[half:])
+}
+
+// watchGoAway reads frames from the peer side until the connection closes and
+// reports the code of the first GOAWAY. Running the reads in the background
+// keeps the Layer's writer from blocking on the synchronous pipe, so a test
+// fails on its assertion instead of hanging.
+func watchGoAway(peer *h2Peer) <-chan uint32 {
+	out := make(chan uint32, 1)
+	go func() {
+		for {
+			f, err := peer.rd.ReadFrame()
+			if err != nil {
+				return
+			}
+			if f.Header.Type == frame.TypeGoAway {
+				_, code, _, _ := f.GoAwayInfo()
+				out <- code
+				return
+			}
+		}
+	}()
+	return out
+}
+
+// hasKeyValue reports whether kvs contains name: value.
+func hasKeyValue(kvs []envelope.KeyValue, name, value string) bool {
+	for _, kv := range kvs {
+		if kv.Name == name && kv.Value == value {
+			return true
+		}
+	}
+	return false
+}
+
+// TestLayer_ServerRole_TrailersAfterLocalCancelAreIgnored pins RFC 9113 §5.1
+// ("closed"): once this endpoint has sent RST_STREAM, frames the peer had
+// already queued on the stream — here the request trailers — MUST be
+// ignored, not treated as stream-id reuse (connection error PROTOCOL_ERROR).
+// The trailers block is still HPACK-decoded (§4.3), so the next request that
+// references its dynamic-table entry decodes correctly.
+func TestLayer_ServerRole_TrailersAfterLocalCancelAreIgnored(t *testing.T) {
+	l, peer, cleanup := startServerLayer(t)
+	defer cleanup()
+	peer.consumePeerSettings(t)
+	peer.sendInitialSettings(t)
+
+	// Request headers without END_STREAM: the body / trailers are to follow.
+	if err := peer.wr.WriteHeaders(1, false, true, peer.encoder.Encode(usk1144RequestFields)); err != nil {
+		t.Fatalf("write HEADERS stream 1: %v", err)
+	}
+	ch1 := acceptChannel(t, l)
+	if _, err := nextWithin(ch1, 2*time.Second); err != nil {
+		t.Fatalf("stream 1 Next: %v", err)
+	}
+	// The consumer abandons the stream: RST_STREAM(CANCEL).
+	_ = ch1.Close()
+	_ = peer.conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	rst := drainUntil(t, peer, frame.TypeRSTStream)
+	_ = peer.conn.SetReadDeadline(time.Time{})
+	if code, _ := rst.RSTStreamErrorCode(); rst.Header.StreamID != 1 || code != ErrCodeCancel {
+		t.Fatalf("got RST_STREAM(%s) on stream %d, want CANCEL on 1", ErrCodeString(code), rst.Header.StreamID)
+	}
+	if !waitFor(time.Second, func() bool { return streamMapSize(l) == 0 }) {
+		t.Fatalf("stream 1 not retired after RST_STREAM(CANCEL): len(StreamMap)=%d", streamMapSize(l))
+	}
+
+	goAway := watchGoAway(peer)
+	req3 := append(append([]hpack.HeaderField(nil), usk1144RequestFields...), usk1144TrailerEntry)
+	writeErr := make(chan error, 1)
+	go func() {
+		_ = peer.conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+		if err := writeLateTrailers(peer, 1); err != nil {
+			writeErr <- err
+			return
+		}
+		writeErr <- peer.wr.WriteHeaders(3, true, true, peer.encoder.Encode(req3))
+	}()
+
+	var ch3 layer.Channel
+	select {
+	case code := <-goAway:
+		t.Fatalf("GOAWAY(%s) after trailers on locally reset stream 1, want them ignored", ErrCodeString(code))
+	case ch3 = <-l.Channels():
+	case <-time.After(3 * time.Second):
+		t.Fatal("no Channel for stream 3 within 3s after trailers on locally reset stream 1")
+	}
+	if ch3 == nil {
+		// Channels() closes when the connection is torn down.
+		select {
+		case code := <-goAway:
+			t.Fatalf("GOAWAY(%s) after trailers on locally reset stream 1, want them ignored", ErrCodeString(code))
+		case <-time.After(time.Second):
+			t.Fatal("connection closed after trailers on locally reset stream 1, want them ignored")
+		}
+	}
+	defer ch3.Close()
+	env, err := nextWithin(ch3, 2*time.Second)
+	if err != nil {
+		t.Fatalf("stream 3 Next: %v", err)
+	}
+	evt, ok := env.Message.(*H2HeadersEvent)
+	if !ok {
+		t.Fatalf("Message = %T, want *H2HeadersEvent", env.Message)
+	}
+	if !hasKeyValue(evt.Headers, usk1144TrailerEntry.Name, usk1144TrailerEntry.Value) {
+		t.Errorf("stream 3 headers = %v, want %s: %s (HPACK desync after ignored trailers)",
+			evt.Headers, usk1144TrailerEntry.Name, usk1144TrailerEntry.Value)
+	}
+	if err := <-writeErr; err != nil {
+		t.Errorf("peer write: %v", err)
+	}
+}
+
+// TestLayer_ServerRole_TrailersOnRefusedStreamAreIgnored pins the same rule
+// for a stream refused with RST_STREAM(REFUSED_STREAM) for exceeding
+// MAX_CONCURRENT_STREAMS: the peer's trailers (and CONTINUATION) on it are
+// decoded and discarded, not a connection error.
+func TestLayer_ServerRole_TrailersOnRefusedStreamAreIgnored(t *testing.T) {
+	l, peer, cleanup := startServerLayer(t, WithMaxConcurrentStreams(1))
+	defer cleanup()
+	peer.consumePeerSettings(t)
+	peer.sendInitialSettings(t)
+	_ = peer.conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+
+	// Stream 1 stays open so stream 3 exceeds the limit.
+	if err := peer.wr.WriteHeaders(1, false, true, peer.encoder.Encode(usk1144RequestFields)); err != nil {
+		t.Fatalf("write HEADERS stream 1: %v", err)
+	}
+	ch1 := acceptChannel(t, l)
+	defer ch1.Close()
+	if _, err := nextWithin(ch1, 2*time.Second); err != nil {
+		t.Fatalf("stream 1 Next: %v", err)
+	}
+	if err := peer.wr.WriteHeaders(3, false, true, peer.encoder.Encode(usk1144RequestFields)); err != nil {
+		t.Fatalf("write HEADERS stream 3: %v", err)
+	}
+	_ = peer.conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	rst := drainUntil(t, peer, frame.TypeRSTStream)
+	_ = peer.conn.SetReadDeadline(time.Time{})
+	if code, _ := rst.RSTStreamErrorCode(); rst.Header.StreamID != 3 || code != ErrCodeRefusedStream {
+		t.Fatalf("got RST_STREAM(%s) on stream %d, want REFUSED_STREAM on 3", ErrCodeString(code), rst.Header.StreamID)
+	}
+
+	goAway := watchGoAway(peer)
+	writeErr := make(chan error, 1)
+	go func() {
+		_ = peer.conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+		if err := writeLateTrailers(peer, 3); err != nil {
+			writeErr <- err
+			return
+		}
+		// Stream 1's trailers reference the entry stream 3's trailers added.
+		writeErr <- peer.wr.WriteHeaders(1, true, true, peer.encoder.Encode([]hpack.HeaderField{usk1144TrailerEntry}))
+	}()
+
+	type nextResult struct {
+		env *envelope.Envelope
+		err error
+	}
+	next := make(chan nextResult, 1)
+	go func() {
+		env, err := nextWithin(ch1, 3*time.Second)
+		next <- nextResult{env, err}
+	}()
+	var res nextResult
+	select {
+	case code := <-goAway:
+		t.Fatalf("GOAWAY(%s) after trailers on refused stream 3, want them ignored", ErrCodeString(code))
+	case res = <-next:
+	}
+	if res.err != nil {
+		// A torn-down connection ends the Channel too; name the GOAWAY.
+		select {
+		case code := <-goAway:
+			t.Fatalf("GOAWAY(%s) after trailers on refused stream 3, want them ignored (stream 1 Next: %v)", ErrCodeString(code), res.err)
+		case <-time.After(time.Second):
+		}
+		t.Fatalf("stream 1 trailers Next: %v", res.err)
+	}
+	evt, ok := res.env.Message.(*H2TrailersEvent)
+	if !ok {
+		t.Fatalf("Message = %T, want *H2TrailersEvent", res.env.Message)
+	}
+	if !hasKeyValue(evt.Trailers, usk1144TrailerEntry.Name, usk1144TrailerEntry.Value) {
+		t.Errorf("stream 1 trailers = %v, want %s: %s (HPACK desync after refused stream's trailers)",
+			evt.Trailers, usk1144TrailerEntry.Name, usk1144TrailerEntry.Value)
+	}
+	if err := <-writeErr; err != nil {
+		t.Errorf("peer write: %v", err)
+	}
+}
