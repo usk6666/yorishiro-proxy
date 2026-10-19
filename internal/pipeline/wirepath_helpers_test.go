@@ -19,8 +19,18 @@ import (
 // fixture.
 func realH1RequestEnvelope(t *testing.T, scheme, rawRequest string) *envelope.Envelope {
 	t.Helper()
+	return realH1RequestEnvelopeWithContext(t, scheme, envelope.EnvelopeContext{}, rawRequest)
+}
+
+// realH1RequestEnvelopeWithContext is realH1RequestEnvelope with the
+// Layer's EnvelopeContext template set, the way the live stack builders
+// stamp the client-leg TLS snapshot (connector/stack_builder.go
+// clientEnvCtx). USK-1086 uses it to pin HTTP/1.x scope behavior with the
+// TLS state its scheme implies.
+func realH1RequestEnvelopeWithContext(t *testing.T, scheme string, envCtx envelope.EnvelopeContext, rawRequest string) *envelope.Envelope {
+	t.Helper()
 	cli, srv := net.Pipe()
-	l := http1.New(srv, "usk1139-h1", envelope.Send, http1.WithScheme(scheme))
+	l := http1.New(srv, "usk1139-h1", envelope.Send, http1.WithScheme(scheme), http1.WithEnvelopeContext(envCtx))
 	t.Cleanup(func() {
 		_ = l.Close()
 		_ = cli.Close()
