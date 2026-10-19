@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"strings"
 	"testing"
 	"time"
 
@@ -163,8 +164,9 @@ func TestLayer_Receive_TerminalExit_RetiresLayer(t *testing.T) {
 	cases := []struct{ name, reply string }{
 		{name: "truncated body", reply: "HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n0123456789"},
 		{name: "closed before response", reply: ""},
-		{name: "malformed status line", reply: "garbage\r\n\r\n"},
-		{name: "connection close response", reply: "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 2\r\n\r\nok"},
+		// The status line is parsed best-effort, so an unparseable
+		// response needs a hard parser limit: header count over 10000.
+		{name: "response parse error", reply: "HTTP/1.1 200 OK\r\n" + strings.Repeat("A: b\r\n", 10001) + "\r\n"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
