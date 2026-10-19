@@ -288,21 +288,33 @@ type rawWinsHarness struct {
 // the harness and the forward listener address.
 func startRawWinsForward(t *testing.T, ctx context.Context, script, target, protocol string, transform *httprules.TransformEngine) (*rawWinsHarness, string) {
 	t.Helper()
+	return startRawWinsForwardDeps(t, ctx, script, target, protocol, func(d *proxybuild.Deps) {
+		d.HTTPTransformEngine = transform
+	})
+}
+
+// startRawWinsForwardDeps is startRawWinsForward with a hook to set
+// further Deps fields (e.g. a per-protocol Transform engine).
+func startRawWinsForwardDeps(t *testing.T, ctx context.Context, script, target, protocol string, setDeps func(*proxybuild.Deps)) (*rawWinsHarness, string) {
+	t.Helper()
 	h := &rawWinsHarness{store: &flowStoreCapture{}}
 	engine := loadRawWinsPlugin(t, ctx, script)
 	buildCfg := rawWinsBuildConfig(t)
 	mgr, err := proxybuild.NewManager(proxybuild.ManagerConfig{
 		Logger: testutil.DiscardLogger(),
 		StackFactory: func(ctx context.Context, name, addr string) (*proxybuild.Stack, error) {
-			return proxybuild.BuildLiveStack(ctx, proxybuild.Deps{
-				Logger:              testutil.DiscardLogger(),
-				ListenerName:        name,
-				ListenAddr:          addr,
-				FlowStore:           h.store,
-				BuildConfig:         buildCfg,
-				PluginV2Engine:      engine,
-				HTTPTransformEngine: transform,
-			})
+			deps := proxybuild.Deps{
+				Logger:         testutil.DiscardLogger(),
+				ListenerName:   name,
+				ListenAddr:     addr,
+				FlowStore:      h.store,
+				BuildConfig:    buildCfg,
+				PluginV2Engine: engine,
+			}
+			if setDeps != nil {
+				setDeps(&deps)
+			}
+			return proxybuild.BuildLiveStack(ctx, deps)
 		},
 	})
 	if err != nil {
