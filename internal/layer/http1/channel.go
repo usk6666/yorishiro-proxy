@@ -1345,6 +1345,13 @@ func (c *channel) sendResponse(msg *envelope.HTTPMessage, env *envelope.Envelope
 // *StaleUpstreamError with ReplaySafe=false regardless of method: the
 // Message does not describe these bytes, and a replay could duplicate a
 // smuggled request.
+//
+// Response framing still follows the Message: the request side's
+// ctxTmpl.RequestMethod (stamped from msg.Method in sendRequest above) is
+// what the receive path consults for HEAD / CONNECT body rules (RFC 9112
+// §6.3), not the method in the verbatim bytes. A plugin whose raw changes
+// the method (e.g. GET → HEAD) must change msg["method"] to match, or the
+// response is framed as for the Message's method (USK-1079 review F-3).
 func (c *channel) sendRawWins(raw []byte, kind string) error {
 	if _, err := c.layer.conn.Write(raw); err != nil {
 		if kind == "request" && isStaleConnErr(err) {

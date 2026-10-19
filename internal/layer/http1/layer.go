@@ -810,6 +810,24 @@ func (l *Layer) EnvelopeContextTemplate() envelope.EnvelopeContext {
 	return l.envCtx
 }
 
+// Scheme returns the HTTP scheme ("http" or "https") this Layer stamps on
+// its envelopes (see [WithScheme]). The proxybuild h1 redial chain uses it
+// to redial over the same transport the original stack was built on:
+// "http" stacks (BuildPlainHTTPStack) sit on plain TCP, "https" stacks on
+// TLS.
+func (l *Layer) Scheme() string {
+	return l.opts.scheme
+}
+
+// Retired reports whether this Receive-direction Layer was retired after
+// the final response to a raw-authoritative request (RFC-001 §9.3 D4,
+// USK-1079). A retired Layer opens no further exchanges; an owner without
+// a redial chain must end the client connection instead of waiting for a
+// response that will never come.
+func (l *Layer) Retired() bool {
+	return l.retired.Load()
+}
+
 // HealthCheck performs a non-blocking peek on the underlying conn to detect
 // a stale upstream connection (USK-998). It is intended for the
 // Receive-direction (upstream-facing) Layer when no exchange is currently
