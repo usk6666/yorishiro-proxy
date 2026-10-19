@@ -222,7 +222,8 @@ type StreamUpdate struct {
 	// (USK-782 mid-stream Drop path). Canonical values mirror
 	// Stream.BlockedBy — see internal/pipeline/blocked_by.go for the
 	// Pipeline-emitted set ("target_scope", "safety_filter",
-	// "intercept_drop", "rate_limit"). Only applied when non-empty.
+	// "intercept_drop", "intercept_cancelled", "rate_limit"). Only applied
+	// when non-empty.
 	BlockedBy string
 	// Duration sets the stream duration.
 	Duration time.Duration

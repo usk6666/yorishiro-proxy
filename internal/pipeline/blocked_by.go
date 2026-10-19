@@ -23,13 +23,17 @@ const (
 	BlockedBySafetyFilter = "safety_filter"
 
 	// BlockedByInterceptDrop attributes a Drop to an explicit user
-	// `drop` action against a held envelope. Plugin ActionDrop and the
-	// context-cancelled hold path are intentionally NOT attributed to
-	// this label (USK-782 design scope guards).
+	// `drop` action against a held envelope, including a hold timeout
+	// under auto_drop. Plugin ActionDrop and the context-cancelled hold
+	// path are intentionally NOT attributed to this label (USK-782 design
+	// scope guards); the latter is BlockedByInterceptCancelled.
 	BlockedByInterceptDrop = "intercept_drop"
 
 	// BlockedByInterceptCancelled attributes a Drop to an intercept hold
-	// whose ctx ended before any action resolved it (USK-1193).
+	// whose ctx ended before any action resolved it — proxy_stop, session
+	// teardown, or a failure in the peer direction (USK-1193). Emitted by
+	// InterceptStep so the held envelope is recorded as an audit Stream
+	// instead of vanishing from both the queue and the flow store.
 	BlockedByInterceptCancelled = "intercept_cancelled"
 
 	// BlockedByRateLimit is reserved for a future RateLimitStep; no

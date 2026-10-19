@@ -65,7 +65,7 @@
         "blocked_by": {
           "type": "string",
           "description": "Filter sessions by blocked_by value (e.g. target_scope, intercept_drop).",
-          "enum": ["target_scope", "intercept_drop", "rate_limit", "safety_filter", "budget", "capacity"]
+          "enum": ["target_scope", "intercept_drop", "intercept_cancelled", "rate_limit", "safety_filter", "budget", "capacity"]
         },
         "origin": {
           "type": "string",

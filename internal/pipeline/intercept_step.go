@@ -423,10 +423,20 @@ func (s *InterceptStep) hold(ctx context.Context, env *envelope.Envelope, matche
 
 	action, err := s.queue.Hold(ctx, env, matchedRules)
 	if err != nil {
-		// Context cancelled while waiting. No user action ever resolved
-		// the hold; do not attribute this to intercept_drop because no
-		// drop decision was made — the surrounding session is being
-		// torn down.
+		// HoldQueue.Hold fails only when ctx ended while waiting
+		// (proxy_stop, session teardown, peer-direction failure); it has
+		// already removed the queue entry. No agent action resolved the
+		// hold, so this is not an intercept_drop — but it must not vanish
+		// unrecorded either (USK-1193): attribute it to
+		// intercept_cancelled so the session's OnPipelineDrop writes the
+		// audit Stream. Always Drop, never the HTTP 403 Respond: the ctx
+		// is gone and there is nobody left to answer. A Release racing
+		// the cancel can report "released" to the agent while this path
+		// wins the select; the Stream then still records the outcome
+		// that actually happened on the wire.
+		if ctx.Err() != nil {
+			return nil, Result{Action: Drop, BlockedBy: BlockedByInterceptCancelled}, false
+		}
 		return nil, Result{Action: Drop}, false
 	}
 	return action, Result{}, true
