@@ -570,7 +570,10 @@ func TestLargeExportImport(t *testing.T) {
 	ctx := context.Background()
 	ts := time.Date(2026, 2, 15, 10, 0, 0, 0, time.UTC)
 
-	const count = 1000
+	// ExportStreams / ImportStreams have no pagination or batch boundary, so
+	// a handful of streams exercises the same multi-record code path as a
+	// thousand did (USK-1205).
+	const count = 20
 	for i := 0; i < count; i++ {
 		id := fmt.Sprintf("fl-large-%04d", i)
 		makeTestSession(t, store, id, "HTTPS", fmt.Sprintf("https://example.com/api/%d", i), ts.Add(time.Duration(i)*time.Second), []byte(fmt.Sprintf("body-%d", i)))
@@ -592,6 +595,14 @@ func TestLargeExportImport(t *testing.T) {
 	}
 	if result.Imported != count {
 		t.Errorf("expected %d imported, got %d", count, result.Imported)
+	}
+	// Verify the destination store, not only the importer's own counter.
+	got, err := store2.ListStreams(ctx, StreamListOptions{})
+	if err != nil {
+		t.Fatalf("ListStreams: %v", err)
+	}
+	if len(got) != count {
+		t.Errorf("destination store has %d streams, want %d", len(got), count)
 	}
 }
 
