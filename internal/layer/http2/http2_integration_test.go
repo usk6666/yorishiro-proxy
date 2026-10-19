@@ -339,7 +339,7 @@ func buildPipeline(store flow.Writer, opts pipelineOpts) *pipeline.Pipeline {
 }
 
 // startH2CProxy starts a FullListener with the h2c handler on OnHTTP2 so the
-// Coordinator routes cleartext HTTP/2 directly to HTTP/2 Layer.
+// FullListener routes cleartext HTTP/2 directly to HTTP/2 Layer.
 func startH2CProxy(t *testing.T, ctx context.Context, upstreamAddr string, opts pipelineOpts) (proxyAddr string, store *testStore) {
 	t.Helper()
 	store = &testStore{}
