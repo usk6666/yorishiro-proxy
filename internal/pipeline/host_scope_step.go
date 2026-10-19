@@ -61,6 +61,19 @@ func NewHostScopeStep(scope *connector.TargetScope) *HostScopeStep {
 // scheme, a CONNECT tunnel as "https"; this Step derives the scheme from
 // TLS state). The intercept release re-check reuses this Step and so
 // inherits the block.
+//
+// USK-1130: the check is TargetScope.CheckHost, not CheckTarget with an
+// empty path, so a path-scoped allow ({hostname: X, path_prefix: "/api/"})
+// admits X here *conditionally* (pathPending). The connection gates admit
+// such a host provisionally on every route that reaches the Pipeline, and
+// this Step is where the condition is enforced, per envelope and
+// statelessly (so the intercept release re-check and the USK-1192 revoke
+// path need no extra state): an HTTP envelope continues to HTTPScopeStep,
+// which checks the request path; a WebSocket envelope continues because
+// its frames ride an upgrade request HTTPScopeStep already path-checked;
+// every other protocol — raw bytes, gRPC and gRPC-Web, whose requests
+// HTTPScopeStep does not path-check (USK-1236) — is blocked, failing
+// closed.
 func (s *HostScopeStep) Process(ctx context.Context, env *envelope.Envelope) Result {
 	if env.Direction != envelope.Send {
 		return Result{}
@@ -84,17 +97,34 @@ func (s *HostScopeStep) Process(ctx context.Context, env *envelope.Envelope) Res
 		port, _ = strconv.Atoi(portStr)
 	}
 
-	// Path is passed empty: this is a connection-level check and no
-	// request path is known yet. The scheme, however, IS known — it is
-	// the connection's transport confidentiality — and must be passed,
+	// No path is passed: this is a connection-level check and no request
+	// path is known here (CheckHost). The scheme, however, IS known — it
+	// is the connection's transport confidentiality — and must be passed,
 	// because matchTargetRule is AND logic: a rule carrying a Schemes
 	// condition silently stops matching when the scheme is blank
 	// (USK-1081).
-	allowed, _ := s.scope.CheckTarget(transportScopeScheme(env), host, port, "")
+	allowed, pathPending, _ := s.scope.CheckHost(transportScopeScheme(env), host, port)
 	if !allowed {
 		return targetScopeBlock(env)
 	}
+	if pathPending && !requestPathChecked(env.Protocol) {
+		return targetScopeBlock(env)
+	}
 	return Result{}
+}
+
+// requestPathChecked reports whether every Send envelope of protocol p is
+// covered by an HTTPScopeStep request-path check (USK-1130): HTTP requests
+// directly, WebSocket frames through the upgrade request. Raw bytes carry
+// no path, and gRPC / gRPC-Web requests are not path-checked by
+// HTTPScopeStep (USK-1236), so a path-scoped allow must not admit them.
+func requestPathChecked(p envelope.Protocol) bool {
+	switch p {
+	case envelope.ProtocolHTTP, envelope.ProtocolWebSocket:
+		return true
+	default:
+		return false
+	}
 }
 
 // targetScopeBlock is the Result of a target scope deny for env.

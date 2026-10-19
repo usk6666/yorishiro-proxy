@@ -100,12 +100,26 @@ func NewSOCKS5Handler(cfg SOCKS5HandlerConfig) HandlerFunc {
 
 		connLogger = connLogger.With("target", target, "via", "socks5")
 
+		// USK-1130: classify the route once so the live-connection
+		// predicate and the passthrough decision agree. An opaque route
+		// (no HTTP path ever observed) is re-checked strictly here: the
+		// negotiator only refuses it before the reply when its
+		// OpaqueRoute is wired, and the passthrough list may have
+		// changed since it ran.
+		scope := cfg.Negotiator.Scope
+		route := classifyTunnelRoute(cfg.PassthroughList, cfg.BuildCfg, target)
+		if route.opaque() {
+			if allowed, reason := socks5ScopeCheck(scope, target, true); !allowed {
+				connLogger.Info("socks5 target blocked by scope", "reason", reason)
+				return nil
+			}
+		}
+
 		// USK-1160: track the admitted tunnel with the negotiator's own
 		// scope check (blank scheme) so a policy change that no longer
 		// admits target cancels ctx for every route below.
-		scope := cfg.Negotiator.Scope
 		ctx, release, ok := trackAdmitted(ctx, cfg.LiveConns, "socks5", target, func() (bool, string) {
-			return socks5ScopeCheck(scope, target)
+			return socks5ScopeCheck(scope, target, route.opaque())
 		}, connLogger)
 		defer release()
 		if !ok {
@@ -119,7 +133,7 @@ func NewSOCKS5Handler(cfg SOCKS5HandlerConfig) HandlerFunc {
 		}
 
 		// Step 2: TLS passthrough check.
-		if socks5Passthrough(ctx, cfg, pc, target, connLogger) {
+		if socks5Passthrough(ctx, cfg, pc, target, route.passthrough, connLogger) {
 			return nil
 		}
 
@@ -157,16 +171,14 @@ func handleSOCKS5NegotiateErr(ctx context.Context, err error, logger *slog.Logge
 	}
 }
 
-// socks5Passthrough engages the TLS passthrough relay when the target
-// matches. Returns true when the relay was used (caller returns).
-func socks5Passthrough(ctx context.Context, cfg SOCKS5HandlerConfig, pc *PeekConn, target string, logger *slog.Logger) bool {
-	if cfg.PassthroughList == nil {
+// socks5Passthrough engages the TLS passthrough relay when relay (the
+// handler's classifyTunnelRoute result) says so. Returns true when the
+// relay was used (caller returns).
+func socks5Passthrough(ctx context.Context, cfg SOCKS5HandlerConfig, pc *PeekConn, target string, relay bool, logger *slog.Logger) bool {
+	if !relay {
 		return false
 	}
 	host, _, _ := net.SplitHostPort(target)
-	if !cfg.PassthroughList.Contains(host) {
-		return false
-	}
 	logger.Debug("TLS passthrough relay", "target", target)
 	// USK-959: stamp the dial target on ctx so the per_target_host
 	// rotation policy can scope state by upstream host.

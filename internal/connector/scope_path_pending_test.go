@@ -141,6 +141,22 @@ func TestTargetScope_CheckHost(t *testing.T) {
 	}
 }
 
+// CheckHost keeps CheckTarget's fail-closed verdict for an unparsable
+// numeric host (USK-1250): the connection gates now call CheckHost, so a
+// gap here would let such a host past a deny-only scope.
+func TestCheckHost_UnparsableNumericHostFailsClosed(t *testing.T) {
+	s := NewTargetScope()
+	s.SetPolicyRules(nil, []TargetRule{{Hostname: "deny.test"}})
+	for _, host := range []string{"1.2.3.4.5", "999999999999"} {
+		if allowed, _, reason := s.CheckHost("https", host, 443); allowed || reason != numericHostReason {
+			t.Errorf("CheckHost(%q) = (%v, %q), want (false, %q)", host, allowed, reason, numericHostReason)
+		}
+		if allowed, _ := s.CheckOpaqueTarget("https", host, 443); allowed {
+			t.Errorf("CheckOpaqueTarget(%q) allowed, want denied", host)
+		}
+	}
+}
+
 // CheckTarget with an empty path keeps its strict verdict: a path-scoped
 // allow never matches it (R2). Only the gate-level CheckHost is lenient.
 func TestCheckTarget_PathScopedAllow_EmptyPathStaysStrict(t *testing.T) {

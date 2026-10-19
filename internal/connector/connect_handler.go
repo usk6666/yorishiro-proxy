@@ -216,9 +216,15 @@ func NewCONNECTHandler(cfg CONNECTHandlerConfig) HandlerFunc {
 
 		connLogger = connLogger.With("target", target)
 
+		// USK-1130: classify the route once, from host-keyed config, so
+		// the admission check, the live-connection predicate and the
+		// passthrough decision below agree even if the passthrough list
+		// changes meanwhile.
+		route := classifyTunnelRoute(cfg.PassthroughList, cfg.BuildCfg, target)
+
 		// Step 2-3: scope and rate-limit policy checks. A denial is
 		// answered with 403 / 429 and the connection closes (USK-1246).
-		if resp := connectPolicyReject(cfg, target, connLogger); resp != nil {
+		if resp := connectPolicyReject(cfg, target, route.opaque(), connLogger); resp != nil {
 			writeForwardResponse(pc, resp)
 			return nil
 		}
@@ -227,7 +233,7 @@ func NewCONNECTHandler(cfg CONNECTHandlerConfig) HandlerFunc {
 		// longer admits target cancels ctx — which every route below
 		// (passthrough relay, inner dispatch, TLS MITM stack) watches.
 		ctx, release, ok := trackAdmitted(ctx, cfg.LiveConns, "connect", target, func() (bool, string) {
-			allowed, reason, _ := connectScopeCheck(cfg.Scope, target)
+			allowed, reason, _ := connectScopeCheck(cfg.Scope, target, route.opaque())
 			return allowed, reason
 		}, connLogger)
 		defer release()
@@ -243,7 +249,7 @@ func NewCONNECTHandler(cfg CONNECTHandlerConfig) HandlerFunc {
 		}
 
 		// Step 4: TLS passthrough check.
-		if connectPassthrough(ctx, cfg, pc, target, connLogger) {
+		if connectPassthrough(ctx, cfg, pc, target, route.passthrough, connLogger) {
 			return nil
 		}
 
@@ -288,9 +294,10 @@ const (
 // when the target is admitted, otherwise the response the caller must send
 // before closing — 403 for a scope denial, 429 for a rate-limit denial
 // (USK-1246) — after emitting the denial log line. Scope runs first, so a
-// scope-denied CONNECT consumes no rate-limit token.
-func connectPolicyReject(cfg CONNECTHandlerConfig, target string, logger *slog.Logger) []byte {
-	allowed, reason, splitErr := connectScopeCheck(cfg.Scope, target)
+// scope-denied CONNECT consumes no rate-limit token. opaque selects the
+// strict scope check for routes that never yield a path (USK-1130).
+func connectPolicyReject(cfg CONNECTHandlerConfig, target string, opaque bool, logger *slog.Logger) []byte {
+	allowed, reason, splitErr := connectScopeCheck(cfg.Scope, target, opaque)
 	if splitErr != nil {
 		logger.Debug("invalid CONNECT target", "error", splitErr)
 		return forwardErrorResponse(400, "Bad Request", "yorishiro-proxy: invalid CONNECT target")
@@ -312,13 +319,17 @@ func connectPolicyReject(cfg CONNECTHandlerConfig, target string, logger *slog.L
 }
 
 // connectScopeCheck is the CONNECT gate's scope check: scheme "https",
-// the CONNECT authority's host and port, path "". It is both the admission
+// the CONNECT authority's host and port, no path. It is both the admission
 // check and the live-connection predicate (USK-1160), so a tunnel survives
 // a policy change iff an identical new CONNECT would be admitted. A nil or
 // rule-less scope allows everything. err is non-nil only for an authority
 // that SplitTargetHostPort rejects (then allowed is false), so a port the
 // scope cannot read as the dialer does fails closed (USK-1249).
-func connectScopeCheck(scope *TargetScope, target string) (allowed bool, reason string, err error) {
+//
+// opaque reports that the tunnel's route never yields an HTTP request path
+// (TLS passthrough relay or raw_passthrough_hosts, see classifyTunnelRoute);
+// see gateScopeCheck for how it changes the decision (USK-1130).
+func connectScopeCheck(scope *TargetScope, target string, opaque bool) (allowed bool, reason string, err error) {
 	if scope == nil || !scope.HasRules() {
 		return true, "", nil
 	}
@@ -326,26 +337,72 @@ func connectScopeCheck(scope *TargetScope, target string) (allowed bool, reason 
 	if err != nil {
 		return false, "invalid CONNECT target", err
 	}
-	allowed, reason = scope.CheckTarget("https", host, port, "")
+	allowed, reason = gateScopeCheck(scope, "https", host, port, opaque)
 	return allowed, reason, nil
 }
 
-// TunnelRouteOpaque reports whether a CONNECT / SOCKS5 tunnel to target
-// never yields an HTTP request path (USK-1130). Not yet implemented.
-func TunnelRouteOpaque(pl *PassthroughList, buildCfg *BuildConfig, target string) bool {
-	return false
+// gateScopeCheck is the decision shared by the connection-level gates
+// (USK-1130). A route that never yields an HTTP request path is checked
+// strictly (CheckOpaqueTarget): a path-scoped allow does not admit it.
+// Every other route reaches the Pipeline, where HostScopeStep and
+// HTTPScopeStep check each envelope, so a path-scoped allow admits the
+// host provisionally (CheckHost) and the request path is enforced per
+// request. The provisional verdict drops pathPending on purpose: the
+// Pipeline recomputes it per envelope and is authoritative for the path.
+func gateScopeCheck(scope *TargetScope, scheme, host string, port int, opaque bool) (allowed bool, reason string) {
+	if opaque {
+		return scope.CheckOpaqueTarget(scheme, host, port)
+	}
+	allowed, _, reason = scope.CheckHost(scheme, host, port)
+	return allowed, reason
 }
 
-// connectPassthrough handles the TLS passthrough relay. Returns true when
-// the relay engaged (caller returns).
-func connectPassthrough(ctx context.Context, cfg CONNECTHandlerConfig, pc *PeekConn, target string, logger *slog.Logger) bool {
-	if cfg.PassthroughList == nil {
+// tunnelRoute is the route a CONNECT / SOCKS5 tunnel takes as far as
+// host-keyed configuration decides it at admission (USK-1130). Routes
+// chosen later from the inner bytes (plaintext HTTP, h2c, TLS MITM,
+// bytechunk) all reach the Pipeline.
+type tunnelRoute struct {
+	// passthrough: TLS passthrough relay — no ConnectionStack, no Pipeline.
+	passthrough bool
+	// rawPassthrough: raw_passthrough_hosts — TLS-terminated bytechunk.
+	rawPassthrough bool
+}
+
+// opaque reports that no HTTP request path is ever observed on the route.
+func (r tunnelRoute) opaque() bool { return r.passthrough || r.rawPassthrough }
+
+// classifyTunnelRoute classifies target against the TLS passthrough list
+// and raw_passthrough_hosts. Nil arguments contribute nothing.
+func classifyTunnelRoute(pl *PassthroughList, buildCfg *BuildConfig, target string) tunnelRoute {
+	var r tunnelRoute
+	if pl != nil {
+		host, _, _ := net.SplitHostPort(target)
+		r.passthrough = pl.Contains(host)
+	}
+	if buildCfg != nil && buildCfg.ProxyConfig != nil {
+		r.rawPassthrough = buildCfg.ProxyConfig.IsRawPassthrough(target)
+	}
+	return r
+}
+
+// TunnelRouteOpaque reports whether a CONNECT / SOCKS5 tunnel to target
+// takes a route on which no HTTP request path is ever observed — the TLS
+// passthrough relay or a raw_passthrough_hosts target (USK-1130). It is
+// the SOCKS5Negotiator.OpaqueRoute production wiring.
+func TunnelRouteOpaque(pl *PassthroughList, buildCfg *BuildConfig, target string) bool {
+	return classifyTunnelRoute(pl, buildCfg, target).opaque()
+}
+
+// connectPassthrough handles the TLS passthrough relay. relay is the
+// admission-time classification (classifyTunnelRoute), so a tunnel
+// admitted provisionally for a path-scoped allow never turns into a relay
+// that no path check would see (USK-1130). Returns true when the relay
+// engaged (caller returns).
+func connectPassthrough(ctx context.Context, cfg CONNECTHandlerConfig, pc *PeekConn, target string, relay bool, logger *slog.Logger) bool {
+	if !relay {
 		return false
 	}
 	host, _, _ := net.SplitHostPort(target)
-	if !cfg.PassthroughList.Contains(host) {
-		return false
-	}
 	logger.Debug("TLS passthrough relay", "target", target)
 	// USK-959: stamp the dial target on ctx so the per_target_host
 	// rotation policy can scope state by upstream host.

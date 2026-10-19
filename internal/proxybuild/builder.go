@@ -504,6 +504,11 @@ func BuildLiveStack(_ context.Context, deps Deps) (*Stack, error) {
 		socks5Negotiator = connector.NewSOCKS5Negotiator(logger)
 	}
 	socks5Negotiator.Scope = deps.Scope
+	// USK-1130: refuse a path-scoped-only target with REP=0x02 when its
+	// route (TLS passthrough / raw_passthrough_hosts) never yields a path.
+	socks5Negotiator.OpaqueRoute = func(target string) bool {
+		return connector.TunnelRouteOpaque(deps.PassthroughList, deps.BuildConfig, target)
+	}
 	socks5Negotiator.RateLimiter = deps.RateLimiter
 	socks5Handler := connector.NewSOCKS5Handler(connector.SOCKS5HandlerConfig{
 		Negotiator:          socks5Negotiator,

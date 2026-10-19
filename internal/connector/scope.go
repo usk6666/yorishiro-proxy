@@ -74,7 +74,9 @@ type TargetRule struct {
 	// with "/" and contain no "*", "?" or "#" (config.ValidateTargetRule).
 	// The path is matched in either its wire form or its percent-decoded
 	// form (USK-1139, see PathPrefixMatches).
-	// When empty, all paths are matched.
+	// When empty, all paths are matched. A check without a path
+	// (CheckTarget with "") never matches a rule with a PathPrefix; the
+	// connection gates use CheckHost instead (USK-1130).
 	PathPrefix string `json:"path_prefix,omitempty"`
 
 	// Schemes restricts the rule to specific URL schemes (e.g., "http", "https").
@@ -160,10 +162,99 @@ func (s *TargetScope) CheckTarget(scheme, hostname string, port int, path string
 	return true, ""
 }
 
-// CheckHost is the path-unknown form of CheckTarget (USK-1130). Not yet implemented.
+// ReasonPathRequired is the block reason for a target that only a
+// path-scoped allow admits, checked on a route that never yields an HTTP
+// request path (TLS passthrough relay, raw TCP, gRPC — USK-1130).
+const ReasonPathRequired = "allowed only for a path_prefix; this route carries no HTTP request path"
+
+// CheckHost is the connection-level form of CheckTarget: it evaluates the
+// rules for a target whose request path is not known yet (USK-1130).
+//
+// Deny rules are evaluated exactly as CheckTarget(scheme, hostname, port,
+// "") does, so a path-scoped deny never matches here; it is enforced per
+// request by the HTTP scope check. Allow rules are evaluated per layer
+// ignoring their PathPrefix: a layer passes if some allow matches host,
+// port and scheme. A layer whose only matches are path-scoped passes
+// *conditionally*: the target may be reached, but only for request paths
+// the layer admits. pathPending reports that at least one layer passed
+// conditionally, and the caller must then make sure every request on the
+// connection is path-checked (CheckTarget with its path) — or refuse the
+// connection when its route can never yield a path. A non-path match in a
+// layer beats a conditional one in the same layer.
+//
+// CheckTarget itself is unchanged: with an empty path it still never
+// matches a path-scoped allow (RFC-001 §3.8 — fix at the call sites, do
+// not change the shared semantics).
 func (s *TargetScope) CheckHost(scheme, hostname string, port int) (allowed, pathPending bool, reason string) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	// Fail closed on an unparsable numeric host, as CheckTarget does
+	// (USK-1250).
+	if s.hasRulesLocked() && numericHostUnparsable(hostname) {
+		return false, false, numericHostReason
+	}
+
+	for _, rule := range s.policyDenies {
+		if matchTargetRule(rule, scheme, hostname, port, "") {
+			return false, false, "blocked by policy deny rule"
+		}
+	}
+	for _, rule := range s.agentDenies {
+		if matchTargetRule(rule, scheme, hostname, port, "") {
+			return false, false, "blocked by agent deny rule"
+		}
+	}
+	policyOK, policyPending := matchAllowLayerHost(s.policyAllows, scheme, hostname, port)
+	if !policyOK {
+		return false, false, "not in policy allow list"
+	}
+	agentOK, agentPending := matchAllowLayerHost(s.agentAllows, scheme, hostname, port)
+	if !agentOK {
+		return false, false, "not in agent allow list"
+	}
+	return true, policyPending || agentPending, ""
+}
+
+// matchAllowLayerHost evaluates one allow layer for a path-unknown target.
+// An empty layer passes unconditionally. Otherwise it passes
+// unconditionally if a rule without PathPrefix matches, conditionally
+// (matched and conditional both true) if only path-scoped rules match
+// host, port and scheme, and not at all otherwise.
+func matchAllowLayerHost(rules []TargetRule, scheme, hostname string, port int) (matched, conditional bool) {
+	if len(rules) == 0 {
+		return true, false
+	}
+	for _, rule := range rules {
+		if rule.PathPrefix == "" {
+			if matchTargetRule(rule, scheme, hostname, port, "") {
+				return true, false
+			}
+			continue
+		}
+		hostOnly := rule
+		hostOnly.PathPrefix = ""
+		if matchTargetRule(hostOnly, scheme, hostname, port, "") {
+			conditional = true
+		}
+	}
+	return conditional, conditional
+}
+
+// CheckOpaqueTarget is the gate check for a route on which no HTTP request
+// path is ever observed (USK-1130): it is CheckTarget with an empty path,
+// so a path-scoped allow does not admit the target. When the target is
+// refused only because its allows are path-scoped, the reason says so
+// (ReasonPathRequired) instead of "not in ... allow list".
+func (s *TargetScope) CheckOpaqueTarget(scheme, hostname string, port int) (allowed bool, reason string) {
 	allowed, reason = s.CheckTarget(scheme, hostname, port, "")
-	return allowed, false, reason
+	if allowed {
+		return true, ""
+	}
+	if ok, pending, _ := s.CheckHost(scheme, hostname, port); ok && pending {
+		return false, ReasonPathRequired
+	}
+	return false, reason
 }
 
 // CheckURL is a convenience method that extracts scheme, hostname, port, and

@@ -275,12 +275,18 @@ func NewHTTP1ForwardHandler(cfg HTTP1ForwardHandlerConfig) HandlerFunc {
 }
 
 // forwardScopeCheck is the plain-HTTP forward gate's scope check: scheme
-// "http", the forward target's host and port, path "". It is both the
+// "http", the forward target's host and port, no path. It is both the
 // admission check and the live-connection predicate (USK-1160). A nil or
 // rule-less scope allows everything. err is non-nil only for a target that
 // SplitTargetHostPort rejects (then allowed is false): peekForwardTarget
 // already refuses such a target, so this fail-closed branch is
 // defense-in-depth (USK-1249).
+//
+// Every request on the connection reaches the Pipeline (HostScopeStep and
+// HTTPScopeStep, which path-checks it), so a path-scoped allow admits the
+// host provisionally (USK-1130, see gateScopeCheck). The first request's
+// path is known here but deliberately not used: later keep-alive requests
+// reuse the same upstream leg and are checked per request anyway.
 func forwardScopeCheck(scope *TargetScope, target string) (allowed bool, reason string, err error) {
 	if scope == nil || !scope.HasRules() {
 		return true, "", nil
@@ -289,7 +295,7 @@ func forwardScopeCheck(scope *TargetScope, target string) (allowed bool, reason 
 	if err != nil {
 		return false, "invalid forward-proxy target", err
 	}
-	allowed, reason = scope.CheckTarget("http", host, port, "")
+	allowed, reason = gateScopeCheck(scope, "http", host, port, false)
 	return allowed, reason, nil
 }
 
