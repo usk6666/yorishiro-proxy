@@ -144,6 +144,17 @@ type RecordStep struct {
 	// the same bounded-by-stream-count rationale as streamCreated.
 	schemeBackfillPending sync.Map
 
+	// annotationWritten records which (streamID, tag key, tag value)
+	// triples appendAnnotations has already written (USK-1109 review
+	// F-3 / CWE-400). A log_only match on every frame of a WS / gRPC
+	// flood would otherwise issue one synchronous read-merge-write
+	// UpdateStream per frame on the single SQLite writer, even after the
+	// per-Stream record cap. Only unseen triples are written; a failed
+	// write forgets its triples so a later envelope retries. Same
+	// no-eviction, bounded-by-stream-count rationale as protocolRetagged
+	// (a Stream contributes at most one entry per matching rule).
+	annotationWritten sync.Map
+
 	// scope filters which envelopes are recorded. nil = capture all
 	// (current behaviour). When non-nil, ShouldRecord is consulted for
 	// every envelope and the result is cached per StreamID in
@@ -623,6 +634,14 @@ func (s *RecordStep) Process(ctx context.Context, env *envelope.Envelope) Result
 	// LoadOrStore so subsequent WS frames are write-free.
 	s.maybeRetagProtocol(ctx, env)
 
+	// USK-1109: append the Run's Result.Annotations (e.g. SafetyStep
+	// log_only observations) to the Stream's tags. Runs after the
+	// ensureStream block above so the row exists even when the annotated
+	// envelope is the stream's first Send, and before the per-Stream
+	// record cap gate so a capped streaming envelope still leaves its
+	// observation on the Stream.
+	s.appendAnnotations(ctx, env)
+
 	// On Receive, project upstream TLS snapshot (if present) onto
 	// Stream.ConnInfo. The Send side carries the synthetic MITM cert we
 	// presented to the client; Receive carries the real upstream TLS
@@ -782,6 +801,48 @@ func (s *RecordStep) markStreamTruncated(ctx context.Context, env *envelope.Enve
 			"error", err,
 		)
 	}
+}
+
+// appendAnnotations writes the Run's merged Result.Annotations onto env's
+// Stream via AppendTags, so tags written earlier (TLS metadata, cap
+// markers, other annotations) are preserved. No-op without annotations or
+// without a StreamID, and when every (key, value) was already written for
+// this Stream (annotationWritten).
+func (s *RecordStep) appendAnnotations(ctx context.Context, env *envelope.Envelope) {
+	tags := annotationsFromContext(ctx)
+	if len(tags) == 0 || env.StreamID == "" {
+		return
+	}
+	var appendTags map[string]string
+	var claimed []annotationWriteKey
+	for k, v := range tags {
+		key := annotationWriteKey{streamID: env.StreamID, tag: k, value: v}
+		if _, seen := s.annotationWritten.LoadOrStore(key, struct{}{}); seen {
+			continue
+		}
+		if appendTags == nil {
+			appendTags = make(map[string]string, len(tags))
+		}
+		appendTags[k] = v
+		claimed = append(claimed, key)
+	}
+	if len(appendTags) == 0 {
+		return
+	}
+	if err := s.store.UpdateStream(ctx, env.StreamID, flow.StreamUpdate{AppendTags: appendTags}); err != nil {
+		for _, key := range claimed {
+			s.annotationWritten.Delete(key)
+		}
+		s.logger.Error("record step: annotation tag update failed",
+			"stream_id", env.StreamID,
+			"error", err,
+		)
+	}
+}
+
+// annotationWriteKey is the RecordStep.annotationWritten dedupe key.
+type annotationWriteKey struct {
+	streamID, tag, value string
 }
 
 // updateStreamTLS projects env.Context.TLS into Stream.ConnInfo via

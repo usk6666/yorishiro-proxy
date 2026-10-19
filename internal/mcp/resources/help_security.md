@@ -468,7 +468,7 @@ Custom rules require `id`, `pattern`, and `targets` fields. The action is inheri
 | Action | Description |
 |--------|-------------|
 | `block` | Reject the request with 403 status. The response includes `X-Block-Reason: safety_filter` header and a JSON body with violation details |
-| `log_only` | Log the match but allow the request through. Useful for testing rules before enforcement |
+| `log_only` | Log the match but allow the request through (live proxy traffic and resend / fuzz / macro alike). Every matching rule (not just the first) is recorded on the stream as tag `safety_log_only:<rule_id>`, visible in `query` results — also when a later step (e.g. an intercept drop) blocks the request. Useful for testing rules before enforcement |
 
 ### Blocked Response Format
 

@@ -83,6 +83,11 @@ type SessionOptions struct {
 	// blocked envelopes are always recorded regardless of scope, which
 	// is the AC #3 deferral that USK-782 closes.
 	//
+	// ctx carries, via pipeline.BlockAnnotationsFromContext, the
+	// Result.Annotations of the Steps that continued before the Drop
+	// (e.g. a SafetyStep log_only observation), so the recorder can keep
+	// them on the audit Stream (USK-1109).
+	//
 	// env is the (possibly Pipeline-mutated) Envelope that was Dropped.
 	// Implementations must not retain env beyond the call — its Message
 	// may share BodyBuffer references with the snapshot held by the
@@ -355,7 +360,10 @@ func (r *bodyBufRegistry) drain() {
 }
 
 // runPipelineTracked runs p on env and registers the buffer refcounts that
-// the session backstop must Release at drain time.
+// the session backstop must Release at drain time. The fifth return value
+// is pipeline.RunOutcome.Annotations (non-nil only on Drop / Respond); the
+// caller hands it to OnPipelineDrop via pipeline.WithBlockAnnotations
+// (USK-1109).
 //
 // Refcount accounting (USK-635 follow-up to USK-634):
 // Every disk-backed HTTP body arrives with two outstanding Retains that the
@@ -396,7 +404,7 @@ func runPipelineTracked(
 	p *pipeline.Pipeline,
 	env *envelope.Envelope,
 	reg *bodyBufRegistry,
-) (*envelope.Envelope, pipeline.Action, *envelope.Envelope, string) {
+) (*envelope.Envelope, pipeline.Action, *envelope.Envelope, string, map[string]string) {
 	var pre *bodybuf.BodyBuffer
 	var preRaw *bodybuf.BodyBuffer
 	if env != nil {
@@ -408,7 +416,8 @@ func runPipelineTracked(
 		}
 	}
 
-	outEnv, action, resp, blockedBy := p.RunWithBlockedBy(ctx, env)
+	o := p.RunDetailed(ctx, env)
+	outEnv, action, resp, blockedBy := o.Envelope, o.Action, o.Response, o.BlockedBy
 
 	if pre != nil {
 		// Always register the Pipeline snapshot Retain (Clone added one).
@@ -442,7 +451,7 @@ func runPipelineTracked(
 		reg.trackEnvelope(resp)
 	}
 
-	return outEnv, action, resp, blockedBy
+	return outEnv, action, resp, blockedBy, o.Annotations
 }
 
 // upstreamHolder passes the upstream Channel from goroutine 1 to goroutine 2
@@ -1570,9 +1579,9 @@ func wsRelayDirection(
 		if streamID == "" {
 			streamID = env.StreamID
 		}
-		env, action, resp, blockedBy := runPipelineTracked(pctx, p, env, reg)
+		env, action, resp, blockedBy, blockTags := runPipelineTracked(pctx, p, env, reg)
 		if action == pipeline.Drop || action == pipeline.Respond {
-			if serr := wsRelayHandlePolicy(ctx, src, action, env, resp, blockedBy, userOpt.OnPipelineDrop); serr != nil {
+			if serr := wsRelayHandlePolicy(pipeline.WithBlockAnnotations(ctx, blockTags), src, action, env, resp, blockedBy, userOpt.OnPipelineDrop); serr != nil {
 				return serr
 			}
 			continue
@@ -2912,7 +2921,7 @@ func clientToUpstream(
 		}
 		sc.set(env.StreamID)
 
-		env, action, resp, blockedBy := runPipelineTracked(pctx, p, env, reg)
+		env, action, resp, blockedBy, blockTags := runPipelineTracked(pctx, p, env, reg)
 		// USK-782 / USK-829: surface the BlockedBy attribution to the
 		// session-side recorder before continuing the loop. Wire
 		// forwarding still short-circuits on Drop (dispatchClientAction
@@ -2924,7 +2933,7 @@ func clientToUpstream(
 		// plugin-driven Respond passes blockedBy="" through unchanged.
 		if blockedBy != "" && onDrop != nil &&
 			(action == pipeline.Drop || action == pipeline.Respond) {
-			onDrop(ctx, env, blockedBy)
+			onDrop(pipeline.WithBlockAnnotations(ctx, blockTags), env, blockedBy)
 		}
 		if terr := rawTargetScopeTeardown(client, uh, env, action, blockedBy); terr != nil {
 			return terr
@@ -3127,14 +3136,14 @@ func upstreamToClient(
 			env.StreamID = clientID
 		}
 
-		env, action, _, blockedBy := runPipelineTracked(pctx, p, env, reg)
+		env, action, _, blockedBy, blockTags := runPipelineTracked(pctx, p, env, reg)
 		if action == pipeline.Drop {
 			// USK-782: receive-direction Drops (e.g. Safety on a Receive
 			// arm — currently no engine emits one, but the path is wired
 			// for future per-protocol Output Filters) surface to the
 			// audit recorder symmetrically with Send-direction Drops.
 			if blockedBy != "" && onDrop != nil {
-				onDrop(ctx, env, blockedBy)
+				onDrop(pipeline.WithBlockAnnotations(ctx, blockTags), env, blockedBy)
 			}
 			if upgradePending(notice) {
 				return ErrUpgradePending

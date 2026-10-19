@@ -315,6 +315,43 @@ func TestCheckInput_FirstRuleWins(t *testing.T) {
 	}
 }
 
+// TestCheckInput_LogOnly pins USK-1109 on the MCP plane: a log_only rule
+// observes but never yields a violation; a block rule further down the
+// list still does.
+func TestCheckInput_LogOnly(t *testing.T) {
+	t.Run("log_only preset only", func(t *testing.T) {
+		e := mustEngine(t, Config{
+			InputRules: []RuleConfig{{Preset: "destructive-sql", Action: "log_only"}},
+		})
+		if v := e.CheckInput([]byte("DROP TABLE users"), "", nil); v != nil {
+			t.Errorf("log_only rule returned violation %+v, want nil", v)
+		}
+	})
+	t.Run("log_only custom only", func(t *testing.T) {
+		e := mustEngine(t, Config{
+			InputRules: []RuleConfig{{ID: "obs", Pattern: `DROP`, Targets: []string{"body"}, Action: "log_only"}},
+		})
+		if v := e.CheckInput([]byte("DROP TABLE"), "", nil); v != nil {
+			t.Errorf("log_only rule returned violation %+v, want nil", v)
+		}
+	})
+	t.Run("log_only then block", func(t *testing.T) {
+		e := mustEngine(t, Config{
+			InputRules: []RuleConfig{
+				{ID: "obs", Pattern: `DROP`, Targets: []string{"body"}, Action: "log_only"},
+				{ID: "enforce", Pattern: `DROP`, Targets: []string{"body"}, Action: "block"},
+			},
+		})
+		v := e.CheckInput([]byte("DROP TABLE"), "", nil)
+		if v == nil {
+			t.Fatal("expected the block rule's violation, got nil")
+		}
+		if v.RuleID != "enforce" {
+			t.Errorf("RuleID = %q, want %q", v.RuleID, "enforce")
+		}
+	})
+}
+
 func TestFilterOutput_Mask(t *testing.T) {
 	e := mustEngine(t, Config{
 		OutputRules: []RuleConfig{

@@ -328,8 +328,12 @@ func (s *InterceptStep) holdAndDispatch(ctx context.Context, env *envelope.Envel
 		// modify_and_forward lets the operator/AI agent inject content that
 		// bypasses that gate. Mirroring SafetyStep ensures the same Send-
 		// only / per-protocol coverage as the inline check (USK-702).
+		var annotations map[string]string
 		if s.safety != nil {
 			recheck := s.safety.Process(ctx, action.Modified)
+			// USK-1109: a log_only SafetyStep passes the modified envelope
+			// and annotates the observation; carry it to RecordStep.
+			annotations = recheck.Annotations
 			// USK-829: SafetyStep now returns Respond (with a synthetic
 			// 403 envelope) for HTTPMessage blocks instead of Drop. The
 			// recheck must forward both Action shapes — Drop for WS /
@@ -356,7 +360,7 @@ func (s *InterceptStep) holdAndDispatch(ctx context.Context, env *envelope.Envel
 				}
 			}
 		}
-		return Result{Envelope: action.Modified}
+		return Result{Envelope: action.Modified, Annotations: annotations}
 	default:
 		// An unknown action forwards the held envelope like a release, so
 		// it is scope-checked like one.
