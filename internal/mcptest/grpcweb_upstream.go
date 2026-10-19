@@ -9,6 +9,8 @@ import (
 	"net/http/httptest"
 	"sync"
 	"sync/atomic"
+	"testing"
+	"time"
 
 	"golang.org/x/net/http2"
 
@@ -92,7 +94,7 @@ const (
 // buildGRPCUpstream returns (URL, Listener, TLS, no-op Config) so the
 // rest of the harness does not need to fork by upstream protocol. The
 // custom Listener wrapper drains http2.Server connections on Close.
-func buildGRPCWebUpstream() (*httptest.Server, *FingerprintObserver, *GRPCWebHitCounter, error) {
+func buildGRPCWebUpstream(tb testing.TB) (*httptest.Server, *FingerprintObserver, *GRPCWebHitCounter, error) {
 	leafCert, err := newSelfSignedLeaf("localhost", "127.0.0.1")
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("self-signed leaf: %w", err)
@@ -169,6 +171,7 @@ func buildGRPCWebUpstream() (*httptest.Server, *FingerprintObserver, *GRPCWebHit
 
 	wrapped := &grpcWebListener{
 		Listener: tcpLn,
+		tb:       tb,
 		tlsCfg:   tlsCfg,
 		handler:  handler,
 		h2s:      &http2.Server{},
@@ -188,12 +191,21 @@ func buildGRPCWebUpstream() (*httptest.Server, *FingerprintObserver, *GRPCWebHit
 	return srv, fpObs, hits, nil
 }
 
+// grpcWebConnsDrainTimeout caps how long grpcWebListener.Close waits for
+// serving goroutines after force-closing their connections.
+const grpcWebConnsDrainTimeout = 5 * time.Second
+
 // grpcWebListener wraps a TCP listener with a single Accept goroutine
 // that promotes each connection to TLS (h2 ALPN) and serves it via
 // http2.Server. Close force-closes every accepted connection and waits
 // for the serving goroutines, mirroring UpstreamCapture.Close.
 type grpcWebListener struct {
 	net.Listener
+
+	// tb receives the failure report when serving goroutines outlive
+	// grpcWebConnsDrainTimeout after force-close. httptest.Server.Close
+	// discards Listener.Close's error, so returning one would be silent.
+	tb testing.TB
 
 	tlsCfg  *tls.Config
 	handler http.Handler
@@ -267,9 +279,19 @@ func (l *grpcWebListener) Close() error {
 			_ = c.Close()
 		}
 		// After the force-close nothing legitimate keeps a serving
-		// goroutine alive, so this wait is unbounded, like
-		// UpstreamCapture.Close.
-		l.connsWG.Wait()
+		// goroutine alive. Bound the wait anyway so a handler stuck on
+		// something other than the conn fails loudly instead of hanging
+		// the suite until the global test timeout.
+		drained := make(chan struct{})
+		go func() {
+			l.connsWG.Wait()
+			close(drained)
+		}()
+		select {
+		case <-drained:
+		case <-time.After(grpcWebConnsDrainTimeout):
+			l.tb.Errorf("mcptest: grpc-web upstream conn goroutines did not exit within %s of force-close", grpcWebConnsDrainTimeout)
+		}
 	})
 	return nil
 }

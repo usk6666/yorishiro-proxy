@@ -219,7 +219,8 @@ type Harness struct {
 	policyReload *policyReloadDriver
 
 	// Cleanup tears down the harness in this order: client session ->
-	// upstream test server -> MCP server (via context cancel + wait).
+	// MCP server (via context cancel + wait for Run) -> upstream test
+	// server.
 	// Idempotent: calling more than once is a no-op. t.Cleanup is also
 	// registered automatically, so explicit defer is optional.
 	Cleanup func()
@@ -256,7 +257,7 @@ func StartHarness(t *testing.T, opts HarnessOptions) *Harness {
 
 	args, exportDir, configPath := buildRunArgs(t, opts, token)
 	mtlsDir := t.TempDir()
-	upstream, mtls, fpObserver, grpcHits, grpcWebHits, wsHits, capture, err := buildUpstream(opts, mtlsDir)
+	upstream, mtls, fpObserver, grpcHits, grpcWebHits, wsHits, capture, err := buildUpstream(t, opts, mtlsDir)
 	if err != nil {
 		t.Fatalf("mcptest: build upstream: %v", err)
 	}
@@ -507,7 +508,7 @@ func writeConfigFile(path, content string) error {
 //
 // validateOptions has already rejected unrecognised variants by the
 // time this is called.
-func buildUpstream(opts HarnessOptions, mtlsDir string) (*httptest.Server, *MTLSMaterial, *FingerprintObserver, *GRPCHitCounter, *GRPCWebHitCounter, *WSHitCounter, *UpstreamCapture, error) {
+func buildUpstream(tb testing.TB, opts HarnessOptions, mtlsDir string) (*httptest.Server, *MTLSMaterial, *FingerprintObserver, *GRPCHitCounter, *GRPCWebHitCounter, *WSHitCounter, *UpstreamCapture, error) {
 	switch opts.UpstreamProto {
 	case "":
 		return nil, nil, nil, nil, nil, nil, nil, nil
@@ -518,7 +519,7 @@ func buildUpstream(opts HarnessOptions, mtlsDir string) (*httptest.Server, *MTLS
 		}
 		return srv, nil, fpObs, hits, nil, nil, nil, nil
 	case "grpc-web":
-		srv, fpObs, hits, err := buildGRPCWebUpstream()
+		srv, fpObs, hits, err := buildGRPCWebUpstream(tb)
 		if err != nil {
 			return nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("build grpc-web upstream: %w", err)
 		}
