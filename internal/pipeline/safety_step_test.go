@@ -560,8 +560,8 @@ func TestSafetyStep_WS_WireFidelity_OnDrop(t *testing.T) {
 	payloadSnap := append([]byte(nil), payloadOriginal...)
 	rawSnap := append([]byte(nil), rawOriginal...)
 
-	if result := step.Process(context.Background(), env); result.Action != Respond {
-		t.Fatalf("expected Respond action; got %v (rule precondition failed)", result.Action)
+	if result := step.Process(context.Background(), env); result.Action != Drop {
+		t.Fatalf("expected Drop action; got %v (rule precondition failed)", result.Action)
 	}
 
 	if !bytes.Equal(msg.Payload, payloadSnap) {
