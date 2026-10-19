@@ -355,6 +355,14 @@ func TestGRPC_UpstreamRSTStreamMidRPCProducesErrorState(t *testing.T) {
 // RST_STREAM(CANCEL); the reset is not propagated upstream and the Stream
 // is not recorded as error. See USK-1255.
 func TestGRPC_ClientRSTStreamMidRPCProducesErrorState(t *testing.T) {
+	// On unfixed code this test is racy, not deterministically red: with
+	// the Skip removed it was observed failing 7/8 runs (at the "upstream
+	// never received RST_STREAM" wait) and passing 1/8. When un-skipping
+	// for USK-1255, verify with repeated runs (e.g. GOFLAGS=-count=20).
+	// On failure, startGRPCMITMProxy's untracked per-connection goroutines
+	// (handleProxyConn / debugChannel) may still call t.Logf after the test
+	// returns, which panics with "Log in goroutine after ... has completed"
+	// and masks the real assertion failure.
 	t.Skip("not yet implemented: USK-1255")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
