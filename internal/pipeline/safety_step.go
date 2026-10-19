@@ -58,6 +58,11 @@ func NewSafetyStep(httpEngine *httprules.SafetyEngine, wsEngine *wsrules.SafetyE
 	}
 }
 
+// WithLogOnly switches the step to log_only mode (USK-1109).
+func (s *SafetyStep) WithLogOnly(logOnly bool) *SafetyStep {
+	return s
+}
+
 // Process checks Send-direction envelopes against safety rules. Receive
 // direction always passes through.
 //

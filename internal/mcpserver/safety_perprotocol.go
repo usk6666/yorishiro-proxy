@@ -18,6 +18,9 @@ type PerProtocolSafetyEngines struct {
 	HTTP *httprules.SafetyEngine
 	WS   *wsrules.SafetyEngine
 	GRPC *grpcrules.SafetyEngine
+
+	// LogOnly reports safety_filter.input.action == "log_only" (USK-1109).
+	LogOnly bool
 }
 
 // InitPerProtocolSafetyEngines compiles the user-facing

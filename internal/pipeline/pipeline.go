@@ -70,6 +70,10 @@ type Result struct {
 	// blocked_by filter: "target_scope", "intercept_drop",
 	// "intercept_cancelled", "rate_limit", "safety_filter", "budget".
 	BlockedBy string
+
+	// Annotations are Stream tags a Step asks RecordStep to append to the
+	// recorded Stream (USK-1109).
+	Annotations map[string]string
 }
 
 // Step is an individual processing unit within a Pipeline.
