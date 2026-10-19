@@ -753,6 +753,7 @@ func TestChannel_Send_ZeroCopyPath(t *testing.T) {
 			origBody: body,
 		},
 	}
+	snapLine(env)
 
 	// Create a channel that writes to the server side.
 	l := New(server, "conn-1", envelope.Receive) // Receive direction → Send() writes requests
@@ -819,6 +820,7 @@ func TestChannel_Send_HeaderPatchPath(t *testing.T) {
 			origBody: body,
 		},
 	}
+	snapLine(env)
 
 	l := New(server, "conn-1", envelope.Receive)
 	defer l.Close()
@@ -1436,6 +1438,7 @@ func TestChannel_Send_BodyBufferUnchanged_ZeroCopy(t *testing.T) {
 			origBodyBuffer: bb,
 		},
 	}
+	snapLine(env)
 
 	l := New(server, "conn-1", envelope.Receive)
 	defer l.Close()
@@ -1507,6 +1510,7 @@ func TestChannel_Send_BodyChangedToBytes(t *testing.T) {
 			origBodyBuffer: origBB,
 		},
 	}
+	snapLine(env)
 
 	l := New(server, "conn-1", envelope.Receive)
 	defer l.Close()
@@ -1572,6 +1576,7 @@ func TestChannel_Send_BodyNilBothNoBodyBytes(t *testing.T) {
 			},
 		},
 	}
+	snapLine(env)
 
 	l := New(server, "conn-1", envelope.Receive)
 	defer l.Close()
