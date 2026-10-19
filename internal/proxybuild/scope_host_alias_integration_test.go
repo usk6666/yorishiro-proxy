@@ -143,8 +143,8 @@ func connectStatus(t *testing.T, proxyAddr, authority string) (net.Conn, *bufio.
 	return c, br, line
 }
 
-// TestProxybuild_ScopeHostAlias_CONNECT is test-plan 1/2: CONNECT to an
-// alias of a denied host is refused before any upstream dial.
+// TestProxybuild_ScopeHostAlias_CONNECT is test-plan 1/2: a CONNECT tunnel
+// to an alias of a denied host is closed without any upstream dial.
 func TestProxybuild_ScopeHostAlias_CONNECT(t *testing.T) {
 	for _, tc := range aliasCases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -167,10 +167,16 @@ func TestProxybuild_ScopeHostAlias_CONNECT(t *testing.T) {
 				t.Fatalf("control upstream accepted %d connections, want >= 1 (alias must dial loopback)", got)
 			}
 
-			c2, _, line := connectStatus(t, f.proxyAddr, tc.alias+":"+strconv.Itoa(portOf(t, denied)))
-			if strings.Contains(line, " 200") {
-				_, _ = io.WriteString(c2, "GET / HTTP/1.1\r\nHost: denied\r\n\r\n")
-				t.Errorf("CONNECT %s to a host denied as %q = %q, want refused", tc.alias, tc.denyHost, line)
+			// The CONNECT negotiator answers 200 before the scope gate runs
+			// (connector.NewCONNECTHandler), so a denied tunnel is one the
+			// proxy closes without dialling — not a non-200 status.
+			c2, br2, _ := connectStatus(t, f.proxyAddr, tc.alias+":"+strconv.Itoa(portOf(t, denied)))
+			_, _ = io.WriteString(c2, "GET / HTTP/1.1\r\nHost: denied\r\n\r\n")
+			_ = c2.SetReadDeadline(time.Now().Add(5 * time.Second))
+			_, err := io.Copy(io.Discard, br2)
+			var ne net.Error
+			if errors.As(err, &ne) && ne.Timeout() {
+				t.Errorf("CONNECT %s to a host denied as %q: tunnel still open after 5s, want closed", tc.alias, tc.denyHost)
 			}
 			if got := settleAccepts(deniedAccepts, 0, 500*time.Millisecond); got != 0 {
 				t.Errorf("denied upstream accepted %d connections via alias %s, want 0", got, tc.alias)
