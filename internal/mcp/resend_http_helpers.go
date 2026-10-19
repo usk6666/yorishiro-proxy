@@ -16,6 +16,7 @@ import (
 	"net"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -27,6 +28,8 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/layer"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/http1"
+	"github.com/usk6666/yorishiro-proxy/internal/layer/http2"
+	"github.com/usk6666/yorishiro-proxy/internal/layer/httpaggregator"
 	"github.com/usk6666/yorishiro-proxy/internal/pipeline"
 	"github.com/usk6666/yorishiro-proxy/internal/pluginv2"
 	"github.com/usk6666/yorishiro-proxy/internal/session"
@@ -103,6 +106,9 @@ func validateResendHTTPInput(input *resendHTTPInput) error {
 	if err := validateResendHTTPScheme(input.Scheme); err != nil {
 		return err
 	}
+	if err := validateResendHTTPVersion(input.HTTPVersion, input.Scheme); err != nil {
+		return err
+	}
 	if input.FlowID == "" {
 		return validateResendHTTPFromScratch(input)
 	}
@@ -149,6 +155,73 @@ func validateResendHTTPScheme(scheme string) error {
 		return fmt.Errorf("unsupported scheme %q: only http and https are allowed", scheme)
 	}
 	return nil
+}
+
+// validateResendHTTPVersion applies the http_version allowlist (http/1.1,
+// h2, h2c — the canonical envelope.HTTPVersion* values minus http/1.0,
+// which the synthetic HTTP/1 send path does not emit) and, when the caller
+// also supplied a scheme, the scheme compatibility rule. On the flow_id
+// path without a scheme the rule is re-checked against the resolved scheme
+// by resolveResendHTTPVersion.
+func validateResendHTTPVersion(version, scheme string) error {
+	if version == "" {
+		return nil
+	}
+	v := strings.ToLower(version)
+	switch v {
+	case envelope.HTTPVersion11, envelope.HTTPVersionH2, envelope.HTTPVersionH2C:
+	default:
+		return fmt.Errorf("unsupported http_version %q: must be http/1.1, h2 or h2c", version)
+	}
+	return checkResendHTTPVersionScheme(v, scheme)
+}
+
+// checkResendHTTPVersionScheme rejects the two contradictory combinations:
+// h2 is HTTP/2 negotiated through TLS ALPN (RFC 9113 §3.2) and so needs
+// https; h2c is HTTP/2 over cleartext with prior knowledge (RFC 9113 §3.3)
+// and so needs http. version must already be lowercased; an empty scheme
+// means "not known yet" and passes.
+func checkResendHTTPVersionScheme(version, scheme string) error {
+	s := strings.ToLower(scheme)
+	switch {
+	case s == "":
+		return nil
+	case version == envelope.HTTPVersionH2 && s != "https":
+		return fmt.Errorf("http_version h2 requires scheme https (got %q); use h2c for cleartext HTTP/2", scheme)
+	case version == envelope.HTTPVersionH2C && s != "http":
+		return fmt.Errorf("http_version h2c requires scheme http (got %q); use h2 for HTTP/2 over TLS", scheme)
+	}
+	return nil
+}
+
+// resolveResendHTTPVersion decides the wire protocol of a resend (USK-1198):
+// an explicit http_version wins (re-checked against the resolved scheme),
+// then the recorded flow's version, then http/1.1. A recorded h2 or h2c
+// flow is sent over HTTP/2; whether that is h2 (TLS + ALPN) or h2c (prior
+// knowledge) follows the resolved scheme, the same value that decides
+// whether the dial uses TLS (resolveResendHTTPDial).
+func resolveResendHTTPVersion(explicit, recorded, scheme string) (string, error) {
+	if explicit != "" {
+		v := strings.ToLower(explicit)
+		if err := checkResendHTTPVersionScheme(v, scheme); err != nil {
+			return "", fmt.Errorf("resend_http: %w", err)
+		}
+		return v, nil
+	}
+	switch strings.ToLower(recorded) {
+	case envelope.HTTPVersionH2, envelope.HTTPVersionH2C:
+		if strings.EqualFold(scheme, "https") {
+			return envelope.HTTPVersionH2, nil
+		}
+		return envelope.HTTPVersionH2C, nil
+	}
+	return envelope.HTTPVersion11, nil
+}
+
+// isResendHTTP2 reports whether a resolved resend version is sent over
+// HTTP/2.
+func isResendHTTP2(version string) bool {
+	return version == envelope.HTTPVersionH2 || version == envelope.HTTPVersionH2C
 }
 
 // validateResendHTTPFromScratch checks that all required HTTPMessage fields
@@ -210,49 +283,29 @@ type resendHTTPEnvelopeMeta struct {
 // callers that need the metadata (fuzz_http) use this one, while resend
 // keeps the simpler signature.
 func (s *Server) buildResendHTTPEnvelopeWithMeta(ctx context.Context, input *resendHTTPInput) (*envelope.Envelope, resendHTTPEnvelopeMeta, error) {
-	method := input.Method
-	scheme := input.Scheme
-	authority := input.Authority
 	path, rawQuery, err := splitResendHTTPPathQuery(input.Path, input.RawQuery)
 	if err != nil {
 		return nil, resendHTTPEnvelopeMeta{}, err
 	}
-	var origHeaders []envelope.KeyValue
-	var origBody []byte
-
+	f := resendHTTPBaseFields{
+		method:    input.Method,
+		scheme:    input.Scheme,
+		authority: input.Authority,
+		path:      path,
+		rawQuery:  rawQuery,
+	}
 	if input.FlowID != "" {
-		stream, sendFlow, err := s.loadResendHTTPSendFlow(ctx, input.FlowID)
-		if err != nil {
+		if err := s.inheritResendHTTPFlow(ctx, input.FlowID, &f); err != nil {
 			return nil, resendHTTPEnvelopeMeta{}, err
 		}
-		if !resendHTTPSupportedProtocols[stream.Protocol] {
-			return nil, resendHTTPEnvelopeMeta{}, fmt.Errorf("resend_http: protocol %q not supported by this tool — use resend_ws / resend_grpc / resend_raw for non-HTTP flows", stream.Protocol)
-		}
-		if method == "" {
-			method = sendFlow.Method
-		}
-		if sendFlow.URL != nil {
-			if scheme == "" {
-				scheme = sendFlow.URL.Scheme
-			}
-			if authority == "" {
-				authority = sendFlow.URL.Host
-			}
-			if path == "" {
-				path = envelope.WirePath(sendFlow.URL)
-				if path == "" {
-					path = "/"
-				}
-			}
-			if rawQuery == "" {
-				rawQuery = sendFlow.URL.RawQuery
-			}
-		}
-		if scheme == "" {
-			scheme = resendHTTPFallbackScheme(stream)
-		}
-		origHeaders = flowMapToKeyValues(sendFlow.Headers)
-		origBody = sendFlow.Body
+	}
+	method, scheme, authority := f.method, f.scheme, f.authority
+	path, rawQuery = f.path, f.rawQuery
+	origHeaders, origBody, recordedVersion := f.headers, f.body, f.httpVersion
+
+	httpVersion, err := resolveResendHTTPVersion(input.HTTPVersion, recordedVersion, scheme)
+	if err != nil {
+		return nil, resendHTTPEnvelopeMeta{}, err
 	}
 
 	headers := origHeaders
@@ -263,7 +316,12 @@ func (s *Server) buildResendHTTPEnvelopeWithMeta(ctx context.Context, input *res
 	// array — what `headers[N]` should resolve against in fuzz positions.
 	preInjectionCount := len(headers)
 	var injected bool
-	headers, injected = ensureResendHTTPHostHeader(headers, authority)
+	if !isResendHTTP2(httpVersion) {
+		// HTTP/2 carries the target in :authority (RFC 9113 §8.3.1), which
+		// the h2 encoder builds from HTTPMessage.Authority; a synthetic
+		// host header there would be a header nobody asked to send.
+		headers, injected = ensureResendHTTPHostHeader(headers, authority)
+	}
 
 	body, err := resolveResendHTTPBody(input, origBody)
 	if err != nil {
@@ -271,6 +329,10 @@ func (s *Server) buildResendHTTPEnvelopeWithMeta(ctx context.Context, input *res
 	}
 
 	env := http1.BuildSendEnvelope(method, scheme, authority, path, rawQuery, headers, body)
+	// The resolved version is the send plan: the dial and the encoder
+	// registry key off it, and RecordStep projects it onto the new Send
+	// Flow's http_version (USK-1198 — that used to be "").
+	env.Message.(*envelope.HTTPMessage).HTTPVersion = httpVersion
 	// BuildSendEnvelope does not set StreamID — RecordStep needs one to
 	// open the new Stream row, so generate it here. RFC-001 streams are
 	// per-resend (each invocation creates a fresh Stream + Flow pair).
@@ -279,6 +341,60 @@ func (s *Server) buildResendHTTPEnvelopeWithMeta(ctx context.Context, input *res
 		HostInjected:    injected,
 		UserHeaderCount: preInjectionCount,
 	}, nil
+}
+
+// resendHTTPBaseFields are the request fields a resend starts from: the
+// caller's values, with the gaps filled from the recorded flow by
+// inheritResendHTTPFlow.
+type resendHTTPBaseFields struct {
+	method, scheme, authority, path, rawQuery string
+	headers                                   []envelope.KeyValue
+	body                                      []byte
+	// httpVersion is the recorded send Flow's http_version ("" when
+	// unknown); resolveResendHTTPVersion turns it into the send plan.
+	httpVersion string
+}
+
+// inheritResendHTTPFlow loads flowID's first send Flow and fills every
+// empty field of f from it. The scheme never stays empty — see
+// resendHTTPFallbackScheme. Headers, body and the recorded http_version
+// are always taken from the flow; the caller decides whether user input
+// replaces them.
+func (s *Server) inheritResendHTTPFlow(ctx context.Context, flowID string, f *resendHTTPBaseFields) error {
+	stream, sendFlow, err := s.loadResendHTTPSendFlow(ctx, flowID)
+	if err != nil {
+		return err
+	}
+	if !resendHTTPSupportedProtocols[stream.Protocol] {
+		return fmt.Errorf("resend_http: protocol %q not supported by this tool — use resend_ws / resend_grpc / resend_raw for non-HTTP flows", stream.Protocol)
+	}
+	if f.method == "" {
+		f.method = sendFlow.Method
+	}
+	if sendFlow.URL != nil {
+		if f.scheme == "" {
+			f.scheme = sendFlow.URL.Scheme
+		}
+		if f.authority == "" {
+			f.authority = sendFlow.URL.Host
+		}
+		if f.path == "" {
+			f.path = envelope.WirePath(sendFlow.URL)
+			if f.path == "" {
+				f.path = "/"
+			}
+		}
+		if f.rawQuery == "" {
+			f.rawQuery = sendFlow.URL.RawQuery
+		}
+	}
+	if f.scheme == "" {
+		f.scheme = resendHTTPFallbackScheme(stream)
+	}
+	f.headers = flowMapToKeyValues(sendFlow.Headers)
+	f.body = sendFlow.Body
+	f.httpVersion = sendFlow.HTTPVersion
+	return nil
 }
 
 // resendHTTPFallbackScheme resolves the scheme for a flow_id-based resend
@@ -553,10 +669,10 @@ func resendHTTPRequestURL(msg *envelope.HTTPMessage) *url.URL {
 // state). The wire encoder for HTTP is registered on a shared
 // WireEncoderRegistry so PluginStepPost MessageOnly mutations regenerate
 // env.Raw consistently with what RecordStep records as the modified
-// variant's bytes.
-func (s *Server) buildResendHTTPPipeline() *pipeline.Pipeline {
-	encoders := pipeline.NewWireEncoderRegistry()
-	encoders.Register(envelope.ProtocolHTTP, http1.EncodeWireBytes)
+// variant's bytes. The encoder follows the resend's wire protocol
+// (resendHTTPEncoderRegistry).
+func (s *Server) buildResendHTTPPipeline(httpVersion string) *pipeline.Pipeline {
+	encoders := resendHTTPEncoderRegistry(httpVersion)
 
 	steps := []pipeline.Step{
 		// USK-818: BudgetStep at position #1 so resend dispatches are
@@ -579,6 +695,21 @@ func (s *Server) buildResendHTTPPipeline() *pipeline.Pipeline {
 	return pipeline.New(steps...)
 }
 
+// resendHTTPEncoderRegistry returns the WireEncoderRegistry shared by
+// PluginStepPost and RecordStep for one resend / fuzz run: HTTP/1 framing
+// for an http/1.1 send, HPACK-encoded HTTP/2 frames for h2 / h2c — the same
+// per-route choice proxybuild makes for the live path
+// (defaultHTTP1WireEncoderRegistry / defaultHTTP2WireEncoderRegistry).
+func resendHTTPEncoderRegistry(httpVersion string) *pipeline.WireEncoderRegistry {
+	encoders := pipeline.NewWireEncoderRegistry()
+	if isResendHTTP2(httpVersion) {
+		encoders.Register(envelope.ProtocolHTTP, httpaggregator.EncodeWireBytes)
+	} else {
+		encoders.Register(envelope.ProtocolHTTP, http1.EncodeWireBytes)
+	}
+	return encoders
+}
+
 // pluginEngineForResend returns the pluginv2.Engine to feed PluginStepPost.
 // nil is acceptable — PluginStepPost no-ops when the engine is unset, which
 // matches the test fixture (no plugins loaded → no hooks fire) and
@@ -590,40 +721,67 @@ func pluginEngineForResend(s *Server) *pluginv2.Engine {
 	return s.pluginEngine.pluginv2
 }
 
-// buildResendHTTPDialFunc returns a session.DialFunc that dials addr,
+// resendHTTPDialConfig is everything buildResendHTTPDialFunc needs to open
+// the upstream connection for one resend (or one fuzz variant).
+//
+// httpVersion is the resolved send plan (resolveResendHTTPVersion):
+// http/1.1, h2 or h2c. h2Fingerprint is the server's TLS fingerprint
+// profile, which also shapes the HTTP/2 SETTINGS / pseudo-header order the
+// way the live upstream path does (USK-1007).
+type resendHTTPDialConfig struct {
+	transport     httputilpkg.TLSTransport
+	addr          string
+	useTLS        bool
+	sni           string
+	httpVersion   string
+	h2Fingerprint string
+}
+
+// buildResendHTTPDialFunc returns a session.DialFunc that dials cfg.addr,
 // optionally upgrades to TLS via the configured TLSTransport, then wraps the
-// connection in an http1 Layer in client (Receive) role. The returned
-// Channel feeds the Job: Channel.Send writes the request, Channel.Next reads
-// the response.
+// connection in the Layer matching cfg.httpVersion in client role. The
+// returned Channel feeds the Job: Channel.Send writes the request,
+// Channel.Next reads the response. Every call opens a fresh connection —
+// no pooling — so upstream proxy rotation keeps working per variant.
 //
 // useTLS is decided by the caller from msg.Scheme + override_host. SNI is
 // the override host when provided so that wrong-server routing produces a
 // matching ClientHello.
 //
-// The TLSTransport is cloned with NextProtos=["http/1.1"] before use: the
-// post-handshake conn is wrapped in an http1 Layer, so any server that
-// negotiates h2 over the default ALPN (StandardTransport offers
+// HTTP/1.1: the TLSTransport is cloned with NextProtos=["http/1.1"] before
+// use. The post-handshake conn is wrapped in an http1 Layer, so a server
+// that negotiated h2 over the default ALPN (StandardTransport offers
 // ["h2","http/1.1"], uTLS Chrome offers the same as part of the browser
 // fingerprint) would silently break the receive side. Pinning to http/1.1
 // keeps the rest of the fingerprint (cipher suites, extensions order) intact
-// while guaranteeing the negotiated wire matches the Layer we drive (USK-717).
-func buildResendHTTPDialFunc(transport httputilpkg.TLSTransport, addr string, useTLS bool, sni string) session.DialFunc {
+// while guaranteeing the negotiated wire matches the Layer we drive
+// (USK-717); anything but "http/1.1" or no ALPN at all is refused.
+//
+// HTTP/2 (USK-1198): see dialResendHTTP2.
+func buildResendHTTPDialFunc(cfg resendHTTPDialConfig) session.DialFunc {
 	return func(ctx context.Context, _ *envelope.Envelope) (layer.Channel, error) {
 		// MaybeDialViaUpstreamProxy consults ctx for a per-flow upstream
 		// proxy override (ContextWithUpstreamProxyOverride) — used by the
 		// fuzz / resend per-iteration rotation path. When ctx carries no
 		// override, this falls through to a plain net.Dialer dial,
 		// preserving the historical direct-dial behaviour.
-		conn, err := connector.MaybeDialViaUpstreamProxy(ctx, addr, defaultReplayTimeout)
+		conn, err := connector.MaybeDialViaUpstreamProxy(ctx, cfg.addr, defaultReplayTimeout)
 		if err != nil {
-			return nil, fmt.Errorf("dial %s: %w", addr, err)
+			return nil, fmt.Errorf("dial %s: %w", cfg.addr, err)
 		}
-		if useTLS {
-			http1Transport := httputilpkg.WithNextProtos(transport, []string{"http/1.1"})
-			tlsConn, _, tlsErr := upgradeResendTLS(ctx, http1Transport, conn, sni)
+		if isResendHTTP2(cfg.httpVersion) {
+			return dialResendHTTP2(ctx, cfg, conn)
+		}
+		if cfg.useTLS {
+			http1Transport := httputilpkg.WithNextProtos(cfg.transport, []string{"http/1.1"})
+			tlsConn, alpn, tlsErr := upgradeResendTLS(ctx, http1Transport, conn, cfg.sni)
 			if tlsErr != nil {
 				_ = conn.Close()
 				return nil, tlsErr
+			}
+			if alpn != "" && alpn != "http/1.1" {
+				_ = tlsConn.Close()
+				return nil, fmt.Errorf("upstream negotiated ALPN %q for an http/1.1 send", alpn)
 			}
 			conn = tlsConn
 		}
@@ -631,6 +789,95 @@ func buildResendHTTPDialFunc(transport httputilpkg.TLSTransport, addr string, us
 		ch := <-l.Channels()
 		return ch, nil
 	}
+}
+
+// dialResendHTTP2 runs the HTTP/2 leg of buildResendHTTPDialFunc on an
+// already-dialled conn, which it owns from here on.
+//
+// h2 (TLS): the configured TLSTransport is used as-is — its ALPN offer is
+// the browser profile's own list (uTLS) or ["h2","http/1.1"] (standard), so
+// the ClientHello stays identical to the live path's. The negotiated value
+// is then required to be exactly "h2": checking the value rather than the
+// error matters because crypto/tls can complete a handshake with no
+// protocol selected. Anything else is a hard error naming the negotiated
+// ALPN — no silent fallback to HTTP/1.1, which is what this Issue fixed.
+//
+// h2c (cleartext): HTTP/2 with prior knowledge (RFC 9113 §3.3) — the
+// client preface goes straight onto the TCP connection.
+//
+// The connection-level http2 Layer is built like the live upstream one
+// (internal/connector/stack_builder.go) and the single request stream is
+// wrapped in an httpaggregator so Send / Next speak HTTPMessage envelopes,
+// exactly like the HTTP/1 path.
+func dialResendHTTP2(ctx context.Context, cfg resendHTTPDialConfig, conn net.Conn) (layer.Channel, error) {
+	scheme := "http"
+	if cfg.useTLS {
+		scheme = "https"
+		tlsConn, alpn, err := upgradeResendTLS(ctx, cfg.transport, conn, cfg.sni)
+		if err != nil {
+			_ = conn.Close()
+			return nil, err
+		}
+		if alpn != "h2" {
+			_ = tlsConn.Close()
+			return nil, fmt.Errorf("upstream negotiated ALPN %q, but the request is sent over HTTP/2 (h2); pass http_version \"http/1.1\" to send it over HTTP/1.1 explicitly", alpn)
+		}
+		conn = tlsConn
+	}
+	l, err := http2.New(conn, "", http2.ClientRole,
+		http2.WithScheme(scheme),
+		http2.WithH2Fingerprint(cfg.h2Fingerprint),
+	)
+	if err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("http2 layer: %w", err)
+	}
+	stream, err := l.OpenStream(ctx)
+	if err != nil {
+		_ = l.Close()
+		return nil, fmt.Errorf("http2 open stream: %w", err)
+	}
+	agg := httpaggregator.Wrap(stream, httpaggregator.RoleClient, nil, httpaggregator.OptionsFromLayer(l))
+	return &resendH2Channel{Channel: agg, h2Layer: l, httpVersion: cfg.httpVersion}, nil
+}
+
+// resendH2Channel is the Channel a resend drives over HTTP/2: the
+// aggregated request stream plus the connection-level Layer it rides on,
+// so that the caller's single `defer ch.Close()` tears both down.
+//
+// Close runs once: the aggregator first (cascading to the stream, which
+// resets it if the exchange did not complete), then the Layer (GOAWAY,
+// then the connection is closed and the Layer's reader/writer goroutines
+// are waited for).
+type resendH2Channel struct {
+	layer.Channel
+	h2Layer     *http2.Layer
+	httpVersion string
+	closeOnce   sync.Once
+}
+
+// Next returns the next aggregated response, labelled with the protocol
+// this channel actually spoke. The aggregator labels every Receive
+// envelope "h2" (it derives the label from :scheme, which responses do not
+// carry), so the h2c leg would otherwise record its responses as h2.
+func (c *resendH2Channel) Next(ctx context.Context) (*envelope.Envelope, error) {
+	env, err := c.Channel.Next(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if msg, ok := env.Message.(*envelope.HTTPMessage); ok {
+		msg.HTTPVersion = c.httpVersion
+	}
+	return env, nil
+}
+
+// Close tears down the stream and the connection exactly once.
+func (c *resendH2Channel) Close() error {
+	c.closeOnce.Do(func() {
+		_ = c.Channel.Close()
+		_ = c.h2Layer.Close()
+	})
+	return nil
 }
 
 // upgradeResendTLS performs the TLS handshake using the configured
@@ -700,25 +947,52 @@ func (s *Server) runResendHTTP(ctx context.Context, env *envelope.Envelope, dial
 	if err := ch.Send(ctx, sendEnv); err != nil {
 		return nil, fmt.Errorf("upstream send: %w", err)
 	}
-	respEnv, err := ch.Next(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("upstream receive: %w", err)
-	}
-	// http1.New(conn, "", envelope.Receive) yielded the upstream Channel
-	// with an empty connID, so respEnv.StreamID is empty. Pin it to the
-	// send envelope's StreamID so RecordStep's variant-snapshot machinery
-	// records the receive Flow under the same Stream row.
-	respEnv.StreamID = sendEnv.StreamID
-	respEnv.Sequence = 1
+	return receiveResendHTTPResponse(ctx, ch, p, sendEnv.StreamID)
+}
 
-	// Pipeline.Run on the response envelope is purely for RecordStep + any
-	// post_pipeline plugin that wants to observe the response. Drop /
-	// Respond on the receive side has no meaningful semantics here (the
-	// response is already on the wire to us); discarding the action keeps
-	// the resend tool's contract simple — caller always sees the upstream
-	// reply, masking applied by formatResendHTTPResult.
-	respEnv, _, _ = p.Run(ctx, respEnv)
-	return respEnv, nil
+// maxResendHTTPInterimResponses bounds how many 1xx interim responses
+// receiveResendHTTPResponse records before giving up on a final one (the
+// next 1xx fails the call without being recorded), so an
+// upstream streaming 1xx forever cannot pin the call until its timeout.
+const maxResendHTTPInterimResponses = 32
+
+// receiveResendHTTPResponse reads the upstream's response(s) for one
+// resend exchange and returns the final one. Each 1xx interim response
+// (100 Continue, 103 Early Hints, ...) is recorded as its own receive Flow
+// ahead of the final response, in wire order (Sequence 1, 2, ...); 101 is
+// final — it ends the HTTP exchange. Shared by resend_http and fuzz_http.
+//
+// The upstream Channel was created with an empty connID, so the response
+// envelopes carry no StreamID. Each is pinned to the send envelope's
+// StreamID so RecordStep records it under the same Stream row.
+//
+// Pipeline.Run on a response envelope is purely for RecordStep + any
+// post_pipeline plugin that wants to observe it. Drop / Respond on the
+// receive side has no meaningful semantics here (the response is already
+// on the wire to us); discarding the action keeps the tools' contract
+// simple — the caller always sees the upstream reply, masking applied when
+// the result is formatted.
+func receiveResendHTTPResponse(ctx context.Context, ch layer.Channel, p *pipeline.Pipeline, streamID string) (*envelope.Envelope, error) {
+	for seq := 1; ; seq++ {
+		respEnv, err := ch.Next(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("upstream receive: %w", err)
+		}
+		respEnv.StreamID = streamID
+		respEnv.Sequence = seq
+		msg, _ := respEnv.Message.(*envelope.HTTPMessage)
+		interim := msg != nil && msg.Status >= 100 && msg.Status < 200 && msg.Status != 101
+		// Check the cap before recording so at most
+		// maxResendHTTPInterimResponses interim Flows are recorded; the
+		// over-cap 1xx itself is not.
+		if interim && seq > maxResendHTTPInterimResponses {
+			return nil, fmt.Errorf("upstream receive: more than %d interim (1xx) responses without a final response", maxResendHTTPInterimResponses)
+		}
+		respEnv, _, _ = p.Run(ctx, respEnv)
+		if !interim {
+			return respEnv, nil
+		}
+	}
 }
 
 // applyResendHTTPTag persists the user-supplied tag on the new Stream row

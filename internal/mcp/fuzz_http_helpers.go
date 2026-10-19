@@ -48,7 +48,6 @@ import (
 
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
-	"github.com/usk6666/yorishiro-proxy/internal/layer/http1"
 	"github.com/usk6666/yorishiro-proxy/internal/macro"
 	"github.com/usk6666/yorishiro-proxy/internal/pipeline"
 	"github.com/usk6666/yorishiro-proxy/internal/session"
@@ -179,6 +178,7 @@ func fuzzHTTPInputToResendHTTP(input *fuzzHTTPInput) resendHTTPInput {
 		BodyPatches:    input.BodyPatches,
 		OverrideHost:   input.OverrideHost,
 		TLSFingerprint: input.TLSFingerprint,
+		HTTPVersion:    input.HTTPVersion,
 		TimeoutMs:      input.TimeoutMs,
 		Tag:            input.Tag,
 	}
@@ -317,10 +317,21 @@ func buildFuzzHTTPVariantLoop(s *Server, plan *fuzzHTTPPlan, timeout time.Durati
 		upstreamProxy: upstreamProxy,
 		preMacro:      preMacro,
 		postMacro:     postMacro,
-		encoders:      buildFuzzHTTPEncoderRegistry(),
+		// The wire protocol is fixed for the whole run by the base plan
+		// (USK-1198): every variant goes out over the same version, and
+		// the encoder registry shared by PluginStepPost and RecordStep
+		// matches it.
+		encoders: resendHTTPEncoderRegistry(plan.baseMsg.HTTPVersion),
 	}
 	loop.pipe = s.buildFuzzHTTPPipeline(loop.encoders)
-	loop.dial = buildResendHTTPDialFunc(s.connector.tlsTransport, plan.dialAddr, plan.useTLS, plan.sni)
+	loop.dial = buildResendHTTPDialFunc(resendHTTPDialConfig{
+		transport:     s.connector.tlsTransport,
+		addr:          plan.dialAddr,
+		useTLS:        plan.useTLS,
+		sni:           plan.sni,
+		httpVersion:   plan.baseMsg.HTTPVersion,
+		h2Fingerprint: s.currentTLSFingerprint(),
+	})
 
 	// Strip the port to align rate-limit bucket keys with the live data path
 	// (connector/connect_handler.go, http1_forward_handler.go, socks5.go) and
@@ -1100,16 +1111,6 @@ func (s *Server) saveFuzzHTTPResult(ctx context.Context, fuzzID string, index in
 	}
 }
 
-// buildFuzzHTTPEncoderRegistry constructs the wire encoder registry
-// shared between PluginStepPost and RecordStep on every fuzz variant
-// pipeline. Mirrors the resend_http registry — registers
-// http1.EncodeWireBytes for envelope.ProtocolHTTP.
-func buildFuzzHTTPEncoderRegistry() *pipeline.WireEncoderRegistry {
-	encoders := pipeline.NewWireEncoderRegistry()
-	encoders.Register(envelope.ProtocolHTTP, http1.EncodeWireBytes)
-	return encoders
-}
-
 // buildFuzzHTTPPipeline constructs the per-variant pipeline shared
 // across the fuzz run. PluginStepPost + RecordStep — same as
 // resend_http per RFC §9.3 D1.
@@ -1307,14 +1308,7 @@ func (s *Server) runFuzzHTTPSingleExchange(ctx context.Context, sendEnv *envelop
 	if err := ch.Send(ctx, postSend); err != nil {
 		return nil, fmt.Errorf("upstream send: %w", err)
 	}
-	respEnv, err := ch.Next(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("upstream receive: %w", err)
-	}
-	respEnv.StreamID = postSend.StreamID
-	respEnv.Sequence = 1
-	respEnv, _, _ = p.Run(ctx, respEnv)
-	return respEnv, nil
+	return receiveResendHTTPResponse(ctx, ch, p, postSend.StreamID)
 }
 
 // nextIndices increments the variant index counter. Treats

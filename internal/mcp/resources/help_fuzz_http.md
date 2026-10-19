@@ -35,9 +35,11 @@ When `flow_id` is set, the recorded send seeds the per-variant base envelope; us
 
 `fuzz_http` inherits every `resend_http` field verbatim:
 
-- `flow_id`, `method`, `scheme`, `authority`, `path`, `raw_query`, `headers[]`, `body`, `body_encoding`, `body_set`, `body_patches[]`, `override_host`, `tls_fingerprint`, `timeout_ms`, `tag`
+- `flow_id`, `method`, `scheme`, `authority`, `path`, `raw_query`, `headers[]`, `body`, `body_encoding`, `body_set`, `body_patches[]`, `override_host`, `tls_fingerprint`, `http_version`, `timeout_ms`, `tag`
 
 Call `docs(topic="resend_http")` for the inherited fields. Documentation here is on fuzz-specific fields only.
+
+> **Wire protocol**: chosen once for the whole run from the base request, with the same rule as `resend_http` (explicit `http_version`, else the recorded flow's — an `h2` / `h2c` flow is fuzzed over HTTP/2 — else `http/1.1`). Every variant uses it on its own fresh connection. Over HTTP/2 no `Host` header is injected (the target is `:authority`, so fuzz it through the `authority` path) and a `scheme` position rewrites `:scheme` on the wire. If the upstream does not negotiate `h2`, each variant fails with an error naming the negotiated ALPN instead of falling back to HTTP/1.1; pass `http_version: "http/1.1"` to fuzz over HTTP/1.1.
 
 > `path` accepts a literal `?` and auto-splits into `path` + `raw_query` at the MCP boundary (USK-859). Supplying both `raw_query` AND a `?` in `path` is rejected. The split applies once to the base envelope; per-position payloads written into `path` or `raw_query` via the `positions[]` mechanism are passed through verbatim (the package-level "Payload passthrough" rule in `fuzz_http_helpers.go`).
 

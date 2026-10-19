@@ -76,6 +76,7 @@ type fuzzHTTPInput struct {
 	BodyPatches    []BodyPatch `json:"body_patches,omitempty" jsonschema:"applied to base body before positions"`
 	OverrideHost   string      `json:"override_host,omitempty" jsonschema:"redirect dial target while preserving the request's Host/:authority"`
 	TLSFingerprint string      `json:"tls_fingerprint,omitempty" jsonschema:"informational v1; per-call selection deferred"`
+	HTTPVersion    string      `json:"http_version,omitempty" jsonschema:"wire protocol for every variant: http/1.1 | h2 (https only, ALPN h2) | h2c (http only, prior knowledge). Default: the recorded flow's http_version (h2/h2c flows go out over HTTP/2), else http/1.1. No silent fallback: an upstream that does not negotiate h2 fails the variant"`
 	TimeoutMs      *int        `json:"timeout_ms,omitempty" jsonschema:"per-variant timeout in milliseconds; default 30000"`
 	Tag            string      `json:"tag,omitempty" jsonschema:"tag stored on every variant Stream's Tags map"`
 
@@ -158,6 +159,7 @@ func (s *Server) registerFuzzHTTP() {
 			"the variant sequence (capped at 1000 per call). Variants run sequentially with a fresh dial each. " +
 			"Base path may carry a literal '?' (auto-split into path + raw_query); supplying both raw_query " +
 			"AND a '?' in path is rejected. " +
+			"An h2/h2c-recorded flow is fuzzed over HTTP/2; http_version (http/1.1|h2|h2c) overrides. " +
 			"stop_on_5xx aborts on the first 5xx response. Full reference: call docs(topic=\"fuzz_http\").",
 	}, s.handleFuzzHTTP)
 }

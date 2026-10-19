@@ -4,6 +4,23 @@ Resend or construct a single HTTP request via a freshly dialled upstream connect
 
 `resend_http` is the typed N7/N8 successor to the legacy multi-protocol `resend` tool. It restricts itself to HTTP/1.x and HTTP/2 flows; non-HTTP `flow_id`s are rejected with an explicit pointer to `resend_ws` / `resend_grpc` / `resend_raw`.
 
+## Wire protocol (HTTP/1.1 vs HTTP/2)
+
+The resend goes out over the protocol the original flow used — it is not silently downgraded:
+
+| Source of the decision | Result |
+|------------------------|--------|
+| `http_version` supplied | that protocol (`http/1.1`, `h2` or `h2c`) |
+| `flow_id` whose recorded `http_version` is `h2` / `h2c` | HTTP/2: `h2` (TLS, ALPN) when the resolved scheme is `https`, `h2c` (cleartext, prior knowledge) when it is `http` |
+| anything else (HTTP/1.x flow, unversioned flow, from-scratch request) | `http/1.1` |
+
+- **HTTP/2 over TLS (`h2`)** offers the server's configured ALPN list unchanged (the uTLS browser profile's own list, or `["h2","http/1.1"]`), so the ClientHello matches the live proxy path, and requires the upstream to select `h2`. If it selects anything else the call fails with an error naming the negotiated ALPN — pass `http_version: "http/1.1"` to send the request over HTTP/1.1 deliberately. The HTTP/2 SETTINGS and pseudo-header order follow the configured `tls_fingerprint` like the live path.
+- **HTTP/2 headers**: the request target is sent as `:method` / `:scheme` / `:authority` / `:path` built from `method` / `scheme` / `authority` / `path`+`raw_query`. No `Host` header is added; a `host` header in the header list is sent as an ordinary header. Header names are lowercased on the wire (RFC 9113 §8.2.1) and connection-specific headers (`Connection`, `Keep-Alive`, `Transfer-Encoding`, `Upgrade`, `Proxy-Connection`, `TE` other than `trailers`) are stripped — relevant when an HTTP/1.x flow is forced to `h2`. The recorded send flow still lists them (it is recorded before the request is encoded).
+- **HTTP/1.1** pins ALPN to `http/1.1` and adds a `Host` header from `authority` when the header list has none.
+- The new flows record the protocol actually used in `http_version` (`http/1.1`, `h2`, `h2c`).
+- 1xx interim responses (`100 Continue`, `103 Early Hints`, ...) are recorded as their own receive flows; `status_code` / `headers` / `body` in the result are the final response's.
+- Not covered: WebSocket over HTTP/2 (RFC 8441) — use `resend_ws`. The recorded order of HTTP/2 pseudo-headers and the original header order across names are not replayed (headers are stored as a map); supply `headers` explicitly to control order.
+
 ## Pipeline placement (RFC-001 §9.3)
 
 Each resend traverses `PluginStepPost -> RecordStep`. `PluginStepPre` and `InterceptStep` are bypassed so signing and last-mile post-mutation hooks fire exactly once on the resent envelope while pre_pipeline annotation hooks (which observe pristine wire-fresh data) stay quiet on resends.
@@ -30,7 +47,7 @@ HTTP method (e.g. `"GET"`, `"POST"`). Required when `flow_id` is empty.
 `"http"` or `"https"`. Required when `flow_id` is empty.
 
 ### authority (string, conditional)
-Host / `:authority` value (e.g. `"example.com:8443"`). Required when `flow_id` is empty. Used both in the request line/`:authority` and as the default Host header when none is supplied.
+Host / `:authority` value (e.g. `"example.com:8443"`). Required when `flow_id` is empty. Sent as `:authority` over HTTP/2; over HTTP/1.1 it is the default Host header when none is supplied.
 
 ### path (string, conditional)
 Request path including the leading slash. Required when `flow_id` is empty. Sent and recorded exactly as given (wire form): percent-encoding is neither decoded nor added, so `/a%2Fb` goes out as `/a%2Fb` and `/a b` as `/a b`. When inherited from `flow_id`, the recorded wire-form path is replayed byte-for-byte.
@@ -68,6 +85,9 @@ Per-request timeout in milliseconds. Default `30000` (30 s).
 
 ### tls_fingerprint (string, optional)
 Informational v1: per-call selection is deferred. Server uses its configured fingerprint regardless and emits a warning log.
+
+### http_version (string, optional)
+Wire protocol for the upstream send: `"http/1.1"`, `"h2"` (requires scheme `https`; ALPN `h2`) or `"h2c"` (requires scheme `http`; HTTP/2 with prior knowledge). Default: the recorded flow's protocol (see "Wire protocol" above), else `http/1.1`. Use `"http/1.1"` to downgrade an HTTP/2 flow explicitly, or `"h2"` to send a from-scratch request over HTTP/2.
 
 ### tag (string, optional)
 Tag stored on the new flow's `Tags` map. Useful for grouping resends.
@@ -127,6 +147,14 @@ Tag stored on the new flow's `Tags` map. Useful for grouping resends.
 {
   "flow_id": "abc-123",
   "override_host": "internal-host:443"
+}
+```
+
+### Replay an HTTP/2 flow over HTTP/1.1 on purpose
+```json
+{
+  "flow_id": "abc-123",
+  "http_version": "http/1.1"
 }
 ```
 

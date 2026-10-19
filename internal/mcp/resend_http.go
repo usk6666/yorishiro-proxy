@@ -6,6 +6,19 @@
 // flow_ids are rejected with an explicit error pointing at the matching
 // protocol-typed tool (resend_ws / resend_grpc / resend_raw).
 //
+// Wire protocol (USK-1198): the resend goes out over the protocol the
+// original flow used. resolveResendHTTPVersion picks it — explicit
+// http_version, else the recorded flow's http_version (h2 / h2c → HTTP/2,
+// h2 over TLS with ALPN, h2c over cleartext with prior knowledge), else
+// http/1.1 — and stamps it on HTTPMessage.HTTPVersion, from which the dial
+// (buildResendHTTPDialFunc), the wire encoder registry and the recorded
+// Flow.HTTPVersion all follow. HTTP/2 sends drive a client-role
+// internal/layer/http2 Layer through httpaggregator; HTTP/1.1 sends drive
+// internal/layer/http1 with ALPN pinned to http/1.1 (USK-717). There is no
+// silent fallback: an upstream that does not select h2 fails the call with
+// an error naming the negotiated ALPN. WebSocket over HTTP/2 (RFC 8441) is
+// out of scope — resend_ws.
+//
 // Pipeline placement (RFC §9.3 D1): resend traverses
 //
 //	PluginStepPost → RecordStep
@@ -52,6 +65,7 @@ type resendHTTPInput struct {
 	FollowRedirects *bool       `json:"follow_redirects,omitempty" jsonschema:"unsupported; setting true returns an error"`
 	TimeoutMs       *int        `json:"timeout_ms,omitempty" jsonschema:"per-request timeout in milliseconds; default 30000"`
 	TLSFingerprint  string      `json:"tls_fingerprint,omitempty" jsonschema:"informational v1; per-call selection deferred — server uses its configured fingerprint"`
+	HTTPVersion     string      `json:"http_version,omitempty" jsonschema:"wire protocol for the upstream send: http/1.1 | h2 (https only, ALPN h2) | h2c (http only, prior knowledge). Default: the recorded flow's http_version (h2/h2c flows go out over HTTP/2), else http/1.1. No silent fallback: an upstream that does not negotiate h2 fails the call"`
 	Tag             string      `json:"tag,omitempty" jsonschema:"tag stored on the new flow's Tags map"`
 
 	UpstreamProxy *UpstreamProxyConfig `json:"upstream_proxy,omitempty" jsonschema:"optional upstream proxy override applied to this resend invocation. url_template is expanded once per call with §__iteration§=0 and a fresh §__nonce§; the parsed URL tunnels the dial via HTTP CONNECT or SOCKS5. Used for residential proxy IP switching when chained with fuzz / repeated resends"`
@@ -84,6 +98,8 @@ func (s *Server) registerResendHTTP() {
 			"path may carry a literal '?' (auto-split into path + raw_query); supplying " +
 			"both raw_query AND a '?' in path is rejected. " +
 			"override_host redirects the dial target while preserving the request's :authority. " +
+			"An h2/h2c-recorded flow is resent over HTTP/2 (no silent downgrade); http_version " +
+			"(http/1.1|h2|h2c) overrides. " +
 			"For non-HTTP flows use resend_ws / resend_grpc / resend_raw. Full reference: call docs(topic=\"resend_http\").",
 	}, s.handleResendHTTP)
 }
@@ -154,8 +170,15 @@ func (s *Server) handleResendHTTP(ctx context.Context, _ *gomcp.CallToolRequest,
 		return nil, nil, fmt.Errorf("resend_http: %w", err)
 	}
 
-	pipe := s.buildResendHTTPPipeline()
-	dial := buildResendHTTPDialFunc(s.connector.tlsTransport, addr, useTLS, sni)
+	pipe := s.buildResendHTTPPipeline(msg.HTTPVersion)
+	dial := buildResendHTTPDialFunc(resendHTTPDialConfig{
+		transport:     s.connector.tlsTransport,
+		addr:          addr,
+		useTLS:        useTLS,
+		sni:           sni,
+		httpVersion:   msg.HTTPVersion,
+		h2Fingerprint: s.currentTLSFingerprint(),
+	})
 
 	// Strip the port to align rate-limit bucket keys with the live data
 	// path (connector/connect_handler.go, http1_forward_handler.go,
