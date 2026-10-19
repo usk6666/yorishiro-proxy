@@ -69,6 +69,28 @@ func pipePair() (a, b net.Conn) {
 	return
 }
 
+// sseEventsAfterHeaders counts SSE event terminators ("\n\n") in the
+// client wire after the HTTP/1.x response head. The head itself ends in
+// "\r\n\r\n", which contains no "\n\n", so counting across the whole wire
+// would never see a "+1 for the head" and a drain loop waiting for one
+// would spin until its deadline (USK-1206). Returns 0 until the head has
+// been fully received.
+func sseEventsAfterHeaders(wire []byte) int {
+	headEnd := bytes.Index(wire, []byte("\r\n\r\n"))
+	if headEnd < 0 {
+		return 0
+	}
+	return bytes.Count(wire[headEnd+4:], []byte("\n\n"))
+}
+
+// isReadTimeout reports whether err is the per-Read deadline a drain loop
+// arms to poll; any other read error (io.EOF, reset, closed) means the
+// connection is finished and the loop must stop rather than spin.
+func isReadTimeout(err error) bool {
+	var ne net.Error
+	return errors.As(err, &ne) && ne.Timeout()
+}
+
 // ---------------------------------------------------------------------------
 // Test infrastructure
 // ---------------------------------------------------------------------------
@@ -696,12 +718,15 @@ func TestSSE_FullChainSwapEndToEnd(t *testing.T) {
 		eventDeadline := time.Now().Add(3 * time.Second)
 		for time.Now().Before(eventDeadline) {
 			_ = clientA.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
-			n, _ := clientA.Read(buf)
+			n, rerr := clientA.Read(buf)
 			if n > 0 {
 				all = append(all, buf[:n]...)
 			}
-			if bytes.Count(all, []byte("\n\n")) >= 4 { // headers + 3 events
+			if sseEventsAfterHeaders(all) >= 3 {
 				break
+			}
+			if rerr != nil && !isReadTimeout(rerr) {
+				break // EOF / closed: nothing more will arrive
 			}
 		}
 		_ = clientA.SetReadDeadline(time.Time{})

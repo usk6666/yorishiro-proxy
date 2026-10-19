@@ -284,17 +284,26 @@ func startGRPCWebHTTP2Upstream(
 		_, _ = w.Write(body)
 	})
 
-	var wg sync.WaitGroup
+	tracker := &upstreamConnTracker{}
+	// The accept loop holds a wg slot of its own so the counter cannot
+	// reach zero (and race a later Add against shutdown's Wait) while
+	// Accept can still hand out connections.
+	tracker.wg.Add(1)
 	go func() {
+		defer tracker.wg.Done()
 		for {
 			c, aerr := tcpLn.Accept()
 			if aerr != nil {
 				return
 			}
+			if !tracker.track(c) {
+				_ = c.Close()
+				continue
+			}
 			tlsConn := tls.Server(c, tlsCfg)
-			wg.Add(1)
+			tracker.wg.Add(1)
 			go func(tc *tls.Conn) {
-				defer wg.Done()
+				defer tracker.wg.Done()
 				defer tc.Close()
 				if err := tc.Handshake(); err != nil {
 					return
@@ -304,16 +313,63 @@ func startGRPCWebHTTP2Upstream(
 		}
 	}()
 
-	shutdown := func() {
-		_ = tcpLn.Close()
+	// The proxy keeps its pooled upstream h2 connection open, so ServeConn
+	// never returns on its own: shutdown force-closes it (USK-1206).
+	shutdown := func() { tracker.shutdown(t, tcpLn) }
+	return tcpLn.Addr().String(), shutdown
+}
+
+// upstreamConnTracker gives an upstream test server the teardown shape of
+// mcptest.UpstreamCapture: stop accepting, force-close every accepted
+// connection, then wait for the serving goroutines. A connection accepted
+// after shutdown began is refused by track and closed by the caller.
+type upstreamConnTracker struct {
+	mu     sync.Mutex
+	closed bool
+	conns  []net.Conn
+
+	wg   sync.WaitGroup
+	once sync.Once
+}
+
+// track registers c for force-close on shutdown. It returns false once
+// shutdown has begun; the caller must then close c itself.
+func (u *upstreamConnTracker) track(c net.Conn) bool {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if u.closed {
+		return false
+	}
+	u.conns = append(u.conns, c)
+	return true
+}
+
+// shutdown closes ln, force-closes every tracked connection, and waits for
+// the accept loop and every per-connection goroutine to exit. Reaching the
+// wait cap fails the test: once its connection is closed, nothing
+// legitimate can keep a serving goroutine alive. Idempotent.
+func (u *upstreamConnTracker) shutdown(t *testing.T, ln net.Listener) {
+	t.Helper()
+	u.once.Do(func() {
+		u.mu.Lock()
+		u.closed = true
+		conns := u.conns
+		u.conns = nil
+		u.mu.Unlock()
+
+		_ = ln.Close()
+		for _, c := range conns {
+			_ = c.Close()
+		}
+
 		done := make(chan struct{})
-		go func() { wg.Wait(); close(done) }()
+		go func() { u.wg.Wait(); close(done) }()
 		select {
 		case <-done:
-		case <-time.After(2 * time.Second):
+		case <-time.After(5 * time.Second):
+			t.Errorf("upstream conn goroutines did not exit within 5s of force-close")
 		}
-	}
-	return tcpLn.Addr().String(), shutdown
+	})
 }
 
 // connectThroughProxy CONNECTs to the proxy for target, then performs a TLS
