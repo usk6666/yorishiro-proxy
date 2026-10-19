@@ -1,6 +1,7 @@
 package grpcweb
 
 import (
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -551,6 +552,167 @@ func TestRelay_EmptyBodyResponseDelivered(t *testing.T) {
 			}
 			if got := sawStatus.Load(); got != int64(tt.wantStatus) {
 				t.Errorf("on_end status = %d, want %d", got, tt.wantStatus)
+			}
+		})
+	}
+}
+
+// --- USK-1219 review round 1 ---
+
+// TestRelay_InformationalResponseIsNotFinal pins review F-1 / S-1: both
+// inner HTTP Layers deliver a 1xx informational (103 Early Hints, 100
+// Continue) as its own bodyless Receive HTTPMessage before the final
+// response. The empty-body N1 path must not treat it as a final response:
+// no End (and no AnomalyMissingGRPCWebTrailer placeholder) is emitted for
+// it, (grpc-web, on_end) fires exactly once with the final grpc-status, and
+// the client side receives one response — the final one.
+func TestRelay_InformationalResponseIsNotFinal(t *testing.T) {
+	for _, status := range []int{100, 103} {
+		t.Run(strconv.Itoa(status), func(t *testing.T) {
+			engine := pluginv2.NewEngine(nil)
+			var fires atomic.Int32
+			var sawStatus atomic.Int64
+			engine.Registry().Register(pluginv2.Hook{
+				Protocol:   pluginv2.ProtoGRPCWeb,
+				Event:      pluginv2.EventOnEnd,
+				Phase:      pluginv2.PhaseNone,
+				PluginName: "test",
+				Fn: builtinHook("end", func(msg starlark.Value, _ starlark.Value) {
+					fires.Add(1)
+					v, _, _ := msg.(*starlark.Dict).Get(starlark.String("status"))
+					if i, ok := v.(starlark.Int).Int64(); ok {
+						sawStatus.Store(i)
+					}
+				}),
+			})
+
+			info := responseEnv([]envelope.KeyValue{{Name: "Link", Value: "</a.css>; rel=preload"}}, nil, status, "Early Hints")
+			body := append([]byte{}, EncodeFrame(false, false, []byte("resp"))...)
+			body = append(body, EncodeFrame(true, false, []byte("grpc-status: 7\r\n"))...)
+			final := responseEnv([]envelope.KeyValue{{Name: "Content-Type", Value: "application/grpc-web+proto"}}, body, 200, "OK")
+
+			src := newMockChannel("s-fid", info, final)
+			next := Wrap(src, RoleClient, WithLifecycleEngine(engine))
+			defer next.Close()
+			envs := drainEnvelopes(t, next, 16)
+
+			var ends []*envelope.GRPCEndMessage
+			for _, e := range envs {
+				if m, ok := e.Message.(*envelope.GRPCEndMessage); ok {
+					ends = append(ends, m)
+				}
+			}
+			if len(ends) != 1 {
+				t.Fatalf("got %d End envelopes, want 1 (none for the %d)", len(ends), status)
+			}
+			if ends[0].Status != 7 || hasAnomaly(ends[0].Anomalies, envelope.AnomalyMissingGRPCWebTrailer) {
+				t.Errorf("End = (status %d, anomalies %v), want status 7 without missing-trailer anomaly",
+					ends[0].Status, ends[0].Anomalies)
+			}
+			if got := fires.Load(); got != 1 {
+				t.Errorf("on_end fired %d times, want 1", got)
+			}
+			if got := sawStatus.Load(); got != 7 {
+				t.Errorf("on_end status = %d, want 7 (the final grpc-status)", got)
+			}
+
+			dst := newMockChannel("s-fid")
+			send := Wrap(dst, RoleServer)
+			defer send.Close()
+			out := sendAll(t, send, dst, envs...)
+			if out.Status != 200 {
+				t.Errorf("client-side status = %d, want 200 (the final response)", out.Status)
+			}
+		})
+	}
+}
+
+// TestSend_InformationalStartGetsNoEmptyBody pins the client-side half of
+// F-1: a 1xx response must not carry Content-Length (RFC 9110 §8.6), so
+// the Send side must not hand the inner HTTP Layer a non-nil empty body for
+// it (the HTTP/1.x synthetic send path stamps Content-Length for one).
+func TestSend_InformationalStartGetsNoEmptyBody(t *testing.T) {
+	dst := newMockChannel("s-1xx")
+	send := Wrap(dst, RoleServer)
+	defer send.Close()
+	out := sendAll(t, send, dst,
+		&envelope.Envelope{StreamID: "s-1xx", Direction: envelope.Receive, Protocol: envelope.ProtocolGRPCWeb,
+			Message: &envelope.GRPCStartMessage{ContentType: "application/grpc-web+proto", HTTPStatus: 103}},
+		&envelope.Envelope{StreamID: "s-1xx", Direction: envelope.Receive, Protocol: envelope.ProtocolGRPCWeb,
+			Message: &envelope.GRPCEndMessage{Anomalies: []envelope.Anomaly{{Type: envelope.AnomalyMissingGRPCWebTrailer}}}},
+	)
+	if out.Body != nil {
+		t.Errorf("1xx body = %#v, want nil (no Content-Length on a 1xx)", out.Body)
+	}
+}
+
+// TestRelay_TrailersOnlyEndEditReachesWire pins review F-3: on a
+// trailers-only response the status travels in the HTTP headers, so an
+// End edit (Transform set_status / set_status_message, intercept, plugin)
+// must rewrite those header entries in place — name casing and position
+// kept — instead of being a silent no-op on the wire while a "modified"
+// End variant is recorded. An unchanged End leaves the headers
+// byte-identical.
+func TestRelay_TrailersOnlyEndEditReachesWire(t *testing.T) {
+	observed := []envelope.KeyValue{
+		{Name: "Content-Type", Value: "application/grpc-web+proto"},
+		{Name: "Grpc-Status", Value: "12"},
+		{Name: "X-Mid", Value: "1"},
+		{Name: "Grpc-Message", Value: "unimplemented"},
+		{Name: "Content-Length", Value: "0"},
+	}
+	tests := []struct {
+		name string
+		edit func(end *envelope.GRPCEndMessage)
+		want []envelope.KeyValue
+	}{
+		{
+			name: "unchanged",
+			edit: func(*envelope.GRPCEndMessage) {},
+			want: observed,
+		},
+		{
+			name: "status_and_message_rewritten_in_place",
+			edit: func(end *envelope.GRPCEndMessage) {
+				end.Status = 3
+				end.Message = "changed"
+			},
+			want: []envelope.KeyValue{
+				{Name: "Content-Type", Value: "application/grpc-web+proto"},
+				{Name: "Grpc-Status", Value: "3"},
+				{Name: "X-Mid", Value: "1"},
+				{Name: "Grpc-Message", Value: "changed"},
+				{Name: "Content-Length", Value: "0"},
+			},
+		},
+		{
+			name: "message_cleared_entry_dropped",
+			edit: func(end *envelope.GRPCEndMessage) { end.Message = "" },
+			want: []envelope.KeyValue{
+				{Name: "Content-Type", Value: "application/grpc-web+proto"},
+				{Name: "Grpc-Status", Value: "12"},
+				{Name: "X-Mid", Value: "1"},
+				{Name: "Content-Length", Value: "0"},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			in := responseEnv(observed, nil, 200, "OK")
+			var start *envelope.GRPCStartMessage
+			out := relay(t, in, RoleClient, RoleServer, func(envs []*envelope.Envelope) []*envelope.Envelope {
+				start = startOf(t, envs)
+				tt.edit(envs[len(envs)-1].Message.(*envelope.GRPCEndMessage))
+				return envs
+			})
+			if !kvEqual(out.Headers, tt.want) {
+				t.Errorf("client-side headers:\n got  %v\n want %v", out.Headers, tt.want)
+			}
+			if len(out.Body) != 0 {
+				t.Errorf("client-side body = %x, want empty", out.Body)
+			}
+			if headerGet(start.Metadata, "grpc-status") != "12" {
+				t.Errorf("recorded Start Metadata mutated: %v", start.Metadata)
 			}
 		})
 	}

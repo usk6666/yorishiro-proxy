@@ -98,6 +98,12 @@ func TestSafetyEngine_GRPCWebPassthroughBody(t *testing.T) {
 		{"binary malformed LPM", "application/grpc-web+proto", envelope.AnomalyMalformedGRPCWebLPM, body, true},
 		{"text malformed base64", "application/grpc-web-text+proto", envelope.AnomalyMalformedGRPCWebBase64, textBody, true},
 		{"text malformed trailer raw match", "application/grpc-web-text", envelope.AnomalyMalformedGRPCWebTrailer, []byte("DROP TABLE users"), true},
+		// USK-1219 review S-3: duplicate Content-Type entries are relayed
+		// verbatim, and the Start's ContentType is only the first. A
+		// binary first value with a later -text value and a base64 body
+		// fails LPM parsing; a backend honouring the last value decodes
+		// the base64, so the scan must too.
+		{"binary content-type base64 body", "application/grpc-web+proto", envelope.AnomalyMalformedGRPCWebLPM, encodeTestBase64(malformedSQLBody()[:21]), true},
 		{"benign malformed body", "application/grpc-web+proto", envelope.AnomalyMalformedGRPCWebLPM, []byte{0x00, 0x00, 0x00, 0x03, 0xe8, 'a'}, false},
 		{"no malformed anomaly", "application/grpc-web+proto", envelope.AnomalyUnexpectedGRPCWebRequestTrailer, body, false},
 	}
