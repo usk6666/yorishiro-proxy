@@ -510,6 +510,10 @@ func TestBuildToolParams_JSONNotAutoParsedForStrings(t *testing.T) {
 		{"intercept nested http.body", "intercept", []string{"action=modify_and_forward", "params.id=1", `http.body={"a":1}`}, []string{"http", "body"}, `{"a":1}`},
 		{"query filter.url_pattern", "query", []string{"resource=flows", "filter.url_pattern=[a-z]+"}, []string{"filter", "url_pattern"}, "[a-z]+"},
 		{"configure tls_passthrough.add bracketed host", "configure", []string{"tls_passthrough.add=[::1],example.com"}, []string{"tls_passthrough", "add"}, []string{"[::1]", "example.com"}},
+		// Valid JSON at an array<string> path must still be one literal item:
+		// the comma form never JSON-decodes string items (only `key:=` does).
+		{"configure tls_passthrough.add valid JSON stays literal", "configure", []string{`tls_passthrough.add=["a"]`}, []string{"tls_passthrough", "add"}, []string{`["a"]`}},
+		{"query fields valid JSON stays literal", "query", []string{"resource=flows", `fields=["id"]`}, []string{"fields"}, []string{`["id"]`}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
