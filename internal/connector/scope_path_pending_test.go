@@ -329,7 +329,7 @@ func TestCONNECTHandler_PathScopedAllow_PassthroughRefused(t *testing.T) {
 	_ = writeCONNECT(t, client, up.addr())
 	_, _ = client.Write([]byte("\x16\x03\x01 not really a ClientHello"))
 	assertClosedWithin(t, client, 5*time.Second)
-	<-done
+	waitHandlerDone(t, done)
 	if n := up.accepts.Load(); n != 0 {
 		t.Errorf("passthrough target accepted %d connections under a path-scoped allow, want 0", n)
 	}
@@ -356,7 +356,10 @@ func TestSOCKS5Handler_PathScopedAllow_PassthroughRefused(t *testing.T) {
 	if rep != socks5ReplyConnectionNotAllowed {
 		t.Errorf("SOCKS5 REP = 0x%02x, want 0x%02x (connection not allowed)", rep, socks5ReplyConnectionNotAllowed)
 	}
-	<-done
+	// Give an (erroneously) admitted relay time to dial before counting.
+	time.Sleep(100 * time.Millisecond)
+	_ = client.Close()
+	waitHandlerDone(t, done)
 	if n := up.accepts.Load(); n != 0 {
 		t.Errorf("passthrough target accepted %d connections under a path-scoped allow, want 0", n)
 	}
@@ -382,7 +385,7 @@ func TestSOCKS5Handler_PathScopedAllow_PassthroughRefusedWithoutOpaqueRoute(t *t
 	_ = socks5Request(t, client, up.addr())
 	_, _ = client.Write([]byte("\x16\x03\x01 not really a ClientHello"))
 	assertClosedWithin(t, client, 5*time.Second)
-	<-done
+	waitHandlerDone(t, done)
 	if n := up.accepts.Load(); n != 0 {
 		t.Errorf("passthrough target accepted %d connections under a path-scoped allow, want 0", n)
 	}
@@ -495,9 +498,20 @@ func TestLiveConns_PathScopedReload_MITMKeptPassthroughCut(t *testing.T) {
 			t.Errorf("Reconcile closed %d passthrough relays, want 1", n)
 		}
 		assertClosedWithin(t, client, 5*time.Second)
-		<-done
+		waitHandlerDone(t, done)
 		if got := reg.Len(); got != 0 {
 			t.Errorf("registry Len after cut = %d, want 0", got)
 		}
 	})
+}
+
+// waitHandlerDone waits for the handler to return, failing instead of
+// hanging when a regression leaves a relay running.
+func waitHandlerDone(t *testing.T, done <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("handler did not return within 5s")
+	}
 }
