@@ -1192,6 +1192,10 @@ func (c *channel) parseRequest() (*envelope.Envelope, error) {
 func (c *channel) parseResponse() (env *envelope.Envelope, isInformational, truncated bool, err error) {
 	rawResp, err := parser.ParseResponseWithOptions(c.layer.reader, parser.ParseOptions{
 		MaxRawCapture: c.bodyOpts.maxRawCapture,
+		// USK-1229 review F-1: the paired request's method (stamped by
+		// sendRequest before appendPending, so pendingMu orders it before
+		// this read) makes a HEAD response bodyless.
+		RequestMethod: c.ctxTmpl.RequestMethod,
 	})
 	if err != nil {
 		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
@@ -1437,6 +1441,16 @@ func (c *channel) sendRequest(msg *envelope.HTTPMessage, env *envelope.Envelope)
 	// unparsed response stream; nothing has been written for this
 	// request, so the retry wrapper may replay it on a fresh Layer
 	// (never a raw-authoritative one, see sendRawWins).
+	if c.layer.dead.Load() {
+		// USK-1229 review F-2: the receive loop ended; nothing would read
+		// this request's response. Nothing has been written, so the retry
+		// wrapper may replay it on a fresh Layer.
+		return fmt.Errorf("http1: send request: %w", &StaleUpstreamError{
+			Underlying: errUpstreamDead,
+			ReplaySafe: !env.RawWins() && isReplaySafe(msg, opaque, "header"),
+			Stage:      "header",
+		})
+	}
 	if c.layer.retired.Load() {
 		return fmt.Errorf("http1: send request: %w", &StaleUpstreamError{
 			Underlying: errUpstreamRetired,
