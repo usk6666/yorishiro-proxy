@@ -502,6 +502,19 @@ func (c *channel) refillFromHTTPMessage(ctx context.Context, env *envelope.Envel
 		// the lifecycle hook represents an RPC's terminal status (grpc-status),
 		// which has no analog on the request half. Leaving firedEndEnv nil
 		// preserves observe-only semantics for response terminations.
+	} else {
+		// Receive with an empty body (no data frame, no trailer frame):
+		// either a gRPC-Web trailers-only response (grpc-status in the HTTP
+		// headers) or a bare HTTP error such as 503 + Content-Length: 0.
+		// Without an End the client-side Send never flushed and the client
+		// received nothing at all. The End is derived from the HTTP
+		// headers; shouldEmbedTrailer keeps it from becoming a trailer frame
+		// the wire never carried. See endFromResponseHeaders.
+		end := endFromResponseHeaders(msg.Headers)
+		endEnv := c.buildEnvelope(env, dir, end, nil, opaque)
+		c.emitQueue = append(c.emitQueue, endEnv)
+		firedEndEnv = endEnv
+		firedEndMsg = end
 	}
 	c.mu.Unlock()
 
@@ -513,6 +526,40 @@ func (c *channel) refillFromHTTPMessage(ctx context.Context, env *envelope.Envel
 		c.fireOnEnd(firedEndEnv, firedEndMsg)
 	}
 	return nil
+}
+
+// endFromResponseHeaders builds the End for an empty-body response
+// (USK-1219 N1).
+//
+// Trailers-only form (the gRPC-Web protocol allows the trailers to be sent
+// with the response headers and no body): grpc-status / grpc-message /
+// grpc-status-details-bin are read from the HTTP headers, so the recorded
+// End and the (grpc-web, on_end) hook report the RPC's actual status. The
+// headers themselves stay in the Start's Metadata, which is how they reach
+// the client.
+//
+// No grpc-status header (e.g. 503 with an empty body): there is no RPC
+// status anywhere on the wire, so the End is the Status=0 placeholder
+// stamped AnomalyMissingGRPCWebTrailer, the same shape the
+// data-without-trailer path uses — a clean grpc-status 0 would be an
+// outcome the peer never sent.
+func endFromResponseHeaders(headers []envelope.KeyValue) *envelope.GRPCEndMessage {
+	if !headerHas(headers, "grpc-status") {
+		return &envelope.GRPCEndMessage{
+			Anomalies: []envelope.Anomaly{{
+				Type:   envelope.AnomalyMissingGRPCWebTrailer,
+				Detail: "gRPC-Web response had an empty body and no grpc-status header",
+			}},
+		}
+	}
+	end := &envelope.GRPCEndMessage{Message: headerGet(headers, "grpc-message")}
+	if n, err := strconv.ParseUint(strings.TrimSpace(headerGet(headers, "grpc-status")), 10, 32); err == nil {
+		end.Status = uint32(n)
+	}
+	if d := headerGet(headers, "grpc-status-details-bin"); d != "" {
+		end.StatusDetails = []byte(d)
+	}
+	return end
 }
 
 // applyRequestOverlay projects the request-side pseudo-headers
@@ -795,7 +842,14 @@ func (c *channel) sendEndLocked(ctx context.Context, env *envelope.Envelope, m *
 
 	isBase64 := IsBase64Encoded(start.ContentType)
 
-	if shouldEmbedTrailer(dir, env, m, passthrough != nil) {
+	// A Receive with no assembled frames whose Start carries grpc-status in
+	// its HTTP headers is the trailers-only form: the status already
+	// travels in the headers, so a trailer frame would duplicate it into a
+	// body the wire did not have.
+	statusInHeaders := dir == envelope.Receive && len(dataBytes) == 0 && passthrough == nil &&
+		headerHas(start.Metadata, "grpc-status")
+
+	if shouldEmbedTrailer(dir, env, m, passthrough != nil || statusInHeaders) {
 		trailer, err := trailerFrameBytes(env, m, isBase64)
 		if err != nil {
 			return err
@@ -820,6 +874,14 @@ func (c *channel) sendEndLocked(ctx context.Context, env *envelope.Envelope, m *
 		body = EncodeBase64Body(dataBytes)
 	default:
 		body = dataBytes
+	}
+	if body == nil && dir == envelope.Receive {
+		// Empty response body (USK-1219 N1): a non-nil empty slice makes
+		// the HTTP/1.x synthetic send path stamp Content-Length: 0 when the
+		// upstream sent none (e.g. an HTTP/2 trailers-only response), so a
+		// keep-alive client is not left reading until close. HTTP/2 sends
+		// END_STREAM on HEADERS for an empty body either way.
+		body = []byte{}
 	}
 
 	// Reconstruct HTTPMessage.
@@ -848,8 +910,10 @@ func (c *channel) sendEndLocked(ctx context.Context, env *envelope.Envelope, m *
 //     direction. On the request side this is the
 //     AnomalyUnexpectedGRPCWebRequestTrailer case: the frame is recorded as
 //     an anomaly AND relayed, rather than silently stripped (USK-1203).
-//   - Passthrough body: the observed body is already complete; the End is
-//     only the flush sentinel, so nothing is added.
+//   - bodyComplete: the observed body is already complete and the End is
+//     only the flush sentinel, so nothing is added. sendEndLocked sets it for
+//     a passthrough body and for a trailers-only response (grpc-status in the
+//     HTTP headers, no frames), whose status already travels in the headers.
 //   - End stamped with a malformed-body anomaly: the emitAnomalyStart
 //     sentinel, standing for "no trailer observed". Nothing is added even
 //     if the passthrough body was lost before this Send.
@@ -860,11 +924,11 @@ func (c *channel) sendEndLocked(ctx context.Context, env *envelope.Envelope, m *
 //   - Send: only an End flagged AnomalyUnexpectedGRPCWebRequestTrailer whose
 //     Raw was dropped (e.g. by a mutation) is re-encoded from its fields;
 //     the clean synthetic End (USK-780 flush sentinel) adds nothing.
-func shouldEmbedTrailer(dir envelope.Direction, env *envelope.Envelope, m *envelope.GRPCEndMessage, passthrough bool) bool {
+func shouldEmbedTrailer(dir envelope.Direction, env *envelope.Envelope, m *envelope.GRPCEndMessage, bodyComplete bool) bool {
 	switch {
 	case len(env.Raw) > 0:
 		return true
-	case passthrough, hasMalformedBodyAnomaly(m.Anomalies):
+	case bodyComplete, hasMalformedBodyAnomaly(m.Anomalies):
 		return false
 	case dir == envelope.Receive:
 		return !hasAnomaly(m.Anomalies, envelope.AnomalyMissingGRPCWebTrailer)
@@ -929,6 +993,17 @@ func materializeBody(ctx context.Context, msg *envelope.HTTPMessage) ([]byte, er
 		return b, nil
 	}
 	return nil, nil
+}
+
+// headerHas reports whether any entry of kvs is named name
+// (case-insensitive).
+func headerHas(kvs []envelope.KeyValue, name string) bool {
+	for _, kv := range kvs {
+		if strings.EqualFold(kv.Name, name) {
+			return true
+		}
+	}
+	return false
 }
 
 // headerGet returns the first matching value for name (case-insensitive),
