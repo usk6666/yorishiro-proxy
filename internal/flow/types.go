@@ -85,8 +85,11 @@ type Stream struct {
 	// May be nil for streams recorded without connection information.
 	ConnInfo *ConnectionInfo
 	// BlockedBy indicates which subsystem blocked this request.
-	// Empty string means the request was not blocked.
-	// "target_scope" means it was blocked by the target scope rules.
+	// Empty string means the request was not blocked. The canonical
+	// vocabulary lives in internal/pipeline/blocked_by.go: "target_scope",
+	// "safety_filter", "intercept_drop", "intercept_cancelled",
+	// "rate_limit" (reserved), "budget", and "capacity" (written by the
+	// connection-rejection recorder rather than a Pipeline Step).
 	BlockedBy string
 	// Origin classifies how the Stream came into existence (USK-785).
 	// OriginProxy for live MITM-recorded traffic, OriginResend for streams
