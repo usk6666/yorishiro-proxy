@@ -88,10 +88,13 @@ type GRPCStartMessage struct {
 	// no reason phrase) or on the request side. USK-1219.
 	HTTPStatusReason string
 
-	// Metadata is the full gRPC metadata list. HTTP/2 pseudo-headers are
-	// NOT included here — they belong to the transport layer and are
-	// observable via Envelope.Context if needed. Order and casing are
-	// preserved as observed on the wire.
+	// Metadata is the gRPC metadata list, order and casing preserved as
+	// observed on the wire. Pseudo-headers are NOT included here: the
+	// request-side ones (and the gRPC-Web response status) are projected
+	// onto the overlay fields above, and their wire bytes stay in
+	// Envelope.Raw. The four control headers parsed into Timeout /
+	// ContentType / Encoding / AcceptEncoding are stripped from it too
+	// (D7); the gRPC-Web Layer restores their observed layout on send.
 	Metadata []KeyValue
 
 	// Timeout is the parsed grpc-timeout value. Zero when unset.

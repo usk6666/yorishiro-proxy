@@ -54,6 +54,24 @@
 // placeholder for a trailer the upstream never sent, so no trailer frame is
 // synthesized for it.
 //
+// A Receive HTTPMessage with an empty body still yields Start + End
+// (USK-1219): the End carries the grpc-status / grpc-message of a
+// trailers-only response read from the HTTP headers, or the
+// AnomalyMissingGRPCWebTrailer placeholder when there is none (e.g. a bare
+// 503). The opposite-side Send writes such a response with an empty body —
+// a trailers-only status already travels in the headers, so no trailer
+// frame is added.
+//
+// # Status, path and query (USK-1219, USK-1069 / USK-1110)
+//
+// The response status and reason are projected onto
+// GRPCStartMessage.HTTPStatus / HTTPStatusReason and relayed by the
+// opposite-side Send; a Start without one (synthetic producers) is written
+// as 200 OK. On the request side Path / RawQuery are projected from the
+// inner HTTPMessage and the Send side resolves the path with pathForStart
+// (the observed path wins when parseServiceMethod cannot represent it) and
+// forwards RawQuery for the inner HTTP Layer to rejoin.
+//
 // # Malformed bodies, request trailers and framing headers (USK-1203)
 //
 // A body that fails to parse (malformed base64 / LPM / trailer) is emitted
@@ -85,6 +103,13 @@
 // grpc-encoding, grpc-accept-encoding, grpc-timeout. The stripped values
 // populate ContentType, Encoding, AcceptEncoding, Timeout respectively.
 // Order and casing of remaining Metadata entries are preserved.
+//
+// The stripped entries' observed names, raw values and positions are
+// recorded on the per-RPC Opaque, and the opposite-side Send restores them
+// (rebuildStartHeaders): verbatim while the structured field is unchanged,
+// rewritten in place when edited, dropped when cleared, synthesized
+// lowercase at the front only when never observed. An Envelope that lost
+// its Opaque (Envelope.Clone) gets the synthesized layout.
 //
 // On Receive, GRPCEndMessage.Trailers excludes grpc-status, grpc-message,
 // and grpc-status-details-bin per RFC §3.2.3; those values populate Status,
