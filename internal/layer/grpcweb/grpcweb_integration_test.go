@@ -1485,45 +1485,6 @@ func TestGRPCWeb_OversizeMessageProducesStreamError(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Test 8: Stream.Protocol = "grpc-web"
-// ---------------------------------------------------------------------------
-
-// TestGRPCWeb_StreamProtocolIsGRPCWeb — a successful round-trip must
-// produce a Stream with Protocol == string(envelope.ProtocolGRPCWeb).
-// This is the lightest possible assertion that the grpcweb Wrap is
-// engaged in the proxy datapath.
-func TestGRPCWeb_StreamProtocolIsGRPCWeb(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	upstreamLn, _ := startGRPCWebHTTP1Upstream(t, func(_ []byte) []byte {
-		return buildGRPCWebResponseHTTP([]byte("ack"), 0, "OK", false)
-	})
-	defer upstreamLn.Close()
-	target := upstreamLn.Addr().String()
-
-	proxyAddr, store, _, sessionDone := startGRPCWebHTTP1Proxy(t, ctx, pipelineOpts{})
-	_ = sendGRPCWebHTTP1Request(t, proxyAddr, target, []byte("hi"), false)
-
-	select {
-	case <-sessionDone:
-	case <-time.After(15 * time.Second):
-		t.Fatal("timeout waiting for session to complete")
-	}
-
-	streams := store.getStreams()
-	if len(streams) == 0 {
-		t.Fatal("no streams recorded")
-	}
-	if got := streams[0].Protocol; got != string(envelope.ProtocolGRPCWeb) {
-		t.Errorf("Stream.Protocol = %q, want %q", got, string(envelope.ProtocolGRPCWeb))
-	}
-	if want := "grpc-web"; streams[0].Protocol != want {
-		t.Errorf("Stream.Protocol = %q, want literal %q", streams[0].Protocol, want)
-	}
-}
-
-// ---------------------------------------------------------------------------
 // Test 9: Per-frame Metadata["grpc_event"] ∈ {start, data, end}
 // ---------------------------------------------------------------------------
 

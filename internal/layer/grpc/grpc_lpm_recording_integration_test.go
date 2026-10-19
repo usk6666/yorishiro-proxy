@@ -393,38 +393,6 @@ func TestGRPCLPMRecording_GzipCompressedPreserved(t *testing.T) {
 	}
 }
 
-// TestGRPCLPMRecording_LengthPrefixMismatch covers Issue case 5 by
-// documenting the architectural reason it is not directly testable
-// today.
-//
-// The grpc Layer's reassembler emits a callback only after a fully
-// reassembled LPM (5-byte prefix consumed AND wireLen bytes of payload
-// consumed). A length-prefix that disagrees with the actual on-wire
-// payload length has three observable outcomes today:
-//
-//  1. wireLen ≤ remaining-bytes-on-stream: the reassembler treats the
-//     declared length as authoritative and the next bytes as the next
-//     LPM's prefix. No mismatch surfaces — the smuggling is silent in
-//     terms of LPM count, but it MAY surface as a malformed-next-LPM
-//     prefix downstream.
-//  2. wireLen > config.MaxGRPCMessageSize: errMessageTooLarge fires
-//     BEFORE any callback emission, ending the stream with
-//     RST_STREAM(INTERNAL_ERROR). No LPM envelope is produced.
-//  3. EOF arrives mid-LPM: the channel returns
-//     StreamError{Protocol, "grpc: stream ended mid-LPM"}. No LPM
-//     envelope is produced for the partial bytes.
-//
-// Capturing partial-LPM bytes would require a new Layer-internal anomaly
-// path (similar to parser.Anomaly on HTTP/1.x). That extension is
-// out-of-scope for USK-896 (Issue body explicitly defers it). When the
-// path is added, this test should grow an assertion that the partial
-// LPM bytes surface as a grpc-lpm-frame envelope with an anomaly tag.
-//
-// For now we record the gap by skipping the case with the rationale.
-func TestGRPCLPMRecording_LengthPrefixMismatch(t *testing.T) {
-	t.Skip("not yet implemented: USK-896 deferred — partial-LPM anomaly path requires Layer-internal anomaly field; case 5 covers a smuggling scenario the current architecture intercepts as RST_STREAM(INTERNAL_ERROR) before any wire envelope fires (see test godoc for the three observable outcomes today)")
-}
-
 // TestGRPCLPMRecording_PerStreamCap covers Issue case 6:
 // WithGRPCLPMFrameMaxPerStream caps the per-stream LPM record count.
 // Server emits 5 messages; cap=3 ⇒ recordStep persists ≤3 LPM

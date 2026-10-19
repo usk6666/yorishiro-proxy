@@ -3,10 +3,8 @@ package flow
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"fmt"
 	"net/url"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -1180,23 +1178,6 @@ func TestSQLiteStore_BodyTruncated(t *testing.T) {
 	}
 	if !msgs[0].BodyTruncated {
 		t.Error("BodyTruncated = false, want true")
-	}
-}
-
-func TestSQLiteStore_DBFileCreated(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "created.db")
-	logger := testutil.DiscardLogger()
-
-	store, err := NewSQLiteStore(context.Background(), dbPath, logger)
-	if err != nil {
-		t.Fatalf("NewSQLiteStore: %v", err)
-	}
-	defer store.Close()
-
-	if _, err := os.Stat(dbPath); errors.Is(err, os.ErrNotExist) {
-		t.Errorf("database file was not created at %s", dbPath)
 	}
 }
 

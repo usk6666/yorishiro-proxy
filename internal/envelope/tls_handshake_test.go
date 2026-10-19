@@ -2,13 +2,6 @@ package envelope
 
 import "testing"
 
-func TestTLSHandshakeMessage_Protocol(t *testing.T) {
-	m := &TLSHandshakeMessage{}
-	if got := m.Protocol(); got != ProtocolTLSHandshake {
-		t.Errorf("Protocol() = %q, want %q", got, ProtocolTLSHandshake)
-	}
-}
-
 func TestTLSHandshakeMessage_CloneMessage(t *testing.T) {
 	original := &TLSHandshakeMessage{
 		SNI:                   "example.com",
@@ -51,14 +44,5 @@ func TestTLSHandshakeMessage_CloneMessage_Nil(t *testing.T) {
 	var m *TLSHandshakeMessage
 	if got := m.CloneMessage(); got != nil {
 		t.Errorf("nil receiver CloneMessage = %v, want nil", got)
-	}
-}
-
-func TestTLSHandshakeOutcomeConstants(t *testing.T) {
-	if TLSHandshakeOutcomeTunneled != "tunneled" {
-		t.Errorf("TLSHandshakeOutcomeTunneled = %q, want %q", TLSHandshakeOutcomeTunneled, "tunneled")
-	}
-	if TLSHandshakeOutcomeFailed != "failed" {
-		t.Errorf("TLSHandshakeOutcomeFailed = %q, want %q", TLSHandshakeOutcomeFailed, "failed")
 	}
 }

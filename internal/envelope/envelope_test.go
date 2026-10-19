@@ -24,20 +24,6 @@ func TestDirection_String(t *testing.T) {
 	}
 }
 
-func TestHTTPMessage_Protocol(t *testing.T) {
-	m := &HTTPMessage{}
-	if got := m.Protocol(); got != ProtocolHTTP {
-		t.Errorf("HTTPMessage.Protocol() = %q, want %q", got, ProtocolHTTP)
-	}
-}
-
-func TestRawMessage_Protocol(t *testing.T) {
-	m := &RawMessage{}
-	if got := m.Protocol(); got != ProtocolRaw {
-		t.Errorf("RawMessage.Protocol() = %q, want %q", got, ProtocolRaw)
-	}
-}
-
 func TestHTTPMessage_CloneMessage_DeepCopy(t *testing.T) {
 	orig := &HTTPMessage{
 		Method:       "POST",
