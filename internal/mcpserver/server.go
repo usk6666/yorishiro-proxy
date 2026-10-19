@@ -90,6 +90,14 @@ type RunOptions struct {
 	// port before issuing tools/call requests.
 	OnHTTPListening func(addr string)
 
+	// OnBootComplete, when non-nil, is invoked once every boot side effect
+	// has happened (log, DB, export directory, CA, plugins, live manager,
+	// MCP components) and immediately before the MCP transports start. A
+	// non-nil return aborts Run with that error, so no listener is bound
+	// and server.json is never written. Intended for tests that need to
+	// observe "boot got this far" without starting a server (USK-1208).
+	OnBootComplete func() error
+
 	// PolicyReload, when non-nil, is called once during Run — and only when
 	// a Policy Layer source (-target-policy-file or -config) is configured —
 	// to obtain the trigger whose events re-read that source and replace
