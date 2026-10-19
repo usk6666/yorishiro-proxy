@@ -47,9 +47,9 @@ func TestConnectPolicyAllow_IPv6RuleForms(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			scope := NewTargetScope()
 			scope.SetPolicyRules(nil, []TargetRule{{Hostname: tc.denyHost}})
-			got := connectPolicyAllow(CONNECTHandlerConfig{Scope: scope}, tc.target, discardLogger())
+			got := connectPolicyReject(CONNECTHandlerConfig{Scope: scope}, tc.target, discardLogger()) == nil
 			if got != tc.wantAllow {
-				t.Errorf("connectPolicyAllow(deny %q, target %q) = %v, want %v",
+				t.Errorf("connectPolicyReject(deny %q, target %q) admitted = %v, want %v",
 					tc.denyHost, tc.target, got, tc.wantAllow)
 			}
 		})
