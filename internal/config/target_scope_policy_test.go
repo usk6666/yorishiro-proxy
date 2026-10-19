@@ -219,10 +219,13 @@ func TestLoadPolicyFile_StrictDecoding(t *testing.T) {
 // TestLoadPolicyFile_AcceptsWorkingForms is a guard (T7 at the config seam):
 // every form here matches a data-path host today and must keep loading.
 //
-// The {path_prefix: "/v2/"} allow is a well-formed rule, but as an ALLOW it
-// takes effect only for checks that carry a path (MCP URL checks and the
-// per-request HTTPScopeStep); the connection-level gates pass an empty path
-// and so do not match it (USK-1130). It is listed here for its syntax only.
+// The path_prefix allows work on the data path since USK-1130: the
+// connection gates admit api.staging.test provisionally on routes whose
+// requests HTTPScopeStep path-checks (HTTP/1.x, HTTP/2, WebSocket), and
+// each request is then checked with its path. They do not admit TLS
+// passthrough, raw TCP or gRPC to that host, where no path is ever seen
+// (internal/connector/scope_path_pending_test.go and
+// internal/mcptest/path_scope_allow_integration_test.go).
 func TestLoadPolicyFile_AcceptsWorkingForms(t *testing.T) {
 	body := `{
 		"allows": [

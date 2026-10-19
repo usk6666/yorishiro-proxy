@@ -166,10 +166,35 @@ Response:
 |---|---|---|
 | `hostname` | string | Required. Exact match or wildcard `*.example.com`. IPv4 and IPv6 literals are accepted; IPv6 may be bare (`::1`) or bracketed (`[::1]`). Hosts are compared in a canonical form, so every spelling that dials the same host matches the rule: any textual form of an IPv6 address, with or without a zone (`[fe80::1%eth0]` matches `fe80::1`; rules cannot carry a zone); IPv4-mapped IPv6 and its IPv4 address in either direction (`::ffff:10.0.0.5` = `10.0.0.5`); one trailing dot (`db.internal.` matches `db.internal` and `*.internal`); and legacy IPv4 spellings (`2130706433`, `0x7f.0.0.1`, `127.1` match `127.0.0.1`). While any rule is set, a target host ending in a number that is not a valid IPv4 address (`1.2.3.4.5`) is blocked. A trailing-dot rule is rejected. A wildcard over an IP literal (`*.10.0.0.1`) is rejected |
 | `ports` | int[] | Optional. Match specific ports. Empty = all ports |
-| `path_prefix` | string | Optional. Literal, case-sensitive prefix of the request path — not a glob. Must start with `/`; `*`, `?` and `#` are rejected (`/api/` already matches everything under `/api/`; the query and fragment are not part of the path). Matches when either the wire-form path or its percent-decoded form starts with the prefix (`/admin` also matches `/%61dmin`; `/a%20b` matches the wire bytes `/a%20b`); dot-segments and `%2F` are not normalized. Empty = all paths |
+| `path_prefix` | string | Optional. Literal, case-sensitive prefix of the request path — not a glob. Must start with `/`; `*`, `?` and `#` are rejected (`/api/` already matches everything under `/api/`; the query and fragment are not part of the path). Matches when either the wire-form path or its percent-decoded form starts with the prefix (`/admin` also matches `/%61dmin`; `/a%20b` matches the wire bytes `/a%20b`); dot-segments and `%2F` are not normalized. Empty = all paths. See "Path-scoped rules" below for which traffic a `path_prefix` rule can cover |
 | `schemes` | string[] | Optional. Match transport confidentiality: `http` = plaintext, `https` = TLS. Only these two values are accepted. Empty = both |
 
 All specified fields must match for a rule to apply (AND logic).
+
+### Path-scoped rules
+
+A connection (CONNECT, SOCKS5, plain-HTTP forward, `tcp_forwards`) is admitted
+before any request path is known, so a rule with `path_prefix` is applied in two
+steps:
+
+- **Allow** `{hostname: X, path_prefix: "/api/"}`: the connection to X is admitted
+  when the proxy will check the path of every request on it — HTTP/1.x, HTTP/2
+  (including h2c) and WebSocket (the upgrade request is path-checked). Each request
+  is then checked with its path: `/api/x` reaches X, `/other` is answered
+  403 `blocked_by: target_scope`. Traffic on which no path is ever seen is refused:
+  a TLS passthrough target (`tls_passthrough`), a `raw_passthrough_hosts` target,
+  `tcp_forwards` with `protocol: raw` or `grpc` (`proxy_start` refuses the entry),
+  non-HTTP bytes inside a tunnel (the connection is closed and a raw Stream is
+  recorded with `blocked_by: target_scope`; the upstream connection may already
+  have been opened, but receives no client byte), and gRPC / gRPC-Web requests.
+  `path_prefix: "/"` behaves the same way: it still requires a request path.
+- **Deny** `{hostname: X, path_prefix: "/admin"}`: never refuses or closes a
+  connection; it is enforced per request. It therefore does not cover TLS
+  passthrough or raw traffic to X — deny the host itself for that.
+
+Every request is checked against both the host it names (`Host` / `:authority`)
+and the host the connection actually reaches, each with the request path, so
+naming another host in `Host` does not escape a path rule on the real target.
 
 ### What `schemes` means
 
