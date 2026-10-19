@@ -45,7 +45,8 @@ func NewTransformStep(
 //
 // Each per-protocol engine is responsible for clearing env.Raw on commit
 // when a wire-encoded snapshot is invalidated by the mutation. The Step
-// itself never touches env.Raw.
+// itself never touches env.Raw; on HTTP it clears env.RawAuthoritative when
+// a rule fired (RFC §9.3 D4 last-writer-wins, USK-1079).
 //
 // ctx is forwarded to engines so future async transform paths (e.g. disk-
 // backed body materialization, plugin transforms) can honour cancellation.
@@ -73,11 +74,19 @@ func (s *TransformStep) processHTTP(ctx context.Context, env *envelope.Envelope,
 		return Result{}
 	}
 
+	var mutated bool
 	switch env.Direction {
 	case envelope.Send:
-		s.http.TransformRequest(ctx, env, msg)
+		mutated = s.http.TransformRequest(ctx, env, msg)
 	case envelope.Receive:
-		s.http.TransformResponse(ctx, env, msg)
+		mutated = s.http.TransformResponse(ctx, env, msg)
+	}
+	if mutated {
+		// RFC §9.3 D4 precedence is pipeline order, last writer wins
+		// (USK-1079): a Transform that fires after a pre_pipeline plugin
+		// msg["raw"] write hands the wire back to the Message path. A
+		// plugin that must win registers phase="post_pipeline".
+		env.RawAuthoritative = false
 	}
 
 	// In-place mutation — no Result.Envelope replacement needed.

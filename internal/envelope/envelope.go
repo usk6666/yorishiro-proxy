@@ -133,6 +133,24 @@ type Envelope struct {
 	// MaxRawCaptureSize cap.
 	RawBuffer *bodybuf.BodyBuffer
 
+	// RawAuthoritative marks Raw as caller-authored bytes that the
+	// producing Layer must write to the wire verbatim, ignoring Message
+	// (RFC-001 §9.3 D4 "Raw wins"). It is set by the Pipeline when a
+	// plugin assigns msg["raw"] (MutationRawOnly / MutationBoth) and
+	// cleared by any later Step that changes the Message (a plugin
+	// MessageOnly mutation, a Transform rule that fires), so the last
+	// writer in Pipeline order wins. Layers must consult RawWins rather
+	// than this field directly: an intercept modify replaces the
+	// envelope with Raw=nil, and RawWins then falls back to the
+	// Message path.
+	//
+	// Per-Layer support (USK-1079): HTTP/1.x (both directions) and raw
+	// TCP (bytechunk) honour it; gRPC Data and gRPC-Web already write a
+	// non-empty Raw verbatim. HTTP/2, WebSocket, and SSE do not yet.
+	//
+	// Clone copies the flag. It is never set on Layer-produced envelopes.
+	RawAuthoritative bool
+
 	// --- Protocol-specific structured view ---
 
 	// Message is the typed protocol-specific payload.
@@ -167,7 +185,10 @@ func (e *Envelope) Clone() *Envelope {
 		Direction: e.Direction,
 		Protocol:  e.Protocol,
 		Raw:       cloneBytes(e.Raw),
-		Context:   e.Context, // shallow copy; TLS is a pointer (shared, immutable)
+		// RFC-001 §9.3 D4: a variant snapshot or intercept-modify clone
+		// keeps the raw-wins marker; RawWins re-checks len(Raw).
+		RawAuthoritative: e.RawAuthoritative,
+		Context:          e.Context, // shallow copy; TLS is a pointer (shared, immutable)
 		// Opaque intentionally not cloned
 	}
 	if e.RawBuffer != nil {
@@ -182,6 +203,15 @@ func (e *Envelope) Clone() *Envelope {
 		clone.Message = e.Message.CloneMessage()
 	}
 	return clone
+}
+
+// RawWins reports whether the producing Layer must write Raw verbatim
+// instead of serializing Message (RFC-001 §9.3 D4). True only when
+// RawAuthoritative is set AND Raw is non-empty, so an envelope whose Raw
+// was cleared after the marker was set (intercept modify) takes the
+// Message path.
+func (e *Envelope) RawWins() bool {
+	return e != nil && e.RawAuthoritative && len(e.Raw) > 0
 }
 
 // WireBytes returns the complete wire bytes for this Envelope. When

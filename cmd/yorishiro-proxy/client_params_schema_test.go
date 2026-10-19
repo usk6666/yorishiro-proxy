@@ -17,6 +17,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"reflect"
 	"strings"
@@ -158,6 +159,10 @@ func TestBuildToolParams_LiveSchemaNullableTypes(t *testing.T) {
 		{"nullable string-item array grpc", "resend_grpc", []string{"accept_encoding=gzip,identity"}, "accept_encoding", []string{"gzip", "identity"}},
 		{"nullable string stays literal", "configure", []string{"tls_fingerprint=123"}, "tls_fingerprint", "123"},
 		{"unparseable integer stays raw", "configure", []string{"max_connections=lots"}, "max_connections", "lots"},
+		// USK-1152 no-regression guards: top-level string-item arrays keep the
+		// comma / single-quote convention and stay []string.
+		{"string-item array keeps quoted comma", "query", []string{"resource=flows", "fields='a,b',c"}, "fields", []string{"a,b", "c"}},
+		{"string-item array keeps doubled quote", "query", []string{"resource=flows", "fields='it''s'"}, "fields", []string{"it's"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -285,4 +290,331 @@ func TestClientTool_DotNotationChildren_TypedByParentSchema(t *testing.T) {
 			}
 		})
 	}
+}
+
+// --- USK-1152: typed array items, N-level dot paths, JSON values ---
+//
+// Every fixture below is a REAL registered tool schema reached through
+// tools/list; the server's own input validation is the oracle wherever the
+// test calls the tool.
+
+// buildViaLiveSchema runs fetchToolSchema → buildToolParams without calling
+// the tool, for assertions on CLI-side results and errors.
+func buildViaLiveSchema(t *testing.T, ctx context.Context, session *gomcp.ClientSession, tool string, args ...string) (map[string]any, error) {
+	t.Helper()
+	schema := fetchToolSchema(ctx, session, tool)
+	if schema == nil {
+		t.Fatalf("fetchToolSchema(%q) returned nil", tool)
+	}
+	return buildToolParams(tool, args, schema, io.Discard)
+}
+
+// childMap walks params along keys, failing the test if any step is not a map.
+func childMap(t *testing.T, params map[string]any, keys ...string) map[string]any {
+	t.Helper()
+	cur := params
+	for _, k := range keys {
+		next, ok := cur[k].(map[string]any)
+		if !ok {
+			t.Fatalf("params path %q: %q = %#v (%T), want map[string]any", strings.Join(keys, "."), k, cur[k], cur[k])
+		}
+		cur = next
+	}
+	return cur
+}
+
+const usk1152Positions = `[{"path":"raw_query","payloads":["test1","test2","test3"]}]`
+
+// TestClientTool_NestedIntegerArray_TypedByItems is the reported bug (T1/T2):
+// an array whose items are integers must be sent as integers, both from the
+// comma form and from the JSON-array form.
+func TestClientTool_NestedIntegerArray_TypedByItems(t *testing.T) {
+	ctx, session := newInMemoryToolSession(t)
+
+	for _, form := range []string{"200,302", "[200,302]"} {
+		t.Run(form, func(t *testing.T) {
+			params, _, err := callToolViaCLIPath(t, ctx, session, "fuzz_http",
+				"flow_id=x", "post_macro.name=m", "post_macro.status_codes="+form, "positions="+usk1152Positions)
+
+			got := childMap(t, params, "post_macro")["status_codes"]
+			want := []any{int64(200), int64(302)}
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("post_macro.status_codes = %#v (%T), want %#v", got, got, want)
+			}
+			if err != nil {
+				t.Fatalf("CallTool(fuzz_http post_macro.status_codes=%s) rejected by server schema: %v", form, err)
+			}
+		})
+	}
+}
+
+// TestClientTool_NestedIntegerArray_UnparseableElementStaysRaw (T3) guards
+// that an element that does not parse is sent as-is so the server rejects it.
+func TestClientTool_NestedIntegerArray_UnparseableElementStaysRaw(t *testing.T) {
+	ctx, session := newInMemoryToolSession(t)
+
+	params, _, err := callToolViaCLIPath(t, ctx, session, "fuzz_http",
+		"flow_id=x", "post_macro.name=m", "post_macro.status_codes=200,abc", "positions="+usk1152Positions)
+
+	got := childMap(t, params, "post_macro")["status_codes"]
+	want := []any{int64(200), "abc"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("post_macro.status_codes = %#v (%T), want %#v", got, got, want)
+	}
+	if err == nil {
+		t.Fatal("CallTool(fuzz_http post_macro.status_codes=200,abc) succeeded, want a server schema error")
+	}
+	if !strings.Contains(err.Error(), "status_codes") {
+		t.Errorf("CallTool error = %q, want it to name status_codes", err)
+	}
+}
+
+// TestClientTool_JSONObjectArrays_Accepted covers T4-T7: array-of-object
+// parameters take a JSON value, decoded verbatim and in order.
+func TestClientTool_JSONObjectArrays_Accepted(t *testing.T) {
+	ctx, session := newInMemoryToolSession(t)
+
+	t.Run("fuzz_http positions", func(t *testing.T) {
+		params, _, err := callToolViaCLIPath(t, ctx, session, "fuzz_http", "flow_id=x", "positions="+usk1152Positions)
+		want := []any{map[string]any{"path": "raw_query", "payloads": []any{"test1", "test2", "test3"}}}
+		if got := params["positions"]; !reflect.DeepEqual(got, want) {
+			t.Errorf("positions = %#v (%T), want %#v", got, got, want)
+		}
+		if err != nil {
+			t.Fatalf("CallTool(fuzz_http positions=<json>) rejected by server schema: %v", err)
+		}
+	})
+
+	t.Run("fuzz_http SQLi payload verbatim", func(t *testing.T) {
+		// What the shell hands over for positions='[...["'\'' OR '\''1'\''='\''1"]...]'.
+		const sqli = `' OR '1'='1`
+		params, _, err := callToolViaCLIPath(t, ctx, session, "fuzz_http", "flow_id=x",
+			`positions=[{"path":"raw_query","payloads":["`+sqli+`"]}]`)
+		positions, ok := params["positions"].([]any)
+		if !ok || len(positions) != 1 {
+			t.Fatalf("positions = %#v (%T), want a 1-element []any", params["positions"], params["positions"])
+		}
+		pos, _ := positions[0].(map[string]any)
+		payloads, _ := pos["payloads"].([]any)
+		if len(payloads) != 1 || payloads[0] != sqli {
+			t.Errorf("positions[0].payloads = %#v, want [%q]", pos["payloads"], sqli)
+		}
+		if err != nil {
+			t.Fatalf("CallTool(fuzz_http SQLi positions) rejected by server schema: %v", err)
+		}
+	})
+
+	t.Run("resend_http headers", func(t *testing.T) {
+		params, _, err := callToolViaCLIPath(t, ctx, session, "resend_http", "flow_id=x",
+			`headers=[{"name":"Authorization","value":"Bearer X"},{"name":"X-A","value":"1"}]`)
+		want := []any{
+			map[string]any{"name": "Authorization", "value": "Bearer X"},
+			map[string]any{"name": "X-A", "value": "1"},
+		}
+		if got := params["headers"]; !reflect.DeepEqual(got, want) {
+			t.Errorf("headers = %#v (%T), want %#v", got, got, want)
+		}
+		if err != nil {
+			t.Fatalf("CallTool(resend_http headers=<json>) rejected by server schema: %v", err)
+		}
+	})
+
+	t.Run("security params.allows echoed", func(t *testing.T) {
+		params, res, err := callToolViaCLIPath(t, ctx, session, "security", "action=set_target_scope",
+			`params.allows=[{"hostname":"a.com","ports":[443]}]`)
+		allows, ok := childMap(t, params, "params")["allows"].([]any)
+		if !ok || len(allows) != 1 {
+			t.Fatalf("params.allows = %#v, want a 1-element []any", childMap(t, params, "params")["allows"])
+		}
+		if err != nil {
+			t.Fatalf("CallTool(security set_target_scope params.allows=<json>) rejected by server schema: %v", err)
+		}
+		if text := toolResultText(res); res.IsError || !strings.Contains(text, `"ports":[443]`) {
+			t.Errorf("security result = IsError:%v %q, want it to echo %q", res.IsError, text, `"ports":[443]`)
+		}
+	})
+}
+
+// TestClientTool_NLevelDotPaths covers T8/T9: dot notation descends every
+// level, a map of objects consumes one segment as its key, and a map of
+// scalars keeps the remaining dotted segments as one key.
+func TestClientTool_NLevelDotPaths(t *testing.T) {
+	ctx, session := newInMemoryToolSession(t)
+
+	t.Run("configure protocol_overrides map of objects", func(t *testing.T) {
+		params, _, err := callToolViaCLIPath(t, ctx, session, "configure",
+			"intercept_queue.protocol_overrides.http.timeout_ms=5000")
+		http := childMap(t, params, "intercept_queue", "protocol_overrides", "http")
+		if got := http["timeout_ms"]; got != int64(5000) {
+			t.Errorf("intercept_queue.protocol_overrides.http.timeout_ms = %#v (%T), want int64(5000)", got, got)
+		}
+		if err != nil {
+			t.Fatalf("CallTool(configure protocol_overrides) rejected by server schema: %v", err)
+		}
+	})
+
+	t.Run("fuzz_http post_macro.vars scalar map keeps dotted key", func(t *testing.T) {
+		params, _, err := callToolViaCLIPath(t, ctx, session, "fuzz_http", "flow_id=x",
+			"post_macro.name=m", "post_macro.vars.user.id=admin", "positions="+usk1152Positions)
+		vars := childMap(t, params, "post_macro", "vars")
+		if want := (map[string]any{"user.id": "admin"}); !reflect.DeepEqual(vars, want) {
+			t.Errorf("post_macro.vars = %#v, want %#v", vars, want)
+		}
+		if err != nil {
+			t.Fatalf("CallTool(fuzz_http post_macro.vars.user.id) rejected by server schema: %v", err)
+		}
+	})
+}
+
+// TestBuildToolParams_MalformedJSONAtJSONOnlyPath (T10) — a JSON-only path
+// with malformed JSON is a CLI error naming the path, not a silent string.
+func TestBuildToolParams_MalformedJSONAtJSONOnlyPath(t *testing.T) {
+	ctx, session := newInMemoryToolSession(t)
+
+	tests := []struct {
+		name string
+		tool string
+		args []string
+		path string
+	}{
+		{"top-level positions", "fuzz_http", []string{"flow_id=x", `positions=[{"path":`}, "positions"},
+		{"nested params.allows", "security", []string{"action=set_target_scope", `params.allows=[{"hostname":}]`}, "params.allows"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			params, err := buildViaLiveSchema(t, ctx, session, tt.tool, tt.args...)
+			if err == nil {
+				t.Fatalf("buildToolParams(%s %q) = %#v, nil error; want an error naming %q", tt.tool, tt.args, params, tt.path)
+			}
+			if !strings.Contains(err.Error(), tt.path) {
+				t.Errorf("buildToolParams error = %q, want it to name %q", err, tt.path)
+			}
+		})
+	}
+}
+
+// TestBuildToolParams_JSONNotAutoParsedForStrings (T11/T12) guards the
+// schema-driven rule: a value that merely LOOKS like JSON stays a string
+// wherever the schema says string (or array of strings).
+func TestBuildToolParams_JSONNotAutoParsedForStrings(t *testing.T) {
+	ctx, session := newInMemoryToolSession(t)
+
+	tests := []struct {
+		name string
+		tool string
+		args []string
+		path []string
+		want any
+	}{
+		{"resend_http body", "resend_http", []string{"flow_id=x", `body={"x":1}`}, []string{"body"}, `{"x":1}`},
+		{"intercept nested http.body", "intercept", []string{"action=modify_and_forward", "params.id=1", `http.body={"a":1}`}, []string{"http", "body"}, `{"a":1}`},
+		{"query filter.url_pattern", "query", []string{"resource=flows", "filter.url_pattern=[a-z]+"}, []string{"filter", "url_pattern"}, "[a-z]+"},
+		{"configure tls_passthrough.add bracketed host", "configure", []string{"tls_passthrough.add=[::1],example.com"}, []string{"tls_passthrough", "add"}, []string{"[::1]", "example.com"}},
+		// Valid JSON at an array<string> path must still be one literal item:
+		// the comma form never JSON-decodes string items (only `key:=` does).
+		{"configure tls_passthrough.add valid JSON stays literal", "configure", []string{`tls_passthrough.add=["a"]`}, []string{"tls_passthrough", "add"}, []string{`["a"]`}},
+		{"query fields valid JSON stays literal", "query", []string{"resource=flows", `fields=["id"]`}, []string{"fields"}, []string{`["id"]`}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			params, err := buildViaLiveSchema(t, ctx, session, tt.tool, tt.args...)
+			if err != nil {
+				t.Fatalf("buildToolParams(%s %q): %v", tt.tool, tt.args, err)
+			}
+			parent := childMap(t, params, tt.path[:len(tt.path)-1]...)
+			leaf := tt.path[len(tt.path)-1]
+			if got := parent[leaf]; !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("%s = %#v (%T), want %#v (%T)", strings.Join(tt.path, "."), got, got, tt.want, tt.want)
+			}
+		})
+	}
+}
+
+// TestClientTool_USK1152_NoRegression (T14) — already-correct behaviour that
+// the rewrite must keep: a nested scalar integer, and an empty array value.
+func TestClientTool_USK1152_NoRegression(t *testing.T) {
+	ctx, session := newInMemoryToolSession(t)
+
+	t.Run("post_macro.n integer", func(t *testing.T) {
+		params, _, err := callToolViaCLIPath(t, ctx, session, "fuzz_http", "flow_id=x",
+			"post_macro.name=m", "post_macro.n=3", "positions="+usk1152Positions)
+		if got := childMap(t, params, "post_macro")["n"]; got != int64(3) {
+			t.Errorf("post_macro.n = %#v (%T), want int64(3)", got, got)
+		}
+		if err != nil {
+			t.Fatalf("CallTool(fuzz_http post_macro.n=3) rejected by server schema: %v", err)
+		}
+	})
+
+	t.Run("resend_http empty headers", func(t *testing.T) {
+		params, _, err := callToolViaCLIPath(t, ctx, session, "resend_http", "flow_id=x", "headers=")
+		got := params["headers"]
+		if v := reflect.ValueOf(got); got == nil || v.Kind() != reflect.Slice || v.Len() != 0 {
+			t.Errorf("headers = %#v (%T), want an empty slice", got, got)
+		}
+		if err != nil {
+			t.Fatalf("CallTool(resend_http headers=) rejected by server schema: %v", err)
+		}
+	})
+}
+
+// TestBuildToolParams_ExplicitJSONAssignment covers T15: `key:=<json>` parses
+// the value as JSON at any path regardless of the schema (and with no schema).
+func TestBuildToolParams_ExplicitJSONAssignment(t *testing.T) {
+	ctx, session := newInMemoryToolSession(t)
+
+	t.Run("null clears a protocol override", func(t *testing.T) {
+		params, err := buildViaLiveSchema(t, ctx, session, "configure", "intercept_queue.protocol_overrides.http:=null")
+		if err != nil {
+			t.Fatalf("buildToolParams: %v", err)
+		}
+		overrides := childMap(t, params, "intercept_queue", "protocol_overrides")
+		got, present := overrides["http"]
+		if !present || got != nil {
+			t.Errorf("protocol_overrides = %#v, want key \"http\" with a nil value", overrides)
+		}
+	})
+
+	t.Run("object form of untyped upstream_proxy", func(t *testing.T) {
+		params, err := buildViaLiveSchema(t, ctx, session, "proxy_start", `upstream_proxy:={"url":"http://127.0.0.1:1"}`)
+		if err != nil {
+			t.Fatalf("buildToolParams: %v", err)
+		}
+		want := map[string]any{"url": "http://127.0.0.1:1"}
+		if got := params["upstream_proxy"]; !reflect.DeepEqual(got, want) {
+			t.Errorf("upstream_proxy = %#v (%T), want %#v", got, got, want)
+		}
+	})
+
+	t.Run("JSON-literal string array", func(t *testing.T) {
+		params, err := buildViaLiveSchema(t, ctx, session, "query", "resource=flows", `fields:=["a,b"]`)
+		if err != nil {
+			t.Fatalf("buildToolParams: %v", err)
+		}
+		if got, want := params["fields"], []any{"a,b"}; !reflect.DeepEqual(got, want) {
+			t.Errorf("fields = %#v (%T), want %#v", got, got, want)
+		}
+	})
+
+	t.Run("malformed JSON names the path", func(t *testing.T) {
+		params, err := buildViaLiveSchema(t, ctx, session, "proxy_start", `upstream_proxy:={"url":`)
+		if err == nil {
+			t.Fatalf("buildToolParams = %#v, nil error; want an error naming upstream_proxy", params)
+		}
+		if !strings.Contains(err.Error(), "upstream_proxy") {
+			t.Errorf("buildToolParams error = %q, want it to name upstream_proxy", err)
+		}
+	})
+
+	t.Run("works with nil schema", func(t *testing.T) {
+		params, err := buildToolParams("fuzz_http", []string{`a.b:=[1,"x"]`}, nil, io.Discard)
+		if err != nil {
+			t.Fatalf("buildToolParams: %v", err)
+		}
+		got := childMap(t, params, "a")["b"]
+		arr, ok := got.([]any)
+		if !ok || len(arr) != 2 || arr[1] != "x" || fmt.Sprint(arr[0]) != "1" {
+			t.Errorf("a.b = %#v (%T), want [1 \"x\"]", got, got)
+		}
+	})
 }

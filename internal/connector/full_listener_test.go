@@ -3,6 +3,7 @@ package connector
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -548,10 +549,13 @@ func TestFullListener_MaxConnections_SOCKS5_StillCloses(t *testing.T) {
 }
 
 // TestFullListener_MaxConnections_NoBytes_DrainsViaPeekTimeout confirms
-// the reject goroutine's lifetime is bounded by rejectPeekTimeout even if
-// the client never sends a byte (slowloris-rejection variant).
+// the reject goroutine's lifetime is bounded by fl.rejectPeekTimeout even
+// if the client never sends a byte (slowloris-rejection variant).
 func TestFullListener_MaxConnections_NoBytes_DrainsViaPeekTimeout(t *testing.T) {
-	h := newCapacityRejectionHarness(t, 2)
+	const peekTimeout = 200 * time.Millisecond
+	h := newCapacityRejectionHarnessWith(t, 2, nil, func(fl *FullListener) {
+		fl.rejectPeekTimeout = peekTimeout
+	})
 	t.Cleanup(h.Release)
 
 	conn, err := net.Dial("tcp", h.Addr())
@@ -560,15 +564,20 @@ func TestFullListener_MaxConnections_NoBytes_DrainsViaPeekTimeout(t *testing.T) 
 	}
 	defer conn.Close()
 	// Do not write — force the reject goroutine to exit via its peek
-	// deadline (rejectPeekTimeout = 1s). Allow a small safety margin.
+	// deadline. The bound sits below defaultRejectPeekTimeout so a
+	// listener that ignored the per-instance value would fail here.
 	start := time.Now()
-	raw, _ := readWith2sDeadline(t, conn)
+	raw, err := readWith2sDeadline(t, conn)
 	elapsed := time.Since(start)
 	if len(raw) != 0 {
 		t.Errorf("expected no bytes from server, got %d bytes: %q", len(raw), raw)
 	}
-	if elapsed > 1500*time.Millisecond {
-		t.Errorf("reject goroutine took %v to close, want <= ~1s + slack", elapsed)
+	var ne net.Error
+	if errors.As(err, &ne) && ne.Timeout() {
+		t.Fatalf("server never closed the rejected conn (client read deadline hit): %v", err)
+	}
+	if limit := peekTimeout + 500*time.Millisecond; elapsed > limit {
+		t.Errorf("reject goroutine took %v to close, want <= %v", elapsed, limit)
 	}
 }
 
@@ -585,6 +594,10 @@ func TestFullListener_MaxConnections_GracefulShutdownDrainsRejectGoroutine(t *te
 			return nil
 		},
 	})
+	// Long enough that the reject goroutine is still mid-peek after the
+	// 100ms settle sleep below, short enough to keep the test fast.
+	const rejectPeek = 500 * time.Millisecond
+	fl.rejectPeekTimeout = rejectPeek
 	ctx, cancel := context.WithCancel(context.Background())
 	startCh := make(chan error, 1)
 	go func() {
@@ -613,6 +626,7 @@ func TestFullListener_MaxConnections_GracefulShutdownDrainsRejectGoroutine(t *te
 	}
 
 	// Trigger a reject goroutine that is mid-peek (no bytes sent).
+	rejDialed := time.Now()
 	rejConn, err := net.Dial("tcp", fl.Addr())
 	if err != nil {
 		t.Fatalf("dial rejected: %v", err)
@@ -626,18 +640,23 @@ func TestFullListener_MaxConnections_GracefulShutdownDrainsRejectGoroutine(t *te
 	time.Sleep(100 * time.Millisecond)
 
 	// Shutdown; the reject goroutine should be mid-peek (no bytes sent),
-	// so fl.wg.Wait() should unblock within rejectPeekTimeout (~1s).
+	// so fl.wg.Wait() should unblock within fl.rejectPeekTimeout.
 	cancel()
 	close(barrier)
 	sat.Close()
 
-	// Start should return without error within a window that comfortably
-	// exceeds rejectPeekTimeout. If the reject goroutine leaked, Start
-	// will never return.
+	// Start should return without error once the reject goroutine's peek
+	// deadline (measured from the dial) fires. The bound sits below
+	// defaultRejectPeekTimeout so a listener that ignored the per-instance
+	// value would fail. If the reject goroutine leaked, Start will never
+	// return.
 	select {
 	case err := <-startCh:
 		if err != nil {
 			t.Fatalf("Start returned error on graceful shutdown: %v", err)
+		}
+		if limit := rejectPeek + 300*time.Millisecond; time.Since(rejDialed) > limit {
+			t.Errorf("Start returned %v after the reject dial, want <= %v", time.Since(rejDialed), limit)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("Start did not return — reject goroutine likely leaked")

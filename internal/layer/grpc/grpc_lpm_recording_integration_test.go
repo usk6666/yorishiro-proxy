@@ -1,4 +1,4 @@
-//go:build e2e
+//go:build e2e && !e2e_smoke
 
 package grpc_test
 
@@ -49,6 +49,9 @@ import (
 //     decompressed).
 //   - MCP tool integration: an LPM wire flow is retrievable from the
 //     store by ID — the same lookup the `query` MCP tool performs.
+//
+// Tier: exhaustive (nightly) since USK-1213 — a defense-in-depth overlay
+// with no live bug behind it, so it does not gate every PR.
 
 // lpmFlowsForStream returns flows in store filtered to streamID and
 // wire_level=grpc-lpm-frame. Optionally filtered by direction when
@@ -597,4 +600,12 @@ func TestGRPCLPMRecording_HARExcludesFrame(t *testing.T) {
 			t.Errorf("LPM flow WireLevel = %q, want %q (HAR filter contract)", f.WireLevel, "grpc-lpm-frame")
 		}
 	}
+}
+
+func (s *testStore) allFlows() []*flow.Flow {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]*flow.Flow, len(s.flows))
+	copy(out, s.flows)
+	return out
 }

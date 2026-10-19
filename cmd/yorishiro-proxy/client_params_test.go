@@ -220,12 +220,16 @@ func TestCoerceValue_IntegerType(t *testing.T) {
 // dot-notation child typed by its parent's schema. Converting such a float to
 // int64 is implementation-defined in Go (math.MinInt64 on amd64).
 func TestCoerceValue_IntegerFloatFallback_NonRepresentable(t *testing.T) {
-	schema := &toolSchema{
-		properties: map[string]string{"limit": "integer"},
-		required:   map[string]bool{},
-		enums:      map[string][]string{},
-		nested:     map[string]map[string]string{"filter": {"status_code": "integer"}},
-	}
+	schema := parseToolSchema(map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"limit": map[string]any{"type": "integer"},
+			"filter": map[string]any{
+				"type":       []any{"null", "object"},
+				"properties": map[string]any{"status_code": map[string]any{"type": "integer"}},
+			},
+		},
+	})
 
 	tests := []struct {
 		input string
@@ -257,8 +261,13 @@ func TestCoerceValue_IntegerFloatFallback_NonRepresentable(t *testing.T) {
 		if got := coerceValue("limit", tt.input, schema); got != tt.want {
 			t.Errorf("coerceValue('limit', %q) = %v (%T), want %v (%T)", tt.input, got, got, tt.want, tt.want)
 		}
-		if got := coerceNestedValue("filter", "status_code", tt.input, schema); got != tt.want {
-			t.Errorf("coerceNestedValue('filter', 'status_code', %q) = %v (%T), want %v (%T)", tt.input, got, got, tt.want, tt.want)
+		result := map[string]any{}
+		if err := applyKeyValue(result, "filter.status_code", tt.input, schema); err != nil {
+			t.Fatalf("applyKeyValue('filter.status_code', %q): %v", tt.input, err)
+		}
+		filter, _ := result["filter"].(map[string]any)
+		if got := filter["status_code"]; got != tt.want {
+			t.Errorf("filter.status_code=%q = %v (%T), want %v (%T)", tt.input, got, got, tt.want, tt.want)
 		}
 	}
 }

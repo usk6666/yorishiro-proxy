@@ -270,26 +270,23 @@ func (h *sseCloseHarness) driveBrowserPhase1(t *testing.T) []byte {
 	return all
 }
 
-// drainBrowser reads from clientA until it has seen `wantEvents` blank-line
-// terminators or the deadline expires.
+// drainBrowser reads from clientA until it has seen `wantEvents` event
+// terminators after the response head, the connection ends (EOF or any
+// other non-timeout read error), or the deadline expires. `within` is a
+// failure bound only; a healthy run returns as soon as the events land.
 func (h *sseCloseHarness) drainBrowser(t *testing.T, prior []byte, wantEvents int, within time.Duration) []byte {
 	t.Helper()
 	all := append([]byte(nil), prior...)
 	buf := make([]byte, 1024)
 	deadline := time.Now().Add(within)
-	for time.Now().Before(deadline) {
+	for time.Now().Before(deadline) && sseEventsAfterHeaders(all) < wantEvents {
 		_ = h.clientA.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
 		n, rerr := h.clientA.Read(buf)
 		if n > 0 {
 			all = append(all, buf[:n]...)
 		}
-		// Headers terminator + N event terminators.
-		if bytes.Count(all, []byte("\n\n")) >= 1+wantEvents {
-			break
-		}
-		if rerr != nil && !errors.Is(rerr, io.EOF) {
-			// Read deadline / closed conn: ignore and keep polling
-			// until the overall deadline.
+		if rerr != nil && !isReadTimeout(rerr) {
+			break // EOF / closed: nothing more will arrive
 		}
 	}
 	_ = h.clientA.SetReadDeadline(time.Time{})
@@ -345,8 +342,11 @@ func TestSSE_GracefulUpstreamClose_StateComplete(t *testing.T) {
 	prior := h.driveBrowserPhase1(t)
 	h.waitForSwap(t, 3*time.Second)
 
-	// Drain the eventCount events.
-	_ = h.drainBrowser(t, prior, eventCount, 3*time.Second)
+	// Drain the eventCount events; every one must reach the browser.
+	wire := h.drainBrowser(t, prior, eventCount, 3*time.Second)
+	if got := sseEventsAfterHeaders(wire); got != eventCount {
+		t.Errorf("browser received %d events after the response head, want %d; wire=%q", got, eventCount, wire)
+	}
 
 	// runUpgradeSSE must return on its own once the upstream chunked
 	// terminator hits the parser as io.EOF. Do NOT force-close clientA

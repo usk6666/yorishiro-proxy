@@ -77,31 +77,75 @@ func TestBuildConnectionStackWithTarget_RawSuccess(t *testing.T) {
 }
 
 // TestBuildConnectionStackWithTarget_EmptyProtocolRoutesViaAuto verifies that
-// an empty Protocol string collapses to Auto and then falls through to the
-// Raw branch when the peek does not see HTTP/1.x bytes. USK-913 wired the
-// Auto arm; prior to that this case rejected with a "not yet wired" error.
-// The peek has a bounded deadline so a net.Pipe peer that never sends bytes
-// resolves to InnerUnknown → Raw fallback within the test timeout.
+// an empty Protocol string collapses to Auto. USK-913 wired the Auto arm;
+// prior to that this case rejected with a "not yet wired" error.
+//
+// The HTTP row is what proves the collapse: an empty Protocol that fell
+// to Raw instead of Auto would assemble bytechunk Layers there. The
+// non-HTTP row covers Auto's Raw fallback. Both rows send bytes so the
+// Auto peek classifies immediately instead of waiting out
+// targetOverrideAutoPeekTimeout.
+//
+// The silent-peer case (no bytes → peek deadline expires → Raw fallback)
+// is intentionally not covered here, to avoid a targetOverrideAutoPeekTimeout
+// wait. Each half is covered elsewhere: TestPeekInnerProtocol_Timeout
+// (50ms deadline) covers timeout → Unknown, and the "non-HTTP byte falls
+// back to raw" row below covers Unknown → Raw.
 func TestBuildConnectionStackWithTarget_EmptyProtocolRoutesViaAuto(t *testing.T) {
-	_, clientPeer := pipePair(t)
-	_, upstreamPeer := pipePair(t)
-
-	cfg := newTestBuildConfig(t)
-	params := TargetOverrideParams{
-		Target: "api.example.com:50051",
-		// Protocol unset — exercises the empty → auto collapse.
+	tests := []struct {
+		name    string
+		payload []byte
+		check   func(t *testing.T, stack *ConnectionStack)
+	}{
+		{
+			name:    "HTTP/1.x request line resolves to http1",
+			payload: []byte("GET / HTTP/1.1\r\nHost: api.example.com\r\n\r\n"),
+			check: func(t *testing.T, stack *ConnectionStack) {
+				t.Helper()
+				if _, ok := stack.ClientTopmost().(*http1.Layer); !ok {
+					t.Errorf("client topmost = %T, want *http1.Layer (empty → Auto → HTTP)", stack.ClientTopmost())
+				}
+			},
+		},
+		{
+			name:    "non-HTTP byte falls back to raw",
+			payload: []byte{0x00},
+			check: func(t *testing.T, stack *ConnectionStack) {
+				t.Helper()
+				if _, ok := stack.ClientTopmost().(*bytechunk.Layer); !ok {
+					t.Errorf("client topmost = %T, want *bytechunk.Layer (Auto fallback to Raw)", stack.ClientTopmost())
+				}
+			},
+		},
 	}
 
-	stack, err := BuildConnectionStackWithTarget(context.Background(), clientPeer, upstreamPeer, params, cfg)
-	if err != nil {
-		t.Fatalf("BuildConnectionStackWithTarget(empty/auto): %v", err)
-	}
-	t.Cleanup(func() { _ = stack.Close() })
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			clientLocal, clientPeer := pipePair(t)
+			_, upstreamPeer := pipePair(t)
 
-	// Auto with no bytes peeked falls through to Raw — both topmosts are
-	// bytechunk Layers.
-	if _, ok := stack.ClientTopmost().(*bytechunk.Layer); !ok {
-		t.Errorf("client topmost = %T, want *bytechunk.Layer (Auto fallback to Raw)", stack.ClientTopmost())
+			go func() {
+				_, _ = clientLocal.Write(tt.payload)
+			}()
+
+			cfg := newTestBuildConfig(t)
+			params := TargetOverrideParams{
+				Target: "api.example.com:50051",
+				// Protocol unset — exercises the empty → auto collapse.
+			}
+
+			start := time.Now()
+			stack, err := BuildConnectionStackWithTarget(context.Background(), clientPeer, upstreamPeer, params, cfg)
+			if err != nil {
+				t.Fatalf("BuildConnectionStackWithTarget(empty/auto): %v", err)
+			}
+			t.Cleanup(func() { _ = stack.Close() })
+			if elapsed := time.Since(start); elapsed > time.Second {
+				t.Errorf("BuildConnectionStackWithTarget took %v, want < 1s (Auto peek stalled?)", elapsed)
+			}
+
+			tt.check(t, stack)
+		})
 	}
 }
 
@@ -312,27 +356,6 @@ func TestBuildConnectionStackWithTarget_AutoHTTPResolvesToHTTP(t *testing.T) {
 
 	if _, ok := stack.ClientTopmost().(*http1.Layer); !ok {
 		t.Errorf("client topmost = %T, want *http1.Layer (Auto → HTTP)", stack.ClientTopmost())
-	}
-}
-
-// TestBuildConnectionStackWithTarget_TLSTerminateDeferred confirms
-// TLSTerminate=true short-circuits with a USK-915 reference rather than
-// silently doing nothing.
-func TestBuildConnectionStackWithTarget_TLSTerminateDeferred(t *testing.T) {
-	_, clientPeer := pipePair(t)
-	_, upstreamPeer := pipePair(t)
-	cfg := newTestBuildConfig(t)
-	params := TargetOverrideParams{
-		Target:       "api.example.com:443",
-		Protocol:     ForwardProtocolRaw,
-		TLSTerminate: true,
-	}
-	_, err := BuildConnectionStackWithTarget(context.Background(), clientPeer, upstreamPeer, params, cfg)
-	if err == nil {
-		t.Fatal("expected non-nil error for TLSTerminate=true, got nil")
-	}
-	if !strings.Contains(err.Error(), "USK-915") {
-		t.Errorf("expected error to cite USK-915, got %q", err.Error())
 	}
 }
 

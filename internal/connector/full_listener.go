@@ -19,14 +19,15 @@ type HandlerFunc func(ctx context.Context, pc *PeekConn) error
 
 // Capacity-rejection deadlines bound the lifetime of a reject goroutine so
 // a stalled or slowloris-style client cannot indefinitely tie up the
-// rejection path. Worst-case lifetime is rejectPeekTimeout +
+// rejection path. Worst-case lifetime is defaultRejectPeekTimeout +
 // rejectWriteDeadline (~6s).
 const (
-	// rejectPeekTimeout bounds the read used to discriminate the protocol
+	// defaultRejectPeekTimeout bounds the read used to discriminate the protocol
 	// kind of an over-cap connection. Intentionally shorter than the regular
 	// PeekTimeout: a rejected client must not be allowed to slowloris the
 	// rejection path.
-	rejectPeekTimeout = 1 * time.Second
+	// FullListener.rejectPeekTimeout carries the per-instance value.
+	defaultRejectPeekTimeout = 1 * time.Second
 
 	// rejectWriteDeadline bounds the 503 response write. Mirrors the
 	// best-effort 5s used by writeForwardErrorResponse.
@@ -109,6 +110,11 @@ type FullListener struct {
 	// rate limiter. Overridable in tests (before Start).
 	now func() time.Time
 
+	// rejectPeekTimeout bounds the protocol-detection read on the
+	// capacity-rejection path. Initialised to defaultRejectPeekTimeout;
+	// overridable in tests (before Start).
+	rejectPeekTimeout time.Duration
+
 	// rejectWarn rate-limits the capacity-rejection Warn log. Its clock
 	// reads fl.now on every call so a test clock is honoured.
 	rejectWarn *RejectWarnLimiter
@@ -155,7 +161,9 @@ func NewFullListener(cfg FullListenerConfig) *FullListener {
 		onTCP:          cfg.OnTCP,
 		onReject:       cfg.OnReject,
 		now:            time.Now,
-		ready:          make(chan struct{}),
+
+		rejectPeekTimeout: defaultRejectPeekTimeout,
+		ready:             make(chan struct{}),
 	}
 	fl.rejectWarn = NewRejectWarnLimiter(func() time.Time { return fl.now() })
 	fl.peekTimeoutNs.Store(int64(peekTimeout))
@@ -329,7 +337,7 @@ func (fl *FullListener) handleConn(ctx context.Context, conn net.Conn) {
 // then handed to OnReject (O(1), non-blocking by contract) and logged —
 // Debug per rejection, Warn rate-limited per listener.
 //
-// Bounded lifetime: rejectPeekTimeout (1s) + rejectWriteDeadline (5s).
+// Bounded lifetime: fl.rejectPeekTimeout (default 1s) + rejectWriteDeadline (5s).
 // Slowloris-safe — the peek deadline is short enough that even a sustained
 // stall does not allow reject goroutines to accumulate faster than they
 // drain. The reject goroutine is tracked by fl.wg so graceful shutdown
@@ -351,7 +359,7 @@ func (fl *FullListener) handleRejection(conn net.Conn, maxConns int) {
 	// path. It is absolute: detection and the request-line read share it.
 	// Reset before the Write so the subsequent rejectWriteDeadline applies
 	// cleanly (separated read/write deadlines).
-	_ = conn.SetReadDeadline(time.Now().Add(rejectPeekTimeout))
+	_ = conn.SetReadDeadline(time.Now().Add(fl.rejectPeekTimeout))
 
 	kind, _, ok := fl.detectProtocol(pc, fl.logger)
 	isHTTP := ok && (kind == ProtocolHTTP1 || kind == ProtocolHTTPConnect)

@@ -69,6 +69,28 @@ func pipePair() (a, b net.Conn) {
 	return
 }
 
+// sseEventsAfterHeaders counts SSE event terminators ("\n\n") in the
+// client wire after the HTTP/1.x response head. The head itself ends in
+// "\r\n\r\n", which contains no "\n\n", so counting across the whole wire
+// would never see a "+1 for the head" and a drain loop waiting for one
+// would spin until its deadline (USK-1206). Returns 0 until the head has
+// been fully received.
+func sseEventsAfterHeaders(wire []byte) int {
+	headEnd := bytes.Index(wire, []byte("\r\n\r\n"))
+	if headEnd < 0 {
+		return 0
+	}
+	return bytes.Count(wire[headEnd+4:], []byte("\n\n"))
+}
+
+// isReadTimeout reports whether err is the per-Read deadline a drain loop
+// arms to poll; any other read error (io.EOF, reset, closed) means the
+// connection is finished and the loop must stop rather than spin.
+func isReadTimeout(err error) bool {
+	var ne net.Error
+	return errors.As(err, &ne) && ne.Timeout()
+}
+
 // ---------------------------------------------------------------------------
 // Test infrastructure
 // ---------------------------------------------------------------------------
@@ -645,24 +667,17 @@ func TestSSE_FullChainSwapEndToEnd(t *testing.T) {
 	stack.PushClient(clientLayer)
 	stack.PushUpstream(upstreamLayer)
 
-	// Browser-side: three-phase choreography around the cancel-and-restart
-	// caveat. http1.channel.Next does not honor ctx, so the proxy's
-	// clientToUpstream goroutine is parked on a blocking parser call after
-	// the upgrade is detected. We unblock it cleanly via TCP half-close
-	// (CloseWrite) on the browser side: the proxy's client read returns
-	// io.EOF, and clientToUpstream's upgradePending check (in session.go)
-	// converts that to ErrUpgradePending so the swap can run.
-	//
-	// Order matters: if we wait for events before half-closing,
-	// clientToUpstream stays blocked → RunSession never returns
-	// ErrUpgradePending → runUpgradeSSE never installs the SSE adapter →
-	// no events ever flow. So:
+	// Browser-side choreography:
 	//   1. Send the GET.
 	//   2. Read until the 200 OK header block arrives (\r\n\r\n).
-	//   3. Half-close the write side immediately so the proxy's parser
-	//      sees EOF and clientToUpstream returns ErrUpgradePending.
-	//   4. Continue reading; the swap installs sse.Wrap and runUpgradeSSE
-	//      forwards the upstream body bytes (events) to us via TeeReader.
+	//   3. Half-close the write side (CloseWrite), modelling a browser
+	//      that sends FIN after its request. The swap does NOT depend on
+	//      this: once the request has been delivered, a second
+	//      http1.channel.Next returns io.EOF immediately (USK-730 /
+	//      USK-1184), and runUpgradeSSE interrupts the client side before
+	//      detaching (USK-701). The half-close only exercises the
+	//      "client FIN after GET" path.
+	//   4. Keep reading; runUpgradeSSE relays the upstream events to us.
 	//
 	// We use CloseWrite (not Close) so the read direction stays open for
 	// Phase 3 — the proxy still writes events back over clientB→clientA.
@@ -692,11 +707,9 @@ func TestSSE_FullChainSwapEndToEnd(t *testing.T) {
 			}
 		}
 
-		// Phase 2: half-close write so the proxy's client-side parser
-		// sees clean EOF. With Pending=UpgradeSSE already latched, the
-		// upgradePending-before-EOF check in clientToUpstream converts
-		// that to ErrUpgradePending (no phantom envelope, no second
-		// Stream record from a partially-parsed malformed request).
+		// Phase 2: half-close write (browser FIN after the GET). The
+		// proxy must not record a phantom envelope or a second Stream
+		// from it; the swap proceeds regardless.
 		if cw, ok := clientA.(interface{ CloseWrite() error }); ok {
 			_ = cw.CloseWrite()
 		}
@@ -705,12 +718,15 @@ func TestSSE_FullChainSwapEndToEnd(t *testing.T) {
 		eventDeadline := time.Now().Add(3 * time.Second)
 		for time.Now().Before(eventDeadline) {
 			_ = clientA.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
-			n, _ := clientA.Read(buf)
+			n, rerr := clientA.Read(buf)
 			if n > 0 {
 				all = append(all, buf[:n]...)
 			}
-			if bytes.Count(all, []byte("\n\n")) >= 4 { // headers + 3 events
+			if sseEventsAfterHeaders(all) >= 3 {
 				break
+			}
+			if rerr != nil && !isReadTimeout(rerr) {
+				break // EOF / closed: nothing more will arrive
 			}
 		}
 		_ = clientA.SetReadDeadline(time.Time{})
@@ -782,10 +798,17 @@ func TestSSE_FullChainSwapEndToEnd(t *testing.T) {
 		t.Errorf("upstream topmost still original http1.Layer; swap did not install SSE adapter")
 	}
 
-	// Tear down: close pipes so the recursive RunSession returns.
+	// Tear down: wait for the client read goroutine to finish FIRST, then
+	// close the local sides (USK-1072). The swap becoming visible above
+	// only means runUpgradeSSE has called ReplaceUpstreamTop; the events
+	// are read, recorded and written to the client afterwards by
+	// driveSSEEventLoop. Closing clientA as soon as the swap is visible
+	// raced that relay: events still in flight (or still in clientA's
+	// kernel buffer) were dropped, the next client write failed, and the
+	// loop exited before event 3 was recorded.
+	<-clientReadDone
 	_ = clientA.Close()
 	_ = upstreamB.Close()
-	<-clientReadDone
 
 	select {
 	case <-done:

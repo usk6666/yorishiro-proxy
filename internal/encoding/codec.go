@@ -72,18 +72,6 @@ func (r *Registry) List() []string {
 	return names
 }
 
-// Register adds a custom Codec to the registry.
-// Returns an error if a codec with the same name is already registered.
-func (r *Registry) Register(name string, c Codec) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if _, exists := r.codecs[name]; exists {
-		return fmt.Errorf("codec: %q is already registered", name)
-	}
-	r.codecs[name] = c
-	return nil
-}
-
 // Encode applies a chain of codecs in order, encoding the value through each.
 func (r *Registry) Encode(value string, names []string) (string, error) {
 	result := value

@@ -9,9 +9,11 @@
 package proxybuild_test
 
 import (
+	"bufio"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -241,7 +243,10 @@ func TestProxybuild_TCPForward_UpstreamTLS_HTTP_PlainClient(t *testing.T) {
 	if _, err := conn.Write([]byte(req)); err != nil {
 		t.Fatalf("conn.Write: %v", err)
 	}
-	buf, _ := io.ReadAll(conn)
+	buf, err := readUntilClose(t, conn, 5*time.Second)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
 	if !strings.Contains(string(buf), "Echo-Path: /upstream-tls-h1") {
 		t.Errorf("response missing Echo-Path: got=%q", string(buf))
 	}
@@ -398,17 +403,10 @@ func TestProxybuild_UpstreamTLS_ALPN_ExplicitHTTP2(t *testing.T) {
 	})
 
 	cli := h2cForwardClient(fix.fwdAddr, nil, nil)
+	cli.Timeout = 5 * time.Second
 	defer cli.CloseIdleConnections()
 	req, _ := gohttp.NewRequestWithContext(ctx, "GET", "http://"+fix.fwdAddr+"/alpn-h2", nil)
-	resp, err := cli.Do(req)
-	if err != nil {
-		// Even if the test handler 502s, the TLS handshake completed —
-		// negotiated.Load() is what we care about.
-		t.Logf("client.Do error (acceptable; the handshake is what we assert): %v", err)
-	} else {
-		_, _ = io.ReadAll(resp.Body)
-		_ = resp.Body.Close()
-	}
+	requireEmpty200(t, cli, req)
 
 	// Wait briefly for the upstream goroutine to observe the handshake.
 	deadline := time.Now().Add(3 * time.Second)
@@ -454,10 +452,7 @@ func TestProxybuild_UpstreamTLS_ALPN_AutoClientH2(t *testing.T) {
 	}
 	req, _ := gohttp.NewRequestWithContext(ctx, "GET", "https://"+fix.fwdAddr+"/auto-client-h2", nil)
 	req.Host = "forward.example.test"
-	if resp, err := cli.Do(req); err == nil {
-		_, _ = io.ReadAll(resp.Body)
-		_ = resp.Body.Close()
-	}
+	requireEmpty200(t, cli, req)
 
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
@@ -495,14 +490,15 @@ func TestProxybuild_UpstreamTLS_ALPN_AutoClientH1(t *testing.T) {
 				NextProtos: []string{"http/1.1"},
 			},
 		},
-		Timeout: 5 * time.Second,
+		// Short so a hang fails fast. The upstream fixture must answer:
+		// a keep-alive HTTP/1 client is left hanging (no 502, no close)
+		// when the upstream closes before responding — USK-1229.
+		Timeout: 2 * time.Second,
 	}
+	defer cli.CloseIdleConnections()
 	req, _ := gohttp.NewRequestWithContext(ctx, "GET", "https://"+fix.fwdAddr+"/auto-client-h1", nil)
 	req.Host = "forward.example.test"
-	if resp, err := cli.Do(req); err == nil {
-		_, _ = io.ReadAll(resp.Body)
-		_ = resp.Body.Close()
-	}
+	requireEmpty200(t, cli, req)
 
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
@@ -546,7 +542,13 @@ func TestProxybuild_UpstreamTLS_ALPN_AutoPlainClient(t *testing.T) {
 	if _, err := conn.Write([]byte(req)); err != nil {
 		t.Fatalf("conn.Write: %v", err)
 	}
-	_, _ = io.ReadAll(conn)
+	resp, err := readUntilClose(t, conn, 3*time.Second)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	if !strings.HasPrefix(string(resp), "HTTP/1.1 200 ") {
+		t.Errorf("response = %q, want HTTP/1.1 200", resp)
+	}
 
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
@@ -590,8 +592,9 @@ func TestProxybuild_UpstreamTLS_CertVerifyFailure_RecordsError(t *testing.T) {
 		t.Fatalf("net.Dial: %v", err)
 	}
 	_, _ = conn.Write([]byte(req))
-	// The proxy drops the connection after the upstream TLS dial fails.
-	_, _ = io.ReadAll(conn)
+	// The proxy drops the connection after the upstream TLS dial fails;
+	// a clean EOF or a reset are both a drop, a read timeout is a hang.
+	_, _ = readUntilClose(t, conn, 3*time.Second)
 	_ = conn.Close()
 
 	if !waitForUpstreamTLSErrorStream(t, fix.store, 3*time.Second) {
@@ -677,7 +680,7 @@ func TestTCPForward_UpstreamTLS_PerEntryInsecureSkipVerify(t *testing.T) {
 			if _, err := conn.Write([]byte(req)); err != nil {
 				t.Fatalf("conn.Write: %v", err)
 			}
-			buf, _ := io.ReadAll(conn)
+			buf, _ := readUntilClose(t, conn, 3*time.Second)
 
 			if tc.wantHandshakeOK {
 				// Handshake-succeeds path: assert echo body reached the
@@ -751,8 +754,11 @@ register_hook("tls", "on_handshake", on_hs)
 		t.Fatalf("net.Dial: %v", err)
 	}
 	_, _ = conn.Write([]byte(req))
-	_, _ = io.ReadAll(conn)
+	buf, err := readUntilClose(t, conn, 3*time.Second)
 	_ = conn.Close()
+	if err != nil || !strings.Contains(string(buf), "tls-echo:/plugin-hook") {
+		t.Fatalf("round-trip failed: err=%v response=%q", err, buf)
+	}
 
 	// Wait for the recording side to finalize so the hook has had time to
 	// run.
@@ -777,11 +783,11 @@ register_hook("tls", "on_handshake", on_hs)
 // ---------------------------------------------------------------------------
 
 // startALPNObservingTLSUpstream binds a TCP listener that performs a TLS
-// handshake offering the supplied ALPN advertise list, records the
-// negotiated ALPN in the returned atomic.Value, and then drops the
-// connection. This is the minimal harness needed to assert the proxy's
-// upstream-ALPN offer list — we do not need to handle any L7 protocol
-// (the negotiated ALPN string is observable directly from the TLS state).
+// handshake offering the supplied ALPN advertise list and records the
+// negotiated ALPN in the returned atomic.Value. It then answers every
+// request with an empty 200 — over HTTP/2 when "h2" was negotiated,
+// otherwise over HTTP/1.1 — so the client side of each test can assert
+// a successful round-trip instead of waiting out a silent upstream.
 func startALPNObservingTLSUpstream(t *testing.T, alpnAdvertise []string) (*atomic.Value, string, func()) {
 	t.Helper()
 
@@ -817,11 +823,8 @@ func startALPNObservingTLSUpstream(t *testing.T, alpnAdvertise []string) (*atomi
 				}
 				st := tlsConn.ConnectionState()
 				negotiated.Store(st.NegotiatedProtocol)
-				// Drain any inner bytes briefly so the proxy's HTTP/1.x or
-				// h2 frame writer does not block on a full receive window.
-				_ = tlsConn.SetReadDeadline(time.Now().Add(1 * time.Second))
-				_, _ = io.Copy(io.Discard, tlsConn)
-				_ = tlsConn.Close()
+				_ = tlsConn.SetReadDeadline(time.Time{})
+				serveEmpty200(tlsConn, st.NegotiatedProtocol)
 			}(c)
 		}
 	}()
@@ -830,6 +833,69 @@ func startALPNObservingTLSUpstream(t *testing.T, alpnAdvertise []string) (*atomi
 		_ = ln.Close()
 	}
 	return negotiated, ln.Addr().String(), stop
+}
+
+// alpnUpstreamIdle bounds how long startALPNObservingTLSUpstream keeps an
+// idle upstream connection open after its last response.
+const alpnUpstreamIdle = 2 * time.Second
+
+// serveEmpty200 answers every request on conn with an empty 200 until the
+// peer closes or the connection idles for alpnUpstreamIdle.
+func serveEmpty200(conn *tls.Conn, alpn string) {
+	if alpn == "h2" {
+		srv := &xhttp2.Server{IdleTimeout: alpnUpstreamIdle}
+		srv.ServeConn(conn, &xhttp2.ServeConnOpts{
+			Handler: gohttp.HandlerFunc(func(w gohttp.ResponseWriter, _ *gohttp.Request) {
+				w.WriteHeader(gohttp.StatusOK)
+			}),
+		})
+		return
+	}
+	br := bufio.NewReader(conn)
+	for {
+		_ = conn.SetReadDeadline(time.Now().Add(alpnUpstreamIdle))
+		req, err := gohttp.ReadRequest(br)
+		if err != nil {
+			return
+		}
+		_, _ = io.Copy(io.Discard, req.Body)
+		_ = req.Body.Close()
+		if _, err := conn.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")); err != nil {
+			return
+		}
+	}
+}
+
+// requireEmpty200 performs req and fails unless it completes with a 200
+// and an empty body (the startALPNObservingTLSUpstream response).
+func requireEmpty200(t *testing.T, cli *gohttp.Client, req *gohttp.Request) {
+	t.Helper()
+	resp, err := cli.Do(req)
+	if err != nil {
+		t.Fatalf("client.Do %s: %v", req.URL.Path, err)
+	}
+	body, err := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if err != nil {
+		t.Fatalf("read body %s: %v", req.URL.Path, err)
+	}
+	if resp.StatusCode != gohttp.StatusOK || len(body) != 0 {
+		t.Fatalf("%s: status=%d body=%q, want 200 with empty body", req.URL.Path, resp.StatusCode, body)
+	}
+}
+
+// readUntilClose reads conn until the peer closes it, failing the test if
+// the peer is still silent after within (a proxy hang must not pass). The
+// returned error is nil on a clean EOF and non-nil on e.g. a reset.
+func readUntilClose(t *testing.T, conn net.Conn, within time.Duration) ([]byte, error) {
+	t.Helper()
+	_ = conn.SetReadDeadline(time.Now().Add(within))
+	buf, err := io.ReadAll(conn)
+	var ne net.Error
+	if errors.As(err, &ne) && ne.Timeout() {
+		t.Fatalf("peer did not close the connection within %v (got %d bytes %q): %v", within, len(buf), buf, err)
+	}
+	return buf, err
 }
 
 // buildSelfSignedTLSCert returns a fresh self-signed TLS leaf cert,
