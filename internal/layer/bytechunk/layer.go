@@ -35,7 +35,9 @@ func WithEnvelopeContext(ctx envelope.EnvelopeContext) Option {
 // WithStateReleaser injects a pluginv2.StateReleaser fired once from
 // Layer.Close with ReleaseTransaction(ConnID, StreamID) and
 // ReleaseStream(ConnID, StreamID) — raw keys both plugin scopes on the
-// StreamID (pluginv2 transactionKey). No-op when ConnID is empty.
+// StreamID (pluginv2 transactionKey). No-op when ConnID is empty. The
+// session driving the Layer repeats the release via ReleaseState after it
+// exits.
 //
 // The release runs on Layer.Close, not on the Channel's terminal state:
 // after the client side reads EOF the session keeps running Receive
@@ -103,13 +105,21 @@ func (l *Layer) Close() error {
 	if l.channel != nil {
 		l.channel.markTerminated(io.EOF)
 	}
-	l.releaseOnce.Do(l.releaseState)
+	l.releaseOnce.Do(l.ReleaseState)
 	return err
 }
 
-// releaseState drops the plugin transaction / stream scopes keyed on this
-// Layer's (ConnID, StreamID).
-func (l *Layer) releaseState() {
+// ReleaseState drops the plugin transaction / stream scopes keyed on this
+// Layer's (ConnID, StreamID) through the WithStateReleaser hook. It is a
+// no-op without a releaser or a ConnID, and safe to call repeatedly.
+//
+// Layer.Close calls it once. The session that drives the Layer calls it
+// again after it has exited (USK-1083 review S-2): when a ctx-cancel
+// watcher makes the first Close, a plugin dispatch already in flight for
+// an envelope read before the Close re-creates the scope, and only a
+// release after the session's goroutines are gone is guaranteed to be the
+// last one.
+func (l *Layer) ReleaseState() {
 	if l.stateReleaser == nil || l.channel == nil {
 		return
 	}

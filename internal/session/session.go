@@ -479,6 +479,16 @@ type upstreamHolder struct {
 	// clean termination. A failing Send of the terminator itself still
 	// surfaces, from clientToUpstream.
 	endingRPC atomic.Bool
+
+	// rawBlocked latches when rawTargetScopeTeardown aborts both raw
+	// Channels after a target scope deny (USK-1083). It is set BEFORE the
+	// aborts so that a client.Send of an upstream chunk upstreamToClient
+	// already held (e.g. a server-first banner) failing on the aborted
+	// client conn is reported as the proxy's own teardown by relaySendErr
+	// and cannot win the errgroup's first-error slot over
+	// errRawBlockedByTargetScope. Kept separate from tornDown, which
+	// onClientEnd also sets for an ordinary client end.
+	rawBlocked atomic.Bool
 }
 
 // refused reports whether the UPSTREAM declared the stream unprocessed —
@@ -2793,7 +2803,8 @@ type channelAborter interface {
 //
 // uh.tornDown is set before the aborts so the upstream read error that
 // follows ends upstreamToClient as the proxy's own teardown, not as an
-// upstream failure.
+// upstream failure; uh.rawBlocked does the same for a client.Send of an
+// already-read upstream chunk failing on the aborted client conn.
 func rawTargetScopeTeardown(client layer.Channel, uh *upstreamHolder, env *envelope.Envelope, action pipeline.Action, blockedBy string) error {
 	if action != pipeline.Drop || blockedBy != pipeline.BlockedByTargetScope ||
 		env == nil || env.Protocol != envelope.ProtocolRaw {
@@ -2802,6 +2813,7 @@ func rawTargetScopeTeardown(client layer.Channel, uh *upstreamHolder, env *envel
 	slog.Debug("session: raw connection closed by target scope deny",
 		"stream_id", env.StreamID, "target", env.Context.TargetHost)
 	uh.tornDown.Store(true)
+	uh.rawBlocked.Store(true)
 	abortChannel(client)
 	if uh.ch != nil {
 		abortChannel(uh.ch)
@@ -3200,9 +3212,10 @@ func upstreamToClient(
 // upstreamToClient's return value. Once the proxy started ending the RPC with
 // its own gRPC terminator (uh.endingRPC), the client Channel refuses anything
 // after it; that refusal is a consequence of the clean termination, not a
-// session failure (USK-1202).
+// session failure (USK-1202). Likewise once a raw target scope deny aborted
+// the client conn (uh.rawBlocked, USK-1083).
 func relaySendErr(uh *upstreamHolder, err error) error {
-	if uh.endingRPC.Load() {
+	if uh.endingRPC.Load() || uh.rawBlocked.Load() {
 		return nil
 	}
 	return fmt.Errorf("client.Send: %w", err)

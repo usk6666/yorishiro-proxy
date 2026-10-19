@@ -534,7 +534,9 @@ func (m *Manager) handleTCPForwardConnRaw(
 	// read from the start, each running Pipeline.Run on every RawMessage
 	// envelope, and a server-speaks-first protocol's banner is relayed
 	// without waiting for the client (USK-1216).
-	if err := session.RunPreDialedStackSession(connCtx, stack, parentStack.Pipeline, m.tcpForwardSessionOpts(parentStack, connCtx)); err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, io.EOF) {
+	// runRawRelaySession also releases the client Layer's plugin scopes
+	// after the session exits (USK-1083 review S-2).
+	if err := runRawRelaySession(connCtx, stack, parentStack.Pipeline, m.tcpForwardSessionOpts(parentStack, connCtx)); err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, io.EOF) {
 		connLogger.Debug("tcp forward session ended with error", "error", err)
 	}
 }
