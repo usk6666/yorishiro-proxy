@@ -233,6 +233,15 @@ func connectThroughProxy(t *testing.T, proxyAddr, target string) *tls.Conn {
 		t.Fatalf("dial proxy: %v", err)
 	}
 
+	// Bound the CONNECT exchange and TLS handshake so a stalled proxy fails
+	// the test fast instead of hanging until the go test timeout. The
+	// deadline is cleared once the handshake completes so callers keep an
+	// unbounded conn lifetime for the payload exchange.
+	if err := conn.SetDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		conn.Close()
+		t.Fatalf("set handshake deadline: %v", err)
+	}
+
 	connectReq := fmt.Sprintf("CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", target, target)
 	if _, err := conn.Write([]byte(connectReq)); err != nil {
 		conn.Close()
@@ -256,6 +265,10 @@ func connectThroughProxy(t *testing.T, proxyAddr, target string) *tls.Conn {
 	if err := tlsConn.Handshake(); err != nil {
 		conn.Close()
 		t.Fatalf("TLS handshake through proxy: %v", err)
+	}
+	if err := conn.SetDeadline(time.Time{}); err != nil {
+		tlsConn.Close()
+		t.Fatalf("clear handshake deadline: %v", err)
 	}
 
 	return tlsConn
