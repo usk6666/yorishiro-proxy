@@ -85,6 +85,12 @@ func TestBuildConnectionStackWithTarget_RawSuccess(t *testing.T) {
 // non-HTTP row covers Auto's Raw fallback. Both rows send bytes so the
 // Auto peek classifies immediately instead of waiting out
 // targetOverrideAutoPeekTimeout.
+//
+// The silent-peer case (no bytes → peek deadline expires → Raw fallback)
+// is intentionally not covered here, to avoid a targetOverrideAutoPeekTimeout
+// wait. Each half is covered elsewhere: TestPeekInnerProtocol_Timeout
+// (50ms deadline) covers timeout → Unknown, and the "non-HTTP byte falls
+// back to raw" row below covers Unknown → Raw.
 func TestBuildConnectionStackWithTarget_EmptyProtocolRoutesViaAuto(t *testing.T) {
 	tests := []struct {
 		name    string
