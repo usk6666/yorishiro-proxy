@@ -202,15 +202,19 @@ func TestHTTPScopeStep_AuthorityWithoutPort_DefaultPort(t *testing.T) {
 	}, nil)
 	step := NewHTTPScopeStep(scope)
 
+	// tls carries the client-leg TLS state the scheme implies: every live
+	// constructor stamps an "https" Layer with a TLS snapshot and an "http"
+	// one without (USK-1086).
 	tests := []struct {
 		name      string
 		scheme    string
+		tls       bool
 		authority string
 		want      Action
 	}{
-		{"https default 443 allowed", "https", "example.com", Continue},
+		{"https default 443 allowed", "https", true, "example.com", Continue},
 		// USK-829: blocked HTTPMessage now emits Respond + synthetic 403.
-		{"http default 80 blocked", "http", "example.com", Respond},
+		{"http default 80 blocked", "http", false, "example.com", Respond},
 	}
 
 	for _, tt := range tests {
@@ -225,6 +229,9 @@ func TestHTTPScopeStep_AuthorityWithoutPort_DefaultPort(t *testing.T) {
 				Direction: envelope.Send,
 				Protocol:  envelope.ProtocolHTTP,
 				Message:   msg,
+			}
+			if tt.tls {
+				env.Context.TLS = &envelope.TLSSnapshot{}
 			}
 
 			result := step.Process(context.Background(), env)
