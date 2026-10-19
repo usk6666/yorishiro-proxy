@@ -57,3 +57,36 @@ func annotationsFromContext(ctx context.Context) map[string]string {
 	}
 	return bag.tags
 }
+
+// copyAnnotations returns an independent copy of tags, or nil when empty.
+func copyAnnotations(tags map[string]string) map[string]string {
+	if len(tags) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(tags))
+	for k, v := range tags {
+		out[k] = v
+	}
+	return out
+}
+
+// blockAnnotationsKey carries RunOutcome.Annotations from the session loop
+// to the block recorder (session.SessionOptions.OnPipelineDrop) without
+// widening that callback's signature (USK-1109 review F-2).
+type blockAnnotationsKey struct{}
+
+// WithBlockAnnotations returns ctx carrying tags for the block recorder.
+// Returns ctx unchanged when tags is empty.
+func WithBlockAnnotations(ctx context.Context, tags map[string]string) context.Context {
+	if len(tags) == 0 {
+		return ctx
+	}
+	return context.WithValue(ctx, blockAnnotationsKey{}, tags)
+}
+
+// BlockAnnotationsFromContext returns the tags installed by
+// WithBlockAnnotations, or nil. Callers must not mutate the map.
+func BlockAnnotationsFromContext(ctx context.Context) map[string]string {
+	tags, _ := ctx.Value(blockAnnotationsKey{}).(map[string]string)
+	return tags
+}

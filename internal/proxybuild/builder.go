@@ -2321,6 +2321,20 @@ func (b *blockedStreamSet) remove(id string) {
 	delete(b.ids, id)
 }
 
+// blockAnnotationTags copies the pipeline.WithBlockAnnotations tags in ctx
+// for the audit Stream, or returns nil when there are none (USK-1109).
+func blockAnnotationTags(ctx context.Context) map[string]string {
+	src := pipeline.BlockAnnotationsFromContext(ctx)
+	if len(src) == 0 {
+		return nil
+	}
+	tags := make(map[string]string, len(src))
+	for k, v := range src {
+		tags[k] = v
+	}
+	return tags
+}
+
 // buildPipelineDropRecorder returns a callback that persists a Pipeline-Drop
 // envelope as a flow.Stream with State="error" and BlockedBy=<reason>. The
 // Stream is intentionally minimal (no Flow rows) for envelopes whose
@@ -2384,6 +2398,10 @@ func buildPipelineDropRecorder(store flow.Writer, listenerName string, logger *s
 		if clientAddr != "" {
 			st.ConnInfo = &flow.ConnectionInfo{ClientAddr: clientAddr}
 		}
+		// USK-1109: annotations of Steps that continued before the Drop
+		// (e.g. safety_log_only:<rule_id> from a log_only SafetyStep)
+		// stay on the audit Stream.
+		st.Tags = blockAnnotationTags(ctx)
 
 		// Use a background-derived context so a cancelled handler ctx does
 		// not abort the audit record.
@@ -2406,8 +2424,9 @@ func buildPipelineDropRecorder(store flow.Writer, listenerName string, logger *s
 		// by SafetyStep) the first Send has already created an active
 		// Stream; this UpdateStream rewrites it as a blocked audit record.
 		if uerr := store.UpdateStream(recordCtx, streamID, flow.StreamUpdate{
-			State:     "error",
-			BlockedBy: blockedBy,
+			State:      "error",
+			BlockedBy:  blockedBy,
+			AppendTags: st.Tags,
 		}); uerr != nil {
 			if logger != nil {
 				logger.Error("proxybuild: pipeline-drop stream save failed",

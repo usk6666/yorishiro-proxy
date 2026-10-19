@@ -84,28 +84,41 @@ type safetyMatch struct {
 	ruleID, ruleName, target, fragment string
 }
 
-// observe logs the match and, in log_only mode, returns the pass Result
-// (Continue + annotation) with ok=true. In block mode it returns ok=false
-// and the caller builds the protocol-specific block Result. The matched
-// fragment is never logged raw (CWE-312).
-func (s *SafetyStep) observe(ctx context.Context, m safetyMatch) (Result, bool) {
-	msg := "safety: request blocked"
-	if s.logOnly {
-		msg = safety.LogOnlyMessage
+// logMatch emits the Info record for one match. The matched fragment is
+// never logged raw (CWE-312).
+func (s *SafetyStep) logMatch(ctx context.Context, msg string, m safetyMatch) {
+	if s.logger == nil {
+		return
 	}
-	if s.logger != nil {
-		s.logger.InfoContext(ctx, msg,
-			slog.String("filter", BlockedBySafetyFilter),
-			slog.String("rule_id", m.ruleID),
-			slog.String("rule_name", m.ruleName),
-			slog.String("target", m.target),
-			slog.String("match", safety.RedactFragment(m.fragment)),
-		)
+	s.logger.InfoContext(ctx, msg,
+		slog.String("filter", BlockedBySafetyFilter),
+		slog.String("rule_id", m.ruleID),
+		slog.String("rule_name", m.ruleName),
+		slog.String("target", m.target),
+		slog.String("match", safety.RedactFragment(m.fragment)),
+	)
+}
+
+// logBlock logs the single (first) match that blocks the envelope.
+func (s *SafetyStep) logBlock(ctx context.Context, m safetyMatch) {
+	s.logMatch(ctx, "safety: request blocked", m)
+}
+
+// observeAll is the log_only arm: it logs every match (the per-protocol
+// CheckInputAll result, so a noisy early rule cannot hide later ones) and
+// returns the pass Result (Continue, env untouched) annotated with one
+// "safety_log_only:<rule_id>" tag per matched rule. No matches → empty
+// Result.
+func (s *SafetyStep) observeAll(ctx context.Context, matches []safetyMatch) Result {
+	if len(matches) == 0 {
+		return Result{}
 	}
-	if !s.logOnly {
-		return Result{}, false
+	tags := make(map[string]string, len(matches))
+	for _, m := range matches {
+		s.logMatch(ctx, safety.LogOnlyMessage, m)
+		tags[SafetyLogOnlyTagPrefix+m.ruleID] = m.target
 	}
-	return Result{Annotations: map[string]string{SafetyLogOnlyTagPrefix + m.ruleID: m.target}}, true
+	return Result{Annotations: tags}
 }
 
 // Process checks Send-direction envelopes against safety rules. Receive
@@ -152,11 +165,18 @@ func (s *SafetyStep) processHTTP(ctx context.Context, env *envelope.Envelope, ms
 		return Result{}
 	}
 
+	if s.logOnly {
+		vs := s.http.CheckInputAll(ctx, msg)
+		matches := make([]safetyMatch, 0, len(vs))
+		for _, v := range vs {
+			matches = append(matches, safetyMatch{v.RuleID, v.RuleName, v.Target, v.Match})
+		}
+		return s.observeAll(ctx, matches)
+	}
+
 	violation := s.http.CheckInput(ctx, msg)
 	if violation != nil {
-		if r, pass := s.observe(ctx, safetyMatch{violation.RuleID, violation.RuleName, violation.Target, violation.Match}); pass {
-			return r
-		}
+		s.logBlock(ctx, safetyMatch{violation.RuleID, violation.RuleName, violation.Target, violation.Match})
 		// USK-829: emit a 403 terminator on the wire for HTTP requests
 		// so the client closes cleanly. Surface the matched safety rule
 		// ID via matched_rules so the body is consistent with the
@@ -179,11 +199,18 @@ func (s *SafetyStep) processWS(ctx context.Context, msg *envelope.WSMessage) Res
 
 	// WS SafetyEngine.CheckInput takes (ctx, msg) — no env. Surface
 	// asymmetry vs gRPC is preserved.
+	if s.logOnly {
+		vs := s.ws.CheckInputAll(ctx, msg)
+		matches := make([]safetyMatch, 0, len(vs))
+		for _, v := range vs {
+			matches = append(matches, safetyMatch{v.RuleID, v.RuleName, v.Target, v.Match})
+		}
+		return s.observeAll(ctx, matches)
+	}
+
 	violation := s.ws.CheckInput(ctx, msg)
 	if violation != nil {
-		if r, pass := s.observe(ctx, safetyMatch{violation.RuleID, violation.RuleName, violation.Target, violation.Match}); pass {
-			return r
-		}
+		s.logBlock(ctx, safetyMatch{violation.RuleID, violation.RuleName, violation.Target, violation.Match})
 		// USK-829: mid-stream WS frame Drop. The protocol-correct
 		// terminator is a Close control frame, which HTTPMessage cannot
 		// express through the WS Send dispatch. Deferred to follow-up
@@ -203,11 +230,18 @@ func (s *SafetyStep) processGRPC(ctx context.Context, env *envelope.Envelope, ms
 		return Result{}
 	}
 
+	if s.logOnly {
+		vs := s.grpc.CheckInputAll(ctx, env, msg)
+		matches := make([]safetyMatch, 0, len(vs))
+		for _, v := range vs {
+			matches = append(matches, safetyMatch{v.RuleID, v.RuleName, v.Target, v.Match})
+		}
+		return s.observeAll(ctx, matches)
+	}
+
 	violation := s.grpc.CheckInput(ctx, env, msg)
 	if violation != nil {
-		if r, pass := s.observe(ctx, safetyMatch{violation.RuleID, violation.RuleName, violation.Target, violation.Match}); pass {
-			return r
-		}
+		s.logBlock(ctx, safetyMatch{violation.RuleID, violation.RuleName, violation.Target, violation.Match})
 		// USK-1202: native gRPC answers the client with grpc-status 7
 		// PERMISSION_DENIED (Trailers-Only, or trailers once response
 		// HEADERS were relayed) and the session then ends the RPC, so the
