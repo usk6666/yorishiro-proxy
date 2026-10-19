@@ -45,11 +45,12 @@ import (
 
 // cliExample is one `yorishiro-proxy client` command found in a document.
 type cliExample struct {
-	Source string   // document path as shown in test names
-	Line   int      // 1-based line where the command starts
-	Fenced bool     // found in a fenced code block (vs an inline code span)
-	Args   []string // shell words after "yorishiro-proxy client"
-	Err    error    // the command could not be tokenized / is not a client command
+	Source  string   // document path as shown in test names
+	Line    int      // 1-based line where the command starts
+	EndLine int      // 1-based last physical line of the command (== Line for inline spans)
+	Fenced  bool     // found in a fenced code block (vs an inline code span)
+	Args    []string // shell words after "yorishiro-proxy client"
+	Err     error    // the command could not be tokenized / is not a client command
 }
 
 func (ex cliExample) name() string { return fmt.Sprintf("%s:%d", ex.Source, ex.Line) }
@@ -79,18 +80,49 @@ func extractClientExamples(source, text string) []cliExample {
 		}
 
 		// Join backslash-continued physical lines into one logical command.
+		// As in bash, only an unescaped `\` that is the very last byte of
+		// the line continues it.
 		start := i
 		logical := lines[i]
-		for strings.HasSuffix(strings.TrimRight(logical, " \t"), `\`) && i+1 < len(lines) {
-			i++
-			logical = strings.TrimRight(logical, " \t") + "\n" + lines[i]
+		var joinErr error
+		for {
+			cur := lines[i]
+			if endsWithContinuation(cur) {
+				if i+1 >= len(lines) {
+					break // the tokenizer reports the trailing backslash
+				}
+				i++
+				logical += "\n" + lines[i]
+				continue
+			}
+			// `\` followed only by blanks is an escaped space in bash, not
+			// a continuation: the next line would run as its own command.
+			if trimmed := strings.TrimRight(cur, " \t"); trimmed != cur && endsWithContinuation(trimmed) {
+				joinErr = fmt.Errorf("line %d: `\\` followed by trailing whitespace is an escaped space in bash, not a line continuation", i+1)
+			}
+			break
 		}
 		if !strings.Contains(logical, clientCommandMarker) {
 			continue
 		}
-		out = append(out, parseClientCommand(source, start+1, true, logical))
+		ex := parseClientCommand(source, start+1, true, logical)
+		if joinErr != nil && ex.Err == nil {
+			ex.Args, ex.Err = nil, joinErr
+		}
+		ex.EndLine = i + 1
+		out = append(out, ex)
 	}
 	return out
+}
+
+// endsWithContinuation reports whether line ends in an unescaped backslash
+// (an odd number of trailing backslashes).
+func endsWithContinuation(line string) bool {
+	n := 0
+	for n < len(line) && line[len(line)-1-n] == '\\' {
+		n++
+	}
+	return n%2 == 1
 }
 
 func extractInlineExamples(source string, line int, text string) []cliExample {
@@ -111,7 +143,7 @@ func extractInlineExamples(source string, line int, text string) []cliExample {
 }
 
 func parseClientCommand(source string, line int, fenced bool, cmd string) cliExample {
-	ex := cliExample{Source: source, Line: line, Fenced: fenced}
+	ex := cliExample{Source: source, Line: line, EndLine: line, Fenced: fenced}
 	words, err := shellWords(cmd)
 	if err != nil {
 		ex.Err = fmt.Errorf("tokenize %q: %w", cmd, err)
@@ -188,13 +220,15 @@ func shellWords(s string) ([]string, error) {
 			i = j
 			inWord = true
 		case c == '#' && !inWord:
-			// Comment to end of line.
-			nl := strings.IndexByte(s[i:], '\n')
-			if nl < 0 {
-				i = len(s)
-			} else {
-				i += nl - 1
+			// A comment runs to end of line and swallows any trailing `\`,
+			// so it ends the command. Anything after it (only reachable via
+			// a joined continuation) would be a separate command in bash.
+			if nl := strings.IndexByte(s[i:], '\n'); nl >= 0 {
+				if rest := strings.TrimSpace(s[i+nl:]); rest != "" {
+					return nil, fmt.Errorf("comment ends the command, but %q follows it (a `\\` inside a comment is not a line continuation)", rest)
+				}
 			}
+			i = len(s)
 		case strings.IndexByte("$`|;&<>()*?[]{}~", c) >= 0:
 			return nil, fmt.Errorf("unsupported shell construct %q", c)
 		default:
@@ -415,6 +449,106 @@ func TestDocCLIExamples_NotVacuous(t *testing.T) {
 	}
 }
 
+// bareClientMention is the one prose form the extractor skips on purpose
+// ("the `yorishiro-proxy client` subcommand"); the sweep allows exactly it.
+const bareClientMention = "`" + clientCommandMarker + "`"
+
+var (
+	// splitMarkerHead / splitMarkerTail detect `yorishiro-proxy` ending a
+	// line (optionally followed by a `\` continuation) with `client` as the
+	// first word of the next line.
+	splitMarkerHead = regexp.MustCompile(`yorishiro-proxy[ \t]*\\?[ \t]*$`)
+	splitMarkerTail = regexp.MustCompile("^[ \t]*client([ \t`]|$)")
+)
+
+// uncoveredClientMentions is a fail-closed sweep, deliberately independent
+// of the extractor's fence and span logic: it returns the 1-based lines
+// that mention a `yorishiro-proxy client` command (including the form split
+// across a line break) more often than extracted examples account for.
+// A line inside a fenced example's range is covered; any other line needs
+// one inline example per mention. Shapes the extractor does not model —
+// indented code blocks, inline spans wrapping across lines, the split form
+// — therefore surface here instead of being silently skipped.
+func uncoveredClientMentions(text string, examples []cliExample) []int {
+	inFencedRange := map[int]bool{}
+	inlineAt := map[int]int{}
+	for _, ex := range examples {
+		if ex.Fenced {
+			for l := ex.Line; l <= ex.EndLine; l++ {
+				inFencedRange[l] = true
+			}
+		} else {
+			inlineAt[ex.Line]++
+		}
+	}
+
+	var out []int
+	lines := strings.Split(text, "\n")
+	for i, line := range lines {
+		mentions := strings.Count(strings.ReplaceAll(line, bareClientMention, ""), clientCommandMarker)
+		if splitMarkerHead.MatchString(line) && i+1 < len(lines) && splitMarkerTail.MatchString(lines[i+1]) {
+			mentions++
+		}
+		if mentions == 0 || inFencedRange[i+1] {
+			continue
+		}
+		if inlineAt[i+1] < mentions {
+			out = append(out, i+1)
+		}
+	}
+	return out
+}
+
+// TestDocCLIExamples_NoUncoveredMentions (T2b) runs the fail-closed sweep
+// over every guarded document: a mention the extractor did not turn into an
+// example is a hole in the guard, reported as file:line.
+func TestDocCLIExamples_NoUncoveredMentions(t *testing.T) {
+	docs := guardedDocs(t)
+	names := make([]string, 0, len(docs))
+	for name := range docs {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		text := readDoc(t, docs[name])
+		for _, line := range uncoveredClientMentions(text, extractClientExamples(name, text)) {
+			t.Errorf("%s:%d: mentions a `yorishiro-proxy client` command that the extractor did not pick up as an example (use a fenced block or a single-line inline code span)", name, line)
+		}
+	}
+}
+
+// TestUncoveredClientMentions pins the sweep with fixtures: each shape the
+// extractor skips must be flagged, and extracted examples plus the bare
+// subcommand mention must not be.
+func TestUncoveredClientMentions(t *testing.T) {
+	tests := []struct {
+		name string
+		doc  string
+		want []int
+	}{
+		{"indented code block", "Run:\n\n    yorishiro-proxy client query resource=flows\n", []int{3}},
+		{"inline span wrapping lines", "Use `yorishiro-proxy client query\nresource=flows` here.", []int{1}},
+		{"split across continuation in fence", "```bash\nyorishiro-proxy \\\n  client query resource=flows\n```", []int{2}},
+		{"split inline span", "Use `yorishiro-proxy\nclient query resource=flows`.", []int{1}},
+		{"second unquoted mention on a covered line", "`yorishiro-proxy client query flow A` or yorishiro-proxy client query flow B", []int{1}},
+		{"plain prose", "the yorishiro-proxy client subcommand", []int{1}},
+
+		{"bare subcommand mention", "All commands use the `yorishiro-proxy client` subcommand.", nil},
+		{"inline example", "Run `yorishiro-proxy client query flow ID` first.", nil},
+		{"two inline examples", "`yorishiro-proxy client query flow A` and `yorishiro-proxy client query flow B`", nil},
+		{"fenced continuation", "```bash\nyorishiro-proxy client query \\\n  resource=flows\n```", nil},
+		{"unrelated line ending in yorishiro-proxy", "npm i -g @usk6666/yorishiro-proxy\ncd yorishiro-proxy", nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := uncoveredClientMentions(tt.doc, extractClientExamples("fixture.md", tt.doc))
+			if fmt.Sprint(got) != fmt.Sprint(tt.want) {
+				t.Errorf("uncovered lines = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 // TestCheckClientExample_Controls (T3 + T4) pins the checker on both sides
 // with invented fixtures (they test the checker, not the docs): each
 // negative control is a real drift class that must be rejected, each
@@ -473,6 +607,47 @@ func TestCheckClientExample_Controls(t *testing.T) {
 	}
 }
 
+// TestExtractClientExamples_Continuation pins the extractor's `\`+newline
+// joining to bash: only an unescaped backslash that is the very last byte
+// of the line continues it. A backslash followed by trailing whitespace is
+// an escaped space in bash (the next line runs as a separate command), and
+// a comment swallows a trailing backslash; both must be reported, not
+// silently joined.
+func TestExtractClientExamples_Continuation(t *testing.T) {
+	tests := []struct {
+		name     string
+		doc      string
+		wantArgs []string // nil = want Err
+	}{
+		{"raw trailing backslash joins", "```bash\nyorishiro-proxy client query resource=flows \\\n  limit=5\n```", []string{"query", "resource=flows", "limit=5"}},
+		{"escaped backslash does not join", "```bash\nyorishiro-proxy client query resource=flows a\\\\\nlimit=5\n```", []string{"query", "resource=flows", `a\`}},
+		{"backslash then trailing space", "```bash\nyorishiro-proxy client query resource=flows \\ \n  limit=5\n```", nil},
+		{"backslash then trailing tab", "```bash\nyorishiro-proxy client query resource=flows \\\t\n  limit=5\n```", nil},
+		{"comment swallows continuation", "```bash\nyorishiro-proxy client query resource=flows # note \\\n  bogus=1\n```", nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			examples := extractClientExamples("fixture.md", tt.doc)
+			if len(examples) != 1 {
+				t.Fatalf("extracted %d examples from %q, want 1", len(examples), tt.doc)
+			}
+			ex := examples[0]
+			if tt.wantArgs == nil {
+				if ex.Err == nil {
+					t.Fatalf("want an error, got args %q", ex.Args)
+				}
+				return
+			}
+			if ex.Err != nil {
+				t.Fatalf("unexpected error: %v", ex.Err)
+			}
+			if strings.Join(ex.Args, "\x00") != strings.Join(tt.wantArgs, "\x00") || len(ex.Args) != len(tt.wantArgs) {
+				t.Errorf("args = %q, want %q", ex.Args, tt.wantArgs)
+			}
+		})
+	}
+}
+
 // TestShellWords (T5) pins the tokenizer to shell semantics, and that it
 // refuses constructs it does not model.
 func TestShellWords(t *testing.T) {
@@ -490,6 +665,10 @@ func TestShellWords(t *testing.T) {
 		{name: "quote idiom", in: `p='["'\'' OR 1"]'`, want: []string{`p=["' OR 1"]`}},
 		{name: "continuation across indented lines", in: "cmd a=1 \\\n    b=2 \\\n  c=3", want: []string{"cmd", "a=1", "b=2", "c=3"}},
 		{name: "comment", in: "cmd a # trailing", want: []string{"cmd", "a"}},
+		{name: "comment then trailing blank line", in: "cmd a # trailing\n  ", want: []string{"cmd", "a"}},
+		// In bash a comment swallows a trailing `\`, so the command ends at
+		// the comment; content joined after it would run as a new command.
+		{name: "comment swallows continuation", in: "cmd a # note \\\n  b=2", wantErr: true},
 		{name: "hash inside word", in: "a#b", want: []string{"a#b"}},
 		{name: "empty quoted word", in: "a ''", want: []string{"a", ""}},
 		{name: "dollar", in: "a $HOME", wantErr: true},
