@@ -618,3 +618,27 @@ func TestStreamMap_Retirement(t *testing.T) {
 		}
 	})
 }
+
+// TestStreamMap_LocalResetSetIsBounded pins the review S-1 memory bound: the
+// set of locally reset ids keeps only the most recent maxLocalResetIDs, so a
+// flood of refused or cancelled streams cannot grow it.
+func TestStreamMap_LocalResetSetIsBounded(t *testing.T) {
+	sm := NewStreamMap(65535, 65535)
+	const total = maxLocalResetIDs + 10
+	for i := uint32(0); i < total; i++ {
+		sm.NoteLocalReset(2*i + 1)
+		sm.NoteLocalReset(2*i + 1) // duplicates must not consume slots
+	}
+	if got := len(sm.localReset); got != maxLocalResetIDs {
+		t.Errorf("len(localReset) = %d, want %d", got, maxLocalResetIDs)
+	}
+	if sm.WasLocallyReset(1) {
+		t.Error("oldest id 1 still remembered after the bound was exceeded")
+	}
+	if last := uint32(2*(total-1) + 1); !sm.WasLocallyReset(last) {
+		t.Errorf("most recent id %d not remembered", last)
+	}
+	if sm.WasLocallyReset(2*total + 1) {
+		t.Error("id never reset reported as locally reset")
+	}
+}

@@ -81,7 +81,24 @@ type StreamMap struct {
 	// (USK-1144), so an absent id at or below its parity's high-water mark
 	// is closed rather than idle (RFC 9113 §5.1.1: ids are never reused).
 	highestID [2]uint32
+
+	// localReset / localResetRing remember the most recent stream ids this
+	// endpoint closed by sending RST_STREAM (NoteLocalReset), so a HEADERS
+	// the peer had already queued on such a stream is ignored as RFC 9113
+	// §5.1 requires rather than taken for stream-id reuse. Bounded by
+	// maxLocalResetIDs (oldest evicted first) so a flood of refused or
+	// cancelled streams cannot grow it.
+	localReset     map[uint32]struct{}
+	localResetRing []uint32
+	localResetNext int
 }
+
+// maxLocalResetIDs bounds the locally-reset id set. It is above twice the
+// default SETTINGS_MAX_CONCURRENT_STREAMS, so every stream that can be open
+// at once fits with room to spare; a peer that sends HEADERS on a reset
+// stream after over this many later resets gets the stream-id-reuse
+// connection error.
+const maxLocalResetIDs = 1024
 
 // NewStreamMap creates a new StreamMap with the given initial window sizes.
 func NewStreamMap(initialSendWindow, initialRecvWindow int32) *StreamMap {
@@ -208,6 +225,38 @@ func (sm *StreamMap) MarkSeen(id uint32) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 	sm.noteIDLocked(id)
+}
+
+// NoteLocalReset records that this endpoint closed id by sending
+// RST_STREAM. It must be called before the stream's entry is removed, so
+// that whenever IsClosed reports the id closed, WasLocallyReset already
+// reflects it.
+func (sm *StreamMap) NoteLocalReset(id uint32) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	if _, ok := sm.localReset[id]; ok {
+		return
+	}
+	if sm.localReset == nil {
+		sm.localReset = make(map[uint32]struct{})
+	}
+	if len(sm.localResetRing) < maxLocalResetIDs {
+		sm.localResetRing = append(sm.localResetRing, id)
+	} else {
+		delete(sm.localReset, sm.localResetRing[sm.localResetNext])
+		sm.localResetRing[sm.localResetNext] = id
+		sm.localResetNext = (sm.localResetNext + 1) % maxLocalResetIDs
+	}
+	sm.localReset[id] = struct{}{}
+}
+
+// WasLocallyReset reports whether id is among the most recent streams this
+// endpoint closed by sending RST_STREAM (see NoteLocalReset).
+func (sm *StreamMap) WasLocallyReset(id uint32) bool {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	_, ok := sm.localReset[id]
+	return ok
 }
 
 // IsClosed reports whether id refers to a stream that was used on this

@@ -215,6 +215,14 @@ func (l *Layer) handleWriteRST(req *writeRST) {
 		// The stream is closed once RST_STREAM is sent (RFC 9113 §5.1). A
 		// stream refused before it was registered has no entry and is
 		// left alone (USK-1144).
+		//
+		// A peer stream is noted as locally reset first — before
+		// retireOnSend removes its entry — so the reader, once it sees the
+		// stream closed, ignores the HEADERS (e.g. trailers) the peer had
+		// already queued instead of taking it for stream-id reuse.
+		if !l.isLocallyInitiated(req.streamID) {
+			l.conn.Streams().NoteLocalReset(req.streamID)
+		}
 		l.retireOnSend(req.streamID, EventSendRST)
 	}
 	deliverDone(req.done, err)

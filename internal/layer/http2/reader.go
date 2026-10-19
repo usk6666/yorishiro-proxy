@@ -231,8 +231,12 @@ func (l *Layer) handleStreamHeaders(f *frame.Frame) error {
 		// MarkSeen alone makes later frames on it closed-stream frames.
 		// Its header block is still decoded so the HPACK dynamic table
 		// stays in sync (RFC 9113 §4.3).
+		// NoteLocalReset: the refusal closes the stream from this
+		// endpoint's side, so the peer's already-queued trailers on it
+		// are ignored rather than taken for stream-id reuse.
 		if l.peerStreamLimitExceeded() {
 			l.conn.Streams().MarkSeen(f.Header.StreamID)
+			l.conn.Streams().NoteLocalReset(f.Header.StreamID)
 			l.enqueueWrite(writeRequest{rst: &writeRST{streamID: f.Header.StreamID, code: ErrCodeRefusedStream}})
 			return l.discardHeaderFragment(f.Header.StreamID, fragment, endHeaders)
 		}
@@ -278,16 +282,21 @@ func (l *Layer) finishHeaderFrame(streamID uint32, ch *channel, asm *eventAssemb
 // handleHeadersOnClosedStream handles a HEADERS frame on a stream that has
 // closed and been retired (USK-1144).
 //
-// A peer-initiated id: the peer is reusing a stream id, which RFC 9113
-// §5.1.1 makes a connection error PROTOCOL_ERROR — it must never open a new
-// stream.
+// A peer-initiated id this endpoint closed by sending RST_STREAM (consumer
+// Close → CANCEL, a body limit, REFUSED_STREAM): the peer may already have
+// queued more of its request (e.g. trailers), which RFC 9113 §5.1 says to
+// ignore. Any other peer-initiated id: the peer is reusing a stream id,
+// which RFC 9113 §5.1.1 makes a connection error PROTOCOL_ERROR — it must
+// never open a new stream.
 //
 // A locally initiated id: the stream closed because this endpoint reset it
 // (or the peer is misbehaving after END_STREAM); the peer may already have
-// queued its response, which RFC 9113 §5.1 says to ignore. The header block
-// is still decoded so the HPACK dynamic table stays in sync (§4.3).
+// queued its response, which RFC 9113 §5.1 says to ignore.
+//
+// An ignored header block is still decoded so the HPACK dynamic table stays
+// in sync (§4.3).
 func (l *Layer) handleHeadersOnClosedStream(streamID uint32, fragment []byte, endHeaders bool) error {
-	if !l.isLocallyInitiated(streamID) {
+	if !l.isLocallyInitiated(streamID) && !l.conn.Streams().WasLocallyReset(streamID) {
 		return &ConnError{
 			Code:   ErrCodeProtocol,
 			Reason: fmt.Sprintf("HEADERS on closed stream %d", streamID),
@@ -451,15 +460,16 @@ func (l *Layer) connWindowUpdate(n uint32) {
 
 func (l *Layer) handleStreamRST(f *frame.Frame) error {
 	streamID := f.Header.StreamID
-	known := l.conn.Streams().Get(streamID) != nil
-	code, err := l.conn.HandleRSTStream(f)
+	code, ignored, err := l.conn.HandleRSTStream(f)
 	if err != nil {
 		return err
 	}
-	if !known {
-		// RST_STREAM on a stream that already closed (USK-1144): permitted
-		// and ignored (RFC 9113 §5.1 "closed"). HandleRSTStream has already
-		// rejected one on an idle stream.
+	if ignored {
+		// RST_STREAM on a stream that had already closed (USK-1144),
+		// including one the writer retired concurrently: permitted and
+		// ignored (RFC 9113 §5.1 "closed"). Its Channel was already told
+		// how the stream ended, and recording a write reset now could
+		// outlive the Channel's release (nothing would ever prune it).
 		return nil
 	}
 	// The stream is closed now; retire it after the Channel is notified.

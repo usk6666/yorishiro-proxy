@@ -241,7 +241,9 @@ func TestLayer_ServerRole_LateWindowUpdateAndRSTOnClosedStream(t *testing.T) {
 	serveBodylessResponses(l)
 	roundTripBodylessGET(t, l, peer, 1, 1)
 	// Let the stream retire so the late frames hit the closed-stream path.
-	waitFor(time.Second, func() bool { return streamMapSize(l) == 0 })
+	if !waitFor(time.Second, func() bool { return streamMapSize(l) == 0 }) {
+		t.Fatalf("stream 1 not retired: len(StreamMap)=%d", streamMapSize(l))
+	}
 
 	if err := peer.wr.WriteWindowUpdate(1, 1024); err != nil {
 		t.Fatalf("write late WINDOW_UPDATE: %v", err)
@@ -310,7 +312,9 @@ func TestLayer_ServerRole_HeadersOnClosedPeerStreamIsConnectionError(t *testing.
 	}()
 
 	roundTripBodylessGET(t, l, peer, 1, 1)
-	waitFor(time.Second, func() bool { return streamMapSize(l) == 0 })
+	if !waitFor(time.Second, func() bool { return streamMapSize(l) == 0 }) {
+		t.Fatalf("stream not retired: len(StreamMap)=%d", streamMapSize(l))
+	}
 
 	if err := peer.wr.WriteHeaders(1, true, true, peer.encoder.Encode(usk1144RequestFields)); err != nil {
 		t.Fatalf("write HEADERS reusing stream 1: %v", err)
@@ -374,7 +378,9 @@ func TestLayer_ClientRole_LateDataAfterLocalResetKeepsConnection(t *testing.T) {
 	if rst.Header.StreamID != sid {
 		t.Fatalf("RST_STREAM on stream %d, want %d", rst.Header.StreamID, sid)
 	}
-	waitFor(time.Second, func() bool { return streamMapSize(l) == 0 })
+	if !waitFor(time.Second, func() bool { return streamMapSize(l) == 0 }) {
+		t.Fatalf("stream not retired: len(StreamMap)=%d", streamMapSize(l))
+	}
 
 	// The peer had already queued a response.
 	resp := peer.encoder.Encode([]hpack.HeaderField{{Name: ":status", Value: "200"}})
@@ -468,7 +474,9 @@ func TestLayer_ClientRole_LateHeadersAfterLocalResetKeepsHPACKInSync(t *testing.
 	ch1, sid1 := open("/1")
 	_ = ch1.Close()
 	drainUntil(t, peer, frame.TypeRSTStream)
-	waitFor(time.Second, func() bool { return streamMapSize(l) == 0 })
+	if !waitFor(time.Second, func() bool { return streamMapSize(l) == 0 }) {
+		t.Fatalf("stream not retired: len(StreamMap)=%d", streamMapSize(l))
+	}
 
 	// The late response inserts x-usk1144 into the peer encoder's dynamic
 	// table (incremental indexing); the next response references it.

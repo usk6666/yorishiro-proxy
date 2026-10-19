@@ -507,49 +507,50 @@ func (c *Conn) HandleWindowUpdate(f *frame.Frame) error {
 }
 
 // HandleRSTStream processes a received RST_STREAM frame.
-// It transitions the stream to the closed state.
-func (c *Conn) HandleRSTStream(f *frame.Frame) (uint32, error) {
+// It transitions the stream to the closed state. ignored reports that the
+// stream was already closed — retired (no entry, USK-1144) or in the closed
+// state — so the frame was permitted but changed nothing (RFC 9113 §5.1
+// "closed").
+func (c *Conn) HandleRSTStream(f *frame.Frame) (code uint32, ignored bool, err error) {
 	if f.Header.StreamID == 0 {
-		return 0, &ConnError{
+		return 0, false, &ConnError{
 			Code:   ErrCodeProtocol,
 			Reason: "RST_STREAM must not have stream ID 0",
 		}
 	}
 	errCode, err := f.RSTStreamErrorCode()
 	if err != nil {
-		return 0, &ConnError{
+		return 0, false, &ConnError{
 			Code:   ErrCodeProtocol,
 			Reason: fmt.Sprintf("invalid RST_STREAM: %v", err),
 		}
 	}
 
-	// RST_STREAM on an idle (unknown) stream is a connection error per RFC 9113 Section 6.4.
-	// A closed stream has no entry either (USK-1144); RST_STREAM on it is
-	// permitted (RFC 9113 §5.1 "closed") and needs no transition.
-	stream := c.streams.Get(f.Header.StreamID)
-	if stream == nil && c.streams.IsClosed(f.Header.StreamID) {
-		return errCode, nil
-	}
-	if stream == nil {
-		return 0, &ConnError{
-			Code:   ErrCodeProtocol,
-			Reason: fmt.Sprintf("RST_STREAM on idle stream %d", f.Header.StreamID),
-		}
-	}
-
-	// TransitionExisting, not Transition: the writer goroutine may retire
-	// the stream between the Get above and here, and an absent stream must
-	// not be re-created as idle.
-	if closed, transErr := c.streams.TransitionExisting(f.Header.StreamID, EventRecvRST); transErr != nil {
+	// One locked transition decides the outcome, so a stream the writer
+	// goroutine retires concurrently is reported as ignored rather than
+	// handled as live (and an absent stream is never re-created as idle).
+	closed, transErr := c.streams.TransitionExisting(f.Header.StreamID, EventRecvRST)
+	if transErr != nil {
 		// Per RFC 9113, RST_STREAM on a closed stream should be ignored
 		// to handle race conditions.
 		if closed {
-			return errCode, nil
+			return errCode, true, nil
 		}
-		return 0, transErr
+		return 0, false, transErr
 	}
-
-	return errCode, nil
+	if closed {
+		return errCode, false, nil
+	}
+	// No entry (RST always closes an existing stream). A closed stream has
+	// none either (USK-1144); RST_STREAM on it is permitted. RST_STREAM on
+	// an idle stream is a connection error per RFC 9113 Section 6.4.
+	if c.streams.IsClosed(f.Header.StreamID) {
+		return errCode, true, nil
+	}
+	return 0, false, &ConnError{
+		Code:   ErrCodeProtocol,
+		Reason: fmt.Sprintf("RST_STREAM on idle stream %d", f.Header.StreamID),
+	}
 }
 
 // HandleSettings processes a received SETTINGS frame (non-ACK).
