@@ -23,16 +23,17 @@
 //   - Opaque is nil (no layer-internal state to thread through; this is a
 //     proxy-generated envelope, not one captured from a wire parse).
 //
-// Mid-stream WS/gRPC paths intentionally do NOT use this helper — those
-// protocols need protocol-correct terminators (Close frame / trailers) that
-// HTTPMessage cannot express through the per-protocol Send dispatch. Those
-// paths remain at Result{Action: Drop} with TODO references to follow-up
-// Issues (D2-D5).
+// Mid-stream WS/gRPC paths do NOT use this helper — those protocols need
+// protocol-correct terminators that HTTPMessage cannot express through the
+// per-protocol Send dispatch. Native gRPC uses buildGRPCPolicyDropResponse
+// below (grpc-status 7 PERMISSION_DENIED, USK-1202). WebSocket (Close frame)
+// and gRPC-Web (USK-1220) still return Result{Action: Drop}.
 
 package pipeline
 
 import (
 	"encoding/json"
+	"strings"
 
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 )
@@ -112,4 +113,69 @@ func policyDropBody(reason string, matchedRules []string) []byte {
 		return []byte(`{"error":"blocked by ` + reason + `","blocked_by":"` + reason + `"}`)
 	}
 	return b
+}
+
+// grpcStatusPermissionDenied is gRPC status code 7 PERMISSION_DENIED — the
+// code gRPC's HTTP-to-gRPC status mapping assigns to HTTP 403, so a policy
+// block reads the same on both protocols. grpc-go does not retry it by
+// default (unlike UNAVAILABLE / REFUSED_STREAM, which would re-send the
+// blocked payload).
+const grpcStatusPermissionDenied = 7
+
+// buildGRPCPolicyDropResponse synthesizes the native-gRPC counterpart of
+// buildPolicyDropResponse (USK-1202): a Receive-direction GRPCEndMessage with
+// grpc-status 7 PERMISSION_DENIED for a blocked Send-direction native-gRPC
+// Start or Data envelope. The client Channel (internal/layer/grpc) renders it
+// as a Trailers-Only response when no response HEADERS were relayed yet, or
+// as trailers otherwise; the session ends the RPC once it is delivered.
+//
+// Shape, kept parallel to the HTTP 403:
+//
+//	grpc-message: blocked by <reason>          (HTTP body "error")
+//	server: yorishiro-proxy                    (HTTP Server header)
+//	x-yorishiro-matched-rules: <id>[,<id>...]  (HTTP body "matched_rules"; omitted when empty)
+//
+// Identity mirrors buildPolicyDropResponse / buildRespondEnvelope: same
+// StreamID/FlowID/Context/Protocol, Sequence+1, Direction Receive. Raw is nil
+// — gRPC End is HPACK-owned and the Layer regenerates the wire form from
+// Message. env and its Message are not mutated.
+func buildGRPCPolicyDropResponse(env *envelope.Envelope, reason string, matchedRules []string) *envelope.Envelope {
+	trailers := []envelope.KeyValue{
+		{Name: "server", Value: "yorishiro-proxy"},
+	}
+	if len(matchedRules) > 0 {
+		trailers = append(trailers, envelope.KeyValue{
+			Name:  "x-yorishiro-matched-rules",
+			Value: strings.Join(matchedRules, ","),
+		})
+	}
+	return &envelope.Envelope{
+		StreamID:  env.StreamID,
+		FlowID:    env.FlowID,
+		Sequence:  env.Sequence + 1,
+		Direction: envelope.Receive,
+		Protocol:  env.Protocol,
+		Context:   env.Context,
+		Message: &envelope.GRPCEndMessage{
+			Status:   grpcStatusPermissionDenied,
+			Message:  "blocked by " + reason,
+			Trailers: trailers,
+		},
+	}
+}
+
+// grpcPolicyDropResult returns the Result a policy Step emits when it blocks
+// a Send-direction gRPC envelope. Native gRPC gets the Respond terminator
+// above; everything else (gRPC-Web — see USK-1220) keeps plain Drop until it
+// has a protocol-correct terminator of its own.
+func grpcPolicyDropResult(env *envelope.Envelope, reason string, matchedRules []string) Result {
+	if env.Protocol == envelope.ProtocolGRPC && env.Direction == envelope.Send {
+		return Result{
+			Action:    Respond,
+			Response:  buildGRPCPolicyDropResponse(env, reason, matchedRules),
+			BlockedBy: reason,
+		}
+	}
+	// gRPC-Web: see USK-1220.
+	return Result{Action: Drop, BlockedBy: reason}
 }

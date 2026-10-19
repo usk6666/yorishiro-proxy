@@ -584,6 +584,12 @@ func RunSession(ctx context.Context, client layer.Channel, dial DialFunc, p *pip
 	})
 
 	result := g.Wait()
+	// USK-1202: the proxy itself ended the RPC with a delivered gRPC
+	// terminator. That is a clean end of the session, not a failure; the
+	// sentinel only existed to drive the cascade-close in clientToUpstream.
+	if errors.Is(result, errRPCTerminatedByProxy) {
+		result = nil
+	}
 	upstreamRefused = result != nil && uh.refused()
 
 	// On upgrade, expose the still-live upstream Channel via the session's
@@ -2610,6 +2616,31 @@ func upgradeExitOrErr(notice *UpgradeNotice, err error) error {
 	return err
 }
 
+// errRPCTerminatedByProxy is returned by dispatchClientAction (and so by
+// clientToUpstream) after a Respond carrying a native-gRPC GRPCEndMessage
+// was delivered to the client (a SafetyFilter / intercept-drop terminator,
+// or a plugin RESPOND_GRPC). The
+// End closed the client's side of the RPC, so nothing the client sends after
+// it may reach the upstream, and the upstream stream — if one was dialed —
+// must be torn down instead of left half-open. Returning a non-nil error
+// reuses the existing teardown: clientToUpstream's cascade defer closes the
+// upstream (RST_STREAM(CANCEL) when open) and the errgroup cancels its ctx so
+// upstreamToClient unblocks. RunSession maps it back to nil before OnComplete
+// and return, so the session reports a clean end (USK-1202).
+var errRPCTerminatedByProxy = errors.New("session: RPC terminated by proxy response")
+
+// endsRPC reports whether a Respond envelope terminates a native-gRPC RPC.
+// HTTP Respond keeps the session open (HTTP/1.x keep-alive carries the next
+// request on the same Channel). gRPC-Web is excluded until it has its own
+// terminator design (USK-1220).
+func endsRPC(resp *envelope.Envelope) bool {
+	if resp == nil || resp.Protocol != envelope.ProtocolGRPC {
+		return false
+	}
+	_, ok := resp.Message.(*envelope.GRPCEndMessage)
+	return ok
+}
+
 // clientToUpstream reads Envelopes from the client, runs them through the
 // Pipeline, and forwards them to the upstream Channel. It creates the upstream
 // Channel lazily on the first forwarded Envelope and signals uh.ready.
@@ -2723,10 +2754,11 @@ func clientToUpstream(
 // also handles the lazy dial-and-publish on first forwarded envelope.
 //
 // Returning a non-nil error terminates clientToUpstream; returning nil
-// loops to the next iteration. The "should I exit for upgrade?" check
-// stays in the caller because it must run AFTER this returns nil so the
-// final envelope (the WS upgrade request) reaches upstream first
-// (Friction 2-C).
+// loops to the next iteration. A delivered native-gRPC End terminator
+// returns errRPCTerminatedByProxy so the RPC ends there (USK-1202). The
+// "should I exit for upgrade?" check stays in the caller because it must
+// run AFTER this returns nil so the final envelope (the WS upgrade request)
+// reaches upstream first (Friction 2-C).
 //
 // USK-860: forwarded reports whether the envelope was actually sent
 // upstream (action == Continue and uh.ch.Send succeeded). The caller
@@ -2750,6 +2782,9 @@ func dispatchClientAction(
 	case pipeline.Respond:
 		if serr := client.Send(ctx, resp); serr != nil {
 			return false, fmt.Errorf("client.Send (respond): %w", serr)
+		}
+		if endsRPC(resp) {
+			return false, errRPCTerminatedByProxy
 		}
 		return false, nil
 	}

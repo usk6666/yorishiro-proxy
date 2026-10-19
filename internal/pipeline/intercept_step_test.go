@@ -957,8 +957,19 @@ func TestInterceptStep_ModifyAndForward_SafetyRecheck_GRPCData(t *testing.T) {
 	})
 
 	result := step.Process(context.Background(), env)
-	if result.Action != Drop {
-		t.Errorf("GRPC_SafetyRecheck: got action %v, want Drop", result.Action)
+	// USK-1202: the safety re-check forwards SafetyStep's native-gRPC
+	// terminator (Respond + GRPCEnd PERMISSION_DENIED) verbatim.
+	if result.Action != Respond {
+		t.Errorf("GRPC_SafetyRecheck: got action %v, want Respond", result.Action)
+	}
+	if result.BlockedBy != BlockedBySafetyFilter {
+		t.Errorf("GRPC_SafetyRecheck: BlockedBy = %q, want %q", result.BlockedBy, BlockedBySafetyFilter)
+	}
+	if result.Response == nil {
+		t.Fatal("GRPC_SafetyRecheck: Response is nil")
+	}
+	if end, ok := result.Response.Message.(*envelope.GRPCEndMessage); !ok || end.Status != 7 {
+		t.Errorf("GRPC_SafetyRecheck: Response.Message = %#v, want GRPCEnd status 7", result.Response.Message)
 	}
 }
 
