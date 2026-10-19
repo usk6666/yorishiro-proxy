@@ -283,15 +283,13 @@ func extractTarget(target common.Target, msg envelope.Message) (data, name strin
 		// nothing at all), and closing it needs parseGRPCPath, which is
 		// unexported in internal/layer/grpc.
 		//
-		// Known residual (gRPC-Web; no Issue filed yet):
-		// layer/grpcweb.applyRequestOverlay copies Authority / Scheme /
-		// Path onto the Start but never RawQuery — the identifier appears
-		// nowhere in internal/layer/grpcweb — so on gRPC-Web traffic the
-		// query target is inert and the url target carries no query.
-		// Currently harmless rather than a bypass: the gRPC-Web Send path
-		// rebuilds msg.Path from Service/Method, dropping the query
-		// before it reaches upstream, so the unscanned bytes are also
-		// never forwarded.
+		// gRPC-Web (USK-1110): layer/grpcweb.applyRequestOverlay copies
+		// RawQuery onto the Start alongside Authority / Scheme / Path,
+		// and the gRPC-Web Send path forwards it to the upstream (it no
+		// longer rebuilds the request path without the query). The query
+		// and url targets are therefore live on gRPC-Web traffic and scan
+		// the same raw query bytes the upstream receives, as rules/http
+		// does for HTTP.
 		case common.TargetURL:
 			return reconstructURL(m), "url"
 		case common.TargetQuery:

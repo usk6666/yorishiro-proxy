@@ -99,10 +99,16 @@ func reconstructURLDecodedPath(msg *envelope.GRPCStartMessage) string {
 	return buildURLString(msg, envelope.LenientDecodePath(startPath(msg)))
 }
 
-// splitServiceMethod splits a "/Service/Method" path at its last '/',
-// mirroring layer/grpcweb.parseServiceMethod (which derives the Start's
-// Service / Method from the wire :path). ok is false for a path with no
+// splitServiceMethod splits a "/Service/Method" path at its last '/', the
+// same split layer/grpcweb.parseServiceMethod uses to derive the Start's
+// Service / Method from the wire :path. ok is false for a path with no
 // separator or an empty service / method.
+//
+// Deliberately more tolerant than parseServiceMethod, which since USK-1069
+// requires a leading "/": this helper only feeds the SafetyFilter's
+// decoded service / method forms (scan-only), where accepting a missing
+// leading "/" produces an extra candidate to match — failing closed — and
+// never changes what reaches the wire.
 func splitServiceMethod(path string) (service, method string, ok bool) {
 	p := strings.TrimPrefix(path, "/")
 	idx := strings.LastIndex(p, "/")

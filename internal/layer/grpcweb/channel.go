@@ -503,7 +503,8 @@ func (c *channel) refillFromHTTPMessage(ctx context.Context, env *envelope.Envel
 }
 
 // applyRequestOverlay projects the request-side pseudo-headers
-// (:authority / :scheme / :path) from the inbound HTTPMessage onto the
+// (:authority / :scheme / :path, plus the query split off :path) from the
+// inbound HTTPMessage onto the
 // derived L7 overlay of the GRPCStartMessage, mirroring the USK-920
 // projection that internal/layer/grpc.buildStartMessage performs for
 // native gRPC.
@@ -534,6 +535,10 @@ func applyRequestOverlay(start *envelope.GRPCStartMessage, msg *envelope.HTTPMes
 	start.Authority = msg.Authority
 	start.Scheme = msg.Scheme
 	start.Path = msg.Path
+	// USK-1110: the query component has its home on the Start (USK-1053),
+	// so it reaches the upstream, Flow.URL, and the Input SafetyFilter's
+	// url / query targets.
+	start.RawQuery = msg.RawQuery
 }
 
 // classifyParseError maps a DecodeBody error to a recoverable Anomaly type.
@@ -1187,8 +1192,8 @@ func encodeTrailerPayload(end *envelope.GRPCEndMessage) []byte {
 }
 
 // buildHTTPMessage reconstructs an outbound HTTPMessage for inner.Send. The
-// request side (Send-side from the caller's perspective) sets Method=POST
-// and Path=/Service/Method per gRPC-Web convention, and carries the
+// request side (Send-side from the caller's perspective) sets Method=POST,
+// resolves Path with pathForStart, carries RawQuery, and carries the
 // wire-observed :authority / :scheme forward from the Start message's
 // derived L7 overlay (USK-1057). The response side keeps
 // Status/StatusReason from the original Receive-side context envelope when
@@ -1213,9 +1218,14 @@ func buildHTTPMessage(
 	case envelope.Send:
 		// Request side: assemble path + method.
 		msg.Method = "POST"
-		if start.Service != "" || start.Method != "" {
-			msg.Path = "/" + start.Service + "/" + start.Method
-		}
+		// USK-1069 / USK-1110: the observed :path wins when the derived
+		// Service/Method view cannot represent it (pathForStart), and the
+		// query string rides along on RawQuery — the inner HTTP Layer
+		// rejoins it (http1 sendRequestSynthetic, http2
+		// appendRequestPseudoHeaders). Joining here would make a later
+		// parseServiceMethod read the query as part of the method name.
+		msg.Path = pathForStart(start)
+		msg.RawQuery = start.RawQuery
 		// USK-1057: :authority and :scheme come from the derived L7 overlay
 		// only — the fields refillFromHTTPMessage projects from the
 		// wire-observed request (applyRequestOverlay). There is deliberately
