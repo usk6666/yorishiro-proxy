@@ -211,25 +211,37 @@ func (d *pluginDispatcher) dispatch(ctx context.Context, env *envelope.Envelope,
 // applyMutation produces the envelope to feed to the next hook (or
 // downstream Steps) given a CONTINUE outcome.
 //
-// The wireEncodedState carried in ctx is updated to reflect the
-// post-mutation relationship between Raw and Message:
+// RFC §9.3 D4 "raw wins" is carried on the envelope itself
+// (Envelope.RawAuthoritative) so the Layer that writes the wire sees it
+// (USK-1079); the ctx-scoped wireEncodedState only tracks the USK-684
+// Encoded dedup flag:
 //
-//   - Unchanged: leave both flags as-is (the prior chain step's truth
-//     still holds — Raw and Message are unchanged).
-//   - RawOnly / Both: mark RawAuthoritative (RFC §9.3 D4: Raw is
-//     user-verbatim; encoder must NOT overwrite it on the modified-variant
-//     record path).
-//   - MessageOnly: delegate to regenerateRaw, which sets Encoded on
-//     success or clears both flags on fail-soft / partial / error.
+//   - Unchanged: leave env and the Encoded flag as-is (the prior chain
+//     step's truth still holds — Raw and Message are unchanged).
+//   - RawOnly / Both: mark the envelope RawAuthoritative and clear
+//     Encoded (Raw is user-verbatim, not encoder output). RawBuffer is
+//     dropped: the plugin's bytes are the complete wire message, and a
+//     disk-spilled body must not be stitched after them by WireBytes. The
+//     session refcount backstop tracks the input envelope's RawBuffer, so
+//     dropping the reference here does not leak it.
+//   - MessageOnly: the Message is now the last writer, so the raw-wins
+//     marker of an earlier hook is cleared; regenerateRaw then sets
+//     Encoded on success or clears it on fail-soft / partial / error.
 func (d *pluginDispatcher) applyMutation(ctx context.Context, env *envelope.Envelope, outcome *pluginv2.HookOutcome) *envelope.Envelope {
 	switch outcome.Mutation {
 	case pluginv2.MutationUnchanged:
 		return env
-	case pluginv2.MutationRawOnly:
-		// New raw bytes; original Message aliased. Raw wins per D4.
-		markRawAuthoritative(ctx)
+	case pluginv2.MutationRawOnly, pluginv2.MutationBoth:
+		// RawOnly: new raw bytes, original Message aliased. Both: the new
+		// Message is propagated for variant recording and downstream typed
+		// inspection but does NOT drive wire bytes. Either way Raw wins
+		// per D4: the Layer writes it verbatim and RecordStep must not
+		// run the encoder over it (USK-686).
+		clearWireEncoded(ctx)
 		next := *env
 		next.Raw = outcome.NewRaw
+		next.RawBuffer = nil
+		next.RawAuthoritative = true
 		next.Message = outcome.NewMessage
 		return &next
 	case pluginv2.MutationMessageOnly:
@@ -238,18 +250,8 @@ func (d *pluginDispatcher) applyMutation(ctx context.Context, env *envelope.Enve
 		// Raw, log Debug, variant snapshot still records the divergence).
 		next := *env
 		next.Message = outcome.NewMessage
+		next.RawAuthoritative = false
 		next.Raw = d.regenerateRaw(ctx, &next, env.Raw)
-		return &next
-	case pluginv2.MutationBoth:
-		// "Raw wins" per RFC §9.3 D4: ship new Raw verbatim; new Message
-		// is propagated for variant recording and downstream typed
-		// inspection but does NOT drive wire bytes. RecordStep must skip
-		// the encoder so the user's bytes survive into the modified-variant
-		// record (USK-686).
-		markRawAuthoritative(ctx)
-		next := *env
-		next.Raw = outcome.NewRaw
-		next.Message = outcome.NewMessage
 		return &next
 	default:
 		return env

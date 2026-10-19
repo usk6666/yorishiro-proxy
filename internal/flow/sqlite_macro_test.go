@@ -187,7 +187,9 @@ func TestSaveMacro_EmptyDescription(t *testing.T) {
 
 func TestMacroTableSurvivesMigration(t *testing.T) {
 	t.Parallel()
-	// Tests that the macros table exists after V2 migration.
+	// Tests that the macros table exists after V2 migration. newTestStore
+	// copies a template built by the full migration chain (its schema
+	// equivalence is pinned by TestTemplateStore_SchemaMatchesMigrationChain).
 	store := newTestStore(t)
 	ctx := context.Background()
 

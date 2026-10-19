@@ -155,14 +155,16 @@ func buildFlakyChainWithMetrics(
 
 	envCtx := envelope.EnvelopeContext{ConnID: "test-conn-999", TargetHost: s.addr}
 	initial := http1.New(flaky, "stream-999", envelope.Receive,
+		http1.WithScheme("https"),
 		http1.WithEnvelopeContext(envCtx),
 	)
 	t.Cleanup(func() { _ = initial.Close() })
 
 	// BuildConfig for redial — TLS upstream with InsecureSkipVerify
-	// (self-signed cert in tests). RedialUpstreamH1 always dials TLS;
-	// the test's dummy upstream terminates TLS to match production
-	// CONNECT-MITM shape.
+	// (self-signed cert in tests). RedialUpstreamH1 redials over the
+	// stale Layer's transport (TLS for scheme="https", as the initial
+	// Layer above declares); the test's dummy upstream terminates TLS to
+	// match production CONNECT-MITM shape.
 	cfg := &connector.BuildConfig{InsecureSkipVerify: true}
 
 	chain := newH1Chain(initial, s.addr, cfg, nil, metrics)

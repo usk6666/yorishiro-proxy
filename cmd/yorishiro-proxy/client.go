@@ -175,12 +175,15 @@ Parameters (key=value or --key=value):
   tls_fingerprint=<prof>   Informational v1; per-call selection deferred
   tag=<tag>                Tag stored on the new flow's Tags map
 
-Note: headers ([{name, value}] ordered list) and body_patches require JSON input — use the MCP
-      client (or pass the parameter as a JSON string) for full structured definitions.
+  headers=<json>           Ordered [{name, value}] list as a JSON array. A FULL replacement of the
+                           recorded headers (wire case, order and duplicates preserved), not a merge
+  body_patches=<json>      JSON array of {json_path, value} or {regex, replace} patches
 
 Examples:
   yorishiro-proxy client resend_http flow_id=abc123
   yorishiro-proxy client resend_http flow_id=abc123 method=POST body='{"x":1}' body_encoding=text
+  yorishiro-proxy client resend_http flow_id=abc123 headers='[{"name":"Host","value":"example.com"},{"name":"Authorization","value":"Bearer X"}]'
+  yorishiro-proxy client resend_http flow_id=abc123 body_patches='[{"regex":"role=user","replace":"role=admin"}]'
   yorishiro-proxy client resend_http method=GET scheme=https authority=example.com path=/api
 
 Full reference (no server required): yorishiro-proxy docs resend_http`,
@@ -227,12 +230,12 @@ Parameters (key=value or --key=value):
   tls_fingerprint=<prof>   Informational v1; per-call selection deferred
   tag=<tag>                Tag stored on the new flow's Tags map
 
-Note: messages ([{payload, body_encoding, compressed}]) and metadata / trailer_metadata
-      ([{name, value}] lists) require JSON input — use the MCP client for full definitions.
-      messages requires at least one element.
+  messages=<json>          JSON array of {payload, body_encoding, compressed}; at least one element
+  metadata=<json>          JSON array of {name, value} (also trailer_metadata=<json>)
 
 Examples:
   yorishiro-proxy client resend_grpc flow_id=abc123
+  yorishiro-proxy client resend_grpc flow_id=abc123 messages='[{"payload":"hello"}]' metadata='[{"name":"authorization","value":"Bearer X"}]'
   yorishiro-proxy client resend_grpc target_addr=127.0.0.1:50051 service=pkg.Greeter method=SayHello
 
 Full reference (no server required): yorishiro-proxy docs resend_grpc`,
@@ -252,12 +255,14 @@ Parameters (key=value or --key=value):
   timeout_ms=<n>                     Per-call timeout in milliseconds (default: 30000)
   tag=<tag>                          Tag stored on the new flow's Tags map
 
-Note: patches ([{offset, data, data_encoding}]) requires JSON input — use the MCP client
-      for full definitions. Wire bytes are NEVER normalized — they reach the wire verbatim,
-      making this the smuggling/anomaly-test surface.
+  patches=<json>                     JSON array of {offset, data, data_encoding}
+
+Note: Wire bytes are NEVER normalized — they reach the wire verbatim, making this the
+      smuggling/anomaly-test surface.
 
 Examples:
   yorishiro-proxy client resend_raw flow_id=abc123 target_addr=127.0.0.1:8080
+  yorishiro-proxy client resend_raw flow_id=abc123 target_addr=127.0.0.1:8080 patches='[{"offset":0,"data":"POST"}]'
   yorishiro-proxy client resend_raw flow_id=abc123 target_addr=example.com:443 use_tls=true
 
 Full reference (no server required): yorishiro-proxy docs resend_raw`,
@@ -359,13 +364,17 @@ Parameters (key=value or --key=value):
   stop_on_5xx=<bool>       Abort remaining variants once a variant returns 5xx
   tag=<tag>                Tag stored on every variant Stream's Tags map
 
-Note: positions[] is REQUIRED — each is {path, payloads[], encoding}. Supported paths:
-      method | scheme | authority | path | raw_query | body | headers[N].name | headers[N].value
-      Use JSON input or MCP client for the positions / headers / body_patches arrays.
+  positions=<json>         REQUIRED JSON array of {path, payloads[], encoding}. Supported paths:
+                           method | scheme | authority | path | raw_query | body |
+                           headers[N].name | headers[N].value
+  headers=<json>           Base [{name, value}] list (full replacement); body_patches=<json> as resend_http
+  post_macro.name=<macro>  Post-variant macro hook (also pre_macro.*), e.g.
+                           post_macro.run_interval=on_status post_macro.status_codes=200,302
 
 Examples:
-  yorishiro-proxy client fuzz_http flow_id=abc123  (positions supplied via JSON)
-  yorishiro-proxy client fuzz_http flow_id=abc123 stop_on_5xx=true tag=path-fuzz
+  yorishiro-proxy client fuzz_http flow_id=abc123 positions='[{"path":"raw_query","payloads":["test1","test2"]}]'
+  yorishiro-proxy client fuzz_http flow_id=abc123 stop_on_5xx=true tag=path-fuzz positions='[{"path":"path","payloads":["/admin","/debug"]}]'
+  yorishiro-proxy client fuzz_http flow_id=abc123 positions='[{"path":"body","payloads":["'\''"]}]'  (a lone ' payload)
 
 Full reference (no server required): yorishiro-proxy docs fuzz_http`,
 
@@ -392,11 +401,11 @@ Parameters (key=value or --key=value):
   stop_on_close=<bool>     Abort remaining variants once a variant receives a Close frame
   tag=<tag>                Tag stored on every variant Stream's Tags map
 
-Note: positions[] is REQUIRED — each is {path, payloads[], encoding}. Supported paths:
-      payload | close_reason. Use JSON input or MCP client for the positions array.
+  positions=<json>         REQUIRED JSON array of {path, payloads[], encoding}. Supported paths:
+                           payload | close_reason
 
 Examples:
-  yorishiro-proxy client fuzz_ws flow_id=abc123 opcode=text  (positions supplied via JSON)
+  yorishiro-proxy client fuzz_ws flow_id=abc123 opcode=text positions='[{"path":"payload","payloads":["a","b"]}]'
 
 Full reference (no server required): yorishiro-proxy docs fuzz_ws`,
 
@@ -415,13 +424,13 @@ Parameters (key=value or --key=value):
   stop_on_non_ok=<bool>    Abort remaining variants on first non-OK gRPC status
   tag=<tag>                Tag stored on every variant Stream's Tags map
 
-Note: positions[] is REQUIRED — each is {path, payloads[], encoding}. Supported paths:
-      service | method | metadata[N].name | metadata[N].value | messages[N].payload
-      messages / metadata / trailer_metadata / positions arrays require JSON input —
-      use the MCP client for full definitions. messages requires at least one element.
+  positions=<json>         REQUIRED JSON array of {path, payloads[], encoding}. Supported paths:
+                           service | method | metadata[N].name | metadata[N].value | messages[N].payload
+  messages=<json>          Base JSON array of {payload, body_encoding, compressed} (at least one element);
+                           metadata=<json> / trailer_metadata=<json> are [{name, value}] arrays
 
 Examples:
-  yorishiro-proxy client fuzz_grpc flow_id=abc123  (positions supplied via JSON)
+  yorishiro-proxy client fuzz_grpc flow_id=abc123 messages='[{"payload":"hello"}]' positions='[{"path":"method","payloads":["SayHello","Admin"]}]'
 
 Full reference (no server required): yorishiro-proxy docs fuzz_grpc`,
 
@@ -441,13 +450,14 @@ Parameters (key=value or --key=value):
   stop_on_error=<bool>               Abort remaining variants on first failure (network error, timeout, drop)
   tag=<tag>                          Tag stored on every variant Stream's Tags map
 
-Note: positions[] is REQUIRED — each is {path, payloads[], encoding}. Supported paths:
-      payload | patches[N].data. patches[] (the base) and positions[] arrays require JSON
-      input — use the MCP client for full definitions.
-      Wire bytes are NEVER normalized — they reach the wire verbatim.
+  positions=<json>                   REQUIRED JSON array of {path, payloads[], encoding}. Supported
+                                     paths: payload | patches[N].data
+  patches=<json>                     Base JSON array of {offset, data, data_encoding}
+
+Note: Wire bytes are NEVER normalized — they reach the wire verbatim.
 
 Examples:
-  yorishiro-proxy client fuzz_raw flow_id=abc123 target_addr=127.0.0.1:8080  (positions via JSON)
+  yorishiro-proxy client fuzz_raw flow_id=abc123 target_addr=127.0.0.1:8080 positions='[{"path":"payload","payloads":["GET / HTTP/1.1\r\n\r\n"]}]'
 
 Full reference (no server required): yorishiro-proxy docs fuzz_raw`,
 
@@ -618,6 +628,16 @@ func printClientUsage(w io.Writer) {
 	fmt.Fprintf(w, "  -q, --quiet               Suppress output on success (for scripting)\n\n")
 	fmt.Fprintf(w, "Tool parameters are passed as key=value pairs:\n")
 	fmt.Fprintf(w, "  yorishiro-proxy client query resource=flows limit=10\n\n")
+	fmt.Fprintf(w, "Values are converted using the tool's input schema:\n")
+	fmt.Fprintf(w, "  - Arrays of scalars are comma-separated; single quotes keep a comma, '' is a literal quote:\n")
+	fmt.Fprintf(w, "      fields=id,method   post_macro.status_codes=200,302 (sent as integers)\n")
+	fmt.Fprintf(w, "  - Dotted keys nest to any depth; a map key is one segment (a map of strings keeps the rest):\n")
+	fmt.Fprintf(w, "      intercept_queue.protocol_overrides.http.timeout_ms=5000   post_macro.vars.user.id=admin\n")
+	fmt.Fprintf(w, "  - Object parameters and arrays of objects take a JSON value (quote it for the shell):\n")
+	fmt.Fprintf(w, "      positions='[{\"path\":\"raw_query\",\"payloads\":[\"a\",\"b\"]}]'\n")
+	fmt.Fprintf(w, "      A ' inside the JSON is written '\\'' in a single-quoted shell string.\n")
+	fmt.Fprintf(w, "  - key:=<json> sends any JSON value as-is, at any path (e.g. a null, or a JSON-literal array):\n")
+	fmt.Fprintf(w, "      intercept_queue.protocol_overrides.http:=null   fields:='[\"a,b\"]'\n\n")
 	fmt.Fprintf(w, "Run 'yorishiro-proxy client <tool> --help' for tool-specific parameters.\n")
 	fmt.Fprintf(w, "\nFull documentation, without a running server:\n")
 	fmt.Fprintf(w, "  yorishiro-proxy docs                     List every documentation topic\n")
