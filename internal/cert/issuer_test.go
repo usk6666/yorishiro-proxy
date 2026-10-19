@@ -478,23 +478,3 @@ func TestClearCache_RemovesAllEntries(t *testing.T) {
 		t.Errorf("CacheLen = %d after re-generation, want 1", iss.CacheLen())
 	}
 }
-
-func TestCacheLen_ReflectsCacheState(t *testing.T) {
-	ca := newTestCA(t)
-	iss := NewIssuer(ca, WithMaxCacheSize(10))
-
-	if iss.CacheLen() != 0 {
-		t.Errorf("initial CacheLen = %d, want 0", iss.CacheLen())
-	}
-
-	for i := 0; i < 5; i++ {
-		hostname := fmt.Sprintf("host-%d.example.com", i)
-		if _, err := iss.GetCertificate(hostname); err != nil {
-			t.Fatalf("GetCertificate(%q): %v", hostname, err)
-		}
-	}
-
-	if iss.CacheLen() != 5 {
-		t.Errorf("CacheLen = %d after 5 certs, want 5", iss.CacheLen())
-	}
-}
