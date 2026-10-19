@@ -404,7 +404,7 @@ It bounds, per client connection:
 - the client-side TLS MITM handshake;
 - the plain-HTTP forward target peek and the CONNECT / SOCKS5 inner first-byte peek.
 
-The request body is not covered. A client that misses the deadline is disconnected without a response. When this happens to an HTTP/1.x request head after some of it arrived, the flow is recorded with `state: "error"`, `failure_reason: "request_head_timeout"` and the received bytes (see `query`); a CONNECT request, TLS handshake or forward-peek timeout is not recorded yet. Separately, an idle client keep-alive connection (no byte of the next request) is closed after 120 seconds, or after `request_timeout_ms` if that is longer. Changes apply to the next request / next connection.
+The request body is not covered. A client that misses the deadline is disconnected — without a response, except the plain-HTTP forward target peek, which answers `400 Bad Request`. These closes are recorded with `state: "error"` (see `query`): an HTTP/1.x request head or forward-peek that had received some bytes as `failure_reason: "request_head_timeout"` with the received bytes (and the 400, for the forward peek), a `CONNECT` request that had received some bytes as `connect_request_timeout`, and a TLS MITM handshake as `client_tls_error` with `tags.phase = "tls_handshake"` and `tags.timeout = "request_timeout"`. The CONNECT / SOCKS5 inner first-byte peek is not recorded. Separately, an idle client keep-alive connection (no byte of the next request) is closed after 120 seconds, or after `request_timeout_ms` if that is longer. Changes apply to the next request / next connection.
 
 ### client_cert (object, optional)
 Global mTLS client certificate configuration for upstream connections.

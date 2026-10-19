@@ -903,16 +903,7 @@ func (c *channel) parseRequestHead() (*parser.RawRequest, error) {
 	head.Phase = RequestHeadPhaseRequestLine
 	var perr *parser.PartialRequestError
 	if errors.As(err, &perr) {
-		head.Raw = perr.Raw
-		head.RawTruncated = perr.Truncated
-		if perr.RequestLineComplete {
-			head.Phase = RequestHeadPhaseHeaders
-			head.Method = perr.Method
-			head.RequestTarget = perr.RequestURI
-			head.Proto = perr.Proto
-			head.Headers = perr.Headers
-			head.Path, head.RawQuery, head.Authority = parseRequestURI(perr.RequestURI, perr.Headers)
-		}
+		head.ApplyPartialRequest(perr)
 	}
 	if head.Reason == RequestHeadTimeout && len(head.Raw) == 0 {
 		// Zero bytes of the request: not a proxy-closed request head

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
+	"github.com/usk6666/yorishiro-proxy/internal/layer/http1"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/http2"
 )
 
@@ -72,6 +73,18 @@ type OnStackFunc func(
 // upstream-side TLS handshake failures.
 type OnUpstreamTLSErrorFunc func(ctx context.Context, target string, err error)
 
+// OnRequestHeadFailureFunc is the callback signature invoked when a
+// connector-side handler closes a client connection while reading a request
+// head, before any Layer or Envelope exists (USK-1189): the CONNECT request
+// (CONNECTHandlerConfig) or the plain-forward target peek
+// (HTTP1ForwardHandlerConfig). head carries what the wire showed — the
+// received bytes, the armed deadline and, for the forward peek, the 400 the
+// handler returned — in the same shape the HTTP/1 Layer reports for its own
+// request heads (USK-1181), so one recorder serves both. target is the
+// validated host:port the connection was bound for, empty when none could
+// be determined. A connection that sent zero bytes never fires it.
+type OnRequestHeadFailureFunc func(ctx context.Context, target string, head *http1.RequestHeadError)
+
 // CONNECTHandlerConfig holds dependencies for the CONNECT handler factory.
 type CONNECTHandlerConfig struct {
 	// Negotiator parses the CONNECT request and sends 200 OK.
@@ -121,6 +134,12 @@ type CONNECTHandlerConfig struct {
 	// silently, matching pre-USK-784 behaviour for stacks that opt out of
 	// recording. See OnUpstreamTLSErrorFunc for the callback contract.
 	OnUpstreamTLSError OnUpstreamTLSErrorFunc
+
+	// OnRequestHeadFailure is invoked when the CONNECT request head is cut
+	// off by the request_timeout_ms deadline after bytes arrived, or
+	// exceeds the request-line / header-section parser limit (USK-1189).
+	// Nil disables — the failure is only logged, as before.
+	OnRequestHeadFailure OnRequestHeadFailureFunc
 
 	// InnerPeekTimeout bounds how long the handler waits for the first
 	// inner byte after CONNECT 200 (USK-762). Zero means
@@ -178,7 +197,9 @@ func NewCONNECTHandler(cfg CONNECTHandlerConfig) HandlerFunc {
 		// Step 1: CONNECT negotiation (parses request, sends 200 OK).
 		// USK-1162: bound the CONNECT request head by request_timeout_ms
 		// so a trickling client cannot hold the slot (nil-safe BuildCfg).
-		_ = pc.SetReadDeadline(time.Now().Add(cfg.BuildCfg.EffectiveRequestHeaderTimeout()))
+		armed := cfg.BuildCfg.EffectiveRequestHeaderTimeout()
+		started := time.Now()
+		_ = pc.SetReadDeadline(started.Add(armed))
 		target, err := cfg.Negotiator.Negotiate(ctx, pc)
 		_ = pc.SetReadDeadline(time.Time{})
 		if err != nil {
@@ -187,6 +208,7 @@ func NewCONNECTHandler(cfg CONNECTHandlerConfig) HandlerFunc {
 				return nil
 			}
 			connLogger.Debug("CONNECT negotiation failed", "error", err)
+			reportCONNECTHeadFailure(ctx, cfg, err, armed, started)
 			return nil
 		}
 
@@ -224,6 +246,23 @@ func NewCONNECTHandler(cfg CONNECTHandlerConfig) HandlerFunc {
 		// Step 6: TLS MITM path (existing behaviour).
 		runTLSMITM(ctx, cfg.BuildCfg, pc, target, cfg.OnStack, cfg.OnHTTP2Stack, cfg.OnUpstreamTLSError, connLogger)
 		return nil
+	}
+}
+
+// reportCONNECTHeadFailure hands a CONNECT request the proxy itself cut
+// off (deadline or parser limit, after bytes arrived) to
+// cfg.OnRequestHeadFailure (USK-1189). The connection is still closed
+// without a response, as before.
+func reportCONNECTHeadFailure(ctx context.Context, cfg CONNECTHandlerConfig, err error, armed time.Duration, started time.Time) {
+	if cfg.OnRequestHeadFailure == nil {
+		return
+	}
+	var maxRaw int64
+	if cfg.BuildCfg != nil {
+		maxRaw = cfg.BuildCfg.MaxRawCaptureSize
+	}
+	if head, target := connectRequestHeadFailure(err, armed, started, maxRaw); head != nil {
+		cfg.OnRequestHeadFailure(ctx, target, head)
 	}
 }
 

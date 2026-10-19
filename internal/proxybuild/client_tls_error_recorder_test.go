@@ -39,7 +39,7 @@ func wrapClientMITMHandshakeErr(target string, inner error) error {
 // USK-784 upstream-side contract (Protocol, Scheme, ConnInfo, Tags).
 func TestBuildTLSStackBuildErrorRecorder_ClientSide_HappyPath(t *testing.T) {
 	store := &recordingFlowStore{}
-	rec := buildTLSStackBuildErrorRecorder(store, nil, "live", silentLogger())
+	rec := buildTLSStackBuildErrorRecorder(store, nil, "live", nil, silentLogger())
 	if rec == nil {
 		t.Fatal("expected non-nil recorder")
 	}
@@ -109,7 +109,7 @@ func TestBuildTLSStackBuildErrorRecorder_ClientSide_HappyPath(t *testing.T) {
 // must classify as client_tls_error.
 func TestBuildTLSStackBuildErrorRecorder_ClientSideWithoutTarget_HappyPath(t *testing.T) {
 	store := &recordingFlowStore{}
-	rec := buildTLSStackBuildErrorRecorder(store, nil, "live", silentLogger())
+	rec := buildTLSStackBuildErrorRecorder(store, nil, "live", nil, silentLogger())
 
 	target := "pinned.example.test:443"
 	inner := errors.New("remote error: tls: unknown certificate")
@@ -136,7 +136,7 @@ func TestBuildTLSStackBuildErrorRecorder_ClientSideWithoutTarget_HappyPath(t *te
 // disturb the existing USK-784 contract.
 func TestBuildTLSStackBuildErrorRecorder_UpstreamSide_Preserved(t *testing.T) {
 	store := &recordingFlowStore{}
-	rec := buildTLSStackBuildErrorRecorder(store, nil, "live", silentLogger())
+	rec := buildTLSStackBuildErrorRecorder(store, nil, "live", nil, silentLogger())
 
 	target := "expired.example.test:443"
 	// Production wrap site for upstream dial — see
@@ -174,7 +174,7 @@ func TestBuildTLSStackBuildErrorRecorder_ClientSide_AuthorityVerbatim(t *testing
 	for _, target := range cases {
 		t.Run(target, func(t *testing.T) {
 			store := &recordingFlowStore{}
-			rec := buildTLSStackBuildErrorRecorder(store, nil, "live", silentLogger())
+			rec := buildTLSStackBuildErrorRecorder(store, nil, "live", nil, silentLogger())
 			buildErr := wrapClientMITMHandshakeErr(target, errors.New("err"))
 			rec(context.Background(), target, buildErr)
 			if got := len(store.saved); got != 1 {
@@ -206,7 +206,7 @@ func TestBuildTLSStackBuildErrorRecorder_ClientSide_OutOfScope_NotRecorded(t *te
 	scope := flow.NewRecordScope()
 	scope.SetRules([]flow.ScopeRule{{Hostname: "httpbin.org"}}, nil)
 
-	rec := buildTLSStackBuildErrorRecorder(store, scope, "live", silentLogger())
+	rec := buildTLSStackBuildErrorRecorder(store, scope, "live", nil, silentLogger())
 	if rec == nil {
 		t.Fatal("expected non-nil recorder")
 	}
@@ -231,7 +231,7 @@ func TestBuildTLSStackBuildErrorRecorder_ClientSide_InScope_Recorded(t *testing.
 	scope := flow.NewRecordScope()
 	scope.SetRules([]flow.ScopeRule{{Hostname: "httpbin.org"}}, nil)
 
-	rec := buildTLSStackBuildErrorRecorder(store, scope, "live", silentLogger())
+	rec := buildTLSStackBuildErrorRecorder(store, scope, "live", nil, silentLogger())
 
 	buildErr := wrapClientMITMHandshakeErr("httpbin.org:443",
 		errors.New("remote error: tls: unknown certificate"))
@@ -256,7 +256,7 @@ func TestBuildTLSStackBuildErrorRecorder_ClientSide_InScope_Recorded(t *testing.
 // the audit row is never written with an empty ConnID.
 func TestBuildTLSStackBuildErrorRecorder_ClientSide_NoConnID_GeneratesFallback(t *testing.T) {
 	store := &recordingFlowStore{}
-	rec := buildTLSStackBuildErrorRecorder(store, nil, "live", silentLogger())
+	rec := buildTLSStackBuildErrorRecorder(store, nil, "live", nil, silentLogger())
 
 	buildErr := wrapClientMITMHandshakeErr("example.com:443", errors.New("err"))
 	rec(context.Background(), "example.com:443", buildErr)

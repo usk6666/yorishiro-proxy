@@ -22,12 +22,19 @@ const (
 	// RequestHeadHeaderTooLarge: the header section exceeded a parser
 	// limit and the Layer answered 431 Request Header Fields Too Large.
 	RequestHeadHeaderTooLarge RequestHeadReason = "request_header_too_large"
+	// RequestHeadCONNECTTimeout: the request_timeout_ms deadline expired
+	// while the connector was reading a CONNECT request, after at least
+	// one byte of it arrived (USK-1189).
+	RequestHeadCONNECTTimeout RequestHeadReason = "connect_request_timeout"
 )
 
 // Request-head phases reported in RequestHeadError.Phase.
 const (
 	RequestHeadPhaseRequestLine = "request_line"
 	RequestHeadPhaseHeaders     = "headers"
+	// RequestHeadPhaseCONNECTRequest marks a CONNECT request read by the
+	// connector before any Layer existed (USK-1189).
+	RequestHeadPhaseCONNECTRequest = "connect_request"
 )
 
 // RequestHeadError is the terminal error a Send-direction Channel's Next
@@ -81,6 +88,30 @@ type RequestHeadError struct {
 	Started time.Time
 	// Err is the underlying error.
 	Err error
+}
+
+// ApplyPartialRequest copies what perr observed into e: the received bytes
+// (Raw / RawTruncated) and, when the request line was complete, the
+// request-line fields, the complete header lines and the Path / RawQuery /
+// Authority split a parsed request's HTTPMessage would carry. Phase is set
+// to RequestHeadPhaseHeaders when the request line was complete and
+// RequestHeadPhaseRequestLine otherwise. A nil perr leaves e unchanged.
+func (e *RequestHeadError) ApplyPartialRequest(perr *parser.PartialRequestError) {
+	if e == nil || perr == nil {
+		return
+	}
+	e.Raw = perr.Raw
+	e.RawTruncated = perr.Truncated
+	e.Phase = RequestHeadPhaseRequestLine
+	if !perr.RequestLineComplete {
+		return
+	}
+	e.Phase = RequestHeadPhaseHeaders
+	e.Method = perr.Method
+	e.RequestTarget = perr.RequestURI
+	e.Proto = perr.Proto
+	e.Headers = perr.Headers
+	e.Path, e.RawQuery, e.Authority = parseRequestURI(perr.RequestURI, perr.Headers)
 }
 
 // Error returns the underlying error's message.

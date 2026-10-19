@@ -102,7 +102,7 @@ func (m *Manager) handleTCPForwardH2ConnWithOverride(
 		// USK-916: TLS-dial failures should produce a state="error" Stream
 		// so MCP query("flows", filter:{state:"error"}) surfaces them.
 		if entry.fc != nil && entry.fc.UpstreamTLS {
-			if rec := buildTLSStackBuildErrorRecorder(parentStack.FlowStore, nil, parentListenerName, connLogger); rec != nil {
+			if rec := buildTLSStackBuildErrorRecorder(parentStack.FlowStore, nil, parentListenerName, parentStack.BuildConfig, connLogger); rec != nil {
 				rec(connCtx, entry.target, derr)
 			}
 		}

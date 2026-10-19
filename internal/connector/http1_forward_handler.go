@@ -3,10 +3,12 @@ package connector
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -55,6 +57,11 @@ type HTTP1ForwardHandlerConfig struct {
 	// without rebuilding the handler. Returning <=0 falls back to the
 	// static RequestTimeout / package default. (USK-844)
 	RequestTimeoutProvider func() time.Duration
+
+	// OnRequestHeadFailure is invoked when the target peek is cut off by
+	// its deadline after bytes arrived (USK-1189). head carries the bytes
+	// peeked and the 400 the handler returned. Nil disables.
+	OnRequestHeadFailure OnRequestHeadFailureFunc
 
 	// Logger for handler-level logging. Nil uses slog.Default().
 	Logger *slog.Logger
@@ -144,13 +151,16 @@ func NewHTTP1ForwardHandler(cfg HTTP1ForwardHandlerConfig) HandlerFunc {
 		// resolveForwardPeekTimeout so a runtime configure { request_timeout_ms }
 		// reaches this read deadline (USK-844).
 		deadline := resolveForwardPeekTimeout(cfg)
-		_ = pc.SetReadDeadline(time.Now().Add(deadline))
+		started := time.Now()
+		_ = pc.SetReadDeadline(started.Add(deadline))
 		target, perr := peekForwardTarget(pc)
 		_ = pc.SetReadDeadline(time.Time{})
 		if perr != nil {
 			connLogger.Debug("plain HTTP: peek target failed", "error", perr)
-			writeForwardErrorResponse(pc, 400, "Bad Request",
+			resp := forwardErrorResponse(400, "Bad Request",
 				"yorishiro-proxy: could not parse request target")
+			written := writeForwardResponse(pc, resp)
+			reportForwardPeekFailure(ctx, cfg, pc, perr, resp, written, deadline, started)
 			return nil
 		}
 
@@ -488,8 +498,13 @@ func ensurePort(host, defaultPort string) string {
 //
 // Best-effort: write errors are swallowed (the conn is about to close).
 func writeForwardErrorResponse(w net.Conn, status int, reason, detail string) {
+	writeForwardResponse(w, forwardErrorResponse(status, reason, detail))
+}
+
+// forwardErrorResponse returns the bytes writeForwardErrorResponse sends.
+func forwardErrorResponse(status int, reason, detail string) []byte {
 	body := detail + "\r\n"
-	resp := fmt.Sprintf(
+	return []byte(fmt.Sprintf(
 		"HTTP/1.1 %d %s\r\n"+
 			"Server: yorishiro-proxy\r\n"+
 			"Content-Type: text/plain; charset=utf-8\r\n"+
@@ -498,8 +513,40 @@ func writeForwardErrorResponse(w net.Conn, status int, reason, detail string) {
 			"\r\n"+
 			"%s",
 		status, reason, len(body), body,
-	)
+	))
+}
+
+// writeForwardResponse writes resp under a 5s write deadline and reports
+// whether every byte was written.
+func writeForwardResponse(w net.Conn, resp []byte) bool {
 	_ = w.SetWriteDeadline(time.Now().Add(5 * time.Second))
-	_, _ = w.Write([]byte(resp))
+	n, err := w.Write(resp)
 	_ = w.SetWriteDeadline(time.Time{})
+	return err == nil && n == len(resp)
+}
+
+// reportForwardPeekFailure hands a target peek cut off by its deadline,
+// after bytes arrived, to cfg.OnRequestHeadFailure (USK-1189) together with
+// the 400 the handler returned. A client close (EOF) and a complete but
+// unusable head are not reported. The peeked bytes are still buffered in
+// pc (Peek does not consume).
+func reportForwardPeekFailure(ctx context.Context, cfg HTTP1ForwardHandlerConfig, pc *PeekConn, perr error, resp []byte, written bool, deadline time.Duration, started time.Time) {
+	if cfg.OnRequestHeadFailure == nil || !errors.Is(perr, os.ErrDeadlineExceeded) {
+		return
+	}
+	n := pc.Buffered()
+	if n == 0 {
+		return
+	}
+	peeked, _ := pc.Peek(n)
+	buf := append([]byte(nil), peeked...)
+	var maxRaw int64
+	if cfg.BuildCfg != nil {
+		maxRaw = cfg.BuildCfg.MaxRawCaptureSize
+	}
+	head := forwardPeekHeadFailure(buf, perr, deadline, started, maxRaw)
+	head.Status = 400
+	head.Response = resp
+	head.ResponseWritten = written
+	cfg.OnRequestHeadFailure(ctx, "", head)
 }

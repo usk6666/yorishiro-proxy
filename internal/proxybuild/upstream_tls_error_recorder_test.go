@@ -14,7 +14,7 @@ import (
 // nil when no flow.Writer is configured, preserving the silent-drop
 // fallback path consistent with buildPipelineDropRecorder.
 func TestBuildUpstreamTLSErrorRecorder_NilStore(t *testing.T) {
-	rec := buildTLSStackBuildErrorRecorder(nil, nil, "test", silentLogger())
+	rec := buildTLSStackBuildErrorRecorder(nil, nil, "test", nil, silentLogger())
 	if rec != nil {
 		t.Fatal("expected nil callback when store is nil")
 	}
@@ -27,7 +27,7 @@ func TestBuildUpstreamTLSErrorRecorder_NilStore(t *testing.T) {
 // to the new "upstream_tls_error" classification.
 func TestBuildUpstreamTLSErrorRecorder_HappyPath(t *testing.T) {
 	store := &recordingFlowStore{}
-	rec := buildTLSStackBuildErrorRecorder(store, nil, "live", silentLogger())
+	rec := buildTLSStackBuildErrorRecorder(store, nil, "live", nil, silentLogger())
 	if rec == nil {
 		t.Fatal("expected non-nil recorder")
 	}
@@ -94,7 +94,7 @@ func TestBuildUpstreamTLSErrorRecorder_HappyPath(t *testing.T) {
 // against future refactors.
 func TestBuildUpstreamTLSErrorRecorder_NilError_NoOp(t *testing.T) {
 	store := &recordingFlowStore{}
-	rec := buildTLSStackBuildErrorRecorder(store, nil, "live", silentLogger())
+	rec := buildTLSStackBuildErrorRecorder(store, nil, "live", nil, silentLogger())
 	rec(context.Background(), "example.com:443", nil)
 	if got := len(store.saved); got != 0 {
 		t.Errorf("SaveStream count = %d, want 0 (nil error ignored)", got)
@@ -107,7 +107,7 @@ func TestBuildUpstreamTLSErrorRecorder_NilError_NoOp(t *testing.T) {
 // writing an empty ConnID.
 func TestBuildUpstreamTLSErrorRecorder_NoConnID_GeneratesFallback(t *testing.T) {
 	store := &recordingFlowStore{}
-	rec := buildTLSStackBuildErrorRecorder(store, nil, "live", silentLogger())
+	rec := buildTLSStackBuildErrorRecorder(store, nil, "live", nil, silentLogger())
 	rec(context.Background(), "example.com:443", errors.New("test error"))
 	if got := len(store.saved); got != 1 {
 		t.Fatalf("SaveStream count = %d, want 1", got)
@@ -131,7 +131,7 @@ func TestBuildUpstreamTLSErrorRecorder_AuthorityVerbatim(t *testing.T) {
 	for _, target := range cases {
 		t.Run(target, func(t *testing.T) {
 			store := &recordingFlowStore{}
-			rec := buildTLSStackBuildErrorRecorder(store, nil, "live", silentLogger())
+			rec := buildTLSStackBuildErrorRecorder(store, nil, "live", nil, silentLogger())
 			rec(context.Background(), target, errors.New("err"))
 			if got := len(store.saved); got != 1 {
 				t.Fatalf("SaveStream count = %d, want 1", got)
@@ -164,7 +164,7 @@ func TestBuildUpstreamTLSErrorRecorder_OutOfScope_NotRecorded(t *testing.T) {
 	scope := flow.NewRecordScope()
 	scope.SetRules([]flow.ScopeRule{{Hostname: "httpbin.org"}}, nil)
 
-	rec := buildTLSStackBuildErrorRecorder(store, scope, "live", silentLogger())
+	rec := buildTLSStackBuildErrorRecorder(store, scope, "live", nil, silentLogger())
 	if rec == nil {
 		t.Fatal("expected non-nil recorder")
 	}
@@ -187,7 +187,7 @@ func TestBuildUpstreamTLSErrorRecorder_InScope_Recorded(t *testing.T) {
 	scope := flow.NewRecordScope()
 	scope.SetRules([]flow.ScopeRule{{Hostname: "httpbin.org"}}, nil)
 
-	rec := buildTLSStackBuildErrorRecorder(store, scope, "live", silentLogger())
+	rec := buildTLSStackBuildErrorRecorder(store, scope, "live", nil, silentLogger())
 
 	rec(context.Background(), "httpbin.org:443",
 		errors.New("tls: failed to verify certificate"))
@@ -210,7 +210,7 @@ func TestBuildUpstreamTLSErrorRecorder_InScope_Recorded(t *testing.T) {
 // every TLS handshake failure is recorded (USK-784 default).
 func TestBuildUpstreamTLSErrorRecorder_NilScope_RecordsAll(t *testing.T) {
 	store := &recordingFlowStore{}
-	rec := buildTLSStackBuildErrorRecorder(store, nil, "live", silentLogger())
+	rec := buildTLSStackBuildErrorRecorder(store, nil, "live", nil, silentLogger())
 
 	rec(context.Background(), "any.example.test:443", errors.New("err"))
 
@@ -226,7 +226,7 @@ func TestBuildUpstreamTLSErrorRecorder_EmptyScope_RecordsAll(t *testing.T) {
 	store := &recordingFlowStore{}
 	scope := flow.NewRecordScope() // no rules
 
-	rec := buildTLSStackBuildErrorRecorder(store, scope, "live", silentLogger())
+	rec := buildTLSStackBuildErrorRecorder(store, scope, "live", nil, silentLogger())
 
 	rec(context.Background(), "any.example.test:443", errors.New("err"))
 
@@ -243,7 +243,7 @@ func TestBuildUpstreamTLSErrorRecorder_ExcludeOnlyScope(t *testing.T) {
 	scope := flow.NewRecordScope()
 	scope.SetRules(nil, []flow.ScopeRule{{Hostname: "noisy.example.test"}})
 
-	rec := buildTLSStackBuildErrorRecorder(store, scope, "live", silentLogger())
+	rec := buildTLSStackBuildErrorRecorder(store, scope, "live", nil, silentLogger())
 
 	rec(context.Background(), "noisy.example.test:443", errors.New("err"))
 	rec(context.Background(), "ok.example.test:443", errors.New("err"))
@@ -264,7 +264,7 @@ func TestBuildUpstreamTLSErrorRecorder_WildcardScope(t *testing.T) {
 	scope := flow.NewRecordScope()
 	scope.SetRules([]flow.ScopeRule{{Hostname: "*.example.com"}}, nil)
 
-	rec := buildTLSStackBuildErrorRecorder(store, scope, "live", silentLogger())
+	rec := buildTLSStackBuildErrorRecorder(store, scope, "live", nil, silentLogger())
 
 	// In-scope: subdomain of example.com.
 	rec(context.Background(), "api.example.com:443", errors.New("err"))
@@ -294,7 +294,7 @@ func TestBuildUpstreamTLSErrorRecorder_URLPrefixOnlyScope_NoRecord(t *testing.T)
 	scope := flow.NewRecordScope()
 	scope.SetRules([]flow.ScopeRule{{URLPrefix: "/api"}}, nil)
 
-	rec := buildTLSStackBuildErrorRecorder(store, scope, "live", silentLogger())
+	rec := buildTLSStackBuildErrorRecorder(store, scope, "live", nil, silentLogger())
 
 	rec(context.Background(), "host.example.test:443", errors.New("err"))
 

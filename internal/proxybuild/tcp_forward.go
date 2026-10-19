@@ -428,7 +428,7 @@ func (m *Manager) handleTCPForwardConnWithOverride(
 		// stay silent (matches the pre-USK-916 raw forward behaviour where
 		// the connection drops before any Layer is constructed).
 		if entry.fc != nil && entry.fc.UpstreamTLS {
-			if rec := buildTLSStackBuildErrorRecorder(parentStack.FlowStore, nil, parentListenerName, connLogger); rec != nil {
+			if rec := buildTLSStackBuildErrorRecorder(parentStack.FlowStore, nil, parentListenerName, parentStack.BuildConfig, connLogger); rec != nil {
 				rec(connCtx, entry.target, derr)
 			}
 		}
