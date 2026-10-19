@@ -1006,43 +1006,23 @@ func TestFullListener_TargetScope_Blocking(t *testing.T) {
 
 		proxyAddr, _, _ := startFullListenerProxy(t, ctx, fullListenerOpts{
 			scope: scope,
+			// A long inner-peek deadline: if the scope gate stops
+			// rejecting, the handler parks in the peek on this silent
+			// client and the prompt-close assertion below fails.
+			innerPeekTimeout: deniedCONNECTInnerPeek,
 			onStack: func(_ context.Context, stack *connector.ConnectionStack, _, _ *envelope.TLSSnapshot, _ string) {
 				defer stack.Close()
 				onStackCalled <- struct{}{}
 			},
 		})
 
-		// Try to CONNECT to a blocked target (127.0.0.1:9999).
-		conn, err := net.DialTimeout("tcp", proxyAddr, 5*time.Second)
-		if err != nil {
-			t.Fatalf("dial proxy: %v", err)
-		}
-		defer conn.Close()
+		// CONNECT to a blocked target (127.0.0.1:9999).
+		assertCONNECTClosedPromptly(t, proxyAddr, "127.0.0.1:9999")
 
-		connectReq := "CONNECT 127.0.0.1:9999 HTTP/1.1\r\nHost: 127.0.0.1:9999\r\n\r\n"
-		if _, err := conn.Write([]byte(connectReq)); err != nil {
-			t.Fatalf("write CONNECT: %v", err)
-		}
-
-		// Read the CONNECT 200 response (CONNECT negotiation succeeds, then scope blocks).
-		buf := make([]byte, 256)
-		conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-		conn.Read(buf) //nolint:errcheck // we just need to wait
-
-		// Give the handler time to process.
 		select {
 		case <-onStackCalled:
 			t.Error("OnStack was called, but scope should have blocked the target")
-		case <-time.After(2 * time.Second):
-			// Expected: OnStack was NOT called.
-		}
-
-		// Verify the proxy closed the connection after scope denial.
-		conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-		verifyBuf := make([]byte, 1)
-		_, readErr := conn.Read(verifyBuf)
-		if readErr == nil {
-			t.Error("expected connection to be closed after scope denial, but read succeeded")
+		default:
 		}
 	})
 
@@ -1330,35 +1310,63 @@ func TestFullListener_RateLimiter_Blocking(t *testing.T) {
 
 	proxyAddr, _, _ := startFullListenerProxy(t, ctx, fullListenerOpts{
 		rateLimiter: rl,
+		// A long inner-peek deadline: if the rate-limit gate stops
+		// rejecting, the handler parks in the peek on this silent client
+		// and the prompt-close assertion below fails.
+		innerPeekTimeout: deniedCONNECTInnerPeek,
 		onStack: func(_ context.Context, stack *connector.ConnectionStack, _, _ *envelope.TLSSnapshot, _ string) {
 			defer stack.Close()
 			onStackCalled <- struct{}{}
 		},
 	})
 
-	// Try CONNECT — should be rate-limited.
+	// CONNECT — should be rate-limited.
+	assertCONNECTClosedPromptly(t, proxyAddr, "127.0.0.1:9999")
+
+	select {
+	case <-onStackCalled:
+		t.Error("OnStack was called, but rate limiter should have blocked the request")
+	default:
+	}
+}
+
+// deniedCONNECTInnerPeek is the inner-peek deadline used by the CONNECT
+// denial tests. It is far above deniedCONNECTClientWait so that a CONNECT
+// which slips past the policy gate is held open by the peek on the silent
+// client instead of being released "promptly" by the peek deadline.
+const (
+	deniedCONNECTInnerPeek  = 30 * time.Second
+	deniedCONNECTClientWait = 2 * time.Second
+)
+
+// assertCONNECTClosedPromptly sends a CONNECT for target, then stays silent
+// and requires the proxy to close the connection before
+// deniedCONNECTClientWait. A policy-denied CONNECT is closed right after
+// negotiation; an admitted one waits for the inner peek
+// (deniedCONNECTInnerPeek), so a client read-deadline timeout means the
+// policy gate did not reject. The CONNECT response status is deliberately
+// not asserted (whether a denied CONNECT should get 200 first is open).
+func assertCONNECTClosedPromptly(t *testing.T, proxyAddr, target string) {
+	t.Helper()
+
 	conn, err := net.DialTimeout("tcp", proxyAddr, 5*time.Second)
 	if err != nil {
 		t.Fatalf("dial proxy: %v", err)
 	}
 	defer conn.Close()
 
-	connectReq := "CONNECT 127.0.0.1:9999 HTTP/1.1\r\nHost: 127.0.0.1:9999\r\n\r\n"
+	connectReq := "CONNECT " + target + " HTTP/1.1\r\nHost: " + target + "\r\n\r\n"
 	if _, err := conn.Write([]byte(connectReq)); err != nil {
 		t.Fatalf("write CONNECT: %v", err)
 	}
 
-	// Read the CONNECT 200 response.
-	buf := make([]byte, 256)
-	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-	conn.Read(buf) //nolint:errcheck // may EOF if handler closes
-
-	// Verify OnStack was NOT called.
-	select {
-	case <-onStackCalled:
-		t.Error("OnStack was called, but rate limiter should have blocked the request")
-	case <-time.After(2 * time.Second):
-		// Expected.
+	start := time.Now()
+	_ = conn.SetReadDeadline(start.Add(deniedCONNECTClientWait))
+	_, readErr := io.ReadAll(conn)
+	elapsed := time.Since(start)
+	var ne net.Error
+	if errors.As(readErr, &ne) && ne.Timeout() {
+		t.Fatalf("proxy held the denied CONNECT open for %v (client read deadline hit): %v", elapsed, readErr)
 	}
 }
 
@@ -1696,10 +1704,9 @@ func TestFullListener_CONNECT_PeekTimeoutSilentClient(t *testing.T) {
 	}
 	defer conn.Close()
 
-	connectReq := "CONNECT 127.0.0.1:1\r\nHost: 127.0.0.1:1\r\n\r\n"
-	// Use a malformed request line on purpose? No — keep it valid so the
-	// negotiator returns 200; the bug class is "after 200, never send".
-	connectReq = "CONNECT 127.0.0.1:1 HTTP/1.1\r\nHost: 127.0.0.1:1\r\n\r\n"
+	// A valid request line so the negotiator returns 200; the bug class is
+	// "after 200, never send".
+	connectReq := "CONNECT 127.0.0.1:1 HTTP/1.1\r\nHost: 127.0.0.1:1\r\n\r\n"
 	if _, err := conn.Write([]byte(connectReq)); err != nil {
 		t.Fatalf("write CONNECT: %v", err)
 	}

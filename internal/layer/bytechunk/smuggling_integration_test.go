@@ -27,6 +27,8 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/layer"
+	"github.com/usk6666/yorishiro-proxy/internal/layer/bytechunk"
+	"github.com/usk6666/yorishiro-proxy/internal/layer/http1"
 	"github.com/usk6666/yorishiro-proxy/internal/pipeline"
 	"github.com/usk6666/yorishiro-proxy/internal/session"
 )
@@ -516,24 +518,32 @@ func TestRawPassthrough_TLSFailure(t *testing.T) {
 
 	// TLS handshake through MITM. The proxy performs the server-side TLS
 	// handshake before dialing upstream, so this may succeed. If it fails,
-	// the proxy closed before handshake completion — also valid.
+	// the proxy closed before handshake completion — also valid. Either
+	// way the proxy must actively close the connection: hitting the
+	// client-side deadline means it held the conn open instead.
+	const clientWait = 5 * time.Second
+	start := time.Now()
+	_ = conn.SetDeadline(start.Add(clientWait))
 	clientTLS := tls.Client(conn, &tls.Config{
 		InsecureSkipVerify: true, //nolint:gosec // test
 	})
-	hsErr := clientTLS.Handshake()
-	if hsErr != nil {
-		// Handshake failed: proxy closed before completion. Acceptable
-		// because the upstream dial failure may tear down the connection
-		// before the client-side TLS handshake finishes.
-	} else {
-		// Handshake succeeded. The next operation should fail because the
-		// proxy closes the connection after upstream dial failure.
-		readBuf := make([]byte, 1)
-		clientTLS.SetReadDeadline(time.Now().Add(5 * time.Second))
-		_, readErr := clientTLS.Read(readBuf)
-		if readErr == nil {
-			t.Error("expected read error after upstream dial failure, got nil")
+	closeErr := clientTLS.Handshake()
+	if closeErr == nil {
+		// Handshake succeeded. The next read must fail because the proxy
+		// closes the connection after the upstream dial failure.
+		var n int
+		n, closeErr = clientTLS.Read(make([]byte, 1))
+		if closeErr == nil {
+			t.Fatalf("expected read error after upstream dial failure, got %d bytes", n)
 		}
+	}
+	elapsed := time.Since(start)
+	var ne net.Error
+	if errors.As(closeErr, &ne) && ne.Timeout() {
+		t.Fatalf("proxy held the conn open for %v after upstream dial failure (client deadline hit): %v", elapsed, closeErr)
+	}
+	if elapsed >= clientWait {
+		t.Errorf("proxy closed the conn after %v, want < %v", elapsed, clientWait)
 	}
 
 	// OnStack must NOT have been called (stack build failed).
@@ -544,15 +554,18 @@ func TestRawPassthrough_TLSFailure(t *testing.T) {
 	}
 }
 
-// TestRawPassthrough_ScopeBlock verifies that a CONNECT target NOT in
-// raw_passthrough_hosts is rejected at the stack-build level. In N2, only
-// raw passthrough mode is supported; non-passthrough returns "not yet
-// supported" (deferred to N3 when http1 layer is added).
-func TestRawPassthrough_ScopeBlock(t *testing.T) {
+// TestRawPassthrough_NonListedTargetUsesL7Stack verifies the other side of
+// the raw_passthrough_hosts switch: a CONNECT target that is NOT listed is
+// TLS-MITM'd onto an L7 (HTTP/1.x) stack, not relayed through bytechunk.
+// The client completes a real TLS handshake (no ALPN offer → http/1.1) and
+// OnStack must observe an *http1.Layer as the client topmost Layer.
+func TestRawPassthrough_NonListedTargetUsesL7Stack(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	target := "127.0.0.1:9999" // NOT in passthrough list
+	upstreamLn, _ := startUpstreamTLS(t, "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+	defer upstreamLn.Close()
+	target := upstreamLn.Addr().String() // NOT in passthrough list
 
 	ca := &cert.CA{}
 	if err := ca.Generate(); err != nil {
@@ -560,7 +573,7 @@ func TestRawPassthrough_ScopeBlock(t *testing.T) {
 	}
 	issuer := cert.NewIssuer(ca)
 
-	onStackCalled := make(chan struct{}, 1)
+	topmost := make(chan layer.Layer, 1)
 
 	buildCfg := &connector.BuildConfig{
 		ProxyConfig: &config.ProxyConfig{
@@ -571,7 +584,7 @@ func TestRawPassthrough_ScopeBlock(t *testing.T) {
 	}
 	onStack := func(_ context.Context, stack *connector.ConnectionStack, _, _ *envelope.TLSSnapshot, _ string) {
 		defer stack.Close()
-		onStackCalled <- struct{}{}
+		topmost <- stack.ClientTopmost()
 	}
 
 	flCfg := connector.FullListenerConfig{
@@ -581,6 +594,9 @@ func TestRawPassthrough_ScopeBlock(t *testing.T) {
 			Negotiator: connector.NewCONNECTNegotiator(slog.Default()),
 			BuildCfg:   buildCfg,
 			OnStack:    onStack,
+			// Long enough that a peek timeout cannot masquerade as the
+			// MITM path: the client sends its ClientHello right away.
+			InnerPeekTimeout: 30 * time.Second,
 		}),
 	}
 
@@ -592,38 +608,20 @@ func TestRawPassthrough_ScopeBlock(t *testing.T) {
 		t.Fatal("timeout waiting for FullListener ready")
 	}
 
-	conn, err := net.DialTimeout("tcp", fl.Addr(), 5*time.Second)
-	if err != nil {
-		t.Fatalf("dial proxy: %v", err)
-	}
-	defer conn.Close()
+	// connectThroughProxy asserts the CONNECT 200 and a completed client
+	// TLS handshake (it fails the test on a handshake error or timeout).
+	tlsConn := connectThroughProxy(t, fl.Addr(), target)
+	defer tlsConn.Close()
 
-	connectReq := fmt.Sprintf("CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", target, target)
-	if _, err := conn.Write([]byte(connectReq)); err != nil {
-		t.Fatalf("write CONNECT: %v", err)
-	}
-
-	buf := make([]byte, 256)
-	n, err := conn.Read(buf)
-	if err != nil {
-		t.Fatalf("read CONNECT response: %v", err)
-	}
-	if got := string(buf[:n]); got != "HTTP/1.1 200 Connection Established\r\n\r\n" {
-		t.Fatalf("unexpected CONNECT response: %q", got)
-	}
-
-	// BuildConnectionStack returns error immediately for non-passthrough
-	// targets (no TLS handshake attempted). The proxy closes the connection.
-	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-	_, err = conn.Read(make([]byte, 1))
-	if err == nil {
-		t.Error("expected connection close for non-passthrough target, got successful read")
-	}
-
-	// OnStack must NOT have been called.
 	select {
-	case <-onStackCalled:
-		t.Error("OnStack should not be called for non-passthrough target")
-	default:
+	case l := <-topmost:
+		if _, ok := l.(*bytechunk.Layer); ok {
+			t.Fatalf("client topmost = %T: non-listed target was relayed raw, want L7 MITM", l)
+		}
+		if _, ok := l.(*http1.Layer); !ok {
+			t.Errorf("client topmost = %T, want *http1.Layer", l)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("OnStack was not called for the non-listed target")
 	}
 }

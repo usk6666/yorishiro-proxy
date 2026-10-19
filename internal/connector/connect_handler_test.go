@@ -2,6 +2,7 @@ package connector
 
 import (
 	"context"
+	"log/slog"
 	"net"
 	"sync/atomic"
 	"testing"
@@ -55,26 +56,26 @@ func TestNewCONNECTHandler_SuccessfulPipeline(t *testing.T) {
 	// Stack not received because build fails with nil config
 }
 
-func TestNewCONNECTHandler_ScopeDenial(t *testing.T) {
-	scope := NewTargetScope()
-	scope.SetPolicyRules(nil, []TargetRule{
-		{Hostname: "blocked.com"},
-	})
+// connectDenialInnerPeek is far above connectDenialReturnWithin, so a
+// CONNECT that slips past the policy gate parks in the inner peek on the
+// silent client and the handler misses the return deadline.
+const (
+	connectDenialInnerPeek    = 30 * time.Second
+	connectDenialReturnWithin = time.Second
+)
 
-	var stackCalled atomic.Bool
-	handler := NewCONNECTHandler(CONNECTHandlerConfig{
-		Negotiator: NewCONNECTNegotiator(nil),
-		Scope:      scope,
-		OnStack: func(ctx context.Context, stack *ConnectionStack, clientSnap, upstreamSnap *envelope.TLSSnapshot, target string) {
-			stackCalled.Store(true)
-		},
-	})
+// runDeniedCONNECT drives handler with a CONNECT for target over a
+// net.Pipe whose client side then stays silent, and requires the handler
+// to return nil within connectDenialReturnWithin.
+func runDeniedCONNECT(t *testing.T, handler HandlerFunc, target string) {
+	t.Helper()
 
 	clientConn, serverConn := net.Pipe()
 	defer clientConn.Close()
+	defer serverConn.Close()
 
 	go func() {
-		_, _ = clientConn.Write([]byte("CONNECT blocked.com:443 HTTP/1.1\r\nHost: blocked.com:443\r\n\r\n"))
+		_, _ = clientConn.Write([]byte("CONNECT " + target + " HTTP/1.1\r\nHost: " + target + "\r\n\r\n"))
 		buf := make([]byte, 256)
 		_, _ = clientConn.Read(buf)
 	}()
@@ -82,12 +83,59 @@ func TestNewCONNECTHandler_ScopeDenial(t *testing.T) {
 	pc := NewPeekConn(serverConn)
 	ctx := ContextWithConnID(context.Background(), "test-conn")
 
-	err := handler(ctx, pc)
-	if err != nil {
-		t.Errorf("handler returned error: %v", err)
-	}
+	done := make(chan error, 1)
+	go func() { done <- handler(ctx, pc) }()
 
-	time.Sleep(50 * time.Millisecond)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("handler returned error: %v", err)
+		}
+	case <-time.After(connectDenialReturnWithin):
+		t.Fatalf("handler did not return within %v; the denied CONNECT reached the inner peek", connectDenialReturnWithin)
+	}
+}
+
+// assertSingleInfoLog requires exactly one Info record with msg.
+func assertSingleInfoLog(t *testing.T, h *captureHandler, msg string) {
+	t.Helper()
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	n := 0
+	for _, r := range h.records {
+		if r.msg == msg {
+			n++
+			if r.level != slog.LevelInfo {
+				t.Errorf("%q logged at %v, want Info", msg, r.level)
+			}
+		}
+	}
+	if n != 1 {
+		t.Errorf("%q logged %d times, want 1", msg, n)
+	}
+}
+
+func TestNewCONNECTHandler_ScopeDenial(t *testing.T) {
+	scope := NewTargetScope()
+	scope.SetPolicyRules(nil, []TargetRule{
+		{Hostname: "blocked.com"},
+	})
+
+	logs := &captureHandler{}
+	var stackCalled atomic.Bool
+	handler := NewCONNECTHandler(CONNECTHandlerConfig{
+		Negotiator:       NewCONNECTNegotiator(nil),
+		Scope:            scope,
+		InnerPeekTimeout: connectDenialInnerPeek,
+		Logger:           slog.New(logs),
+		OnStack: func(ctx context.Context, stack *ConnectionStack, clientSnap, upstreamSnap *envelope.TLSSnapshot, target string) {
+			stackCalled.Store(true)
+		},
+	})
+
+	runDeniedCONNECT(t, handler, "blocked.com:443")
+
+	assertSingleInfoLog(t, logs, "CONNECT target blocked by scope")
 	if stackCalled.Load() {
 		t.Error("OnStack should not be called when target is blocked by scope")
 	}
@@ -102,33 +150,21 @@ func TestNewCONNECTHandler_RateLimitDenial(t *testing.T) {
 	// Pre-consume the tiny bucket.
 	_ = rl.Check("limited.com")
 
+	logs := &captureHandler{}
 	var stackCalled atomic.Bool
 	handler := NewCONNECTHandler(CONNECTHandlerConfig{
-		Negotiator:  NewCONNECTNegotiator(nil),
-		RateLimiter: rl,
+		Negotiator:       NewCONNECTNegotiator(nil),
+		RateLimiter:      rl,
+		InnerPeekTimeout: connectDenialInnerPeek,
+		Logger:           slog.New(logs),
 		OnStack: func(ctx context.Context, stack *ConnectionStack, clientSnap, upstreamSnap *envelope.TLSSnapshot, target string) {
 			stackCalled.Store(true)
 		},
 	})
 
-	clientConn, serverConn := net.Pipe()
-	defer clientConn.Close()
+	runDeniedCONNECT(t, handler, "limited.com:443")
 
-	go func() {
-		_, _ = clientConn.Write([]byte("CONNECT limited.com:443 HTTP/1.1\r\nHost: limited.com:443\r\n\r\n"))
-		buf := make([]byte, 256)
-		_, _ = clientConn.Read(buf)
-	}()
-
-	pc := NewPeekConn(serverConn)
-	ctx := ContextWithConnID(context.Background(), "test-conn")
-
-	err := handler(ctx, pc)
-	if err != nil {
-		t.Errorf("handler returned error: %v", err)
-	}
-
-	time.Sleep(50 * time.Millisecond)
+	assertSingleInfoLog(t, logs, "CONNECT target blocked by rate limit")
 	if stackCalled.Load() {
 		t.Error("OnStack should not be called when target is rate limited")
 	}
