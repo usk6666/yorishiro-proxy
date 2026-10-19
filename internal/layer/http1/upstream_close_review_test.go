@@ -281,3 +281,42 @@ func TestLayer_Receive_HealthyAfterCompleteResponse(t *testing.T) {
 		t.Error("OpenExchange = nil after a complete keep-alive response")
 	}
 }
+
+// TestLayer_Receive_HEADResponse_NextBeforeSend covers F-1 on the
+// registration path where the consumer calls Next before Send (the session
+// loop's upstream reader can win that race): the parse then starts before
+// the request method is known, so the method must be consulted when the
+// response head arrives, not when the parse starts.
+func TestLayer_Receive_HEADResponse_NextBeforeSend(t *testing.T) {
+	const headReply = "HTTP/1.1 200 OK\r\nContent-Length: 1234\r\n\r\n"
+	client, server := testConn(t)
+	defer client.Close()
+	defer server.Close()
+	go upstreamPeer(server, headReply)
+
+	l := New(client, "up-1", envelope.Receive)
+	defer l.Close()
+	ch := l.OpenExchange()
+
+	type result struct {
+		env *envelope.Envelope
+		err error
+	}
+	got := make(chan result, 1)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	go func() {
+		env, err := ch.Next(ctx)
+		got <- result{env, err}
+	}()
+	time.Sleep(50 * time.Millisecond) // let Next register the exchange first
+	sendMethod(t, ch, "HEAD", "/")
+
+	r := <-got
+	if r.err != nil {
+		t.Fatalf("Next: %v; want the HEAD response", r.err)
+	}
+	if m := r.env.Message.(*envelope.HTTPMessage); hasAnomaly(m, envelope.AnomalyTruncatedBody) {
+		t.Errorf("HEAD response flagged %s on the Next-before-Send path", envelope.AnomalyTruncatedBody)
+	}
+}
