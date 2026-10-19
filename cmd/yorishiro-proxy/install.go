@@ -18,11 +18,27 @@ var validInstallTargets = map[string]setup.Target{
 
 // runInstall handles the "install" subcommand.
 func runInstall(ctx context.Context, args []string) error {
+	opts, err := parseInstallOptions(args)
+	if err != nil {
+		return err
+	}
+
+	prompter := setup.NewStdinPrompter(os.Stdin, os.Stderr)
+	runner := setup.NewRunner(opts, prompter, os.Stderr)
+
+	return runner.Install(ctx)
+}
+
+// parseInstallOptions turns the "install" subcommand's arguments into
+// setup.Options, validating target-specific flags. It performs no side
+// effects, so tests can adjust the result (e.g. BinaryPath) before running
+// the install.
+func parseInstallOptions(args []string) (setup.Options, error) {
 	// Determine target before parsing flags.
 	// install [target] [flags] — target is the first non-flag argument.
 	target, flagArgs, err := parseInstallTarget(args)
 	if err != nil {
-		return err
+		return setup.Options{}, err
 	}
 
 	fs := flag.NewFlagSet("install", flag.ContinueOnError)
@@ -60,7 +76,7 @@ func runInstall(ctx context.Context, args []string) error {
 	}
 
 	if err := fs.Parse(flagArgs); err != nil {
-		return err
+		return setup.Options{}, err
 	}
 
 	// Handle --user-scope flag: set scope to "user".
@@ -70,13 +86,10 @@ func runInstall(ctx context.Context, args []string) error {
 
 	// Validate target-specific flags.
 	if opts.Trust && opts.Target != setup.TargetCA && opts.Target != setup.TargetAll {
-		return fmt.Errorf("--trust is only valid with the 'ca' target or no target (all)")
+		return setup.Options{}, fmt.Errorf("--trust is only valid with the 'ca' target or no target (all)")
 	}
 
-	prompter := setup.NewStdinPrompter(os.Stdin, os.Stderr)
-	runner := setup.NewRunner(opts, prompter, os.Stderr)
-
-	return runner.Install(ctx)
+	return opts, nil
 }
 
 // parseInstallTarget extracts the target from args, returning the target
