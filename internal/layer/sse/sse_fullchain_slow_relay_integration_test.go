@@ -177,10 +177,13 @@ func TestSSE_FullChainSwapEndToEnd_SlowRelay(t *testing.T) {
 		t.Errorf("upstream topmost still original http1.Layer; swap did not install SSE adapter")
 	}
 
-	// Tear down: close pipes so the recursive RunSession returns.
+	// Tear down: wait for the client read goroutine to finish FIRST. The
+	// swap becoming visible only means runUpgradeSSE has installed the
+	// SSE adapter; the events are relayed afterwards. Closing clientA
+	// before the reader is done would drop events still in flight.
+	<-clientReadDone
 	_ = clientA.Close()
 	_ = upstreamB.Close()
-	<-clientReadDone
 
 	select {
 	case <-done:
