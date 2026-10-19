@@ -9,7 +9,8 @@
 //
 // This package is for tests only; production code must not import it.
 // Package flow's own in-package tests cannot import it (that would be an
-// import cycle) and carry an equivalent helper in sqlite_test.go.
+// import cycle) and carry an equivalent helper: newTestStore in
+// sqlite_test.go, backed by the template built in template_store_test.go.
 package flowtest
 
 import (

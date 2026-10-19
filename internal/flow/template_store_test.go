@@ -100,7 +100,10 @@ func sqliteMaster(t *testing.T, db *sql.DB) []masterRow {
 
 // TestTemplateStore_SchemaMatchesMigrationChain: a store created from the
 // template has exactly the schema a store freshly built by the migration
-// chain has, is at latestVersion(), and keeps WAL journaling.
+// chain has, and is at latestVersion(). The journal_mode == wal assertion
+// does not guard the template file itself (NewSQLiteStore's DSN forces
+// journal_mode(WAL) on every open); it guards that the template-backed
+// helper opens its copy through NewSQLiteStore with that WAL DSN.
 func TestTemplateStore_SchemaMatchesMigrationChain(t *testing.T) {
 	ctx := context.Background()
 	fromTemplate := newTestStore(t)
