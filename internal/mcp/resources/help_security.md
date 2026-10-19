@@ -193,10 +193,12 @@ SOCKS5 `CONNECT` is scope-checked before the tunnel carries a single byte, so th
 proxy does not yet know whether TLS follows. Scope such traffic by `hostname` /
 `ports`, or scope the tunneled protocol instead.
 
-SOCKS5 is the only scope check on the live data path that cannot know the
-transport. Everywhere else the proxy matches `schemes` against the transport it
-actually observed. For HTTP requests (including WebSocket / SSE upgrade requests
-and HTTP/2), that is the transport of the client's connection — TLS or not — not
+Three live-data-path checks do not observe the transport: SOCKS5 (blank scheme),
+the `CONNECT` admission gate (always `https`), and raw TCP inside a tunnel, which
+is not re-checked per connection after the gate (USK-1083) — so a deny carrying
+`"schemes": ["http"]` does not block cleartext non-HTTP TCP through `CONNECT`.
+For HTTP requests (including WebSocket / SSE upgrade requests and HTTP/2), the
+proxy matches `schemes` against the transport of the client's connection — TLS or not — not
 a client-declared HTTP/2 `:scheme` (which may be absent or disagree with the
 connection) and not a `scheme` set via intercept `modify_and_forward`. The
 recorded request still shows the scheme exactly as the client declared it.
