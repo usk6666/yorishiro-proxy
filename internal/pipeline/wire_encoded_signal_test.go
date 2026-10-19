@@ -3,6 +3,8 @@ package pipeline
 import (
 	"context"
 	"testing"
+
+	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 )
 
 func TestWireEncodedFromContext_AbsentDefaultsFalse(t *testing.T) {
@@ -11,15 +13,9 @@ func TestWireEncodedFromContext_AbsentDefaultsFalse(t *testing.T) {
 	}
 }
 
-func TestRawAuthoritativeFromContext_AbsentDefaultsFalse(t *testing.T) {
-	if rawAuthoritativeFromContext(context.Background()) {
-		t.Error("absent state must default to false")
-	}
-}
-
 func TestShouldSkipEncoder_AbsentDefaultsFalse(t *testing.T) {
-	if shouldSkipEncoder(context.Background()) {
-		t.Error("absent state must default to false")
+	if shouldSkipEncoder(context.Background(), &envelope.Envelope{Raw: []byte("x")}) {
+		t.Error("absent state on an unmarked envelope must default to false")
 	}
 }
 
@@ -37,9 +33,6 @@ func TestWithWireEncodedState_InstallsFreshState(t *testing.T) {
 	}
 	if state.Encoded {
 		t.Error("freshly installed state must have Encoded=false")
-	}
-	if state.RawAuthoritative {
-		t.Error("freshly installed state must have RawAuthoritative=false")
 	}
 }
 
@@ -65,51 +58,32 @@ func TestWireEncodedFromContext_ReadsAfterStateMutation(t *testing.T) {
 	}
 }
 
-func TestRawAuthoritativeFromContext_ReadsAfterStateMutation(t *testing.T) {
-	ctx := withWireEncodedState(context.Background())
-	state := wireEncodedStateFromContext(ctx)
-	if state == nil {
-		t.Fatal("state nil")
+// TestShouldSkipEncoder_Signals verifies the helper's semantics: skip when
+// the envelope is raw-wins (RFC §9.3 D4) or when Raw is encoder output
+// (USK-684) and still present; otherwise run the encoder.
+func TestShouldSkipEncoder_Signals(t *testing.T) {
+	tests := []struct {
+		name    string
+		encoded bool
+		auth    bool
+		raw     []byte
+		want    bool
+	}{
+		{name: "no signal", raw: []byte("x"), want: false},
+		{name: "encoded", encoded: true, raw: []byte("x"), want: true},
+		{name: "encoded but Raw cleared", encoded: true, raw: nil, want: false},
+		{name: "raw wins", auth: true, raw: []byte("x"), want: true},
+		{name: "raw-wins marker but Raw cleared", auth: true, raw: nil, want: false},
 	}
-
-	if rawAuthoritativeFromContext(ctx) {
-		t.Error("RawAuthoritative=false must read as false")
-	}
-
-	state.RawAuthoritative = true
-	if !rawAuthoritativeFromContext(ctx) {
-		t.Error("RawAuthoritative=true must read as true via the same ctx")
-	}
-
-	state.RawAuthoritative = false
-	if rawAuthoritativeFromContext(ctx) {
-		t.Error("clearing RawAuthoritative must read as false")
-	}
-}
-
-// TestShouldSkipEncoder_OrsBothFlags verifies the helper's semantics:
-// returns true when EITHER flag is set, false when both are clear.
-func TestShouldSkipEncoder_OrsBothFlags(t *testing.T) {
-	ctx := withWireEncodedState(context.Background())
-	state := wireEncodedStateFromContext(ctx)
-	if shouldSkipEncoder(ctx) {
-		t.Error("both flags clear must yield false")
-	}
-
-	state.Encoded = true
-	if !shouldSkipEncoder(ctx) {
-		t.Error("Encoded=true must yield true")
-	}
-	state.Encoded = false
-
-	state.RawAuthoritative = true
-	if !shouldSkipEncoder(ctx) {
-		t.Error("RawAuthoritative=true must yield true")
-	}
-	state.RawAuthoritative = false
-
-	if shouldSkipEncoder(ctx) {
-		t.Error("clearing both flags must yield false again")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := withWireEncodedState(context.Background())
+			wireEncodedStateFromContext(ctx).Encoded = tt.encoded
+			env := &envelope.Envelope{Raw: tt.raw, RawAuthoritative: tt.auth}
+			if got := shouldSkipEncoder(ctx, env); got != tt.want {
+				t.Errorf("shouldSkipEncoder = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }
 
@@ -118,64 +92,28 @@ func TestClearWireEncoded_NoOpWhenStateAbsent(t *testing.T) {
 	clearWireEncoded(context.Background())
 }
 
-// TestClearWireEncoded_FlipsBothFlagsToFalse verifies that the broadened
-// clear (USK-686) zeroes out both Encoded and RawAuthoritative — the
-// fail-soft / no-encoder paths in regenerateRaw rely on this to wipe any
-// prior chain step's flags.
-func TestClearWireEncoded_FlipsBothFlagsToFalse(t *testing.T) {
+func TestClearWireEncoded_FlipsEncodedToFalse(t *testing.T) {
 	ctx := withWireEncodedState(context.Background())
 	state := wireEncodedStateFromContext(ctx)
 	state.Encoded = true
-	state.RawAuthoritative = true
 
 	clearWireEncoded(ctx)
 	if state.Encoded {
 		t.Error("clearWireEncoded must flip Encoded to false")
 	}
-	if state.RawAuthoritative {
-		t.Error("clearWireEncoded must flip RawAuthoritative to false")
-	}
 }
 
-// TestMarkWireEncoded_SetsEncodedAndClearsRawAuthoritative verifies the
-// mutual-exclusion invariant: marking Encoded must clear RawAuthoritative
-// (Raw cannot be both encoder output AND user-verbatim).
-func TestMarkWireEncoded_SetsEncodedAndClearsRawAuthoritative(t *testing.T) {
+func TestMarkWireEncoded_SetsEncoded(t *testing.T) {
 	ctx := withWireEncodedState(context.Background())
 	state := wireEncodedStateFromContext(ctx)
-	state.RawAuthoritative = true
 
 	markWireEncoded(ctx)
 	if !state.Encoded {
 		t.Error("markWireEncoded must set Encoded=true")
-	}
-	if state.RawAuthoritative {
-		t.Error("markWireEncoded must clear RawAuthoritative")
-	}
-}
-
-// TestMarkRawAuthoritative_SetsRawAuthoritativeAndClearsEncoded verifies
-// the mutual-exclusion invariant in the other direction.
-func TestMarkRawAuthoritative_SetsRawAuthoritativeAndClearsEncoded(t *testing.T) {
-	ctx := withWireEncodedState(context.Background())
-	state := wireEncodedStateFromContext(ctx)
-	state.Encoded = true
-
-	markRawAuthoritative(ctx)
-	if !state.RawAuthoritative {
-		t.Error("markRawAuthoritative must set RawAuthoritative=true")
-	}
-	if state.Encoded {
-		t.Error("markRawAuthoritative must clear Encoded")
 	}
 }
 
 func TestMarkWireEncoded_NoOpWhenStateAbsent(t *testing.T) {
 	// Must not panic when ctx has no state.
 	markWireEncoded(context.Background())
-}
-
-func TestMarkRawAuthoritative_NoOpWhenStateAbsent(t *testing.T) {
-	// Must not panic when ctx has no state.
-	markRawAuthoritative(context.Background())
 }

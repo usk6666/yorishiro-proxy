@@ -11,6 +11,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/config"
@@ -84,6 +85,19 @@ type Layer struct {
 	// conn ownership to a successor Layer (ws / sse). Subsequent Close
 	// calls become conn-close no-ops.
 	detached bool
+
+	// retired is set (Receive direction only) once the final response to
+	// a raw-authoritative request has been parsed (RFC-001 §9.3 D4,
+	// USK-1079). The plugin's verbatim bytes may have carried further
+	// pipelined requests, so the responses still arriving on this conn
+	// belong to no exchange the proxy knows about; parsing them as the
+	// next exchange's response would misattribute them. A retired Layer
+	// stops its parser, refuses new exchanges (OpenExchange returns nil,
+	// sendRequest fails), and reports stale from HealthCheck so the h1
+	// redial chain replaces it. Set before the response is delivered, so a
+	// client that already holds the response cannot race the chain's
+	// HealthCheck into reusing the conn.
+	retired atomic.Bool
 
 	// stateReleaser invocation is per-Channel; the Layer-level field is held
 	// only so newly spawned channels inherit it.
@@ -440,7 +454,8 @@ func (l *Layer) Channels() <-chan layer.Channel { return l.chOut }
 // Calling OpenExchange on a Send-direction Layer returns nil — the spawn
 // loop already produces Channels via Channels().
 //
-// After Close(), OpenExchange returns nil.
+// After Close(), or once the Layer was retired after a raw-authoritative
+// exchange (USK-1079), OpenExchange returns nil.
 func (l *Layer) OpenExchange() layer.Channel {
 	if l.direction != envelope.Receive {
 		return nil
@@ -449,6 +464,9 @@ func (l *Layer) OpenExchange() layer.Channel {
 	case <-l.closed:
 		return nil
 	default:
+	}
+	if l.retired.Load() {
+		return nil
 	}
 	return l.newChannelLocked()
 }
@@ -666,38 +684,75 @@ func (l *Layer) spawnLoopReceive() {
 			if head == nil {
 				break
 			}
-
-			// USK-715 / detach hygiene: if the conn was reclaimed, fail any
-			// still-pending channels with EOF.
-			if l.isDetached() {
-				for ch := l.popPending(); ch != nil; ch = l.popPending() {
-					ch.deliverResponse(nil, io.EOF)
-				}
+			if !l.receiveOne(head) {
 				return
-			}
-
-			env, isInformational, perr := head.parseResponse()
-			if perr != nil {
-				// Drain all remaining pending channels with the terminal err.
-				for ch := l.popPending(); ch != nil; ch = l.popPending() {
-					ch.deliverResponse(nil, perr)
-				}
-				return
-			}
-			head.deliverResponse(env, nil)
-			if !isInformational {
-				_ = l.popPending()
-				if head.connClosed || l.isDetached() {
-					// Peer signalled connection-close; remaining pendings are
-					// futile.
-					for ch := l.popPending(); ch != nil; ch = l.popPending() {
-						ch.deliverResponse(nil, io.EOF)
-					}
-					return
-				}
 			}
 		}
 	}
+}
+
+// failPending delivers err to every still-pending Channel.
+func (l *Layer) failPending(err error) {
+	for ch := l.popPending(); ch != nil; ch = l.popPending() {
+		ch.deliverResponse(nil, err)
+	}
+}
+
+// receiveOne parses and delivers one response for head, the current
+// pendingQ head. Returns false when the receive loop must stop (detach,
+// parse error, connection-close, or retirement); every remaining pending
+// Channel has then been failed.
+func (l *Layer) receiveOne(head *channel) bool {
+	// USK-715 / detach hygiene: if the conn was reclaimed, fail any
+	// still-pending channels with EOF.
+	if l.isDetached() {
+		l.failPending(io.EOF)
+		return false
+	}
+
+	env, isInformational, perr := head.parseResponse()
+	if perr != nil {
+		// Drain all remaining pending channels with the terminal err.
+		l.failPending(perr)
+		return false
+	}
+	if !isInformational && head.rawWinsSent.Load() {
+		// USK-1079: retire before delivering, so the conn is already
+		// stale when the client sees this response and sends its next
+		// request.
+		l.retire()
+	}
+	head.deliverResponse(env, nil)
+	if isInformational {
+		return true
+	}
+	_ = l.popPending()
+	if head.connClosed || l.isDetached() || l.retired.Load() {
+		// Peer signalled connection-close (or the Layer was retired);
+		// remaining pendings are futile.
+		l.failPending(io.EOF)
+		return false
+	}
+	return true
+}
+
+// errUpstreamRetired is reported by HealthCheck and sendRequest on a
+// Layer retired after a raw-authoritative exchange (USK-1079). It wraps
+// net.ErrClosed so callers treating the Layer as closed keep working.
+var errUpstreamRetired = fmt.Errorf("http1: upstream retired after raw-authoritative exchange: %w", net.ErrClosed)
+
+// retire marks the Receive-direction Layer unusable for further exchanges
+// after the final response to a raw-authoritative request (USK-1079). Any
+// bytes still buffered or in flight on the conn (responses to requests
+// the plugin smuggled) are not parsed; they are dropped when the h1 chain
+// (or the owning stack) closes the Layer. Called only from
+// spawnLoopReceive.
+func (l *Layer) retire() {
+	if l.retired.Swap(true) {
+		return
+	}
+	slog.Debug("http1: retiring upstream connection after raw-authoritative exchange",
+		"stream_id", l.streamID, "buffered_bytes_dropped", l.reader.Buffered())
 }
 
 // isDetached reports whether DetachStream / DetachStreamingBody transferred
@@ -816,6 +871,11 @@ func (l *Layer) HealthCheck() error {
 	case <-l.closed:
 		return net.ErrClosed
 	default:
+	}
+	// USK-1079: a Layer retired after a raw-authoritative exchange may
+	// still hold responses to smuggled requests; it must be replaced.
+	if l.retired.Load() {
+		return errUpstreamRetired
 	}
 
 	l.pendingMu.Lock()
