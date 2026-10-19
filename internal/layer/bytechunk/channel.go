@@ -136,6 +136,9 @@ func (c *Channel) CloseWrite() error {
 	return nil
 }
 
+// Abort tears the underlying connection down (USK-1083 scaffold).
+func (c *Channel) Abort() error { return nil }
+
 // Close is a no-op for Channel. The underlying connection is owned by the
 // Layer, not the Channel.
 func (c *Channel) Close() error { return nil }

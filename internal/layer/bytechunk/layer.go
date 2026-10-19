@@ -6,7 +6,28 @@ import (
 
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/layer"
+	"github.com/usk6666/yorishiro-proxy/internal/pluginv2"
 )
+
+// Option configures a ByteChunk Layer at construction time.
+type Option func(*options)
+
+type options struct {
+	ctxTmpl       envelope.EnvelopeContext
+	stateReleaser pluginv2.StateReleaser
+}
+
+// WithEnvelopeContext sets the EnvelopeContext template stamped on every
+// envelope the Layer's Channel produces (USK-1083).
+func WithEnvelopeContext(ctx envelope.EnvelopeContext) Option {
+	return func(o *options) {}
+}
+
+// WithStateReleaser injects a pluginv2.StateReleaser fired once on
+// Layer.Close (USK-1083).
+func WithStateReleaser(r pluginv2.StateReleaser) Option {
+	return func(o *options) {}
+}
 
 // Layer wraps a net.Conn in a single-channel Layer that yields RawMessage
 // envelopes. It owns the connection and closes it on Close().
@@ -23,7 +44,7 @@ type Layer struct {
 //
 // Session uses two bytechunk Layers (one per direction) connected to the
 // 2-goroutine model.
-func New(conn net.Conn, streamID string, direction envelope.Direction) *Layer {
+func New(conn net.Conn, streamID string, direction envelope.Direction, opts ...Option) *Layer {
 	l := &Layer{
 		conn: conn,
 		ch:   make(chan layer.Channel, 1),
