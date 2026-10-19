@@ -72,7 +72,7 @@ type resendGRPCInput struct {
 	Metadata        []headerKV       `json:"metadata,omitempty" jsonschema:"ordered metadata list; preserves wire case, order and duplicates"`
 	Encoding        string           `json:"encoding,omitempty" jsonschema:"grpc-encoding for outgoing messages (identity or gzip)"`
 	AcceptEncoding  []string         `json:"accept_encoding,omitempty" jsonschema:"grpc-accept-encoding list (e.g. [\"gzip\",\"identity\"])"`
-	Messages        []resendGRPCData `json:"messages,omitempty" jsonschema:"request-side LPM list; at least one element required"`
+	Messages        []resendGRPCData `json:"messages" jsonschema:"request-side LPM list; at least one element required, also with flow_id (recorded messages are not inherited)"`
 	TrailerMetadata []headerKV       `json:"trailer_metadata,omitempty" jsonschema:"optional Send-direction trailer HEADERS; when supplied, the request terminates via a trailer frame instead of END_STREAM on the last DATA"`
 	TimeoutMs       *int             `json:"timeout_ms,omitempty" jsonschema:"per-call timeout in milliseconds covering dial+handshake+send+receive; default 30000"`
 	TLSFingerprint  string           `json:"tls_fingerprint,omitempty" jsonschema:"informational v1; per-call selection deferred — server uses its configured fingerprint"`

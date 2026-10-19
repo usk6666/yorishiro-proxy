@@ -64,7 +64,7 @@ Ordered position list; at least one entry. Each position has:
 - **payloads** (array of strings, REQUIRED): list of values to substitute at this path; at least one element.
 - **encoding** (string, optional): `"text"` (default) or `"base64"`. Applies to every payload in this position.
 
-`messages[N]` and `metadata[N]` index into the inherited or user-supplied base list.
+`metadata[N]` indexes the inherited or user-supplied metadata list; `messages[N]` indexes the user-supplied `messages[]` (REQUIRED, at least one element — recorded messages are not inherited from `flow_id`).
 
 ### stop_on_non_ok (boolean, optional)
 When `true`, abort the remaining variants once any variant returns a non-OK gRPC status (or terminates without a trailer).

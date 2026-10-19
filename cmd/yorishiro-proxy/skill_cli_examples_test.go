@@ -485,12 +485,31 @@ func extractHelpExamples(tool, help string) []cliExample {
 // of lines mentioning the client command (a marker line the extractor
 // dropped is a hole in the guard).
 func helpExampleCoverage(help map[string]string) []string {
-	return nil
+	var out []string
+	for _, tool := range sortedKeys(help) {
+		text := help[tool]
+		got := len(extractHelpExamples(tool, text))
+		if got == 0 {
+			out = append(out, fmt.Sprintf("clientToolHelp[%s]: no `%s` example extracted", tool, clientCommandMarker))
+			continue
+		}
+		want := 0
+		for _, line := range strings.Split(text, "\n") {
+			if strings.Contains(line, clientCommandMarker) {
+				want++
+			}
+		}
+		if got != want {
+			out = append(out, fmt.Sprintf("clientToolHelp[%s]: extracted %d examples, but %d lines mention `%s`", tool, got, want, clientCommandMarker))
+		}
+	}
+	return out
 }
 
 // knownBrokenHelpExamples are help examples that are wrong for a reason
-// tracked elsewhere. Each stays excluded only while it still fails: once
-// it passes the guard, the exclusion is reported as stale.
+// tracked elsewhere. Each stays excluded only while it still matches an
+// example that still fails: once the example passes the guard, or no help
+// example matches the entry any more, the exclusion is reported as stale.
 var knownBrokenHelpExamples = []struct {
 	tool, substr, issue string
 }{
@@ -499,14 +518,16 @@ var knownBrokenHelpExamples = []struct {
 	{"intercept", "params.override_body=", "USK-1153"},
 }
 
-func knownBrokenHelpExample(tool string, args []string) string {
+// knownBrokenHelpExample returns the knownBrokenHelpExamples index that
+// matches the example, or -1.
+func knownBrokenHelpExample(tool string, args []string) int {
 	joined := strings.Join(args, " ")
-	for _, kb := range knownBrokenHelpExamples {
+	for i, kb := range knownBrokenHelpExamples {
 		if kb.tool == tool && strings.Contains(joined, kb.substr) {
-			return kb.issue
+			return i
 		}
 	}
-	return ""
+	return -1
 }
 
 func sortedKeys(m map[string]string) []string {
@@ -524,14 +545,20 @@ func sortedKeys(m map[string]string) []string {
 func TestClientToolHelpExamples_AcceptedByLiveSchema(t *testing.T) {
 	ctx, session := newValidationSession(t)
 
+	matched := make([]bool, len(knownBrokenHelpExamples))
 	for _, tool := range sortedKeys(clientToolHelp) {
 		for _, ex := range extractHelpExamples(tool, clientToolHelp[tool]) {
+			kb := knownBrokenHelpExample(tool, ex.Args)
+			if kb >= 0 {
+				matched[kb] = true
+			}
 			t.Run(ex.name(), func(t *testing.T) {
 				err := ex.Err
 				if err == nil {
 					err = checkClientExample(ctx, session, ex.Args)
 				}
-				if issue := knownBrokenHelpExample(tool, ex.Args); issue != "" {
+				if kb >= 0 {
+					issue := knownBrokenHelpExamples[kb].issue
 					if err == nil {
 						t.Errorf("stale exclusion: the example now passes; remove the %s entry from knownBrokenHelpExamples", issue)
 						return
@@ -545,6 +572,11 @@ func TestClientToolHelpExamples_AcceptedByLiveSchema(t *testing.T) {
 					t.Errorf("`yorishiro-proxy client %s`: %v", strings.Join(ex.Args, " "), err)
 				}
 			})
+		}
+	}
+	for i, kb := range knownBrokenHelpExamples {
+		if !matched[i] {
+			t.Errorf("stale exclusion: no clientToolHelp[%s] example contains %q any more; remove the %s entry from knownBrokenHelpExamples", kb.tool, kb.substr, kb.issue)
 		}
 	}
 }
