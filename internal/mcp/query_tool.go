@@ -230,8 +230,8 @@ type queryFilter struct {
 	URLPattern string `json:"url_pattern,omitempty" jsonschema:"URL substring search pattern"`
 	// StatusCode filters flows/fuzz_results by HTTP response status code.
 	StatusCode int `json:"status_code,omitempty" jsonschema:"HTTP response status code filter"`
-	// BlockedBy filters flows by blocked_by value (e.g. "target_scope", "intercept_drop", "rate_limit", "capacity").
-	BlockedBy string `json:"blocked_by,omitempty" jsonschema:"blocked_by filter (e.g. target_scope, intercept_drop, rate_limit, capacity)"`
+	// BlockedBy filters flows by blocked_by value (e.g. "target_scope", "intercept_drop", "intercept_cancelled", "rate_limit", "capacity").
+	BlockedBy string `json:"blocked_by,omitempty" jsonschema:"blocked_by filter (e.g. target_scope, intercept_drop, intercept_cancelled, rate_limit, capacity)"`
 	// Origin filters streams by how they came into existence (USK-786):
 	// "proxy" for live MITM-recorded traffic, "resend" for streams created by the
 	// resend_* MCP tools, "fuzz" reserved for fuzz campaigns. Empty disables the filter.
@@ -323,7 +323,7 @@ var validFilterHTTPVersions = []string{"http/1.0", "http/1.1", "h2", "h2c"}
 var validFilterStates = []string{"active", "complete", "error"}
 
 // validFilterBlockedBy lists valid values for filter.blocked_by.
-var validFilterBlockedBy = []string{"target_scope", "intercept_drop", "rate_limit", "safety_filter", "budget", "capacity"}
+var validFilterBlockedBy = []string{"target_scope", "intercept_drop", "intercept_cancelled", "rate_limit", "safety_filter", "budget", "capacity"}
 
 // validFilterOrigins lists valid values for filter.origin (USK-786).
 // Mirrors flow.Origin constants; "fuzz" is reserved for forward compatibility.
