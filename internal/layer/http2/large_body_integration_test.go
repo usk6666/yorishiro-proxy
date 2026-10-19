@@ -513,7 +513,18 @@ func TestLargeBody_HTTP2_ExceedsMaxBodySizeReturnsStreamError(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
-	respBody := makeH2LargeBody(h2LargeBodySize)
+	// The test only exercises the spill-to-disk path if the body spills
+	// before the cap is hit: threshold < cap < body. The error is raised
+	// inside the Layer, so no inspector Step can observe the spill; guard
+	// the ordering here so a later constant edit cannot silently move this
+	// test onto the in-memory path.
+	spillThreshold, maxBodySize, bodySize := int64(h2SpillThresholdTest), int64(h2MaxBodyTestCap), int64(h2LargeBodySize)
+	if !(spillThreshold < maxBodySize && maxBodySize < bodySize) {
+		t.Fatalf("precondition: need spill threshold (%d) < max body size (%d) < body size (%d)",
+			spillThreshold, maxBodySize, bodySize)
+	}
+
+	respBody := makeH2LargeBody(int(bodySize))
 
 	upAddr, _, _, upShutdown := startH2TLSUpstream(t, "maxbody-marker",
 		nethttp.HandlerFunc(func(w nethttp.ResponseWriter, r *nethttp.Request) {
@@ -523,7 +534,7 @@ func TestLargeBody_HTTP2_ExceedsMaxBodySizeReturnsStreamError(t *testing.T) {
 	defer upShutdown()
 
 	spillDir := t.TempDir()
-	bcfg := makeBuildCfgWithBody(t, nil, spillDir, h2SpillThresholdTest, h2MaxBodyTestCap)
+	bcfg := makeBuildCfgWithBody(t, nil, spillDir, spillThreshold, maxBodySize)
 	proxyAddr, store := startH2MITMProxy(t, ctx, bcfg, pipelineOpts{})
 
 	cli := newMITMH2Client(proxyAddr, upAddr)
