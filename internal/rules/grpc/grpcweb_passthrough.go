@@ -4,25 +4,61 @@ import (
 	"encoding/base64"
 	"strings"
 
+	"github.com/usk6666/yorishiro-proxy/internal/config"
+	"github.com/usk6666/yorishiro-proxy/internal/encoding/grpclpm"
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/rules/common"
 )
 
-// USK-1203 (review S-1): a gRPC-Web body that fails to parse is emitted as a
-// Start whose Envelope.Raw is the whole observed body, followed by a sentinel
-// End — no GRPCDataMessage is ever emitted for it — and the upstream-side
-// grpcweb Layer forwards that body verbatim. Without the check below, the
-// payload / body targets of the Input SafetyFilter (destructive-sql,
-// destructive-os-command, custom payload rules) would never see those bytes:
-// a valid frame carrying `DROP TABLE users` plus one stray byte would reach
-// the upstream unscanned.
+// USK-1203 (review S-1 / S-4 / S-5): a gRPC-Web body that fails to parse is
+// emitted as a Start whose Envelope.Raw is the whole observed body, followed
+// by a sentinel End — no GRPCDataMessage is ever emitted for it — and the
+// upstream-side grpcweb Layer forwards that body verbatim. Without the scan
+// below, the payload / body targets of the Input SafetyFilter
+// (destructive-sql, destructive-os-command, custom payload rules) would never
+// see those bytes: a valid frame carrying `DROP TABLE users` plus one stray
+// byte would reach the upstream unscanned.
+//
+// The scan is deny-only, so it widens rather than narrows: every plausible
+// reading of the body is a candidate, and a rule matching any of them blocks.
+
+// undecodableFrameMatch is the Violation.Match reported when a compressed
+// frame in a passthrough body cannot be inflated (fail-closed).
+const undecodableFrameMatch = "<compressed gRPC-Web frame could not be decompressed for inspection>"
+
+// passthroughScan is the set of candidate forms of a gRPC-Web
+// malformed-body Start's passthrough body.
+type passthroughScan struct {
+	forms []string
+	// undecodable is true when at least one complete frame has its
+	// compressed flag set but could not be inflated (unsupported
+	// grpc-encoding, corrupt stream, or over the size cap). Those bytes are
+	// forwarded upstream without having been inspected, so any loaded
+	// payload / body rule fails closed on them (checkPassthroughBody).
+	undecodable bool
+}
 
 // passthroughBodyForms returns the candidate forms of a gRPC-Web
-// malformed-body Start's passthrough body for payload/body matching: the
-// wire bytes verbatim and, for grpc-web-text content types, a lenient base64
-// decode of them. Returns nil for every other envelope. Read-only — the
-// returned strings are copies; env.Raw is never written.
-func passthroughBodyForms(env *envelope.Envelope, msg envelope.Message) []string {
+// malformed-body Start's passthrough body for payload/body matching. Returns
+// nil for every other envelope. Candidates, each tried by every
+// payload/body rule:
+//
+//   - the wire bytes verbatim;
+//   - for grpc-web-text content types, two lenient base64 decodes of them:
+//     one restarting the 4-char quantum at every '=' (concatenated padded
+//     chunks) and one ignoring every '=' (a decoder that skips stray
+//     padding aligns the remaining characters differently, review S-5);
+//   - from each binary form (wire bytes, or each decode), the payload of
+//     every complete LPM frame found before the first incomplete header or
+//     length (grpclpm.WalkCompleteFrames), so payload-anchored rules see the
+//     same bytes as on the Data path (review F-4). A frame flagged
+//     compressed is inflated with the grpc-encoding and algorithm set the
+//     Layer's Data path uses (grpclpm.Decompress), bounded by
+//     config.MaxGRPCMessageSize — the Layer default — so a gzip-compressed
+//     destructive payload is seen too (review S-4).
+//
+// Read-only: env.Raw is never written.
+func passthroughBodyForms(env *envelope.Envelope, msg envelope.Message) *passthroughScan {
 	if !envelope.IsGRPCWebPassthroughStart(env) {
 		return nil
 	}
@@ -30,29 +66,58 @@ func passthroughBodyForms(env *envelope.Envelope, msg envelope.Message) []string
 	if !ok {
 		return nil
 	}
-	forms := []string{string(env.Raw)}
+	scan := &passthroughScan{}
+	binaries := [][]byte{env.Raw}
+	scan.forms = append(scan.forms, string(env.Raw))
 	if isGRPCWebTextContentType(start.ContentType) {
-		if decoded := lenientBase64Decode(env.Raw); len(decoded) > 0 {
-			forms = append(forms, string(decoded))
+		for _, decoded := range [][]byte{lenientBase64Decode(env.Raw), base64DecodeIgnoringPadding(env.Raw)} {
+			if len(decoded) > 0 {
+				binaries = append(binaries, decoded)
+				scan.forms = append(scan.forms, string(decoded))
+			}
 		}
 	}
-	return forms
+	for _, b := range binaries {
+		for _, fr := range grpclpm.WalkCompleteFrames(b) {
+			payload := fr.Payload
+			if fr.Compressed() {
+				inflated, err := grpclpm.Decompress(payload, start.Encoding, config.MaxGRPCMessageSize)
+				if err != nil {
+					scan.undecodable = true
+					continue
+				}
+				payload = inflated
+			}
+			scan.forms = append(scan.forms, string(payload))
+		}
+	}
+	return scan
 }
 
 // checkPassthroughBody matches rule's payload / body targets against the
 // passthrough body forms. Input Safety is deny-only, so matching any form
-// fails closed.
-func checkPassthroughBody(rule *common.CompiledRule, forms []string) *Violation {
-	if len(forms) == 0 {
+// fails closed. When the body holds a compressed frame that could not be
+// inflated, any payload / body-targeted rule reports a violation without a
+// pattern match: those bytes would otherwise reach upstream uninspected.
+func checkPassthroughBody(rule *common.CompiledRule, scan *passthroughScan) *Violation {
+	if scan == nil {
 		return nil
 	}
 	for _, target := range rule.Targets {
 		if target != TargetPayload && target != common.TargetBody {
 			continue
 		}
-		for _, form := range forms {
+		for _, form := range scan.forms {
 			if v := matchRuleData(rule, form, "payload"); v != nil {
 				return v
+			}
+		}
+		if scan.undecodable {
+			return &Violation{
+				RuleID:   rule.ID,
+				RuleName: rule.Name,
+				Target:   "payload",
+				Match:    undecodableFrameMatch,
 			}
 		}
 	}
@@ -69,6 +134,35 @@ func isGRPCWebTextContentType(ct string) bool {
 	return mt == "application/grpc-web-text" || strings.HasPrefix(mt, "application/grpc-web-text+")
 }
 
+// base64Sextet maps a standard or URL-safe base64 alphabet byte to its
+// standard-alphabet form, reporting false for any other byte.
+func base64Sextet(c byte) (byte, bool) {
+	switch {
+	case c >= 'A' && c <= 'Z', c >= 'a' && c <= 'z', c >= '0' && c <= '9', c == '+', c == '/':
+		return c, true
+	case c == '-':
+		return '+', true
+	case c == '_':
+		return '/', true
+	default:
+		return 0, false
+	}
+}
+
+// decodeRawSegment decodes an unpadded run of standard-alphabet base64
+// characters as far as it goes (a trailing lone sextet carries no full byte).
+func decodeRawSegment(seg []byte) []byte {
+	if len(seg)%4 == 1 {
+		seg = seg[:len(seg)-1]
+	}
+	if len(seg) == 0 {
+		return nil
+	}
+	buf := make([]byte, base64.RawStdEncoding.DecodedLen(len(seg)))
+	n, _ := base64.RawStdEncoding.Decode(buf, seg)
+	return buf[:n]
+}
+
 // lenientBase64Decode decodes as much of b as possible: bytes outside the
 // standard / URL-safe base64 alphabet are skipped, '=' padding ends a
 // segment (gRPC-Web text bodies may be a concatenation of independently
@@ -77,29 +171,28 @@ func isGRPCWebTextContentType(ct string) bool {
 // bytes are never replaced with this output.
 func lenientBase64Decode(b []byte) []byte {
 	var out, seg []byte
-	flush := func() {
-		if len(seg)%4 == 1 {
-			seg = seg[:len(seg)-1] // a lone sextet carries no full byte
-		}
-		if len(seg) > 0 {
-			buf := make([]byte, base64.RawStdEncoding.DecodedLen(len(seg)))
-			n, _ := base64.RawStdEncoding.Decode(buf, seg)
-			out = append(out, buf[:n]...)
-		}
-		seg = seg[:0]
-	}
 	for _, c := range b {
-		switch {
-		case c >= 'A' && c <= 'Z', c >= 'a' && c <= 'z', c >= '0' && c <= '9', c == '+', c == '/':
-			seg = append(seg, c)
-		case c == '-':
-			seg = append(seg, '+')
-		case c == '_':
-			seg = append(seg, '/')
-		case c == '=':
-			flush()
+		if s, ok := base64Sextet(c); ok {
+			seg = append(seg, s)
+		} else if c == '=' {
+			out = append(out, decodeRawSegment(seg)...)
+			seg = seg[:0]
 		}
 	}
-	flush()
-	return out
+	return append(out, decodeRawSegment(seg)...)
+}
+
+// base64DecodeIgnoringPadding decodes every base64 alphabet character of b as
+// one string, ignoring '=' and every other non-alphabet byte. This is the
+// alignment a decoder that skips stray padding would see, which differs from
+// lenientBase64Decode's restart-at-'=' reading whenever '=' appears
+// mid-body (review S-5).
+func base64DecodeIgnoringPadding(b []byte) []byte {
+	var seg []byte
+	for _, c := range b {
+		if s, ok := base64Sextet(c); ok {
+			seg = append(seg, s)
+		}
+	}
+	return decodeRawSegment(seg)
 }

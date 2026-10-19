@@ -16,6 +16,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/usk6666/yorishiro-proxy/internal/encoding/grpclpm"
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/layer"
 	"github.com/usk6666/yorishiro-proxy/internal/pluginv2"
@@ -1114,47 +1115,23 @@ func base64StdEncode(b []byte) string {
 // gzip bombs). The caller threads the per-Channel cap resolved at Wrap
 // time (defaulting to config.MaxGRPCMessageSize when no
 // WithMaxMessageSize Option is supplied).
+//
+// The algorithm set and bound live in grpclpm.Decompress, shared with the
+// gRPC Input SafetyEngine's scan of malformed-body passthroughs (USK-1203).
+// "Compressed" flag with encoding=identity is technically an RFC violation;
+// it is treated as passthrough rather than failing.
 func maybeDecompress(payload []byte, compressed bool, encoding string, maxMessageSize uint32) ([]byte, error) {
 	if !compressed {
 		return payload, nil
 	}
-	switch strings.ToLower(strings.TrimSpace(encoding)) {
-	case "", "identity":
-		// "Compressed" flag set but encoding=identity is technically an RFC
-		// violation; treat as passthrough rather than failing.
-		return payload, nil
-	case "gzip":
-		zr, err := gzip.NewReader(bytes.NewReader(payload))
-		if err != nil {
-			return nil, &layer.StreamError{
-				Code:   layer.ErrorInternalError,
-				Reason: "grpcweb: gzip new reader: " + err.Error(),
-			}
-		}
-		defer zr.Close()
-		// Bound decompressed length to maxMessageSize to defend against
-		// gzip-bomb DoS. Read at most cap+1 so we can detect overflow.
-		cap := int64(maxMessageSize)
-		out, err := io.ReadAll(io.LimitReader(zr, cap+1))
-		if err != nil {
-			return nil, &layer.StreamError{
-				Code:   layer.ErrorInternalError,
-				Reason: "grpcweb: gzip read: " + err.Error(),
-			}
-		}
-		if int64(len(out)) > cap {
-			return nil, &layer.StreamError{
-				Code:   layer.ErrorInternalError,
-				Reason: fmt.Sprintf("grpcweb: gzip decompressed size exceeds cap %d", cap),
-			}
-		}
-		return out, nil
-	default:
+	out, err := grpclpm.Decompress(payload, encoding, maxMessageSize)
+	if err != nil {
 		return nil, &layer.StreamError{
 			Code:   layer.ErrorInternalError,
-			Reason: "grpcweb: unsupported grpc-encoding: " + encoding,
+			Reason: "grpcweb: " + err.Error(),
 		}
 	}
+	return out, nil
 }
 
 // compressPayload compresses payload using encoding. identity / empty are
