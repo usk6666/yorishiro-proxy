@@ -727,6 +727,25 @@ func RunStackSession(
 	return RunStackSessionExchange(ctx, stack, clientCh, dial, p, opts...)
 }
 
+// RunPreDialedStackSession runs a session whose upstream is already
+// established (USK-1216). Scaffolding: not implemented yet — it keeps
+// today's lazy-dial behaviour.
+func RunPreDialedStackSession(
+	ctx context.Context,
+	stack *connector.ConnectionStack,
+	p *pipeline.Pipeline,
+	opts ...SessionOptions,
+) error {
+	dial := func(_ context.Context, _ *envelope.Envelope) (layer.Channel, error) {
+		ch, ok := <-stack.UpstreamTopmost().Channels()
+		if !ok {
+			return nil, errors.New("session: upstream topmost produced no Channel")
+		}
+		return ch, nil
+	}
+	return RunStackSession(ctx, stack, dial, p, opts...)
+}
+
 // RunStackSessionExchange is the per-exchange variant of RunStackSession.
 // It accepts a pre-fetched client Channel rather than pulling one from
 // stack.ClientTopmost().Channels(). This is the entry point used by HTTP/1.x
