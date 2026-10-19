@@ -82,7 +82,8 @@ func TestE2E_ProxyStart_ListenAddrValidation(t *testing.T) {
 //   - proxy_start accepts the URL form and records it in the manager
 //     (visible via query("config").upstream_proxy with redacted creds).
 //   - Malformed values (unsupported scheme, parse failure) surface
-//     errors at proxy_start time.
+//     errors at proxy_start time (exhaustive tier:
+//     TestE2E_ProxyStart_SOCKS5UpstreamAuth_Rejections).
 //   - Live transit (USK-734): once proxy_start succeeds, an HTTP
 //     request through the proxy listener actually transits the
 //     configured SOCKS5 server. RFC 1929 user/pass auth is exercised
@@ -119,18 +120,6 @@ func TestE2E_ProxyStart_SOCKS5UpstreamAuth(t *testing.T) {
 		if strings.Contains(cfg.UpstreamProxy, wantPass) {
 			t.Errorf("config.upstream_proxy leaks password: %q", cfg.UpstreamProxy)
 		}
-	})
-
-	t.Run("invalid_upstream_proxy_rejected", func(t *testing.T) {
-		h := mcptest.StartHarness(t, mcptest.HarnessOptions{})
-		// connector.ParseUpstreamProxy rejects unsupported schemes
-		// with "unsupported upstream proxy scheme". Match the
-		// "upstream_proxy" wrapper plus the scheme literal so the
-		// assertion is unambiguous.
-		h.ExpectError(t, "proxy_start", map[string]any{
-			"listen_addr":    "127.0.0.1:0",
-			"upstream_proxy": "socks4://127.0.0.1:1080",
-		}, "upstream_proxy")
 	})
 
 	// USK-734: live-transit sub-case. After proxy_start sets
@@ -263,46 +252,6 @@ func stripURLScheme(t *testing.T, raw string) string {
 	return host
 }
 
-// TestE2E_ProxyStart_RejectsUnknownProtocolsField is the USK-870
-// regression guard for the removal of the `protocols` field
-// (USK-865 Option A). After the deletion, any client that still sends
-// `protocols` to proxy_start must be rejected with an unknown-field
-// schema error rather than silently ignored — this prevents a stale
-// caller from believing it has enforced a protocol allow-list when in
-// fact every protocol is now always enabled.
-//
-// The MCP go-sdk generates `additionalProperties: false` for struct
-// inputs (github.com/google/jsonschema-go infer.go: "Structs have
-// schema type 'object', and disallow additionalProperties"), so the
-// rejection comes from JSON-schema validation before the handler is
-// ever invoked.
-func TestE2E_ProxyStart_RejectsUnknownProtocolsField(t *testing.T) {
-	cases := []struct {
-		name      string
-		protocols any
-	}{
-		{"single_protocol", []any{"HTTP/1.x"}},
-		{"multiple_protocols", []any{"HTTP/1.x", "HTTPS"}},
-		{"empty_slice", []any{}},
-		{"null", nil},
-	}
-	for _, tc := range cases {
-		tc := tc
-		t.Run(tc.name, func(t *testing.T) {
-			h := mcptest.StartHarness(t, mcptest.HarnessOptions{})
-			// The schema validator emits a message that mentions the
-			// offending property name. "protocols" is the stable
-			// substring; the exact wording ("additional properties not
-			// allowed", "unknown field", etc.) is SDK-version-specific
-			// so we anchor on the field name only.
-			h.ExpectError(t, "proxy_start", map[string]any{
-				"listen_addr": "127.0.0.1:0",
-				"protocols":   tc.protocols,
-			}, "protocols")
-		})
-	}
-}
-
 // TestE2E_ProxyStart_MTLSClientCert verifies the client_cert /
 // client_key arguments to proxy_start (a) are accepted and validated
 // by the tool, (b) round-trip into the connector's HostTLSRegistry
@@ -310,9 +259,8 @@ func TestE2E_ProxyStart_RejectsUnknownProtocolsField(t *testing.T) {
 // runtime-mutable HostTLSRegistry at handshake time, so the upstream
 // observes the client cert installed by proxy_start.
 //
-// Negative cases (missing path, cert without key) exercise the live
-// validation path in applyClientCert before the listener takes
-// traffic.
+// Negative cases (missing path, cert without key) live in the exhaustive
+// tier as TestE2E_ProxyStart_MTLSClientCert_Rejections (USK-1213).
 func TestE2E_ProxyStart_MTLSClientCert(t *testing.T) {
 	t.Run("client_cert_argument_accepted", func(t *testing.T) {
 		// Acceptance + reachable-config wiring: proxy_start succeeds
@@ -389,29 +337,6 @@ func TestE2E_ProxyStart_MTLSClientCert(t *testing.T) {
 		if !strings.Contains(respBody, "client_cn=") {
 			t.Fatalf("upstream did not echo client CN; client cert was not presented (USK-733 wiring broken). body=%q", respBody)
 		}
-	})
-
-	t.Run("missing_cert_path_surfaces_error", func(t *testing.T) {
-		h := mcptest.StartHarness(t, mcptest.HarnessOptions{})
-		// The path ends up flowing through tls.LoadX509KeyPair, which
-		// returns an "open ...: no such file or directory" error.
-		// Match the stable substring "client_cert" — that's the
-		// wrapped section emitted by handleProxyStart.
-		h.ExpectError(t, "proxy_start", map[string]any{
-			"listen_addr": "127.0.0.1:0",
-			"client_cert": "/nonexistent/path/to/client.crt",
-			"client_key":  "/nonexistent/path/to/client.key",
-		}, "client_cert")
-	})
-
-	t.Run("cert_without_key_rejected", func(t *testing.T) {
-		h := mcptest.StartHarness(t, mcptest.HarnessOptions{})
-		// applyClientCert requires both fields together. Validate the
-		// "key is required" message.
-		h.ExpectError(t, "proxy_start", map[string]any{
-			"listen_addr": "127.0.0.1:0",
-			"client_cert": "/anywhere",
-		}, "client_key")
 	})
 }
 

@@ -1,5 +1,3 @@
-//go:build e2e && !e2e_smoke
-
 package mcp
 
 import (
@@ -39,6 +37,10 @@ import (
 // If a future regression accidentally hooks safety.Engine into the live
 // path (or accidentally adds a mask method to internal/rules/http), this
 // test fails on assertion (1) or (3).
+//
+// Tier: untagged (fast) since USK-1213. It opens no listener — the Pipeline
+// and the MCP session run in-process — so it guards the CLAUDE.md MITM
+// Principle 7 invariant on every PR instead of only nightly.
 func TestWireFidelity_LivePath_NoMask_MCP_Mask(t *testing.T) {
 	ctx := context.Background()
 

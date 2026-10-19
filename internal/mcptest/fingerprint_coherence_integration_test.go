@@ -28,7 +28,6 @@
 package mcptest_test
 
 import (
-	"bufio"
 	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
@@ -418,47 +417,6 @@ func fpH2ClientThroughProxy(proxyAddr, connectTarget, serverName string) *gohttp
 		},
 	}
 	return &gohttp.Client{Transport: tr, Timeout: 30 * time.Second}
-}
-
-// fpDialCONNECTTunnel opens a CONNECT tunnel to proxyAddr for target and
-// returns the post-200 raw connection. Uniquely named to avoid colliding
-// with connect_modes_smoke's dialCONNECTTunnel (both compile into the same
-// package under -tags e2e).
-func fpDialCONNECTTunnel(proxyAddr, target string) (net.Conn, error) {
-	c, err := net.DialTimeout("tcp", proxyAddr, 5*time.Second)
-	if err != nil {
-		return nil, err
-	}
-	req := fmt.Sprintf("CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", target, target)
-	if _, err := c.Write([]byte(req)); err != nil {
-		_ = c.Close()
-		return nil, err
-	}
-	br := bufio.NewReader(c)
-	line, err := br.ReadString('\n')
-	if err != nil {
-		_ = c.Close()
-		return nil, err
-	}
-	if !strings.Contains(line, "200") {
-		_ = c.Close()
-		return nil, fmt.Errorf("CONNECT failed: %s", line)
-	}
-	for {
-		l, err := br.ReadString('\n')
-		if err != nil {
-			_ = c.Close()
-			return nil, err
-		}
-		if l == "\r\n" || l == "\n" {
-			break
-		}
-	}
-	if br.Buffered() > 0 {
-		_ = c.Close()
-		return nil, fmt.Errorf("unexpected buffered bytes after CONNECT response")
-	}
-	return c, nil
 }
 
 // ---------------------------------------------------------------------------
