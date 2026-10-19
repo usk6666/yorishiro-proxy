@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -429,6 +430,18 @@ type upstreamHolder struct {
 	// goroutine finished with, if any. Written only by goroutine 2 (upstream->client); read after the
 	// errgroup's Wait.
 	recvErr error
+
+	// endingRPC latches once clientToUpstream starts delivering a
+	// proxy-synthesized native-gRPC End terminator (USK-1202). It is set
+	// BEFORE the client.Send of the terminator: from that moment the grpc
+	// client Channel may refuse further Sends (errSendAfterEnd), the
+	// upstream is about to be cascade-closed, and a client RST_STREAM in
+	// reply to the Trailers-Only is to be expected. upstreamToClient and
+	// lateClientErrorWatcher return nil instead of those consequential
+	// errors so they cannot win the errgroup's first-error slot over the
+	// clean termination. A failing Send of the terminator itself still
+	// surfaces, from clientToUpstream.
+	endingRPC atomic.Bool
 }
 
 // refused reports whether the UPSTREAM declared the stream unprocessed —
@@ -2780,6 +2793,9 @@ func dispatchClientAction(
 	case pipeline.Drop:
 		return false, nil
 	case pipeline.Respond:
+		if endsRPC(resp) {
+			uh.endingRPC.Store(true)
+		}
 		if serr := client.Send(ctx, resp); serr != nil {
 			return false, fmt.Errorf("client.Send (respond): %w", serr)
 		}
@@ -2930,7 +2946,7 @@ func upstreamToClient(
 		}
 
 		if err := client.Send(ctx, env); err != nil {
-			return fmt.Errorf("client.Send: %w", err)
+			return relaySendErr(uh, err)
 		}
 		relayed = true
 
@@ -2952,6 +2968,18 @@ func upstreamToClient(
 			return ErrUpgradePending
 		}
 	}
+}
+
+// relaySendErr maps a failed client.Send of a relayed upstream envelope to
+// upstreamToClient's return value. Once the proxy started ending the RPC with
+// its own gRPC terminator (uh.endingRPC), the client Channel refuses anything
+// after it; that refusal is a consequence of the clean termination, not a
+// session failure (USK-1202).
+func relaySendErr(uh *upstreamHolder, err error) error {
+	if uh.endingRPC.Load() {
+		return nil
+	}
+	return fmt.Errorf("client.Send: %w", err)
 }
 
 // upstreamToClientFinish is the EOF / terminal-error tail of
@@ -2980,6 +3008,11 @@ func upstreamToClient(
 func upstreamToClientFinish(ctx context.Context, opt SessionOptions, uh *upstreamHolder, clientID string, err error, relayed bool) error {
 	if errors.Is(err, ErrUpgradePending) {
 		return err
+	}
+	if err != nil && uh.endingRPC.Load() {
+		// USK-1202: the cascade-close of an RPC the proxy ended with its
+		// own terminator, not an upstream failure.
+		err = nil
 	}
 	if err != nil {
 		uh.recvErr = err
@@ -3124,6 +3157,12 @@ func lateClientErrorWatcher(
 	select {
 	case <-client.Closed():
 		if err := client.Err(); err != nil && !errors.Is(err, io.EOF) {
+			if uh.endingRPC.Load() {
+				// USK-1202: the client reset a stream the proxy already
+				// ended with its own terminator. Expected, not a failure;
+				// clientToUpstream already cascade-closed the upstream.
+				return nil
+			}
 			// Late abnormal event (e.g., RST_STREAM) arrived after the
 			// client's recv half-closed. Propagate the cancel to the
 			// response side and surface the error for classification.

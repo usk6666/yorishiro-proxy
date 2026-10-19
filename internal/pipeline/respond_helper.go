@@ -135,6 +135,9 @@ const grpcStatusPermissionDenied = 7
 //	server: yorishiro-proxy                    (HTTP Server header)
 //	x-yorishiro-matched-rules: <id>[,<id>...]  (HTTP body "matched_rules"; omitted when empty)
 //
+// Each rule ID in x-yorishiro-matched-rules is encoded by
+// encodeMatchedRuleID so the value is always a valid h2 field value.
+//
 // Identity mirrors buildPolicyDropResponse / buildRespondEnvelope: same
 // StreamID/FlowID/Context/Protocol, Sequence+1, Direction Receive. Raw is nil
 // — gRPC End is HPACK-owned and the Layer regenerates the wire form from
@@ -144,9 +147,13 @@ func buildGRPCPolicyDropResponse(env *envelope.Envelope, reason string, matchedR
 		{Name: "server", Value: "yorishiro-proxy"},
 	}
 	if len(matchedRules) > 0 {
+		encoded := make([]string, len(matchedRules))
+		for i, id := range matchedRules {
+			encoded[i] = encodeMatchedRuleID(id)
+		}
 		trailers = append(trailers, envelope.KeyValue{
 			Name:  "x-yorishiro-matched-rules",
-			Value: strings.Join(matchedRules, ","),
+			Value: strings.Join(encoded, ","),
 		})
 	}
 	return &envelope.Envelope{
@@ -162,6 +169,30 @@ func buildGRPCPolicyDropResponse(env *envelope.Envelope, reason string, matchedR
 			Trailers: trailers,
 		},
 	}
+}
+
+// encodeMatchedRuleID percent-encodes (%XX, uppercase hex) every byte of a
+// rule ID outside visible ASCII 0x21-0x7E, plus '%' and the ',' list
+// separator. Rule IDs are operator / AI-agent authored and only required to
+// be non-empty, so without this an ID carrying CR, LF, NUL or edge
+// whitespace would make the synthesized h2 field value malformed (RFC 9113
+// §8.2.1) and the client would see a stream error instead of
+// PERMISSION_DENIED. Visible-ASCII IDs pass through unchanged. This only
+// touches the proxy-synthesized value, never wire-observed data (USK-1202).
+func encodeMatchedRuleID(id string) string {
+	const hex = "0123456789ABCDEF"
+	var b strings.Builder
+	for i := 0; i < len(id); i++ {
+		c := id[i]
+		if c < 0x21 || c > 0x7e || c == '%' || c == ',' {
+			b.WriteByte('%')
+			b.WriteByte(hex[c>>4])
+			b.WriteByte(hex[c&0x0f])
+			continue
+		}
+		b.WriteByte(c)
+	}
+	return b.String()
 }
 
 // grpcPolicyDropResult returns the Result a policy Step emits when it blocks

@@ -150,6 +150,40 @@ func TestRunSession_GRPCEndRespond_SendFailureSurfaces(t *testing.T) {
 	}
 }
 
+// TestLateClientErrorWatcher_ProxyEndedRPC pins the second half of review
+// finding F-1 (USK-1202): a client RST_STREAM in reply to the proxy's
+// Trailers-Only must not be reported as "client late cancel" once the proxy
+// ended the RPC itself. Without the latch the same input surfaces an error
+// (the USK-616 behavior), which the second sub-test keeps guarding.
+func TestLateClientErrorWatcher_ProxyEndedRPC(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		endingRPC bool
+		wantErr   bool
+	}{
+		{name: "proxy ended RPC", endingRPC: true, wantErr: false},
+		{name: "ordinary late cancel", endingRPC: false, wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := &mockChannel{streamID: "grpc-stream"}
+			client.fireTerminated(&layer.StreamError{Code: layer.ErrorCanceled})
+			upstream := &mockChannel{streamID: "up"}
+			uh := &upstreamHolder{
+				ch:    upstream,
+				ready: make(chan struct{}),
+				done:  make(chan struct{}),
+			}
+			uh.endingRPC.Store(tc.endingRPC)
+			close(uh.done)
+
+			err := lateClientErrorWatcher(context.Background(), client, uh, make(chan struct{}))
+			if (err != nil) != tc.wantErr {
+				t.Errorf("lateClientErrorWatcher err = %v, wantErr %v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
 // TestRunSession_GRPCEndRespond_UpstreamRelayAfterEndIsClean pins the
 // USK-1202 review finding F-1: upstreamToClient may already hold an upstream
 // envelope when the proxy delivers its gRPC End terminator. Its client.Send

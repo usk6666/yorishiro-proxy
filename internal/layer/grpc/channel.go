@@ -189,6 +189,11 @@ type grpcChannel struct {
 	// (e.g. response HEADERS enqueued after a proxy-synthesized
 	// Trailers-Only, or anything after END_STREAM). Never acquired while
 	// holding mu, and never acquired by the Next path (USK-1202).
+	//
+	// A Data Send parked on the peer's flow control keeps holding sendMu
+	// until the write completes, its ctx is cancelled, or the Layer shuts
+	// down, so a terminator Send queues behind it. That is intentional:
+	// trailers must not overtake DATA already committed to the stream.
 	sendMu sync.Mutex
 
 	mu      sync.Mutex
