@@ -655,3 +655,41 @@ func TestRun_PolicyReloadHookOnlyWithPolicySource(t *testing.T) {
 		})
 	}
 }
+
+// TestLoadConfigFileSource_IgnoresRemovedCodecPlugins pins the handling of
+// the removed `codec_plugins` key (USK-1210). It has had no effect since
+// v0.15.0 (USK-706); a config file that still carries it — in the
+// pre-removal documented shape, an array of {path} entries — must keep
+// loading through the boot / SIGHUP entry point, with its real sections
+// applied and validation passing. The config loader is lenient about
+// unknown keys by design (see config's TestLoadFile_UnknownFieldsIgnored).
+func TestLoadConfigFileSource_IgnoresRemovedCodecPlugins(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	content := `{
+		"codec_plugins": [{"path": "x.star"}, {"path": "dir/"}],
+		"target_scope_policy": {
+			"allows": [{"hostname": "*.target.example"}]
+		}
+	}`
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write config file: %v", err)
+	}
+
+	proxyCfg, loaded, err := loadConfigFileSource(path)
+	if err != nil {
+		t.Fatalf("loadConfigFileSource: %v", err)
+	}
+	if proxyCfg == nil || loaded == nil {
+		t.Fatalf("loadConfigFileSource returned nil result: cfg=%v loaded=%v", proxyCfg, loaded)
+	}
+	pol := proxyCfg.TargetScopePolicy
+	if pol == nil || len(pol.Allows) != 1 || pol.Allows[0].Hostname != "*.target.example" {
+		t.Fatalf("TargetScopePolicy = %+v, want one allow rule for *.target.example", pol)
+	}
+	if loaded.Policy != pol {
+		t.Errorf("LoadedPolicy.Policy = %p, want the config's TargetScopePolicy %p", loaded.Policy, pol)
+	}
+	if loaded.Source != "config file" {
+		t.Errorf("LoadedPolicy.Source = %q, want %q", loaded.Source, "config file")
+	}
+}

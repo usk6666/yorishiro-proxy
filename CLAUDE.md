@@ -100,7 +100,6 @@ internal/
                            #   WireEncoderRegistry (per-protocol on-Send re-encode).
   connector/               # TCP listener, ConnectionStack builder, per-connection plumbing
                            #   full_listener.go (the sole listener API),
-                           #   coordinator.go (multi-listener orchestrator),
                            #   connection_stack.go, detect.go, alpn_routing.go,
                            #   connect_handler.go (CONNECT tunnel), socks5_handler.go,
                            #   h2_dispatch.go, h2_pool.go, h2c_handler.go,
@@ -130,7 +129,10 @@ internal/
   flow/                    # Stream/Flow Store (sqlite); HAR / JSONL export, import
   cert/                    # Root CA + dynamic server cert issuance
   config/                  # Configuration loading + validation (incl. Plugins, body-spill, limits)
-  encoding/                # Protobuf framing helper
+  encoding/                # String codec registry (base64 / url / hex / html / unicode / hash / case)
+                           #   used by macro encoders and MCP body patches;
+                           #   protobuf/ (schema-less wire <-> JSON), protoschema/ (schema-aware
+                           #   codec, server reflection, protoc), grpclpm/ (gRPC LPM helpers)
   fuzzer/                  # Iterator / Position / RequestData primitives for typed-fuzz path
   mcp/                     # MCP server, tools, handlers
                            #   typed resend: resend_http / resend_ws / resend_grpc / resend_raw
@@ -153,7 +155,8 @@ make test           # fast tier: ensure-ui → go test -race -v ./... (unit test
 make test-fast      # alias for `make test`; explicit naming for the fast tier (USK-728)
 make test-pkg PKG=./internal/<pkg>/... [RUN=<regexp>] [TAGS=e2e]
                     # one package/pattern only — the TDD red/green loop
-make test-e2e-smoke # smoke tier (merge gate): ensure-ui → go test -race -v -tags 'e2e e2e_smoke' ./...
+make test-e2e-smoke # smoke tier (merge gate): ensure-ui → tools/smokeselect → go test -race -v -tags 'e2e e2e_smoke'
+                    #   -run <smoke tests only> <smoke packages>  (untagged tests are NOT re-run; USK-1209)
 make test-e2e       # full tier (nightly): ensure-ui → go test -race -v -tags e2e ./...
 make test-cover     # ensure-ui → test with coverage report
 make vet            # ensure-ui → go vet ./...
@@ -186,7 +189,11 @@ make clean          # Delete build artifacts
 
 > **e2e test tiers (USK-728)**: e2e tests are split into three tiers.
 > - **fast** (`make test`/`make test-fast`): untagged unit tests only.
-> - **smoke** (`make test-e2e-smoke`): merge-gate subset — files with `//go:build e2e` only. Run by CI on every PR.
+> - **smoke** (`make test-e2e-smoke`): merge-gate subset — only the tests declared in `//go:build e2e` files. Run by CI on every PR.
+>   Building under `-tags 'e2e e2e_smoke'` also compiles every untagged test, so the recipe narrows `go test` with
+>   `tools/smokeselect` (derived from `go list` + `go/parser`, nothing hard-coded) instead of re-running the fast tier;
+>   it fails loudly on a selection error or an empty selection (USK-1209). For the old "untagged + smoke" coverage, run `make test test-e2e-smoke`.
+>   Both PR test jobs in `ci.yml` call these `make` targets rather than hand-copied `go test` lines (USK-1058).
 > - **full** (`make test-e2e`): every e2e file — smoke ∪ exhaustive. Run nightly via `.github/workflows/nightly-e2e.yml`; also on dependency-update PRs (head branch `automated/security-updates`) as `ci.yml`'s `test-e2e-full` job (advisory until it is added to the branch ruleset's required checks), and on any push to `main` touching `go.mod` / `go.sum` (USK-1055).
 >
 > The `e2e_smoke` build tag is an **exclusion filter**: smoke files keep plain `//go:build e2e`; exhaustive files use `//go:build e2e && !e2e_smoke` so they drop out of the smoke tier but remain in the full tier under `-tags e2e` alone. This guarantees `smoke ⊂ full`.
@@ -299,7 +306,7 @@ policy but are deliberately not enumerated — `/license-check` walks the whole 
 | `golang.org/x/net` | BSD-3-Clause | `http2` / `hpack` / `h2c` / `proxy` primitives used by the HTTP/2 data path |
 | `github.com/refraction-networking/utls` | BSD-3-Clause | uTLS ClientHello fingerprinting (`internal/layer/tlslayer`, `internal/connector/transport`) |
 | `github.com/andybalholm/brotli` | MIT | Brotli body decode (`internal/bodydecode`) |
-| `github.com/klauspost/compress` | Apache-2.0 | zstd / s2 body decode and protobuf framing compression |
+| `github.com/klauspost/compress` | Apache-2.0 | zstd body decode (`internal/bodydecode`) |
 | `golang.org/x/time` | BSD-3-Clause | Rate limiting in `internal/connector/ratelimit.go` |
 | `google.golang.org/grpc` | Apache-2.0 | Server-reflection client and the MCP-side gRPC resend / fuzz helpers. **Not** in the proxy data path — gRPC on the wire is parsed natively (see "No external proxy libraries"). |
 | `google.golang.org/protobuf` | BSD-3-Clause | Descriptor / reflection handling in `internal/encoding/protoschema` |

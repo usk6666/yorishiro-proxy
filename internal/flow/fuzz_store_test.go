@@ -317,7 +317,10 @@ func TestPayloadsFromJSON_Invalid(t *testing.T) {
 
 func TestSchemaV2_Migration(t *testing.T) {
 	t.Parallel()
-	// The newTestStore helper runs migrations; just verify the tables exist.
+	// newTestStore copies a template built by the full migration chain (its
+	// schema equivalence is pinned by
+	// TestTemplateStore_SchemaMatchesMigrationChain); just verify the V2
+	// tables exist.
 	store := newTestStore(t)
 	ctx := context.Background()
 

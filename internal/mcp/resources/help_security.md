@@ -199,12 +199,15 @@ the scheme of the client-facing leg — including raw TCP that matches no known
 protocol (`http` when it is cleartext, `https` when the proxy terminated TLS on
 it) and every `tcp_forwards` entry, `protocol: raw` included.
 
-SOCKS5 is the only *deliberate* case, but not the only one today: the
-per-request path check (rules with a `path_prefix`) still hands the engine a
-blank scheme for an HTTP/2 request that omits `:scheme`, which makes a
-`schemes`-bearing rule silently stop matching there. That is being fixed under
-USK-1086; until it lands, a path rule that must hold for live HTTP/2 traffic is
-safest written without `schemes`.
+Two live-data-path admission gates do not observe the transport: SOCKS5
+(blank scheme) and the `CONNECT` admission gate (always `https`); the tunneled
+traffic behind them is re-checked as described above.
+
+For HTTP requests (including WebSocket / SSE upgrade requests and HTTP/2), the
+proxy matches `schemes` against the transport of the client's connection — TLS or not — not
+a client-declared HTTP/2 `:scheme` (which may be absent or disagree with the
+connection) and not a `scheme` set via intercept `modify_and_forward`. The
+recorded request still shows the scheme exactly as the client declared it.
 
 ### How a deny shows up on the wire
 

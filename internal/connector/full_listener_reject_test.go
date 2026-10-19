@@ -65,6 +65,9 @@ func TestFullListener_OnReject_ReportsKindAndTarget(t *testing.T) {
 		wantTarget  string
 		wantWrote   bool
 		readTimeout time.Duration
+		// rejectPeekTimeout overrides FullListener.rejectPeekTimeout
+		// when non-zero. Only the silent-client row waits on it.
+		rejectPeekTimeout time.Duration
 	}{
 		{
 			name: "HTTP/1 absolute-form request line is reported verbatim",
@@ -94,11 +97,14 @@ func TestFullListener_OnReject_ReportsKindAndTarget(t *testing.T) {
 			readTimeout: 2 * time.Second,
 		},
 		{
-			name:        "silent client is reported as unknown after the reject peek timeout",
-			payload:     nil,
-			wantKind:    ProtocolUnknown,
-			wantWrote:   false,
-			readTimeout: 3 * time.Second,
+			name:      "silent client is reported as unknown after the reject peek timeout",
+			payload:   nil,
+			wantKind:  ProtocolUnknown,
+			wantWrote: false,
+			// Bounded just above the shortened reject peek timeout so
+			// a listener that ignored the field (default 1s) goes red.
+			readTimeout:       700 * time.Millisecond,
+			rejectPeekTimeout: 200 * time.Millisecond,
 		},
 	}
 
@@ -108,6 +114,10 @@ func TestFullListener_OnReject_ReportsKindAndTarget(t *testing.T) {
 			h := newCapacityRejectionHarnessWith(t, 1, func(cfg *FullListenerConfig) {
 				cfg.Name = "reject-test"
 				cfg.OnReject = rec.onReject
+			}, func(fl *FullListener) {
+				if tt.rejectPeekTimeout > 0 {
+					fl.rejectPeekTimeout = tt.rejectPeekTimeout
+				}
 			})
 			t.Cleanup(h.Release)
 
@@ -158,12 +168,23 @@ func TestFullListener_OnReject_ReportsKindAndTarget(t *testing.T) {
 
 // TestFullListener_OnReject_StalledRequestLine covers a CONNECT whose
 // request line never completes: the reject goroutine must still finish
-// within rejectPeekTimeout + rejectWriteDeadline and report the partial
-// target as observed.
+// within the reject peek timeout and report the partial target as
+// observed. Detection and the request-line read share one absolute
+// deadline, so the shortened rejectPeekTimeout bounds both.
+//
+// The bound is peekTimeout + 500ms rather than + rejectWriteDeadline: the
+// 503 write lands in a loopback socket buffer and completes at once, so
+// rejectWriteDeadline never applies here, and a bound below
+// defaultRejectPeekTimeout (1s) is what makes a listener that ignored
+// fl.rejectPeekTimeout go red.
 func TestFullListener_OnReject_StalledRequestLine(t *testing.T) {
+	const peekTimeout = 300 * time.Millisecond
+	const bound = peekTimeout + 500*time.Millisecond
 	rec := newRejectRecorder()
 	h := newCapacityRejectionHarnessWith(t, 1, func(cfg *FullListenerConfig) {
 		cfg.OnReject = rec.onReject
+	}, func(fl *FullListener) {
+		fl.rejectPeekTimeout = peekTimeout
 	})
 	t.Cleanup(h.Release)
 
@@ -171,9 +192,9 @@ func TestFullListener_OnReject_StalledRequestLine(t *testing.T) {
 	conn := dialAndSend(t, h.Addr(), []byte("CONNECT exa"))
 	defer conn.Close()
 
-	info := rec.next(t, rejectPeekTimeout+rejectWriteDeadline)
-	if elapsed := time.Since(start); elapsed > rejectPeekTimeout+rejectWriteDeadline {
-		t.Errorf("rejection took %v, want <= %v", elapsed, rejectPeekTimeout+rejectWriteDeadline)
+	info := rec.next(t, bound)
+	if elapsed := time.Since(start); elapsed > bound {
+		t.Errorf("rejection took %v, want <= %v", elapsed, bound)
 	}
 	if info.DetectedKind != ProtocolHTTPConnect {
 		t.Errorf("DetectedKind = %v, want %v", info.DetectedKind, ProtocolHTTPConnect)

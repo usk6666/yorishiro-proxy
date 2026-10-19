@@ -195,21 +195,6 @@ func SOCKS5AuthUserFromContext(ctx context.Context) string {
 	return ""
 }
 
-// SOCKS5Protocol returns the protocol string with a "SOCKS5+" prefix if the
-// request arrived through a SOCKS5 tunnel (detected via context metadata).
-// For example, "HTTPS" becomes "SOCKS5+HTTPS" and "HTTP/1.x" becomes "SOCKS5+HTTP".
-func SOCKS5Protocol(ctx context.Context, base string) string {
-	if SOCKS5TargetFromContext(ctx) != "" {
-		switch base {
-		case "HTTP/1.x":
-			return "SOCKS5+HTTP"
-		default:
-			return "SOCKS5+" + base
-		}
-	}
-	return base
-}
-
 // MergeSOCKS5Tags adds SOCKS5 metadata tags to the given tags map if the
 // request arrived through a SOCKS5 tunnel. If tags is nil, a new map is
 // created. Returns the (possibly new) tags map.

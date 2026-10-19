@@ -5,7 +5,4 @@
 // Provided types:
 //   - TLSTransport / StandardTransport / UTLSTransport — TLS dialer abstraction
 //   - HostTLSRegistry / HostTLSConfig / ParseBrowserProfile — per-host TLS
-//   - ConnPool — upstream TCP/TLS connection pool used by the typed-resend tools
-//   - H1Transport / RoundTripResult / RoundTripTiming — net/http-free HTTP/1.x
-//     client transport built on internal/layer/http1/parser
 package transport

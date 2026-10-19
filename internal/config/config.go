@@ -187,8 +187,9 @@ type Config struct {
 	RequestTimeout time.Duration `json:"request_timeout"`
 
 	// DialTimeout is the timeout for establishing upstream TCP connections
-	// (including any upstream proxy CONNECT handshake). Used by ConnPool
-	// in the HTTP/1.x independent engine. Defaults to 30s.
+	// (including any upstream proxy CONNECT handshake). Defaults to 30s.
+	// Validated but not currently read by any dial path: each data-path
+	// dialer applies its own fixed timeout.
 	DialTimeout time.Duration `json:"dial_timeout"`
 
 	// MaxConnections is the maximum number of concurrent proxy connections.
@@ -870,16 +871,6 @@ type ProxyConfig struct {
 	// When loaded from a config file, this section is ignored if a dedicated
 	// policy file is specified via -target-policy-file / YP_TARGET_POLICY_FILE.
 	TargetScopePolicy *TargetScopePolicyConfig `json:"target_scope_policy,omitempty"`
-
-	// CodecPlugins configures Starlark-based custom codec plugins.
-	// Each entry specifies a path to a Starlark codec file or a directory
-	// containing *.star codec files. Codec plugins are loaded at startup
-	// and registered with the codec registry alongside built-in codecs.
-	//
-	// json.RawMessage is used intentionally to avoid a dependency from the
-	// config package to the encoding package. The raw JSON is decoded into
-	// []encoding.CodecPluginConfig by the caller (e.g. cmd/yorishiro-proxy/main.go).
-	CodecPlugins json.RawMessage `json:"codec_plugins,omitempty"`
 
 	// SafetyFilter configures the SafetyFilter engine for blocking or logging
 	// destructive payloads. This is a Policy Layer setting: once loaded from a

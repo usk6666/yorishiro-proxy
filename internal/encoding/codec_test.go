@@ -179,34 +179,6 @@ func TestRegistry_Get_NotFound(t *testing.T) {
 	}
 }
 
-func TestRegistry_Register(t *testing.T) {
-	r := NewRegistry()
-
-	custom := &mockCodec{name: "custom_test"}
-	err := r.Register("custom_test", custom)
-	if err != nil {
-		t.Fatalf("Register() error = %v", err)
-	}
-
-	c, ok := r.Get("custom_test")
-	if !ok {
-		t.Fatal("Get(custom_test) returned false after Register")
-	}
-	if c.Name() != "custom_test" {
-		t.Errorf("Name() = %q, want %q", c.Name(), "custom_test")
-	}
-}
-
-func TestRegistry_Register_Duplicate(t *testing.T) {
-	r := NewRegistry()
-
-	// Registering a name that conflicts with a builtin should fail.
-	err := r.Register("base64", &mockCodec{name: "base64"})
-	if err == nil {
-		t.Error("Register(base64) expected error for duplicate name")
-	}
-}
-
 func TestRegistry_Encode_Chain(t *testing.T) {
 	r := NewRegistry()
 
@@ -276,28 +248,6 @@ func TestPackageLevelFunctions(t *testing.T) {
 	}
 	if decoded != "hello" {
 		t.Errorf("Decode = %q, want %q", decoded, "hello")
-	}
-}
-
-func TestChain(t *testing.T) {
-	r := NewRegistry()
-	chain := NewChain(r, "url_encode_query", "base64")
-
-	encoded, err := chain.Encode("hello world")
-	if err != nil {
-		t.Fatalf("Chain.Encode error = %v", err)
-	}
-	want := "aGVsbG8rd29ybGQ="
-	if encoded != want {
-		t.Errorf("Chain.Encode = %q, want %q", encoded, want)
-	}
-
-	decoded, err := chain.Decode(encoded)
-	if err != nil {
-		t.Fatalf("Chain.Decode error = %v", err)
-	}
-	if decoded != "hello world" {
-		t.Errorf("Chain.Decode = %q, want %q", decoded, "hello world")
 	}
 }
 
@@ -372,12 +322,3 @@ func TestDoubleURLEncode_Roundtrip(t *testing.T) {
 		t.Errorf("roundtrip = %q, want %q", decoded, input)
 	}
 }
-
-// mockCodec is a test double for Codec.
-type mockCodec struct {
-	name string
-}
-
-func (m *mockCodec) Name() string                    { return m.name }
-func (m *mockCodec) Encode(s string) (string, error) { return s, nil }
-func (m *mockCodec) Decode(s string) (string, error) { return s, nil }

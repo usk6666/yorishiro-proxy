@@ -19,11 +19,16 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/testutil"
 )
 
+// newTestStore returns a fresh store backed by a private copy of the migrated
+// template database (see template_store_test.go). The copy is verified to be
+// at the template's schema version before it is opened, so NewSQLiteStore
+// applies no migration step. Tests that exercise the migration chain itself
+// call NewSQLiteStore directly.
 func newTestStore(t *testing.T) *SQLiteStore {
 	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), "test.db")
-	logger := testutil.DiscardLogger()
-	store, err := NewSQLiteStore(context.Background(), dbPath, logger)
+	copyTestStoreTemplate(t, dbPath)
+	store, err := NewSQLiteStore(context.Background(), dbPath, testutil.DiscardLogger())
 	if err != nil {
 		t.Fatalf("NewSQLiteStore: %v", err)
 	}

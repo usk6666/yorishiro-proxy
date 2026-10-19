@@ -863,7 +863,7 @@ func runHTTP1ExchangeLoop(
 			wg.Add(1)
 			go func(ch layer.Channel) {
 				defer wg.Done()
-				runHTTP1Exchange(ctx, stack, ch, chain, p, sessOpts, target, grpcwebOpts, headRecorder, logger, deps.H1UpstreamMetrics)
+				runHTTP1Exchange(ctx, stack, clientH1, ch, chain, p, sessOpts, target, grpcwebOpts, headRecorder, logger, deps.H1UpstreamMetrics)
 			}(clientCh)
 		}
 	}
@@ -886,6 +886,7 @@ func runHTTP1ExchangeLoop(
 func runHTTP1Exchange(
 	ctx context.Context,
 	stack *connector.ConnectionStack,
+	clientH1 *http1.Layer,
 	clientCh layer.Channel,
 	chain *h1Chain,
 	p *pipeline.Pipeline,
@@ -927,16 +928,21 @@ func runHTTP1Exchange(
 		return
 	}
 
+	// dialFailed records that this exchange never reached an upstream, so
+	// the client will receive no response for it.
+	var dialFailed atomic.Bool
 	dial := func(dctx context.Context, env *envelope.Envelope) (layer.Channel, error) {
 		// USK-998: probe the current upstream Layer for staleness (peer
 		// idle-FIN / RST during keep-alive) and transparently redial when
 		// stale. Returns the same Layer fast when alive.
 		upstreamH1, err := chain.EnsureFresh(dctx)
 		if err != nil {
+			dialFailed.Store(true)
 			return nil, fmt.Errorf("dial: %w", err)
 		}
 		upCh := upstreamH1.OpenExchange()
 		if upCh == nil {
+			dialFailed.Store(true)
 			return nil, fmt.Errorf("proxybuild: upstream http1 layer closed before opening exchange for %s", target)
 		}
 		// USK-934: wrap the upstream channel with the same per-protocol
@@ -964,6 +970,15 @@ func runHTTP1Exchange(
 	}
 	if err := session.RunStackSessionExchange(ctx, stack, dispatchedCh, dial, p, sessOpts); err != nil && !errors.Is(err, context.Canceled) {
 		logger.Debug("proxybuild: http1 exchange ended with error", "target", target, "error", err)
+	}
+	if dialFailed.Load() {
+		// USK-1079 review F-1: no upstream (e.g. the redial replacing a
+		// retired raw-authoritative upstream failed), so this request gets
+		// no response. HTTP/1.x answers in request order, so the client
+		// connection cannot continue past a missing response: end it now
+		// rather than leave the client waiting until its own timeout. The
+		// close unblocks the exchange loop, which tears the stack down.
+		_ = clientH1.Close()
 	}
 }
 

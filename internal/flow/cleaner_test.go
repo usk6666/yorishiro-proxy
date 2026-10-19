@@ -2,7 +2,6 @@ package flow
 
 import (
 	"context"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -11,14 +10,8 @@ import (
 
 func newTestCleaner(t *testing.T, cfg CleanerConfig) (*Cleaner, *SQLiteStore) {
 	t.Helper()
-	dbPath := filepath.Join(t.TempDir(), "cleaner.db")
-	logger := testutil.DiscardLogger()
-	store, err := NewSQLiteStore(context.Background(), dbPath, logger)
-	if err != nil {
-		t.Fatalf("NewSQLiteStore: %v", err)
-	}
-	t.Cleanup(func() { store.Close() })
-	cleaner := NewCleaner(store, cfg, logger)
+	store := newTestStore(t)
+	cleaner := NewCleaner(store, cfg, testutil.DiscardLogger())
 	return cleaner, store
 }
 

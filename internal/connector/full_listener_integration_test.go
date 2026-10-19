@@ -13,6 +13,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -523,18 +524,20 @@ func startFullListenerProxy(
 		Name: "test",
 		Addr: "127.0.0.1:0",
 		OnCONNECT: connector.NewCONNECTHandler(connector.CONNECTHandlerConfig{
-			Negotiator:      connectNeg,
-			BuildCfg:        buildCfg,
-			Scope:           opts.scope,
-			RateLimiter:     opts.rateLimiter,
-			PassthroughList: opts.passthroughList,
-			OnStack:         onStack,
+			Negotiator:       connectNeg,
+			BuildCfg:         buildCfg,
+			Scope:            opts.scope,
+			RateLimiter:      opts.rateLimiter,
+			PassthroughList:  opts.passthroughList,
+			OnStack:          onStack,
+			InnerPeekTimeout: opts.innerPeekTimeout,
 		}),
 		OnSOCKS5: connector.NewSOCKS5Handler(connector.SOCKS5HandlerConfig{
-			Negotiator:      socks5Neg,
-			BuildCfg:        buildCfg,
-			PassthroughList: opts.passthroughList,
-			OnStack:         onStack,
+			Negotiator:       socks5Neg,
+			BuildCfg:         buildCfg,
+			PassthroughList:  opts.passthroughList,
+			OnStack:          onStack,
+			InnerPeekTimeout: opts.innerPeekTimeout,
 		}),
 	}
 
@@ -588,6 +591,10 @@ type fullListenerOpts struct {
 	// USK-1162: optional request-head bound installed on BuildConfig via
 	// SetRequestHeaderTimeout (the request_timeout_ms runtime path).
 	requestHeaderTimeout time.Duration
+
+	// USK-1207: optional inner-peek deadline forwarded to both the
+	// CONNECT and SOCKS5 handlers. Zero keeps DefaultInnerPeekTimeout.
+	innerPeekTimeout time.Duration
 }
 
 // waitSessionDone waits for the WaitGroup with a timeout.
@@ -982,112 +989,6 @@ func socks5AuthConnectAndSendHTTP(t *testing.T, proxyAddr, target, user, pass, r
 	}
 
 	return readHTTPResponse(t, tlsConn)
-}
-
-// TestCoordinator_MultipleListeners starts two listeners via Coordinator and
-// verifies CONNECT through one and SOCKS5 through the other both succeed.
-func TestCoordinator_MultipleListeners(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	upstreamLn1, getReqs1 := startUpstreamHTTPS(t, func(_ []byte) []byte {
-		return []byte("HTTP/1.1 200 OK\r\nContent-Length: 8\r\nConnection: close\r\n\r\ncoord-c!")
-	})
-	defer upstreamLn1.Close()
-	target1 := upstreamLn1.Addr().String()
-
-	upstreamLn2, getReqs2 := startUpstreamHTTPS(t, func(_ []byte) []byte {
-		return []byte("HTTP/1.1 200 OK\r\nContent-Length: 8\r\nConnection: close\r\n\r\ncoord-s!")
-	})
-	defer upstreamLn2.Close()
-	target2 := upstreamLn2.Addr().String()
-
-	ca := &cert.CA{}
-	if err := ca.Generate(); err != nil {
-		t.Fatal(err)
-	}
-	issuer := cert.NewIssuer(ca)
-
-	store := &testStore{}
-	var wg sync.WaitGroup
-
-	connectNeg := connector.NewCONNECTNegotiator(slog.Default())
-	socks5Neg := connector.NewSOCKS5Negotiator(slog.Default())
-
-	coord := connector.NewCoordinator(connector.CoordinatorConfig{
-		CONNECTNegotiator: connectNeg,
-		SOCKS5Negotiator:  socks5Neg,
-		BuildCfg: &connector.BuildConfig{
-			ProxyConfig:        &config.ProxyConfig{},
-			Issuer:             issuer,
-			InsecureSkipVerify: true,
-		},
-		OnStack: func(ctx context.Context, stack *connector.ConnectionStack, clientSnap, upstreamSnap *envelope.TLSSnapshot, target string) {
-			defer wg.Done()
-			defer stack.Close()
-
-			clientCh := <-stack.ClientTopmost().Channels()
-
-			steps := []pipeline.Step{
-				pipeline.NewHostScopeStep(nil),
-				pipeline.NewRecordStep(store, slog.Default()),
-			}
-			p := pipeline.New(steps...)
-
-			session.RunSession(ctx, clientCh, func(_ context.Context, _ *envelope.Envelope) (layer.Channel, error) {
-				return <-stack.UpstreamTopmost().Channels(), nil
-			}, p)
-		},
-	})
-
-	if err := coord.StartNamed(ctx, "listener-a", "127.0.0.1:0"); err != nil {
-		t.Fatalf("start listener-a: %v", err)
-	}
-	if err := coord.StartNamed(ctx, "listener-b", "127.0.0.1:0"); err != nil {
-		t.Fatalf("start listener-b: %v", err)
-	}
-	t.Cleanup(func() { coord.StopAll(context.Background()) })
-
-	statuses := coord.ListenerStatuses()
-	if len(statuses) != 2 {
-		t.Fatalf("expected 2 listeners, got %d", len(statuses))
-	}
-
-	// Find addresses by name.
-	addrByName := make(map[string]string)
-	for _, s := range statuses {
-		addrByName[s.Name] = s.ListenAddr
-	}
-
-	// Send CONNECT through listener-a.
-	wg.Add(1)
-	rawReq1 := fmt.Sprintf("GET /coord-c HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n", target1)
-	resp1 := connectAndSendHTTP(t, addrByName["listener-a"], target1, rawReq1)
-
-	reqs1 := getReqs1()
-	waitSessionDone(t, &wg)
-
-	if !strings.Contains(resp1, "coord-c!") {
-		t.Errorf("CONNECT response body not 'coord-c!': %q", resp1)
-	}
-	if len(reqs1) < 1 {
-		t.Fatal("upstream-a received no requests")
-	}
-
-	// Send SOCKS5 through listener-b.
-	wg.Add(1)
-	rawReq2 := fmt.Sprintf("GET /coord-s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n", target2)
-	resp2 := socks5ConnectAndSendHTTP(t, addrByName["listener-b"], target2, rawReq2)
-
-	reqs2 := getReqs2()
-	waitSessionDone(t, &wg)
-
-	if !strings.Contains(resp2, "coord-s!") {
-		t.Errorf("SOCKS5 response body not 'coord-s!': %q", resp2)
-	}
-	if len(reqs2) < 1 {
-		t.Fatal("upstream-b received no requests")
-	}
 }
 
 // TestFullListener_TargetScope_Blocking verifies both CONNECT and SOCKS5 are
@@ -1770,13 +1671,24 @@ func TestFullListener_CONNECT_BytechunkFallback(t *testing.T) {
 // that completes CONNECT 200 then sends nothing at all is released after
 // the inner-peek deadline (no goroutine leak; no panic). The proxy must
 // not block forever on a silent client.
+//
+// The inner-peek deadline is shortened to 200ms; the client's own read
+// deadline (3s) sits below DefaultInnerPeekTimeout (5s), so a harness or
+// handler that dropped the override fails instead of passing slowly.
 func TestFullListener_CONNECT_PeekTimeoutSilentClient(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
+	const (
+		innerPeekTimeout = 200 * time.Millisecond
+		clientWait       = 3 * time.Second
+	)
+
 	// We do not need a real upstream — the dispatch should never reach the
 	// dial step on a silent client because the peek times out first.
-	proxyAddr, _, _ := startFullListenerProxy(t, ctx, fullListenerOpts{})
+	proxyAddr, _, _ := startFullListenerProxy(t, ctx, fullListenerOpts{
+		innerPeekTimeout: innerPeekTimeout,
+	})
 
 	conn, err := net.DialTimeout("tcp", proxyAddr, 5*time.Second)
 	if err != nil {
@@ -1802,15 +1714,25 @@ func TestFullListener_CONNECT_PeekTimeoutSilentClient(t *testing.T) {
 		t.Fatalf("unexpected CONNECT response: %q", string(buf[:n]))
 	}
 
-	// Now silently wait. The proxy will peek the inner stream with a
-	// bounded deadline (DefaultInnerPeekTimeout = 5s) and close the conn
-	// when it expires. The client should observe the proxy-side close.
-	conn.SetReadDeadline(time.Now().Add(15 * time.Second))
-	_, readErr := conn.Read(buf)
+	// Now silently wait. The proxy will peek the inner stream with the
+	// bounded innerPeekTimeout and close the conn when it expires. The
+	// client should observe the proxy-side close.
+	start := time.Now()
+	conn.SetReadDeadline(start.Add(clientWait))
+	n, readErr := conn.Read(buf)
+	elapsed := time.Since(start)
 	// EOF or connection-closed-by-peer is the expected outcome. A timeout
 	// from our deadline would mean the proxy held the conn open past the
 	// inner-peek deadline — that's the bug.
 	if readErr == nil {
-		t.Errorf("expected EOF after inner-peek timeout; got nil error")
+		t.Fatalf("expected EOF after inner-peek timeout; got %d bytes %q", n, buf[:n])
+	}
+	var ne net.Error
+	if errors.As(readErr, &ne) && ne.Timeout() {
+		t.Fatalf("proxy held the silent client open for %v (client read deadline hit; innerPeekTimeout=%v not honoured?): %v",
+			elapsed, innerPeekTimeout, readErr)
+	}
+	if elapsed >= clientWait {
+		t.Errorf("proxy released the silent client after %v, want < %v", elapsed, clientWait)
 	}
 }

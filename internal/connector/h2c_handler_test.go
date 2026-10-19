@@ -4,7 +4,6 @@ import (
 	"context"
 	"net"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -309,25 +308,5 @@ func TestNewH2CHandler_BadPreface(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatalf("handler did not exit within 2s")
-	}
-}
-
-func TestCoordinator_OnHTTP2Stream_BuildsHandler(t *testing.T) {
-	var called atomic.Int32
-	coord := NewCoordinator(CoordinatorConfig{
-		OnHTTP2Stream: func(context.Context, layer.Channel) {
-			called.Add(1)
-		},
-	})
-
-	h := coord.buildHTTP2Handler()
-	if h == nil {
-		t.Fatalf("buildHTTP2Handler returned nil when OnHTTP2Stream is set")
-	}
-
-	// Also verify the nil path.
-	empty := NewCoordinator(CoordinatorConfig{})
-	if got := empty.buildHTTP2Handler(); got != nil {
-		t.Errorf("buildHTTP2Handler without OnHTTP2Stream = %v, want nil", got)
 	}
 }
