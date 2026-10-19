@@ -205,7 +205,7 @@ func (m *Manager) handleTCPForwardTLSConn(
 		_ = clientConn.Close()
 		err := fmt.Errorf("proxybuild: tcp forward tls: no CA Issuer configured")
 		connLogger.Error("tcp forward tls handshake aborted", "error", err)
-		if rec := buildTLSStackBuildErrorRecorder(parentStack.FlowStore, nil, parentListenerName, connLogger); rec != nil {
+		if rec := buildTLSStackBuildErrorRecorder(parentStack.FlowStore, nil, parentListenerName, parentStack.BuildConfig, connLogger); rec != nil {
 			rec(connCtx, entry.target, fmt.Errorf("%w: %w", connector.ErrClientTLSMITMHandshake, err))
 		}
 		return
@@ -231,7 +231,7 @@ func (m *Manager) handleTCPForwardTLSConn(
 		// live MITM CONNECT path's classification — USK-858).
 		wrapped := fmt.Errorf("%w for %s: %w", connector.ErrClientTLSMITMHandshake, entry.target, err)
 		connLogger.Debug("tcp forward tls client handshake failed", "error", err)
-		if rec := buildTLSStackBuildErrorRecorder(parentStack.FlowStore, nil, parentListenerName, connLogger); rec != nil {
+		if rec := buildTLSStackBuildErrorRecorder(parentStack.FlowStore, nil, parentListenerName, parentStack.BuildConfig, connLogger); rec != nil {
 			rec(connCtx, entry.target, wrapped)
 		}
 		_ = clientConn.Close()

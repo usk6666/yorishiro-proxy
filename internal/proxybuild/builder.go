@@ -415,7 +415,7 @@ func BuildLiveStack(_ context.Context, deps Deps) (*Stack, error) {
 	// recorded when the operator scoped capture to a specific host. The
 	// CONNECT/SOCKS5 authority carries the host even when no L7 message
 	// reached the proxy.
-	upstreamTLSErrorRecorder := buildTLSStackBuildErrorRecorder(deps.FlowStore, deps.RecordScope, listenerName, logger)
+	upstreamTLSErrorRecorder := buildTLSStackBuildErrorRecorder(deps.FlowStore, deps.RecordScope, listenerName, deps.BuildConfig, logger)
 
 	// USK-790: passthrough audit-flow observer. Persists a Stream + Flow
 	// per TLS passthrough connection with SNI / 4-tuple / byte counters
@@ -2424,7 +2424,7 @@ func buildPipelineDropRecorder(store flow.Writer, listenerName string, logger *s
 // path. URL-prefix / method matchers are inert at this stage because
 // the inner TLS handshake never completed; hostname matchers are the
 // only meaningful axis for unrecorded-protocol error paths.
-func buildTLSStackBuildErrorRecorder(store flow.Writer, scope *flow.RecordScope, listenerName string, logger *slog.Logger) connector.OnUpstreamTLSErrorFunc {
+func buildTLSStackBuildErrorRecorder(store flow.Writer, scope *flow.RecordScope, listenerName string, buildCfg *connector.BuildConfig, logger *slog.Logger) connector.OnUpstreamTLSErrorFunc {
 	if store == nil {
 		return nil
 	}
