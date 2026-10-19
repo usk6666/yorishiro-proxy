@@ -1,3 +1,6 @@
+// Dark-fixed copy of docs/images/yorishiro-proxy-logo.svg: the Web UI is
+// dark-only, so the OS-theme media query in the original must not apply.
+import logoUrl from "../../assets/yorishiro-proxy-logo-dark.svg";
 import { useMcpClient } from "../../lib/mcp/index.js";
 import { Badge } from "../ui/index.js";
 import "./Header.css";
@@ -29,8 +32,12 @@ export function Header({ onToggleSidebar, sidebarCollapsed }: HeaderProps) {
           <MenuIcon />
         </button>
         <div className="header-logo">
-          <span className="header-logo-text">yorishiro</span>
-          <span className="header-logo-accent">-proxy</span>
+          <img
+            src={logoUrl}
+            alt="yorishiro-proxy"
+            className="header-logo-img"
+            height={24}
+          />
         </div>
       </div>
       <div className="header-right">
