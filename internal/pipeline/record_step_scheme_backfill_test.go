@@ -121,6 +121,18 @@ func TestRecordStep_SchemeBackfill_SemanticFirstNoExtraWrite(t *testing.T) {
 			want: "https",
 		},
 		{
+			// A repeated semantic Send/Seq0 after an overlay must not
+			// write either: the gate is armed only when an overlay
+			// created the Stream.
+			name: "HTTPMessage_then_overlay_then_HTTPMessage",
+			envs: []*envelope.Envelope{
+				semanticHTTPSendEnvelope("s1", "https"),
+				h2FrameSendEnvelope("s1"),
+				semanticHTTPSendEnvelope("s1", "https"),
+			},
+			want: "https",
+		},
+		{
 			name: "bodyless_HTTPMessage",
 			envs: []*envelope.Envelope{semanticHTTPSendEnvelope("s1", "https")},
 			want: "https",
