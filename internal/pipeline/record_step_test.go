@@ -1099,7 +1099,7 @@ func TestRecordStep_VariantRecording_OriginalRawNeverRewrittenByEncoder(t *testi
 
 // TestRecordStep_ModifiedVariant_RawOnly_RawWins covers USK-686 / RFC §9.3 D4:
 // when a preceding Step (PluginStepPost on MutationRawOnly) marks the
-// context's RawAuthoritative flag, RecordStep must skip applyWireEncode
+// envelope RawAuthoritative (USK-1079), RecordStep must skip applyWireEncode
 // and record env.Raw verbatim into the modified-variant flow's RawBytes.
 // Calling the encoder would overwrite the user's smuggling-test bytes
 // with a "cleaned-up" re-encoded form, destroying the diagnostic signal
@@ -1136,7 +1136,7 @@ func TestRecordStep_ModifiedVariant_RawOnly_RawWins(t *testing.T) {
 	}
 
 	ctx := withWireEncodedState(context.Background())
-	markRawAuthoritative(ctx)
+	modified.RawAuthoritative = true
 	ctx = withSnapshot(ctx, original)
 	step.Process(ctx, modified)
 
@@ -1201,7 +1201,7 @@ func TestRecordStep_ModifiedVariant_Both_RawWins(t *testing.T) {
 	}
 
 	ctx := withWireEncodedState(context.Background())
-	markRawAuthoritative(ctx)
+	modified.RawAuthoritative = true
 	ctx = withSnapshot(ctx, original)
 	step.Process(ctx, modified)
 

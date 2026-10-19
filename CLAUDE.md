@@ -153,7 +153,8 @@ make test           # fast tier: ensure-ui → go test -race -v ./... (unit test
 make test-fast      # alias for `make test`; explicit naming for the fast tier (USK-728)
 make test-pkg PKG=./internal/<pkg>/... [RUN=<regexp>] [TAGS=e2e]
                     # one package/pattern only — the TDD red/green loop
-make test-e2e-smoke # smoke tier (merge gate): ensure-ui → go test -race -v -tags 'e2e e2e_smoke' ./...
+make test-e2e-smoke # smoke tier (merge gate): ensure-ui → tools/smokeselect → go test -race -v -tags 'e2e e2e_smoke'
+                    #   -run <smoke tests only> <smoke packages>  (untagged tests are NOT re-run; USK-1209)
 make test-e2e       # full tier (nightly): ensure-ui → go test -race -v -tags e2e ./...
 make test-cover     # ensure-ui → test with coverage report
 make vet            # ensure-ui → go vet ./...
@@ -186,7 +187,11 @@ make clean          # Delete build artifacts
 
 > **e2e test tiers (USK-728)**: e2e tests are split into three tiers.
 > - **fast** (`make test`/`make test-fast`): untagged unit tests only.
-> - **smoke** (`make test-e2e-smoke`): merge-gate subset — files with `//go:build e2e` only. Run by CI on every PR.
+> - **smoke** (`make test-e2e-smoke`): merge-gate subset — only the tests declared in `//go:build e2e` files. Run by CI on every PR.
+>   Building under `-tags 'e2e e2e_smoke'` also compiles every untagged test, so the recipe narrows `go test` with
+>   `tools/smokeselect` (derived from `go list` + `go/parser`, nothing hard-coded) instead of re-running the fast tier;
+>   it fails loudly on a selection error or an empty selection (USK-1209). For the old "untagged + smoke" coverage, run `make test test-e2e-smoke`.
+>   Both PR test jobs in `ci.yml` call these `make` targets rather than hand-copied `go test` lines (USK-1058).
 > - **full** (`make test-e2e`): every e2e file — smoke ∪ exhaustive. Run nightly via `.github/workflows/nightly-e2e.yml`; also on dependency-update PRs (head branch `automated/security-updates`) as `ci.yml`'s `test-e2e-full` job (advisory until it is added to the branch ruleset's required checks), and on any push to `main` touching `go.mod` / `go.sum` (USK-1055).
 >
 > The `e2e_smoke` build tag is an **exclusion filter**: smoke files keep plain `//go:build e2e`; exhaustive files use `//go:build e2e && !e2e_smoke` so they drop out of the smoke tier but remain in the full tier under `-tags e2e` alone. This guarantees `smoke ⊂ full`.
