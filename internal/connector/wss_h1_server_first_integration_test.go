@@ -178,7 +178,8 @@ func TestWSS_H1_ServerSpeaksFirst_RelayedWithoutClientSend(t *testing.T) {
 	}
 
 	// 3. State: the client goes away without ever sending a frame while
-	// the upstream stays idle; the Stream must leave state=active.
+	// the upstream stays idle; the Stream must leave state=active and
+	// settle at complete.
 	_ = tc.Close()
 	var state string
 	deadline = time.Now().Add(5 * time.Second)
@@ -189,7 +190,9 @@ func TestWSS_H1_ServerSpeaksFirst_RelayedWithoutClientSend(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	if state == "" || state == "active" {
-		t.Errorf("handshake Stream state = %q after client close, want complete/error", state)
+	// A client FIN is a clean end of the session: the upstream read error
+	// provoked by the proxy's own teardown must not be recorded as error.
+	if state != "complete" {
+		t.Errorf("handshake Stream state = %q after client close, want complete", state)
 	}
 }

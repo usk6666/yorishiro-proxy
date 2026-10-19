@@ -3102,6 +3102,18 @@ func upstreamToClientFinish(ctx context.Context, opt SessionOptions, uh *upstrea
 		// tornDown: the read failed because the client direction ended
 		// and the session tore the upstream down (onClientEnd); the
 		// upstream did nothing wrong.
+		//
+		// Accepted race (USK-1171 review F-4/S-2): once tornDown is set,
+		// ANY upstream read error is treated as teardown-caused, so a
+		// genuine upstream failure that happens to land in the same
+		// instant as the client's end is recorded as a clean end. The
+		// mask cannot be narrowed to the teardown's own error
+		// (net.ErrClosed): the ws Layer's mapReadError flattens the
+		// cause into a layer.StreamError Reason string with no Unwrap,
+		// so errors.Is cannot see it. The window is bounded by the
+		// client having already left, and the wire bytes the upstream
+		// did send are still recorded.
+		//
 		// endingRPC (USK-1202): the cascade-close of an RPC the proxy
 		// ended with its own terminator, not an upstream failure.
 		err = nil

@@ -31,14 +31,21 @@ type wsServerFirstFixture struct {
 	server   net.Conn
 	done     chan error
 
-	mu         sync.Mutex
-	completeID []string
+	mu          sync.Mutex
+	completeID  []string
+	completeErr []error
 }
 
 func (f *wsServerFirstFixture) completeIDs() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]string(nil), f.completeID...)
+}
+
+func (f *wsServerFirstFixture) completeErrs() []error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]error(nil), f.completeErr...)
 }
 
 // serverScript, when given, runs on the server side after the 101 (and
@@ -103,9 +110,10 @@ func startWSServerFirstFixture(t *testing.T, ctx context.Context, serverFrame []
 		done:     make(chan error, 1),
 	}
 	opt := SessionOptions{
-		OnComplete: func(_ context.Context, streamID string, _ error) {
+		OnComplete: func(_ context.Context, streamID string, err error) {
 			f.mu.Lock()
 			f.completeID = append(f.completeID, streamID)
+			f.completeErr = append(f.completeErr, err)
 			f.mu.Unlock()
 		},
 	}
@@ -167,7 +175,10 @@ func TestRunStackSession_WSUpgrade_RelaysServerFirstFrameWithoutClientSend(t *te
 // 101 without ever sending a frame (and the upstream stays idle), the
 // post-swap session must still return, and OnComplete must carry the
 // handshake StreamID — an empty id makes the recorder skip the terminal
-// update and leaves the WS Stream stuck at state=active.
+// update and leaves the WS Stream stuck at state=active. The client's
+// FIN is a clean end: the read error the proxy's own upstream teardown
+// provokes must not surface as the session result (a non-nil OnComplete
+// error is recorded as state=error).
 func TestRunStackSession_WSUpgrade_ClientCloseWithoutFrameCompletesStream(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -179,7 +190,10 @@ func TestRunStackSession_WSUpgrade_ClientCloseWithoutFrameCompletesStream(t *tes
 	_ = f.browser.Close()
 
 	select {
-	case <-f.done:
+	case err := <-f.done:
+		if err != nil {
+			t.Errorf("RunStackSession returned %v after a client FIN, want nil", err)
+		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("RunStackSession did not return after the client closed (upstream idle)")
 	}
@@ -190,6 +204,9 @@ func TestRunStackSession_WSUpgrade_ClientCloseWithoutFrameCompletesStream(t *tes
 	}
 	if ids[0] == "" {
 		t.Errorf("OnComplete streamID = %q, want the handshake StreamID", ids[0])
+	}
+	if errs := f.completeErrs(); errs[0] != nil {
+		t.Errorf("OnComplete err = %v after a client FIN, want nil (clean end)", errs[0])
 	}
 }
 
