@@ -145,6 +145,13 @@ type lpmFrame struct {
 // *layer.StreamError.
 var errMessageTooLarge = errors.New("grpc: message too large")
 
+// errSendAfterEnd is returned by Send when the requested direction already
+// emitted its End (END_STREAM went out). Anything after END_STREAM on the
+// same h2 stream is a STREAM_CLOSED connection error (RFC 9113 §5.1) that
+// would kill every RPC multiplexed on the connection, so the Channel
+// refuses it (USK-1202).
+var errSendAfterEnd = errors.New("grpc: send after End on this direction")
+
 // directionState holds reassembler + start-headers metadata for one
 // direction of an RPC. Per-direction so bidi streams have independent
 // buffers, and so the gRPC content-encoding negotiated on the request
