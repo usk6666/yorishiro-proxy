@@ -324,3 +324,84 @@ func TestOpaqueSend_LineUnchangedKeepsWire(t *testing.T) {
 		})
 	}
 }
+
+// TestOpaqueSend_LineOnlyRewriteKeepsHeaderSectionVerbatim (USK-1148
+// review F-1): a start-line-only rewrite must not route the header
+// section through the lossy RawHeaders re-serialization. Header forms the
+// parser folds or reinterprets — obs-fold continuations, orphan
+// continuation lines, colon-less lines, bare-LF terminators — must reach
+// the wire byte-for-byte after the rewritten line, on Send and in
+// EncodeWireBytes alike.
+func TestOpaqueSend_LineOnlyRewriteKeepsHeaderSectionVerbatim(t *testing.T) {
+	const respFold = "HTTP/1.1 200 OK\r\nX-F:  a\r\n b\r\nContent-Length: 2\r\n\r\nok"
+	cases := []struct {
+		name       string
+		reqWire    string
+		respWire   string
+		mutateReq  func(m *envelope.HTTPMessage)
+		mutateResp func(m *envelope.HTTPMessage)
+		wantReq    string
+		wantResp   string
+	}{
+		{
+			name:      "path only, obs-fold header",
+			reqWire:   "GET /p HTTP/1.1\r\nhost: x\r\nX-F:  a\r\n b\r\n\r\n",
+			respWire:  lineRespWire,
+			mutateReq: func(m *envelope.HTTPMessage) { m.Path = "/new" },
+			wantReq:   "GET /new HTTP/1.1\r\nhost: x\r\nX-F:  a\r\n b\r\n\r\n",
+			wantResp:  lineRespWire,
+		},
+		{
+			name:      "method only, orphan continuation line",
+			reqWire:   "GET /p HTTP/1.1\r\n orphan\r\nhost: x\r\n\r\n",
+			respWire:  lineRespWire,
+			mutateReq: func(m *envelope.HTTPMessage) { m.Method = "PUT" },
+			wantReq:   "PUT /p HTTP/1.1\r\n orphan\r\nhost: x\r\n\r\n",
+			wantResp:  lineRespWire,
+		},
+		{
+			name:      "query only, colon-less header line",
+			reqWire:   "GET /p?a=1 HTTP/1.1\r\nhost: x\r\nNoColonHere\r\n\r\n",
+			respWire:  lineRespWire,
+			mutateReq: func(m *envelope.HTTPMessage) { m.RawQuery = "b=2" },
+			wantReq:   "GET /p?b=2 HTTP/1.1\r\nhost: x\r\nNoColonHere\r\n\r\n",
+			wantResp:  lineRespWire,
+		},
+		{
+			name:      "path only, bare-LF header terminators",
+			reqWire:   "GET /p HTTP/1.1\nhost: x\nX-A: 1\n\n",
+			respWire:  lineRespWire,
+			mutateReq: func(m *envelope.HTTPMessage) { m.Path = "/q" },
+			wantReq:   "GET /q HTTP/1.1\r\nhost: x\nX-A: 1\n\n",
+			wantResp:  lineRespWire,
+		},
+		{
+			name:       "status only, obs-fold header",
+			reqWire:    "GET /p HTTP/1.1\r\nhost: x\r\n\r\n",
+			respWire:   respFold,
+			mutateResp: func(m *envelope.HTTPMessage) { m.Status = 404 },
+			wantReq:    "GET /p HTTP/1.1\r\nhost: x\r\n\r\n",
+			wantResp:   "HTTP/1.1 404 OK\r\nX-F:  a\r\n b\r\nContent-Length: 2\r\n\r\nok",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			res := runLineExchange(t, lineExchange{
+				reqWire: tc.reqWire, respWire: tc.respWire,
+				mutateReq: tc.mutateReq, mutateResp: tc.mutateResp,
+			})
+			if string(res.reqSent) != tc.wantReq {
+				t.Errorf("request wire = %q, want %q", res.reqSent, tc.wantReq)
+			}
+			if !bytes.Equal(res.reqSent, res.reqEncoded) {
+				t.Errorf("request EncodeWireBytes = %q, differs from wire %q", res.reqEncoded, res.reqSent)
+			}
+			if string(res.respSent) != tc.wantResp {
+				t.Errorf("response wire = %q, want %q", res.respSent, tc.wantResp)
+			}
+			if !bytes.Equal(res.respSent, res.respEncoded) {
+				t.Errorf("response EncodeWireBytes = %q, differs from wire %q", res.respEncoded, res.respSent)
+			}
+		})
+	}
+}

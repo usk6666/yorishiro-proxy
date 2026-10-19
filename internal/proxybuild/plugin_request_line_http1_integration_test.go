@@ -366,3 +366,40 @@ register_hook("http", "on_request", on_req)
 		}
 	})
 }
+
+// TestPluginRequestLine_HTTP1_LineOnlyKeepsFoldedHeaders (USK-1148
+// review F-1/F-2): a path-only rewrite of a request whose head carries
+// header forms the parser folds or reinterprets (obs-fold continuation,
+// colon-less line) must deliver the header section to the upstream
+// byte-for-byte, and the modified send variant must record those bytes.
+func TestPluginRequestLine_HTTP1_LineOnlyKeepsFoldedHeaders(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	up := startRawCaptureUpstream(t, true, nil)
+	h, fwd := startRawWinsForward(t, ctx, `
+def on_req(msg, ctx):
+    msg["path"] = "/rewritten"
+register_hook("http", "on_request", on_req)
+`, up.Addr(), "http", nil)
+
+	const tail = "host: example.test\r\nX-F:  a\r\n b\r\nNoColonHere\r\n\r\n"
+	c, br := dialForward(t, fwd)
+	if _, err := c.Write([]byte("GET /orig HTTP/1.1\r\n" + tail)); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if _, _, err := readOneResponse(br); err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	want := "GET /rewritten HTTP/1.1\r\n" + tail
+	if got := up.waitBytes(1, len(want)); string(got) != want {
+		t.Errorf("upstream received %q, want %q", got, want)
+	}
+	mod := waitFlow(h.store, "send", "modified", nil)
+	if mod == nil {
+		t.Fatalf("no modified send variant recorded; flows:%s", describeFlows(h.store))
+	}
+	if string(mod.RawBytes) != want {
+		t.Errorf("modified send variant RawBytes = %q, want the wire bytes %q", mod.RawBytes, want)
+	}
+}
