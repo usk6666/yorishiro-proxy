@@ -44,6 +44,9 @@ func run(ctx context.Context, args []string) error {
 	}
 }
 
+// subcommandNames is the ordered list of top-level subcommands.
+var subcommandNames = []string{"server", "client", "docs", "install", "upgrade", "version", "help"}
+
 // routeCommand picks the subcommand for args (os.Args[1:]) and returns the
 // arguments that subcommand receives. It is pure so every routing branch is
 // unit-testable without starting a server.

@@ -721,3 +721,78 @@ func runDocsBinary(t *testing.T, binary string, env []string, args ...string) st
 	}
 	return stdout.String()
 }
+
+// TestBinarySmoke_TopLevelRouting is USK-1047 T3: through the real main(),
+// an unknown first word exits 1 promptly with the subcommand list instead
+// of booting a server, and `help` prints the usage banner and exits 0.
+// Neither may touch ~/.yorishiro-proxy.
+func TestBinarySmoke_TopLevelRouting(t *testing.T) {
+	binary := buildBinary(t)
+
+	tests := []struct {
+		name       string
+		args       []string
+		wantExit   int
+		wantStderr []string
+	}{
+		{
+			name:       "typo of server is refused",
+			args:       []string{"serevr"},
+			wantExit:   1,
+			wantStderr: []string{`error: unknown subcommand "serevr"`, "server", "client", "docs", "install", "upgrade", "version", "help"},
+		},
+		{
+			name:       "client tool name without client gets a hint",
+			args:       []string{"query", "resource=flows"},
+			wantExit:   1,
+			wantStderr: []string{`unknown subcommand "query"`, "did you mean 'yorishiro-proxy client query'"},
+		},
+		{
+			// flag.ExitOnError prints -h usage to stderr and exits 0.
+			name:       "help prints the usage banner",
+			args:       []string{"help"},
+			wantExit:   0,
+			wantStderr: []string{"Usage: yorishiro-proxy [subcommand] [flags]", "Subcommands:", "Server flags:", "-stdio-mcp"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			home := t.TempDir()
+			cmd := exec.Command(binary, tt.args...)
+			cmd.Env = binaryChildEnv(home)
+			var stdout, stderr bytes.Buffer
+			cmd.Stdout = &stdout
+			cmd.Stderr = &stderr
+
+			// Neither path does any I/O; the bound turns a regression that
+			// boots a server into a visible failure rather than a hang.
+			timer := time.AfterFunc(15*time.Second, func() {
+				if cmd.Process != nil {
+					_ = cmd.Process.Kill()
+				}
+			})
+			err := cmd.Run()
+			timer.Stop()
+
+			exitCode := 0
+			if err != nil {
+				exitErr, ok := err.(*exec.ExitError)
+				if !ok {
+					t.Fatalf("run: %v", err)
+				}
+				exitCode = exitErr.ExitCode()
+			}
+			if exitCode != tt.wantExit {
+				t.Errorf("%q exit code = %d, want %d\nstdout=%s\nstderr=%s", tt.args, exitCode, tt.wantExit, stdout.String(), stderr.String())
+			}
+			for _, want := range tt.wantStderr {
+				if !strings.Contains(stderr.String(), want) {
+					t.Errorf("%q stderr is missing %q:\n%s", tt.args, want, stderr.String())
+				}
+			}
+			if _, statErr := os.Lstat(filepath.Join(home, ".yorishiro-proxy")); !os.IsNotExist(statErr) {
+				t.Errorf("%q touched ~/.yorishiro-proxy (stat err = %v)", tt.args, statErr)
+			}
+		})
+	}
+}
