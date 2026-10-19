@@ -1017,7 +1017,8 @@ func TestFullListener_TargetScope_Blocking(t *testing.T) {
 		})
 
 		// CONNECT to a blocked target (127.0.0.1:9999).
-		assertCONNECTClosedPromptly(t, proxyAddr, "127.0.0.1:9999")
+		assertCONNECTClosedPromptly(t, proxyAddr, "127.0.0.1:9999",
+			"HTTP/1.1 403 Forbidden", "yorishiro-proxy: target blocked by scope")
 
 		select {
 		case <-onStackCalled:
@@ -1321,7 +1322,8 @@ func TestFullListener_RateLimiter_Blocking(t *testing.T) {
 	})
 
 	// CONNECT — should be rate-limited.
-	assertCONNECTClosedPromptly(t, proxyAddr, "127.0.0.1:9999")
+	assertCONNECTClosedPromptly(t, proxyAddr, "127.0.0.1:9999",
+		"HTTP/1.1 429 Too Many Requests", "yorishiro-proxy: target blocked by rate limit")
 
 	select {
 	case <-onStackCalled:
@@ -1344,9 +1346,10 @@ const (
 // deniedCONNECTClientWait. A policy-denied CONNECT is closed right after
 // negotiation; an admitted one waits for the inner peek
 // (deniedCONNECTInnerPeek), so a client read-deadline timeout means the
-// policy gate did not reject. The CONNECT response status is deliberately
-// not asserted (whether a denied CONNECT should get 200 first is open).
-func assertCONNECTClosedPromptly(t *testing.T, proxyAddr, target string) {
+// policy gate did not reject. It also requires the reply to be the
+// connector's reject response — wantStatusLine, a text/plain body naming
+// the gate, then EOF — never "200 Connection Established" (USK-1246).
+func assertCONNECTClosedPromptly(t *testing.T, proxyAddr, target, wantStatusLine, wantBody string) {
 	t.Helper()
 
 	conn, err := net.DialTimeout("tcp", proxyAddr, 5*time.Second)
@@ -1362,11 +1365,18 @@ func assertCONNECTClosedPromptly(t *testing.T, proxyAddr, target string) {
 
 	start := time.Now()
 	_ = conn.SetReadDeadline(start.Add(deniedCONNECTClientWait))
-	_, readErr := io.ReadAll(conn)
+	got, readErr := io.ReadAll(conn)
 	elapsed := time.Since(start)
 	var ne net.Error
 	if errors.As(readErr, &ne) && ne.Timeout() {
 		t.Fatalf("proxy held the denied CONNECT open for %v (client read deadline hit): %v", elapsed, readErr)
+	}
+	reply := string(got)
+	if !strings.HasPrefix(reply, wantStatusLine+"\r\n") {
+		t.Errorf("denied CONNECT reply = %q, want status line %q", reply, wantStatusLine)
+	}
+	if !strings.HasSuffix(reply, "\r\n\r\n"+wantBody+"\r\n") {
+		t.Errorf("denied CONNECT reply = %q, want body %q", reply, wantBody)
 	}
 }
 

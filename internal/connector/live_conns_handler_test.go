@@ -257,7 +257,18 @@ func TestCONNECTHandler_LiveConns_DeniedNeverRegistered(t *testing.T) {
 		LiveConns:  reg,
 		Logger:     newTestLogger(),
 	}))
-	connectThrough(t, client, "127.0.0.1:1")
+	if _, err := io.WriteString(client, "CONNECT 127.0.0.1:1 HTTP/1.1\r\nHost: 127.0.0.1:1\r\n\r\n"); err != nil {
+		t.Fatalf("write CONNECT: %v", err)
+	}
+	_ = client.SetReadDeadline(time.Now().Add(5 * time.Second))
+	got, err := io.ReadAll(client)
+	if err != nil {
+		t.Fatalf("read CONNECT reply until EOF: %v (got %q)", err, got)
+	}
+	// USK-1246: a denied CONNECT is refused with 403, never 200.
+	if want := string(forwardErrorResponse(403, "Forbidden", "yorishiro-proxy: target blocked by scope")); string(got) != want {
+		t.Errorf("CONNECT reply = %q, want %q", got, want)
+	}
 	<-done
 	if got := reg.Len(); got != 0 {
 		t.Errorf("registry Len after denied CONNECT = %d, want 0", got)
