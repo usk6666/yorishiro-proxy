@@ -185,6 +185,16 @@ func (m *Manager) startTCPForwardListener(
 	// policy uses BuildConfig.InsecureSkipVerify (global) and tolerates a
 	// missing Issuer (upstream TLS does not need the proxy's CA).
 
+	// USK-1161: refuse a forward whose target the TargetScope denies now.
+	// Advisory — the scope can change at runtime, so the accept-time gate
+	// (admitTCPForwardConn) is the authoritative check.
+	if parent := m.Stack(parentListenerName); parent != nil {
+		if allowed, reason := tcpForwardScopeCheck(parent.Scope, fc.Target, fc.UpstreamTLS); !allowed {
+			return nil, fmt.Errorf("tcp forward port %s: %w: target %s (scheme %s): %s",
+				port, ErrTCPForwardTargetBlocked, fc.Target, tcpForwardScheme(fc.UpstreamTLS), reason)
+		}
+	}
+
 	bindAddr := fmt.Sprintf("127.0.0.1:%s", port)
 	ln, err := net.Listen("tcp", bindAddr)
 	if err != nil {
@@ -313,6 +323,16 @@ func (m *Manager) runTCPForwardAcceptLoop(
 			if counted {
 				defer entry.activeConns.Add(-1)
 			}
+			// USK-1161: TargetScope gate before client TLS termination
+			// and before the upstream dial, so a denied target is never
+			// contacted. Every handler below derives its connCtx from
+			// the registered ctx, which a policy change that no longer
+			// admits the target cancels.
+			ctx, release, ok := m.admitTCPForwardConn(ctx, parentListenerName, entry, c)
+			if !ok {
+				return
+			}
+			defer release()
 			// USK-915: when fc.TLS=true, terminate client-side TLS first
 			// then dispatch by negotiated ALPN. handleTCPForwardTLSConn
 			// owns the post-handshake routing — it picks the H2 or H1

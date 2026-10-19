@@ -100,12 +100,13 @@ type Deps struct {
 	// --- Optional connector policy ---
 
 	// Scope is the per-target capture/pass policy applied to CONNECT and
-	// SOCKS5 negotiations. nil = allow all.
+	// SOCKS5 negotiations, the plain-HTTP forward gate and TCP forward
+	// listeners (USK-1161, via Stack.Scope). nil = allow all.
 	Scope *connector.TargetScope
 
 	// LiveConns is the process-wide live-connection registry (USK-1160).
-	// The CONNECT, SOCKS5 and plain-HTTP-forward handlers register every
-	// connection they admit, so a policy change that no longer admits its
+	// The CONNECT, SOCKS5, plain-HTTP-forward and TCP forward handlers
+	// register every connection they admit, so a policy change that no longer admits its
 	// target closes it. nil disables tracking.
 	LiveConns *connector.LiveConns
 
