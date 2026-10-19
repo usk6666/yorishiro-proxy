@@ -28,6 +28,7 @@ Both Policy Layer and Agent Layer `target_scope` rules apply to **all** proxy tr
 | Traffic source | Policy Layer | Agent Layer |
 |---|---|---|
 | Transparent MITM (HTTP CONNECT tunnel, plain HTTP forward proxy, SOCKS5 tunnel) | Applied | Applied |
+| TCP forward (`tcp_forwards`, every `protocol`) | Applied (at `proxy_start` and at every accept, before the target is contacted; see [`tcp_forwards` gate](#tcp_forwards-gate)) | Applied |
 | MCP tool-initiated requests (`resend_http`, `resend_ws`, `resend_grpc`, `resend_raw`, `fuzz_http`, `fuzz_ws`, `fuzz_grpc`, `fuzz_raw`, `macro`) | Applied | Applied |
 | Intercepted traffic released from a hold (`intercept` `release` / `modify_and_forward`, timeout auto-release) | Applied | Applied |
 
@@ -55,7 +56,7 @@ The operator replaces the running Policy Layer — target scope `allows` / `deni
 - **Full replacement**: reloading is equivalent to starting with that file. A section omitted from the new file (e.g. `rate_limits`) is cleared.
 - **Atomic**: the new file is validated completely before anything changes. Malformed JSON, an out-of-vocabulary `schemes` token or a negative limit rejects the whole reload; the previous policy stays in force and an Error line (`target scope policy reload rejected; previous policy retained`) is logged.
 - **Unknown fields — prefer `-target-policy-file` for live edits**: only `-target-policy-file` is decoded strictly, so an unknown or misspelled field there (e.g. `denys`) rejects the reload. The `-config` source is decoded leniently, exactly as at startup: a misspelled `target_scope_policy` key, a misspelled key inside it (e.g. `deny` for `denies`), or a file that is just `{}` or `null` is accepted and reloads as "no policy", dropping the rules it was meant to keep. When a reload drops every policy allow and deny rule, a Warn line (`reloaded policy has no allow or deny rules; the previous target scope policy rules were removed`) names the source path and the previous counts. Check for it after every reload.
-- **What it applies to**: new connections and new requests, and also work already in flight. Every live connection admitted by the CONNECT, SOCKS5 or plain-HTTP-forward gate — TLS passthrough relays, MITM'd HTTP/1.x / HTTP/2 / WebSocket / SSE / gRPC connections and raw (bytechunk) tunnels alike — is re-evaluated with the same check that admitted it (the CONNECT / SOCKS5 authority or forward target, never the SNI), and is closed when an identical new connection would no longer be admitted. One Info line (`live connection closed: target no longer in scope`) is logged per closed connection, and the reload's Info line carries `live_conns_closed` (a Warn line is added when it is non-zero). A connection with held intercepts is revoked at once — new requests on it are answered 403 `blocked_by: target_scope` and nothing more is sent to the denied host — but closed only after its holds are released or time out; each held request is then answered and recorded per the release re-check below. Until then, data the denied host sends toward the client (responses of other HTTP/2 streams, SSE events, WebSocket server frames) keeps flowing, bounded by the intercept hold timeout: a revoked connection takes no new holds, so a server message that matches an intercept rule meanwhile is dropped (`blocked_by: target_scope`) instead of held. `live_conns_closed` counts the revoked connections and `live_conns_deferred` the ones whose close was deferred this way (`live connection revoked: close deferred until intercept holds resolve` is logged for each, then the `closed` line once they close). A deny that only names a `path_prefix` closes no connection; it is enforced per request. Running fuzz jobs re-check the scope for every variant they send, and a held intercept re-checks it when released (manually, by timeout auto-release, or via `modify_and_forward`). The same reconciliation runs after `set_target_scope` / `update_target_scope`.
+- **What it applies to**: new connections and new requests, and also work already in flight. Every live connection admitted by the CONNECT, SOCKS5, plain-HTTP-forward or `tcp_forwards` gate — TLS passthrough relays, MITM'd HTTP/1.x / HTTP/2 / WebSocket / SSE / gRPC connections and raw (bytechunk) tunnels alike — is re-evaluated with the same check that admitted it (the CONNECT / SOCKS5 authority, the forward target or the `tcp_forwards` target, never the SNI), and is closed when an identical new connection would no longer be admitted. One Info line (`live connection closed: target no longer in scope`) is logged per closed connection, and the reload's Info line carries `live_conns_closed` (a Warn line is added when it is non-zero). A connection with held intercepts is revoked at once — new requests on it are answered 403 `blocked_by: target_scope` and nothing more is sent to the denied host — but closed only after its holds are released or time out; each held request is then answered and recorded per the release re-check below. Until then, data the denied host sends toward the client (responses of other HTTP/2 streams, SSE events, WebSocket server frames) keeps flowing, bounded by the intercept hold timeout: a revoked connection takes no new holds, so a server message that matches an intercept rule meanwhile is dropped (`blocked_by: target_scope`) instead of held. `live_conns_closed` counts the revoked connections and `live_conns_deferred` the ones whose close was deferred this way (`live connection revoked: close deferred until intercept holds resolve` is logged for each, then the `closed` line once they close). A deny that only names a `path_prefix` closes no connection; it is enforced per request. Running fuzz jobs re-check the scope for every variant they send, and a held intercept re-checks it when released (manually, by timeout auto-release, or via `modify_and_forward`). The same reconciliation runs after `set_target_scope` / `update_target_scope`.
 - **Agent Layer on narrowing**: Agent rules are kept unchanged. An agent allow rule the new policy no longer covers simply stops matching (requests to it are blocked with `not in policy allow list`) and a Warn line lists such rules. The agent's restriction is never dropped, so narrowing the policy never widens what the agent can reach.
 - **Budget**: the request counter is **not** reset by a reload; the duration limit is re-armed against the new value, measured from the original session start. A budget narrowed below current usage stops the proxy (on the next request, or immediately for the duration limit).
 - **Audit**: a successful reload logs `target scope policy reloaded` at Info with the trigger, source path, file `sha256` and `mtime`, rule counts before/after, and the resulting policy and effective rate limits and budget. `get_target_scope` reports `source` and `loaded_at` so the agent can see that the policy changed.
@@ -216,6 +217,8 @@ recorded request still shows the scheme exactly as the client declared it.
 | HTTP/1.x, HTTP/2 request | `403` with `X-Blocked-By: target_scope` | Stream with `blocked_by: target_scope`, `state: error` |
 | Raw TCP (bytechunk — CONNECT / SOCKS5 tunnels carrying an unknown protocol, `raw_passthrough_hosts`, `tcp_forwards` with `protocol: raw` or an `auto` fallback to raw) | The connection is closed (EOF) at the first byte the client sends; none of the client's bytes reach the denied host | One raw Stream with `blocked_by: target_scope`, `state: error` |
 | WebSocket, gRPC message | The message is dropped; the connection stays open | Stream with `blocked_by: target_scope` |
+| `tcp_forwards` target denied when `proxy_start` runs | `proxy_start` fails with an error naming the scope, port and target; nothing is bound | Nothing |
+| `tcp_forwards` target denied when a client connects | Plaintext `protocol: http` / `websocket` / `sse`: `HTTP/1.1 403 Forbidden` with body `yorishiro-proxy: target blocked by scope`, then close. Every other protocol and every `tls: true` entry: the connection is closed with no byte (a TLS client's handshake fails). The target is never contacted | Nothing (Info log) |
 
 A raw connection is closed rather than having single chunks dropped because a
 byte stream has no message boundary to drop at: removing some bytes and relaying
@@ -228,9 +231,39 @@ host is still *contacted*: the upstream TCP connection is already open when
 that byte is examined, and on `raw_passthrough_hosts`, an unrecognised-ALPN
 tunnel or a `tcp_forwards` entry with `upstream_tls` the upstream TLS handshake
 (SNI included) has already completed too. A CONNECT admitted as `https` and
-then denied by an `http`-scheme rule on its inner plaintext, and every
-`tcp_forwards` entry, are cases that reach the denied host this way; an
-accept-time gate for `tcp_forwards` is tracked as USK-1161.
+then denied by an `http`-scheme rule on its inner plaintext is a case that
+reaches the denied host this way.
+
+### `tcp_forwards` gate
+
+A `tcp_forwards` entry has a fixed target, so its target is checked before the
+proxy contacts it:
+
+- **At `proxy_start`**: an entry whose target the scope denies is refused, and
+  the whole `proxy_start` fails (the listener is rolled back) with an error that
+  names the forward port, the target and the reason. This check is advisory —
+  the scope can change later.
+- **At every accept**: each new connection is checked before the client's TLS is
+  terminated (`tls: true`) and before the upstream is dialed, on every
+  `protocol`. A denied target receives nothing — no TCP connection, no TLS
+  ClientHello / SNI, no HTTP/2 preface, no byte. This is the authoritative
+  check: a deny added after the forward started (policy reload or this tool)
+  refuses new connections while the forward port stays bound.
+- **Live connections**: an admitted connection is re-evaluated with the same
+  check on every policy reload and every `set_target_scope` /
+  `update_target_scope`, and is closed when an identical new connection would
+  be refused (see [Reloading the Policy Layer](#reloading-the-policy-layer-operator-only)).
+
+The scheme of this check is the **upstream (dial) leg's**: `https` when
+`upstream_tls` is true, `http` otherwise, whatever `tls` is. A `tls: true` forward
+with a plaintext upstream therefore egresses as `http` and is refused by a deny
+on `schemes: ["http"]`. Each envelope on the connection is still checked by the
+connection-level host check with the client-facing leg's scheme (above), so on an
+entry whose two legs differ, a deny matching either leg blocks the traffic.
+
+The check uses the literal `target` host (no DNS resolution). A denied connection
+is not recorded as a flow; an Info line `tcp forward target blocked by scope` is
+logged.
 
 ## Rate Limiting
 

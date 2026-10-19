@@ -71,6 +71,7 @@ Each entry maps a local port number (string key) to either:
 
 - If omitted, TCP forwarding is not configured
 - Both legacy string format and structured ForwardConfig can be mixed in the same object
+- **Target scope**: every `target` is checked against `target_scope` (Policy and Agent layers). An entry whose target is denied fails the whole `proxy_start` (nothing stays bound). The check repeats on every accepted connection before the target is contacted, and open connections are closed when a scope change denies their target. The scheme checked is the upstream leg's (`https` iff `upstream_tls`). See `docs(topic="security")`, section "`tcp_forwards` gate".
 
 ### tls_fingerprint (string, optional)
 TLS ClientHello fingerprint profile for upstream connections.
