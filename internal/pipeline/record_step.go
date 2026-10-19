@@ -1531,6 +1531,7 @@ var httpAnomalyKeys = map[envelope.AnomalyType]string{
 	envelope.AnomalyTrailerForbidden:      "http_anomaly_trailer_forbidden",
 	envelope.AnomalyTrailersInPassthrough: "http_anomaly_trailers_in_passthrough",
 	envelope.AnomalyRawBodyTruncated:      "http_anomaly_raw_body_truncated",
+	envelope.AnomalyTruncatedBody:         "http_anomaly_truncated_body",
 	// HTTP/2 receive-side anomalies emitted by the aggregator on parse.
 	envelope.H2DuplicatePseudoHeader:    "http_anomaly_h2_duplicate_pseudo_header",
 	envelope.H2PseudoHeaderAfterRegular: "http_anomaly_h2_pseudo_header_after_regular",

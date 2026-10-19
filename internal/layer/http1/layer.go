@@ -428,6 +428,9 @@ func (l *Layer) runInitialSend(initial *channel) {
 	if initial.connClosed || l.isDetached() || initial.parseFailed {
 		return
 	}
+	if l.endAfterUnanswered(initial) {
+		return
+	}
 	l.spawnLoopSend()
 }
 
@@ -662,7 +665,31 @@ func (l *Layer) spawnLoopSend() {
 		if ch.connClosed {
 			return
 		}
+		if l.endAfterUnanswered(ch) {
+			return
+		}
 	}
+}
+
+// endAfterUnanswered reports whether the Send-direction connection must end
+// because ch delivered its request without a complete final response
+// written back (USK-1229): the upstream closed before (or in the middle of)
+// its response, or the Pipeline dropped the request. HTTP/1.1 answers in
+// request order (RFC 9112 §9.3), so answering a later request on this
+// connection would pair that response with ch's request; and an origin
+// that closed is mirrored by closing, never by inventing a response. The
+// spawn loop returning closes Channels(), which ends the owner's exchange
+// loop and its deferred stack teardown closes the client connection.
+// Called only after ch's termDone.
+func (l *Layer) endAfterUnanswered(ch *channel) bool {
+	if !ch.exchangeUnanswered() {
+		return false
+	}
+	slog.Debug("http1: request not answered completely; ending client connection",
+		"stream_id", l.streamID,
+		"final_response_sent", ch.finalResponseSent.Load(),
+		"response_incomplete", ch.responseIncomplete.Load())
+	return true
 }
 
 // spawnLoopReceive parses responses and demultiplexes them in FIFO order to
@@ -710,10 +737,39 @@ func (l *Layer) receiveOne(head *channel) bool {
 		return false
 	}
 
-	env, isInformational, perr := head.parseResponse()
+	env, isInformational, truncated, perr := head.parseResponse()
 	if perr != nil {
+		if errors.Is(perr, io.EOF) && head.requestSent.Load() {
+			// USK-1229: the upstream closed after a request was written
+			// to it and before its response head completed. That is an
+			// aborted exchange, not a clean end; every request pipelined
+			// behind it is equally unanswered.
+			slog.Debug("http1: upstream closed before sending a response",
+				"stream_id", l.streamID)
+			perr = &layer.StreamError{
+				Code:   layer.ErrorAborted,
+				Reason: "http1: upstream closed the connection before sending a response",
+			}
+		}
 		// Drain all remaining pending channels with the terminal err.
 		l.failPending(perr)
+		return false
+	}
+	if truncated {
+		// USK-1229: the upstream closed mid-body. Deliver the response as
+		// received (the client gets exactly those bytes), then end the
+		// exchange with an aborted error; the connection is gone, so every
+		// request pipelined behind it fails the same way.
+		slog.Debug("http1: upstream closed the connection mid-body",
+			"stream_id", l.streamID)
+		se := &layer.StreamError{
+			Code:   layer.ErrorAborted,
+			Reason: "http1: upstream closed the connection mid-body",
+		}
+		head.postFinalErr.Store(se)
+		head.deliverResponse(env, nil)
+		_ = l.popPending()
+		l.failPending(se)
 		return false
 	}
 	if !isInformational && head.rawWinsSent.Load() {

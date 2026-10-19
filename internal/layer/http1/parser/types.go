@@ -114,6 +114,20 @@ type RawBodyProvider interface {
 	RawBodyTruncated() bool
 }
 
+// BodyTruncationProvider is implemented by the parser's body readers. After
+// the body has been drained, BodyTruncated reports whether the connection
+// ended before the body framed by the message's own headers was complete
+// (USK-1229): a Content-Length body that received fewer bytes than
+// declared, or a chunked body whose stream ended before the terminal
+// zero-size chunk. detail describes the shortfall for the
+// AnomalyTruncatedBody anomaly. EOF-delimited bodies (HTTP/1.0 /
+// Connection: close without Content-Length) are complete by definition and
+// never report truncation. The reader still returns io.EOF at the cut so
+// existing drain loops are unchanged; callers that care consult this.
+type BodyTruncationProvider interface {
+	BodyTruncated() (truncated bool, detail string)
+}
+
 // ChunkRecordSetter is implemented by body readers that decode chunked
 // Transfer-Encoding and support per-chunk record callbacks (USK-895).
 // Today only *dechunkedReader satisfies this — non-chunked readers
