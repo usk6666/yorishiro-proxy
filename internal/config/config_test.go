@@ -212,7 +212,7 @@ func TestValidate_ValidFields(t *testing.T) {
 			modify: func(c *Config) { c.PeekTimeout = time.Nanosecond; c.RequestTimeout = time.Nanosecond },
 		},
 		{
-			name:   "dial_timeout zero (uses ConnPool default)",
+			name:   "dial_timeout zero",
 			modify: func(c *Config) { c.DialTimeout = 0 },
 		},
 		{

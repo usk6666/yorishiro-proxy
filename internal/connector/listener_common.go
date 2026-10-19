@@ -1,7 +1,6 @@
 package connector
 
 import (
-	"errors"
 	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/config"
@@ -24,30 +23,7 @@ const DefaultMaxConnections = config.DefaultMaxConnections
 // from blocking connection acceptance.
 const hookTimeout = 5 * time.Second
 
-// shutdownTimeout bounds Coordinator.StopNamed / StopAll waits for an
-// individual listener to drain.
-const shutdownTimeout = 30 * time.Second
-
-// DefaultListenerName is the name assigned when the caller does not pass an
-// explicit name to Coordinator.StartNamed.
+// DefaultListenerName is the name of the listener started without an
+// explicit name. It mirrors proxybuild.DefaultListenerName; the
+// multi-listener lifecycle itself lives in proxybuild.Manager.
 const DefaultListenerName = "default"
-
-var (
-	// ErrListenerExists is returned by Coordinator.StartNamed when the given
-	// name is already running.
-	ErrListenerExists = errors.New("connector: listener with this name already exists")
-
-	// ErrListenerNotFound is returned by Coordinator.StopNamed when no
-	// listener has the given name.
-	ErrListenerNotFound = errors.New("connector: listener not found")
-)
-
-// ListenerStatus describes a single running listener. It is returned by
-// Coordinator.ListenerStatuses so callers can build a status view without
-// touching FullListener internals.
-type ListenerStatus struct {
-	Name              string `json:"name"`
-	ListenAddr        string `json:"listen_addr"`
-	ActiveConnections int    `json:"active_connections"`
-	UptimeSeconds     int64  `json:"uptime_seconds"`
-}

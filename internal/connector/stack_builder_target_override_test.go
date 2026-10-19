@@ -359,27 +359,6 @@ func TestBuildConnectionStackWithTarget_AutoHTTPResolvesToHTTP(t *testing.T) {
 	}
 }
 
-// TestBuildConnectionStackWithTarget_TLSTerminateDeferred confirms
-// TLSTerminate=true short-circuits with a USK-915 reference rather than
-// silently doing nothing.
-func TestBuildConnectionStackWithTarget_TLSTerminateDeferred(t *testing.T) {
-	_, clientPeer := pipePair(t)
-	_, upstreamPeer := pipePair(t)
-	cfg := newTestBuildConfig(t)
-	params := TargetOverrideParams{
-		Target:       "api.example.com:443",
-		Protocol:     ForwardProtocolRaw,
-		TLSTerminate: true,
-	}
-	_, err := BuildConnectionStackWithTarget(context.Background(), clientPeer, upstreamPeer, params, cfg)
-	if err == nil {
-		t.Fatal("expected non-nil error for TLSTerminate=true, got nil")
-	}
-	if !strings.Contains(err.Error(), "USK-915") {
-		t.Errorf("expected error to cite USK-915, got %q", err.Error())
-	}
-}
-
 // TestBuildConnectionStackWithTarget_UpstreamTLSInformational confirms
 // USK-916 changed UpstreamTLS=true from a hard reject into an
 // informational flag — the builder no longer dials upstream TLS itself

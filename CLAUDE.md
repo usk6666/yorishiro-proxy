@@ -100,7 +100,6 @@ internal/
                            #   WireEncoderRegistry (per-protocol on-Send re-encode).
   connector/               # TCP listener, ConnectionStack builder, per-connection plumbing
                            #   full_listener.go (the sole listener API),
-                           #   coordinator.go (multi-listener orchestrator),
                            #   connection_stack.go, detect.go, alpn_routing.go,
                            #   connect_handler.go (CONNECT tunnel), socks5_handler.go,
                            #   h2_dispatch.go, h2_pool.go, h2c_handler.go,
@@ -130,7 +129,10 @@ internal/
   flow/                    # Stream/Flow Store (sqlite); HAR / JSONL export, import
   cert/                    # Root CA + dynamic server cert issuance
   config/                  # Configuration loading + validation (incl. Plugins, body-spill, limits)
-  encoding/                # Protobuf framing helper
+  encoding/                # String codec registry (base64 / url / hex / html / unicode / hash / case)
+                           #   used by macro encoders and MCP body patches;
+                           #   protobuf/ (schema-less wire <-> JSON), protoschema/ (schema-aware
+                           #   codec, server reflection, protoc), grpclpm/ (gRPC LPM helpers)
   fuzzer/                  # Iterator / Position / RequestData primitives for typed-fuzz path
   mcp/                     # MCP server, tools, handlers
                            #   typed resend: resend_http / resend_ws / resend_grpc / resend_raw
@@ -304,7 +306,7 @@ policy but are deliberately not enumerated — `/license-check` walks the whole 
 | `golang.org/x/net` | BSD-3-Clause | `http2` / `hpack` / `h2c` / `proxy` primitives used by the HTTP/2 data path |
 | `github.com/refraction-networking/utls` | BSD-3-Clause | uTLS ClientHello fingerprinting (`internal/layer/tlslayer`, `internal/connector/transport`) |
 | `github.com/andybalholm/brotli` | MIT | Brotli body decode (`internal/bodydecode`) |
-| `github.com/klauspost/compress` | Apache-2.0 | zstd / s2 body decode and protobuf framing compression |
+| `github.com/klauspost/compress` | Apache-2.0 | zstd body decode (`internal/bodydecode`) |
 | `golang.org/x/time` | BSD-3-Clause | Rate limiting in `internal/connector/ratelimit.go` |
 | `google.golang.org/grpc` | Apache-2.0 | Server-reflection client and the MCP-side gRPC resend / fuzz helpers. **Not** in the proxy data path — gRPC on the wire is parsed natively (see "No external proxy libraries"). |
 | `google.golang.org/protobuf` | BSD-3-Clause | Descriptor / reflection handling in `internal/encoding/protoschema` |
