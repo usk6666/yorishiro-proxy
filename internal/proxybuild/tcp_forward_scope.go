@@ -2,10 +2,12 @@ package proxybuild
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/config"
@@ -72,18 +74,38 @@ func tcpForwardScheme(upstreamTLS bool) string {
 // compares it in canonical form) and port, path "". It is the start-time
 // check, the accept-time check and the live-connection predicate, so a
 // connection survives a policy change iff an identical new one would be
-// admitted. A nil or rule-less scope allows everything. An unparseable
-// target is checked as host=target, port 0.
+// admitted. A nil or rule-less scope allows everything. With rules, a
+// target that tcpForwardTargetHostPort rejects fails closed: net.Dial
+// resolves a service-name port ("postgresql" → 5432), so checking it as
+// port 0 would slip past a port-scoped deny (USK-1161 review S-1).
 func tcpForwardScopeCheck(scope *connector.TargetScope, target string, upstreamTLS bool) (allowed bool, reason string) {
 	if scope == nil || !scope.HasRules() {
 		return true, ""
 	}
+	host, port, err := tcpForwardTargetHostPort(target)
+	if err != nil {
+		return false, err.Error()
+	}
+	return scope.CheckTarget(tcpForwardScheme(upstreamTLS), host, port, "")
+}
+
+// tcpForwardTargetHostPort splits a forward target into host and a port
+// that must be a decimal integer in 1..65535. Service names ("https",
+// "postgresql"), signs and out-of-range values are rejected, so the port
+// the scope checks is the port the dialer connects to.
+func tcpForwardTargetHostPort(target string) (string, int, error) {
 	host, portStr, err := net.SplitHostPort(target)
 	if err != nil {
-		host, portStr = target, ""
+		return "", 0, fmt.Errorf("invalid target %q: %w", target, err)
 	}
-	port, _ := strconv.Atoi(portStr)
-	return scope.CheckTarget(tcpForwardScheme(upstreamTLS), host, port, "")
+	if portStr == "" || strings.Trim(portStr, "0123456789") != "" {
+		return "", 0, fmt.Errorf("invalid target %q: port %q is not a decimal port number", target, portStr)
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil || port < 1 || port > 65535 {
+		return "", 0, fmt.Errorf("invalid target %q: port %q is out of range 1-65535", target, portStr)
+	}
+	return host, port, nil
 }
 
 // tcpForwardUpstreamTLS reports the forward's upstream_tls axis.
@@ -119,7 +141,13 @@ func (m *Manager) admitTCPForwardConn(ctx context.Context, parentListenerName st
 		return ctx, func() {}, false
 	}
 
+	// Mint the conn ID here and carry it on ctx so the live-connection
+	// registry's close / revoke logs and the handlers' logs and recorded
+	// flows share one conn_id (tcpForwardConnID reuses it).
+	connID := connector.GenerateConnID()
+	ctx = connector.ContextWithConnID(ctx, connID)
 	rctx, release, err := stack.LiveConns.Register(ctx, connector.LiveConn{
+		ConnID:   connID,
 		Listener: parentListenerName,
 		Via:      tcpForwardScopeVia,
 		Target:   entry.target,
@@ -134,6 +162,16 @@ func (m *Manager) admitTCPForwardConn(ctx context.Context, parentListenerName st
 		return ctx, func() {}, false
 	}
 	return rctx, release, true
+}
+
+// tcpForwardConnID returns the conn ID admitTCPForwardConn put on ctx,
+// or a fresh one when there is none (the parent listener was gone at
+// admission, or a caller outside the accept loop).
+func tcpForwardConnID(ctx context.Context) string {
+	if id := connector.ConnIDFromContext(ctx); id != "" {
+		return id
+	}
+	return connector.GenerateConnID()
 }
 
 // rejectTCPForwardConn answers a denied forward connection and closes it.

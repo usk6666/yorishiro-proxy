@@ -1,8 +1,10 @@
 package proxybuild
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"net"
 	"strings"
 	"testing"
@@ -212,6 +214,65 @@ func TestTCPForwardScopeCheck_NonNumericPortFailsClosed(t *testing.T) {
 	}
 	if ok, _ := tcpForwardScopeCheck(connector.NewTargetScope(), "db.internal:postgresql", false); !ok {
 		t.Error("rule-less scope blocked a service-name target")
+	}
+}
+
+// TestAdmitTCPForwardConn_ConnIDSharedWithRegistry (USK-1161 review
+// F-1): the conn ID admitTCPForwardConn registers in the live-connection
+// registry is the one it puts on the returned ctx (which the handlers
+// reuse via tcpForwardConnID), so the registry's revoke log carries the
+// same conn_id as the handler's logs and the recorded flow.
+func TestAdmitTCPForwardConn_ConnIDSharedWithRegistry(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var logBuf bytes.Buffer
+	live := connector.NewLiveConns(slog.New(slog.NewTextHandler(&logBuf, nil)))
+	scope := connector.NewTargetScope()
+	depsTpl := newTestDeps(t)
+	mgr, err := NewManager(ManagerConfig{
+		Logger: depsTpl.Logger,
+		StackFactory: func(_ context.Context, name, addr string) (*Stack, error) {
+			d := newTestDeps(t)
+			d.ListenerName = name
+			d.ListenAddr = addr
+			d.Scope = scope
+			d.LiveConns = live
+			return BuildLiveStack(context.Background(), d)
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	if err := mgr.Start(ctx, "127.0.0.1:0"); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer mgr.StopAll(context.Background())
+
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
+	entry := &tcpForwardEntry{port: "1", target: "127.0.0.1:4444", fc: &config.ForwardConfig{Target: "127.0.0.1:4444", Protocol: "raw"}}
+	rctx, release, ok := mgr.admitTCPForwardConn(ctx, DefaultListenerName, entry, server)
+	if !ok {
+		t.Fatal("admitTCPForwardConn rejected under an empty scope")
+	}
+	defer release()
+
+	connID := connector.ConnIDFromContext(rctx)
+	if connID == "" {
+		t.Fatal("admitted ctx carries no conn ID")
+	}
+	if got := tcpForwardConnID(rctx); got != connID {
+		t.Errorf("tcpForwardConnID(admitted ctx) = %q, want %q", got, connID)
+	}
+
+	scope.SetPolicyRules(nil, []connector.TargetRule{{Hostname: "127.0.0.1", Ports: []int{4444}}})
+	if n := live.Reconcile("test"); n != 1 {
+		t.Fatalf("Reconcile revoked %d connections, want 1", n)
+	}
+	if logs := logBuf.String(); !strings.Contains(logs, "conn_id="+connID) {
+		t.Errorf("registry revoke log does not carry conn_id=%s:\n%s", connID, logs)
 	}
 }
 

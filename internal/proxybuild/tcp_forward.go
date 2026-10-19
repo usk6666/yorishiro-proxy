@@ -154,6 +154,13 @@ func (m *Manager) startTCPForwardListener(
 	if fc.Target == "" {
 		return nil, fmt.Errorf("tcp forward port %s: empty Target", port)
 	}
+	// USK-1161 review S-1: the target port must be a decimal 1..65535.
+	// net.Dial would resolve a service name ("postgresql" → 5432) that the
+	// TargetScope gate cannot see, so such a target is never dialed. Every
+	// forward start (config file and MCP proxy_start) converges here.
+	if _, _, err := tcpForwardTargetHostPort(fc.Target); err != nil {
+		return nil, fmt.Errorf("tcp forward port %s: %w", port, err)
+	}
 
 	// After the rebase of USK-913 onto main (USK-914 already landed), all
 	// six L7 / raw selectors are wired: raw/auto via the bytechunk inline
@@ -402,7 +409,7 @@ func (m *Manager) handleTCPForwardConnWithOverride(
 
 	protocol := override.resolveProtocol(entry)
 
-	connID := connector.GenerateConnID()
+	connID := tcpForwardConnID(ctx)
 	clientAddr := clientConn.RemoteAddr().String()
 	connLogger := m.logger.With(
 		"conn_id", connID,

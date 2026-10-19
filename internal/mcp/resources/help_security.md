@@ -261,7 +261,11 @@ on `schemes: ["http"]`. Each envelope on the connection is still checked by the
 connection-level host check with the client-facing leg's scheme (above), so on an
 entry whose two legs differ, a deny matching either leg blocks the traffic.
 
-The check uses the literal `target` host (no DNS resolution). A denied connection
+The check uses the literal `target` host (no DNS resolution) and its port, which
+must be a decimal number in 1-65535: a target whose port is a service name
+(`db.internal:postgresql`), signed or out of range is refused at `proxy_start`
+whether or not a scope is set, because the dialer would resolve a service name to
+a port the check never saw. A denied connection
 is not recorded as a flow; an Info line `tcp forward target blocked by scope` is
 logged.
 
