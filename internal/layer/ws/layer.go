@@ -299,6 +299,18 @@ func (l *Layer) releaseStreamState(streamID string) {
 	o.stateReleaser.ReleaseStream(o.ctxTmpl.ConnID, streamID)
 }
 
+// CloseFrameSeen reports whether this Layer's Channel has emitted a
+// Close-frame Envelope, i.e. the peer it reads from started (or answered)
+// the RFC 6455 closing handshake. Safe for concurrent use.
+func (l *Layer) CloseFrameSeen() bool {
+	if l == nil || l.channel == nil {
+		return false
+	}
+	l.channel.mu.Lock()
+	defer l.channel.mu.Unlock()
+	return l.channel.closeSeen
+}
+
 // Close cascades closer.Close() to the underlying transport and marks the
 // inner Channel terminated. Idempotent via sync.Once: a second Close
 // returns the cached error from the first call (typically nil).

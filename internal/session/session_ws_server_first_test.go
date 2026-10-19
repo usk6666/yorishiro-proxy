@@ -41,7 +41,9 @@ func (f *wsServerFirstFixture) completeIDs() []string {
 	return append([]string(nil), f.completeID...)
 }
 
-func startWSServerFirstFixture(t *testing.T, ctx context.Context, serverFrame []byte) *wsServerFirstFixture {
+// serverScript, when given, runs on the server side after the 101 (and
+// after serverFrame, if any) with the server's buffered reader.
+func startWSServerFirstFixture(t *testing.T, ctx context.Context, serverFrame []byte, serverScript ...func(br *bufio.Reader, c net.Conn)) *wsServerFirstFixture {
 	t.Helper()
 
 	browser, proxyClientSide := pipePair()
@@ -80,6 +82,9 @@ func startWSServerFirstFixture(t *testing.T, ctx context.Context, serverFrame []
 			// arrives after the swap, not as 101 leftover bytes.
 			time.Sleep(50 * time.Millisecond)
 			_, _ = server.Write(serverFrame)
+		}
+		for _, script := range serverScript {
+			script(br, server)
 		}
 	}()
 
@@ -185,5 +190,53 @@ func TestRunStackSession_WSUpgrade_ClientCloseWithoutFrameCompletesStream(t *tes
 	}
 	if ids[0] == "" {
 		t.Errorf("OnComplete streamID = %q, want the handshake StreamID", ids[0])
+	}
+}
+
+// TestRunStackSession_WSUpgrade_ClientCloseHandshakeKeepsServerReply guards
+// the exception in the USK-1171 client-end teardown: when the client
+// starts the RFC 6455 closing handshake, the session must not tear the
+// upstream down on the client direction's end — the server's Close reply
+// (sent here after a delay) must still reach the client.
+func TestRunStackSession_WSUpgrade_ClientCloseHandshakeKeepsServerReply(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	serverReply := []byte{0x03, 0xe8} // status 1000
+	f := startWSServerFirstFixture(t, ctx, nil, func(br *bufio.Reader, c net.Conn) {
+		for {
+			fr, err := ws.ReadFrame(br)
+			if err != nil {
+				return
+			}
+			if fr.Opcode == ws.OpcodeClose {
+				break
+			}
+		}
+		time.Sleep(200 * time.Millisecond)
+		_ = ws.WriteFrame(c, &ws.Frame{Fin: true, Opcode: ws.OpcodeClose, Payload: serverReply})
+		_ = c.Close()
+	})
+
+	if err := ws.WriteFrame(f.browser, &ws.Frame{
+		Fin: true, Opcode: ws.OpcodeClose, Masked: true,
+		MaskKey: [4]byte{1, 2, 3, 4}, Payload: []byte{0x03, 0xe8},
+	}); err != nil {
+		t.Fatalf("browser write Close: %v", err)
+	}
+
+	_ = f.browser.SetReadDeadline(time.Now().Add(3 * time.Second))
+	fr, err := ws.ReadFrame(f.browserR)
+	if err != nil {
+		t.Fatalf("server Close reply not relayed to the client: %v", err)
+	}
+	if fr.Opcode != ws.OpcodeClose {
+		t.Errorf("relayed frame opcode = %d, want Close", fr.Opcode)
+	}
+
+	select {
+	case <-f.done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("RunStackSession did not return after the closing handshake")
 	}
 }

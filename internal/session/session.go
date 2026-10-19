@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -170,6 +171,36 @@ type SessionOptions struct {
 	// LifecycleEngine semantically — both fields typically point at the
 	// same *pluginv2.Engine in production.
 	PluginEngine *pluginv2.Engine
+
+	// preDialed, when non-nil, puts RunSession in "upstream pre-
+	// established" mode: the upstream Channel already exists, so it is
+	// published to the upstream->client goroutine before either goroutine
+	// starts instead of being dialled lazily on the first client
+	// envelope. Both directions are read from the start, so a peer that
+	// speaks first (WS greetings / server push) is relayed without
+	// waiting for the client (USK-1171). The dial argument is never
+	// called in this mode.
+	//
+	// Set only by orchestrators that built the upstream Channel
+	// themselves (runUpgradeWS today; the raw-TCP forward is the planned
+	// next caller, USK-1216). The lazy dial stays the default because
+	// HTTP routing needs the first envelope to pick the upstream.
+	preDialed layer.Channel
+
+	// onClientEnd, when non-nil, is called once when the client->upstream
+	// direction ends for any reason other than an upgrade handoff (EOF or
+	// error). It returns the io.Closer that tears the upstream wire down,
+	// or nil to leave the upstream alone. RunSession marks the teardown as
+	// its own doing before closing, so the upstream read error that
+	// follows ends the upstream->client direction gracefully instead of
+	// being recorded as an upstream failure.
+	//
+	// Needed by the WS swap (USK-1171): the post-swap upstream read is
+	// live from the start, a ws Channel's Close is a no-op and its Next
+	// does not honour ctx cancellation, so without a teardown a client
+	// that goes away while the upstream is idle would park the session
+	// until the upstream closes on its own.
+	onClientEnd func() io.Closer
 }
 
 // interceptReleaseEOFDefaultWindow is the canonical correlation window for
@@ -429,6 +460,12 @@ type upstreamHolder struct {
 	// goroutine finished with, if any. Written only by goroutine 2 (upstream->client); read after the
 	// errgroup's Wait.
 	recvErr error
+
+	// tornDown is set by goroutine 1 BEFORE it closes the upstream wire
+	// via SessionOptions.onClientEnd. Goroutine 2 reads it when its
+	// upstream read fails, to tell the proxy's own teardown from an
+	// upstream failure.
+	tornDown atomic.Bool
 }
 
 // refused reports whether the UPSTREAM declared the stream unprocessed —
@@ -555,6 +592,20 @@ func RunSession(ctx context.Context, client layer.Channel, dial DialFunc, p *pip
 	}()
 
 	sc := &streamCapture{}
+
+	// USK-1171: upstream pre-established mode. The writes happen before
+	// the g.Go calls below, so both goroutines observe them (go statement
+	// happens-before). uh.ch != nil makes dispatchClientAction skip its
+	// lazy dial, so close(uh.ready) fires at exactly one site per mode.
+	// The StreamID is seeded from the client Channel because
+	// upstreamToClient reads it once on entry, possibly before any client
+	// envelope arrives, and OnComplete needs it to finalise the Stream
+	// even when the client never sends.
+	if opt.preDialed != nil {
+		uh.ch = opt.preDialed
+		close(uh.ready)
+		sc.set(client.StreamID())
+	}
 
 	// Backstop for BodyBuffer references that Pipeline.Run's variant-snapshot
 	// Clone retained. Drained after g.Wait() returns and after OnComplete, so
@@ -937,6 +988,25 @@ func runUpgradeWS(
 	upgradeDial := DialFunc(func(_ context.Context, _ *envelope.Envelope) (layer.Channel, error) {
 		return wrappedUpstreamCh, nil
 	})
+
+	// USK-1171: the post-swap session reads both directions immediately.
+	// Without this the recursive RunSession only published the upstream
+	// Channel on the first client frame, so a server-speaks-first WS
+	// protocol (greeting, push) stalled until the client sent something.
+	// userOpt is this function's local copy; the caller's options are
+	// untouched.
+	userOpt.preDialed = wrappedUpstreamCh
+	// When the client goes away, tear the upstream down so the upstream
+	// read (live from the start, and deaf to ctx) ends too. The exception
+	// is a client that sent a Close frame: per RFC 6455 §7.1.1 the server
+	// answers with its own Close and closes TCP, and that reply must still
+	// reach the client.
+	userOpt.onClientEnd = func() io.Closer {
+		if clientWS.CloseFrameSeen() {
+			return nil
+		}
+		return upstreamWS
+	}
 
 	// USK-841 Phase A milestone (d): the post-swap recursive session is
 	// about to start. Both ws.Layers are installed on the ConnectionStack
@@ -2628,12 +2698,9 @@ func clientToUpstream(
 	//   * Genuine err → close upstream so peer goroutine unblocks promptly.
 	//   * Normal EOF (err == nil) → leave open; the response may still arrive.
 	//   * ErrUpgradePending → leave open; RunStackSession owns the wire.
-	defer func() {
-		if err == nil || errors.Is(err, ErrUpgradePending) || uh.ch == nil {
-			return
-		}
-		_ = uh.ch.Close()
-	}()
+	//   * USK-1171: SessionOptions.onClientEnd may tear the upstream
+	//     down on any non-upgrade exit (see clientToUpstreamExit).
+	defer func() { clientToUpstreamExit(uh, opt, err) }()
 
 	notice := UpgradeNoticeFromContext(ctx)
 
@@ -2716,6 +2783,29 @@ func clientToUpstream(
 			return ErrUpgradePending
 		}
 	}
+}
+
+// clientToUpstreamExit is clientToUpstream's deferred teardown, extracted
+// to keep that loop under the gocyclo budget. On an upgrade handoff it
+// does nothing (RunStackSession owns the wires). Otherwise it first lets
+// SessionOptions.onClientEnd tear the upstream down — marking uh.tornDown
+// BEFORE the Close so upstreamToClient attributes the resulting read
+// error to the proxy — and then applies the cascade-close discipline:
+// close the upstream Channel on a genuine error only, never on EOF.
+func clientToUpstreamExit(uh *upstreamHolder, opt SessionOptions, err error) {
+	if errors.Is(err, ErrUpgradePending) {
+		return
+	}
+	if opt.onClientEnd != nil {
+		if c := opt.onClientEnd(); c != nil {
+			uh.tornDown.Store(true)
+			_ = c.Close()
+		}
+	}
+	if err == nil || uh.ch == nil {
+		return
+	}
+	_ = uh.ch.Close()
 }
 
 // dispatchClientAction performs the post-Pipeline action on a client-side
@@ -2945,6 +3035,12 @@ func upstreamToClient(
 func upstreamToClientFinish(ctx context.Context, opt SessionOptions, uh *upstreamHolder, clientID string, err error, relayed bool) error {
 	if errors.Is(err, ErrUpgradePending) {
 		return err
+	}
+	if err != nil && uh.tornDown.Load() {
+		// The read failed because the client direction ended and the
+		// session tore the upstream down (onClientEnd); the upstream did
+		// nothing wrong.
+		err = nil
 	}
 	if err != nil {
 		uh.recvErr = err
