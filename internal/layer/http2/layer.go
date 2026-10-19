@@ -646,6 +646,7 @@ func New(conn net.Conn, streamID string, role Role, opts ...Option) (*Layer, err
 		}
 	}
 	local := httpConn.LocalSettings()
+	httpConn.Streams().SetLocalResetCapacity(2 * int(local.MaxConcurrentStreams))
 
 	dec := hpack.NewDecoder(local.HeaderTableSize)
 	if o.maxHeaderListSize > 0 {

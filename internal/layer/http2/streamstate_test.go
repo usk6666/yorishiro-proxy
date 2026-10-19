@@ -642,3 +642,54 @@ func TestStreamMap_LocalResetSetIsBounded(t *testing.T) {
 		t.Error("id never reset reported as locally reset")
 	}
 }
+
+// TestStreamMap_SetLocalResetCapacity pins the review LOW from the fix-round
+// verification: the locally-reset set's capacity follows the configured
+// MAX_CONCURRENT_STREAMS (twice it), never drops below maxLocalResetIDs, and
+// is capped at maxLocalResetCapacity.
+func TestStreamMap_SetLocalResetCapacity(t *testing.T) {
+	tests := []struct {
+		name string
+		n    int
+		want int
+	}{
+		{name: "below floor keeps the floor", n: 10, want: maxLocalResetIDs},
+		{name: "above floor is honoured", n: 4000, want: 4000},
+		{name: "huge is capped", n: 1 << 30, want: maxLocalResetCapacity},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sm := NewStreamMap(65535, 65535)
+			sm.SetLocalResetCapacity(tt.n)
+			total := tt.want + 5
+			for i := 0; i < total; i++ {
+				sm.NoteLocalReset(uint32(2*i + 1))
+			}
+			if got := len(sm.localReset); got != tt.want {
+				t.Errorf("len(localReset) = %d, want %d", got, tt.want)
+			}
+			if sm.WasLocallyReset(1) {
+				t.Error("oldest id 1 still remembered after the capacity was exceeded")
+			}
+			if last := uint32(2*(total-1) + 1); !sm.WasLocallyReset(last) {
+				t.Errorf("most recent id %d not remembered", last)
+			}
+		})
+	}
+}
+
+// TestLayer_LocalResetCapacityFollowsMaxConcurrentStreams checks the Layer
+// wires the set's capacity to twice its local MAX_CONCURRENT_STREAMS, so a
+// raised limit keeps every concurrently open stream's reset remembered.
+func TestLayer_LocalResetCapacityFollowsMaxConcurrentStreams(t *testing.T) {
+	l, peer, cleanup := startServerLayer(t, WithMaxConcurrentStreams(3000))
+	defer cleanup()
+	peer.consumePeerSettings(t)
+	sm := l.conn.Streams()
+	sm.mu.Lock()
+	got := sm.localResetCapacityLocked()
+	sm.mu.Unlock()
+	if got != 6000 {
+		t.Errorf("local reset capacity = %d, want 6000 (2 x MAX_CONCURRENT_STREAMS)", got)
+	}
+}

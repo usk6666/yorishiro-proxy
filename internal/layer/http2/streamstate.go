@@ -91,14 +91,47 @@ type StreamMap struct {
 	localReset     map[uint32]struct{}
 	localResetRing []uint32
 	localResetNext int
+	// localResetCap is the set's capacity; zero means maxLocalResetIDs.
+	// See SetLocalResetCapacity.
+	localResetCap int
 }
 
-// maxLocalResetIDs bounds the locally-reset id set. It is above twice the
-// default SETTINGS_MAX_CONCURRENT_STREAMS, so every stream that can be open
-// at once fits with room to spare; a peer that sends HEADERS on a reset
-// stream after over this many later resets gets the stream-id-reuse
-// connection error.
+// maxLocalResetIDs is the minimum capacity of the locally-reset id set.
+// The Layer raises it to twice its local SETTINGS_MAX_CONCURRENT_STREAMS
+// (SetLocalResetCapacity), so every stream that can be open at once fits
+// with room to spare whatever limit is configured. A peer that sends
+// HEADERS on a reset stream only after more than the capacity's worth of
+// later resets gets the stream-id-reuse connection error; that can only
+// tear down the peer's own connection.
 const maxLocalResetIDs = 1024
+
+// maxLocalResetCapacity caps SetLocalResetCapacity so a huge configured
+// MAX_CONCURRENT_STREAMS cannot make the set unbounded in practice. The
+// ring grows lazily, so only ids actually reset cost memory.
+const maxLocalResetCapacity = 1 << 16
+
+// SetLocalResetCapacity sets the capacity of the locally-reset id set to
+// n, clamped to [maxLocalResetIDs, maxLocalResetCapacity]. It must be
+// called before the first NoteLocalReset.
+func (sm *StreamMap) SetLocalResetCapacity(n int) {
+	if n < maxLocalResetIDs {
+		n = maxLocalResetIDs
+	}
+	if n > maxLocalResetCapacity {
+		n = maxLocalResetCapacity
+	}
+	sm.mu.Lock()
+	sm.localResetCap = n
+	sm.mu.Unlock()
+}
+
+// localResetCapacityLocked returns the set's capacity. Caller holds sm.mu.
+func (sm *StreamMap) localResetCapacityLocked() int {
+	if sm.localResetCap == 0 {
+		return maxLocalResetIDs
+	}
+	return sm.localResetCap
+}
 
 // NewStreamMap creates a new StreamMap with the given initial window sizes.
 func NewStreamMap(initialSendWindow, initialRecvWindow int32) *StreamMap {
@@ -240,12 +273,12 @@ func (sm *StreamMap) NoteLocalReset(id uint32) {
 	if sm.localReset == nil {
 		sm.localReset = make(map[uint32]struct{})
 	}
-	if len(sm.localResetRing) < maxLocalResetIDs {
+	if c := sm.localResetCapacityLocked(); len(sm.localResetRing) < c {
 		sm.localResetRing = append(sm.localResetRing, id)
 	} else {
 		delete(sm.localReset, sm.localResetRing[sm.localResetNext])
 		sm.localResetRing[sm.localResetNext] = id
-		sm.localResetNext = (sm.localResetNext + 1) % maxLocalResetIDs
+		sm.localResetNext = (sm.localResetNext + 1) % c
 	}
 	sm.localReset[id] = struct{}{}
 }
