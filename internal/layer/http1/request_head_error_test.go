@@ -33,6 +33,8 @@ func nextOnRequestN(t *testing.T, l *Layer, n int) nextResult {
 		if r.err != nil {
 			t.Fatalf("request %d: %v", i, r.err)
 		}
+		// USK-1229: an unanswered request ends the connection.
+		answerOK(t, ch)
 		_ = ch.Close()
 	}
 	var ch layer.Channel
@@ -105,6 +107,7 @@ func TestChannelNext_RequestHeadTimeout_ReturnsRequestHeadError(t *testing.T) {
 				if r := <-nextAsync(ch); r.err != nil {
 					t.Fatalf("request 1: %v", r.err)
 				}
+				answerOK(t, ch) // USK-1229: an unanswered request ends the connection
 				_ = ch.Close()
 			}
 			if _, err := client.Write([]byte(tc.partial)); err != nil {
@@ -228,12 +231,19 @@ func TestChannelNext_RequestHeadTooLarge_RespondsAndReturnsError(t *testing.T) {
 				res := make(chan nextResult, 1)
 				go func() { res <- nextOnRequestN(t, l, requestN) }()
 
-				// Request 1 (when present) is never answered, so the reject
-				// is the only response on the wire.
+				// Request 1 (when present) is answered with answerOKWire
+				// (USK-1229: an unanswered request would end the
+				// connection), so the reject follows that response.
 				_ = client.SetReadDeadline(time.Now().Add(10 * time.Second))
 				got, readErr := io.ReadAll(client)
 				if readErr != nil {
 					t.Errorf("reading the response: %v (want the response then a clean EOF)", readErr)
+				}
+				if requestN > 1 {
+					if !strings.HasPrefix(string(got), answerOKWire) {
+						t.Fatalf("client read %q, want request 1's response %q first", truncateForLog(got), answerOKWire)
+					}
+					got = got[len(answerOKWire):]
 				}
 				if !strings.HasPrefix(string(got), tc.wantLine) {
 					t.Fatalf("client read %q, want a response starting %q", truncateForLog(got), tc.wantLine)

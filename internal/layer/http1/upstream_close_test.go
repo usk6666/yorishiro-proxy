@@ -457,6 +457,20 @@ func nextRequestPathEnv(t *testing.T, l *Layer) (chEnv, string) {
 	return chEnv{}, ""
 }
 
+// answerOKWire is what answerOK writes on the wire.
+const answerOKWire = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"
+
+// answerOK writes a bodiless 200 response on a Send-direction exchange
+// Channel, so a keep-alive test that expects the next request to be parsed
+// answers this one first (USK-1229: an unanswered request ends the
+// connection). The peer must be reading (net.Pipe writes are synchronous).
+func answerOK(t *testing.T, ch layer.Channel) {
+	t.Helper()
+	if err := ch.Send(context.Background(), response(200)); err != nil {
+		t.Fatalf("Send 200: %v", err)
+	}
+}
+
 func hasAnomaly(msg *envelope.HTTPMessage, typ envelope.AnomalyType) bool {
 	for _, a := range msg.Anomalies {
 		if a.Type == typ {
