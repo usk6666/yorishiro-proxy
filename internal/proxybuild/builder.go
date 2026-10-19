@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/url"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -458,6 +459,9 @@ func BuildLiveStack(_ context.Context, deps Deps) (*Stack, error) {
 		OnStack:             buildOnStack(p, deps, headRecorder, logger),
 		OnHTTP2Stack:        buildOnHTTP2Stack(pH2, deps, logger),
 		OnUpstreamTLSError:  upstreamTLSErrorRecorder,
+		// USK-1189: CONNECT requests the handler cuts off (deadline or
+		// parser limit, after bytes arrived) share the USK-1181 recorder.
+		OnRequestHeadFailure: connectorRequestHeadCallback(headRecorder),
 		// USK-844: thread the configured request timeout into the inner-byte
 		// peek deadline. The provider closure reads the wrapper's atomic
 		// slot so a runtime configure { request_timeout_ms } reaches the
@@ -513,7 +517,10 @@ func BuildLiveStack(_ context.Context, deps Deps) (*Stack, error) {
 		OnStack:                buildOnStack(p, deps, headRecorder, logger),
 		RequestTimeout:         deps.RequestTimeout,
 		RequestTimeoutProvider: wrapper.RequestTimeout,
-		Logger:                 logger,
+		// USK-1189: a target peek cut off by its deadline is recorded
+		// with the 400 the handler returns.
+		OnRequestHeadFailure: connectorRequestHeadCallback(headRecorder),
+		Logger:               logger,
 	})
 
 	flCfg := connector.FullListenerConfig{
@@ -2424,6 +2431,12 @@ func buildPipelineDropRecorder(store flow.Writer, listenerName string, logger *s
 // path. URL-prefix / method matchers are inert at this stage because
 // the inner TLS handshake never completed; hostname matchers are the
 // only meaningful axis for unrecorded-protocol error paths.
+//
+// USK-1189: a client-side handshake the proxy itself abandoned because the
+// request_timeout_ms bound (USK-1162) expired keeps
+// FailureReason="client_tls_error" and gains the proxy-closed timeout tags
+// (see addTLSHandshakeTimeoutTags). buildCfg supplies request_timeout_ms;
+// nil omits that one tag.
 func buildTLSStackBuildErrorRecorder(store flow.Writer, scope *flow.RecordScope, listenerName string, buildCfg *connector.BuildConfig, logger *slog.Logger) connector.OnUpstreamTLSErrorFunc {
 	if store == nil {
 		return nil
@@ -2496,6 +2509,9 @@ func buildTLSStackBuildErrorRecorder(store flow.Writer, scope *flow.RecordScope,
 				ServerAddr: target,
 			},
 		}
+		if failureReason == "client_tls_error" && errors.Is(buildErr, context.DeadlineExceeded) {
+			addTLSHandshakeTimeoutTags(st.Tags, buildCfg)
+		}
 
 		// Use a background-derived context so a cancelled handler ctx
 		// does not abort the audit record.
@@ -2511,5 +2527,31 @@ func buildTLSStackBuildErrorRecorder(store flow.Writer, scope *flow.RecordScope,
 				)
 			}
 		}
+	}
+}
+
+// addTLSHandshakeTimeoutTags marks a client_tls_error the proxy caused by
+// abandoning the client-side MITM handshake at request_timeout_ms
+// (USK-1189), using the tag keys the request-head records use.
+//
+// The caller gates on errors.Is(err, context.DeadlineExceeded) AND
+// FailureReason="client_tls_error": the three client handshake sites
+// (performClientMITM, the raw passthrough builder, tcp_forwards TLS) are
+// bounded only by a context.WithTimeout of EffectiveRequestHeaderTimeout,
+// and crypto/tls returns that ctx's error. The FailureReason gate keeps
+// upstream dial / handshake timeouts out — a net timeout error also
+// satisfies errors.Is(context.DeadlineExceeded). context.Canceled
+// (shutdown, USK-1160 revocation) is not tagged. Re-open trigger: if a
+// parent ctx of those handshakes ever carries its own deadline, its expiry
+// would be tagged too and needs a dedicated connector sentinel.
+//
+// request_timeout_ms is read now, not at handshake time, so a runtime
+// request_timeout_ms change racing the handshake can report the new value.
+func addTLSHandshakeTimeoutTags(tags map[string]string, buildCfg *connector.BuildConfig) {
+	tags["phase"] = "tls_handshake"
+	tags["closed_by"] = "proxy"
+	tags["timeout"] = "request_timeout"
+	if buildCfg != nil {
+		tags["request_timeout_ms"] = strconv.FormatInt(buildCfg.EffectiveRequestHeaderTimeout().Milliseconds(), 10)
 	}
 }

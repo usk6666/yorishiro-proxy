@@ -265,6 +265,24 @@ func requestHeadHTTPVersion(proto string) string {
 	}
 }
 
+// connectorRequestHeadCallback adapts rec to the connector-side
+// OnRequestHeadFailure callback (USK-1189: the CONNECT request and the
+// plain-forward target peek, read before any Layer exists). Nil rec yields
+// nil, which the connector treats as "do not report".
+func connectorRequestHeadCallback(rec requestHeadRecorder) connector.OnRequestHeadFailureFunc {
+	if rec == nil {
+		return nil
+	}
+	return func(ctx context.Context, target string, head *http1.RequestHeadError) {
+		rec(ctx, requestHeadFailure{
+			ConnID:     connector.ConnIDFromContext(ctx),
+			ClientAddr: connector.ClientAddrFromContext(ctx),
+			Target:     target,
+			Head:       head,
+		})
+	}
+}
+
 // recordH1RequestHead records err when it is a *http1.RequestHeadError and
 // reports whether it was one. rec may be nil (no flow store): the error is
 // still classified so callers log it uniformly.

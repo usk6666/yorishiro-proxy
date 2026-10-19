@@ -197,7 +197,9 @@ func NewCONNECTHandler(cfg CONNECTHandlerConfig) HandlerFunc {
 		// Step 1: CONNECT negotiation (parses request, sends 200 OK).
 		// USK-1162: bound the CONNECT request head by request_timeout_ms
 		// so a trickling client cannot hold the slot (nil-safe BuildCfg).
-		_ = pc.SetReadDeadline(time.Now().Add(cfg.BuildCfg.EffectiveRequestHeaderTimeout()))
+		armed := cfg.BuildCfg.EffectiveRequestHeaderTimeout()
+		started := time.Now()
+		_ = pc.SetReadDeadline(started.Add(armed))
 		target, err := cfg.Negotiator.Negotiate(ctx, pc)
 		_ = pc.SetReadDeadline(time.Time{})
 		if err != nil {
@@ -206,6 +208,7 @@ func NewCONNECTHandler(cfg CONNECTHandlerConfig) HandlerFunc {
 				return nil
 			}
 			connLogger.Debug("CONNECT negotiation failed", "error", err)
+			reportCONNECTHeadFailure(ctx, cfg, err, armed, started)
 			return nil
 		}
 
@@ -243,6 +246,23 @@ func NewCONNECTHandler(cfg CONNECTHandlerConfig) HandlerFunc {
 		// Step 6: TLS MITM path (existing behaviour).
 		runTLSMITM(ctx, cfg.BuildCfg, pc, target, cfg.OnStack, cfg.OnHTTP2Stack, cfg.OnUpstreamTLSError, connLogger)
 		return nil
+	}
+}
+
+// reportCONNECTHeadFailure hands a CONNECT request the proxy itself cut
+// off (deadline or parser limit, after bytes arrived) to
+// cfg.OnRequestHeadFailure (USK-1189). The connection is still closed
+// without a response, as before.
+func reportCONNECTHeadFailure(ctx context.Context, cfg CONNECTHandlerConfig, err error, armed time.Duration, started time.Time) {
+	if cfg.OnRequestHeadFailure == nil {
+		return
+	}
+	var maxRaw int64
+	if cfg.BuildCfg != nil {
+		maxRaw = cfg.BuildCfg.MaxRawCaptureSize
+	}
+	if head, target := connectRequestHeadFailure(err, armed, started, maxRaw); head != nil {
+		cfg.OnRequestHeadFailure(ctx, target, head)
 	}
 }
 
