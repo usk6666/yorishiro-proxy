@@ -128,16 +128,24 @@ func (u *rawCaptureUpstream) serve(c net.Conn, idx int, buf *bytes.Buffer) {
 		return
 	}
 	br := bufio.NewReader(tee)
+	var out bytes.Buffer
 	for {
 		path, err := readUpstreamRequest(br)
 		if err != nil {
 			return
 		}
 		body := fmt.Sprintf("path=%s conn=%d", path, idx)
-		resp := fmt.Sprintf("HTTP/1.1 200 OK\r\nContent-Length: %d\r\n\r\n%s", len(body), body)
-		if _, err := c.Write([]byte(resp)); err != nil {
+		fmt.Fprintf(&out, "HTTP/1.1 200 OK\r\nContent-Length: %d\r\n\r\n%s", len(body), body)
+		// Answer pipelined requests in one write, so their responses
+		// reach the proxy together and land in its read buffer — where a
+		// conn-level idle probe cannot see the leftover.
+		if br.Buffered() > 0 {
+			continue
+		}
+		if _, err := c.Write(out.Bytes()); err != nil {
 			return
 		}
+		out.Reset()
 	}
 }
 
