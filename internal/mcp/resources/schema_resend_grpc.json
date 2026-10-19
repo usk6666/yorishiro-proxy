@@ -3,6 +3,7 @@
   "title": "resend_grpc input",
   "description": "Input schema for the resend_grpc tool (RFC-001 N8 typed gRPC resend).",
   "type": "object",
+  "required": ["messages"],
   "properties": {
     "flow_id": {
       "type": "string",

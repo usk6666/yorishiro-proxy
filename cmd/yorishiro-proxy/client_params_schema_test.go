@@ -156,7 +156,7 @@ func TestBuildToolParams_LiveSchemaNullableTypes(t *testing.T) {
 		{"nullable boolean true", "query", []string{"resource=flows", "include_bodies=true"}, "include_bodies", true},
 		{"nullable boolean false", "resend_ws", []string{"opcode=text", "fin=false"}, "fin", false},
 		{"nullable string-item array", "query", []string{"resource=flows", "fields=id,method"}, "fields", []string{"id", "method"}},
-		{"nullable string-item array grpc", "resend_grpc", []string{"accept_encoding=gzip,identity"}, "accept_encoding", []string{"gzip", "identity"}},
+		{"nullable string-item array grpc", "resend_grpc", []string{`messages=[{"payload":"x"}]`, "accept_encoding=gzip,identity"}, "accept_encoding", []string{"gzip", "identity"}},
 		{"nullable string stays literal", "configure", []string{"tls_fingerprint=123"}, "tls_fingerprint", "123"},
 		{"unparseable integer stays raw", "configure", []string{"max_connections=lots"}, "max_connections", "lots"},
 		// USK-1152 no-regression guards: top-level string-item arrays keep the

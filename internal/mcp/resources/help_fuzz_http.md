@@ -4,8 +4,6 @@ Synchronously fuzz an HTTP request with `HTTPMessage`-typed positions. Each vari
 
 The schema mirrors `resend_http` plus a `positions[]` list. The cartesian product of all positions yields the variant sequence (capped at **1000 variants per call**). Variants are executed sequentially with a fresh dial per variant.
 
-Larger fuzz jobs that need concurrency, rate limiting, or overload monitoring should use the legacy `fuzz` tool (asynchronous job runner) which coexists in parallel until N9 retires it.
-
 ## Position path syntax (HTTPMessage-typed)
 
 | Path | HTTPMessage field |
