@@ -105,13 +105,23 @@ func TestSelect_PackageThatExistsOnlyUnderTags(t *testing.T) {
 	}
 }
 
+// The smoke recipe runs `go test -race`, which sets the `race` build tag. A
+// `//go:build e2e && race` file is therefore part of the smoke tier and must
+// be selected; listing without -race would silently drop it (USK-1058 class).
+func TestSelect_RaceConstrainedSmokeFileSelected(t *testing.T) {
+	sel := selectMod(t)
+	if got := sel.Tests["example.com/smk/raceonly"]; !reflect.DeepEqual(got, []string{"TestRaceOnly"}) {
+		t.Fatalf("raceonly tests = %v, want [TestRaceOnly]; all = %v", got, sel.Tests)
+	}
+}
+
 func TestSelect_FullSelection(t *testing.T) {
 	sel := selectMod(t)
-	wantPkgs := []string{"example.com/smk/collide", "example.com/smk/smoke", "example.com/smk/tagonly"}
+	wantPkgs := []string{"example.com/smk/collide", "example.com/smk/raceonly", "example.com/smk/smoke", "example.com/smk/tagonly"}
 	if got := sel.Packages(); !reflect.DeepEqual(got, wantPkgs) {
 		t.Errorf("Packages() = %v, want %v", got, wantPkgs)
 	}
-	wantNames := []string{"ExampleSmoke", "FuzzSmoke", "Test", "TestCollideSmoke", "TestSmokeA", "TestSmoke_B", "TestTagOnly", "TestXSmoke"}
+	wantNames := []string{"ExampleSmoke", "FuzzSmoke", "Test", "TestCollideSmoke", "TestRaceOnly", "TestSmokeA", "TestSmoke_B", "TestTagOnly", "TestXSmoke"}
 	if got := sel.Names(); !reflect.DeepEqual(got, wantNames) {
 		t.Errorf("Names() = %v, want %v", got, wantNames)
 	}
@@ -235,8 +245,8 @@ func TestRun_OutputIsDeterministic(t *testing.T) {
 			t.Fatalf("output differs between runs:\n%s\n---\n%s", first, out.String())
 		}
 	}
-	want := "^(ExampleSmoke|FuzzSmoke|Test|TestCollideSmoke|TestSmokeA|TestSmoke_B|TestTagOnly|TestXSmoke)$\n" +
-		"example.com/smk/collide\nexample.com/smk/smoke\nexample.com/smk/tagonly\n"
+	want := "^(ExampleSmoke|FuzzSmoke|Test|TestCollideSmoke|TestRaceOnly|TestSmokeA|TestSmoke_B|TestTagOnly|TestXSmoke)$\n" +
+		"example.com/smk/collide\nexample.com/smk/raceonly\nexample.com/smk/smoke\nexample.com/smk/tagonly\n"
 	if first != want {
 		t.Fatalf("output =\n%s\nwant\n%s", first, want)
 	}
