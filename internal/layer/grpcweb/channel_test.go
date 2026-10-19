@@ -887,26 +887,26 @@ func TestClosed_FiresOnExplicitClose(t *testing.T) {
 	}
 }
 
-// --- Gzip decompression is bounded by MaxGRPCMessageSize ---
+// --- Gzip decompression is bounded by the per-Channel max message size ---
 
 func TestGzipDecompressionCap(t *testing.T) {
-	// Build a small gzip blob whose decompressed size exceeds
-	// MaxGRPCMessageSize. We don't need to actually allocate that much:
-	// the LimitReader-based cap should fire before allocation completes.
-	// Use a highly-compressible payload of zero bytes; gzip compresses
-	// runs of zeros at ~1000:1, so a 1 MiB compressed payload decodes to
-	// roughly 1 GiB of zeros.
-	var bigZeros [1 << 20]byte // 1 MiB of zeros
+	// Build a gzip LPM payload whose decompressed size exceeds the
+	// per-Channel message cap. A small cap keeps the fixture cheap: 64 KiB
+	// of zeros compresses to ~100 bytes, far below the 4096-byte wire-length
+	// cap (so the LPM frame itself parses), while its decompressed size is
+	// 16x the cap (so the decompression bound must reject it).
+	const msgCap = 4096
+	zeros := make([]byte, 64<<10)
 	var gz bytes.Buffer
 	gw := gzip.NewWriter(&gz)
-	// Write the same MiB many times to cross the cap.
-	for i := 0; i < 300; i++ {
-		if _, err := gw.Write(bigZeros[:]); err != nil {
-			t.Fatalf("gzip write: %v", err)
-		}
+	if _, err := gw.Write(zeros); err != nil {
+		t.Fatalf("gzip write: %v", err)
 	}
 	if err := gw.Close(); err != nil {
 		t.Fatalf("gzip close: %v", err)
+	}
+	if gz.Len() >= msgCap {
+		t.Fatalf("precondition: compressed size %d must be < cap %d so the wire-length cap does not fire first", gz.Len(), msgCap)
 	}
 	// Wrap as an LPM frame with compressed=true.
 	frame := EncodeFrame(false, true, gz.Bytes())
@@ -916,7 +916,7 @@ func TestGzipDecompressionCap(t *testing.T) {
 	}
 	in := mustHTTPResponseEnv("s-bomb", headers, frame, 200)
 	mock := newMockChannel("s-bomb", in)
-	ch := Wrap(mock, RoleClient)
+	ch := Wrap(mock, RoleClient, WithMaxMessageSize(msgCap))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -933,9 +933,12 @@ func TestGzipDecompressionCap(t *testing.T) {
 		if se.Code != layer.ErrorInternalError {
 			t.Errorf("Code = %v, want ErrorInternalError", se.Code)
 		}
-		if !strings.Contains(se.Reason, "exceeds cap") &&
-			!strings.Contains(se.Reason, "gzip") {
-			t.Errorf("Reason = %q (expected mention of cap or gzip)", se.Reason)
+		// The literal cap value proves the per-Channel WithMaxMessageSize is
+		// threaded into the decompression bound (not the package default),
+		// and that this is the decompressed-size limit rather than an
+		// unrelated gzip read error.
+		if want := "gzip decompressed size exceeds cap 4096"; !strings.Contains(se.Reason, want) {
+			t.Errorf("Reason = %q, want it to contain %q", se.Reason, want)
 		}
 		return
 	}

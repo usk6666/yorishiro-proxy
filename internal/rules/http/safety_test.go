@@ -240,24 +240,43 @@ func TestReconstructURL(t *testing.T) {
 	}
 }
 
+// chunkStraddlingBodySize is the size of the bodies built by
+// chunkStraddlingBody: 8 × bodybuf.readChunkSize (32 KiB, unexported), so a
+// file-backed Bytes(ctx) call has to issue several reads to reassemble it.
+const chunkStraddlingBodySize = 256 << 10
+
+// chunkStraddlingBody returns a chunkStraddlingBodySize-byte body of 'A'
+// filler with needle centred on offset 128 KiB. 128 KiB is a multiple of
+// every power-of-two read chunk from 4 KiB to 128 KiB (including
+// bodybuf.readChunkSize), so the needle straddles a chunk boundary and a
+// match proves the chunks were reassembled rather than scanned one at a time.
+func chunkStraddlingBody(needle []byte) []byte {
+	const boundary = 128 << 10
+	start := boundary - len(needle)/2
+	body := bytes.Repeat([]byte("A"), chunkStraddlingBodySize)
+	copy(body[start:], needle)
+	return body
+}
+
 // TestSafetyEngine_CheckInput_BodyBufferFileBackedSQLi verifies that a
-// disk-backed BodyBuffer (12 MiB) carrying a SQL injection pattern is
+// disk-backed BodyBuffer carrying a SQL injection pattern is
 // materialized via Bytes(ctx) and matched by the safety engine. Before
 // USK-633 the body target was silently skipped whenever msg.Body was nil,
 // which let >10 MiB bodies bypass Safety entirely.
+//
+// The fixture is small (256 KiB) but still spans several file-mode read
+// chunks; size does not matter to the engine, only that the body is
+// file-backed and that the needle crosses a chunk boundary (USK-1205).
 func TestSafetyEngine_CheckInput_BodyBufferFileBackedSQLi(t *testing.T) {
 	e := NewSafetyEngine()
 	if err := e.LoadPreset(common.PresetDestructiveSQL); err != nil {
 		t.Fatal(err)
 	}
 
-	// Build a 12 MiB body with a DROP TABLE needle in the middle so the
-	// file-mode reader has to traverse multiple readChunkSize chunks.
-	const payloadSize = 12 << 20
+	// The DROP TABLE needle straddles a file-mode read-chunk boundary, so
+	// the match only succeeds if the whole multi-chunk body is reassembled.
 	needle := []byte("DROP TABLE users")
-	filler := bytes.Repeat([]byte("A"), payloadSize/2)
-	body := append(append([]byte(nil), filler...), needle...)
-	body = append(body, filler...)
+	body := chunkStraddlingBody(needle)
 
 	bb, err := bodybuf.NewFile(t.TempDir(), "test-body", 0)
 	if err != nil {
@@ -266,6 +285,9 @@ func TestSafetyEngine_CheckInput_BodyBufferFileBackedSQLi(t *testing.T) {
 	t.Cleanup(func() { _ = bb.Release() })
 	if _, err := bb.Write(body); err != nil {
 		t.Fatal(err)
+	}
+	if !bb.IsFileBacked() {
+		t.Fatal("precondition: BodyBuffer must be file-backed")
 	}
 
 	msg := &envelope.HTTPMessage{

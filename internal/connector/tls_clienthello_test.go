@@ -13,7 +13,7 @@ import (
 //
 // The function returns the complete TLS record bytes (5-byte header +
 // handshake message) so test cases can feed it directly to
-// parseClientHelloSNI.
+// parseClientHelloExtensions (via sniFromClientHello).
 func buildClientHello(t *testing.T, sni string) []byte {
 	t.Helper()
 	return buildClientHelloWithExts(t, sni, nil)
@@ -127,10 +127,22 @@ func buildALPNExtension(t *testing.T, offers []string) []byte {
 	return ext
 }
 
+// sniFromClientHello runs the production SNI extraction sequence used by
+// peekClientHelloSNIAndALPN: validate the record + Handshake framing with
+// parseClientHelloExtensions, then scan the extensions block with
+// findSNIInExtensions.
+func sniFromClientHello(buf []byte) (string, error) {
+	exts, err := parseClientHelloExtensions(buf)
+	if err != nil {
+		return "", err
+	}
+	return findSNIInExtensions(exts)
+}
+
 func TestParseClientHelloSNI_PresentHostname(t *testing.T) {
 	want := "example.com"
 	rec := buildClientHello(t, want)
-	got, err := parseClientHelloSNI(rec)
+	got, err := sniFromClientHello(rec)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -143,7 +155,7 @@ func TestParseClientHelloSNI_PunycodeHostname(t *testing.T) {
 	// Verbatim wire bytes are case- and punycode-preserved.
 	want := "xn--bcher-kva.example"
 	rec := buildClientHello(t, want)
-	got, err := parseClientHelloSNI(rec)
+	got, err := sniFromClientHello(rec)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -154,7 +166,7 @@ func TestParseClientHelloSNI_PunycodeHostname(t *testing.T) {
 
 func TestParseClientHelloSNI_NoSNIExtension(t *testing.T) {
 	rec := buildClientHello(t, "")
-	got, err := parseClientHelloSNI(rec)
+	got, err := sniFromClientHello(rec)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -166,7 +178,7 @@ func TestParseClientHelloSNI_NoSNIExtension(t *testing.T) {
 func TestParseClientHelloSNI_NotHandshake(t *testing.T) {
 	// Application data record (type 0x17).
 	rec := []byte{0x17, 0x03, 0x03, 0x00, 0x05, 0xde, 0xad, 0xbe, 0xef, 0x00}
-	_, err := parseClientHelloSNI(rec)
+	_, err := parseClientHelloExtensions(rec)
 	if !errors.Is(err, errNotClientHello) {
 		t.Errorf("err = %v, want errNotClientHello", err)
 	}
@@ -177,7 +189,7 @@ func TestParseClientHelloSNI_NotClientHello(t *testing.T) {
 	rec := []byte{tlsContentTypeHandshake, 0x03, 0x03, 0x00, 0x04,
 		0x02, 0x00, 0x00, 0x00, // msg_type=ServerHello, length=0
 	}
-	_, err := parseClientHelloSNI(rec)
+	_, err := parseClientHelloExtensions(rec)
 	if !errors.Is(err, errNotClientHello) {
 		t.Errorf("err = %v, want errNotClientHello", err)
 	}
@@ -192,7 +204,7 @@ func TestParseClientHelloSNI_TooShort(t *testing.T) {
 	}
 	for i, buf := range cases {
 		t.Run(fmt.Sprintf("case_%d", i), func(t *testing.T) {
-			_, err := parseClientHelloSNI(buf)
+			_, err := parseClientHelloExtensions(buf)
 			if !errors.Is(err, errClientHelloIncomplete) {
 				t.Errorf("err = %v, want errClientHelloIncomplete", err)
 			}
@@ -205,7 +217,7 @@ func TestParseClientHelloSNI_TruncatedRecordBody(t *testing.T) {
 	rec := []byte{tlsContentTypeHandshake, 0x03, 0x03, 0x00, 0xc8,
 		0x01, 0x00, 0x00, 0x00, // partial handshake header
 	}
-	_, err := parseClientHelloSNI(rec)
+	_, err := parseClientHelloExtensions(rec)
 	if !errors.Is(err, errClientHelloIncomplete) {
 		t.Errorf("err = %v, want errClientHelloIncomplete", err)
 	}
@@ -301,9 +313,9 @@ func TestParseClientHelloALPN_SNIAndALPNIndependent(t *testing.T) {
 	wantALPN := []string{"h2", "http/1.1"}
 	rec := buildClientHelloWithExts(t, wantSNI, wantALPN)
 
-	gotSNI, err := parseClientHelloSNI(rec)
+	gotSNI, err := sniFromClientHello(rec)
 	if err != nil {
-		t.Fatalf("parseClientHelloSNI: unexpected error: %v", err)
+		t.Fatalf("sniFromClientHello: unexpected error: %v", err)
 	}
 	if gotSNI != wantSNI {
 		t.Errorf("SNI = %q, want %q", gotSNI, wantSNI)
