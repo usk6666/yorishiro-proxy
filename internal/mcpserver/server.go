@@ -265,6 +265,13 @@ func Run(ctx context.Context, fs *flag.FlagSet, args []string, opts RunOptions) 
 		return err
 	}
 
+	// Apply transport flags and refuse a server nobody can reach before any
+	// infrastructure is created, so this refusal — like the checks above —
+	// leaves nothing on disk (USK-1208).
+	if err := applyMCPTransportFlags(cfg, stdioMCP, noHTTPMCP); err != nil {
+		return err
+	}
+
 	infra, err := InitInfra(ctx, cfg)
 	if err != nil {
 		return err
@@ -328,11 +335,6 @@ func Run(ctx context.Context, fs *flag.FlagSet, args []string, opts RunOptions) 
 	// MCP schema (deferred per RFC-001 N9 design review 2026-05-04).
 	httpTransformEngine := httprules.NewTransformEngine()
 
-	// Apply transport flags before building options so MCPHTTPAddr is correct.
-	if noHTTPMCP {
-		cfg.MCPHTTPAddr = ""
-	}
-
 	versionStr := opts.Version
 	if versionStr == "" {
 		versionStr = "dev"
@@ -341,7 +343,25 @@ func Run(ctx context.Context, fs *flag.FlagSet, args []string, opts RunOptions) 
 	return assembleAndRunMCPServer(ctx, cfg, proxyCfg, ca, issuer, store, pluginv2Engine,
 		holdQueue, releaseTracker, holdTracker, httpInterceptEngine, wsInterceptEngine, grpcInterceptEngine,
 		sseInterceptEngine, httpTransformEngine, sseTransformEngine, passthrough,
-		targetScopePolicy, targetScopePolicySource, reload, openBrowser, stdioMCP, versionStr, opts.OnHTTPListening, logger)
+		targetScopePolicy, targetScopePolicySource, reload, openBrowser, stdioMCP, versionStr, opts, logger)
+}
+
+// applyMCPTransportFlags clears the HTTP MCP address when -no-http-mcp is
+// set, then refuses a configuration with no MCP transport enabled.
+func applyMCPTransportFlags(cfg *config.Config, stdioMCP, noHTTPMCP bool) error {
+	if noHTTPMCP {
+		cfg.MCPHTTPAddr = ""
+	}
+	return checkMCPTransports(cfg, stdioMCP)
+}
+
+// checkMCPTransports refuses a configuration with neither the HTTP nor the
+// stdio MCP transport enabled.
+func checkMCPTransports(cfg *config.Config, stdioMCP bool) error {
+	if !stdioMCP && cfg.MCPHTTPAddr == "" {
+		return fmt.Errorf("no MCP transport enabled: use -stdio-mcp or remove -no-http-mcp")
+	}
+	return nil
 }
 
 // checkResolvedConfig runs the boot checks that need both the CLI Config
@@ -394,7 +414,7 @@ func assembleAndRunMCPServer(
 	reload policyReloadWiring,
 	openBrowserFlag, stdioMCP bool,
 	version string,
-	onHTTPListening func(addr string),
+	hooks RunOptions,
 	logger *slog.Logger,
 ) error {
 	targetScope := InitTargetScope(targetScopePolicy)
@@ -515,8 +535,14 @@ func assembleAndRunMCPServer(
 		opts...,
 	)
 
+	if hooks.OnBootComplete != nil {
+		if err := hooks.OnBootComplete(); err != nil {
+			return err
+		}
+	}
+
 	logger.Info("starting MCP server", "http_mcp_addr", cfg.MCPHTTPAddr, "stdio_mcp", stdioMCP)
-	return startServers(ctx, cfg, mcpServer, webUIToken, openBrowserFlag, stdioMCP, onHTTPListening, logger)
+	return startServers(ctx, cfg, mcpServer, webUIToken, openBrowserFlag, stdioMCP, hooks.OnHTTPListening, logger)
 }
 
 // ApplyEnvFallback checks each flag in EnvVarMap; if the flag was not
@@ -768,6 +794,12 @@ func buildMCPComponents(
 // also started. server.json is written once the HTTP server starts
 // listening and removed on exit.
 func startServers(ctx context.Context, cfg *config.Config, mcpServer *mcp.Server, webUIToken string, openBrowserFlag bool, stdioMCP bool, onHTTPListening func(addr string), logger *slog.Logger) error {
+	// Run refuses this configuration before boot; re-checked here so a
+	// future caller cannot reach g.Wait with nothing to wait on.
+	if err := checkMCPTransports(cfg, stdioMCP); err != nil {
+		return err
+	}
+
 	g, gctx := errgroup.WithContext(ctx)
 
 	// Optionally start stdio MCP transport (opt-in via -stdio-mcp).
@@ -844,11 +876,6 @@ func startServers(ctx context.Context, cfg *config.Config, mcpServer *mcp.Server
 			}
 			return nil
 		})
-	}
-
-	// If neither transport is enabled, return an error.
-	if !stdioMCP && cfg.MCPHTTPAddr == "" {
-		return fmt.Errorf("no MCP transport enabled: use -stdio-mcp or remove -no-http-mcp")
 	}
 
 	return g.Wait()

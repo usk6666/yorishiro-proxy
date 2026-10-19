@@ -599,9 +599,9 @@ func TestPolicyReloader_RunConsumesTriggers(t *testing.T) {
 // given, and releases it when Run returns. Without a source the hook is
 // never called, so the binary leaves SIGHUP at Go's default.
 //
-// -no-http-mcp without -stdio-mcp makes Run return on its own after the
-// whole assembly (the "no MCP transport enabled" error), so these runs end
-// without a listener.
+// -no-http-mcp without -stdio-mcp makes Run return "no MCP transport
+// enabled" after the trigger is installed but before any infrastructure is
+// created (USK-1208), so these runs end without a listener or a DB.
 func TestRun_PolicyReloadHookOnlyWithPolicySource(t *testing.T) {
 	dir := t.TempDir()
 	policyPath := filepath.Join(dir, "policy.json")
