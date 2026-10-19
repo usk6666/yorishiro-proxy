@@ -78,9 +78,9 @@ func startRawForwardUSK1216(t *testing.T, ctx context.Context, store flow.Writer
 		Logger: testutil.DiscardLogger(),
 		StackFactory: func(ctx context.Context, name, addr string) (*proxybuild.Stack, error) {
 			return proxybuild.BuildLiveStack(ctx, proxybuild.Deps{
-				Logger:       testutil.DiscardLogger(),
-				ListenerName: name,
-				ListenAddr:   addr,
+				Logger:         testutil.DiscardLogger(),
+				ListenerName:   name,
+				ListenAddr:     addr,
 				FlowStore:      store,
 				BuildConfig:    buildCfg,
 				PluginV2Engine: engine,

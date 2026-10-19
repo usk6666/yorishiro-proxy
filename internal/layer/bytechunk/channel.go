@@ -116,6 +116,26 @@ func (c *Channel) Send(ctx context.Context, env *envelope.Envelope) error {
 	return nil
 }
 
+// CloseWrite half-closes the write side of the underlying connection so
+// the peer reads EOF while this side stays readable: a FIN on a TCP conn,
+// close_notify on a TLS conn (connector.PeekConn forwards to its inner
+// conn). It is a no-op returning nil when the conn cannot half-close
+// (e.g. net.Pipe).
+//
+// The session calls it to relay a peer's clean EOF to the other peer
+// (USK-1216), so a raw relay behaves like a direct TCP connection. Unlike
+// Close it does not stop the opposite direction.
+func (c *Channel) CloseWrite() error {
+	cw, ok := c.conn.(interface{ CloseWrite() error })
+	if !ok {
+		return nil
+	}
+	if err := cw.CloseWrite(); err != nil {
+		return fmt.Errorf("bytechunk: close write: %w", err)
+	}
+	return nil
+}
+
 // Close is a no-op for Channel. The underlying connection is owned by the
 // Layer, not the Channel.
 func (c *Channel) Close() error { return nil }

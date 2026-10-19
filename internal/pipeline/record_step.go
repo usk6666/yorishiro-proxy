@@ -578,10 +578,13 @@ func (s *RecordStep) Process(ctx context.Context, env *envelope.Envelope) Result
 	// calls (and the resulting UNIQUE constraint failures on
 	// streams.id). SaveFlow at the bottom of Process still fires for
 	// every wire_level envelope so wire-record persistence is preserved.
-	if env.Direction == envelope.Send && env.Sequence == 0 {
-		if _, loaded := s.streamCreated.LoadOrStore(env.StreamID, struct{}{}); !loaded {
-			s.createStream(ctx, env)
-		} else {
+	//
+	// USK-1216: a raw stream is opened by its first envelope in EITHER
+	// direction — a server-speaks-first protocol (SMTP / MySQL / FTP
+	// banner) delivers Receive seq 0 before the client sends anything.
+	// ensureStream makes a concurrent opener wait for the row to exist.
+	if opensStream(env) {
+		if !s.ensureStream(ctx, env) {
 			s.backfillScheme(ctx, env)
 			s.logger.DebugContext(ctx, "record: savestream skipped",
 				"phase", "recordstep-savestream-skip",
@@ -913,6 +916,45 @@ func (s *RecordStep) backfillScheme(ctx context.Context, env *envelope.Envelope)
 			"error", err,
 		)
 	}
+}
+
+// opensStream reports whether env may create its Stream row. For every
+// protocol the first client Send (Sequence 0) does. For raw TCP any
+// envelope does (USK-1216): the byte stream has no request/response
+// shape, and a server-speaks-first protocol's first envelope is the
+// upstream's Receive seq 0. Non-raw Receive envelopes never create a
+// Stream — an HTTP response without its request is not a stream opener.
+func opensStream(env *envelope.Envelope) bool {
+	if env.Protocol == envelope.ProtocolRaw {
+		return true
+	}
+	return env.Direction == envelope.Send && env.Sequence == 0
+}
+
+// streamCreateGate serialises Stream creation for one StreamID. The first
+// opener runs createStream inside once.Do; every concurrent opener on the
+// same StreamID blocks in once.Do until SaveStream has returned, so no
+// Flow on that stream is saved before its Stream row exists (USK-1216:
+// on a raw relay the client's Send seq 0 and the upstream's Receive
+// seq 0 race from the session's two goroutines).
+type streamCreateGate struct {
+	once sync.Once
+}
+
+// ensureStream creates env's Stream row exactly once per StreamID and
+// reports whether THIS call created it. It returns only after the row
+// was written (or the write failed), whichever caller ran createStream.
+func (s *RecordStep) ensureStream(ctx context.Context, env *envelope.Envelope) bool {
+	v, ok := s.streamCreated.Load(env.StreamID)
+	if !ok {
+		v, _ = s.streamCreated.LoadOrStore(env.StreamID, &streamCreateGate{})
+	}
+	created := false
+	v.(*streamCreateGate).once.Do(func() {
+		created = true
+		s.createStream(ctx, env)
+	})
+	return created
 }
 
 // createStream creates a new Stream record from the Envelope.
@@ -1813,7 +1855,13 @@ func (s *RecordStep) shouldRecord(env *envelope.Envelope) bool {
 			return decision
 		}
 	}
-	if env.Direction == envelope.Send && env.Sequence == 0 {
+	// The decision is made on the envelope that opens the stream: the
+	// first Send, or — for raw TCP — any envelope (USK-1216). A raw
+	// envelope carries no method / path and bytechunk stamps no
+	// TargetHost / SNI, so the decision is identical in both directions;
+	// and since any raw envelope may create the Stream row (opensStream),
+	// deciding on a Receive-first envelope cannot strand a Flow.
+	if opensStream(env) {
 		decision := s.scope.ShouldRecord(env)
 		if s.decisionCache != nil {
 			s.decisionCache.put(streamID, decision)

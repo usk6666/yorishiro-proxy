@@ -502,20 +502,12 @@ func (m *Manager) handleTCPForwardConnRaw(
 		watcherWG.Wait()
 	}()
 
-	// Wire the per-stream session. The dial closure yields the upstream
-	// channel from the bytechunk Layer (bytechunk yields exactly one
-	// Channel). The session loop's clientToUpstream reads from the client
-	// channel, runs Pipeline.Run on each RawMessage envelope, and forwards
-	// bytes to upstream; upstreamToClient does the same in reverse.
-	dial := func(_ context.Context, _ *envelope.Envelope) (layer.Channel, error) {
-		ch, ok := <-stack.UpstreamTopmost().Channels()
-		if !ok {
-			return nil, fmt.Errorf("proxybuild: tcp forward upstream channel closed before yielding")
-		}
-		return ch, nil
-	}
-
-	if err := session.RunStackSession(connCtx, stack, dial, parentStack.Pipeline, m.tcpForwardSessionOpts(parentStack, connCtx)); err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, io.EOF) {
+	// Wire the per-stream session. The upstream is already dialled, so the
+	// session runs pre-dialed: clientToUpstream and upstreamToClient both
+	// read from the start, each running Pipeline.Run on every RawMessage
+	// envelope, and a server-speaks-first protocol's banner is relayed
+	// without waiting for the client (USK-1216).
+	if err := session.RunPreDialedStackSession(connCtx, stack, parentStack.Pipeline, m.tcpForwardSessionOpts(parentStack, connCtx)); err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, io.EOF) {
 		connLogger.Debug("tcp forward session ended with error", "error", err)
 	}
 }
@@ -620,7 +612,7 @@ func (m *Manager) handleTCPForwardConnL7(
 			}
 			return ch, nil
 		}
-		if err := session.RunStackSession(connCtx, stack, dial, parentStack.Pipeline, m.tcpForwardSessionOpts(parentStack, connCtx)); err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, io.EOF) {
+		if err := runSingleChannelSession(connCtx, stack, dial, parentStack.Pipeline, m.tcpForwardSessionOpts(parentStack, connCtx)); err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, io.EOF) {
 			connLogger.Debug("tcp forward L7-fallback session ended with error", "error", err)
 		}
 		return

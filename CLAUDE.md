@@ -114,7 +114,7 @@ internal/
                            #   ctx.transaction_state / ctx.stream_state, plugin_introspect
   rules/                   # Per-protocol rule engines (Intercept, Transform, Safety)
                            #   common/ (HoldQueue, pattern compiler, presets)
-                           #   http/, ws/, grpc/, sse/ (USK-892: Intercept + Transform), raw/
+                           #   http/, ws/, grpc/, sse/ (USK-892: Intercept + Transform); no raw/ engine
   safety/                  # SafetyFilter Engine (envelope-native; Input Filter + Output Filter)
                            #   engine.go, rule.go, preset.go (destructive-sql,
                            #   destructive-os-command), preset_pii.go (credit-card,
