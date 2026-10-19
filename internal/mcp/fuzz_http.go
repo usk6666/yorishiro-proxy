@@ -76,6 +76,7 @@ type fuzzHTTPInput struct {
 	BodyPatches    []BodyPatch `json:"body_patches,omitempty" jsonschema:"applied to base body before positions"`
 	OverrideHost   string      `json:"override_host,omitempty" jsonschema:"redirect dial target while preserving the request's Host/:authority"`
 	TLSFingerprint string      `json:"tls_fingerprint,omitempty" jsonschema:"informational v1; per-call selection deferred"`
+	HTTPVersion    string      `json:"http_version,omitempty" jsonschema:"wire protocol for every variant: http/1.1 | h2 (https only, ALPN h2) | h2c (http only, prior knowledge). Default: the recorded flow's http_version (h2/h2c flows go out over HTTP/2), else http/1.1. No silent fallback: an upstream that does not negotiate h2 fails the variant"`
 	TimeoutMs      *int        `json:"timeout_ms,omitempty" jsonschema:"per-variant timeout in milliseconds; default 30000"`
 	Tag            string      `json:"tag,omitempty" jsonschema:"tag stored on every variant Stream's Tags map"`
 

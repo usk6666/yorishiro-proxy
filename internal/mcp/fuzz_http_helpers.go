@@ -179,6 +179,7 @@ func fuzzHTTPInputToResendHTTP(input *fuzzHTTPInput) resendHTTPInput {
 		BodyPatches:    input.BodyPatches,
 		OverrideHost:   input.OverrideHost,
 		TLSFingerprint: input.TLSFingerprint,
+		HTTPVersion:    input.HTTPVersion,
 		TimeoutMs:      input.TimeoutMs,
 		Tag:            input.Tag,
 	}

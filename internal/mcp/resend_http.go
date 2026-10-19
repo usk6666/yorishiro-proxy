@@ -52,6 +52,7 @@ type resendHTTPInput struct {
 	FollowRedirects *bool       `json:"follow_redirects,omitempty" jsonschema:"unsupported; setting true returns an error"`
 	TimeoutMs       *int        `json:"timeout_ms,omitempty" jsonschema:"per-request timeout in milliseconds; default 30000"`
 	TLSFingerprint  string      `json:"tls_fingerprint,omitempty" jsonschema:"informational v1; per-call selection deferred — server uses its configured fingerprint"`
+	HTTPVersion     string      `json:"http_version,omitempty" jsonschema:"wire protocol for the upstream send: http/1.1 | h2 (https only, ALPN h2) | h2c (http only, prior knowledge). Default: the recorded flow's http_version (h2/h2c flows go out over HTTP/2), else http/1.1. No silent fallback: an upstream that does not negotiate h2 fails the call"`
 	Tag             string      `json:"tag,omitempty" jsonschema:"tag stored on the new flow's Tags map"`
 
 	UpstreamProxy *UpstreamProxyConfig `json:"upstream_proxy,omitempty" jsonschema:"optional upstream proxy override applied to this resend invocation. url_template is expanded once per call with §__iteration§=0 and a fresh §__nonce§; the parsed URL tunnels the dial via HTTP CONNECT or SOCKS5. Used for residential proxy IP switching when chained with fuzz / repeated resends"`
