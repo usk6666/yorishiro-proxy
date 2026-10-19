@@ -60,14 +60,17 @@
 // AnomalyMissingGRPCWebTrailer placeholder when there is none (e.g. a bare
 // 503). The opposite-side Send writes such a response with an empty body —
 // a trailers-only status already travels in the headers, so no trailer
-// frame is added.
+// frame is added; an edit to that End is written back into those header
+// entries in place. A 1xx informational response (100, 103) is not final:
+// it yields only a Start and no End.
 //
 // # Status, path and query (USK-1219, USK-1069 / USK-1110)
 //
 // The response status and reason are projected onto
 // GRPCStartMessage.HTTPStatus / HTTPStatusReason and relayed by the
-// opposite-side Send; a Start without one (synthetic producers) is written
-// as 200 OK. On the request side Path / RawQuery are projected from the
+// opposite-side Send; a Start without one (synthetic producers, or a live
+// response whose status line / :status the inner Layer could not parse and
+// left at 0) is written as 200 OK. On the request side Path / RawQuery are projected from the
 // inner HTTPMessage and the Send side resolves the path with pathForStart
 // (the observed path wins when parseServiceMethod cannot represent it) and
 // forwards RawQuery for the inner HTTP Layer to rejoin.

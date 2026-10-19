@@ -2,7 +2,6 @@ package grpc
 
 import (
 	"encoding/base64"
-	"strings"
 
 	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/encoding/grpclpm"
@@ -44,7 +43,8 @@ type passthroughScan struct {
 // payload/body rule:
 //
 //   - the wire bytes verbatim;
-//   - for grpc-web-text content types, two lenient base64 decodes of them:
+//   - whatever the Start's ContentType says (review S-3, below), two
+//     lenient base64 decodes of them:
 //     one restarting the 4-char quantum at every '=' (concatenated padded
 //     chunks) and one ignoring every '=' (a decoder that skips stray
 //     padding aligns the remaining characters differently, review S-5);
@@ -69,12 +69,18 @@ func passthroughBodyForms(env *envelope.Envelope, msg envelope.Message) *passthr
 	scan := &passthroughScan{}
 	binaries := [][]byte{env.Raw}
 	scan.forms = append(scan.forms, string(env.Raw))
-	if isGRPCWebTextContentType(start.ContentType) {
-		for _, decoded := range [][]byte{lenientBase64Decode(env.Raw), base64DecodeIgnoringPadding(env.Raw)} {
-			if len(decoded) > 0 {
-				binaries = append(binaries, decoded)
-				scan.forms = append(scan.forms, string(decoded))
-			}
+	// The base64 readings are tried regardless of start.ContentType
+	// (USK-1219 review S-3): ContentType is only the first observed
+	// Content-Type entry, while duplicate entries are relayed verbatim
+	// (MITM principle 1). A binary first value with a later -text value
+	// and a base64 body fails LPM parsing and lands here, and a backend
+	// that honours the last value decodes it — so the deny-only scan must
+	// see the decoded form too. On a genuinely binary body the extra
+	// candidates are only noise for the pattern match.
+	for _, decoded := range [][]byte{lenientBase64Decode(env.Raw), base64DecodeIgnoringPadding(env.Raw)} {
+		if len(decoded) > 0 {
+			binaries = append(binaries, decoded)
+			scan.forms = append(scan.forms, string(decoded))
 		}
 	}
 	for _, b := range binaries {
@@ -122,16 +128,6 @@ func checkPassthroughBody(rule *common.CompiledRule, scan *passthroughScan) *Vio
 		}
 	}
 	return nil
-}
-
-// isGRPCWebTextContentType mirrors layer/grpcweb.IsBase64Encoded (kept local
-// so the rules engine does not import a Layer package).
-func isGRPCWebTextContentType(ct string) bool {
-	if idx := strings.IndexByte(ct, ';'); idx >= 0 {
-		ct = ct[:idx]
-	}
-	mt := strings.TrimSpace(strings.ToLower(ct))
-	return mt == "application/grpc-web-text" || strings.HasPrefix(mt, "application/grpc-web-text+")
 }
 
 // base64Sextet maps a standard or URL-safe base64 alphabet byte to its
