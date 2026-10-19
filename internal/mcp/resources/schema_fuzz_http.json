@@ -79,6 +79,11 @@
       "type": "string",
       "description": "Informational v1; per-call selection deferred."
     },
+    "http_version": {
+      "type": "string",
+      "description": "Wire protocol for every variant. h2 requires scheme https (ALPN h2); h2c requires scheme http (prior knowledge). Default: the recorded flow's http_version (h2/h2c flows are fuzzed over HTTP/2), else http/1.1. An upstream that does not negotiate h2 fails the variant; there is no silent fallback.",
+      "enum": ["http/1.1", "h2", "h2c"]
+    },
     "timeout_ms": {
       "type": "integer",
       "description": "Per-variant timeout in milliseconds; default 30000.",

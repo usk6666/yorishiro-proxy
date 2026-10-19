@@ -159,6 +159,7 @@ func (s *Server) registerFuzzHTTP() {
 			"the variant sequence (capped at 1000 per call). Variants run sequentially with a fresh dial each. " +
 			"Base path may carry a literal '?' (auto-split into path + raw_query); supplying both raw_query " +
 			"AND a '?' in path is rejected. " +
+			"An h2/h2c-recorded flow is fuzzed over HTTP/2; http_version (http/1.1|h2|h2c) overrides. " +
 			"stop_on_5xx aborts on the first 5xx response. Full reference: call docs(topic=\"fuzz_http\").",
 	}, s.handleFuzzHTTP)
 }
