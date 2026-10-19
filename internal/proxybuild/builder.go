@@ -100,12 +100,13 @@ type Deps struct {
 	// --- Optional connector policy ---
 
 	// Scope is the per-target capture/pass policy applied to CONNECT and
-	// SOCKS5 negotiations. nil = allow all.
+	// SOCKS5 negotiations, the plain-HTTP forward gate and TCP forward
+	// listeners (USK-1161, via Stack.Scope). nil = allow all.
 	Scope *connector.TargetScope
 
 	// LiveConns is the process-wide live-connection registry (USK-1160).
-	// The CONNECT, SOCKS5 and plain-HTTP-forward handlers register every
-	// connection they admit, so a policy change that no longer admits its
+	// The CONNECT, SOCKS5, plain-HTTP-forward and TCP forward handlers
+	// register every connection they admit, so a policy change that no longer admits its
 	// target closes it. nil disables tracking.
 	LiveConns *connector.LiveConns
 
@@ -358,6 +359,18 @@ type Stack struct {
 	// Envelope existed (USK-1181). Shared with TCP forward listeners that
 	// piggyback on this Stack. Nil when FlowStore is nil.
 	requestHeadRecorder requestHeadRecorder
+
+	// Scope is the TargetScope the listener's gates and HostScopeStep
+	// consult. TCP forward listeners piggybacking on this Stack check it
+	// at listener start and at every accept (USK-1161). May be nil
+	// (allow all).
+	Scope *connector.TargetScope
+
+	// LiveConns is the live-connection registry (USK-1160). TCP forward
+	// connections admitted by the accept-time gate are registered in it
+	// so a policy change that no longer admits the target closes them
+	// (USK-1161). May be nil (no tracking).
+	LiveConns *connector.LiveConns
 }
 
 // BuildLiveStack assembles a per-listener Stack from deps. Validates
@@ -553,6 +566,8 @@ func BuildLiveStack(_ context.Context, deps Deps) (*Stack, error) {
 		BuildConfig:           deps.BuildConfig,
 		FlowStore:             deps.FlowStore,
 		requestHeadRecorder:   headRecorder,
+		Scope:                 deps.Scope,
+		LiveConns:             deps.LiveConns,
 	}, nil
 }
 
