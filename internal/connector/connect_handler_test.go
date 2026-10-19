@@ -262,16 +262,22 @@ func TestNewCONNECTHandler_UpstreamTLSError_FiresCallback(t *testing.T) {
 		_, _ = clientConn.Write([]byte("CONNECT badssl.example.test:443 HTTP/1.1\r\nHost: badssl.example.test:443\r\n\r\n"))
 		buf := make([]byte, 256)
 		_, _ = clientConn.Read(buf)
-		// Send a TLS ClientHello first byte to trigger the TLS path.
-		_, _ = clientConn.Write([]byte{0x16, 0x03, 0x01})
+		// Send a complete (zero-length) TLS record header. The
+		// sniff-first ClientHello peek needs the full 5-byte header;
+		// a shorter write would stall it until clientHelloPeekTimeout.
+		_, _ = clientConn.Write(tlsZeroLengthRecordHeader)
 	}()
 
 	pc := NewPeekConn(serverConn)
 	ctx := ContextWithConnID(context.Background(), "usk-784-conn")
 	ctx = ContextWithClientAddr(ctx, "127.0.0.1:54321")
 
+	start := time.Now()
 	if err := handler(ctx, pc); err != nil {
 		t.Errorf("handler returned error: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Errorf("handler took %v, want < 1s (ClientHello peek stalled?)", elapsed)
 	}
 
 	// Allow the synchronous OnUpstreamTLSError callback to land.
@@ -310,7 +316,7 @@ func TestNewCONNECTHandler_UpstreamTLSError_NilCallback(t *testing.T) {
 		_, _ = clientConn.Write([]byte("CONNECT badssl.example.test:443 HTTP/1.1\r\nHost: badssl.example.test:443\r\n\r\n"))
 		buf := make([]byte, 256)
 		_, _ = clientConn.Read(buf)
-		_, _ = clientConn.Write([]byte{0x16, 0x03, 0x01})
+		_, _ = clientConn.Write(tlsZeroLengthRecordHeader)
 	}()
 
 	pc := NewPeekConn(serverConn)
@@ -318,10 +324,20 @@ func TestNewCONNECTHandler_UpstreamTLSError_NilCallback(t *testing.T) {
 
 	// Must not panic and must return nil — silent drop is the legacy
 	// behaviour.
+	start := time.Now()
 	if err := handler(ctx, pc); err != nil {
 		t.Errorf("handler returned error with nil callback: %v", err)
 	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Errorf("handler took %v, want < 1s (ClientHello peek stalled?)", elapsed)
+	}
 }
+
+// tlsZeroLengthRecordHeader is a complete TLS record header (Handshake,
+// TLS 1.0 legacy version, length 0). The inner-byte peek classifies it as
+// TLS and the sniff-first ClientHello peek can read header + body without
+// waiting, so the handler reaches BuildConnectionStack immediately.
+var tlsZeroLengthRecordHeader = []byte{0x16, 0x03, 0x01, 0x00, 0x00}
 
 func TestNewCONNECTHandler_NegotiationError(t *testing.T) {
 	handler := NewCONNECTHandler(CONNECTHandlerConfig{

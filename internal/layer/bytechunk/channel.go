@@ -92,12 +92,20 @@ func (c *Channel) Next(ctx context.Context) (*envelope.Envelope, error) {
 
 // Send writes the envelope's RawMessage bytes to the connection.
 // The envelope's Message must be a *RawMessage.
+//
+// When the envelope is raw-authoritative (a plugin assigned msg["raw"],
+// RFC-001 §9.3 D4 "Raw wins", USK-1079), env.Raw is written instead of
+// Message.Bytes.
 func (c *Channel) Send(ctx context.Context, env *envelope.Envelope) error {
 	msg, ok := env.Message.(*envelope.RawMessage)
 	if !ok {
 		return fmt.Errorf("bytechunk: Send requires *RawMessage, got %T", env.Message)
 	}
-	if len(msg.Bytes) == 0 {
+	data := msg.Bytes
+	if env.RawWins() {
+		data = env.Raw
+	}
+	if len(data) == 0 {
 		return nil
 	}
 
@@ -109,7 +117,7 @@ func (c *Channel) Send(ctx context.Context, env *envelope.Envelope) error {
 		defer c.conn.SetWriteDeadline(time.Time{}) //nolint:errcheck
 	}
 
-	_, err := c.conn.Write(msg.Bytes)
+	_, err := c.conn.Write(data)
 	if err != nil {
 		return fmt.Errorf("bytechunk: write: %w", err)
 	}
