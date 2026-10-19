@@ -20,6 +20,21 @@ import (
 // Every envelope here is produced by a real Layer parsing real wire
 // bytes, so opaqueHTTP1 is populated exactly as in production.
 
+// snapLine fills the parse-time start-line snapshot on a hand-built
+// envelope's Opaque from its Message, as parseRequest / parseResponse /
+// buildStreamingResponseEnvelope do, and returns env.
+func snapLine(env *envelope.Envelope) *envelope.Envelope {
+	o := env.Opaque.(*opaqueHTTP1)
+	msg := env.Message.(*envelope.HTTPMessage)
+	if o.rawReq != nil {
+		o.snapshotRequestLine(msg)
+	}
+	if o.rawResp != nil {
+		o.snapshotStatusLine(msg)
+	}
+	return env
+}
+
 // lineExchange drives one exchange through two real Layers: a
 // client-facing Layer parses reqWire, the request (after mutateReq) is
 // sent on an upstream-facing Layer, the upstream answers respWire, and

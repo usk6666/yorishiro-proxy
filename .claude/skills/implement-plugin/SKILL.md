@@ -81,8 +81,11 @@ register_hook("<protocol>", "<event>", <hook_name>)
 | `tls` | `on_handshake` (lifecycle, no phase) | `side`, `sni`, `alpn`, `version_name`, `cipher_name`, `peer_cert_subject`, `client_fingerprint` (frozen) |
 | `connection` | `on_connect`, `on_disconnect` (lifecycle, no phase) | connect: `conn_id`, `client_addr`, `listener_name`; disconnect: `conn_id`, `client_addr`, `duration_ms` (frozen) |
 
-`msg["path"]` on `http` is the wire form on both HTTP/1.x and HTTP/2 — the request path exactly as the client sent it, percent-encoding not decoded, query excluded (USK-1139). Decode it in the plugin if a decoded view is needed.
 | `socks5` | `on_connect` (lifecycle, no phase) | `conn_id`, `client_addr`, `target_addr` (frozen) |
+
+`msg["path"]` on `http` is the wire form on both HTTP/1.x and HTTP/2 — the request path exactly as the client sent it, percent-encoding not decoded, query excluded (USK-1139). Decode it in the plugin if a decoded view is needed.
+
+Writing `method` / `path` / `raw_query` (request) or `status` / `status_reason` (response) changes the line on the wire. On HTTP/1.x only the changed parts are rebuilt — an untouched request-target is sent byte-for-byte, an absolute-form `scheme://authority` prefix is kept — and the values are **not validated**: CR / LF / SP go out verbatim, so a plugin can craft request splitting the same way it can with `msg["raw"]` (USK-1148). `authority` / `scheme` are not written to the HTTP/1.x wire; change the `Host` header instead.
 
 `headers` / `trailers` / `metadata` are `*HeadersValue` instances, not dicts. Methods: `append(name, value)`, `delete_first(name) -> bool`, `replace_at(index, name, value)`, `get_first(name) -> str|None`. Iteration yields `(name, value)` 2-tuples; `name in headers` is case-insensitive. Wire order, casing, and duplicates are preserved.
 
