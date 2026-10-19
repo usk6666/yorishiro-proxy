@@ -29,9 +29,14 @@ import (
 // form without per-stream lookup tables. Pipeline Steps must not type-
 // assert on Opaque (RFC §3.1) — only the same-package WireEncoder may
 // inspect it.
+//
+// layout records the observed casing / position / raw value of the D7
+// control headers so the opposite-side Send can restore them
+// (rebuildStartHeaders, USK-1219). Only the Start send path reads it.
 type opaqueGRPCWeb struct {
 	wireBase64 bool
 	encoding   string
+	layout     *headerLayout
 }
 
 // channel is the layer.Channel returned by Wrap. It maintains a small
@@ -330,12 +335,6 @@ func (c *channel) refillFromHTTPMessage(ctx context.Context, env *envelope.Envel
 	acceptEnc := splitCSV(headerGet(msg.Headers, "grpc-accept-encoding"))
 	timeout := parseGRPCTimeout(headerGet(msg.Headers, "grpc-timeout"))
 
-	// opaque carries the wire-format signal (binary vs base64) and the
-	// negotiated grpc-encoding so the package-level WireEncoder can re-render
-	// modified envelopes back to wire form. Pipeline Steps must not type-
-	// assert on Opaque (RFC §3.1) — only the same-package WireEncoder does.
-	opaque := &opaqueGRPCWeb{wireBase64: isBase64, encoding: encoding}
-
 	// Service/Method derivation. On the request side (Direction=Send for
 	// RoleServer Next, Direction=Send for assembled outbound) the path is
 	// authoritative. On the response side (Direction=Receive) the path is
@@ -373,6 +372,17 @@ func (c *channel) refillFromHTTPMessage(ctx context.Context, env *envelope.Envel
 	// Before DecodeBody: the malformed-body passthrough Start
 	// (emitAnomalyStart) must carry the status too.
 	applyResponseOverlay(start, msg, dir)
+
+	// opaque carries the wire-format signal (binary vs base64) and the
+	// negotiated grpc-encoding so the package-level WireEncoder can re-render
+	// modified envelopes back to wire form, plus the observed control-header
+	// layout for the opposite-side Send. Pipeline Steps must not type-assert
+	// on Opaque (RFC §3.1) — only same-package code does.
+	opaque := &opaqueGRPCWeb{
+		wireBase64: isBase64,
+		encoding:   encoding,
+		layout:     newHeaderLayout(msg.Headers, start),
+	}
 
 	// Decode body LPMs. Returns ParseResult with DataFrames + optional
 	// TrailerFrame. Empty body → empty result, no error. The cap is the
@@ -1235,7 +1245,7 @@ func buildHTTPMessage(
 ) *envelope.HTTPMessage {
 	msg := &envelope.HTTPMessage{
 		Body:    body,
-		Headers: reconcileBodyFraming(rebuildStartHeaders(start), len(body)),
+		Headers: reconcileBodyFraming(rebuildStartHeaders(start, layoutFromEnv(srcEnv)), len(body)),
 	}
 
 	switch dir {
@@ -1295,27 +1305,6 @@ func buildHTTPMessage(
 		}
 	}
 	return msg
-}
-
-// rebuildStartHeaders re-injects content-type / grpc-encoding /
-// grpc-accept-encoding / grpc-timeout (when set on Start) and appends the
-// preserved Metadata in original order.
-func rebuildStartHeaders(start *envelope.GRPCStartMessage) []envelope.KeyValue {
-	out := make([]envelope.KeyValue, 0, len(start.Metadata)+4)
-	if start.ContentType != "" {
-		out = append(out, envelope.KeyValue{Name: "content-type", Value: start.ContentType})
-	}
-	if start.Encoding != "" {
-		out = append(out, envelope.KeyValue{Name: "grpc-encoding", Value: start.Encoding})
-	}
-	if len(start.AcceptEncoding) > 0 {
-		out = append(out, envelope.KeyValue{Name: "grpc-accept-encoding", Value: strings.Join(start.AcceptEncoding, ",")})
-	}
-	if start.Timeout > 0 {
-		out = append(out, envelope.KeyValue{Name: "grpc-timeout", Value: formatGRPCTimeout(start.Timeout)})
-	}
-	out = append(out, start.Metadata...)
-	return out
 }
 
 // reconcileBodyFraming makes the framing headers carried over from the
