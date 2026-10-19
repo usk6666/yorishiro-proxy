@@ -717,3 +717,173 @@ func TestRelay_TrailersOnlyEndEditReachesWire(t *testing.T) {
 		})
 	}
 }
+
+// --- USK-1219 review round 2 ---
+
+// TestRelay_TrailerFrameStatusLeavesHeadersAlone pins review F-R1-1: a
+// response whose HTTP headers say one grpc-status and whose body carries
+// a trailer frame saying another is relayed unedited exactly as observed —
+// headers byte-identical, trailer frame forwarded. The End derived from the
+// trailer frame disagreeing with the headers is wire reality, not an edit,
+// so nothing may be projected onto the headers (MITM Principle 1).
+func TestRelay_TrailerFrameStatusLeavesHeadersAlone(t *testing.T) {
+	observed := []envelope.KeyValue{
+		{Name: "Content-Type", Value: "application/grpc-web+proto"},
+		{Name: "Grpc-Status", Value: "0"},
+		{Name: "X-A", Value: "1"},
+	}
+	body := EncodeFrame(true, false, []byte("grpc-status: 7\r\ngrpc-message: boom\r\n"))
+	out := relay(t, responseEnv(observed, body, 200, "OK"), RoleClient, RoleServer, nil)
+	if got := withoutContentLength(out.Headers); !kvEqual(got, observed) {
+		t.Errorf("client-side headers:\n got  %v\n want %v", got, observed)
+	}
+	if string(out.Body) != string(body) {
+		t.Errorf("client-side body = %x, want the observed trailer frame %x", out.Body, body)
+	}
+}
+
+// TestRelay_TrailersOnlyStartEditReachesWire pins review F-R1-2: on a
+// trailers-only response a Start-only edit of the grpc-status header
+// (Transform set_metadata, intercept, on_start plugin) with the End left
+// alone must reach the wire as edited — the untouched End must not write
+// the originally observed status back over it.
+func TestRelay_TrailersOnlyStartEditReachesWire(t *testing.T) {
+	observed := []envelope.KeyValue{
+		{Name: "Content-Type", Value: "application/grpc-web+proto"},
+		{Name: "Grpc-Status", Value: "12"},
+		{Name: "Grpc-Message", Value: "unimplemented"},
+		{Name: "Content-Length", Value: "0"},
+	}
+	want := []envelope.KeyValue{
+		{Name: "Content-Type", Value: "application/grpc-web+proto"},
+		{Name: "Grpc-Status", Value: "5"},
+		{Name: "Grpc-Message", Value: "unimplemented"},
+		{Name: "Content-Length", Value: "0"},
+	}
+	out := relay(t, responseEnv(observed, nil, 200, "OK"), RoleClient, RoleServer, func(envs []*envelope.Envelope) []*envelope.Envelope {
+		start := startOf(t, envs)
+		md := append([]envelope.KeyValue(nil), start.Metadata...)
+		for i := range md {
+			if strings.EqualFold(md[i].Name, "grpc-status") {
+				md[i].Value = "5"
+			}
+		}
+		start.Metadata = md
+		return envs
+	})
+	if !kvEqual(out.Headers, want) {
+		t.Errorf("client-side headers:\n got  %v\n want %v", out.Headers, want)
+	}
+}
+
+// TestRelay_TrailersOnlyClearedMessageKeepsControlAnchors pins review
+// F-R1-3: an End edit that clears grpc-message drops that entry without
+// shifting the restored D7 control headers that followed it on the wire.
+func TestRelay_TrailersOnlyClearedMessageKeepsControlAnchors(t *testing.T) {
+	observed := []envelope.KeyValue{
+		{Name: "Grpc-Status", Value: "12"},
+		{Name: "Grpc-Message", Value: "unimplemented"},
+		{Name: "Content-Type", Value: "application/grpc-web+proto"},
+		{Name: "X-A", Value: "1"},
+	}
+	want := []envelope.KeyValue{
+		{Name: "Grpc-Status", Value: "12"},
+		{Name: "Content-Type", Value: "application/grpc-web+proto"},
+		{Name: "X-A", Value: "1"},
+	}
+	out := relay(t, responseEnv(observed, nil, 200, "OK"), RoleClient, RoleServer, func(envs []*envelope.Envelope) []*envelope.Envelope {
+		envs[len(envs)-1].Message.(*envelope.GRPCEndMessage).Message = ""
+		return envs
+	})
+	if got := withoutContentLength(out.Headers); !kvEqual(got, want) {
+		t.Errorf("client-side headers:\n got  %v\n want %v", got, want)
+	}
+}
+
+// TestRelay_TrailersOnlyEndEditSurvivesEndClone: intercept
+// modify_and_forward re-sends a Clone()d End (Opaque dropped); the edit
+// must still reach the trailers-only headers, using the baseline the
+// Start's Envelope carries.
+func TestRelay_TrailersOnlyEndEditSurvivesEndClone(t *testing.T) {
+	observed := []envelope.KeyValue{
+		{Name: "Content-Type", Value: "application/grpc-web+proto"},
+		{Name: "Grpc-Status", Value: "12"},
+	}
+	want := []envelope.KeyValue{
+		{Name: "Content-Type", Value: "application/grpc-web+proto"},
+		{Name: "Grpc-Status", Value: "3"},
+	}
+	out := relay(t, responseEnv(observed, nil, 200, "OK"), RoleClient, RoleServer, func(envs []*envelope.Envelope) []*envelope.Envelope {
+		last := envs[len(envs)-1].Clone()
+		last.Message.(*envelope.GRPCEndMessage).Status = 3
+		envs[len(envs)-1] = last
+		return envs
+	})
+	if got := withoutContentLength(out.Headers); !kvEqual(got, want) {
+		t.Errorf("client-side headers:\n got  %v\n want %v", got, want)
+	}
+}
+
+// TestRelay_H2Status101IsInformational pins review S-R1-1: the HTTP/2
+// inner Layers (assembler, httpaggregator) deliver every 1xx, 101
+// included (forbidden by RFC 9113 §8.6 but forwarded), as an interim
+// bodyless message before the real response. Over HTTP/2 the gRPC-Web
+// Layer must classify 101 the same way: one End, on_end fired once with
+// the final status. Over HTTP/1.x 101 ends the exchange and stays final.
+func TestRelay_H2Status101IsInformational(t *testing.T) {
+	engine := pluginv2.NewEngine(nil)
+	var fires atomic.Int32
+	var sawStatus atomic.Int64
+	engine.Registry().Register(pluginv2.Hook{
+		Protocol:   pluginv2.ProtoGRPCWeb,
+		Event:      pluginv2.EventOnEnd,
+		Phase:      pluginv2.PhaseNone,
+		PluginName: "test",
+		Fn: builtinHook("end", func(msg starlark.Value, _ starlark.Value) {
+			fires.Add(1)
+			v, _, _ := msg.(*starlark.Dict).Get(starlark.String("status"))
+			if i, ok := v.(starlark.Int).Int64(); ok {
+				sawStatus.Store(i)
+			}
+		}),
+	})
+	info := responseEnv(nil, nil, 101, "Switching Protocols")
+	info.Message.(*envelope.HTTPMessage).HTTPVersion = envelope.HTTPVersionH2
+	body := EncodeFrame(true, false, []byte("grpc-status: 7\r\n"))
+	final := responseEnv([]envelope.KeyValue{{Name: "Content-Type", Value: "application/grpc-web+proto"}}, body, 200, "OK")
+	final.Message.(*envelope.HTTPMessage).HTTPVersion = envelope.HTTPVersionH2
+
+	src := newMockChannel("s-fid", info, final)
+	next := Wrap(src, RoleClient, WithLifecycleEngine(engine))
+	defer next.Close()
+	var ends int
+	for _, e := range drainEnvelopes(t, next, 16) {
+		if _, ok := e.Message.(*envelope.GRPCEndMessage); ok {
+			ends++
+		}
+	}
+	if ends != 1 {
+		t.Errorf("got %d End envelopes, want 1 (none for the h2 101)", ends)
+	}
+	if got := fires.Load(); got != 1 {
+		t.Errorf("on_end fired %d times, want 1", got)
+	}
+	if got := sawStatus.Load(); got != 7 {
+		t.Errorf("on_end status = %d, want 7", got)
+	}
+
+	h1 := responseEnv(nil, nil, 101, "Switching Protocols")
+	h1.Message.(*envelope.HTTPMessage).HTTPVersion = envelope.HTTPVersion11
+	src1 := newMockChannel("s-fid", h1)
+	next1 := Wrap(src1, RoleClient)
+	defer next1.Close()
+	var ends1 int
+	for _, e := range drainEnvelopes(t, next1, 16) {
+		if _, ok := e.Message.(*envelope.GRPCEndMessage); ok {
+			ends1++
+		}
+	}
+	if ends1 != 1 {
+		t.Errorf("HTTP/1.1 101: got %d End envelopes, want 1 (final)", ends1)
+	}
+}
