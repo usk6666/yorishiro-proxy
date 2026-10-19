@@ -3,7 +3,7 @@
   "title": "fuzz_grpc input",
   "description": "Input schema for the fuzz_grpc tool (RFC-001 N8 typed gRPC fuzzer).",
   "type": "object",
-  "required": ["positions"],
+  "required": ["positions", "messages"],
   "properties": {
     "flow_id": {
       "type": "string",

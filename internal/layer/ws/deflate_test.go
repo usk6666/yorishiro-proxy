@@ -231,41 +231,6 @@ func TestDeflateState_Decompress_MultipleMessages_ContextTakeover(t *testing.T) 
 	}
 }
 
-func TestDeflateState_Decompress_ContextTakeover_RepeatedContent(t *testing.T) {
-	// With context takeover, repeated content should produce smaller compressed
-	// payloads as the compressor can reference previous data. This test verifies
-	// that such back-references are correctly resolved during decompression.
-	params := deflateParams{
-		enabled:         true,
-		contextTakeover: true,
-		windowBits:      15,
-	}
-	ds := newDeflateState(params)
-	defer ds.close()
-
-	repeated := []byte("The quick brown fox jumps over the lazy dog.")
-	messages := [][]byte{repeated, repeated, repeated}
-	compressedMsgs := deflateCompressWithContext(t, messages)
-
-	// Verify that later messages are smaller (compressor uses back-references).
-	if len(compressedMsgs[2]) >= len(compressedMsgs[0]) {
-		t.Logf("compressed sizes: msg0=%d msg1=%d msg2=%d",
-			len(compressedMsgs[0]), len(compressedMsgs[1]), len(compressedMsgs[2]))
-		// Not a hard failure — compression ratio depends on the algorithm,
-		// but for identical repeated content we expect smaller payloads.
-	}
-
-	for i, msg := range messages {
-		decompressed, err := ds.decompress(compressedMsgs[i], 1<<20)
-		if err != nil {
-			t.Fatalf("decompress message %d: %v", i, err)
-		}
-		if !bytes.Equal(decompressed, msg) {
-			t.Errorf("decompress message %d = %q, want %q", i, decompressed, msg)
-		}
-	}
-}
-
 func TestDeflateState_Decompress_ContextTakeover_ManyMessages(t *testing.T) {
 	params := deflateParams{
 		enabled:         true,

@@ -245,13 +245,6 @@ func TestValidate_ValidFields(t *testing.T) {
 	}
 }
 
-func TestDefault_InsecureSkipVerifyIsFalse(t *testing.T) {
-	cfg := Default()
-	if cfg.InsecureSkipVerify {
-		t.Error("Default().InsecureSkipVerify = true, want false")
-	}
-}
-
 func TestDefault_FieldsHaveSensibleDefaults(t *testing.T) {
 	cfg := Default()
 

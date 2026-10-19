@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -214,4 +215,79 @@ func TestDefaultHandler_ServesEmbeddedContent(t *testing.T) {
 	if !strings.Contains(string(body), "yorishiro-proxy") {
 		t.Errorf("GET / body = %q, want to contain %q", string(body), "yorishiro-proxy")
 	}
+}
+
+// TestNewHandler_ServesSVGAsset is a characterization test (USK-1245): an
+// .svg file under assets/ is served by http.FileServer as image/svg+xml with
+// the hardening headers, and is not swallowed by the SPA index.html fallback.
+func TestNewHandler_ServesSVGAsset(t *testing.T) {
+	const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1"></svg>`
+	fsys := fstest.MapFS{
+		"index.html":          {Data: []byte("<h1>Home</h1>")},
+		"assets/icon-abc.svg": {Data: []byte(svg)},
+	}
+
+	rec := httptest.NewRecorder()
+	NewHandler(fsys).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/assets/icon-abc.svg", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /assets/icon-abc.svg status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "image/svg+xml" {
+		t.Errorf("Content-Type = %q, want %q", ct, "image/svg+xml")
+	}
+	if body := rec.Body.String(); body != svg {
+		t.Errorf("body = %q, want the SVG file (not the SPA fallback)", body)
+	}
+	assertSecurityHeaders(t, rec, "/assets/icon-abc.svg")
+}
+
+// iconLinkRe matches the favicon <link> Vite emits into dist/index.html.
+// Attribute order is not fixed, so href is extracted separately.
+var (
+	iconLinkRe = regexp.MustCompile(`<link\b[^>]*\brel="icon"[^>]*>`)
+	hrefRe     = regexp.MustCompile(`\bhref="([^"]+)"`)
+)
+
+// TestDefaultHandler_ServesSVGFavicon checks the real embedded dist (USK-1245):
+// index.html declares an SVG favicon, and the referenced file is served from
+// the embedded assets as image/svg+xml with the hardening headers.
+func TestDefaultHandler_ServesSVGFavicon(t *testing.T) {
+	handler := DefaultHandler()
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET / status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	index := rec.Body.String()
+
+	link := iconLinkRe.FindString(index)
+	if link == "" {
+		t.Fatalf("icon link not found in dist/index.html: %q", index)
+	}
+	if !strings.Contains(link, `type="image/svg+xml"`) {
+		t.Errorf("icon link %q lacks type=\"image/svg+xml\"", link)
+	}
+	m := hrefRe.FindStringSubmatch(link)
+	if m == nil {
+		t.Fatalf("icon link %q has no href", link)
+	}
+	href := m[1]
+	if !strings.HasPrefix(href, "/assets/") || !strings.HasSuffix(href, ".svg") {
+		t.Fatalf("icon href = %q, want a /assets/*.svg file emitted by Vite", href)
+	}
+
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, href, nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET %s status = %d, want %d", href, rec.Code, http.StatusOK)
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "image/svg+xml" {
+		t.Errorf("GET %s Content-Type = %q, want %q", href, ct, "image/svg+xml")
+	}
+	if body := rec.Body.String(); !strings.HasPrefix(body, "<svg") {
+		t.Errorf("GET %s body does not start with <svg (SPA fallback?): %.80q", href, body)
+	}
+	assertSecurityHeaders(t, rec, href)
 }

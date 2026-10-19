@@ -100,12 +100,13 @@ type Deps struct {
 	// --- Optional connector policy ---
 
 	// Scope is the per-target capture/pass policy applied to CONNECT and
-	// SOCKS5 negotiations. nil = allow all.
+	// SOCKS5 negotiations, the plain-HTTP forward gate and TCP forward
+	// listeners (USK-1161, via Stack.Scope). nil = allow all.
 	Scope *connector.TargetScope
 
 	// LiveConns is the process-wide live-connection registry (USK-1160).
-	// The CONNECT, SOCKS5 and plain-HTTP-forward handlers register every
-	// connection they admit, so a policy change that no longer admits its
+	// The CONNECT, SOCKS5, plain-HTTP-forward and TCP forward handlers
+	// register every connection they admit, so a policy change that no longer admits its
 	// target closes it. nil disables tracking.
 	LiveConns *connector.LiveConns
 
@@ -159,6 +160,11 @@ type Deps struct {
 	GRPCTransformEngine *grpcrules.TransformEngine
 	SSEInterceptEngine  *sserules.InterceptEngine
 	SSETransformEngine  *sserules.TransformEngine
+
+	// SafetyInputLogOnly puts the live SafetyStep in log_only mode
+	// (safety_filter.input.action "log_only", USK-1109): matches are
+	// logged and tagged on the Stream but never block.
+	SafetyInputLogOnly bool
 
 	// HoldQueue receives held envelopes from InterceptStep. nil disables
 	// hold-and-dispatch (matched envelopes still drop, but no async
@@ -358,6 +364,18 @@ type Stack struct {
 	// Envelope existed (USK-1181). Shared with TCP forward listeners that
 	// piggyback on this Stack. Nil when FlowStore is nil.
 	requestHeadRecorder requestHeadRecorder
+
+	// Scope is the TargetScope the listener's gates and HostScopeStep
+	// consult. TCP forward listeners piggybacking on this Stack check it
+	// at listener start and at every accept (USK-1161). May be nil
+	// (allow all).
+	Scope *connector.TargetScope
+
+	// LiveConns is the live-connection registry (USK-1160). TCP forward
+	// connections admitted by the accept-time gate are registered in it
+	// so a policy change that no longer admits the target closes them
+	// (USK-1161). May be nil (no tracking).
+	LiveConns *connector.LiveConns
 }
 
 // BuildLiveStack assembles a per-listener Stack from deps. Validates
@@ -553,6 +571,8 @@ func BuildLiveStack(_ context.Context, deps Deps) (*Stack, error) {
 		BuildConfig:           deps.BuildConfig,
 		FlowStore:             deps.FlowStore,
 		requestHeadRecorder:   headRecorder,
+		Scope:                 deps.Scope,
+		LiveConns:             deps.LiveConns,
 	}, nil
 }
 
@@ -666,7 +686,7 @@ func buildPipeline(deps Deps, encoders *pipeline.WireEncoderRegistry, logger *sl
 	}
 	recordOpts = append(recordOpts, pipeline.WithGRPCWebBase64MaxPerStream(grpcWebBase64Cap))
 
-	safetyStep := pipeline.NewSafetyStep(deps.HTTPSafetyEngine, deps.WSSafetyEngine, deps.GRPCSafetyEngine, logger)
+	safetyStep := pipeline.NewSafetyStep(deps.HTTPSafetyEngine, deps.WSSafetyEngine, deps.GRPCSafetyEngine, logger).WithLogOnly(deps.SafetyInputLogOnly)
 	hostScopeStep := pipeline.NewHostScopeStep(deps.Scope)
 	httpScopeStep := pipeline.NewHTTPScopeStep(deps.Scope)
 	return pipeline.New(
@@ -2316,6 +2336,20 @@ func (b *blockedStreamSet) remove(id string) {
 	delete(b.ids, id)
 }
 
+// blockAnnotationTags copies the pipeline.WithBlockAnnotations tags in ctx
+// for the audit Stream, or returns nil when there are none (USK-1109).
+func blockAnnotationTags(ctx context.Context) map[string]string {
+	src := pipeline.BlockAnnotationsFromContext(ctx)
+	if len(src) == 0 {
+		return nil
+	}
+	tags := make(map[string]string, len(src))
+	for k, v := range src {
+		tags[k] = v
+	}
+	return tags
+}
+
 // buildPipelineDropRecorder returns a callback that persists a Pipeline-Drop
 // envelope as a flow.Stream with State="error" and BlockedBy=<reason>. The
 // Stream is intentionally minimal (no Flow rows) for envelopes whose
@@ -2379,6 +2413,10 @@ func buildPipelineDropRecorder(store flow.Writer, listenerName string, logger *s
 		if clientAddr != "" {
 			st.ConnInfo = &flow.ConnectionInfo{ClientAddr: clientAddr}
 		}
+		// USK-1109: annotations of Steps that continued before the Drop
+		// (e.g. safety_log_only:<rule_id> from a log_only SafetyStep)
+		// stay on the audit Stream.
+		st.Tags = blockAnnotationTags(ctx)
 
 		// Use a background-derived context so a cancelled handler ctx does
 		// not abort the audit record.
@@ -2401,8 +2439,9 @@ func buildPipelineDropRecorder(store flow.Writer, listenerName string, logger *s
 		// by SafetyStep) the first Send has already created an active
 		// Stream; this UpdateStream rewrites it as a blocked audit record.
 		if uerr := store.UpdateStream(recordCtx, streamID, flow.StreamUpdate{
-			State:     "error",
-			BlockedBy: blockedBy,
+			State:      "error",
+			BlockedBy:  blockedBy,
+			AppendTags: st.Tags,
 		}); uerr != nil {
 			if logger != nil {
 				logger.Error("proxybuild: pipeline-drop stream save failed",

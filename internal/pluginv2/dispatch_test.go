@@ -5,7 +5,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
+	"strings"
 	"testing"
+	"time"
 
 	"go.starlark.net/starlark"
 
@@ -332,27 +335,77 @@ func TestDispatch_ContinueString_Explicit(t *testing.T) {
 	}
 }
 
+// TestDispatch_ContextCancel_AbortsHook pins that cancelling the Dispatch
+// ctx aborts a long-running Starlark hook via the ctx.Done() →
+// thread.Cancel bridge. The hook is a real Starlark function whose loop
+// would run for minutes; the plugin's MaxSteps budget is raised far above
+// the loop length so the step limit cannot be what stops it. Dispatch
+// itself returns Continue/nil (fail-soft), so the observable proof of
+// cancellation is the Warn log carrying the "context canceled" reason.
 func TestDispatch_ContextCancel_AbortsHook(t *testing.T) {
-	e := NewEngine(nil)
+	path := writeScript(t, `
+def h(msg, ctx):
+    n = 0
+    for _ in range(1000000000):
+        n = n + 1
+    return None
+register_hook("http", "on_request", h)
+`)
+	var logBuf bytes.Buffer
+	e := NewEngine(slog.New(slog.NewJSONHandler(&logBuf, nil)))
+	cfg := PluginConfig{Path: path, OnError: string(OnErrorAbort), MaxSteps: 1_000_000_000_000}
+	if err := e.LoadPlugins(context.Background(), []PluginConfig{cfg}); err != nil {
+		t.Fatalf("LoadPlugins: %v", err)
+	}
+	hooks := e.Registry().Lookup(ProtoHTTP, EventOnRequest, PhasePrePipeline)
+	if len(hooks) != 1 {
+		t.Fatalf("Lookup returned %d hooks, want 1", len(hooks))
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
-	hook := Hook{
-		Protocol: ProtoHTTP, Event: EventOnRequest, Phase: PhasePrePipeline,
-		PluginName: "p1",
-		Fn: builtinHook("loop", func(msg *MessageDict, c *Ctx) (starlark.Value, error) {
-			cancel()
-			// Simulate a long-running hook by spinning a no-op Starlark
-			// loop indirectly — but the test version returns immediately
-			// after cancel; we exercise the cancellation path via the
-			// outer goroutine bridging ctx.Done() → thread.Cancel.
-			return starlark.None, nil
-		}),
+	defer cancel()
+	timer := time.AfterFunc(20*time.Millisecond, cancel)
+	defer timer.Stop()
+
+	type result struct {
+		out *HookOutcome
+		err error
 	}
-	out, err := e.Dispatch(ctx, hook, httpEnv(t))
-	if err != nil {
-		t.Fatalf("err = %v", err)
+	env := httpEnv(t)
+	resCh := make(chan result, 1)
+	go func() {
+		out, err := e.Dispatch(ctx, hooks[0], env)
+		resCh <- result{out, err}
+	}()
+
+	var res result
+	select {
+	case res = <-resCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Dispatch did not return within 5s of ctx cancel; ctx.Done() is not bridged to thread.Cancel")
 	}
-	if out.Action != ActionContinue {
-		t.Errorf("Action = %v", out.Action)
+	if res.err != nil {
+		t.Fatalf("err = %v", res.err)
+	}
+	if res.out.Action != ActionContinue {
+		t.Errorf("Action = %v, want Continue", res.out.Action)
+	}
+
+	var sawCancel bool
+	for _, rec := range parseSlogJSONLines(t, logBuf.Bytes()) {
+		if rec["msg"] != "pluginv2: hook returned error" {
+			continue
+		}
+		errStr, _ := rec["error"].(string)
+		if strings.Contains(errStr, "too many steps") {
+			t.Errorf("hook stopped by step budget, not by ctx cancel: %q", errStr)
+		}
+		if strings.Contains(errStr, context.Canceled.Error()) {
+			sawCancel = true
+		}
+	}
+	if !sawCancel {
+		t.Errorf("no Warn log with %q in error; logs:\n%s", context.Canceled.Error(), logBuf.String())
 	}
 }
 

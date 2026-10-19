@@ -154,6 +154,13 @@ func (m *Manager) startTCPForwardListener(
 	if fc.Target == "" {
 		return nil, fmt.Errorf("tcp forward port %s: empty Target", port)
 	}
+	// USK-1161 review S-1: the target port must be a decimal 1..65535.
+	// net.Dial would resolve a service name ("postgresql" → 5432) that the
+	// TargetScope gate cannot see, so such a target is never dialed. Every
+	// forward start (config file and MCP proxy_start) converges here.
+	if _, _, err := tcpForwardTargetHostPort(fc.Target); err != nil {
+		return nil, fmt.Errorf("tcp forward port %s: %w", port, err)
+	}
 
 	// After the rebase of USK-913 onto main (USK-914 already landed), all
 	// six L7 / raw selectors are wired: raw/auto via the bytechunk inline
@@ -184,6 +191,16 @@ func (m *Manager) startTCPForwardListener(
 	// the existing Target / Protocol checks — the upstream cert verification
 	// policy uses BuildConfig.InsecureSkipVerify (global) and tolerates a
 	// missing Issuer (upstream TLS does not need the proxy's CA).
+
+	// USK-1161: refuse a forward whose target the TargetScope denies now.
+	// Advisory — the scope can change at runtime, so the accept-time gate
+	// (admitTCPForwardConn) is the authoritative check.
+	if parent := m.Stack(parentListenerName); parent != nil {
+		if allowed, reason := tcpForwardScopeCheck(parent.Scope, fc.Target, fc.UpstreamTLS); !allowed {
+			return nil, fmt.Errorf("tcp forward port %s: %w: target %s (scheme %s): %s",
+				port, ErrTCPForwardTargetBlocked, fc.Target, tcpForwardScheme(fc.UpstreamTLS), reason)
+		}
+	}
 
 	bindAddr := fmt.Sprintf("127.0.0.1:%s", port)
 	ln, err := net.Listen("tcp", bindAddr)
@@ -313,6 +330,16 @@ func (m *Manager) runTCPForwardAcceptLoop(
 			if counted {
 				defer entry.activeConns.Add(-1)
 			}
+			// USK-1161: TargetScope gate before client TLS termination
+			// and before the upstream dial, so a denied target is never
+			// contacted. Every handler below derives its connCtx from
+			// the registered ctx, which a policy change that no longer
+			// admits the target cancels.
+			ctx, release, ok := m.admitTCPForwardConn(ctx, parentListenerName, entry, c)
+			if !ok {
+				return
+			}
+			defer release()
 			// USK-915: when fc.TLS=true, terminate client-side TLS first
 			// then dispatch by negotiated ALPN. handleTCPForwardTLSConn
 			// owns the post-handshake routing — it picks the H2 or H1
@@ -382,7 +409,7 @@ func (m *Manager) handleTCPForwardConnWithOverride(
 
 	protocol := override.resolveProtocol(entry)
 
-	connID := connector.GenerateConnID()
+	connID := tcpForwardConnID(ctx)
 	clientAddr := clientConn.RemoteAddr().String()
 	connLogger := m.logger.With(
 		"conn_id", connID,

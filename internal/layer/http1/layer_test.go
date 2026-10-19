@@ -756,6 +756,7 @@ func TestChannel_Send_ZeroCopyPath(t *testing.T) {
 			origBody: body,
 		},
 	}
+	snapLine(env)
 
 	// Create a channel that writes to the server side.
 	l := New(server, "conn-1", envelope.Receive) // Receive direction → Send() writes requests
@@ -822,6 +823,7 @@ func TestChannel_Send_HeaderPatchPath(t *testing.T) {
 			origBody: body,
 		},
 	}
+	snapLine(env)
 
 	l := New(server, "conn-1", envelope.Receive)
 	defer l.Close()
@@ -1439,6 +1441,7 @@ func TestChannel_Send_BodyBufferUnchanged_ZeroCopy(t *testing.T) {
 			origBodyBuffer: bb,
 		},
 	}
+	snapLine(env)
 
 	l := New(server, "conn-1", envelope.Receive)
 	defer l.Close()
@@ -1510,6 +1513,7 @@ func TestChannel_Send_BodyChangedToBytes(t *testing.T) {
 			origBodyBuffer: origBB,
 		},
 	}
+	snapLine(env)
 
 	l := New(server, "conn-1", envelope.Receive)
 	defer l.Close()
@@ -1575,6 +1579,7 @@ func TestChannel_Send_BodyNilBothNoBodyBytes(t *testing.T) {
 			},
 		},
 	}
+	snapLine(env)
 
 	l := New(server, "conn-1", envelope.Receive)
 	defer l.Close()
@@ -2334,13 +2339,11 @@ func TestLayer_DetachStream_ReplaysCapturedAfterInterrupt(t *testing.T) {
 		if r.err == nil {
 			t.Fatalf("parser unexpectedly succeeded: env=%+v", r.env)
 		}
-		// The parser should have surfaced os.ErrDeadlineExceeded on its
-		// follow-up read (after consuming wsFrame on the first read).
+		// The parser must surface os.ErrDeadlineExceeded (wrapped) from
+		// its follow-up read after consuming wsFrame on the first read;
+		// the error chain must not be flattened to text.
 		if !errors.Is(r.err, os.ErrDeadlineExceeded) {
-			// Another classification (e.g. parse error wrapping a
-			// truncation) is also acceptable as long as DetachStream
-			// recovers the bytes.
-			t.Logf("parser exit err = %v (acceptable so long as bytes are replayed)", r.err)
+			t.Errorf("parser exit err = %v, want errors.Is(err, os.ErrDeadlineExceeded)", r.err)
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("parser did not exit within 3s")

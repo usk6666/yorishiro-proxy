@@ -287,3 +287,39 @@ func TestInitPerProtocolSafetyEngines(t *testing.T) {
 		})
 	}
 }
+
+// TestInitPerProtocolSafetyEngines_LogOnly pins USK-1109: the section-level
+// safety_filter.input.action reaches the live-wire engines bundle. LogOnly
+// is true iff the action is "log_only"; "" and "block" keep blocking.
+func TestInitPerProtocolSafetyEngines_LogOnly(t *testing.T) {
+	for _, tc := range []struct {
+		action string
+		want   bool
+	}{
+		{action: "", want: false},
+		{action: "block", want: false},
+		{action: "log_only", want: true},
+	} {
+		t.Run("action="+tc.action, func(t *testing.T) {
+			proxyCfg := &config.ProxyConfig{
+				SafetyFilter: &config.SafetyFilterConfig{
+					Enabled: true,
+					Input: &config.SafetyFilterInputConfig{
+						Action: tc.action,
+						Rules:  []config.SafetyFilterRuleConfig{{Preset: "destructive-sql"}},
+					},
+				},
+			}
+			got, err := InitPerProtocolSafetyEngines(config.Default(), proxyCfg)
+			if err != nil {
+				t.Fatalf("InitPerProtocolSafetyEngines: %v", err)
+			}
+			if got.HTTP == nil || got.WS == nil || got.GRPC == nil {
+				t.Fatalf("engines not built: %+v", got)
+			}
+			if got.LogOnly != tc.want {
+				t.Errorf("LogOnly = %v, want %v", got.LogOnly, tc.want)
+			}
+		})
+	}
+}

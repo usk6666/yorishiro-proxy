@@ -351,17 +351,16 @@ def hook(msg):
 	}
 }
 
-func TestMessageDict_ImplementsExpectedInterfaces(t *testing.T) {
-	var _ starlark.Value = (*MessageDict)(nil)
-	var _ starlark.Mapping = (*MessageDict)(nil)
-	var _ starlark.HasSetKey = (*MessageDict)(nil)
-	var _ starlark.IterableMapping = (*MessageDict)(nil)
-}
+// Compile-time interface conformance for the Starlark value types.
+var (
+	_ starlark.Value           = (*MessageDict)(nil)
+	_ starlark.Mapping         = (*MessageDict)(nil)
+	_ starlark.HasSetKey       = (*MessageDict)(nil)
+	_ starlark.IterableMapping = (*MessageDict)(nil)
 
-func TestHeadersValue_ImplementsExpectedInterfaces(t *testing.T) {
-	var _ starlark.Value = (*HeadersValue)(nil)
-	var _ starlark.Sequence = (*HeadersValue)(nil)
-	var _ starlark.Indexable = (*HeadersValue)(nil)
-	var _ starlark.Container = (*HeadersValue)(nil)
-	var _ starlark.HasAttrs = (*HeadersValue)(nil)
-}
+	_ starlark.Value     = (*HeadersValue)(nil)
+	_ starlark.Sequence  = (*HeadersValue)(nil)
+	_ starlark.Indexable = (*HeadersValue)(nil)
+	_ starlark.Container = (*HeadersValue)(nil)
+	_ starlark.HasAttrs  = (*HeadersValue)(nil)
+)

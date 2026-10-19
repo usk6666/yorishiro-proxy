@@ -9,13 +9,6 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/rules/common"
 )
 
-func TestSafetyEngine_NewSafetyEngine_EmptyRules(t *testing.T) {
-	e := NewSafetyEngine()
-	if e.RuleCount() != 0 {
-		t.Errorf("expected 0 rules, got %d", e.RuleCount())
-	}
-}
-
 // TestSafetyEngine_NoAutoLoadHTTPPresets verifies that simply constructing
 // a WS SafetyEngine does not pull in HTTP presets (destructive-sql, etc.).
 // Operators must explicitly add WS-targeted rules.

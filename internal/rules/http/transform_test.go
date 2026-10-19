@@ -705,11 +705,6 @@ func zstdEncode(t *testing.T, body []byte) []byte {
 	return out
 }
 
-// findHeader returns the value of the first matching header, or "" if missing.
-func findHeader(headers []envelope.KeyValue, name string) string {
-	return headerGet(headers, name)
-}
-
 // TestTransformEngine_ReplaceBody_DecodesCE_Gzip is the USK-834 happy-path:
 // a response with Content-Encoding: gzip is decoded, the regex matches the
 // plaintext, and the wire-side msg.Body is the modified plaintext with
@@ -741,10 +736,10 @@ func TestTransformEngine_ReplaceBody_DecodesCE_Gzip(t *testing.T) {
 	if !bytes.Equal(msg.Body, wantBody) {
 		t.Errorf("body = %q, want %q", msg.Body, wantBody)
 	}
-	if got := findHeader(msg.Headers, "Content-Encoding"); got != "" {
+	if got := headerGet(msg.Headers, "Content-Encoding"); got != "" {
 		t.Errorf("Content-Encoding should be stripped after decode, got %q", got)
 	}
-	if got := findHeader(msg.Headers, "Content-Length"); got != strconv.Itoa(len(wantBody)) {
+	if got := headerGet(msg.Headers, "Content-Length"); got != strconv.Itoa(len(wantBody)) {
 		t.Errorf("Content-Length = %q, want %d", got, len(wantBody))
 	}
 }
@@ -774,10 +769,10 @@ func TestTransformEngine_ReplaceBody_DecodesCE_Brotli(t *testing.T) {
 	if string(msg.Body) != `{"pw": "[REDACTED]"}` {
 		t.Errorf("body = %q", msg.Body)
 	}
-	if got := findHeader(msg.Headers, "Content-Encoding"); got != "" {
+	if got := headerGet(msg.Headers, "Content-Encoding"); got != "" {
 		t.Errorf("Content-Encoding should be stripped, got %q", got)
 	}
-	if got := findHeader(msg.Headers, "Content-Length"); got != strconv.Itoa(len(msg.Body)) {
+	if got := headerGet(msg.Headers, "Content-Length"); got != strconv.Itoa(len(msg.Body)) {
 		t.Errorf("Content-Length = %q, want %d", got, len(msg.Body))
 	}
 }
@@ -808,10 +803,10 @@ func TestTransformEngine_ReplaceBody_DecodesCE_Zstd(t *testing.T) {
 	if string(msg.Body) != `{"REPLACED": {"k":"v"}}` {
 		t.Errorf("body = %q", msg.Body)
 	}
-	if got := findHeader(msg.Headers, "Content-Encoding"); got != "" {
+	if got := headerGet(msg.Headers, "Content-Encoding"); got != "" {
 		t.Errorf("Content-Encoding should be stripped, got %q", got)
 	}
-	if got := findHeader(msg.Headers, "Content-Length"); got != strconv.Itoa(len(msg.Body)) {
+	if got := headerGet(msg.Headers, "Content-Length"); got != strconv.Itoa(len(msg.Body)) {
 		t.Errorf("Content-Length = %q, want %d", got, len(msg.Body))
 	}
 }
@@ -842,10 +837,10 @@ func TestTransformEngine_ReplaceBody_DecodesCE_GzipRequest(t *testing.T) {
 	if string(msg.Body) != `{"pw":"[REDACTED]"}` {
 		t.Errorf("body = %q", msg.Body)
 	}
-	if got := findHeader(msg.Headers, "Content-Encoding"); got != "" {
+	if got := headerGet(msg.Headers, "Content-Encoding"); got != "" {
 		t.Errorf("Content-Encoding should be stripped on request side too, got %q", got)
 	}
-	if got := findHeader(msg.Headers, "Content-Length"); got != strconv.Itoa(len(msg.Body)) {
+	if got := headerGet(msg.Headers, "Content-Length"); got != strconv.Itoa(len(msg.Body)) {
 		t.Errorf("Content-Length = %q, want %d", got, len(msg.Body))
 	}
 }
@@ -890,7 +885,7 @@ func TestTransformEngine_ReplaceBody_Identity_NoHeaderRewrite(t *testing.T) {
 	if clCount != 1 {
 		t.Errorf("Content-Length count = %d, want 1 (no rewrite on identity path)", clCount)
 	}
-	if got := findHeader(msg.Headers, "Content-Length"); got != strconv.Itoa(len(body)) {
+	if got := headerGet(msg.Headers, "Content-Length"); got != strconv.Itoa(len(body)) {
 		// Original CL preserved; Transform did not touch it.
 		t.Errorf("Content-Length = %q, want %d (original, untouched)", got, len(body))
 	}
@@ -922,7 +917,7 @@ func TestTransformEngine_ReplaceBody_DecodeFailSoft_UnknownCodec(t *testing.T) {
 	if !bytes.Equal(msg.Body, body) {
 		t.Errorf("body changed under fail-soft: %q vs original %q", msg.Body, body)
 	}
-	if got := findHeader(msg.Headers, "Content-Encoding"); got != "snappy" {
+	if got := headerGet(msg.Headers, "Content-Encoding"); got != "snappy" {
 		t.Errorf("Content-Encoding should be preserved under fail-soft, got %q", got)
 	}
 }
@@ -954,7 +949,7 @@ func TestTransformEngine_ReplaceBody_DecodeFailSoft_ChainedCE(t *testing.T) {
 	if !bytes.Equal(msg.Body, body) {
 		t.Errorf("body changed under fail-soft: %q vs original %q", msg.Body, body)
 	}
-	if got := findHeader(msg.Headers, "Content-Encoding"); got != "gzip, br" {
+	if got := headerGet(msg.Headers, "Content-Encoding"); got != "gzip, br" {
 		t.Errorf("Content-Encoding should be preserved under fail-soft, got %q", got)
 	}
 }
@@ -1007,7 +1002,7 @@ func TestTransformEngine_ReplaceBody_DecodeEmptyBody_NoOp(t *testing.T) {
 	if modified {
 		t.Error("empty body should not produce modification")
 	}
-	if got := findHeader(msg.Headers, "Content-Encoding"); got != "gzip" {
+	if got := headerGet(msg.Headers, "Content-Encoding"); got != "gzip" {
 		t.Errorf("Content-Encoding should be preserved when body is empty, got %q", got)
 	}
 }

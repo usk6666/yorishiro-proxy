@@ -814,22 +814,47 @@ func TestRunSession_ClientSendRespondError(t *testing.T) {
 	}
 }
 
-func TestRunSession_NoUpstreamCloseOnNil(t *testing.T) {
+// TestRunSession_DropBeforeDial_NeverDialsUpstream pins that a Send
+// envelope the Pipeline drops before the first upstream dial is never
+// forwarded: the session must not dial upstream at all, must not Send
+// anything upstream, and must not Close an upstream it never opened.
+func TestRunSession_DropBeforeDial_NeverDialsUpstream(t *testing.T) {
 	req := makeEnvelope(envelope.Send, 0)
 	clientCh := &mockChannel{
 		streamID:      "stream",
 		nextEnvelopes: []*envelope.Envelope{req},
 	}
 
+	upstreamCh := &mockChannel{streamID: "upstream"}
+	var dialMu sync.Mutex
+	dialCalls := 0
 	dial := func(_ context.Context, _ *envelope.Envelope) (layer.Channel, error) {
-		return &mockChannel{}, nil
+		dialMu.Lock()
+		dialCalls++
+		dialMu.Unlock()
+		return upstreamCh, nil
 	}
 	p := pipeline.New(dropStep{})
 
-	// Should not panic.
 	err := RunSession(context.Background(), clientCh, dial, p)
 	if err != nil {
 		t.Fatalf("RunSession returned error: %v", err)
+	}
+
+	dialMu.Lock()
+	gotDials := dialCalls
+	dialMu.Unlock()
+	if gotDials != 0 {
+		t.Errorf("dial called %d times, want 0 (dropped envelope must not dial upstream)", gotDials)
+	}
+	if n := len(upstreamCh.getSent()); n != 0 {
+		t.Errorf("upstream received %d envelopes, want 0", n)
+	}
+	upstreamCh.mu.Lock()
+	upCloses := upstreamCh.closeCalls
+	upstreamCh.mu.Unlock()
+	if upCloses != 0 {
+		t.Errorf("upstream Close called %d times, want 0", upCloses)
 	}
 }
 

@@ -548,3 +548,41 @@ func TestMessageDict_FreezeIdempotent(t *testing.T) {
 		t.Fatal("frozen flag not set after Freeze")
 	}
 }
+
+// TestHTTPMessage_LineFieldsNotValidated (USK-1148, user decision
+// 2026-10-20): plugin-written method / path / raw_query / status_reason
+// are passed through verbatim, CR / LF / SP / HTAB included. A plugin can
+// already write arbitrary bytes via msg["raw"], so validating the
+// structured fields would not be a privilege boundary. Guards against
+// validation creeping in later.
+func TestHTTPMessage_LineFieldsNotValidated(t *testing.T) {
+	const evil = "/a HTTP/1.1\r\nHost: x\r\n\r\nGET /b\t c"
+	m := &envelope.HTTPMessage{Method: "GET", Path: "/p", RawQuery: "a=1", Status: 200, StatusReason: "OK"}
+	env := &envelope.Envelope{Message: m}
+	d, err := runHook(t, env, `
+def hook(msg):
+    v = "/a HTTP/1.1\r\nHost: x\r\n\r\nGET /b\t c"
+    msg["method"] = v
+    msg["path"] = v
+    msg["raw_query"] = v
+    msg["status_reason"] = v
+`)
+	if err != nil {
+		t.Fatalf("hook: %v", err)
+	}
+	got, _, kind, err := dictToMessage(d)
+	if err != nil {
+		t.Fatalf("dictToMessage rejected line-field bytes: %v", err)
+	}
+	if kind != MutationMessageOnly {
+		t.Fatalf("kind = %s, want message_only", kind)
+	}
+	gm := got.(*envelope.HTTPMessage)
+	for name, v := range map[string]string{
+		"method": gm.Method, "path": gm.Path, "raw_query": gm.RawQuery, "status_reason": gm.StatusReason,
+	} {
+		if v != evil {
+			t.Errorf("%s = %q, want %q verbatim", name, v, evil)
+		}
+	}
+}

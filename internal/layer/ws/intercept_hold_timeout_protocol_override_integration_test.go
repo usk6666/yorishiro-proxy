@@ -17,7 +17,6 @@ import (
 	"context"
 	"errors"
 	"log/slog"
-	"sync"
 	"testing"
 	"time"
 
@@ -25,6 +24,7 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/layer"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/http1"
+	"github.com/usk6666/yorishiro-proxy/internal/layer/ws"
 	"github.com/usk6666/yorishiro-proxy/internal/pipeline"
 	"github.com/usk6666/yorishiro-proxy/internal/rules/common"
 	wsrules "github.com/usk6666/yorishiro-proxy/internal/rules/ws"
@@ -101,16 +101,13 @@ func TestWSIntercept_HoldTimeout_PerProtocolOverride_AutoRelease(t *testing.T) {
 	}
 
 	sessionDone := make(chan struct{})
-	var sessionErr error
-	var once sync.Once
 	opts := session.SessionOptions{
 		InterceptReleaseTracker: releaseTracker,
 	}
 
 	go func() {
 		defer close(sessionDone)
-		err := session.RunStackSession(ctx, stack, dial, p, opts)
-		once.Do(func() { sessionErr = err })
+		_ = session.RunStackSession(ctx, stack, dial, p, opts)
 	}()
 
 	doWSUpgradeHandshakeUSK851(t, ctx, clientA, upstreamB, stack)
@@ -137,14 +134,26 @@ func TestWSIntercept_HoldTimeout_PerProtocolOverride_AutoRelease(t *testing.T) {
 		t.Fatalf("queue not drained within per-protocol budget: still %d entries; per-protocol override did not fire", holdQueue.Len())
 	}
 
-	// Clean up: close pipes so the session loop unwinds. The session
-	// completion is not strictly required for the assertion but we
-	// still wait so leaked goroutines fail the test under -race.
+	// The drained entry must have been RELEASED, not dropped: the held
+	// frame reaches the upstream. A queue that drains via auto-drop
+	// would pass the Len() check above but never deliver this frame.
+	_ = upstreamB.SetReadDeadline(time.Now().Add(3 * time.Second))
+	f, err := ws.ReadFrame(upstreamB)
+	if err != nil {
+		t.Fatalf("read released frame on upstream: %v (held frame was not auto-released to upstream)", err)
+	}
+	_ = upstreamB.SetReadDeadline(time.Time{})
+	if f.Opcode != ws.OpcodeText || string(f.Payload) != "usk855-payload" {
+		t.Fatalf("upstream frame = opcode %v payload %q, want text %q", f.Opcode, f.Payload, "usk855-payload")
+	}
+
+	// Clean up: close pipes so the session loop unwinds, and require it
+	// to do so — a session that outlives its closed transports is a leak.
 	_ = clientA.Close()
 	_ = upstreamB.Close()
 	select {
 	case <-sessionDone:
 	case <-time.After(5 * time.Second):
-		t.Logf("session did not terminate within 5s; err=%v", sessionErr)
+		t.Fatal("session did not terminate within 5s of closing both transports")
 	}
 }

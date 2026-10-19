@@ -12,6 +12,7 @@
 package mcptest_test
 
 import (
+	"crypto/tls"
 	"fmt"
 	"net"
 	"strconv"
@@ -25,18 +26,28 @@ import (
 // echoUpstream is a TCP echo server counting the bytes it received.
 func echoUpstream(t *testing.T) (string, *atomic.Int64) {
 	t.Helper()
+	addr, received, _ := countingEchoUpstream(t)
+	return addr, received
+}
+
+// countingEchoUpstream is echoUpstream that also counts the connections
+// it accepted (USK-1161: a gated target must see no TCP connection at
+// all, not just no bytes).
+func countingEchoUpstream(t *testing.T) (string, *atomic.Int64, *atomic.Int64) {
+	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen echo: %v", err)
 	}
 	t.Cleanup(func() { _ = ln.Close() })
-	var received atomic.Int64
+	var received, accepts atomic.Int64
 	go func() {
 		for {
 			c, err := ln.Accept()
 			if err != nil {
 				return
 			}
+			accepts.Add(1)
 			go func(c net.Conn) {
 				defer c.Close()
 				buf := make([]byte, 4096)
@@ -55,7 +66,7 @@ func echoUpstream(t *testing.T) (string, *atomic.Int64) {
 			}(c)
 		}
 	}()
-	return ln.Addr().String(), &received
+	return ln.Addr().String(), &received, &accepts
 }
 
 // rawAddrPort returns the numeric port of a host:port address.
@@ -166,6 +177,19 @@ func queryFlowDetail(t *testing.T, h *mcptest.Harness, id string) map[string]any
 	return res.Decoded
 }
 
+// dialForwardTLS completes a client TLS handshake with a tls=true
+// forward (the proxy's ephemeral MITM CA is not verified).
+func dialForwardTLS(t *testing.T, addr string) *tls.Conn {
+	t.Helper()
+	tc, err := tls.DialWithDialer(&net.Dialer{Timeout: 5 * time.Second}, "tcp", addr,
+		&tls.Config{InsecureSkipVerify: true, ServerName: "127.0.0.1"}) //nolint:gosec // proxy's ephemeral MITM CA
+	if err != nil {
+		t.Fatalf("TLS dial forward: %v", err)
+	}
+	t.Cleanup(func() { _ = tc.Close() })
+	return tc
+}
+
 // writeRaw dials addr and writes payload, returning the open conn.
 func writeRaw(t *testing.T, addr string, payload []byte) net.Conn {
 	t.Helper()
@@ -185,14 +209,24 @@ func writeRaw(t *testing.T, addr string, payload []byte) net.Conn {
 // protocol=raw entry whose target the Policy denies delivers no byte to
 // the upstream, and the block is recorded as a raw audit Stream carrying
 // the connection's conn_id.
+//
+// Since USK-1161 a plain deny on the target is refused at proxy_start and
+// at accept, before HostScopeStep is reached. The per-envelope check is
+// still the backstop where the two legs differ: the accept gate checks
+// the dial leg (plaintext here, so the https-only deny admits it) and
+// HostScopeStep checks the client leg (TLS-terminated, so "https").
 func TestE2E_RawTargetScope_TCPForwardDenied(t *testing.T) {
 	target, received := echoUpstream(t)
 	h := mcptest.StartHarness(t, mcptest.HarnessOptions{
-		ConfigJSON: denyPolicyConfig(rawAddrPort(t, target)),
+		ConfigJSON: denyPolicyConfig(rawAddrPort(t, target), "https"),
 	})
-	fwd := startForwards(t, h, nil, map[string]any{"target": target, "protocol": "raw"})[0]
+	fwd := startForwards(t, h, nil, map[string]any{"target": target, "protocol": "raw", "tls": true})[0]
 
-	writeRaw(t, fwd, []byte{0x00, 0x01, 'r', 'a', 'w', '-', 'd', 'e', 'n', 'y'})
+	tc := dialForwardTLS(t, fwd)
+	_ = tc.SetWriteDeadline(time.Now().Add(5 * time.Second))
+	if _, err := tc.Write([]byte{0x00, 0x01, 'r', 'a', 'w', '-', 'd', 'e', 'n', 'y'}); err != nil {
+		t.Fatalf("write: %v", err)
+	}
 
 	blocked := waitBlockedRawStream(t, h)
 	if got := received.Load(); got != 0 {

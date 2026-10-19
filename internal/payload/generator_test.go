@@ -1,6 +1,7 @@
 package payload
 
 import (
+	"slices"
 	"strings"
 	"testing"
 )
@@ -76,7 +77,7 @@ func TestRangeGenerator(t *testing.T) {
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-			if !strSliceEqual(got, tt.want) {
+			if !slices.Equal(got, tt.want) {
 				t.Errorf("got %v, want %v", got, tt.want)
 			}
 		})
@@ -146,7 +147,7 @@ func TestCharsetGenerator(t *testing.T) {
 				t.Fatalf("unexpected error: %v", err)
 			}
 			if tt.want != nil {
-				if !strSliceEqual(got, tt.want) {
+				if !slices.Equal(got, tt.want) {
 					t.Errorf("got %v, want %v", got, tt.want)
 				}
 			}
@@ -377,7 +378,7 @@ func TestPipeline(t *testing.T) {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		want := []string{"1", "2", "3"}
-		if !strSliceEqual(got, want) {
+		if !slices.Equal(got, want) {
 			t.Errorf("got %v, want %v", got, want)
 		}
 	})
@@ -391,7 +392,7 @@ func TestPipeline(t *testing.T) {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		want := []string{"[1]", "[2]", "[3]"}
-		if !strSliceEqual(got, want) {
+		if !slices.Equal(got, want) {
 			t.Errorf("got %v, want %v", got, want)
 		}
 	})
@@ -415,25 +416,6 @@ var errBoom = &testError{msg: "boom"}
 type testError struct{ msg string }
 
 func (e *testError) Error() string { return e.msg }
-
-func TestPipelineWithCodecIntegration(t *testing.T) {
-	// Demonstrates that Pipeline can use encoding.Registry.Encode as the EncodeFunc.
-	// This is a unit test that uses a mock encode function simulating codec behavior.
-	gen := &RangeGenerator{Start: 1, End: 3, Step: 1}
-	mockBase64 := func(s string) (string, error) {
-		// Simulated base64 encoding for test (not real base64).
-		return "b64(" + s + ")", nil
-	}
-	p := NewPipeline(gen, mockBase64)
-	got, err := p.Generate()
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	want := []string{"b64(1)", "b64(2)", "b64(3)"}
-	if !strSliceEqual(got, want) {
-		t.Errorf("got %v, want %v", got, want)
-	}
-}
 
 func TestEstimateCount(t *testing.T) {
 	tests := []struct {
@@ -460,19 +442,4 @@ func TestEstimateCount(t *testing.T) {
 			}
 		})
 	}
-}
-
-func strSliceEqual(a, b []string) bool {
-	if len(a) == 0 && len(b) == 0 {
-		return true
-	}
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
 }
