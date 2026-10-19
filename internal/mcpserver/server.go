@@ -201,7 +201,7 @@ func Run(ctx context.Context, fs *flag.FlagSet, args []string, opts RunOptions) 
 	fs.UintVar(&maxConcurrentStreams, "max-concurrent-streams", 0,
 		"HTTP/2 SETTINGS_MAX_CONCURRENT_STREAMS advertised to clients; 0 = use H2 default (500) (env: YP_MAX_CONCURRENT_STREAMS)")
 
-	if err := fs.Parse(args); err != nil {
+	if err := parseFlagsOnly(fs, args); err != nil {
 		return err
 	}
 
@@ -348,6 +348,22 @@ func Run(ctx context.Context, fs *flag.FlagSet, args []string, opts RunOptions) 
 
 // applyMCPTransportFlags clears the HTTP MCP address when -no-http-mcp is
 // set, then refuses a configuration with no MCP transport enabled.
+// parseFlagsOnly parses args into fs and refuses any positional argument.
+// The flag package stops at the first non-flag token and leaves the rest
+// unparsed, so `-insecure true -db proj` would otherwise boot with -db
+// silently dropped. The server takes flags only, and the refusal happens
+// before any side effect (USK-1047).
+func parseFlagsOnly(fs *flag.FlagSet, args []string) error {
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() > 0 {
+		return fmt.Errorf("unexpected argument %q: the server takes flags only "+
+			"(boolean flags take -flag=value, e.g. -insecure=false)", fs.Arg(0))
+	}
+	return nil
+}
+
 func applyMCPTransportFlags(cfg *config.Config, stdioMCP, noHTTPMCP bool) error {
 	if noHTTPMCP {
 		cfg.MCPHTTPAddr = ""

@@ -2,11 +2,14 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
 	"os/signal"
+	"slices"
+	"strings"
 	"syscall"
 
 	"github.com/usk6666/yorishiro-proxy/internal/mcpserver"
@@ -39,26 +42,58 @@ func run(ctx context.Context, args []string) error {
 	case "version":
 		fmt.Println(buildVersion())
 		return nil
-	default:
+	case "help":
+		// Same as `yorishiro-proxy -h`: flag.CommandLine is ExitOnError, so
+		// mcpserver.Run's fs.Parse prints the usage banner and exits 0
+		// before any side effect.
+		return runServer(ctx, flag.CommandLine, []string{"-h"})
+	case "server":
 		return runServer(ctx, flag.CommandLine, rest)
+	default:
+		// Unreachable: routeCommand only returns names from subcommandNames.
+		return fmt.Errorf("internal error: unrouted subcommand %q", name)
 	}
 }
 
-// subcommandNames is the ordered list of top-level subcommands.
+// subcommandNames is the ordered list of top-level subcommands. It is the
+// single source routeCommand validates against and the unknown-subcommand
+// error lists; the usage banner is pinned to it by a test.
 var subcommandNames = []string{"server", "client", "docs", "install", "upgrade", "version", "help"}
 
 // routeCommand picks the subcommand for args (os.Args[1:]) and returns the
 // arguments that subcommand receives. It is pure so every routing branch is
 // unit-testable without starting a server.
+//
+// No arguments, or a first argument starting with "-", is the server: the
+// bare `yorishiro-proxy` and flag-first `yorishiro-proxy -db proj` forms are
+// both documented. Any other first word must be a subcommand — an unknown
+// one is an error rather than a silently booted server (USK-1047).
 func routeCommand(args []string) (name string, rest []string, err error) {
-	if len(args) > 0 {
-		switch args[0] {
-		case "server", "client", "docs", "install", "upgrade", "version":
-			return args[0], args[1:], nil
-		}
+	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
+		return "server", args, nil
 	}
-	// No subcommand: backward-compatible, behave like "server".
-	return "server", args, nil
+	first := args[0]
+	if !slices.Contains(subcommandNames, first) {
+		return "", nil, unknownSubcommandError(first)
+	}
+	if first == "help" && len(args) > 1 {
+		return "", nil, fmt.Errorf("unexpected argument %q: help takes no arguments "+
+			"(for a subcommand's help run 'yorishiro-proxy <subcommand> -h'; for tool docs run 'yorishiro-proxy docs')", args[1])
+	}
+	return first, args[1:], nil
+}
+
+// unknownSubcommandError lists every subcommand so the caller can correct
+// itself from the error alone. When word is an MCP tool name, the likely
+// intent is `yorishiro-proxy client <word>`, so name it.
+func unknownSubcommandError(word string) error {
+	msg := fmt.Sprintf("unknown subcommand %q: valid subcommands are %s; "+
+		"flags with no subcommand start the server (run 'yorishiro-proxy -h' for usage)",
+		word, strings.Join(subcommandNames, ", "))
+	if slices.Contains(clientToolList, word) {
+		msg += fmt.Sprintf("; did you mean 'yorishiro-proxy client %s'?", word)
+	}
+	return errors.New(msg)
 }
 
 // runServer wires the CLI usage banner onto fs and delegates to
@@ -88,7 +123,8 @@ func printServerUsage(w io.Writer, fs *flag.FlagSet) {
 	fmt.Fprintf(w, "  docs     Show tool documentation (works offline)\n")
 	fmt.Fprintf(w, "  install  Install and configure components (MCP, CA, Playwright)\n")
 	fmt.Fprintf(w, "  upgrade  Check for and install updates from GitHub Releases\n")
-	fmt.Fprintf(w, "  version  Print version information\n\n")
+	fmt.Fprintf(w, "  version  Print version information\n")
+	fmt.Fprintf(w, "  help     Show this usage (same as -h)\n\n")
 	fmt.Fprintf(w, "Server flags:\n")
 	out := fs.Output()
 	fs.SetOutput(w)
