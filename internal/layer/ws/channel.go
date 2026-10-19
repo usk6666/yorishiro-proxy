@@ -645,6 +645,13 @@ func (c *wsChannel) populateCloseFields(msg *envelope.WSMessage, frame *Frame) {
 // corresponding direction's deflateState is configured, the Layer
 // compresses Payload and sets RSV1 in the wire frame. Otherwise the
 // payload is written verbatim.
+//
+// Raw wins (RFC-001 §9.3 D4, USK-1238): when env.RawWins() holds (a
+// plugin assigned msg["raw"]), env.Raw is written to the wire verbatim
+// in one Write and the WSMessage is ignored — no re-mask, no RSV
+// clearing, no recompression, no Close rebuild, no frame-size cap. The
+// bytes may be malformed, partial, or several frames. See sendRawWins
+// for how the permessage-deflate send context is kept in step.
 func (c *wsChannel) Send(ctx context.Context, env *envelope.Envelope) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -657,7 +664,12 @@ func (c *wsChannel) Send(ctx context.Context, env *envelope.Envelope) error {
 		return fmt.Errorf("ws: Send: unsupported Message type %T", env.Message)
 	}
 
+	if env.RawWins() {
+		return c.sendRawWins(ctx, env.Raw)
+	}
+
 	wireDir := c.sendDirection()
+	c.resetRawWinsFragState(ctx, wireDir)
 
 	frame := &Frame{
 		Fin:    msg.Fin,

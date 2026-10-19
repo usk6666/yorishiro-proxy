@@ -45,9 +45,9 @@ func NewTransformStep(
 //
 // Each per-protocol engine is responsible for clearing env.Raw on commit
 // when a wire-encoded snapshot is invalidated by the mutation. The Step
-// itself never touches env.Raw; on HTTP and SSE it clears
+// itself never touches env.Raw; on HTTP, WebSocket, and SSE it clears
 // env.RawAuthoritative when a rule fired (RFC §9.3 D4 last-writer-wins,
-// USK-1079 / USK-1239).
+// USK-1079 / USK-1238 / USK-1239).
 //
 // ctx is forwarded to engines so future async transform paths (e.g. disk-
 // backed body materialization, plugin transforms) can honour cancellation.
@@ -98,7 +98,10 @@ func (s *TransformStep) processWS(ctx context.Context, env *envelope.Envelope, m
 	if s.ws == nil {
 		return Result{}
 	}
-	s.ws.Transform(ctx, env, msg)
+	if s.ws.Transform(ctx, env, msg) {
+		// RFC §9.3 D4 last-writer-wins, as on HTTP (USK-1238).
+		env.RawAuthoritative = false
+	}
 	return Result{}
 }
 
