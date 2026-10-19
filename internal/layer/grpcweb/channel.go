@@ -70,6 +70,12 @@ type channel struct {
 	sendCtxEnv   *envelope.Envelope
 	sendStreamID string
 
+	// sendPassthrough holds the wire-form body carried on a Start's
+	// Envelope.Raw (the emitAnomalyStart shape: a body that failed to
+	// parse). When non-nil, sendEndLocked forwards it verbatim instead of
+	// re-assembling a body from LPM frames (USK-1203).
+	sendPassthrough []byte
+
 	closeOnce sync.Once
 
 	// maxMessageSize caps the per-LPM length on the wire and the
@@ -370,8 +376,9 @@ func (c *channel) refillFromHTTPMessage(ctx context.Context, env *envelope.Envel
 	parsed, parseErr := DecodeBodyWithMaxMessageSize(bodyBytes, isBase64, c.maxMessageSize)
 	if parseErr != nil {
 		// Recoverable wire-format failures classify as envelope.Anomaly
-		// values: emit a single Start envelope carrying the malformed
-		// body bytes verbatim on Envelope.Raw, then latch terminal EOF
+		// values: emit a Start envelope carrying the malformed body bytes
+		// verbatim on Envelope.Raw plus a sentinel End that flushes them
+		// to the opposite side (USK-1203), then latch terminal EOF
 		// so the session OnComplete sees a clean termination and the
 		// Stream is recorded with the diagnostic preserved. Unrecoverable
 		// failures (security caps such as the per-LPM size limit) fall
@@ -438,7 +445,8 @@ func (c *channel) refillFromHTTPMessage(ctx context.Context, env *envelope.Envel
 	// Send direction: gRPC-Web request bodies must NOT carry an embedded
 	// trailer. If one is observed, emit the End anyway (so the analyst
 	// can inspect what was sent) and stamp
-	// AnomalyUnexpectedGRPCWebRequestTrailer. If absent (the spec-conformant
+	// AnomalyUnexpectedGRPCWebRequestTrailer; its Raw makes the upstream-
+	// side Send forward the frame verbatim (USK-1203). If absent (the spec-conformant
 	// case), synthesize a Status=0 End with Raw=nil so the upstream-side
 	// RoleClient.Send observes the D6 flush sentinel via Pipeline → upstream
 	// dispatch and the assembled HTTPMessage actually reaches the upstream
@@ -545,13 +553,23 @@ func classifyParseError(err error) (envelope.AnomalyType, bool) {
 	}
 }
 
-// emitAnomalyStart pushes a single GRPCStartMessage envelope onto emitQueue
+// emitAnomalyStart pushes a GRPCStartMessage envelope onto emitQueue
 // carrying the parser's diagnostic state (Anomalies populated) and the full
-// inbound body in Envelope.Raw, then latches the channel into a clean
-// terminal-EOF state. Next() drains the queue first (the existing Next loop
-// returns queued envelopes before observing terminalErr) so RecordStep sees
-// the Anomaly envelope before the session OnComplete sees io.EOF and
-// finalizes the Stream cleanly.
+// inbound body in Envelope.Raw, followed by a clean sentinel End (Raw nil,
+// no anomaly), then latches the channel into a clean terminal-EOF state.
+// Next() drains the queue first (the existing Next loop returns queued
+// envelopes before observing terminalErr) so RecordStep sees the Anomaly
+// envelope before the session OnComplete sees io.EOF and finalizes the
+// Stream cleanly.
+//
+// USK-1203: the sentinel End is what makes the opposite-side Send flush
+// the body to the wire (the D6 convention — sendStartLocked only buffers).
+// Without it a malformed body was recorded but never forwarded, in either
+// direction, and the peer waited for bytes that never came. sendStartLocked
+// treats the Start's non-empty Raw as a passthrough body, so the observed
+// bytes reach the next hop verbatim (MITM principles 1 and 5). The sentinel
+// does not fire (grpc-web, on_end): no trailer was parsed, so there is no
+// RPC status to report.
 func (c *channel) emitAnomalyStart(
 	src *envelope.Envelope,
 	dir envelope.Direction,
@@ -567,7 +585,10 @@ func (c *channel) emitAnomalyStart(
 	})
 
 	c.mu.Lock()
-	c.emitQueue = append(c.emitQueue, c.buildEnvelopeRaw(src, dir, start, bodyBytes, opaque))
+	c.emitQueue = append(c.emitQueue,
+		c.buildEnvelopeRaw(src, dir, start, bodyBytes, opaque),
+		c.buildEnvelope(src, dir, &envelope.GRPCEndMessage{}, nil, opaque),
+	)
 	c.mu.Unlock()
 
 	// Latch clean termination via the existing helper. terminate()
@@ -623,6 +644,11 @@ func (c *channel) Send(ctx context.Context, env *envelope.Envelope) error {
 
 // sendStartLocked records the Start metadata for assembly. Resets any prior
 // in-flight assembly buffer (defensive).
+//
+// A non-empty env.Raw is kept as a passthrough body (USK-1203). Only
+// emitAnomalyStart produces such a Start — every other Start is built with
+// Raw nil — and its Raw is the full observed body in wire form (base64 text
+// for -text content-types), which sendEndLocked forwards verbatim.
 func (c *channel) sendStartLocked(env *envelope.Envelope, m *envelope.GRPCStartMessage) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -630,6 +656,10 @@ func (c *channel) sendStartLocked(env *envelope.Envelope, m *envelope.GRPCStartM
 	c.sendCtxEnv = env
 	c.sendStreamID = env.StreamID
 	c.sendDataBuf.Reset()
+	c.sendPassthrough = nil
+	if len(env.Raw) > 0 {
+		c.sendPassthrough = append([]byte(nil), env.Raw...)
+	}
 	return nil
 }
 
@@ -682,11 +712,11 @@ func (c *channel) sendDataLocked(env *envelope.Envelope, m *envelope.GRPCDataMes
 	return nil
 }
 
-// sendEndLocked finalizes the assembly. For Send-side (request) flush
-// direction this writes no embedded trailer (gRPC-Web requests have none —
-// the Layer-internal sentinel only triggers HTTPMessage.Send). For Receive-
-// side (response from RoleServer) direction this encodes the embedded
-// trailer LPM frame at the end of the body.
+// sendEndLocked finalizes the assembly and hands one HTTPMessage to
+// inner.Send. Whether an embedded trailer LPM frame is appended is decided
+// by shouldEmbedTrailer. When the Start carried a passthrough body
+// (sendStartLocked), that body is forwarded verbatim — it is already in
+// wire form, so it is neither re-assembled nor base64-wrapped again.
 func (c *channel) sendEndLocked(ctx context.Context, env *envelope.Envelope, m *envelope.GRPCEndMessage) error {
 	c.mu.Lock()
 	if c.sendStart == nil {
@@ -696,51 +726,47 @@ func (c *channel) sendEndLocked(ctx context.Context, env *envelope.Envelope, m *
 	start := c.sendStart
 	srcEnv := c.sendCtxEnv
 	streamID := c.sendStreamID
+	passthrough := c.sendPassthrough
 	dir := env.Direction
 	dataBytes := append([]byte(nil), c.sendDataBuf.Bytes()...)
 	// Reset assembly state immediately to allow pipelined RPCs.
 	c.sendStart = nil
 	c.sendCtxEnv = nil
+	c.sendPassthrough = nil
 	c.sendDataBuf.Reset()
 	c.mu.Unlock()
 
-	// Determine whether to embed the trailer frame.
-	embedTrailer := dir == envelope.Receive
+	isBase64 := IsBase64Encoded(start.ContentType)
 
-	if embedTrailer {
-		trailerPayload := encodeTrailerPayload(m)
-		if len(env.Raw) > 0 {
-			// Fast path: caller provided raw trailer bytes. Assembly buffer
-			// holds binary LPM frames; the final base64 wrap below is the
-			// only base64 encode applied. For -text wire formats Raw is
-			// base64-encoded (USK-641), so decode once here to keep the
-			// buffer binary and avoid a double-encode.
-			rawTrailer := env.Raw
-			if IsBase64Encoded(start.ContentType) {
-				decoded, err := decodeBase64(rawTrailer)
-				if err != nil {
-					return &layer.StreamError{
-						Code:   layer.ErrorInternalError,
-						Reason: "grpcweb: sendEndLocked decode base64 Raw: " + err.Error(),
-					}
-				}
-				rawTrailer = decoded
-			}
-			dataBytes = append(dataBytes, rawTrailer...)
-		} else {
-			dataBytes = append(dataBytes, EncodeFrame(true, false, trailerPayload)...)
+	if shouldEmbedTrailer(dir, env, m, passthrough != nil) {
+		trailer, err := trailerFrameBytes(env, m, isBase64)
+		if err != nil {
+			return err
 		}
+		dataBytes = append(dataBytes, trailer...)
 	}
 
-	// Apply base64 encoding if the original Start ContentType indicated -text.
-	body := dataBytes
-	isBase64 := IsBase64Encoded(start.ContentType)
-	if isBase64 {
+	// The assembly buffer holds binary LPM frames; apply the -text base64
+	// wrap exactly once. A passthrough body is already wire form, so only
+	// frames assembled after it (none on the live path) are wrapped.
+	var body []byte
+	switch {
+	case passthrough != nil:
+		body = passthrough
+		if len(dataBytes) > 0 {
+			if isBase64 {
+				dataBytes = EncodeBase64Body(dataBytes)
+			}
+			body = append(body, dataBytes...)
+		}
+	case isBase64:
 		body = EncodeBase64Body(dataBytes)
+	default:
+		body = dataBytes
 	}
 
 	// Reconstruct HTTPMessage.
-	httpMsg := buildHTTPMessage(start, m, body, dir, srcEnv, embedTrailer)
+	httpMsg := buildHTTPMessage(start, body, dir, srcEnv)
 
 	out := &envelope.Envelope{
 		StreamID:  streamID,
@@ -755,6 +781,68 @@ func (c *channel) sendEndLocked(ctx context.Context, env *envelope.Envelope, m *
 	}
 
 	return c.inner.Send(ctx, out)
+}
+
+// shouldEmbedTrailer decides whether sendEndLocked appends an embedded
+// trailer LPM frame to the body. The rule forwards what the wire carried
+// and never fabricates a trailer the peer did not send (MITM principle 1):
+//
+//   - End.Raw non-empty: an observed trailer frame — forward it in either
+//     direction. On the request side this is the
+//     AnomalyUnexpectedGRPCWebRequestTrailer case: the frame is recorded as
+//     an anomaly AND relayed, rather than silently stripped (USK-1203).
+//   - Passthrough body: the observed body is already complete; the End is
+//     only the flush sentinel, so nothing is added.
+//   - Receive: a response End re-encoded from its fields (a plugin or
+//     intercept may have synthesized or rewritten it) — except when it is
+//     the AnomalyMissingGRPCWebTrailer placeholder, which stands for a
+//     trailer the upstream never sent.
+//   - Send: only an End flagged AnomalyUnexpectedGRPCWebRequestTrailer whose
+//     Raw was dropped (e.g. by a mutation) is re-encoded from its fields;
+//     the clean synthetic End (USK-780 flush sentinel) adds nothing.
+func shouldEmbedTrailer(dir envelope.Direction, env *envelope.Envelope, m *envelope.GRPCEndMessage, passthrough bool) bool {
+	switch {
+	case len(env.Raw) > 0:
+		return true
+	case passthrough:
+		return false
+	case dir == envelope.Receive:
+		return !hasAnomaly(m.Anomalies, envelope.AnomalyMissingGRPCWebTrailer)
+	default:
+		return hasAnomaly(m.Anomalies, envelope.AnomalyUnexpectedGRPCWebRequestTrailer)
+	}
+}
+
+// hasAnomaly reports whether anomalies contains an entry of type t.
+func hasAnomaly(anomalies []envelope.Anomaly, t envelope.AnomalyType) bool {
+	for _, a := range anomalies {
+		if a.Type == t {
+			return true
+		}
+	}
+	return false
+}
+
+// trailerFrameBytes returns the binary trailer LPM frame to append to the
+// assembly buffer. env.Raw, when present, is used verbatim; for -text wire
+// formats Raw is base64-encoded (USK-641), so it is decoded once here to keep
+// the buffer binary — the final wrap in sendEndLocked is the only base64
+// encode applied. Otherwise the frame is encoded from m's fields.
+func trailerFrameBytes(env *envelope.Envelope, m *envelope.GRPCEndMessage, isBase64 bool) ([]byte, error) {
+	if len(env.Raw) == 0 {
+		return EncodeFrame(true, false, encodeTrailerPayload(m)), nil
+	}
+	if !isBase64 {
+		return env.Raw, nil
+	}
+	decoded, err := decodeBase64(env.Raw)
+	if err != nil {
+		return nil, &layer.StreamError{
+			Code:   layer.ErrorInternalError,
+			Reason: "grpcweb: sendEndLocked decode base64 Raw: " + err.Error(),
+		}
+	}
+	return decoded, nil
 }
 
 // --- helpers ---
@@ -1101,17 +1189,20 @@ func encodeTrailerPayload(end *envelope.GRPCEndMessage) []byte {
 // derived L7 overlay (USK-1057). The response side keeps
 // Status/StatusReason from the original Receive-side context envelope when
 // available.
+//
+// The framing headers carried over from the observed message are reconciled
+// with the re-assembled body (reconcileBodyFraming, USK-1203) — this is the
+// seam where the body is rebuilt, so it is the seam that owns keeping the
+// two consistent.
 func buildHTTPMessage(
 	start *envelope.GRPCStartMessage,
-	end *envelope.GRPCEndMessage,
 	body []byte,
 	dir envelope.Direction,
 	srcEnv *envelope.Envelope,
-	embedTrailer bool,
 ) *envelope.HTTPMessage {
 	msg := &envelope.HTTPMessage{
 		Body:    body,
-		Headers: rebuildStartHeaders(start),
+		Headers: reconcileBodyFraming(rebuildStartHeaders(start), len(body)),
 	}
 
 	switch dir {
@@ -1162,8 +1253,6 @@ func buildHTTPMessage(
 			}
 		}
 	}
-	_ = embedTrailer // kept in signature for parity / future use
-	_ = end
 	return msg
 }
 
@@ -1188,11 +1277,64 @@ func rebuildStartHeaders(start *envelope.GRPCStartMessage) []envelope.KeyValue {
 	return out
 }
 
-// reconcileBodyFraming is a USK-1203 scaffold; the implementation follows in
-// the fix commit.
+// reconcileBodyFraming makes the framing headers carried over from the
+// observed message agree with the re-assembled body of bodyLen bytes
+// (USK-1203). The body the grpcweb Layer hands to inner.Send is rebuilt from
+// LPM frames, so its length changes whenever a Transform / intercept /
+// plugin resized a message, and it is always a de-chunked byte string.
+// Copying the observed Content-Length / Transfer-Encoding forward unchanged
+// therefore produced (a) a stale Content-Length that truncated the body and
+// left its tail on a keep-alive connection (desync), and (b) for a chunked
+// request, Transfer-Encoding: chunked over an un-chunked body plus the
+// Content-Length the HTTP/1.x synthetic send path stamps — the CL+TE
+// request-smuggling shape.
+//
+// Rules, mirroring the http1 opaque path's applyTEToCLRewrite (USK-769):
+//
+//   - Transfer-Encoding present: every entry is dropped and the body is
+//     framed by Content-Length instead. This is a documented divergence
+//     from the wire: the chunk boundaries the peer used are not reproduced
+//     on the next hop (the de-chunked body is all the Layer has).
+//   - Content-Length present: when no entry already equals bodyLen, every
+//     entry's value is rewritten in place — name casing and position are
+//     kept. When one already matches, the entries are left byte-identical
+//     (an unchanged length never moves a header, and a duplicate-CL probe
+//     whose first value matches the body survives intact).
+//   - Content-Length absent: stays absent (unless Transfer-Encoding was
+//     dropped, in which case one is appended). On HTTP/1.x the synthetic
+//     send path stamps one; on HTTP/2 END_STREAM frames the body.
+//
+// The returned slice is a fresh copy; headers is not mutated.
 func reconcileBodyFraming(headers []envelope.KeyValue, bodyLen int) []envelope.KeyValue {
-	_ = bodyLen
-	return headers
+	if len(headers) == 0 {
+		return headers
+	}
+	want := strconv.Itoa(bodyLen)
+	out := make([]envelope.KeyValue, 0, len(headers)+1)
+	var clIdx []int
+	clMatches, droppedTE := false, false
+	for _, kv := range headers {
+		switch {
+		case strings.EqualFold(kv.Name, "transfer-encoding"):
+			droppedTE = true
+			continue
+		case strings.EqualFold(kv.Name, "content-length"):
+			if strings.TrimSpace(kv.Value) == want {
+				clMatches = true
+			}
+			clIdx = append(clIdx, len(out))
+		}
+		out = append(out, kv)
+	}
+	switch {
+	case len(clIdx) == 0 && droppedTE:
+		out = append(out, envelope.KeyValue{Name: "Content-Length", Value: want})
+	case len(clIdx) > 0 && !clMatches:
+		for _, i := range clIdx {
+			out[i].Value = want
+		}
+	}
+	return out
 }
 
 // formatGRPCTimeout returns a grpc-timeout-formatted string. The simplest

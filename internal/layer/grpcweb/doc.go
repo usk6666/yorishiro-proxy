@@ -50,7 +50,26 @@
 // final Send is a *envelope.GRPCEndMessage with Direction=Receive; this
 // Layer encodes an embedded gRPC-Web trailer LPM frame (flags MSB=1) into
 // the outbound HTTPMessage body, alongside any prior GRPCDataMessage
-// payloads.
+// payloads. A Receive End stamped AnomalyMissingGRPCWebTrailer is the
+// placeholder for a trailer the upstream never sent, so no trailer frame is
+// synthesized for it.
+//
+// # Malformed bodies, request trailers and framing headers (USK-1203)
+//
+// A body that fails to parse (malformed base64 / LPM / trailer) is emitted
+// as a Start carrying the anomaly and the whole observed body on
+// Envelope.Raw, followed by a clean sentinel End — in both directions. The
+// opposite-side Send treats the Start's Raw as a passthrough body and
+// forwards it verbatim, so the anomaly is recorded AND the observed bytes
+// reach the next hop. An observed request trailer frame
+// (AnomalyUnexpectedGRPCWebRequestTrailer) is likewise forwarded, not
+// stripped.
+//
+// The assembled HTTPMessage carries the observed Content-Length /
+// Transfer-Encoding headers reconciled with the re-assembled body: a
+// Content-Length that no longer matches is rewritten in place, and
+// Transfer-Encoding is dropped in favour of Content-Length (the chunk
+// boundaries are not reproduced on the next hop). See reconcileBodyFraming.
 //
 // # Metadata strip set (D7)
 //
