@@ -74,6 +74,20 @@ type GRPCStartMessage struct {
 	// observed :path carried no query. USK-1053.
 	RawQuery string
 
+	// HTTPStatus is the HTTP status code of the response that carried
+	// this Start (the HTTP/1.x status line or the HTTP/2 :status
+	// pseudo-header). Populated on the response side (Direction=Receive)
+	// by the gRPC-Web Layer; zero on the request side and on native gRPC,
+	// whose HTTP/2 mapping fixes the response status at 200. A derived
+	// L7 overlay like Authority / Scheme / Path — the wire bytes stay in
+	// Envelope.Raw. USK-1219.
+	HTTPStatus int
+
+	// HTTPStatusReason is the HTTP/1.x reason phrase observed alongside
+	// HTTPStatus. Empty when the response arrived over HTTP/2 (which has
+	// no reason phrase) or on the request side. USK-1219.
+	HTTPStatusReason string
+
 	// Metadata is the full gRPC metadata list. HTTP/2 pseudo-headers are
 	// NOT included here — they belong to the transport layer and are
 	// observable via Envelope.Context if needed. Order and casing are

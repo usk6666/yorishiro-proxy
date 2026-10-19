@@ -1793,6 +1793,50 @@ func TestRecordStep_FlowFieldsGRPCStart(t *testing.T) {
 	}
 }
 
+// TestRecordStep_FlowFieldsGRPCStart_ReceiveHTTPStatus pins USK-1219: the
+// response-side Start of a gRPC-Web RPC carries the upstream HTTP status
+// (e.g. 503) on GRPCStartMessage.HTTPStatus, and the recorded Receive
+// start flow must report it as Flow.StatusCode so it matches the wire.
+// A Start without one (request side, native gRPC) leaves StatusCode 0.
+func TestRecordStep_FlowFieldsGRPCStart_ReceiveHTTPStatus(t *testing.T) {
+	tests := []struct {
+		name   string
+		dir    envelope.Direction
+		status int
+		want   int
+	}{
+		{"receive_503", envelope.Receive, 503, 503},
+		{"receive_200", envelope.Receive, 200, 200},
+		{"send_has_none", envelope.Send, 0, 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			w := &mockWriter{}
+			step := NewRecordStep(w, nil)
+			env := &envelope.Envelope{
+				StreamID:  "rpc-status",
+				FlowID:    "rpc-status-start",
+				Direction: tt.dir,
+				Protocol:  envelope.ProtocolGRPCWeb,
+				Message: &envelope.GRPCStartMessage{
+					Service:          "pkg.Svc",
+					Method:           "Do",
+					ContentType:      "application/grpc-web+proto",
+					HTTPStatus:       tt.status,
+					HTTPStatusReason: "Service Unavailable",
+				},
+			}
+			step.Process(context.Background(), env)
+			if len(w.flows) != 1 {
+				t.Fatalf("expected 1 flow, got %d", len(w.flows))
+			}
+			if got := w.flows[0].StatusCode; got != tt.want {
+				t.Errorf("Flow.StatusCode = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestRecordStep_FlowFieldsGRPCStartOptionalsOmitted(t *testing.T) {
 	w := &mockWriter{}
 	step := NewRecordStep(w, nil)

@@ -782,6 +782,12 @@ func TestServiceMethodExtraction(t *testing.T) {
 		{"/", false, "", ""},
 		{"/onlyone", false, "", ""},
 		{"/svc/", false, "", ""},
+		// USK-1069: strict like internal/layer/grpc.parseGRPCPath — a
+		// :path without a leading "/" is not parseable, so pathForStart
+		// forwards it verbatim instead of normalizing it to "/svc/M".
+		{"svc/M", false, "", ""},
+		{"//Do", false, "", ""},
+		{"//pkg/Do", true, "/pkg", "Do"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.path, func(t *testing.T) {

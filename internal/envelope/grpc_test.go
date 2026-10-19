@@ -39,6 +39,9 @@ func TestGRPCStartMessage_CloneMessage_DeepCopy(t *testing.T) {
 		Scheme:    "https",
 		Path:      "/example.Greeter/SayHello",
 		RawQuery:  "trace=1&verbose=on",
+		// USK-1219 response-side overlay.
+		HTTPStatus:       503,
+		HTTPStatusReason: "Service Unavailable",
 		Metadata: []KeyValue{
 			{Name: "x-request-id", Value: "abc123"},
 			{Name: "authorization", Value: "Bearer xyz"},
@@ -68,6 +71,12 @@ func TestGRPCStartMessage_CloneMessage_DeepCopy(t *testing.T) {
 	}
 	if cloned.RawQuery != orig.RawQuery {
 		t.Errorf("RawQuery: got %q, want %q", cloned.RawQuery, orig.RawQuery)
+	}
+	if cloned.HTTPStatus != orig.HTTPStatus {
+		t.Errorf("HTTPStatus: got %d, want %d", cloned.HTTPStatus, orig.HTTPStatus)
+	}
+	if cloned.HTTPStatusReason != orig.HTTPStatusReason {
+		t.Errorf("HTTPStatusReason: got %q, want %q", cloned.HTTPStatusReason, orig.HTTPStatusReason)
 	}
 	if cloned.Timeout != orig.Timeout {
 		t.Errorf("Timeout: got %v, want %v", cloned.Timeout, orig.Timeout)
