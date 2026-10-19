@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -118,7 +119,7 @@ func waitForFlowID(t *testing.T, h *mcptest.Harness, pathSubstring string, timeo
 			return parsed.Flows[i].ID > parsed.Flows[j].ID
 		})
 		for _, f := range parsed.Flows {
-			if containsString(f.URL, pathSubstring) {
+			if strings.Contains(f.URL, pathSubstring) {
 				return f.ID
 			}
 		}
@@ -146,22 +147,4 @@ func decodedInt(decoded map[string]any, key string) int {
 	default:
 		return 0
 	}
-}
-
-// containsString is a tiny substring helper kept inline so the test
-// file does not pull in strings just for one use site. Equivalent to
-// strings.Contains.
-func containsString(haystack, needle string) bool {
-	if len(needle) == 0 {
-		return true
-	}
-	if len(needle) > len(haystack) {
-		return false
-	}
-	for i := 0; i+len(needle) <= len(haystack); i++ {
-		if haystack[i:i+len(needle)] == needle {
-			return true
-		}
-	}
-	return false
 }

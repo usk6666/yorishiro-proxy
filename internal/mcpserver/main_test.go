@@ -3,7 +3,6 @@ package mcpserver
 import (
 	"crypto/sha256"
 	"flag"
-	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -545,48 +544,6 @@ func TestEnvVarMap_AllFlagsHaveMapping(t *testing.T) {
 			t.Errorf("flag %q has no entry in EnvVarMap", f.Name)
 		}
 	})
-}
-
-func TestUsageOutput(t *testing.T) {
-	fs := flag.NewFlagSet("test", flag.ContinueOnError)
-	cfg := config.Default()
-
-	fs.StringVar(&cfg.DBPath, "db", cfg.DBPath, "SQLite database path (env: YP_DB)")
-	fs.StringVar(&cfg.LogLevel, "log-level", cfg.LogLevel, "log level (env: YP_LOG_LEVEL)")
-	fs.StringVar(&cfg.MCPHTTPAddr, "mcp-http-addr", cfg.MCPHTTPAddr, "Streamable HTTP listen address (env: YP_MCP_HTTP_ADDR)")
-
-	var buf strings.Builder
-	fs.SetOutput(&buf)
-	fs.Usage = func() {
-		fmt.Fprintf(fs.Output(), "Usage: yorishiro-proxy [flags]\n\n")
-		fmt.Fprintf(fs.Output(), "yorishiro-proxy is an AI agent network proxy (MCP server).\n")
-		fmt.Fprintf(fs.Output(), "It runs as an MCP server on stdin/stdout by default.\n\n")
-		fmt.Fprintf(fs.Output(), "Flags:\n")
-		fs.PrintDefaults()
-		fmt.Fprintf(fs.Output(), "\nEnvironment variables:\n")
-		fmt.Fprintf(fs.Output(), "  All flags accept a YP_ prefixed environment variable as fallback.\n")
-		fmt.Fprintf(fs.Output(), "  Priority: CLI flag > environment variable > default value.\n")
-		fmt.Fprintf(fs.Output(), "\nExamples:\n")
-		fmt.Fprintf(fs.Output(), "  yorishiro-proxy                                  # MCP stdio mode (default)\n")
-		fmt.Fprintf(fs.Output(), "  yorishiro-proxy -mcp-http-addr 127.0.0.1:3000    # stdio + Streamable HTTP\n")
-	}
-	fs.Usage()
-
-	output := buf.String()
-	mustContain := []string{
-		"Usage: yorishiro-proxy",
-		"MCP server",
-		"YP_DB",
-		"YP_LOG_LEVEL",
-		"YP_MCP_HTTP_ADDR",
-		"Examples:",
-		"MCP stdio mode",
-	}
-	for _, s := range mustContain {
-		if !strings.Contains(output, s) {
-			t.Errorf("usage output missing %q", s)
-		}
-	}
 }
 
 // getStringConfigField returns the string value of a named config field.

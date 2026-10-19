@@ -88,12 +88,6 @@ type HarnessOptions struct {
 	// without an upstream is rejected by validateOptions.
 	EnableMTLS bool
 
-	// PreStartTools is a sequence of tool calls invoked AFTER the MCP
-	// server is listening but BEFORE StartHarness returns. Used by
-	// USK-727 (USK-719 regression) to call resend before proxy_start
-	// has run, which historically segfaulted.
-	PreStartTools []ToolCall
-
 	// LogLevel overrides the server's log level. Empty defaults to
 	// "error" so test output stays quiet; set "debug" while iterating
 	// on a flaky test.
@@ -120,12 +114,6 @@ type HarnessOptions struct {
 	// sets -export-dir, Harness.ExportDir reports that value instead of
 	// the harness-provided temp directory.
 	ExtraArgs []string
-}
-
-// ToolCall is a (name, args) pair used for HarnessOptions.PreStartTools.
-type ToolCall struct {
-	Name string
-	Args any
 }
 
 // Harness is the value returned by StartHarness. It owns a running MCP
@@ -306,10 +294,6 @@ func StartHarness(t *testing.T, opts HarnessOptions) *Harness {
 		Cleanup:             cleanup,
 	}
 
-	for _, tc := range opts.PreStartTools {
-		_ = h.CallTool(t, tc.Name, tc.Args)
-	}
-
 	return h
 }
 
@@ -350,7 +334,7 @@ func (h *Harness) ExpectError(t *testing.T, name string, args any, errSubstring 
 		t.Fatalf("mcptest: tool %q expected error containing %q, got success: %s",
 			name, errSubstring, res.Text)
 	}
-	if !contains(combined, errSubstring) {
+	if !strings.Contains(combined, errSubstring) {
 		t.Fatalf("mcptest: tool %q error = %q, want substring %q", name, combined, errSubstring)
 	}
 }
@@ -691,34 +675,6 @@ func combineErrorText(res ToolResult) string {
 		return res.Text
 	}
 	return ""
-}
-
-// contains is a thin wrapper that lets tests inject a different match
-// strategy in the future without changing the call sites.
-func contains(haystack, needle string) bool {
-	if needle == "" {
-		return true
-	}
-	return indexOf(haystack, needle) >= 0
-}
-
-// indexOf is a minimal substring search; we avoid pulling in strings
-// here so the harness package's import surface stays small. Equivalent
-// to strings.Index — kept inline for readability of the substring
-// search choice.
-func indexOf(haystack, needle string) int {
-	if len(needle) == 0 {
-		return 0
-	}
-	if len(needle) > len(haystack) {
-		return -1
-	}
-	for i := 0; i+len(needle) <= len(haystack); i++ {
-		if haystack[i:i+len(needle)] == needle {
-			return i
-		}
-	}
-	return -1
 }
 
 // generateToken returns a 64-character hex string suitable for the MCP
