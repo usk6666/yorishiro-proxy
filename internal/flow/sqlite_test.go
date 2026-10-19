@@ -270,6 +270,36 @@ func TestSQLiteStore_UpdateStreamClientFingerprint(t *testing.T) {
 	}
 }
 
+// TestSQLiteStore_UpdateStreamScheme verifies StreamUpdate.Scheme backfills
+// an empty scheme column and that an empty Scheme in a later update does
+// not clobber it (USK-1197).
+func TestSQLiteStore_UpdateStreamScheme(t *testing.T) {
+	t.Parallel()
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	st := &Stream{Protocol: "http", Timestamp: time.Now().UTC()}
+	if err := store.SaveStream(ctx, st); err != nil {
+		t.Fatalf("SaveStream: %v", err)
+	}
+	if err := store.UpdateStream(ctx, st.ID, StreamUpdate{Scheme: "https"}); err != nil {
+		t.Fatalf("UpdateStream(scheme): %v", err)
+	}
+	if err := store.UpdateStream(ctx, st.ID, StreamUpdate{State: "complete"}); err != nil {
+		t.Fatalf("UpdateStream(state): %v", err)
+	}
+	got, err := store.GetStream(ctx, st.ID)
+	if err != nil {
+		t.Fatalf("GetStream: %v", err)
+	}
+	if got.Scheme != "https" {
+		t.Errorf("Scheme = %q, want %q", got.Scheme, "https")
+	}
+	if got.State != "complete" {
+		t.Errorf("State = %q, want complete", got.State)
+	}
+}
+
 func TestSQLiteStore_AppendAndGetMessages(t *testing.T) {
 	t.Parallel()
 	store := newTestStore(t)

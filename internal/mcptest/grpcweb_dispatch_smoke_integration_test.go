@@ -127,6 +127,14 @@ func TestE2E_LiveGRPCWeb_DispatchDeliversEnvelope(t *testing.T) {
 			if !foundActiveOrCompleteGRPCWebFlow(queryRes.Decoded) {
 				t.Fatalf("query(flows, protocol=grpc-web) after %s: no non-error flow recorded; envelope did not reach RecordStep, or the Stream is state=error. Decoded=%v", tc.name, queryRes.Decoded)
 			}
+
+			// USK-1197: the grpc-web request carries a body, so its
+			// h2-frame / grpcweb-base64 overlay reaches RecordStep before
+			// the semantic envelope. The Stream must still record the
+			// client-declared :scheme.
+			if bad := grpcWebFlowsWithScheme(queryRes.Decoded, "https"); bad != "" {
+				t.Fatalf("grpc-web flow scheme after %s: %s", tc.name, bad)
+			}
 		})
 	}
 }
@@ -147,6 +155,25 @@ func foundActiveOrCompleteGRPCWebFlow(decoded map[string]any) bool {
 		}
 	}
 	return false
+}
+
+// grpcWebFlowsWithScheme returns a non-empty description when any
+// grpc-web flow in the query response does not carry wantScheme.
+func grpcWebFlowsWithScheme(decoded map[string]any, wantScheme string) string {
+	flowsAny, _ := decoded["flows"].([]any)
+	for _, fa := range flowsAny {
+		fm, _ := fa.(map[string]any)
+		if fm == nil {
+			continue
+		}
+		if p, _ := fm["protocol"].(string); p != "grpc-web" {
+			continue
+		}
+		if sc, _ := fm["scheme"].(string); sc != wantScheme {
+			return fmt.Sprintf("flow %v scheme = %q, want %q", fm["id"], sc, wantScheme)
+		}
+	}
+	return ""
 }
 
 // grpcWebUpstreamHostPort parses the httptest server URL ("https://h:p")
