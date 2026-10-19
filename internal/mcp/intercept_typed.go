@@ -40,9 +40,11 @@ type headerKV struct {
 //
 // Headers and Trailers replace the held envelope's slices wholesale when
 // non-nil. Body, when supplied, replaces HTTPMessage.Body before
-// BodyPatches are applied (Decision R12). AutoContentLength is retained
-// for HTTP Request Smuggling test surface (Decision R25); it is observed
-// by downstream HTTP/1.x and HTTP/2 wire-encoders, not by this handler.
+// BodyPatches are applied (Decision R12). AutoContentLength is accepted
+// but read by nothing: the HTTP/1.x opaque send path always drops
+// Transfer-Encoding and re-stamps Content-Length on a body change. Its
+// description says so rather than advertise a smuggling knob that does
+// not exist (USK-1153; making it work is tracked in USK-1258).
 type httpMessageModify struct {
 	Method            *string     `json:"method,omitempty" jsonschema:"HTTP method override (request side)"`
 	Scheme            *string     `json:"scheme,omitempty" jsonschema:"scheme override (request side)"`
@@ -56,7 +58,7 @@ type httpMessageModify struct {
 	Body              *string     `json:"body,omitempty" jsonschema:"body replacement (text or base64 per body_encoding)"`
 	BodyEncoding      string      `json:"body_encoding,omitempty" jsonschema:"text|base64; required when body is non-textual"`
 	BodyPatches       []BodyPatch `json:"body_patches,omitempty" jsonschema:"body patches applied on top of any body replacement"`
-	AutoContentLength *bool       `json:"auto_content_length,omitempty" jsonschema:"auto-sync Content-Length on body change (default true; false preserves CL/TE for smuggling tests)"`
+	AutoContentLength *bool       `json:"auto_content_length,omitempty" jsonschema:"accepted but currently has no effect; on HTTP/1.x a body change always re-stamps Content-Length"`
 }
 
 // wsMessageModify carries the structured override fields for a WebSocket

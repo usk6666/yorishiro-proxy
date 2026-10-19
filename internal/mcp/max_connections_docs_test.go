@@ -13,9 +13,8 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/connector"
 )
 
-// USK-1141: the max_connections default is stated in three places Go cannot
-// derive from the constant — the proxy_start jsonschema struct tag, the
-// hand-written yorishiro://schema/proxy_start resource, and the
+// USK-1141: the max_connections default is stated in two places Go cannot
+// derive from the constant — the proxy_start jsonschema struct tag and the
 // yorishiro://help/proxy_start resource. These guards keep each of them in
 // step with connector.DefaultMaxConnections, which is what the listener and
 // the USK-407 reset path actually apply.
@@ -75,17 +74,6 @@ func TestProxyStartDocs_MaxConnectionsDefaultMatchesConstant(t *testing.T) {
 		desc := schemaDescription(t, props, "max_connections")
 		if !strings.Contains(desc, "(default: "+want+")") {
 			t.Errorf("proxy_start tool max_connections description = %q, want it to state default %s", desc, want)
-		}
-	})
-
-	t.Run("schema resource description", func(t *testing.T) {
-		var schema map[string]any
-		if err := json.Unmarshal([]byte(readResourceText(t, "yorishiro://schema/proxy_start")), &schema); err != nil {
-			t.Fatalf("unmarshal schema/proxy_start: %v", err)
-		}
-		desc := schemaDescription(t, navSchema(t, schema, "properties"), "max_connections")
-		if !strings.Contains(desc, "Default: "+want+".") {
-			t.Errorf("schema/proxy_start max_connections description = %q, want it to state default %s", desc, want)
 		}
 	})
 

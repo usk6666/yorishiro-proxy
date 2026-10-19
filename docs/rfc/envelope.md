@@ -950,7 +950,7 @@ Consequently the fix for a blank scheme belongs at the **call sites**, not in `m
 
 #### Anti-patterns (do not propose)
 
-- **"Extend the vocabulary with `ws` / `wss` / `tcp` / `raw` / `tls`"** — it costs the config struct, `validateTargetRules`, `ruleCoversRule`'s policy-boundary subset logic, `schema_security.json`, `help_security.md` and the WebUI, and it creates a *new* silent-non-match class: every existing `schemes: ["http"]` deny would stop covering raw traffic the moment `raw` became a distinct token.
+- **"Extend the vocabulary with `ws` / `wss` / `tcp` / `raw` / `tls`"** — it costs the config struct, `validateTargetRules`, `ruleCoversRule`'s policy-boundary subset logic, the `security` tool schema, `help_security.md` and the WebUI, and it creates a *new* silent-non-match class: every existing `schemes: ["http"]` deny would stop covering raw traffic the moment `raw` became a distinct token.
 - **"Make `matchTargetRule` fail-safe for a blank scheme"** — provably impossible with one semantic (above).
 - **"Default `""` to `"http"` in `checkTargetScopeAddr`"** — mis-scopes the genuinely-unknown SOCKS5 caller as plaintext, trading a visible gap for an invisible wrong answer.
 
