@@ -9,9 +9,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"syscall"
-	"time"
-
-	"github.com/usk6666/yorishiro-proxy/internal/tlsfingerprint"
 )
 
 // PassthroughObservation captures everything the proxy could observe about
@@ -193,11 +190,20 @@ func relayTLSPassthroughWithObserver(
 	slog.Debug("connector: TLS passthrough relay started", "target", target)
 
 	// Best-effort SNI peek before the relay starts. The peek is bounded by
-	// passthroughSNIPeekTimeout so a misbehaving client cannot stall the
+	// clientHelloPeekTimeout so a misbehaving client cannot stall the
 	// relay forever; failure is logged and the audit flow records SNI="".
+	//
+	// USK-1170: reuse the sniff-first MITM peek, which reads the record
+	// header and then exactly one record, so it returns as soon as the
+	// ClientHello is buffered instead of waiting out the deadline. Only
+	// SNI and the client JA3/JA4 are copied: the ClientHello is on the wire
+	// in the clear even under passthrough, but ALPN stays absent from the
+	// passthrough observation (no fabricated negotiation data — see
+	// PassthroughObservation).
 	var sni, clientJA3, clientJA4 string
 	if observer != nil {
-		sni, clientJA3, clientJA4 = peekClientHelloSNI(clientConn)
+		peeked := peekClientHelloSNIAndALPN(clientConn)
+		sni, clientJA3, clientJA4 = peeked.SNI, peeked.ClientJA3, peeked.ClientJA4
 	}
 
 	obs := PassthroughObservation{
@@ -242,58 +248,6 @@ func relayTLSPassthroughWithObserver(
 		"error", relayErr,
 	)
 	return relayErr
-}
-
-// peekClientHelloSNI reads the first TLS record from clientConn without
-// consuming it (when the conn is a *PeekConn — every connector entry point
-// wraps the inbound conn in PeekConn before dispatching) and extracts the
-// server_name extension's host_name. Returns the empty string on any
-// failure mode (timeout, malformed record, no SNI extension); failures
-// are logged at Debug since they are routine on the wire (TLS 1.2 fallbacks,
-// TLS-over-something exotic, etc.).
-//
-// The peek is bounded by clientHelloPeekTimeout. Resetting the read
-// deadline after the peek is critical: bufio.Reader.Peek reads from the
-// underlying conn under the deadline, and leaving the deadline armed
-// would cause the relay's first io.Copy read to fail with a deadline
-// error before any TLS bytes flowed.
-//
-// USK-1015: the peek also computes the client's JA3/JA4 fingerprints from
-// the same buffer. Under passthrough the proxy never decrypts the tunnel,
-// but the ClientHello is on the wire in the clear, so the fingerprint is a
-// legal observation (added ONLY here; ALPN / negotiated version stay absent
-// to keep the "no fabricated data" contract). Empty on any peek/parse
-// failure, matching the SNI fallback.
-func peekClientHelloSNI(clientConn net.Conn) (sni, ja3, ja4 string) {
-	pc, ok := clientConn.(*PeekConn)
-	if !ok {
-		return "", "", ""
-	}
-	if err := pc.SetReadDeadline(time.Now().Add(clientHelloPeekTimeout)); err != nil {
-		slog.Debug("connector: passthrough SNI peek deadline arm failed", "error", err)
-		return "", "", ""
-	}
-	defer func() {
-		// Clear the deadline regardless of peek outcome so the relay's
-		// io.Copy is not torpedoed by a pending timeout.
-		_ = pc.SetReadDeadline(time.Time{})
-	}()
-
-	buf, err := pc.Peek(clientHelloPeekSize)
-	if err != nil && len(buf) == 0 {
-		// True peek failure (timeout / EOF / closed). Audit flow records
-		// SNI="" and the relay still runs (the underlying io.Copy will
-		// either see a closed conn and return promptly, or unblock on
-		// the next byte the client sends).
-		slog.Debug("connector: passthrough SNI peek failed", "error", err)
-		return "", "", ""
-	}
-	ja3, ja4 = tlsfingerprint.Compute(buf)
-	sni, parseErr := parseClientHelloSNI(buf)
-	if parseErr != nil && !errors.Is(parseErr, errNotClientHello) && !errors.Is(parseErr, errClientHelloIncomplete) {
-		slog.Debug("connector: passthrough SNI parse failed", "error", parseErr, "buffered", len(buf))
-	}
-	return sni, ja3, ja4
 }
 
 // netAddrString returns a.String() or empty when a is nil.
