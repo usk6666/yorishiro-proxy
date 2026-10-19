@@ -298,10 +298,11 @@ func TestInterceptStep_ContextCancellation(t *testing.T) {
 	if result.Action != Drop {
 		t.Errorf("ContextCancellation: got action %v, want Drop", result.Action)
 	}
-	// USK-782: context-cancelled hold path is intentionally not attributed
-	// to intercept_drop — no user action ever resolved the hold.
-	if result.BlockedBy != "" {
-		t.Errorf("ContextCancellation: BlockedBy = %q, want empty (session teardown is not an intercept_drop)", result.BlockedBy)
+	// USK-782: context-cancelled hold path is not attributed to
+	// intercept_drop — no user action ever resolved the hold. USK-1193:
+	// it is attributed to intercept_cancelled so it is recorded.
+	if result.BlockedBy != BlockedByInterceptCancelled {
+		t.Errorf("ContextCancellation: BlockedBy = %q, want %q", result.BlockedBy, BlockedByInterceptCancelled)
 	}
 }
 
