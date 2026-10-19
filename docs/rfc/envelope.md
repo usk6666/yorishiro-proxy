@@ -118,6 +118,12 @@ type Envelope struct {
     // --- Wire fidelity (read-only view for Pipeline; authoritative bytes) ---
     Raw []byte
 
+    // RFC §9.3 D4 "Raw wins" marker: Raw is caller-authored bytes the Layer
+    // must write verbatim, ignoring Message. Set by the Pipeline on a plugin
+    // msg["raw"] write; cleared by any later Step that changes the Message.
+    // Layers consult Envelope.RawWins() (marker AND len(Raw) > 0). USK-1079.
+    RawAuthoritative bool
+
     // --- Protocol-specific structured view ---
     Message Message      // interface; typed by Protocol
 
@@ -1408,6 +1414,8 @@ Any other `(protocol, event)` combination is a load-time error.
 3. **Headers as ordered list of pairs with case-insensitive read accessor.** `msg["headers"]` is a list of `(name, value)` 2-tuples preserving wire case, order, and duplicates. Mutation operations are `append`, `replace_at(index, pair)`, `delete_first(name)`, etc. — operations that preserve order. A read-only convenience method `headers.get_first(name)` does case-insensitive lookup but does **not** alter the list. The Layer never re-canonicalizes; any plugin attempt to invoke a re-sort or dedup operation raises a Starlark error explicitly (`fail("ordered list operations only")`) rather than silently re-ordering. This satisfies the §1.4 wire-fidelity invariant under plugin mutation.
 
 4. **Both Message and Raw editable; Raw wins if both touched.** A plugin may write `msg["raw"] = b"..."` to inject byte-level content directly. If the plugin modified `msg["raw"]` (compared to its snapshot), the Layer takes the wire-faithful path and writes the bytes verbatim, ignoring any Message-field mutations. This preserves smuggling-test capability (the original motivation for §1.4) under the plugin API. If only Message fields changed, the Layer regenerates Raw via WireEncoder. If neither changed, the original Raw passes through zero-copy.
+
+   *Carrier and precedence (USK-1079).* The decision travels on the envelope as `Envelope.RawAuthoritative` (§3.1), not in Pipeline-scoped state: the Layer writes the wire after `Pipeline.Run` returns, so only a per-envelope field reaches it. Layers honour it through `Envelope.RawWins()` (marker set **and** `Raw` non-empty); a plugin's raw bytes are the complete wire message, so a disk-spilled `RawBuffer` is dropped when the marker is set. Precedence is **pipeline order, last writer wins**: a later Step that changes the Message hands the wire back to the Message path — a later plugin hook with a Message-only mutation, a Transform rule that fires (the marker is cleared), or an intercept modify (it replaces the envelope with `Raw=nil`, so `RawWins()` is false). A plugin whose bytes must survive Transform and intercept therefore registers `phase="post_pipeline"`. RecordStep skips the WireEncoder when `RawWins()` holds, so the recorded modified variant equals the bytes written. On HTTP/1.x a raw-authoritative request is never replayed on a stale-connection retry (the Message does not describe the bytes, and a replay could duplicate a smuggled request), and the upstream connection is retired after that exchange's final response — responses to any extra requests the bytes carried are not attributed to the next exchange; the CONNECT path's redial chain opens a fresh connection for it. Per-Layer support: HTTP/1.x (request and response) and raw TCP (`bytechunk`) honour the marker; gRPC Data and gRPC-Web already write a non-empty `Raw` verbatim. HTTP/2, gRPC Start/End, WebSocket, and SSE do not yet honour it (follow-ups).
 
 5. **Action surface depends on event semantics, not direction.** DROP/RESPOND are valid only at transaction-start events (`http.on_request`, `http.on_response`, `ws.on_upgrade`, `grpc.on_start`, `grpc-web.on_start`, `connection.on_connect`, `socks5.on_connect`). Mid-stream events (`on_data`, `on_message`, `on_event`, `on_chunk`) accept only CONTINUE + mutation; "drop a frame" is not wire-realizable for stateful streams without breaking the stream, so plugins that want to terminate must use the protocol's native termination action (e.g., `ctx.rst_stream(code)` for gRPC/HTTP/2, `ctx.close(code, reason)` for WebSocket). Lifecycle observation events accept no actions other than CONTINUE.
 
