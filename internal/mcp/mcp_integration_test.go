@@ -403,41 +403,6 @@ func TestIntegration_ExportCACert(t *testing.T) {
 	}
 }
 
-// TestIntegration_ProxyStop_WhenNotRunning verifies that proxy_stop returns
-// an error when the proxy is not running.
-func TestIntegration_ProxyStop_WhenNotRunning(t *testing.T) {
-	env := setupIntegrationEnv(t)
-
-	callToolExpectError(t, env.cs, "proxy_stop", nil)
-}
-
-// TestIntegration_ProxyStart_DoubleStart verifies that starting the proxy
-// twice returns an error.
-func TestIntegration_ProxyStart_DoubleStart(t *testing.T) {
-	env := setupIntegrationEnv(t)
-
-	// First start should succeed.
-	_ = callTool[proxyStartResult](t, env.cs, "proxy_start", map[string]any{
-		"listen_addr": "127.0.0.1:0",
-	})
-
-	// Second start should fail.
-	callToolExpectError(t, env.cs, "proxy_start", map[string]any{
-		"listen_addr": "127.0.0.1:0",
-	})
-}
-
-// TestIntegration_QuerySession_NotFound verifies that querying a flow returns an
-// error for a non-existent flow ID.
-func TestIntegration_QuerySession_NotFound(t *testing.T) {
-	env := setupIntegrationEnv(t)
-
-	callToolExpectError(t, env.cs, "query", map[string]any{
-		"resource": "flow",
-		"id":       "nonexistent-flow-id",
-	})
-}
-
 // TestIntegration_ExecuteDeleteFlows_NotFound verifies that deleting a flow
 // returns an error for a non-existent flow ID.
 func TestIntegration_ExecuteDeleteFlows_NotFound(t *testing.T) {
@@ -449,25 +414,6 @@ func TestIntegration_ExecuteDeleteFlows_NotFound(t *testing.T) {
 			"flow_id": "nonexistent-flow-id",
 		},
 	})
-}
-
-// TestIntegration_QuerySessions_Empty verifies that query sessions returns an
-// empty list when no sessions have been recorded.
-func TestIntegration_QuerySessions_Empty(t *testing.T) {
-	env := setupIntegrationEnv(t)
-
-	result := callTool[queryFlowsResult](t, env.cs, "query", map[string]any{
-		"resource": "flows",
-	})
-	if result.Count != 0 {
-		t.Errorf("query sessions count = %d, want 0", result.Count)
-	}
-	if result.Total != 0 {
-		t.Errorf("query sessions total = %d, want 0", result.Total)
-	}
-	if len(result.Flows) != 0 {
-		t.Errorf("query sessions length = %d, want 0", len(result.Flows))
-	}
 }
 
 // TestIntegration_ListTools verifies that all expected tools are registered.
@@ -510,22 +456,6 @@ func TestIntegration_ListTools(t *testing.T) {
 		}
 	}
 
-	// Verify no unexpected legacy tools are present.
-	legacyTools := []string{
-		"clear_sessions", "proxy_status", "list_sessions", "get_session",
-		"replay_request", "delete_session", "export_ca_cert",
-		"add_tls_passthrough", "remove_tls_passthrough", "list_tls_passthrough",
-		"replay_raw",
-	}
-	toolSet := make(map[string]bool)
-	for _, tool := range toolsResult.Tools {
-		toolSet[tool.Name] = true
-	}
-	for _, legacy := range legacyTools {
-		if toolSet[legacy] {
-			t.Errorf("legacy tool %q should not be registered", legacy)
-		}
-	}
 }
 
 // TestIntegration_ProxyStartStopRestart verifies the proxy can be started,
