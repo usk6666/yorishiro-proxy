@@ -58,6 +58,12 @@ const (
 	// The semantic body (Body / BodyBuffer) is unaffected and capped by the
 	// independent body-spill / MaxBodySize policies.
 	AnomalyRawBodyTruncated AnomalyType = "RawBodyTruncated"
+	// AnomalyTruncatedBody indicates that the connection ended before the
+	// body framed by the message's own headers was complete: fewer bytes
+	// than Content-Length declared, or a chunked body cut before its
+	// terminal zero-size chunk (USK-1229). The captured body and RawBody
+	// hold exactly the bytes received.
+	AnomalyTruncatedBody AnomalyType = "TruncatedBody"
 )
 
 // TrailerProvider is implemented by body readers that parse chunked trailers
