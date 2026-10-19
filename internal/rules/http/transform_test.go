@@ -233,12 +233,10 @@ func TestTransformEngine_ReplaceBody_BodyBufferMaterializes(t *testing.T) {
 	}
 	e.SetRules([]TransformRule{*rule})
 
-	// Build a 12 MiB body with a needle near the middle.
-	const payloadSize = 12 << 20
+	// Multi-chunk file-backed body with the needle straddling a read-chunk
+	// boundary (see chunkStraddlingBody in safety_test.go; USK-1205).
 	needle := []byte("secret123")
-	filler := bytes.Repeat([]byte("A"), payloadSize/2)
-	payload := append(append([]byte(nil), filler...), needle...)
-	payload = append(payload, filler...)
+	payload := chunkStraddlingBody(needle)
 
 	bb, err := bodybuf.NewFile(t.TempDir(), "test-body", 0)
 	if err != nil {
@@ -252,6 +250,9 @@ func TestTransformEngine_ReplaceBody_BodyBufferMaterializes(t *testing.T) {
 	})
 	if _, err := bb.Write(payload); err != nil {
 		t.Fatal(err)
+	}
+	if !bb.IsFileBacked() {
+		t.Fatal("precondition: BodyBuffer must be file-backed")
 	}
 
 	env, msg := testTransformEnv("POST", "/api", "example.com", nil, nil)
@@ -273,7 +274,7 @@ func TestTransformEngine_ReplaceBody_BodyBufferMaterializes(t *testing.T) {
 	if !bytes.Contains(msg.Body, []byte("[REDACTED]")) {
 		t.Error("msg.Body missing replacement token")
 	}
-	// payload = 2*filler + needle; replacement: needle → "[REDACTED]".
+	// payload holds exactly one needle; replacement: needle → "[REDACTED]".
 	if want := len(payload) + len("[REDACTED]") - len("secret123"); len(msg.Body) != want {
 		t.Errorf("body length = %d, want %d", len(msg.Body), want)
 	}

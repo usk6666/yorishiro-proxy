@@ -19,9 +19,11 @@ import (
 	"io"
 	"math/big"
 	"net"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -41,22 +43,28 @@ import (
 
 // USK-635 — N6.5 acceptance gate for MCP tool surface.
 //
-// Proves that a 25 MiB response body round-trips through the RFC-001 pipeline
-// (http1 layer → rules/pipeline RecordStep materialize → SQLite flow.Store),
-// and that the MCP `query` tool serves the full body back with the correct
-// base64 encoding and `response_body_truncated` flag.
+// Proves that a response body spilled to disk round-trips through the
+// RFC-001 pipeline (http1 layer → rules/pipeline RecordStep materialize →
+// SQLite flow.Store), and that the MCP `query` tool serves the full body back
+// with the correct base64 encoding and `response_body_truncated` flag.
+//
+// The spill threshold is lowered to mcpSpillThreshold (512 KiB) so a 2 MiB
+// body spills; an mcpSpillInspector asserts it really did (USK-1205). 2 MiB
+// is still above the query tool's 256 KiB oversize advisory.
 //
 // Two subtests:
 //   - full_body_below_cap: RecordStep MaxBodySize = config.MaxBodySize (default
-//     254 MiB). 25 MiB fits under the cap → ResponseBodyTruncated=false, full
+//     254 MiB). The body fits under the cap → ResponseBodyTruncated=false, full
 //     body returned base64-encoded.
-//   - truncated_above_cap: RecordStep MaxBodySize = 10 MiB. 25 MiB body is
-//     truncated to 10 MiB → ResponseBodyTruncated=true, body reflects the
-//     first 10 MiB (not the discarded tail).
+//   - truncated_above_cap: RecordStep MaxBodySize = 1 MiB (above the spill
+//     threshold, so truncation runs on the file-backed materialize path). The
+//     2 MiB body is truncated to 1 MiB → ResponseBodyTruncated=true, body
+//     reflects the first 1 MiB (not the discarded tail).
 
 const (
-	mcpLargeBodySize25MiB = 25 << 20
-	mcpRecordCapTruncate  = 10 << 20
+	mcpSpillThreshold    = 512 << 10
+	mcpLargeBodySize     = 2 << 20
+	mcpRecordCapTruncate = 1 << 20
 )
 
 // ---------------------------------------------------------------------------
@@ -91,7 +99,7 @@ func newMCPLargeTLSConfig(t *testing.T) *tls.Config {
 	}
 }
 
-// startMCPLargeUpstream serves a canned 25 MiB response on every request.
+// startMCPLargeUpstream serves a canned response body on every request.
 func startMCPLargeUpstream(t *testing.T, body []byte) (net.Listener, string) {
 	t.Helper()
 	ln, err := tls.Listen("tcp", "127.0.0.1:0", newMCPLargeTLSConfig(t))
@@ -117,7 +125,7 @@ func startMCPLargeUpstream(t *testing.T, body []byte) (net.Listener, string) {
 						break
 					}
 				}
-				// Write a 25 MiB Content-Length-framed response + Connection:
+				// Write a Content-Length-framed response + Connection:
 				// close so the proxy drains the full body and the session ends.
 				header := fmt.Sprintf(
 					"HTTP/1.1 200 OK\r\nContent-Length: %d\r\nConnection: close\r\n\r\n",
@@ -136,7 +144,55 @@ func startMCPLargeUpstream(t *testing.T, body []byte) (net.Listener, string) {
 
 // startMCPLargeProxy stands up a minimal http1 MITM listener backed by store.
 // recordCap caps RecordStep.MaxBodySize; 0 means "use config.MaxBodySize".
+// The body-spill threshold is left at its default.
 func startMCPLargeProxy(t *testing.T, ctx context.Context, store flow.Writer, recordCap int64) (proxyAddr string, done <-chan struct{}) {
+	t.Helper()
+	return startMCPLargeProxyWithSpill(t, ctx, store, recordCap, mcpSpillOpts{})
+}
+
+// mcpSpillOpts configures body spill for startMCPLargeProxyWithSpill. Zero
+// values keep the connector defaults.
+type mcpSpillOpts struct {
+	threshold int64
+	dir       string
+	// preSteps are prepended to the pipeline (before HostScope), e.g. an
+	// mcpSpillInspector.
+	preSteps []pipeline.Step
+}
+
+// mcpSpillInspector is a Pipeline Step that records whether the HTTP
+// envelopes it sees carry a file-backed BodyBuffer, and whether a spill file
+// existed on disk at that moment. It proves the disk-spill path was really
+// exercised instead of the in-memory one.
+type mcpSpillInspector struct {
+	dir           string
+	sawFileBacked atomic.Bool
+	bodyLen       atomic.Int64
+	filesOnDisk   atomic.Int32
+}
+
+func (s *mcpSpillInspector) Process(_ context.Context, env *envelope.Envelope) pipeline.Result {
+	m, ok := env.Message.(*envelope.HTTPMessage)
+	if !ok || m == nil || m.BodyBuffer == nil || !m.BodyBuffer.IsFileBacked() {
+		return pipeline.Result{}
+	}
+	s.sawFileBacked.Store(true)
+	s.bodyLen.Store(m.BodyBuffer.Len())
+	if entries, err := os.ReadDir(s.dir); err == nil {
+		var n int32
+		for _, e := range entries {
+			if !e.IsDir() && strings.HasPrefix(e.Name(), config.BodySpillPrefix) {
+				n++
+			}
+		}
+		s.filesOnDisk.Store(n)
+	}
+	return pipeline.Result{}
+}
+
+// startMCPLargeProxyWithSpill is startMCPLargeProxy with an explicit
+// body-spill configuration.
+func startMCPLargeProxyWithSpill(t *testing.T, ctx context.Context, store flow.Writer, recordCap int64, spill mcpSpillOpts) (proxyAddr string, done <-chan struct{}) {
 	t.Helper()
 
 	ca := &cert.CA{}
@@ -151,6 +207,8 @@ func startMCPLargeProxy(t *testing.T, ctx context.Context, store flow.Writer, re
 		ProxyConfig:        &config.ProxyConfig{},
 		Issuer:             issuer,
 		InsecureSkipVerify: true,
+		BodySpillThreshold: spill.threshold,
+		BodySpillDir:       spill.dir,
 	}
 
 	onStack := func(sctx context.Context, stack *connector.ConnectionStack, _, _ *envelope.TLSSnapshot, _ string) {
@@ -166,11 +224,13 @@ func startMCPLargeProxy(t *testing.T, ctx context.Context, store flow.Writer, re
 			recordOpts = append(recordOpts, pipeline.WithMaxBodySize(recordCap))
 		}
 
-		steps := []pipeline.Step{
+		steps := make([]pipeline.Step, 0, 3+len(spill.preSteps))
+		steps = append(steps, spill.preSteps...)
+		steps = append(steps,
 			pipeline.NewHostScopeStep(nil),
 			pipeline.NewHTTPScopeStep(nil),
 			pipeline.NewRecordStep(store, testutil.DiscardLogger(), recordOpts...),
-		}
+		)
 		p := pipeline.New(steps...)
 
 		session.RunSession(sctx, clientCh, func(_ context.Context, _ *envelope.Envelope) (layer.Channel, error) {
@@ -372,12 +432,12 @@ func TestLargeBody_MCPQueryReturnsFullBody(t *testing.T) {
 		{
 			name:         "full_body_below_cap",
 			recordCap:    0, // defaults to config.MaxBodySize (254 MiB)
-			wantLen:      mcpLargeBodySize25MiB,
+			wantLen:      mcpLargeBodySize,
 			wantTruncate: false,
 		},
 		{
 			name:         "truncated_above_cap",
-			recordCap:    mcpRecordCapTruncate, // 10 MiB cap on 25 MiB body
+			recordCap:    mcpRecordCapTruncate, // 1 MiB cap on 2 MiB body
 			wantLen:      mcpRecordCapTruncate,
 			wantTruncate: true,
 		},
@@ -388,7 +448,7 @@ func TestLargeBody_MCPQueryReturnsFullBody(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 			defer cancel()
 
-			respBody := makeBody(mcpLargeBodySize25MiB)
+			respBody := makeBody(mcpLargeBodySize)
 			wantBytes := respBody
 			if tc.wantTruncate {
 				wantBytes = respBody[:tc.wantLen]
@@ -406,14 +466,20 @@ func TestLargeBody_MCPQueryReturnsFullBody(t *testing.T) {
 			upstreamLn, target := startMCPLargeUpstream(t, respBody)
 			defer upstreamLn.Close()
 
-			proxyAddr, sessionDone := startMCPLargeProxy(t, ctx, store, tc.recordCap)
+			spillDir := t.TempDir()
+			inspector := &mcpSpillInspector{dir: spillDir}
+			proxyAddr, sessionDone := startMCPLargeProxyWithSpill(t, ctx, store, tc.recordCap, mcpSpillOpts{
+				threshold: mcpSpillThreshold,
+				dir:       spillDir,
+				preSteps:  []pipeline.Step{inspector},
+			})
 
 			// Drive one request through the proxy. The client-side body must
 			// match respBody byte-for-byte (wire-fidelity proof: MaxBodySize
 			// cap only affects RecordStep projection, not wire round-trip).
 			got := drainResponseThroughProxy(t, proxyAddr, target)
-			if len(got) != mcpLargeBodySize25MiB {
-				t.Fatalf("client body length = %d, want %d", len(got), mcpLargeBodySize25MiB)
+			if len(got) != mcpLargeBodySize {
+				t.Fatalf("client body length = %d, want %d", len(got), mcpLargeBodySize)
 			}
 			if gotHash := sha256.Sum256(got); gotHash != sha256.Sum256(respBody) {
 				t.Fatalf("client body hash mismatch (wire round-trip)")
@@ -423,6 +489,19 @@ func TestLargeBody_MCPQueryReturnsFullBody(t *testing.T) {
 			case <-sessionDone:
 			case <-time.After(60 * time.Second):
 				t.Fatal("timeout waiting for session to complete")
+			}
+
+			// The response body must have reached RecordStep file-backed;
+			// otherwise this exercises only the in-memory path.
+			if !inspector.sawFileBacked.Load() {
+				t.Errorf("no file-backed BodyBuffer observed; a %d-byte body must spill above the %d-byte threshold",
+					mcpLargeBodySize, mcpSpillThreshold)
+			}
+			if got := inspector.bodyLen.Load(); got != mcpLargeBodySize {
+				t.Errorf("file-backed BodyBuffer length = %d, want %d", got, mcpLargeBodySize)
+			}
+			if got := inspector.filesOnDisk.Load(); got < 1 {
+				t.Errorf("observed %d spill files mid-flight, want >= 1", got)
 			}
 
 			// Locate the Stream ID (single exchange per test).
@@ -445,7 +524,7 @@ func TestLargeBody_MCPQueryReturnsFullBody(t *testing.T) {
 
 			if fq.ResponseBodyEncoding != "base64" {
 				t.Errorf("ResponseBodyEncoding = %q, want %q "+
-					"(25 MiB byte(i%%251) is non-UTF-8, must base64-encode)",
+					"(byte(i%%251) body is non-UTF-8, must base64-encode)",
 					fq.ResponseBodyEncoding, "base64")
 			}
 			if fq.ResponseBodyTruncated != tc.wantTruncate {

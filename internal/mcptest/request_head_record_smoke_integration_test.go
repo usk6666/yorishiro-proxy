@@ -158,7 +158,12 @@ func TestE2E_RequestLineTooLong_RecordedWithResponse(t *testing.T) {
 	}
 	defer conn.Close()
 	payload := "GET http://" + upstream + "/" + strings.Repeat("x", 4<<20) + " HTTP/1.1\r\nHost: " + upstream + "\r\n\r\n"
-	go func() { _, _ = conn.Write([]byte(payload)) }()
+	// Half-close once the upload is done so the proxy's post-414 drain
+	// ends at EOF instead of waiting out its linger deadline.
+	go func() {
+		_, _ = conn.Write([]byte(payload))
+		_ = conn.(*net.TCPConn).CloseWrite()
+	}()
 	_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
 	got, _ := io.ReadAll(conn)
 	if !strings.HasPrefix(string(got), "HTTP/1.1 414 ") {

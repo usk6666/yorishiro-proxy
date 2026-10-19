@@ -37,6 +37,7 @@ import (
 	"net"
 	"regexp"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -63,6 +64,7 @@ import (
 	intHTTP2 "github.com/usk6666/yorishiro-proxy/internal/layer/http2"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/httpaggregator"
 	"github.com/usk6666/yorishiro-proxy/internal/pipeline"
+	"github.com/usk6666/yorishiro-proxy/internal/pluginv2"
 	"github.com/usk6666/yorishiro-proxy/internal/rules/common"
 	grpcrules "github.com/usk6666/yorishiro-proxy/internal/rules/grpc"
 	"github.com/usk6666/yorishiro-proxy/internal/session"
@@ -441,6 +443,55 @@ type pipelineOpts struct {
 	// StreamID (USK-896 LPM record callback wiring with StreamID
 	// unification). Empty (nil) = no extra Options.
 	extraGRPCOptionsFn func(p *pipeline.Pipeline, sessionStreamID string) []grpclayer.Option
+	// plugins, when non-nil, installs PluginStepPre after SafetyStep
+	// (production order: Safety -> PluginPre -> Intercept).
+	plugins *pluginv2.Engine
+	// probe, when non-nil, observes the session's dial / policy-drop /
+	// completion signals so tests can poll for them instead of sleeping
+	// (USK-1202).
+	probe *sessionProbe
+}
+
+// sessionProbe records per-session signals from the harness: how many
+// times the upstream dial ran, which BlockedBy attributions reached
+// SessionOptions.OnPipelineDrop, and how many sessions finished.
+type sessionProbe struct {
+	dials     atomic.Int32
+	completed atomic.Int32
+
+	mu        sync.Mutex
+	blockedBy []string
+}
+
+func (p *sessionProbe) addBlocked(v string) {
+	p.mu.Lock()
+	p.blockedBy = append(p.blockedBy, v)
+	p.mu.Unlock()
+}
+
+func (p *sessionProbe) blocked() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]string(nil), p.blockedBy...)
+}
+
+// waitBlockedAndComplete polls until at least one OnPipelineDrop with the
+// given attribution fired and at least one session finished.
+func (p *sessionProbe) waitBlockedAndComplete(t *testing.T, wantBlockedBy string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if p.completed.Load() > 0 {
+			for _, b := range p.blocked() {
+				if b == wantBlockedBy {
+					return
+				}
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("timeout: blockedBy=%v completed=%d, want %q and >=1 completed session",
+		p.blocked(), p.completed.Load(), wantBlockedBy)
 }
 
 func buildPipeline(store flow.Writer, opts pipelineOpts) *pipeline.Pipeline {
@@ -448,10 +499,15 @@ func buildPipeline(store flow.Writer, opts pipelineOpts) *pipeline.Pipeline {
 		pipeline.NewHostScopeStep(nil),
 		pipeline.NewHTTPScopeStep(nil),
 		pipeline.NewSafetyStep(nil, nil, opts.safety, slog.Default()),
+	}
+	if opts.plugins != nil {
+		steps = append(steps, pipeline.NewPluginStepPre(opts.plugins, nil, slog.Default()))
+	}
+	steps = append(steps,
 		pipeline.NewTransformStep(nil, nil, opts.transform, nil),
 		pipeline.NewInterceptStep(nil, nil, opts.intercept, nil, opts.queue, nil, slog.Default()),
 		pipeline.NewRecordStep(store, slog.Default(), opts.recordOpts...),
-	}
+	)
 	return pipeline.New(steps...)
 }
 
@@ -621,6 +677,9 @@ func handleProxyConn(ctx context.Context, t *testing.T, clientConn net.Conn, iss
 				}
 				dial := func(dctx context.Context, env *envelope.Envelope) (layer.Channel, error) {
 					t.Logf("proxy: dial called, env.Protocol=%v env.Context.TargetHost=%q msg=%T", env.Protocol, env.Context.TargetHost, env.Message)
+					if opts.probe != nil {
+						opts.probe.dials.Add(1)
+					}
 					upCh, oerr := upH2.OpenStream(dctx)
 					if oerr != nil {
 						t.Logf("proxy: OpenStream error: %v", oerr)
@@ -635,7 +694,15 @@ func handleProxyConn(ctx context.Context, t *testing.T, clientConn net.Conn, iss
 					return httpaggregator.Wrap(upCh, httpaggregator.RoleClient, nil, httpaggregator.OptionsFromLayer(upH2)), nil
 				}
 				err := session.RunSession(ctx, aggCh, dial, pipe, session.SessionOptions{
+					OnPipelineDrop: func(_ context.Context, _ *envelope.Envelope, blockedBy string) {
+						if opts.probe != nil {
+							opts.probe.addBlocked(blockedBy)
+						}
+					},
 					OnComplete: func(cctx context.Context, streamID string, err error) {
+						if opts.probe != nil {
+							defer opts.probe.completed.Add(1)
+						}
 						state := "complete"
 						if err != nil && !errors.Is(err, io.EOF) {
 							state = "error"
@@ -1554,14 +1621,45 @@ func TestGRPC_SafetyFilterBlocksPayload(t *testing.T) {
 		Targets: []common.Target{grpcrules.TargetPayload},
 	})
 
-	proxyAddr, _ := startGRPCMITMProxy(t, ctx, ca, issuer, pipelineOpts{safety: safety})
+	probe := &sessionProbe{}
+	proxyAddr, _ := startGRPCMITMProxy(t, ctx, ca, issuer, pipelineOpts{safety: safety, probe: probe})
 
 	cc := dialGRPCViaProxy(ctx, t, proxyAddr, upAddr)
 	defer cc.Close()
 
-	req := []byte("hello blocked-pattern world")
+	// USK-1202: only the blocked call gets a short deadline, so a proxy
+	// that never terminates the RPC surfaces as DeadlineExceeded (a
+	// failure) instead of a slow pass.
+	assertBlockedUnary(t, ctx, cc, echoFullMethod(echoMethodUnary), []byte("hello blocked-pattern world"),
+		codes.PermissionDenied, "safety_filter")
+
+	// Poll for the audit signal and the session end instead of sleeping;
+	// once the session is over, the upstream handler can no longer run.
+	probe.waitBlockedAndComplete(t, "safety_filter", 5*time.Second)
+	if got := upstreamHits.Load(); got != 0 {
+		t.Errorf("upstream handler hit %d times; want 0 (safety filter must block)", got)
+	}
+}
+
+// blockedCallTimeout bounds a call the proxy is expected to reject. The
+// assertion on elapsed time is well under it, so a reject that only arrives
+// because the client's own deadline fired cannot pass (USK-1202).
+const (
+	blockedCallTimeout = 2 * time.Second
+	blockedCallMaxWait = 1500 * time.Millisecond
+)
+
+// assertBlockedUnary invokes a unary RPC under its own blockedCallTimeout
+// and asserts it fails with wantCode, promptly, and with a grpc-message
+// naming the blocking policy.
+func assertBlockedUnary(t *testing.T, parent context.Context, cc *grpc.ClientConn, method string, req []byte, wantCode codes.Code, wantMsgSubstr string) {
+	t.Helper()
+	callCtx, callCancel := context.WithTimeout(parent, blockedCallTimeout)
+	defer callCancel()
 	var resp []byte
-	err := cc.Invoke(ctx, echoFullMethod(echoMethodUnary), &req, &resp)
+	start := time.Now()
+	err := cc.Invoke(callCtx, method, &req, &resp)
+	elapsed := time.Since(start)
 	if err == nil {
 		t.Fatalf("expected non-nil error from blocked RPC; got resp=%q", resp)
 	}
@@ -1569,15 +1667,14 @@ func TestGRPC_SafetyFilterBlocksPayload(t *testing.T) {
 	if !ok {
 		t.Fatalf("error is not a gRPC status: %T %v", err, err)
 	}
-	if st.Code() == codes.OK {
-		t.Errorf("status = OK; want non-OK due to safety drop")
+	if st.Code() != wantCode {
+		t.Errorf("status code = %v (%q) after %v; want %v", st.Code(), st.Message(), elapsed, wantCode)
 	}
-
-	// Wait briefly for the drop to propagate; upstream must NOT have been
-	// invoked.
-	time.Sleep(300 * time.Millisecond)
-	if got := upstreamHits.Load(); got != 0 {
-		t.Errorf("upstream handler hit %d times; want 0 (safety filter must block)", got)
+	if !strings.Contains(st.Message(), wantMsgSubstr) {
+		t.Errorf("status message = %q; want it to contain %q", st.Message(), wantMsgSubstr)
+	}
+	if elapsed > blockedCallMaxWait {
+		t.Errorf("blocked RPC took %v; want < %v (the proxy must terminate it, not the client deadline)", elapsed, blockedCallMaxWait)
 	}
 }
 

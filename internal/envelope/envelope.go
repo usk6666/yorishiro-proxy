@@ -283,6 +283,21 @@ type EnvelopeContext struct {
 	RequestMethod   string
 	RequestRawQuery string
 
+	// RequestAuthority carries the wire-observed request authority of the
+	// same HTTP transaction, verbatim (HTTP/2 :authority, or the HTTP/1.x
+	// authority the Layer derives from the request line / Host header,
+	// matching HTTPMessage.Authority). Populated alongside RequestPath /
+	// RequestMethod / RequestRawQuery by the same producers.
+	//
+	// USK-1199: capture_scope reads RequestMethod / RequestPath /
+	// RequestAuthority on Message-less wire_level overlays (h2-frame,
+	// grpcweb-base64) that reach RecordStep before the stream's semantic
+	// envelope, so the cached per-stream recording decision equals the
+	// one the semantic envelope would produce — including the hostname
+	// under HTTP/2 connection coalescing, where :authority differs from
+	// the connection's TargetHost / SNI.
+	RequestAuthority string
+
 	// Synthetic is true when this Envelope was synthesized by the proxy
 	// (not observed on the wire). The first and currently only producer is
 	// the USK-854 WS hold-window keepalive injection path in

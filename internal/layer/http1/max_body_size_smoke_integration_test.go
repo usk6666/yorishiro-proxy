@@ -15,8 +15,9 @@ import (
 )
 
 // USK-799 — smoke-tier verification that the HTTP/1.x channel honours an
-// operator-configured MaxBodySize override. The exhaustive 25 MiB / 254 MiB
-// scenarios live in large_body_integration_test.go (full tier); this smoke
+// operator-configured MaxBodySize override. It is also the only coverage of
+// MaxBodySize on the HTTP/1.x spill path (the exhaustive duplicate in
+// large_body_integration_test.go was removed by USK-1205); this smoke
 // test economises with a 1 MiB cap + 2 MiB body so the merge gate can
 // re-validate the wire-cap path quickly on every PR.
 func TestSmoke_HTTP1_MaxBodySize_StreamErrorOnExceed(t *testing.T) {

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"errors"
 	"io"
+	"net"
 	"os"
 	"strings"
 	"testing"
@@ -216,7 +217,13 @@ func TestChannelNext_RequestHeadTooLarge_RespondsAndReturnsError(t *testing.T) {
 				if requestN > 1 {
 					payload = usk1181KeepAliveReq1 + payload
 				}
-				go func() { _, _ = client.Write([]byte(payload)) }()
+				// Half-close once the upload is done: the post-reject drain
+				// then ends at EOF (a clean FIN) instead of waiting out the
+				// linger deadline, which stays as an upper bound only.
+				go func() {
+					_, _ = client.Write([]byte(payload))
+					_ = client.(*net.TCPConn).CloseWrite()
+				}()
 
 				res := make(chan nextResult, 1)
 				go func() { res <- nextOnRequestN(t, l, requestN) }()

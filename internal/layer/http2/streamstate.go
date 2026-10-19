@@ -74,6 +74,63 @@ type StreamMap struct {
 
 	// lastPeerStreamID tracks the highest stream ID initiated by the peer.
 	lastPeerStreamID uint32
+
+	// highestID is the highest stream id that has ever had an entry (or was
+	// marked seen via MarkSeen), indexed by id parity (odd = client-
+	// initiated, even = server-initiated). Streams leave the map once closed
+	// (USK-1144), so an absent id at or below its parity's high-water mark
+	// is closed rather than idle (RFC 9113 §5.1.1: ids are never reused).
+	highestID [2]uint32
+
+	// localReset / localResetRing remember the most recent stream ids this
+	// endpoint closed by sending RST_STREAM (NoteLocalReset), so a HEADERS
+	// the peer had already queued on such a stream is ignored as RFC 9113
+	// §5.1 requires rather than taken for stream-id reuse. Bounded by
+	// maxLocalResetIDs (oldest evicted first) so a flood of refused or
+	// cancelled streams cannot grow it.
+	localReset     map[uint32]struct{}
+	localResetRing []uint32
+	localResetNext int
+	// localResetCap is the set's capacity; zero means maxLocalResetIDs.
+	// See SetLocalResetCapacity.
+	localResetCap int
+}
+
+// maxLocalResetIDs is the minimum capacity of the locally-reset id set.
+// The Layer raises it to twice its local SETTINGS_MAX_CONCURRENT_STREAMS
+// (SetLocalResetCapacity), so every stream that can be open at once fits
+// with room to spare whatever limit is configured. A peer that sends
+// HEADERS on a reset stream only after more than the capacity's worth of
+// later resets gets the stream-id-reuse connection error; that can only
+// tear down the peer's own connection.
+const maxLocalResetIDs = 1024
+
+// maxLocalResetCapacity caps SetLocalResetCapacity so a huge configured
+// MAX_CONCURRENT_STREAMS cannot make the set unbounded in practice. The
+// ring grows lazily, so only ids actually reset cost memory.
+const maxLocalResetCapacity = 1 << 16
+
+// SetLocalResetCapacity sets the capacity of the locally-reset id set to
+// n, clamped to [maxLocalResetIDs, maxLocalResetCapacity]. It must be
+// called before the first NoteLocalReset.
+func (sm *StreamMap) SetLocalResetCapacity(n int) {
+	if n < maxLocalResetIDs {
+		n = maxLocalResetIDs
+	}
+	if n > maxLocalResetCapacity {
+		n = maxLocalResetCapacity
+	}
+	sm.mu.Lock()
+	sm.localResetCap = n
+	sm.mu.Unlock()
+}
+
+// localResetCapacityLocked returns the set's capacity. Caller holds sm.mu.
+func (sm *StreamMap) localResetCapacityLocked() int {
+	if sm.localResetCap == 0 {
+		return maxLocalResetIDs
+	}
+	return sm.localResetCap
 }
 
 // NewStreamMap creates a new StreamMap with the given initial window sizes.
@@ -108,6 +165,7 @@ func (sm *StreamMap) GetOrCreate(id uint32) *Stream {
 			RecvWindow: sm.initialRecvWindow,
 		}
 		sm.streams[id] = s
+		sm.noteIDLocked(id)
 	}
 	return s
 }
@@ -129,6 +187,7 @@ func (sm *StreamMap) Transition(id uint32, event StreamEvent) error {
 			RecvWindow: sm.initialRecvWindow,
 		}
 		sm.streams[id] = s
+		sm.noteIDLocked(id)
 	}
 
 	newState, err := nextState(s.State, event)
@@ -141,6 +200,118 @@ func (sm *StreamMap) Transition(id uint32, event StreamEvent) error {
 	}
 	s.State = newState
 	return nil
+}
+
+// TransitionExisting is Transition for an event that can only apply to a
+// stream that already exists (END_STREAM, RST_STREAM). Unlike Transition it
+// never creates an entry: a stream that is absent — never opened (e.g. one
+// refused with RST_STREAM before it was registered) or already removed —
+// is left alone and (false, nil) is returned. closed reports whether the
+// stream is in the closed state afterwards; the caller then retires it
+// (USK-1144).
+func (sm *StreamMap) TransitionExisting(id uint32, event StreamEvent) (closed bool, err error) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	s, ok := sm.streams[id]
+	if !ok {
+		return false, nil
+	}
+	newState, nerr := nextState(s.State, event)
+	if nerr != nil {
+		return s.State == StateClosed, &StreamError{
+			StreamID: id,
+			Code:     ErrCodeProtocol,
+			Reason:   fmt.Sprintf("invalid transition from %s on %s", s.State, event),
+		}
+	}
+	s.State = newState
+	return newState == StateClosed, nil
+}
+
+// Remove deletes the stream's entry. The id stays accounted for in its
+// parity's high-water mark, so IsClosed reports it as closed afterwards.
+func (sm *StreamMap) Remove(id uint32) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	delete(sm.streams, id)
+}
+
+// RemoveIfClosed deletes the stream's entry if it is in the closed state and
+// reports whether it did.
+func (sm *StreamMap) RemoveIfClosed(id uint32) bool {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	s, ok := sm.streams[id]
+	if !ok || s.State != StateClosed {
+		return false
+	}
+	delete(sm.streams, id)
+	return true
+}
+
+// MarkSeen records id as used without creating an entry. Used for a peer
+// stream refused before it was registered (RST_STREAM(REFUSED_STREAM)): the
+// stream is closed from the moment it is refused (RFC 9113 §5.1), so a later
+// frame on it is a frame on a closed stream, not a new stream.
+func (sm *StreamMap) MarkSeen(id uint32) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	sm.noteIDLocked(id)
+}
+
+// NoteLocalReset records that this endpoint closed id by sending
+// RST_STREAM. It must be called before the stream's entry is removed, so
+// that whenever IsClosed reports the id closed, WasLocallyReset already
+// reflects it.
+func (sm *StreamMap) NoteLocalReset(id uint32) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	if _, ok := sm.localReset[id]; ok {
+		return
+	}
+	if sm.localReset == nil {
+		sm.localReset = make(map[uint32]struct{})
+	}
+	if c := sm.localResetCapacityLocked(); len(sm.localResetRing) < c {
+		sm.localResetRing = append(sm.localResetRing, id)
+	} else {
+		delete(sm.localReset, sm.localResetRing[sm.localResetNext])
+		sm.localResetRing[sm.localResetNext] = id
+		sm.localResetNext = (sm.localResetNext + 1) % c
+	}
+	sm.localReset[id] = struct{}{}
+}
+
+// WasLocallyReset reports whether id is among the most recent streams this
+// endpoint closed by sending RST_STREAM (see NoteLocalReset).
+func (sm *StreamMap) WasLocallyReset(id uint32) bool {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	_, ok := sm.localReset[id]
+	return ok
+}
+
+// IsClosed reports whether id refers to a stream that was used on this
+// connection and has since been removed: it has no entry, and an id of the
+// same parity at least as high has been used. Stream 0 is never closed.
+func (sm *StreamMap) IsClosed(id uint32) bool {
+	if id == 0 {
+		return false
+	}
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	if _, ok := sm.streams[id]; ok {
+		return false
+	}
+	return id <= sm.highestID[id%2]
+}
+
+// noteIDLocked raises id's parity high-water mark. Caller holds sm.mu.
+func (sm *StreamMap) noteIDLocked(id uint32) {
+	if id > sm.highestID[id%2] {
+		sm.highestID[id%2] = id
+	}
 }
 
 // UpdateInitialSendWindow adjusts all open/half-closed streams' send windows
