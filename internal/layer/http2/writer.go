@@ -209,12 +209,33 @@ func (l *Layer) handleWriteRST(req *writeRST) {
 	// RFC 9113 §5.1 / §6.9: once RST_STREAM is sent no DATA or HEADERS may
 	// follow on the stream; drop anything parked for it before the RST goes
 	// out (USK-1166).
-	l.purgeStream(req.streamID, localResetError(req.code))
+	l.purgeStream(req.streamID, localResetError(req.code), false)
 	err := l.frameWriter.WriteRSTStream(req.streamID, req.code)
+	if err == nil {
+		// The stream is closed once RST_STREAM is sent (RFC 9113 §5.1). A
+		// stream refused before it was registered has no entry and is
+		// left alone (USK-1144).
+		//
+		// A peer stream is noted as locally reset first — before
+		// retireOnSend removes its entry — so the reader, once it sees the
+		// stream closed, ignores the HEADERS (e.g. trailers) the peer had
+		// already queued instead of taking it for stream-id reuse.
+		if !l.isLocallyInitiated(req.streamID) {
+			l.conn.Streams().NoteLocalReset(req.streamID)
+		}
+		l.retireOnSend(req.streamID, EventSendRST)
+	}
 	deliverDone(req.done, err)
 }
 
 func (l *Layer) handleWriteWindowUpdate(req *writeWindowUpdate) {
+	// RFC 9113 §5.1: no WINDOW_UPDATE on a closed stream. The reader queues
+	// stream-level WINDOW_UPDATE at DATA arrival, so the stream can close
+	// before it is written; the connection-level one still goes out.
+	if req.streamID != 0 && l.conn.Streams().Get(req.streamID) == nil {
+		deliverDone(req.done, nil)
+		return
+	}
 	err := l.frameWriter.WriteWindowUpdate(req.streamID, req.increment)
 	if err == nil && !req.skipLocalUpdate {
 		if req.streamID == 0 {
@@ -273,6 +294,11 @@ func (l *Layer) handleWriteHeaders(req *writeHeaders) {
 
 	encoded := l.encoder.Encode(req.fields)
 	err := l.writeHeaderBlock(req.streamID, encoded, req.endStream, maxFrameSize)
+	if err == nil && req.endStream {
+		// Before deliverDone, so the Send that returns has already seen
+		// its stream's state change (USK-1144).
+		l.retireOnSend(req.streamID, EventSendEndStream)
+	}
 	deliverDone(req.done, err)
 }
 
@@ -291,6 +317,9 @@ func (l *Layer) writeDataProgress(req *writeDataEvent) bool {
 		var err error
 		if req.endStream {
 			err = l.frameWriter.WriteData(req.streamID, true, nil)
+			if err == nil {
+				l.retireOnSend(req.streamID, EventSendEndStream)
+			}
 		}
 		deliverDone(req.done, err)
 		return true
@@ -326,6 +355,9 @@ func (l *Layer) writeDataProgress(req *writeDataEvent) bool {
 		if err := l.frameWriter.WriteData(req.streamID, endStream, chunk); err != nil {
 			deliverDone(req.done, err)
 			return true
+		}
+		if endStream {
+			l.retireOnSend(req.streamID, EventSendEndStream)
 		}
 	}
 	deliverDone(req.done, nil)

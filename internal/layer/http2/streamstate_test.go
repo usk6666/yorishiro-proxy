@@ -517,3 +517,179 @@ func TestStreamMap_FullLifecycle(t *testing.T) {
 		})
 	}
 }
+
+// TestStreamMap_Retirement covers the USK-1144 retirement primitives:
+// TransitionExisting never creates entries, RemoveIfClosed only removes
+// closed streams, and a removed (or MarkSeen) id reads as closed while an
+// unused id of the same parity reads as idle.
+func TestStreamMap_Retirement(t *testing.T) {
+	t.Run("TransitionExisting on absent stream is a no-op", func(t *testing.T) {
+		sm := NewStreamMap(65535, 65535)
+		closed, err := sm.TransitionExisting(1, EventSendRST)
+		if closed || err != nil {
+			t.Fatalf("TransitionExisting(absent) = (%v, %v), want (false, nil)", closed, err)
+		}
+		if sm.Get(1) != nil {
+			t.Fatal("TransitionExisting created an entry")
+		}
+		if sm.IsClosed(1) {
+			t.Error("absent never-used id 1 reported closed, want idle")
+		}
+	})
+
+	t.Run("TransitionExisting reports closed only on the closing event", func(t *testing.T) {
+		sm := NewStreamMap(65535, 65535)
+		if err := sm.Transition(1, EventRecvHeaders); err != nil {
+			t.Fatal(err)
+		}
+		if closed, err := sm.TransitionExisting(1, EventRecvEndStream); closed || err != nil {
+			t.Fatalf("recv END_STREAM = (%v, %v), want (false, nil)", closed, err)
+		}
+		if closed, err := sm.TransitionExisting(1, EventSendEndStream); !closed || err != nil {
+			t.Fatalf("send END_STREAM = (%v, %v), want (true, nil)", closed, err)
+		}
+		// A second closing event on the closed stream is invalid but still
+		// reports closed so callers retire idempotently.
+		if closed, err := sm.TransitionExisting(1, EventSendEndStream); !closed || err == nil {
+			t.Fatalf("second send END_STREAM = (%v, %v), want (true, error)", closed, err)
+		}
+	})
+
+	t.Run("RemoveIfClosed only removes closed streams", func(t *testing.T) {
+		sm := NewStreamMap(65535, 65535)
+		if err := sm.Transition(3, EventRecvHeaders); err != nil {
+			t.Fatal(err)
+		}
+		if sm.RemoveIfClosed(3) {
+			t.Fatal("RemoveIfClosed removed an open stream")
+		}
+		if sm.RemoveIfClosed(5) {
+			t.Fatal("RemoveIfClosed reported removing an absent stream")
+		}
+		if _, err := sm.TransitionExisting(3, EventRecvRST); err != nil {
+			t.Fatal(err)
+		}
+		if !sm.RemoveIfClosed(3) {
+			t.Fatal("RemoveIfClosed did not remove a closed stream")
+		}
+		if !sm.IsClosed(3) {
+			t.Error("removed stream 3 not reported closed")
+		}
+		if !sm.IsClosed(1) {
+			t.Error("unused odd id 1 below the high-water mark not reported closed")
+		}
+		if sm.IsClosed(5) {
+			t.Error("unused odd id 5 above the high-water mark reported closed")
+		}
+		if sm.IsClosed(2) {
+			t.Error("even id 2 reported closed; parities are tracked separately")
+		}
+		if sm.IsClosed(0) {
+			t.Error("stream 0 reported closed")
+		}
+	})
+
+	t.Run("Remove keeps the id closed and ActiveCount drops", func(t *testing.T) {
+		sm := NewStreamMap(65535, 65535)
+		_ = sm.Transition(1, EventSendHeaders)
+		if n := sm.ActiveCount(); n != 1 {
+			t.Fatalf("ActiveCount = %d, want 1", n)
+		}
+		sm.Remove(1)
+		if n := sm.ActiveCount(); n != 0 {
+			t.Errorf("ActiveCount after Remove = %d, want 0", n)
+		}
+		if !sm.IsClosed(1) {
+			t.Error("removed stream not reported closed")
+		}
+	})
+
+	t.Run("MarkSeen makes an id closed without an entry", func(t *testing.T) {
+		sm := NewStreamMap(65535, 65535)
+		sm.MarkSeen(7)
+		if sm.Get(7) != nil {
+			t.Fatal("MarkSeen created an entry")
+		}
+		if !sm.IsClosed(7) {
+			t.Error("MarkSeen id 7 not reported closed")
+		}
+		if sm.IsClosed(9) {
+			t.Error("id 9 above the MarkSeen high-water mark reported closed")
+		}
+	})
+}
+
+// TestStreamMap_LocalResetSetIsBounded pins the review S-1 memory bound: the
+// set of locally reset ids keeps only the most recent maxLocalResetIDs, so a
+// flood of refused or cancelled streams cannot grow it.
+func TestStreamMap_LocalResetSetIsBounded(t *testing.T) {
+	sm := NewStreamMap(65535, 65535)
+	const total = maxLocalResetIDs + 10
+	for i := uint32(0); i < total; i++ {
+		sm.NoteLocalReset(2*i + 1)
+		sm.NoteLocalReset(2*i + 1) // duplicates must not consume slots
+	}
+	if got := len(sm.localReset); got != maxLocalResetIDs {
+		t.Errorf("len(localReset) = %d, want %d", got, maxLocalResetIDs)
+	}
+	if sm.WasLocallyReset(1) {
+		t.Error("oldest id 1 still remembered after the bound was exceeded")
+	}
+	if last := uint32(2*(total-1) + 1); !sm.WasLocallyReset(last) {
+		t.Errorf("most recent id %d not remembered", last)
+	}
+	if sm.WasLocallyReset(2*total + 1) {
+		t.Error("id never reset reported as locally reset")
+	}
+}
+
+// TestStreamMap_SetLocalResetCapacity pins the review LOW from the fix-round
+// verification: the locally-reset set's capacity follows the configured
+// MAX_CONCURRENT_STREAMS (twice it), never drops below maxLocalResetIDs, and
+// is capped at maxLocalResetCapacity.
+func TestStreamMap_SetLocalResetCapacity(t *testing.T) {
+	tests := []struct {
+		name string
+		n    int
+		want int
+	}{
+		{name: "below floor keeps the floor", n: 10, want: maxLocalResetIDs},
+		{name: "above floor is honoured", n: 4000, want: 4000},
+		{name: "huge is capped", n: 1 << 30, want: maxLocalResetCapacity},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sm := NewStreamMap(65535, 65535)
+			sm.SetLocalResetCapacity(tt.n)
+			total := tt.want + 5
+			for i := 0; i < total; i++ {
+				sm.NoteLocalReset(uint32(2*i + 1))
+			}
+			if got := len(sm.localReset); got != tt.want {
+				t.Errorf("len(localReset) = %d, want %d", got, tt.want)
+			}
+			if sm.WasLocallyReset(1) {
+				t.Error("oldest id 1 still remembered after the capacity was exceeded")
+			}
+			if last := uint32(2*(total-1) + 1); !sm.WasLocallyReset(last) {
+				t.Errorf("most recent id %d not remembered", last)
+			}
+		})
+	}
+}
+
+// TestLayer_LocalResetCapacityFollowsMaxConcurrentStreams checks the Layer
+// wires the set's capacity to twice its local MAX_CONCURRENT_STREAMS, so a
+// raised limit keeps every concurrently open stream's reset remembered.
+func TestLayer_LocalResetCapacityFollowsMaxConcurrentStreams(t *testing.T) {
+	l, peer, cleanup := startServerLayer(t, WithMaxConcurrentStreams(3000))
+	defer cleanup()
+	peer.consumePeerSettings(t)
+	sm := l.conn.Streams()
+	sm.mu.Lock()
+	got := sm.localResetCapacityLocked()
+	sm.mu.Unlock()
+	if got != 6000 {
+		t.Errorf("local reset capacity = %d, want 6000 (2 x MAX_CONCURRENT_STREAMS)", got)
+	}
+}
