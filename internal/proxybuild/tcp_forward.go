@@ -451,7 +451,15 @@ func (m *Manager) handleTCPForwardConnWithOverride(
 	}
 
 	if protocol == "raw" {
-		m.handleTCPForwardConnRaw(connCtx, parentStack, connID, connLogger, clientConn, upstreamConn)
+		// USK-1083: the raw Layers stamp each leg's TLS snapshot — the
+		// client leg's when this forward port terminated TLS (tls=true),
+		// the upstream leg's when the dial did (upstream_tls) — so
+		// HostScopeStep derives the scheme from the client-facing leg.
+		var clientSnap *envelope.TLSSnapshot
+		if override != nil && override.tlsTerminated {
+			clientSnap = override.clientTLSSnapshot
+		}
+		m.handleTCPForwardConnRaw(connCtx, parentStack, connID, entry.target, connLogger, clientConn, upstreamConn, clientSnap, upstreamSnap)
 		return
 	}
 
@@ -468,17 +476,36 @@ func (m *Manager) handleTCPForwardConnWithOverride(
 // Factored out of handleTCPForwardConn so the L7 arm reads against an
 // equal-sibling structure — both call into the same session options
 // wiring and the same ctx-cancel watcher idiom.
+//
+// USK-1083: both Layers carry an EnvelopeContext (ConnID, TargetHost =
+// the forward target, per-leg TLS) so HostScopeStep gates the raw bytes,
+// RecordStep records conn_id / conn_info, and capture_scope sees the
+// target. clientTLS / upstreamTLS are nil for a plaintext leg.
 func (m *Manager) handleTCPForwardConnRaw(
 	connCtx context.Context,
 	parentStack *Stack,
-	connID string,
+	connID, target string,
 	connLogger *slog.Logger,
 	clientConn, upstreamConn net.Conn,
+	clientTLS, upstreamTLS *envelope.TLSSnapshot,
 ) {
 	stack := connector.NewConnectionStack(connID)
-	clientLayer := bytechunk.New(clientConn, connID+"/client", envelope.Send)
+	clientLayer := bytechunk.New(clientConn, connID+"/client", envelope.Send,
+		bytechunk.WithEnvelopeContext(envelope.EnvelopeContext{
+			ConnID:     connID,
+			TargetHost: target,
+			TLS:        clientTLS,
+		}),
+		bytechunk.WithStateReleaser(parentStack.PluginV2Engine),
+	)
 	stack.PushClient(clientLayer)
-	upstreamLayer := bytechunk.New(upstreamConn, connID+"/upstream", envelope.Receive)
+	upstreamLayer := bytechunk.New(upstreamConn, connID+"/upstream", envelope.Receive,
+		bytechunk.WithEnvelopeContext(envelope.EnvelopeContext{
+			ConnID:     connID,
+			TargetHost: target,
+			TLS:        upstreamTLS,
+		}),
+	)
 	stack.PushUpstream(upstreamLayer)
 
 	defer stack.Close()

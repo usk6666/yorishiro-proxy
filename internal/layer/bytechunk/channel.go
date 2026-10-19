@@ -21,8 +21,11 @@ type Channel struct {
 	conn      net.Conn
 	streamID  string
 	direction envelope.Direction
-	seq       int
-	buf       []byte
+	// ctxTmpl is the WithEnvelopeContext template, copied into every
+	// envelope with a fresh ReceivedAt. Read-only after New.
+	ctxTmpl envelope.EnvelopeContext
+	seq     int
+	buf     []byte
 
 	// Terminal-state tracking. Populated before termDone is closed so
 	// callers observing Closed see a stable Err value.
@@ -62,6 +65,8 @@ func (c *Channel) Next(ctx context.Context) (*envelope.Envelope, error) {
 		data := make([]byte, n)
 		copy(data, c.buf[:n])
 
+		envCtx := c.ctxTmpl
+		envCtx.ReceivedAt = time.Now()
 		env := &envelope.Envelope{
 			StreamID:  c.streamID,
 			FlowID:    uuid.New().String(),
@@ -70,9 +75,7 @@ func (c *Channel) Next(ctx context.Context) (*envelope.Envelope, error) {
 			Protocol:  envelope.ProtocolRaw,
 			Raw:       data,
 			Message:   &envelope.RawMessage{Bytes: data},
-			Context: envelope.EnvelopeContext{
-				ReceivedAt: time.Now(),
-			},
+			Context:   envCtx,
 		}
 		c.seq++
 		return env, nil
@@ -136,8 +139,21 @@ func (c *Channel) CloseWrite() error {
 	return nil
 }
 
-// Abort tears the underlying connection down (USK-1083 scaffold).
-func (c *Channel) Abort() error { return nil }
+// Abort closes the underlying connection so a Next parked on Read returns
+// and the peer reads EOF. Unlike Close (a no-op: the Layer owns the
+// conn), it is a deliberate teardown: the session calls it when a policy
+// verdict ends a raw connection (USK-1083 — a target_scope deny), because
+// a bytechunk Next does not honour ctx cancellation. The owning Layer's
+// later Close is still safe; the second conn.Close just reports an error
+// nobody reads.
+func (c *Channel) Abort() error {
+	err := c.conn.Close()
+	c.markTerminated(io.EOF)
+	if err != nil {
+		return fmt.Errorf("bytechunk: abort: %w", err)
+	}
+	return nil
+}
 
 // Close is a no-op for Channel. The underlying connection is owned by the
 // Layer, not the Channel.

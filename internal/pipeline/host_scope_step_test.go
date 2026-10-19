@@ -331,12 +331,9 @@ func TestHostScopeStep_SchemeDerivedFromTLS(t *testing.T) {
 		},
 		{
 			// Deny side, RawMessage: HostScopeStep is Message-agnostic, so
-			// the derivation must apply here too. This is a contract pin,
-			// not live coverage — production raw envelopes carry no
-			// TargetHost (internal/layer/bytechunk/channel.go stamps only
-			// ReceivedAt, and bytechunk.New takes no envelope-context
-			// parameter), so they short-circuit before this point. Tracked
-			// as USK-1083.
+			// the derivation must apply here too. Production raw envelopes
+			// reach it since USK-1083 (bytechunk.WithEnvelopeContext); the
+			// live coverage is internal/mcptest/raw_target_scope_*.
 			name: "http deny rule matches a plaintext connection",
 			policyDenies: []connector.TargetRule{
 				{Hostname: "169.254.169.254", Schemes: []string{"http"}},

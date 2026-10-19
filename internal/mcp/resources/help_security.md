@@ -193,11 +193,32 @@ SOCKS5 `CONNECT` is scope-checked before the tunnel carries a single byte, so th
 proxy does not yet know whether TLS follows. Scope such traffic by `hostname` /
 `ports`, or scope the tunneled protocol instead.
 
-SOCKS5 is the only *deliberate* case, but not the only one today: the live data
-path still has two scope call sites that hand the engine a blank scheme, which
-makes a `schemes`-bearing rule silently stop matching there as well. Those are
-being fixed under USK-1081 and USK-1086; until they land, a rule that must hold
-for live proxied traffic is safest written without `schemes`.
+The tunneled protocol *is* scoped with a scheme: once a SOCKS5 or `CONNECT`
+tunnel carries traffic, the connection-level host check runs on it again with
+the scheme of the client-facing leg — including raw TCP that matches no known
+protocol (`http` when it is cleartext, `https` when the proxy terminated TLS on
+it) and every `tcp_forwards` entry, `protocol: raw` included.
+
+SOCKS5 is the only *deliberate* case, but not the only one today: the
+per-request path check (rules with a `path_prefix`) still hands the engine a
+blank scheme for an HTTP/2 request that omits `:scheme`, which makes a
+`schemes`-bearing rule silently stop matching there. That is being fixed under
+USK-1086; until it lands, a path rule that must hold for live HTTP/2 traffic is
+safest written without `schemes`.
+
+### How a deny shows up on the wire
+
+| Traffic | What the client sees | Recorded |
+|---|---|---|
+| HTTP/1.x, HTTP/2 request | `403` with `X-Blocked-By: target_scope` | Stream with `blocked_by: target_scope`, `state: error` |
+| Raw TCP (bytechunk — CONNECT / SOCKS5 tunnels carrying an unknown protocol, `raw_passthrough_hosts`, `tcp_forwards` with `protocol: raw` or an `auto` fallback to raw) | The connection is closed (EOF) at the first byte the client sends; nothing reaches the denied host | One raw Stream with `blocked_by: target_scope`, `state: error` |
+| WebSocket, gRPC message | The message is dropped; the connection stays open | Stream with `blocked_by: target_scope` |
+
+A raw connection is closed rather than having single chunks dropped because a
+byte stream has no message boundary to drop at: removing some bytes and relaying
+the rest would hand the peer a corrupted stream. An upstream that speaks first
+(an SMTP / FTP / IMAP banner) can still deliver its greeting before the client's
+first byte is checked.
 
 ## Rate Limiting
 

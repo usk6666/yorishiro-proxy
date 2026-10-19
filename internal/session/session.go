@@ -654,6 +654,11 @@ func RunSession(ctx context.Context, client layer.Channel, dial DialFunc, p *pip
 	if errors.Is(result, errRPCTerminatedByProxy) {
 		result = nil
 	}
+	// USK-1083: likewise a raw connection the proxy closed on a target
+	// scope deny; the audit Stream already records the block.
+	if errors.Is(result, errRawBlockedByTargetScope) {
+		result = nil
+	}
 	upstreamRefused = result != nil && uh.refused()
 
 	// On upgrade, expose the still-live upstream Channel via the session's
@@ -2762,6 +2767,56 @@ func upgradeExitOrErr(notice *UpgradeNotice, err error) error {
 // and return, so the session reports a clean end (USK-1202).
 var errRPCTerminatedByProxy = errors.New("session: RPC terminated by proxy response")
 
+// errRawBlockedByTargetScope is returned by clientToUpstream after a raw
+// (bytechunk) Send envelope was Dropped by a target scope verdict
+// (USK-1083, user decision U1). A raw byte stream has no protocol-level
+// way to refuse one chunk, and silently dropping chunks while relaying
+// the rest would corrupt the stream, so the connection is torn down: the
+// audit Stream has already been written by OnPipelineDrop, both Channels
+// are aborted, and the non-nil return drives the errgroup cancel. Like
+// errRPCTerminatedByProxy, RunSession maps it back to nil — the proxy
+// ended the session on purpose; it is not a failure of either peer.
+var errRawBlockedByTargetScope = errors.New("session: raw connection closed by target scope deny")
+
+// channelAborter is satisfied by Channels that can tear their underlying
+// connection down (bytechunk.Channel.Abort). Needed because a bytechunk
+// Channel's Close is a no-op (its Layer owns the conn) and its Next does
+// not honour ctx cancellation.
+type channelAborter interface {
+	Abort() error
+}
+
+// rawTargetScopeTeardown ends a raw session whose Send envelope a target
+// scope verdict Dropped, returning errRawBlockedByTargetScope; for every
+// other envelope / action it returns nil and changes nothing. WS / gRPC /
+// HTTP keep their existing deny behaviour.
+//
+// uh.tornDown is set before the aborts so the upstream read error that
+// follows ends upstreamToClient as the proxy's own teardown, not as an
+// upstream failure.
+func rawTargetScopeTeardown(client layer.Channel, uh *upstreamHolder, env *envelope.Envelope, action pipeline.Action, blockedBy string) error {
+	if action != pipeline.Drop || blockedBy != pipeline.BlockedByTargetScope ||
+		env == nil || env.Protocol != envelope.ProtocolRaw {
+		return nil
+	}
+	slog.Debug("session: raw connection closed by target scope deny",
+		"stream_id", env.StreamID, "target", env.Context.TargetHost)
+	uh.tornDown.Store(true)
+	abortChannel(client)
+	if uh.ch != nil {
+		abortChannel(uh.ch)
+	}
+	return errRawBlockedByTargetScope
+}
+
+// abortChannel aborts ch when it supports it. Errors are ignored: the peer
+// may already have closed the socket.
+func abortChannel(ch layer.Channel) {
+	if a, ok := ch.(channelAborter); ok {
+		_ = a.Abort()
+	}
+}
+
 // endsRPC reports whether a Respond envelope terminates a native-gRPC RPC.
 // HTTP Respond keeps the session open (HTTP/1.x keep-alive carries the next
 // request on the same Channel). gRPC-Web is excluded until it has its own
@@ -2858,6 +2913,9 @@ func clientToUpstream(
 		if blockedBy != "" && onDrop != nil &&
 			(action == pipeline.Drop || action == pipeline.Respond) {
 			onDrop(ctx, env, blockedBy)
+		}
+		if terr := rawTargetScopeTeardown(client, uh, env, action, blockedBy); terr != nil {
+			return terr
 		}
 		forwarded, perr := dispatchClientAction(ctx, client, uh, dial, env, resp, action)
 		if perr != nil {

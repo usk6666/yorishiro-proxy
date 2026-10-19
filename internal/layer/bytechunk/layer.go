@@ -3,6 +3,7 @@ package bytechunk
 import (
 	"io"
 	"net"
+	"sync"
 
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/layer"
@@ -18,15 +19,30 @@ type options struct {
 }
 
 // WithEnvelopeContext sets the EnvelopeContext template stamped on every
-// envelope the Layer's Channel produces (USK-1083).
+// envelope the Layer's Channel produces: ConnID, TargetHost and the TLS
+// snapshot of the wire this Layer reads (RFC-001 §3.1 — TLS is per-Layer).
+// The template is copied per envelope and ReceivedAt is overwritten with
+// the read time; the caller's value is never mutated.
+//
+// Without it the envelopes carry only ReceivedAt, which leaves
+// HostScopeStep with no TargetHost to check (USK-1083). Production
+// construction sites always pass it; the MCP resend_raw / fuzz_raw
+// Receive Layers do not (their scope is checked before the dial).
 func WithEnvelopeContext(ctx envelope.EnvelopeContext) Option {
-	return func(o *options) {}
+	return func(o *options) { o.ctxTmpl = ctx }
 }
 
-// WithStateReleaser injects a pluginv2.StateReleaser fired once on
-// Layer.Close (USK-1083).
+// WithStateReleaser injects a pluginv2.StateReleaser fired once from
+// Layer.Close with ReleaseTransaction(ConnID, StreamID) and
+// ReleaseStream(ConnID, StreamID) — raw keys both plugin scopes on the
+// StreamID (pluginv2 transactionKey). No-op when ConnID is empty.
+//
+// The release runs on Layer.Close, not on the Channel's terminal state:
+// after the client side reads EOF the session keeps running Receive
+// envelopes, rewritten to the client StreamID, through PluginStep, and a
+// release at EOF would let those recreate the scope and leak it.
 func WithStateReleaser(r pluginv2.StateReleaser) Option {
-	return func(o *options) {}
+	return func(o *options) { o.stateReleaser = r }
 }
 
 // Layer wraps a net.Conn in a single-channel Layer that yields RawMessage
@@ -35,6 +51,9 @@ type Layer struct {
 	conn    net.Conn
 	ch      chan layer.Channel
 	channel *Channel
+
+	stateReleaser pluginv2.StateReleaser
+	releaseOnce   sync.Once
 }
 
 // New creates a ByteChunk Layer wrapping conn. The direction parameter
@@ -45,14 +64,22 @@ type Layer struct {
 // Session uses two bytechunk Layers (one per direction) connected to the
 // 2-goroutine model.
 func New(conn net.Conn, streamID string, direction envelope.Direction, opts ...Option) *Layer {
+	var o options
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&o)
+		}
+	}
 	l := &Layer{
-		conn: conn,
-		ch:   make(chan layer.Channel, 1),
+		conn:          conn,
+		ch:            make(chan layer.Channel, 1),
+		stateReleaser: o.stateReleaser,
 	}
 	l.channel = &Channel{
 		conn:      conn,
 		streamID:  streamID,
 		direction: direction,
+		ctxTmpl:   o.ctxTmpl,
 		buf:       make([]byte, 32*1024), // 32 KB read buffer
 		termDone:  make(chan struct{}),
 	}
@@ -68,10 +95,28 @@ func (l *Layer) Channels() <-chan layer.Channel { return l.ch }
 // It also fires the Channel's Closed signal with io.EOF if the Channel has
 // not already observed a terminal state, covering the case where Layer.Close
 // races an idle Next-less Channel.
+//
+// Close also fires the WithStateReleaser hook, exactly once however often
+// Close is called.
 func (l *Layer) Close() error {
 	err := l.conn.Close()
 	if l.channel != nil {
 		l.channel.markTerminated(io.EOF)
 	}
+	l.releaseOnce.Do(l.releaseState)
 	return err
+}
+
+// releaseState drops the plugin transaction / stream scopes keyed on this
+// Layer's (ConnID, StreamID).
+func (l *Layer) releaseState() {
+	if l.stateReleaser == nil || l.channel == nil {
+		return
+	}
+	connID, streamID := l.channel.ctxTmpl.ConnID, l.channel.streamID
+	if connID == "" || streamID == "" {
+		return
+	}
+	l.stateReleaser.ReleaseTransaction(connID, streamID)
+	l.stateReleaser.ReleaseStream(connID, streamID)
 }
