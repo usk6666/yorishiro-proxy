@@ -18,7 +18,8 @@ import (
 //
 //   - Actions mutate envelope.SSEMessage fields directly. The session-
 //     side `sseMessageMutated` field-diff (relaySSEEvent) is the
-//     authoritative re-encode signal — engines do NOT clear env.Raw.
+//     authoritative re-encode signal — engines do NOT clear env.Raw;
+//     TransformStep clears env.RawAuthoritative on Modified (USK-1239).
 //   - Anomalies are record-only metadata; no action mutates them.
 //   - PrependData / AppendData emit raw concatenation. The engine does
 //     NOT auto-insert newline boundaries. Operators control "single line"

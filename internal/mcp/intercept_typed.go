@@ -485,7 +485,9 @@ func applyGRPCDataModify(env *envelope.Envelope, _ *envelope.GRPCDataMessage, pa
 // the authoritative re-encode signal. Clearing Raw here would force a
 // re-encode for every modify_and_forward release, including no-op
 // "release-with-empty-payload" cases that should round-trip the
-// upstream's bytes verbatim.
+// upstream's bytes verbatim. Setting any field clears
+// Envelope.RawAuthoritative instead (RFC-001 §9.3 D4 last-writer-wins,
+// USK-1239); a release with no fields keeps a plugin's raw-wins marker.
 //
 // CRLF guards: event / id reject CR or LF; data accepts `\n` (multi-line
 // is legal RFC 8895 wire form) but rejects `\r`. RetryMs is interpreted
@@ -520,7 +522,14 @@ func applySSEModify(env *envelope.Envelope, _ *envelope.SSEMessage, params *sseM
 	if params.RetryMs != nil {
 		sm.Retry = time.Duration(*params.RetryMs) * time.Millisecond
 	}
-	// Deliberately do NOT clear clone.Raw — see func doc.
+	// Deliberately do NOT clear clone.Raw — see func doc. Because Raw is
+	// kept, the raw-wins marker of an earlier plugin msg["raw"] write must
+	// be cleared explicitly when the operator set a field, or the session
+	// writer would send the plugin bytes and drop the edit (RFC §9.3 D4
+	// last-writer-wins, USK-1239).
+	if params.Event != nil || params.ID != nil || params.Data != nil || params.RetryMs != nil {
+		clone.RawAuthoritative = false
+	}
 	return clone, nil
 }
 

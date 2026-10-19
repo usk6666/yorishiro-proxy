@@ -145,8 +145,9 @@ type Envelope struct {
 	// Message path.
 	//
 	// Per-Layer support (USK-1079): HTTP/1.x (both directions) and raw
-	// TCP (bytechunk) honour it; gRPC Data and gRPC-Web already write a
-	// non-empty Raw verbatim. HTTP/2, WebSocket, and SSE do not yet.
+	// TCP (bytechunk) honour it, as does the session-side SSE event
+	// writer (USK-1239); gRPC Data and gRPC-Web already write a
+	// non-empty Raw verbatim. HTTP/2 and WebSocket do not yet.
 	//
 	// Clone copies the flag. It is never set on Layer-produced envelopes.
 	RawAuthoritative bool
