@@ -3,7 +3,6 @@ package mcp
 import (
 	"context"
 	"net/http"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -11,7 +10,7 @@ import (
 
 	"github.com/usk6666/yorishiro-proxy/internal/cert"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
-	"github.com/usk6666/yorishiro-proxy/internal/testutil"
+	"github.com/usk6666/yorishiro-proxy/internal/flow/flowtest"
 )
 
 // newTestCA creates a CA with a generated certificate for testing.
@@ -24,17 +23,12 @@ func newTestCA(t *testing.T) *cert.CA {
 	return ca
 }
 
-// newTestStore creates a SQLite flow store for testing.
+// newTestStore creates a SQLite flow store for testing. It is a private copy
+// of a migrated template database (see internal/flow/flowtest), so no schema
+// migration runs per test.
 func newTestStore(t *testing.T) flow.Store {
 	t.Helper()
-	dbPath := filepath.Join(t.TempDir(), "test.db")
-	logger := testutil.DiscardLogger()
-	store, err := flow.NewSQLiteStore(context.Background(), dbPath, logger)
-	if err != nil {
-		t.Fatalf("NewSQLiteStore: %v", err)
-	}
-	t.Cleanup(func() { store.Close() })
-	return store
+	return flowtest.NewStore(t)
 }
 
 // setupTestSession creates a connected MCP client session for testing tools.
