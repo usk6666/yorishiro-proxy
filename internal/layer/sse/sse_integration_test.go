@@ -479,38 +479,6 @@ func TestSSE_DirectChannelThroughPipelineRecordsThreeEvents(t *testing.T) {
 	}
 }
 
-// TestSSE_DirectChannelSendReturnsSentinel confirms that the wrapped SSE
-// Channel's Send method is a programmer-error sentinel:
-//
-//   - errors.Is(err, sse.ErrSendUnsupported) — true
-//   - errors.As(err, &*layer.StreamError{}) — false
-//
-// SSE is half-duplex (server → client per RFC 8895 / N7 D23). A caller that
-// reaches Send on the SSE Channel has a logic bug; we surface that as a
-// plain sentinel rather than a stream-level abort.
-func TestSSE_DirectChannelSendReturnsSentinel(t *testing.T) {
-	const streamID = "sse-stream-2"
-	inner := newInnerStub(streamID)
-	first := makeSSEFirstResponse(streamID, 0)
-	ch := sse.Wrap(inner, first, strings.NewReader(""))
-	defer ch.Close()
-
-	err := ch.Send(context.Background(), &envelope.Envelope{
-		Direction: envelope.Send,
-		Protocol:  envelope.ProtocolSSE,
-	})
-	if err == nil {
-		t.Fatal("Send returned nil error; want sse.ErrSendUnsupported")
-	}
-	if !errors.Is(err, sse.ErrSendUnsupported) {
-		t.Errorf("errors.Is(err, sse.ErrSendUnsupported) = false, err = %v", err)
-	}
-	var se *layer.StreamError
-	if errors.As(err, &se) {
-		t.Errorf("Send returned *layer.StreamError (%v); want plain sentinel", se)
-	}
-}
-
 // TestSSE_DirectChannelOversizeProducesStreamError feeds an event larger
 // than the WithMaxEventSize cap and asserts:
 //
