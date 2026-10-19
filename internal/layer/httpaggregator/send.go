@@ -71,6 +71,7 @@ func (a *aggregatorChannel) Send(ctx context.Context, env *envelope.Envelope) er
 		a.pairedRequestPath = msg.Path
 		a.pairedRequestMethod = msg.Method
 		a.pairedRequestRawQuery = msg.RawQuery
+		a.pairedRequestAuthority = msg.Authority
 		a.mu.Unlock()
 	}
 

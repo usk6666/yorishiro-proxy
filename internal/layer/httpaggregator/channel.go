@@ -91,6 +91,10 @@ type aggregatorChannel struct {
 	pairedRequestPath     string
 	pairedRequestMethod   string
 	pairedRequestRawQuery string
+	// USK-1199: pairedRequestAuthority is the request's wire :authority,
+	// carried the same way as the fields above (EnvelopeContext.
+	// RequestAuthority) for capture_scope hostname matching on overlays.
+	pairedRequestAuthority string
 
 	// h2FrameCB is the optional synchronous per-H2DataEvent wire-record
 	// callback installed via WithH2FrameRecordCallback (USK-897). When
@@ -386,13 +390,16 @@ func (a *aggregatorChannel) absorbHeaders(env *envelope.Envelope, evt *http2.H2H
 		a.pairedRequestPath = msg.Path
 		a.pairedRequestMethod = msg.Method
 		a.pairedRequestRawQuery = msg.RawQuery
+		a.pairedRequestAuthority = msg.Authority
 		outCtx.RequestPath = msg.Path
 		outCtx.RequestMethod = msg.Method
 		outCtx.RequestRawQuery = msg.RawQuery
+		outCtx.RequestAuthority = msg.Authority
 	} else if env.Direction == envelope.Receive {
 		outCtx.RequestPath = a.pairedRequestPath
 		outCtx.RequestMethod = a.pairedRequestMethod
 		outCtx.RequestRawQuery = a.pairedRequestRawQuery
+		outCtx.RequestAuthority = a.pairedRequestAuthority
 	}
 
 	outEnv := &envelope.Envelope{
@@ -590,7 +597,7 @@ func (a *aggregatorChannel) absorbData(env *envelope.Envelope, evt *http2.H2Data
 	// callback may retain the slice across return without interfering
 	// with the aggregator's own raw-bytes accumulation on inflight.Raw.
 	if a.h2FrameCB != nil {
-		a.h2FrameCB(buildH2FrameWireEnvelope(env, evt))
+		a.h2FrameCB(buildH2FrameWireEnvelope(env, evt, &a.inflight.Context))
 	}
 
 	maxBody := a.effectiveMaxBody()
@@ -827,15 +834,30 @@ func cloneBytes(b []byte) []byte {
 //     view by design — the matching HTTPMessage envelope
 //     queued AFTER full aggregation already provides one)
 //   - Context   = the inner envelope's Context (carries ConnID /
-//     TargetHost / TLS / ClientAddr; the callback expects to
-//     stamp WireLevel before forwarding)
+//     TargetHost / TLS / ClientAddr / ReceivedAt; the callback
+//     expects to stamp WireLevel before forwarding), plus the
+//     stream's request-head fields (RequestMethod / RequestPath /
+//     RequestRawQuery / RequestAuthority) copied from headCtx —
+//     the in-flight message's Context, stamped from the HEADERS
+//     frame in absorbHeaders. USK-1199: the first overlay reaches
+//     RecordStep before the semantic HTTPMessage and decides the
+//     stream's capture_scope outcome, so it must expose the same
+//     wire-observed request head the semantic envelope does. Only
+//     Context is touched; Raw / Message / WireLevel stay as is.
 //
 // The defensive copy keeps the callback contract simple — consumers may
 // retain the Raw slice without coordinating with the aggregator's
 // inflight.Raw accumulation (which appends to the same backing array as
 // env.Raw). The cost is one allocation per DATA frame; for gRPC over
 // h2 this matches USK-896's grpc LPM wire-record allocation profile.
-func buildH2FrameWireEnvelope(env *envelope.Envelope, evt *http2.H2DataEvent) *envelope.Envelope {
+func buildH2FrameWireEnvelope(env *envelope.Envelope, evt *http2.H2DataEvent, headCtx *envelope.EnvelopeContext) *envelope.Envelope {
+	ctx := env.Context
+	if headCtx != nil {
+		ctx.RequestMethod = headCtx.RequestMethod
+		ctx.RequestPath = headCtx.RequestPath
+		ctx.RequestRawQuery = headCtx.RequestRawQuery
+		ctx.RequestAuthority = headCtx.RequestAuthority
+	}
 	return &envelope.Envelope{
 		StreamID:  env.StreamID,
 		Sequence:  env.Sequence,
@@ -847,6 +869,6 @@ func buildH2FrameWireEnvelope(env *envelope.Envelope, evt *http2.H2DataEvent) *e
 		// AFTER full aggregation provides one. The session helper
 		// stamping flow.WireLevelH2Frame on Context.WireLevel is the
 		// authoritative discriminator the record path keys on.
-		Context: env.Context,
+		Context: ctx,
 	}
 }
