@@ -12,8 +12,12 @@ import (
 
 // SafetyStep is a Message-typed Pipeline Step that checks Send-direction
 // messages against input safety rules. If a violation is detected, the
-// envelope is dropped. Receive-direction messages always pass through
-// (Input Filter is Send-only).
+// envelope is not forwarded and, where the protocol has a terminator the
+// client understands, the client is answered with one: HTTP gets a synthetic
+// 403, native gRPC gets grpc-status 7 PERMISSION_DENIED (USK-1202).
+// WebSocket and gRPC-Web are dropped without a terminator for now.
+// Receive-direction messages always pass through (Input Filter is
+// Send-only).
 //
 // HTTP / WebSocket / gRPC messages are dispatched to their respective
 // per-protocol SafetyEngines. SSE has no per-protocol engine (N7 scope-out:
@@ -23,8 +27,10 @@ import (
 //
 // Wire fidelity invariant (RFC-001 Principle 1): SafetyStep.Process MUST
 // NOT mutate env, env.Message, env.Raw, or any field reachable from them.
-// Result is restricted to {} (pass) or {Action: Drop} (block). PII / body
-// masking belongs to internal/safety on the MCP response path, never here.
+// Result is {} (pass), {Action: Drop} (block), or {Action: Respond} (block
+// with a terminator carried in a NEW Response envelope; the blocked envelope
+// itself is left untouched). PII / body masking belongs to internal/safety on
+// the MCP response path, never here.
 //
 // SafetyStep is the live-wire Input Filter half of SafetyFilter — it
 // protects the upstream server from destructive AI-agent payloads. The
@@ -167,12 +173,12 @@ func (s *SafetyStep) processGRPC(ctx context.Context, env *envelope.Envelope, ms
 				slog.String("match", violation.Match),
 			)
 		}
-		// USK-829: mid-stream gRPC Drop. The protocol-correct terminator
-		// is a gRPC trailers frame (Status: 7 / PERMISSION_DENIED, or
-		// similar), which HTTPMessage cannot express through the gRPC
-		// Send dispatch. Deferred to follow-up Issue D3; keep Drop
-		// until that lands.
-		return Result{Action: Drop, BlockedBy: BlockedBySafetyFilter}
+		// USK-1202: native gRPC answers the client with grpc-status 7
+		// PERMISSION_DENIED (Trailers-Only, or trailers once response
+		// HEADERS were relayed) and the session then ends the RPC, so the
+		// client does not hang until its own deadline. gRPC-Web keeps
+		// Drop (USK-1220).
+		return grpcPolicyDropResult(env, BlockedBySafetyFilter, []string{violation.RuleID})
 	}
 
 	return Result{}

@@ -522,26 +522,79 @@ func TestInterceptStep_GRPCStart_Release(t *testing.T) {
 	}
 }
 
-func TestInterceptStep_GRPCData_Drop(t *testing.T) {
-	grpcEngine := newTestGRPCInterceptEngine(newCatchAllGRPCRule())
-	queue := common.NewHoldQueue()
-	step := NewInterceptStep(nil, nil, grpcEngine, nil, queue, nil, nil)
-
-	env := &envelope.Envelope{
-		Direction: envelope.Send,
-		Protocol:  envelope.ProtocolGRPC,
-		Message: &envelope.GRPCDataMessage{
-			Service: "Greeter",
-			Method:  "SayHello",
-			Payload: []byte("body"),
+// TestInterceptStep_GRPC_Drop_Terminator pins USK-1202 (U1): an intercept
+// drop of a held Send-direction native-gRPC Start/Data envelope yields the
+// same Respond + Receive GRPCEnd(PERMISSION_DENIED) terminator as a
+// SafetyFilter block, attributed to intercept_drop. Receive-direction drops
+// (skip one streamed message) and gRPC-Web (USK-1220) keep plain Drop.
+func TestInterceptStep_GRPC_Drop_Terminator(t *testing.T) {
+	tests := []struct {
+		name        string
+		dir         envelope.Direction
+		proto       envelope.Protocol
+		msg         envelope.Message
+		wantRespond bool
+	}{
+		{
+			name:        "native data send",
+			dir:         envelope.Send,
+			proto:       envelope.ProtocolGRPC,
+			msg:         &envelope.GRPCDataMessage{Service: "Greeter", Method: "SayHello", Payload: []byte("body")},
+			wantRespond: true,
+		},
+		{
+			name:        "native start send",
+			dir:         envelope.Send,
+			proto:       envelope.ProtocolGRPC,
+			msg:         &envelope.GRPCStartMessage{Service: "Greeter", Method: "SayHello"},
+			wantRespond: true,
+		},
+		{
+			name:  "native data receive",
+			dir:   envelope.Receive,
+			proto: envelope.ProtocolGRPC,
+			msg:   &envelope.GRPCDataMessage{Service: "Greeter", Method: "SayHello", Payload: []byte("body")},
+		},
+		{
+			name:  "grpc-web data send",
+			dir:   envelope.Send,
+			proto: envelope.ProtocolGRPCWeb,
+			msg:   &envelope.GRPCDataMessage{Service: "Greeter", Method: "SayHello", Payload: []byte("body")},
 		},
 	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			grpcEngine := newTestGRPCInterceptEngine(newCatchAllGRPCRule())
+			queue := common.NewHoldQueue()
+			step := NewInterceptStep(nil, nil, grpcEngine, nil, queue, nil, nil)
 
-	releaseFirst(t, queue, &common.HoldAction{Type: common.ActionDrop})
+			env := &envelope.Envelope{
+				StreamID:  "stream-1",
+				FlowID:    "flow-1",
+				Sequence:  2,
+				Direction: tt.dir,
+				Protocol:  tt.proto,
+				Message:   tt.msg,
+			}
 
-	result := step.Process(context.Background(), env)
-	if result.Action != Drop {
-		t.Errorf("GRPCData_Drop: got action %v, want Drop", result.Action)
+			releaseFirst(t, queue, &common.HoldAction{Type: common.ActionDrop})
+
+			result := step.Process(context.Background(), env)
+			if !tt.wantRespond {
+				if result.Action != Drop {
+					t.Errorf("got action %v, want Drop", result.Action)
+				}
+				if result.BlockedBy != BlockedByInterceptDrop {
+					t.Errorf("BlockedBy = %q, want %q", result.BlockedBy, BlockedByInterceptDrop)
+				}
+				return
+			}
+			assertGRPCPolicyDropResult(t, result, env, BlockedByInterceptDrop)
+			end := result.Response.Message.(*envelope.GRPCEndMessage)
+			if v, _ := kvValue(end.Trailers, "x-yorishiro-matched-rules"); v != "grpc-catch-all" {
+				t.Errorf("x-yorishiro-matched-rules = %q, want grpc-catch-all", v)
+			}
+		})
 	}
 }
 
@@ -904,8 +957,19 @@ func TestInterceptStep_ModifyAndForward_SafetyRecheck_GRPCData(t *testing.T) {
 	})
 
 	result := step.Process(context.Background(), env)
-	if result.Action != Drop {
-		t.Errorf("GRPC_SafetyRecheck: got action %v, want Drop", result.Action)
+	// USK-1202: the safety re-check forwards SafetyStep's native-gRPC
+	// terminator (Respond + GRPCEnd PERMISSION_DENIED) verbatim.
+	if result.Action != Respond {
+		t.Errorf("GRPC_SafetyRecheck: got action %v, want Respond", result.Action)
+	}
+	if result.BlockedBy != BlockedBySafetyFilter {
+		t.Errorf("GRPC_SafetyRecheck: BlockedBy = %q, want %q", result.BlockedBy, BlockedBySafetyFilter)
+	}
+	if result.Response == nil {
+		t.Fatal("GRPC_SafetyRecheck: Response is nil")
+	}
+	if end, ok := result.Response.Message.(*envelope.GRPCEndMessage); !ok || end.Status != 7 {
+		t.Errorf("GRPC_SafetyRecheck: Response.Message = %#v, want GRPCEnd status 7", result.Response.Message)
 	}
 }
 
