@@ -34,8 +34,14 @@ function stripCommentsAndStyle(svg: string): string {
     .replace(/<style>[\s\S]*?<\/style>/g, "");
 }
 
+function stripComments(svg: string): string {
+  return svg.replace(/<!--[\s\S]*?-->/g, "");
+}
+
+// Comments are stripped first: the derivation comment in the dark copy
+// mentions both "<style>" and "prefers-color-scheme".
 function styleOf(svg: string): string {
-  const m = /<style>([\s\S]*?)<\/style>/.exec(svg);
+  const m = /<style>([\s\S]*?)<\/style>/.exec(stripComments(svg));
   return m ? m[1] : "";
 }
 
@@ -65,8 +71,8 @@ describe("dark header logo", () => {
     const dark = webAssets[DARK_LOGO] ?? "";
     const style = styleOf(dark);
     expect(style).not.toBe("");
-    expect(dark).not.toMatch(/@media/i);
-    expect(dark).not.toMatch(/prefers-color-scheme/i);
+    expect(stripComments(dark)).not.toMatch(/@media/i);
+    expect(stripComments(dark)).not.toMatch(/prefers-color-scheme/i);
     expect(style).not.toMatch(/#1B2140/i);
     expect(style).not.toMatch(/#C9962B/i);
     expect(style).toContain("#E9ECF5");
