@@ -1,6 +1,8 @@
 package main
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -44,10 +46,10 @@ type toolSchema struct {
 	// A nullable JSON Schema type array (e.g. ["null", "integer"]) is resolved to its
 	// non-null member; see schemaPropertyType.
 	properties map[string]string
-	// nested maps a top-level parameter name → child name → resolved type string,
-	// taken from that parameter's own "properties". It types dot-notation
-	// children (e.g. params.older_than_days=7) against the parent's schema.
-	nested map[string]map[string]string
+	// schemas maps a top-level parameter name → its raw JSON Schema map, kept
+	// whole (properties / items / additionalProperties) so a dot-notation path
+	// of any depth and array items can be typed; see schemaAt and coerceAt.
+	schemas map[string]map[string]any
 	// required is the set of required parameter names.
 	required map[string]bool
 	// enums maps parameter name → allowed values.
@@ -67,7 +69,7 @@ func parseToolSchema(inputSchema any) *toolSchema {
 
 	ts := &toolSchema{
 		properties: make(map[string]string),
-		nested:     make(map[string]map[string]string),
+		schemas:    make(map[string]map[string]any),
 		required:   make(map[string]bool),
 		enums:      make(map[string][]string),
 	}
@@ -93,24 +95,32 @@ func parseSchemaRequired(ts *toolSchema, m map[string]any) {
 	}
 }
 
-// parseSchemaProperties fills ts.properties, ts.nested and ts.enums from the
+// parseSchemaProperties fills ts.properties, ts.schemas and ts.enums from the
 // "properties" object in a JSON Schema map.
 func parseSchemaProperties(ts *toolSchema, m map[string]any) {
 	for name, propMap := range schemaPropertyMaps(m) {
 		ts.properties[name] = schemaPropertyType(propMap)
+		ts.schemas[name] = propMap
 		if enumVals := schemaPropertyEnums(propMap); enumVals != nil {
 			ts.enums[name] = enumVals
 		}
-		children := schemaPropertyMaps(propMap)
-		if len(children) == 0 {
-			continue
-		}
-		childTypes := make(map[string]string, len(children))
-		for child, childMap := range children {
-			childTypes[child] = schemaPropertyType(childMap)
-		}
-		ts.nested[name] = childTypes
 	}
+}
+
+// topSchema returns the JSON Schema map of a top-level parameter, or nil when
+// the parameter is undeclared (or ts is nil). A schema built without raw
+// sub-schemas falls back to a synthetic {"type": <resolved type>} map.
+func (ts *toolSchema) topSchema(name string) map[string]any {
+	if ts == nil {
+		return nil
+	}
+	if s, ok := ts.schemas[name]; ok {
+		return s
+	}
+	if typ, ok := ts.properties[name]; ok {
+		return map[string]any{"type": typ}
+	}
+	return nil
 }
 
 // schemaPropertyMaps returns the property-name → property-schema entries of the
@@ -195,9 +205,8 @@ func buildToolParams(toolName string, args []string, schema *toolSchema, stderr 
 		case idx < 0 && isFlagStyle:
 			result[stripped] = true
 		default:
-			key := stripped[:idx]
-			if key != "" {
-				applyKeyValue(result, key, stripped[idx+1:], schema)
+			if err := applyKeyValue(result, stripped[:idx], stripped[idx+1:], schema); err != nil {
+				return nil, err
 			}
 		}
 	}
@@ -231,40 +240,94 @@ func applyPositionalArg(result map[string]any, posMapping []string, posIndex int
 	return posIndex
 }
 
-// applyKeyValue sets a key-value pair in the result map.
-// If key contains a "." (dot-notation), it expands into a nested map.
-// For example, "filter.method" with value "POST" produces result["filter"] = {"method": "POST"}.
-// If result["filter"] already exists as map[string]any, the child key is merged into it.
-// A dot-notation child is typed against the parent property's own schema
-// (schema.nested[parent][child]); a child the parent does not declare stays a string.
-func applyKeyValue(result map[string]any, key, value string, schema *toolSchema) {
-	dotIdx := strings.IndexByte(key, '.')
-	if dotIdx < 0 {
-		result[key] = coerceValue(key, value, schema)
-		return
+// applyKeyValue sets one key=value argument in the result map.
+//
+// The key is a dot-separated path of any depth: "filter.method=POST" produces
+// result["filter"] = {"method": "POST"}, merging into an existing map. Each
+// segment is resolved against the schema (see resolveKeyPath) and the leaf
+// value is converted to the type the schema declares there (see coerceAt).
+//
+// A key ending in ":" ("key:=<json>") parses the value as JSON at any path,
+// regardless of the schema (and with no schema at all) — the only way to send
+// null, or a JSON value where the schema has no usable type.
+//
+// It returns an error, naming the path, only when a value that must be JSON
+// does not parse as the JSON kind required there.
+func applyKeyValue(result map[string]any, key, value string, schema *toolSchema) error {
+	explicitJSON := strings.HasSuffix(key, ":")
+	key = strings.TrimSuffix(key, ":")
+	if key == "" {
+		return nil
 	}
-	parent := key[:dotIdx]
-	child := key[dotIdx+1:]
-	nested, ok := result[parent].(map[string]any)
-	if !ok {
-		nested = make(map[string]any)
+	path, leaf := resolveKeyPath(key, schema)
+
+	var v any
+	var err error
+	if explicitJSON {
+		if v, err = decodeJSONValue(value); err != nil {
+			return fmt.Errorf("%s: invalid JSON after \":=\": %w", key, err)
+		}
+	} else if v, err = coerceAt(leaf, value); err != nil {
+		return fmt.Errorf("%s: %w", key, err)
 	}
-	nested[child] = coerceNestedValue(parent, child, value, schema)
-	result[parent] = nested
+	setPath(result, path, v)
+	return nil
 }
 
-// coerceNestedValue converts a dot-notation child value using the type the
-// parent property's schema declares for that child. If schema is nil or the
-// child is not declared, returns the string as-is.
-func coerceNestedValue(parent, child, value string, schema *toolSchema) any {
-	if schema == nil {
-		return value
+// resolveKeyPath splits a dotted key into result-map path segments and
+// returns the JSON Schema that applies to the leaf (nil when unknown).
+//
+// Every "." separates a segment, with one exception: once the walk reaches a
+// map whose values are not objects (e.g. "vars": additionalProperties
+// string), the remaining segments form a single map key, so
+// "post_macro.vars.user.id" yields path [post_macro vars user.id].
+func resolveKeyPath(key string, schema *toolSchema) ([]string, map[string]any) {
+	segs := strings.Split(key, ".")
+	s := schema.topSchema(segs[0])
+	path := []string{segs[0]}
+	for i := 1; i < len(segs); i++ {
+		var joinRest bool
+		s, joinRest = schemaChild(s, segs[i])
+		if joinRest {
+			return append(path, strings.Join(segs[i:], ".")), s
+		}
+		path = append(path, segs[i])
 	}
-	typ, ok := schema.nested[parent][child]
-	if !ok {
-		return value
+	return path, s
+}
+
+// schemaChild returns the sub-schema for one dot segment below s: the
+// declared property of that name or, failing that, the additionalProperties
+// sub-schema when s is a map (the segment is then a map key). joinRest
+// reports that the map's values are not objects, so no further dot segment
+// can descend into them. A segment below an array, or one s does not
+// declare, resolves to nil and the value is left as a string.
+func schemaChild(s map[string]any, seg string) (child map[string]any, joinRest bool) {
+	if s == nil {
+		return nil, false
 	}
-	return coerceTyped(typ, value)
+	if c, ok := schemaPropertyMaps(s)[seg]; ok {
+		return c, false
+	}
+	if ap, ok := s["additionalProperties"].(map[string]any); ok {
+		return ap, schemaPropertyType(ap) != "object"
+	}
+	return nil, false
+}
+
+// setPath stores v in result at path, creating (or replacing non-map values
+// with) intermediate maps. A later value at the same path wins.
+func setPath(result map[string]any, path []string, v any) {
+	cur := result
+	for _, seg := range path[:len(path)-1] {
+		next, ok := cur[seg].(map[string]any)
+		if !ok {
+			next = make(map[string]any)
+			cur[seg] = next
+		}
+		cur = next
+	}
+	cur[path[len(path)-1]] = v
 }
 
 // validateToolParams warns on unknown parameters and errors on missing required ones.
@@ -302,48 +365,183 @@ func missingRequiredParamError(param string, schema *toolSchema) error {
 	return fmt.Errorf("missing required parameter %q%s", param, candidates)
 }
 
-// coerceValue converts a string value to the appropriate Go type based on the schema.
-// If schema is nil or the key is not found in the schema, returns the string as-is.
+// coerceValue converts a top-level parameter's string value to the Go type
+// its schema declares. If schema is nil, the key is not declared, or the value
+// does not fit a JSON-only type, the string is returned as-is.
 func coerceValue(key, value string, schema *toolSchema) any {
-	if schema == nil {
+	v, err := coerceAt(schema.topSchema(key), value)
+	if err != nil {
 		return value
 	}
-	typ, ok := schema.properties[key]
-	if !ok {
-		return value
-	}
-	return coerceTyped(typ, value)
+	return v
 }
 
-// coerceTyped converts a string value to the Go type matching a resolved JSON
-// Schema type. A value that does not parse as that type is returned unchanged,
-// so the server's schema validation reports it.
+// coerceAt converts a CLI string value to the Go type the JSON Schema s
+// declares (nil s: returned unchanged).
+//
+// JSON is parsed only where the schema makes every non-JSON value invalid
+// anyway — an object, or an array of objects / arrays — so no value that a
+// string-typed (or untyped) parameter accepts ever changes meaning. Arrays of
+// scalars keep the comma-separated form; see coerceArray.
+func coerceAt(s map[string]any, value string) (any, error) {
+	if s == nil {
+		return value, nil
+	}
+	switch typ := schemaPropertyType(s); typ {
+	case "object":
+		return decodeJSONKind(value, "object")
+	case "array":
+		return coerceArray(s, value)
+	default:
+		return coerceTyped(typ, value), nil
+	}
+}
+
+// coerceArray converts an array value according to the schema's items type:
+//   - string (or no items): comma-separated, see parseArrayValue → []string
+//   - object / array: the value must be a JSON array → []any
+//   - integer / number / boolean: comma-separated, or a JSON array when the
+//     value starts with "[", each element converted to the item type → []any
+//
+// An empty value is an empty array.
+func coerceArray(s map[string]any, value string) (any, error) {
+	if value == "" {
+		return []string{}, nil
+	}
+	itemType := "string"
+	if items, ok := s["items"].(map[string]any); ok {
+		itemType = schemaPropertyType(items)
+	}
+	switch itemType {
+	case "string":
+		return parseArrayValue(value), nil
+	case "object", "array":
+		return decodeJSONKind(value, "array")
+	default:
+		return coerceScalarArray(itemType, value), nil
+	}
+}
+
+// coerceScalarArray converts an array of integer / number / boolean items.
+// A value starting with "[" that parses as a JSON array is taken as JSON (its
+// numbers converted to the item type); anything else falls back to the comma
+// form with each element converted by coerceTyped. An element that does not
+// convert is left as-is, so the server's validation reports it.
+func coerceScalarArray(itemType, value string) []any {
+	if strings.HasPrefix(value, "[") {
+		if decoded, err := decodeJSONValue(value); err == nil {
+			if arr, ok := decoded.([]any); ok {
+				for i, e := range arr {
+					if n, isNum := e.(json.Number); isNum && itemType != "boolean" {
+						arr[i] = coerceTyped(itemType, n.String())
+					}
+				}
+				return arr
+			}
+		}
+	}
+	parts := parseArrayValue(value)
+	out := make([]any, len(parts))
+	for i, p := range parts {
+		out[i] = coerceTyped(itemType, p)
+	}
+	return out
+}
+
+// decodeJSONKind decodes value as JSON and requires the result to be a JSON
+// object (kind "object") or array (kind "array").
+func decodeJSONKind(value, kind string) (any, error) {
+	v, err := decodeJSONValue(value)
+	if err != nil {
+		return nil, fmt.Errorf("expected a JSON %s: %w", kind, err)
+	}
+	switch v.(type) {
+	case map[string]any:
+		if kind == "object" {
+			return v, nil
+		}
+	case []any:
+		if kind == "array" {
+			return v, nil
+		}
+	}
+	return nil, fmt.Errorf("expected a JSON %s, got %s", kind, jsonKind(v))
+}
+
+// jsonKind names the JSON kind of a decoded value for error messages.
+func jsonKind(v any) string {
+	switch v.(type) {
+	case nil:
+		return "null"
+	case map[string]any:
+		return "an object"
+	case []any:
+		return "an array"
+	case string:
+		return "a string"
+	case bool:
+		return "a boolean"
+	default:
+		return "a number"
+	}
+}
+
+// decodeJSONValue decodes exactly one JSON value. Numbers are kept as
+// json.Number so they re-marshal verbatim. Errors carry the byte offset at
+// which decoding failed.
+func decodeJSONValue(value string) (any, error) {
+	dec := json.NewDecoder(strings.NewReader(value))
+	dec.UseNumber()
+	var v any
+	if err := dec.Decode(&v); err != nil {
+		var se *json.SyntaxError
+		if errors.As(err, &se) {
+			return nil, fmt.Errorf("%w (at offset %d)", err, se.Offset)
+		}
+		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			return nil, fmt.Errorf("unexpected end of JSON input (at offset %d)", len(value))
+		}
+		return nil, err
+	}
+	end := dec.InputOffset()
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		return nil, fmt.Errorf("unexpected data after the JSON value (at offset %d)", end)
+	}
+	return v, nil
+}
+
+// coerceTyped converts a string value to the Go type matching a resolved
+// scalar JSON Schema type. A value that does not parse as that type is
+// returned unchanged, so the server's schema validation reports it.
 func coerceTyped(typ, value string) any {
 	switch typ {
 	case "integer":
-		i, err := strconv.ParseInt(value, 10, 64)
-		if err != nil {
-			// Try float and truncate to int64. NaN, ±Inf and values outside
-			// [-2^63, 2^63) have no int64 form (the conversion is
-			// implementation-defined), so leave them for server validation.
-			// The upper bound is exclusive because float64(math.MaxInt64)
-			// rounds up to 2^63.
-			f, ferr := strconv.ParseFloat(value, 64)
-			if ferr != nil || !(f >= -9223372036854775808.0 && f < 9223372036854775808.0) {
-				return value
-			}
-			return int64(f)
-		}
-		return i
+		return coerceInteger(value)
 	case "number":
 		return coerceNumeric(value)
 	case "boolean":
 		return coerceBoolean(value)
-	case "array":
-		return parseArrayValue(value)
 	default:
 		return value
 	}
+}
+
+// coerceInteger parses a string as int64, truncating an in-range float.
+func coerceInteger(value string) any {
+	i, err := strconv.ParseInt(value, 10, 64)
+	if err == nil {
+		return i
+	}
+	// Try float and truncate to int64. NaN, ±Inf and values outside
+	// [-2^63, 2^63) have no int64 form (the conversion is
+	// implementation-defined), so leave them for server validation.
+	// The upper bound is exclusive because float64(math.MaxInt64)
+	// rounds up to 2^63.
+	f, ferr := strconv.ParseFloat(value, 64)
+	if ferr != nil || !(f >= -9223372036854775808.0 && f < 9223372036854775808.0) {
+		return value
+	}
+	return int64(f)
 }
 
 // coerceNumeric parses a string as int64, then float64, falling back to string.
