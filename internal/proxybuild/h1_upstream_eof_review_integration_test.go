@@ -41,8 +41,7 @@ func TestProxybuild_MITM_H1HEADThenUpstreamClose_RecordedComplete(t *testing.T) 
 				}
 				if idx == 1 {
 					_, _ = io.WriteString(c, tc.headReply)
-					time.Sleep(50 * time.Millisecond)
-					return // close after answering HEAD
+					return // close right after answering HEAD
 				}
 				_, _ = io.WriteString(c, secondReply)
 				time.Sleep(500 * time.Millisecond)
@@ -72,7 +71,10 @@ func TestProxybuild_MITM_H1HEADThenUpstreamClose_RecordedComplete(t *testing.T) 
 				t.Errorf("HEAD receive flow carries http_anomaly_truncated_body=%q; a HEAD response has no body", v)
 			}
 
-			time.Sleep(100 * time.Millisecond) // let the upstream FIN land
+			// Let the upstream FIN land so the redial chain's HealthCheck
+			// sees it (the same settle TestProxybuild_MITM_H1AnsweredThen-
+			// UpstreamClose_KeepsClient relies on, with headroom for -race).
+			time.Sleep(250 * time.Millisecond)
 			if _, err := c.Write([]byte("GET /2 HTTP/1.1\r\n" + host + "\r\n")); err != nil {
 				t.Fatalf("write GET after HEAD: %v", err)
 			}
