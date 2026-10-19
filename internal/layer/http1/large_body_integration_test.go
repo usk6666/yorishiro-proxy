@@ -29,9 +29,18 @@ import (
 // USK-635 — N6.5 acceptance gate for HTTP/1.x.
 //
 // These tests verify that SafetyFilter, TransformEngine, variant recording,
-// temp-file cleanup, and MaxBodySize enforcement all work end-to-end on bodies
-// that exceed the spill threshold (default 10 MiB) and thus exercise the
-// disk-backed BodyBuffer code path.
+// and temp-file cleanup all work end-to-end on bodies that exceed the spill
+// threshold and thus exercise the disk-backed BodyBuffer code path.
+//
+// The spill threshold is lowered to spillThresholdTest (256 KiB) so a 1 MiB
+// body crosses it; the code path is the same as with the 10 MiB production
+// default (USK-1205). Every spill-dependent test prepends a bufferInspector
+// and asserts (assertSpilled) that a file-backed BodyBuffer was actually seen
+// mid-flight, so a threshold that silently stops applying fails the test
+// instead of letting it pass on the in-memory path.
+//
+// MaxBodySize enforcement on the spill path is covered by the smoke test
+// TestSmoke_HTTP1_MaxBodySize_StreamErrorOnExceed.
 //
 // Per USK-613 MITM-diagnostic test philosophy: assertions target recording
 // outcomes (flow content, state transitions, spill-dir file counts), not
@@ -42,18 +51,16 @@ import (
 // USK-636 and will get a companion test when CheckOutput lands.
 
 const (
-	largeBodySize25MiB = 25 << 20
-	smallBodySize5MiB  = 5 << 20
-
-	// maxBodyTestCap is the MaxBodySize override used by the exceed-cap test
-	// to trigger *layer.StreamError without allocating 300 MiB. The behavior
-	// under cap breach is identical to the production 254 MiB default; this
-	// just economizes on test memory.
-	maxBodyTestCap = 20 << 20
+	// spillThresholdTest is the BodySpillThreshold used by these tests.
+	spillThresholdTest = 256 << 10
+	// largeBodySize is above spillThresholdTest, so it spills to disk.
+	largeBodySize = 1 << 20
+	// smallBodySize is below spillThresholdTest, so it stays in memory.
+	smallBodySize = 128 << 10
 
 	// destructiveSQLMarker is any SQL fragment that matches the
 	// destructive-sql:drop rule pattern ((?i)DROP\s+TABLE\s+...). Embedded
-	// in a 25 MiB POST body to prove safety filtering materializes a
+	// in a large POST body to prove safety filtering materializes a
 	// disk-backed body and matches against it.
 	destructiveSQLMarker = "DROP TABLE users;"
 
@@ -117,28 +124,6 @@ func countSpillFiles(t *testing.T, dir string) int {
 	return n
 }
 
-// waitForStreamState polls store until a Stream reaches wantState or timeout.
-// Returns the matching stream.
-func waitForStreamState(t *testing.T, store *testStore, wantState string, timeout time.Duration) *flow.Stream {
-	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		for _, st := range store.getStreams() {
-			if st.State == wantState {
-				return st
-			}
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	// Build a diagnostic string of all observed states.
-	var seen []string
-	for _, st := range store.getStreams() {
-		seen = append(seen, fmt.Sprintf("%s=%q", st.ID, st.State))
-	}
-	t.Fatalf("timeout waiting for Stream state %q (observed: %v)", wantState, seen)
-	return nil
-}
-
 // writeLargeResponse builds a complete HTTP/1.1 response with Content-Length
 // framing around body and a "Connection: close" header.
 func writeLargeResponse(body []byte) []byte {
@@ -189,14 +174,14 @@ func readFullHTTPResponse(t *testing.T, tlsConn net.Conn) (header, body []byte, 
 }
 
 // ---------------------------------------------------------------------------
-// Scenario 1: SafetyFilter matches a 25 MiB disk-backed REQUEST body
+// Scenario 1: SafetyFilter matches a disk-backed REQUEST body
 // ---------------------------------------------------------------------------
 //
 // The SafetyEngine.CheckInput path reads msg.BodyBuffer.Bytes(ctx) via
 // materializeBody when targeting TargetBody. This test proves the pipeline
-// (a) drains 25 MiB into a file-backed BodyBuffer, (b) materializes it for
-// pattern matching without OOM, (c) drops the envelope so upstream never
-// receives the request, and (d) releases the temp file before session end.
+// (a) drains the body into a file-backed BodyBuffer, (b) materializes it for
+// pattern matching, (c) drops the envelope so upstream never receives the
+// request, and (d) releases the temp file before session end.
 //
 // Response-side (Output Filter) safety on disk-backed bodies is deferred to
 // USK-636; this test is the request-side half of that coverage.
@@ -205,7 +190,7 @@ func TestLargeBody_HTTP1_SafetyFilterMatchesDiskBackedBody(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
-	body := embedMarker(makeLargeBody(largeBodySize25MiB), destructiveSQLMarker, largeBodySize25MiB/2)
+	body := embedMarker(makeLargeBody(largeBodySize), destructiveSQLMarker, largeBodySize/2)
 
 	// Upstream should never be contacted. Return a canned response if it is,
 	// so we can distinguish "safety blocked" (upstream got 0 requests) from
@@ -222,12 +207,15 @@ func TestLargeBody_HTTP1_SafetyFilterMatchesDiskBackedBody(t *testing.T) {
 	}
 
 	spillDir := t.TempDir()
+	inspector := &bufferInspector{spillDir: spillDir}
 	proxyAddr, _, sessionDone := startHTTPMITMProxy(t, ctx, target, proxyOpts{
-		safetyEngine: safetyEngine,
-		bodySpillDir: spillDir,
+		safetyEngine:       safetyEngine,
+		bodySpillDir:       spillDir,
+		bodySpillThreshold: spillThresholdTest,
+		prependCustomSteps: []pipeline.Step{inspector},
 	})
 
-	// Send the 25 MiB POST. We expect no HTTP response (safety drop closes
+	// Send the large POST. We expect no HTTP response (safety drop closes
 	// the client side without replying in the RFC-001 pipeline).
 	tlsConn := connectThroughProxy(t, proxyAddr, target)
 	defer tlsConn.Close()
@@ -259,6 +247,7 @@ func TestLargeBody_HTTP1_SafetyFilterMatchesDiskBackedBody(t *testing.T) {
 		t.Fatal("timeout waiting for session to complete")
 	}
 
+	assertSpilled(t, inspector, largeBodySize)
 	if got := len(upstreamReqs); got != 0 {
 		t.Errorf("upstream received %d requests, want 0 (safety filter must block before dial)", got)
 	}
@@ -271,7 +260,7 @@ func TestLargeBody_HTTP1_SafetyFilterMatchesDiskBackedBody(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Scenario 2: TransformReplaceBody rewrites a 25 MiB disk-backed RESPONSE body
+// Scenario 2: TransformReplaceBody rewrites a disk-backed RESPONSE body
 // ---------------------------------------------------------------------------
 //
 // TransformEngine.TransformResponse materializes msg.BodyBuffer, regex-
@@ -283,7 +272,7 @@ func TestLargeBody_HTTP1_TransformReplacesDiskBackedBody(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
-	respBody := embedMarker(makeLargeBody(largeBodySize25MiB), secretMarker, largeBodySize25MiB/2)
+	respBody := embedMarker(makeLargeBody(largeBodySize), secretMarker, largeBodySize/2)
 	expectedBytes := bytes.Replace(respBody, []byte(secretMarker), []byte(replaceWith), 1)
 
 	upstreamLn, _ := startUpstreamHTTPS(t, func(_ []byte) []byte {
@@ -304,9 +293,12 @@ func TestLargeBody_HTTP1_TransformReplacesDiskBackedBody(t *testing.T) {
 	}})
 
 	spillDir := t.TempDir()
+	inspector := &bufferInspector{spillDir: spillDir}
 	proxyAddr, _, sessionDone := startHTTPMITMProxy(t, ctx, target, proxyOpts{
-		transformEngine: transformEngine,
-		bodySpillDir:    spillDir,
+		transformEngine:    transformEngine,
+		bodySpillDir:       spillDir,
+		bodySpillThreshold: spillThresholdTest,
+		prependCustomSteps: []pipeline.Step{inspector},
 	})
 
 	tlsConn := connectThroughProxy(t, proxyAddr, target)
@@ -336,6 +328,7 @@ func TestLargeBody_HTTP1_TransformReplacesDiskBackedBody(t *testing.T) {
 		t.Fatal("timeout waiting for session to complete")
 	}
 
+	assertSpilled(t, inspector, largeBodySize)
 	if bytes.Contains(got, []byte(secretMarker)) {
 		t.Errorf("client body still contains %q — Transform did not replace", secretMarker)
 	}
@@ -349,7 +342,7 @@ func TestLargeBody_HTTP1_TransformReplacesDiskBackedBody(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Scenario 3: Variant recording preserves both original and modified 25 MiB bodies
+// Scenario 3: Variant recording preserves both original and modified disk-backed bodies
 // ---------------------------------------------------------------------------
 //
 // RecordStep's variant path takes a snapshot before Pipeline Run. For
@@ -362,7 +355,7 @@ func TestLargeBody_HTTP1_VariantRecordingPersistsBothVersions(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
-	respBody := embedMarker(makeLargeBody(largeBodySize25MiB), secretMarker, largeBodySize25MiB/2)
+	respBody := embedMarker(makeLargeBody(largeBodySize), secretMarker, largeBodySize/2)
 
 	upstreamLn, _ := startUpstreamHTTPS(t, func(_ []byte) []byte {
 		return writeLargeResponse(respBody)
@@ -382,9 +375,12 @@ func TestLargeBody_HTTP1_VariantRecordingPersistsBothVersions(t *testing.T) {
 	}})
 
 	spillDir := t.TempDir()
+	inspector := &bufferInspector{spillDir: spillDir}
 	proxyAddr, store, sessionDone := startHTTPMITMProxy(t, ctx, target, proxyOpts{
-		transformEngine: transformEngine,
-		bodySpillDir:    spillDir,
+		transformEngine:    transformEngine,
+		bodySpillDir:       spillDir,
+		bodySpillThreshold: spillThresholdTest,
+		prependCustomSteps: []pipeline.Step{inspector},
 	})
 
 	tlsConn := connectThroughProxy(t, proxyAddr, target)
@@ -401,6 +397,8 @@ func TestLargeBody_HTTP1_VariantRecordingPersistsBothVersions(t *testing.T) {
 	case <-time.After(30 * time.Second):
 		t.Fatal("timeout waiting for session to complete")
 	}
+
+	assertSpilled(t, inspector, largeBodySize)
 
 	// Locate the original + modified receive flows.
 	var original, modified *flow.Flow
@@ -425,17 +423,17 @@ func TestLargeBody_HTTP1_VariantRecordingPersistsBothVersions(t *testing.T) {
 		t.Fatal("expected modified variant receive flow")
 	}
 
-	// Original must carry the untouched 25 MiB bytes. Modified must reflect
-	// the post-transform bytes. RecordStep maxBodySize cap defaults to
-	// config.MaxBodySize (254 MiB) so 25 MiB round-trips uncut.
-	if len(original.Body) != largeBodySize25MiB {
-		t.Errorf("original variant Body length = %d, want %d", len(original.Body), largeBodySize25MiB)
+	// Original must carry the untouched bytes. Modified must reflect the
+	// post-transform bytes. RecordStep maxBodySize cap defaults to
+	// config.MaxBodySize (254 MiB) so the body round-trips uncut.
+	if len(original.Body) != largeBodySize {
+		t.Errorf("original variant Body length = %d, want %d", len(original.Body), largeBodySize)
 	}
 	if !bytes.Contains(original.Body, []byte(secretMarker)) {
 		t.Errorf("original variant must still contain %q", secretMarker)
 	}
 	if original.BodyTruncated {
-		t.Error("original variant BodyTruncated = true; 25 MiB fits under default 254 MiB cap")
+		t.Error("original variant BodyTruncated = true; body fits under default 254 MiB cap")
 	}
 
 	expectedMod := bytes.Replace(respBody, []byte(secretMarker), []byte(replaceWith), 1)
@@ -455,7 +453,7 @@ func TestLargeBody_HTTP1_VariantRecordingPersistsBothVersions(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Scenario 4: Temp-file cleanup on session end (disk-backed 25 MiB)
+// Scenario 4: Temp-file cleanup on session end (disk-backed body)
 // ---------------------------------------------------------------------------
 //
 // Asserts the core N6.5 invariant: a disk-backed body that traverses the
@@ -494,11 +492,28 @@ func (b *bufferInspector) Process(_ context.Context, env *envelope.Envelope) pip
 	return pipeline.Result{}
 }
 
+// assertSpilled fails t unless inspector saw a file-backed BodyBuffer of
+// wantLen bytes with at least one spill file on disk at that moment. It is
+// what keeps these tests from passing vacuously on the in-memory path when
+// the spill threshold does not apply.
+func assertSpilled(t *testing.T, inspector *bufferInspector, wantLen int) {
+	t.Helper()
+	if !inspector.sawFileBacked.Load() {
+		t.Errorf("bufferInspector did not observe a file-backed BodyBuffer; a %d-byte body must spill above the %d-byte threshold", wantLen, spillThresholdTest)
+	}
+	if got := inspector.bodyLen.Load(); got != int64(wantLen) {
+		t.Errorf("bufferInspector observed BodyBuffer length = %d, want %d", got, wantLen)
+	}
+	if got := inspector.filesOnDisk.Load(); got < 1 {
+		t.Errorf("bufferInspector observed %d spill files mid-flight, want >= 1", got)
+	}
+}
+
 func TestLargeBody_HTTP1_TempFileCleanupOnSessionEnd(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
-	reqBody := makeLargeBody(largeBodySize25MiB)
+	reqBody := makeLargeBody(largeBodySize)
 
 	upstreamLn, _ := startUpstreamHTTPS(t, func(_ []byte) []byte {
 		return []byte("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
@@ -511,6 +526,7 @@ func TestLargeBody_HTTP1_TempFileCleanupOnSessionEnd(t *testing.T) {
 
 	proxyAddr, _, sessionDone := startHTTPMITMProxy(t, ctx, target, proxyOpts{
 		bodySpillDir:       spillDir,
+		bodySpillThreshold: spillThresholdTest,
 		prependCustomSteps: []pipeline.Step{inspector},
 	})
 
@@ -535,17 +551,9 @@ func TestLargeBody_HTTP1_TempFileCleanupOnSessionEnd(t *testing.T) {
 		t.Fatal("timeout waiting for session to complete")
 	}
 
-	// Mid-flight invariant: inspector saw a file-backed BodyBuffer with full
-	// 25 MiB, and at that point at least one spill file existed on disk.
-	if !inspector.sawFileBacked.Load() {
-		t.Error("bufferInspector did not observe a file-backed BodyBuffer; 25 MiB should spill")
-	}
-	if got := inspector.bodyLen.Load(); got != largeBodySize25MiB {
-		t.Errorf("bufferInspector observed Body length = %d, want %d", got, largeBodySize25MiB)
-	}
-	if got := inspector.filesOnDisk.Load(); got < 1 {
-		t.Errorf("bufferInspector observed %d spill files mid-flight, want >= 1", got)
-	}
+	// Mid-flight invariant: inspector saw a file-backed BodyBuffer with the
+	// full body, and at that point at least one spill file existed on disk.
+	assertSpilled(t, inspector, largeBodySize)
 
 	// Cleanup invariant: zero temp files after session.
 	if n := countSpillFiles(t, spillDir); n != 0 {
@@ -559,77 +567,23 @@ func TestLargeBody_HTTP1_TempFileCleanupOnSessionEnd(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Scenario 5: MaxBodySize exceeded surfaces *layer.StreamError
+// Scenario 5: Fast path (body <= spill threshold) produces no temp file
 // ---------------------------------------------------------------------------
 //
-// MaxBodySize is set to 20 MiB; the upstream sends 25 MiB. The h1 channel
-// must emit *layer.StreamError{Code: ErrorInternalError, Reason: "http1:
-// body exceeds max size"} which session.ClassifyError maps to
-// "internal_error". The client sees an abrupt close; the BodySpillDir must
-// contain zero files afterwards (bodybuf teardown removes the partial temp
-// file on ErrMaxSizeExceeded).
+// smallBodySize (128 KiB) < spillThresholdTest (256 KiB). msg.BodyBuffer must
+// be nil and msg.Body must carry the full bytes. Assert via intercept Hold
+// (mid-flight) that the fast path is taken, then release normally and verify
+// 0 files after.
 //
-// We use 20 MiB cap + 25 MiB body instead of the issue-text 254/300 MiB to
-// economize test memory; the code path is identical (maxSize comparison in
-// bodybuf.Write).
-
-func TestLargeBody_HTTP1_ExceedsMaxBodySizeReturnsStreamError(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
-	defer cancel()
-
-	respBody := makeLargeBody(largeBodySize25MiB)
-
-	upstreamLn, _ := startUpstreamHTTPS(t, func(_ []byte) []byte {
-		return writeLargeResponse(respBody)
-	})
-	defer upstreamLn.Close()
-	target := upstreamLn.Addr().String()
-
-	spillDir := t.TempDir()
-	proxyAddr, store, sessionDone := startHTTPMITMProxy(t, ctx, target, proxyOpts{
-		bodySpillDir: spillDir,
-		maxBodySize:  maxBodyTestCap,
-	})
-
-	tlsConn := connectThroughProxy(t, proxyAddr, target)
-	defer tlsConn.Close()
-	rawReq := fmt.Sprintf("GET /toobig HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n", target)
-	if _, err := tlsConn.Write([]byte(rawReq)); err != nil {
-		t.Fatalf("write request: %v", err)
-	}
-	tlsConn.SetReadDeadline(time.Now().Add(60 * time.Second))
-	_, _ = io.ReadAll(tlsConn)
-
-	select {
-	case <-sessionDone:
-	case <-time.After(30 * time.Second):
-		t.Fatal("timeout waiting for session to complete")
-	}
-
-	st := waitForStreamState(t, store, "error", 5*time.Second)
-	if st.FailureReason != "internal_error" {
-		t.Errorf("Stream.FailureReason = %q, want %q", st.FailureReason, "internal_error")
-	}
-
-	if n := countSpillFiles(t, spillDir); n != 0 {
-		t.Errorf("BodySpillDir has %d leftover files after MaxBodySize error, want 0 "+
-			"(bodybuf teardown must remove the partial temp file)", n)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Scenario 6: Fast path (body <= spill threshold) produces no temp file
-// ---------------------------------------------------------------------------
-//
-// 5 MiB < default 10 MiB threshold. msg.BodyBuffer must be nil and msg.Body
-// must carry the full bytes. Assert via intercept Hold (mid-flight) that the
-// fast path is taken, then release normally and verify 0 files after.
+// (The former Scenario 5, MaxBodySize exceeded on the spill path, is covered
+// by the smoke test TestSmoke_HTTP1_MaxBodySize_StreamErrorOnExceed; smoke is
+// a subset of the full tier, so it was a duplicate here.)
 
 func TestLargeBody_HTTP1_FastPathNoTempFileBelowThreshold(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	reqBody := makeLargeBody(smallBodySize5MiB)
+	reqBody := makeLargeBody(smallBodySize)
 
 	upstreamLn, _ := startUpstreamHTTPS(t, func(_ []byte) []byte {
 		return []byte("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
@@ -649,9 +603,10 @@ func TestLargeBody_HTTP1_FastPathNoTempFileBelowThreshold(t *testing.T) {
 
 	spillDir := t.TempDir()
 	proxyAddr, _, sessionDone := startHTTPMITMProxy(t, ctx, target, proxyOpts{
-		interceptEngine: interceptEngine,
-		holdQueue:       holdQueue,
-		bodySpillDir:    spillDir,
+		interceptEngine:    interceptEngine,
+		holdQueue:          holdQueue,
+		bodySpillDir:       spillDir,
+		bodySpillThreshold: spillThresholdTest,
 	})
 
 	respCh := make(chan struct{}, 1)
@@ -688,10 +643,10 @@ func TestLargeBody_HTTP1_FastPathNoTempFileBelowThreshold(t *testing.T) {
 	}
 	// Fast path: BodyBuffer must be nil, Body populated.
 	if msg.BodyBuffer != nil {
-		t.Errorf("msg.BodyBuffer = %v; 5 MiB body must not spill (below 10 MiB threshold)", msg.BodyBuffer)
+		t.Errorf("msg.BodyBuffer = %v; a %d-byte body must not spill (below the %d-byte threshold)", msg.BodyBuffer, smallBodySize, spillThresholdTest)
 	}
-	if len(msg.Body) != smallBodySize5MiB {
-		t.Errorf("msg.Body length = %d, want %d", len(msg.Body), smallBodySize5MiB)
+	if len(msg.Body) != smallBodySize {
+		t.Errorf("msg.Body length = %d, want %d", len(msg.Body), smallBodySize)
 	}
 	if n := countSpillFiles(t, spillDir); n != 0 {
 		t.Errorf("BodySpillDir has %d files mid-flight on fast path, want 0", n)
