@@ -269,6 +269,11 @@ func requestHeadHTTPVersion(proto string) string {
 // OnRequestHeadFailure callback (USK-1189: the CONNECT request and the
 // plain-forward target peek, read before any Layer exists). Nil rec yields
 // nil, which the connector treats as "do not report".
+//
+// These records are written before the connector's connect policy / rate
+// limiter runs, and only Raw is capped at max_raw_capture_size; the
+// URL / Headers overlay is bounded by the parser limits (see
+// connector.connectRequestHeadFailure for the full bound).
 func connectorRequestHeadCallback(rec requestHeadRecorder) connector.OnRequestHeadFailureFunc {
 	if rec == nil {
 		return nil

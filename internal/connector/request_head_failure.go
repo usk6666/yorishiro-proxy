@@ -25,6 +25,17 @@ import (
 // maxRaw is BuildConfig.MaxRawCaptureSize (<= 0: the parser default). The
 // negotiator parses with the package-default capture cap, so the
 // effective cap is the smaller of the two.
+//
+// Storage bound (USK-1189 security review S-1): only head.Raw is capped at
+// maxRaw. The L7 overlay — the verbatim authority and the parsed Headers —
+// is bounded by the parser limits instead (MaxLineLength for the request
+// line, the header-section limit for Headers), not by max_raw_capture_size.
+// The record is made before connectPolicyAllow, so TargetScope and the
+// rate limiter do not gate it; only capture_scope (applied by the
+// proxybuild recorder) does. The per-record rate is bounded by
+// MaxConnections x request_timeout_ms. This is the same exposure USK-1181
+// accepted for the Layer-path request-head records; capping the overlay on
+// both paths is a separate follow-up.
 func connectRequestHeadFailure(err error, armed time.Duration, started time.Time, maxRaw int64) (*http1.RequestHeadError, string) {
 	var perr *parser.PartialRequestError
 	if !errors.As(err, &perr) || len(perr.Raw) == 0 {

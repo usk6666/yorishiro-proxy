@@ -7,7 +7,10 @@ package proxybuild_test
 
 import (
 	"context"
+	"io"
 	"net"
+	gohttp "net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -105,6 +108,44 @@ func TestProxybuild_TCPForwardTLS_HandshakeTimeoutTagged(t *testing.T) {
 	} {
 		if st.Tags[k] != v {
 			t.Errorf("Tags[%q] = %q, want %q", k, st.Tags[k], v)
+		}
+	}
+}
+
+// TestProxybuild_CONNECT_MITM_HandshakeTimeoutTagged (F-2 of the USK-1189
+// review): the ordinary CONNECT MITM path (performClientMITM against a live
+// TLS upstream, not raw passthrough) tags a client handshake the proxy
+// abandons at request_timeout_ms.
+func TestProxybuild_CONNECT_MITM_HandshakeTimeoutTagged(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	upstream := httptest.NewTLSServer(gohttp.HandlerFunc(func(w gohttp.ResponseWriter, _ *gohttp.Request) {
+		_, _ = io.WriteString(w, "ok")
+	}))
+	defer upstream.Close()
+	target := strings.TrimPrefix(upstream.URL, "https://")
+	fix := startUSK1189Proxy(t, ctx, nil, nil, 300*time.Millisecond)
+
+	conn, err := connectTunnelDialerForPoolTest(fix.proxyAddr, target)
+	if err != nil {
+		t.Fatalf("CONNECT: %v", err)
+	}
+	defer conn.Close()
+	usk1189StallTLSHandshake(t, conn)
+
+	if n := fix.buildCfg.ClientMITMHandshakeCount(); n == 0 {
+		t.Fatal("performClientMITM was never entered; the test did not drive the MITM path")
+	}
+	st, _ := awaitErrorStream(t, fix.store, "client_tls_error", 0, 5*time.Second)
+	for k, v := range map[string]string{
+		"phase":              "tls_handshake",
+		"closed_by":          "proxy",
+		"timeout":            "request_timeout",
+		"request_timeout_ms": "300",
+		"target":             target,
+	} {
+		if st.Tags[k] != v {
+			t.Errorf("Tags[%q] = %q, want %q (error=%q)", k, st.Tags[k], v, st.Tags["error"])
 		}
 	}
 }
