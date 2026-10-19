@@ -1238,7 +1238,8 @@ export interface FuzzGRPCParams {
   metadata?: HeaderKV[];
   encoding?: string;
   accept_encoding?: string[];
-  messages?: ResendGRPCData[];
+  /** Required in every mode, flow_id included (recorded messages are not inherited); at least one element. */
+  messages: ResendGRPCData[];
   trailer_metadata?: HeaderKV[];
   timeout_ms?: number;
   tls_fingerprint?: string;
@@ -1717,7 +1718,8 @@ export interface ResendGRPCParams {
   metadata?: HeaderKV[];
   encoding?: string;
   accept_encoding?: string[];
-  messages?: ResendGRPCData[];
+  /** Required in every mode, flow_id included (recorded messages are not inherited); at least one element. */
+  messages: ResendGRPCData[];
   trailer_metadata?: HeaderKV[];
   timeout_ms?: number;
   tls_fingerprint?: string;
