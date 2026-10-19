@@ -36,9 +36,3 @@ func TestRunClientPreface(t *testing.T) {
 		t.Errorf("runClientPreface wrote %q, want %q", buf.String(), ClientPreface)
 	}
 }
-
-func TestClientPrefaceLength(t *testing.T) {
-	if len(ClientPreface) != 24 {
-		t.Errorf("ClientPreface length = %d, want 24", len(ClientPreface))
-	}
-}

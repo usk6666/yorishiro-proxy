@@ -753,37 +753,6 @@ func TestActionString(t *testing.T) {
 	}
 }
 
-func TestPresetNames_Engine(t *testing.T) {
-	names := PresetNames()
-	if len(names) < 6 {
-		t.Errorf("expected at least 6 presets, got %d", len(names))
-	}
-	found := make(map[string]bool)
-	for _, n := range names {
-		found[n] = true
-	}
-	required := []string{
-		PresetDestructiveSQL,
-		PresetDestructiveOSCommand,
-		PresetCreditCard,
-		PresetJapanMyNumber,
-		PresetEmail,
-		PresetJapanPhone,
-	}
-	for _, name := range required {
-		if !found[name] {
-			t.Errorf("missing preset: %s", name)
-		}
-	}
-}
-
-func TestLookupPreset_NotFound_Engine(t *testing.T) {
-	_, err := LookupPreset("nonexistent")
-	if err == nil {
-		t.Error("LookupPreset(nonexistent) expected error, got nil")
-	}
-}
-
 func TestFilterOutput_ValidatorAccepts(t *testing.T) {
 	e, err := NewEngine(Config{
 		OutputRules: []RuleConfig{

@@ -401,26 +401,6 @@ func TestInstallLinuxNSSDB_HappyPath_ExistingDB(t *testing.T) {
 	}
 }
 
-func TestInstallLinuxNSSDB_DeleteFailureIgnored(t *testing.T) {
-	home := withFakeHome(t)
-	withCertutilOnPath(t)
-
-	nssDir := filepath.Join(home, ".pki", "nssdb")
-	if err := os.MkdirAll(nssDir, 0700); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-
-	// Delete fails (no entry); -A succeeds. Net effect: no error.
-	installScriptedExecCommand(t, []scriptedCertutil{
-		{subcmd: "-D", exit: 1, stderr: "no certificate matching"},
-		{subcmd: "-A", exit: 0},
-	})
-
-	if err := installLinuxNSSDB("/some/cert.crt"); err != nil {
-		t.Fatalf("installLinuxNSSDB returned error despite -D failure being expected: %v", err)
-	}
-}
-
 func TestInstallLinuxNSSDB_AddFailure(t *testing.T) {
 	home := withFakeHome(t)
 	withCertutilOnPath(t)

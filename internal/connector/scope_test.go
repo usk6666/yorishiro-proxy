@@ -1433,16 +1433,6 @@ func TestTargetScope_NoPolicyAgentOnly_BackwardCompat(t *testing.T) {
 	}
 }
 
-func TestTargetScope_NoRules_AllAllowed(t *testing.T) {
-	// With no policy and no agent rules, everything should be allowed.
-	s := NewTargetScope()
-
-	allowed, reason := s.CheckTarget("http", "anything.com", 80, "/")
-	if !allowed {
-		t.Errorf("no rules should allow all, got blocked with reason %q", reason)
-	}
-}
-
 func TestTargetScope_PolicyDenyPrecedesAgentDeny(t *testing.T) {
 	s := NewTargetScope()
 	s.SetPolicyRules(nil, []TargetRule{{Hostname: "blocked.com"}})

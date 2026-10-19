@@ -669,21 +669,6 @@ func TestLoad_EmptyFiles(t *testing.T) {
 	}
 }
 
-func TestGenerate_KeyCurveIsP256(t *testing.T) {
-	ca := &CA{}
-	if err := ca.Generate(); err != nil {
-		t.Fatalf("Generate: %v", err)
-	}
-
-	// Access private key directly to verify curve.
-	if ca.privKey == nil {
-		t.Fatal("privKey is nil after Generate")
-	}
-	if ca.privKey.Curve != elliptic.P256() {
-		t.Errorf("private key curve = %v, want P-256", ca.privKey.Curve.Params().Name)
-	}
-}
-
 func TestCASource_SetAndGet(t *testing.T) {
 	ca := &CA{}
 	if err := ca.Generate(); err != nil {

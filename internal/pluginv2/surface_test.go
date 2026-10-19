@@ -69,16 +69,26 @@ func TestSurface_LookupUnknownEventReturnsFalse(t *testing.T) {
 }
 
 func TestSurface_LifecycleEntriesAcceptOnlyContinueOrDrop(t *testing.T) {
-	for _, e := range expectedEntries {
-		if e.Phases != PhaseSupportNone {
+	// Iterate the production surface table (not the test's own
+	// expectedEntries fixture) so a lifecycle row that gains a forbidden
+	// action bit is caught.
+	const allowed = ActionMaskContinue | ActionMaskDrop
+	lifecycle := 0
+	for _, row := range SurfaceEntries() {
+		if row.Spec.Phases != PhaseSupportNone {
 			continue
 		}
-		if !e.Actions.Has(ActionContinue) {
-			t.Errorf("(%q, %q) lifecycle entry must allow CONTINUE", e.Protocol, e.Event)
+		lifecycle++
+		if !row.Spec.Actions.Has(ActionContinue) {
+			t.Errorf("(%q, %q) lifecycle entry must allow CONTINUE", row.Protocol, row.Event)
 		}
-		if e.Actions.Has(ActionRespond) {
-			t.Errorf("(%q, %q) lifecycle entry must not allow RESPOND", e.Protocol, e.Event)
+		if extra := row.Spec.Actions &^ allowed; extra != 0 {
+			t.Errorf("(%q, %q) lifecycle entry action mask %b has bits outside CONTINUE|DROP (%b)",
+				row.Protocol, row.Event, row.Spec.Actions, extra)
 		}
+	}
+	if lifecycle == 0 {
+		t.Fatal("SurfaceEntries() returned no lifecycle (PhaseSupportNone) rows")
 	}
 }
 

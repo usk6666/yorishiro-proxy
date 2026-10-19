@@ -1746,10 +1746,12 @@ func appMessageModified(a, b envelope.Message) bool {
 // Follows the USK-631 `isBodyChanged` precedent in
 // internal/layer/http1/channel.go.
 func httpMessageModified(a, b *envelope.HTTPMessage) bool {
-	if a.Method != b.Method || a.Status != b.Status {
+	if a.Method != b.Method || a.Status != b.Status || a.StatusReason != b.StatusReason {
 		return true
 	}
-	if a.Path != b.Path || a.Authority != b.Authority || a.Scheme != b.Scheme {
+	// USK-1148: RawQuery is part of the request line a plugin can rewrite
+	// on its own; without it a query-only rewrite records no variant.
+	if a.Path != b.Path || a.RawQuery != b.RawQuery || a.Authority != b.Authority || a.Scheme != b.Scheme {
 		return true
 	}
 	if !keyValuesEqual(a.Headers, b.Headers) {

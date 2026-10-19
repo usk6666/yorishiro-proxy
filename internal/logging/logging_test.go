@@ -1,9 +1,13 @@
 package logging
 
 import (
+	"context"
+	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestSetup(t *testing.T) {
@@ -92,18 +96,27 @@ func TestSetup_FileOutput(t *testing.T) {
 func TestSetup_FileCleanupCloses(t *testing.T) {
 	logFile := filepath.Join(t.TempDir(), "test.log")
 
-	_, cleanup, err := Setup(Config{File: logFile})
+	logger, cleanup, err := Setup(Config{File: logFile})
 	if err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
+
+	// The *os.File is reachable only through the handler, so observe the
+	// close through it: writing a record succeeds before cleanup and fails
+	// with os.ErrClosed after.
+	ctx := context.Background()
+	rec := slog.NewRecord(time.Now(), slog.LevelError, "before cleanup", 0)
+	if err := logger.Handler().Handle(ctx, rec); err != nil {
+		t.Fatalf("Handle before cleanup: %v", err)
+	}
+
 	cleanup()
 
-	// Open the file to verify it was properly closed (no locking issues).
-	f, err := os.OpenFile(logFile, os.O_WRONLY|os.O_APPEND, 0644)
-	if err != nil {
-		t.Fatalf("open after cleanup: %v", err)
+	rec = slog.NewRecord(time.Now(), slog.LevelError, "after cleanup", 0)
+	err = logger.Handler().Handle(ctx, rec)
+	if !errors.Is(err, os.ErrClosed) {
+		t.Fatalf("Handle after cleanup: err = %v, want os.ErrClosed (cleanup must close the log file)", err)
 	}
-	f.Close()
 }
 
 func TestSetup_InvalidFilePath(t *testing.T) {

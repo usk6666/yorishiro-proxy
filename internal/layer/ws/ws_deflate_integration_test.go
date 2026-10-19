@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
+	"github.com/usk6666/yorishiro-proxy/internal/layer"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/ws"
 )
 
@@ -237,11 +238,20 @@ func TestWSUpgrade_PermessageDeflate_RoundTrip(t *testing.T) {
 
 	h.closeClient()
 	h.closeUpstream()
-	if err := h.waitSessionDone(5 * time.Second); err != nil && !errors.Is(err, io.EOF) {
-		// EOF on graceful client/upstream close is fine; surface
-		// anything else so a regression that surfaces as session
-		// abort is identifiable.
-		t.Logf("session done err = %v", err)
+	// Graceful close of both transports may end the session with nil,
+	// io.EOF or a closed-conn error, but never with a protocol-level
+	// *layer.StreamError: that would mean the deflate round trip broke
+	// the WS stream (e.g. an inflate/re-encode failure surfaced as a
+	// protocol error) even though the frames above looked right.
+	sessErr := h.waitSessionDone(5 * time.Second)
+	var se *layer.StreamError
+	if errors.As(sessErr, &se) {
+		t.Errorf("session ended with StreamError (code=%v reason=%q); want a graceful close", se.Code, se.Reason)
+	}
+	for _, st := range h.store.getStreams() {
+		if st.FailureReason == "protocol_error" {
+			t.Errorf("stream %s recorded FailureReason=protocol_error", st.ID)
+		}
 	}
 
 	// HTTP flow recording: the 101 upgrade response must surface the

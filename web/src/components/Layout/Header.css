@@ -36,18 +36,15 @@
 }
 
 .header-logo {
-  font-family: var(--font-mono);
-  font-size: var(--font-size-md);
-  font-weight: 600;
+  display: flex;
+  align-items: center;
   user-select: none;
 }
 
-.header-logo-text {
-  color: var(--text-primary);
-}
-
-.header-logo-accent {
-  color: var(--accent-primary);
+.header-logo-img {
+  display: block;
+  height: 24px;
+  width: auto;
 }
 
 .header-right {

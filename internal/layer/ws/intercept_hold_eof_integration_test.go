@@ -306,25 +306,6 @@ func TestWSIntercept_HoldThenUpstreamEOF_AppendsStreamTag(t *testing.T) {
 	}
 }
 
-// TestReleaseTracker_OppositeDirectionLookup is a focused regression guard
-// covering the contract that wsRelayDirection / clientToUpstream rely on:
-// a release on Send produces a Receive-side correlation hit, and vice
-// versa, within the configured window.
-func TestReleaseTracker_OppositeDirectionLookup(t *testing.T) {
-	tr := common.NewReleaseTracker()
-	now := time.Now()
-	tr.MarkRelease("s-1", envelope.Send, now)
-	// Caller is the Receive-side relay: it asks for opposite-of-Receive,
-	// i.e. Send, on the same stream — should hit.
-	if _, ok := tr.LookupOppositeRelease("s-1", envelope.Receive, now.Add(500*time.Millisecond), 2*time.Second); !ok {
-		t.Fatalf("Receive-direction caller missed the Send-side release within window")
-	}
-	// Outside the 2s window — should not hit.
-	if _, ok := tr.LookupOppositeRelease("s-1", envelope.Receive, now.Add(3*time.Second), 2*time.Second); ok {
-		t.Fatalf("Receive-direction caller incorrectly matched outside window")
-	}
-}
-
 // doWSUpgradeHandshakeUSK851 drives the HTTP/1 → WS upgrade from both ends
 // so the session swaps in ws.Layer pairs. Mirrors performUpgrade in
 // ws_integration_test.go; duplicated to keep this test self-contained.

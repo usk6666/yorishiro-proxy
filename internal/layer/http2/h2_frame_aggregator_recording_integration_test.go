@@ -358,11 +358,19 @@ func TestAggregatorH2FrameRecording_LargeBodySplitsAcrossFrames(t *testing.T) {
 
 	st := firstStreamWithProto(t, store, "http", 5*time.Second)
 
-	// Wait for AT LEAST one send h2-frame; large bodies typically split
-	// into ≥2 frames but exact count depends on flow control and the
-	// proxy's re-frame behavior. Concatenation correctness is the
-	// load-bearing assertion.
-	sendFrames := waitForH2FrameFlows(t, store, st.ID, "send", 1, 5*time.Second)
+	// A DATA frame payload cannot exceed SETTINGS_MAX_FRAME_SIZE (RFC 9113
+	// §4.2; default 16384, which neither peer here changes), so the
+	// 61440-byte body reaches the proxy as at least ceil(61440/16384) = 4
+	// DATA frames. One h2-frame envelope per wire DATA frame means at
+	// least 4 send records; fewer means frames were coalesced
+	// (waitForH2FrameFlows fails the test if fewer ever appear).
+	const minFrames = (len("AB")*30*1024 + 16384 - 1) / 16384
+	sendFrames := waitForH2FrameFlows(t, store, st.ID, "send", minFrames, 5*time.Second)
+	for i, f := range sendFrames {
+		if len(f.RawBytes) > 16384 {
+			t.Errorf("send h2-frame[%d] payload = %d bytes, exceeds MAX_FRAME_SIZE 16384 (not a single wire frame)", i, len(f.RawBytes))
+		}
+	}
 	var sendCat []byte
 	for _, f := range sendFrames {
 		sendCat = append(sendCat, f.RawBytes...)
@@ -371,10 +379,6 @@ func TestAggregatorH2FrameRecording_LargeBodySplitsAcrossFrames(t *testing.T) {
 		t.Errorf("send h2-frame concat len = %d, want %d (per-frame payload preservation across body fragmentation)",
 			len(sendCat), len(payload))
 	}
-	// We expect the wire to fragment (≥2 frames) at this size; if the
-	// proxy re-frames into a single DATA frame the test still passes the
-	// concat assertion above, which is the correctness contract.
-	t.Logf("60 KiB POST: send h2-frame count = %d (wire-level fragmentation)", len(sendFrames))
 }
 
 // TestAggregatorH2FrameRecording_PerStreamCap covers Issue §D #5:

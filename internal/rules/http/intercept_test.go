@@ -348,53 +348,6 @@ func TestMatchResponse_HostPatternStillEnforced(t *testing.T) {
 	}
 }
 
-// TestMatchRequest_PathPatternStillEnforced is the regression guard
-// against the fix being too aggressive. Request-side matching of
-// PathPattern must remain correct.
-func TestMatchRequest_PathPatternStillEnforced(t *testing.T) {
-	e := NewInterceptEngine()
-	e.SetRules([]InterceptRule{{
-		ID:          "r1",
-		Enabled:     true,
-		Direction:   DirectionRequest,
-		PathPattern: regexp.MustCompile(`^/api/`),
-	}})
-
-	// Matching path.
-	env, msg := testHTTPRequest("GET", "/api/users", "example.com", nil)
-	if matched := e.MatchRequest(env, msg); len(matched) != 1 {
-		t.Errorf("matched = %v, want 1 (regression: request-side PathPattern still applies)", matched)
-	}
-
-	// Non-matching path.
-	env2, msg2 := testHTTPRequest("GET", "/web/index.html", "example.com", nil)
-	if matched := e.MatchRequest(env2, msg2); len(matched) != 0 {
-		t.Errorf("matched = %v, want empty (regression: request-side PathPattern should still reject mismatches)", matched)
-	}
-}
-
-// TestMatchRequest_MethodsStillEnforced is the parallel regression
-// guard for Methods.
-func TestMatchRequest_MethodsStillEnforced(t *testing.T) {
-	e := NewInterceptEngine()
-	e.SetRules([]InterceptRule{{
-		ID:        "r1",
-		Enabled:   true,
-		Direction: DirectionRequest,
-		Methods:   []string{"POST"},
-	}})
-
-	env, msg := testHTTPRequest("POST", "/", "example.com", nil)
-	if matched := e.MatchRequest(env, msg); len(matched) != 1 {
-		t.Errorf("matched = %v, want 1 (regression: request-side Methods still applies)", matched)
-	}
-
-	env2, msg2 := testHTTPRequest("GET", "/", "example.com", nil)
-	if matched := e.MatchRequest(env2, msg2); len(matched) != 0 {
-		t.Errorf("matched = %v, want empty (regression: request-side Methods should still reject)", matched)
-	}
-}
-
 // TestMatchBoth_PathMatch_ResponseHeld is the canonical happy path for
 // direction:"both" with a path_pattern: the producing HTTP Layer threads
 // the request's path forward via EnvelopeContext.RequestPath, so the

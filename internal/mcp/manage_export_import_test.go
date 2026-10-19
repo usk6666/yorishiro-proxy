@@ -390,10 +390,6 @@ func TestExportImportRoundTrip_MCP(t *testing.T) {
 		t.Fatalf("expected 3 exported, got %d", exportRes.ExportedCount)
 	}
 
-	// Log JSONL for debugging
-	data, _ := os.ReadFile(exportPath)
-	t.Logf("Exported JSONL:\n%s", string(data))
-
 	// Step 2: Delete all sessions
 	deleteResult := manageCallTool(t, cs, map[string]any{
 		"action": "delete_flows",

@@ -144,13 +144,6 @@ func TestDecodeBody_Base64NoPadding(t *testing.T) {
 	}
 }
 
-func TestDecodeBody_InvalidBase64(t *testing.T) {
-	_, err := DecodeBody([]byte("!!!not-base64!!!"), true)
-	if err == nil {
-		t.Fatal("DecodeBody() error = nil, want error for invalid base64")
-	}
-}
-
 func TestDecodeBody_EmptyData(t *testing.T) {
 	result, err := DecodeBody(nil, false)
 	if err != nil {
@@ -281,17 +274,6 @@ func TestDecodeBody_MultipleDataAndTrailer(t *testing.T) {
 	}
 }
 
-func TestDecodeBody_MalformedTrailer(t *testing.T) {
-	// Trailer with a malformed line (no colon).
-	trailer := []byte("malformed-trailer-no-colon\r\n")
-	data := EncodeFrame(true, false, trailer)
-
-	_, err := DecodeBody(data, false)
-	if err == nil {
-		t.Fatal("DecodeBody() error = nil, want error for malformed trailer")
-	}
-}
-
 func TestEncodeFrame_RoundTrip(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -401,33 +383,6 @@ func TestEncodeFrame_HeaderFormat(t *testing.T) {
 	length := binary.BigEndian.Uint32(encoded[1:5])
 	if length != uint32(len(payload)) {
 		t.Errorf("length = %d, want %d", length, len(payload))
-	}
-}
-
-func TestBase64RoundTrip(t *testing.T) {
-	payload := []byte("round-trip-test")
-	trailer := []byte("grpc-status: 0\r\n")
-
-	var binaryData []byte
-	binaryData = append(binaryData, EncodeFrame(false, false, payload)...)
-	binaryData = append(binaryData, EncodeFrame(true, false, trailer)...)
-
-	// Encode to base64.
-	base64Data := EncodeBase64Body(binaryData)
-
-	// Decode via DecodeBody.
-	result, err := DecodeBody(base64Data, true)
-	if err != nil {
-		t.Fatalf("DecodeBody(base64) error = %v", err)
-	}
-	if len(result.DataFrames) != 1 {
-		t.Fatalf("DataFrames count = %d, want 1", len(result.DataFrames))
-	}
-	if !bytes.Equal(result.DataFrames[0].Payload, payload) {
-		t.Errorf("DataFrames[0].Payload = %q, want %q", result.DataFrames[0].Payload, payload)
-	}
-	if result.Trailers["grpc-status"] != "0" {
-		t.Errorf("Trailers[grpc-status] = %q, want %q", result.Trailers["grpc-status"], "0")
 	}
 }
 

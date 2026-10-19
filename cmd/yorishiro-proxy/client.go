@@ -130,7 +130,7 @@ TLS passthrough (dot-notation):
 
 Examples:
   yorishiro-proxy client configure upstream_proxy=http://proxy:8888
-  yorishiro-proxy client configure tls_passthrough.add=example.com,*.internal
+  yorishiro-proxy client configure tls_passthrough.add='example.com,*.internal'
   yorishiro-proxy client configure tls_fingerprint=chrome
 
 Full reference (no server required): yorishiro-proxy docs configure`,
@@ -230,13 +230,14 @@ Parameters (key=value or --key=value):
   tls_fingerprint=<prof>   Informational v1; per-call selection deferred
   tag=<tag>                Tag stored on the new flow's Tags map
 
-  messages=<json>          JSON array of {payload, body_encoding, compressed}; at least one element
+  messages=<json>          REQUIRED JSON array of {payload, body_encoding, compressed}; at least one
+                           element, even with flow_id (recorded messages are not inherited)
   metadata=<json>          JSON array of {name, value} (also trailer_metadata=<json>)
 
 Examples:
-  yorishiro-proxy client resend_grpc flow_id=abc123
+  yorishiro-proxy client resend_grpc flow_id=abc123 messages='[{"payload":"hello"}]'
   yorishiro-proxy client resend_grpc flow_id=abc123 messages='[{"payload":"hello"}]' metadata='[{"name":"authorization","value":"Bearer X"}]'
-  yorishiro-proxy client resend_grpc target_addr=127.0.0.1:50051 service=pkg.Greeter method=SayHello
+  yorishiro-proxy client resend_grpc target_addr=127.0.0.1:50051 service=pkg.Greeter method=SayHello messages='[{"payload":"hello"}]'
 
 Full reference (no server required): yorishiro-proxy docs resend_grpc`,
 
@@ -295,7 +296,7 @@ Examples:
   yorishiro-proxy client manage action=delete_flows params.flow_id=abc123
   yorishiro-proxy client manage action=delete_flows params.older_than_days=7 params.confirm=true
   yorishiro-proxy client manage action=export_flows params.format=har params.output_path=export.har
-  yorishiro-proxy client manage action=regenerate_ca_cert
+  yorishiro-proxy client manage action=regenerate_ca_cert params:='{}'
 
 Full reference (no server required): yorishiro-proxy docs manage`,
 
@@ -319,7 +320,7 @@ Parameters (key=value):
   params.max_duration=<dur>                Max duration e.g. 30m (for set_budget)
 
 Examples:
-  yorishiro-proxy client security action=get_target_scope
+  yorishiro-proxy client security action=get_target_scope params:='{}'
   yorishiro-proxy client security action=test_target params.url=https://example.com
   yorishiro-proxy client security action=set_rate_limits params.max_requests_per_second=100
 
@@ -374,7 +375,7 @@ Parameters (key=value or --key=value):
 Examples:
   yorishiro-proxy client fuzz_http flow_id=abc123 positions='[{"path":"raw_query","payloads":["test1","test2"]}]'
   yorishiro-proxy client fuzz_http flow_id=abc123 stop_on_5xx=true tag=path-fuzz positions='[{"path":"path","payloads":["/admin","/debug"]}]'
-  yorishiro-proxy client fuzz_http flow_id=abc123 positions='[{"path":"body","payloads":["'\''"]}]'  (a lone ' payload)
+  yorishiro-proxy client fuzz_http flow_id=abc123 positions='[{"path":"body","payloads":["'\''"]}]'  # a lone ' payload
 
 Full reference (no server required): yorishiro-proxy docs fuzz_http`,
 
@@ -426,7 +427,7 @@ Parameters (key=value or --key=value):
 
   positions=<json>         REQUIRED JSON array of {path, payloads[], encoding}. Supported paths:
                            service | method | metadata[N].name | metadata[N].value | messages[N].payload
-  messages=<json>          Base JSON array of {payload, body_encoding, compressed} (at least one element);
+  messages=<json>          REQUIRED base JSON array of {payload, body_encoding, compressed} (at least one element);
                            metadata=<json> / trailer_metadata=<json> are [{name, value}] arrays
 
 Examples:
@@ -504,7 +505,7 @@ Parameters (key=value):
 
 Examples:
   yorishiro-proxy client grpc_schema action=list
-  yorishiro-proxy client grpc_schema action=register params.source=descriptor_set params.descriptor_set_b64=<base64>
+  yorishiro-proxy client grpc_schema action=register params.source=descriptor_set params.descriptor_set_b64=DESCRIPTOR_SET_B64
   yorishiro-proxy client grpc_schema action=register params.source=file params.proto_paths=/srv/protos/hello.proto
   yorishiro-proxy client grpc_schema action=unregister params.service=pkg.Greeter
   yorishiro-proxy client grpc_schema action=clear
