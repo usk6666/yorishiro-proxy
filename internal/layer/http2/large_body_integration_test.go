@@ -9,16 +9,12 @@ import (
 	"fmt"
 	"io"
 	nethttp "net/http"
-	"os"
 	"regexp"
 	"strconv"
-	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/pipeline"
@@ -43,151 +39,15 @@ import (
 // h2BufferInspector and asserts that a file-backed BodyBuffer was actually
 // seen mid-flight, so a threshold that silently stops applying fails the
 // test instead of letting it pass on the in-memory path.
-
-const (
-	// h2SpillThresholdTest is the BodySpillThreshold used by these tests.
-	h2SpillThresholdTest = 256 << 10
-	// h2LargeBodySize is above h2SpillThresholdTest, so it spills to disk.
-	h2LargeBodySize = 1 << 20
-	// h2SmallBodySize is below h2SpillThresholdTest, so it stays in memory.
-	h2SmallBodySize = 128 << 10
-
-	// h2MaxBodyTestCap sits between the spill threshold and h2LargeBodySize,
-	// so the cap is breached on the disk-spill path (bodybuf's maxSize
-	// check). The code path is identical to the production 254 MiB cap.
-	h2MaxBodyTestCap = 512 << 10
-
-	h2DestructiveSQLMarker = "DROP TABLE users;"
-	h2SecretMarker         = "SECRET"
-	// h2ReplaceWith is intentionally the SAME LENGTH as h2SecretMarker so
-	// that the Transform rewrite keeps the total body size identical.
-	// h2 wire encoding inherits the request's Content-Length pseudo-header
-	// from msg.Headers; restamping CL after a body-length change is a
-	// separate improvement (not in scope for USK-635). A same-length
-	// replacement exercises the disk-backed materialize path without
-	// depending on the CL restamp.
-	h2ReplaceWith = "SECRE7"
-)
+//
+// Tiering (USK-1213): Scenario #1 and the shared spill harness live in the
+// smoke-tier large_body_smoke_integration_test.go; everything in this file
+// is exhaustive (nightly), including the 11 MiB production-threshold round
+// trip (Scenario 9) moved here from http2_integration_test.go.
 
 // ---------------------------------------------------------------------------
 // Body helpers (kept local to this package; http1 test file has its own set)
 // ---------------------------------------------------------------------------
-
-// makeH2LargeBody returns size bytes with a deterministic repeating pattern.
-// Matches the precedent in TestLargeResponseBody_SpillRoundtrip_11MiB so
-// variant recording with hash comparison is reliable.
-func makeH2LargeBody(size int) []byte {
-	pattern := make([]byte, 256)
-	for i := range pattern {
-		pattern[i] = byte(i)
-	}
-	b := bytes.Repeat(pattern, size/256)
-	if len(b) < size {
-		b = append(b, make([]byte, size-len(b))...)
-	}
-	return b
-}
-
-// embedH2Marker overwrites marker into body at offset (or end-aligned if
-// offset is beyond the body length minus marker length).
-func embedH2Marker(body []byte, marker string, offset int) []byte {
-	if offset+len(marker) > len(body) {
-		offset = len(body) - len(marker)
-	}
-	copy(body[offset:], []byte(marker))
-	return body
-}
-
-// countH2SpillFiles counts files in dir whose name starts with
-// config.BodySpillPrefix. Returns 0 if dir does not exist.
-func countH2SpillFiles(t *testing.T, dir string) int {
-	t.Helper()
-	if dir == "" {
-		t.Fatal("countH2SpillFiles: empty dir")
-	}
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return 0
-		}
-		t.Fatalf("ReadDir %s: %v", dir, err)
-	}
-	n := 0
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		if strings.HasPrefix(e.Name(), config.BodySpillPrefix) {
-			n++
-		}
-	}
-	return n
-}
-
-// h2BufferInspector is a Pipeline Step that records whether the HTTP
-// envelopes it sees carry a file-backed BodyBuffer, and how many spill files
-// were on disk at that moment. Prepended to the pipeline (before Safety /
-// Transform release or replace the BodyBuffer) to prove the disk-spill path
-// was really exercised. Safe for concurrent streams.
-type h2BufferInspector struct {
-	spillDir        string
-	fileBackedCount atomic.Int32
-	maxBodyLen      atomic.Int64
-	maxFilesOnDisk  atomic.Int32
-}
-
-func (b *h2BufferInspector) Process(_ context.Context, env *envelope.Envelope) pipeline.Result {
-	m, ok := env.Message.(*envelope.HTTPMessage)
-	if !ok || m == nil || m.BodyBuffer == nil || !m.BodyBuffer.IsFileBacked() {
-		return pipeline.Result{}
-	}
-	b.fileBackedCount.Add(1)
-	storeMax64(&b.maxBodyLen, m.BodyBuffer.Len())
-	if entries, err := os.ReadDir(b.spillDir); err == nil {
-		var n int32
-		for _, e := range entries {
-			if !e.IsDir() && strings.HasPrefix(e.Name(), config.BodySpillPrefix) {
-				n++
-			}
-		}
-		storeMax32(&b.maxFilesOnDisk, n)
-	}
-	return pipeline.Result{}
-}
-
-func storeMax64(a *atomic.Int64, v int64) {
-	for {
-		cur := a.Load()
-		if v <= cur || a.CompareAndSwap(cur, v) {
-			return
-		}
-	}
-}
-
-func storeMax32(a *atomic.Int32, v int32) {
-	for {
-		cur := a.Load()
-		if v <= cur || a.CompareAndSwap(cur, v) {
-			return
-		}
-	}
-}
-
-// assertH2Spilled fails t unless inspector saw at least wantCount file-backed
-// BodyBuffers, the largest wantLen bytes long, with a spill file on disk.
-func assertH2Spilled(t *testing.T, inspector *h2BufferInspector, wantCount int, wantLen int) {
-	t.Helper()
-	if got := inspector.fileBackedCount.Load(); got < int32(wantCount) {
-		t.Errorf("inspector saw %d file-backed BodyBuffers, want >= %d; a %d-byte body must spill above the %d-byte threshold",
-			got, wantCount, wantLen, h2SpillThresholdTest)
-	}
-	if got := inspector.maxBodyLen.Load(); got != int64(wantLen) {
-		t.Errorf("inspector saw file-backed BodyBuffer length = %d, want %d", got, wantLen)
-	}
-	if got := inspector.maxFilesOnDisk.Load(); got < 1 {
-		t.Errorf("inspector saw %d spill files mid-flight, want >= 1", got)
-	}
-}
 
 // waitStreamReachesState polls store until the specified stream ID's last
 // update records wantState, or timeout expires.
@@ -207,72 +67,6 @@ func waitStreamReachesState(t *testing.T, store *testStore, streamID, wantState 
 		observed = append(observed, fmt.Sprintf("state=%q reason=%q", u.State, u.FailureReason))
 	}
 	t.Fatalf("timeout waiting for stream %s state=%q (observed: %v)", streamID, wantState, observed)
-}
-
-// ---------------------------------------------------------------------------
-// Scenario 1: SafetyFilter matches a disk-backed REQUEST body (H2)
-// ---------------------------------------------------------------------------
-
-func TestLargeBody_HTTP2_SafetyFilterMatchesDiskBackedBody(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
-	defer cancel()
-
-	body := embedH2Marker(makeH2LargeBody(h2LargeBodySize), h2DestructiveSQLMarker, h2LargeBodySize/2)
-
-	var upstreamHits atomic.Int32
-	upAddr, _, _, upShutdown := startH2TLSUpstream(t, "safety-marker",
-		nethttp.HandlerFunc(func(w nethttp.ResponseWriter, r *nethttp.Request) {
-			upstreamHits.Add(1)
-			_, _ = io.Copy(io.Discard, r.Body)
-			w.WriteHeader(nethttp.StatusOK)
-		}))
-	defer upShutdown()
-
-	safetyEngine := httprules.NewSafetyEngine()
-	if err := safetyEngine.LoadPreset(common.PresetDestructiveSQL); err != nil {
-		t.Fatalf("LoadPreset: %v", err)
-	}
-
-	spillDir := t.TempDir()
-	inspector := &h2BufferInspector{spillDir: spillDir}
-	bcfg := makeBuildCfgWithBody(t, nil, spillDir, h2SpillThresholdTest, 0)
-	proxyAddr, store := startH2MITMProxy(t, ctx, bcfg, pipelineOpts{
-		safetyEngine:       safetyEngine,
-		prependCustomSteps: []pipeline.Step{inspector},
-	})
-
-	cli := newMITMH2Client(proxyAddr, upAddr)
-	req, err := nethttp.NewRequestWithContext(ctx, nethttp.MethodPost, "https://"+upAddr+"/sql", bytes.NewReader(body))
-	if err != nil {
-		t.Fatal(err)
-	}
-	req.Header.Set("Content-Type", "application/sql")
-	req.ContentLength = int64(len(body))
-	resp, doErr := cli.Do(req)
-	if resp != nil {
-		_, _ = io.Copy(io.Discard, resp.Body)
-		resp.Body.Close()
-	}
-	// doErr may be nil (upstream-free 0-length response if pipeline drops
-	// before headers) or non-nil (stream reset). Either is consistent with
-	// "no response from a dropped envelope" in the current pipeline — the
-	// definitive assertion is that upstream never saw the request.
-	_ = doErr
-
-	// Give pipeline time to drain the drop.
-	time.Sleep(500 * time.Millisecond)
-
-	assertH2Spilled(t, inspector, 1, h2LargeBodySize)
-	if h := upstreamHits.Load(); h != 0 {
-		t.Errorf("upstream handler fired %d times, want 0 (safety filter must block before stream open)", h)
-	}
-	if n := countH2SpillFiles(t, spillDir); n != 0 {
-		t.Errorf("BodySpillDir has %d leftover files after safety-drop, want 0", n)
-	}
-	// No Stream record is guaranteed because SafetyStep drops before
-	// RecordStep.createStream. No flow assertions needed; _ store elides the
-	// unused variable.
-	_ = store
 }
 
 // ---------------------------------------------------------------------------
@@ -922,4 +716,97 @@ func TestLargeBody_HTTP2_ConcurrentStreamsIndependent(t *testing.T) {
 		t.Errorf("BodySpillDir has %d leftover files after %d concurrent streams, want 0 "+
 			"(per-stream BodyBuffer must be released individually)", sf, nStreams)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Scenario 9: 11 MiB response round-trips at the production spill threshold
+// (moved from http2_integration_test.go by USK-1213)
+// ---------------------------------------------------------------------------
+
+// TestLargeResponseBody_SpillRoundtrip_11MiB verifies that an 11 MiB body
+// round-trips through the MITM proxy end-to-end under the USK-632 model:
+// the assembler aggregates all DATA frames into a BodyBuffer (memory →
+// file-backed past the configured spill threshold) and emits the envelope
+// only after END_STREAM. After USK-633, RecordStep materializes the
+// BodyBuffer into flow.Flow.Body via projectHTTPBody (capped at
+// config.MaxBodySize = 254 MiB), so recvF.Body carries the full 11 MiB —
+// the wire-observed bytes also remain on RawBytes (L7/L4 duality).
+func TestLargeResponseBody_SpillRoundtrip_11MiB(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	const size = 11 << 20
+	// Deterministic pattern: 256-byte repeating counter.
+	pattern := make([]byte, 256)
+	for i := range pattern {
+		pattern[i] = byte(i)
+	}
+	expected := bytes.Repeat(pattern, size/256)
+	if len(expected) != size {
+		expected = append(expected, make([]byte, size-len(expected))...)
+	}
+	expectedHash := sha256.Sum256(expected)
+
+	upAddr, _, _, upShutdown := startH2TLSUpstream(t, "large-marker", nethttp.HandlerFunc(func(w nethttp.ResponseWriter, r *nethttp.Request) {
+		w.Header().Set("Content-Length", strconv.Itoa(size))
+		_, _ = w.Write(expected)
+	}))
+	defer upShutdown()
+
+	bcfg := makeBuildCfg(t, nil)
+	proxyAddr, store := startH2MITMProxy(t, ctx, bcfg, pipelineOpts{})
+
+	cli := newMITMH2Client(proxyAddr, upAddr)
+	req, _ := nethttp.NewRequestWithContext(ctx, "GET", "https://"+upAddr+"/big", nil)
+	resp, err := cli.Do(req)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	defer resp.Body.Close()
+
+	h := sha256.New()
+	n, err := io.Copy(h, resp.Body)
+	if err != nil {
+		// An analyst driving a large download MUST get the full body through
+		// the proxy. A FLOW_CONTROL_ERROR is a proxy bug, not a client bug.
+		t.Fatalf("copy: %v", err)
+	}
+	if n != size {
+		t.Errorf("got %d bytes, want %d", n, size)
+	}
+	gotHash := h.Sum(nil)
+	if !bytes.Equal(gotHash, expectedHash[:]) {
+		t.Errorf("body hash mismatch: got=%x want=%x", gotHash, expectedHash)
+	}
+
+	st, flows := ensureLinkedExchange(t, store, 5*time.Second)
+	var recvF *flow.Flow
+	for _, f := range flows {
+		if f.Direction == "receive" {
+			recvF = f
+			break
+		}
+	}
+	if recvF == nil {
+		t.Fatal("no receive flow under linked stream")
+	}
+	// RecordStep materializes the BodyBuffer into flow.Flow.Body after USK-633
+	// (projectHTTPBody with MaxBodySize=254 MiB). 11 MiB fits under the cap
+	// and must be recorded faithfully for analyst review.
+	if len(recvF.Body) != size {
+		t.Errorf("receive flow Body length = %d, want %d", len(recvF.Body), size)
+	} else {
+		gotBodyHash := sha256.Sum256(recvF.Body)
+		if !bytes.Equal(gotBodyHash[:], expectedHash[:]) {
+			t.Errorf("receive flow Body hash mismatch: got=%x want=%x", gotBodyHash, expectedHash)
+		}
+	}
+	if len(recvF.Headers) == 0 {
+		t.Error("receive flow headers missing")
+	}
+	if len(recvF.RawBytes) == 0 {
+		t.Error("receive flow RawBytes empty")
+	}
+
+	waitForStreamState(t, store, st.ID, "complete", 5*time.Second)
 }
