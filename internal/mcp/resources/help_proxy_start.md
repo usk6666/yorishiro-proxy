@@ -52,6 +52,7 @@ Each entry maps a local port number (string key) to either:
   - **target** (string, required): Upstream address in `"host:port"` format (e.g. `"api.example.com:50051"`)
   - **protocol** (string, optional): Expected protocol for L7 parsing. Default: `"auto"` (peek-based detection).
     Valid values: `"auto"`, `"raw"`, `"http"`, `"http2"`, `"grpc"`, `"websocket"`, `"sse"`
+    For server-speaks-first targets (SMTP, FTP, MySQL, IMAP, POP3), use `"raw"`: `"auto"` waits up to 5 s for the client's first bytes before falling back to raw, so the server's greeting is delayed by that peek.
   - **tls** (boolean, optional): Enable client-side TLS MITM termination on the forwarded listen port. Default: `false`.
     When true, the proxy presents a dynamically-issued certificate to the local client and terminates TLS before applying L7 parsing.
   - **upstream_tls** (boolean, optional): Enable upstream-dial TLS encryption to `target`. Default: `false`.

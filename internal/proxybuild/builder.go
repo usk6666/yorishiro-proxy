@@ -17,6 +17,7 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
 	"github.com/usk6666/yorishiro-proxy/internal/layer"
+	"github.com/usk6666/yorishiro-proxy/internal/layer/bytechunk"
 	grpclayer "github.com/usk6666/yorishiro-proxy/internal/layer/grpc"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/grpcweb"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/http1"
@@ -743,7 +744,8 @@ func buildOnStack(p *pipeline.Pipeline, deps Deps, headRecorder requestHeadRecor
 
 		// USK-730: HTTP/1.x keep-alive runs one session per request-response
 		// exchange, mirroring the H2 per-stream pattern. Other routes
-		// (bytechunk Raw TCP) fall back to the single-Channel RunStackSession.
+		// (bytechunk Raw TCP) fall back to a single-Channel session
+		// (runSingleChannelSession; pre-dialed for raw, USK-1216).
 		if clientH1, ok := stack.ClientTopmost().(*http1.Layer); ok {
 			upstreamH1, ok := stack.UpstreamTopmost().(*http1.Layer)
 			if !ok {
@@ -762,10 +764,31 @@ func buildOnStack(p *pipeline.Pipeline, deps Deps, headRecorder requestHeadRecor
 			}
 			return ch, nil
 		}
-		if err := session.RunStackSession(ctx, stack, dial, p, sessOpts); err != nil && !errors.Is(err, context.Canceled) {
+		if err := runSingleChannelSession(ctx, stack, dial, p, sessOpts); err != nil && !errors.Is(err, context.Canceled) {
 			logger.Debug("proxybuild: session ended with error", "target", target, "error", err)
 		}
 	}
+}
+
+// isRawRelayStack reports whether stack is a [bytechunk → bytechunk] raw
+// relay: both topmost Layers are bytechunk Layers over connections that
+// already exist.
+func isRawRelayStack(stack *connector.ConnectionStack) bool {
+	_, clientRaw := stack.ClientTopmost().(*bytechunk.Layer)
+	_, upstreamRaw := stack.UpstreamTopmost().(*bytechunk.Layer)
+	return clientRaw && upstreamRaw
+}
+
+// runSingleChannelSession runs the session for a non-HTTP/1.x stack. A raw
+// relay runs pre-dialed so both directions are read from the start and a
+// server-speaks-first protocol (SMTP / MySQL / FTP / IMAPS banner) is
+// relayed without waiting for the client (USK-1216); any other stack
+// keeps the lazy dial of session.RunStackSession.
+func runSingleChannelSession(ctx context.Context, stack *connector.ConnectionStack, dial session.DialFunc, p *pipeline.Pipeline, opts session.SessionOptions) error {
+	if isRawRelayStack(stack) {
+		return session.RunPreDialedStackSession(ctx, stack, p, opts)
+	}
+	return session.RunStackSession(ctx, stack, dial, p, opts)
 }
 
 // runHTTP1ExchangeLoop iterates the HTTP/1.x client Layer's Channels()

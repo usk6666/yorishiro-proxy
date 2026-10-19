@@ -182,9 +182,10 @@ type SessionOptions struct {
 	// called in this mode.
 	//
 	// Set only by orchestrators that built the upstream Channel
-	// themselves (runUpgradeWS today; the raw-TCP forward is the planned
-	// next caller, USK-1216). The lazy dial stays the default because
-	// HTTP routing needs the first envelope to pick the upstream.
+	// themselves: runUpgradeWS (USK-1171) and RunPreDialedStackSession,
+	// which the raw [bytechunk → bytechunk] relays use so server-speaks-
+	// first protocols work (USK-1216). The lazy dial stays the default
+	// because HTTP routing needs the first envelope to pick the upstream.
 	preDialed layer.Channel
 
 	// onClientEnd, when non-nil, is called once when the client->upstream
@@ -725,6 +726,56 @@ func RunStackSession(
 	}
 
 	return RunStackSessionExchange(ctx, stack, clientCh, dial, p, opts...)
+}
+
+// errPreDialedNoDial is returned by the DialFunc RunPreDialedStackSession
+// hands to RunStackSessionExchange. RunSession never calls it in
+// pre-dialed mode; reaching it is a logic bug, surfaced instead of a hang.
+var errPreDialedNoDial = errors.New("session: pre-dialed session must not dial")
+
+// RunPreDialedStackSession runs a session over a ConnectionStack whose
+// upstream connection already exists (USK-1216). Both the client and the
+// upstream Channel are pulled from the stack's topmost Layers up front and
+// the session runs in "upstream pre-established" mode
+// (SessionOptions.preDialed): both directions are read from the start, so
+// a peer that speaks first — an SMTP / MySQL / FTP / IMAP banner on a raw
+// relay — reaches the other peer without waiting for the client to send.
+//
+// Use it only for stacks whose topmost Layers yield their Channel
+// immediately and whose upstream does not depend on the first client
+// envelope (the [bytechunk → bytechunk] raw relay). HTTP routing needs the
+// lazy dial of RunStackSession, which stays the default everywhere else.
+func RunPreDialedStackSession(
+	ctx context.Context,
+	stack *connector.ConnectionStack,
+	p *pipeline.Pipeline,
+	opts ...SessionOptions,
+) error {
+	if stack == nil {
+		return errors.New("session: RunPreDialedStackSession requires non-nil ConnectionStack")
+	}
+	clientTop, upstreamTop := stack.ClientTopmost(), stack.UpstreamTopmost()
+	if clientTop == nil || upstreamTop == nil {
+		return errors.New("session: pre-dialed ConnectionStack needs both a client and an upstream topmost layer")
+	}
+	clientCh, ok := <-clientTop.Channels()
+	if !ok || clientCh == nil {
+		return errors.New("session: client topmost layer produced no Channel")
+	}
+	upstreamCh, ok := <-upstreamTop.Channels()
+	if !ok || upstreamCh == nil {
+		return errors.New("session: upstream topmost layer produced no Channel")
+	}
+
+	var opt SessionOptions
+	if len(opts) > 0 {
+		opt = opts[0]
+	}
+	opt.preDialed = upstreamCh
+	dial := func(context.Context, *envelope.Envelope) (layer.Channel, error) {
+		return nil, errPreDialedNoDial
+	}
+	return RunStackSessionExchange(ctx, stack, clientCh, dial, p, opt)
 }
 
 // RunStackSessionExchange is the per-exchange variant of RunStackSession.
@@ -2845,10 +2896,38 @@ func clientToUpstreamExit(uh *upstreamHolder, opt SessionOptions, err error) {
 			_ = c.Close()
 		}
 	}
-	if err == nil || uh.ch == nil {
+	if uh.ch == nil {
+		return
+	}
+	if err == nil {
+		// USK-1216: the client sent FIN. Pass it on as a half-close so
+		// the upstream reads EOF too (no-op for Channels that cannot
+		// half-close); the response direction keeps flowing.
+		halfCloseWrite(uh.ch)
 		return
 	}
 	_ = uh.ch.Close()
+}
+
+// halfCloser is implemented by Channels that can half-close their write
+// side while staying readable — today only bytechunk.Channel (FIN on TCP,
+// close_notify on TLS). RunSession uses it to relay one peer's clean EOF
+// to the other peer, so a raw relay behaves like a direct TCP connection
+// (USK-1216). Channels of framed protocols do not implement it: their end
+// of stream is a protocol event, not a socket half-close.
+type halfCloser interface {
+	CloseWrite() error
+}
+
+// halfCloseWrite half-closes ch when it supports it. Errors are ignored:
+// the peer may already have closed the socket, which is exactly the state
+// the half-close would have produced.
+func halfCloseWrite(ch layer.Channel) {
+	if hc, ok := ch.(halfCloser); ok {
+		if err := hc.CloseWrite(); err != nil {
+			slog.Debug("session: half-close failed", "stream_id", ch.StreamID(), "error", err)
+		}
+	}
 }
 
 // dispatchClientAction performs the post-Pipeline action on a client-side
@@ -2971,7 +3050,7 @@ func upstreamToClient(
 		settle()
 		env, err := upstreamNext(ctx, uh.ch, notice)
 		if err != nil || env == nil {
-			return upstreamToClientFinish(ctx, opt, uh, clientID, err, relayed)
+			return upstreamToClientFinish(ctx, opt, uh, client, clientID, err, relayed)
 		}
 
 		if clientID != "" {
@@ -3077,8 +3156,10 @@ func relaySendErr(uh *upstreamHolder, err error) error {
 // returns through.
 //
 // Contract:
-//   - err == nil (env was nil): graceful EOF; check release tracker and
-//     return nil so the caller's errgroup sees a clean exit.
+//   - err == nil (env was nil): graceful EOF; relay it to the client as
+//     a half-close where the client Channel supports one (USK-1216),
+//     check release tracker and return nil so the caller's errgroup sees
+//     a clean exit.
 //   - err == ErrUpgradePending: control-flow signal from upstreamNext;
 //     surface verbatim WITHOUT touching the tracker (it is not a wire
 //     teardown).
@@ -3094,9 +3175,15 @@ func relaySendErr(uh *upstreamHolder, err error) error {
 // diagnostic tag is suppressed on the canonical false-positive path
 // (modify_and_forward request → 200 OK relayed end-to-end → normal
 // upstream close).
-func upstreamToClientFinish(ctx context.Context, opt SessionOptions, uh *upstreamHolder, clientID string, err error, relayed bool) error {
+func upstreamToClientFinish(ctx context.Context, opt SessionOptions, uh *upstreamHolder, client layer.Channel, clientID string, err error, relayed bool) error {
 	if errors.Is(err, ErrUpgradePending) {
 		return err
+	}
+	if err == nil {
+		// USK-1216: the upstream sent FIN. Relay it to the client as a
+		// half-close (no-op for Channels that cannot half-close); the
+		// client may still send, so the request direction stays open.
+		halfCloseWrite(client)
 	}
 	if err != nil && (uh.tornDown.Load() || uh.endingRPC.Load()) {
 		// tornDown: the read failed because the client direction ended

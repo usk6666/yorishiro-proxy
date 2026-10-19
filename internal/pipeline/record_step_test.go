@@ -146,6 +146,9 @@ func TestRecordStep_CreateStreamOnFirstSend(t *testing.T) {
 	}
 }
 
+// TestRecordStep_NoStreamOnSubsequentSend: a non-first Send does not open
+// a Stream. Uses HTTP: raw TCP is the exception — any raw envelope opens
+// its Stream (USK-1216, see record_step_raw_receive_first_test.go).
 func TestRecordStep_NoStreamOnSubsequentSend(t *testing.T) {
 	w := &mockWriter{}
 	step := NewRecordStep(w, nil)
@@ -155,9 +158,9 @@ func TestRecordStep_NoStreamOnSubsequentSend(t *testing.T) {
 		FlowID:    "flow-2",
 		Direction: envelope.Send,
 		Sequence:  1,
-		Protocol:  envelope.ProtocolRaw,
+		Protocol:  envelope.ProtocolHTTP,
 		Raw:       []byte("more"),
-		Message:   &envelope.RawMessage{Bytes: []byte("more")},
+		Message:   &envelope.HTTPMessage{Method: "GET", Path: "/"},
 	}
 	step.Process(context.Background(), env)
 
@@ -169,6 +172,8 @@ func TestRecordStep_NoStreamOnSubsequentSend(t *testing.T) {
 	}
 }
 
+// TestRecordStep_NoStreamOnReceive: a Receive does not open a Stream.
+// Uses HTTP for the same reason as TestRecordStep_NoStreamOnSubsequentSend.
 func TestRecordStep_NoStreamOnReceive(t *testing.T) {
 	w := &mockWriter{}
 	step := NewRecordStep(w, nil)
@@ -178,9 +183,9 @@ func TestRecordStep_NoStreamOnReceive(t *testing.T) {
 		FlowID:    "flow-3",
 		Direction: envelope.Receive,
 		Sequence:  0,
-		Protocol:  envelope.ProtocolRaw,
+		Protocol:  envelope.ProtocolHTTP,
 		Raw:       []byte("resp"),
-		Message:   &envelope.RawMessage{Bytes: []byte("resp")},
+		Message:   &envelope.HTTPMessage{Method: "GET", Path: "/"},
 	}
 	step.Process(context.Background(), env)
 
