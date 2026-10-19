@@ -951,7 +951,8 @@ func (s *Server) runResendHTTP(ctx context.Context, env *envelope.Envelope, dial
 }
 
 // maxResendHTTPInterimResponses bounds how many 1xx interim responses
-// receiveResendHTTPResponse records before giving up on a final one, so an
+// receiveResendHTTPResponse records before giving up on a final one (the
+// next 1xx fails the call without being recorded), so an
 // upstream streaming 1xx forever cannot pin the call until its timeout.
 const maxResendHTTPInterimResponses = 32
 
@@ -981,12 +982,15 @@ func receiveResendHTTPResponse(ctx context.Context, ch layer.Channel, p *pipelin
 		respEnv.Sequence = seq
 		msg, _ := respEnv.Message.(*envelope.HTTPMessage)
 		interim := msg != nil && msg.Status >= 100 && msg.Status < 200 && msg.Status != 101
+		// Check the cap before recording so at most
+		// maxResendHTTPInterimResponses interim Flows are recorded; the
+		// over-cap 1xx itself is not.
+		if interim && seq > maxResendHTTPInterimResponses {
+			return nil, fmt.Errorf("upstream receive: more than %d interim (1xx) responses without a final response", maxResendHTTPInterimResponses)
+		}
 		respEnv, _, _ = p.Run(ctx, respEnv)
 		if !interim {
 			return respEnv, nil
-		}
-		if seq > maxResendHTTPInterimResponses {
-			return nil, fmt.Errorf("upstream receive: more than %d interim (1xx) responses without a final response", maxResendHTTPInterimResponses)
 		}
 	}
 }

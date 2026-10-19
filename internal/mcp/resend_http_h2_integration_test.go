@@ -583,6 +583,37 @@ func TestResendHTTP_H2Flow_EarlyHintsThenFinal(t *testing.T) {
 	}
 }
 
+// TestResendHTTP_H1Flow_EarlyHintsThenFinal is the HTTP/1.1 twin of
+// TestResendHTTP_H2Flow_EarlyHintsThenFinal: the 1xx loop is shared, so an
+// h1 resend must also report the final 200 (not the 103) and record both
+// responses as receive Flows in wire order.
+func TestResendHTTP_H1Flow_EarlyHintsThenFinal(t *testing.T) {
+	srv, rec := startProtoTLSUpstream(t, []string{"http/1.1"}, true)
+	authority := srv.Listener.Addr().String()
+	cs, store := setupResendHTTPVersionSession(t, &transport.StandardTransport{InsecureSkipVerify: true}, "")
+	flowID := saveVersionedHTTPFlow(t, store, "https://"+authority+"/hints", "http/1.1", map[string][]string{"User-Agent": {"curl/8.5.0"}})
+
+	res := callResendHTTP(t, cs, map[string]any{"flow_id": flowID, "timeout_ms": 5000})
+	if res.IsError {
+		t.Fatalf("resend_http failed: %s", extractTextContent(res))
+	}
+	var out resendHTTPResult
+	decodeStructuredResult(t, res, &out)
+	if out.StatusCode != 200 || out.Body != "proto-ok" {
+		t.Errorf("result = %d %q, want the final 200 %q", out.StatusCode, out.Body, "proto-ok")
+	}
+	if got := rec.snapshot(); len(got) != 1 || got[0] != "HTTP/1.1" {
+		t.Errorf("upstream protos = %v, want [HTTP/1.1]", got)
+	}
+	send, recv, statuses := flowVersions(t, store, out.StreamID)
+	if len(statuses) != 2 || statuses[0] != 103 || statuses[1] != 200 {
+		t.Errorf("recorded receive statuses = %v, want [103 200]", statuses)
+	}
+	if send != "http/1.1" || recv != "http/1.1" {
+		t.Errorf("recorded http_version send=%q receive=%q, want http/1.1/http/1.1", send, recv)
+	}
+}
+
 // TestFuzzHTTP_H2Flow_VariantsSentOverHTTP2 covers AC "fuzz_http variants
 // based on an h2 flow are sent over HTTP/2": every variant reaches the
 // h2-only upstream as HTTP/2 and every variant Send Flow records "h2".
