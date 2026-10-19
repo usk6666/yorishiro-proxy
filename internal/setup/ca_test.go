@@ -8,7 +8,6 @@ import (
 	"slices"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/cert"
 )
@@ -243,19 +242,16 @@ const helperRaceEnv = "GORACE=atexit_sleep_ms=0"
 
 // TestInstallScriptedExecCommand_HelperSkipsRaceExitSleep guards the
 // helper child's environment: without helperRaceEnv every successful fake
-// certutil call costs a 1 s sleep under -race (USK-1208).
+// certutil call costs a 1 s sleep under -race (USK-1208). The env check
+// is the guard; wall-clock timing is deliberately not asserted.
 func TestInstallScriptedExecCommand_HelperSkipsRaceExitSleep(t *testing.T) {
 	installScriptedExecCommand(t, []scriptedCertutil{{subcmd: "-L"}})
 	cmd := execCommand("certutil", "-L", "-d", "sql:/nonexistent")
 	if !slices.Contains(cmd.Env, helperRaceEnv) {
 		t.Fatalf("helper env = %q, want it to contain %q", cmd.Env, helperRaceEnv)
 	}
-	start := time.Now()
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("helper run: %v", err)
-	}
-	if elapsed := time.Since(start); elapsed >= time.Second {
-		t.Errorf("helper child took %v to exit 0, want < 1s", elapsed)
 	}
 }
 

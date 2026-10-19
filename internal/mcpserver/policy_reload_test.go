@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -601,7 +602,9 @@ func TestPolicyReloader_RunConsumesTriggers(t *testing.T) {
 //
 // -no-http-mcp without -stdio-mcp makes Run return "no MCP transport
 // enabled" after the trigger is installed but before any infrastructure is
-// created (USK-1208), so these runs end without a listener or a DB.
+// created (USK-1208), so these runs end without a listener or a DB. That
+// early return skips startPolicyReloader; the fully assembled boot is
+// covered by TestRun_PolicyReloaderServesTriggerAfterFullBoot.
 func TestRun_PolicyReloadHookOnlyWithPolicySource(t *testing.T) {
 	dir := t.TempDir()
 	policyPath := filepath.Join(dir, "policy.json")
@@ -653,5 +656,78 @@ func TestRun_PolicyReloadHookOnlyWithPolicySource(t *testing.T) {
 				t.Errorf("trigger Stop called %d times, want %d", got, want)
 			}
 		})
+	}
+}
+
+// TestRun_PolicyReloaderServesTriggerAfterFullBoot covers what the
+// -no-http-mcp runs above return too early to reach (USK-1208 review F-2):
+// with a policy source, a fully assembled boot starts the reloader on the
+// installed trigger — a request sent from OnBootComplete is served — and
+// Run releases the trigger exactly once on the way out. OnBootComplete
+// fires after startPolicyReloader and before any transport starts, so
+// returning its sentinel ends Run without a listener.
+func TestRun_PolicyReloaderServesTriggerAfterFullBoot(t *testing.T) {
+	sandboxBootEnv(t)
+	dir := t.TempDir()
+	policyPath := filepath.Join(dir, "policy.json")
+	writeFileAtomic(t, policyPath, `{"allows":[{"hostname":"x.test"}]}`)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	fs := flag.NewFlagSet("reload-full-boot", flag.ContinueOnError)
+	fs.SetOutput(discardWriter{})
+
+	trigger := make(chan struct{}, 1)
+	reloaded := make(chan error, 1)
+	errStop := errors.New("boot complete: stop here")
+	var installed, stopped, listening atomic.Int32
+	err := Run(ctx, fs, []string{
+		"-db", filepath.Join(dir, "flows.db"),
+		"-ca-ephemeral",
+		"-mcp-http-addr", "127.0.0.1:0",
+		"-log-level", "error",
+		"-target-policy-file", policyPath,
+	}, RunOptions{
+		Version: "test",
+		PolicyReload: func() PolicyReloadTrigger {
+			installed.Add(1)
+			return PolicyReloadTrigger{Name: "test", C: trigger, Stop: func() { stopped.Add(1) }}
+		},
+		OnPolicyReload: func(err error) {
+			select {
+			case reloaded <- err:
+			default:
+			}
+		},
+		OnBootComplete: func() error {
+			trigger <- struct{}{}
+			select {
+			case err := <-reloaded:
+				if err != nil {
+					t.Errorf("reload served at boot failed: %v", err)
+				}
+			case <-time.After(10 * time.Second):
+				t.Error("reloader did not serve a trigger sent after boot completed")
+			}
+			return errStop
+		},
+		OnHTTPListening: func(string) {
+			// Reached only if OnBootComplete did not abort; end Run so
+			// that is an assertion failure, not a hang.
+			listening.Add(1)
+			cancel()
+		},
+	})
+	if !errors.Is(err, errStop) {
+		t.Fatalf("Run error = %v, want the OnBootComplete sentinel", err)
+	}
+	if got := installed.Load(); got != 1 {
+		t.Errorf("PolicyReload hook called %d times, want 1", got)
+	}
+	if got := stopped.Load(); got != 1 {
+		t.Errorf("trigger Stop called %d times, want 1", got)
+	}
+	if got := listening.Load(); got != 0 {
+		t.Errorf("HTTP MCP listener started %d times despite OnBootComplete aborting", got)
 	}
 }

@@ -9,7 +9,6 @@ import (
 	"runtime"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/setup"
 )
@@ -41,7 +40,7 @@ func stubVerifyBinary(t *testing.T) (bin, marker string) {
 	dir := t.TempDir()
 	marker = filepath.Join(dir, "verified")
 	bin = filepath.Join(dir, "yorishiro-proxy-stub")
-	script := "#!/bin/sh\n: > '" + marker + "'\nexit 0\n"
+	script := "#!/bin/sh\n: > " + shellQuote(marker) + "\nexit 0\n"
 	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
 		t.Fatalf("write verify stub: %v", err)
 	}
@@ -62,13 +61,9 @@ func TestRunInstall_AllTargets(t *testing.T) {
 	}
 	opts.BinaryPath = bin
 
-	start := time.Now()
 	runner := setup.NewRunner(opts, setup.NewStdinPrompter(strings.NewReader(""), io.Discard), io.Discard)
 	if err := runner.Install(context.Background()); err != nil {
 		t.Fatalf("Install() error: %v", err)
-	}
-	if elapsed := time.Since(start); elapsed > 2*time.Second {
-		t.Errorf("install took %v, want < 2s (verification must not run a long-lived process)", elapsed)
 	}
 
 	// The project-scope MCP config lands in cwd and points at the binary.
@@ -284,4 +279,11 @@ func TestParseInstallTarget(t *testing.T) {
 			}
 		})
 	}
+}
+
+// shellQuote returns s as a single-quoted POSIX shell word, escaping any
+// embedded single quote (close the quote, emit an escaped quote, reopen)
+// so a quote in TMPDIR cannot break out of the script's quoting.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }

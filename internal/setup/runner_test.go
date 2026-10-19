@@ -341,7 +341,7 @@ func stubVerifyBinary(t *testing.T) (string, string) {
 	dir := t.TempDir()
 	marker := filepath.Join(dir, "verified")
 	bin := filepath.Join(dir, "yorishiro-proxy-stub")
-	script := "#!/bin/sh\n: > '" + marker + "'\nexit 0\n"
+	script := "#!/bin/sh\n: > " + shellQuote(marker) + "\nexit 0\n"
 	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
 		t.Fatalf("write verify stub: %v", err)
 	}

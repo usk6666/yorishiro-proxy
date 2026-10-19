@@ -55,17 +55,17 @@ func writeFakeProtoc(t *testing.T, mode fakeProtocMode) (bin, argvLog string) {
 	var tail string
 	switch mode {
 	case fakeProtocWriteDesc:
-		tail = "cat '" + fixture + "' > \"$out\"\nexit 0\n"
+		tail = "cat " + shellQuote(fixture) + " > \"$out\"\nexit 0\n"
 	case fakeProtocFail:
 		tail = "echo " + fakeProtocErrMarker + " >&2\nexit 3\n"
 	case fakeProtocNoOutput:
 		tail = "exit 0\n"
 	}
 	script := "#!/bin/sh\n" +
-		": > '" + argvLog + "'\n" +
+		": > " + shellQuote(argvLog) + "\n" +
 		"out=\n" +
 		"for a in \"$@\"; do\n" +
-		"  printf '%s\\n' \"$a\" >> '" + argvLog + "'\n" +
+		"  printf '%s\\n' \"$a\" >> " + shellQuote(argvLog) + "\n" +
 		"  case \"$a\" in --descriptor_set_out=*) out=\"${a#--descriptor_set_out=}\" ;; esac\n" +
 		"done\n" +
 		tail
@@ -74,6 +74,13 @@ func writeFakeProtoc(t *testing.T, mode fakeProtocMode) (bin, argvLog string) {
 		t.Fatalf("write fake protoc: %v", err)
 	}
 	return bin, argvLog
+}
+
+// shellQuote returns s as a single-quoted POSIX shell word, escaping any
+// embedded single quote (close the quote, emit an escaped quote, reopen)
+// so a quote in TMPDIR cannot break out of the script's quoting.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // fakeProtocInput writes a .proto file (content is irrelevant to the fake)
