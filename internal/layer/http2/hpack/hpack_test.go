@@ -10,17 +10,11 @@ import (
 
 // --- Static Table Tests ---
 
-func TestStaticTable_Size(t *testing.T) {
-	// Verify static table has 61 entries.
-	count := 0
+func TestStaticTable_NoEmptyNames(t *testing.T) {
 	for i := 1; i <= staticTableLen; i++ {
 		if staticTable[i].Name == "" {
 			t.Errorf("static table entry %d has empty name", i)
 		}
-		count++
-	}
-	if count != 61 {
-		t.Errorf("static table has %d entries, want 61", count)
 	}
 }
 

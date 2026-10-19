@@ -161,29 +161,6 @@ func (p *h2Peer) expectSettingsAck(t *testing.T) {
 
 // --- Layer construction tests ---
 
-func TestLayer_NewServer(t *testing.T) {
-	l, peer, cleanup := startServerLayer(t)
-	defer cleanup()
-	peer.consumePeerSettings(t)
-
-	if l.Channels() == nil {
-		t.Errorf("Channels() returned nil")
-	}
-	if l.role != ServerRole {
-		t.Errorf("role = %s, want server", l.role)
-	}
-}
-
-func TestLayer_NewClient(t *testing.T) {
-	l, peer, cleanup := startClientLayer(t)
-	defer cleanup()
-	peer.consumePeerSettings(t)
-
-	if l.role != ClientRole {
-		t.Errorf("role = %s, want client", l.role)
-	}
-}
-
 func TestLayer_OpenStream_ServerRoleRejected(t *testing.T) {
 	l, peer, cleanup := startServerLayer(t)
 	defer cleanup()

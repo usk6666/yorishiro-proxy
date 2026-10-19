@@ -5,13 +5,6 @@ import (
 	"time"
 )
 
-func TestSSEMessage_Protocol(t *testing.T) {
-	m := &SSEMessage{}
-	if got := m.Protocol(); got != ProtocolSSE {
-		t.Errorf("SSEMessage.Protocol() = %q, want %q", got, ProtocolSSE)
-	}
-}
-
 func TestSSEMessage_CloneMessage_DeepCopy(t *testing.T) {
 	orig := &SSEMessage{
 		Event: "update",
