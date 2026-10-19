@@ -11,16 +11,17 @@ import (
 
 // Live-connection registry (USK-1160).
 //
-// The CONNECT, SOCKS5 and plain-HTTP-forward gates check TargetScope once,
-// at admission. Some routes are never checked again — the TLS passthrough
+// The CONNECT, SOCKS5, plain-HTTP-forward and TCP forward (tcp_forwards,
+// in internal/proxybuild, USK-1161) gates check TargetScope once, at
+// admission. Some routes are never checked again — the TLS passthrough
 // relay, the bytechunk (raw TCP) route, the server→client half of a MITM'd
 // WebSocket / SSE / gRPC stream, idle upstream connections, the h2 pre-warm
 // redial — so without this registry a policy change that denies a host
 // would leave every connection already open to it running.
 //
 // Every connection a gate admits is registered with the predicate the gate
-// used (the exact CheckTarget call, keyed on the CONNECT / SOCKS5 authority
-// or the forward target — never on SNI). Reconcile re-evaluates every entry
+// used (the exact CheckTarget call, keyed on the CONNECT / SOCKS5 authority,
+// the forward target or the tcp_forwards target — never on SNI). Reconcile re-evaluates every entry
 // and cancels the context of each one that would not be admitted now; the
 // handlers pass that context to the relay / stack / session, whose existing
 // ctx watchers close both legs. The invariant is:
@@ -62,12 +63,13 @@ var ErrTargetScopeRevoked = errors.New("target scope no longer admits this conne
 type LiveConnAdmitFunc func() (allowed bool, reason string)
 
 // LiveConn describes one connection admitted by a CONNECT / SOCKS5 /
-// plain-HTTP-forward gate. ConnID, Listener, Via and Target are only used
+// plain-HTTP-forward / TCP forward gate. ConnID, Listener, Via and Target are only used
 // for logging.
 type LiveConn struct {
 	ConnID   string
 	Listener string
-	// Via names the gate: "connect", "socks5" or "http1-forward".
+	// Via names the gate: "connect", "socks5", "http1-forward" or
+	// "tcp-forward".
 	Via string
 	// Target is the authority the gate admitted (host:port).
 	Target string

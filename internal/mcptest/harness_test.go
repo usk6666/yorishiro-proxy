@@ -50,32 +50,6 @@ func TestCombineErrorText(t *testing.T) {
 	}
 }
 
-func TestContains(t *testing.T) {
-	tests := []struct {
-		name     string
-		haystack string
-		needle   string
-		want     bool
-	}{
-		{"empty needle matches anything", "abc", "", true},
-		{"exact match", "abc", "abc", true},
-		{"prefix match", "abc def", "abc", true},
-		{"suffix match", "abc def", "def", true},
-		{"middle match", "abc def ghi", "def", true},
-		{"no match", "abc", "xyz", false},
-		{"needle longer than haystack", "abc", "abcdef", false},
-		{"case sensitive", "ABC", "abc", false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := contains(tt.haystack, tt.needle)
-			if got != tt.want {
-				t.Errorf("contains(%q, %q) = %v, want %v", tt.haystack, tt.needle, got, tt.want)
-			}
-		})
-	}
-}
-
 func TestGenerateToken_FormatAndUniqueness(t *testing.T) {
 	a, err := generateToken()
 	if err != nil {

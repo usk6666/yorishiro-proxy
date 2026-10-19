@@ -1103,8 +1103,6 @@ func TestExportImportRoundTrip_WithValidateIDs(t *testing.T) {
 		t.Fatalf("expected 1 exported, got %d", n)
 	}
 
-	t.Logf("Exported JSONL:\n%s", buf.String())
-
 	// Import into a fresh store with ValidateIDs: true (like MCP handler does)
 	store2 := newTestStore(t)
 	result, err := ImportStreams(ctx, store2, &buf, ImportOptions{

@@ -1,9 +1,11 @@
 package pipeline
 
 import (
+	"bytes"
 	"context"
-	"errors"
-	"fmt"
+	"encoding/json"
+	"log/slog"
+	"strings"
 	"testing"
 
 	"go.starlark.net/starlark"
@@ -217,10 +219,75 @@ func TestPluginStepPre_MidStreamDrop_IsRejectedFailSoft(t *testing.T) {
 	}
 }
 
+// TestPluginStepPre_DispatcherErrorIsLoggedAndContinued drives the real
+// PluginStepPre with two hooks on (grpc, on_data, pre_pipeline): the first
+// returns "DROP", which Engine.Dispatch rejects with ErrDisallowedAction
+// because grpc on_data is mid-stream. The dispatcher must log that error at
+// Warn and continue the chain — the second hook still runs and the step
+// returns Continue.
 func TestPluginStepPre_DispatcherErrorIsLoggedAndContinued(t *testing.T) {
-	// Sanity check that ErrDisallowedAction surfacing from Engine.Dispatch
-	// is converted to a continued chain in the pipeline layer.
-	if !errors.Is(fmt.Errorf("wrap: %w", pluginv2.ErrDisallowedAction), pluginv2.ErrDisallowedAction) {
-		t.Skip("errors.Is plumbing broken in dependency")
+	eng := pluginv2.NewEngine(nil)
+	eng.Registry().Register(pluginv2.Hook{
+		Protocol: pluginv2.ProtoGRPC, Event: pluginv2.EventOnData,
+		Phase: pluginv2.PhasePrePipeline, PluginName: "dropper",
+		Fn: hookCallable("drop", func(args starlark.Tuple) (starlark.Value, error) {
+			return starlark.String("DROP"), nil
+		}),
+	})
+	secondCalls := 0
+	eng.Registry().Register(pluginv2.Hook{
+		Protocol: pluginv2.ProtoGRPC, Event: pluginv2.EventOnData,
+		Phase: pluginv2.PhasePrePipeline, PluginName: "counter",
+		Fn: hookCallable("count", func(args starlark.Tuple) (starlark.Value, error) {
+			secondCalls++
+			return starlark.None, nil
+		}),
+	})
+
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	step := NewPluginStepPre(eng, nil, logger)
+	env := &envelope.Envelope{
+		StreamID:  "s",
+		FlowID:    "f",
+		Direction: envelope.Send,
+		Protocol:  envelope.ProtocolGRPC,
+		Message:   &envelope.GRPCDataMessage{Service: "S", Method: "M", Payload: []byte("hi")},
+	}
+	r := step.Process(context.Background(), env)
+
+	if r.Action != Continue {
+		t.Errorf("Action = %v, want Continue", r.Action)
+	}
+	if secondCalls != 1 {
+		t.Errorf("second hook called %d times, want 1 (chain must continue past the rejected outcome)", secondCalls)
+	}
+
+	var found bool
+	for _, line := range bytes.Split(bytes.TrimSpace(logBuf.Bytes()), []byte("\n")) {
+		if len(line) == 0 {
+			continue
+		}
+		var rec map[string]any
+		if err := json.Unmarshal(line, &rec); err != nil {
+			t.Fatalf("unmarshal log line %q: %v", line, err)
+		}
+		if rec["msg"] != "plugin: hook outcome rejected; treating as continue" {
+			continue
+		}
+		found = true
+		if rec["level"] != "WARN" {
+			t.Errorf("log level = %v, want WARN", rec["level"])
+		}
+		if rec["plugin"] != "dropper" {
+			t.Errorf("log plugin = %v, want dropper", rec["plugin"])
+		}
+		errStr, _ := rec["error"].(string)
+		if !strings.Contains(errStr, "disallowed") {
+			t.Errorf("log error = %q, want it to contain %q", errStr, "disallowed")
+		}
+	}
+	if !found {
+		t.Errorf("no 'hook outcome rejected' Warn log; got logs:\n%s", logBuf.String())
 	}
 }

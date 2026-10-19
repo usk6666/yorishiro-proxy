@@ -691,8 +691,23 @@ function CampaignCreator({ onCreated }: CampaignCreatorProps) {
       if (protocol === "grpc") {
         const built = buildPositions<FuzzGRPCPosition>();
         if (!built) return;
+        // fuzz_grpc requires `messages` in every mode, flow_id included:
+        // recorded request messages are not inherited. The form always
+        // sends exactly one base message (messages[0]); an empty payload
+        // is a valid zero-length LPM (e.g. google.protobuf.Empty), so it
+        // is sent as-is rather than omitted. This mirrors
+        // buildResendGrpcParams on the Resend page.
         const params: FuzzGRPCParams = {
           positions: built,
+          messages: [
+            {
+              payload: grpcMessagePayload,
+              body_encoding:
+                grpcMessageEncoding && grpcMessageEncoding !== "text"
+                  ? grpcMessageEncoding
+                  : undefined,
+            },
+          ],
         };
         if (flowId.trim()) params.flow_id = flowId.trim();
         if (grpcTargetAddr.trim()) params.target_addr = grpcTargetAddr.trim();
@@ -702,20 +717,6 @@ function CampaignCreator({ onCreated }: CampaignCreatorProps) {
         const md = headerEntriesToKVs(grpcMetadata);
         if (md.length > 0) params.metadata = md;
         if (grpcEncoding.trim()) params.encoding = grpcEncoding.trim();
-        // A single base message is the common case; multi-message campaigns
-        // can iterate via positions on messages[N].payload after seeding via
-        // flow_id. The form keeps the surface small.
-        if (grpcMessagePayload.length > 0) {
-          params.messages = [
-            {
-              payload: grpcMessagePayload,
-              body_encoding:
-                grpcMessageEncoding && grpcMessageEncoding !== "text"
-                  ? grpcMessageEncoding
-                  : undefined,
-            },
-          ];
-        }
         if (grpcStopOnNonOk) params.stop_on_non_ok = true;
         if (tag.trim()) params.tag = tag.trim();
         if (!isNaN(timeoutMsNum)) params.timeout_ms = timeoutMsNum;
@@ -1548,8 +1549,9 @@ function GrpcCampaignFields({
           Request Message (messages[0])
         </h3>
         <div className="fuzz-creator-help">
-          Single base message — additional messages must be seeded via Flow
-          ID. Positions can target `messages[N].payload` to substitute
+          Single base message, always sent (also with Flow ID — recorded
+          messages are not inherited). An empty payload sends a zero-length
+          message. Positions can target `messages[0].payload` to substitute
           per-variant bytes.
         </div>
         <div className="fuzz-creator-row-inline">

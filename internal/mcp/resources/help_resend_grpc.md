@@ -64,8 +64,8 @@ Ordered metadata list. Preserves wire case, order, and duplicates per RFC-001 §
 ### accept_encoding (array of strings, optional)
 `grpc-accept-encoding` list (e.g. `["gzip","identity"]`).
 
-### messages (array, optional)
-Request-side LPM (length-prefixed message) list. At least one element required. Each element has:
+### messages (array, REQUIRED)
+Request-side LPM (length-prefixed message) list. At least one element required, in both modes: the recorded request messages are not inherited from `flow_id`. Each element has:
 - **payload** (string, REQUIRED): LPM payload interpreted per `body_encoding`.
 - **body_encoding** (string, optional): `"text"` (default), `"base64"`, `"proto-schemaless-json"`, or `"proto-json"`.
 - **compressed** (boolean, optional): Set the LPM compression flag. Requires `encoding` to be set (recovered from flow or user-supplied).

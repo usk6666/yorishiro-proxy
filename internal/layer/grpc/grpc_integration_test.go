@@ -1819,18 +1819,3 @@ func TestGRPC_NonOKStatusProducesGRPCEnd(t *testing.T) {
 		}
 	}
 }
-
-// ---------------------------------------------------------------------------
-// Scenario 12: RST_STREAM produces State="error". Skipped pending stable
-// repro per design review.
-//
-// Replicating an upstream-side RST_STREAM mid-RPC reliably (without
-// timing flakes in CI) requires either lower-level h2 frame manipulation or
-// a stable abort hook the gRPC service does not expose. The design review
-// explicitly approves t.Skip with a tracking note so we do not commit a
-// flaky test.
-// ---------------------------------------------------------------------------
-
-func TestGRPC_RSTStreamProducesErrorState(t *testing.T) {
-	t.Skip("not yet implemented: stable RST_STREAM e2e — file follow-up after USK-651 lands")
-}

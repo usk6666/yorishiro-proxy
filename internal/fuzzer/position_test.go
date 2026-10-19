@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"strings"
 	"testing"
 )
 
@@ -309,7 +310,7 @@ func TestApplyPosition_ReplaceBodyJSON(t *testing.T) {
 	// Unmarshal and check
 	want := "new-password"
 	// Simple string check since JSON serialization is deterministic here.
-	if got := string(data.Body); !contains(got, `"password":"new-password"`) {
+	if got := string(data.Body); !strings.Contains(got, `"password":"new-password"`) {
 		t.Errorf("body = %s, want to contain password: %q", got, want)
 	}
 }
@@ -465,7 +466,7 @@ func TestApplyPosition_RemoveCookie(t *testing.T) {
 		t.Fatalf("ApplyPosition() error = %v", err)
 	}
 	got := data.Headers["Cookie"][0]
-	if contains(got, "debug") {
+	if strings.Contains(got, "debug") {
 		t.Errorf("cookie still contains debug: %q", got)
 	}
 }
@@ -606,20 +607,6 @@ func TestApplyPosition_NilURL(t *testing.T) {
 	if err == nil {
 		t.Error("expected error for nil URL with path replace")
 	}
-}
-
-// contains checks if s contains substr (helper for test assertions).
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsStr(s, substr))
-}
-
-func containsStr(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
 }
 
 func mustCompileRegex(pattern string) *regexp.Regexp {

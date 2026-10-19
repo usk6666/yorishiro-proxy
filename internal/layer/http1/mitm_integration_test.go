@@ -761,9 +761,12 @@ func TestHTTPSMITM_WireFidelity(t *testing.T) {
 	// The parser trims OWS for the parsed Value, but the raw-first patching
 	// path preserves the original wire bytes including OWS in RawValue.
 	// Since no headers were modified by any Step, the zero-copy fast path
-	// writes the original RawBytes verbatim to upstream.
-	if !strings.Contains(upReq, "spaced-value") {
-		t.Error("upstream lost 'spaced-value' content")
+	// writes the original RawBytes verbatim to upstream. Assert the exact
+	// wire bytes: a bare "spaced-value" substring would also match an
+	// OWS-trimmed "X-Custom: spaced-value".
+	if !strings.Contains(upReq, "X-Custom:   spaced-value  \r\n") {
+		t.Errorf("upstream lost the OWS around X-Custom's value; want %q in raw request %q",
+			"X-Custom:   spaced-value  \r\n", upReq)
 	}
 }
 

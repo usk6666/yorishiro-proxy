@@ -70,6 +70,20 @@ type Result struct {
 	// blocked_by filter: "target_scope", "intercept_drop",
 	// "intercept_cancelled", "rate_limit", "safety_filter", "budget".
 	BlockedBy string
+
+	// Annotations are Stream tags a Step asks RecordStep to append to the
+	// recorded Stream (USK-1109). Only honoured on Continue: Run merges
+	// the annotations of every continuing Step (later Steps win on a key
+	// collision) and RecordStep appends the merged set to the Stream via
+	// flow.StreamUpdate.AppendTags, after the Stream row exists. They are
+	// metadata about the observation, never wire data — setting them does
+	// not modify the Envelope. A Drop / Respond Step's own Annotations
+	// are ignored; the annotations of the continuing Steps before it are
+	// surfaced as RunOutcome.Annotations for the block recorder.
+	//
+	// Current producer: SafetyStep in log_only mode
+	// ("safety_log_only:<rule_id>" = matched target).
+	Annotations map[string]string
 }
 
 // Step is an individual processing unit within a Pipeline.
@@ -123,25 +137,54 @@ func (p *Pipeline) Run(ctx context.Context, env *envelope.Envelope) (*envelope.E
 // the empty string; plugin-driven Respond (no BlockedBy set) returns
 // the empty string verbatim.
 func (p *Pipeline) RunWithBlockedBy(ctx context.Context, env *envelope.Envelope) (*envelope.Envelope, Action, *envelope.Envelope, string) {
+	o := p.RunDetailed(ctx, env)
+	return o.Envelope, o.Action, o.Response, o.BlockedBy
+}
+
+// RunOutcome is the full result of one RunDetailed call.
+type RunOutcome struct {
+	// Envelope, Action, Response and BlockedBy are the RunWithBlockedBy
+	// 4-tuple.
+	Envelope  *envelope.Envelope
+	Action    Action
+	Response  *envelope.Envelope
+	BlockedBy string
+
+	// Annotations are the merged Result.Annotations of the Steps that
+	// returned Continue before the chain ended (USK-1109). Populated only
+	// when the chain ended with Drop / Respond — on Continue RecordStep
+	// has already consumed them. The non-continuing Step's own
+	// Annotations are never included. The session forwards them to the
+	// block recorder via WithBlockAnnotations so an earlier log_only
+	// safety observation survives a later Drop. Owned by the caller.
+	Annotations map[string]string
+}
+
+// RunDetailed is RunWithBlockedBy plus the Annotations of the continuing
+// Steps that preceded a Drop / Respond (USK-1109 review F-2).
+func (p *Pipeline) RunDetailed(ctx context.Context, env *envelope.Envelope) RunOutcome {
 	snapshot := env.Clone()
 	ctx = withSnapshot(ctx, snapshot)
 	ctx = withWireEncodedState(ctx)
+	ctx = withAnnotations(ctx)
 
 	for _, step := range p.steps {
 		r := step.Process(ctx, env)
 		if r.Action != Continue {
-			blockedBy := ""
+			o := RunOutcome{Envelope: env, Action: r.Action, Response: r.Response}
 			switch r.Action {
 			case Drop, Respond:
-				blockedBy = r.BlockedBy
+				o.BlockedBy = r.BlockedBy
+				o.Annotations = copyAnnotations(annotationsFromContext(ctx))
 			}
-			return env, r.Action, r.Response, blockedBy
+			return o
 		}
+		mergeAnnotations(ctx, r.Annotations)
 		if r.Envelope != nil {
 			env = r.Envelope
 		}
 	}
-	return env, Continue, nil, ""
+	return RunOutcome{Envelope: env, Action: Continue}
 }
 
 // Without returns a new Pipeline that excludes all Steps whose concrete type

@@ -10,7 +10,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/usk6666/yorishiro-proxy/internal/envelope/bodybuf"
 )
@@ -374,49 +373,61 @@ func TestConcurrentRetainRelease(t *testing.T) {
 	}
 }
 
-// TestBytesContextCancel covers requirement (10): ctx cancel mid-Bytes
-// in file mode returns ctx.Err(). Uses a multi-MiB body and cancels
-// the ctx after a short delay; the Bytes loop checks ctx.Err() at the
-// top of each 32 KiB chunk iteration.
+// flipCtx is a context.Context whose Err() returns nil for the first
+// okCalls calls and err afterwards. It lets a test place the cancellation
+// at an exact ctx.Err() check inside Bytes instead of racing a timer
+// against the read loop.
+type flipCtx struct {
+	context.Context
+	mu      sync.Mutex
+	okCalls int
+	calls   int
+	err     error
+}
+
+func (c *flipCtx) Err() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.calls++
+	if c.calls <= c.okCalls {
+		return nil
+	}
+	return c.err
+}
+
+// TestBytesContextCancel covers requirement (10), entry check: Bytes
+// called with an already-cancelled ctx returns ctx.Err() before touching
+// the buffer. Memory mode is used because it has no read loop — the entry
+// check is the only ctx check on that path.
 func TestBytesContextCancel(t *testing.T) {
 	t.Parallel()
 
-	// 8 MiB: large enough that a reasonable sleep interleaves at least
-	// one chunk read before ctx fires.
-	const payloadSize = 8 * 1024 * 1024
-	payload := make([]byte, payloadSize)
-	for i := range payload {
-		payload[i] = byte(i)
-	}
-
-	buf, err := bodybuf.NewFile(t.TempDir(), "yorishiro-body", int64(payloadSize+1))
-	if err != nil {
-		t.Fatalf("NewFile: %v", err)
-	}
+	buf := bodybuf.NewMemory([]byte("payload"))
 	t.Cleanup(func() { _ = buf.Release() })
-	if _, err := buf.Write(payload); err != nil {
-		t.Fatalf("Write: %v", err)
-	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	// Cancel almost immediately, before Bytes has a chance to read
-	// anything: since the loop checks ctx.Err() at the top of each
-	// iteration, the very first check inside the loop will bail.
 	cancel()
 
-	if _, err := buf.Bytes(ctx); !errors.Is(err, context.Canceled) {
-		t.Fatalf("want context.Canceled, got %v", err)
+	got, err := buf.Bytes(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("want context.Canceled, got err=%v (len(bytes)=%d)", err, len(got))
+	}
+	if got != nil {
+		t.Errorf("want nil bytes on cancel, got %d bytes", len(got))
 	}
 }
 
-// TestBytesContextDeadline covers a variant of requirement (10) where
-// the ctx fires via deadline while Bytes is mid-loop. This exercises
-// the in-loop ctx.Err() check specifically (rather than the entry
-// check).
+// TestBytesContextDeadline covers requirement (10), in-loop check: a ctx
+// that fires while a file-backed Bytes is between 32 KiB chunk reads
+// aborts the read with ctx.Err(). flipCtx passes the entry check and the
+// first loop iteration, then reports DeadlineExceeded, so only the in-loop
+// ctx.Err() check can stop the read.
 func TestBytesContextDeadline(t *testing.T) {
 	t.Parallel()
 
-	const payloadSize = 8 * 1024 * 1024
+	// 128 KiB = four 32 KiB chunks, so the loop iterates well past the
+	// point where the ctx flips.
+	const payloadSize = 128 * 1024
 	payload := make([]byte, payloadSize)
 	for i := range payload {
 		payload[i] = byte(i)
@@ -431,17 +442,15 @@ func TestBytesContextDeadline(t *testing.T) {
 		t.Fatalf("Write: %v", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Nanosecond)
-	defer cancel()
-	// Sleep to guarantee the deadline has passed before we enter Bytes.
-	time.Sleep(5 * time.Millisecond)
+	// Call 1: entry check. Call 2: first loop iteration. Call 3+: error.
+	ctx := &flipCtx{Context: context.Background(), okCalls: 2, err: context.DeadlineExceeded}
 
-	_, err = buf.Bytes(ctx)
-	if err == nil {
-		t.Fatalf("want ctx error, got nil")
+	got, err := buf.Bytes(ctx)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("want context.DeadlineExceeded, got err=%v (len(bytes)=%d)", err, len(got))
 	}
-	if !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
-		t.Fatalf("want ctx error, got %v", err)
+	if got != nil {
+		t.Errorf("want nil bytes on mid-read deadline, got %d bytes", len(got))
 	}
 }
 

@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"reflect"
 	"testing"
 
 	"github.com/usk6666/yorishiro-proxy/internal/connector"
@@ -499,10 +500,10 @@ func TestHostScopeStep_SchemeDerivedFromTLS(t *testing.T) {
 			}
 			switch tt.wantAction {
 			case Continue:
-				// Result is comparable, so pin the whole value: a
-				// continuing scope check must not leave an Envelope
-				// replacement, a Response, or a BlockedBy behind.
-				if r != (Result{}) {
+				// Pin the whole value: a continuing scope check must not
+				// leave an Envelope replacement, a Response, a BlockedBy,
+				// or Annotations behind.
+				if !reflect.DeepEqual(r, Result{}) {
 					t.Errorf("Continue: got %+v, want the zero Result", r)
 				}
 			case Drop, Respond:
@@ -692,7 +693,7 @@ func TestHostScopeStep_DirectionGate(t *testing.T) {
 			if r.Action != tt.wantAction {
 				t.Fatalf("got action %v, want %v", r.Action, tt.wantAction)
 			}
-			if tt.wantAction == Continue && r != (Result{}) {
+			if tt.wantAction == Continue && !reflect.DeepEqual(r, Result{}) {
 				t.Errorf("Continue: got %+v, want the zero Result", r)
 			}
 			if tt.wantAction != Continue && r.BlockedBy != BlockedByTargetScope {

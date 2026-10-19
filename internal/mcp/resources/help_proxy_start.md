@@ -49,7 +49,7 @@ Maps local listen ports to upstream forwarding configurations for TCP forwarding
 Each entry maps a local port number (string key) to either:
 - A **string** value `"upstream_host:port"` (legacy format, treated as raw TCP forwarding)
 - A **ForwardConfig object** with the following fields:
-  - **target** (string, required): Upstream address in `"host:port"` format (e.g. `"api.example.com:50051"`)
+  - **target** (string, required): Upstream address in `"host:port"` format (e.g. `"api.example.com:50051"`). The port must be a decimal number in 1-65535; a service name (`"db.internal:postgresql"`) is rejected, so the port the target scope checks is the port that is dialed.
   - **protocol** (string, optional): Expected protocol for L7 parsing. Default: `"auto"` (peek-based detection).
     Valid values: `"auto"`, `"raw"`, `"http"`, `"http2"`, `"grpc"`, `"websocket"`, `"sse"`
     For server-speaks-first targets (SMTP, FTP, MySQL, IMAP, POP3), use `"raw"`: `"auto"` waits up to 5 s for the client's first bytes before falling back to raw, so the server's greeting is delayed by that peek.
@@ -71,6 +71,7 @@ Each entry maps a local port number (string key) to either:
 
 - If omitted, TCP forwarding is not configured
 - Both legacy string format and structured ForwardConfig can be mixed in the same object
+- **Target scope**: every `target` is checked against `target_scope` (Policy and Agent layers). An entry whose target is denied fails the whole `proxy_start` (nothing stays bound). The check repeats on every accepted connection before the target is contacted, and open connections are closed when a scope change denies their target. The scheme checked is the upstream leg's (`https` iff `upstream_tls`). See `docs(topic="security")`, section "`tcp_forwards` gate".
 
 ### tls_fingerprint (string, optional)
 TLS ClientHello fingerprint profile for upstream connections.
