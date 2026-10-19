@@ -370,6 +370,9 @@ func (c *channel) refillFromHTTPMessage(ctx context.Context, env *envelope.Envel
 		AcceptEncoding: acceptEnc,
 	}
 	applyRequestOverlay(start, msg, dir)
+	// Before DecodeBody: the malformed-body passthrough Start
+	// (emitAnomalyStart) must carry the status too.
+	applyResponseOverlay(start, msg, dir)
 
 	// Decode body LPMs. Returns ParseResult with DataFrames + optional
 	// TrailerFrame. Empty body → empty result, no error. The cap is the
@@ -539,6 +542,27 @@ func applyRequestOverlay(start *envelope.GRPCStartMessage, msg *envelope.HTTPMes
 	// so it reaches the upstream, Flow.URL, and the Input SafetyFilter's
 	// url / query targets.
 	start.RawQuery = msg.RawQuery
+}
+
+// applyResponseOverlay projects the response status (HTTP/1.x status line
+// or HTTP/2 :status, plus the HTTP/1.x reason phrase) from the inbound
+// HTTPMessage onto GRPCStartMessage.HTTPStatus / HTTPStatusReason, the
+// response-side sibling of applyRequestOverlay (USK-1219).
+//
+// Without it the status had nowhere to live once the HTTPMessage was split
+// into gRPC-Web events, and the opposite-side Send wrote every response as
+// 200 OK — an upstream 503 reached the client as a success.
+//
+// Guarded on dir for the same reason as applyRequestOverlay: a request
+// HTTPMessage carries no status, and projecting unconditionally would
+// fabricate one onto a request overlay the moment a producer changed.
+// Only the overlay changes; Envelope.Raw is untouched.
+func applyResponseOverlay(start *envelope.GRPCStartMessage, msg *envelope.HTTPMessage, dir envelope.Direction) {
+	if dir != envelope.Receive {
+		return
+	}
+	start.HTTPStatus = msg.Status
+	start.HTTPStatusReason = msg.StatusReason
 }
 
 // classifyParseError maps a DecodeBody error to a recoverable Anomaly type.
@@ -1195,9 +1219,9 @@ func encodeTrailerPayload(end *envelope.GRPCEndMessage) []byte {
 // request side (Send-side from the caller's perspective) sets Method=POST,
 // resolves Path with pathForStart, carries RawQuery, and carries the
 // wire-observed :authority / :scheme forward from the Start message's
-// derived L7 overlay (USK-1057). The response side keeps
-// Status/StatusReason from the original Receive-side context envelope when
-// available.
+// derived L7 overlay (USK-1057). The response side takes Status /
+// StatusReason from the Start's HTTPStatus / HTTPStatusReason overlay
+// (USK-1219).
 //
 // The framing headers carried over from the observed message are reconciled
 // with the re-assembled body (reconcileBodyFraming, USK-1203) — this is the
@@ -1252,19 +1276,22 @@ func buildHTTPMessage(
 		msg.Authority = start.Authority
 		msg.Scheme = start.Scheme
 	case envelope.Receive:
-		// Response side: status from srcEnv if available; otherwise default
-		// to 200.
-		msg.Status = 200
-		msg.StatusReason = "OK"
-		if srcEnv != nil {
-			if hm, ok := srcEnv.Message.(*envelope.HTTPMessage); ok {
-				if hm.Status != 0 {
-					msg.Status = hm.Status
-				}
-				if hm.StatusReason != "" {
-					msg.StatusReason = hm.StatusReason
-				}
-			}
+		// Response side: the status observed on the upstream response,
+		// carried on the Start overlay (applyResponseOverlay, USK-1219).
+		// An empty reason phrase stays empty — an HTTP/2 upstream has none,
+		// and the HTTP/1.x synthetic send path fills it from statusText.
+		msg.Status = start.HTTPStatus
+		msg.StatusReason = start.HTTPStatusReason
+		if msg.Status == 0 {
+			// Zero-value path for synthetic / test producers that build a
+			// Receive Start without an HTTP status (the same shape as
+			// pathForStart's empty-Path fall-through). Every live Start
+			// comes through applyResponseOverlay, and an HTTP Layer never
+			// yields status 0 for a parsed response. Without this an
+			// HTTP/1.x client would see "0 Unknown" and an HTTP/2 client
+			// :status 0.
+			msg.Status = 200
+			msg.StatusReason = "OK"
 		}
 	}
 	return msg

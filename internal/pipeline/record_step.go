@@ -1375,6 +1375,12 @@ func projectGRPCStart(m *envelope.GRPCStartMessage, fl *flow.Flow) {
 	if m.Encoding != "" {
 		fl.Metadata["grpc_encoding"] = m.Encoding
 	}
+	// USK-1219: the gRPC-Web response-side Start carries the upstream HTTP
+	// status; record it so the Receive start flow matches the wire. Zero
+	// (request side, native gRPC) leaves StatusCode unset.
+	if m.HTTPStatus != 0 {
+		fl.StatusCode = m.HTTPStatus
+	}
 	// USK-920: project the request-side pseudo-headers (:authority,
 	// :scheme, :path) into Flow.URL so resend_grpc { flow_id } can
 	// recover the RPC target without manual overrides — mirroring the

@@ -403,7 +403,13 @@ func buildGRPCStartDict(d *MessageDict, m *envelope.GRPCStartMessage) {
 			Scheme:    m.Scheme,
 			Path:      m.Path,
 			RawQuery:  m.RawQuery,
-			Anomalies: m.Anomalies,
+			// USK-1219: the gRPC-Web response-side status overlay. Not a
+			// dict key either (same hook-surface rule); dropping it would
+			// turn an upstream 503 into a 200 on the client whenever a
+			// plugin touched the Receive Start.
+			HTTPStatus:       m.HTTPStatus,
+			HTTPStatusReason: m.HTTPStatusReason,
+			Anomalies:        m.Anomalies,
 		}
 		if err := readScalar(d, "service", &out.Service); err != nil {
 			return nil, err

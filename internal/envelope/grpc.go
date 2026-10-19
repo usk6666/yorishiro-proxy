@@ -123,18 +123,20 @@ func (m *GRPCStartMessage) Protocol() Protocol { return ProtocolGRPC }
 // CloneMessage returns a deep copy of the GRPCStartMessage.
 func (m *GRPCStartMessage) CloneMessage() Message {
 	return &GRPCStartMessage{
-		Service:        m.Service,
-		Method:         m.Method,
-		Authority:      m.Authority,
-		Scheme:         m.Scheme,
-		Path:           m.Path,
-		RawQuery:       m.RawQuery,
-		Metadata:       cloneKeyValues(m.Metadata),
-		Timeout:        m.Timeout,
-		ContentType:    m.ContentType,
-		Encoding:       m.Encoding,
-		AcceptEncoding: cloneStrings(m.AcceptEncoding),
-		Anomalies:      cloneAnomalies(m.Anomalies),
+		Service:          m.Service,
+		Method:           m.Method,
+		Authority:        m.Authority,
+		Scheme:           m.Scheme,
+		Path:             m.Path,
+		RawQuery:         m.RawQuery,
+		HTTPStatus:       m.HTTPStatus,
+		HTTPStatusReason: m.HTTPStatusReason,
+		Metadata:         cloneKeyValues(m.Metadata),
+		Timeout:          m.Timeout,
+		ContentType:      m.ContentType,
+		Encoding:         m.Encoding,
+		AcceptEncoding:   cloneStrings(m.AcceptEncoding),
+		Anomalies:        cloneAnomalies(m.Anomalies),
 	}
 }
 
