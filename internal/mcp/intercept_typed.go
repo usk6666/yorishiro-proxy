@@ -414,7 +414,8 @@ func applyWSModify(env *envelope.Envelope, _ *envelope.WSMessage, params *wsMess
 // the wire carried. :authority and :scheme are carried verbatim on the
 // cloned message (env.Clone deep-copies them via CloneMessage) and
 // forwarded unchanged, so an override here never rewrites what the client
-// put on the wire (USK-920 / USK-1051).
+// put on the wire (USK-920 / USK-1051). Envelope.Raw is cleared, except on
+// a gRPC-Web malformed-body Start (envelope.IsGRPCWebPassthroughStart).
 func applyGRPCStartModify(env *envelope.Envelope, _ *envelope.GRPCStartMessage, params *grpcStartMessageModify) (*envelope.Envelope, error) {
 	if params == nil {
 		return env.Clone(), nil
@@ -439,7 +440,13 @@ func applyGRPCStartModify(env *envelope.Envelope, _ *envelope.GRPCStartMessage, 
 	if params.Metadata != nil {
 		gm.Metadata = headerKVsToKeyValues(params.Metadata)
 	}
-	clone.Raw = nil
+	// A gRPC-Web malformed-body Start's Raw is the observed body the
+	// upstream-side Layer forwards verbatim — not a header snapshot — so
+	// it survives a Start override (USK-1203). Every other Start's Raw is
+	// stale once its fields change.
+	if !envelope.IsGRPCWebPassthroughStart(clone) {
+		clone.Raw = nil
+	}
 	return clone, nil
 }
 

@@ -43,3 +43,50 @@ const (
 	// a client bug or a deliberately crafted request worth recording.
 	AnomalyUnexpectedGRPCWebRequestTrailer AnomalyType = "UnexpectedGRPCWebRequestTrailer"
 )
+
+// IsMalformedGRPCWebBodyAnomaly reports whether t marks a gRPC-Web body that
+// failed to parse (malformed base64 / LPM / trailer). The grpcweb Layer emits
+// such a body as a Start carrying the whole observed body on Envelope.Raw
+// (USK-1203).
+func IsMalformedGRPCWebBodyAnomaly(t AnomalyType) bool {
+	switch t {
+	case AnomalyMalformedGRPCWebBase64, AnomalyMalformedGRPCWebLPM, AnomalyMalformedGRPCWebTrailer:
+		return true
+	default:
+		return false
+	}
+}
+
+// MalformedGRPCWebBodyAnomaly returns the first malformed-body anomaly in
+// anomalies (see IsMalformedGRPCWebBodyAnomaly).
+func MalformedGRPCWebBodyAnomaly(anomalies []Anomaly) (Anomaly, bool) {
+	for _, a := range anomalies {
+		if IsMalformedGRPCWebBodyAnomaly(a.Type) {
+			return a, true
+		}
+	}
+	return Anomaly{}, false
+}
+
+// IsGRPCWebPassthroughStart reports whether env is a gRPC-Web Start emitted
+// for a body that failed to parse: its Envelope.Raw is the whole observed
+// request/response body in wire form (base64 text for -text content types),
+// not a header snapshot, and the opposite-side grpcweb Layer forwards it
+// verbatim (USK-1203).
+//
+// Code that clears Raw on a Start modification (Transform, intercept
+// modify) must keep it for such a Start — clearing it would forward an
+// empty, well-formed body instead of what the wire carried. Input safety
+// rules targeting the body must evaluate this Raw, because no
+// GRPCDataMessage is ever emitted for the body.
+func IsGRPCWebPassthroughStart(env *Envelope) bool {
+	if env == nil || env.Protocol != ProtocolGRPCWeb || len(env.Raw) == 0 {
+		return false
+	}
+	m, ok := env.Message.(*GRPCStartMessage)
+	if !ok {
+		return false
+	}
+	_, ok = MalformedGRPCWebBodyAnomaly(m.Anomalies)
+	return ok
+}

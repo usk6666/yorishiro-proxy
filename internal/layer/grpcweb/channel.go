@@ -555,8 +555,9 @@ func classifyParseError(err error) (envelope.AnomalyType, bool) {
 
 // emitAnomalyStart pushes a GRPCStartMessage envelope onto emitQueue
 // carrying the parser's diagnostic state (Anomalies populated) and the full
-// inbound body in Envelope.Raw, followed by a clean sentinel End (Raw nil,
-// no anomaly), then latches the channel into a clean terminal-EOF state.
+// inbound body in Envelope.Raw, followed by a sentinel End (Raw nil, no
+// trailer fields) stamped with the same anomaly type, then latches the
+// channel into a clean terminal-EOF state.
 // Next() drains the queue first (the existing Next loop returns queued
 // envelopes before observing terminalErr) so RecordStep sees the Anomaly
 // envelope before the session OnComplete sees io.EOF and finalizes the
@@ -570,6 +571,14 @@ func classifyParseError(err error) (envelope.AnomalyType, bool) {
 // bytes reach the next hop verbatim (MITM principles 1 and 5). The sentinel
 // does not fire (grpc-web, on_end): no trailer was parsed, so there is no
 // RPC status to report.
+//
+// The sentinel End carries the Start's anomaly type so its recorded flow
+// reads as "body failed to parse, no trailer observed" rather than a clean
+// grpc_status=0 the peer never sent (USK-1203 review F-2). Both directions
+// are stamped alike: on Receive a clean End would be a fabricated RPC
+// outcome, and on Send it terminates a request that was never parsed, which
+// the clean USK-780 flush sentinel does not convey. shouldEmbedTrailer never
+// encodes a trailer frame for such an End.
 func (c *channel) emitAnomalyStart(
 	src *envelope.Envelope,
 	dir envelope.Direction,
@@ -587,7 +596,12 @@ func (c *channel) emitAnomalyStart(
 	c.mu.Lock()
 	c.emitQueue = append(c.emitQueue,
 		c.buildEnvelopeRaw(src, dir, start, bodyBytes, opaque),
-		c.buildEnvelope(src, dir, &envelope.GRPCEndMessage{}, nil, opaque),
+		c.buildEnvelope(src, dir, &envelope.GRPCEndMessage{
+			Anomalies: []envelope.Anomaly{{
+				Type:   anomalyType,
+				Detail: "flush sentinel: body failed to parse; no trailer observed",
+			}},
+		}, nil, opaque),
 	)
 	c.mu.Unlock()
 
@@ -645,10 +659,13 @@ func (c *channel) Send(ctx context.Context, env *envelope.Envelope) error {
 // sendStartLocked records the Start metadata for assembly. Resets any prior
 // in-flight assembly buffer (defensive).
 //
-// A non-empty env.Raw is kept as a passthrough body (USK-1203). Only
-// emitAnomalyStart produces such a Start — every other Start is built with
-// Raw nil — and its Raw is the full observed body in wire form (base64 text
-// for -text content-types), which sendEndLocked forwards verbatim.
+// A non-empty env.Raw is kept as a passthrough body (USK-1203) only when
+// the Start carries a malformed-body anomaly (AnomalyMalformedGRPCWeb*):
+// that is the emitAnomalyStart shape, whose Raw is the full observed body
+// in wire form (base64 text for -text content-types), which sendEndLocked
+// forwards verbatim. Raw on any other Start (e.g. a (grpc-web, on_start)
+// plugin assigning msg["raw"]) is ignored, as it was before USK-1203 — it
+// never becomes a prefix of a re-assembled body (review F-3).
 func (c *channel) sendStartLocked(env *envelope.Envelope, m *envelope.GRPCStartMessage) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -657,7 +674,7 @@ func (c *channel) sendStartLocked(env *envelope.Envelope, m *envelope.GRPCStartM
 	c.sendStreamID = env.StreamID
 	c.sendDataBuf.Reset()
 	c.sendPassthrough = nil
-	if len(env.Raw) > 0 {
+	if hasMalformedBodyAnomaly(m.Anomalies) && len(env.Raw) > 0 {
 		c.sendPassthrough = append([]byte(nil), env.Raw...)
 	}
 	return nil
@@ -793,6 +810,9 @@ func (c *channel) sendEndLocked(ctx context.Context, env *envelope.Envelope, m *
 //     an anomaly AND relayed, rather than silently stripped (USK-1203).
 //   - Passthrough body: the observed body is already complete; the End is
 //     only the flush sentinel, so nothing is added.
+//   - End stamped with a malformed-body anomaly: the emitAnomalyStart
+//     sentinel, standing for "no trailer observed". Nothing is added even
+//     if the passthrough body was lost before this Send.
 //   - Receive: a response End re-encoded from its fields (a plugin or
 //     intercept may have synthesized or rewritten it) — except when it is
 //     the AnomalyMissingGRPCWebTrailer placeholder, which stands for a
@@ -804,13 +824,20 @@ func shouldEmbedTrailer(dir envelope.Direction, env *envelope.Envelope, m *envel
 	switch {
 	case len(env.Raw) > 0:
 		return true
-	case passthrough:
+	case passthrough, hasMalformedBodyAnomaly(m.Anomalies):
 		return false
 	case dir == envelope.Receive:
 		return !hasAnomaly(m.Anomalies, envelope.AnomalyMissingGRPCWebTrailer)
 	default:
 		return hasAnomaly(m.Anomalies, envelope.AnomalyUnexpectedGRPCWebRequestTrailer)
 	}
+}
+
+// hasMalformedBodyAnomaly reports whether anomalies contains a
+// malformed-body anomaly (envelope.IsMalformedGRPCWebBodyAnomaly).
+func hasMalformedBodyAnomaly(anomalies []envelope.Anomaly) bool {
+	_, ok := envelope.MalformedGRPCWebBodyAnomaly(anomalies)
+	return ok
 }
 
 // hasAnomaly reports whether anomalies contains an entry of type t.
@@ -1303,6 +1330,18 @@ func rebuildStartHeaders(start *envelope.GRPCStartMessage) []envelope.KeyValue {
 //   - Content-Length absent: stays absent (unless Transfer-Encoding was
 //     dropped, in which case one is appended). On HTTP/1.x the synthetic
 //     send path stamps one; on HTTP/2 END_STREAM frames the body.
+//
+// Known edge (USK-1203 review S-2; documented, deliberately not changed):
+// the "an entry already matches" test is per-entry. If the peer sent
+// duplicate conflicting Content-Length values and a Transform / intercept /
+// plugin resizes the body to exactly one of the non-first values, every
+// entry is left as-is — so the conflicting set the next hop sees no longer
+// describes the framing the peer used (which entry the next hop honours
+// decides where it thinks the body ends). The entries are not deduplicated
+// or collapsed to one: that would normalize what the wire did not normalize
+// (MITM principle 1), and with an unchanged body this pass-through is the
+// faithful forwarding of a duplicate-CL probe, matching the http1 opaque
+// path.
 //
 // The returned slice is a fresh copy; headers is not mutated.
 func reconcileBodyFraming(headers []envelope.KeyValue, bodyLen int) []envelope.KeyValue {

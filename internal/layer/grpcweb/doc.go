@@ -58,10 +58,16 @@
 //
 // A body that fails to parse (malformed base64 / LPM / trailer) is emitted
 // as a Start carrying the anomaly and the whole observed body on
-// Envelope.Raw, followed by a clean sentinel End — in both directions. The
-// opposite-side Send treats the Start's Raw as a passthrough body and
-// forwards it verbatim, so the anomaly is recorded AND the observed bytes
-// reach the next hop. An observed request trailer frame
+// Envelope.Raw, followed by a sentinel End stamped with the same anomaly
+// (no trailer observed; never re-encoded into a trailer frame) — in both
+// directions. The opposite-side Send treats the Raw of a Start carrying a
+// malformed-body anomaly as a passthrough body and forwards it verbatim, so
+// the anomaly is recorded AND the observed bytes reach the next hop; Raw on
+// any other Start is ignored. Start Transform rules and intercept overrides
+// keep that Raw (envelope.IsGRPCWebPassthroughStart), and the Input
+// SafetyFilter's payload/body rules are evaluated against it, since no
+// GRPCDataMessage is emitted for an unparsed body. An observed request
+// trailer frame
 // (AnomalyUnexpectedGRPCWebRequestTrailer) is likewise forwarded, not
 // stripped.
 //
