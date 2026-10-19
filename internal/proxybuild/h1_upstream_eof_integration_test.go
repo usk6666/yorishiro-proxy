@@ -11,6 +11,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -299,7 +300,16 @@ def on_req(msg, ctx):
         return action.DROP
 register_hook("http", "on_request", on_req)
 `
-	up := startUSK1229Upstream(t, true, usk1229ReplyThenClose("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"))
+	// The CONNECT MITM path dials (and TLS-handshakes with) the upstream
+	// before any request, so count requests, not connections.
+	var requests atomic.Int32
+	up := startUSK1229Upstream(t, true, func(_ int, c net.Conn, br *bufio.Reader) {
+		if _, err := usk1229ReadHead(br); err != nil {
+			return
+		}
+		requests.Add(1)
+		_, _ = io.WriteString(c, "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+	})
 	_, proxyAddr := startUSK1229MITM(t, ctx, loadRawWinsPlugin(t, ctx, dropScript))
 	c, br := usk1229DialMITM(t, proxyAddr, up.Addr())
 
@@ -310,8 +320,8 @@ register_hook("http", "on_request", on_req)
 	if got := usk1229ReadUntilClose(t, c, br, start, time.Second, 3*time.Second); len(got) != 0 {
 		t.Errorf("client received %q; want no bytes", got)
 	}
-	if n := up.ConnCount(); n != 0 {
-		t.Errorf("upstream connections = %d, want 0 (the dropped request is never forwarded)", n)
+	if n := requests.Load(); n != 0 {
+		t.Errorf("upstream received %d requests, want 0 (the dropped request is never forwarded)", n)
 	}
 }
 
