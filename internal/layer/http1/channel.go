@@ -313,6 +313,12 @@ type channel struct {
 	sequence        int  // 0=request; 1+=responses (1xx-aware)
 	connClosed      bool // peer signalled Connection: close on this exchange
 
+	// rawWinsSent is set by sendRequest when it wrote a raw-authoritative
+	// envelope's Raw verbatim (RFC-001 §9.3 D4, USK-1079). Stored before
+	// appendPending and read by spawnLoopReceive, which then retires the
+	// Layer after this exchange's final response.
+	rawWinsSent atomic.Bool
+
 	// USK-721: priorRespWasInformational tracks whether the previous response
 	// emitted on this Channel was 1xx, so the next response advances Sequence.
 	priorRespWasInformational bool
@@ -1278,6 +1284,25 @@ func (c *channel) sendRequest(msg *envelope.HTTPMessage, env *envelope.Envelope)
 	c.ctxTmpl.RequestRawQuery = msg.RawQuery
 	c.ctxTmpl.RequestAuthority = msg.Authority
 
+	// USK-1079: a Layer retired after a raw-authoritative exchange has an
+	// unparsed response stream; nothing has been written for this
+	// request, so the retry wrapper may replay it on a fresh Layer
+	// (never a raw-authoritative one, see sendRawWins).
+	if c.layer.retired.Load() {
+		return fmt.Errorf("http1: send request: %w", &StaleUpstreamError{
+			Underlying: errUpstreamRetired,
+			ReplaySafe: !env.RawWins() && isReplaySafe(msg, opaque, "header"),
+			Stage:      "header",
+		})
+	}
+
+	rawWins := env.RawWins()
+	if rawWins {
+		// Before appendPending: pendingMu orders this store before
+		// spawnLoopReceive's read for this Channel.
+		c.rawWinsSent.Store(true)
+	}
+
 	// USK-730: register this Channel in the parent Layer's pendingQ
 	// atomically with the wire write so the response FIFO matches the
 	// on-wire request order. Caller (Send) holds writeMu, so this append
@@ -1286,6 +1311,9 @@ func (c *channel) sendRequest(msg *envelope.HTTPMessage, env *envelope.Envelope)
 		c.layer.appendPending(c)
 	}
 
+	if rawWins {
+		return c.sendRawWins(env.Raw, "request")
+	}
 	if opaque != nil && opaque.rawReq != nil {
 		return c.sendRequestOpaque(msg, opaque)
 	}
@@ -1295,10 +1323,43 @@ func (c *channel) sendRequest(msg *envelope.HTTPMessage, env *envelope.Envelope)
 func (c *channel) sendResponse(msg *envelope.HTTPMessage, env *envelope.Envelope) error {
 	opaque, _ := env.Opaque.(*opaqueHTTP1)
 
+	if env.RawWins() {
+		return c.sendRawWins(env.Raw, "response")
+	}
 	if opaque != nil && opaque.rawResp != nil {
 		return c.sendResponseOpaque(msg, opaque)
 	}
 	return c.sendResponseSynthetic(msg)
+}
+
+// --- Send Path 0: raw wins (RFC-001 §9.3 D4) ---
+
+// sendRawWins writes a raw-authoritative envelope's Raw to the wire exactly
+// as given (USK-1079): no framing fix-up, no Content-Length /
+// Transfer-Encoding rewrite, no header patch — the plugin that assigned
+// msg["raw"] owns every byte, including malformed or multi-message
+// payloads (smuggling tests, RFC-001 §1.4 / §4.2). Message is ignored.
+// Caller holds writeMu.
+//
+// A stale-conn write failure on the request side surfaces as a
+// *StaleUpstreamError with ReplaySafe=false regardless of method: the
+// Message does not describe these bytes, and a replay could duplicate a
+// smuggled request.
+//
+// Response framing still follows the Message: the request side's
+// ctxTmpl.RequestMethod (stamped from msg.Method in sendRequest above) is
+// what the receive path consults for HEAD / CONNECT body rules (RFC 9112
+// §6.3), not the method in the verbatim bytes. A plugin whose raw changes
+// the method (e.g. GET → HEAD) must change msg["method"] to match, or the
+// response is framed as for the Message's method (USK-1079 review F-3).
+func (c *channel) sendRawWins(raw []byte, kind string) error {
+	if _, err := c.layer.conn.Write(raw); err != nil {
+		if kind == "request" && isStaleConnErr(err) {
+			err = &StaleUpstreamError{Underlying: err, ReplaySafe: false, Stage: "header"}
+		}
+		return fmt.Errorf("http1: send %s raw-wins: %w", kind, err)
+	}
+	return nil
 }
 
 // --- Send Path 1: Opaque-based (raw-first patching) ---

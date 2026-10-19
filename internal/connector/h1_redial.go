@@ -3,6 +3,7 @@ package connector
 import (
 	"context"
 	"fmt"
+	"net"
 
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/layer/http1"
@@ -27,7 +28,12 @@ import (
 // during idle). HTTP/1 has no connection pool — the per-CONNECT
 // lifetime owns its single upstream Layer (and any redialed successors).
 //
-// ALPN: offers only "http/1.1". By definition the prior negotiation
+// Transport: the redial matches the stale Layer's scheme (USK-1079 review
+// F-1) — a scheme="http" Layer (plain-HTTP forward proxy / plaintext
+// CONNECT inner) is redialed over plain TCP, a scheme="https" Layer over
+// TLS. See redialUpstreamH1Conn.
+//
+// ALPN (TLS redial only): offers only "http/1.1". By definition the prior negotiation
 // produced http/1.1 (we were holding a *http1.Layer); re-negotiating to
 // h2 would invalidate the Layer type already wired into the client side
 // of the stack.
@@ -59,6 +65,47 @@ func RedialUpstreamH1(
 		return nil, fmt.Errorf("connector: RedialUpstreamH1: invalid target %q", target)
 	}
 
+	upstreamConn, err := redialUpstreamH1Conn(ctx, target, host, stale.Scheme(), cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	// Reuse the original Layer's EnvelopeContext template (mirroring h2:
+	// the older TLS snapshot is kept on the template; Pipeline / RecordStep
+	// already snapshotted the original handshake on prior envelopes, so
+	// keeping the template coherent for the CONNECT's lifetime is more
+	// useful than re-recording TLS here).
+	envCtx := stale.EnvelopeContextTemplate()
+	connID := redialConnIDLabel(envCtx.ConnID, generation)
+
+	fresh := http1.New(upstreamConn, connID, envelope.Receive,
+		http1.WithScheme(stale.Scheme()),
+		http1.WithEnvelopeContext(envCtx),
+		http1.WithBodySpillDir(cfg.BodySpillDir),
+		http1.WithBodySpillThreshold(cfg.BodySpillThreshold),
+		http1.WithMaxBodySize(cfg.MaxBodySize),
+		http1.WithMaxRawCaptureSize(cfg.MaxRawCaptureSize),
+		http1.WithStateReleaser(cfg.PluginV2Engine),
+		// USK-655: bypass body draining for SSE responses so the swap
+		// orchestrator (session.runUpgradeSSE) can hand the still-open
+		// body to sse.Wrap without blocking on a never-ending drain.
+		// Matches the option set used in buildStackFromRoute "http1".
+		http1.WithStreamingResponseDetect(http1.IsSSEResponse),
+	)
+	return fresh, nil
+}
+
+// redialUpstreamH1Conn dials the replacement upstream conn over the same
+// transport the stale Layer's stack was built on (USK-1079 review F-1).
+// An "http" Layer comes from BuildPlainHTTPStack (plain-HTTP forward proxy
+// or plaintext CONNECT inner) and sits on plain TCP, so the redial is a
+// plain dial — a TLS dial to a plaintext upstream would only fail. Any
+// other scheme is the CONNECT MITM "https" stack and is redialed over TLS.
+func redialUpstreamH1Conn(ctx context.Context, target, host, scheme string, cfg *BuildConfig) (net.Conn, error) {
+	if scheme == "http" {
+		return dialPlainUpstream(ContextWithDialTarget(ctx, target), target, cfg)
+	}
+
 	hostTLS, err := resolvePerHostTLS(target, cfg)
 	if err != nil {
 		return nil, err
@@ -75,28 +122,5 @@ func RedialUpstreamH1(
 	if err != nil {
 		return nil, err
 	}
-
-	// Reuse the original Layer's EnvelopeContext template (mirroring h2:
-	// the older TLS snapshot is kept on the template; Pipeline / RecordStep
-	// already snapshotted the original handshake on prior envelopes, so
-	// keeping the template coherent for the CONNECT's lifetime is more
-	// useful than re-recording TLS here).
-	envCtx := stale.EnvelopeContextTemplate()
-	connID := redialConnIDLabel(envCtx.ConnID, generation)
-
-	fresh := http1.New(upstreamConn, connID, envelope.Receive,
-		http1.WithScheme("https"),
-		http1.WithEnvelopeContext(envCtx),
-		http1.WithBodySpillDir(cfg.BodySpillDir),
-		http1.WithBodySpillThreshold(cfg.BodySpillThreshold),
-		http1.WithMaxBodySize(cfg.MaxBodySize),
-		http1.WithMaxRawCaptureSize(cfg.MaxRawCaptureSize),
-		http1.WithStateReleaser(cfg.PluginV2Engine),
-		// USK-655: bypass body draining for SSE responses so the swap
-		// orchestrator (session.runUpgradeSSE) can hand the still-open
-		// body to sse.Wrap without blocking on a never-ending drain.
-		// Matches the option set used in buildStackFromRoute "http1".
-		http1.WithStreamingResponseDetect(http1.IsSSEResponse),
-	)
-	return fresh, nil
+	return upstreamConn, nil
 }

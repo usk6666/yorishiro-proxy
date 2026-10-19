@@ -1101,26 +1101,14 @@ func (s *RecordStep) applyWireEncode(ctx context.Context, current *envelope.Enve
 	if s.encoders == nil || s.encoders.Len() == 0 {
 		return
 	}
-	// Skip the encoder when env.Raw already matches the desired record
-	// bytes:
-	//
-	//   - USK-684 (Encoded): a preceding Step (PluginStepPost today) just
-	//     rendered the post-mutation wire bytes via the same WireEncoder
-	//     into current.Raw. envelopeToFlow has copied current.Raw into
-	//     modFlow.RawBytes, so a second encoder call here would produce
-	//     bit-identical bytes — pure waste on heavy encoders.
-	//
-	//   - USK-686 (RawAuthoritative): a preceding PluginStepPost
-	//     MutationRawOnly / MutationBoth set current.Raw to user-verbatim
-	//     bytes the plugin injected via msg["raw"] (RFC §9.3 D4 raw-wins).
-	//     Calling the encoder would overwrite the user's smuggling-test
-	//     bytes with a "cleaned-up" re-encoded form, destroying the
-	//     diagnostic signal that motivated D4.
-	//
-	// shouldSkipEncoder ORs both flags. Fail-soft / partial / no-encoder
-	// paths leave both flags clear, so they still fall through to the
-	// call below and tag modFlow's Metadata["wire_bytes"] correctly.
-	if shouldSkipEncoder(ctx) {
+	// Skip the encoder when current.Raw already matches the desired
+	// record bytes: a preceding Step rendered it via the same encoder
+	// (USK-684), or it is plugin-injected verbatim bytes that the Layer
+	// writes as-is (RFC §9.3 D4 raw-wins, USK-686 / USK-1079). Fail-soft
+	// / partial / no-encoder paths leave both signals clear, so they
+	// still fall through to the call below and tag modFlow's
+	// Metadata["wire_bytes"] correctly.
+	if shouldSkipEncoder(ctx, current) {
 		return
 	}
 	enc, ok := s.encoders.Lookup(current.Protocol)

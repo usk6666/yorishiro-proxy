@@ -194,7 +194,11 @@ func TestHTTP1StaleConnRecovery_AfterIdleClose(t *testing.T) {
 // own bootstrap-via-redial pattern in this test harness.
 func dialInitialUpstream(t *testing.T, target string, cfg *connector.BuildConfig, envCtxTmpl envelope.EnvelopeContext) (*http1.Layer, error) {
 	t.Helper()
+	// scheme="https" matches the production CONNECT-MITM upstream Layer
+	// (buildStackFromRoute); RedialUpstreamH1 redials over the stale
+	// Layer's transport, TLS for "https".
 	stale := http1.New(nopConn{}, "stream-998-bootstrap", envelope.Receive,
+		http1.WithScheme("https"),
 		http1.WithEnvelopeContext(envCtxTmpl),
 	)
 	defer stale.Close()
