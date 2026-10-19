@@ -29,3 +29,9 @@ var ErrListenerNotFound = errors.New("proxybuild: listener not found")
 // Deprecated: TCP forward orchestration is implemented; do not match
 // against this error.
 var ErrTCPForwardsNotSupported = errors.New("proxybuild: tcp forward listeners not yet supported")
+
+// ErrTCPForwardTargetBlocked is returned (wrapped) by StartTCPForwardsNamed
+// when the TargetScope does not admit a forward's upstream target
+// (USK-1161). The wrapping error names the forward port, the target and
+// the scope's reason.
+var ErrTCPForwardTargetBlocked = errors.New("tcp forward target blocked by target scope")

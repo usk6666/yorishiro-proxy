@@ -68,50 +68,49 @@ func TestE2E_RawTargetScope_TCPForwardAllowedRecordsConnID(t *testing.T) {
 
 // TestE2E_RawTargetScope_TCPForwardTLSScheme is T3: with tls=true the
 // client-facing leg is TLS, so HostScopeStep derives "https" — a deny on
-// schemes ["https"] blocks, a deny on ["http"] does not.
+// schemes ["https"] blocks. A deny on ["http"] no longer relays: since
+// USK-1161 (user decision U1) proxy_start checks the dial leg, which is
+// plaintext here, so the forward is refused before it is bound.
 func TestE2E_RawTargetScope_TCPForwardTLSScheme(t *testing.T) {
-	dialTLS := func(t *testing.T, addr string) *tls.Conn {
-		t.Helper()
-		tc, err := tls.DialWithDialer(&net.Dialer{Timeout: 5 * time.Second}, "tcp", addr,
-			&tls.Config{InsecureSkipVerify: true, ServerName: "127.0.0.1"}) //nolint:gosec // proxy's ephemeral MITM CA
-		if err != nil {
-			t.Fatalf("TLS dial forward: %v", err)
-		}
-		t.Cleanup(func() { _ = tc.Close() })
-		return tc
-	}
-
 	t.Run("deny https blocks", func(t *testing.T) {
 		target, received := echoUpstream(t)
 		h := mcptest.StartHarness(t, mcptest.HarnessOptions{ConfigJSON: denyPolicyConfig(rawAddrPort(t, target), "https")})
 		fwd := startForwards(t, h, nil, map[string]any{"target": target, "protocol": "raw", "tls": true})[0]
-		tc := dialTLS(t, fwd)
+		tc := dialForwardTLS(t, fwd)
 		if _, err := tc.Write(rawProbe); err != nil {
 			t.Fatalf("write: %v", err)
 		}
 		assertBlockedNoBytes(t, h, received)
 	})
 
-	t.Run("deny http relays", func(t *testing.T) {
+	t.Run("deny http refused at proxy_start", func(t *testing.T) {
 		target, _ := echoUpstream(t)
 		h := mcptest.StartHarness(t, mcptest.HarnessOptions{ConfigJSON: denyPolicyConfig(rawAddrPort(t, target), "http")})
-		fwd := startForwards(t, h, nil, map[string]any{"target": target, "protocol": "raw", "tls": true})[0]
-		tc := dialTLS(t, fwd)
-		if _, err := tc.Write(rawProbe); err != nil {
-			t.Fatalf("write: %v", err)
+		res := h.CallTool(t, "proxy_start", map[string]any{
+			"listen_addr": "127.0.0.1:0",
+			"tcp_forwards": map[string]any{
+				strconv.Itoa(pickFreePort(t)): map[string]any{"target": target, "protocol": "raw", "tls": true},
+			},
+		})
+		if !res.IsError && res.Err == nil {
+			t.Fatalf("proxy_start succeeded for a tls=true forward whose plaintext dial the Policy denies: %s", res.Text)
 		}
-		readEcho(t, tc, rawProbe)
 	})
 }
 
 // TestE2E_RawTargetScope_TCPForwardAutoRawFallback is T4: protocol=auto
-// that falls back to raw on non-HTTP first bytes is gated too.
+// that falls back to raw on non-HTTP first bytes is gated too. As in T1,
+// the https-only deny passes the USK-1161 dial-leg gate (plaintext dial)
+// and is enforced per envelope on the TLS-terminated client leg.
 func TestE2E_RawTargetScope_TCPForwardAutoRawFallback(t *testing.T) {
 	target, received := echoUpstream(t)
-	h := mcptest.StartHarness(t, mcptest.HarnessOptions{ConfigJSON: denyPolicyConfig(rawAddrPort(t, target))})
-	fwd := startForwards(t, h, nil, map[string]any{"target": target, "protocol": "auto"})[0]
+	h := mcptest.StartHarness(t, mcptest.HarnessOptions{ConfigJSON: denyPolicyConfig(rawAddrPort(t, target), "https")})
+	fwd := startForwards(t, h, nil, map[string]any{"target": target, "protocol": "auto", "tls": true})[0]
 
-	writeRaw(t, fwd, []byte{0xde, 0xad, 0xbe, 0xef, 0x01, 0x02})
+	tc := dialForwardTLS(t, fwd)
+	if _, err := tc.Write([]byte{0xde, 0xad, 0xbe, 0xef, 0x01, 0x02}); err != nil {
+		t.Fatalf("write: %v", err)
+	}
 	assertBlockedNoBytes(t, h, received)
 }
 
@@ -315,10 +314,16 @@ func TestE2E_RawTargetScope_CaptureScopeReceiveFirst(t *testing.T) {
 // Stream exists however often the client keeps writing.
 func TestE2E_RawTargetScope_DenyTearsConnectionDown(t *testing.T) {
 	target, received := echoUpstream(t)
-	h := mcptest.StartHarness(t, mcptest.HarnessOptions{ConfigJSON: denyPolicyConfig(rawAddrPort(t, target))})
-	fwd := startForwards(t, h, nil, map[string]any{"target": target, "protocol": "raw"})[0]
+	// https-only deny + tls=true: admitted by the USK-1161 dial-leg gate,
+	// denied per envelope on the client leg (see T1).
+	h := mcptest.StartHarness(t, mcptest.HarnessOptions{ConfigJSON: denyPolicyConfig(rawAddrPort(t, target), "https")})
+	fwd := startForwards(t, h, nil, map[string]any{"target": target, "protocol": "raw", "tls": true})[0]
 
-	c := writeRaw(t, fwd, rawProbe)
+	c := dialForwardTLS(t, fwd)
+	_ = c.SetWriteDeadline(time.Now().Add(5 * time.Second))
+	if _, err := c.Write(rawProbe); err != nil {
+		t.Fatalf("write: %v", err)
+	}
 	assertConnClosedWithin(t, c, c.SetReadDeadline, 5*time.Second)
 	for i := 0; i < 3; i++ {
 		_ = c.SetWriteDeadline(time.Now().Add(time.Second))
