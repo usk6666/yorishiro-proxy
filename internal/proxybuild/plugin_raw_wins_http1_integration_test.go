@@ -12,6 +12,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"errors"
 	"fmt"
 	"io"
 	"math/big"
@@ -645,10 +646,136 @@ func TestPluginRawWins_HTTP1_SmuggleRetiresUpstream_MITM(t *testing.T) {
 	}
 }
 
+// openPlaintextProxyConn opens a client connection that speaks plain
+// HTTP/1.1 through the proxy at proxyAddr to the plain upstream upAddr,
+// either as a forward proxy (absolute-form) or through a CONNECT tunnel,
+// and returns the conn plus the request-target prefix to use.
+func openPlaintextProxyConn(t *testing.T, mode, proxyAddr, upAddr string) (net.Conn, *bufio.Reader, string) {
+	t.Helper()
+	var c net.Conn
+	var prefix string
+	var err error
+	switch mode {
+	case "forward":
+		c, err = net.DialTimeout("tcp", proxyAddr, 5*time.Second)
+		if err != nil {
+			t.Fatalf("dial proxy: %v", err)
+		}
+		prefix = "http://" + upAddr
+	case "connect":
+		c, err = connectTunnelDialerForPoolTest(proxyAddr, upAddr)
+		if err != nil {
+			t.Fatalf("CONNECT: %v", err)
+		}
+	default:
+		t.Fatalf("unknown mode %q", mode)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+	_ = c.SetDeadline(time.Now().Add(10 * time.Second))
+	return c, bufio.NewReader(c), prefix
+}
+
+// TestPluginRawWins_HTTP1_SmuggleRetiresUpstream_Plaintext covers Test
+// Plan #7 on the plaintext h1-chain paths (plain-HTTP forward proxy with
+// absolute-form, and plain HTTP inside a CONNECT tunnel): the retired
+// upstream is replaced by a fresh plain-TCP connection, so the next
+// client request is answered on upstream conn 2.
+func TestPluginRawWins_HTTP1_SmuggleRetiresUpstream_Plaintext(t *testing.T) {
+	for _, mode := range []string{"forward", "connect"} {
+		t.Run(mode, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+
+			up := startRawCaptureUpstream(t, true, nil)
+			_, proxyAddr := startRawWinsMITM(t, ctx, smuggleScript)
+			c, br, prefix := openPlaintextProxyConn(t, mode, proxyAddr, up.Addr())
+
+			if _, err := c.Write([]byte("GET " + prefix + "/smuggle HTTP/1.1\r\nHost: " + up.Addr() + "\r\n\r\n")); err != nil {
+				t.Fatalf("write 1: %v", err)
+			}
+			_, body1, err := readOneResponse(br)
+			if err != nil {
+				t.Fatalf("read response 1: %v", err)
+			}
+			if got := up.waitBytes(1, len(pipelinedSmuggle)); string(got) != pipelinedSmuggle {
+				t.Fatalf("upstream conn 1 received %q, want both smuggled requests %q", got, pipelinedSmuggle)
+			}
+			if body1 != "path=/first conn=1" {
+				t.Errorf("response 1 body = %q, want %q", body1, "path=/first conn=1")
+			}
+
+			if _, err := c.Write([]byte("GET " + prefix + "/next HTTP/1.1\r\nHost: " + up.Addr() + "\r\n\r\n")); err != nil {
+				t.Fatalf("write 2: %v", err)
+			}
+			_, body2, err := readOneResponse(br)
+			if err != nil {
+				t.Fatalf("read response 2: %v", err)
+			}
+			if !strings.HasSuffix(body2, "/next conn=2") {
+				t.Errorf("response 2 body = %q, want the /next response on a fresh upstream conn 2", body2)
+			}
+			if got := up.ConnCount(); got != 2 {
+				t.Errorf("upstream connections = %d, want 2", got)
+			}
+		})
+	}
+}
+
+// TestPluginRawWins_HTTP1_RedialFailureClosesClient: when the upstream
+// that replaces a retired one cannot be dialed, the client connection is
+// ended promptly instead of being left waiting for a response that will
+// never come.
+func TestPluginRawWins_HTTP1_RedialFailureClosesClient(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	up := startRawCaptureUpstream(t, true, nil)
+	_, proxyAddr := startRawWinsMITM(t, ctx, smuggleScript)
+	c, br, prefix := openPlaintextProxyConn(t, "forward", proxyAddr, up.Addr())
+
+	if _, err := c.Write([]byte("GET " + prefix + "/smuggle HTTP/1.1\r\nHost: " + up.Addr() + "\r\n\r\n")); err != nil {
+		t.Fatalf("write 1: %v", err)
+	}
+	if _, _, err := readOneResponse(br); err != nil {
+		t.Fatalf("read response 1: %v", err)
+	}
+	// No further upstream connection can be accepted, so the redial for
+	// the retired upstream fails.
+	_ = up.ln.Close()
+
+	if _, err := c.Write([]byte("GET " + prefix + "/next HTTP/1.1\r\nHost: " + up.Addr() + "\r\n\r\n")); err != nil {
+		t.Fatalf("write 2: %v", err)
+	}
+	assertClientClosedPromptly(t, c, br)
+}
+
+// assertClientClosedPromptly fails unless the proxy ends the client
+// connection (EOF or reset) with no further data, well before the
+// client's own timeout.
+func assertClientClosedPromptly(t *testing.T, c net.Conn, br *bufio.Reader) {
+	t.Helper()
+	const limit = 3 * time.Second
+	start := time.Now()
+	_ = c.SetReadDeadline(start.Add(limit))
+	b, err := br.ReadByte()
+	if err == nil {
+		rest, _ := br.Peek(br.Buffered())
+		t.Fatalf("client received data %q, want the connection closed", append([]byte{b}, rest...))
+	}
+	var ne net.Error
+	if errors.As(err, &ne) && ne.Timeout() {
+		t.Fatalf("client connection still open after %v; want a prompt close", limit)
+	}
+	if el := time.Since(start); el > 2*time.Second {
+		t.Errorf("client connection closed after %v; want well under %v", el, limit)
+	}
+}
+
 // TestPluginRawWins_HTTP1_SmuggleRetiresUpstream_TCPForward covers Test
 // Plan #7 on the TCP forward path, which owns a single upstream conn and
-// no redial chain: the leftover smuggled response must never be handed to
-// the next client request, and the proxy keeps serving new connections.
+// no redial chain: the proxy ends the client connection after the
+// raw-authoritative exchange, so the leftover smuggled response is never
+// handed to a next request, and it keeps serving new connections.
 func TestPluginRawWins_HTTP1_SmuggleRetiresUpstream_TCPForward(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -671,13 +798,16 @@ func TestPluginRawWins_HTTP1_SmuggleRetiresUpstream_TCPForward(t *testing.T) {
 		t.Errorf("response 1 body = %q, want %q", body1, "path=/first conn=1")
 	}
 
-	// Second request on the same client conn: whatever the outcome, it
-	// must not be the response to the smuggled /second request.
-	_ = c.SetDeadline(time.Now().Add(3 * time.Second))
-	if _, err := c.Write([]byte("GET /next HTTP/1.1\r\nHost: example.test\r\n\r\n")); err == nil {
-		if _, body2, _ := readOneResponse(br); strings.Contains(body2, "path=/second") {
-			t.Errorf("second client request received the leftover smuggled response %q", body2)
-		}
+	// Second request on the same client conn: the proxy has no upstream
+	// to answer it on, so the client conn is closed promptly with no
+	// further bytes — never the leftover response to the smuggled
+	// /second request, and never a hang until the client's own timeout.
+	// The write may already fail if the proxy closed first; either way
+	// the read below must observe the close.
+	_, _ = c.Write([]byte("GET /next HTTP/1.1\r\nHost: example.test\r\n\r\n"))
+	assertClientClosedPromptly(t, c, br)
+	if got := up.ConnCount(); got != 1 {
+		t.Errorf("upstream connections = %d, want 1", got)
 	}
 
 	// The proxy is still alive for new client connections.
