@@ -23,8 +23,8 @@ const clientHelloPeekTimeout = 5 * time.Second
 // before either starting the relay or routing through the fallback.
 const clientHelloPeekSize = 4096
 
-// errClientHelloIncomplete is returned by parseClientHelloSNI when the peek
-// buffer does not yet contain a complete ClientHello extension list. The
+// errClientHelloIncomplete is returned by parseClientHelloExtensions (and
+// the helpers below it) when the peek buffer does not yet contain a complete ClientHello extension list. The
 // caller (peekClientHelloSNIAndALPN) abandons SNI / ALPN extraction — a
 // ClientHello fragmented across records is not reassembled.
 var errClientHelloIncomplete = errors.New("connector: client hello incomplete")
@@ -54,31 +54,6 @@ const tlsServerNameTypeHostname = 0x00
 // tlsExtensionALPN is the ExtensionType value for the Application-Layer
 // Protocol Negotiation (ALPN) extension (RFC 7301 §3.1, IANA-assigned 16).
 const tlsExtensionALPN = 0x0010
-
-// parseClientHelloSNI extracts the SNI host_name value from a TLS
-// ClientHello carried at the start of buf. Returns an empty string with
-// nil error when the ClientHello does not include the SNI extension or
-// includes it with no host_name entry — both are legal per RFC 6066 and
-// must not cause the caller to abort the relay.
-//
-// Returns errClientHelloIncomplete when buf truncates a length-prefixed
-// region; the caller should peek more bytes (up to the configured cap)
-// and retry. Returns errNotClientHello when the first byte is not a
-// Handshake record or the inner handshake type is not ClientHello — the
-// caller treats this as "no SNI" and continues without retry.
-//
-// Other errors (legacy_version mismatch, malformed TLS record framing)
-// are surfaced verbatim for diagnostic logging but never fatal: the
-// caller's audit flow records SNI="" and relays the bytes anyway. This
-// matches the L4-capable principle — the proxy must remain
-// passthrough-faithful even when the first record is junk.
-func parseClientHelloSNI(buf []byte) (string, error) {
-	exts, err := parseClientHelloExtensions(buf)
-	if err != nil {
-		return "", err
-	}
-	return findSNIInExtensions(exts)
-}
 
 // parseClientHelloALPN extracts the offered ALPN protocol name list from a
 // TLS ClientHello carried at the start of buf. Returns a nil slice with nil
@@ -111,9 +86,10 @@ func parseClientHelloALPN(buf []byte) ([]string, error) {
 
 // parseClientHelloExtensions is the shared prelude for the SNI and ALPN
 // entry points: it validates the TLS record + Handshake headers and
-// returns the extensions block slice. Both parseClientHelloSNI and
-// parseClientHelloALPN sit on top of this helper so the framing checks
-// stay in one place.
+// returns the extensions block slice. peekClientHelloSNIAndALPN and
+// parseClientHelloALPN sit on top of this helper (followed by
+// findSNIInExtensions / findALPNInExtensions) so the framing checks stay
+// in one place.
 func parseClientHelloExtensions(buf []byte) ([]byte, error) {
 	hello, err := unwrapClientHelloBody(buf)
 	if err != nil {
