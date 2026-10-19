@@ -11,7 +11,6 @@ import (
 	nethttp "net/http"
 	"os"
 	"regexp"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -22,6 +21,7 @@ import (
 	"github.com/usk6666/yorishiro-proxy/internal/config"
 	"github.com/usk6666/yorishiro-proxy/internal/envelope"
 	"github.com/usk6666/yorishiro-proxy/internal/flow"
+	"github.com/usk6666/yorishiro-proxy/internal/pipeline"
 	"github.com/usk6666/yorishiro-proxy/internal/rules/common"
 	httprules "github.com/usk6666/yorishiro-proxy/internal/rules/http"
 )
@@ -36,15 +36,26 @@ import (
 //
 // Scenario #1 is REQUEST-side (SafetyEngine.CheckInput); response-side
 // safety on disk-backed bodies awaits USK-636.
+//
+// The spill threshold is lowered to h2SpillThresholdTest (256 KiB) so 1 MiB
+// bodies cross it; the code path is the same as with the 10 MiB production
+// default (USK-1205). Every spill-dependent test prepends an
+// h2BufferInspector and asserts that a file-backed BodyBuffer was actually
+// seen mid-flight, so a threshold that silently stops applying fails the
+// test instead of letting it pass on the in-memory path.
 
 const (
-	h2LargeBodySize25MiB = 25 << 20
-	h2SmallBodySize5MiB  = 5 << 20
+	// h2SpillThresholdTest is the BodySpillThreshold used by these tests.
+	h2SpillThresholdTest = 256 << 10
+	// h2LargeBodySize is above h2SpillThresholdTest, so it spills to disk.
+	h2LargeBodySize = 1 << 20
+	// h2SmallBodySize is below h2SpillThresholdTest, so it stays in memory.
+	h2SmallBodySize = 128 << 10
 
-	// h2MaxBodyTestCap caps MaxBodySize low enough that a 25 MiB response
-	// breaches it. The code path is identical to the production 254 MiB
-	// cap; this just economizes test memory.
-	h2MaxBodyTestCap = 20 << 20
+	// h2MaxBodyTestCap sits between the spill threshold and h2LargeBodySize,
+	// so the cap is breached on the disk-spill path (bodybuf's maxSize
+	// check). The code path is identical to the production 254 MiB cap.
+	h2MaxBodyTestCap = 512 << 10
 
 	h2DestructiveSQLMarker = "DROP TABLE users;"
 	h2SecretMarker         = "SECRET"
@@ -113,6 +124,71 @@ func countH2SpillFiles(t *testing.T, dir string) int {
 	return n
 }
 
+// h2BufferInspector is a Pipeline Step that records whether the HTTP
+// envelopes it sees carry a file-backed BodyBuffer, and how many spill files
+// were on disk at that moment. Prepended to the pipeline (before Safety /
+// Transform release or replace the BodyBuffer) to prove the disk-spill path
+// was really exercised. Safe for concurrent streams.
+type h2BufferInspector struct {
+	spillDir        string
+	fileBackedCount atomic.Int32
+	maxBodyLen      atomic.Int64
+	maxFilesOnDisk  atomic.Int32
+}
+
+func (b *h2BufferInspector) Process(_ context.Context, env *envelope.Envelope) pipeline.Result {
+	m, ok := env.Message.(*envelope.HTTPMessage)
+	if !ok || m == nil || m.BodyBuffer == nil || !m.BodyBuffer.IsFileBacked() {
+		return pipeline.Result{}
+	}
+	b.fileBackedCount.Add(1)
+	storeMax64(&b.maxBodyLen, m.BodyBuffer.Len())
+	if entries, err := os.ReadDir(b.spillDir); err == nil {
+		var n int32
+		for _, e := range entries {
+			if !e.IsDir() && strings.HasPrefix(e.Name(), config.BodySpillPrefix) {
+				n++
+			}
+		}
+		storeMax32(&b.maxFilesOnDisk, n)
+	}
+	return pipeline.Result{}
+}
+
+func storeMax64(a *atomic.Int64, v int64) {
+	for {
+		cur := a.Load()
+		if v <= cur || a.CompareAndSwap(cur, v) {
+			return
+		}
+	}
+}
+
+func storeMax32(a *atomic.Int32, v int32) {
+	for {
+		cur := a.Load()
+		if v <= cur || a.CompareAndSwap(cur, v) {
+			return
+		}
+	}
+}
+
+// assertH2Spilled fails t unless inspector saw at least wantCount file-backed
+// BodyBuffers, the largest wantLen bytes long, with a spill file on disk.
+func assertH2Spilled(t *testing.T, inspector *h2BufferInspector, wantCount int, wantLen int) {
+	t.Helper()
+	if got := inspector.fileBackedCount.Load(); got < int32(wantCount) {
+		t.Errorf("inspector saw %d file-backed BodyBuffers, want >= %d; a %d-byte body must spill above the %d-byte threshold",
+			got, wantCount, wantLen, h2SpillThresholdTest)
+	}
+	if got := inspector.maxBodyLen.Load(); got != int64(wantLen) {
+		t.Errorf("inspector saw file-backed BodyBuffer length = %d, want %d", got, wantLen)
+	}
+	if got := inspector.maxFilesOnDisk.Load(); got < 1 {
+		t.Errorf("inspector saw %d spill files mid-flight, want >= 1", got)
+	}
+}
+
 // waitStreamReachesState polls store until the specified stream ID's last
 // update records wantState, or timeout expires.
 func waitStreamReachesState(t *testing.T, store *testStore, streamID, wantState string, timeout time.Duration) {
@@ -134,14 +210,14 @@ func waitStreamReachesState(t *testing.T, store *testStore, streamID, wantState 
 }
 
 // ---------------------------------------------------------------------------
-// Scenario 1: SafetyFilter matches a 25 MiB disk-backed REQUEST body (H2)
+// Scenario 1: SafetyFilter matches a disk-backed REQUEST body (H2)
 // ---------------------------------------------------------------------------
 
 func TestLargeBody_HTTP2_SafetyFilterMatchesDiskBackedBody(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
-	body := embedH2Marker(makeH2LargeBody(h2LargeBodySize25MiB), h2DestructiveSQLMarker, h2LargeBodySize25MiB/2)
+	body := embedH2Marker(makeH2LargeBody(h2LargeBodySize), h2DestructiveSQLMarker, h2LargeBodySize/2)
 
 	var upstreamHits atomic.Int32
 	upAddr, _, _, upShutdown := startH2TLSUpstream(t, "safety-marker",
@@ -158,8 +234,12 @@ func TestLargeBody_HTTP2_SafetyFilterMatchesDiskBackedBody(t *testing.T) {
 	}
 
 	spillDir := t.TempDir()
-	bcfg := makeBuildCfgWithBody(t, nil, spillDir, 0, 0)
-	proxyAddr, store := startH2MITMProxy(t, ctx, bcfg, pipelineOpts{safetyEngine: safetyEngine})
+	inspector := &h2BufferInspector{spillDir: spillDir}
+	bcfg := makeBuildCfgWithBody(t, nil, spillDir, h2SpillThresholdTest, 0)
+	proxyAddr, store := startH2MITMProxy(t, ctx, bcfg, pipelineOpts{
+		safetyEngine:       safetyEngine,
+		prependCustomSteps: []pipeline.Step{inspector},
+	})
 
 	cli := newMITMH2Client(proxyAddr, upAddr)
 	req, err := nethttp.NewRequestWithContext(ctx, nethttp.MethodPost, "https://"+upAddr+"/sql", bytes.NewReader(body))
@@ -182,6 +262,7 @@ func TestLargeBody_HTTP2_SafetyFilterMatchesDiskBackedBody(t *testing.T) {
 	// Give pipeline time to drain the drop.
 	time.Sleep(500 * time.Millisecond)
 
+	assertH2Spilled(t, inspector, 1, h2LargeBodySize)
 	if h := upstreamHits.Load(); h != 0 {
 		t.Errorf("upstream handler fired %d times, want 0 (safety filter must block before stream open)", h)
 	}
@@ -195,14 +276,14 @@ func TestLargeBody_HTTP2_SafetyFilterMatchesDiskBackedBody(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Scenario 2: TransformReplaceBody rewrites a 25 MiB disk-backed RESPONSE body
+// Scenario 2: TransformReplaceBody rewrites a disk-backed RESPONSE body
 // ---------------------------------------------------------------------------
 
 func TestLargeBody_HTTP2_TransformReplacesDiskBackedBody(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
-	respBody := embedH2Marker(makeH2LargeBody(h2LargeBodySize25MiB), h2SecretMarker, h2LargeBodySize25MiB/2)
+	respBody := embedH2Marker(makeH2LargeBody(h2LargeBodySize), h2SecretMarker, h2LargeBodySize/2)
 	expected := bytes.Replace(respBody, []byte(h2SecretMarker), []byte(h2ReplaceWith), 1)
 	wantHash := sha256.Sum256(expected)
 
@@ -225,8 +306,12 @@ func TestLargeBody_HTTP2_TransformReplacesDiskBackedBody(t *testing.T) {
 	}})
 
 	spillDir := t.TempDir()
-	bcfg := makeBuildCfgWithBody(t, nil, spillDir, 0, 0)
-	proxyAddr, _ := startH2MITMProxy(t, ctx, bcfg, pipelineOpts{transformEngine: transformEngine})
+	inspector := &h2BufferInspector{spillDir: spillDir}
+	bcfg := makeBuildCfgWithBody(t, nil, spillDir, h2SpillThresholdTest, 0)
+	proxyAddr, _ := startH2MITMProxy(t, ctx, bcfg, pipelineOpts{
+		transformEngine:    transformEngine,
+		prependCustomSteps: []pipeline.Step{inspector},
+	})
 
 	cli := newMITMH2Client(proxyAddr, upAddr)
 	req, _ := nethttp.NewRequestWithContext(ctx, nethttp.MethodGet, "https://"+upAddr+"/big", nil)
@@ -248,6 +333,7 @@ func TestLargeBody_HTTP2_TransformReplacesDiskBackedBody(t *testing.T) {
 	if !bytes.Equal(gotHash, wantHash[:]) {
 		t.Errorf("client body hash mismatch: got=%x want=%x", gotHash, wantHash)
 	}
+	assertH2Spilled(t, inspector, 1, h2LargeBodySize)
 
 	// Cleanup: allow backstop drain to run.
 	time.Sleep(200 * time.Millisecond)
@@ -257,14 +343,14 @@ func TestLargeBody_HTTP2_TransformReplacesDiskBackedBody(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Scenario 3: Variant recording preserves both original and modified 25 MiB
+// Scenario 3: Variant recording preserves both original and modified bodies
 // ---------------------------------------------------------------------------
 
 func TestLargeBody_HTTP2_VariantRecordingPersistsBothVersions(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
-	respBody := embedH2Marker(makeH2LargeBody(h2LargeBodySize25MiB), h2SecretMarker, h2LargeBodySize25MiB/2)
+	respBody := embedH2Marker(makeH2LargeBody(h2LargeBodySize), h2SecretMarker, h2LargeBodySize/2)
 	expectedMod := bytes.Replace(respBody, []byte(h2SecretMarker), []byte(h2ReplaceWith), 1)
 
 	upAddr, _, _, upShutdown := startH2TLSUpstream(t, "variant-marker",
@@ -286,8 +372,12 @@ func TestLargeBody_HTTP2_VariantRecordingPersistsBothVersions(t *testing.T) {
 	}})
 
 	spillDir := t.TempDir()
-	bcfg := makeBuildCfgWithBody(t, nil, spillDir, 0, 0)
-	proxyAddr, store := startH2MITMProxy(t, ctx, bcfg, pipelineOpts{transformEngine: transformEngine})
+	inspector := &h2BufferInspector{spillDir: spillDir}
+	bcfg := makeBuildCfgWithBody(t, nil, spillDir, h2SpillThresholdTest, 0)
+	proxyAddr, store := startH2MITMProxy(t, ctx, bcfg, pipelineOpts{
+		transformEngine:    transformEngine,
+		prependCustomSteps: []pipeline.Step{inspector},
+	})
 
 	cli := newMITMH2Client(proxyAddr, upAddr)
 	req, _ := nethttp.NewRequestWithContext(ctx, nethttp.MethodGet, "https://"+upAddr+"/variant", nil)
@@ -325,15 +415,16 @@ func TestLargeBody_HTTP2_VariantRecordingPersistsBothVersions(t *testing.T) {
 	if modified == nil {
 		t.Fatal("expected modified variant receive flow")
 	}
+	assertH2Spilled(t, inspector, 1, h2LargeBodySize)
 
-	if len(original.Body) != h2LargeBodySize25MiB {
-		t.Errorf("original variant Body length = %d, want %d", len(original.Body), h2LargeBodySize25MiB)
+	if len(original.Body) != h2LargeBodySize {
+		t.Errorf("original variant Body length = %d, want %d", len(original.Body), h2LargeBodySize)
 	}
 	if !bytes.Contains(original.Body, []byte(h2SecretMarker)) {
 		t.Errorf("original variant body missing %q", h2SecretMarker)
 	}
 	if original.BodyTruncated {
-		t.Error("original variant BodyTruncated = true; 25 MiB fits under default 254 MiB cap")
+		t.Error("original variant BodyTruncated = true; body fits under default 254 MiB cap")
 	}
 
 	if len(modified.Body) != len(expectedMod) {
@@ -353,22 +444,19 @@ func TestLargeBody_HTTP2_VariantRecordingPersistsBothVersions(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Scenario 4: Temp-file cleanup on session end (disk-backed 25 MiB, H2)
+// Scenario 4: Temp-file cleanup on session end (disk-backed body, H2)
 // ---------------------------------------------------------------------------
 //
-// Simpler than the http1 equivalent: a plain 25 MiB POST traverses the h2
-// pipeline and returns 200. The cleanup invariant is asserted from pre/post
-// file counts; the mid-flight file-backed state is implicitly verified by the
-// Transform + Variant + Trailers tests which depend on the same disk-spill
-// path. The http1 version uses a custom Pipeline Step (bufferInspector); the
-// h2 pipeline helper does not expose a prepend-steps hook today, so this
-// variant relies purely on before/after counts.
+// A plain large POST traverses the h2 pipeline and returns 200. The
+// h2BufferInspector proves the request body was file-backed mid-flight with a
+// spill file on disk; the cleanup invariant is then asserted from the
+// post-session file count.
 
 func TestLargeBody_HTTP2_TempFileCleanupOnSessionEnd(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
-	reqBody := makeH2LargeBody(h2LargeBodySize25MiB)
+	reqBody := makeH2LargeBody(h2LargeBodySize)
 
 	upAddr, _, _, upShutdown := startH2TLSUpstream(t, "cleanup-marker",
 		nethttp.HandlerFunc(func(w nethttp.ResponseWriter, r *nethttp.Request) {
@@ -381,8 +469,11 @@ func TestLargeBody_HTTP2_TempFileCleanupOnSessionEnd(t *testing.T) {
 	if sf := countH2SpillFiles(t, spillDir); sf != 0 {
 		t.Fatalf("setup: BodySpillDir has %d files, want 0", sf)
 	}
-	bcfg := makeBuildCfgWithBody(t, nil, spillDir, 0, 0)
-	proxyAddr, _ := startH2MITMProxy(t, ctx, bcfg, pipelineOpts{})
+	inspector := &h2BufferInspector{spillDir: spillDir}
+	bcfg := makeBuildCfgWithBody(t, nil, spillDir, h2SpillThresholdTest, 0)
+	proxyAddr, _ := startH2MITMProxy(t, ctx, bcfg, pipelineOpts{
+		prependCustomSteps: []pipeline.Step{inspector},
+	})
 
 	cli := newMITMH2Client(proxyAddr, upAddr)
 	req, err := nethttp.NewRequestWithContext(ctx, nethttp.MethodPost, "https://"+upAddr+"/cleanup", bytes.NewReader(reqBody))
@@ -400,6 +491,7 @@ func TestLargeBody_HTTP2_TempFileCleanupOnSessionEnd(t *testing.T) {
 	// Give the stream teardown + backstop drain a brief window.
 	time.Sleep(500 * time.Millisecond)
 
+	assertH2Spilled(t, inspector, 1, h2LargeBodySize)
 	if sf := countH2SpillFiles(t, spillDir); sf != 0 {
 		t.Errorf("BodySpillDir has %d leftover files after session, want 0 (temp file leak)", sf)
 	}
@@ -408,12 +500,20 @@ func TestLargeBody_HTTP2_TempFileCleanupOnSessionEnd(t *testing.T) {
 // ---------------------------------------------------------------------------
 // Scenario 5: MaxBodySize exceeded → RST_STREAM(INTERNAL_ERROR) (H2)
 // ---------------------------------------------------------------------------
+//
+// Threshold (256 KiB) < cap (512 KiB) < body (1 MiB): the body spills to a
+// temp file first and then breaches the cap on the disk-backed path, so the
+// partial temp file must be removed. The error surfaces inside the Layer
+// before the envelope reaches the Pipeline, so no inspector Step can observe
+// the spill; the threshold ordering above is what guarantees it. (The h2
+// smoke sibling uses threshold 0, so only this test covers the cap on the
+// spill path.)
 
 func TestLargeBody_HTTP2_ExceedsMaxBodySizeReturnsStreamError(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
-	respBody := makeH2LargeBody(h2LargeBodySize25MiB)
+	respBody := makeH2LargeBody(h2LargeBodySize)
 
 	upAddr, _, _, upShutdown := startH2TLSUpstream(t, "maxbody-marker",
 		nethttp.HandlerFunc(func(w nethttp.ResponseWriter, r *nethttp.Request) {
@@ -423,7 +523,7 @@ func TestLargeBody_HTTP2_ExceedsMaxBodySizeReturnsStreamError(t *testing.T) {
 	defer upShutdown()
 
 	spillDir := t.TempDir()
-	bcfg := makeBuildCfgWithBody(t, nil, spillDir, 0, h2MaxBodyTestCap)
+	bcfg := makeBuildCfgWithBody(t, nil, spillDir, h2SpillThresholdTest, h2MaxBodyTestCap)
 	proxyAddr, store := startH2MITMProxy(t, ctx, bcfg, pipelineOpts{})
 
 	cli := newMITMH2Client(proxyAddr, upAddr)
@@ -483,7 +583,7 @@ func TestLargeBody_HTTP2_FastPathNoTempFileBelowThreshold(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	reqBody := makeH2LargeBody(h2SmallBodySize5MiB)
+	reqBody := makeH2LargeBody(h2SmallBodySize)
 
 	upAddr, _, _, upShutdown := startH2TLSUpstream(t, "fast-marker",
 		nethttp.HandlerFunc(func(w nethttp.ResponseWriter, r *nethttp.Request) {
@@ -503,7 +603,7 @@ func TestLargeBody_HTTP2_FastPathNoTempFileBelowThreshold(t *testing.T) {
 	holdQueue.SetTimeout(30 * time.Second)
 
 	spillDir := t.TempDir()
-	bcfg := makeBuildCfgWithBody(t, nil, spillDir, 0, 0)
+	bcfg := makeBuildCfgWithBody(t, nil, spillDir, h2SpillThresholdTest, 0)
 	proxyAddr, _ := startH2MITMProxy(t, ctx, bcfg, pipelineOpts{
 		interceptEngine: interceptEngine,
 		holdQueue:       holdQueue,
@@ -541,10 +641,10 @@ func TestLargeBody_HTTP2_FastPathNoTempFileBelowThreshold(t *testing.T) {
 		t.Fatalf("held envelope message is *%T, want *HTTPMessage", held.Envelope.Message)
 	}
 	if msg.BodyBuffer != nil {
-		t.Errorf("msg.BodyBuffer = %v; 5 MiB body must not spill (below 10 MiB threshold)", msg.BodyBuffer)
+		t.Errorf("msg.BodyBuffer = %v; a %d-byte body must not spill (below the %d-byte threshold)", msg.BodyBuffer, h2SmallBodySize, h2SpillThresholdTest)
 	}
-	if len(msg.Body) != h2SmallBodySize5MiB {
-		t.Errorf("msg.Body length = %d, want %d", len(msg.Body), h2SmallBodySize5MiB)
+	if len(msg.Body) != h2SmallBodySize {
+		t.Errorf("msg.Body length = %d, want %d", len(msg.Body), h2SmallBodySize)
 	}
 	if sf := countH2SpillFiles(t, spillDir); sf != 0 {
 		t.Errorf("BodySpillDir has %d files mid-flight on fast path, want 0", sf)
@@ -571,7 +671,7 @@ func TestLargeBody_HTTP2_TrailersPreservedAfterDiskSpill(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
-	respBody := makeH2LargeBody(h2LargeBodySize25MiB)
+	respBody := makeH2LargeBody(h2LargeBodySize)
 
 	upAddr, _, _, upShutdown := startH2TLSUpstream(t, "trailer-spill-marker",
 		nethttp.HandlerFunc(func(w nethttp.ResponseWriter, r *nethttp.Request) {
@@ -586,8 +686,11 @@ func TestLargeBody_HTTP2_TrailersPreservedAfterDiskSpill(t *testing.T) {
 	defer upShutdown()
 
 	spillDir := t.TempDir()
-	bcfg := makeBuildCfgWithBody(t, nil, spillDir, 0, 0)
-	proxyAddr, store := startH2MITMProxy(t, ctx, bcfg, pipelineOpts{})
+	inspector := &h2BufferInspector{spillDir: spillDir}
+	bcfg := makeBuildCfgWithBody(t, nil, spillDir, h2SpillThresholdTest, 0)
+	proxyAddr, store := startH2MITMProxy(t, ctx, bcfg, pipelineOpts{
+		prependCustomSteps: []pipeline.Step{inspector},
+	})
 
 	cli := newMITMH2Client(proxyAddr, upAddr)
 	req, _ := nethttp.NewRequestWithContext(ctx, nethttp.MethodGet, "https://"+upAddr+"/trailer", nil)
@@ -626,9 +729,10 @@ func TestLargeBody_HTTP2_TrailersPreservedAfterDiskSpill(t *testing.T) {
 	if got := recvF.Trailers["x-checksum"]; len(got) != 1 || got[0] != "big-body-sha" {
 		t.Errorf("recvF.Trailers[x-checksum] = %v, want [big-body-sha]", got)
 	}
-	if len(recvF.Body) != h2LargeBodySize25MiB {
-		t.Errorf("receive flow Body length = %d, want %d", len(recvF.Body), h2LargeBodySize25MiB)
+	if len(recvF.Body) != h2LargeBodySize {
+		t.Errorf("receive flow Body length = %d, want %d", len(recvF.Body), h2LargeBodySize)
 	}
+	assertH2Spilled(t, inspector, 1, h2LargeBodySize)
 
 	time.Sleep(200 * time.Millisecond)
 	if sf := countH2SpillFiles(t, spillDir); sf != 0 {
@@ -640,41 +744,28 @@ func TestLargeBody_HTTP2_TrailersPreservedAfterDiskSpill(t *testing.T) {
 // Scenario 8: Concurrent streams spill independently + cleanup at end
 // ---------------------------------------------------------------------------
 //
-// 5 parallel streams × 25 MiB response, multiplexed over a single CONNECT
+// 3 parallel streams × 1 MiB response, multiplexed over a single CONNECT
 // tunnel (upstream accept count stays at 1). Each stream must produce an
 // independent disk-backed BodyBuffer; all files must be cleaned up once all
 // sessions end. Cross-contamination check compares per-stream response hash
 // against the sent body for that stream.
 
 func TestLargeBody_HTTP2_ConcurrentStreamsIndependent(t *testing.T) {
-	// Force a GC cycle before running. The test peaks at several hundred
-	// MiB allocated across stream bodies + per-stream BodyBuffer spill
-	// copies + variant snapshots; earlier tests in the same package can
-	// leave allocations that push the x/net/http2 server into surfacing a
-	// PROTOCOL_ERROR under the race detector. A warm-up GC plus a
-	// conservative stream count (3) makes the test robust to CI memory
-	// pressure without losing the concurrent-isolation signal.
-	runtime.GC()
-
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
 	defer cancel()
 
-	// 3 streams × 12 MiB = ~36 MiB in flight. USK-715 stabilization:
-	// dropped from 25 MiB so the concurrent test does not race
-	// x/net/http2 server's per-connection memory ceiling on a 2-vCPU CI
-	// runner with `-race` enabled. 12 MiB is still > the disk-spill
-	// threshold (10 MiB) so the disk-spill code path is exercised
-	// per-stream — the isolation property the test verifies is
-	// disk-spill-aware. The original 25 MiB value remains in single-
-	// stream tests above (e.g. TestLargeBody_HTTP2_VariantRecording...)
-	// where the H2 server doesn't multiplex 3× the load on one
-	// connection.
+	// 3 streams × 1 MiB, each above the 256 KiB test spill threshold, so
+	// the disk-spill code path is exercised per stream — the isolation
+	// property the test verifies is disk-spill-aware. (USK-715 had already
+	// lowered this from 25 MiB to 12 MiB to stay under x/net/http2's
+	// per-connection memory ceiling with -race; USK-1205 lowered the
+	// threshold instead of relying on the 10 MiB default.)
 	const nStreams = 3
-	const concurrentBodySize = 12 << 20 // 12 MiB
+	const concurrentBodySize = h2LargeBodySize
 
 	// Per-stream deterministic body: marker byte at offset 0 of each body
-	// distinguishes streams without costing a full per-stream allocation of
-	// 12 MiB × 5 = 60 MiB upstream-side.
+	// distinguishes streams without a full per-stream allocation
+	// upstream-side.
 	baseBody := makeH2LargeBody(concurrentBodySize)
 
 	// Upstream reads X-Stream-Id and stamps a marker byte at offset 0 of the
@@ -694,8 +785,11 @@ func TestLargeBody_HTTP2_ConcurrentStreamsIndependent(t *testing.T) {
 	defer upShutdown()
 
 	spillDir := t.TempDir()
-	bcfg := makeBuildCfgWithBody(t, nil, spillDir, 0, 0)
-	proxyAddr, store := startH2MITMProxy(t, ctx, bcfg, pipelineOpts{})
+	inspector := &h2BufferInspector{spillDir: spillDir}
+	bcfg := makeBuildCfgWithBody(t, nil, spillDir, h2SpillThresholdTest, 0)
+	proxyAddr, store := startH2MITMProxy(t, ctx, bcfg, pipelineOpts{
+		prependCustomSteps: []pipeline.Step{inspector},
+	})
 
 	cli := newMITMH2Client(proxyAddr, upAddr)
 
@@ -763,8 +857,12 @@ func TestLargeBody_HTTP2_ConcurrentStreamsIndependent(t *testing.T) {
 		t.Errorf("upstream accept count = %d, want 1 (shared CONNECT must multiplex n streams)", acc)
 	}
 
+	// Every concurrent response spilled to its own file-backed BodyBuffer
+	// (the warm-up response has no body, so it does not count).
+	assertH2Spilled(t, inspector, nStreams, concurrentBodySize)
+
 	// Each concurrent stream should have produced a Stream + its own receive
-	// flow of the full 25 MiB. The warm-up is recorded separately but is not
+	// flow of the full body. The warm-up is recorded separately but is not
 	// part of the isolation assertion.
 	deadline := time.Now().Add(15 * time.Second)
 	var linked int
@@ -804,7 +902,7 @@ func TestLargeBody_HTTP2_ConcurrentStreamsIndependent(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 	}
 	if linked != nStreams {
-		t.Errorf("concurrent linked send+recv pairs with 12 MiB body = %d, want %d", linked, nStreams)
+		t.Errorf("concurrent linked send+recv pairs with full body = %d, want %d", linked, nStreams)
 	}
 
 	// All BodyBuffers must have been released; zero leftover spill files.
